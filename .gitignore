@@ -1,0 +1,25 @@
+# Build
+build/
+sdkconfig.old
+
+# IDE
+.vscode/
+.idea/
+
+# Private reference materials (local only, do not distribute)
+reference/*.bin
+reference/firmware-notes.md
+.claude/notes.md
+
+# ESP-IDF
+managed_components/
+dependencies.lock
+
+# Ghidra workspace and clean-room specs (contain reference-firmware details)
+reference/ghidra/
+reference/specs/
+reference/gnss-fw/
+reference/um982-firmware.md
+
+# macOS
+.DS_Store
