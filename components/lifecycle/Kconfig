@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+menu "Station: lifecycle (boot guard, safe mode, reboots)"
+
+    config LIFECYCLE_STABLE_UPTIME_S
+        int "Seconds of uptime that count as a stable boot"
+        range 30 3600
+        default 120
+        help
+            Reaching this uptime in normal mode clears the crash counter.
+            (App update confirmation has its own, stricter criteria in the
+            firmware update settings.)
+
+    config LIFECYCLE_BOOTLOOP_LIMIT
+        int "Crashes before safe mode"
+        range 2 20
+        default 5
+        help
+            Panics, watchdog resets and failed boots since the last stable
+            boot. Brownouts and power cuts never count: they raise a
+            power-supply alert instead. Safe mode keeps Wi-Fi, the web UI and
+            app updates running but leaves the receiver path and casters off.
+            It retries a normal boot after 1 h, 4 h, then every 24 h.
+
+    config LIFECYCLE_SHUTDOWN_BUDGET_MS
+        int "Time allowed for shutdown hooks before a reboot (ms)"
+        range 200 5000
+        default 1500
+        help
+            Casters use this to close their sessions cleanly so the caster
+            accepts the reconnect right after the reboot.
+
+    config LIFECYCLE_FATAL_RETRY_S
+        int "Delay before rebooting after a mandatory boot step failed (s)"
+        range 1 300
+        default 30
+
+    config LIFECYCLE_MAX_INHIBITS
+        int "Maximum simultaneous reboot inhibits"
+        range 2 16
+        default 6
+
+endmenu

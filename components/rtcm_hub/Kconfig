@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+menu "Station: RTCM fan-out hub"
+
+    config RTCM_HUB_RING_KB
+        int "Shared frame ring size (KB, PSRAM)"
+        range 32 2048
+        default 256
+        help
+            One ring holds every RTCM3 frame received from the GNSS link; all
+            consumers (casters, live view, future local server/logger) read
+            from it with their own cursor. 256 KB holds about two minutes of
+            a full MSM7 set at 1 Hz.
+
+    config RTCM_HUB_MAX_CONSUMERS
+        int "Maximum simultaneous consumers"
+        range 2 24
+        default 12
+        help
+            Caster slots plus local consumers (web live view, local TCP server,
+            SD logger).
+
+    config RTCM_HUB_MAX_LAG_MS
+        int "Slow-consumer lag limit (ms)"
+        range 500 60000
+        default 3000
+        help
+            A consumer whose oldest unread frame is older than this drops
+            whole oldest epochs until it is back under the limit; the dropped
+            frames count as data loss for that consumer. Corrections are only
+            useful while fresh.
+
+endmenu

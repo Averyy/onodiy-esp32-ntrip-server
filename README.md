@@ -6,9 +6,10 @@ output, automatic UM982 configuration, on-device GNSS firmware updates (no Windo
 tooling), and over-the-air updates for both chips from GitHub Releases. All code is
 original and MIT-licensed.
 
-> Early development. Hardware is on the way and the firmware isn't written yet — this
-> repo currently holds the hardware notes, the GNSS firmware payload, and the splitter
-> PCB. Code lands here as the project progresses.
+> Early development. The firmware scaffold builds (component structure, settings, boot
+> accounting and safe mode, partition layout, CI, host unit tests), but most subsystems
+> are still stubs and nothing has run on hardware yet. Don't flash it to a station you
+> rely on.
 
 ## Why
 
@@ -49,23 +50,64 @@ Antenna and cable notes: [`reference/antenna-specs.md`](reference/antenna-specs.
 
 | Path | Contents |
 |---|---|
+| `main/`, `components/` | ESP-IDF firmware (entry point and one component per subsystem) |
+| `test/host/` | Host unit tests (ESP-IDF linux target, Unity) |
 | `firmware/um982/` | Unicore UM982 receiver firmware the device flashes and serves over OTA (see its README) |
 | `gnss-splitter/` | KiCad/EasyEDA PCB for an optional GNSS antenna splitter |
 | `reference/` | Hardware notes (board, antenna); private research is kept out of the repo |
 
 ## Building
 
-ESP-IDF (latest stable), ESP32-S3 target:
+Requires ESP-IDF v6.1. From the repository root:
 
 ```sh
+. $IDF_PATH/export.sh            # your ESP-IDF v6.1 checkout
 idf.py set-target esp32s3
 idf.py build
+idf.py -p <port> flash monitor   # the "ESP32S3 USB&&UART" USB-C port
 ```
 
-Firmware sources are added as the project progresses.
+Host unit tests (Linux or macOS, no hardware needed):
+
+```sh
+cd test/host
+idf.py --preview set-target linux
+idf.py build
+./build/onocoydiy_host_tests.elf
+```
+
+CI runs both for pushes to `main`, release tags and pull requests
+(`.github/workflows/build.yml`).
+
+Notes:
+
+- The console runs at **921600 baud** (`idf.py monitor` picks this up). The chip's ROM
+  prints its first lines at 115200, so a moment of noise at reset is normal.
+- Only tag builds in CI are release versions (`vX.Y.Z`, passed as
+  `-DRELEASE_VERSION=`; configure refuses it unless HEAD carries that tag). Every
+  other build is named `<git describe>+dev` and never auto-updates. The version is
+  fixed when CMake configures; run `idf.py reconfigure` before a local build whose
+  version matters.
+- The partition table is permanent once a station is deployed (see the comments in
+  `partitions.csv`).
+
+## Recovery (planned behaviour)
+
+- **Forgot the admin password:** hold the **BOOT** button for 10 s while the station
+  is running. The password is cleared and the setup Wi-Fi network (`onocoydiy-XXXX`)
+  comes up for 15 minutes so you can set a new one. Casters and settings are kept.
+- **Factory reset:** hold **BOOT** for 20 s. Wi-Fi, admin password, casters and
+  receiver profile are erased; the station restarts in setup mode.
+- **Safe mode:** after repeated crashes the station keeps Wi-Fi, the web UI and app
+  updates running but turns off the receiver path and casters. It retries a normal
+  boot by itself after 1 h, 4 h and then every 24 h, or immediately from the web UI.
+  Brownouts never trigger safe mode; they show a power-supply warning instead.
 
 ## License
 
-Our code is under the [MIT License](LICENSE). The UM982 firmware packages under
-`firmware/um982/` are produced and owned by Unicore Communications, redistributed here
-for convenience, and are **not** covered by this project's license.
+Our code is under the [MIT License](LICENSE). The firmware image also contains
+ESP-IDF, FreeRTOS, lwIP, Mbed TLS, cJSON and other components under their own licenses;
+see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), which ships with every build.
+The UM982 firmware packages under `firmware/um982/` are produced and owned by Unicore
+Communications, redistributed here for convenience, and are **not** covered by this
+project's license.

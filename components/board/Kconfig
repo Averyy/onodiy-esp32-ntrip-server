@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+menu "Station: board and pins"
+
+    config BOARD_GNSS_UART_NUM
+        int "UART port connected to GNSS receiver COM1"
+        range 1 2
+        default 1
+        help
+            ESP32-S3 UART controller used for the GNSS link. UART0 is the
+            console (CH343P USB bridge), so use UART1 or UART2.
+
+    config BOARD_GNSS_RX_GPIO
+        int "ESP32 RX GPIO (receiver COM1 TXD)"
+        range 0 48
+        default 1
+        help
+            GPIO the ESP32 receives GNSS data on. Wired to the receiver's COM1
+            TXD on the UM982 + ESP32-S3 dev board.
+
+    config BOARD_GNSS_TX_GPIO
+        int "ESP32 TX GPIO (receiver COM1 RXD)"
+        range 0 48
+        default 2
+        help
+            GPIO the ESP32 sends commands on. Wired to the receiver's COM1 RXD
+            on the UM982 + ESP32-S3 dev board.
+
+    config BOARD_GNSS_RESET_GPIO
+        int "GPIO driving the receiver reset line (-1 = not wired)"
+        range -1 48
+        default -1
+        help
+            Optional hardware reset for the receiver. Not yet confirmed on the
+            UM982 + ESP32-S3 dev board (check at bring-up whether the
+            receiver's reset or power enable reaches any ESP32 GPIO). Without
+            it, recovery uses receiver commands, and a receiver that stops
+            answering raises a "needs a power cycle" alert.
+
+    config BOARD_BUTTON_GPIO
+        int "Recovery button GPIO (-1 = none)"
+        range -1 48
+        default 0
+        help
+            The BOOT button. GPIO0 is a strapping pin sampled only at reset,
+            so it is an ordinary input afterwards. Held at runtime it clears
+            the admin password or performs a factory reset (see the health
+            monitor settings).
+
+    config BOARD_STATUS_LED_GPIO
+        int "Status LED GPIO (-1 = none)"
+        range -1 48
+        default -1
+
+    config BOARD_SD_ENABLE
+        bool "microSD slot present (reserved, not used yet)"
+        default n
+
+    if BOARD_SD_ENABLE
+        config BOARD_SD_MISO_GPIO
+            int "SD MISO GPIO"
+            range 0 48
+            default 4
+        config BOARD_SD_MOSI_GPIO
+            int "SD MOSI GPIO"
+            range 0 48
+            default 5
+        config BOARD_SD_SCK_GPIO
+            int "SD SCK GPIO"
+            range 0 48
+            default 6
+        config BOARD_SD_CS_GPIO
+            int "SD CS GPIO"
+            range 0 48
+            default 7
+    endif
+
+endmenu

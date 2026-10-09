@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+#
+# Partition table for ESP32-S3-WROOM-1 N16R8 (16 MB flash).
+#
+# This layout is permanent for deployed stations: OTA cannot rewrite the
+# table atomically (a power cut would brick the device), so it reserves room
+# for growth up front.
+#
+# Table at 0x10000 (CONFIG_PARTITION_TABLE_OFFSET): the bootloader may use up
+# to 64 KB, enough for secure boot / flash encryption later (today's
+# bootloader is ~22 KB).
+#
+# otadata   2 sectors, required by OTA.
+# phy_init  standard (unused while PHY init data comes from the app).
+# nvs       112 KB: settings, 8 caster slots, PHY calibration, PSA ITS keys,
+#           boot history, availability ledger ("last alive" every 60 s);
+#           ~28 pages give years of wear headroom.
+# ota_0/1   4 MB each, 64 KB aligned. A full build (Wi-Fi, TLS, httpd,
+#           embedded UI) is expected around 1.3-1.8 MB, so >2x headroom.
+#           No factory slot: two OTA slots with rollback, USB for the rest.
+# gnss_pkg  6 MB, receiver package staging (custom type 0x40, subtype 0x00,
+#           found by label). Today's .pkg is 3,027,628 bytes (2.89 MiB); one
+#           bank with a 4 KB header holds packages up to ~2x that size. The
+#           staged package is pinned while a receiver flash depends on it.
+# journal   128 KB raw event journal (custom type 0x40, subtype 0x01):
+#           reboot reasons, recovery steps, update results; survives power loss.
+# storage   1.4375 MB reserved, unformatted (LittleFS subtype; log snapshots
+#           or future features).
+# coredump  256 KB: ELF core dumps of ~20 tasks without full DRAM capture.
+#           Ends exactly at 16 MB.
+#
+# Name,     Type,  SubType,  Offset,    Size,      Flags
+otadata,    data,  ota,      0x11000,   0x2000,
+phy_init,   data,  phy,      0x13000,   0x1000,
+nvs,        data,  nvs,      0x14000,   0x1C000,
+ota_0,      app,   ota_0,    0x30000,   0x400000,
+ota_1,      app,   ota_1,    0x430000,  0x400000,
+gnss_pkg,   0x40,  0x00,     0x830000,  0x600000,
+journal,    0x40,  0x01,     0xE30000,  0x20000,
+storage,    data,  littlefs, 0xE50000,  0x170000,
+coredump,   data,  coredump, 0xFC0000,  0x40000,

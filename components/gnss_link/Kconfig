@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+menu "Station: GNSS link"
+
+    config GNSS_LINK_DEFAULT_BAUD
+        int "Default receiver COM1 baud rate"
+        range 9600 921600
+        default 115200
+        help
+            Baud rate tried first at boot. Bring-up falls back to scanning the
+            other standard rates and stores the rate that answered.
+
+    config GNSS_LINK_RX_BUF_SIZE
+        int "UART driver RX buffer (bytes)"
+        range 4096 65536
+        default 32768
+        help
+            Software buffer behind the hardware FIFO (internal RAM). Must
+            cover the longest time the RX task can be kept off the CPU at the
+            highest baud rate in use: 32 KB is about 2.8 s at 115200 baud and
+            0.7 s at 460800. PROVISIONAL: confirm with the bench test (app
+            update plus receiver package download while streaming must end
+            with zero buffer-full and FIFO-overflow events).
+
+    config GNSS_LINK_RX_TASK_PRIO
+        int "RX task priority"
+        range 5 22
+        default 18
+
+    config GNSS_LINK_RX_TASK_CORE
+        int "RX task core (0/1)"
+        range 0 1
+        default 1
+        help
+            Wi-Fi runs on core 0; keeping the GNSS reader on core 1 isolates it
+            from radio bursts.
+
+endmenu

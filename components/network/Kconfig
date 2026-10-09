@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+menu "Station: network"
+
+    config NETWORK_AP_SSID_PREFIX
+        string "Setup AP SSID prefix"
+        default "onocoydiy-"
+        help
+            The setup access point is named <prefix><last 4 hex digits of MAC>.
+
+    config NETWORK_AP_CHANNEL
+        int "Setup AP channel"
+        range 1 13
+        default 1
+
+    config NETWORK_STA_FALLBACK_S
+        int "Seconds without Wi-Fi before the setup AP also comes up"
+        range 30 3600
+        default 300
+        help
+            The station keeps retrying its configured network; after this long
+            without a connection it additionally starts the setup AP (AP+STA)
+            so the user can fix the credentials. The AP stops again once the
+            station reconnects.
+
+    config NETWORK_RECOVERY_AP_S
+        int "Recovery AP lifetime after a BOOT-button press (s)"
+        range 120 3600
+        default 900
+        help
+            The AP started by the BOOT button (admin password cleared, or
+            settings unreadable) goes down again after this long unless a
+            client is connected.
+
+    config NETWORK_WIFI_COUNTRY
+        string "Wi-Fi country code"
+        default "01"
+        help
+            ISO 3166 alpha-2 code, or "01" for the conservative worldwide
+            setting. Sets the allowed channels and transmit power.
+
+    config NETWORK_FALLBACK_DNS1
+        string "Fallback DNS server 1"
+        default "1.1.1.1"
+        help
+            Used by the network recovery ladder when the DHCP-provided DNS
+            stops answering.
+
+    config NETWORK_FALLBACK_DNS2
+        string "Fallback DNS server 2"
+        default "9.9.9.9"
+
+endmenu

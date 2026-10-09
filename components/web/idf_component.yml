@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+# Managed dependencies (IDF Component Manager). Versions are pinned in the
+# project's dependencies.lock.
+dependencies:
+  espressif/cjson: "^1.7.19"

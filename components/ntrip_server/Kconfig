@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+menu "Station: NTRIP casters"
+
+    config NTRIP_MAX_CASTERS
+        int "Maximum caster slots"
+        range 1 8
+        default 4
+        help
+            Number of casters the station can stream to at once (Onocoy plus
+            others). Each slot costs one task (created once at boot), one
+            socket and, with TLS, tens of KB of PSRAM for the session.
+
+    config NTRIP_TASK_PRIO
+        int "Caster task priority"
+        range 2 20
+        default 8
+
+    config NTRIP_TASK_STACK
+        int "Caster task stack (bytes)"
+        range 3072 16384
+        default 8192
+
+    config NTRIP_CONNECT_TIMEOUT_MS
+        int "TCP connect + TLS handshake timeout (ms)"
+        range 2000 60000
+        default 15000
+
+    config NTRIP_SEND_TIMEOUT_MS
+        int "Socket send/receive timeout (ms)"
+        range 1000 60000
+        default 10000
+        help
+            A caster whose TCP window stays full this long is dropped and
+            reconnected; the hub's lag limit keeps it from falling behind
+            meanwhile.
+
+    config NTRIP_CONNECT_BUDGET_S
+        int "Longest a slot may stay CONNECTING (s)"
+        range 20 300
+        default 60
+        help
+            Covers DNS, connect, TLS and the caster's reply. The health
+            monitor restarts a slot that overruns it (only that slot).
+
+    config NTRIP_MAX_BACKOFF_S
+        int "Longest reconnect backoff for ordinary slots (s)"
+        range 30 3600
+        default 300
+
+    config NTRIP_PROTECTED_MAX_BACKOFF_S
+        int "Longest reconnect backoff for the protected (Onocoy) slot (s)"
+        range 5 120
+        default 30
+
+    config NTRIP_AUTH_TRANSIENT_WINDOW_S
+        int "Treat rejections as transient for this long after a disconnect or boot (s)"
+        range 60 1800
+        default 300
+        help
+            Casters may still hold the previous session for a while after a
+            reconnect and reply with an error that looks like a bad password.
+
+    config NTRIP_AUTH_RETRY_S
+        int "Retry interval during the transient window (s)"
+        range 5 120
+        default 15
+
+    config NTRIP_AUTH_FAILED_RETRY_S
+        int "Retry interval once a slot shows AUTH_FAILED (s)"
+        range 60 86400
+        default 600
+
+    config NTRIP_PAUSE_DISCONNECT_S
+        int "Disconnect paused slots after (s)"
+        range 0 120
+        default 20
+        help
+            Short receiver command sessions keep caster sessions open (no
+            data is sent). Longer pauses, and receiver flashing, disconnect.
+
+endmenu

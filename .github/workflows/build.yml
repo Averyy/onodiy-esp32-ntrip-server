@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware:
+    name: Firmware (esp32s3)
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # full history + tags: `git describe` names dev builds
+
+      - name: Layering lint
+        shell: bash
+        run: |
+          # The configure step checks declared and linked dependencies between
+          # our components; a relative path into another component would get
+          # around it.
+          if grep -rnE '#[[:space:]]*include[[:space:]]*"\.\./' components main; then
+            echo "::error::relative #include across components: declare the dependency instead"
+            exit 1
+          fi
+          if grep -nE '\.\./' components/*/CMakeLists.txt main/CMakeLists.txt; then
+            echo "::error::relative path in a component CMakeLists.txt: declare the dependency instead"
+            exit 1
+          fi
+
+      - name: Build
+        shell: bash
+        env:
+          # Only tag builds are release versions (CMakeLists.txt checks the
+          # format, the 31-character limit and that HEAD carries the tag);
+          # everything else gets "<git describe>+dev".
+          RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          set -o pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
+          ver_args=()
+          if [ -n "$RELEASE_VERSION" ]; then
+            ver_args=(-DRELEASE_VERSION="$RELEASE_VERSION")
+          fi
+          idf.py "${ver_args[@]}" set-target esp32s3 2>&1 | tee set-target.log
+          idf.py "${ver_args[@]}" build 2>&1 | tee build.log
+          # Unknown symbols, and known ones silently ignored because a
+          # dependency is off, both mean sdkconfig.defaults is wrong.
+          if grep -E "unknown kconfig symbol|but is not visible" set-target.log build.log; then
+            echo "::error::sdkconfig.defaults sets a symbol this IDF version does not know or ignores"
+            exit 1
+          fi
+          # Same arguments again: should anything trigger a reconfigure, it
+          # must not rename the release image to a dev version.
+          idf.py "${ver_args[@]}" size
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            build/onocoydiy-esp-um982.bin
+            build/onocoydiy-esp-um982.elf
+            build/onocoydiy-esp-um982.map
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+            build/ota_data_initial.bin
+            build/flasher_args.json
+            THIRD_PARTY_NOTICES.md
+
+  host-tests:
+    name: Host unit tests (linux target)
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.1
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build and run
+        shell: bash
+        working-directory: test/host
+        run: |
+          set -o pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
+          idf.py --preview set-target linux 2>&1 | tee set-target.log
+          idf.py build 2>&1 | tee build.log
+          if grep -E "unknown kconfig symbol|but is not visible" set-target.log build.log; then
+            echo "::error::test/host/sdkconfig.defaults sets a symbol this IDF version does not know or ignores"
+            exit 1
+          fi
+          ./build/onocoydiy_host_tests.elf

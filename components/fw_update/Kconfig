@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+menu "Station: firmware updates"
+
+    config FW_UPDATE_GITHUB_REPO
+        string "GitHub repository serving releases (owner/name)"
+        default "Averyy/onocoydiy-esp-um982"
+        help
+            Releases of this repository carry the app image, the receiver
+            package and a manifest. Forks point this at their own repository.
+            Overridable at runtime in settings.
+
+    config FW_UPDATE_MANIFEST_ASSET
+        string "Release manifest asset name"
+        default "manifest.json"
+
+    config FW_UPDATE_APP_ASSET
+        string "App image asset name"
+        default "onocoydiy-esp-um982.bin"
+
+    config FW_UPDATE_CHECK_INTERVAL_H
+        int "Hours between automatic update checks"
+        range 1 168
+        default 24
+
+    config FW_UPDATE_HTTP_BUF_SIZE
+        int "HTTP client receive/transmit buffer (bytes)"
+        range 2048 16384
+        default 4096
+        help
+            GitHub release downloads redirect to signed CDN URLs that are
+            often longer than 1000 characters. The request line is built in
+            the transmit buffer, so both buffers must hold such a URL.
+
+    config FW_UPDATE_MAX_REDIRECTS
+        int "Maximum HTTP redirects followed"
+        range 1 10
+        default 5
+
+    config FW_UPDATE_MANIFEST_MAX_KB
+        int "Largest manifest / release list accepted (KB)"
+        range 4 256
+        default 32
+
+    config FW_UPDATE_CONFIRM_S
+        int "Stage 1: seconds before a new app image is confirmed"
+        range 20 600
+        default 60
+        help
+            Until then the bootloader rolls back on any reset, including a
+            power blip, so the window is short. The real acceptance test is
+            stage 2.
+
+    config FW_UPDATE_VERIFY_WINDOW_S
+        int "Stage 2: seconds a new image has to reach the saved baseline"
+        range 120 3600
+        default 600
+
+    config FW_UPDATE_CRASH_WATCH_H
+        int "Stage 2: hours of crash watch after an update"
+        range 1 168
+        default 24
+
+    config FW_UPDATE_CRASH_REVERT_COUNT
+        int "Crash resets during the watch that revert the update"
+        range 1 20
+        default 3
+
+    config FW_UPDATE_RESET_RETRY_H
+        int "Hours before retrying a version rolled back in stage 1"
+        range 1 168
+        default 24
+
+    config FW_UPDATE_AUTO_APP_SUPPORTED
+        bool
+        default y if SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT || SECURE_BOOT
+        help
+            Automatic app installs need app signature verification on update.
+
+endmenu

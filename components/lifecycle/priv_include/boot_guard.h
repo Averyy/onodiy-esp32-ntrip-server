@@ -1,0 +1,102 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Avery L.
+ * SPDX-License-Identifier: MIT
+ *
+ * Boot-loop guard (pure logic, no IDF includes, host-testable).
+ *
+ * The state lives in RTC memory that survives software, panic and watchdog
+ * resets but not power loss. It counts crashes since the last stable boot,
+ * decides safe mode, time-boxes safe mode with growing retry intervals, and
+ * carries the reason code of a planned reboot into the next boot.
+ *
+ * Counting rules:
+ *  - power-on (or lost/corrupt state): everything starts over;
+ *  - crash (panic, watchdog, lockup, or a reboot flagged BOOT_GUARD_REASON_CRASH):
+ *    +1;
+ *  - brownout: never counts toward safe mode, tracked separately (a supply
+ *    problem that safe mode cannot fix);
+ *  - planned reboot, reset pin, unexpected software restart: unchanged;
+ *  - stable uptime reached in normal mode: counter and safe-mode episodes
+ *    cleared. Reaching stable uptime in safe mode clears nothing.
+ */
+#pragma once
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define BOOT_GUARD_MAGIC 0x4C494645u        /* "LIFE" */
+/** Set in a reboot reason code to make the next boot count as a crash. */
+#define BOOT_GUARD_REASON_CRASH 0x80000000u
+
+/** What the hardware says about the last reset (mapped from esp_reset_reason()). */
+typedef enum {
+    BOOT_HW_POWER_ON = 0,
+    BOOT_HW_SOFTWARE,      /**< esp_restart() */
+    BOOT_HW_CRASH,         /**< panic, interrupt/task/other watchdog, CPU lockup */
+    BOOT_HW_BROWNOUT,      /**< brownout or power glitch */
+    BOOT_HW_OTHER,         /**< reset pin, USB, JTAG, deep sleep, ... */
+} boot_hw_reset_t;
+
+/** Our classification of the last reset. */
+typedef enum {
+    BOOT_RESET_POWER_ON = 0,
+    BOOT_RESET_PLANNED,
+    BOOT_RESET_CRASH,
+    BOOT_RESET_BROWNOUT,
+    BOOT_RESET_OTHER,
+} boot_reset_class_t;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t boots;             /**< boots since the state started (power-on) */
+    uint32_t crashes;           /**< crashes since the last stable normal-mode boot */
+    uint32_t brownouts;         /**< since power-on */
+    uint32_t safe_episodes;     /**< safe-mode entries since the last stable normal-mode boot */
+    uint32_t reboot_reason;     /**< set before a planned reboot, consumed by the next boot */
+    uint32_t once_flags;        /**< one-shot actions already taken since power-on */
+    uint32_t safe_mode;         /**< this boot runs in safe mode */
+    uint32_t check;             /**< checksum over the fields above */
+} boot_guard_state_t;
+
+typedef struct {
+    boot_reset_class_t cls;
+    uint32_t prev_reboot_reason;   /**< reason code the previous boot left (0 = none) */
+    bool state_was_lost;           /**< RTC state was invalid (first boot or memory lost) */
+    bool safe_mode;
+    bool entered_safe_mode;        /**< this boot is the first of a safe-mode episode */
+} boot_guard_result_t;
+
+/** True if the state carries the magic and a matching checksum. */
+bool boot_guard_valid(const boot_guard_state_t *st);
+
+/** Recompute the checksum after changing the state. */
+void boot_guard_seal(boot_guard_state_t *st);
+
+/** Account for this boot. `limit` = crashes that trigger safe mode. Seals the state. */
+void boot_guard_on_boot(boot_guard_state_t *st, boot_hw_reset_t hw, uint32_t limit, boot_guard_result_t *out);
+
+/** Stable uptime reached. Clears the counters in normal mode only. Seals. */
+void boot_guard_on_stable(boot_guard_state_t *st);
+
+/** Record the reason code for the planned reboot that follows. Seals. */
+void boot_guard_set_reboot_reason(boot_guard_state_t *st, uint32_t reason);
+
+/** Seconds a safe-mode episode lasts before a normal boot is retried: 1 h, 4 h, then 24 h. */
+uint32_t boot_guard_safe_retry_s(const boot_guard_state_t *st);
+
+/** Prepare the retry from safe mode: counter = limit - 1, so one more crash re-enters safe mode. Seals. */
+void boot_guard_prepare_safe_retry(boot_guard_state_t *st, uint32_t limit);
+
+/** User cleared safe mode: counter and episodes to zero. Seals. */
+void boot_guard_clear(boot_guard_state_t *st);
+
+/** True the first time `flag` is claimed since power-on. Seals. */
+bool boot_guard_claim_once(boot_guard_state_t *st, uint32_t flag);
+
+#ifdef __cplusplus
+}
+#endif

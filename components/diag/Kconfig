@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+menu "Station: diagnostics"
+
+    config DIAG_LOG_RING_KB
+        int "Log ring for the web UI (KB, PSRAM, kept across resets)"
+        range 8 1024
+        default 64
+        help
+            Every log line is also copied here so it can be read remotely
+            (web UI log view, WebSocket stream). The ring survives software,
+            panic and watchdog resets, so the previous boot's last lines can
+            be read after a crash. The serial console keeps receiving all
+            output as usual.
+
+    config DIAG_JOURNAL_MIN_INTERVAL_MS
+        int "Minimum interval between journal records of one kind (ms)"
+        range 0 60000
+        default 1000
+        help
+            Rate limit that keeps a flapping condition from wearing out the
+            journal partition.
+
+endmenu
