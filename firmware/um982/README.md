@@ -43,7 +43,7 @@ and checks its structure on that copy, which is then the only copy sent:
 - the partition layout, which must be one the firmware knows for that receiver
   build (a package that would change the layout is refused until that path is
   bench-tested);
-- size and SHA-256, which must equal the signed release manifest or what the user
+- size and SHA-256, which must equal the release manifest or what the user
   confirmed for a manual upload; and a build that is not lower than the one running.
 
 The upload page shows what this check reads (model string, layout, build date stamps
@@ -58,9 +58,11 @@ confirmed on hardware.
 1. Obtain a newer `.pkg` for the UM982 (see below).
 2. Confirm the model string in the header reads `UM982` and that the file flashes
    cleanly on a bench unit.
-3. Replace the file here, regenerate `SHA256SUMS`
-   (`shasum -a 256 *.pkg > SHA256SUMS`), and attach the `.pkg` to a GitHub Release
-   so stations can offer it.
+3. Replace the file here and regenerate `SHA256SUMS`
+   (`shasum -a 256 *.pkg > SHA256SUMS`). The next release tag attaches every `.pkg`
+   in this directory to the GitHub Release and lists it in the release manifest
+   (the release job refuses a package that does not match `SHA256SUMS`), so stations
+   can offer it.
 
 ## Where newer firmware comes from
 

@@ -231,6 +231,8 @@ typedef struct {
     const station_status_t *st;
     const web_last_result_t *last;
     bool checks_enabled;
+    const char *release_repo;      /**< "owner/name" (NULL or "" = null) */
+    bool signed_manifests;         /**< the build accepts signed manifests only */
     uint32_t budget_left_s;        /**< UINT32_MAX = null */
     bool flash_available;
     const char (*rolled_back)[32]; /**< fw_update_get_rolled_back(), newest first */

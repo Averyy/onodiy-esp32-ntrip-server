@@ -83,12 +83,12 @@ const char *fw_manifest_err_str(fw_manifest_err_t err)
     switch (err) {
     case FW_MANIFEST_OK:
         return "ok";
-    case FW_MANIFEST_ERR_NO_KEY:
-        return "no manifest key in this build";
-    case FW_MANIFEST_ERR_ENVELOPE:
-        return "not a signed manifest";
+    case FW_MANIFEST_ERR_FORMAT:
+        return "not a manifest (JSON or envelope)";
+    case FW_MANIFEST_ERR_UNSIGNED:
+        return "not signed, and this build requires a signature";
     case FW_MANIFEST_ERR_SIGNATURE:
-        return "signature not valid for any known key";
+        return "signature not valid for any key of this build";
     case FW_MANIFEST_ERR_CONTENT:
         return "manifest content not understood";
     case FW_MANIFEST_ERR_NO_MEM:
@@ -182,24 +182,28 @@ static bool printable(const char *s)
     return true;
 }
 
-fw_manifest_err_t fw_manifest_parse_payload(const char *json, size_t len, fw_manifest_t *out)
+/* Parse a JSON document of which nothing but whitespace may follow the value. */
+static cJSON *parse_json(const char *json, size_t len)
 {
-    if (json == NULL || out == NULL) {
-        return FW_MANIFEST_ERR_CONTENT;
-    }
-    memset(out, 0, sizeof(*out));
     const char *end = NULL;
     cJSON *root = cJSON_ParseWithLengthOpts(json, len, &end, false);
     if (root == NULL) {
-        return FW_MANIFEST_ERR_CONTENT;
+        return NULL;
     }
-    fw_manifest_err_t err = FW_MANIFEST_ERR_CONTENT;
-    /* Nothing but whitespace may follow the object. */
     for (const char *p = end; p != NULL && p < json + len; p++) {
         if (*p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != '\0') {
-            goto done;
+            cJSON_Delete(root);
+            return NULL;
         }
     }
+    return root;
+}
+
+/* The content rules on a parsed manifest object; *out is cleared on failure. */
+static fw_manifest_err_t parse_root(const cJSON *root, fw_manifest_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    fw_manifest_err_t err = FW_MANIFEST_ERR_CONTENT;
     if (!cJSON_IsObject(root)) {
         goto done;
     }
@@ -234,10 +238,24 @@ fw_manifest_err_t fw_manifest_parse_payload(const char *json, size_t len, fw_man
     err = FW_MANIFEST_OK;
 
 done:
-    cJSON_Delete(root);
     if (err != FW_MANIFEST_OK) {
         memset(out, 0, sizeof(*out));
     }
+    return err;
+}
+
+fw_manifest_err_t fw_manifest_parse_payload(const char *json, size_t len, fw_manifest_t *out)
+{
+    if (json == NULL || out == NULL) {
+        return FW_MANIFEST_ERR_CONTENT;
+    }
+    memset(out, 0, sizeof(*out));
+    cJSON *root = parse_json(json, len);
+    if (root == NULL) {
+        return FW_MANIFEST_ERR_CONTENT;
+    }
+    fw_manifest_err_t err = parse_root(root, out);
+    cJSON_Delete(root);
     return err;
 }
 
@@ -248,13 +266,13 @@ static fw_manifest_err_t b64_member(const cJSON *root, const char *name, size_t 
 {
     const cJSON *f = cJSON_GetObjectItemCaseSensitive(root, name);
     if (!cJSON_IsString(f) || f->valuestring == NULL || f->valuestring[0] == '\0') {
-        return FW_MANIFEST_ERR_ENVELOPE;
+        return FW_MANIFEST_ERR_FORMAT;
     }
     const unsigned char *src = (const unsigned char *)f->valuestring;
     size_t src_len = strlen(f->valuestring);
     size_t cap = (src_len / 4u) * 3u + 3u;
     if (cap > max + 3u) {
-        return FW_MANIFEST_ERR_ENVELOPE;
+        return FW_MANIFEST_ERR_FORMAT;
     }
     uint8_t *buf = malloc(cap + 1u);
     if (buf == NULL) {
@@ -263,7 +281,7 @@ static fw_manifest_err_t b64_member(const cJSON *root, const char *name, size_t 
     size_t n = 0;
     if (mbedtls_base64_decode(buf, cap, &n, src, src_len) != 0 || n == 0 || n > max) {
         free(buf);
-        return FW_MANIFEST_ERR_ENVELOPE;
+        return FW_MANIFEST_ERR_FORMAT;
     }
     buf[n] = 0;
     *out = buf;
@@ -289,64 +307,180 @@ static bool verify_with(const fw_manifest_key_t *key, const uint8_t *msg, size_t
     return st == PSA_SUCCESS;
 }
 
-fw_manifest_err_t fw_manifest_verify(const char *json, size_t len, const fw_manifest_key_t *keys, size_t key_count,
-                                     fw_manifest_t *out, int *key_index)
+/* Check the envelope's signature against `keys` (none: no check). On
+ * FW_MANIFEST_OK, *payload holds the manifest bytes (caller frees). */
+static fw_manifest_err_t open_envelope(const cJSON *root, const fw_manifest_key_t *keys, size_t key_count,
+                                       uint8_t **payload, size_t *payload_len, int *key_index)
 {
+    *payload = NULL;
+    *payload_len = 0;
+    const cJSON *signature = cJSON_GetObjectItemCaseSensitive(root, "signature");
+    if (key_count > 0 && (signature == NULL || cJSON_IsNull(signature))) {
+        return FW_MANIFEST_ERR_UNSIGNED;
+    }
+    uint8_t *data = NULL;
+    size_t data_len = 0;
+    fw_manifest_err_t err = b64_member(root, "payload", PAYLOAD_MAX, &data, &data_len);
+    if (err != FW_MANIFEST_OK || key_count == 0) {
+        /* Without keys the signature, if any, is not looked at. */
+        *payload = data;
+        *payload_len = data_len;
+        return err;
+    }
+
+    uint8_t *der = NULL;
+    size_t der_len = 0;
+    err = b64_member(root, "signature", SIG_DER_MAX, &der, &der_len);
+    uint8_t sig[SIG_RAW_LEN];
+    size_t sig_len = 0;
+    if (err == FW_MANIFEST_OK &&
+        (mbedtls_ecdsa_der_to_raw(256, der, der_len, sig, sizeof(sig), &sig_len) != 0 || sig_len != SIG_RAW_LEN)) {
+        err = FW_MANIFEST_ERR_FORMAT;
+    }
+    if (err == FW_MANIFEST_OK && psa_crypto_init() != PSA_SUCCESS) {
+        err = FW_MANIFEST_ERR_NO_MEM;
+    }
+    if (err == FW_MANIFEST_OK) {
+        err = FW_MANIFEST_ERR_SIGNATURE;
+        for (size_t i = 0; i < key_count; i++) {
+            if (verify_with(&keys[i], data, data_len, sig)) {
+                *key_index = (int)i;
+                err = FW_MANIFEST_OK;
+                break;
+            }
+        }
+    }
+    free(der);
+    if (err != FW_MANIFEST_OK) {
+        free(data);
+        return err;
+    }
+    *payload = data;
+    *payload_len = data_len;
+    return FW_MANIFEST_OK;
+}
+
+fw_manifest_err_t fw_manifest_read(const char *json, size_t len, const fw_manifest_key_t *keys, size_t key_count,
+                                   fw_manifest_t *out, int *key_index)
+{
+    int key = -1;
     if (key_index != NULL) {
         *key_index = -1;
     }
     if (out != NULL) {
         memset(out, 0, sizeof(*out));
     }
-    if (keys == NULL || key_count == 0) {
-        return FW_MANIFEST_ERR_NO_KEY;
+    if (json == NULL || out == NULL || (keys == NULL && key_count > 0)) {
+        return FW_MANIFEST_ERR_FORMAT;
     }
-    if (json == NULL || out == NULL) {
-        return FW_MANIFEST_ERR_ENVELOPE;
-    }
-    if (psa_crypto_init() != PSA_SUCCESS) {
-        return FW_MANIFEST_ERR_NO_MEM;
-    }
-
-    cJSON *root = cJSON_ParseWithLength(json, len);
+    cJSON *root = parse_json(json, len);
     if (root == NULL) {
-        return FW_MANIFEST_ERR_ENVELOPE;
+        return FW_MANIFEST_ERR_FORMAT;
     }
-    uint8_t *payload = NULL;
-    uint8_t *der = NULL;
-    size_t payload_len = 0;
-    size_t der_len = 0;
-    fw_manifest_err_t err = FW_MANIFEST_ERR_ENVELOPE;
-    if (cJSON_IsObject(root)) {
-        err = b64_member(root, "payload", PAYLOAD_MAX, &payload, &payload_len);
+    fw_manifest_err_t err;
+    if (!cJSON_IsObject(root)) {
+        err = FW_MANIFEST_ERR_FORMAT;
+    } else if (cJSON_GetObjectItemCaseSensitive(root, "payload") == NULL) {
+        /* The plain form: acceptable only to a build that requires no signature. */
+        err = key_count > 0 ? FW_MANIFEST_ERR_UNSIGNED : parse_root(root, out);
+    } else {
+        uint8_t *payload = NULL;
+        size_t payload_len = 0;
+        err = open_envelope(root, keys, key_count, &payload, &payload_len, &key);
         if (err == FW_MANIFEST_OK) {
-            err = b64_member(root, "signature", SIG_DER_MAX, &der, &der_len);
+            err = fw_manifest_parse_payload((const char *)payload, payload_len, out);
         }
+        free(payload);
     }
     cJSON_Delete(root);
-
-    uint8_t sig[SIG_RAW_LEN];
-    size_t sig_len = 0;
-    if (err == FW_MANIFEST_OK &&
-        (mbedtls_ecdsa_der_to_raw(256, der, der_len, sig, sizeof(sig), &sig_len) != 0 || sig_len != SIG_RAW_LEN)) {
-        err = FW_MANIFEST_ERR_ENVELOPE;
+    if (err != FW_MANIFEST_OK) {
+        memset(out, 0, sizeof(*out));
+        key = -1;
     }
-    if (err == FW_MANIFEST_OK) {
-        err = FW_MANIFEST_ERR_SIGNATURE;
-        for (size_t i = 0; i < key_count; i++) {
-            if (verify_with(&keys[i], payload, payload_len, sig)) {
-                if (key_index != NULL) {
-                    *key_index = (int)i;
-                }
-                err = FW_MANIFEST_OK;
-                break;
-            }
-        }
+    if (key_index != NULL) {
+        *key_index = key;
     }
-    if (err == FW_MANIFEST_OK) {
-        err = fw_manifest_parse_payload((const char *)payload, payload_len, out);
-    }
-    free(payload);
-    free(der);
     return err;
+}
+
+/* ---- per-asset check ------------------------------------------------------------------ */
+
+const char *fw_asset_result_str(fw_asset_result_t r)
+{
+    switch (r) {
+    case FW_ASSET_OK:
+        return "ok";
+    case FW_ASSET_ERR_SIZE:
+        return "size differs from the manifest";
+    case FW_ASSET_ERR_SHA256:
+        return "SHA-256 differs from the manifest";
+    case FW_ASSET_ERR_CRYPTO:
+        return "hashing failed";
+    }
+    return "?";
+}
+
+fw_asset_result_t fw_asset_check_length(const fw_manifest_file_t *file, int64_t content_length)
+{
+    return (content_length < 0 || content_length == (int64_t)file->size) ? FW_ASSET_OK : FW_ASSET_ERR_SIZE;
+}
+
+fw_asset_result_t fw_asset_check_begin(fw_asset_check_t *c, const fw_manifest_file_t *file)
+{
+    memset(c, 0, sizeof(*c));
+    c->op = psa_hash_operation_init();
+    c->size = file->size;
+    memcpy(c->sha256, file->sha256, sizeof(c->sha256));
+    if (psa_crypto_init() != PSA_SUCCESS || psa_hash_setup(&c->op, PSA_ALG_SHA_256) != PSA_SUCCESS) {
+        psa_hash_abort(&c->op);
+        return FW_ASSET_ERR_CRYPTO;
+    }
+    c->open = true;
+    return FW_ASSET_OK;
+}
+
+void fw_asset_check_abort(fw_asset_check_t *c)
+{
+    if (c->open) {
+        psa_hash_abort(&c->op);
+        c->open = false;
+    }
+}
+
+fw_asset_result_t fw_asset_check_update(fw_asset_check_t *c, const void *data, size_t len)
+{
+    if (!c->open) {
+        return FW_ASSET_ERR_CRYPTO;
+    }
+    if (len > (size_t)(c->size - c->received)) {
+        fw_asset_check_abort(c);
+        return FW_ASSET_ERR_SIZE;
+    }
+    if (len > 0 && psa_hash_update(&c->op, data, len) != PSA_SUCCESS) {
+        fw_asset_check_abort(c);
+        return FW_ASSET_ERR_CRYPTO;
+    }
+    c->received += (uint32_t)len;
+    return FW_ASSET_OK;
+}
+
+fw_asset_result_t fw_asset_check_finish(fw_asset_check_t *c)
+{
+    if (!c->open) {
+        return FW_ASSET_ERR_CRYPTO;
+    }
+    if (c->received != c->size) {
+        fw_asset_check_abort(c);
+        return FW_ASSET_ERR_SIZE;
+    }
+    uint8_t digest[32];
+    size_t n = 0;
+    psa_status_t st = psa_hash_finish(&c->op, digest, sizeof(digest), &n);
+    c->open = false;
+    if (st != PSA_SUCCESS || n != sizeof(digest)) {
+        psa_hash_abort(&c->op);
+        return FW_ASSET_ERR_CRYPTO;
+    }
+    /* Not secret: no constant-time compare needed. */
+    return memcmp(digest, c->sha256, sizeof(digest)) == 0 ? FW_ASSET_OK : FW_ASSET_ERR_SHA256;
 }

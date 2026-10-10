@@ -356,6 +356,20 @@ TEST_CASE("GET /api/update lists every version rolled back here, newest first", 
     TEST_ASSERT_EQUAL_STRING("v0.3.1", cJSON_GetArrayItem(rb, 1)->valuestring);
     TEST_ASSERT_TRUE(cJSON_IsTrue(at(app, "latest_rolled_back")));
     TEST_ASSERT_EQUAL_STRING("v0.4.0", at(app, "reverted")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "release_repo")));   /* none given */
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "signed_manifests")));
+    cJSON_Delete(root);
+
+    u.release_repo = "Averyy/onocoydiy-esp-um982";
+    u.signed_manifests = true;
+    u.checks_enabled = true;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_update(&w, &u);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_EQUAL_STRING("Averyy/onocoydiy-esp-um982", at(root, "release_repo")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "signed_manifests")));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "checks_enabled")));
     cJSON_Delete(root);
 
     u.rolled_back = NULL;   /* none: an empty list, never null */
@@ -382,6 +396,11 @@ TEST_CASE("update job results map the esp_err_t", "[web_build]")
     TEST_ASSERT_EQUAL_STRING("invalid_image", web_result_code("app_upload", 0x1503));
     TEST_ASSERT_EQUAL_STRING("package_rejected", web_result_code("gnss_flash", ESP_ERR_INVALID_VERSION));
     TEST_ASSERT_EQUAL_STRING("failed", web_result_code("gnss_upload", ESP_ERR_NO_MEM));
+    /* A redirect off GitHub's release hosts, on any download job. */
+    TEST_ASSERT_EQUAL_STRING("untrusted_host", web_result_code("check", ESP_ERR_NOT_ALLOWED));
+    TEST_ASSERT_EQUAL_STRING("untrusted_host", web_result_code("app_update", ESP_ERR_NOT_ALLOWED));
+    TEST_ASSERT_EQUAL_STRING("untrusted_host", web_result_code("gnss_update", ESP_ERR_NOT_ALLOWED));
+    TEST_ASSERT_EQUAL_STRING("failed", web_result_code("app_upload", ESP_ERR_NOT_ALLOWED));
 }
 
 TEST_CASE("signals: per-band CNR null when unknown, messages merged with the profile", "[web_build]")

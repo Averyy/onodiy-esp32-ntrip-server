@@ -43,10 +43,10 @@ Antenna and cable notes: [`reference/antenna-specs.md`](reference/antenna-specs.
    tool needed.
 4. **Updates from GitHub Releases** — daily check with a banner in the web UI; the
    ESP32 app (`.bin`) and UM982 firmware (`.pkg`) install only when you click Update
-   (or upload a file). Downloads are HTTPS; the `.pkg` lives in
-   [`firmware/um982/`](firmware/um982/). Each release carries a signed manifest
-   (ECDSA P-256, offline key); the station only offers what it lists and checks every
-   download against its size and SHA-256.
+   (or upload a file). The `.pkg` lives in [`firmware/um982/`](firmware/um982/). Each
+   release carries a manifest listing every file with its size and SHA-256; the station
+   downloads only from this repository's GitHub releases over verified HTTPS and uses a
+   file only if it matches (see [Releases and updates](#releases-and-updates)).
 5. **Web UI** — Wi-Fi setup, NTRIP configuration, live status, firmware updates, and a
    signal/satellite view.
 6. **Health monitoring** — GNSS watchdog, auto-recovery, and data-loss counters.
@@ -59,6 +59,7 @@ Antenna and cable notes: [`reference/antenna-specs.md`](reference/antenna-specs.
 | `test/host/` | Host unit tests (ESP-IDF linux target, Unity) |
 | `firmware/um982/` | Unicore UM982 receiver firmware the device flashes and offers as a user-confirmed update (see its README) |
 | `gnss-splitter/` | KiCad/EasyEDA PCB for an optional GNSS antenna splitter |
+| `tools/` | Release tooling (`release_manifest.py` writes a release's `manifest.json`) |
 | `reference/` | Hardware notes (board, antenna); private research is kept out of the repo |
 
 ## Building
@@ -82,7 +83,8 @@ idf.py build
 ```
 
 CI runs both for pushes to `main`, release tags and pull requests
-(`.github/workflows/build.yml`).
+(`.github/workflows/build.yml`); a release tag also publishes the GitHub Release (see
+below).
 
 Notes:
 
@@ -96,13 +98,65 @@ Notes:
   version matters.
 - The partition table is permanent once a station is deployed (see the comments in
   `partitions.csv`).
-- Release manifest: `manifest.json` on each release is
-  `{"payload": "<base64 of the manifest JSON>", "signature": "<base64 of the DER
-  signature>"}`, signed with `openssl dgst -sha256 -sign key.pem` over the exact
-  payload bytes (format in `components/fw_update/priv_include/manifest.h`). Builds
-  verify it with the public keys in `CONFIG_FW_UPDATE_MANIFEST_KEY_1`/`_2` (130 hex
-  digits, `openssl ec -pubin -in key.pub -text -noout`); a build without a key never
-  offers updates. Forks set their own keys.
+
+## Releases and updates
+
+**Cutting a release.** Tag the commit and push the tag:
+
+```sh
+git tag v0.3.0
+git push origin v0.3.0
+```
+
+CI builds the tag as release `v0.3.0` (`-DRELEASE_VERSION`), runs the host tests, then
+creates the GitHub Release with:
+
+- `onocoydiy-esp-um982.bin`, the app image stations install;
+- the receiver package(s) from [`firmware/um982/`](firmware/um982/) (checked against
+  its `SHA256SUMS`);
+- `manifest.json`, written by [`tools/release_manifest.py`](tools/release_manifest.py):
+  the version, and every file with its size and SHA-256;
+- `bootloader.bin`, `partition-table.bin`, `ota_data_initial.bin` and an `esptool`
+  command line in the release notes, for the first flash of a new board, and
+  `THIRD_PARTY_NOTICES.md`.
+
+The release is published only once every file is attached. A tag with a suffix
+(`v0.3.0-rc.1`) becomes a pre-release, which stations never offer (install it as a
+file upload). To redo a release, delete it and its tag on GitHub first. The job needs
+only `contents: write`. After publishing, it follows the same download redirects a
+station does and fails if one leads to a host the firmware does not trust (skipped
+while the repository is private).
+
+**What a station trusts.** The repository must be public: stations download without
+a token. A release is trusted because of where it comes from:
+
+- every request is HTTPS with the server certificate checked against the CA bundle;
+- it goes only to the releases of the repository set at build time
+  (`CONFIG_FW_UPDATE_GITHUB_REPO`, `Averyy/onocoydiy-esp-um982` by default), and every
+  redirect must stay on GitHub's release hosts (`github.com`,
+  `release-assets.githubusercontent.com`, `objects.githubusercontent.com`), or the
+  download stops before it connects;
+- the manifest names each file with its size and SHA-256, and an app image or receiver
+  package is used only if both match (the app image is also checked in flash, and must
+  carry the manifest's version and this project's name).
+
+No signing keys, no secure boot. Updates still start only when you click Update, and a
+self-built image can always be installed with a file upload.
+
+**Forks.** Set `CONFIG_FW_UPDATE_GITHUB_REPO` to your repository; the release job
+refuses to publish a build that reads releases from another one. Signing is optional:
+put your public key in `CONFIG_FW_UPDATE_MANIFEST_KEY_1` (130 hex digits; `_2` is for
+rotating keys) and the private key in the `MANIFEST_SIGNING_KEY` repository secret, and
+CI signs `manifest.json` (`{"payload": ..., "signature": ...}`, ECDSA P-256/SHA-256).
+A build with a key accepts only manifests signed with it and refuses unsigned ones;
+the release job refuses to publish an unsigned manifest for such a build.
+
+```sh
+openssl ecparam -name prime256v1 -genkey -noout -out manifest-key.pem   # keep it secret
+openssl ec -in manifest-key.pem -pubout | openssl ec -pubin -text -noout  # the pub: hex
+```
+
+Manifest format and rules: `components/fw_update/priv_include/manifest.h`.
 
 ## Recovery (planned behaviour)
 

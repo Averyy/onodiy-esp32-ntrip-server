@@ -1011,6 +1011,12 @@ const char *web_result_code(const char *job, esp_err_t err)
         return "refused";
     case ESP_ERR_INVALID_CRC:
         return check ? "signature_failed" : "checksum_mismatch";
+    case ESP_ERR_NOT_ALLOWED:
+        /* fw_update: a redirect off GitHub's release hosts, refused before connecting. */
+        return (check || strcmp(job != NULL ? job : "", "app_update") == 0 ||
+                strcmp(job != NULL ? job : "", "gnss_update") == 0)
+                   ? "untrusted_host"
+                   : "failed";
     case ESP_ERR_INVALID_SIZE:
         return "size_mismatch";
     case ESP_ERR_INVALID_VERSION:
@@ -1036,6 +1042,8 @@ void web_build_update(wj_t *w, const web_update_snap_t *u)
     wj_str(w, "state", web_fw_state_name(f->state));
     wj_uint(w, "progress_pct", f->progress_pct);
     wj_bool(w, "checks_enabled", u->checks_enabled);
+    wj_str_or_null(w, "release_repo", u->release_repo);
+    wj_bool(w, "signed_manifests", u->signed_manifests);
     wj_unix(w, "last_check_unix", f->last_check_unix);
     if (u->last != NULL && u->last->valid) {
         wj_obj_open(w, "last_result");

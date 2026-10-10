@@ -18,6 +18,7 @@
 #include "fw_internal.h"
 #include "network.h"
 #include "pkg_store.h"
+#include "release_url.h"
 #include "rtcm_hub.h"
 #include "sdkconfig.h"
 #include "semver.h"
@@ -98,43 +99,34 @@ void fw_set_progress(uint8_t pct)
     fw_unlock();
 }
 
-static bool repo_ok(const char *repo)
+/* Pick the repository once, at init (after load_trust). */
+static void select_repo(void)
 {
-    int slashes = 0;
-    size_t n = 0;
-    for (const char *p = repo; *p != '\0'; p++, n++) {
-        char c = *p;
-        if (c == '/') {
-            if (n == 0 || p[1] == '\0') {
-                return false;
-            }
-            slashes++;
-            continue;
-        }
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' ||
-              c == '.')) {
-            return false;
-        }
+    char repo[FW_UPDATE_REPO_MAX];
+    strlcpy(g_fw.repo, CONFIG_FW_UPDATE_GITHUB_REPO, sizeof(g_fw.repo));
+    if (settings_get_str(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_REPO, repo, sizeof(repo)) != ESP_OK || repo[0] == '\0' ||
+        strcmp(repo, g_fw.repo) == 0) {
+        return;
     }
-    return slashes == 1;
+    /* Without a key the repository is the trust anchor: only the one this
+     * image was built for. A signed-manifest build trusts its key instead. */
+    if (!g_fw.signature_required) {
+        ESP_LOGW(TAG, "ota/repo \"%s\" ignored: without a manifest key releases come from %s only", repo, g_fw.repo);
+    } else if (!fw_release_repo_ok(repo)) {
+        ESP_LOGW(TAG, "ota/repo \"%s\" ignored: not owner/name", repo);
+    } else {
+        strlcpy(g_fw.repo, repo, sizeof(g_fw.repo));
+    }
 }
 
 void fw_repo(char *out, size_t out_size)
 {
-    char repo[96];
-    if (settings_get_str(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_REPO, repo, sizeof(repo)) == ESP_OK && repo_ok(repo)) {
-        strlcpy(out, repo, out_size);
-        return;
-    }
-    strlcpy(out, CONFIG_FW_UPDATE_GITHUB_REPO, out_size);
+    strlcpy(out, g_fw.repo, out_size);
 }
 
 bool fw_asset_url(const char *tag, const char *asset, char *out, size_t out_size)
 {
-    char repo[96];
-    fw_repo(repo, sizeof(repo));
-    int n = snprintf(out, out_size, "https://github.com/%s/releases/download/%s/%s", repo, tag, asset);
-    return n > 0 && (size_t)n < out_size;
+    return fw_release_asset_url(out, out_size, g_fw.repo, tag, asset);
 }
 
 bool fw_hub_fed_now(void)
@@ -222,11 +214,9 @@ static void run_check(void)
     uint32_t started = fw_uptime_s();
     fw_set_state(FW_UPDATE_CHECKING, ESP_OK);
 
-    char repo[96];
-    char url[256];
+    char repo[FW_UPDATE_REPO_MAX];
+    char url[384];
     fw_repo(repo, sizeof(repo));
-    snprintf(url, sizeof(url), "https://github.com/%s/releases/latest/download/%s", repo,
-             CONFIG_FW_UPDATE_MANIFEST_ASSET);
 
     char etag_in[sizeof(g_fw.etag)];
     fw_lock();
@@ -237,10 +227,16 @@ static void run_check(void)
     char *body = NULL;
     size_t len = 0;
     char etag[sizeof(g_fw.etag)] = "";
-    /* "Not modified" is only useful while this boot holds the verified
-     * manifest it refers to. */
-    fw_http_result_t r = fw_http_fetch(url, (have && etag_in[0] != '\0') ? etag_in : NULL, MANIFEST_CAP, &body, &len,
-                                       etag, sizeof(etag));
+    fw_http_result_t r;
+    if (fw_release_latest_url(url, sizeof(url), repo, CONFIG_FW_UPDATE_MANIFEST_ASSET)) {
+        /* "Not modified" is only useful while this boot holds the accepted
+         * manifest it refers to. */
+        r = fw_http_fetch(url, (have && etag_in[0] != '\0') ? etag_in : NULL, MANIFEST_CAP, &body, &len, etag,
+                          sizeof(etag));
+    } else {
+        ESP_LOGE(TAG, "no release URL for %s and %s", repo, CONFIG_FW_UPDATE_MANIFEST_ASSET);
+        r = FW_HTTP_BAD_ANSWER;   /* unusable: waits for the next daily check */
+    }
 
     fw_check_result_t result;
     esp_err_t err = ESP_OK;
@@ -248,7 +244,7 @@ static void run_check(void)
     case FW_HTTP_OK: {
         static fw_manifest_t m;   /* worker only; too large for the stack */
         int key = -1;
-        fw_manifest_err_t merr = fw_manifest_verify(body, len, g_fw.keys, g_fw.key_count, &m, &key);
+        fw_manifest_err_t merr = fw_manifest_read(body, len, g_fw.keys, g_fw.key_count, &m, &key);
         if (merr == FW_MANIFEST_OK) {
             fw_lock();
             g_fw.manifest = m;
@@ -256,8 +252,13 @@ static void run_check(void)
             strlcpy(g_fw.etag, etag, sizeof(g_fw.etag));
             fw_unlock();
             result = FW_CHECK_OK;
-            ESP_LOGI(TAG, "manifest %s verified (key %d), %u receiver package(s)", m.version, key + 1,
-                     (unsigned)m.gnss_count);
+            if (key >= 0) {
+                ESP_LOGI(TAG, "manifest %s signed (key %d), %u receiver package(s)", m.version, key + 1,
+                         (unsigned)m.gnss_count);
+            } else {
+                ESP_LOGI(TAG, "manifest %s from github.com/%s over HTTPS, %u receiver package(s)", m.version, repo,
+                         (unsigned)m.gnss_count);
+            }
             if (strcmp(etag, g_fw.etag_saved) != 0) {
                 if (settings_set_str(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_ETAG, etag) == ESP_OK) {
                     strlcpy(g_fw.etag_saved, etag, sizeof(g_fw.etag_saved));
@@ -265,10 +266,9 @@ static void run_check(void)
             }
         } else {
             result = merr == FW_MANIFEST_ERR_NO_MEM ? FW_CHECK_NO_RESPONSE : FW_CHECK_UNUSABLE;
-            err = merr == FW_MANIFEST_ERR_SIGNATURE   ? ESP_ERR_INVALID_CRC
-                  : merr == FW_MANIFEST_ERR_NO_MEM    ? ESP_ERR_NO_MEM
-                  : merr == FW_MANIFEST_ERR_NO_KEY    ? ESP_ERR_NOT_SUPPORTED
-                                                      : ESP_ERR_INVALID_RESPONSE;
+            err = (merr == FW_MANIFEST_ERR_SIGNATURE || merr == FW_MANIFEST_ERR_UNSIGNED) ? ESP_ERR_INVALID_CRC
+                  : merr == FW_MANIFEST_ERR_NO_MEM                                       ? ESP_ERR_NO_MEM
+                                                                                         : ESP_ERR_INVALID_RESPONSE;
             ESP_LOGE(TAG, "release manifest rejected: %s", fw_manifest_err_str(merr));
         }
         break;
@@ -281,6 +281,13 @@ static void run_check(void)
         result = FW_CHECK_UNUSABLE;
         err = ESP_ERR_INVALID_RESPONSE;
         ESP_LOGW(TAG, "no usable release manifest at github.com/%s", repo);
+        break;
+    case FW_HTTP_UNTRUSTED:
+        /* An answer, but one that would leave GitHub's release hosts: the
+         * next daily check, like any unusable answer. */
+        result = FW_CHECK_UNUSABLE;
+        err = ESP_ERR_NOT_ALLOWED;
+        ESP_LOGE(TAG, "update check: GitHub redirected to a host this firmware does not trust");
         break;
     case FW_HTTP_LOCAL_ERROR:
         result = FW_CHECK_NO_RESPONSE;
@@ -337,7 +344,7 @@ static bool check_due(void)
         .last_success_s = g_fw.last_success_s,
     };
     bool idle = !g_fw.busy && g_fw.state != FW_UPDATE_REBOOT_PENDING && g_fw.run != FW_TRIAL_RUN_CONFIRMING &&
-                g_fw.key_count > 0;
+                g_fw.checks_enabled;
     fw_unlock();
     return idle && fw_sched_wait_s(&s) == 0 && network_is_online();
 }
@@ -414,20 +421,30 @@ static esp_err_t queue_job_locked(const fw_job_t *job)
 
 /* ---- public API ----------------------------------------------------------------------- */
 
-static void load_keys(void)
+/* The trust settings of this build: keys, whether a signature is required,
+ * and whether update checks can run at all. */
+static void load_trust(void)
 {
     const char *hex[FW_MANIFEST_MAX_KEYS] = { CONFIG_FW_UPDATE_MANIFEST_KEY_1, CONFIG_FW_UPDATE_MANIFEST_KEY_2 };
     g_fw.key_count = 0;
+    g_fw.signature_required = false;
     for (size_t i = 0; i < FW_MANIFEST_MAX_KEYS; i++) {
         if (hex[i][0] == '\0') {
             continue;
         }
+        /* Configured is enough to require signatures: a key that does not
+         * parse must not turn this build into one that takes unsigned
+         * manifests. */
+        g_fw.signature_required = true;
         if (fw_manifest_key_from_hex(hex[i], &g_fw.keys[g_fw.key_count])) {
             g_fw.key_count++;
         } else {
             ESP_LOGE(TAG, "manifest key %u is not a P-256 public key in hex: ignored", (unsigned)(i + 1));
         }
     }
+    g_fw.checks_enabled = fw_release_repo_ok(CONFIG_FW_UPDATE_GITHUB_REPO) &&
+                          fw_manifest_asset_name_ok(CONFIG_FW_UPDATE_MANIFEST_ASSET) &&
+                          (!g_fw.signature_required || g_fw.key_count > 0);
 }
 
 esp_err_t fw_update_init(void)
@@ -439,7 +456,8 @@ esp_err_t fw_update_init(void)
             return ESP_ERR_NO_MEM;
         }
     }
-    load_keys();
+    load_trust();
+    select_repo();
 
     uint8_t mac[6] = { 0 };
     (void)esp_read_mac(mac, ESP_MAC_WIFI_STA);
@@ -455,15 +473,24 @@ esp_err_t fw_update_init(void)
      * (and this does not return), before the steps that may be what fails. */
     fw_trial_boot();
 
-    char repo[96];
+    char repo[FW_UPDATE_REPO_MAX];
     fw_repo(repo, sizeof(repo));
-    if (g_fw.key_count == 0) {
+    bool names_ok =
+        fw_release_repo_ok(CONFIG_FW_UPDATE_GITHUB_REPO) && fw_manifest_asset_name_ok(CONFIG_FW_UPDATE_MANIFEST_ASSET);
+    if (!names_ok) {
         g_fw.last_err = ESP_ERR_NOT_SUPPORTED;
-        ESP_LOGW(TAG, "no manifest signing key in this build: update checks are off (manual uploads still work)");
+        ESP_LOGW(TAG, "no valid release repository or manifest name in this build (\"%s\", \"%s\"): update checks "
+                      "are off (manual uploads still work)",
+                 CONFIG_FW_UPDATE_GITHUB_REPO, CONFIG_FW_UPDATE_MANIFEST_ASSET);
+    } else if (!g_fw.checks_enabled) {
+        g_fw.last_err = ESP_ERR_NOT_SUPPORTED;
+        ESP_LOGE(TAG, "this build requires signed manifests but none of its keys is usable: update checks are off "
+                      "(manual uploads still work)");
     } else {
-        ESP_LOGI(TAG, "releases from github.com/%s, checked every %d h (first not before %u s), installs only on "
-                      "request",
-                 repo, CONFIG_FW_UPDATE_CHECK_INTERVAL_H, (unsigned)g_fw.first_check_s);
+        ESP_LOGI(TAG, "releases from github.com/%s (%s), checked every %d h (first not before %u s), installs only "
+                      "on request",
+                 repo, g_fw.signature_required ? "signed manifests only" : "HTTPS to GitHub, size and SHA-256 per file",
+                 CONFIG_FW_UPDATE_CHECK_INTERVAL_H, (unsigned)g_fw.first_check_s);
     }
     return ESP_OK;
 }
@@ -489,12 +516,27 @@ esp_err_t fw_update_start(void)
     return ESP_OK;
 }
 
+bool fw_update_checks_enabled(void)
+{
+    return g_fw.mtx != NULL && g_fw.checks_enabled;
+}
+
+bool fw_update_signature_required(void)
+{
+    return g_fw.signature_required;
+}
+
+const char *fw_update_release_repo(void)
+{
+    return g_fw.repo;
+}
+
 esp_err_t fw_update_check(void)
 {
     if (g_fw.mtx == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (g_fw.key_count == 0) {
+    if (!g_fw.checks_enabled) {
         return ESP_ERR_NOT_SUPPORTED;
     }
     fw_lock();

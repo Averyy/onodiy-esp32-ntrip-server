@@ -145,6 +145,8 @@ Views.updates = {
           ['App', [a.running || DASH, a.dev_build ? ' ' : null, a.dev_build ? badge('development build', 'plain') : null]],
           ['Receiver', g.running ? g.running + (g.model ? ' on ' + g.model : '') : DASH],
           ['Last check', u.last_check_unix ? fmt.time(u.last_check_unix) : 'not yet'],
+          u.release_repo ? ['Releases from', ['github.com/' + u.release_repo, u.signed_manifests ? ' ' : null,
+            u.signed_manifests ? badge('signed only', 'plain') : null]] : null,
           lr ? ['Last job', lbl(L.job, lr.job) + ': ' + resultText(lr)] : null,
         ]),
         u.checks_enabled ? h('p', { class: 'muted small' }, 'The station checks for new releases once a day. Nothing is downloaded until you click.') :
@@ -158,7 +160,7 @@ Views.updates = {
       const ok = await dialog({
         title: 'Install app ' + version + '?',
         ok: 'Install',
-        body: [h('p', null, 'The station downloads ' + version + ', checks it against the signed release list, installs it and restarts. ' +
+        body: [h('p', null, 'The station downloads ' + version + ' from the release over HTTPS, checks its size and SHA-256 against the release\'s manifest, installs it and restarts. ' +
           'The new version then runs on trial: if it fails, the station goes back to this version by itself.'),
         h('p', { class: 'muted' }, 'The casters reconnect after the restart, which usually takes less than a minute of today\'s Onocoy budget.')],
         check: ack ? 'I know this version was rolled back on this station before.' : null,

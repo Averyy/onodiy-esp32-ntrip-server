@@ -2,12 +2,22 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * HTTPS transfers from GitHub Releases. Every request uses the CA bundle,
- * CONFIG_FW_UPDATE_HTTP_BUF_SIZE for the receive and the transmit buffer
- * (the asset redirects point at signed CDN URLs longer than 1000
- * characters, and the request line is built in the transmit buffer) and
- * follows at most CONFIG_FW_UPDATE_MAX_REDIRECTS redirects, HTTPS only (the
- * client refuses a redirect from HTTPS to anything else).
+ * HTTPS transfers from GitHub Releases: the manifest fetch, the receiver
+ * package download and the app image download all go through one request
+ * path (open_follow):
+ *  - the server certificate is checked against the CA bundle (and its name
+ *    against the host), never skipped;
+ *  - before every connection, the first and each redirect, the URL the
+ *    client is about to use must be https on port 443 to one of GitHub's
+ *    release hosts (release_url.h); anything else ends the transfer before
+ *    it connects (FW_HTTP_UNTRUSTED);
+ *  - at most CONFIG_FW_UPDATE_MAX_REDIRECTS redirects;
+ *  - CONFIG_FW_UPDATE_HTTP_BUF_SIZE for the receive and the transmit buffer
+ *    (the asset redirects point at signed CDN URLs longer than 1000
+ *    characters, and the request line is built in the transmit buffer).
+ * Redirects are followed here, never inside the HTTP client or by a helper
+ * that follows them on its own (esp_https_ota does), so no hop escapes the
+ * host check.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,18 +28,28 @@
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
-#include "esp_https_ota.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "fw_internal.h"
 #include "pkg_store.h"
 #include "psa/crypto.h"
+#include "release_url.h"
 #include "sdkconfig.h"
+
+#if !CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+#error "update transfers check the server certificate against the CA bundle (CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)"
+#endif
+#if CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY || CONFIG_ESP_TLS_INSECURE
+#error "update transfers need server certificate verification (CONFIG_ESP_TLS_INSECURE must stay off)"
+#endif
 
 static const char *TAG = "fw_update";
 
 #define CHUNK 4096u
+/* Enough for "https://<host>:<port>" of any release host; a longer URL is
+ * cut by esp_http_client_get_url and then fails the host check. */
+#define URL_CHECK_LEN 160
 
 typedef struct {
     char *etag;
@@ -65,12 +85,13 @@ static void client_config(esp_http_client_config_t *cfg, const char *url, hdr_ct
     if (s_user_agent[0] == '\0') {
         snprintf(s_user_agent, sizeof(s_user_agent), "onocoydiy-esp-um982/%s", esp_app_get_description()->version);
     }
-    memset(cfg, 0, sizeof(*cfg));
+    memset(cfg, 0, sizeof(*cfg));   /* skip_cert_common_name_check stays false */
     cfg->url = url;
     cfg->crt_bundle_attach = esp_crt_bundle_attach;
     cfg->buffer_size = CONFIG_FW_UPDATE_HTTP_BUF_SIZE;
     cfg->buffer_size_tx = CONFIG_FW_UPDATE_HTTP_BUF_SIZE;
     cfg->max_redirection_count = CONFIG_FW_UPDATE_MAX_REDIRECTS;
+    cfg->disable_auto_redirect = true;   /* open_follow decides about every redirect */
     cfg->timeout_ms = CONFIG_FW_UPDATE_HTTP_TIMEOUT_MS;
     cfg->user_agent = s_user_agent;
     cfg->event_handler = on_http_event;
@@ -82,6 +103,24 @@ static bool is_redirect(int status)
     return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
 
+/* The URL the client connects to next is on a release host (release_url.h). */
+static bool target_trusted(esp_http_client_handle_t c)
+{
+    char url[URL_CHECK_LEN];
+    if (esp_http_client_get_url(c, url, sizeof(url)) != ESP_OK) {
+        return false;
+    }
+    url[sizeof(url) - 1] = '\0';
+    if (fw_release_url_ok(url)) {
+        return true;
+    }
+    /* Log the scheme and host only: release CDN URLs carry access tokens. */
+    const char *host = strstr(url, "://");
+    host = host != NULL ? host + 3 : url;
+    ESP_LOGE(TAG, "refusing to connect to %.*s: not a GitHub release host", (int)strcspn(host, "/?#"), host);
+    return false;
+}
+
 /*
  * Send the request and follow redirects. On FW_HTTP_OK the final answer's
  * headers are read: *status is its HTTP status, *length its Content-Length
@@ -90,6 +129,9 @@ static bool is_redirect(int status)
 static fw_http_result_t open_follow(esp_http_client_handle_t c, hdr_ctx_t *ctx, int *status, int64_t *length)
 {
     for (int redirects = 0;; redirects++) {
+        if (!target_trusted(c)) {
+            return FW_HTTP_UNTRUSTED;
+        }
         if (ctx != NULL && ctx->etag != NULL) {
             ctx->etag[0] = '\0';
         }
@@ -111,6 +153,7 @@ static fw_http_result_t open_follow(esp_http_client_handle_t c, hdr_ctx_t *ctx, 
             }
             int flushed = 0;
             (void)esp_http_client_flush_response(c, &flushed);
+            /* Only sets the next URL (https only); the check above runs before it connects. */
             err = esp_http_client_set_redirection(c);
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "redirect not followed: %s", esp_err_to_name(err));
@@ -195,6 +238,45 @@ fw_http_result_t fw_http_fetch(const char *url, const char *etag_in, size_t cap,
     return FW_HTTP_OK;
 }
 
+/* Open an asset download: redirects, status 200 and a Content-Length that
+ * fits the manifest. `what` names it in the logs. */
+static esp_err_t open_asset(esp_http_client_handle_t c, const fw_manifest_file_t *file, const char *what)
+{
+    int status = 0;
+    int64_t length = -1;
+    fw_http_result_t r = open_follow(c, NULL, &status, &length);
+    if (r == FW_HTTP_UNTRUSTED) {
+        return ESP_ERR_NOT_ALLOWED;
+    }
+    if (r != FW_HTTP_OK) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (status != 200) {
+        ESP_LOGE(TAG, "%s: HTTP %d", what, status);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    if (fw_asset_check_length(file, length) != FW_ASSET_OK) {
+        ESP_LOGE(TAG, "%s is %lld bytes, the manifest says %u", what, (long long)length, (unsigned)file->size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t asset_err(fw_asset_result_t r)
+{
+    switch (r) {
+    case FW_ASSET_OK:
+        return ESP_OK;
+    case FW_ASSET_ERR_SIZE:
+        return ESP_ERR_INVALID_SIZE;
+    case FW_ASSET_ERR_SHA256:
+        return ESP_ERR_INVALID_CRC;
+    case FW_ASSET_ERR_CRYPTO:
+        break;
+    }
+    return ESP_FAIL;
+}
+
 esp_err_t fw_http_download_package(const char *url, const fw_manifest_file_t *file, const char *label)
 {
     esp_http_client_config_t cfg;
@@ -203,19 +285,7 @@ esp_err_t fw_http_download_package(const char *url, const fw_manifest_file_t *fi
     if (c == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    int status = 0;
-    int64_t length = -1;
-    esp_err_t err = ESP_OK;
-    if (open_follow(c, NULL, &status, &length) != FW_HTTP_OK) {
-        err = ESP_ERR_TIMEOUT;
-    } else if (status != 200) {
-        ESP_LOGE(TAG, "receiver package: HTTP %d", status);
-        err = ESP_ERR_INVALID_RESPONSE;
-    } else if (length >= 0 && length != (int64_t)file->size) {
-        ESP_LOGE(TAG, "receiver package is %lld bytes, the manifest says %u", (long long)length,
-                 (unsigned)file->size);
-        err = ESP_ERR_INVALID_SIZE;
-    }
+    esp_err_t err = open_asset(c, file, "receiver package");
     uint8_t *buf = NULL;
     pkg_store_writer_t w = NULL;
     if (err == ESP_OK) {
@@ -294,75 +364,91 @@ esp_err_t fw_http_download_app(const char *url, const fw_manifest_file_t *file, 
         ESP_LOGE(TAG, "app image of %u bytes does not fit %s", (unsigned)file->size, part->label);
         return ESP_ERR_INVALID_SIZE;
     }
-    esp_http_client_config_t http;
-    client_config(&http, url, NULL);
-    esp_https_ota_config_t ota = {
-        .http_config = &http,
-        .bulk_flash_erase = false,   /* erase sector by sector while writing */
-#if CONFIG_SPIRAM
-        .buffer_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
-#endif
-        .partition.staging = part,
-    };
-    esp_https_ota_handle_t h = NULL;
-    esp_err_t err = esp_https_ota_begin(&ota, &h);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "app download did not start: %s", esp_err_to_name(err));
-        return err;
+    esp_http_client_config_t cfg;
+    client_config(&cfg, url, NULL);
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (c == NULL) {
+        return ESP_ERR_NO_MEM;
     }
-
-    /* The image must be the release the manifest names, built by this project. */
-    esp_app_desc_t desc;
-    err = esp_https_ota_get_img_desc(h, &desc);
-    if (err == ESP_OK && (strncmp(desc.version, version, sizeof(desc.version)) != 0 ||
-                          strncmp(desc.project_name, esp_app_get_description()->project_name,
-                                  sizeof(desc.project_name)) != 0)) {
-        ESP_LOGE(TAG, "downloaded image is %s %.32s, the manifest names %s", desc.project_name, desc.version,
-                 version);
-        err = ESP_ERR_INVALID_VERSION;
-    }
-    int announced = esp_https_ota_get_image_size(h);
-    if (err == ESP_OK && announced > 0 && (uint32_t)announced != file->size) {
-        ESP_LOGE(TAG, "app image is %d bytes, the manifest says %u", announced, (unsigned)file->size);
-        err = ESP_ERR_INVALID_SIZE;
-    }
-    while (err == ESP_OK) {
-        err = esp_https_ota_perform(h);
-        int done = esp_https_ota_get_image_len_read(h);
-        if (done > 0 && (uint32_t)done > file->size) {
-            err = ESP_ERR_INVALID_SIZE;
-            break;
-        }
-        if (done > 0) {
-            fw_set_progress((uint8_t)((uint64_t)done * 100u / file->size));
-        }
-        if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
-            break;
-        }
-        err = ESP_OK;
-    }
-    if (err == ESP_OK && (!esp_https_ota_is_complete_data_received(h) ||
-                          (uint32_t)esp_https_ota_get_image_len_read(h) != file->size)) {
-        err = ESP_ERR_INVALID_SIZE;
+    fw_asset_check_t check;
+    memset(&check, 0, sizeof(check));
+    esp_ota_handle_t ota = 0;
+    uint8_t *buf = NULL;
+    esp_err_t err = open_asset(c, file, "app image");
+    if (err == ESP_OK) {
+        buf = buf_alloc(CHUNK);
+        err = buf == NULL ? ESP_ERR_NO_MEM : asset_err(fw_asset_check_begin(&check, file));
     }
     if (err == ESP_OK) {
-        /* Check what is in flash, before anything is activated. */
+        /* Erases sector by sector ahead of the writes. */
+        err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &ota);
+    }
+    while (err == ESP_OK) {
+        int n = esp_http_client_read(c, (char *)buf, CHUNK);
+        if (n < 0) {
+            err = ESP_ERR_TIMEOUT;
+        } else if (n == 0) {
+            break;
+        } else {
+            err = asset_err(fw_asset_check_update(&check, buf, (size_t)n));   /* refuses a byte too many */
+            if (err == ESP_OK) {
+                err = esp_ota_write(ota, buf, (size_t)n);
+            }
+            if (err == ESP_OK) {
+                fw_set_progress((uint8_t)((uint64_t)check.received * 100u / file->size));
+            }
+        }
+    }
+    if (err == ESP_OK && !esp_http_client_is_complete_data_received(c)) {
+        err = ESP_ERR_INVALID_SIZE;
+    }
+    esp_http_client_close(c);
+    esp_http_client_cleanup(c);
+    free(buf);
+    if (err == ESP_OK) {
+        /* What arrived: exactly the manifest's size and SHA-256. */
+        err = asset_err(fw_asset_check_finish(&check));
+        if (err == ESP_ERR_INVALID_CRC) {
+            ESP_LOGE(TAG, "app image SHA-256 does not match the manifest");
+        }
+    }
+    fw_asset_check_abort(&check);
+    if (err == ESP_OK) {
+        /* Validation (image structure, chip, the image's own digest); frees the handle. */
+        err = esp_ota_end(ota);
+        ota = 0;
+    }
+    if (err == ESP_OK) {
+        /* What is in flash, before anything is activated. */
         uint8_t digest[32];
         err = hash_partition(part, file->size, digest);
         if (err == ESP_OK && memcmp(digest, file->sha256, sizeof(digest)) != 0) {
-            ESP_LOGE(TAG, "app image SHA-256 does not match the manifest");
+            ESP_LOGE(TAG, "app image in flash does not match the manifest's SHA-256");
             err = ESP_ERR_INVALID_CRC;
         }
     }
-    if (err != ESP_OK) {
-        (void)esp_https_ota_abort(h);
-        ESP_LOGE(TAG, "app download failed: %s", esp_err_to_name(err));
+    if (err == ESP_OK) {
+        /* The image must be the release the manifest names, built by this project. */
+        esp_app_desc_t desc;
+        err = esp_ota_get_partition_description(part, &desc);
+        if (err == ESP_OK && (strncmp(desc.version, version, sizeof(desc.version)) != 0 ||
+                              strncmp(desc.project_name, esp_app_get_description()->project_name,
+                                      sizeof(desc.project_name)) != 0)) {
+            ESP_LOGE(TAG, "downloaded image is %.32s %.32s, the manifest names %s", desc.project_name, desc.version,
+                     version);
+            err = ESP_ERR_INVALID_VERSION;
+        }
+    }
+    if (ota != 0) {
+        (void)esp_ota_abort(ota);
+    }
+    if (err == ESP_OK) {
+        err = esp_ota_set_boot_partition(part);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "app image not activated: %s", esp_err_to_name(err));
+        }
         return err;
     }
-    /* esp_ota_end (image validation) and esp_ota_set_boot_partition. */
-    err = esp_https_ota_finish(h);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "app image not activated: %s", esp_err_to_name(err));
-    }
+    ESP_LOGE(TAG, "app download failed: %s", esp_err_to_name(err));
     return err;
 }

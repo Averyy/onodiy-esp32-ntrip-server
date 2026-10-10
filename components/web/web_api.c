@@ -1156,7 +1156,7 @@ static esp_err_t h_system_put(web_req_t *r)
 
 static bool checks_enabled(void)
 {
-    return CONFIG_FW_UPDATE_MANIFEST_KEY_1[0] != '\0' || CONFIG_FW_UPDATE_MANIFEST_KEY_2[0] != '\0';
+    return fw_update_checks_enabled();
 }
 
 static esp_err_t h_update_get(web_req_t *r)
@@ -1176,6 +1176,8 @@ static esp_err_t h_update_get(web_req_t *r)
         .st = &s_st,
         .last = &last,
         .checks_enabled = checks_enabled(),
+        .release_repo = fw_update_release_repo(),
+        .signed_manifests = fw_update_signature_required(),
         .budget_left_s = web_budget_now(),
         .flash_available = WEB_FLASH_AVAILABLE,
         .rolled_back = (const char (*)[32])rolled_back,

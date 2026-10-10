@@ -7,31 +7,43 @@ menu "Station: firmware updates"
         default "Averyy/onocoydiy-esp-um982"
         help
             Releases of this repository carry the app image, the receiver
-            package and a manifest. Forks point this at their own repository.
-            Overridable at runtime in settings (ota/repo).
+            package and a manifest. The repository must be public: devices
+            send no access token. Without a manifest key (below) this is what
+            a release is trusted for: it is fetched over HTTPS, certificate
+            checked against the CA bundle, from GitHub's release hosts for
+            this repository only, and every file must match the manifest's
+            size and SHA-256. Forks point this at their own repository. Empty
+            or not "owner/name": update checks are off. Only a build with a
+            manifest key also takes a runtime override from settings
+            (ota/repo).
 
     config FW_UPDATE_MANIFEST_ASSET
         string "Release manifest asset name"
         default "manifest.json"
 
     config FW_UPDATE_MANIFEST_KEY_1
-        string "Manifest signing key 1 (public, hex)"
+        string "Manifest signing key 1 (public, hex; optional)"
         default ""
         help
-            Public half of the offline key that signs release manifests:
-            the uncompressed P-256 point (04 || X || Y) as 130 hex digits,
-            e.g. from `openssl ec -pubin -in key.pub -text -noout` with the
-            colons removed. A manifest is used only if key 1 or key 2
-            verifies its signature. With neither set, this build cannot
-            verify any manifest and never offers an update (manual uploads
-            still work). Forks put their own keys here.
+            Optional. Leave empty (the default) and release manifests need no
+            signature: the repository above, HTTPS and the per-file size and
+            SHA-256 are the trust. Set it (e.g. a fork that signs its
+            releases) and only manifests signed with key 1 or key 2 are used;
+            an unsigned manifest is then refused, and so is everything when
+            no configured key parses. The value is the public half of the
+            signing key, the uncompressed P-256 point (04 || X || Y) as 130
+            hex digits, e.g. from `openssl ec -pubin -in key.pub -text
+            -noout` (colons and line breaks are ignored). The release
+            workflow signs when the MANIFEST_SIGNING_KEY secret holds the
+            private key (tools/release_manifest.py).
 
     config FW_UPDATE_MANIFEST_KEY_2
         string "Manifest signing key 2 (public, hex)"
         default ""
         help
             Second accepted key, so the signing key can be rotated: ship
-            the next key here before signing releases with it.
+            the next key here before signing releases with it. Setting
+            either key makes signatures required.
 
     config FW_UPDATE_HTTP_TIMEOUT_MS
         int "HTTP network timeout (ms)"

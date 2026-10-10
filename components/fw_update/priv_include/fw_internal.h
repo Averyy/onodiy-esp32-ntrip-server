@@ -8,6 +8,7 @@
  *   fw_trial.c    trial and rollback bookkeeping at boot and while running
  *   fw_install.c  app install (download and manual upload) and receiver package job
  *   fw_http.c     HTTPS: manifest fetch, package download, app image download
+ *   release_url.c repository name, release URLs, the hosts a transfer may reach (pure)
  *
  * Locking: g_fw.mtx guards every field the status getter reads. It is held
  * only for copies, never across network or flash work.
@@ -56,7 +57,7 @@ typedef struct {
     esp_err_t last_err;
     uint8_t progress_pct;
     bool busy;                    /**< a job or a manual upload runs (one at a time) */
-    bool have_manifest;           /**< `manifest` was verified during this boot */
+    bool have_manifest;           /**< `manifest` was accepted during this boot */
     fw_manifest_t manifest;
     char etag[64];                /**< ETag of `manifest` */
     int64_t last_check_unix;      /**< ota/last_check */
@@ -66,7 +67,10 @@ typedef struct {
     uint32_t last_success_s;
     uint32_t first_check_s;       /**< MAC-jittered */
     fw_manifest_key_t keys[FW_MANIFEST_MAX_KEYS];
-    size_t key_count;
+    size_t key_count;             /**< keys that parsed */
+    bool signature_required;      /**< a manifest key is configured (parsed or not): unsigned manifests are refused */
+    bool checks_enabled;          /**< a valid repository, and a usable key when one is configured */
+    char repo[FW_UPDATE_REPO_MAX];/**< "owner/name" releases are read from (fixed at init) */
 
     /* App trial (fw_trial.c). */
     fw_trial_rec_t rec;           /**< ota/trial */
@@ -100,10 +104,16 @@ void fw_set_state(fw_update_state_t state, esp_err_t err);
 /** Set the download progress (call unlocked). */
 void fw_set_progress(uint8_t pct);
 
-/** "owner/name" of the repository serving releases (ota/repo, else Kconfig). */
+/**
+ * "owner/name" of the repository serving releases, chosen at init:
+ * CONFIG_FW_UPDATE_GITHUB_REPO. A build that requires signed manifests also
+ * honours the ota/repo override, read at boot (its key, not the repository,
+ * is what it trusts); a build without a key trusts the repository it was
+ * built for and nothing else.
+ */
 void fw_repo(char *out, size_t out_size);
 
-/** https://github.com/<repo>/releases/download/<tag>/<asset>; false if it does not fit. */
+/** https://github.com/<repo>/releases/download/<tag>/<asset>; false if a part is invalid or it does not fit. */
 bool fw_asset_url(const char *tag, const char *asset, char *out, size_t out_size);
 
 /** The RTCM hub received a frame within the last few seconds. */
@@ -158,23 +168,32 @@ typedef enum {
     FW_HTTP_NO_RESPONSE,     /**< no final HTTP answer (network, DNS, TLS, timeout) */
     FW_HTTP_BAD_ANSWER,      /**< an answer, but not the expected one (status, size, too large) */
     FW_HTTP_LOCAL_ERROR,     /**< out of memory or a local write failed */
+    FW_HTTP_UNTRUSTED,       /**< the URL or a redirect left GitHub's release hosts (release_url.h): not connected */
 } fw_http_result_t;
 
 /**
- * GET url (following HTTPS redirects) into a new buffer of at most `cap`
- * bytes (PSRAM when available; caller frees *out). With `etag_in` set, sends
- * If-None-Match; `etag_out` gets the answer's ETag.
+ * GET url (following HTTPS redirects between release hosts only) into a new
+ * buffer of at most `cap` bytes (PSRAM when available; caller frees *out).
+ * With `etag_in` set, sends If-None-Match; `etag_out` gets the answer's ETag.
  */
 fw_http_result_t fw_http_fetch(const char *url, const char *etag_in, size_t cap, char **out, size_t *out_len,
                                char *etag_out, size_t etag_size);
 
-/** Download `file` from `url` into pkg_store (size and SHA-256 checked there). */
+/**
+ * Download `file` from `url` into pkg_store (size and SHA-256 checked there).
+ * ESP_ERR_NOT_ALLOWED when a redirect leaves the release hosts.
+ */
 esp_err_t fw_http_download_package(const char *url, const fw_manifest_file_t *file, const char *label);
 
 /**
- * Download the app image from `url` into the inactive slot with
- * esp_https_ota, check the image's version, its size and its SHA-256 (read
- * back from flash) against the manifest, then activate it.
+ * Download the app image from `url` into the inactive slot
+ * (esp_ota_begin/write, sequential erase), check its size and SHA-256 on the
+ * stream, validate it (esp_ota_end), check the SHA-256 again on what is in
+ * flash and that its app description names the manifest's version and this
+ * project, then activate it. ESP_ERR_NOT_ALLOWED when a redirect leaves the
+ * release hosts, ESP_ERR_INVALID_SIZE / ESP_ERR_INVALID_CRC when the bytes
+ * are not the manifest's, ESP_ERR_INVALID_VERSION for another release or
+ * project.
  */
 esp_err_t fw_http_download_app(const char *url, const fw_manifest_file_t *file, const char *version);
 

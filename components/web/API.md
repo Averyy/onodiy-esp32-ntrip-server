@@ -90,7 +90,7 @@ with the endpoint).
 | 422 | `not_this_project` (app upload) |
 | 429 | `rate_limited` (with `retry_in_s`) |
 | 500 | `internal` (`message` carries the `esp_err_t` name) |
-| 501 | `not_available_yet` (receiver flashing is not built yet), `checks_disabled` (this build has no manifest key) |
+| 501 | `not_available_yet` (receiver flashing is not built yet), `checks_disabled` (this build cannot check for updates: no valid release repository, or it requires signed manifests and none of its keys is usable) |
 | 503 | `too_many_clients` (WebSocket) |
 
 ---
@@ -875,6 +875,21 @@ Every update, app and receiver, starts with a user action. The device checks
 the release manifest once a day (and on "check now"); a check never
 downloads an image or a package.
 
+**Trust.** A release is trusted because of where it comes from and what it
+lists. The manifest and every file are fetched over HTTPS, the server
+certificate checked against the CA bundle, from the GitHub releases of the
+repository set at build time (`release_repo`), and only from GitHub's release
+hosts: `github.com`, `release-assets.githubusercontent.com` and
+`objects.githubusercontent.com`. Every hop of a redirect must stay on them,
+or the download stops before it connects (`untrusted_host`). The manifest
+lists each file with its size and SHA-256, and a downloaded app image or
+receiver package is used only if both match. No signing key is needed: a
+build without one accepts the plain manifest (and reads a signed one without
+checking its signature). A build with a manifest key (`signed_manifests`,
+e.g. a fork that signs its releases) accepts only manifests signed with one
+of its keys and refuses unsigned ones (`signature_failed`). Manual uploads
+are not affected by any of this.
+
 **Banner** (`update` in `/api/status`, admin sessions only, on every page):
 shown when `app_available`, `gnss_available` or `app_reverted_in_stage1`.
 "App vX / receiver build Y available - Update / Later". "Later" is kept in
@@ -894,7 +909,8 @@ a newer version appears; the server keeps no "later" state.
 
 ```json
 {
-  "state": "idle", "progress_pct": 0, "checks_enabled": true, "last_check_unix": 1760080000,
+  "state": "idle", "progress_pct": 0, "checks_enabled": true,
+  "release_repo": "Averyy/onocoydiy-esp-um982", "signed_manifests": false, "last_check_unix": 1760080000,
   "last_result": {"job": "gnss_update", "result": "not_available_yet", "message": "ESP_ERR_NOT_SUPPORTED"},
   "app": {"running": "v0.3.0", "dev_build": false, "latest": "v0.4.0", "available": true,
           "latest_rolled_back": false, "rolled_back": ["v0.3.1"], "reverted": "", "reverted_in_stage1": false,
@@ -909,7 +925,9 @@ a newer version appears; the server keeps no "later" state.
 | Field | Notes |
 |---|---|
 | `state` | `fw_update_state_t` |
-| `checks_enabled` | `false` when the build has no manifest key (manual uploads still work) |
+| `checks_enabled` | `false` when the build cannot check: no valid release repository, or it requires signed manifests and none of its keys is usable (manual uploads still work) |
+| `release_repo` | `owner/name` whose GitHub releases the station reads (`CONFIG_FW_UPDATE_GITHUB_REPO`; `null` if unset) |
+| `signed_manifests` | `true` when the build has a manifest key and accepts signed manifests only |
 | `last_result` | outcome of the last job the backend saw end (`job`: `check`, `app_update`, `app_upload`, `gnss_update`, `gnss_upload`, `rollback`), `null` this boot until one ended |
 | `app.trial.stage` | `none`, `confirming`, `verifying`, `watching` |
 | `app.latest_rolled_back` | the latest release is one that was rolled back here: not offered, installable with a warning |
@@ -920,7 +938,10 @@ a newer version appears; the server keeps no "later" state.
 **Result codes** (`last_result.result`, final `progress` messages): `ok`,
 `not_available_yet`, `refused` (the state changed between click and start),
 `download_failed`, `checksum_mismatch`, `size_mismatch`, `invalid_image`,
-`signature_failed`, `package_rejected` (a receiver package failed a
+`signature_failed` (check: a build with a manifest key got a manifest that
+is unsigned or not signed with one of its keys), `untrusted_host` (check,
+`app_update`, `gnss_update`: a redirect led off GitHub's release hosts;
+nothing was fetched from there), `package_rejected` (a receiver package failed a
 pre-flight rule; with `failed_rule`, 1-12 as numbered in `um98x_flash.h`,
 and `cross_layout`), `failed` (anything else; `message` has the
 `esp_err_t`). An app upload that stops for `rolled_back_ack_required`
@@ -936,8 +957,10 @@ per 60 s).
 ### `POST /api/update/app` (adm)
 
 `{"version": "v0.4.0", "rolled_back_ack": false}`: `version` is what the
-banner showed. Downloads into the inactive slot, verifies against the
-manifest, activates, reboots, then runs the two-stage trial.
+banner showed. Downloads into the inactive slot, checks the image's size and
+SHA-256 against the manifest (on the stream and again in flash) and that it
+is that version of this project, activates, reboots, then runs the
+two-stage trial.
 `202 {"accepted": true}`; progress job `app_update`, then a `rebooting`
 event. Errors: `409 manifest_changed` (the offer changed since the banner),
 `409 not_offered` (not newer than the running release), `409
@@ -955,7 +978,7 @@ installing receiver firmware is not available in this firmware version yet.
 
 `{"build": 19152, "cross_layout_ack": false}`. One click runs the chain:
 download the manifest's package for the detected model into the package
-slot (size and SHA-256 from the signed manifest, checked on the stream and
+slot (size and SHA-256 from the release manifest, checked on the stream and
 on the stored copy), then start the session on the station. `202
 {"accepted": true}`; progress job `gnss_update`, then `gnss_flash`.
 

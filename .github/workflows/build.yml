@@ -81,6 +81,7 @@ jobs:
             build/partition_table/partition-table.bin
             build/ota_data_initial.bin
             build/flasher_args.json
+            build/config/sdkconfig.json
             THIRD_PARTY_NOTICES.md
 
   host-tests:
@@ -104,3 +105,135 @@ jobs:
             exit 1
           fi
           ./build/onocoydiy_host_tests.elf
+
+  # A tag vX.Y.Z[-PRE] becomes a GitHub Release with what stations download:
+  # the app image the firmware job built as that release version, the receiver
+  # package(s) from firmware/um982/ and manifest.json listing each with its
+  # size and SHA-256 (tools/release_manifest.py; signed only when the
+  # MANIFEST_SIGNING_KEY secret is set), plus the files for a first flash
+  # over USB and THIRD_PARTY_NOTICES.md. A tag with "-PRE" is a pre-release:
+  # stations read releases/latest only, so it is installed by manual upload.
+  # The release is created as a draft and published once every file is
+  # attached, so a station never sees a manifest without its files. Needs
+  # contents: write and nothing else; it never changes repository settings.
+  release:
+    name: GitHub Release
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: [firmware, host-tests]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: firmware-${{ github.sha }}
+          path: artifact
+
+      - name: Manifest
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          # Optional (P-256 private key, PEM). Only a build with
+          # CONFIG_FW_UPDATE_MANIFEST_KEY_1/_2 requires a signed manifest; the
+          # tool refuses to write an unsigned one for such a build.
+          MANIFEST_SIGNING_KEY: ${{ secrets.MANIFEST_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/manifest-key.pem"
+          trap 'rm -f "$key"' EXIT
+          sign_args=()
+          if [ -n "${MANIFEST_SIGNING_KEY:-}" ]; then
+            (umask 077 && printf '%s\n' "$MANIFEST_SIGNING_KEY" > "$key")
+            sign_args=(--sign-key "$key")
+          fi
+          mkdir -p release
+          python3 tools/release_manifest.py --version "$TAG" \
+            --app artifact/build/onocoydiy-esp-um982.bin \
+            --gnss firmware/um982/*.pkg \
+            --sdkconfig-json artifact/build/config/sdkconfig.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --out release/manifest.json ${sign_args[@]+"${sign_args[@]}"}
+
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          a=artifact/build
+          # First flash over USB: offsets and flash settings from the build.
+          flash=$(jq -r '[.flash_files | to_entries[] | "\(.key) \(.value | split("/") | last)"] | join(" ")' \
+            "$a/flasher_args.json")
+          settings=$(jq -r '.flash_settings | "--flash-mode \(.flash_mode) --flash-size \(.flash_size) --flash-freq \(.flash_freq)"' \
+            "$a/flasher_args.json")
+          {
+            echo "Stations offer this release in their daily update check; nothing installs until you click Update."
+            echo "\`manifest.json\` lists every file with its size and SHA-256."
+            echo
+            echo "First flash of a new board over USB (the files below):"
+            echo
+            echo '```'
+            echo "esptool --chip esp32s3 write-flash $settings $flash"
+            echo '```'
+            echo
+          } > "$RUNNER_TEMP/notes.md"
+          pre=()
+          case "$TAG" in *-*) pre=(--prerelease) ;; esac
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" --generate-notes ${pre[@]+"${pre[@]}"} \
+            "$a/onocoydiy-esp-um982.bin" firmware/um982/*.pkg release/manifest.json \
+            "$a/bootloader/bootloader.bin" "$a/partition_table/partition-table.bin" "$a/ota_data_initial.bin" \
+            artifact/THIRD_PARTY_NOTICES.md
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+
+      - name: Check the download path stations use
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Stations download without a token, so only a public repository can
+          # be checked (and used).
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" = "true" ]; then
+            echo "::warning::private repository: stations cannot download releases until it is public; not checked"
+            exit 0
+          fi
+          # Every hop must be a host the firmware connects to (the list in
+          # components/fw_update/release_url.c), or stations refuse the download.
+          allowed=$(awk '/s_hosts\[.*\] = \{/{f=1} f{print} f&&/^};/{exit}' components/fw_update/release_url.c |
+            grep -oE '"[A-Za-z0-9.-]+"' | tr -d '"')
+          [ -n "$allowed" ] || { echo "::error::no host list found in release_url.c"; exit 1; }
+          check() {
+            local url="$1" hops=0 code next host
+            while :; do
+              host="${url#https://}"
+              host="${host%%[/?#]*}"
+              if [[ "$url" != https://* ]] || ! grep -qixF -- "$host" <<<"$allowed"; then
+                echo "::error::$1 leads to $host, which stations do not trust (components/fw_update/release_url.c)"
+                return 1
+              fi
+              read -r code next < <(curl -sS -o /dev/null --max-time 120 -w '%{http_code} %{redirect_url}\n' "$url" || true)
+              case "${code:-}" in
+                301|302|303|307|308)
+                  hops=$((hops + 1))
+                  [ "$hops" -le 5 ] || { echo "::error::$1: more than 5 redirects"; return 1; }
+                  url="$next" ;;
+                200) echo "$1: ends on $host after $hops redirect(s)"; return 0 ;;
+                *) echo "::error::$1: HTTP ${code:-none} from $host"; return 1 ;;
+              esac
+            done
+          }
+          base="https://github.com/$GITHUB_REPOSITORY/releases"
+          check "$base/download/$TAG/manifest.json"
+          check "$base/download/$TAG/onocoydiy-esp-um982.bin"
+          for pkg in firmware/um982/*.pkg; do
+            check "$base/download/$TAG/$(basename "$pkg")"
+          done
+          case "$TAG" in
+            *-*) ;;
+            *) check "$base/latest/download/manifest.json" ;;
+          esac

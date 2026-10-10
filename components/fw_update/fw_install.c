@@ -59,8 +59,18 @@ static void activated(const char *version, uint8_t baseline, uint8_t slots, life
     (void)lifecycle_request_reboot(LIFECYCLE_REBOOT_APP_UPDATE);
 }
 
+/* The inactive slot may have been written (it held the rollback image):
+ * have the worker look at it again before rollback is offered. */
+static void slot_touched(void)
+{
+    fw_lock();
+    g_fw.rollback_known = false;
+    fw_unlock();
+}
+
 static void failed(esp_err_t err, lifecycle_inhibit_t inhibit)
 {
+    slot_touched();
     (void)diag_journal_append(DIAG_EV_APP_UPDATE, (int32_t)err, 0);
     lifecycle_inhibit_release(inhibit);
     lifecycle_update_release(LIFECYCLE_UPDATE_APP);
@@ -286,6 +296,7 @@ void fw_update_upload_app_abort(fw_update_upload_t u)
     }
     lifecycle_inhibit_t inhibit = s_up.inhibit;
     upload_close();
+    slot_touched();
     lifecycle_inhibit_release(inhibit);
     lifecycle_update_release(LIFECYCLE_UPDATE_APP);
     fw_set_state(FW_UPDATE_IDLE, ESP_OK);

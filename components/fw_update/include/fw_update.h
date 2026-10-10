@@ -14,12 +14,13 @@
  * least 24 h old by the trusted clock, otherwise when it becomes due. Without
  * a trusted clock the first check waits for one, at most 1 h after boot. A
  * check that got no answer (offline, DNS, TLS, timeout) is retried after
- * 1 h; one that got an answer without a usable manifest (HTTP error, bad
- * signature, unknown format) waits for the next daily check. Checks pause
- * while the station is offline. A check fetches and verifies the manifest
+ * 1 h; one that got an answer without a usable manifest (HTTP error, bad or
+ * missing signature where one is required, unknown format, a redirect off
+ * GitHub's release hosts) waits for the next daily check. Checks pause
+ * while the station is offline. A check fetches and checks the manifest
  * and refreshes the banner state; it never downloads an app image or a
  * receiver package, and never writes an OTA slot or pkg_store. Nothing waits
- * in flash for later. The verified manifest is kept in RAM for the boot, so
+ * in flash for later. The accepted manifest is kept in RAM for the boot, so
  * after a reboot the banner is empty until the next check (or "check now").
  *
  * Source of truth is a small manifest attached to every release
@@ -33,9 +34,11 @@
  * as If-None-Match while this boot holds the manifest it belongs to. GitHub's
  * asset redirects point at long signed CDN URLs, so every request uses
  * CONFIG_FW_UPDATE_HTTP_BUF_SIZE for both the receive and the transmit buffer
- * and follows up to CONFIG_FW_UPDATE_MAX_REDIRECTS redirects. Assets are
- * downloaded from https://github.com/<repo>/releases/download/<manifest
- * version>/<asset>.
+ * and follows up to CONFIG_FW_UPDATE_MAX_REDIRECTS redirects, each only to
+ * one of GitHub's release hosts. Assets are downloaded from
+ * https://github.com/<repo>/releases/download/<manifest version>/<asset>.
+ * The repository is CONFIG_FW_UPDATE_GITHUB_REPO (and must be public: no
+ * access token is sent).
  *
  * Banner (web UI, every page, admin session): "App vX / receiver build Y
  * available - Update / Later". It never offers a lower version (downgrades
@@ -55,13 +58,14 @@
  * user), while another update or check runs, and during the running image's
  * own stage 1 or verify window. Claim the slot, take a reboot inhibit, save a
  * baseline of the running station (Wi-Fi had an IP, which caster slots were
- * streaming, hub fed). A release image is downloaded with esp_https_ota into
- * the inactive slot; its app description must name the manifest's version
- * and this project, its size must match, and the SHA-256 of what was written
- * (read back from flash) must equal the manifest's before esp_ota_end
- * validates and activates it. A manual upload is hashed as it streams in and
- * validated by esp_ota_end (no manifest digest; the SHA-256 is returned for
- * the UI). Then the trial record is written, the inhibit released and
+ * streaming, hub fed). A release image is streamed into the inactive slot
+ * (esp_ota_begin/write); its size and SHA-256 must equal the manifest's on
+ * the stream, esp_ota_end validates it, the SHA-256 of what is in flash must
+ * equal the manifest's again and its app description must name the
+ * manifest's version and this project before it is activated. A manual
+ * upload is hashed as it streams in and validated by esp_ota_end (no
+ * manifest digest; the SHA-256 is returned for the UI). Then the trial
+ * record is written, the inhibit released and
  * lifecycle_request_reboot(APP_UPDATE) reboots into the new image.
  *
  * App trial after an update (two stages; it protects user-initiated updates
@@ -96,17 +100,20 @@
  * the update was rolled back during its first minute and offers to install
  * it again; if that one rolls back too, the version goes on the list.
  *
- * Authenticity: TLS + a signed manifest verified before any of its fields
- * is used; every downloaded app image and receiver package must match the
- * manifest's size and SHA-256. The release asset is an envelope
- * {"payload": base64 manifest, "signature": base64 DER ECDSA P-256/SHA-256
- * over the payload bytes}, verified through PSA against the public keys
- * compiled in (CONFIG_FW_UPDATE_MANIFEST_KEY_1/_2, two for rotation; the
- * signing key stays offline). A build without a key verifies nothing and
- * offers nothing. The banner and every digest the device checks come from
- * the manifest, so its signature is what ties a release to this project.
- * App-image signing is optional hardening (it would also stop self-built
- * images from being uploaded).
+ * Authenticity: a release is trusted because of where it comes from. Every
+ * transfer is HTTPS with the server certificate checked against the CA
+ * bundle, and goes only to GitHub's release hosts (the first URL and every
+ * redirect) for the repository set at build time
+ * (CONFIG_FW_UPDATE_GITHUB_REPO). The manifest names every file with its
+ * size and SHA-256, and each downloaded app image and receiver package must
+ * match both before it is used. No signing key is needed: without
+ * CONFIG_FW_UPDATE_MANIFEST_KEY_1/_2 the plain manifest (or a signed
+ * envelope, its signature unchecked) is accepted. A build that configures a
+ * key (e.g. a fork that signs its releases; two for rotation) accepts only a
+ * manifest signed with it, verified through PSA before any field is used,
+ * refuses unsigned ones, and may then also take its repository from
+ * ota/repo. Format and rules: manifest.h. No secure boot or app-image
+ * signing (a self-built image can always be uploaded by hand).
  *
  * Receiver (fw_update_install_gnss, after the user confirmed the dialog:
  * version, expected downtime against today's remaining Onocoy budget, "do
@@ -125,7 +132,9 @@
  * keep working (a fix must be able to arrive); receiver updates are off
  * because the station does not run there (see station.h).
  *
- * All transfers are HTTPS with the CA bundle; plain HTTP is never followed.
+ * All transfers are HTTPS with the CA bundle; plain HTTP is never followed,
+ * and neither is a redirect to a host outside GitHub's release hosts
+ * (ESP_ERR_NOT_ALLOWED as the job's error).
  */
 #pragma once
 
@@ -179,6 +188,9 @@ typedef enum {
 /** Versions kept on the rolled-back list (ota/bad_ver). */
 #define FW_UPDATE_ROLLED_BACK_MAX 8
 
+/** Buffer for "owner/name" (GitHub: owner up to 39, name up to 100 characters). */
+#define FW_UPDATE_REPO_MAX 144
+
 /** Status snapshot for the web UI (also the banner fields of /api/status). */
 typedef struct {
     fw_update_state_t state;
@@ -215,10 +227,24 @@ esp_err_t fw_update_init(void);
 esp_err_t fw_update_start(void);
 
 /**
+ * Update checks can run in this build: CONFIG_FW_UPDATE_GITHUB_REPO and
+ * CONFIG_FW_UPDATE_MANIFEST_ASSET are valid, and when a manifest key is
+ * configured at least one of them parses (a build that requires signatures
+ * never falls back to unsigned manifests). False before fw_update_init.
+ */
+bool fw_update_checks_enabled(void);
+
+/** This build has a manifest key: only signed manifests are accepted. */
+bool fw_update_signature_required(void);
+
+/** "owner/name" releases are read from (fixed at fw_update_init; "" before). */
+const char *fw_update_release_repo(void);
+
+/**
  * Fetch the manifest and refresh the banner state now (async). Never
  * downloads an image or package.
  * @return ESP_OK (also when a check is already running),
- *         ESP_ERR_NOT_SUPPORTED without a manifest key in this build,
+ *         ESP_ERR_NOT_SUPPORTED when fw_update_checks_enabled() is false,
  *         ESP_ERR_INVALID_STATE while an install runs or the new image's
  *         first minute is not over.
  */
