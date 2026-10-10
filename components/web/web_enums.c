@@ -4,6 +4,8 @@
  */
 #include "web_enums.h"
 
+#include "diag.h"
+
 #include <string.h>
 
 #define COUNT(a) (sizeof(a) / sizeof((a)[0]))
@@ -95,9 +97,10 @@ const char *web_health_step_name(health_step_t v)
 
 static const char *const s_health_alert[] = {
     "power_supply", "receiver_power", "bands", "profile_drift", "heap_fragmented",
-    "safe_mode", "settings_degraded", "no_upstream", "link_loss",
+    "safe_mode", "settings_degraded", "no_upstream", "link_loss", "power_lost",
 };
-_Static_assert(HEALTH_ALERT_POWER_SUPPLY == 1u << 0 && HEALTH_ALERT_LINK_LOSS == 1u << 8,
+_Static_assert(HEALTH_ALERT_POWER_SUPPLY == 1u << 0 && HEALTH_ALERT_LINK_LOSS == 1u << 8 &&
+               HEALTH_ALERT_POWER_LOST == 1u << 9,
                "health alert bits moved: update the name table");
 
 const char *web_health_alert_name(uint32_t bit)
@@ -309,7 +312,10 @@ static const char *const s_ladder_why[] = {
     [NETWORK_LADDER_WHY_INTERVAL] = "interval",
     [NETWORK_LADDER_WHY_INHIBITED] = "inhibited",
     [NETWORK_LADDER_WHY_AP_IN_USE] = "ap_in_use",
+    [NETWORK_LADDER_WHY_NO_REBOOT_TRIGGER] = "no_reboot_trigger",
+    [NETWORK_LADDER_WHY_AP_OVERRIDDEN] = "ap_overridden",
 };
+_Static_assert(COUNT(s_ladder_why) == (size_t)NETWORK_LADDER_WHY_AP_OVERRIDDEN + 1u, "ladder reasons added: update the table");
 
 const char *web_ladder_why_name(uint8_t v)
 {
@@ -426,10 +432,25 @@ const char *web_band_name(gnss_band_t v)
     return pick(s_band, COUNT(s_band), (int)v);
 }
 
+/* By the stored kind value: the values are not contiguous (gaps stay NULL = "unknown"). */
 static const char *const s_diag_event[] = {
-    NULL, "boot", "reboot", "ladder_step", "app_update", "app_revert",
-    "gnss_flash", "safe_mode", "wifi_disconnect", "data_loss", "session",
+    [DIAG_EV_BOOT] = "boot",
+    [DIAG_EV_REBOOT] = "reboot",
+    [DIAG_EV_LADDER_STEP] = "ladder_step",
+    [DIAG_EV_APP_UPDATE] = "app_update",
+    [DIAG_EV_APP_REVERT] = "app_revert",
+    [DIAG_EV_GNSS_FLASH] = "gnss_flash",
+    [DIAG_EV_SAFE_MODE] = "safe_mode",
+    [DIAG_EV_WIFI_DISCONNECT] = "wifi_disconnect",
+    [DIAG_EV_DATA_LOSS] = "data_loss",
+    [DIAG_EV_SESSION] = "session",
+    [DIAG_EV_CASTER_DOWN] = "caster_down",
+    [DIAG_EV_CASTER_UP] = "caster_up",
+    [DIAG_EV_WIFI_UP] = "wifi_up",
+    [DIAG_EV_RX_MAINT] = "rx_maintenance",
+    [DIAG_EV_LIVE_VIEW] = "live_view",
 };
+_Static_assert(COUNT(s_diag_event) == (size_t)DIAG_EV_LIVE_VIEW + 1u, "journal kinds added: update the table");
 
 const char *web_diag_event_name(uint16_t kind)
 {

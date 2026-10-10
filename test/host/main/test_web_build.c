@@ -8,6 +8,7 @@
 #include "cJSON.h"
 #include "unity.h"
 #include "web_build.h"
+#include "web_enums.h"
 
 static char s_out[16384];
 static web_status_snap_t s_snap;
@@ -548,6 +549,48 @@ TEST_CASE("journal entries use the event names", "[web_build]")
     TEST_ASSERT_TRUE(cJSON_IsNull(at(cJSON_GetArrayItem(list, 1), "time_unix")));
     TEST_ASSERT_EQUAL(-1, at(cJSON_GetArrayItem(list, 1), "a")->valueint);
     cJSON_Delete(root);
+}
+
+TEST_CASE("journal names cover the connection-history and receiver kinds; the gap is unknown", "[web_build]")
+{
+    diag_journal_entry_t e[6] = {
+        { .seq = 1, .kind = DIAG_EV_CASTER_DOWN, .a = diag_caster_a(0, 5, 2), .b = 30 },
+        { .seq = 2, .kind = DIAG_EV_CASTER_UP, .a = diag_caster_a(1, 0, 3), .b = 12 },
+        { .seq = 3, .kind = DIAG_EV_WIFI_UP, .a = 4, .b = 90 },
+        { .seq = 4, .kind = DIAG_EV_RX_MAINT, .a = 1, .b = 1800 },
+        { .seq = 5, .kind = DIAG_EV_LIVE_VIEW, .a = DIAG_LIVE_OPENED, .b = 600 },
+        { .seq = 6, .kind = 15, .a = 0, .b = 0 },   /* between the two groups: never written */
+    };
+    static const char *const want[] = { "caster_down", "caster_up", "wifi_up", "rx_maintenance", "live_view", "unknown" };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_journal(&w, e, 6, 6, false);
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    const cJSON *list = at(root, "entries");
+    TEST_ASSERT_EQUAL(6, cJSON_GetArraySize(list));
+    for (int i = 0; i < 6; i++) {
+        TEST_ASSERT_EQUAL_STRING(want[i], at(cJSON_GetArrayItem(list, i), "kind")->valuestring);
+    }
+    TEST_ASSERT_EQUAL(0 | (5 << 8) | (2 << 16), at(cJSON_GetArrayItem(list, 0), "a")->valueint);
+    cJSON_Delete(root);
+
+    /* Stored in the journal: the numbers keep their meaning. */
+    TEST_ASSERT_EQUAL(10, DIAG_EV_SESSION);
+    TEST_ASSERT_EQUAL(11, DIAG_EV_CASTER_DOWN);
+    TEST_ASSERT_EQUAL(12, DIAG_EV_CASTER_UP);
+    TEST_ASSERT_EQUAL(13, DIAG_EV_WIFI_UP);
+    TEST_ASSERT_EQUAL(20, DIAG_EV_RX_MAINT);
+    TEST_ASSERT_EQUAL(21, DIAG_EV_LIVE_VIEW);
+}
+
+TEST_CASE("the power-lost alert and the new network ladder reasons have API names", "[web_build]")
+{
+    TEST_ASSERT_EQUAL_STRING("power_lost", web_health_alert_name(HEALTH_ALERT_POWER_LOST));
+    TEST_ASSERT_EQUAL_STRING("link_loss", web_health_alert_name(HEALTH_ALERT_LINK_LOSS));
+    TEST_ASSERT_EQUAL_STRING("no_reboot_trigger", web_ladder_why_name(NETWORK_LADDER_WHY_NO_REBOOT_TRIGGER));
+    TEST_ASSERT_EQUAL_STRING("ap_overridden", web_ladder_why_name(NETWORK_LADDER_WHY_AP_OVERRIDDEN));
+    TEST_ASSERT_EQUAL_STRING("unknown", web_ladder_why_name(NETWORK_LADDER_WHY_AP_OVERRIDDEN + 1));
 }
 
 TEST_CASE("signals: epoch gaps only against a configured period; frames per message", "[web_build]")

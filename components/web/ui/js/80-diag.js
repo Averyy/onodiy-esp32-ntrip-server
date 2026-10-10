@@ -378,6 +378,10 @@ function journalDetail(e) {
       return 'Reason: ' + (J.rebootReason[a] || a);
     case 'ladder_step': {
       const outcome = (b >> 8) & 0xff, code = b & 0xff, why = (b >> 16) & 0xff;
+      if (a === 1 && code === 0) {
+        const trig = J.netTrigger.filter((t, i) => why & (1 << i));
+        return 'Network recovery: pass started' + (trig.length ? ' (' + trig.join(', ') + ')' : '');
+      }
       let step = 'step ' + code;
       if (a === 0 && J.gnssRung[code]) step = J.gnssRung[code];
       if (a === 1 && J.netRung[code]) step = J.netRung[code];
@@ -396,6 +400,29 @@ function journalDetail(e) {
       return wifiReason(a) + ', signal ' + b + ' dBm';
     case 'data_loss':
       return (a >= 16 ? 'Caster slot ' + (a - 15) : J.loss[a] || 'counter ' + a) + ': +' + fmt.num(b);
+    case 'caster_down': {
+      const cls = (a >> 8) & 0xff, skipped = a >>> 16;
+      return 'Caster slot ' + ((a & 0xff) + 1) + ': session ended after ' + fmt.dur(b) +
+        (cls ? ' (' + lbl(L.fail, J.fail[cls] || cls) + ')' : '') +
+        (skipped ? '; ' + skipped + ' short session' + (skipped === 1 ? '' : 's') + ' not listed' : '');
+    }
+    case 'caster_up': {
+      const tries = a >>> 16;
+      return 'Caster slot ' + ((a & 0xff) + 1) + ': streaming again after ' + fmt.dur(b) +
+        (tries ? ', ' + tries + ' failed attempt' + (tries === 1 ? '' : 's') : '');
+    }
+    case 'wifi_up':
+      return 'IP address back after ' + fmt.dur(b) + ', ' + a + ' connect attempt' + (a === 1 ? '' : 's');
+    case 'rx_maintenance':
+      return a ? 'Started for ' + fmt.dur(b) : 'Ended after ' + fmt.dur(b);
+    case 'live_view': {
+      const ev = a & 0xff, detail = (a >> 8) & 0xff;
+      const what = J.liveEv[ev] || 'event ' + ev;
+      if (ev === 1) return 'Opened for ' + fmt.dur(b);
+      if (ev === 2) return 'Extended, ' + fmt.dur(b) + ' left';
+      if (ev === 3) return 'Closed after ' + fmt.dur(b) + (J.liveEnd[detail] ? ' (' + J.liveEnd[detail] + ')' : '');
+      return what + ': ' + (J.liveCmd[detail] || detail) + ', RTCM held ' + fmt.num(b) + ' ms';
+    }
     default:
       return 'a = ' + a + ', b = ' + b;
   }

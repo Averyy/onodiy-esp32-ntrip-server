@@ -1229,13 +1229,18 @@ At most 64 entries per call, oldest first, `seq > cursor`. `time_unix`
 | `boot` | reset class | planned reboot reason |
 | `session` | previous session uptime s (-1 unknown) | raw reset reason |
 | `reboot` | reason | — |
-| `ladder_step` | ladder (0 GNSS, 1 network, 2 caster) | `(outcome << 8) \| code` (network: `(reason << 16) \| ...`); see `diag.h`, `network.h` |
+| `ladder_step` | ladder (0 GNSS, 1 network, 2 caster) | `(outcome << 8) \| code` (outcome 0 started, 1 healthy again, 2 failed or refused, 3 abandoned, 4 not run because of the recovery mode; network: `(reason << 16) \| ...`, and code 0 = a pass started with the trigger bits as the reason: 1 protected caster down, 2 associated without an IP, 4 a slot not reaching its caster); see `diag.h`, `network.h` |
 | `app_update` | result (`esp_err_t`) | — |
 | `app_revert` | trial stage | — |
 | `gnss_flash` | result (`esp_err_t`) | attempt |
 | `safe_mode` | episode | — |
 | `wifi_disconnect` | `wifi_err_reason_t` | RSSI |
 | `data_loss` | counter id (`diag_loss_id_t`) | increase since the previous record for that id |
+| `caster_down` | slot (bits 0-7) \| end class (`ntrip_fail_class_t`, 0 = not a caster failure; bits 8-15) \| short sessions not journalled since the previous `caster_down` (bits 16-30) | session length s |
+| `caster_up` | slot (bits 0-7) \| failed attempts since the previous session (bits 16-30) | outage s |
+| `wifi_up` | connect attempts during the outage | outage s |
+| `rx_maintenance` | 1 entry, 0 exit | chosen duration s (entry), time spent s (exit) |
+| `live_view` | event (bits 0-7: 1 opened, 2 extended, 3 closed, 4 satellite-in-view output on, 5 off) \| detail << 8 (closed: end reason; on/off: 0 accepted, 1 rejected, 2 no answer, 3 not sent) | opened: window s; extended: s left; closed: s open; on/off: ms the lease held RTCM back |
 
 Enum numbers are the C values; the UI decodes them with the appendix
 tables.
@@ -1484,7 +1489,8 @@ Things this contract needs that the current headers do not provide yet:
 
 Each enum is listed in C order. Its C value is the position counted from
 its first value: 0 for most, 1 for `diag_event_t`, `diag_loss_id_t` and
-`um98x_journal_state_t`. The journal's `a` and `b` carry these C values.
+`um98x_journal_state_t` (`diag_event_t` has a gap: its row gives the values
+after it). The journal's `a` and `b` carry these C values.
 
 | Enum (C) | API strings |
 |---|---|
@@ -1492,7 +1498,7 @@ its first value: 0 for most, 1 for `diag_event_t`, `diag_loss_id_t` and
 | `station_alert_t` | `unsupported_model`, `config_failed`, `position_mismatch`, `antenna_moved`, `receiver_attention`, `receiver_in_loader` |
 | `health_level_t` | `ok`, `degraded`, `recovering`, `failed` |
 | `health_step_t` | `none`, `resync`, `link_restart`, `rescan`, `reconfigure`, `receiver_reset`, `reboot` |
-| `health_alert_t` | `power_supply`, `receiver_power`, `bands`, `profile_drift`, `heap_fragmented`, `safe_mode`, `settings_degraded`, `no_upstream`, `link_loss` |
+| `health_alert_t` | `power_supply`, `receiver_power`, `bands`, `profile_drift`, `heap_fragmented`, `safe_mode`, `settings_degraded`, `no_upstream`, `link_loss`, `power_lost` |
 | `ntrip_state_t` | `disabled`, `wait_network`, `wait_data`, `connecting`, `streaming`, `backoff`, `auth_failed`, `paused`, `config_error`, `banned` |
 | `ntrip_fail_class_t` | `none`, `dns`, `connect`, `tls`, `timeout`, `remote_close`, `write_stall`, `keepalive`, `auth`, `mount_busy`, `config`, `banned` |
 | `ntrip_trust_t` | `bundle`, `custom_ca`, `insecure` |
@@ -1507,7 +1513,7 @@ its first value: 0 for most, 1 for `diag_event_t`, `diag_loss_id_t` and
 | `fw_update_gnss_block_t` | `none`, `app_trial`, `journal_open`, `unsupported_model`, `safe_mode`, `app_update`, `receiver_not_streaming` |
 | `network_probe_t` | `none`, `ok`, `no_ip`, `dns_failed`, `no_upstream` |
 | `network_ap_reason_t` | `setup`, `fallback`, `linger`, `recovery` |
-| `network_ladder_why_t` | `none`, `upstream_ok`, `no_upstream`, `journal_open`, `interval`, `inhibited`, `ap_in_use` |
+| `network_ladder_why_t` | `none`, `upstream_ok`, `no_upstream`, `journal_open`, `interval`, `inhibited`, `ap_in_use`, `no_reboot_trigger`, `ap_overridden` |
 | `gnss_link_mode_t` | `off`, `stream`, `command`, `raw` |
 | `lifecycle_reset_class_t` | `power_on`, `planned`, `crash`, `brownout`, `other` |
 | `lifecycle_reboot_reason_t` | `none`, `user`, `factory_reset`, `admin_reset`, `app_update`, `app_revert` (a failed trial, also one the bootloader rolled back), `gnss_ladder`, `network_ladder`, `low_heap`, `safe_mode_retry`, `safe_mode_cleared`, `nvs_slot_switch`, `boot_failure`, `app_rollback` (the user's rollback) |
@@ -1515,5 +1521,5 @@ its first value: 0 for most, 1 for `diag_event_t`, `diag_loss_id_t` and
 | `ledger_clock_t` | `none`, `sntp`, `gnss` |
 | `gnss_sys_t` | `gps`, `glonass`, `galileo`, `sbas`, `qzss`, `beidou`, `navic` |
 | `gnss_band_t` | `l1`, `l2`, `l5`, `l6`, `e5ab` |
-| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session` |
+| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up` (1-13); `rx_maintenance` = 20, `live_view` = 21 |
 | `diag_loss_id_t` | `hw_fifo`, `rx_buffer_full`, `line_errors`, `rtcm_crc`, `framer_discarded`, `hub_publish`, `baud_switch`, `rx_events_dropped`; 16 and up: caster slots |
