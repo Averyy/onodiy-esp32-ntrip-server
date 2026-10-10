@@ -66,6 +66,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -145,6 +146,28 @@ bool lifecycle_in_safe_mode(void);
 
 /** Boot accounting snapshot. */
 void lifecycle_get_boot_info(lifecycle_boot_info_t *out);
+
+/** One boot of the persisted history (settings life/boots). */
+typedef struct {
+    lifecycle_reset_class_t reset_class;
+    esp_reset_reason_t reset_reason;            /**< raw IDF reason */
+    lifecycle_reboot_reason_t planned_reason;   /**< what the boot before it planned, NONE if not planned */
+    uint32_t boot_no;                           /**< boots since power-on */
+    uint32_t prev_uptime_s;                     /**< uptime of the session before it (s); UINT32_MAX = unknown */
+    char version[32];                           /**< app version that booted */
+} lifecycle_boot_record_t;
+
+/** Boots kept in the persisted history. */
+#define LIFECYCLE_BOOT_HISTORY_LEN 16
+
+/**
+ * Read the persisted boot history, newest first (for the web UI).
+ * @param count in = capacity of out, out = entries filled (0 when none is stored)
+ * @return ESP_ERR_INVALID_STATE without settings this boot,
+ *         ESP_ERR_INVALID_VERSION for a history written by a newer app (left
+ *         untouched, nothing filled), ESP_ERR_INVALID_ARG for NULL.
+ */
+esp_err_t lifecycle_get_boot_history(lifecycle_boot_record_t *out, size_t *count);
 
 /**
  * Leave safe mode now (user action): reboot with the crash counter and the

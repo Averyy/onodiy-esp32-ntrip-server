@@ -186,9 +186,11 @@ RAM for this boot only (`"persisted": false`).
 | `GET /api/session`, `POST /api/session` | `GET /api/gnss/signals`, `GET /api/sky` |
 | `POST /api/setup/admin` (claim rules above) | `/ws` with the `status` topic in its public form |
 
-Everything else answers `401 unauthorized` without a session. The public
-form never contains a host, mountpoint, username, IP address, SSID, version
-or the antenna position. `web/public_status` defaults to off.
+Everything else answers `401 unauthorized` without a session; the
+right-hand column answers `403 forbidden` without a session while public
+status is off. The public form never contains a host, mountpoint, username,
+IP address, SSID, version or the antenna position. `web/public_status`
+defaults to off.
 
 ---
 
@@ -501,9 +503,12 @@ never reach a caster); ephemeris types (1019, 1020, 1042, 1045, 1046) need
 `202 {"accepted": true, "saved": true, "apply": "queued"}`. `apply` is
 `queued`, `unchanged` (same profile, or only `autocfg` changed),
 `safe_mode` (stored; the station applies it after safe mode, when
-`autocfg` is on) or `unsupported_model` (stored; never applied to this
-receiver). Errors: `400 invalid_field`, `409 journal_open` (any receiver
-update journal open), `409 settings_unavailable`.
+`autocfg` is on), `unsupported_model` (stored; never applied to this
+receiver) or `not_running` (stored; the station did not start this boot).
+A fixed position entered here is stored as the locked position with
+`source: "user"`; switching to `survey_in` forgets the locked position.
+Errors: `400 invalid_field`, `409 journal_open` (any receiver update
+journal open), `409 settings_unavailable`.
 
 ### `POST /api/gnss/apply` (adm)
 
@@ -602,7 +607,8 @@ comes from `station_get_flash_log()` (empty until there is any).
 
 `why` codes: `no_journal`, `not_waiting` (a session runs), `safe_mode`
 (only `clear` there), `settings_unavailable`, `app_trial`, `app_update`,
-`not_available_yet`.
+`not_available_yet`, `unreadable` (a damaged journal: only `clear`; the
+POST answers `409 journal_open`).
 
 ### `POST /api/gnss/flash/retry`, `/restart-receiver`, `/clear` (adm)
 
@@ -1032,7 +1038,7 @@ offering the download.
   "slots": [{"slot": 0, "name": "Onocoy", "protected": true}],
   "protected": {"down_today_s": 4, "budget_left_s": 469, "data_rate_permille": 1000,
                 "graced_uptime_permille": 1000, "streak_ok": true},
-  "today": {"utc_day": 20371, "date": "2026-10-10", "down_s": [4, 0, 0, 0], "planned_s": [0, 0, 0, 0],
+  "today": {"utc_day": 20736, "date": "2026-10-10", "down_s": [4, 0, 0, 0], "planned_s": [0, 0, 0, 0],
             "reconnects": [1, 0, 0, 0], "power_off_s": 0, "rx_overflows": 0},
   "history": []
 }
@@ -1238,21 +1244,33 @@ no receiver update action.
   WGS84/ECEF conversion) and `um98x_flash` (`um98x_flash_inspect_staged`)
   in its `PRIV_REQUIRES`; both are lower layers.
 
+**UI assets** (the files the UI provides). Every regular file directly in
+`components/web/ui/` is embedded: the build (`components/web/ui_pack.py`)
+gzips it and serves it at `/<file name>`; `index.html` is also served at
+`/` and must exist. No subdirectories. Names are `[A-Za-z0-9._-]+`; the type
+comes from the extension: `.html`, `.js`, `.mjs`, `.css`, `.json`,
+`.webmanifest`, `.svg`, `.png`, `.ico`, `.woff2`, `.txt` (others fail the
+build). A file already ending in `.gz` is embedded as it is, under the name
+without `.gz`. Dot files and `*.md` notes are skipped. The CSP of section 2
+applies: no inline scripts or styles, no `data:` images, no other origins.
+The build ships placeholder `index.html`, `app.js` and `app.css`.
+
 ---
 
 ## 19. Open items
 
 Things this contract needs that the current headers do not provide yet:
 
-1. **Boot history** (`/api/health` `boot_history`): `lifecycle.h` has no
-   reader for `life/boots`; it needs one (the codec is private to
-   lifecycle).
+1. **Boot history**: resolved; `lifecycle_get_boot_history()` reads
+   `life/boots`.
 2. **Caster policy reason**: `ntrip_server_set_config()` returns
-   `ESP_ERR_NOT_ALLOWED` for all three policy cases; the API needs to know
-   which (a reason out-parameter or a check function in `ntrip_server.h`).
-3. **Receiver flashing available**: `flash_available` needs a source that
-   is not a constant in the web component (for example a query in
-   `station.h`).
+   `ESP_ERR_NOT_ALLOWED` for all three policy cases; the server names the
+   reason by applying the same rules to the slot configs
+   (`web_caster_policy()`). A reason out-parameter or a check function in
+   `ntrip_server.h` would remove that duplicate.
+3. **Receiver flashing available**: `flash_available` is still the
+   constant `WEB_FLASH_AVAILABLE` in the web component; it should come from
+   the station (for example a query in `station.h`) once flashing is built.
 4. **Rolled-back versions**: `fw_update.h` exposes only the last reverted
    version and whether the latest release was rolled back, not the whole
    list.

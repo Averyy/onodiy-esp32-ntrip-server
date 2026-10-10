@@ -1,41 +1,897 @@
 /*
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
+ *
+ * HTTP server: configuration, the request checks every request passes
+ * before a handler runs, the dispatcher of the REST routes, the embedded UI
+ * assets, the captive portal, component events and the periodic tick.
  */
 #include "web.h"
 
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include "cJSON.h"
+#include "esp_app_desc.h"
+#include "esp_app_format.h"
+#include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "psa/crypto.h"
+#include "esp_netif.h"
+#include "esp_ota_ops.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "fw_update.h"
+#include "lifecycle.h"
+#include "lwip/sockets.h"
+#include "network.h"
+#include "ntrip_server.h"
+#include "sdkconfig.h"
+#include "settings.h"
+#include "station.h"
+#include "web_assets.h"
+#include "web_enums.h"
+#include "web_internal.h"
+#include "web_parse.h"
 
 static const char *TAG = "web";
 
-/* The admin password hash uses PSA key derivation (Mbed TLS 4 in IDF v6.x;
- * the legacy mbedtls_pkcs5_* API is private there). Fail the build early if
- * the crypto configuration ever drops it. */
-#if !defined(PSA_WANT_ALG_PBKDF2_HMAC) || !defined(PSA_WANT_ALG_SHA_256)
-#error "PBKDF2-HMAC-SHA256 must be available through PSA Crypto"
+/* The fixed offsets the upload check reads must match the IDF image types. */
+_Static_assert(sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) == WEB_IMAGE_DESC_OFS,
+               "app description offset moved");
+_Static_assert(offsetof(esp_image_header_t, chip_id) == WEB_IMAGE_CHIP_ID_OFS, "chip id offset moved");
+_Static_assert(offsetof(esp_app_desc_t, version) == WEB_DESC_VERSION_OFS, "app version offset moved");
+_Static_assert(offsetof(esp_app_desc_t, project_name) == WEB_DESC_PROJECT_OFS, "project name offset moved");
+_Static_assert(ESP_APP_DESC_MAGIC_WORD == WEB_DESC_MAGIC, "app description magic moved");
+_Static_assert(ESP_IMAGE_HEADER_MAGIC == WEB_IMAGE_MAGIC, "image magic moved");
+_Static_assert(ESP_ERR_OTA_VALIDATE_FAILED == 0x1503, "OTA validation error code moved (web_build.c)");
+
+/* Server limits (socket budget: 7 here + 3 for the server itself, beside the casters). */
+#define SERVER_MAX_SOCKETS   7
+#define SERVER_MAX_URIS      64
+#define SERVER_STACK         8192
+#define SERVER_PRIO          5
+#define SERVER_HDR_LEN       2048
+#define SERVER_TIMEOUT_S     10
+#define TICK_MS              250
+
+static httpd_handle_t s_server;
+static esp_netif_t *s_sta;
+static esp_netif_t *s_ap;
+static char s_hostname[33];
+static char s_etag[40];
+static bool s_public;
+static esp_timer_handle_t s_tick_timer;
+static atomic_bool s_tick_queued;
+static uint32_t s_ticks;
+static SemaphoreHandle_t s_reboot_sem;
+static atomic_int s_reboot_reason = -1;
+static atomic_bool s_rebooting;
+
+/* Flags set by event handlers, consumed by the tick on the server task. */
+static atomic_uint s_caster_changed;     /* slot bit mask */
+static atomic_bool s_auth_reload;
+static atomic_bool s_end_all_sessions;
+static atomic_bool s_public_reload;
+static atomic_bool s_fw_changed;
+static atomic_bool s_scan_done;
+
+/* Server-task buffers in PSRAM. */
+EXT_RAM_BSS_ATTR static char s_http_buf[2048];
+EXT_RAM_BSS_ATTR static char s_body[WEB_JSON_MAX_CA + 1];
+static char s_csp[384];
+
+/* ---- small accessors ------------------------------------------------------------------- */
+
+httpd_handle_t web_server(void)
+{
+    return s_server;
+}
+
+uint32_t web_now_s(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000000);
+}
+
+bool web_public_status(void)
+{
+    return s_public;
+}
+
+void web_public_status_set_cached(bool on)
+{
+    s_public = on;
+}
+
+const char *web_hostname_active(void)
+{
+    return s_hostname;
+}
+
+char *web_http_buf(size_t *cap)
+{
+    *cap = sizeof(s_http_buf);
+    return s_http_buf;
+}
+
+static void load_public_status(void)
+{
+    uint8_t v = 0;
+    s_public = settings_get_u8(SETTINGS_NS_WEB, SETTINGS_KEY_WEB_PUBLIC, &v) == ESP_OK && v != 0;
+}
+
+static void load_hostname(void)
+{
+    const char *name = NULL;
+    if (s_sta != NULL && esp_netif_get_hostname(s_sta, &name) == ESP_OK && name != NULL && name[0] != '\0') {
+        strlcpy(s_hostname, name, sizeof(s_hostname));
+    } else {
+        strlcpy(s_hostname, CONFIG_LWIP_LOCAL_HOSTNAME, sizeof(s_hostname));
+    }
+}
+
+static void ip_of(esp_netif_t *netif, char *out, size_t out_size, const char *fallback)
+{
+    esp_netif_ip_info_t info;
+    out[0] = '\0';
+    if (netif != NULL && esp_netif_get_ip_info(netif, &info) == ESP_OK && info.ip.addr != 0) {
+        esp_ip4addr_ntoa(&info.ip, out, (int)out_size);
+    } else if (fallback != NULL) {
+        strlcpy(out, fallback, out_size);
+    }
+}
+
+/* ---- responses -------------------------------------------------------------------------- */
+
+void web_set_common_headers(httpd_req_t *req, bool api)
+{
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+    httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
+    httpd_resp_set_hdr(req, "Referrer-Policy", "no-referrer");
+    if (api) {
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    }
+}
+
+esp_err_t web_send_error(httpd_req_t *req, web_err_t err, const char *message, const char *field, uint32_t retry_in_s,
+                         const char *by, const char *reason)
+{
+    char buf[384];
+    wj_t w;
+    wj_init(&w, buf, sizeof(buf), NULL, NULL);
+    web_build_error(&w, err, message, field, retry_in_s, by, reason);
+    if (!wj_ok(&w)) {
+        wj_init(&w, buf, sizeof(buf), NULL, NULL);
+        web_build_error(&w, err, NULL, NULL, UINT32_MAX, NULL, NULL);
+    }
+    httpd_resp_set_status(req, web_status_line(web_err_status(err)));
+    httpd_resp_set_type(req, "application/json");
+    web_set_common_headers(req, true);
+    return httpd_resp_send(req, wj_text(&w), (ssize_t)strlen(wj_text(&w)));
+}
+
+esp_err_t web_send_err(httpd_req_t *req, web_err_t err)
+{
+    return web_send_error(req, err, NULL, NULL, UINT32_MAX, NULL, NULL);
+}
+
+esp_err_t web_send_internal(httpd_req_t *req, esp_err_t err)
+{
+    return web_send_error(req, WEB_ERR_INTERNAL, esp_err_to_name(err), NULL, UINT32_MAX, NULL, NULL);
+}
+
+esp_err_t web_send_json_literal(httpd_req_t *req, int status, const char *json)
+{
+    httpd_resp_set_status(req, web_status_line(status));
+    httpd_resp_set_type(req, "application/json");
+    web_set_common_headers(req, true);
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+}
+
+static void resp_headers(web_resp_t *r)
+{
+    if (!r->headers_sent) {
+        httpd_resp_set_status(r->req, web_status_line(r->status));
+        httpd_resp_set_type(r->req, "application/json");
+        web_set_common_headers(r->req, true);
+        r->headers_sent = true;
+    }
+}
+
+static bool resp_flush(void *ctx, const char *data, size_t len)
+{
+    web_resp_t *r = ctx;
+    resp_headers(r);
+    if (httpd_resp_send_chunk(r->req, data, (ssize_t)len) != ESP_OK) {
+        r->send_failed = true;
+        return false;
+    }
+    return true;
+}
+
+void web_resp_begin(web_resp_t *r, httpd_req_t *req, int status, char *buf, size_t cap)
+{
+    memset(r, 0, sizeof(*r));
+    r->req = req;
+    r->status = status;
+    wj_init(&r->w, buf, cap, resp_flush, r);
+}
+
+esp_err_t web_resp_end(web_resp_t *r)
+{
+    if (r->send_failed) {
+        return ESP_FAIL;
+    }
+    if (!r->headers_sent) {
+        if (!wj_ok(&r->w)) {
+            return web_send_internal(r->req, ESP_ERR_INVALID_SIZE);
+        }
+        resp_headers(r);
+        return httpd_resp_send(r->req, r->w.buf, (ssize_t)r->w.len);
+    }
+    if (!wj_finish(&r->w)) {
+        return ESP_FAIL;   /* half a body went out: close the connection */
+    }
+    return httpd_resp_send_chunk(r->req, NULL, 0);
+}
+
+/* ---- request checks ---------------------------------------------------------------------- */
+
+bool web_req_on_ap(httpd_req_t *req)
+{
+    int fd = httpd_req_to_sockfd(req);
+    struct sockaddr_storage addr;
+    socklen_t len = sizeof(addr);
+    if (fd < 0 || getsockname(fd, (struct sockaddr *)&addr, &len) != 0) {
+        return false;
+    }
+    uint32_t local = 0;
+    if (addr.ss_family == AF_INET) {
+        local = ((struct sockaddr_in *)&addr)->sin_addr.s_addr;
+    }
+#if CONFIG_LWIP_IPV6
+    else if (addr.ss_family == AF_INET6) {
+        const struct sockaddr_in6 *a6 = (const struct sockaddr_in6 *)&addr;
+        const uint8_t *b = a6->sin6_addr.s6_addr;
+        static const uint8_t mapped[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF };
+        if (memcmp(b, mapped, sizeof(mapped)) != 0) {
+            return false;
+        }
+        memcpy(&local, b + 12, 4);
+    }
 #endif
+    esp_netif_ip_info_t info;
+    if (s_ap == NULL || esp_netif_get_ip_info(s_ap, &info) != ESP_OK || info.ip.addr == 0) {
+        return false;
+    }
+    return local == info.ip.addr;
+}
+
+static esp_err_t captive_redirect(httpd_req_t *req)
+{
+    char ap_ip[16];
+    ip_of(s_ap, ap_ip, sizeof(ap_ip), "192.168.4.1");
+    static char location[40];
+    snprintf(location, sizeof(location), "http://%s/", ap_ip);
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", location);
+    web_set_common_headers(req, true);
+    return httpd_resp_send(req, NULL, 0);
+}
+
+typedef enum { PRE_OK = 0, PRE_ANSWERED, PRE_CLOSE } pre_t;
+
+static bool mutating(int method)
+{
+    return method == HTTP_POST || method == HTTP_PUT || method == HTTP_DELETE;
+}
+
+/* Host header value (validated), kept for the Origin check and the CSP. */
+static char s_host[80];
+
+/* Host (DNS rebinding; on the AP: the captive portal) and Origin. */
+static pre_t precheck(httpd_req_t *req, bool *on_ap, bool websocket)
+{
+    *on_ap = web_req_on_ap(req);
+    bool host_ok = false;
+    if (httpd_req_get_hdr_value_str(req, "Host", s_host, sizeof(s_host)) == ESP_OK) {
+        char sta_ip[16];
+        char ap_ip[16];
+        ip_of(s_sta, sta_ip, sizeof(sta_ip), NULL);
+        ip_of(s_ap, ap_ip, sizeof(ap_ip), "192.168.4.1");
+        web_host_names_t names = { .sta_ip = sta_ip, .ap_ip = ap_ip, .hostname = s_hostname };
+        host_ok = web_host_allowed(s_host, &names);
+    } else {
+        s_host[0] = '\0';
+    }
+    if (!host_ok) {
+        if (*on_ap && !websocket) {
+            captive_redirect(req);
+        } else {
+            web_send_err(req, WEB_ERR_BAD_HOST);
+        }
+        return PRE_ANSWERED;
+    }
+    if (mutating(req->method) || websocket) {
+        char origin[96];
+        esp_err_t err = httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin));
+        if (err == ESP_ERR_HTTPD_RESULT_TRUNC || (err == ESP_OK && !web_origin_ok(origin, s_host))) {
+            web_send_error(req, WEB_ERR_FORBIDDEN, "Cross-origin request refused", NULL, UINT32_MAX, NULL, NULL);
+            return PRE_ANSWERED;
+        }
+    }
+    return PRE_OK;
+}
+
+bool web_ws_precheck(httpd_req_t *req)
+{
+    bool on_ap = false;
+    return precheck(req, &on_ap, true) == PRE_OK;
+}
+
+static bool header_is(httpd_req_t *req, const char *field, const char *type, bool content_type)
+{
+    char v[96];
+    if (httpd_req_get_hdr_value_str(req, field, v, sizeof(v)) != ESP_OK) {
+        return false;
+    }
+    return content_type ? web_content_type_is(v, type) : strcmp(v, type) == 0;
+}
+
+/* Answer, and close the connection instead of reading a body we refuse. */
+static esp_err_t refuse_and_close(httpd_req_t *req, web_err_t err)
+{
+    httpd_resp_set_hdr(req, "Connection", "close");
+    web_send_err(req, err);
+    return ESP_FAIL;
+}
+
+static esp_err_t read_body(httpd_req_t *req, size_t len)
+{
+    size_t got = 0;
+    int timeouts = 0;
+    while (got < len) {
+        int n = httpd_req_recv(req, s_body + got, len - got);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 3) {
+            continue;
+        }
+        if (n <= 0) {
+            return ESP_FAIL;
+        }
+        got += (size_t)n;
+    }
+    s_body[got] = '\0';
+    return ESP_OK;
+}
+
+static esp_err_t api_dispatch(httpd_req_t *req)
+{
+    const web_route_t *rt = req->user_ctx;
+    web_req_t r;
+    memset(&r, 0, sizeof(r));
+    r.req = req;
+    r.sess = -1;
+    pre_t pre = precheck(req, &r.on_ap, false);
+    if (pre != PRE_OK) {
+        return pre == PRE_CLOSE ? ESP_FAIL : ESP_OK;
+    }
+    /* CSRF: a JSON or upload content type (a cross-site form cannot send either). */
+    if (rt->body == WEB_BODY_JSON && !header_is(req, "Content-Type", "application/json", true)) {
+        return req->content_len > 0 ? refuse_and_close(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE)
+                                    : web_send_err(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE);
+    }
+    if (rt->body == WEB_BODY_UPLOAD && (!header_is(req, "Content-Type", "application/octet-stream", true) ||
+                                         !header_is(req, "X-Requested-With", "onocoydiy", false))) {
+        return refuse_and_close(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE);
+    }
+    size_t max_body = rt->max_body != 0 ? rt->max_body : WEB_JSON_MAX;
+    if (rt->body == WEB_BODY_JSON && req->content_len > max_body) {
+        return refuse_and_close(req, WEB_ERR_TOO_LARGE);
+    }
+    if (httpd_req_get_url_query_str(req, r.query, sizeof(r.query)) != ESP_OK) {
+        r.query[0] = '\0';
+    }
+
+    r.sess = web_auth_session(req, true);
+    switch (rt->access) {
+    case WEB_ACC_ADMIN:
+        if (r.sess < 0) {
+            return rt->body == WEB_BODY_UPLOAD ? refuse_and_close(req, WEB_ERR_UNAUTHORIZED)
+                                               : web_send_err(req, WEB_ERR_UNAUTHORIZED);
+        }
+        r.admin = true;
+        break;
+    case WEB_ACC_PUBSTAR:
+        r.admin = r.sess >= 0;
+        if (!r.admin && !web_public_status()) {
+            return web_send_error(req, WEB_ERR_FORBIDDEN, "Public status is off: log in", NULL, UINT32_MAX, NULL,
+                                  NULL);
+        }
+        break;
+    default:
+        r.admin = r.sess >= 0;
+        break;
+    }
+
+    if (rt->body == WEB_BODY_JSON) {
+        if (read_body(req, req->content_len) != ESP_OK) {
+            return ESP_FAIL;
+        }
+        web_bad_t bad = { 0 };
+        r.body = web_parse_body(s_body, req->content_len, &bad);
+        if (r.body == NULL) {
+            return web_send_err(req, bad.err);
+        }
+    }
+    esp_err_t ret = rt->fn(&r);
+    cJSON_Delete(r.body);
+    return ret;
+}
+
+/* ---- UI assets, 404/405, captive portal ----------------------------------------------------- */
+
+static const web_asset_t *find_asset(const char *path, size_t len)
+{
+    if (len == 1 && path[0] == '/') {
+        path = "/index.html";
+        len = strlen(path);
+    }
+    if (len < 2 || path[0] != '/') {
+        return NULL;
+    }
+    for (size_t i = 0; i < web_ui_asset_count; i++) {
+        const char *p = web_ui_assets[i].path;
+        if (strlen(p) == len && memcmp(p, path, len) == 0) {
+            return &web_ui_assets[i];
+        }
+    }
+    return NULL;
+}
+
+static bool is_html(const web_asset_t *a)
+{
+    return strncmp(a->mime, "text/html", 9) == 0;
+}
+
+static esp_err_t serve_asset(httpd_req_t *req, const web_asset_t *a)
+{
+    web_set_common_headers(req, false);
+    httpd_resp_set_hdr(req, "ETag", s_etag);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    if (is_html(a)) {
+        /* Only the device's own origin: scripts, styles, images and the WebSocket; no framing.
+         * The Host was validated, so it is safe to name in the policy. */
+        snprintf(s_csp, sizeof(s_csp),
+                 "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; "
+                 "connect-src 'self' ws://%s; object-src 'none'; base-uri 'none'; form-action 'self'; "
+                 "frame-ancestors 'none'",
+                 s_host);
+        httpd_resp_set_hdr(req, "Content-Security-Policy", s_csp);
+    }
+    char inm[48];
+    if (httpd_req_get_hdr_value_str(req, "If-None-Match", inm, sizeof(inm)) == ESP_OK && strcmp(inm, s_etag) == 0) {
+        httpd_resp_set_status(req, "304 Not Modified");
+        return httpd_resp_send(req, NULL, 0);
+    }
+    httpd_resp_set_type(req, a->mime);
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    return httpd_resp_send(req, (const char *)a->data, (ssize_t)a->len);
+}
+
+/* Everything no route matched: the UI assets, 404/405, the captive portal on the AP. */
+static esp_err_t fallback(httpd_req_t *req)
+{
+    bool on_ap = false;
+    pre_t pre = precheck(req, &on_ap, false);
+    if (pre != PRE_OK) {
+        return pre == PRE_CLOSE ? ESP_FAIL : ESP_OK;
+    }
+    const char *uri = req->uri;
+    size_t len = strcspn(uri, "?");
+    bool api = (len >= 5 && strncmp(uri, "/api/", 5) == 0) || (len == 4 && strncmp(uri, "/api", 4) == 0) ||
+               (len == 3 && strncmp(uri, "/ws", 3) == 0);
+    if (req->method == HTTP_OPTIONS) {
+        return web_send_err(req, WEB_ERR_METHOD_NOT_ALLOWED);   /* no CORS, ever */
+    }
+    if (api) {
+        char path[64];
+        bool known = len < sizeof(path);
+        if (known) {
+            memcpy(path, uri, len);
+            path[len] = '\0';
+            known = web_api_path_known(path);
+        }
+        return web_send_err(req, known ? WEB_ERR_METHOD_NOT_ALLOWED : WEB_ERR_NOT_FOUND);
+    }
+    const web_asset_t *a = find_asset(uri, len);
+    if (a != NULL) {
+        if (req->method != HTTP_GET) {
+            return web_send_err(req, WEB_ERR_METHOD_NOT_ALLOWED);
+        }
+        return serve_asset(req, a);
+    }
+    if (on_ap) {
+        return captive_redirect(req);
+    }
+    return web_send_err(req, WEB_ERR_NOT_FOUND);
+}
+
+/* ---- sessions of the server ------------------------------------------------------------------- */
+
+static void on_sess_close(httpd_handle_t hd, int fd)
+{
+    (void)hd;
+    web_ws_on_close(fd);
+    close(fd);
+}
+
+/* ---- periodic tick and events -------------------------------------------------------------------- */
+
+static void tick_work(void *arg)
+{
+    (void)arg;
+    atomic_store(&s_tick_queued, false);
+    s_ticks++;
+    bool second = (s_ticks % (1000 / TICK_MS)) == 0;
+    bool half = (s_ticks % (500 / TICK_MS)) == 0;
+
+    if (atomic_exchange(&s_end_all_sessions, false)) {
+        web_auth_end_sessions(-1);
+    }
+    if (atomic_exchange(&s_auth_reload, false)) {
+        web_auth_reload();
+    }
+    if (atomic_exchange(&s_public_reload, false)) {
+        load_public_status();
+    }
+    bool fw_event = atomic_exchange(&s_fw_changed, false);
+    if (fw_event || half) {
+        web_track_fw_state(fw_event);
+    }
+    if (atomic_exchange(&s_scan_done, false)) {
+        web_note_scan_done();
+    }
+    unsigned changed = atomic_exchange(&s_caster_changed, 0u);
+    for (size_t slot = 0; changed != 0 && slot < WEB_MAX_SLOTS; slot++) {
+        if ((changed & (1u << slot)) == 0) {
+            continue;
+        }
+        ntrip_caster_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (st == NULL) {
+            st = malloc(sizeof(*st));
+        }
+        if (st != NULL && ntrip_server_get_status(slot, st) == ESP_OK) {
+            char ev[96];
+            snprintf(ev, sizeof(ev), "{\"type\":\"event\",\"event\":\"caster_state\",\"slot\":%u,\"state\":\"%s\"}",
+                     (unsigned)slot, web_ntrip_state_name(st->state));
+            web_ws_event(ev);
+        }
+        free(st);
+    }
+    if (second) {
+        web_auth_expire();
+    }
+    web_ws_tick(second, half);
+}
+
+void web_kick(void)
+{
+    if (s_server != NULL && !atomic_exchange(&s_tick_queued, true)) {
+        if (httpd_queue_work(s_server, tick_work, NULL) != ESP_OK) {
+            atomic_store(&s_tick_queued, false);
+        }
+    }
+}
+
+static void on_tick_timer(void *arg)
+{
+    (void)arg;
+    web_kick();
+}
+
+static void event_json(const char *event, const char *key, const char *value)
+{
+    char ev[160];
+    if (key != NULL) {
+        snprintf(ev, sizeof(ev), "{\"type\":\"event\",\"event\":\"%s\",\"%s\":\"%s\"}", event, key, value);
+    } else {
+        snprintf(ev, sizeof(ev), "{\"type\":\"event\",\"event\":\"%s\"}", event);
+    }
+    web_ws_event(ev);
+}
+
+static void on_station(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    if (id == STATION_EVENT_STATE_CHANGED && data != NULL) {
+        event_json("station_state", "state", web_station_state_name(*(const station_state_t *)data));
+    } else if (id == STATION_EVENT_FLASH_PROGRESS && data != NULL) {
+        web_ws_note_flash_progress((const um98x_flash_progress_t *)data);
+    } else if (id == STATION_EVENT_RECEIVER_RESTARTED) {
+        event_json("receiver_restarted", NULL, NULL);
+    }
+    web_kick();
+}
+
+static void on_ntrip(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    if (id == NTRIP_EVENT_STATE_CHANGED && data != NULL) {
+        size_t slot = *(const size_t *)data;
+        if (slot < WEB_MAX_SLOTS) {
+            atomic_fetch_or(&s_caster_changed, 1u << slot);
+            web_kick();
+        }
+    }
+}
+
+static void on_fw(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    if (id == FW_UPDATE_EVENT_STATE_CHANGED && data != NULL) {
+        event_json("update_state", "state", web_fw_state_name(*(const fw_update_state_t *)data));
+        atomic_store(&s_fw_changed, true);
+        web_kick();
+    }
+}
+
+static void on_network(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    (void)data;
+    switch (id) {
+    case NETWORK_EVENT_ONLINE:
+        event_json("network", "what", "online");
+        break;
+    case NETWORK_EVENT_OFFLINE:
+        event_json("network", "what", "offline");
+        break;
+    case NETWORK_EVENT_SETUP_AP_UP:
+        event_json("network", "what", "ap_up");
+        break;
+    case NETWORK_EVENT_SETUP_AP_DOWN:
+        event_json("network", "what", "ap_down");
+        break;
+    case NETWORK_EVENT_TIME_SYNCED:
+        event_json("network", "what", "time_synced");
+        break;
+    case NETWORK_EVENT_SCAN_DONE:
+        event_json("scan_done", NULL, NULL);
+        atomic_store(&s_scan_done, true);
+        break;
+    default:
+        return;
+    }
+    web_kick();
+}
+
+static void on_settings(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    if (id == SETTINGS_EVENT_FACTORY_RESET) {
+        atomic_store(&s_end_all_sessions, true);
+        atomic_store(&s_auth_reload, true);
+        atomic_store(&s_public_reload, true);
+        web_kick();
+        return;
+    }
+    if (id != SETTINGS_EVENT_CHANGED || data == NULL) {
+        return;
+    }
+    const settings_changed_t *c = data;
+    char ns[sizeof(c->ns)];
+    strlcpy(ns, c->ns, sizeof(ns));
+    if (strcmp(ns, SETTINGS_NS_SYS) == 0 && (c->key[0] == '\0' || strcmp(c->key, SETTINGS_KEY_ADMIN_HASH) == 0)) {
+        atomic_store(&s_auth_reload, true);
+    }
+    if (strcmp(ns, SETTINGS_NS_WEB) == 0) {
+        atomic_store(&s_public_reload, true);
+    }
+    /* The namespace is ours (schema), plain ASCII: safe in the JSON string. */
+    event_json("settings_changed", "ns", ns);
+    web_kick();
+}
+
+static void reboot_work(void *arg)
+{
+    (void)arg;
+    web_ws_rebooting(atomic_load(&s_reboot_reason));
+    if (s_reboot_sem != NULL) {
+        xSemaphoreGive(s_reboot_sem);
+    }
+}
+
+static void on_lifecycle(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    if (id == LIFECYCLE_EVENT_PRE_REBOOT) {
+        atomic_store(&s_reboot_reason, data != NULL ? (int)*(const lifecycle_reboot_reason_t *)data : 0);
+        atomic_store(&s_rebooting, true);
+        if (s_server != NULL) {
+            (void)httpd_queue_work(s_server, reboot_work, NULL);
+        }
+    }
+}
+
+/* Before a planned restart: let pending responses go out, tell the WebSocket
+ * clients, close them with 1012. Bounded by the hook budget. */
+static void shutdown_hook(uint32_t deadline_ms, void *ctx)
+{
+    (void)ctx;
+    if (s_server == NULL) {
+        return;
+    }
+    int64_t start = esp_timer_get_time();
+    int64_t budget_us = (int64_t)(deadline_ms > 100 ? deadline_ms - 100 : deadline_ms) * 1000;
+    if (budget_us > 1000000) {
+        budget_us = 1000000;
+    }
+    while (web_worker_pending_responses() > 0 && esp_timer_get_time() - start < budget_us / 2) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    atomic_store(&s_rebooting, true);
+    if (s_reboot_sem != NULL) {
+        (void)xSemaphoreTake(s_reboot_sem, 0);
+        if (httpd_queue_work(s_server, reboot_work, NULL) == ESP_OK) {
+            int64_t left = budget_us - (esp_timer_get_time() - start);
+            if (left > 0) {
+                (void)xSemaphoreTake(s_reboot_sem, pdMS_TO_TICKS((uint32_t)(left / 1000)));
+            }
+        }
+    }
+    /* A moment for the close frames and the last responses to leave. */
+    vTaskDelay(pdMS_TO_TICKS(50));
+}
+
+/* ---- cJSON in PSRAM -------------------------------------------------------------------------------- */
+
+static void *json_malloc(size_t size)
+{
+    void *p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return p != NULL ? p : malloc(size);
+}
+
+/* ---- public API ------------------------------------------------------------------------------------ */
 
 esp_err_t web_init(void)
 {
-    ESP_LOGI(TAG, "stub");
+    /* Request parsing only (responses use the streaming writer); global
+     * hooks, set before any other task parses JSON. */
+    cJSON_Hooks hooks = { .malloc_fn = json_malloc, .free_fn = free };
+    cJSON_InitHooks(&hooks);
+
+    snprintf(s_etag, sizeof(s_etag), "\"%s\"", esp_app_get_description()->version);
+    load_public_status();
+    web_auth_init();
+    if (s_reboot_sem == NULL) {
+        s_reboot_sem = xSemaphoreCreateBinary();
+    }
+    esp_err_t err = web_ws_init();
+    if (err == ESP_OK) {
+        err = web_worker_init();
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+    static const struct {
+        const esp_event_base_t *base;
+        esp_event_handler_t fn;
+    } subs[] = {
+        { &STATION_EVENT, on_station },     { &NTRIP_EVENT, on_ntrip },       { &FW_UPDATE_EVENT, on_fw },
+        { &NETWORK_EVENT, on_network },     { &SETTINGS_EVENT, on_settings }, { &LIFECYCLE_EVENT, on_lifecycle },
+    };
+    for (size_t i = 0; i < sizeof(subs) / sizeof(subs[0]); i++) {
+        err = esp_event_handler_register(*subs[i].base, ESP_EVENT_ANY_ID, subs[i].fn, NULL);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "event subscription failed: %s", esp_err_to_name(err));
+            return err;
+        }
+    }
+    err = lifecycle_register_shutdown_hook(shutdown_hook, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "no shutdown hook (%s): clients are not told about reboots", esp_err_to_name(err));
+    }
+    if (s_tick_timer == NULL) {
+        const esp_timer_create_args_t args = { .callback = on_tick_timer, .name = "web_tick" };
+        err = esp_timer_create(&args, &s_tick_timer);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    ESP_LOGI(TAG, "%u UI asset(s), public status %s", (unsigned)web_ui_asset_count, s_public ? "on" : "off");
     return ESP_OK;
 }
 
 esp_err_t web_start(void)
 {
-    /* TODO: httpd_start, URI table, Host check, WebSocket, captive-portal probes. */
-    return ESP_ERR_NOT_SUPPORTED;
+    if (s_server != NULL) {
+        return ESP_OK;
+    }
+    s_sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    s_ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    load_hostname();
+
+    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+    cfg.task_priority = SERVER_PRIO;
+    cfg.stack_size = SERVER_STACK;
+    cfg.task_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    cfg.max_open_sockets = SERVER_MAX_SOCKETS;
+    cfg.max_uri_handlers = SERVER_MAX_URIS;
+    cfg.max_resp_headers = 12;
+    cfg.max_req_hdr_len = SERVER_HDR_LEN;
+    cfg.lru_purge_enable = true;
+    cfg.recv_wait_timeout = SERVER_TIMEOUT_S;
+    cfg.send_wait_timeout = SERVER_TIMEOUT_S;
+    cfg.uri_match_fn = httpd_uri_match_wildcard;
+    cfg.close_fn = on_sess_close;
+    esp_err_t err = httpd_start(&s_server, &cfg);
+    if (err != ESP_OK) {
+        s_server = NULL;
+        return err;
+    }
+
+    for (size_t i = 0; i < web_api_route_count; i++) {
+        const web_route_t *rt = &web_api_routes[i];
+        httpd_uri_t u = {
+            .uri = rt->uri,
+            .method = rt->method,
+            .handler = api_dispatch,
+            .user_ctx = (void *)rt,
+        };
+        err = httpd_register_uri_handler(s_server, &u);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "route %s: %s", rt->uri, esp_err_to_name(err));
+            break;
+        }
+    }
+    if (err == ESP_OK) {
+        httpd_uri_t ws = {
+            .uri = "/ws",
+            .method = HTTP_GET,
+            .handler = web_ws_handler,
+            .is_websocket = true,
+            .handle_ws_control_frames = false,
+            .ws_pre_handshake_cb = web_ws_pre_handshake,
+            .ws_post_handshake_cb = web_ws_post_handshake,
+        };
+        err = httpd_register_uri_handler(s_server, &ws);
+    }
+    if (err == ESP_OK) {
+        httpd_uri_t any = { .uri = "/*", .method = HTTP_ANY, .handler = fallback };
+        err = httpd_register_uri_handler(s_server, &any);
+    }
+    if (err != ESP_OK) {
+        httpd_stop(s_server);
+        s_server = NULL;
+        return err;
+    }
+    err = esp_timer_start_periodic(s_tick_timer, (uint64_t)TICK_MS * 1000);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "tick timer: %s", esp_err_to_name(err));
+    }
+    ESP_LOGI(TAG, "listening on port 80 (hostname %s)", s_hostname);
+    return ESP_OK;
 }
 
 esp_err_t web_stop(void)
 {
-    return ESP_OK;
-}
-
-esp_err_t web_ws_publish(const char *topic, const char *json)
-{
-    (void)topic;
-    (void)json;
-    return ESP_ERR_NOT_SUPPORTED;
+    if (s_tick_timer != NULL) {
+        (void)esp_timer_stop(s_tick_timer);
+    }
+    if (s_server == NULL) {
+        return ESP_OK;
+    }
+    /* Stopping closes every session; the close callback forgets the WebSocket clients. */
+    esp_err_t err = httpd_stop(s_server);
+    s_server = NULL;
+    return err;
 }

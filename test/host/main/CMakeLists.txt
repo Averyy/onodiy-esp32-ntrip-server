@@ -46,6 +46,11 @@ idf_component_register(
         "test_diag_logring.c"
         "test_diag_journal.c"
         "test_ledger_core.c"
+        "test_web_json.c"
+        "test_web_core.c"
+        "test_web_pw.c"
+        "test_web_build.c"
+        "test_web_parse.c"
         "${_fw}/lifecycle/boot_guard.c"
         "${_fw}/lifecycle/reboot_gate.c"
         "${_fw}/lifecycle/boot_history.c"
@@ -78,6 +83,12 @@ idf_component_register(
         "${_fw}/diag/diag_journal_core.c"
         "${_fw}/diag/diag_task_core.c"
         "${_fw}/ledger/ledger_core.c"
+        "${_fw}/web/web_json.c"
+        "${_fw}/web/web_core.c"
+        "${_fw}/web/web_pw.c"
+        "${_fw}/web/web_enums.c"
+        "${_fw}/web/web_build.c"
+        "${_fw}/web/web_parse.c"
     INCLUDE_DIRS
         "."
     PRIV_INCLUDE_DIRS
@@ -97,6 +108,18 @@ idf_component_register(
         "${_fw}/health/priv_include"
         "${_fw}/diag/priv_include"
         "${_fw}/ledger/priv_include"
+        "${_fw}/web/priv_include"
+        "${_fw}/station/include"
+        "${_fw}/ntrip_server/include"
+        "${_fw}/network/include"
+        "${_fw}/fw_update/include"
+        "${_fw}/health/include"
+        "${_fw}/diag/include"
+        "${_fw}/ledger/include"
+        "${_fw}/lifecycle/include"
+        "${_fw}/gnss_obs/include"
+        "${_fw}/rtcm_hub/include"
+        "${_fw}/um98x_flash/include"
     REQUIRES unity gnss_framing gnss_types settings pkg_store nvs_flash esp_partition esp_event mbedtls
     WHOLE_ARCHIVE)
 

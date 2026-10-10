@@ -4,6 +4,7 @@
  */
 #include "lifecycle.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "boot_guard.h"
@@ -447,6 +448,55 @@ static esp_err_t record_boot(void)
         return ESP_ERR_INVALID_SIZE;
     }
     return settings_set_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_HISTORY, buf, len);
+}
+
+_Static_assert(LIFECYCLE_BOOT_HISTORY_LEN == BOOT_HISTORY_LEN, "boot history length differs from its codec");
+
+esp_err_t lifecycle_get_boot_history(lifecycle_boot_record_t *out, size_t *count)
+{
+    if (out == NULL || count == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    size_t cap = *count;
+    *count = 0;
+    if (!settings_is_available()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* Off the caller's stack: the reader may be a server task with a small stack. */
+    typedef struct {
+        uint8_t buf[BOOT_HISTORY_BLOB_MAX];
+        boot_history_entry_t entries[BOOT_HISTORY_LEN];
+    } scratch_t;
+    scratch_t *s = malloc(sizeof(*s));
+    if (s == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    size_t len = sizeof(s->buf);
+    size_t n = 0;
+    esp_err_t err = settings_get_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_HISTORY, s->buf, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    } else if (err == ESP_ERR_NVS_INVALID_LENGTH ||
+               (err == ESP_OK && !boot_history_decode(s->buf, len, s->entries, BOOT_HISTORY_LEN, &n))) {
+        err = ESP_ERR_INVALID_VERSION;
+        n = 0;
+    }
+    if (err == ESP_OK) {
+        for (size_t i = 0; i < n && i < cap; i++) {
+            const boot_history_entry_t *e = &s->entries[i];
+            lifecycle_boot_record_t *r = &out[i];
+            memset(r, 0, sizeof(*r));
+            r->reset_class = (lifecycle_reset_class_t)e->cls;
+            r->reset_reason = (esp_reset_reason_t)e->raw;
+            r->planned_reason = (lifecycle_reboot_reason_t)e->reboot_reason;
+            r->boot_no = e->boot_no;
+            r->prev_uptime_s = e->prev_uptime_s;
+            strlcpy(r->version, e->version, sizeof(r->version));
+            *count = i + 1;
+        }
+    }
+    free(s);
+    return err;
 }
 
 /* The event journal's timeline of boots (the persisted list is life/boots). */

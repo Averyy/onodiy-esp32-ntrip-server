@@ -95,6 +95,9 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 
 # ---- HTTP server (web UI + WebSocket) --------------------------------------
 CONFIG_HTTPD_WS_SUPPORT=y
+# The handshake is refused with an HTTP error (401, 403, 421, 503) before the
+# upgrade; the client is registered right after it.
+CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT=y
 CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 
 # ---- Networking -------------------------------------------------------------

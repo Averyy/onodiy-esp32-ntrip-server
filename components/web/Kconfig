@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+menu "Station: web server"
+
+    config WEB_PBKDF2_ITERATIONS
+        int "Admin password hash cost (PBKDF2-HMAC-SHA256 iterations)"
+        range 1000 1000000
+        default 10000
+        help
+            Iterations for a newly set admin password. One check should take
+            about 0.3 s on the device; the count is stored with each hash,
+            so changing it needs no migration (existing passwords keep their
+            count until they are changed). PROVISIONAL, to be measured on
+            hardware.
+
+endmenu
