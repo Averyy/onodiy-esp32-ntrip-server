@@ -59,6 +59,10 @@ idf_component_register(
         "test_web_live.c"
         "test_web_parse.c"
         "test_web_assets.c"
+        "fixture_util.c"
+        "test_fixture_rtcm.c"
+        "test_fixture_obs.c"
+        "test_fixture_unicore.c"
         "${_fw}/lifecycle/boot_guard.c"
         "${_fw}/lifecycle/boot_gen.c"
         "${_fw}/lifecycle/reboot_gate.c"
@@ -141,3 +145,7 @@ idf_component_register(
 # The WGS84 conversion and the caster budget estimate use libm (part of libc
 # on macOS, separate on Linux).
 target_link_libraries(${COMPONENT_LIB} PRIVATE m)
+
+# Real-world fixtures and their oracles (test/fixtures, read at run time).
+get_filename_component(_fixtures "${CMAKE_CURRENT_LIST_DIR}/../../fixtures" ABSOLUTE)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE FIXTURE_DIR="${_fixtures}")

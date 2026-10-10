@@ -496,6 +496,50 @@ TEST_CASE("a non-text byte aborts a line and starts the next unit", "[gnss_frami
     TEST_ASSERT_EQUAL_UINT64(16 + 12 + 1, st.bytes_discarded);
 }
 
+TEST_CASE("a line behind noise that ends in a lead byte is still found", "[gnss_framing]")
+{
+    /* '#' or '$' right in front of a line (both seen as the last byte of a
+     * binary message), and a lead byte followed by text that is no line. */
+    start();
+    feed_str("#" L_NMEA "\r\n");
+    feed_str("$" L_ACK "\r\n");              /* "$$...": would pass the '$'-inclusive rule */
+    feed_str("$x!" L_BANNER "\r\n");
+    feed_str("#garbage" L_VERSION "\n");
+    feed_str("$" "$" "#" L_MODE "\r");
+    feed(k_v1005, sizeof(k_v1005));
+    TEST_ASSERT_EQUAL_size_t(6, s_count);
+    expect_line(0, L_NMEA);
+    expect_line(1, L_ACK);
+    expect_line(2, L_BANNER);
+    expect_line(3, L_VERSION);
+    expect_line(4, L_MODE);
+    expect_rtcm(5, k_v1005, sizeof(k_v1005), 1005);
+    gnss_framing_stats_t st = stats();
+    TEST_ASSERT_EQUAL_UINT64(1 + 1 + 3 + 8 + 3, st.bytes_discarded);
+    TEST_ASSERT_EQUAL_UINT64(5, st.text_lines);
+    TEST_ASSERT_EQUAL_UINT64(2, st.text_rejected);   /* "$x!$dev...", "#garbage#VER..." */
+    TEST_ASSERT_EQUAL_UINT64(5, st.text_aborts);     /* "#$", "$$", then "$$", "$#", "##" */
+
+    /* The same, byte by byte. */
+    start();
+    static const char k_all[] = "#" L_NMEA "\r\n" "$" L_ACK "\r\n" "$x!" L_BANNER "\r\n";
+    for (size_t i = 0; i < sizeof(k_all) - 1; i++) {
+        feed(k_all + i, 1);
+    }
+    TEST_ASSERT_EQUAL_size_t(3, s_count);
+    expect_line(0, L_NMEA);
+    expect_line(1, L_ACK);
+    expect_line(2, L_BANNER);
+
+    /* A failing line with no lead byte inside is dropped whole, as before. */
+    start();
+    feed_str("$GPGGA,garbage*00\r\n" L_ACK "\r\n");
+    TEST_ASSERT_EQUAL_size_t(1, s_count);
+    expect_line(0, L_ACK);
+    st = stats();
+    TEST_ASSERT_EQUAL_UINT64(strlen("$GPGGA,garbage*00\r\n"), st.bytes_discarded);
+}
+
 TEST_CASE("NUL noise between and inside units", "[gnss_framing]")
 {
     static const uint8_t zeros[64] = { 0 };

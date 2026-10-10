@@ -231,6 +231,21 @@ TEST_CASE("obs parse: talkers and satellite numbering", "[gnss_obs]")
     TEST_ASSERT_TRUE(parse("$GIGSV,1,1,01,05,40,100,36", &g));
     TEST_ASSERT_EQUAL(GNSS_SYS_NAVIC, g.sat[0].sys);
 
+    /* The receiver's BeiDou signal IDs above 9 are one hex digit (B2I = B,
+     * B2Q = C), and its QZSS talker is GQ with numbers 1..10. */
+    TEST_ASSERT_TRUE(parse("$GBGSV,2,1,05,21,45,120,41,08,12,300,33,36,61,055,47,42,22,190,38,B", &g));
+    TEST_ASSERT_EQUAL_UINT8(0x0B, g.signal_id);
+    TEST_ASSERT_EQUAL_UINT8(4, g.count);
+    TEST_ASSERT_EQUAL_UINT8(42, g.sat[3].sat);
+    TEST_ASSERT_TRUE(parse("$GBGSV,2,2,05,59,05,150,,C", &g));
+    TEST_ASSERT_EQUAL_UINT8(0x0C, g.signal_id);
+    TEST_ASSERT_EQUAL_UINT8(1, g.count);
+    TEST_ASSERT_EQUAL_UINT8(0, g.sat[0].cnr_dbhz);
+    TEST_ASSERT_TRUE(parse("$GQGSV,1,1,01,03,55,140,44,8", &g));
+    TEST_ASSERT_EQUAL(GNSS_SYS_QZSS, g.sat[0].sys);
+    TEST_ASSERT_EQUAL_UINT8(3, g.sat[0].sat);
+    TEST_ASSERT_EQUAL_UINT8(8, g.signal_id);
+
     /* GP/GN by number range: SBAS, GLONASS, QZSS, Galileo, BeiDou. */
     TEST_ASSERT_TRUE(parse("$GNGSV,2,1,08,46,30,200,40,133,31,201,41,70,10,010,35,194,50,190,44", &g));
     TEST_ASSERT_EQUAL_UINT8(4, g.count);

@@ -275,6 +275,18 @@ TEST_CASE("reply: the elevation mask reads back in tenths of a degree", "[um98x_
     memset(&rb, 0, sizeof(rb));
     fold_item(&rb, "CONFIG,MASK,CONFIG MASK BDS");
     TEST_ASSERT_FALSE(rb.rx.mask_known);
+
+    /* The receiver's own dump form for MASK has no CONFIG word, six decimals,
+     * and per-satellite lines ("<system>MaskPrn:<n>,") that are no elevation. */
+    memset(&rb, 0, sizeof(rb));
+    fold_item(&rb, "CONFIG,MASK,MASK 10.000000");
+    TEST_ASSERT_TRUE(rb.rx.mask_known);
+    TEST_ASSERT_EQUAL_INT16(100, rb.rx.mask_ddeg);
+    fold_item(&rb, "CONFIG,MASK,GPSMaskPrn:12,");
+    fold_item(&rb, "CONFIG,MASK,QZSSMaskPrn:194,");
+    fold_item(&rb, "CONFIG,MASK,MASK GPS");
+    TEST_ASSERT_EQUAL_INT16(100, rb.rx.mask_ddeg);
+    TEST_ASSERT_EQUAL_UINT16(4, rb.items);
 }
 
 TEST_CASE("reply: the base antenna descriptor reads back, or unknown", "[um98x_reply]")

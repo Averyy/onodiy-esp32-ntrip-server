@@ -1,0 +1,16 @@
+The rtcm/centipede_*.rtcm3 excerpts are cut from public correction streams
+of the Centipede-RTK network (centipede-rtk.org; caster crtk.net), captured
+on 2026-10-10.
+
+Attribution: Centipede-RTK (centipede-rtk.org), data under the Open Data
+Commons Database Contents License (ODC DbCL) 1.0:
+https://opendatacommons.org/licenses/dbcl/1-0/
+
+Centipede-RTK's terms ask for this attribution and rule out redistributing
+its data as a competing correction service. These files are short excerpts
+(30 to 35 seconds of three stations) kept only as test inputs; they are not
+a correction stream and must not be served as one.
+
+Changes: whole frames were left out, none was edited (every kept frame keeps
+its original CRC). Left out are every 1005 and 1006 (the contributors'
+antenna positions) and every 1033 (their receiver serial numbers).

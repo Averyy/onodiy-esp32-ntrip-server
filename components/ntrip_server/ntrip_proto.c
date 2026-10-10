@@ -427,8 +427,16 @@ static bool is_msm(uint16_t type)
     return constellation && kind >= 1u && kind <= 7u;
 }
 
-void ntrip_count_frames(const uint8_t *buf, size_t len, uint32_t *frames, uint32_t *epochs_ended)
+void ntrip_epoch_track_init(ntrip_epoch_track_t *t)
 {
+    memset(t, 0, sizeof(*t));
+}
+
+void ntrip_count_frames(const uint8_t *buf, size_t len, ntrip_epoch_track_t *track, uint32_t *frames,
+                        uint32_t *epochs_ended)
+{
+    /* GPS, Galileo, QZSS and NavIC epoch times are all GPS time of week. */
+    static const uint8_t k_gps_scale = (1u << 0) | (1u << 2) | (1u << 4) | (1u << 6);
     uint32_t nf = 0;
     uint32_t ne = 0;
     size_t off = 0;
@@ -442,9 +450,26 @@ void ntrip_count_frames(const uint8_t *buf, size_t len, uint32_t *frames, uint32
         if (plen >= 7u) {
             const uint8_t *p = buf + off + 3;
             uint16_t type = (uint16_t)(((uint16_t)p[0] << 4) | (p[1] >> 4));
-            /* Multiple-message bit: payload bit 54 (after type, station id, epoch time). */
-            if (is_msm(type) && ((p[6] >> 1) & 1u) == 0u) {
-                ne++;
+            if (is_msm(type)) {
+                /* Epoch time: payload bits 24..53; multiple-message bit: bit 54. */
+                const unsigned slot = (unsigned)(type / 10u - 107u);
+                const uint32_t time = ((uint32_t)p[3] << 22) | ((uint32_t)p[4] << 14) | ((uint32_t)p[5] << 6) |
+                                      ((uint32_t)p[6] >> 2);
+                const uint8_t scale = ((1u << slot) & k_gps_scale) ? k_gps_scale : (uint8_t)(1u << slot);
+                for (unsigned s = 0; s < 7; s++) {
+                    if ((scale & track->open_mask & (1u << s)) && track->time[s] != time) {
+                        ne++;                  /* its closing MSM never came */
+                        track->open_mask = 0;
+                        break;
+                    }
+                }
+                if (((p[6] >> 1) & 1u) == 0u) {
+                    ne++;
+                    track->open_mask = 0;
+                } else {
+                    track->open_mask |= (uint8_t)(1u << slot);
+                    track->time[slot] = time;
+                }
             }
         }
         off += flen;
@@ -712,7 +737,91 @@ static void on_header(ntrip_reply_t *r)
         r->server[vlen] = '\0';
     } else if (name_len == 13 && ntrip_contains_ci(h, 13, "ntrip-version")) {
         r->ntrip_v2_header = ntrip_contains_ci(h + v, vlen, "ntrip/2.0");
+    } else if (name_len == 17 && ntrip_contains_ci(h, 17, "transfer-encoding")) {
+        r->chunked = ntrip_contains_ci(h + v, vlen, "chunked");
     }
+}
+
+/* Chunked body decoder states (the body check reads the data bytes only). */
+enum {
+    CK_SIZE = 0,   /* hex digits of the size line */
+    CK_EXT,        /* chunk extension up to CR */
+    CK_SIZE_LF,
+    CK_DATA,
+    CK_DATA_CR,
+    CK_DATA_LF,
+    CK_RAW,        /* framing not understood: plain body bytes from here */
+};
+
+static int hex_val(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    c = lower(c);
+    return (c >= 'a' && c <= 'f') ? c - 'a' + 10 : -1;
+}
+
+static void body_byte(ntrip_reply_t *r, char c);
+
+/* One body byte through the chunk decoder. @return true at the last chunk. */
+static bool chunk_byte(ntrip_reply_t *r, char c)
+{
+    switch (r->ck_state) {
+    case CK_SIZE: {
+        int d = hex_val(c);
+        if (d >= 0 && r->ck_digits < 7) {
+            r->ck_left = r->ck_left * 16u + (uint32_t)d;
+            r->ck_digits++;
+            return false;
+        }
+        if (r->ck_digits > 0 && (c == ';' || c == '\r')) {
+            r->ck_state = (c == ';') ? CK_EXT : CK_SIZE_LF;
+            return false;
+        }
+        break;
+    }
+    case CK_EXT:
+        if (c == '\r') {
+            r->ck_state = CK_SIZE_LF;
+        }
+        return false;
+    case CK_SIZE_LF:
+        if (c != '\n') {
+            break;
+        }
+        if (r->ck_left == 0) {
+            return true;   /* last chunk: the body is over */
+        }
+        r->ck_state = CK_DATA;
+        return false;
+    case CK_DATA:
+        body_byte(r, c);
+        if (--r->ck_left == 0) {
+            r->ck_state = CK_DATA_CR;
+        }
+        return false;
+    case CK_DATA_CR:
+        if (c != '\r') {
+            break;
+        }
+        r->ck_state = CK_DATA_LF;
+        return false;
+    case CK_DATA_LF:
+        if (c != '\n') {
+            break;
+        }
+        r->ck_state = CK_SIZE;
+        r->ck_left = 0;
+        r->ck_digits = 0;
+        return false;
+    default:
+        body_byte(r, c);
+        return false;
+    }
+    r->ck_state = CK_RAW;   /* not chunk framing after all */
+    body_byte(r, c);
+    return false;
 }
 
 static void body_byte(ntrip_reply_t *r, char c)
@@ -770,12 +879,18 @@ bool ntrip_reply_feed(ntrip_reply_t *r, const uint8_t *data, size_t len, size_t 
                 after_headers(r);
             }
             break;
-        case NTRIP_RP_BODY:
-            body_byte(r, c);
-            if (++r->body_seen >= NTRIP_REPLY_BODY_MAX) {
+        case NTRIP_RP_BODY: {
+            bool last = false;
+            if (r->chunked) {
+                last = chunk_byte(r, c);
+            } else {
+                body_byte(r, c);
+            }
+            if (last || ++r->body_seen >= NTRIP_REPLY_BODY_MAX) {
                 finalize(r);
             }
             break;
+        }
         default:
             break;
         }

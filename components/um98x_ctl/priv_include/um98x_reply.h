@@ -29,7 +29,11 @@
  * receiver echoes the command as it was sent).
  *
  * Status: reply formats PROVISIONAL, to be confirmed on hardware (the
- * base-mode log header and the dump item texts in particular).
+ * base-mode log header and the dump item texts in particular). Public
+ * samples from a sibling receiver (test/fixtures/unicore) follow these
+ * rules: the acknowledgement, error, dump and banner lines and a "#MODE,"
+ * log with its 2-hex XOR including the lead character; the base-mode body
+ * comes back as "MODE BASE TIME 60," (no station ID, trailing comma).
  */
 #pragma once
 

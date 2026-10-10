@@ -37,6 +37,17 @@ static gnss_rtcm3_msm_t msm(gnss_sys_t sys, uint32_t epoch, bool more, uint64_t 
     h.multiple_message = more;
     h.sat_mask = sat_mask;
     h.sig_mask = sig_mask;
+    /* Every satellite carries every signal (as decoded from a frame). */
+    for (unsigned i = 0; i < 64; i++) {
+        h.num_sats = (uint8_t)(h.num_sats + ((sat_mask >> i) & 1u));
+    }
+    for (unsigned i = 0; i < 32; i++) {
+        h.num_sigs = (uint8_t)(h.num_sigs + ((sig_mask >> i) & 1u));
+    }
+    unsigned grid = (unsigned)h.num_sats * h.num_sigs;
+    TEST_ASSERT_LESS_OR_EQUAL_UINT(GNSS_RTCM3_MSM_MAX_CELLS, grid);
+    h.cell_mask = grid >= 64 ? UINT64_MAX : (((uint64_t)1 << grid) - 1u);
+    h.num_cells = (uint8_t)grid;
     return h;
 }
 
@@ -213,6 +224,65 @@ TEST_CASE("obs: epochs close on the multiple-message bit", "[gnss_obs]")
     TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 1u, v.epoch_age_ms);
 }
 
+TEST_CASE("obs: an epoch whose closing MSM never came ends at the next epoch time", "[gnss_obs]")
+{
+    obs_core_view_t v;
+    obs_core_init(&s_core);
+    gnss_rtcm3_msm_t h = msm(GNSS_SYS_GPS, 1000, true, 1, 2);
+    obs_core_feed_msm(&s_core, &h, NULL, 0);
+    h = msm(GNSS_SYS_GLONASS, 7000, true, 1, 2);
+    obs_core_feed_msm(&s_core, &h, NULL, 5);       /* the closing BeiDou MSM is lost */
+    obs_core_view(&s_core, 900, &v);
+    TEST_ASSERT_EQUAL_UINT64(0, v.epochs);
+    TEST_ASSERT_EQUAL_UINT32(OBS_NEVER, v.epoch_age_ms);
+    h = msm(GNSS_SYS_GPS, 2000, true, 1, 2);       /* next epoch: ends the open one */
+    obs_core_feed_msm(&s_core, &h, NULL, 1000);
+    obs_core_view(&s_core, 1000, &v);
+    TEST_ASSERT_EQUAL_UINT64(1, v.epochs);
+    TEST_ASSERT_EQUAL_UINT32(0, v.epoch_age_ms);
+    h = msm(GNSS_SYS_GPS, 2000, true, 2, 2);       /* same epoch, second GPS MSM: no end */
+    obs_core_feed_msm(&s_core, &h, NULL, 1002);
+    h = msm(GNSS_SYS_BEIDOU, 2000 - 14000 + 604800000u, false, 1, 2);
+    obs_core_feed_msm(&s_core, &h, NULL, 1009);
+    obs_core_view(&s_core, 1009, &v);
+    TEST_ASSERT_EQUAL_UINT64(2, v.epochs);
+    h = msm(GNSS_SYS_GALILEO, 3000, true, 1, 2);   /* after a closed epoch nothing is open */
+    obs_core_feed_msm(&s_core, &h, NULL, 2000);
+    h = msm(GNSS_SYS_GPS, 3000, false, 1, 2);
+    obs_core_feed_msm(&s_core, &h, NULL, 2005);
+    obs_core_view(&s_core, 2005, &v);
+    TEST_ASSERT_EQUAL_UINT64(3, v.epochs);
+}
+
+TEST_CASE("obs: a signal or satellite in the masks without a cell is not observed", "[gnss_obs]")
+{
+    /* Two BeiDou satellites, signals 2I (2), 7I (14) and 7D (25); no cell
+     * uses 7I, and the third satellite has no cell at all. */
+    gnss_rtcm3_msm_t h = msm(GNSS_SYS_BEIDOU, 500, false, 0x7u, (1u << 1) | (1u << 13) | (1u << 24));
+    TEST_ASSERT_EQUAL_UINT8(9, h.num_cells);
+    h.cell_mask = (1u << 0) | (1u << 2) | (1u << 3) | (1u << 5);   /* sat 1: 2I 7D, sat 2: 2I 7D */
+    h.num_cells = 4;
+    TEST_ASSERT_EQUAL_HEX32((1u << 1) | (1u << 24), gnss_rtcm3_msm_sigs_with_cells(&h));
+    TEST_ASSERT_EQUAL_HEX64(0x3u, gnss_rtcm3_msm_sats_with_cells(&h));
+    obs_core_init(&s_core);
+    obs_core_feed_msm(&s_core, &h, NULL, 10);
+    obs_core_feed_sats(&s_core, &h, NULL, 10);
+    obs_core_view_t v;
+    obs_core_view(&s_core, 20, &v);
+    TEST_ASSERT_EQUAL_HEX32((1u << 1) | (1u << 24), v.sys[GNSS_SYS_BEIDOU].signal_mask);
+    TEST_ASSERT_EQUAL_UINT8(2, v.sys[GNSS_SYS_BEIDOU].satellites);
+    TEST_ASSERT_EQUAL_HEX8((1u << GNSS_BAND_L1) | (1u << GNSS_BAND_L2), v.sys[GNSS_SYS_BEIDOU].band_mask);
+    obs_live_totals_t tot;
+    obs_live_sat_t live[4];
+    TEST_ASSERT_EQUAL_size_t(2, obs_core_live(&s_core, 20, live, 4, &tot));
+    TEST_ASSERT_EQUAL_UINT16(4, tot.signals);
+
+    /* Masks that do not fit together give nothing. */
+    h.num_sats = 2;
+    TEST_ASSERT_EQUAL_HEX32(0, gnss_rtcm3_msm_sigs_with_cells(&h));
+    TEST_ASSERT_EQUAL_HEX64(0, gnss_rtcm3_msm_sats_with_cells(&h));
+}
+
 TEST_CASE("obs: the published 1074 frame end to end", "[gnss_obs]")
 {
     gnss_rtcm3_msm_t h;
@@ -329,7 +399,8 @@ TEST_CASE("obs: without a closing MSM the next epoch time finishes the CNR", "[g
     obs_core_feed_msm(&s_core, &h, NULL, 2000);
     obs_core_view(&s_core, 2000, &v);
     TEST_ASSERT_EQUAL_UINT8(44, v.sys[GNSS_SYS_GPS].cnr_dbhz[GNSS_BAND_L1]);
-    TEST_ASSERT_EQUAL_UINT64(0, v.epochs);
+    TEST_ASSERT_EQUAL_UINT64(2, v.epochs);   /* epochs 1000 and 2000 ended by the next epoch time */
+    TEST_ASSERT_EQUAL_UINT32(0, v.epoch_age_ms);
 }
 
 /* ---- epoch gaps ------------------------------------------------------------ */

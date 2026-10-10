@@ -28,6 +28,12 @@ page; each component's license file in the ESP-IDF source tree takes precedence
 over the summary above. When a dependency is added (for example LittleFS or
 mDNS from the Component Registry), add it here in the same change.
 
+The test data under `test/fixtures/` (receiver captures and example streams
+from other projects and from the Centipede-RTK network) is not part of any
+build artifact; its sources, licenses and attributions are listed in
+[`test/fixtures/README.md`](test/fixtures/README.md) and
+[`test/fixtures/LICENSES/`](test/fixtures/LICENSES).
+
 ## cJSON
 
 ```

@@ -218,7 +218,7 @@ typedef struct {
     uint32_t budget_left_s;     /**< protected slot: offline budget left today for that data rate (estimate) */
     uint64_t bytes_sent;
     uint64_t frames_sent;
-    uint64_t epochs_sent;
+    uint64_t epochs_sent;       /**< ended by their closing MSM, or by the next epoch time when it never came */
     uint32_t epochs_sent_today;
     uint64_t frames_dropped;    /**< lost while streaming (hub slow-consumer policy) */
     uint64_t bytes_dropped;

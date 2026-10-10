@@ -304,24 +304,35 @@ void obs_core_feed_msm(obs_core_t *c, const gnss_rtcm3_msm_t *h, const obs_cnr_t
     }
     const unsigned s = (unsigned)h->sys;
     const uint8_t bit = (uint8_t)(1u << s);
+    /* What the cells carry: a signal (or satellite) in the mask without a
+     * cell has no observation. */
+    const uint32_t sigs = gnss_rtcm3_msm_sigs_with_cells(h);
+    const uint64_t sats = gnss_rtcm3_msm_sats_with_cells(h);
 
     for (unsigned i = 0; i < 32; i++) {
-        if (h->sig_mask & ((uint32_t)1 << i)) {
+        if (sigs & ((uint32_t)1 << i)) {
             c->sig_seen_ms[s][i] = now_ms;
         }
     }
-    c->sig_ever[s] |= h->sig_mask;
+    c->sig_ever[s] |= sigs;
 
     const bool first = !(c->msm_ever & bit);
+    if (!first && (c->epoch_open & bit) && c->epoch_time[s] != h->epoch_time) {
+        /* The open epoch never got its closing MSM: this one ends it. */
+        c->epochs++;
+        c->epoch_end_ms = now_ms;
+        c->epoch_ever = true;
+        c->epoch_open = 0;
+    }
     if (first || c->epoch_time[s] != h->epoch_time) {
         cnr_finish(c, s, now_ms);
         if (!first) {
             count_gaps(c, s, c->epoch_time[s], h->epoch_time);
         }
         c->epoch_time[s] = h->epoch_time;
-        c->epoch_sats[s] = h->sat_mask;
+        c->epoch_sats[s] = sats;
     } else {
-        c->epoch_sats[s] |= h->sat_mask;
+        c->epoch_sats[s] |= sats;
     }
     if (cnr != NULL) {
         cnr_add(c, s, cnr);
@@ -329,17 +340,19 @@ void obs_core_feed_msm(obs_core_t *c, const gnss_rtcm3_msm_t *h, const obs_cnr_t
     c->msm_seen_ms[s] = now_ms;
     c->msm_ever |= bit;
 
-    if (h->sys == GNSS_SYS_GALILEO &&
-        (gnss_rtcm3_msm_band_mask(GNSS_SYS_GALILEO, h->sig_mask) & (1u << GNSS_BAND_L6))) {
+    if (h->sys == GNSS_SYS_GALILEO && (gnss_rtcm3_msm_band_mask(GNSS_SYS_GALILEO, sigs) & (1u << GNSS_BAND_L6))) {
         c->e6_seen = true;
     }
     if (!h->multiple_message) {
         c->epochs++;
         c->epoch_end_ms = now_ms;
         c->epoch_ever = true;
+        c->epoch_open = 0;
         for (unsigned x = 0; x < GNSS_SYS_COUNT; x++) {
             cnr_finish(c, x, now_ms);
         }
+    } else {
+        c->epoch_open |= bit;
     }
 }
 

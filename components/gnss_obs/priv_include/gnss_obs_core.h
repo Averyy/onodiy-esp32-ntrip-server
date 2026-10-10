@@ -17,6 +17,9 @@
  * after that long, and a single missing epoch does not. Satellites are
  * counted over all MSMs of the constellation's latest epoch (a
  * constellation may be split over several MSMs with the same epoch time).
+ * Signals and satellites count only with at least one present cell: an
+ * encoder may announce a signal in the MSM signal mask and send no cell for
+ * it (a native receiver does so for BeiDou signal 14 in every message).
  *
  * Band self-check: the best constellation is the one with the most bands
  * (ties go to the lower gnss_sys_t value). Galileo E6 that was seen since
@@ -30,8 +33,10 @@
  * finished epoch, for bands present in the window, as long as it is not
  * older than the window.
  *
- * Epochs: an MSM with the multiple-message bit clear closes an epoch; the
- * core counts those and the time since the latest one.
+ * Epochs: an MSM with the multiple-message bit clear closes an epoch; when
+ * that MSM never comes (seen from a native receiver), the next MSM of a
+ * constellation the open epoch already holds, with another epoch time, ends
+ * it. The core counts the ended epochs and the time since the latest end.
  *
  * Epoch gaps, against the configured period (obs_core_set_expected: the
  * shortest period of the constellation's MSM types in the profile; nothing
@@ -163,8 +168,9 @@ typedef struct {
     uint8_t msm_ever;                              /**< constellations with at least one MSM (bit per gnss_sys_t) */
     bool e6_seen;                                  /**< Galileo E6 seen since the last reset */
     bool epoch_ever;
-    uint64_t epochs;                               /**< MSMs that closed an epoch */
-    uint64_t epoch_end_ms;                         /**< when the latest of them arrived */
+    uint8_t epoch_open;                            /**< constellations in the epoch not closed yet (bit per gnss_sys_t) */
+    uint64_t epochs;                               /**< epochs ended (closing MSM, or the next epoch time) */
+    uint64_t epoch_end_ms;                         /**< when the latest of them ended */
 
     /* CNR */
     uint32_t cnr_acc_q4[GNSS_SYS_COUNT][GNSS_BAND_COUNT];   /**< epoch in progress: sum, 1/16 dB-Hz */
@@ -212,7 +218,7 @@ typedef struct {
     uint8_t best_bands;
     bool e6_lost;              /**< Galileo E6 seen since the last reset, but not within the window */
     uint64_t epochs;
-    uint32_t epoch_age_ms;     /**< since the latest epoch-closing MSM, OBS_NEVER = never */
+    uint32_t epoch_age_ms;     /**< since the latest epoch ended, OBS_NEVER = never */
     uint32_t epoch_period_ms;  /**< shortest configured MSM period, 0 = none configured */
     uint64_t epoch_gaps;       /**< station total */
     uint64_t epoch_jumps;

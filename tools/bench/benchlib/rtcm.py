@@ -272,7 +272,9 @@ def describe_type(mtype: int | None) -> str:
 # MSM
 
 # Bits per satellite and per cell, and where C/N0 sits inside the cell block.
-_MSM_SAT_BITS = {1: 10, 2: 10, 3: 18, 4: 18, 5: 36, 6: 18, 7: 36}
+# MSM1-3 carry only the rough range modulo 1 ms (10 bits) per satellite; the
+# whole milliseconds (8 bits) come with MSM4 and up.
+_MSM_SAT_BITS = {1: 10, 2: 10, 3: 10, 4: 18, 5: 36, 6: 18, 7: 36}
 _MSM_CELL_BITS = {1: 15, 2: 27, 3: 42, 4: 48, 5: 63, 6: 65, 7: 80}
 # (bits per cell before the C/N0 field, C/N0 width, scale)
 _MSM_CNR = {4: (42, 6, 1.0), 5: (42, 6, 1.0), 6: (55, 10, 1.0 / 16), 7: (55, 10, 1.0 / 16)}

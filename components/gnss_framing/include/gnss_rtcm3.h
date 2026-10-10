@@ -141,6 +141,21 @@ bool gnss_rtcm3_msm_type(uint16_t msg_type, gnss_sys_t *sys, uint8_t *msm);
  */
 bool gnss_rtcm3_msm_decode(const uint8_t *frame, size_t len, gnss_rtcm3_msm_t *out);
 
+/**
+ * Satellites of a decoded MSM header that have at least one present cell
+ * (bit n-1 = satellite n); 0 for a header whose masks do not fit together.
+ */
+uint64_t gnss_rtcm3_msm_sats_with_cells(const gnss_rtcm3_msm_t *h);
+
+/**
+ * Signals of a decoded MSM header that have at least one present cell
+ * (bit n-1 = signal ID n). An encoder may announce a signal in the signal
+ * mask and send no cell for it (seen from a native receiver: BeiDou signal
+ * 14 on every message); such a signal carries no observation. 0 for a
+ * header whose masks do not fit together.
+ */
+uint32_t gnss_rtcm3_msm_sigs_with_cells(const gnss_rtcm3_msm_t *h);
+
 /** Decode a 1005 or 1006. Fails (out cleared) for other types or a short payload. */
 bool gnss_rtcm3_arp_decode(const uint8_t *frame, size_t len, gnss_rtcm3_arp_t *out);
 

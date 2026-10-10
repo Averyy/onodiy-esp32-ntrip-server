@@ -192,6 +192,40 @@ TEST_CASE("epoch: a lost terminating MSM is recovered by the gap rule", "[rtcm_e
     TEST_ASSERT_EQUAL_UINT64(1, x.e.by_gap);
 }
 
+TEST_CASE("epoch: GPS-time constellations compare times with each other, GLONASS and BeiDou only with themselves",
+          "[rtcm_epoch]")
+{
+    /* A stream whose epochs end with SBAS 1107 (not an MSM here): GLONASS,
+     * Galileo, 1107 closing; the next epoch begins with GPS. */
+    ep_fx_t x;
+    rtcm_epoch_start_t why;
+    ep_init(&x, 1, 0);
+    uint32_t tow = 333497000;
+    uint32_t glo = 85080000;
+    uint32_t e = feed(&x, 0, 1087, glo, true, NULL);
+    TEST_ASSERT_EQUAL_UINT32(e, feed(&x, 5, 1097, tow, true, NULL));
+    TEST_ASSERT_EQUAL_UINT32(e, feed(&x, 5, 1107, tow, false, NULL));   /* not an MSM: bit unseen */
+    uint32_t e2 = feed(&x, 50, 1077, tow + 1000, true, &why);         /* Galileo held tow */
+    TEST_ASSERT_EQUAL(RTCM_EPOCH_START_TIME, why);
+    TEST_ASSERT_EQUAL_UINT32(e + 1, e2);
+    TEST_ASSERT_EQUAL_UINT32(e2, feed(&x, 5, 1087, glo + 1000, true, NULL));
+    TEST_ASSERT_EQUAL_UINT32(e2, feed(&x, 5, 1097, tow + 1000, true, NULL));
+    TEST_ASSERT_EQUAL_UINT32(e2, feed(&x, 5, 1117, tow + 1000, true, NULL));
+    TEST_ASSERT_EQUAL_UINT32(e2, feed(&x, 5, 1137, tow + 1000, true, NULL));
+    /* BeiDou 14 s behind and GLONASS on its own scale join without a split. */
+    TEST_ASSERT_EQUAL_UINT32(e2, feed(&x, 5, 1127, tow + 1000 - 14000, true, NULL));
+    TEST_ASSERT_EQUAL_UINT32(e2, feed(&x, 5, 1127, tow + 1000, true, &why) - 1u);   /* same scale as itself only */
+    TEST_ASSERT_EQUAL(RTCM_EPOCH_START_TIME, why);
+    TEST_ASSERT_EQUAL_UINT64(2, x.e.by_time);
+    TEST_ASSERT_EQUAL_UINT64(0, x.e.by_mmb);
+
+    /* QZSS or NavIC first in an epoch: GPS of another time splits. */
+    ep_init(&x, 1, 0);
+    e = feed(&x, 0, 1117, tow, true, NULL);
+    TEST_ASSERT_EQUAL_UINT32(e + 1, feed(&x, 5, 1077, tow + 1000, true, &why));
+    TEST_ASSERT_EQUAL(RTCM_EPOCH_START_TIME, why);
+}
+
 TEST_CASE("epoch: a constellation split over several MSMs stays in one epoch", "[rtcm_epoch]")
 {
     ep_fx_t x;

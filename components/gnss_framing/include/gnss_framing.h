@@ -47,14 +47,23 @@
  *    XOR). Hex digits are accepted in either case.
  *  - Lines that fail are dropped and counted in text_rejected; payload bytes
  *    that happen to contain '$' or CR/LF therefore never produce a fake reply
- *    line. Emitted lines exclude the terminator and are NUL-terminated
- *    (data[len] == 0) for the callback's convenience.
+ *    line. A line that fails but holds another '$' or '#' after its first
+ *    byte is scanned again from the byte after that first byte, terminator
+ *    included, like a rejected RTCM candidate: noise that ends in a lead
+ *    byte (seen in a real capture: the last byte of a binary message is a
+ *    '#' right in front of a sentence) never costs the line behind it. A
+ *    lead byte right after the lead byte restarts the line there (no line
+ *    starts with two; "$$..." would otherwise pass the '$'-inclusive rule),
+ *    counted in text_aborts. Emitted lines exclude the terminator and are
+ *    NUL-terminated (data[len] == 0) for the callback's convenience.
  *  - Binary logs: after 0xAA 0x44 0xB5 the 24-byte header is collected; its
  *    16-bit message length at offset 6 (little-endian, message body only;
- *    PROVISIONAL, to be confirmed on hardware) gives the bytes to skip
- *    (body + 4-byte CRC), counted in bin_skipped and as discarded bytes. A
- *    length above GNSS_BIN_MAX_MSG is a false sync and is rescanned like a
- *    rejected RTCM candidate.
+ *    so laid out in a real capture of 39 logs from a sibling receiver,
+ *    PROVISIONAL for ours, to be confirmed on hardware) gives the bytes to
+ *    skip (body + 4-byte CRC), counted in bin_skipped and as discarded bytes.
+ *    The CRC is not checked (the bytes are not kept). A length above
+ *    GNSS_BIN_MAX_MSG is a false sync and is rescanned like a rejected RTCM
+ *    candidate.
  *  - Loader prompt detector (armed only while the station looks for the
  *    receiver, under its command lease; during a firmware update session the
  *    framer is not fed and the flasher matches the loader's text itself):
@@ -81,6 +90,9 @@
  * work, no allocation). Ordinary noise produces a false candidate roughly
  * every 16 KB. Units swallowed by a false candidate come out when it fails
  * its CRC, i.e. after at most GNSS_RTCM3_MAX_FRAME bytes of further input.
+ * A rejected line is rescanned only when it holds another lead byte; a line
+ * built to nest failing lines costs at most about GNSS_TEXT_MAX_LINE^2 / 4
+ * steps.
  *
  * Version log parser (gnss_versiona_parse): the one parser for the receiver's
  * version log, shared by the command layer and the firmware flasher. The line
