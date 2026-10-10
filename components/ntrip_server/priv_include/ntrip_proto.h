@@ -361,10 +361,18 @@ typedef struct {
     uint32_t fast_late_cap_ms;   /**< fast TRANSIENT cap after 10 min of failure */
 } ntrip_sm_cfg_t;
 
+/*
+ * have_ip and link_up: open sessions stay while the station holds its
+ * address; new connections need the link as well. With ESP-IDF's default
+ * Wi-Fi handlers the address is cleared (and lwIP aborts every session on
+ * it) at the disconnect itself, so the server reports both together; only a
+ * network layer that held the address through a short drop would ever give
+ * have_ip without link_up.
+ */
 typedef struct {
     bool enabled;                /**< slot enabled and the server running */
     bool have_ip;                /**< the station holds an IP: open sessions stay */
-    bool link_up;                /**< associated with an IP: new connections allowed */
+    bool link_up;                /**< the station holds an IP and its link is up: new connections allowed */
     bool paused;                 /**< receiver work in progress */
     bool fresh_data;             /**< receiver RTCM within NTRIP_FRESH_DATA_MS */
     bool session_open;
@@ -420,6 +428,8 @@ typedef struct {
     uint32_t good_hash;          /**< credentials that last succeeded */
     bool good_valid;
     ntrip_row_t saved_row;       /**< long state as last persisted */
+    uint32_t saved_step;         /**< step of that row as last persisted */
+    uint32_t saved_reached;      /**< polite: caster-reaching failures as last persisted */
     bool saved_hourly;
     bool saved_dirty;            /**< good_hash changed since the last write */
 } ntrip_sm_t;
@@ -433,9 +443,10 @@ typedef struct {
     bool hourly;
     bool good_valid;
     uint32_t good_hash;
+    uint8_t reached;             /**< polite profile: consecutive caster-reaching failures (at most the hourly limit) */
 } ntrip_backoff_rec_t;
 
-#define NTRIP_BACKOFF_REC_VERSION 1u
+#define NTRIP_BACKOFF_REC_VERSION 2u   /**< version 1 (no `reached`) is still read */
 #define NTRIP_BACKOFF_REC_MAX     32u
 
 void ntrip_sm_init(ntrip_sm_t *sm, const ntrip_sm_cfg_t *cfg, uint32_t cred_hash, uint32_t now_ms);
@@ -450,7 +461,11 @@ ntrip_sm_act_t ntrip_sm_poll(ntrip_sm_t *sm, const ntrip_sm_in_t *in, uint32_t n
 /** A connection attempt starts (state CONNECTING). */
 void ntrip_sm_connecting(ntrip_sm_t *sm, uint32_t now_ms);
 
-/** The caster accepted the request (state STREAMING). */
+/**
+ * The caster accepted the request (state STREAMING). A success: the polite
+ * hourly limit and its count of caster-reaching failures end here; the
+ * attempt count itself waits for a healthy session.
+ */
 void ntrip_sm_connected(ntrip_sm_t *sm, uint32_t now_ms);
 
 /** Bytes accepted by the socket; a session that becomes healthy resets the backoff. */
@@ -475,14 +490,26 @@ void ntrip_sm_user_edit(ntrip_sm_t *sm, const ntrip_sm_cfg_t *cfg, uint32_t cred
 /** ms until the next attempt may start (0 = none pending). */
 uint32_t ntrip_sm_retry_in_ms(const ntrip_sm_t *sm, uint32_t now_ms);
 
-/** True if the long-backoff record (or the last-good credentials) changed since the last write. */
+/**
+ * True if the record changed since the last write: the long row (AUTH,
+ * CONFIG, BANNED) or its step (bounded: once the row's last entry repeats,
+ * further failures change nothing), the hourly limit, a polite slot's count
+ * of caster-reaching failures (up to the hourly limit) or the last-good
+ * credentials. So a reboot never puts a slot back to an earlier step.
+ */
 bool ntrip_sm_persist_due(const ntrip_sm_t *sm);
 
 /** Snapshot for persisting; then call ntrip_sm_persist_done(). */
 void ntrip_sm_persist_get(const ntrip_sm_t *sm, uint32_t now_ms, ntrip_backoff_rec_t *out);
 void ntrip_sm_persist_done(ntrip_sm_t *sm);
 
-/** Restore a record at boot: wait out the remaining delay before the first attempt. */
+/**
+ * Restore a record at boot. A long row or the hourly limit waits the larger
+ * of the stored remaining delay and the full nominal delay of the stored
+ * step (one hour in hourly mode) before the first attempt, so a reboot loop
+ * can never shorten the escalation; the stored count of caster-reaching
+ * failures carries on toward the hourly limit.
+ */
 void ntrip_sm_restore(ntrip_sm_t *sm, const ntrip_backoff_rec_t *rec, uint32_t now_ms);
 
 /** Encode / decode the record (settings blob). */

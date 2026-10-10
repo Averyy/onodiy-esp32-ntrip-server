@@ -119,6 +119,7 @@ typedef enum {
     DIAG_LOSS_FRAMER_DISCARDED,    /**< framer discarded bytes [bytes] */
     DIAG_LOSS_HUB_PUBLISH,         /**< frames the hub failed to publish [frames] */
     DIAG_LOSS_BAUD_SWITCH,         /**< bytes discarded after a baud change [bytes]; expected, never alerted */
+    DIAG_LOSS_RX_EVENTS_DROPPED,   /**< UART event queue found full [episodes]; the event counts above may be low */
     DIAG_LOSS_CASTER_BASE = 16,    /**< ids from here on are reserved for per-caster losses */
 } diag_loss_id_t;
 

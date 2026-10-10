@@ -183,6 +183,12 @@ static uint8_t streaming_slots(uint8_t mask)
  */
 static void revert(fw_trial_run_t stage, const char *why, bool from_init)
 {
+    fw_lock();
+    bool already = g_fw.state == FW_UPDATE_REBOOT_PENDING;
+    fw_unlock();
+    if (already) {
+        return;   /* the reboot is on its way (the image is marked invalid once only) */
+    }
     const char *version = esp_app_get_description()->version;
     /* No receiver flash may start before the reboot. */
     (void)lifecycle_update_claim(LIFECYCLE_UPDATE_APP);
@@ -207,7 +213,13 @@ static void revert(fw_trial_run_t stage, const char *why, bool from_init)
     strlcpy(g_fw.rec.version, version, sizeof(g_fw.rec.version));
     g_fw.rec.stage = FW_TRIAL_REC_REVERTED;
     fw_trial_rec_t rec = g_fw.rec;
+    /* The trial is over and the reboot pending: the worker's next tick (the
+     * shutdown hooks may take longer than a tick) must not revert again;
+     * the otadata now points at the old image, so a second mark would fail
+     * and undo this record. The update slot stays claimed until the reboot. */
+    g_fw.run = FW_TRIAL_RUN_NONE;
     fw_unlock();
+    fw_set_state(FW_UPDATE_REBOOT_PENDING, ESP_OK);
     fw_trial_save_bad(&bad);
     fw_trial_save_rec(&rec);
     journal(DIAG_EV_APP_REVERT, (int32_t)stage, 0);

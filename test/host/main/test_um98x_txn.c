@@ -194,6 +194,50 @@ TEST_CASE("txn: a negative reply is resent once, the second is final", "[um98x_t
     TEST_ASSERT_EQUAL(UM98X_TXN_REJECTED, r.t.status);
 }
 
+TEST_CASE("txn: negative replies do not end a version query early", "[um98x_txn]")
+{
+    rig_t r;
+    char line[160];
+    /* After a restart the receiver's parser answers the first polls with a
+     * failure text while it boots: polling goes on until the log or end_ms. */
+    rig_begin(&r, UM98X_TXN_VERSION_RESTART, "VERSIONA", NULL, 0);
+    um98x_txn_set_end(&r.t, T0 + 20000);
+    ack(line, sizeof(line), "VERSIONA", "PARSING FAILD NO MATCHING FUNC");
+    run_until(&r, T0 + 50);
+    TEST_ASSERT_TRUE(feed(&r, line));
+    run_until(&r, T0 + 1050);
+    TEST_ASSERT_TRUE(feed(&r, line));
+    run_until(&r, T0 + 2050);
+    TEST_ASSERT_TRUE(feed(&r, line));
+    TEST_ASSERT_EQUAL(UM98X_TXN_PENDING, r.t.status);
+    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", r.t.reason);
+    run_until(&r, T0 + 3100);
+    TEST_ASSERT_EQUAL_INT(4, r.sends);   /* still one poll a second */
+    TEST_ASSERT_TRUE(feed(&r, TV_VERSIONA_UM982));
+    TEST_ASSERT_EQUAL(UM98X_TXN_OK, r.t.status);
+
+    /* Only failure texts until end_ms: REJECTED (the receiver answers). */
+    rig_begin(&r, UM98X_TXN_VERSION_RESTART, "VERSIONA", NULL, 0);
+    um98x_txn_set_end(&r.t, T0 + 5000);
+    run_until(&r, T0 + 50);
+    feed(&r, line);
+    run_until(&r, T0 + 1050);
+    feed(&r, line);
+    TEST_ASSERT_EQUAL(UM98X_TXN_ACT_DONE, run_until(&r, T0 + 6000));
+    TEST_ASSERT_EQUAL(UM98X_TXN_REJECTED, r.t.status);
+
+    /* The plain query keeps its 3 tries as well. */
+    rig_begin(&r, UM98X_TXN_VERSION, "VERSIONA", NULL, 0);
+    run_until(&r, T0 + 50);
+    feed(&r, line);
+    run_until(&r, T0 + 3050);   /* second try at T0 + 3000 */
+    feed(&r, line);
+    TEST_ASSERT_EQUAL(UM98X_TXN_PENDING, r.t.status);
+    TEST_ASSERT_EQUAL(UM98X_TXN_ACT_DONE, run_until(&r, T0 + 20000));
+    TEST_ASSERT_EQUAL_INT(3, r.sends);
+    TEST_ASSERT_EQUAL(UM98X_TXN_REJECTED, r.t.status);
+}
+
 TEST_CASE("txn: the base-mode query completes on its log, not on the ack", "[um98x_txn]")
 {
     rig_t r;

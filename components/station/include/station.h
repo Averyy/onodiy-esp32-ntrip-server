@@ -231,7 +231,7 @@ typedef struct {
     um98x_base_position_t position;  /**< locked or last surveyed position */
     bool surveying;                  /**< inside the survey window */
     uint32_t survey_window_left_s;   /**< until the survey window ends (0 when not surveying) */
-    bool lease_held;                 /**< a COMMAND or RAW lease is held */
+    bool lease_held;                 /**< a COMMAND or RAW lease is held now (read live from the link, also while a job runs) */
     uint32_t since_lease_release_ms; /**< since the last lease release (UINT32_MAX = none this boot) */
     bool flash_journal_open;         /**< open, or present but unreadable; valid in safe mode too */
     bool flash_journal_readable;     /**< flash_journal holds the record (false: damaged or a newer schema: waits for the user) */

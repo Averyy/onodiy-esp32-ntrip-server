@@ -596,8 +596,8 @@ esp_err_t um98x_ctl_apply_profile(gnss_link_lease_t lease, const um98x_base_prof
     if (identity.model[0] != '\0') {
         remember_identity(&identity);   /* this session's (written only on change) */
     }
-    if (result->found_baud != 0 && res != UM98X_OK) {
-        persist_baud(result->found_baud);   /* the receiver was found there: keep it on any outcome */
+    if (result->answer_baud != 0 && res != UM98X_OK) {
+        persist_baud(result->answer_baud);   /* where it last answered (a rollback's RESET may have moved it) */
     }
     if (res == UM98X_OK) {
         result->persisted = persist_applied(profile, result);
@@ -638,6 +638,28 @@ esp_err_t um98x_ctl_restore_output(gnss_link_lease_t lease, const um98x_base_pro
         ESP_LOGW(TAG, "RTCM output not fully restored: \"%s\": %s", result->failed_cmd, result->reason);
     }
     return to_esp_err(res);
+}
+
+esp_err_t um98x_ctl_reset_receiver(gnss_link_lease_t lease)
+{
+    if (lease == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (call_begin(lease, NULL) != ESP_OK) {
+        return ESP_ERR_INVALID_STATE;   /* nothing sent */
+    }
+    call_t c;
+    call_setup(&c, lease);
+    um98x_res_t res = um98x_exec_reset(&c.ex);
+    call_end();
+    if (res == UM98X_E_LINK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (res != UM98X_OK) {
+        ESP_LOGW(TAG, "no answer within 20 s of the receiver's restart");
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
 }
 
 esp_err_t um98x_ctl_get_base_position(um98x_base_position_t *out)

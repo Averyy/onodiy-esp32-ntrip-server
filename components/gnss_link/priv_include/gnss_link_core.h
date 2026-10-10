@@ -36,9 +36,27 @@
  *
  * Events (gnss_link_core_on_event; units are events):
  *   FIFO overflow   hw_fifo_overflows += 1, reset the framer
- *   buffer full     rx_buffer_full += 1, reset the framer (drain at once)
+ *   buffer full     rx_buffer_full += 1 once per ring-full episode, reset the
+ *                   framer (drain at once)
  *   frame/parity/break   line_errors += 1
  * None of them flushes the driver input or resets the event queue.
+ *
+ * Full event queue (gnss_link_core_on_queue_full): the driver drops every
+ * event that finds the queue full, and a reader stall fills it with data
+ * events (one per ~120 B) long before the ring is full. Whoever reads the
+ * ring looks at the queue first; found full, the queued events are counted
+ * and taken, then this rule stands in for the dropped ones:
+ *   - rx_events_dropped += 1 once per episode (the queue was seen with room
+ *     in between), except in RAW, where nobody takes events and a full queue
+ *     is normal;
+ *   - the ring is full (less than one hardware FIFO of room left: the driver
+ *     has paused RX interrupts): rx_buffer_full += 1 and hw_fifo_overflows
+ *     += 1 (inferred: the 128-byte FIFO overruns within 128 byte times while
+ *     RX interrupts are paused, and those overflow events were dropped),
+ *     each once per ring-full episode and only if its event did not count it;
+ *   - a new episode resets the framer.
+ * A ring-full episode ends when a reader finds the ring below the full mark
+ * (gnss_link_core_on_level).
  *
  * Drain pass (gnss_link_pass_*): reads of at most GNSS_LINK_READ_CHUNK bytes,
  * sized from the driver's buffered length (never from an event's size), at
@@ -64,6 +82,7 @@ extern "C" {
 #endif
 
 #define GNSS_LINK_EVENT_QUEUE_LEN  32u           /**< UART event queue entries */
+#define GNSS_LINK_HW_FIFO_LEN      128u          /**< UART hardware RX FIFO (bytes) */
 #define GNSS_LINK_READ_CHUNK       1024u         /**< bytes per driver read */
 #define GNSS_LINK_DRAIN_CAP        (16u * 1024u) /**< bytes per drain pass */
 #define GNSS_LINK_EVENT_WAIT_MS    20u           /**< event wait after a pass that emptied the buffer */
@@ -117,6 +136,9 @@ typedef struct {
     int64_t last_rx_us;
     bool rtcm_seen;
     int64_t last_rtcm_us;
+    bool ring_full_seen;     /**< this ring-full episode was counted in rx_buffer_full */
+    bool overflow_seen;      /**< an overflow was counted since the ring was last below the full mark */
+    bool queue_full_seen;    /**< this full-queue episode was counted in rx_events_dropped */
     gnss_link_stats_t stats; /**< counters; mode, baud and ages are filled by the snapshot */
 } gnss_link_core_t;
 
@@ -152,6 +174,25 @@ esp_err_t gnss_link_core_set_prompt(gnss_link_core_t *c, uint32_t token, bool ar
 
 /** Count one UART condition. @return true if the framer must be reset. */
 bool gnss_link_core_on_event(gnss_link_core_t *c, gnss_link_ev_t ev);
+
+/** Ring with less than one hardware FIFO of room: the driver pauses RX interrupts. */
+bool gnss_link_core_ring_full(size_t buffered, size_t ring_size);
+
+/**
+ * The event queue was found full (see "Full event queue" above), after the
+ * events still queued were counted with gnss_link_core_on_event().
+ * @param buffered    bytes in the driver ring now
+ * @param ring_size   the ring's size
+ * @param count_drop  count the episode in rx_events_dropped (false in RAW)
+ * @return true if the framer must be reset (a new episode).
+ */
+bool gnss_link_core_on_queue_full(gnss_link_core_t *c, size_t buffered, size_t ring_size, bool count_drop);
+
+/** The event queue had room: the next full queue is a new episode. */
+void gnss_link_core_on_queue_ok(gnss_link_core_t *c);
+
+/** A reader found `buffered` bytes in the ring: below the full mark ends a ring-full episode. */
+void gnss_link_core_on_level(gnss_link_core_t *c, size_t buffered, size_t ring_size);
 
 /** `n` bytes were read from the driver at `now_us`. */
 void gnss_link_core_on_rx(gnss_link_core_t *c, size_t n, int64_t now_us);

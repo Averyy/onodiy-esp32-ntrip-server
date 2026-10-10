@@ -955,6 +955,34 @@ static ntrip_row_t long_row(ntrip_row_t row)
     return (row == NTRIP_ROW_AUTH || row == NTRIP_ROW_CONFIG || row == NTRIP_ROW_BANNED) ? row : NTRIP_ROW_NONE;
 }
 
+/* Entries of a long row (its last one repeats). */
+static uint32_t row_steps(ntrip_prof_t prof, ntrip_row_t row)
+{
+    if (row == NTRIP_ROW_BANNED && prof != NTRIP_PROF_FAST) {
+        return sizeof(k_banned) / sizeof(k_banned[0]);
+    }
+    return sizeof(k_auth[0]) / sizeof(k_auth[0][0]);
+}
+
+/* Where in its long row a slot stands: changes until the last entry repeats. */
+static uint32_t long_step(ntrip_prof_t prof, ntrip_row_t row, uint32_t attempt)
+{
+    if (long_row(row) == NTRIP_ROW_NONE) {
+        return 0;
+    }
+    uint32_t steps = row_steps(prof, row);
+    return attempt < steps ? attempt : steps;
+}
+
+/* Polite profile only: caster-reaching failures toward the hourly limit. */
+static uint32_t reached_key(const ntrip_sm_t *sm)
+{
+    if (sm->cfg.profile != NTRIP_PROF_POLITE) {
+        return 0;
+    }
+    return sm->reached_streak < NTRIP_POLITE_HOURLY_AFTER ? sm->reached_streak : NTRIP_POLITE_HOURLY_AFTER;
+}
+
 static ntrip_sm_state_t failure_state(ntrip_cls_t cls, ntrip_row_t row)
 {
     if (cls == NTRIP_CLS_BANNED || row == NTRIP_ROW_BANNED) {
@@ -1082,6 +1110,10 @@ void ntrip_sm_connected(ntrip_sm_t *sm, uint32_t now_ms)
     sm->hint = NTRIP_HINT_NONE;
     sm->retry_pending = false;
     sm->busy_active = false;
+    /* The caster accepted us: the hourly limit ("until a success") and the
+     * run of consecutive caster-reaching failures end. */
+    sm->hourly = false;
+    sm->reached_streak = 0;
     if (!sm->good_valid || sm->good_hash != sm->cred_hash) {
         sm->good_valid = true;
         sm->good_hash = sm->cred_hash;
@@ -1196,7 +1228,9 @@ uint32_t ntrip_sm_retry_in_ms(const ntrip_sm_t *sm, uint32_t now_ms)
 
 bool ntrip_sm_persist_due(const ntrip_sm_t *sm)
 {
-    return long_row(sm->row) != sm->saved_row || sm->hourly != sm->saved_hourly || sm->saved_dirty;
+    ntrip_row_t row = long_row(sm->row);
+    return row != sm->saved_row || long_step(sm->cfg.profile, row, sm->attempt) != sm->saved_step ||
+           sm->hourly != sm->saved_hourly || reached_key(sm) != sm->saved_reached || sm->saved_dirty;
 }
 
 void ntrip_sm_persist_get(const ntrip_sm_t *sm, uint32_t now_ms, ntrip_backoff_rec_t *out)
@@ -1214,44 +1248,60 @@ void ntrip_sm_persist_get(const ntrip_sm_t *sm, uint32_t now_ms, ntrip_backoff_r
     }
     out->good_valid = sm->good_valid;
     out->good_hash = sm->good_hash;
+    out->reached = (uint8_t)reached_key(sm);
 }
 
 void ntrip_sm_persist_done(ntrip_sm_t *sm)
 {
     sm->saved_row = long_row(sm->row);
+    sm->saved_step = long_step(sm->cfg.profile, sm->saved_row, sm->attempt);
+    sm->saved_reached = reached_key(sm);
     sm->saved_hourly = sm->hourly;
     sm->saved_dirty = false;
 }
 
 void ntrip_sm_restore(ntrip_sm_t *sm, const ntrip_backoff_rec_t *rec, uint32_t now_ms)
 {
+    ntrip_row_t row = long_row(rec->row);
     sm->good_valid = rec->good_valid;
     sm->good_hash = rec->good_hash;
-    sm->saved_row = long_row(rec->row);
+    sm->saved_row = row;
+    sm->saved_step = long_step(sm->cfg.profile, row, rec->attempt);
     sm->saved_hourly = rec->hourly;
     sm->saved_dirty = false;
-    if (long_row(rec->row) == NTRIP_ROW_NONE && !rec->hourly) {
+    if (sm->cfg.profile == NTRIP_PROF_POLITE) {
+        uint32_t reached = rec->reached < NTRIP_POLITE_HOURLY_AFTER ? rec->reached : NTRIP_POLITE_HOURLY_AFTER;
+        sm->reached_streak = rec->hourly ? NTRIP_POLITE_HOURLY_AFTER : reached;
+    }
+    sm->saved_reached = reached_key(sm);
+    if (row == NTRIP_ROW_NONE && !rec->hourly) {
         return;
     }
-    sm->row = long_row(rec->row);
+    sm->row = row;
     sm->reason = rec->cls;
     sm->attempt = rec->attempt;
     sm->hourly = rec->hourly;
-    if (rec->hourly) {
-        sm->reached_streak = NTRIP_POLITE_HOURLY_AFTER;
-    }
     if (sm->attempt > 0) {
         sm->streak_active = true;
         sm->streak_start_ms = now_ms;
     }
-    if (rec->remaining_s > 0) {
-        uint32_t s = rec->remaining_s;
-        const uint32_t max_s = 24u * 3600u * 12u / 10u;   /* longest delay the rows produce */
-        if (s > max_s) {
-            s = max_s;
-        }
+    /* The remaining delay was taken when the record was written; a reboot
+     * loop must not shorten the step, so wait at least its full delay. */
+    uint64_t wait_ms = (uint64_t)rec->remaining_s * 1000u;
+    if (row != NTRIP_ROW_NONE) {
+        uint64_t nominal = row_entry_s(sm->cfg.profile, row, sm->attempt > 0 ? sm->attempt - 1u : 0u) * 1000u;
+        wait_ms = nominal > wait_ms ? nominal : wait_ms;
+    }
+    if (rec->hourly && wait_ms < NTRIP_HOURLY_MS) {
+        wait_ms = NTRIP_HOURLY_MS;
+    }
+    const uint64_t max_ms = 24ull * 3600u * 1200u;   /* longest delay the rows produce (24 h x 1.2) */
+    if (wait_ms > max_ms) {
+        wait_ms = max_ms;
+    }
+    if (wait_ms > 0) {
         sm->retry_pending = true;
-        sm->retry_at_ms = now_ms + s * 1000u;
+        sm->retry_at_ms = now_ms + (uint32_t)wait_ms;
     }
 }
 
@@ -1267,6 +1317,7 @@ size_t ntrip_backoff_rec_encode(const ntrip_backoff_rec_t *rec, uint8_t *buf, si
     blob_put_bool(&w, rec->hourly);
     blob_put_bool(&w, rec->good_valid);
     blob_put_u32(&w, rec->good_hash);
+    blob_put_u8(&w, rec->reached);
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
@@ -1275,10 +1326,12 @@ bool ntrip_backoff_rec_decode(const uint8_t *buf, size_t len, ntrip_backoff_rec_
     blob_reader_t r;
     blob_reader_init(&r, buf, len);
     memset(out, 0, sizeof(*out));
-    if (blob_get_u8(&r) != NTRIP_BACKOFF_REC_VERSION) {
+    uint8_t version = blob_get_u8(&r);
+    if (version != 1u && version != NTRIP_BACKOFF_REC_VERSION) {
         return false;
     }
     ntrip_backoff_rec_t rec;
+    memset(&rec, 0, sizeof(rec));
     uint8_t cls = blob_get_u8(&r);
     uint8_t row = blob_get_u8(&r);
     rec.attempt = blob_get_u32(&r);
@@ -1286,6 +1339,9 @@ bool ntrip_backoff_rec_decode(const uint8_t *buf, size_t len, ntrip_backoff_rec_
     rec.hourly = blob_get_bool(&r);
     rec.good_valid = blob_get_bool(&r);
     rec.good_hash = blob_get_u32(&r);
+    if (version >= 2u) {
+        rec.reached = blob_get_u8(&r);
+    }
     if (!blob_reader_ok(&r) || cls >= NTRIP_CLS_COUNT || long_row((ntrip_row_t)row) != (ntrip_row_t)row) {
         return false;
     }

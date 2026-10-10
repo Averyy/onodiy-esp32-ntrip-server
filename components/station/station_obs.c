@@ -67,7 +67,7 @@ void stn_obs_arm(stn_obs_t *o, const um98x_rtcm_out_t *rtcm, uint8_t count, int6
     o->armed_ms = now_ms;
 }
 
-void stn_obs_feed(stn_obs_t *o, uint16_t msg, int64_t now_ms)
+void stn_obs_feed(stn_obs_t *o, uint16_t msg, bool has_epoch, uint32_t epoch_time, int64_t now_ms)
 {
     if (!o->armed) {
         return;
@@ -80,10 +80,15 @@ void stn_obs_feed(stn_obs_t *o, uint16_t msg, int64_t now_ms)
     }
     for (uint8_t i = 0; i < o->count; i++) {
         if (o->msg[i] == msg) {
+            o->last_ms[i] = now_ms;
+            if (has_epoch && o->epoch_valid[i] && o->epoch[i] == epoch_time) {
+                return;   /* one more frame of an epoch already counted */
+            }
+            o->epoch_valid[i] = has_epoch;
+            o->epoch[i] = epoch_time;
             if (o->seen[i] < UINT32_MAX) {
                 o->seen[i]++;
             }
-            o->last_ms[i] = now_ms;
             return;
         }
     }

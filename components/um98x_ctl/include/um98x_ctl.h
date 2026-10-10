@@ -232,8 +232,10 @@ esp_err_t um98x_ctl_command(gnss_link_lease_t lease, const char *cmd, char *repl
  * had been accepted, RESET (the receiver returns to its saved configuration;
  * the host goes back to the saved baud, then 10 s at the previous one). The
  * station then raises its config-failed alert and, if no RTCM resumes,
- * calls um98x_ctl_restore_output(). A detection inside the session that
- * found the receiver at another baud persists that baud on any outcome.
+ * calls um98x_ctl_restore_output(). On failure, the baud where the receiver
+ * last answered (a detection inside the session, then the rollback's version
+ * query; result->answer_baud) is kept as gnss/baud; after a RESET without an
+ * answer the stored baud stays.
  *
  * @param opts   may be NULL (no forced base mode)
  * @param result required; what the session did and why it failed
@@ -254,6 +256,18 @@ esp_err_t um98x_ctl_apply_profile(gnss_link_lease_t lease, const um98x_base_prof
  */
 esp_err_t um98x_ctl_restore_output(gnss_link_lease_t lease, const um98x_base_profile_t *profile,
                                    um98x_apply_result_t *result);
+
+/**
+ * Recovery: the receiver's RESET command under the caller's COMMAND lease.
+ * Written once and never resent (a resend would reset it again); the
+ * restart is ours, so its banner and the version log after it are not
+ * reported as an unsolicited restart. Waits for the banner (up to 15 s) and
+ * polls the version every second until 20 s after it.
+ * @return ESP_OK (it answered after the restart), ESP_ERR_TIMEOUT (no answer;
+ *         the RESET went out), ESP_ERR_INVALID_STATE (nothing sent: no lease,
+ *         a link error, or another call holds the command layer).
+ */
+esp_err_t um98x_ctl_reset_receiver(gnss_link_lease_t lease);
 
 /**
  * Current base position: the antenna reference point of the latest CRC-valid

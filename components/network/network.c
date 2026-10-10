@@ -149,6 +149,7 @@ static esp_netif_t *s_ap;
 static QueueHandle_t s_queue;
 static TaskHandle_t s_task;
 static volatile bool s_queue_overflow;
+static volatile bool s_ap_clients_queued;   /* one MSG_AP_CLIENTS at most in the queue */
 
 /* Readers' snapshot; everything below "under s_lock" is shared with API callers. */
 static network_status_t s_st;               /* under s_lock */
@@ -177,6 +178,8 @@ static sta_state_t s_sta_state;
 static uint32_t s_attempt;
 static int64_t s_retry_at_us;
 static int64_t s_deadline_us;               /* DISCONNECTING / CONNECTING watchdog */
+static uint32_t s_wifi_start_fails;          /* esp_wifi_start() failures in a row */
+static int64_t s_wifi_retry_at_us;           /* next start attempt after a failure */
 static bool s_sta_configured;
 static bool s_associated;
 static bool s_has_ip;
@@ -209,6 +212,7 @@ static bool s_dns2_ok;
 /* DNS responder. */
 static TaskHandle_t s_dns_task;             /* net task */
 static volatile bool s_dns_stop;
+static bool s_dns_restart;                  /* net task: start again once the stopping task is gone */
 static SemaphoreHandle_t s_dns_done;
 static uint8_t s_dns_rx[CAPTIVE_DNS_MAX_QUERY];
 static uint8_t s_dns_tx[CAPTIVE_DNS_MAX_REPLY];
@@ -242,6 +246,9 @@ static void send_msg(uint8_t type, uint8_t reason, int8_t rssi)
     net_msg_t m = { .type = type, .reason = reason, .rssi = rssi };
     if (s_queue == NULL || xQueueSend(s_queue, &m, 0) != pdTRUE) {
         s_queue_overflow = true;   /* the net task resyncs from the driver */
+        if (type == MSG_AP_CLIENTS) {
+            __atomic_store_n(&s_ap_clients_queued, false, __ATOMIC_SEQ_CST);   /* the resync counts the clients */
+        }
     }
 }
 
@@ -286,7 +293,11 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         break;
     case WIFI_EVENT_AP_STACONNECTED:
     case WIFI_EVENT_AP_STADISCONNECTED:
-        send_msg(MSG_AP_CLIENTS, 0, 0);
+        /* Any client can produce these at will on an open AP: one message
+         * stands for all of them, so they cannot crowd out the others. */
+        if (!__atomic_exchange_n(&s_ap_clients_queued, true, __ATOMIC_SEQ_CST)) {
+            send_msg(MSG_AP_CLIENTS, 0, 0);
+        }
         break;
     case WIFI_EVENT_SCAN_DONE:
         send_msg(MSG_SCAN_DONE, 0, 0);
@@ -358,13 +369,31 @@ static void dns_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/*
+ * One DNS task at a time. A task told to stop is forgotten only once it has
+ * said it is gone (s_dns_done); a start while it is still on its way out
+ * waits for that (s_dns_restart, picked up by housekeeping), so the stop flag
+ * of a running task is never cleared under it and no second task binds the
+ * port beside it.
+ */
+static void dns_reap(void)
+{
+    if (s_dns_task != NULL && s_dns_stop && xSemaphoreTake(s_dns_done, 0) == pdTRUE) {
+        s_dns_task = NULL;
+    }
+}
+
 static void dns_start(void)
 {
+    dns_reap();
     if (s_dns_task != NULL) {
+        if (s_dns_stop) {
+            s_dns_restart = true;   /* the previous task is still exiting */
+        }
         return;
     }
+    s_dns_restart = false;
     s_dns_stop = false;
-    (void)xSemaphoreTake(s_dns_done, 0);
     if (xTaskCreate(dns_task, "dns", DNS_TASK_STACK, NULL, DNS_TASK_PRIO, &s_dns_task) != pdPASS) {
         s_dns_task = NULL;
         ESP_LOGE(TAG, "captive DNS: task not started");
@@ -373,14 +402,17 @@ static void dns_start(void)
 
 static void dns_stop(void)
 {
-    if (s_dns_task == NULL) {
+    s_dns_restart = false;
+    if (s_dns_task == NULL || s_dns_stop) {
+        dns_reap();
         return;
     }
     s_dns_stop = true;
-    if (xSemaphoreTake(s_dns_done, pdMS_TO_TICKS(DNS_STOP_WAIT_MS)) != pdTRUE) {
-        ESP_LOGW(TAG, "captive DNS: task did not stop in time");
+    if (xSemaphoreTake(s_dns_done, pdMS_TO_TICKS(DNS_STOP_WAIT_MS)) == pdTRUE) {
+        s_dns_task = NULL;
+    } else {
+        ESP_LOGW(TAG, "captive DNS: task still stopping");
     }
-    s_dns_task = NULL;
 }
 
 /* ---- upstream probe ------------------------------------------------------------------ */
@@ -606,9 +638,16 @@ static esp_err_t wifi_start(void)
 {
     esp_err_t err = esp_wifi_start();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_start: %s", esp_err_to_name(err));
+        /* Retried from housekeeping (station) or the AP policy, with backoff. */
+        s_wifi_retry_at_us = esp_timer_get_time() + (int64_t)net_backoff_ms(s_wifi_start_fails) * 1000;
+        if (s_wifi_start_fails < UINT32_MAX) {
+            s_wifi_start_fails++;
+        }
+        ESP_LOGE(TAG, "esp_wifi_start: %s (retry in %u ms)", esp_err_to_name(err),
+                 (unsigned)net_backoff_ms(s_wifi_start_fails - 1));
         return err;
     }
+    s_wifi_start_fails = 0;
     s_wifi_started = true;
     /* Power save off after every start: no DTIM latency, no stalls. */
     err = esp_wifi_set_ps(WIFI_PS_NONE);
@@ -634,10 +673,39 @@ static void wifi_stop(void)
     }
     s_wifi_started = false;
     s_associated = false;
+    s_ap_reasons = 0;   /* the AP stops with Wi-Fi: the policy brings it back if still wanted */
     taskENTER_CRITICAL(&s_lock);
     s_st.associated = false;
+    s_st.ap_reasons = 0;
     taskEXIT_CRITICAL(&s_lock);
     ip_lost();
+}
+
+/* Wi-Fi may be (re)started now: not running, and no failed start waiting out its backoff. */
+static bool wifi_start_due(void)
+{
+    return !s_wifi_started && (s_wifi_start_fails == 0 || esp_timer_get_time() >= s_wifi_retry_at_us);
+}
+
+/* Start Wi-Fi for the configured station (MSG_STA_START connects). */
+static void start_station(void)
+{
+    wifi_config_t cfg;
+    build_sta_config(&cfg);
+    esp_err_t err = esp_wifi_set_mode(ap_is_up() ? WIFI_MODE_APSTA : WIFI_MODE_STA);
+    if (err == ESP_OK) {
+        err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    }
+    memset(&cfg, 0, sizeof(cfg));
+    if (err == ESP_OK) {
+        (void)wifi_start();   /* a failure schedules the next try */
+        return;
+    }
+    ESP_LOGE(TAG, "station config: %s", esp_err_to_name(err));
+    s_wifi_retry_at_us = esp_timer_get_time() + (int64_t)net_backoff_ms(s_wifi_start_fails) * 1000;
+    if (s_wifi_start_fails < UINT32_MAX) {
+        s_wifi_start_fails++;
+    }
 }
 
 /* Use the credentials in s_ssid/s_pass from now on. */
@@ -646,6 +714,7 @@ static void apply_credentials(void)
     s_sta_configured = net_ssid_valid(s_ssid);
     taskENTER_CRITICAL(&s_lock);
     s_st.sta_configured = s_sta_configured;
+    s_st.sta_credentials_unreadable = false;
     strlcpy(s_st.ssid, s_ssid, sizeof(s_st.ssid));
     taskEXIT_CRITICAL(&s_lock);
     if (!s_sta_configured || !s_started) {
@@ -803,6 +872,9 @@ static void build_ap_config(wifi_config_t *c)
 
 static void ap_up(uint32_t reasons)
 {
+    if (!s_wifi_started && !wifi_start_due()) {
+        return;   /* a failed start waits out its backoff */
+    }
     wifi_config_t cfg;
     build_ap_config(&cfg);
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
@@ -1008,7 +1080,8 @@ static void handle_got_ip(void)
 
 static void do_recovery(network_recovery_t action)
 {
-    if (!s_sta_configured || !s_wifi_started) {
+    /* A restart also helps when Wi-Fi did not start: it tries once more now. */
+    if (!s_sta_configured || (!s_wifi_started && action != NETWORK_RECOVER_RESTART_WIFI)) {
         ESP_LOGW(TAG, "recovery %d skipped: station not running", (int)action);
         return;
     }
@@ -1046,17 +1119,16 @@ static void do_recovery(network_recovery_t action)
             }
         }
         break;
-    case NETWORK_RECOVER_RESTART_WIFI: {
+    case NETWORK_RECOVER_RESTART_WIFI:
         ESP_LOGW(TAG, "recovery: restart Wi-Fi");
-        wifi_mode_t mode = WIFI_MODE_NULL;
-        (void)esp_wifi_get_mode(&mode);
-        wifi_stop();
+        wifi_stop();   /* the AP goes down with it */
         s_attempt = 0;
-        if (esp_wifi_set_mode(mode) == ESP_OK) {
-            (void)wifi_start();   /* MSG_STA_START connects */
+        s_wifi_start_fails = 0;   /* an explicit restart tries at once */
+        if (esp_wifi_set_mode(WIFI_MODE_STA) == ESP_OK) {
+            (void)wifi_start();   /* MSG_STA_START connects; a failed start is retried */
         }
+        apply_ap_policy();   /* the AP again, if it is still wanted */
         break;
-    }
     default:
         break;
     }
@@ -1074,9 +1146,22 @@ static esp_err_t handle_start(void)
         char pass[65] = "";
         esp_err_t e1 = settings_get_str(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_SSID, ssid, sizeof(ssid));
         esp_err_t e2 = settings_get_str(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_PASS, pass, sizeof(pass));
-        if (e1 == ESP_OK && net_ssid_valid(ssid)) {
+        switch (net_sta_credentials(e1 == ESP_OK, ssid, e2 == ESP_OK, pass)) {
+        case NET_CRED_OK:
             strlcpy(s_ssid, ssid, sizeof(s_ssid));
-            strlcpy(s_pass, (e2 == ESP_OK) ? pass : "", sizeof(s_pass));
+            strlcpy(s_pass, pass, sizeof(s_pass));
+            break;
+        case NET_CRED_UNREADABLE:
+            /* Never an open network in place of the stored one. */
+            ESP_LOGE(TAG, "Wi-Fi password for \"%s\" unreadable (%s): station not started, enter the credentials "
+                     "again on the setup page", ssid, esp_err_to_name(e2 != ESP_OK ? e2 : ESP_ERR_INVALID_SIZE));
+            taskENTER_CRITICAL(&s_lock);
+            s_st.sta_credentials_unreadable = true;
+            taskEXIT_CRITICAL(&s_lock);
+            break;
+        case NET_CRED_NONE:
+        default:
+            break;
         }
         memset(pass, 0, sizeof(pass));
     } else {
@@ -1176,6 +1261,8 @@ static void handle_msg(const net_msg_t *m)
         post_event(NETWORK_EVENT_SETUP_AP_DOWN);
         break;
     case MSG_AP_CLIENTS: {
+        /* Cleared before the count is read: a later event queues again. */
+        __atomic_store_n(&s_ap_clients_queued, false, __ATOMIC_SEQ_CST);
         uint8_t n = ap_client_count();
         taskENTER_CRITICAL(&s_lock);
         s_st.ap_clients = n;
@@ -1228,15 +1315,36 @@ static void resync(void)
     } else if (!ip && s_has_ip) {
         ip_lost();
     }
+    /* A lost STA_START leaves a configured station idle for good. */
+    if (s_wifi_started && s_sta_configured && s_sta_state == STA_IDLE) {
+        set_wifi_sta_on(true);
+        connect_now();
+    }
+    /* A lost AP_START or AP_STOP: the captive DNS and the status follow the AP. */
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    bool ap_running = s_wifi_started && esp_wifi_get_mode(&mode) == ESP_OK &&
+                      (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA);
+    if (ap_running) {
+        dns_start();
+    } else {
+        dns_stop();
+    }
+    uint8_t clients = ap_client_count();
     taskENTER_CRITICAL(&s_lock);
-    s_scanning = false;   /* a lost SCAN_DONE would block connects forever */
+    s_st.setup_ap_active = ap_running;
+    s_st.ap_clients = ap_running ? clients : 0;
     taskEXIT_CRITICAL(&s_lock);
+    /* A lost SCAN_DONE is left to the scan watchdog: a scan still running
+     * keeps its results. */
 }
 
 static void housekeeping(void)
 {
     if (s_queue_overflow) {
         resync();
+    }
+    if (s_dns_restart) {
+        dns_start();   /* runs once the previous task has gone */
     }
     int64_t now_us = esp_timer_get_time();
 
@@ -1264,6 +1372,12 @@ static void housekeeping(void)
         ESP_LOGW(TAG, "scan did not finish: abandoned");
         (void)esp_wifi_scan_stop();
         (void)esp_wifi_clear_ap_list();
+    }
+
+    if (s_started && s_sta_configured && !ap_is_up() && wifi_start_due()) {
+        /* Wi-Fi did not start (a failed start or restart): nothing else would try again. */
+        ESP_LOGW(TAG, "starting Wi-Fi again");
+        start_station();
     }
 
     switch (s_sta_state) {

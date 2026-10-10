@@ -40,9 +40,11 @@ bool fw_policy_app_install_allowed(const char *running, const char *offered)
     return semver_compare(&off, &run) > 0;
 }
 
-const fw_manifest_gnss_t *fw_policy_gnss_offer(const fw_manifest_t *m, const char *model, uint32_t current_build)
+const fw_manifest_gnss_t *fw_policy_gnss_offer(const fw_manifest_t *m, const char *running, const char *model,
+                                               uint32_t current_build)
 {
-    if (m == NULL || model == NULL || model[0] == '\0' || current_build == 0) {
+    semver_t run;
+    if (m == NULL || model == NULL || model[0] == '\0' || current_build == 0 || !semver_parse(running, &run)) {
         return NULL;
     }
     const fw_manifest_gnss_t *best = NULL;

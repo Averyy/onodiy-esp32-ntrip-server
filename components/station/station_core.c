@@ -301,6 +301,11 @@ static stn_job_t ladder_job(stn_t *s, stn_rec_t a)
         return j;
     }
     case STN_REC_RECONFIGURE:
+        if (s->apply_wanted) {
+            /* A queued apply (the user's lock or re-survey, a pending check)
+             * rides along in the ladder's session instead of being dropped. */
+            return start_apply(s, STN_WHY_LADDER, (stn_change_t)s->apply_change, s->apply_force);
+        }
         return start_apply(s, STN_WHY_LADDER, STN_CHANGE_NONE, false);
     case STN_REC_RECEIVER_RESET:
     default:
@@ -428,6 +433,9 @@ static stn_job_t next_streaming(stn_t *s, const stn_in_t *in)
         stn_job_t j = make_job(STN_JOB_IDENTIFY);
         j.after_restart = s->identify_restart;
         j.leased = s->identify_leased;
+        if (j.leased) {
+            s->paused = true;   /* the lease holds RTCM back: a planned gap for the casters */
+        }
         return j;
     }
 
@@ -580,6 +588,9 @@ static void done_identify(stn_t *s, const stn_result_t *r, const stn_in_t *in)
 {
     int64_t now = in->now_ms;
     s->identify_restart = false;
+    if (s->job.leased) {
+        s->paused = false;
+    }
     if (r->err == STN_OK) {
         set_identity(s, r->supported, r->static_ok);
         after_identity(s, in);
@@ -701,6 +712,15 @@ static void done_leave_loader(stn_t *s, const stn_result_t *r, const stn_in_t *i
     take_base(s, in);
 }
 
+/* The receiver restarted within a session of ours (the signal-group reset,
+ * the rollback's RESET): with a survey profile it surveys again. */
+static void survey_restarted(stn_t *s, const stn_in_t *in)
+{
+    um98x_survey_start(&s->survey, in->now_ms, in->survey_s);
+    s->mode_poll_ms = in->now_ms + STN_MODE_POLL_MS;
+    s->lock_done = false;
+}
+
 static void done_apply(stn_t *s, const stn_result_t *r, const stn_in_t *in)
 {
     int64_t now = in->now_ms;
@@ -731,6 +751,8 @@ static void done_apply(stn_t *s, const stn_result_t *r, const stn_in_t *in)
             um98x_survey_start(&s->survey, r->mode_ack_ms != 0 ? r->mode_ack_ms : now, in->survey_s);
             s->mode_poll_ms = now + STN_MODE_POLL_MS;
             s->lock_done = false;
+        } else if (r->restarted) {
+            survey_restarted(s, in);   /* the session's own receiver restart */
         }
         s->paused = false;
         s->last_resort = false;
@@ -751,6 +773,9 @@ static void done_apply(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     }
 
     raise_config_failed(s, now);
+    if (r->restarted && in->profile_survey) {
+        survey_restarted(s, in);   /* the rollback's restart: the receiver surveys again */
+    }
     if (r->receiver_lost) {
         s->paused = false;
         enter_detecting(s, in);

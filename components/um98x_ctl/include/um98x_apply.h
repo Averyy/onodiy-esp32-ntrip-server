@@ -30,6 +30,9 @@ typedef struct {
     bool baud_changed;          /**< the COM1 baud was changed in this session */
     uint32_t baud;              /**< link baud when the session ended */
     uint32_t found_baud;        /**< receiver found again at this baud by a detection inside the session (0 = none ran) */
+    /** where the receiver last answered after that detection or the rollback's
+     *  RESET (0 = not known): kept as gnss/baud when the session fails */
+    uint32_t answer_baud;
     bool rtcm1230_ok;           /**< RTCM1230 accepted (false if rejected or not in the profile) */
     bool saved;                 /**< SAVECONFIG accepted: the receiver runs the profile */
     bool persisted;             /**< applied hash, firmware, 1230 result (and baud) written in one settings batch */

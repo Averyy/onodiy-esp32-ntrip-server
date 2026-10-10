@@ -15,10 +15,12 @@
  *    of the write (5000 ms for SAVECONFIG, set by the caller). On a timeout
  *    it is resent 1000 ms after the timeout expired, up to 4 sends in total;
  *    on a negative reply ("PARSING FAILD ...") it is resent once, 100 ms
- *    later, and a second negative reply is final. A late acknowledgement of
- *    an earlier send completes it (every send carries the same text). With
- *    restart_ends set (a command that restarts the receiver), the restart
- *    banner also ends it (status RESTARTED).
+ *    later, and a second negative reply is final (MODE and CONFIG alike;
+ *    the version kinds below keep their own schedule and only record the
+ *    reason, finishing REJECTED instead of TIMEOUT when no log came). A late
+ *    acknowledgement of an earlier send completes it (every send carries the
+ *    same text). With restart_ends set (a command that restarts the
+ *    receiver), the restart banner also ends it (status RESTARTED).
  *  - MODE: the base-mode query. Done on the base-mode log (the ack comes
  *    first and does not complete it); timeouts and retries as COMMAND.
  *  - CONFIG: the configuration dump. The ack, then one line per item with

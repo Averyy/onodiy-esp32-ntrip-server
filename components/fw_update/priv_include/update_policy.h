@@ -15,7 +15,10 @@
  *    so; one more such rollback puts it on the list (app_trial.h).
  *  - Receiver: the manifest entry for exactly the detected model whose build
  *    is higher than the receiver's build. Nothing is offered while the model
- *    or the build is unknown. Downgrades are never offered.
+ *    or the build is unknown. Downgrades are never offered. A dev build is
+ *    offered no receiver build either (nothing at all is offered to it), and
+ *    the install path asks the same question, so it cannot start one. A
+ *    manual package upload is not affected.
  *
  * Daily check (seconds of uptime; the trusted clock is the unix time once
  * SNTP has set it):
@@ -75,9 +78,11 @@ bool fw_policy_app_install_allowed(const char *running, const char *offered);
 /**
  * Manifest entry to offer for the receiver: exact model match, build higher
  * than `current_build`; the highest such build if several. NULL if none,
- * or if the model is "" or the build is 0 (unknown).
+ * if the model is "" or the build is 0 (unknown), or if `running` (the app
+ * version) is not a release (a dev build is offered nothing).
  */
-const fw_manifest_gnss_t *fw_policy_gnss_offer(const fw_manifest_t *m, const char *model, uint32_t current_build);
+const fw_manifest_gnss_t *fw_policy_gnss_offer(const fw_manifest_t *m, const char *running, const char *model,
+                                               uint32_t current_build);
 
 /** Outcome of an update check, for the schedule. */
 typedef enum {

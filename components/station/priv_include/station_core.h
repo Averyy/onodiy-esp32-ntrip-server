@@ -44,13 +44,19 @@
  *   RECOVERING: a step the health ladder asked for (resync, link restart,
  *     rescan, reconfigure, receiver reset); weaker requests are ignored while
  *     a stronger one is queued or running. A refused reconfigure (autocfg
- *     off, or CONFIG_FAILED raised) sends nothing.
+ *     off, or CONFIG_FAILED raised) sends nothing. A reconfigure carries out
+ *     an apply that was queued (the user's lock or re-survey) in the same
+ *     session, so the queued request is never lost.
+ *   A version query that needs a lease (no model ever stored) pauses the
+ *   casters while it runs: the lease holds RTCM back.
  *   FLASH_RECOVERY: a receiver-flash journal is open (or its state is
  *     unknown): nothing is decided here until it is cleared.
  *
  * Survey: an apply that sent a survey-in base mode, a receiver restart while
- * the profile surveys, or a base-mode read-back at boot that shows a running
- * survey opens the survey window (um98x_base.h); the base mode is read every
+ * the profile surveys (also one an apply session caused itself: the
+ * signal-group reset or a rollback), or a base-mode read-back at boot that
+ * shows a running survey opens the survey window (um98x_base.h); the base
+ * mode is read every
  * 60 s while it is open. Once the survey is complete (the read-back, or the
  * 1005 fallback) the position is locked automatically (gnss/autocfg = 1, no
  * CONFIG_FAILED) and checked against the next 1005.
@@ -200,6 +206,7 @@ typedef struct {
     bool nothing_sent;       /**< the session sent nothing configuring (unsupported model, no identity, no 1005 for a lock) */
     bool mode_sent;          /**< the base mode was sent and accepted (survey restarts) */
     int64_t mode_ack_ms;     /**< when */
+    bool restarted;          /**< the receiver restarted in the session (signal-group reset, an answered rollback RESET) */
     bool receiver_lost;      /**< the receiver was not found again during the session */
     bool answered;           /**< the receiver answered during or after the session */
 } stn_result_t;

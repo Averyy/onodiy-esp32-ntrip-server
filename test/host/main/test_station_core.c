@@ -73,7 +73,7 @@ static void sim_tick(sim_t *w)
         if (m == w->skip || (w->skip_station && (m == 1005 || m == 1033))) {
             continue;
         }
-        stn_obs_feed(&w->obs, m, w->in.now_ms + (int64_t)i);
+        stn_obs_feed(&w->obs, m, true, (uint32_t)w->in.now_ms, w->in.now_ms + (int64_t)i);   /* one epoch a second */
         w->in.rtcm_frames++;
     }
 }
@@ -712,6 +712,64 @@ TEST_CASE("station core: the ladder's reconfigure and receiver reset", "[station
     TEST_ASSERT_TRUE(w.s.profile_applied);
 }
 
+TEST_CASE("station core: a queued lock rides along in the ladder's reconfigure", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+
+    /* The user locks the position; before the station task loops, the
+     * health ladder asks for a reconfigure. */
+    stn_request_lock(&w.s);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_recovery(&w.s, STN_REC_RECONFIGURE, true));
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_WHY_LADDER, j.why);
+    TEST_ASSERT_EQUAL(STN_CHANGE_LOCK, j.change);   /* the lock is carried out, not dropped */
+    TEST_ASSERT_TRUE(j.force_mode);
+    TEST_ASSERT_EQUAL(STN_RECOVERING, w.s.state);
+    TEST_ASSERT_FALSE(w.s.apply_wanted);
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+    TEST_ASSERT_EQUAL_UINT8(0, w.s.rec_running);
+    TEST_ASSERT_TRUE(w.s.lock_done);
+    TEST_ASSERT_NOT_EQUAL(STN_NEVER, w.s.pos_check_ms);
+
+    /* A re-survey queued the same way. */
+    stn_request_resurvey(&w.s);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_recovery(&w.s, STN_REC_RECONFIGURE, true));
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_CHANGE_RESURVEY, j.change);
+    TEST_ASSERT_TRUE(j.force_mode);
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+
+    /* Without a queued request the ladder's apply carries no change. */
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_recovery(&w.s, STN_REC_RECONFIGURE, true));
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_CHANGE_NONE, j.change);
+    TEST_ASSERT_FALSE(j.force_mode);
+}
+
+TEST_CASE("station core: a leased version query pauses the casters while it runs", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    w.in.model_known = false;
+    w.rtcm_on = true;
+    sim_start(&w);
+    stn_job_t j = sim_until_job(&w, 5);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+    TEST_ASSERT_FALSE(j.leased);
+    TEST_ASSERT_FALSE(w.s.paused);   /* a query on the stream holds nothing back */
+    sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+    j = sim_next(&w);
+    TEST_ASSERT_TRUE(j.leased);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    TEST_ASSERT_TRUE(w.s.paused);    /* the lease holds RTCM back */
+    identity_done(&w, true, true);
+    TEST_ASSERT_FALSE(w.s.paused);
+}
+
 /* ---- survey, lock, antenna ------------------------------------------------------- */
 
 TEST_CASE("station core: a running survey found at boot is tracked and locked when done", "[station]")
@@ -844,6 +902,47 @@ TEST_CASE("station core: a restart while surveying opens a new survey window", "
     TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_next(&w).kind);
     TEST_ASSERT_TRUE(stn_surveying(&w.s, w.in.now_ms));
     TEST_ASSERT_FALSE(w.s.antenna_check);
+}
+
+TEST_CASE("station core: a restart the apply session caused opens a survey window", "[station]")
+{
+    /* The signal-group reset restores the saved survey-in mode; the base
+     * mode read back then matches, so no MODE BASE is sent. */
+    sim_t w;
+    sim_init(&w, false);
+    w.in.profile_survey = true;
+    boot_streaming(&w, true);
+    TEST_ASSERT_EQUAL(STN_JOB_MODE, sim_next(&w).kind);
+    sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+    TEST_ASSERT_FALSE(stn_surveying(&w.s, w.in.now_ms));
+    stn_request_apply(&w.s);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, sim_next(&w).kind);
+    sim_done(&w, &(stn_result_t){ .err = STN_OK, .restarted = true });
+    TEST_ASSERT_TRUE(stn_surveying(&w.s, w.in.now_ms));
+    TEST_ASSERT_FALSE(w.s.lock_done);
+
+    /* A failed apply whose rollback RESET was answered: surveying again too. */
+    sim_init(&w, false);
+    w.in.profile_survey = true;
+    boot_streaming(&w, true);
+    TEST_ASSERT_EQUAL(STN_JOB_MODE, sim_next(&w).kind);
+    sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+    stn_request_apply(&w.s);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, sim_next(&w).kind);
+    sim_done(&w, &(stn_result_t){ .err = STN_E_FAIL, .restarted = true, .answered = true });
+    TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+    TEST_ASSERT_TRUE(stn_surveying(&w.s, w.in.now_ms));
+
+    /* Nothing restarted: no window. */
+    sim_init(&w, false);
+    w.in.profile_survey = true;
+    boot_streaming(&w, true);
+    TEST_ASSERT_EQUAL(STN_JOB_MODE, sim_next(&w).kind);
+    sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+    stn_request_apply(&w.s);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, sim_next(&w).kind);
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+    TEST_ASSERT_FALSE(stn_surveying(&w.s, w.in.now_ms));
 }
 
 /* ---- flash journal ------------------------------------------------------------- */

@@ -187,7 +187,7 @@ typedef struct {
     char gnss_running[48];         /**< receiver firmware as detected */
     char gnss_latest[48];
     uint32_t gnss_latest_build;
-    bool gnss_update_available;    /**< banner: a higher build for the detected model */
+    bool gnss_update_available;    /**< banner: a higher build for the detected model, running is not a dev build */
     fw_update_gnss_block_t gnss_blocked;
     uint32_t gnss_blocked_left_s;  /**< for FW_GNSS_BLOCK_APP_TRIAL: seconds until the trial ends */
     uint32_t gnss_expected_downtime_s; /**< for the confirmation dialog (never a gate) */
@@ -266,7 +266,8 @@ void fw_update_upload_app_abort(fw_update_upload_t u);
  * detected model into pkg_store and hand it to the station (async). The
  * package slot is released when the session ends. Refused
  * (ESP_ERR_INVALID_STATE) for every fw_update_gnss_block_t reason.
- * @param offered_build    the build the banner showed; refused if it changed.
+ * @param offered_build    the build the banner showed; refused if it changed
+ *        or if nothing is offered (a dev build is offered nothing).
  * @param cross_layout_ack the user confirmed a package with a different
  *        partition layout (still refused until bench-tested).
  */

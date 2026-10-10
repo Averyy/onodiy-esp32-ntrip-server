@@ -644,11 +644,27 @@ TEST_CASE("ntrip slot session: stalls, pause, network loss are not failures", "[
     TEST_ASSERT_EQUAL(NTRIP_SM_STREAMING, sm.state);
     in.session_open = true;
 
-    /* Wi-Fi blip with the IP still held: keep streaming */
+    /* A Wi-Fi drop clears the address at once (and lwIP aborts the session):
+     * close as "no network", not a failure. Re-association alone brings no
+     * address: still waiting. The address back: the protected slot would go
+     * at once, this one waits its random stagger from that moment. */
+    in.have_ip = false;
     in.link_up = false;
-    TEST_ASSERT_EQUAL(NTRIP_ACT_NONE, step(&sm, &in, t + 100));
-    TEST_ASSERT_EQUAL(NTRIP_SM_STREAMING, sm.state);
-    in.link_up = true;
+    TEST_ASSERT_EQUAL(NTRIP_ACT_CLOSE, ntrip_sm_poll(&sm, &in, t + 100, MID, &why));
+    TEST_ASSERT_EQUAL(NTRIP_WHY_NO_IP, why);
+    ntrip_sm_closed(&sm, t + 100);
+    in.session_open = false;
+    TEST_ASSERT_EQUAL(NTRIP_ACT_NONE, step(&sm, &in, t + 2000));
+    TEST_ASSERT_EQUAL(NTRIP_SM_WAIT_NETWORK, sm.state);
+    TEST_ASSERT_EQUAL_UINT32(1, sm.attempt);
+    in = ready();
+    TEST_ASSERT_EQUAL(NTRIP_ACT_NONE, ntrip_sm_poll(&sm, &in, t + 3000, 2500, &why));
+    TEST_ASSERT_EQUAL_UINT32(2500, ntrip_sm_retry_in_ms(&sm, t + 3000));
+    TEST_ASSERT_EQUAL(NTRIP_ACT_CONNECT, step(&sm, &in, t + 5500));
+    ntrip_sm_connecting(&sm, t + 5500);
+    ntrip_sm_connected(&sm, t + 5500);
+    in.session_open = true;
+    t += 6000;
 
     /* source stall: close after the slot's limit */
     in.silent_ms = 9999;
@@ -904,7 +920,16 @@ TEST_CASE("ntrip long backoff persistence", "[ntrip]")
     TEST_ASSERT_EQUAL_UINT32((d - 1000 + 999) / 1000, rec.remaining_s);
     ntrip_sm_persist_done(&sm);
     TEST_ASSERT_FALSE(ntrip_sm_persist_due(&sm));
-    ntrip_sm_failed(&sm, &k_auth, t + d, MID);       /* same class: no write */
+    /* The next step of the same row is written too (else a reboot would put
+     * the slot back a step), until the row's last entry repeats. */
+    uint32_t tt = t + d;
+    tt += ntrip_sm_failed(&sm, &k_auth, tt, MID);    /* attempt 4 */
+    TEST_ASSERT_TRUE(ntrip_sm_persist_due(&sm));
+    ntrip_sm_persist_done(&sm);
+    tt += ntrip_sm_failed(&sm, &k_auth, tt, MID);    /* attempt 5: the last entry */
+    TEST_ASSERT_TRUE(ntrip_sm_persist_due(&sm));
+    ntrip_sm_persist_done(&sm);
+    tt += ntrip_sm_failed(&sm, &k_auth, tt, MID);    /* the last entry repeats: no write */
     TEST_ASSERT_FALSE(ntrip_sm_persist_due(&sm));
 
     /* codec round trip, strict version, trailing bytes from a newer writer ignored */
@@ -920,27 +945,35 @@ TEST_CASE("ntrip long backoff persistence", "[ntrip]")
     TEST_ASSERT_EQUAL_UINT32(rec.attempt, back.attempt);
     TEST_ASSERT_EQUAL_UINT32(rec.remaining_s, back.remaining_s);
     TEST_ASSERT_EQUAL(rec.hourly, back.hourly);
+    TEST_ASSERT_EQUAL_UINT8(rec.reached, back.reached);
     TEST_ASSERT_FALSE(ntrip_backoff_rec_decode(buf, n - 1, &back));
+    /* a version 1 record (no failure count) is still read */
+    buf[0] = 1;
+    TEST_ASSERT_TRUE(ntrip_backoff_rec_decode(buf, n - 1, &back));
+    TEST_ASSERT_EQUAL_UINT8(0, back.reached);
+    TEST_ASSERT_EQUAL_UINT32(rec.attempt, back.attempt);
     buf[0] = NTRIP_BACKOFF_REC_VERSION + 1;
     TEST_ASSERT_FALSE(ntrip_backoff_rec_decode(buf, n, &back));
     buf[0] = NTRIP_BACKOFF_REC_VERSION;
     buf[2] = (uint8_t)NTRIP_ROW_TRANSIENT;              /* not a long row */
     TEST_ASSERT_FALSE(ntrip_backoff_rec_decode(buf, n, &back));
 
-    /* a reboot waits out the remaining delay before the first attempt */
+    /* a reboot waits the stored step's full delay (AUTH row step 2: 900 s,
+     * not the 899 s left when the record was written) before the first attempt */
     ntrip_sm_t boot;
     uint32_t b = 123;
     ntrip_sm_init(&boot, &k_std, 77, b);
     ntrip_sm_restore(&boot, &rec, b);
     ntrip_sm_in_t in = ready();
     boot.prev_link_up = true;
-    TEST_ASSERT_EQUAL(NTRIP_ACT_NONE, step(&boot, &in, b + rec.remaining_s * 1000 - 1));
+    TEST_ASSERT_EQUAL_UINT32(899, rec.remaining_s);
+    TEST_ASSERT_EQUAL(NTRIP_ACT_NONE, step(&boot, &in, b + 900000 - 1));
     TEST_ASSERT_EQUAL(NTRIP_SM_AUTH_FAILED, boot.state);
-    TEST_ASSERT_EQUAL(NTRIP_ACT_CONNECT, step(&boot, &in, b + rec.remaining_s * 1000));
+    TEST_ASSERT_EQUAL(NTRIP_ACT_CONNECT, step(&boot, &in, b + 900000));
     TEST_ASSERT_FALSE(ntrip_sm_persist_due(&boot));
 
     /* success clears the record and stores the credentials that worked */
-    ntrip_sm_connected(&boot, b + rec.remaining_s * 1000);
+    ntrip_sm_connected(&boot, b + 900000);
     TEST_ASSERT_TRUE(ntrip_sm_persist_due(&boot));
     ntrip_sm_persist_get(&boot, b, &rec);
     TEST_ASSERT_EQUAL(NTRIP_ROW_NONE, rec.row);
@@ -962,6 +995,94 @@ TEST_CASE("ntrip long backoff persistence", "[ntrip]")
     ntrip_sm_persist_done(&again);
     ntrip_sm_user_edit(&again, &k_std, 78, 400001);
     TEST_ASSERT_TRUE(ntrip_sm_persist_due(&again));
+}
+
+/* Run one boot of a slot from a stored record (NULL: first boot); fail every
+ * attempt with `f` until `uptime` ms; return the record the last write left. */
+static ntrip_backoff_rec_t reboot_run(const ntrip_sm_cfg_t *cfg, const ntrip_backoff_rec_t *stored,
+                                      const ntrip_failure_t *f, uint32_t uptime, uint32_t *attempts)
+{
+    ntrip_sm_t sm;
+    ntrip_sm_init(&sm, cfg, 5, 0);
+    ntrip_backoff_rec_t rec;
+    memset(&rec, 0, sizeof(rec));
+    if (stored != NULL) {
+        ntrip_sm_restore(&sm, stored, 0);
+        rec = *stored;
+    }
+    sm.prev_link_up = true;
+    ntrip_sm_in_t in = ready();
+    for (uint32_t t = 0; t < uptime; t += 1000) {
+        if (step(&sm, &in, t) == NTRIP_ACT_CONNECT) {
+            ntrip_sm_connecting(&sm, t);
+            ntrip_sm_failed(&sm, f, t, MID);
+            (*attempts)++;
+        }
+        if (ntrip_sm_persist_due(&sm)) {
+            ntrip_sm_persist_get(&sm, t, &rec);
+            ntrip_sm_persist_done(&sm);
+        }
+    }
+    return rec;
+}
+
+TEST_CASE("ntrip a reboot loop never shortens a long backoff", "[ntrip]")
+{
+    /* A polite slot with a wrong password (never accepted: no AUTH window)
+     * on a device that reboots every 10 minutes for a day. Each boot used to
+     * restore the first step (5 min) and try again: about 6 bad passwords an
+     * hour. Now each boot waits the stored step in full. */
+    uint32_t attempts = 0;
+    ntrip_backoff_rec_t rec = reboot_run(&k_polite, NULL, &k_auth, 600000, &attempts);
+    for (int boot = 1; boot < 144; boot++) {
+        rec = reboot_run(&k_polite, &rec, &k_auth, 600000, &attempts);
+    }
+    TEST_ASSERT_EQUAL(NTRIP_ROW_AUTH, rec.row);
+    TEST_ASSERT_TRUE(attempts <= 3);   /* 0 s, 5 min, then the 15 min step outlasts every boot */
+
+    /* Caster-reaching failures carry over toward the polite hourly limit. */
+    ntrip_sm_t sm;
+    uint32_t t = 0;
+    ntrip_sm_init(&sm, &k_polite, 5, t);
+    for (int i = 0; i < 12; i++) {
+        t += ntrip_sm_failed(&sm, &k_reached, t, MID);
+    }
+    TEST_ASSERT_TRUE(ntrip_sm_persist_due(&sm));
+    ntrip_sm_persist_get(&sm, t, &rec);
+    TEST_ASSERT_EQUAL_UINT8(12, rec.reached);
+    ntrip_sm_t next;
+    ntrip_sm_init(&next, &k_polite, 5, 0);
+    ntrip_sm_restore(&next, &rec, 0);
+    TEST_ASSERT_FALSE(ntrip_sm_persist_due(&next));
+    for (int i = 0; i < 7; i++) {
+        ntrip_sm_failed(&next, &k_reached, 1000, MID);
+        TEST_ASSERT_FALSE(next.hourly);
+    }
+    ntrip_sm_failed(&next, &k_reached, 1000, MID);
+    TEST_ASSERT_TRUE(next.hourly);
+}
+
+TEST_CASE("ntrip the polite hourly limit ends when the caster accepts the source", "[ntrip]")
+{
+    ntrip_sm_t sm;
+    uint32_t t = 0;
+    ntrip_sm_init(&sm, &k_polite, 9, t);
+    for (int i = 0; i < 20; i++) {
+        t += ntrip_sm_failed(&sm, &k_reached, t, MID);
+    }
+    TEST_ASSERT_TRUE(sm.hourly);
+    ntrip_sm_persist_done(&sm);
+
+    /* Accepted, then the caster restarts 40 s later (no healthy session):
+     * the next attempt follows the normal row, not the hour. */
+    ntrip_sm_connected(&sm, t);
+    TEST_ASSERT_FALSE(sm.hourly);
+    TEST_ASSERT_EQUAL_UINT32(0, sm.reached_streak);
+    TEST_ASSERT_TRUE(ntrip_sm_persist_due(&sm));   /* the stored hourly flag goes too */
+    ntrip_sm_sent(&sm, 2000, t + 40000);
+    uint32_t d = ntrip_sm_failed(&sm, &k_reached, t + 40000, MID);
+    TEST_ASSERT_TRUE(d < NTRIP_HOURLY_MS);
+    TEST_ASSERT_EQUAL_UINT32(300000, d);   /* the attempt count kept escalating: the polite cap */
 }
 
 TEST_CASE("ntrip credential hash and Onocoy offline budget", "[ntrip]")

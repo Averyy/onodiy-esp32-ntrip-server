@@ -149,7 +149,7 @@ um98x_txn_action_t um98x_txn_poll(um98x_txn_t *t, int64_t now_ms, int64_t *wake_
     }
 
     if (t->kind == UM98X_TXN_VERSION_RESTART && now_ms >= t->end_ms) {
-        finish(t, UM98X_TXN_TIMEOUT, now_ms);
+        finish(t, t->rejects > 0 ? UM98X_TXN_REJECTED : UM98X_TXN_TIMEOUT, now_ms);
         return UM98X_TXN_ACT_DONE;
     }
 
@@ -159,7 +159,8 @@ um98x_txn_action_t um98x_txn_poll(um98x_txn_t *t, int64_t now_ms, int64_t *wake_
         int64_t expired = t->deadline_ms;
         t->deadline_ms = UM98X_NEVER;
         if (t->sends >= t->max_sends) {
-            finish(t, UM98X_TXN_TIMEOUT, now_ms);
+            /* A version query that only drew negative replies says so. */
+            finish(t, (!command_like(t) && t->rejects > 0) ? UM98X_TXN_REJECTED : UM98X_TXN_TIMEOUT, now_ms);
             return UM98X_TXN_ACT_DONE;
         }
         if (command_like(t)) {
@@ -239,20 +240,20 @@ static void on_reject(um98x_txn_t *t, const um98x_line_t *l, int64_t now_ms)
     if (t->rejects < UINT8_MAX) {
         t->rejects++;
     }
-    if (t->rejects >= UM98X_MAX_REJECTS) {
+    if (!command_like(t)) {
+        /* Version queries keep their own schedule (tries, or polling until
+         * end_ms after a restart, whose parser may answer with a failure
+         * text while it boots): they end on the log, the try count or
+         * end_ms; the reason is kept. */
+        return;
+    }
+    if (t->rejects >= UM98X_MAX_REJECTS || t->sends >= t->max_sends) {
         finish(t, UM98X_TXN_REJECTED, now_ms);
         return;
     }
-    if (command_like(t)) {
-        if (t->sends >= t->max_sends) {
-            finish(t, UM98X_TXN_REJECTED, now_ms);
-            return;
-        }
-        /* Possibly garbled on the way in: send it once more. */
-        t->deadline_ms = UM98X_NEVER;
-        t->next_send_ms = now_ms + UM98X_PACING_MS;
-    }
-    /* Version queries keep their own schedule. */
+    /* Possibly garbled on the way in: send it once more. */
+    t->deadline_ms = UM98X_NEVER;
+    t->next_send_ms = now_ms + UM98X_PACING_MS;
 }
 
 bool um98x_txn_on_line(um98x_txn_t *t, const char *line, size_t len, const um98x_line_t *l, int64_t now_ms)

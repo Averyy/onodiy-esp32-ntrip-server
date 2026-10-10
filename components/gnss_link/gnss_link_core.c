@@ -104,9 +104,14 @@ bool gnss_link_core_on_event(gnss_link_core_t *c, gnss_link_ev_t ev)
     switch (ev) {
     case GNSS_LINK_EV_FIFO_OVF:
         c->stats.hw_fifo_overflows++;
+        c->overflow_seen = true;
         return true;
     case GNSS_LINK_EV_BUFFER_FULL:
+        if (c->ring_full_seen) {
+            return false;   /* this episode was counted already (a full queue found it first) */
+        }
         c->stats.rx_buffer_full++;
+        c->ring_full_seen = true;
         return true;
     case GNSS_LINK_EV_FRAME_ERR:
     case GNSS_LINK_EV_PARITY_ERR:
@@ -118,6 +123,47 @@ bool gnss_link_core_on_event(gnss_link_core_t *c, gnss_link_ev_t ev)
         break;
     }
     return false;
+}
+
+bool gnss_link_core_ring_full(size_t buffered, size_t ring_size)
+{
+    return ring_size <= GNSS_LINK_HW_FIFO_LEN || buffered >= ring_size - GNSS_LINK_HW_FIFO_LEN;
+}
+
+bool gnss_link_core_on_queue_full(gnss_link_core_t *c, size_t buffered, size_t ring_size, bool count_drop)
+{
+    bool reset = false;
+    if (count_drop && !c->queue_full_seen) {
+        c->queue_full_seen = true;
+        c->stats.rx_events_dropped++;
+        reset = true;
+    }
+    if (gnss_link_core_ring_full(buffered, ring_size)) {
+        if (!c->ring_full_seen) {
+            c->ring_full_seen = true;
+            c->stats.rx_buffer_full++;
+            reset = true;
+        }
+        if (!c->overflow_seen) {
+            c->overflow_seen = true;
+            c->stats.hw_fifo_overflows++;
+            reset = true;
+        }
+    }
+    return reset;
+}
+
+void gnss_link_core_on_queue_ok(gnss_link_core_t *c)
+{
+    c->queue_full_seen = false;
+}
+
+void gnss_link_core_on_level(gnss_link_core_t *c, size_t buffered, size_t ring_size)
+{
+    if (!gnss_link_core_ring_full(buffered, ring_size)) {
+        c->ring_full_seen = false;
+        c->overflow_seen = false;
+    }
 }
 
 void gnss_link_core_on_rx(gnss_link_core_t *c, size_t n, int64_t now_us)

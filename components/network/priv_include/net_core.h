@@ -44,6 +44,23 @@ bool net_password_valid(const char *pass);
 /** Setup-AP password: 8-63 printable ASCII characters (WPA2 passphrase). */
 bool net_ap_password_valid(const char *pass);
 
+/** Stored station credentials, as read at start. */
+typedef enum {
+    NET_CRED_NONE = 0,       /**< no valid SSID stored: not configured (setup) */
+    NET_CRED_OK,             /**< SSID and password read ("" = an open network, stored as such) */
+    NET_CRED_UNREADABLE,     /**< an SSID is stored but its password could not be read (or is not valid) */
+} net_cred_t;
+
+/**
+ * What the station may use. Both values are always written together (an
+ * open network stores ""), and a damaged entry reads as "not found", so any
+ * failure to read the password of a stored SSID fails closed: the station
+ * stays unconfigured for this boot (the setup AP takes the credentials
+ * again) instead of dropping its security floor to an open network that
+ * carries the same name.
+ */
+net_cred_t net_sta_credentials(bool ssid_read, const char *ssid, bool pass_read, const char *pass);
+
 /** DHCP hostname: 1-32 characters [A-Za-z0-9-], not starting or ending with '-'. */
 bool net_hostname_valid(const char *name);
 

@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "gnss_rtcm3.h"
 #include "station_obs.h"
 #include "unity.h"
 
@@ -21,12 +22,18 @@ static const um98x_rtcm_out_t k_set[] = {
 
 static const stn_obs_opts_t k_opts = { .rtcm1230_ok = true, .surveying = false };
 
+/* One frame at t; an MSM carries the epoch time t (each output second its own epoch). */
+static void feed(stn_obs_t *o, uint16_t msg, int64_t t)
+{
+    stn_obs_feed(o, msg, gnss_rtcm3_msm_type(msg, NULL, NULL), (uint32_t)(t - T0), t);
+}
+
 /* Feed one second of output starting at t: every listed message once, except `skip`. */
 static void feed_second(stn_obs_t *o, int64_t t, const uint16_t *msgs, unsigned n, uint16_t skip)
 {
     for (unsigned i = 0; i < n; i++) {
         if (msgs[i] != skip) {
-            stn_obs_feed(o, msgs[i], t + 10 * (int64_t)i);
+            feed(o, msgs[i], t + 10 * (int64_t)i);
         }
     }
 }
@@ -48,7 +55,7 @@ TEST_CASE("observed set: unarmed is pending, silence ends as no RTCM after the w
     stn_obs_t o;
     stn_obs_clear(&o);
     TEST_ASSERT_EQUAL(STN_OBS_PENDING, stn_obs_eval(&o, &k_opts, T0, NULL));
-    stn_obs_feed(&o, 1077, T0);   /* ignored while not armed */
+    feed(&o, 1077, T0);   /* ignored while not armed */
     TEST_ASSERT_EQUAL_UINT32(0, o.frames);
 
     stn_obs_arm(&o, k_set, K_SET_N, T0);
@@ -105,9 +112,38 @@ TEST_CASE("observed set: an MSM faster than its period is drift", "[station]")
     stn_obs_arm(&o, k_set, K_SET_N, T0);
     for (int s = 0; s < 30; s++) {
         feed_second(&o, T0 + s * 1000, k_all, 8, 0);
-        stn_obs_feed(&o, 1127, T0 + s * 1000 + 500);   /* BeiDou at 2 Hz */
+        feed(&o, 1127, T0 + s * 1000 + 500);   /* BeiDou at 2 Hz: a second epoch every second */
     }
     uint16_t bad = 0;
+    TEST_ASSERT_EQUAL(STN_OBS_DRIFT, stn_obs_eval(&o, &k_opts, T0 + 30000, &bad));
+    TEST_ASSERT_EQUAL_UINT16(1127, bad);
+}
+
+TEST_CASE("observed set: a constellation split over several MSMs per epoch is one epoch", "[station]")
+{
+    /* About 25 BeiDou satellites on 3 signals (75 cells) do not fit one MSM
+     * (64 cells): the receiver sends two 1127 frames with the same epoch
+     * time every second. That is 1 Hz, not 2 Hz. */
+    stn_obs_t o;
+    stn_obs_arm(&o, k_set, K_SET_N, T0);
+    for (int s = 0; s < 30; s++) {
+        int64_t t = T0 + s * 1000;
+        feed_second(&o, t, k_all, 8, 0);   /* 1127 at t + 60 with epoch time t + 60 */
+        stn_obs_feed(&o, 1127, true, (uint32_t)(t + 60 - T0), t + 65);
+    }
+    uint16_t bad = 1;
+    TEST_ASSERT_EQUAL(STN_OBS_PASS, stn_obs_eval(&o, &k_opts, T0 + 30000, &bad));
+    TEST_ASSERT_EQUAL_UINT16(0, bad);
+    TEST_ASSERT_EQUAL_UINT32(30, o.seen[6]);   /* 1127: 30 epochs */
+
+    /* Frames without an epoch time (header not decoded) still count one by one. */
+    stn_obs_arm(&o, k_set, K_SET_N, T0);
+    for (int s = 0; s < 30; s++) {
+        int64_t t = T0 + s * 1000;
+        feed_second(&o, t, k_all, 8, 1127);
+        stn_obs_feed(&o, 1127, false, 0, t + 60);
+        stn_obs_feed(&o, 1127, false, 0, t + 65);
+    }
     TEST_ASSERT_EQUAL(STN_OBS_DRIFT, stn_obs_eval(&o, &k_opts, T0 + 30000, &bad));
     TEST_ASSERT_EQUAL_UINT16(1127, bad);
 }
@@ -122,15 +158,15 @@ TEST_CASE("observed set: an absent regional MSM is not drift, a too fast one is"
     /* QZSS at the horizon for a few seconds only: still fine. */
     stn_obs_arm(&o, k_set, K_SET_N, T0);
     end = run(&o, T0, 30, k_no_qzss, 7, 0);
-    stn_obs_feed(&o, 1117, T0 + 3000);
-    stn_obs_feed(&o, 1117, T0 + 4000);
+    feed(&o, 1117, T0 + 3000);
+    feed(&o, 1117, T0 + 4000);
     TEST_ASSERT_EQUAL(STN_OBS_PASS, stn_obs_eval(&o, &k_opts, end, NULL));
 
     /* QZSS at 2 Hz. */
     stn_obs_arm(&o, k_set, K_SET_N, T0);
     for (int s = 0; s < 30; s++) {
         feed_second(&o, T0 + s * 1000, k_all, 8, 0);
-        stn_obs_feed(&o, 1117, T0 + s * 1000 + 500);
+        feed(&o, 1117, T0 + s * 1000 + 500);
     }
     uint16_t bad = 0;
     TEST_ASSERT_EQUAL(STN_OBS_DRIFT, stn_obs_eval(&o, &k_opts, T0 + 30000, &bad));
@@ -177,14 +213,14 @@ TEST_CASE("observed set: slow station messages stretch the window; unchecked typ
     /* 1033 every 30 s: the window is 60 s; 1019 (ephemeris) is not checked. */
     TEST_ASSERT_EQUAL_INT64(60000, stn_obs_window_ms(&o));
     for (int s = 0; s < 60; s++) {
-        stn_obs_feed(&o, 1077, T0 + s * 1000);
+        feed(&o, 1077, T0 + s * 1000);
         if (s % 30 == 0) {
-            stn_obs_feed(&o, 1033, T0 + s * 1000 + 100);
+            feed(&o, 1033, T0 + s * 1000 + 100);
         }
     }
     TEST_ASSERT_EQUAL(STN_OBS_PENDING, stn_obs_eval(&o, &k_opts, T0 + 59999, NULL));
     TEST_ASSERT_EQUAL(STN_OBS_PASS, stn_obs_eval(&o, &k_opts, T0 + 60000, NULL));
     /* Extra messages the profile does not list are not drift. */
-    stn_obs_feed(&o, 1074, T0 + 60100);
+    feed(&o, 1074, T0 + 60100);
     TEST_ASSERT_EQUAL(STN_OBS_PASS, stn_obs_eval(&o, &k_opts, T0 + 60200, NULL));
 }

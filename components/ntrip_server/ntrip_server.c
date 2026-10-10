@@ -22,6 +22,18 @@
  *   - IP and Wi-Fi events, pause, per-slot stats and progress stamps,
  *     restart_slot, persistence of long backoffs in settings cstN/backoff.
  *
+ * Network state: with ESP-IDF's default station handlers a Wi-Fi disconnect
+ * takes the interface down at once: the address is cleared and lwIP aborts
+ * every TCP session bound to it (IP_EVENT_STA_LOST_IP only follows later,
+ * when the lost-IP timer runs out). So the network counts as up only from
+ * IP_EVENT_STA_GOT_IP, and as down from the disconnect (or a station stop,
+ * or LOST_IP) on; sessions then close as "no network", never as failures.
+ * Association alone is not enough: until DHCP has an address a connect
+ * fails with "no route" and would be counted. The flag is also checked
+ * against the interface itself (address and up state), so a session that
+ * the disconnect aborted is never counted even if that abort is seen before
+ * this file's event handler ran.
+ *
  * Nothing here logs a password, a request line, an Onocoy mountpoint or a
  * v2 username; reply text is shown sanitised with those values masked.
  */
@@ -106,6 +118,8 @@ _Static_assert(CONFIG_NTRIP_MAX_CASTERS <= 24, "one event-group bit per slot");
 #define LOW_HEAP_RETRY_MS   5000u
 #define STOP_WAIT_MS        2000u
 #define ONOCOY_LAG_MS       1000u
+#define NET_SETTLE_MS       200u    /* a failure while the network looks up: wait this long for a drop to show */
+#define NET_SETTLE_STEP_MS  20u
 #define CLOCK_VALID_UNIX    1704067200   /* 2024-01-01: before this the clock is not set */
 
 #define CMD_CONFIG  (1u << 0)
@@ -226,9 +240,9 @@ static char s_agent[NTRIP_AGENT_MAX];
 static volatile bool s_running;
 static volatile bool s_paused;
 static volatile bool s_shutdown;
-static volatile bool s_have_ip;
-static volatile bool s_wifi_up;
-static volatile uint32_t s_net_gen;
+static volatile bool s_net_up;           /* station got an IP and has not dropped since */
+static volatile uint32_t s_net_gen;      /* bumped when the address returns or changes: older sockets are dead */
+static esp_netif_t *volatile s_sta_netif;
 static volatile uint32_t s_tls_protected_waiting;
 
 /* ---- small helpers ------------------------------------------------------------ */
@@ -435,27 +449,43 @@ static ntrip_fields_t fields_of(const ntrip_caster_cfg_t *c)
 
 /* ---- network events --------------------------------------------------------------- */
 
+static esp_netif_t *sta_netif(void)
+{
+    esp_netif_t *sta = s_sta_netif;
+    if (sta == NULL) {
+        sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");   /* created once, never destroyed */
+        s_sta_netif = sta;
+    }
+    return sta;
+}
+
+/* The station interface is up with an address (lock-free reads of the netif). */
+static bool sta_has_address(void)
+{
+    esp_netif_t *sta = sta_netif();
+    esp_netif_ip_info_t ip;
+    return sta != NULL && esp_netif_is_netif_up(sta) && esp_netif_get_ip_info(sta, &ip) == ESP_OK &&
+           ip.ip.addr != 0;
+}
+
 static void on_net_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
     if (base == WIFI_EVENT) {
-        if (id == WIFI_EVENT_STA_CONNECTED) {
-            s_wifi_up = true;
-        } else if (id == WIFI_EVENT_STA_DISCONNECTED || id == WIFI_EVENT_STA_STOP) {
-            /* Keep sessions: TCP may survive a short blip; the write-stall
-             * watchdog and keepalive decide. Only new connects wait. */
-            s_wifi_up = false;
+        if (id == WIFI_EVENT_STA_DISCONNECTED || id == WIFI_EVENT_STA_STOP) {
+            /* The default handler clears the address now and lwIP aborts
+             * the sessions bound to it: they close as "no network". */
+            s_net_up = false;
         }
     } else if (base == IP_EVENT) {
         if (id == IP_EVENT_STA_GOT_IP) {
             const ip_event_got_ip_t *e = (const ip_event_got_ip_t *)data;
-            s_have_ip = true;
-            s_wifi_up = true;
-            if (e != NULL && e->ip_changed) {
-                s_net_gen++;   /* sockets bound to the old address are dead */
+            if (!s_net_up || (e != NULL && e->ip_changed)) {
+                s_net_gen++;   /* a socket from before this address is dead (the same lease reports no change) */
             }
+            s_net_up = true;
         } else if (id == IP_EVENT_STA_LOST_IP) {
-            s_have_ip = false;
+            s_net_up = false;
         }
     }
     kick_all();
@@ -463,12 +493,28 @@ static void on_net_event(void *arg, esp_event_base_t base, int32_t id, void *dat
 
 static void refresh_network_state(void)
 {
-    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    esp_netif_ip_info_t ip;
-    if (sta != NULL && esp_netif_get_ip_info(sta, &ip) == ESP_OK && ip.ip.addr != 0) {
-        s_have_ip = true;
-        s_wifi_up = true;
+    if (sta_has_address()) {
+        s_net_up = true;
     }
+}
+
+/* New connections and open sessions need the station's address. */
+static bool net_ready(void)
+{
+    return s_net_up && sta_has_address();
+}
+
+/*
+ * A failure while the network looks up: a drop that aborted the socket may
+ * not be visible yet (the abort happens inside the interface going down).
+ * Wait a moment for it before the failure is counted.
+ */
+static bool net_lost_settled(void)
+{
+    for (uint32_t waited = 0; net_ready() && waited < NET_SETTLE_MS; waited += NET_SETTLE_STEP_MS) {
+        vTaskDelay(pdMS_TO_TICKS(NET_SETTLE_STEP_MS));
+    }
+    return !net_ready();
 }
 
 /* ---- session I/O ------------------------------------------------------------------------ */
@@ -587,14 +633,14 @@ static void sess_wait(slot_t *s, bool for_write, uint32_t ms)
 /* Commands or events that end any attempt or session at once. */
 static bool hard_abort(slot_t *s)
 {
-    return s_shutdown || !s_running || !s_have_ip || (s->cmd & (CMD_CONFIG | CMD_RESTART)) != 0 ||
+    return s_shutdown || !s_running || !net_ready() || (s->cmd & (CMD_CONFIG | CMD_RESTART)) != 0 ||
            (s->open && s->net_gen != s_net_gen);
 }
 
-/* A connection attempt also stops for a pause or a Wi-Fi drop (nothing has been streamed yet). */
+/* A connection attempt also stops for a pause (nothing has been streamed yet). */
 static bool connect_abort(slot_t *s)
 {
-    return hard_abort(s) || s_paused || !s_wifi_up || !s->cfg.enabled;
+    return hard_abort(s) || s_paused || !s->cfg.enabled;
 }
 
 typedef enum { WR_DONE = 0, WR_STALL, WR_ERROR, WR_ABORT } write_result_t;
@@ -887,7 +933,13 @@ static io_result_t tls_connect(slot_t *s, ntrip_failure_t *f)
     return IO_FAIL;
 }
 
-/* At most one TLS handshake at a time; the protected slot is served first. */
+/*
+ * At most one TLS handshake at a time, the protected slot first. Taken right
+ * before the handshake (after the name lookup) and given back right after
+ * it, so a slow lookup never holds the protected slot back. A slot that is
+ * not protected hands the gate straight back if the protected slot started
+ * waiting while it was taking it.
+ */
 static bool tls_gate_take(slot_t *s)
 {
     bool prot = s->cfg.protected_slot;
@@ -902,9 +954,17 @@ static bool tls_gate_take(slot_t *s)
             continue;
         }
         got = xSemaphoreTake(s_tls_sem, pdMS_TO_TICKS(TICK_MS)) == pdTRUE;
+        if (got && !prot && __atomic_load_n(&s_tls_protected_waiting, __ATOMIC_SEQ_CST) > 0) {
+            xSemaphoreGive(s_tls_sem);   /* the protected slot goes first */
+            got = false;
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
     }
     if (prot) {
         __atomic_sub_fetch(&s_tls_protected_waiting, 1u, __ATOMIC_SEQ_CST);
+    }
+    if (got) {
+        s->gate_held = true;
     }
     return got;
 }
@@ -1025,6 +1085,9 @@ static io_result_t do_connect(slot_t *s, ntrip_failure_t *f)
         return IO_ABORT;
     }
     if (s->cfg.tls) {
+        if (!tls_gate_take(s)) {
+            return IO_ABORT;   /* ended while waiting for the gate: no attempt made */
+        }
         r = tls_connect(s, f);
         tls_gate_give(s);   /* handshake done: the next slot may start its own */
     } else {
@@ -1346,14 +1409,9 @@ static void count_failure(slot_t *s, const ntrip_failure_t *f, bool after_stream
     }
 }
 
-static bool link_up(void)
-{
-    return s_have_ip && s_wifi_up;
-}
-
 static void session_failed(slot_t *s, ntrip_cls_t cls, uint32_t now)
 {
-    if (!link_up()) {
+    if (net_lost_settled()) {
         /* The session died while the network was down: a drop, not a caster
          * failure; the gate waits for the network instead of a backoff. */
         session_close(s, false);
@@ -1386,10 +1444,6 @@ static void connect_once(slot_t *s, uint32_t now)
             return;
         }
         s->low_heap_wait = false;
-        if (!tls_gate_take(s)) {
-            return;   /* aborted while waiting: no attempt */
-        }
-        s->gate_held = true;
     }
     session_close(s, false);   /* never two sessions for a slot */
     uint32_t t0 = now_ms();
@@ -1401,9 +1455,9 @@ static void connect_once(slot_t *s, uint32_t now)
     ntrip_failure_t f;
     memset(&f, 0, sizeof(f));
     io_result_t r = do_connect(s, &f);
-    tls_gate_give(s);   /* if the attempt ended before the handshake */
+    tls_gate_give(s);   /* do_connect gives it back after the handshake: never left held */
     uint32_t t1 = now_ms();
-    if (r == IO_FAIL && !link_up()) {
+    if (r == IO_FAIL && net_lost_settled()) {
         r = IO_ABORT;   /* the network went down meanwhile: not a failure */
         ESP_LOGI(TAG, "cst%u (%s): attempt ended by a network loss (%s), not counted", (unsigned)s->idx, s->cfg.name,
                  k_class_name[f.cls]);
@@ -1565,10 +1619,11 @@ static void slot_task(void *arg)
         ensure_consumer(s, now);
         handle_commands(s, now);
 
+        bool net = net_ready();   /* the address goes with the link (see "Network state") */
         ntrip_sm_in_t in = {
             .enabled = s->cfg.enabled && s_running && !s_shutdown,
-            .have_ip = s_have_ip,
-            .link_up = link_up(),
+            .have_ip = net,
+            .link_up = net,
             .paused = s_paused,
             .fresh_data = s->consumer != NULL && hub_fresh(),
             .session_open = s->open,
@@ -1696,9 +1751,6 @@ esp_err_t ntrip_server_init(void)
     }
     if (err == ESP_OK) {
         err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP, on_net_event, NULL);
-    }
-    if (err == ESP_OK) {
-        err = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, on_net_event, NULL);
     }
     if (err == ESP_OK) {
         err = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, on_net_event, NULL);

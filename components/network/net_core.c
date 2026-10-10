@@ -72,6 +72,17 @@ bool net_password_valid(const char *pass)
     return n >= 8 && n <= 63 && printable(pass, n);
 }
 
+net_cred_t net_sta_credentials(bool ssid_read, const char *ssid, bool pass_read, const char *pass)
+{
+    if (!ssid_read || !net_ssid_valid(ssid)) {
+        return NET_CRED_NONE;
+    }
+    if (!pass_read || !net_password_valid(pass)) {
+        return NET_CRED_UNREADABLE;
+    }
+    return NET_CRED_OK;
+}
+
 bool net_ap_password_valid(const char *pass)
 {
     if (pass == NULL) {

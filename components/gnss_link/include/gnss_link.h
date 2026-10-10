@@ -23,11 +23,13 @@
  *            (gnss_link_raw_read). On release, the events queued meanwhile
  *            (overflow / buffer-full / line errors; up to 32) are added to
  *            the counters first, then input is flushed, the framer reset and
- *            the RX task resubscribed to the task watchdog. Once the event
- *            queue is full the driver drops further events: the received
- *            data is not lost, only those event counts run low. The framer
- *            is not fed during RAW, so its loader prompt detector is unused
- *            there; the flasher matches the loader's text itself.
+ *            the RX task resubscribed to the task watchdog. Nobody takes
+ *            events during RAW, so the queue fills and the driver drops
+ *            further events; a raw read that finds it full counts what is
+ *            queued, empties it and applies the full-queue rule below, so a
+ *            stall of the lease holder is counted like one of the RX task.
+ *            The framer is not fed during RAW, so its loader prompt detector
+ *            is unused there; the flasher matches the loader's text itself.
  *
  * A lease is required for COMMAND and RAW. Leases carry a generation number,
  * so a stale handle (after release) is rejected with ESP_ERR_INVALID_STATE
@@ -48,6 +50,20 @@
  * counter, reset the framer (the partial frame is counted as discarded) and
  * reading continues. The RX task never logs and never touches flash; it
  * only counts. The driver's interrupt is allocated on the RX task's core.
+ *
+ * Full event queue: the driver posts one data event per RX interrupt (about
+ * 120 B) and silently drops any event that finds the queue full. A reader
+ * stall therefore fills the queue with data events long before the 32 KB
+ * ring is full, and the buffer-full and overflow events of that stall are
+ * dropped. So whoever reads the ring (the RX task before it takes an event,
+ * the RAW lease holder before a read) first looks at the queue: found full,
+ * the queued events are counted and the queue emptied, rx_events_dropped
+ * counts the episode (not in RAW, where a full queue is normal), and a ring
+ * that is full at that moment counts as a buffer-full and as an overflow
+ * (inferred: with RX interrupts paused the 128-byte hardware FIFO overruns
+ * within 128 byte times, and its overflow events were dropped), each once
+ * per episode and only if the event itself did not count it. The framer is
+ * reset for every new episode.
  *
  * Only gnss_link changes the UART RX-FIFO-full threshold, and only right
  * after a baud change (gnss_link_init, gnss_link_set_baud, gnss_link_restart).
@@ -70,7 +86,8 @@
  * ~0.7 s at 460800.
  *
  * Counter units: events for the UART conditions (hw_fifo_overflows,
- * rx_buffer_full, line_errors; the bytes an overflow loses are unknown),
+ * rx_buffer_full, line_errors; the bytes an overflow loses are unknown;
+ * rx_events_dropped counts episodes of a full event queue),
  * bytes for byte counters, frames for frame counters. Input dropped on
  * purpose (a lease release, gnss_link_resync, gnss_link_restart, the bytes
  * that piled up before gnss_link_start) is read out and counted in
@@ -146,8 +163,13 @@ typedef struct {
     uint32_t baud;
     uint64_t rx_bytes;
     uint64_t tx_bytes;
-    uint32_t hw_fifo_overflows;    /**< UART hardware FIFO overrun events (real loss, size unknown) */
-    uint32_t rx_buffer_full;       /**< driver software buffer full events (back-pressure, no loss by itself) */
+    /** UART hardware FIFO overruns (real loss, size unknown): events, plus one
+     *  per stall inferred from a full ring found with a full event queue */
+    uint32_t hw_fifo_overflows;
+    /** driver software buffer full (back-pressure, no loss by itself): events,
+     *  or a full ring found with a full event queue */
+    uint32_t rx_buffer_full;
+    uint32_t rx_events_dropped;    /**< episodes of a full UART event queue: the counts above may be low */
     uint32_t line_errors;          /**< framing/parity/break events */
     uint64_t baud_switch_bytes;    /**< bytes discarded in the 20 ms after a baud change or reopen (expected) */
     uint64_t rtcm_held;            /**< CRC-valid RTCM frames not published because a lease was held (expected) */
@@ -193,8 +215,9 @@ gnss_link_mode_t gnss_link_get_mode(void);
  *
  * @param owner short label for logs/status (not copied: use a literal).
  * @return ESP_ERR_TIMEOUT if another lease is held (or a NULL-lease write
- *         did not finish) within timeout_ms, ESP_ERR_INVALID_ARG for mode
- *         STREAM/OFF or out == NULL, ESP_ERR_INVALID_STATE before
+ *         did not finish) within timeout_ms, or the RX task did not take
+ *         the request within 1 s (nothing changed); ESP_ERR_INVALID_ARG for
+ *         mode STREAM/OFF or out == NULL, ESP_ERR_INVALID_STATE before
  *         gnss_link_init().
  */
 esp_err_t gnss_link_acquire(gnss_link_mode_t mode, const char *owner, uint32_t timeout_ms,
@@ -205,7 +228,10 @@ esp_err_t gnss_link_acquire(gnss_link_mode_t mode, const char *owner, uint32_t t
  * counters first; then stale input is flushed (counted in flushed_bytes),
  * the framer reset (sinks get on_reset) and the RX task resubscribed to the
  * task watchdog. The loader prompt detector is disarmed. The handle is stale
- * afterwards. ESP_ERR_INVALID_STATE for a stale or unknown handle.
+ * afterwards. ESP_ERR_INVALID_STATE for a stale or unknown handle (nothing
+ * held). Never times out: the release waits until the RX task has taken it
+ * (it always gets to it, through its event queue or its task
+ * notification), so a lease is never left held behind a failed release.
  */
 esp_err_t gnss_link_release(gnss_link_lease_t lease);
 
@@ -213,8 +239,9 @@ esp_err_t gnss_link_release(gnss_link_lease_t lease);
  * Arm or disarm the framer's loader prompt detector (COMMAND lease
  * required). Armed only while the station looks for the receiver
  * (detection); a hit reaches the on_prompt sink. Releasing the lease disarms
- * it. RAW sessions never use it (see RAW above). PROVISIONAL, to be
- * confirmed on hardware.
+ * it. RAW sessions never use it (see RAW above). ESP_ERR_TIMEOUT if the RX
+ * task did not take the request within 1 s (nothing changed). PROVISIONAL,
+ * to be confirmed on hardware.
  */
 esp_err_t gnss_link_set_prompt_detect(gnss_link_lease_t lease, bool armed);
 
@@ -225,7 +252,9 @@ esp_err_t gnss_link_set_prompt_detect(gnss_link_lease_t lease, bool armed);
  * input for 20 ms (counted in baud_switch_bytes) and resets the framer
  * (sinks get on_reset; in RAW the framer is reset on release instead).
  * Returns after the 20 ms, so every byte read afterwards arrived at the new
- * rate. PROVISIONAL, to be confirmed on hardware.
+ * rate. ESP_ERR_TIMEOUT if a writer held the line for 1 s or the RX task did
+ * not take the request within 1 s (the baud is unchanged then).
+ * PROVISIONAL, to be confirmed on hardware.
  */
 esp_err_t gnss_link_set_baud(gnss_link_lease_t lease, uint32_t baud);
 
@@ -243,8 +272,9 @@ esp_err_t gnss_link_send_break(gnss_link_lease_t lease, uint32_t duration_ms);
  * is taken, so no post-lease pause follows) or with the COMMAND lease. The
  * RX task does it between two reads, so no byte is read twice. Sinks get
  * on_reset; counters are kept (the dropped bytes count in flushed_bytes).
- * ESP_ERR_INVALID_STATE in any other mode/lease combination. PROVISIONAL, to
- * be confirmed on hardware.
+ * ESP_ERR_INVALID_STATE in any other mode/lease combination, ESP_ERR_TIMEOUT
+ * if the RX task did not take the request within 1 s (nothing done).
+ * PROVISIONAL, to be confirmed on hardware.
  */
 esp_err_t gnss_link_resync(gnss_link_lease_t lease);
 
@@ -256,7 +286,9 @@ esp_err_t gnss_link_resync(gnss_link_lease_t lease);
  * With lease == NULL in STREAM mode (the RX task reopens and keeps
  * streaming), or with the COMMAND lease. Counters are kept. If the reinstall
  * fails the link stays closed (reads and writes fail) until a later restart
- * succeeds. PROVISIONAL, to be confirmed on hardware.
+ * succeeds. ESP_ERR_TIMEOUT if a writer held the line for 1 s or the RX task
+ * did not take the request within 1 s (nothing done). PROVISIONAL, to be
+ * confirmed on hardware.
  */
 esp_err_t gnss_link_restart(gnss_link_lease_t lease);
 

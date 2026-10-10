@@ -42,9 +42,12 @@
  *    restart evidence. Nothing within 20 s of the acknowledgement: the
  *    receiver came back at its saved baud, so detection runs inside the same
  *    session (short list, then full list) and the session continues there;
- *    not found = the receiver is lost (nothing more can be sent). Then UNLOG
- *    COM1 again (the restart restored the saved outputs) and the read-back
- *    again: the signal group must now match;
+ *    not found = the receiver is lost (nothing more can be sent). No
+ *    acknowledgement at all (the restart may swallow it, and a receiver back
+ *    at another baud answers no resend) is handled the same way, timed from
+ *    the first send; only a negative reply fails the step. Then UNLOG COM1
+ *    again (the restart restored the saved outputs) and the read-back again:
+ *    the signal group must now match;
  *  - baud change: CONFIG COM1 <new> without waiting for its acknowledgement
  *    (the link itself changes), 200 ms, host baud, 100 ms, then a version
  *    log within 2000 ms (one retry). Failure: CONFIG COM1 <old> at the new
@@ -53,7 +56,14 @@
  *  - a fatal failure stops the session (no SAVECONFIG). If any command was
  *    accepted, RESET (a plain restart to the saved configuration): the host
  *    goes back to the saved baud, then version polling for 20 s; nothing
- *    there: 10 s more at the baud used before the RESET.
+ *    there: 10 s more at the baud used before the RESET. answer_baud is
+ *    where the receiver last answered (a detection inside the session, then
+ *    the rollback: its answer, or unknown without one).
+ *
+ * Receiver reset (um98x_exec_reset, a recovery step): RESET written once,
+ * never resent (a resend would reset it again), with the restart marked as
+ * our own until its version log arrives, so neither its banner nor that log
+ * counts as an unsolicited restart.
  *
  * Status: timings and texts PROVISIONAL, to be confirmed on hardware.
  */
@@ -228,6 +238,14 @@ um98x_res_t um98x_exec_leave_loader(um98x_exec_t *ex, uint32_t timeout_ms);
  */
 um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, const um98x_apply_opts_t *opts,
                              gnss_versiona_t *identity, uint32_t stored_baud, um98x_apply_result_t *r);
+
+/**
+ * The receiver's RESET (see "Receiver reset" above): banner up to 15 s, then
+ * the version polled every second until 20 s after it (or after the write).
+ * @return OK (it answered after the restart), E_TIMEOUT (no answer; the
+ *         RESET went out), E_LINK (the write failed: nothing was sent).
+ */
+um98x_res_t um98x_exec_reset(um98x_exec_t *ex);
 
 /**
  * Last resort after a failed session: the profile's RTCM outputs only (no

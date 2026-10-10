@@ -31,6 +31,7 @@
 #include "freertos/task.h"
 #include "gnss_link.h"
 #include "gnss_obs.h"
+#include "gnss_rtcm3.h"
 #include "ledger.h"
 #include "lifecycle.h"
 #include "ntrip_server.h"
@@ -407,6 +408,10 @@ static void on_rtcm_frame(const uint8_t *frame, size_t len, uint16_t msg_type, v
         (void)rtcm_hub_publish(frame, len, msg_type);
     }
     gnss_obs_feed_rtcm(frame, len, msg_type);
+    /* A busy constellation comes as several MSMs of one type per epoch:
+     * the observed-set tracker counts epochs. */
+    gnss_rtcm3_msm_t msm;
+    bool has_epoch = !excluded && gnss_rtcm3_msm_type(msg_type, NULL, NULL) && gnss_rtcm3_msm_decode(frame, len, &msm);
     int64_t t = now_ms();
     portENTER_CRITICAL(&s_lock);
     if (excluded) {
@@ -415,7 +420,7 @@ static void on_rtcm_frame(const uint8_t *frame, size_t len, uint16_t msg_type, v
     if (msg_type == 1005 || msg_type == 1006) {
         s_arp_frames++;
     }
-    stn_obs_feed(&s_obs, msg_type, t);
+    stn_obs_feed(&s_obs, msg_type, has_epoch, has_epoch ? msm.epoch_time : 0, t);
     portEXIT_CRITICAL(&s_lock);
 }
 
@@ -471,13 +476,25 @@ static esp_err_t lease_take(const char *owner)
     return err;
 }
 
+/* Release a lease of ours. A release never times out; an error means the
+ * handle was stale (nothing of ours is held), so the handle is dropped
+ * either way. */
+static void release_lease(gnss_link_lease_t *lease, const char *what)
+{
+    if (*lease == NULL) {
+        return;
+    }
+    esp_err_t err = gnss_link_release(*lease);   /* framer reset: hub sticky copies cleared */
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "%s lease release: %s", what, esp_err_to_name(err));
+    }
+    *lease = NULL;
+    mark_released();
+}
+
 static void lease_drop(void)
 {
-    if (s_lease != NULL) {
-        (void)gnss_link_release(s_lease);   /* framer reset: hub sticky copies cleared */
-        s_lease = NULL;
-        mark_released();
-    }
+    release_lease(&s_lease, "job");
 }
 
 static bool receiver_fresh(void)
@@ -736,6 +753,7 @@ static void job_apply(const stn_job_t *job, stn_result_t *r)
 
     r->mode_sent = s_apply.mode_sent;
     r->mode_ack_ms = s_apply.mode_ack_ms;
+    r->restarted = s_apply.signal_group_sent || (s_apply.rolled_back && s_apply.rollback_answered);
     r->receiver_lost = s_apply.receiver_lost || err == ESP_ERR_NOT_FOUND;
     r->answered = s_apply.rolled_back ? s_apply.rollback_answered : answered_since(t0);
     switch (err) {
@@ -794,14 +812,14 @@ static void job_receiver_reset(stn_result_t *r)
         r->err = STN_E_STATE;
         return;
     }
-    /* One write, no acknowledgement awaited (it may be lost in the restart
-     * itself) and never resent: a resend would reset the receiver again.
-     * The restart is then handled like any other (identity in restart mode,
-     * the applied check 30 s later). */
-    static const char k_reset[] = "\r\nRESET\r\n";
-    esp_err_t err = gnss_link_write(s_lease, k_reset, sizeof(k_reset) - 1, LEASE_WAIT_MS);
+    /* One write, never resent (a resend would reset the receiver again),
+     * through the command layer so the restart counts as ours: its banner
+     * is not reported as an unsolicited restart. The restart is then handled
+     * like any other (identity in restart mode, the applied check 30 s
+     * later). */
+    esp_err_t err = um98x_ctl_reset_receiver(s_lease);
     lease_drop();
-    r->err = (err == ESP_OK) ? STN_OK : STN_E_STATE;
+    r->err = (err == ESP_ERR_INVALID_STATE) ? STN_E_STATE : STN_OK;
     ESP_LOGW(TAG, "receiver reset command: %s", esp_err_to_name(err));
 }
 
@@ -984,11 +1002,7 @@ static void service(const stn_in_t *in)
 
     if (s_journal_cleared) {
         s_journal_cleared = false;
-        if (s_hold_lease != NULL) {
-            (void)gnss_link_release(s_hold_lease);
-            s_hold_lease = NULL;
-            mark_released();
-        }
+        release_lease(&s_hold_lease, "listen-only");
         portENTER_CRITICAL(&s_lock);
         stn_journal_cleared(&s_core, in);
         portEXIT_CRITICAL(&s_lock);
@@ -1026,11 +1040,7 @@ static void service(const stn_in_t *in)
  * are released, so app updates and reboots work again). */
 static void flash_recovery_begin(void)
 {
-    if (s_boot_lease != NULL) {
-        (void)gnss_link_release(s_boot_lease);
-        s_boot_lease = NULL;
-        mark_released();
-    }
+    release_lease(&s_boot_lease, "boot");
     if (gnss_link_acquire(GNSS_LINK_MODE_COMMAND, "flash journal", LEASE_WAIT_MS, &s_hold_lease) != ESP_OK) {
         s_hold_lease = NULL;
         ESP_LOGE(TAG, "no listen-only lease for the open flash journal");
@@ -1075,10 +1085,8 @@ static void station_task(void *arg)
     portEXIT_CRITICAL(&s_lock);
     if (journal_open(jerr)) {
         flash_recovery_begin();
-    } else if (s_boot_lease != NULL) {
-        (void)gnss_link_release(s_boot_lease);
-        s_boot_lease = NULL;
-        mark_released();
+    } else {
+        release_lease(&s_boot_lease, "boot");
     }
 
     stn_in_t in;
@@ -1269,6 +1277,11 @@ esp_err_t station_get_status(station_status_t *out)
         }
     }
     out->rtcm_excluded = excluded;
+    /* Live, not from the last published status: a job takes and drops its
+     * lease while it runs, between two publications. Every lease on the link
+     * is the station's (its jobs, the boot lease, the listen-only lease). */
+    gnss_link_mode_t mode = gnss_link_get_mode();
+    out->lease_held = (mode == GNSS_LINK_MODE_COMMAND || mode == GNSS_LINK_MODE_RAW);
     if (released == INT64_MIN) {
         out->since_lease_release_ms = UINT32_MAX;
     } else {

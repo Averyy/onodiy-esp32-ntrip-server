@@ -45,12 +45,22 @@
  * row; after the window AUTH and CONFIG follow the profile's AUTH row, and
  * persistent MOUNT_BUSY escalates to it after 10 min. A polite slot makes at
  * most one attempt per hour after 20 consecutive failures that reached the
- * caster. Entering AUTH, CONFIG, BANNED or the hourly mode persists {class,
- * attempt, remaining delay} (settings cstN/backoff, written only on class
- * changes) so a reboot never resets a long backoff; success or a user edit
- * clears it. Network down, source stalls, pauses and user edits are never
+ * caster, until the caster accepts it again or the user edits the slot.
+ * Entering AUTH, CONFIG, BANNED or the hourly mode persists {class, attempt,
+ * remaining delay} (settings cstN/backoff), and so does every further step
+ * of such a row until its last entry repeats, and a polite slot's count of
+ * caster-reaching failures; after a reboot the slot waits at least the full
+ * delay of the stored step, so a reboot loop never shortens a long backoff.
+ * Success or a user edit clears it. Network down (from the Wi-Fi disconnect
+ * until the next IP), source stalls, pauses and user edits are never
  * failures; a healthy session (>= 60 s and >= 5 KB) resets the attempt count.
  * The tables live in a pure core with host tests.
+ *
+ * Network events: ESP-IDF's default station handlers clear the address at a
+ * Wi-Fi disconnect and lwIP aborts every session bound to it, so sessions
+ * do not survive a Wi-Fi drop: they close as "no network" (not a failure)
+ * and new connections wait for IP_EVENT_STA_GOT_IP (the Onocoy slot at
+ * once, the others 0-10 s later at random).
  *
  * Protected slot: the Onocoy slot is "protected": its availability drives
  * the daily downtime budget and the network recovery ladder, and its

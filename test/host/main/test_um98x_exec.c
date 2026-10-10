@@ -63,6 +63,9 @@ typedef struct {
     bool ignore_baud_cmd;
     bool dies_on_restart;
     bool sg_sticky;
+    bool sg_no_ack;      /* a signal-group change restarts the receiver before its ack goes out */
+    uint32_t deaf_baud;  /* the next deaf_n commands received at this baud are lost */
+    int deaf_n;
     char drop_prefix[40];
     int drop_n;
     char reject_prefix[40];
@@ -161,6 +164,10 @@ static void receive(sim_t *s, const char *cmd)
         s->drop_n--;
         return;
     }
+    if (s->deaf_n > 0 && s->rx_baud == s->deaf_baud) {
+        s->deaf_n--;
+        return;
+    }
     if (s->reject_n > 0 && starts(up, s->reject_prefix)) {
         s->reject_n--;
         reply(s, cmd, "PARSING FAILD NO MATCHING FUNC", 30);
@@ -188,8 +195,11 @@ static void receive(sim_t *s, const char *cmd)
         snprintf(log, sizeof(log), "MODEA,COM1,0,0.0,FINE,0,0.000,0,0,0;%s", s->mode);
         emit_checked(s, '#', log, 50);
     } else if (sscanf(up, "CONFIG SIGNALGROUP %u %u", &a, &b) == 2) {
-        reply(s, cmd, "OK", 30);
-        if (a != s->sg_m || b != s->sg_s) {
+        bool change = a != s->sg_m || b != s->sg_s;
+        if (!(change && s->sg_no_ack)) {
+            reply(s, cmd, "OK", 30);
+        }
+        if (change) {
             if (!s->sg_sticky) {
                 s->sg_m = (uint8_t)a;   /* saves itself */
                 s->sg_s = (uint8_t)b;
@@ -750,6 +760,100 @@ TEST_CASE("exec: after a signal-group restart at the saved baud, detection finds
     int unlog2 = nth(s, "UNLOG COM1", 1);
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, unlog2);
     TEST_ASSERT_EQUAL_UINT32(115200, s->rx[unlog2].host_baud);
+}
+
+TEST_CASE("exec: an unacknowledged signal group that lands at the saved baud is found in the session", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    /* COM1 at an unsaved 460800; the receiver resets before its ack goes
+     * out and comes back at its saved 115200, where no resend reaches it. */
+    s->host_baud = 460800;
+    s->rx_baud = 460800;
+    s->saved_baud = 115200;
+    s->sg_no_ack = true;
+    strcpy(s->saved_mode, "MODE BASE 1234 TIME 600 0");
+    strcpy(s->mode, s->saved_mode);
+    um98x_base_profile_t p;
+    default_profile(&p);
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 460800, &r));
+    TEST_ASSERT_TRUE(r.signal_group_sent);
+    TEST_ASSERT_EQUAL_UINT32(115200, r.found_baud);
+    TEST_ASSERT_EQUAL_UINT32(115200, r.answer_baud);
+    TEST_ASSERT_EQUAL_UINT32(115200, r.baud);
+    TEST_ASSERT_TRUE(r.saved);
+    TEST_ASSERT_EQUAL_STRING("", r.failed_cmd);
+    TEST_ASSERT_EQUAL_UINT8(3, s->sg_m);
+    TEST_ASSERT_EQUAL_INT(4, count(s, "CONFIG SIGNALGROUP"));   /* the step's own resends, then no more */
+    TEST_ASSERT_EQUAL_INT(0, count(s, "RESET"));
+    TEST_ASSERT_EQUAL_UINT64(0, s->ch.stats.restarts);
+    TEST_ASSERT_FALSE(s->ch.expect_restart);
+
+    /* A negative reply still fails the step at once. */
+    s = sim_init();
+    snprintf(s->reject_prefix, sizeof(s->reject_prefix), "CONFIG SIGNALGROUP");
+    s->reject_n = 10;
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_EQUAL_STRING("CONFIG SIGNALGROUP 3 6", r.failed_cmd);
+    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", r.reason);
+    TEST_ASSERT_EQUAL_INT(2, count(s, "CONFIG SIGNALGROUP"));
+    TEST_ASSERT_TRUE(r.rolled_back);
+}
+
+TEST_CASE("exec: after a rollback the receiver's baud is where it answered last", "[um98x_exec]")
+{
+    /* CONFIG COM1 460800 takes effect, but the checks at 460800 go unheard
+     * and so does CONFIG COM1 115200; detection finds it at 460800; the
+     * rollback's RESET brings it back to its saved 115200, where it answers. */
+    sim_t *s = sim_init();
+    configured(s);
+    s->deaf_baud = 460800;
+    s->deaf_n = 3;
+    um98x_base_profile_t p;
+    default_profile(&p);
+    p.com1_baud = 460800;
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_EQUAL_UINT32(460800, r.found_baud);
+    TEST_ASSERT_TRUE(r.rolled_back);
+    TEST_ASSERT_TRUE(r.rollback_answered);
+    TEST_ASSERT_EQUAL_UINT32(115200, s->rx_baud);
+    TEST_ASSERT_EQUAL_UINT32(115200, r.answer_baud);   /* not the 460800 the detection saw */
+    TEST_ASSERT_EQUAL_UINT32(115200, r.baud);
+
+    /* A RESET nobody answers leaves the receiver's baud unknown. */
+    s = sim_init();
+    configured(s);
+    snprintf(s->reject_prefix, sizeof(s->reject_prefix), "RTCM1077");
+    s->reject_n = 10;
+    s->dies_on_restart = true;
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.rolled_back);
+    TEST_ASSERT_FALSE(r.rollback_answered);
+    TEST_ASSERT_EQUAL_UINT32(0, r.answer_baud);
+}
+
+TEST_CASE("exec: the recovery RESET is our own restart, sent once", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    configured(s);
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_reset(&s->ex));
+    TEST_ASSERT_EQUAL_INT(1, count(s, "RESET"));
+    TEST_ASSERT_EQUAL_UINT64(1, s->ch.stats.banners);
+    TEST_ASSERT_EQUAL_UINT64(0, s->ch.stats.restarts);   /* not reported as the receiver's own */
+    TEST_ASSERT_FALSE(s->ch.expect_restart);
+    TEST_ASSERT_EQUAL_UINT32(0, s->events & UM98X_CHAN_RESTART);
+
+    /* No answer: never resent. */
+    s = sim_init();
+    s->dies_on_restart = true;
+    TEST_ASSERT_EQUAL(UM98X_E_TIMEOUT, um98x_exec_reset(&s->ex));
+    TEST_ASSERT_EQUAL_INT(1, count(s, "RESET"));
+    TEST_ASSERT_FALSE(s->ch.expect_restart);
 }
 
 TEST_CASE("exec: a receiver lost after its signal-group restart gets nothing more", "[um98x_exec]")

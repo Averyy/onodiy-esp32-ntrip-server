@@ -546,6 +546,7 @@ static um98x_res_t find_receiver(session_t *s, uint32_t first_baud, bool full, u
     if (res == UM98X_OK) {
         *found = d.baud;
         s->r->found_baud = d.baud;
+        s->r->answer_baud = d.baud;
     }
     return res;
 }
@@ -561,7 +562,9 @@ static um98x_res_t signal_group(session_t *s)
     set_expect_restart(ex, true);
     uint64_t banners0 = banner_count(ex);
     um98x_txn_status_t st;
-    if (step(s, UM98X_TXN_COMMAND, cmd, true, true, &st) != UM98X_OK) {
+    (void)step(s, UM98X_TXN_COMMAND, cmd, true, false, &st);
+    if (st == UM98X_TXN_REJECTED || st == UM98X_TXN_LINK_ERROR) {
+        fail_txn(s, cmd, st);
         set_expect_restart(ex, false);
         return UM98X_E_FAILED;
     }
@@ -569,8 +572,16 @@ static um98x_res_t signal_group(session_t *s)
     s->r->signal_group_sent = true;
 
     /* Banner (at most 15 s after the acknowledgement), then the version
-     * polled every second until 20 s after the restart evidence. */
+     * polled every second until 20 s after the restart evidence. No
+     * acknowledgement at all (it may be lost in the restart itself, and a
+     * receiver back at another baud answers none of the resends): the same
+     * as a restart nothing was heard of, timed from the first send. */
     int64_t t_ack = txn_done_ms(ex);
+    if (st == UM98X_TXN_TIMEOUT) {
+        lock(ex);
+        t_ack = ex->ch->txn.first_sent_ms;
+        unlock(ex);
+    }
     bool banner = (st == UM98X_TXN_RESTARTED) || wait_banner(ex, banners0, t_ack + UM98X_RESTART_BANNER_MS);
     int64_t end = t_ack + UM98X_RESTART_LOST_MS;
     if (banner) {
@@ -686,6 +697,10 @@ static void rollback(session_t *s)
         }
     }
     s->r->rollback_answered = (res == UM98X_OK);
+    if (s->r->rolled_back) {
+        /* After the RESET only an answer says where the receiver is. */
+        s->r->answer_baud = (res == UM98X_OK) ? pt->get_baud(pt->ctx) : 0;
+    }
     set_expect_restart(ex, false);
 }
 
@@ -829,6 +844,30 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
         return res;
     }
     return UM98X_E_FAILED;
+}
+
+um98x_res_t um98x_exec_reset(um98x_exec_t *ex)
+{
+    const um98x_port_t *pt = ex->port;
+    /* Our own restart: its banner and the version log after it are not
+     * restart evidence. */
+    set_expect_restart(ex, true);
+    uint64_t banners0 = banner_count(ex);
+    pace(ex);
+    if (!pt->write(pt->ctx, "\r\n", 2) || !raw_line(ex, UM98X_CMD_RESET)) {
+        set_expect_restart(ex, false);
+        return UM98X_E_LINK;
+    }
+    int64_t t0 = now_ms(ex);
+    int64_t end = t0 + UM98X_RESTART_LOST_MS;
+    if (wait_banner(ex, banners0, t0 + UM98X_RESTART_BANNER_MS)) {
+        lock(ex);
+        end = ex->ch->last_banner_ms + UM98X_VERSION_RESTART_SPAN_MS;
+        unlock(ex);
+    }
+    um98x_res_t res = um98x_exec_version(ex, true, end, NULL, NULL);
+    set_expect_restart(ex, false);
+    return res == UM98X_OK ? UM98X_OK : UM98X_E_TIMEOUT;
 }
 
 um98x_res_t um98x_exec_restore_rtcm(um98x_exec_t *ex, const um98x_base_profile_t *p, um98x_apply_result_t *r)

@@ -14,10 +14,14 @@
  * STN_OBS_WINDOW_MS, or twice the longest period of a checked message if
  * that is longer.
  *
+ * MSM types are counted in epochs, not frames: an MSM carries at most 64
+ * cells (satellites x signals), so a busy constellation arrives as several
+ * frames of the same type with the same epoch time, and those count once.
+ *
  * Verdict at the end of the window:
  *  - MSM types of the global constellations (GPS, GLONASS, Galileo, BeiDou)
  *    must arrive at their period: at least half and at most one and a half
- *    times (plus one) the count the period gives over the window;
+ *    times (plus one) the count of epochs the period gives over the window;
  *  - MSM types of regional systems (QZSS, NavIC) are checked the same way
  *    only when they arrive at all: outside their service area the receiver
  *    tracks no satellite of the system and sends nothing for it, which is
@@ -64,8 +68,10 @@ typedef struct {
     uint8_t count;
     uint16_t msg[STN_OBS_MAX];
     uint16_t period_s[STN_OBS_MAX];
-    uint32_t seen[STN_OBS_MAX];        /**< frames of that type since the window started */
+    uint32_t seen[STN_OBS_MAX];        /**< frames (MSM: epochs) of that type since the window started */
     int64_t last_ms[STN_OBS_MAX];      /**< latest frame of that type (STN_NEVER = none) */
+    bool epoch_valid[STN_OBS_MAX];     /**< MSM: epoch[] holds the epoch time last counted */
+    uint32_t epoch[STN_OBS_MAX];
     int64_t armed_ms;
     int64_t first_ms;                  /**< first RTCM frame since arming: window start (STN_NEVER = none yet) */
     uint32_t frames;                   /**< RTCM frames of any type since the window started */
@@ -82,8 +88,14 @@ void stn_obs_clear(stn_obs_t *o);
 /** Start a new window for these messages (the profile's RTCM list). */
 void stn_obs_arm(stn_obs_t *o, const um98x_rtcm_out_t *rtcm, uint8_t count, int64_t now_ms);
 
-/** One RTCM frame of type msg (GNSS RX task: constant time per profile entry, never blocks). */
-void stn_obs_feed(stn_obs_t *o, uint16_t msg, int64_t now_ms);
+/**
+ * One RTCM frame of type msg (GNSS RX task: constant time per profile entry,
+ * never blocks). has_epoch / epoch_time: an MSM's epoch time as sent (the
+ * 30-bit field); a frame with the epoch time of the last counted frame of
+ * its type is part of the same epoch and is not counted again. Without an
+ * epoch time (not an MSM, or its header did not decode) every frame counts.
+ */
+void stn_obs_feed(stn_obs_t *o, uint16_t msg, bool has_epoch, uint32_t epoch_time, int64_t now_ms);
 
 /** Window length for the armed message list (ms). */
 int64_t stn_obs_window_ms(const stn_obs_t *o);

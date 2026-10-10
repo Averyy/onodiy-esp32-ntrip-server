@@ -47,8 +47,11 @@
 #include "sdkconfig.h"
 #include "settings.h"
 #include "settings_schema.h"
+#include "soc/soc_caps.h"
 
 static const char *TAG = "gnss_link";
+
+_Static_assert(SOC_UART_FIFO_LEN == GNSS_LINK_HW_FIFO_LEN, "the full-ring mark assumes this FIFO length");
 
 #if CONFIG_FREERTOS_UNICORE
 #define RX_CORE 0
@@ -452,24 +455,65 @@ static void settle_and_discard(uint32_t baud)
     taskEXIT_CRITICAL(&s_lock);
 }
 
-/* Events queued while nobody read the queue. count = add them to the counters. */
-static void take_pending_events(bool count)
+/* Events queued while nobody read the queue. count = add them to the counters.
+ * Returns true if one of them asks for a framer reset. */
+static bool take_pending_events(bool count)
 {
     taskENTER_CRITICAL(&s_lock);
     QueueHandle_t q = s_events;
     taskEXIT_CRITICAL(&s_lock);
     if (q == NULL) {
-        return;
+        return false;
     }
+    bool reset = false;
     uart_event_t ev;
     for (unsigned i = 0; i < 2 * GNSS_LINK_EVENT_QUEUE_LEN && xQueueReceive(q, &ev, 0) == pdTRUE; i++) {
         if (count) {
             gnss_link_ev_t e = map_event(ev.type);
             taskENTER_CRITICAL(&s_lock);
-            (void)gnss_link_core_on_event(&s_core, e);
+            reset |= gnss_link_core_on_event(&s_core, e);
             taskEXIT_CRITICAL(&s_lock);
         }
     }
+    return reset;
+}
+
+#define QCHECK_RESET    0x1u   /* the framer must be reset */
+#define QCHECK_SERVICED 0x2u   /* the queue was full and has been emptied */
+
+/*
+ * Before reading the ring (RX task, or the RAW lease holder): the driver
+ * drops events into a full queue, so a full queue is counted, emptied, and
+ * the driver state stands in for the events it dropped (see the core's
+ * "Full event queue"). Also ends a ring-full episode once the ring is below
+ * its full mark.
+ */
+static unsigned check_queue(QueueHandle_t q, bool raw)
+{
+    size_t buffered = 0;
+    if (q == NULL || uart_get_buffered_data_len(s_port, &buffered) != ESP_OK) {
+        return 0;
+    }
+    unsigned out = 0;
+    if (uxQueueSpacesAvailable(q) == 0) {
+        if (take_pending_events(true)) {
+            out |= QCHECK_RESET;
+        }
+        out |= QCHECK_SERVICED;
+        taskENTER_CRITICAL(&s_lock);
+        if (gnss_link_core_on_queue_full(&s_core, buffered, CONFIG_GNSS_LINK_RX_BUF_SIZE, !raw)) {
+            out |= QCHECK_RESET;
+        }
+        taskEXIT_CRITICAL(&s_lock);
+    } else if (!raw) {
+        taskENTER_CRITICAL(&s_lock);
+        gnss_link_core_on_queue_ok(&s_core);
+        taskEXIT_CRITICAL(&s_lock);
+    }
+    taskENTER_CRITICAL(&s_lock);
+    gnss_link_core_on_level(&s_core, buffered, CONFIG_GNSS_LINK_RX_BUF_SIZE);
+    taskEXIT_CRITICAL(&s_lock);
+    return out;
 }
 
 /* One UART event (RX task). Returns true after a buffer-full event. */
@@ -560,7 +604,13 @@ static void exec_req(req_t *r)
             break;
         }
         if (current_mode() == GNSS_LINK_MODE_RAW) {
-            take_pending_events(true);   /* they describe the link, whoever read it */
+            /* They describe the link, whoever read it; a full queue also
+             * stands for the events it dropped. */
+            taskENTER_CRITICAL(&s_lock);
+            QueueHandle_t q = s_driver_ok ? s_events : NULL;
+            taskEXIT_CRITICAL(&s_lock);
+            (void)check_queue(q, true);
+            (void)take_pending_events(true);
         }
         drop_input();
         gnss_framer_set_prompt_detect(&s_framer, false);
@@ -629,6 +679,10 @@ static esp_err_t run_req(req_t *r)
 {
     (void)xSemaphoreTake(s_req_mutex, portMAX_DELAY);
     bool here = s_rx_task == NULL || (r->op == REQ_SET_BAUD && current_mode() == GNSS_LINK_MODE_RAW);
+    /* A release is never withdrawn: a lease left held behind a failed
+     * release would hold RTCM back until a reboot. The RX task always gets
+     * to it (event queue or task notification), so waiting is safe. */
+    bool may_withdraw = r->op != REQ_EXIT;
     if (here) {
         exec_req(r);
     } else {
@@ -640,6 +694,10 @@ static esp_err_t run_req(req_t *r)
         for (;;) {
             if (xSemaphoreTake(s_req_done, pdMS_TO_TICKS(REQ_PICKUP_MS)) == pdTRUE) {
                 break;
+            }
+            if (!may_withdraw) {
+                wake_rx();
+                continue;
             }
             bool cancelled = false;
             taskENTER_CRITICAL(&s_lock);
@@ -712,10 +770,18 @@ static void rx_task(void *arg)
             continue;
         }
 
-        uart_event_t ev;
         bool pull_stash = false;
-        if (xQueueReceive(q, &ev, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
-            pull_stash = handle_event(&ev);
+        unsigned qc = check_queue(q, false);
+        if (qc & QCHECK_RESET) {
+            framer_reset();
+        }
+        if (qc & QCHECK_SERVICED) {
+            pull_stash = true;   /* the ring may be full: read at once */
+        } else {
+            uart_event_t ev;
+            if (xQueueReceive(q, &ev, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
+                pull_stash = handle_event(&ev);
+            }
         }
         wait_ms = drain(pull_stash);
         wdt_feed();
@@ -1069,9 +1135,13 @@ esp_err_t gnss_link_raw_read(gnss_link_lease_t lease, void *buf, size_t len, siz
     if (err != ESP_OK) {
         return err;
     }
-    if (!driver_ok()) {
+    taskENTER_CRITICAL(&s_lock);
+    QueueHandle_t q = s_driver_ok ? s_events : NULL;
+    taskEXIT_CRITICAL(&s_lock);
+    if (q == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+    (void)check_queue(q, true);   /* the framer is reset on release */
     uint8_t *p = buf;
     int n = uart_read_bytes(s_port, p, 1, ms_to_ticks(timeout_ms));
     if (n <= 0) {

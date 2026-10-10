@@ -65,6 +65,19 @@ TEST_CASE("network credential and hostname validation", "[net_core]")
     TEST_ASSERT_FALSE(net_hostname_valid("abcdefghijabcdefghijabcdefghij123")); /* 33 */
 }
 
+TEST_CASE("network credentials: a stored SSID whose password cannot be read fails closed", "[net_core]")
+{
+    TEST_ASSERT_EQUAL(NET_CRED_OK, net_sta_credentials(true, "home", true, "secret-pass"));
+    TEST_ASSERT_EQUAL(NET_CRED_OK, net_sta_credentials(true, "cafe", true, ""));   /* stored as open */
+    /* No (valid) SSID: simply not configured. */
+    TEST_ASSERT_EQUAL(NET_CRED_NONE, net_sta_credentials(false, "", false, ""));
+    TEST_ASSERT_EQUAL(NET_CRED_NONE, net_sta_credentials(true, "", true, ""));
+    /* SSID read, password not: never an open network of the same name
+     * (a damaged entry reads as "not found", so that fails closed too). */
+    TEST_ASSERT_EQUAL(NET_CRED_UNREADABLE, net_sta_credentials(true, "home", false, ""));
+    TEST_ASSERT_EQUAL(NET_CRED_UNREADABLE, net_sta_credentials(true, "home", true, "short"));
+}
+
 TEST_CASE("network setup AP name: prefix plus the last MAC bytes", "[net_core]")
 {
     const uint8_t mac[6] = { 0x24, 0x6F, 0x28, 0x11, 0x3A, 0x7F };

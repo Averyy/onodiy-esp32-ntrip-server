@@ -134,6 +134,7 @@ typedef enum {
 /** Snapshot for status pages and health. */
 typedef struct {
     bool sta_configured;
+    bool sta_credentials_unreadable; /**< SSID stored, password unreadable: station not started (setup AP) */
     bool online;                   /**< station has an IP */
     bool associated;               /**< station link to the access point is up */
     bool upstream_ok;              /**< last probe reached the internet */

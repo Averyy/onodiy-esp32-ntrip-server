@@ -11,6 +11,8 @@
 /* Clock near the 32-bit millisecond wrap, to show nothing depends on it. */
 #define T0_US ((int64_t)UINT32_MAX * 1000 - 5000000)
 
+#define RING 32768u   /* driver RX ring (CONFIG_GNSS_LINK_RX_BUF_SIZE default) */
+
 static void open_link(gnss_link_core_t *c)
 {
     gnss_link_core_init(c, 115200);
@@ -236,7 +238,9 @@ TEST_CASE("link core: UART conditions count events and only overflow/full reset 
     TEST_ASSERT_EQUAL_UINT64(0, s.rx_bytes);
     TEST_ASSERT_EQUAL_UINT64(0, s.flushed_bytes);
 
-    /* Events counted while a RAW lease was held land in the same counters. */
+    /* Events counted while a RAW lease was held land in the same counters
+     * (the ring was read below its full mark in between: a new episode). */
+    gnss_link_core_on_level(&c, 0, RING);
     uint32_t raw = 0;
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&c, GNSS_LINK_MODE_RAW, "flash", &raw));
     (void)gnss_link_core_on_event(&c, GNSS_LINK_EV_BUFFER_FULL);
@@ -245,6 +249,71 @@ TEST_CASE("link core: UART conditions count events and only overflow/full reset 
     gnss_link_core_snapshot(&c, T0_US, &s);
     TEST_ASSERT_EQUAL_UINT32(3, s.hw_fifo_overflows);
     TEST_ASSERT_EQUAL_UINT32(2, s.rx_buffer_full);
+}
+
+TEST_CASE("link core: a reader stall with a saturated event queue still counts the loss", "[gnss_link]")
+{
+    /* The RX task stalls 5 s at 115200: 32 data events fill the queue after
+     * ~330 ms, the 32 KB ring is full after ~2.8 s, and the driver drops the
+     * buffer-full event and every overflow event after it. On resume the
+     * reader finds a full queue and a full ring. */
+    gnss_link_core_t c;
+    open_link(&c);
+    for (unsigned i = 0; i < GNSS_LINK_EVENT_QUEUE_LEN; i++) {
+        TEST_ASSERT_FALSE(gnss_link_core_on_event(&c, GNSS_LINK_EV_DATA));   /* the queued events */
+    }
+    TEST_ASSERT_TRUE(gnss_link_core_ring_full(RING - GNSS_LINK_HW_FIFO_LEN, RING));
+    TEST_ASSERT_FALSE(gnss_link_core_ring_full(RING - GNSS_LINK_HW_FIFO_LEN - 1, RING));
+    TEST_ASSERT_TRUE(gnss_link_core_on_queue_full(&c, RING - 40, RING, true));
+    gnss_link_stats_t s;
+    gnss_link_core_snapshot(&c, T0_US, &s);
+    TEST_ASSERT_EQUAL_UINT32(1, s.rx_events_dropped);
+    TEST_ASSERT_EQUAL_UINT32(1, s.rx_buffer_full);
+    TEST_ASSERT_EQUAL_UINT32(1, s.hw_fifo_overflows);   /* the alert input moves */
+
+    /* The same episode is counted once, however often the queue is found full. */
+    gnss_link_core_on_level(&c, RING - 40, RING);
+    TEST_ASSERT_FALSE(gnss_link_core_on_queue_full(&c, RING - 40, RING, true));
+    /* A late buffer-full event of this episode is not counted again. */
+    TEST_ASSERT_FALSE(gnss_link_core_on_event(&c, GNSS_LINK_EV_BUFFER_FULL));
+    gnss_link_core_snapshot(&c, T0_US, &s);
+    TEST_ASSERT_EQUAL_UINT32(1, s.rx_events_dropped);
+    TEST_ASSERT_EQUAL_UINT32(1, s.rx_buffer_full);
+    TEST_ASSERT_EQUAL_UINT32(1, s.hw_fifo_overflows);
+
+    /* Drained, queue with room again: a shorter stall (queue full, ring not)
+     * counts only the dropped events and resets the framer. */
+    gnss_link_core_on_level(&c, 0, RING);
+    gnss_link_core_on_queue_ok(&c);
+    TEST_ASSERT_TRUE(gnss_link_core_on_queue_full(&c, 12000, RING, true));
+    gnss_link_core_snapshot(&c, T0_US, &s);
+    TEST_ASSERT_EQUAL_UINT32(2, s.rx_events_dropped);
+    TEST_ASSERT_EQUAL_UINT32(1, s.rx_buffer_full);
+    TEST_ASSERT_EQUAL_UINT32(1, s.hw_fifo_overflows);
+
+    /* Buffer-full and overflow events that did fit are not counted twice. */
+    gnss_link_core_on_level(&c, 0, RING);
+    gnss_link_core_on_queue_ok(&c);
+    TEST_ASSERT_TRUE(gnss_link_core_on_event(&c, GNSS_LINK_EV_BUFFER_FULL));
+    TEST_ASSERT_TRUE(gnss_link_core_on_event(&c, GNSS_LINK_EV_FIFO_OVF));
+    TEST_ASSERT_TRUE(gnss_link_core_on_queue_full(&c, RING, RING, true));   /* only the dropped events */
+    gnss_link_core_snapshot(&c, T0_US, &s);
+    TEST_ASSERT_EQUAL_UINT32(3, s.rx_events_dropped);
+    TEST_ASSERT_EQUAL_UINT32(2, s.rx_buffer_full);
+    TEST_ASSERT_EQUAL_UINT32(2, s.hw_fifo_overflows);
+
+    /* RAW: nobody takes events, so a full queue is normal and not counted;
+     * a stalled lease holder still shows as a full ring with lost bytes. */
+    gnss_link_core_on_level(&c, 0, RING);
+    uint32_t raw = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&c, GNSS_LINK_MODE_RAW, "flash", &raw));
+    gnss_link_core_on_queue_full(&c, 100, RING, false);
+    gnss_link_core_on_queue_full(&c, RING - 1, RING, false);
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_release(&c, raw, NULL));
+    gnss_link_core_snapshot(&c, T0_US, &s);
+    TEST_ASSERT_EQUAL_UINT32(3, s.rx_events_dropped);
+    TEST_ASSERT_EQUAL_UINT32(3, s.rx_buffer_full);
+    TEST_ASSERT_EQUAL_UINT32(3, s.hw_fifo_overflows);
 }
 
 TEST_CASE("link core: byte counters, baud switches and flushes", "[gnss_link]")
