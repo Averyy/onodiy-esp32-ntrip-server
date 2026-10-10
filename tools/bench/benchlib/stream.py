@@ -12,7 +12,8 @@ returns items in stream order:
   rtcm_bad  a 0xD3 candidate with a plausible header whose CRC failed; the
             splitter then re-scans from the byte after its preamble, so a
             valid frame that starts inside it is never lost
-  text      one line without its CR/LF, with the checksum verdict
+  text      one line without its CR/LF, with the checksum verdict; printable
+            noise in front of a checksum-valid line is split off as junk
   binary    a Unicore binary log whose CRC-32 verifies
   junk      bytes that are none of the above (merged into runs)
 
@@ -79,6 +80,25 @@ def check_text(line: str) -> str:
     if len(ck) == 8:
         return "crc32" if crc32_unicore(body.encode("latin-1", "replace")) == want else "bad"
     return "unicore" if xor_checksum("#" + body) == want else "bad"
+
+
+VALID = ("nmea", "unicore", "crc32")
+
+
+def line_start(line: str, check: str) -> int:
+    """Where a checksum-valid line starts after leading noise; 0 if it starts
+    at the beginning (or no valid line is in there).
+
+    A text run can begin with noise: printable bytes the receiver sent before
+    the line, or a lone '$'/'#' (one real capture has the '#' that ends a
+    binary message right in front of a sentence). No line starts with two
+    lead characters; "$$..." would even pass the '$'-inclusive XOR."""
+    if check in VALID and not (len(line) > 1 and line[1] in "$#"):
+        return 0
+    for k in range(1, len(line) - 3):
+        if line[k] in "$#" and line[k + 1] not in "$#" and check_text(line[k:]) in VALID:
+            return k
+    return 0
 
 
 @dataclass
@@ -255,9 +275,16 @@ class StreamSplitter:
 
     def _emit_text(self, out: list[Item], raw: bytes | bytearray, off: int, note: str) -> None:
         line = bytes(raw).rstrip(b"\r").decode("latin-1")
-        check = check_text(line)
         if not line.strip():
             return
+        check = check_text(line)
+        k = line_start(line, check)
+        if k:
+            # Printable noise in front of a real line (boot garbage, the tail
+            # of a binary message): the noise is junk, the line is kept whole.
+            self._add_junk(bytes(raw[:k]), off, out)
+            raw, off, line = raw[k:], off + k, line[k:]
+            check = check_text(line)
         self._emit(out, Item("text", bytes(raw), off, text=line, check=check, note=note))
         self.stats["text"] += 1
         if check == "bad":

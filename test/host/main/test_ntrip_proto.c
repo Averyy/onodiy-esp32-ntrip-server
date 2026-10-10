@@ -195,15 +195,69 @@ TEST_CASE("ntrip counts frames and epoch ends in a hub read", "[ntrip]")
     n += make_frame(buf + n, 1127, false, 30);    /* last MSM of the epoch */
     n += make_frame(buf + n, 1104, false, 20);    /* receiver's own message number: not an MSM */
     uint32_t frames = 0, epochs = 0;
-    ntrip_count_frames(buf, n, &frames, &epochs);
+    ntrip_epoch_track_t tr;
+    ntrip_epoch_track_init(&tr);
+    ntrip_count_frames(buf, n, &tr, &frames, &epochs);
     TEST_ASSERT_EQUAL_UINT32(5, frames);
     TEST_ASSERT_EQUAL_UINT32(1, epochs);
 
     /* a truncated tail is not counted */
-    ntrip_count_frames(buf, n - 3, &frames, &epochs);
+    ntrip_epoch_track_init(&tr);
+    ntrip_count_frames(buf, n - 3, &tr, &frames, &epochs);
     TEST_ASSERT_EQUAL_UINT32(4, frames);
-    ntrip_count_frames(buf, 0, &frames, &epochs);
+    ntrip_count_frames(buf, 0, &tr, &frames, &epochs);
     TEST_ASSERT_EQUAL_UINT32(0, frames);
+}
+
+/* MSM frame with an epoch time (payload bits 24..53) and the multiple-message bit. */
+static size_t make_msm(uint8_t *b, uint16_t type, uint32_t tow, bool mmb)
+{
+    size_t n = make_frame(b, type, mmb, 20);
+    b[3 + 3] = (uint8_t)(tow >> 22);
+    b[3 + 4] = (uint8_t)(tow >> 14);
+    b[3 + 5] = (uint8_t)(tow >> 6);
+    b[3 + 6] = (uint8_t)(((tow & 0x3Fu) << 2) | (mmb ? 0x02u : 0x00u));
+    return n;
+}
+
+TEST_CASE("ntrip epoch count: a lost closing MSM is ended by the next epoch time, across reads", "[ntrip]")
+{
+    uint8_t buf[512];
+    uint32_t frames = 0, epochs = 0, total = 0;
+    ntrip_epoch_track_t tr;
+    ntrip_epoch_track_init(&tr);
+
+    /* Epoch 1000: GPS and GLONASS, the closing BeiDou MSM is lost. */
+    size_t n = 0;
+    n += make_msm(buf + n, 1077, 1000, true);
+    n += make_msm(buf + n, 1087, 7000, true);
+    ntrip_count_frames(buf, n, &tr, &frames, &epochs);
+    TEST_ASSERT_EQUAL_UINT32(2, frames);
+    TEST_ASSERT_EQUAL_UINT32(0, epochs);
+    /* Next read: epoch 2000 complete; its GPS MSM ends epoch 1000. */
+    n = 0;
+    n += make_msm(buf + n, 1005, 0, false);        /* not an MSM: nothing to do with epochs */
+    n += make_msm(buf + n, 1077, 2000, true);
+    n += make_msm(buf + n, 1127, 2000 - 14000 + 604800000, true);
+    n += make_msm(buf + n, 1127, 2000 - 14000 + 604800000, true);   /* same type, same epoch: split */
+    n += make_msm(buf + n, 1087, 8000, false);
+    ntrip_count_frames(buf, n, &tr, &frames, &epochs);
+    TEST_ASSERT_EQUAL_UINT32(5, frames);
+    TEST_ASSERT_EQUAL_UINT32(2, epochs);
+    total += epochs;
+    /* A new constellation alone does not end an open epoch; 110x never counts. */
+    n = 0;
+    n += make_msm(buf + n, 1097, 3000, true);
+    n += make_msm(buf + n, 1107, 3000, false);
+    n += make_msm(buf + n, 1077, 3000, true);
+    ntrip_count_frames(buf, n, &tr, &frames, &epochs);
+    TEST_ASSERT_EQUAL_UINT32(0, epochs);
+    /* A resync starts from a clean state: the open epoch is forgotten. */
+    ntrip_epoch_track_init(&tr);
+    n = make_msm(buf, 1077, 4000, true);
+    ntrip_count_frames(buf, n, &tr, &frames, &epochs);
+    TEST_ASSERT_EQUAL_UINT32(0, epochs);
+    TEST_ASSERT_EQUAL_UINT32(2, total);
 }
 
 /* ---- reply classifier -------------------------------------------------------------- */
@@ -310,6 +364,33 @@ TEST_CASE("ntrip reply details: 4xx body check, headers, timeouts, caps", "[ntri
     TEST_ASSERT_TRUE(ntrip_reply_feed(&r, (const uint8_t *)filler, sizeof(filler), &used));
     TEST_ASSERT_EQUAL_size_t(NTRIP_REPLY_BODY_MAX, used);
     TEST_ASSERT_EQUAL(NTRIP_ROW_CONFIG, r.verdict.row);
+
+    /* A chunked 4xx body is read through its chunk framing: a word cut by a
+     * chunk boundary is still found, and a size line never reads as text. */
+    v = run_reply("HTTP/1.1 403 Forbidden\r\nTransfer-Encoding: chunked\r\n\r\n"
+                  "e\r\n<p>Your IP is \r\n"
+                  "3;ext=1\r\nban\r\n"
+                  "A\r\nned.</p>\r\n\r\n"
+                  "0\r\n\r\n",
+                  true, true, &r);
+    TEST_ASSERT_EQUAL(NTRIP_ROW_BANNED, v.row);
+    TEST_ASSERT_EQUAL(NTRIP_HINT_BANNED, v.hint);
+    v = run_reply("HTTP/1.1 403 Forbidden\r\ntransfer-encoding:  Chunked \r\n\r\n"
+                  "2\r\nba\r\n4\r\nnned\r\n0\r\n\r\n",
+                  true, true, &r);
+    TEST_ASSERT_EQUAL(NTRIP_ROW_BANNED, v.row);
+    /* "ba" "nned" across the size line, but not chunked: no word there */
+    v = run_reply("HTTP/1.1 403 Forbidden\r\n\r\nba\r\n4\r\nnned", true, true, &r);
+    TEST_ASSERT_EQUAL(NTRIP_ROW_CONFIG, v.row);
+    /* the terminating chunk ends the body check at once */
+    ntrip_reply_init(&r, true);
+    const char *chunked = "HTTP/1.1 401 Unauthorized\r\nTransfer-Encoding: chunked\r\n\r\n"
+                          "5\r\nhello\r\n0\r\n\r\n";
+    TEST_ASSERT_TRUE(ntrip_reply_feed(&r, (const uint8_t *)chunked, strlen(chunked), &used));
+    TEST_ASSERT_EQUAL(NTRIP_ROW_AUTH, r.verdict.row);
+    /* a malformed size line: the rest is searched as it comes */
+    v = run_reply("HTTP/1.1 403 Forbidden\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nbanned", true, true, &r);
+    TEST_ASSERT_EQUAL(NTRIP_ROW_BANNED, v.row);
 
     /* Server: and Ntrip-Version: are recorded; v1-only hint without the header */
     v = run_reply("HTTP/1.1 401 Unauthorized\r\nServer: NTRIP Caster 2.0\r\nNtrip-Version: Ntrip/2.0\r\n\r\n", true,

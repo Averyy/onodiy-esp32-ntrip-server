@@ -76,6 +76,10 @@ typedef struct {
     char restart_after[40];   /* the next command with this prefix is acknowledged, then the receiver restarts */
     char ant[120], saved_ant[120];   /* antenna descriptor values ("" = not in the dump) */
     unsigned gsv;         /* satellite-in-view output period, 0 = off */
+    bool sg_quiet_only;   /* a signal-group command is taken (and acknowledged) only with COM1 output off */
+    int64_t version_mute_ms;     /* after a restart, the version query is acknowledged without its log this long */
+    int64_t version_mute_until;
+    int version_empty;           /* version queries answered without the log */
 
     /* records */
     sim_rx_t rx[MAX_RX];
@@ -126,6 +130,7 @@ static void restart(sim_t *s, int64_t dur)
     s->b1c = s->saved_b1c;
     strcpy(s->ant, s->saved_ant);
     s->gsv = 0;   /* never saved */
+    s->version_mute_until = s->busy_until + s->version_mute_ms;
     if (s->dies_on_restart) {
         s->present = false;
         return;
@@ -184,7 +189,11 @@ static void receive(sim_t *s, const char *cmd)
     unsigned a, b;
     if (strcmp(up, "VERSIONA") == 0) {
         reply(s, cmd, "OK", 30);
-        emit(s, s->version, 50);
+        if (s->now < s->version_mute_until) {
+            s->version_empty++;   /* "OK", but no version yet so soon after a restart */
+        } else {
+            emit(s, s->version, 50);
+        }
     } else if (strcmp(up, "UNLOG COM1") == 0) {
         s->output = false;
         reply(s, cmd, "OK", 30);
@@ -211,6 +220,9 @@ static void receive(sim_t *s, const char *cmd)
         snprintf(log, sizeof(log), "MODEA,COM1,0,0.0,FINE,0,0.000,0,0,0;%s", s->mode);
         emit_checked(s, '#', log, 50);
     } else if (sscanf(up, "CONFIG SIGNALGROUP %u %u", &a, &b) == 2) {
+        if (s->sg_quiet_only && s->output) {
+            return;   /* ignored while the port still streams */
+        }
         bool change = a != s->sg_m || b != s->sg_s;
         if (!(change && s->sg_no_ack)) {
             reply(s, cmd, "OK", 30);
@@ -556,6 +568,43 @@ TEST_CASE("exec: apply on a factory receiver: signal group first, restart, then 
     TEST_ASSERT_EQUAL_UINT64(0, s->ch.stats.restarts);
     TEST_ASSERT_EQUAL_UINT64(1, s->ch.stats.banners);
     TEST_ASSERT_FALSE(s->ch.expect_restart);
+}
+
+TEST_CASE("exec: published receiver habits: signal group only on a quiet port, version late after a restart",
+          "[um98x_exec]")
+{
+    /* Two behaviours reported for these receivers in public code: the signal
+     * group is acknowledged only once output is off, and shortly after a
+     * restart the version query gets its "OK" without the version (1 s too
+     * early, 2 s fine). The session quiets COM1 first and keeps polling the
+     * version after the restart until the log comes. */
+    sim_t *s = sim_init();
+    s->sg_quiet_only = true;
+    s->version_mute_ms = 2000;
+    um98x_base_profile_t p;
+    default_profile(&p);
+    gnss_versiona_t id;
+    memset(&id, 0, sizeof(id));
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.signal_group_sent);
+    TEST_ASSERT_TRUE(r.saved);
+    TEST_ASSERT_EQUAL_STRING("UM982", id.model);
+    TEST_ASSERT_EQUAL_UINT8(3, s->sg_m);
+    TEST_ASSERT_EQUAL_UINT8(6, s->sg_s);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "CONFIG SIGNALGROUP"));
+    TEST_ASSERT_LESS_THAN_INT(nth(s, "CONFIG SIGNALGROUP 3 6", 0), nth(s, "UNLOG COM1", 0));
+    TEST_ASSERT_GREATER_THAN_INT(0, s->version_empty);   /* the early polls got "OK" only */
+    TEST_ASSERT_EQUAL_UINT64(0, s->ch.stats.restarts);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "RESET"));
+
+    /* A signal group sent while the port streams gets nothing back: the
+     * command times out without a change, so it must never go first. */
+    s = sim_init();
+    s->sg_quiet_only = true;
+    char text[64];
+    TEST_ASSERT_EQUAL(UM98X_E_TIMEOUT, um98x_exec_command(&s->ex, "CONFIG SIGNALGROUP 3 6", 0, text, sizeof(text)));
+    TEST_ASSERT_EQUAL_UINT8(4, s->sg_m);
 }
 
 TEST_CASE("exec: a receiver that runs the profile gets no base mode and no signal group", "[um98x_exec]")

@@ -1,0 +1,53 @@
+{
+ "license": "MIT, Copyright (c) 2016 SparkFun Electronics (see ../LICENSES/MIT-SparkFun.txt)",
+ "samples": [
+  {
+   "text": "$devicename,COM3*65",
+   "kind": "boot_banner",
+   "checksum": "xor8_incl_sync",
+   "source": "SparkFun Unicore GNSS Arduino Library @ 5ae30de, src/SparkFun_Unicore_GNSS_Arduino_Library.cpp line 174 comment (UM980 boot output)"
+  },
+  {
+   "text": "$command,MODE,response: OK*5D",
+   "kind": "command_ok",
+   "checksum": "xor8_incl_sync",
+   "source": "SparkFun Unicore GNSS Arduino Library @ 5ae30de, src/SparkFun_Unicore_GNSS_Arduino_Library.cpp line 428 comment"
+  },
+  {
+   "text": "$command,badResponse,response: PARSING FAILD NO MATCHING FUNC  BADRESPONSE*40",
+   "kind": "command_error",
+   "checksum": "xor8_incl_sync",
+   "source": "SparkFun Unicore GNSS Arduino Library @ 5ae30de, src/SparkFun_Unicore_GNSS_Arduino_Library.cpp line 1146 comment (note the receiver's own spelling 'FAILD' and the double space)"
+  },
+  {
+   "text": "#MODE,97,GPS,FINE,2389,337235000,0,0,18,969;MODE ROVER SURVEY,*18",
+   "kind": "mode_query",
+   "checksum": "xor8_incl_sync",
+   "source": "SparkFun Unicore GNSS Arduino Library @ 5ae30de, src/SparkFun_Unicore_GNSS_Arduino_Library.cpp line 484 comment"
+  },
+  {
+   "text": "#MODE,97,GPS,FINE,2389,338172000,0,0,18,968;MODE BASE TIME 60,*72",
+   "kind": "mode_query",
+   "checksum": "xor8_incl_sync",
+   "source": "SparkFun Unicore GNSS Arduino Library @ 5ae30de, src/SparkFun_Unicore_GNSS_Arduino_Library.cpp line 485 comment"
+  },
+  {
+   "text": "#MODE,97,GPS,FINE,2283,499142000,0,0,18,22;MODE BASE -1280206.5680 -4716804.4030 4086665.4840,*60",
+   "kind": "mode_query",
+   "checksum": "xor8_incl_sync",
+   "source": "SparkFun Unicore GNSS Arduino Library @ 5ae30de, src/SparkFun_Unicore_GNSS_Arduino_Library.cpp line 486 comment"
+  },
+  {
+   "text": "$CONFIG,COM3,CONFIG COM3 115200*23",
+   "kind": "config_dump",
+   "checksum": "xor8_incl_sync",
+   "source": "SparkFun Unicore GNSS Arduino Library @ 5ae30de, src/SparkFun_Unicore_GNSS_Arduino_Library.cpp line 640 comment"
+  },
+  {
+   "text": "$CONFIG,MASK,MASK 5.0*25",
+   "kind": "config_dump",
+   "checksum": "xor8_incl_sync",
+   "source": "SparkFun Unicore GNSS Arduino Library @ 5ae30de, src/SparkFun_Unicore_GNSS_Arduino_Library.cpp line 764 comment"
+  }
+ ]
+}

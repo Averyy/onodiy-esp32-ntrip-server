@@ -36,6 +36,26 @@ bool rtcm_msm_head(const uint8_t *frame, size_t len, uint16_t msg_type, rtcm_msm
     return true;
 }
 
+/* Constellation slots whose epoch time is the GPS time of week: GPS,
+ * Galileo, QZSS and NavIC (BeiDou runs 14 s behind, GLONASS on its own day). */
+#define GPS_SCALE_SLOTS ((1u << 0) | (1u << 2) | (1u << 4) | (1u << 6))
+
+/* The MSM's epoch time differs from one already in the current epoch on
+ * the same time scale: its own constellation, or any GPS-time one. */
+static bool other_time(const rtcm_epoch_t *e, const rtcm_msm_head_t *m)
+{
+    uint8_t scale = (uint8_t)(1u << m->gnss);
+    if ((1u << m->gnss) & GPS_SCALE_SLOTS) {
+        scale = (uint8_t)GPS_SCALE_SLOTS;
+    }
+    for (unsigned s = 0; s < RTCM_EPOCH_GNSS_SLOTS; s++) {
+        if ((scale & e->time_mask & (1u << s)) && e->msm_time[s] != m->time) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void rtcm_epoch_init(rtcm_epoch_t *e, uint32_t gap_ms, uint32_t first_epoch)
 {
     memset(e, 0, sizeof(*e));
@@ -59,7 +79,7 @@ uint32_t rtcm_epoch_assign(rtcm_epoch_t *e, const uint8_t *frame, size_t len, ui
         why = RTCM_EPOCH_START_FIRST;
     } else if (e->terminated) {
         why = RTCM_EPOCH_START_MMB;
-    } else if (is_msm && (e->time_mask & (1u << msm.gnss)) && e->msm_time[msm.gnss] != msm.time) {
+    } else if (is_msm && other_time(e, &msm)) {
         why = RTCM_EPOCH_START_TIME;
     } else if (e->msm_open && (uint32_t)(now_ms - e->last_rx_ms) >= e->gap_ms) {
         why = RTCM_EPOCH_START_GAP;

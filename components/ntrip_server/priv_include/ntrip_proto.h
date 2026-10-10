@@ -12,8 +12,11 @@
  *   - the chunked transfer encoder (one chunk per hub read);
  *   - the reply parser and classifier: the first reply line is matched
  *     against an ordered table (first match wins), HTTP headers are read for
- *     Server: and Ntrip-Version:, and HTML or 4xx replies get a body check
- *     for "banned";
+ *     Server:, Ntrip-Version: and Transfer-Encoding:, and HTML or 4xx
+ *     replies get a body check for "banned" (a chunked body is read through
+ *     its chunk framing, so a chunk boundary never splits the word and a
+ *     size line never reads as text; the last chunk ends the check; a
+ *     malformed size line makes the rest count as plain body bytes);
  *   - the backoff calculator (fast, standard and polite profiles, +-20 %
  *     jitter, MOUNT_BUSY escalation, the AUTH transient window, the polite
  *     hourly limit) and the per-slot state machine that uses it, including
@@ -281,11 +284,27 @@ size_t ntrip_chunk_wrap(uint8_t *buf, size_t len, size_t *start);
 
 /* ---- RTCM frames in a hub read ---------------------------------------------- */
 
+/** Epoch state carried from one hub read to the next (see ntrip_count_frames). */
+typedef struct {
+    uint8_t open_mask;        /**< constellations with an MSM in the epoch not yet ended (bit per 107x..113x slot) */
+    uint32_t time[7];         /**< their epoch times */
+} ntrip_epoch_track_t;
+
+/** Start counting with no epoch open (session start, hub resync). */
+void ntrip_epoch_track_init(ntrip_epoch_track_t *t);
+
 /**
- * Count whole RTCM3 frames in buf and the MSM frames that end an epoch
- * (multiple-message bit 0). Stops at the first byte that is not a frame.
+ * Count whole RTCM3 frames in buf and the epochs they end. Stops at the
+ * first byte that is not a frame. An epoch ends at an MSM with the
+ * multiple-message bit clear, or, when that MSM never came (seen from a
+ * native receiver), at the next MSM whose epoch time differs from one of the
+ * open epoch on the same time scale (its own constellation; GPS, Galileo,
+ * QZSS and NavIC share GPS time), the same rule the hub uses for its epoch
+ * boundaries. 1101..1107 are not MSMs here. `track` carries the open epoch
+ * from one hub read to the next.
  */
-void ntrip_count_frames(const uint8_t *buf, size_t len, uint32_t *frames, uint32_t *epochs_ended);
+void ntrip_count_frames(const uint8_t *buf, size_t len, ntrip_epoch_track_t *track, uint32_t *frames,
+                        uint32_t *epochs_ended);
 
 /* ---- Reply parser and classifier ------------------------------------------------ */
 
@@ -316,6 +335,10 @@ typedef struct {
     size_t hdr_total;
     char server[65];
     bool ntrip_v2_header;
+    bool chunked;             /**< Transfer-Encoding: chunked (the body check reads through the chunk framing) */
+    uint8_t ck_state;         /**< chunk decoder state */
+    uint8_t ck_digits;
+    uint32_t ck_left;         /**< chunk size, then bytes left in the chunk */
     size_t body_seen;
     char tail[8];             /**< last bytes of the body, for matches across reads */
     size_t tail_len;

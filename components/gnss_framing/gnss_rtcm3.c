@@ -189,6 +189,56 @@ bool gnss_rtcm3_msm_decode(const uint8_t *frame, size_t len, gnss_rtcm3_msm_t *o
     return true;
 }
 
+/* Satellite and signal bits of the present cells. */
+static bool cell_masks(const gnss_rtcm3_msm_t *h, uint64_t *sats, uint32_t *sigs)
+{
+    *sats = 0;
+    *sigs = 0;
+    const unsigned nsat = h->num_sats;
+    const unsigned nsig = h->num_sigs;
+    if (nsat * nsig > GNSS_RTCM3_MSM_MAX_CELLS) {
+        return false;
+    }
+    uint8_t sat_bit[GNSS_RTCM3_MSM_MAX_CELLS];
+    uint8_t sig_bit[32];
+    unsigned n = 0;
+    unsigned m = 0;
+    for (unsigned i = 0; i < 64 && n < GNSS_RTCM3_MSM_MAX_CELLS; i++) {
+        if (h->sat_mask & ((uint64_t)1 << i)) {
+            sat_bit[n++] = (uint8_t)i;
+        }
+    }
+    for (unsigned i = 0; i < 32; i++) {
+        if (h->sig_mask & ((uint32_t)1 << i)) {
+            sig_bit[m++] = (uint8_t)i;
+        }
+    }
+    if (n != nsat || m != nsig) {
+        return false;
+    }
+    for (unsigned x = 0; x < nsat * nsig; x++) {
+        if (h->cell_mask & ((uint64_t)1 << x)) {
+            *sats |= (uint64_t)1 << sat_bit[x / nsig];
+            *sigs |= (uint32_t)1 << sig_bit[x % nsig];
+        }
+    }
+    return true;
+}
+
+uint64_t gnss_rtcm3_msm_sats_with_cells(const gnss_rtcm3_msm_t *h)
+{
+    uint64_t sats;
+    uint32_t sigs;
+    return cell_masks(h, &sats, &sigs) ? sats : 0;
+}
+
+uint32_t gnss_rtcm3_msm_sigs_with_cells(const gnss_rtcm3_msm_t *h)
+{
+    uint64_t sats;
+    uint32_t sigs;
+    return cell_masks(h, &sats, &sigs) ? sigs : 0;
+}
+
 bool gnss_rtcm3_arp_decode(const uint8_t *frame, size_t len, gnss_rtcm3_arp_t *out)
 {
     memset(out, 0, sizeof(*out));

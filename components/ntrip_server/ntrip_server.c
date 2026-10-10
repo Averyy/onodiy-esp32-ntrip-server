@@ -189,6 +189,7 @@ typedef struct {
     volatile bool open;          /* streaming session (after the caster's OK) */
     bool chunked;
     bool mid_chunk;
+    ntrip_epoch_track_t epochs;  /* epochs sent: state across hub reads */
     bool paused_seen;
     bool logged_unexpected;
     uint32_t last_tx_ms;
@@ -1566,6 +1567,7 @@ static void connect_once(slot_t *s, uint32_t now)
     s->open = true;
     s->chunked = s->cfg.proto == NTRIP_PROTO_V2 && !s->cfg.v2_raw_body;
     s->mid_chunk = false;
+    ntrip_epoch_track_init(&s->epochs);
     s->paused_seen = false;
     s->logged_unexpected = false;
     s->last_tx_ms = t1;
@@ -1645,6 +1647,7 @@ static void stream_step(slot_t *s, uint32_t now)
         /* the receiver was reconfigured: start again with the station metadata */
         s->paused_seen = false;
         (void)rtcm_hub_resync(s->consumer);
+        ntrip_epoch_track_init(&s->epochs);   /* the hub restarts at an epoch start */
     }
     size_t len = 0;
     esp_err_t err = rtcm_hub_read(s->consumer, s->tx + NTRIP_CHUNK_HEAD_RESERVE, NTRIP_CHUNK_MAX_PAYLOAD, &len,
@@ -1657,7 +1660,7 @@ static void stream_step(slot_t *s, uint32_t now)
     }
     uint32_t frames = 0;
     uint32_t epochs = 0;
-    ntrip_count_frames(s->tx + NTRIP_CHUNK_HEAD_RESERVE, len, &frames, &epochs);
+    ntrip_count_frames(s->tx + NTRIP_CHUNK_HEAD_RESERVE, len, &s->epochs, &frames, &epochs);
     const uint8_t *p = s->tx + NTRIP_CHUNK_HEAD_RESERVE;
     size_t n = len;
     if (s->chunked) {

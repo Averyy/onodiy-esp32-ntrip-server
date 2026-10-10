@@ -658,8 +658,12 @@ and admin clients.
 ```
 
 `systems` lists only present constellations. `signal_ids` are the MSM
-signal IDs seen in the last 10 s; `cnr_dbhz` is the mean per band over the
-latest epoch's cells (MSM4 to MSM7; `null` = not available). `epoch_gaps`
+signal IDs that carried at least one cell in the last 10 s (a signal an
+encoder announces in its signal mask without any cell is left out, and so
+is its band); `satellites` likewise counts satellites with a cell;
+`cnr_dbhz` is the mean per band over the latest epoch's cells (MSM4 to
+MSM7; `null` = not available). `epochs` counts ended epochs: by their
+closing MSM, or by the next epoch time when that MSM never came. `epoch_gaps`
 counts epochs missing from the profile's shortest MSM period
 (`epoch_period_ms`); both are `null` when the profile has no MSM message.
 `epoch_jumps` counts outages over 60 s and epoch-time resets (not gaps).

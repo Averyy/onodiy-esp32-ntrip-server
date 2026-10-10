@@ -87,7 +87,7 @@ extern "C" {
 typedef struct {
     bool present;
     uint8_t satellites;
-    uint32_t signal_mask;          /**< MSM signal IDs seen in the last 10 s (bit id-1) */
+    uint32_t signal_mask;          /**< MSM signal IDs with cells in the last 10 s (bit id-1) */
     uint8_t band_mask;             /**< bands present (bit per gnss_band_t) */
     uint8_t bands;                 /**< distinct frequency bands present */
     uint8_t cnr_dbhz[8];           /**< mean CNR per band, index gnss_band_t (MSM4-7 only), 0 = n/a */
@@ -99,8 +99,8 @@ typedef struct {
     gnss_sys_t best_sys;           /**< constellation with the most bands */
     uint8_t best_bands;            /**< fewer than 4: DEGRADED with an alert */
     bool e6_lost;                  /**< Galileo E6 seen since the last reset, now missing: alert */
-    uint32_t epoch_age_ms;         /**< since the last complete epoch, UINT32_MAX = never */
-    uint64_t epochs;
+    uint32_t epoch_age_ms;         /**< since the last epoch ended, UINT32_MAX = never */
+    uint64_t epochs;               /**< epochs ended: by the closing MSM, or by the next epoch time when it never came */
     uint64_t epoch_gaps;           /**< epochs missing from the expected cadence (station total) */
     uint64_t epoch_jumps;          /**< epoch time jumps (outage over 60 s, time reset): not counted as gaps */
     uint32_t epoch_period_ms;      /**< shortest configured MSM period, 0 = none (no gaps counted) */

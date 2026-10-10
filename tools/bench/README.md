@@ -15,6 +15,11 @@ uv run ports.py --help       # every script has --help
 uv run pytest                # host unit tests (no hardware)
 ```
 
+The tests also run the decoders over the real-world streams and receiver
+output in `test/fixtures` (see its README) and compare every frame, MSM
+cell, 1033 string, text line and satellite-in-view entry with independent
+decodes (pyrtcm, pynmeagps).
+
 Every run writes its logs to a new directory
 `./bench-logs/<YYYYmmdd-HHMMSS>-<tool>[-<label>]/` (`--log-dir` or
 `$BENCH_LOG_DIR` to move it, `--label` to tag it). `bench-logs/` is

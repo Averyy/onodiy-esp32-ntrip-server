@@ -7,9 +7,13 @@
  * Every frame the hub stores gets an epoch sequence number. A new epoch starts
  *  - at the first frame (any type) after an MSM whose multiple-message bit is
  *    0 ("last MSM of this epoch"),
- *  - otherwise at an MSM whose constellation already has an MSM with a
- *    different epoch time in the current epoch (a receiver that never clears
- *    the bit),
+ *  - otherwise at an MSM whose epoch time differs from one already in the
+ *    current epoch on the same time scale: an MSM of its own constellation,
+ *    or, for GPS, Galileo, QZSS and NavIC (all on GPS time of week), an MSM
+ *    of any of these four (a receiver that never clears the bit, a lost
+ *    terminating MSM, or a terminating MSM that is not an MSM here, e.g. an
+ *    SBAS 1107 last in its epoch as one real stream sends it: the next
+ *    epoch's GPS MSM must not join the open one),
  *  - otherwise at any frame that arrives at least `gap_ms` after the previous
  *    frame while the current epoch holds an MSM not yet terminated (a lost
  *    terminating MSM),
@@ -17,10 +21,11 @@
  *    rtcm_epoch_force_new() (framer reset, receiver reconfiguration).
  * The checks run in that order; the first that matches is counted. Non-MSM
  * frames after an epoch's terminating MSM belong to the next epoch, and a gap
- * after a terminated epoch starts nothing. Epoch times are compared within one
- * constellation only (GLONASS and BeiDou run on other time scales), so no
- * conversion is needed. A constellation split over several MSMs with the same
- * epoch time stays in one epoch.
+ * after a terminated epoch starts nothing. GLONASS and BeiDou epoch times are
+ * compared within their own constellation only (other time scales; one 2012
+ * encoder even puts GPS time into its BeiDou MSMs), so no conversion is
+ * needed. A constellation split over several MSMs with the same epoch time
+ * stays in one epoch.
  *
  * MSM detection follows the public RTCM numbering: 1071..1137 with a last
  * digit of 1..7, except 1101..1107 (SBAS numbers the receiver may reuse for

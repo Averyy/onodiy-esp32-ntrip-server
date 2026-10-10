@@ -203,17 +203,34 @@ static void emit_rtcm(gnss_framer_t *f)
     f->cb(&fr, f->ctx);
 }
 
+static bool has_lead(const uint8_t *p, size_t n)
+{
+    return memchr(p, '$', n) != NULL || memchr(p, '#', n) != NULL;
+}
+
 static void end_line(gnss_framer_t *f, uint8_t term)
 {
     size_t len = f->fill;
-    f->fill = 0;
-    f->state = ST_SYNC;
     if (!gnss_text_line_valid((const char *)f->buf, len)) {
         f->stats.text_rejected++;
+        if (len > 1 && has_lead(f->buf + 1, len - 1)) {
+            /* Junk that began with a lead byte may hold a real line after
+             * it: scan the rest again, the terminator included (it stays
+             * below the bytes still waiting, see rescan()). */
+            f->buf[len] = term;
+            f->fill = len + 1;
+            rescan(f);
+            f->after_cr = CR_NONE;
+            return;
+        }
+        f->fill = 0;
+        f->state = ST_SYNC;
         discard(f, len + 1);
         f->after_cr = (term == '\r') ? CR_DROPPED : CR_NONE;
         return;
     }
+    f->fill = 0;
+    f->state = ST_SYNC;
     f->after_cr = (term == '\r') ? CR_EMITTED : CR_NONE;
     f->buf[len] = 0;    /* below any byte still waiting to be rescanned */
     found_unit(f);
@@ -291,6 +308,14 @@ static void step(gnss_framer_t *f, uint8_t c)
         case ST_TEXT:
             if (c == '\r' || c == '\n') {
                 end_line(f, c);
+                return;
+            }
+            if (f->fill == 1 && (c == '$' || c == '#')) {
+                /* No line starts with two lead bytes: the first was noise
+                 * (else "$$..." could pass the '$'-inclusive rule). */
+                f->stats.text_aborts++;
+                discard(f, 1);
+                start_unit(f, ST_TEXT, c);
                 return;
             }
             if (is_text_byte(c)) {

@@ -1,0 +1,668 @@
+{
+ "centipede_BGDD_30ep.rtcm3": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 150,
+  "message_counts": {
+   "1074": 30,
+   "1084": 30,
+   "1094": 30,
+   "1124": 30,
+   "1230": 30
+  },
+  "msm_messages": 120,
+  "path": "rtcm/centipede_BGDD_30ep.rtcm3",
+  "sha256": "5aaab8502ffe1ba9b7d74a6e137d2757964e750bb7738a7f76a26a6f4690e3dd",
+  "size": 22800,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "centipede_LAX_30ep.rtcm3": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 211,
+  "message_counts": {
+   "1077": 30,
+   "1087": 30,
+   "1097": 30,
+   "1107": 30,
+   "1117": 30,
+   "1127": 30,
+   "1137": 30,
+   "1230": 1
+  },
+  "msm_messages": 210,
+  "path": "rtcm/centipede_LAX_30ep.rtcm3",
+  "sha256": "ba6cbac28af429237e583c62151d9724ecb5c8f1889ddfd144459f2f66313933",
+  "size": 51624,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "centipede_ROBU1_35ep.rtcm3": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 156,
+  "message_counts": {
+   "1019": 4,
+   "1020": 4,
+   "1042": 4,
+   "1045": 2,
+   "1046": 2,
+   "1077": 35,
+   "1087": 34,
+   "1097": 33,
+   "1127": 34,
+   "1230": 4
+  },
+  "msm_messages": 136,
+  "path": "rtcm/centipede_ROBU1_35ep.rtcm3",
+  "sha256": "4171c4781072ec312eabcd6694508d23ee228358f0f07823d69e0e81283af307",
+  "size": 52289,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1005_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1005": 1
+  },
+  "msm_messages": 0,
+  "path": "rtcm/go-gnss_1005_frame.bin",
+  "sha256": "e3ae4d15a3e4e79c0f06b8c2da59d7be063c8f3ca3015d86445ac4e8c31f1a6d",
+  "size": 25,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1006_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1006": 1
+  },
+  "msm_messages": 0,
+  "path": "rtcm/go-gnss_1006_frame.bin",
+  "sha256": "6f9d927c8340acf418b1c935c1b74c445d9c3a998a534055f747ab978bd5f1ff",
+  "size": 27,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1033_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [
+   {
+    "antenna": "",
+    "antenna_serial": "Unknown",
+    "offset": 0,
+    "receiver_fw": "5.2.0",
+    "receiver_serial": "3025123",
+    "receiver_type": "SEPT POLARX5",
+    "setup_id": 0,
+    "station": 0
+   }
+  ],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1033": 1
+  },
+  "msm_messages": 0,
+  "path": "rtcm/go-gnss_1033_frame.bin",
+  "sha256": "ff7ba255b7ef643734dc00f3a811f5c05b74e21925de8c68136964b00ceb1f6d",
+  "size": 46,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1074_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1074": 1
+  },
+  "msm_messages": 1,
+  "path": "rtcm/go-gnss_1074_frame.bin",
+  "sha256": "e02ee434a81dfe06e478c4cb8f72a2504ab7c1f29866de9cac264afa1920f2a6",
+  "size": 173,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1077_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1077": 1
+  },
+  "msm_messages": 1,
+  "path": "rtcm/go-gnss_1077_frame.bin",
+  "sha256": "f1546a5630371b751bbd079d966433ee1c42453188adb12f8f4c1748682efb1b",
+  "size": 275,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1084_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1084": 1
+  },
+  "msm_messages": 1,
+  "path": "rtcm/go-gnss_1084_frame.bin",
+  "sha256": "ab2d10f1c080de01bd6cb0f213dc97990bd19389b34df01fe73ca541a0ffc8d4",
+  "size": 144,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1087_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1087": 1
+  },
+  "msm_messages": 1,
+  "path": "rtcm/go-gnss_1087_frame.bin",
+  "sha256": "cd0d5e1421f8a23c4f189c50ecb0eb7ded6dd3429a0afb457d43d11b5f2d2433",
+  "size": 226,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1094_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1094": 1
+  },
+  "msm_messages": 1,
+  "path": "rtcm/go-gnss_1094_frame.bin",
+  "sha256": "70dd598664895914d3580698e574f594d969f2969bb80db81e83b339fa1b7f67",
+  "size": 213,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1097_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1097": 1
+  },
+  "msm_messages": 1,
+  "path": "rtcm/go-gnss_1097_frame.bin",
+  "sha256": "25aed3ac98b51769696a5b8d2b6c9bde9bbe209a93f8d5eda351bd815533ffbe",
+  "size": 341,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1104_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1104": 1
+  },
+  "msm_messages": 1,
+  "path": "rtcm/go-gnss_1104_frame.bin",
+  "sha256": "22b8952e6675458c2cf527708a17dbcc9b3b89ca921bff66f5de358e9e6de4cb",
+  "size": 28,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1107_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1107": 1
+  },
+  "msm_messages": 1,
+  "path": "rtcm/go-gnss_1107_frame.bin",
+  "sha256": "47d8f62c8042e18df07b35d13c86a9b2ccec578a5270e18f9cb6716650501217",
+  "size": 71,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1114_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1114": 1
+  },
+  "msm_messages": 1,
+  "path": "rtcm/go-gnss_1114_frame.bin",
+  "sha256": "78a1069c2724d5dc6dc0c191f198582dbbb8d6085ee38f1321c5427df1dd66dc",
+  "size": 86,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1117_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1117": 1
+  },
+  "msm_messages": 1,
+  "path": "rtcm/go-gnss_1117_frame.bin",
+  "sha256": "1de563f19371c60ce4c60b7ace94650315695c37041fad190be98c17d9b41c69",
+  "size": 127,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1124_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1124": 1
+  },
+  "msm_messages": 1,
+  "path": "rtcm/go-gnss_1124_frame.bin",
+  "sha256": "04d43b618d4ba3312d810e549ff15024073f8dfbfa2473331986156b9f5894f9",
+  "size": 140,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1127_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1127": 1
+  },
+  "msm_messages": 1,
+  "path": "rtcm/go-gnss_1127_frame.bin",
+  "sha256": "a4ad27614d46f5c87ddac45f32dbf48c6951deb8e0196af7394000eb20ceb197",
+  "size": 220,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "go-gnss_1230_frame.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 1,
+  "message_counts": {
+   "1230": 1
+  },
+  "msm_messages": 0,
+  "path": "rtcm/go-gnss_1230_frame.bin",
+  "sha256": "2050b5e835ea381d1a3b17f75365a601420e0f85c1346a0d05a9cdc08bd4996c",
+  "size": 18,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "gpsd_rtcm3.2.log": {
+  "crc_fail_candidates": 0,
+  "d1033": [
+   {
+    "antenna": "",
+    "antenna_serial": "",
+    "offset": 6456,
+    "receiver_fw": "",
+    "receiver_serial": "",
+    "receiver_type": "JAVAD TRE_G3TH DELTA",
+    "setup_id": 0,
+    "station": 633
+   }
+  ],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 192,
+  "message_counts": {
+   "1007": 3,
+   "1008": 3,
+   "1019": 32,
+   "1020": 24,
+   "1033": 3,
+   "1044": 1,
+   "1045": 9,
+   "1046": 9,
+   "1077": 23,
+   "1087": 24,
+   "1097": 24,
+   "1107": 24,
+   "63": 13
+  },
+  "msm_messages": 95,
+  "path": "rtcm/gpsd_rtcm3.2.log",
+  "sha256": "003477aa845b30758b3af6314021a29b5e8ed812f185af34b429fccf798ebcce",
+  "size": 30766,
+  "skipped_bytes": 594,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "gpsd_ublox-zed-f9t-rtcm3.log": {
+  "crc_fail_candidates": 3,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 182,
+  "message_counts": {
+   "1005": 26,
+   "1077": 26,
+   "1087": 26,
+   "1097": 26,
+   "1127": 26,
+   "1230": 26,
+   "4072": 26
+  },
+  "msm_messages": 104,
+  "path": "rtcm/gpsd_ublox-zed-f9t-rtcm3.log",
+  "sha256": "a2648c5e319dba422032fd2ec4c7b8094bc49b82d50c0b93c6180f3fe43b7e48",
+  "size": 33096,
+  "skipped_bytes": 8407,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 89
+ },
+ "gpsd_unicore-um621_excerpt.log": {
+  "path": "nmea/gpsd_unicore-um621_excerpt.log",
+  "sha256": "382a957192d6df38fa41aa039868842e450ea980add61b8c330fd6ab38f0c61f",
+  "size": 20030,
+  "text_lines": 280,
+  "text_rules": {
+   "nmea": 280
+  }
+ },
+ "pygnssutils_nmea_rtcm3_excerpt.log": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 70,
+  "message_counts": {
+   "1005": 10,
+   "1077": 10,
+   "1087": 10,
+   "1097": 10,
+   "1127": 10,
+   "1230": 10,
+   "4072": 10
+  },
+  "msm_messages": 40,
+  "path": "rtcm/pygnssutils_nmea_rtcm3_excerpt.log",
+  "sha256": "48e1de79731299d87f6f4e0bba09d4734f43676ea5d91ff58e82cc6388ffca60",
+  "size": 28065,
+  "skipped_bytes": 18015,
+  "text_lines": 282,
+  "text_rules": {
+   "nmea": 282
+  },
+  "truncated_tail_bytes": 0
+ },
+ "pygnssutils_ntrip_chunked.bin": {
+  "crc_fail_candidates": 0,
+  "d1033": [
+   {
+    "antenna": "LEIAR10         NONE",
+    "antenna_serial": "21204005",
+    "offset": 9864,
+    "receiver_fw": "Nav 6.23 / Boot 5.63",
+    "receiver_serial": "5803R40146",
+    "receiver_type": "TRIMBLE ALLOY",
+    "setup_id": 0,
+    "station": 25
+   }
+  ],
+  "dechunk": true,
+  "decode_errors": 0,
+  "frames_ok": 109,
+  "message_counts": {
+   "1006": 3,
+   "1019": 11,
+   "1020": 11,
+   "1033": 2,
+   "1042": 11,
+   "1046": 11,
+   "1077": 11,
+   "1087": 11,
+   "1097": 11,
+   "1127": 21,
+   "1230": 3,
+   "4094": 3
+  },
+  "msm_messages": 54,
+  "path": "rtcm/pygnssutils_ntrip_chunked.bin",
+  "sha256": "6dbcfb5372b539f586b5f68b6c2703bc09ec9db9794a46ad40465fb143afcdac",
+  "size": 23950,
+  "skipped_bytes": 330,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "pyrtcm_NTRIP-USCL00CHL0.log": {
+  "crc_fail_candidates": 0,
+  "d1033": [
+   {
+    "antenna": "SEPCHOKE_B3E6   SPKE",
+    "antenna_serial": "5856",
+    "offset": 1049,
+    "receiver_fw": "5.5.0",
+    "receiver_serial": "3075024",
+    "receiver_type": "SEPT POLARX5",
+    "setup_id": 0,
+    "station": 0
+   }
+  ],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 35,
+  "message_counts": {
+   "1001": 1,
+   "1002": 1,
+   "1003": 1,
+   "1004": 1,
+   "1005": 1,
+   "1006": 1,
+   "1007": 1,
+   "1008": 1,
+   "1009": 1,
+   "1010": 1,
+   "1011": 1,
+   "1012": 1,
+   "1013": 1,
+   "1019": 1,
+   "1020": 1,
+   "1029": 1,
+   "1033": 1,
+   "1042": 1,
+   "1045": 1,
+   "1046": 1,
+   "1076": 1,
+   "1077": 1,
+   "1086": 1,
+   "1087": 1,
+   "1096": 1,
+   "1097": 1,
+   "1106": 1,
+   "1107": 1,
+   "1116": 1,
+   "1117": 1,
+   "1126": 1,
+   "1127": 1,
+   "1136": 1,
+   "1137": 1,
+   "1230": 1
+  },
+  "msm_messages": 14,
+  "path": "rtcm/pyrtcm_NTRIP-USCL00CHL0.log",
+  "sha256": "22d80aa368978c5e5622a1e328d4f340090102788727b6a3b14c5b5ccfa0bad8",
+  "size": 4606,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "pyrtcm_RTCMMSM3.log": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 3,
+  "message_counts": {
+   "1073": 1,
+   "1083": 1,
+   "1093": 1
+  },
+  "msm_messages": 3,
+  "path": "rtcm/pyrtcm_RTCMMSM3.log",
+  "sha256": "574af058f0acb1a7ee71fd27d1cde599db18aaa5598c78c529555235ed90cf58",
+  "size": 408,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ },
+ "pyunigps_mixed.log": {
+  "crc_fail_candidates": 0,
+  "d1033": [],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 7,
+  "message_counts": {
+   "1005": 1,
+   "1077": 1,
+   "1087": 1,
+   "1097": 1,
+   "1127": 1,
+   "1230": 1,
+   "4072": 1
+  },
+  "msm_messages": 4,
+  "path": "rtcm/pyunigps_mixed.log",
+  "sha256": "95bfbe92cb84eedf4fb6e3097bb877e7e3ca5d055b5304274b9585ccc804cc03",
+  "size": 10994,
+  "skipped_bytes": 9989,
+  "text_lines": 2,
+  "text_rules": {
+   "nmea": 2
+  },
+  "truncated_tail_bytes": 0
+ },
+ "pyunigps_um981.log": {
+  "path": "unicore/pyunigps_um981.log",
+  "sha256": "9d36da3fd14f79c0f196ba0c16bd07716f835e67d4259fc21e810a020f38e31a",
+  "size": 9767,
+  "text_lines": 0,
+  "text_rules": {}
+ },
+ "rtklib_GMSD7_12ep.rtcm3": {
+  "crc_fail_candidates": 0,
+  "d1033": [
+   {
+    "antenna": "",
+    "antenna_serial": "",
+    "offset": 6171,
+    "receiver_fw": "",
+    "receiver_serial": "",
+    "receiver_type": "TRIMBLE NETR9",
+    "setup_id": 0,
+    "station": 611
+   }
+  ],
+  "dechunk": false,
+  "decode_errors": 0,
+  "frames_ok": 53,
+  "message_counts": {
+   "1007": 1,
+   "1008": 1,
+   "1019": 1,
+   "1020": 1,
+   "1033": 1,
+   "1077": 12,
+   "1087": 12,
+   "1117": 12,
+   "1127": 12
+  },
+  "msm_messages": 48,
+  "path": "rtcm/rtklib_GMSD7_12ep.rtcm3",
+  "sha256": "51cbb4b7bc917bc9f6a9f1719423a6b6f928edf3d68f4309921533e8b2ad767d",
+  "size": 12229,
+  "skipped_bytes": 0,
+  "text_lines": 0,
+  "text_rules": {},
+  "truncated_tail_bytes": 0
+ }
+}

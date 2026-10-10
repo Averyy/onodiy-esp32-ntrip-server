@@ -374,6 +374,8 @@ NMEA_SIGNALS = {
              "5": ("L2C-M", "L2"), "6": ("L2C-L", "L2"), "7": ("L5-I", "L5"), "8": ("L5-Q", "L5"),
              "9": ("L6D", "L6"), "A": ("L6E", "L6")},
 }
+# SBAS satellites come under the GPS talker with its signal IDs.
+NMEA_SIGNALS["SBAS"] = NMEA_SIGNALS["GPS"]
 
 
 @dataclass
@@ -415,24 +417,46 @@ class SignalView:
         }
 
 
+def gsv_system(talker: str, number: int) -> str:
+    """Constellation of one satellite-in-view entry (NMEA 4.11 numbering).
+
+    The GPS and multi-constellation talkers also carry other systems by
+    number range: a real Unicore capture reports SBAS satellites (33-64)
+    under GP, among the GPS ones."""
+    if talker in ("GP", "GN"):
+        if 33 <= number <= 64 or 120 <= number <= 158:
+            return "SBAS"
+        if 65 <= number <= 96:
+            return "GLONASS"
+        if 193 <= number <= 202:
+            return "QZSS"
+        if 301 <= number <= 364:
+            return "Galileo"
+        if 401 <= number <= 463:
+            return "BeiDou"
+        return "GPS"
+    return NMEA_SYSTEMS.get(talker, talker)
+
+
 def parse_gsv(lines: list[str]) -> SignalView:
     view = SignalView("GSV")
     for line in lines:
         m = re.match(r"^\$(G[A-Z]|BD)GSV,", line)
         if not m:
             continue
-        system = NMEA_SYSTEMS.get(m.group(1), m.group(1))
+        talker = m.group(1)
         fields = line.rsplit("*", 1)[0].split(",")
         rest = fields[4:]
         sig_id = None
         if len(rest) % 4 == 1:
             sig_id = rest[-1].strip().upper()
             rest = rest[:-1]
-        name, band = NMEA_SIGNALS.get(system, {}).get(sig_id, (f"sig{sig_id}" if sig_id else "?", None))
         for i in range(0, len(rest) - 3, 4):
             sat, cn0 = rest[i], rest[i + 3]
             if not sat:
                 continue
+            system = gsv_system(talker, int(sat)) if sat.isdigit() else NMEA_SYSTEMS.get(talker, talker)
+            name, band = NMEA_SIGNALS.get(system, {}).get(sig_id, (f"sig{sig_id}" if sig_id else "?", None))
             view.add(system, name, band, sat, float(cn0) if cn0 else None)
     return view
 
