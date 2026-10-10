@@ -308,16 +308,18 @@ static void load_profile(void)
 {
     uint8_t buf[UM98X_PROFILE_BLOB_MAX];
     size_t len = sizeof(buf);
-    if (settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_PROFILE, buf, &len) == ESP_OK &&
-        um98x_profile_decode(buf, len, &s_profile)) {
-        return;
+    if (!(settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_PROFILE, buf, &len) == ESP_OK &&
+          um98x_profile_decode(buf, len, &s_profile))) {
+        /* Default: the station ID comes from the base MAC, stable per device. */
+        uint8_t mac[6] = { 0 };
+        if (esp_read_mac(mac, ESP_MAC_BASE) != ESP_OK) {
+            ESP_LOGW(TAG, "base MAC unreadable: station ID 0");
+        }
+        um98x_profile_default(&s_profile, um98x_station_id_from_mac(mac));
     }
-    /* Default: the station ID comes from the base MAC, stable per device. */
-    uint8_t mac[6] = { 0 };
-    if (esp_read_mac(mac, ESP_MAC_BASE) != ESP_OK) {
-        ESP_LOGW(TAG, "base MAC unreadable: station ID 0");
-    }
-    um98x_profile_default(&s_profile, um98x_station_id_from_mac(mac));
+    /* The signal view lists the profile's messages, and epoch gaps are
+     * counted against its MSM periods. */
+    gnss_obs_set_expected(s_profile.rtcm, s_profile.rtcm_count);
 }
 
 /* The profile (and the locked position, or none) in one batch. */
