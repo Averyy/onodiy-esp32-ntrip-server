@@ -997,6 +997,11 @@ static ntrip_sm_state_t failure_state(ntrip_cls_t cls, ntrip_row_t row)
     return NTRIP_SM_BACKOFF;
 }
 
+bool ntrip_failure_unreached(const ntrip_failure_t *f)
+{
+    return !f->reached_caster && !f->refused && (f->cls == NTRIP_CLS_DNS || f->cls == NTRIP_CLS_CONNECT);
+}
+
 static void reset_streaks(ntrip_sm_t *sm)
 {
     sm->attempt = 0;
@@ -1045,16 +1050,19 @@ ntrip_sm_act_t ntrip_sm_poll(ntrip_sm_t *sm, const ntrip_sm_in_t *in, uint32_t n
 
     if (!in->enabled) {
         set_state(sm, NTRIP_SM_DISABLED, now_ms);
+        sm->unreached_active = false;   /* out of the connect/backoff cycle */
         *why = NTRIP_WHY_DISABLED;
         return in->session_open ? NTRIP_ACT_CLOSE : NTRIP_ACT_NONE;
     }
     if (!in->have_ip) {
         set_state(sm, NTRIP_SM_WAIT_NETWORK, now_ms);
+        sm->unreached_active = false;
         *why = NTRIP_WHY_NO_IP;
         return in->session_open ? NTRIP_ACT_CLOSE : NTRIP_ACT_NONE;
     }
     if (in->paused) {
         set_state(sm, NTRIP_SM_PAUSED, now_ms);
+        sm->unreached_active = false;
         if (in->session_open && in->silent_ms >= sm->cfg.stall_limit_ms) {
             *why = NTRIP_WHY_PAUSE_IDLE;
             return NTRIP_ACT_CLOSE;
@@ -1071,6 +1079,7 @@ ntrip_sm_act_t ntrip_sm_poll(ntrip_sm_t *sm, const ntrip_sm_in_t *in, uint32_t n
     }
     if (!in->link_up) {
         set_state(sm, NTRIP_SM_WAIT_NETWORK, now_ms);
+        sm->unreached_active = false;
         return NTRIP_ACT_NONE;
     }
     if (sm->retry_pending) {
@@ -1083,12 +1092,14 @@ ntrip_sm_act_t ntrip_sm_poll(ntrip_sm_t *sm, const ntrip_sm_in_t *in, uint32_t n
     if (sm->stagger_pending) {
         if (!due(now_ms, sm->stagger_at_ms)) {
             set_state(sm, NTRIP_SM_WAIT_DATA, now_ms);
+            sm->unreached_active = false;
             return NTRIP_ACT_NONE;
         }
         sm->stagger_pending = false;
     }
     if (!in->fresh_data) {
         set_state(sm, NTRIP_SM_WAIT_DATA, now_ms);
+        sm->unreached_active = false;
         return NTRIP_ACT_NONE;
     }
     return NTRIP_ACT_CONNECT;
@@ -1110,6 +1121,7 @@ void ntrip_sm_connected(ntrip_sm_t *sm, uint32_t now_ms)
     sm->hint = NTRIP_HINT_NONE;
     sm->retry_pending = false;
     sm->busy_active = false;
+    sm->unreached_active = false;
     /* The caster accepted us: the hourly limit ("until a success") and the
      * run of consecutive caster-reaching failures end. */
     sm->hourly = false;
@@ -1164,6 +1176,25 @@ uint32_t ntrip_sm_failed(ntrip_sm_t *sm, const ntrip_failure_t *f, uint32_t now_
         sm->streak_active = true;
         sm->streak_start_ms = now_ms;
     }
+
+    bool unreached = ntrip_failure_unreached(f);
+    if (!unreached) {
+        sm->unreached_active = false;   /* the caster (or its host) answered: the run ends */
+    } else if (!sm->unreached_active) {
+        sm->unreached_active = true;
+        sm->unreached_start_ms = now_ms;
+    }
+    if (unreached && sm->cfg.protected_slot) {
+        /* The caster never saw it: a flat short retry, the count stays. */
+        uint32_t flat = (uint32_t)((uint64_t)NTRIP_UNREACHED_RETRY_MS * (800u + (rnd % 401u)) / 1000u);
+        sm->retry_pending = true;
+        sm->retry_at_ms = now_ms + flat;
+        sm->row = row;
+        sm->reason = cls;
+        set_state(sm, failure_state(cls, row), now_ms);
+        return flat;
+    }
+
     bool late = sm->cfg.profile == NTRIP_PROF_FAST && (uint32_t)(now_ms - sm->streak_start_ms) >= NTRIP_FAST_LATE_MS;
     if (f->reached_caster && sm->reached_streak < UINT32_MAX) {
         sm->reached_streak++;
@@ -1206,6 +1237,7 @@ void ntrip_sm_user_edit(ntrip_sm_t *sm, const ntrip_sm_cfg_t *cfg, uint32_t cred
     sm->cfg = *cfg;
     sm->cred_hash = cred_hash;
     reset_streaks(sm);
+    sm->unreached_active = false;
     sm->retry_pending = false;
     sm->stagger_pending = false;
     sm->row = NTRIP_ROW_NONE;
@@ -1224,6 +1256,15 @@ uint32_t ntrip_sm_retry_in_ms(const ntrip_sm_t *sm, uint32_t now_ms)
         left = s > left ? s : left;
     }
     return left;
+}
+
+uint32_t ntrip_sm_unreached_ms(const ntrip_sm_t *sm, uint32_t now_ms)
+{
+    if (!sm->unreached_active) {
+        return 0;
+    }
+    uint32_t d = now_ms - sm->unreached_start_ms;
+    return d == 0 ? 1u : d;   /* a run in progress is never reported as none */
 }
 
 bool ntrip_sm_persist_due(const ntrip_sm_t *sm)
@@ -1387,6 +1428,85 @@ uint32_t ntrip_cred_hash(const char *host, uint16_t port, bool v2, const char *m
 }
 
 /* ---- Onocoy budget ------------------------------------------------------------------------- */
+
+/* ---- connection history ---------------------------------------------------------------- */
+
+int32_t ntrip_hist_pack(uint32_t slot, uint32_t cls, uint32_t count)
+{
+    if (count > NTRIP_HIST_COUNT_MAX) {
+        count = NTRIP_HIST_COUNT_MAX;
+    }
+    return (int32_t)((slot & 0xFFu) | ((cls & 0xFFu) << 8) | (count << 16));
+}
+
+void ntrip_hist_init(ntrip_hist_t *h)
+{
+    memset(h, 0, sizeof(*h));
+}
+
+void ntrip_hist_failed(ntrip_hist_t *h, uint32_t now_s)
+{
+    if (h->fails < UINT32_MAX) {
+        h->fails++;
+    }
+    if (!h->first_fail_valid) {
+        h->first_fail_valid = true;
+        h->first_fail_s = now_s;
+    }
+}
+
+bool ntrip_hist_up(ntrip_hist_t *h, uint32_t slot, uint32_t now_s, int32_t *a, int32_t *b)
+{
+    bool write = false;
+    bool after_gap = h->streamed && (uint32_t)(now_s - h->prev_end_s) >= NTRIP_HIST_UP_GAP_S;
+    if (h->fails > 0 || after_gap) {
+        uint32_t outage = 0;
+        if (h->streamed) {
+            outage = now_s - h->prev_end_s;
+        } else if (h->first_fail_valid) {
+            outage = now_s - h->first_fail_s;
+        }
+        bool limited = h->streamed && h->prev_short && h->up_written &&
+                       (uint32_t)(now_s - h->up_at_s) < NTRIP_HIST_LIMIT_S;
+        if (!limited) {
+            write = true;
+            *a = ntrip_hist_pack(slot, 0, h->fails);
+            *b = (int32_t)(outage > INT32_MAX ? INT32_MAX : outage);
+            h->up_written = true;
+            h->up_at_s = now_s;
+        }
+    }
+    h->in_session = true;
+    h->session_start_s = now_s;
+    h->fails = 0;
+    return write;
+}
+
+bool ntrip_hist_down(ntrip_hist_t *h, uint32_t slot, uint8_t cls, uint32_t now_s, int32_t *a, int32_t *b)
+{
+    if (!h->in_session) {
+        return false;
+    }
+    uint32_t len = now_s - h->session_start_s;
+    bool is_short = len < NTRIP_HIST_SHORT_S;
+    bool write = !is_short || !h->down_written || (uint32_t)(now_s - h->down_at_s) >= NTRIP_HIST_LIMIT_S;
+    if (write) {
+        *a = ntrip_hist_pack(slot, cls, h->skipped);
+        *b = (int32_t)(len > INT32_MAX ? INT32_MAX : len);
+        h->skipped = 0;
+        h->down_written = true;
+        h->down_at_s = now_s;
+    } else if (h->skipped < UINT32_MAX) {
+        h->skipped++;
+    }
+    h->in_session = false;
+    h->streamed = true;
+    h->prev_end_s = now_s;
+    h->prev_short = is_short;
+    return write;
+}
+
+/* ---- Onocoy daily budget ----------------------------------------------------------- */
 
 uint32_t ntrip_offline_budget_s(uint32_t data_rate_permille)
 {

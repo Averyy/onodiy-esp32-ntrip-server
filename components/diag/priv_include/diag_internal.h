@@ -26,9 +26,6 @@ esp_err_t diag_journal_init(void);
 /** Before a restart: write what is queued into the sector being written (never erases: bounded). */
 void diag_journal_flush(void);
 
-/** UTC seconds now if a trusted clock was set (diag_set_utc), else 0. */
-int64_t diag_utc_now(void);
-
 #ifdef __cplusplus
 }
 #endif

@@ -38,8 +38,10 @@ extern "C" {
 
 /* ---- "wifi": station credentials ----------------------------------------- */
 #define SETTINGS_NS_WIFI            "wifi"
-#define SETTINGS_KEY_WIFI_SSID      "ssid"        /**< str (<= 32) */
+#define SETTINGS_KEY_WIFI_SSID      "ssid"        /**< str (<= 32): the station's credentials (confirmed by an IP, or entered at first setup) */
 #define SETTINGS_KEY_WIFI_PASS      "pass"        /**< str (<= 64), secret */
+#define SETTINGS_KEY_WIFI_PEND_SSID "pend_ssid"   /**< str (<= 32): changed credentials not confirmed yet (tried first at boot; replace ssid/pass once they get an IP) */
+#define SETTINGS_KEY_WIFI_PEND_PASS "pend_pass"   /**< str (<= 64), secret: written with pend_ssid in one batch */
 #define SETTINGS_KEY_WIFI_AP_PASS   "ap_pass"     /**< str: setup AP password, empty = open */
 
 /* ---- "gnss": receiver configuration and state ----------------------------- */
@@ -50,6 +52,7 @@ extern "C" {
 #define SETTINGS_KEY_GNSS_APPLIED_FW "applied_fw" /**< str (<= 47 chars, like every receiver firmware string): receiver firmware at the last successful apply (written with applied_hash in one batch) */
 #define SETTINGS_KEY_GNSS_RTCM1230_OK "rtcm1230_ok" /**< u8: the receiver accepted (1) or rejected (0) the RTCM1230 output at the last successful apply (same batch as applied_hash; missing = not applied) */
 #define SETTINGS_KEY_GNSS_AUTOCFG   "autocfg"     /**< u8: apply the profile when the receiver drifts from it; 0 = alert only and the health ladder's reconfigure step is refused (a receiver update always re-applies) */
+#define SETTINGS_KEY_GNSS_RECOVERY  "recovery"    /**< u8: automatic receiver recovery (the health monitor's GNSS ladder): 0 = full (default), 1 = no ESP32 reboot, 2 = alerts only; any other value reads as 0 */
 #define SETTINGS_KEY_GNSS_MODEL     "model"       /**< str: last detected model; survives factory reset */
 #define SETTINGS_KEY_GNSS_FW        "fw"          /**< str: last detected firmware; survives factory reset */
 #define SETTINGS_KEY_GNSS_BASE_POS  "base_pos"    /**< blob: locked antenna position (um98x_base_position_t, encoded) */
@@ -64,7 +67,7 @@ extern "C" {
 /* ---- "ota": firmware update state (every install is user-initiated; the
  * daily check interval is a build-time constant) ----------------------------- */
 #define SETTINGS_NS_OTA             "ota"
-#define SETTINGS_KEY_OTA_REPO       "repo"        /**< str: GitHub repository override "owner/name" (default from Kconfig) */
+#define SETTINGS_KEY_OTA_REPO       "repo"        /**< str: GitHub repository override "owner/name"; used only by builds that configure a manifest key (CONFIG_FW_UPDATE_MANIFEST_KEY_1/_2), every other build fetches from its Kconfig repository only */
 #define SETTINGS_KEY_OTA_TRIAL      "trial"       /**< blob: app trial {version, baseline, stage, started, boots, crashes}; survives factory reset */
 #define SETTINGS_KEY_OTA_BAD_VER    "bad_ver"     /**< blob: versions rolled back (never offered by the update banner); survives factory reset */
 #define SETTINGS_KEY_OTA_ETAG       "etag"        /**< str: ETag of the last manifest fetched (written only when it changes) */

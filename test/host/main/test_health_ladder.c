@@ -57,6 +57,8 @@ typedef struct {
     int64_t apply_end;
 
     /* reboot cap model (optional) */
+    bool refuse_reboot;         /* the reboot request is blocked after all */
+    unsigned refused_reboots;
     bool cap_model;
     int64_t reboots_at[16];
     unsigned nreboots_cap;
@@ -95,14 +97,19 @@ static hl_req_t cb_request(void *ctx, uint8_t step)
     return HL_REQ_ACCEPTED;
 }
 
-static void cb_reboot(void *ctx)
+static bool cb_reboot(void *ctx)
 {
     sim_t *w = (sim_t *)ctx;
+    if (w->refuse_reboot) {
+        w->refused_reboots++;
+        return false;   /* blocked after all: a race with the cap or an inhibit */
+    }
     w->reboots++;
     w->reboot_at = w->now;
     if (w->cap_model && w->nreboots_cap < 16) {
         w->reboots_at[w->nreboots_cap++] = w->now;
     }
+    return true;
 }
 
 static void cb_journal(void *ctx, uint8_t code, uint8_t outcome)
@@ -1335,4 +1342,292 @@ TEST_CASE("ladder: a flapping receiver over a day escalates but stays bounded", 
     TEST_ASSERT_TRUE(w.nreq > 0);
     TEST_ASSERT_TRUE(w.reboots <= 3);
     TEST_ASSERT_EQUAL_UINT32(w.started_steps, st_of(&w).recoveries - w.reboots);
+}
+
+/* ---- a blocked 6a is looked at again ------------------------------------- */
+
+/* Boot detection fails silently while the reboot cap is closed: 6a blocked. */
+static void blocked_in_no_receiver(sim_t *w)
+{
+    sim_init(w);
+    w->in.reboot_allowed = false;
+    w->in.stn_state = HL_STN_DETECTING;
+    sim_run(w, 45 * SEC);
+    w->in.stn_state = HL_STN_NO_RECEIVER;
+    w->in.detect_passes = 1;
+    sim_run(w, 2 * SEC);
+    static const uint8_t want[][2] = { { 9, HL_OUT_STARTED }, { 8, HL_OUT_STARTED } };
+    expect_recs(w, want, 2);
+    TEST_ASSERT_EQUAL_UINT32(2, w->nrec);
+    TEST_ASSERT_TRUE(st_of(w).reboot_recheck);
+}
+
+TEST_CASE("ladder: a blocked 6a in NO_RECEIVER runs once the cap allows it and a newer pass is silent", "[health_ladder]")
+{
+    sim_t w;
+    blocked_in_no_receiver(&w);
+
+    /* the cap opens, but no pass completed since the block: nothing */
+    w.in.reboot_allowed = true;
+    sim_run(&w, 10 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(2, w.nrec);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+
+    /* a newer pass without a byte: 6a, journalled as a new start */
+    w.in.detect_passes = 2;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+    TEST_ASSERT_EQUAL_UINT8(6, w.rec[2].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_STARTED, w.rec[2].outcome);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_REBOOTING, s.phase);
+    TEST_ASSERT_FALSE(s.reboot_recheck);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+}
+
+TEST_CASE("ladder: a blocked 6a looked at again with bytes in the newer pass raises the power-cycle alert", "[health_ladder]")
+{
+    sim_t w;
+    blocked_in_no_receiver(&w);
+    w.in.detect_passes = 2;
+    w.in.detect_saw_bytes = true;
+    sim_run(&w, 5 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(2, w.nrec);   /* the cap is still closed */
+    w.in.reboot_allowed = true;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    TEST_ASSERT_EQUAL_UINT8(7, w.rec[2].code);
+    TEST_ASSERT_EQUAL_UINT8(8, w.rec[3].code);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_TRUE(s.power_alert);
+    TEST_ASSERT_FALSE(s.reboot_recheck);
+    /* once decided, nothing more in this episode */
+    w.in.detect_passes = 9;
+    sim_run(&w, 2 * HOUR);
+    TEST_ASSERT_EQUAL_UINT32(4, w.nrec);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+}
+
+TEST_CASE("ladder: a blocked 6a waits for a released inhibit and never queues behind it", "[health_ladder]")
+{
+    sim_t w;
+    blocked_in_no_receiver(&w);
+    w.in.reboot_allowed = true;
+    w.in.reboot_inhibited = true;
+    w.in.detect_passes = 2;
+    sim_run(&w, 30 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(2, w.nrec);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    w.in.reboot_inhibited = false;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+}
+
+TEST_CASE("ladder: a blocked 6a is not looked at again outside full mode or after NO_RECEIVER", "[health_ladder]")
+{
+    /* "no ESP32 reboot": nothing; back to full: the next tick decides */
+    sim_t w;
+    blocked_in_no_receiver(&w);
+    w.in.reboot_allowed = true;
+    w.in.detect_passes = 2;
+    w.in.recovery_mode = HL_MODE_NO_REBOOT;
+    sim_run(&w, 30 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(2, w.nrec);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    w.in.recovery_mode = HL_MODE_FULL;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+
+    /* "alerts only": nothing */
+    blocked_in_no_receiver(&w);
+    w.in.reboot_allowed = true;
+    w.in.detect_passes = 2;
+    w.in.recovery_mode = HL_MODE_ALERTS;
+    sim_run(&w, 30 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+
+    /* the station left NO_RECEIVER: the block is forgotten */
+    blocked_in_no_receiver(&w);
+    w.in.stn_state = HL_STN_STREAMING;   /* found, still silent */
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_FALSE(st_of(&w).reboot_recheck);
+    w.in.reboot_allowed = true;
+    w.in.detect_passes = 2;
+    sim_run(&w, 5 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    TEST_ASSERT_EQUAL_UINT32(2, w.nrec);
+}
+
+TEST_CASE("ladder: a reboot blocked again by a race waits for the next pass", "[health_ladder]")
+{
+    sim_t w;
+    blocked_in_no_receiver(&w);
+    w.in.reboot_allowed = true;
+    w.in.detect_passes = 2;
+    w.refuse_reboot = true;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(1, w.refused_reboots);
+    static const uint8_t want[][2] = { { 9, 0 }, { 8, 0 }, { 6, 0 }, { 9, 0 }, { 8, 0 } };
+    expect_recs(&w, want, 5);
+    TEST_ASSERT_TRUE(st_of(&w).reboot_recheck);
+    w.refuse_reboot = false;
+    sim_run(&w, 10 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);   /* same pass: not again */
+    w.in.detect_passes = 3;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+}
+
+/* ---- user recovery mode ----------------------------------------------------- */
+
+TEST_CASE("ladder: mode no ESP32 reboot journals 6a as not run and goes to FAILED", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rescan_finds = false;
+    w.in.recovery_mode = HL_MODE_NO_REBOOT;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 8, 10 * MIN));
+    static const uint8_t want[][2] = {
+        { 1, HL_OUT_STARTED }, { 1, HL_OUT_FAILED }, { 2, HL_OUT_STARTED }, { 2, HL_OUT_FAILED },
+        { 3, HL_OUT_STARTED }, { 3, HL_OUT_FAILED }, { 9, HL_OUT_NOT_RUN }, { 8, HL_OUT_STARTED },
+    };
+    expect_recs(&w, want, 8);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    TEST_ASSERT_EQUAL_UINT32(3, w.nreq);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_FAILED, s.level);
+    TEST_ASSERT_EQUAL_UINT8(HL_MODE_NO_REBOOT, s.mode);
+
+    /* NO_RECEIVER at boot: the same */
+    sim_init(&w);
+    w.in.recovery_mode = HL_MODE_NO_REBOOT;
+    w.in.stn_state = HL_STN_NO_RECEIVER;
+    sim_run(&w, 3 * SEC);
+    static const uint8_t want2[][2] = { { 9, HL_OUT_NOT_RUN }, { 8, HL_OUT_STARTED } };
+    expect_recs(&w, want2, 2);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+
+    /* 6b is not affected */
+    sim_init(&w);
+    w.in.recovery_mode = HL_MODE_NO_REBOOT;
+    w.in.stn_state = HL_STN_NO_RECEIVER;
+    w.in.detect_saw_bytes = true;
+    sim_run(&w, 3 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(7, w.rec[0].code);
+    TEST_ASSERT_TRUE(st_of(&w).power_alert);
+}
+
+/* Alerts only: the stream stops (then garbage, lines or nothing) until FAILED;
+ * nothing may be requested or rebooted on the way. */
+static void alerts_only_run(sim_t *w, bool bytes, bool lines)
+{
+    sim_init(w);
+    w->in.recovery_mode = HL_MODE_ALERTS;
+    w->rescan_finds = false;
+    w->rtcm = true;
+    sim_run(w, 20 * SEC);
+    w->rtcm = false;
+    w->bytes = bytes;
+    w->lines = lines;
+    for (int64_t t = 0; t < 10 * MIN && find_rec(w, 8, HL_OUT_STARTED, 0) < 0; t += SEC) {
+        sim_step(w);
+        if (w->nrec == 1) {
+            hl_status_t s = st_of(w);
+            TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, s.level);   /* stalled before 7: degraded only */
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, w->nreq);
+    TEST_ASSERT_EQUAL_UINT32(0, w->reboots);
+    hl_status_t s = st_of(w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_FAILED, s.level);
+    TEST_ASSERT_FALSE(s.power_alert);
+    TEST_ASSERT_EQUAL_UINT32(0, s.recoveries);
+    TEST_ASSERT_EQUAL_UINT8(0, s.last_step);
+}
+
+TEST_CASE("ladder: alerts only journals each would-be step once and sends nothing", "[health_ladder]")
+{
+    sim_t w;
+    /* NO_BYTES: 1, 2, 3, then where the byte rule would run, 7 */
+    alerts_only_run(&w, false, false);
+    static const uint8_t nb[][2] = { { 1, HL_OUT_NOT_RUN }, { 2, HL_OUT_NOT_RUN }, { 3, HL_OUT_NOT_RUN }, { 8, 0 } };
+    expect_recs(&w, nb, 4);
+    TEST_ASSERT_EQUAL_UINT32(4, w.nrec);
+    /* each grace still elapses */
+    TEST_ASSERT_TRUE(w.rec[1].at - w.rec[0].at >= 5 * SEC);
+    TEST_ASSERT_TRUE(w.rec[2].at - w.rec[1].at >= 15 * SEC);
+    TEST_ASSERT_TRUE(w.rec[3].at - w.rec[2].at >= 30 * SEC);
+    /* the FAILED retry pass journals the step it would enter, every 10 min, and sends nothing */
+    sim_run(&w, 21 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(3, count_rec(&w, 2, HL_OUT_NOT_RUN));
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+
+    /* GARBAGE: 3, then 7 */
+    alerts_only_run(&w, true, false);
+    static const uint8_t gb[][2] = { { 3, HL_OUT_NOT_RUN }, { 8, 0 } };
+    expect_recs(&w, gb, 2);
+    TEST_ASSERT_EQUAL_UINT32(2, w.nrec);
+
+    /* TEXT_ONLY: 4, 5, then 7, no power-cycle alert */
+    alerts_only_run(&w, false, true);
+    static const uint8_t to[][2] = { { 4, HL_OUT_NOT_RUN }, { 5, HL_OUT_NOT_RUN }, { 8, 0 } };
+    expect_recs(&w, to, 3);
+    TEST_ASSERT_EQUAL_UINT32(3, w.nrec);
+
+    /* NO_RECEIVER: no byte rule, straight to 7 */
+    sim_init(&w);
+    w.in.recovery_mode = HL_MODE_ALERTS;
+    w.in.stn_state = HL_STN_NO_RECEIVER;
+    w.in.detect_saw_bytes = true;
+    sim_run(&w, 3 * SEC);
+    static const uint8_t nr[][2] = { { 8, 0 } };
+    expect_recs(&w, nr, 1);
+    TEST_ASSERT_FALSE(st_of(&w).power_alert);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+}
+
+TEST_CASE("ladder: a mode change mid-step lets the step finish; leaving alerts only starts afresh", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rescan_finds = true;
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.bytes = true;   /* GARBAGE: the ladder starts at 3 */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    TEST_ASSERT_EQUAL_UINT8(3, w.rec[0].code);
+    sim_run(&w, 10 * SEC);   /* the rescan runs (45 s) */
+    w.in.recovery_mode = HL_MODE_ALERTS;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 5, 10 * MIN));
+    static const uint8_t want[][2] = {
+        { 3, HL_OUT_STARTED }, { 3, HL_OUT_FAILED }, { 4, HL_OUT_NOT_RUN }, { 5, HL_OUT_NOT_RUN }, { 8, 0 },
+    };
+    expect_recs(&w, want, 5);
+    TEST_ASSERT_EQUAL_UINT32(1, w.nreq);
+    TEST_ASSERT_EQUAL_UINT8(3, w.req[0]);
+
+    /* back to full while still stalled: a fresh pass at the class entry step (3), not max(2, ...) */
+    sim_run(&w, MIN);
+    unsigned nreq = w.nreq;
+    w.in.recovery_mode = HL_MODE_FULL;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(nreq + 1, w.nreq);
+    TEST_ASSERT_EQUAL_UINT8(3, w.req[w.nreq - 1]);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, st_of(&w).level);
+}
+
+TEST_CASE("ladder: a stored recovery mode out of range acts as full", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rescan_finds = false;
+    w.in.recovery_mode = 7;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 7, 10 * MIN));
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+    TEST_ASSERT_EQUAL_UINT8(HL_MODE_FULL, st_of(&w).mode);
 }

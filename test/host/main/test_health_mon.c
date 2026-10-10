@@ -476,3 +476,117 @@ TEST_CASE("health mon: overall level is the worst of the ladder and degraded", "
     TEST_ASSERT_EQUAL_UINT8(3, hm_level(3, true));
     TEST_ASSERT_EQUAL_UINT8(3, hm_level(3, false));
 }
+
+/* ---- power lost --------------------------------------------------------------------- */
+
+#define PT0 1800000000LL   /* 2027-01-15, UTC s */
+#define PH 3600LL
+#define PDAY 86400LL
+#define RESET_PLANNED 1
+#define RESET_CRASH 2
+#define EV_OTHER 8         /* any record of a boot after its boot record */
+
+/* One boot: its boot record (no clock yet) and, `start` > 0, a later record
+ * of the same boot with a trusted clock 100 s into it. */
+static void pboot(hm_power_t *p, int cls, int64_t start)
+{
+    hm_power_feed(p, HM_EV_BOOT, cls, 0, 0);
+    hm_power_feed(p, EV_OTHER, 0, 0, 5);
+    if (start > 0) {
+        hm_power_feed(p, EV_OTHER, 0, start + 100, 100);
+    }
+}
+
+TEST_CASE("health mon: three power-on boots within 24 h raise power lost; it clears 24 h after the last", "[health_mon]")
+{
+    hm_power_t p;
+    hm_power_init(&p);
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0));
+    pboot(&p, HM_RESET_POWER_ON, PT0);
+    pboot(&p, HM_RESET_POWER_ON, PT0 + 1 * PH);
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0 + 2 * PH));
+    pboot(&p, HM_RESET_POWER_ON, PT0 + 2 * PH);
+    TEST_ASSERT_TRUE(hm_power_alert(&p, PT0 + 2 * PH + 200));
+    /* the first boot leaves the window, the alert stays: 24 h without one clears it */
+    TEST_ASSERT_TRUE(hm_power_alert(&p, PT0 + 25 * PH));
+    TEST_ASSERT_TRUE(hm_power_alert(&p, PT0 + 2 * PH + PDAY - 1));
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0 + 2 * PH + PDAY));
+
+    /* boots of other kinds count neither for nor against it */
+    hm_power_init(&p);
+    pboot(&p, HM_RESET_POWER_ON, PT0);
+    pboot(&p, RESET_CRASH, PT0 + 1 * PH);
+    pboot(&p, RESET_PLANNED, PT0 + 2 * PH);
+    pboot(&p, HM_RESET_POWER_ON, PT0 + 3 * PH);
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0 + 4 * PH));
+    pboot(&p, HM_RESET_POWER_ON, PT0 + 5 * PH);
+    TEST_ASSERT_TRUE(hm_power_alert(&p, PT0 + 6 * PH));
+
+    /* one a day is not "within 24 h" */
+    hm_power_init(&p);
+    for (int i = 0; i < 5; i++) {
+        pboot(&p, HM_RESET_POWER_ON, PT0 + i * (PDAY + PH));
+    }
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0 + 4 * (PDAY + PH) + PH));
+}
+
+TEST_CASE("health mon: power lost stays up while power-on boots keep coming less than 24 h apart", "[health_mon]")
+{
+    hm_power_t p;
+    hm_power_init(&p);
+    pboot(&p, HM_RESET_POWER_ON, PT0);
+    pboot(&p, HM_RESET_POWER_ON, PT0 + 1 * PH);
+    pboot(&p, HM_RESET_POWER_ON, PT0 + 2 * PH);
+    pboot(&p, HM_RESET_POWER_ON, PT0 + 22 * PH);
+    pboot(&p, HM_RESET_POWER_ON, PT0 + 44 * PH);
+    TEST_ASSERT_TRUE(hm_power_alert(&p, PT0 + 60 * PH));
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0 + 44 * PH + PDAY));
+    /* a new run needs three again */
+    pboot(&p, HM_RESET_POWER_ON, PT0 + 80 * PH);
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0 + 81 * PH));
+}
+
+TEST_CASE("health mon: power-on boots without a trusted clock count as inside the window", "[health_mon]")
+{
+    hm_power_t p;
+    hm_power_init(&p);
+    /* a boot dated two days ago, then three boots that never had a clock */
+    pboot(&p, RESET_PLANNED, PT0 - 2 * PDAY);
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0));
+    TEST_ASSERT_FALSE(hm_power_alert(&p, 0));
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    TEST_ASSERT_TRUE(hm_power_alert(&p, PT0));
+    TEST_ASSERT_TRUE(hm_power_alert(&p, 0));   /* no clock now either: three undated boots */
+
+    /* a later trusted time dates them: older than 24 h, they no longer count */
+    pboot(&p, RESET_PLANNED, PT0 - PDAY - PH);
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0));
+    TEST_ASSERT_FALSE(hm_power_alert(&p, 0));
+
+    /* placed at the start of the next dated boot, inside the window: they count */
+    hm_power_init(&p);
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    pboot(&p, HM_RESET_POWER_ON, PT0);
+    TEST_ASSERT_TRUE(hm_power_alert(&p, PT0 + PH));
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0 + PDAY));
+}
+
+TEST_CASE("health mon: a boot record with its own clock dates the boot; old boots fall out", "[health_mon]")
+{
+    hm_power_t p;
+    hm_power_init(&p);
+    for (int i = 0; i < 3; i++) {
+        hm_power_feed(&p, HM_EV_BOOT, HM_RESET_POWER_ON, PT0 + i * PH + 2, 2);
+    }
+    TEST_ASSERT_TRUE(hm_power_alert(&p, PT0 + 3 * PH));
+    TEST_ASSERT_EQUAL_INT64(PT0 + PH, p.boot[1].t);
+    /* many more boots than kept: the newest decide */
+    for (int i = 0; i < 40; i++) {
+        pboot(&p, HM_RESET_POWER_ON, PT0 + 10 * PDAY + i * 2 * PDAY);
+    }
+    TEST_ASSERT_EQUAL_UINT8(HM_POWER_BOOTS, p.n);
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0 + 10 * PDAY + 39 * 2 * PDAY + PH));
+}

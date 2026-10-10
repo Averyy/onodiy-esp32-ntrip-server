@@ -509,3 +509,43 @@ TEST_CASE("link core: hands off refuses every write and every lease, reception g
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, gnss_link_core_check(&c, GNSS_LINK_OP_WRITE, 7));
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_release(&c, 7, NULL));
 }
+
+TEST_CASE("link core: a closed driver reopens after 1 s, 5 s, 30 s, then every 60 s", "[gnss_link]")
+{
+    static const uint32_t want[] = { 1000, 5000, 30000, 60000, 60000, 60000 };
+    for (uint32_t i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+        TEST_ASSERT_EQUAL_UINT32(want[i], gnss_link_core_reopen_delay_ms(i));
+    }
+    TEST_ASSERT_EQUAL_UINT32(60000, gnss_link_core_reopen_delay_ms(UINT32_MAX));
+
+    /* the first failure is logged, then at most one line per 10 min */
+    TEST_ASSERT_TRUE(gnss_link_core_reopen_log_due(false, 0, T0_US));
+    TEST_ASSERT_FALSE(gnss_link_core_reopen_log_due(true, T0_US, T0_US + 599LL * 1000000));
+    TEST_ASSERT_TRUE(gnss_link_core_reopen_log_due(true, T0_US, T0_US + 600LL * 1000000));
+}
+
+TEST_CASE("link core: link_open and open_failures show a closed driver", "[gnss_link]")
+{
+    gnss_link_core_t c;
+    memset(&c, 0, sizeof(c));
+    gnss_link_stats_t st;
+    gnss_link_core_snapshot(&c, T0_US, &st);
+    TEST_ASSERT_FALSE(st.link_open);   /* not initialised: OFF */
+
+    open_link(&c);
+    gnss_link_core_snapshot(&c, T0_US, &st);
+    TEST_ASSERT_TRUE(st.link_open);
+    TEST_ASSERT_EQUAL_UINT32(0, st.open_failures);
+
+    gnss_link_core_on_open_failed(&c);
+    gnss_link_core_on_open_failed(&c);
+    gnss_link_core_snapshot(&c, T0_US, &st);
+    TEST_ASSERT_FALSE(st.link_open);
+    TEST_ASSERT_EQUAL_UINT32(2, st.open_failures);
+    TEST_ASSERT_EQUAL(GNSS_LINK_MODE_STREAM, st.mode);   /* still STREAM: the reopen keeps the mode */
+
+    gnss_link_core_set_open(&c, true);
+    gnss_link_core_snapshot(&c, T0_US, &st);
+    TEST_ASSERT_TRUE(st.link_open);
+    TEST_ASSERT_EQUAL_UINT32(2, st.open_failures);   /* since boot */
+}

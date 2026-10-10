@@ -31,7 +31,8 @@ menu "Station: network"
         help
             The AP started by the BOOT button (admin password cleared, or
             settings unreadable) goes down again after this long, or later
-            when the last connected client leaves.
+            when the last connected client leaves, but at most 30 min after
+            this lifetime even while a client stays connected.
 
     config NETWORK_WIFI_COUNTRY
         string "Wi-Fi country code"

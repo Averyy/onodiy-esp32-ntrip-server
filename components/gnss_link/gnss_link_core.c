@@ -11,6 +11,31 @@ void gnss_link_core_init(gnss_link_core_t *c, uint32_t baud)
     memset(c, 0, sizeof(*c));
     c->mode = GNSS_LINK_MODE_STREAM;
     c->baud = baud;
+    c->link_open = true;
+}
+
+void gnss_link_core_set_open(gnss_link_core_t *c, bool open)
+{
+    c->link_open = open;
+}
+
+void gnss_link_core_on_open_failed(gnss_link_core_t *c)
+{
+    c->link_open = false;
+    if (c->stats.open_failures < UINT32_MAX) {
+        c->stats.open_failures++;
+    }
+}
+
+uint32_t gnss_link_core_reopen_delay_ms(uint32_t failures)
+{
+    static const uint32_t k[] = { 1000u, 5000u, 30000u };
+    return failures < sizeof(k) / sizeof(k[0]) ? k[failures] : 60000u;
+}
+
+bool gnss_link_core_reopen_log_due(bool logged, int64_t last_log_us, int64_t now_us)
+{
+    return !logged || now_us - last_log_us >= (int64_t)GNSS_LINK_REOPEN_LOG_MS * 1000;
 }
 
 static bool is_lease_mode(gnss_link_mode_t mode)
@@ -260,6 +285,7 @@ void gnss_link_core_snapshot(const gnss_link_core_t *c, int64_t now_us, gnss_lin
     out->last_rx_age_ms = gnss_link_core_age_ms(c->rx_seen, c->last_rx_us, now_us);
     out->last_rtcm_age_ms = gnss_link_core_age_ms(c->rtcm_seen, c->last_rtcm_us, now_us);
     out->hands_off = c->hands_off;
+    out->link_open = c->mode != GNSS_LINK_MODE_OFF && c->link_open;
 }
 
 bool gnss_link_core_baud_supported(uint32_t baud)

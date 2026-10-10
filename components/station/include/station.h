@@ -347,6 +347,7 @@ typedef struct {
     um98x_flash_journal_t flash_journal;
     uint32_t detect_failures;        /**< consecutive failed detections */
     bool detect_saw_bytes;           /**< the last failed detection pass received bytes at some baud (health's byte rule on entering NO_RECEIVER) */
+    uint32_t detect_passes;          /**< detection passes completed since boot, found or not (health looks at a blocked ESP32 reboot again only after a newer pass) */
     uint64_t rtcm_excluded;          /**< frames of types 1101-1107 kept out of the hub */
     um98x_flash_progress_t flash;    /**< valid while FLASHING / FLASH_RECOVERY */
 

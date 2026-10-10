@@ -13,17 +13,32 @@
  *    up beside the AP (AP+STA), unconnected, so the setup page can scan.
  *  - Credentials stored: connect as a station and reconnect forever after
  *    every drop, waiting 1 s, 2 s, 4 s, 8 s, 16 s, then 30 s between
- *    attempts. A Wi-Fi outage never reboots the station and never switches it
- *    to the setup AP: after CONFIG_NETWORK_STA_FALLBACK_S without an IP the
- *    setup AP comes up *beside* the station (AP+STA, on the station's channel
- *    once it connects), and goes down again a minute after the station has an
- *    IP. The station keeps retrying all along.
+ *    attempts. A Wi-Fi outage never switches the station to setup-AP-only
+ *    mode: after CONFIG_NETWORK_STA_FALLBACK_S without an IP the setup AP
+ *    comes up *beside* the station (AP+STA, on the station's channel once it
+ *    connects), and goes down again a minute after the station has an IP.
+ *    The station keeps retrying all along. A Wi-Fi outage can reboot the
+ *    ESP32 only through the network ladder's last rung (upstream probe
+ *    NO_IP or DNS_FAILED, at most once per
+ *    CONFIG_HEALTH_NET_REBOOT_MIN_INTERVAL_H, never while a receiver-flash
+ *    journal is open); the receiver is untouched by it.
+ *  - Changed credentials are tried first (network_set_credentials): stored
+ *    as pending (wifi/pend_ssid, wifi/pend_pass) beside the station's
+ *    current ones and used at once; when they get an IP within 90 s they
+ *    replace the current ones, otherwise the station goes back to its
+ *    previous credentials and keeps the new ones pending (shown in the
+ *    status, retried with network_retry_pending_credentials() and first
+ *    thing at the next boot, dropped with
+ *    network_discard_pending_credentials()). So a typo never strands a
+ *    remote station. Without previous credentials (first setup) the new ones
+ *    are stored as the station's at once.
  *  - Settings unavailable (degraded boot, NVS unreadable): no AP comes up on
  *    its own. Only a BOOT-button long press starts the recovery AP, so an
  *    unconfigured-looking station on a roof is never open to passers-by.
  *  - Recovery AP (network_start_setup_ap(true), BOOT button): wifi/ap_pass if
  *    set and readable, else open; down again after CONFIG_NETWORK_RECOVERY_AP_S
- *    unless a client is still connected (then when the last one leaves).
+ *    unless a client is still connected (then when the last one leaves, or
+ *    30 min after the lifetime at the latest).
  *  - An AP that is up for setup or fallback stays up while the station tries
  *    new credentials and until a minute after it gets an IP, so the browser
  *    on the setup page receives an answer (and the new address).
@@ -51,27 +66,41 @@
  * warns before a fresh scan.
  *
  * Recovery ladder (network_ladder_tick, driven by the health monitor once a
- * second while the protected caster is not streaming but RTCM is healthy):
+ * second) while the station has credentials and any of these triggers holds:
+ * P, the protected caster is enabled and not streaming (nor paused) while
+ * RTCM is healthy; A, the station has been associated for 60 s without an
+ * IP (assoc_no_ip_s); S, an enabled slot of any caster has failed for 180 s
+ * in a row without reaching its caster (DNS failures, connects that timed
+ * out or failed locally; network_ladder_input_t.slot_unreached_s).
  * +60 s reconnect, +3 min renew DHCP and switch to the fallback DNS servers
  * (CONFIG_NETWORK_FALLBACK_DNS1/2, kept for the rest of the boot), +6 min
  * restart Wi-Fi, +10 min reboot (lifecycle_request_reboot(NETWORK_LADDER)).
  * Each rung first probes upstream: reachable -> the fault is remote (a caster)
  * and the rung is skipped; an IP but nothing beyond the router -> no reboot.
+ * Only trigger P can reboot: without it at the reboot rung the reboot is
+ * withheld (NO_REBOOT_TRIGGER), so A and S never reboot the ESP32.
  * The reboot is also withheld while a receiver-flash journal is open (not
  * when its state is only unknown because the settings are unavailable),
  * within the minimum interval since the last network-ladder reboot (counted
  * across resets; a power cycle, or RTC state from before another app image's
  * run, starts afresh), while a reboot inhibit is held
- * and while someone is connected to the station's AP. The reconnect, renew
- * and restart rungs run regardless of the journal, so the user can still
- * reach the UI. After the reboot rung the ladder holds 10 min, then starts a
- * new pass; it resets after 60 s without the condition. Ladder timings are
- * PROVISIONAL, to be confirmed on hardware.
+ * and while someone is connected to the station's AP. A connected AP client
+ * holds the Wi-Fi restart and the reboot back for at most 30 min per ladder
+ * episode; after that they run anyway (reason AP_OVERRIDDEN). The
+ * reconnect, renew and restart rungs run regardless of the journal, so the
+ * user can still reach the UI. After the reboot rung the ladder holds 10
+ * min, then starts a new pass; it resets after 60 s without a trigger.
+ * Ladder timings are PROVISIONAL, to be confirmed on hardware.
  * Journal: DIAG_EV_LADDER_STEP with a = 1 and b = (reason << 16) |
- * (outcome << 8) | code. Codes: 1 reconnect, 2 renew DHCP + fallback DNS,
- * 3 restart Wi-Fi, 4 reboot. Outcomes: 0 started, 1 healthy again (code =
- * the last rung started), 2 skipped or withheld with the reason
+ * (outcome << 8) | code. Codes: 0 pass started (reason = the triggers
+ * holding then: bit 0 P, bit 1 A, bit 2 S), 1 reconnect, 2 renew DHCP +
+ * fallback DNS, 3 restart Wi-Fi, 4 reboot. Outcomes: 0 started (reason
+ * AP_OVERRIDDEN when it runs with an AP client connected), 1 healthy again
+ * (code = the last rung started), 2 skipped or withheld with the reason
  * (network_ladder_why_t).
+ * Connection history: DIAG_EV_WIFI_UP when the station gets its IP back
+ * after losing it (not the first IP of a boot): a = connect attempts during
+ * the outage, b = outage in seconds.
  *
  * Wi-Fi credentials live in the settings component; the Wi-Fi driver's own
  * NVS storage is disabled (single source of truth).
@@ -130,7 +159,16 @@ typedef enum {
     NETWORK_LADDER_WHY_INTERVAL,     /**< last network-ladder reboot too recent */
     NETWORK_LADDER_WHY_INHIBITED,    /**< a reboot inhibit is held */
     NETWORK_LADDER_WHY_AP_IN_USE,    /**< a client is connected to the station's AP */
+    NETWORK_LADDER_WHY_NO_REBOOT_TRIGGER, /**< reboot rung: the pass runs for triggers A or S only (never reboot) */
+    NETWORK_LADDER_WHY_AP_OVERRIDDEN,/**< the rung ran although an AP client is connected (30 min limit over) */
 } network_ladder_why_t;
+
+/** Network ladder triggers (network_status_t.ladder_triggers, pass-start record). */
+typedef enum {
+    NETWORK_LADDER_TRIG_PROTECTED  = 1u << 0, /**< P: protected caster down while RTCM is healthy */
+    NETWORK_LADDER_TRIG_ASSOC_NO_IP = 1u << 1, /**< A: associated 60 s without an IP */
+    NETWORK_LADDER_TRIG_UNREACHED  = 1u << 2, /**< S: a slot's failures have not reached its caster for 180 s */
+} network_ladder_trigger_t;
 
 /** Snapshot for status pages and health. */
 typedef struct {
@@ -138,6 +176,7 @@ typedef struct {
     bool sta_credentials_unreadable; /**< SSID stored, password unreadable: station not started (setup AP) */
     bool online;                   /**< station has an IP */
     bool associated;               /**< station link to the access point is up */
+    uint32_t assoc_no_ip_s;        /**< associated without an IP for this long (since the association or the loss of the address); 0 = not associated, or has an IP */
     bool upstream_ok;              /**< last probe reached the internet */
     network_probe_t probe;         /**< last probe result */
     uint32_t probe_age_s;          /**< since the last probe finished, UINT32_MAX = never */
@@ -160,7 +199,13 @@ typedef struct {
     bool ladder_active;            /**< the recovery ladder runs (or holds between passes) */
     uint8_t ladder_rung;           /**< last rung started: 1 reconnect, 2 renew DHCP, 3 restart Wi-Fi, 4 reboot */
     uint8_t ladder_withheld;       /**< network_ladder_why_t of the last skipped or withheld rung */
+    uint8_t ladder_triggers;       /**< network_ladder_trigger_t flags holding at the last tick */
     uint32_t ladder_actions;       /**< recovery actions started by the ladder since boot */
+    bool cred_trial;               /**< changed credentials are being tried now */
+    uint32_t cred_trial_left_s;    /**< until the trial gives up (0 = none) */
+    bool cred_pending;             /**< credentials wait to be confirmed (pending_ssid) */
+    char pending_ssid[33];         /**< SSID of the pending credentials ("" = none) */
+    bool cred_reverted;            /**< the pending credentials got no IP in time: back on the previous ones */
 } network_status_t;
 
 /** One scan result. */
@@ -185,6 +230,7 @@ typedef enum {
 typedef struct {
     bool caster_down;              /**< the protected caster slot is configured but not STREAMING */
     bool rtcm_healthy;             /**< the GNSS path delivers RTCM (so the network is the suspect) */
+    uint32_t slot_unreached_s;     /**< longest run of an enabled slot's failures that never reached its caster (ntrip_caster_status_t.unreached_s) */
     bool flash_journal_open;       /**< a receiver-flash journal is open, any state, safe mode included: no reboot */
     bool flash_journal_unknown;    /**< journal state unknown because the settings are unavailable: does not withhold the reboot */
     uint32_t min_reboot_interval_s;/**< at most one network-ladder reboot per this many seconds (counted across resets) */
@@ -207,15 +253,35 @@ esp_err_t network_get_status(network_status_t *out);
 bool network_is_online(void);
 
 /**
- * Store new station credentials and reconnect with them (applied about a
- * second later, so an HTTP reply can go out first). An AP that is up stays
- * up until the station gets an IP and a minute after, so the browser gets an
- * answer. ssid: 1-32 bytes; password: "" (open), 8-63 characters or 64 hex
- * digits. With the settings unavailable they are used for this boot only.
+ * New station credentials, applied about a second later (so an HTTP reply
+ * can go out first). With credentials already stored (and different) they
+ * are stored as pending and tried: an IP within 90 s makes them the
+ * station's credentials, otherwise the station goes back to the previous
+ * ones and keeps these pending (see the header). Without stored credentials
+ * they are stored as the station's at once. An AP that is up stays up until
+ * the station gets an IP and a minute after, so the browser gets an answer.
+ * ssid: 1-32 bytes; password: "" (open), 8-63 characters or 64 hex digits.
+ * With the settings unavailable they are kept for this boot only.
  * @return ESP_ERR_INVALID_ARG for invalid values, ESP_ERR_INVALID_STATE before
  *         network_init(), or the settings error if they could not be stored.
  */
 esp_err_t network_set_credentials(const char *ssid, const char *password);
+
+/**
+ * Try the pending credentials again (90 s, then back to the current ones
+ * unless they got an IP).
+ * @return ESP_ERR_NOT_FOUND when none are pending, ESP_ERR_INVALID_STATE
+ *         before network_init().
+ */
+esp_err_t network_retry_pending_credentials(void);
+
+/**
+ * Forget the pending credentials (a trial in progress ends: the station goes
+ * back to its current credentials).
+ * @return ESP_ERR_NOT_FOUND when none are pending, ESP_ERR_INVALID_STATE
+ *         before network_init(), or the settings error.
+ */
+esp_err_t network_discard_pending_credentials(void);
 
 /**
  * Start a scan in the background; NETWORK_EVENT_SCAN_DONE when finished.

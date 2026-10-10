@@ -55,6 +55,28 @@
  * the station's report for its whole detection pass, then the ladder holds
  * FAILED without retries until the station leaves NO_RECEIVER. An episode
  * that began with the ladder's own failed rescan is handled by that step.
+ * A 6a the episode's byte rule could not take (the reboot cap, a reboot
+ * inhibit, or the "no ESP32 reboot" mode) is looked at again: on a tick
+ * where the mode is full, the cap allows a reboot, no inhibit is held and
+ * the station has completed a detection pass since the block, the byte rule
+ * runs once more on that latest pass (no bytes -> 6a, bytes -> 6b). The cap
+ * still bounds every reboot; a reboot is never queued behind an inhibit.
+ *
+ * User recovery mode (gnss/recovery, read before every decision; a step
+ * already running completes):
+ *   FULL     the ladder above;
+ *   NO_REBOOT  6a is never taken: where the byte rule would choose it, the
+ *            ladder journals code 9 with outcome NOT_RUN and goes to 7;
+ *            steps 1-5 and 6b unchanged;
+ *   ALERTS   nothing is requested and nothing rebooted. Stalls are still
+ *            declared and classed; each step the full ladder would start is
+ *            journalled once (outcome NOT_RUN) when it would start and its
+ *            grace still runs; where the byte rule would run (after step 3
+ *            or 5) the ladder goes to 7, with no 6b and no power-cycle
+ *            alert. In 7 the retry pass journals the step it would enter
+ *            every 10 min and sends nothing. The level is DEGRADED before 7
+ *            and FAILED at 7. Leaving this mode while stalled starts a fresh
+ *            pass at the class entry step.
  *
  * Timings are PROVISIONAL, to be confirmed on hardware.
  */
@@ -124,7 +146,15 @@ typedef enum {
     HL_OUT_HEALTHY = 1,
     HL_OUT_FAILED = 2,            /**< also: refused by the station without sending anything */
     HL_OUT_ABANDONED = 3,         /**< a suspension began */
+    HL_OUT_NOT_RUN = 4,           /**< not run: the user's recovery mode */
 } hl_outcome_t;
+
+/** User recovery mode (gnss/recovery). */
+typedef enum {
+    HL_MODE_FULL = 0,             /**< the whole ladder */
+    HL_MODE_NO_REBOOT = 1,        /**< everything but the ESP32 reboot (6a) */
+    HL_MODE_ALERTS = 2,           /**< nothing sent, nothing rebooted: stalls are only declared and journalled */
+} hl_mode_t;
 
 /** Result of a step request. */
 typedef enum {
@@ -162,8 +192,8 @@ typedef enum {
 typedef struct {
     /** Request recovery step 1-5 from the station (never blocks). */
     hl_req_t (*request)(void *ctx, uint8_t step);
-    /** Request the ESP32 reboot (6a). */
-    void (*reboot)(void *ctx);
+    /** Request the ESP32 reboot (6a). @return false if it was blocked after all (cap or inhibit, a race). */
+    bool (*reboot)(void *ctx);
     /** Journal one ladder record. */
     void (*journal)(void *ctx, uint8_t code, uint8_t outcome);
     void *ctx;
@@ -186,6 +216,8 @@ typedef struct {
     bool journal_unknown;         /**< settings unavailable: state unknown (also suspends) */
     bool safe_mode;
     bool detect_saw_bytes;        /**< the station's last failed detection pass received bytes */
+    uint32_t detect_passes;       /**< detection passes the station completed since boot (monotonic) */
+    uint8_t recovery_mode;        /**< hl_mode_t (any other value acts as FULL) */
     bool reconfigure_refused;     /**< the station would refuse RECONFIGURE now */
     bool surveying;               /**< the station's survey window is open */
     bool survey_holds_rtcm;       /**< the receiver sends no RTCM while surveying: no stall inside the window */
@@ -236,6 +268,12 @@ typedef struct {
     /* NO_RECEIVER episodes */
     bool no_rx;                   /**< the station is in a NO_RECEIVER episode */
     bool no_rx_handled;           /**< the byte rule already ran for it */
+    bool blocked_6a;              /**< its byte rule chose 6a and could not take it: looked at again */
+    uint32_t blocked_at_pass;     /**< detect_passes when it was blocked */
+
+    /* user recovery mode */
+    uint8_t mode;                 /**< hl_mode_t of the last decision */
+    bool dry;                     /**< the step in its grace was only journalled (ALERTS mode) */
 
     /* REBOOTING */
     int64_t reboot_ms;
@@ -257,6 +295,8 @@ typedef struct {
     uint32_t stalls;
     uint32_t recoveries;
     uint32_t retry_in_s;          /**< FAILED: until the next retry pass (0 = none scheduled) */
+    uint8_t mode;                 /**< hl_mode_t the ladder last decided with */
+    bool reboot_recheck;          /**< NO_RECEIVER: a blocked 6a waits to be looked at again */
 } hl_status_t;
 
 /** Fresh ladder; the stall timer starts at now_ms. */

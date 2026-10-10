@@ -34,6 +34,18 @@
  *    never runs the first action as well.
  *  - Overall level: the worst of the GNSS ladder's and "degraded" for any
  *    other alert or a caster that is down.
+ *  - Power lost: the journal's boot records are read in order and the
+ *    power-on boots kept with their time. The alert is up while the newest
+ *    power-on boot is less than 24 h old and, in the run of power-on boots
+ *    that ends with it (each less than 24 h after the one before), some 24 h
+ *    span held at least three of them; so it clears 24 h after the last
+ *    one. A boot's time is the first trusted clock of that boot (journal
+ *    unix time minus the record's uptime). A boot that never had a trusted
+ *    clock counts as inside the window: it is placed at the first trusted
+ *    time recorded after it (a later boot's start or any later record), or
+ *    at "now" when nothing later had a clock. Without a trusted clock now,
+ *    only boots that nothing later dated can be counted, and three of those
+ *    raise it.
  *
  * Thresholds are PROVISIONAL, to be confirmed on hardware.
  */
@@ -223,6 +235,33 @@ void hm_button_init(hm_button_t *b);
 
 /** One sample of the button (pressed = active). */
 hm_btn_event_t hm_button(hm_button_t *b, bool pressed, int64_t now_ms, uint32_t admin_ms, uint32_t factory_ms);
+
+/* ---- power lost ------------------------------------------------------------------ */
+
+#define HM_POWER_BOOTS     16          /**< power-on boots kept (newest) */
+#define HM_POWER_WINDOW_S  86400       /**< "within 24 h", and "24 h without one" clears */
+#define HM_POWER_COUNT     3           /**< power-on boots within the window that raise the alert */
+#define HM_RESET_POWER_ON  0           /**< journal boot record `a` for a power-on reset (lifecycle_reset_class_t) */
+#define HM_EV_BOOT         1           /**< journal kind of the boot record (diag_event_t) */
+
+typedef struct {
+    int64_t t;                         /**< UTC start (s), 0 = not dated */
+    int64_t ub;                        /**< earliest trusted time known to come after it, 0 = none */
+} hm_pboot_t;
+
+typedef struct {
+    hm_pboot_t boot[HM_POWER_BOOTS];   /**< oldest first */
+    uint8_t n;
+    bool cur_power;                    /**< the records being read belong to a power-on boot: boot[n - 1] */
+} hm_power_t;
+
+void hm_power_init(hm_power_t *p);
+
+/** Feed one journal record, in journal order (unix_s 0 = no trusted clock then). */
+void hm_power_feed(hm_power_t *p, uint16_t kind, int32_t a, int64_t unix_s, uint32_t uptime_s);
+
+/** Is the "power was lost" alert up at `now_utc` (0 = no trusted clock now)? */
+bool hm_power_alert(const hm_power_t *p, int64_t now_utc);
 
 /* ---- overall level ------------------------------------------------------------ */
 

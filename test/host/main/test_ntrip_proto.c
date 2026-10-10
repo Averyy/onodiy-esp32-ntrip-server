@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "diag.h"
 #include "ntrip_proto.h"
 #include "unity.h"
 
@@ -621,11 +622,14 @@ static ntrip_sm_act_t step(ntrip_sm_t *sm, const ntrip_sm_in_t *in, uint32_t now
     return ntrip_sm_poll(sm, in, now, MID, &why);
 }
 
-static const ntrip_failure_t k_transient = { NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false, false };
-static const ntrip_failure_t k_reached = { NTRIP_CLS_REMOTE_CLOSE, NTRIP_ROW_TRANSIENT, true, false };
-static const ntrip_failure_t k_auth = { NTRIP_CLS_AUTH, NTRIP_ROW_AUTH, true, false };
-static const ntrip_failure_t k_busy = { NTRIP_CLS_MOUNT_BUSY, NTRIP_ROW_MOUNT_BUSY, true, false };
-static const ntrip_failure_t k_busy_ambiguous = { NTRIP_CLS_MOUNT_BUSY, NTRIP_ROW_MOUNT_BUSY, true, true };
+static const ntrip_failure_t k_transient = { NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false, false, false };
+static const ntrip_failure_t k_reached = { NTRIP_CLS_REMOTE_CLOSE, NTRIP_ROW_TRANSIENT, true, false, false };
+static const ntrip_failure_t k_auth = { NTRIP_CLS_AUTH, NTRIP_ROW_AUTH, true, false, false };
+static const ntrip_failure_t k_busy = { NTRIP_CLS_MOUNT_BUSY, NTRIP_ROW_MOUNT_BUSY, true, false, false };
+static const ntrip_failure_t k_busy_ambiguous = { NTRIP_CLS_MOUNT_BUSY, NTRIP_ROW_MOUNT_BUSY, true, true, false };
+/* A refused connect reached the caster's host: it follows the TRANSIENT row on every slot. */
+static const ntrip_failure_t k_refused = { NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false, false, true };
+static const ntrip_failure_t k_dns = { NTRIP_CLS_DNS, NTRIP_ROW_TRANSIENT, false, false, false };
 
 TEST_CASE("ntrip slot gate: enable, network, fresh data, stagger", "[ntrip]")
 {
@@ -761,7 +765,7 @@ TEST_CASE("ntrip slot failures back off and a healthy session resets", "[ntrip]"
     ntrip_sm_init(&sm, &k_fast, 7, t);
     ntrip_sm_in_t in = ready();
 
-    uint32_t d = ntrip_sm_failed(&sm, &k_transient, t, MID);
+    uint32_t d = ntrip_sm_failed(&sm, &k_refused, t, MID);
     TEST_ASSERT_EQUAL_UINT32(1000, d);
     TEST_ASSERT_EQUAL(NTRIP_SM_BACKOFF, sm.state);
     TEST_ASSERT_EQUAL(NTRIP_CLS_CONNECT, sm.reason);
@@ -769,9 +773,9 @@ TEST_CASE("ntrip slot failures back off and a healthy session resets", "[ntrip]"
     TEST_ASSERT_EQUAL(NTRIP_SM_BACKOFF, sm.state);
     TEST_ASSERT_EQUAL(NTRIP_ACT_CONNECT, step(&sm, &in, t + 1000));
     t += 1000;
-    TEST_ASSERT_EQUAL_UINT32(2000, ntrip_sm_failed(&sm, &k_transient, t, MID));
+    TEST_ASSERT_EQUAL_UINT32(2000, ntrip_sm_failed(&sm, &k_refused, t, MID));
     t += 2000;
-    TEST_ASSERT_EQUAL_UINT32(4000, ntrip_sm_failed(&sm, &k_transient, t, MID));
+    TEST_ASSERT_EQUAL_UINT32(4000, ntrip_sm_failed(&sm, &k_refused, t, MID));
 
     /* a short session keeps the count growing */
     t += 4000;
@@ -803,14 +807,14 @@ TEST_CASE("ntrip fast profile raises the transient cap after 10 minutes", "[ntri
     uint32_t max_early = 0;
     uint32_t d = 0;
     while (t < NTRIP_FAST_LATE_MS) {
-        d = ntrip_sm_failed(&sm, &k_transient, t, HI);
+        d = ntrip_sm_failed(&sm, &k_refused, t, HI);
         if (t + d < NTRIP_FAST_LATE_MS && d > max_early) {
             max_early = d;
         }
         t += d;
     }
     TEST_ASSERT_EQUAL_UINT32(18000, max_early);    /* 15 s cap x 1.2 */
-    d = ntrip_sm_failed(&sm, &k_transient, t, HI);
+    d = ntrip_sm_failed(&sm, &k_refused, t, HI);
     TEST_ASSERT_EQUAL_UINT32(36000, d);            /* 30 s cap x 1.2 */
 }
 
@@ -1138,4 +1142,215 @@ TEST_CASE("ntrip credential hash and Onocoy offline budget", "[ntrip]")
     TEST_ASSERT_EQUAL_UINT32(387, ntrip_offline_budget_s(990));
     TEST_ASSERT_EQUAL_UINT32(300, ntrip_offline_budget_s(980));
     TEST_ASSERT_EQUAL_UINT32(0, ntrip_offline_budget_s(979));
+}
+
+/* ---- failures that never reached the caster ------------------------------------- */
+
+TEST_CASE("ntrip unreached run: DNS and timed-out connects start it, a refused connect or success end it", "[ntrip]")
+{
+    TEST_ASSERT_TRUE(ntrip_failure_unreached(&k_dns));
+    TEST_ASSERT_TRUE(ntrip_failure_unreached(&k_transient));   /* timed out or failed locally */
+    TEST_ASSERT_FALSE(ntrip_failure_unreached(&k_refused));
+    TEST_ASSERT_FALSE(ntrip_failure_unreached(&k_reached));
+    TEST_ASSERT_FALSE(ntrip_failure_unreached(&k_auth));
+
+    ntrip_sm_t sm;
+    uint32_t t = UINT32_MAX - 100000;   /* across the clock wrap */
+    ntrip_sm_init(&sm, &k_std, 1, t);
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_sm_unreached_ms(&sm, t));
+    t += ntrip_sm_failed(&sm, &k_dns, t, MID);
+    uint32_t start = t - 2000;
+    t += ntrip_sm_failed(&sm, &k_transient, t, MID);
+    t += ntrip_sm_failed(&sm, &k_dns, t, MID);
+    TEST_ASSERT_EQUAL_UINT32(t - start, ntrip_sm_unreached_ms(&sm, t));
+    TEST_ASSERT_TRUE(ntrip_sm_unreached_ms(&sm, t) >= 2000 + 4000 + 8000);
+
+    /* a refused connect reached the caster's host: the run ends */
+    ntrip_sm_failed(&sm, &k_refused, t, MID);
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_sm_unreached_ms(&sm, t + 5000));
+
+    /* a new run; a failure after the TCP connection ends it too */
+    ntrip_sm_failed(&sm, &k_dns, t + 6000, MID);
+    TEST_ASSERT_EQUAL_UINT32(4000, ntrip_sm_unreached_ms(&sm, t + 10000));
+    ntrip_sm_failed(&sm, &k_reached, t + 10000, MID);
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_sm_unreached_ms(&sm, t + 10000));
+
+    /* and a success */
+    ntrip_sm_failed(&sm, &k_transient, t + 20000, MID);
+    TEST_ASSERT_TRUE(ntrip_sm_unreached_ms(&sm, t + 21000) > 0);
+    ntrip_sm_connected(&sm, t + 21000);
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_sm_unreached_ms(&sm, t + 22000));
+}
+
+TEST_CASE("ntrip unreached run ends when the slot leaves its connect cycle", "[ntrip]")
+{
+    ntrip_sm_t sm;
+    uint32_t t = 1000;
+    ntrip_sm_in_t in = ready();
+    ntrip_close_why_t why;
+
+    /* waiting for data (the receiver stopped) */
+    ntrip_sm_init(&sm, &k_std, 1, t);
+    sm.prev_link_up = true;
+    ntrip_sm_failed(&sm, &k_dns, t, MID);
+    in.fresh_data = false;
+    (void)ntrip_sm_poll(&sm, &in, t + 5000, MID, &why);
+    TEST_ASSERT_EQUAL(NTRIP_SM_WAIT_DATA, sm.state);
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_sm_unreached_ms(&sm, t + 5000));
+
+    /* the network went down */
+    ntrip_sm_init(&sm, &k_std, 1, t);
+    ntrip_sm_failed(&sm, &k_dns, t, MID);
+    in = ready();
+    in.have_ip = false;
+    in.link_up = false;
+    (void)ntrip_sm_poll(&sm, &in, t + 100, MID, &why);
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_sm_unreached_ms(&sm, t + 100));
+
+    /* paused, disabled, or edited by the user */
+    ntrip_sm_init(&sm, &k_std, 1, t);
+    ntrip_sm_failed(&sm, &k_dns, t, MID);
+    in = ready();
+    in.paused = true;
+    (void)ntrip_sm_poll(&sm, &in, t + 100, MID, &why);
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_sm_unreached_ms(&sm, t + 100));
+    ntrip_sm_failed(&sm, &k_dns, t + 200, MID);
+    in = ready();
+    in.enabled = false;
+    (void)ntrip_sm_poll(&sm, &in, t + 300, MID, &why);
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_sm_unreached_ms(&sm, t + 300));
+    ntrip_sm_failed(&sm, &k_dns, t + 400, MID);
+    ntrip_sm_user_edit(&sm, &k_std, 2, t + 500);
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_sm_unreached_ms(&sm, t + 500));
+
+    /* still in backoff with fresh data: the run goes on */
+    ntrip_sm_init(&sm, &k_std, 1, t);
+    sm.prev_link_up = true;
+    ntrip_sm_failed(&sm, &k_dns, t, MID);
+    in = ready();
+    (void)ntrip_sm_poll(&sm, &in, t + 1000, MID, &why);
+    TEST_ASSERT_EQUAL(NTRIP_SM_BACKOFF, sm.state);
+    TEST_ASSERT_EQUAL_UINT32(1000, ntrip_sm_unreached_ms(&sm, t + 1000));
+}
+
+TEST_CASE("ntrip protected slot: unreached failures retry flat at 5 s without advancing the count", "[ntrip]")
+{
+    ntrip_sm_t sm;
+    uint32_t t = 0;
+    ntrip_sm_init(&sm, &k_fast, 1, t);
+    for (int i = 0; i < 20; i++) {
+        uint32_t d = ntrip_sm_failed(&sm, (i & 1) ? &k_dns : &k_transient, t, MID);
+        TEST_ASSERT_EQUAL_UINT32(NTRIP_UNREACHED_RETRY_MS, d);
+        TEST_ASSERT_EQUAL(NTRIP_SM_BACKOFF, sm.state);
+        t += d;
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, sm.attempt);
+    TEST_ASSERT_EQUAL_UINT32(NTRIP_UNREACHED_RETRY_MS * 8u / 10u, ntrip_sm_failed(&sm, &k_dns, t, LO));
+    TEST_ASSERT_EQUAL_UINT32(NTRIP_UNREACHED_RETRY_MS * 12u / 10u, ntrip_sm_failed(&sm, &k_dns, t, HI));
+    TEST_ASSERT_EQUAL_UINT32(0, sm.attempt);
+
+    /* a refused connect and a reached failure follow the row (1 s, then 2 s) */
+    TEST_ASSERT_EQUAL_UINT32(1000, ntrip_sm_failed(&sm, &k_refused, t, MID));
+    TEST_ASSERT_EQUAL_UINT32(2000, ntrip_sm_failed(&sm, &k_reached, t + 1000, MID));
+    TEST_ASSERT_EQUAL_UINT32(2, sm.attempt);
+    /* back to an unreached failure: flat again, the count stays */
+    TEST_ASSERT_EQUAL_UINT32(NTRIP_UNREACHED_RETRY_MS, ntrip_sm_failed(&sm, &k_dns, t + 3000, MID));
+    TEST_ASSERT_EQUAL_UINT32(2, sm.attempt);
+
+    /* other slots keep the row for every failure */
+    ntrip_sm_init(&sm, &k_std, 1, 0);
+    TEST_ASSERT_EQUAL_UINT32(2000, ntrip_sm_failed(&sm, &k_dns, 0, MID));
+    TEST_ASSERT_EQUAL_UINT32(4000, ntrip_sm_failed(&sm, &k_dns, 2000, MID));
+    TEST_ASSERT_EQUAL_UINT32(2, sm.attempt);
+}
+
+/* ---- connection history ---------------------------------------------------------------- */
+
+TEST_CASE("ntrip history: UP after failures or a gap, DOWN with class and length", "[ntrip]")
+{
+    ntrip_hist_t h;
+    ntrip_hist_init(&h);
+    int32_t a = 0;
+    int32_t b = 0;
+
+    /* first attempt of the boot succeeds: no UP */
+    TEST_ASSERT_FALSE(ntrip_hist_up(&h, 2, 100, &a, &b));
+    /* a long session ends with a failure: DOWN always */
+    TEST_ASSERT_TRUE(ntrip_hist_down(&h, 2, NTRIP_CLS_REMOTE_CLOSE, 400, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(2 | (NTRIP_CLS_REMOTE_CLOSE << 8), a);
+    TEST_ASSERT_EQUAL_INT32(300, b);
+    /* three failed attempts, then streaming again: UP with the count and the outage */
+    ntrip_hist_failed(&h, 401);
+    ntrip_hist_failed(&h, 405);
+    ntrip_hist_failed(&h, 415);
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 2, 430, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(2 | (3 << 16), a);
+    TEST_ASSERT_EQUAL_INT32(30, b);
+    /* a planned close (class 0), back 9 s later without a failure: no UP; 10 s later: UP */
+    TEST_ASSERT_TRUE(ntrip_hist_down(&h, 2, 0, 1000, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(2, a);
+    TEST_ASSERT_FALSE(ntrip_hist_up(&h, 2, 1009, &a, &b));
+    TEST_ASSERT_TRUE(ntrip_hist_down(&h, 2, 0, 2000, &a, &b));
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 2, 2010, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(2, a);
+    TEST_ASSERT_EQUAL_INT32(10, b);
+
+    /* not streamed this boot: the outage counts from the first failed attempt */
+    ntrip_hist_init(&h);
+    ntrip_hist_failed(&h, 50);
+    ntrip_hist_failed(&h, 60);
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 0, 80, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(2 << 16, a);
+    TEST_ASSERT_EQUAL_INT32(30, b);
+
+    /* a DOWN without a session is nothing */
+    ntrip_hist_init(&h);
+    TEST_ASSERT_FALSE(ntrip_hist_down(&h, 0, 0, 10, &a, &b));
+
+    /* the packing matches the journal's */
+    TEST_ASSERT_EQUAL_INT32(diag_caster_a(7, NTRIP_CLS_KEEPALIVE, 40000), ntrip_hist_pack(7, NTRIP_CLS_KEEPALIVE, 40000));
+    TEST_ASSERT_EQUAL_INT32(7 | (NTRIP_CLS_KEEPALIVE << 8) | (32767 << 16),
+                            ntrip_hist_pack(7, NTRIP_CLS_KEEPALIVE, 40000));
+}
+
+TEST_CASE("ntrip history: short sessions are written once per 10 min, the skipped ones counted", "[ntrip]")
+{
+    ntrip_hist_t h;
+    ntrip_hist_init(&h);
+    int32_t a = 0;
+    int32_t b = 0;
+    uint32_t t = 1000;
+    unsigned downs = 0;
+    unsigned ups = 0;
+    int32_t last_down_a = 0;
+    /* a session of 20 s every 40 s, for 30 min: one failed attempt in each gap */
+    for (int i = 0; i < 45; i++) {
+        if (ntrip_hist_up(&h, 1, t, &a, &b)) {
+            ups++;
+        }
+        t += 20;
+        if (ntrip_hist_down(&h, 1, NTRIP_CLS_WRITE_STALL, t, &a, &b)) {
+            downs++;
+            last_down_a = a;
+            TEST_ASSERT_EQUAL_INT32(20, b);
+        }
+        ntrip_hist_failed(&h, t + 5);
+        t += 20;
+    }
+    /* 45 short sessions over 30 min: one DOWN per 10 min (the first, then at 600 s and 1200 s) */
+    TEST_ASSERT_EQUAL_UINT32(3, downs);
+    /* the third DOWN carries the 14 skipped since the second */
+    TEST_ASSERT_EQUAL_INT32(1 | (NTRIP_CLS_WRITE_STALL << 8) | (14 << 16), last_down_a);
+    /* UPs after short sessions: one per 10 min as well (the first UP followed a failure, never a short session) */
+    TEST_ASSERT_TRUE(ups >= 3 && ups <= 4);
+
+    /* still after a short session, within 10 min of the last UP: not written */
+    TEST_ASSERT_FALSE(ntrip_hist_up(&h, 1, t, &a, &b));
+    /* a long session's DOWN and the UP after it are always written */
+    t += 120;
+    TEST_ASSERT_TRUE(ntrip_hist_down(&h, 1, NTRIP_CLS_REMOTE_CLOSE, t, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(1 | (NTRIP_CLS_REMOTE_CLOSE << 8) | (14 << 16), a);   /* the 14 skipped since the third */
+    TEST_ASSERT_EQUAL_INT32(120, b);
+    ntrip_hist_failed(&h, t + 1);
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 1, t + 5, &a, &b));
 }

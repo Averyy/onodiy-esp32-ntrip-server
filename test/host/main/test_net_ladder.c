@@ -338,3 +338,168 @@ TEST_CASE("network ladder: resets after 60 s healthy, a shorter spell keeps esca
     TEST_ASSERT_EQUAL_UINT32(3, s.resets);
     TEST_ASSERT_EQUAL(NET_RUNG_NONE, s.reset_rung);
 }
+
+/* ---- triggers beyond the protected caster ------------------------------------- */
+
+/* Count pass starts and remember their triggers. */
+static uint32_t run_counting_passes(sim_t *s, uint32_t seconds, uint8_t *last_triggers)
+{
+    uint32_t passes = 0;
+    for (uint32_t i = 0; i < seconds; i++) {
+        net_ladder_out_t o = sim_step(s);
+        if (o.act == NET_LADDER_PASS) {
+            passes++;
+            *last_triggers = o.triggers;
+        }
+    }
+    return passes;
+}
+
+TEST_CASE("network ladder: associated without an IP runs the Wi-Fi rungs, never the reboot", "[net_ladder]")
+{
+    sim_t s;
+    sim_init(&s, NET_PROBE_NO_IP);
+    s.in.caster_down = false;              /* no protected trigger at all */
+    s.in.assoc_no_ip_s = NET_LADDER_ASSOC_NO_IP_S - 1;
+    sim_run(&s, 300);
+    TEST_ASSERT_EQUAL(NET_LADDER_IDLE, s.l.phase);
+
+    s.in.assoc_no_ip_s = NET_LADDER_ASSOC_NO_IP_S;
+    uint8_t trig = 0;
+    uint32_t passes = run_counting_passes(&s, 700, &trig);
+    TEST_ASSERT_EQUAL_UINT32(1, passes);
+    TEST_ASSERT_EQUAL_UINT8(NET_TRIG_A, trig);
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RECONNECT]);
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RENEW_DHCP]);
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RESTART_WIFI]);
+    TEST_ASSERT_EQUAL_UINT32(0, s.acts[NET_RUNG_REBOOT]);
+    TEST_ASSERT_EQUAL(NET_WHY_NO_REBOOT_TRIGGER, s.last_why);
+    TEST_ASSERT_EQUAL(NET_RUNG_REBOOT, s.last_held_rung);
+    TEST_ASSERT_EQUAL(NET_LADDER_HOLD, s.l.phase);
+
+    /* the hold, then a new pass repeats rungs 1-3 */
+    passes = run_counting_passes(&s, NET_LADDER_HOLD_S + 400, &trig);
+    TEST_ASSERT_EQUAL_UINT32(1, passes);
+    TEST_ASSERT_EQUAL_UINT32(2, s.acts[NET_RUNG_RESTART_WIFI]);
+    TEST_ASSERT_EQUAL_UINT32(0, s.acts[NET_RUNG_REBOOT]);
+}
+
+TEST_CASE("network ladder: a slot that never reaches its caster runs the Wi-Fi rungs, never the reboot", "[net_ladder]")
+{
+    sim_t s;
+    sim_init(&s, NET_PROBE_DNS_FAILED);    /* would allow a reboot for the protected trigger */
+    s.in.caster_down = false;
+    s.in.unreached_s = NET_LADDER_UNREACHED_S - 1;
+    sim_run(&s, 300);
+    TEST_ASSERT_EQUAL(NET_LADDER_IDLE, s.l.phase);
+
+    s.in.unreached_s = NET_LADDER_UNREACHED_S;
+    uint8_t trig = 0;
+    TEST_ASSERT_EQUAL_UINT32(1, run_counting_passes(&s, 700, &trig));
+    TEST_ASSERT_EQUAL_UINT8(NET_TRIG_S, trig);
+    TEST_ASSERT_EQUAL_UINT32(3, total_acts(&s));
+    TEST_ASSERT_EQUAL_UINT32(0, s.acts[NET_RUNG_REBOOT]);
+    TEST_ASSERT_EQUAL(NET_WHY_NO_REBOOT_TRIGGER, s.last_why);
+
+    /* the run ends (a refused connect, a success): reset after 60 s */
+    s.in.unreached_s = 0;
+    sim_run(&s, NET_LADDER_HEALTHY_S + 1);
+    TEST_ASSERT_EQUAL(NET_LADDER_IDLE, s.l.phase);
+
+    /* RTCM does not matter for A and S, credentials do */
+    sim_init(&s, NET_PROBE_NO_IP);
+    s.in.caster_down = false;
+    s.in.rtcm_healthy = false;
+    s.in.unreached_s = 600;
+    sim_run(&s, 100);
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RECONNECT]);
+    sim_init(&s, NET_PROBE_NO_IP);
+    s.in.sta_configured = false;
+    s.in.assoc_no_ip_s = 600;
+    s.in.unreached_s = 600;
+    sim_run(&s, 700);
+    TEST_ASSERT_EQUAL_UINT32(0, total_acts(&s) + s.probes);
+}
+
+TEST_CASE("network ladder: only the protected trigger at the reboot rung reboots", "[net_ladder]")
+{
+    /* P alone reboots as before, and its pass start says so */
+    sim_t s;
+    sim_init(&s, NET_PROBE_NO_IP);
+    uint8_t trig = 0;
+    run_counting_passes(&s, 700, &trig);
+    TEST_ASSERT_EQUAL_UINT8(NET_TRIG_P, trig);
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_REBOOT]);
+
+    /* P at the pass start, gone by the reboot rung while A keeps the pass alive: withheld */
+    sim_init(&s, NET_PROBE_NO_IP);
+    s.in.assoc_no_ip_s = 120;
+    run_counting_passes(&s, 400, &trig);
+    TEST_ASSERT_EQUAL_UINT8(NET_TRIG_P | NET_TRIG_A, trig);
+    s.in.caster_down = false;
+    sim_run(&s, 300);
+    TEST_ASSERT_EQUAL_UINT32(0, s.acts[NET_RUNG_REBOOT]);
+    TEST_ASSERT_EQUAL(NET_WHY_NO_REBOOT_TRIGGER, s.last_why);
+
+    /* a reachable internet skips the rungs for every trigger */
+    sim_init(&s, NET_PROBE_OK);
+    s.in.caster_down = false;
+    s.in.assoc_no_ip_s = 120;
+    s.in.unreached_s = 300;
+    sim_run(&s, 700);
+    TEST_ASSERT_EQUAL_UINT32(0, total_acts(&s));
+    TEST_ASSERT_EQUAL_UINT32(4, s.skips);
+    TEST_ASSERT_EQUAL(NET_WHY_UPSTREAM_OK, s.last_why);
+}
+
+TEST_CASE("network ladder: AP clients hold the restart and reboot back for at most 30 min per episode", "[net_ladder]")
+{
+    sim_t s;
+    sim_init(&s, NET_PROBE_NO_IP);
+    s.in.ap_clients = 1;
+    /* first pass: restart withheld at +362 s (the 30 min start here), reboot withheld at +602 s */
+    sim_run(&s, 700);
+    TEST_ASSERT_EQUAL_UINT32(0, s.acts[NET_RUNG_RESTART_WIFI]);
+    TEST_ASSERT_EQUAL_UINT32(0, s.acts[NET_RUNG_REBOOT]);
+    TEST_ASSERT_EQUAL(NET_WHY_AP_IN_USE, s.last_why);
+    TEST_ASSERT_TRUE(s.l.ap_held);
+    uint32_t held_at = s.l.ap_held_since_s;
+    TEST_ASSERT_EQUAL_UINT32(T0 + 360 + 2, held_at);
+
+    /* the timer survives the hold and the next pass */
+    sim_run(&s, NET_LADDER_HOLD_S + 400);
+    TEST_ASSERT_EQUAL_UINT32(held_at, s.l.ap_held_since_s);
+    TEST_ASSERT_EQUAL_UINT32(0, s.acts[NET_RUNG_RESTART_WIFI]);
+
+    /* from 30 min on the clients no longer hold anything back */
+    uint32_t until = held_at + NET_LADDER_AP_HOLD_MAX_S;
+    net_ladder_why_t act_why = NET_WHY_NONE;
+    while (s.acts[NET_RUNG_RESTART_WIFI] == 0 && s.now - T0 < 4 * 3600) {
+        net_ladder_out_t o = sim_step(&s);
+        if (o.act == NET_LADDER_ACT && o.rung == NET_RUNG_RESTART_WIFI) {
+            act_why = o.why;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RESTART_WIFI]);
+    TEST_ASSERT_TRUE(s.act_at[NET_RUNG_RESTART_WIFI] - until < 0x80000000u);   /* not before the limit */
+    TEST_ASSERT_EQUAL(NET_WHY_AP_OVERRIDDEN, act_why);
+    while (s.acts[NET_RUNG_REBOOT] == 0 && s.now - T0 < 4 * 3600) {
+        net_ladder_out_t o = sim_step(&s);
+        if (o.act == NET_LADDER_ACT && o.rung == NET_RUNG_REBOOT) {
+            act_why = o.why;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_REBOOT]);
+    TEST_ASSERT_EQUAL(NET_WHY_AP_OVERRIDDEN, act_why);
+
+    /* a ladder reset clears it: the next episode withholds again */
+    s.in.caster_down = false;
+    sim_run(&s, NET_LADDER_HEALTHY_S + 1);
+    TEST_ASSERT_EQUAL(NET_LADDER_IDLE, s.l.phase);
+    TEST_ASSERT_FALSE(s.l.ap_held);
+    s.in.caster_down = true;
+    s.rebooted = false;
+    sim_run(&s, 700);
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RESTART_WIFI]);
+    TEST_ASSERT_EQUAL(NET_WHY_AP_IN_USE, s.last_why);
+}
