@@ -9,6 +9,20 @@
  * decides safe mode, time-boxes safe mode with growing retry intervals, and
  * carries the reason code of a planned reboot into the next boot.
  *
+ * It also carries, validated by the same magic and checksum:
+ *  - the session-uptime heartbeat: the running boot's uptime, written every
+ *    60 s and at a planned reboot (RTC only, no flash). The next boot reports
+ *    it as the previous session's uptime only after a software, panic or
+ *    watchdog reset; after power-on, brownout or other resets it is unknown;
+ *  - "station time": uptime accumulated over the boots since power-on (each
+ *    boot adds the previous session's last heartbeat, except after a
+ *    brownout, whose RTC content is not trusted for that);
+ *  - the GNSS-ladder reboot budget: the station times of the last three
+ *    GNSS-ladder reboots. Such a reboot is allowed only if none happened in
+ *    the last 60 min and fewer than three in the last 24 h. Losing the
+ *    state (power cycle, or the first boot of another app image whose RTC
+ *    layout differs) starts a fresh budget, like a power cycle.
+ *
  * Counting rules:
  *  - power-on (or lost/corrupt state): everything starts over;
  *  - crash (panic, watchdog, lockup, or a reboot flagged BOOT_GUARD_REASON_CRASH):
@@ -31,6 +45,12 @@ extern "C" {
 #define BOOT_GUARD_MAGIC 0x4C494645u        /* "LIFE" */
 /** Set in a reboot reason code to make the next boot count as a crash. */
 #define BOOT_GUARD_REASON_CRASH 0x80000000u
+/** Previous session uptime not known. */
+#define BOOT_GUARD_UNKNOWN 0xFFFFFFFFu
+
+#define BOOT_GUARD_LADDER_KEEP     3u        /**< GNSS-ladder reboots remembered (and allowed per window) */
+#define BOOT_GUARD_LADDER_GAP_S    3600u     /**< at least this long between two of them */
+#define BOOT_GUARD_LADDER_WINDOW_S 86400u    /**< at most BOOT_GUARD_LADDER_KEEP within this window */
 
 /** What the hardware says about the last reset (mapped from esp_reset_reason()). */
 typedef enum {
@@ -59,6 +79,10 @@ typedef struct {
     uint32_t reboot_reason;     /**< set before a planned reboot, consumed by the next boot */
     uint32_t once_flags;        /**< one-shot actions already taken since power-on */
     uint32_t safe_mode;         /**< this boot runs in safe mode */
+    uint32_t uptime_base_s;     /**< uptime of the earlier boots since power-on (station time at this boot's start) */
+    uint32_t session_s;         /**< heartbeat: this boot's uptime at the last write */
+    uint32_t ladder_count;      /**< valid entries in ladder_at (<= BOOT_GUARD_LADDER_KEEP) */
+    uint32_t ladder_at[BOOT_GUARD_LADDER_KEEP]; /**< station times of the last GNSS-ladder reboots, oldest first */
     uint32_t check;             /**< checksum over the fields above */
 } boot_guard_state_t;
 
@@ -68,6 +92,7 @@ typedef struct {
     bool state_was_lost;           /**< RTC state was invalid (first boot or memory lost) */
     bool safe_mode;
     bool entered_safe_mode;        /**< this boot is the first of a safe-mode episode */
+    uint32_t prev_session_s;       /**< previous boot's uptime (s), BOOT_GUARD_UNKNOWN if not trusted */
 } boot_guard_result_t;
 
 /** True if the state carries the magic and a matching checksum. */
@@ -96,6 +121,21 @@ void boot_guard_clear(boot_guard_state_t *st);
 
 /** True the first time `flag` is claimed since power-on. Seals. */
 bool boot_guard_claim_once(boot_guard_state_t *st, uint32_t flag);
+
+/** Session heartbeat: record this boot's uptime (every 60 s and before a planned reboot). Seals. */
+void boot_guard_heartbeat(boot_guard_state_t *st, uint32_t uptime_s);
+
+/** Station time: uptime accumulated since power-on, including this boot's `uptime_s`. */
+uint32_t boot_guard_station_time(const boot_guard_state_t *st, uint32_t uptime_s);
+
+/**
+ * May the GNSS ladder reboot now? `retry_in_s` (optional) gets the seconds
+ * until it may, 0 when allowed.
+ */
+bool boot_guard_ladder_reboot_allowed(const boot_guard_state_t *st, uint32_t uptime_s, uint32_t *retry_in_s);
+
+/** Record a GNSS-ladder reboot happening now (also writes the heartbeat). Seals. */
+void boot_guard_record_ladder_reboot(boot_guard_state_t *st, uint32_t uptime_s);
 
 #ifdef __cplusplus
 }

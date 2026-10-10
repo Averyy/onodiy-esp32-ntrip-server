@@ -70,6 +70,19 @@ esp_err_t rtcm_hub_resync(rtcm_hub_consumer_t consumer)
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+esp_err_t rtcm_hub_set_max_lag(rtcm_hub_consumer_t consumer, uint32_t ms)
+{
+    if (consumer == NULL || ms < 100 || ms > 60000) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+void rtcm_hub_clear_sticky(void)
+{
+    /* TODO: drop the sticky copies and mark the next frame as an epoch start. */
+}
+
 void rtcm_hub_get_stats(rtcm_hub_stats_t *out)
 {
     memset(out, 0, sizeof(*out));

@@ -7,4 +7,4 @@ idf_component_register(
     SRCS "um98x_ctl.c" "um98x_profile.c"
     INCLUDE_DIRS "include"
     REQUIRES gnss_link gnss_types
-    PRIV_REQUIRES settings)
+    PRIV_REQUIRES settings gnss_obs)

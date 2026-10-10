@@ -2,7 +2,8 @@
 
 Unicore UM982 receiver firmware packages. The ESP32 firmware flashes one of these
 to the UM982 over UART (XMODEM), and the same files are published as GitHub Release
-assets so a deployed station can fetch and apply updates over the air.
+assets so a deployed station can offer them as updates, installed only when the user
+confirms.
 
 ## Current package
 
@@ -28,11 +29,29 @@ signal-group tables but not yet verified on our hardware — see the project TOD
 
 ## Package format
 
-A `.pkg` is the complete, ready-to-flash image. It begins with a header that
-includes the target model string, which the flasher checks against the connected
-receiver's reported model before sending anything — a UM980 package will not be
-sent to a UM982 or vice-versa. The payload is transferred to the receiver as-is;
-our firmware does not need to decode or repackage it.
+A `.pkg` is the complete, ready-to-flash image, and it is sent to the receiver
+byte for byte: the firmware never modifies or repackages it. It does read it first.
+Before any byte goes to the receiver, the flasher loads the whole package into RAM
+and checks its structure on that copy, which is then the only copy sent:
+
+- the block structure and the block headers;
+- the payload sums and block trailers;
+- the compressed sections, which are decoded and checked;
+- the model string (`UM982` exactly, equal to what the connected receiver reports),
+  so a UM980 package is never sent to a UM982 or vice-versa, and the UM982 product
+  tags;
+- the partition layout, which must be one the firmware knows for that receiver
+  build (a package that would change the layout is refused until that path is
+  bench-tested);
+- size and SHA-256, which must equal the signed release manifest or what the user
+  confirmed for a manual upload; and a build that is not lower than the one running.
+
+The upload page shows what this check reads (model string, layout, build date stamps
+of the blocks, size, SHA-256) so you can confirm the file before flashing it.
+
+What the firmware knows about the format comes from examining the Unicore `.pkg`
+files themselves, the ones redistributed in this directory. It is PROVISIONAL, to be
+confirmed on hardware.
 
 ## Updating this directory
 
@@ -41,7 +60,7 @@ our firmware does not need to decode or repackage it.
    cleanly on a bench unit.
 3. Replace the file here, regenerate `SHA256SUMS`
    (`shasum -a 256 *.pkg > SHA256SUMS`), and attach the `.pkg` to a GitHub Release
-   so stations can pull it.
+   so stations can offer it.
 
 ## Where newer firmware comes from
 

@@ -4,30 +4,42 @@
  *
  * GNSS firmware package staging area (raw flash partition "gnss_pkg").
  *
- * Holds one receiver firmware package (.pkg) between "downloaded/uploaded" and
- * "flashed to the receiver". Format-agnostic: it stores bytes, checks size and
- * SHA-256, and records metadata. Understanding the package (model check, what
- * to send) is the flasher's job.
+ * Holds at most one receiver firmware package (.pkg), and only while a
+ * user-initiated receiver update is in progress: it is written after the
+ * user confirmed an update (download) or uploaded a file, and released when
+ * that session ends. Nothing is staged in advance; the daily update check
+ * never writes here. Format-agnostic: it stores bytes, checks size and
+ * SHA-256, and records metadata. Understanding the package (model check,
+ * what to send) is the flasher's job.
  *
  * Layout: sector 0 holds a small header {magic, layout version, state, size,
  * sha256, version label, pinned}; the payload starts at the next 4 KB
  * boundary. The header is written last, so a power cut mid-download leaves
- * the slot EMPTY, never "valid but truncated".
+ * the slot EMPTY, never "valid but truncated". Releasing or invalidating
+ * rewrites only the header; the payload sectors are erased lazily by the
+ * next pkg_store_begin(). The partition is reserved for this and nothing
+ * else uses it.
  *
- * Pinning: while a receiver flash is open (started and not yet confirmed by
- * the receiver reporting the new version), the staged package is the only
- * copy that can recover the receiver. The station pins it before the first
- * byte goes to the receiver and unpins it after the post-flash version check.
- * The pin is stored in the header, so it survives reboots and power cuts,
- * and while it is set pkg_store_begin() refuses to overwrite the slot.
+ * Pinning: while a receiver flash is open, the staged package is the only
+ * copy that can finish or recover it. The station pins it before the first
+ * journal write and releases it (unpin + empty, pkg_store_release) when the
+ * journal closes, whatever the outcome; a journal waiting for the user keeps
+ * it pinned. A boot that finds no open journal releases any package left
+ * over (pinned or not). The pin is stored in the header, so it survives
+ * reboots and power cuts, and while it is set pkg_store_begin() refuses to
+ * overwrite the slot. The web upload path also releases the slot when the
+ * user cancels or does not confirm an upload within 15 minutes, and so does
+ * a failed pre-flight validation.
  *
  * Integrity: SHA-256 is computed with PSA Crypto (psa_hash_*, hardware SHA)
- * while writing, and recomputed by pkg_store_verify() right before every
- * flash run, because a package may sit in flash for days.
+ * while writing. Before a flash the flasher reads the package into RAM and
+ * checks the SHA-256 of that copy, which is what gets sent;
+ * pkg_store_verify() re-hashes the flash copy (e.g. for the upload page).
  *
- * Writers: fw_update (download) and web (manual upload). Reader: um98x_flash.
- * One writer at a time; begin() fails with ESP_ERR_INVALID_STATE otherwise.
- * Do not call from a task whose stack is in PSRAM (flash writes).
+ * Writers: fw_update (download after the user's click) and web (manual
+ * upload). Reader: um98x_flash. One writer at a time; begin() fails with
+ * ESP_ERR_INVALID_STATE otherwise. Do not call from a task whose stack is in
+ * PSRAM (flash writes).
  */
 #pragma once
 
@@ -100,6 +112,15 @@ esp_err_t pkg_store_set_pinned(bool pinned);
 
 /** Mark the slot empty (header only; the payload is erased on next begin). Refused while pinned. */
 esp_err_t pkg_store_invalidate(void);
+
+/**
+ * Release the staged package: unpin and mark the slot empty in one header
+ * write (the payload is erased on next begin). For the end of a receiver
+ * flash session (journal closed), a failed validation, a cancelled or
+ * unconfirmed upload, and a boot without an open journal. ESP_OK also when
+ * nothing is staged.
+ */
+esp_err_t pkg_store_release(void);
 
 #ifdef __cplusplus
 }

@@ -7,8 +7,10 @@ menu "Station: GNSS link"
         range 9600 921600
         default 115200
         help
-            Baud rate tried first at boot. Bring-up falls back to scanning the
-            other standard rates and stores the rate that answered.
+            Baud rate the link opens at when no rate is stored. Boot listens
+            at the stored rate first and scans the other rates only when
+            nothing valid arrives. COM1 stays at 115200 until the bench shows
+            460800 is safe (baud change, then no FIFO overflows at 460800).
 
     config GNSS_LINK_RX_BUF_SIZE
         int "UART driver RX buffer (bytes)"
@@ -18,9 +20,10 @@ menu "Station: GNSS link"
             Software buffer behind the hardware FIFO (internal RAM). Must
             cover the longest time the RX task can be kept off the CPU at the
             highest baud rate in use: 32 KB is about 2.8 s at 115200 baud and
-            0.7 s at 460800. PROVISIONAL: confirm with the bench test (app
-            update plus receiver package download while streaming must end
-            with zero buffer-full and FIFO-overflow events).
+            0.7 s at 460800. PROVISIONAL, to be confirmed on hardware: the
+            bench test (app update plus receiver package download while
+            streaming) must end with zero buffer-full and FIFO-overflow
+            events.
 
     config GNSS_LINK_RX_TASK_PRIO
         int "RX task priority"

@@ -23,6 +23,12 @@
  *    start): they are what safe mode protects against, and their init runs
  *    before network and web, so a crash there would otherwise keep the UI
  *    from ever coming up.
+ *  - An open receiver-flash journal is read right after the settings, before
+ *    anything that could transmit or start Wi-Fi (station_early_boot): an
+ *    interrupted receiver update decides the first bytes on the receiver's
+ *    UART. Not in safe mode, where nothing is sent to the receiver; there
+ *    station_safe_mode_boot() only reads the journal and, with none open,
+ *    releases a receiver package left staged.
  */
 #include <stdbool.h>
 #include <stddef.h>
@@ -88,12 +94,13 @@ static const boot_step_t s_init_steps[] = {
 };
 
 /* Start: spawn tasks. Network and web first so the UI is reachable early;
- * health last so it starts watching a fully started system. Updates keep
- * running in safe mode so a fix can arrive; receiver flashing stays off
- * there because the station does not run, and that includes finishing an
- * interrupted receiver flash: it waits for the next normal boot (the safe-mode
- * retry, or clearing safe mode from the UI), since the crash being escaped
- * may be in the flash path itself. */
+ * health last so it starts watching a fully started system. The update
+ * check and user-initiated app installs keep running in safe mode so a fix
+ * can arrive; receiver flashing stays off there because the station does
+ * not run, and that includes finishing an interrupted receiver flash: it
+ * waits for the next normal boot (the safe-mode retry, or clearing safe mode
+ * from the UI), since the crash being escaped may be in the flash path
+ * itself. */
 static const boot_step_t s_start_steps[] = {
     { "network",      network_start,      false },
     { "web",          web_start,          false },
@@ -231,17 +238,34 @@ void app_main(void)
         }
     }
 
+    bool safe_mode = lifecycle_in_safe_mode();
+    if (safe_mode) {
+        ESP_LOGW(TAG, "SAFE MODE: repeated crashes; receiver path and casters stay off, update checks and app "
+                      "installs stay on");
+    } else {
+        /* Before Wi-Fi and every other init step: an interrupted receiver
+         * update owns the receiver's UART first. */
+        err = station_early_boot();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "receiver flash recovery at boot: %s", esp_err_to_name(err));
+        }
+    }
+
     err = esp_netif_init();
     if (err != ESP_OK) {
         lifecycle_fatal_boot_error("esp_netif", err);
     }
 
-    bool safe_mode = lifecycle_in_safe_mode();
-    if (safe_mode) {
-        ESP_LOGW(TAG, "SAFE MODE: repeated crashes; receiver path and casters stay off, updates stay on");
-    }
-
     int failures = run_steps("init", s_init_steps, sizeof(s_init_steps) / sizeof(s_init_steps[0]), safe_mode);
+    if (safe_mode) {
+        /* The station does not run, but a receiver package left staged
+         * without an open journal must not wait out the whole episode. */
+        err = station_safe_mode_boot();
+        if (err != ESP_OK) {
+            failures++;
+            ESP_LOGE(TAG, "init station (safe mode) failed: %s", esp_err_to_name(err));
+        }
+    }
     failures += run_steps("start", s_start_steps, sizeof(s_start_steps) / sizeof(s_start_steps[0]), safe_mode);
 
     if (failures == 0) {

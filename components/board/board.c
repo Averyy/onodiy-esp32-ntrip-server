@@ -85,7 +85,9 @@ static esp_err_t check_pin(const char *what, int gpio, bool output, bool optiona
 
 esp_err_t board_init(void)
 {
-    s_valid = false;
+    if (s_valid) {
+        return ESP_OK;   /* an early boot step may have validated the pins already */
+    }
     const board_desc_t *b = &s_board;
     const struct {
         const char *what;

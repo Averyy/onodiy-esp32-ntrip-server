@@ -2,21 +2,14 @@
 # SPDX-License-Identifier: MIT
 menu "Station: receiver supervisor"
 
-    config STATION_AUTO_FLASH_UTC_HOUR
-        int "Automatic receiver updates only from this UTC hour on"
-        range 0 23
-        default 22
-        help
-            Planned downtime late in the UTC day only spends budget that
-            unknown outages earlier in the day did not need.
-
     config STATION_FLASH_RESTART_ALLOWANCE_S
-        int "Receiver restart and reacquisition allowance for a flash (s)"
+        int "Receiver write, restart and reacquisition allowance for an update (s)"
         range 30 900
         default 180
         help
-            Added to the transfer time (package size at the link rate plus
-            10 %) and the survey-in time to estimate the downtime of one
-            receiver update. Refine from measured runs.
+            Added to the transfer time at the loader baud (package size,
+            10 bits per byte, plus 10 %) to estimate a receiver update's
+            downtime for the confirmation dialog. Information only: it never
+            gates an update. Refine from measured runs.
 
 endmenu

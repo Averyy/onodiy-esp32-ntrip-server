@@ -47,32 +47,33 @@ extern "C" {
 #define SETTINGS_KEY_GNSS_BAUD      "baud"        /**< u32: link baud rate last detected/set */
 #define SETTINGS_KEY_GNSS_PROFILE   "profile"     /**< blob: um98x_profile_encode() */
 #define SETTINGS_KEY_GNSS_APPLIED   "applied_hash" /**< u32: um98x_profile_hash() of the profile last applied */
-#define SETTINGS_KEY_GNSS_AUTOCFG   "autocfg"     /**< u8: apply profile automatically on boot */
+#define SETTINGS_KEY_GNSS_APPLIED_FW "applied_fw" /**< str (<= 47 chars, like every receiver firmware string): receiver firmware at the last successful apply (written with applied_hash in one batch) */
+#define SETTINGS_KEY_GNSS_RTCM1230_OK "rtcm1230_ok" /**< u8: the receiver accepted (1) or rejected (0) the RTCM1230 output at the last successful apply (same batch as applied_hash; missing = not applied) */
+#define SETTINGS_KEY_GNSS_AUTOCFG   "autocfg"     /**< u8: apply the profile when the receiver drifts from it; 0 = alert only and the health ladder's reconfigure step is refused (a receiver update always re-applies) */
 #define SETTINGS_KEY_GNSS_MODEL     "model"       /**< str: last detected model; survives factory reset */
 #define SETTINGS_KEY_GNSS_FW        "fw"          /**< str: last detected firmware; survives factory reset */
 #define SETTINGS_KEY_GNSS_BASE_POS  "base_pos"    /**< blob: locked antenna position (um98x_base_position_t, encoded) */
-#define SETTINGS_KEY_GNSS_FLASH_JOB "flash_job"   /**< blob: open receiver-flash journal; survives factory reset */
+#define SETTINGS_KEY_GNSS_FLASH_JOB "flash_job"   /**< blob: open receiver-flash journal (versioned record, see the flasher); survives factory reset */
 
 /* ---- "cst0".."cst7": one namespace per caster slot ------------------------ */
 #define SETTINGS_NS_CASTER_FMT      "cst%u"
 #define SETTINGS_KEY_CST_CFG        "cfg"         /**< blob: whole slot config, encoded (password inside, secret) */
+#define SETTINGS_KEY_CST_BACKOFF    "backoff"     /**< blob: long backoff state {class, attempt, remaining s, hourly mode} and last-good credential hash */
+#define SETTINGS_KEY_CST_CA_PEM     "ca_pem"      /**< blob: custom CA certificate (PEM) for a TLS slot */
 
-/* ---- "ota": firmware update policy and state ------------------------------- */
+/* ---- "ota": firmware update state (every install is user-initiated; the
+ * daily check interval is a build-time constant) ----------------------------- */
 #define SETTINGS_NS_OTA             "ota"
-#define SETTINGS_KEY_OTA_REPO       "repo"        /**< str: "owner/name" on GitHub */
-#define SETTINGS_KEY_OTA_CHANNEL    "channel"     /**< u8: 0 = stable, 1 = pre-release */
-#define SETTINGS_KEY_OTA_AUTO_APP   "auto_app"    /**< u8: install app updates automatically */
-#define SETTINGS_KEY_OTA_AUTO_GNSS  "auto_gnss"   /**< u8: flash receiver updates automatically */
-#define SETTINGS_KEY_OTA_INTERVAL   "interval_h"  /**< u16: hours between checks */
+#define SETTINGS_KEY_OTA_REPO       "repo"        /**< str: GitHub repository override "owner/name" (default from Kconfig) */
 #define SETTINGS_KEY_OTA_TRIAL      "trial"       /**< blob: app trial {version, baseline, stage, started, boots, crashes}; survives factory reset */
-#define SETTINGS_KEY_OTA_BAD_VER    "bad_ver"     /**< blob: versions rolled back (never auto-installed again); survives factory reset */
-#define SETTINGS_KEY_OTA_ETAG       "etag"        /**< str: ETag of the last manifest fetched */
-#define SETTINGS_KEY_OTA_GNSS_LAST  "gnss_last"   /**< i64: unix time of the last automatic receiver flash */
+#define SETTINGS_KEY_OTA_BAD_VER    "bad_ver"     /**< blob: versions rolled back (never offered by the update banner); survives factory reset */
+#define SETTINGS_KEY_OTA_ETAG       "etag"        /**< str: ETag of the last manifest fetched (written only when it changes) */
+#define SETTINGS_KEY_OTA_LAST_CHECK "last_check"  /**< i64: unix time of the last successful update check (written once per check), so reboots add no checks */
 
 /* ---- "life": boot history (crash counter and safe-mode state live in RTC
  * memory, so a power cycle always retries a normal boot) ---------------------- */
 #define SETTINGS_NS_LIFE            "life"        /**< whole namespace survives factory reset */
-#define SETTINGS_KEY_BOOT_HISTORY   "boots"       /**< blob: last 16 boots (reset class, raw reason, planned-reboot reason, boot no., app version) */
+#define SETTINGS_KEY_BOOT_HISTORY   "boots"       /**< blob: last 16 boots (reset class, raw reason, planned-reboot reason, boot no., previous session uptime, app version) */
 
 /* ---- "ledger": availability accounting ------------------------------------- */
 #define SETTINGS_NS_LEDGER          "ledger"      /**< whole namespace survives factory reset */

@@ -13,24 +13,46 @@
  * Policy:
  *  - The producer never blocks. When the ring is full the oldest frames are
  *    overwritten.
- *  - Epochs: MSM frames are tagged with their epoch time and the public MSM
- *    "multiple message" bit, so the hub knows where each epoch starts.
+ *  - Epochs: every record carries an epoch sequence number (the `epoch`
+ *    field), assigned at publish time. A new epoch starts (a) at the first
+ *    frame after an MSM whose multiple-message bit is 0 (last MSM of its
+ *    epoch), (b) at an MSM whose constellation already has an MSM with a
+ *    different epoch time in the current epoch (a receiver that never clears
+ *    the bit), (c) at any frame arriving CONFIG_RTCM_HUB_BURST_GAP_MS or more
+ *    after the previous one while the current epoch holds an MSM not yet
+ *    terminated (a lost terminating MSM), and at the first frame after
+ *    rtcm_hub_clear_sticky(). Non-MSM frames after an epoch's last MSM
+ *    belong to the next epoch. Epoch times are compared within one
+ *    constellation only, so no time-system conversion is needed.
  *  - Station metadata: the latest 1005/1006, 1033 and 1230 frames are kept
- *    as sticky copies outside the ring.
+ *    as sticky copies outside the ring. They are cleared on every framer
+ *    reset and every receiver reconfiguration (rtcm_hub_clear_sticky), and a
+ *    copy older than 30 s is never replayed, so a superseded position is
+ *    never sent.
  *  - A new consumer, and one that calls rtcm_hub_resync() (e.g. after a
  *    caster reconnect), first receives the sticky metadata frames, then live
  *    data starting at the next epoch start. A caster never starts with the
- *    tail of an epoch or waits 10 s for the station position.
- *  - A consumer whose oldest unread frame is older than
- *    CONFIG_RTCM_HUB_MAX_LAG_MS drops whole oldest epochs until its lag is
- *    back under the limit (not a jump to the very newest frame, which would
- *    throw away still-valid data). A consumer that was overwritten ("lapped")
+ *    tail of an epoch or waits for the station position.
+ *  - Lag limit per consumer (rtcm_hub_set_max_lag; default
+ *    CONFIG_RTCM_HUB_MAX_LAG_MS, the Onocoy slot 1000 ms): a consumer whose
+ *    oldest unread frame is older than its limit drops whole oldest epochs
+ *    until it is back under the limit, but an epoch already partly delivered
+ *    is finished first, never cut (only properly terminated epochs count
+ *    for Onocoy). Not a jump to the very newest frame, which would throw
+ *    away still-valid data. A consumer that was overwritten ("lapped")
  *    resyncs as above.
  *  - Reads return whole frames only, so a caster never sends a partial frame.
+ *  - A failed publish loses that frame only and is counted
+ *    (publish_failures); the link counters still show it received.
+ *  - Types 1101-1107 (SBAS MSM numbers the receiver may reuse for its own
+ *    messages) are dropped before the hub by the station and counted there.
+ *  - A per-consumer filter on non-MSM types (MSMs always pass, so epoch
+ *    termination is never broken) is planned (SHOULD), not provided yet.
  *
  * Ring and concurrency (single producer):
- *  - Records {u16 len, u16 msg_type, u32 seq, u32 rx_ms, u32 epoch} + frame,
- *    padded to 4, never wrapping (a wrap marker sends the record to offset 0).
+ *  - Records {u16 len, u16 msg_type, u32 seq, u32 rx_ms, u32 epoch (sequence
+ *    number)} + frame, padded to 4, never wrapping (a wrap marker sends the
+ *    record to offset 0).
  *    Offsets are monotonic 64-bit byte counts.
  *  - The producer first publishes reserve_off = write_off + record length
  *    (including any wrap waste) under a short spinlock, copies the record,
@@ -54,8 +76,8 @@
  * Thread safety: rtcm_hub_publish() from one task (the GNSS link RX task);
  * every consumer handle used by exactly one task.
  *
- * Status: API settled; ring not implemented yet. Limits are provisional
- * until measured on the bench.
+ * Status: API settled; ring not implemented yet. Limits are PROVISIONAL, to
+ * be confirmed on hardware.
  */
 #pragma once
 
@@ -78,7 +100,11 @@ typedef struct rtcm_hub_consumer *rtcm_hub_consumer_t;
 typedef struct {
     uint64_t frames_in;          /**< frames published */
     uint64_t bytes_in;
-    uint64_t epochs_in;          /**< MSM epochs started */
+    uint64_t epochs_in;          /**< epochs started */
+    uint64_t epochs_by_mmb;      /**< started by rule (a): the previous epoch's last MSM said so */
+    uint64_t epochs_by_time;     /**< started by rule (b): an epoch-time change within a constellation */
+    uint64_t epochs_by_gap;      /**< started by rule (c): a gap while an MSM epoch was open */
+    uint64_t publish_failures;   /**< frames rtcm_hub_publish() could not store (lost) */
     uint32_t consumers;          /**< currently attached */
     size_t capacity;             /**< ring size in bytes */
     uint32_t last_frame_age_ms;  /**< time since the last publish (UINT32_MAX = never) */
@@ -91,6 +117,8 @@ typedef struct {
     uint64_t frames_dropped;     /**< lost while streaming (lapped or over the lag limit): real loss */
     uint64_t bytes_dropped;
     uint64_t frames_skipped_idle;/**< skipped while not streaming (attach, resync after outage/pause): expected */
+    uint64_t epochs_dropped;     /**< whole epochs dropped by the lag limit or a lap (each lowers Onocoy's data rate) */
+    uint32_t max_lag_ms;         /**< this consumer's lag limit */
     uint32_t lag_drops;          /**< number of lag-limit events */
     uint32_t laps;               /**< number of times overwritten */
     uint32_t lag_ms;             /**< age of the oldest unread frame right now */
@@ -138,6 +166,21 @@ esp_err_t rtcm_hub_read(rtcm_hub_consumer_t consumer, uint8_t *buf, size_t max_l
  * start), e.g. after a caster reconnects. Skipped frames count as idle skips.
  */
 esp_err_t rtcm_hub_resync(rtcm_hub_consumer_t consumer);
+
+/**
+ * Set a consumer's lag limit (the Onocoy slot uses 1000 ms; others keep
+ * CONFIG_RTCM_HUB_MAX_LAG_MS). The limit bounds queueing in the hub only.
+ * @return ESP_ERR_INVALID_ARG for ms outside 100..60000.
+ */
+esp_err_t rtcm_hub_set_max_lag(rtcm_hub_consumer_t consumer, uint32_t ms);
+
+/**
+ * Forget the sticky metadata copies and start a new epoch at the next frame.
+ * The station calls it on every framer reset (the GNSS link's on_reset sink)
+ * and whenever the receiver was reconfigured (lease release). Producer
+ * context only (same task as rtcm_hub_publish).
+ */
+void rtcm_hub_clear_sticky(void);
 
 /** Hub-wide counters. */
 void rtcm_hub_get_stats(rtcm_hub_stats_t *out);

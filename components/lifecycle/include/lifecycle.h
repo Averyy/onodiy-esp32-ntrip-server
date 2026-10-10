@@ -11,14 +11,21 @@
  *   raise a power-supply alert instead. Safe mode is time-boxed: after 1 h,
  *   4 h, then 24 h the station retries a normal boot (one more early crash
  *   puts it straight back). Safe mode turns off the receiver path and the
- *   casters; Wi-Fi, the web UI and app updates stay on so a fix can arrive.
+ *   casters; Wi-Fi, the web UI, the update check and user-initiated app
+ *   installs stay on so a fix can arrive.
  *   The RTC state is linked after IDF's own RTC data, so a boot into a
  *   different app image may not find it and starts over as after power-on:
- *   never use it to pass information between images.
+ *   never use it to pass information between images. One RTC block, checked
+ *   by magic and checksum, holds the crash accounting, the session-uptime
+ *   heartbeat (written every 60 s, RTC only; read back by the next boot
+ *   after software, panic and watchdog resets only) and the GNSS-ladder
+ *   reboot budget (see lifecycle_ladder_reboot_allowed). An invalid block
+ *   counts as a fresh start, like a power cycle.
  *
  * Service task (started by lifecycle_init): once per second it marks the
- *   boot stable after CONFIG_LIFECYCLE_STABLE_UPTIME_S and, in safe mode,
- *   requests the normal-boot retry when the episode's time is up. It also runs
+ *   boot stable after CONFIG_LIFECYCLE_STABLE_UPTIME_S, writes the session
+ *   heartbeat every 60 s and, in safe mode, requests the normal-boot retry
+ *   when the episode's time is up. It also runs
  *   the reboots that lifecycle_request_reboot() and lifecycle_inhibit_release()
  *   commit, so neither caller runs the shutdown hooks on its own stack. Safe
  *   mode therefore ends on time without depending on any higher-layer task.
@@ -34,13 +41,27 @@
  *
  * Reboot inhibit (lifecycle_inhibit_acquire/release):
  *   "do not reboot now" held while something must not be cut short
- *   (receiver flashing, app image writes, the app update trial window).
+ *   (a receiver flash session until it ends, waits for the user or its
+ *   post-flash re-apply has been checked; app image writes; the app update
+ *   trial window).
  *   Non-forced reboots are refused while any inhibit is held; a reboot
  *   requested with lifecycle_request_reboot() is queued and runs when the
  *   last one is released. Checking the inhibits and committing a reboot is
  *   one atomic step, and no inhibit can be taken once a reboot is committed.
  *
- * Layer: L1. Anything above may call it; it calls only settings.
+ * App trial flag (lifecycle_set_app_trial): fw_update publishes whether a
+ *   new app image is in its trial (confirm, verify or crash watch), so the
+ *   station, which may not call fw_update, can refuse to start a receiver
+ *   flash meanwhile.
+ *
+ * Update slot (lifecycle_update_claim): one firmware update at a time across
+ *   both chips. fw_update claims it for an app download, manual upload or
+ *   install; the station claims it for a receiver flash session in full
+ *   lockout. Checking and claiming is one atomic step, so an app install and
+ *   a receiver flash can never start together, whichever path (banner or
+ *   manual upload) starts them.
+ *
+ * Layer: L1. Anything above may call it; it calls only settings and diag.
  */
 #pragma once
 
@@ -99,6 +120,7 @@ typedef struct {
     bool safe_mode;
     uint32_t safe_mode_retry_s;                /**< when safe mode retries a normal boot (uptime), 0 if not in safe mode */
     bool stable;                               /**< this boot reached CONFIG_LIFECYCLE_STABLE_UPTIME_S */
+    uint32_t prev_session_uptime_s;            /**< uptime of the previous boot (s); UINT32_MAX = unknown (power-on, brownout, other resets) */
 } lifecycle_boot_info_t;
 
 /** One-shot actions tracked per power cycle (lifecycle_claim_once). */
@@ -195,6 +217,47 @@ esp_err_t lifecycle_register_shutdown_hook(lifecycle_shutdown_hook_t hook, void 
 
 /** True the first time `flag` is claimed since power-on (LIFECYCLE_ONCE_*). */
 bool lifecycle_claim_once(uint32_t flag);
+
+/**
+ * GNSS-ladder reboot cap: allowed only if no LIFECYCLE_REBOOT_GNSS_LADDER
+ * reboot happened in the last 60 min and fewer than three in the last 24 h,
+ * both counted across software resets (RTC block; a power cycle or an
+ * invalid block after an image switch starts a fresh budget). Health asks
+ * before requesting that reboot; lifecycle records each one when it runs.
+ * @param retry_in_s optional: seconds until a ladder reboot would be allowed (0 if now).
+ */
+bool lifecycle_ladder_reboot_allowed(uint32_t *retry_in_s);
+
+/** fw_update: a new app image is in its trial (stage 1, stage 2 or the crash watch). */
+void lifecycle_set_app_trial(bool active);
+
+/** True while an app trial runs: receiver flashes (including retries) are refused meanwhile. */
+bool lifecycle_app_trial_active(void);
+
+/** Which firmware update holds the update slot. */
+typedef enum {
+    LIFECYCLE_UPDATE_NONE = 0,
+    LIFECYCLE_UPDATE_APP,        /**< fw_update: an app image is being downloaded, uploaded or installed */
+    LIFECYCLE_UPDATE_RECEIVER,   /**< station: a receiver flash session in full lockout */
+} lifecycle_update_t;
+
+/**
+ * Claim the update slot. fw_update claims APP before the first image byte is
+ * written (download or manual upload) and releases it when the install fails
+ * or is abandoned (a successful one reboots). The station claims RECEIVER
+ * before the first journal write of a session, and again at boot for an open
+ * journal that is not waiting for the user, and releases it together with
+ * its reboot inhibit.
+ * @return ESP_OK (also when `what` already holds it), ESP_ERR_INVALID_STATE
+ *         while the other update holds it, ESP_ERR_INVALID_ARG for NONE.
+ */
+esp_err_t lifecycle_update_claim(lifecycle_update_t what);
+
+/** Release the update slot if `what` holds it (otherwise nothing changes). */
+void lifecycle_update_release(lifecycle_update_t what);
+
+/** The update holding the slot now (NONE if free). */
+lifecycle_update_t lifecycle_update_active(void);
 
 #ifdef __cplusplus
 }

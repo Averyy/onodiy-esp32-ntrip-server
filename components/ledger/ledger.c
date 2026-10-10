@@ -79,7 +79,13 @@ uint32_t ledger_protected_down_today_s(void)
 
 uint32_t ledger_protected_budget_left_s(void)
 {
-    return (uint32_t)(86400u * (1000u - CONFIG_LEDGER_TARGET_PERMILLE) / 1000u);
+    /* Seconds online the target needs, before the daily grant. */
+    const int64_t needed = (int64_t)86400 * CONFIG_LEDGER_TARGET_PERMILLE / 1000 - CONFIG_LEDGER_GRACE_S;
+    int64_t left = (int64_t)86400 - needed - (int64_t)ledger_protected_down_today_s();
+    if (left < 0) {
+        return 0;
+    }
+    return (left > 86400) ? 86400u : (uint32_t)left;
 }
 
 int32_t ledger_utc_seconds_of_day(void)

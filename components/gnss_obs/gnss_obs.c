@@ -55,6 +55,16 @@ esp_err_t gnss_obs_get_sky(gnss_obs_sat_t *out, size_t *count)
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+esp_err_t gnss_obs_get_arp(gnss_obs_arp_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    out->age_ms = UINT32_MAX;
+    return ESP_ERR_NOT_FOUND;   /* TODO: decode 1005 (and 1006) antenna reference points */
+}
+
 void gnss_obs_reset(void)
 {
 }

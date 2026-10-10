@@ -8,7 +8,7 @@ menu "Station: firmware updates"
         help
             Releases of this repository carry the app image, the receiver
             package and a manifest. Forks point this at their own repository.
-            Overridable at runtime in settings.
+            Overridable at runtime in settings (ota/repo).
 
     config FW_UPDATE_MANIFEST_ASSET
         string "Release manifest asset name"
@@ -19,9 +19,13 @@ menu "Station: firmware updates"
         default "onocoydiy-esp-um982.bin"
 
     config FW_UPDATE_CHECK_INTERVAL_H
-        int "Hours between automatic update checks"
-        range 1 168
+        int "Hours between automatic update checks (not a runtime setting)"
+        range 24 168
         default 24
+        help
+            The check only looks for new releases and shows a banner in the
+            web UI; installing always needs the user's confirmation. The
+            first check runs a few minutes after boot.
 
     config FW_UPDATE_HTTP_BUF_SIZE
         int "HTTP client receive/transmit buffer (bytes)"
@@ -38,9 +42,9 @@ menu "Station: firmware updates"
         default 5
 
     config FW_UPDATE_MANIFEST_MAX_KB
-        int "Largest manifest / release list accepted (KB)"
-        range 4 256
-        default 32
+        int "Largest manifest accepted (KB)"
+        range 4 64
+        default 8
 
     config FW_UPDATE_CONFIRM_S
         int "Stage 1: seconds before a new app image is confirmed"
@@ -65,16 +69,5 @@ menu "Station: firmware updates"
         int "Crash resets during the watch that revert the update"
         range 1 20
         default 3
-
-    config FW_UPDATE_RESET_RETRY_H
-        int "Hours before retrying a version rolled back in stage 1"
-        range 1 168
-        default 24
-
-    config FW_UPDATE_AUTO_APP_SUPPORTED
-        bool
-        default y if SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT || SECURE_BOOT
-        help
-            Automatic app installs need app signature verification on update.
 
 endmenu

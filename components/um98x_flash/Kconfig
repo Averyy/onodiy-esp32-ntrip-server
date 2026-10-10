@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+menu "Station: receiver flasher"
+
+    config UM98X_FLASH_RECOVERY_ACTIONS
+        bool "Send the boot-time recovery actions for an interrupted receiver update"
+        default n
+        help
+            With an open receiver-flash journal, the boot picks the first
+            bytes, baud rates and timeouts from the journal state and the
+            reset reason (for example racing into the receiver's loader
+            after a power cut). Off: it logs what it would send and sends
+            nothing. PROVISIONAL, to be confirmed on hardware.
+
+    config UM98X_FLASH_FALLBACK_115200
+        bool "Allow the 115200 baud fallback for loader entry and transfer"
+        default n
+        help
+            Loader entry and transfer run at 460800. When enabled, an entry
+            attempt that follows a failed attempt which never reached the
+            loader prompt may run at 115200 instead. It is one of the
+            session's three entry attempts, under the same journal: it never
+            starts a second session on its own, and once the attempts are
+            used up a new try needs the user's confirmation. Off until it is
+            proven on hardware. PROVISIONAL, to be confirmed on hardware.
+
+endmenu

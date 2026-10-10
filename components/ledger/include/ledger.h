@@ -4,11 +4,16 @@
  *
  * Availability ledger: how much of each UTC day each caster slot streamed.
  *
- * Onocoy rewards availability per UTC day (target >= 98 %, i.e. at most
- * ~28.8 min of downtime). The ledger counts, per slot, the seconds a slot was
- * expected to stream (enabled, not paused for planned work) but did not.
- * Slots flagged "protected" (the Onocoy slot) drive the planned-downtime
- * budget that gates receiver flashing and the network recovery ladder.
+ * Onocoy's daily streak needs Availability >= 0.98, which on its scoring
+ * curve means a graced uptime of >= 99.8 % per UTC day with a 300 s grant:
+ * at most ~473 s offline per day at a perfect data rate (less when epochs
+ * are lost; a plain 98 % uptime scores only about 0.81). The ledger counts,
+ * per slot, the seconds a slot was expected to stream (enabled, not paused
+ * for planned work) but did not. Slots flagged "protected" (the Onocoy slot)
+ * drive the daily downtime budget shown in the UI and with update prompts,
+ * and the network recovery ladder. The budget never gates anything: every
+ * update is started by the user, who sees the expected downtime against
+ * what is left.
  *
  * Inputs (all push-style, so this L1 component depends on nobody above it):
  *   - ntrip_server reports each slot's streaming state on every change;
@@ -87,7 +92,13 @@ esp_err_t ledger_get_history(ledger_day_t *days, size_t *count);
 /** Protected-slot downtime so far this UTC day, seconds (worst protected slot). */
 uint32_t ledger_protected_down_today_s(void);
 
-/** Protected-slot downtime still allowed today under CONFIG_LEDGER_TARGET_PERMILLE. */
+/**
+ * Protected-slot downtime still allowed today: 86400 - (86400 x
+ * CONFIG_LEDGER_TARGET_PERMILLE / 1000 - CONFIG_LEDGER_GRACE_S) minus the
+ * protected downtime so far, clamped at 0 (998 per mille with the 300 s
+ * grant: 473 s a day). The Onocoy slot's estimate adjusted for its data rate
+ * comes from the caster status.
+ */
 uint32_t ledger_protected_budget_left_s(void);
 
 /** Seconds since 00:00 UTC, or -1 if no trusted clock yet. */

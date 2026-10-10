@@ -12,10 +12,17 @@
 #define PROFILE_BLOB_VERSION  1
 #define POSITION_BLOB_VERSION 1
 
-/* Format of um98x_profile_hash(), frozen separately from the blob layout:
- * changing it makes every station's gnss/applied_hash mismatch, so each one
- * reconfigures its receiver once (and an unlocked station surveys again). */
+/* Format of um98x_profile_hash(), frozen separately from the blob layout
+ * once released: changing it makes every station's gnss/applied_hash
+ * mismatch, so each one reconfigures its receiver once (and an unlocked
+ * station surveys again). */
 #define PROFILE_HASH_FORMAT 1
+
+/* WGS84 ellipsoid. */
+#define WGS84_A  6378137.0
+#define WGS84_F  (1.0 / 298.257223563)
+#define WGS84_E2 (WGS84_F * (2.0 - WGS84_F))
+#define DEG_TO_RAD (3.14159265358979323846 / 180.0)
 
 static bool height_ok(double h)
 {
@@ -36,6 +43,8 @@ static void canonical(const um98x_base_profile_t *p, um98x_base_profile_t *out)
     out->signal_group_master = p->signal_group_master;
     out->signal_group_slave = p->signal_group_slave;
     out->base_mode = p->base_mode;
+    out->station_id = p->station_id;
+    out->com1_baud = p->com1_baud;
     if (p->base_mode == UM98X_BASE_SURVEY_IN) {
         out->survey_in_s = p->survey_in_s;
     } else {
@@ -48,12 +57,14 @@ static void canonical(const um98x_base_profile_t *p, um98x_base_profile_t *out)
     out->sat_view_output = p->sat_view_output;
 }
 
-void um98x_profile_default(um98x_base_profile_t *out)
+void um98x_profile_default(um98x_base_profile_t *out, uint16_t station_id)
 {
+    /* Station messages and MSM7 for every constellation the receiver
+     * tracks, all at 1 Hz, in the order they are configured. */
     static const um98x_rtcm_out_t onocoy_set[] = {
-        { 1005, 10 }, { 1033, 10 },
-        { 1077, 1 }, { 1087, 1 }, { 1097, 1 }, { 1117, 1 }, { 1127, 1 }, { 1137, 1 },
-        { 1230, 10 },
+        { 1005, 1 }, { 1033, 1 },
+        { 1077, 1 }, { 1087, 1 }, { 1097, 1 }, { 1117, 1 }, { 1127, 1 },
+        { 1230, 1 },
     };
     _Static_assert(sizeof(onocoy_set) / sizeof(onocoy_set[0]) <= UM98X_MAX_RTCM_MSGS,
                    "default RTCM set exceeds UM98X_MAX_RTCM_MSGS");
@@ -62,10 +73,28 @@ void um98x_profile_default(um98x_base_profile_t *out)
     out->signal_group_master = 3;
     out->signal_group_slave = 6;
     out->base_mode = UM98X_BASE_SURVEY_IN;
-    out->survey_in_s = 60;
+    out->survey_in_s = UM98X_DEFAULT_SURVEY_S;
+    out->station_id = (uint16_t)(station_id & UM98X_STATION_ID_MAX);
+    out->com1_baud = UM98X_DEFAULT_COM1_BAUD;
     out->rtcm_count = (uint8_t)(sizeof(onocoy_set) / sizeof(onocoy_set[0]));
     memcpy(out->rtcm, onocoy_set, sizeof(onocoy_set));
-    out->sat_view_output = true;
+    out->sat_view_output = false;   /* default not decided yet: send nothing extra */
+}
+
+uint16_t um98x_station_id_from_mac(const uint8_t mac[6])
+{
+    return (uint16_t)((((unsigned)mac[4] << 8) | mac[5]) & UM98X_STATION_ID_MAX);
+}
+
+bool um98x_baud_supported(uint32_t baud)
+{
+    static const uint32_t rates[] = { 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600 };
+    for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
+        if (rates[i] == baud) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool um98x_profile_valid(const um98x_base_profile_t *p)
@@ -73,12 +102,15 @@ bool um98x_profile_valid(const um98x_base_profile_t *p)
     if (p == NULL || p->rtcm_count > UM98X_MAX_RTCM_MSGS) {
         return false;
     }
+    if (p->station_id > UM98X_STATION_ID_MAX || !um98x_baud_supported(p->com1_baud)) {
+        return false;
+    }
     /* NaN or infinity is invalid in every mode, used or not. */
     if (!isfinite(p->fixed_lat_deg) || !isfinite(p->fixed_lon_deg) || !isfinite(p->fixed_height_m)) {
         return false;
     }
     if (p->base_mode == UM98X_BASE_SURVEY_IN) {
-        if (p->survey_in_s == 0) {
+        if (p->survey_in_s == 0 || p->survey_in_s > UM98X_SURVEY_MAX_S) {
             return false;
         }
     } else if (p->base_mode == UM98X_BASE_FIXED) {
@@ -116,6 +148,8 @@ size_t um98x_profile_encode(const um98x_base_profile_t *profile, uint8_t *buf, s
     blob_put_f64(&w, p->fixed_lon_deg);
     blob_put_f64(&w, p->fixed_height_m);
     blob_put_bool(&w, p->sat_view_output);
+    blob_put_u16(&w, p->station_id);
+    blob_put_u32(&w, p->com1_baud);
     blob_put_u8(&w, p->rtcm_count);
     for (size_t i = 0; i < p->rtcm_count; i++) {
         blob_put_u16(&w, p->rtcm[i].msg);
@@ -141,6 +175,8 @@ bool um98x_profile_decode(const uint8_t *buf, size_t len, um98x_base_profile_t *
     p.fixed_lon_deg = blob_get_f64(&r);
     p.fixed_height_m = blob_get_f64(&r);
     p.sat_view_output = blob_get_bool(&r);
+    p.station_id = blob_get_u16(&r);
+    p.com1_baud = blob_get_u32(&r);
     p.rtcm_count = blob_get_u8(&r);
     if (p.rtcm_count > UM98X_MAX_RTCM_MSGS) {
         return false;
@@ -171,6 +207,8 @@ uint32_t um98x_profile_hash(const um98x_base_profile_t *profile)
     blob_put_u8(&w, PROFILE_HASH_FORMAT);
     blob_put_u8(&w, c.signal_group_master);
     blob_put_u8(&w, c.signal_group_slave);
+    blob_put_u32(&w, c.com1_baud);
+    blob_put_u16(&w, c.station_id);
     blob_put_u8(&w, (uint8_t)c.base_mode);
     if (c.base_mode == UM98X_BASE_SURVEY_IN) {
         blob_put_u16(&w, c.survey_in_s);
@@ -231,5 +269,53 @@ bool um98x_position_decode(const uint8_t *buf, size_t len, um98x_base_position_t
         return false;
     }
     *out = pos;
+    return true;
+}
+
+void um98x_llh_to_ecef(double lat_deg, double lon_deg, double height_m, double xyz[3])
+{
+    double lat = lat_deg * DEG_TO_RAD;
+    double lon = lon_deg * DEG_TO_RAD;
+    double sin_lat = sin(lat);
+    double cos_lat = cos(lat);
+    double n = WGS84_A / sqrt(1.0 - WGS84_E2 * sin_lat * sin_lat);   /* prime vertical radius */
+    xyz[0] = (n + height_m) * cos_lat * cos(lon);
+    xyz[1] = (n + height_m) * cos_lat * sin(lon);
+    xyz[2] = (n * (1.0 - WGS84_E2) + height_m) * sin_lat;
+}
+
+bool um98x_ecef_to_llh(const double xyz[3], double *lat_deg, double *lon_deg, double *height_m)
+{
+    const double x = xyz[0];
+    const double y = xyz[1];
+    const double z = xyz[2];
+    if (!isfinite(x) || !isfinite(y) || !isfinite(z)) {
+        return false;
+    }
+    const double p = sqrt(x * x + y * y);
+    if (sqrt(p * p + z * z) < 100000.0) {
+        return false;   /* nowhere near the surface: no meaningful geodetic position */
+    }
+    /* Fixed-point iteration on the latitude; the height uses the form that
+     * stays exact at the poles (no division by cos(lat)). Converges to
+     * double precision in a handful of steps for any height near the
+     * surface. */
+    double lat = atan2(z, p * (1.0 - WGS84_E2));
+    for (int i = 0; i < 20; i++) {
+        double sin_lat = sin(lat);
+        double n = WGS84_A / sqrt(1.0 - WGS84_E2 * sin_lat * sin_lat);
+        double next = atan2(z + WGS84_E2 * n * sin_lat, p);
+        if (fabs(next - lat) < 1e-15) {
+            lat = next;
+            break;
+        }
+        lat = next;
+    }
+    double sin_lat = sin(lat);
+    double cos_lat = cos(lat);
+    double n = WGS84_A / sqrt(1.0 - WGS84_E2 * sin_lat * sin_lat);
+    *lat_deg = lat / DEG_TO_RAD;
+    *lon_deg = (p > 0.0) ? atan2(y, x) / DEG_TO_RAD : 0.0;
+    *height_m = p * cos_lat + z * sin_lat - WGS84_A * WGS84_A / n;
     return true;
 }

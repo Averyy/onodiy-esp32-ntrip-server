@@ -7,8 +7,8 @@ menu "Station: health monitor"
         range 3 600
         default 10
         help
-            First rung of the recovery ladder. PROVISIONAL: confirm on
-            hardware.
+            First rung of the recovery ladder. PROVISIONAL, to be confirmed
+            on hardware.
 
     config HEALTH_HEAP_FRAGMENT_KB
         int "Alert when the largest free internal block drops below (KB)"

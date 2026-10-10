@@ -25,10 +25,18 @@
  *    revert, rollback). The event journal below is layout-independent and
  *    records those events and the reset reason instead.
  *  - Event journal: rate-limited, fixed-size records in the raw "journal"
- *    partition (boots with reset class and reason, reboot reason codes,
- *    ladder steps, app update/trial/revert/rollback results, receiver-flash
- *    results, safe-mode entries, Wi-Fi disconnect reasons). Survives power
- *    loss and image changes; the oldest records are overwritten.
+ *    partition (boots with reset class and reason, the previous session's
+ *    uptime, reboot reason codes, ladder steps, app update/trial/revert/
+ *    rollback results, receiver-flash results, safe-mode entries, Wi-Fi
+ *    disconnect reasons, data-loss deltas). Survives power loss and image
+ *    changes; the oldest records are overwritten. The rate limit is per kind
+ *    (CONFIG_DIAG_JOURNAL_MIN_INTERVAL_MS); a record it drops is reported as
+ *    not written, so a caller that accumulates deltas keeps them pending.
+ *    Ladder step records are exempt: one step's result and the next step's
+ *    start fall in the same second, and the ladder bounds their rate itself.
+ *    The journal is a timeline, not the boot history: the last 16 boots are
+ *    kept in settings (life/boots), because a busy journal can overwrite
+ *    boot records within hours.
  *  - Core dump: reports whether the coredump partition holds a dump from an
  *    earlier crash, its summary (task, PC, backtrace) and lets the web UI
  *    download (for `idf.py coredump-info`) or erase it. A dump can contain
@@ -38,9 +46,10 @@
  *    high-water mark, and CPU % computed from the 64-bit run-time counter
  *    between two snapshots.
  *
- * Nothing logs from the GNSS RX hot path (counters only), and the console
- * runs at CONFIG_ESP_CONSOLE_UART_BAUDRATE (921600) so a log burst does not
- * stall the task that logs.
+ * Nothing logs from the GNSS RX hot path (counters only). The console runs at
+ * 115200, so console output is best-effort: a line is written to the UART only
+ * when its TX buffer has room, otherwise it is counted as a console drop. The
+ * log ring always keeps the line, so a burst never stalls the task that logs.
  */
 #pragma once
 
@@ -76,16 +85,42 @@ typedef struct {
 
 /** Event journal record kinds. */
 typedef enum {
-    DIAG_EV_BOOT = 1,           /**< a = reset class, b = planned reboot reason */
+    DIAG_EV_BOOT = 1,           /**< a = reset class, b = planned reboot reason (written at boot) */
     DIAG_EV_REBOOT,             /**< a = reason */
-    DIAG_EV_LADDER_STEP,        /**< a = ladder (0 GNSS, 1 network, 2 caster), b = step */
+    /**
+     * a = ladder (0 GNSS, 1 network, 2 caster), b = (outcome << 8) | code.
+     * GNSS journal step codes (health.h names the rungs 1-5, 6a, 6b, 7):
+     * 1-5 = rungs 1-5 (the recovery actions), 6 = rung 6a (ESP32 reboot),
+     * 7 = rung 6b ("receiver needs a power cycle" alert), 8 = rung 7
+     * (FAILED, retry pass pending), 9 = rung 6a blocked by the reboot cap.
+     * Outcome: 0 started, 1 healthy again, 2 failed (also: refused by the
+     * station without sending anything), 3 abandoned because the ladder was
+     * suspended. Exempt from the per-kind rate limit.
+     */
+    DIAG_EV_LADDER_STEP,
     DIAG_EV_APP_UPDATE,         /**< a = result (esp_err_t) */
     DIAG_EV_APP_REVERT,         /**< a = trial stage */
     DIAG_EV_GNSS_FLASH,         /**< a = result (esp_err_t), b = attempt */
     DIAG_EV_SAFE_MODE,          /**< a = episode */
     DIAG_EV_WIFI_DISCONNECT,    /**< a = wifi_err_reason_t, b = RSSI */
-    DIAG_EV_DATA_LOSS,          /**< a = counter id, b = amount */
+    DIAG_EV_DATA_LOSS,          /**< a = diag_loss_id_t, b = increase since the previous record for that id (clamped to INT32_MAX) */
+    DIAG_EV_SESSION,            /**< right after DIAG_EV_BOOT: a = previous session uptime in s (-1 = unknown), b = raw esp_reset_reason_t */
 } diag_event_t;
+
+/**
+ * Counter ids for DIAG_EV_DATA_LOSS records (health journals the deltas,
+ * never the task that increments the counter). Units in brackets.
+ */
+typedef enum {
+    DIAG_LOSS_HW_FIFO = 1,         /**< UART hardware FIFO overflows [events] */
+    DIAG_LOSS_RX_BUFFER_FULL,      /**< UART driver buffer full [events] */
+    DIAG_LOSS_LINE_ERRORS,         /**< framing/parity/break [events] */
+    DIAG_LOSS_RTCM_CRC,            /**< RTCM frames failing CRC [frames] */
+    DIAG_LOSS_FRAMER_DISCARDED,    /**< framer discarded bytes [bytes] */
+    DIAG_LOSS_HUB_PUBLISH,         /**< frames the hub failed to publish [frames] */
+    DIAG_LOSS_BAUD_SWITCH,         /**< bytes discarded after a baud change [bytes]; expected, never alerted */
+    DIAG_LOSS_CASTER_BASE = 16,    /**< ids from here on are reserved for per-caster losses */
+} diag_loss_id_t;
 
 /** One journal record as read back. */
 typedef struct {
@@ -118,7 +153,13 @@ size_t diag_log_read_prev_boot(uint32_t *cursor, char *buf, size_t buf_size);
 /** Change a tag's runtime log level ("*" = all). */
 esp_err_t diag_set_log_level(const char *tag, esp_log_level_t level);
 
-/** Append a journal record (rate-limited per kind; never blocks for long). */
+/**
+ * Append a journal record (never blocks for long).
+ * @return ESP_OK when written; ESP_ERR_INVALID_STATE when the per-kind rate
+ *         limit dropped it (nothing written: keep the data and retry later;
+ *         never for DIAG_EV_LADDER_STEP); other errors when the journal is
+ *         unavailable.
+ */
 esp_err_t diag_journal_append(diag_event_t kind, int32_t a, int32_t b);
 
 /** Read records with seq > *cursor, oldest first; *count in = capacity, out = filled. */

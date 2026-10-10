@@ -22,7 +22,7 @@ static const char *TAG = "ntrip";
 ESP_EVENT_DEFINE_BASE(NTRIP_EVENT);
 
 #define CFG_BLOB_VERSION 1
-#define CFG_BLOB_MAX     320
+#define CFG_BLOB_MAX     320   /* largest v1 record: 307 bytes */
 
 static ntrip_caster_cfg_t s_cfg[CONFIG_NTRIP_MAX_CASTERS];
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -48,7 +48,18 @@ static size_t encode_cfg(const ntrip_caster_cfg_t *c, uint8_t *buf, size_t cap)
     blob_put_str(&w, c->mountpoint);
     blob_put_str(&w, c->username);
     blob_put_str(&w, c->password);
+    blob_put_u8(&w, (uint8_t)c->trust_mode);
+    blob_put_u8(&w, (uint8_t)c->backoff_profile);
+    blob_put_str(&w, c->label);
+    blob_put_bool(&w, c->v2_raw_body);
+    blob_put_bool(&w, c->dup_stream_ack);
     return blob_writer_ok(&w) ? w.len : 0;
+}
+
+static bool enums_valid(const ntrip_caster_cfg_t *c)
+{
+    return (c->proto == NTRIP_PROTO_V1 || c->proto == NTRIP_PROTO_V2) && c->trust_mode <= NTRIP_TRUST_INSECURE &&
+           c->backoff_profile <= NTRIP_BACKOFF_POLITE;
 }
 
 static bool decode_cfg(const uint8_t *buf, size_t len, ntrip_caster_cfg_t *out)
@@ -70,7 +81,12 @@ static bool decode_cfg(const uint8_t *buf, size_t len, ntrip_caster_cfg_t *out)
     blob_get_str(&r, c.mountpoint, sizeof(c.mountpoint));
     blob_get_str(&r, c.username, sizeof(c.username));
     blob_get_str(&r, c.password, sizeof(c.password));
-    if (!blob_reader_ok(&r) || (c.proto != NTRIP_PROTO_V1 && c.proto != NTRIP_PROTO_V2)) {
+    c.trust_mode = (ntrip_trust_t)blob_get_u8(&r);
+    c.backoff_profile = (ntrip_backoff_profile_t)blob_get_u8(&r);
+    blob_get_str(&r, c.label, sizeof(c.label));
+    c.v2_raw_body = blob_get_bool(&r);
+    c.dup_stream_ack = blob_get_bool(&r);
+    if (!blob_reader_ok(&r) || !enums_valid(&c)) {
         return false;
     }
     c.password_set = c.password[0] != '\0';
@@ -86,7 +102,20 @@ static void slot_defaults(size_t slot, ntrip_caster_cfg_t *out)
         memset(out, 0, sizeof(*out));
         out->port = 2101;
         out->proto = NTRIP_PROTO_V2;
+        out->trust_mode = NTRIP_TRUST_BUNDLE;
+        out->backoff_profile = NTRIP_BACKOFF_STANDARD;
     }
+}
+
+/* A custom CA PEM is stored under its own key in the slot namespace. */
+static bool ca_pem_present(size_t slot)
+{
+    char ns[16];
+    snprintf(ns, sizeof(ns), SETTINGS_NS_CASTER_FMT, (unsigned)slot);
+    uint8_t probe;
+    size_t len = sizeof(probe);
+    esp_err_t err = settings_get_blob(ns, SETTINGS_KEY_CST_CA_PEM, &probe, &len);
+    return err == ESP_OK || err == ESP_ERR_NVS_INVALID_LENGTH;   /* present (longer than the probe) */
 }
 
 static esp_err_t load_slot(size_t slot, ntrip_caster_cfg_t *out)
@@ -160,6 +189,7 @@ esp_err_t ntrip_server_get_config(size_t slot, ntrip_caster_cfg_t *out, bool wit
     taskEXIT_CRITICAL(&s_lock);
     out->password_set = out->password[0] != '\0';
     out->clear_password = false;
+    out->ca_pem_set = ca_pem_present(slot);
     if (!with_secret) {
         memset(out->password, 0, sizeof(out->password));
     }
@@ -176,8 +206,7 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg)
     }
     if (!fits(cfg->name, sizeof(cfg->name)) || !fits(cfg->host, sizeof(cfg->host)) ||
         !fits(cfg->mountpoint, sizeof(cfg->mountpoint)) || !fits(cfg->username, sizeof(cfg->username)) ||
-        !fits(cfg->password, sizeof(cfg->password)) ||
-        (cfg->proto != NTRIP_PROTO_V1 && cfg->proto != NTRIP_PROTO_V2)) {
+        !fits(cfg->password, sizeof(cfg->password)) || !fits(cfg->label, sizeof(cfg->label)) || !enums_valid(cfg)) {
         return ESP_ERR_INVALID_ARG;
     }
     if (cfg->enabled && (cfg->host[0] == '\0' || cfg->port == 0 || cfg->mountpoint[0] == '\0')) {
@@ -186,6 +215,7 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg)
 
     ntrip_caster_cfg_t next = *cfg;
     next.clear_password = false;
+    next.ca_pem_set = false;   /* output only */
     if (cfg->clear_password) {
         memset(next.password, 0, sizeof(next.password));
     } else if (next.password[0] == '\0') {
@@ -237,10 +267,11 @@ esp_err_t ntrip_server_restart_slot(size_t slot)
     return ESP_ERR_NOT_SUPPORTED;
 }
 
-esp_err_t ntrip_server_set_paused(bool paused, bool disconnect_now)
+esp_err_t ntrip_server_set_paused(bool paused)
 {
     (void)paused;
-    (void)disconnect_now;
+    /* TODO: paused slots stay connected and idle up to their source-stall
+     * limit, then close cleanly and wait in PAUSED. */
     return ESP_ERR_NOT_SUPPORTED;
 }
 
@@ -254,4 +285,6 @@ void ntrip_server_onocoy_defaults(ntrip_caster_cfg_t *out)
     out->port = 2101;
     out->proto = NTRIP_PROTO_V1;
     out->tls = false;
+    out->trust_mode = NTRIP_TRUST_BUNDLE;
+    out->backoff_profile = NTRIP_BACKOFF_FAST;
 }

@@ -8,6 +8,7 @@
 
 #include "boot_guard.h"
 #include "boot_history.h"
+#include "diag.h"
 #include "esp_app_desc.h"
 #include "esp_attr.h"
 #include "esp_log.h"
@@ -25,6 +26,8 @@ ESP_EVENT_DEFINE_BASE(LIFECYCLE_EVENT);
 _Static_assert(CONFIG_LIFECYCLE_MAX_INHIBITS <= REBOOT_GATE_MAX_INHIBITS, "too many reboot inhibits");
 _Static_assert(CONFIG_FREERTOS_TASK_NOTIFICATION_ARRAY_ENTRIES >= 2,
                "the lifecycle service wakes on task notification index 1");
+_Static_assert(BOOT_GUARD_UNKNOWN == UINT32_MAX && BOOT_HISTORY_UPTIME_UNKNOWN == UINT32_MAX,
+               "unknown session uptime is UINT32_MAX everywhere");
 
 /* Survives software, panic and watchdog resets; validated by magic + checksum. */
 static RTC_NOINIT_ATTR boot_guard_state_t s_rtc;
@@ -48,9 +51,13 @@ static bool s_safe_cleared;         /* under s_lock: a later retry must not undo
 #define SERVICE_STACK      4096
 #define SERVICE_PRIO       13
 #define SERVICE_NOTIFY_IDX 1        /* index 0 belongs to IDF APIs */
+#define HEARTBEAT_S        60       /* session-uptime heartbeat (RTC only, no flash) */
 static TaskHandle_t s_service;      /* under s_lock */
 static bool s_deferred;             /* under s_lock: a committed reboot waits for the service task */
 static bool s_retry_requested;      /* service task only */
+static uint32_t s_last_beat_s;      /* service task only */
+static bool s_app_trial;            /* under s_lock */
+static lifecycle_update_t s_update; /* under s_lock: holder of the update slot */
 
 /* Shutdown hooks run once per boot. If they overrun the budget, a one-shot
  * timer restarts anyway, well before the task watchdog of a subscribed caller
@@ -182,6 +189,11 @@ static void on_esp_restart(void)
 
 /* ---- reboot execution ------------------------------------------------------------ */
 
+static uint32_t uptime_s(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000000);
+}
+
 /* Runs a reboot the gate committed. Only the committer (or the service task it
  * handed the reboot to) gets here, so this runs once. */
 static void __attribute__((noreturn)) do_reboot(lifecycle_reboot_reason_t reason)
@@ -190,8 +202,16 @@ static void __attribute__((noreturn)) do_reboot(lifecycle_reboot_reason_t reason
     if (reason == LIFECYCLE_REBOOT_BOOT_FAILURE) {
         code |= BOOT_GUARD_REASON_CRASH;
     }
+    uint32_t now = uptime_s();
     taskENTER_CRITICAL(&s_lock);
     boot_guard_set_reboot_reason(&s_rtc, code);
+    /* Exact session length for the next boot; a GNSS-ladder reboot also
+     * spends one from the reboot budget. */
+    if (reason == LIFECYCLE_REBOOT_GNSS_LADDER) {
+        boot_guard_record_ladder_reboot(&s_rtc, now);
+    } else {
+        boot_guard_heartbeat(&s_rtc, now);
+    }
     taskEXIT_CRITICAL(&s_lock);
 
     ESP_LOGW(TAG, "rebooting (reason %d)", (int)reason);
@@ -279,18 +299,25 @@ static esp_err_t reboot_now(lifecycle_reboot_reason_t reason, bool force, uint32
 
 static void service_poll(void)
 {
-    uint32_t uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
+    uint32_t now = uptime_s();
 
-    if (!s_info.stable && uptime_s >= CONFIG_LIFECYCLE_STABLE_UPTIME_S) {
+    if (now - s_last_beat_s >= HEARTBEAT_S) {
+        s_last_beat_s = now;
+        taskENTER_CRITICAL(&s_lock);
+        boot_guard_heartbeat(&s_rtc, now);
+        taskEXIT_CRITICAL(&s_lock);
+    }
+
+    if (!s_info.stable && now >= CONFIG_LIFECYCLE_STABLE_UPTIME_S) {
         taskENTER_CRITICAL(&s_lock);
         boot_guard_on_stable(&s_rtc);
         s_info.stable = true;
         refresh_info();
         taskEXIT_CRITICAL(&s_lock);
-        ESP_LOGI(TAG, "boot stable after %u s", (unsigned)uptime_s);
+        ESP_LOGI(TAG, "boot stable after %u s", (unsigned)now);
     }
 
-    if (s_info.safe_mode && !s_retry_requested && uptime_s >= s_info.safe_mode_retry_s) {
+    if (s_info.safe_mode && !s_retry_requested && now >= s_info.safe_mode_retry_s) {
         ESP_LOGW(TAG, "safe mode episode over: retrying a normal boot");
         /* The crash counter is set up for the retry when the reboot is
          * committed, not now: a queued retry must not change anything yet. */
@@ -362,6 +389,7 @@ void lifecycle_early_boot(void)
     s_info.reset_reason = raw;
     s_info.reset_class = (lifecycle_reset_class_t)res.cls;
     s_info.prev_reboot_reason = (lifecycle_reboot_reason_t)(res.prev_reboot_reason & ~BOOT_GUARD_REASON_CRASH);
+    s_info.prev_session_uptime_s = res.prev_session_s;   /* BOOT_GUARD_UNKNOWN == UINT32_MAX */
     refresh_info();
 
     (void)esp_register_shutdown_handler(on_esp_restart);
@@ -411,6 +439,7 @@ static esp_err_t record_boot(void)
     now->raw = (uint8_t)s_info.reset_reason;
     now->reboot_reason = (uint16_t)s_info.prev_reboot_reason;
     now->boot_no = s_info.boots_since_power_on;
+    now->prev_uptime_s = s_info.prev_session_uptime_s;
     strlcpy(now->version, esp_app_get_description()->version, sizeof(now->version));
 
     len = boot_history_encode(entries, count + 1, buf, sizeof(buf));
@@ -420,13 +449,23 @@ static esp_err_t record_boot(void)
     return settings_set_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_HISTORY, buf, len);
 }
 
+/* The event journal's timeline of boots (the persisted list is life/boots). */
+static void journal_boot(void)
+{
+    uint32_t prev = s_info.prev_session_uptime_s;
+    int32_t prev_s = (prev == BOOT_HISTORY_UPTIME_UNKNOWN) ? -1 : (int32_t)(prev > INT32_MAX ? INT32_MAX : prev);
+    (void)diag_journal_append(DIAG_EV_BOOT, (int32_t)s_info.reset_class, (int32_t)s_info.prev_reboot_reason);
+    (void)diag_journal_append(DIAG_EV_SESSION, prev_s, (int32_t)s_info.reset_reason);
+}
+
 esp_err_t lifecycle_init(void)
 {
     esp_err_t err = start_service();
     if (err == ESP_ERR_NO_MEM) {
-        ESP_LOGE(TAG, "service task not started: no stable-boot marking or safe-mode retry this boot");
+        ESP_LOGE(TAG, "service task not started: no stable-boot marking, heartbeat or safe-mode retry this boot");
     }
     esp_err_t hist = record_boot();
+    journal_boot();
     return (err != ESP_OK) ? err : hist;
 }
 
@@ -548,4 +587,59 @@ bool lifecycle_claim_once(uint32_t flag)
     bool first = boot_guard_claim_once(&s_rtc, flag);
     taskEXIT_CRITICAL(&s_lock);
     return first;
+}
+
+bool lifecycle_ladder_reboot_allowed(uint32_t *retry_in_s)
+{
+    uint32_t now = uptime_s();
+    taskENTER_CRITICAL(&s_lock);
+    bool allowed = boot_guard_ladder_reboot_allowed(&s_rtc, now, retry_in_s);
+    taskEXIT_CRITICAL(&s_lock);
+    return allowed;
+}
+
+void lifecycle_set_app_trial(bool active)
+{
+    taskENTER_CRITICAL(&s_lock);
+    s_app_trial = active;
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+bool lifecycle_app_trial_active(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    bool active = s_app_trial;
+    taskEXIT_CRITICAL(&s_lock);
+    return active;
+}
+
+esp_err_t lifecycle_update_claim(lifecycle_update_t what)
+{
+    if (what != LIFECYCLE_UPDATE_APP && what != LIFECYCLE_UPDATE_RECEIVER) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    taskENTER_CRITICAL(&s_lock);
+    bool ok = (s_update == LIFECYCLE_UPDATE_NONE || s_update == what);
+    if (ok) {
+        s_update = what;
+    }
+    taskEXIT_CRITICAL(&s_lock);
+    return ok ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+void lifecycle_update_release(lifecycle_update_t what)
+{
+    taskENTER_CRITICAL(&s_lock);
+    if (s_update == what) {
+        s_update = LIFECYCLE_UPDATE_NONE;
+    }
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+lifecycle_update_t lifecycle_update_active(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    lifecycle_update_t what = s_update;
+    taskEXIT_CRITICAL(&s_lock);
+    return what;
 }

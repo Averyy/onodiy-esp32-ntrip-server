@@ -13,36 +13,53 @@
  * allocated once per slot. Slots are fully independent: one caster's outage,
  * auth failure or slowness never affects another.
  *
- * Bounded blocking: every blocking call has a limit (connect and TLS
- * handshake via esp_tls_cfg_t.timeout_ms, SO_SNDTIMEO/SO_RCVTIMEO on the
- * socket, lwIP's resolver gives up after ~7 s per DNS server). Slot tasks are
- * NOT subscribed to the task watchdog: a slow caster must never reboot the
- * station. Instead each slot stamps its progress; the health monitor
- * restarts only the slot that overruns its per-state budget
- * (CONNECTING <= CONFIG_NTRIP_CONNECT_BUDGET_S, a single send <= the send
- * timeout + 5 s) via ntrip_server_restart_slot().
+ * Bounded blocking: every blocking call has a limit (plain slots: TCP
+ * connect CONFIG_NTRIP_TCP_CONNECT_TIMEOUT_MS = 5 s; TLS slots: esp_tls
+ * timeout_ms CONFIG_NTRIP_CONNECT_TIMEOUT_MS = 10 s, which bounds the connect
+ * and each handshake wait, so the whole handshake can take about twice that;
+ * SO_SNDTIMEO/SO_RCVTIMEO on the socket; lwIP's resolver gives up after ~7 s
+ * per DNS server). Slot tasks are NOT subscribed to the task watchdog: a
+ * slow caster must never reboot the station. Instead each slot stamps its
+ * progress; the health monitor restarts only the slot that overruns its
+ * per-state budget (CONNECTING <= CONFIG_NTRIP_CONNECT_BUDGET_S, a single
+ * send <= the send timeout + 5 s) via ntrip_server_restart_slot().
  *
  * Clean shutdown: a lifecycle shutdown hook closes every session (TLS
- * close_notify / shutdown(SHUT_WR), bounded) before any planned reboot, so
- * the caster does not hold a stale source session. While streaming, the
- * socket is also polled for EOF so a caster-side close is seen at once.
+ * close_notify / shutdown(SHUT_WR) immediately followed by close(), bounded)
+ * before any planned reboot, so the caster does not hold a stale source
+ * session. While streaming, the socket is also polled for EOF so a
+ * caster-side close is seen at once.
  *
- * Rejections: NTRIP 1.0 has no standard "mountpoint in use" reply and
- * casters word errors differently, so a rejection right after a reboot or
- * disconnect may just be the caster still holding the previous session. A
- * rejection is treated as transient (retry every CONFIG_NTRIP_AUTH_RETRY_S)
- * when the same credentials have worked before, or within
- * CONFIG_NTRIP_AUTH_TRANSIENT_WINDOW_S of a disconnect or boot. Only after
- * that window does the slot show AUTH_FAILED, and even then it keeps
- * retrying every CONFIG_NTRIP_AUTH_FAILED_RETRY_S.
+ * Failures and backoff: every failure has a class (ntrip_fail_class_t) and
+ * every slot a backoff profile (fast for Onocoy, standard, polite for
+ * community casters that ban hammering sources). Transient failures back off
+ * exponentially to the profile's cap; the other classes follow the profile's
+ * row for their class; every delay gets +-20 % jitter. NTRIP 1.0 has no
+ * standard "mountpoint in use" reply, so a rejection right after a reboot or
+ * disconnect may just be the caster still holding the previous session: an
+ * AUTH reply within CONFIG_NTRIP_AUTH_TRANSIENT_WINDOW_S of a disconnect or
+ * boot, on credentials that worked before, follows the profile's MOUNT_BUSY
+ * row; after the window AUTH and CONFIG follow the profile's AUTH row, and
+ * persistent MOUNT_BUSY escalates to it after 10 min. A polite slot makes at
+ * most one attempt per hour after 20 consecutive failures that reached the
+ * caster. Entering AUTH, CONFIG, BANNED or the hourly mode persists {class,
+ * attempt, remaining delay} (settings cstN/backoff, written only on class
+ * changes) so a reboot never resets a long backoff; success or a user edit
+ * clears it. Network down, source stalls, pauses and user edits are never
+ * failures; a healthy session (>= 60 s and >= 5 KB) resets the attempt count.
+ * The tables live in a pure core with host tests.
  *
  * Protected slot: the Onocoy slot is "protected": its availability drives
  * the daily downtime budget and the network recovery ladder, and its
- * reconnect backoff is capped at CONFIG_NTRIP_PROTECTED_MAX_BACKOFF_S.
+ * transient backoff is capped at CONFIG_NTRIP_PROTECTED_MAX_BACKOFF_S.
  *
- * Pause: while the station holds the receiver for a short command session,
- * slots stay connected but idle; only a pause longer than
- * CONFIG_NTRIP_PAUSE_DISCONNECT_S (or a receiver flash) disconnects them.
+ * Source stall and pause: a slot with no fresh RTCM closes its session
+ * gracefully after CONFIG_NTRIP_SOURCE_STALL_S (casters drop or count silent
+ * sources), the protected slot after CONFIG_NTRIP_PROTECTED_SOURCE_STALL_S.
+ * A pause for receiver work (configuration or a flash) is a planned source
+ * stall with the same limits: paused slots stay connected and idle up to
+ * their limit, then close cleanly and wait in PAUSED until the station
+ * resumes them; never counted as a failure.
  *
  * Logging: request lines carry the password (NTRIP 1.0) and the Onocoy
  * mountpoint is the credential username, so requests and replies are only
@@ -58,9 +75,9 @@
  * ESP_ERR_INVALID_STATE, so nothing is written over stored slots that were
  * never loaded.
  *
- * Status: PROVISIONAL. Request formats, reply parsing, reconnect/backoff and
- * caster error handling are still to be designed in detail. The config and
- * status structures are expected to hold.
+ * Status: PROVISIONAL, to be confirmed on hardware and against real casters:
+ * request formats, reply parsing, timeouts and backoff values. Slot config
+ * persistence is implemented.
  */
 #pragma once
 
@@ -87,6 +104,37 @@ typedef enum {
     NTRIP_PROTO_V2 = 2,   /**< NTRIP 2.0: HTTP/1.1 POST with Basic auth */
 } ntrip_proto_t;
 
+/** Reconnect backoff profile of a slot. */
+typedef enum {
+    NTRIP_BACKOFF_FAST = 0,     /**< Onocoy: short delays, the daily budget is tight */
+    NTRIP_BACKOFF_STANDARD,
+    NTRIP_BACKOFF_POLITE,       /**< community casters that ban hammering sources */
+} ntrip_backoff_profile_t;
+
+/** TLS certificate check of a slot. */
+typedef enum {
+    NTRIP_TRUST_BUNDLE = 0,     /**< the built-in CA bundle (default) */
+    NTRIP_TRUST_CUSTOM_CA,      /**< the slot's own CA PEM (settings cstN/ca_pem), e.g. a self-signed caster */
+    NTRIP_TRUST_INSECURE,       /**< no check: explicit opt-in, shown as a warning */
+} ntrip_trust_t;
+
+/** Failure classes (status, counters, backoff rows). */
+typedef enum {
+    NTRIP_FAIL_NONE = 0,
+    NTRIP_FAIL_DNS,
+    NTRIP_FAIL_CONNECT,
+    NTRIP_FAIL_TLS,
+    NTRIP_FAIL_TIMEOUT,
+    NTRIP_FAIL_REMOTE_CLOSE,
+    NTRIP_FAIL_WRITE_STALL,
+    NTRIP_FAIL_KEEPALIVE,
+    NTRIP_FAIL_AUTH,
+    NTRIP_FAIL_MOUNT_BUSY,
+    NTRIP_FAIL_CONFIG,
+    NTRIP_FAIL_BANNED,
+    NTRIP_FAIL_CLASS_COUNT,
+} ntrip_fail_class_t;
+
 /** One caster slot (persisted as one blob in settings namespace "cst<N>"). */
 typedef struct {
     bool enabled;
@@ -101,6 +149,12 @@ typedef struct {
     bool clear_password;   /**< input only (set_config): remove the stored password */
     ntrip_proto_t proto;
     bool tls;
+    ntrip_trust_t trust_mode;      /**< TLS slots only */
+    bool ca_pem_set;               /**< output only: a custom CA PEM is stored for this slot */
+    ntrip_backoff_profile_t backoff_profile; /**< presets set it (Onocoy: fast) */
+    char label[48];                /**< NTRIP 2.0 dashboard label (Onocoy v2 sends it as the mountpoint) */
+    bool v2_raw_body;              /**< NTRIP 2.0 quirk: send the body unchunked */
+    bool dup_stream_ack;           /**< user acknowledged streaming the same data to Onocoy and an open caster */
 } ntrip_caster_cfg_t;
 
 typedef enum {
@@ -109,25 +163,55 @@ typedef enum {
     NTRIP_STATE_WAIT_DATA,      /**< connected network, but no RTCM to send */
     NTRIP_STATE_CONNECTING,     /**< DNS, TCP/TLS connect, request, reply */
     NTRIP_STATE_STREAMING,
-    NTRIP_STATE_BACKOFF,        /**< waiting before the next attempt */
-    NTRIP_STATE_AUTH_FAILED,    /**< rejected past the transient window; still retried slowly */
+    NTRIP_STATE_BACKOFF,        /**< waiting before the next attempt (transient or mountpoint busy) */
+    NTRIP_STATE_AUTH_FAILED,    /**< credentials rejected past the transient window; still retried per profile */
     NTRIP_STATE_PAUSED,         /**< station paused output (receiver config/flash) */
+    NTRIP_STATE_CONFIG_ERROR,   /**< caster refused the request itself (unknown mountpoint, bad request, certificate); retried per profile */
+    NTRIP_STATE_BANNED,         /**< caster says this source is banned; retried after hours */
 } ntrip_state_t;
 
-/** Live status of one slot. */
+/** Live status of one slot. "today" = the current UTC day. */
 typedef struct {
     ntrip_state_t state;
+    ntrip_fail_class_t reason;  /**< class of the last failure */
     uint32_t state_age_s;       /**< seconds in the current state */
     uint32_t progress_age_ms;   /**< since the slot task last made progress (liveness) */
     uint32_t connects;          /**< successful connections */
     uint32_t failures;          /**< failed attempts */
+    uint32_t failures_by_class[NTRIP_FAIL_CLASS_COUNT];
     uint32_t disconnects;       /**< drops after streaming */
     uint32_t restarts;          /**< forced by the health monitor */
-    uint64_t bytes_sent;
-    uint64_t frames_dropped;    /**< lost while streaming (hub slow-consumer policy) */
+    int64_t connected_since;    /**< unix time the session started, 0 = none or no clock */
     uint32_t connected_s;       /**< seconds in the current session */
-    uint32_t next_retry_s;      /**< seconds until the next attempt (BACKOFF/AUTH_FAILED) */
+    uint32_t today_online_s;
+    uint32_t today_offline_s;
+    uint16_t graced_uptime_permille; /**< protected slot: min(1, (online + grant) / 86400) */
+    bool streak_ok;             /**< protected slot: graced uptime meets the streak threshold so far */
+    uint16_t data_rate_permille;/**< protected slot: epochs sent / epochs expected while connected today (estimate) */
+    uint32_t budget_left_s;     /**< protected slot: offline budget left today for that data rate (estimate) */
+    uint64_t bytes_sent;
+    uint64_t frames_sent;
+    uint64_t epochs_sent;
+    uint32_t epochs_sent_today;
+    uint64_t frames_dropped;    /**< lost while streaming (hub slow-consumer policy) */
+    uint64_t bytes_dropped;
+    uint64_t epochs_dropped;
+    uint32_t epochs_dropped_today;
+    uint64_t frames_skipped_idle; /**< expected skips (attach, resync after an outage or pause) */
+    uint32_t lag_drops;
+    uint32_t laps;
+    uint32_t lag_ms_now;        /**< age of the oldest unsent frame */
+    uint32_t max_lag_ms;
+    uint32_t backoff_attempt;   /**< consecutive failures counted for the backoff */
+    uint32_t next_retry_s;      /**< seconds until the next attempt */
     int last_status_code;       /**< last caster HTTP/ICY status, 0 = none */
+    char last_status_line[97];  /**< raw first reply line (never contains credentials) */
+    char server_header[65];     /**< caster's Server: header */
+    char resolved_ip[46];
+    uint32_t dns_cached_used;   /**< attempts that used the cached address after a DNS failure */
+    char tls_version[16];
+    char tls_cipher[48];
+    char hint[64];              /**< e.g. "mountpoint held by another source" */
     esp_err_t last_err;
 } ntrip_caster_status_t;
 
@@ -170,13 +254,15 @@ esp_err_t ntrip_server_get_status(size_t slot, ntrip_caster_status_t *out);
 esp_err_t ntrip_server_restart_slot(size_t slot);
 
 /**
- * Pause/resume all slots for receiver work. Paused slots stay connected and
- * idle for up to CONFIG_NTRIP_PAUSE_DISCONNECT_S, then disconnect cleanly;
- * `disconnect_now` (receiver flash) skips the idle phase.
+ * Pause/resume all slots for receiver work (a planned source stall). Paused
+ * slots stay connected and idle up to their source-stall limit
+ * (CONFIG_NTRIP_SOURCE_STALL_S, the protected slot
+ * CONFIG_NTRIP_PROTECTED_SOURCE_STALL_S), then close cleanly and wait in
+ * PAUSED; never a failure. The ledger counts the time as planned downtime.
  */
-esp_err_t ntrip_server_set_paused(bool paused, bool disconnect_now);
+esp_err_t ntrip_server_set_paused(bool paused);
 
-/** Fill a slot config with the Onocoy endpoint (credentials left empty, protected). */
+/** Fill a slot config with the Onocoy endpoint (credentials left empty, protected, fast backoff). */
 void ntrip_server_onocoy_defaults(ntrip_caster_cfg_t *out);
 
 #ifdef __cplusplus

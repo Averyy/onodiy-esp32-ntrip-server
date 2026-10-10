@@ -8,22 +8,43 @@
 #include "um98x_profile.h"
 #include "unity.h"
 
-/* um98x_profile_hash() of um98x_profile_default(); see "profile hash format is frozen". */
-#define DEFAULT_PROFILE_HASH 0xCAC97CD8u
+/* Station ID used for the default profile in these tests. */
+#define TEST_STATION_ID 1234u
+
+/* um98x_profile_hash() of um98x_profile_default(TEST_STATION_ID); see "profile hash format is frozen". */
+#define DEFAULT_PROFILE_HASH 0x139710D8u
 
 TEST_CASE("default profile is the Onocoy set and valid", "[um98x_profile]")
 {
+    static const uint16_t expected[] = { 1005, 1033, 1077, 1087, 1097, 1117, 1127, 1230 };
     um98x_base_profile_t p;
-    um98x_profile_default(&p);
+    um98x_profile_default(&p, TEST_STATION_ID);
     TEST_ASSERT_TRUE(um98x_profile_valid(&p));
     TEST_ASSERT_EQUAL_UINT8(3, p.signal_group_master);
     TEST_ASSERT_EQUAL_UINT8(6, p.signal_group_slave);
     TEST_ASSERT_EQUAL(UM98X_BASE_SURVEY_IN, p.base_mode);
-    TEST_ASSERT_EQUAL_UINT8(9, p.rtcm_count);
-    TEST_ASSERT_EQUAL_UINT16(1005, p.rtcm[0].msg);
-    TEST_ASSERT_EQUAL_UINT16(10, p.rtcm[0].period_s);
-    TEST_ASSERT_EQUAL_UINT16(1137, p.rtcm[7].msg);
-    TEST_ASSERT_EQUAL_UINT16(1, p.rtcm[7].period_s);
+    TEST_ASSERT_EQUAL_UINT16(600, p.survey_in_s);
+    TEST_ASSERT_EQUAL_UINT16(TEST_STATION_ID, p.station_id);
+    TEST_ASSERT_EQUAL_UINT32(115200, p.com1_baud);
+    TEST_ASSERT_FALSE(p.sat_view_output);                    /* nothing extra until the owner decides */
+    TEST_ASSERT_EQUAL_UINT8(sizeof(expected) / sizeof(expected[0]), p.rtcm_count);
+    for (size_t i = 0; i < p.rtcm_count; i++) {
+        TEST_ASSERT_EQUAL_UINT16(expected[i], p.rtcm[i].msg);
+        TEST_ASSERT_EQUAL_UINT16(1, p.rtcm[i].period_s);    /* every message at 1 Hz */
+        TEST_ASSERT_NOT_EQUAL(1137, p.rtcm[i].msg);          /* no NavIC on the UM982 */
+    }
+
+    /* The station ID keeps 12 bits. */
+    um98x_profile_default(&p, 0xFFFFu);
+    TEST_ASSERT_EQUAL_UINT16(4095, p.station_id);
+}
+
+TEST_CASE("station ID is the low 12 bits of the MAC", "[um98x_profile]")
+{
+    const uint8_t mac[6] = { 0x24, 0x6F, 0x28, 0x9A, 0xAB, 0xCD };
+    TEST_ASSERT_EQUAL_HEX16(0x0BCD, um98x_station_id_from_mac(mac));
+    const uint8_t low[6] = { 0, 0, 0, 0, 0x10, 0x01 };
+    TEST_ASSERT_EQUAL_HEX16(0x0001, um98x_station_id_from_mac(low));
 }
 
 /* Copy every named field, leaving whatever b's padding holds. */
@@ -33,6 +54,8 @@ static void copy_fields(um98x_base_profile_t *b, const um98x_base_profile_t *a)
     b->signal_group_slave = a->signal_group_slave;
     b->base_mode = a->base_mode;
     b->survey_in_s = a->survey_in_s;
+    b->station_id = a->station_id;
+    b->com1_baud = a->com1_baud;
     b->fixed_lat_deg = a->fixed_lat_deg;
     b->fixed_lon_deg = a->fixed_lon_deg;
     b->fixed_height_m = a->fixed_height_m;
@@ -46,7 +69,7 @@ static void copy_fields(um98x_base_profile_t *b, const um98x_base_profile_t *a)
 
 static void fixed_profile(um98x_base_profile_t *p)
 {
-    um98x_profile_default(p);
+    um98x_profile_default(p, TEST_STATION_ID);
     p->base_mode = UM98X_BASE_FIXED;
     p->fixed_lat_deg = 43.6532;
     p->fixed_lon_deg = -79.3832;
@@ -60,6 +83,8 @@ TEST_CASE("profile blob round-trips every field", "[um98x_profile]")
     um98x_base_profile_t a;
     um98x_base_profile_t b;
     fixed_profile(&a);
+    a.station_id = 4095;
+    a.com1_baud = 460800;
 
     uint8_t buf[UM98X_PROFILE_BLOB_MAX];
     size_t len = um98x_profile_encode(&a, buf, sizeof(buf));
@@ -69,6 +94,8 @@ TEST_CASE("profile blob round-trips every field", "[um98x_profile]")
     TEST_ASSERT_EQUAL_UINT8(a.signal_group_master, b.signal_group_master);
     TEST_ASSERT_EQUAL_UINT8(a.signal_group_slave, b.signal_group_slave);
     TEST_ASSERT_EQUAL(a.base_mode, b.base_mode);
+    TEST_ASSERT_EQUAL_UINT16(4095, b.station_id);
+    TEST_ASSERT_EQUAL_UINT32(460800, b.com1_baud);
     TEST_ASSERT_TRUE(a.fixed_lat_deg == b.fixed_lat_deg);
     TEST_ASSERT_TRUE(a.fixed_lon_deg == b.fixed_lon_deg);
     TEST_ASSERT_TRUE(a.fixed_height_m == b.fixed_height_m);
@@ -77,13 +104,15 @@ TEST_CASE("profile blob round-trips every field", "[um98x_profile]")
     TEST_ASSERT_EQUAL_UINT8(a.rtcm_count, b.rtcm_count);
     TEST_ASSERT_EQUAL_MEMORY(a.rtcm, b.rtcm, sizeof(a.rtcm[0]) * a.rtcm_count);
 
-    um98x_profile_default(&a);
+    um98x_profile_default(&a, TEST_STATION_ID);
     len = um98x_profile_encode(&a, buf, sizeof(buf));
     TEST_ASSERT_TRUE(um98x_profile_decode(buf, len, &b));
     TEST_ASSERT_EQUAL(UM98X_BASE_SURVEY_IN, b.base_mode);
     TEST_ASSERT_EQUAL_UINT16(a.survey_in_s, b.survey_in_s);
     TEST_ASSERT_EQUAL_UINT8(a.signal_group_slave, b.signal_group_slave);
     TEST_ASSERT_EQUAL(a.sat_view_output, b.sat_view_output);
+    TEST_ASSERT_EQUAL_UINT16(TEST_STATION_ID, b.station_id);
+    TEST_ASSERT_EQUAL_UINT32(115200, b.com1_baud);
 }
 
 TEST_CASE("profile hash ignores struct padding", "[um98x_profile]")
@@ -109,8 +138,8 @@ TEST_CASE("profile hash and blob ignore fields the mode does not use", "[um98x_p
     uint8_t bb[UM98X_PROFILE_BLOB_MAX];
 
     /* Survey-in: stale fixed coordinates do not matter. */
-    um98x_profile_default(&a);
-    um98x_profile_default(&b);
+    um98x_profile_default(&a, TEST_STATION_ID);
+    um98x_profile_default(&b, TEST_STATION_ID);
     b.fixed_lat_deg = 12.5;
     b.fixed_lon_deg = -3.25;
     b.fixed_height_m = 100.0;
@@ -131,12 +160,18 @@ TEST_CASE("profile hash and blob ignore fields the mode does not use", "[um98x_p
     TEST_ASSERT_EQUAL_HEX32(um98x_profile_hash(&a), um98x_profile_hash(&b));
 
     /* What the receiver does use still counts. */
-    um98x_profile_default(&a);
-    um98x_profile_default(&b);
+    um98x_profile_default(&a, TEST_STATION_ID);
+    um98x_profile_default(&b, TEST_STATION_ID);
     b.survey_in_s = 120;
     TEST_ASSERT_NOT_EQUAL(um98x_profile_hash(&a), um98x_profile_hash(&b));
     b.survey_in_s = a.survey_in_s;
     b.sat_view_output = !a.sat_view_output;
+    TEST_ASSERT_NOT_EQUAL(um98x_profile_hash(&a), um98x_profile_hash(&b));
+    b.sat_view_output = a.sat_view_output;
+    b.station_id = (uint16_t)(a.station_id + 1);
+    TEST_ASSERT_NOT_EQUAL(um98x_profile_hash(&a), um98x_profile_hash(&b));
+    b.station_id = a.station_id;
+    b.com1_baud = 460800;
     TEST_ASSERT_NOT_EQUAL(um98x_profile_hash(&a), um98x_profile_hash(&b));
 }
 
@@ -145,7 +180,7 @@ TEST_CASE("profile hash format is frozen", "[um98x_profile]")
     /* gnss/applied_hash on every deployed station holds values like this one.
      * If this changes, every station reconfigures its receiver once. */
     um98x_base_profile_t p;
-    um98x_profile_default(&p);
+    um98x_profile_default(&p, TEST_STATION_ID);
     TEST_ASSERT_EQUAL_HEX32(DEFAULT_PROFILE_HASH, um98x_profile_hash(&p));
 }
 
@@ -153,7 +188,7 @@ TEST_CASE("profile decode rejects foreign or damaged blobs", "[um98x_profile]")
 {
     um98x_base_profile_t p;
     um98x_base_profile_t out;
-    um98x_profile_default(&p);
+    um98x_profile_default(&p, TEST_STATION_ID);
     uint8_t buf[UM98X_PROFILE_BLOB_MAX];
     size_t len = um98x_profile_encode(&p, buf, sizeof(buf));
 
@@ -166,36 +201,52 @@ TEST_CASE("profile decode rejects foreign or damaged blobs", "[um98x_profile]")
 TEST_CASE("profile validation catches bad values", "[um98x_profile]")
 {
     um98x_base_profile_t p;
-    um98x_profile_default(&p);
+    um98x_profile_default(&p, TEST_STATION_ID);
     p.survey_in_s = 0;
     TEST_ASSERT_FALSE(um98x_profile_valid(&p));
+    p.survey_in_s = UM98X_SURVEY_MAX_S + 1;
+    TEST_ASSERT_FALSE(um98x_profile_valid(&p));
+    p.survey_in_s = UM98X_SURVEY_MAX_S;
+    TEST_ASSERT_TRUE(um98x_profile_valid(&p));
 
-    um98x_profile_default(&p);
+    um98x_profile_default(&p, TEST_STATION_ID);
+    p.station_id = UM98X_STATION_ID_MAX + 1;
+    TEST_ASSERT_FALSE(um98x_profile_valid(&p));
+
+    um98x_profile_default(&p, TEST_STATION_ID);
+    p.com1_baud = 100000;                                /* not a receiver baud */
+    TEST_ASSERT_FALSE(um98x_profile_valid(&p));
+    p.com1_baud = 0;
+    TEST_ASSERT_FALSE(um98x_profile_valid(&p));
+    p.com1_baud = 921600;
+    TEST_ASSERT_TRUE(um98x_profile_valid(&p));
+
+    um98x_profile_default(&p, TEST_STATION_ID);
     p.base_mode = UM98X_BASE_FIXED;
     p.fixed_lat_deg = 91.0;
     TEST_ASSERT_FALSE(um98x_profile_valid(&p));
 
-    um98x_profile_default(&p);
+    um98x_profile_default(&p, TEST_STATION_ID);
     p.rtcm_count = UM98X_MAX_RTCM_MSGS + 1;
     TEST_ASSERT_FALSE(um98x_profile_valid(&p));
 
-    um98x_profile_default(&p);
+    um98x_profile_default(&p, TEST_STATION_ID);
     p.rtcm[0].period_s = 0;
     TEST_ASSERT_FALSE(um98x_profile_valid(&p));
     TEST_ASSERT_EQUAL_UINT32(0, um98x_profile_hash(&p));
 
     uint8_t small[8];
-    um98x_profile_default(&p);
+    um98x_profile_default(&p, TEST_STATION_ID);
     TEST_ASSERT_EQUAL_size_t(0, um98x_profile_encode(&p, small, sizeof(small)));
 
     /* NaN or infinity is invalid in every field, used by the mode or not. */
-    um98x_profile_default(&p);
+    um98x_profile_default(&p, TEST_STATION_ID);
     p.fixed_lat_deg = NAN;
     TEST_ASSERT_FALSE(um98x_profile_valid(&p));
-    um98x_profile_default(&p);
+    um98x_profile_default(&p, TEST_STATION_ID);
     p.fixed_height_m = INFINITY;
     TEST_ASSERT_FALSE(um98x_profile_valid(&p));
-    um98x_profile_default(&p);
+    um98x_profile_default(&p, TEST_STATION_ID);
     p.base_mode = UM98X_BASE_FIXED;
     p.fixed_height_m = NAN;
     TEST_ASSERT_FALSE(um98x_profile_valid(&p));
@@ -262,4 +313,79 @@ TEST_CASE("base position: encode and decode apply the same check", "[um98x_profi
     const double nan_height = NAN;
     memcpy(&buf[2 + 8 + 8], &nan_height, sizeof(nan_height));   /* version, source, lat, lon, height */
     TEST_ASSERT_FALSE(um98x_position_decode(buf, good_len, &out));
+}
+
+/* Distance between two ECEF points, metres. */
+static double ecef_dist(const double a[3], const double b[3])
+{
+    double dx = a[0] - b[0];
+    double dy = a[1] - b[1];
+    double dz = a[2] - b[2];
+    return sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+TEST_CASE("WGS84 to ECEF matches the ellipsoid axes", "[um98x_profile]")
+{
+    double xyz[3];
+    um98x_llh_to_ecef(0.0, 0.0, 0.0, xyz);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 6378137.0, xyz[0]);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 0.0, xyz[1]);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 0.0, xyz[2]);
+
+    um98x_llh_to_ecef(90.0, 0.0, 0.0, xyz);           /* semi-minor axis */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 0.0, xyz[0]);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-3, 6356752.314245, xyz[2]);
+
+    um98x_llh_to_ecef(0.0, 90.0, 100.0, xyz);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 6378237.0, xyz[1]);
+}
+
+TEST_CASE("ECEF and WGS84 round-trip within 0.1 mm", "[um98x_profile]")
+{
+    static const double points[][3] = {
+        { 43.6532, -79.3832, 112.5 },     /* Toronto */
+        { -33.8688, 151.2093, 58.25 },    /* Sydney */
+        { 51.4779, -0.0015, 45.0 },
+        { 0.0, 180.0, -500.0 },
+        { -0.000001, -179.999999, 9999.0 },
+        { 89.9999999, 12.0, 10.0 },       /* next to the pole */
+        { -90.0, 0.0, 0.0 },
+        { 90.0, 0.0, 8848.0 },
+        { 27.9881, 86.925, 8848.86 },
+        { -45.0, 170.0, -999.0 },
+    };
+    for (size_t i = 0; i < sizeof(points) / sizeof(points[0]); i++) {
+        double xyz[3];
+        double back[3];
+        double lat;
+        double lon;
+        double h;
+        um98x_llh_to_ecef(points[i][0], points[i][1], points[i][2], xyz);
+        TEST_ASSERT_TRUE(um98x_ecef_to_llh(xyz, &lat, &lon, &h));
+        TEST_ASSERT_DOUBLE_WITHIN(1e-4, points[i][2], h);
+        TEST_ASSERT_DOUBLE_WITHIN(1e-9, points[i][0], lat);   /* ~0.1 mm of latitude */
+        um98x_llh_to_ecef(lat, lon, h, back);
+        TEST_ASSERT_TRUE(ecef_dist(xyz, back) < 1e-4);
+    }
+
+    /* A 1005-style position (0.1 mm units, here in metres). */
+    const double arp[3] = { 850163.8571, -4542463.3207, 4383373.3092 };
+    double lat;
+    double lon;
+    double h;
+    double back[3];
+    TEST_ASSERT_TRUE(um98x_ecef_to_llh(arp, &lat, &lon, &h));
+    um98x_llh_to_ecef(lat, lon, h, back);
+    TEST_ASSERT_TRUE(ecef_dist(arp, back) < 1e-4);
+}
+
+TEST_CASE("ECEF to WGS84 rejects points nowhere near the surface", "[um98x_profile]")
+{
+    double lat;
+    double lon;
+    double h;
+    const double centre[3] = { 0.0, 0.0, 0.0 };
+    const double bad[3] = { NAN, 0.0, 6378137.0 };
+    TEST_ASSERT_FALSE(um98x_ecef_to_llh(centre, &lat, &lon, &h));
+    TEST_ASSERT_FALSE(um98x_ecef_to_llh(bad, &lat, &lon, &h));
 }

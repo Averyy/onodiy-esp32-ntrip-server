@@ -78,6 +78,14 @@ typedef struct {
     uint32_t age_ms;               /**< since last seen */
 } gnss_obs_msg_stat_t;
 
+/** Antenna reference point from the latest CRC-valid 1005 (public RTCM 10403). */
+typedef struct {
+    bool valid;
+    uint16_t station_id;           /**< reference station ID of that frame */
+    int64_t ecef_01mm[3];          /**< X, Y, Z in 0.1 mm units */
+    uint32_t age_ms;               /**< since that frame, UINT32_MAX = never */
+} gnss_obs_arp_t;
+
 /** One satellite for the sky view (from satellite-in-view lines). */
 typedef struct {
     gnss_sys_t sys;
@@ -102,6 +110,9 @@ esp_err_t gnss_obs_get_msg_stats(gnss_obs_msg_stat_t *out, size_t *count);
 
 /** *count in = capacity, out = filled. */
 esp_err_t gnss_obs_get_sky(gnss_obs_sat_t *out, size_t *count);
+
+/** Latest antenna reference point (the base position shown and locked). ESP_ERR_NOT_FOUND before the first 1005. */
+esp_err_t gnss_obs_get_arp(gnss_obs_arp_t *out);
 
 /** Forget everything (after a receiver reconfigure or flash). */
 void gnss_obs_reset(void);

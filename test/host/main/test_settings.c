@@ -147,11 +147,15 @@ TEST_CASE("factory reset keeps exactly the device state", "[settings]")
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BAUD, 115200));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_PROFILE, blob, sizeof(blob)));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_APPLIED, 0x1234));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_APPLIED_FW, "R4.10Build18975"));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RTCM1230_OK, 1));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_str(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_REPO, "owner/name"));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_str(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_ETAG, "\"etag\""));
-    TEST_ASSERT_EQUAL(ESP_OK, settings_set_i64(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_GNSS_LAST, 1791590400));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_i64(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_LAST_CHECK, 1791590400));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_u8(SETTINGS_NS_WEB, SETTINGS_KEY_WEB_PUBLIC, 1));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_blob("cst0", SETTINGS_KEY_CST_CFG, blob, sizeof(blob)));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_blob("cst0", SETTINGS_KEY_CST_BACKOFF, blob, sizeof(blob)));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_blob("cst0", SETTINGS_KEY_CST_CA_PEM, blob, sizeof(blob)));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_blob("cst7", SETTINGS_KEY_CST_CFG, blob, sizeof(blob)));
     /* More keys than one erase batch holds. */
     for (unsigned i = 0; i < 40; i++) {

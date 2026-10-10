@@ -39,6 +39,9 @@ typedef struct {
  * no duplicates), configure the button input, and put optional outputs (LED,
  * reset line) in a safe state.
  *
+ * A call after a successful one returns ESP_OK at once (an early boot step
+ * may run it before the normal init).
+ *
  * @return ESP_OK, or ESP_ERR_INVALID_ARG if the configured pin map is unusable.
  */
 esp_err_t board_init(void);

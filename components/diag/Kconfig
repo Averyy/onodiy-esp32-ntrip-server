@@ -19,6 +19,10 @@ menu "Station: diagnostics"
         default 1000
         help
             Rate limit that keeps a flapping condition from wearing out the
-            journal partition.
+            journal partition. A record it refuses is reported as not
+            written, so callers that accumulate deltas keep them pending.
+            Health-ladder step records are exempt: one step's result and the
+            next step's start fall in the same second, and the ladder bounds
+            their rate itself (each step has a grace of at least 5 s).
 
 endmenu

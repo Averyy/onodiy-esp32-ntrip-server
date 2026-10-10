@@ -230,3 +230,127 @@ TEST_CASE("boot guard keeps 24 h retries beyond the third episode", "[boot_guard
     TEST_ASSERT_FALSE(boot(&st, BOOT_HW_SOFTWARE).safe_mode);
     TEST_ASSERT_EQUAL_UINT32(0, st.safe_episodes);
 }
+
+TEST_CASE("boot guard reports the previous session uptime after software and crash resets only", "[boot_guard]")
+{
+    boot_guard_state_t st;
+    fresh(&st);
+    TEST_ASSERT_EQUAL_UINT32(0, st.session_s);
+
+    boot_guard_heartbeat(&st, 120);
+    boot_guard_set_reboot_reason(&st, 4);
+    TEST_ASSERT_EQUAL_UINT32(120, boot(&st, BOOT_HW_SOFTWARE).prev_session_s);
+    TEST_ASSERT_EQUAL_UINT32(0, st.session_s);           /* the new session starts at 0 */
+
+    boot_guard_heartbeat(&st, 300);
+    TEST_ASSERT_EQUAL_UINT32(300, boot(&st, BOOT_HW_CRASH).prev_session_s);
+
+    /* RTC content is not trusted after a brownout; other resets are unknown too. */
+    boot_guard_heartbeat(&st, 77);
+    TEST_ASSERT_EQUAL_UINT32(BOOT_GUARD_UNKNOWN, boot(&st, BOOT_HW_BROWNOUT).prev_session_s);
+    boot_guard_heartbeat(&st, 50);
+    TEST_ASSERT_EQUAL_UINT32(BOOT_GUARD_UNKNOWN, boot(&st, BOOT_HW_OTHER).prev_session_s);
+    boot_guard_heartbeat(&st, 60);
+    TEST_ASSERT_EQUAL_UINT32(BOOT_GUARD_UNKNOWN, boot(&st, BOOT_HW_POWER_ON).prev_session_s);
+
+    /* A lost block (another image, corruption) is a fresh start. */
+    boot_guard_heartbeat(&st, 90);
+    st.session_s = 91;                                   /* changed without resealing */
+    boot_guard_result_t res = boot(&st, BOOT_HW_SOFTWARE);
+    TEST_ASSERT_TRUE(res.state_was_lost);
+    TEST_ASSERT_EQUAL_UINT32(BOOT_GUARD_UNKNOWN, res.prev_session_s);
+}
+
+TEST_CASE("boot guard accumulates station time across resets since power-on", "[boot_guard]")
+{
+    boot_guard_state_t st;
+    fresh(&st);
+    TEST_ASSERT_EQUAL_UINT32(10, boot_guard_station_time(&st, 10));
+
+    boot_guard_heartbeat(&st, 1000);
+    boot(&st, BOOT_HW_SOFTWARE);
+    TEST_ASSERT_EQUAL_UINT32(1005, boot_guard_station_time(&st, 5));
+
+    /* A brownout adds nothing (conservative for the reboot budget). */
+    boot_guard_heartbeat(&st, 200);
+    boot(&st, BOOT_HW_BROWNOUT);
+    TEST_ASSERT_EQUAL_UINT32(1000, boot_guard_station_time(&st, 0));
+
+    /* A crash between heartbeats loses at most the time since the last one. */
+    boot_guard_heartbeat(&st, 60);
+    boot(&st, BOOT_HW_CRASH);
+    TEST_ASSERT_EQUAL_UINT32(1060, boot_guard_station_time(&st, 0));
+
+    boot(&st, BOOT_HW_OTHER);                            /* nothing beat since: adds 0 */
+    TEST_ASSERT_EQUAL_UINT32(1060, boot_guard_station_time(&st, 0));
+
+    boot(&st, BOOT_HW_POWER_ON);
+    TEST_ASSERT_EQUAL_UINT32(7, boot_guard_station_time(&st, 7));
+}
+
+/* A GNSS-ladder reboot at `uptime` of the current boot, then the boot it causes. */
+static void ladder_reboot(boot_guard_state_t *st, uint32_t uptime)
+{
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(st, uptime, NULL));
+    boot_guard_record_ladder_reboot(st, uptime);
+    boot_guard_set_reboot_reason(st, 6);
+    boot(st, BOOT_HW_SOFTWARE);
+}
+
+TEST_CASE("GNSS ladder reboots: an hour apart and at most three per day, across reboots", "[boot_guard]")
+{
+    boot_guard_state_t st;
+    fresh(&st);
+    uint32_t wait = 99;
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 100, &wait));
+    TEST_ASSERT_EQUAL_UINT32(0, wait);
+
+    ladder_reboot(&st, 100);                             /* station time 100 */
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 10, &wait));
+    TEST_ASSERT_EQUAL_UINT32(3590, wait);
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 3599, &wait));
+    TEST_ASSERT_EQUAL_UINT32(1, wait);
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 3600, &wait));
+
+    ladder_reboot(&st, 3600);                            /* station time 3700 */
+    ladder_reboot(&st, 3600);                            /* station time 7300 */
+
+    /* Three in the window: the oldest must be 24 h old. */
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 3600, &wait));   /* now 10900 */
+    TEST_ASSERT_EQUAL_UINT32(86400u - 10800u, wait);
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 86400u - 7300u + 99u, NULL));
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 86400u - 7300u + 100u, &wait));
+    TEST_ASSERT_EQUAL_UINT32(0, wait);
+
+    /* The next one pushes the oldest out; the gap rule still applies. */
+    ladder_reboot(&st, 86400u - 7300u + 100u);           /* station time 86500 */
+    TEST_ASSERT_EQUAL_UINT32(BOOT_GUARD_LADDER_KEEP, st.ladder_count);
+    TEST_ASSERT_EQUAL_UINT32(3700, st.ladder_at[0]);
+    TEST_ASSERT_EQUAL_UINT32(86500, st.ladder_at[2]);
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 1800, &wait));
+    TEST_ASSERT_EQUAL_UINT32(1800, wait);
+
+    /* A crash in between only moves station time on (now 87500 at its boot). */
+    boot_guard_heartbeat(&st, 1000);
+    boot(&st, BOOT_HW_CRASH);
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 2599, &wait));   /* 3599 s after the last one */
+    TEST_ASSERT_EQUAL_UINT32(1, wait);
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 2600, NULL));
+}
+
+TEST_CASE("GNSS ladder reboot budget starts fresh after a power cycle or a lost RTC block", "[boot_guard]")
+{
+    boot_guard_state_t st;
+    fresh(&st);
+    ladder_reboot(&st, 100);
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 10, NULL));
+    boot(&st, BOOT_HW_POWER_ON);
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 10, NULL));
+
+    ladder_reboot(&st, 100);
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 10, NULL));
+    st.ladder_at[0] = 5;                                 /* corrupted: invalid block */
+    TEST_ASSERT_TRUE(boot(&st, BOOT_HW_SOFTWARE).state_was_lost);
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 10, NULL));
+    TEST_ASSERT_EQUAL_UINT32(0, st.ladder_count);
+}

@@ -22,7 +22,8 @@ cmake_minimum_required(VERSION 3.22)
 # "v0.3.0-4-g47fc47b-dirty+dev"), the describe part cut to 27 characters so
 # "+dev" always survives the 31-character limit. The firmware rejects any
 # version with "+", so a dev build is never taken for a release, never
-# auto-updated and never offered as a downgrade target. (`git describe`
+# offered an update by the daily check and never offered as a downgrade
+# target. (`git describe`
 # output alone would parse as a pre-release.) The version is fixed when CMake
 # configures: the git files below re-trigger that on commits, checkouts and
 # staging, but not on unstaged edits, so run `idf.py reconfigure` before a

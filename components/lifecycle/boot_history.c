@@ -22,6 +22,7 @@ bool boot_history_decode(const uint8_t *buf, size_t len, boot_history_entry_t *o
         e->raw = blob_get_u8(&r);
         e->reboot_reason = blob_get_u16(&r);
         e->boot_no = blob_get_u32(&r);
+        e->prev_uptime_s = blob_get_u32(&r);
         blob_get_str(&r, e->version, sizeof(e->version));
         if (blob_reader_ok(&r)) {
             (*count)++;
@@ -44,6 +45,7 @@ size_t boot_history_encode(const boot_history_entry_t *entries, size_t count, ui
         blob_put_u8(&w, entries[i].raw);
         blob_put_u16(&w, entries[i].reboot_reason);
         blob_put_u32(&w, entries[i].boot_no);
+        blob_put_u32(&w, entries[i].prev_uptime_s);
         blob_put_str(&w, entries[i].version);
     }
     return blob_writer_ok(&w) ? w.len : 0;

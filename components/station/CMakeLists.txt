@@ -8,6 +8,8 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES esp_event gnss_types
     PRIV_REQUIRES
+        board
+        esp_hw_support
         gnss_link
         gnss_obs
         rtcm_hub

@@ -21,13 +21,23 @@ menu "Station: RTCM fan-out hub"
             SD logger).
 
     config RTCM_HUB_MAX_LAG_MS
-        int "Slow-consumer lag limit (ms)"
+        int "Default slow-consumer lag limit (ms)"
         range 500 60000
         default 3000
         help
-            A consumer whose oldest unread frame is older than this drops
-            whole oldest epochs until it is back under the limit; the dropped
-            frames count as data loss for that consumer. Corrections are only
-            useful while fresh.
+            A consumer whose oldest unread frame is older than its limit
+            drops whole oldest epochs (finishing one already partly sent)
+            until it is back under the limit; the dropped frames count as
+            data loss for that consumer. Corrections are only useful while
+            fresh. This is the default; the Onocoy slot sets 1000 ms.
+
+    config RTCM_HUB_BURST_GAP_MS
+        int "Gap that starts a new epoch while an MSM epoch is open (ms)"
+        range 100 500
+        default 250
+        help
+            Fallback epoch rule for a lost terminating MSM: a frame arriving
+            this long after the previous one starts a new epoch while the
+            current epoch holds an MSM not yet marked as its last.
 
 endmenu

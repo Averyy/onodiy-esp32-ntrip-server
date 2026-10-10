@@ -3,13 +3,22 @@
 menu "Station: availability ledger"
 
     config LEDGER_TARGET_PERMILLE
-        int "Daily availability target (per mille)"
+        int "Daily graced-uptime target (per mille)"
         range 900 1000
-        default 980
+        default 998
         help
-            Onocoy's daily availability target. 980 = 98.0 %, which allows
-            about 28.8 minutes of downtime per UTC day. Planned downtime
-            (receiver flashing) is only scheduled within what is left.
+            Graced uptime the protected (Onocoy) slot needs per UTC day.
+            Onocoy's streak needs Availability >= 0.98, which on its scoring
+            curve means a graced uptime of 99.8 %: with the daily grant below
+            that is about 473 s of downtime per UTC day at a perfect data
+            rate (a plain 98 % uptime would score only about 0.81).
+
+    config LEDGER_GRACE_S
+        int "Daily downtime grant of the protected slot (s)"
+        range 0 3600
+        default 300
+        help
+            Seconds Onocoy adds to each day's uptime before scoring it.
 
     config LEDGER_HISTORY_DAYS
         int "Days of per-day history kept"

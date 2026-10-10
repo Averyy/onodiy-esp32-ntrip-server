@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Ladder thresholds and loss accounting are PROVISIONAL until confirmed on
+ * Ladder thresholds and loss accounting are PROVISIONAL, to be confirmed on
  * hardware. The ladder decision logic goes into a pure core with an injected
  * clock (host-tested across clock wrap and multi-day runs); this file stays
  * the RTOS glue.
@@ -42,7 +42,8 @@ esp_err_t health_get_status(health_status_t *out)
     memset(out, 0, sizeof(*out));
     lifecycle_boot_info_t boot;
     lifecycle_get_boot_info(&boot);
-    out->level = boot.safe_mode ? HEALTH_FAILED : HEALTH_OK;
+    /* FAILED is reserved for the GNSS ladder's 6b and 7; safe mode is an alert. */
+    out->level = boot.safe_mode ? HEALTH_DEGRADED : HEALTH_OK;
     if (boot.safe_mode) {
         out->alerts |= HEALTH_ALERT_SAFE_MODE;
     }

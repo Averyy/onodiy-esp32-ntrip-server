@@ -16,19 +16,25 @@
 static const char *TAG = "gnss_link";
 
 static gnss_link_sinks_t s_sinks;
+static bool s_inited;
 
 esp_err_t gnss_link_init(void)
 {
+    if (s_inited) {
+        return ESP_OK;   /* an early boot step may have opened the link already */
+    }
     if (!board_is_valid()) {
         /* A rejected pin map may point the UART at flash or PSRAM lines. */
         ESP_LOGE(TAG, "board pin map not validated: GNSS UART left closed");
         return ESP_ERR_INVALID_STATE;
     }
     const board_desc_t *b = board_get();
-    /* TODO: uart_driver_install + uart_param_config + uart_set_pin with an
-     * event queue for overflow/buffer-full/error accounting. */
+    /* TODO: uart_driver_install (RX ring CONFIG_GNSS_LINK_RX_BUF_SIZE, TX 0,
+     * event queue of 32, no pattern detection) + uart_param_config +
+     * uart_set_pin, at gnss/baud or the Kconfig default. */
     ESP_LOGI(TAG, "stub: UART%d RX GPIO%d TX GPIO%d @ %d baud (not opened yet)", b->gnss_uart_num,
              b->gnss_rx_gpio, b->gnss_tx_gpio, CONFIG_GNSS_LINK_DEFAULT_BAUD);
+    s_inited = true;
     return ESP_OK;
 }
 
@@ -87,9 +93,26 @@ esp_err_t gnss_link_send_break(gnss_link_lease_t lease, uint32_t duration_ms)
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+esp_err_t gnss_link_set_prompt_detect(gnss_link_lease_t lease, bool armed)
+{
+    (void)armed;
+    if (lease == NULL) {
+        return ESP_ERR_INVALID_STATE;   /* COMMAND lease only */
+    }
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t gnss_link_resync(gnss_link_lease_t lease)
+{
+    (void)lease;
+    return s_inited ? ESP_ERR_NOT_SUPPORTED : ESP_ERR_INVALID_STATE;
+}
+
 esp_err_t gnss_link_restart(gnss_link_lease_t lease)
 {
     (void)lease;
+    /* TODO: reinstall at gnss/baud (else CONFIG_GNSS_LINK_DEFAULT_BAUD), not
+     * at the current baud. */
     return ESP_ERR_NOT_SUPPORTED;
 }
 

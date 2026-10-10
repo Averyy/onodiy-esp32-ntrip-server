@@ -16,6 +16,7 @@ static void fill(boot_history_entry_t *e, size_t n)
         e[i].raw = (uint8_t)(i + 1);
         e[i].reboot_reason = (uint16_t)(i * 3);
         e[i].boot_no = 1000u + (uint32_t)i;
+        e[i].prev_uptime_s = (i % 3 == 0) ? BOOT_HISTORY_UPTIME_UNKNOWN : 86400u * 40u + (uint32_t)i;
         /* longest version esp_app_desc_t can carry */
         snprintf(e[i].version, sizeof(e[i].version), "v1.0.0-rc.1-12-g47fc47b-d+%05u", (unsigned)(i % 100000u));
     }
@@ -37,6 +38,7 @@ TEST_CASE("boot history round-trips, newest first", "[boot_history]")
         TEST_ASSERT_EQUAL_UINT8(in[i].raw, out[i].raw);
         TEST_ASSERT_EQUAL_UINT16(in[i].reboot_reason, out[i].reboot_reason);
         TEST_ASSERT_EQUAL_UINT32(in[i].boot_no, out[i].boot_no);
+        TEST_ASSERT_EQUAL_UINT32(in[i].prev_uptime_s, out[i].prev_uptime_s);
         TEST_ASSERT_EQUAL_STRING(in[i].version, out[i].version);
     }
 }
@@ -56,7 +58,9 @@ TEST_CASE("boot history: a full history fits and a new boot drops the oldest", "
     TEST_ASSERT_TRUE(boot_history_decode(buf, len, &next[1], BOOT_HISTORY_LEN - 1, &count));
     TEST_ASSERT_EQUAL_size_t(BOOT_HISTORY_LEN - 1, count);
     TEST_ASSERT_EQUAL_UINT32(e[0].boot_no, next[1].boot_no);
+    TEST_ASSERT_EQUAL_UINT32(e[0].prev_uptime_s, next[1].prev_uptime_s);
     TEST_ASSERT_EQUAL_UINT32(e[BOOT_HISTORY_LEN - 2].boot_no, next[BOOT_HISTORY_LEN - 1].boot_no);
+    TEST_ASSERT_EQUAL_UINT32(e[BOOT_HISTORY_LEN - 2].prev_uptime_s, next[BOOT_HISTORY_LEN - 1].prev_uptime_s);
 
     /* Encode never writes more than BOOT_HISTORY_LEN entries. */
     boot_history_entry_t many[BOOT_HISTORY_LEN + 4];

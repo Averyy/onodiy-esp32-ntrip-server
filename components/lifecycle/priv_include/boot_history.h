@@ -7,7 +7,8 @@
  *
  * v1 layout (settings_codec.h, little-endian): u8 version, u8 count, then
  * count x {u8 reset class, u8 raw reset reason, u16 planned-reboot reason,
- * u32 boots since power-on, str app version}, newest first.
+ * u32 boots since power-on, u32 previous session uptime (s, UINT32_MAX =
+ * unknown), str app version}, newest first.
  *
  * A blob that is not v1 (a newer app's layout, after a rollback) is reported
  * as such and must be left untouched: "life" survives factory reset, so
@@ -27,13 +28,16 @@ extern "C" {
 #define BOOT_HISTORY_LEN      16
 #define BOOT_HISTORY_VER_MAX  31    /**< app version characters kept (esp_app_desc_t.version) */
 /** Largest v1 blob; a stored blob longer than this was written by a newer layout. */
-#define BOOT_HISTORY_BLOB_MAX (2 + BOOT_HISTORY_LEN * (8 + 1 + BOOT_HISTORY_VER_MAX))
+#define BOOT_HISTORY_BLOB_MAX (2 + BOOT_HISTORY_LEN * (12 + 1 + BOOT_HISTORY_VER_MAX))
+/** Previous session uptime not known (power-on, brownout, other resets). */
+#define BOOT_HISTORY_UPTIME_UNKNOWN UINT32_MAX
 
 typedef struct {
     uint8_t cls;                /**< lifecycle_reset_class_t */
     uint8_t raw;                /**< esp_reset_reason_t */
     uint16_t reboot_reason;     /**< lifecycle_reboot_reason_t the previous boot planned */
     uint32_t boot_no;           /**< boots since power-on */
+    uint32_t prev_uptime_s;     /**< uptime of the session before this boot, BOOT_HISTORY_UPTIME_UNKNOWN if unknown */
     char version[BOOT_HISTORY_VER_MAX + 1];
 } boot_history_entry_t;
 

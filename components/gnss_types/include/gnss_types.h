@@ -20,13 +20,16 @@ extern "C" {
 
 #define UM98X_MAX_RTCM_MSGS 16
 
-/** What the receiver reports about itself. */
+/** What the receiver reports about itself (the body fields of its version log). */
 typedef struct {
     bool valid;
     char model[16];          /**< e.g. "UM982" */
-    char firmware[48];       /**< firmware version string as reported */
-    uint32_t build;          /**< numeric build, 0 if unknown */
-    char serial[32];
+    char firmware[48];       /**< firmware version string as reported, e.g. "R4.10Build18975" */
+    uint32_t build;          /**< integer after "Build" in the firmware string, 0 if absent */
+    char serial[32];         /**< serial number (the part after the first '-' of the PN-SN field) */
+    char pn[24];             /**< part number (the part before it) */
+    char efuse_id[24];       /**< efuse / board ID */
+    char compile_date[12];   /**< "YYYY/MM/DD" */
 } um98x_info_t;
 
 typedef enum {
@@ -50,10 +53,12 @@ typedef struct {
     uint8_t signal_group_master;     /**< e.g. 3 */
     uint8_t signal_group_slave;      /**< e.g. 6 (0 = slave antenna off) */
     um98x_base_mode_t base_mode;
-    uint16_t survey_in_s;
+    uint16_t survey_in_s;            /**< 1..3600 */
     double fixed_lat_deg;
     double fixed_lon_deg;
     double fixed_height_m;           /**< ellipsoidal height */
+    uint16_t station_id;             /**< 0..4095, sent with every base-mode command (reference station ID in 1005 and MSM) */
+    uint32_t com1_baud;              /**< receiver COM1 baud rate the profile sets (one the receiver supports) */
     uint8_t rtcm_count;
     um98x_rtcm_out_t rtcm[UM98X_MAX_RTCM_MSGS];
     bool sat_view_output;            /**< also emit satellite-in-view sentences for the web UI */
@@ -79,13 +84,31 @@ typedef struct {
 
 typedef enum {
     UM98X_FLASH_IDLE = 0,
-    UM98X_FLASH_CHECKING,      /**< re-hashing/validating the staged package */
+    UM98X_FLASH_CHECKING,      /**< validating the package copy in RAM */
     UM98X_FLASH_ENTERING,      /**< getting the receiver into its loader */
     UM98X_FLASH_TRANSFERRING,  /**< package transfer in progress */
-    UM98X_FLASH_FINISHING,     /**< completion check, receiver restart */
+    UM98X_FLASH_COMMITTING,    /**< transfer ended: waiting for the receiver to write and report (send nothing) */
+    UM98X_FLASH_FINISHING,     /**< leaving the loader, confirming the application, re-applying the profile */
     UM98X_FLASH_DONE,
     UM98X_FLASH_FAILED,
+    UM98X_FLASH_NEEDS_USER,    /**< stopped; the receiver waits for the user's choice (journal stays open) */
 } um98x_flash_phase_t;
+
+/**
+ * Why the last flash attempt failed (journal and progress). PROVISIONAL, to
+ * be confirmed on hardware: the receiver's exact failure texts are not
+ * captured yet.
+ */
+typedef enum {
+    UM98X_FLASH_FAIL_NONE = 0,
+    UM98X_FLASH_FAIL_TRANSPORT,        /**< timeout, retry limit, cancel or text during the transfer, handshake: retryable */
+    UM98X_FLASH_FAIL_PACKAGE,          /**< the receiver rejected the package content: not retried with the same package */
+    UM98X_FLASH_FAIL_UNCONFIRMED,      /**< loader prompt after the transfer without the success text */
+    UM98X_FLASH_FAIL_NO_ANSWER,        /**< nothing classifiable after the transfer */
+    UM98X_FLASH_FAIL_APP_NOT_STARTING, /**< the loader answers, the application does not start */
+    UM98X_FLASH_FAIL_ENTRY,            /**< could not reach the loader (before the first data block) */
+    UM98X_FLASH_FAIL_JOURNAL,          /**< journal unreadable or written by a newer schema */
+} um98x_flash_failure_t;
 
 /** Flash progress snapshot. */
 typedef struct {
@@ -93,8 +116,54 @@ typedef struct {
     uint32_t bytes_sent;
     uint32_t bytes_total;
     uint32_t retries;          /**< retransmissions so far */
+    uint8_t transfers;         /**< transfers started under the open journal (counted across reboots; at most 3 without a new confirmation) */
+    uint8_t failure_class;     /**< um98x_flash_failure_t of the last failure */
     int32_t last_err;          /**< esp_err_t of the last failure, 0 = none */
 } um98x_flash_progress_t;
+
+/**
+ * Receiver-flash journal states. Each state is persisted before the action
+ * that starts it, so after a reset the receiver may be on either side of
+ * that action. The main states are in session order (compare with < / >=);
+ * FAILED and NEEDS_USER are side states, and `phase` keeps the last main
+ * state while one of them is set.
+ */
+typedef enum {
+    UM98X_JOURNAL_PREPARED = 1,    /**< journal opened, before the link is quiesced */
+    UM98X_JOURNAL_BAUD_CHANGING,   /**< before the receiver's COM1 is moved to the loader baud */
+    UM98X_JOURNAL_RESET_SENT,      /**< before the reset command (covers the stop key and the prompt) */
+    UM98X_JOURNAL_MENU2_SENT,      /**< before the "download to flash" menu item */
+    UM98X_JOURNAL_TRANSFERRING,    /**< before the first data block: the point of no return */
+    UM98X_JOURNAL_EOT_SENT,        /**< before the first end-of-transfer byte */
+    UM98X_JOURNAL_VERIFYING,       /**< before leaving the loader */
+    UM98X_JOURNAL_FAILED,          /**< failure after the point of no return recorded, retry pending */
+    UM98X_JOURNAL_NEEDS_USER,      /**< terminal until the user acts */
+} um98x_journal_state_t;
+
+/**
+ * The open receiver-flash journal (settings gnss/flash_job). Persisted as a
+ * versioned blob by the flasher's codec, never as a raw struct. A journal
+ * exists only while a flash session is open.
+ */
+typedef struct {
+    uint8_t version;               /**< blob layout version it was read from (1) */
+    uint8_t state;                 /**< um98x_journal_state_t */
+    uint8_t phase;                 /**< last main state (kept while FAILED / NEEDS_USER) */
+    uint8_t sha256[32];            /**< SHA-256 of the pinned package */
+    uint32_t size;                 /**< package size in bytes */
+    char expected_fw[48];          /**< firmware string the update should produce */
+    uint32_t expected_build;
+    char pre_model[16];            /**< model from this session's live version query: the recovery model gate */
+    char pre_fw[48];               /**< firmware running before the flash */
+    uint32_t pre_build;
+    uint32_t app_baud;             /**< receiver application baud detected at session start */
+    uint32_t boot_baud;            /**< loader baud of the current entry attempt */
+    uint8_t transfers;             /**< transfers started: at most 3 in total (the user's first plus up to 2 automatic retries); more need a user confirmation each */
+    uint8_t entry_attempts;        /**< loader entry attempts in this session (at most 3, fallback-baud attempts included) */
+    uint16_t last_acked_block;     /**< updated every 64 blocks */
+    uint8_t failure_class;         /**< um98x_flash_failure_t of the last failure */
+    int64_t changed_unix;          /**< last state change, 0 without a trusted clock */
+} um98x_flash_journal_t;
 
 #ifdef __cplusplus
 }

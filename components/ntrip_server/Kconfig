@@ -21,10 +21,19 @@ menu "Station: NTRIP casters"
         range 3072 16384
         default 8192
 
+    config NTRIP_TCP_CONNECT_TIMEOUT_MS
+        int "TCP connect timeout for plain slots (ms)"
+        range 2000 30000
+        default 5000
+
     config NTRIP_CONNECT_TIMEOUT_MS
-        int "TCP connect + TLS handshake timeout (ms)"
+        int "TLS slots: connect and handshake timeout (ms)"
         range 2000 60000
-        default 15000
+        default 10000
+        help
+            TLS slots: esp_tls timeout_ms. It bounds the connect and each
+            handshake wait, so the handshake can take up to about twice
+            this.
 
     config NTRIP_SEND_TIMEOUT_MS
         int "Socket send/receive timeout (ms)"
@@ -43,15 +52,15 @@ menu "Station: NTRIP casters"
             Covers DNS, connect, TLS and the caster's reply. The health
             monitor restarts a slot that overruns it (only that slot).
 
-    config NTRIP_MAX_BACKOFF_S
-        int "Longest reconnect backoff for ordinary slots (s)"
-        range 30 3600
-        default 300
-
     config NTRIP_PROTECTED_MAX_BACKOFF_S
-        int "Longest reconnect backoff for the protected (Onocoy) slot (s)"
+        int "Longest transient reconnect backoff for the protected (Onocoy) slot (s)"
         range 5 120
         default 30
+        help
+            Transient failures (network, timeouts, caster restarts) of the
+            protected slot back off to 15 s, and to this cap after 10 min of
+            continuous failure. Every second offline counts against the
+            daily streak budget.
 
     config NTRIP_AUTH_TRANSIENT_WINDOW_S
         int "Treat rejections as transient for this long after a disconnect or boot (s)"
@@ -60,23 +69,25 @@ menu "Station: NTRIP casters"
         help
             Casters may still hold the previous session for a while after a
             reconnect and reply with an error that looks like a bad password.
+            Within this window such a rejection, on credentials that worked
+            before, follows the slot profile's "mountpoint busy" delays.
 
-    config NTRIP_AUTH_RETRY_S
-        int "Retry interval during the transient window (s)"
-        range 5 120
-        default 15
-
-    config NTRIP_AUTH_FAILED_RETRY_S
-        int "Retry interval once a slot shows AUTH_FAILED (s)"
-        range 60 86400
-        default 600
-
-    config NTRIP_PAUSE_DISCONNECT_S
-        int "Disconnect paused slots after (s)"
-        range 0 120
-        default 20
+    config NTRIP_SOURCE_STALL_S
+        int "Close a slot's session after this long without RTCM (s)"
+        range 5 60
+        default 10
         help
-            Short receiver command sessions keep caster sessions open (no
-            data is sent). Longer pauses, and receiver flashing, disconnect.
+            Casters drop or count as bad a source that stays connected but
+            silent (some after about 10-16 s). A pause for receiver work is
+            a planned stall with the same limit.
+
+    config NTRIP_PROTECTED_SOURCE_STALL_S
+        int "Same for the protected (Onocoy) slot (s)"
+        range 10 300
+        default 60
+        help
+            Staying connected through a short stall costs the Onocoy streak
+            less than reconnecting, if the caster keeps the silent session.
+            PROVISIONAL, to be confirmed against the caster's idle timeout.
 
 endmenu

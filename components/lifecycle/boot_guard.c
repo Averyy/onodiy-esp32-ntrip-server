@@ -47,6 +47,21 @@ void boot_guard_on_boot(boot_guard_state_t *st, boot_hw_reset_t hw, uint32_t lim
     st->reboot_reason = 0;
     res.prev_reboot_reason = pending;
 
+    /* Session uptime and station time. A fresh state has nothing to add. */
+    res.prev_session_s = BOOT_GUARD_UNKNOWN;
+    if (!res.state_was_lost && hw != BOOT_HW_POWER_ON) {
+        if (hw == BOOT_HW_SOFTWARE || hw == BOOT_HW_CRASH) {
+            res.prev_session_s = st->session_s;
+        }
+        if (hw != BOOT_HW_BROWNOUT) {
+            /* After a brownout the heartbeat is not trusted: adding nothing
+             * makes earlier ladder reboots look more recent, never older. */
+            uint32_t base = st->uptime_base_s + st->session_s;
+            st->uptime_base_s = (base < st->uptime_base_s) ? UINT32_MAX : base;
+        }
+    }
+    st->session_s = 0;
+
     switch (hw) {
     case BOOT_HW_POWER_ON:
         res.cls = BOOT_RESET_POWER_ON;
@@ -140,4 +155,63 @@ bool boot_guard_claim_once(boot_guard_state_t *st, uint32_t flag)
     st->once_flags |= flag;
     boot_guard_seal(st);
     return true;
+}
+
+void boot_guard_heartbeat(boot_guard_state_t *st, uint32_t uptime_s)
+{
+    st->session_s = uptime_s;
+    boot_guard_seal(st);
+}
+
+uint32_t boot_guard_station_time(const boot_guard_state_t *st, uint32_t uptime_s)
+{
+    uint32_t t = st->uptime_base_s + uptime_s;
+    return (t < st->uptime_base_s) ? UINT32_MAX : t;
+}
+
+/* Seconds since a recorded station time; a time in the future (should not
+ * happen) counts as "just now", which only ever blocks longer. */
+static uint32_t since(uint32_t now, uint32_t then)
+{
+    return (now >= then) ? now - then : 0;
+}
+
+bool boot_guard_ladder_reboot_allowed(const boot_guard_state_t *st, uint32_t uptime_s, uint32_t *retry_in_s)
+{
+    uint32_t now = boot_guard_station_time(st, uptime_s);
+    uint32_t wait = 0;
+    uint32_t n = st->ladder_count;
+    if (n > BOOT_GUARD_LADDER_KEEP) {
+        n = BOOT_GUARD_LADDER_KEEP;
+    }
+    if (n > 0) {
+        uint32_t newest = since(now, st->ladder_at[n - 1]);
+        if (newest < BOOT_GUARD_LADDER_GAP_S) {
+            wait = BOOT_GUARD_LADDER_GAP_S - newest;
+        }
+    }
+    if (n == BOOT_GUARD_LADDER_KEEP) {
+        uint32_t oldest = since(now, st->ladder_at[0]);
+        if (oldest < BOOT_GUARD_LADDER_WINDOW_S && BOOT_GUARD_LADDER_WINDOW_S - oldest > wait) {
+            wait = BOOT_GUARD_LADDER_WINDOW_S - oldest;
+        }
+    }
+    if (retry_in_s != NULL) {
+        *retry_in_s = wait;
+    }
+    return wait == 0;
+}
+
+void boot_guard_record_ladder_reboot(boot_guard_state_t *st, uint32_t uptime_s)
+{
+    uint32_t now = boot_guard_station_time(st, uptime_s);
+    if (st->ladder_count >= BOOT_GUARD_LADDER_KEEP) {
+        for (uint32_t i = 1; i < BOOT_GUARD_LADDER_KEEP; i++) {
+            st->ladder_at[i - 1] = st->ladder_at[i];
+        }
+        st->ladder_count = BOOT_GUARD_LADDER_KEEP - 1;
+    }
+    st->ladder_at[st->ladder_count++] = now;
+    st->session_s = uptime_s;
+    boot_guard_seal(st);
 }

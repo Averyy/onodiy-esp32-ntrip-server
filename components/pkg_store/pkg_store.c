@@ -114,3 +114,11 @@ esp_err_t pkg_store_invalidate(void)
 {
     return ESP_ERR_NOT_SUPPORTED;
 }
+
+esp_err_t pkg_store_release(void)
+{
+    /* TODO: one header write (unpinned, EMPTY) once the header is read and
+     * written. The stub never stages a package, so there is nothing to
+     * release. */
+    return ESP_OK;
+}

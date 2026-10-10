@@ -5,24 +5,52 @@
  * Firmware updates from GitHub Releases, for both chips, and everything about
  * which app image runs (install, trial, confirm, revert, rollback).
  *
+ * Every update is started by the user. The only automatic part is the
+ * update check, once a day: every CONFIG_FW_UPDATE_CHECK_INTERVAL_H (24 h, a
+ * build-time constant, not a setting), plus "check now" in the UI. The time
+ * of the last successful check is kept in ota/last_check (written once per
+ * check), so a reboot does not add a check: the first check of a boot runs
+ * 5-15 min after boot (jittered by the MAC) only when the last one is at
+ * least 24 h old by the trusted clock, otherwise when it becomes due. Without
+ * a trusted clock the first check waits for one, at most 1 h after boot. A
+ * check fetches and parses the manifest and refreshes the banner state; it
+ * never downloads an app image or a receiver package, and never writes an
+ * OTA slot or pkg_store. Nothing waits in flash for later.
+ *
  * Source of truth is a small manifest attached to every release
  * (CONFIG_FW_UPDATE_MANIFEST_ASSET): app version + asset name + size + SHA-256,
- * and receiver package model + version + asset name + size + SHA-256.
- * Stable channel: https://github.com/<repo>/releases/latest/download/<manifest>
- * (a redirect, not the rate-limited REST API). Pre-release channel: the
- * Releases REST API; the newest few releases are fetched and the highest
- * version >= the latest stable one is picked (creation order is not version
- * order). Responses are size-capped; the manifest ETag is cached.
- * GitHub's asset redirects point at long signed CDN URLs, so every request
- * uses CONFIG_FW_UPDATE_HTTP_BUF_SIZE for both the receive and the transmit
- * buffer and follows up to CONFIG_FW_UPDATE_MAX_REDIRECTS redirects.
+ * and receiver package model + version + build + asset name + size + SHA-256.
+ * Only the stable channel is read:
+ * https://github.com/<repo>/releases/latest/download/<manifest> (a redirect,
+ * not the rate-limited REST API); pre-releases are installed by manual
+ * upload. Responses are capped at CONFIG_FW_UPDATE_MANIFEST_MAX_KB; the
+ * manifest ETag is cached (ota/etag, written only when it changes). GitHub's
+ * asset redirects point at long signed CDN URLs, so every request uses
+ * CONFIG_FW_UPDATE_HTTP_BUF_SIZE for both the receive and the transmit buffer
+ * and follows up to CONFIG_FW_UPDATE_MAX_REDIRECTS redirects.
  *
- * App install: stream the image into the inactive OTA slot (esp_ota_*),
- * hashing as it goes; activate only if the SHA-256 matches; reboot.
- * Before activating, a baseline of the running station is saved (Wi-Fi had
- * an IP, which caster slots were streaming, hub fed).
+ * Banner (web UI, every page, admin session): "App vX / receiver build Y
+ * available - Update / Later". It never offers a lower version (downgrades
+ * are manual uploads), a version in ota/bad_ver, or anything to a dev build
+ * ("+dev": no comparable version). "Later" is browser-side state only.
  *
- * App trial after an update (two stages):
+ * One update at a time, across both chips: an app download, manual upload or
+ * install holds lifecycle's update slot (lifecycle_update_claim, APP) from
+ * before the first image byte until it fails or the new image reboots; a
+ * receiver flash session holds it (RECEIVER) during its full lockout. The
+ * claim is atomic, so neither path (banner or manual upload) can start while
+ * the other runs.
+ *
+ * App install (fw_update_install_app, after the user's Update click, or a
+ * manual upload): refused while the station holds the update slot (a
+ * receiver flash journal open and not waiting for the user) or while another
+ * app update runs. Save a baseline of the running station (Wi-Fi had an IP,
+ * which caster slots were streaming, hub fed), stream the image into the
+ * inactive OTA slot (esp_ota_*) hashing as it goes, activate only if the
+ * SHA-256 matches the manifest, then lifecycle_request_reboot(APP_UPDATE).
+ *
+ * App trial after an update (two stages; it protects user-initiated updates
+ * too, so it stays automatic):
  *  1. Confirm (bootloader rollback armed): the new image runs
  *     PENDING_VERIFY. After CONFIG_FW_UPDATE_CONFIRM_S with init complete and
  *     no reset, it is marked valid. A crash or hang before that, or any reset
@@ -37,27 +65,41 @@
  *     into the previous one. Trial state is persisted (ota/trial), so a power
  *     blip during stage 2 just continues the trial. A reboot inhibit is held
  *     for the verify window.
+ * While a trial runs (stage 1, stage 2 or the crash watch), the trial flag
+ * in lifecycle is set and receiver flashes are refused; the banner says when
+ * the receiver update becomes possible.
  *
  * Rollback records: a version reverted by stage 2 or rolled back manually
- * goes to ota/bad_ver and is never installed automatically again (manual
- * install still works). A stage-1 rollback (crash or reset in the first
- * minute) is retried automatically once after CONFIG_FW_UPDATE_RESET_RETRY_H,
- * then treated as bad, since a power blip and a real crash look the same to
- * the bootloader.
+ * goes to ota/bad_ver and is never offered by the banner again (the user can
+ * still install it, with a warning). A stage-1 rollback (crash or reset in
+ * the first minute; a power blip and a real crash look the same to the
+ * bootloader) is not retried automatically: the banner says the update was
+ * rolled back during its first minute and offers to install it again; if
+ * that one rolls back too, the version goes to ota/bad_ver.
  *
- * Authenticity: TLS + the manifest's SHA-256 today. Automatic app installs
- * are compiled in only when the build verifies app signatures on update
- * (CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT or secure boot): trust in
- * updates is fixed by the image a unit already runs, so it cannot be added
- * later by an update.
+ * Authenticity: TLS + a signed manifest (two compiled-in public keys, for
+ * rotation) verified before any of its fields is used; every downloaded app
+ * image and receiver package must match the manifest's SHA-256. The banner
+ * and every digest the device checks come from the manifest, so its
+ * signature is what ties a release to this project. App-image signing is
+ * optional hardening (it would also stop self-built images from being
+ * uploaded).
  *
- * Receiver: stream the package into pkg_store (SHA-256 checked), then ask the
- * station supervisor to flash it (STATION_FLASH_AUTO is budget-gated, see
- * station.h). Never automatic unless enabled in settings.
+ * Receiver (fw_update_install_gnss, after the user confirmed the dialog:
+ * version, expected downtime against today's remaining Onocoy budget, "do
+ * not power off or plug into the receiver's USB port", "the station profile
+ * will be re-applied"): download the manifest's package for the detected
+ * model into pkg_store (size and SHA-256 from the manifest), then hand it to
+ * the station (station_request_flash), which validates the RAM copy and
+ * flashes. Refused during an app trial, while an app update runs, in safe
+ * mode, with a flash journal open, unless the station is streaming (valid
+ * RTCM or NMEA within the last 10 s), for an unsupported model, or while a
+ * package is pinned. The package slot is released when the session ends; a
+ * failed validation releases it at once.
  *
- * Safe mode: checks and app installs keep working (a fix must be able to
- * arrive); receiver flashing is off because the station does not run, and
- * that includes finishing an interrupted one (see station.h).
+ * Safe mode: the update check, the banner and user-initiated app installs
+ * keep working (a fix must be able to arrive); receiver updates are off
+ * because the station does not run there (see station.h).
  *
  * All transfers are HTTPS with the CA bundle; plain HTTP is never followed.
  */
@@ -97,22 +139,38 @@ typedef enum {
     FW_TRIAL_WATCHING,          /**< stage 2: crash watch */
 } fw_update_trial_t;
 
-/** Status snapshot for the web UI. */
+/** Why a receiver update cannot start now (banner and dialog). */
+typedef enum {
+    FW_GNSS_BLOCK_NONE = 0,
+    FW_GNSS_BLOCK_APP_TRIAL,          /**< an app trial runs; gnss_blocked_left_s says until when */
+    FW_GNSS_BLOCK_JOURNAL_OPEN,       /**< a receiver flash session is open */
+    FW_GNSS_BLOCK_UNSUPPORTED_MODEL,  /**< the detected receiver is not one we flash */
+    FW_GNSS_BLOCK_SAFE_MODE,
+    FW_GNSS_BLOCK_APP_UPDATE,         /**< an app download, upload or install runs (one update at a time) */
+    FW_GNSS_BLOCK_RECEIVER_NOT_STREAMING, /**< no valid RTCM or NMEA from the receiver in the last 10 s */
+} fw_update_gnss_block_t;
+
+/** Status snapshot for the web UI (also the banner fields of /api/status). */
 typedef struct {
     fw_update_state_t state;
     char running_version[32];
     fw_update_trial_t trial;
     uint32_t trial_left_s;         /**< remaining time of the current trial stage */
     char reverted_version[32];     /**< last version rolled back, "" if none */
+    bool reverted_in_stage1;       /**< it rolled back in its first minute (crash or reset): offer it again */
     bool rollback_available;       /**< the other slot holds a valid image */
     char latest_version[32];       /**< "" until a check succeeded */
-    bool app_update_available;
-    bool auto_app_supported;       /**< build verifies app signatures */
+    bool app_update_available;     /**< banner: newer than running, not in bad_ver, running is not a dev build */
+    bool latest_rolled_back;       /**< latest_version is in ota/bad_ver: not offered, installable with a warning */
     char gnss_running[48];         /**< receiver firmware as detected */
     char gnss_latest[48];
-    bool gnss_update_available;
+    uint32_t gnss_latest_build;
+    bool gnss_update_available;    /**< banner: a higher build for the detected model */
+    fw_update_gnss_block_t gnss_blocked;
+    uint32_t gnss_blocked_left_s;  /**< for FW_GNSS_BLOCK_APP_TRIAL: seconds until the trial ends */
+    uint32_t gnss_expected_downtime_s; /**< for the confirmation dialog (never a gate) */
     uint8_t progress_pct;          /**< current download */
-    int64_t last_check_unix;       /**< 0 = never */
+    int64_t last_check_unix;       /**< last successful check (ota/last_check), 0 = never */
     esp_err_t last_err;
 } fw_update_status_t;
 
@@ -120,21 +178,36 @@ typedef struct {
  * Boot-time image bookkeeping (early in init, right after settings and
  * lifecycle): note a rollback that happened during the previous boot
  * (esp_ota_get_last_invalid_partition), count trial crashes, revert a failing
- * trial image. Then load the update policy.
+ * trial image, publish the trial flag to lifecycle.
  */
 esp_err_t fw_update_init(void);
 
-/** Start the worker task, the trial timers and the periodic check. */
+/** Start the worker task, the trial timers and the daily check (due from ota/last_check). */
 esp_err_t fw_update_start(void);
 
-/** Check for updates now (async). */
+/** Fetch the manifest and refresh the banner state now (async). Never downloads an image or package. */
 esp_err_t fw_update_check(void);
 
-/** Download, verify and install the latest app, then reboot (async). */
-esp_err_t fw_update_install_app(void);
+/**
+ * The user clicked Update: claim the update slot, download, verify, install,
+ * reboot (async).
+ * @param offered_version the version the banner showed; refused
+ *        (ESP_ERR_INVALID_STATE) if the manifest changed since.
+ * @return ESP_ERR_INVALID_STATE also while a receiver flash holds the update
+ *         slot (its full lockout) or while another update runs.
+ */
+esp_err_t fw_update_install_app(const char *offered_version);
 
-/** Download the latest receiver package into pkg_store and hand it to the station (async). */
-esp_err_t fw_update_install_gnss(void);
+/**
+ * The user confirmed the receiver update: download the package for the
+ * detected model into pkg_store and hand it to the station (async). The
+ * package slot is released when the session ends. Refused
+ * (ESP_ERR_INVALID_STATE) for every fw_update_gnss_block_t reason.
+ * @param offered_build    the build the banner showed; refused if it changed.
+ * @param cross_layout_ack the user confirmed a package with a different
+ *        partition layout (still refused until bench-tested).
+ */
+esp_err_t fw_update_install_gnss(uint32_t offered_build, bool cross_layout_ack);
 
 /**
  * Manual rollback: mark the running image invalid, record its version in
@@ -152,7 +225,8 @@ esp_err_t fw_update_get_status(fw_update_status_t *out);
  *
  * @param out <0, 0 or >0 like strcmp.
  * @return ESP_ERR_INVALID_ARG if either string is not a version (e.g. a dev
- *         build "v0.3.0-4-g47fc47b-dirty+dev"; dev builds never auto-update).
+ *         build "v0.3.0-4-g47fc47b-dirty+dev"; dev builds are never offered
+ *         updates).
  */
 esp_err_t fw_update_version_compare(const char *a, const char *b, int *out);
 
