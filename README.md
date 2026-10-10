@@ -99,7 +99,14 @@ Notes:
 
 - **Forgot the admin password:** hold the **BOOT** button for 10 s while the station
   is running. The password is cleared and the setup Wi-Fi network (`onocoydiy-XXXX`)
-  comes up for 15 minutes so you can set a new one. Casters and settings are kept.
+  comes up for 15 minutes (longer while you stay connected to it) so you can set a new
+  one. Casters and settings are kept.
+- **Wi-Fi gone:** the station never gives up; it keeps retrying (every 30 s at most)
+  and after 5 minutes offline also opens the setup Wi-Fi network beside it, so you
+  can fix the credentials. That network closes again a minute after the station is
+  back online. While the Onocoy stream is down for a network reason on the station's
+  side, it reconnects, renews its address and restarts Wi-Fi by itself, and reboots
+  for it at most once every 6 hours (never during a receiver firmware update).
 - **Factory reset:** hold **BOOT** for 20 s. Wi-Fi, admin password, casters and
   receiver profile are erased; the station restarts in setup mode. Refused while a
   receiver firmware update is running.

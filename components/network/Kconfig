@@ -20,8 +20,9 @@ menu "Station: network"
         help
             The station keeps retrying its configured network; after this long
             without a connection it additionally starts the setup AP (AP+STA)
-            so the user can fix the credentials. The AP stops again once the
-            station reconnects.
+            so the user can fix the credentials. The AP stops again a minute
+            after the station has an IP (so the setup page can still show the
+            new address).
 
     config NETWORK_RECOVERY_AP_S
         int "Recovery AP lifetime after a BOOT-button press (s)"
@@ -29,8 +30,8 @@ menu "Station: network"
         default 900
         help
             The AP started by the BOOT button (admin password cleared, or
-            settings unreadable) goes down again after this long unless a
-            client is connected.
+            settings unreadable) goes down again after this long, or later
+            when the last connected client leaves.
 
     config NETWORK_WIFI_COUNTRY
         string "Wi-Fi country code"
@@ -49,5 +50,24 @@ menu "Station: network"
     config NETWORK_FALLBACK_DNS2
         string "Fallback DNS server 2"
         default "9.9.9.9"
+        help
+            Second server for the same switch. Both are also the targets of
+            the upstream probe's TCP check (port 53) when a name lookup
+            fails, which tells a DNS failure from no internet at all.
+
+    config NETWORK_PROBE_HOST
+        string "Upstream probe host"
+        default "github.com"
+        help
+            Name looked up and connected to (TCP, closed at once, nothing
+            sent) by the upstream probe, which tells "no IP" from "IP but no
+            upstream" for the network recovery ladder. The default is a host
+            the station talks to anyway (update check). Never a caster: a
+            bare connect could count as a failed source login there.
+
+    config NETWORK_PROBE_PORT
+        int "Upstream probe TCP port"
+        range 1 65535
+        default 443
 
 endmenu

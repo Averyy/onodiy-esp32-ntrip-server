@@ -30,6 +30,9 @@ idf_component_register(
         "test_rtcm_hub_core.c"
         "test_ntrip_proto.c"
         "test_gnss_link_core.c"
+        "test_captive_dns.c"
+        "test_net_core.c"
+        "test_net_ladder.c"
         "${_fw}/lifecycle/boot_guard.c"
         "${_fw}/lifecycle/reboot_gate.c"
         "${_fw}/lifecycle/boot_history.c"
@@ -46,6 +49,9 @@ idf_component_register(
         "${_fw}/rtcm_hub/rtcm_hub_core.c"
         "${_fw}/ntrip_server/ntrip_proto.c"
         "${_fw}/gnss_link/gnss_link_core.c"
+        "${_fw}/network/captive_dns.c"
+        "${_fw}/network/net_core.c"
+        "${_fw}/network/net_ladder.c"
     INCLUDE_DIRS
         "."
     PRIV_INCLUDE_DIRS
@@ -59,6 +65,7 @@ idf_component_register(
         "${_fw}/ntrip_server/priv_include"
         "${_fw}/gnss_link/include"
         "${_fw}/gnss_link/priv_include"
+        "${_fw}/network/priv_include"
     REQUIRES unity gnss_framing gnss_types settings nvs_flash esp_partition esp_event
     WHOLE_ARCHIVE)
 
