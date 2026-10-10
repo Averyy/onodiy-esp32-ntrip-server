@@ -125,11 +125,21 @@ Applied to every request before any handler runs.
    connections including the WebSocket) and forbids framing.
 
 UI assets are pre-compressed, embedded in the image and served with
-`Content-Encoding: gzip`, `ETag: "<app version>"` and `Cache-Control:
+`Content-Encoding: gzip`, `ETag: "<app version>-<UI digest>"` (the digest
+covers the compressed assets, so a development build whose version string
+does not change still gets a fresh UI) and `Cache-Control:
 no-cache` (`304` on a matching `If-None-Match`). The UI routes with the URL
 fragment (`/#/casters`), so the server serves only `/`, `/index.html` and the
 fixed asset names; other paths outside `/api/` and `/ws` get `404` (on the
 AP interface: the captive redirect).
+
+The fixed asset names are `/app.js`, `/app.css` and `/favicon.svg` (`/` and
+`/index.html` are the page). The build generates the table of them from
+`components/web/ui/` (`tools/ui_bundle.py`: path, content type, gzip body;
+`priv_include/web_assets.h`); `web_asset_find()` maps a request URI to an
+entry (query ignored) and `web_etag_match()` evaluates `If-None-Match`. The
+page loads only these files (no inline script or style), so the
+Content-Security-Policy can stay at the device's own origin.
 
 ---
 
@@ -1244,16 +1254,15 @@ no receiver update action.
   WGS84/ECEF conversion) and `um98x_flash` (`um98x_flash_inspect_staged`)
   in its `PRIV_REQUIRES`; both are lower layers.
 
-**UI assets** (the files the UI provides). Every regular file directly in
-`components/web/ui/` is embedded: the build (`components/web/ui_pack.py`)
-gzips it and serves it at `/<file name>`; `index.html` is also served at
-`/` and must exist. No subdirectories. Names are `[A-Za-z0-9._-]+`; the type
-comes from the extension: `.html`, `.js`, `.mjs`, `.css`, `.json`,
-`.webmanifest`, `.svg`, `.png`, `.ico`, `.woff2`, `.txt` (others fail the
-build). A file already ending in `.gz` is embedded as it is, under the name
-without `.gz`. Dot files and `*.md` notes are skipped. The CSP of section 2
-applies: no inline scripts or styles, no `data:` images, no other origins.
-The build ships placeholder `index.html`, `app.js` and `app.css`.
+**UI assets** (the files the UI provides): `ui/index.html`, `ui/app.css`,
+`ui/favicon.svg` and the scripts `ui/js/*.js`, which the build
+(`components/web/tools/ui_bundle.py`) joins in file-name order into one
+`app.js` inside a strict-mode function. The build checks the page, styles
+and scripts (structure, unique ids, and what the CSP of section 2 would
+block: no inline scripts or styles, no `on*` or `style` attributes, no
+other origins, no `eval`/`innerHTML`-style sinks), gzips every asset and
+fails when the compressed total exceeds the budget in
+`components/web/CMakeLists.txt` (150 KB). No other files are served.
 
 ---
 

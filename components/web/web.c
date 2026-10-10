@@ -62,7 +62,7 @@ static httpd_handle_t s_server;
 static esp_netif_t *s_sta;
 static esp_netif_t *s_ap;
 static char s_hostname[33];
-static char s_etag[40];
+static char s_etag[64];   /* "<app version>-<UI digest>" with quotes */
 static bool s_public;
 static esp_timer_handle_t s_tick_timer;
 static atomic_bool s_tick_queued;
@@ -433,27 +433,9 @@ static esp_err_t api_dispatch(httpd_req_t *req)
 
 /* ---- UI assets, 404/405, captive portal ----------------------------------------------------- */
 
-static const web_asset_t *find_asset(const char *path, size_t len)
-{
-    if (len == 1 && path[0] == '/') {
-        path = "/index.html";
-        len = strlen(path);
-    }
-    if (len < 2 || path[0] != '/') {
-        return NULL;
-    }
-    for (size_t i = 0; i < web_ui_asset_count; i++) {
-        const char *p = web_ui_assets[i].path;
-        if (strlen(p) == len && memcmp(p, path, len) == 0) {
-            return &web_ui_assets[i];
-        }
-    }
-    return NULL;
-}
-
 static bool is_html(const web_asset_t *a)
 {
-    return strncmp(a->mime, "text/html", 9) == 0;
+    return strncmp(a->type, "text/html", 9) == 0;
 }
 
 static esp_err_t serve_asset(httpd_req_t *req, const web_asset_t *a)
@@ -471,14 +453,14 @@ static esp_err_t serve_asset(httpd_req_t *req, const web_asset_t *a)
                  s_host);
         httpd_resp_set_hdr(req, "Content-Security-Policy", s_csp);
     }
-    char inm[48];
-    if (httpd_req_get_hdr_value_str(req, "If-None-Match", inm, sizeof(inm)) == ESP_OK && strcmp(inm, s_etag) == 0) {
+    char inm[160];
+    if (httpd_req_get_hdr_value_str(req, "If-None-Match", inm, sizeof(inm)) == ESP_OK && web_etag_match(inm, s_etag)) {
         httpd_resp_set_status(req, "304 Not Modified");
         return httpd_resp_send(req, NULL, 0);
     }
-    httpd_resp_set_type(req, a->mime);
+    httpd_resp_set_type(req, a->type);
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
-    return httpd_resp_send(req, (const char *)a->data, (ssize_t)a->len);
+    return httpd_resp_send(req, (const char *)a->gz, (ssize_t)a->gz_len);
 }
 
 /* Everything no route matched: the UI assets, 404/405, the captive portal on the AP. */
@@ -506,7 +488,7 @@ static esp_err_t fallback(httpd_req_t *req)
         }
         return web_send_err(req, known ? WEB_ERR_METHOD_NOT_ALLOWED : WEB_ERR_NOT_FOUND);
     }
-    const web_asset_t *a = find_asset(uri, len);
+    const web_asset_t *a = web_asset_find(web_ui_assets, web_ui_asset_count, uri);
     if (a != NULL) {
         if (req->method != HTTP_GET) {
             return web_send_err(req, WEB_ERR_METHOD_NOT_ALLOWED);
@@ -769,7 +751,9 @@ esp_err_t web_init(void)
     cJSON_Hooks hooks = { .malloc_fn = json_malloc, .free_fn = free };
     cJSON_InitHooks(&hooks);
 
-    snprintf(s_etag, sizeof(s_etag), "\"%s\"", esp_app_get_description()->version);
+    /* The UI digest keeps a development build whose version string does not
+     * change from leaving a browser on a stale cached UI. */
+    snprintf(s_etag, sizeof(s_etag), "\"%s-%s\"", esp_app_get_description()->version, web_ui_digest);
     load_public_status();
     web_auth_init();
     if (s_reboot_sem == NULL) {

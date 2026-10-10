@@ -51,6 +51,7 @@ idf_component_register(
         "test_web_pw.c"
         "test_web_build.c"
         "test_web_parse.c"
+        "test_web_assets.c"
         "${_fw}/lifecycle/boot_guard.c"
         "${_fw}/lifecycle/reboot_gate.c"
         "${_fw}/lifecycle/boot_history.c"
@@ -89,6 +90,7 @@ idf_component_register(
         "${_fw}/web/web_enums.c"
         "${_fw}/web/web_build.c"
         "${_fw}/web/web_parse.c"
+        "${_fw}/web/web_assets.c"
     INCLUDE_DIRS
         "."
     PRIV_INCLUDE_DIRS

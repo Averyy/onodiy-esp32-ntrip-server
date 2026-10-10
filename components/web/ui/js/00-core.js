@@ -1,0 +1,570 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Avery L.
+ * SPDX-License-Identifier: MIT
+ *
+ * Core helpers: DOM building, formatting, the JSON client, browser storage
+ * and a small event bus.
+ *
+ * The bundle (tools/ui_bundle.py) joins js/*.js in name order inside one
+ * strict-mode function, so these names are shared by the later files and
+ * nothing reaches the global object. The page is built from DOM nodes only:
+ * text from the station (caster replies, SSIDs, log lines) is always set as
+ * text, never parsed as HTML.
+ */
+
+const doc = document;
+const API_VERSION = 1;
+
+/* ---- DOM --------------------------------------------------------------- */
+
+/**
+ * Create an element. props: class, text, on<event> (listener), style
+ * (object; set through CSSOM, which the Content-Security-Policy allows),
+ * value/checked/disabled/hidden/selected (properties), anything else as an
+ * attribute (true = empty attribute, null/false = left out).
+ */
+function h(tag, props, ...kids) {
+  const el = doc.createElement(tag);
+  if (props) {
+    for (const k of Object.keys(props)) {
+      const v = props[k];
+      if (v === null || v === undefined || v === false) continue;
+      if (k === 'class') el.className = v;
+      else if (k === 'text') el.textContent = String(v);
+      else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
+      else if (k === 'style') Object.assign(el.style, v);
+      else if (k === 'value') el.value = v;
+      else if (k === 'checked' || k === 'disabled' || k === 'hidden' || k === 'selected' || k === 'required') el[k] = !!v;
+      else el.setAttribute(k, v === true ? '' : String(v));
+    }
+  }
+  add(el, kids);
+  return el;
+}
+
+function add(el, kids) {
+  for (const k of kids) {
+    if (k === null || k === undefined || k === false) continue;
+    if (Array.isArray(k)) add(el, k);
+    else el.append(k instanceof Node ? k : String(k));
+  }
+  return el;
+}
+
+function clear(el) {
+  el.textContent = '';
+  return el;
+}
+
+function mount(el, ...kids) {
+  clear(el);
+  return add(el, kids);
+}
+
+function svg(tag, attrs, ...kids) {
+  const el = doc.createElementNS('http://www.w3.org/2000/svg', tag);
+  if (attrs) {
+    for (const k of Object.keys(attrs)) {
+      if (attrs[k] !== null && attrs[k] !== undefined) el.setAttribute(k, String(attrs[k]));
+    }
+  }
+  return add(el, kids);
+}
+
+function card(title, ...kids) {
+  return h('section', { class: 'card' }, title ? h('h2', null, title) : null, kids);
+}
+
+/** Definition list from [label, value] rows; rows that are null are skipped. */
+function kv(rows) {
+  const dl = h('dl', { class: 'kv' });
+  for (const r of rows) {
+    if (!r) continue;
+    dl.append(h('dt', null, r[0]), h('dd', null, r[1] === null || r[1] === undefined || r[1] === '' ? '–' : r[1]));
+  }
+  return dl;
+}
+
+function badge(text, tone) {
+  return h('span', { class: 'badge ' + (tone || '') }, text);
+}
+
+function msg(tone, ...kids) {
+  return h('div', { class: 'msg ' + (tone || ''), role: tone === 'bad' ? 'alert' : null }, kids);
+}
+
+function btn(label, onclick, kind, attrs) {
+  return h('button', Object.assign({ type: 'button', class: 'btn ' + (kind || ''), onclick: onclick }, attrs || {}), label);
+}
+
+function link(label, href, cls) {
+  return h('a', { href: href, class: cls || null }, label);
+}
+
+/** Labelled input with hint and error line. Returns {el, input, error(msg)}. */
+function field(label, input, hint) {
+  const err = h('small', { class: 'err', hidden: true });
+  const el = h('div', { class: 'field' },
+    h('label', null, h('span', { class: 'lbl' }, label), input),
+    hint ? h('small', { class: 'hint' }, hint) : null,
+    err);
+  return {
+    el: el,
+    input: input,
+    error(text) {
+      err.textContent = text || '';
+      err.hidden = !text;
+      input.classList.toggle('invalid', !!text);
+      if (text) input.setAttribute('aria-invalid', 'true');
+      else input.removeAttribute('aria-invalid');
+    },
+  };
+}
+
+function textInput(value, attrs) {
+  return h('input', Object.assign({ type: 'text', value: value === null || value === undefined ? '' : value,
+    autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' }, attrs || {}));
+}
+
+function numInput(value, attrs) {
+  return h('input', Object.assign({ type: 'text', inputmode: 'decimal', value: value === null || value === undefined ? '' : String(value),
+    autocomplete: 'off' }, attrs || {}));
+}
+
+function pwInput(attrs) {
+  return h('input', Object.assign({ type: 'password', autocomplete: 'new-password', autocapitalize: 'off', spellcheck: 'false' }, attrs || {}));
+}
+
+function selectInput(options, value, attrs) {
+  const s = h('select', attrs || null);
+  for (const o of options) {
+    s.append(h('option', { value: String(o[0]), selected: String(o[0]) === String(value) }, o[1]));
+  }
+  return s;
+}
+
+/** Checkbox row. Returns {el, input}. */
+function checkbox(label, checked, hint, attrs) {
+  const input = h('input', Object.assign({ type: 'checkbox', checked: !!checked }, attrs || {}));
+  const el = h('label', { class: 'check' }, input,
+    h('span', null, h('span', null, label), hint ? h('small', { class: 'hint' }, hint) : null));
+  return { el: el, input: input };
+}
+
+/** Radio group. Returns {el, value(), set(v), onchange(fn)}. */
+function radios(legend, name, options, value) {
+  const inputs = [];
+  const box = h('div', { class: 'choices' });
+  for (const o of options) {
+    const r = h('input', { type: 'radio', name: name, value: String(o[0]), checked: String(o[0]) === String(value) });
+    inputs.push(r);
+    box.append(h('label', { class: 'choice' }, r, o[1]));
+  }
+  const el = h('fieldset', { class: 'fieldset' }, h('legend', null, legend), box);
+  return {
+    el: el,
+    value() {
+      for (const r of inputs) if (r.checked) return r.value;
+      return null;
+    },
+    set(v) {
+      for (const r of inputs) r.checked = r.value === String(v);
+    },
+    onchange(fn) {
+      for (const r of inputs) r.addEventListener('change', fn);
+    },
+  };
+}
+
+function bar(fraction, tone) {
+  const f = Math.max(0, Math.min(1, fraction || 0));
+  return h('div', { class: 'bar ' + (tone || ''), role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100,
+    'aria-valuenow': Math.round(f * 100) }, h('span', { style: { width: (f * 100).toFixed(1) + '%' } }));
+}
+
+function table(head, rows, opts) {
+  const numeric = (opts && opts.num) || [];
+  return h('div', { class: 'scroll' }, h('table', null,
+    h('thead', null, h('tr', null, head.map((t, i) => h('th', { class: numeric.indexOf(i) >= 0 ? 'num' : null }, t)))),
+    h('tbody', null, rows.map(r => h('tr', null, r.map((c, i) =>
+      h('td', { class: numeric.indexOf(i) >= 0 ? 'num' : null }, c === null || c === undefined ? '–' : c)))))));
+}
+
+/* ---- Formatting -------------------------------------------------------- */
+
+const DASH = '–';
+
+const fmt = {
+  /** Duration in seconds, e.g. "7 min 49 s", "3 h 12 min". */
+  dur(s) {
+    if (s === null || s === undefined || isNaN(s)) return DASH;
+    s = Math.max(0, Math.round(s));
+    const d = Math.floor(s / 86400), hh = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+    if (d) return d + ' d ' + hh + ' h';
+    if (hh) return hh + ' h ' + m + ' min';
+    if (m) return m + ' min' + (ss ? ' ' + ss + ' s' : '');
+    return ss + ' s';
+  },
+  /** Age or latency in milliseconds. */
+  ms(v) {
+    if (v === null || v === undefined || isNaN(v)) return DASH;
+    if (v < 1000) return Math.round(v) + ' ms';
+    if (v < 60000) return (v / 1000).toFixed(v < 10000 ? 1 : 0) + ' s';
+    return fmt.dur(v / 1000);
+  },
+  bytes(b) {
+    if (b === null || b === undefined || isNaN(b)) return DASH;
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(b < 10240 ? 1 : 0) + ' KB';
+    if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+    return (b / 1073741824).toFixed(2) + ' GB';
+  },
+  num(n) {
+    return n === null || n === undefined || isNaN(n) ? DASH : Number(n).toLocaleString();
+  },
+  permille(p) {
+    return p === null || p === undefined ? DASH : (p / 10).toFixed(1) + ' %';
+  },
+  pct(p) {
+    return p === null || p === undefined ? DASH : p + ' %';
+  },
+  time(unix) {
+    if (!unix) return DASH;
+    return new Date(unix * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  },
+  deg(v) {
+    return v === null || v === undefined ? DASH : Number(v).toFixed(9) + '°';
+  },
+  m(v, digits) {
+    return v === null || v === undefined ? DASH : Number(v).toFixed(digits === undefined ? 4 : digits) + ' m';
+  },
+  kbps(bitsPerS) {
+    return bitsPerS === null || bitsPerS === undefined ? DASH : (bitsPerS / 1000).toFixed(1) + ' kbit/s';
+  },
+  yesno(b) {
+    return b === null || b === undefined ? DASH : b ? 'Yes' : 'No';
+  },
+  /** Seconds until the next 00:00 UTC, and that moment in local time. */
+  utcMidnight() {
+    const now = new Date();
+    const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+    return { in_s: Math.round((next - now.getTime()) / 1000),
+      local: new Date(next).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) };
+  },
+};
+
+/** Text of an enum value through a label table; unknown values verbatim. */
+function lbl(table, v) {
+  if (v === null || v === undefined) return DASH;
+  const t = table[v];
+  if (t === undefined) return String(v);
+  return Array.isArray(t) ? t[0] : t;
+}
+
+/** Bytes of a string in UTF-8. */
+function utf8Len(s) {
+  return new TextEncoder().encode(s).length;
+}
+
+function hasControl(s) {
+  return /[\u0000-\u001f\u007f]/.test(s);
+}
+
+/* ---- Browser storage (per-browser conveniences only) ------------------- */
+
+const store = {
+  get(k, dflt) {
+    try {
+      const v = localStorage.getItem('station.' + k);
+      return v === null ? dflt : JSON.parse(v);
+    } catch (e) {
+      return dflt;
+    }
+  },
+  set(k, v) {
+    try {
+      if (v === null || v === undefined) localStorage.removeItem('station.' + k);
+      else localStorage.setItem('station.' + k, JSON.stringify(v));
+    } catch (e) {
+      /* private mode, captive-portal browser: the setting lasts for this page only */
+    }
+  },
+};
+
+/* ---- Event bus --------------------------------------------------------- */
+
+const bus = {
+  map: {},
+  on(type, fn) {
+    (this.map[type] = this.map[type] || []).push(fn);
+    return () => this.off(type, fn);
+  },
+  off(type, fn) {
+    const l = this.map[type];
+    if (l) {
+      const i = l.indexOf(fn);
+      if (i >= 0) l.splice(i, 1);
+    }
+  },
+  emit(type, ...args) {
+    for (const fn of (this.map[type] || []).slice()) {
+      try {
+        fn(...args);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  },
+};
+
+/* ---- JSON client ------------------------------------------------------- */
+
+class ApiError extends Error {
+  constructor(status, body) {
+    const e = body || {};
+    super(e.message || (status ? 'HTTP ' + status : 'no answer'));
+    this.status = status;
+    this.code = e.code || (status ? 'http_' + status : 'network');
+    this.field = e.field || null;
+    this.retry_in_s = e.retry_in_s === undefined ? null : e.retry_in_s;
+    this.by = e.by || null;
+    this.body = e;
+  }
+}
+
+/**
+ * Call the API. POST and PUT always send Content-Type: application/json
+ * (the server's CSRF rule, also for an empty body). Resolves with the parsed
+ * body; rejects with ApiError. A 401 also emits "unauthorized" unless
+ * opts.quiet401.
+ */
+async function api(method, path, body, opts) {
+  opts = opts || {};
+  const init = { method: method, credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' } };
+  if (method === 'POST' || method === 'PUT') {
+    init.headers['Content-Type'] = 'application/json';
+    init.body = body === undefined ? '' : JSON.stringify(body);
+  }
+  let timer = 0;
+  if (typeof AbortController === 'function') {
+    const ctl = new AbortController();
+    init.signal = ctl.signal;
+    timer = setTimeout(() => ctl.abort(), opts.timeout || 15000);
+  }
+  let res;
+  try {
+    res = await fetch(path, init);
+  } catch (e) {
+    throw new ApiError(0, { code: e && e.name === 'AbortError' ? 'timeout' : 'network' });
+  } finally {
+    clearTimeout(timer);
+  }
+  let data = null;
+  if ((res.headers.get('Content-Type') || '').indexOf('json') >= 0) {
+    try {
+      data = await res.json();
+    } catch (e) {
+      data = null;
+    }
+  }
+  if (!res.ok) {
+    const err = new ApiError(res.status, data && data.error);
+    if (res.status === 401 && !opts.quiet401) bus.emit('unauthorized');
+    throw err;
+  }
+  return data;
+}
+
+/**
+ * Raw upload (application/octet-stream plus the X-Requested-With header the
+ * server requires). onProgress(sent, total) while the body goes out.
+ */
+function upload(path, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('POST', path);
+    x.setRequestHeader('Content-Type', 'application/octet-stream');
+    x.setRequestHeader('X-Requested-With', 'onocoydiy');
+    x.upload.onprogress = e => {
+      if (onProgress && e.lengthComputable) onProgress(e.loaded, e.total);
+    };
+    x.onload = () => {
+      let data = null;
+      try {
+        data = JSON.parse(x.responseText);
+      } catch (e) {
+        data = null;
+      }
+      if (x.status >= 200 && x.status < 300) {
+        resolve(data);
+        return;
+      }
+      if (x.status === 401) bus.emit('unauthorized');
+      reject(new ApiError(x.status, data && data.error));
+    };
+    x.onerror = () => reject(new ApiError(0, { code: 'network' }));
+    x.send(file);
+  });
+}
+
+/* ---- Errors in the user's words ----------------------------------------- */
+
+const ERR = {
+  network: 'The station did not answer. Check that this device is still on the same network as the station.',
+  timeout: 'The station did not answer in time.',
+  bad_json: 'The station could not read the request.',
+  invalid_field: 'A value is not accepted',
+  confirm_required: 'This action needs a confirmation.',
+  bad_request: 'The station refused the request.',
+  invalid_image: 'This file is not a valid firmware image for this chip.',
+  size_mismatch: 'The upload ended early. Try again.',
+  unauthorized: 'Your session ended. Log in again.',
+  forbidden: 'The station refused the request from this page.',
+  wrong_password: 'Wrong password.',
+  not_on_setup_ap: 'The first admin password can only be set over the station\'s own Wi-Fi network.',
+  not_found: 'Not found.',
+  nothing_staged: 'No uploaded receiver package is waiting.',
+  no_journal: 'There is no receiver update session.',
+  no_coredump: 'There is no core dump.',
+  method_not_allowed: 'The station does not support this action.',
+  busy: 'The station is busy with another job. Try again in a moment.',
+  journal_open: 'A receiver update session is open. Finish or clear it first.',
+  not_waiting: 'The receiver update is still running.',
+  app_trial: 'The new app version is still on trial.',
+  app_update: 'An app update is running.',
+  safe_mode: 'Not possible in safe mode.',
+  not_in_safe_mode: 'The station is not in safe mode.',
+  receiver_not_streaming: 'The receiver must be streaming first.',
+  unsupported_model: 'Not possible with this receiver model.',
+  package_pinned: 'A receiver package is held for an open update session.',
+  manifest_changed: 'The offered version changed since this page loaded. Check the new offer and try again.',
+  not_offered: 'That version is not offered (any more).',
+  rolled_back_ack_required: 'This version was rolled back on this station before.',
+  reboot_inhibited: 'A restart is blocked right now',
+  settings_unavailable: 'The settings storage is unavailable this boot, so nothing can be saved.',
+  no_position_yet: 'There is no surveyed position yet.',
+  caster_policy: 'This caster setup is not allowed.',
+  sha256_mismatch: 'The SHA-256 does not match the uploaded package.',
+  downgrade: 'That build is older than the receiver\'s current firmware.',
+  no_rollback_image: 'There is no previous app version to go back to.',
+  admin_already_set: 'An admin password is already set.',
+  admin_not_set: 'No admin password is set yet. Set one over the station\'s own Wi-Fi network.',
+  length_required: 'The upload needs a known size.',
+  too_large: 'Too large for the station.',
+  unsupported_media_type: 'The station refused the request type.',
+  bad_host: 'Open the station by its IP address or its hostname.',
+  not_this_project: 'This image is not firmware for this station.',
+  rate_limited: 'Too many attempts.',
+  internal: 'The station hit an internal error',
+  not_available_yet: 'Installing receiver firmware is not available in this firmware version yet.',
+  checks_disabled: 'This build cannot check for updates. Uploading a file still works.',
+  too_many_clients: 'Too many pages are open on the station.',
+};
+
+const POLICY = {
+  second_onocoy: 'Another enabled slot already streams to Onocoy. Onocoy allows one stream per station.',
+  second_rtk2go: 'Another enabled slot already streams to RTK2go. Use one RTK2go slot per station.',
+  dup_stream_ack_required: 'Streaming to Onocoy and an open caster at the same time needs your acknowledgement.',
+};
+
+function errText(e) {
+  if (!(e instanceof ApiError)) return 'This page hit an error: ' + (e && e.message ? e.message : String(e));
+  let t = ERR[e.code] || e.message || ('Error ' + e.status);
+  if (e.code === 'caster_policy' && POLICY[e.body.reason]) t = POLICY[e.body.reason];
+  if (e.code === 'invalid_field' && e.field) t += ': ' + e.field;
+  if (e.code === 'reboot_inhibited' && e.by) t += ' (' + e.by + ')';
+  if (e.code === 'internal' && e.message) t += ' (' + e.message + ')';
+  if (/[^.!?]$/.test(t)) t += '.';
+  if (e.retry_in_s) t += ' Try again in ' + fmt.dur(e.retry_in_s) + '.';
+  return t;
+}
+
+/* ---- Small async helpers ------------------------------------------------ */
+
+/** Run fn with the button disabled and spinning. */
+async function busy(button, fn) {
+  if (button) {
+    button.disabled = true;
+    button.classList.add('busy');
+  }
+  try {
+    return await fn();
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.classList.remove('busy');
+    }
+  }
+}
+
+/** busy() plus error display: in `out` (an element) or as a toast. Resolves undefined on error. */
+async function act(button, fn, out) {
+  if (out) out.hidden = true;
+  try {
+    return await busy(button, fn);
+  } catch (e) {
+    showErr(e, out);
+    return undefined;
+  }
+}
+
+function showErr(e, out) {
+  if (!(e instanceof ApiError)) console.error(e);
+  if (e instanceof ApiError && e.status === 401) return; /* the login screen takes over */
+  const text = errText(e);
+  if (out) {
+    mount(out, text);
+    out.className = 'msg bad';
+    out.hidden = false;
+  } else {
+    toast(text, 'bad');
+  }
+}
+
+/** Show a plain message in a box made by errBox(). */
+function say(out, text, tone) {
+  mount(out, text);
+  out.className = 'msg ' + (tone || 'bad');
+  out.hidden = false;
+}
+
+/** Empty message box for act(); hidden until something is shown. */
+function errBox() {
+  return h('div', { class: 'msg bad', role: 'alert', hidden: true });
+}
+
+/**
+ * Repeat fn every `ms` while the page is visible, never overlapping
+ * (later = wait one period before the first call). Returns a stop function.
+ */
+function poller(ms, fn, later) {
+  let stopped = false, timer = 0;
+  const loop = async () => {
+    if (stopped) return;
+    if (doc.visibilityState !== 'hidden') {
+      try {
+        await fn();
+      } catch (e) {
+        if (!(e instanceof ApiError)) console.error(e);
+      }
+    }
+    if (!stopped) timer = setTimeout(loop, ms);
+  };
+  if (later) timer = setTimeout(loop, ms);
+  else loop();
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+function toast(text, tone) {
+  const box = doc.getElementById('toasts');
+  const t = h('div', { class: 'toast ' + (tone || 'info') }, text);
+  box.append(t);
+  setTimeout(() => t.remove(), tone === 'bad' ? 7000 : 4000);
+}

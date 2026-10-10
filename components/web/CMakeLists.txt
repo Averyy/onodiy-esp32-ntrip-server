@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Avery L.
 # SPDX-License-Identifier: MIT
 #
-# web_json.c, web_core.c, web_pw.c, web_enums.c, web_build.c and web_parse.c
-# are pure logic (no RTOS or driver calls) and are also compiled into the
-# host test app; web.c, web_api.c, web_auth.c, web_ws.c and web_worker.c are
-# the server around them.
+# web_json.c, web_core.c, web_pw.c, web_enums.c, web_build.c, web_parse.c
+# and web_assets.c are pure logic (no RTOS or driver calls) and are also
+# compiled into the host test app; web.c, web_api.c, web_auth.c, web_ws.c and
+# web_worker.c are the server around them.
 #
 # mbedtls provides psa/crypto.h (PBKDF2-HMAC-SHA256 for the admin password).
 # um98x_ctl (profile codec, WGS84/ECEF) and um98x_flash (package facts) are
@@ -22,6 +22,7 @@ idf_component_register(
         "web_enums.c"
         "web_build.c"
         "web_parse.c"
+        "web_assets.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "priv_include"
     PRIV_REQUIRES
@@ -54,18 +55,26 @@ idf_component_register(
         health
         fw_update)
 
-# Embedded UI: every file directly in ui/ is gzip-compressed into a C table
-# at build time (ui_pack.py; names and rules in API.md, "UI assets"). Adding
-# or removing a file re-runs the configure step (CONFIGURE_DEPENDS).
-if(NOT CMAKE_BUILD_EARLY_EXPANSION)
-    file(GLOB _ui_files CONFIGURE_DEPENDS LIST_DIRECTORIES false "${COMPONENT_DIR}/ui/*")
-    set(_ui_c "${CMAKE_CURRENT_BINARY_DIR}/web_assets_gen.c")
-    idf_build_get_property(_python PYTHON)
-    add_custom_command(
-        OUTPUT "${_ui_c}"
-        COMMAND "${_python}" "${COMPONENT_DIR}/ui_pack.py" "${COMPONENT_DIR}/ui" "${_ui_c}"
-        DEPENDS ${_ui_files} "${COMPONENT_DIR}/ui_pack.py"
-        COMMENT "Packing the web UI assets"
-        VERBATIM)
-    target_sources(${COMPONENT_LIB} PRIVATE "${_ui_c}")
-endif()
+# Browser UI (ui/): tools/ui_bundle.py checks the page, the scripts and the
+# styles (structure, and what the Content-Security-Policy would block), joins
+# ui/js/*.js into app.js, gzips every asset and writes the asset table
+# (priv_include/web_assets.h) as a C file into the build directory. Any check
+# failing, or the compressed UI growing past UI_GZ_BUDGET bytes, fails the
+# build. Adding a file under ui/js/ reconfigures (CONFIGURE_DEPENDS).
+set(UI_GZ_BUDGET 153600)
+file(GLOB _ui_js CONFIGURE_DEPENDS "${COMPONENT_DIR}/ui/js/*.js")
+set(_ui_inputs
+    "${COMPONENT_DIR}/ui/index.html"
+    "${COMPONENT_DIR}/ui/app.css"
+    "${COMPONENT_DIR}/ui/favicon.svg"
+    ${_ui_js})
+set(_ui_c "${CMAKE_CURRENT_BINARY_DIR}/web_ui_assets.c")
+idf_build_get_property(_python PYTHON)
+add_custom_command(
+    OUTPUT "${_ui_c}"
+    COMMAND "${_python}" "${COMPONENT_DIR}/tools/ui_bundle.py"
+            --ui "${COMPONENT_DIR}/ui" --c-out "${_ui_c}" --max-gz ${UI_GZ_BUDGET}
+    DEPENDS "${COMPONENT_DIR}/tools/ui_bundle.py" ${_ui_inputs}
+    COMMENT "Checking and embedding the web UI"
+    VERBATIM)
+target_sources(${COMPONENT_LIB} PRIVATE "${_ui_c}")
