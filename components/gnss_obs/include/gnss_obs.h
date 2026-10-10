@@ -23,11 +23,20 @@
  *   - epoch gaps: an MSM epoch time that does not advance by the configured
  *     period counts as lost data, independent of byte counters.
  *
- * Feeding is cheap (header decode only, no allocation) and runs in the GNSS
- * RX task; readers get snapshots under a short lock.
+ * Feeding is cheap (header decode only, no allocation, no logging) and runs
+ * in the GNSS RX task; readers get snapshots under a short lock.
  *
- * Status: API settled; decoder not implemented yet (pure core, host-tested
- * with recorded frames).
+ * Bands are the buckets of gnss_rtcm3.h (L1, L2, L5, L6, E5 AltBOC). A signal
+ * counts for 10 s after it was last seen, so one missing epoch does not
+ * change the count. Galileo E6 is only expected once it has been seen
+ * since the last gnss_obs_reset() (it depends on the receiver's signal
+ * group); losing it after that is reported in e6_lost.
+ *
+ * Status: per-constellation satellites, signal masks, bands, best
+ * constellation, E6 loss, epoch count and age, and the antenna reference
+ * point are implemented (pure core host-tested). Not yet: per-band CNR
+ * (cnr_dbhz stays 0), epoch gaps, message statistics and the sky view
+ * (ESP_ERR_NOT_SUPPORTED).
  */
 #pragma once
 
@@ -36,35 +45,27 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "gnss_rtcm3.h"   /* gnss_sys_t, gnss_band_t */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef enum {
-    GNSS_SYS_GPS = 0,
-    GNSS_SYS_GLONASS,
-    GNSS_SYS_GALILEO,
-    GNSS_SYS_SBAS,
-    GNSS_SYS_QZSS,
-    GNSS_SYS_BEIDOU,
-    GNSS_SYS_NAVIC,
-    GNSS_SYS_COUNT,
-} gnss_sys_t;
-
-/** Per-constellation summary from the latest complete epoch. */
+/** Per-constellation summary: signals of the last 10 s, satellites of the latest epoch. */
 typedef struct {
     bool present;
     uint8_t satellites;
-    uint32_t signal_mask;          /**< MSM signal mask (bit per signal id) */
+    uint32_t signal_mask;          /**< MSM signal IDs seen in the last 10 s (bit id-1) */
+    uint8_t band_mask;             /**< bands present (bit per gnss_band_t) */
     uint8_t bands;                 /**< distinct frequency bands present */
-    uint8_t cnr_dbhz[8];           /**< mean CNR per band (MSM7 only), 0 = n/a */
+    uint8_t cnr_dbhz[8];           /**< mean CNR per band, index gnss_band_t (MSM7 only), 0 = n/a */
 } gnss_obs_sys_t;
 
 typedef struct {
     gnss_obs_sys_t sys[GNSS_SYS_COUNT];
     gnss_sys_t best_sys;           /**< constellation with the most bands */
-    uint8_t best_bands;
+    uint8_t best_bands;            /**< fewer than 4: DEGRADED with an alert */
+    bool e6_lost;                  /**< Galileo E6 seen since the last reset, now missing: alert */
     uint32_t epoch_age_ms;         /**< since the last complete epoch, UINT32_MAX = never */
     uint64_t epochs;
     uint64_t epoch_gaps;           /**< epochs missing from the expected cadence */
@@ -78,7 +79,7 @@ typedef struct {
     uint32_t age_ms;               /**< since last seen */
 } gnss_obs_msg_stat_t;
 
-/** Antenna reference point from the latest CRC-valid 1005 (public RTCM 10403). */
+/** Antenna reference point from the latest CRC-valid 1005 or 1006 (public RTCM 10403). */
 typedef struct {
     bool valid;
     uint16_t station_id;           /**< reference station ID of that frame */
@@ -111,7 +112,7 @@ esp_err_t gnss_obs_get_msg_stats(gnss_obs_msg_stat_t *out, size_t *count);
 /** *count in = capacity, out = filled. */
 esp_err_t gnss_obs_get_sky(gnss_obs_sat_t *out, size_t *count);
 
-/** Latest antenna reference point (the base position shown and locked). ESP_ERR_NOT_FOUND before the first 1005. */
+/** Latest antenna reference point (the base position shown and locked). ESP_ERR_NOT_FOUND before the first 1005/1006. */
 esp_err_t gnss_obs_get_arp(gnss_obs_arp_t *out);
 
 /** Forget everything (after a receiver reconfigure or flash). */

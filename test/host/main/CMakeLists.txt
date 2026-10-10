@@ -10,6 +10,9 @@ idf_component_register(
     SRCS
         "test_main.c"
         "test_gnss_framing.c"
+        "test_gnss_rtcm3.c"
+        "test_gnss_obs_core.c"
+        "rtcm_vectors.c"
         "test_settings_codec.c"
         "test_settings.c"
         "test_boot_guard.c"
@@ -24,6 +27,7 @@ idf_component_register(
         "${_fw}/fw_update/semver.c"
         "${_fw}/um98x_ctl/um98x_profile.c"
         "${_fw}/um98x_flash/flash_journal.c"
+        "${_fw}/gnss_obs/gnss_obs_core.c"
     INCLUDE_DIRS
         "."
     PRIV_INCLUDE_DIRS
@@ -31,6 +35,7 @@ idf_component_register(
         "${_fw}/fw_update/priv_include"
         "${_fw}/um98x_ctl/include"
         "${_fw}/um98x_flash/priv_include"
+        "${_fw}/gnss_obs/priv_include"
     REQUIRES unity gnss_framing gnss_types settings nvs_flash esp_partition esp_event
     WHOLE_ARCHIVE)
 
