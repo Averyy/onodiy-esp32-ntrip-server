@@ -2,36 +2,642 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Ladder thresholds and loss accounting are PROVISIONAL, to be confirmed on
- * hardware. The ladder decision logic goes into a pure core with an injected
- * clock (host-tested across clock wrap and multi-day runs); this file stays
- * the RTOS glue.
+ * Health monitor task: samples the station once a second, runs the GNSS
+ * recovery ladder (health_ladder.c) and the monitor helpers (health_mon.c),
+ * feeds the network ladder, supervises the caster slots, watches the heap
+ * and the BOOT button, journals loss counters and ladder steps, and drives
+ * ledger_tick(). The logic lives in the pure cores; this file only samples
+ * and acts. Thresholds and loss rules are PROVISIONAL, to be confirmed on
+ * hardware.
  */
 #include "health.h"
 
+#include <inttypes.h>
 #include <string.h>
 
+#include "board.h"
+#include "diag.h"
+#include "driver/gpio.h"
+#include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "gnss_link.h"
+#include "gnss_obs.h"
+#include "health_ladder.h"
+#include "health_mon.h"
+#include "ledger.h"
 #include "lifecycle.h"
+#include "network.h"
+#include "ntrip_server.h"
+#include "rtcm_hub.h"
 #include "sdkconfig.h"
 #include "settings.h"
+#include "settings_schema.h"
+#include "station.h"
 
 static const char *TAG = "health";
 
+#define TASK_PRIO          12
+#define TICK_MS            1000
+#define STALL_MS           ((uint32_t)CONFIG_HEALTH_GNSS_STALL_S * 1000u)
+#define HEAP_WARN_BYTES    (16u * 1024u)
+#define HEAP_REBOOT_BYTES  (8u * 1024u)
+#define FRAG_BYTES         ((uint32_t)CONFIG_HEALTH_HEAP_FRAGMENT_KB * 1024u)
+#define CFG_REFRESH_MS     10000
+#define LEDGER_OVF_PER_TICK 100u
+#define MAX_SLOTS          CONFIG_NTRIP_MAX_CASTERS
+
+/* Debounce of the alerts that come from sampled states (ms). */
+#define BANDS_ON_MS        60000u
+#define BANDS_OFF_MS       60000u
+#define DRIFT_ON_MS        90000u
+#define DRIFT_OFF_MS       10000u
+#define FRAG_ON_MS         10000u
+#define FRAG_OFF_MS        60000u
+#define CASTER_ON_MS       30000u
+#define CASTER_OFF_MS      10000u
+
+/* The cores mirror these enums by value. */
+_Static_assert(HL_STN_IDLE == (int)STATION_STATE_IDLE && HL_STN_DETECTING == (int)STATION_STATE_DETECTING &&
+                   HL_STN_CONFIGURING == (int)STATION_STATE_CONFIGURING &&
+                   HL_STN_STREAMING == (int)STATION_STATE_STREAMING &&
+                   HL_STN_FLASHING == (int)STATION_STATE_FLASHING &&
+                   HL_STN_FLASH_RECOVERY == (int)STATION_STATE_FLASH_RECOVERY &&
+                   HL_STN_RECOVERING == (int)STATION_STATE_RECOVERING &&
+                   HL_STN_NO_RECEIVER == (int)STATION_STATE_NO_RECEIVER,
+               "ladder station states mirror station_state_t");
+_Static_assert(HL_CODE_RESYNC == (int)STATION_RECOVER_RESYNC + 1 &&
+                   HL_CODE_LINK_RESTART == (int)STATION_RECOVER_LINK_RESTART + 1 &&
+                   HL_CODE_RESCAN == (int)STATION_RECOVER_RESCAN + 1 &&
+                   HL_CODE_RECONFIGURE == (int)STATION_RECOVER_RECONFIGURE + 1 &&
+                   HL_CODE_RECEIVER_RESET == (int)STATION_RECOVER_RECEIVER_RESET + 1,
+               "ladder steps are station_recovery_t + 1");
+_Static_assert(HL_CODE_RESYNC == (int)HEALTH_STEP_RESYNC && HL_CODE_LINK_RESTART == (int)HEALTH_STEP_LINK_RESTART &&
+                   HL_CODE_RESCAN == (int)HEALTH_STEP_RESCAN && HL_CODE_RECONFIGURE == (int)HEALTH_STEP_RECONFIGURE &&
+                   HL_CODE_RECEIVER_RESET == (int)HEALTH_STEP_RECEIVER_RESET &&
+                   HL_CODE_REBOOT == (int)HEALTH_STEP_REBOOT,
+               "ladder steps mirror health_step_t");
+_Static_assert(HL_LEVEL_OK == (int)HEALTH_OK && HL_LEVEL_DEGRADED == (int)HEALTH_DEGRADED &&
+                   HL_LEVEL_RECOVERING == (int)HEALTH_RECOVERING && HL_LEVEL_FAILED == (int)HEALTH_FAILED,
+               "ladder levels mirror health_level_t");
+_Static_assert(HM_CST_DISABLED == (int)NTRIP_STATE_DISABLED && HM_CST_WAIT_NETWORK == (int)NTRIP_STATE_WAIT_NETWORK &&
+                   HM_CST_WAIT_DATA == (int)NTRIP_STATE_WAIT_DATA && HM_CST_CONNECTING == (int)NTRIP_STATE_CONNECTING &&
+                   HM_CST_STREAMING == (int)NTRIP_STATE_STREAMING && HM_CST_BACKOFF == (int)NTRIP_STATE_BACKOFF &&
+                   HM_CST_AUTH_FAILED == (int)NTRIP_STATE_AUTH_FAILED && HM_CST_PAUSED == (int)NTRIP_STATE_PAUSED &&
+                   HM_CST_CONFIG_ERROR == (int)NTRIP_STATE_CONFIG_ERROR && HM_CST_BANNED == (int)NTRIP_STATE_BANNED,
+               "caster states mirror ntrip_state_t");
+_Static_assert(DIAG_LOSS_HW_FIFO == 1 && DIAG_LOSS_RX_BUFFER_FULL == 2 && DIAG_LOSS_LINE_ERRORS == 3 &&
+                   DIAG_LOSS_RTCM_CRC == 4 && DIAG_LOSS_FRAMER_DISCARDED == 5 && DIAG_LOSS_HUB_PUBLISH == 6 &&
+                   DIAG_LOSS_BAUD_SWITCH == 7 && DIAG_LOSS_RX_EVENTS_DROPPED == HM_LOSS_IDS,
+               "loss journal ids are diag_loss_id_t 1..8");
+
+/* ---- shared state ----------------------------------------------------------- */
+
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+static health_status_t s_pub;        /* published snapshot (under s_lock) */
+static bool s_pub_valid;
+static bool s_inited;
+static TaskHandle_t s_task;
+
+/* Station transitions into and out of RECOVERING (event loop task writes,
+ * health task reads), so a step shorter than one tick is still seen. */
+static uint32_t s_rec_enters;
+static uint32_t s_rec_exits;
+static station_state_t s_ev_state = STATION_STATE_IDLE;   /* event loop task only */
+static bool s_cfg_dirty = true;                          /* caster configs to re-read */
+
+/* ---- health task only --------------------------------------------------------- */
+
+static hl_t s_ladder;
+static hl_in_t s_in;
+static hm_loss_t s_loss;
+static hm_link_t s_link;
+static hm_slot_t s_slot[MAX_SLOTS];
+static bool s_slot_enabled[MAX_SLOTS];
+static bool s_slot_protected[MAX_SLOTS];
+static int64_t s_cfg_at_ms;
+static hm_deb_t s_deb_bands;
+static hm_deb_t s_deb_drift;
+static hm_deb_t s_deb_frag;
+static hm_deb_t s_deb_casters;
+static hm_button_t s_button;
+static uint32_t s_caster_restarts;
+static uint64_t s_ledger_owed;
+static bool s_heap_warned;
+static bool s_heap_reboot;
+static int64_t s_factory_refused_ms = HM_NEVER;
+static uint8_t s_prev_level;
+static uint32_t s_prev_alerts;
+static bool s_prev_suspended;
+
+/* Large snapshots, kept off the task stack. */
+static station_status_t s_st;
+static ntrip_caster_status_t s_cst;
+static ntrip_caster_cfg_t s_ccfg;
+static gnss_link_stats_t s_link_stats;
+static network_status_t s_net;
+
+static int64_t now_ms(void)
+{
+    return esp_timer_get_time() / 1000;
+}
+
+static const char *step_name(uint8_t code)
+{
+    static const char *const k[] = { "none", "resync", "link restart", "rescan", "reconfigure",
+                                     "receiver reset", "ESP32 reboot", "power-cycle alert", "failed",
+                                     "reboot blocked" };
+    return code < sizeof(k) / sizeof(k[0]) ? k[code] : "?";
+}
+
+static const char *outcome_name(uint8_t o)
+{
+    static const char *const k[] = { "started", "healthy again", "failed", "abandoned (suspended)" };
+    return o < sizeof(k) / sizeof(k[0]) ? k[o] : "?";
+}
+
+/* ---- ladder callbacks ----------------------------------------------------------- */
+
+static hl_req_t op_request(void *ctx, uint8_t step)
+{
+    (void)ctx;
+    station_recovery_t action = (station_recovery_t)(step - 1u);
+    esp_err_t err = station_request_recovery(action);
+    if (err == ESP_OK) {
+        return HL_REQ_ACCEPTED;
+    }
+    if (action == STATION_RECOVER_RECONFIGURE && err == ESP_ERR_INVALID_STATE &&
+        station_get_status(&s_st) == ESP_OK && s_st.reconfigure_refused) {
+        return HL_REQ_REFUSED;
+    }
+    ESP_LOGD(TAG, "station did not take step %u: %s", step, esp_err_to_name(err));
+    return HL_REQ_REJECTED;
+}
+
+static void op_reboot(void *ctx)
+{
+    (void)ctx;
+    ESP_LOGE(TAG, "GNSS ladder: no byte from the receiver after the recovery steps: rebooting the ESP32");
+    (void)lifecycle_request_reboot(LIFECYCLE_REBOOT_GNSS_LADDER);
+}
+
+static void op_journal(void *ctx, uint8_t code, uint8_t outcome)
+{
+    (void)ctx;
+    if (outcome == HL_OUT_HEALTHY) {
+        ESP_LOGI(TAG, "GNSS ladder: %s: %s", step_name(code), outcome_name(outcome));
+    } else {
+        ESP_LOGW(TAG, "GNSS ladder: %s: %s", step_name(code), outcome_name(outcome));
+    }
+    int32_t b = (int32_t)(((uint32_t)outcome << 8) | code);
+    esp_err_t err = diag_journal_append(DIAG_EV_LADDER_STEP, 0, b);
+    if (err != ESP_OK) {
+        ESP_LOGD(TAG, "ladder record not journalled: %s", esp_err_to_name(err));
+    }
+}
+
+/* ---- events ------------------------------------------------------------------- */
+
+static void on_station_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    if (id != STATION_EVENT_STATE_CHANGED || data == NULL) {
+        return;
+    }
+    station_state_t st = *(const station_state_t *)data;
+    if (st == STATION_STATE_RECOVERING && s_ev_state != STATION_STATE_RECOVERING) {
+        __atomic_add_fetch(&s_rec_enters, 1u, __ATOMIC_SEQ_CST);
+    } else if (st != STATION_STATE_RECOVERING && s_ev_state == STATION_STATE_RECOVERING) {
+        __atomic_add_fetch(&s_rec_exits, 1u, __ATOMIC_SEQ_CST);
+    }
+    s_ev_state = st;
+}
+
+static void on_ntrip_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    (void)id;
+    (void)data;
+    __atomic_store_n(&s_cfg_dirty, true, __ATOMIC_SEQ_CST);
+}
+
+/* ---- one tick, part by part --------------------------------------------------- */
+
+/* Loss counters: one journal record per tick at most; FIFO overflows also
+ * go to the ledger's daily count. */
+static void loss_tick(const gnss_link_stats_t *link, const rtcm_hub_stats_t *hub, int64_t now)
+{
+    const uint64_t vals[HM_LOSS_IDS] = {
+        link->hw_fifo_overflows,      link->rx_buffer_full,    link->line_errors,
+        link->framing.rtcm_crc_errors, link->framing.bytes_discarded, hub->publish_failures,
+        link->baud_switch_bytes,      link->rx_events_dropped,
+    };
+    uint64_t inc[HM_LOSS_IDS];
+    hm_loss_sample(&s_loss, vals, now, inc);
+
+    s_ledger_owed += inc[DIAG_LOSS_HW_FIFO - 1];
+    for (unsigned i = 0; i < LEDGER_OVF_PER_TICK && s_ledger_owed > 0; i++, s_ledger_owed--) {
+        ledger_count_overflow();
+    }
+
+    uint8_t id;
+    int32_t delta;
+    if (hm_loss_next(&s_loss, &id, &delta)) {
+        esp_err_t err = diag_journal_append(DIAG_EV_DATA_LOSS, id, delta);
+        if (err == ESP_OK) {
+            hm_loss_written(&s_loss, id, delta);
+        }
+        /* refused (rate limit) or no journal: the increase stays pending */
+    }
+}
+
+/* Caster slots: budgets, "down" for the level, the protected slot for the
+ * network ladder, and whether any slot streams (upstream evidently works). */
+static void casters_tick(int64_t now, bool *any_down, bool *protected_down, bool *any_streaming)
+{
+    *any_down = false;
+    *protected_down = false;
+    *any_streaming = false;
+    size_t n = ntrip_server_slot_count();
+    if (n > MAX_SLOTS) {
+        n = MAX_SLOTS;
+    }
+    if (__atomic_exchange_n(&s_cfg_dirty, false, __ATOMIC_SEQ_CST) || now - s_cfg_at_ms >= CFG_REFRESH_MS) {
+        s_cfg_at_ms = now;
+        for (size_t i = 0; i < n; i++) {
+            bool ok = ntrip_server_get_config(i, &s_ccfg, false) == ESP_OK;
+            s_slot_enabled[i] = ok && s_ccfg.enabled;
+            s_slot_protected[i] = ok && s_ccfg.protected_slot;
+        }
+        memset(&s_ccfg, 0, sizeof(s_ccfg));
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (ntrip_server_get_status(i, &s_cst) != ESP_OK) {
+            continue;
+        }
+        hm_slot_in_t si = {
+            .enabled = s_slot_enabled[i] && s_cst.state != NTRIP_STATE_DISABLED,
+            .state = (uint8_t)s_cst.state,
+            .state_age_s = s_cst.state_age_s,
+            .progress_age_ms = s_cst.progress_age_ms,
+            .connect_budget_s = CONFIG_NTRIP_CONNECT_BUDGET_S,
+            .send_timeout_ms = CONFIG_NTRIP_SEND_TIMEOUT_MS,
+        };
+        if (hm_slot_overrun(&s_slot[i], &si, now)) {
+            ESP_LOGW(TAG, "caster slot %u over its budget (state %d for %" PRIu32 " s, no progress for %" PRIu32
+                     " ms): restarting it",
+                     (unsigned)i, (int)s_cst.state, s_cst.state_age_s, s_cst.progress_age_ms);
+            if (ntrip_server_restart_slot(i) == ESP_OK) {
+                s_caster_restarts++;
+            }
+        }
+        if (hm_slot_down(&si)) {
+            *any_down = true;
+        }
+        if (si.enabled && s_cst.state == NTRIP_STATE_STREAMING) {
+            *any_streaming = true;
+        }
+        if (s_slot_protected[i] && si.enabled && s_cst.state != NTRIP_STATE_STREAMING &&
+            s_cst.state != NTRIP_STATE_PAUSED) {
+            *protected_down = true;
+        }
+    }
+}
+
+/* Network ladder inputs; the ladder itself runs in the network component.
+ * @return the "no upstream" alert: an IP, the last probe reached nothing
+ *         beyond the router, and no caster streams. */
+static bool network_tick(const rtcm_hub_stats_t *hub, bool protected_down, bool any_streaming)
+{
+    bool have = network_get_status(&s_net) == ESP_OK;
+    network_ladder_input_t nin = {
+        .caster_down = protected_down,
+        .rtcm_healthy = hub->last_frame_age_ms != UINT32_MAX && hub->last_frame_age_ms <= STALL_MS,
+        .flash_journal_open = s_st.flash_journal_open,
+        .flash_journal_unknown = s_st.flash_journal_settings_unavailable,
+        .min_reboot_interval_s = (uint32_t)CONFIG_HEALTH_NET_REBOOT_MIN_INTERVAL_H * 3600u,
+    };
+    esp_err_t err = network_ladder_tick(&nin);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGD(TAG, "network ladder: %s", esp_err_to_name(err));
+    }
+    return have && s_net.online && s_net.probe == NETWORK_PROBE_NO_UPSTREAM && !any_streaming;
+}
+
+static bool heap_tick(int64_t now, health_status_t *o)
+{
+    o->heap_internal_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    o->heap_internal_min = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    o->heap_internal_largest = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    o->heap_psram_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    if (o->heap_internal_min < HEAP_WARN_BYTES && !s_heap_warned) {
+        s_heap_warned = true;
+        ESP_LOGW(TAG, "internal heap low-water %" PRIu32 " B (free %" PRIu32 " B)", o->heap_internal_min,
+                 o->heap_internal_free);
+    }
+    if (o->heap_internal_min < HEAP_REBOOT_BYTES && !s_heap_reboot) {
+        /* Allowed even with a receiver flash journal open: lifecycle waits
+         * for the reboot inhibit, and a starved heap would take the web UI
+         * down with it. */
+        s_heap_reboot = true;
+        ESP_LOGE(TAG, "internal heap low-water %" PRIu32 " B: rebooting", o->heap_internal_min);
+        (void)lifecycle_request_reboot(LIFECYCLE_REBOOT_LOW_HEAP);
+    }
+    return hm_deb(&s_deb_frag, o->heap_internal_largest < FRAG_BYTES, now, FRAG_ON_MS, FRAG_OFF_MS);
+}
+
+/* A receiver flash session in full lockout (not waiting for the user). */
+static bool receiver_update_running(void)
+{
+    if (lifecycle_update_active() == LIFECYCLE_UPDATE_RECEIVER) {
+        return true;
+    }
+    return s_st.flash_journal_open && s_st.flash_journal_readable &&
+           s_st.flash_journal.state != UM98X_JOURNAL_NEEDS_USER && s_st.flash.phase != UM98X_FLASH_NEEDS_USER;
+}
+
+static void admin_reset(void)
+{
+    ESP_LOGW(TAG, "BOOT button: clearing the admin password and opening the recovery AP");
+    if (settings_is_available()) {
+        esp_err_t err = settings_erase_key(SETTINGS_NS_SYS, SETTINGS_KEY_ADMIN_HASH);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "admin password not cleared: %s", esp_err_to_name(err));
+        }
+    } else {
+        ESP_LOGW(TAG, "settings unavailable: no stored admin password to clear");
+    }
+    esp_err_t err = network_start_setup_ap(true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "recovery AP not started: %s", esp_err_to_name(err));
+    }
+}
+
+static void factory_reset(int64_t now)
+{
+    if (receiver_update_running()) {
+        s_factory_refused_ms = now;
+        ESP_LOGE(TAG, "BOOT button: factory reset refused while a receiver update runs (it needs the stored "
+                      "profile); try again when it has finished");
+        return;
+    }
+    ESP_LOGW(TAG, "BOOT button: factory reset");
+    esp_err_t err = settings_factory_reset();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "factory reset failed: %s", esp_err_to_name(err));
+        return;
+    }
+    (void)lifecycle_request_reboot(LIFECYCLE_REBOOT_FACTORY_RESET);
+}
+
+static void button_tick(int64_t now)
+{
+    const board_desc_t *b = board_get();
+    if (!board_is_valid() || b->button_gpio < 0) {
+        return;
+    }
+    bool pressed = gpio_get_level((gpio_num_t)b->button_gpio) == 0;   /* active low */
+    switch (hm_button(&s_button, pressed, now, (uint32_t)CONFIG_HEALTH_BUTTON_ADMIN_S * 1000u,
+                      (uint32_t)CONFIG_HEALTH_BUTTON_FACTORY_S * 1000u)) {
+    case HM_BTN_ADMIN_REACHED:
+        ESP_LOGW(TAG, "BOOT held %d s: release now to clear the admin password (keep holding to %d s for a "
+                      "factory reset)",
+                 CONFIG_HEALTH_BUTTON_ADMIN_S, CONFIG_HEALTH_BUTTON_FACTORY_S);
+        break;
+    case HM_BTN_FACTORY_REACHED:
+        ESP_LOGW(TAG, "BOOT held %d s: release now for a factory reset", CONFIG_HEALTH_BUTTON_FACTORY_S);
+        break;
+    case HM_BTN_ADMIN:
+        admin_reset();
+        break;
+    case HM_BTN_FACTORY:
+        factory_reset(now);
+        break;
+    default:
+        break;
+    }
+}
+
+static void log_changes(const health_status_t *o)
+{
+    if (o->level != s_prev_level) {
+        static const char *const k[] = { "ok", "degraded", "recovering", "failed" };
+        ESP_LOGI(TAG, "level %s -> %s", k[s_prev_level & 3u], k[o->level & 3u]);
+        s_prev_level = (uint8_t)o->level;
+    }
+    if (o->alerts != s_prev_alerts) {
+        ESP_LOGI(TAG, "alerts 0x%03" PRIx32 " -> 0x%03" PRIx32, s_prev_alerts, o->alerts);
+        s_prev_alerts = o->alerts;
+    }
+    if (o->gnss_ladder_suspended != s_prev_suspended) {
+        ESP_LOGD(TAG, "GNSS ladder %s", o->gnss_ladder_suspended ? "suspended" : "running");
+        s_prev_suspended = o->gnss_ladder_suspended;
+    }
+}
+
+static void tick(void)
+{
+    int64_t now = now_ms();
+    lifecycle_boot_info_t boot;
+    lifecycle_get_boot_info(&boot);
+
+    (void)gnss_link_get_stats(&s_link_stats);
+    rtcm_hub_stats_t hub;
+    rtcm_hub_get_stats(&hub);
+
+    /* Transition counters first, then the status: a transition counted here
+     * is already in the status read after it. */
+    uint32_t enters = __atomic_load_n(&s_rec_enters, __ATOMIC_SEQ_CST);
+    uint32_t exits = __atomic_load_n(&s_rec_exits, __ATOMIC_SEQ_CST);
+    if (station_get_status(&s_st) != ESP_OK) {
+        memset(&s_st, 0, sizeof(s_st));
+        s_st.state = STATION_STATE_IDLE;
+        s_st.since_lease_release_ms = UINT32_MAX;
+    }
+
+    hl_in_t *in = &s_in;
+    in->now_ms = now;
+    in->stall_ms = STALL_MS;
+    in->rtcm_age_ms = s_link_stats.last_rtcm_age_ms;
+    in->rx_age_ms = s_link_stats.last_rx_age_ms;
+    in->rx_bytes = s_link_stats.rx_bytes;
+    in->text_lines = s_link_stats.framing.text_lines;
+    in->stn_state = (uint8_t)s_st.state;
+    in->rec_enters = enters;
+    in->rec_exits = exits;
+    in->lease_held = s_st.lease_held;
+    in->since_release_ms = s_st.since_lease_release_ms;
+    in->journal_open = s_st.flash_journal_open;
+    in->journal_unknown = s_st.flash_journal_settings_unavailable;
+    in->safe_mode = boot.safe_mode;
+    in->detect_saw_bytes = s_st.detect_saw_bytes;
+    in->reconfigure_refused = s_st.reconfigure_refused;
+    in->surveying = s_st.surveying;
+#if CONFIG_HEALTH_SURVEY_HOLDS_RTCM
+    in->survey_holds_rtcm = true;
+#else
+    in->survey_holds_rtcm = false;
+#endif
+    in->reboot_allowed = lifecycle_ladder_reboot_allowed(NULL);
+    in->reboot_inhibited = lifecycle_reboot_inhibited(NULL);
+    hl_tick(&s_ladder, in);
+    hl_status_t ls;
+    hl_get_status(&s_ladder, in, &ls);
+
+    loss_tick(&s_link_stats, &hub, now);
+    bool link_loss = hm_link_tick(&s_link, s_link_stats.hw_fifo_overflows, s_link_stats.framing.rtcm_crc_errors,
+                                  s_link_stats.framing.rtcm_frames, ls.suspended, now);
+
+    bool any_down;
+    bool protected_down;
+    bool any_streaming;
+    casters_tick(now, &any_down, &protected_down, &any_streaming);
+    bool casters_down = hm_deb(&s_deb_casters, any_down, now, CASTER_ON_MS, CASTER_OFF_MS);
+    bool no_upstream = network_tick(&hub, protected_down, any_streaming);
+
+    gnss_obs_summary_t obs;
+    bool bands_raw = gnss_obs_get_summary(&obs) == ESP_OK && obs.epochs > 0 && obs.epoch_age_ms <= STALL_MS &&
+                     (obs.best_bands < 4 || obs.e6_lost);
+    bool bands = hm_deb(&s_deb_bands, bands_raw, now, BANDS_ON_MS, BANDS_OFF_MS);
+
+    bool drift_raw = s_st.state == STATION_STATE_STREAMING && s_st.identity_confirmed && !s_st.profile_applied &&
+                     (s_st.alerts & (STATION_ALERT_UNSUPPORTED_MODEL | STATION_ALERT_CONFIG_FAILED)) == 0;
+    bool drift = hm_deb(&s_deb_drift, drift_raw, now, DRIFT_ON_MS, DRIFT_OFF_MS);
+
+    health_status_t o;
+    memset(&o, 0, sizeof(o));
+    bool fragmented = heap_tick(now, &o);
+    button_tick(now);
+    ledger_tick();
+
+    uint32_t alerts = 0;
+    if (boot.brownouts_since_power_on > 0) {
+        alerts |= HEALTH_ALERT_POWER_SUPPLY;
+    }
+    if (ls.power_alert) {
+        alerts |= HEALTH_ALERT_RECEIVER_POWER;
+    }
+    if (bands) {
+        alerts |= HEALTH_ALERT_BANDS;
+    }
+    if (drift) {
+        alerts |= HEALTH_ALERT_PROFILE_DRIFT;
+    }
+    if (fragmented) {
+        alerts |= HEALTH_ALERT_HEAP_FRAGMENTED;
+    }
+    if (boot.safe_mode) {
+        alerts |= HEALTH_ALERT_SAFE_MODE;
+    }
+    if (!settings_is_available()) {
+        alerts |= HEALTH_ALERT_SETTINGS_DEGRADED;
+    }
+    if (no_upstream) {
+        alerts |= HEALTH_ALERT_NO_UPSTREAM;
+    }
+    if (link_loss) {
+        alerts |= HEALTH_ALERT_LINK_LOSS;
+    }
+
+    bool degraded = (alerts & ~(uint32_t)HEALTH_ALERT_RECEIVER_POWER) != 0 || casters_down;
+    o.level = (health_level_t)hm_level(ls.level, degraded);
+    o.alerts = alerts;
+    o.last_step = (health_step_t)ls.last_step;
+    o.gnss_ladder_suspended = ls.suspended;
+    o.uptime_s = (uint64_t)(esp_timer_get_time() / 1000000);
+    o.gnss_stalls = ls.stalls;
+    o.recoveries = ls.recoveries;
+    o.caster_restarts = s_caster_restarts;
+    o.network_recoveries = s_net.ladder_actions;
+    o.rtcm_gap_ms = s_link_stats.last_rtcm_age_ms;
+    o.gnss_retry_in_s = ls.retry_in_s;
+    if (s_factory_refused_ms == HM_NEVER) {
+        o.factory_reset_refused_age_s = UINT32_MAX;
+    } else {
+        int64_t age = (now - s_factory_refused_ms) / 1000;
+        o.factory_reset_refused_age_s = age >= (int64_t)UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)age;
+    }
+
+    portENTER_CRITICAL(&s_lock);
+    s_pub = o;
+    s_pub_valid = true;
+    portEXIT_CRITICAL(&s_lock);
+    log_changes(&o);
+}
+
+static void health_task(void *arg)
+{
+    (void)arg;
+    bool wdt = esp_task_wdt_add(NULL) == ESP_OK;
+    if (!wdt) {
+        ESP_LOGW(TAG, "not on the task watchdog");
+    }
+    TickType_t last = xTaskGetTickCount();
+    for (;;) {
+        tick();
+        if (wdt) {
+            (void)esp_task_wdt_reset();
+        }
+        vTaskDelayUntil(&last, pdMS_TO_TICKS(TICK_MS));
+    }
+}
+
+/* ---- public API -------------------------------------------------------------- */
+
 esp_err_t health_init(void)
 {
-    /* TODO: event handlers, BOOT button input, ladder state. */
-    ESP_LOGI(TAG, "stub: stall after %d s, button %d s / %d s", CONFIG_HEALTH_GNSS_STALL_S,
+    if (s_inited) {
+        return ESP_OK;
+    }
+    int64_t now = now_ms();
+    const hl_ops_t ops = { .request = op_request, .reboot = op_reboot, .journal = op_journal, .ctx = NULL };
+    hl_init(&s_ladder, &ops, now);
+    hm_loss_init(&s_loss);
+    hm_link_init(&s_link, now);
+    for (size_t i = 0; i < MAX_SLOTS; i++) {
+        hm_slot_init(&s_slot[i]);
+    }
+    hm_deb_init(&s_deb_bands);
+    hm_deb_init(&s_deb_drift);
+    hm_deb_init(&s_deb_frag);
+    hm_deb_init(&s_deb_casters);
+    hm_button_init(&s_button);
+
+    esp_err_t err = esp_event_handler_register(STATION_EVENT, STATION_EVENT_STATE_CHANGED, on_station_event, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "station events not received (%s): ladder steps are followed by polling only",
+                 esp_err_to_name(err));
+    }
+    err = esp_event_handler_register(NTRIP_EVENT, NTRIP_EVENT_STATE_CHANGED, on_ntrip_event, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "caster events not received (%s)", esp_err_to_name(err));
+    }
+    s_inited = true;
+    ESP_LOGI(TAG, "stall after %d s without RTCM; BOOT button %d s / %d s", CONFIG_HEALTH_GNSS_STALL_S,
              CONFIG_HEALTH_BUTTON_ADMIN_S, CONFIG_HEALTH_BUTTON_FACTORY_S);
     return ESP_OK;
 }
 
 esp_err_t health_start(void)
 {
-    /* TODO: 1 Hz monitor task: ledger_tick(), ladders, caster budgets,
-     * button, heap watch. */
-    return ESP_ERR_NOT_SUPPORTED;
+    if (!s_inited) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_task != NULL) {
+        return ESP_OK;
+    }
+    TaskHandle_t t = NULL;
+    if (xTaskCreate(health_task, "health", CONFIG_HEALTH_TASK_STACK, NULL, TASK_PRIO, &t) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    s_task = t;
+    return ESP_OK;
 }
 
 esp_err_t health_get_status(health_status_t *out)
@@ -39,11 +645,24 @@ esp_err_t health_get_status(health_status_t *out)
     if (out == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    bool have;
+    portENTER_CRITICAL(&s_lock);
+    have = s_pub_valid;
+    if (have) {
+        *out = s_pub;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    if (have) {
+        out->uptime_s = (uint64_t)(esp_timer_get_time() / 1000000);
+        return ESP_OK;
+    }
+
+    /* Before the first tick (or without the monitor task): what is known
+     * without sampling. FAILED is reserved for the ladder; safe mode is an
+     * alert. */
     memset(out, 0, sizeof(*out));
     lifecycle_boot_info_t boot;
     lifecycle_get_boot_info(&boot);
-    /* FAILED is reserved for the GNSS ladder's 6b and 7; safe mode is an alert. */
-    out->level = boot.safe_mode ? HEALTH_DEGRADED : HEALTH_OK;
     if (boot.safe_mode) {
         out->alerts |= HEALTH_ALERT_SAFE_MODE;
     }
@@ -53,6 +672,10 @@ esp_err_t health_get_status(health_status_t *out)
     if (!settings_is_available()) {
         out->alerts |= HEALTH_ALERT_SETTINGS_DEGRADED;
     }
+    out->level = out->alerts != 0 ? HEALTH_DEGRADED : HEALTH_OK;
+    out->uptime_s = (uint64_t)(esp_timer_get_time() / 1000000);
+    out->rtcm_gap_ms = UINT32_MAX;
+    out->factory_reset_refused_age_s = UINT32_MAX;
     out->heap_internal_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     out->heap_internal_min = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
     out->heap_internal_largest = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
