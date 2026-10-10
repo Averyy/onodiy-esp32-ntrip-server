@@ -30,3 +30,6 @@ compile_commands.json
 
 # macOS
 .DS_Store
+
+# Bench tool run logs (tools/bench; default ./bench-logs wherever they run)
+bench-logs/
