@@ -1,0 +1,182 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Avery L.
+ * SPDX-License-Identifier: MIT
+ *
+ * Network decisions that need no radio (pure logic, no IDF or RTOS includes,
+ * host-testable): reconnect backoff, input validation, the setup AP's name,
+ * when the setup/recovery AP is up, which disconnects go to the event
+ * journal, the cached scan list, and the age of the last network-ladder
+ * reboot across resets. Times are seconds of an injected monotonic clock,
+ * compared only as (uint32_t)(now - then), so they survive the clock wrap.
+ */
+#pragma once
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ---- reconnect backoff --------------------------------------------------------- */
+
+/** Longest wait between two station connect attempts. */
+#define NET_BACKOFF_CAP_MS 30000u
+
+/**
+ * Wait before connect attempt `attempt` (0 = the first retry after a drop):
+ * 1 s, 2 s, 4 s, 8 s, 16 s, then 30 s for every further attempt, forever.
+ */
+uint32_t net_backoff_ms(uint32_t attempt);
+
+/* ---- validation ------------------------------------------------------------------ */
+
+/** SSID: 1-32 bytes (any bytes except NUL). */
+bool net_ssid_valid(const char *ssid);
+
+/**
+ * Station password: "" (open network), 8-63 printable ASCII characters
+ * (WPA passphrase) or exactly 64 hex digits (raw PSK).
+ */
+bool net_password_valid(const char *pass);
+
+/** Setup-AP password: 8-63 printable ASCII characters (WPA2 passphrase). */
+bool net_ap_password_valid(const char *pass);
+
+/** DHCP hostname: 1-32 characters [A-Za-z0-9-], not starting or ending with '-'. */
+bool net_hostname_valid(const char *name);
+
+/**
+ * Setup-AP SSID: `prefix` followed by the last two MAC bytes as four
+ * upper-case hex digits ("onocoydiy-" + "3A7F"). The prefix is cut so the
+ * whole name fits the 32-byte SSID limit and the digits always survive.
+ * @return length written (excluding the terminator), 0 if out is too small
+ *         for the digits.
+ */
+size_t net_ap_ssid(const char *prefix, const uint8_t mac[6], char *out, size_t out_size);
+
+/* ---- when the AP is up --------------------------------------------------------------- */
+
+/** Why the AP is up (bit flags; 0 = down). */
+typedef enum {
+    NET_AP_SETUP    = 1u << 0, /**< no station credentials (first boot, after a factory reset) */
+    NET_AP_FALLBACK = 1u << 1, /**< configured but offline for the fallback time, or held until the station has an IP */
+    NET_AP_LINGER   = 1u << 2, /**< station just got its IP: setup page can still show the new address */
+    NET_AP_RECOVERY = 1u << 3, /**< BOOT button (or a manual request): fixed lifetime, longer while a client is connected */
+} net_ap_reason_t;
+
+typedef struct {
+    bool settings_available;     /**< settings readable this boot; without them no AP opens on its own */
+    bool sta_configured;         /**< station credentials present */
+    bool has_ip;                 /**< station holds an IP */
+    uint32_t offline_s;          /**< since the station last had an IP (or since start); ignored while has_ip */
+    uint32_t since_ip_s;         /**< since the station got its current IP; ignored unless has_ip */
+    uint32_t reasons_now;        /**< what the AP is up for right now (net_ap_reason_t, 0 = down) */
+    bool recovery_requested;     /**< a recovery (or manual) AP was requested and has not expired */
+    uint32_t recovery_age_s;     /**< since that request */
+    uint32_t ap_clients;         /**< stations connected to the AP */
+    uint32_t fallback_after_s;   /**< offline time before the fallback AP opens */
+    uint32_t recovery_lifetime_s;/**< recovery AP lifetime when nobody is connected */
+    uint32_t linger_s;           /**< how long the AP stays after the station got an IP */
+} net_ap_input_t;
+
+/**
+ * Reasons the AP should be up now (net_ap_reason_t flags, 0 = down):
+ *  - RECOVERY while the request is younger than its lifetime, and after that
+ *    for as long as a client stays connected; then *recovery_expired is set
+ *    (the caller clears the request).
+ *  - Only with settings available (degraded mode opens nothing on its own):
+ *    SETUP while no credentials are stored; FALLBACK once the configured
+ *    station has been offline for fallback_after_s, and also for as long as
+ *    an AP that is up for SETUP/FALLBACK/LINGER waits for the station's IP
+ *    (new credentials being tried, or failing: the browser keeps its link);
+ *    LINGER for linger_s after the station got its IP while such an AP is up.
+ */
+uint32_t net_ap_reasons(const net_ap_input_t *in, bool *recovery_expired);
+
+/* ---- disconnect journal filter -------------------------------------------------------- */
+
+/**
+ * Which station disconnects are journalled. A long outage retries every 30 s
+ * and must not flood the event journal (fixed-size ring) with identical
+ * records, so within one outage:
+ *  - the drop of an established connection is always recorded;
+ *  - a failed attempt is recorded when its reason differs from the last
+ *    recorded one and the last record is at least NET_DROP_LOG_CHANGE_S old,
+ *    or when the last record is at least NET_DROP_LOG_REPEAT_S old.
+ */
+#define NET_DROP_LOG_CHANGE_S 60u
+#define NET_DROP_LOG_REPEAT_S 600u
+
+typedef struct {
+    bool any;              /**< something was recorded in this outage */
+    uint8_t last_reason;
+    uint32_t last_s;
+} net_drop_log_t;
+
+/** Start state (also after a successful connection). */
+void net_drop_log_reset(net_drop_log_t *s);
+
+/**
+ * Should this disconnect be recorded? `was_connected` = the station was
+ * associated before this event (an established link dropped). Updates the
+ * state when it answers true.
+ */
+bool net_drop_log_should(net_drop_log_t *s, bool was_connected, uint8_t reason, uint32_t now_s);
+
+/* ---- cached scan list ----------------------------------------------------------------- */
+
+typedef struct {
+    char ssid[33];
+    int8_t rssi;
+    uint8_t channel;
+    bool secured;
+} net_scan_entry_t;
+
+/**
+ * Add one scan record to a list kept sorted by signal, strongest first. One
+ * entry per SSID (the strongest access point of a mesh or repeater set);
+ * hidden networks (empty SSID) are skipped; a full list drops its weakest
+ * entry for a stronger one.
+ * @return the new number of entries.
+ */
+size_t net_scan_insert(net_scan_entry_t *list, size_t count, size_t cap, const net_scan_entry_t *e);
+
+/* ---- network-ladder reboot age across resets ---------------------------------------- */
+
+/** Age not known (no network-ladder reboot since power-on, or state lost). */
+#define NET_AGE_UNKNOWN UINT32_MAX
+
+#define NET_RTC_MAGIC 0x4E455452u  /* "NETR" */
+
+/**
+ * Kept in RTC memory (survives software, panic and watchdog resets, not
+ * power loss), validated by magic and checksum. An invalid block is a fresh
+ * start, like a power cycle.
+ */
+typedef struct {
+    uint32_t magic;
+    uint32_t age_at_boot_s;  /**< seconds from the last network-ladder reboot to this boot's start, NET_AGE_UNKNOWN if none */
+    uint32_t check;
+} net_rtc_t;
+
+bool net_rtc_valid(const net_rtc_t *r);
+void net_rtc_seal(net_rtc_t *r);
+
+/**
+ * Account for this boot:
+ *  - the previous boot ended in a network-ladder reboot: age 0;
+ *  - else, with a valid block and a known previous session length (software,
+ *    panic and watchdog resets): the stored age plus that session;
+ *  - else (power-on, brownout, lost block): unknown.
+ * Seals the block.
+ */
+void net_rtc_on_boot(net_rtc_t *r, bool prev_was_ladder_reboot, uint32_t prev_session_s);
+
+/** Seconds since the last network-ladder reboot now (saturating), NET_AGE_UNKNOWN if none. */
+uint32_t net_rtc_age_now(const net_rtc_t *r, uint32_t uptime_s);
+
+#ifdef __cplusplus
+}
+#endif
