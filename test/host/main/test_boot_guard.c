@@ -354,3 +354,54 @@ TEST_CASE("GNSS ladder reboot budget starts fresh after a power cycle or a lost 
     TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 10, NULL));
     TEST_ASSERT_EQUAL_UINT32(0, st.ladder_count);
 }
+
+TEST_CASE("boot guard: a block from before another image's run is accounted again from scratch", "[boot_guard]")
+{
+    /* Image A crashed twice, then planned an app update (stamp: generation 4). */
+    boot_guard_state_t st;
+    fresh(&st);
+    boot_guard_stamp(&st, 4);
+    boot(&st, BOOT_HW_CRASH);
+    boot(&st, BOOT_HW_CRASH);
+    TEST_ASSERT_EQUAL_UINT32(2, st.crashes);
+    TEST_ASSERT_EQUAL_UINT32(4, st.gen);                 /* accounting keeps the stamp */
+    boot_guard_set_reboot_reason(&st, 4);                /* APP_UPDATE */
+    TEST_ASSERT_TRUE(boot_guard_valid(&st));
+
+    /* Another image ran; back on A, the first accounting takes the block as
+     * found (the settings are not read yet), and so does one claimed flag. */
+    boot_guard_result_t res = boot(&st, BOOT_HW_SOFTWARE);
+    TEST_ASSERT_EQUAL(BOOT_RESET_PLANNED, res.cls);
+    TEST_ASSERT_EQUAL_UINT32(4, res.prev_reboot_reason);
+    TEST_ASSERT_TRUE(boot_guard_claim_once(&st, 1u << 3));
+
+    /* The stamp is not accepted: accounted again as after power loss. */
+    boot_guard_restart(&st, BOOT_HW_SOFTWARE, LIMIT, 1u << 3, &res);
+    TEST_ASSERT_TRUE(boot_guard_valid(&st));
+    TEST_ASSERT_TRUE(res.state_was_lost);
+    TEST_ASSERT_EQUAL(BOOT_RESET_OTHER, res.cls);        /* no stale planned reason */
+    TEST_ASSERT_EQUAL_UINT32(0, res.prev_reboot_reason);
+    TEST_ASSERT_EQUAL_UINT32(BOOT_GUARD_UNKNOWN, res.prev_session_s);
+    TEST_ASSERT_EQUAL_UINT32(0, st.crashes);
+    TEST_ASSERT_EQUAL_UINT32(1, st.boots);
+    TEST_ASSERT_EQUAL_UINT32(0, st.gen);                 /* unstamped until stamped */
+    TEST_ASSERT_FALSE(boot_guard_claim_once(&st, 1u << 3));   /* this boot's claim kept */
+    TEST_ASSERT_TRUE(boot_guard_claim_once(&st, 1u << 2));
+
+    /* A crash reset counts once, from zero; stale safe mode is dropped. */
+    for (int i = 0; i < (int)LIMIT; i++) {
+        boot(&st, BOOT_HW_CRASH);
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, st.safe_mode);
+    boot_guard_restart(&st, BOOT_HW_CRASH, LIMIT, 0, &res);
+    TEST_ASSERT_EQUAL(BOOT_RESET_CRASH, res.cls);
+    TEST_ASSERT_EQUAL_UINT32(1, st.crashes);
+    TEST_ASSERT_FALSE(res.safe_mode);
+    TEST_ASSERT_EQUAL_UINT32(0, st.safe_mode);
+
+    /* The stamp is covered by the checksum. */
+    boot_guard_stamp(&st, 9);
+    TEST_ASSERT_TRUE(boot_guard_valid(&st));
+    st.gen = 8;
+    TEST_ASSERT_FALSE(boot_guard_valid(&st));
+}

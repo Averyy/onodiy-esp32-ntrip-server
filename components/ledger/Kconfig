@@ -50,11 +50,14 @@ menu "Station: availability ledger"
         default 60
         help
             After a power cut, the time between this mark and the next boot
-            is counted as downtime. Today's counters are stored with it when
-            they changed (only while some slot is down). Shorter is more
-            exact but writes NVS more often: at 60 s the mark alone is about
-            1500 page erases per page in 10 years with the 112 KB NVS
-            partition, and a slot that stays down for years at a time adds
-            about ten times that, still well inside the flash's rating.
+            is counted as downtime. When today's counters changed (only
+            while some slot is down) they are stored with the mark as one
+            record, in one write; otherwise the mark alone is written.
+            Shorter is more exact but writes NVS more often: at 60 s the
+            mark alone is about 1500 page erases per page in 10 years with
+            the 112 KB NVS partition, and a slot that stays down for years
+            at a time makes it about six times that (the record is six NVS
+            entries, the mark alone one), still well inside the flash's
+            rating.
 
 endmenu

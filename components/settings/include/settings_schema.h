@@ -70,16 +70,18 @@ extern "C" {
 #define SETTINGS_KEY_OTA_ETAG       "etag"        /**< str: ETag of the last manifest fetched (written only when it changes) */
 #define SETTINGS_KEY_OTA_LAST_CHECK "last_check"  /**< i64: unix time of the last successful update check (written once per check), so reboots add no checks */
 
-/* ---- "life": boot history (crash counter and safe-mode state live in RTC
- * memory, so a power cycle always retries a normal boot) ---------------------- */
+/* ---- "life": boot history and image generation (crash counter and
+ * safe-mode state live in RTC memory, so a power cycle always retries a
+ * normal boot) ---------------------------------------------------------------- */
 #define SETTINGS_NS_LIFE            "life"        /**< whole namespace survives factory reset */
 #define SETTINGS_KEY_BOOT_HISTORY   "boots"       /**< blob: last 16 boots (reset class, raw reason, planned-reboot reason, boot no., previous session uptime, app version) */
+#define SETTINGS_KEY_BOOT_GEN       "gen"         /**< blob: image generation {u8 version, u32 generation, u32 image id} stamped into the RTC blocks; written only when another app image boots */
 
 /* ---- "ledger": availability accounting ------------------------------------- */
 #define SETTINGS_NS_LEDGER          "ledger"      /**< whole namespace survives factory reset */
-#define SETTINGS_KEY_LEDGER_TODAY   "today"       /**< blob: running counters of the current UTC day */
+#define SETTINGS_KEY_LEDGER_TODAY   "today"       /**< blob: running counters of the current UTC day with the last-alive mark (UTC ms) they run up to, one unit (an older blob without the mark: the alive key alone) */
 #define SETTINGS_KEY_LEDGER_HIST    "hist"        /**< blob: last 30 UTC days (availability per slot, reconnects, overflows) */
-#define SETTINGS_KEY_LEDGER_ALIVE   "alive"       /**< i64: last "still running" unix time (power-off gaps count as downtime) */
+#define SETTINGS_KEY_LEDGER_ALIVE   "alive"       /**< i64: last "still running" unix time, written only while the stored today is unchanged; a restore takes the later of it and the today blob's mark (power-off gaps count as downtime) */
 
 /* ---- "web" ------------------------------------------------------------------ */
 #define SETTINGS_NS_WEB             "web"

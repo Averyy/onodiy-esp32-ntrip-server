@@ -7,7 +7,10 @@
  *
  * Failure policy:
  *  - Boot accounting runs first, before anything that could crash, so a crash
- *    in any later step counts toward safe mode.
+ *    in any later step counts toward safe mode. Right after the settings,
+ *    lifecycle_init() checks that accounting's RTC state against the image
+ *    generation (state from before another app image's run starts over),
+ *    before the safe-mode decision or any other RTC block is read.
  *  - NVS is never erased just because it is unreadable. Written by a newer
  *    app (rolled back): boot that app if the other slot still holds it and it
  *    is newer, otherwise run without persistence. Erased only when it is full or
@@ -78,7 +81,9 @@ typedef struct {
  * the casters close; and how lifecycle says the previous session ended (a
  * planned reboot, or a crash or reboot that was not) is reported to it
  * before the casters report their slots. Without a record of lifecycle's
- * (power-on, another image) the ledger's own books decide.
+ * (power-on, another image) the ledger's own books decide. Lifecycle's RTC
+ * stamp check is handed over too: the ledger uses its RTC copy only when it
+ * is from the run right before this boot.
  */
 static void ledger_reboot_hook(lifecycle_reboot_reason_t reason, uint32_t deadline_ms, void *ctx)
 {
@@ -89,7 +94,7 @@ static void ledger_reboot_hook(lifecycle_reboot_reason_t reason, uint32_t deadli
 
 static esp_err_t ledger_step(void)
 {
-    esp_err_t err = ledger_init();
+    esp_err_t err = ledger_init(lifecycle_rtc_stamp_ok, lifecycle_rtc_stamp());
     if (err != ESP_OK) {
         return err;
     }
@@ -110,12 +115,11 @@ static esp_err_t ledger_step(void)
 }
 
 /* Initialisation: allocate, load settings, register handlers. No tasks yet
- * (except the lifecycle service). fw_update goes first so a failing app trial
- * is reverted before the steps that might be what is failing. The receiver
- * path and the casters are skipped in safe mode; their status getters work
- * uninitialised. */
+ * (except the lifecycle service, started by lifecycle_init() right after the
+ * settings). fw_update goes first so a failing app trial is reverted before
+ * the steps that might be what is failing. The receiver path and the casters
+ * are skipped in safe mode; their status getters work uninitialised. */
 static const boot_step_t s_init_steps[] = {
-    { "lifecycle",    lifecycle_init,    false }, /* service task, boot history */
     { "fw_update",    fw_update_init,    false }, /* app trial bookkeeping, revert */
     { "board",        board_init,        false },
     { "ledger",       ledger_step,       false }, /* first shutdown hook; planned-reboot accounting */
@@ -277,6 +281,17 @@ void app_main(void)
         }
     }
 
+    /* Before anything reads the boot accounting, the safe-mode decision or an
+     * RTC block: RTC state from before another app image's run is set aside
+     * here (checked without settings too), then the service task starts and
+     * the boot is recorded. */
+    int failures = 0;
+    err = lifecycle_init();
+    if (err != ESP_OK) {
+        failures++;
+        ESP_LOGE(TAG, "init lifecycle failed: %s", esp_err_to_name(err));
+    }
+
     bool safe_mode = lifecycle_in_safe_mode();
     if (safe_mode) {
         ESP_LOGW(TAG, "SAFE MODE: repeated crashes; receiver path and casters stay off, update checks and app "
@@ -295,7 +310,7 @@ void app_main(void)
         lifecycle_fatal_boot_error("esp_netif", err);
     }
 
-    int failures = run_steps("init", s_init_steps, sizeof(s_init_steps) / sizeof(s_init_steps[0]), safe_mode);
+    failures += run_steps("init", s_init_steps, sizeof(s_init_steps) / sizeof(s_init_steps[0]), safe_mode);
     if (safe_mode) {
         /* The station does not run, but a receiver package left staged
          * without an open journal must not wait out the whole episode. */

@@ -82,11 +82,15 @@
  *
  * The state that must outlive a reset is a snapshot (lc_snapshot_t): the
  * wrapper keeps one in RTC memory every second (software, panic and watchdog
- * resets) and stores today in NVS with the last-alive mark every
- * persist interval and at every reboot (power cuts). Today is only ever
- * stored together with the mark it runs up to (lc_persist_due), so a
- * restore from NVS does not count the time the stored today covers a second
- * time as gap. Blob codecs for NVS are below.
+ * resets) and stores the last-alive mark in NVS every persist interval and
+ * at every reboot (power cuts). Today is only ever stored together with the
+ * mark it runs up to, in one blob (the today blob carries its mark, and NVS
+ * replaces a key as a unit), so no failed write or power cut can leave the
+ * stored today ahead of the stored mark, and a restore from NVS never counts
+ * the time the stored today covers a second time as gap. While today has not
+ * changed since it was stored, the mark alone advances (the alive key, one
+ * small write); a restore takes the later of the two marks (lc_stored_mark).
+ * Blob codecs for NVS are below.
  */
 #pragma once
 
@@ -318,7 +322,10 @@ void lc_snapshot(const lc_t *c, lc_snapshot_t *out);
  * On true, *alive_ms is the mark; *today / *hist say whether those records
  * changed since they were last stored (the flags are cleared: call
  * lc_mark_dirty if storing fails; a failed store waits for the interval).
- * The caller stores today only together with this mark.
+ * The caller stores the history first, then: today changed, today with
+ * this mark as one blob (lc_encode_today, nothing if the history write
+ * failed); today unchanged, the mark alone (the stored today is exact up to
+ * it).
  */
 bool lc_persist_due(lc_t *c, uint32_t now_ms, uint32_t interval_ms, int64_t *alive_ms, bool *today, bool *hist);
 
@@ -327,15 +334,31 @@ void lc_mark_dirty(lc_t *c, bool today, bool hist);
 
 /* ---- NVS blobs (settings_codec, version byte first; newer writers may append) ---------- */
 
-/** Today's record with the slot masks. @return bytes written, 0 if cap is too small. */
+/**
+ * Today's record with the slot masks, the flags and s->alive_ms: the UTC
+ * mark (ms) this today runs up to, stored with it as one unit.
+ * @return bytes written, 0 if cap is too small.
+ */
 size_t lc_encode_today(const lc_snapshot_t *s, uint8_t *buf, size_t cap);
 
 /**
- * Decode into s->today, s->expected_mask, s->protected_mask, s->planned and
- * s->reboot_planned (false in a blob written before it existed); other
- * fields untouched.
+ * Decode into s->today, s->expected_mask, s->protected_mask, s->planned,
+ * s->reboot_planned (false in a blob written before it existed) and
+ * s->alive_ms (the blob's own mark; 0 in a blob written before it existed,
+ * whose mark is the alive key alone); other fields untouched.
  */
 bool lc_decode_today(const uint8_t *buf, size_t len, lc_snapshot_t *s);
+
+/**
+ * The mark a restore from NVS starts the gap at: the later of the today
+ * blob's own mark (`blob_mark_ms`, 0 = none) and the alive key (`alive_s`,
+ * <= 0 = none), which is written only while the stored today is unchanged,
+ * so the stored today is exact up to either. (After the clock went back,
+ * the wrapper also lowers an alive key that a new blob's mark is behind.)
+ * An older two-key layout (today blob without a mark) gives the alive key
+ * alone.
+ */
+int64_t lc_stored_mark(int64_t blob_mark_ms, int64_t alive_s);
 
 /** History, newest first. @return bytes written, 0 if cap is too small. */
 size_t lc_encode_hist(const lc_day_t *days, size_t n, uint8_t *buf, size_t cap);
@@ -349,21 +372,27 @@ size_t lc_hist_blob_max(size_t n);
 /* ---- RTC copy --------------------------------------------------------------------------- */
 
 #define LC_RTC_MAGIC   0x4C444752u   /* "RGDL" */
-#define LC_RTC_VERSION 2u   /* 2: the snapshot carries reboot_planned */
+#define LC_RTC_VERSION 3u   /* 2: the snapshot carries reboot_planned; 3: the stamp */
 
-/** The block kept in RTC memory (only ever read back by the same image). */
+/**
+ * The block kept in RTC memory. `stamp` is the image generation of the run
+ * that wrote it (lifecycle): the wrapper uses the block only when lifecycle
+ * accepts the stamp, so a block from before another image's run (still
+ * valid by its own checks) is never read back.
+ */
 typedef struct {
     uint32_t magic;
     uint32_t version;
     uint32_t size;
+    uint32_t stamp;
     lc_snapshot_t snap;
     uint32_t crc;
 } lc_rtc_t;
 
 /** Fill and seal a block. */
-void lc_rtc_seal(lc_rtc_t *r, const lc_snapshot_t *snap);
+void lc_rtc_seal(lc_rtc_t *r, const lc_snapshot_t *snap, uint32_t stamp);
 
-/** True if the block's magic, version, size and CRC check out. */
+/** True if the block's magic, version, size and CRC (which covers the stamp) check out. */
 bool lc_rtc_valid(const lc_rtc_t *r);
 
 #ifdef __cplusplus

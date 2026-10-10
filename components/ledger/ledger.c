@@ -4,12 +4,14 @@
  *
  * Availability ledger around the pure core (ledger_core.c): a spinlock, the
  * RTC copy of the running counters (written every tick and right after the
- * restore at boot, read back after a software, panic or watchdog reset), and
- * NVS (today together with the last-alive mark it runs up to, every
- * CONFIG_LEDGER_ALIVE_PERSIST_S and at the start of every reboot, the
- * history when it changes; read back after a power cut or when the RTC copy
- * is not valid, e.g. in another app image). The NVS writes of the tick and
- * of a reboot's shutdown hook are serialised by a mutex.
+ * restore at boot, read back after a software, panic or watchdog reset when
+ * lifecycle accepts its stamp), and NVS (every
+ * CONFIG_LEDGER_ALIVE_PERSIST_S and at the start of every reboot: today and
+ * the last-alive mark it runs up to as one blob when today changed, the
+ * mark alone in the alive key when it did not; the history when it changes;
+ * read back after a power cut, or when the RTC copy is not valid or
+ * predates another app image's run). The NVS writes of the tick and of a
+ * reboot's shutdown hook are serialised by a mutex.
  */
 #include "ledger.h"
 
@@ -35,7 +37,7 @@ _Static_assert((int)LEDGER_CLOCK_NONE == (int)LC_CLOCK_NONE && (int)LEDGER_CLOCK
 
 #define DAY_S          86400
 #define SHUTDOWN_WAIT_MS 300   /* of the shutdown budget, for a tick's writes to finish */
-#define TODAY_BLOB_MAX 160u
+#define TODAY_BLOB_MAX 160u    /* today with its mark: 122 bytes */
 #define HIST_BLOB_MAX  (3u + (size_t)CONFIG_LEDGER_HISTORY_DAYS * (4u + LC_SLOTS * 12u + 8u))
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -46,8 +48,11 @@ static SemaphoreHandle_t s_store;                       /* the settings writes a
 static bool s_ready;
 static bool s_store_warned;
 
-/* Survives software, panic and watchdog resets; validated by magic, size and CRC. */
+/* Survives software, panic and watchdog resets; validated by magic, size and
+ * CRC, and used only when lifecycle accepts its stamp. */
 static RTC_NOINIT_ATTR lc_rtc_t s_rtc;
+static uint32_t s_stamp;   /* this boot's image generation, stamped into every RTC copy */
+static int64_t s_alive_key_s;   /* the alive key as stored (under s_store after init) */
 
 static uint32_t now_ms(void)
 {
@@ -88,7 +93,7 @@ static void consume_flags(lc_snapshot_t *stored, bool stored_ok)
     lc_snapshot_t snap;
     lc_snapshot(&s_core, &snap);
     lc_rtc_t blk;
-    lc_rtc_seal(&blk, &snap);
+    lc_rtc_seal(&blk, &snap, s_stamp);
     memcpy(&s_rtc, &blk, sizeof(blk));
     if (!stored_ok || (!stored->reboot_planned && !stored->planned)) {
         return;
@@ -96,17 +101,18 @@ static void consume_flags(lc_snapshot_t *stored, bool stored_ok)
     stored->reboot_planned = false;
     stored->planned = false;
     uint8_t buf[TODAY_BLOB_MAX];
-    size_t len = lc_encode_today(stored, buf, sizeof(buf));
+    size_t len = lc_encode_today(stored, buf, sizeof(buf));   /* with the blob's own mark, as stored */
     if (len == 0 || settings_set_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_TODAY, buf, len) != ESP_OK) {
         ESP_LOGW(TAG, "stored planned-downtime flags not cleared (settings unavailable?)");
     }
 }
 
-esp_err_t ledger_init(void)
+esp_err_t ledger_init(bool (*rtc_stamp_ok)(uint32_t stamp), uint32_t rtc_stamp)
 {
     if (s_ready) {
         return ESP_OK;
     }
+    s_stamp = rtc_stamp;
     if (s_store == NULL && (s_store = xSemaphoreCreateMutex()) == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -125,6 +131,9 @@ esp_err_t ledger_init(void)
     memset(&stored, 0, sizeof(stored));
     stored.today.utc_day = -1;
     bool stored_ok = false;
+    if (settings_get_i64(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_ALIVE, &s_alive_key_s) != ESP_OK) {
+        s_alive_key_s = 0;
+    }
     {
         uint8_t buf[TODAY_BLOB_MAX];
         size_t len = sizeof(buf);
@@ -139,10 +148,14 @@ esp_err_t ledger_init(void)
      * for that either; nor is a planned reboot's flag after a crash. */
     lc_reset_t reset = reset_kind(esp_reset_reason());
     const char *from;
-    if (lc_rtc_valid(&s_rtc)) {
+    bool rtc_valid = lc_rtc_valid(&s_rtc);
+    if (rtc_valid && rtc_stamp_ok != NULL && rtc_stamp_ok(s_rtc.stamp)) {
         snap = s_rtc.snap;
         from = "RTC copy";
     } else {
+        /* Today and the mark it runs up to are one blob; the alive key moves
+         * the mark on while today did not change. An older layout (no mark
+         * in the blob) gives the alive key alone. */
         if (stored_ok) {
             snap.today = stored.today;
             snap.expected_mask = stored.expected_mask;
@@ -150,11 +163,8 @@ esp_err_t ledger_init(void)
             snap.planned = stored.planned;
             snap.reboot_planned = stored.reboot_planned;
         }
-        int64_t alive_s = 0;
-        if (settings_get_i64(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_ALIVE, &alive_s) == ESP_OK && alive_s > 0) {
-            snap.alive_ms = alive_s * 1000;
-        }
-        from = "settings";
+        snap.alive_ms = lc_stored_mark(stored_ok ? stored.alive_ms : 0, s_alive_key_s);
+        from = rtc_valid ? "settings (RTC copy not from the run before this boot)" : "settings";
     }
     lc_restore(&s_core, &snap, reset);
 
@@ -281,7 +291,11 @@ void ledger_count_overflow(void)
  * Accrue, refresh the RTC copy and store what is due (caller holds s_store).
  * `interval_ms` 0 stores now (a reboot; without a clock, today with the mark
  * it was restored with, or nothing without one: the RTC copy carries the
- * flags then). Today is only ever stored together with its mark.
+ * flags then). Today is only ever stored together with its mark, in one
+ * blob that NVS replaces as a unit; while today is unchanged since it was
+ * stored, the mark alone goes to the alive key. Each store is one write
+ * (plus lowering the alive key after the clock went back), so neither a
+ * failed write nor a power cut can leave today ahead of its mark.
  */
 static void step(uint32_t interval_ms)
 {
@@ -302,7 +316,7 @@ static void step(uint32_t interval_ms)
 
     /* RTC copy every tick: a reset other than a power cut loses at most a second. */
     lc_rtc_t blk;
-    lc_rtc_seal(&blk, &snap);
+    lc_rtc_seal(&blk, &snap, s_stamp);
     memcpy(&s_rtc, &blk, sizeof(blk));
 
     if (!due) {
@@ -313,13 +327,32 @@ static void step(uint32_t interval_ms)
     bool hist_ok = !store_hist || (hist_len > 0 && settings_set_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_HIST,
                                                                      s_hist_blob, hist_len) == ESP_OK);
     bool today_ok = !store_today;
-    if (store_today && hist_ok) {   /* after a failed history write, the stored day stays the old one */
-        uint8_t buf[TODAY_BLOB_MAX];
-        size_t len = lc_encode_today(&snap, buf, sizeof(buf));
-        today_ok = len > 0 &&
-                   settings_set_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_TODAY, buf, len) == ESP_OK;
+    bool alive_ok = true;
+    if (store_today) {
+        /* Today with its mark, one write. After a failed history write
+         * neither moves: the stored day stays the old one, and so does the
+         * mark it runs up to (the time since counts as gap, never twice). */
+        if (hist_ok) {
+            snap.alive_ms = alive_ms;
+            uint8_t buf[TODAY_BLOB_MAX];
+            size_t len = lc_encode_today(&snap, buf, sizeof(buf));
+            today_ok = len > 0 &&
+                       settings_set_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_TODAY, buf, len) == ESP_OK;
+        }
+        /* Only after the clock went back (a correction, or a previous
+         * session's clock that ran ahead): a restore takes the later mark,
+         * so the alive key must not stay ahead of this one. */
+        if (today_ok && s_alive_key_s > alive_ms / 1000 &&
+            settings_set_i64(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_ALIVE, alive_ms / 1000) == ESP_OK) {
+            s_alive_key_s = alive_ms / 1000;
+        }
+    } else {
+        /* Today unchanged since it was stored: it is exact up to here. */
+        alive_ok = settings_set_i64(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_ALIVE, alive_ms / 1000) == ESP_OK;
+        if (alive_ok) {
+            s_alive_key_s = alive_ms / 1000;
+        }
     }
-    bool alive_ok = settings_set_i64(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_ALIVE, alive_ms / 1000) == ESP_OK;
     if (!hist_ok || !today_ok) {
         portENTER_CRITICAL(&s_lock);
         lc_mark_dirty(&s_core, !today_ok, !hist_ok);

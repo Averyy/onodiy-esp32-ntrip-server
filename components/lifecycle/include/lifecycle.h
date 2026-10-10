@@ -22,6 +22,30 @@
  *   reboot budget (see lifecycle_ladder_reboot_allowed). An invalid block
  *   counts as a fresh start, like a power cycle.
  *
+ * Image generation (lifecycle_init): an image that runs again after another
+ *   one ran (the user's rollback, a trial revert, a bootloader rollback)
+ *   would find its own RTC blocks from before that run, intact. So every
+ *   RTC block (lifecycle's, the ledger's, the network's) carries a stamp,
+ *   the image generation of the run that wrote it, and a block whose stamp
+ *   does not match the generation settings recorded last (life/gen,
+ *   advanced only when another image records a boot: one small write per
+ *   image change, none per boot) predates another image's run and counts
+ *   as lost, as after power loss (lifecycle_rtc_stamp_ok,
+ *   lifecycle_rtc_stamp). lifecycle_early_boot() runs before the settings
+ *   can be read, so it accounts the boot on the block it finds;
+ *   lifecycle_init() checks the stamp and, for a stale block, accounts the
+ *   boot again from scratch before anything reads the result. Without
+ *   settings nothing can be checked: blocks stamped with a generation are
+ *   not used and this boot's blocks carry none; later boots without
+ *   settings use those (crash counting keeps working, one boot late), and
+ *   so does the next boot with settings when the record names this image.
+ *   A new image that the bootloader rolls back before it recorded its boot
+ *   leaves the generation unchanged; the previous image then finds that
+ *   the reboot into another image it planned (an app update, rollback or
+ *   revert: lifecycle_reboot_switches_image) never led to one, and reports
+ *   that reboot as LIFECYCLE_REBOOT_APP_REVERT (an unplanned end, previous
+ *   session length unknown).
+ *
  * Service task (started by lifecycle_init): once per second it marks the
  *   boot stable after CONFIG_LIFECYCLE_STABLE_UPTIME_S, writes the session
  *   heartbeat every 60 s and, in safe mode, requests the normal-boot retry
@@ -147,6 +171,17 @@ typedef enum {
  */
 lifecycle_prev_end_t lifecycle_prev_session_end(lifecycle_reset_class_t cls, lifecycle_reboot_reason_t prev);
 
+/**
+ * True for a reboot that an image commits after it recorded its boot, to
+ * start another app image: APP_UPDATE, APP_ROLLBACK, APP_REVERT. If the next
+ * boot is the same image again and no other image recorded a boot in
+ * between, the switch did not take (see "Image generation"). Not
+ * NVS_SLOT_SWITCH: it is committed before the settings are read, so the
+ * image that commits it never records a boot, and the image it starts
+ * (which did) may find that reason in an RTC block both share. Pure.
+ */
+bool lifecycle_reboot_switches_image(lifecycle_reboot_reason_t reason);
+
 /** This boot, as accounted by lifecycle_early_boot(). */
 typedef struct {
     esp_reset_reason_t reset_reason;           /**< raw IDF reason */
@@ -171,12 +206,29 @@ typedef struct {
 void lifecycle_early_boot(void);
 
 /**
- * After settings_init(), in every boot mode: start the lifecycle service task,
- * then append this boot to the persisted boot history (a history written by a
+ * Right after settings_init() (or after NVS failed), in every boot mode, and
+ * before anything reads the boot accounting, the safe-mode decision or an
+ * RTC block: check the RTC state against the image generation (account the
+ * boot again from scratch when it predates another image's run; store a new
+ * generation when the image changed), start the lifecycle service task, then
+ * append this boot to the persisted boot history (a history written by a
  * newer app is left untouched). ESP_ERR_INVALID_STATE without settings; the
- * service task runs anyway.
+ * check (see "Image generation") and the service task run anyway.
  */
 esp_err_t lifecycle_init(void);
+
+/**
+ * For the other components' RTC blocks (ledger, network), when they read
+ * theirs at init: true if an inherited block with this stamp comes from the
+ * run right before this boot (this image's own, or the image that ran
+ * before it, which counts only if the layouts match). A block that fails
+ * predates another image's run: treat it as lost, as after power loss.
+ * False before lifecycle_init().
+ */
+bool lifecycle_rtc_stamp_ok(uint32_t stamp);
+
+/** Stamp for every RTC block written this boot (0 = none: no settings this boot, or before lifecycle_init()). */
+uint32_t lifecycle_rtc_stamp(void);
 
 /** True if this boot runs in safe mode. */
 bool lifecycle_in_safe_mode(void);
@@ -286,9 +338,10 @@ bool lifecycle_claim_once(uint32_t flag);
 /**
  * GNSS-ladder reboot cap: allowed only if no LIFECYCLE_REBOOT_GNSS_LADDER
  * reboot happened in the last 60 min and fewer than three in the last 24 h,
- * both counted across software resets (RTC block; a power cycle or an
- * invalid block after an image switch starts a fresh budget). Health asks
- * before requesting that reboot; lifecycle records each one when it runs.
+ * both counted across software resets (RTC block; a power cycle, or a
+ * block that is invalid or predates another image's run, starts a fresh
+ * budget). Health asks before requesting that reboot; lifecycle records
+ * each one when it runs.
  * @param retry_in_s optional: seconds until a ladder reboot would be allowed (0 if now).
  */
 bool lifecycle_ladder_reboot_allowed(uint32_t *retry_in_s);

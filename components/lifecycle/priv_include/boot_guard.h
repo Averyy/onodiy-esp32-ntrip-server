@@ -21,7 +21,13 @@
  *    GNSS-ladder reboots. Such a reboot is allowed only if none happened in
  *    the last 60 min and fewer than three in the last 24 h. Losing the
  *    state (power cycle, or the first boot of another app image whose RTC
- *    layout differs) starts a fresh budget, like a power cycle.
+ *    layout differs) starts a fresh budget, like a power cycle;
+ *  - the stamp: the image generation of the run that wrote the block
+ *    (boot_gen.h). boot_guard_on_boot() runs before the settings can be read
+ *    and accounts the boot on whatever valid block it finds; lifecycle_init
+ *    then checks the stamp and, for a block that predates another image's
+ *    run, accounts the boot again from scratch (boot_guard_restart), as
+ *    after power loss. A fresh block is unstamped until boot_guard_stamp().
  *
  * Counting rules:
  *  - power-on (or lost/corrupt state): everything starts over;
@@ -83,6 +89,7 @@ typedef struct {
     uint32_t session_s;         /**< heartbeat: this boot's uptime at the last write */
     uint32_t ladder_count;      /**< valid entries in ladder_at (<= BOOT_GUARD_LADDER_KEEP) */
     uint32_t ladder_at[BOOT_GUARD_LADDER_KEEP]; /**< station times of the last GNSS-ladder reboots, oldest first */
+    uint32_t gen;               /**< image generation of the run that wrote it (BOOT_GEN_UNSTAMPED = none yet) */
     uint32_t check;             /**< checksum over the fields above */
 } boot_guard_state_t;
 
@@ -103,6 +110,19 @@ void boot_guard_seal(boot_guard_state_t *st);
 
 /** Account for this boot. `limit` = crashes that trigger safe mode. Seals the state. */
 void boot_guard_on_boot(boot_guard_state_t *st, boot_hw_reset_t hw, uint32_t limit, boot_guard_result_t *out);
+
+/**
+ * The state boot_guard_on_boot() used turned out to predate another image's
+ * run (its stamp was not accepted): account this boot again from a fresh
+ * state, as after power loss, keeping the one-shot flags `claimed` since the
+ * first accounting (they belong to this power cycle's boots of this image).
+ * The result replaces the first one. Seals.
+ */
+void boot_guard_restart(boot_guard_state_t *st, boot_hw_reset_t hw, uint32_t limit, uint32_t claimed,
+                        boot_guard_result_t *out);
+
+/** Stamp the state with the generation of this boot's run. Seals. */
+void boot_guard_stamp(boot_guard_state_t *st, uint32_t gen);
 
 /** Stable uptime reached. Clears the counters in normal mode only. Seals. */
 void boot_guard_on_stable(boot_guard_state_t *st);

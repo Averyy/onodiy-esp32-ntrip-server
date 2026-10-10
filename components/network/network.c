@@ -228,7 +228,8 @@ static EventGroupHandle_t s_probe_events;
 static net_ladder_t s_ladder;
 static uint8_t s_ladder_note;               /* last journalled skip/withhold: (rung << 4) | why */
 
-/* Survives software, panic and watchdog resets: when the last network-ladder reboot was. */
+/* Survives software, panic and watchdog resets: when the last network-ladder
+ * reboot was. Stamped with the image generation (lifecycle). */
 static RTC_NOINIT_ATTR net_rtc_t s_rtc;
 
 /* ---- small helpers ------------------------------------------------------------------- */
@@ -1519,7 +1520,10 @@ static void account_boot(void)
 {
     lifecycle_boot_info_t bi;
     lifecycle_get_boot_info(&bi);
-    net_rtc_on_boot(&s_rtc, bi.prev_reboot_reason == LIFECYCLE_REBOOT_NETWORK_LADDER, bi.prev_session_uptime_s);
+    /* A block from before another image's run (still valid by its own
+     * checks) starts afresh, like a power cycle. */
+    net_rtc_on_boot(&s_rtc, lifecycle_rtc_stamp_ok(s_rtc.stamp), lifecycle_rtc_stamp(),
+                    bi.prev_reboot_reason == LIFECYCLE_REBOOT_NETWORK_LADDER, bi.prev_session_uptime_s);
 }
 
 esp_err_t network_init(void)

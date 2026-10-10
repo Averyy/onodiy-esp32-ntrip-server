@@ -648,6 +648,7 @@ size_t lc_encode_today(const lc_snapshot_t *s, uint8_t *buf, size_t cap)
     blob_put_u8(&w, s->protected_mask);
     blob_put_bool(&w, s->planned);
     blob_put_bool(&w, s->reboot_planned);   /* appended later: older blobs end before it */
+    blob_put_i64(&w, s->alive_ms);          /* appended later: the mark this today runs up to */
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
@@ -665,6 +666,10 @@ bool lc_decode_today(const uint8_t *buf, size_t len, lc_snapshot_t *s)
     uint8_t prot = blob_get_u8(&r);
     bool planned = blob_get_bool(&r);
     bool reboot_planned = blob_reader_ok(&r) && blob_reader_remaining(&r) > 0 && blob_get_bool(&r);
+    int64_t mark = 0;
+    if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
+        mark = blob_get_i64(&r);   /* a blob cut inside it is damaged */
+    }
     if (!blob_reader_ok(&r)) {
         return false;
     }
@@ -673,7 +678,17 @@ bool lc_decode_today(const uint8_t *buf, size_t len, lc_snapshot_t *s)
     s->protected_mask = prot;
     s->planned = planned;
     s->reboot_planned = reboot_planned;
+    s->alive_ms = (mark > 0) ? mark : 0;
     return true;
+}
+
+int64_t lc_stored_mark(int64_t blob_mark_ms, int64_t alive_s)
+{
+    int64_t mark = (blob_mark_ms > 0) ? blob_mark_ms : 0;
+    if (alive_s > 0 && alive_s <= INT64_MAX / 1000 && alive_s * 1000 > mark) {
+        mark = alive_s * 1000;
+    }
+    return mark;
 }
 
 size_t lc_hist_blob_max(size_t n)
@@ -736,12 +751,13 @@ static uint32_t crc32(const void *data, size_t len)
     return crc ^ 0xFFFFFFFFu;
 }
 
-void lc_rtc_seal(lc_rtc_t *r, const lc_snapshot_t *snap)
+void lc_rtc_seal(lc_rtc_t *r, const lc_snapshot_t *snap, uint32_t stamp)
 {
     memset(r, 0, sizeof(*r));
     r->magic = LC_RTC_MAGIC;
     r->version = LC_RTC_VERSION;
     r->size = (uint32_t)sizeof(*r);
+    r->stamp = stamp;
     r->snap = *snap;
     r->crc = crc32(r, offsetof(lc_rtc_t, crc));
 }

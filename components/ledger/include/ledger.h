@@ -53,15 +53,24 @@
  * Persistence: the running counters also live in RTC memory, written every
  * tick and checked with magic, size and CRC (they survive software, panic
  * and watchdog resets, so a reboot costs at most a second of accounting).
- * Today's counters and the "last alive" mark are stored in settings every
- * CONFIG_LEDGER_ALIVE_PERSIST_S (today only when it changed) and at the start
- * of every reboot through lifecycle (ledger_shutdown), so after a power cut
- * the time between that mark and the next boot is added as downtime (and
- * power-off time) for the slots that were expected to stream, and a reboot
- * into another app image (whose RTC layout may differ) counts its gap from
- * the moment the reboot began. Today is only ever stored together with the
- * mark it runs up to (without a clock: the mark it was restored with; with
- * no mark at all, nothing), so that gap never counts time twice.
+ * The RTC copy also carries lifecycle's stamp (the image generation of the
+ * run that wrote it) and is read back only when lifecycle accepts it: an
+ * image that runs again after another one ran would otherwise find its own
+ * copy from before that run and miss everything the other image stored.
+ * The "last alive" mark is stored in settings every
+ * CONFIG_LEDGER_ALIVE_PERSIST_S and at the start of every reboot through
+ * lifecycle (ledger_shutdown), so after a power cut the time between that
+ * mark and the next boot is added as downtime (and power-off time) for the
+ * slots that were expected to stream, and a reboot into another app image
+ * (whose RTC layout may differ) counts its gap from the moment the reboot
+ * began. When today's counters changed they are stored with it as one blob
+ * (ledger/today carries the mark it runs up to; NVS replaces a key as a
+ * unit), otherwise the mark alone moves on (ledger/alive); without a clock,
+ * today goes with the mark it was restored with, and with no mark at all
+ * nothing is stored. So no failed write or power cut leaves the stored
+ * today ahead of its mark, and the gap never counts time twice. A restore
+ * from settings takes the later of the two marks (a today blob of the older
+ * two-key layout has none: the alive key alone).
  * Day totals roll into a CONFIG_LEDGER_HISTORY_DAYS history at UTC midnight
  * (settings: ledger/hist, written when it changes). The whole ledger
  * namespace survives a factory reset.
@@ -107,8 +116,14 @@ typedef struct {
 /**
  * Load today and the history (RTC copy first, then settings). The gap since
  * the last-alive mark is added once the first trusted time arrives.
+ * The ledger (L1) cannot call lifecycle (L1), so main passes its RTC stamp
+ * check: `rtc_stamp_ok` (lifecycle_rtc_stamp_ok; NULL = never use the RTC
+ * copy) decides whether the RTC copy comes from the run right before this
+ * boot, and `rtc_stamp` (lifecycle_rtc_stamp()) is stamped into every RTC
+ * copy this boot writes. A copy that fails falls back to settings, as after
+ * a power cut but with the reset as it was.
  */
-esp_err_t ledger_init(void);
+esp_err_t ledger_init(bool (*rtc_stamp_ok)(uint32_t stamp), uint32_t rtc_stamp);
 
 /**
  * How the previous session ended, by lifecycle's record of it

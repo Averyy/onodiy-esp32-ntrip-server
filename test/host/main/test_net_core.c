@@ -331,6 +331,12 @@ TEST_CASE("network scan list: one entry per SSID, strongest first, capped", "[ne
     TEST_ASSERT_EQUAL_size_t(0, net_scan_insert(list, 0, 0, &e));
 }
 
+/* A boot whose RTC stamp lifecycle accepts (same image generation, here 7). */
+static void on_boot(net_rtc_t *r, bool ladder, uint32_t prev_session_s)
+{
+    net_rtc_on_boot(r, true, 7u, ladder, prev_session_s);
+}
+
 TEST_CASE("network reboot age survives software resets, not power cycles", "[net_core]")
 {
     net_rtc_t r;
@@ -339,37 +345,65 @@ TEST_CASE("network reboot age survives software resets, not power cycles", "[net
     TEST_ASSERT_EQUAL_UINT32(NET_AGE_UNKNOWN, net_rtc_age_now(&r, 10));
 
     /* Power-on: nothing known. */
-    net_rtc_on_boot(&r, false, NET_AGE_UNKNOWN);
+    on_boot(&r, false, NET_AGE_UNKNOWN);
     TEST_ASSERT_TRUE(net_rtc_valid(&r));
     TEST_ASSERT_EQUAL_UINT32(NET_AGE_UNKNOWN, net_rtc_age_now(&r, 10));
 
     /* A software reset with a known session keeps "unknown". */
-    net_rtc_on_boot(&r, false, 3600);
+    on_boot(&r, false, 3600);
     TEST_ASSERT_EQUAL_UINT32(NET_AGE_UNKNOWN, net_rtc_age_now(&r, 10));
 
     /* The network ladder rebooted: age counts from this boot. */
-    net_rtc_on_boot(&r, true, 7200);
+    on_boot(&r, true, 7200);
     TEST_ASSERT_EQUAL_UINT32(0, net_rtc_age_now(&r, 0));
     TEST_ASSERT_EQUAL_UINT32(125, net_rtc_age_now(&r, 125));
 
     /* A crash 1000 s later, then a user reboot 500 s after that. */
-    net_rtc_on_boot(&r, false, 1000);
+    on_boot(&r, false, 1000);
     TEST_ASSERT_EQUAL_UINT32(1000 + 20, net_rtc_age_now(&r, 20));
-    net_rtc_on_boot(&r, false, 500);
+    on_boot(&r, false, 500);
     TEST_ASSERT_EQUAL_UINT32(1500, net_rtc_age_now(&r, 0));
 
     /* Saturates instead of wrapping into "unknown" or a small age. */
     TEST_ASSERT_EQUAL_UINT32(NET_AGE_UNKNOWN - 1, net_rtc_age_now(&r, UINT32_MAX - 10));
 
     /* Brownout / reset pin: session unknown -> age unknown (fresh budget). */
-    net_rtc_on_boot(&r, false, NET_AGE_UNKNOWN);
+    on_boot(&r, false, NET_AGE_UNKNOWN);
     TEST_ASSERT_EQUAL_UINT32(NET_AGE_UNKNOWN, net_rtc_age_now(&r, 5));
 
     /* A damaged block is a fresh start. */
-    net_rtc_on_boot(&r, true, 10);
+    on_boot(&r, true, 10);
     r.age_at_boot_s ^= 1;
     TEST_ASSERT_FALSE(net_rtc_valid(&r));
     TEST_ASSERT_EQUAL_UINT32(NET_AGE_UNKNOWN, net_rtc_age_now(&r, 5));
-    net_rtc_on_boot(&r, false, 100);
+    on_boot(&r, false, 100);
     TEST_ASSERT_EQUAL_UINT32(NET_AGE_UNKNOWN, net_rtc_age_now(&r, 5));
+}
+
+TEST_CASE("network reboot age: a block from before another image's run starts afresh", "[net_core]")
+{
+    net_rtc_t r;
+    memset(&r, 0, sizeof(r));
+    net_rtc_on_boot(&r, true, 3u, true, 100);         /* image A, generation 3: ladder reboot */
+    TEST_ASSERT_EQUAL_UINT32(3u, r.stamp);
+    TEST_ASSERT_EQUAL_UINT32(50, net_rtc_age_now(&r, 50));
+
+    /* Image B ran (generation 4) and the station came back to A: A's block
+     * is intact, but lifecycle does not accept its stamp. */
+    net_rtc_t stale = r;
+    TEST_ASSERT_TRUE(net_rtc_valid(&stale));
+    net_rtc_on_boot(&stale, false, 5u, false, 600);
+    TEST_ASSERT_EQUAL_UINT32(NET_AGE_UNKNOWN, net_rtc_age_now(&stale, 5));
+    TEST_ASSERT_EQUAL_UINT32(5u, stale.stamp);          /* restamped for this run */
+
+    /* Accepted, it carries on; a ladder reboot is age 0 whatever the stamp. */
+    net_rtc_t ok = r;
+    net_rtc_on_boot(&ok, true, 3u, false, 600);
+    TEST_ASSERT_EQUAL_UINT32(600 + 5, net_rtc_age_now(&ok, 5));
+    net_rtc_on_boot(&stale, false, 5u, true, 600);
+    TEST_ASSERT_EQUAL_UINT32(0, net_rtc_age_now(&stale, 0));
+
+    /* The check covers the stamp. */
+    ok.stamp ^= 1;
+    TEST_ASSERT_FALSE(net_rtc_valid(&ok));
 }

@@ -757,7 +757,11 @@ that does not show a field cannot reset it). Output-only fields
 - `protected` is set by the server: true exactly for a host in the
   `onocoy.com` domain. `backoff_profile` is forced to `fast` for that host
   and to `polite` for `rtk2go.com`; elsewhere `standard` or `polite` as sent
-  (`fast` is refused there: `400 invalid_field`).
+  (`fast` is refused there: `400 invalid_field`), or, when left out, the
+  stored profile (a `fast` one left from an Onocoy host becomes
+  `standard`). These host rules belong to `ntrip_server`
+  (`ntrip_server_apply_host_rules()`, which every save applies too); the
+  server applies them to the request only to name a refused field.
 - `dup_stream_ack`: see below.
 
 Validation (`400 invalid_field` with `field`): no control characters
@@ -1113,7 +1117,11 @@ not this boot); `admin_resets` counts BOOT-button password resets this
 boot. `journal` and `log` are the event journal's and the log ring's
 counters (`diag_journal_info()`, `diag_log_stats()`; `journal.capacity` in
 records). Per-caster loss counters are in `/api/casters`. `boot_history` is the last
-16 boots, newest first (`prev_uptime_s` `null` = unknown). `inhibited_by` is
+16 boots, newest first (`prev_uptime_s` `null` = unknown). `boot` counts
+since power-on from RTC memory; state written before another app image ran
+(an update or a rollback, then back) is not used, so the counters start over
+as after a power cut, and a reboot into another image that the bootloader
+rolled back before the new image recorded a boot reads as `app_revert`. `inhibited_by` is
 the label of a held reboot inhibit; `update_slot` is `none`, `app` or
 `receiver`. The UI warns that a core dump may contain secrets before
 offering the download.
@@ -1467,7 +1475,7 @@ its first value: 0 for most, 1 for `diag_event_t`, `diag_loss_id_t` and
 | `network_ladder_why_t` | `none`, `upstream_ok`, `no_upstream`, `journal_open`, `interval`, `inhibited`, `ap_in_use` |
 | `gnss_link_mode_t` | `off`, `stream`, `command`, `raw` |
 | `lifecycle_reset_class_t` | `power_on`, `planned`, `crash`, `brownout`, `other` |
-| `lifecycle_reboot_reason_t` | `none`, `user`, `factory_reset`, `admin_reset`, `app_update`, `app_revert` (a failed trial), `gnss_ladder`, `network_ladder`, `low_heap`, `safe_mode_retry`, `safe_mode_cleared`, `nvs_slot_switch`, `boot_failure`, `app_rollback` (the user's rollback) |
+| `lifecycle_reboot_reason_t` | `none`, `user`, `factory_reset`, `admin_reset`, `app_update`, `app_revert` (a failed trial, also one the bootloader rolled back), `gnss_ladder`, `network_ladder`, `low_heap`, `safe_mode_retry`, `safe_mode_cleared`, `nvs_slot_switch`, `boot_failure`, `app_rollback` (the user's rollback) |
 | `esp_reset_reason_t` | `unknown`, `poweron`, `ext`, `sw`, `panic`, `int_wdt`, `task_wdt`, `wdt`, `deepsleep`, `brownout`, `sdio`, `usb`, `jtag`, `efuse`, `pwr_glitch`, `cpu_lockup` |
 | `ledger_clock_t` | `none`, `sntp`, `gnss` |
 | `gnss_sys_t` | `gps`, `glonass`, `galileo`, `sbas`, `qzss`, `beidou`, `navic` |

@@ -839,19 +839,6 @@ bool web_host_name_ok(const char *host)
     return !all_digits_label;
 }
 
-bool web_host_in_domain(const char *host, const char *domain)
-{
-    if (host == NULL || domain == NULL) {
-        return false;
-    }
-    size_t hl = strlen(host);
-    size_t dl = strlen(domain);
-    if (dl == 0 || hl < dl || !eq_nocase_n(host + (hl - dl), domain, dl)) {
-        return false;
-    }
-    return hl == dl || host[hl - dl - 1] == '.';
-}
-
 uint32_t web_expected_build(const char *fw)
 {
     if (fw == NULL || strlen(fw) > 47 || !web_no_ctrl(fw)) {

@@ -169,12 +169,15 @@ size_t net_scan_insert(net_scan_entry_t *list, size_t count, size_t cap, const n
 
 /**
  * Kept in RTC memory (survives software, panic and watchdog resets, not
- * power loss), validated by magic and checksum. An invalid block is a fresh
- * start, like a power cycle.
+ * power loss), validated by magic and checksum, and by its stamp (the image
+ * generation of the run that wrote it, lifecycle_rtc_stamp_ok()). An invalid
+ * block, or one that predates another app image's run, is a fresh start,
+ * like a power cycle.
  */
 typedef struct {
     uint32_t magic;
     uint32_t age_at_boot_s;  /**< seconds from the last network-ladder reboot to this boot's start, NET_AGE_UNKNOWN if none */
+    uint32_t stamp;          /**< image generation of the run that wrote it */
     uint32_t check;
 } net_rtc_t;
 
@@ -184,12 +187,15 @@ void net_rtc_seal(net_rtc_t *r);
 /**
  * Account for this boot:
  *  - the previous boot ended in a network-ladder reboot: age 0;
- *  - else, with a valid block and a known previous session length (software,
- *    panic and watchdog resets): the stored age plus that session;
- *  - else (power-on, brownout, lost block): unknown.
- * Seals the block.
+ *  - else, with a valid block whose stamp lifecycle accepted (`stamp_ok`)
+ *    and a known previous session length (software, panic and watchdog
+ *    resets): the stored age plus that session;
+ *  - else (power-on, brownout, lost block, a block from before another
+ *    image's run): unknown.
+ * Stamps the block with `stamp` (this boot's generation) and seals it.
  */
-void net_rtc_on_boot(net_rtc_t *r, bool prev_was_ladder_reboot, uint32_t prev_session_s);
+void net_rtc_on_boot(net_rtc_t *r, bool stamp_ok, uint32_t stamp, bool prev_was_ladder_reboot,
+                     uint32_t prev_session_s);
 
 /** Seconds since the last network-ladder reboot now (saturating), NET_AGE_UNKNOWN if none. */
 uint32_t net_rtc_age_now(const net_rtc_t *r, uint32_t uptime_s);

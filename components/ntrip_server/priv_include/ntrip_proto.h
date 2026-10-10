@@ -192,6 +192,9 @@ bool ntrip_host_in_domain(const char *host, const char *domain);
 /** Onocoy slot: host in onocoy.com. */
 bool ntrip_host_is_onocoy(const char *host);
 
+/** RTK2go: host in rtk2go.com (a community caster: polite backoff, one slot). */
+bool ntrip_host_is_rtk2go(const char *host);
+
 /** Caster whose streams anyone can use without credentials (RTK2go, Centipede). */
 bool ntrip_host_is_open_caster(const char *host);
 

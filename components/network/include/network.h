@@ -60,7 +60,8 @@
  * The reboot is also withheld while a receiver-flash journal is open (not
  * when its state is only unknown because the settings are unavailable),
  * within the minimum interval since the last network-ladder reboot (counted
- * across resets, a power cycle starts afresh), while a reboot inhibit is held
+ * across resets; a power cycle, or RTC state from before another app image's
+ * run, starts afresh), while a reboot inhibit is held
  * and while someone is connected to the station's AP. The reconnect, renew
  * and restart rungs run regardless of the journal, so the user can still
  * reach the UI. After the reboot rung the ladder holds 10 min, then starts a

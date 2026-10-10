@@ -64,3 +64,18 @@ TEST_CASE("the previous session's end: a crash never planned, our reboots by rea
     TEST_ASSERT_EQUAL(LIFECYCLE_PREV_UNKNOWN,
                       lifecycle_prev_session_end(LIFECYCLE_RESET_BROWNOUT, LIFECYCLE_REBOOT_USER));
 }
+
+TEST_CASE("reboots that start another app image", "[lifecycle]")
+{
+    TEST_ASSERT_TRUE(lifecycle_reboot_switches_image(LIFECYCLE_REBOOT_APP_UPDATE));
+    TEST_ASSERT_TRUE(lifecycle_reboot_switches_image(LIFECYCLE_REBOOT_APP_ROLLBACK));
+    TEST_ASSERT_TRUE(lifecycle_reboot_switches_image(LIFECYCLE_REBOOT_APP_REVERT));
+    /* Committed before the settings are read, by an image that never records a boot. */
+    TEST_ASSERT_FALSE(lifecycle_reboot_switches_image(LIFECYCLE_REBOOT_NVS_SLOT_SWITCH));
+    TEST_ASSERT_FALSE(lifecycle_reboot_switches_image(LIFECYCLE_REBOOT_NONE));
+    TEST_ASSERT_FALSE(lifecycle_reboot_switches_image(LIFECYCLE_REBOOT_USER));
+    TEST_ASSERT_FALSE(lifecycle_reboot_switches_image(LIFECYCLE_REBOOT_FACTORY_RESET));
+    TEST_ASSERT_FALSE(lifecycle_reboot_switches_image(LIFECYCLE_REBOOT_GNSS_LADDER));
+    TEST_ASSERT_FALSE(lifecycle_reboot_switches_image(LIFECYCLE_REBOOT_SAFE_MODE_CLEARED));
+    TEST_ASSERT_FALSE(lifecycle_reboot_switches_image(LIFECYCLE_REBOOT_BOOT_FAILURE));
+}

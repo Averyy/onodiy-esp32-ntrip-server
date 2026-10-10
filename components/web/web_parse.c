@@ -424,20 +424,11 @@ bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, n
         return invalid(bad, "backoff_profile");
     }
 
-    /* Server-set fields: protected exactly for Onocoy; the backoff profile by host. */
-    bool onocoy = web_host_in_domain(c.host, "onocoy.com");
-    c.protected_slot = onocoy;
-    if (onocoy) {
-        c.backoff_profile = NTRIP_BACKOFF_FAST;
-    } else if (web_host_in_domain(c.host, "rtk2go.com")) {
-        c.backoff_profile = NTRIP_BACKOFF_POLITE;
-    } else if (m == M_OK) {
-        if (backoff == NTRIP_BACKOFF_FAST) {
-            return invalid(bad, "backoff_profile");   /* fast is for Onocoy only */
-        }
-        c.backoff_profile = backoff;
-    } else if (c.backoff_profile == NTRIP_BACKOFF_FAST) {
-        c.backoff_profile = NTRIP_BACKOFF_STANDARD;   /* the host is no longer Onocoy */
+    /* Server-set fields: protected_slot and the backoff profile follow the
+     * caster component's host rules (a requested profile they refuse is
+     * named here). */
+    if (!ntrip_server_apply_host_rules(&c, m == M_OK ? &backoff : NULL)) {
+        return invalid(bad, "backoff_profile");
     }
     c.password_set = false;
     c.ca_pem_set = false;
@@ -461,7 +452,8 @@ bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, n
         if (c.proto == NTRIP_PROTO_V1 && !have_pw) {
             return invalid(bad, "password");
         }
-        if (c.proto == NTRIP_PROTO_V2 && !onocoy && c.username[0] == '\0') {
+        /* The Onocoy slot (protected, by the host rules) authenticates with its mountpoint. */
+        if (c.proto == NTRIP_PROTO_V2 && !c.protected_slot && c.username[0] == '\0') {
             return invalid(bad, "username");
         }
     }

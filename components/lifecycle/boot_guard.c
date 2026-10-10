@@ -108,6 +108,21 @@ void boot_guard_on_boot(boot_guard_state_t *st, boot_hw_reset_t hw, uint32_t lim
     }
 }
 
+void boot_guard_restart(boot_guard_state_t *st, boot_hw_reset_t hw, uint32_t limit, uint32_t claimed,
+                        boot_guard_result_t *out)
+{
+    memset(st, 0, sizeof(*st));   /* no magic: starts over */
+    boot_guard_on_boot(st, hw, limit, out);
+    st->once_flags |= claimed;
+    boot_guard_seal(st);
+}
+
+void boot_guard_stamp(boot_guard_state_t *st, uint32_t gen)
+{
+    st->gen = gen;
+    boot_guard_seal(st);
+}
+
 void boot_guard_on_stable(boot_guard_state_t *st)
 {
     if (!st->safe_mode) {

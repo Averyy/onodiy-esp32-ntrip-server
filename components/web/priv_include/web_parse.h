@@ -72,7 +72,8 @@ bool web_parse_profile_put(const cJSON *root, const um98x_base_profile_t *stored
  * password_set telling whether one is stored). *out gets the merged config
  * to hand to ntrip_server_set_config(): `password` holds the new password
  * or "" (keep), clear_password set when asked; protected_slot and the
- * backoff profile follow the host rules.
+ * backoff profile follow ntrip_server_apply_host_rules() (a fast profile
+ * requested for a host that is not Onocoy: field "backoff_profile").
  */
 bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, ntrip_caster_cfg_t *out,
                           web_bad_t *bad);

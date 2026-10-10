@@ -7,12 +7,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "boot_gen.h"
 #include "boot_guard.h"
 #include "boot_history.h"
 #include "diag.h"
 #include "esp_app_desc.h"
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -30,11 +32,22 @@ _Static_assert(CONFIG_FREERTOS_TASK_NOTIFICATION_ARRAY_ENTRIES >= 2,
 _Static_assert(BOOT_GUARD_UNKNOWN == UINT32_MAX && BOOT_HISTORY_UPTIME_UNKNOWN == UINT32_MAX,
                "unknown session uptime is UINT32_MAX everywhere");
 
-/* Survives software, panic and watchdog resets; validated by magic + checksum. */
+/* Survives software, panic and watchdog resets; validated by magic + checksum,
+ * and by its stamp against the image generation (lifecycle_init). */
 static RTC_NOINIT_ATTR boot_guard_state_t s_rtc;
 
 static lifecycle_boot_info_t s_info;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+
+/* Set by lifecycle_early_boot for the generation check in lifecycle_init. */
+static boot_hw_reset_t s_hw;
+static bool s_inherited;            /* the block was valid and carried over (not started over) */
+static uint32_t s_inherited_stamp;
+static uint32_t s_claimed;          /* under s_lock: one-shot flags claimed this boot */
+
+/* Under s_lock: the image generation, decided once by lifecycle_init. */
+static boot_gen_t s_gen;
+static bool s_gen_known;
 
 /* Inhibits and the queue/commit decision for reboots. Read and changed under
  * s_lock only, so checking for inhibits and committing a reboot is one step. */
@@ -99,6 +112,14 @@ static boot_hw_reset_t map_reset(esp_reset_reason_t r)
     default:
         return BOOT_HW_OTHER;
     }
+}
+
+/* Call under s_lock (or before other tasks exist). */
+static void apply_result(const boot_guard_result_t *res)
+{
+    s_info.reset_class = (lifecycle_reset_class_t)res->cls;
+    s_info.prev_reboot_reason = (lifecycle_reboot_reason_t)(res->prev_reboot_reason & ~BOOT_GUARD_REASON_CRASH);
+    s_info.prev_session_uptime_s = res->prev_session_s;   /* BOOT_GUARD_UNKNOWN == UINT32_MAX */
 }
 
 static void refresh_info(void)
@@ -388,15 +409,18 @@ static esp_err_t start_service(void)
 void lifecycle_early_boot(void)
 {
     esp_reset_reason_t raw = esp_reset_reason();
+    s_hw = map_reset(raw);
+    /* Accounted on the block as found; its stamp is checked once the
+     * settings can be read (lifecycle_init). */
+    s_inherited = boot_guard_valid(&s_rtc) && s_hw != BOOT_HW_POWER_ON;
+    s_inherited_stamp = s_rtc.gen;
     boot_guard_result_t res;
-    boot_guard_on_boot(&s_rtc, map_reset(raw), CONFIG_LIFECYCLE_BOOTLOOP_LIMIT, &res);
+    boot_guard_on_boot(&s_rtc, s_hw, CONFIG_LIFECYCLE_BOOTLOOP_LIMIT, &res);
     reboot_gate_init(&s_gate, CONFIG_LIFECYCLE_MAX_INHIBITS);
 
     memset(&s_info, 0, sizeof(s_info));
     s_info.reset_reason = raw;
-    s_info.reset_class = (lifecycle_reset_class_t)res.cls;
-    s_info.prev_reboot_reason = (lifecycle_reboot_reason_t)(res.prev_reboot_reason & ~BOOT_GUARD_REASON_CRASH);
-    s_info.prev_session_uptime_s = res.prev_session_s;   /* BOOT_GUARD_UNKNOWN == UINT32_MAX */
+    apply_result(&res);
     refresh_info();
 
     (void)esp_register_shutdown_handler(on_esp_restart);
@@ -520,8 +544,113 @@ static void journal_boot(void)
     }
 }
 
+/* This app image: its build and the slot it runs from. */
+static uint32_t image_id(void)
+{
+    const esp_app_desc_t *app = esp_app_get_description();
+    const esp_partition_t *part = esp_ota_get_running_partition();
+    return boot_gen_image_id(app->app_elf_sha256, part != NULL ? part->address : 0);
+}
+
+/* The generation record; rec->readable false when it cannot be read. */
+static void read_generation(boot_gen_record_t *rec)
+{
+    memset(rec, 0, sizeof(*rec));
+    if (!settings_is_available()) {
+        return;
+    }
+    uint8_t buf[BOOT_GEN_BLOB_MAX];
+    size_t len = sizeof(buf);
+    esp_err_t err = settings_get_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_GEN, buf, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        rec->readable = true;
+    } else if (err == ESP_OK) {
+        rec->readable = true;
+        rec->found = boot_gen_decode(buf, len, &rec->gen, &rec->image);   /* damaged: as if none */
+    } else {
+        ESP_LOGW(TAG, "image generation not readable (%s): RTC state checked as without settings",
+                 esp_err_to_name(err));
+    }
+}
+
+/*
+ * The RTC blocks against the image generation (see lifecycle.h). Runs once,
+ * in app_main's task before any other reads the boot accounting.
+ */
+static void check_generation(void)
+{
+    boot_gen_record_t rec;
+    read_generation(&rec);
+    uint32_t image = image_id();
+    boot_gen_t g;
+    boot_gen_decide(&rec, image, &g);
+    if (g.store) {
+        uint8_t buf[BOOT_GEN_BLOB_MAX];
+        size_t len = boot_gen_encode(g.current, image, buf, sizeof(buf));
+        esp_err_t err = (len == 0) ? ESP_ERR_INVALID_SIZE
+                                   : settings_set_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_GEN, buf, len);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "image generation not stored (%s): this run keeps the previous one", esp_err_to_name(err));
+            boot_gen_store_failed(&g);
+        } else if (rec.found) {
+            ESP_LOGI(TAG, "another app image ran before this boot: image generation %u", (unsigned)g.current);
+        }
+    }
+
+    taskENTER_CRITICAL(&s_lock);
+    boot_gen_verdict_t v = boot_gen_check(&g, s_inherited, s_inherited_stamp,
+                                          lifecycle_reboot_switches_image(s_info.prev_reboot_reason));
+    if (v == BOOT_GEN_STALE) {
+        boot_guard_result_t res;
+        boot_guard_restart(&s_rtc, s_hw, CONFIG_LIFECYCLE_BOOTLOOP_LIMIT, s_claimed, &res);
+        apply_result(&res);
+    } else if (v == BOOT_GEN_SWITCH_FAILED) {
+        /* The other image never recorded a boot: it failed early and the
+         * bootloader rolled it back (or it never started). Not the planned
+         * reboot it was meant to be; its session length is not ours. */
+        s_info.prev_reboot_reason = LIFECYCLE_REBOOT_APP_REVERT;
+        s_info.prev_session_uptime_s = UINT32_MAX;
+    }
+    boot_guard_stamp(&s_rtc, g.current);
+    s_gen = g;
+    s_gen_known = true;
+    refresh_info();
+    taskEXIT_CRITICAL(&s_lock);
+
+    if (v == BOOT_GEN_STALE) {
+        ESP_LOGW(TAG, "RTC state predates another app image's run%s: boot accounting started over, as after "
+                      "power loss",
+                 rec.readable ? "" : " or cannot be checked without settings");
+    } else if (v == BOOT_GEN_SWITCH_FAILED) {
+        ESP_LOGW(TAG, "the reboot into another app image did not take (no boot of it recorded): counted as a "
+                      "failed update, not as planned");
+    }
+}
+
+bool lifecycle_rtc_stamp_ok(uint32_t stamp)
+{
+    taskENTER_CRITICAL(&s_lock);
+    bool ok = s_gen_known && boot_gen_accepts(&s_gen, stamp);
+    taskEXIT_CRITICAL(&s_lock);
+    return ok;
+}
+
+uint32_t lifecycle_rtc_stamp(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    uint32_t stamp = s_gen_known ? s_gen.current : BOOT_GEN_UNSTAMPED;
+    taskEXIT_CRITICAL(&s_lock);
+    return stamp;
+}
+
 esp_err_t lifecycle_init(void)
 {
+    taskENTER_CRITICAL(&s_lock);
+    bool checked = s_gen_known;
+    taskEXIT_CRITICAL(&s_lock);
+    if (!checked) {
+        check_generation();
+    }
     esp_err_t err = start_service();
     if (err == ESP_ERR_NO_MEM) {
         ESP_LOGE(TAG, "service task not started: no stable-boot marking, heartbeat or safe-mode retry this boot");
@@ -647,6 +776,9 @@ bool lifecycle_claim_once(uint32_t flag)
 {
     taskENTER_CRITICAL(&s_lock);
     bool first = boot_guard_claim_once(&s_rtc, flag);
+    if (first) {
+        s_claimed |= flag;   /* kept if the generation check starts the accounting over */
+    }
     taskEXIT_CRITICAL(&s_lock);
     return first;
 }

@@ -338,7 +338,7 @@ TEST_CASE("hostname, SSID and Wi-Fi password rules", "[web_core]")
     TEST_ASSERT_TRUE(web_ap_password_valid("apsecret"));
 }
 
-TEST_CASE("caster host names and domains", "[web_core]")
+TEST_CASE("caster host names", "[web_core]")
 {
     TEST_ASSERT_TRUE(web_host_name_ok("servers.onocoy.com"));
     TEST_ASSERT_TRUE(web_host_name_ok("35.207.172.57"));
@@ -352,11 +352,6 @@ TEST_CASE("caster host names and domains", "[web_core]")
     TEST_ASSERT_FALSE(web_host_name_ok("1.2.3.256"));
     TEST_ASSERT_FALSE(web_host_name_ok("1.2.3"));
     TEST_ASSERT_FALSE(web_host_name_ok("host:2101"));
-
-    TEST_ASSERT_TRUE(web_host_in_domain("servers.onocoy.com", "onocoy.com"));
-    TEST_ASSERT_TRUE(web_host_in_domain("ONOCOY.COM", "onocoy.com"));
-    TEST_ASSERT_FALSE(web_host_in_domain("notonocoy.com", "onocoy.com"));
-    TEST_ASSERT_FALSE(web_host_in_domain("onocoy.com.evil", "onocoy.com"));
 }
 
 TEST_CASE("expected firmware string needs a Build number", "[web_core]")

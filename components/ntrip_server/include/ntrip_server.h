@@ -262,7 +262,9 @@ esp_err_t ntrip_server_get_config(size_t slot, ntrip_caster_cfg_t *out, bool wit
  * Fields are checked before saving: no control characters; host a DNS name
  * or IP literal; mountpoint [A-Za-z0-9._-]; NTRIP 1.0 password without
  * spaces; NTRIP 2.0 username without ':'; an enabled slot needs host, port,
- * mountpoint, a password (1.0) and a username (2.0, except Onocoy).
+ * mountpoint, a password (1.0) and a username (2.0, except Onocoy). The
+ * host rules (ntrip_server_apply_host_rules(), with no requested profile)
+ * then set protected_slot and the backoff profile.
  *
  * Cross-slot rules (this component owns them; callers only name the
  * reason): enabling a slot must not stream to Onocoy or RTK2go from a second
@@ -295,6 +297,21 @@ esp_err_t ntrip_server_set_paused(bool paused);
 
 /** Fill a slot config with the Onocoy endpoint (credentials left empty, protected, fast backoff). */
 void ntrip_server_onocoy_defaults(ntrip_caster_cfg_t *out);
+
+/**
+ * The host rules of a slot (this component owns them, like the cross-slot
+ * rules): `protected_slot` is set exactly for a host in the onocoy.com
+ * domain; the backoff profile is fast for that host, polite for rtk2go.com,
+ * and elsewhere `requested` (standard or polite; fast is for Onocoy only)
+ * or, with `requested` NULL, the profile cfg has, a fast one left from an
+ * Onocoy host becoming standard. Hosts match by domain, case-insensitively.
+ * The web API applies it to a request (to name a refused field);
+ * ntrip_server_set_config() applies it to every save (with NULL), so a
+ * stored slot always follows the rules. Pure; no init needed.
+ * @return false (cfg unchanged) if `requested` is fast for a host that is
+ *         not Onocoy.
+ */
+bool ntrip_server_apply_host_rules(ntrip_caster_cfg_t *cfg, const ntrip_backoff_profile_t *requested);
 
 #ifdef __cplusplus
 }

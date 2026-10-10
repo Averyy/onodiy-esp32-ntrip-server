@@ -208,14 +208,14 @@ bool ntrip_host_is_onocoy(const char *host)
     return ntrip_host_in_domain(host, "onocoy.com");
 }
 
-static bool host_is_rtk2go(const char *host)
+bool ntrip_host_is_rtk2go(const char *host)
 {
     return ntrip_host_in_domain(host, "rtk2go.com");
 }
 
 bool ntrip_host_is_open_caster(const char *host)
 {
-    return host_is_rtk2go(host) || ntrip_host_in_domain(host, "crtk.net");
+    return ntrip_host_is_rtk2go(host) || ntrip_host_in_domain(host, "crtk.net");
 }
 
 ntrip_policy_t ntrip_check_policy(const ntrip_policy_slot_t *slots, size_t count, size_t edited)
@@ -232,13 +232,13 @@ ntrip_policy_t ntrip_check_policy(const ntrip_policy_slot_t *slots, size_t count
             continue;
         }
         other_onocoy |= ntrip_host_is_onocoy(slots[i].host);
-        other_rtk2go |= host_is_rtk2go(slots[i].host);
+        other_rtk2go |= ntrip_host_is_rtk2go(slots[i].host);
         other_open |= ntrip_host_is_open_caster(slots[i].host);
     }
     if (ntrip_host_is_onocoy(mine) && other_onocoy) {
         return NTRIP_POLICY_SECOND_ONOCOY;
     }
-    if (host_is_rtk2go(mine) && other_rtk2go) {
+    if (ntrip_host_is_rtk2go(mine) && other_rtk2go) {
         return NTRIP_POLICY_SECOND_RTK2GO;
     }
     bool pair = (ntrip_host_is_onocoy(mine) && other_open) || (ntrip_host_is_open_caster(mine) && other_onocoy);

@@ -232,10 +232,10 @@ size_t net_scan_insert(net_scan_entry_t *list, size_t count, size_t cap, const n
 
 static uint32_t rtc_check(const net_rtc_t *r)
 {
-    /* FNV-1a over the two data words */
+    /* FNV-1a over the data words */
     uint32_t h = 2166136261u;
-    const uint32_t words[2] = { r->magic, r->age_at_boot_s };
-    for (size_t w = 0; w < 2; w++) {
+    const uint32_t words[3] = { r->magic, r->age_at_boot_s, r->stamp };
+    for (size_t w = 0; w < 3; w++) {
         for (unsigned b = 0; b < 4; b++) {
             h ^= (words[w] >> (8 * b)) & 0xFFu;
             h *= 16777619u;
@@ -264,15 +264,18 @@ void net_rtc_seal(net_rtc_t *r)
     r->check = rtc_check(r);
 }
 
-void net_rtc_on_boot(net_rtc_t *r, bool prev_was_ladder_reboot, uint32_t prev_session_s)
+void net_rtc_on_boot(net_rtc_t *r, bool stamp_ok, uint32_t stamp, bool prev_was_ladder_reboot,
+                     uint32_t prev_session_s)
 {
     uint32_t age = NET_AGE_UNKNOWN;
     if (prev_was_ladder_reboot) {
         age = 0;
-    } else if (net_rtc_valid(r) && r->age_at_boot_s != NET_AGE_UNKNOWN && prev_session_s != NET_AGE_UNKNOWN) {
+    } else if (stamp_ok && net_rtc_valid(r) && r->age_at_boot_s != NET_AGE_UNKNOWN &&
+               prev_session_s != NET_AGE_UNKNOWN) {
         age = sat_add(r->age_at_boot_s, prev_session_s);
     }
     r->age_at_boot_s = age;
+    r->stamp = stamp;
     net_rtc_seal(r);
 }
 

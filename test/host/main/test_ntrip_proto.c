@@ -450,6 +450,14 @@ TEST_CASE("ntrip field validation", "[ntrip]")
 
 TEST_CASE("ntrip host domains and cross-slot policy", "[ntrip]")
 {
+    TEST_ASSERT_TRUE(ntrip_host_in_domain("servers.onocoy.com", "onocoy.com"));
+    TEST_ASSERT_TRUE(ntrip_host_in_domain("ONOCOY.COM", "onocoy.com"));
+    TEST_ASSERT_FALSE(ntrip_host_in_domain("notonocoy.com", "onocoy.com"));
+    TEST_ASSERT_FALSE(ntrip_host_in_domain("onocoy.com.evil", "onocoy.com"));
+    TEST_ASSERT_FALSE(ntrip_host_in_domain("onocoy.com", ""));
+    TEST_ASSERT_FALSE(ntrip_host_in_domain(NULL, "onocoy.com"));
+    TEST_ASSERT_TRUE(ntrip_host_is_rtk2go("RTK2GO.com"));
+    TEST_ASSERT_FALSE(ntrip_host_is_rtk2go("rtk2go.com.example.net"));
     TEST_ASSERT_TRUE(ntrip_host_is_onocoy("servers.onocoy.com"));
     TEST_ASSERT_TRUE(ntrip_host_is_onocoy("ONOCOY.COM"));
     TEST_ASSERT_FALSE(ntrip_host_is_onocoy("notonocoy.com"));

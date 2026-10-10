@@ -1862,6 +1862,7 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg, nt
     ntrip_caster_cfg_t next = *cfg;
     next.clear_password = false;
     next.ca_pem_set = false;   /* output only */
+    (void)ntrip_server_apply_host_rules(&next, NULL);   /* never refuses without a requested profile */
     if (cfg->clear_password) {
         memset(next.password, 0, sizeof(next.password));
     } else if (next.password[0] == '\0') {
@@ -1963,16 +1964,3 @@ esp_err_t ntrip_server_set_paused(bool paused)
     return ESP_OK;
 }
 
-void ntrip_server_onocoy_defaults(ntrip_caster_cfg_t *out)
-{
-    memset(out, 0, sizeof(*out));
-    out->enabled = false;  /* enabled once the user enters credentials */
-    out->protected_slot = true;
-    strlcpy(out->name, "Onocoy", sizeof(out->name));
-    strlcpy(out->host, "servers.onocoy.com", sizeof(out->host));
-    out->port = 2101;
-    out->proto = NTRIP_PROTO_V1;
-    out->tls = false;
-    out->trust_mode = NTRIP_TRUST_BUNDLE;
-    out->backoff_profile = NTRIP_BACKOFF_FAST;
-}

@@ -2,10 +2,10 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Which reboot reasons are planned downtime, and how the previous session
- * ended (pure logic, no RTOS calls, host-testable). The reasons and why each
- * is or is not planned are listed at lifecycle_reboot_user_planned() in
- * lifecycle.h.
+ * Which reboot reasons are planned downtime or start another app image,
+ * and how the previous session ended (pure logic, no RTOS calls,
+ * host-testable). The reasons and why each is or is not planned are listed
+ * at lifecycle_reboot_user_planned() in lifecycle.h.
  */
 #include "lifecycle.h"
 
@@ -27,6 +27,19 @@ bool lifecycle_reboot_user_planned(lifecycle_reboot_reason_t reason)
     case LIFECYCLE_REBOOT_SAFE_MODE_RETRY:
     case LIFECYCLE_REBOOT_NVS_SLOT_SWITCH:
     case LIFECYCLE_REBOOT_BOOT_FAILURE:
+    default:
+        return false;
+    }
+}
+
+bool lifecycle_reboot_switches_image(lifecycle_reboot_reason_t reason)
+{
+    switch (reason) {
+    case LIFECYCLE_REBOOT_APP_UPDATE:
+    case LIFECYCLE_REBOOT_APP_ROLLBACK:
+    case LIFECYCLE_REBOOT_APP_REVERT:
+        return true;
+    case LIFECYCLE_REBOOT_NVS_SLOT_SWITCH:   /* committed before the settings are read: see lifecycle.h */
     default:
         return false;
     }

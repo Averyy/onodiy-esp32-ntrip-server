@@ -259,7 +259,7 @@ TEST_CASE("ledger: the RTC copy carries a reset across; damage is caught", "[led
     lc_snapshot_t s;
     lc_snapshot(&c, &s);
     lc_rtc_t blk;
-    lc_rtc_seal(&blk, &s);
+    lc_rtc_seal(&blk, &s, 7u);
     TEST_ASSERT_TRUE(lc_rtc_valid(&blk));
 
     fresh(5000u, 1000);                                          /* new boot, 1 s up */
@@ -278,6 +278,11 @@ TEST_CASE("ledger: the RTC copy carries a reset across; damage is caught", "[led
     TEST_ASSERT_FALSE(lc_rtc_valid(&bad));
     bad = blk;
     bad.magic = 0;
+    TEST_ASSERT_FALSE(lc_rtc_valid(&bad));
+    /* The stamp (lifecycle's image generation) is kept and covered by the CRC. */
+    TEST_ASSERT_EQUAL_UINT32(7u, blk.stamp);
+    bad = blk;
+    bad.stamp = 8u;
     TEST_ASSERT_FALSE(lc_rtc_valid(&bad));
 }
 
@@ -306,16 +311,25 @@ TEST_CASE("ledger blobs: round trip, newer writers may append, damage is refused
     TEST_ASSERT_TRUE(d.planned);
 
     TEST_ASSERT_FALSE(d.reboot_planned);
+    TEST_ASSERT_EQUAL_INT64(0, d.alive_ms);                      /* no mark */
 
     buf[len] = 0xAB;                                             /* a newer writer's extra field */
     TEST_ASSERT_TRUE(lc_decode_today(buf, len + 1u, &d));
-    TEST_ASSERT_FALSE(lc_decode_today(buf, len - 2u, &d));
-    /* A blob from before the reboot flag existed ends one byte earlier. */
+    TEST_ASSERT_FALSE(lc_decode_today(buf, len - 2u, &d));       /* cut inside the mark */
+    /* Today carries the mark it runs up to: one unit. */
     s.reboot_planned = true;
+    s.alive_ms = at(DAY0, H(7));
     len = lc_encode_today(&s, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_size_t(122, len);
     TEST_ASSERT_TRUE(lc_decode_today(buf, len, &d));
     TEST_ASSERT_TRUE(d.reboot_planned);
-    TEST_ASSERT_TRUE(lc_decode_today(buf, len - 1u, &d));
+    TEST_ASSERT_EQUAL_INT64(at(DAY0, H(7)), d.alive_ms);
+    /* A blob from before the mark existed ends 8 bytes earlier, one from
+     * before the reboot flag one more. */
+    TEST_ASSERT_TRUE(lc_decode_today(buf, len - 8u, &d));
+    TEST_ASSERT_TRUE(d.reboot_planned);
+    TEST_ASSERT_EQUAL_INT64(0, d.alive_ms);
+    TEST_ASSERT_TRUE(lc_decode_today(buf, len - 9u, &d));
     TEST_ASSERT_FALSE(d.reboot_planned);
     TEST_ASSERT_TRUE(d.planned);
     buf[0] = 0;
@@ -389,7 +403,7 @@ TEST_CASE("ledger: a reset just after UTC midnight keeps the day that ended", "[
         lc_tick(&c, now);
         lc_snapshot_t snap;
         lc_snapshot(&c, &snap);
-        lc_rtc_seal(&rtc, &snap);
+        lc_rtc_seal(&rtc, &snap, 7u);
         int64_t alive;
         bool today, hist;
         if (lc_persist_due(&c, now, 60000u, &alive, &today, &hist)) {
@@ -732,7 +746,7 @@ TEST_CASE("ledger: a planned reboot counts as planned from its start and stores 
     lc_snapshot(&c, &s);
     TEST_ASSERT_TRUE(s.reboot_planned);
     lc_rtc_t blk;
-    lc_rtc_seal(&blk, &s);
+    lc_rtc_seal(&blk, &s, 7u);
     TEST_ASSERT_TRUE(lc_rtc_valid(&blk));
     TEST_ASSERT_TRUE(blk.snap.reboot_planned);
 
@@ -771,7 +785,7 @@ TEST_CASE("ledger: a crash after a planned reboot is not planned; one boot uses 
     TEST_ASSERT_EQUAL_INT64(s.alive_ms, resealed.alive_ms);
     TEST_ASSERT_EQUAL_HEX8(0x01, resealed.expected_mask);
     lc_rtc_t rtc;
-    lc_rtc_seal(&rtc, &resealed);
+    lc_rtc_seal(&rtc, &resealed, 7u);
 
     /* The boot after the panic: 60 s of gap, then 25 s of boot. */
     fresh(T0, 0);
@@ -874,7 +888,8 @@ TEST_CASE("ledger: a reboot without a clock stores today with the mark it runs u
     /* S3 after a power cut: restored from NVS, SNTP 200 s after S1 began. */
     lc_snapshot_t st = snap_base();
     TEST_ASSERT_TRUE(lc_decode_today(blob, blob_len, &st));
-    st.alive_ms = nvs_alive;
+    TEST_ASSERT_EQUAL_INT64(nvs_alive, st.alive_ms);            /* the blob carries its own mark */
+    st.alive_ms = lc_stored_mark(st.alive_ms, 0);
     fresh(T0, 0);
     lc_restore(&c, &st, LC_RESET_POWER_CUT);
     TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(200)), LC_CLOCK_SNTP));
@@ -884,4 +899,101 @@ TEST_CASE("ledger: a reboot without a clock stores today with the mark it runs u
     fresh(T0, 0);
     lc_shutdown(&c, T0 + 1000u, true);
     TEST_ASSERT_FALSE(lc_persist_due(&c, T0 + 1000u, 0, &alive, &today, &hist));
+}
+
+TEST_CASE("ledger: today and its mark are stored as one unit; a stale alive key never counts time twice",
+          "[ledger]")
+{
+    static uint8_t blob[200];
+    size_t blob_len = 0;
+    int64_t alive_key_s = 0;   /* the alive key as NVS holds it */
+    int64_t alive = 0;
+    bool today = false;
+    bool hist = false;
+
+    /* Slot 0 is down from 10:00; stores once a minute, as ledger.c does:
+     * today changed, so today with its mark goes as one blob. */
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, at(DAY0, H(10)), LC_CLOCK_SNTP);
+    lc_set_slot(&c, T0, 0, true, true, false);
+    uint32_t now = T0;
+    for (int min = 0; min <= 2; min++) {
+        lc_tick(&c, now);
+        lc_snapshot_t snap;
+        lc_snapshot(&c, &snap);
+        TEST_ASSERT_TRUE(lc_persist_due(&c, now, 60000u, &alive, &today, &hist));
+        TEST_ASSERT_TRUE(today);
+        snap.alive_ms = alive;
+        blob_len = lc_encode_today(&snap, blob, sizeof(blob));
+        if (min == 0) {
+            alive_key_s = alive / 1000;   /* an older alive key, from before */
+        }
+        now += 60000u;
+    }
+    /* A power cut 30 s after the last store; back at 10:03:00 by SNTP. The
+     * alive key is two minutes behind the blob: with two keys this is what a
+     * failed second write left, and the restore counted those two minutes
+     * twice. The blob's own mark wins. */
+    lc_snapshot_t st = snap_base();
+    TEST_ASSERT_TRUE(lc_decode_today(blob, blob_len, &st));
+    TEST_ASSERT_EQUAL_INT64(at(DAY0, H(10) + M(2)), st.alive_ms);
+    st.alive_ms = lc_stored_mark(st.alive_ms, alive_key_s);
+    TEST_ASSERT_EQUAL_INT64(at(DAY0, H(10) + M(2)), st.alive_ms);
+    fresh(T0, 0);
+    lc_restore(&c, &st, LC_RESET_POWER_CUT);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + M(3)), LC_CLOCK_SNTP));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)M(3), c.today.down_ms[0]);   /* not 5 min */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)M(1), c.today.power_off_ms);
+}
+
+TEST_CASE("ledger: while today is unchanged the alive key alone moves the mark on", "[ledger]")
+{
+    static uint8_t blob[200];
+    size_t blob_len = 0;
+    int64_t alive_key_s = 0;
+    int64_t alive = 0;
+    bool today = false;
+    bool hist = false;
+
+    /* Slot 0 streams all along: after the first store today never changes,
+     * so only the mark is written (one small write, not the blob). */
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, at(DAY0, H(10)), LC_CLOCK_SNTP);
+    lc_set_rtcm_ok(&c, T0, true);
+    lc_set_slot(&c, T0, 0, true, true, true);
+    uint32_t now = T0;
+    int blobs = 0;
+    for (int min = 0; min <= 10; min++) {
+        lc_tick(&c, now);
+        lc_snapshot_t snap;
+        lc_snapshot(&c, &snap);
+        TEST_ASSERT_TRUE(lc_persist_due(&c, now, 60000u, &alive, &today, &hist));
+        if (today) {
+            snap.alive_ms = alive;
+            blob_len = lc_encode_today(&snap, blob, sizeof(blob));
+            blobs++;
+        } else {
+            alive_key_s = alive / 1000;
+        }
+        now += 60000u;
+    }
+    TEST_ASSERT_EQUAL(1, blobs);
+    /* A power cut; back at 10:12. The gap runs from the later mark (10:10),
+     * not from the blob's (10:00): ten minutes of streaming are not down. */
+    lc_snapshot_t st = snap_base();
+    TEST_ASSERT_TRUE(lc_decode_today(blob, blob_len, &st));
+    TEST_ASSERT_EQUAL_INT64(at(DAY0, H(10)), st.alive_ms);
+    st.alive_ms = lc_stored_mark(st.alive_ms, alive_key_s);
+    TEST_ASSERT_EQUAL_INT64(at(DAY0, H(10) + M(10)), st.alive_ms);
+    fresh(T0, 0);
+    lc_restore(&c, &st, LC_RESET_POWER_CUT);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + M(12)), LC_CLOCK_SNTP));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)M(2), c.today.down_ms[0]);
+
+    /* The older two-key layout: a today blob without a mark, the alive key alone. */
+    TEST_ASSERT_EQUAL_INT64(S(1234), lc_stored_mark(0, 1234));
+    TEST_ASSERT_EQUAL_INT64(S(1234), lc_stored_mark(S(1000), 1234));
+    TEST_ASSERT_EQUAL_INT64(S(2000), lc_stored_mark(S(2000), 1234));
+    TEST_ASSERT_EQUAL_INT64(S(2000), lc_stored_mark(S(2000), 0));
+    TEST_ASSERT_EQUAL_INT64(0, lc_stored_mark(0, -5));
 }

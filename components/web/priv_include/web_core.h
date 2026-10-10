@@ -266,9 +266,6 @@ bool web_chars_ok(const char *s, const char *extra);
 /** A DNS name (labels of [A-Za-z0-9-], 1-63 each, not starting or ending with '-') or an IPv4 literal; <= 63 characters. */
 bool web_host_name_ok(const char *host);
 
-/** True if host equals `domain` or ends in "." + domain (case-insensitive). */
-bool web_host_in_domain(const char *host, const char *domain);
-
 /**
  * Receiver firmware string the user expects: <= 47 characters, no control
  * characters, containing "Build" followed by digits. @return the build
