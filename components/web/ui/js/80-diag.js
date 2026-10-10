@@ -73,6 +73,33 @@ function pollInto(box, ms, path, render) {
 
 /* ---- Health ------------------------------------------------------------- */
 
+function journalStats(j) {
+  if (!j) return h('p', { class: 'muted' }, 'Not available.');
+  if (!j.available) return msg('warn', 'The journal partition is missing or unusable: events are not recorded.');
+  return kv([
+    ['Records kept', fmt.num(j.capacity)],
+    ['Oldest / newest', j.newest_seq ? '#' + j.oldest_seq + ' / #' + j.newest_seq : 'empty'],
+    ['Written this start', fmt.num(j.written)],
+    ['Waiting to be written', fmt.num(j.queued)],
+    ['Refused (same kind too soon)', fmt.num(j.refused_kind)],
+    ['Refused (hourly budget)', fmt.num(j.refused_budget)],
+    j.queue_full ? ['Refused (queue full)', h('span', { class: 't-warn' }, fmt.num(j.queue_full))] : null,
+    j.io_errors ? ['Write errors', h('span', { class: 't-bad' }, fmt.num(j.io_errors))] : null,
+    ['Erase cycles per sector', fmt.num(j.sector_cycles)],
+  ]);
+}
+
+function logStats(l) {
+  if (!l) return h('p', { class: 'muted' }, 'Not available.');
+  return kv([
+    ['Lines this start', fmt.num(l.lines)],
+    ['Overwritten in memory', fmt.num(l.ring_overwritten)],
+    ['Cut to the line limit', fmt.num(l.cut)],
+    ['Not sent to the serial console', fmt.num(l.console_dropped) + ' lines (' + fmt.bytes(l.console_dropped_bytes) + ')'],
+    ['Previous start', l.prev_boot_available ? fmt.num(l.prev_boot_lines) + ' lines readable' : 'not readable'],
+  ]);
+}
+
 function healthTab(box) {
   const render = hl => {
     const b = hl.boot || {};
@@ -94,9 +121,14 @@ function healthTab(box) {
           ['Recovery steps', fmt.num(hl.recoveries)],
           ['Caster restarts', fmt.num(hl.caster_restarts)],
           ['Network recoveries', fmt.num(hl.network_recoveries)],
-          ['Longest RTCM gap', fmt.ms(hl.rtcm_gap_ms)],
+          ['Since the last RTCM', hl.rtcm_gap_ms === null || hl.rtcm_gap_ms === undefined ? 'never received' : fmt.ms(hl.rtcm_gap_ms)],
+          hl.gnss_retry_in_s ? ['Next receiver recovery pass in', fmt.dur(hl.gnss_retry_in_s)] : null,
           ['Restart blocked by', hl.inhibited_by || 'nothing'],
           ['Update in progress', hl.update_slot === 'none' || !hl.update_slot ? 'none' : words(hl.update_slot)],
+          hl.factory_reset_refused_age_s !== null && hl.factory_reset_refused_age_s !== undefined ?
+            ['BOOT-button factory reset', h('span', { class: 't-warn' }, 'refused ' + fmt.dur(hl.factory_reset_refused_age_s) +
+              ' ago (a receiver update was running)')] : null,
+          hl.admin_resets ? ['BOOT-button password resets', fmt.num(hl.admin_resets)] : null,
         ])),
       h('section', { class: 'card' },
         h('h2', null, 'Memory'),
@@ -105,6 +137,8 @@ function healthTab(box) {
           ['Internal lowest', fmt.bytes(heap.internal_min)],
           ['Largest internal block', fmt.bytes(heap.internal_largest)],
           ['PSRAM free', fmt.bytes(heap.psram_free)],
+          heap.psram_min !== undefined ? ['PSRAM lowest', fmt.bytes(heap.psram_min)] : null,
+          heap.psram_largest !== undefined ? ['Largest PSRAM block', fmt.bytes(heap.psram_largest)] : null,
         ])),
       h('section', { class: 'card' },
         h('h2', null, 'This start', b.safe_mode ? badge('Safe mode', 'bad') : b.stable ? badge('Stable', 'ok') : null),
@@ -128,6 +162,8 @@ function healthTab(box) {
       h('section', { class: 'card' }, h('h2', null, 'RTCM hub'), autoKv(hl.hub),
         h('h3', { class: 'section-title' }, 'Station'), autoKv(hl.station),
         h('h3', { class: 'section-title' }, 'Observations'), autoKv(hl.obs)),
+      h('section', { class: 'card' }, h('h2', null, 'Event journal'), journalStats(hl.journal),
+        h('h3', { class: 'section-title' }, 'Log'), logStats(hl.log)),
       h('section', { class: 'card' }, h('h2', null, 'Network'), autoKv(net),
         h('h3', { class: 'section-title' }, 'Recovery'), net.ladder ? kv([
           ['Active', fmt.yesno(net.ladder.active)],
@@ -167,7 +203,7 @@ function availabilityTab(box) {
           ['Powered off', fmt.dur(day.power_off_s)],
           ['UART overflows', fmt.num(day.rx_overflows)],
         ]),
-        h('p', { class: 'muted small foot' }, 'Offline counts seconds a caster should have streamed but did not; planned is the part caused by updates and receiver work. Information only.')),
+        h('p', { class: 'muted small foot' }, 'Offline counts seconds a caster should have streamed but did not; planned is the part caused by receiver configuration and updates. Information only.')),
       h('section', { class: 'card' }, h('h2', null, 'Casters today'),
         slots.length ? table(['Caster', 'Offline', 'Planned', 'Reconnects'], dayRows, { num: [1, 2, 3] }) : h('p', { class: 'muted' }, 'No casters.')),
       h('section', { class: 'card wide' }, h('h2', null, 'Last 30 days'),

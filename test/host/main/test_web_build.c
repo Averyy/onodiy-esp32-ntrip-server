@@ -498,3 +498,156 @@ TEST_CASE("journal entries use the event names", "[web_build]")
     TEST_ASSERT_EQUAL(-1, at(cJSON_GetArrayItem(list, 1), "a")->valueint);
     cJSON_Delete(root);
 }
+
+TEST_CASE("signals: epoch gaps only against a configured period; frames per message", "[web_build]")
+{
+    gnss_obs_summary_t sum;
+    memset(&sum, 0, sizeof(sum));
+    sum.epoch_age_ms = 420;
+    sum.epochs = 100;
+    sum.epoch_gaps = 3;
+    sum.epoch_jumps = 1;
+    um98x_base_profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.rtcm_count = 1;
+    p.rtcm[0] = (um98x_rtcm_out_t){ 1077, 1 };
+
+    /* No MSM period configured: gaps are not counted, so they are null. */
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_signals(&w, &sum, NULL, 0, &p, true);
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "epoch_gaps")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "epoch_period_ms")));
+    TEST_ASSERT_EQUAL(1, at(root, "epoch_jumps")->valueint);
+    cJSON_Delete(root);
+
+    sum.epoch_period_ms = 1000;
+    gnss_obs_msg_stat_t stats[1] = {
+        { .msg = 1077, .expected_period_s = 1, .count = 100, .frames = 200, .period_ms = 1000, .age_ms = 300 },
+    };
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_signals(&w, &sum, stats, 1, &p, true);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_EQUAL(3, at(root, "epoch_gaps")->valueint);
+    TEST_ASSERT_EQUAL(1000, at(root, "epoch_period_ms")->valueint);
+    const cJSON *m = cJSON_GetArrayItem(at(root, "messages"), 0);
+    TEST_ASSERT_EQUAL(100, at(m, "count")->valueint);
+    TEST_ASSERT_EQUAL(200, at(m, "frames")->valueint);
+    cJSON_Delete(root);
+}
+
+TEST_CASE("sky: QZSS and SBAS show their PRN, GLONASS its slot", "[web_build]")
+{
+    TEST_ASSERT_EQUAL_UINT(193, web_sky_prn(GNSS_SYS_QZSS, 1));
+    TEST_ASSERT_EQUAL_UINT(120, web_sky_prn(GNSS_SYS_SBAS, 1));
+    TEST_ASSERT_EQUAL_UINT(12, web_sky_prn(GNSS_SYS_GPS, 12));
+    TEST_ASSERT_EQUAL_UINT(7, web_sky_prn(GNSS_SYS_GLONASS, 7));
+
+    gnss_obs_sat_t sats[2] = {
+        { .sys = GNSS_SYS_QZSS, .prn = 2, .elevation_deg = 40, .azimuth_deg = 180, .cnr_dbhz = 0 },
+        { .sys = GNSS_SYS_SBAS, .prn = 12, .elevation_deg = 30, .azimuth_deg = 200, .cnr_dbhz = 41 },
+    };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_sky(&w, sats, 2, NULL);
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "available")));
+    const cJSON *list = at(root, "satellites");
+    TEST_ASSERT_EQUAL(194, at(cJSON_GetArrayItem(list, 0), "prn")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(cJSON_GetArrayItem(list, 0), "cnr_dbhz")));
+    TEST_ASSERT_EQUAL(131, at(cJSON_GetArrayItem(list, 1), "prn")->valueint);
+    cJSON_Delete(root);
+
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_sky(&w, sats, 2, "no_data");
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_FALSE(cJSON_IsTrue(at(root, "available")));
+    TEST_ASSERT_EQUAL_STRING("no_data", at(root, "reason")->valuestring);
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(root, "satellites")));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("health: retry, refused factory reset, journal and log counters", "[web_build]")
+{
+    static health_status_t hs;
+    static lifecycle_boot_info_t boot;
+    static gnss_link_stats_t link;
+    static rtcm_hub_stats_t hub;
+    static station_status_t st;
+    static gnss_obs_summary_t obs;
+    static network_status_t net;
+    static diag_coredump_info_t cd;
+    static diag_heap_info_t heap;
+    static diag_journal_info_t journal;
+    static diag_log_stats_t log;
+    memset(&hs, 0, sizeof(hs));
+    hs.factory_reset_refused_age_s = UINT32_MAX;
+    hs.rtcm_gap_ms = UINT32_MAX;
+    obs.epoch_period_ms = 1000;
+    obs.epoch_gaps = 2;
+    heap.psram_min = 1234;
+    journal.available = true;
+    journal.capacity = 4064;
+    journal.newest_seq = 77;
+    log.lines = 812;
+    log.prev_boot_available = true;
+    web_health_snap_t h = {
+        .health = &hs, .boot = &boot, .link = &link, .hub = &hub, .st = &st, .obs = &obs, .net = &net,
+        .coredump = &cd, .heap = &heap, .journal = &journal, .log = &log,
+    };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_health(&w, &h);
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "gnss_retry_in_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "factory_reset_refused_age_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "rtcm_gap_ms")));
+    TEST_ASSERT_EQUAL(1234, at(at(root, "heap"), "psram_min")->valueint);
+    TEST_ASSERT_EQUAL(2, at(at(root, "obs"), "epoch_gaps")->valueint);
+    TEST_ASSERT_EQUAL(4064, at(at(root, "journal"), "capacity")->valueint);
+    TEST_ASSERT_EQUAL(812, at(at(root, "log"), "lines")->valueint);
+    cJSON_Delete(root);
+
+    hs.gnss_retry_in_s = 420;
+    hs.factory_reset_refused_age_s = 30;
+    hs.admin_resets = 1;
+    h.journal = NULL;
+    h.log = NULL;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_health(&w, &h);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_EQUAL(420, at(root, "gnss_retry_in_s")->valueint);
+    TEST_ASSERT_EQUAL(30, at(root, "factory_reset_refused_age_s")->valueint);
+    TEST_ASSERT_EQUAL(1, at(root, "admin_resets")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "journal")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "log")));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("status: a refused factory reset shows for 10 minutes, admin form only", "[web_build]")
+{
+    fixture();
+    char frag[512];
+    wj_t w;
+    s_snap.health.factory_reset_refused_age_s = 30;
+    wj_init_members(&w, frag, sizeof(frag));
+    web_build_section(&w, &s_snap, WEB_SEC_HEALTH, false);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(wj_text(&w), "\"factory_reset_refused\":true"), wj_text(&w));
+    s_snap.health.factory_reset_refused_age_s = WEB_FACTORY_REFUSED_SHOW_S;
+    wj_init_members(&w, frag, sizeof(frag));
+    web_build_section(&w, &s_snap, WEB_SEC_HEALTH, false);
+    TEST_ASSERT_NOT_NULL(strstr(wj_text(&w), "\"factory_reset_refused\":false"));
+    s_snap.health.factory_reset_refused_age_s = UINT32_MAX;
+    wj_init_members(&w, frag, sizeof(frag));
+    web_build_section(&w, &s_snap, WEB_SEC_HEALTH, false);
+    TEST_ASSERT_NOT_NULL(strstr(wj_text(&w), "\"factory_reset_refused\":false"));
+    wj_init_members(&w, frag, sizeof(frag));
+    web_build_section(&w, &s_snap, WEB_SEC_HEALTH, true);
+    TEST_ASSERT_NULL(strstr(wj_text(&w), "factory_reset_refused"));
+}

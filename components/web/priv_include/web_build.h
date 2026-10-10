@@ -272,12 +272,18 @@ typedef struct {
     const gnss_obs_summary_t *obs;
     const network_status_t *net;
     const diag_coredump_info_t *coredump;
+    const diag_heap_info_t *heap;          /**< NULL = the PSRAM low-water and largest block are left out */
+    const diag_journal_info_t *journal;    /**< NULL = "journal" is null */
+    const diag_log_stats_t *log;           /**< NULL = "log" is null */
     const char *inhibited_by;      /**< NULL = none */
     lifecycle_update_t update_slot;
 } web_health_snap_t;
 
 /** GET /api/health. */
 void web_build_health(wj_t *w, const web_health_snap_t *h);
+
+/** How long /api/status says a BOOT-button factory reset was refused (s). */
+#define WEB_FACTORY_REFUSED_SHOW_S 600u
 
 typedef struct {
     ledger_clock_t clock;
@@ -296,6 +302,9 @@ typedef struct {
 
 /** GET /api/availability. */
 void web_build_availability(wj_t *w, const web_avail_snap_t *a);
+
+/** PRN shown in the sky view for a gnss_obs satellite number (QZSS, SBAS offsets). */
+unsigned web_sky_prn(gnss_sys_t sys, uint8_t prn);
 
 /** GET /api/journal. */
 void web_build_journal(wj_t *w, const diag_journal_entry_t *e, size_t count, uint32_t cursor, bool more);

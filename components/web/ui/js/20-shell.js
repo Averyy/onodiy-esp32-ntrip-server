@@ -283,6 +283,11 @@ function renderNotices() {
     items.push(['bad', 'Settings storage unavailable',
       'The station could not use its settings storage this boot. It runs, but changes are not saved. Restarting may help; if not, see the diagnostics.', null]);
   }
+  if (st.health && st.health.factory_reset_refused) {
+    items.push(['warn', 'Factory reset refused',
+      'Someone held the BOOT button for a factory reset while a receiver update was running, so the station refused it. ' +
+      'Hold the button again once the update has finished.', [link('Details', '#/diag', 'btn small')]]);
+  }
   if (sm.active) {
     items.push(['bad', 'Safe mode',
       'The station restarted after ' + (sm.crashes || 'repeated') + ' crashes and is in safe mode: the receiver and the casters are off. ' +

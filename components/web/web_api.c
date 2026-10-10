@@ -183,6 +183,8 @@ void web_snap_status(web_status_snap_t *s)
     }
     if (health_get_status(&s->health) != ESP_OK) {
         memset(&s->health, 0, sizeof(s->health));
+        s->health.rtcm_gap_ms = UINT32_MAX;
+        s->health.factory_reset_refused_age_s = UINT32_MAX;
     }
     if (fw_update_get_status(&s->fw) != ESP_OK) {
         memset(&s->fw, 0, sizeof(s->fw));
@@ -681,7 +683,7 @@ static esp_err_t h_sky(web_req_t *r)
         if (!profile.sat_view_output) {
             reason = "sat_view_off";
         } else if (err != ESP_OK) {
-            reason = "not_available_yet";
+            reason = "no_data";   /* on in the profile, but nothing arrived in the last 30 s */
         }
     }
     web_resp_t resp;
@@ -1026,6 +1028,7 @@ static esp_err_t h_wifi_put(web_req_t *r)
     /* Work out the station password before changing anything. */
     static char stored_pw[65];
     const char *pw = in.password;
+    bool reconnect = in.have_ssid;
     if (in.have_ssid && !in.have_password) {
         char stored_ssid[33];
         bool same = settings_get_str(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_SSID, stored_ssid, sizeof(stored_ssid)) ==
@@ -1035,7 +1038,10 @@ static esp_err_t h_wifi_put(web_req_t *r)
             return web_send_error(r->req, WEB_ERR_INVALID_FIELD, "A new network needs its password", "password",
                                   UINT32_MAX, NULL, NULL);
         }
-        pw = stored_pw;
+        /* Same network, same password: nothing to change, so no reconnect
+         * (a form that only sets the AP password may still send the SSID). */
+        memset(stored_pw, 0, sizeof(stored_pw));
+        reconnect = false;
     }
     if (in.have_ap_password) {
         esp_err_t err = settings_set_str(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_AP_PASS, in.ap_password);
@@ -1044,7 +1050,7 @@ static esp_err_t h_wifi_put(web_req_t *r)
             return web_send_internal(r->req, err);
         }
     }
-    if (in.have_ssid) {
+    if (reconnect) {
         esp_err_t err = network_set_credentials(in.ssid, pw);
         memset(stored_pw, 0, sizeof(stored_pw));
         if (err == ESP_ERR_INVALID_ARG) {
@@ -1505,6 +1511,8 @@ static esp_err_t h_health(web_req_t *r)
     health_status_t health;
     if (health_get_status(&health) != ESP_OK) {
         memset(&health, 0, sizeof(health));
+        health.rtcm_gap_ms = UINT32_MAX;
+        health.factory_reset_refused_age_s = UINT32_MAX;
     }
     lifecycle_boot_info_t boot;
     lifecycle_get_boot_info(&boot);
@@ -1531,6 +1539,12 @@ static esp_err_t h_health(web_req_t *r)
     if (diag_coredump_info(&cd) != ESP_OK) {
         memset(&cd, 0, sizeof(cd));
     }
+    diag_heap_info_t heap;
+    diag_heap_stats(&heap);
+    diag_journal_info_t journal;
+    diag_journal_info(&journal);
+    diag_log_stats_t log;
+    diag_log_stats(&log);
     const char *by = NULL;
     if (!lifecycle_reboot_inhibited(&by)) {
         by = NULL;
@@ -1547,6 +1561,9 @@ static esp_err_t h_health(web_req_t *r)
         .obs = &s_obs,
         .net = &s_net,
         .coredump = &cd,
+        .heap = &heap,
+        .journal = &journal,
+        .log = &log,
         .inhibited_by = by,
         .update_slot = lifecycle_update_active(),
     };
@@ -1598,7 +1615,8 @@ static esp_err_t h_availability(web_req_t *r)
 static esp_err_t h_tasks(web_req_t *r)
 {
     size_t n = TASKS_MAX;
-    if (diag_task_stats(s_tasks, &n) != ESP_OK) {
+    esp_err_t err = diag_task_stats(s_tasks, &n);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_SIZE) {   /* INVALID_SIZE: the first n tasks */
         n = 0;
     }
     web_resp_t resp;
@@ -1641,15 +1659,12 @@ static esp_err_t h_logs(web_req_t *r)
         return web_download_log_text(r, prev);
     }
     uint32_t cursor = query_u32(r->query, "cursor");
-    uint32_t before = cursor;
-    size_t n = prev ? diag_log_read_prev_boot(&cursor, s_text, sizeof(s_text))
-                    : diag_log_read(&cursor, s_text, sizeof(s_text));
-    /* Whole lines only: a nearly full page means more is waiting. */
-    bool more = n + 256u >= sizeof(s_text) - 1u;
-    bool gap = (uint32_t)(cursor - before) > n;
+    diag_log_read_info_t info = { 0 };
+    diag_log_src_t src = prev ? DIAG_LOG_PREV_BOOT : DIAG_LOG_THIS_BOOT;
+    size_t n = diag_log_read_ex(src, &cursor, s_text, sizeof(s_text), &info);
     web_resp_t resp;
     resp_begin(&resp, r->req, 200);
-    web_build_logs(&resp.w, cursor, more, gap, s_text, n);
+    web_build_logs(&resp.w, cursor, info.more, info.gap, s_text, n);
     return web_resp_end(&resp);
 }
 
@@ -1660,9 +1675,12 @@ static esp_err_t h_journal(web_req_t *r)
     if (diag_journal_read(&cursor, s_journal, &n) != ESP_OK) {
         n = 0;
     }
+    diag_journal_info_t info;
+    diag_journal_info(&info);
+    bool more = n == JOURNAL_PAGE && info.newest_seq != 0 && (int32_t)(info.newest_seq - cursor) > 0;
     web_resp_t resp;
     resp_begin(&resp, r->req, 200);
-    web_build_journal(&resp.w, s_journal, n, cursor, n == JOURNAL_PAGE);
+    web_build_journal(&resp.w, s_journal, n, cursor, more);
     return web_resp_end(&resp);
 }
 

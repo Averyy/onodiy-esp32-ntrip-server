@@ -295,6 +295,8 @@ static void sec_health(wj_t *w, const web_status_snap_t *s, bool pub)
     if (!pub) {
         wj_str(w, "last_step", web_health_step_name(s->health.last_step));
         wj_bool(w, "ladder_suspended", s->health.gnss_ladder_suspended);
+        /* A bool (not the age), so the section only changes when it flips. */
+        wj_bool(w, "factory_reset_refused", s->health.factory_reset_refused_age_s < WEB_FACTORY_REFUSED_SHOW_S);
     }
     wj_obj_close(w);
 }
@@ -577,6 +579,19 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     wj_obj_close(w);
 }
 
+/* Epoch-gap counters: gaps are only counted against a configured MSM period. */
+static void obs_gaps(wj_t *w, const gnss_obs_summary_t *sum)
+{
+    if (sum->epoch_period_ms != 0) {
+        wj_uint(w, "epoch_gaps", sum->epoch_gaps);
+        wj_uint(w, "epoch_period_ms", sum->epoch_period_ms);
+    } else {
+        wj_null(w, "epoch_gaps");
+        wj_null(w, "epoch_period_ms");
+    }
+    wj_uint(w, "epoch_jumps", sum->epoch_jumps);
+}
+
 static int profile_period(const um98x_base_profile_t *p, uint16_t msg)
 {
     for (size_t i = 0; p != NULL && i < p->rtcm_count && i < UM98X_MAX_RTCM_MSGS; i++) {
@@ -592,6 +607,7 @@ static void msg_entry(wj_t *w, uint16_t msg, const gnss_obs_msg_stat_t *stat, in
     wj_obj_open(w, NULL);
     wj_uint(w, "msg", msg);
     wj_uint(w, "count", stat != NULL ? stat->count : 0);
+    wj_uint(w, "frames", stat != NULL ? stat->frames : 0);
     if (stat != NULL) {
         wj_u32_or_null(w, "period_ms", stat->period_ms);
         wj_u32_or_null(w, "age_ms", stat->age_ms);
@@ -616,7 +632,7 @@ void web_build_signals(wj_t *w, const gnss_obs_summary_t *sum, const gnss_obs_ms
     wj_bool(w, "e6_lost", sum->e6_lost);
     wj_u32_or_null(w, "epoch_age_ms", sum->epoch_age_ms);
     wj_uint(w, "epochs", sum->epochs);
-    wj_uint(w, "epoch_gaps", sum->epoch_gaps);
+    obs_gaps(w, sum);
     wj_arr_open(w, "systems");
     for (int s = 0; s < GNSS_SYS_COUNT; s++) {
         const gnss_obs_sys_t *o = &sum->sys[s];
@@ -683,6 +699,20 @@ void web_build_signals(wj_t *w, const gnss_obs_summary_t *sum, const gnss_obs_ms
     wj_obj_close(w);
 }
 
+/* The satellite's own PRN: gnss_obs numbers QZSS and SBAS as in the MSM
+ * satellite mask (PRN - 192, PRN - 119); GLONASS stays its slot number. */
+unsigned web_sky_prn(gnss_sys_t sys, uint8_t prn)
+{
+    switch (sys) {
+    case GNSS_SYS_QZSS:
+        return prn + 192u;
+    case GNSS_SYS_SBAS:
+        return prn + 119u;
+    default:
+        return prn;
+    }
+}
+
 void web_build_sky(wj_t *w, const gnss_obs_sat_t *sats, size_t count, const char *reason)
 {
     wj_obj_open(w, NULL);
@@ -692,7 +722,7 @@ void web_build_sky(wj_t *w, const gnss_obs_sat_t *sats, size_t count, const char
     for (size_t i = 0; reason == NULL && sats != NULL && i < count && i < 64; i++) {
         wj_obj_open(w, NULL);
         wj_str(w, "sys", web_sys_name(sats[i].sys));
-        wj_uint(w, "prn", sats[i].prn);
+        wj_uint(w, "prn", web_sky_prn(sats[i].sys, sats[i].prn));
         wj_int(w, "el_deg", sats[i].elevation_deg);
         wj_uint(w, "az_deg", sats[i].azimuth_deg);
         if (sats[i].cnr_dbhz != 0) {
@@ -1145,11 +1175,22 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
     wj_uint(w, "caster_restarts", hs->caster_restarts);
     wj_uint(w, "network_recoveries", hs->network_recoveries);
     wj_u32_or_null(w, "rtcm_gap_ms", hs->rtcm_gap_ms);
+    if (hs->gnss_retry_in_s != 0) {
+        wj_uint(w, "gnss_retry_in_s", hs->gnss_retry_in_s);
+    } else {
+        wj_null(w, "gnss_retry_in_s");
+    }
+    wj_u32_or_null(w, "factory_reset_refused_age_s", hs->factory_reset_refused_age_s);
+    wj_uint(w, "admin_resets", hs->admin_resets);
     wj_obj_open(w, "heap");
     wj_uint(w, "internal_free", hs->heap_internal_free);
     wj_uint(w, "internal_min", hs->heap_internal_min);
     wj_uint(w, "internal_largest", hs->heap_internal_largest);
     wj_uint(w, "psram_free", hs->heap_psram_free);
+    if (h->heap != NULL) {
+        wj_uint(w, "psram_min", h->heap->psram_min);
+        wj_uint(w, "psram_largest", h->heap->psram_largest);
+    }
     wj_obj_close(w);
     wj_str(w, "inhibited_by", h->inhibited_by);
     wj_str(w, "update_slot", web_update_slot_name(h->update_slot));
@@ -1230,7 +1271,7 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
 
     wj_obj_open(w, "obs");
     wj_uint(w, "epochs", h->obs->epochs);
-    wj_uint(w, "epoch_gaps", h->obs->epoch_gaps);
+    obs_gaps(w, h->obs);
     wj_obj_close(w);
 
     const network_status_t *n = h->net;
@@ -1253,6 +1294,39 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
     wj_uint(w, "actions", n->ladder_actions);
     wj_obj_close(w);
     wj_obj_close(w);
+
+    const diag_journal_info_t *j = h->journal;
+    if (j != NULL) {
+        wj_obj_open(w, "journal");
+        wj_bool(w, "available", j->available);
+        wj_uint(w, "capacity", j->capacity);
+        wj_uint(w, "oldest_seq", j->oldest_seq);
+        wj_uint(w, "newest_seq", j->newest_seq);
+        wj_uint(w, "sector_cycles", j->sector_cycles);
+        wj_uint(w, "written", j->written);
+        wj_uint(w, "queued", j->queued);
+        wj_uint(w, "refused_kind", j->refused_kind);
+        wj_uint(w, "refused_budget", j->refused_budget);
+        wj_uint(w, "queue_full", j->queue_full);
+        wj_uint(w, "io_errors", j->io_errors);
+        wj_obj_close(w);
+    } else {
+        wj_null(w, "journal");
+    }
+    const diag_log_stats_t *lg = h->log;
+    if (lg != NULL) {
+        wj_obj_open(w, "log");
+        wj_uint(w, "lines", lg->lines);
+        wj_uint(w, "ring_overwritten", lg->ring_overwritten);
+        wj_uint(w, "cut", lg->cut);
+        wj_uint(w, "console_dropped", lg->console_dropped);
+        wj_uint(w, "console_dropped_bytes", lg->console_dropped_bytes);
+        wj_bool(w, "prev_boot_available", lg->prev_boot_available);
+        wj_uint(w, "prev_boot_lines", lg->prev_boot_lines);
+        wj_obj_close(w);
+    } else {
+        wj_null(w, "log");
+    }
 
     const diag_coredump_info_t *cd = h->coredump;
     wj_obj_open(w, "coredump");

@@ -168,7 +168,9 @@ are 8-64 bytes of UTF-8 without control characters.
 - `DELETE /api/session` ends the session. Changing the password ends every
   other session. When `sys/admin_hash` changes or disappears behind the
   web's back (BOOT-button admin reset, factory reset; seen through
-  `SETTINGS_EVENT`), every session ends.
+  `SETTINGS_EVENT`), every session ends. A BOOT-button admin reset also
+  clears a password that lives only in RAM because the settings are
+  unavailable (seen through `health_status_t.admin_resets`).
 - An ended session's WebSocket is closed with code `4001`.
 
 **Login throttling** (global, RAM): the first 5 consecutive failures cost
@@ -334,7 +336,8 @@ object as sections (section 7), so the UI keeps one model. Admin form:
      "streak_ok": true, "data_rate_permille": 1000, "budget_left_s": 469,
      "bytes_sent": 74000000, "lag_ms_now": 40, "next_retry_s": 0, "hint": ""}
   ],
-  "health": {"level": "degraded", "last_step": "none", "ladder_suspended": false},
+  "health": {"level": "degraded", "last_step": "none", "ladder_suspended": false,
+             "factory_reset_refused": false},
   "alerts": [{"id": "link_loss", "source": "health"}],
   "availability": {"protected_down_today_s": 4, "budget_left_s": 469},
   "update": {"app_available": true, "app_version": "v0.4.0",
@@ -356,6 +359,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `casters[]` | every slot; the full status is in `/api/casters`. Protected-slot fields (`graced_uptime_permille`, `streak_ok`, `data_rate_permille`, `budget_left_s`) are `null` for other slots |
 | `alerts[]` | health's alerts (`source: "health"`) and the station's (`source: "station"`); `config_failed` carries `retry_in_s` |
 | `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without a protected slot or a trusted clock. Information only, never a gate |
+| `health.factory_reset_refused` | a BOOT-button factory reset was refused within the last 10 min because a receiver update was running (the UI shows a notice); admin form only |
 | `update` | the banner (section 12); admin form only |
 
 In safe mode the receiver section shows `state: "idle"` with the journal
@@ -546,21 +550,29 @@ and admin clients.
 ```json
 {
   "best_sys": "galileo", "best_bands": 4, "e6_lost": false,
-  "epoch_age_ms": 420, "epochs": 86400, "epoch_gaps": 0,
+  "epoch_age_ms": 420, "epochs": 86400, "epoch_gaps": 0, "epoch_period_ms": 1000, "epoch_jumps": 0,
   "systems": [
     {"sys": "galileo", "satellites": 9, "bands": ["l1", "l5", "l6", "e5ab"],
      "signal_ids": [2, 15, 16, 22, 23], "cnr_dbhz": {"l1": 44, "l5": 47, "l6": null, "e5ab": 46}}
   ],
-  "messages": [{"msg": 1077, "count": 86400, "period_ms": 1000, "age_ms": 420, "expected_period_s": 1}],
+  "messages": [{"msg": 1077, "count": 86400, "frames": 86400, "period_ms": 1000, "age_ms": 420, "expected_period_s": 1}],
   "rtcm1230_supported": true
 }
 ```
 
 `systems` lists only present constellations. `signal_ids` are the MSM
-signal IDs seen in the last 10 s; `cnr_dbhz` is the mean per band (MSM7
-only; `null` = not available). `messages` merges the observed statistics
-with the profile's list (`expected_period_s` `null` = not in the profile);
-it is `null` while `gnss_obs_get_msg_stats` is not available.
+signal IDs seen in the last 10 s; `cnr_dbhz` is the mean per band over the
+latest epoch's cells (MSM4 to MSM7; `null` = not available). `epoch_gaps`
+counts epochs missing from the profile's shortest MSM period
+(`epoch_period_ms`); both are `null` when the profile has no MSM message.
+`epoch_jumps` counts outages over 60 s and epoch-time resets (not gaps).
+Counters run since the last receiver configuration. `messages` lists the
+profile's messages first (seen or not; `count` 0 = never seen), then every
+other message observed (`expected_period_s` `null` = not in the profile).
+For MSM types `count` counts epochs and `frames` the frames carrying them;
+`period_ms` is the mean of the last 8 intervals and `age_ms` the time since
+the last one (`null` = fewer than two / never). `messages` is `null` only
+when the statistics cannot be read.
 
 ### `GET /api/sky` (pub\*/adm)
 
@@ -569,9 +581,11 @@ it is `null` while `gnss_obs_get_msg_stats` is not available.
  "satellites": [{"sys": "gps", "prn": 12, "el_deg": 45, "az_deg": 210, "cnr_dbhz": 44}]}
 ```
 
-At most 64 satellites. `available: false` with `reason`: `sat_view_off`
-(the profile's `sat_view_output` is off; the UI offers to turn it on) or
-`not_available_yet`.
+At most 64 satellites, from the receiver's satellite-in-view output of the
+last 30 s. `prn` is the satellite's PRN (GLONASS: its slot number).
+`available: false` with `reason`: `sat_view_off` (the profile's
+`sat_view_output` is off; the UI offers to turn it on) or `no_data` (it is
+on, but nothing arrived in the last 30 s).
 
 ---
 
@@ -771,14 +785,18 @@ before the first scan.
 {"ssid": "Home", "password": "...", "ap_password": ""}
 ```
 
+Every member is optional.
 - `ssid` 1-32 bytes; `password` `""` (open network), 8-63 characters or 64
-  hex digits. A missing `password` keeps the stored one when `ssid` is
-  unchanged; for a new SSID it is required (`400 invalid_field`).
+  hex digits (only with `ssid`). A missing `password` keeps the stored one
+  when `ssid` is unchanged, and then nothing changes and the station does
+  not reconnect; for a new SSID it is required (`400 invalid_field`).
 - `ap_password` (optional): 8-63 characters sets the AP password (WPA2),
   `""` removes it (the AP is then open; the UI warns); missing = unchanged.
-  It takes effect the next time the AP comes up.
+  It takes effect the next time the AP comes up. The UI sends it alone, so
+  changing it never touches the station's Wi-Fi connection.
 
-`202 {"accepted": true}`: the station switches about a second later; an AP
+`202 {"accepted": true, "persisted": true}`. With new credentials the
+station switches about a second later; an AP
 that is up stays up until a minute after the station has an IP, so the UI
 polls `GET /api/wifi` for `online` and `ip`. Changing Wi-Fi drops every
 caster session (the UI warns). With the settings unavailable the
@@ -1005,8 +1023,10 @@ All admin only.
 {
   "level": "ok", "alerts": [], "last_step": "none", "ladder_suspended": false,
   "uptime_s": 86400, "gnss_stalls": 0, "recoveries": 0, "caster_restarts": 0,
-  "network_recoveries": 0, "rtcm_gap_ms": 230,
-  "heap": {"internal_free": 120000, "internal_min": 98000, "internal_largest": 64000, "psram_free": 7000000},
+  "network_recoveries": 0, "rtcm_gap_ms": 230, "gnss_retry_in_s": null,
+  "factory_reset_refused_age_s": null, "admin_resets": 0,
+  "heap": {"internal_free": 120000, "internal_min": 98000, "internal_largest": 64000, "psram_free": 7000000,
+           "psram_min": 6900000, "psram_largest": 4000000},
   "inhibited_by": null, "update_slot": "none",
   "boot": {"reset_reason": "sw", "reset_class": "planned", "prev_reboot_reason": "app_update",
            "boots_since_power_on": 3, "crashes": 0, "brownouts_since_power_on": 0,
@@ -1026,15 +1046,26 @@ All admin only.
           "last_frame_age_ms": 180},
   "station": {"state": "streaming", "rtcm_excluded": 0, "detect_failures": 0, "detect_saw_bytes": false,
               "lease_held": false, "since_lease_release_ms": null},
-  "obs": {"epochs": 86400, "epoch_gaps": 0},
+  "obs": {"epochs": 86400, "epoch_gaps": 0, "epoch_period_ms": 1000, "epoch_jumps": 0},
   "network": {"reconnects": 1, "connect_failures": 0, "offline_s": 0, "last_disconnect_reason": 8,
               "fallback_dns": false, "probe": "ok", "probe_age_s": 120,
               "ladder": {"active": false, "rung": 0, "withheld": "none", "actions": 0}},
+  "journal": {"available": true, "capacity": 4064, "oldest_seq": 1, "newest_seq": 77, "sector_cycles": 0,
+              "written": 12, "queued": 0, "refused_kind": 0, "refused_budget": 0, "queue_full": 0, "io_errors": 0},
+  "log": {"lines": 812, "ring_overwritten": 0, "cut": 0, "console_dropped": 0, "console_dropped_bytes": 0,
+          "prev_boot_available": true, "prev_boot_lines": 640},
   "coredump": {"present": false, "size": 0, "task": "", "pc": null, "backtrace": []}
 }
 ```
 
-Per-caster loss counters are in `/api/casters`. `boot_history` is the last
+`rtcm_gap_ms` is the time since the last RTCM frame. `gnss_retry_in_s` is
+the time until the receiver recovery's next retry pass (`null` = none
+scheduled). `factory_reset_refused_age_s` is the time since a BOOT-button
+factory reset was refused because a receiver update was running (`null` =
+not this boot); `admin_resets` counts BOOT-button password resets this
+boot. `journal` and `log` are the event journal's and the log ring's
+counters (`diag_journal_info()`, `diag_log_stats()`; `journal.capacity` in
+records). Per-caster loss counters are in `/api/casters`. `boot_history` is the last
 16 boots, newest first (`prev_uptime_s` `null` = unknown). `inhibited_by` is
 the label of a held reboot inhibit; `update_slot` is `none`, `app` or
 `receiver`. The UI warns that a core dump may contain secrets before
@@ -1056,8 +1087,9 @@ offering the download.
 
 Per-slot arrays have `max_slots` entries. `history` holds up to 30 past days
 in the `today` shape, newest first. `down_s` counts seconds a slot should
-have streamed but did not; `planned_s` the planned part of it (receiver
-work, app updates). `clock` is `none` until a trusted time exists
+have streamed but did not; `planned_s` the planned part of it (casters
+paused for receiver configuration or a receiver update; an app update's
+restart is not counted as planned). `clock` is `none` until a trusted time exists
 (`utc_second_of_day` is then `null`). The budget is information only.
 
 ### `GET /api/diag/tasks`
@@ -1078,7 +1110,8 @@ work, app updates). `clock` is `none` until a trusted time exists
 8 KB of whole lines newer than `cursor` (start with 0; pass the returned
 `cursor` back; `more: true` = call again at once). `gap` = lines were
 overwritten before they were read. `boot=prev` reads the previous boot's
-ring (empty after a power cut or an app image change). `format=text`
+ring (empty after a power cut or an app image change). Both flags come
+from `diag_log_read_ex()`. `format=text`
 streams the whole ring as `text/plain` with
 `Content-Disposition: attachment; filename="log-<version>.txt"`.
 
@@ -1283,13 +1316,14 @@ Things this contract needs that the current headers do not provide yet:
 4. **Rolled-back versions**: `fw_update.h` exposes only the last reverted
    version and whether the latest release was rolled back, not the whole
    list.
-5. **Refused BOOT-button factory reset**: health refuses it during a
-   receiver update and should show that in the UI, but `health_status_t`
-   has no field for it.
-6. Not implemented yet behind existing headers (the API shows `null` or
-   `available: false`): per-band CNR, epoch gaps, message statistics and the
-   sky view (`gnss_obs`), the receiver text of a flash session
-   (`station_get_flash_log`), the availability ledger.
+5. **Refused BOOT-button factory reset**: resolved;
+   `health_status_t.factory_reset_refused_age_s`.
+6. Not implemented yet behind existing headers (the API shows empty
+   values): the receiver text of a flash session (`station_get_flash_log`),
+   until receiver flashing is built.
+7. **GNSS time**: the availability ledger takes SNTP time only; no header
+   provides the receiver's time (MSM epoch time with its week) yet, so
+   `clock` is `sntp` or `none`, never `gnss`.
 
 ---
 

@@ -298,7 +298,7 @@ Views.updates = {
         f.receiver_in_loader ? msg('warn', L.salert.receiver_in_loader[1]) : null,
         rec ? kv([
           ['Step', JOURNAL_STATE[rec.state] || rec.state],
-          ['Phase', lbl(L.flashPhase, rec.phase)],
+          rec.phase && rec.phase !== rec.state ? ['Reached', JOURNAL_STATE[rec.phase] || rec.phase] : null,
           ['Package', fmt.bytes(rec.size) + ', SHA-256 ' + String(rec.sha256 || '').slice(0, 16) + '…'],
           ['Expected firmware', rec.expected_fw],
           ['Before the update', [rec.pre_model, rec.pre_fw].filter(Boolean).join(' ')],

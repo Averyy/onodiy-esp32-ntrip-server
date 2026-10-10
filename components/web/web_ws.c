@@ -724,18 +724,17 @@ static void push_log(void)
     }
     if (!s_log_started) {
         /* Start at the end of what is there: subscribers get new lines. */
-        while (diag_log_read(&s_log_cursor, s_log_text, sizeof(s_log_text)) > 0) {
+        while (diag_log_read_ex(DIAG_LOG_THIS_BOOT, &s_log_cursor, s_log_text, sizeof(s_log_text), NULL) > 0) {
         }
         s_log_started = true;
         return;
     }
-    uint32_t before = s_log_cursor;
-    size_t n = diag_log_read(&s_log_cursor, s_log_text, sizeof(s_log_text));
+    diag_log_read_info_t info = { 0 };
+    size_t n = diag_log_read_ex(DIAG_LOG_THIS_BOOT, &s_log_cursor, s_log_text, sizeof(s_log_text), &info);
     if (n == 0 || !want) {
         return;
     }
-    /* A cursor that moved further than the text copied skipped lines the ring overwrote. */
-    bool ring_gap = (uint32_t)(s_log_cursor - before) > n;
+    bool ring_gap = info.gap;   /* the ring overwrote lines before they were pushed */
     for (int variant = 0; variant < 2; variant++) {
         bool gap = variant == 1 || ring_gap;
         ws_msg_t *m = NULL;

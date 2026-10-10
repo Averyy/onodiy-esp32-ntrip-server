@@ -518,7 +518,7 @@ function startWizard(claim) {
         stopped = true;
         const addr = 'http://' + w.ip + '/';
         show('ok', msg('ok', h('strong', null, 'Connected.'), ' The station is now on ' + joined.ssid + '.'),
-          kv([['Address', h('a', { href: addr }, addr)], ['Name', 'http://' + host + '.local/']]),
+          kv([['Address', h('a', { href: addr }, addr)], ['Name', 'http://' + host + '/ (where your router resolves device names)']]),
           h('p', null, 'Join ' + joined.ssid + ' with this device and open one of the addresses above. ' +
             'The setup network closes about a minute after the station connected.'),
           joined.persisted ? null : msg('warn', 'The settings storage is unavailable: the station forgets this network at the next restart.'),
@@ -528,7 +528,7 @@ function startWizard(claim) {
       if (fails >= 3) {
         show('lost', msg('info', h('strong', null, 'This device lost the setup network.'),
           ' That is normal once the station joins ' + joined.ssid + ': its access point moves to that network\'s channel and closes a minute later.'),
-        h('p', null, 'Join ' + joined.ssid + ' with this device and open http://' + host + '.local/ (or find the station\'s address in your router). ' +
+        h('p', null, 'Join ' + joined.ssid + ' with this device and find the station\'s address in your router\'s device list (it is named ' + host + '). ' +
           'If the station could not join, its setup network comes back: join it again and open http://192.168.4.1/.'),
         h('div', { class: 'spinner' }));
       } else if (w && secs > 40 && (w.connect_failures > 0 || w.last_disconnect_reason)) {

@@ -115,6 +115,7 @@ const L = {
     no_journal: 'no session', not_waiting: 'the session still runs', safe_mode: 'not in safe mode',
     settings_unavailable: 'settings unavailable', app_trial: 'app trial running', app_update: 'app update running',
     not_available_yet: 'not available in this firmware yet',
+    unreadable: 'the update record is damaged: only clearing it works',
   },
   job: {
     check: 'Update check', app_update: 'App update', app_upload: 'App upload', gnss_update: 'Receiver package download',

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Signals: frequency bands per constellation from the MSM data (with mean
- * CNR when MSM7 carries it), the Galileo E6 indicator, the RTCM messages
+ * CNR from MSM4 to MSM7), the Galileo E6 indicator, the RTCM messages
  * seen against the profile, and the sky view of satellites in view.
  */
 
@@ -100,7 +100,7 @@ function skyView(sky, onEnable) {
       return [msg('info', 'The receiver does not send satellite-in-view data: it is off in the receiver profile.'),
         onEnable ? h('div', { class: 'form-actions' }, onEnable) : null];
     }
-    return msg('', 'The sky view is not available in this firmware version yet.');
+    return msg('', 'Satellite-in-view output is on, but the receiver has not sent any in the last 30 seconds.');
   }
   const sats = (sky.satellites || []).slice().sort((a, b) => (a.sys < b.sys ? -1 : a.sys > b.sys ? 1 : a.prn - b.prn));
   const systems = [];
@@ -151,14 +151,16 @@ Views.signals = {
         kv([
           ['Last epoch', sig.epoch_age_ms === null || sig.epoch_age_ms === undefined ? 'never' : fmt.ms(sig.epoch_age_ms) + ' ago'],
           ['Epochs', fmt.num(sig.epochs)],
-          ['Epoch gaps', sig.epoch_gaps === null || sig.epoch_gaps === undefined ? 'not counted yet' : fmt.num(sig.epoch_gaps)],
+          ['Epoch gaps', sig.epoch_gaps === null || sig.epoch_gaps === undefined ? 'not counted (no MSM message in the profile)' :
+            fmt.num(sig.epoch_gaps) + ' missing at ' + fmt.ms(sig.epoch_period_ms)],
+          sig.epoch_jumps ? ['Outages or time jumps', fmt.num(sig.epoch_jumps)] : null,
           sig.rtcm1230_supported === false ? ['Message 1230', h('span', { class: 't-warn' }, 'Refused by the receiver')] : null,
         ]));
       mount(bandsCard, h('h2', null, 'Bands per constellation'),
         systems.length ? bandTable(systems) : h('p', { class: 'muted' }, 'No MSM observations yet.'),
-        h('p', { class: 'muted small foot' }, 'Seen in the last 10 seconds. CNR is the mean per band (MSM7 only).'));
+        h('p', { class: 'muted small foot' }, 'Seen in the last 10 seconds. CNR is the mean per band (MSM4 to MSM7).'));
       mount(msgsCard, h('h2', null, 'RTCM messages'),
-        sig.messages ? messagesTable(sig.messages) : h('p', { class: 'muted' }, 'Message statistics are not available in this firmware version yet.'));
+        sig.messages ? messagesTable(sig.messages) : h('p', { class: 'muted' }, 'No message statistics.'));
     }
 
     let lastSky = '';

@@ -290,6 +290,7 @@ function profileEditor(g, done) {
     unchanged: 'Saved. Nothing changes on the receiver.',
     safe_mode: 'Saved. It is applied after safe mode (with automatic configuration on).',
     unsupported_model: 'Saved, but the station does not configure this receiver model.',
+    not_running: 'Saved. The receiver path did not start this boot; the station applies the profile once it runs.',
   };
   const form = h('form', { class: 'stack', oninput: () => {
     dirty = true;

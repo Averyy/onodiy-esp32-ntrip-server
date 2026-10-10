@@ -103,8 +103,8 @@ Views.system = {
         try {
           w = await api('GET', '/api/wifi', undefined, { timeout: 3000 });
         } catch (e) {
-          if (secs > 5) show(msg('warn', 'This page lost contact with the station. If it moved to another network, open http://' +
-            ((sys && sys.hostname_active) || 'onocoydiy') + '.local/ from that network.'));
+          if (secs > 5) show(msg('warn', 'This page lost contact with the station. If it moved to another network, open it there: ' +
+            'its address is in that router\'s device list, named ' + ((sys && sys.hostname_active) || 'onocoydiy') + '.'));
           return;
         }
         wifi = w;
@@ -126,11 +126,8 @@ Views.system = {
     const apPw = pwInput({ maxlength: 63, autocomplete: 'new-password' });
     const apErr = errBox();
     const apField = field('Access point password', apPw, '8 to 63 characters. Takes effect the next time the access point comes up.');
-    const apBody = () => {
-      const b = { ap_password: apPw.value };
-      if (wifi && wifi.configured && wifi.ssid) b.ssid = wifi.ssid;
-      return b;
-    };
+    /* Only the AP password: the station keeps its Wi-Fi connection. */
+    const apBody = () => ({ ap_password: apPw.value });
     const apSet = btn('Set password', async () => {
       apField.error(null);
       const v = apPw.value;
@@ -173,7 +170,7 @@ Views.system = {
     /* ---- Device ---- */
     function renderDevice() {
       const name = textInput(sys.hostname, { maxlength: 32 });
-      const fName = field('Station name', name, 'Letters, digits and "-". Used on the network (' + sys.hostname + '.local) and as the Onocoy dashboard label default.');
+      const fName = field('Station name', name, 'Letters, digits and "-". The name the station gives your router (DHCP) and the Onocoy dashboard label default.');
       const pub = checkbox('Public status page', sys.public_status,
         'Anyone on your network can see the station state, caster names and states, signals and the sky view without logging in. ' +
         'Never shown: hosts, mountpoints, users, addresses, versions or the antenna position.');
