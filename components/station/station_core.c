@@ -79,6 +79,50 @@ static void take_base(stn_t *s, const stn_in_t *in)
     s->base_lines = in->text_lines;
 }
 
+static void note(stn_t *s, stn_note_kind_t kind, int64_t a, int32_t b)
+{
+    if (s->note_n >= STN_NOTES) {
+        /* The caller fell behind: the oldest note gives way. */
+        memmove(&s->notes[0], &s->notes[1], sizeof(s->notes[0]) * (STN_NOTES - 1u));
+        s->note_n = STN_NOTES - 1u;
+    }
+    stn_note_t *n = &s->notes[s->note_n++];
+    n->kind = (uint8_t)kind;
+    n->a = (a > INT32_MAX) ? INT32_MAX : (a < INT32_MIN ? INT32_MIN : (int32_t)a);
+    n->b = b;
+}
+
+static uint32_t secs(int64_t ms)
+{
+    if (ms <= 0) {
+        return 0;
+    }
+    int64_t sec = (ms + 999) / 1000;
+    return sec > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)sec;
+}
+
+/* The receiver was reconfigured, reset or restarted: satellite-in-view
+ * output we turned on (never saved) is gone. A window that had it on does
+ * not turn it on again by itself. */
+static void sky_receiver_changed(stn_t *s)
+{
+    if (!s->sky_on) {
+        return;
+    }
+    s->sky_on = false;
+    s->sky_off_tries = 0;
+    s->sky_retry_ms = STN_NEVER;
+    if (s->live_open && s->sky_want) {
+        s->sky_want = false;
+        s->sky_why = STN_SKY_WHY_RECONFIGURED;
+    }
+}
+
+static bool flash_state(const stn_t *s)
+{
+    return s->state == STN_FLASHING || s->state == STN_FLASH_RECOVERY;
+}
+
 static bool config_failed(const stn_t *s)
 {
     return (s->alerts & STN_ALERT_CONFIG_FAILED) != 0;
@@ -257,6 +301,11 @@ void stn_init(stn_t *s, bool journal_open)
     s->mode_poll_ms = STN_NEVER;
     s->lock_retry_ms = STN_NEVER;
     s->pos_check_ms = STN_NEVER;
+    s->maint_until_ms = STN_NEVER;
+    s->live_idle_ms = STN_LIVE_IDLE_MS;
+    s->live_max_ms = STN_LIVE_MAX_MS;
+    s->live_until_ms = STN_NEVER;
+    s->sky_retry_ms = STN_NEVER;
 }
 
 void stn_start(stn_t *s, const stn_in_t *in)
@@ -409,6 +458,34 @@ static void judge_window(stn_t *s, const stn_in_t *in)
     }
 }
 
+/* Satellite-in-view output for the live view: on while the window wants it,
+ * off once it does not. Only from STREAMING with nothing more urgent due. */
+static bool sky_job(stn_t *s, const stn_in_t *in, stn_job_t *out)
+{
+    if (in->profile_sky) {
+        return false;   /* the profile sends it permanently: never toggled here */
+    }
+    bool want = s->live_open && s->sky_want;
+    bool on;
+    if (want && !s->sky_on) {
+        if (!in->autocfg || !s->identity_ok || !s->supported) {
+            return false;   /* the user configures the receiver, or not a model we configure (status says why) */
+        }
+        on = true;
+    } else if (!want && s->sky_on) {
+        if (s->sky_retry_ms != STN_NEVER && in->now_ms < s->sky_retry_ms) {
+            return false;
+        }
+        on = false;
+    } else {
+        return false;
+    }
+    *out = make_job(STN_JOB_SKY);
+    out->sky_on = on;
+    s->paused = true;   /* the lease holds RTCM back: a short planned gap for the casters */
+    return true;
+}
+
 static stn_job_t next_streaming(stn_t *s, const stn_in_t *in)
 {
     int64_t now = in->now_ms;
@@ -459,6 +536,11 @@ static stn_job_t next_streaming(stn_t *s, const stn_in_t *in)
     if (s->survey.active && in->profile_survey && !s->lock_done && um98x_survey_done(&s->survey, now) &&
         auto_apply_allowed(s, in) && (s->lock_retry_ms == STN_NEVER || now >= s->lock_retry_ms)) {
         return start_apply(s, STN_WHY_LOCK, STN_CHANGE_LOCK, true);
+    }
+
+    stn_job_t sky;
+    if (sky_job(s, in, &sky)) {
+        return sky;
     }
 
     if (s->mode_probe) {
@@ -543,11 +625,89 @@ static stn_job_t next_detect(stn_t *s, const stn_in_t *in)
     return j;
 }
 
+static void live_close(stn_t *s, int64_t now_ms, stn_live_end_t why)
+{
+    if (!s->live_open) {
+        return;
+    }
+    s->live_open = false;
+    s->sky_want = false;
+    s->live_last_end = (uint8_t)why;
+    s->live_until_ms = STN_NEVER;
+    note(s, STN_NOTE_LIVE_CLOSED, secs(now_ms - s->live_opened_ms), (int32_t)why);
+}
+
+/* The live view's time limits, and a flash session taking the receiver. */
+static void live_tick(stn_t *s, const stn_in_t *in)
+{
+    int64_t now = in->now_ms;
+    if (flash_state(s)) {
+        live_close(s, now, STN_LIVE_END_FLASH);
+        s->sky_on = false;   /* the flash restarts the receiver */
+        return;
+    }
+    if (!s->live_open) {
+        return;
+    }
+    if (now >= s->live_until_ms) {
+        live_close(s, now, STN_LIVE_END_EXPIRED);
+    } else if (now - s->live_touch_ms >= (int64_t)s->live_idle_ms) {
+        live_close(s, now, STN_LIVE_END_IDLE);
+    }
+}
+
+/* Maintenance ends: the stream-first path, as at boot. */
+static void maint_exit(stn_t *s, const stn_in_t *in, bool expired)
+{
+    int64_t now = in->now_ms;
+    note(s, STN_NOTE_MAINT_OFF, secs(now - s->maint_start_ms), expired ? 1 : 0);
+    bool restarted = s->maint_restart_seen;
+    s->maint = false;
+    s->maint_until_ms = STN_NEVER;
+    s->maint_restart_seen = false;
+
+    s->state = STN_IDLE;
+    s->paused = false;
+    s->last_resort = false;
+    s->identity_ok = false;
+    s->identify_ms = STN_NEVER;
+    s->identify_restart = false;
+    s->identify_leased = false;
+    s->restart_seen = false;
+    s->check_ms = STN_NEVER;
+    s->check_pending = false;
+    s->verify_pending = false;
+    s->obs_on = false;
+    s->drift_windows = 0;
+    s->drift_blocked = false;
+    s->profile_applied = false;
+    s->mode_probe = false;
+    s->mode_probe_done = false;
+    s->antenna_check = false;
+    s->antenna_probe = false;
+    s->detect_ms = STN_NEVER;
+    s->episode_ms = STN_NEVER;
+    if (restarted && in->profile_survey) {
+        um98x_survey_start(&s->survey, now, in->survey_s);   /* the receiver surveys again */
+        s->mode_poll_ms = now + STN_MODE_POLL_MS;
+        s->lock_done = false;
+    }
+    s->listen_until_ms = now + STN_LISTEN_MS;
+    take_base(s, in);
+}
+
 stn_job_t stn_next(stn_t *s, const stn_in_t *in)
 {
     stn_job_t none = make_job(STN_JOB_NONE);
     if (s->job_busy || !s->started) {
         return none;
+    }
+    live_tick(s, in);
+    if (s->maint) {
+        if (in->now_ms < s->maint_until_ms) {
+            return none;   /* hands off: nothing is sent, nothing is decided */
+        }
+        maint_exit(s, in, true);
     }
     if (s->state == STN_IDLE) {
         if (data_since_base(s, in)) {
@@ -727,6 +887,9 @@ static void done_apply(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     if (s->job.why == STN_WHY_LADDER) {
         s->rec_running = 0;
     }
+    if (!r->nothing_sent) {
+        sky_receiver_changed(s);   /* the session quieted the port (and saved, or rolled back) */
+    }
     if (r->err == STN_OK) {
         s->alerts &= ~(STN_ALERT_CONFIG_FAILED | STN_ALERT_UNSUPPORTED_MODEL);
         s->apply_failures = 0;
@@ -793,6 +956,49 @@ static void done_apply(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     take_base(s, in);
 }
 
+static void done_sky(stn_t *s, const stn_result_t *r, const stn_in_t *in)
+{
+    s->paused = false;
+    const bool on = s->job.sky_on;
+    note(s, on ? STN_NOTE_SKY_ON : STN_NOTE_SKY_OFF, r->lease_ms, (int32_t)r->err);
+    if (r->err == STN_OK) {
+        s->sky_on = on;
+        s->sky_off_tries = 0;
+        s->sky_retry_ms = STN_NEVER;
+        return;
+    }
+    if (on) {
+        /* Not on: the window drops its wish until the user starts it again.
+         * Without an answer it may have taken: turned off at the end. */
+        s->sky_want = false;
+        switch (r->err) {
+        case STN_E_FAIL:
+            s->sky_why = STN_SKY_WHY_REJECTED;
+            break;
+        case STN_E_TIMEOUT:
+            s->sky_why = STN_SKY_WHY_NO_ANSWER;
+            s->sky_on = true;
+            break;
+        default:
+            s->sky_why = STN_SKY_WHY_BUSY;   /* nothing was sent */
+            break;
+        }
+        return;
+    }
+    if (r->err == STN_E_STATE) {
+        s->sky_retry_ms = in->now_ms + STN_SKY_RETRY_MS;   /* nothing was sent: try again later */
+        return;
+    }
+    if (++s->sky_off_tries >= STN_SKY_OFF_TRIES) {
+        note(s, STN_NOTE_SKY_LEFT_ON, 0, 0);
+        s->sky_on = false;   /* given up: it ends with the receiver's next restart */
+        s->sky_off_tries = 0;
+        s->sky_retry_ms = STN_NEVER;
+        return;
+    }
+    s->sky_retry_ms = in->now_ms + STN_SKY_RETRY_MS;
+}
+
 static void done_position(stn_t *s, const stn_result_t *r, const stn_in_t *in)
 {
     switch (r->err) {
@@ -845,9 +1051,15 @@ void stn_done(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         s->rec_running = 0;
         back_to_streaming(s, in);
         s->restart_seen = true;   /* identity, applied check and survey as after any restart */
+        if (r->err != STN_E_STATE) {
+            sky_receiver_changed(s);
+        }
         break;
     case STN_JOB_CHECK_POSITION:
         done_position(s, r, in);
+        break;
+    case STN_JOB_SKY:
+        done_sky(s, r, in);
         break;
     default:
         break;
@@ -879,8 +1091,8 @@ bool stn_reconfigure_refused(const stn_t *s, bool autocfg)
 
 int stn_request_recovery(stn_t *s, uint8_t action, bool autocfg)
 {
-    if (action >= STN_REC_COUNT) {
-        return STN_E_STATE;
+    if (action >= STN_REC_COUNT || s->maint) {
+        return STN_E_STATE;   /* in maintenance nothing is sent to the receiver */
     }
     if (action == STN_REC_RECONFIGURE && stn_reconfigure_refused(s, autocfg)) {
         return STN_E_FAIL;
@@ -907,6 +1119,11 @@ int stn_request_restart_receiver(stn_t *s)
 
 void stn_restart_seen(stn_t *s)
 {
+    sky_receiver_changed(s);
+    if (s->maint) {
+        s->maint_restart_seen = true;   /* noted; the exit's stream-first path looks at the receiver again */
+        return;
+    }
     s->restart_seen = true;
 }
 
@@ -938,4 +1155,245 @@ uint32_t stn_config_retry_in_s(const stn_t *s, int64_t now_ms)
     }
     int64_t sec = (left + 999) / 1000;
     return sec > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)sec;
+}
+
+/* ---- receiver maintenance --------------------------------------------------- */
+
+bool stn_maint_duration_ok(uint32_t dur_s)
+{
+    static const uint32_t k_choices[] = { 15u * 60u, 30u * 60u, 3600u, 2u * 3600u, 4u * 3600u };
+    for (unsigned i = 0; i < sizeof(k_choices) / sizeof(k_choices[0]); i++) {
+        if (k_choices[i] == dur_s) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int stn_maint_enter(stn_t *s, uint32_t dur_s, bool lease_held, int64_t now_ms)
+{
+    if (!stn_maint_duration_ok(dur_s)) {
+        return STN_MAINT_DURATION;
+    }
+    if (s->maint) {
+        /* Extension: added to the time left, at most the longest choice. */
+        int64_t left = s->maint_until_ms - now_ms;
+        if (left < 0) {
+            left = 0;
+        }
+        int64_t next = left + (int64_t)dur_s * 1000;
+        if (next > (int64_t)STN_MAINT_MAX_S * 1000) {
+            next = (int64_t)STN_MAINT_MAX_S * 1000;
+        }
+        s->maint_until_ms = now_ms + next;
+        s->maint_chosen_s = secs(s->maint_until_ms - s->maint_start_ms);
+        return STN_MAINT_OK;
+    }
+    if (flash_state(s)) {
+        return STN_MAINT_FLASH;
+    }
+    if (lease_held || s->job_busy || s->state == STN_CONFIGURING || s->state == STN_RECOVERING) {
+        return STN_MAINT_SESSION;
+    }
+    s->maint = true;
+    s->maint_start_ms = now_ms;
+    s->maint_until_ms = now_ms + (int64_t)dur_s * 1000;
+    s->maint_chosen_s = dur_s;
+    s->maint_restart_seen = false;
+    drop_stale_requests(s);   /* queued ladder steps and automatic re-applies */
+    /* Listening only, as in the first seconds of a boot: the health
+     * monitor's ladder stays suspended, no drift is judged. */
+    s->state = STN_IDLE;
+    s->paused = false;
+    s->obs_on = false;
+    note(s, STN_NOTE_MAINT_ON, dur_s, 0);
+    return STN_MAINT_OK;
+}
+
+int stn_maint_end(stn_t *s, const stn_in_t *in)
+{
+    if (!s->maint) {
+        return STN_MAINT_NOT_ON;
+    }
+    maint_exit(s, in, false);
+    return STN_MAINT_OK;
+}
+
+void stn_maint_restore(stn_t *s, uint32_t left_s, uint32_t spent_s, int64_t now_ms)
+{
+    if (left_s == 0) {
+        return;
+    }
+    if (left_s > STN_MAINT_MAX_S) {
+        left_s = STN_MAINT_MAX_S;
+    }
+    s->maint = true;
+    s->maint_start_ms = now_ms - (int64_t)spent_s * 1000;
+    s->maint_until_ms = now_ms + (int64_t)left_s * 1000;
+    s->maint_chosen_s = left_s + spent_s;
+    s->maint_restart_seen = false;
+}
+
+uint32_t stn_maint_left_s(const stn_t *s, int64_t now_ms)
+{
+    return s->maint ? secs(s->maint_until_ms - now_ms) : 0;
+}
+
+#define MAINT_RTC_MAGIC 0x544E4D52u   /* "RMNT" */
+
+/* CRC-32 (reflected 0xEDB88320) of the record's words before the CRC. */
+static uint32_t rtc_crc(const stn_maint_rtc_t *r)
+{
+    const uint32_t w[4] = { r->magic, r->stamp, r->left_s, r->spent_s };
+    uint32_t crc = 0xFFFFFFFFu;
+    for (unsigned i = 0; i < 4; i++) {
+        for (unsigned k = 0; k < 4; k++) {
+            crc ^= (w[i] >> (8u * k)) & 0xFFu;
+            for (int b = 0; b < 8; b++) {
+                crc = (crc & 1u) ? (crc >> 1) ^ 0xEDB88320u : (crc >> 1);
+            }
+        }
+    }
+    return ~crc;
+}
+
+void stn_maint_rtc_write(stn_maint_rtc_t *r, uint32_t stamp, uint32_t left_s, uint32_t spent_s)
+{
+    if (left_s == 0) {
+        memset(r, 0, sizeof(*r));
+        return;
+    }
+    r->magic = MAINT_RTC_MAGIC;
+    r->stamp = stamp;
+    r->left_s = left_s;
+    r->spent_s = spent_s;
+    r->crc = rtc_crc(r);
+}
+
+bool stn_maint_rtc_read(const stn_maint_rtc_t *r, uint32_t *stamp, uint32_t *left_s, uint32_t *spent_s)
+{
+    if (r->magic != MAINT_RTC_MAGIC || r->crc != rtc_crc(r) || r->left_s == 0 || r->left_s > STN_MAINT_MAX_S ||
+        r->spent_s > STN_MAINT_MAX_S * 16u) {
+        return false;
+    }
+    *stamp = r->stamp;
+    *left_s = r->left_s;
+    *spent_s = r->spent_s;
+    return true;
+}
+
+/* ---- live view ----------------------------------------------------------------- */
+
+int stn_live_start(stn_t *s, uint32_t dur_ms, int64_t now_ms, uint8_t *why)
+{
+    if (why != NULL) {
+        *why = STN_SKY_WHY_NONE;
+    }
+    if (flash_state(s)) {
+        if (why != NULL) {
+            *why = STN_SKY_WHY_FLASH;
+        }
+        return STN_E_STATE;
+    }
+    const int64_t max = (int64_t)s->live_max_ms;
+    if (dur_ms == 0) {
+        dur_ms = STN_LIVE_DEFAULT_MS;
+    }
+    if (s->live_open) {
+        int64_t until = (s->live_until_ms > now_ms ? s->live_until_ms : now_ms) + (int64_t)dur_ms;
+        s->live_until_ms = until > now_ms + max ? now_ms + max : until;
+        note(s, STN_NOTE_LIVE_EXTENDED, secs(s->live_until_ms - now_ms), 0);
+    } else {
+        s->live_open = true;
+        s->live_opened_ms = now_ms;
+        int64_t len = (int64_t)dur_ms > max ? max : (int64_t)dur_ms;
+        s->live_until_ms = now_ms + len;
+        s->live_last_end = STN_LIVE_END_NONE;
+        note(s, STN_NOTE_LIVE_OPENED, secs(len), 0);
+    }
+    s->live_touch_ms = now_ms;
+    s->sky_want = true;
+    s->sky_why = STN_SKY_WHY_NONE;
+    return STN_OK;
+}
+
+void stn_live_touch(stn_t *s, int64_t now_ms)
+{
+    if (s->live_open && now_ms > s->live_touch_ms) {
+        s->live_touch_ms = now_ms;
+    }
+}
+
+void stn_live_stop(stn_t *s, int64_t now_ms)
+{
+    live_close(s, now_ms, STN_LIVE_END_USER);
+}
+
+/* Why the output is not on now although the window wants it. */
+static stn_sky_why_t sky_pending_why(const stn_t *s, const stn_in_t *in)
+{
+    if (s->maint) {
+        return STN_SKY_WHY_MAINTENANCE;
+    }
+    switch (s->state) {
+    case STN_FLASHING:
+    case STN_FLASH_RECOVERY:
+        return STN_SKY_WHY_FLASH;
+    case STN_IDLE:
+    case STN_DETECTING:
+    case STN_NO_RECEIVER:
+        return STN_SKY_WHY_NOT_STREAMING;
+    case STN_STREAMING:
+        break;
+    default:
+        return STN_SKY_WHY_BUSY;
+    }
+    if (!in->autocfg) {
+        return STN_SKY_WHY_AUTOCFG_OFF;
+    }
+    if (s->identity_ok && !s->supported) {
+        return STN_SKY_WHY_UNSUPPORTED;
+    }
+    return STN_SKY_WHY_BUSY;
+}
+
+void stn_live_status(const stn_t *s, const stn_in_t *in, stn_live_status_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    int64_t now = in->now_ms;
+    out->last_end = s->live_last_end;
+    out->open = s->live_open;
+    if (s->live_open) {
+        out->left_s = secs(s->live_until_ms - now);
+        int64_t idle_end = s->live_touch_ms + (int64_t)s->live_idle_ms;
+        int64_t end = idle_end < s->live_until_ms ? idle_end : s->live_until_ms;
+        out->idle_left_s = secs(end - now);
+        out->open_s = (uint32_t)(secs(now - s->live_opened_ms));
+    }
+    if (in->profile_sky) {
+        out->sky = STN_SKY_ON_PROFILE;
+    } else if (!s->live_open) {
+        out->sky = s->sky_on ? STN_SKY_STOPPING : STN_SKY_OFF;
+    } else if (s->sky_on && s->sky_want) {
+        out->sky = STN_SKY_ON;
+    } else if (!s->sky_want) {
+        out->sky = s->sky_on ? STN_SKY_STOPPING : STN_SKY_BLOCKED;
+        out->why = s->sky_why;
+    } else {
+        stn_sky_why_t why = sky_pending_why(s, in);
+        out->why = (uint8_t)why;
+        out->sky = (why == STN_SKY_WHY_AUTOCFG_OFF || why == STN_SKY_WHY_UNSUPPORTED || why == STN_SKY_WHY_FLASH)
+                       ? STN_SKY_BLOCKED
+                       : STN_SKY_PENDING;
+    }
+}
+
+unsigned stn_take_notes(stn_t *s, stn_note_t *out, unsigned cap)
+{
+    unsigned n = s->note_n < cap ? s->note_n : cap;
+    memcpy(out, s->notes, sizeof(s->notes[0]) * n);
+    /* Whatever did not fit stays for the next call. */
+    memmove(&s->notes[0], &s->notes[n], sizeof(s->notes[0]) * (s->note_n - n));
+    s->note_n = (uint8_t)(s->note_n - n);
+    return n;
 }

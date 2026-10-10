@@ -15,21 +15,35 @@
  *      not the link's current baud
  *   3. MODE BASE ...                         only if the base-mode read-back
  *      differs, or for a lock / re-survey (um98x_base.h)
- *   4. RTCM<msg> COM1 <period>               every profile message, in
+ *   4. CONFIG BASEANTENNAMODEL "<name>" "<serial>" <setup id> USER
+ *                                            only with an antenna model in
+ *      the profile and a read-back that differs or was not understood
+ *      (non-fatal: a rejection is recorded and shown)
+ *   5. CONFIG RTCMB1CB2A ENABLE              only if the read-back shows
+ *      BeiDou B1C/B2a in RTCM turned off; unknown = not sent (non-fatal).
+ *      Not a profile field: B1C/B2a is always wanted
+ *   6. RTCM<msg> COM1 <period>               every profile message, in
  *      profile order (1230 non-fatal: some builds reject it)
- *   5. GPGSV COM1 10                         only with satellite-view output
+ *   7. GPGSV COM1 10                         only with satellite-view output
  *                                            (non-fatal)
- *   6. SAVECONFIG                            the only save of the session
+ *   8. SAVECONFIG                            the only save of the session
  *
  * Never sent: anything for COM2/COM3 (the user's ports), the vendor RTCM
- * encryption settings, FRESET, comma-separated command forms. Commands are
+ * encryption settings, the elevation mask and multipath mitigation (read
+ * back and shown only), FRESET, comma-separated command forms. Commands are
  * the manual's space-separated upper-case form.
+ *
+ * Satellite-in-view output outside the profile (the live view, never
+ * saved): "GPGSV COM1 <period>" on, "UNLOG COM1 GPGSV" off
+ * (um98x_sat_view_command).
  *
  * Detection candidates: the stored baud, then 115200, 460800, 921600,
  * 230400 (short list); the full list adds 57600, 38400, 19200, 9600;
  * duplicates skipped.
  *
- * Status: order and conditions PROVISIONAL, to be confirmed on hardware.
+ * Status: order and conditions PROVISIONAL, to be confirmed on hardware
+ * (also whether the B1C/B2a command restarts the receiver, and the antenna
+ * command's form).
  */
 #pragma once
 
@@ -66,6 +80,8 @@ typedef enum {
     UM98X_STEP_RTCM,
     UM98X_STEP_SAT_VIEW,
     UM98X_STEP_SAVE,
+    UM98X_STEP_ANTENNA,     /**< base antenna descriptor (non-fatal) */
+    UM98X_STEP_B1CB2A,      /**< BeiDou B1C/B2a in RTCM on (non-fatal) */
 } um98x_step_kind_t;
 
 typedef struct {
@@ -75,7 +91,7 @@ typedef struct {
     uint16_t period_s;   /**< RTCM: period */
 } um98x_step_t;
 
-#define UM98X_PLAN_MAX (UM98X_MAX_RTCM_MSGS + 5)
+#define UM98X_PLAN_MAX (UM98X_MAX_RTCM_MSGS + 7)
 
 typedef struct {
     uint8_t count;
@@ -95,6 +111,26 @@ bool um98x_model_supported(const char *model);
 
 /** True if the read-back shows the profile's signal group (unknown = different). */
 bool um98x_signal_group_matches(const um98x_base_profile_t *p, const um98x_readback_t *rb);
+
+/**
+ * True if the read-back shows the profile's antenna: descriptor and serial
+ * number equal after trailing spaces are dropped, same setup ID. Unknown
+ * (or no dump) = different. A profile without a model never needs the step:
+ * true.
+ */
+bool um98x_antenna_matches(const um98x_base_profile_t *p, const um98x_readback_t *rb);
+
+/** Satellite-in-view output period for the live view (s): 1..60. */
+#define UM98X_SAT_VIEW_PERIOD_MAX 60u
+
+/**
+ * Command that turns the satellite-in-view output on ("GPGSV COM1
+ * <period_s>", period 1..UM98X_SAT_VIEW_PERIOD_MAX) or off ("UNLOG COM1
+ * GPGSV"). Never saved. PROVISIONAL, to be confirmed on hardware: the
+ * off form, and whether either interrupts the RTCM output.
+ * @return length, 0 for a period out of range or a buffer too small.
+ */
+size_t um98x_sat_view_command(bool on, uint16_t period_s, char *buf, size_t cap);
 
 /**
  * Build the plan for a valid profile.

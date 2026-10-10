@@ -467,3 +467,45 @@ TEST_CASE("link core: open baud, receiver rates, thresholds and break length", "
     TEST_ASSERT_TRUE(gnss_link_core_break_ok(GNSS_LINK_BREAK_MAX_MS));
     TEST_ASSERT_FALSE(gnss_link_core_break_ok(GNSS_LINK_BREAK_MAX_MS + 1));
 }
+
+TEST_CASE("link core: hands off refuses every write and every lease, reception goes on", "[gnss_link]")
+{
+    gnss_link_core_t c;
+    open_link(&c);
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_set_hands_off(&c, true));
+    gnss_link_stats_t s;
+    gnss_link_core_snapshot(&c, T0_US, &s);
+    TEST_ASSERT_TRUE(s.hands_off);
+
+    /* Nothing may reach the receiver: no lease-free query, no lease. */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, gnss_link_core_check(&c, GNSS_LINK_OP_WRITE, 0));
+    uint32_t tok = 99;
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, gnss_link_core_acquire(&c, GNSS_LINK_MODE_COMMAND, "detect", &tok));
+    TEST_ASSERT_EQUAL_UINT32(0, tok);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, gnss_link_core_acquire(&c, GNSS_LINK_MODE_RAW, "flash", &tok));
+    TEST_ASSERT_EQUAL(GNSS_LINK_MODE_STREAM, c.mode);
+    /* The stream is still published. */
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_PUBLISH, gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_LINE, gnss_link_core_route(&c, GNSS_FRAME_TEXT, T0_US));
+
+    /* Off again: as before. */
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_set_hands_off(&c, false));
+    gnss_link_core_snapshot(&c, T0_US, &s);
+    TEST_ASSERT_FALSE(s.hands_off);
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_check(&c, GNSS_LINK_OP_WRITE, 0));
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&c, GNSS_LINK_MODE_COMMAND, "detect", &tok));
+
+    /* Not while a lease is held (its holder would be cut off mid-session). */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, gnss_link_core_set_hands_off(&c, true));
+    TEST_ASSERT_FALSE(c.hands_off);
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_check(&c, GNSS_LINK_OP_WRITE, tok));
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_release(&c, tok, NULL));
+
+    /* Even with a lease that slipped through, writes and breaks are refused. */
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_set_hands_off(&c, true));
+    c.lease = 7;
+    c.mode = GNSS_LINK_MODE_COMMAND;
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, gnss_link_core_check(&c, GNSS_LINK_OP_BREAK, 7));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, gnss_link_core_check(&c, GNSS_LINK_OP_WRITE, 7));
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_release(&c, 7, NULL));
+}

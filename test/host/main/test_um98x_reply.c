@@ -196,9 +196,125 @@ TEST_CASE("reply: dump items fold into the read-back", "[um98x_reply]")
     TEST_ASSERT_EQUAL_UINT8(7, rb.signal_group_master);
 
     /* Other items only count. */
-    static const char mmp[] = "CONFIG MMP ENABLE";
-    um98x_config_item(&rb, "MMP", 3, mmp, strlen(mmp));
+    static const char und[] = "CONFIG UNDULATION AUTO";
+    um98x_config_item(&rb, "UNDULATION", 10, und, strlen(und));
     TEST_ASSERT_EQUAL_UINT16(5, rb.items);
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_UNKNOWN, rb.rx.b1cb2a);
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_UNKNOWN, rb.rx.mmp);
+    TEST_ASSERT_FALSE(rb.rx.mask_known);
+    TEST_ASSERT_FALSE(rb.rx.antenna_known);
+}
+
+static void fold(um98x_config_readback_t *rb, const char *line)
+{
+    um98x_line_t l;
+    classify(line, &l);
+    TEST_ASSERT_EQUAL(UM98X_LINE_CONFIG, l.kind);
+    um98x_config_item(rb, l.item, l.item_len, l.text, l.text_len);
+}
+
+static void fold_item(um98x_config_readback_t *rb, const char *content)
+{
+    char line[256];
+    make_dollar(line, sizeof(line), content);
+    fold(rb, line);
+}
+
+TEST_CASE("reply: BeiDou B1C/B2a and multipath mitigation read back as on, off or unknown", "[um98x_reply]")
+{
+    um98x_config_readback_t rb;
+    memset(&rb, 0, sizeof(rb));
+    /* The public dump line, as it is. */
+    fold(&rb, "$CONFIG,RTCMB1CB2A,CONFIG RTCMB1CB2A ENABLE*25");
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_ON, rb.rx.b1cb2a);
+    fold_item(&rb, "CONFIG,RTCMB1CB2A,CONFIG RTCMB1CB2A DISABLE");
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_OFF, rb.rx.b1cb2a);
+    /* Lower case, as the receiver echoes what it was given. */
+    fold_item(&rb, "CONFIG,rtcmb1cb2a,config rtcmb1cb2a enable");
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_ON, rb.rx.b1cb2a);
+    /* A value that is neither, or none at all: unknown (the last line wins). */
+    fold_item(&rb, "CONFIG,RTCMB1CB2A,CONFIG RTCMB1CB2A MAYBE");
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_UNKNOWN, rb.rx.b1cb2a);
+    fold_item(&rb, "CONFIG,RTCMB1CB2A,CONFIG RTCMB1CB2A DISABLE");
+    fold_item(&rb, "CONFIG,RTCMB1CB2A,CONFIG RTCMB1CB2A");
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_UNKNOWN, rb.rx.b1cb2a);
+
+    fold_item(&rb, "CONFIG,MMP,CONFIG MMP ENABLE");
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_ON, rb.rx.mmp);
+    fold_item(&rb, "CONFIG,MMP,CONFIG MMP DISABLE");
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_OFF, rb.rx.mmp);
+
+    /* An item missing from the dump stays unknown. */
+    memset(&rb, 0, sizeof(rb));
+    fold(&rb, TV_CONFIG_SG);
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_UNKNOWN, rb.rx.b1cb2a);
+}
+
+TEST_CASE("reply: the elevation mask reads back in tenths of a degree", "[um98x_reply]")
+{
+    um98x_config_readback_t rb;
+    memset(&rb, 0, sizeof(rb));
+    fold_item(&rb, "CONFIG,MASK,CONFIG MASK 5.0");
+    TEST_ASSERT_TRUE(rb.rx.mask_known);
+    TEST_ASSERT_EQUAL_INT16(50, rb.rx.mask_ddeg);
+    fold_item(&rb, "CONFIG,MASK,CONFIG MASK 0");
+    TEST_ASSERT_EQUAL_INT16(0, rb.rx.mask_ddeg);
+    fold_item(&rb, "CONFIG,MASK,CONFIG MASK 12.25");
+    TEST_ASSERT_EQUAL_INT16(123, rb.rx.mask_ddeg);   /* rounded to 0.1 degree */
+    fold_item(&rb, "CONFIG,MASK,CONFIG MASK -5");
+    TEST_ASSERT_EQUAL_INT16(-50, rb.rx.mask_ddeg);
+    /* A system mask line (no number) leaves the elevation mask alone. */
+    fold_item(&rb, "CONFIG,MASK,CONFIG MASK GPS");
+    TEST_ASSERT_TRUE(rb.rx.mask_known);
+    TEST_ASSERT_EQUAL_INT16(-50, rb.rx.mask_ddeg);
+    /* Out of range or malformed: ignored too. */
+    fold_item(&rb, "CONFIG,MASK,CONFIG MASK 95");
+    fold_item(&rb, "CONFIG,MASK,CONFIG MASK 1.2.3");
+    TEST_ASSERT_EQUAL_INT16(-50, rb.rx.mask_ddeg);
+
+    memset(&rb, 0, sizeof(rb));
+    fold_item(&rb, "CONFIG,MASK,CONFIG MASK BDS");
+    TEST_ASSERT_FALSE(rb.rx.mask_known);
+}
+
+TEST_CASE("reply: the base antenna descriptor reads back, or unknown", "[um98x_reply]")
+{
+    um98x_config_readback_t rb;
+    memset(&rb, 0, sizeof(rb));
+    fold_item(&rb, "CONFIG,BASEANTENNAMODEL,CONFIG BASEANTENNAMODEL \"TRM59800.00     SCIS\" \"5000112233\" 3 USER");
+    TEST_ASSERT_TRUE(rb.rx.antenna_known);
+    TEST_ASSERT_EQUAL_STRING("TRM59800.00     SCIS", rb.rx.antenna_model);   /* inner spaces kept */
+    TEST_ASSERT_EQUAL_STRING("5000112233", rb.rx.antenna_serial);
+    TEST_ASSERT_EQUAL_UINT8(3, rb.rx.antenna_setup_id);
+
+    /* The receiver's null antenna with an empty serial. */
+    fold_item(&rb, "CONFIG,BASEANTENNAMODEL,CONFIG BASEANTENNAMODEL \"ADVNULLANTENNA\" \"\" 0 USER");
+    TEST_ASSERT_TRUE(rb.rx.antenna_known);
+    TEST_ASSERT_EQUAL_STRING("ADVNULLANTENNA", rb.rx.antenna_model);
+    TEST_ASSERT_EQUAL_STRING("", rb.rx.antenna_serial);
+
+    /* 31 characters fit. */
+    fold_item(&rb, "CONFIG,BASEANTENNAMODEL,CONFIG BASEANTENNAMODEL \"1234567890123456789012345678901\" \"S\" 255 USER");
+    TEST_ASSERT_TRUE(rb.rx.antenna_known);
+    TEST_ASSERT_EQUAL_UINT8(255, rb.rx.antenna_setup_id);
+
+    /* Anything that does not fit: unknown (and the last line wins). */
+    static const char *const bad[] = {
+        "CONFIG,BASEANTENNAMODEL,CONFIG BASEANTENNAMODEL TRM59800.00 SCIS 5000112233 3 USER",   /* no quotes */
+        "CONFIG,BASEANTENNAMODEL,CONFIG BASEANTENNAMODEL \"TRM59800.00\" 5000112233 3",          /* serial unquoted */
+        "CONFIG,BASEANTENNAMODEL,CONFIG BASEANTENNAMODEL \"TRM59800.00\" \"1\"",                 /* no setup ID */
+        "CONFIG,BASEANTENNAMODEL,CONFIG BASEANTENNAMODEL \"TRM59800.00\" \"1\" 256 USER",        /* ID out of range */
+        "CONFIG,BASEANTENNAMODEL,CONFIG BASEANTENNAMODEL \"12345678901234567890123456789012\" \"\" 0",   /* 32 characters */
+        "CONFIG,BASEANTENNAMODEL,CONFIG BASEANTENNAMODEL \"TRM59800.00",                         /* unterminated */
+        "CONFIG,BASEANTENNAMODEL,BASEANTENNA",                                                   /* no item name in the text */
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        fold_item(&rb, "CONFIG,BASEANTENNAMODEL,CONFIG BASEANTENNAMODEL \"A\" \"B\" 1 USER");
+        TEST_ASSERT_TRUE(rb.rx.antenna_known);
+        fold_item(&rb, bad[i]);
+        TEST_ASSERT_FALSE_MESSAGE(rb.rx.antenna_known, bad[i]);
+        TEST_ASSERT_EQUAL_STRING("", rb.rx.antenna_model);
+    }
 }
 
 TEST_CASE("reply: only VERSIONA and MODE are allowed without a lease", "[um98x_reply]")

@@ -1075,6 +1075,21 @@ esp_err_t gnss_link_restart(gnss_link_lease_t lease)
     return err;
 }
 
+esp_err_t gnss_link_set_hands_off(bool on)
+{
+    if (!s_inited || in_rx_task()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    taskENTER_CRITICAL(&s_lock);
+    bool was = s_core.hands_off;
+    esp_err_t err = gnss_link_core_set_hands_off(&s_core, on);
+    taskEXIT_CRITICAL(&s_lock);
+    if (err == ESP_OK && was != on) {
+        ESP_LOGI(TAG, "%s", on ? "hands off: nothing is sent to the receiver" : "hands off ended");
+    }
+    return err;
+}
+
 uint32_t gnss_link_get_baud(void)
 {
     taskENTER_CRITICAL(&s_lock);

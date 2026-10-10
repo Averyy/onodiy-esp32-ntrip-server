@@ -283,3 +283,115 @@ TEST_CASE("obs parse: values out of range and malformed sentences", "[gnss_obs]"
     TEST_ASSERT_FALSE(obs_gsv_parse("#MODE,BASE", 10, &g));
     TEST_ASSERT_EQUAL_UINT8(0, g.count);
 }
+
+/* ---- antenna and receiver descriptor (1033) ------------------------------- */
+
+typedef struct {
+    uint8_t payload[GNSS_RTCM3_MAX_PAYLOAD];
+    size_t pos;
+} bits_t;
+
+static void put_count_str(bits_t *b, unsigned count, const char *s)
+{
+    msm_put(b->payload, b->pos, 8, count);
+    b->pos += 8;
+    for (unsigned i = 0; i < count; i++) {
+        msm_put(b->payload, b->pos, 8, (uint8_t)s[i]);
+        b->pos += 8;
+    }
+}
+
+static void put_str(bits_t *b, const char *s)
+{
+    put_count_str(b, (unsigned)strlen(s), s);
+}
+
+static bits_t s_bits;
+
+/* A 1033 per the public layout; trim cuts that many bytes off the payload. */
+static size_t build_1033(uint16_t station, const char *ant, uint8_t setup, const char *aser, const char *rtype,
+                         const char *rfw, const char *rser, size_t trim)
+{
+    memset(&s_bits, 0, sizeof(s_bits));
+    msm_put(s_bits.payload, 0, 12, 1033);
+    msm_put(s_bits.payload, 12, 12, station);
+    s_bits.pos = 24;
+    put_str(&s_bits, ant);
+    msm_put(s_bits.payload, s_bits.pos, 8, setup);
+    s_bits.pos += 8;
+    put_str(&s_bits, aser);
+    put_str(&s_bits, rtype);
+    put_str(&s_bits, rfw);
+    put_str(&s_bits, rser);
+    size_t n = (s_bits.pos + 7u) / 8u;
+    return rtcm_make_frame(s_frame, s_bits.payload, n - trim);
+}
+
+TEST_CASE("obs parse: 1033 antenna and receiver descriptor", "[gnss_obs]")
+{
+    obs_1033_t d;
+    size_t len = build_1033(1234, "TRM59800.00     SCIS", 3, "5000112233", "UNICORE UM982", "R4.10Build18975",
+                            "1234567", 0);
+    TEST_ASSERT_TRUE(gnss_rtcm3_frame_ok(s_frame, len));
+    TEST_ASSERT_TRUE(obs_1033_parse(s_frame, len, &d));
+    TEST_ASSERT_EQUAL_UINT16(1234, d.station_id);
+    TEST_ASSERT_EQUAL_STRING("TRM59800.00     SCIS", d.antenna);
+    TEST_ASSERT_EQUAL_UINT8(3, d.setup_id);
+    TEST_ASSERT_EQUAL_STRING("5000112233", d.antenna_serial);
+    TEST_ASSERT_EQUAL_STRING("UNICORE UM982", d.receiver_type);
+    TEST_ASSERT_EQUAL_STRING("R4.10Build18975", d.receiver_fw);
+    TEST_ASSERT_EQUAL_STRING("1234567", d.receiver_serial);
+
+    /* Empty strings everywhere. */
+    len = build_1033(0, "", 0, "", "", "", "", 0);
+    TEST_ASSERT_TRUE(obs_1033_parse(s_frame, len, &d));
+    TEST_ASSERT_EQUAL_STRING("", d.antenna);
+    TEST_ASSERT_EQUAL_STRING("", d.receiver_serial);
+
+    /* 31 characters in every string. */
+    static const char k31[] = "1234567890123456789012345678901";
+    len = build_1033(4095, k31, 255, k31, k31, k31, k31, 0);
+    TEST_ASSERT_TRUE(obs_1033_parse(s_frame, len, &d));
+    TEST_ASSERT_EQUAL_UINT16(4095, d.station_id);
+    TEST_ASSERT_EQUAL_STRING(k31, d.antenna);
+    TEST_ASSERT_EQUAL_STRING(k31, d.receiver_serial);
+    TEST_ASSERT_EQUAL_UINT8(255, d.setup_id);
+
+    /* Characters outside printable ASCII are shown as '?'. */
+    len = build_1033(1, "A\x01" "B", 0, "", "", "\xE9", "", 0);
+    TEST_ASSERT_TRUE(obs_1033_parse(s_frame, len, &d));
+    TEST_ASSERT_EQUAL_STRING("A?B", d.antenna);
+    TEST_ASSERT_EQUAL_STRING("?", d.receiver_fw);
+}
+
+TEST_CASE("obs parse: 1033 frames that overrun or are not 1033 are refused", "[gnss_obs]")
+{
+    obs_1033_t d;
+    /* A string that ends beyond the payload. */
+    size_t len = build_1033(1, "ANT", 0, "SER", "TYPE", "FW", "SERIAL", 3);
+    TEST_ASSERT_FALSE(obs_1033_parse(s_frame, len, &d));
+    TEST_ASSERT_EQUAL_STRING("", d.antenna);   /* cleared */
+    /* Cut inside the setup ID. */
+    len = build_1033(1, "ANT", 0, "", "", "", "", 5);
+    TEST_ASSERT_FALSE(obs_1033_parse(s_frame, len, &d));
+
+    /* A count over 31. */
+    memset(&s_bits, 0, sizeof(s_bits));
+    msm_put(s_bits.payload, 0, 12, 1033);
+    s_bits.pos = 24;
+    static const char k32[] = "12345678901234567890123456789012";
+    put_count_str(&s_bits, 32, k32);
+    msm_put(s_bits.payload, s_bits.pos, 8, 0);
+    s_bits.pos += 8;
+    for (int i = 0; i < 4; i++) {
+        put_str(&s_bits, "");
+    }
+    len = rtcm_make_frame(s_frame, s_bits.payload, (s_bits.pos + 7u) / 8u);
+    TEST_ASSERT_FALSE(obs_1033_parse(s_frame, len, &d));
+
+    /* Another message, a length that does not match, no frame. */
+    TEST_ASSERT_FALSE(obs_1033_parse(k_v1005, sizeof(k_v1005), &d));
+    len = build_1033(1, "ANT", 0, "", "", "", "", 0);
+    TEST_ASSERT_FALSE(obs_1033_parse(s_frame, len - 1, &d));
+    TEST_ASSERT_FALSE(obs_1033_parse(NULL, 0, &d));
+}

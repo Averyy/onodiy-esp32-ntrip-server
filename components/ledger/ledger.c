@@ -47,6 +47,8 @@ static EXT_RAM_BSS_ATTR uint8_t s_hist_blob[HIST_BLOB_MAX];   /* ledger_init, an
 static SemaphoreHandle_t s_store;                       /* the settings writes and s_hist_blob */
 static bool s_ready;
 static bool s_store_warned;
+static bool s_planned_paused;                           /* under s_lock: casters paused for receiver work */
+static bool s_planned_maint;                            /* under s_lock: receiver maintenance state */
 
 /* Survives software, panic and watchdog resets; validated by magic, size and
  * CRC, and used only when lifecycle accepts its stamp. */
@@ -222,7 +224,20 @@ void ledger_set_planned(bool planned)
     }
     uint32_t now = now_ms();
     portENTER_CRITICAL(&s_lock);
-    lc_set_planned(&s_core, now, planned);
+    s_planned_paused = planned;
+    lc_set_planned(&s_core, now, s_planned_paused || s_planned_maint);
+    portEXIT_CRITICAL(&s_lock);
+}
+
+void ledger_set_maintenance(bool on)
+{
+    if (!s_ready) {
+        return;
+    }
+    uint32_t now = now_ms();
+    portENTER_CRITICAL(&s_lock);
+    s_planned_maint = on;
+    lc_set_planned(&s_core, now, s_planned_paused || s_planned_maint);
     portEXIT_CRITICAL(&s_lock);
 }
 

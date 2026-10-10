@@ -301,6 +301,115 @@ static bool parse_uint(const char *s, size_t len, uint32_t max, uint32_t *out)
     return true;
 }
 
+static uint8_t on_off(const char *tok, size_t len)
+{
+    if (same_ci(tok, len, "ENABLE", 6)) {
+        return UM98X_SETTING_ON;
+    }
+    if (same_ci(tok, len, "DISABLE", 7)) {
+        return UM98X_SETTING_OFF;
+    }
+    return UM98X_SETTING_UNKNOWN;
+}
+
+/* Degrees with an optional sign and fraction, in 0.1 degree (rounded half
+ * away from zero), -90..90. */
+static bool parse_ddeg(const char *s, size_t len, int16_t *out)
+{
+    size_t i = 0;
+    bool neg = false;
+    if (i < len && (s[i] == '-' || s[i] == '+')) {
+        neg = (s[i] == '-');
+        i++;
+    }
+    uint32_t whole = 0;
+    size_t digits = 0;
+    while (i < len && s[i] >= '0' && s[i] <= '9') {
+        if (++digits > 3) {
+            return false;
+        }
+        whole = whole * 10u + (uint32_t)(s[i] - '0');
+        i++;
+    }
+    uint32_t tenths = 0;
+    bool round_up = false;
+    if (i < len && s[i] == '.') {
+        i++;
+        size_t frac = 0;
+        while (i < len && s[i] >= '0' && s[i] <= '9') {
+            if (frac == 0) {
+                tenths = (uint32_t)(s[i] - '0');
+            } else if (frac == 1) {
+                round_up = s[i] >= '5';
+            }
+            frac++;
+            digits++;
+            i++;
+        }
+    }
+    if (i != len || digits == 0) {
+        return false;
+    }
+    uint32_t v = whole * 10u + tenths + (round_up ? 1u : 0u);
+    if (v > 900u) {
+        return false;
+    }
+    *out = (int16_t)(neg ? -(int32_t)v : (int32_t)v);
+    return true;
+}
+
+static void skip_blanks(const char **p, const char *end)
+{
+    while (*p < end && is_blank(**p)) {
+        (*p)++;
+    }
+}
+
+/* One quoted string of at most UM98X_ANTENNA_STR_MAX printable characters. */
+static bool quoted(const char **p, const char *end, char *out)
+{
+    skip_blanks(p, end);
+    if (*p >= end || **p != '"') {
+        return false;
+    }
+    (*p)++;
+    size_t n = 0;
+    while (*p < end && **p != '"') {
+        unsigned char c = (unsigned char)**p;
+        if (c < 0x20 || c > 0x7E || n >= UM98X_ANTENNA_STR_MAX) {
+            return false;
+        }
+        out[n++] = (char)c;
+        (*p)++;
+    }
+    if (*p >= end) {
+        return false;   /* no closing quote */
+    }
+    (*p)++;
+    out[n] = '\0';
+    return true;
+}
+
+static void antenna_item(um98x_rx_settings_t *rx, const char *p, const char *end)
+{
+    um98x_rx_settings_t a;
+    memset(&a, 0, sizeof(a));
+    const char *tok;
+    size_t tok_len;
+    uint32_t id;
+    bool ok = quoted(&p, end, a.antenna_model) && quoted(&p, end, a.antenna_serial) &&
+              next_token(&p, end, &tok, &tok_len) && parse_uint(tok, tok_len, UINT8_MAX, &id);
+    rx->antenna_known = ok;
+    memset(rx->antenna_model, 0, sizeof(rx->antenna_model));
+    memset(rx->antenna_serial, 0, sizeof(rx->antenna_serial));
+    rx->antenna_setup_id = 0;
+    if (ok) {
+        memcpy(rx->antenna_model, a.antenna_model, sizeof(rx->antenna_model));
+        memcpy(rx->antenna_serial, a.antenna_serial, sizeof(rx->antenna_serial));
+        rx->antenna_setup_id = (uint8_t)id;
+    }
+}
+
 void um98x_config_item(um98x_config_readback_t *rb, const char *item, size_t item_len, const char *text,
                        size_t text_len)
 {
@@ -309,7 +418,11 @@ void um98x_config_item(um98x_config_readback_t *rb, const char *item, size_t ite
     }
     bool sg = same_ci(item, item_len, "SIGNALGROUP", 11);
     bool com1 = same_ci(item, item_len, "COM1", 4);
-    if (!sg && !com1) {
+    bool b1c = same_ci(item, item_len, "RTCMB1CB2A", 10);
+    bool mmp = same_ci(item, item_len, "MMP", 3);
+    bool mask = same_ci(item, item_len, "MASK", 4);
+    bool ant = same_ci(item, item_len, "BASEANTENNAMODEL", 16);
+    if (!sg && !com1 && !b1c && !mmp && !mask && !ant) {
         return;
     }
     /* The values follow the item's own name in the text, e.g.
@@ -325,14 +438,37 @@ void um98x_config_item(um98x_config_readback_t *rb, const char *item, size_t ite
             break;
         }
     }
-    if (!found) {
+    if (ant) {
+        if (found) {
+            antenna_item(&rb->rx, p, end);
+        } else {
+            antenna_item(&rb->rx, end, end);   /* unknown */
+        }
+        return;
+    }
+    bool have = found && next_token(&p, end, &tok, &tok_len);
+    if (b1c || mmp) {
+        uint8_t v = have ? on_off(tok, tok_len) : (uint8_t)UM98X_SETTING_UNKNOWN;
+        if (b1c) {
+            rb->rx.b1cb2a = v;
+        } else {
+            rb->rx.mmp = v;
+        }
+        return;
+    }
+    if (!have) {
+        return;
+    }
+    if (mask) {
+        int16_t ddeg;
+        if (parse_ddeg(tok, tok_len, &ddeg)) {
+            rb->rx.mask_known = true;
+            rb->rx.mask_ddeg = ddeg;
+        }
         return;
     }
     uint32_t a;
     uint32_t b = 0;
-    if (!next_token(&p, end, &tok, &tok_len)) {
-        return;
-    }
     if (sg) {
         if (!parse_uint(tok, tok_len, UINT8_MAX, &a)) {
             return;

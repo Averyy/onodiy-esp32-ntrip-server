@@ -129,6 +129,56 @@
  * that sends no RTCM after a receiver restart while it still reports a fixed
  * base raises STATION_ALERT_ANTENNA_MOVED; it is never re-surveyed on its own.
  *
+ * Receiver settings read back: every apply session reads the receiver's
+ * configuration dump; the station keeps (in RAM, with the time of the
+ * read-back) what it said about BeiDou B1C/B2a in RTCM, multipath
+ * mitigation, the elevation mask and the base antenna descriptor, and the
+ * outcome of the antenna and B1C/B2a steps (sent only when the read-back
+ * asks for them; a rejection does not fail the session). Unknown after a
+ * reboot until the next apply session.
+ *
+ * Receiver maintenance (station_maintenance_start; "hands off" while the
+ * user works on the receiver through its other port, e.g. a PC tool or a
+ * reflash): a user action with a duration (15 min, 30 min, 1 h, 2 h, 4 h;
+ * default 30 min; extendable while on, at most 4 h left; "end now").
+ * Refused while a receiver-flash journal is open, while a receiver session
+ * or job runs (offer again when it ends) and in safe mode. While on, the
+ * GNSS link refuses every write and every lease, so nothing reaches the
+ * receiver: no detection, no queries, no apply of any kind (the request
+ * functions refuse with ESP_ERR_INVALID_STATE), no loader key, no RESET, no
+ * receiver flash, no ladder step. Reception goes on: every CRC-valid RTCM
+ * frame still reaches the casters. Restart evidence is noted and triggers
+ * nothing. The ledger counts the time as planned downtime. The station
+ * reports STATION_STATE_IDLE meanwhile (listening only, as in a boot's
+ * first seconds), which suspends health's GNSS ladder; rx_maintenance tells
+ * the two apart (the UI's banner with the time left). Exit (the
+ * user, or the time is up) runs the stream-first path as at boot. An ESP32
+ * software reset keeps the state with its time left (RTC memory, never
+ * NVS; the boot only listens until it ends); a power cut ends it. Entry and
+ * exit are journalled. PROVISIONAL, to be confirmed on hardware (whether
+ * input on the link can disturb the receiver while it is worked on through
+ * its other port).
+ *
+ * Live view (station_live_view_start; satellites first): a window the user
+ * opens for CONFIG_STATION_LIVE_VIEW_MIN minutes (extendable up to
+ * CONFIG_STATION_LIVE_VIEW_MAX_MIN; it also closes when no admin client
+ * asked for it, station_live_view_touch, for
+ * CONFIG_STATION_LIVE_VIEW_IDLE_S). While it is open the receiver's
+ * satellite-in-view output is turned on, unsaved (never SAVECONFIG), every
+ * CONFIG_STATION_LIVE_VIEW_SKY_PERIOD_S, for the sky plot's azimuth and
+ * elevation (gnss_obs_get_live); it is turned off when the window closes.
+ * Each toggle is one configuring command under a short COMMAND lease (the
+ * casters pause for it; journalled with its length), only while the
+ * station streams with nothing else to do: never while it configures,
+ * detects, recovers or flashes, never in maintenance, never with
+ * gnss/autocfg = 0, never for a model it does not configure, and never when
+ * the profile sends the output permanently. After a receiver
+ * reconfiguration, reset or restart the output is simply off (status says
+ * why); starting the view again turns it on again. Everything else in the
+ * live view comes from the RTCM stream without any receiver traffic.
+ * Whether toggling the output interrupts RTCM is PROVISIONAL, to be
+ * confirmed on hardware.
+ *
  * Dependencies point down only: the station never calls health or
  * fw_update; it learns about an app trial from lifecycle.
  *
@@ -164,7 +214,7 @@ typedef enum {
 } station_event_t;
 
 typedef enum {
-    STATION_STATE_IDLE = 0,      /**< not started (or safe mode), or the first 3 s of a boot: listening at the stored baud */
+    STATION_STATE_IDLE = 0,      /**< not started (or safe mode), the first 3 s of a boot, or receiver maintenance (rx_maintenance): listening at the stored baud, nothing sent */
     STATION_STATE_DETECTING,
     STATION_STATE_CONFIGURING,
     STATION_STATE_STREAMING,
@@ -215,6 +265,64 @@ typedef enum {
     STATION_FLASH_ACTION_CLEAR_JOURNAL,   /**< forget the session, release the package, resume normal operation */
 } station_flash_action_t;
 
+/** Why a maintenance request was refused (station_maintenance_start / _end). */
+typedef enum {
+    STATION_MAINT_OK = 0,
+    STATION_MAINT_REFUSED_FLASH,        /**< a receiver-flash journal is open */
+    STATION_MAINT_REFUSED_SESSION,      /**< a receiver session or job runs: offer again when it ends */
+    STATION_MAINT_REFUSED_DURATION,     /**< not one of 15 min, 30 min, 1 h, 2 h, 4 h */
+    STATION_MAINT_NOT_ON,               /**< "end now" without the state */
+    STATION_MAINT_REFUSED_NOT_RUNNING,  /**< the station does not run (safe mode) */
+} station_maint_why_t;
+
+/** The receiver's satellite-in-view output as the live view sees it. */
+typedef enum {
+    STATION_LIVE_SKY_OFF = 0,     /**< no window */
+    STATION_LIVE_SKY_PENDING,     /**< wanted; waits for a free moment (why) */
+    STATION_LIVE_SKY_ON,          /**< on for this window (unsaved) */
+    STATION_LIVE_SKY_ON_PROFILE,  /**< the profile sends it permanently */
+    STATION_LIVE_SKY_BLOCKED,     /**< not available in this window (why) */
+    STATION_LIVE_SKY_STOPPING,    /**< the window closed; turned off at the next free moment */
+} station_live_sky_t;
+
+/** Why the satellite-in-view output is not on (or why the view was refused). */
+typedef enum {
+    STATION_LIVE_WHY_NONE = 0,
+    STATION_LIVE_WHY_BUSY,           /**< a receiver job or session runs */
+    STATION_LIVE_WHY_NOT_STREAMING,  /**< no receiver streaming (detecting, no receiver, boot) */
+    STATION_LIVE_WHY_MAINTENANCE,    /**< receiver maintenance: nothing is sent */
+    STATION_LIVE_WHY_AUTOCFG_OFF,    /**< gnss/autocfg = 0: the user configures the receiver */
+    STATION_LIVE_WHY_UNSUPPORTED,    /**< not a receiver model this firmware configures */
+    STATION_LIVE_WHY_RECONFIGURED,   /**< receiver reconfigured, reset or restarted: start the view again */
+    STATION_LIVE_WHY_REJECTED,       /**< the receiver rejected the command (sky_reply) */
+    STATION_LIVE_WHY_NO_ANSWER,      /**< no answer to the command */
+    STATION_LIVE_WHY_FLASH,          /**< receiver update session (also refuses the view) */
+    STATION_LIVE_WHY_NOT_RUNNING,    /**< the station does not run (safe mode; refuses the view) */
+} station_live_why_t;
+
+/** Why the last live view window closed. */
+typedef enum {
+    STATION_LIVE_END_NONE = 0,
+    STATION_LIVE_END_USER,
+    STATION_LIVE_END_EXPIRED,
+    STATION_LIVE_END_IDLE,           /**< no admin client asked for it for CONFIG_STATION_LIVE_VIEW_IDLE_S */
+    STATION_LIVE_END_FLASH,          /**< a receiver update began */
+} station_live_end_t;
+
+/** Live view state (the satellites themselves: gnss_obs_get_live). */
+typedef struct {
+    bool open;
+    uint32_t left_s;                 /**< until the window closes */
+    uint32_t idle_left_s;            /**< until it closes for lack of an admin client */
+    uint32_t open_s;                 /**< since it opened */
+    uint32_t max_s;                  /**< longest window, extensions included */
+    uint8_t sky;                     /**< station_live_sky_t */
+    uint8_t sky_why;                 /**< station_live_why_t */
+    uint16_t sky_period_s;           /**< satellite-in-view output period while on */
+    uint8_t last_end;                /**< station_live_end_t of the last window */
+    char sky_reply[64];              /**< the receiver's reply to the last failed toggle ("" none) */
+} station_live_status_t;
+
 /** Status snapshot. */
 typedef struct {
     station_state_t state;
@@ -241,6 +349,25 @@ typedef struct {
     bool detect_saw_bytes;           /**< the last failed detection pass received bytes at some baud (health's byte rule on entering NO_RECEIVER) */
     uint64_t rtcm_excluded;          /**< frames of types 1101-1107 kept out of the hub */
     um98x_flash_progress_t flash;    /**< valid while FLASHING / FLASH_RECOVERY */
+
+    /* Receiver settings read back at the last apply session this boot. */
+    bool rx_settings_valid;          /**< a configuration dump was read this boot (else every value is unknown) */
+    um98x_rx_settings_t rx_settings; /**< B1C/B2a in RTCM, multipath mitigation, elevation mask, antenna descriptor */
+    uint32_t rx_settings_age_s;      /**< since that read-back */
+    int64_t rx_settings_unix;        /**< its wall-clock time, 0 = clock not set then */
+    bool antenna_sent;               /**< the last apply session sent the antenna descriptor */
+    bool antenna_ok;                 /**< ... and the receiver accepted it */
+    char antenna_reply[64];          /**< its rejection text or "timeout" ("antenna model rejected: ...") */
+    bool b1cb2a_sent;                /**< the last apply session turned BeiDou B1C/B2a in RTCM on */
+    bool b1cb2a_ok;                  /**< ... and the receiver accepted it */
+    char b1cb2a_reply[64];           /**< its rejection text or "timeout" */
+
+    /* Receiver maintenance (hands off). */
+    bool rx_maintenance;             /**< on: nothing is sent to the receiver; health suspends its GNSS ladder */
+    uint32_t maintenance_left_s;     /**< until it ends by itself */
+    uint32_t maintenance_chosen_s;   /**< chosen duration, extensions included */
+
+    station_live_status_t live;      /**< live view */
 } station_status_t;
 
 /**
@@ -279,8 +406,9 @@ esp_err_t station_get_status(station_status_t *out);
  * Re-apply the stored base profile (after the user edits it). Async; runs
  * whatever gnss/autocfg says, also while CONFIG_FAILED is raised, once the
  * receiver streams.
- * @return ESP_ERR_INVALID_STATE uninitialised (safe mode) or with a flash
- *         journal open, ESP_ERR_NOT_SUPPORTED for an unsupported model.
+ * @return ESP_ERR_INVALID_STATE uninitialised (safe mode), with a flash
+ *         journal open or in receiver maintenance, ESP_ERR_NOT_SUPPORTED for
+ *         an unsupported model.
  */
 esp_err_t station_request_reconfigure(void);
 
@@ -346,6 +474,46 @@ esp_err_t station_lock_position(void);
 
 /** Forget the locked position and survey again (reconfigure). Async. Errors as station_request_reconfigure(). */
 esp_err_t station_request_resurvey(void);
+
+/**
+ * Receiver maintenance (see above): enter for duration_s (900, 1800, 3600,
+ * 7200 or 14400; 0 = 1800), or, while on, extend by it (at most 4 h left).
+ * Effective at once: the link refuses every write and lease from the
+ * return on.
+ * @param why optional: the refusal reason (STATION_MAINT_OK on success)
+ * @return ESP_OK; ESP_ERR_INVALID_ARG (duration); ESP_ERR_INVALID_STATE
+ *         (refused: flash journal, a running session, safe mode).
+ */
+esp_err_t station_maintenance_start(uint32_t duration_s, station_maint_why_t *why);
+
+/**
+ * The user's "end now": the station leaves maintenance within a second
+ * and runs the stream-first path. ESP_ERR_NOT_FOUND when it is not on,
+ * ESP_ERR_INVALID_STATE in safe mode.
+ */
+esp_err_t station_maintenance_end(void);
+
+/**
+ * Open the live view for `minutes` (0 = CONFIG_STATION_LIVE_VIEW_MIN), or
+ * extend an open one by that much (at most CONFIG_STATION_LIVE_VIEW_MAX_MIN
+ * from now); either also turns the satellite-in-view output on again when
+ * a receiver reconfiguration had ended it, and counts as a touch.
+ * @param why optional: the refusal reason (STATION_LIVE_WHY_NONE on success)
+ * @return ESP_OK; ESP_ERR_INVALID_STATE (safe mode / not running:
+ *         STATION_LIVE_WHY_NOT_RUNNING; receiver flash:
+ *         STATION_LIVE_WHY_FLASH).
+ */
+esp_err_t station_live_view_start(uint32_t minutes, station_live_why_t *why);
+
+/**
+ * An admin client asked for the live view (the web API calls it on every
+ * live-view request); without one for CONFIG_STATION_LIVE_VIEW_IDLE_S the
+ * window closes by itself. ESP_ERR_NOT_FOUND when no window is open.
+ */
+esp_err_t station_live_view_touch(void);
+
+/** Close the live view now (the output is turned off at the next free moment). ESP_ERR_NOT_FOUND when none is open. */
+esp_err_t station_live_view_stop(void);
 
 #ifdef __cplusplus
 }

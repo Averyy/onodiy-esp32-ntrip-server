@@ -662,6 +662,32 @@ esp_err_t um98x_ctl_reset_receiver(gnss_link_lease_t lease)
     return ESP_OK;
 }
 
+esp_err_t um98x_ctl_sat_view(gnss_link_lease_t lease, bool on, uint16_t period_s, char *reason, size_t reason_len)
+{
+    if (reason != NULL && reason_len > 0) {
+        reason[0] = '\0';
+    }
+    if (on && (period_s == 0 || period_s > UM98X_SAT_VIEW_PERIOD_MAX)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (lease == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = call_begin(lease, NULL);
+    if (err != ESP_OK) {
+        return err == ESP_ERR_TIMEOUT ? ESP_ERR_INVALID_STATE : err;
+    }
+    call_t c;
+    call_setup(&c, lease);
+    um98x_res_t res = um98x_exec_sat_view(&c.ex, on, period_s, reason, reason_len);
+    call_end();
+    if (res != UM98X_OK) {
+        ESP_LOGW(TAG, "satellite-in-view output %s: %s", on ? "not turned on" : "not turned off",
+                 reason != NULL && reason[0] != '\0' ? reason : "failed");
+    }
+    return to_esp_err(res);
+}
+
 esp_err_t um98x_ctl_get_base_position(um98x_base_position_t *out)
 {
     if (out == NULL) {

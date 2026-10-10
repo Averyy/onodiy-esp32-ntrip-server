@@ -50,20 +50,39 @@
  *    the signal group must now match;
  *  - baud change: CONFIG COM1 <new> without waiting for its acknowledgement
  *    (the link itself changes), 200 ms, host baud, 100 ms, then a version
- *    log within 2000 ms (one retry). Failure: CONFIG COM1 <old> at the new
- *    baud, host back, version again; still nothing: short-list detection.
- *    Never saved on this path;
+ *    log within 2000 ms (one retry). Silent at the new baud: the host goes
+ *    back to the old baud and asks there; a receiver that answers there
+ *    never switched, so CONFIG COM1 <new> goes out once more (same checks)
+ *    before the step fails. Only when both bauds are silent: CONFIG COM1
+ *    <old> at the new baud, host back, version again; still nothing:
+ *    short-list detection. Never saved on this path;
+ *  - antenna descriptor and B1C/B2a (only when the read-back asks for
+ *    them, um98x_plan.h): not fatal; the outcome and the receiver's reply
+ *    are recorded in the result. A restart banner while the B1C/B2a
+ *    command is in flight fails the session (PROVISIONAL, to be confirmed
+ *    on hardware);
  *  - a fatal failure stops the session (no SAVECONFIG). If any command was
- *    accepted, RESET (a plain restart to the saved configuration): the host
- *    goes back to the saved baud, then version polling for 20 s; nothing
- *    there: 10 s more at the baud used before the RESET. answer_baud is
- *    where the receiver last answered (a detection inside the session, then
- *    the rollback: its answer, or unknown without one).
+ *    accepted, RESET (a plain restart to the saved configuration), on the
+ *    recovery RESET's timeline: the host goes back to the saved baud, then
+ *    nothing is sent until the restart banner or 15 s after the RESET, then
+ *    version polling until 20 s after the banner (or after the RESET when no
+ *    banner came); nothing there: 10 s more at the baud used before the
+ *    RESET. answer_baud is where the receiver last answered (a detection
+ *    inside the session, then the rollback: its answer, or unknown without
+ *    one).
+ *
+ * The result also carries what the configuration dump said (B1C/B2a,
+ * multipath mitigation, elevation mask, antenna descriptor), updated with
+ * the antenna and B1C/B2a as sent when the session saved them.
  *
  * Receiver reset (um98x_exec_reset, a recovery step): RESET written once,
  * never resent (a resend would reset it again), with the restart marked as
  * our own until its version log arrives, so neither its banner nor that log
- * counts as an unsolicited restart.
+ * counts as an unsolicited restart. Nothing is sent while the receiver
+ * restarts: listen until its banner (at most 15 s), then poll the version.
+ *
+ * Satellite-in-view output (um98x_exec_sat_view, the live view): one
+ * command with normal acknowledgement handling, never saved.
  *
  * Status: timings and texts PROVISIONAL, to be confirmed on hardware.
  */
@@ -93,8 +112,8 @@ extern "C" {
 #define UM98X_BAUD_SETTLE_MS          200        /**< after CONFIG COM1 <new>, before the host switches */
 #define UM98X_BAUD_VERIFY_DELAY_MS    100        /**< after the host switch, before the version query */
 #define UM98X_BAUD_VERIFY_TRIES       2
-#define UM98X_ROLLBACK_SAVED_MS       20000      /**< after RESET: version polling at the saved baud */
-#define UM98X_ROLLBACK_PREVIOUS_MS    10000      /**< then at the baud used before the RESET */
+#define UM98X_BAUD_ATTEMPTS           2          /**< CONFIG COM1 <new> sends while the receiver still answers at the old baud */
+#define UM98X_ROLLBACK_PREVIOUS_MS    10000      /**< after the RESET timeline: version polling at the baud used before the RESET */
 #define UM98X_LOADER_WAIT_MS          15000      /**< after the loader's restart key: wait for the application */
 
 typedef struct {
@@ -240,8 +259,9 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
                              gnss_versiona_t *identity, uint32_t stored_baud, um98x_apply_result_t *r);
 
 /**
- * The receiver's RESET (see "Receiver reset" above): banner up to 15 s, then
- * the version polled every second until 20 s after it (or after the write).
+ * The receiver's RESET (see "Receiver reset" above): nothing sent until the
+ * banner (up to 15 s), then the version polled every second until 20 s
+ * after it (or after the write).
  * @return OK (it answered after the restart), E_TIMEOUT (no answer; the
  *         RESET went out), E_LINK (the write failed: nothing was sent).
  */
@@ -254,6 +274,14 @@ um98x_res_t um98x_exec_reset(um98x_exec_t *ex);
  *         names the first failure). r->rtcm1230_ok as in an apply.
  */
 um98x_res_t um98x_exec_restore_rtcm(um98x_exec_t *ex, const um98x_base_profile_t *p, um98x_apply_result_t *r);
+
+/**
+ * Satellite-in-view output on (period_s, 1..60 s) or off, unsaved: a lone
+ * CR LF, then the command with normal reply handling. reason (optional)
+ * gets the receiver's rejection text, "timeout" or "link error".
+ * @return OK, E_REJECTED, E_TIMEOUT, E_LINK, E_ARG (period out of range).
+ */
+um98x_res_t um98x_exec_sat_view(um98x_exec_t *ex, bool on, uint16_t period_s, char *reason, size_t cap);
 
 #ifdef __cplusplus
 }

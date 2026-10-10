@@ -55,6 +55,47 @@ static void canonical(const um98x_base_profile_t *p, um98x_base_profile_t *out)
     out->rtcm_count = p->rtcm_count;
     memcpy(out->rtcm, p->rtcm, sizeof(out->rtcm[0]) * p->rtcm_count);
     out->sat_view_output = p->sat_view_output;
+    /* Trailing spaces are dropped; without a model the serial number and
+     * setup ID are never sent, so they are cleared. */
+    size_t n = um98x_antenna_str_len(p->antenna_model);
+    if (n > 0) {
+        memcpy(out->antenna_model, p->antenna_model, n);
+        size_t k = um98x_antenna_str_len(p->antenna_serial);
+        memcpy(out->antenna_serial, p->antenna_serial, k);
+        out->antenna_setup_id = p->antenna_setup_id;
+    }
+}
+
+bool um98x_antenna_str_valid(const char *s, size_t cap)
+{
+    if (s == NULL) {
+        return false;
+    }
+    for (size_t i = 0; i < cap; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '\0') {
+            return i <= UM98X_ANTENNA_STR_MAX;
+        }
+        if (c < 0x20 || c > 0x7E || c == '"') {
+            return false;
+        }
+    }
+    return false;   /* not terminated */
+}
+
+size_t um98x_antenna_str_len(const char *s)
+{
+    if (s == NULL) {
+        return 0;
+    }
+    size_t n = 0;
+    while (n < UM98X_ANTENNA_STR_MAX && s[n] != '\0') {
+        n++;
+    }
+    while (n > 0 && s[n - 1] == ' ') {
+        n--;
+    }
+    return n;
 }
 
 void um98x_profile_default(um98x_base_profile_t *out, uint16_t station_id)
@@ -79,6 +120,7 @@ void um98x_profile_default(um98x_base_profile_t *out, uint16_t station_id)
     out->rtcm_count = (uint8_t)(sizeof(onocoy_set) / sizeof(onocoy_set[0]));
     memcpy(out->rtcm, onocoy_set, sizeof(onocoy_set));
     out->sat_view_output = false;   /* default not decided yet: send nothing extra */
+    /* antenna: empty, so the receiver keeps its own descriptor */
 }
 
 uint16_t um98x_station_id_from_mac(const uint8_t mac[6])
@@ -126,7 +168,8 @@ bool um98x_profile_valid(const um98x_base_profile_t *p)
             return false;
         }
     }
-    return true;
+    return um98x_antenna_str_valid(p->antenna_model, sizeof(p->antenna_model)) &&
+           um98x_antenna_str_valid(p->antenna_serial, sizeof(p->antenna_serial));
 }
 
 size_t um98x_profile_encode(const um98x_base_profile_t *profile, uint8_t *buf, size_t cap)
@@ -155,6 +198,11 @@ size_t um98x_profile_encode(const um98x_base_profile_t *profile, uint8_t *buf, s
         blob_put_u16(&w, p->rtcm[i].msg);
         blob_put_u16(&w, p->rtcm[i].period_s);
     }
+    /* Appended in the same version: a blob that ends before them decodes
+     * with an empty antenna. */
+    blob_put_str(&w, p->antenna_model);
+    blob_put_str(&w, p->antenna_serial);
+    blob_put_u8(&w, p->antenna_setup_id);
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
@@ -184,6 +232,11 @@ bool um98x_profile_decode(const uint8_t *buf, size_t len, um98x_base_profile_t *
     for (size_t i = 0; i < p.rtcm_count; i++) {
         p.rtcm[i].msg = blob_get_u16(&r);
         p.rtcm[i].period_s = blob_get_u16(&r);
+    }
+    if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
+        blob_get_str(&r, p.antenna_model, sizeof(p.antenna_model));
+        blob_get_str(&r, p.antenna_serial, sizeof(p.antenna_serial));
+        p.antenna_setup_id = blob_get_u8(&r);
     }
     if (!blob_reader_ok(&r) || !um98x_profile_valid(&p)) {
         return false;
@@ -222,6 +275,13 @@ uint32_t um98x_profile_hash(const um98x_base_profile_t *profile)
     for (size_t i = 0; i < c.rtcm_count; i++) {
         blob_put_u16(&w, c.rtcm[i].msg);
         blob_put_u16(&w, c.rtcm[i].period_s);
+    }
+    /* The antenna only when the receiver gets one: a profile without a
+     * model hashes as it did before the antenna fields existed. */
+    if (c.antenna_model[0] != '\0') {
+        blob_put_str(&w, c.antenna_model);
+        blob_put_str(&w, c.antenna_serial);
+        blob_put_u8(&w, c.antenna_setup_id);
     }
     return blob_writer_ok(&w) ? blob_hash32(buf, w.len) : 0;
 }

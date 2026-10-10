@@ -38,6 +38,15 @@
  * QZSS as PRN - 192, SBAS as PRN - 119. Blocks whose number cannot be
  * mapped are skipped. Out-of-range elevation, azimuth or SNR values count as
  * empty.
+ *
+ * Antenna and receiver descriptor (RTCM 1033, public layout): message
+ * number (12 bits), reference station ID (12), then counted strings of 8-bit
+ * characters, each count 8 bits: antenna descriptor (DF029/DF030), antenna
+ * setup ID (DF031, 8 bits, not counted), antenna serial number
+ * (DF032/DF033), receiver type (DF227/DF228), receiver firmware version
+ * (DF229/DF230), receiver serial number (DF231/DF232). Every count must be
+ * at most 31 and every string must lie within the payload, else the frame
+ * is refused. Characters outside printable ASCII are shown as '?'.
  */
 #pragma once
 
@@ -96,6 +105,27 @@ bool obs_msm_cnr(const uint8_t *frame, size_t len, const gnss_rtcm3_msm_t *h, ob
  * sentence. false (out cleared) for any other line or a malformed one.
  */
 bool obs_gsv_parse(const char *line, size_t len, obs_gsv_t *out);
+
+#define OBS_1033_STR_MAX 31u   /**< longest string of a 1033 (characters) */
+
+/** The strings of one 1033. */
+typedef struct {
+    uint16_t station_id;
+    char antenna[OBS_1033_STR_MAX + 1];          /**< antenna descriptor */
+    uint8_t setup_id;                            /**< antenna setup ID */
+    char antenna_serial[OBS_1033_STR_MAX + 1];
+    char receiver_type[OBS_1033_STR_MAX + 1];
+    char receiver_fw[OBS_1033_STR_MAX + 1];
+    char receiver_serial[OBS_1033_STR_MAX + 1];
+} obs_1033_t;
+
+/**
+ * Decode one whole 1033 frame (preamble, header, payload, CRC; the CRC is
+ * the framer's). false (out cleared) for another message, a frame whose
+ * length field does not match `len`, a count over 31 or a string beyond the
+ * payload.
+ */
+bool obs_1033_parse(const uint8_t *frame, size_t len, obs_1033_t *out);
 
 #ifdef __cplusplus
 }

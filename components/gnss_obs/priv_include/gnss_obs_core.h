@@ -65,6 +65,17 @@
  * does not blank a satellite). A satellite reported for several signals in
  * one output burst keeps the highest CNR of that burst.
  *
+ * Satellites (the live view): per constellation and MSM satellite number,
+ * the signals and the CNR per band of the latest MSM epoch that listed the
+ * satellite (obs_core_feed_sats: all MSMs of one epoch time add up; a new
+ * epoch time starts over). A band's CNR is the highest of its signals.
+ * A satellite counts for OBS_SIGNAL_WINDOW_MS after that epoch.
+ * obs_core_live() lists them, joined with the sky view's azimuth and
+ * elevation where known (a satellite only the sky view knows is listed
+ * too, without bands), and totals: satellites per constellation and per
+ * band, per-band totals and mean CNR (over the satellites with that band),
+ * satellites, signals and the mean CNR over every satellite band.
+ *
  * The clock is any monotonic millisecond count (the caller uses esp_timer).
  */
 #pragma once
@@ -91,6 +102,8 @@ extern "C" {
 #define OBS_SKY_MAX          80u      /**< satellites kept for the sky view */
 #define OBS_SKY_WINDOW_MS    30000u   /**< a satellite stays this long after its last report */
 #define OBS_SKY_BURST_MS     2000u    /**< reports of one satellite this close together are one burst */
+#define OBS_SATS_PER_SYS     64u      /**< MSM satellite numbers per constellation */
+#define OBS_LIVE_MAX         96u      /**< satellites in one live list */
 
 #define OBS_NEVER UINT32_MAX          /**< "never" / "unknown" in views */
 
@@ -120,6 +133,16 @@ typedef struct {
     uint64_t seen_ms;                  /**< latest report with azimuth and elevation */
     uint64_t cnr_ms;                   /**< start of the burst cnr_dbhz belongs to */
 } obs_sky_entry_t;
+
+/** One satellite as its latest MSM epoch listed it. */
+typedef struct {
+    bool valid;
+    uint32_t epoch;                    /**< epoch time of that MSM */
+    uint64_t seen_ms;
+    uint32_t sig_mask;                 /**< MSM signal IDs (bit id-1) */
+    uint8_t band_mask;                 /**< bit per gnss_band_t */
+    uint8_t cnr[GNSS_BAND_COUNT];      /**< dB-Hz, the band's best signal; 0 = no CNR */
+} obs_sat_entry_t;
 
 /** Configuration (survives obs_core_reset). */
 typedef struct {
@@ -161,6 +184,9 @@ typedef struct {
     uint8_t msg_count;
     uint32_t msg_dropped;                          /**< frames of numbers the full table could not take */
     obs_msg_t msg[OBS_MSG_MAX];
+
+    /* satellites of the latest MSM epochs */
+    obs_sat_entry_t sats[GNSS_SYS_COUNT][OBS_SATS_PER_SYS];
 
     /* sky view */
     bool gsv_ever;
@@ -212,6 +238,38 @@ typedef struct {
     uint8_t cnr_dbhz;            /**< 0 = not tracked */
 } obs_sat_t;
 
+/** One satellite of the live list. */
+typedef struct {
+    gnss_sys_t sys;
+    uint8_t sat;                 /**< MSM satellite number */
+    bool in_msm;                 /**< listed by an MSM within the window */
+    uint32_t msm_age_ms;         /**< since that MSM, OBS_NEVER = not in an MSM */
+    uint32_t sig_mask;
+    uint8_t band_mask;
+    uint8_t cnr_dbhz[GNSS_BAND_COUNT];   /**< 0 = no CNR for the band */
+    bool has_pos;                /**< azimuth and elevation from the sky view */
+    int8_t elevation_deg;
+    uint16_t azimuth_deg;
+    uint8_t sky_cnr_dbhz;        /**< CNR of the sky view's latest report, 0 = none */
+    uint32_t pos_age_ms;         /**< since that report, OBS_NEVER = none */
+} obs_live_sat_t;
+
+/** Totals of the live list. */
+typedef struct {
+    uint16_t satellites;         /**< listed (MSM or sky view) */
+    uint16_t tracked;            /**< listed by an MSM within the window */
+    uint16_t signals;            /**< satellite signals of those MSM epochs */
+    uint16_t with_pos;           /**< with azimuth and elevation */
+    uint16_t dropped;            /**< listed satellites the caller's capacity could not take */
+    uint8_t sys_sats[GNSS_SYS_COUNT];                    /**< tracked, per constellation */
+    uint8_t sys_band_sats[GNSS_SYS_COUNT][GNSS_BAND_COUNT];
+    uint16_t band_sats[GNSS_BAND_COUNT];                 /**< tracked satellites with the band, all constellations */
+    uint8_t band_cnr_dbhz[GNSS_BAND_COUNT];              /**< mean CNR of the band over those satellites, 0 = none */
+    uint8_t cnr_dbhz;                                    /**< mean CNR over every satellite band, 0 = none */
+    uint32_t msm_age_ms;         /**< since the latest MSM, OBS_NEVER = never */
+    uint32_t sky_age_ms;         /**< since the latest satellite-in-view sentence, OBS_NEVER = never */
+} obs_live_totals_t;
+
 /** Forget everything, configuration included (a zeroed struct is the same). */
 void obs_core_init(obs_core_t *c);
 
@@ -243,6 +301,13 @@ void obs_core_feed_msg(obs_core_t *c, uint16_t msg, bool has_epoch, uint32_t epo
 /** One parsed satellite-in-view sentence received at now_ms. */
 void obs_core_feed_gsv(obs_core_t *c, const obs_gsv_t *g, uint64_t now_ms);
 
+/**
+ * The satellites and signals of one decoded MSM header received at now_ms,
+ * with every present cell's CNR in sent order (obs_msm_cnr's cell_q4; NULL
+ * for MSM1-3 or cells that did not decode: signals without CNR).
+ */
+void obs_core_feed_sats(obs_core_t *c, const gnss_rtcm3_msm_t *h, const uint16_t *cell_q4, uint64_t now_ms);
+
 /** Summary as of now_ms. */
 void obs_core_view(const obs_core_t *c, uint64_t now_ms, obs_core_view_t *out);
 
@@ -264,6 +329,14 @@ bool obs_core_sky_available(const obs_core_t *c, uint64_t now_ms);
  * returns the entries written (at most cap).
  */
 size_t obs_core_sky(const obs_core_t *c, uint64_t now_ms, obs_sat_t *out, size_t cap);
+
+/**
+ * The live list (see "Satellites" above), sorted by constellation and
+ * satellite number; returns the entries written (at most cap, out may be
+ * NULL with cap 0). tot (required) covers every listed satellite, also
+ * those beyond cap (counted in dropped).
+ */
+size_t obs_core_live(const obs_core_t *c, uint64_t now_ms, obs_live_sat_t *out, size_t cap, obs_live_totals_t *tot);
 
 #ifdef __cplusplus
 }

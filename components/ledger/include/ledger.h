@@ -164,6 +164,13 @@ void ledger_set_slot(size_t slot, bool enabled, bool protected_slot, bool stream
 /** Planned receiver work in progress (casters paused for receiver flash/config); counted as down and also as planned. */
 void ledger_set_planned(bool planned);
 
+/**
+ * The receiver maintenance state is on (the user works on the receiver;
+ * reported by the station): downtime meanwhile counts as planned, like
+ * ledger_set_planned (either one makes it planned).
+ */
+void ledger_set_maintenance(bool on);
+
 /** Fresh RTCM flowing from the receiver (reported by the station). */
 void ledger_set_rtcm_ok(bool ok);
 

@@ -359,3 +359,61 @@ bool obs_gsv_parse(const char *line, size_t len, obs_gsv_t *out)
     *out = g;
     return true;
 }
+
+/* ---- antenna and receiver descriptor (1033) ---------------------------- */
+
+/* One counted string at *pos (count byte, then the characters); false when
+ * the count is over OBS_1033_STR_MAX or the string ends beyond `bits`. */
+static bool counted_str(const uint8_t *p, size_t bits, size_t *pos, char *out)
+{
+    if (*pos + 8u > bits) {
+        return false;
+    }
+    unsigned n = bits_u(p, *pos, 8);
+    *pos += 8u;
+    if (n > OBS_1033_STR_MAX || *pos + (size_t)n * 8u > bits) {
+        return false;
+    }
+    for (unsigned i = 0; i < n; i++) {
+        unsigned c = bits_u(p, *pos, 8);
+        out[i] = (c >= 0x20u && c <= 0x7Eu) ? (char)c : '?';
+        *pos += 8u;
+    }
+    out[n] = '\0';
+    return true;
+}
+
+bool obs_1033_parse(const uint8_t *frame, size_t len, obs_1033_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (frame == NULL || len < GNSS_RTCM3_HEADER_LEN + GNSS_RTCM3_CRC_LEN || frame[0] != GNSS_RTCM3_PREAMBLE) {
+        return false;
+    }
+    size_t plen = ((size_t)(frame[1] & 0x03u) << 8) | frame[2];
+    if (len != plen + GNSS_RTCM3_HEADER_LEN + GNSS_RTCM3_CRC_LEN || plen < 3) {
+        return false;
+    }
+    const uint8_t *p = frame + GNSS_RTCM3_HEADER_LEN;
+    const size_t bits = plen * 8u;
+    if (bits_u(p, 0, 12) != 1033u) {
+        return false;
+    }
+    obs_1033_t r;
+    memset(&r, 0, sizeof(r));
+    r.station_id = (uint16_t)bits_u(p, 12, 12);
+    size_t pos = 24;
+    if (!counted_str(p, bits, &pos, r.antenna)) {
+        return false;
+    }
+    if (pos + 8u > bits) {
+        return false;
+    }
+    r.setup_id = (uint8_t)bits_u(p, pos, 8);
+    pos += 8u;
+    if (!counted_str(p, bits, &pos, r.antenna_serial) || !counted_str(p, bits, &pos, r.receiver_type) ||
+        !counted_str(p, bits, &pos, r.receiver_fw) || !counted_str(p, bits, &pos, r.receiver_serial)) {
+        return false;
+    }
+    *out = r;
+    return true;
+}

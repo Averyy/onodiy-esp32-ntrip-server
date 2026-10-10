@@ -12,6 +12,7 @@ idf_component_register(
     REQUIRES esp_event gnss_types
     PRIV_REQUIRES
         board
+        diag
         esp_hw_support
         esp_timer
         gnss_framing

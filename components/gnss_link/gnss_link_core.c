@@ -29,7 +29,7 @@ esp_err_t gnss_link_core_acquire(gnss_link_core_t *c, gnss_link_mode_t mode, con
         return ESP_ERR_INVALID_ARG;
     }
     *token = 0;
-    if (c->mode != GNSS_LINK_MODE_STREAM || c->lease != 0) {
+    if (c->mode != GNSS_LINK_MODE_STREAM || c->lease != 0 || c->hands_off) {
         return ESP_ERR_INVALID_STATE;
     }
     uint32_t next = c->last_token + 1;
@@ -45,10 +45,22 @@ esp_err_t gnss_link_core_acquire(gnss_link_core_t *c, gnss_link_mode_t mode, con
     return ESP_OK;
 }
 
+esp_err_t gnss_link_core_set_hands_off(gnss_link_core_t *c, bool on)
+{
+    if (on && c->lease != 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    c->hands_off = on;
+    return ESP_OK;
+}
+
 esp_err_t gnss_link_core_check(const gnss_link_core_t *c, gnss_link_op_t op, uint32_t token)
 {
     if (c->mode == GNSS_LINK_MODE_OFF) {
         return ESP_ERR_INVALID_STATE;
+    }
+    if (c->hands_off && (op == GNSS_LINK_OP_WRITE || op == GNSS_LINK_OP_BREAK)) {
+        return ESP_ERR_INVALID_STATE;   /* nothing may reach the receiver */
     }
     bool ok = false;
     switch (op) {
@@ -247,6 +259,7 @@ void gnss_link_core_snapshot(const gnss_link_core_t *c, int64_t now_us, gnss_lin
     out->baud = c->baud;
     out->last_rx_age_ms = gnss_link_core_age_ms(c->rx_seen, c->last_rx_us, now_us);
     out->last_rtcm_age_ms = gnss_link_core_age_ms(c->rtcm_seen, c->last_rtcm_us, now_us);
+    out->hands_off = c->hands_off;
 }
 
 bool gnss_link_core_baud_supported(uint32_t baud)
