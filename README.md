@@ -57,12 +57,14 @@ Antenna and cable notes: [`reference/antenna-specs.md`](reference/antenna-specs.
 |---|---|
 | `main/`, `components/` | ESP-IDF firmware (entry point and one component per subsystem) |
 | `test/host/` | Host unit tests (ESP-IDF linux target, Unity) |
+| `test/fixtures/` | Real-world RTCM streams, a receiver NMEA capture, receiver binary logs and reply samples with independent decodes, used by the host and bench tests (see its README) |
 | `firmware/um982/` | Unicore UM982 receiver firmware the device flashes and offers as a user-confirmed update (see its README) |
 | `gnss-splitter/` | KiCad/EasyEDA PCB for an optional GNSS antenna splitter |
 | `tools/` | Release tooling (`release_manifest.py` writes a release's `manifest.json`) |
 | `tools/bench/` | Host-side bench tools for the board: port finder, captures of both serial ports, receiver queries, RTCM inspection, station API dumps, and the receiver boot menu check over its USB port (see its README) |
 | `tools/qemu/` | The firmware in Espressif's QEMU, no board needed: build and run script, smoke test (see its README) |
 | `sdkconfig.qemu` | QEMU-only configuration overlay used by `tools/qemu/run.sh`; never for a station |
+| `sdkconfig.bench` | Bench-unit configuration overlay: receiver firmware updates on, bench console on UART0, receiver byte capture (see Building); never released |
 | `reference/` | Hardware notes (board, antenna); private research is kept out of the repo |
 
 ## Building
