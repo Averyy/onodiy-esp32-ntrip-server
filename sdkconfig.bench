@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+#
+# BENCH BUILDS ONLY: never for a release (the release job refuses a build
+# with either option on). An overlay on sdkconfig.defaults for bring-up of
+# the receiver flasher on a bench unit:
+#
+#   idf.py -B build-bench -D SDKCONFIG=build-bench/sdkconfig \
+#          -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.bench" build
+#
+# It adds the bench console on the UART0 console (115200, beside the log;
+# every receiver byte captured) and builds the receiver flasher in. The
+# boot-time recovery of an interrupted update stays report-only (it logs
+# what it would send) until the journal-state bench test passes; then add
+# CONFIG_UM98X_FLASH_RECOVERY_ACTIONS=y for its second half. The 115200
+# entry fallback and cross-layout packages stay off until their own bench
+# tests pass.
+
+CONFIG_BENCH_CONSOLE=y
+CONFIG_UM98X_FLASH_ENABLE=y

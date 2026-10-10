@@ -2,18 +2,35 @@
 # SPDX-License-Identifier: MIT
 menu "Station: receiver flasher"
 
+    config UM98X_FLASH_ENABLE
+        bool "Receiver firmware updates (send packages to the receiver)"
+        default n
+        help
+            Builds the receiver flasher in: a receiver package the user
+            confirmed (a release from the update banner, or an uploaded
+            file) is sent to the receiver's loader, and an interrupted
+            update is finished at boot. Off: packages can still be uploaded
+            and checked against every pre-flight rule, the web UI says that
+            receiver firmware updates are not enabled in this build, and
+            nothing is ever sent to the receiver's loader. Releases are built
+            with this off until the bench has confirmed the receiver side.
+            PROVISIONAL, to be confirmed on hardware.
+
     config UM98X_FLASH_RECOVERY_ACTIONS
         bool "Send the boot-time recovery actions for an interrupted receiver update"
+        depends on UM98X_FLASH_ENABLE
         default n
         help
             With an open receiver-flash journal, the boot picks the first
             bytes, baud rates and timeouts from the journal state and the
             reset reason (for example racing into the receiver's loader
             after a power cut). Off: it logs what it would send and sends
-            nothing. PROVISIONAL, to be confirmed on hardware.
+            nothing; the session then waits for the user. PROVISIONAL, to be
+            confirmed on hardware.
 
     config UM98X_FLASH_FALLBACK_115200
         bool "Allow the 115200 baud fallback for loader entry and transfer"
+        depends on UM98X_FLASH_ENABLE
         default n
         help
             Loader entry and transfer run at 460800. When enabled, an entry
@@ -23,5 +40,26 @@ menu "Station: receiver flasher"
             starts a second session on its own, and once the attempts are
             used up a new try needs the user's confirmation. Off until it is
             proven on hardware. PROVISIONAL, to be confirmed on hardware.
+
+    config UM98X_FLASH_CROSS_LAYOUT
+        bool "Allow packages with another partition layout (with their own confirmation)"
+        depends on UM98X_FLASH_ENABLE
+        default n
+        help
+            A package whose partition table differs from the one of the
+            receiver's current build moves receiver flash regions. Refused
+            while off; when on, such a package still needs its own explicit
+            confirmation. Off until a layout change is tested on hardware.
+            PROVISIONAL, to be confirmed on hardware.
+
+    config UM98X_FLASH_BYTE_CAPTURE
+        bool "Capture every receiver byte (bench builds)"
+        default n
+        help
+            Every byte sent to and received from the receiver by the
+            flasher and the bench console, time-stamped as hex and text, in
+            a 256 KB PSRAM ring (downloadable from the web UI's diagnostics)
+            and on the console. Selected by the bench console; never in a
+            release.
 
 endmenu

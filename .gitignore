@@ -1,7 +1,8 @@
 # Build
 build/
-# QEMU development build (tools/qemu/run.sh)
-build-qemu/
+# Other build directories: build-qemu/ (QEMU development build,
+# tools/qemu/run.sh), build-bench/ (sdkconfig.bench)
+build-*/
 sdkconfig.old
 
 # IDE

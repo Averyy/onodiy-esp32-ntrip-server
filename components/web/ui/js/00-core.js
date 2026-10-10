@@ -556,7 +556,7 @@ const ERR = {
   not_this_project: 'This image is not firmware for this station.',
   rate_limited: 'Too many attempts.',
   internal: 'The station hit an internal error',
-  not_available_yet: 'Installing receiver firmware is not available in this firmware version yet.',
+  not_available_yet: 'Receiver firmware updates are not enabled in this build yet.',
   checks_disabled: 'This build cannot check for updates. Uploading a file still works.',
   too_many_clients: 'Too many pages are open on the station.',
 };

@@ -396,6 +396,38 @@ function logsTab(box) {
     if (r !== undefined) toast('Log level of ' + t + ' set to ' + level.value + ' until the next restart.', 'ok');
   }, 'small');
 
+  /* Receiver byte capture: only bench builds record it (404 elsewhere). */
+  const capErr = errBox();
+  const capBtn = btn('Download receiver bytes', () => act(capBtn, async () => {
+    let res;
+    try {
+      res = await fetch('/api/diag/flash-capture', { credentials: 'same-origin', cache: 'no-store' });
+    } catch (e) {
+      throw new ApiError(0, { code: 'network' });
+    }
+    if (res.status === 404) {
+      say(capErr, 'This build does not record the receiver\'s bytes; bench builds do.', 'info');
+      return;
+    }
+    if (!res.ok) {
+      let body = null;
+      try {
+        body = await res.json();
+      } catch (e) {
+        body = null;
+      }
+      if (res.status === 401) bus.emit('unauthorized');
+      throw new ApiError(res.status, body && body.error);
+    }
+    const name = /filename="?([^";]+)"?/.exec(res.headers.get('Content-Disposition') || '');
+    const url = URL.createObjectURL(await res.blob());
+    const a = h('a', { href: url, download: name ? name[1] : 'flash-capture.txt', hidden: true });
+    doc.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }, capErr), 'small');
+
   mount(box,
     h('section', { class: 'card' },
       h('h2', null, 'Log'),
@@ -407,7 +439,13 @@ function logsTab(box) {
       h('h2', null, 'Log level'),
       h('p', { class: 'muted small' }, 'Per component tag, until the next restart. Debug output costs memory and console time; set it back when done.'),
       h('div', { class: 'cols c3' }, field('Tag', tag).el, field('Level', level).el, h('div', { class: 'field' }, h('span', { class: 'lbl' }, ' '), setBtn)),
-      lvErr));
+      lvErr),
+    h('section', { class: 'card' },
+      h('h2', null, 'Receiver byte capture'),
+      h('p', { class: 'muted small' }, 'Bench builds record every byte the station exchanged with the receiver during a receiver update or a bench test ' +
+        '(the last 256 KB, data blocks as one line each). Other builds record nothing.'),
+      h('div', { class: 'row' }, capBtn),
+      capErr));
   restart();
 
   return {
@@ -447,7 +485,7 @@ function journalDetail(e) {
     case 'app_revert':
       return 'Trial stage: ' + (J.trial[a] || a);
     case 'gnss_flash':
-      return 'Result: ' + espErr(a) + ', attempt ' + b;
+      return 'Outcome: ' + (J.flashOut[a] || a) + ', transfers ' + b;
     case 'safe_mode':
       return 'Episode ' + a;
     case 'wifi_disconnect':

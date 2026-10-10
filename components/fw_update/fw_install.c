@@ -371,9 +371,19 @@ esp_err_t fw_install_gnss_job(uint32_t build, bool cross_layout_ack)
         req.expected_build = entry.build;
         req.cross_layout_confirmed = cross_layout_ack;
         err = station_request_flash(&req);
-        if (err != ESP_OK) {
+        bool checking = false;
+        if (err == ESP_ERR_NOT_SUPPORTED) {
+            /* Receiver flashing is not enabled in this build: the station
+             * checks the package against every rule instead (nothing is sent
+             * to the receiver) and releases it afterwards. */
+            checking = station_request_package_check(&req) == ESP_OK;
+            ESP_LOGW(TAG, "receiver flashing is not enabled in this build: %s",
+                     checking ? "the downloaded package is checked, then released" : "package released");
+        } else if (err != ESP_OK) {
             ESP_LOGE(TAG, "the station did not take the receiver update (%s): package released",
                      esp_err_to_name(err));
+        }
+        if (err != ESP_OK && !checking) {
             /* Nothing stays staged without a session that uses it. */
             esp_err_t rel = pkg_store_release();
             if (rel != ESP_OK) {

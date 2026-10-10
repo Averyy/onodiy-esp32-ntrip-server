@@ -48,6 +48,7 @@
 
 #include "boot_info.h"
 
+#include "bench.h"
 #include "board.h"
 #include "diag.h"
 #include "fw_update.h"
@@ -298,6 +299,13 @@ void app_main(void)
         ESP_LOGW(TAG, "SAFE MODE: repeated crashes; receiver path and casters stay off, update checks and app "
                       "installs stay on");
     } else {
+        /* Bench builds only, and only when armed for this one boot: the
+         * receiver's stop key from the earliest point of the boot (refused
+         * while a receiver update journal is open). */
+        err = bench_boot_early();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "bench stop key from boot: %s", esp_err_to_name(err));
+        }
         /* Before Wi-Fi and every other init step: an interrupted receiver
          * update owns the receiver's UART first. */
         err = station_early_boot();
@@ -327,5 +335,11 @@ void app_main(void)
         ESP_LOGI(TAG, "startup complete");
     } else {
         ESP_LOGW(TAG, "startup complete with %d failed step(s)", failures);
+    }
+
+    /* Bench builds only: the bench console's command line. */
+    err = bench_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "bench console: %s", esp_err_to_name(err));
     }
 }

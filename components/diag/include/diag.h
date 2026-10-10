@@ -144,7 +144,7 @@ typedef enum {
     DIAG_EV_LADDER_STEP,
     DIAG_EV_APP_UPDATE,         /**< a = result (esp_err_t) */
     DIAG_EV_APP_REVERT,         /**< a = trial stage */
-    DIAG_EV_GNSS_FLASH,         /**< a = result (esp_err_t), b = attempt */
+    DIAG_EV_GNSS_FLASH,         /**< a = outcome (station_flash_outcome_t), b = transfers */
     DIAG_EV_SAFE_MODE,          /**< a = episode */
     DIAG_EV_WIFI_DISCONNECT,    /**< a = wifi_err_reason_t, b = RSSI */
     DIAG_EV_DATA_LOSS,          /**< a = diag_loss_id_t, b = increase since the previous record for that id (clamped to INT32_MAX) */

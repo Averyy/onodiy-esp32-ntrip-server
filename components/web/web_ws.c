@@ -772,19 +772,30 @@ static void push_flash_progress(void)
         return;   /* the final message went out already */
     }
     s_flash_last_phase = p.phase;
+    /* Builds without receiver flashing only check packages: their job is gnss_check. */
+    bool check = !station_flash_available();
+    /* The final message says how the session (or the check) ended. */
+    static EXT_RAM_BSS_ATTR station_status_t s_fst;
+    const station_flash_last_t *last = NULL;
+    if (done && station_get_status(&s_fst) == ESP_OK && s_fst.flash_last.outcome != STATION_FLASH_OUT_NONE) {
+        last = &s_fst.flash_last;
+    }
+    const char *result = NULL;
+    if (done) {
+        result = last != NULL ? web_flash_outcome_result(last->outcome) : (p.phase == UM98X_FLASH_DONE ? "ok" : "failed");
+    }
+    bool ok = done && result != NULL && strcmp(result, "ok") == 0;
     web_progress_t m = {
-        .job = "gnss_flash",
-        .phase = web_flash_phase_name(p.phase),
-        .pct = p.bytes_total > 0 ? (int)((uint64_t)p.bytes_sent * 100u / p.bytes_total) : -1,
+        .job = check ? "gnss_check" : "gnss_flash",
+        .phase = check && !done ? "checking" : web_flash_phase_name(p.phase),
+        .pct = p.bytes_total > 0 && !check ? (int)((uint64_t)p.bytes_sent * 100u / p.bytes_total) : -1,
         .bytes = -1,
         .done = done,
-        .result = done ? (p.phase == UM98X_FLASH_DONE ? "ok" : "failed") : NULL,
-        .err = done && p.phase != UM98X_FLASH_DONE ? (esp_err_t)p.last_err : ESP_OK,
-        .flash = &p,
+        .result = result,
+        .err = done && !ok ? (esp_err_t)p.last_err : ESP_OK,
+        .flash = check ? NULL : &p,
+        .last = last,
     };
-    if (m.done && m.err == ESP_OK && p.phase != UM98X_FLASH_DONE) {
-        m.err = ESP_FAIL;
-    }
     web_ws_progress(&m);
 }
 

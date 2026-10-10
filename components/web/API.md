@@ -91,7 +91,7 @@ refused receiver maintenance (`receiver_session`, `live_view_output`).
 | 422 | `not_this_project` (app upload) |
 | 429 | `rate_limited` (with `retry_in_s`) |
 | 500 | `internal` (`message` carries the `esp_err_t` name) |
-| 501 | `not_available_yet` (receiver flashing is not built yet), `checks_disabled` (this build cannot check for updates: no valid release repository, or it requires signed manifests and none of its keys is usable) |
+| 501 | `not_available_yet` (receiver flashing is not enabled in this build: `flash_available` false), `checks_disabled` (this build cannot check for updates: no valid release repository, or it requires signed manifests and none of its keys is usable) |
 | 503 | `too_many_clients` (WebSocket) |
 
 ---
@@ -280,6 +280,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | GET | `/api/health` | adm | Health, loss counters, boots, core dump summary | health, gnss_link, rtcm_hub, lifecycle, diag |
 | GET | `/api/availability` | adm | Per-day availability, budget | ledger, ntrip_server |
 | GET | `/api/diag/tasks` | adm | Task statistics | `diag_task_stats` |
+| GET | `/api/diag/flash-capture` | adm | Receiver byte capture download (bench builds) | `um98x_flash_capture_read` |
 | PUT | `/api/diag/log-level` | adm | Runtime log level per tag | `diag_set_log_level` |
 | GET | `/api/logs` | adm | Log ring (this or previous boot) | `diag_log_read*` |
 | GET | `/api/journal` | adm | Event journal | `diag_journal_read` |
@@ -375,7 +376,8 @@ object as sections (section 7), so the UI keeps one model. Admin form:
              "app_reverted_version": "", "app_reverted_in_stage1": false,
              "gnss_available": true, "gnss_build": 19152, "gnss_version": "R4.10Build19152",
              "gnss_blocked_reason": "none", "gnss_blocked_left_s": 0,
-             "gnss_flash_available": false, "checking": false, "last_check_unix": 1760080000}
+             "gnss_flash_available": false, "gnss_flash_reason": "not_enabled_in_build",
+             "checking": false, "last_check_unix": 1760080000}
 }
 ```
 
@@ -480,12 +482,19 @@ from `LIFECYCLE_EVENT_PRE_REBOOT`, then the server closes with `1012`).
 | `check` | `checking` |
 | `app_update` | `downloading` → `rebooting` |
 | `app_upload` | `receiving` → `verifying` → `rebooting` |
-| `gnss_update` | `downloading`; when it ends with `ok` the station took the request and the `gnss_flash` job follows |
+| `gnss_update` | `downloading`; when it ends with `ok` the station took the request and the `gnss_flash` job follows (without flashing in the build: `not_available_yet`, and a `gnss_check` job follows) |
+| `gnss_check` | builds without receiver flashing: `checking`, then the final message with `result` `ok` (the package passes every rule; nothing was sent) or `package_rejected` (`failed_rule`, `reason`) |
 | `gnss_upload` | `receiving` → `inspecting` |
-| `gnss_flash` | the flash phases (`um98x_flash_phase_t`): `checking`, `entering`, `transferring`, `committing`, `finishing`, `done`, `failed`, `needs_user`, with `bytes_sent`, `bytes_total`, `retries`, `transfers`, `failure` |
+| `gnss_flash` | the flash phases (`um98x_flash_phase_t`): `checking`, `entering`, `transferring`, `committing`, `finishing`, `done`, `failed`, `needs_user`, with `bytes_sent`, `bytes_total`, `retries`, `transfers`, `failure`, `frames_acked`, `frames_total`, `frames_sent`, `entry_attempts`, `journal_state` (`um98x_journal_state_t`, `null` before the journal opens). `finishing` covers leaving the loader, the version check and the profile's re-apply and its check; the journal closes after that |
 
 The final message has `"done": true` and `"result"`: `ok` or a result code
-(section 12), plus `message` (the `esp_err_t` name) on failure.
+(section 12), plus `message` (the `esp_err_t` name) on failure. The final
+`gnss_flash` and `gnss_check` messages also carry the session's outcome:
+`outcome` (`station_flash_outcome_t`), `firmware` and `build` (the
+receiver's version log afterwards, `""`/`0` unknown), `failed_rule` (1-12,
+0 none), `reason` (text); `result` is `ok` for `success` and `checked`,
+else the outcome's name (`old_firmware`, `unexpected_build`, `not_done`,
+`package_rejected` for `rejected`, `not_started`, `needs_user`).
 
 **Close codes:** `1012` the device reboots, `4001` session ended (logout,
 expiry, password change), `4003` client too slow (its queue stayed full for
@@ -832,21 +841,39 @@ it is open. `journal` (here and in `/api/status`):
              "app_baud": 115200, "boot_baud": 460800, "transfers": 1, "entry_attempts": 1,
              "last_acked_block": 1984, "failure": "transport", "changed_unix": 1760000000},
   "progress": {"phase": "needs_user", "bytes_sent": 2031616, "bytes_total": 3027628, "retries": 3,
-               "transfers": 1, "failure": "transport", "last_err": "ESP_ERR_TIMEOUT"},
+               "transfers": 1, "failure": "transport", "last_err": "ESP_ERR_TIMEOUT",
+               "frames_acked": 1984, "frames_total": 2957, "frames_sent": 1990, "entry_attempts": 1,
+               "journal_state": "needs_user"},
   "receiver_in_loader": false,
   "receiver_text": "...last 4 KB of receiver text...",
   "actions": {"retry": {"allowed": false, "why": "app_trial"},
               "restart_receiver": {"allowed": true, "why": null},
               "clear": {"allowed": true, "why": null}},
-  "flash_available": false
+  "last": {"outcome": "needs_user", "failed_rule": 0, "cross_layout": false, "check_only": false,
+           "reapply_ok": false, "firmware": "", "build": 0,
+           "reason": "waits for you: the loader prompt came back without the success text", "ended_unix": 1760000000,
+           "ended_age_s": 120},
+  "check_running": false,
+  "flash_available": true,
+  "flash_reason": null
 }
 ```
 
 `record` is `null` for `none`, `unreadable` and `unknown`. `receiver_in_loader`
 is the station alert for a receiver found at its loader without a session
 (then `restart_receiver` is offered with `journal: "none"`). `receiver_text`
-comes from `station_get_flash_log()` (empty until there is any).
-`flash_available` is `false` until receiver flashing is built.
+comes from `station_get_flash_log()` (the last 4 KB the receiver sent during
+the last session, non-printable bytes as `.`; empty until there is any).
+`last` is the last session or package check this boot
+(`station_flash_last_t`; `null` when there was none): `outcome`
+(`station_flash_outcome_t`), `failed_rule` for `rejected`, `firmware` and
+`build` the receiver reported afterwards, `reapply_ok` whether the station
+profile came back after it. `check_running`: a package check runs (builds
+without flashing). `flash_available` is `station_flash_available()`: `false`
+in builds without receiver flashing (`CONFIG_UM98X_FLASH_ENABLE` off), then
+`flash_reason` is `not_enabled_in_build` and the UI says that receiver
+firmware updates are not enabled in this build yet; packages can still be
+uploaded and checked.
 
 `why` codes: `no_journal`, `not_waiting` (a session runs), `safe_mode`
 (only `clear` there), `settings_unavailable`, `receiver_maintenance` (retry
@@ -864,12 +891,14 @@ action's warning first:
 - clear: the session is forgotten and the package released; the receiver
   may not run valid firmware.
 
-`202 {"accepted": true}` (`clear` completes at once: `200 {"ok": true}`).
-Errors: `404 no_journal`, `409 not_waiting`, `409 safe_mode`,
-`409 receiver_maintenance`, `409 app_trial`, `409 app_update`,
-`409 settings_unavailable`,
-`501 not_available_yet` (retry and restart with a journal, until receiver
-flashing is built).
+`202 {"accepted": true}` (`clear` completes at once: `200 {"ok": true}`);
+retry and restart then report as progress job `gnss_flash`. Retry sends
+only the package the journal pinned (its SHA-256 checked again on a fresh
+RAM copy, the journalled model); it is one more transfer beyond the
+automatic cap, confirmed by this request. Errors: `404 no_journal`, `409
+not_waiting`, `409 safe_mode`, `409 receiver_maintenance`, `409 app_trial`,
+`409 app_update`, `409 settings_unavailable`, `501 not_available_yet`
+(retry and restart in builds without receiver flashing).
 
 ---
 
@@ -1119,7 +1148,7 @@ a newer version appears; the server keeps no "later" state.
 | `app_reverted_version`, `app_reverted_in_stage1` | the last version rolled back; true when it rolled back in its first minute (offer "install again?") |
 | `gnss_available`, `gnss_build`, `gnss_version` | `gnss_update_available`, `gnss_latest_build`, `gnss_latest` |
 | `gnss_blocked_reason`, `gnss_blocked_left_s` | `fw_update_gnss_block_t`; `left_s` for `app_trial` |
-| `gnss_flash_available` | `false` until receiver flashing is built |
+| `gnss_flash_available`, `gnss_flash_reason` | `station_flash_available()`; the reason is `not_enabled_in_build` when it is `false`, else `null` |
 | `checking`, `last_check_unix` | state `checking`; `ota/last_check` |
 
 ### `GET /api/update` (adm)
@@ -1192,20 +1221,23 @@ The user confirmed the receiver dialog. Before the request the UI shows:
 version, `expected_downtime_s` against `budget_left_s`, "do not power off
 the station or plug anything into the receiver's USB port", "the station
 profile will be re-applied", and while `flash_available` is `false`, that
-installing receiver firmware is not available in this firmware version yet.
+receiver firmware updates are not enabled in this build yet.
 
 `{"build": 19152, "cross_layout_ack": false}`. One click runs the chain:
 download the manifest's package for the detected model into the package
 slot (size and SHA-256 from the release manifest, checked on the stream and
 on the stored copy), then start the session on the station. `202
-{"accepted": true}`; progress job `gnss_update`, then `gnss_flash`.
+{"accepted": true}`; progress job `gnss_update`, then `gnss_flash` (the
+receiver identified, every package rule on the RAM copy, the transfer, the
+version check, the profile re-applied and checked; the final message says
+how it ended).
 
-**Until receiver flashing is built** the chain ends after the download:
-the start step answers `not_available_yet`, the package is released and
-nothing is sent to the receiver. The final progress message and
-`last_result` say `not_available_yet`; the UI shows "Receiver package
-downloaded and verified; installing it is not available yet. Nothing on the
-receiver changed."
+**In builds without receiver flashing** the chain ends after the download:
+the start step answers `not_available_yet`, the package is checked against
+every rule (progress job `gnss_check`), then released; nothing is sent to
+the receiver. `last_result` says `not_available_yet`; the UI shows
+"Receiver package downloaded and checked; receiver firmware updates are not
+enabled in this build yet. Nothing on the receiver changed."
 
 Errors (all before anything is downloaded): `409 not_offered` (the build
 changed or nothing is offered; dev builds are offered nothing), `409
@@ -1293,10 +1325,15 @@ a build lower than the receiver's is `409 downgrade`. Then
 {"accepted": true}`, progress job `gnss_flash`. The package rules run on the
 station's RAM copy after that; a refusal ends the job with `result:
 "package_rejected"` and releases the package. A package with another
-partition layout than the receiver's is refused until tested on hardware;
-after that it needs `cross_layout_ack`. Until receiver flashing is built:
-`501 not_available_yet` and the package is released. Other errors:
-`404 nothing_staged` and the `409` codes of the upload.
+partition layout than the receiver's is refused unless the build allows it
+(tested on hardware); then it needs `cross_layout_ack`.
+
+**In builds without receiver flashing** the package is checked instead:
+`202 {"accepted": true, "check_only": true}`, progress job `gnss_check`
+(every rule on a RAM copy, against the receiver identity confirmed this
+boot; nothing is sent to the receiver), then the package is released; the
+result is in the final message and in `GET /api/gnss/flash` (`last`).
+Other errors: `404 nothing_staged` and the `409` codes of the upload.
 
 ### `DELETE /api/upload/gnss` (adm)
 
@@ -1409,6 +1446,15 @@ information only.
 `core` `null` = not pinned; `cpu_pct` since the previous call (poll every
 2 s or slower).
 
+### `GET /api/diag/flash-capture`
+
+Bench builds only (the bench console, `CONFIG_UM98X_FLASH_BYTE_CAPTURE`):
+every byte the receiver flasher and the bench console sent to and received
+from the receiver, time-stamped (hex and text), as a `text/plain`
+attachment (`flash-capture-<version>.txt`; at most the last 256 KB; data
+frames as one summary line each). `404 not_found` in other builds. Read on
+the worker like the other downloads.
+
 ### `PUT /api/diag/log-level`
 
 `{"tag": "station", "level": "debug"}`: `tag` <= 15 characters or `"*"`;
@@ -1449,7 +1495,7 @@ At most 64 entries per call, oldest first, `seq > cursor`. `time_unix`
 | `ladder_step` | ladder (0 GNSS, 1 network, 2 caster) | `(outcome << 8) \| code` (outcome 0 started, 1 healthy again, 2 failed or refused, 3 abandoned, 4 not run because of the recovery mode; network: `(reason << 16) \| ...`, and code 0 = a pass started with the trigger bits as the reason: 1 protected caster down, 2 associated without an IP, 4 a slot not reaching its caster); see `diag.h`, `network.h` |
 | `app_update` | result (`esp_err_t`) | — |
 | `app_revert` | trial stage | — |
-| `gnss_flash` | result (`esp_err_t`) | attempt |
+| `gnss_flash` | the session's outcome (`station_flash_outcome_t`), written when its journal closes | transfers under the journal |
 | `safe_mode` | episode | — |
 | `wifi_disconnect` | `wifi_err_reason_t` | RSSI |
 | `data_loss` | counter id (`diag_loss_id_t`) | increase since the previous record for that id |
@@ -1713,9 +1759,9 @@ Things this contract needs that the current headers do not provide yet:
 2. **Caster policy reason**: resolved; `ntrip_server_set_config()` reports
    the rule it applied (`ntrip_policy_t`, out-parameter) and the server only
    names it (section 10).
-3. **Receiver flashing available**: `flash_available` is still the
-   constant `WEB_FLASH_AVAILABLE` in the web component; it should come from
-   the station (for example a query in `station.h`) once flashing is built.
+3. **Receiver flashing available**: resolved; `flash_available` is
+   `station_flash_available()` (`CONFIG_UM98X_FLASH_ENABLE`, off until the
+   bench has confirmed the receiver side).
 4. **Rolled-back versions**: resolved; `fw_update_get_rolled_back()` and
    `fw_update_is_rolled_back()` expose the bounded list fw_update keeps
    (`ota/bad_ver`, 8 versions, written only when one is added). The banner
@@ -1724,9 +1770,9 @@ Things this contract needs that the current headers do not provide yet:
    (section 13).
 5. **Refused BOOT-button factory reset**: resolved;
    `health_status_t.factory_reset_refused_age_s`.
-6. Not implemented yet behind existing headers (the API shows empty
-   values): the receiver text of a flash session (`station_get_flash_log`),
-   until receiver flashing is built.
+6. **Receiver text of a flash session**: resolved;
+   `station_get_flash_log()` returns the last 4 KB the receiver sent during
+   the last session.
 7. **GNSS time**: resolved in part. The ledger takes the receiver's GPS
    time of week (`gnss_obs_get_gps_time()`, fed by the health monitor) and
    dates it against its running clock, or after a reset that was not a
@@ -1764,7 +1810,8 @@ after it). The journal's `a` and `b` carry these C values.
 | `station_live_end_t` | `none`, `user`, `expired`, `idle`, `flash` |
 | `um98x_flash_phase_t` | `idle`, `checking`, `entering`, `transferring`, `committing`, `finishing`, `done`, `failed`, `needs_user` |
 | `um98x_journal_state_t` | `prepared`, `baud_changing`, `reset_sent`, `menu2_sent`, `transferring`, `eot_sent`, `verifying`, `failed`, `needs_user` |
-| `um98x_flash_failure_t` | `none`, `transport`, `package`, `unconfirmed`, `no_answer`, `app_not_starting`, `entry`, `journal` |
+| `um98x_flash_failure_t` | `none`, `transport`, `package`, `unconfirmed`, `no_answer`, `app_not_starting`, `entry`, `journal`, `receiver` |
+| `station_flash_outcome_t` | `none`, `success`, `old_firmware`, `unexpected_build`, `not_done`, `rejected`, `not_started`, `needs_user`, `checked` |
 | `fw_update_state_t` | `idle`, `checking`, `downloading_app`, `downloading_gnss`, `reboot_pending`, `failed`, `uploading_app` |
 | `fw_update_trial_t` | `none`, `confirming`, `verifying`, `watching` |
 | `fw_update_gnss_block_t` | `none`, `app_trial`, `journal_open`, `unsupported_model`, `safe_mode`, `app_update`, `receiver_not_streaming` |

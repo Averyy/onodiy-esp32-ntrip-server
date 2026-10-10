@@ -57,6 +57,7 @@ extern "C" {
 #define SETTINGS_KEY_GNSS_FW        "fw"          /**< str: last detected firmware; survives factory reset */
 #define SETTINGS_KEY_GNSS_BASE_POS  "base_pos"    /**< blob: locked antenna position (um98x_base_position_t, encoded) */
 #define SETTINGS_KEY_GNSS_FLASH_JOB "flash_job"   /**< blob: open receiver-flash journal (versioned record, see the flasher); survives factory reset */
+#define SETTINGS_KEY_GNSS_BENCH_RACE "bench_race" /**< u8: bench builds only: 1 = the next boot streams the receiver's stop key from its earliest point (one-shot, erased before it runs) */
 
 /* ---- "cst0".."cst7": one namespace per caster slot ------------------------ */
 #define SETTINGS_NS_CASTER_FMT      "cst%u"

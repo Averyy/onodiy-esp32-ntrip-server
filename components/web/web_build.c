@@ -413,6 +413,7 @@ static void sec_update(wj_t *w, const web_status_snap_t *s)
     wj_str(w, "gnss_blocked_reason", web_gnss_block_name(f->gnss_blocked));
     wj_uint(w, "gnss_blocked_left_s", f->gnss_blocked_left_s);
     wj_bool(w, "gnss_flash_available", s->flash_available);
+    wj_str(w, "gnss_flash_reason", s->flash_available ? NULL : "not_enabled_in_build");
     wj_bool(w, "checking", f->state == FW_UPDATE_CHECKING);
     wj_unix(w, "last_check_unix", f->last_check_unix);
     wj_obj_close(w);
@@ -883,6 +884,25 @@ void web_build_sky(wj_t *w, const gnss_obs_sat_t *sats, size_t count, const char
     wj_obj_close(w);
 }
 
+/* The flash counters (progress messages and GET /api/gnss/flash). */
+static void flash_counters(wj_t *w, const um98x_flash_progress_t *p)
+{
+    wj_uint(w, "bytes_sent", p->bytes_sent);
+    wj_uint(w, "bytes_total", p->bytes_total);
+    wj_uint(w, "retries", p->retries);
+    wj_uint(w, "transfers", p->transfers);
+    wj_str(w, "failure", web_flash_failure_name(p->failure_class));
+    wj_uint(w, "frames_acked", p->frames_acked);
+    wj_uint(w, "frames_total", p->frames_total);
+    wj_uint(w, "frames_sent", p->frames_sent);
+    wj_uint(w, "entry_attempts", p->entry_attempts);
+    if (p->journal_state != 0) {
+        wj_str(w, "journal_state", web_journal_state_name(p->journal_state));
+    } else {
+        wj_null(w, "journal_state");
+    }
+}
+
 static void action(wj_t *w, const char *key, const web_flash_ctx_t *c, web_flash_action_t a)
 {
     const char *why = web_flash_action_why(c, a, NULL);
@@ -922,11 +942,7 @@ void web_build_flash(wj_t *w, const station_status_t *st, const web_flash_ctx_t 
     const um98x_flash_progress_t *p = &st->flash;
     wj_obj_open(w, "progress");
     wj_str(w, "phase", web_flash_phase_name(p->phase));
-    wj_uint(w, "bytes_sent", p->bytes_sent);
-    wj_uint(w, "bytes_total", p->bytes_total);
-    wj_uint(w, "retries", p->retries);
-    wj_uint(w, "transfers", p->transfers);
-    wj_str(w, "failure", web_flash_failure_name(p->failure_class));
+    flash_counters(w, p);
     err_name(w, "last_err", (esp_err_t)p->last_err);
     wj_obj_close(w);
     wj_bool(w, "receiver_in_loader", ctx->receiver_in_loader);
@@ -936,7 +952,30 @@ void web_build_flash(wj_t *w, const station_status_t *st, const web_flash_ctx_t 
     action(w, "restart_receiver", ctx, WEB_FLASH_RESTART_RECEIVER);
     action(w, "clear", ctx, WEB_FLASH_CLEAR);
     wj_obj_close(w);
+    const station_flash_last_t *l = &st->flash_last;
+    if (l->outcome == STATION_FLASH_OUT_NONE) {
+        wj_null(w, "last");
+    } else {
+        wj_obj_open(w, "last");
+        wj_str(w, "outcome", web_flash_outcome_name(l->outcome));
+        wj_uint(w, "failed_rule", l->failed_rule);
+        wj_bool(w, "cross_layout", l->cross_layout);
+        wj_bool(w, "check_only", l->check_only);
+        wj_bool(w, "reapply_ok", l->reapply_ok);
+        wj_str(w, "firmware", l->firmware);
+        wj_uint(w, "build", l->build);
+        wj_str(w, "reason", l->reason);
+        wj_unix(w, "ended_unix", l->ended_unix);
+        if (l->ended_age_s == UINT32_MAX) {
+            wj_null(w, "ended_age_s");
+        } else {
+            wj_uint(w, "ended_age_s", l->ended_age_s);
+        }
+        wj_obj_close(w);
+    }
+    wj_bool(w, "check_running", st->pkg_check_running);
     wj_bool(w, "flash_available", ctx->flash_available);
+    wj_str(w, "flash_reason", ctx->flash_available ? NULL : "not_enabled_in_build");
     wj_obj_close(w);
 }
 
@@ -1445,6 +1484,7 @@ void web_build_update(wj_t *w, const web_update_snap_t *u)
     }
     wj_u32_or_null(w, "budget_left_s", u->budget_left_s);
     wj_bool(w, "flash_available", u->flash_available);
+    wj_str(w, "flash_reason", u->flash_available ? NULL : "not_enabled_in_build");
     wj_obj_close(w);
     wj_obj_close(w);
 }
@@ -1481,6 +1521,7 @@ void web_build_staged(wj_t *w, const web_staged_snap_t *s)
     wj_uint(w, "expected_downtime_s", s->expected_downtime_s);
     wj_u32_or_null(w, "budget_left_s", s->budget_left_s);
     wj_bool(w, "flash_available", s->flash_available);
+    wj_str(w, "flash_reason", s->flash_available ? NULL : "not_enabled_in_build");
     wj_obj_close(w);
 }
 
@@ -1939,17 +1980,20 @@ void web_build_progress(wj_t *w, const web_progress_t *p)
         wj_int(w, "total", p->total);
     }
     if (p->flash != NULL) {
-        wj_uint(w, "bytes_sent", p->flash->bytes_sent);
-        wj_uint(w, "bytes_total", p->flash->bytes_total);
-        wj_uint(w, "retries", p->flash->retries);
-        wj_uint(w, "transfers", p->flash->transfers);
-        wj_str(w, "failure", web_flash_failure_name(p->flash->failure_class));
+        flash_counters(w, p->flash);
     }
     wj_bool(w, "done", p->done);
     if (p->done) {
         wj_str(w, "result", p->result != NULL ? p->result : web_result_code(p->job, p->err));
         if (p->err != ESP_OK) {
             wj_str(w, "message", esp_err_to_name(p->err));
+        }
+        if (p->last != NULL) {
+            wj_str(w, "outcome", web_flash_outcome_name(p->last->outcome));
+            wj_str(w, "firmware", p->last->firmware);
+            wj_uint(w, "build", p->last->build);
+            wj_uint(w, "failed_rule", p->last->failed_rule);
+            wj_str(w, "reason", p->last->reason);
         }
     }
     wj_obj_close(w);

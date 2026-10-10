@@ -1600,19 +1600,6 @@ static esp_err_t h_upload_gnss_get(web_req_t *r)
     return send_staged(r->req, &facts, left);
 }
 
-static void release_staged(void)
-{
-    pkg_store_info_t info;
-    if (pkg_store_get_info(&info) == ESP_OK && info.pinned) {
-        return;   /* held by an open session: never released here */
-    }
-    esp_err_t err = pkg_store_release();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "uploaded receiver package not released: %s", esp_err_to_name(err));
-    }
-    web_staged_forget();
-}
-
 static esp_err_t h_upload_gnss_confirm(web_req_t *r)
 {
     uint8_t sha[32];
@@ -1650,19 +1637,22 @@ static esp_err_t h_upload_gnss_confirm(web_req_t *r)
     req.expected_build = build;
     req.cross_layout_confirmed = ack;
     esp_err_t err = station_request_flash(&req);
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        /* Receiver flashing is not enabled in this build: the package is
+         * checked against every rule instead (nothing reaches the receiver),
+         * then released by the station. */
+        err = station_request_package_check(&req);
+        if (err == ESP_OK) {
+            web_staged_forget();
+            ESP_LOGI(TAG, "uploaded receiver package: checking it (flashing is not enabled in this build)");
+            return web_send_json_literal(r->req, 202, "{\"accepted\":true,\"check_only\":true}");
+        }
+    }
     switch (err) {
     case ESP_OK:
         web_staged_forget();
         ESP_LOGW(TAG, "receiver update with the uploaded package started by the user");
         return accepted(r->req);
-    case ESP_ERR_NOT_SUPPORTED:
-        /* Receiver flashing is not built yet: nothing was sent to the receiver. */
-        release_staged();
-        web_note_result("gnss_upload", ESP_ERR_NOT_SUPPORTED, "not_available_yet");
-        return web_send_error(r->req, WEB_ERR_NOT_AVAILABLE_YET,
-                              "Installing receiver firmware is not available in this firmware version yet; the "
-                              "package was released and nothing on the receiver changed",
-                              NULL, UINT32_MAX, NULL, NULL);
     case ESP_ERR_NOT_FOUND:
         web_staged_forget();
         return web_send_err(r->req, WEB_ERR_NOTHING_STAGED);
@@ -1927,6 +1917,11 @@ static esp_err_t h_coredump_get(web_req_t *r)
     return web_download_coredump(r);
 }
 
+static esp_err_t h_flash_capture(web_req_t *r)
+{
+    return web_download_flash_capture(r);
+}
+
 static esp_err_t h_coredump_delete(web_req_t *r)
 {
     diag_coredump_info_t cd;
@@ -2080,6 +2075,7 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/health", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_health),
     ROUTE("/api/availability", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_availability),
     ROUTE("/api/diag/tasks", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_tasks),
+    ROUTE("/api/diag/flash-capture", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_flash_capture),
     ROUTE("/api/diag/log-level", HTTP_PUT, WEB_ACC_ADMIN, WEB_BODY_JSON, h_log_level),
     ROUTE("/api/logs", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_logs),
     ROUTE("/api/journal", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_journal),

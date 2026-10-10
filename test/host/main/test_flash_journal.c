@@ -148,9 +148,18 @@ TEST_CASE("flash journal: the boot race only after both chips reset in the loade
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
         j.state = rows[i].state;
         j.phase = rows[i].phase;
+        j.transfers = rows[i].phase >= UM98X_JOURNAL_TRANSFERRING ? 1 : 0;
         TEST_ASSERT_EQUAL_MESSAGE(rows[i].race, flash_journal_needs_race(&j, true), "power-on / brownout");
         /* An ESP32-only reset leaves the receiver where it was: never a race. */
         TEST_ASSERT_FALSE(flash_journal_needs_race(&j, false));
     }
     TEST_ASSERT_FALSE(flash_journal_needs_race(NULL, true));
+
+    /* A retry after the point of no return records the entry states again:
+     * the flash is presumed modified, so a power cut there races too. */
+    j.state = UM98X_JOURNAL_RESET_SENT;
+    j.phase = UM98X_JOURNAL_RESET_SENT;
+    j.transfers = 1;
+    TEST_ASSERT_TRUE(flash_journal_needs_race(&j, true));
+    TEST_ASSERT_FALSE(flash_journal_needs_race(&j, false));
 }

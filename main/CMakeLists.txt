@@ -27,4 +27,5 @@ idf_component_register(
         network
         web
         fw_update
-        station)
+        station
+        bench)

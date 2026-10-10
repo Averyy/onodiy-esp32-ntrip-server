@@ -53,6 +53,7 @@ typedef enum {
     JOB_REFUSE,              /* read the body to its end, then answer with the error */
     JOB_COREDUMP,
     JOB_LOG_TEXT,
+    JOB_FLASH_CAPTURE,
     JOB_RELEASE_EXPIRED,
     JOB_SAFE_MODE_CLEAR,
 } job_kind_t;
@@ -518,6 +519,23 @@ static void send_log_text(httpd_req_t *req, bool prev)
     (void)httpd_resp_send_chunk(req, NULL, 0);
 }
 
+/* Bench builds: the receiver byte capture, oldest kept line first. */
+static void send_flash_capture(httpd_req_t *req)
+{
+    download_headers(req, "text/plain; charset=utf-8", "flash-capture", "txt");
+    uint32_t cursor = 0;
+    for (;;) {
+        size_t n = um98x_flash_capture_read(&cursor, (char *)s_io, sizeof(s_io));
+        if (n == 0) {
+            break;
+        }
+        if (httpd_resp_send_chunk(req, (const char *)s_io, (ssize_t)n) != ESP_OK) {
+            return;
+        }
+    }
+    (void)httpd_resp_send_chunk(req, NULL, 0);
+}
+
 /* ---- task ---------------------------------------------------------------------------------------------- */
 
 static void worker(void *arg)
@@ -546,6 +564,9 @@ static void worker(void *arg)
             break;
         case JOB_LOG_TEXT:
             send_log_text(job.req, job.flag);
+            break;
+        case JOB_FLASH_CAPTURE:
+            send_flash_capture(job.req);
             break;
         case JOB_RELEASE_EXPIRED:
             release_expired();
@@ -720,6 +741,18 @@ esp_err_t web_download_coredump(web_req_t *r)
         return web_send_err(r->req, WEB_ERR_NO_COREDUMP);
     }
     job_t job = { .kind = JOB_COREDUMP };
+    if (!queue_async(r->req, &job)) {
+        return web_send_err(r->req, WEB_ERR_BUSY);
+    }
+    return ESP_OK;
+}
+
+esp_err_t web_download_flash_capture(web_req_t *r)
+{
+    if (!um98x_flash_capture_available()) {
+        return web_send_err(r->req, WEB_ERR_NOT_FOUND);
+    }
+    job_t job = { .kind = JOB_FLASH_CAPTURE };
     if (!queue_async(r->req, &job)) {
         return web_send_err(r->req, WEB_ERR_BUSY);
     }

@@ -7,12 +7,12 @@
  *   App: install the offered release (download, verify, restart, trial), go
  *        back to the previous version, or install a .bin file.
  *   Receiver: download and verify the offered package or upload a .pkg,
- *        confirm its SHA-256 and the expected firmware, then install. While
- *        this firmware cannot flash the receiver yet, the flow ends after
- *        the package was verified and says so; nothing on the receiver
- *        changes.
+ *        confirm its SHA-256 and the expected firmware, then install. In
+ *        builds without receiver flashing the package is checked against
+ *        every rule instead and released; the page says so, and nothing is
+ *        sent to the receiver.
  *   Session: a receiver update session waiting for a decision (retry,
- *        restart the receiver, clear).
+ *        restart the receiver, clear), and how the last one ended.
  */
 
 const JOURNAL_STATE = {
@@ -30,14 +30,67 @@ const FLASH_ACTIONS = [
     'The session is forgotten and its package released. The receiver may not run valid firmware afterwards.'],
 ];
 
-const NOT_YET_DOWNLOADED = 'Receiver package downloaded and verified; installing it is not available yet. Nothing on the receiver changed.';
-const NOT_YET_UPLOADED = 'Installing receiver firmware is not available in this firmware version yet. The package was released; nothing on the receiver changed.';
+const NOT_ENABLED = 'Receiver firmware updates are not enabled in this build yet.';
+const NOT_YET_DOWNLOADED = 'Receiver package downloaded and verified. ' + NOT_ENABLED +
+  ' The station now checks the package against every rule; nothing is sent to the receiver.';
+const CHECK_STARTED = NOT_ENABLED + ' The station checks the package against every rule, then releases it; nothing is sent to the receiver.';
+
+/* Outcome of a receiver session or package check: success and checked are good,
+ * a refused package or an unexpected build bad, everything else needs a look. */
+function outcomeTone(o) {
+  if (o === 'success' || o === 'checked') return 'ok';
+  if (o === 'rejected' || o === 'unexpected_build') return 'bad';
+  return 'warn';
+}
+
+/** Sentence for how a session or package check ended (a final progress message or `last`). */
+function outcomeText(m) {
+  const fw = m.firmware ? m.firmware : 'unknown firmware';
+  const why = m.reason ? ' (' + m.reason + ')' : '';
+  switch (m.outcome) {
+    case 'success':
+      return 'Updated: the receiver runs ' + fw + '.' + (m.reapply_ok === false ? ' The station profile did not come back; check the Receiver page.' : '');
+    case 'checked':
+      return 'The package passes every rule. ' + NOT_ENABLED + ' It was released; nothing was sent to the receiver.';
+    case 'rejected':
+      return 'Package refused' + (m.failed_rule ? ' by rule ' + m.failed_rule + (m.cross_layout ? ' (other partition layout)' : '') : '') +
+        (m.reason ? ': ' + m.reason : '') + '. Nothing was sent to the receiver.';
+    case 'old_firmware':
+      return 'The receiver still runs its old firmware (' + fw + ')' + why + '.';
+    case 'unexpected_build':
+      return 'The receiver runs a build that was not expected: ' + fw + why + '.';
+    case 'not_done':
+      return 'Not done: the receiver is unchanged' + why + '.';
+    case 'not_started':
+      return 'Not started; nothing was sent to the receiver' + why + '.';
+    case 'needs_user':
+      return 'Stopped and waiting for your decision' + why + '. See the receiver update session below.';
+    default:
+      return lbl(L.flashOutcome, m.outcome);
+  }
+}
 
 function resultText(m) {
+  if (m.outcome && m.outcome !== 'none') return outcomeText(m);
   let t = lbl(L.result, m.result);
   if (m.result === 'package_rejected' && m.failed_rule) t += ' (rule ' + m.failed_rule + (m.cross_layout ? ', other partition layout' : '') + ')';
   if (m.result !== 'ok' && m.result !== 'not_available_yet' && m.message) t += ' (' + m.message + ')';
   return t;
+}
+
+function resultTone(m) {
+  if (m.outcome && m.outcome !== 'none') return outcomeTone(m.outcome);
+  return m.result === 'ok' ? 'ok' : m.result === 'not_available_yet' ? 'warn' : 'bad';
+}
+
+/** Blocks, transfers and entry attempts of a receiver session's progress. */
+function flashCounts(m) {
+  const parts = [];
+  if (m.frames_total) parts.push('block ' + fmt.num(m.frames_acked || 0) + ' of ' + fmt.num(m.frames_total));
+  if (m.transfers > 1) parts.push('transfer ' + m.transfers);
+  if (m.entry_attempts > 1) parts.push('loader attempt ' + m.entry_attempts);
+  if (m.retries) parts.push(fmt.num(m.retries) + ' resent');
+  return parts.join(', ');
 }
 
 /** Progress line for one job: label, bar, then the result. */
@@ -54,12 +107,13 @@ function progressWidget() {
       if (m.pct !== undefined && m.pct !== null) frac = m.pct / 100;
       else if (m.bytes_total) frac = m.bytes_sent / m.bytes_total;
       else if (m.total) frac = m.bytes / m.total;
-      if (m.done) frac = m.result === 'ok' || m.result === 'not_available_yet' ? 1 : frac;
-      b.className = 'bar ' + (m.done ? (m.result === 'ok' ? 'ok' : m.result === 'not_available_yet' ? 'warn' : 'bad') : '') +
-        (frac === null && !m.done ? ' indet' : '');
+      const tone = m.done ? resultTone(m) : '';
+      if (m.done) frac = tone === 'ok' || m.result === 'not_available_yet' ? 1 : frac;
+      b.className = 'bar ' + tone + (frac === null && !m.done ? ' indet' : '');
       fill.style.width = frac === null ? '' : (Math.max(0, Math.min(1, frac)) * 100).toFixed(1) + '%';
+      const counts = m.job === 'gnss_flash' && !m.done ? flashCounts(m) : '';
       label.textContent = lbl(L.job, m.job) + ': ' + (m.done ? resultText(m) : lbl(L.phase, m.phase) +
-        (frac !== null ? ' ' + Math.round(frac * 100) + ' %' : ''));
+        (frac !== null ? ' ' + Math.round(frac * 100) + ' %' : '') + (counts ? ' (' + counts + ')' : ''));
     },
     hide() {
       el.hidden = true;
@@ -68,21 +122,19 @@ function progressWidget() {
 }
 
 /**
- * Steps of a receiver update. state: confirm, download, install, na (the
- * install step is not built yet), failed. upload: the manual-upload wording.
+ * Steps of a receiver update. state: confirm, download, failed (at the
+ * second step), install or check (the third step runs), refused (the third
+ * step failed), installed or checked (all done). upload: the manual-upload
+ * wording. checkOnly: builds without receiver flashing, whose third step
+ * checks the package instead of installing it.
  */
-function receiverSteps(state, upload) {
-  const order = ['confirm', 'download', 'install'];
-  const at = state === 'na' || state === 'install' ? 2 : state === 'download' || state === 'failed' ? 1 : 0;
-  const names = upload ? ['Upload and check', 'Confirm', 'Install on the receiver'] : ['Confirm', 'Download and verify', 'Install on the receiver'];
-  return h('ol', { class: 'steps' }, order.map((s, i) => {
+function receiverSteps(state, upload, checkOnly) {
+  const at = { confirm: 0, download: 1, failed: 1, install: 2, check: 2, refused: 2, installed: 3, checked: 3 }[state] || 0;
+  const names = upload ? ['Upload and check', 'Confirm'] : ['Confirm', 'Download and verify'];
+  names.push(checkOnly ? 'Check every rule (installing is not enabled in this build)' : 'Install on the receiver');
+  return h('ol', { class: 'steps' }, names.map((text, i) => {
     let cls = i < at ? 'done' : i === at ? 'now' : '';
-    let text = names[i];
-    if (i === 2 && state === 'na') {
-      cls = 'na';
-      text += ': not available yet';
-    }
-    if (i === 1 && state === 'failed') cls = 'na';
+    if (i === at && (state === 'failed' || state === 'refused')) cls = 'na';
     return h('li', { class: cls }, (cls === 'done' ? '✓ ' : '') + text);
   }));
 }
@@ -106,8 +158,8 @@ function receiverWarnings(flashAvailable) {
     h('ul', null,
       h('li', null, 'Do not power off the station or plug anything into the receiver\'s USB port.'),
       h('li', null, 'The station profile is applied to the receiver again afterwards.')),
-    flashAvailable ? null : msg('warn', 'Installing receiver firmware is not available in this firmware version yet. The station downloads ' +
-      'and verifies the package, then releases it. Nothing on the receiver changes.'),
+    flashAvailable ? null : msg('warn', NOT_ENABLED + ' The station verifies the package and checks it against every rule, then releases it. ' +
+      'Nothing is sent to the receiver.'),
   ];
 }
 
@@ -121,7 +173,7 @@ Views.updates = {
     const offs = [];
     const P = {
       check: progressWidget(), app_update: progressWidget(), app_upload: progressWidget(),
-      gnss_update: progressWidget(), gnss_flash: progressWidget(), gnss_upload: progressWidget(),
+      gnss_update: progressWidget(), gnss_flash: progressWidget(), gnss_upload: progressWidget(), gnss_check: progressWidget(),
     };
     const versionsCard = h('section', { class: 'card' });
     const appCard = h('section', { class: 'card' });
@@ -251,22 +303,29 @@ Views.updates = {
       const upd = btn(g.flash_available ? 'Update receiver…' : 'Download and verify…', () => updateReceiver(upd), 'primary',
         { disabled: blocked || !g.available || (rflow && rflow.state === 'download') });
       const lr = u.last_result;
+      const last = flash && flash.last;
       mount(gnssCard,
         h('h2', null, 'Receiver firmware', g.available ? badge('Update available', 'info') : null),
         kv([
           ['Receiver', g.model],
           ['Running', g.running ? g.running + (g.running_build ? ' (build ' + g.running_build + ')' : '') : DASH],
           ['Latest release', g.latest ? g.latest + ' (build ' + g.latest_build + ')' : DASH],
+          last ? [last.check_only ? 'Last package check' : 'Last receiver update',
+            [badge(lbl(L.flashOutcome, last.outcome), outcomeTone(last.outcome)),
+              last.ended_age_s !== null && last.ended_age_s !== undefined ? ' ' + fmt.dur(last.ended_age_s) + ' ago' : null]] : null,
         ]),
         g.available ? downtimeRows(g.expected_downtime_s, g.budget_left_s) : h('p', { class: 'muted' }, g.latest ? 'No newer receiver firmware is offered.' : 'No release information yet.'),
         blocked ? msg('warn', 'Not possible right now: ' + lbl(L.gnssBlock, g.blocked).toLowerCase() +
           (g.blocked_left_s ? ' (about ' + fmt.dur(g.blocked_left_s) + ' left).' : '.')) : null,
-        g.flash_available ? null : msg('', 'Installing receiver firmware is not available in this firmware version yet. You can download and verify the offered package; nothing on the receiver changes.'),
-        rflow ? receiverSteps(rflow.state) : null,
+        g.flash_available ? null : msg('', NOT_ENABLED + ' You can download the offered package or upload one and have it checked against every rule; ' +
+          'nothing is sent to the receiver.'),
+        rflow ? receiverSteps(rflow.state, rflow.upload, !g.flash_available) : null,
         P.gnss_update.el,
+        P.gnss_check.el,
         P.gnss_flash.el,
         rflow && rflow.text ? msg(rflow.tone || 'info', rflow.text) : null,
-        !rflow && lr && (lr.job === 'gnss_update' || lr.job === 'gnss_upload') ? h('p', { class: 'muted small' }, 'Last attempt: ' + resultText(lr)) : null,
+        !rflow && last ? msg(outcomeTone(last.outcome), outcomeText(last)) : null,
+        !rflow && !last && lr && (lr.job === 'gnss_update' || lr.job === 'gnss_upload') ? h('p', { class: 'muted small' }, 'Last attempt: ' + resultText(lr)) : null,
         gnssErr,
         g.available ? h('div', { class: 'form-actions' }, upd) : null);
     }
@@ -314,13 +373,18 @@ Views.updates = {
           pr.bytes_total ? bar(pr.bytes_sent / pr.bytes_total) : null,
           kv([
             ['Phase', lbl(L.flashPhase, pr.phase)],
+            pr.journal_state ? ['Recorded step', JOURNAL_STATE[pr.journal_state] || pr.journal_state] : null,
             ['Sent', fmt.bytes(pr.bytes_sent) + ' of ' + fmt.bytes(pr.bytes_total)],
-            ['Retries', fmt.num(pr.retries)],
+            pr.frames_total ? ['Blocks acknowledged', fmt.num(pr.frames_acked) + ' of ' + fmt.num(pr.frames_total) +
+              ' (' + fmt.num(pr.frames_sent) + ' sent)'] : null,
+            ['Transfers / loader attempts', fmt.num(pr.transfers) + ' / ' + fmt.num(pr.entry_attempts)],
+            ['Blocks resent', fmt.num(pr.retries)],
             pr.failure && pr.failure !== 'none' ? ['Failure', lbl(L.flashFailure, pr.failure)] : null,
             pr.last_err ? ['Last error', pr.last_err] : null,
           ])] : null,
+        f.last && f.last.ended_unix && f.journal === 'none' ? msg(outcomeTone(f.last.outcome), outcomeText(f.last)) : null,
         f.receiver_text ? h('details', { class: 'more' }, h('summary', null, 'Receiver output'), h('pre', { class: 'log' }, f.receiver_text)) : null,
-        f.flash_available ? null : msg('', 'Flashing the receiver is not available in this firmware version yet, so retrying and restarting wait for a later version.'),
+        f.flash_available ? null : msg('', NOT_ENABLED + ' Retrying and restarting the receiver from here need a build with receiver flashing; clearing works.'),
         sessionErr,
         h('div', { class: 'form-actions' }, buttons));
     }
@@ -449,17 +513,19 @@ Views.updates = {
         if (!ok) return;
         err.hidden = true;
         try {
-          await busy(go, () => api('POST', '/api/upload/gnss/confirm', { sha256: s.sha256, expected_fw: v, cross_layout_ack: false }));
+          const r = await busy(go, () => api('POST', '/api/upload/gnss/confirm', { sha256: s.sha256, expected_fw: v, cross_layout_ack: false }));
           staged = null;
-          rflow = { state: 'install' };
-          renderStaged(msg('info', 'Receiver update started. Progress shows under Receiver firmware.'));
+          if (r && r.check_only) {
+            /* No receiver flashing in this build: the station checks the package and releases it. */
+            rflow = { state: 'check', upload: true, tone: 'warn', text: CHECK_STARTED };
+            P.gnss_check.set({ job: 'gnss_check', phase: 'checking', done: false });
+            renderStaged(msg('info', 'The package check started. Its result shows under Receiver firmware.'));
+          } else {
+            rflow = { state: 'install', upload: true };
+            renderStaged(msg('info', 'Receiver update started. Progress shows under Receiver firmware.'));
+          }
           renderGnss();
         } catch (e) {
-          if (e instanceof ApiError && e.code === 'not_available_yet') {
-            staged = null;
-            renderStaged([receiverSteps('na', true), msg('warn', NOT_YET_UPLOADED)]);
-            return;
-          }
           showErr(e, err);
         }
       }, 'primary');
@@ -484,7 +550,7 @@ Views.updates = {
         downtimeRows(staged.expected_downtime_s, staged.budget_left_s),
         fExp.el,
         shaOk.el,
-        staged.flash_available ? null : msg('warn', 'Installing receiver firmware is not available in this firmware version yet.'),
+        staged.flash_available ? null : msg('warn', NOT_ENABLED + ' Continuing checks the package against every rule and releases it; nothing is sent to the receiver.'),
         err,
         h('div', { class: 'form-actions' }, go, cancel));
       tick();
@@ -529,6 +595,14 @@ Views.updates = {
         P.gnss_update.set({ job: 'gnss_update', phase: 'downloading', pct: u.progress_pct, done: false });
       }
       if (u.state === 'downloading_app') P.app_update.set({ job: 'app_update', phase: 'downloading', pct: u.progress_pct, done: false });
+      if (flash && flash.check_running && !rflow) {
+        rflow = { state: 'check', tone: 'warn', text: CHECK_STARTED };
+        P.gnss_check.set({ job: 'gnss_check', phase: 'checking', done: false });
+      }
+      if (flash && flash.journal === 'running' && flash.progress && !rflow) {
+        rflow = { state: 'install' };
+        P.gnss_flash.set(Object.assign({ job: 'gnss_flash' }, flash.progress, { done: false }));
+      }
       const key = JSON.stringify([u, flash, rflow]);
       if (periodic && (key === shownKey || interacting(el))) return;
       shownKey = key;
@@ -545,7 +619,8 @@ Views.updates = {
         if (!m.done) {
           rflow = { state: 'download' };
         } else if (m.result === 'not_available_yet') {
-          rflow = { state: 'na', tone: 'warn', text: NOT_YET_DOWNLOADED };
+          /* No receiver flashing in this build: the package check follows. */
+          rflow = { state: 'check', tone: 'warn', text: NOT_YET_DOWNLOADED };
         } else if (m.result === 'ok') {
           rflow = { state: 'install' };
         } else {
@@ -553,9 +628,22 @@ Views.updates = {
         }
         if (u) renderGnss();
       }
-      if (m.job === 'gnss_flash' && m.done && u) {
-        rflow = m.result === 'ok' ? { state: 'install', tone: 'ok', text: 'Receiver firmware installed.' } :
-          { state: 'install', tone: 'bad', text: 'Receiver update: ' + resultText(m) };
+      if ((m.job === 'gnss_flash' || m.job === 'gnss_check') && u) {
+        const upload = !!(rflow && rflow.upload);
+        if (!m.done) {
+          if (!rflow || (rflow.state !== 'install' && rflow.state !== 'check')) {
+            rflow = { state: m.job === 'gnss_check' ? 'check' : 'install', upload: upload };
+          }
+        } else {
+          const good = resultTone(m) === 'ok';
+          rflow = {
+            state: good ? (m.job === 'gnss_check' ? 'checked' : 'installed') : 'refused',
+            upload: upload,
+            tone: resultTone(m),
+            text: m.outcome && m.outcome !== 'none' ? resultText(m) :
+              (m.job === 'gnss_check' ? 'Package check: ' : 'Receiver update: ') + resultText(m),
+          };
+        }
         renderGnss();
       }
       if (m.done) load().catch(() => {});

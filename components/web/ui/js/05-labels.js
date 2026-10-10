@@ -94,7 +94,12 @@ const L = {
   flashFailure: {
     none: 'None', transport: 'Transfer error', package: 'Package refused', unconfirmed: 'Not confirmed by the receiver',
     no_answer: 'Receiver did not answer', app_not_starting: 'Receiver firmware does not start', entry: 'Could not enter the loader',
-    journal: 'Update record problem',
+    journal: 'Update record problem', receiver: 'The receiver reported a write error',
+  },
+  flashOutcome: {
+    none: 'None', success: 'Updated', old_firmware: 'The old firmware still runs', unexpected_build: 'An unexpected build runs',
+    not_done: 'Not done: the receiver is unchanged', rejected: 'Package refused', not_started: 'Not started',
+    needs_user: 'Waiting for your decision', checked: 'Package checked: it passes every rule',
   },
   updState: {
     idle: 'Idle', checking: 'Checking', downloading_app: 'Downloading the app', downloading_gnss: 'Downloading the receiver package',
@@ -115,13 +120,14 @@ const L = {
   why: {
     no_journal: 'no session', not_waiting: 'the session still runs', safe_mode: 'not in safe mode',
     settings_unavailable: 'settings unavailable', app_trial: 'app trial running', app_update: 'app update running',
-    not_available_yet: 'not available in this firmware yet',
+    not_available_yet: 'receiver firmware updates are not enabled in this build yet',
     unreadable: 'the update record is damaged: only clearing it works',
     receiver_maintenance: 'receiver maintenance is on',
   },
   job: {
     check: 'Update check', app_update: 'App update', app_upload: 'App upload', gnss_update: 'Receiver package download',
-    gnss_upload: 'Receiver package upload', gnss_flash: 'Receiver update', rollback: 'Rollback',
+    gnss_upload: 'Receiver package upload', gnss_flash: 'Receiver update', gnss_check: 'Receiver package check',
+    rollback: 'Rollback',
   },
   phase: {
     checking: 'Checking', downloading: 'Downloading', rebooting: 'Restarting', receiving: 'Uploading', verifying: 'Verifying',
@@ -130,7 +136,12 @@ const L = {
   },
   result: {
     ok: 'Done',
-    not_available_yet: 'Verified; installing it is not available yet',
+    not_available_yet: 'Verified; receiver firmware updates are not enabled in this build yet',
+    old_firmware: 'The old firmware still runs',
+    unexpected_build: 'An unexpected build runs',
+    not_done: 'Not done: the receiver is unchanged',
+    not_started: 'Not started',
+    needs_user: 'Stopped: waiting for your decision',
     refused: 'Refused: the station state changed',
     download_failed: 'Download failed',
     checksum_mismatch: 'Checksum mismatch',
@@ -207,6 +218,9 @@ const J = {
   liveEv: [null, 'Opened', 'Extended', 'Closed', 'Satellite output on', 'Satellite output off'],
   liveEnd: ['', 'stopped by you', 'time up', 'nobody watching', 'receiver update'],
   liveCmd: ['accepted', 'rejected', 'no answer', 'not sent'],
+  /* station_flash_outcome_t */
+  flashOut: ['none', 'updated', 'the old firmware still runs', 'an unexpected build runs', 'not done (receiver unchanged)',
+    'package refused', 'not started', 'waiting for a decision', 'package checked'],
   loss: [null, 'UART FIFO overflows', 'UART buffer full', 'line errors', 'RTCM CRC errors', 'framer discarded bytes',
     'hub publish failures', 'baud-switch bytes', 'UART events dropped'],
 };

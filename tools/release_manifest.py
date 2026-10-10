@@ -33,7 +33,11 @@ Checks, so a release the stations would refuse fails here instead:
     reads releases from --repo under the manifest name written here (or from
     --move-to: the release that moves stations to another repository); a
     build with a manifest key gets a signed manifest, and the signing key is
-    one of its keys; the manifest fits the build's size limit.
+    one of its keys; the manifest fits the build's size limit; and none of
+    the bench-only options is on (the bench console, the receiver byte
+    capture, and receiver flashing, which stays off in releases until the
+    receiver side has passed on hardware: drop UM98X_FLASH_ENABLE from
+    BENCH_ONLY then, on purpose).
 
 Standard library only, plus the openssl command for signing.
 """
@@ -69,6 +73,9 @@ VERSION_RE = re.compile(rf"^v({NUM})\.({NUM})\.({NUM})(?:-{IDENT}(?:\.{IDENT})*)
 ASSET_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
 PKG_RE = re.compile(r"^(?P<model>[A-Za-z0-9]+)_(?P<version>[!-~]*Build(?P<build>[0-9]+)[!-~]*)\.pkg$")
 REPO_RE = re.compile(r"^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$")
+
+# Kconfig symbols (sdkconfig.json names, without CONFIG_) a release must not have on.
+BENCH_ONLY = ("BENCH_CONSOLE", "UM98X_FLASH_BYTE_CAPTURE", "UM98X_FLASH_ENABLE")
 
 
 class Fail(Exception):
@@ -201,6 +208,10 @@ def main():
             if qemu:
                 raise Fail("this is the QEMU development build (CONFIG_" + ", CONFIG_".join(qemu) +
                            "): it has no Wi-Fi and never runs on a station")
+            bench = [s for s in BENCH_ONLY if cfg.get(s) is True]
+            if bench:
+                raise Fail("bench-only options are on in this build: " + ", ".join("CONFIG_" + s for s in bench) +
+                           " (build the release from sdkconfig.defaults alone)")
         manifest = {
             "schema": SCHEMA,
             "version": args.version,

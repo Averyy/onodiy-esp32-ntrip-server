@@ -101,6 +101,18 @@ Notes:
   version matters.
 - The partition table is permanent once a station is deployed (see the comments in
   `partitions.csv`).
+- Receiver firmware updates are off in the default build until they have been tested
+  on a bench unit: a package can be uploaded and checked against every rule, but
+  nothing is sent to the receiver. A bench build turns them on together with a bench
+  console on UART0 that runs the receiver tests one at a time and records every byte
+  (`help` lists the commands):
+
+  ```sh
+  idf.py -B build-bench -D SDKCONFIG=build-bench/sdkconfig \
+         -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.bench" build
+  ```
+
+  Never release a bench build: `tools/release_manifest.py` refuses one.
 
 ## Developing without hardware (QEMU)
 
