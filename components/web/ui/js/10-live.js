@@ -1,0 +1,286 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Avery L.
+ * SPDX-License-Identifier: MIT
+ *
+ * Live data: one status model fed by the WebSocket (1 Hz deltas, events,
+ * job progress, log text), with GET /api/status polling whenever the socket
+ * is down. Views read S.status and listen on the bus:
+ *   status (model)  event (message)  progress (message)  log (message)
+ *   live (state)    unauthorized     rebooting (reason)
+ */
+
+const S = {
+  session: null,    /* GET /api/session */
+  status: null,     /* GET /api/status, kept current by the WebSocket */
+  statusAt: 0,      /* Date.now() of the last status data */
+  progress: {},     /* job -> last progress message */
+  rates: {},        /* slot -> [[uptime_s, bytes_sent], ...] over the last minute */
+  publicView: false,
+};
+
+function isAdmin() {
+  return !!(S.session && S.session.authenticated);
+}
+
+/** Merge one WebSocket status message (full snapshot or changed sections). */
+function applyStatusMessage(m) {
+  const data = m.data || {};
+  if (m.full || !S.status) S.status = {};
+  for (const k of Object.keys(data)) {
+    if (k === 'casters' && !m.full && Array.isArray(S.status.casters)) {
+      const bySlot = {};
+      for (const c of S.status.casters) bySlot[c.slot] = c;
+      for (const c of data.casters) bySlot[c.slot] = c;
+      S.status.casters = Object.keys(bySlot).map(Number).sort((a, b) => a - b).map(n => bySlot[n]);
+    } else {
+      S.status[k] = data[k];
+    }
+  }
+  if (m.uptime_s !== undefined) S.status.uptime_s = m.uptime_s;
+  statusChanged();
+}
+
+function statusChanged() {
+  S.statusAt = Date.now();
+  sampleRates();
+  bus.emit('status', S.status);
+}
+
+/* Output rate per caster from bytes_sent (device uptime as the clock). */
+function sampleRates() {
+  const st = S.status;
+  if (!st || !Array.isArray(st.casters) || st.uptime_s === undefined) return;
+  for (const c of st.casters) {
+    if (c.bytes_sent === undefined || c.bytes_sent === null) continue;
+    let l = S.rates[c.slot] || (S.rates[c.slot] = []);
+    const last = l[l.length - 1];
+    if (last && (c.bytes_sent < last[1] || st.uptime_s < last[0])) l = S.rates[c.slot] = [];
+    if (!last || st.uptime_s > last[0]) l.push([st.uptime_s, c.bytes_sent]);
+    while (l.length > 2 && l[0][0] < st.uptime_s - 61) l.shift();
+  }
+}
+
+/** Bits per second a slot sent over the last `window` seconds (null = not enough data). */
+function slotRate(slot, window) {
+  const l = S.rates[slot];
+  if (!l || l.length < 2) return null;
+  const end = l[l.length - 1];
+  let start = l[0];
+  for (const p of l) {
+    if (p[0] >= end[0] - window) {
+      start = p;
+      break;
+    }
+  }
+  if (end[0] - start[0] < Math.min(window, 3)) return null;
+  return ((end[1] - start[1]) * 8) / (end[0] - start[0]);
+}
+
+/** RTCM output rate: the busiest streaming slot over the last 10 s. */
+function outputRate() {
+  const st = S.status;
+  if (!st || !Array.isArray(st.casters)) return null;
+  let best = null;
+  for (const c of st.casters) {
+    if (c.state !== 'streaming') continue;
+    const r = slotRate(c.slot, 10);
+    if (r !== null && (best === null || r > best)) best = r;
+  }
+  return best;
+}
+
+const live = {
+  ws: null,
+  state: 'off',        /* off, connecting, ws, poll */
+  topics: null,        /* desired topic set; null = server default */
+  lastMsg: 0,
+  lastPing: 0,
+  retryMs: 1000,
+  reconnectAt: 0,
+  lastPoll: 0,
+  polling: false,
+  tick: 0,
+  running: false,
+
+  start() {
+    if (this.running) return;
+    this.running = true;
+    this.connect();
+    this.tick = setInterval(() => this.watch(), 1000);
+  },
+
+  stop() {
+    this.running = false;
+    clearInterval(this.tick);
+    if (this.ws) {
+      const ws = this.ws;
+      this.ws = null;
+      ws.onclose = null;
+      try {
+        ws.close();
+      } catch (e) {
+        /* already closed */
+      }
+    }
+    this.setState('off');
+  },
+
+  setState(s) {
+    if (this.state !== s) {
+      this.state = s;
+      bus.emit('live', s);
+    }
+  },
+
+  connect() {
+    if (!this.running || typeof WebSocket !== 'function') return;
+    let ws;
+    try {
+      ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    } catch (e) {
+      this.scheduleReconnect();
+      return;
+    }
+    this.ws = ws;
+    this.setState('connecting');
+    this.lastMsg = Date.now();
+    ws.onopen = () => {
+      this.retryMs = 1000;
+      this.lastMsg = Date.now();
+      if (this.topics) this.send({ type: 'subscribe', topics: this.topics });
+    };
+    ws.onmessage = ev => {
+      this.lastMsg = Date.now();
+      let m;
+      try {
+        m = JSON.parse(ev.data);
+      } catch (e) {
+        return;
+      }
+      this.handle(m);
+    };
+    ws.onclose = ev => {
+      if (this.ws !== ws) return;
+      this.ws = null;
+      if (ev.code === 4001) {
+        bus.emit('unauthorized');
+        return;
+      }
+      if (ev.code === 1012) bus.emit('rebooting', 'restart');
+      this.scheduleReconnect();
+    };
+    ws.onerror = () => {
+      /* onclose follows */
+    };
+  },
+
+  scheduleReconnect() {
+    if (!this.running) return;
+    this.setState('poll');
+    this.reconnectAt = Date.now() + this.retryMs;
+    this.retryMs = Math.min(this.retryMs * 2, 15000);
+  },
+
+  send(obj) {
+    if (this.ws && this.ws.readyState === 1) {
+      try {
+        this.ws.send(JSON.stringify(obj));
+      } catch (e) {
+        /* the close handler reconnects */
+      }
+    }
+  },
+
+  /** Replace the topic set ("status", "progress", "log"). */
+  subscribe(topics) {
+    this.topics = topics;
+    this.send({ type: 'subscribe', topics: topics });
+  },
+
+  handle(m) {
+    switch (m.type) {
+      case 'hello':
+        this.setState('ws');
+        break;
+      case 'status':
+        this.setState('ws');
+        applyStatusMessage(m);
+        break;
+      case 'event':
+        if (m.event === 'rebooting') bus.emit('rebooting', m.reason || 'restart');
+        bus.emit('event', m);
+        break;
+      case 'progress':
+        S.progress[m.job] = m;
+        bus.emit('progress', m);
+        break;
+      case 'log':
+        bus.emit('log', m);
+        break;
+      default:
+        break;
+    }
+  },
+
+  /* Once a second: liveness, keep-alive pings, polling while the socket is down. */
+  watch() {
+    const now = Date.now();
+    const ws = this.ws;
+    if (ws && ws.readyState === 1) {
+      if (now - this.lastMsg > 5000) {
+        /* Status comes every second; silence means a dead connection. */
+        this.ws = null;
+        ws.onclose = null;
+        try {
+          ws.close();
+        } catch (e) {
+          /* ignore */
+        }
+        this.scheduleReconnect();
+      } else if (isAdmin() && doc.visibilityState === 'visible' && now - this.lastPing > 60000) {
+        /* A ping extends the session; only a visible tab keeps it alive. */
+        this.lastPing = now;
+        this.send({ type: 'ping' });
+      }
+    } else if (ws && ws.readyState === 0 && now - this.lastMsg > 10000) {
+      /* A handshake that never completes. */
+      this.ws = null;
+      ws.onclose = null;
+      try {
+        ws.close();
+      } catch (e) {
+        /* ignore */
+      }
+      this.scheduleReconnect();
+    } else if (!ws && this.running && now >= this.reconnectAt) {
+      this.connect();
+    }
+    if (this.state !== 'ws' && this.running && !this.polling && now - this.lastPoll >= 2000) {
+      this.poll();
+    }
+  },
+
+  async poll() {
+    this.polling = true;
+    this.lastPoll = Date.now();
+    try {
+      const st = await api('GET', '/api/status', undefined, { timeout: 4000 });
+      if (this.state !== 'ws') {
+        S.status = st;
+        statusChanged();
+      }
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 0 && this.state !== 'ws') bus.emit('live', 'down');
+    } finally {
+      this.polling = false;
+    }
+  },
+};
+
+/** Load the status once (before the socket delivers). */
+async function loadStatus() {
+  const st = await api('GET', '/api/status', undefined, { quiet401: true });
+  S.status = st;
+  statusChanged();
+  return st;
+}

@@ -131,6 +131,14 @@ fragment (`/#/casters`), so the server serves only `/`, `/index.html` and the
 fixed asset names; other paths outside `/api/` and `/ws` get `404` (on the
 AP interface: the captive redirect).
 
+The fixed asset names are `/app.js`, `/app.css` and `/favicon.svg` (`/` and
+`/index.html` are the page). The build generates the table of them from
+`components/web/ui/` (`tools/ui_bundle.py`: path, content type, gzip body;
+`priv_include/web_assets.h`); `web_asset_find()` maps a request URI to an
+entry (query ignored) and `web_etag_match()` evaluates `If-None-Match`. The
+page loads only these files (no inline script or style), so the
+Content-Security-Policy can stay at the device's own origin.
+
 ---
 
 ## 3. Authentication

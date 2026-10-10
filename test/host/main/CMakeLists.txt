@@ -40,6 +40,7 @@ idf_component_register(
         "test_pkg_store.c"
         "test_station_obs.c"
         "test_station_core.c"
+        "test_web_assets.c"
         "${_fw}/lifecycle/boot_guard.c"
         "${_fw}/lifecycle/reboot_gate.c"
         "${_fw}/lifecycle/boot_history.c"
@@ -64,6 +65,7 @@ idf_component_register(
         "${_fw}/network/net_ladder.c"
         "${_fw}/station/station_core.c"
         "${_fw}/station/station_obs.c"
+        "${_fw}/web/web_assets.c"
     INCLUDE_DIRS
         "."
     PRIV_INCLUDE_DIRS
@@ -80,6 +82,7 @@ idf_component_register(
         "${_fw}/network/priv_include"
         "${_fw}/pkg_store/priv_include"
         "${_fw}/station/priv_include"
+        "${_fw}/web/priv_include"
     REQUIRES unity gnss_framing gnss_types settings pkg_store nvs_flash esp_partition esp_event mbedtls
     WHOLE_ARCHIVE)
 

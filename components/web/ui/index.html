@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<!-- SPDX-FileCopyrightText: 2026 Avery L. -->
+<!-- SPDX-License-Identifier: MIT -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>Station</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body class="bare">
+<header class="top">
+<a class="brand" href="#/"><img src="favicon.svg" alt=""><span id="brand-name">Station</span></a>
+<span class="live" id="live" role="status"></span>
+<div class="top-actions" id="top-actions"></div>
+</header>
+<nav class="tabs" id="tabs" aria-label="Sections"></nav>
+<div class="notices" id="notices"></div>
+<main class="view" id="view" tabindex="-1">
+<p class="loading">Loading…</p>
+<noscript><p class="noscript">This page needs JavaScript.</p></noscript>
+</main>
+<div id="modal"></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>
