@@ -134,7 +134,7 @@ static void on_hooks_overrun(void *arg)
 /* The first caller runs the hooks; a second one (an esp_restart() racing a
  * lifecycle reboot) waits until they finish or the budget is used up, so
  * sessions are not cut half-closed. */
-static void run_hooks(void)
+static void run_hooks(lifecycle_reboot_reason_t reason)
 {
     bool run = false;
     taskENTER_CRITICAL(&s_lock);
@@ -168,7 +168,7 @@ static void run_hooks(void)
             ESP_LOGW(TAG, "shutdown budget used up, %d hook(s) skipped", s_hook_count - i);
             break;
         }
-        s_hooks[i].fn((uint32_t)(left_us / 1000), s_hooks[i].ctx);
+        s_hooks[i].fn(reason, (uint32_t)(left_us / 1000), s_hooks[i].ctx);
     }
     if (s_overrun_timer != NULL) {
         (void)esp_timer_stop(s_overrun_timer);   /* the restart follows anyway; avoid a second one */
@@ -185,7 +185,11 @@ static void run_hooks(void)
  * network still works. */
 static void on_esp_restart(void)
 {
-    run_hooks();
+    taskENTER_CRITICAL(&s_lock);
+    lifecycle_reboot_reason_t reason =
+        s_gate.rebooting ? (lifecycle_reboot_reason_t)s_gate.reason : LIFECYCLE_REBOOT_NONE;
+    taskEXIT_CRITICAL(&s_lock);
+    run_hooks(reason);
 }
 
 /* ---- reboot execution ------------------------------------------------------------ */
@@ -219,7 +223,7 @@ static void __attribute__((noreturn)) do_reboot(lifecycle_reboot_reason_t reason
     /* Queued; diag's restart handler writes out what its task has not. */
     (void)diag_journal_append(DIAG_EV_REBOOT, (int32_t)reason, 0);
     (void)esp_event_post(LIFECYCLE_EVENT, LIFECYCLE_EVENT_PRE_REBOOT, &reason, sizeof(reason), 0);
-    run_hooks();
+    run_hooks(reason);
     esp_restart();
 }
 

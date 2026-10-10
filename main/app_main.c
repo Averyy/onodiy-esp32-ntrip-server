@@ -70,6 +70,35 @@ typedef struct {
     bool skip_in_safe_mode;
 } boot_step_t;
 
+/*
+ * Availability ledger and planned reboots. The ledger (L1) cannot see
+ * lifecycle (L1), so the wiring is here: its shutdown hook is registered
+ * before any other (hooks run in registration order), so the books are
+ * stored, and a reboot the user asked for starts counting as planned, before
+ * the casters close; and a boot that lifecycle says follows such a reboot is
+ * reported to it before the casters report their slots.
+ */
+static void ledger_reboot_hook(lifecycle_reboot_reason_t reason, uint32_t deadline_ms, void *ctx)
+{
+    (void)deadline_ms;
+    (void)ctx;
+    ledger_shutdown(lifecycle_reboot_user_planned(reason));
+}
+
+static esp_err_t ledger_step(void)
+{
+    esp_err_t err = ledger_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+    lifecycle_boot_info_t boot;
+    lifecycle_get_boot_info(&boot);
+    if (lifecycle_reboot_user_planned(boot.prev_reboot_reason)) {
+        ledger_note_planned_boot();
+    }
+    return lifecycle_register_shutdown_hook(ledger_reboot_hook, NULL);
+}
+
 /* Initialisation: allocate, load settings, register handlers. No tasks yet
  * (except the lifecycle service). fw_update goes first so a failing app trial
  * is reverted before the steps that might be what is failing. The receiver
@@ -79,7 +108,7 @@ static const boot_step_t s_init_steps[] = {
     { "lifecycle",    lifecycle_init,    false }, /* service task, boot history */
     { "fw_update",    fw_update_init,    false }, /* app trial bookkeeping, revert */
     { "board",        board_init,        false },
-    { "ledger",       ledger_init,       false },
+    { "ledger",       ledger_step,       false }, /* first shutdown hook; planned-reboot accounting */
     { "pkg_store",    pkg_store_init,    false },
     { "rtcm_hub",     rtcm_hub_init,     true  },
     { "gnss_obs",     gnss_obs_init,     true  },

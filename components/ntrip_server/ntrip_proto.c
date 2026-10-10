@@ -218,7 +218,7 @@ bool ntrip_host_is_open_caster(const char *host)
     return host_is_rtk2go(host) || ntrip_host_in_domain(host, "crtk.net");
 }
 
-ntrip_policy_result_t ntrip_check_policy(const ntrip_policy_slot_t *slots, size_t count, size_t edited)
+ntrip_policy_t ntrip_check_policy(const ntrip_policy_slot_t *slots, size_t count, size_t edited)
 {
     if (edited >= count || !slots[edited].enabled) {
         return NTRIP_POLICY_OK;

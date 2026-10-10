@@ -156,6 +156,19 @@ bool fw_bad_add(fw_bad_versions_t *b, const char *version)
     return true;
 }
 
+size_t fw_bad_newest_first(const fw_bad_versions_t *b, char out[][32], size_t cap)
+{
+    if (b == NULL || out == NULL) {
+        return 0;
+    }
+    size_t n = b->count < FW_BAD_VER_MAX ? b->count : FW_BAD_VER_MAX;
+    size_t k = 0;
+    for (size_t i = n; i > 0 && k < cap; i--) {
+        strlcpy(out[k++], b->v[i - 1], sizeof(out[0]));
+    }
+    return k;
+}
+
 /* ---- boot ------------------------------------------------------------------------- */
 
 static void clear_rec(fw_trial_rec_t *rec)

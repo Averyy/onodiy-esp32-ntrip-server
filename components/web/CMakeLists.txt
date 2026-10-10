@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Avery L.
 # SPDX-License-Identifier: MIT
 #
-# web_json.c, web_core.c, web_pw.c, web_enums.c, web_build.c, web_parse.c
-# and web_assets.c are pure logic (no RTOS or driver calls) and are also
-# compiled into the host test app; web.c, web_api.c, web_auth.c, web_ws.c and
-# web_worker.c are the server around them.
+# web_json.c, web_core.c, web_conn.c, web_pw.c, web_enums.c, web_build.c,
+# web_parse.c and web_assets.c are pure logic (no RTOS or driver calls) and
+# are also compiled into the host test app; web.c, web_api.c, web_auth.c,
+# web_ws.c and web_worker.c are the server around them.
 #
 # mbedtls provides psa/crypto.h (PBKDF2-HMAC-SHA256 for the admin password).
 # um98x_ctl (profile codec, WGS84/ECEF) and um98x_flash (package facts) are
@@ -18,6 +18,7 @@ idf_component_register(
         "web_worker.c"
         "web_json.c"
         "web_core.c"
+        "web_conn.c"
         "web_pw.c"
         "web_enums.c"
         "web_build.c"

@@ -5,8 +5,10 @@
  * Availability ledger around the pure core (ledger_core.c): a spinlock, the
  * RTC copy of the running counters (written every tick, read back after a
  * software, panic or watchdog reset), and NVS (today and the last-alive mark
- * every CONFIG_LEDGER_ALIVE_PERSIST_S, the history when it changes; read
- * back after a power cut or when the RTC copy is not valid).
+ * every CONFIG_LEDGER_ALIVE_PERSIST_S and at the start of every reboot, the
+ * history when it changes; read back after a power cut or when the RTC copy
+ * is not valid, e.g. in another app image). The NVS writes of the tick and
+ * of a reboot's shutdown hook are serialised by a mutex.
  */
 #include "ledger.h"
 
@@ -18,6 +20,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "ledger_core.h"
 #include "sdkconfig.h"
 #include "settings.h"
@@ -30,13 +33,15 @@ _Static_assert((int)LEDGER_CLOCK_NONE == (int)LC_CLOCK_NONE && (int)LEDGER_CLOCK
                "clock sources differ between the API and the core");
 
 #define DAY_S          86400
+#define SHUTDOWN_WAIT_MS 300   /* of the shutdown budget, for a tick's writes to finish */
 #define TODAY_BLOB_MAX 160u
 #define HIST_BLOB_MAX  (3u + (size_t)CONFIG_LEDGER_HISTORY_DAYS * (4u + LC_SLOTS * 12u + 8u))
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static lc_t s_core;                                     /* under s_lock */
 static EXT_RAM_BSS_ATTR lc_day_t s_hist[CONFIG_LEDGER_HISTORY_DAYS];
-static EXT_RAM_BSS_ATTR uint8_t s_hist_blob[HIST_BLOB_MAX];   /* ledger_init and ledger_tick only */
+static EXT_RAM_BSS_ATTR uint8_t s_hist_blob[HIST_BLOB_MAX];   /* ledger_init, and under s_store */
+static SemaphoreHandle_t s_store;                       /* the settings writes and s_hist_blob */
 static bool s_ready;
 static bool s_store_warned;
 
@@ -71,8 +76,12 @@ esp_err_t ledger_init(void)
     if (s_ready) {
         return ESP_OK;
     }
+    if (s_store == NULL && (s_store = xSemaphoreCreateMutex()) == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
     int64_t up_ms = esp_timer_get_time() / 1000;
     lc_init(&s_core, s_hist, CONFIG_LEDGER_HISTORY_DAYS, (uint32_t)up_ms, (uint64_t)up_ms);
+    lc_set_boot_window(&s_core, (uint32_t)CONFIG_LEDGER_PLANNED_BOOT_S * 1000u);
 
     lc_snapshot_t snap;
     memset(&snap, 0, sizeof(snap));
@@ -94,7 +103,10 @@ esp_err_t ledger_init(void)
             stored.today.utc_day = -1;
         }
     }
-    bool cut = false;
+    /* A power cut (or a brownout) is never planned, whichever copy is read:
+     * RTC memory that happens to pass its checks after one is not trusted
+     * for that either. */
+    bool cut = power_cut(esp_reset_reason());
     const char *from;
     if (lc_rtc_valid(&s_rtc)) {
         snap = s_rtc.snap;
@@ -105,12 +117,12 @@ esp_err_t ledger_init(void)
             snap.expected_mask = stored.expected_mask;
             snap.protected_mask = stored.protected_mask;
             snap.planned = stored.planned;
+            snap.reboot_planned = stored.reboot_planned;
         }
         int64_t alive_s = 0;
         if (settings_get_i64(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_ALIVE, &alive_s) == ESP_OK && alive_s > 0) {
             snap.alive_ms = alive_s * 1000;
         }
-        cut = power_cut(esp_reset_reason());
         from = "settings";
     }
     lc_restore(&s_core, &snap, cut);
@@ -123,10 +135,21 @@ esp_err_t ledger_init(void)
     }
     lc_merge_stored_day(&s_core, &stored.today);
     s_ready = true;
-    ESP_LOGI(TAG, "restored from %s: day %ld, %u days of history, target %d.%d %%, last alive %lld",
+    ESP_LOGI(TAG, "restored from %s: day %ld, %u days of history, target %d.%d %%, last alive %lld%s",
              from, (long)s_core.today.utc_day, (unsigned)s_core.hist_n, CONFIG_LEDGER_TARGET_PERMILLE / 10,
-             CONFIG_LEDGER_TARGET_PERMILLE % 10, (long long)(snap.alive_ms / 1000));
+             CONFIG_LEDGER_TARGET_PERMILLE % 10, (long long)(snap.alive_ms / 1000),
+             (snap.reboot_planned && !cut) ? ", after a planned reboot" : "");
     return ESP_OK;
+}
+
+void ledger_note_planned_boot(void)
+{
+    if (!s_ready) {
+        return;
+    }
+    portENTER_CRITICAL(&s_lock);
+    lc_planned_boot(&s_core);   /* ignored after a power cut; once per boot */
+    portEXIT_CRITICAL(&s_lock);
 }
 
 void ledger_set_slot(size_t slot, bool enabled, bool protected_slot, bool streaming)
@@ -212,11 +235,13 @@ void ledger_count_overflow(void)
     portEXIT_CRITICAL(&s_lock);
 }
 
-void ledger_tick(void)
+/*
+ * Accrue, refresh the RTC copy and store what is due (caller holds s_store).
+ * `interval_ms` 0 stores now; `shutdown` also stores today when there is no
+ * clock yet, so a planned reboot's flag reaches NVS in any case.
+ */
+static void step(uint32_t interval_ms, bool shutdown)
 {
-    if (!s_ready) {
-        return;
-    }
     uint32_t now = now_ms();
     lc_snapshot_t snap;
     int64_t alive_ms = 0;
@@ -226,8 +251,7 @@ void ledger_tick(void)
     portENTER_CRITICAL(&s_lock);
     lc_tick(&s_core, now);
     lc_snapshot(&s_core, &snap);
-    bool due = lc_persist_due(&s_core, now, (uint32_t)CONFIG_LEDGER_ALIVE_PERSIST_S * 1000u, &alive_ms,
-                              &store_today, &store_hist);
+    bool due = lc_persist_due(&s_core, now, interval_ms, &alive_ms, &store_today, &store_hist);
     if (due && store_hist) {
         hist_len = lc_encode_hist(s_core.hist, s_core.hist_n, s_hist_blob, sizeof(s_hist_blob));
     }
@@ -239,6 +263,14 @@ void ledger_tick(void)
     memcpy(&s_rtc, &blk, sizeof(blk));
 
     if (!due) {
+        if (shutdown) {
+            /* No clock: no last-alive mark to store, but today carries the flags. */
+            uint8_t buf[TODAY_BLOB_MAX];
+            size_t len = lc_encode_today(&snap, buf, sizeof(buf));
+            if (len > 0) {
+                (void)settings_set_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_TODAY, buf, len);
+            }
+        }
         return;
     }
     /* History before today: a day rolled into the history must not vanish
@@ -263,6 +295,36 @@ void ledger_tick(void)
         ESP_LOGW(TAG, "counters not stored (settings unavailable?); retrying every %d s",
                  CONFIG_LEDGER_ALIVE_PERSIST_S);
     }
+}
+
+void ledger_tick(void)
+{
+    if (!s_ready) {
+        return;
+    }
+    xSemaphoreTake(s_store, portMAX_DELAY);
+    step((uint32_t)CONFIG_LEDGER_ALIVE_PERSIST_S * 1000u, false);
+    xSemaphoreGive(s_store);
+}
+
+void ledger_shutdown(bool planned)
+{
+    if (!s_ready) {
+        return;
+    }
+    /* First the flag: every RTC copy from here on carries it, stored or not. */
+    uint32_t now = now_ms();
+    portENTER_CRITICAL(&s_lock);
+    lc_shutdown(&s_core, now, planned);
+    portEXIT_CRITICAL(&s_lock);
+    /* Bounded: a tick holds the mutex only for its own writes. */
+    if (xSemaphoreTake(s_store, pdMS_TO_TICKS(SHUTDOWN_WAIT_MS)) != pdTRUE) {
+        ESP_LOGW(TAG, "counters not stored before the reboot (settings busy)");
+        return;
+    }
+    step(0, true);
+    xSemaphoreGive(s_store);
+    ESP_LOGI(TAG, "counters stored before the reboot%s", planned ? " (planned downtime from here)" : "");
 }
 
 esp_err_t ledger_get_today(ledger_day_t *out)

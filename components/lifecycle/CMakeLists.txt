@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: MIT
 #
 # boot_guard.c, reboot_gate.c and boot_history.c are pure logic (no IDF
-# includes) and are also compiled into the host test app.
+# includes) and are also compiled into the host test app, and so is
+# reboot_reason.c (it needs only the types of lifecycle.h).
 idf_component_register(
-    SRCS "lifecycle.c" "boot_guard.c" "reboot_gate.c" "boot_history.c"
+    SRCS "lifecycle.c" "boot_guard.c" "reboot_gate.c" "boot_history.c" "reboot_reason.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "priv_include"
     REQUIRES esp_event

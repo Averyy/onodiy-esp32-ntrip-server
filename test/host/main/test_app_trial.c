@@ -140,6 +140,26 @@ TEST_CASE("rolled-back list: no duplicates, oldest dropped, round-trips", "[app_
     TEST_ASSERT_FALSE(fw_bad_decode(buf, n, &d));
 }
 
+TEST_CASE("rolled-back list is handed out newest first, as much as fits", "[app_trial]")
+{
+    fw_bad_versions_t b;
+    memset(&b, 0, sizeof(b));
+    char out[FW_BAD_VER_MAX][32];
+    TEST_ASSERT_EQUAL_size_t(0, fw_bad_newest_first(&b, out, FW_BAD_VER_MAX));
+    TEST_ASSERT_EQUAL_size_t(0, fw_bad_newest_first(NULL, out, FW_BAD_VER_MAX));
+    fw_bad_add(&b, "v0.2.0");
+    fw_bad_add(&b, "v0.3.0");
+    fw_bad_add(&b, "v0.4.1");
+    TEST_ASSERT_EQUAL_size_t(3, fw_bad_newest_first(&b, out, FW_BAD_VER_MAX));
+    TEST_ASSERT_EQUAL_STRING("v0.4.1", out[0]);
+    TEST_ASSERT_EQUAL_STRING("v0.3.0", out[1]);
+    TEST_ASSERT_EQUAL_STRING("v0.2.0", out[2]);
+    TEST_ASSERT_EQUAL_size_t(2, fw_bad_newest_first(&b, out, 2));
+    TEST_ASSERT_EQUAL_STRING("v0.3.0", out[1]);
+    b.count = FW_BAD_VER_MAX + 5;   /* a damaged count never reads past the list */
+    TEST_ASSERT_EQUAL_size_t(FW_BAD_VER_MAX, fw_bad_newest_first(&b, out, FW_BAD_VER_MAX));
+}
+
 /* ---- boot bookkeeping ---------------------------------------------------------------- */
 
 TEST_CASE("trial boot: a new image starts stage 1", "[app_trial]")

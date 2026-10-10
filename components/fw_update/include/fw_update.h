@@ -85,12 +85,16 @@
  * the receiver update becomes possible.
  *
  * Rollback records: a version reverted by stage 2 or rolled back manually
- * goes to ota/bad_ver and is never offered by the banner again (the user can
- * still install it, with a warning). A stage-1 rollback (crash or reset in
- * the first minute; a power blip and a real crash look the same to the
- * bootloader) is not retried automatically: the banner says the update was
- * rolled back during its first minute and offers to install it again; if
- * that one rolls back too, the version goes to ota/bad_ver.
+ * goes to the rolled-back list (ota/bad_ver: the last
+ * FW_UPDATE_ROLLED_BACK_MAX versions, oldest dropped first, written only
+ * when a version is added, kept through a factory reset) and is never
+ * offered by the banner again, however many releases later it is checked
+ * (the user can still install it, with a warning:
+ * fw_update_get_rolled_back, fw_update_is_rolled_back). A stage-1 rollback
+ * (crash or reset in the first minute; a power blip and a real crash look
+ * the same to the bootloader) is not retried automatically: the banner says
+ * the update was rolled back during its first minute and offers to install
+ * it again; if that one rolls back too, the version goes on the list.
  *
  * Authenticity: TLS + a signed manifest verified before any of its fields
  * is used; every downloaded app image and receiver package must match the
@@ -172,13 +176,16 @@ typedef enum {
     FW_GNSS_BLOCK_RECEIVER_NOT_STREAMING, /**< no valid RTCM or NMEA from the receiver in the last 10 s */
 } fw_update_gnss_block_t;
 
+/** Versions kept on the rolled-back list (ota/bad_ver). */
+#define FW_UPDATE_ROLLED_BACK_MAX 8
+
 /** Status snapshot for the web UI (also the banner fields of /api/status). */
 typedef struct {
     fw_update_state_t state;
     char running_version[32];
     fw_update_trial_t trial;
     uint32_t trial_left_s;         /**< remaining time of the current trial stage */
-    char reverted_version[32];     /**< last version rolled back, "" if none */
+    char reverted_version[32];     /**< last version rolled back, "" if none (the whole list: fw_update_get_rolled_back) */
     bool reverted_in_stage1;       /**< it rolled back in its first minute (crash or reset): offer it again */
     bool rollback_available;       /**< the other slot holds a valid image */
     char latest_version[32];       /**< "" until a check succeeded */
@@ -285,6 +292,19 @@ esp_err_t fw_update_rollback(void);
 
 /** Status snapshot. */
 esp_err_t fw_update_get_status(fw_update_status_t *out);
+
+/**
+ * The versions rolled back on this station, newest first: reverted by their
+ * trial, rolled back by the user, or rolled back twice in their first
+ * minute (the rolled-back list, ota/bad_ver). The banner offers none of
+ * them; the UI shows the list and asks for an acknowledgement before
+ * installing one (banner or manual upload).
+ * @return entries written (at most cap; 0 before fw_update_init).
+ */
+size_t fw_update_get_rolled_back(char out[][32], size_t cap);
+
+/** True if `version` (exact string) is on the rolled-back list. */
+bool fw_update_is_rolled_back(const char *version);
 
 /**
  * Compare two version strings "vMAJOR.MINOR.PATCH[-pre]" (leading 'v'

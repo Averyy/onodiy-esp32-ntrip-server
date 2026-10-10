@@ -877,59 +877,14 @@ uint32_t web_expected_build(const char *fw)
 
 /* ---- caster policy ------------------------------------------------------------------------- */
 
-static bool is_onocoy(const char *h)
-{
-    return web_host_in_domain(h, "onocoy.com");
-}
-
-static bool is_rtk2go(const char *h)
-{
-    return web_host_in_domain(h, "rtk2go.com");
-}
-
-static bool is_open_caster(const char *h)
-{
-    return is_rtk2go(h) || web_host_in_domain(h, "crtk.net");
-}
-
-web_policy_t web_caster_policy(const web_policy_slot_t *slots, size_t count, size_t edited)
-{
-    if (slots == NULL || edited >= count || !slots[edited].enabled) {
-        return WEB_POLICY_OK;
-    }
-    const char *mine = slots[edited].host;
-    bool other_onocoy = false;
-    bool other_rtk2go = false;
-    bool other_open = false;
-    for (size_t i = 0; i < count; i++) {
-        if (i == edited || !slots[i].enabled) {
-            continue;
-        }
-        other_onocoy |= is_onocoy(slots[i].host);
-        other_rtk2go |= is_rtk2go(slots[i].host);
-        other_open |= is_open_caster(slots[i].host);
-    }
-    if (is_onocoy(mine) && other_onocoy) {
-        return WEB_POLICY_SECOND_ONOCOY;
-    }
-    if (is_rtk2go(mine) && other_rtk2go) {
-        return WEB_POLICY_SECOND_RTK2GO;
-    }
-    bool pair = (is_onocoy(mine) && other_open) || (is_open_caster(mine) && other_onocoy);
-    if (pair && !slots[edited].dup_ack) {
-        return WEB_POLICY_DUP_ACK_REQUIRED;
-    }
-    return WEB_POLICY_OK;
-}
-
-const char *web_policy_reason(web_policy_t p)
+const char *web_policy_reason(ntrip_policy_t p)
 {
     switch (p) {
-    case WEB_POLICY_SECOND_ONOCOY:
+    case NTRIP_POLICY_SECOND_ONOCOY:
         return "second_onocoy";
-    case WEB_POLICY_SECOND_RTK2GO:
+    case NTRIP_POLICY_SECOND_RTK2GO:
         return "second_rtk2go";
-    case WEB_POLICY_DUP_ACK_REQUIRED:
+    case NTRIP_POLICY_NEED_DUP_ACK:
         return "dup_stream_ack_required";
     default:
         return NULL;
@@ -976,6 +931,18 @@ web_image_check_t web_image_check(const uint8_t *head, size_t len, uint16_t chip
         return WEB_IMAGE_OTHER_PROJECT;
     }
     return WEB_IMAGE_OK;
+}
+
+web_err_t web_app_upload_verdict(web_image_check_t chk, bool rolled_back, bool rolled_back_ack)
+{
+    switch (chk) {
+    case WEB_IMAGE_OK:
+        return (rolled_back && !rolled_back_ack) ? WEB_ERR_ROLLED_BACK_ACK_REQUIRED : WEB_ERR_COUNT;
+    case WEB_IMAGE_OTHER_PROJECT:
+        return WEB_ERR_NOT_THIS_PROJECT;
+    default:
+        return WEB_ERR_INVALID_IMAGE;
+    }
 }
 
 /* ---- status deltas, dates, names --------------------------------------------------------------- */

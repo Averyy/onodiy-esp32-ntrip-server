@@ -32,18 +32,36 @@
  *     receiver stall counts as down, which keeps the budget on the safe
  *     side);
  *   - planned: the part of down while planned receiver work paused the
- *     casters;
+ *     casters, and the part a reboot the user asked for caused (below);
  *   - reconnects: entries into streaming after a period of expected
  *     downtime;
  *   - per day also power-off time (gaps between the last-alive mark and a
  *     boot after a power cut) and UART overflow events.
+ *
+ * Planned reboots. A reboot the user asked for (restart, app update or
+ * rollback, factory reset, leaving safe mode: the wrapper decides, from
+ * lifecycle's reason) is planned downtime like receiver work:
+ *   - lc_shutdown(planned) at the start of the reboot counts the rest of the
+ *     session as planned and records it in the snapshot (reboot_planned),
+ *     which the wrapper stores at once, so the record survives a switch to
+ *     another app image too;
+ *   - the next boot learns it from that snapshot (lc_restore) or from
+ *     lifecycle's own record (lc_planned_boot, for when the snapshot was not
+ *     stored): the gap since the last-alive mark is planned, and so is each
+ *     expected slot's downtime from boot until that slot streams again, for
+ *     at most the boot window (lc_set_boot_window) after boot. A slot that
+ *     is up once is done: later outages count as unplanned again.
+ * A power cut is never planned: after one, neither the snapshot's flags nor
+ * lifecycle's record make the gap or the boot window planned (planned
+ * receiver work that the cut interrupted included).
  *
  * Before the first trusted UTC of a boot, everything accrues into a
  * "pending" record. When UTC arrives:
  *   1. the gap between the previous session's last-alive mark and this
  *      boot's start (UTC now minus uptime) is counted as down for the slots
  *      that were expected to stream then (planned if planned work was going
- *      on; also as power-off time after a power cut). Pending time carried
+ *      on or the session ended in a planned reboot, and the reset was not a
+ *      power cut; also as power-off time after a power cut). Pending time carried
  *      over from an earlier boot without a clock is taken out of the gap,
  *      since it covers part of it. The gap is capped at the history length
  *      plus one day;
@@ -105,7 +123,8 @@ typedef struct {
     int64_t alive_ms;                   /**< UTC ms accounted up to (0 = never had a clock) */
     uint8_t expected_mask;              /**< slots expected to stream at the time */
     uint8_t protected_mask;
-    bool planned;
+    bool planned;                       /**< planned receiver work was going on */
+    bool reboot_planned;                /**< the session is ending in a reboot the user asked for (lc_shutdown) */
 } lc_snapshot_t;
 
 typedef struct {
@@ -131,6 +150,12 @@ typedef struct {
     uint8_t prev_protected_mask;
     bool planned;
     bool rtcm_ok;
+    bool rebooting;                     /**< a reboot the user asked for is under way (lc_shutdown) */
+
+    /* after a planned reboot */
+    uint64_t boot_window_ms;            /**< how long after boot a slot's reconnect counts as planned */
+    uint8_t boot_planned_mask;          /**< slots whose downtime is still planned (not up since boot) */
+    bool boot_planned_started;          /**< lc_planned_boot ran (once per boot) */
 
     /* records */
     lc_day_t today;
@@ -142,7 +167,7 @@ typedef struct {
     bool alive_valid;
     int64_t alive_ms;
     bool gap_power_off;
-    bool prev_planned;
+    bool prev_planned;                  /**< its gap counts as planned */
 
     /* persistence */
     bool today_dirty;
@@ -159,11 +184,37 @@ typedef struct {
 void lc_init(lc_t *c, lc_day_t *hist, size_t hist_cap, uint32_t now_ms, uint64_t uptime_ms);
 
 /**
+ * How long after boot a slot's reconnect still counts as planned after a
+ * planned reboot (0 = only the gap until the boot). Call before lc_restore.
+ */
+void lc_set_boot_window(lc_t *c, uint32_t window_ms);
+
+/**
  * Carry state over from the previous session (before any other call but
- * lc_init and lc_set_history). `power_cut`: the gap since snap->alive_ms was
- * a power cut (counted as power-off time too).
+ * lc_init, lc_set_boot_window and lc_set_history). `power_cut`: the gap
+ * since snap->alive_ms was a power cut (counted as power-off time too, and
+ * never as planned). A snapshot that says the session ended in a planned
+ * reboot starts the boot as lc_planned_boot() does.
  */
 void lc_restore(lc_t *c, const lc_snapshot_t *snap, bool power_cut);
+
+/**
+ * The previous session ended in a reboot the user asked for (lifecycle's
+ * record of it, for when the snapshot could not say so): its gap counts as
+ * planned, and so does each expected slot's downtime from boot until it
+ * streams again, within the boot window. Ignored after a power cut. Call
+ * right after lc_restore, before the first input; calling it again changes
+ * nothing.
+ */
+void lc_planned_boot(lc_t *c);
+
+/**
+ * A reboot starts now (a shutdown hook). Accrues up to now_ms; when
+ * `planned` (the user asked for it), the rest of the session counts as
+ * planned and the snapshot carries reboot_planned for the next boot. Then
+ * the wrapper stores the books at once (lc_persist_due with interval 0).
+ */
+void lc_shutdown(lc_t *c, uint32_t now_ms, bool planned);
 
 /** Load the history (newest first; older entries and duplicates are dropped). */
 void lc_set_history(lc_t *c, const lc_day_t *days, size_t n);
@@ -239,7 +290,11 @@ void lc_mark_dirty(lc_t *c, bool today, bool hist);
 /** Today's record with the slot masks. @return bytes written, 0 if cap is too small. */
 size_t lc_encode_today(const lc_snapshot_t *s, uint8_t *buf, size_t cap);
 
-/** Decode into s->today, s->expected_mask, s->protected_mask, s->planned (other fields untouched). */
+/**
+ * Decode into s->today, s->expected_mask, s->protected_mask, s->planned and
+ * s->reboot_planned (false in a blob written before it existed); other
+ * fields untouched.
+ */
 bool lc_decode_today(const uint8_t *buf, size_t len, lc_snapshot_t *s);
 
 /** History, newest first. @return bytes written, 0 if cap is too small. */
@@ -254,7 +309,7 @@ size_t lc_hist_blob_max(size_t n);
 /* ---- RTC copy --------------------------------------------------------------------------- */
 
 #define LC_RTC_MAGIC   0x4C444752u   /* "RGDL" */
-#define LC_RTC_VERSION 1u
+#define LC_RTC_VERSION 2u   /* 2: the snapshot carries reboot_planned */
 
 /** The block kept in RTC memory (only ever read back by the same image). */
 typedef struct {

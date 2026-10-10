@@ -153,6 +153,20 @@ bool web_req_on_ap(httpd_req_t *req);
 /** Request checks of a WebSocket handshake (Host, Origin); false = answered already. */
 bool web_ws_precheck(httpd_req_t *req);
 
+/* ---- connections (web.c, around web_conn.h) ---------------------------------------------- */
+
+/** A handler on the server task finished its request (`admin`: it had an admin session). */
+void web_conn_request_done(httpd_req_t *req, bool admin);
+
+/** The handshake made `fd` a WebSocket client (of an admin session, or a public viewer). */
+void web_conn_ws_open(int fd, bool admin);
+
+/** A WebSocket client's close is under way. */
+void web_conn_ws_closing(int fd);
+
+/** The worker took over `fd`'s request (`on`), or finished it (any task). */
+void web_conn_worker(int fd, bool on);
+
 /* ---- authentication (web_auth.c) --------------------------------------------------------------- */
 
 /** Load the admin password record; reset sessions and throttling. */
@@ -259,6 +273,12 @@ void web_ws_close_sessions(uint32_t mask);
 
 /** Close every client without a session (1008): public status was turned off. */
 void web_ws_close_public(void);
+
+/**
+ * The sockets ran out and `fd` was chosen to make room: if it is a WebSocket
+ * client, close it with 1013 (try again later). @return false if it is not one.
+ */
+bool web_ws_evict(int fd);
 
 /** Periodic work on the server task: status at 1 Hz, progress at 2 Hz, log every 500 ms, events. */
 void web_ws_tick(bool second, bool half_second);

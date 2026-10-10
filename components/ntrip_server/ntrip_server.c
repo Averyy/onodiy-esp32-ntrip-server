@@ -1690,8 +1690,9 @@ static void wait_sessions_closed(uint32_t budget_ms)
 /* Planned reboot: every slot closes its session (terminator, close_notify,
  * close) so the caster frees the mountpoint at once. Bounded by the
  * lifecycle shutdown budget; a slot still in a TLS handshake is skipped. */
-static void on_shutdown(uint32_t deadline_ms, void *ctx)
+static void on_shutdown(lifecycle_reboot_reason_t reason, uint32_t deadline_ms, void *ctx)
 {
+    (void)reason;
     (void)ctx;
     s_shutdown = true;
     kick_all();
@@ -1820,7 +1821,8 @@ esp_err_t ntrip_server_get_config(size_t slot, ntrip_caster_cfg_t *out, bool wit
     return ESP_OK;
 }
 
-static esp_err_t check_policy(size_t slot, const ntrip_caster_cfg_t *next)
+/* The cross-slot rules against the stored configs, with `next` in `slot`. */
+static ntrip_policy_t check_policy(size_t slot, const ntrip_caster_cfg_t *next)
 {
     ntrip_policy_slot_t pol[CONFIG_NTRIP_MAX_CASTERS];
     char hosts[CONFIG_NTRIP_MAX_CASTERS][64];
@@ -1836,11 +1838,14 @@ static esp_err_t check_policy(size_t slot, const ntrip_caster_cfg_t *next)
         hosts[i][sizeof(hosts[i]) - 1] = '\0';
         pol[i].host = hosts[i];
     }
-    return ntrip_check_policy(pol, ntrip_server_slot_count(), slot) == NTRIP_POLICY_OK ? ESP_OK : ESP_ERR_NOT_ALLOWED;
+    return ntrip_check_policy(pol, ntrip_server_slot_count(), slot);
 }
 
-esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg)
+esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg, ntrip_policy_t *policy)
 {
+    if (policy != NULL) {
+        *policy = NTRIP_POLICY_OK;
+    }
     if (cfg == NULL || slot >= ntrip_server_slot_count()) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -1875,7 +1880,13 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg)
     if (has_bad_name(next.name) || ntrip_validate_fields(&f) != NTRIP_FIELDS_OK) {
         err = ESP_ERR_INVALID_ARG;
     } else {
-        err = check_policy(slot, &next);
+        ntrip_policy_t rule = check_policy(slot, &next);
+        if (rule != NTRIP_POLICY_OK) {
+            err = ESP_ERR_NOT_ALLOWED;
+            if (policy != NULL) {
+                *policy = rule;
+            }
+        }
     }
     uint8_t buf[CFG_BLOB_MAX];
     size_t len = 0;

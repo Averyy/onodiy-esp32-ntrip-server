@@ -17,6 +17,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ntrip_policy.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -276,29 +278,13 @@ uint32_t web_expected_build(const char *fw);
 
 /* ---- caster policy ------------------------------------------------------------------------ */
 
-typedef enum {
-    WEB_POLICY_OK = 0,
-    WEB_POLICY_SECOND_ONOCOY,
-    WEB_POLICY_SECOND_RTK2GO,
-    WEB_POLICY_DUP_ACK_REQUIRED,
-} web_policy_t;
-
-typedef struct {
-    bool enabled;
-    const char *host;
-    bool dup_ack;
-} web_policy_slot_t;
-
 /**
- * Which cross-slot rule saving slot `edited` breaks (slots[] holds the
- * result of the save): a second enabled Onocoy slot, a second RTK2go slot,
- * or Onocoy together with an open caster (RTK2go, Centipede) without the
- * acknowledgement. Used to name the reason when the caster component refuses.
+ * API name of the cross-slot rule ntrip_server_set_config() reported (the
+ * `reason` of `409 caster_policy`): "second_onocoy", "second_rtk2go",
+ * "dup_stream_ack_required"; NULL for NTRIP_POLICY_OK and unknown values.
+ * The rules themselves live in ntrip_server only.
  */
-web_policy_t web_caster_policy(const web_policy_slot_t *slots, size_t count, size_t edited);
-
-/** "second_onocoy", "second_rtk2go", "dup_stream_ack_required", NULL for OK. */
-const char *web_policy_reason(web_policy_t p);
+const char *web_policy_reason(ntrip_policy_t p);
 
 /* ---- app image check ------------------------------------------------------------------------- */
 
@@ -329,6 +315,15 @@ typedef struct {
  */
 web_image_check_t web_image_check(const uint8_t *head, size_t len, uint16_t chip_id, const char *project,
                                   web_image_info_t *out);
+
+/**
+ * What an app upload gets after its first bytes were checked: WEB_ERR_COUNT
+ * = go on and install; WEB_ERR_INVALID_IMAGE, WEB_ERR_NOT_THIS_PROJECT; or
+ * WEB_ERR_ROLLED_BACK_ACK_REQUIRED for a version that was rolled back on
+ * this station (`rolled_back`) unless the user acknowledged it
+ * (`?rolled_back_ack=1`), the same warning an install from the banner gives.
+ */
+web_err_t web_app_upload_verdict(web_image_check_t chk, bool rolled_back, bool rolled_back_ack);
 
 /* ---- status deltas, dates, names ------------------------------------------------------------- */
 

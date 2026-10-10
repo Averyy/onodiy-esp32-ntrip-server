@@ -408,6 +408,11 @@ with `1009`):
 | `{"type": "subscribe", "topics": ["status", "progress", "log"], "log_cursor": 51200}` | replaces the topic set (admin topics are ignored for public clients); `log_cursor` (optional): send the log lines after this cursor (as `/api/logs?cursor=`), else, when `log` is newly subscribed, only lines logged from now on |
 | `{"type": "ping"}` | `{"type": "pong"}`; also extends the session's idle timeout |
 
+WebSocket control frames are answered by the server itself (a `PING` frame
+gets a `PONG` with its payload, a `CLOSE` frame a `CLOSE`); they never
+extend a session, and neither does the server's own bookkeeping of the
+connection (section 18): only the page's own messages do.
+
 Default topics after the handshake: `status` and `progress` (admin), `status`
 (public). `event` messages go to every admin client.
 
@@ -455,7 +460,9 @@ The final message has `"done": true` and `"result"`: `ok` or a result code
 **Close codes:** `1012` the device reboots, `4001` session ended (logout,
 expiry, password change), `4003` client too slow (its queue stayed full for
 30 s), `1009` client message too large, `1008` public status was turned off
-(clients without a session).
+(clients without a session), `1013` a public viewer made room when the
+server ran out of sockets (section 18; reconnect after the usual backoff).
+An admin's client is never closed for that.
 
 **Log.** Each client reads the log from its own cursor: a `log` message
 holds whole lines, those after `from` up to `cursor`, so a client that read
@@ -757,7 +764,10 @@ anywhere; `name` <= 23, `host` <= 63 (a DNS name or an IPv4 literal),
 `port` 1-65535; `ntrip_version` 1 or 2; an enabled slot needs `host`,
 `port`, `mountpoint`, a password (1.0) and a username (2.0, except Onocoy).
 
-**Caster policy** (`409 caster_policy` with `reason`):
+**Caster policy** (`409 caster_policy` with `reason`). The rules belong
+to `ntrip_server`: `ntrip_server_set_config()` checks them against the
+stored slots under the same lock as the save and reports which one refused
+(`ntrip_policy_t`); the server only names it:
 - `second_onocoy`: another enabled slot already streams to Onocoy;
 - `second_rtk2go`: another enabled slot already streams to RTK2go;
 - `dup_stream_ack_required`: enabling this slot would stream to Onocoy and
@@ -880,7 +890,7 @@ a newer version appears; the server keeps no "later" state.
   "state": "idle", "progress_pct": 0, "checks_enabled": true, "last_check_unix": 1760080000,
   "last_result": {"job": "gnss_update", "result": "not_available_yet", "message": "ESP_ERR_NOT_SUPPORTED"},
   "app": {"running": "v0.3.0", "dev_build": false, "latest": "v0.4.0", "available": true,
-          "latest_rolled_back": false, "reverted": "", "reverted_in_stage1": false,
+          "latest_rolled_back": false, "rolled_back": ["v0.3.1"], "reverted": "", "reverted_in_stage1": false,
           "trial": {"stage": "none", "left_s": 0}, "rollback_available": true},
   "gnss": {"model": "UM982", "running": "R4.10Build18975", "running_build": 18975,
            "latest": "R4.10Build19152", "latest_build": 19152, "available": true,
@@ -896,6 +906,7 @@ a newer version appears; the server keeps no "later" state.
 | `last_result` | outcome of the last job the backend saw end (`job`: `check`, `app_update`, `app_upload`, `gnss_update`, `gnss_upload`, `rollback`), `null` this boot until one ended |
 | `app.trial.stage` | `none`, `confirming`, `verifying`, `watching` |
 | `app.latest_rolled_back` | the latest release is one that was rolled back here: not offered, installable with a warning |
+| `app.rolled_back` | every version rolled back on this station, newest first (`fw_update_get_rolled_back()`: reverted by its trial, rolled back by the user, or rolled back twice in its first minute; the last 8, kept through a factory reset). The banner offers none of them, however many daily checks later; installing one, from the banner or as an upload, asks for `rolled_back_ack` first |
 | `gnss.expected_downtime_s` | `station_expected_flash_downtime_s()` for the offered package (PROVISIONAL, to be confirmed on hardware); information, never a gate |
 | `gnss.budget_left_s` | as in `/api/status`, for the dialog |
 
@@ -905,7 +916,8 @@ a newer version appears; the server keeps no "later" state.
 `signature_failed`, `package_rejected` (a receiver package failed a
 pre-flight rule; with `failed_rule`, 1-12 as numbered in `um98x_flash.h`,
 and `cross_layout`), `failed` (anything else; `message` has the
-`esp_err_t`).
+`esp_err_t`). An app upload that stops for `rolled_back_ack_required`
+ends with `refused`.
 
 ### `POST /api/update/check` (adm)
 
@@ -956,9 +968,10 @@ safe_mode`, `409 package_pinned`, `409 busy`.
 ### `POST /api/update/rollback` (adm)
 
 `{"confirm": true}`. Marks the running version as rolled back and reboots
-into the other slot. `202 {"accepted": true}`. Errors: `409
-no_rollback_image`, `409 reboot_inhibited`, `409 busy`, `409
-journal_open`.
+into the other slot (reboot reason `app_rollback`, planned downtime: a
+failed trial's own revert is `app_revert` and is not). `202 {"accepted":
+true}`. Errors: `409 no_rollback_image`, `409 reboot_inhibited`, `409
+busy`, `409 journal_open`.
 
 ---
 
@@ -976,14 +989,20 @@ Size at most the inactive app slot (4 MB), else `413` before any write.
 The first 4 KB are checked before the slot is opened: the image's app
 description must name this project (`onocoydiy-esp-um982`), else
 `422 not_this_project` (the query `?any_project=1` overrides it after a
-warning). Then the image goes through `fw_update_upload_app_*`, which claims
-the update slot and a reboot inhibit before the first byte.
+warning), and its version must not be one rolled back on this station
+(`app.rolled_back` of `GET /api/update`), else `409
+rolled_back_ack_required` (the query `?rolled_back_ack=1` overrides it after
+the same warning an install from the banner gives; both queries combine as
+`?any_project=1&rolled_back_ack=1`). A refused upload is read to its end
+first, nothing is written. Then the image goes through
+`fw_update_upload_app_*`, which claims the update slot and a reboot inhibit
+before the first byte.
 
 `200 {"sha256": "...", "size": 1234567, "version": "v0.4.0+dev", "project": "onocoydiy-esp-um982", "reboot": true}`;
 the device reboots into the image about a second after the response and
 runs the trial. Errors: `400 invalid_image` (not a valid app for this chip),
-`400 size_mismatch` (fewer bytes than announced), `409 journal_open`,
-`409 busy`, `409 app_trial`.
+`400 size_mismatch` (fewer bytes than announced), `409
+rolled_back_ack_required`, `409 journal_open`, `409 busy`, `409 app_trial`.
 
 ### `POST /api/upload/gnss` (adm)
 
@@ -1112,10 +1131,17 @@ offering the download.
 
 Per-slot arrays have `max_slots` entries. `history` holds up to 30 past days
 in the `today` shape, newest first. `down_s` counts seconds a slot should
-have streamed but did not; `planned_s` the planned part of it (casters
-paused for receiver configuration or a receiver update; an app update's
-restart is not counted as planned). `clock` is `none` until a trusted time exists
-(`utc_second_of_day` is then `null`). The budget is information only.
+have streamed but did not; `planned_s` the planned part of it: casters
+paused for receiver configuration or a receiver update, and a restart that
+is a direct consequence of a user action (Restart, an app update or
+rollback, a factory reset, leaving safe mode, the BOOT-button resets;
+`lifecycle_reboot_user_planned()`), from the moment it begins until each
+caster streams again, at most `CONFIG_LEDGER_PLANNED_BOOT_S` (120 s) after
+the boot. Recovery restarts (ladders, low memory, a failed app trial, the
+safe-mode retry), crashes, brownouts and power cuts are never planned. Planned
+time counts against the budget all the same. `clock` is `none` until a
+trusted time exists (`utc_second_of_day` is then `null`). The budget is
+information only.
 
 ### `GET /api/diag/tasks`
 
@@ -1282,16 +1308,45 @@ no receiver update action.
 
 - **Server:** `esp_http_server`, task priority 5, 8 KB stack in internal
   RAM; `max_open_sockets` 7 (the lwIP socket budget counts on it),
-  `lru_purge_enable`, `max_uri_handlers` 64 with wildcard matching for
-  `/api/casters/*`, `max_req_hdr_len` 2048 (cookies and long browser
-  headers), receive timeout 4 s (a client that sends nothing that long is
-  dropped while it sends headers; a body read gives up after three in a
-  row), send timeout 10 s. A request with a body that nobody reads (every
-  `GET` and `DELETE`, anything outside the API routes, and any request
-  answered before its body, such as a refused Host or Origin) is answered
-  and the connection closed, instead of reading the body away on the
-  server task. WebSocket clients: at most 4, at most 2 of them without a
-  session.
+  `max_uri_handlers` 64 with wildcard matching for `/api/casters/*`,
+  `max_req_hdr_len` 2048 (cookies and long browser headers), receive
+  timeout 4 s (a client that sends nothing that long is dropped while it
+  sends headers; a body read gives up after three in a row), send timeout
+  10 s. A request with a body that nobody reads (every `GET` and `DELETE`,
+  anything outside the API routes, a request refused before its body, such
+  as a refused Host or Origin or a missing session) is answered and the
+  connection closed, instead of reading the body away on the server task.
+  WebSocket clients: at most 4, at most 2 of them without a session.
+- **Request deadline:** the server reads every request on its one task, and
+  the 4 s receive timeout alone would let a client that sends a byte every
+  few seconds hold that task (and every status push, WebSocket message and
+  session expiry queued behind it) for hours. So the first byte of a request
+  arms a deadline of `CONFIG_WEB_REQUEST_DEADLINE_S` (6 s): the request
+  line, the headers, a JSON body and a WebSocket frame must all be in by
+  then, or the connection is closed (`408` while headers are read). A
+  receive override on every connection enforces it (`web_conn.h`); the
+  handler's end disarms it. A browser sends a request at once, so a slow
+  phone on the setup AP needs a fraction of that, and 6 s still covers two
+  lost and resent TCP segments. Uploads and downloads run on the worker,
+  which reads a large body at the client's pace: they are not bounded by
+  it, only by their own per-receive retries.
+- **Socket limit:** `lru_purge_enable` is off. Its least-recently-used
+  choice counts only requests received, so an admin's WebSocket, which only
+  listens, would be the first connection closed whenever anyone opened
+  sockets. Instead the open callback keeps one of the 7 sockets free: when a
+  new connection takes the last one, another is closed at once, in this
+  order: an idle connection whose last request had no admin session, an
+  idle admin connection, a public viewer's WebSocket (`1013`); the oldest
+  activity first within each. An admin's WebSocket and a connection whose
+  upload or download runs on the worker are never chosen; when nothing else
+  is left the new connection itself is closed. The trade-off: 6 connections
+  stay open at a time instead of 7, and an idle keep-alive connection may be
+  closed under a browser (it reopens one by itself); in exchange no client
+  on the network can cut off the admin's live page by opening sockets. A
+  client-side keep-alive frame was the alternative and was not taken: it
+  only helps while the admin's frames outnumber the other client's
+  requests, and the server would have to tell those frames from the page's
+  own messages so as not to extend the session.
 - **Handlers never block for long.** Station, caster, network and update
   calls are asynchronous; a handler reads snapshots and returns. The
   password check (about 0.3 s) runs on the server task. Uploads and
@@ -1337,17 +1392,18 @@ Things this contract needs that the current headers do not provide yet:
 
 1. **Boot history**: resolved; `lifecycle_get_boot_history()` reads
    `life/boots`.
-2. **Caster policy reason**: `ntrip_server_set_config()` returns
-   `ESP_ERR_NOT_ALLOWED` for all three policy cases; the server names the
-   reason by applying the same rules to the slot configs
-   (`web_caster_policy()`). A reason out-parameter or a check function in
-   `ntrip_server.h` would remove that duplicate.
+2. **Caster policy reason**: resolved; `ntrip_server_set_config()` reports
+   the rule it applied (`ntrip_policy_t`, out-parameter) and the server only
+   names it (section 10).
 3. **Receiver flashing available**: `flash_available` is still the
    constant `WEB_FLASH_AVAILABLE` in the web component; it should come from
    the station (for example a query in `station.h`) once flashing is built.
-4. **Rolled-back versions**: `fw_update.h` exposes only the last reverted
-   version and whether the latest release was rolled back, not the whole
-   list.
+4. **Rolled-back versions**: resolved; `fw_update_get_rolled_back()` and
+   `fw_update_is_rolled_back()` expose the bounded list fw_update keeps
+   (`ota/bad_ver`, 8 versions, written only when one is added). The banner
+   already suppressed every version on it; the API now lists them
+   (`app.rolled_back`) and an app upload of one asks for the acknowledgement
+   (section 13).
 5. **Refused BOOT-button factory reset**: resolved;
    `health_status_t.factory_reset_refused_age_s`.
 6. Not implemented yet behind existing headers (the API shows empty
@@ -1393,7 +1449,7 @@ its first value: 0 for most, 1 for `diag_event_t`, `diag_loss_id_t` and
 | `network_ladder_why_t` | `none`, `upstream_ok`, `no_upstream`, `journal_open`, `interval`, `inhibited`, `ap_in_use` |
 | `gnss_link_mode_t` | `off`, `stream`, `command`, `raw` |
 | `lifecycle_reset_class_t` | `power_on`, `planned`, `crash`, `brownout`, `other` |
-| `lifecycle_reboot_reason_t` | `none`, `user`, `factory_reset`, `admin_reset`, `app_update`, `app_revert`, `gnss_ladder`, `network_ladder`, `low_heap`, `safe_mode_retry`, `safe_mode_cleared`, `nvs_slot_switch`, `boot_failure` |
+| `lifecycle_reboot_reason_t` | `none`, `user`, `factory_reset`, `admin_reset`, `app_update`, `app_revert` (a failed trial), `gnss_ladder`, `network_ladder`, `low_heap`, `safe_mode_retry`, `safe_mode_cleared`, `nvs_slot_switch`, `boot_failure`, `app_rollback` (the user's rollback) |
 | `esp_reset_reason_t` | `unknown`, `poweron`, `ext`, `sw`, `panic`, `int_wdt`, `task_wdt`, `wdt`, `deepsleep`, `brownout`, `sdio`, `usb`, `jtag`, `efuse`, `pwr_glitch`, `cpu_lockup` |
 | `ledger_clock_t` | `none`, `sntp`, `gnss` |
 | `gnss_sys_t` | `gps`, `glonass`, `galileo`, `sbas`, `qzss`, `beidou`, `navic` |

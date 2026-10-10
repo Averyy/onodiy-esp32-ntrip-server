@@ -233,6 +233,8 @@ typedef struct {
     bool checks_enabled;
     uint32_t budget_left_s;        /**< UINT32_MAX = null */
     bool flash_available;
+    const char (*rolled_back)[32]; /**< fw_update_get_rolled_back(), newest first */
+    size_t rolled_back_count;
 } web_update_snap_t;
 
 /** GET /api/update. */

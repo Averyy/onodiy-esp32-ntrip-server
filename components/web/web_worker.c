@@ -62,6 +62,7 @@ typedef struct {
     httpd_req_t *req;        /* async copy (NULL for the jobs without a request) */
     uint32_t size;
     bool flag;               /* app: any project; log: previous boot */
+    bool ack;                /* app: the user knows the version was rolled back here */
     web_err_t err;
     uint32_t retry_in_s;
 } job_t;
@@ -266,6 +267,7 @@ static void refuse(httpd_req_t *req, uint32_t left, web_err_t err, const char *m
 static void finish_request(httpd_req_t *req)
 {
     if (req != NULL) {
+        web_conn_worker(httpd_req_to_sockfd(req), false);   /* its next request is bounded again */
         (void)httpd_req_async_handler_complete(req);
     }
 }
@@ -300,10 +302,18 @@ static void upload_app(const job_t *job)
     web_image_info_t info;
     web_image_check_t chk = web_image_check(s_io, head, (uint16_t)CONFIG_IDF_FIRMWARE_CHIP_ID,
                                             job->flag ? NULL : WEB_PROJECT_NAME, &info);
-    if (chk != WEB_IMAGE_OK) {
-        web_err_t e = chk == WEB_IMAGE_OTHER_PROJECT ? WEB_ERR_NOT_THIS_PROJECT : WEB_ERR_INVALID_IMAGE;
+    bool rolled_back = chk == WEB_IMAGE_OK && fw_update_is_rolled_back(info.version);
+    web_err_t verdict = web_app_upload_verdict(chk, rolled_back, job->ack);
+    if (verdict == WEB_ERR_ROLLED_BACK_ACK_REQUIRED) {
+        /* Before anything is written: the same warning as from the banner. */
+        progress_done(NULL, "refused", ESP_ERR_INVALID_STATE);
+        refuse(req, left, verdict, NULL, UINT32_MAX);
+        web_note_result("app_upload", ESP_ERR_INVALID_STATE, "refused");
+        return;
+    }
+    if (verdict != WEB_ERR_COUNT) {
         progress_done(NULL, "invalid_image", ESP_ERR_INVALID_VERSION);
-        refuse(req, left, e, NULL, UINT32_MAX);
+        refuse(req, left, verdict, NULL, UINT32_MAX);
         web_note_result("app_upload", ESP_ERR_INVALID_VERSION, "invalid_image");
         return;
     }
@@ -562,7 +572,12 @@ static bool queue_async(httpd_req_t *req, job_t *job)
         return false;
     }
     job->req = copy;
+    /* Before the worker can run: its body reads are not held to the
+     * server's request deadline (large uploads at the client's pace). */
+    int fd = httpd_req_to_sockfd(req);
+    web_conn_worker(fd, true);
     if (xQueueSend(s_jobs, job, 0) != pdTRUE) {
+        web_conn_worker(fd, false);
         (void)httpd_req_async_handler_complete(copy);
         return false;
     }
@@ -624,7 +639,8 @@ esp_err_t web_upload_app(web_req_t *r)
     }
     char v[4];
     bool any_project = web_query_value(r->query, "any_project", v, sizeof(v)) && strcmp(v, "1") == 0;
-    job_t job = { .kind = JOB_UPLOAD_APP, .size = (uint32_t)req->content_len, .flag = any_project };
+    bool ack = web_query_value(r->query, "rolled_back_ack", v, sizeof(v)) && strcmp(v, "1") == 0;
+    job_t job = { .kind = JOB_UPLOAD_APP, .size = (uint32_t)req->content_len, .flag = any_project, .ack = ack };
     if (!queue_async(req, &job)) {
         atomic_store(&s_busy, false);
         return answer_and_close(req, WEB_ERR_BUSY, UINT32_MAX);

@@ -110,6 +110,8 @@ bool fw_bad_decode(const uint8_t *buf, size_t len, fw_bad_versions_t *out);
 bool fw_bad_contains(const fw_bad_versions_t *b, const char *version);
 /** Add a version (no duplicates; the oldest goes when full). @return true if the list changed. */
 bool fw_bad_add(fw_bad_versions_t *b, const char *version);
+/** Copy the list newest first into out[0..cap). @return entries copied. */
+size_t fw_bad_newest_first(const fw_bad_versions_t *b, char out[][32], size_t cap);
 
 /* ---- boot ------------------------------------------------------------------------- */
 

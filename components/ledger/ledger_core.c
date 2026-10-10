@@ -43,6 +43,12 @@ static uint8_t up_mask(const lc_t *c)
     return c->rtcm_ok ? (uint8_t)(c->known_mask & c->streaming_mask) : 0u;
 }
 
+/* After a planned reboot: a slot that streams again is no longer in its planned reconnect. */
+static void note_up(lc_t *c)
+{
+    c->boot_planned_mask &= (uint8_t)~up_mask(c);
+}
+
 /* ---- history ------------------------------------------------------------------------- */
 
 static void mark(lc_t *c, const lc_day_t *r)
@@ -133,7 +139,8 @@ static lc_day_t *rec_for_day(lc_t *c, int32_t day)
 
 /* ---- accrual ------------------------------------------------------------------------- */
 
-static void add_state(lc_t *c, lc_day_t *r, uint64_t ms, uint8_t expected, uint8_t up, bool planned)
+/* `planned`: the slots whose downtime counts as planned. */
+static void add_state(lc_t *c, lc_day_t *r, uint64_t ms, uint8_t expected, uint8_t up, uint8_t planned)
 {
     uint8_t down = (uint8_t)(expected & ~up);
     if (down == 0) {
@@ -142,7 +149,7 @@ static void add_state(lc_t *c, lc_day_t *r, uint64_t ms, uint8_t expected, uint8
     for (size_t s = 0; s < LC_SLOTS; s++) {
         if (down & bit(s)) {
             r->down_ms[s] = sat_add(r->down_ms[s], ms);
-            if (planned) {
+            if (planned & bit(s)) {
                 r->planned_ms[s] = sat_add(r->planned_ms[s], ms);
             }
         }
@@ -151,7 +158,7 @@ static void add_state(lc_t *c, lc_day_t *r, uint64_t ms, uint8_t expected, uint8
 }
 
 /* Spread [start, start + ms) over UTC days with a fixed state. */
-static void accrue_span(lc_t *c, int64_t start, uint64_t ms, uint8_t expected, uint8_t up, bool planned,
+static void accrue_span(lc_t *c, int64_t start, uint64_t ms, uint8_t expected, uint8_t up, uint8_t planned,
                         bool power_off)
 {
     int64_t t = start;
@@ -176,21 +183,40 @@ static void accrue_span(lc_t *c, int64_t start, uint64_t ms, uint8_t expected, u
     }
 }
 
-static void accrue(lc_t *c, uint64_t ms)
+/* Accrue `ms` with one state; `planned` as in add_state. */
+static void accrue_piece(lc_t *c, uint64_t ms, uint8_t planned)
 {
-    if (ms == 0) {
-        return;
-    }
     if (c->clock != LC_CLOCK_NONE) {
-        accrue_span(c, c->unix_ms, ms, expected_mask(c), up_mask(c), c->planned, false);
+        accrue_span(c, c->unix_ms, ms, expected_mask(c), up_mask(c), planned, false);
         c->unix_ms += (int64_t)ms;
         (void)rec_for_day(c, day_of(c->unix_ms));   /* at exactly midnight, today is the new day */
     } else {
-        add_state(c, &c->pending, ms, expected_mask(c), up_mask(c), c->planned);
+        add_state(c, &c->pending, ms, expected_mask(c), up_mask(c), planned);
         c->pending_ms += ms;
         c->pending_boot_ms += ms;
     }
     c->uptime_ms += ms;
+}
+
+static void accrue(lc_t *c, uint64_t ms)
+{
+    while (ms > 0) {
+        uint64_t piece = ms;
+        uint8_t planned = (c->planned || c->rebooting) ? 0xFFu : 0u;
+        if (c->boot_planned_mask != 0) {
+            if (c->uptime_ms >= c->boot_window_ms) {
+                c->boot_planned_mask = 0;   /* the window after a planned reboot is over */
+            } else {
+                uint64_t left = c->boot_window_ms - c->uptime_ms;
+                if (piece > left) {
+                    piece = left;           /* the rest of this step falls after the window */
+                }
+                planned |= c->boot_planned_mask;
+            }
+        }
+        accrue_piece(c, piece, planned);
+        ms -= piece;
+    }
 }
 
 static void advance(lc_t *c, uint32_t now_ms)
@@ -271,7 +297,8 @@ static void first_clock(lc_t *c, int64_t unix_ms)
                 start += gap - max_gap;
                 gap = max_gap;
             }
-            accrue_span(c, start, (uint64_t)gap, c->prev_expected_mask, 0, c->prev_planned, c->gap_power_off);
+            accrue_span(c, start, (uint64_t)gap, c->prev_expected_mask, 0, c->prev_planned ? 0xFFu : 0u,
+                        c->gap_power_off);
         }
     }
     spread_pending(c, unix_ms);
@@ -293,6 +320,23 @@ void lc_init(lc_t *c, lc_day_t *hist, size_t hist_cap, uint32_t now_ms, uint64_t
     c->pending.utc_day = -1;
 }
 
+void lc_set_boot_window(lc_t *c, uint32_t window_ms)
+{
+    c->boot_window_ms = window_ms;
+}
+
+void lc_planned_boot(lc_t *c)
+{
+    if (c->gap_power_off) {
+        return;   /* a power cut is never planned */
+    }
+    c->prev_planned = true;
+    if (c->uptime_ms < c->boot_window_ms && c->boot_planned_mask == 0 && !c->boot_planned_started) {
+        c->boot_planned_mask = 0xFFu;   /* every slot until it streams again */
+    }
+    c->boot_planned_started = true;
+}
+
 void lc_restore(lc_t *c, const lc_snapshot_t *snap, bool power_cut)
 {
     c->today = snap->today;
@@ -306,12 +350,16 @@ void lc_restore(lc_t *c, const lc_snapshot_t *snap, bool power_cut)
     c->pending_boot_ms = 0;
     c->prev_expected_mask = snap->expected_mask;
     c->prev_protected_mask = snap->protected_mask;
-    c->prev_planned = snap->planned;
+    c->prev_planned = snap->planned && !power_cut;   /* a power cut is never planned */
     c->planned = false;
     c->alive_valid = snap->alive_ms >= LC_UTC_FLOOR_S * 1000;
     c->alive_ms = snap->alive_ms;
     c->gap_power_off = power_cut;
     trim_hist(c);
+    if (snap->reboot_planned) {
+        lc_planned_boot(c);
+        c->today_dirty = true;   /* the stored copy of the flag belongs to the session that ended */
+    }
 }
 
 void lc_set_history(lc_t *c, const lc_day_t *days, size_t n)
@@ -371,6 +419,7 @@ void lc_set_slot(lc_t *c, uint32_t now_ms, size_t slot, bool enabled, bool prote
     c->enabled_mask = enabled ? (uint8_t)(c->enabled_mask | b) : (uint8_t)(c->enabled_mask & ~b);
     c->protected_mask = protected_slot ? (uint8_t)(c->protected_mask | b) : (uint8_t)(c->protected_mask & ~b);
     c->streaming_mask = streaming ? (uint8_t)(c->streaming_mask | b) : (uint8_t)(c->streaming_mask & ~b);
+    note_up(c);
     if (expected_mask(c) != old_expected || protected_mask(c) != old_protected) {
         c->today_dirty = true;          /* the masks are stored with today */
     }
@@ -389,6 +438,16 @@ void lc_set_rtcm_ok(lc_t *c, uint32_t now_ms, bool ok)
 {
     advance(c, now_ms);
     c->rtcm_ok = ok;
+    note_up(c);
+}
+
+void lc_shutdown(lc_t *c, uint32_t now_ms, bool planned)
+{
+    advance(c, now_ms);
+    if (planned && !c->rebooting) {
+        c->rebooting = true;
+        c->today_dirty = true;   /* the flag is stored with today */
+    }
 }
 
 bool lc_set_utc(lc_t *c, uint32_t now_ms, int64_t unix_ms, lc_clock_t source)
@@ -500,6 +559,7 @@ void lc_snapshot(const lc_t *c, lc_snapshot_t *out)
     out->expected_mask = expected_mask(c);
     out->protected_mask = protected_mask(c);
     out->planned = c->planned;
+    out->reboot_planned = c->rebooting;
 }
 
 bool lc_persist_due(lc_t *c, uint32_t now_ms, uint32_t interval_ms, int64_t *alive_ms, bool *today, bool *hist)
@@ -569,6 +629,7 @@ size_t lc_encode_today(const lc_snapshot_t *s, uint8_t *buf, size_t cap)
     blob_put_u8(&w, s->expected_mask);
     blob_put_u8(&w, s->protected_mask);
     blob_put_bool(&w, s->planned);
+    blob_put_bool(&w, s->reboot_planned);   /* appended later: older blobs end before it */
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
@@ -585,6 +646,7 @@ bool lc_decode_today(const uint8_t *buf, size_t len, lc_snapshot_t *s)
     uint8_t expected = blob_get_u8(&r);
     uint8_t prot = blob_get_u8(&r);
     bool planned = blob_get_bool(&r);
+    bool reboot_planned = blob_reader_ok(&r) && blob_reader_remaining(&r) > 0 && blob_get_bool(&r);
     if (!blob_reader_ok(&r)) {
         return false;
     }
@@ -592,6 +654,7 @@ bool lc_decode_today(const uint8_t *buf, size_t len, lc_snapshot_t *s)
     s->expected_mask = expected;
     s->protected_mask = prot;
     s->planned = planned;
+    s->reboot_planned = reboot_planned;
     return true;
 }
 

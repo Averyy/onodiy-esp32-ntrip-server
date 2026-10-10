@@ -25,6 +25,25 @@ menu "Station: availability ledger"
         range 7 90
         default 30
 
+    config LEDGER_PLANNED_BOOT_S
+        int "After a planned reboot, count a caster's reconnect as planned for at most (s)"
+        range 0 600
+        default 120
+        help
+            A reboot the user asked for (restart, app update or rollback,
+            factory reset, leaving safe mode) is planned downtime: the gap
+            until the next boot, and each caster's time after the boot until
+            it streams again, at most this long after the boot. A normal
+            boot streams again within about 20-40 s (boot, Wi-Fi association
+            and DHCP, the receiver keeps streaming, one caster connect and
+            perhaps one quick retry while the caster lets go of the old
+            session); 120 s leaves room for a slow access point. A caster
+            still down after that has a problem of its own (Wi-Fi, internet,
+            the caster), which counts as unplanned like after any other
+            boot. The downtime counts against the daily budget either way;
+            this only decides how much of it is shown as planned. 0 = only
+            the gap until the boot.
+
     config LEDGER_ALIVE_PERSIST_S
         int "Persist the last-alive mark every (s)"
         range 10 600

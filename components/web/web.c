@@ -8,8 +8,10 @@
  */
 #include "web.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -34,6 +36,7 @@
 #include "settings.h"
 #include "station.h"
 #include "web_assets.h"
+#include "web_conn.h"
 #include "web_enums.h"
 #include "web_internal.h"
 #include "web_parse.h"
@@ -50,7 +53,8 @@ _Static_assert(ESP_APP_DESC_MAGIC_WORD == WEB_DESC_MAGIC, "app description magic
 _Static_assert(ESP_IMAGE_HEADER_MAGIC == WEB_IMAGE_MAGIC, "image magic moved");
 _Static_assert(ESP_ERR_OTA_VALIDATE_FAILED == 0x1503, "OTA validation error code moved (web_build.c)");
 
-/* Server limits (socket budget: 7 here + 3 for the server itself, beside the casters). */
+/* Server limits (socket budget: 7 here + 3 for the server itself, beside the
+ * casters). One of the 7 is kept free for the next connection (web_conn.h). */
 #define SERVER_MAX_SOCKETS   7
 #define SERVER_MAX_URIS      64
 #define SERVER_STACK         8192
@@ -58,10 +62,17 @@ _Static_assert(ESP_ERR_OTA_VALIDATE_FAILED == 0x1503, "OTA validation error code
 #define SERVER_HDR_LEN       2048
 /* One server task handles every request: a client that sends nothing for
  * this long is dropped (headers), or its body read gives up (after a few
- * tries), so a stalled or trickling client holds the server only briefly. */
+ * tries); and the whole request must be in within CONFIG_WEB_REQUEST_DEADLINE_S
+ * of its first byte, so a stalled or trickling client holds the server only
+ * briefly. */
 #define SERVER_RECV_TIMEOUT_S 4
 #define SERVER_SEND_TIMEOUT_S 10
 #define TICK_MS              250
+#define DEADLINE_LOG_S       60   /* at most one log line about late requests per minute */
+
+_Static_assert(SERVER_MAX_SOCKETS <= WEB_CONN_MAX, "every connection must fit the connection table");
+_Static_assert(CONFIG_WEB_REQUEST_DEADLINE_S > SERVER_RECV_TIMEOUT_S,
+               "the request deadline must allow one full per-receive timeout");
 
 static httpd_handle_t s_server;
 static esp_netif_t *s_sta;
@@ -84,6 +95,13 @@ static atomic_bool s_public_reload;
 static atomic_bool s_fw_changed;
 static atomic_bool s_scan_done;
 
+/* Connections: request deadlines and which one to close when the sockets
+ * run out (web_conn.h). Server task, and the worker for its requests. */
+static portMUX_TYPE s_conn_lock = portMUX_INITIALIZER_UNLOCKED;
+static web_conns_t s_conns;
+static uint32_t s_late_logged_s;
+static uint32_t s_late_count;
+
 /* Server-task buffers in PSRAM. */
 EXT_RAM_BSS_ATTR static char s_http_buf[2048];
 EXT_RAM_BSS_ATTR static char s_body[WEB_JSON_MAX_CA + 1];
@@ -101,9 +119,163 @@ uint32_t web_now_s(void)
     return (uint32_t)(esp_timer_get_time() / 1000000);
 }
 
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
 bool web_public_status(void)
 {
     return s_public;
+}
+
+/* ---- connections ------------------------------------------------------------------------ */
+
+void web_conn_request_done(httpd_req_t *req, bool admin)
+{
+    int fd = httpd_req_to_sockfd(req);
+    uint32_t now = now_ms();
+    taskENTER_CRITICAL(&s_conn_lock);
+    web_conn_done(&s_conns, fd, now, admin);
+    taskEXIT_CRITICAL(&s_conn_lock);
+}
+
+void web_conn_ws_open(int fd, bool admin)
+{
+    uint32_t now = now_ms();
+    taskENTER_CRITICAL(&s_conn_lock);
+    web_conn_websocket(&s_conns, fd, admin, now);
+    taskEXIT_CRITICAL(&s_conn_lock);
+}
+
+void web_conn_ws_closing(int fd)
+{
+    taskENTER_CRITICAL(&s_conn_lock);
+    web_conn_closing(&s_conns, fd, true);
+    taskEXIT_CRITICAL(&s_conn_lock);
+}
+
+void web_conn_worker(int fd, bool on)
+{
+    uint32_t now = now_ms();
+    taskENTER_CRITICAL(&s_conn_lock);
+    web_conn_async(&s_conns, fd, on, now);
+    taskEXIT_CRITICAL(&s_conn_lock);
+}
+
+/* A request ran out of time: logged at most once a minute (a client could
+ * otherwise fill the log). */
+static void note_late(void)
+{
+    uint32_t now = web_now_s();
+    taskENTER_CRITICAL(&s_conn_lock);
+    s_late_count++;
+    bool log = s_late_logged_s == 0 || (uint32_t)(now - s_late_logged_s) >= DEADLINE_LOG_S;
+    uint32_t count = s_late_count;
+    if (log) {
+        s_late_logged_s = now == 0 ? 1 : now;
+        s_late_count = 0;
+    }
+    taskEXIT_CRITICAL(&s_conn_lock);
+    if (log) {
+        ESP_LOGW(TAG, "%u request(s) not received within %d s: connection closed", (unsigned)count,
+                 CONFIG_WEB_REQUEST_DEADLINE_S);
+    }
+}
+
+/* True if the socket has something to read within `ms`. */
+static bool readable_within(int fd, int32_t ms)
+{
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    struct timeval tv = { .tv_sec = ms / 1000, .tv_usec = (ms % 1000) * 1000 };
+    int n = select(fd + 1, &rfds, NULL, NULL, &tv);
+    return n != 0;   /* an error is left to recv() to report */
+}
+
+/*
+ * Receive override of every connection: the default receive, except that a
+ * request being received on the server task waits only for what is left of
+ * its deadline (web_conn.h), then reports a timeout, after which the server
+ * answers 408 (headers) or gives up on the body or frame and closes the
+ * connection.
+ */
+static int conn_recv(httpd_handle_t hd, int fd, char *buf, size_t len, int flags)
+{
+    (void)hd;
+    if (buf == NULL) {
+        return HTTPD_SOCK_ERR_INVALID;
+    }
+    uint32_t now = now_ms();
+    taskENTER_CRITICAL(&s_conn_lock);
+    int32_t budget = web_conn_recv_budget(&s_conns, fd, now);
+    taskEXIT_CRITICAL(&s_conn_lock);
+    if (budget == 0 || (budget > 0 && budget < SERVER_RECV_TIMEOUT_S * 1000 && !readable_within(fd, budget))) {
+        note_late();
+        return HTTPD_SOCK_ERR_TIMEOUT;
+    }
+    int n = recv(fd, buf, len, flags);
+    if (n < 0) {
+        switch (errno) {
+        case EAGAIN:
+#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
+        case EWOULDBLOCK:
+#endif
+        case EINTR:
+            return HTTPD_SOCK_ERR_TIMEOUT;
+        case EINVAL:
+        case EBADF:
+        case EFAULT:
+        case ENOTSOCK:
+            return HTTPD_SOCK_ERR_INVALID;
+        default:
+            return HTTPD_SOCK_ERR_FAIL;
+        }
+    }
+    if (n > 0) {
+        now = now_ms();
+        taskENTER_CRITICAL(&s_conn_lock);
+        web_conn_received(&s_conns, fd, now);
+        taskEXIT_CRITICAL(&s_conn_lock);
+    }
+    return n;
+}
+
+/* Close `fd` to keep a socket free (server task, from the open callback). */
+static void evict(httpd_handle_t hd, int fd)
+{
+    if (web_ws_evict(fd)) {
+        return;   /* a public viewer: told to come back later, then closed */
+    }
+    /* esp_http_server skips the close of a session whose LRU counter is
+     * still 0 (no request finished since the server was last idle). */
+    (void)httpd_sess_update_lru_counter(hd, fd);
+    if (httpd_sess_trigger_close(hd, fd) != ESP_OK) {
+        taskENTER_CRITICAL(&s_conn_lock);
+        web_conn_closing(&s_conns, fd, false);
+        taskEXIT_CRITICAL(&s_conn_lock);
+        ESP_LOGW(TAG, "connection %d not closed (server queue full)", fd);
+    }
+}
+
+static esp_err_t on_sess_open(httpd_handle_t hd, int fd)
+{
+    uint32_t now = now_ms();
+    taskENTER_CRITICAL(&s_conn_lock);
+    bool tracked = web_conn_open(&s_conns, fd, now);
+    int victim = web_conn_victim(&s_conns, fd, SERVER_MAX_SOCKETS, now);
+    taskEXIT_CRITICAL(&s_conn_lock);
+    if (!tracked) {
+        ESP_LOGW(TAG, "connection %d not tracked", fd);
+    }
+    /* Never fail here: esp_http_server would close the socket twice. */
+    (void)httpd_sess_set_recv_override(hd, fd, conn_recv);
+    if (victim >= 0) {
+        ESP_LOGD(TAG, "sockets full: closing connection %d%s", victim, victim == fd ? " (the new one)" : "");
+        evict(hd, victim);
+    }
+    return ESP_OK;
 }
 
 void web_public_status_set_cached(bool on)
@@ -385,7 +557,11 @@ static esp_err_t read_body(httpd_req_t *req, size_t len)
     return ESP_OK;
 }
 
-static esp_err_t api_dispatch(httpd_req_t *req)
+/* Every path either reads the request's body, hands it to the worker, or
+ * answers and closes the connection (ESP_FAIL): esp_http_server never has a
+ * body left to read away after the handler, which it would do on the server
+ * task once the request deadline is over. */
+static esp_err_t api_handle(httpd_req_t *req, web_req_t *rp)
 {
     const web_route_t *rt = req->user_ctx;
     web_req_t r;
@@ -418,11 +594,12 @@ static esp_err_t api_dispatch(httpd_req_t *req)
     }
 
     r.sess = web_auth_session(req, true);
+    rp->sess = r.sess;
     switch (rt->access) {
     case WEB_ACC_ADMIN:
         if (r.sess < 0) {
-            return rt->body == WEB_BODY_UPLOAD ? refuse_and_close(req, WEB_ERR_UNAUTHORIZED)
-                                               : web_send_err(req, WEB_ERR_UNAUTHORIZED);
+            return req->content_len > 0 ? refuse_and_close(req, WEB_ERR_UNAUTHORIZED)
+                                        : web_send_err(req, WEB_ERR_UNAUTHORIZED);
         }
         r.admin = true;
         break;
@@ -450,6 +627,14 @@ static esp_err_t api_dispatch(httpd_req_t *req)
     }
     esp_err_t ret = rt->fn(&r);
     cJSON_Delete(r.body);
+    return ret;
+}
+
+static esp_err_t api_dispatch(httpd_req_t *req)
+{
+    web_req_t r = { .sess = -1 };
+    esp_err_t ret = api_handle(req, &r);
+    web_conn_request_done(req, r.sess >= 0);
     return ret;
 }
 
@@ -486,7 +671,7 @@ static esp_err_t serve_asset(httpd_req_t *req, const web_asset_t *a)
 }
 
 /* Everything no route matched: the UI assets, 404/405, the captive portal on the AP. */
-static esp_err_t fallback(httpd_req_t *req)
+static esp_err_t fallback_handle(httpd_req_t *req)
 {
     bool on_ap = false;
     pre_t pre = precheck(req, &on_ap, false);
@@ -526,12 +711,31 @@ static esp_err_t fallback(httpd_req_t *req)
     return web_send_err(req, WEB_ERR_NOT_FOUND);
 }
 
+static esp_err_t fallback(httpd_req_t *req)
+{
+    esp_err_t ret = fallback_handle(req);
+    web_conn_request_done(req, false);
+    return ret;
+}
+
+/* WebSocket frames: every frame, control frames included, ends here, which
+ * ends its receive deadline. */
+static esp_err_t ws_frame(httpd_req_t *req)
+{
+    esp_err_t ret = web_ws_handler(req);
+    web_conn_request_done(req, false);
+    return ret;
+}
+
 /* ---- sessions of the server ------------------------------------------------------------------- */
 
 static void on_sess_close(httpd_handle_t hd, int fd)
 {
     (void)hd;
     web_ws_on_close(fd);
+    taskENTER_CRITICAL(&s_conn_lock);
+    web_conn_close(&s_conns, fd);
+    taskEXIT_CRITICAL(&s_conn_lock);
     close(fd);
 }
 
@@ -750,8 +954,9 @@ static void on_lifecycle(void *arg, esp_event_base_t base, int32_t id, void *dat
 
 /* Before a planned restart: let pending responses go out, tell the WebSocket
  * clients, close them with 1012. Bounded by the hook budget. */
-static void shutdown_hook(uint32_t deadline_ms, void *ctx)
+static void shutdown_hook(lifecycle_reboot_reason_t reason, uint32_t deadline_ms, void *ctx)
 {
+    (void)reason;   /* the PRE_REBOOT event already told the clients */
     (void)ctx;
     if (s_server == NULL) {
         return;
@@ -798,6 +1003,7 @@ esp_err_t web_init(void)
     /* The UI digest keeps a development build whose version string does not
      * change from leaving a browser on a stale cached UI. */
     snprintf(s_etag, sizeof(s_etag), "\"%s-%s\"", esp_app_get_description()->version, web_ui_digest);
+    web_conns_init(&s_conns, (uint32_t)CONFIG_WEB_REQUEST_DEADLINE_S * 1000u);
     load_public_status();
     web_auth_init();
     if (s_reboot_sem == NULL) {
@@ -856,10 +1062,14 @@ esp_err_t web_start(void)
     cfg.max_uri_handlers = SERVER_MAX_URIS;
     cfg.max_resp_headers = 12;
     cfg.max_req_hdr_len = SERVER_HDR_LEN;
-    cfg.lru_purge_enable = true;
+    /* Not the server's own LRU purge: it would close an admin's quiet
+     * WebSocket for anyone's new socket. on_sess_open keeps one socket free
+     * by closing a connection that may go (web_conn.h). */
+    cfg.lru_purge_enable = false;
     cfg.recv_wait_timeout = SERVER_RECV_TIMEOUT_S;
     cfg.send_wait_timeout = SERVER_SEND_TIMEOUT_S;
     cfg.uri_match_fn = httpd_uri_match_wildcard;
+    cfg.open_fn = on_sess_open;
     cfg.close_fn = on_sess_close;
     esp_err_t err = httpd_start(&s_server, &cfg);
     if (err != ESP_OK) {
@@ -885,9 +1095,9 @@ esp_err_t web_start(void)
         httpd_uri_t ws = {
             .uri = "/ws",
             .method = HTTP_GET,
-            .handler = web_ws_handler,
+            .handler = ws_frame,
             .is_websocket = true,
-            .handle_ws_control_frames = false,
+            .handle_ws_control_frames = true,   /* answered in web_ws_handler, so every frame ends in a handler */
             .ws_pre_handshake_cb = web_ws_pre_handshake,
             .ws_post_handshake_cb = web_ws_post_handshake,
         };

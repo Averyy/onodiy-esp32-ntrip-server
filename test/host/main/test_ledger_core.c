@@ -305,9 +305,19 @@ TEST_CASE("ledger blobs: round trip, newer writers may append, damage is refused
     TEST_ASSERT_EQUAL_HEX8(0x01, d.protected_mask);
     TEST_ASSERT_TRUE(d.planned);
 
+    TEST_ASSERT_FALSE(d.reboot_planned);
+
     buf[len] = 0xAB;                                             /* a newer writer's extra field */
     TEST_ASSERT_TRUE(lc_decode_today(buf, len + 1u, &d));
-    TEST_ASSERT_FALSE(lc_decode_today(buf, len - 1u, &d));
+    TEST_ASSERT_FALSE(lc_decode_today(buf, len - 2u, &d));
+    /* A blob from before the reboot flag existed ends one byte earlier. */
+    s.reboot_planned = true;
+    len = lc_encode_today(&s, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(lc_decode_today(buf, len, &d));
+    TEST_ASSERT_TRUE(d.reboot_planned);
+    TEST_ASSERT_TRUE(lc_decode_today(buf, len - 1u, &d));
+    TEST_ASSERT_FALSE(d.reboot_planned);
+    TEST_ASSERT_TRUE(d.planned);
     buf[0] = 0;
     TEST_ASSERT_FALSE(lc_decode_today(buf, len, &d));
     TEST_ASSERT_EQUAL_size_t(0, lc_encode_today(&s, buf, 20));
@@ -569,4 +579,171 @@ TEST_CASE("ledger: three days of outages across the clock wrap add up", "[ledger
     TEST_ASSERT_EQUAL_UINT64(outage_total, sum);
     TEST_ASSERT_EQUAL_UINT32(reconnects, rec);
     TEST_ASSERT_EQUAL_UINT32(12u * 37000u, c.hist[0].down_ms[0]);
+}
+
+/* ---- planned reboots --------------------------------------------------------------------------- */
+
+TEST_CASE("ledger: after a planned reboot the gap and each slot's reconnect are planned, within the window", "[ledger]")
+{
+    lc_snapshot_t s = snap_base();
+    s.today.utc_day = DAY0;
+    s.alive_ms = at(DAY0, H(10));                               /* stored as the reboot began */
+    s.expected_mask = 0x03;
+    s.protected_mask = 0x01;
+    s.reboot_planned = true;
+    fresh(T0, 2000);                                            /* booted 2 s ago */
+    lc_set_boot_window(&c, 120000u);
+    lc_restore(&c, &s, false);
+    TEST_ASSERT_TRUE(c.today_dirty);                            /* the stored flag gets replaced */
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(8)), LC_CLOCK_SNTP));
+    /* 6 s of gap until the boot, 2 s since: all planned */
+    TEST_ASSERT_EQUAL_UINT32(8000u, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(8000u, c.today.planned_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(8000u, c.today.planned_ms[1]);
+
+    lc_set_rtcm_ok(&c, T0, true);
+    lc_set_slot(&c, T0, 1, true, false, false);
+    lc_set_slot(&c, T0 + 28000u, 0, true, true, true);          /* Onocoy back 30 s after boot */
+    lc_tick(&c, T0 + 198000u);                                  /* 200 s after boot, past the window */
+    TEST_ASSERT_EQUAL_UINT32(36000u, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(36000u, c.today.planned_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(206000u, c.today.down_ms[1]);
+    TEST_ASSERT_EQUAL_UINT32(126000u, c.today.planned_ms[1]);   /* 6 s gap + the 120 s window */
+
+    lc_set_slot(&c, T0 + 198000u, 0, true, true, false);        /* a later outage is not planned */
+    lc_tick(&c, T0 + 208000u);
+    TEST_ASSERT_EQUAL_UINT32(46000u, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(36000u, c.today.planned_ms[0]);
+    lc_snapshot_t now;
+    lc_snapshot(&c, &now);
+    TEST_ASSERT_FALSE(now.reboot_planned);                      /* this session is not ending */
+}
+
+TEST_CASE("ledger: a slot back up during the window is done; one dropping within it is not planned again", "[ledger]")
+{
+    lc_snapshot_t s = snap_base();
+    s.today.utc_day = DAY0;
+    s.alive_ms = at(DAY0, H(10));
+    s.expected_mask = 0x01;
+    s.protected_mask = 0x01;
+    s.reboot_planned = true;
+    fresh(T0, 0);
+    lc_set_boot_window(&c, 120000u);
+    lc_restore(&c, &s, false);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(5)), LC_CLOCK_SNTP));
+    lc_set_slot(&c, T0, 0, true, true, true);                   /* streaming, but no fresh RTCM yet */
+    lc_tick(&c, T0 + 10000u);
+    TEST_ASSERT_EQUAL_UINT32(15000u, c.today.planned_ms[0]);    /* not up without RTCM behind it */
+    lc_set_rtcm_ok(&c, T0 + 10000u, true);                      /* up: its planned reconnect is over */
+    lc_set_rtcm_ok(&c, T0 + 20000u, false);                     /* a receiver stall inside the window */
+    lc_tick(&c, T0 + 30000u);
+    TEST_ASSERT_EQUAL_UINT32(25000u, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(15000u, c.today.planned_ms[0]);
+    lc_planned_boot(&c);                                        /* lifecycle's record arrives late: no change */
+    lc_tick(&c, T0 + 40000u);
+    TEST_ASSERT_EQUAL_UINT32(15000u, c.today.planned_ms[0]);
+}
+
+TEST_CASE("ledger: a power cut is never planned, whatever the books or lifecycle say", "[ledger]")
+{
+    lc_snapshot_t s = snap_base();
+    s.today.utc_day = DAY0;
+    s.alive_ms = at(DAY0, H(10));
+    s.expected_mask = 0x01;
+    s.protected_mask = 0x01;
+    s.planned = true;                                           /* receiver work when the power went */
+    s.reboot_planned = true;                                    /* and a reboot had begun */
+    fresh(T0, 2000);
+    lc_set_boot_window(&c, 120000u);
+    lc_restore(&c, &s, true);
+    lc_planned_boot(&c);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(11)), LC_CLOCK_SNTP));
+    lc_tick(&c, T0 + 30000u);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)H(1) + 30000u, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0u, c.today.planned_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)H(1) - 2000u, c.today.power_off_ms);
+}
+
+TEST_CASE("ledger: lifecycle's record plans the boot when the books could not; time without a clock too", "[ledger]")
+{
+    lc_snapshot_t s = snap_base();
+    s.today.utc_day = DAY0;
+    s.alive_ms = at(DAY0, H(10));
+    s.expected_mask = 0x03;
+    s.protected_mask = 0x01;
+    fresh(T0, 0);
+    lc_set_boot_window(&c, 120000u);
+    lc_restore(&c, &s, false);                                  /* stale books: no reboot flag */
+    TEST_ASSERT_FALSE(c.prev_planned);
+    lc_planned_boot(&c);
+    lc_set_rtcm_ok(&c, T0, true);
+    lc_set_slot(&c, T0 + 20000u, 0, true, true, true);          /* up after 20 s, before any clock */
+    lc_tick(&c, T0 + 50000u);
+    TEST_ASSERT_EQUAL_UINT64(50000u, c.pending_ms);
+    TEST_ASSERT_EQUAL_UINT32(20000u, c.pending.planned_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(50000u, c.pending.planned_ms[1]);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0 + 50000u, at(DAY0, H(10) + S(80)), LC_CLOCK_SNTP));
+    /* 30 s of gap (planned for both) + what the boot counted */
+    TEST_ASSERT_EQUAL_UINT32(50000u, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(50000u, c.today.planned_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(80000u, c.today.planned_ms[1]);
+
+    /* Window 0: only the gap is planned. */
+    fresh(T0, 0);
+    lc_set_boot_window(&c, 0);
+    lc_restore(&c, &s, false);
+    lc_planned_boot(&c);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(30)), LC_CLOCK_SNTP));
+    lc_tick(&c, T0 + 10000u);
+    TEST_ASSERT_EQUAL_UINT32(40000u, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(30000u, c.today.planned_ms[0]);
+
+    /* Without either, the boot is an ordinary one. */
+    fresh(T0, 0);
+    lc_set_boot_window(&c, 120000u);
+    lc_restore(&c, &s, false);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(30)), LC_CLOCK_SNTP));
+    lc_tick(&c, T0 + 10000u);
+    TEST_ASSERT_EQUAL_UINT32(40000u, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0u, c.today.planned_ms[0]);
+}
+
+TEST_CASE("ledger: a planned reboot counts as planned from its start and stores the books at once", "[ledger]")
+{
+    int64_t alive = 0;
+    bool today = false;
+    bool hist = false;
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, at(DAY0, H(12)), LC_CLOCK_GNSS);
+    lc_set_rtcm_ok(&c, T0, true);
+    lc_set_slot(&c, T0, 0, true, true, true);
+    TEST_ASSERT_TRUE(lc_persist_due(&c, T0 + 1000u, 60000u, &alive, &today, &hist));
+    TEST_ASSERT_FALSE(lc_persist_due(&c, T0 + 2000u, 60000u, &alive, &today, &hist));
+
+    lc_shutdown(&c, T0 + 2000u, true);                          /* the user's restart begins */
+    lc_set_slot(&c, T0 + 2500u, 0, true, true, false);          /* the casters close */
+    lc_tick(&c, T0 + 3000u);
+    TEST_ASSERT_TRUE(lc_persist_due(&c, T0 + 3000u, 0, &alive, &today, &hist));
+    TEST_ASSERT_EQUAL_INT64(at(DAY0, H(12) + 3000), alive);
+    TEST_ASSERT_TRUE(today);                                    /* it carries the flag */
+    TEST_ASSERT_EQUAL_UINT32(500u, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(500u, c.today.planned_ms[0]);
+    lc_snapshot_t s;
+    lc_snapshot(&c, &s);
+    TEST_ASSERT_TRUE(s.reboot_planned);
+    lc_rtc_t blk;
+    lc_rtc_seal(&blk, &s);
+    TEST_ASSERT_TRUE(lc_rtc_valid(&blk));
+    TEST_ASSERT_TRUE(blk.snap.reboot_planned);
+
+    /* Any other reboot stores the books too, without planning anything. */
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, at(DAY0, H(12)), LC_CLOCK_GNSS);
+    lc_set_slot(&c, T0, 0, true, true, false);
+    lc_shutdown(&c, T0 + 1000u, false);
+    lc_tick(&c, T0 + 2000u);
+    TEST_ASSERT_EQUAL_UINT32(2000u, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0u, c.today.planned_ms[0]);
+    lc_snapshot(&c, &s);
+    TEST_ASSERT_FALSE(s.reboot_planned);
 }

@@ -13,4 +13,21 @@ menu "Station: web server"
             count until they are changed). PROVISIONAL, to be measured on
             hardware.
 
+    config WEB_REQUEST_DEADLINE_S
+        int "Time a client gets to send one request (s)"
+        range 5 30
+        default 6
+        help
+            One server task reads every request. From the first byte of a
+            request (request line and headers, a JSON body, a WebSocket
+            frame) the whole of it must arrive within this time, or the
+            connection is closed (408 while headers are read). Without this
+            limit a client sending a byte every few seconds could hold the
+            server, and every status push queued behind it, for hours. A
+            browser sends a request at once, so even a slow phone on the
+            setup access point needs a fraction of a second; 6 s also covers
+            two lost and resent TCP segments. Uploads are read by the worker
+            task at the client's pace and are not bounded by it. Must be
+            longer than the 4 s a single receive may wait.
+
 endmenu

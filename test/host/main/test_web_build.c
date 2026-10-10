@@ -336,6 +336,38 @@ TEST_CASE("flash view: record only for an open readable journal, actions listed"
     cJSON_Delete(root);
 }
 
+TEST_CASE("GET /api/update lists every version rolled back here, newest first", "[web_build]")
+{
+    fixture();
+    s_snap.fw.latest_rolled_back = true;
+    strcpy(s_snap.fw.reverted_version, "v0.4.0");
+    static const char list[2][32] = { "v0.4.0", "v0.3.1" };
+    web_update_snap_t u = { .fw = &s_snap.fw, .st = &s_snap.st, .rolled_back = list, .rolled_back_count = 2 };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_update(&w, &u);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    const cJSON *app = at(root, "app");
+    const cJSON *rb = at(app, "rolled_back");
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(rb));
+    TEST_ASSERT_EQUAL_STRING("v0.4.0", cJSON_GetArrayItem(rb, 0)->valuestring);
+    TEST_ASSERT_EQUAL_STRING("v0.3.1", cJSON_GetArrayItem(rb, 1)->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(app, "latest_rolled_back")));
+    TEST_ASSERT_EQUAL_STRING("v0.4.0", at(app, "reverted")->valuestring);
+    cJSON_Delete(root);
+
+    u.rolled_back = NULL;   /* none: an empty list, never null */
+    u.rolled_back_count = 0;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_update(&w, &u);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(at(root, "app"), "rolled_back")));
+    cJSON_Delete(root);
+}
+
 TEST_CASE("update job results map the esp_err_t", "[web_build]")
 {
     TEST_ASSERT_EQUAL_STRING("ok", web_result_code("check", ESP_OK));

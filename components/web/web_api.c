@@ -867,7 +867,7 @@ static void reconnect_slot(size_t slot)
     if (ntrip_server_get_config(slot, c, false) == ESP_OK) {
         c->clear_password = false;
         memset(c->password, 0, sizeof(c->password));   /* empty + same host keeps the stored one */
-        esp_err_t err = ntrip_server_set_config(slot, c);
+        esp_err_t err = ntrip_server_set_config(slot, c, NULL);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "caster slot %u not reconnected: %s", (unsigned)slot, esp_err_to_name(err));
         }
@@ -890,21 +890,14 @@ static esp_err_t caster_put(web_req_t *r, size_t slot)
     if (!web_parse_caster_put(r->body, &s_cfg[slot], &next, &b)) {
         return bad(r->req, &b);
     }
-    esp_err_t err = ntrip_server_set_config(slot, &next);
-    if (err == ESP_ERR_NOT_ALLOWED) {
-        web_policy_slot_t pol[WEB_MAX_SLOTS];
-        size_t n = slot_count();
-        for (size_t i = 0; i < n; i++) {
-            const ntrip_caster_cfg_t *c = i == slot ? &next : &s_cfg[i];
-            pol[i] = (web_policy_slot_t){ .enabled = c->enabled, .host = c->host, .dup_ack = c->dup_stream_ack };
-        }
-        web_policy_t p = web_caster_policy(pol, n, slot);
-        const char *reason = web_policy_reason(p);
-        memset(next.password, 0, sizeof(next.password));
-        return web_send_error(r->req, WEB_ERR_CASTER_POLICY, NULL, NULL, UINT32_MAX, NULL,
-                              reason != NULL ? reason : "dup_stream_ack_required");
-    }
+    ntrip_policy_t rule = NTRIP_POLICY_OK;
+    esp_err_t err = ntrip_server_set_config(slot, &next, &rule);
     memset(next.password, 0, sizeof(next.password));
+    /* The caster component owns the cross-slot rules and names the one it applied. */
+    const char *reason = err == ESP_ERR_NOT_ALLOWED ? web_policy_reason(rule) : NULL;
+    if (reason != NULL) {
+        return web_send_error(r->req, WEB_ERR_CASTER_POLICY, NULL, NULL, UINT32_MAX, NULL, reason);
+    }
     switch (err) {
     case ESP_OK:
         ESP_LOGI(TAG, "caster slot %u saved", (unsigned)slot);
@@ -1176,6 +1169,8 @@ static esp_err_t h_update_get(web_req_t *r)
     portENTER_CRITICAL(&s_res_lock);
     last = s_last;
     portEXIT_CRITICAL(&s_res_lock);
+    static char rolled_back[FW_UPDATE_ROLLED_BACK_MAX][32];   /* server task only */
+    size_t n_rolled_back = fw_update_get_rolled_back(rolled_back, FW_UPDATE_ROLLED_BACK_MAX);
     web_update_snap_t u = {
         .fw = &s_fw,
         .st = &s_st,
@@ -1183,6 +1178,8 @@ static esp_err_t h_update_get(web_req_t *r)
         .checks_enabled = checks_enabled(),
         .budget_left_s = web_budget_now(),
         .flash_available = WEB_FLASH_AVAILABLE,
+        .rolled_back = (const char (*)[32])rolled_back,
+        .rolled_back_count = n_rolled_back,
     };
     web_resp_t resp;
     resp_begin(&resp, r->req, 200);

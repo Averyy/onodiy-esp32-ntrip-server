@@ -1057,6 +1057,11 @@ void web_build_update(wj_t *w, const web_update_snap_t *u)
     wj_str_or_null(w, "latest", f->latest_version);
     wj_bool(w, "available", f->app_update_available);
     wj_bool(w, "latest_rolled_back", f->latest_rolled_back);
+    wj_arr_open(w, "rolled_back");
+    for (size_t i = 0; u->rolled_back != NULL && i < u->rolled_back_count; i++) {
+        wj_str(w, NULL, u->rolled_back[i]);
+    }
+    wj_arr_close(w);
     wj_str(w, "reverted", f->reverted_version);
     wj_bool(w, "reverted_in_stage1", f->reverted_in_stage1);
     wj_obj_open(w, "trial");

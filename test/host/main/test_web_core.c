@@ -370,29 +370,19 @@ TEST_CASE("expected firmware string needs a Build number", "[web_core]")
     TEST_ASSERT_EQUAL_UINT32(0, web_expected_build("123456789012345678901234567890123456789012Build1"));
 }
 
-TEST_CASE("caster policy names the rule a save breaks", "[web_core]")
+TEST_CASE("caster policy: the rule ntrip_server reports keeps its API name", "[web_core]")
 {
-    web_policy_slot_t s[3] = {
-        { .enabled = true, .host = "servers.onocoy.com" },
-        { .enabled = true, .host = "rtk2go.com" },
-        { .enabled = false, .host = "" },
-    };
-    TEST_ASSERT_EQUAL(WEB_POLICY_DUP_ACK_REQUIRED, web_caster_policy(s, 3, 1));
-    TEST_ASSERT_EQUAL_STRING("dup_stream_ack_required", web_policy_reason(WEB_POLICY_DUP_ACK_REQUIRED));
-    s[1].dup_ack = true;
-    TEST_ASSERT_EQUAL(WEB_POLICY_OK, web_caster_policy(s, 3, 1));
-    s[2] = (web_policy_slot_t){ .enabled = true, .host = "Servers.Onocoy.com" };
-    TEST_ASSERT_EQUAL(WEB_POLICY_SECOND_ONOCOY, web_caster_policy(s, 3, 2));
-    TEST_ASSERT_EQUAL_STRING("second_onocoy", web_policy_reason(WEB_POLICY_SECOND_ONOCOY));
-    s[2] = (web_policy_slot_t){ .enabled = true, .host = "rtk2go.com", .dup_ack = true };
-    TEST_ASSERT_EQUAL(WEB_POLICY_SECOND_RTK2GO, web_caster_policy(s, 3, 2));
-    s[2] = (web_policy_slot_t){ .enabled = true, .host = "caster.centipede.fr" };
-    TEST_ASSERT_EQUAL(WEB_POLICY_OK, web_caster_policy(s, 3, 2));
-    s[2] = (web_policy_slot_t){ .enabled = true, .host = "crtk.net" };
-    TEST_ASSERT_EQUAL(WEB_POLICY_DUP_ACK_REQUIRED, web_caster_policy(s, 3, 2));
-    s[2].enabled = false;
-    TEST_ASSERT_EQUAL(WEB_POLICY_OK, web_caster_policy(s, 3, 2));
-    TEST_ASSERT_NULL(web_policy_reason(WEB_POLICY_OK));
+    /* The rules live in ntrip_server; the web only names what it reports. */
+    TEST_ASSERT_EQUAL_STRING("second_onocoy", web_policy_reason(NTRIP_POLICY_SECOND_ONOCOY));
+    TEST_ASSERT_EQUAL_STRING("second_rtk2go", web_policy_reason(NTRIP_POLICY_SECOND_RTK2GO));
+    TEST_ASSERT_EQUAL_STRING("dup_stream_ack_required", web_policy_reason(NTRIP_POLICY_NEED_DUP_ACK));
+    TEST_ASSERT_NULL(web_policy_reason(NTRIP_POLICY_OK));
+    TEST_ASSERT_NULL(web_policy_reason(NTRIP_POLICY_COUNT));
+    for (int p = NTRIP_POLICY_OK + 1; p < NTRIP_POLICY_COUNT; p++) {
+        TEST_ASSERT_NOT_NULL(web_policy_reason((ntrip_policy_t)p));   /* every refusal has a name */
+    }
+    TEST_ASSERT_EQUAL_STRING("caster_policy", web_err_code(WEB_ERR_CASTER_POLICY));
+    TEST_ASSERT_EQUAL(409, web_err_status(WEB_ERR_CASTER_POLICY));
 }
 
 /* ---- app image check ----------------------------------------------------------------------------------- */
@@ -437,6 +427,17 @@ TEST_CASE("app upload check reads the image header and app description", "[web_c
     fake_image(img, sizeof(img), 9, "x", "1");
     img[WEB_IMAGE_DESC_OFS] = 0;
     TEST_ASSERT_EQUAL(WEB_IMAGE_NOT_APP, web_image_check(img, sizeof(img), 9, NULL, &info));
+}
+
+TEST_CASE("app upload: a version rolled back here needs the acknowledgement, like the banner's", "[web_core]")
+{
+    TEST_ASSERT_EQUAL(WEB_ERR_COUNT, web_app_upload_verdict(WEB_IMAGE_OK, false, false));
+    TEST_ASSERT_EQUAL(WEB_ERR_ROLLED_BACK_ACK_REQUIRED, web_app_upload_verdict(WEB_IMAGE_OK, true, false));
+    TEST_ASSERT_EQUAL(WEB_ERR_COUNT, web_app_upload_verdict(WEB_IMAGE_OK, true, true));
+    TEST_ASSERT_EQUAL(WEB_ERR_NOT_THIS_PROJECT, web_app_upload_verdict(WEB_IMAGE_OTHER_PROJECT, false, true));
+    TEST_ASSERT_EQUAL(WEB_ERR_INVALID_IMAGE, web_app_upload_verdict(WEB_IMAGE_NOT_APP, true, true));
+    TEST_ASSERT_EQUAL_STRING("rolled_back_ack_required", web_err_code(WEB_ERR_ROLLED_BACK_ACK_REQUIRED));
+    TEST_ASSERT_EQUAL(409, web_err_status(WEB_ERR_ROLLED_BACK_ACK_REQUIRED));
 }
 
 /* ---- misc --------------------------------------------------------------------------------------------- */

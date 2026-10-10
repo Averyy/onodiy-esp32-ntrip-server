@@ -203,7 +203,7 @@ function availabilityTab(box) {
           ['Powered off', fmt.dur(day.power_off_s)],
           ['UART overflows', fmt.num(day.rx_overflows)],
         ]),
-        h('p', { class: 'muted small foot' }, 'Offline counts seconds a caster should have streamed but did not; planned is the part caused by receiver configuration and updates. Information only.')),
+        h('p', { class: 'muted small foot' }, 'Offline counts seconds a caster should have streamed but did not; planned is the part caused by receiver configuration and updates, and by restarts you started (until each caster is back, at most a couple of minutes after the restart). Information only.')),
       h('section', { class: 'card' }, h('h2', null, 'Casters today'),
         slots.length ? table(['Caster', 'Offline', 'Planned', 'Reconnects'], dayRows, { num: [1, 2, 3] }) : h('p', { class: 'muted' }, 'No casters.')),
       h('section', { class: 'card wide' }, h('h2', null, 'Last 30 days'),

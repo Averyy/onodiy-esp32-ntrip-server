@@ -53,6 +53,7 @@ static const char *TAG = "web";
 #define CLOSE_GOING_AWAY_RESTART 1012
 #define CLOSE_POLICY             1008
 #define CLOSE_TOO_BIG            1009
+#define CLOSE_TRY_AGAIN_LATER    1013
 #define CLOSE_SESSION_ENDED      4001
 #define CLOSE_TOO_SLOW           4003
 
@@ -148,6 +149,7 @@ static void client_close(ws_client_t *c, uint16_t code)
     }
     c->closing = true;
     queue_clear(c);
+    web_conn_ws_closing(c->fd);
     if (hd != NULL) {
         uint8_t payload[2] = { (uint8_t)(code >> 8), (uint8_t)(code & 0xFF) };
         httpd_ws_frame_t f = {
@@ -203,6 +205,7 @@ static void drain(ws_client_t *c)
             /* Half a frame may be on the wire: the connection cannot continue. */
             c->closing = true;
             queue_clear(c);
+            web_conn_ws_closing(c->fd);
             (void)httpd_sess_trigger_close(hd, c->fd);
             break;
         }
@@ -339,8 +342,39 @@ esp_err_t web_ws_post_handshake(httpd_req_t *req)
     /* A slow client must not hold the server for the full HTTP send timeout. */
     struct timeval tv = { .tv_sec = WS_SEND_TIMEOUT_MS / 1000, .tv_usec = (WS_SEND_TIMEOUT_MS % 1000) * 1000 };
     (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    web_conn_ws_open(fd, c->admin);
     send_hello(c);
     return ESP_OK;
+}
+
+/* Control frames (the route asks for them, so every frame reaches a handler
+ * and ends its receive deadline): answered as the server would itself. They
+ * never extend a session: only the page's own messages do. */
+static esp_err_t control_frame(httpd_req_t *req, ws_client_t *c, httpd_ws_frame_t *f)
+{
+    httpd_ws_frame_t reply = { .final = true };
+    switch (f->type) {
+    case HTTPD_WS_TYPE_PING:
+        reply.type = HTTPD_WS_TYPE_PONG;
+        reply.payload = f->len > 0 ? f->payload : NULL;
+        reply.len = f->len;
+        return httpd_ws_send_frame(req, &reply);
+    case HTTPD_WS_TYPE_CLOSE:
+        /* The server closes the socket after this frame; answer the close
+         * unless ours went out first. */
+        if (c == NULL || !c->closing) {
+            if (c != NULL) {
+                c->closing = true;
+                queue_clear(c);
+                web_conn_ws_closing(c->fd);
+            }
+            reply.type = HTTPD_WS_TYPE_CLOSE;
+            return httpd_ws_send_frame(req, &reply);
+        }
+        return ESP_OK;
+    default:   /* PONG */
+        return ESP_OK;
+    }
 }
 
 esp_err_t web_ws_handler(httpd_req_t *req)
@@ -357,13 +391,15 @@ esp_err_t web_ws_handler(httpd_req_t *req)
     if (err != ESP_OK) {
         return err;
     }
-    if (c == NULL || c->closing) {
-        return ESP_OK;
-    }
     if (f.len > WS_IN_MAX) {
+        /* (control frames carry at most 125 bytes) */
+        if (c == NULL || c->closing) {
+            return ESP_FAIL;   /* the rest of the frame stays unread: drop the connection */
+        }
         client_close(c, CLOSE_TOO_BIG);
         return ESP_OK;
     }
+    /* Read the whole frame, also when it is ignored, so the next one starts in step. */
     uint8_t buf[WS_IN_MAX + 1];
     if (f.len > 0) {
         f.payload = buf;
@@ -373,7 +409,13 @@ esp_err_t web_ws_handler(httpd_req_t *req)
         }
     }
     buf[f.len] = '\0';
-    /* Every message from the client extends its session. */
+    if (f.type == HTTPD_WS_TYPE_PING || f.type == HTTPD_WS_TYPE_PONG || f.type == HTTPD_WS_TYPE_CLOSE) {
+        return control_frame(req, c, &f);
+    }
+    if (c == NULL || c->closing) {
+        return ESP_OK;
+    }
+    /* Every message from the page extends its session. */
     if (c->admin && web_auth_session_alive(c->sess, c->gen)) {
         web_auth_session_touch(c->sess);
     }
@@ -428,6 +470,16 @@ void web_ws_close_public(void)
             client_close(c, CLOSE_POLICY);
         }
     }
+}
+
+bool web_ws_evict(int fd)
+{
+    ws_client_t *c = find(fd);
+    if (c == NULL) {
+        return false;
+    }
+    client_close(c, CLOSE_TRY_AGAIN_LATER);
+    return true;
 }
 
 void web_ws_close_sessions(uint32_t mask)

@@ -350,7 +350,11 @@ static const char *const s_reboot_reason[] = {
     [LIFECYCLE_REBOOT_SAFE_MODE_CLEARED] = "safe_mode_cleared",
     [LIFECYCLE_REBOOT_NVS_SLOT_SWITCH] = "nvs_slot_switch",
     [LIFECYCLE_REBOOT_BOOT_FAILURE] = "boot_failure",
+    [LIFECYCLE_REBOOT_APP_ROLLBACK] = "app_rollback",
 };
+
+_Static_assert(COUNT(s_reboot_reason) == (size_t)LIFECYCLE_REBOOT_APP_ROLLBACK + 1u,
+               "reboot reasons moved: update the table");
 
 const char *web_reboot_reason_name(lifecycle_reboot_reason_t v)
 {

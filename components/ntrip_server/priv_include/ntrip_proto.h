@@ -23,7 +23,9 @@
  * then); no single delay or window here comes near 2^31 ms.
  *
  * The enums below mirror the public ones in ntrip_server.h value for value
- * (ntrip_server.c static-asserts that), so the core needs no IDF header.
+ * (ntrip_server.c static-asserts that), so the core needs no IDF header. The
+ * cross-slot policy result is the public type itself (ntrip_policy.h holds
+ * only types).
  *
  * Status: PROVISIONAL, to be confirmed against real casters: reply texts,
  * timeouts and backoff values.
@@ -33,6 +35,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#include "ntrip_policy.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -197,15 +201,15 @@ typedef struct {
     bool dup_ack;
 } ntrip_policy_slot_t;
 
-typedef enum {
-    NTRIP_POLICY_OK = 0,
-    NTRIP_POLICY_SECOND_ONOCOY,   /**< another enabled slot already streams to Onocoy */
-    NTRIP_POLICY_SECOND_RTK2GO,   /**< another enabled slot already streams to RTK2go */
-    NTRIP_POLICY_NEED_DUP_ACK,    /**< Onocoy plus an open caster needs the acknowledgement */
-} ntrip_policy_result_t;
-
-/** Cross-slot rules for saving slot `edited` (slots[] holds the result of the save). */
-ntrip_policy_result_t ntrip_check_policy(const ntrip_policy_slot_t *slots, size_t count, size_t edited);
+/**
+ * Cross-slot rules for saving slot `edited` (slots[] holds the result of the
+ * save): a second enabled Onocoy slot, a second RTK2go slot, or Onocoy
+ * together with an open caster (RTK2go, Centipede) without the edited slot's
+ * acknowledgement. Hosts match by domain, case-insensitively; a disabled
+ * edited slot breaks nothing. The only place these rules live: the web API
+ * names the reason from what ntrip_server_set_config() reports.
+ */
+ntrip_policy_t ntrip_check_policy(const ntrip_policy_slot_t *slots, size_t count, size_t edited);
 
 /* ---- Requests ---------------------------------------------------------------- */
 

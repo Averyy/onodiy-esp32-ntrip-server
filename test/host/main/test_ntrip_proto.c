@@ -480,6 +480,34 @@ TEST_CASE("ntrip host domains and cross-slot policy", "[ntrip]")
     TEST_ASSERT_EQUAL(NTRIP_POLICY_OK, ntrip_check_policy(s, 3, 2));   /* uninvolved slot */
 }
 
+/* The cases the web API names in 409 caster_policy (they used to be decided a
+ * second time in the web component; ntrip_server is the only owner now). */
+TEST_CASE("ntrip cross-slot policy: hosts match by domain, any case; the edited slot's ack counts", "[ntrip]")
+{
+    ntrip_policy_slot_t s[3] = {
+        { .enabled = true, .host = "servers.onocoy.com" },
+        { .enabled = true, .host = "rtk2go.com" },
+        { .enabled = false, .host = "" },
+    };
+    TEST_ASSERT_EQUAL(NTRIP_POLICY_NEED_DUP_ACK, ntrip_check_policy(s, 3, 1));
+    s[1].dup_ack = true;
+    TEST_ASSERT_EQUAL(NTRIP_POLICY_OK, ntrip_check_policy(s, 3, 1));
+    TEST_ASSERT_EQUAL(NTRIP_POLICY_NEED_DUP_ACK, ntrip_check_policy(s, 3, 0));   /* the ack is per saved slot */
+    s[2] = (ntrip_policy_slot_t){ .enabled = true, .host = "Servers.Onocoy.com" };
+    TEST_ASSERT_EQUAL(NTRIP_POLICY_SECOND_ONOCOY, ntrip_check_policy(s, 3, 2));
+    s[2] = (ntrip_policy_slot_t){ .enabled = true, .host = "RTK2GO.com", .dup_ack = true };
+    TEST_ASSERT_EQUAL(NTRIP_POLICY_SECOND_RTK2GO, ntrip_check_policy(s, 3, 2));
+    s[2] = (ntrip_policy_slot_t){ .enabled = true, .host = "caster.centipede.fr" };
+    TEST_ASSERT_EQUAL(NTRIP_POLICY_OK, ntrip_check_policy(s, 3, 2));
+    s[2] = (ntrip_policy_slot_t){ .enabled = true, .host = "crtk.net" };
+    TEST_ASSERT_EQUAL(NTRIP_POLICY_NEED_DUP_ACK, ntrip_check_policy(s, 3, 2));
+    s[2].enabled = false;
+    TEST_ASSERT_EQUAL(NTRIP_POLICY_OK, ntrip_check_policy(s, 3, 2));            /* disabled: streams nowhere */
+    TEST_ASSERT_EQUAL(NTRIP_POLICY_OK, ntrip_check_policy(s, 3, 3));            /* no such slot */
+    s[0].host = NULL;
+    TEST_ASSERT_EQUAL(NTRIP_POLICY_OK, ntrip_check_policy(s, 3, 1));            /* no host: nothing to pair */
+}
+
 /* ---- backoff ------------------------------------------------------------------------- */
 
 #define MID 200u   /* rnd giving a jitter factor of exactly 1.0 */

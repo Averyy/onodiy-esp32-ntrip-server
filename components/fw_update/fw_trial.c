@@ -499,6 +499,30 @@ void fw_trial_status_locked(fw_update_status_t *out, bool clock_trusted, int64_t
     out->rollback_available = g_fw.rollback_known && g_fw.rollback_available;
 }
 
+_Static_assert(FW_UPDATE_ROLLED_BACK_MAX == FW_BAD_VER_MAX, "the rolled-back list moved: update fw_update.h");
+
+size_t fw_update_get_rolled_back(char out[][32], size_t cap)
+{
+    if (g_fw.mtx == NULL || out == NULL) {
+        return 0;
+    }
+    fw_lock();
+    size_t n = fw_bad_newest_first(&g_fw.bad, out, cap);
+    fw_unlock();
+    return n;
+}
+
+bool fw_update_is_rolled_back(const char *version)
+{
+    if (g_fw.mtx == NULL || version == NULL || version[0] == '\0') {
+        return false;
+    }
+    fw_lock();
+    bool bad = fw_bad_contains(&g_fw.bad, version);
+    fw_unlock();
+    return bad;
+}
+
 /* ---- manual rollback ---------------------------------------------------------------- */
 
 esp_err_t fw_update_rollback(void)
@@ -565,6 +589,6 @@ esp_err_t fw_update_rollback(void)
     fw_set_state(FW_UPDATE_REBOOT_PENDING, ESP_OK);
     ESP_LOGW(TAG, "rollback of %s requested by the user: rebooting into the previous image", version);
     /* The update slot stays claimed until the reboot: no receiver flash starts. */
-    (void)lifecycle_request_reboot(LIFECYCLE_REBOOT_APP_REVERT);
+    (void)lifecycle_request_reboot(LIFECYCLE_REBOOT_APP_ROLLBACK);
     return ESP_OK;
 }

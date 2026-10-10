@@ -9,8 +9,9 @@
  * at most ~473 s offline per day at a perfect data rate (less when epochs
  * are lost; a plain 98 % uptime scores only about 0.81). The ledger counts,
  * per slot, the seconds a slot was expected to stream (enabled) but did not;
- * time paused for planned receiver work counts too and is also shown on its
- * own as planned. Slots flagged "protected" (the Onocoy slot)
+ * planned downtime counts too and is also shown on its own as planned:
+ * casters paused for receiver work, and a reboot the user asked for (see
+ * "Planned reboots"). Slots flagged "protected" (the Onocoy slot)
  * drive the daily downtime budget shown in the UI and with update prompts,
  * and the network recovery ladder. The budget never gates anything: every
  * update is started by the user, who sees the expected downtime against
@@ -32,22 +33,39 @@
  *     time is known. Trusted time is passed on to diag for the event
  *     journal's timestamps.
  *
+ * Planned reboots: a reboot that is a direct consequence of a user action
+ * (lifecycle_reboot_user_planned(): restart, factory reset, app update or
+ * rollback, leaving safe mode) is planned downtime, like receiver work. Its
+ * shutdown hook (ledger_shutdown) counts the rest of the session as planned
+ * and stores the books at once; the next boot counts the gap until it as
+ * planned, and each expected slot's downtime from boot until that slot
+ * streams again, for at most CONFIG_LEDGER_PLANNED_BOOT_S after the boot.
+ * The next boot learns it from the stored books, or from lifecycle's record
+ * of the previous boot (ledger_note_planned_boot) when they could not say
+ * so. Ladder, low-heap, crash, safe-mode-retry and trial-revert reboots are
+ * not planned, and a power cut (or brownout) never is, whatever was going
+ * on when it hit.
+ *
  * Persistence: the running counters also live in RTC memory, written every
  * tick and checked with magic, size and CRC (they survive software, panic
  * and watchdog resets, so a reboot costs at most a second of accounting).
  * Today's counters and the "last alive" mark are stored in settings every
- * CONFIG_LEDGER_ALIVE_PERSIST_S (today only when it changed), so after a
- * power cut the time between that mark and the next boot is added as
- * downtime (and power-off time) for the slots that were expected to stream.
+ * CONFIG_LEDGER_ALIVE_PERSIST_S (today only when it changed) and at the start
+ * of every reboot through lifecycle (ledger_shutdown), so after a power cut
+ * the time between that mark and the next boot is added as downtime (and
+ * power-off time) for the slots that were expected to stream, and a reboot
+ * into another app image (whose RTC layout may differ) counts its gap from
+ * the moment the reboot began.
  * Day totals roll into a CONFIG_LEDGER_HISTORY_DAYS history at UTC midnight
  * (settings: ledger/hist, written when it changes). The whole ledger
  * namespace survives a factory reset.
  *
  * Accounting is a pure core (ledger_core.c, host-tested across clock wraps,
- * day rollovers, power-cut gaps and late clocks); ledger.c adds the lock,
- * the RTC copy and the settings writes. ledger_tick() is driven at 1 Hz by
- * the health monitor and is the only call that writes settings; every other
- * call is short and may come from any task.
+ * day rollovers, power-cut gaps, planned reboots and late clocks); ledger.c
+ * adds the lock, the RTC copy and the settings writes. ledger_tick() is
+ * driven at 1 Hz by the health monitor; it and ledger_shutdown() are the only
+ * calls that write settings (serialised). Every other call is short and may
+ * come from any task.
  */
 #pragma once
 
@@ -74,7 +92,7 @@ typedef enum {
 typedef struct {
     int32_t utc_day;                          /**< days since 1970-01-01, -1 = no day known yet */
     uint32_t down_s[LEDGER_MAX_SLOTS];        /**< seconds a slot should have streamed but did not */
-    uint32_t planned_s[LEDGER_MAX_SLOTS];     /**< of which planned (casters paused for receiver work) */
+    uint32_t planned_s[LEDGER_MAX_SLOTS];     /**< of which planned (receiver work, reboots the user asked for) */
     uint32_t reconnects[LEDGER_MAX_SLOTS];
     uint32_t power_off_s;                     /**< power-cut gaps added at boot */
     uint32_t rx_overflows;                    /**< UART/driver overflow events */
@@ -87,6 +105,27 @@ typedef struct {
 esp_err_t ledger_init(void);
 
 /**
+ * This boot follows a reboot the user asked for, by lifecycle's record of the
+ * previous boot (main calls it right after ledger_init, before the slots are
+ * reported). Usually the stored books say so already (ledger_shutdown); this
+ * covers a reboot whose books could not be stored. Ignored after a power cut
+ * and when called again.
+ */
+void ledger_note_planned_boot(void);
+
+/**
+ * A reboot begins (a lifecycle shutdown hook; main registers it first, so it
+ * runs before the casters close): settle the books and store them now, so
+ * the next boot counts the gap from here even in another app image that
+ * cannot read the RTC copy. `planned`: the user asked for this reboot
+ * (lifecycle_reboot_user_planned()); the rest of this session, the gap and
+ * each caster's reconnect after the boot (at most
+ * CONFIG_LEDGER_PLANNED_BOOT_S) count as planned. Takes at most a few
+ * hundred ms (settings writes).
+ */
+void ledger_shutdown(bool planned);
+
+/**
  * Slot state, reported by ntrip_server on every change. `enabled`: the slot
  * is configured to stream, whether or not the caster client runs (time
  * before it starts, in safe mode or while it shuts down is downtime too).
@@ -95,7 +134,7 @@ esp_err_t ledger_init(void);
  */
 void ledger_set_slot(size_t slot, bool enabled, bool protected_slot, bool streaming);
 
-/** Planned downtime in progress (casters paused for receiver flash/config); counted as down and also as planned. */
+/** Planned receiver work in progress (casters paused for receiver flash/config); counted as down and also as planned. */
 void ledger_set_planned(bool planned);
 
 /** Fresh RTCM flowing from the receiver (reported by the station). */

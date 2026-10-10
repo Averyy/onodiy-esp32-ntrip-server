@@ -99,6 +99,7 @@
 
 #include "esp_err.h"
 #include "esp_event.h"
+#include "ntrip_policy.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -262,13 +263,20 @@ esp_err_t ntrip_server_get_config(size_t slot, ntrip_caster_cfg_t *out, bool wit
  * or IP literal; mountpoint [A-Za-z0-9._-]; NTRIP 1.0 password without
  * spaces; NTRIP 2.0 username without ':'; an enabled slot needs host, port,
  * mountpoint, a password (1.0) and a username (2.0, except Onocoy).
+ *
+ * Cross-slot rules (this component owns them; callers only name the
+ * reason): enabling a slot must not stream to Onocoy or RTK2go from a second
+ * slot, and pairing Onocoy with an open caster (RTK2go, Centipede) needs
+ * dup_stream_ack on the slot being saved. They are checked against the
+ * stored configs of the other slots under the same lock as the save.
+ * @param policy optional (NULL = not wanted): the rule the save breaks when
+ *        the call returns ESP_ERR_NOT_ALLOWED, NTRIP_POLICY_OK otherwise.
  * @return ESP_ERR_INVALID_ARG for a field that fails these checks,
- *         ESP_ERR_NOT_ALLOWED when enabling it would stream to Onocoy or
- *         RTK2go from a second slot, or pair Onocoy with an open caster
- *         (RTK2go, Centipede) without dup_stream_ack,
- *         ESP_ERR_INVALID_STATE before ntrip_server_init() (safe mode).
+ *         ESP_ERR_NOT_ALLOWED when a cross-slot rule refuses it (*policy
+ *         names which), ESP_ERR_INVALID_STATE before ntrip_server_init()
+ *         (safe mode).
  */
-esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg);
+esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg, ntrip_policy_t *policy);
 
 /** Live status of a slot. Works before ntrip_server_init() (every slot DISABLED). */
 esp_err_t ntrip_server_get_status(size_t slot, ntrip_caster_status_t *out);

@@ -213,6 +213,7 @@ Views.updates = {
           ['Running', a.running],
           ['Latest release', a.latest || DASH],
           trial.stage && trial.stage !== 'none' ? ['Trial', lbl(L.trial, trial.stage) + (trial.left_s ? ', ' + fmt.dur(trial.left_s) + ' left' : '')] : null,
+          (a.rolled_back || []).length ? ['Rolled back here', a.rolled_back.join(', ') + ' (not offered again)'] : null,
         ]),
         parts,
         P.app_update.el,
@@ -324,32 +325,42 @@ Views.updates = {
 
     /* ---- Files ---- */
     const appFile = h('input', { type: 'file', accept: '.bin,application/octet-stream' });
-    const appUploadBtn = btn('Install this file', () => uploadApp(false));
+    const appUploadBtn = btn('Install this file', () => uploadApp({}));
     const appUploadErr = errBox();
-    async function uploadApp(anyProject) {
+    /* o.anyProject, o.rolledBackAck: what the user already confirmed after a refusal. */
+    async function uploadApp(o) {
       const file = appFile.files && appFile.files[0];
       if (!file) {
         say(appUploadErr, 'Choose a .bin file first.');
         return;
       }
-      if (!anyProject) {
+      if (!o.anyProject && !o.rolledBackAck) {
         const ok = await dialog({ title: 'Install ' + file.name + '?', ok: 'Install',
           body: [h('p', null, fmt.bytes(file.size) + '. The station writes it to its spare app slot and restarts into it. ' +
             'The new version runs on trial and goes back to this one if it fails.')] });
         if (!ok) return;
       }
       appUploadErr.hidden = true;
+      const q = [o.anyProject ? 'any_project=1' : null, o.rolledBackAck ? 'rolled_back_ack=1' : null].filter(x => x).join('&');
       let r;
       try {
-        r = await busy(appUploadBtn, () => upload('/api/upload/app' + (anyProject ? '?any_project=1' : ''), file, (sent, total) =>
+        r = await busy(appUploadBtn, () => upload('/api/upload/app' + (q ? '?' + q : ''), file, (sent, total) =>
           P.app_upload.set({ job: 'app_upload', phase: 'receiving', bytes: sent, total: total, done: false })));
       } catch (e) {
         P.app_upload.hide();
-        if (e instanceof ApiError && e.code === 'not_this_project' && !anyProject) {
+        if (e instanceof ApiError && e.code === 'not_this_project' && !o.anyProject) {
           const ok = await dialog({ title: 'Firmware for another project?', ok: 'Install anyway', okKind: 'danger solid',
             body: h('p', null, 'This image does not say it is firmware for this station. Firmware for something else can leave the station ' +
               'unreachable until it is flashed over USB.'), check: 'I know what this image is.' });
-          if (ok) uploadApp(true);
+          if (ok) uploadApp({ anyProject: true, rolledBackAck: o.rolledBackAck });
+          return;
+        }
+        if (e instanceof ApiError && e.code === 'rolled_back_ack_required' && !o.rolledBackAck) {
+          const ok = await dialog({ title: 'Install a version that was rolled back?', ok: 'Install anyway',
+            body: h('p', null, 'This version was rolled back on this station before: its trial failed, or someone went back from it. ' +
+              'If it fails again, the station goes back to the version running now.'),
+            check: 'I know this version was rolled back on this station before.' });
+          if (ok) uploadApp({ anyProject: o.anyProject, rolledBackAck: true });
           return;
         }
         showErr(e, appUploadErr);

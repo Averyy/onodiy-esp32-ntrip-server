@@ -84,14 +84,17 @@ typedef enum {
     LIFECYCLE_EVENT_PRE_REBOOT,   /**< data: lifecycle_reboot_reason_t; restart follows shortly */
 } lifecycle_event_t;
 
-/** Why we rebooted ourselves (stored across the reset, shown in boot history). */
+/**
+ * Why we rebooted ourselves (stored across the reset, shown in boot history).
+ * New values are appended: the numbers are stored (life/boots, journal).
+ */
 typedef enum {
     LIFECYCLE_REBOOT_NONE = 0,
     LIFECYCLE_REBOOT_USER,             /**< web UI / API */
     LIFECYCLE_REBOOT_FACTORY_RESET,
     LIFECYCLE_REBOOT_ADMIN_RESET,      /**< BOOT button: admin password cleared */
     LIFECYCLE_REBOOT_APP_UPDATE,       /**< new app image activated */
-    LIFECYCLE_REBOOT_APP_REVERT,       /**< app trial failed or manual rollback */
+    LIFECYCLE_REBOOT_APP_REVERT,       /**< the app trial failed (verify window or crash watch) */
     LIFECYCLE_REBOOT_GNSS_LADDER,
     LIFECYCLE_REBOOT_NETWORK_LADDER,
     LIFECYCLE_REBOOT_LOW_HEAP,
@@ -99,7 +102,24 @@ typedef enum {
     LIFECYCLE_REBOOT_SAFE_MODE_CLEARED,
     LIFECYCLE_REBOOT_NVS_SLOT_SWITCH,  /**< NVS written by a newer app: booting that app */
     LIFECYCLE_REBOOT_BOOT_FAILURE,     /**< mandatory service failed at boot; counts as a crash */
+    LIFECYCLE_REBOOT_APP_ROLLBACK,     /**< the user rolled the app back (web UI / API) */
 } lifecycle_reboot_reason_t;
+
+/**
+ * True for a reboot that is a direct consequence of a user action: its
+ * downtime is planned, like receiver work (the ledger shows it as planned).
+ *   USER, FACTORY_RESET (web UI or the BOOT button held), APP_UPDATE (every
+ *   app install is started by the user: the banner's Update or a manual
+ *   upload), APP_ROLLBACK (the user's Roll back), SAFE_MODE_CLEARED (the
+ *   user left safe mode), ADMIN_RESET (the user held the BOOT button; the
+ *   admin reset itself does not restart today): planned.
+ *   APP_REVERT (a failed trial: the station undoes an update that did not
+ *   work, a recovery like the ladders), NVS_SLOT_SWITCH (automatic, at
+ *   boot, before anything runs), SAFE_MODE_RETRY (automatic), the GNSS and
+ *   network ladders, LOW_HEAP, BOOT_FAILURE and NONE: not planned.
+ * A crash, brownout or power cut has no reason code and is never planned.
+ */
+bool lifecycle_reboot_user_planned(lifecycle_reboot_reason_t reason);
 
 /** Our classification of the last reset. */
 typedef enum {
@@ -225,16 +245,21 @@ esp_err_t lifecycle_request_reboot(lifecycle_reboot_reason_t reason);
  */
 void lifecycle_fatal_boot_error(const char *what, esp_err_t err) __attribute__((noreturn));
 
-/** Shutdown hook: finish within deadline_ms (e.g. close caster sessions). */
-typedef void (*lifecycle_shutdown_hook_t)(uint32_t deadline_ms, void *ctx);
+/**
+ * Shutdown hook: finish within deadline_ms (e.g. close caster sessions).
+ * `reason`: the reboot under way (LIFECYCLE_REBOOT_NONE for an esp_restart()
+ * that did not come through lifecycle).
+ */
+typedef void (*lifecycle_shutdown_hook_t)(lifecycle_reboot_reason_t reason, uint32_t deadline_ms, void *ctx);
 
 /**
- * Register a hook run before a planned restart. Reliable only for reboots
- * through lifecycle_reboot()/lifecycle_request_reboot(), which run the hooks
- * while the network is still up. For any other esp_restart() the hooks still
- * run, but after IDF has stopped Wi-Fi (its shutdown handler is registered
- * later and runs first), so they cannot reach a remote peer: every restart of
- * ours goes through lifecycle.
+ * Register a hook run before a planned restart; hooks run in the order they
+ * were registered. Reliable only for reboots through
+ * lifecycle_reboot()/lifecycle_request_reboot(), which run the hooks while
+ * the network is still up. For any other esp_restart() the hooks still run,
+ * but after IDF has stopped Wi-Fi (its shutdown handler is registered later
+ * and runs first), so they cannot reach a remote peer: every restart of ours
+ * goes through lifecycle.
  */
 esp_err_t lifecycle_register_shutdown_hook(lifecycle_shutdown_hook_t hook, void *ctx);
 
