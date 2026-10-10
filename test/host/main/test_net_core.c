@@ -407,3 +407,48 @@ TEST_CASE("network reboot age: a block from before another image's run starts af
     ok.stamp ^= 1;
     TEST_ASSERT_FALSE(net_rtc_valid(&ok));
 }
+
+TEST_CASE("network AP: a connected client keeps the recovery AP at most 30 min past its lifetime", "[net_core]")
+{
+    bool expired;
+    net_ap_input_t in = ap_in();
+    in.recovery_requested = true;
+    in.ap_clients = 1;
+    in.recovery_age_s = in.recovery_lifetime_s + NET_AP_CLIENT_HOLD_MAX_S - 1;
+    TEST_ASSERT_EQUAL_UINT32(NET_AP_RECOVERY, net_ap_reasons(&in, &expired));
+    TEST_ASSERT_FALSE(expired);
+    in.recovery_age_s = in.recovery_lifetime_s + NET_AP_CLIENT_HOLD_MAX_S;
+    TEST_ASSERT_EQUAL_UINT32(0, net_ap_reasons(&in, &expired));
+    TEST_ASSERT_TRUE(expired);
+
+    /* a lifetime at the top of the range does not wrap the limit */
+    in.recovery_lifetime_s = UINT32_MAX - 10u;
+    in.recovery_age_s = UINT32_MAX - 5u;
+    TEST_ASSERT_EQUAL_UINT32(NET_AP_RECOVERY, net_ap_reasons(&in, &expired));
+}
+
+TEST_CASE("network credentials: changed ones are tried first and confirmed by an IP within 90 s", "[net_core]")
+{
+    /* first setup, or the same credentials again: stored as the station's */
+    TEST_ASSERT_EQUAL(NET_CRED_PLAN_ACTIVE, net_cred_plan(false, false));
+    TEST_ASSERT_EQUAL(NET_CRED_PLAN_ACTIVE, net_cred_plan(true, true));
+    /* changed credentials: pending, on trial */
+    TEST_ASSERT_EQUAL(NET_CRED_PLAN_TRIAL, net_cred_plan(true, false));
+
+    net_cred_trial_t t = { 0 };
+    uint32_t now = UINT32_MAX - 30u;   /* across the clock wrap */
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_tick(&t, true, now));   /* no trial: an IP changes nothing */
+    TEST_ASSERT_EQUAL_UINT32(0, net_cred_trial_left_s(&t, now));
+    net_cred_trial_start(&t, now);
+    TEST_ASSERT_EQUAL_UINT32(NET_CRED_TRIAL_S, net_cred_trial_left_s(&t, now));
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_tick(&t, false, now + NET_CRED_TRIAL_S - 1));
+    TEST_ASSERT_EQUAL_UINT32(1, net_cred_trial_left_s(&t, now + NET_CRED_TRIAL_S - 1));
+    TEST_ASSERT_EQUAL(NET_TRIAL_CONFIRMED, net_cred_trial_tick(&t, true, now + NET_CRED_TRIAL_S - 1));
+    TEST_ASSERT_FALSE(t.on);
+
+    /* no IP in time: back to the previous credentials, once */
+    net_cred_trial_start(&t, now);
+    TEST_ASSERT_EQUAL(NET_TRIAL_REVERT, net_cred_trial_tick(&t, false, now + NET_CRED_TRIAL_S));
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_tick(&t, false, now + NET_CRED_TRIAL_S + 1));
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_tick(&t, true, now + NET_CRED_TRIAL_S + 2));
+}

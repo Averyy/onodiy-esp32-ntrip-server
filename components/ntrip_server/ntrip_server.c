@@ -47,6 +47,7 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include "diag.h"
 #include "esp_app_desc.h"
 #include "esp_attr.h"
 #include "esp_crt_bundle.h"
@@ -112,6 +113,7 @@ _Static_assert(CONFIG_NTRIP_MAX_CASTERS <= 24, "one event-group bit per slot");
 #define PUBLISH_MS          250u
 #define ATTACH_RETRY_MS     5000u
 #define TX_BUF_SIZE         (NTRIP_CHUNK_HEAD_RESERVE + NTRIP_CHUNK_MAX_PAYLOAD + NTRIP_CHUNK_TAIL)
+#define HIST_QUEUE_LEN 4      /* connection history records waiting for the journal, per slot */
 #define RX_SCRATCH          256u
 #define CA_PEM_MAX          8192u
 #define TLS_MIN_INTERNAL_HEAP (64u * 1024u)   /* below this, non-protected TLS slots wait */
@@ -196,6 +198,15 @@ typedef struct {
     ntrip_sm_t sm;
     uint8_t prev_state;
 
+    /* connection history: records waiting for the journal (its rate limits) */
+    ntrip_hist_t hist;
+    struct {
+        uint16_t kind;
+        int32_t a;
+        int32_t b;
+    } jq[HIST_QUEUE_LEN];
+    uint8_t jq_n;
+
     /* DNS cache */
     char cache_host[64];
     struct sockaddr_storage cache_addr;
@@ -250,6 +261,12 @@ static volatile uint32_t s_tls_protected_waiting;
 static uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/* The connection history counts in seconds of uptime (no wrap). */
+static uint32_t uptime_s(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000000);
 }
 
 static int32_t utc_day(void)
@@ -718,6 +735,13 @@ static void fail_with(ntrip_failure_t *f, ntrip_cls_t cls, ntrip_row_t row, bool
     f->reached_caster = reached;
 }
 
+/* A connect the caster's host answered with a reset: it was reached. lwIP
+ * reports a reset answer to a SYN as ECONNRESET; other stacks use ECONNREFUSED. */
+static bool connect_refused(int err)
+{
+    return err == ECONNREFUSED || err == ECONNRESET;
+}
+
 static io_result_t resolve(slot_t *s, struct sockaddr_storage *addr, socklen_t *alen, ntrip_failure_t *f)
 {
     char port[8];
@@ -779,7 +803,10 @@ static io_result_t tcp_connect(slot_t *s, const struct sockaddr_storage *addr, s
         return IO_OK;
     }
     if (errno != EINPROGRESS) {
+        int err = errno;
         fail_with(f, NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false);
+        f->refused = connect_refused(err);   /* else no route or a local failure: not reached */
+        s->last_errno = err;
         s->st.last_err = ESP_FAIL;
         return IO_FAIL;
     }
@@ -805,6 +832,8 @@ static io_result_t tcp_connect(slot_t *s, const struct sockaddr_storage *addr, s
             socklen_t len = sizeof(err);
             if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0) {
                 fail_with(f, NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false);
+                f->refused = connect_refused(err);
+                s->last_errno = err;
                 s->st.last_err = ESP_FAIL;
                 return IO_FAIL;
             }
@@ -913,17 +942,21 @@ static io_result_t tls_connect(slot_t *s, ntrip_failure_t *f)
     esp_tls_error_handle_t eh = NULL;
     int code = 0;
     int flags = 0;
+    int sock_err = 0;
     esp_err_t last = ESP_FAIL;
     if (esp_tls_get_error_handle(s->tls, &eh) == ESP_OK) {
         last = esp_tls_get_and_clear_last_error(eh, &code, &flags);
+        (void)esp_tls_get_and_clear_error_type(eh, ESP_TLS_ERR_TYPE_SYSTEM, &sock_err);
     }
     s->st.last_err = last;
     esp_tls_conn_destroy(s->tls);
     s->tls = NULL;
     s->fd = -1;
     if (state == ESP_TLS_INIT) {
-        /* never got a TCP connection */
+        /* never got a TCP connection: refused by the host, or timed out / failed locally */
         fail_with(f, NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false);
+        f->refused = connect_refused(sock_err);
+        s->last_errno = sock_err;
     } else if (flags != 0 || code == -MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
         fail_with(f, NTRIP_CLS_TLS, NTRIP_ROW_CONFIG, true);   /* never retried in plaintext */
         s->hint = NTRIP_HINT_TLS_CERT;
@@ -1158,6 +1191,7 @@ static void publish(slot_t *s, uint32_t now, bool force)
     st->backoff_attempt = s->sm.attempt;
     st->next_retry_s = (ntrip_sm_retry_in_ms(&s->sm, now) + 999u) / 1000u;
     st->connected_s = s->open ? (now - s->sm.session_start_ms) / 1000u : 0;
+    st->unreached_s = ntrip_sm_unreached_ms(&s->sm, now) / 1000u;
     if (!s->open) {
         st->connected_since = 0;
     }
@@ -1340,6 +1374,46 @@ static bool hub_fresh(void)
     return hs.frames_in > 0 && hs.last_frame_age_ms <= NTRIP_FRESH_DATA_MS;
 }
 
+/* ---- connection history -------------------------------------------------------------------- */
+
+/* Queue one record; the oldest gives way if the journal has refused them for long. */
+static void hist_queue(slot_t *s, uint16_t kind, int32_t a, int32_t b)
+{
+    if (s->jq_n == HIST_QUEUE_LEN) {
+        memmove(&s->jq[0], &s->jq[1], (HIST_QUEUE_LEN - 1u) * sizeof(s->jq[0]));
+        s->jq_n--;
+        ESP_LOGD(TAG, "cst%u: connection history record dropped (journal busy)", (unsigned)s->idx);
+    }
+    s->jq[s->jq_n].kind = kind;
+    s->jq[s->jq_n].a = a;
+    s->jq[s->jq_n].b = b;
+    s->jq_n++;
+}
+
+/* Write what waits, in order, until the journal refuses one (its rate limit: kept for later). */
+static void hist_flush(slot_t *s)
+{
+    while (s->jq_n > 0) {
+        esp_err_t err = diag_journal_append((diag_event_t)s->jq[0].kind, s->jq[0].a, s->jq[0].b);
+        if (err == ESP_ERR_INVALID_STATE || err == ESP_ERR_NO_MEM) {
+            return;   /* refused by a rate limit, or the write queue is full: next loop */
+        }
+        memmove(&s->jq[0], &s->jq[1], (size_t)(s->jq_n - 1u) * sizeof(s->jq[0]));
+        s->jq_n--;   /* written, or no journal: nothing to keep */
+    }
+}
+
+/* A session that reached STREAMING ended; cls = NONE when it was not a caster failure. */
+static void hist_down(slot_t *s, ntrip_cls_t cls)
+{
+    int32_t a;
+    int32_t b;
+    if (ntrip_hist_down(&s->hist, (uint32_t)s->idx, (uint8_t)cls, uptime_s(), &a, &b)) {
+        hist_queue(s, DIAG_EV_CASTER_DOWN, a, b);
+        hist_flush(s);
+    }
+}
+
 static void end_planned(slot_t *s, uint32_t now, bool clean)
 {
     bool was_open = s->open;
@@ -1347,6 +1421,7 @@ static void end_planned(slot_t *s, uint32_t now, bool clean)
     ntrip_sm_closed(&s->sm, now);
     if (was_open) {
         s->st.connected_since = 0;
+        hist_down(s, NTRIP_CLS_NONE);
     }
 }
 
@@ -1420,6 +1495,7 @@ static void session_failed(slot_t *s, ntrip_cls_t cls, uint32_t now)
         s->st.connected_since = 0;
         s->st.disconnects++;
         ntrip_sm_closed(&s->sm, now);
+        hist_down(s, NTRIP_CLS_NONE);   /* not a caster failure */
         ESP_LOGW(TAG, "cst%u (%s): session to %s:%u ended while the network was down (%s)", (unsigned)s->idx,
                  s->cfg.name, s->cfg.host, (unsigned)s->cfg.port, k_class_name[cls]);
         return;
@@ -1429,6 +1505,7 @@ static void session_failed(slot_t *s, ntrip_cls_t cls, uint32_t now)
     session_close(s, false);
     s->st.connected_since = 0;
     count_failure(s, &f, true);
+    hist_down(s, cls);
     uint32_t d = ntrip_sm_failed(&s->sm, &f, now, esp_random());
     ESP_LOGW(TAG, "cst%u (%s): session to %s:%u ended (%s); retry in %u s", (unsigned)s->idx, s->cfg.name,
              s->cfg.host, (unsigned)s->cfg.port, k_class_name[cls], (unsigned)((d + 999u) / 1000u));
@@ -1472,6 +1549,7 @@ static void connect_once(slot_t *s, uint32_t now)
     if (r == IO_FAIL) {
         session_close(s, false);
         count_failure(s, &f, false);
+        ntrip_hist_failed(&s->hist, uptime_s());
         uint32_t d = ntrip_sm_failed(&s->sm, &f, t1, esp_random());
         if (s->st.last_status_line[0] != '\0' && f.reached_caster) {
             ESP_LOGW(TAG, "cst%u (%s): %s:%u refused (%s): \"%.80s\"; retry in %u s", (unsigned)s->idx, s->cfg.name,
@@ -1500,6 +1578,12 @@ static void connect_once(slot_t *s, uint32_t now)
     ntrip_sm_connected(&s->sm, t1);
     s->st.connects++;
     s->st.connected_since = unix_now();
+    int32_t ha;
+    int32_t hb;
+    if (ntrip_hist_up(&s->hist, (uint32_t)s->idx, uptime_s(), &ha, &hb)) {
+        hist_queue(s, DIAG_EV_CASTER_UP, ha, hb);
+        hist_flush(s);
+    }
     ESP_LOGI(TAG, "cst%u (%s): streaming to %s:%u (%s)", (unsigned)s->idx, s->cfg.name, s->cfg.host,
              (unsigned)s->cfg.port, s->st.last_status_line);
 }
@@ -1613,6 +1697,7 @@ static void slot_task(void *arg)
     s->prev_state = (uint8_t)s->sm.state;
     s->state_since_ms = now;
     s->last_acct_ms = now;
+    ntrip_hist_init(&s->hist);
     restore_backoff(s, now);
 
     for (;;) {
@@ -1660,6 +1745,7 @@ static void slot_task(void *arg)
 
         now = now_ms();
         note_state(s, now);
+        hist_flush(s);
         persist_backoff(s, now);
         account(s, now);
         ledger_report(s);

@@ -312,3 +312,88 @@ uint8_t hm_level(uint8_t ladder_level, bool degraded)
     }
     return lvl;
 }
+
+/* ---- power lost ------------------------------------------------------------------ */
+
+void hm_power_init(hm_power_t *p)
+{
+    memset(p, 0, sizeof(*p));
+}
+
+void hm_power_feed(hm_power_t *p, uint16_t kind, int32_t a, int64_t unix_s, uint32_t uptime_s)
+{
+    if (kind == HM_EV_BOOT) {
+        p->cur_power = (a == HM_RESET_POWER_ON);
+        if (p->cur_power) {
+            if (p->n == HM_POWER_BOOTS) {
+                memmove(&p->boot[0], &p->boot[1], (HM_POWER_BOOTS - 1u) * sizeof(p->boot[0]));
+                p->n--;
+            }
+            p->boot[p->n].t = 0;
+            p->boot[p->n].ub = 0;
+            p->n++;
+        }
+    }
+    if (unix_s <= 0) {
+        return;
+    }
+    /* This record's boot started at `start`: every earlier boot came before it. */
+    int64_t start = unix_s - (int64_t)uptime_s;
+    if (start <= 0) {
+        start = 1;
+    }
+    uint8_t earlier = p->n;
+    if (p->cur_power && p->n > 0) {
+        earlier = (uint8_t)(p->n - 1u);
+        if (p->boot[p->n - 1u].t == 0) {
+            p->boot[p->n - 1u].t = start;
+        }
+    }
+    for (uint8_t i = 0; i < earlier; i++) {
+        if (p->boot[i].t == 0 && (p->boot[i].ub == 0 || start < p->boot[i].ub)) {
+            p->boot[i].ub = start;
+        }
+    }
+}
+
+bool hm_power_alert(const hm_power_t *p, int64_t now_utc)
+{
+    if (p->n == 0) {
+        return false;
+    }
+    if (now_utc <= 0) {
+        unsigned undated = 0;
+        for (uint8_t i = 0; i < p->n; i++) {
+            if (p->boot[i].t == 0 && p->boot[i].ub == 0) {
+                undated++;
+            }
+        }
+        return undated >= HM_POWER_COUNT;
+    }
+    int64_t e[HM_POWER_BOOTS];
+    for (uint8_t i = 0; i < p->n; i++) {
+        int64_t t = p->boot[i].t != 0 ? p->boot[i].t : (p->boot[i].ub != 0 ? p->boot[i].ub : now_utc);
+        e[i] = t > now_utc ? now_utc : t;
+    }
+    uint8_t last = (uint8_t)(p->n - 1u);
+    if (now_utc - e[last] >= HM_POWER_WINDOW_S) {
+        return false;   /* 24 h without a power-on boot */
+    }
+    /* The run of boots ending with the newest, each < 24 h after the one before. */
+    uint8_t first = last;
+    while (first > 0 && e[first] - e[first - 1u] < HM_POWER_WINDOW_S) {
+        first--;
+    }
+    for (uint8_t k = first; k <= last; k++) {
+        unsigned in_window = 0;
+        for (uint8_t j = first; j <= k; j++) {
+            if (e[k] - e[j] < HM_POWER_WINDOW_S) {
+                in_window++;
+            }
+        }
+        if (in_window >= HM_POWER_COUNT) {
+            return true;
+        }
+    }
+    return false;
+}

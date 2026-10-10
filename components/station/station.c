@@ -948,6 +948,7 @@ static void publish_status(const stn_in_t *in)
     o->lease_held = s_lease != NULL || s_hold_lease != NULL || s_boot_lease != NULL;
     o->detect_failures = core.detect_failures;
     o->detect_saw_bytes = core.detect_saw_bytes;
+    o->detect_passes = core.detect_passes;
     um98x_flash_get_progress(&o->flash);
 
     portENTER_CRITICAL(&s_lock);

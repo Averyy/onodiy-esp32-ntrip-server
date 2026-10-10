@@ -65,6 +65,20 @@
  * per episode and only if the event itself did not count it. The framer is
  * reset for every new episode.
  *
+ * The driver is installed once and never deleted: its 32 KB RX ring is one
+ * contiguous internal-RAM block (ISR in IRAM), which a fragmented heap may
+ * not have again. gnss_link_restart() reconfigures the installed driver in
+ * place. If the install itself fails (gnss_link_init), the link is closed
+ * and gnss_link reopens it on its own: 1 s after the failure, then 5 s,
+ * 30 s and every 60 s for ever, each with the full parameter set at the
+ * stored baud, without waiting for anyone; the first failure is logged and
+ * then at most one line per 10 min. link_open and open_failures in the
+ * stats show it ("receiver UART closed (reopening)"); while closed nothing
+ * is read, so a stall is classed as "no bytes". PROVISIONAL, to be confirmed
+ * on hardware: whether a wedged UART peripheral ever needs a reinstall; if
+ * so, only with the largest free internal block at least the RX ring plus
+ * 8 KB.
+ *
  * Only gnss_link changes the UART RX-FIFO-full threshold, and only right
  * after a baud change (gnss_link_init, gnss_link_set_baud, gnss_link_restart).
  * Version 1 keeps the driver default threshold and RX timeout at every baud.
@@ -176,6 +190,8 @@ typedef struct {
     uint64_t flushed_bytes;        /**< input dropped on purpose: lease release, resync, restart, before start (expected) */
     uint32_t last_rx_age_ms;       /**< time since any byte arrived (UINT32_MAX = never) */
     uint32_t last_rtcm_age_ms;     /**< time since the last CRC-valid RTCM frame, published or held (UINT32_MAX = never) */
+    bool link_open;                /**< the UART driver is installed (false: closed, gnss_link reopens it on its own) */
+    uint32_t open_failures;        /**< failed driver installs since boot (the first open and the reopens) */
     gnss_framing_stats_t framing;
 } gnss_link_stats_t;
 
@@ -186,7 +202,9 @@ typedef struct {
  * of 32, no pattern detection). The link is then open in STREAM mode, but
  * nothing reads it until gnss_link_start() (or a RAW lease holder).
  * ESP_ERR_INVALID_STATE unless board_is_valid(): a rejected pin map never
- * reaches the UART. A second call returns ESP_OK.
+ * reaches the UART. If the install fails, its error is returned but the link
+ * is initialised as closed: once gnss_link_start() has run, the RX task
+ * reopens it on its own schedule (see above). A second call returns ESP_OK.
  */
 esp_err_t gnss_link_init(void);
 
@@ -279,16 +297,21 @@ esp_err_t gnss_link_send_break(gnss_link_lease_t lease, uint32_t duration_ms);
 esp_err_t gnss_link_resync(gnss_link_lease_t lease);
 
 /**
- * Recovery: reinstall the UART driver at the stored baud (gnss/baud, else
+ * Recovery: restart the link at the stored baud (gnss/baud, else
  * CONFIG_GNSS_LINK_DEFAULT_BAUD), which may differ from the current one
- * after a scan or a failed baud change; flush input (flushed_bytes), discard
- * the first 20 ms after the reopen (baud_switch_bytes) and reset the framer.
- * With lease == NULL in STREAM mode (the RX task reopens and keeps
- * streaming), or with the COMMAND lease. Counters are kept. If the reinstall
- * fails the link stays closed (reads and writes fail) until a later restart
- * succeeds. ESP_ERR_TIMEOUT if a writer held the line for 1 s or the RX task
- * did not take the request within 1 s (nothing done). PROVISIONAL, to be
- * confirmed on hardware.
+ * after a scan or a failed baud change, keeping the installed driver (no
+ * delete, no install, no allocation). In the RX task, in this order: RX
+ * interrupts off; the pending UART events read and counted (the queue is
+ * never reset); the buffered input flushed (counted in flushed_bytes); line
+ * parameters (8N1, no flow control), pins, the stored baud, the RX-FIFO-full
+ * threshold and RX timeout applied again as at init; RX interrupts on; the
+ * first 20 ms discarded (baud_switch_bytes); the framer reset. Every step is
+ * tried; the first error is returned and the driver stays installed.
+ * With lease == NULL in STREAM mode, or with the COMMAND lease. Counters are
+ * kept. ESP_ERR_INVALID_STATE while the driver is closed (the reopen loop
+ * owns it) or under someone else's lease; ESP_ERR_TIMEOUT if a writer held
+ * the line for 1 s or the RX task did not take the request within 1 s
+ * (nothing done). PROVISIONAL, to be confirmed on hardware.
  */
 esp_err_t gnss_link_restart(gnss_link_lease_t lease);
 

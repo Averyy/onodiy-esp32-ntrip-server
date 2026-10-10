@@ -5,7 +5,8 @@
  * Health monitor task: samples the station once a second, runs the GNSS
  * recovery ladder (health_ladder.c) and the monitor helpers (health_mon.c),
  * feeds the network ladder, supervises the caster slots, watches the heap
- * and the BOOT button, journals loss counters and ladder steps, and drives
+ * and the BOOT button, journals loss counters and ladder steps, reads the
+ * journal's boot records for the power-lost alert, and drives
  * ledger_tick(). The logic lives in the pure cores; this file only samples
  * and acts. Thresholds and loss rules are PROVISIONAL, to be confirmed on
  * hardware.
@@ -50,6 +51,8 @@ static const char *TAG = "health";
 #define CFG_REFRESH_MS     10000
 #define LEDGER_OVF_PER_TICK 100u
 #define MAX_SLOTS          CONFIG_NTRIP_MAX_CASTERS
+#define JOURNAL_CHUNK      32      /* journal records per read (power-lost alert) */
+#define JOURNAL_READS_PER_TICK 8   /* a full 128 KB journal is read in about 16 s at start, bounded per tick */
 
 /* Debounce of the alerts that come from sampled states (ms). */
 #define BANDS_ON_MS        60000u
@@ -102,8 +105,14 @@ _Static_assert(HL_CODE_RESYNC == (int)DIAG_GNSS_STEP_RESYNC && HL_CODE_LINK_REST
                    HL_CODE_REBOOT_BLOCKED == (int)DIAG_GNSS_STEP_REBOOT_BLOCKED,
                "ladder journal codes are diag_gnss_step_t");
 _Static_assert(HL_OUT_STARTED == (int)DIAG_STEP_STARTED && HL_OUT_HEALTHY == (int)DIAG_STEP_HEALTHY &&
-                   HL_OUT_FAILED == (int)DIAG_STEP_FAILED && HL_OUT_ABANDONED == (int)DIAG_STEP_ABANDONED,
+                   HL_OUT_FAILED == (int)DIAG_STEP_FAILED && HL_OUT_ABANDONED == (int)DIAG_STEP_ABANDONED &&
+                   HL_OUT_NOT_RUN == (int)DIAG_STEP_NOT_RUN,
                "ladder outcomes are diag_step_outcome_t");
+_Static_assert(HL_MODE_FULL == (int)HEALTH_RECOVERY_FULL && HL_MODE_NO_REBOOT == (int)HEALTH_RECOVERY_NO_REBOOT &&
+                   HL_MODE_ALERTS == (int)HEALTH_RECOVERY_ALERTS,
+               "ladder modes are health_recovery_mode_t");
+_Static_assert(HM_RESET_POWER_ON == (int)LIFECYCLE_RESET_POWER_ON && HM_EV_BOOT == (int)DIAG_EV_BOOT,
+               "power-lost alert reads lifecycle's boot records");
 
 /* ---- shared state ----------------------------------------------------------- */
 
@@ -145,6 +154,11 @@ static int64_t s_factory_refused_ms = HM_NEVER;
 static uint8_t s_prev_level;
 static uint32_t s_prev_alerts;
 static bool s_prev_suspended;
+static uint8_t s_mode = HL_MODE_FULL;   /* recovery mode in effect */
+static int s_mode_bad = -1;             /* last out-of-range stored value logged */
+static hm_power_t s_power;
+static uint32_t s_jcursor;              /* journal records read so far (seq) */
+static diag_journal_entry_t s_jbuf[JOURNAL_CHUNK];
 
 /* Large snapshots, kept off the task stack. */
 static station_status_t s_st;
@@ -168,7 +182,8 @@ static const char *step_name(uint8_t code)
 
 static const char *outcome_name(uint8_t o)
 {
-    static const char *const k[] = { "started", "healthy again", "failed", "abandoned (suspended)" };
+    static const char *const k[] = { "started", "healthy again", "failed", "abandoned (suspended)",
+                                     "not run (user setting)" };
     return o < sizeof(k) / sizeof(k[0]) ? k[o] : "?";
 }
 
@@ -190,11 +205,18 @@ static hl_req_t op_request(void *ctx, uint8_t step)
     return HL_REQ_REJECTED;
 }
 
-static void op_reboot(void *ctx)
+static bool op_reboot(void *ctx)
 {
     (void)ctx;
+    /* Checked again right before the request: the ladder's sample is from
+     * the start of the tick, and a reboot is never queued behind an inhibit. */
+    if (!lifecycle_ladder_reboot_allowed(NULL) || lifecycle_reboot_inhibited(NULL)) {
+        ESP_LOGW(TAG, "GNSS ladder: ESP32 reboot blocked after all (cap or inhibit)");
+        return false;
+    }
     ESP_LOGE(TAG, "GNSS ladder: no byte from the receiver after the recovery steps: rebooting the ESP32");
     (void)lifecycle_request_reboot(LIFECYCLE_REBOOT_GNSS_LADDER);
+    return true;
 }
 
 static void op_journal(void *ctx, uint8_t code, uint8_t outcome)
@@ -270,13 +292,16 @@ static void loss_tick(const gnss_link_stats_t *link, const rtcm_hub_stats_t *hub
     }
 }
 
-/* Caster slots: budgets, "down" for the level, the protected slot for the
- * network ladder, and whether any slot streams (upstream evidently works). */
-static void casters_tick(int64_t now, bool *any_down, bool *protected_down, bool *any_streaming)
+/* Caster slots: budgets, "down" for the level, the protected slot and the
+ * longest run of failures that never reached a caster for the network
+ * ladder, and whether any slot streams (upstream evidently works). */
+static void casters_tick(int64_t now, bool *any_down, bool *protected_down, bool *any_streaming,
+                         uint32_t *unreached_s)
 {
     *any_down = false;
     *protected_down = false;
     *any_streaming = false;
+    *unreached_s = 0;
     size_t n = ntrip_server_slot_count();
     if (n > MAX_SLOTS) {
         n = MAX_SLOTS;
@@ -316,6 +341,9 @@ static void casters_tick(int64_t now, bool *any_down, bool *protected_down, bool
         if (si.enabled && s_cst.state == NTRIP_STATE_STREAMING) {
             *any_streaming = true;
         }
+        if (si.enabled && s_cst.unreached_s > *unreached_s) {
+            *unreached_s = s_cst.unreached_s;
+        }
         if (s_slot_protected[i] && si.enabled && s_cst.state != NTRIP_STATE_STREAMING &&
             s_cst.state != NTRIP_STATE_PAUSED) {
             *protected_down = true;
@@ -326,12 +354,13 @@ static void casters_tick(int64_t now, bool *any_down, bool *protected_down, bool
 /* Network ladder inputs; the ladder itself runs in the network component.
  * @return the "no upstream" alert: an IP, the last probe reached nothing
  *         beyond the router, and no caster streams. */
-static bool network_tick(const rtcm_hub_stats_t *hub, bool protected_down, bool any_streaming)
+static bool network_tick(const rtcm_hub_stats_t *hub, bool protected_down, bool any_streaming, uint32_t unreached_s)
 {
     bool have = network_get_status(&s_net) == ESP_OK;
     network_ladder_input_t nin = {
         .caster_down = protected_down,
         .rtcm_healthy = hub->last_frame_age_ms != UINT32_MAX && hub->last_frame_age_ms <= STALL_MS,
+        .slot_unreached_s = unreached_s,
         .flash_journal_open = s_st.flash_journal_open,
         .flash_journal_unknown = s_st.flash_journal_settings_unavailable,
         .min_reboot_interval_s = (uint32_t)CONFIG_HEALTH_NET_REBOOT_MIN_INTERVAL_H * 3600u,
@@ -442,6 +471,48 @@ static void button_tick(int64_t now)
     }
 }
 
+/* gnss/recovery, read before every ladder decision; out of range reads as full. */
+static uint8_t read_recovery_mode(void)
+{
+    uint8_t v = HL_MODE_FULL;
+    if (!settings_is_available() || settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RECOVERY, &v) != ESP_OK) {
+        return HL_MODE_FULL;
+    }
+    if (v > HL_MODE_ALERTS) {
+        if (s_mode_bad != (int)v) {
+            s_mode_bad = (int)v;
+            ESP_LOGW(TAG, "gnss/recovery = %u is not a recovery mode: full recovery", (unsigned)v);
+        }
+        return HL_MODE_FULL;
+    }
+    return v;
+}
+
+static const char *mode_name(uint8_t m)
+{
+    static const char *const k[] = { "full", "no ESP32 reboot", "alerts only" };
+    return m < sizeof(k) / sizeof(k[0]) ? k[m] : "?";
+}
+
+/* The journal's boot records, read a bounded number per tick (the whole
+ * journal over the first ticks, then what is new). */
+static bool power_tick(void)
+{
+    for (int i = 0; i < JOURNAL_READS_PER_TICK; i++) {
+        size_t n = JOURNAL_CHUNK;
+        if (diag_journal_read(&s_jcursor, s_jbuf, &n) != ESP_OK) {
+            break;
+        }
+        for (size_t k = 0; k < n; k++) {
+            hm_power_feed(&s_power, s_jbuf[k].kind, s_jbuf[k].a, s_jbuf[k].unix_s, s_jbuf[k].uptime_s);
+        }
+        if (n < JOURNAL_CHUNK) {
+            break;
+        }
+    }
+    return hm_power_alert(&s_power, diag_utc_now());
+}
+
 static void log_changes(const health_status_t *o)
 {
     if (o->level != s_prev_level) {
@@ -504,6 +575,13 @@ static void tick(void)
 #endif
     in->reboot_allowed = lifecycle_ladder_reboot_allowed(NULL);
     in->reboot_inhibited = lifecycle_reboot_inhibited(NULL);
+    in->detect_passes = s_st.detect_passes;
+    uint8_t mode = read_recovery_mode();
+    if (mode != s_mode) {
+        ESP_LOGI(TAG, "automatic receiver recovery: %s -> %s", mode_name(s_mode), mode_name(mode));
+        s_mode = mode;
+    }
+    in->recovery_mode = mode;
     hl_tick(&s_ladder, in);
     hl_status_t ls;
     hl_get_status(&s_ladder, in, &ls);
@@ -515,9 +593,11 @@ static void tick(void)
     bool any_down;
     bool protected_down;
     bool any_streaming;
-    casters_tick(now, &any_down, &protected_down, &any_streaming);
+    uint32_t unreached_s;
+    casters_tick(now, &any_down, &protected_down, &any_streaming, &unreached_s);
     bool casters_down = hm_deb(&s_deb_casters, any_down, now, CASTER_ON_MS, CASTER_OFF_MS);
-    bool no_upstream = network_tick(&hub, protected_down, any_streaming);
+    bool no_upstream = network_tick(&hub, protected_down, any_streaming, unreached_s);
+    bool power_lost = power_tick();
 
     gnss_obs_summary_t obs;
     bool bands_raw = gnss_obs_get_summary(&obs) == ESP_OK && obs.epochs > 0 && obs.epoch_age_ms <= STALL_MS &&
@@ -567,6 +647,9 @@ static void tick(void)
     if (link_loss) {
         alerts |= HEALTH_ALERT_LINK_LOSS;
     }
+    if (power_lost) {
+        alerts |= HEALTH_ALERT_POWER_LOST;
+    }
 
     bool degraded = (alerts & ~(uint32_t)HEALTH_ALERT_RECEIVER_POWER) != 0 || casters_down;
     o.level = (health_level_t)hm_level(ls.level, degraded);
@@ -581,6 +664,8 @@ static void tick(void)
     o.rtcm_gap_ms = s_link_stats.last_rtcm_age_ms;
     o.gnss_retry_in_s = ls.retry_in_s;
     o.admin_resets = s_admin_resets;
+    o.recovery_mode = (health_recovery_mode_t)mode;
+    o.gnss_reboot_recheck = ls.reboot_recheck;
     if (s_factory_refused_ms == HM_NEVER) {
         o.factory_reset_refused_age_s = UINT32_MAX;
     } else {
@@ -635,6 +720,8 @@ esp_err_t health_init(void)
     hm_deb_init(&s_deb_frag);
     hm_deb_init(&s_deb_casters);
     hm_button_init(&s_button);
+    hm_power_init(&s_power);
+    s_mode = read_recovery_mode();
 
     esp_err_t err = esp_event_handler_register(STATION_EVENT, STATION_EVENT_STATE_CHANGED, on_station_event, NULL);
     if (err != ESP_OK) {
@@ -701,6 +788,7 @@ esp_err_t health_get_status(health_status_t *out)
     }
     out->level = out->alerts != 0 ? HEALTH_DEGRADED : HEALTH_OK;
     out->uptime_s = (uint64_t)(esp_timer_get_time() / 1000000);
+    out->recovery_mode = (health_recovery_mode_t)read_recovery_mode();
     out->rtcm_gap_ms = UINT32_MAX;
     out->factory_reset_refused_age_s = UINT32_MAX;
     out->heap_internal_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);

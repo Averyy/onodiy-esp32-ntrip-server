@@ -54,7 +54,8 @@
  *    (boots with reset class and reason, the previous session's uptime,
  *    reboot reason codes, ladder steps, app update/trial/revert/rollback
  *    results, receiver-flash results, safe-mode entries, Wi-Fi disconnect
- *    reasons, data-loss deltas). Survives power loss and image changes; the
+ *    reasons, data-loss deltas, and the connection history: caster sessions
+ *    ending and starting again, the station getting its IP back). Survives power loss and image changes; the
  *    oldest records are overwritten, one 4 KB sector (127 records) at a
  *    time, in strict ring order so every sector wears equally. Appends are
  *    queued and written by a small task of diag's, so a caller never waits
@@ -124,15 +125,21 @@ typedef enum {
     /**
      * a = ladder (diag_ladder_t: 0 GNSS, 1 network, 2 caster),
      * b = (outcome << 8) | code; diag_ladder_b() builds it. The network
-     * ladder adds its reason in bits 16-23 (see network.h).
+     * ladder adds its reason in bits 16-23 (see network.h); its code 0
+     * marks a pass start, with the triggers holding then in the reason
+     * (bit 0 protected caster down, bit 1 associated without an IP, bit 2 a
+     * slot not reaching its caster).
      * GNSS journal step codes (diag_gnss_step_t; health.h names the rungs
      * 1-5, 6a, 6b, 7): 1-5 = rungs 1-5 (the recovery actions), 6 = rung 6a
      * (ESP32 reboot), 7 = rung 6b ("receiver needs a power cycle" alert),
      * 8 = rung 7 (FAILED, retry pass pending), 9 = rung 6a blocked by the
-     * reboot cap or a held reboot inhibit. Outcome (diag_step_outcome_t): 0 started, 1 healthy again,
-     * 2 failed (also: refused by the station without sending anything),
-     * 3 abandoned because the ladder was suspended. Exempt from both rate
-     * limits.
+     * reboot cap or a held reboot inhibit (or, with outcome 4, not taken
+     * because of the user's recovery mode). Outcome (diag_step_outcome_t):
+     * 0 started, 1 healthy again, 2 failed (also: refused by the station
+     * without sending anything), 3 abandoned because the ladder was
+     * suspended, 4 not run because of the user's recovery mode
+     * (gnss/recovery: the step the full ladder would have started). Exempt
+     * from both rate limits.
      */
     DIAG_EV_LADDER_STEP,
     DIAG_EV_APP_UPDATE,         /**< a = result (esp_err_t) */
@@ -142,7 +149,42 @@ typedef enum {
     DIAG_EV_WIFI_DISCONNECT,    /**< a = wifi_err_reason_t, b = RSSI */
     DIAG_EV_DATA_LOSS,          /**< a = diag_loss_id_t, b = increase since the previous record for that id (clamped to INT32_MAX) */
     DIAG_EV_SESSION,            /**< right after DIAG_EV_BOOT: a = previous session uptime in s (-1 = unknown), b = raw esp_reset_reason_t */
+    /**
+     * A caster session that reached STREAMING ended (any reason):
+     * a = diag_caster_a(slot, end class, short sessions not journalled since
+     * the slot's previous DOWN), b = session length in s. End class:
+     * ntrip_fail_class_t of a failure; 0 when the end was not a caster
+     * failure (pause, configuration change, health restart, shutdown, the
+     * receiver's RTCM stopping, the network going down: the records beside
+     * it tell which). Sessions shorter than 60 s are journalled only when
+     * the slot wrote no DOWN in the last 10 min; the skipped ones are counted
+     * into the next DOWN written.
+     */
+    DIAG_EV_CASTER_DOWN,
+    /**
+     * A caster session reached STREAMING after at least one failed attempt,
+     * or at least 10 s after the slot's previous session ended:
+     * a = diag_caster_a(slot, 0, failed attempts since that session),
+     * b = outage in s (from the previous session's end, or from the first
+     * failed attempt when the slot had not streamed this boot). After a
+     * session shorter than 60 s it is journalled only when the slot wrote no
+     * UP in the last 10 min.
+     */
+    DIAG_EV_CASTER_UP,
+    DIAG_EV_WIFI_UP,            /**< the station got its IP back (not the first IP of a boot): a = connect attempts during the outage, b = outage in s */
 } diag_event_t;
+
+/**
+ * `a` of DIAG_EV_CASTER_DOWN / _UP: slot index in bits 0-7, end class in bits
+ * 8-15, a count in bits 16-30 (saturating at 32 767, so `a` stays >= 0).
+ */
+static inline int32_t diag_caster_a(uint32_t slot, uint32_t cls, uint32_t count)
+{
+    if (count > 32767u) {
+        count = 32767u;
+    }
+    return (int32_t)((slot & 0xFFu) | ((cls & 0xFFu) << 8) | (count << 16));
+}
 
 /**
  * Counter ids for DIAG_EV_DATA_LOSS records (health journals the deltas,
@@ -186,6 +228,7 @@ typedef enum {
     DIAG_STEP_HEALTHY = 1,
     DIAG_STEP_FAILED = 2,       /**< also: refused without sending anything */
     DIAG_STEP_ABANDONED = 3,    /**< the ladder was suspended */
+    DIAG_STEP_NOT_RUN = 4,      /**< not run: the user's recovery mode (gnss/recovery) */
 } diag_step_outcome_t;
 
 /** `b` of a DIAG_EV_LADDER_STEP record. */
@@ -339,6 +382,9 @@ void diag_journal_info(diag_journal_info_t *out);
  * first call they carry 0. The availability ledger feeds it.
  */
 void diag_set_utc(int64_t unix_s);
+
+/** Trusted UTC now (seconds since 1970), extrapolated from the last diag_set_utc(); 0 before it. */
+int64_t diag_utc_now(void);
 
 /** Summary of the stored core dump (present = false if none). */
 esp_err_t diag_coredump_info(diag_coredump_info_t *out);

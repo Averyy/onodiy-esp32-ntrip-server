@@ -64,6 +64,12 @@
  * with data still buffered makes the next event wait zero, otherwise it is
  * GNSS_LINK_EVENT_WAIT_MS.
  *
+ * Closed driver (gnss_link_core_reopen_*): when the UART driver could not be
+ * installed, gnss_link retries the install on its own: 1 s after the
+ * failure, then 5 s, 30 s, and every 60 s for ever; the first failure is
+ * logged, then at most one line per GNSS_LINK_REOPEN_LOG_MS. link_open and
+ * open_failures show it.
+ *
  * Time: 64-bit microsecond stamps; ages are computed values clamped to
  * UINT32_MAX - 1 ms, UINT32_MAX meaning "never".
  */
@@ -88,6 +94,7 @@ extern "C" {
 #define GNSS_LINK_EVENT_WAIT_MS    20u           /**< event wait after a pass that emptied the buffer */
 #define GNSS_LINK_BAUD_SETTLE_MS   20u           /**< input discarded after a host baud change */
 #define GNSS_LINK_BREAK_MAX_MS     1000u         /**< longest break one call may hold */
+#define GNSS_LINK_REOPEN_LOG_MS    (10u * 60u * 1000u) /**< a closed driver logs its failed reopens at most this often */
 
 /** Driver defaults for the 128 B hardware FIFO: RX-full threshold 120 B, RX timeout 10 symbols. */
 #define GNSS_LINK_RX_FULL_THRESH_DEFAULT 120
@@ -139,7 +146,8 @@ typedef struct {
     bool ring_full_seen;     /**< this ring-full episode was counted in rx_buffer_full */
     bool overflow_seen;      /**< an overflow was counted since the ring was last below the full mark */
     bool queue_full_seen;    /**< this full-queue episode was counted in rx_events_dropped */
-    gnss_link_stats_t stats; /**< counters; mode, baud and ages are filled by the snapshot */
+    bool link_open;          /**< the UART driver is installed */
+    gnss_link_stats_t stats; /**< counters; mode, baud, ages and link_open are filled by the snapshot */
 } gnss_link_core_t;
 
 /** One drain pass. */
@@ -150,6 +158,26 @@ typedef struct {
 
 /** Link open at `baud`, STREAM mode, counters zero. */
 void gnss_link_core_init(gnss_link_core_t *c, uint32_t baud);
+
+/** The driver is installed (true) or closed (false). */
+void gnss_link_core_set_open(gnss_link_core_t *c, bool open);
+
+/** An install of the driver failed (open_failures += 1, the link is closed). */
+void gnss_link_core_on_open_failed(gnss_link_core_t *c);
+
+/**
+ * Delay before the next install of a closed driver, after `failures` failed
+ * reopen attempts (0 = right after the failure that closed it): 1 s, 5 s,
+ * 30 s, then 60 s for ever.
+ */
+uint32_t gnss_link_core_reopen_delay_ms(uint32_t failures);
+
+/**
+ * Should this failed reopen be logged? The first one always
+ * (`logged` false), then one at most every GNSS_LINK_REOPEN_LOG_MS after
+ * `last_log_us`.
+ */
+bool gnss_link_core_reopen_log_due(bool logged, int64_t last_log_us, int64_t now_us);
 
 /**
  * Take a COMMAND or RAW lease (the caller waits for a free slot itself).

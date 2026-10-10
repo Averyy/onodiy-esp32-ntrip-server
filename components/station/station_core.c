@@ -650,6 +650,9 @@ static void done_detect(stn_t *s, const stn_result_t *r, const stn_in_t *in)
 {
     int64_t now = in->now_ms;
     bool rescan = (s->state == STN_RECOVERING);
+    if (s->detect_passes < UINT32_MAX) {
+        s->detect_passes++;   /* with detect_saw_bytes below: health reads the two together */
+    }
     if (rescan) {
         s->rec_running = 0;
         s->paused = false;

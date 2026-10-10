@@ -40,6 +40,12 @@ static void journal(hl_t *l, uint8_t code, uint8_t outcome)
     }
 }
 
+static uint8_t mode_of(const hl_in_t *in)
+{
+    return (in->recovery_mode == HL_MODE_NO_REBOOT || in->recovery_mode == HL_MODE_ALERTS) ? in->recovery_mode
+                                                                                            : (uint8_t)HL_MODE_FULL;
+}
+
 static bool rtcm_fresh(const hl_in_t *in)
 {
     return in->rtcm_age_ms != UINT32_MAX && in->rtcm_age_ms <= in->stall_ms;
@@ -148,23 +154,39 @@ static void enter_failed(hl_t *l, const hl_in_t *in)
     l->healthy = false;
 }
 
-/* After a failed step 3 (not found) or 5, and for a NO_RECEIVER episode. */
+/* After a failed step 3 (not found) or 5, and for a NO_RECEIVER episode.
+ * ALERTS mode: neither 6a nor 6b, straight to 7. NO_REBOOT mode: 6a is
+ * journalled as not run and the ladder goes to 7. A 6a that could not be
+ * taken during a NO_RECEIVER episode is looked at again (no_receiver()). */
 static void byte_rule(hl_t *l, const hl_in_t *in, bool bytes)
 {
+    uint8_t mode = mode_of(in);
+    l->blocked_6a = false;
+    if (mode == HL_MODE_ALERTS) {
+        enter_failed(l, in);
+        return;
+    }
     if (!bytes) {
-        if (in->reboot_allowed && !in->reboot_inhibited) {
+        if (mode == HL_MODE_NO_REBOOT) {
+            journal(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_NOT_RUN);
+        } else if (in->reboot_allowed && !in->reboot_inhibited) {
             journal(l, HL_CODE_REBOOT, HL_OUT_STARTED);
-            l->recoveries++;
-            l->last_step = HL_CODE_REBOOT;
-            l->phase = HL_PH_REBOOTING;
-            l->step = 0;
-            l->reboot_ms = in->now_ms;
-            if (l->ops.reboot != NULL) {
-                l->ops.reboot(l->ops.ctx);
+            if (l->ops.reboot == NULL || l->ops.reboot(l->ops.ctx)) {
+                l->recoveries++;
+                l->last_step = HL_CODE_REBOOT;
+                l->phase = HL_PH_REBOOTING;
+                l->step = 0;
+                l->reboot_ms = in->now_ms;
+                return;
             }
-            return;
+            journal(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_STARTED);   /* blocked after all: a race with the cap or an inhibit */
+        } else {
+            journal(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_STARTED);
         }
-        journal(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_STARTED);
+        if (in->stn_state == HL_STN_NO_RECEIVER) {
+            l->blocked_6a = true;
+            l->blocked_at_pass = in->detect_passes;
+        }
     } else {
         journal(l, HL_CODE_POWER_ALERT, HL_OUT_STARTED);
         l->power_alert = true;
@@ -190,20 +212,37 @@ static void start_run(hl_t *l, const hl_in_t *in)
     l->own_to_ms = HL_NEVER;
 }
 
-/* A refused RECONFIGURE fails at once; the ladder goes on to step 5. */
-static void refused(hl_t *l)
+/* A refused RECONFIGURE fails at once; the ladder goes on to step 5. In
+ * ALERTS mode the full ladder would not have started it either: no record. */
+static void refused(hl_t *l, const hl_in_t *in)
 {
-    journal(l, HL_CODE_RECONFIGURE, HL_OUT_FAILED);
+    if (mode_of(in) != HL_MODE_ALERTS) {
+        journal(l, HL_CODE_RECONFIGURE, HL_OUT_FAILED);
+    }
     l->idx = HL_CODE_RECONFIGURE;
     l->step = HL_CODE_RECEIVER_RESET;
+}
+
+/* ALERTS mode: the step is only journalled; its grace runs as if it had. */
+static void dry_start(hl_t *l)
+{
+    journal(l, l->step, HL_OUT_NOT_RUN);
+    l->dry = true;
+    l->phase = HL_PH_GRACE;
+    l->grace_start = l->active_ms;
+    l->not_found = false;
 }
 
 static void try_request(hl_t *l, const hl_in_t *in)
 {
     for (int guard = 0; guard < 2 && l->phase == HL_PH_WANT; guard++) {
         if (l->step == HL_CODE_RECONFIGURE && in->reconfigure_refused) {
-            refused(l);
+            refused(l, in);
             continue;
+        }
+        if (mode_of(in) == HL_MODE_ALERTS) {
+            dry_start(l);
+            return;
         }
         hl_req_t r = (l->ops.request != NULL) ? l->ops.request(l->ops.ctx, l->step) : HL_REQ_REJECTED;
         if (r == HL_REQ_ACCEPTED) {
@@ -211,7 +250,7 @@ static void try_request(hl_t *l, const hl_in_t *in)
             return;
         }
         if (r == HL_REQ_REFUSED && l->step == HL_CODE_RECONFIGURE) {
-            refused(l);
+            refused(l, in);
             continue;
         }
         return;   /* rejected: asked again on the next tick */
@@ -223,6 +262,7 @@ static void want(hl_t *l, const hl_in_t *in, uint8_t step)
     l->step = step;
     l->phase = HL_PH_WANT;
     l->healthy = false;
+    l->dry = false;
     try_request(l, in);
 }
 
@@ -262,9 +302,26 @@ static void step_failed(hl_t *l, const hl_in_t *in)
     }
 }
 
+/* ALERTS mode: the grace of a step that was only journalled ran out. Where
+ * the byte rule would run (after step 3 or 5) the ladder goes to 7. */
+static void dry_failed(hl_t *l, const hl_in_t *in)
+{
+    uint8_t step = l->step;
+    l->idx = step;
+    l->dry = false;
+    if (step == HL_CODE_RESCAN || step == HL_CODE_RECEIVER_RESET) {
+        enter_failed(l, in);
+        return;
+    }
+    escalate(l, in, hl_classify(l, in));
+}
+
 static void step_healthy(hl_t *l)
 {
-    journal(l, l->step, HL_OUT_HEALTHY);
+    if (!l->dry) {
+        journal(l, l->step, HL_OUT_HEALTHY);   /* a step that was not run has no result */
+    }
+    l->dry = false;
     l->idx = l->step;
     l->step = 0;
     l->phase = HL_PH_IDLE;
@@ -281,7 +338,10 @@ static void step_healthy(hl_t *l)
 static void abandon(hl_t *l)
 {
     bool repeat = false;
-    if (l->phase == HL_PH_RUN || l->phase == HL_PH_GRACE) {
+    if (l->dry) {
+        /* only journalled: nothing ran that could be abandoned */
+        l->dry = false;
+    } else if (l->phase == HL_PH_RUN || l->phase == HL_PH_GRACE) {
         journal(l, l->step, HL_OUT_ABANDONED);
         if (l->phase == HL_PH_RUN) {
             l->own_to_ms = l->last_now;   /* the step's window closes here */
@@ -315,6 +375,8 @@ static void ladder_reset(hl_t *l)
     l->power_alert = false;
     l->hold_no_rx = false;
     l->abandoned = 0;
+    l->blocked_6a = false;
+    l->dry = false;
 }
 
 /* Healthy-for-60-s tracking (IDLE and FAILED). */
@@ -380,7 +442,11 @@ static void grace_phase(hl_t *l, const hl_in_t *in)
     }
     bool hold = survey_hold(in) || (l->step == HL_CODE_RECONFIGURE && in->surveying);
     if (l->active_ms - l->grace_start >= grace_ms(l->step) && !hold) {
-        step_failed(l, in);
+        if (l->dry) {
+            dry_failed(l, in);
+        } else {
+            step_failed(l, in);
+        }
     }
 }
 
@@ -400,7 +466,12 @@ static void failed_phase(hl_t *l, const hl_in_t *in)
         return;
     }
     l->retry_at = l->active_ms + HL_FAILED_RETRY_MS;
-    want(l, in, max_u8(HL_CODE_LINK_RESTART, hl_entry_step(c)));
+    uint8_t step = max_u8(HL_CODE_LINK_RESTART, hl_entry_step(c));
+    if (mode_of(in) == HL_MODE_ALERTS) {
+        journal(l, step, HL_OUT_NOT_RUN);   /* the pass it would start; nothing is sent */
+        return;
+    }
+    want(l, in, step);
 }
 
 static void idle_phase(hl_t *l, const hl_in_t *in)
@@ -416,13 +487,24 @@ static void idle_phase(hl_t *l, const hl_in_t *in)
     escalate(l, in, hl_classify(l, in));
 }
 
-/* NO_RECEIVER episodes: the byte rule once on the station's whole pass. */
+/* A 6a this episode could not take, looked at again: full mode, the cap
+ * allows a reboot now, no inhibit is held, and the station has completed a
+ * detection pass since the block (its result is what the rule reads). */
+static bool recheck_due(const hl_t *l, const hl_in_t *in)
+{
+    return l->blocked_6a && mode_of(in) == HL_MODE_FULL && in->reboot_allowed && !in->reboot_inhibited &&
+           (int32_t)(in->detect_passes - l->blocked_at_pass) > 0;
+}
+
+/* NO_RECEIVER episodes: the byte rule once on the station's whole pass,
+ * and again on a later pass for a 6a that was blocked. */
 static bool no_receiver(hl_t *l, const hl_in_t *in)
 {
     if (in->stn_state != HL_STN_NO_RECEIVER) {
         if (l->no_rx) {
             l->no_rx = false;
             l->no_rx_handled = false;
+            l->blocked_6a = false;
             if (l->phase == HL_PH_FAILED && l->hold_no_rx) {
                 l->hold_no_rx = false;
                 l->retry_at = l->active_ms + HL_FAILED_RETRY_MS;
@@ -437,6 +519,10 @@ static bool no_receiver(hl_t *l, const hl_in_t *in)
     if (l->no_rx_handled || l->phase == HL_PH_RUN || l->phase == HL_PH_GRACE) {
         if (l->phase == HL_PH_FAILED) {
             l->hold_no_rx = true;
+            if (recheck_due(l, in)) {
+                byte_rule(l, in, in->detect_saw_bytes);
+                return true;
+            }
         }
         return false;
     }
@@ -447,6 +533,35 @@ static bool no_receiver(hl_t *l, const hl_in_t *in)
     l->step = 0;
     byte_rule(l, in, in->detect_saw_bytes);
     return true;
+}
+
+/* The user left the ALERTS mode: a stall in progress starts a fresh pass at
+ * its class entry step (a step that was only journalled is dropped). In a
+ * NO_RECEIVER episode the byte rule runs again on the station's last pass. */
+static void leave_alerts(hl_t *l, const hl_in_t *in)
+{
+    if (in->stn_state == HL_STN_NO_RECEIVER) {
+        if (l->no_rx && l->phase == HL_PH_FAILED) {
+            l->no_rx_handled = false;
+        }
+        return;
+    }
+    bool dry_step = l->dry && l->phase == HL_PH_GRACE;
+    if (!dry_step && l->phase != HL_PH_FAILED && l->phase != HL_PH_IDLE) {
+        return;   /* a step that really runs completes first */
+    }
+    if (!dry_step && !stalled(l, in)) {
+        return;
+    }
+    l->dry = false;
+    l->phase = HL_PH_IDLE;
+    l->idx = 0;
+    l->step = 0;
+    l->abandoned = 0;
+    l->hold_no_rx = false;
+    if (stalled(l, in)) {
+        escalate(l, in, hl_classify(l, in));
+    }
 }
 
 /* ---- API ----------------------------------------------------------------- */
@@ -515,6 +630,13 @@ void hl_tick(hl_t *l, const hl_in_t *in)
         l->stall_ref_ms = now;
     }
 
+    uint8_t mode = mode_of(in);
+    if (l->mode == HL_MODE_ALERTS && mode != HL_MODE_ALERTS) {
+        l->mode = mode;
+        leave_alerts(l, in);
+    }
+    l->mode = mode;
+
     if (no_receiver(l, in)) {
         return;
     }
@@ -548,7 +670,8 @@ void hl_get_status(const hl_t *l, const hl_in_t *in, hl_status_t *out)
     case HL_PH_WANT:
     case HL_PH_RUN:
     case HL_PH_GRACE:
-        out->level = HL_LEVEL_RECOVERING;
+        /* ALERTS mode: nothing recovers, the stall is only reported */
+        out->level = l->dry ? HL_LEVEL_DEGRADED : HL_LEVEL_RECOVERING;
         out->rung = l->step;
         break;
     case HL_PH_REBOOTING:
@@ -575,4 +698,6 @@ void hl_get_status(const hl_t *l, const hl_in_t *in, hl_status_t *out)
     out->power_alert = l->power_alert;
     out->stalls = l->stalls;
     out->recoveries = l->recoveries;
+    out->mode = l->mode;
+    out->reboot_recheck = l->blocked_6a && l->mode == HL_MODE_FULL;
 }

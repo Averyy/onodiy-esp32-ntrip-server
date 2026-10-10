@@ -144,7 +144,10 @@ uint32_t net_ap_reasons(const net_ap_input_t *in, bool *recovery_expired)
     uint32_t r = 0;
     bool expired = false;
     if (in->recovery_requested) {
-        if (in->recovery_age_s < in->recovery_lifetime_s || in->ap_clients > 0) {
+        /* uint64: a lifetime near UINT32_MAX must not wrap the client limit */
+        bool client_hold = in->ap_clients > 0 &&
+                           (uint64_t)in->recovery_age_s < (uint64_t)in->recovery_lifetime_s + NET_AP_CLIENT_HOLD_MAX_S;
+        if (in->recovery_age_s < in->recovery_lifetime_s || client_hold) {
             r |= NET_AP_RECOVERY;
         } else {
             expired = true;
@@ -226,6 +229,44 @@ size_t net_scan_insert(net_scan_entry_t *list, size_t count, size_t cap, const n
     list[pos] = *e;
     list[pos].ssid[sizeof(list[pos].ssid) - 1] = '\0';
     return count + 1;
+}
+
+/* ---- changed station credentials on trial -------------------------------------------- */
+
+net_cred_plan_t net_cred_plan(bool have_active, bool same_as_active)
+{
+    return (have_active && !same_as_active) ? NET_CRED_PLAN_TRIAL : NET_CRED_PLAN_ACTIVE;
+}
+
+void net_cred_trial_start(net_cred_trial_t *t, uint32_t now_s)
+{
+    t->on = true;
+    t->since_s = now_s;
+}
+
+net_trial_act_t net_cred_trial_tick(net_cred_trial_t *t, bool got_ip, uint32_t now_s)
+{
+    if (!t->on) {
+        return NET_TRIAL_NONE;
+    }
+    if (got_ip) {
+        t->on = false;
+        return NET_TRIAL_CONFIRMED;
+    }
+    if ((uint32_t)(now_s - t->since_s) >= NET_CRED_TRIAL_S) {
+        t->on = false;
+        return NET_TRIAL_REVERT;
+    }
+    return NET_TRIAL_NONE;
+}
+
+uint32_t net_cred_trial_left_s(const net_cred_trial_t *t, uint32_t now_s)
+{
+    if (!t->on) {
+        return 0;
+    }
+    uint32_t el = now_s - t->since_s;
+    return el >= NET_CRED_TRIAL_S ? 0 : NET_CRED_TRIAL_S - el;
 }
 
 /* ---- network-ladder reboot age across resets ---------------------------------------- */

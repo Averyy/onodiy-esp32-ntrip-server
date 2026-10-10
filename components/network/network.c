@@ -65,14 +65,20 @@ _Static_assert((int)NETWORK_LADDER_WHY_UPSTREAM_OK == (int)NET_WHY_UPSTREAM_OK &
                    (int)NETWORK_LADDER_WHY_JOURNAL_OPEN == (int)NET_WHY_JOURNAL_OPEN &&
                    (int)NETWORK_LADDER_WHY_INTERVAL == (int)NET_WHY_INTERVAL &&
                    (int)NETWORK_LADDER_WHY_INHIBITED == (int)NET_WHY_INHIBITED &&
-                   (int)NETWORK_LADDER_WHY_AP_IN_USE == (int)NET_WHY_AP_IN_USE,
+                   (int)NETWORK_LADDER_WHY_AP_IN_USE == (int)NET_WHY_AP_IN_USE &&
+                   (int)NETWORK_LADDER_WHY_NO_REBOOT_TRIGGER == (int)NET_WHY_NO_REBOOT_TRIGGER &&
+                   (int)NETWORK_LADDER_WHY_AP_OVERRIDDEN == (int)NET_WHY_AP_OVERRIDDEN,
                "ladder reasons match the core");
+_Static_assert((int)NETWORK_LADDER_TRIG_PROTECTED == (int)NET_TRIG_P &&
+                   (int)NETWORK_LADDER_TRIG_ASSOC_NO_IP == (int)NET_TRIG_A &&
+                   (int)NETWORK_LADDER_TRIG_UNREACHED == (int)NET_TRIG_S,
+               "ladder triggers match the core");
 _Static_assert(sizeof(((network_scan_entry_t *)0)->ssid) == sizeof(((net_scan_entry_t *)0)->ssid),
                "scan entries carry the same SSID size");
 _Static_assert(CONFIG_NETWORK_RECOVERY_AP_S > 0 && CONFIG_NETWORK_STA_FALLBACK_S > 0, "AP timings");
 
 /* Tasks and queue. */
-#define NET_TASK_STACK    4096
+#define NET_TASK_STACK    5120    /* settings writes when trial credentials are confirmed */
 #define NET_TASK_PRIO     6
 #define NET_TASK_CORE     0       /* with the Wi-Fi driver; the GNSS path is on core 1 */
 #define NET_QUEUE_LEN     24
@@ -168,7 +174,17 @@ EXT_RAM_BSS_ATTR static net_scan_entry_t s_scan_tmp[NETWORK_SCAN_MAX]; /* net ta
 static char s_new_ssid[33];                 /* under s_lock: credentials waiting to be applied */
 static char s_new_pass[65];
 static bool s_new_pending;
+static bool s_new_trial;                    /* under s_lock: apply them as a trial (pending credentials) */
 static int64_t s_apply_at_us;
+
+/* Credentials (under s_lock): the station's stored ones and the pending ones
+ * (changed, not confirmed by an IP yet; see network.h). */
+static char s_act_ssid[33];
+static char s_act_pass[65];
+static char s_pend_ssid[33];
+static char s_pend_pass[65];
+static bool s_pend_valid;
+static bool s_cred_reverted;
 
 static esp_err_t s_start_err;               /* MSG_START result */
 static SemaphoreHandle_t s_start_done;
@@ -188,6 +204,15 @@ static bool s_has_ip;
 static bool s_had_link;
 static uint32_t s_offline_since_s;
 static uint32_t s_ip_since_s;
+static uint32_t s_noip_since_s;             /* associated without an IP since (trigger A) */
+static bool s_outage;                       /* the address was lost after the station had one (DIAG_EV_WIFI_UP) */
+static uint32_t s_outage_attempts;          /* connect attempts since */
+static bool s_up_pending;                   /* a DIAG_EV_WIFI_UP record waits to be written */
+static int32_t s_up_a;
+static int32_t s_up_b;
+static net_cred_trial_t s_trial;            /* pending credentials in use, on trial */
+static bool s_trial_assoc;                  /* associated since the trial started */
+static bool s_trial_revert_ok;              /* stored credentials to go back to */
 static char s_ssid[33];
 static char s_pass[65];
 static uint32_t s_ap_reasons;               /* what the AP is up for (0 = down) */
@@ -587,6 +612,9 @@ static void ip_lost(void)
     }
     s_has_ip = false;
     s_offline_since_s = now_s();
+    s_noip_since_s = s_offline_since_s;   /* counts only while still associated */
+    s_outage = true;
+    s_outage_attempts = 0;
     taskENTER_CRITICAL(&s_lock);
     s_st.online = false;
     s_st.ip[0] = '\0';
@@ -618,6 +646,9 @@ static void connect_now(void)
     }
     esp_err_t err = esp_wifi_connect();
     if (err == ESP_OK) {
+        if (s_outage && s_outage_attempts < UINT32_MAX) {
+            s_outage_attempts++;
+        }
         s_sta_state = STA_CONNECTING;
         s_deadline_us = esp_timer_get_time() + (int64_t)CONNECT_WATCHDOG_MS * 1000;
     } else {
@@ -957,6 +988,18 @@ static void apply_ap_policy(void)
 
 /* ---- journal ---------------------------------------------------------------------------- */
 
+/* DIAG_EV_WIFI_UP: kept until the journal takes it (its per-kind limit), dropped without a journal. */
+static void flush_up_record(void)
+{
+    if (!s_up_pending) {
+        return;
+    }
+    esp_err_t err = diag_journal_append(DIAG_EV_WIFI_UP, s_up_a, s_up_b);
+    if (err != ESP_ERR_INVALID_STATE) {
+        s_up_pending = false;
+    }
+}
+
 static void flush_drop_record(void)
 {
     if (!s_drop_pending) {
@@ -1015,6 +1058,7 @@ static void handle_disconnected(uint8_t reason, int8_t rssi)
 {
     bool was_linked = s_associated;
     s_associated = false;
+    s_trial_assoc = false;   /* only the next association can confirm trial credentials */
     taskENTER_CRITICAL(&s_lock);
     s_st.associated = false;
     s_st.last_disconnect_reason = reason;
@@ -1049,6 +1093,79 @@ static void handle_disconnected(uint8_t reason, int8_t rssi)
     schedule_retry();
 }
 
+/* ---- credentials on trial ------------------------------------------------------------- */
+
+static esp_err_t store_pair(const char *key_ssid, const char *key_pass, const char *ssid, const char *pass)
+{
+    settings_batch_t b;
+    esp_err_t err = settings_batch_begin(SETTINGS_NS_WIFI, &b);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = settings_batch_set_str(b, key_ssid, ssid);
+    if (err == ESP_OK) {
+        err = settings_batch_set_str(b, key_pass, pass);
+    }
+    if (err != ESP_OK) {
+        settings_batch_abort(b);
+        return err;
+    }
+    return settings_batch_commit(b);
+}
+
+static esp_err_t erase_pending_keys(void)
+{
+    esp_err_t e1 = settings_erase_key(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_PEND_SSID);
+    esp_err_t e2 = settings_erase_key(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_PEND_PASS);
+    return e1 != ESP_OK ? e1 : e2;
+}
+
+/* The pending credentials got an IP: they become the station's. The new
+ * pair is written before the pending one is erased, so a reset in between
+ * only tries them first once more. */
+static void trial_confirmed(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    strlcpy(s_act_ssid, s_ssid, sizeof(s_act_ssid));
+    strlcpy(s_act_pass, s_pass, sizeof(s_act_pass));
+    memset(s_pend_pass, 0, sizeof(s_pend_pass));
+    s_pend_ssid[0] = '\0';
+    s_pend_valid = false;
+    s_cred_reverted = false;
+    taskEXIT_CRITICAL(&s_lock);
+    ESP_LOGI(TAG, "new Wi-Fi credentials for \"%s\" confirmed", s_ssid);
+    if (!settings_is_available()) {
+        return;
+    }
+    esp_err_t err = store_pair(SETTINGS_KEY_WIFI_SSID, SETTINGS_KEY_WIFI_PASS, s_ssid, s_pass);
+    if (err == ESP_OK) {
+        err = erase_pending_keys();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "confirmed Wi-Fi credentials not stored: %s", esp_err_to_name(err));
+    }
+}
+
+/* No IP in time with the pending credentials: back to the stored ones. */
+static void trial_revert(void)
+{
+    if (!s_trial_revert_ok) {
+        ESP_LOGW(TAG, "Wi-Fi credentials for \"%s\" got no IP in %u s; no previous credentials, still trying",
+                 s_ssid, (unsigned)NET_CRED_TRIAL_S);
+        return;
+    }
+    char tried[33];
+    strlcpy(tried, s_ssid, sizeof(tried));
+    taskENTER_CRITICAL(&s_lock);
+    strlcpy(s_ssid, s_act_ssid, sizeof(s_ssid));
+    strlcpy(s_pass, s_act_pass, sizeof(s_pass));
+    s_cred_reverted = true;
+    taskEXIT_CRITICAL(&s_lock);
+    ESP_LOGW(TAG, "Wi-Fi credentials for \"%s\" got no IP in %u s: back to \"%s\" (the new ones stay pending)",
+             tried, (unsigned)NET_CRED_TRIAL_S, s_ssid);
+    apply_credentials();
+}
+
 static void handle_got_ip(void)
 {
     esp_netif_ip_info_t info;
@@ -1060,6 +1177,21 @@ static void handle_got_ip(void)
     s_has_ip = true;
     s_ip_since_s = now_s();
     s_attempt = 0;
+    if (s_outage && !was) {
+        /* The address is back (not the first one of this boot). */
+        s_outage = false;
+        s_up_pending = true;
+        s_up_a = (int32_t)(s_outage_attempts > INT32_MAX ? INT32_MAX : s_outage_attempts);
+        uint32_t out_s = s_ip_since_s - s_offline_since_s;
+        s_up_b = (int32_t)(out_s > INT32_MAX ? INT32_MAX : out_s);
+        flush_up_record();
+    }
+    /* Only an IP on a link the trial credentials made confirms them (an
+     * event of the previous link can still arrive after the switch); the
+     * timeout is left to housekeeping. */
+    if (s_trial.on && s_trial_assoc && net_cred_trial_tick(&s_trial, true, s_ip_since_s) == NET_TRIAL_CONFIRMED) {
+        trial_confirmed();
+    }
     net_drop_log_reset(&s_drop);
     set_status_str(s_st.ip, sizeof(s_st.ip), ip);
     taskENTER_CRITICAL(&s_lock);
@@ -1147,6 +1279,7 @@ static esp_err_t handle_start(void)
     if (settings_is_available()) {
         char ssid[33] = "";
         char pass[65] = "";
+        bool unreadable = false;
         esp_err_t e1 = settings_get_str(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_SSID, ssid, sizeof(ssid));
         esp_err_t e2 = settings_get_str(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_PASS, pass, sizeof(pass));
         switch (net_sta_credentials(e1 == ESP_OK, ssid, e2 == ESP_OK, pass)) {
@@ -1156,15 +1289,39 @@ static esp_err_t handle_start(void)
             break;
         case NET_CRED_UNREADABLE:
             /* Never an open network in place of the stored one. */
-            ESP_LOGE(TAG, "Wi-Fi password for \"%s\" unreadable (%s): station not started, enter the credentials "
-                     "again on the setup page", ssid, esp_err_to_name(e2 != ESP_OK ? e2 : ESP_ERR_INVALID_SIZE));
-            taskENTER_CRITICAL(&s_lock);
-            s_st.sta_credentials_unreadable = true;
-            taskEXIT_CRITICAL(&s_lock);
+            unreadable = true;
+            ESP_LOGE(TAG, "Wi-Fi password for \"%s\" unreadable (%s)", ssid,
+                     esp_err_to_name(e2 != ESP_OK ? e2 : ESP_ERR_INVALID_SIZE));
             break;
         case NET_CRED_NONE:
         default:
             break;
+        }
+        /* Pending credentials (changed, not confirmed yet) are tried first. */
+        char pssid[33] = "";
+        e1 = settings_get_str(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_PEND_SSID, pssid, sizeof(pssid));
+        e2 = settings_get_str(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_PEND_PASS, pass, sizeof(pass));
+        bool pend = net_sta_credentials(e1 == ESP_OK, pssid, e2 == ESP_OK, pass) == NET_CRED_OK;
+        taskENTER_CRITICAL(&s_lock);
+        strlcpy(s_act_ssid, s_ssid, sizeof(s_act_ssid));
+        strlcpy(s_act_pass, s_pass, sizeof(s_act_pass));
+        if (pend) {
+            strlcpy(s_pend_ssid, pssid, sizeof(s_pend_ssid));
+            strlcpy(s_pend_pass, pass, sizeof(s_pend_pass));
+            s_pend_valid = true;
+        }
+        s_st.sta_credentials_unreadable = unreadable && !pend;
+        taskEXIT_CRITICAL(&s_lock);
+        if (pend) {
+            s_trial_revert_ok = net_ssid_valid(s_ssid);
+            ESP_LOGI(TAG, "pending Wi-Fi credentials for \"%s\" are tried first (%u s)%s", pssid,
+                     (unsigned)NET_CRED_TRIAL_S, s_trial_revert_ok ? "" : "; no other credentials stored");
+            strlcpy(s_ssid, pssid, sizeof(s_ssid));
+            strlcpy(s_pass, pass, sizeof(s_pass));
+            net_cred_trial_start(&s_trial, now_s());
+            s_trial_assoc = false;
+        } else if (unreadable) {
+            ESP_LOGE(TAG, "station not started: enter the Wi-Fi credentials again on the setup page");
         }
         memset(pass, 0, sizeof(pass));
     } else {
@@ -1222,6 +1379,12 @@ static void handle_msg(const net_msg_t *m)
     case MSG_STA_CONNECTED: {
         s_associated = true;
         s_sta_state = STA_CONNECTED;
+        if (!s_has_ip) {
+            s_noip_since_s = now_s();
+        }
+        if (s_trial.on) {
+            s_trial_assoc = true;   /* a link the trial credentials made */
+        }
         if (s_had_link) {
             taskENTER_CRITICAL(&s_lock);
             s_st.reconnects++;
@@ -1354,16 +1517,25 @@ static void housekeeping(void)
     int64_t now_us = esp_timer_get_time();
 
     bool apply = false;
+    bool trial = false;
     taskENTER_CRITICAL(&s_lock);
     if (s_new_pending && now_us >= s_apply_at_us) {
         strlcpy(s_ssid, s_new_ssid, sizeof(s_ssid));
         strlcpy(s_pass, s_new_pass, sizeof(s_pass));
         memset(s_new_pass, 0, sizeof(s_new_pass));
         s_new_pending = false;
+        trial = s_new_trial;
+        s_trial_revert_ok = net_ssid_valid(s_act_ssid);
         apply = true;
     }
     taskEXIT_CRITICAL(&s_lock);
     if (apply) {
+        if (trial) {
+            net_cred_trial_start(&s_trial, now_s());
+            s_trial_assoc = false;
+        } else {
+            s_trial.on = false;
+        }
         apply_credentials();
     }
 
@@ -1430,6 +1602,10 @@ static void housekeeping(void)
         ensure_sntp_servers();
     }
     flush_drop_record();
+    flush_up_record();
+    if (net_cred_trial_tick(&s_trial, false, now) == NET_TRIAL_REVERT) {
+        trial_revert();
+    }
 
     uint32_t retry_in = 0;
     if (s_sta_state == STA_WAIT_RETRY && s_retry_at_us > now_us) {
@@ -1437,7 +1613,13 @@ static void housekeeping(void)
     }
     taskENTER_CRITICAL(&s_lock);
     s_st.offline_s = (s_sta_configured && !s_has_ip) ? now - s_offline_since_s : 0;
+    s_st.assoc_no_ip_s = (s_associated && !s_has_ip) ? now - s_noip_since_s : 0;
     s_st.retry_in_s = retry_in;
+    s_st.cred_trial = s_trial.on;
+    s_st.cred_trial_left_s = net_cred_trial_left_s(&s_trial, now);
+    s_st.cred_pending = s_pend_valid;
+    strlcpy(s_st.pending_ssid, s_pend_valid ? s_pend_ssid : "", sizeof(s_st.pending_ssid));
+    s_st.cred_reverted = s_cred_reverted && s_pend_valid;
     taskEXIT_CRITICAL(&s_lock);
 }
 
@@ -1637,6 +1819,16 @@ bool network_is_online(void)
     return online;
 }
 
+/* Hand credentials to the net task, applied APPLY_DELAY_MS from now (under s_lock). */
+static void queue_apply_locked(const char *ssid, const char *pass, bool trial)
+{
+    strlcpy(s_new_ssid, ssid, sizeof(s_new_ssid));
+    strlcpy(s_new_pass, pass, sizeof(s_new_pass));
+    s_new_trial = trial;
+    s_new_pending = true;
+    s_apply_at_us = esp_timer_get_time() + (int64_t)APPLY_DELAY_MS * 1000;
+}
+
 esp_err_t network_set_credentials(const char *ssid, const char *password)
 {
     if (ssid == NULL || password == NULL || !net_ssid_valid(ssid) || !net_password_valid(password)) {
@@ -1645,21 +1837,25 @@ esp_err_t network_set_credentials(const char *ssid, const char *password)
     if (!s_inited) {
         return ESP_ERR_INVALID_STATE;
     }
+    taskENTER_CRITICAL(&s_lock);
+    bool have = net_ssid_valid(s_act_ssid);
+    bool same = have && strcmp(s_act_ssid, ssid) == 0 && strcmp(s_act_pass, password) == 0;
+    taskEXIT_CRITICAL(&s_lock);
+    net_cred_plan_t plan = net_cred_plan(have, same);
+
     if (settings_is_available()) {
-        settings_batch_t b;
-        esp_err_t err = settings_batch_begin(SETTINGS_NS_WIFI, &b);
-        if (err != ESP_OK) {
-            return err;
+        esp_err_t err;
+        if (plan == NET_CRED_PLAN_TRIAL) {
+            err = store_pair(SETTINGS_KEY_WIFI_PEND_SSID, SETTINGS_KEY_WIFI_PEND_PASS, ssid, password);
+        } else {
+            err = store_pair(SETTINGS_KEY_WIFI_SSID, SETTINGS_KEY_WIFI_PASS, ssid, password);
+            if (err == ESP_OK) {
+                esp_err_t e = erase_pending_keys();
+                if (e != ESP_OK) {
+                    ESP_LOGW(TAG, "pending Wi-Fi credentials not erased: %s", esp_err_to_name(e));
+                }
+            }
         }
-        err = settings_batch_set_str(b, SETTINGS_KEY_WIFI_SSID, ssid);
-        if (err == ESP_OK) {
-            err = settings_batch_set_str(b, SETTINGS_KEY_WIFI_PASS, password);
-        }
-        if (err != ESP_OK) {
-            settings_batch_abort(b);
-            return err;
-        }
-        err = settings_batch_commit(b);
         if (err != ESP_OK) {
             return err;
         }
@@ -1667,11 +1863,71 @@ esp_err_t network_set_credentials(const char *ssid, const char *password)
         ESP_LOGW(TAG, "settings unavailable: Wi-Fi credentials are used for this boot only");
     }
     taskENTER_CRITICAL(&s_lock);
-    strlcpy(s_new_ssid, ssid, sizeof(s_new_ssid));
-    strlcpy(s_new_pass, password, sizeof(s_new_pass));
-    s_new_pending = true;
-    s_apply_at_us = esp_timer_get_time() + (int64_t)APPLY_DELAY_MS * 1000;
+    if (plan == NET_CRED_PLAN_TRIAL) {
+        strlcpy(s_pend_ssid, ssid, sizeof(s_pend_ssid));
+        strlcpy(s_pend_pass, password, sizeof(s_pend_pass));
+        s_pend_valid = true;
+    } else {
+        strlcpy(s_act_ssid, ssid, sizeof(s_act_ssid));
+        strlcpy(s_act_pass, password, sizeof(s_act_pass));
+        memset(s_pend_pass, 0, sizeof(s_pend_pass));
+        s_pend_ssid[0] = '\0';
+        s_pend_valid = false;
+    }
+    s_cred_reverted = false;
+    queue_apply_locked(ssid, password, plan == NET_CRED_PLAN_TRIAL);
     taskEXIT_CRITICAL(&s_lock);
+    ESP_LOGI(TAG, "Wi-Fi credentials for \"%s\" %s", ssid,
+             plan == NET_CRED_PLAN_TRIAL ? "stored as pending: tried now, kept if they get an IP"
+                                         : "stored");
+    return ESP_OK;
+}
+
+esp_err_t network_retry_pending_credentials(void)
+{
+    if (!s_inited) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    taskENTER_CRITICAL(&s_lock);
+    bool pend = s_pend_valid;
+    if (pend) {
+        s_cred_reverted = false;
+        queue_apply_locked(s_pend_ssid, s_pend_pass, true);
+    }
+    taskEXIT_CRITICAL(&s_lock);
+    return pend ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t network_discard_pending_credentials(void)
+{
+    if (!s_inited) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    taskENTER_CRITICAL(&s_lock);
+    bool pend = s_pend_valid;
+    taskEXIT_CRITICAL(&s_lock);
+    if (!pend) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (settings_is_available()) {
+        esp_err_t err = erase_pending_keys();
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    taskENTER_CRITICAL(&s_lock);
+    bool on_trial = s_st.cred_trial || (s_new_pending && s_new_trial);
+    memset(s_pend_pass, 0, sizeof(s_pend_pass));
+    s_pend_ssid[0] = '\0';
+    s_pend_valid = false;
+    s_cred_reverted = false;
+    if (on_trial && net_ssid_valid(s_act_ssid)) {
+        queue_apply_locked(s_act_ssid, s_act_pass, false);   /* back to the station's credentials */
+    } else if (s_new_pending && s_new_trial) {
+        s_new_pending = false;
+    }
+    taskEXIT_CRITICAL(&s_lock);
+    ESP_LOGI(TAG, "pending Wi-Fi credentials discarded");
     return ESP_OK;
 }
 
@@ -1778,9 +2034,9 @@ esp_err_t network_probe_upstream(uint32_t timeout_ms)
 
 /* ---- recovery ladder ------------------------------------------------------------------- */
 
-static void ladder_journal(uint32_t outcome, net_rung_t rung, net_ladder_why_t why)
+static void ladder_journal(uint32_t outcome, net_rung_t rung, uint32_t why)
 {
-    int32_t b = (int32_t)(((uint32_t)why << 16) | (uint32_t)diag_ladder_b((diag_step_outcome_t)outcome, (uint32_t)rung));
+    int32_t b = (int32_t)(((why & 0xFFu) << 16) | (uint32_t)diag_ladder_b((diag_step_outcome_t)outcome, (uint32_t)rung));
     (void)diag_journal_append(DIAG_EV_LADDER_STEP, LADDER_JOURNAL_A, b);
 }
 
@@ -1813,6 +2069,7 @@ esp_err_t network_ladder_tick(const network_ladder_input_t *in)
     net_ladder_in_t lin = {
         .caster_down = in->caster_down,
         .rtcm_healthy = in->rtcm_healthy,
+        .unreached_s = in->slot_unreached_s,
         .journal_open = in->flash_journal_open,
         .journal_unknown = in->flash_journal_unknown,
         .reboot_inhibited = lifecycle_reboot_inhibited(NULL),
@@ -1821,11 +2078,13 @@ esp_err_t network_ladder_tick(const network_ladder_input_t *in)
     };
     taskENTER_CRITICAL(&s_lock);
     lin.sta_configured = s_st.sta_configured;
+    lin.assoc_no_ip_s = s_st.assoc_no_ip_s;
     lin.ap_clients = s_st.ap_clients;
     lin.probe_valid = s_probe_valid;
     lin.probe = (net_probe_t)s_st.probe;
     lin.probe_at_s = now - (uint32_t)((now_us - s_probe_at_us) / 1000000);
     net_ladder_out_t out = net_ladder_tick(&s_ladder, &lin, now);
+    s_st.ladder_triggers = net_ladder_triggers(&lin);
     s_st.ladder_active = s_ladder.phase != NET_LADDER_IDLE;
     s_st.ladder_rung = s_ladder.last_rung;
     if (out.act == NET_LADDER_SKIP || out.act == NET_LADDER_WITHHELD) {
@@ -1839,12 +2098,24 @@ esp_err_t network_ladder_tick(const network_ladder_input_t *in)
     taskEXIT_CRITICAL(&s_lock);
 
     switch (out.act) {
+    case NET_LADDER_PASS:
+        /* rung code 0 = "pass started", the reason byte = the triggers holding now */
+        s_ladder_note = 0;
+        ladder_journal(LADDER_OUTCOME_STARTED, NET_RUNG_NONE, out.triggers);
+        ESP_LOGW(TAG, "network ladder: pass started (%s%s%s)", (out.triggers & NET_TRIG_P) ? " protected caster down" : "",
+                 (out.triggers & NET_TRIG_A) ? " associated without IP" : "",
+                 (out.triggers & NET_TRIG_S) ? " caster not reached" : "");
+        break;
     case NET_LADDER_PROBE:
         probe_kick();
         break;
     case NET_LADDER_ACT:
         s_ladder_note = 0;
-        ladder_journal(LADDER_OUTCOME_STARTED, out.rung, NET_WHY_NONE);
+        ladder_journal(LADDER_OUTCOME_STARTED, out.rung, out.why);
+        if (out.why == NET_WHY_AP_OVERRIDDEN) {
+            ESP_LOGW(TAG, "network ladder: %s although an AP client is connected (held back for %u s already)",
+                     rung_name(out.rung), (unsigned)NET_LADDER_AP_HOLD_MAX_S);
+        }
         if (out.rung == NET_RUNG_REBOOT) {
             ESP_LOGE(TAG, "network ladder: reboot (protected caster down, the fault is on this side)");
             (void)lifecycle_request_reboot(LIFECYCLE_REBOOT_NETWORK_LADDER);

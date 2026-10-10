@@ -5,8 +5,8 @@
  * Network decisions that need no radio (pure logic, no IDF or RTOS includes,
  * host-testable): reconnect backoff, input validation, the setup AP's name,
  * when the setup/recovery AP is up, which disconnects go to the event
- * journal, the cached scan list, and the age of the last network-ladder
- * reboot across resets. Times are seconds of an injected monotonic clock,
+ * journal, the cached scan list, the age of the last network-ladder reboot
+ * across resets, and the trial of changed station credentials. Times are seconds of an injected monotonic clock,
  * compared only as (uint32_t)(now - then), so they survive the clock wrap.
  */
 #pragma once
@@ -83,6 +83,9 @@ typedef enum {
     NET_AP_RECOVERY = 1u << 3, /**< BOOT button (or a manual request): fixed lifetime, longer while a client is connected */
 } net_ap_reason_t;
 
+/** A connected client keeps the recovery AP up at most this long past its lifetime. */
+#define NET_AP_CLIENT_HOLD_MAX_S 1800u
+
 typedef struct {
     bool settings_available;     /**< settings readable this boot; without them no AP opens on its own */
     bool sta_configured;         /**< station credentials present */
@@ -101,8 +104,9 @@ typedef struct {
 /**
  * Reasons the AP should be up now (net_ap_reason_t flags, 0 = down):
  *  - RECOVERY while the request is younger than its lifetime, and after that
- *    for as long as a client stays connected; then *recovery_expired is set
- *    (the caller clears the request).
+ *    while a client stays connected, for at most NET_AP_CLIENT_HOLD_MAX_S
+ *    beyond the lifetime; then *recovery_expired is set (the caller clears
+ *    the request).
  *  - Only with settings available (degraded mode opens nothing on its own):
  *    SETUP while no credentials are stored; FALLBACK once the configured
  *    station has been offline for fallback_after_s, and also for as long as
@@ -159,6 +163,51 @@ typedef struct {
  * @return the new number of entries.
  */
 size_t net_scan_insert(net_scan_entry_t *list, size_t count, size_t cap, const net_scan_entry_t *e);
+
+/* ---- changed station credentials on trial -------------------------------------------- */
+
+/**
+ * Changed station credentials are tried before they replace the ones the
+ * station has: stored as "pending" (settings wifi/pend_*), used at once,
+ * and only when they get an IP within NET_CRED_TRIAL_S do they become the
+ * station's credentials. Otherwise the station goes back to its previous
+ * credentials and keeps the new ones pending: shown in the UI, retried on
+ * request and first thing at the next boot (a user who enters the next
+ * site's network before moving the station). So a typo never strands a
+ * remote station. Without previous credentials (first setup) there is
+ * nothing to go back to: the new ones are stored as the station's at once.
+ */
+#define NET_CRED_TRIAL_S 90u
+
+typedef enum {
+    NET_CRED_PLAN_ACTIVE = 0,   /**< store and use as the station's credentials (none to go back to, or the same ones) */
+    NET_CRED_PLAN_TRIAL,        /**< store as pending and try them; the previous ones stay */
+} net_cred_plan_t;
+
+/** What to do with credentials the user entered. */
+net_cred_plan_t net_cred_plan(bool have_active, bool same_as_active);
+
+typedef enum {
+    NET_TRIAL_NONE = 0,         /**< no trial, or still waiting */
+    NET_TRIAL_CONFIRMED,        /**< an IP with the new credentials: they become the station's */
+    NET_TRIAL_REVERT,           /**< no IP in time: back to the previous credentials (if any) */
+} net_trial_act_t;
+
+typedef struct {
+    bool on;
+    uint32_t since_s;
+} net_cred_trial_t;
+
+void net_cred_trial_start(net_cred_trial_t *t, uint32_t now_s);
+
+/**
+ * One check: `got_ip` = an IP arrived on a link the trial credentials made
+ * (associated after the trial started). Ends the trial on CONFIRMED or REVERT.
+ */
+net_trial_act_t net_cred_trial_tick(net_cred_trial_t *t, bool got_ip, uint32_t now_s);
+
+/** Seconds the trial still has (0 = none running). */
+uint32_t net_cred_trial_left_s(const net_cred_trial_t *t, uint32_t now_s);
 
 /* ---- network-ladder reboot age across resets ---------------------------------------- */
 

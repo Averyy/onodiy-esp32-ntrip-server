@@ -16,8 +16,11 @@
  *     for "banned";
  *   - the backoff calculator (fast, standard and polite profiles, +-20 %
  *     jitter, MOUNT_BUSY escalation, the AUTH transient window, the polite
- *     hourly limit) and the per-slot state machine that uses it;
- *   - the persisted long-backoff record and the Onocoy daily budget estimate.
+ *     hourly limit) and the per-slot state machine that uses it, including
+ *     the run of failures that never reached the caster (the network
+ *     ladder's trigger S, and the protected slot's flat retry);
+ *   - the persisted long-backoff record and the Onocoy daily budget estimate;
+ *   - the connection history's journal records and their flapping limit.
  *
  * Times are wrapping u32 milliseconds, only compared as (uint32_t)(now -
  * then); no single delay or window here comes near 2^31 ms.
@@ -73,6 +76,14 @@ extern "C" {
 #define NTRIP_HOURLY_MS           (3600u * 1000u)
 #define NTRIP_STAGGER_MAX_MS      10000u  /**< non-protected slots after the network returns */
 #define NTRIP_TLS_PLAIN_HINT_AFTER 10u    /**< consecutive TLS failures on an Onocoy slot */
+/**
+ * Protected slot: a failure that never reached the caster (a failed name
+ * lookup, a connect that timed out or failed locally) retries after this x
+ * U(0.8, 1.2), without advancing the backoff count: the TRANSIENT row's
+ * rationale (do not hammer the caster) does not cover a caster that never
+ * saw the attempt. PROVISIONAL, to be confirmed on hardware.
+ */
+#define NTRIP_UNREACHED_RETRY_MS  5000u
 
 /** Daily availability rule used for the Onocoy budget estimate. */
 #define NTRIP_DAY_S               86400u
@@ -405,7 +416,15 @@ typedef struct {
     ntrip_row_t row;
     bool reached_caster;         /**< a TCP connection was made */
     bool mount_ambiguous;
+    bool refused;                /**< the caster's host refused the TCP connect (a reset): it was reached, no connection */
 } ntrip_failure_t;
+
+/**
+ * The failure never reached the caster: a failed name lookup (no cached
+ * address either), or a TCP connect that timed out or failed locally (no
+ * route, socket error). A refused connect reached the caster's host.
+ */
+bool ntrip_failure_unreached(const ntrip_failure_t *f);
 
 typedef struct {
     ntrip_sm_cfg_t cfg;
@@ -425,6 +444,8 @@ typedef struct {
     uint32_t streak_start_ms;
     bool busy_active;            /**< consecutive MOUNT_BUSY-row failures */
     uint32_t busy_start_ms;
+    bool unreached_active;       /**< consecutive failures that never reached the caster */
+    uint32_t unreached_start_ms; /**< ... since the first of them */
     uint32_t window_start_ms;    /**< last disconnect or boot */
     bool session;
     uint32_t session_start_ms;
@@ -498,6 +519,16 @@ void ntrip_sm_user_edit(ntrip_sm_t *sm, const ntrip_sm_cfg_t *cfg, uint32_t cred
 uint32_t ntrip_sm_retry_in_ms(const ntrip_sm_t *sm, uint32_t now_ms);
 
 /**
+ * Since the first failure of the slot's current run of consecutive failures
+ * that never reached the caster (ntrip_failure_unreached), in ms; 0 when
+ * there is no such run. A refused connect, any failure after the TCP
+ * connection was made, a successful connect, a user edit and the slot
+ * leaving its connect/backoff cycle (disabled, waiting for the network or
+ * for data, paused) end the run.
+ */
+uint32_t ntrip_sm_unreached_ms(const ntrip_sm_t *sm, uint32_t now_ms);
+
+/**
  * True if the record changed since the last write: the long row (AUTH,
  * CONFIG, BANNED) or its step (bounded: once the row's last entry repeats,
  * further failures change nothing), the hourly limit, a polite slot's count
@@ -526,6 +557,63 @@ bool ntrip_backoff_rec_decode(const uint8_t *buf, size_t len, ntrip_backoff_rec_
 /** Hash of the credentials a slot authenticates with (host, port, protocol, names, password). */
 uint32_t ntrip_cred_hash(const char *host, uint16_t port, bool v2, const char *mountpoint,
                          const char *username, const char *password, const char *label);
+
+/* ---- Connection history (journal records) ------------------------------------------- */
+
+#define NTRIP_HIST_SHORT_S   60u      /**< a session shorter than this is "short" (the healthy-session rule) */
+#define NTRIP_HIST_LIMIT_S   600u     /**< short sessions: one record of a kind per slot in this long */
+#define NTRIP_HIST_UP_GAP_S  10u      /**< an UP is written after this long without a session, failed attempts or not */
+#define NTRIP_HIST_COUNT_MAX 32767u   /**< counts in a record saturate here (bits 16-30) */
+
+/**
+ * Per slot. DOWN when a session that reached STREAMING ends (end class, the
+ * short sessions not journalled since the last DOWN, its length); UP when a
+ * session reaches STREAMING after at least one failed attempt or at least
+ * NTRIP_HIST_UP_GAP_S after the previous session ended (failed attempts
+ * since that session, the outage: from that session's end, or from the
+ * first failed attempt when the slot had not streamed this boot). A DOWN
+ * for a session shorter than NTRIP_HIST_SHORT_S, and the UP after such a
+ * session, are written only when the slot wrote no record of that kind in
+ * the last NTRIP_HIST_LIMIT_S; a skipped DOWN is counted into the next DOWN
+ * written. Failed attempts are never recorded one by one. Times are seconds
+ * of a monotonic clock (uptime).
+ */
+typedef struct {
+    bool streamed;               /**< a session reached STREAMING this boot */
+    bool in_session;
+    uint32_t session_start_s;
+    uint32_t prev_end_s;         /**< the previous session's end (valid once streamed) */
+    bool prev_short;             /**< the previous session was short */
+    uint32_t fails;              /**< failed attempts since the previous session (or since boot) */
+    bool first_fail_valid;
+    uint32_t first_fail_s;       /**< first failed attempt of this boot */
+    bool down_written;
+    uint32_t down_at_s;
+    bool up_written;
+    uint32_t up_at_s;
+    uint32_t skipped;            /**< short-session DOWNs not written since the last DOWN written */
+} ntrip_hist_t;
+
+void ntrip_hist_init(ntrip_hist_t *h);
+
+/** A connection attempt failed (a caster failure; not an attempt the network loss ended). */
+void ntrip_hist_failed(ntrip_hist_t *h, uint32_t now_s);
+
+/**
+ * The session reached STREAMING. @return true with *a, *b set when an UP
+ * record is due (a = slot | failed attempts << 16, b = outage s).
+ */
+bool ntrip_hist_up(ntrip_hist_t *h, uint32_t slot, uint32_t now_s, int32_t *a, int32_t *b);
+
+/**
+ * The session ended. `cls` = the failure class that ended it, 0 for an end
+ * that was not a caster failure. @return true with *a, *b set when a DOWN
+ * record is due (a = slot | cls << 8 | skipped << 16, b = length s).
+ */
+bool ntrip_hist_down(ntrip_hist_t *h, uint32_t slot, uint8_t cls, uint32_t now_s, int32_t *a, int32_t *b);
+
+/** `a` of a history record: slot bits 0-7, class bits 8-15, count bits 16-30 (saturating). */
+int32_t ntrip_hist_pack(uint32_t slot, uint32_t cls, uint32_t count);
 
 /* ---- Onocoy daily budget ----------------------------------------------------------- */
 

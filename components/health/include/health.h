@@ -23,7 +23,7 @@
  * rung only if the previous one did not bring RTCM back within its grace;
  * the grace counts from the end of the step):
  *   1. resync framer / flush input (station_request_recovery)     grace 5 s
- *   2. restart the UART link at the stored baud                     15 s
+ *   2. restart the UART link at the stored baud (driver kept)       15 s
  *   3. UART break + full baud rescan                                30 s from the end of the scan
  *   4. re-apply the receiver profile                                90 s; during the survey
  *                                                                   window missing 1005/1033
@@ -69,8 +69,26 @@
  * (station_status_t.detect_saw_bytes: none -> 6a, some -> 6b), and then
  * holds step 7: the station's own detection schedule (short list every 30 s
  * for 5 min, then the full list every 5 min) replaces the ladder's retries,
- * and the leases of those passes suspend nothing. When a suspension ends the
- * stall timer and the loss window start again from there.
+ * and the leases of those passes suspend nothing. A 6a that the reboot cap,
+ * a reboot inhibit or the "no ESP32 reboot" mode kept from running is
+ * looked at again while the episode lasts: on a tick in full mode where the
+ * cap allows a reboot, no inhibit is held and the station has completed a
+ * detection pass since (station_status_t.detect_passes), the byte rule runs
+ * on that latest pass (6a or 6b). The cap still bounds every reboot. When a
+ * suspension ends the stall timer and the loss window start again from
+ * there.
+ *
+ * User recovery mode (gnss/recovery, read every tick; a step already running
+ * completes): full (default); no ESP32 reboot (6a is journalled as not run,
+ * the ladder goes to 7); alerts only (nothing is requested from the station
+ * and nothing rebooted: stalls are declared, classed and shown, each step the
+ * full ladder would start is journalled once with outcome "not run" and its
+ * grace still runs, and where the byte rule would run the ladder goes to 7,
+ * with no power-cycle alert; level DEGRADED before 7, FAILED at 7; the
+ * FAILED retry pass journals the step it would enter every 10 min). Leaving
+ * "alerts only" while stalled starts a fresh pass at the class entry step.
+ * The network ladder, the station's detection schedule and its apply rules
+ * are not affected.
  *
  * Link-loss alert: any UART FIFO overflow, or RTCM CRC errors above 1 % with
  * at least 100 frames, within a 10-11 min window of one-minute RAM buckets
@@ -83,13 +101,23 @@
  * restarts only the slot that overruns its per-state budget
  * (ntrip_server_restart_slot).
  *
- * Network ladder (while the protected caster is not streaming but RTCM is
- * healthy): +60 s reconnect, +3 min renew DHCP + fallback DNS, +6 min
- * restart Wi-Fi, +10 min reboot (rate-limited, inhibit-aware, withheld while
- * a receiver flash journal is open; not withheld when the journal's state is
+ * Network ladder (network_ladder_tick; triggers: the protected caster is not
+ * streaming but RTCM is healthy, or the station has been associated 60 s
+ * without an IP, or an enabled slot of any caster has failed 180 s in a row
+ * without reaching its caster; health passes the longest such run,
+ * ntrip_caster_status_t.unreached_s): +60 s reconnect, +3 min renew DHCP +
+ * fallback DNS, +6 min restart Wi-Fi, +10 min reboot (only for the
+ * protected-caster trigger; rate-limited, inhibit-aware, withheld while a
+ * receiver flash journal is open; not withheld when the journal's state is
  * only unknown because the settings are unavailable, since an ESP32-only
  * reset sends nothing to the receiver then either). A DNS/TCP probe tells
  * "no IP" from "IP but no upstream".
+ *
+ * Power lost: the journal's boot records are read (a bounded number per
+ * tick); three or more power-on boots within 24 h raise
+ * HEALTH_ALERT_POWER_LOST (DEGRADED), which clears 24 h after the last
+ * power-on boot. A boot dated by no trusted clock counts as inside the
+ * window. Brownouts keep their own alert (HEALTH_ALERT_POWER_SUPPLY).
  *
  * All reboots go through lifecycle_reboot()/lifecycle_request_reboot(), so
  * they honour reboot inhibits (receiver flash, app update) and close caster
@@ -160,7 +188,15 @@ typedef enum {
     HEALTH_ALERT_SETTINGS_DEGRADED = 1u << 6, /**< NVS unusable this boot: nothing is saved */
     HEALTH_ALERT_NO_UPSTREAM       = 1u << 7, /**< Wi-Fi connected but no internet */
     HEALTH_ALERT_LINK_LOSS         = 1u << 8, /**< UART overflows or RTCM CRC errors in the last 10 min */
+    HEALTH_ALERT_POWER_LOST        = 1u << 9, /**< power was lost: >= 3 power-on boots within 24 h (clears 24 h after the last) */
 } health_alert_t;
+
+/** Automatic receiver recovery chosen by the user (settings gnss/recovery). */
+typedef enum {
+    HEALTH_RECOVERY_FULL = 0,        /**< the whole GNSS ladder */
+    HEALTH_RECOVERY_NO_REBOOT = 1,   /**< everything but the ESP32 reboot */
+    HEALTH_RECOVERY_ALERTS = 2,      /**< nothing sent to the receiver, nothing rebooted: stalls are only reported */
+} health_recovery_mode_t;
 
 /** Snapshot for status pages. */
 typedef struct {
@@ -181,6 +217,8 @@ typedef struct {
     uint32_t gnss_retry_in_s;        /**< FAILED: until the next retry pass (0 = none scheduled, e.g. while the station's own detection schedule runs) */
     uint32_t factory_reset_refused_age_s; /**< since a BOOT-button factory reset was refused because a receiver update was running (UINT32_MAX = not this boot) */
     uint32_t admin_resets;           /**< BOOT-button admin password resets this boot; the web also forgets a password it holds only in RAM (settings unavailable) and ends every session */
+    health_recovery_mode_t recovery_mode; /**< in effect (gnss/recovery; a stored value out of range reads as FULL) */
+    bool gnss_reboot_recheck;        /**< NO_RECEIVER: a blocked ESP32 reboot waits for the cap and the next detection pass */
 } health_status_t;
 
 /** Register handlers; read the button pin from the board. */

@@ -144,6 +144,9 @@ TEST_CASE("factory reset keeps exactly the device state", "[settings]")
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_blob(SETTINGS_NS_SYS, SETTINGS_KEY_ADMIN_HASH, blob, sizeof(blob)));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_str(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_SSID, "home"));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_str(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_PASS, "secret"));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_str(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_PEND_SSID, "next-site"));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_str(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_PEND_PASS, "secret2"));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RECOVERY, 2));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BAUD, 115200));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_PROFILE, blob, sizeof(blob)));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_APPLIED, 0x1234));
@@ -244,5 +247,22 @@ TEST_CASE("settings batch reports the first error and writes the rest", "[settin
 
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, settings_batch_begin(SETTINGS_NS_WIFI, NULL));
     settings_batch_abort(NULL);
+    nvs_down();
+}
+
+TEST_CASE("settings: the recovery mode is a user setting a factory reset takes back to full", "[settings]")
+{
+    nvs_up();
+    TEST_ASSERT_EQUAL(ESP_OK, settings_init());
+    uint8_t v = 0xFF;
+    /* not stored: the reader's default (full) applies */
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RECOVERY, &v));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RECOVERY, 1));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RECOVERY, &v));
+    TEST_ASSERT_EQUAL_UINT8(1, v);
+    TEST_ASSERT_TRUE(strlen(SETTINGS_KEY_GNSS_RECOVERY) <= 15);
+    TEST_ASSERT_TRUE(strlen(SETTINGS_KEY_WIFI_PEND_SSID) <= 15 && strlen(SETTINGS_KEY_WIFI_PEND_PASS) <= 15);
+    TEST_ASSERT_EQUAL(ESP_OK, settings_factory_reset());
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RECOVERY, &v));
     nvs_down();
 }

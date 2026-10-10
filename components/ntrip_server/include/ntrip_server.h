@@ -54,7 +54,19 @@
  * Success or a user edit clears it. Network down (from the Wi-Fi disconnect
  * until the next IP), source stalls, pauses and user edits are never
  * failures; a healthy session (>= 60 s and >= 5 KB) resets the attempt count.
- * The tables live in a pure core with host tests.
+ * The protected slot retries a failure that never reached the caster (a
+ * failed name lookup, a connect that timed out or failed locally) after a
+ * flat 5 s +-20 % without advancing its count; a refused connect and every
+ * failure after the TCP connection follow the rows above. Every slot reports
+ * how long its current run of such failures lasts (unreached_s; the network
+ * recovery ladder's "caster not reached" trigger). The tables live in a pure
+ * core with host tests.
+ *
+ * Connection history (diag journal): DIAG_EV_CASTER_DOWN when a session that
+ * reached STREAMING ends, DIAG_EV_CASTER_UP when one starts after failed
+ * attempts or a gap (see diag.h for the fields and the flapping limit). A
+ * record the journal's rate limit refuses waits in the slot (a few at most)
+ * and is written a moment later.
  *
  * Network events: ESP-IDF's default station handlers clear the address at a
  * Wi-Fi disconnect and lwIP aborts every session bound to it, so sessions
@@ -224,6 +236,7 @@ typedef struct {
     char server_header[65];     /**< caster's Server: header */
     char resolved_ip[46];
     uint32_t dns_cached_used;   /**< attempts that used the cached address after a DNS failure */
+    uint32_t unreached_s;       /**< since the first of the current run of failures that never reached the caster (DNS, connect timed out or failed locally); 0 = no such run */
     char tls_version[16];
     char tls_cipher[48];
     char hint[64];              /**< e.g. "mountpoint held by another source" */

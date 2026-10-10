@@ -15,11 +15,11 @@
  *    lease on), hence not a mutex.
  *  - s_tx (mutex): one writer at a time. Also held while a lease is granted
  *    (so no NULL-lease write is still in flight when STREAM ends) and while
- *    the line is reconfigured (baud, break, reinstall).
+ *    the line is reconfigured (baud, break, restart).
  *  - s_req_mutex (mutex): one request to the RX task at a time.
  *
  * Requests: everything that changes the input side (mode switches, baud
- * change, resync, reinstall, prompt detector) runs in the RX task between
+ * change, resync, restart, prompt detector) runs in the RX task between
  * two reads, handed over through a one-slot mailbox and acknowledged on
  * s_req_done. So no byte is ever read by two readers, and the framer is only
  * ever touched by one task. Before the RX task exists, and for a baud change
@@ -27,9 +27,14 @@
  * the request runs in the caller instead.
  *
  * The RX task never logs and never touches flash (counters only); the driver
- * is opened and reinstalled by a short-lived helper task pinned to the RX
- * task's core, which puts the UART interrupt on that core and keeps the
- * driver's own install messages out of the RX task.
+ * is installed by a short-lived helper task pinned to the RX task's core,
+ * which puts the UART interrupt on that core and keeps the driver's own
+ * install messages (and our reopen log lines, and the settings read of the
+ * stored baud) out of the RX task. The driver is installed once and never
+ * deleted (its RX ring is one contiguous internal-RAM block a fragmented
+ * heap may not have again): a restart reconfigures it in place, and only a
+ * failed install leaves it closed, which the RX task then reopens on its
+ * own schedule.
  */
 #include "gnss_link.h"
 
@@ -102,6 +107,12 @@ static StaticSemaphore_t s_open_done_buf;
 
 static StaticTask_t s_rx_tcb;
 static StackType_t s_rx_stack[CONFIG_GNSS_LINK_RX_TASK_STACK];
+
+/* A closed driver (its install failed): reopened by the RX task on a schedule. */
+static uint32_t s_reopen_failures;     /* RX task (set by init before it runs) */
+static int64_t s_reopen_at_us;
+static bool s_reopen_logged;
+static int64_t s_reopen_log_us;
 
 /* Reader-side state: used by the RX task, or by the single reader while the
  * RX task does not run yet or is parked (see "Requests" above). */
@@ -290,17 +301,9 @@ static void apply_rx_thresholds(uint32_t baud)
     (void)uart_set_rx_timeout(s_port, gnss_link_core_rx_timeout(baud));
 }
 
-static esp_err_t driver_open_here(uint32_t baud, bool close_first)
+/* 8N1, no flow control, at `baud`: the line parameters of every open and restart. */
+static uart_config_t line_config(uint32_t baud)
 {
-    taskENTER_CRITICAL(&s_lock);
-    s_driver_ok = false;
-    s_events = NULL;
-    taskEXIT_CRITICAL(&s_lock);
-    if (close_first && uart_is_driver_installed(s_port)) {
-        (void)uart_driver_delete(s_port);
-    }
-
-    const board_desc_t *b = board_get();
     const uart_config_t cfg = {
         .baud_rate = (int)baud,
         .data_bits = UART_DATA_8_BITS,
@@ -309,6 +312,25 @@ static esp_err_t driver_open_here(uint32_t baud, bool close_first)
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
+    return cfg;
+}
+
+static uint32_t stored_baud(void)
+{
+    uint32_t stored = 0;
+    esp_err_t serr = settings_get_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BAUD, &stored);
+    return gnss_link_core_open_baud(serr, stored, CONFIG_GNSS_LINK_DEFAULT_BAUD);
+}
+
+static esp_err_t driver_open_here(uint32_t baud)
+{
+    taskENTER_CRITICAL(&s_lock);
+    s_driver_ok = false;
+    s_events = NULL;
+    taskEXIT_CRITICAL(&s_lock);
+
+    const board_desc_t *b = board_get();
+    const uart_config_t cfg = line_config(baud);
     QueueHandle_t q = NULL;
     esp_err_t err = uart_param_config(s_port, &cfg);
     if (err == ESP_OK) {
@@ -332,29 +354,52 @@ static esp_err_t driver_open_here(uint32_t baud, bool close_first)
 }
 
 typedef struct {
-    uint32_t baud;
-    bool close_first;
+    uint32_t baud;           /* in (or out with `stored`): the baud opened at */
+    bool stored;             /* read the stored baud here (the RX task reads no settings) */
+    bool reopen;             /* the self-reopen of a closed driver: log here, not in the RX task */
+    bool log_failure;        /* reopen: this failure is logged (the first, then one per 10 min) */
+    uint32_t failures;       /* reopen: failed installs before this one */
+    uint32_t next_ms;        /* reopen: the next attempt if this one fails */
     esp_err_t err;
 } open_job_t;
 
 static void open_task(void *arg)
 {
     open_job_t *job = arg;
-    job->err = driver_open_here(job->baud, job->close_first);
+    if (job->stored) {
+        job->baud = stored_baud();
+    }
+    job->err = driver_open_here(job->baud);
+    if (job->reopen) {
+        if (job->err == ESP_OK) {
+            ESP_LOGW(TAG, "receiver UART reopened @ %u baud after %u failed attempt%s", (unsigned)job->baud,
+                     (unsigned)job->failures, job->failures == 1 ? "" : "s");
+        } else if (job->log_failure) {
+            ESP_LOGE(TAG, "receiver UART still closed: %s (next attempt in %u s; this is logged at most every %u min)",
+                     esp_err_to_name(job->err), (unsigned)(job->next_ms / 1000u),
+                     (unsigned)(GNSS_LINK_REOPEN_LOG_MS / 60000u));
+        }
+    }
     xSemaphoreGive(s_open_done);
     vTaskDelete(NULL);
 }
 
-/* (Re)open the driver from a helper pinned to the RX core and wait for it. */
-static esp_err_t driver_open(uint32_t baud, bool close_first)
+/* Install the driver from a helper pinned to the RX core and wait for it. */
+static esp_err_t driver_open_job(open_job_t *job)
 {
-    open_job_t job = { .baud = baud, .close_first = close_first, .err = ESP_FAIL };
-    if (xTaskCreatePinnedToCore(open_task, "gnss_open", OPEN_TASK_STACK, &job, uxTaskPriorityGet(NULL), NULL,
+    job->err = ESP_FAIL;
+    if (xTaskCreatePinnedToCore(open_task, "gnss_open", OPEN_TASK_STACK, job, uxTaskPriorityGet(NULL), NULL,
                                 RX_CORE) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     (void)xSemaphoreTake(s_open_done, portMAX_DELAY);
-    return job.err;
+    return job->err;
+}
+
+static esp_err_t driver_open(uint32_t baud)
+{
+    open_job_t job = { .baud = baud };
+    return driver_open_job(&job);
 }
 
 /* ---- reader side ------------------------------------------------------------------- */
@@ -583,6 +628,98 @@ static esp_err_t do_set_baud(uint32_t baud, bool reset_framer)
     return ESP_OK;
 }
 
+/*
+ * Restart the link without reinstalling the driver (RX task, or the caller
+ * before the RX task runs): no allocation anywhere on this path. Every step
+ * is tried; the first error is returned and the driver stays installed.
+ */
+static esp_err_t restart_in_place(uint32_t baud)
+{
+    if (!driver_ok()) {
+        return ESP_ERR_INVALID_STATE;   /* closed: the reopen loop owns it */
+    }
+    esp_err_t first = ESP_OK;
+    esp_err_t e = uart_disable_rx_intr(s_port);
+    first = (first == ESP_OK) ? e : first;
+
+    /* The pending events describe the link: counted (a full queue also for
+     * the events it dropped), never thrown away with a queue reset. */
+    taskENTER_CRITICAL(&s_lock);
+    QueueHandle_t q = s_events;
+    taskEXIT_CRITICAL(&s_lock);
+    (void)check_queue(q, false);
+    (void)take_pending_events(true);
+
+    /* Drop the buffered input, counted like any deliberate drop. */
+    size_t buffered = 0;
+    e = uart_get_buffered_data_len(s_port, &buffered);
+    first = (first == ESP_OK) ? e : first;
+    e = uart_flush_input(s_port);
+    first = (first == ESP_OK) ? e : first;
+    count_rx(buffered);
+    taskENTER_CRITICAL(&s_lock);
+    gnss_link_core_on_flush(&s_core, buffered);
+    taskEXIT_CRITICAL(&s_lock);
+
+    /* The whole parameter set again, as at init. */
+    const board_desc_t *b = board_get();
+    const uart_config_t cfg = line_config(baud);
+    e = uart_param_config(s_port, &cfg);
+    first = (first == ESP_OK) ? e : first;
+    e = uart_set_pin(s_port, b->gnss_tx_gpio, b->gnss_rx_gpio, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    first = (first == ESP_OK) ? e : first;
+    e = uart_set_baudrate(s_port, baud);
+    first = (first == ESP_OK) ? e : first;
+    e = uart_set_rx_full_threshold(s_port, gnss_link_core_rx_full_threshold(baud));
+    first = (first == ESP_OK) ? e : first;
+    e = uart_set_rx_timeout(s_port, gnss_link_core_rx_timeout(baud));
+    first = (first == ESP_OK) ? e : first;
+
+    e = uart_enable_rx_intr(s_port);
+    first = (first == ESP_OK) ? e : first;
+    settle_and_discard(baud);   /* the first 20 ms at the (new) rate, counted; records the baud */
+    framer_reset();
+    return first;
+}
+
+/* RX task, driver closed: one reopen attempt when it is due. */
+static void reopen_step(void)
+{
+    int64_t now = esp_timer_get_time();
+    if (now < s_reopen_at_us) {
+        return;
+    }
+    uint32_t next_ms = gnss_link_core_reopen_delay_ms(s_reopen_failures);
+    open_job_t job = {
+        .stored = true,
+        .reopen = true,
+        .log_failure = gnss_link_core_reopen_log_due(s_reopen_logged, s_reopen_log_us, now),
+        .failures = s_reopen_failures,
+        .next_ms = next_ms,
+    };
+    esp_err_t err = driver_open_job(&job);
+    if (err == ESP_OK) {
+        s_reopen_failures = 0;
+        taskENTER_CRITICAL(&s_lock);
+        gnss_link_core_set_open(&s_core, true);
+        taskEXIT_CRITICAL(&s_lock);
+        settle_and_discard(job.baud);
+        framer_reset();
+        return;
+    }
+    taskENTER_CRITICAL(&s_lock);
+    gnss_link_core_on_open_failed(&s_core);
+    taskEXIT_CRITICAL(&s_lock);
+    if (job.log_failure) {
+        s_reopen_logged = true;
+        s_reopen_log_us = now;
+    }
+    if (s_reopen_failures < UINT32_MAX) {
+        s_reopen_failures++;
+    }
+    s_reopen_at_us = esp_timer_get_time() + (int64_t)next_ms * 1000;
+}
+
 static void exec_req(req_t *r)
 {
     esp_err_t err = ESP_ERR_INVALID_STATE;
@@ -639,12 +776,7 @@ static void exec_req(req_t *r)
     case REQ_RESTART:
         err = check(GNSS_LINK_OP_RESTART, r->token);
         if (err == ESP_OK) {
-            drop_input();
-            err = driver_open(r->baud, true);
-            if (err == ESP_OK) {
-                settle_and_discard(r->baud);
-            }
-            framer_reset();
+            err = restart_in_place(r->baud);
         }
         break;
     case REQ_PROMPT:
@@ -764,7 +896,9 @@ static void rx_task(void *arg)
         wdt_set(true);
 
         if (q == NULL) {
-            /* Driver closed after a failed reinstall: wait for the next request. */
+            /* Driver closed (its install failed): reopen it on its schedule,
+             * without waiting for a recovery step. */
+            reopen_step();
             (void)ulTaskNotifyTakeIndexed(RX_NOTIFY_IDX, pdTRUE, pdMS_TO_TICKS(GNSS_LINK_EVENT_WAIT_MS));
             wdt_feed();
             continue;
@@ -826,15 +960,24 @@ esp_err_t gnss_link_init(void)
     }
 
     gnss_framer_init(&s_framer, on_frame, NULL);
-    esp_err_t err = driver_open(baud, false);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "UART%d not opened: %s", b->gnss_uart_num, esp_err_to_name(err));
-        return err;
-    }
+    esp_err_t err = driver_open(baud);
     taskENTER_CRITICAL(&s_lock);
     gnss_link_core_init(&s_core, baud);
+    if (err != ESP_OK) {
+        gnss_link_core_on_open_failed(&s_core);
+    }
     taskEXIT_CRITICAL(&s_lock);
     s_inited = true;
+    if (err != ESP_OK) {
+        /* Closed, not given up: the RX task reopens it on its own. */
+        s_reopen_failures = 0;
+        s_reopen_at_us = esp_timer_get_time() + (int64_t)gnss_link_core_reopen_delay_ms(0) * 1000;
+        s_reopen_logged = true;
+        s_reopen_log_us = esp_timer_get_time();
+        ESP_LOGE(TAG, "UART%d not opened: %s; retried on its own (1 s, 5 s, 30 s, then every 60 s)",
+                 b->gnss_uart_num, esp_err_to_name(err));
+        return err;
+    }
     ESP_LOGI(TAG, "UART%d open: RX GPIO%d TX GPIO%d @ %u baud (%s)", b->gnss_uart_num, b->gnss_rx_gpio,
              b->gnss_tx_gpio, (unsigned)baud, serr == ESP_OK && baud == stored ? "stored" : "default");
     return ESP_OK;
@@ -1058,9 +1201,7 @@ esp_err_t gnss_link_restart(gnss_link_lease_t lease)
     }
     /* The stored rate, not the current one: a scan or a failed baud change
      * may have left the host elsewhere. */
-    uint32_t stored = 0;
-    esp_err_t serr = settings_get_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BAUD, &stored);
-    uint32_t baud = gnss_link_core_open_baud(serr, stored, CONFIG_GNSS_LINK_DEFAULT_BAUD);
+    uint32_t baud = stored_baud();
     if (xSemaphoreTake(s_tx, pdMS_TO_TICKS(TX_LOCK_MS)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
@@ -1068,9 +1209,11 @@ esp_err_t gnss_link_restart(gnss_link_lease_t lease)
     err = run_req(&r);
     xSemaphoreGive(s_tx);
     if (err == ESP_OK) {
-        ESP_LOGW(TAG, "UART reinstalled @ %u baud", (unsigned)baud);
+        ESP_LOGW(TAG, "UART link restarted @ %u baud (driver kept)", (unsigned)baud);
+    } else if (err == ESP_ERR_INVALID_STATE && !driver_ok()) {
+        ESP_LOGW(TAG, "UART link restart skipped: the driver is closed and reopens on its own");
     } else {
-        ESP_LOGE(TAG, "UART reinstall @ %u baud failed: %s", (unsigned)baud, esp_err_to_name(err));
+        ESP_LOGE(TAG, "UART link restart @ %u baud: %s (driver kept)", (unsigned)baud, esp_err_to_name(err));
     }
     return err;
 }

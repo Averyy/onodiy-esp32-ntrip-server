@@ -22,6 +22,24 @@ void net_ladder_init(net_ladder_t *l)
     memset(l, 0, sizeof(*l));
 }
 
+uint8_t net_ladder_triggers(const net_ladder_in_t *in)
+{
+    if (!in->sta_configured) {
+        return 0;
+    }
+    uint8_t t = 0;
+    if (in->caster_down && in->rtcm_healthy) {
+        t |= NET_TRIG_P;
+    }
+    if (in->assoc_no_ip_s >= NET_LADDER_ASSOC_NO_IP_S) {
+        t |= NET_TRIG_A;
+    }
+    if (in->unreached_s >= NET_LADDER_UNREACHED_S) {
+        t |= NET_TRIG_S;
+    }
+    return t;
+}
+
 static void start_pass(net_ladder_t *l, uint32_t now_s)
 {
     l->phase = NET_LADDER_ACTIVE;
@@ -37,9 +55,34 @@ static void enter_hold(net_ladder_t *l, uint32_t now_s)
     l->probe_asked = false;
 }
 
-/* Why the reboot rung may not run, NET_WHY_NONE if it may. */
-static net_ladder_why_t reboot_blocked(const net_ladder_in_t *in, net_probe_t p)
+/*
+ * AP clients at the Wi-Fi restart or reboot rung: withheld (AP_IN_USE) for
+ * at most NET_LADDER_AP_HOLD_MAX_S per episode, counted from the first such
+ * withhold; after that the clients no longer hold the rung back
+ * (AP_OVERRIDDEN, the rung runs if nothing else withholds it).
+ */
+static net_ladder_why_t ap_check(net_ladder_t *l, const net_ladder_in_t *in, uint32_t now_s)
 {
+    if (in->ap_clients == 0) {
+        return NET_WHY_NONE;
+    }
+    if (!l->ap_held) {
+        l->ap_held = true;
+        l->ap_held_since_s = now_s;
+    }
+    if ((uint32_t)(now_s - l->ap_held_since_s) < NET_LADDER_AP_HOLD_MAX_S) {
+        return NET_WHY_AP_IN_USE;
+    }
+    return NET_WHY_AP_OVERRIDDEN;
+}
+
+/* Why the reboot rung may not run, NET_WHY_NONE if it may (AP_OVERRIDDEN:
+ * it may, past the AP-client limit). */
+static net_ladder_why_t reboot_blocked(net_ladder_t *l, const net_ladder_in_t *in, net_probe_t p, uint32_t now_s)
+{
+    if ((net_ladder_triggers(in) & NET_TRIG_P) == 0) {
+        return NET_WHY_NO_REBOOT_TRIGGER;   /* A and S never reboot */
+    }
     if (p != NET_PROBE_NO_IP && p != NET_PROBE_DNS_FAILED) {
         return NET_WHY_NO_UPSTREAM;   /* nothing beyond the router (or no answer): not ours to fix */
     }
@@ -52,21 +95,21 @@ static net_ladder_why_t reboot_blocked(const net_ladder_in_t *in, net_probe_t p)
     if (in->reboot_inhibited) {
         return NET_WHY_INHIBITED;
     }
-    if (in->ap_clients > 0) {
-        return NET_WHY_AP_IN_USE;
-    }
-    return NET_WHY_NONE;
+    return ap_check(l, in, now_s);
 }
 
 net_ladder_out_t net_ladder_tick(net_ladder_t *l, const net_ladder_in_t *in, uint32_t now_s)
 {
-    net_ladder_out_t out = { NET_LADDER_NONE, NET_RUNG_NONE, NET_WHY_NONE };
-    bool needed = in->caster_down && in->rtcm_healthy && in->sta_configured;
+    net_ladder_out_t out = { NET_LADDER_NONE, NET_RUNG_NONE, NET_WHY_NONE, 0 };
+    uint8_t triggers = net_ladder_triggers(in);
+    bool needed = triggers != 0;
 
     if (l->phase == NET_LADDER_IDLE) {
         if (needed) {
-            net_ladder_init(l);
+            net_ladder_init(l);   /* a new episode: the AP-client limit starts afresh */
             start_pass(l, now_s);
+            out.act = NET_LADDER_PASS;
+            out.triggers = triggers;
         }
         return out;
     }
@@ -88,6 +131,8 @@ net_ladder_out_t net_ladder_tick(net_ladder_t *l, const net_ladder_in_t *in, uin
     if (l->phase == NET_LADDER_HOLD) {
         if ((uint32_t)(now_s - l->hold_start_s) >= NET_LADDER_HOLD_S) {
             start_pass(l, now_s);
+            out.act = NET_LADDER_PASS;
+            out.triggers = triggers;
         }
         return out;
     }
@@ -128,17 +173,18 @@ net_ladder_out_t net_ladder_tick(net_ladder_t *l, const net_ladder_in_t *in, uin
         return out;
     }
     net_ladder_why_t why = NET_WHY_NONE;
-    if (rung == NET_RUNG_RESTART_WIFI && in->ap_clients > 0) {
-        why = NET_WHY_AP_IN_USE;
+    if (rung == NET_RUNG_RESTART_WIFI) {
+        why = ap_check(l, in, now_s);
     } else if (rung == NET_RUNG_REBOOT) {
-        why = reboot_blocked(in, p);
+        why = reboot_blocked(l, in, p, now_s);
     }
-    if (why != NET_WHY_NONE) {
+    if (why != NET_WHY_NONE && why != NET_WHY_AP_OVERRIDDEN) {
         out.act = NET_LADDER_WITHHELD;
         out.why = why;
         return out;
     }
     out.act = NET_LADDER_ACT;
+    out.why = why;   /* AP_OVERRIDDEN: runs with a client connected */
     l->last_rung = (uint8_t)rung;
     return out;
 }

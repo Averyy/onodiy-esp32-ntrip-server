@@ -272,6 +272,7 @@ typedef struct {
     int64_t detect_ms;         /**< next pass (STN_NEVER = none) */
     uint8_t short_fails;
     uint32_t detect_failures;
+    uint32_t detect_passes;    /**< detection passes completed since boot, found or not (health re-checks a blocked reboot on a newer pass) */
     bool detect_saw_bytes;
     bool loader_key_sent;      /**< the loader's restart key went out this boot */
     bool listen_only;
