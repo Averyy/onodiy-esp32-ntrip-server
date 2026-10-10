@@ -36,13 +36,13 @@ menu "Station: NTRIP casters"
             this.
 
     config NTRIP_SEND_TIMEOUT_MS
-        int "Socket send/receive timeout (ms)"
+        int "Write-stall limit (ms)"
         range 1000 60000
         default 10000
         help
-            A caster whose TCP window stays full this long is dropped and
-            reconnected; the hub's lag limit keeps it from falling behind
-            meanwhile.
+            A caster that accepts no byte of pending data for this long
+            (its TCP window stays full) is dropped and reconnected; the hub's
+            lag limit keeps it from falling behind meanwhile.
 
     config NTRIP_CONNECT_BUDGET_S
         int "Longest a slot may stay CONNECTING (s)"
