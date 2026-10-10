@@ -18,12 +18,16 @@ idf_component_register(
         "test_semver.c"
         "test_um98x_profile.c"
         "test_flash_journal.c"
+        "test_rtcm_epoch.c"
+        "test_rtcm_hub_core.c"
         "${_fw}/lifecycle/boot_guard.c"
         "${_fw}/lifecycle/reboot_gate.c"
         "${_fw}/lifecycle/boot_history.c"
         "${_fw}/fw_update/semver.c"
         "${_fw}/um98x_ctl/um98x_profile.c"
         "${_fw}/um98x_flash/flash_journal.c"
+        "${_fw}/rtcm_hub/rtcm_epoch.c"
+        "${_fw}/rtcm_hub/rtcm_hub_core.c"
     INCLUDE_DIRS
         "."
     PRIV_INCLUDE_DIRS
@@ -31,6 +35,7 @@ idf_component_register(
         "${_fw}/fw_update/priv_include"
         "${_fw}/um98x_ctl/include"
         "${_fw}/um98x_flash/priv_include"
+        "${_fw}/rtcm_hub/priv_include"
     REQUIRES unity gnss_framing gnss_types settings nvs_flash esp_partition esp_event
     WHOLE_ARCHIVE)
 
