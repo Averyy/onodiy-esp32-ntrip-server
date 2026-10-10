@@ -32,7 +32,9 @@
  *  - A new consumer, and one that calls rtcm_hub_resync() (e.g. after a
  *    caster reconnect), first receives the sticky metadata frames, then live
  *    data starting at the next epoch start. A caster never starts with the
- *    tail of an epoch or waits for the station position.
+ *    tail of an epoch or waits for the station position. Epoch starts that
+ *    are already over the consumer's lag limit when it reads are skipped too
+ *    (as idle skips).
  *  - Lag limit per consumer (rtcm_hub_set_max_lag; default
  *    CONFIG_RTCM_HUB_MAX_LAG_MS, the Onocoy slot 1000 ms): a consumer whose
  *    oldest unread frame is older than its limit drops whole oldest epochs
@@ -62,22 +64,36 @@
  *    GNSS_RTCM3_MAX_FRAME before use.
  *  - Wake-up uses task notification index 1
  *    (CONFIG_FREERTOS_TASK_NOTIFICATION_ARRAY_ENTRIES >= 2), so it never
- *    collides with IDF APIs on index 0. Attach and detach take the hub lock;
- *    detach clears the consumer's task handle before freeing it, so the
- *    producer never notifies a freed task.
- *  - rx_ms is a wrapping millisecond stamp; it is only ever compared as
- *    (uint32_t)(now - then).
+ *    collides with IDF APIs on index 0; a consumer task leaves index 1 to the
+ *    hub (a stray notification only costs an extra check). Attach and detach
+ *    take the hub lock; detach clears the consumer's task handle and, if the
+ *    producer is notifying at that moment, waits for that pass to end, so the
+ *    producer never notifies a task that has gone away after detaching.
+ *  - rx_ms is a wrapping millisecond stamp; ages are only ever computed as
+ *    (uint32_t)(now - then), clamped at 0. Once the newest frame is older
+ *    than 2^31 ms, every stored frame counts as older than any lag limit.
  *
  * Loss accounting: frames a consumer skips while it is not streaming
  * (before attach, during resync after an outage or pause) are expected and
  * go to `frames_skipped_idle`. Only frames lost while streaming (lapped or
- * over the lag limit) count as `frames_dropped`, the real data-loss figure.
+ * over the lag limit) count as `frames_dropped`, the real data-loss figure;
+ * after a lap, the rest of the newest epoch skipped while resyncing counts as
+ * dropped too. Every frame published while a consumer is attached ends up in
+ * exactly one of frames_out, frames_dropped or frames_skipped_idle
+ * (frames_out also counts the sticky replays).
  *
- * Thread safety: rtcm_hub_publish() from one task (the GNSS link RX task);
- * every consumer handle used by exactly one task.
+ * Thread safety: rtcm_hub_publish() and rtcm_hub_clear_sticky() from one task
+ * (the GNSS link RX task); every consumer handle used by exactly one task for
+ * read, resync, set_max_lag and detach. The stats getters may be called from
+ * any task.
  *
- * Status: API settled; ring not implemented yet. Limits are PROVISIONAL, to
- * be confirmed on hardware.
+ * The ring, epoch and cursor logic is a pure core (rtcm_hub_core.c,
+ * rtcm_epoch.c) with host tests; this component wraps it with the spinlock,
+ * PSRAM buffers, the clock and task notifications.
+ *
+ * Status: implemented. Ring size, lag limits and the burst gap are
+ * PROVISIONAL, to be confirmed on hardware (epoch rule counters on a real
+ * stream, burst timing).
  */
 #pragma once
 
@@ -118,6 +134,7 @@ typedef struct {
     uint64_t bytes_dropped;
     uint64_t frames_skipped_idle;/**< skipped while not streaming (attach, resync after outage/pause): expected */
     uint64_t epochs_dropped;     /**< whole epochs dropped by the lag limit or a lap (each lowers Onocoy's data rate) */
+    uint64_t epochs_out;         /**< epochs delivered whole (counted when the next epoch begins) */
     uint32_t max_lag_ms;         /**< this consumer's lag limit */
     uint32_t lag_drops;          /**< number of lag-limit events */
     uint32_t laps;               /**< number of times overwritten */
@@ -130,8 +147,12 @@ esp_err_t rtcm_hub_init(void);
 /**
  * Publish one complete RTCM3 frame (header + payload + CRC).
  *
- * @param msg_type RTCM3 message number, kept per frame for statistics.
- * @return ESP_OK, ESP_ERR_INVALID_ARG if len exceeds a maximum RTCM3 frame,
+ * Never blocks, allocates or logs. A rejected frame is counted in
+ * publish_failures.
+ *
+ * @param msg_type RTCM3 message number (epoch rules, sticky copies).
+ * @return ESP_OK, ESP_ERR_INVALID_ARG if len exceeds a maximum RTCM3 frame
+ *         (or frame is NULL or shorter than an empty frame),
  *         ESP_ERR_INVALID_STATE before init.
  */
 esp_err_t rtcm_hub_publish(const uint8_t *frame, size_t len, uint16_t msg_type);
