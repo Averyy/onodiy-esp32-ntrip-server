@@ -2,9 +2,9 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Diagnostics: health and loss counters, per-day availability, the log
- * (live, previous start, download, levels), the event journal, task
- * statistics and the core dump.
+ * Diagnostics: health and loss counters, per-day availability with the
+ * connection history next to it, the log (live, previous start, download,
+ * levels), the event journal, task statistics and the core dump.
  */
 
 const DIAG_TABS = [
@@ -114,8 +114,11 @@ function healthTab(box) {
           return msg('warn', h('strong', null, t[0]), t[1] ? h('div', { class: 'small' }, t[1]) : null);
         })) : h('p', { class: 'muted' }, 'No health alerts.'),
         kv([
+          ['Automatic receiver recovery', hl.recovery_mode ? lbl(L.recovery, hl.recovery_mode) : DASH],
+          hl.reboot_recheck ? ['ESP32 reboot', h('span', { class: 't-warn' }, 'blocked; checked again after the next detection pass when the cap allows')] : null,
+          link.open === false && link.mode !== 'off' ? ['Receiver UART', h('span', { class: 't-bad' }, 'closed (reopening)')] : null,
           ['Last recovery step', lbl(L.step, hl.last_step)],
-          ['Receiver recovery paused', fmt.yesno(hl.ladder_suspended)],
+          ['Receiver recovery paused', fmt.yesno(hl.ladder_suspended) + ((hl.station || {}).rx_maintenance ? ' (receiver maintenance)' : '')],
           ['Running for', fmt.dur(hl.uptime_s)],
           ['Receiver stalls', fmt.num(hl.gnss_stalls)],
           ['Recovery steps', fmt.num(hl.recoveries)],
@@ -169,6 +172,7 @@ function healthTab(box) {
           ['Active', fmt.yesno(net.ladder.active)],
           ['Step', String(net.ladder.rung)],
           ['Held back because', net.ladder.withheld === 'none' ? DASH : lbl(L.ladderWhy, net.ladder.withheld)],
+          ['Triggers now', (net.ladder.triggers || []).length ? net.ladder.triggers.map(t => lbl(L.trigger, t)).join(', ') : 'none'],
           ['Actions', fmt.num(net.ladder.actions)],
         ]) : null)));
   };
@@ -177,7 +181,50 @@ function healthTab(box) {
 
 /* ---- Availability -------------------------------------------------------- */
 
+/* One connection-history record in words: [event, where, details]. */
+function connRow(e) {
+  const slot = e.slot_name || (e.slot === null || e.slot === undefined ? '' : 'Slot ' + (e.slot + 1));
+  switch (e.kind) {
+    case 'caster_down':
+      return ['Session ended', slot, 'after ' + fmt.dur(e.duration_s) + (e.class && e.class !== 'none' ? ': ' + lbl(L.fail, e.class).toLowerCase() : '') +
+        (e.count ? '; ' + e.count + ' shorter session' + (e.count === 1 ? '' : 's') + ' not listed' : '')];
+    case 'caster_up':
+      return ['Streaming again', slot, 'after ' + fmt.dur(e.duration_s) + (e.count ? ', ' + e.count + ' failed attempt' + (e.count === 1 ? '' : 's') : '')];
+    case 'wifi_up':
+      return ['Wi-Fi back', 'Wi-Fi', 'after ' + fmt.dur(e.duration_s) + (e.count ? ', ' + e.count + ' connect attempt' + (e.count === 1 ? '' : 's') : '')];
+    case 'wifi_disconnect':
+      return ['Wi-Fi dropped', 'Wi-Fi', wifiReason(e.reason) + (e.rssi ? ', signal ' + e.rssi + ' dBm' : '')];
+    default:
+      return [words(e.kind), slot, ''];
+  }
+}
+
+/** The connection-history card (GET /api/connections), refreshed every minute and on demand. */
+function connHistory() {
+  const out = h('div');
+  const err = errBox();
+  const load = async () => {
+    const r = await api('GET', '/api/connections');
+    const list = r.entries || [];
+    mount(out, list.length ? table(['When', 'Event', 'Where', 'Details'], list.map(e => {
+      const c = connRow(e);
+      const bad = e.kind === 'caster_down' || e.kind === 'wifi_disconnect';
+      return [e.time_unix ? fmt.time(e.time_unix) : h('span', { class: 'muted' }, fmt.dur(e.uptime_s) + ' after a start'),
+        h('span', { class: bad ? 't-warn' : 't-ok' }, c[0]), c[1] || DASH, c[2]];
+    })) : h('p', { class: 'muted' }, 'No caster sessions ended or Wi-Fi drops recorded.'),
+    r.complete === false && list.length ? h('p', { class: 'muted small foot' }, 'The newest ' + list.length + ' records; older ones are in the event journal.') : null);
+  };
+  const refresh = btn('Refresh', () => act(refresh, load, err), 'small');
+  const el = h('section', { class: 'card wide' }, h('h2', null, 'Connection history'),
+    h('p', { class: 'muted small' }, 'Caster sessions ending and coming back, Wi-Fi drops and returns, newest first. ' +
+      'Not every session shorter than a minute is listed: the next record counts the ones left out.'),
+    h('div', { class: 'row' }, refresh), err, h('div', { class: 'foot' }, out));
+  const stop = poller(60000, () => load().catch(e => showErr(e, err)));
+  return { el: el, stop: stop };
+}
+
 function availabilityTab(box) {
+  const hist = connHistory();
   const render = av => {
     const slots = av.slots || [];
     const prot = slots.find(s => s.protected);
@@ -215,9 +262,16 @@ function availabilityTab(box) {
             return [d.date || String(d.utc_day), h('span', { class: over ? 't-bad' : null }, fmt.dur(down)), fmt.dur((d.planned_s || [])[i]),
               fmt.num((d.reconnects || [])[i]), fmt.dur(d.power_off_s)];
           }), { num: [1, 2, 3, 4] }) : h('p', { class: 'muted' }, 'No earlier days recorded yet.'),
-        prot ? h('p', { class: 'muted small foot' }, 'Onocoy\'s streak allows about 473 s offline per UTC day at a perfect data rate.') : null)));
+        prot ? h('p', { class: 'muted small foot' }, 'Onocoy\'s streak allows about 473 s offline per UTC day at a perfect data rate.') : null),
+      hist.el));
   };
-  return { stop: pollInto(box, 10000, '/api/availability', render) };
+  const stopAv = pollInto(box, 10000, '/api/availability', render);
+  return {
+    stop() {
+      stopAv();
+      hist.stop();
+    },
+  };
 }
 
 /* ---- Logs ------------------------------------------------------------------ */

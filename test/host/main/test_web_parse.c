@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "cJSON.h"
@@ -187,6 +188,126 @@ static bool caster_put(const char *json, ntrip_caster_cfg_t *out, web_bad_t *b)
     bool ok = web_parse_caster_put(root, &st, out, b);
     cJSON_Delete(root);
     return ok;
+}
+
+TEST_CASE("antenna descriptor: trailing spaces dropped, inner kept, the profile's character rule", "[web_parse]")
+{
+    um98x_base_profile_t p;
+    web_bad_t b = { 0 };
+    TEST_ASSERT_TRUE(profile_put("{\"profile\":{\"antenna_model\":\"TRM59800.00     SCIS  \","
+                                 "\"antenna_serial\":\"5000123 \",\"antenna_setup_id\":2}}",
+                                 &p, &b));
+    TEST_ASSERT_EQUAL_STRING("TRM59800.00     SCIS", p.antenna_model);
+    TEST_ASSERT_EQUAL_STRING("5000123", p.antenna_serial);
+    TEST_ASSERT_EQUAL_UINT8(2, p.antenna_setup_id);
+    TEST_ASSERT_TRUE(um98x_profile_valid(&p));
+
+    /* 31 characters fit, also with trailing spaces beyond them; 32 do not. */
+    TEST_ASSERT_TRUE(profile_put("{\"profile\":{\"antenna_model\":\"1234567890123456789012345678901    \"}}", &p, &b));
+    TEST_ASSERT_EQUAL(31, (int)strlen(p.antenna_model));
+    TEST_ASSERT_FALSE(profile_put("{\"profile\":{\"antenna_model\":\"12345678901234567890123456789012\"}}", &p, &b));
+    TEST_ASSERT_EQUAL_STRING("antenna_model", b.field);
+
+    /* Empty clears it (the receiver keeps its own value). */
+    TEST_ASSERT_TRUE(profile_put("{\"profile\":{\"antenna_model\":\"   \"}}", &p, &b));
+    TEST_ASSERT_EQUAL_STRING("", p.antenna_model);
+
+    static const struct {
+        const char *json;
+        const char *field;
+    } bad[] = {
+        { "{\"profile\":{\"antenna_model\":\"ANT\\\"X\"}}", "antenna_model" },     /* '"' */
+        { "{\"profile\":{\"antenna_model\":\"ANT\\tX\"}}", "antenna_model" },       /* control character */
+        { "{\"profile\":{\"antenna_model\":\"ANT\\u00e9\"}}", "antenna_model" },    /* not ASCII */
+        { "{\"profile\":{\"antenna_model\":7}}", "antenna_model" },
+        { "{\"profile\":{\"antenna_serial\":\"S\\\"N\"}}", "antenna_serial" },
+        { "{\"profile\":{\"antenna_setup_id\":256}}", "antenna_setup_id" },
+        { "{\"profile\":{\"antenna_setup_id\":-1}}", "antenna_setup_id" },
+        { "{\"profile\":{\"antenna_setup_id\":1.5}}", "antenna_setup_id" },
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        b = (web_bad_t){ 0 };
+        TEST_ASSERT_FALSE_MESSAGE(profile_put(bad[i].json, &p, &b), bad[i].json);
+        TEST_ASSERT_EQUAL(WEB_ERR_INVALID_FIELD, b.err);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(bad[i].field, b.field, bad[i].json);
+    }
+}
+
+TEST_CASE("recovery mode, maintenance duration and live view minutes", "[web_parse]")
+{
+    web_bad_t b = { 0 };
+    bool have = true;
+    health_recovery_mode_t mode = HEALTH_RECOVERY_ALERTS;
+    cJSON *root = body("{\"autocfg\":true}");
+    TEST_ASSERT_TRUE(web_parse_recovery(root, &have, &mode, &b));
+    TEST_ASSERT_FALSE(have);
+    cJSON_Delete(root);
+    static const struct {
+        const char *json;
+        health_recovery_mode_t mode;
+    } good[] = {
+        { "{\"recovery\":\"full\"}", HEALTH_RECOVERY_FULL },
+        { "{\"recovery\":\"no_reboot\"}", HEALTH_RECOVERY_NO_REBOOT },
+        { "{\"recovery\":\"alerts_only\"}", HEALTH_RECOVERY_ALERTS },
+    };
+    for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+        root = body(good[i].json);
+        TEST_ASSERT_TRUE(web_parse_recovery(root, &have, &mode, &b));
+        TEST_ASSERT_TRUE(have);
+        TEST_ASSERT_EQUAL(good[i].mode, mode);
+        cJSON_Delete(root);
+    }
+    static const char *const bad_modes[] = { "{\"recovery\":2}", "{\"recovery\":\"alerts\"}", "{\"recovery\":\"FULL\"}",
+                                             "{\"recovery\":null}", "{\"recovery\":\"\"}" };
+    for (size_t i = 0; i < sizeof(bad_modes) / sizeof(bad_modes[0]); i++) {
+        root = body(bad_modes[i]);
+        b = (web_bad_t){ 0 };
+        TEST_ASSERT_FALSE_MESSAGE(web_parse_recovery(root, &have, &mode, &b), bad_modes[i]);
+        TEST_ASSERT_EQUAL_STRING("recovery", b.field);
+        cJSON_Delete(root);
+    }
+
+    uint32_t dur = 1;
+    root = body("{}");
+    TEST_ASSERT_TRUE(web_parse_maintenance(root, &dur, &b));
+    TEST_ASSERT_EQUAL_UINT32(0, dur);   /* the station's default */
+    cJSON_Delete(root);
+    static const uint32_t ok_dur[] = { 0, 900, 1800, 3600, 7200, 14400 };
+    for (size_t i = 0; i < sizeof(ok_dur) / sizeof(ok_dur[0]); i++) {
+        char json[48];
+        snprintf(json, sizeof(json), "{\"duration_s\":%u}", (unsigned)ok_dur[i]);
+        root = body(json);
+        TEST_ASSERT_TRUE_MESSAGE(web_parse_maintenance(root, &dur, &b), json);
+        TEST_ASSERT_EQUAL_UINT32(ok_dur[i], dur);
+        cJSON_Delete(root);
+    }
+    static const char *const bad_dur[] = { "{\"duration_s\":600}", "{\"duration_s\":28800}", "{\"duration_s\":-900}",
+                                           "{\"duration_s\":\"1800\"}", "{\"duration_s\":1800.5}" };
+    for (size_t i = 0; i < sizeof(bad_dur) / sizeof(bad_dur[0]); i++) {
+        root = body(bad_dur[i]);
+        b = (web_bad_t){ 0 };
+        TEST_ASSERT_FALSE_MESSAGE(web_parse_maintenance(root, &dur, &b), bad_dur[i]);
+        TEST_ASSERT_EQUAL_STRING("duration_s", b.field);
+        cJSON_Delete(root);
+    }
+
+    uint32_t minutes = 9;
+    root = body("{}");
+    TEST_ASSERT_TRUE(web_parse_live(root, 60, &minutes, &b));
+    TEST_ASSERT_EQUAL_UINT32(0, minutes);
+    cJSON_Delete(root);
+    root = body("{\"minutes\":60}");
+    TEST_ASSERT_TRUE(web_parse_live(root, 60, &minutes, &b));
+    TEST_ASSERT_EQUAL_UINT32(60, minutes);
+    cJSON_Delete(root);
+    static const char *const bad_min[] = { "{\"minutes\":61}", "{\"minutes\":-1}", "{\"minutes\":true}", "{\"minutes\":2.5}" };
+    for (size_t i = 0; i < sizeof(bad_min) / sizeof(bad_min[0]); i++) {
+        root = body(bad_min[i]);
+        b = (web_bad_t){ 0 };
+        TEST_ASSERT_FALSE_MESSAGE(web_parse_live(root, 60, &minutes, &b), bad_min[i]);
+        TEST_ASSERT_EQUAL_STRING("minutes", b.field);
+        cJSON_Delete(root);
+    }
 }
 
 TEST_CASE("caster edits keep left-out fields and the stored password", "[web_parse]")

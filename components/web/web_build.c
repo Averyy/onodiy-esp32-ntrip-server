@@ -58,6 +58,9 @@ const char *web_flash_action_why(const web_flash_ctx_t *c, web_flash_action_t a,
             if (!c->station_running) {
                 return refuse(err, WEB_ERR_NOT_WAITING, "not_waiting");
             }
+            if (c->maintenance) {
+                return refuse(err, WEB_ERR_RECEIVER_MAINTENANCE, "receiver_maintenance");
+            }
             return NULL;
         }
         return refuse(err, WEB_ERR_NO_JOURNAL, "no_journal");
@@ -79,6 +82,9 @@ const char *web_flash_action_why(const web_flash_ctx_t *c, web_flash_action_t a,
     }
     if (c->safe_mode) {
         return refuse(err, WEB_ERR_SAFE_MODE, "safe_mode");
+    }
+    if (c->maintenance) {
+        return refuse(err, WEB_ERR_RECEIVER_MAINTENANCE, "receiver_maintenance");
     }
     if (a == WEB_FLASH_RETRY) {
         if (c->app_trial) {
@@ -142,6 +148,46 @@ static void station_alerts(wj_t *w, const char *key, uint32_t alerts)
         }
     }
     wj_arr_close(w);
+}
+
+/* A bounded char array as a string (its terminator, or the array's end). */
+static void str_arr(wj_t *w, const char *key, const char *s, size_t cap)
+{
+    wj_strn(w, key, s, strnlen(s, cap));
+}
+
+static void str_arr_or_null(wj_t *w, const char *key, const char *s, size_t cap)
+{
+    size_t n = strnlen(s, cap);
+    if (n == 0) {
+        wj_null(w, key);
+    } else {
+        wj_strn(w, key, s, n);
+    }
+}
+
+static void ladder_triggers(wj_t *w, const char *key, uint32_t bits)
+{
+    wj_arr_open(w, key);
+    for (uint32_t bit = 1; bit != 0 && bit < 0x100; bit <<= 1) {
+        if ((bits & bit) != 0) {
+            const char *name = web_ladder_trigger_name(bit);
+            if (name != NULL) {
+                wj_str(w, NULL, name);
+            }
+        }
+    }
+    wj_arr_close(w);
+}
+
+/* Changed Wi-Fi credentials on trial, pending, or reverted (status network section and /api/wifi). */
+static void cred_fields(wj_t *w, const network_status_t *n)
+{
+    wj_bool(w, "cred_trial", n->cred_trial);
+    wj_uint(w, "cred_trial_left_s", n->cred_trial ? n->cred_trial_left_s : 0);
+    wj_bool(w, "cred_pending", n->cred_pending);
+    str_arr_or_null(w, "pending_ssid", (n->cred_pending || n->cred_trial) ? n->pending_ssid : "", sizeof(n->pending_ssid));
+    wj_bool(w, "cred_reverted", n->cred_reverted);
 }
 
 /* ---- status ------------------------------------------------------------------------------- */
@@ -260,6 +306,9 @@ static void sec_network(wj_t *w, const web_status_snap_t *s)
     wj_uint(w, "offline_s", n->offline_s);
     wj_bool(w, "ap_active", n->setup_ap_active);
     ap_reasons(w, "ap_reasons", n->setup_ap_active, n->ap_reasons);
+    wj_uint(w, "assoc_no_ip_s", n->assoc_no_ip_s);
+    ladder_triggers(w, "ladder_triggers", n->ladder_triggers);
+    cred_fields(w, n);
     wj_obj_close(w);
 }
 
@@ -284,6 +333,10 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
     wj_uint(w, "best_bands", s->obs_valid ? s->best_bands : 0);
     if (!pub) {
         wj_str(w, "journal", web_journal_name(web_journal_view(st, s->boot.safe_mode)));
+        wj_bool(w, "uart_closed", s->uart_closed);
+        wj_bool(w, "rx_maintenance", st->rx_maintenance);
+        wj_uint(w, "maintenance_left_s", st->rx_maintenance ? st->maintenance_left_s : 0);
+        wj_uint(w, "maintenance_chosen_s", st->rx_maintenance ? st->maintenance_chosen_s : 0);
     }
     wj_obj_close(w);
 }
@@ -297,6 +350,8 @@ static void sec_health(wj_t *w, const web_status_snap_t *s, bool pub)
         wj_bool(w, "ladder_suspended", s->health.gnss_ladder_suspended);
         /* A bool (not the age), so the section only changes when it flips. */
         wj_bool(w, "factory_reset_refused", s->health.factory_reset_refused_age_s < WEB_FACTORY_REFUSED_SHOW_S);
+        wj_str(w, "recovery_mode", web_recovery_mode_name(s->health.recovery_mode));
+        wj_bool(w, "reboot_recheck", s->health.gnss_reboot_recheck);
     }
     wj_obj_close(w);
 }
@@ -433,6 +488,7 @@ void web_build_caster_summary(wj_t *w, const web_status_snap_t *s, size_t slot, 
         wj_uint(w, "bytes_sent", t->bytes_sent);
         wj_uint(w, "lag_ms_now", t->lag_ms_now);
         wj_uint(w, "next_retry_s", t->next_retry_s);
+        wj_uint(w, "unreached_s", t->unreached_s);
         wj_str(w, "hint", t->hint);
     }
     wj_obj_close(w);
@@ -490,6 +546,86 @@ void web_build_profile(wj_t *w, const char *key, const um98x_base_profile_t *p)
     }
     wj_arr_close(w);
     wj_bool(w, "sat_view_output", p->sat_view_output);
+    str_arr(w, "antenna_model", p->antenna_model, sizeof(p->antenna_model));
+    str_arr(w, "antenna_serial", p->antenna_serial, sizeof(p->antenna_serial));
+    wj_uint(w, "antenna_setup_id", p->antenna_setup_id);
+    wj_obj_close(w);
+}
+
+/* The receiver's settings as read back at the last apply session this boot (unknown before one). */
+static void rx_settings(wj_t *w, const station_status_t *st)
+{
+    const um98x_rx_settings_t *r = &st->rx_settings;
+    bool v = st->rx_settings_valid;
+    wj_obj_open(w, "rx_settings");
+    wj_bool(w, "valid", v);
+    if (v) {
+        wj_uint(w, "age_s", st->rx_settings_age_s);
+    } else {
+        wj_null(w, "age_s");
+    }
+    wj_unix(w, "read_unix", v ? st->rx_settings_unix : 0);
+    wj_str(w, "b1cb2a", web_setting_name(v ? r->b1cb2a : (uint8_t)UM98X_SETTING_UNKNOWN));
+    wj_str(w, "mmp", web_setting_name(v ? r->mmp : (uint8_t)UM98X_SETTING_UNKNOWN));
+    if (v && r->mask_known) {
+        wj_double(w, "mask_deg", (double)r->mask_ddeg / 10.0, 1);
+    } else {
+        wj_null(w, "mask_deg");
+    }
+    if (v && r->antenna_known) {
+        wj_obj_open(w, "antenna");
+        str_arr(w, "model", r->antenna_model, sizeof(r->antenna_model));
+        str_arr(w, "serial", r->antenna_serial, sizeof(r->antenna_serial));
+        wj_uint(w, "setup_id", r->antenna_setup_id);
+        wj_obj_close(w);
+    } else {
+        wj_null(w, "antenna");
+    }
+    wj_obj_close(w);
+}
+
+static void apply_step(wj_t *w, const char *key, bool sent, bool ok, const char *reply, size_t cap)
+{
+    wj_obj_open(w, key);
+    wj_bool(w, "sent", sent);
+    wj_bool(w, "ok", sent && ok);
+    str_arr_or_null(w, "reply", (sent && !ok) ? reply : "", cap);
+    wj_obj_close(w);
+}
+
+/* The latest 1033 the receiver published, as decoded (nothing rewritten). */
+static void rtcm1033(wj_t *w, const gnss_obs_1033_t *d)
+{
+    wj_obj_open(w, "rtcm1033");
+    wj_bool(w, "valid", d->valid);
+    if (d->valid) {
+        wj_uint(w, "station_id", d->station_id);
+        str_arr(w, "antenna", d->antenna, sizeof(d->antenna));
+        wj_uint(w, "setup_id", d->setup_id);
+        str_arr(w, "antenna_serial", d->antenna_serial, sizeof(d->antenna_serial));
+        str_arr(w, "receiver_type", d->receiver_type, sizeof(d->receiver_type));
+        str_arr(w, "receiver_fw", d->receiver_fw, sizeof(d->receiver_fw));
+        str_arr(w, "receiver_serial", d->receiver_serial, sizeof(d->receiver_serial));
+        wj_u32_or_null(w, "age_ms", d->age_ms);
+    }
+    wj_uint(w, "bad_frames", d->bad_frames);
+    wj_obj_close(w);
+}
+
+static void maintenance(wj_t *w, const station_status_t *st)
+{
+    static const uint32_t choices[] = WEB_MAINT_CHOICES_S;
+    wj_obj_open(w, "maintenance");
+    wj_bool(w, "on", st->rx_maintenance);
+    wj_uint(w, "left_s", st->rx_maintenance ? st->maintenance_left_s : 0);
+    wj_uint(w, "chosen_s", st->rx_maintenance ? st->maintenance_chosen_s : 0);
+    wj_arr_open(w, "choices_s");
+    for (size_t i = 0; i < sizeof(choices) / sizeof(choices[0]); i++) {
+        wj_uint(w, NULL, choices[i]);
+    }
+    wj_arr_close(w);
+    wj_uint(w, "default_s", WEB_MAINT_DEFAULT_S);
+    wj_uint(w, "max_left_s", WEB_MAINT_MAX_LEFT_S);
     wj_obj_close(w);
 }
 
@@ -514,10 +650,21 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     wj_str(w, "mode", web_link_mode_name((int)g->link.mode));
     wj_u32_or_null(w, "rx_age_ms", g->link.last_rx_age_ms);
     wj_u32_or_null(w, "rtcm_age_ms", g->link.last_rtcm_age_ms);
+    wj_bool(w, "open", g->link.link_open);
+    wj_uint(w, "open_failures", g->link.open_failures);
+    wj_bool(w, "hands_off", g->link.hands_off);
     wj_obj_close(w);
 
     wj_bool(w, "autocfg", g->autocfg);
+    wj_str(w, "recovery", web_recovery_mode_name(g->recovery));
     web_build_profile(w, "profile", &g->profile);
+    rx_settings(w, st);
+    wj_obj_open(w, "apply_steps");
+    apply_step(w, "antenna", st->antenna_sent, st->antenna_ok, st->antenna_reply, sizeof(st->antenna_reply));
+    apply_step(w, "b1cb2a", st->b1cb2a_sent, st->b1cb2a_ok, st->b1cb2a_reply, sizeof(st->b1cb2a_reply));
+    wj_obj_close(w);
+    rtcm1033(w, &g->rtcm1033);
+    maintenance(w, st);
 
     const um98x_base_position_t *pos = &st->position;
     bool have_pos = pos->source != UM98X_POS_NONE;
@@ -793,6 +940,191 @@ void web_build_flash(wj_t *w, const station_status_t *st, const web_flash_ctx_t 
     wj_obj_close(w);
 }
 
+web_err_t web_maint_refusal(station_maint_why_t why, bool safe_mode, const char **field, const char **reason)
+{
+    const char *f = NULL;
+    const char *r = NULL;
+    web_err_t e;
+    switch (why) {
+    case STATION_MAINT_REFUSED_FLASH:
+        e = WEB_ERR_JOURNAL_OPEN;
+        break;
+    case STATION_MAINT_REFUSED_SESSION:
+        e = WEB_ERR_BUSY;
+        r = "receiver_session";
+        break;
+    case STATION_MAINT_REFUSED_DURATION:
+        e = WEB_ERR_INVALID_FIELD;
+        f = "duration_s";
+        break;
+    case STATION_MAINT_NOT_ON:
+        e = WEB_ERR_NOT_IN_MAINTENANCE;
+        break;
+    case STATION_MAINT_REFUSED_NOT_RUNNING:
+    default:
+        e = safe_mode ? WEB_ERR_SAFE_MODE : WEB_ERR_INTERNAL;
+        break;
+    }
+    if (field != NULL) {
+        *field = f;
+    }
+    if (reason != NULL) {
+        *reason = r;
+    }
+    return e;
+}
+
+web_err_t web_live_refusal(station_live_why_t why, bool safe_mode)
+{
+    if (why == STATION_LIVE_WHY_FLASH) {
+        return WEB_ERR_JOURNAL_OPEN;
+    }
+    return safe_mode ? WEB_ERR_SAFE_MODE : WEB_ERR_INTERNAL;
+}
+
+/* ---- live view ------------------------------------------------------------------------------------ */
+
+void web_build_live_window(wj_t *w, const char *key, const station_live_status_t *win, const web_live_limits_t *lim)
+{
+    wj_obj_open(w, key);
+    wj_bool(w, "open", win->open);
+    wj_uint(w, "left_s", win->open ? win->left_s : 0);
+    wj_uint(w, "idle_left_s", win->open ? win->idle_left_s : 0);
+    wj_uint(w, "open_s", win->open ? win->open_s : 0);
+    wj_uint(w, "max_s", win->max_s);
+    wj_uint(w, "default_min", lim->default_min);
+    wj_uint(w, "max_min", lim->max_min);
+    wj_uint(w, "idle_s", lim->idle_s);
+    wj_str(w, "sky", web_live_sky_name(win->sky));
+    wj_str(w, "sky_why", web_live_why_name(win->sky_why));
+    wj_uint(w, "sky_period_s", win->sky_period_s);
+    wj_str(w, "last_end", web_live_end_name(win->last_end));
+    str_arr_or_null(w, "sky_reply", win->sky_reply, sizeof(win->sky_reply));
+    wj_obj_close(w);
+}
+
+static void live_sat(wj_t *w, const gnss_obs_live_sat_t *s)
+{
+    wj_obj_open(w, NULL);
+    wj_str(w, "sys", web_sys_name(s->sys));
+    wj_uint(w, "prn", web_sky_prn(s->sys, s->prn));
+    wj_bool(w, "in_msm", s->in_msm);
+    wj_u32_or_null(w, "msm_age_ms", s->msm_age_ms);
+    wj_arr_open(w, "signal_ids");
+    for (unsigned id = 1; id <= 32; id++) {
+        if ((s->signal_mask & (1u << (id - 1))) != 0) {
+            wj_uint(w, NULL, id);
+        }
+    }
+    wj_arr_close(w);
+    wj_obj_open(w, "cnr_dbhz");
+    for (int b = 0; b < GNSS_BAND_COUNT; b++) {
+        if ((s->band_mask & (1u << b)) == 0) {
+            continue;
+        }
+        if (s->cnr_dbhz[b] != 0) {
+            wj_uint(w, web_band_name((gnss_band_t)b), s->cnr_dbhz[b]);
+        } else {
+            wj_null(w, web_band_name((gnss_band_t)b));
+        }
+    }
+    wj_obj_close(w);
+    if (s->has_pos) {
+        wj_int(w, "el_deg", s->elevation_deg);
+        wj_uint(w, "az_deg", s->azimuth_deg);
+    } else {
+        wj_null(w, "el_deg");
+        wj_null(w, "az_deg");
+    }
+    if (s->sky_cnr_dbhz != 0) {
+        wj_uint(w, "sky_cnr_dbhz", s->sky_cnr_dbhz);
+    } else {
+        wj_null(w, "sky_cnr_dbhz");
+    }
+    wj_u32_or_null(w, "pos_age_ms", s->has_pos ? s->pos_age_ms : UINT32_MAX);
+    wj_obj_close(w);
+}
+
+static void live_totals(wj_t *w, const gnss_obs_live_t *t)
+{
+    wj_obj_open(w, "totals");
+    wj_uint(w, "satellites", t->satellites);
+    wj_uint(w, "tracked", t->tracked);
+    wj_uint(w, "signals", t->signals);
+    wj_uint(w, "with_pos", t->with_pos);
+    wj_uint(w, "dropped", t->dropped);
+    if (t->cnr_dbhz != 0) {
+        wj_uint(w, "cnr_dbhz", t->cnr_dbhz);
+    } else {
+        wj_null(w, "cnr_dbhz");
+    }
+    wj_u32_or_null(w, "msm_age_ms", t->msm_age_ms);
+    wj_u32_or_null(w, "sky_age_ms", t->sky_age_ms);
+    wj_obj_open(w, "bands");
+    for (int b = 0; b < GNSS_BAND_COUNT; b++) {
+        if (t->band_sats[b] == 0) {
+            continue;
+        }
+        wj_obj_open(w, web_band_name((gnss_band_t)b));
+        wj_uint(w, "satellites", t->band_sats[b]);
+        if (t->band_cnr_dbhz[b] != 0) {
+            wj_uint(w, "cnr_dbhz", t->band_cnr_dbhz[b]);
+        } else {
+            wj_null(w, "cnr_dbhz");
+        }
+        wj_obj_close(w);
+    }
+    wj_obj_close(w);
+    wj_arr_open(w, "systems");
+    for (int sys = 0; sys < GNSS_SYS_COUNT; sys++) {
+        if (t->sys_sats[sys] == 0) {
+            continue;
+        }
+        wj_obj_open(w, NULL);
+        wj_str(w, "sys", web_sys_name((gnss_sys_t)sys));
+        wj_uint(w, "satellites", t->sys_sats[sys]);
+        wj_obj_open(w, "bands");
+        for (int b = 0; b < GNSS_BAND_COUNT; b++) {
+            if (t->sys_band_sats[sys][b] != 0) {
+                wj_uint(w, web_band_name((gnss_band_t)b), t->sys_band_sats[sys][b]);
+            }
+        }
+        wj_obj_close(w);
+        wj_obj_close(w);
+    }
+    wj_arr_close(w);
+    wj_obj_close(w);
+}
+
+void web_build_live(wj_t *w, const web_live_snap_t *l)
+{
+    const station_status_t *st = l->st;
+    wj_obj_open(w, NULL);
+    web_build_live_window(w, "window", &st->live, &l->limits);
+    wj_str(w, "receiver_state", web_station_state_name(st->state));
+    wj_bool(w, "rx_maintenance", st->rx_maintenance);
+    const um98x_base_position_t *pos = &st->position;
+    bool have_pos = pos->source != UM98X_POS_NONE;
+    wj_obj_open(w, "position");
+    wj_bool(w, "locked", st->position_locked);
+    wj_str(w, "source", web_pos_source_name(pos->source));
+    wj_double(w, "lat_deg", have_pos ? pos->lat_deg : NAN, 9);
+    wj_double(w, "lon_deg", have_pos ? pos->lon_deg : NAN, 9);
+    wj_double(w, "height_m", have_pos ? pos->height_m : NAN, 4);
+    wj_obj_close(w);
+    if (l->totals != NULL) {
+        live_totals(w, l->totals);
+    } else {
+        wj_null(w, "totals");
+    }
+    wj_arr_open(w, "satellites");
+    for (size_t i = 0; l->totals != NULL && l->sats != NULL && i < l->count; i++) {
+        live_sat(w, &l->sats[i]);
+    }
+    wj_arr_close(w);
+    wj_obj_close(w);
+}
+
 /* ---- casters ------------------------------------------------------------------------------------ */
 
 void web_build_caster_config(wj_t *w, const char *key, const ntrip_caster_cfg_t *c)
@@ -872,6 +1204,7 @@ void web_build_caster_status(wj_t *w, const char *key, const ntrip_caster_status
     wj_str(w, "server_header", t->server_header);
     wj_str_or_null(w, "resolved_ip", t->resolved_ip);
     wj_uint(w, "dns_cached_used", t->dns_cached_used);
+    wj_uint(w, "unreached_s", t->unreached_s);
     wj_str_or_null(w, "tls_version", t->tls_version);
     wj_str_or_null(w, "tls_cipher", t->tls_cipher);
     wj_str(w, "hint", t->hint);
@@ -931,10 +1264,13 @@ void web_build_wifi(wj_t *w, const web_wifi_snap_t *s)
         wj_null(w, "last_disconnect_reason");
     }
     wj_bool(w, "fallback_dns", n->fallback_dns);
+    wj_uint(w, "assoc_no_ip_s", n->assoc_no_ip_s);
+    cred_fields(w, n);
     wj_obj_open(w, "ladder");
     wj_bool(w, "active", n->ladder_active);
     wj_uint(w, "rung", n->ladder_rung);
     wj_str(w, "withheld", web_ladder_why_name(n->ladder_withheld));
+    ladder_triggers(w, "triggers", n->ladder_triggers);
     wj_uint(w, "actions", n->ladder_actions);
     wj_obj_close(w);
     wj_obj_open(w, "ap");
@@ -1196,6 +1532,8 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
     }
     wj_u32_or_null(w, "factory_reset_refused_age_s", hs->factory_reset_refused_age_s);
     wj_uint(w, "admin_resets", hs->admin_resets);
+    wj_str(w, "recovery_mode", web_recovery_mode_name(hs->recovery_mode));
+    wj_bool(w, "reboot_recheck", hs->gnss_reboot_recheck);
     wj_obj_open(w, "heap");
     wj_uint(w, "internal_free", hs->heap_internal_free);
     wj_uint(w, "internal_min", hs->heap_internal_min);
@@ -1256,6 +1594,9 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
     wj_uint(w, "flushed_bytes", l->flushed_bytes);
     wj_u32_or_null(w, "last_rx_age_ms", l->last_rx_age_ms);
     wj_u32_or_null(w, "last_rtcm_age_ms", l->last_rtcm_age_ms);
+    wj_bool(w, "open", l->link_open);
+    wj_uint(w, "open_failures", l->open_failures);
+    wj_bool(w, "hands_off", l->hands_off);
     framing_stats(w, &l->framing);
     wj_obj_close(w);
 
@@ -1281,6 +1622,7 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
     wj_bool(w, "detect_saw_bytes", st->detect_saw_bytes);
     wj_bool(w, "lease_held", st->lease_held);
     wj_u32_or_null(w, "since_lease_release_ms", st->since_lease_release_ms);
+    wj_bool(w, "rx_maintenance", st->rx_maintenance);
     wj_obj_close(w);
 
     wj_obj_open(w, "obs");
@@ -1301,10 +1643,12 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
     wj_bool(w, "fallback_dns", n->fallback_dns);
     wj_str(w, "probe", web_probe_name(n->probe));
     wj_u32_or_null(w, "probe_age_s", n->probe_age_s);
+    wj_uint(w, "assoc_no_ip_s", n->assoc_no_ip_s);
     wj_obj_open(w, "ladder");
     wj_bool(w, "active", n->ladder_active);
     wj_uint(w, "rung", n->ladder_rung);
     wj_str(w, "withheld", web_ladder_why_name(n->ladder_withheld));
+    ladder_triggers(w, "triggers", n->ladder_triggers);
     wj_uint(w, "actions", n->ladder_actions);
     wj_obj_close(w);
     wj_obj_close(w);
@@ -1446,6 +1790,82 @@ void web_build_journal(wj_t *w, const diag_journal_entry_t *e, size_t count, uin
         wj_int(w, "a", e[i].a);
         wj_int(w, "b", e[i].b);
         wj_obj_close(w);
+    }
+    wj_arr_close(w);
+    wj_obj_close(w);
+}
+
+bool web_history_kind(uint16_t kind)
+{
+    return kind == DIAG_EV_CASTER_DOWN || kind == DIAG_EV_CASTER_UP || kind == DIAG_EV_WIFI_UP ||
+           kind == DIAG_EV_WIFI_DISCONNECT;
+}
+
+bool web_history_collect(const diag_journal_entry_t *page, size_t count, uint32_t hi, diag_journal_entry_t *out,
+                      size_t *n, size_t max)
+{
+    for (size_t i = count; i > 0 && *n < max; i--) {
+        const diag_journal_entry_t *e = &page[i - 1];
+        if (e->seq <= hi && web_history_kind(e->kind)) {
+            out[(*n)++] = *e;
+        }
+    }
+    return *n < max;
+}
+
+static void conn_entry(wj_t *w, const diag_journal_entry_t *e, const ntrip_caster_cfg_t *cfg, size_t slots)
+{
+    bool caster = e->kind == DIAG_EV_CASTER_DOWN || e->kind == DIAG_EV_CASTER_UP;
+    uint32_t a = (uint32_t)e->a;
+    wj_obj_open(w, NULL);
+    wj_uint(w, "seq", e->seq);
+    wj_unix(w, "time_unix", e->unix_s);
+    wj_uint(w, "uptime_s", e->uptime_s);
+    wj_str(w, "kind", web_diag_event_name(e->kind));
+    if (caster) {
+        size_t slot = a & 0xFFu;
+        wj_uint(w, "slot", slot);
+        if (cfg != NULL && slot < slots) {
+            str_arr_or_null(w, "slot_name", cfg[slot].name, sizeof(cfg[slot].name));
+        } else {
+            wj_null(w, "slot_name");
+        }
+        if (e->kind == DIAG_EV_CASTER_DOWN) {
+            wj_str(w, "class", web_ntrip_fail_name((ntrip_fail_class_t)((a >> 8) & 0xFFu)));
+        } else {
+            wj_null(w, "class");
+        }
+        wj_uint(w, "count", (a >> 16) & 0x7FFFu);
+    } else {
+        wj_null(w, "slot");
+        wj_null(w, "slot_name");
+        wj_null(w, "class");
+        if (e->kind == DIAG_EV_WIFI_UP) {
+            wj_uint(w, "count", a);
+        } else {
+            wj_null(w, "count");
+        }
+    }
+    if (e->kind == DIAG_EV_WIFI_DISCONNECT) {
+        wj_null(w, "duration_s");
+        wj_uint(w, "reason", a);
+        wj_int(w, "rssi", e->b);
+    } else {
+        wj_uint(w, "duration_s", e->b < 0 ? 0u : (uint32_t)e->b);
+        wj_null(w, "reason");
+        wj_null(w, "rssi");
+    }
+    wj_obj_close(w);
+}
+
+void web_build_connections(wj_t *w, const diag_journal_entry_t *e, size_t count, const ntrip_caster_cfg_t *cfg,
+                           size_t slots, bool complete)
+{
+    wj_obj_open(w, NULL);
+    wj_bool(w, "complete", complete);
+    wj_arr_open(w, "entries");
+    for (size_t i = 0; e != NULL && i < count; i++) {
+        conn_entry(w, &e[i], cfg, slots);
     }
     wj_arr_close(w);
     wj_obj_close(w);

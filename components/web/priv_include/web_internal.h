@@ -44,6 +44,13 @@ extern "C" {
 /** Onocoy's TLS port for source connections (public Onocoy documentation). */
 #define WEB_ONOCOY_TLS_PORT 2121u
 
+/**
+ * The one other origin the page may load from, for images only: the
+ * OpenStreetMap tile server of the live view's station map (its tile usage
+ * policy: this exact host, HTTPS, attribution shown, a Referer sent).
+ */
+#define WEB_MAP_TILE_ORIGIN "https://tile.openstreetmap.org"
+
 /** This project, as the app description of an image names it. */
 #define WEB_PROJECT_NAME "onocoydiy-esp-um982"
 
@@ -263,6 +270,12 @@ void web_note_job_started(const char *job);
  * ends. Called on FW_UPDATE_EVENT (`event`) and twice a second.
  */
 void web_track_fw_state(bool event);
+
+/**
+ * Receiver maintenance is on (gnss_link refuses every write and lease): the
+ * receiver-update refusals answer receiver_maintenance then.
+ */
+bool web_rx_hands_off(void);
 
 /** Protected-slot budget for the update dialogs (any task); UINT32_MAX = unknown. */
 uint32_t web_budget_now(void);

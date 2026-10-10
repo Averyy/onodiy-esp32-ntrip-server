@@ -1,0 +1,575 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Avery L.
+ * SPDX-License-Identifier: MIT
+ *
+ * Live view, satellites first: a window the user opens on request
+ * (POST /api/gnss/live) for a limited time. It can be extended and stopped;
+ * the station closes it when its time is up, or when no page asked for it
+ * for a while: every GET /api/gnss/live keeps it open, so a page polls only
+ * while it is shown (poller() pauses in a hidden tab). While it is open the
+ * receiver also sends azimuth and elevation, so the sky plot can place the
+ * satellites; everything else comes from the RTCM stream.
+ *
+ * Order on the page: the window (time left, Extend, Stop), the sky plot
+ * coloured by C/N0, the satellite table, satellites per constellation and
+ * band, the mean C/N0 per band, the totals as tiles; last and optional, the
+ * station map. The setup wizard's reception check reuses the pieces.
+ */
+
+const LIVE_POLL_MS = 2000;
+
+/* C/N0 classes for colour (dB-Hz): under 30, 30-34, 35-39, 40-44, 45 or more. */
+const CNR_STEPS = [30, 35, 40, 45];
+const CNR_STEP_LABEL = ['under 30', '30–34', '35–39', '40–44', '45 or more'];
+
+function cnrStep(v) {
+  if (!v) return -1;
+  let i = 0;
+  while (i < CNR_STEPS.length && v >= CNR_STEPS[i]) i++;
+  return i;
+}
+
+/* Satellite names as in RINEX files: G12, R05, E11, C23, J02, S20, I03. */
+const SYS_LETTER = { gps: 'G', glonass: 'R', galileo: 'E', beidou: 'C', qzss: 'J', sbas: 'S', navic: 'I' };
+
+function satId(s) {
+  let n = s.prn;
+  if (s.sys === 'qzss' && n > 192) n -= 192;
+  else if (s.sys === 'sbas' && n >= 100) n -= 100;
+  return (SYS_LETTER[s.sys] || '?') + String(n).padStart(2, '0');
+}
+
+/** Best C/N0 of a satellite: its strongest band, else its satellite-in-view report (null = none). */
+function satCnr(s) {
+  let best = null;
+  const c = s.cnr_dbhz || {};
+  for (const b of Object.keys(c)) {
+    if (c[b] && (best === null || c[b] > best)) best = c[b];
+  }
+  return best === null && s.sky_cnr_dbhz ? s.sky_cnr_dbhz : best;
+}
+
+function hasSkyPos(s) {
+  return s.el_deg !== null && s.el_deg !== undefined && s.az_deg !== null && s.az_deg !== undefined && s.el_deg >= 0;
+}
+
+/** Bands with tracked satellites, in table order. */
+function liveBands(t) {
+  return BAND_ORDER.filter(b => t && t.bands && t.bands[b]);
+}
+
+/* ---- Sky plot -------------------------------------------------------------- */
+
+function liveSkyPlot(sats) {
+  const C = 170, R = 140;
+  const placed = sats.filter(hasSkyPos).sort((a, b) => (satCnr(a) || 0) - (satCnr(b) || 0));   /* strongest on top */
+  const plot = svg('svg', { class: 'sky live-sky', viewBox: '0 0 340 340', role: 'img',
+    'aria-label': 'Sky plot: ' + placed.length + ' satellites placed by azimuth and elevation, coloured by C/N0. The table lists every satellite.' });
+  for (const el of [0, 30, 60]) plot.append(svg('circle', { class: 'ring', cx: C, cy: C, r: (R * (90 - el)) / 90 }));
+  plot.append(svg('line', { class: 'axis', x1: C, y1: C - R, x2: C, y2: C + R }), svg('line', { class: 'axis', x1: C - R, y1: C, x2: C + R, y2: C }));
+  for (const l of [['N', C, C - R - 8], ['S', C, C + R + 16], ['E', C + R + 11, C + 4], ['W', C - R - 11, C + 4]]) {
+    plot.append(svg('text', { class: 'lbl', x: l[1], y: l[2], 'text-anchor': 'middle' }, l[0]));
+  }
+  plot.append(svg('text', { class: 'lbl', x: C + 4, y: C - (R * 60) / 90 + 12 }, '30°'), svg('text', { class: 'lbl', x: C + 4, y: C - (R * 30) / 90 + 12 }, '60°'));
+  for (const s of placed) {
+    const r = (R * (90 - Math.min(90, s.el_deg))) / 90;
+    const a = (s.az_deg * Math.PI) / 180;
+    const x = C + r * Math.sin(a), y = C - r * Math.cos(a);
+    const cnr = satCnr(s);
+    const step = cnrStep(cnr);
+    const cls = step < 0 ? 'none' : 'b' + step;
+    plot.append(svg('g', null,
+      svg('title', null, satId(s) + ' (' + lbl(L.sys, s.sys) + ' ' + s.prn + '): elevation ' + s.el_deg + '°, azimuth ' + s.az_deg + '°' +
+        (cnr ? ', ' + cnr + ' dB-Hz' : ', no C/N0')),
+      svg('circle', { class: 'sat ' + cls, cx: x.toFixed(1), cy: y.toFixed(1), r: 11 }),
+      svg('text', { class: 'sid ' + cls, x: x.toFixed(1), y: (y + 3).toFixed(1), 'text-anchor': 'middle' }, satId(s))));
+  }
+  return plot;
+}
+
+function cnrLegend() {
+  return h('div', { class: 'legend foot' }, h('span', null, 'C/N0 (dB-Hz):'),
+    CNR_STEP_LABEL.map((t, i) => h('span', null, h('i', { class: 'cnr-sw b' + i }), t)),
+    h('span', null, h('i', { class: 'cnr-sw none' }), 'none'));
+}
+
+const SYS_KEY = 'G GPS · R GLONASS · E Galileo · C BeiDou · J QZSS · S SBAS · I NavIC';
+
+/* ---- Satellite table (sortable) ------------------------------------------------ */
+
+const SAT_SORTS = { sys: 'Constellation', cnr: 'C/N0', el: 'Elevation' };
+
+/**
+ * Satellite table with its header kept between refreshes (the sort buttons
+ * keep keyboard focus); the rows are patched in place. Returns {el, update(d)}.
+ */
+function liveSatTable() {
+  let sort = store.get('liveSort', 'sys');
+  if (!SAT_SORTS[sort]) sort = 'sys';
+  let bands = null, last = null;
+  const head = h('thead');
+  const body = h('tbody');
+  const note = h('p', { class: 'muted small foot' });
+
+  const sortHead = (key, label, num) => {
+    const on = sort === key;
+    return h('th', { class: num ? 'num' : null, 'aria-sort': on ? (key === 'sys' ? 'ascending' : 'descending') : null },
+      h('button', { type: 'button', class: 'sort', 'data-sort': key, onclick: () => {
+        sort = key;
+        store.set('liveSort', key);
+        renderHead(true);
+        if (last) renderBody(last);
+      } }, label, h('span', { class: 'arrow', 'aria-hidden': 'true' }, on ? (key === 'sys' ? ' ▲' : ' ▼') : '')));
+  };
+
+  function renderHead(keepFocus) {
+    const focused = keepFocus && doc.activeElement && doc.activeElement.getAttribute ? doc.activeElement.getAttribute('data-sort') : null;
+    mount(head, h('tr', null,
+      h('th', null, 'Satellite'),
+      sortHead('sys', SAT_SORTS.sys),
+      sortHead('el', SAT_SORTS.el, true),
+      h('th', { class: 'num' }, 'Azimuth'),
+      sortHead('cnr', 'Best C/N0', true),
+      (bands || []).map(b => h('th', { class: 'num' }, BAND_HEAD[b]))));
+    if (focused) {
+      const again = head.querySelector('[data-sort="' + focused + '"]');
+      if (again) again.focus();
+    }
+  }
+
+  function sorted(sats) {
+    const list = sats.slice();
+    const nullLast = (a, b) => (a === null || a === undefined ? -1000 : a) - (b === null || b === undefined ? -1000 : b);
+    if (sort === 'cnr') list.sort((a, b) => nullLast(satCnr(b), satCnr(a)));
+    else if (sort === 'el') list.sort((a, b) => nullLast(hasSkyPos(b) ? b.el_deg : null, hasSkyPos(a) ? a.el_deg : null));
+    return list;   /* sys: the station's order (constellation, then number) */
+  }
+
+  function renderBody(d) {
+    const sats = d.satellites || [];
+    patch(body, sorted(sats).map(s => {
+      const c = s.cnr_dbhz || {};
+      const best = satCnr(s);
+      return h('tr', null,
+        h('td', null, h('b', null, satId(s))),
+        h('td', null, h('span', { class: 'legend' }, h('span', null, h('i', { class: 'sys-' + s.sys }), lbl(L.sys, s.sys) + ' ' + s.prn))),
+        h('td', { class: 'num' }, s.el_deg === null || s.el_deg === undefined ? DASH : s.el_deg + '°'),
+        h('td', { class: 'num' }, s.az_deg === null || s.az_deg === undefined ? DASH : s.az_deg + '°'),
+        h('td', { class: 'num' }, best ? h('span', { class: cnrClass(best) }, best + ' dB-Hz') : DASH),
+        bands.map(b => h('td', { class: 'num' }, c[b] ? h('span', { class: cnrClass(c[b]) }, String(c[b])) : b in c ? '✓' : DASH)));
+    }));
+    const t = d.totals || {};
+    const noPos = sats.filter(s => !hasSkyPos(s)).length;
+    note.textContent = [
+      noPos ? noPos + ' without a position in the sky yet (or below the horizon): listed here, not plotted.' : '',
+      t.dropped ? t.dropped + ' more not listed.' : '',
+      'C/N0 per band from the RTCM observations; ✓ = signal tracked without a C/N0 value.',
+    ].filter(Boolean).join(' ');
+  }
+
+  return {
+    el: h('div', null, h('div', { class: 'scroll' }, h('table', { class: 'sats' }, head, body)), note),
+    update(d) {
+      last = d;
+      const nb = liveBands(d.totals);
+      for (const s of d.satellites || []) for (const b of Object.keys(s.cnr_dbhz || {})) if (nb.indexOf(b) < 0) nb.push(b);
+      nb.sort((a, b) => BAND_ORDER.indexOf(a) - BAND_ORDER.indexOf(b));
+      if (!bands || bands.join() !== nb.join()) {
+        bands = nb;
+        renderHead(true);
+      }
+      renderBody(d);
+    },
+  };
+}
+
+/* ---- Counts, band means, tiles ---------------------------------------------------- */
+
+function liveCountsTable(t) {
+  const bands = liveBands(t);
+  const systems = t.systems || [];
+  if (!systems.length) return h('p', { class: 'muted' }, 'No satellites tracked yet.');
+  return h('div', { class: 'scroll' }, h('table', { class: 'counts' },
+    h('thead', null, h('tr', null, h('th', null, 'Constellation'), h('th', { class: 'num' }, 'Satellites'),
+      bands.map(b => h('th', { class: 'num' }, BAND_HEAD[b])), h('th', { class: 'num' }, 'Bands'))),
+    h('tbody', null, systems.map(s => {
+      const per = s.bands || {};
+      const n = Object.keys(per).filter(b => per[b] > 0).length;
+      return h('tr', null,
+        h('td', null, h('span', { class: 'legend' }, h('span', null, h('i', { class: 'sys-' + s.sys }), lbl(L.sys, s.sys)))),
+        h('td', { class: 'num' }, fmt.num(s.satellites)),
+        bands.map(b => h('td', { class: 'num' }, per[b] ? String(per[b]) : DASH)),
+        h('td', { class: 'num' }, h('b', { class: n >= 4 ? 't-ok' : null }, String(n))));
+    })),
+    h('tfoot', null, h('tr', null, h('th', null, 'All'), h('td', { class: 'num' }, fmt.num(t.tracked)),
+      bands.map(b => h('td', { class: 'num' }, fmt.num(t.bands[b].satellites))), h('td', null, '')))));
+}
+
+/* Mean C/N0 per band as bars on a 0 to 55 dB-Hz scale. */
+const CNR_SCALE = 55;
+
+function liveBandBars(t) {
+  const bands = liveBands(t);
+  if (!bands.length) return h('p', { class: 'muted' }, 'No signals yet.');
+  return [h('div', { class: 'bandbars' }, bands.map(b => {
+    const v = t.bands[b].cnr_dbhz;
+    return [h('span', { class: 'band' }, BAND_HEAD[b]),
+      h('div', { class: 'bar', role: 'meter', 'aria-label': BAND_HEAD[b] + ' mean C/N0', 'aria-valuemin': 0, 'aria-valuemax': CNR_SCALE,
+        'aria-valuenow': v || 0 }, h('span', { style: { width: (Math.min(1, (v || 0) / CNR_SCALE) * 100).toFixed(1) + '%' } })),
+      h('span', { class: 'num' }, v ? v + ' dB-Hz' : DASH, h('small', { class: 'muted' }, ' · ' + t.bands[b].satellites + ' sat.'))];
+  })), h('p', { class: 'muted small foot' }, 'Mean over the satellites tracked on each band. Scale 0 to ' + CNR_SCALE + ' dB-Hz.')];
+}
+
+function tile(label, value, sub) {
+  return h('div', { class: 'tile' }, h('div', { class: 'k' }, label), h('div', { class: 'v' }, value), sub ? h('div', { class: 'muted small' }, sub) : null);
+}
+
+function liveTiles(t) {
+  return h('div', { class: 'tiles' },
+    tile('Satellites tracked', fmt.num(t.tracked), t.satellites > t.tracked ? 'of ' + t.satellites + ' listed' : null),
+    tile('Signals', fmt.num(t.signals)),
+    tile('Mean C/N0', t.cnr_dbhz ? String(t.cnr_dbhz) : DASH, 'dB-Hz'),
+    tile('Placed in the sky', fmt.num(t.with_pos), 'azimuth and elevation known'));
+}
+
+/* ---- Station map (optional, last) ------------------------------------------------------ */
+
+const MAP_ZOOM = 16, MAP_TILE = 256, MAP_W = 512, MAP_H = 320;
+const MAP_HOST = 'https://tile.openstreetmap.org/';
+
+/**
+ * A small OpenStreetMap tile mosaic centred on the position, no library:
+ * the tiles are plain images placed in percent of the frame (so it scales
+ * with the page). The browser fetches them only after the user asked for
+ * the map; each image sends the page's origin as Referer (the tile
+ * server's usage policy), and a tile that fails hides the mosaic (no
+ * internet on this device: the coordinates stay).
+ */
+function tileMosaic(lat, lon, onFail) {
+  const n = Math.pow(2, MAP_ZOOM);
+  const latR = (Math.max(-85, Math.min(85, lat)) * Math.PI) / 180;
+  const x = ((lon + 180) / 360) * n * MAP_TILE;
+  const y = ((1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2) * n * MAP_TILE;
+  const left = x - MAP_W / 2, top = y - MAP_H / 2;
+  const box = h('div', { class: 'map', role: 'img', 'aria-label': 'Map around the station position' });
+  let failed = false;
+  for (let ty = Math.floor(top / MAP_TILE); ty <= Math.floor((top + MAP_H - 1) / MAP_TILE); ty++) {
+    if (ty < 0 || ty >= n) continue;
+    for (let tx = Math.floor(left / MAP_TILE); tx <= Math.floor((left + MAP_W - 1) / MAP_TILE); tx++) {
+      const wx = ((tx % n) + n) % n;
+      box.append(h('img', { src: MAP_HOST + MAP_ZOOM + '/' + wx + '/' + ty + '.png', alt: '', referrerpolicy: 'origin',
+        draggable: 'false', decoding: 'async',
+        style: { left: (((tx * MAP_TILE - left) / MAP_W) * 100).toFixed(3) + '%', top: (((ty * MAP_TILE - top) / MAP_H) * 100).toFixed(3) + '%',
+          width: ((MAP_TILE / MAP_W) * 100).toFixed(3) + '%', height: ((MAP_TILE / MAP_H) * 100).toFixed(3) + '%' },
+        onerror: () => {
+          if (!failed) {
+            failed = true;
+            onFail();
+          }
+        } }));
+    }
+  }
+  box.append(h('span', { class: 'pin', 'aria-hidden': 'true' }),
+    h('span', { class: 'map-attr' }, '© ', h('a', { href: 'https://www.openstreetmap.org/copyright', target: '_blank', rel: 'noopener noreferrer' },
+      'OpenStreetMap'), ' contributors'));
+  return box;
+}
+
+/** The station-map card: coordinates always, the map on request. Returns {el, update(position)}. */
+function mapPanel() {
+  const el = h('section', { class: 'card wide' });
+  let key = null;
+  function render(pos) {
+    const have = pos && pos.source && pos.source !== 'none' && pos.lat_deg !== null && pos.lat_deg !== undefined;
+    if (!have) {
+      mount(el, h('h2', null, 'Station map'), h('p', { class: 'muted' }, 'No surveyed or locked position yet.'));
+      return;
+    }
+    const lat = pos.lat_deg, lon = pos.lon_deg;
+    const ext = 'https://www.openstreetmap.org/?mlat=' + lat.toFixed(7) + '&mlon=' + lon.toFixed(7) + '#map=17/' + lat.toFixed(6) + '/' + lon.toFixed(6);
+    const mapBox = h('div');
+    const offer = () => mount(mapBox, h('div', { class: 'stack' }, h('p', { class: 'muted small' },
+      'The map is loaded from OpenStreetMap over the internet by this browser (the tiles show the area around the station).'),
+    h('div', null, btn('Show the map', show, 'small'))));
+    function show() {
+      store.set('map', true);
+      mount(mapBox, tileMosaic(lat, lon, () => mount(mapBox, msg('', 'The map tiles could not be loaded: this device may have no internet. ' +
+        'The coordinates above are what the map would show.'))),
+      h('div', { class: 'row foot' }, btn('Hide the map', () => {
+        store.set('map', false);
+        offer();
+      }, 'small ghost')));
+    }
+    mount(el,
+      h('h2', null, 'Station map', badge(pos.locked ? 'Locked position' : 'Last surveyed', pos.locked ? 'ok' : '')),
+      kv([
+        ['Latitude', fmt.deg(lat)],
+        ['Longitude', fmt.deg(lon)],
+        ['Height (ellipsoid)', fmt.m(pos.height_m)],
+        ['Source', lbl(L.posSource, pos.source)],
+      ]),
+      mapBox,
+      h('div', { class: 'row foot' }, h('a', { href: ext, target: '_blank', rel: 'noopener noreferrer' }, 'Open this position in OpenStreetMap')));
+    if (store.get('map', false)) show();
+    else offer();
+  }
+  return {
+    el: el,
+    update(pos) {
+      const k = JSON.stringify(pos || null);
+      if (k !== key) {
+        key = k;
+        render(pos);
+      }
+    },
+  };
+}
+
+/* ---- The window: time left, Extend, Stop --------------------------------------------- */
+
+function skyOutputText(w) {
+  const why = w.sky_why && w.sky_why !== 'none' ? lbl(L.liveWhy, w.sky_why) : '';
+  switch (w.sky) {
+    case 'on':
+      return 'Satellite positions: on, every ' + w.sky_period_s + ' s (not saved in the receiver).';
+    case 'on_profile':
+      return 'Satellite positions: on (the receiver profile sends them all the time).';
+    case 'pending':
+      return 'Satellite positions: waiting' + (why ? ': ' + why : '') + '.';
+    case 'blocked':
+      return 'Satellite positions: not available in this window' + (why ? ': ' + why : '') +
+        (w.sky_reply ? ' (' + w.sky_reply + ')' : '') + '. The table still lists every satellite.';
+    case 'stopping':
+      return 'Satellite positions: turning off.';
+    default:
+      return '';
+  }
+}
+
+/** The window card. opts: onStart(button), onExtend(button), onStop(button). Returns {el, update(window), left()}. */
+function liveWindowCard(opts) {
+  const badgeEl = badge('', '');
+  const leftText = h('span', { class: 'countdown' });
+  const state = h('p', { class: 'state-line' });
+  const sky = h('p', { class: 'small' });
+  const err = errBox();
+  const startBtn = btn('Start', () => opts.onStart(startBtn, err), 'primary');
+  const extendBtn = btn('Extend', () => opts.onExtend(extendBtn, err), 'primary');
+  const stopBtn = btn('Stop', () => opts.onStop(stopBtn, err));
+  const el = h('section', { class: 'card wide' },
+    h('h2', null, 'Live view', badgeEl),
+    state, sky, err,
+    h('div', { class: 'form-actions' }, startBtn, extendBtn, stopBtn),
+    h('p', { class: 'muted small foot' }, 'While the view is open the receiver also reports where each satellite is in the sky. ' +
+      'Switching that output on and off pauses the casters for a moment. The view closes by itself when its time is up, ' +
+      'or about two minutes after no page shows it.'));
+  let deadline = 0, open = false;
+  const tick = () => {
+    if (!open) return;
+    leftText.textContent = fmt.dur(Math.max(0, Math.round((deadline - Date.now()) / 1000)));
+  };
+  const timer = setInterval(tick, 1000);
+  return {
+    el: el,
+    update(w) {
+      open = !!w.open;
+      badgeEl.className = 'badge ' + (open ? 'ok' : '');
+      badgeEl.textContent = open ? 'Open' : 'Closed';
+      startBtn.hidden = open;
+      extendBtn.hidden = stopBtn.hidden = !open;
+      startBtn.textContent = 'Start (' + w.default_min + ' min)';
+      extendBtn.textContent = w.sky_why === 'reconfigured' ? 'Extend and turn positions on again' : 'Extend by ' + w.default_min + ' min';
+      if (open) {
+        deadline = Date.now() + w.left_s * 1000;
+        mount(state, 'Open: ', leftText, ' left (at most ' + w.max_min + ' min from now with extensions).');
+        tick();
+      } else {
+        const end = w.last_end && w.last_end !== 'none' ? ' It closed because ' + lbl(L.liveEnd, w.last_end) + '.' : '';
+        mount(state, 'The live view is closed.' + end);
+      }
+      sky.textContent = open ? skyOutputText(w) : '';
+      sky.hidden = !sky.textContent;
+    },
+    stop() {
+      clearInterval(timer);
+    },
+    leftMs() {
+      return open ? deadline - Date.now() : 0;
+    },
+  };
+}
+
+/* ---- The page ---------------------------------------------------------------------------- */
+
+/* Set by the entry buttons (Signals page, dashboard): the page starts the window when it opens. */
+let liveAutoStart = false;
+
+/** Open the live view page and start the window there. */
+function openLiveView() {
+  liveAutoStart = true;
+  if (location.hash === '#/signals/live') openView('signals', 'live');
+  else location.hash = '#/signals/live';
+}
+
+function livePage(el) {
+  if (!isAdmin()) {
+    mount(el, card('Live view', h('p', null, 'Log in to open the live view.'),
+      h('div', { class: 'form-actions' }, btn('Log in', () => showLogin(), 'primary'))));
+    return {};
+  }
+  let stopPoll = null, gone = false;
+  const startPoll = () => {
+    if (!stopPoll) stopPoll = poller(LIVE_POLL_MS, fetchLive, true);
+  };
+  const endPoll = () => {
+    if (stopPoll) stopPoll();
+    stopPoll = null;
+  };
+
+  const win = liveWindowCard({
+    onStart: (b, out) => act(b, async () => show(await api('POST', '/api/gnss/live', {})), out),
+    onExtend: (b, out) => act(b, async () => show(await api('POST', '/api/gnss/live', {})), out),
+    onStop: (b, out) => act(b, async () => {
+      try {
+        await api('DELETE', '/api/gnss/live');
+      } catch (e) {
+        if (!(e instanceof ApiError && e.code === 'live_view_closed')) throw e;
+      }
+      show(await api('GET', '/api/gnss/live'));
+    }, out),
+  });
+  const skyBox = h('div');
+  const skyNote = h('p', { class: 'muted small' });
+  const table = liveSatTable();
+  const countsBox = h('div');
+  const barsBox = h('div');
+  const tilesBox = h('div');
+  const map = mapPanel();
+  const dataCards = [
+    h('section', { class: 'card wide' }, h('h2', null, 'Sky'), h('div', { class: 'sky-wrap' }, skyBox,
+      h('div', null, cnrLegend(), h('p', { class: 'muted small' }, SYS_KEY), skyNote))),
+    h('section', { class: 'card wide' }, h('h2', null, 'Satellites'), table.el),
+    h('section', { class: 'card' }, h('h2', null, 'Per constellation and band'), countsBox,
+      h('p', { class: 'muted small foot' }, 'Satellites tracked on each band. Onocoy\'s top band reward needs 4 bands on one constellation.')),
+    h('section', { class: 'card' }, h('h2', null, 'Mean C/N0 per band'), barsBox),
+    h('section', { class: 'card wide' }, h('h2', null, 'Totals'), tilesBox),
+  ];
+  const closedNote = h('section', { class: 'card wide' }, h('p', { class: 'muted' },
+    'Start the live view to see every satellite, where it is in the sky and how strong its signals are.'));
+  mount(el, h('div', { class: 'grid' }, win.el, closedNote, dataCards, map.el));
+  map.update(null);
+
+  function show(d) {
+    if (gone || !d) return;
+    const w = d.window || {};
+    win.update(w);
+    map.update(d.position);
+    closedNote.hidden = !!w.open;
+    for (const c of dataCards) c.hidden = !w.open;
+    if (!w.open) {
+      endPoll();
+      return;
+    }
+    startPoll();
+    const t = d.totals;
+    if (!t) {
+      patch(skyBox, msg('warn', 'The station cannot read the observations right now.'));
+      return;
+    }
+    const sats = d.satellites || [];
+    patch(skyBox, liveSkyPlot(sats));
+    const placed = sats.filter(hasSkyPos).length;
+    skyNote.textContent = placed ? placed + ' of ' + sats.length + ' satellites placed.' :
+      w.sky === 'on' || w.sky === 'on_profile' ? 'Waiting for the first satellite positions from the receiver.' :
+        'No satellite positions in this window: see the line under Live view.';
+    table.update(d);
+    patch(countsBox, liveCountsTable(t));
+    patch(barsBox, liveBandBars(t));
+    patch(tilesBox, liveTiles(t));
+  }
+
+  async function fetchLive() {
+    let d;
+    try {
+      d = await api('GET', '/api/gnss/live');
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 401)) toast(errText(e), 'bad');
+      return;
+    }
+    show(d);
+  }
+
+  if (liveAutoStart) {
+    liveAutoStart = false;
+    act(null, async () => {
+      show(await api('POST', '/api/gnss/live', {}));
+      return true;
+    }).then(r => {
+      if (r === undefined) fetchLive();   /* refused: show the window as it is */
+    });
+  } else {
+    fetchLive();
+  }
+  return {
+    destroy() {
+      gone = true;
+      endPoll();
+      win.stop();
+    },
+  };
+}
+
+/* ---- Reception check (setup wizard) --------------------------------------------------------- */
+
+/*
+ * Guide values for a first look at the antenna's sky view. PROVISIONAL, to
+ * be confirmed on hardware: what a clear sky gives a multi-band antenna,
+ * not Onocoy's own scoring.
+ */
+const RX_CHECK = { satsGood: 20, satsFair: 10, cnrGood: 40, cnrFair: 35, bands: 4 };
+
+/** Pass/warn hints from the live data: {waiting} or {items: [[tone, title, text]], ok}. */
+function receptionChecks(d) {
+  const t = d && d.totals;
+  if (!t || (!t.tracked && (t.msm_age_ms === null || t.msm_age_ms === undefined))) return { waiting: true };
+  const items = [];
+  if (t.tracked >= RX_CHECK.satsGood) {
+    items.push(['ok', t.tracked + ' satellites tracked', 'A good view of the sky.']);
+  } else if (t.tracked >= RX_CHECK.satsFair) {
+    items.push(['warn', t.tracked + ' satellites tracked', 'Fewer than an open sky gives. Trees, walls or a roof edge may hide part of the sky.']);
+  } else {
+    items.push(['bad', t.tracked + ' satellites tracked', 'Very few. Check that the antenna sees the open sky and that its cable is connected.']);
+  }
+  const c = t.cnr_dbhz;
+  if (c && c >= RX_CHECK.cnrGood) {
+    items.push(['ok', 'Mean signal strength ' + c + ' dB-Hz', 'Strong signals.']);
+  } else if (c && c >= RX_CHECK.cnrFair) {
+    items.push(['warn', 'Mean signal strength ' + c + ' dB-Hz', 'Fair. Check the antenna cable and its connectors, and keep metal and walls away from the antenna.']);
+  } else {
+    items.push(['bad', 'Mean signal strength ' + (c ? c + ' dB-Hz' : 'unknown'), 'Weak. Check the antenna, its cable and its connectors.']);
+  }
+  let best = null, bestN = 0;
+  for (const s of t.systems || []) {
+    const n = Object.keys(s.bands || {}).filter(b => s.bands[b] > 0).length;
+    if (n > bestN) {
+      best = s.sys;
+      bestN = n;
+    }
+  }
+  if (bestN >= RX_CHECK.bands) {
+    items.push(['ok', lbl(L.sys, best) + ': ' + bestN + ' bands', 'Four bands on one constellation: the condition for Onocoy\'s top band reward.']);
+  } else {
+    items.push(['warn', best ? 'Best: ' + lbl(L.sys, best) + ' with ' + bestN + (bestN === 1 ? ' band' : ' bands') : 'No bands yet',
+      'Onocoy\'s top band reward needs 4 bands on one constellation. The receiver profile chooses the signals; right after a start it can also take a minute.']);
+  }
+  return { items: items, ok: items.every(i => i[0] === 'ok') };
+}
+
+const CHECK_ICON = { ok: '✓', warn: '!', bad: '✕' };
+const CHECK_WORD = { ok: 'Good', warn: 'Check', bad: 'Problem' };
+
+function receptionList(r) {
+  return h('ul', { class: 'checks' }, r.items.map(i => h('li', { class: i[0] },
+    h('span', { class: 'ic', 'aria-hidden': 'true' }, CHECK_ICON[i[0]]),
+    h('span', null, h('strong', null, CHECK_WORD[i[0]] + ': ' + i[1]), h('span', { class: 'muted small' }, ' ' + i[2])))));
+}

@@ -70,6 +70,9 @@ EXT_RAM_BSS_ATTR static lifecycle_boot_record_t s_boots[LIFECYCLE_BOOT_HISTORY_L
 EXT_RAM_BSS_ATTR static ledger_day_t s_days[HISTORY_DAYS_MAX];
 EXT_RAM_BSS_ATTR static diag_task_info_t s_tasks[TASKS_MAX];
 EXT_RAM_BSS_ATTR static diag_journal_entry_t s_journal[JOURNAL_PAGE];
+EXT_RAM_BSS_ATTR static diag_journal_entry_t s_hist[WEB_HISTORY_MAX];
+EXT_RAM_BSS_ATTR static gnss_obs_live_sat_t s_live[GNSS_OBS_MAX_LIVE];
+EXT_RAM_BSS_ATTR static gnss_obs_live_t s_live_totals;
 EXT_RAM_BSS_ATTR static char s_text[LOG_PAGE + 1];
 
 /* ---- shared helpers ------------------------------------------------------------------------ */
@@ -142,6 +145,19 @@ static bool journal_open_now(const station_status_t *st)
     return st->flash_journal_open || st->flash_journal_settings_unavailable;
 }
 
+bool web_rx_hands_off(void)
+{
+    gnss_link_stats_t l;
+    return gnss_link_get_stats(&l) == ESP_OK && l.hands_off;
+}
+
+/* gnss/recovery as health reads it: a value out of range is full recovery. */
+static health_recovery_mode_t stored_recovery(void)
+{
+    uint8_t v = read_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RECOVERY, (uint8_t)HEALTH_RECOVERY_FULL);
+    return v <= (uint8_t)HEALTH_RECOVERY_ALERTS ? (health_recovery_mode_t)v : HEALTH_RECOVERY_FULL;
+}
+
 /* ---- status snapshot ------------------------------------------------------------------------- */
 
 void web_snap_status(web_status_snap_t *s)
@@ -161,6 +177,8 @@ void web_snap_status(web_status_snap_t *s)
     s->rtcm_age_ms = UINT32_MAX;
     if (gnss_link_get_stats(&s_link) == ESP_OK) {
         s->rtcm_age_ms = s_link.last_rtcm_age_ms;
+        /* Closed after it was opened once: gnss_link reopens it on its own (OFF = never opened, safe mode). */
+        s->uart_closed = s_link.mode != GNSS_LINK_MODE_OFF && !s_link.link_open;
     }
     if (gnss_obs_get_summary(&s_obs) == ESP_OK) {
         s->obs_valid = true;
@@ -499,9 +517,14 @@ static esp_err_t h_gnss(web_req_t *r)
         g.link.last_rtcm_age_ms = UINT32_MAX;
     }
     g.autocfg = read_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_AUTOCFG, 1) != 0;
+    g.recovery = stored_recovery();
     load_profile(&g.profile, NULL);
     if (gnss_obs_get_arp(&g.arp) != ESP_OK) {
         memset(&g.arp, 0, sizeof(g.arp));
+    }
+    esp_err_t e1033 = gnss_obs_get_1033(&g.rtcm1033);
+    if (e1033 != ESP_OK && e1033 != ESP_ERR_NOT_FOUND) {
+        memset(&g.rtcm1033, 0, sizeof(g.rtcm1033));   /* NOT_FOUND fills valid = false and the bad frames */
     }
     web_resp_t resp;
     resp_begin(&resp, r->req, 200);
@@ -566,9 +589,6 @@ static esp_err_t h_gnss_profile(web_req_t *r)
     if (!settings_ok()) {
         return web_send_err(r->req, WEB_ERR_SETTINGS_UNAVAILABLE);
     }
-    if (journal_open_now(&s_st)) {
-        return web_send_err(r->req, WEB_ERR_JOURNAL_OPEN);
-    }
     um98x_base_profile_t stored;
     bool was_stored = false;
     load_profile(&stored, &was_stored);
@@ -579,6 +599,15 @@ static esp_err_t h_gnss_profile(web_req_t *r)
     web_bad_t b = { 0 };
     if (!web_parse_profile_put(r->body, &stored, &next, &have_profile, &autocfg, &have_autocfg, &b)) {
         return bad(r->req, &b);
+    }
+    bool have_recovery = false;
+    health_recovery_mode_t recovery = HEALTH_RECOVERY_FULL;
+    if (!web_parse_recovery(r->body, &have_recovery, &recovery, &b)) {
+        return bad(r->req, &b);
+    }
+    /* The recovery mode is health's: it changes nothing on the receiver, so an open update session does not hold it. */
+    if ((have_profile || have_autocfg) && journal_open_now(&s_st)) {
+        return web_send_err(r->req, WEB_ERR_JOURNAL_OPEN);
     }
     bool changed = false;
     if (have_profile) {
@@ -600,12 +629,24 @@ static esp_err_t h_gnss_profile(web_req_t *r)
             return web_send_internal(r->req, err);
         }
     }
+    if (have_recovery && recovery != stored_recovery()) {
+        /* Health reads it every tick. */
+        esp_err_t err = settings_set_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RECOVERY, (uint8_t)recovery);
+        if (err != ESP_OK) {
+            return web_send_internal(r->req, err);
+        }
+        ESP_LOGW(TAG, "automatic receiver recovery set to %s by the user", web_recovery_mode_name(recovery));
+    }
     const char *apply = "unchanged";
     if (changed) {
         esp_err_t err = station_request_reconfigure();
+        if (err == ESP_ERR_INVALID_STATE) {
+            station_snapshot(&s_st);
+        }
         apply = err == ESP_OK                ? "queued"
                 : err == ESP_ERR_NOT_SUPPORTED ? "unsupported_model"
                 : lifecycle_in_safe_mode()     ? "safe_mode"
+                : s_st.rx_maintenance          ? "maintenance"
                                                : "not_running";
     }
     char body[96];
@@ -623,6 +664,9 @@ static esp_err_t station_action(web_req_t *r, esp_err_t (*fn)(void), bool lock)
     if (lifecycle_in_safe_mode()) {
         return web_send_err(r->req, WEB_ERR_SAFE_MODE);
     }
+    if (s_st.rx_maintenance) {
+        return web_send_err(r->req, WEB_ERR_RECEIVER_MAINTENANCE);
+    }
     esp_err_t err = fn();
     switch (err) {
     case ESP_OK:
@@ -633,7 +677,9 @@ static esp_err_t station_action(web_req_t *r, esp_err_t (*fn)(void), bool lock)
         return web_send_err(r->req, lock ? WEB_ERR_NO_POSITION_YET : WEB_ERR_BUSY);
     case ESP_ERR_INVALID_STATE:
         station_snapshot(&s_st);
-        return web_send_err(r->req, journal_open_now(&s_st) ? WEB_ERR_JOURNAL_OPEN : WEB_ERR_BUSY);
+        return web_send_err(r->req, journal_open_now(&s_st) ? WEB_ERR_JOURNAL_OPEN
+                                    : s_st.rx_maintenance    ? WEB_ERR_RECEIVER_MAINTENANCE
+                                                             : WEB_ERR_BUSY);
     default:
         return web_send_internal(r->req, err);
     }
@@ -692,6 +738,120 @@ static esp_err_t h_sky(web_req_t *r)
     return web_resp_end(&resp);
 }
 
+/* ---- receiver maintenance ------------------------------------------------------------------------------------ */
+
+static esp_err_t send_maintenance(httpd_req_t *req)
+{
+    station_snapshot(&s_st);
+    char body[96];
+    snprintf(body, sizeof(body), "{\"on\":%s,\"left_s\":%u,\"chosen_s\":%u}", s_st.rx_maintenance ? "true" : "false",
+             (unsigned)(s_st.rx_maintenance ? s_st.maintenance_left_s : 0),
+             (unsigned)(s_st.rx_maintenance ? s_st.maintenance_chosen_s : 0));
+    return web_send_json_literal(req, 200, body);
+}
+
+static esp_err_t h_maint_post(web_req_t *r)
+{
+    uint32_t duration = 0;
+    web_bad_t b = { 0 };
+    if (!web_parse_maintenance(r->body, &duration, &b)) {
+        return bad(r->req, &b);
+    }
+    station_maint_why_t why = STATION_MAINT_OK;
+    esp_err_t err = station_maintenance_start(duration, &why);
+    if (err == ESP_OK) {
+        ESP_LOGW(TAG, "receiver maintenance started or extended by the user (%u s)",
+                 (unsigned)(duration != 0 ? duration : WEB_MAINT_DEFAULT_S));
+        return send_maintenance(r->req);
+    }
+    const char *field = NULL;
+    const char *reason = NULL;
+    web_err_t e = web_maint_refusal(why, lifecycle_in_safe_mode(), &field, &reason);
+    if (e == WEB_ERR_INTERNAL) {
+        return web_send_internal(r->req, err);
+    }
+    return web_send_error(r->req, e,
+                          reason != NULL ? "A receiver session or job runs: offer maintenance again when it ends" : NULL,
+                          field, UINT32_MAX, NULL, reason);
+}
+
+static esp_err_t h_maint_delete(web_req_t *r)
+{
+    esp_err_t err = station_maintenance_end();
+    if (err == ESP_OK) {
+        ESP_LOGW(TAG, "receiver maintenance ended by the user");
+        return accepted(r->req);
+    }
+    if (err == ESP_ERR_NOT_FOUND || (err == ESP_ERR_INVALID_STATE && !lifecycle_in_safe_mode())) {
+        return web_send_err(r->req, WEB_ERR_NOT_IN_MAINTENANCE);
+    }
+    if (err == ESP_ERR_INVALID_STATE) {
+        return web_send_err(r->req, WEB_ERR_SAFE_MODE);
+    }
+    return web_send_internal(r->req, err);
+}
+
+/* ---- live view -------------------------------------------------------------------------------------------- */
+
+static esp_err_t send_live(httpd_req_t *req)
+{
+    station_snapshot(&s_st);
+    size_t n = GNSS_OBS_MAX_LIVE;
+    bool have = gnss_obs_get_live(s_live, &n, &s_live_totals) == ESP_OK;
+    web_live_snap_t l = {
+        .st = &s_st,
+        .limits = { .default_min = CONFIG_STATION_LIVE_VIEW_MIN, .max_min = CONFIG_STATION_LIVE_VIEW_MAX_MIN,
+                    .idle_s = CONFIG_STATION_LIVE_VIEW_IDLE_S },
+        .sats = s_live,
+        .count = have ? n : 0,
+        .totals = have ? &s_live_totals : NULL,
+    };
+    web_resp_t resp;
+    resp_begin(&resp, req, 200);
+    web_build_live(&resp.w, &l);
+    return web_resp_end(&resp);
+}
+
+static esp_err_t h_live_get(web_req_t *r)
+{
+    /* Every live-view request is an admin client asking for it: without one the window closes. */
+    (void)station_live_view_touch();
+    return send_live(r->req);
+}
+
+static esp_err_t h_live_post(web_req_t *r)
+{
+    uint32_t minutes = 0;
+    web_bad_t b = { 0 };
+    if (!web_parse_live(r->body, CONFIG_STATION_LIVE_VIEW_MAX_MIN, &minutes, &b)) {
+        return bad(r->req, &b);
+    }
+    station_live_why_t why = STATION_LIVE_WHY_NONE;
+    esp_err_t err = station_live_view_start(minutes, &why);
+    if (err == ESP_ERR_INVALID_STATE) {
+        web_err_t e = web_live_refusal(why, lifecycle_in_safe_mode());
+        return e == WEB_ERR_INTERNAL ? web_send_internal(r->req, err) : web_send_err(r->req, e);
+    }
+    if (err != ESP_OK) {
+        return web_send_internal(r->req, err);
+    }
+    ESP_LOGI(TAG, "live view opened or extended by the user");
+    return send_live(r->req);
+}
+
+static esp_err_t h_live_delete(web_req_t *r)
+{
+    esp_err_t err = station_live_view_stop();
+    if (err == ESP_ERR_NOT_FOUND) {
+        return web_send_err(r->req, WEB_ERR_LIVE_VIEW_CLOSED);
+    }
+    if (err != ESP_OK) {
+        return web_send_internal(r->req, err);
+    }
+    ESP_LOGI(TAG, "live view closed by the user");
+    return ok(r->req);
+}
+
 /* ---- receiver update sessions ------------------------------------------------------------------------------ */
 
 static void flash_ctx(const station_status_t *st, web_flash_ctx_t *c)
@@ -705,6 +865,7 @@ static void flash_ctx(const station_status_t *st, web_flash_ctx_t *c)
     c->receiver_in_loader = (st->alerts & STATION_ALERT_RECEIVER_IN_LOADER) != 0;
     c->station_running = !safe;
     c->flash_available = WEB_FLASH_AVAILABLE;
+    c->maintenance = st->rx_maintenance;
 }
 
 static esp_err_t h_flash_get(web_req_t *r)
@@ -745,7 +906,7 @@ static esp_err_t flash_action(web_req_t *r, web_flash_action_t a, station_flash_
     case ESP_ERR_NOT_FOUND:
         return web_send_err(r->req, WEB_ERR_NO_JOURNAL);
     case ESP_ERR_INVALID_STATE:
-        return web_send_err(r->req, WEB_ERR_NOT_WAITING);
+        return web_send_err(r->req, web_rx_hands_off() ? WEB_ERR_RECEIVER_MAINTENANCE : WEB_ERR_NOT_WAITING);
     case ESP_ERR_NOT_SUPPORTED:
         return web_send_err(r->req, WEB_ERR_NOT_AVAILABLE_YET);
     default:
@@ -1043,6 +1204,7 @@ static esp_err_t h_wifi_put(web_req_t *r)
             return web_send_internal(r->req, err);
         }
     }
+    bool trial = false;
     if (reconnect) {
         esp_err_t err = network_set_credentials(in.ssid, pw);
         memset(stored_pw, 0, sizeof(stored_pw));
@@ -1052,10 +1214,42 @@ static esp_err_t h_wifi_put(web_req_t *r)
         if (err != ESP_OK) {
             return web_send_internal(r->req, err);
         }
-        ESP_LOGI(TAG, "Wi-Fi credentials changed: the station reconnects");
+        /* With credentials stored before, the new ones are pending: tried, and dropped back from if they get no IP. */
+        trial = network_get_status(&s_net) == ESP_OK && s_net.cred_pending &&
+                strncmp(s_net.pending_ssid, in.ssid, sizeof(s_net.pending_ssid)) == 0;
+        ESP_LOGI(TAG, "Wi-Fi credentials changed: %s",
+                 trial ? "tried now, the previous ones come back unless they get an IP" : "the station connects with them");
     }
-    return web_send_json_literal(r->req, 202, persist ? "{\"accepted\":true,\"persisted\":true}"
-                                                      : "{\"accepted\":true,\"persisted\":false}");
+    char body[80];
+    snprintf(body, sizeof(body), "{\"accepted\":true,\"persisted\":%s,\"trial\":%s}", persist ? "true" : "false",
+             trial ? "true" : "false");
+    return web_send_json_literal(r->req, 202, body);
+}
+
+static esp_err_t h_wifi_pending_retry(web_req_t *r)
+{
+    esp_err_t err = network_retry_pending_credentials();
+    if (err == ESP_ERR_NOT_FOUND) {
+        return web_send_err(r->req, WEB_ERR_NOTHING_PENDING);
+    }
+    if (err != ESP_OK) {
+        return web_send_internal(r->req, err);
+    }
+    ESP_LOGI(TAG, "pending Wi-Fi credentials tried again at the user's request");
+    return accepted(r->req);
+}
+
+static esp_err_t h_wifi_pending_discard(web_req_t *r)
+{
+    esp_err_t err = network_discard_pending_credentials();
+    if (err == ESP_ERR_NOT_FOUND) {
+        return web_send_err(r->req, WEB_ERR_NOTHING_PENDING);
+    }
+    if (err != ESP_OK) {
+        return web_send_internal(r->req, err);
+    }
+    ESP_LOGI(TAG, "pending Wi-Fi credentials discarded by the user");
+    return ok(r->req);
 }
 
 static esp_err_t h_wifi_scan(web_req_t *r)
@@ -1274,6 +1468,9 @@ static esp_err_t h_update_app(web_req_t *r)
 static web_err_t gnss_block(const fw_update_status_t *fw, uint32_t *retry_in_s)
 {
     *retry_in_s = UINT32_MAX;
+    if (web_rx_hands_off()) {
+        return WEB_ERR_RECEIVER_MAINTENANCE;   /* nothing is sent to the receiver */
+    }
     switch (fw->gnss_blocked) {
     case FW_GNSS_BLOCK_APP_TRIAL:
         *retry_in_s = fw->gnss_blocked_left_s;
@@ -1683,6 +1880,44 @@ static esp_err_t h_journal(web_req_t *r)
     return web_resp_end(&resp);
 }
 
+/*
+ * The connection history: the newest WEB_HISTORY_MAX caster session ends and
+ * returns, Wi-Fi drops and returns, read backwards through the journal one
+ * page at a time.
+ */
+static esp_err_t h_connections(web_req_t *r)
+{
+    diag_journal_info_t info;
+    diag_journal_info(&info);
+    size_t n = 0;
+    bool complete = info.available && info.newest_seq == 0;   /* an empty journal holds nothing more */
+    if (info.available && info.newest_seq != 0 && info.oldest_seq != 0 && info.newest_seq >= info.oldest_seq) {
+        uint32_t hi = info.newest_seq;
+        for (;;) {
+            uint32_t lo = hi - info.oldest_seq + 1u > JOURNAL_PAGE ? hi - (JOURNAL_PAGE - 1u) : info.oldest_seq;
+            uint32_t cursor = lo - 1u;
+            size_t got = hi - lo + 1u;
+            if (diag_journal_read(&cursor, s_journal, &got) != ESP_OK) {
+                break;
+            }
+            bool room = web_history_collect(s_journal, got, hi, s_hist, &n, WEB_HISTORY_MAX);
+            if (lo <= info.oldest_seq) {
+                complete = room;
+                break;
+            }
+            if (!room) {
+                break;
+            }
+            hi = lo - 1u;
+        }
+    }
+    bool have_cfg = load_configs();
+    web_resp_t resp;
+    resp_begin(&resp, r->req, 200);
+    web_build_connections(&resp.w, s_hist, n, have_cfg ? s_cfg : NULL, slot_count(), complete);
+    return web_resp_end(&resp);
+}
+
 static esp_err_t h_coredump_get(web_req_t *r)
 {
     return web_download_coredump(r);
@@ -1807,6 +2042,11 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/gnss/position/lock", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_gnss_unlock),
     ROUTE("/api/gnss/signals", HTTP_GET, WEB_ACC_PUBSTAR, WEB_BODY_NONE, h_gnss_signals),
     ROUTE("/api/sky", HTTP_GET, WEB_ACC_PUBSTAR, WEB_BODY_NONE, h_sky),
+    ROUTE("/api/gnss/maintenance", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_maint_post),
+    ROUTE("/api/gnss/maintenance", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_maint_delete),
+    ROUTE("/api/gnss/live", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_live_get),
+    ROUTE("/api/gnss/live", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_live_post),
+    ROUTE("/api/gnss/live", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_live_delete),
     ROUTE("/api/gnss/flash", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_flash_get),
     ROUTE("/api/gnss/flash/retry", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_flash_retry),
     ROUTE("/api/gnss/flash/restart-receiver", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_flash_restart),
@@ -1819,6 +2059,8 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/wifi", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_wifi_get),
     ROUTE("/api/wifi", HTTP_PUT, WEB_ACC_ADMIN, WEB_BODY_JSON, h_wifi_put),
     ROUTE("/api/wifi/scan", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_wifi_scan),
+    ROUTE("/api/wifi/pending/retry", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_wifi_pending_retry),
+    ROUTE("/api/wifi/pending/discard", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_wifi_pending_discard),
     ROUTE("/api/system", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_system_get),
     ROUTE("/api/system", HTTP_PUT, WEB_ACC_ADMIN, WEB_BODY_JSON, h_system_put),
     ROUTE("/api/update", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_update_get),
@@ -1837,6 +2079,7 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/diag/log-level", HTTP_PUT, WEB_ACC_ADMIN, WEB_BODY_JSON, h_log_level),
     ROUTE("/api/logs", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_logs),
     ROUTE("/api/journal", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_journal),
+    ROUTE("/api/connections", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_connections),
     ROUTE("/api/coredump", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_coredump_get),
     ROUTE("/api/coredump", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_coredump_delete),
     ROUTE("/api/system/reboot", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_reboot),

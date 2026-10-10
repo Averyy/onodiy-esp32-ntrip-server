@@ -64,6 +64,7 @@ typedef struct {
     bool receiver_in_loader;
     bool station_running;      /**< station initialised and started (not safe mode, no failed init) */
     bool flash_available;      /**< receiver flashing is built */
+    bool maintenance;          /**< receiver maintenance: nothing is sent to the receiver */
 } web_flash_ctx_t;
 
 typedef enum {
@@ -74,8 +75,8 @@ typedef enum {
 
 /**
  * Why an action is refused now ("no_journal", "not_waiting", "safe_mode",
- * "settings_unavailable", "app_trial", "app_update", "not_available_yet",
- * "unreadable"), NULL when it is allowed. `err` gets the error code the POST
+ * "settings_unavailable", "receiver_maintenance", "app_trial", "app_update",
+ * "not_available_yet", "unreadable"), NULL when it is allowed. `err` gets the error code the POST
  * answers with.
  */
 const char *web_flash_action_why(const web_flash_ctx_t *c, web_flash_action_t a, web_err_t *err);
@@ -94,6 +95,7 @@ typedef struct {
     network_status_t net;
     station_status_t st;
     uint32_t rtcm_age_ms;          /**< gnss_link: since the last CRC-valid RTCM frame (UINT32_MAX = never) */
+    bool uart_closed;              /**< gnss_link: the receiver UART is closed and being reopened (link opened once, link_open false) */
     gnss_sys_t best_sys;
     uint8_t best_bands;
     bool obs_valid;                /**< best_sys / best_bands come from a summary */
@@ -148,8 +150,10 @@ typedef struct {
     const station_status_t *st;
     gnss_link_stats_t link;
     bool autocfg;
+    health_recovery_mode_t recovery;   /**< gnss/recovery as stored (out of range reads as full) */
     um98x_base_profile_t profile;
     gnss_obs_arp_t arp;            /**< valid = false before the first frame */
+    gnss_obs_1033_t rtcm1033;      /**< valid = false before the first one that decoded */
 } web_gnss_snap_t;
 
 /** GET /api/gnss. */
@@ -167,6 +171,41 @@ void web_build_sky(wj_t *w, const gnss_obs_sat_t *sats, size_t count, const char
 
 /** GET /api/gnss/flash. */
 void web_build_flash(wj_t *w, const station_status_t *st, const web_flash_ctx_t *ctx, const char *receiver_text);
+
+/**
+ * Error of a refused POST /api/gnss/maintenance (station_maint_why_t): a
+ * receiver update session (journal_open), a running receiver session or job
+ * (busy, *reason "receiver_session": offer it again when that ends), a
+ * duration not offered (invalid_field, *field "duration_s"), the station
+ * not running (safe_mode in safe mode, else internal); "end now" without
+ * the state (STATION_MAINT_NOT_ON): not_in_maintenance. *field and *reason
+ * are NULL when the body carries none.
+ */
+web_err_t web_maint_refusal(station_maint_why_t why, bool safe_mode, const char **field, const char **reason);
+
+/** Error of a refused POST /api/gnss/live (station_live_why_t): journal_open (receiver update), safe_mode, else internal. */
+web_err_t web_live_refusal(station_live_why_t why, bool safe_mode);
+
+/** Live view window limits (the station's Kconfig). */
+typedef struct {
+    uint32_t default_min;          /**< CONFIG_STATION_LIVE_VIEW_MIN */
+    uint32_t max_min;              /**< CONFIG_STATION_LIVE_VIEW_MAX_MIN */
+    uint32_t idle_s;               /**< CONFIG_STATION_LIVE_VIEW_IDLE_S */
+} web_live_limits_t;
+
+/** The live view window (station_status_t.live) under `key`. */
+void web_build_live_window(wj_t *w, const char *key, const station_live_status_t *win, const web_live_limits_t *lim);
+
+typedef struct {
+    const station_status_t *st;    /**< window, receiver state, base position */
+    web_live_limits_t limits;
+    const gnss_obs_live_sat_t *sats;
+    size_t count;
+    const gnss_obs_live_t *totals; /**< NULL = not available (then no satellites either) */
+} web_live_snap_t;
+
+/** GET/POST /api/gnss/live. */
+void web_build_live(wj_t *w, const web_live_snap_t *l);
 
 /* ---- casters ------------------------------------------------------------------------- */
 
@@ -312,6 +351,28 @@ unsigned web_sky_prn(gnss_sys_t sys, uint8_t prn);
 
 /** GET /api/journal. */
 void web_build_journal(wj_t *w, const diag_journal_entry_t *e, size_t count, uint32_t cursor, bool more);
+
+/** Records the connection history lists (GET /api/connections). */
+#define WEB_HISTORY_MAX 64u
+
+/** A journal kind of the connection history: caster_down, caster_up, wifi_up, wifi_disconnect. */
+bool web_history_kind(uint16_t kind);
+
+/**
+ * Collect the connection history from one journal page (oldest first, as
+ * diag_journal_read returns it): its connection records with seq <= hi are
+ * appended to out newest first, while out (*n of max) has room.
+ * @return true while out has room for more.
+ */
+bool web_history_collect(const diag_journal_entry_t *page, size_t count, uint32_t hi, diag_journal_entry_t *out,
+                      size_t *n, size_t max);
+
+/**
+ * GET /api/connections: `e` newest first; slot names from `cfg` (NULL in
+ * safe mode: null); `complete` = the whole journal was searched.
+ */
+void web_build_connections(wj_t *w, const diag_journal_entry_t *e, size_t count, const ntrip_caster_cfg_t *cfg,
+                           size_t slots, bool complete);
 
 /** GET /api/diag/tasks. */
 void web_build_tasks(wj_t *w, const diag_task_info_t *t, size_t count);

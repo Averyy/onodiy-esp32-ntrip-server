@@ -497,6 +497,7 @@ const ERR = {
   nothing_staged: 'No uploaded receiver package is waiting.',
   no_journal: 'There is no receiver update session.',
   no_coredump: 'There is no core dump.',
+  nothing_pending: 'No new Wi-Fi credentials are waiting (they were confirmed or discarded meanwhile).',
   method_not_allowed: 'The station does not support this action.',
   busy: 'The station is busy with another job. Try again in a moment.',
   journal_open: 'A receiver update session is open. Finish or clear it first.',
@@ -520,6 +521,9 @@ const ERR = {
   no_rollback_image: 'There is no previous app version to go back to.',
   admin_already_set: 'An admin password is already set.',
   admin_not_set: 'No admin password is set yet. Set one over the station\'s own Wi-Fi network.',
+  receiver_maintenance: 'Receiver maintenance is on: nothing is sent to the receiver. End it first.',
+  not_in_maintenance: 'Receiver maintenance is not on (it may have ended meanwhile).',
+  live_view_closed: 'The live view is not open (it may have closed meanwhile).',
   length_required: 'The upload needs a known size.',
   too_large: 'Too large for the station.',
   unsupported_media_type: 'The station refused the request type.',
@@ -542,6 +546,9 @@ function errText(e) {
   if (!(e instanceof ApiError)) return 'This page hit an error: ' + (e && e.message ? e.message : String(e));
   let t = ERR[e.code] || e.message || ('Error ' + e.status);
   if (e.code === 'caster_policy' && POLICY[e.body.reason]) t = POLICY[e.body.reason];
+  if (e.code === 'busy' && e.body.reason === 'receiver_session') {
+    t = 'The station is working with the receiver right now (configuring or checking it). Offer maintenance again when that ends.';
+  }
   if (e.code === 'invalid_field' && e.field) t += ': ' + e.field;
   if (e.code === 'reboot_inhibited' && e.by) t += ' (' + e.by + ')';
   if (e.code === 'internal' && e.message) t += ' (' + e.message + ')';

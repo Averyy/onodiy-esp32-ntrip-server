@@ -42,6 +42,9 @@ function heroCard(s) {
   if (s.safe_mode && s.safe_mode.active) {
     tone = 'bad';
     head = 'Safe mode';
+  } else if (rcv.rx_maintenance) {
+    tone = 'warn';
+    head = 'Receiver maintenance';
   } else if (rcv.state !== 'streaming') {
     tone = rcv.state === 'no_receiver' ? 'bad' : 'warn';
     head = lbl(L.station, rcv.state);
@@ -59,6 +62,7 @@ function heroCard(s) {
   const facts = [];
   if (on.length) facts.push(streaming + ' of ' + on.length + ' casters streaming');
   if (hl.level) facts.push(lbl(L.health, hl.level).toLowerCase());
+  if (hl.recovery_mode && hl.recovery_mode !== 'full') facts.push('receiver recovery: ' + lbl(L.recovery, hl.recovery_mode));
   if (s.uptime_s !== undefined) facts.push('up ' + fmt.dur(s.uptime_s));
   return h('section', { class: 'card hero ' + tone }, h('div', { class: 'state' }, head), h('div', { class: 'facts' }, facts.join(' · ')));
 }
@@ -79,11 +83,16 @@ function receiverCard(s, admin) {
     else base = 'Not locked';
     rows.push(['Base', base]);
     rows.push(['Profile', r.profile_applied ? 'Applied' : h('span', { class: 't-warn' }, 'Not applied')]);
+    if (r.rx_maintenance) {
+      rows.push(['Maintenance', h('span', { class: 't-warn' }, 'On, ' + fmt.dur(Math.ceil((r.maintenance_left_s || 0) / 60) * 60) + ' left: nothing is sent to the receiver')]);
+    }
+    if (r.uart_closed && !(s.safe_mode && s.safe_mode.active)) rows.push(['Receiver link', h('span', { class: 't-bad' }, 'UART closed (reopening)')]);
   }
+  const state = r.rx_maintenance ? badge('Maintenance', 'warn') : badge(lbl(L.station, r.state), stationTone(r.state));
   return h('section', { class: 'card' },
-    h('h2', null, 'Receiver', badge(lbl(L.station, r.state), stationTone(r.state))),
+    h('h2', null, 'Receiver', state),
     kv(rows),
-    admin ? h('div', { class: 'foot' }, link('Receiver and position', '#/receiver'), ' · ', link('Signals', '#/signals')) :
+    admin ? h('div', { class: 'foot row' }, btn('Live view', openLiveView, 'small'), link('Receiver and position', '#/receiver'), link('Signals', '#/signals')) :
       h('div', { class: 'foot' }, link('Signals', '#/signals')));
 }
 
@@ -128,6 +137,7 @@ function casterLine(c, admin) {
       metrics.push(['For', fmt.dur(c.state_age_s)]);
     }
     if (c.next_retry_s) metrics.push(['Retry in', fmt.dur(c.next_retry_s)]);
+    if (c.unreached_s) metrics.push(['Not reached for', fmt.dur(c.unreached_s)]);
     const on = c.today_online_s || 0, off = c.today_offline_s || 0;
     if (on + off > 0) metrics.push(['Today', (100 * on / (on + off)).toFixed(on === on + off ? 0 : 2) + ' % online']);
     if (c.bytes_sent) metrics.push(['Sent', fmt.bytes(c.bytes_sent)]);
@@ -155,6 +165,9 @@ function networkCard(s) {
   const n = s.network || {};
   const rows = [
     ['Wi-Fi', n.ssid ? n.ssid + (n.online ? '' : ' (not connected)') : 'Not set up'],
+    n.cred_trial ? ['New network', 'trying ' + (n.pending_ssid || '') + (n.cred_trial_left_s ? ', ' + fmt.dur(n.cred_trial_left_s) + ' left' : '')] :
+      n.cred_pending ? ['New network', h('span', { class: 't-warn' }, (n.pending_ssid || '') + ' not confirmed' + (n.cred_reverted ? ' (back on the previous network)' : ''))] : null,
+    !n.online && n.assoc_no_ip_s ? ['Connected without an address for', fmt.dur(n.assoc_no_ip_s)] : null,
     n.online ? ['Address', n.ip] : ['Offline for', fmt.dur(n.offline_s)],
     n.online ? ['Signal', rssiView(n.rssi)] : null,
     ['Internet', n.upstream === 'ok' ? h('span', { class: 't-ok' }, 'Reachable') :
@@ -185,7 +198,12 @@ function alertsCard(s) {
         h('strong', null, t[0]), t[1] ? h('div', { class: 'small' }, t[1]) : null);
     })) : h('p', { class: 'muted' }, 'Nothing needs attention.'),
     s.health && s.health.last_step && s.health.last_step !== 'none' ?
-      h('p', { class: 'muted small foot' }, 'Last recovery step: ' + lbl(L.step, s.health.last_step) + '.') : null);
+      h('p', { class: 'muted small foot' }, 'Last recovery step: ' + lbl(L.step, s.health.last_step) + '.') : null,
+    s.health && s.health.reboot_recheck ? h('p', { class: 'muted small foot' },
+      'ESP32 reboot blocked; checked again after the next detection pass when the cap allows.') : null,
+    s.health && s.health.recovery_mode ? h('p', { class: 'muted small foot' }, 'Automatic receiver recovery: ' + lbl(L.recovery, s.health.recovery_mode) +
+      (s.health.recovery_mode === 'alerts_only' ? ' (a stall is shown here, nothing is sent to the receiver).' : '.'), ' ',
+    link('Change', '#/receiver')) : null);
 }
 
 function deviceCard(s) {

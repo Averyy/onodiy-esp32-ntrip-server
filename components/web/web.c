@@ -659,9 +659,12 @@ static esp_err_t serve_asset(httpd_req_t *req, const web_asset_t *a)
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
     if (is_html(a)) {
         /* Only the device's own origin: scripts, styles, images and the WebSocket; no framing.
+         * One exception, images only: the map tiles of the live view's optional station map,
+         * which the page fetches only after the user asks for the map.
          * The Host was validated, so it is safe to name in the policy. */
         snprintf(s_csp, sizeof(s_csp),
-                 "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; "
+                 "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' " WEB_MAP_TILE_ORIGIN "; "
+                 "font-src 'self'; "
                  "connect-src 'self' ws://%s; object-src 'none'; base-uri 'none'; form-action 'self'; "
                  "frame-ancestors 'none'",
                  s_host);

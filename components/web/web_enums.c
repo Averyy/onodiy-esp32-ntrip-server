@@ -322,6 +322,15 @@ const char *web_ladder_why_name(uint8_t v)
     return pick(s_ladder_why, COUNT(s_ladder_why), (int)v);
 }
 
+static const char *const s_ladder_trigger[] = { "protected", "assoc_no_ip", "unreached" };
+_Static_assert(NETWORK_LADDER_TRIG_PROTECTED == 1u << 0 && NETWORK_LADDER_TRIG_UNREACHED == 1u << 2,
+               "network ladder trigger bits moved: update the table");
+
+const char *web_ladder_trigger_name(uint32_t bit)
+{
+    return bit_name(s_ladder_trigger, COUNT(s_ladder_trigger), bit);
+}
+
 static const char *const s_link_mode[] = { "off", "stream", "command", "raw" };
 
 const char *web_link_mode_name(int v)
@@ -468,6 +477,78 @@ const char *web_update_slot_name(lifecycle_update_t v)
     return pick(s_update_slot, COUNT(s_update_slot), (int)v);
 }
 
+static const char *const s_recovery_mode[] = {
+    [HEALTH_RECOVERY_FULL] = "full",
+    [HEALTH_RECOVERY_NO_REBOOT] = "no_reboot",
+    [HEALTH_RECOVERY_ALERTS] = "alerts_only",
+};
+_Static_assert(COUNT(s_recovery_mode) == (size_t)HEALTH_RECOVERY_ALERTS + 1u, "recovery modes moved: update the table");
+
+const char *web_recovery_mode_name(health_recovery_mode_t v)
+{
+    return pick(s_recovery_mode, COUNT(s_recovery_mode), (int)v);
+}
+
+static const char *const s_setting[] = {
+    [UM98X_SETTING_UNKNOWN] = "unknown",
+    [UM98X_SETTING_ON] = "on",
+    [UM98X_SETTING_OFF] = "off",
+};
+
+const char *web_setting_name(uint8_t v)
+{
+    return pick(s_setting, COUNT(s_setting), (int)v);
+}
+
+static const char *const s_live_sky[] = {
+    [STATION_LIVE_SKY_OFF] = "off",
+    [STATION_LIVE_SKY_PENDING] = "pending",
+    [STATION_LIVE_SKY_ON] = "on",
+    [STATION_LIVE_SKY_ON_PROFILE] = "on_profile",
+    [STATION_LIVE_SKY_BLOCKED] = "blocked",
+    [STATION_LIVE_SKY_STOPPING] = "stopping",
+};
+_Static_assert(COUNT(s_live_sky) == (size_t)STATION_LIVE_SKY_STOPPING + 1u, "live view output states moved: update the table");
+
+const char *web_live_sky_name(uint8_t v)
+{
+    return pick(s_live_sky, COUNT(s_live_sky), (int)v);
+}
+
+static const char *const s_live_why[] = {
+    [STATION_LIVE_WHY_NONE] = "none",
+    [STATION_LIVE_WHY_BUSY] = "busy",
+    [STATION_LIVE_WHY_NOT_STREAMING] = "not_streaming",
+    [STATION_LIVE_WHY_MAINTENANCE] = "maintenance",
+    [STATION_LIVE_WHY_AUTOCFG_OFF] = "autocfg_off",
+    [STATION_LIVE_WHY_UNSUPPORTED] = "unsupported",
+    [STATION_LIVE_WHY_RECONFIGURED] = "reconfigured",
+    [STATION_LIVE_WHY_REJECTED] = "rejected",
+    [STATION_LIVE_WHY_NO_ANSWER] = "no_answer",
+    [STATION_LIVE_WHY_FLASH] = "flash",
+    [STATION_LIVE_WHY_NOT_RUNNING] = "not_running",
+};
+_Static_assert(COUNT(s_live_why) == (size_t)STATION_LIVE_WHY_NOT_RUNNING + 1u, "live view reasons moved: update the table");
+
+const char *web_live_why_name(uint8_t v)
+{
+    return pick(s_live_why, COUNT(s_live_why), (int)v);
+}
+
+static const char *const s_live_end[] = {
+    [STATION_LIVE_END_NONE] = "none",
+    [STATION_LIVE_END_USER] = "user",
+    [STATION_LIVE_END_EXPIRED] = "expired",
+    [STATION_LIVE_END_IDLE] = "idle",
+    [STATION_LIVE_END_FLASH] = "flash",
+};
+_Static_assert(COUNT(s_live_end) == (size_t)STATION_LIVE_END_FLASH + 1u, "live view end reasons moved: update the table");
+
+const char *web_live_end_name(uint8_t v)
+{
+    return pick(s_live_end, COUNT(s_live_end), (int)v);
+}
+
 /* ---- reverse lookups -------------------------------------------------------------- */
 
 bool web_base_mode_parse(const char *s, um98x_base_mode_t *out)
@@ -497,6 +578,16 @@ bool web_ntrip_backoff_parse(const char *s, ntrip_backoff_profile_t *out)
         return false;
     }
     *out = (ntrip_backoff_profile_t)v;
+    return true;
+}
+
+bool web_recovery_mode_parse(const char *s, health_recovery_mode_t *out)
+{
+    int v;
+    if (!lookup(s_recovery_mode, COUNT(s_recovery_mode), s, &v)) {
+        return false;
+    }
+    *out = (health_recovery_mode_t)v;
     return true;
 }
 

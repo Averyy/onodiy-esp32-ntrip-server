@@ -41,6 +41,7 @@ typedef enum {
     WEB_ERR_NOTHING_STAGED,
     WEB_ERR_NO_JOURNAL,
     WEB_ERR_NO_COREDUMP,
+    WEB_ERR_NOTHING_PENDING,
     WEB_ERR_METHOD_NOT_ALLOWED,
     WEB_ERR_BUSY,
     WEB_ERR_JOURNAL_OPEN,
@@ -64,6 +65,9 @@ typedef enum {
     WEB_ERR_NO_ROLLBACK_IMAGE,
     WEB_ERR_ADMIN_ALREADY_SET,
     WEB_ERR_ADMIN_NOT_SET,
+    WEB_ERR_RECEIVER_MAINTENANCE,
+    WEB_ERR_NOT_IN_MAINTENANCE,
+    WEB_ERR_LIVE_VIEW_CLOSED,
     WEB_ERR_LENGTH_REQUIRED,
     WEB_ERR_TOO_LARGE,
     WEB_ERR_UNSUPPORTED_MEDIA_TYPE,
@@ -272,6 +276,18 @@ bool web_host_name_ok(const char *host);
  * number, 0 if the string is not usable.
  */
 uint32_t web_expected_build(const char *fw);
+
+/**
+ * Receiver maintenance durations the station accepts (s; station.h), the
+ * default (a request without a duration) and the most time left after an
+ * extension.
+ */
+#define WEB_MAINT_CHOICES_S  { 900u, 1800u, 3600u, 7200u, 14400u }
+#define WEB_MAINT_DEFAULT_S  1800u
+#define WEB_MAINT_MAX_LEFT_S 14400u
+
+/** One of WEB_MAINT_CHOICES_S. */
+bool web_maint_duration_ok(uint32_t s);
 
 /* ---- caster policy ------------------------------------------------------------------------ */
 

@@ -6,9 +6,11 @@
  * the first-run setup wizard.
  *
  * Wizard order follows the station: admin password (only over the station's
- * own access point), Onocoy credentials, optional extra casters, Wi-Fi last
- * (joining it ends the setup access point). It keeps its state in memory
- * only: captive-portal browsers may not keep browser storage.
+ * own access point), a reception check of the antenna (the live view, with
+ * plain hints) before any caster is enabled, Onocoy credentials, optional
+ * extra casters, Wi-Fi last (joining it ends the setup access point). It
+ * keeps its state in memory only: captive-portal browsers may not keep
+ * browser storage.
  */
 
 const RECOVERY_HINT = 'Forgot the password? Hold the station\'s BOOT button for 10 seconds. That clears the password and opens the ' +
@@ -274,7 +276,7 @@ function wifiPicker(wifi, opts) {
 
 function startWizard(claim) {
   live.stop();
-  const steps = claim ? ['password', 'onocoy', 'casters', 'wifi'] : ['onocoy', 'casters', 'wifi'];
+  const steps = claim ? ['password', 'reception', 'onocoy', 'casters', 'wifi'] : ['reception', 'onocoy', 'casters', 'wifi'];
   const W = { casters: null, wifi: null, system: null, joined: null };
 
   function frame(step, title, ...body) {
@@ -285,7 +287,11 @@ function startWizard(claim) {
     bare(h('div', { class: 'narrow' }, head, h('section', { class: 'card' }, h('h1', null, title), body)));
   }
 
+  let stopCheck = null;   /* the reception check's polling, while it is shown */
+
   function next(step) {
+    if (stopCheck) stopCheck();
+    stopCheck = null;
     const i = steps.indexOf(step);
     go(steps[i + 1] || 'connect');
   }
@@ -305,6 +311,7 @@ function startWizard(claim) {
   async function go(step) {
     try {
       if (step === 'password') return stepPassword();
+      if (step === 'reception') return stepReception();
       if (step === 'onocoy' || step === 'casters') await loadBasics();
       if (step === 'onocoy') return stepOnocoy();
       if (step === 'casters') return stepCasters();
@@ -335,8 +342,106 @@ function startWizard(claim) {
   function skipAll() {
     return h('p', { class: 'muted small foot' }, 'Experienced? ', h('button', { type: 'button', class: 'btn ghost small', onclick: async e => {
       const ok = await act(e.currentTarget, setupDone);
-      if (ok !== undefined) boot();
+      if (ok !== undefined) {
+        if (stopCheck) {
+          stopCheck();
+          stopCheck = null;
+          api('DELETE', '/api/gnss/live').catch(() => {});   /* the reception check's view: it would close by itself */
+        }
+        boot();
+      }
     } }, 'Skip the rest of the setup'));
+  }
+
+  /*
+   * Reception check: opens the live view and shows plain hints about the
+   * antenna's sky view before any caster streams. The guide values are in
+   * RX_CHECK (66-live.js). Leaving the step closes the view again.
+   */
+  function stepReception() {
+    const box = h('div', { class: 'stack' }, h('div', { class: 'spinner' }), h('p', { class: 'muted' }, 'Opening the live view…'));
+    const err = errBox();
+    const cont = btn('Continue', () => leave(cont), 'primary');
+    const later = h('p', { class: 'muted small' });
+    frame('reception', 'Reception check',
+      h('p', null, 'Before the station streams to any caster, check what the antenna sees. Put it where it will stay, with a clear view of the sky, ' +
+        'and watch the numbers settle for a minute or two. Moving the antenna shows its effect within seconds.'),
+      box, err, later,
+      h('div', { class: 'form-actions' }, cont),
+      skipAll());
+
+    let opened = false, stopped = false, closedShown = false;
+    async function leave(b) {
+      await busy(b, async () => {
+        stopped = true;
+        if (opened) {
+          try {
+            await api('DELETE', '/api/gnss/live');
+          } catch (e) {
+            /* closed already, or the station is busy: it closes by itself */
+          }
+        }
+      });
+      next('reception');
+    }
+
+    function render(d) {
+      const t = d.totals;
+      const r = receptionChecks(d);
+      const w = d.window || {};
+      if (r.waiting) {
+        patch(box, h('div', { class: 'spinner' }), h('p', null, 'Waiting for the receiver\'s observations… (receiver: ' +
+          lbl(L.station, d.receiver_state).toLowerCase() + ')'),
+        h('p', { class: 'muted small' }, 'Right after power-on the receiver needs a minute or two to find satellites, and the station may still be configuring it.'));
+      } else {
+        patch(box, receptionList(r), liveTiles(t),
+          h('div', { class: 'sky-wrap' }, liveSkyPlot(d.satellites || []), h('div', null, cnrLegend(), h('p', { class: 'muted small' }, SYS_KEY),
+            liveCountsTable(t))));
+      }
+      cont.textContent = r.ok ? 'Continue' : 'Continue anyway';
+      later.textContent = r.waiting || r.ok ? '' : 'The hints are rough guide values for a first check, not Onocoy\'s own scoring. ' +
+        'You can open the live view any time later on the Signals page.';
+      /* Built on the change only, so its button stays put between refreshes. */
+      if (w.open === false && !closedShown) {
+        closedShown = true;
+        mount(err, 'The live view closed (' + (lbl(L.liveEnd, w.last_end) || 'time up') + '). ', btn('Open it again', reopen, 'small'));
+        err.className = 'msg warn';
+        err.hidden = false;
+      } else if (w.open !== false && closedShown) {
+        closedShown = false;
+        err.hidden = true;
+      }
+    }
+
+    async function reopen() {
+      try {
+        const d = await api('POST', '/api/gnss/live', {});
+        opened = true;
+        render(d);
+      } catch (e) {
+        closedShown = false;
+        showErr(e, err);
+      }
+    }
+
+    (async () => {
+      try {
+        render(await api('POST', '/api/gnss/live', {}));
+        opened = true;
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 401) return;
+        patch(box, msg('warn', 'The live view could not be opened: ' + errText(e)),
+          h('p', { class: 'muted small' }, 'You can check the reception later on the Signals page.'));
+        cont.textContent = 'Continue';
+        return;
+      }
+      if (stopped) return;
+      stopCheck = poller(LIVE_POLL_MS, async () => {
+        if (stopped) return;
+        const d = await api('GET', '/api/gnss/live');
+        if (!stopped) render(d);
+      }, true);
+    })();
   }
 
   function stepPassword() {
@@ -533,7 +638,27 @@ function startWizard(claim) {
       /* The station switches about a second after PUT /api/wifi; until then
        * (and for a moment after) GET /api/wifi still describes the old
        * connection. Only the chosen network, past the switch, counts. */
-      if (w && w.online && w.ip && w.ssid === joined.ssid && Date.now() - joined.since > 2000) {
+      if (w && w.cred_reverted && w.pending_ssid === joined.ssid && !w.cred_trial) {
+        /* Changed credentials that got no address: the station went back to its previous network. */
+        show('reverted', msg('warn', h('strong', null, 'No address on ' + joined.ssid + ' within 90 seconds.'),
+          ' The station went back to ' + (w.ssid || 'its previous network') + ' and keeps the new credentials as pending.'),
+        h('div', { class: 'form-actions' }, btn('Try them again', async e => {
+          if (await retryPendingWifi(e)) {
+            joined.since = Date.now();
+            shown = '';
+          }
+        }, 'primary'), btn('Change Wi-Fi settings', () => {
+          stopped = true;
+          go('wifi');
+        })));
+        setTimeout(loop, 1000);
+        return;
+      }
+      if (w && w.cred_trial && w.pending_ssid === joined.ssid) {
+        show('trial', h('div', { class: 'spinner' }), h('p', null, 'The station is trying ' + joined.ssid + ' for up to 90 seconds. ' +
+          'Without an address there it goes back to its previous network by itself.'));
+      }
+      if (w && w.online && w.ip && w.ssid === joined.ssid && !w.cred_trial && Date.now() - joined.since > 2000) {
         stopped = true;
         const addr = 'http://' + w.ip + '/';
         show('ok', msg('ok', h('strong', null, 'Connected.'), ' The station is now on ' + joined.ssid + '.'),
@@ -550,7 +675,7 @@ function startWizard(claim) {
         h('p', null, 'Join ' + joined.ssid + ' with this device and find the station\'s address in your router\'s device list (it is named ' + host + '). ' +
           'If the station could not join, its setup network comes back: join it again and open http://192.168.4.1/.'),
         h('div', { class: 'spinner' }));
-      } else if (w && secs > 40 && (w.connect_failures > 0 || w.last_disconnect_reason)) {
+      } else if (w && secs > 40 && !w.cred_trial && (w.connect_failures > 0 || w.last_disconnect_reason)) {
         show('failing:' + w.last_disconnect_reason, msg('warn', h('strong', null, 'Not connected yet.'), ' Last error: ' + wifiReason(w.last_disconnect_reason) + '.'),
           h('p', null, 'The station keeps trying. Check the network name and password.'),
           h('div', { class: 'form-actions' }, btn('Change Wi-Fi settings', () => {

@@ -29,6 +29,8 @@ function wifiStatus(w) {
       w.retry_in_s ? ['Next attempt in', fmt.dur(w.retry_in_s)] : null,
       ['Last disconnect', wifiReason(w.last_disconnect_reason)],
       w.fallback_dns ? ['DNS', 'Using the fallback servers'] : null,
+      w.associated && !w.online && w.assoc_no_ip_s ? ['Without an address for', fmt.dur(w.assoc_no_ip_s)] : null,
+      w.ladder && (w.ladder.triggers || []).length ? ['Network recovery', 'running: ' + w.ladder.triggers.map(t => lbl(L.trigger, t)).join(', ')] : null,
     ]),
     h('h3', { class: 'section-title' }, 'Station access point'),
     kv([
@@ -54,8 +56,39 @@ Views.system = {
       wifiBadge.className = 'badge ' + (w.online ? 'ok' : 'bad');
       wifiBadge.textContent = w.online ? 'Online' : 'Offline';
       mount(wifiBody, wifiStatus(w));
+      showPending(w);
     };
     const joinBox = h('div');
+    const pendingBox = h('div');
+    let pendingKey = '';
+    /* New credentials on trial or pending: rebuilt only when that changes, so its buttons stay put. */
+    const showPending = w => {
+      const key = [w.cred_trial, w.cred_pending, w.cred_reverted, w.pending_ssid, w.ssid].join('|');
+      if (key === pendingKey) {
+        const left = pendingBox.querySelector('.trial-left');
+        if (left) left.textContent = fmt.dur(w.cred_trial_left_s);
+        return;
+      }
+      pendingKey = key;
+      if (w.cred_trial) {
+        mount(pendingBox, msg('info', h('strong', null, 'Trying ' + (w.pending_ssid || 'the new network') + '. '),
+          'If it gets no address within ', h('span', { class: 'trial-left' }, fmt.dur(w.cred_trial_left_s)),
+          ', the station goes back to its previous network and keeps the new credentials as pending.'));
+      } else if (w.cred_pending) {
+        const retry = btn('Try again', async e => {
+          if (await retryPendingWifi(e)) load().catch(() => {});
+        }, 'small primary');
+        const discard = btn('Discard', async e => {
+          if (await discardPendingWifi(e)) load().catch(() => {});
+        }, 'small');
+        mount(pendingBox, msg('warn', h('strong', null, 'Pending credentials for ' + (w.pending_ssid || 'a network') + ' not confirmed. '),
+          w.cred_reverted ? 'They got no address within 90 seconds: the station is back on the previous network (' + (w.ssid || 'unknown') + ').' :
+            'They are tried first at the next start.',
+          h('div', { class: 'form-actions' }, retry, discard)));
+      } else {
+        clear(pendingBox);
+      }
+    };
     const deviceCard = h('section', { class: 'card' });
     const pwCard = h('section', { class: 'card' });
     const aboutCard = h('section', { class: 'card' });
@@ -82,7 +115,7 @@ Views.system = {
         const r = await act(go, () => api('PUT', '/api/wifi', v), err);
         if (r === undefined) return;
         dirty = false;
-        watchJoin(v.ssid, r.persisted !== false);
+        watchJoin(v.ssid, r.persisted !== false, r.trial === true, wifi.ssid);
       } }, picker.el, err, h('div', { class: 'form-actions' }, go, btn('Cancel', () => {
         dirty = false;
         clear(joinBox);
@@ -90,12 +123,14 @@ Views.system = {
       }, 'ghost'))));
     });
 
-    function watchJoin(ssid, persisted) {
+    function watchJoin(ssid, persisted, trial, prev) {
       const t0 = Date.now();
       const status = h('div', { class: 'stack' });
       mount(joinBox, h('div', { class: 'foot' }, status));
       const show = (...kids) => mount(status, kids);
-      show(msg('info', 'Joining ' + ssid + '…'), persisted ? null : msg('warn', 'Settings storage unavailable: this network is used until the next restart only.'));
+      show(msg('info', 'Joining ' + ssid + '…' + (trial ? ' The station tries it for up to 90 seconds; without an address there it goes back to ' +
+        (prev || 'the current network') + ' by itself, so this page may lose contact for that long.' : '')),
+      persisted ? null : msg('warn', 'Settings storage unavailable: this network is used until the next restart only.'));
       if (stopJoin) stopJoin();
       stopJoin = poller(1000, async () => {
         const secs = (Date.now() - t0) / 1000;
@@ -109,14 +144,22 @@ Views.system = {
         }
         wifi = w;
         showWifi(w);
-        if (w.online && w.ssid === ssid && secs > 2) {
+        if (trial && w.cred_reverted && w.pending_ssid === ssid && !w.cred_trial) {
+          stopJoin();
+          stopJoin = null;
+          show(msg('warn', 'No address on ' + ssid + ' within 90 seconds: the station is back on ' + (w.ssid || 'the previous network') +
+            '. The new credentials are kept as pending; try them again or discard them above.'));
+          changeBtn.hidden = false;
+          return;
+        }
+        if (w.online && w.ssid === ssid && !w.cred_trial && secs > 2) {
           stopJoin();
           stopJoin = null;
           const moved = w.ip && location.hostname !== w.ip && /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname);
           show(msg('ok', 'Connected to ' + ssid + ' with address ' + w.ip + '.'),
             moved ? h('p', null, 'The station has a new address: ', h('a', { href: 'http://' + w.ip + '/' }, 'http://' + w.ip + '/')) : null);
           changeBtn.hidden = false;
-        } else if (secs > 45) {
+        } else if (secs > 45 && !w.cred_trial) {
           show(msg('warn', 'Not connected to ' + ssid + ' yet. Last error: ' + wifiReason(w.last_disconnect_reason) + '. The station keeps trying.'));
           changeBtn.hidden = false;
         }
@@ -159,6 +202,7 @@ Views.system = {
       mount(wifiCard,
         h('h2', null, 'Wi-Fi', wifiBadge),
         wifiBody,
+        pendingBox,
         h('div', { class: 'form-actions' }, changeBtn),
         joinBox,
         h('h3', { class: 'section-title' }, 'Access point password'),

@@ -362,6 +362,8 @@ function casterSummary(c, st, preset) {
     st.reason && st.reason !== 'none' && st.state !== 'streaming' ? h('div', { class: 't-' + (tone || 'warn') + ' small' }, lbl(L.fail, st.reason)) : null,
     h('div', { class: 'metrics' }, metrics.map(m => h('span', null, m[0] + ' ', h('b', null, m[1])))),
     st.hint ? h('div', { class: 'hintline' }, st.hint) : null,
+    st.unreached_s ? h('div', { class: 'hintline' }, 'Caster not reached for ' + fmt.dur(st.unreached_s) +
+      ' (name lookup or connection failing before the caster answered).') : null,
   ];
   if (avg !== null) {
     out.push(h('div', { class: 'small ' + (avg > 28000 ? 't-warn' : 'muted') }, 'Average over 60 s: ' + fmt.kbps(avg) +
@@ -404,6 +406,7 @@ function casterDetails(st) {
       ['Last reply', st.last_status_line ? st.last_status_line + (st.last_status_code ? ' (' + st.last_status_code + ')' : '') : DASH],
       st.server_header ? ['Caster software', st.server_header] : null,
       ['Address', st.resolved_ip ? st.resolved_ip + (st.dns_cached_used ? ' (cached DNS used ' + st.dns_cached_used + '×)' : '') : DASH],
+      st.unreached_s ? ['Not reached for', fmt.dur(st.unreached_s)] : null,
       st.tls_version ? ['TLS', st.tls_version + (st.tls_cipher ? ' · ' + st.tls_cipher : '')] : null,
       ['Sent', fmt.bytes(st.bytes_sent) + ' · ' + fmt.num(st.frames_sent) + ' frames · ' + fmt.num(st.epochs_sent) + ' epochs'],
       ['Epochs today', fmt.num(st.epochs_sent_today) + ' sent · ' + fmt.num(st.epochs_dropped_today) + ' dropped'],

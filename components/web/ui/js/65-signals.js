@@ -2,9 +2,10 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Signals: frequency bands per constellation from the MSM data (with mean
- * CNR from MSM4 to MSM7), the Galileo E6 indicator, the RTCM messages
- * seen against the profile, and the sky view of satellites in view.
+ * Signals: the entry to the live view (#/signals/live, 66-live.js),
+ * frequency bands per constellation from the MSM data (with mean CNR from
+ * MSM4 to MSM7), the Galileo E6 indicator, the RTCM messages seen against
+ * the profile, and the sky view of satellites in view.
  */
 
 const BAND_ORDER = ['l1', 'l2', 'l5', 'l6', 'e5ab'];
@@ -113,12 +114,18 @@ function skyView(sky, onEnable) {
 
 Views.signals = {
   title: 'Signals',
-  create(el) {
+  create(el, arg) {
+    if (arg === 'live') return livePage(el);
     const summary = h('section', { class: 'card wide' });
     const bandsCard = h('section', { class: 'card wide' });
     const msgsCard = h('section', { class: 'card wide' });
     const skyCard = h('section', { class: 'card wide' });
-    mount(el, h('div', { class: 'grid' }, summary, bandsCard, msgsCard, skyCard));
+    const liveCard = isAdmin() ? h('section', { class: 'card wide live-entry' },
+      h('div', { class: 'text' }, h('h2', null, 'Live view'),
+        h('p', { class: 'muted' }, 'Every satellite the receiver tracks: where it is in the sky, how strong its signals are, ' +
+          'and how many bands each constellation brings. It runs for a limited time; you can extend or stop it.')),
+      h('div', null, btn('Open the live view', openLiveView, 'primary'))) : null;
+    mount(el, h('div', { class: 'grid' }, liveCard, summary, bandsCard, msgsCard, skyCard));
     mount(summary, h('p', { class: 'loading' }, 'Loading signals…'));
 
     const enableBtn = isAdmin() ? btn('Turn it on', async () => {

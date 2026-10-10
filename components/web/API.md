@@ -73,16 +73,17 @@ and fallbacks (the UI words its own text per code). `field` names the
 offending request field (`invalid_field`), `retry_in_s` comes with
 `rate_limited` and `app_trial`, `by` with `reboot_inhibited` (the holder's
 label, e.g. `"receiver flash"`). Other fields may appear per code (listed
-with the endpoint).
+with the endpoint): `reason` with `caster_policy` and with the `busy` of a
+refused receiver maintenance (`receiver_session`).
 
 | HTTP | Codes |
 |---|---|
 | 400 | `bad_json`, `invalid_field`, `confirm_required`, `bad_request`, `invalid_image`, `size_mismatch` |
 | 401 | `unauthorized` (no session, or it expired: show the login) |
 | 403 | `forbidden` (Origin or CSRF check failed, public status off), `wrong_password`, `not_on_setup_ap` |
-| 404 | `not_found`, `nothing_staged`, `no_journal`, `no_coredump` |
+| 404 | `not_found`, `nothing_staged`, `no_journal`, `no_coredump`, `nothing_pending` |
 | 405 | `method_not_allowed` |
-| 409 | state conflicts: `busy`, `journal_open`, `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set` |
+| 409 | state conflicts: `busy`, `journal_open`, `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed` |
 | 411 | `length_required` (uploads) |
 | 413 | `too_large` |
 | 415 | `unsupported_media_type` |
@@ -124,7 +125,13 @@ Applied to every request before any handler runs.
    `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
    `Referrer-Policy: no-referrer`; HTML also gets a Content-Security-Policy
    that allows only the device's own origin (scripts, styles, images,
-   connections including the WebSocket) and forbids framing.
+   connections including the WebSocket) and forbids framing, with one
+   exception for images: `https://tile.openstreetmap.org`, the tiles of the
+   live view's optional station map (section 8). The page requests tiles
+   only after the user asks for the map; the tile images carry
+   `referrerpolicy="origin"`, because the tile server's usage policy asks
+   for a Referer (the page's origin, nothing more); everything else keeps
+   `no-referrer`.
 
 UI assets are pre-compressed, embedded in the image and served with
 `Content-Encoding: gzip`, `ETag: "<app version>-<UI digest>"` (the digest
@@ -141,7 +148,8 @@ The fixed asset names are `/app.js`, `/app.css` and `/favicon.svg` (`/` and
 `priv_include/web_assets.h`); `web_asset_find()` maps a request URI to an
 entry (query ignored) and `web_etag_match()` evaluates `If-None-Match`. The
 page loads only these files (no inline script or style), so the
-Content-Security-Policy can stay at the device's own origin.
+Content-Security-Policy can stay at the device's own origin (the map tiles
+above are the one exception, images only).
 
 ---
 
@@ -239,6 +247,11 @@ status is on, **adm** = admin session, **claim** = section 3.
 | DELETE | `/api/gnss/position/lock` | adm | Forget it and survey again | `station_request_resurvey` |
 | GET | `/api/gnss/signals` | pub\*/adm | Bands, CNR, observed RTCM set | gnss_obs |
 | GET | `/api/sky` | pub\*/adm | Satellites in view | `gnss_obs_get_sky` |
+| POST | `/api/gnss/maintenance` | adm | Start or extend receiver maintenance | `station_maintenance_start` |
+| DELETE | `/api/gnss/maintenance` | adm | End it now | `station_maintenance_end` |
+| GET | `/api/gnss/live` | adm | Live view: window, satellites, totals | `station_live_view_touch`, `gnss_obs_get_live` |
+| POST | `/api/gnss/live` | adm | Open or extend the live view | `station_live_view_start` |
+| DELETE | `/api/gnss/live` | adm | Close it | `station_live_view_stop` |
 | GET | `/api/gnss/flash` | adm | Receiver update session, allowed actions | station |
 | POST | `/api/gnss/flash/retry` | adm | Flash the same package again | `station_flash_user_action` |
 | POST | `/api/gnss/flash/restart-receiver` | adm | Leave the loader, check the version | `station_flash_user_action` |
@@ -250,6 +263,8 @@ status is on, **adm** = admin session, **claim** = section 3.
 | GET | `/api/wifi` | adm | Wi-Fi state, AP, cached scan | network |
 | PUT | `/api/wifi` | adm | Station credentials, AP password | `network_set_credentials`, settings |
 | POST | `/api/wifi/scan` | adm | Fresh scan | `network_scan_start` |
+| POST | `/api/wifi/pending/retry` | adm | Try the pending credentials again | `network_retry_pending_credentials` |
+| POST | `/api/wifi/pending/discard` | adm | Forget the pending credentials | `network_discard_pending_credentials` |
 | GET | `/api/system` | adm | Hostname, public status, identity | settings, lifecycle |
 | PUT | `/api/system` | adm | Edit hostname, public status | settings |
 | GET | `/api/update` | adm | Versions, trial, banner detail | fw_update |
@@ -268,6 +283,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | PUT | `/api/diag/log-level` | adm | Runtime log level per tag | `diag_set_log_level` |
 | GET | `/api/logs` | adm | Log ring (this or previous boot) | `diag_log_read*` |
 | GET | `/api/journal` | adm | Event journal | `diag_journal_read` |
+| GET | `/api/connections` | adm | Connection history (casters, Wi-Fi) | `diag_journal_read`, ntrip_server |
 | GET, DELETE | `/api/coredump` | adm | Download / erase the core dump | `diag_coredump_*` |
 | POST | `/api/system/reboot` | adm | Reboot | lifecycle |
 | POST | `/api/system/factory-reset` | adm | Erase user settings, reboot | settings, lifecycle |
@@ -335,20 +351,24 @@ object as sections (section 7), so the UI keeps one model. Admin form:
              "time_unix": 1760090000, "time_source": "gnss", "settings_available": true},
   "safe_mode": {"active": false, "retry_in_s": null, "crashes": 0},
   "network": {"online": true, "ssid": "Home", "ip": "192.168.1.50", "rssi": -61,
-              "upstream": "ok", "offline_s": 0, "ap_active": false, "ap_reasons": []},
+              "upstream": "ok", "offline_s": 0, "ap_active": false, "ap_reasons": [],
+              "assoc_no_ip_s": 0, "ladder_triggers": [],
+              "cred_trial": false, "cred_trial_left_s": 0, "cred_pending": false, "pending_ssid": null,
+              "cred_reverted": false},
   "receiver": {"state": "streaming", "model": "UM982", "firmware": "R4.10Build18975",
                "responding": true, "identity_confirmed": true, "profile_applied": true,
                "position_locked": true, "surveying": false, "survey_window_left_s": 0,
-               "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "journal": "none"},
+               "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "journal": "none",
+               "uart_closed": false, "rx_maintenance": false, "maintenance_left_s": 0, "maintenance_chosen_s": 0},
   "casters": [
     {"slot": 0, "name": "Onocoy", "enabled": true, "protected": true, "host": "servers.onocoy.com",
      "state": "streaming", "reason": "none", "state_age_s": 3600, "connected_s": 3600,
      "today_online_s": 43200, "today_offline_s": 4, "graced_uptime_permille": 1000,
      "streak_ok": true, "data_rate_permille": 1000, "budget_left_s": 469,
-     "bytes_sent": 74000000, "lag_ms_now": 40, "next_retry_s": 0, "hint": ""}
+     "bytes_sent": 74000000, "lag_ms_now": 40, "next_retry_s": 0, "unreached_s": 0, "hint": ""}
   ],
   "health": {"level": "degraded", "last_step": "none", "ladder_suspended": false,
-             "factory_reset_refused": false},
+             "factory_reset_refused": false, "recovery_mode": "full", "reboot_recheck": false},
   "alerts": [{"id": "link_loss", "source": "health"}],
   "availability": {"protected_down_today_s": 4, "budget_left_s": 469},
   "update": {"app_available": true, "app_version": "v0.4.0",
@@ -364,13 +384,20 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `device.time_source` | `ledger_clock_source()`: `gnss`, `sntp` or `none` (then `time_unix` is `null`) |
 | `safe_mode` | `lifecycle_get_boot_info()`: `retry_in_s` until the automatic normal-boot retry |
 | `network.upstream` | last probe: `none`, `ok`, `no_ip`, `dns_failed`, `no_upstream` |
-| `receiver.state` | `station_state_t` |
+| `network.assoc_no_ip_s` | associated with the access point without an IP for this long (0 = not associated, or it has an IP) |
+| `network.ladder_triggers` | network ladder triggers holding (`network_ladder_trigger_t`): `protected` (the protected caster down while RTCM is healthy), `assoc_no_ip` (associated 60 s without an IP), `unreached` (a slot not reaching its caster for 180 s) |
+| `network.cred_*`, `pending_ssid` | changed Wi-Fi credentials (section 11): `cred_trial` while they are tried (`cred_trial_left_s` until the station goes back), `cred_pending` with `pending_ssid` while they wait to be confirmed (`null` = none), `cred_reverted` when they got no IP in time and the station is back on its previous credentials; `ssid` names the network in use, during a trial the one being tried |
+| `receiver.state` | `station_state_t`; `idle` during receiver maintenance (`rx_maintenance` tells the two apart) |
+| `receiver.uart_closed` | the receiver UART is closed and `gnss_link` reopens it on its own ("receiver UART closed (reopening)"; never in safe mode, where the link is not opened) |
+| `receiver.rx_maintenance` | receiver maintenance is on (section 8): nothing is sent to the receiver; `maintenance_left_s` until it ends by itself, `maintenance_chosen_s` the chosen duration with extensions (both 0 when off) |
 | `receiver.rtcm_age_ms` | since the last CRC-valid RTCM frame (`gnss_link`), `null` = never |
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
-| `casters[]` | every slot; the full status is in `/api/casters`. Protected-slot fields (`graced_uptime_permille`, `streak_ok`, `data_rate_permille`, `budget_left_s`) are `null` for other slots |
+| `casters[]` | every slot; the full status is in `/api/casters`. Protected-slot fields (`graced_uptime_permille`, `streak_ok`, `data_rate_permille`, `budget_left_s`) are `null` for other slots; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none) |
 | `alerts[]` | health's alerts (`source: "health"`) and the station's (`source: "station"`); `config_failed` carries `retry_in_s` |
 | `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without a protected slot or a trusted clock. Information only, never a gate |
 | `health.factory_reset_refused` | a BOOT-button factory reset was refused within the last 10 min because a receiver update was running (the UI shows a notice); admin form only |
+| `health.recovery_mode` | automatic receiver recovery in effect (`gnss/recovery`, `health_recovery_mode_t`): `full`, `no_reboot` (everything but the ESP32 reboot), `alerts_only` (nothing is sent to the receiver: a stall is only reported and journalled, level `degraded`, `failed` once the ladder gives up); admin form only |
+| `health.reboot_recheck` | no receiver found and an ESP32 reboot was blocked: it is looked at again after the next detection pass, when the reboot cap allows; admin form only |
 | `update` | the banner (section 12); admin form only |
 
 In safe mode the receiver section shows `state: "idle"` with the journal
@@ -498,15 +525,28 @@ oldest.
   "profile_applied": true, "rtcm1230_supported": true,
   "config_failed": false, "config_retry_in_s": 0, "reconfigure_refused": false,
   "detect_failures": 0,
-  "link": {"baud": 115200, "mode": "stream", "rx_age_ms": 12, "rtcm_age_ms": 180},
+  "link": {"baud": 115200, "mode": "stream", "rx_age_ms": 12, "rtcm_age_ms": 180,
+           "open": true, "open_failures": 0, "hands_off": false},
   "autocfg": true,
+  "recovery": "full",
   "profile": {
     "signal_group_master": 3, "signal_group_slave": 6,
     "base_mode": "survey_in", "survey_in_s": 600, "fixed": null,
     "station_id": 1234, "com1_baud": 115200,
     "rtcm": [{"msg": 1005, "period_s": 1}, {"msg": 1033, "period_s": 1}, {"msg": 1077, "period_s": 1}],
-    "sat_view_output": false
+    "sat_view_output": false,
+    "antenna_model": "", "antenna_serial": "", "antenna_setup_id": 0
   },
+  "rx_settings": {"valid": true, "age_s": 3600, "read_unix": 1760000000,
+                  "b1cb2a": "on", "mmp": "off", "mask_deg": 10.0,
+                  "antenna": {"model": "TRM59800.00     SCIS", "serial": "5000123", "setup_id": 0}},
+  "apply_steps": {"antenna": {"sent": false, "ok": false, "reply": null},
+                  "b1cb2a": {"sent": true, "ok": true, "reply": null}},
+  "rtcm1033": {"valid": true, "station_id": 1234, "antenna": "TRM59800.00     SCIS", "setup_id": 0,
+               "antenna_serial": "5000123", "receiver_type": "...", "receiver_fw": "...",
+               "receiver_serial": "...", "age_ms": 400, "bad_frames": 0},
+  "maintenance": {"on": false, "left_s": 0, "chosen_s": 0, "choices_s": [900, 1800, 3600, 7200, 14400],
+                  "default_s": 1800, "max_left_s": 14400},
   "position": {"locked": true, "source": "survey", "lat_deg": 45.123456789, "lon_deg": -75.123456789,
                "height_m": 85.1234, "sigma_m": 0.0, "locked_unix": 1759000000},
   "survey": {"active": false, "window_left_s": 0},
@@ -520,21 +560,32 @@ oldest.
 |---|---|
 | `alerts` | station alerts only (`station_alert_t`) |
 | `link.mode` | `off`, `stream`, `command`, `raw` (`gnss_link`) |
+| `link.open`, `open_failures` | the UART driver is installed; failed installs since boot. `open: false` with a mode other than `off` = "receiver UART closed (reopening)": `gnss_link` reopens it on its own |
+| `link.hands_off` | the link refuses every write and lease (receiver maintenance) |
+| `recovery` | `gnss/recovery` as stored, `health_recovery_mode_t` (a stored value out of range reads as `full`, as health reads it) |
+| `profile.antenna_*` | the base antenna descriptor the receiver publishes in 1033: `antenna_model` the IGS antenna name with its radome (`""` = leave the receiver's own value, the default), `antenna_serial`, `antenna_setup_id` 0-255; serial and setup ID only matter with a model (stored cleared without one) |
+| `rx_settings` | what the receiver's configuration dump said at the last apply session this boot (`station_status_t.rx_settings`): `valid` false and every value unknown (`unknown` / `null`) after a reboot until the next apply. `b1cb2a`, `mmp` (`um98x_setting_t`): BeiDou B1C/B2a observations in RTCM, multipath mitigation; `mask_deg` the elevation mask (0.1°); `antenna` the descriptor the receiver holds (`null` = not read). `age_s` since the read-back, `read_unix` its time (`null` without a clock then). MMP and the mask are shown only, never sent (PROVISIONAL, to be confirmed on hardware) |
+| `apply_steps` | outcome of the antenna and B1C/B2a steps of the last apply session (sent only when the read-back asked for them; a refusal does not fail the session): `sent`, `ok` (accepted), `reply` the receiver's refusal text or `"timeout"` (`null` unless refused). The UI words an antenna refusal "antenna model rejected: <reply>" |
+| `rtcm1033` | the latest CRC-valid 1033 the receiver published (`gnss_obs_get_1033`), strings as received; `{"valid": false, "bad_frames": n}` before the first that decoded; `bad_frames` counts 1033 frames that did not decode since boot |
+| `maintenance` | receiver maintenance (below): `left_s`, `chosen_s` 0 when off; `choices_s` the durations offered, `max_left_s` the most time left after extensions |
 | `profile.fixed` | `{lat_deg, lon_deg, height_m}` in `fixed` mode, else `null`; fields a mode does not use are ignored on input and come back cleared (`survey_in_s` 0 in `fixed` mode) |
 | `position` | locked or last surveyed (`station_status_t.position`); `source`: `none`, `survey`, `averaged`, `user`; `sigma_m` 0 = unknown |
 | `arp` | latest CRC-valid 1005/1006 (`gnss_obs_get_arp`), converted to WGS84; `offset_m` = 3-D distance to the locked position, `null` when not locked; `{"valid": false}` before the first frame |
 
 ### `PUT /api/gnss/profile` (adm)
 
-Both members optional: `profile` (the whole profile object as above) and
-`autocfg` (bool, `gnss/autocfg`).
+Every member optional: `profile` (the whole profile object as above),
+`autocfg` (bool, `gnss/autocfg`) and `recovery` (`gnss/recovery`: `full`,
+`no_reboot` or `alerts_only`; anything else `400 invalid_field`; health
+reads it every tick, a step already running completes).
 
 ```json
 {"profile": {"signal_group_master": 3, "signal_group_slave": 6, "base_mode": "fixed", "survey_in_s": 600,
              "fixed": {"lat_deg": 45.123456789, "lon_deg": -75.123456789, "height_m": 85.1234},
              "station_id": 1234, "com1_baud": 115200,
-             "rtcm": [{"msg": 1005, "period_s": 1}], "sat_view_output": false},
- "autocfg": true}
+             "rtcm": [{"msg": 1005, "period_s": 1}], "sat_view_output": false,
+             "antenna_model": "TRM59800.00     SCIS", "antenna_serial": "5000123", "antenna_setup_id": 0},
+ "autocfg": true, "recovery": "full"}
 ```
 
 The profile is stored with `um98x_profile_encode()` (validated by
@@ -547,29 +598,40 @@ of 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600;
 (latitude ±90, longitude ±180, height -1000 to 10000 m); `rtcm` at most 16
 entries, `msg` 1001-4095, `period_s` >= 1; types 1101-1107 are refused (they
 never reach a caster); ephemeris types (1019, 1020, 1042, 1045, 1046) need
-`com1_baud` >= 460800.
+`com1_baud` >= 460800; `antenna_model` and `antenna_serial` lose their
+trailing spaces (the stored form) and must then be at most 31 printable
+ASCII characters without `"` (inner spaces stay: the IGS name pads the
+antenna type to 16 characters before the radome); `antenna_setup_id` 0-255.
+The UI's hint: enter the IGS antenna name with its radome only if the
+antenna has a published calibration; leave it empty to keep the receiver's
+value; to clear a model the receiver already holds, enter its null-antenna
+name (`ADVNULLANTENNA`).
 
 `202 {"accepted": true, "saved": true, "apply": "queued"}`. `apply` is
 `queued`, `unchanged` (same profile, or only `autocfg` changed),
 `safe_mode` (stored; the station applies it after safe mode, when
 `autocfg` is on), `unsupported_model` (stored; never applied to this
-receiver) or `not_running` (stored; the station did not start this boot).
+receiver), `maintenance` (stored; receiver maintenance is on, and its end
+runs the stream-first check, which applies it when `autocfg` is on) or
+`not_running` (stored; the station did not start this boot).
 A fixed position entered here is stored as the locked position with
 `source: "user"`; switching to `survey_in` forgets the locked position.
 Errors: `400 invalid_field`, `409 journal_open` (any receiver update
-journal open), `409 settings_unavailable`.
+journal open, for a body with `profile` or `autocfg`; the recovery mode
+alone changes nothing on the receiver), `409 settings_unavailable`.
 
 ### `POST /api/gnss/apply` (adm)
 
 Empty body. `202 {"accepted": true}`. Errors: `409 journal_open`,
-`409 safe_mode`, `409 unsupported_model`.
+`409 safe_mode`, `409 receiver_maintenance` (nothing is sent to the
+receiver then), `409 unsupported_model`.
 
 ### `POST /api/gnss/position/lock` (adm)
 
 Empty body: lock the latest surveyed position (the station switches the
 profile to `fixed` and reconfigures). `202 {"accepted": true}`. Errors:
 `409 no_position_yet` (no 1005 yet), `409 unsupported_model`,
-`409 journal_open`, `409 safe_mode`.
+`409 journal_open`, `409 safe_mode`, `409 receiver_maintenance`.
 
 ### `DELETE /api/gnss/position/lock` (adm)
 
@@ -622,6 +684,114 @@ last 30 s. `prn` is the satellite's PRN (GLONASS: its slot number).
 `sat_view_output` is off; the UI offers to turn it on) or `no_data` (it is
 on, but nothing arrived in the last 30 s).
 
+### Receiver maintenance
+
+"Hands off" while the user works on the receiver through its other port (a
+PC tool, a reflash): nothing is sent to the receiver (no detection, query,
+apply, `RESET`, flash, ladder step or live-view toggle), reception goes on
+and every CRC-valid RTCM frame still reaches the casters. The station
+reports `idle` meanwhile (`rx_maintenance` tells it apart); the ledger
+counts the time as planned. It ends by itself when its time is up, on "end
+now", or with a power cut (an ESP32 software reset keeps it with its time
+left); the end runs the station's stream-first check, as at boot. Entry and
+exit are journalled (`rx_maintenance`). Whether input on the link can
+disturb a receiver worked on through its other port is PROVISIONAL, to be
+confirmed on hardware.
+
+While it is on, the receiver actions answer `409 receiver_maintenance`
+("receiver maintenance: nothing is sent to the receiver"): apply, lock,
+re-survey, receiver updates (banner, upload, confirm), flash retry and
+restart-receiver; a profile save is stored (`apply: "maintenance"`).
+
+#### `POST /api/gnss/maintenance` (adm)
+
+`{"duration_s": 1800}`: start for that long, or, while on, extend by it (at
+most `max_left_s` left). `duration_s` one of `choices_s` (900, 1800, 3600,
+7200, 14400); left out or 0 = the default (1800). Effective at once.
+`200 {"on": true, "left_s": 1800, "chosen_s": 1800}`. Errors:
+`400 invalid_field` (`duration_s`), `409 journal_open` (a receiver update
+session), `409 busy` with `"reason": "receiver_session"` (a receiver session
+or job runs, e.g. a configuration: offer it again when it ends),
+`409 safe_mode`.
+
+#### `DELETE /api/gnss/maintenance` (adm)
+
+End now: the station leaves maintenance within a second and checks the
+receiver as at boot. `202 {"accepted": true}`. Errors:
+`409 not_in_maintenance`, `409 safe_mode`.
+
+### Live view
+
+A window the user opens on request (satellites first). It runs for
+`default_min` minutes (10, `CONFIG_STATION_LIVE_VIEW_MIN`), can be extended
+up to `max_min` (60) from now, and closes by itself when its time is up, at
+the user's stop, when a receiver update begins, or when no admin client
+asked for it for `idle_s` (120 s): every `GET /api/gnss/live` counts as
+asking (`station_live_view_touch`), so a page polls it while it shows the
+view. While it is open the receiver's satellite-in-view output is on,
+unsaved (never saved in the receiver), every `sky_period_s`, for the
+satellites' azimuth and elevation, and turned off when the window closes.
+Each toggle is one configuring command under a short command lease (the
+casters pause for it; journalled with its length), only while the station
+streams with nothing else to do: never while it configures, detects,
+recovers or flashes, never in maintenance, never with `autocfg` off, never
+for a model the station does not configure, and never when the profile's
+`sat_view_output` sends it permanently. After a receiver reconfiguration,
+reset or restart the output is off (`sky_why: "reconfigured"`); opening or
+extending the view turns it on again. Everything else comes from the RTCM
+stream without any receiver traffic. Whether toggling the output
+interrupts RTCM is PROVISIONAL, to be confirmed on hardware.
+
+#### `GET /api/gnss/live` (adm)
+
+```json
+{
+  "window": {"open": true, "left_s": 540, "idle_left_s": 118, "open_s": 60, "max_s": 3600,
+             "default_min": 10, "max_min": 60, "idle_s": 120,
+             "sky": "on", "sky_why": "none", "sky_period_s": 5, "last_end": "none", "sky_reply": null},
+  "receiver_state": "streaming", "rx_maintenance": false,
+  "position": {"locked": true, "source": "survey", "lat_deg": 45.123456789, "lon_deg": -75.123456789,
+               "height_m": 85.1234},
+  "totals": {"satellites": 38, "tracked": 36, "signals": 112, "with_pos": 35, "dropped": 0,
+             "cnr_dbhz": 43, "msm_age_ms": 400, "sky_age_ms": 1200,
+             "bands": {"l1": {"satellites": 36, "cnr_dbhz": 44}, "l5": {"satellites": 20, "cnr_dbhz": 46}},
+             "systems": [{"sys": "galileo", "satellites": 9, "bands": {"l1": 9, "l2": 9, "l5": 9, "l6": 7}}]},
+  "satellites": [{"sys": "gps", "prn": 12, "in_msm": true, "msm_age_ms": 400, "signal_ids": [2, 15],
+                  "cnr_dbhz": {"l1": 44, "l2": 38}, "el_deg": 45, "az_deg": 210, "sky_cnr_dbhz": 44,
+                  "pos_age_ms": 1200}]
+}
+```
+
+| Field | Notes |
+|---|---|
+| `window` | `station_status_t.live`; `left_s`, `idle_left_s`, `open_s` 0 while closed. `sky` (`station_live_sky_t`): `off`, `pending` (wanted, waits for a free moment: `sky_why`), `on`, `on_profile` (the profile sends it permanently), `blocked` (not in this window: `sky_why`), `stopping`. `sky_why` (`station_live_why_t`). `last_end` (`station_live_end_t`) why the last window closed. `sky_reply` the receiver's reply to the last failed toggle (`null` = none) |
+| `receiver_state`, `rx_maintenance` | as in `/api/status`, for a page without the WebSocket (the setup wizard) |
+| `position` | the station's locked or last surveyed position (`null` coordinates with `source: "none"`), for the optional station map |
+| `totals` | `gnss_obs_get_live` over every satellite, also those beyond the list: `satellites` listed, `tracked` in an MSM within the last 10 s, `signals` their signals, `with_pos` with azimuth and elevation, `dropped` beyond the list; `cnr_dbhz` mean over every satellite band (`null` = none); `bands` per band with tracked satellites (count, mean C/N0); `systems` per constellation with tracked satellites, their count per band (only bands with any). `null` when the observations cannot be read |
+| `satellites` | at most 96, by constellation and number. `prn` as in `/api/sky` (QZSS and SBAS by PRN, GLONASS by slot). `in_msm` and `msm_age_ms` (`null` = only the sky view knows it); `signal_ids` the MSM signal IDs; `cnr_dbhz` per band present: its best signal's C/N0 (`null` = no C/N0 in the MSM type). `el_deg`, `az_deg` (`null` until the satellite-in-view output reported it), `sky_cnr_dbhz` from that report, `pos_age_ms` its age |
+
+The UI shows satellites first: a sky plot (satellites with a position,
+coloured by C/N0, labelled), the per-satellite table, counts per
+constellation and band with per-band totals, the mean C/N0 per band and
+tiles (tracked satellites, signals, mean C/N0); then, last and optional, a
+station map: the position with a small OpenStreetMap tile mosaic, fetched
+only after the user asks for it, with the attribution and a plain link to
+open the position in an external map (offline: the coordinates only).
+
+#### `POST /api/gnss/live` (adm)
+
+`{"minutes": 10}` (optional; 0 or left out = `default_min`; at most
+`max_min`, else `400 invalid_field`): open the window, or extend an open one
+by that much (at most `max_min` from now); either also turns the
+satellite-in-view output on again after a receiver reconfiguration ended it.
+`200` with the body of `GET /api/gnss/live`. Errors: `409 journal_open` (a
+receiver update session), `409 safe_mode`.
+
+#### `DELETE /api/gnss/live` (adm)
+
+Close it now (the output is turned off at the next free moment).
+`200 {"ok": true}`; `409 live_view_closed` when none is open.
+
 ---
 
 ## 9. Receiver update sessions
@@ -665,7 +835,8 @@ comes from `station_get_flash_log()` (empty until there is any).
 `flash_available` is `false` until receiver flashing is built.
 
 `why` codes: `no_journal`, `not_waiting` (a session runs), `safe_mode`
-(only `clear` there), `settings_unavailable`, `app_trial`, `app_update`,
+(only `clear` there), `settings_unavailable`, `receiver_maintenance` (retry
+and restart: nothing is sent to the receiver), `app_trial`, `app_update`,
 `not_available_yet`, `unreadable` (a damaged journal: only `clear`; the
 POST answers `409 journal_open`).
 
@@ -681,7 +852,8 @@ action's warning first:
 
 `202 {"accepted": true}` (`clear` completes at once: `200 {"ok": true}`).
 Errors: `404 no_journal`, `409 not_waiting`, `409 safe_mode`,
-`409 app_trial`, `409 app_update`, `409 settings_unavailable`,
+`409 receiver_maintenance`, `409 app_trial`, `409 app_update`,
+`409 settings_unavailable`,
 `501 not_available_yet` (retry and restart with a journal, until receiver
 flashing is built).
 
@@ -737,13 +909,15 @@ UI labels `mountpoint` "Credential username" and `label` "Dashboard label"
  "frames_skipped_idle": 12, "lag_drops": 0, "laps": 0, "lag_ms_now": 40, "max_lag_ms": 1000,
  "backoff_attempt": 0, "next_retry_s": 0,
  "last_status_code": 200, "last_status_line": "ICY 200 OK", "server_header": "",
- "resolved_ip": "35.207.172.57", "dns_cached_used": 0,
+ "resolved_ip": "35.207.172.57", "dns_cached_used": 0, "unreached_s": 0,
  "tls_version": null, "tls_cipher": null, "hint": "", "last_err": null}
 ```
 
 "Today" is the current UTC day. The protected-slot fields are `null` for
 other slots; `tls_*` are `null` without TLS; `max_lag_ms` is the slot's lag
-limit.
+limit; `unreached_s` the current run of failures that never reached the
+caster (DNS failures, connects that timed out or failed locally; 0 = none;
+the UI says "caster not reached for N s").
 
 ### `PUT /api/casters/{n}` (adm)
 
@@ -808,8 +982,10 @@ removes it. The slot reconnects. `200` with the slot entry. Errors:
   "online": true, "associated": true, "ip": "192.168.1.50", "rssi": -60, "channel": 6,
   "time_synced": true, "upstream": "ok", "probe_age_s": 120,
   "reconnects": 1, "connect_failures": 0, "offline_s": 0, "retry_in_s": 0,
-  "last_disconnect_reason": 8, "fallback_dns": false,
-  "ladder": {"active": false, "rung": 0, "withheld": "none", "actions": 0},
+  "last_disconnect_reason": 8, "fallback_dns": false, "assoc_no_ip_s": 0,
+  "cred_trial": false, "cred_trial_left_s": 0, "cred_pending": false, "pending_ssid": null,
+  "cred_reverted": false,
+  "ladder": {"active": false, "rung": 0, "withheld": "none", "triggers": [], "actions": 0},
   "ap": {"active": false, "ssid": "onocoydiy-1A2B", "reasons": [], "clients": 0,
          "recovery_left_s": 0, "password_set": false},
   "scan": {"running": false, "age_s": 30,
@@ -819,7 +995,8 @@ removes it. The slot reconnects. `200` with the slot entry. Errors:
 
 `last_disconnect_reason` is the numeric `wifi_err_reason_t`. `scan.results`
 are the cached ones (no radio activity; at most 24); `age_s` is `null`
-before the first scan.
+before the first scan. `assoc_no_ip_s`, `cred_*`, `pending_ssid` and
+`ladder.triggers` as in `/api/status` (section 6).
 
 ### `PUT /api/wifi` (adm)
 
@@ -837,12 +1014,34 @@ Every member is optional.
   It takes effect the next time the AP comes up. The UI sends it alone, so
   changing it never touches the station's Wi-Fi connection.
 
-`202 {"accepted": true, "persisted": true}`. With new credentials the
-station switches about a second later; an AP
-that is up stays up until a minute after the station has an IP, so the UI
-polls `GET /api/wifi` for `online` and `ip`. Changing Wi-Fi drops every
-caster session (the UI warns). With the settings unavailable the
-credentials are used for this boot only (`"persisted": false`).
+`202 {"accepted": true, "persisted": true, "trial": true}`. With new
+credentials the station switches about a second later; an AP that is up
+stays up until a minute after the station has an IP, so the UI polls
+`GET /api/wifi` for `online` and `ip`. Changing Wi-Fi drops every caster
+session (the UI warns). With the settings unavailable the credentials are
+used for this boot only (`"persisted": false`).
+
+`trial` (`network_set_credentials`): with credentials stored before (and
+different), the new ones are stored as **pending** and tried for 90 s.
+They replace the current ones once they get an IP; otherwise the station
+goes back to its previous credentials and keeps the new ones pending
+(`cred_reverted`, `pending_ssid`), so a typo never strands a remote station.
+Pending credentials are tried again first thing at the next boot, with
+`POST /api/wifi/pending/retry`, or dropped with
+`POST /api/wifi/pending/discard`. Without stored credentials (first setup)
+`trial` is `false`: they are the station's at once.
+
+### `POST /api/wifi/pending/retry` (adm)
+
+Empty body. Try the pending credentials again (90 s, then back to the
+current ones unless they got an IP). `202 {"accepted": true}`;
+`404 nothing_pending`.
+
+### `POST /api/wifi/pending/discard` (adm)
+
+Empty body. Forget the pending credentials (a trial in progress ends: the
+station goes back to its current credentials). `200 {"ok": true}`;
+`404 nothing_pending`.
 
 ### `POST /api/wifi/scan` (adm)
 
@@ -996,9 +1195,9 @@ receiver changed."
 
 Errors (all before anything is downloaded): `409 not_offered` (the build
 changed or nothing is offered; dev builds are offered nothing), `409
-app_trial` (`retry_in_s` = time left), `409 app_update`, `409
-journal_open`, `409 receiver_not_streaming`, `409 unsupported_model`, `409
-safe_mode`, `409 package_pinned`, `409 busy`.
+receiver_maintenance`, `409 app_trial` (`retry_in_s` = time left), `409
+app_update`, `409 journal_open`, `409 receiver_not_streaming`, `409
+unsupported_model`, `409 safe_mode`, `409 package_pinned`, `409 busy`.
 
 ### `POST /api/update/rollback` (adm)
 
@@ -1042,9 +1241,10 @@ rolled_back_ack_required`, `409 journal_open`, `409 busy`, `409 app_trial`.
 ### `POST /api/upload/gnss` (adm)
 
 Size at most the package slot (`pkg_store_capacity()`, 6 MB minus 4 KB).
-Refused before anything is stored: `409 safe_mode`, `409 app_trial`, `409
-app_update`, `409 journal_open`, `409 receiver_not_streaming`, `409
-unsupported_model`, `409 package_pinned`, `409 busy`.
+Refused before anything is stored: `409 receiver_maintenance`, `409
+safe_mode`, `409 app_trial`, `409 app_update`, `409 journal_open`, `409
+receiver_not_streaming`, `409 unsupported_model`, `409 package_pinned`,
+`409 busy`.
 
 Stored with `pkg_store_begin(size, NULL)` (SHA-256 computed on the way),
 then inspected without the receiver. The response, also returned by
@@ -1103,7 +1303,7 @@ All admin only.
   "level": "ok", "alerts": [], "last_step": "none", "ladder_suspended": false,
   "uptime_s": 86400, "gnss_stalls": 0, "recoveries": 0, "caster_restarts": 0,
   "network_recoveries": 0, "rtcm_gap_ms": 230, "gnss_retry_in_s": null,
-  "factory_reset_refused_age_s": null, "admin_resets": 0,
+  "factory_reset_refused_age_s": null, "admin_resets": 0, "recovery_mode": "full", "reboot_recheck": false,
   "heap": {"internal_free": 120000, "internal_min": 98000, "internal_largest": 64000, "psram_free": 7000000,
            "psram_min": 6900000, "psram_largest": 4000000},
   "inhibited_by": null, "update_slot": "none",
@@ -1115,7 +1315,7 @@ All admin only.
   "link": {"mode": "stream", "baud": 115200, "rx_bytes": 0, "tx_bytes": 0,
            "hw_fifo_overflows": 0, "rx_buffer_full": 0, "rx_events_dropped": 0, "line_errors": 0,
            "baud_switch_bytes": 0, "rtcm_held": 0, "flushed_bytes": 0,
-           "last_rx_age_ms": 10, "last_rtcm_age_ms": 180,
+           "last_rx_age_ms": 10, "last_rtcm_age_ms": 180, "open": true, "open_failures": 0, "hands_off": false,
            "framing": {"bytes_in": 0, "bytes_discarded": 0, "rtcm_frames": 0, "rtcm_crc_errors": 0,
                        "rtcm_reserved_nonzero": 0, "rtcm_bad_length": 0, "text_lines": 0,
                        "text_rejected": 0, "text_aborts": 0, "text_overflows": 0, "bin_skipped": 0,
@@ -1124,11 +1324,11 @@ All admin only.
           "epochs_by_gap": 0, "publish_failures": 0, "consumers": 1, "capacity": 262144,
           "last_frame_age_ms": 180},
   "station": {"state": "streaming", "rtcm_excluded": 0, "detect_failures": 0, "detect_saw_bytes": false,
-              "lease_held": false, "since_lease_release_ms": null},
+              "lease_held": false, "since_lease_release_ms": null, "rx_maintenance": false},
   "obs": {"epochs": 86400, "epoch_gaps": 0, "epoch_period_ms": 1000, "epoch_jumps": 0},
   "network": {"reconnects": 1, "connect_failures": 0, "offline_s": 0, "last_disconnect_reason": 8,
-              "fallback_dns": false, "probe": "ok", "probe_age_s": 120,
-              "ladder": {"active": false, "rung": 0, "withheld": "none", "actions": 0}},
+              "fallback_dns": false, "probe": "ok", "probe_age_s": 120, "assoc_no_ip_s": 0,
+              "ladder": {"active": false, "rung": 0, "withheld": "none", "triggers": [], "actions": 0}},
   "journal": {"available": true, "capacity": 4064, "oldest_seq": 1, "newest_seq": 77, "sector_cycles": 0,
               "written": 12, "queued": 0, "refused_kind": 0, "refused_budget": 0, "queue_full": 0, "io_errors": 0},
   "log": {"lines": 812, "ring_overwritten": 0, "cut": 0, "console_dropped": 0, "console_dropped_bytes": 0,
@@ -1142,7 +1342,10 @@ the time until the receiver recovery's next retry pass (`null` = none
 scheduled). `factory_reset_refused_age_s` is the time since a BOOT-button
 factory reset was refused because a receiver update was running (`null` =
 not this boot); `admin_resets` counts BOOT-button password resets this
-boot. `journal` and `log` are the event journal's and the log ring's
+boot. `recovery_mode` and `reboot_recheck` as in `/api/status`.
+`link.open` and `link.open_failures`: the UART driver is installed, failed
+installs since boot ("receiver UART closed (reopening)" while `open` is
+false in a mode other than `off`); `link.hands_off`: receiver maintenance. `journal` and `log` are the event journal's and the log ring's
 counters (`diag_journal_info()`, `diag_log_stats()`; `journal.capacity` in
 records; `log.prev_boot_available` false and `log.prev_boot_lines` 0 when
 the previous boot's lines are not readable, see `GET /api/logs`).
@@ -1245,6 +1448,29 @@ At most 64 entries per call, oldest first, `seq > cursor`. `time_unix`
 Enum numbers are the C values; the UI decodes them with the appendix
 tables.
 
+### `GET /api/connections`
+
+The connection history next to the ledger: the newest 64 records of
+`caster_down`, `caster_up`, `wifi_up` and `wifi_disconnect`, newest first,
+read backwards through the journal.
+
+```json
+{"complete": true,
+ "entries": [{"seq": 812, "time_unix": 1760000000, "uptime_s": 3600, "kind": "caster_down",
+              "slot": 0, "slot_name": "Onocoy", "class": "remote_close", "count": 0, "duration_s": 3600,
+              "reason": null, "rssi": null}]}
+```
+
+| Field | Notes |
+|---|---|
+| `complete` | every journal record was looked at (the list holds every connection record the journal keeps) |
+| `time_unix` | `null` without a trusted clock then: `uptime_s` dates it after its boot |
+| `slot`, `slot_name` | caster records: the slot and its name now (`null` without one, and in safe mode); `null` for Wi-Fi |
+| `class` | `caster_down`: why the session ended (`ntrip_fail_class_t`; `none` = not a caster failure: a pause, a configuration change, a health restart, the receiver's RTCM stopping, the network going down); `null` otherwise |
+| `count` | `caster_down`: shorter sessions not journalled since the slot's previous `caster_down`; `caster_up`: failed attempts since the previous session; `wifi_up`: connect attempts during the outage; `null` for `wifi_disconnect` |
+| `duration_s` | `caster_down`: session length; `caster_up`, `wifi_up`: outage length; `null` for `wifi_disconnect` |
+| `reason`, `rssi` | `wifi_disconnect`: `wifi_err_reason_t` and the RSSI at the drop; `null` otherwise |
+
 ### `GET /api/coredump`, `DELETE /api/coredump`
 
 `GET` streams the ELF dump (`application/octet-stream`,
@@ -1305,11 +1531,17 @@ the session, but nothing may rely on `localStorage` surviving.
 **First setup** (unconfigured station, open AP `onocoydiy-XXXX`):
 1. `GET /api/session`: `admin_set: false`, `claim_allowed: true`.
 2. `POST /api/setup/admin`: the admin password; the response logs in.
-3. Optional: the Onocoy slot, `PUT /api/casters/0` with `onocoy_preset`,
+3. Reception check, before any caster is enabled: `POST /api/gnss/live`
+   opens the live view and the UI polls `GET /api/gnss/live`, with plain
+   pass/warn hints (satellites tracked, mean C/N0, whether a constellation
+   has 4 bands, the condition of Onocoy's top band reward; guide values,
+   PROVISIONAL, to be confirmed on hardware) and "Continue anyway";
+   `DELETE /api/gnss/live` when the user goes on.
+4. Optional: the Onocoy slot, `PUT /api/casters/0` with `onocoy_preset`,
    the credential username and password.
-4. Wi-Fi: `GET /api/wifi` (cached scan), `POST /api/wifi/scan` if needed
+5. Wi-Fi: `GET /api/wifi` (cached scan), `POST /api/wifi/scan` if needed
    (nothing streams yet), then `POST /api/setup/done` and `PUT /api/wifi`.
-5. The UI polls `GET /api/wifi` every second until `online`, then shows
+6. The UI polls `GET /api/wifi` every second until `online`, then shows
    the station's address (`ip`, and the hostname). The AP follows the
    station's channel once it connects, so phones may drop off it briefly;
    the UI keeps polling and otherwise tells the user to join their own
@@ -1348,6 +1580,12 @@ client stays connected): the claim works again over that AP. BOOT held
 
 Safe-mode clear works only in safe mode (`not_in_safe_mode` otherwise) and
 is refused with `reboot_inhibited` while any reboot inhibit is held.
+During receiver maintenance (section 8) apply, lock, re-survey, receiver
+updates (banner, upload, confirm), flash retry and restart-receiver answer
+`receiver_maintenance`; a profile save is stored and checked when it ends;
+everything else works as usual. Receiver maintenance itself is refused
+while a receiver update session is open (`journal_open`) and while a
+receiver session or job runs (`busy`).
 Receiver updates are also refused (`receiver_not_streaming`,
 `unsupported_model`, `package_pinned`) whenever those hold. With the
 settings unavailable this boot, every call that would persist something
@@ -1499,12 +1737,17 @@ after it). The journal's `a` and `b` carry these C values.
 | `health_level_t` | `ok`, `degraded`, `recovering`, `failed` |
 | `health_step_t` | `none`, `resync`, `link_restart`, `rescan`, `reconfigure`, `receiver_reset`, `reboot` |
 | `health_alert_t` | `power_supply`, `receiver_power`, `bands`, `profile_drift`, `heap_fragmented`, `safe_mode`, `settings_degraded`, `no_upstream`, `link_loss`, `power_lost` |
+| `health_recovery_mode_t` | `full`, `no_reboot`, `alerts_only` |
 | `ntrip_state_t` | `disabled`, `wait_network`, `wait_data`, `connecting`, `streaming`, `backoff`, `auth_failed`, `paused`, `config_error`, `banned` |
 | `ntrip_fail_class_t` | `none`, `dns`, `connect`, `tls`, `timeout`, `remote_close`, `write_stall`, `keepalive`, `auth`, `mount_busy`, `config`, `banned` |
 | `ntrip_trust_t` | `bundle`, `custom_ca`, `insecure` |
 | `ntrip_backoff_profile_t` | `fast`, `standard`, `polite` |
 | `um98x_base_mode_t` | `survey_in`, `fixed` |
 | `um98x_pos_source_t` | `none`, `survey`, `averaged`, `user` |
+| `um98x_setting_t` | `unknown`, `on`, `off` |
+| `station_live_sky_t` | `off`, `pending`, `on`, `on_profile`, `blocked`, `stopping` |
+| `station_live_why_t` | `none`, `busy`, `not_streaming`, `maintenance`, `autocfg_off`, `unsupported`, `reconfigured`, `rejected`, `no_answer`, `flash`, `not_running` |
+| `station_live_end_t` | `none`, `user`, `expired`, `idle`, `flash` |
 | `um98x_flash_phase_t` | `idle`, `checking`, `entering`, `transferring`, `committing`, `finishing`, `done`, `failed`, `needs_user` |
 | `um98x_journal_state_t` | `prepared`, `baud_changing`, `reset_sent`, `menu2_sent`, `transferring`, `eot_sent`, `verifying`, `failed`, `needs_user` |
 | `um98x_flash_failure_t` | `none`, `transport`, `package`, `unconfirmed`, `no_answer`, `app_not_starting`, `entry`, `journal` |
@@ -1514,6 +1757,7 @@ after it). The journal's `a` and `b` carry these C values.
 | `network_probe_t` | `none`, `ok`, `no_ip`, `dns_failed`, `no_upstream` |
 | `network_ap_reason_t` | `setup`, `fallback`, `linger`, `recovery` |
 | `network_ladder_why_t` | `none`, `upstream_ok`, `no_upstream`, `journal_open`, `interval`, `inhibited`, `ap_in_use`, `no_reboot_trigger`, `ap_overridden` |
+| `network_ladder_trigger_t` (bits) | `protected`, `assoc_no_ip`, `unreached` |
 | `gnss_link_mode_t` | `off`, `stream`, `command`, `raw` |
 | `lifecycle_reset_class_t` | `power_on`, `planned`, `crash`, `brownout`, `other` |
 | `lifecycle_reboot_reason_t` | `none`, `user`, `factory_reset`, `admin_reset`, `app_update`, `app_revert` (a failed trial, also one the bootloader rolled back), `gnss_ladder`, `network_ladder`, `low_heap`, `safe_mode_retry`, `safe_mode_cleared`, `nvs_slot_switch`, `boot_failure`, `app_rollback` (the user's rollback) |

@@ -19,6 +19,7 @@
 #include "cJSON.h"
 #include "esp_log.h"
 #include "gnss_types.h"
+#include "health.h"
 #include "ntrip_server.h"
 #include "web_core.h"
 
@@ -60,10 +61,31 @@ bool web_rtcm_is_ephemeris(uint16_t msg);
 /**
  * PUT /api/gnss/profile. `stored` is the profile in force; *profile gets
  * the merged result when the body has "profile" (*have_profile), *autocfg
- * when it has "autocfg" (*have_autocfg).
+ * when it has "autocfg" (*have_autocfg). The antenna strings
+ * (antenna_model, antenna_serial) lose their trailing spaces (the stored
+ * form) and must then pass um98x_antenna_str_valid(): at most 31 printable
+ * ASCII characters without '"'; inner spaces stay.
  */
 bool web_parse_profile_put(const cJSON *root, const um98x_base_profile_t *stored, um98x_base_profile_t *profile,
                            bool *have_profile, bool *autocfg, bool *have_autocfg, web_bad_t *bad);
+
+/**
+ * The "recovery" member of PUT /api/gnss/profile (gnss/recovery): one of
+ * "full", "no_reboot", "alerts_only". *have false when it is left out.
+ */
+bool web_parse_recovery(const cJSON *root, bool *have, health_recovery_mode_t *mode, web_bad_t *bad);
+
+/**
+ * POST /api/gnss/maintenance: {"duration_s": n}, one of WEB_MAINT_CHOICES_S;
+ * left out (or 0) = the default (*duration_s 0: the station's default).
+ */
+bool web_parse_maintenance(const cJSON *root, uint32_t *duration_s, web_bad_t *bad);
+
+/**
+ * POST /api/gnss/live: {"minutes": n}, 0..max_min; left out (or 0) = the
+ * station's default window.
+ */
+bool web_parse_live(const cJSON *root, uint32_t max_min, uint32_t *minutes, web_bad_t *bad);
 
 /* ---- casters ------------------------------------------------------------------------------ */
 

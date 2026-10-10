@@ -117,6 +117,7 @@ const L = {
     settings_unavailable: 'settings unavailable', app_trial: 'app trial running', app_update: 'app update running',
     not_available_yet: 'not available in this firmware yet',
     unreadable: 'the update record is damaged: only clearing it works',
+    receiver_maintenance: 'receiver maintenance is on',
   },
   job: {
     check: 'Update check', app_update: 'App update', app_upload: 'App upload', gnss_update: 'Receiver package download',
@@ -150,7 +151,36 @@ const L = {
   linkMode: { off: 'Off', stream: 'Streaming', command: 'Command session', raw: 'Raw (update)' },
   baseMode: { survey_in: 'Survey-in', fixed: 'Fixed position' },
   posSource: { none: 'None', survey: 'Survey-in', averaged: 'Averaged', user: 'Entered by you' },
+  setting: { on: 'on', off: 'off', unknown: 'unknown' },
+  recovery: {
+    full: ['full', 'Every recovery step, up to restarting the station when that can help.'],
+    no_reboot: ['no ESP32 reboot', 'Every step that acts on the receiver, but the station itself is never restarted for it.'],
+    alerts_only: ['alerts only', 'Nothing is sent to the receiver and nothing restarts: a stall is only shown and recorded in the journal.'],
+  },
+  trigger: { protected: 'Onocoy caster down', assoc_no_ip: 'connected without an IP address', unreached: 'a caster not reached' },
+  liveSky: {
+    off: 'off', pending: 'waiting', on: 'on', on_profile: 'on (receiver profile)', blocked: 'not available', stopping: 'turning off',
+  },
+  liveWhy: {
+    none: '',
+    busy: 'the station is busy with the receiver; it turns on once that ends',
+    not_streaming: 'the receiver is not streaming',
+    maintenance: 'receiver maintenance: nothing is sent to the receiver',
+    autocfg_off: 'automatic configuration is off, so the station sends the receiver nothing',
+    unsupported: 'the station does not configure this receiver model',
+    reconfigured: 'the receiver was configured or restarted since; extend the view to turn it on again',
+    rejected: 'the receiver refused the command',
+    no_answer: 'the receiver did not answer',
+    flash: 'a receiver update runs',
+    not_running: 'the receiver path is not running',
+  },
+  liveEnd: {
+    none: '', user: 'you stopped it', expired: 'its time was up', idle: 'no page showed it for a while', flash: 'a receiver update began',
+  },
 };
+
+/* Receiver maintenance durations (s) as the station offers them. */
+const MAINT_CHOICES = [[900, '15 minutes'], [1800, '30 minutes'], [3600, '1 hour'], [7200, '2 hours'], [14400, '4 hours']];
 
 /* Journal enumerations by C value (API.md appendix: position in C order). */
 const J = {

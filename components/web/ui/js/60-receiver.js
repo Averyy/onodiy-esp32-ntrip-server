@@ -2,10 +2,13 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Receiver: identity and link, base position (survey, lock, survey again),
- * and the base profile editor (signal groups, base mode, station ID, COM1
- * baud, RTCM messages, satellite-in-view output). Field rules mirror
- * PUT /api/gnss/profile; the station's own validation has the last word.
+ * Receiver: identity and link, the settings read back at the last
+ * configuration, base position (survey, lock, survey again), what the
+ * receiver publishes in RTCM 1033, receiver maintenance (hands off), the
+ * automatic recovery mode, and the base profile editor (signal groups, base
+ * mode, station ID, COM1 baud, RTCM messages, satellite-in-view output,
+ * antenna descriptor). Field rules mirror PUT /api/gnss/profile; the
+ * station's own validation has the last word.
  */
 
 const RTCM_NAMES = {
@@ -69,12 +72,37 @@ function positionActions(done) {
   };
 }
 
+/* The receiver's settings as read back at the last configuration, and the antenna and B1C/B2a steps of it. */
+function readBack(g) {
+  const rs = g.rx_settings || {};
+  const steps = g.apply_steps || {};
+  const a = steps.antenna || {}, b = steps.b1cb2a || {};
+  const when = rs.valid ? ' (read ' + (rs.read_unix ? 'at ' + fmt.time(rs.read_unix) : fmt.dur(rs.age_s) + ' ago') + ')' : '';
+  const ant = rs.antenna;
+  return [
+    kv([
+      ['BeiDou B1C/B2a in RTCM', lbl(L.setting, rs.b1cb2a || 'unknown') + when],
+      ['Multipath mitigation', lbl(L.setting, rs.mmp || 'unknown')],
+      ['Elevation mask', rs.mask_deg === null || rs.mask_deg === undefined ? 'unknown' : Number(rs.mask_deg).toFixed(1) + '°'],
+      ['Antenna (receiver)', ant ? [ant.model ? h('span', { class: 'ant' }, ant.model) : h('span', { class: 'muted' }, 'none'),
+        ant.serial ? ' · serial ' + ant.serial : '', ' · setup ID ' + ant.setup_id] : 'unknown'],
+      a.sent ? ['Antenna descriptor sent', a.ok ? h('span', { class: 't-ok' }, 'accepted') :
+        h('span', { class: 't-bad' }, 'antenna model rejected: ' + (a.reply || 'no reason given'))] : null,
+      b.sent ? ['B1C/B2a turned on', b.ok ? h('span', { class: 't-ok' }, 'accepted') :
+        h('span', { class: 't-bad' }, 'rejected: ' + (b.reply || 'no reason given'))] : null,
+    ]),
+    rs.valid ? null : h('p', { class: 'muted small' }, 'Unknown until the station next configures the receiver: it reads these settings back then ' +
+      '(nothing is kept across a restart).'),
+  ];
+}
+
 function receiverInfo(g) {
   const r = g.receiver || {};
   const link = g.link || {};
   const alerts = g.alerts || [];
+  const maint = (g.maintenance || {}).on;
   return [
-    h('h2', null, 'Receiver', badge(lbl(L.station, g.state), stationTone(g.state))),
+    h('h2', null, 'Receiver', maint ? badge('Maintenance', 'warn') : badge(lbl(L.station, g.state), stationTone(g.state))),
     r.valid === false ? h('p', { class: 'muted' }, 'The receiver has not identified itself yet.') : null,
     kv([
       ['Model', r.model],
@@ -92,6 +120,9 @@ function receiverInfo(g) {
       ['Last data', link.rx_age_ms === null || link.rx_age_ms === undefined ? 'never' : fmt.ms(link.rx_age_ms) + ' ago'],
       ['Last RTCM', h('span', { class: 't-' + ageTone(link.rtcm_age_ms) },
         link.rtcm_age_ms === null || link.rtcm_age_ms === undefined ? 'never' : fmt.ms(link.rtcm_age_ms) + ' ago')],
+      link.open === false && link.mode !== 'off' ? ['Receiver UART', h('span', { class: 't-bad' }, 'closed (reopening)' +
+        (link.open_failures ? ', ' + link.open_failures + ' failed opens' : ''))] : null,
+      link.hands_off ? ['Sending to the receiver', h('span', { class: 't-warn' }, 'off (receiver maintenance)')] : null,
       ['Automatic configuration', g.autocfg ? 'On' : 'Off'],
       ['Profile applied', g.profile_applied ? 'Yes' : h('span', { class: 't-warn' }, 'No')],
       ['Message 1230', g.rtcm1230_supported === null || g.rtcm1230_supported === undefined ? 'Not applied yet' :
@@ -99,11 +130,122 @@ function receiverInfo(g) {
       g.config_failed ? ['Last configuration', h('span', { class: 't-bad' }, 'Failed' + (g.config_retry_in_s ? '; next try in ' + fmt.dur(g.config_retry_in_s) : ''))] : null,
       g.detect_failures ? ['Detection failures', fmt.num(g.detect_failures)] : null,
     ]),
+    h('h3', { class: 'section-title' }, 'Settings read back'),
+    readBack(g),
     alerts.length ? h('div', { class: 'stack foot' }, alerts.map(a => {
       const t = L.salert[a] || [a, ''];
       return msg('warn', h('strong', null, t[0]), t[1] ? h('div', { class: 'small' }, t[1]) : null);
     })) : null,
   ];
+}
+
+/* What the receiver publishes in its antenna and receiver descriptor (RTCM 1033), as received. */
+function rtcm1033Info(g) {
+  const d = g.rtcm1033 || {};
+  return [
+    h('h2', null, 'Published in RTCM 1033', d.valid ? badge('Received', 'ok') : badge('Not yet', '')),
+    d.valid ? kv([
+      ['Station ID', String(d.station_id)],
+      ['Antenna', d.antenna ? h('span', { class: 'ant' }, d.antenna) : h('span', { class: 'muted' }, 'empty')],
+      ['Antenna setup ID', String(d.setup_id)],
+      ['Antenna serial', d.antenna_serial || DASH],
+      ['Receiver type', d.receiver_type || DASH],
+      ['Receiver firmware', d.receiver_fw || DASH],
+      ['Receiver serial', d.receiver_serial || DASH],
+      ['Received', d.age_ms === null || d.age_ms === undefined ? DASH : fmt.ms(d.age_ms) + ' ago'],
+    ]) : h('p', { class: 'muted' }, 'No antenna and receiver descriptor (message 1033) received yet.'),
+    d.bad_frames ? h('p', { class: 'small t-warn' }, fmt.num(d.bad_frames) + ' message' + (d.bad_frames === 1 ? '' : 's') +
+      ' 1033 could not be decoded since the start.') : null,
+    h('p', { class: 'muted small foot' }, 'What casters and rovers read about the antenna and the receiver. The antenna fields of the profile below change it.'),
+  ];
+}
+
+/**
+ * Receiver maintenance: start (with its duration), extend, end now. Built
+ * once per view so a pending request keeps its button; update(g) shows the
+ * state. done() refreshes the page.
+ */
+function maintenanceCtl(done) {
+  const out = errBox();
+  const badgeEl = badge('', '');
+  const status = h('p');
+  const dur = selectInput(MAINT_CHOICES, 1800, { 'aria-label': 'Duration' });
+  const durField = field('Duration', dur);
+  const label = () => lbl(Object.fromEntries(MAINT_CHOICES), dur.value);
+  const startBtn = btn('Start maintenance', async () => {
+    const ok = await dialog({ title: 'Start receiver maintenance?', ok: 'Start',
+      body: [h('p', null, 'For ' + label() + ' the station sends nothing to the receiver: no configuration, no checks, no recovery steps, ' +
+        'no updates. The receiver\'s RTCM still reaches the casters.'),
+      h('p', { class: 'muted' }, 'It ends by itself, with End now, or with a power cut; then the station checks the receiver as at start-up. ' +
+        'The time counts as planned in the availability record.')] });
+    if (!ok) return;
+    const r = await act(startBtn, () => api('POST', '/api/gnss/maintenance', { duration_s: Number(dur.value) }), out);
+    if (r !== undefined) {
+      toast('Receiver maintenance on: nothing is sent to the receiver.', 'ok');
+      done();
+    }
+  }, 'primary');
+  const extendBtn = btn('Add time', async () => {
+    const r = await act(extendBtn, () => api('POST', '/api/gnss/maintenance', { duration_s: Number(dur.value) }), out);
+    if (r !== undefined) {
+      toast('Receiver maintenance extended: ' + fmt.dur(r.left_s) + ' left.', 'ok');
+      done();
+    }
+  });
+  const endBtn = btn('End now', async e => {
+    if (await endMaintenance(e)) done();
+  });
+  return {
+    el: h('div', null,
+      h('h2', null, 'Receiver maintenance', badgeEl),
+      h('p', { class: 'muted small' }, 'Hands off while you work on the receiver through its other port, for example with a PC tool ' +
+        'or a firmware update there: the station then sends it nothing, and the casters still get its RTCM.'),
+      status, durField.el, h('div', { class: 'form-actions' }, startBtn, extendBtn, endBtn), out),
+    update(g) {
+      const m = g.maintenance || {};
+      badgeEl.className = 'badge ' + (m.on ? 'warn' : '');
+      badgeEl.textContent = m.on ? 'On' : 'Off';
+      startBtn.hidden = !!m.on;
+      extendBtn.hidden = endBtn.hidden = !m.on;
+      status.textContent = m.on ? 'On: about ' + fmt.dur(Math.ceil((m.left_s || 0) / 60) * 60) + ' left (' + fmt.dur(m.chosen_s) +
+        ' in all). Nothing is sent to the receiver.' + (m.max_left_s ? ' Adding time keeps at most ' + fmt.dur(m.max_left_s) + ' left.' : '') : '';
+      status.hidden = !m.on;
+    },
+  };
+}
+
+/** Automatic receiver recovery (gnss/recovery). Returns {el, update(g), dirty()}. */
+function recoveryCtl() {
+  const out = errBox();
+  let dirty = false, current = 'full';
+  const opts = ['full', 'no_reboot', 'alerts_only'].map(k => [k, h('span', { class: 'opt' }, h('span', null, L.recovery[k][0]),
+    h('small', { class: 'hint' }, L.recovery[k][1]))]);
+  const choice = radios('When the receiver stalls', 'recovery', opts, current);
+  choice.el.querySelector('.choices').classList.add('stacked');
+  choice.onchange(() => {
+    dirty = choice.value() !== current;
+  });
+  const save = btn('Save', async () => {
+    const v = choice.value();
+    const r = await act(save, () => api('PUT', '/api/gnss/profile', { recovery: v }), out);
+    if (r === undefined) return;
+    current = v;
+    dirty = false;
+    toast('Automatic receiver recovery: ' + L.recovery[v][0] + '.', 'ok');
+  }, 'primary');
+  return {
+    el: h('div', null,
+      h('h2', null, 'Automatic receiver recovery'),
+      h('p', { class: 'muted small' }, 'What the station does on its own when the receiver stops sending RTCM. A step already running completes.'),
+      choice.el, out, h('div', { class: 'form-actions' }, save)),
+    update(g) {
+      if (!dirty && g.recovery) {
+        current = g.recovery;
+        choice.set(current);
+      }
+    },
+    dirty: () => dirty,
+  };
 }
 
 function positionInfo(g) {
@@ -165,6 +307,9 @@ function profileEditor(g, done) {
   const sid = numInput(p.station_id, { inputmode: 'numeric', maxlength: 4 });
   const baud = selectInput(BAUDS.map(b => [b, b + ' baud']), p.com1_baud);
   const satView = checkbox('Satellite-in-view output', p.sat_view_output, 'Needed for the sky view on the Signals page.');
+  const antModel = textInput(p.antenna_model || '', { maxlength: 64, class: 'ant' });
+  const antSerial = textInput(p.antenna_serial || '', { maxlength: 64 });
+  const antSetup = numInput(p.antenna_setup_id || 0, { inputmode: 'numeric', maxlength: 3 });
 
   const F = {
     signal_group_master: field('Signal group (main antenna)', sgm),
@@ -176,6 +321,12 @@ function profileEditor(g, done) {
     station_id: field('Station ID', sid, '0 to 4095; goes into every RTCM message.'),
     com1_baud: field('Receiver link speed (COM1)', baud, 'Ephemeris messages need 460800 baud or more.'),
     rtcm: { el: h('div'), input: null, error: null },
+    antenna_model: field('Antenna model (IGS name and radome)', antModel, 'Only if the antenna has a published calibration: its IGS name ' +
+      'with the radome, exactly as listed (the name padded with spaces to 16 characters, then the 4-character radome code, ' +
+      'such as NONE). Leave it empty to keep the receiver\'s own value. To clear a model the receiver already holds, enter its ' +
+      'null-antenna name (ADVNULLANTENNA).'),
+    antenna_serial: field('Antenna serial number', antSerial, 'Optional; sent only with a model.'),
+    antenna_setup_id: field('Antenna setup ID', antSetup, '0 to 255; sent only with a model.'),
   };
   const rows = h('div', { class: 'msgrows' });
   const rtcmErr = h('small', { class: 'err', hidden: true });
@@ -241,7 +392,22 @@ function profileEditor(g, done) {
       com1_baud: Number(baud.value),
       rtcm: [],
       sat_view_output: satView.input.checked,
+      antenna_model: '',
+      antenna_serial: '',
+      antenna_setup_id: int(antSetup.value, 0, 255),
     };
+    /* Trailing spaces are dropped (the stored form); inner spaces stay. */
+    const antenna = (input, k) => {
+      const v = input.value.replace(/ +$/, '');
+      if (v.length > 31 || /[^\x20-\x7e]/.test(v) || v.indexOf('"') >= 0) {
+        fail(k, 'At most 31 plain characters (letters, digits, spaces and punctuation, no ").');
+        return '';
+      }
+      return v;
+    };
+    out.antenna_model = antenna(antModel, 'antenna_model');
+    out.antenna_serial = antenna(antSerial, 'antenna_serial');
+    if (out.antenna_setup_id === null) fail('antenna_setup_id', 'A number from 0 to 255.');
     if (out.signal_group_master === null) fail('signal_group_master', 'A number from 0 to 255.');
     if (out.signal_group_slave === null) fail('signal_group_slave', 'A number from 0 to 255.');
     if (out.station_id === null) fail('station_id', 'A number from 0 to 4095.');
@@ -299,6 +465,7 @@ function profileEditor(g, done) {
     queued: 'Saved. The station configures the receiver now.',
     unchanged: 'Saved. Nothing changes on the receiver.',
     safe_mode: 'Saved. It is applied after safe mode (with automatic configuration on).',
+    maintenance: 'Saved. Receiver maintenance is on: the station checks the profile when it ends (and applies it with automatic configuration on).',
     unsupported_model: 'Saved, but the station does not configure this receiver model.',
     not_running: 'Saved. The receiver path did not start this boot; the station applies the profile once it runs.',
   };
@@ -334,6 +501,8 @@ function profileEditor(g, done) {
         dirty = true;
       }, 'small'))),
   satView.el,
+  h('fieldset', { class: 'fieldset group' }, h('legend', null, 'Antenna (published in RTCM 1033)'),
+    F.antenna_model.el, h('div', { class: 'cols c2' }, F.antenna_serial.el, F.antenna_setup_id.el)),
   err,
   h('div', { class: 'form-actions' }, saveBtn, applyBtn));
   return { el: form, dirty: () => dirty };
@@ -347,6 +516,11 @@ Views.receiver = {
     const info = h('section', { class: 'card' });
     const posActions = positionActions(() => refresh());
     const position = h('section', { class: 'card' }, posActions.el);
+    const desc = h('section', { class: 'card' });
+    const maint = maintenanceCtl(() => refresh().catch(() => {}));
+    const maintCard = h('section', { class: 'card' }, maint.el);
+    const recovery = recoveryCtl();
+    const recoveryCard = h('section', { class: 'card' }, recovery.el);
     const profile = h('section', { class: 'card wide' });
 
     const fill = () => {
@@ -355,6 +529,9 @@ Views.receiver = {
       while (position.firstChild && position.firstChild !== posActions.el) position.firstChild.remove();
       position.insertBefore(add(doc.createDocumentFragment(), positionInfo(g)), posActions.el);
       posActions.update(g);
+      mount(desc, rtcm1033Info(g));
+      maint.update(g);
+      recovery.update(g);
     };
     const buildEditor = () => {
       editor = profileEditor(g, refresh);
@@ -368,7 +545,7 @@ Views.receiver = {
     }
     async function load() {
       g = await api('GET', '/api/gnss');
-      mount(el, h('div', { class: 'grid' }, info, position, profile));
+      mount(el, h('div', { class: 'grid' }, info, position, desc, maintCard, recoveryCard, profile));
       fill();
       buildEditor();
     }
@@ -380,7 +557,7 @@ Views.receiver = {
       destroy() {
         if (stop) stop();
       },
-      dirty: () => !!(editor && editor.dirty()),
+      dirty: () => !!(editor && editor.dirty()) || recovery.dirty(),
       reload() {
         if (!g) return;
         refresh().then(() => {

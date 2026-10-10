@@ -210,6 +210,41 @@ static bool parse_rtcm(const cJSON *arr, um98x_base_profile_t *p, web_bad_t *bad
     return true;
 }
 
+/*
+ * An antenna descriptor or serial number: trailing spaces dropped (the
+ * stored form, so what comes back is what is kept), then the profile's own
+ * rule (um98x_antenna_str_valid: printable ASCII without '"', at most
+ * UM98X_ANTENNA_STR_MAX characters). Inner spaces stay: an IGS name pads
+ * the antenna type before its radome code.
+ */
+static bool antenna_str(const cJSON *obj, const char *key, char *dst, size_t dst_size, web_bad_t *bad)
+{
+    const cJSON *it = get(obj, key);
+    if (it == NULL) {
+        return true;
+    }
+    if (!cJSON_IsString(it) || it->valuestring == NULL) {
+        return invalid(bad, key);
+    }
+    const char *s = it->valuestring;
+    size_t n = strlen(s);
+    while (n > 0 && s[n - 1] == ' ') {
+        n--;
+    }
+    char tmp[UM98X_ANTENNA_STR_MAX + 1];
+    if (n > UM98X_ANTENNA_STR_MAX || n >= dst_size) {
+        return invalid(bad, key);
+    }
+    memcpy(tmp, s, n);
+    tmp[n] = '\0';
+    if (!um98x_antenna_str_valid(tmp, sizeof(tmp))) {
+        return invalid(bad, key);
+    }
+    memset(dst, 0, dst_size);
+    memcpy(dst, tmp, n + 1);
+    return true;
+}
+
 static bool parse_profile(const cJSON *obj, const um98x_base_profile_t *stored, um98x_base_profile_t *p,
                           web_bad_t *bad)
 {
@@ -249,6 +284,15 @@ static bool parse_profile(const cJSON *obj, const um98x_base_profile_t *stored, 
         return invalid(bad, "sat_view_output");
     } else if (m == M_OK) {
         p->sat_view_output = sat_view;
+    }
+    if (!antenna_str(obj, "antenna_model", p->antenna_model, sizeof(p->antenna_model), bad) ||
+        !antenna_str(obj, "antenna_serial", p->antenna_serial, sizeof(p->antenna_serial), bad)) {
+        return false;
+    }
+    if ((m = get_int(obj, "antenna_setup_id", 0, 255, &v)) == M_BAD) {
+        return invalid(bad, "antenna_setup_id");
+    } else if (m == M_OK) {
+        p->antenna_setup_id = (uint8_t)v;
     }
 
     if (p->base_mode == UM98X_BASE_SURVEY_IN) {
@@ -319,6 +363,43 @@ bool web_parse_profile_put(const cJSON *root, const um98x_base_profile_t *stored
         }
         *have_profile = true;
     }
+    return true;
+}
+
+bool web_parse_recovery(const cJSON *root, bool *have, health_recovery_mode_t *mode, web_bad_t *bad)
+{
+    *have = false;
+    const char *s = NULL;
+    member_t m = get_str(root, "recovery", 16, &s);
+    if (m == M_ABSENT) {
+        return true;
+    }
+    if (m == M_BAD || !web_recovery_mode_parse(s, mode)) {
+        return invalid(bad, "recovery");
+    }
+    *have = true;
+    return true;
+}
+
+bool web_parse_maintenance(const cJSON *root, uint32_t *duration_s, web_bad_t *bad)
+{
+    int64_t v = 0;
+    member_t m = get_int(root, "duration_s", 0, UINT32_MAX, &v);
+    if (m == M_BAD || (m == M_OK && v != 0 && !web_maint_duration_ok((uint32_t)v))) {
+        return invalid(bad, "duration_s");
+    }
+    *duration_s = m == M_OK ? (uint32_t)v : 0;
+    return true;
+}
+
+bool web_parse_live(const cJSON *root, uint32_t max_min, uint32_t *minutes, web_bad_t *bad)
+{
+    int64_t v = 0;
+    member_t m = get_int(root, "minutes", 0, max_min, &v);
+    if (m == M_BAD) {
+        return invalid(bad, "minutes");
+    }
+    *minutes = m == M_OK ? (uint32_t)v : 0;
     return true;
 }
 

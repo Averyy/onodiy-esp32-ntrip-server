@@ -32,6 +32,7 @@ static const err_row_t s_errors[WEB_ERR_COUNT] = {
     [WEB_ERR_NOTHING_STAGED] = { "nothing_staged", 404, "No uploaded receiver package is waiting" },
     [WEB_ERR_NO_JOURNAL] = { "no_journal", 404, "No receiver update session is open" },
     [WEB_ERR_NO_COREDUMP] = { "no_coredump", 404, "No core dump stored" },
+    [WEB_ERR_NOTHING_PENDING] = { "nothing_pending", 404, "No Wi-Fi credentials are pending" },
     [WEB_ERR_METHOD_NOT_ALLOWED] = { "method_not_allowed", 405, "Method not allowed" },
     [WEB_ERR_BUSY] = { "busy", 409, "Another operation is running" },
     [WEB_ERR_JOURNAL_OPEN] = { "journal_open", 409, "A receiver update session is open" },
@@ -55,6 +56,10 @@ static const err_row_t s_errors[WEB_ERR_COUNT] = {
     [WEB_ERR_NO_ROLLBACK_IMAGE] = { "no_rollback_image", 409, "No previous app image to go back to" },
     [WEB_ERR_ADMIN_ALREADY_SET] = { "admin_already_set", 409, "An admin password is already set" },
     [WEB_ERR_ADMIN_NOT_SET] = { "admin_not_set", 409, "No admin password set yet" },
+    [WEB_ERR_RECEIVER_MAINTENANCE] = { "receiver_maintenance", 409,
+                                       "Receiver maintenance: nothing is sent to the receiver" },
+    [WEB_ERR_NOT_IN_MAINTENANCE] = { "not_in_maintenance", 409, "Receiver maintenance is not on" },
+    [WEB_ERR_LIVE_VIEW_CLOSED] = { "live_view_closed", 409, "The live view is not open" },
     [WEB_ERR_LENGTH_REQUIRED] = { "length_required", 411, "Content-Length required" },
     [WEB_ERR_TOO_LARGE] = { "too_large", 413, "Request body too large" },
     [WEB_ERR_UNSUPPORTED_MEDIA_TYPE] = { "unsupported_media_type", 415, "Unsupported content type" },
@@ -860,6 +865,17 @@ uint32_t web_expected_build(const char *fw)
         return 0;
     }
     return (uint32_t)v;
+}
+
+bool web_maint_duration_ok(uint32_t s)
+{
+    static const uint32_t choices[] = WEB_MAINT_CHOICES_S;
+    for (size_t i = 0; i < sizeof(choices) / sizeof(choices[0]); i++) {
+        if (choices[i] == s) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /* ---- caster policy ------------------------------------------------------------------------- */

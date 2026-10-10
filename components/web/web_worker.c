@@ -652,6 +652,9 @@ esp_err_t web_upload_app(web_req_t *r)
 static web_err_t gnss_refusal(uint32_t *retry_in_s)
 {
     *retry_in_s = UINT32_MAX;
+    if (web_rx_hands_off()) {
+        return WEB_ERR_RECEIVER_MAINTENANCE;   /* nothing is sent to the receiver */
+    }
     fw_update_status_t fw;
     if (fw_update_get_status(&fw) == ESP_OK) {
         switch (fw.gnss_blocked) {

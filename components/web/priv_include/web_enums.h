@@ -55,6 +55,8 @@ const char *web_probe_name(network_probe_t v);
 /** Name of one network_ap_reason_t bit (NULL for an unknown bit). */
 const char *web_ap_reason_name(uint32_t bit);
 const char *web_ladder_why_name(uint8_t v);
+/** Name of one network_ladder_trigger_t bit (NULL for an unknown bit). */
+const char *web_ladder_trigger_name(uint32_t bit);
 const char *web_link_mode_name(int v);
 const char *web_reset_class_name(lifecycle_reset_class_t v);
 const char *web_reboot_reason_name(lifecycle_reboot_reason_t v);
@@ -65,6 +67,14 @@ const char *web_band_name(gnss_band_t v);
 /** diag_event_t (1-based C values). */
 const char *web_diag_event_name(uint16_t kind);
 const char *web_update_slot_name(lifecycle_update_t v);
+/** health_recovery_mode_t ("full", "no_reboot", "alerts_only"). */
+const char *web_recovery_mode_name(health_recovery_mode_t v);
+/** um98x_setting_t of a receiver read-back ("unknown", "on", "off"). */
+const char *web_setting_name(uint8_t v);
+/** station_live_sky_t, station_live_why_t, station_live_end_t. */
+const char *web_live_sky_name(uint8_t v);
+const char *web_live_why_name(uint8_t v);
+const char *web_live_end_name(uint8_t v);
 
 /* ---- reverse lookups (request parsing) ---------------------------------------- */
 
@@ -73,6 +83,7 @@ bool web_ntrip_trust_parse(const char *s, ntrip_trust_t *out);
 bool web_ntrip_backoff_parse(const char *s, ntrip_backoff_profile_t *out);
 /** "none", "error", "warn", "info", "debug", "verbose". */
 bool web_log_level_parse(const char *s, esp_log_level_t *out);
+bool web_recovery_mode_parse(const char *s, health_recovery_mode_t *out);
 
 #ifdef __cplusplus
 }

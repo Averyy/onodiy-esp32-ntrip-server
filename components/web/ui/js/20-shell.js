@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: MIT
  *
  * App shell: header, navigation, hash router (#/casters, #/diag/logs, ...),
- * page-wide notices (safe mode, receiver update waiting, update banner),
- * dialogs, the restart overlay and the colour theme.
+ * page-wide notices (safe mode, receiver maintenance, receiver UART
+ * reopening, new Wi-Fi credentials on trial or pending, receiver update
+ * waiting, update banner), dialogs, the restart overlay and the colour theme.
  *
  * A view is {title, admin, create(el, arg) -> {update(status)?, destroy()?,
  * dirty()?, reload()?}}. update() runs on every status change; reload() when
@@ -315,6 +316,25 @@ function renderNotices() {
       'Wi-Fi, this page and updates still work.' + (sm.retry_in_s ? ' It tries normal operation again in ' + fmt.dur(Math.ceil(sm.retry_in_s / 60) * 60) + '.' : ''),
       [link('Details', '#/system', 'btn small'), link('Updates', '#/updates', 'btn small')]]);
   }
+  if (rcv.rx_maintenance) {
+    const left = rcv.maintenance_left_s ? ' It ends by itself in about ' + fmt.dur(Math.ceil(rcv.maintenance_left_s / 60) * 60) + '.' : '';
+    items.push(['warn', 'Receiver maintenance', 'Nothing is sent to the receiver while you work on it through its other port; ' +
+      'the casters still get its RTCM.' + left, [btn('End now', endMaintenance, 'small'), link('Details', '#/receiver', 'btn small')]]);
+  }
+  if (rcv.uart_closed && !sm.active) {
+    items.push(['bad', 'Receiver UART closed (reopening)', 'The station could not open its serial port to the receiver and keeps trying on its own. ' +
+      'Nothing arrives from the receiver meanwhile.', [link('Details', '#/diag', 'btn small')]]);
+  }
+  const net = st.network || {};
+  if (net.cred_trial) {
+    const left = net.cred_trial_left_s ? ' (about ' + fmt.dur(Math.ceil(net.cred_trial_left_s / 10) * 10) + ' left)' : '';
+    items.push(['info', 'Trying new Wi-Fi credentials' + left, 'The station tries ' + (net.pending_ssid || 'the new network') +
+      '. If it gets no address there, it goes back to its previous network by itself.', null]);
+  } else if (net.cred_pending) {
+    items.push(['warn', 'New Wi-Fi credentials not confirmed', 'Pending credentials for ' + (net.pending_ssid || 'a network') +
+      ' not confirmed: ' + (net.cred_reverted ? 'back on the previous network (' + (net.ssid || 'unknown') + ').' : 'they are tried at the next start.') +
+      ' Try them again, or discard them.', [btn('Try again', retryPendingWifi, 'small'), btn('Discard', discardPendingWifi, 'small')]]);
+  }
   const j = rcv.journal;
   const inLoader = alerts.indexOf('receiver_in_loader') >= 0;
   if (j === 'waiting' || j === 'unreadable' || j === 'unknown' || inLoader) {
@@ -359,6 +379,41 @@ function renderNotices() {
   mount(box, items.map(i => h('div', { class: 'notice ' + i[0], role: i[0] === 'bad' ? 'alert' : 'status' },
     h('div', { class: 'text' }, h('strong', null, i[1]), i[2]),
     i[3] ? h('div', { class: 'row' }, i[3]) : null)));
+}
+
+/* ---- Receiver maintenance and pending Wi-Fi credentials (notices, pages) ---- */
+
+async function endMaintenance(e) {
+  const b = e && e.currentTarget;
+  const ok = await dialog({ title: 'End receiver maintenance?', ok: 'End now',
+    body: h('p', null, 'The station talks to the receiver again and checks it as at start-up. ' +
+      'Make sure nothing else is connected to the receiver\'s other port and working on it.') });
+  if (!ok) return false;
+  const r = await act(b, () => api('DELETE', '/api/gnss/maintenance'));
+  if (r !== undefined) toast('Receiver maintenance ends. The station checks the receiver now.', 'ok');
+  return r !== undefined;
+}
+
+async function retryPendingWifi(e) {
+  const b = e && e.currentTarget;
+  const ok = await dialog({ title: 'Try the new Wi-Fi credentials again?', ok: 'Try again',
+    body: [h('p', null, 'The station leaves its current network and tries the new credentials for up to 90 seconds. ' +
+      'If they get no address, it comes back by itself.'),
+    h('p', { class: 'muted' }, 'This page may lose contact with the station meanwhile, and the casters reconnect afterwards.')] });
+  if (!ok) return false;
+  const r = await act(b, () => api('POST', '/api/wifi/pending/retry'));
+  if (r !== undefined) toast('Trying the new Wi-Fi credentials…', 'ok');
+  return r !== undefined;
+}
+
+async function discardPendingWifi(e) {
+  const b = e && e.currentTarget;
+  const ok = await dialog({ title: 'Discard the new Wi-Fi credentials?', ok: 'Discard', okKind: 'danger solid',
+    body: h('p', null, 'The station keeps using its current network and forgets the new credentials.') });
+  if (!ok) return false;
+  const r = await act(b, () => api('POST', '/api/wifi/pending/discard'));
+  if (r !== undefined) toast('New Wi-Fi credentials discarded.', 'ok');
+  return r !== undefined;
 }
 
 /* ---- Dialogs ----------------------------------------------------------- */
