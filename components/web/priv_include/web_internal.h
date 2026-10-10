@@ -1,0 +1,306 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Avery L.
+ * SPDX-License-Identifier: MIT
+ *
+ * Internal interface between the web server's files:
+ *   web.c         server, request checks, dispatcher, assets, captive portal,
+ *                 events and the periodic tick
+ *   web_auth.c    admin password, sessions, login throttling
+ *   web_api.c     REST handlers and the status snapshot
+ *   web_ws.c      WebSocket clients, status deltas, events, progress, log
+ *   web_worker.c  uploads and downloads on the worker task, the uploaded
+ *                 receiver package, deferred system actions
+ *
+ * Threading: everything except the worker runs on the server task (handlers
+ * and work queued with httpd_queue_work), so the session table and the
+ * WebSocket clients need no lock. Event handlers only set flags and queue
+ * work. The worker task touches only its own state, published to the
+ * server task through atomics.
+ */
+#pragma once
+
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "cJSON.h"
+#include "esp_err.h"
+#include "esp_http_server.h"
+#include "web_build.h"
+#include "web_core.h"
+#include "web_json.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * Receiver flashing is not built yet (blocked on bench tests): the update
+ * flow stops before the flash and says so. The one place that knows it.
+ */
+#define WEB_FLASH_AVAILABLE false
+
+/** Onocoy's TLS port for source connections (public Onocoy documentation). */
+#define WEB_ONOCOY_TLS_PORT 2121u
+
+/** This project, as the app description of an image names it. */
+#define WEB_PROJECT_NAME "onocoydiy-esp-um982"
+
+/** Largest JSON request body; the CA certificate route takes more. */
+#define WEB_JSON_MAX       2048u
+#define WEB_JSON_MAX_CA    6144u
+
+/** Uploads and downloads move in pieces of this size (internal RAM buffer). */
+#define WEB_IO_CHUNK       4096u
+
+/* ---- server ---------------------------------------------------------------------------- */
+
+/** Running server, NULL when stopped. */
+httpd_handle_t web_server(void);
+
+/** Monotonic seconds (esp_timer). */
+uint32_t web_now_s(void);
+
+/** Public status setting (cached; refreshed on change). */
+bool web_public_status(void);
+void web_public_status_set_cached(bool on);
+
+/** Hostname in use (DHCP / mDNS name of the station interface). */
+const char *web_hostname_active(void);
+
+/** Queue the periodic work now (events, progress) instead of waiting for the next tick. */
+void web_kick(void);
+
+/* ---- requests and responses ------------------------------------------------------------- */
+
+typedef enum {
+    WEB_ACC_PUB = 0,     /**< always */
+    WEB_ACC_PUBSTAR,     /**< without a session only while public status is on */
+    WEB_ACC_ADMIN,       /**< admin session */
+    WEB_ACC_CLAIM,       /**< the handler applies the claim rules */
+} web_access_t;
+
+typedef enum {
+    WEB_BODY_NONE = 0,   /**< GET, DELETE */
+    WEB_BODY_JSON,       /**< POST, PUT: application/json, parsed */
+    WEB_BODY_UPLOAD,     /**< raw octet stream, read by the handler */
+} web_body_t;
+
+/** One request after the checks. */
+typedef struct {
+    httpd_req_t *req;
+    int sess;            /**< session index, -1 = none */
+    bool admin;          /**< an admin session (WEB_ACC_PUBSTAR: false = public form) */
+    bool on_ap;          /**< arrived over the device's own AP */
+    cJSON *body;         /**< WEB_BODY_JSON: the parsed object */
+    char query[96];      /**< query string ("" = none) */
+} web_req_t;
+
+typedef esp_err_t (*web_handler_t)(web_req_t *r);
+
+typedef struct {
+    const char *uri;
+    httpd_method_t method;
+    web_access_t access;
+    web_body_t body;
+    size_t max_body;     /**< JSON bodies; 0 = WEB_JSON_MAX */
+    web_handler_t fn;
+} web_route_t;
+
+/** The REST routes (web_api.c). */
+extern const web_route_t web_api_routes[];
+extern const size_t web_api_route_count;
+
+/** True if `path` (no query) is one of the API paths (for 405 versus 404). */
+bool web_api_path_known(const char *path);
+
+/** Response headers every API and page response carries (no-store for the API). */
+void web_set_common_headers(httpd_req_t *req, bool api);
+
+/** Error response with the common body. Returns ESP_OK (the request is answered). */
+esp_err_t web_send_error(httpd_req_t *req, web_err_t err, const char *message, const char *field, uint32_t retry_in_s,
+                         const char *by, const char *reason);
+esp_err_t web_send_err(httpd_req_t *req, web_err_t err);
+/** 500 internal with the esp_err_t name as message. */
+esp_err_t web_send_internal(httpd_req_t *req, esp_err_t err);
+
+/** Send a short literal JSON body ("{\"ok\": true}"). */
+esp_err_t web_send_json_literal(httpd_req_t *req, int status, const char *json);
+
+/**
+ * JSON response through the streaming writer: chunked once the buffer
+ * fills, a plain Content-Length response otherwise. `buf` is the caller's
+ * (the server task uses web_http_buf()).
+ */
+typedef struct {
+    wj_t w;
+    httpd_req_t *req;
+    int status;
+    bool headers_sent;
+    bool send_failed;
+} web_resp_t;
+
+void web_resp_begin(web_resp_t *r, httpd_req_t *req, int status, char *buf, size_t cap);
+esp_err_t web_resp_end(web_resp_t *r);
+
+/** The server task's 2 KB PSRAM response buffer (server task only). */
+char *web_http_buf(size_t *cap);
+
+/** Interface of the request: true when its local address is the AP's. */
+bool web_req_on_ap(httpd_req_t *req);
+
+/** Request checks of a WebSocket handshake (Host, Origin); false = answered already. */
+bool web_ws_precheck(httpd_req_t *req);
+
+/* ---- authentication (web_auth.c) --------------------------------------------------------------- */
+
+/** Load the admin password record; reset sessions and throttling. */
+void web_auth_init(void);
+
+typedef enum {
+    WEB_ADMIN_NONE = 0,      /**< no password: claim over the AP */
+    WEB_ADMIN_SET,           /**< a record is loaded (stored, or RAM-only this boot) */
+    WEB_ADMIN_UNREADABLE,    /**< something is stored but it cannot be read */
+} web_admin_state_t;
+
+web_admin_state_t web_auth_admin_state(void);
+
+/** Session of the request's cookie (extends its idle timeout when `touch`). -1 if none. */
+int web_auth_session(httpd_req_t *req, bool touch);
+
+/** Generation of a live session (links WebSocket clients to it). */
+uint32_t web_auth_session_gen(int idx);
+bool web_auth_session_alive(int idx, uint32_t gen);
+uint32_t web_auth_session_left_s(int idx);
+void web_auth_session_touch(int idx);
+
+/** Seconds a login must still wait (0 = allowed now). */
+uint32_t web_auth_throttle_wait_s(void);
+
+/** Check the password (counts a failure, resets on success). Call only when the throttle allows it. */
+bool web_auth_check(const char *pw);
+
+/** New session; sets the cookie header on the response (`cookie_buf` must outlive the response). */
+int web_auth_start_session(httpd_req_t *req, char cookie_buf[96]);
+
+/** End the request's session (and its WebSocket clients); sets the clearing cookie. */
+void web_auth_logout(httpd_req_t *req, int idx);
+
+/**
+ * Store a new password (first claim or change). `ram_only` when the
+ * settings are unavailable (claim only). @return ESP_OK or the settings error.
+ */
+esp_err_t web_auth_set_password(const char *pw, bool *persisted);
+
+/** End every session but `keep` (-1 = all); their WebSocket clients close with 4001. */
+void web_auth_end_sessions(int keep);
+
+/** End one session (its WebSocket clients close with 4001). */
+void web_auth_end_session(int idx);
+
+/** End expired sessions (once a second). */
+void web_auth_expire(void);
+
+/** SETTINGS_EVENT for sys/admin_hash or a factory reset: reload, end sessions if it changed behind our back. */
+void web_auth_reload(void);
+
+/* ---- REST helpers (web_api.c) ------------------------------------------------------------------------ */
+
+/** Gather the status snapshot (into PSRAM storage the caller owns). */
+void web_snap_status(web_status_snap_t *s);
+
+/** Record the outcome of an update job for GET /api/update. */
+void web_note_result(const char *job, esp_err_t err, const char *result);
+
+/** Note that the server started an update job (attribution of the next end). */
+void web_note_job_started(const char *job);
+
+/**
+ * Watch fw_update's state: progress of a running job, its result when it
+ * ends. Called on FW_UPDATE_EVENT (`event`) and twice a second.
+ */
+void web_track_fw_state(bool event);
+
+/** Protected-slot budget for the update dialogs (any task); UINT32_MAX = unknown. */
+uint32_t web_budget_now(void);
+
+/** The network reported a finished scan. */
+void web_note_scan_done(void);
+
+/* ---- WebSocket (web_ws.c) ---------------------------------------------------------------------------------- */
+
+esp_err_t web_ws_init(void);
+
+/** /ws route: pre-handshake check, post-handshake setup and the frame handler. */
+esp_err_t web_ws_pre_handshake(httpd_req_t *req);
+esp_err_t web_ws_post_handshake(httpd_req_t *req);
+esp_err_t web_ws_handler(httpd_req_t *req);
+
+/** A session closed (httpd close callback). */
+void web_ws_on_close(int fd);
+
+/** Close the clients of these sessions (bit mask of indexes) with 4001. */
+void web_ws_close_sessions(uint32_t mask);
+
+/** Periodic work on the server task: status at 1 Hz, progress at 2 Hz, log every 500 ms, events. */
+void web_ws_tick(bool second, bool half_second);
+
+/** Queue an event message for admin clients (server task or any task: copied). */
+void web_ws_event(const char *json);
+
+/** Send a progress message to the progress subscribers (server task). */
+void web_ws_progress(const web_progress_t *p);
+
+/** Latest receiver flash progress (from the station's event; any task: copied). */
+void web_ws_note_flash_progress(const um98x_flash_progress_t *p);
+
+/** Reboot under way: send `rebooting` and close every client with 1012. */
+void web_ws_rebooting(int reason);
+
+/** Clients connected now. */
+size_t web_ws_client_count(void);
+
+/* ---- worker (web_worker.c) ---------------------------------------------------------------------------------- */
+
+esp_err_t web_worker_init(void);
+
+/** POST /api/upload/app and /api/upload/gnss, after the request checks. */
+esp_err_t web_upload_app(web_req_t *r);
+esp_err_t web_upload_gnss(web_req_t *r);
+
+/** GET /api/coredump and GET /api/logs?format=text. */
+esp_err_t web_download_coredump(web_req_t *r);
+esp_err_t web_download_log_text(web_req_t *r, bool prev_boot);
+
+/** An upload is being received or refused (one at a time). */
+bool web_upload_busy(void);
+
+/** Uploaded receiver package waiting for confirmation (matches the staged one). */
+bool web_staged_get(um98x_flash_pkg_facts_t *facts, uint32_t *expires_in_s);
+/** Forget it (released, confirmed or replaced). */
+void web_staged_forget(void);
+
+/** Run lifecycle_clear_safe_mode() on the worker after the response went out. */
+esp_err_t web_worker_clear_safe_mode(void);
+
+/** Progress of an upload for the WebSocket (job NULL = none). */
+typedef struct {
+    const char *job;     /**< "app_upload" / "gnss_upload" */
+    const char *phase;
+    uint32_t bytes;
+    uint32_t total;
+    bool done;
+    const char *result;
+    esp_err_t err;
+    uint32_t seq;        /**< changes with every update */
+} web_upload_progress_t;
+
+void web_upload_progress(web_upload_progress_t *out);
+
+/** Responses still being written by the worker (the reboot hook waits for them). */
+int web_worker_pending_responses(void);
+
+#ifdef __cplusplus
+}
+#endif
