@@ -217,8 +217,9 @@ bool gnss_text_line_valid(const char *line, size_t len);
  * Parse one version log line (without CR/LF; trailing CR/LF are ignored).
  * Requires the "#VERSIONA," prefix, a valid CRC32 and at least
  * GNSS_VERSIONA_MIN_FIELDS body fields; see the rules above. A model or
- * firmware field that does not fit its buffer fails the parse; the other
- * fields are cut to fit. A PN-SN field without '-' is taken as the serial.
+ * firmware field that is empty or does not fit its buffer fails the parse;
+ * the other fields are cut to fit. A PN-SN field without '-' is taken as the
+ * serial (PN empty).
  * @return false (out cleared) if the line is not a valid version log.
  */
 bool gnss_versiona_parse(const char *line, size_t len, gnss_versiona_t *out);

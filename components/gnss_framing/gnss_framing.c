@@ -462,9 +462,11 @@ static void copy_cut(char *dst, size_t size, const char *src, size_t n)
     dst[n] = '\0';
 }
 
+/* Model and firmware decide what gets configured or flashed: they must be
+ * non-empty and fit whole (a cut model could read as a supported one). */
 static bool copy_whole(char *dst, size_t size, const char *src, size_t n)
 {
-    if (n > size - 1) {
+    if (n == 0 || n > size - 1) {
         return false;
     }
     memcpy(dst, src, n);

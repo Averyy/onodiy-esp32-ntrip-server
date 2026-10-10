@@ -188,6 +188,7 @@ static void on_loader_prompt(void *ctx)
     /* Detection stops probing; the loader's restart key goes out at most
      * once per boot (station task). */
     s_prompt_seen = true;
+    um98x_ctl_notify_prompt();
 }
 
 static void load_profile(void)
