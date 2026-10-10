@@ -70,7 +70,9 @@
  * nothing is stored. So no failed write or power cut leaves the stored
  * today ahead of its mark, and the gap never counts time twice. A restore
  * from settings takes the later of the two marks (a today blob of the older
- * two-key layout has none: the alive key alone).
+ * two-key layout has none: the alive key alone); after a clock correction
+ * back behind the stored today's mark, today is stored again with the
+ * corrected one at the next store.
  * Day totals roll into a CONFIG_LEDGER_HISTORY_DAYS history at UTC midnight
  * (settings: ledger/hist, written when it changes). The whole ledger
  * namespace survives a factory reset.

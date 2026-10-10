@@ -44,12 +44,16 @@
  *   the reboot into another image it planned (an app update, rollback or
  *   revert: lifecycle_reboot_switches_image) never led to one, and reports
  *   that reboot as LIFECYCLE_REBOOT_APP_REVERT (an unplanned end, previous
- *   session length unknown).
+ *   session length unknown). Only for a reboot it planned itself:
+ *   lifecycle's block also names the image whose run wrote it, so a reboot
+ *   committed by another image that ran without recording its boot (no
+ *   settings, a failed write) is read back as it was planned.
  *
  * Service task (started by lifecycle_init): once per second it marks the
- *   boot stable after CONFIG_LIFECYCLE_STABLE_UPTIME_S, writes the session
- *   heartbeat every 60 s and, in safe mode, requests the normal-boot retry
- *   when the episode's time is up. It also runs
+ *   boot stable after CONFIG_LIFECYCLE_STABLE_UPTIME_S (never while a fatal
+ *   boot error waits to restart), writes the session heartbeat every 60 s
+ *   and, in safe mode, requests the normal-boot retry when the episode's
+ *   time is up. It also runs
  *   the reboots that lifecycle_request_reboot() and lifecycle_inhibit_release()
  *   commit, so neither caller runs the shutdown hooks on its own stack. Safe
  *   mode therefore ends on time without depending on any higher-layer task.
@@ -310,7 +314,9 @@ esp_err_t lifecycle_request_reboot(lifecycle_reboot_reason_t reason);
  * Mandatory service failed at boot: log, wait CONFIG_LIFECYCLE_FATAL_RETRY_S
  * (no tight loop; console stays readable), reboot. Counts as a crash, so a
  * persistent failure ends in safe mode, and an app still in its first-boot
- * check is rolled back by the bootloader. Never returns.
+ * check is rolled back by the bootloader. The failure is recorded before the
+ * wait: the boot is not marked stable meanwhile, whatever the retry delay
+ * and CONFIG_LIFECYCLE_STABLE_UPTIME_S. Never returns.
  */
 void lifecycle_fatal_boot_error(const char *what, esp_err_t err) __attribute__((noreturn));
 

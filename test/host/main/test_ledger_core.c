@@ -997,3 +997,70 @@ TEST_CASE("ledger: while today is unchanged the alive key alone moves the mark o
     TEST_ASSERT_EQUAL_INT64(S(2000), lc_stored_mark(S(2000), 0));
     TEST_ASSERT_EQUAL_INT64(0, lc_stored_mark(0, -5));
 }
+
+TEST_CASE("ledger: after the clock went back, today is stored again with the corrected mark", "[ledger]")
+{
+    static uint8_t blob[200];
+    size_t blob_len = 0;
+    int64_t alive_key_s = 0;
+    int64_t alive = 0;
+    bool today = false;
+    bool hist = false;
+
+    /* SNTP set the clock 8 min fast; today is stored at "12:00". Half a
+     * minute later GNSS time corrects it; the slot streams all along, so
+     * today does not change. Stores once a minute, as ledger.c does. */
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, at(DAY0, H(12)), LC_CLOCK_SNTP);
+    lc_set_rtcm_ok(&c, T0, true);
+    lc_set_slot(&c, T0, 0, true, true, true);
+    uint32_t now = T0;
+    int blobs = 0;
+    for (int min = 0; min <= 5; min++) {
+        if (min == 1) {
+            TEST_ASSERT_TRUE(lc_set_utc(&c, now - 30000u, at(DAY0, H(11) + M(52) + S(30)), LC_CLOCK_GNSS));
+        }
+        lc_tick(&c, now);
+        lc_snapshot_t snap;
+        lc_snapshot(&c, &snap);
+        TEST_ASSERT_TRUE(lc_persist_due(&c, now, 60000u, &alive, &today, &hist));
+        if (today) {
+            snap.alive_ms = alive;
+            blob_len = lc_encode_today(&snap, blob, sizeof(blob));
+            blobs++;
+            if (alive_key_s > alive / 1000) {
+                alive_key_s = alive / 1000;   /* lowered, as ledger.c does */
+            }
+        } else {
+            alive_key_s = alive / 1000;
+        }
+        now += 60000u;
+    }
+    /* The first store and the one right after the correction (11:53). */
+    TEST_ASSERT_EQUAL(2, blobs);
+
+    /* A power cut after the 11:57 store; back at 12:30 by SNTP. The gap runs
+     * from 11:57, not from the blob's 12:00 of the fast clock. */
+    lc_snapshot_t st = snap_base();
+    TEST_ASSERT_TRUE(lc_decode_today(blob, blob_len, &st));
+    TEST_ASSERT_EQUAL_INT64(at(DAY0, H(11) + M(53)), st.alive_ms);
+    st.alive_ms = lc_stored_mark(st.alive_ms, alive_key_s);
+    TEST_ASSERT_EQUAL_INT64(at(DAY0, H(11) + M(57)), st.alive_ms);
+    fresh(T0, 0);
+    lc_restore(&c, &st, LC_RESET_POWER_CUT);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(12) + M(30)), LC_CLOCK_SNTP));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)M(33), c.today.power_off_ms);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)M(33), c.today.down_ms[0]);
+
+    /* GNSS time comes every second, a few ms off the running clock: a
+     * sample behind it is no correction behind the stored mark, and the
+     * mark alone moves on (no blob per store). */
+    lc_set_rtcm_ok(&c, T0, true);
+    lc_set_slot(&c, T0, 0, true, true, true);
+    TEST_ASSERT_TRUE(lc_persist_due(&c, T0, 60000u, &alive, &today, &hist));
+    TEST_ASSERT_TRUE(today);                                    /* restored: stored again */
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0 + 1000u, lc_unix_now(&c, T0 + 1000u) - 40, LC_CLOCK_GNSS));
+    lc_tick(&c, T0 + 60000u);
+    TEST_ASSERT_TRUE(lc_persist_due(&c, T0 + 60000u, 60000u, &alive, &today, &hist));
+    TEST_ASSERT_FALSE(today);
+}

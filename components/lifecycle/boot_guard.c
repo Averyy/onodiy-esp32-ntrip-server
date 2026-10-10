@@ -117,19 +117,24 @@ void boot_guard_restart(boot_guard_state_t *st, boot_hw_reset_t hw, uint32_t lim
     boot_guard_seal(st);
 }
 
-void boot_guard_stamp(boot_guard_state_t *st, uint32_t gen)
+void boot_guard_stamp(boot_guard_state_t *st, uint32_t gen, uint32_t image)
 {
     st->gen = gen;
+    st->image = image;
     boot_guard_seal(st);
 }
 
-void boot_guard_on_stable(boot_guard_state_t *st)
+bool boot_guard_on_stable(boot_guard_state_t *st)
 {
+    if (st->reboot_reason & BOOT_GUARD_REASON_CRASH) {
+        return false;   /* a failed boot waiting to restart: it counts as a crash */
+    }
     if (!st->safe_mode) {
         st->crashes = 0;
         st->safe_episodes = 0;
     }
     boot_guard_seal(st);
+    return true;
 }
 
 void boot_guard_set_reboot_reason(boot_guard_state_t *st, uint32_t reason)

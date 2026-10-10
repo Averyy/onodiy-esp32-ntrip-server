@@ -48,7 +48,11 @@
  * recording its boot; the previous image then reads its own blocks back,
  * which are its latest state indeed, except that the reboot it planned (an
  * app update) never led to a recorded boot of the other image:
- * boot_gen_check() reports that as BOOT_GEN_SWITCH_FAILED.
+ * boot_gen_check() reports that as BOOT_GEN_SWITCH_FAILED. For that it
+ * needs to know who wrote the block, so lifecycle's block also carries the
+ * id of the image whose run wrote it: a block that an invisible run of
+ * another image wrote (same layout, accepted stamp) holds that image's own
+ * planned reboot, which did take.
  */
 #pragma once
 
@@ -82,6 +86,7 @@ typedef struct {
     uint32_t current;       /**< stamp of every block this boot writes */
     bool store;             /**< store {current, image} as the new record */
     bool same_image;        /**< the record names this image: no other image recorded a boot since */
+    uint32_t image;         /**< id of the running image */
 } boot_gen_t;
 
 /** Image id: hash of the ELF SHA-256 and the flash address of the running slot. */
@@ -109,10 +114,13 @@ typedef enum {
 /**
  * Verdict on lifecycle's own block. `inherited`: the block was valid and
  * carried over (not started over at power-on or as corrupt); `stamp`: its
- * stamp; `planned_switch`: the reboot it records was meant to start another
- * image (lifecycle_reboot_switches_image()).
+ * stamp; `writer`: the id of the image whose run wrote it (0 if never
+ * stamped); `planned_switch`: the reboot it records was meant to start
+ * another image (lifecycle_reboot_switches_image()). SWITCH_FAILED only for
+ * a switch this image planned itself.
  */
-boot_gen_verdict_t boot_gen_check(const boot_gen_t *g, bool inherited, uint32_t stamp, bool planned_switch);
+boot_gen_verdict_t boot_gen_check(const boot_gen_t *g, bool inherited, uint32_t stamp, uint32_t writer,
+                                  bool planned_switch);
 
 /** Encode the record. @return bytes written, 0 if cap is too small. */
 size_t boot_gen_encode(uint32_t gen, uint32_t image, uint8_t *buf, size_t cap);

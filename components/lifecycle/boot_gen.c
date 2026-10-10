@@ -26,6 +26,7 @@ uint32_t boot_gen_image_id(const uint8_t elf_sha256[32], uint32_t slot_addr)
 void boot_gen_decide(const boot_gen_record_t *rec, uint32_t image, boot_gen_t *out)
 {
     memset(out, 0, sizeof(*out));
+    out->image = image;
     if (!rec->readable) {
         out->accept_unstamped = true;   /* only what earlier boots without settings wrote */
         return;
@@ -61,7 +62,8 @@ bool boot_gen_accepts(const boot_gen_t *g, uint32_t stamp)
     return stamp == g->accept;
 }
 
-boot_gen_verdict_t boot_gen_check(const boot_gen_t *g, bool inherited, uint32_t stamp, bool planned_switch)
+boot_gen_verdict_t boot_gen_check(const boot_gen_t *g, bool inherited, uint32_t stamp, uint32_t writer,
+                                  bool planned_switch)
 {
     if (!inherited) {
         return BOOT_GEN_USE;   /* started over in this boot: nothing carried over */
@@ -69,7 +71,9 @@ boot_gen_verdict_t boot_gen_check(const boot_gen_t *g, bool inherited, uint32_t 
     if (!boot_gen_accepts(g, stamp)) {
         return BOOT_GEN_STALE;
     }
-    if (g->same_image && planned_switch) {
+    /* Only this image's own plan: another image that ran without recording
+     * its boot stamps this generation (or none), and its switch did take. */
+    if (g->same_image && writer == g->image && planned_switch) {
         return BOOT_GEN_SWITCH_FAILED;
     }
     return BOOT_GEN_USE;

@@ -590,10 +590,20 @@ bool lc_persist_due(lc_t *c, uint32_t now_ms, uint32_t interval_ms, int64_t *ali
         c->alive_saved = true;
         c->alive_saved_ms = now_ms;
         *alive_ms = c->unix_ms;
+        /* The clock went back behind the mark the stored today carries: a
+         * restore takes the later mark, so today goes again with this one.
+         * Time samples a few ms off the running clock never get here: by
+         * the next store the clock is far past the last mark. */
+        if (c->today_mark_ms > c->unix_ms) {
+            c->today_dirty = true;
+        }
     }
     c->rolled = false;
     *today = c->today_dirty;
     *hist = c->hist_dirty;
+    if (*today) {
+        c->today_mark_ms = *alive_ms;
+    }
     c->today_dirty = false;
     c->hist_dirty = false;
     return true;

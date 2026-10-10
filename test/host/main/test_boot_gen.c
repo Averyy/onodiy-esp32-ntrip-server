@@ -80,9 +80,9 @@ TEST_CASE("image generation: back on an image after another ran, its old blocks 
     TEST_ASSERT_FALSE(boot_gen_accepts(&g, a_stamp));
     TEST_ASSERT_TRUE(boot_gen_accepts(&g, b_stamp));
     TEST_ASSERT_FALSE(g.same_image);
-    TEST_ASSERT_EQUAL(BOOT_GEN_STALE, boot_gen_check(&g, true, a_stamp, false));
-    TEST_ASSERT_EQUAL(BOOT_GEN_USE, boot_gen_check(&g, true, b_stamp, true));   /* B's planned switch took */
-    TEST_ASSERT_EQUAL(BOOT_GEN_USE, boot_gen_check(&g, false, a_stamp, false)); /* started over anyway */
+    TEST_ASSERT_EQUAL(BOOT_GEN_STALE, boot_gen_check(&g, true, a_stamp, IMG_A, false));
+    TEST_ASSERT_EQUAL(BOOT_GEN_USE, boot_gen_check(&g, true, b_stamp, IMG_B, true));   /* B's planned switch took */
+    TEST_ASSERT_EQUAL(BOOT_GEN_USE, boot_gen_check(&g, false, a_stamp, IMG_A, false)); /* started over anyway */
     uint32_t a2 = g.current;
     TEST_ASSERT_NOT_EQUAL(b_stamp, a2);
     TEST_ASSERT_NOT_EQUAL(a_stamp, a2);
@@ -102,9 +102,40 @@ TEST_CASE("image generation: a new image that never recorded a boot leaves it; t
      * bootloader rolls back to A. */
     g = boot_as(&nvs, IMG_A, true);
     TEST_ASSERT_TRUE(g.same_image);
-    TEST_ASSERT_EQUAL(BOOT_GEN_SWITCH_FAILED, boot_gen_check(&g, true, a_stamp, true));
-    TEST_ASSERT_EQUAL(BOOT_GEN_USE, boot_gen_check(&g, true, a_stamp, false));
-    TEST_ASSERT_EQUAL(BOOT_GEN_USE, boot_gen_check(&g, false, BOOT_GEN_UNSTAMPED, true));
+    TEST_ASSERT_EQUAL(BOOT_GEN_SWITCH_FAILED, boot_gen_check(&g, true, a_stamp, IMG_A, true));
+    TEST_ASSERT_EQUAL(BOOT_GEN_USE, boot_gen_check(&g, true, a_stamp, IMG_A, false));
+    TEST_ASSERT_EQUAL(BOOT_GEN_USE, boot_gen_check(&g, false, BOOT_GEN_UNSTAMPED, 0, true));
+}
+
+TEST_CASE("image generation: a switch planned by another image that did not record its boot took",
+          "[boot_gen]")
+{
+    store_t nvs = { .readable = true };
+    boot_gen_t g = boot_as(&nvs, IMG_A, true);
+    uint32_t a_stamp = g.current;
+
+    /* A updates to B (same RTC layout); B cannot store the record, so its
+     * blocks carry A's generation. B runs; the user rolls back. */
+    g = boot_as(&nvs, IMG_B, false);
+    TEST_ASSERT_EQUAL_UINT32(a_stamp, g.current);
+    /* Back on A: the record still names A and the stamp is accepted, but B
+     * wrote the block: the rollback B planned did take. */
+    g = boot_as(&nvs, IMG_A, true);
+    TEST_ASSERT_TRUE(g.same_image);
+    TEST_ASSERT_TRUE(boot_gen_accepts(&g, a_stamp));
+    TEST_ASSERT_EQUAL(BOOT_GEN_USE, boot_gen_check(&g, true, a_stamp, IMG_B, true));
+
+    /* B ran without settings: its blocks are unstamped, but still name B. */
+    nvs.readable = false;
+    g = boot_as(&nvs, IMG_B, true);
+    TEST_ASSERT_EQUAL_UINT32(BOOT_GEN_UNSTAMPED, g.current);
+    nvs.readable = true;
+    g = boot_as(&nvs, IMG_A, true);
+    TEST_ASSERT_TRUE(g.same_image);
+    TEST_ASSERT_EQUAL(BOOT_GEN_USE, boot_gen_check(&g, true, BOOT_GEN_UNSTAMPED, IMG_B, true));
+    /* ...while A's own unstamped block (a boot of A without settings) that
+     * planned the switch says it did not take. */
+    TEST_ASSERT_EQUAL(BOOT_GEN_SWITCH_FAILED, boot_gen_check(&g, true, BOOT_GEN_UNSTAMPED, IMG_A, true));
 }
 
 TEST_CASE("image generation: without settings nothing stamped is used; unstamped blocks chain", "[boot_gen]")
@@ -120,7 +151,7 @@ TEST_CASE("image generation: without settings nothing stamped is used; unstamped
     TEST_ASSERT_FALSE(g.store);
     TEST_ASSERT_EQUAL_UINT32(BOOT_GEN_UNSTAMPED, g.current);
     TEST_ASSERT_FALSE(boot_gen_accepts(&g, a_stamp));
-    TEST_ASSERT_EQUAL(BOOT_GEN_STALE, boot_gen_check(&g, true, a_stamp, false));
+    TEST_ASSERT_EQUAL(BOOT_GEN_STALE, boot_gen_check(&g, true, a_stamp, IMG_A, false));
     /* ...and the next boot without settings uses them (crash counting). */
     g = boot_as(&nvs, IMG_A, true);
     TEST_ASSERT_TRUE(boot_gen_accepts(&g, BOOT_GEN_UNSTAMPED));

@@ -43,6 +43,7 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static boot_hw_reset_t s_hw;
 static bool s_inherited;            /* the block was valid and carried over (not started over) */
 static uint32_t s_inherited_stamp;
+static uint32_t s_inherited_image;  /* id of the image whose run wrote it */
 static uint32_t s_claimed;          /* under s_lock: one-shot flags claimed this boot */
 
 /* Under s_lock: the image generation, decided once by lifecycle_init. */
@@ -338,11 +339,17 @@ static void service_poll(void)
 
     if (!s_info.stable && now >= CONFIG_LIFECYCLE_STABLE_UPTIME_S) {
         taskENTER_CRITICAL(&s_lock);
-        boot_guard_on_stable(&s_rtc);
-        s_info.stable = true;
-        refresh_info();
+        /* Refused while a fatal boot error waits to restart: that boot
+         * counts as a crash, however long its retry delay. */
+        bool stable = boot_guard_on_stable(&s_rtc);
+        if (stable) {
+            s_info.stable = true;
+            refresh_info();
+        }
         taskEXIT_CRITICAL(&s_lock);
-        ESP_LOGI(TAG, "boot stable after %u s", (unsigned)now);
+        if (stable) {
+            ESP_LOGI(TAG, "boot stable after %u s", (unsigned)now);
+        }
     }
 
     if (s_info.safe_mode && !s_retry_requested && now >= s_info.safe_mode_retry_s) {
@@ -414,6 +421,7 @@ void lifecycle_early_boot(void)
      * settings can be read (lifecycle_init). */
     s_inherited = boot_guard_valid(&s_rtc) && s_hw != BOOT_HW_POWER_ON;
     s_inherited_stamp = s_rtc.gen;
+    s_inherited_image = s_rtc.image;
     boot_guard_result_t res;
     boot_guard_on_boot(&s_rtc, s_hw, CONFIG_LIFECYCLE_BOOTLOOP_LIMIT, &res);
     reboot_gate_init(&s_gate, CONFIG_LIFECYCLE_MAX_INHIBITS);
@@ -598,20 +606,21 @@ static void check_generation(void)
     }
 
     taskENTER_CRITICAL(&s_lock);
-    boot_gen_verdict_t v = boot_gen_check(&g, s_inherited, s_inherited_stamp,
+    boot_gen_verdict_t v = boot_gen_check(&g, s_inherited, s_inherited_stamp, s_inherited_image,
                                           lifecycle_reboot_switches_image(s_info.prev_reboot_reason));
     if (v == BOOT_GEN_STALE) {
         boot_guard_result_t res;
         boot_guard_restart(&s_rtc, s_hw, CONFIG_LIFECYCLE_BOOTLOOP_LIMIT, s_claimed, &res);
         apply_result(&res);
     } else if (v == BOOT_GEN_SWITCH_FAILED) {
-        /* The other image never recorded a boot: it failed early and the
-         * bootloader rolled it back (or it never started). Not the planned
-         * reboot it was meant to be; its session length is not ours. */
+        /* This image planned it, and the other image never recorded a
+         * boot: it failed early and the bootloader rolled it back (or it
+         * never started). Not the planned reboot it was meant to be; its
+         * session length is not ours. */
         s_info.prev_reboot_reason = LIFECYCLE_REBOOT_APP_REVERT;
         s_info.prev_session_uptime_s = UINT32_MAX;
     }
-    boot_guard_stamp(&s_rtc, g.current);
+    boot_guard_stamp(&s_rtc, g.current, image);
     s_gen = g;
     s_gen_known = true;
     refresh_info();
@@ -748,10 +757,20 @@ void lifecycle_fatal_boot_error(const char *what, esp_err_t err)
 {
     ESP_LOGE(TAG, "%s failed (%s): rebooting in %d s", what ? what : "boot step", esp_err_to_name(err),
              CONFIG_LIFECYCLE_FATAL_RETRY_S);
+    /* Recorded before the wait, under the lock (the service task may run on
+     * the other core and seal the same block): while the reason is pending,
+     * the boot is never marked stable, so it counts as a crash whatever the
+     * retry delay and the stable uptime. */
+    taskENTER_CRITICAL(&s_lock);
+    boot_guard_set_reboot_reason(&s_rtc, (uint32_t)LIFECYCLE_REBOOT_BOOT_FAILURE | BOOT_GUARD_REASON_CRASH);
+    taskEXIT_CRITICAL(&s_lock);
     vTaskDelay(pdMS_TO_TICKS(CONFIG_LIFECYCLE_FATAL_RETRY_S * 1000));
+    uint32_t now = uptime_s();
+    taskENTER_CRITICAL(&s_lock);
+    boot_guard_heartbeat(&s_rtc, now);   /* exact session length for the next boot */
+    taskEXIT_CRITICAL(&s_lock);
     /* Direct restart: used only before the network and the casters exist, so
      * there is no session for the shutdown hooks to close. */
-    boot_guard_set_reboot_reason(&s_rtc, (uint32_t)LIFECYCLE_REBOOT_BOOT_FAILURE | BOOT_GUARD_REASON_CRASH);
     esp_restart();
 }
 

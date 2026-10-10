@@ -22,12 +22,13 @@
  *    the last 60 min and fewer than three in the last 24 h. Losing the
  *    state (power cycle, or the first boot of another app image whose RTC
  *    layout differs) starts a fresh budget, like a power cycle;
- *  - the stamp: the image generation of the run that wrote the block
- *    (boot_gen.h). boot_guard_on_boot() runs before the settings can be read
- *    and accounts the boot on whatever valid block it finds; lifecycle_init
- *    then checks the stamp and, for a block that predates another image's
- *    run, accounts the boot again from scratch (boot_guard_restart), as
- *    after power loss. A fresh block is unstamped until boot_guard_stamp().
+ *  - the stamp: the image generation of the run that wrote the block and
+ *    the id of that run's image (boot_gen.h). boot_guard_on_boot() runs
+ *    before the settings can be read and accounts the boot on whatever
+ *    valid block it finds; lifecycle_init then checks the stamp and, for a
+ *    block that predates another image's run, accounts the boot again from
+ *    scratch (boot_guard_restart), as after power loss. A fresh block is
+ *    unstamped (and names no image) until boot_guard_stamp().
  *
  * Counting rules:
  *  - power-on (or lost/corrupt state): everything starts over;
@@ -37,7 +38,10 @@
  *    problem that safe mode cannot fix);
  *  - planned reboot, reset pin, unexpected software restart: unchanged;
  *  - stable uptime reached in normal mode: counter and safe-mode episodes
- *    cleared. Reaching stable uptime in safe mode clears nothing.
+ *    cleared. Reaching stable uptime in safe mode clears nothing, and
+ *    neither does a boot that waits to restart with a reason flagged
+ *    BOOT_GUARD_REASON_CRASH already set (a fatal boot error): it is a
+ *    failed boot however long it waits.
  */
 #pragma once
 
@@ -90,6 +94,7 @@ typedef struct {
     uint32_t ladder_count;      /**< valid entries in ladder_at (<= BOOT_GUARD_LADDER_KEEP) */
     uint32_t ladder_at[BOOT_GUARD_LADDER_KEEP]; /**< station times of the last GNSS-ladder reboots, oldest first */
     uint32_t gen;               /**< image generation of the run that wrote it (BOOT_GEN_UNSTAMPED = none yet) */
+    uint32_t image;             /**< id of the image whose run wrote it (boot_gen_image_id; 0 = not stamped yet) */
     uint32_t check;             /**< checksum over the fields above */
 } boot_guard_state_t;
 
@@ -121,11 +126,16 @@ void boot_guard_on_boot(boot_guard_state_t *st, boot_hw_reset_t hw, uint32_t lim
 void boot_guard_restart(boot_guard_state_t *st, boot_hw_reset_t hw, uint32_t limit, uint32_t claimed,
                         boot_guard_result_t *out);
 
-/** Stamp the state with the generation of this boot's run. Seals. */
-void boot_guard_stamp(boot_guard_state_t *st, uint32_t gen);
+/** Stamp the state with the generation of this boot's run and the id of the running image. Seals. */
+void boot_guard_stamp(boot_guard_state_t *st, uint32_t gen, uint32_t image);
 
-/** Stable uptime reached. Clears the counters in normal mode only. Seals. */
-void boot_guard_on_stable(boot_guard_state_t *st);
+/**
+ * Stable uptime reached. Clears the counters in normal mode only. Seals.
+ * @return false (nothing changes, not stable) while a reboot reason flagged
+ *         BOOT_GUARD_REASON_CRASH is pending: a fatal boot error waiting to
+ *         restart.
+ */
+bool boot_guard_on_stable(boot_guard_state_t *st);
 
 /** Record the reason code for the planned reboot that follows. Seals. */
 void boot_guard_set_reboot_reason(boot_guard_state_t *st, uint32_t reason);

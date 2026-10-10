@@ -90,6 +90,9 @@
  * the time the stored today covers a second time as gap. While today has not
  * changed since it was stored, the mark alone advances (the alive key, one
  * small write); a restore takes the later of the two marks (lc_stored_mark).
+ * A clock that went back behind the mark the stored today carries (a
+ * correction) has today stored again with the corrected mark at the next
+ * store, so the later mark is never one from before the correction.
  * Blob codecs for NVS are below.
  */
 #pragma once
@@ -200,6 +203,7 @@ typedef struct {
     bool rolled;                        /**< a finished day moved into the history: store it now */
     bool alive_saved;
     uint32_t alive_saved_ms;
+    int64_t today_mark_ms;              /**< mark today was last handed out to be stored with (0 = not yet) */
 } lc_t;
 
 /**
@@ -322,6 +326,8 @@ void lc_snapshot(const lc_t *c, lc_snapshot_t *out);
  * On true, *alive_ms is the mark; *today / *hist say whether those records
  * changed since they were last stored (the flags are cleared: call
  * lc_mark_dirty if storing fails; a failed store waits for the interval).
+ * *today is also set when the clock went back behind the mark today was
+ * last stored with, so that today goes again with the corrected mark.
  * The caller stores the history first, then: today changed, today with
  * this mark as one blob (lc_encode_today, nothing if the history write
  * failed); today unchanged, the mark alone (the stored today is exact up to
@@ -353,8 +359,9 @@ bool lc_decode_today(const uint8_t *buf, size_t len, lc_snapshot_t *s);
  * The mark a restore from NVS starts the gap at: the later of the today
  * blob's own mark (`blob_mark_ms`, 0 = none) and the alive key (`alive_s`,
  * <= 0 = none), which is written only while the stored today is unchanged,
- * so the stored today is exact up to either. (After the clock went back,
- * the wrapper also lowers an alive key that a new blob's mark is behind.)
+ * so the stored today is exact up to either. (After the clock went back
+ * behind the blob's mark, lc_persist_due has today stored again with the
+ * corrected mark, and the wrapper lowers an alive key that is ahead of it.)
  * An older two-key layout (today blob without a mark) gives the alive key
  * alone.
  */

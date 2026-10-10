@@ -35,6 +35,10 @@ menu "Station: lifecycle (boot guard, safe mode, reboots)"
         int "Delay before rebooting after a mandatory boot step failed (s)"
         range 1 300
         default 30
+        help
+            The failed boot counts as a crash toward safe mode. It is never
+            marked stable while it waits, even with a delay longer than the
+            stable uptime.
 
     config LIFECYCLE_MAX_INHIBITS
         int "Maximum simultaneous reboot inhibits"

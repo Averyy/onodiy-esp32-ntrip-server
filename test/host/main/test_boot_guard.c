@@ -119,6 +119,30 @@ TEST_CASE("boot guard clears on a stable normal boot only", "[boot_guard]")
     TEST_ASSERT_TRUE(boot(&st, BOOT_HW_OTHER).safe_mode);
 }
 
+TEST_CASE("boot guard: a boot waiting to restart after a fatal boot error is never stable", "[boot_guard]")
+{
+    /* Two failed boots; the third fails again and waits out its retry delay,
+     * longer than the stable uptime: the counter must keep counting. */
+    boot_guard_state_t st;
+    fresh(&st);
+    for (int i = 0; i < 2; i++) {
+        boot_guard_set_reboot_reason(&st, 12u | BOOT_GUARD_REASON_CRASH);
+        boot(&st, BOOT_HW_SOFTWARE);
+    }
+    TEST_ASSERT_EQUAL_UINT32(2, st.crashes);
+    boot_guard_set_reboot_reason(&st, 12u | BOOT_GUARD_REASON_CRASH);
+    TEST_ASSERT_FALSE(boot_guard_on_stable(&st));
+    TEST_ASSERT_EQUAL_UINT32(2, st.crashes);
+    TEST_ASSERT_TRUE(boot_guard_valid(&st));
+    boot(&st, BOOT_HW_SOFTWARE);
+    TEST_ASSERT_EQUAL_UINT32(3, st.crashes);
+
+    /* A planned reboot under way does not hold it back. */
+    boot_guard_set_reboot_reason(&st, 1u);
+    TEST_ASSERT_TRUE(boot_guard_on_stable(&st));
+    TEST_ASSERT_EQUAL_UINT32(0, st.crashes);
+}
+
 TEST_CASE("boot guard retries a normal boot with growing intervals", "[boot_guard]")
 {
     boot_guard_state_t st;
@@ -360,11 +384,12 @@ TEST_CASE("boot guard: a block from before another image's run is accounted agai
     /* Image A crashed twice, then planned an app update (stamp: generation 4). */
     boot_guard_state_t st;
     fresh(&st);
-    boot_guard_stamp(&st, 4);
+    boot_guard_stamp(&st, 4, 0xA0A0u);
     boot(&st, BOOT_HW_CRASH);
     boot(&st, BOOT_HW_CRASH);
     TEST_ASSERT_EQUAL_UINT32(2, st.crashes);
     TEST_ASSERT_EQUAL_UINT32(4, st.gen);                 /* accounting keeps the stamp */
+    TEST_ASSERT_EQUAL_UINT32(0xA0A0u, st.image);         /* ...and the image that wrote it */
     boot_guard_set_reboot_reason(&st, 4);                /* APP_UPDATE */
     TEST_ASSERT_TRUE(boot_guard_valid(&st));
 
@@ -385,6 +410,7 @@ TEST_CASE("boot guard: a block from before another image's run is accounted agai
     TEST_ASSERT_EQUAL_UINT32(0, st.crashes);
     TEST_ASSERT_EQUAL_UINT32(1, st.boots);
     TEST_ASSERT_EQUAL_UINT32(0, st.gen);                 /* unstamped until stamped */
+    TEST_ASSERT_EQUAL_UINT32(0, st.image);
     TEST_ASSERT_FALSE(boot_guard_claim_once(&st, 1u << 3));   /* this boot's claim kept */
     TEST_ASSERT_TRUE(boot_guard_claim_once(&st, 1u << 2));
 
@@ -399,9 +425,12 @@ TEST_CASE("boot guard: a block from before another image's run is accounted agai
     TEST_ASSERT_FALSE(res.safe_mode);
     TEST_ASSERT_EQUAL_UINT32(0, st.safe_mode);
 
-    /* The stamp is covered by the checksum. */
-    boot_guard_stamp(&st, 9);
+    /* The stamp and the writer are covered by the checksum. */
+    boot_guard_stamp(&st, 9, 0xB0B0u);
     TEST_ASSERT_TRUE(boot_guard_valid(&st));
     st.gen = 8;
+    TEST_ASSERT_FALSE(boot_guard_valid(&st));
+    boot_guard_stamp(&st, 9, 0xB0B0u);
+    st.image = 0xA0A0u;
     TEST_ASSERT_FALSE(boot_guard_valid(&st));
 }
