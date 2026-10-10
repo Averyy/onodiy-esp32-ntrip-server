@@ -15,6 +15,16 @@
  * midnight, never back: a clock corrected backwards keeps counting into the
  * current day until it catches up.
  *
+ * GNSS time is the receiver's GPS time of week (lc_set_gps_tow: an MSM
+ * epoch time), which carries no week number. It is dated against the
+ * running clock (taken within LC_GNSS_SKEW_MS of it), or, before the first
+ * clock of a boot, against the previous session's last-alive mark when that
+ * session had a clock and the reset was not a power cut: the mark plus this
+ * boot's uptime is then the time give or take the reset itself (taken from
+ * LC_GNSS_BACK_MS before to LC_GNSS_RESET_MS after it). Anything else waits
+ * for SNTP: after a power cut, or on a station that never had a clock, the
+ * week cannot be known.
+ *
  * What is counted, per slot and UTC day (milliseconds):
  *   - down: the slot was expected to stream (enabled; for a slot not
  *     reported yet this boot, enabled in the previous session) but was not
@@ -62,6 +72,13 @@ extern "C" {
 #define LC_DAY_MS       86400000LL
 #define LC_UTC_FLOOR_S  1767225600LL          /* 2026-01-01 00:00 UTC */
 #define LC_GNSS_HOLD_MS (600u * 1000u)        /* SNTP is ignored this long after a GNSS time */
+
+#define LC_GPS_EPOCH_UNIX_MS 315964800000LL   /* 1980-01-06 00:00 UTC, GPS week 0 */
+#define LC_GPS_WEEK_MS       604800000LL
+#define LC_GPS_UTC_LEAP_S    18               /* GPS time minus UTC since 2017-01-01 (no change announced) */
+#define LC_GNSS_SKEW_MS      (10LL * 60000)   /* GNSS time taken within this of the running clock */
+#define LC_GNSS_BACK_MS      60000LL          /* ...or of the last-alive mark plus uptime: this much before */
+#define LC_GNSS_RESET_MS     (15LL * 60000)   /* ...to this much after (the reset itself) */
 
 /** Clock source; same values as ledger_clock_t. */
 typedef enum {
@@ -130,6 +147,7 @@ typedef struct {
     /* persistence */
     bool today_dirty;
     bool hist_dirty;
+    bool rolled;                        /**< a finished day moved into the history: store it now */
     bool alive_saved;
     uint32_t alive_saved_ms;
 } lc_t;
@@ -150,6 +168,15 @@ void lc_restore(lc_t *c, const lc_snapshot_t *snap, bool power_cut);
 /** Load the history (newest first; older entries and duplicates are dropped). */
 void lc_set_history(lc_t *c, const lc_day_t *days, size_t n);
 
+/**
+ * The day last stored as today (NVS), after the RTC copy was restored: if
+ * it is earlier than the restored today and the history does not hold it,
+ * it goes into the history. A reset right after UTC midnight, before the
+ * finished day reached the stored history, then keeps that day (as of its
+ * last store). Call after lc_restore and lc_set_history.
+ */
+void lc_merge_stored_day(lc_t *c, const lc_day_t *day);
+
 /** Accrue the time up to now_ms (also rolls the day). */
 void lc_tick(lc_t *c, uint32_t now_ms);
 
@@ -167,6 +194,14 @@ void lc_set_rtcm_ok(lc_t *c, uint32_t now_ms, bool ok);
  * SNTP while GNSS time is recent).
  */
 bool lc_set_utc(lc_t *c, uint32_t now_ms, int64_t unix_ms, lc_clock_t source);
+
+/**
+ * GPS time of week from the receiver: `tow_ms` (ms of the GPS week, an MSM
+ * epoch time) seen `age_ms` ago. Dated as described above and converted to
+ * UTC (LC_GPS_UTC_LEAP_S), then taken like lc_set_utc(..., LC_CLOCK_GNSS).
+ * @return true if taken.
+ */
+bool lc_set_gps_tow(lc_t *c, uint32_t now_ms, uint32_t tow_ms, uint32_t age_ms);
 
 /** Count one UART overflow event. */
 void lc_count_overflow(lc_t *c, uint32_t now_ms);
@@ -187,10 +222,12 @@ void lc_today(const lc_t *c, lc_day_t *out);
 void lc_snapshot(const lc_t *c, lc_snapshot_t *out);
 
 /**
- * Time to store the last-alive mark (with a clock, every `interval_ms`).
+ * Time to store the last-alive mark (with a clock, every `interval_ms`, and
+ * at once when a finished day moved into the history: the RTC copy holds
+ * only today, so until the history is stored a reset would lose that day).
  * On true, *alive_ms is the mark; *today / *hist say whether those records
  * changed since they were last stored (the flags are cleared: call
- * lc_mark_dirty if storing fails).
+ * lc_mark_dirty if storing fails; a failed store waits for the interval).
  */
 bool lc_persist_due(lc_t *c, uint32_t now_ms, uint32_t interval_ms, int64_t *alive_ms, bool *today, bool *hist);
 

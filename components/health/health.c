@@ -139,7 +139,8 @@ static uint32_t s_caster_restarts;
 static uint32_t s_admin_resets;
 static uint64_t s_ledger_owed;
 static bool s_heap_warned;
-static bool s_heap_reboot;
+static hm_heap_t s_heap;
+static bool s_heap_held_logged;
 static int64_t s_factory_refused_ms = HM_NEVER;
 static uint8_t s_prev_level;
 static uint32_t s_prev_alerts;
@@ -240,8 +241,9 @@ static void on_ntrip_event(void *arg, esp_event_base_t base, int32_t id, void *d
 
 /* ---- one tick, part by part --------------------------------------------------- */
 
-/* Loss counters: one journal record per tick at most; FIFO overflows also
- * go to the ledger's daily count. */
+/* Loss counters: one journal record per tick at most, and per counter at
+ * most one a minute (health_mon.h); FIFO overflows also go to the ledger's
+ * daily count. */
 static void loss_tick(const gnss_link_stats_t *link, const rtcm_hub_stats_t *hub, int64_t now)
 {
     const uint64_t vals[HM_LOSS_IDS] = {
@@ -259,10 +261,10 @@ static void loss_tick(const gnss_link_stats_t *link, const rtcm_hub_stats_t *hub
 
     uint8_t id;
     int32_t delta;
-    if (hm_loss_next(&s_loss, &id, &delta)) {
+    if (hm_loss_next(&s_loss, now, &id, &delta)) {
         esp_err_t err = diag_journal_append(DIAG_EV_DATA_LOSS, id, delta);
         if (err == ESP_OK) {
-            hm_loss_written(&s_loss, id, delta);
+            hm_loss_written(&s_loss, id, delta, now);
         }
         /* refused (rate limit) or no journal: the increase stays pending */
     }
@@ -352,13 +354,17 @@ static bool heap_tick(int64_t now, health_status_t *o)
         ESP_LOGW(TAG, "internal heap low-water %" PRIu32 " B (free %" PRIu32 " B)", o->heap_internal_min,
                  o->heap_internal_free);
     }
-    if (o->heap_internal_min < HEAP_REBOOT_BYTES && !s_heap_reboot) {
+    if (hm_heap_reboot_due(&s_heap, o->heap_internal_min, HEAP_REBOOT_BYTES)) {
         /* Allowed even with a receiver flash journal open: lifecycle waits
          * for the reboot inhibit, and a starved heap would take the web UI
          * down with it. */
-        s_heap_reboot = true;
         ESP_LOGE(TAG, "internal heap low-water %" PRIu32 " B: rebooting", o->heap_internal_min);
         (void)lifecycle_request_reboot(LIFECYCLE_REBOOT_LOW_HEAP);
+    } else if (o->heap_internal_min < HEAP_REBOOT_BYTES && !s_heap.done && !s_heap_held_logged) {
+        s_heap_held_logged = true;
+        ESP_LOGW(TAG, "internal heap low-water %" PRIu32 " B: %s, so no reboot", o->heap_internal_min,
+                 s_heap.held ? "the previous boot already rebooted for low heap soon after its start"
+                             : "reached while the firmware started (a reboot would repeat it)");
     }
     return hm_deb(&s_deb_frag, o->heap_internal_largest < FRAG_BYTES, now, FRAG_ON_MS, FRAG_OFF_MS);
 }
@@ -526,6 +532,11 @@ static void tick(void)
     memset(&o, 0, sizeof(o));
     bool fragmented = heap_tick(now, &o);
     button_tick(now);
+    uint32_t gps_tow;
+    uint32_t gps_age;
+    if (gnss_obs_get_gps_time(&gps_tow, &gps_age) == ESP_OK) {
+        ledger_set_gps_time(gps_tow, gps_age);   /* the ledger's GNSS clock */
+    }
     ledger_tick();
 
     uint32_t alerts = 0;
@@ -612,6 +623,9 @@ esp_err_t health_init(void)
     const hl_ops_t ops = { .request = op_request, .reboot = op_reboot, .journal = op_journal, .ctx = NULL };
     hl_init(&s_ladder, &ops, now);
     hm_loss_init(&s_loss);
+    lifecycle_boot_info_t boot;
+    lifecycle_get_boot_info(&boot);
+    hm_heap_init(&s_heap, boot.prev_reboot_reason == LIFECYCLE_REBOOT_LOW_HEAP, boot.prev_session_uptime_s);
     hm_link_init(&s_link, now);
     for (size_t i = 0; i < MAX_SLOTS; i++) {
         hm_slot_init(&s_slot[i]);

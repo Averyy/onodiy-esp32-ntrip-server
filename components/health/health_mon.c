@@ -22,6 +22,7 @@ void hm_loss_init(hm_loss_t *l)
     memset(l, 0, sizeof(*l));
     for (unsigned i = 0; i < HM_LOSS_IDS; i++) {
         l->since_ms[i] = HM_NEVER;
+        l->written_ms[i] = HM_NEVER;
     }
 }
 
@@ -46,12 +47,15 @@ void hm_loss_sample(hm_loss_t *l, const uint64_t vals[HM_LOSS_IDS], int64_t now_
     l->have_base = true;
 }
 
-bool hm_loss_next(const hm_loss_t *l, uint8_t *id, int32_t *delta)
+bool hm_loss_next(const hm_loss_t *l, int64_t now_ms, uint8_t *id, int32_t *delta)
 {
     int best = -1;
     for (unsigned i = 0; i < HM_LOSS_IDS; i++) {
         if (l->pending[i] == 0) {
             continue;
+        }
+        if (l->written_ms[i] != HM_NEVER && now_ms - l->written_ms[i] < HM_LOSS_MIN_INTERVAL_MS) {
+            continue;   /* this counter's last record is too recent: the increase merges meanwhile */
         }
         if (best < 0 || l->since_ms[i] < l->since_ms[best]) {
             best = (int)i;
@@ -66,17 +70,40 @@ bool hm_loss_next(const hm_loss_t *l, uint8_t *id, int32_t *delta)
     return true;
 }
 
-void hm_loss_written(hm_loss_t *l, uint8_t id, int32_t delta)
+void hm_loss_written(hm_loss_t *l, uint8_t id, int32_t delta, int64_t now_ms)
 {
     if (id == 0 || id > HM_LOSS_IDS || delta <= 0) {
         return;
     }
     unsigned i = (unsigned)id - 1u;
+    l->written_ms[i] = now_ms;
     uint64_t d = (uint64_t)delta;
     l->pending[i] = l->pending[i] > d ? l->pending[i] - d : 0;
     if (l->pending[i] == 0) {
         l->since_ms[i] = HM_NEVER;
     }
+}
+
+/* ---- low-heap reboot ------------------------------------------------------------ */
+
+void hm_heap_init(hm_heap_t *h, bool prev_low_heap, uint32_t prev_uptime_s)
+{
+    memset(h, 0, sizeof(*h));
+    h->held = prev_low_heap && prev_uptime_s < HM_HEAP_REBOOT_SPACING_S;
+}
+
+bool hm_heap_reboot_due(hm_heap_t *h, uint32_t low_water, uint32_t limit)
+{
+    if (!h->have_base) {
+        h->have_base = true;
+        h->base_min = low_water;   /* the start-up peak: a reboot would only repeat it */
+        return false;
+    }
+    if (h->done || h->held || low_water >= limit || low_water >= h->base_min) {
+        return false;
+    }
+    h->done = true;
+    return true;
 }
 
 /* ---- link-loss alert ----------------------------------------------------------- */

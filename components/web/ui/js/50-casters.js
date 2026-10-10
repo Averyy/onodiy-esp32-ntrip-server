@@ -368,10 +368,26 @@ function casterSummary(c, st, preset) {
       (avg > 28000 ? '. That is close to the limits of public casters; consider MSM4 messages instead of MSM7.' : '')));
   }
   if (ono && c.tls && st.failures_by_class && st.failures_by_class.tls >= 10 && st.state !== 'streaming') {
-    const sw = btn('Use plain port ' + preset.port, () => act(sw, async () => {
-      await saveCaster(c.slot, { tls: false, port: preset.port });
+    const sw = btn('Use plain port ' + preset.port, async () => {
+      const body = { tls: false, port: preset.port };
+      try {
+        await busy(sw, () => saveCaster(c.slot, body));
+      } catch (e) {
+        if (e instanceof ApiError && e.code === 'caster_policy' && e.body.reason === 'dup_stream_ack_required') {
+          /* This slot needs the acknowledgement itself (it may have been given
+           * on the other slot only): ask for it here. A dialog, since this
+           * card is rebuilt every second. */
+          const ok = await dialog({ title: 'Duplicate-stream risk', ok: 'Save with acknowledgement', body: h('p', null, DUP_TEXT),
+            check: 'I understand the risk and want to stream to both.',
+            onOk: () => saveCaster(c.slot, Object.assign({ dup_stream_ack: true }, body)) });
+          if (ok) toast('Switched to the plain port.', 'ok');
+          return;
+        }
+        showErr(e);
+        return;
+      }
       toast('Switched to the plain port.', 'ok');
-    }), 'small');
+    }, 'small');
     out.push(msg('warn', 'TLS to Onocoy failed ' + st.failures_by_class.tls + ' times. Onocoy documents uploads on the plain port only.', h('div', { class: 'form-actions' }, sw)));
   }
   return out;

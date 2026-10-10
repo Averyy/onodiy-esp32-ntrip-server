@@ -101,6 +101,13 @@ static uint16_t rec_check(const logring_t *r, const uint8_t *hdr6, uint32_t text
     return crc;
 }
 
+static void hints_clear(logring_t *r)
+{
+    memset(r->hint_seq, 0, sizeof(r->hint_seq));
+    memset(r->hint_off, 0, sizeof(r->hint_off));
+    r->hint_next = 0;
+}
+
 void logring_attach(logring_t *r, void *mem, size_t mem_size, logring_sync_fn sync, void *sync_ctx)
 {
     r->hdr = (logring_hdr_t *)mem;
@@ -108,6 +115,20 @@ void logring_attach(logring_t *r, void *mem, size_t mem_size, logring_sync_fn sy
     r->data_size = (uint32_t)(mem_size - sizeof(logring_hdr_t));
     r->sync = sync;
     r->sync_ctx = sync_ctx;
+    r->bank = 0;
+    memset(r->image, 0, sizeof(r->image));
+    r->seek_steps = 0;
+    hints_clear(r);
+}
+
+void logring_set_owner(logring_t *r, uint32_t bank, const uint8_t image[LOGRING_IMAGE_ID])
+{
+    r->bank = bank;
+    if (image != NULL) {
+        memcpy(r->image, image, sizeof(r->image));
+    } else {
+        memset(r->image, 0, sizeof(r->image));
+    }
 }
 
 bool logring_header_ok(const logring_t *r)
@@ -116,6 +137,9 @@ bool logring_header_ok(const logring_t *r)
     if (h->magic != LOGRING_MAGIC || h->layout != LOGRING_LAYOUT || h->hdr_size != sizeof(logring_hdr_t) ||
         h->data_size != r->data_size || h->crc != hdr_crc(h)) {
         return false;
+    }
+    if (h->bank != r->bank || memcmp(h->image, r->image, sizeof(h->image)) != 0) {
+        return false;   /* another block's copy, or another image's */
     }
     if (h->tail >= r->data_size || h->used > r->data_size || h->first_seq == 0 || h->next_seq < h->first_seq) {
         return false;
@@ -127,6 +151,7 @@ bool logring_header_ok(const logring_t *r)
 
 bool logring_recover(logring_t *r)
 {
+    hints_clear(r);
     if (!logring_header_ok(r)) {
         return false;
     }
@@ -170,7 +195,10 @@ void logring_format(logring_t *r, uint32_t boot_id, uint32_t first_seq)
     h->boot_id = boot_id;
     h->first_seq = (first_seq == 0) ? 1u : first_seq;
     h->next_seq = h->first_seq;
+    h->bank = r->bank;
+    memcpy(h->image, r->image, sizeof(h->image));
     seal(r);
+    hints_clear(r);
 }
 
 uint32_t logring_append(logring_t *r, const char *text, size_t len)
@@ -235,16 +263,58 @@ uint32_t logring_count(const logring_t *r)
     return r->hdr->next_seq - r->hdr->first_seq;
 }
 
-size_t logring_read(const logring_t *r, uint32_t *cursor, char *out, size_t cap, logring_read_t *info)
+/* Offset of record `want` (first <= want <= next), from the nearest usable
+ * hint at or before it, else from the oldest record. */
+static uint32_t seek(logring_t *r, uint32_t want)
+{
+    const logring_hdr_t *h = r->hdr;
+    uint32_t seq = h->first_seq;
+    uint32_t off = h->tail;
+    for (uint32_t i = 0; i < LOGRING_HINTS; i++) {
+        uint32_t hs = r->hint_seq[i];
+        if (hs == 0 || hs <= seq || hs > want || hs > h->next_seq || r->hint_off[i] >= r->data_size) {
+            continue;
+        }
+        if (hs < h->next_seq) {
+            /* still held: it must be where the hint says (a cheap check) */
+            uint8_t rh[4];
+            get(r, r->hint_off[i], rh, sizeof(rh));
+            if (le32(rh) != hs) {
+                continue;
+            }
+        } else if (r->hint_off[i] != advance(r, h->tail, h->used)) {
+            continue;   /* the head moved: records were appended or dropped since */
+        }
+        seq = hs;
+        off = r->hint_off[i];
+    }
+    while (seq < want) {
+        off = advance(r, off, LOGRING_REC_HDR + rec_len_at(r, off));
+        seq++;
+        r->seek_steps++;
+    }
+    return off;
+}
+
+static void hint_put(logring_t *r, uint32_t seq, uint32_t off)
+{
+    for (uint32_t i = 0; i < LOGRING_HINTS; i++) {
+        if (r->hint_seq[i] == seq) {
+            r->hint_off[i] = off;
+            return;
+        }
+    }
+    uint32_t i = r->hint_next % LOGRING_HINTS;
+    r->hint_seq[i] = seq;
+    r->hint_off[i] = off;
+    r->hint_next = (i + 1u) % LOGRING_HINTS;
+}
+
+static size_t read_impl(logring_t *r, uint32_t *cursor, char *out, size_t cap, bool cut_first,
+                        logring_read_t *info)
 {
     logring_read_t res = { 0 };
     size_t pos = 0;
-    if (cap == 0 || out == NULL || cursor == NULL) {
-        if (info != NULL) {
-            *info = res;
-        }
-        return 0;
-    }
     const logring_hdr_t *h = r->hdr;
     uint32_t first = h->first_seq;
     uint32_t next = h->next_seq;
@@ -259,20 +329,16 @@ size_t logring_read(const logring_t *r, uint32_t *cursor, char *out, size_t cap,
         want = first;
     }
 
-    uint32_t off = h->tail;
-    uint32_t seq = first;
-    while (seq < want) {
-        off = advance(r, off, LOGRING_REC_HDR + rec_len_at(r, off));
-        seq++;
-    }
+    uint32_t off = seek(r, want);
+    uint32_t seq = want;
     while (seq < next) {
         uint32_t len = rec_len_at(r, off);
         uint32_t copy = len;
         if (pos + len > cap - 1) {
-            if (pos != 0) {
-                break;
+            if (pos != 0 || !cut_first) {
+                break;                      /* whole records only */
             }
-            copy = (uint32_t)(cap - 1);     /* cut, so the reader still advances */
+            copy = (uint32_t)(cap - 1);     /* cut, so a reader with a tiny buffer still advances */
         }
         get(r, advance(r, off, LOGRING_REC_HDR), out + pos, copy);
         pos += copy;
@@ -284,8 +350,64 @@ size_t logring_read(const logring_t *r, uint32_t *cursor, char *out, size_t cap,
             break;
         }
     }
+    hint_put(r, seq, off);
     res.more = seq < next;
     out[pos] = '\0';
+    if (info != NULL) {
+        *info = res;
+    }
+    return pos;
+}
+
+size_t logring_read(logring_t *r, uint32_t *cursor, char *out, size_t cap, logring_read_t *info)
+{
+    if (cap == 0 || out == NULL || cursor == NULL) {
+        if (info != NULL) {
+            memset(info, 0, sizeof(*info));
+        }
+        return 0;
+    }
+    return read_impl(r, cursor, out, cap, true, info);
+}
+
+size_t logring_read_sliced(logring_t *r, uint32_t *cursor, char *out, size_t size, size_t slice,
+                           logring_lock_fn lock, logring_lock_fn unlock, void *lock_ctx, logring_read_t *info)
+{
+    logring_read_t res = { 0 };
+    size_t pos = 0;
+    if (size == 0 || out == NULL || cursor == NULL) {
+        if (info != NULL) {
+            *info = res;
+        }
+        return 0;
+    }
+    if (slice < LOGRING_MAX_TEXT + 1u) {
+        slice = LOGRING_MAX_TEXT + 1u;   /* a slice holds any whole record */
+    }
+    out[0] = '\0';
+    while (pos + 1u < size) {
+        size_t cap = size - pos;
+        if (cap > slice) {
+            cap = slice;
+        }
+        logring_read_t ri;
+        if (lock != NULL) {
+            lock(lock_ctx);
+        }
+        /* A record is cut only when the whole buffer is smaller than it,
+         * never because a slice (or the buffer's end) falls inside it. */
+        size_t n = read_impl(r, cursor, out + pos, cap, pos == 0 && size <= slice, &ri);
+        if (unlock != NULL) {
+            unlock(lock_ctx);
+        }
+        pos += n;
+        res.gap |= ri.gap;
+        res.more = ri.more;
+        res.records += ri.records;
+        if (!ri.more || ri.records == 0) {
+            break;
+        }
+    }
     if (info != NULL) {
         *info = res;
     }

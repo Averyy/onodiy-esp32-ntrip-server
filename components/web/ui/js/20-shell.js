@@ -73,10 +73,17 @@ function renderTopActions() {
   }
 }
 
+/*
+ * Connection indicator. Its state word is a polite live region, so a screen
+ * reader hears "Live", "Updating" or "No contact" once when it changes; the
+ * running count of seconds without contact sits beside it, outside the
+ * region (and hidden from assistive technology), or it would be read out
+ * every second.
+ */
 function renderLive(state) {
   const el = doc.getElementById('live');
   const age = S.statusAt ? (Date.now() - S.statusAt) / 1000 : null;
-  let cls = '', text = '';
+  let cls = '', text = '', count = '';
   if (!shell.started) {
     cls = '';
     text = '';
@@ -88,10 +95,23 @@ function renderLive(state) {
     text = 'Updating';
   } else {
     cls = 'down';
-    text = age === null ? 'Connecting…' : 'No contact ' + fmt.dur(age);
+    text = age === null ? 'Connecting…' : 'No contact';
+    count = age === null ? '' : fmt.dur(age);
   }
   el.className = 'live ' + cls;
-  el.textContent = text;
+  if (!text) {
+    clear(el);
+    return;
+  }
+  let word = el.querySelector('.word');
+  let ageEl = el.querySelector('.age');
+  if (!word || !ageEl) {
+    word = h('span', { class: 'word', role: 'status' });
+    ageEl = h('span', { class: 'age', 'aria-hidden': 'true' });
+    mount(el, word, ageEl);
+  }
+  if (word.textContent !== text) word.textContent = text;
+  if (ageEl.textContent !== count) ageEl.textContent = count;
 }
 
 function renderNav() {
@@ -186,6 +206,7 @@ function stopShell() {
 
 /** Show a page outside the app (login, setup). */
 function bare(...kids) {
+  if (openDialogClose) openDialogClose(false);   /* it would keep the new page inert */
   stopShell();
   renderTopActions();
   mount(viewEl(), kids);
@@ -342,6 +363,8 @@ function renderNotices() {
 
 /* ---- Dialogs ----------------------------------------------------------- */
 
+let openDialogClose = null;   /* close(result) of the dialog that is open */
+
 /**
  * Modal dialog. opts: title, body (nodes), ok (label), okKind ('primary' or
  * 'danger solid'), cancel (label, false = none), check (label of a box that
@@ -359,14 +382,48 @@ function dialog(opts) {
     const update = () => {
       okBtn.disabled = (chk && !chk.input.checked) || (typed && typed.value.trim() !== opts.typed);
     };
+    /* Modal for real: the page behind it is inert (no focus, no clicks, out
+     * of the accessibility tree) and Tab wraps inside the dialog. */
+    const behind = [doc.querySelector('header.top'), doc.getElementById('tabs'), doc.getElementById('notices'), viewEl()];
+    const setInert = on => {
+      for (const el of behind) {
+        if (!el) continue;
+        if (on) el.setAttribute('inert', '');
+        else el.removeAttribute('inert');
+      }
+    };
+    let closed = false;
     const close = result => {
+      if (closed) return;
+      closed = true;
+      if (openDialogClose === close) openDialogClose = null;
       doc.removeEventListener('keydown', onKey);
+      window.removeEventListener('hashchange', onHash);
       clear(root);
+      setInert(false);
       if (prevFocus && prevFocus.focus) prevFocus.focus();
       resolve(result);
     };
+    const onHash = () => close(false);   /* the page changed underneath (back button) */
     const onKey = e => {
-      if (e.key === 'Escape' && opts.cancel !== false) close(false);
+      if (e.key === 'Escape' && opts.cancel !== false) {
+        close(false);
+      } else if (e.key === 'Tab') {
+        const items = Array.from(form.querySelectorAll('button, input, select, textarea, a[href]'))
+          .filter(el => !el.disabled && !el.hidden && el.offsetParent !== null);
+        if (!items.length) return;
+        const first = items[0], last = items[items.length - 1];
+        if (!form.contains(doc.activeElement)) {
+          e.preventDefault();
+          first.focus();
+        } else if (e.shiftKey && doc.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && doc.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
     const form = h('form', { class: 'dialog', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'dlg-title',
       onsubmit: async e => {
@@ -389,10 +446,14 @@ function dialog(opts) {
     if (chk) chk.input.addEventListener('change', update);
     if (typed) typed.addEventListener('input', update);
     update();
+    if (openDialogClose) openDialogClose(false);   /* one dialog at a time */
     mount(root, h('div', { class: 'backdrop', onclick: e => {
       if (e.target === e.currentTarget && opts.cancel !== false) close(false);
     } }, form));
+    openDialogClose = close;
+    setInert(true);
     doc.addEventListener('keydown', onKey);
+    window.addEventListener('hashchange', onHash);
     (typed || chk && chk.input || okBtn).focus();
   });
 }

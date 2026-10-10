@@ -78,16 +78,33 @@ esp_err_t ledger_init(void)
     memset(&snap, 0, sizeof(snap));
     snap.today.utc_day = -1;
     snap.pending.utc_day = -1;
+    /* The day stored last as today: after an RTC restore it can be a day
+     * that finished just before the reset and is not in the stored history
+     * yet (lc_merge_stored_day). */
+    lc_snapshot_t stored;
+    memset(&stored, 0, sizeof(stored));
+    stored.today.utc_day = -1;
+    bool stored_ok = false;
+    {
+        uint8_t buf[TODAY_BLOB_MAX];
+        size_t len = sizeof(buf);
+        stored_ok = settings_get_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_TODAY, buf, &len) == ESP_OK &&
+                    lc_decode_today(buf, len, &stored);
+        if (!stored_ok) {
+            stored.today.utc_day = -1;
+        }
+    }
     bool cut = false;
     const char *from;
     if (lc_rtc_valid(&s_rtc)) {
         snap = s_rtc.snap;
         from = "RTC copy";
     } else {
-        uint8_t buf[TODAY_BLOB_MAX];
-        size_t len = sizeof(buf);
-        if (settings_get_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_TODAY, buf, &len) == ESP_OK) {
-            (void)lc_decode_today(buf, len, &snap);
+        if (stored_ok) {
+            snap.today = stored.today;
+            snap.expected_mask = stored.expected_mask;
+            snap.protected_mask = stored.protected_mask;
+            snap.planned = stored.planned;
         }
         int64_t alive_s = 0;
         if (settings_get_i64(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_ALIVE, &alive_s) == ESP_OK && alive_s > 0) {
@@ -104,6 +121,7 @@ esp_err_t ledger_init(void)
         size_t n = lc_decode_hist(s_hist_blob, hlen, s_hist, CONFIG_LEDGER_HISTORY_DAYS);
         lc_set_history(&s_core, s_hist, n);
     }
+    lc_merge_stored_day(&s_core, &stored.today);
     s_ready = true;
     ESP_LOGI(TAG, "restored from %s: day %ld, %u days of history, target %d.%d %%, last alive %lld",
              from, (long)s_core.today.utc_day, (unsigned)s_core.hist_n, CONFIG_LEDGER_TARGET_PERMILLE / 10,
@@ -160,6 +178,26 @@ void ledger_set_utc(int64_t unix_s, ledger_clock_t source)
     diag_set_utc(unix_s);
     if ((lc_clock_t)source != before) {
         ESP_LOGI(TAG, "clock: %s", source == LEDGER_CLOCK_GNSS ? "GNSS" : "SNTP");
+    }
+}
+
+void ledger_set_gps_time(uint32_t tow_ms, uint32_t age_ms)
+{
+    if (!s_ready) {
+        return;
+    }
+    uint32_t now = now_ms();
+    portENTER_CRITICAL(&s_lock);
+    lc_clock_t before = s_core.clock;
+    bool taken = lc_set_gps_tow(&s_core, now, tow_ms, age_ms);
+    int64_t unix_ms = taken ? lc_unix_now(&s_core, now) : -1;
+    portEXIT_CRITICAL(&s_lock);
+    if (!taken || unix_ms < 0) {
+        return;
+    }
+    diag_set_utc(unix_ms / 1000);
+    if (before != LC_CLOCK_GNSS) {
+        ESP_LOGI(TAG, "clock: GNSS");
     }
 }
 

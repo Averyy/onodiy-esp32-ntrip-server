@@ -56,7 +56,11 @@ _Static_assert(ESP_ERR_OTA_VALIDATE_FAILED == 0x1503, "OTA validation error code
 #define SERVER_STACK         8192
 #define SERVER_PRIO          5
 #define SERVER_HDR_LEN       2048
-#define SERVER_TIMEOUT_S     10
+/* One server task handles every request: a client that sends nothing for
+ * this long is dropped (headers), or its body read gives up (after a few
+ * tries), so a stalled or trickling client holds the server only briefly. */
+#define SERVER_RECV_TIMEOUT_S 4
+#define SERVER_SEND_TIMEOUT_S 10
 #define TICK_MS              250
 
 static httpd_handle_t s_server;
@@ -105,6 +109,9 @@ bool web_public_status(void)
 void web_public_status_set_cached(bool on)
 {
     s_public = on;
+    if (!on) {
+        web_ws_close_public();   /* viewers connected while it was on lose it now */
+    }
 }
 
 const char *web_hostname_active(void)
@@ -121,7 +128,7 @@ char *web_http_buf(size_t *cap)
 static void load_public_status(void)
 {
     uint8_t v = 0;
-    s_public = settings_get_u8(SETTINGS_NS_WEB, SETTINGS_KEY_WEB_PUBLIC, &v) == ESP_OK && v != 0;
+    web_public_status_set_cached(settings_get_u8(SETTINGS_NS_WEB, SETTINGS_KEY_WEB_PUBLIC, &v) == ESP_OK && v != 0);
 }
 
 static void load_hostname(void)
@@ -308,20 +315,30 @@ static pre_t precheck(httpd_req_t *req, bool *on_ap, bool websocket)
     } else {
         s_host[0] = '\0';
     }
+    /* A request answered here never has its body read: with a body, the
+     * connection closes instead of the server reading and discarding it
+     * (it could announce gigabytes). */
+    bool body = req->content_len > 0;
     if (!host_ok) {
+        if (body) {
+            httpd_resp_set_hdr(req, "Connection", "close");
+        }
         if (*on_ap && !websocket) {
             captive_redirect(req);
         } else {
             web_send_err(req, WEB_ERR_BAD_HOST);
         }
-        return PRE_ANSWERED;
+        return body ? PRE_CLOSE : PRE_ANSWERED;
     }
     if (mutating(req->method) || websocket) {
         char origin[96];
         esp_err_t err = httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin));
         if (err == ESP_ERR_HTTPD_RESULT_TRUNC || (err == ESP_OK && !web_origin_ok(origin, s_host))) {
+            if (body) {
+                httpd_resp_set_hdr(req, "Connection", "close");
+            }
             web_send_error(req, WEB_ERR_FORBIDDEN, "Cross-origin request refused", NULL, UINT32_MAX, NULL, NULL);
-            return PRE_ANSWERED;
+            return body ? PRE_CLOSE : PRE_ANSWERED;
         }
     }
     return PRE_OK;
@@ -378,6 +395,10 @@ static esp_err_t api_dispatch(httpd_req_t *req)
     pre_t pre = precheck(req, &r.on_ap, false);
     if (pre != PRE_OK) {
         return pre == PRE_CLOSE ? ESP_FAIL : ESP_OK;
+    }
+    /* GET and DELETE take no body: refuse one instead of reading it away. */
+    if (rt->body == WEB_BODY_NONE && req->content_len > 0) {
+        return refuse_and_close(req, WEB_ERR_TOO_LARGE);
     }
     /* CSRF: a JSON or upload content type (a cross-site form cannot send either). */
     if (rt->body == WEB_BODY_JSON && !header_is(req, "Content-Type", "application/json", true)) {
@@ -471,6 +492,9 @@ static esp_err_t fallback(httpd_req_t *req)
     pre_t pre = precheck(req, &on_ap, false);
     if (pre != PRE_OK) {
         return pre == PRE_CLOSE ? ESP_FAIL : ESP_OK;
+    }
+    if (req->content_len > 0) {
+        return refuse_and_close(req, WEB_ERR_TOO_LARGE);   /* nothing here takes a body */
     }
     const char *uri = req->uri;
     size_t len = strcspn(uri, "?");
@@ -833,8 +857,8 @@ esp_err_t web_start(void)
     cfg.max_resp_headers = 12;
     cfg.max_req_hdr_len = SERVER_HDR_LEN;
     cfg.lru_purge_enable = true;
-    cfg.recv_wait_timeout = SERVER_TIMEOUT_S;
-    cfg.send_wait_timeout = SERVER_TIMEOUT_S;
+    cfg.recv_wait_timeout = SERVER_RECV_TIMEOUT_S;
+    cfg.send_wait_timeout = SERVER_SEND_TIMEOUT_S;
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.close_fn = on_sess_close;
     esp_err_t err = httpd_start(&s_server, &cfg);

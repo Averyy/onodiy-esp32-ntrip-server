@@ -27,7 +27,8 @@ TEST_CASE("health mon: the first sample is the baseline", "[health_mon]")
     hm_loss_sample(&l, v, T0, inc);
     uint8_t id;
     int32_t d;
-    TEST_ASSERT_FALSE(hm_loss_next(&l, &id, &d));
+    int64_t now = T0;
+    TEST_ASSERT_FALSE(hm_loss_next(&l, now, &id, &d));
     for (unsigned i = 0; i < HM_LOSS_IDS; i++) {
         TEST_ASSERT_EQUAL_UINT64(0, inc[i]);
     }
@@ -52,25 +53,26 @@ TEST_CASE("health mon: one record per tick, oldest increase first, refused recor
 
     uint8_t id;
     int32_t d;
-    TEST_ASSERT_TRUE(hm_loss_next(&l, &id, &d));
+    int64_t now = T0 + 2 * SEC;
+    TEST_ASSERT_TRUE(hm_loss_next(&l, now, &id, &d));
     TEST_ASSERT_EQUAL_UINT8(1, id);   /* same age as id 4: the lower id first */
     TEST_ASSERT_EQUAL_INT32(1, d);
     /* refused by the rate limit: nothing cleared; more overflows merge in */
     v[0] = 4;
     hm_loss_sample(&l, v, T0 + 3 * SEC, NULL);
-    TEST_ASSERT_TRUE(hm_loss_next(&l, &id, &d));
+    TEST_ASSERT_TRUE(hm_loss_next(&l, now, &id, &d));
     TEST_ASSERT_EQUAL_UINT8(1, id);
     TEST_ASSERT_EQUAL_INT32(4, d);
-    hm_loss_written(&l, id, d);
-    TEST_ASSERT_TRUE(hm_loss_next(&l, &id, &d));
+    hm_loss_written(&l, id, d, now);
+    TEST_ASSERT_TRUE(hm_loss_next(&l, now, &id, &d));
     TEST_ASSERT_EQUAL_UINT8(4, id);
     TEST_ASSERT_EQUAL_INT32(3, d);
-    hm_loss_written(&l, id, d);
-    TEST_ASSERT_TRUE(hm_loss_next(&l, &id, &d));
+    hm_loss_written(&l, id, d, now);
+    TEST_ASSERT_TRUE(hm_loss_next(&l, now, &id, &d));
     TEST_ASSERT_EQUAL_UINT8(2, id);
     TEST_ASSERT_EQUAL_INT32(2, d);
-    hm_loss_written(&l, id, d);
-    TEST_ASSERT_FALSE(hm_loss_next(&l, &id, &d));
+    hm_loss_written(&l, id, d, now);
+    TEST_ASSERT_FALSE(hm_loss_next(&l, now, &id, &d));
 }
 
 TEST_CASE("health mon: large increases are clamped and the rest stays pending", "[health_mon]")
@@ -83,15 +85,18 @@ TEST_CASE("health mon: large increases are clamped and the rest stays pending", 
     hm_loss_sample(&l, v, T0 + SEC, NULL);
     uint8_t id;
     int32_t d;
-    TEST_ASSERT_TRUE(hm_loss_next(&l, &id, &d));
+    int64_t now = T0 + SEC;
+    TEST_ASSERT_TRUE(hm_loss_next(&l, now, &id, &d));
     TEST_ASSERT_EQUAL_UINT8(5, id);
     TEST_ASSERT_EQUAL_INT32(INT32_MAX, d);
-    hm_loss_written(&l, id, d);
-    TEST_ASSERT_TRUE(hm_loss_next(&l, &id, &d));
+    hm_loss_written(&l, id, d, now);
+    TEST_ASSERT_FALSE(hm_loss_next(&l, now + SEC, &id, &d));   /* the counter's next record waits */
+    now += HM_LOSS_MIN_INTERVAL_MS;
+    TEST_ASSERT_TRUE(hm_loss_next(&l, now, &id, &d));
     TEST_ASSERT_EQUAL_UINT8(5, id);
     TEST_ASSERT_EQUAL_INT32(10, d);
-    hm_loss_written(&l, id, d);
-    TEST_ASSERT_FALSE(hm_loss_next(&l, &id, &d));
+    hm_loss_written(&l, id, d, now);
+    TEST_ASSERT_FALSE(hm_loss_next(&l, now, &id, &d));
 }
 
 TEST_CASE("health mon: a counter that went backwards is rebaselined", "[health_mon]")
@@ -104,15 +109,101 @@ TEST_CASE("health mon: a counter that went backwards is rebaselined", "[health_m
     hm_loss_sample(&l, v, T0 + SEC, NULL);
     uint8_t id;
     int32_t d;
-    TEST_ASSERT_FALSE(hm_loss_next(&l, &id, &d));
+    int64_t now = T0 + 2 * SEC;
+    TEST_ASSERT_FALSE(hm_loss_next(&l, now, &id, &d));
     v[0] = 5;
     hm_loss_sample(&l, v, T0 + 2 * SEC, NULL);
-    TEST_ASSERT_TRUE(hm_loss_next(&l, &id, &d));
+    TEST_ASSERT_TRUE(hm_loss_next(&l, now, &id, &d));
     TEST_ASSERT_EQUAL_INT32(2, d);
-    hm_loss_written(&l, 0, 1);    /* ignored: no such id */
-    hm_loss_written(&l, 9, 1);
-    TEST_ASSERT_TRUE(hm_loss_next(&l, &id, &d));
+    hm_loss_written(&l, 0, 1, now);    /* ignored: no such id */
+    hm_loss_written(&l, 9, 1, now);
+    TEST_ASSERT_TRUE(hm_loss_next(&l, now, &id, &d));
     TEST_ASSERT_EQUAL_INT32(2, d);
+}
+
+TEST_CASE("health mon: a counter rising for hours gives one record a minute, others still get theirs", "[health_mon]")
+{
+    /* Framer discards rise every second for 3 h (a garbled line); FIFO
+     * overflows now and then. A journal that takes every record. */
+    hm_loss_t l;
+    hm_loss_init(&l);
+    uint64_t v[HM_LOSS_IDS] = { 0 };
+    int64_t now = T0;
+    hm_loss_sample(&l, v, now, NULL);
+    unsigned recs[HM_LOSS_IDS + 1] = { 0 };
+    uint64_t journalled[HM_LOSS_IDS + 1] = { 0 };
+    for (int t = 1; t <= 3 * 3600; t++) {
+        now += SEC;
+        v[4] += 100;
+        if (t % 600 == 0) {
+            v[0] += 1;
+        }
+        hm_loss_sample(&l, v, now, NULL);
+        uint8_t id;
+        int32_t d;
+        if (hm_loss_next(&l, now, &id, &d)) {
+            recs[id]++;
+            journalled[id] += (uint64_t)d;
+            hm_loss_written(&l, id, d, now);
+        }
+    }
+    TEST_ASSERT_TRUE(recs[5] <= 3 * 60 + 1);
+    TEST_ASSERT_TRUE(recs[5] >= 3 * 60 - 1);
+    TEST_ASSERT_EQUAL_UINT32(18, recs[1]);
+    /* Nothing is lost: what is not journalled yet is pending. */
+    TEST_ASSERT_EQUAL_UINT64(v[4], journalled[5] + l.pending[4]);
+    TEST_ASSERT_EQUAL_UINT64(v[0], journalled[1] + l.pending[0]);
+}
+
+TEST_CASE("health mon: a low heap reboots once, never for a start-up dip or after a quick one", "[health_mon]")
+{
+    const uint32_t lim = 8192;
+    hm_heap_t hp;
+    /* A dip at run time: one reboot. */
+    hm_heap_init(&hp, false, UINT32_MAX);
+    TEST_ASSERT_FALSE(hm_heap_reboot_due(&hp, 40000, lim));
+    TEST_ASSERT_FALSE(hm_heap_reboot_due(&hp, 9000, lim));
+    TEST_ASSERT_TRUE(hm_heap_reboot_due(&hp, 8000, lim));
+    TEST_ASSERT_FALSE(hm_heap_reboot_due(&hp, 7000, lim));
+
+    /* The mark was already below the limit when the monitor started (a
+     * start-up peak): every boot would repeat it, so no reboot for it... */
+    hm_heap_init(&hp, false, UINT32_MAX);
+    TEST_ASSERT_FALSE(hm_heap_reboot_due(&hp, 6000, lim));
+    for (int i = 0; i < 100; i++) {
+        TEST_ASSERT_FALSE(hm_heap_reboot_due(&hp, 6000, lim));
+    }
+    /* ...but a further fall at run time does. */
+    TEST_ASSERT_TRUE(hm_heap_reboot_due(&hp, 5000, lim));
+
+    /* The previous boot rebooted for low heap 10 min after its start: hold. */
+    hm_heap_init(&hp, true, 600);
+    TEST_ASSERT_FALSE(hm_heap_reboot_due(&hp, 40000, lim));
+    TEST_ASSERT_FALSE(hm_heap_reboot_due(&hp, 1000, lim));
+    TEST_ASSERT_TRUE(hp.held);
+    /* After a long session, or another reboot reason, it may again. */
+    hm_heap_init(&hp, true, HM_HEAP_REBOOT_SPACING_S);
+    TEST_ASSERT_FALSE(hm_heap_reboot_due(&hp, 40000, lim));
+    TEST_ASSERT_TRUE(hm_heap_reboot_due(&hp, 1000, lim));
+    hm_heap_init(&hp, false, 5);
+    TEST_ASSERT_FALSE(hm_heap_reboot_due(&hp, 40000, lim));
+    TEST_ASSERT_TRUE(hm_heap_reboot_due(&hp, 1000, lim));
+
+    /* A start-up dip on every boot: boots loop at most... never. */
+    unsigned reboots = 0;
+    bool prev_low = false;
+    uint32_t prev_up = UINT32_MAX;
+    for (int boot = 0; boot < 50; boot++) {
+        hm_heap_init(&hp, prev_low, prev_up);
+        bool r = false;
+        for (int t = 0; t < 3600 && !r; t++) {
+            r = hm_heap_reboot_due(&hp, 7000, lim);
+        }
+        reboots += r ? 1u : 0u;
+        prev_low = r;
+        prev_up = r ? 5u : UINT32_MAX;
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, reboots);
 }
 
 /* ---- link-loss window ---------------------------------------------------------- */

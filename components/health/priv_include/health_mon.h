@@ -9,7 +9,11 @@
  *  - Loss journal: the loss counters are monotonic and live in RAM in the
  *    components that increment them; health journals their increases, at
  *    most one record per tick, for the counter whose unjournalled increase
- *    is oldest. A record the journal refuses (its per-kind rate limit) stays
+ *    is oldest, and at most one record per counter every
+ *    HM_LOSS_MIN_INTERVAL_MS: a counter that rises for days (a garbled
+ *    line) must not take the journal's shared hourly budget from every
+ *    other kind of record, nor overwrite the journal's history in hours. A
+ *    record that waits, or that the journal refuses (its rate limits), stays
  *    pending and keeps accumulating, so increases are merged, never lost.
  *  - Link-loss alert: raised when, within the last 10-11 minutes, the UART
  *    hardware FIFO overflowed at least once, or RTCM CRC errors exceeded
@@ -49,11 +53,15 @@ extern "C" {
 /** Loss counters journalled, ids 1..HM_LOSS_IDS (same values as diag_loss_id_t). */
 #define HM_LOSS_IDS 8
 
+/** Shortest time between two records of the same counter. */
+#define HM_LOSS_MIN_INTERVAL_MS 60000
+
 typedef struct {
     bool have_base;
     uint64_t last[HM_LOSS_IDS];      /**< last sampled value (index = id - 1) */
     uint64_t pending[HM_LOSS_IDS];   /**< increase not journalled yet */
     int64_t since_ms[HM_LOSS_IDS];   /**< when the oldest unjournalled increase was seen */
+    int64_t written_ms[HM_LOSS_IDS]; /**< when the counter's last record was journalled (HM_NEVER = not yet) */
 } hm_loss_t;
 
 void hm_loss_init(hm_loss_t *l);
@@ -65,11 +73,15 @@ void hm_loss_init(hm_loss_t *l);
  */
 void hm_loss_sample(hm_loss_t *l, const uint64_t vals[HM_LOSS_IDS], int64_t now_ms, uint64_t inc[HM_LOSS_IDS]);
 
-/** The record to try this tick: the id whose pending increase is oldest (clamped to INT32_MAX). */
-bool hm_loss_next(const hm_loss_t *l, uint8_t *id, int32_t *delta);
+/**
+ * The record to try at now_ms: among the counters whose last record is at
+ * least HM_LOSS_MIN_INTERVAL_MS old, the one whose pending increase is
+ * oldest (clamped to INT32_MAX).
+ */
+bool hm_loss_next(const hm_loss_t *l, int64_t now_ms, uint8_t *id, int32_t *delta);
 
-/** The journal took that record: clear what it carried (a clamped remainder stays pending). */
-void hm_loss_written(hm_loss_t *l, uint8_t id, int32_t delta);
+/** The journal took that record at now_ms: clear what it carried (a clamped remainder stays pending). */
+void hm_loss_written(hm_loss_t *l, uint8_t id, int32_t delta, int64_t now_ms);
 
 /* ---- link-loss alert ----------------------------------------------------------- */
 
@@ -145,6 +157,37 @@ bool hm_slot_overrun(hm_slot_t *s, const hm_slot_in_t *in, int64_t now_ms);
 
 /** A slot that is enabled and failing (waiting for the network, backing off, rejected or banned). */
 bool hm_slot_down(const hm_slot_in_t *in);
+
+/* ---- low-heap reboot ------------------------------------------------------------ */
+
+/*
+ * The internal heap's low-water mark below a limit reboots the ESP32 once.
+ * Two cases where a reboot cannot help are left out, so they never loop:
+ *  - a dip already in the mark at the first sample: it happened while the
+ *    firmware started (the monitor starts last) and would happen again on
+ *    every boot; only a mark that falls further later counts;
+ *  - the previous boot ended in a low-heap reboot within
+ *    HM_HEAP_REBOOT_SPACING_S of its start: this boot only warns.
+ * A low-heap reboot is a planned one, so the boot-loop guard never sees it;
+ * these rules are what bounds it.
+ */
+#define HM_HEAP_REBOOT_SPACING_S 3600u
+
+typedef struct {
+    bool have_base;
+    uint32_t base_min;     /**< low-water mark at the first sample */
+    bool held;             /**< no low-heap reboot this boot (the previous one was a quick one) */
+    bool done;             /**< requested already */
+} hm_heap_t;
+
+/**
+ * prev_low_heap: the previous boot ended in a low-heap reboot;
+ * prev_uptime_s: how long it ran (UINT32_MAX = unknown).
+ */
+void hm_heap_init(hm_heap_t *h, bool prev_low_heap, uint32_t prev_uptime_s);
+
+/** One sample of the low-water mark. @return true once: request the reboot now. */
+bool hm_heap_reboot_due(hm_heap_t *h, uint32_t low_water, uint32_t limit);
 
 /* ---- debounce ----------------------------------------------------------------- */
 

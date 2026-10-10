@@ -218,30 +218,21 @@ int dj_mount(dj_t *j, const dj_flash_t *fl, uint32_t size)
 
 /* ---- append ------------------------------------------------------------------------ */
 
-/* Small buffer: this runs on the writer task's stack, next to the flash calls. */
-static bool sector_blank(dj_t *j, uint32_t k)
-{
-    uint8_t buf[128];
-    for (uint32_t off = 0; off < DJ_SECTOR_SIZE; off += sizeof(buf)) {
-        if (rd(j, sector_off(k) + off, buf, sizeof(buf)) != DJ_OK || !all_ff(buf, sizeof(buf))) {
-            return false;
-        }
-    }
-    return true;
-}
-
 static int open_next(dj_t *j)
 {
     uint32_t k = (j->cur < 0) ? 0u : ((uint32_t)j->cur + 1u) % j->sectors;
-    /* The oldest records are dropped here, whatever happens next. */
+    /* The oldest records are dropped here, whatever happens next. The
+     * sector is always erased, also when it reads blank: a blank sector can
+     * be one whose erase a power cut interrupted, and such cells may read
+     * as erased but not hold what is written next (NOR flash wants an
+     * interrupted erase repeated). On a fresh partition that costs one
+     * erase per sector, once. */
     j->sec[k].valid = false;
-    if (!sector_blank(j, k)) {
-        if (j->fl.erase(j->fl.ctx, sector_off(k), DJ_SECTOR_SIZE) != 0) {
-            j->io_errors++;
-            return DJ_ERR_IO;
-        }
-        j->erases++;
+    if (j->fl.erase(j->fl.ctx, sector_off(k), DJ_SECTOR_SIZE) != 0) {
+        j->io_errors++;
+        return DJ_ERR_IO;
     }
+    j->erases++;
     uint32_t seq = j->top_sector_seq + 1u;
     uint8_t hdr[DJ_SLOT_SIZE];
     dj_encode_sector_hdr(seq, j->next_seq, DJ_REC_FORMAT, hdr);

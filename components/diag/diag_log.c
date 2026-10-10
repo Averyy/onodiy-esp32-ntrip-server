@@ -24,6 +24,7 @@
 
 #include "driver/uart.h"
 #include "driver/uart_vfs.h"
+#include "esp_app_desc.h"
 #include "esp_attr.h"
 #include "esp_cache.h"
 #include "esp_heap_caps.h"
@@ -56,7 +57,7 @@ static EXT_RAM_NOINIT_ATTR uint8_t s_bank_mem[2][BANK_BYTES] __attribute__((alig
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static logring_t s_ring;            /* this boot; under s_lock */
-static logring_t s_prev;            /* previous boot; read-only after init */
+static logring_t s_prev;            /* previous boot; its records are read-only after init, its read hints under s_lock */
 static bool s_ring_ok;
 static bool s_prev_ok;
 static uint32_t s_cache_line = 32;
@@ -111,11 +112,18 @@ static esp_err_t rings_init(void)
     mem[1] = NULL;
 #endif
 
+    /* Each bank is stamped with its index and this image: when the image
+     * changes, the banks' physical place can move by whole MMU pages (one
+     * page can be one bank), so an old bank must not pass for the other
+     * bank or for this image's. */
+    uint8_t image[LOGRING_IMAGE_ID];
+    memcpy(image, esp_app_get_description()->app_elf_sha256, sizeof(image));
     logring_t bank[2];
     bool ok[2] = { false, false };
     for (int i = 0; i < 2; i++) {
         if (mem[i] != NULL) {
             logring_attach(&bank[i], mem[i], BANK_BYTES, ring_sync, NULL);
+            logring_set_owner(&bank[i], (uint32_t)i, image);
 #if BANKS_PERSIST
             ok[i] = logring_recover(&bank[i]);
 #endif
@@ -380,11 +388,22 @@ void diag_log_drain_console(uint32_t ms)
 
 /* ---- readers ------------------------------------------------------------------------------ */
 
+static void read_lock(void *ctx)
+{
+    (void)ctx;
+    portENTER_CRITICAL(&s_lock);
+}
+
+static void read_unlock(void *ctx)
+{
+    (void)ctx;
+    portEXIT_CRITICAL(&s_lock);
+}
+
 size_t diag_log_read_ex(diag_log_src_t src, uint32_t *cursor, char *buf, size_t buf_size,
                         diag_log_read_info_t *info)
 {
     diag_log_read_info_t res = { 0 };
-    size_t pos = 0;
     if (buf != NULL && buf_size > 0) {
         buf[0] = '\0';
     }
@@ -395,28 +414,15 @@ size_t diag_log_read_ex(diag_log_src_t src, uint32_t *cursor, char *buf, size_t 
         }
         return 0;
     }
-    const logring_t *r = live ? &s_ring : &s_prev;
-    /* Short lock holds: one slice at a time, so a long read never delays a logger much. */
-    while (pos + 1u < buf_size) {
-        size_t slice = buf_size - pos;
-        if (slice > READ_SLICE) {
-            slice = READ_SLICE;
-        }
-        logring_read_t ri;
-        if (live) {
-            portENTER_CRITICAL(&s_lock);
-        }
-        size_t n = logring_read(r, cursor, buf + pos, slice, &ri);
-        if (live) {
-            portEXIT_CRITICAL(&s_lock);
-        }
-        pos += n;
-        res.gap |= ri.gap;
-        res.more = ri.more;
-        if (!ri.more || ri.records == 0) {
-            break;
-        }
-    }
+    /* Short lock holds: one slice at a time, so a long read never delays a
+     * logger much; the read hints keep each hold from walking the ring. The
+     * previous boot's ring takes the lock too: readers on two tasks share
+     * its hints. */
+    logring_read_t ri;
+    size_t pos = logring_read_sliced(live ? &s_ring : &s_prev, cursor, buf, buf_size, READ_SLICE, read_lock,
+                                     read_unlock, NULL, &ri);
+    res.gap = ri.gap;
+    res.more = ri.more;
     if (info != NULL) {
         *info = res;
     }
@@ -424,19 +430,15 @@ size_t diag_log_read_ex(diag_log_src_t src, uint32_t *cursor, char *buf, size_t 
 }
 
 /* Would a read from this cursor skip lines that were overwritten? */
-static bool gap_ahead(const logring_t *r, bool live, uint32_t cursor)
+static bool gap_ahead(const logring_t *r, uint32_t cursor)
 {
     if (cursor == 0) {
         return false;
     }
-    if (live) {
-        portENTER_CRITICAL(&s_lock);
-    }
+    portENTER_CRITICAL(&s_lock);
     uint32_t first = r->hdr->first_seq;
     uint32_t next = r->hdr->next_seq;
-    if (live) {
-        portEXIT_CRITICAL(&s_lock);
-    }
+    portEXIT_CRITICAL(&s_lock);
     return cursor + 1u < first || cursor + 1u > next;
 }
 
@@ -445,7 +447,7 @@ static size_t read_with_note(diag_log_src_t src, uint32_t *cursor, char *buf, si
     static const char k_note[] = "[diag: earlier lines were overwritten before they were read]\n";
     bool live = (src == DIAG_LOG_THIS_BOOT);
     if (cursor != NULL && buf != NULL && buf_size > sizeof(k_note) + 1u && (live ? s_ring_ok : s_prev_ok) &&
-        gap_ahead(live ? &s_ring : &s_prev, live, *cursor)) {
+        gap_ahead(live ? &s_ring : &s_prev, *cursor)) {
         memcpy(buf, k_note, sizeof(k_note) - 1u);
         size_t n = diag_log_read_ex(src, cursor, buf + sizeof(k_note) - 1u, buf_size - (sizeof(k_note) - 1u), NULL);
         return n + sizeof(k_note) - 1u;
@@ -461,6 +463,18 @@ size_t diag_log_read(uint32_t *cursor, char *buf, size_t buf_size)
 size_t diag_log_read_prev_boot(uint32_t *cursor, char *buf, size_t buf_size)
 {
     return read_with_note(DIAG_LOG_PREV_BOOT, cursor, buf, buf_size);
+}
+
+uint32_t diag_log_head(void)
+{
+    if (!s_ring_ok) {
+        return 0;
+    }
+    portENTER_CRITICAL(&s_lock);
+    uint32_t first = s_ring.hdr->first_seq;
+    uint32_t next = s_ring.hdr->next_seq;
+    portEXIT_CRITICAL(&s_lock);
+    return next == first ? (first > 1u ? first - 1u : 0u) : next - 1u;
 }
 
 void diag_log_stats(diag_log_stats_t *out)

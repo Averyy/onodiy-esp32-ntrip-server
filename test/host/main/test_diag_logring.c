@@ -157,6 +157,197 @@ TEST_CASE("log ring: overwriting drops the oldest lines and the reader sees a ga
     TEST_ASSERT_EQUAL_MEMORY(text, out, strlen(text));
 }
 
+static size_t count_nl(const char *s, size_t n)
+{
+    size_t c = 0;
+    for (size_t i = 0; i < n; i++) {
+        c += (s[i] == '\n');
+    }
+    return c;
+}
+
+TEST_CASE("log ring: a sliced read through a large buffer never cuts a line", "[diag][logring]")
+{
+    /* 200 lines of about 60 bytes read 4 KB at a time in 1025-byte lock
+     * slices (the web's log download and WebSocket push): every chunk ends
+     * on a whole line and nothing is lost. */
+    static uint8_t mem[sizeof(logring_hdr_t) + 65536u];
+    logring_t r;
+    logring_attach(&r, mem, sizeof(mem), NULL, NULL);
+    logring_format(&r, 1, 1);
+    static char expect[200 * 80];
+    size_t elen = 0;
+    for (uint32_t i = 0; i < 200; i++) {
+        char text[80];
+        snprintf(text, sizeof(text), "I (%05u) tag: line number %u of the test, some words\n", (unsigned)i,
+                 (unsigned)i);
+        logring_append(&r, text, strlen(text));
+        memcpy(expect + elen, text, strlen(text));
+        elen += strlen(text);
+    }
+    static char got[200 * 80];
+    size_t glen = 0;
+    uint32_t cur = 0;
+    char buf[4096];
+    for (int guard = 0; guard < 100; guard++) {
+        logring_read_t info;
+        size_t n = logring_read_sliced(&r, &cur, buf, sizeof(buf), LOGRING_MAX_TEXT + 1u, NULL, NULL, NULL, &info);
+        TEST_ASSERT_EQUAL_size_t(strlen(buf), n);
+        if (n == 0) {
+            TEST_ASSERT_FALSE(info.more);
+            break;
+        }
+        TEST_ASSERT_EQUAL_CHAR('\n', buf[n - 1]);
+        TEST_ASSERT_EQUAL_UINT32(count_nl(buf, n), info.records);
+        memcpy(got + glen, buf, n);
+        glen += n;
+    }
+    TEST_ASSERT_EQUAL_size_t(elen, glen);
+    TEST_ASSERT_EQUAL_MEMORY(expect, got, elen);
+    TEST_ASSERT_EQUAL_size_t(200, count_nl(got, glen));
+    TEST_ASSERT_EQUAL_UINT32(200, cur);
+
+    /* A buffer smaller than a record still advances (that record is cut). */
+    char tiny[16];
+    cur = 0;
+    logring_read_t info;
+    TEST_ASSERT_EQUAL_size_t(15, logring_read_sliced(&r, &cur, tiny, sizeof(tiny), 1025, NULL, NULL, NULL, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, cur);
+}
+
+static unsigned s_locks;
+static void test_lock(void *ctx)
+{
+    TEST_ASSERT_EQUAL_PTR(&s_locks, ctx);
+    s_locks++;
+}
+static void test_unlock(void *ctx)
+{
+    (void)ctx;
+}
+
+TEST_CASE("log ring: a reader that continues where it stopped does not walk the ring", "[diag][logring]")
+{
+    static uint8_t mem[sizeof(logring_hdr_t) + 65536u];
+    logring_t r;
+    logring_attach(&r, mem, sizeof(mem), NULL, NULL);
+    logring_format(&r, 1, 1);
+    char text[80];
+    uint32_t cur = 0;
+    char buf[4096];
+    /* Fill and wrap the ring, a few lines between two reads, as the
+     * WebSocket push does every 500 ms. */
+    for (uint32_t i = 0; i < 3000; i++) {
+        line_text(i, text, sizeof(text));
+        logring_append(&r, text, strlen(text));
+        if (i % 3 == 2) {
+            s_locks = 0;
+            logring_read_t info;
+            logring_read_sliced(&r, &cur, buf, sizeof(buf), LOGRING_MAX_TEXT + 1u, test_lock, test_unlock, &s_locks,
+                                &info);
+            TEST_ASSERT_EQUAL_UINT32(1, s_locks);
+            TEST_ASSERT_EQUAL_UINT32(i + 1u, cur);
+            TEST_ASSERT_EQUAL_size_t(3, count_nl(buf, strlen(buf)));
+        }
+    }
+    TEST_ASSERT_TRUE(r.hdr->lost > 0);
+    TEST_ASSERT_EQUAL_UINT32(0, r.seek_steps);
+
+    /* A reader far behind (another cursor) still reads correctly, with a gap. */
+    uint32_t old = 5;
+    logring_read_t info;
+    size_t n = logring_read(&r, &old, buf, sizeof(buf), &info);
+    TEST_ASSERT_TRUE(info.gap);
+    line_text(r.hdr->first_seq - 1u, text, sizeof(text));
+    TEST_ASSERT_EQUAL_MEMORY(text, buf, strlen(text));
+    TEST_ASSERT_TRUE(n > 0);
+    /* Paging on from there uses the hint the last page left. */
+    uint32_t steps = r.seek_steps;
+    n = logring_read(&r, &old, buf, sizeof(buf), &info);
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_EQUAL_UINT32(steps, r.seek_steps);
+    line_text(old - 1u, text, sizeof(text));
+    TEST_ASSERT_EQUAL_MEMORY(text, buf + n - strlen(text), strlen(text));
+}
+
+TEST_CASE("log ring: random appends and readers with hints read exactly what was written", "[diag][logring]")
+{
+    static uint8_t mem[sizeof(logring_hdr_t) + 2048u];
+    logring_t r;
+    logring_attach(&r, mem, sizeof(mem), NULL, NULL);
+    logring_format(&r, 1, 1);
+    srand(7);
+    uint32_t cur[3] = { 0, 0, 0 };
+    char buf[700];
+    char text[200];
+    for (uint32_t i = 0; i < 4000; i++) {
+        uint32_t seq = r.hdr->next_seq;
+        int len = snprintf(text, sizeof(text), "%u:%.*s\n", (unsigned)seq, rand() % 120,
+                           "0123456789012345678901234567890123456789012345678901234567890123456789"
+                           "012345678901234567890123456789012345678901234567890123456789");
+        logring_append(&r, text, (size_t)len);
+        int who = rand() % 4;
+        if (who < 3) {
+            size_t cap = (size_t)(40 + rand() % 600);
+            logring_read_t info;
+            size_t n = logring_read_sliced(&r, &cur[who], buf, cap, LOGRING_MAX_TEXT + 1u, NULL, NULL, NULL, &info);
+            /* every line read is whole and numbered in order */
+            size_t p = 0;
+            uint32_t last = 0;
+            while (p < n) {
+                char *nl = memchr(buf + p, '\n', n - p);
+                if (nl == NULL) {
+                    /* only a record longer than the whole buffer is cut, alone */
+                    TEST_ASSERT_EQUAL_size_t(0, p);
+                    TEST_ASSERT_EQUAL_size_t(cap - 1u, n);
+                    TEST_ASSERT_EQUAL_UINT32(1, info.records);
+                    last = (uint32_t)strtoul(buf, NULL, 10);
+                    break;
+                }
+                uint32_t num = (uint32_t)strtoul(buf + p, NULL, 10);
+                if (last != 0) {
+                    TEST_ASSERT_EQUAL_UINT32(last + 1u, num);
+                }
+                last = num;
+                p = (size_t)(nl - buf) + 1u;
+            }
+            if (last != 0) {
+                TEST_ASSERT_EQUAL_UINT32(last, cur[who]);
+            }
+        }
+    }
+}
+
+TEST_CASE("log ring: a block of another bank or image is refused", "[diag][logring]")
+{
+    static uint8_t mem[MEM_SIZE];
+    static const uint8_t img_a[LOGRING_IMAGE_ID] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    static const uint8_t img_b[LOGRING_IMAGE_ID] = { 1, 2, 3, 4, 5, 6, 7, 9 };
+    logring_t r;
+    logring_attach(&r, mem, sizeof(mem), NULL, NULL);
+    logring_set_owner(&r, 1, img_a);
+    logring_format(&r, 4, 1);
+    logring_append(&r, "x\n", 2);
+
+    logring_t same;
+    logring_attach(&same, mem, sizeof(mem), NULL, NULL);
+    logring_set_owner(&same, 1, img_a);
+    TEST_ASSERT_TRUE(logring_recover(&same));
+    TEST_ASSERT_EQUAL_UINT32(1, logring_count(&same));
+
+    /* the same bytes found where bank 0 lives (the image moved them) */
+    logring_t other_bank;
+    logring_attach(&other_bank, mem, sizeof(mem), NULL, NULL);
+    logring_set_owner(&other_bank, 0, img_a);
+    TEST_ASSERT_FALSE(logring_recover(&other_bank));
+
+    /* written by another image */
+    logring_t other_image;
+    logring_attach(&other_image, mem, sizeof(mem), NULL, NULL);
+    logring_set_owner(&other_image, 1, img_b);
+    TEST_ASSERT_FALSE(logring_recover(&other_image));
+}
+
 TEST_CASE("log ring: a long line is cut to what the ring can hold", "[diag][logring]")
 {
     static uint8_t mem[sizeof(logring_hdr_t) + 64u];

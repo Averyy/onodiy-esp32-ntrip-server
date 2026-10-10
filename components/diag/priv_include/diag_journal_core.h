@@ -39,11 +39,12 @@
  *   A slot that is neither free nor a valid record (a write cut by a power
  *   loss) is skipped and never reused until its sector is erased.
  *
- * Wear: sectors are used strictly in ring order and each is erased only when
- * the ring comes back to it (never ahead of time, and not at all when it
- * still reads blank), so every sector sees the same number of erases. The
- * number of sectors opened so far (the newest sector_seq) divided by the
- * sector count is the number of erase cycles each sector has seen. The rate
+ * Wear: sectors are used strictly in ring order and each is erased when the
+ * ring comes to it (never ahead of time; also when it reads blank, since a
+ * power cut during an erase can leave cells that read blank but do not hold
+ * a write), so every sector sees the same number of erases. The number of
+ * sectors opened so far (the newest sector_seq) divided by the sector count
+ * is the number of erase cycles each sector has seen. The rate
  * of records is bounded by the caller (per-kind interval and an hourly
  * budget, dj_rate_*).
  *
@@ -133,12 +134,12 @@ int dj_decode_sector_hdr(const uint8_t in[DJ_SLOT_SIZE], dj_sector_t *s);
 int dj_mount(dj_t *j, const dj_flash_t *fl, uint32_t size);
 
 /**
- * Write one record; e->seq is assigned here. Opens (erases, if needed) the
+ * Write one record; e->seq is assigned here. Opens (erases) the
  * next sector when the current one is full.
  */
 int dj_append(dj_t *j, dj_entry_t *e);
 
-/** True if the next append has to open (and maybe erase) a sector first. */
+/** True if the next append has to open (and erase) a sector first. */
 bool dj_needs_open(const dj_t *j);
 
 /**

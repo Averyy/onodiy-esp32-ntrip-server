@@ -272,17 +272,32 @@ static void step_healthy(hl_t *l)
     l->healthy_since = l->active_ms;
 }
 
-/* A suspension began: a step in progress is abandoned and tried again later. */
+/* A suspension began: a step in progress is abandoned and tried again later.
+ * A step that ran and is abandoned a second time in the same episode counts
+ * as failed instead: the ladder goes on past it once the suspension ends.
+ * The station can start a session of its own as a result of a step (its
+ * applied check after a receiver reset, for one), so without this bound the
+ * same step could be abandoned and re-run for as long as the fault lasts. */
 static void abandon(hl_t *l)
 {
+    bool repeat = false;
     if (l->phase == HL_PH_RUN || l->phase == HL_PH_GRACE) {
         journal(l, l->step, HL_OUT_ABANDONED);
         if (l->phase == HL_PH_RUN) {
             l->own_to_ms = l->last_now;   /* the step's window closes here */
         }
+        if (l->step >= 1 && l->step <= HL_LAST_STEP) {
+            uint8_t bit = (uint8_t)(1u << l->step);
+            repeat = (l->abandoned & bit) != 0;
+            l->abandoned |= bit;
+        }
     }
     if (l->phase == HL_PH_WANT || l->phase == HL_PH_RUN || l->phase == HL_PH_GRACE) {
-        l->idx = (uint8_t)(l->step > 0 ? l->step - 1 : 0);
+        if (repeat) {
+            l->idx = l->step;
+        } else {
+            l->idx = (uint8_t)(l->step > 0 ? l->step - 1 : 0);
+        }
         l->step = 0;
         l->phase = HL_PH_IDLE;
         l->healthy = false;
@@ -299,6 +314,7 @@ static void ladder_reset(hl_t *l)
     l->step = 0;
     l->power_alert = false;
     l->hold_no_rx = false;
+    l->abandoned = 0;
 }
 
 /* Healthy-for-60-s tracking (IDLE and FAILED). */

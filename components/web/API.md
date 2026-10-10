@@ -102,8 +102,10 @@ Applied to every request before any handler runs.
 1. **Host.** The `Host` header (port ignored) must be the station's current
    IPv4 address, the AP address (`192.168.4.1`), the hostname in use,
    `<hostname>.local`, or `<hostname>.` followed by one of `lan`, `home`,
-   `home.arpa`, `localdomain`, `internal`, `fritz.box` (names compared
-   without case). Anything else on the
+   `home.arpa`, `localdomain`, `internal` (names compared without case):
+   only suffixes that never resolve in public DNS, so a router domain that
+   is a public zone (such as `fritz.box`) is not accepted; use the IP
+   address or `<hostname>.local` there. Anything else on the
    station interface gets `421 bad_host` (DNS rebinding). On the AP
    interface a foreign Host is the captive portal instead (section 16).
 2. **Origin.** On every `POST`, `PUT`, `DELETE` and WebSocket handshake that
@@ -173,12 +175,21 @@ are 8-64 bytes of UTF-8 without control characters.
   unavailable (seen through `health_status_t.admin_resets`).
 - An ended session's WebSocket is closed with code `4001`.
 
-**Login throttling** (global, RAM): the first 5 consecutive failures cost
-nothing extra; after the n-th failure (n >= 5) the next attempt is accepted
-only `min(2^(n-4), 300)` s later. Earlier attempts get `429 rate_limited`
-with `retry_in_s`, without checking the password and without counting. A
-success resets the count. A wrong `current` password in
-`PUT /api/admin-password` counts the same way.
+**Login throttling** (per client, RAM): a client is its IPv4 address (an
+IPv6 address: its /64 prefix) together with the interface it came over
+(station or AP); the 16 clients seen last are tracked. A client's first 5
+consecutive failures cost nothing extra; after its n-th failure (n >= 5) its
+next attempt is accepted only `min(2^(n-4), 300)` s later. Earlier attempts
+get `429 rate_limited` with that client's `retry_in_s`, without checking the
+password and without counting. A success resets that client's count; a new
+admin password resets every count. One client's failures never delay
+another client. Against guessing from many addresses, each interface also
+has a ceiling: at most 30 failures in a burst, then one more every 120 s;
+while it is reached, attempts over that interface get `429 rate_limited`
+too. A single throttled client stays well below the ceiling, and failures
+on the station interface never touch the AP's, so nobody on the LAN can lock
+out an owner who logs in over the station's own AP. A wrong `current`
+password in `PUT /api/admin-password` counts the same way.
 
 **First password ("claim").** `POST /api/setup/admin` works only while no
 admin password is stored **and** the request arrived over the device's own
@@ -383,14 +394,18 @@ Public form (no session, public status on):
 The handshake is authenticated by the session cookie; without one it is
 accepted only when public status is on, and then only the public `status`
 topic is served. Refused handshakes get the HTTP error (`401`, `403`); a
-fifth concurrent client gets `503 too_many_clients`.
+fifth concurrent client, and a third client without a session (public
+viewers get at most 2 of the 4 slots, so the admin's pages always find
+one), get `503 too_many_clients`. A handshake extends the session's idle
+timeout only when it succeeds. Turning public status off closes every
+client without a session (`1008`).
 
 **Client to server** (text frames, JSON, at most 256 bytes; larger closes
 with `1009`):
 
 | Message | Effect |
 |---|---|
-| `{"type": "subscribe", "topics": ["status", "progress", "log"]}` | replaces the topic set (admin topics are ignored for public clients) |
+| `{"type": "subscribe", "topics": ["status", "progress", "log"], "log_cursor": 51200}` | replaces the topic set (admin topics are ignored for public clients); `log_cursor` (optional): send the log lines after this cursor (as `/api/logs?cursor=`), else, when `log` is newly subscribed, only lines logged from now on |
 | `{"type": "ping"}` | `{"type": "pong"}`; also extends the session's idle timeout |
 
 Default topics after the handshake: `status` and `progress` (admin), `status`
@@ -404,7 +419,7 @@ Default topics after the handshake: `status` and `progress` (admin), `status`
 | `status` | 1 Hz | `{"type": "status", "seq": 812, "full": false, "uptime_s": 86400, "data": {"casters": [...], "receiver": {...}}}` |
 | `event` | at once, at most 10/s (coalesced) | `{"type": "event", "event": "caster_state", "slot": 0, "state": "backoff"}` |
 | `progress` | at most 2 Hz while a job runs, plus one final message | `{"type": "progress", "job": "gnss_update", "phase": "downloading", "pct": 42, "done": false}` |
-| `log` | every 500 ms when there are new lines, at most 4 KB per message | `{"type": "log", "cursor": 51234, "gap": false, "text": "I (1234) station: ...\n"}` |
+| `log` | every 500 ms when there are new lines, at most 4 KB per message | `{"type": "log", "from": 51200, "cursor": 51234, "gap": false, "text": "I (1234) station: ...\n"}` |
 | `pong` | reply to `ping` | `{"type": "pong"}` |
 
 **Status deltas.** Once a second the server builds the status object of
@@ -439,13 +454,23 @@ The final message has `"done": true` and `"result"`: `ok` or a result code
 
 **Close codes:** `1012` the device reboots, `4001` session ended (logout,
 expiry, password change), `4003` client too slow (its queue stayed full for
-30 s), `1009` client message too large.
+30 s), `1009` client message too large, `1008` public status was turned off
+(clients without a session).
+
+**Log.** Each client reads the log from its own cursor: a `log` message
+holds whole lines, those after `from` up to `cursor`, so a client that read
+up to cursor N over HTTP and subscribed with `"log_cursor": N` gets the
+following lines exactly once. A message whose `from` is not where the
+client stands was sent before its subscription took effect (or the client
+missed one): it reads the difference over HTTP and subscribes again.
+`gap` is true when the ring overwrote lines before this client read them.
 
 **Back-pressure.** Pushes go through `httpd_queue_work` and never block a
 producer. Each client has a queue of at most 8 messages / 16 KB. When it is
 full: a `status` message is dropped and the client gets a full snapshot
-next time; a `log` message is dropped and the next one has `"gap": true`;
-`progress` keeps only the newest; `event` drops the oldest.
+next time; log lines wait (the client's log cursor stays, so they go out
+later, without a gap); `progress` keeps only the newest; `event` drops the
+oldest.
 
 ---
 
@@ -1259,7 +1284,14 @@ no receiver update action.
   RAM; `max_open_sockets` 7 (the lwIP socket budget counts on it),
   `lru_purge_enable`, `max_uri_handlers` 64 with wildcard matching for
   `/api/casters/*`, `max_req_hdr_len` 2048 (cookies and long browser
-  headers), receive and send timeouts 10 s. WebSocket clients: at most 4.
+  headers), receive timeout 4 s (a client that sends nothing that long is
+  dropped while it sends headers; a body read gives up after three in a
+  row), send timeout 10 s. A request with a body that nobody reads (every
+  `GET` and `DELETE`, anything outside the API routes, and any request
+  answered before its body, such as a refused Host or Origin) is answered
+  and the connection closed, instead of reading the body away on the
+  server task. WebSocket clients: at most 4, at most 2 of them without a
+  session.
 - **Handlers never block for long.** Station, caster, network and update
   calls are asynchronous; a handler reads snapshots and returns. The
   password check (about 0.3 s) runs on the server task. Uploads and
@@ -1321,9 +1353,13 @@ Things this contract needs that the current headers do not provide yet:
 6. Not implemented yet behind existing headers (the API shows empty
    values): the receiver text of a flash session (`station_get_flash_log`),
    until receiver flashing is built.
-7. **GNSS time**: the availability ledger takes SNTP time only; no header
-   provides the receiver's time (MSM epoch time with its week) yet, so
-   `clock` is `sntp` or `none`, never `gnss`.
+7. **GNSS time**: resolved in part. The ledger takes the receiver's GPS
+   time of week (`gnss_obs_get_gps_time()`, fed by the health monitor) and
+   dates it against its running clock, or after a reset that was not a
+   power cut against the previous session's last-alive mark, so `clock` is
+   `gnss` while the receiver streams GPS MSM. MSM carries no week number:
+   a station that never had a clock, or one that lost power, still needs
+   one SNTP time first (`clock` is `none` until then).
 
 ---
 

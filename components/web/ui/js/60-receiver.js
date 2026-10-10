@@ -26,11 +26,15 @@ function rtcmName(n) {
   return '';
 }
 
-/** Lock / survey-again buttons with their warnings. */
-function positionActions(g, done) {
+/**
+ * Lock / survey-again buttons with their warnings and their error box. Built
+ * once per view: the 5 s refresh rebuilds the position card around them, and
+ * a request that is still pending (or its confirmation dialog) must keep the
+ * button it disabled and the box it reports into. update(g) shows the buttons
+ * that fit the latest state.
+ */
+function positionActions(done) {
   const out = errBox();
-  const pos = g.position || {};
-  const arp = g.arp || {};
   const lockBtn = btn('Lock this position', async () => {
     const ok = await dialog({ title: 'Lock the surveyed position?', ok: 'Lock position',
       body: h('p', null, 'The station switches the receiver to a fixed base at the latest surveyed position and configures it again. ' +
@@ -41,7 +45,7 @@ function positionActions(g, done) {
       toast('Locking the position…', 'ok');
       done();
     }
-  }, 'primary');
+  }, 'primary', { hidden: true });
   const resurveyBtn = btn('Forget it and survey again', async () => {
     const ok = await dialog({ title: 'Survey the position again?', ok: 'Survey again', okKind: 'danger solid',
       body: [h('p', null, 'The locked position is forgotten and the receiver surveys its position again.'),
@@ -53,9 +57,16 @@ function positionActions(g, done) {
       toast('Surveying again…', 'ok');
       done();
     }
-  }, 'danger');
-  const canLock = !pos.locked && (arp.valid || (pos.source && pos.source !== 'none'));
-  return h('div', null, h('div', { class: 'form-actions' }, canLock ? lockBtn : null, pos.locked ? resurveyBtn : null), out);
+  }, 'danger', { hidden: true });
+  return {
+    el: h('div', null, h('div', { class: 'form-actions' }, lockBtn, resurveyBtn), out),
+    update(g) {
+      const pos = g.position || {};
+      const arp = g.arp || {};
+      lockBtn.hidden = !(!pos.locked && (arp.valid || (pos.source && pos.source !== 'none')));
+      resurveyBtn.hidden = !pos.locked;
+    },
+  };
 }
 
 function receiverInfo(g) {
@@ -95,7 +106,7 @@ function receiverInfo(g) {
   ];
 }
 
-function positionInfo(g, done) {
+function positionInfo(g) {
   const pos = g.position || {};
   const arp = g.arp || {};
   const sv = g.survey || {};
@@ -132,7 +143,6 @@ function positionInfo(g, done) {
       ['Received', fmt.ms(arp.age_ms) + ' ago'],
       arp.offset_m === null || arp.offset_m === undefined ? null : ['Distance to locked', h('span', { class: offTone }, fmt.m(arp.offset_m))],
     ]) : h('p', { class: 'muted' }, 'No position message (1005/1006) received yet.'),
-    positionActions(g, done),
   ];
 }
 
@@ -335,12 +345,16 @@ Views.receiver = {
   create(el) {
     let g = null, editor = null, stop = null;
     const info = h('section', { class: 'card' });
-    const position = h('section', { class: 'card' });
+    const posActions = positionActions(() => refresh());
+    const position = h('section', { class: 'card' }, posActions.el);
     const profile = h('section', { class: 'card wide' });
 
     const fill = () => {
       mount(info, receiverInfo(g));
-      mount(position, positionInfo(g, refresh));
+      /* Everything in the position card but its actions, which stay put. */
+      while (position.firstChild && position.firstChild !== posActions.el) position.firstChild.remove();
+      position.insertBefore(add(doc.createDocumentFragment(), positionInfo(g)), posActions.el);
+      posActions.update(g);
     };
     const buildEditor = () => {
       editor = profileEditor(g, refresh);

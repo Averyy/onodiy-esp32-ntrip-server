@@ -25,6 +25,7 @@ async function boot() {
       h('div', { class: 'form-actions' }, btn('Try again', boot, 'primary')))));
     return;
   }
+  if (apiMismatch(s.api)) return;
   S.session = s;
   if (!s.authenticated) {
     if (!s.admin_set) {
@@ -39,7 +40,10 @@ async function boot() {
     showLogin();
     return;
   }
-  if (!s.setup_done) {
+  /* With the settings unavailable this boot, setup_done reads false and
+   * cannot be stored: the wizard could never finish. The dashboard and its
+   * notice explain the situation instead. */
+  if (!s.setup_done && s.settings_available !== false) {
     startWizard(false);
     return;
   }
@@ -316,9 +320,21 @@ function startWizard(claim) {
     return undefined;
   }
 
+  /* Marks the setup finished. With the settings unavailable this boot the
+   * flag cannot be stored (409 settings_unavailable); the setup goes on
+   * regardless, and boot() then leaves the wizard for the dashboard. */
+  async function setupDone() {
+    try {
+      await api('POST', '/api/setup/done');
+    } catch (e) {
+      if (!(e instanceof ApiError && e.code === 'settings_unavailable')) throw e;
+    }
+    return true;
+  }
+
   function skipAll() {
     return h('p', { class: 'muted small foot' }, 'Experienced? ', h('button', { type: 'button', class: 'btn ghost small', onclick: async e => {
-      const ok = await act(e.currentTarget, () => api('POST', '/api/setup/done'));
+      const ok = await act(e.currentTarget, setupDone);
       if (ok !== undefined) boot();
     } }, 'Skip the rest of the setup'));
   }
@@ -470,7 +486,7 @@ function startWizard(claim) {
     const err = errBox();
     const submit = h('button', { type: 'submit', class: 'btn primary' }, 'Join this network');
     const keep = w.configured && w.online ? btn('Keep ' + w.ssid, async e => {
-      const ok = await act(e.currentTarget, () => api('POST', '/api/setup/done'), err);
+      const ok = await act(e.currentTarget, setupDone, err);
       if (ok !== undefined) boot();
     }) : null;
     frame('wifi', 'Wi-Fi',
@@ -481,7 +497,7 @@ function startWizard(claim) {
         const v = picker.value();
         if (!v) return;
         const r = await act(submit, async () => {
-          await api('POST', '/api/setup/done');
+          await setupDone();
           return api('PUT', '/api/wifi', v);
         }, err);
         if (r === undefined) return;
@@ -514,7 +530,10 @@ function startWizard(claim) {
         fails++;
       }
       const secs = Math.round((Date.now() - joined.since) / 1000);
-      if (w && w.online && w.ip) {
+      /* The station switches about a second after PUT /api/wifi; until then
+       * (and for a moment after) GET /api/wifi still describes the old
+       * connection. Only the chosen network, past the switch, counts. */
+      if (w && w.online && w.ip && w.ssid === joined.ssid && Date.now() - joined.since > 2000) {
         stopped = true;
         const addr = 'http://' + w.ip + '/';
         show('ok', msg('ok', h('strong', null, 'Connected.'), ' The station is now on ' + joined.ssid + '.'),

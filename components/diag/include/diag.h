@@ -26,8 +26,11 @@
  *    Limit: with XIP from PSRAM the ring's physical place depends on the
  *    image layout (code and rodata are copied to PSRAM first), so the
  *    previous boot's lines do not survive a change of app image (OTA, trial
- *    revert, rollback). The event journal below is layout-independent and
- *    records those events and the reset reason instead.
+ *    revert, rollback): each bank's header names its bank and the image
+ *    that wrote it, and a bank from another image, or another bank's copy
+ *    moved into its place, is discarded. The event journal below is
+ *    layout-independent and records those events and the reset reason
+ *    instead.
  *    Lines longer than CONFIG_DIAG_LOG_LINE_MAX - 1 characters are cut
  *    (ending in "..."), on the console and in the ring alike.
  *  - Console: UART at 115200 through the UART driver with a TX buffer of
@@ -268,6 +271,12 @@ size_t diag_log_read_prev_boot(uint32_t *cursor, char *buf, size_t buf_size);
  */
 size_t diag_log_read_ex(diag_log_src_t src, uint32_t *cursor, char *buf, size_t buf_size,
                         diag_log_read_info_t *info);
+
+/**
+ * Cursor of the newest line this boot: a reader that starts from it gets
+ * only lines logged afterwards (0 before the first line).
+ */
+uint32_t diag_log_head(void);
 
 /** Log counters. */
 void diag_log_stats(diag_log_stats_t *out);

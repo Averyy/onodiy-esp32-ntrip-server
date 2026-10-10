@@ -493,7 +493,12 @@ Views.updates = {
       stagedBox);
 
     /* ---- Loading and live progress ---- */
-    async function load() {
+    /* The 10 s poll re-renders only when something changed and nobody is
+     * working in the page (keyboard focus, a text selection): every render
+     * builds the cards' buttons anew. Loads after an action or an event
+     * always render. */
+    let shownKey = '';
+    async function load(periodic) {
       const res = await Promise.all([
         api('GET', '/api/update'),
         api('GET', '/api/gnss/flash').catch(() => null),
@@ -511,6 +516,9 @@ Views.updates = {
         P.gnss_update.set({ job: 'gnss_update', phase: 'downloading', pct: u.progress_pct, done: false });
       }
       if (u.state === 'downloading_app') P.app_update.set({ job: 'app_update', phase: 'downloading', pct: u.progress_pct, done: false });
+      const key = JSON.stringify([u, flash, rflow]);
+      if (periodic && (key === shownKey || interacting(el))) return;
+      shownKey = key;
       renderVersions();
       renderApp();
       renderGnss();
@@ -548,7 +556,7 @@ Views.updates = {
     load().then(() => {
       if (arg === 'session' && !sessionCard.hidden) sessionCard.scrollIntoView({ block: 'start' });
     }, e => mount(versionsCard, msg('bad', errText(e)), btn('Try again', () => openView('updates', arg), 'primary')));
-    const stop = poller(10000, () => load(), true);
+    const stop = poller(10000, () => load(true), true);
 
     return {
       destroy() {

@@ -162,7 +162,7 @@ TEST_CASE("journal: empty partition, append, read back, continue after a remount
     }
     TEST_ASSERT_FALSE(dj_needs_open(&s_j));
     read_check(&s_j, 1, 3);
-    TEST_ASSERT_EQUAL_UINT32(0, s_nor.erases[0]);   /* blank: never erased */
+    TEST_ASSERT_EQUAL_UINT32(1, s_nor.erases[0]);   /* erased before use, blank or not */
 
     mount(&s_j);
     TEST_ASSERT_EQUAL_INT32(0, s_j.cur);
@@ -255,13 +255,12 @@ TEST_CASE("journal: a power cut while opening a sector is repaired on the next w
     for (uint32_t cut = 1; cut <= 3; cut++) {
         nor_reset(3);
         mount(&s_j);
-        /* fill sector 0 and 1, then wrap: opening sector 2 needs no erase,
-         * opening sector 0 again needs one */
+        /* fill all three sectors; the next append wraps to sector 0 */
         for (uint32_t i = 1; i <= 3u * DJ_RECS_PER_SECTOR; i++) {
             append(&s_j, 1, (int32_t)i);
         }
         uint32_t ops = s_nor.ops;
-        /* the next append opens sector 0: read, erase, header write, record write */
+        /* the next append opens sector 0: erase, header write, record write */
         s_nor.cut_at = ops + cut;
         (void)append(&s_j, 1, (int32_t)(3u * DJ_RECS_PER_SECTOR + 1u));
         mount(&s_j);
@@ -273,6 +272,24 @@ TEST_CASE("journal: a power cut while opening a sector is repaired on the next w
         read_check(&s_j, DJ_RECS_PER_SECTOR + 1u, 2u * DJ_RECS_PER_SECTOR + 1u);
         TEST_ASSERT_EQUAL_UINT32(0, s_nor.overwrites);
     }
+}
+
+TEST_CASE("journal: a sector that reads blank after a cut erase is erased again before use", "[diag][journal]")
+{
+    nor_reset(3);
+    mount(&s_j);
+    for (uint32_t i = 1; i <= 3u * DJ_RECS_PER_SECTOR; i++) {
+        append(&s_j, 1, (int32_t)i);
+    }
+    /* The ring is full; the next append opens sector 0 again. Its erase was
+     * cut by a power loss in a way that left it reading blank. */
+    memset(s_nor.mem, 0xFF, DJ_SECTOR_SIZE);
+    mount(&s_j);
+    uint32_t before = s_nor.erases[0];
+    TEST_ASSERT_EQUAL_INT(DJ_OK, append(&s_j, 1, (int32_t)(3u * DJ_RECS_PER_SECTOR + 1u)));
+    TEST_ASSERT_EQUAL_INT32(0, s_j.cur);
+    TEST_ASSERT_EQUAL_UINT32(before + 1u, s_nor.erases[0]);
+    read_check(&s_j, DJ_RECS_PER_SECTOR + 1u, 2u * DJ_RECS_PER_SECTOR + 1u);
 }
 
 TEST_CASE("journal: a sector in another record format keeps its place but is not read", "[diag][journal]")

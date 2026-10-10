@@ -46,7 +46,10 @@
  * any state or of unknown state; safe mode; a lease, or a station recovery
  * job, that is not the ladder's own step; and the post-lease grace after any
  * release that was not the ladder's own. When a suspension ends the stall
- * timer restarts from there.
+ * timer restarts from there. An abandoned step runs again, once per
+ * episode: a step that ran and is abandoned a second time before the ladder
+ * resets counts as failed, and the ladder goes on past it (after step 5,
+ * the byte rule on the stall class).
  * Station NO_RECEIVER: the station's slow detection schedule replaces the
  * ladder's retries. On entering it the byte rule runs once per episode on
  * the station's report for its whole detection pass, then the ladder holds
@@ -196,6 +199,7 @@ typedef struct {
     uint8_t idx;                  /**< last step of this episode (0 = none) */
     uint8_t step;                 /**< step wanted, running or in its grace */
     uint8_t last_step;            /**< last action started (1-5, 6 = reboot), 0 = none */
+    uint8_t abandoned;            /**< bit n: step n ran and was abandoned in this episode */
     bool power_alert;
 
     int64_t last_now;

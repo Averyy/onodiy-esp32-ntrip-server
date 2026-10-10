@@ -39,7 +39,7 @@ TEST_CASE("Host check accepts only the device's names", "[web_core]")
     static const char *const good[] = {
         "192.168.1.50", "192.168.1.50:80", "192.168.4.1", "onocoydiy", "ONOCOYDIY", "onocoydiy.local",
         "OnocoyDIY.Local:8080", "onocoydiy.lan", "onocoydiy.home", "onocoydiy.home.arpa", "onocoydiy.localdomain",
-        "onocoydiy.internal", "onocoydiy.fritz.box", " onocoydiy ",
+        "onocoydiy.internal", " onocoydiy ",
     };
     for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
         TEST_ASSERT_TRUE_MESSAGE(web_host_allowed(good[i], &s_names), good[i]);
@@ -48,6 +48,8 @@ TEST_CASE("Host check accepts only the device's names", "[web_core]")
         "", "evil.com", "onocoydiy.evil.com", "onocoydiy.local.evil.com", "xonocoydiy", "onocoydiyx.local",
         "192.168.1.5", "192.168.1.500", "[::1]", "[::1]:80", "onocoydiy:", "onocoydiy:80:80", "onocoydiy:abc",
         "onocoydiy:123456", "onocoydiy.", "connectivitycheck.gstatic.com", "onocoydiy/x",
+        /* a publicly delegated zone: whoever controls it could rebind the name */
+        "onocoydiy.fritz.box",
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         TEST_ASSERT_FALSE_MESSAGE(web_host_allowed(bad[i], &s_names), bad[i]);
@@ -223,6 +225,76 @@ TEST_CASE("login throttle: 5 free failures, then doubling up to 300 s", "[web_co
     TEST_ASSERT_EQUAL_UINT32(4, web_throttle_wait_s(&t, now + 2));
     web_throttle_ok(&t);
     TEST_ASSERT_EQUAL_UINT32(0, web_throttle_wait_s(&t, now + 3));
+}
+
+TEST_CASE("login throttle: one client's failures never delay another client", "[web_core]")
+{
+    web_throttles_t t;
+    uint32_t now = UINT32_MAX - 100;
+    web_throttles_init(&t, now);
+    const uint64_t attacker = 0x0A00000Au;   /* 10.0.0.10 */
+    const uint64_t owner = 0x0B00000Au;
+    /* The attacker keeps the delay at its cap: one failure as each window opens. */
+    for (int i = 0; i < 40; i++) {
+        uint32_t w = web_throttles_wait_s(&t, attacker, false, now);
+        now += w;
+        TEST_ASSERT_EQUAL_UINT32(0, web_throttles_wait_s(&t, attacker, false, now));
+        web_throttles_fail(&t, attacker, false, now);
+        TEST_ASSERT_EQUAL_UINT32(0, web_throttles_wait_s(&t, owner, false, now));
+        TEST_ASSERT_EQUAL_UINT32(0, web_throttles_wait_s(&t, owner, true, now));
+    }
+    TEST_ASSERT_EQUAL_UINT32(WEB_THROTTLE_MAX_S, web_throttles_wait_s(&t, attacker, false, now));
+    /* The owner's own mistakes count for the owner only, and a success resets them. */
+    for (int i = 0; i < 5; i++) {
+        web_throttles_fail(&t, owner, false, now);
+    }
+    TEST_ASSERT_EQUAL_UINT32(2, web_throttles_wait_s(&t, owner, false, now));
+    TEST_ASSERT_EQUAL_UINT32(0, web_throttles_wait_s(&t, owner, true, now));   /* over the AP: another client */
+    web_throttles_ok(&t, owner, false);
+    TEST_ASSERT_EQUAL_UINT32(0, web_throttles_wait_s(&t, owner, false, now));
+    TEST_ASSERT_EQUAL_UINT32(WEB_THROTTLE_MAX_S, web_throttles_wait_s(&t, attacker, false, now));
+    /* A new password clears everything. */
+    web_throttles_init(&t, now);
+    TEST_ASSERT_EQUAL_UINT32(0, web_throttles_wait_s(&t, attacker, false, now));
+}
+
+TEST_CASE("login throttle: many addresses hit the interface ceiling, the AP keeps its own", "[web_core]")
+{
+    web_throttles_t t;
+    uint32_t now = 1000;
+    web_throttles_init(&t, now);
+    /* 40 addresses, each with its free failures: the station interface's
+     * burst runs out, replaced table entries do not reset the ceiling. */
+    unsigned counted = 0;
+    for (uint64_t a = 1; a <= 40; a++) {
+        for (int i = 0; i < 4; i++) {
+            if (web_throttles_wait_s(&t, a, false, now) == 0) {
+                web_throttles_fail(&t, a, false, now);
+                counted++;
+            }
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(WEB_THROTTLE_IFACE_BURST, counted);
+    uint32_t w = web_throttles_wait_s(&t, 999, false, now);
+    TEST_ASSERT_EQUAL_UINT32(WEB_THROTTLE_IFACE_REFILL_S, w);
+    TEST_ASSERT_EQUAL_UINT32(0, web_throttles_wait_s(&t, 999, true, now));   /* the AP is not affected */
+    /* One more failure per refill period after that. */
+    now += WEB_THROTTLE_IFACE_REFILL_S;
+    TEST_ASSERT_EQUAL_UINT32(0, web_throttles_wait_s(&t, 999, false, now));
+    web_throttles_fail(&t, 999, false, now);
+    TEST_ASSERT_EQUAL_UINT32(WEB_THROTTLE_IFACE_REFILL_S, web_throttles_wait_s(&t, 998, false, now));
+    /* A quiet spell refills the whole burst. */
+    now += WEB_THROTTLE_IFACE_BURST * WEB_THROTTLE_IFACE_REFILL_S;
+    TEST_ASSERT_EQUAL_UINT32(0, web_throttles_wait_s(&t, 998, false, now));
+    TEST_ASSERT_EQUAL_UINT32(WEB_THROTTLE_IFACE_BURST, t.iface[0].left);
+
+    /* A single client throttled at the cap never drains the ceiling. */
+    web_throttles_init(&t, now);
+    for (int i = 0; i < 2000; i++) {
+        now += web_throttles_wait_s(&t, 7, false, now);
+        web_throttles_fail(&t, 7, false, now);
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, web_throttles_wait_s(&t, 8, false, now));
 }
 
 /* ---- field rules ----------------------------------------------------------------------------------- */

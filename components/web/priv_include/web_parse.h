@@ -140,8 +140,19 @@ typedef enum {
     WEB_WS_MSG_PING,
 } web_ws_msg_t;
 
-/** A client text message; for subscribe, *topics gets the topic bits (unknown names ignored). */
-web_ws_msg_t web_parse_ws_message(const char *text, size_t len, uint32_t *topics);
+/** What a subscribe message asks for. */
+typedef struct {
+    uint32_t topics;          /**< topic bits (unknown names ignored) */
+    bool has_log_cursor;      /**< "log_cursor" given: send log lines after it */
+    uint32_t log_cursor;
+} web_ws_sub_t;
+
+/**
+ * A client text message; for subscribe, *sub gets the topics and the
+ * optional log cursor (a "log_cursor" that is not an integer of 0..2^32-1
+ * makes the message invalid).
+ */
+web_ws_msg_t web_parse_ws_message(const char *text, size_t len, web_ws_sub_t *sub);
 
 #ifdef __cplusplus
 }

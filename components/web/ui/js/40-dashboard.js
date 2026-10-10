@@ -3,9 +3,11 @@
  * SPDX-License-Identifier: MIT
  *
  * Status dashboard: overall state, receiver and RTCM, the Onocoy day (UTC)
- * with the remaining offline budget, every caster, Wi-Fi, alerts. Rebuilt
- * from the status model on every update (no inputs on this page). Visitors
- * without a session see the public form (names and states only).
+ * with the remaining offline budget, every caster, Wi-Fi, alerts. Built
+ * from the status model on every update and patched into the page (no
+ * inputs on this page), so the links keep keyboard focus and text stays
+ * selectable across the 1 s updates. Visitors without a session see the
+ * public form (names and states only).
  */
 
 /* Onocoy's streak needs at least 99.8 % graced uptime per UTC day. */
@@ -17,10 +19,10 @@ Views.dashboard = {
     const render = () => {
       const s = S.status;
       if (!s) {
-        mount(el, h('p', { class: 'loading' }, 'Waiting for the station…'));
+        patch(el, h('p', { class: 'loading' }, 'Waiting for the station…'));
         return;
       }
-      mount(el, isAdmin() && !s.public ? adminDashboard(s) : publicDashboard(s));
+      patch(el, isAdmin() && !s.public ? adminDashboard(s) : publicDashboard(s));
     };
     render();
     return { update: render };

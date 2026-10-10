@@ -22,6 +22,44 @@ function isAdmin() {
   return !!(S.session && S.session.authenticated);
 }
 
+let apiWarned = false;
+
+/**
+ * The station speaks another API version than this page (a firmware update
+ * this tab did not see): load the page again, which brings the matching UI.
+ * At most once a minute, so a page that still differs after a reload only
+ * says so. @return true on a mismatch.
+ */
+function apiMismatch(v) {
+  if (v === undefined || v === null || v === API_VERSION) return false;
+  let last = 0;
+  try {
+    last = Number(sessionStorage.getItem('station.reloadAt')) || 0;
+  } catch (e) {
+    last = 0;
+  }
+  if (Date.now() - last > 60000) {
+    try {
+      sessionStorage.setItem('station.reloadAt', String(Date.now()));
+    } catch (e) {
+      /* without storage the next mismatch reloads again, a minute apart at best */
+    }
+    location.reload();
+  } else if (!apiWarned) {
+    apiWarned = true;
+    toast('This page does not match the station\'s firmware. Reload the page.', 'warn');
+  }
+  return true;
+}
+
+/**
+ * The station answered as if this page had no session (it restarted, or the
+ * session ended while this page could not hear about it): show the login.
+ */
+function sessionLost() {
+  if (isAdmin()) bus.emit('unauthorized');
+}
+
 /** Merge one WebSocket status message (full snapshot or changed sections). */
 function applyStatusMessage(m) {
   const data = m.data || {};
@@ -93,6 +131,7 @@ const live = {
   ws: null,
   state: 'off',        /* off, connecting, ws, poll */
   topics: null,        /* desired topic set; null = server default */
+  subExtra: null,      /* () => more fields of the subscribe message (the log cursor) */
   lastMsg: 0,
   lastPing: 0,
   retryMs: 1000,
@@ -147,7 +186,7 @@ const live = {
     ws.onopen = () => {
       this.retryMs = 1000;
       this.lastMsg = Date.now();
-      if (this.topics) this.send({ type: 'subscribe', topics: this.topics });
+      if (this.topics) this.send(this.subMessage());
     };
     ws.onmessage = ev => {
       this.lastMsg = Date.now();
@@ -191,15 +230,30 @@ const live = {
     }
   },
 
-  /** Replace the topic set ("status", "progress", "log"). */
-  subscribe(topics) {
+  subMessage() {
+    return Object.assign({ type: 'subscribe', topics: this.topics }, this.subExtra ? this.subExtra() : null);
+  },
+
+  /**
+   * Replace the topic set ("status", "progress", "log"). extra: optional
+   * function giving more fields of the message, asked again on every
+   * reconnect ({log_cursor: n}: log lines after n).
+   */
+  subscribe(topics, extra) {
     this.topics = topics;
-    this.send({ type: 'subscribe', topics: topics });
+    this.subExtra = extra || null;
+    this.send(this.subMessage());
   },
 
   handle(m) {
     switch (m.type) {
       case 'hello':
+        if (apiMismatch(m.api)) return;
+        if (m.admin === false && isAdmin()) {
+          /* The socket was taken as a public viewer's: the session is gone. */
+          sessionLost();
+          return;
+        }
         this.setState('ws');
         break;
       case 'status':
@@ -252,10 +306,13 @@ const live = {
         /* ignore */
       }
       this.scheduleReconnect();
-    } else if (!ws && this.running && now >= this.reconnectAt) {
+    } else if (!ws && this.running && now >= this.reconnectAt && (visible() || !isAdmin())) {
       this.connect();
     }
-    if (this.state !== 'ws' && this.running && !this.polling && now - this.lastPoll >= 2000) {
+    /* A hidden tab with a session neither polls nor reconnects: every
+     * request would extend the session, and a forgotten tab must not stay
+     * logged in. It catches up as soon as it is shown again. */
+    if (this.state !== 'ws' && this.running && !this.polling && now - this.lastPoll >= 2000 && (visible() || !isAdmin())) {
       this.poll();
     }
   },
@@ -265,17 +322,35 @@ const live = {
     this.lastPoll = Date.now();
     try {
       const st = await api('GET', '/api/status', undefined, { timeout: 4000 });
+      if (apiMismatch(st && st.api)) return;
+      if (st && st.public && isAdmin()) {
+        sessionLost();   /* the public form: the station no longer knows this page's session */
+        return;
+      }
       if (this.state !== 'ws') {
         S.status = st;
         statusChanged();
       }
     } catch (e) {
       if (e instanceof ApiError && e.status === 0 && this.state !== 'ws') bus.emit('live', 'down');
+      /* GET /api/status answers 403 only to a page without a session while public status is off. */
+      if (e instanceof ApiError && e.status === 403) sessionLost();
     } finally {
       this.polling = false;
     }
   },
 };
+
+function visible() {
+  return doc.visibilityState === 'visible';
+}
+
+/* Shown again: reconnect and refresh at once instead of waiting out the backoff. */
+doc.addEventListener('visibilitychange', () => {
+  if (!visible() || !live.running) return;
+  if (!live.ws) live.reconnectAt = 0;
+  live.watch();
+});
 
 /** Load the status once (before the socket delivers). */
 async function loadStatus() {

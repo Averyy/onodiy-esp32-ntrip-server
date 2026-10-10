@@ -373,7 +373,7 @@ static esp_err_t h_session_post(web_req_t *r)
                               "The stored password cannot be read: hold the BOOT button to reset it", NULL, UINT32_MAX,
                               NULL, NULL);
     }
-    uint32_t wait = web_auth_throttle_wait_s();
+    uint32_t wait = web_auth_throttle_wait_s(r->req, r->on_ap);
     if (wait > 0) {
         return web_send_error(r->req, WEB_ERR_RATE_LIMITED, NULL, NULL, wait, NULL, NULL);
     }
@@ -382,7 +382,7 @@ static esp_err_t h_session_post(web_req_t *r)
     if (!web_parse_password(r->body, "password", &pw, &b)) {
         return bad(r->req, &b);
     }
-    if (!web_auth_check(pw)) {
+    if (!web_auth_check(r->req, r->on_ap, pw)) {
         return web_send_err(r->req, WEB_ERR_WRONG_PASSWORD);
     }
     if (r->sess >= 0) {
@@ -444,7 +444,7 @@ static esp_err_t h_setup_done(web_req_t *r)
 
 static esp_err_t h_admin_password(web_req_t *r)
 {
-    uint32_t wait = web_auth_throttle_wait_s();
+    uint32_t wait = web_auth_throttle_wait_s(r->req, r->on_ap);
     if (wait > 0) {
         return web_send_error(r->req, WEB_ERR_RATE_LIMITED, NULL, NULL, wait, NULL, NULL);
     }
@@ -457,7 +457,7 @@ static esp_err_t h_admin_password(web_req_t *r)
     if (!settings_ok()) {
         return web_send_err(r->req, WEB_ERR_SETTINGS_UNAVAILABLE);
     }
-    if (!web_auth_check(cur)) {
+    if (!web_auth_check(r->req, r->on_ap, cur)) {
         return web_send_err(r->req, WEB_ERR_WRONG_PASSWORD);
     }
     if (!web_password_valid(next)) {

@@ -392,10 +392,19 @@ TEST_CASE("update and upload confirmation bodies", "[web_parse]")
 
 TEST_CASE("WebSocket client messages", "[web_parse]")
 {
-    uint32_t topics = 0;
+    web_ws_sub_t topics = { 0 };
     const char *sub = "{\"type\":\"subscribe\",\"topics\":[\"status\",\"log\",\"bogus\",7]}";
     TEST_ASSERT_EQUAL(WEB_WS_MSG_SUBSCRIBE, web_parse_ws_message(sub, strlen(sub), &topics));
-    TEST_ASSERT_EQUAL_UINT32(WEB_TOPIC_STATUS | WEB_TOPIC_LOG, topics);
+    TEST_ASSERT_EQUAL_UINT32(WEB_TOPIC_STATUS | WEB_TOPIC_LOG, topics.topics);
+    TEST_ASSERT_FALSE(topics.has_log_cursor);
+    sub = "{\"type\":\"subscribe\",\"topics\":[\"log\"],\"log_cursor\":4294967295}";
+    TEST_ASSERT_EQUAL(WEB_WS_MSG_SUBSCRIBE, web_parse_ws_message(sub, strlen(sub), &topics));
+    TEST_ASSERT_TRUE(topics.has_log_cursor);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, topics.log_cursor);
+    sub = "{\"type\":\"subscribe\",\"topics\":[\"log\"],\"log_cursor\":-1}";
+    TEST_ASSERT_EQUAL(WEB_WS_MSG_INVALID, web_parse_ws_message(sub, strlen(sub), &topics));
+    sub = "{\"type\":\"subscribe\",\"topics\":[\"log\"],\"log_cursor\":\"5\"}";
+    TEST_ASSERT_EQUAL(WEB_WS_MSG_INVALID, web_parse_ws_message(sub, strlen(sub), &topics));
     TEST_ASSERT_EQUAL(WEB_WS_MSG_PING, web_parse_ws_message("{\"type\":\"ping\"}", 15, &topics));
     TEST_ASSERT_EQUAL(WEB_WS_MSG_INVALID, web_parse_ws_message("{\"type\":\"subscribe\"}", 20, &topics));
     TEST_ASSERT_EQUAL(WEB_WS_MSG_INVALID, web_parse_ws_message("ping", 4, &topics));

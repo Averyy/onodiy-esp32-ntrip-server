@@ -17,6 +17,9 @@ const API_VERSION = 1;
 
 /* ---- DOM --------------------------------------------------------------- */
 
+/* Marks elements that h() gave a listener (see patch()). */
+const HAS_ON = '_hOn';
+
 /**
  * Create an element. props: class, text, on<event> (listener), style
  * (object; set through CSSOM, which the Content-Security-Policy allows),
@@ -31,7 +34,10 @@ function h(tag, props, ...kids) {
       if (v === null || v === undefined || v === false) continue;
       if (k === 'class') el.className = v;
       else if (k === 'text') el.textContent = String(v);
-      else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
+      else if (k.startsWith('on') && typeof v === 'function') {
+        el.addEventListener(k.slice(2), v);
+        el[HAS_ON] = true;
+      }
       else if (k === 'style') Object.assign(el.style, v);
       else if (k === 'value') el.value = v;
       else if (k === 'checked' || k === 'disabled' || k === 'hidden' || k === 'selected' || k === 'required') el[k] = !!v;
@@ -59,6 +65,71 @@ function clear(el) {
 function mount(el, ...kids) {
   clear(el);
   return add(el, kids);
+}
+
+/**
+ * Make el's children match `kids` (built fresh with h()) while keeping the
+ * nodes already there wherever the same tag sits at the same place: only
+ * text and attributes that changed are written. Keyboard focus, a text
+ * selection and a screen reader's place survive a refresh this way, which
+ * mount() (new nodes every time) destroys. Elements that carry a listener
+ * are always taken fresh, so no handler with stale data survives. For views
+ * without form controls (their live values are properties, not attributes).
+ */
+function patch(el, ...kids) {
+  patchKids(el, add(doc.createDocumentFragment(), kids));
+  return el;
+}
+
+function patchKids(cur, next) {
+  let a = cur.firstChild;
+  let b = next.firstChild;
+  while (b) {
+    const nb = b.nextSibling;
+    if (a && a.nodeType === b.nodeType && a.nodeName === b.nodeName &&
+        (a.nodeType !== 1 || (!a[HAS_ON] && !b[HAS_ON] && a.namespaceURI === b.namespaceURI))) {
+      if (a.nodeType === 1) {
+        for (const at of Array.from(a.attributes)) if (!b.hasAttribute(at.name)) a.removeAttribute(at.name);
+        for (const at of Array.from(b.attributes)) if (a.getAttribute(at.name) !== at.value) a.setAttribute(at.name, at.value);
+        patchKids(a, b);
+      } else if (a.nodeValue !== b.nodeValue) {
+        a.nodeValue = b.nodeValue;
+      }
+      a = a.nextSibling;
+    } else if (a) {
+      const na = a.nextSibling;
+      cur.replaceChild(b, a);
+      a = na;
+    } else {
+      cur.append(b);
+    }
+    b = nb;
+  }
+  while (a) {
+    const na = a.nextSibling;
+    a.remove();
+    a = na;
+  }
+}
+
+/**
+ * True while the user works inside el: keyboard focus on an element in it
+ * (focus a mouse click leaves on a button does not count), or a text
+ * selection in it. Periodic refreshes that rebuild nodes wait meanwhile.
+ */
+function interacting(el) {
+  const a = doc.activeElement;
+  if (a && a !== doc.body && el.contains(a)) {
+    let keyboard = true;
+    try {
+      keyboard = a.matches(':focus-visible');
+    } catch (e) {
+      /* no :focus-visible: count any focus */
+    }
+    if (keyboard || a.matches('input, select, textarea')) return true;
+  }
+  const sel = window.getSelection ? window.getSelection() : null;
+  return !!(sel && !sel.isCollapsed && sel.rangeCount && el.contains(sel.getRangeAt(0).commonAncestorContainer));
 }
 
 function svg(tag, attrs, ...kids) {

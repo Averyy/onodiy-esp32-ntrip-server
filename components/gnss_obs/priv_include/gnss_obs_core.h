@@ -45,7 +45,9 @@
  * count restarts from there (a "jump").
  * The station total counts each missing epoch once: only gaps found on the
  * reference constellation count, i.e. the lowest gnss_sys_t with a
- * configured period that is present, so a lost epoch (missing from every
+ * configured period that was present when the gap began (judged at the
+ * constellation's previous epoch, so the order in which MSMs arrive after
+ * an outage does not matter), so a lost epoch (missing from every
  * constellation) is not counted once per constellation. Per-constellation
  * counts are kept too.
  *
@@ -246,6 +248,13 @@ void obs_core_view(const obs_core_t *c, uint64_t now_ms, obs_core_view_t *out);
 
 /** Message statistics, sorted by message number; returns the entries written (at most cap). */
 size_t obs_core_msgs(const obs_core_t *c, uint64_t now_ms, obs_msg_stat_t *out, size_t cap);
+
+/**
+ * GPS time of the latest GPS MSM: its epoch time (ms of the GPS week) and
+ * the time since it arrived. False when no GPS MSM arrived within
+ * OBS_SIGNAL_WINDOW_MS, or its epoch time is not a time of week.
+ */
+bool obs_core_gps_time(const obs_core_t *c, uint64_t now_ms, uint32_t *tow_ms, uint32_t *age_out);
 
 /** Whether a satellite-in-view sentence arrived within OBS_SKY_WINDOW_MS. */
 bool obs_core_sky_available(const obs_core_t *c, uint64_t now_ms);

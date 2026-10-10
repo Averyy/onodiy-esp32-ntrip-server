@@ -125,6 +125,7 @@ static lc_day_t *rec_for_day(lc_t *c, int32_t day)
     lc_day_t *h = hist_slot(c, old.utc_day);   /* NULL: a jump left it too old to keep */
     if (h != NULL) {
         add_day(h, &old);
+        c->rolled = true;
     }
     trim_hist(c);
     return &c->today;
@@ -328,6 +329,23 @@ void lc_set_history(lc_t *c, const lc_day_t *days, size_t n)
     trim_hist(c);
 }
 
+void lc_merge_stored_day(lc_t *c, const lc_day_t *day)
+{
+    if (day == NULL || day->utc_day < 0 || c->today.utc_day < 0 || day->utc_day >= c->today.utc_day) {
+        return;
+    }
+    for (size_t i = 0; i < c->hist_n; i++) {
+        if (c->hist[i].utc_day == day->utc_day) {
+            return;   /* the stored history has it (as stored at or after midnight) */
+        }
+    }
+    lc_day_t *h = hist_slot(c, day->utc_day);
+    if (h != NULL) {
+        add_day(h, day);
+        c->rolled = true;
+    }
+}
+
 void lc_tick(lc_t *c, uint32_t now_ms)
 {
     advance(c, now_ms);
@@ -396,6 +414,39 @@ bool lc_set_utc(lc_t *c, uint32_t now_ms, int64_t unix_ms, lc_clock_t source)
     return true;
 }
 
+bool lc_set_gps_tow(lc_t *c, uint32_t now_ms, uint32_t tow_ms, uint32_t age_ms)
+{
+    if ((int64_t)tow_ms >= LC_GPS_WEEK_MS) {
+        return false;
+    }
+    advance(c, now_ms);
+    int64_t est;
+    int64_t lo;
+    int64_t hi;
+    if (c->clock != LC_CLOCK_NONE) {
+        est = c->unix_ms;
+        lo = est - LC_GNSS_SKEW_MS;
+        hi = est + LC_GNSS_SKEW_MS;
+    } else if (c->alive_valid && !c->gap_power_off && c->pending_ms == c->pending_boot_ms) {
+        /* The previous session had a clock to its end and only a reset lies
+         * between: its last-alive mark plus this boot's uptime. */
+        est = c->alive_ms + (int64_t)c->uptime_ms;
+        lo = est - LC_GNSS_BACK_MS;
+        hi = est + LC_GNSS_RESET_MS;
+    } else {
+        return false;   /* no week to date it with */
+    }
+    /* The week that puts the time nearest the estimate. */
+    int64_t base = LC_GPS_EPOCH_UNIX_MS - (int64_t)LC_GPS_UTC_LEAP_S * 1000 + (int64_t)tow_ms + (int64_t)age_ms;
+    int64_t d = est - base;
+    int64_t week = (d >= 0) ? (d + LC_GPS_WEEK_MS / 2) / LC_GPS_WEEK_MS : -((-d + LC_GPS_WEEK_MS / 2) / LC_GPS_WEEK_MS);
+    int64_t unix_ms = base + week * LC_GPS_WEEK_MS;
+    if (unix_ms < lo || unix_ms > hi) {
+        return false;
+    }
+    return lc_set_utc(c, now_ms, unix_ms, LC_CLOCK_GNSS);
+}
+
 void lc_count_overflow(lc_t *c, uint32_t now_ms)
 {
     advance(c, now_ms);
@@ -453,9 +504,13 @@ void lc_snapshot(const lc_t *c, lc_snapshot_t *out)
 
 bool lc_persist_due(lc_t *c, uint32_t now_ms, uint32_t interval_ms, int64_t *alive_ms, bool *today, bool *hist)
 {
-    if (c->clock == LC_CLOCK_NONE || (c->alive_saved && (uint32_t)(now_ms - c->alive_saved_ms) < interval_ms)) {
+    if (c->clock == LC_CLOCK_NONE) {
         return false;
     }
+    if (!c->rolled && c->alive_saved && (uint32_t)(now_ms - c->alive_saved_ms) < interval_ms) {
+        return false;
+    }
+    c->rolled = false;
     c->alive_saved = true;
     c->alive_saved_ms = now_ms;
     *alive_ms = c->unix_ms;

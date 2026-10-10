@@ -165,6 +165,14 @@ esp_err_t gnss_obs_get_sky(gnss_obs_sat_t *out, size_t *count);
 /** Latest antenna reference point (the base position shown and locked). ESP_ERR_NOT_FOUND before the first 1005/1006. */
 esp_err_t gnss_obs_get_arp(gnss_obs_arp_t *out);
 
+/**
+ * GPS time of the latest GPS MSM epoch: its epoch time as sent (ms of the
+ * GPS week) and the time since that MSM arrived. ESP_ERR_NOT_FOUND when no
+ * GPS MSM arrived within the last 10 s; ESP_ERR_INVALID_ARG without both
+ * outputs.
+ */
+esp_err_t gnss_obs_get_gps_time(uint32_t *tow_ms, uint32_t *age_ms);
+
 /** Forget every observation (after a receiver reconfigure or flash); the expected messages stay. */
 void gnss_obs_reset(void);
 

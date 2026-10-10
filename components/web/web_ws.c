@@ -38,6 +38,7 @@
 static const char *TAG = "web";
 
 #define WS_MAX_CLIENTS     4
+#define WS_MAX_PUBLIC      2      /* the rest stay free for admin pages */
 #define WS_IN_MAX          256u
 #define WS_STALL_CLOSE_S   30u
 #define WS_SEND_TIMEOUT_MS 3000
@@ -50,6 +51,7 @@ static const char *TAG = "web";
 #define LOG_CHUNK          4096u
 
 #define CLOSE_GOING_AWAY_RESTART 1012
+#define CLOSE_POLICY             1008
 #define CLOSE_TOO_BIG            1009
 #define CLOSE_SESSION_ENDED      4001
 #define CLOSE_TOO_SLOW           4003
@@ -99,6 +101,7 @@ typedef struct {
     uint32_t topics;
     bool need_full;
     bool log_gap;
+    uint32_t log_cursor;        /* log lines up to here were queued for this client */
     ws_msg_t *q[WEB_WSQ_MAX_MSGS];
     size_t qn;
     uint32_t refused_since_s;   /* 0 = the last message was taken */
@@ -263,18 +266,31 @@ static void broadcast(web_msg_kind_t kind, const char *text, size_t len, bool ad
 
 /* ---- handshake and client messages ----------------------------------------------------------------- */
 
+static size_t public_count(void)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < WS_MAX_CLIENTS; i++) {
+        n += (s_clients[i].used && !s_clients[i].admin) ? 1 : 0;
+    }
+    return n;
+}
+
 esp_err_t web_ws_pre_handshake(httpd_req_t *req)
 {
     s_pending_sess = -1;
     if (!web_ws_precheck(req)) {
         return ESP_FAIL;
     }
-    int sess = web_auth_session(req, true);
+    /* Not touched yet: a refused handshake must not keep a session alive
+     * (a hidden tab retrying would); a successful one touches it. */
+    int sess = web_auth_session(req, false);
     if (sess < 0 && !web_public_status()) {
         web_send_error(req, WEB_ERR_FORBIDDEN, "Public status is off: log in", NULL, UINT32_MAX, NULL, NULL);
         return ESP_FAIL;
     }
-    if (web_ws_client_count() >= WS_MAX_CLIENTS) {
+    /* Public viewers get at most WS_MAX_PUBLIC slots, so they can never
+     * take every slot from the admin's pages. */
+    if (web_ws_client_count() >= WS_MAX_CLIENTS || (sess < 0 && public_count() >= WS_MAX_PUBLIC)) {
         web_send_err(req, WEB_ERR_TOO_MANY_CLIENTS);
         return ESP_FAIL;
     }
@@ -317,6 +333,9 @@ esp_err_t web_ws_post_handshake(httpd_req_t *req)
     c->topics = c->admin ? (WEB_TOPIC_STATUS | WEB_TOPIC_PROGRESS) : WEB_TOPIC_STATUS;
     c->need_full = true;
     s_pending_sess = -1;
+    if (c->admin) {
+        web_auth_session_touch(c->sess);
+    }
     /* A slow client must not hold the server for the full HTTP send timeout. */
     struct timeval tv = { .tv_sec = WS_SEND_TIMEOUT_MS / 1000, .tv_usec = (WS_SEND_TIMEOUT_MS % 1000) * 1000 };
     (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -361,14 +380,26 @@ esp_err_t web_ws_handler(httpd_req_t *req)
     if (f.type != HTTPD_WS_TYPE_TEXT) {
         return ESP_OK;
     }
-    uint32_t topics = 0;
-    switch (web_parse_ws_message((const char *)buf, f.len, &topics)) {
+    web_ws_sub_t sub = { 0 };
+    switch (web_parse_ws_message((const char *)buf, f.len, &sub)) {
     case WEB_WS_MSG_SUBSCRIBE: {
+        uint32_t topics = sub.topics;
         if (!c->admin) {
             topics &= WEB_TOPIC_STATUS;   /* admin topics are ignored for public clients */
         }
         if ((topics & WEB_TOPIC_STATUS) != 0 && (c->topics & WEB_TOPIC_STATUS) == 0) {
             c->need_full = true;
+        }
+        if ((topics & WEB_TOPIC_LOG) != 0) {
+            /* The log continues after the client's own cursor (what it read
+             * over HTTP), or with new lines only. */
+            if (sub.has_log_cursor) {
+                c->log_cursor = sub.log_cursor;
+                c->log_gap = false;
+            } else if ((c->topics & WEB_TOPIC_LOG) == 0) {
+                c->log_cursor = diag_log_head();
+                c->log_gap = false;
+            }
         }
         c->topics = topics;
         break;
@@ -387,6 +418,16 @@ esp_err_t web_ws_handler(httpd_req_t *req)
         break;
     }
     return ESP_OK;
+}
+
+void web_ws_close_public(void)
+{
+    for (size_t i = 0; i < WS_MAX_CLIENTS; i++) {
+        ws_client_t *c = &s_clients[i];
+        if (c->used && !c->admin) {
+            client_close(c, CLOSE_POLICY);
+        }
+    }
 }
 
 void web_ws_close_sessions(uint32_t mask)
@@ -591,9 +632,10 @@ static size_t compose(int form, bool full)
 static void push_status(void)
 {
     bool want[2] = { false, false };
+    bool pub = web_public_status();   /* off: no public form for anyone (such clients are being closed) */
     for (size_t i = 0; i < WS_MAX_CLIENTS; i++) {
         ws_client_t *c = &s_clients[i];
-        if (c->used && !c->closing && (c->topics & WEB_TOPIC_STATUS) != 0) {
+        if (c->used && !c->closing && (c->topics & WEB_TOPIC_STATUS) != 0 && (c->admin || pub)) {
             want[c->admin ? 0 : 1] = true;
         }
     }
@@ -713,54 +755,54 @@ static void push_upload_progress(void)
 /* ---- log ------------------------------------------------------------------------------------------------- */
 
 EXT_RAM_BSS_ATTR static char s_log_text[LOG_CHUNK];
-static uint32_t s_log_cursor;
-static bool s_log_started;
 
+/* Every client reads the log from its own cursor: a message carries the
+ * lines after `from` up to `cursor`, so the client can tell it continues
+ * exactly where its own reading (HTTP or earlier messages) stopped. A
+ * message the client's queue cannot take now is not lost: the cursor stays
+ * and the same lines go out later. `gap` only when the ring overwrote lines
+ * before this client read them. */
 static void push_log(void)
 {
-    bool want = false;
     for (size_t i = 0; i < WS_MAX_CLIENTS; i++) {
-        want |= s_clients[i].used && s_clients[i].admin && (s_clients[i].topics & WEB_TOPIC_LOG) != 0;
-    }
-    if (!s_log_started) {
-        /* Start at the end of what is there: subscribers get new lines. */
-        while (diag_log_read_ex(DIAG_LOG_THIS_BOOT, &s_log_cursor, s_log_text, sizeof(s_log_text), NULL) > 0) {
+        ws_client_t *c = &s_clients[i];
+        if (!c->used || c->closing || !c->admin || (c->topics & WEB_TOPIC_LOG) == 0 || c->qn >= WEB_WSQ_MAX_MSGS) {
+            continue;
         }
-        s_log_started = true;
-        return;
-    }
-    diag_log_read_info_t info = { 0 };
-    size_t n = diag_log_read_ex(DIAG_LOG_THIS_BOOT, &s_log_cursor, s_log_text, sizeof(s_log_text), &info);
-    if (n == 0 || !want) {
-        return;
-    }
-    bool ring_gap = info.gap;   /* the ring overwrote lines before they were pushed */
-    for (int variant = 0; variant < 2; variant++) {
-        bool gap = variant == 1 || ring_gap;
-        ws_msg_t *m = NULL;
-        for (size_t i = 0; i < WS_MAX_CLIENTS; i++) {
-            ws_client_t *c = &s_clients[i];
-            if (!c->used || c->closing || !c->admin || (c->topics & WEB_TOPIC_LOG) == 0 ||
-                (c->log_gap ? 1 : 0) != variant) {
-                continue;
-            }
-            if (m == NULL) {
-                wj_t w;
-                wj_init(&w, s_scratch, sizeof(s_scratch), NULL, NULL);
-                wj_obj_open(&w, NULL);
-                wj_str(&w, "type", "log");
-                wj_uint(&w, "cursor", s_log_cursor);
-                wj_bool(&w, "gap", gap);
-                wj_strn(&w, "text", s_log_text, n);
-                wj_obj_close(&w);
-                if (!wj_ok(&w) || (m = msg_new(WEB_MSG_LOG, s_scratch, w.len)) == NULL) {
-                    break;
-                }
-            }
-            c->log_gap = false;
-            enqueue(c, m);   /* a refused log message sets log_gap again */
+        uint32_t from = c->log_cursor;
+        diag_log_read_info_t info = { 0 };
+        size_t n = diag_log_read_ex(DIAG_LOG_THIS_BOOT, &c->log_cursor, s_log_text, sizeof(s_log_text), &info);
+        if (n == 0 && !info.gap) {
+            continue;
         }
+        wj_t w;
+        wj_init(&w, s_scratch, sizeof(s_scratch), NULL, NULL);
+        wj_obj_open(&w, NULL);
+        wj_str(&w, "type", "log");
+        wj_uint(&w, "from", from);
+        wj_uint(&w, "cursor", c->log_cursor);
+        wj_bool(&w, "gap", info.gap || c->log_gap);
+        wj_strn(&w, "text", s_log_text, n);
+        wj_obj_close(&w);
+        if (!wj_ok(&w)) {
+            c->log_gap = true;   /* these lines do not fit one message (escaped): skipped, said so next time */
+            continue;
+        }
+        ws_msg_t *m = msg_new(WEB_MSG_LOG, s_scratch, w.len);
+        if (m == NULL) {
+            c->log_cursor = from;   /* no memory now: try again next time */
+            continue;
+        }
+        bool had_gap = c->log_gap;
+        enqueue(c, m);
+        bool taken = m->refs > 1;
         msg_release(m);
+        if (taken) {
+            c->log_gap = false;
+        } else {
+            c->log_cursor = from;   /* not queued: the same lines next time, so no gap */
+            c->log_gap = had_gap;
+        }
     }
 }
 

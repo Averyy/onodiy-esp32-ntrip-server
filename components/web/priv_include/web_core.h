@@ -86,8 +86,14 @@ const char *web_status_line(int status);
 
 /* ---- request checks ------------------------------------------------------------------ */
 
-/** Search-domain suffixes a browser may append to the bare hostname. */
-#define WEB_HOST_SUFFIXES "lan", "home", "home.arpa", "localdomain", "internal", "fritz.box"
+/**
+ * Search-domain suffixes a browser may append to the bare hostname: only
+ * names that never resolve in public DNS (reserved, or never delegated), so
+ * nobody outside the LAN controls what they resolve to. A router's domain
+ * that is a publicly delegated zone is left out on purpose: reach the
+ * station by its IP address or <hostname>.local there.
+ */
+#define WEB_HOST_SUFFIXES "lan", "home", "home.arpa", "localdomain", "internal"
 
 /** The device's names, for the Host check. Empty strings are skipped. */
 typedef struct {
@@ -189,6 +195,48 @@ void web_throttle_fail(web_throttle_t *t, uint32_t now_s);
 void web_throttle_ok(web_throttle_t *t);
 /** Delay after the n-th consecutive failure: 0 for n < 5, then min(2^(n-4), 300). */
 uint32_t web_throttle_delay_s(uint32_t fails);
+
+/*
+ * Login throttling per client. Each client (its address, and whether it came
+ * over the AP) has its own count and delay, so one client's failures never
+ * delay another's login. Distributed guessing from many addresses is bounded
+ * by a ceiling per interface (station / AP): at most
+ * WEB_THROTTLE_IFACE_BURST failures in a burst, then one more every
+ * WEB_THROTTLE_IFACE_REFILL_S. A single client, throttled to one failure
+ * per 300 s after its first few, stays well below that ceiling, and a LAN
+ * client never touches the AP's, so nobody on the LAN can lock out an owner
+ * standing next to the station.
+ */
+#define WEB_THROTTLE_CLIENTS          16u     /**< clients tracked (the least recently seen one is replaced) */
+#define WEB_THROTTLE_IFACE_BURST      30u
+#define WEB_THROTTLE_IFACE_REFILL_S   120u
+
+typedef struct {
+    bool used;
+    bool ap;
+    uint64_t key;        /**< IPv4 address, or an IPv6 address's /64 prefix */
+    uint32_t seen_s;     /**< last failure or check (replacement order) */
+    web_throttle_t t;
+} web_throttle_client_t;
+
+typedef struct {
+    uint32_t left;       /**< failures left in the burst */
+    uint32_t at_s;       /**< refill reference */
+} web_throttle_bucket_t;
+
+typedef struct {
+    web_throttle_client_t c[WEB_THROTTLE_CLIENTS];
+    web_throttle_bucket_t iface[2];   /**< [0] station interface, [1] AP */
+} web_throttles_t;
+
+/** Empty table (also: a new admin password makes every earlier failure moot). */
+void web_throttles_init(web_throttles_t *t, uint32_t now_s);
+/** Seconds until this client's next attempt is accepted (0 = now): its own delay or its interface's ceiling. */
+uint32_t web_throttles_wait_s(web_throttles_t *t, uint64_t key, bool ap, uint32_t now_s);
+/** A counted failure of this client (only call when web_throttles_wait_s() was 0). @return its consecutive failures. */
+uint32_t web_throttles_fail(web_throttles_t *t, uint64_t key, bool ap, uint32_t now_s);
+/** This client's success resets its count. */
+void web_throttles_ok(web_throttles_t *t, uint64_t key, bool ap);
 
 /* ---- field rules ------------------------------------------------------------------------- */
 

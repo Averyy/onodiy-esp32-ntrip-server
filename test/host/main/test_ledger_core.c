@@ -363,6 +363,180 @@ TEST_CASE("ledger: the last-alive mark is due once a minute with a clock; dirty 
     TEST_ASSERT_TRUE(hist);
 }
 
+TEST_CASE("ledger: a reset just after UTC midnight keeps the day that ended", "[ledger]")
+{
+    /* The protected slot is down from 23:00:30; the stores run once a
+     * minute at :30 as ledger.c does; the RTC copy is taken every second. */
+    static uint8_t hist_blob[4000];
+    static uint8_t today_blob[200];
+    size_t hist_len = 0, today_len = 0;
+    fresh(T0, 0);
+    uint32_t now = T0;
+    lc_set_utc(&c, now, at(DAY0, H(23) + S(30)), LC_CLOCK_SNTP);
+    lc_set_slot(&c, now, 0, true, true, false);
+    lc_rtc_t rtc;
+    for (int sec = 0; sec <= 3600 - 30 + 20; sec++) {      /* to 00:00:20 */
+        lc_tick(&c, now);
+        lc_snapshot_t snap;
+        lc_snapshot(&c, &snap);
+        lc_rtc_seal(&rtc, &snap);
+        int64_t alive;
+        bool today, hist;
+        if (lc_persist_due(&c, now, 60000u, &alive, &today, &hist)) {
+            if (hist) {
+                hist_len = lc_encode_hist(c.hist, c.hist_n, hist_blob, sizeof(hist_blob));
+            }
+            if (today) {
+                today_len = lc_encode_today(&snap, today_blob, sizeof(today_blob));
+            }
+        }
+        now += 1000u;
+    }
+    TEST_ASSERT_EQUAL_INT32(DAY0 + 1, c.today.utc_day);
+    TEST_ASSERT_EQUAL_INT32(DAY0, c.hist[0].utc_day);
+    uint32_t down = c.hist[0].down_ms[0];
+    TEST_ASSERT_EQUAL_UINT32(S(3570), down);
+
+    /* A watchdog reset: the RTC copy (today = the new day) and what NVS holds. */
+    fresh(5000u, 1000);
+    lc_restore(&c, &rtc.snap, false);
+    static lc_day_t back[HIST];
+    size_t n = lc_decode_hist(hist_blob, hist_len, back, HIST);
+    lc_set_history(&c, back, n);
+    lc_snapshot_t stored = snap_base();
+    TEST_ASSERT_TRUE(lc_decode_today(today_blob, today_len, &stored));
+    lc_merge_stored_day(&c, &stored.today);
+    TEST_ASSERT_EQUAL_INT32(DAY0 + 1, c.today.utc_day);
+    TEST_ASSERT_EQUAL_size_t(1, c.hist_n);
+    TEST_ASSERT_EQUAL_INT32(DAY0, c.hist[0].utc_day);
+    TEST_ASSERT_EQUAL_UINT32(down, c.hist[0].down_ms[0]);   /* stored at midnight, not a minute before */
+}
+
+TEST_CASE("ledger: the stored today fills a day the stored history missed", "[ledger]")
+{
+    /* The history write at midnight did not happen (reset in between, or the
+     * write failed): the day comes from the stored today, as of its last
+     * store; a day the history has is never added twice. */
+    lc_snapshot_t rtc = snap_base();
+    rtc.today.utc_day = DAY0 + 1;
+    rtc.today.down_ms[0] = 5000;
+    lc_day_t stored;
+    memset(&stored, 0, sizeof(stored));
+    stored.utc_day = DAY0;
+    stored.down_ms[0] = S(3540);
+    lc_day_t old;
+    memset(&old, 0, sizeof(old));
+    old.utc_day = DAY0 - 1;
+    old.down_ms[0] = 42;
+
+    fresh(5000u, 1000);
+    lc_restore(&c, &rtc, false);
+    lc_set_history(&c, &old, 1);
+    lc_merge_stored_day(&c, &stored);
+    TEST_ASSERT_EQUAL_size_t(2, c.hist_n);
+    TEST_ASSERT_EQUAL_INT32(DAY0, c.hist[0].utc_day);
+    TEST_ASSERT_EQUAL_UINT32(S(3540), c.hist[0].down_ms[0]);
+    TEST_ASSERT_EQUAL_INT32(DAY0 - 1, c.hist[1].utc_day);
+    lc_merge_stored_day(&c, &stored);
+    TEST_ASSERT_EQUAL_size_t(2, c.hist_n);
+    TEST_ASSERT_EQUAL_UINT32(S(3540), c.hist[0].down_ms[0]);
+    /* the restored today itself, or an older day the history has: nothing */
+    stored.utc_day = DAY0 + 1;
+    lc_merge_stored_day(&c, &stored);
+    stored.utc_day = DAY0 - 1;
+    lc_merge_stored_day(&c, &stored);
+    TEST_ASSERT_EQUAL_size_t(2, c.hist_n);
+    TEST_ASSERT_EQUAL_UINT32(42, c.hist[1].down_ms[0]);
+    /* the merged day is stored with the first clock */
+    int64_t alive;
+    bool today, hist;
+    lc_set_utc(&c, 5000u, at(DAY0 + 1, S(30)), LC_CLOCK_SNTP);
+    TEST_ASSERT_TRUE(lc_persist_due(&c, 5000u, 60000u, &alive, &today, &hist));
+    TEST_ASSERT_TRUE(hist);
+}
+
+/* GPS time of week (ms) of a UTC time. */
+static uint32_t tow_of(int64_t unix_ms)
+{
+    int64_t g = unix_ms - LC_GPS_EPOCH_UNIX_MS + (int64_t)LC_GPS_UTC_LEAP_S * 1000;
+    return (uint32_t)(g % LC_GPS_WEEK_MS);
+}
+
+TEST_CASE("ledger: GNSS time keeps the clock across a reset without SNTP", "[ledger]")
+{
+    /* A session with a clock; a watchdog reset; the router is down, so no
+     * SNTP: the receiver's GPS time of week dates itself against the RTC
+     * copy's last-alive mark, and the reset gap is counted. */
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, at(DAY0, H(10)), LC_CLOCK_SNTP);
+    lc_set_rtcm_ok(&c, T0, true);
+    lc_set_slot(&c, T0, 0, true, true, true);
+    lc_tick(&c, T0 + 5000u);
+    lc_snapshot_t s;
+    lc_snapshot(&c, &s);
+
+    fresh(9000u, 4000);                                          /* 4 s after boot; 3 s of reset */
+    lc_restore(&c, &s, false);
+    int64_t truth = at(DAY0, H(10) + S(5) + S(3) + S(4));
+    TEST_ASSERT_TRUE(lc_set_gps_tow(&c, 9000u, tow_of(truth - 300), 300));
+    TEST_ASSERT_EQUAL(LC_CLOCK_GNSS, c.clock);
+    TEST_ASSERT_EQUAL_INT64(truth, lc_unix_now(&c, 9000u));
+    TEST_ASSERT_EQUAL_UINT32(S(7), c.today.down_ms[0]);          /* 3 s gap + 4 s since boot */
+    /* SNTP is ignored while GNSS time keeps coming. */
+    TEST_ASSERT_FALSE(lc_set_utc(&c, 10000u, at(DAY0, H(11)), LC_CLOCK_SNTP));
+    /* A GNSS time that is far from the running clock is not taken. */
+    TEST_ASSERT_FALSE(lc_set_gps_tow(&c, 10000u, tow_of(truth + 1000 + H(1)), 0));
+    TEST_ASSERT_TRUE(lc_set_gps_tow(&c, 10000u, tow_of(truth + 1000 + 200), 0));
+    TEST_ASSERT_EQUAL_INT64(truth + 1200, lc_unix_now(&c, 10000u));
+}
+
+TEST_CASE("ledger: GNSS time without a datable week waits for SNTP", "[ledger]")
+{
+    /* A power cut: the gap is unknown, so the week is too. */
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, at(DAY0, H(10)), LC_CLOCK_SNTP);
+    lc_tick(&c, T0 + 5000u);
+    lc_snapshot_t s;
+    lc_snapshot(&c, &s);
+    fresh(9000u, 4000);
+    lc_restore(&c, &s, true);
+    int64_t truth = at(DAY0, H(12));
+    TEST_ASSERT_FALSE(lc_set_gps_tow(&c, 9000u, tow_of(truth), 0));
+    TEST_ASSERT_EQUAL(LC_CLOCK_NONE, c.clock);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, 9000u, truth, LC_CLOCK_SNTP));
+    TEST_ASSERT_TRUE(lc_set_gps_tow(&c, 10000u, tow_of(truth + 1000), 0));
+    TEST_ASSERT_EQUAL(LC_CLOCK_GNSS, c.clock);
+
+    /* A new station: no mark at all. */
+    fresh(T0, 0);
+    TEST_ASSERT_FALSE(lc_set_gps_tow(&c, T0, tow_of(truth), 0));
+    /* A previous session that itself had no clock at its end: its mark is old. */
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, at(DAY0, H(1)), LC_CLOCK_SNTP);
+    lc_snapshot(&c, &s);
+    fresh(9000u, 4000);
+    lc_restore(&c, &s, false);
+    lc_tick(&c, 20000u);
+    lc_snapshot(&c, &s);                                         /* no clock this session */
+    fresh(9000u, 4000);
+    lc_restore(&c, &s, false);
+    TEST_ASSERT_FALSE(lc_set_gps_tow(&c, 9000u, tow_of(at(DAY0, H(1) + S(20))), 0));
+    /* garbage time of week */
+    TEST_ASSERT_FALSE(lc_set_gps_tow(&c, 9000u, (uint32_t)LC_GPS_WEEK_MS, 0));
+}
+
+TEST_CASE("ledger: GNSS time is dated across the GPS week boundary", "[ledger]")
+{
+    /* GPS weeks start Sunday 00:00:00 GPS time = Saturday 23:59:42 UTC. */
+    int64_t week_start = LC_GPS_EPOCH_UNIX_MS - (int64_t)LC_GPS_UTC_LEAP_S * 1000 + 2437 * LC_GPS_WEEK_MS;
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, week_start - S(2), LC_CLOCK_SNTP);       /* the old week's end */
+    TEST_ASSERT_TRUE(lc_set_gps_tow(&c, T0 + 3000u, 1000, 0));    /* 1 s into the new week */
+    TEST_ASSERT_EQUAL_INT64(week_start + 1000, lc_unix_now(&c, T0 + 3000u));
+    TEST_ASSERT_TRUE(lc_set_gps_tow(&c, T0 + 3000u, (uint32_t)(LC_GPS_WEEK_MS - 500), 0));   /* late epoch */
+    TEST_ASSERT_EQUAL_INT64(week_start - 500, lc_unix_now(&c, T0 + 3000u));
+}
+
 TEST_CASE("ledger: three days of outages across the clock wrap add up", "[ledger]")
 {
     fresh(UINT32_MAX - 100000u, 0);

@@ -224,8 +224,17 @@ function availabilityTab(box) {
 
 const LOG_KEEP = 200000; /* characters kept in the view */
 
+/*
+ * The log view reads over HTTP up to the newest line, then subscribes to the
+ * WebSocket log with that cursor: the station sends each client the lines
+ * after its own cursor, and every message says where it starts ("from"), so
+ * nothing is shown twice or skipped when the view switches between the two.
+ * A message that does not continue where the view stands (one sent before
+ * the subscription took effect, or after lines were missed) makes the view
+ * read the difference over HTTP and subscribe again from there.
+ */
 function logsTab(box) {
-  let cursor = 0, prev = false, paused = false, loading = false;
+  let cursor = 0, prev = false, paused = false, loading = false, again = false;
   const pre = h('pre', { class: 'log', tabindex: '0', 'aria-label': 'Log' });
   const follow = checkbox('Follow new lines', true);
   const err = errBox();
@@ -263,10 +272,31 @@ function logsTab(box) {
     }
   }
 
+  const following = () => !prev && !paused;
+
+  function subscribeLog(on) {
+    if (on) live.subscribe(['status', 'progress', 'log'], () => ({ log_cursor: cursor }));
+    else live.subscribe(['status', 'progress']);
+  }
+
+  /* Read over HTTP up to the newest line, then let the socket go on from there. */
+  async function catchUp() {
+    if (loading) {
+      again = true;
+      return;
+    }
+    subscribeLog(false);
+    do {
+      again = false;
+      await fetchMore();
+    } while (again);
+    if (following()) subscribeLog(true);
+  }
+
   function restart() {
     clear(pre);
     cursor = 0;
-    fetchMore().then(() => {
+    catchUp().then(() => {
       if (!pre.firstChild) pre.append(h('span', { class: 'gap' }, prev ? 'No lines from the previous start (they do not survive a power cut or an app change).' : 'No lines yet.'));
     });
     mount(dl, 'Download ' + (prev ? 'previous start' : 'log'));
@@ -274,14 +304,17 @@ function logsTab(box) {
   }
 
   const offLog = bus.on('log', m => {
-    if (prev || paused || loading) return;
-    if (m.cursor !== undefined && m.cursor <= cursor) return;
+    if (!following() || loading) return;
+    if (m.from !== undefined && m.from !== cursor) {
+      if (m.cursor !== undefined && m.cursor <= cursor) return;   /* sent before this view's cursor took effect */
+      catchUp();
+      return;
+    }
     append(m.text, m.gap);
     if (m.cursor !== undefined) cursor = m.cursor;
   });
-  live.subscribe(['status', 'progress', 'log']);
   /* Without the WebSocket, poll for new lines. */
-  const stopPoll = poller(2000, () => (!prev && !paused && live.state !== 'ws' ? fetchMore() : Promise.resolve()), true);
+  const stopPoll = poller(2000, () => (following() && live.state !== 'ws' ? fetchMore() : Promise.resolve()), true);
 
   const which = radios('Which start', 'logboot', [['now', 'This start'], ['prev', 'Previous start']], 'now');
   which.onchange(() => {
@@ -291,7 +324,8 @@ function logsTab(box) {
   const pauseBtn = btn('Pause', () => {
     paused = !paused;
     pauseBtn.textContent = paused ? 'Resume' : 'Pause';
-    if (!paused) fetchMore();
+    if (paused) subscribeLog(false);
+    else catchUp();
   }, 'small');
   const dl = h('a', { class: 'btn small', href: '/api/logs?format=text', download: '' }, 'Download log');
 

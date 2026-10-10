@@ -175,11 +175,18 @@ bool web_auth_session_alive(int idx, uint32_t gen);
 uint32_t web_auth_session_left_s(int idx);
 void web_auth_session_touch(int idx);
 
-/** Seconds a login must still wait (0 = allowed now). */
-uint32_t web_auth_throttle_wait_s(void);
+/**
+ * Seconds this request's client must still wait before a password attempt
+ * (0 = allowed now). Throttling is per client (peer address, and whether it
+ * came over the AP; web_core.h).
+ */
+uint32_t web_auth_throttle_wait_s(httpd_req_t *req, bool on_ap);
 
-/** Check the password (counts a failure, resets on success). Call only when the throttle allows it. */
-bool web_auth_check(const char *pw);
+/**
+ * Check the password for this request's client (counts its failure, resets
+ * its count on success). Call only when the throttle allows it.
+ */
+bool web_auth_check(httpd_req_t *req, bool on_ap, const char *pw);
 
 /** New session; sets the cookie header on the response (`cookie_buf` must outlive the response). */
 int web_auth_start_session(httpd_req_t *req, char cookie_buf[96]);
@@ -249,6 +256,9 @@ void web_ws_on_close(int fd);
 
 /** Close the clients of these sessions (bit mask of indexes) with 4001. */
 void web_ws_close_sessions(uint32_t mask);
+
+/** Close every client without a session (1008): public status was turned off. */
+void web_ws_close_public(void);
 
 /** Periodic work on the server task: status at 1 Hz, progress at 2 Hz, log every 500 ms, events. */
 void web_ws_tick(bool second, bool half_second);

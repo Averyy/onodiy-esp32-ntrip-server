@@ -205,6 +205,18 @@ esp_err_t gnss_obs_get_arp(gnss_obs_arp_t *out)
     return ESP_OK;
 }
 
+esp_err_t gnss_obs_get_gps_time(uint32_t *tow_ms, uint32_t *age_ms)
+{
+    if (tow_ms == NULL || age_ms == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const uint64_t now = (uint64_t)esp_timer_get_time() / 1000u;
+    portENTER_CRITICAL(&s_lock);
+    bool ok = obs_core_gps_time(&s_core, now, tow_ms, age_ms);
+    portEXIT_CRITICAL(&s_lock);
+    return ok ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
 void gnss_obs_reset(void)
 {
     portENTER_CRITICAL(&s_lock);

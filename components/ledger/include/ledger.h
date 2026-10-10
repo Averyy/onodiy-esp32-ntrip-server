@@ -21,11 +21,16 @@
  *   - the station reports whether fresh RTCM is flowing (a slot whose
  *     session stays open through a receiver stall streams nothing, so it
  *     counts as down);
- *   - the clock: GNSS time first (receiver time output or MSM epoch + week),
- *     SNTP as fallback (taken only while no GNSS time arrived for 10 min).
- *     Until either is valid, seconds accrue to an "unattributed" record and
- *     are spread over the days they covered once time is known. Trusted
- *     time is passed on to diag for the event journal's timestamps.
+ *   - the clock: GNSS time first, SNTP as fallback (taken only while no
+ *     GNSS time arrived for 10 min). GNSS time is the receiver's GPS time
+ *     of week (its GPS MSM epoch time, fed by the health monitor), which
+ *     has no week number: it is dated against the running clock, or after
+ *     a reset (not a power cut) against the previous session's last-alive
+ *     mark. A station that never had a clock, or one that lost power, needs
+ *     one SNTP time first. Until a clock is valid, seconds accrue to an
+ *     "unattributed" record and are spread over the days they covered once
+ *     time is known. Trusted time is passed on to diag for the event
+ *     journal's timestamps.
  *
  * Persistence: the running counters also live in RTC memory, written every
  * tick and checked with magic, size and CRC (they survive software, panic
@@ -102,6 +107,14 @@ void ledger_set_rtcm_ok(bool ok);
  * session's last-alive mark and the unattributed seconds.
  */
 void ledger_set_utc(int64_t unix_s, ledger_clock_t source);
+
+/**
+ * GNSS time from the receiver: the GPS time of week in ms of its latest MSM
+ * epoch (as sent), `age_ms` after that MSM arrived. Dated and converted to
+ * UTC as described above (GPS-UTC offset 18 s), then taken like
+ * ledger_set_utc(..., LEDGER_CLOCK_GNSS); ignored when it cannot be dated.
+ */
+void ledger_set_gps_time(uint32_t tow_ms, uint32_t age_ms);
 
 /** Count a data-loss event against today (UART overflow etc.). */
 void ledger_count_overflow(void);

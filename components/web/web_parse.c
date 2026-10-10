@@ -646,7 +646,7 @@ bool web_parse_upload_confirm(const cJSON *root, uint8_t sha256[32], const char 
 
 /* ---- WebSocket ---------------------------------------------------------------------------------------- */
 
-web_ws_msg_t web_parse_ws_message(const char *text, size_t len, uint32_t *topics)
+web_ws_msg_t web_parse_ws_message(const char *text, size_t len, web_ws_sub_t *sub)
 {
     if (!web_json_depth_ok(text, len, WEB_JSON_MAX_DEPTH)) {
         return WEB_WS_MSG_INVALID;
@@ -674,10 +674,16 @@ web_ws_msg_t web_parse_ws_message(const char *text, size_t len, uint32_t *topics
                         bits |= WEB_TOPIC_LOG;
                     }
                 }
-                if (topics != NULL) {
-                    *topics = bits;
+                int64_t cur = 0;
+                member_t mc = get_int(root, "log_cursor", 0, UINT32_MAX, &cur);
+                if (mc != M_BAD) {
+                    if (sub != NULL) {
+                        sub->topics = bits;
+                        sub->has_log_cursor = mc == M_OK;
+                        sub->log_cursor = (uint32_t)cur;
+                    }
+                    kind = WEB_WS_MSG_SUBSCRIBE;
                 }
-                kind = WEB_WS_MSG_SUBSCRIBE;
             }
         }
     }

@@ -13,7 +13,7 @@
  *
  * Memory layout (all multi-byte fields little-endian, the CPU's order):
  *
- *   header (logring_hdr_t, 44 bytes), then the data area (the rest).
+ *   header (logring_hdr_t, 56 bytes), then the data area (the rest).
  *
  *   magic      "DLOG" (0x474F4C44)
  *   layout     LOGRING_LAYOUT; another value is a different layout: discard
@@ -26,7 +26,15 @@
  *   tail       offset of the oldest record in the data area
  *   used       bytes held, record headers included
  *   lost       records dropped to make room since the block was started
+ *   bank       which of the caller's blocks wrote it (logring_set_owner)
+ *   image      8 bytes naming the program image that wrote it
  *   crc        CRC-32 over the fields above
+ *
+ *   A block whose bank or image differs from its reader's is refused: when
+ *   the program image changes, the memory the blocks live in can move (on
+ *   the target by whole MMU pages, which can equal one block), so the old
+ *   copy of another block, or of another image, could otherwise pass for
+ *   this one.
  *
  *   Record: u32 seq, u16 len, u16 check (CRC-16 over seq, len and the
  *   text), then `len` bytes of text with no terminator. Records are stored
@@ -61,9 +69,11 @@ extern "C" {
 #endif
 
 #define LOGRING_MAGIC    0x474F4C44u   /* "DLOG" */
-#define LOGRING_LAYOUT   1u
+#define LOGRING_LAYOUT   2u
 #define LOGRING_REC_HDR  8u            /* u32 seq, u16 len, u16 check */
 #define LOGRING_MAX_TEXT 1024u         /* longer records are cut to this */
+#define LOGRING_IMAGE_ID 8u            /* bytes naming the program image */
+#define LOGRING_HINTS    8u            /* read positions remembered (RAM only) */
 
 typedef struct {
     uint32_t magic;
@@ -76,6 +86,8 @@ typedef struct {
     uint32_t tail;
     uint32_t used;
     uint32_t lost;
+    uint32_t bank;
+    uint8_t image[LOGRING_IMAGE_ID];
     uint32_t crc;
 } logring_hdr_t;
 
@@ -88,6 +100,16 @@ typedef struct {
     uint32_t data_size;
     logring_sync_fn sync;      /**< optional */
     void *sync_ctx;
+    uint32_t bank;             /**< owner this reader expects and writes (logring_set_owner) */
+    uint8_t image[LOGRING_IMAGE_ID];
+    /* Where reads stopped: record hint_seq[i] starts at hint_off[i]. A held
+     * record never moves, so a hint stays right while its record is held
+     * (seq >= first_seq); a reader that continues where it stopped starts
+     * there instead of walking every record from the oldest. */
+    uint32_t hint_seq[LOGRING_HINTS];   /**< 0 = unused */
+    uint32_t hint_off[LOGRING_HINTS];
+    uint32_t hint_next;
+    uint32_t seek_steps;       /**< records walked to find read positions (statistics) */
 } logring_t;
 
 /** What a read found. */
@@ -104,7 +126,14 @@ typedef struct {
  */
 void logring_attach(logring_t *r, void *mem, size_t mem_size, logring_sync_fn sync, void *sync_ctx);
 
-/** True if the header passes every check for this block (magic, layout, sizes, CRC, offsets). */
+/**
+ * Owner of the block: which of the caller's blocks it is, and the program
+ * image (LOGRING_IMAGE_ID bytes). logring_format() stores them and the
+ * header checks require them. Both are 0 after logring_attach().
+ */
+void logring_set_owner(logring_t *r, uint32_t bank, const uint8_t image[LOGRING_IMAGE_ID]);
+
+/** True if the header passes every check for this block (magic, layout, sizes, owner, CRC, offsets). */
 bool logring_header_ok(const logring_t *r);
 
 /**
@@ -131,10 +160,25 @@ uint32_t logring_count(const logring_t *r);
  * Copy whole records with seq > *cursor, oldest first, into out
  * (NUL-terminated; at most cap - 1 text bytes). *cursor becomes the last
  * copied record's sequence number. A record longer than cap - 1 that would
- * be the first one copied is cut to fit, so a reader always advances.
+ * be the first one copied is cut to fit, so a reader whose whole buffer is
+ * smaller than one record still advances.
  * @return text bytes copied.
  */
-size_t logring_read(const logring_t *r, uint32_t *cursor, char *out, size_t cap, logring_read_t *info);
+size_t logring_read(logring_t *r, uint32_t *cursor, char *out, size_t cap, logring_read_t *info);
+
+/** Lock or unlock the ring for one slice of logring_read_sliced (optional). */
+typedef void (*logring_lock_fn)(void *ctx);
+
+/**
+ * logring_read into a large buffer, at most `slice` bytes (raised to one
+ * longest record plus its terminator) per lock hold, so a long read never
+ * keeps a writer waiting for long. Only whole records are copied: a record
+ * is cut only when the whole buffer cannot hold it (`size` - 1 bytes), never
+ * because a slice ended inside it. info->records counts every record copied.
+ * @return text bytes copied (out is NUL-terminated).
+ */
+size_t logring_read_sliced(logring_t *r, uint32_t *cursor, char *out, size_t size, size_t slice,
+                           logring_lock_fn lock, logring_lock_fn unlock, void *lock_ctx, logring_read_t *info);
 
 #ifdef __cplusplus
 }

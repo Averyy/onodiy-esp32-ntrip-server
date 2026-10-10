@@ -555,6 +555,105 @@ void web_throttle_ok(web_throttle_t *t)
     t->last_s = 0;
 }
 
+void web_throttles_init(web_throttles_t *t, uint32_t now_s)
+{
+    memset(t, 0, sizeof(*t));
+    for (size_t i = 0; i < 2; i++) {
+        t->iface[i].left = WEB_THROTTLE_IFACE_BURST;
+        t->iface[i].at_s = now_s;
+    }
+}
+
+static void bucket_refill(web_throttle_bucket_t *b, uint32_t now_s)
+{
+    if (b->left >= WEB_THROTTLE_IFACE_BURST) {
+        b->left = WEB_THROTTLE_IFACE_BURST;
+        b->at_s = now_s;   /* full: the refill clock starts at the next failure */
+        return;
+    }
+    uint32_t add = (now_s - b->at_s) / WEB_THROTTLE_IFACE_REFILL_S;
+    if (add == 0) {
+        return;
+    }
+    if (add >= WEB_THROTTLE_IFACE_BURST - b->left) {
+        b->left = WEB_THROTTLE_IFACE_BURST;
+        b->at_s = now_s;
+    } else {
+        b->left += add;
+        b->at_s += add * WEB_THROTTLE_IFACE_REFILL_S;
+    }
+}
+
+static web_throttle_client_t *client_find(web_throttles_t *t, uint64_t key, bool ap)
+{
+    for (size_t i = 0; i < WEB_THROTTLE_CLIENTS; i++) {
+        web_throttle_client_t *c = &t->c[i];
+        if (c->used && c->key == key && c->ap == ap) {
+            return c;
+        }
+    }
+    return NULL;
+}
+
+uint32_t web_throttles_wait_s(web_throttles_t *t, uint64_t key, bool ap, uint32_t now_s)
+{
+    web_throttle_bucket_t *b = &t->iface[ap ? 1 : 0];
+    bucket_refill(b, now_s);
+    uint32_t wait = 0;
+    if (b->left == 0) {
+        uint32_t since = now_s - b->at_s;
+        wait = since >= WEB_THROTTLE_IFACE_REFILL_S ? 1u : WEB_THROTTLE_IFACE_REFILL_S - since;
+    }
+    web_throttle_client_t *c = client_find(t, key, ap);
+    if (c != NULL) {
+        c->seen_s = now_s;
+        uint32_t own = web_throttle_wait_s(&c->t, now_s);
+        if (own > wait) {
+            wait = own;
+        }
+    }
+    return wait;
+}
+
+uint32_t web_throttles_fail(web_throttles_t *t, uint64_t key, bool ap, uint32_t now_s)
+{
+    web_throttle_bucket_t *b = &t->iface[ap ? 1 : 0];
+    bucket_refill(b, now_s);
+    if (b->left > 0) {
+        b->left--;
+    }
+    web_throttle_client_t *c = client_find(t, key, ap);
+    if (c == NULL) {
+        /* A free entry, else the one seen longest ago. */
+        c = &t->c[0];
+        for (size_t i = 0; i < WEB_THROTTLE_CLIENTS; i++) {
+            web_throttle_client_t *e = &t->c[i];
+            if (!e->used) {
+                c = e;
+                break;
+            }
+            if ((uint32_t)(now_s - e->seen_s) > (uint32_t)(now_s - c->seen_s)) {
+                c = e;
+            }
+        }
+        memset(c, 0, sizeof(*c));
+        c->used = true;
+        c->key = key;
+        c->ap = ap;
+    }
+    c->seen_s = now_s;
+    web_throttle_fail(&c->t, now_s);
+    return c->t.fails;
+}
+
+void web_throttles_ok(web_throttles_t *t, uint64_t key, bool ap)
+{
+    web_throttle_client_t *c = client_find(t, key, ap);
+    if (c != NULL) {
+        memset(c, 0, sizeof(*c));
+    }
+}
+
 /* ---- field rules --------------------------------------------------------------------------- */
 
 bool web_no_ctrl(const char *s)

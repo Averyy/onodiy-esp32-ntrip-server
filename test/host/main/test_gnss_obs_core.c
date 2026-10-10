@@ -71,6 +71,33 @@ TEST_CASE("obs: Galileo E1/E5a/E5b/E6 is four bands and the best constellation",
     TEST_ASSERT_FALSE(v.e6_lost);
 }
 
+TEST_CASE("obs: GPS time of the latest GPS epoch, for the ledger's clock", "[gnss_obs]")
+{
+    obs_core_init(&s_core);
+    uint32_t tow = 0, age = 0;
+    TEST_ASSERT_FALSE(obs_core_gps_time(&s_core, 1000, &tow, &age));
+    gnss_rtcm3_msm_t h = msm(GNSS_SYS_GALILEO, 345000, false, 0x3, 0x2);
+    obs_core_feed_msm(&s_core, &h, NULL, 1000);
+    TEST_ASSERT_FALSE(obs_core_gps_time(&s_core, 1000, &tow, &age));   /* Galileo only */
+    h = msm(GNSS_SYS_GPS, 345000, true, 0x3, 0x2);
+    obs_core_feed_msm(&s_core, &h, NULL, 1000);
+    h = msm(GNSS_SYS_GPS, 345000, false, 0xC, 0x2);
+    obs_core_feed_msm(&s_core, &h, NULL, 1003);
+    TEST_ASSERT_TRUE(obs_core_gps_time(&s_core, 1250, &tow, &age));
+    TEST_ASSERT_EQUAL_UINT32(345000, tow);
+    TEST_ASSERT_EQUAL_UINT32(247, age);
+    h = msm(GNSS_SYS_GPS, 346000, false, 0xF, 0x2);
+    obs_core_feed_msm(&s_core, &h, NULL, 2000);
+    TEST_ASSERT_TRUE(obs_core_gps_time(&s_core, 2000, &tow, &age));
+    TEST_ASSERT_EQUAL_UINT32(346000, tow);
+    TEST_ASSERT_EQUAL_UINT32(0, age);
+    /* stale after the window; an epoch time beyond a week is no time of week */
+    TEST_ASSERT_FALSE(obs_core_gps_time(&s_core, 2000 + OBS_SIGNAL_WINDOW_MS, &tow, &age));
+    h = msm(GNSS_SYS_GPS, 604800000u, false, 0xF, 0x2);
+    obs_core_feed_msm(&s_core, &h, NULL, 3000);
+    TEST_ASSERT_FALSE(obs_core_gps_time(&s_core, 3000, &tow, &age));
+}
+
 TEST_CASE("obs: nothing fed means no bands and no epoch", "[gnss_obs]")
 {
     obs_core_init(&s_core);
@@ -384,6 +411,35 @@ TEST_CASE("obs: epoch gaps against the configured period count each lost epoch o
     obs_core_view(&s_core, 27010, &v);
     TEST_ASSERT_EQUAL_UINT64(0, v.epoch_gaps);
     TEST_ASSERT_EQUAL_UINT32(1000, v.epoch_period_ms);
+}
+
+TEST_CASE("obs: an outage counts once whichever constellation comes first after it", "[gnss_obs]")
+{
+    /* GPS and Galileo at 1 s; a 20 s link outage (19 epochs lost); in the
+     * first epoch after it Galileo's MSM arrives before GPS's. */
+    static const um98x_rtcm_out_t prof[] = { { 1077, 1 }, { 1097, 1 } };
+    for (int order = 0; order < 2; order++) {
+        obs_core_view_t v;
+        obs_core_init(&s_core);
+        obs_core_set_expected(&s_core, prof, 2);
+        for (unsigned i = 0; i < 5; i++) {
+            feed_second(i, SYS_BIT(GNSS_SYS_GPS) | SYS_BIT(GNSS_SYS_GALILEO));
+        }
+        const unsigned i = 24;
+        gnss_rtcm3_msm_t g = msm(GNSS_SYS_GPS, TOW0 + 1000u * i, order == 0, 1, 2);
+        gnss_rtcm3_msm_t e = msm(GNSS_SYS_GALILEO, TOW0 + 1000u * i, order == 1, 1, 2);
+        if (order == 0) {
+            obs_core_feed_msm(&s_core, &g, NULL, 1000u * i);
+            obs_core_feed_msm(&s_core, &e, NULL, 1000u * i + 2);
+        } else {
+            obs_core_feed_msm(&s_core, &e, NULL, 1000u * i);
+            obs_core_feed_msm(&s_core, &g, NULL, 1000u * i + 2);
+        }
+        obs_core_view(&s_core, 1000u * i + 10, &v);
+        TEST_ASSERT_EQUAL_UINT64(19, v.sys[GNSS_SYS_GPS].epoch_gaps);
+        TEST_ASSERT_EQUAL_UINT64(19, v.sys[GNSS_SYS_GALILEO].epoch_gaps);
+        TEST_ASSERT_EQUAL_UINT64_MESSAGE(19, v.epoch_gaps, order == 0 ? "GPS first" : "Galileo first");
+    }
 }
 
 static void feed_gps(uint32_t tow, uint64_t t)

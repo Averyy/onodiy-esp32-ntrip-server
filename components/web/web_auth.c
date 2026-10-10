@@ -7,9 +7,11 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
 
 #include "esp_log.h"
 #include "esp_random.h"
+#include "lwip/sockets.h"
 #include "sdkconfig.h"
 #include "settings.h"
 #include "web_internal.h"
@@ -18,7 +20,7 @@
 static const char *TAG = "web";
 
 static web_sessions_t s_sess;
-static web_throttle_t s_throttle;
+static web_throttles_t s_throttles;
 static web_admin_state_t s_state;
 static web_pw_record_t s_rec;
 static bool s_ram_only;                        /* claimed while the settings were unavailable */
@@ -65,7 +67,7 @@ static bool load(void)
 void web_auth_init(void)
 {
     web_sess_init(&s_sess);
-    memset(&s_throttle, 0, sizeof(s_throttle));
+    web_throttles_init(&s_throttles, web_now_s());
     s_ram_only = false;
     s_blob_len = 0;
     s_blob_unreadable = false;
@@ -204,19 +206,51 @@ void web_auth_expire(void)
 
 /* ---- password -------------------------------------------------------------------------------- */
 
-uint32_t web_auth_throttle_wait_s(void)
+/* The client a throttle entry belongs to: its IPv4 address (also when
+ * mapped into IPv6), or the /64 prefix of an IPv6 address (one host can use
+ * any address in its prefix). 0 if the socket cannot tell. */
+static uint64_t client_key(httpd_req_t *req)
 {
-    return web_throttle_wait_s(&s_throttle, web_now_s());
+    int fd = httpd_req_to_sockfd(req);
+    struct sockaddr_storage addr;
+    socklen_t len = sizeof(addr);
+    if (fd < 0 || getpeername(fd, (struct sockaddr *)&addr, &len) != 0) {
+        return 0;
+    }
+    if (addr.ss_family == AF_INET) {
+        return ((const struct sockaddr_in *)&addr)->sin_addr.s_addr;
+    }
+#if CONFIG_LWIP_IPV6
+    if (addr.ss_family == AF_INET6) {
+        const uint8_t *b = ((const struct sockaddr_in6 *)&addr)->sin6_addr.s6_addr;
+        static const uint8_t mapped[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF };
+        uint32_t v4;
+        if (memcmp(b, mapped, sizeof(mapped)) == 0) {
+            memcpy(&v4, b + 12, 4);
+            return v4;
+        }
+        uint64_t prefix;
+        memcpy(&prefix, b, 8);
+        return prefix;
+    }
+#endif
+    return 0;
 }
 
-bool web_auth_check(const char *pw)
+uint32_t web_auth_throttle_wait_s(httpd_req_t *req, bool on_ap)
 {
+    return web_throttles_wait_s(&s_throttles, client_key(req), on_ap, web_now_s());
+}
+
+bool web_auth_check(httpd_req_t *req, bool on_ap, const char *pw)
+{
+    uint64_t key = client_key(req);
     bool ok = s_state == WEB_ADMIN_SET && web_pw_check(&s_rec, pw);
     if (ok) {
-        web_throttle_ok(&s_throttle);
+        web_throttles_ok(&s_throttles, key, on_ap);
     } else {
-        web_throttle_fail(&s_throttle, web_now_s());
-        ESP_LOGW(TAG, "wrong admin password (%u in a row)", (unsigned)s_throttle.fails);
+        uint32_t n = web_throttles_fail(&s_throttles, key, on_ap, web_now_s());
+        ESP_LOGW(TAG, "wrong admin password (%u in a row from this client)", (unsigned)n);
     }
     return ok;
 }
@@ -258,6 +292,6 @@ esp_err_t web_auth_set_password(const char *pw, bool *persisted)
     }
     s_rec = rec;
     s_state = WEB_ADMIN_SET;
-    web_throttle_ok(&s_throttle);
+    web_throttles_init(&s_throttles, web_now_s());   /* failures against the old password are moot */
     return ESP_OK;
 }

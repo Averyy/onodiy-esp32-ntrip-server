@@ -52,6 +52,9 @@ typedef struct {
     bool reject;                /* the station rejects every request */
     bool lease;
     int64_t release_at;
+    uint8_t apply_after;        /* this finished step makes the station run an apply of its own */
+    int64_t apply_at;           /* when it starts (NEVER = none scheduled) */
+    int64_t apply_end;
 
     /* reboot cap model (optional) */
     bool cap_model;
@@ -62,6 +65,7 @@ typedef struct {
     uint8_t req[256];
     int64_t req_at[256];
     unsigned nreq;
+    unsigned nreq_step[6];      /* requests per step (not bounded by req[]) */
     rec_t rec[512];
     unsigned nrec;
     unsigned reboots;
@@ -73,6 +77,7 @@ static hl_req_t cb_request(void *ctx, uint8_t step)
 {
     sim_t *w = (sim_t *)ctx;
     TEST_ASSERT_TRUE(step >= 1 && step <= 5);
+    w->nreq_step[step]++;
     if (w->nreq < 256) {
         w->req[w->nreq] = step;
         w->req_at[w->nreq] = w->now;
@@ -126,6 +131,8 @@ static void sim_init(sim_t *w)
     w->last_rtcm = NEVER;
     w->last_rx = NEVER;
     w->release_at = NEVER;
+    w->apply_at = NEVER;
+    w->apply_end = NEVER;
     w->in.stn_state = HL_STN_STREAMING;
     w->in.reboot_allowed = true;
     w->events = true;
@@ -156,6 +163,19 @@ static bool cap_allows(const sim_t *w)
 
 static void sim_station(sim_t *w)
 {
+    /* The station's own apply (CONFIGURING under its lease). */
+    if (w->apply_at != NEVER && w->running == 0 && w->now >= w->apply_at &&
+        w->in.stn_state == HL_STN_STREAMING) {
+        w->apply_at = NEVER;
+        w->in.stn_state = HL_STN_CONFIGURING;
+        w->lease = true;
+    }
+    if (w->in.stn_state == HL_STN_CONFIGURING && w->apply_end != NEVER && w->now >= w->apply_end) {
+        w->apply_end = NEVER;
+        w->in.stn_state = HL_STN_STREAMING;
+        w->lease = false;
+        w->release_at = w->now;
+    }
     if (w->pending != 0 && w->running == 0 && w->in.stn_state == HL_STN_STREAMING) {
         w->running = w->pending;
         w->pending = 0;
@@ -186,6 +206,10 @@ static void sim_station(sim_t *w)
             w->rtcm = false;
             w->lines = false;
             w->bytes = false;
+        }
+        if (st == w->apply_after) {
+            w->apply_at = w->now + 60 * SEC;
+            w->apply_end = w->apply_at + 20 * SEC;
         }
     }
 }
@@ -863,6 +887,74 @@ TEST_CASE("ladder: a configuration session during a grace abandons the step, whi
     TEST_ASSERT_EQUAL_UINT8(4, w.rec[2].code);
     TEST_ASSERT_EQUAL_UINT8(HL_OUT_STARTED, w.rec[2].outcome);
     TEST_ASSERT_TRUE(w.rec[2].at - w.release_at > 10 * SEC);
+}
+
+TEST_CASE("ladder: a step abandoned twice in an episode counts as failed", "[health_ladder]")
+{
+    /* The receiver answers but sends no RTCM. About 60 s after each
+     * receiver reset the station runs an apply of its own (its check after
+     * the restart), which suspends the ladder inside step 5's grace. Step 5
+     * runs again once; abandoned a second time it counts as failed and the
+     * byte rule raises the power-cycle alert. */
+    sim_t w;
+    sim_init(&w);
+    w.apply_after = 5;
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    for (int64_t t = 0; t < 30 * MIN && !w.l.power_alert; t += SEC) {
+        sim_step(&w);
+    }
+    TEST_ASSERT_EQUAL_UINT32(2, w.nreq_step[5]);
+    TEST_ASSERT_EQUAL_UINT32(2, count_rec(&w, 5, HL_OUT_ABANDONED));
+    int alert = find_rec(&w, HL_CODE_POWER_ALERT, HL_OUT_STARTED, 0);
+    TEST_ASSERT_TRUE(alert >= 0);
+    TEST_ASSERT_TRUE(find_rec(&w, HL_CODE_FAILED, HL_OUT_STARTED, (unsigned)alert) > alert);
+    TEST_ASSERT_TRUE(w.l.power_alert);
+
+    /* Over a day the FAILED passes keep it bounded: one reset per pass,
+     * never a reset every couple of minutes. */
+    sim_run(&w, 24 * HOUR);
+    unsigned passes = w.l.phase == HL_PH_FAILED ? 0u : 1u;
+    passes += (unsigned)(24 * HOUR / HL_FAILED_RETRY_MS) + 2u;
+    TEST_ASSERT_TRUE(w.nreq_step[5] <= passes);
+    TEST_ASSERT_TRUE(w.nreq_step[5] < 24 * HOUR / (5 * MIN));
+    TEST_ASSERT_TRUE(w.l.power_alert);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+
+    /* 60 s of health resets the ladder: a new episode may run step 5 twice
+     * again. */
+    w.apply_after = 0;
+    w.apply_at = NEVER;
+    w.rtcm = true;
+    sim_run(&w, 2 * MIN);
+    TEST_ASSERT_EQUAL_UINT8(0, w.l.abandoned);
+    TEST_ASSERT_FALSE(w.l.power_alert);
+}
+
+TEST_CASE("ladder: a rescan abandoned twice goes on to reconfigure", "[health_ladder]")
+{
+    /* Garbage on the line: entry step 3. Each rescan's grace is cut short
+     * by a station apply; the second time the ladder goes on to step 4. */
+    sim_t w;
+    sim_init(&w);
+    w.apply_after = 3;
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.bytes = true;
+    for (int64_t t = 0; t < 30 * MIN && w.nreq_step[4] == 0; t += SEC) {
+        /* the apply lands 10 s into the rescan's 30 s grace */
+        if (w.apply_at != NEVER && w.apply_at - w.now > 10 * SEC) {
+            w.apply_at = w.now + 10 * SEC;
+            w.apply_end = w.apply_at + 20 * SEC;
+        }
+        sim_step(&w);
+    }
+    TEST_ASSERT_EQUAL_UINT32(2, w.nreq_step[3]);
+    TEST_ASSERT_EQUAL_UINT32(1, w.nreq_step[4]);
+    TEST_ASSERT_EQUAL_UINT32(2, count_rec(&w, 3, HL_OUT_ABANDONED));
 }
 
 TEST_CASE("ladder: the receiver lost during reconfigure: abandoned, then the NO_RECEIVER rule", "[health_ladder]")

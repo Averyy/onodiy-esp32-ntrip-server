@@ -65,26 +65,31 @@ static uint64_t epoch_advance_ms(gnss_sys_t sys, uint32_t a, uint32_t b)
     return (tb + wrap - ta) % wrap;
 }
 
-/* Gaps found on constellation s count for the station only while no lower
- * constellation with a configured period is present. */
-static bool is_reference(const obs_core_t *c, unsigned s, uint64_t now_ms)
+/* Gaps found on constellation s count for the station only when no lower
+ * constellation with a configured period was present at s's previous epoch
+ * (the start of the gap: its latest MSM then, or already a newer one). Judged
+ * at the gap's start, not now, so after an outage longer than the window the
+ * lower constellation still counts the outage alone, whichever MSM arrives
+ * first. Call before s's MSM time is updated. */
+static bool is_reference(const obs_core_t *c, unsigned s)
 {
+    const uint64_t at = c->msm_seen_ms[s];
     for (unsigned r = 0; r < s; r++) {
         if (c->cfg.period_ms[r] != 0 && (c->msm_ever & (1u << r)) &&
-            within(c->msm_seen_ms[r], now_ms, OBS_SIGNAL_WINDOW_MS)) {
+            within(c->msm_seen_ms[r], at, OBS_SIGNAL_WINDOW_MS)) {
             return false;
         }
     }
     return true;
 }
 
-static void count_gaps(obs_core_t *c, unsigned s, uint32_t from, uint32_t to, uint64_t now_ms)
+static void count_gaps(obs_core_t *c, unsigned s, uint32_t from, uint32_t to)
 {
     const uint64_t period = c->cfg.period_ms[s];
     if (period == 0) {
         return;
     }
-    const bool ref = is_reference(c, s, now_ms);
+    const bool ref = is_reference(c, s);
     const uint64_t limit = (4u * period > OBS_EPOCH_GAP_MAX_MS) ? 4u * period : OBS_EPOCH_GAP_MAX_MS;
     uint64_t d = epoch_advance_ms((gnss_sys_t)s, from, to);
     if (d > limit) {
@@ -311,7 +316,7 @@ void obs_core_feed_msm(obs_core_t *c, const gnss_rtcm3_msm_t *h, const obs_cnr_t
     if (first || c->epoch_time[s] != h->epoch_time) {
         cnr_finish(c, s, now_ms);
         if (!first) {
-            count_gaps(c, s, c->epoch_time[s], h->epoch_time, now_ms);
+            count_gaps(c, s, c->epoch_time[s], h->epoch_time);
         }
         c->epoch_time[s] = h->epoch_time;
         c->epoch_sats[s] = h->sat_mask;
@@ -526,6 +531,18 @@ size_t obs_core_msgs(const obs_core_t *c, uint64_t now_ms, obs_msg_stat_t *out, 
 bool obs_core_sky_available(const obs_core_t *c, uint64_t now_ms)
 {
     return c->gsv_ever && within(c->gsv_ms, now_ms, OBS_SKY_WINDOW_MS);
+}
+
+bool obs_core_gps_time(const obs_core_t *c, uint64_t now_ms, uint32_t *tow_ms, uint32_t *age_out)
+{
+    const unsigned s = (unsigned)GNSS_SYS_GPS;
+    if (!(c->msm_ever & (1u << s)) || !within(c->msm_seen_ms[s], now_ms, OBS_SIGNAL_WINDOW_MS) ||
+        c->epoch_time[s] >= 604800000u) {
+        return false;
+    }
+    *tow_ms = c->epoch_time[s];
+    *age_out = age_ms(c->msm_seen_ms[s], now_ms);
+    return true;
 }
 
 size_t obs_core_sky(const obs_core_t *c, uint64_t now_ms, obs_sat_t *out, size_t cap)
