@@ -288,12 +288,18 @@ fl_ev_t fl_rx_next(fl_rx_t *rx, uint32_t deadline)
             return FL_EV_CAN1;   /* the next byte stays queued */
         }
         if (b == 'C') {
+            /* The window runs from the first 'C': a run of them with no other
+             * printable byte inside it is one start byte. Measured from each
+             * 'C' instead, a receiver repeating its start byte faster than the
+             * window would never end the run (and no deadline would hold). */
             unsigned run = 0;
+            uint32_t t_first = fl_now(rx->io);
             for (;;) {
                 (void)take(rx);
                 run++;
-                if (!have(rx, 1, FL_LONE_C_MS)) {
-                    return FL_EV_C;
+                uint32_t spent = fl_since(rx->io, t_first);
+                if (spent >= FL_LONE_C_MS || !have(rx, 1, FL_LONE_C_MS - spent)) {
+                    return FL_EV_C;   /* later 'C's stay queued: their own events */
                 }
                 uint8_t n = peek(rx, 0);
                 if (n == 'C') {
@@ -324,7 +330,13 @@ fl_ev_t fl_rx_next(fl_rx_t *rx, uint32_t deadline)
     }
 }
 
-void fl_rx_drop_stale(fl_rx_t *rx)
+void fl_rx_poll(fl_rx_t *rx)
+{
+    while (rx->q_len < FL_RXQ_CAP && fill_once(rx, 0)) {
+    }
+}
+
+void fl_rx_drop_stale(fl_rx_t *rx, bool c_run_at_end)
 {
     while (rx->q_len > 0) {
         uint8_t b = peek(rx, 0);
@@ -341,7 +353,7 @@ void fl_rx_drop_stale(fl_rx_t *rx)
             if (i < rx->q_len && printable(peek(rx, i))) {
                 return;
             }
-            if (i == rx->q_len) {
+            if (i == rx->q_len && !c_run_at_end) {
                 /* The run ends the queue: whether text follows is not known yet. */
                 return;
             }

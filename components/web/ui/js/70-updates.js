@@ -31,6 +31,7 @@ const FLASH_ACTIONS = [
 ];
 
 const NOT_ENABLED = 'Receiver firmware updates are not enabled in this build yet.';
+const TRANSFER_FAILED = 'A transfer failed; the update goes on (keep the station powered)';
 const NOT_YET_DOWNLOADED = 'Receiver package downloaded and verified. ' + NOT_ENABLED +
   ' The station now checks the package against every rule; nothing is sent to the receiver.';
 const CHECK_STARTED = NOT_ENABLED + ' The station checks the package against every rule, then releases it; nothing is sent to the receiver.';
@@ -112,7 +113,10 @@ function progressWidget() {
       b.className = 'bar ' + tone + (frac === null && !m.done ? ' indet' : '');
       fill.style.width = frac === null ? '' : (Math.max(0, Math.min(1, frac)) * 100).toFixed(1) + '%';
       const counts = m.job === 'gnss_flash' && !m.done ? flashCounts(m) : '';
-      label.textContent = lbl(L.job, m.job) + ': ' + (m.done ? resultText(m) : lbl(L.phase, m.phase) +
+      /* "failed" before the final message: a transfer failed and the session goes on (back to the loader,
+       * the same package again within the caps, or a stop for your decision). */
+      const phase = m.job === 'gnss_flash' && !m.done && m.phase === 'failed' ? TRANSFER_FAILED : lbl(L.phase, m.phase);
+      label.textContent = lbl(L.job, m.job) + ': ' + (m.done ? resultText(m) : phase +
         (frac !== null ? ' ' + Math.round(frac * 100) + ' %' : '') + (counts ? ' (' + counts + ')' : ''));
     },
     hide() {

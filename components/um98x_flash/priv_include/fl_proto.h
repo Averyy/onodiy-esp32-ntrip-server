@@ -255,6 +255,16 @@ typedef enum {
 /** Wait up to max_ms for the prompt after `mark`; one "\r\n" after nudge_ms of silence (0 = never). */
 fl_prompt_result_t fl_wait_prompt(fl_lis_t *lis, uint64_t mark, uint32_t max_ms, uint32_t nudge_ms);
 
+/**
+ * A fresh prompt before any menu item: the receiver quiet for
+ * FL_MENU_QUIET_MS (at most FL_MENU_QUIET_MAX_MS), one "\r\n" (it also
+ * clears stop-key bytes left in the menu's input line), and a prompt that
+ * answers it within FL_PROMPT_MS. Anything but FL_PROMPT_SEEN: no menu item
+ * may follow (the attempt failed). io_failed (may be NULL): the write
+ * failed (then FL_PROMPT_TIMEOUT).
+ */
+fl_prompt_result_t fl_fresh_prompt(fl_lis_t *lis, bool *io_failed);
+
 typedef enum {
     FL_MENU_READY = 0,      /**< the ready line arrived: the handshake follows */
     FL_MENU_FAILED,         /**< this attempt failed (the loader is at its prompt or silent) */

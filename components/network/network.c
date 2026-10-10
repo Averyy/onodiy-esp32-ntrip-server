@@ -2012,7 +2012,12 @@ esp_err_t network_set_credentials(const char *ssid, const char *password)
     bool have = net_ssid_valid(s_act_ssid);
     bool same = have && strcmp(s_act_ssid, ssid) == 0 && strcmp(s_act_pass, password) == 0;
     taskEXIT_CRITICAL(&s_lock);
-    net_cred_plan_t plan = net_cred_plan(have, same);
+#if CONFIG_NETWORK_QEMU_ETHERNET
+    const bool wifi_used = false;   /* the emulated Ethernet port is the station interface */
+#else
+    const bool wifi_used = true;
+#endif
+    net_cred_plan_t plan = net_cred_plan(have, same, wifi_used);
 
     if (settings_is_available()) {
         esp_err_t err;
@@ -2047,12 +2052,15 @@ esp_err_t network_set_credentials(const char *ssid, const char *password)
         s_pend_valid = false;
     }
     s_cred_reverted = false;
-    queue_apply_locked(ssid, password, plan == NET_CRED_PLAN_TRIAL);
+    if (plan != NET_CRED_PLAN_STORE_ONLY) {
+        queue_apply_locked(ssid, password, plan == NET_CRED_PLAN_TRIAL);
+    }
     taskEXIT_CRITICAL(&s_lock);
     xSemaphoreGive(s_cred_mux);
     ESP_LOGI(TAG, "Wi-Fi credentials for \"%s\" %s", ssid,
-             plan == NET_CRED_PLAN_TRIAL ? "stored as pending: tried now, kept if they get an IP"
-                                         : "stored");
+             plan == NET_CRED_PLAN_TRIAL        ? "stored as pending: tried now, kept if they get an IP"
+             : plan == NET_CRED_PLAN_STORE_ONLY ? "stored, not used: the emulated Ethernet stays the station's link"
+                                                : "stored");
     return ESP_OK;
 }
 

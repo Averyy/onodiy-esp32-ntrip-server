@@ -61,6 +61,58 @@ static void send_ack(const fl_io_t *io)
     (void)fl_write(io, &ack, 1);
 }
 
+/* Before a frame is written: what the receiver sent before it (still in
+ * the driver or already queued) answers an earlier frame or is a repeated
+ * start byte. Read it in without waiting and drop its control bytes. */
+static void purge_stale(fl_rx_t *rx, bool before_frame1)
+{
+    fl_rx_poll(rx);
+    fl_rx_drop_stale(rx, before_frame1);
+}
+
+/* After the ACK of a block that went out more than once: the receiver may
+ * still answer the other copies (a duplicate block is acknowledged again).
+ * Such an answer would count for the next block, and every answer after it
+ * would be one block off. Listen XM_DUP_SETTLE_MS and drop them; text, a
+ * cancel and the mismatch pattern count as in the block wait. */
+static xm_result_t settle(const fl_io_t *io, fl_rx_t *rx, xm_state_t *st, uint32_t idx)
+{
+    uint32_t until = fl_now(io) + XM_DUP_SETTLE_MS;
+    for (;;) {
+        fl_ev_t ev = fl_rx_next(rx, until);
+        switch (ev) {
+        case FL_EV_TIMEOUT:
+            return XM_OK;
+        case FL_EV_ACK:
+        case FL_EV_NAK:
+        case FL_EV_C:
+            st->late_answers++;
+            fl_notef(io, "block %u: a late answer to an earlier copy (%s), dropped", (unsigned)(idx + 1u),
+                     ev == FL_EV_ACK ? "ACK" : ev == FL_EV_NAK ? "NAK" : "C");
+            break;
+        case FL_EV_CANCEL:
+            send_ack(io);
+            strcpy(st->text, "CAN CAN");
+            fl_notef(io, "block %u: the receiver cancelled", (unsigned)(idx + 1u));
+            return XM_CANCELLED;
+        case FL_EV_TEXT:
+            if (line_has_any(rx, k_rx_error, sizeof(k_rx_error) / sizeof(k_rx_error[0]))) {
+                note_line(io, "receiver error report", rx);
+                break;
+            }
+            keep_text(st, rx);
+            note_line(io, "receiver text during the transfer, stopping", rx);
+            return XM_TEXT_ABORT;
+        case FL_EV_MISMATCH:
+            strcpy(st->text, "baud mismatch pattern");
+            fl_notef(io, "block %u: baud-mismatch pattern, the receiver left the loader", (unsigned)(idx + 1u));
+            return XM_BAUD_MISMATCH;
+        default:
+            break;   /* junk and a lone CAN: ignored */
+        }
+    }
+}
+
 /* The deadline of the two that comes first. */
 static uint32_t earliest(const fl_io_t *io, uint32_t a, uint32_t b)
 {
@@ -181,6 +233,7 @@ xm_result_t xm_send(const fl_io_t *io, fl_rx_t *rx, const xm_job_t *job, xm_stat
     st->eot_acked = false;
     st->last_eot_ms = 0;
     st->handshake_ms = 0;
+    st->late_answers = 0;
     st->text[0] = '\0';
     if (job->data == NULL || job->len == 0 || job->len % XM_BLOCK == 0) {
         return XM_REFUSED;
@@ -202,7 +255,7 @@ xm_result_t xm_send(const fl_io_t *io, fl_rx_t *rx, const xm_job_t *job, xm_stat
         uint32_t cap = t_block + XM_FRAME_MAX_MS;
         bool acked = false;
         while (!acked) {
-            fl_rx_drop_stale(rx);
+            purge_stale(rx, idx == 0);
             st->first_frame_sent = true;   /* from the first byte of frame 1 on */
             if (fl_write(io, st->frame, flen) != 0) {
                 fl_notef(io, "block %u: write failed", (unsigned)(idx + 1u));
@@ -266,6 +319,14 @@ xm_result_t xm_send(const fl_io_t *io, fl_rx_t *rx, const xm_job_t *job, xm_stat
             }
         }
         st->blocks_acked++;
+        if (tries > 0 && idx + 1u < st->blocks) {
+            /* The last block needs none: an extra answer to it lands in the
+             * EOT wait, where an ACK or a NAK changes nothing that matters. */
+            xm_result_t sr = settle(io, rx, st, idx);
+            if (sr != XM_OK) {
+                return sr;
+            }
+        }
         if (job->on_acked != NULL) {
             uint32_t bytes = (idx + 1u) * XM_BLOCK;
             job->on_acked(job->ctx, st->blocks_acked, bytes > job->len ? job->len : bytes, st->retries);
@@ -277,7 +338,7 @@ xm_result_t xm_send(const fl_io_t *io, fl_rx_t *rx, const xm_job_t *job, xm_stat
     }
 
     /* End of transfer: only EOT from here on. */
-    fl_rx_drop_stale(rx);
+    purge_stale(rx, false);
     if (job->before_eot != NULL) {
         job->before_eot(job->ctx);
     }

@@ -26,6 +26,9 @@ password, default settings).
   --seconds N         stop QEMU after N seconds (with --headless)
   --http-port N       host port forwarded to the web server's port 80
                       (default 8080; the UI is at http://localhost:N/)
+  --no-wdt            turn off the emulated timer-group watchdogs (the task
+                      and interrupt watchdogs never fire then): only for a
+                      debugger session that stops the CPUs; never for checks
   --uart1 MODE        where UART1 goes (default listen:5556):
                         listen[:PORT]   QEMU listens on 127.0.0.1:PORT; connect any time
                                         (bytes sent while nothing is connected are lost,
@@ -54,9 +57,11 @@ headless=""
 seconds=""
 http_port=8080
 uart1="listen:5556"
+wdt=1
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-build) build=0 ;;
+        --no-wdt) wdt=0 ;;
         --build-only) run=0 ;;
         --headless) [ $# -ge 2 ] || die "--headless needs a log file"; headless="$2"; shift ;;
         --seconds) [ $# -ge 2 ] || die "--seconds needs a number"; seconds="$2"; shift ;;
@@ -115,11 +120,15 @@ grep -q '^#define CONFIG_NETWORK_QEMU_ETHERNET 1' "$bdir/config/sdkconfig.h" ||
 [ "$run" = 1 ] || exit 0
 
 # Flash image like idf.py qemu makes it, written fresh every run, and the
-# eFuse image with IDF's QEMU defaults (written once).
+# eFuse image with IDF's QEMU defaults (written once). The image is written
+# to a new file that then replaces the old one: a QEMU from an earlier run
+# that is still alive keeps writing to the old file (QEMU takes no lock on
+# it), never into this run's image.
 flash_size=$(sed -n 's/^CONFIG_ESPTOOLPY_FLASHSIZE="\(.*\)"$/\1/p' "$bdir/sdkconfig")
 [ -n "$flash_size" ] || die "no CONFIG_ESPTOOLPY_FLASHSIZE in build-qemu/sdkconfig"
-(cd "$bdir" && "$idf_python" -m esptool --chip=esp32s3 merge-bin --output=qemu_flash.bin \
-    --pad-to-size="$flash_size" @flash_args >/dev/null)
+(cd "$bdir" && rm -f qemu_flash.bin.new && "$idf_python" -m esptool --chip=esp32s3 merge-bin \
+    --output=qemu_flash.bin.new --pad-to-size="$flash_size" @flash_args >/dev/null &&
+    mv -f qemu_flash.bin.new qemu_flash.bin)
 if [ ! -f "$bdir/qemu_efuse.bin" ]; then
     "$idf_python" - "$bdir/qemu_efuse.bin" <<'EOF'
 import os, sys
@@ -137,14 +146,21 @@ fi
 # seconds of boot in 5 of 13 runs (host heap corruption: glibc "malloc():
 # unsorted double linked list corrupted", or SIGSEGV inside a device register
 # read); with one thread, in none of 13 (README).
+# The timer-group watchdogs stay on (idf.py qemu turns them off): the task
+# watchdog (TIMG0) and the interrupt watchdog (TIMG1) fire here as on a
+# board, so a task that starves IDLE panics in QEMU too. --no-wdt turns them
+# off for a debugger session.
 args=(
     -M esp32s3 -m 8M -accel tcg,thread=single
     -drive "file=$bdir/qemu_flash.bin,if=mtd,format=raw"
     -drive "file=$bdir/qemu_efuse.bin,if=none,format=raw,id=efuse"
     -global driver=nvram.esp32s3.efuse,property=drive,value=efuse
-    -global driver=timer.esp32s3.timg,property=wdt_disable,value=true
     -nic "user,model=open_eth,hostfwd=tcp:127.0.0.1:$http_port-:80"
 )
+if [ "$wdt" = 0 ]; then
+    args+=(-global driver=timer.esp32s3.timg,property=wdt_disable,value=true)
+    echo "Watchdogs: OFF (--no-wdt): a starved task or a stuck interrupt goes unnoticed"
+fi
 
 echo "Web UI:  http://localhost:$http_port/  (empty NVS: set the admin password on the first page)"
 echo "UART1:   $uart1_text"

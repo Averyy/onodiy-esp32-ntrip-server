@@ -506,7 +506,11 @@ void stn_init(stn_t *s, bool journal_open);
 /** Start of the station task: the boot listen window begins (unless FLASH_RECOVERY). */
 void stn_start(stn_t *s, const stn_in_t *in);
 
-/** The flash journal was cleared by the user: leave FLASH_RECOVERY and boot stream-first. */
+/**
+ * The flash journal was cleared by the user: leave FLASH_RECOVERY and boot
+ * stream-first. A receiver update job still queued is dropped (there is no
+ * journal left for it to work on).
+ */
 void stn_journal_cleared(stn_t *s, const stn_in_t *in);
 
 /**
@@ -555,6 +559,9 @@ int stn_request_restart_receiver(stn_t *s);
  * STN_NOTE_FLASH_CLOSE. @return STN_OK, STN_E_STATE.
  */
 int stn_request_flash(stn_t *s, uint8_t kind);
+
+/** A receiver update job is queued or running (the journal is being worked on: it may not be cleared). */
+bool stn_flash_pending(const stn_t *s);
 
 /** A bench operation (STN_JOB_BENCH): STREAMING or NO_RECEIVER, nothing else running, not in maintenance. */
 int stn_request_bench(stn_t *s);

@@ -140,9 +140,12 @@ fl_sess_result_t fl_sess_run(fl_sess_t *s);
 
 /**
  * The user's "retry flash (same package)" from needs-user (one more
- * transfer, beyond the automatic cap): back to the loader prompt (listen,
- * one "\r\n"), or, with the application answering with the journalled
- * model, a full loader entry; then the menu and the transfer.
+ * transfer, beyond the automatic cap). Without a RAM copy (s->pkg NULL) the
+ * pinned package goes through the recovery gate (hooks.recovery_prepare)
+ * first; if it fails, needs-user again and nothing is sent. Then back to the
+ * loader prompt (listen, one "\r\n"), or, with the application answering
+ * with the journalled model, a full loader entry; then the menu and the
+ * transfer.
  */
 fl_sess_result_t fl_sess_user_retry(fl_sess_t *s);
 

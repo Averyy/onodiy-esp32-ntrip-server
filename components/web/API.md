@@ -485,10 +485,13 @@ from `LIFECYCLE_EVENT_PRE_REBOOT`, then the server closes with `1012`).
 | `gnss_update` | `downloading`; when it ends with `ok` the station took the request and the `gnss_flash` job follows (without flashing in the build: `not_available_yet`, and a `gnss_check` job follows) |
 | `gnss_check` | builds without receiver flashing: `checking`, then the final message with `result` `ok` (the package passes every rule; nothing was sent) or `package_rejected` (`failed_rule`, `reason`) |
 | `gnss_upload` | `receiving` → `inspecting` |
-| `gnss_flash` | the flash phases (`um98x_flash_phase_t`): `checking`, `entering`, `transferring`, `committing`, `finishing`, `done`, `failed`, `needs_user`, with `bytes_sent`, `bytes_total`, `retries`, `transfers`, `failure`, `frames_acked`, `frames_total`, `frames_sent`, `entry_attempts`, `journal_state` (`um98x_journal_state_t`, `null` before the journal opens). `finishing` covers leaving the loader, the version check and the profile's re-apply and its check; the journal closes after that |
+| `gnss_flash` | the flash phases (`um98x_flash_phase_t`): `checking`, `entering`, `transferring`, `committing`, `finishing`, `done`, `failed`, `needs_user`, with `bytes_sent`, `bytes_total`, `retries`, `transfers`, `failure`, `frames_acked`, `frames_total`, `frames_sent`, `entry_attempts`, `journal_state` (`um98x_journal_state_t`, `null` before the journal opens). `finishing` covers leaving the loader, the version check and the profile's re-apply and its check; the journal closes after that. `failed` with `"done": false` is a transfer that failed after the point of no return while the session goes on (back to the loader, the same package again within the caps, or a stop for the user's decision); only the final message ends the job |
 
 The final message has `"done": true` and `"result"`: `ok` or a result code
-(section 12), plus `message` (the `esp_err_t` name) on failure. The final
+(section 12), plus `message` (the `esp_err_t` name) on failure. For
+`gnss_flash` and `gnss_check` it is the station's own end of the job (a
+session, a retry or restart, the journal's close or a package check ended),
+never a phase on its way. The final
 `gnss_flash` and `gnss_check` messages also carry the session's outcome:
 `outcome` (`station_flash_outcome_t`), `firmware` and `build` (the
 receiver's version log afterwards, `""`/`0` unknown), `failed_rule` (1-12,
@@ -825,7 +828,7 @@ it is open. `journal` (here and in `/api/status`):
 | Value | Meaning | Lockout |
 |---|---|---|
 | `none` | no session | — |
-| `running` | a session or its boot-time recovery runs | full: no app updates, reboots or receiver config changes |
+| `running` | a session or its boot-time recovery runs, or the user's retry or restart was accepted (its record still says `needs_user` until the session writes; it cannot be cleared meanwhile) | full: no app updates, reboots or receiver config changes |
 | `waiting` | stopped, waiting for the user's choice (also while boot-time recovery is report-only) | reduced: app updates and reboots work; the receiver is left alone |
 | `unreadable` | a damaged journal, or one written by a newer firmware; counts as waiting | reduced; only `clear` |
 | `unknown` | settings unavailable this boot: the state cannot be read; nothing is sent to the receiver | no action possible |

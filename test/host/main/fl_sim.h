@@ -84,6 +84,7 @@ typedef struct {
     /* menu */
     sim_menu2_t menu2;
     bool skip_leading_crlf;     /* "\r\n" before an item prints no prompt of its own */
+    bool no_prompt_on_empty;    /* an empty line at the menu prints nothing (another input state) */
     bool begin_text;
     /* XMODEM */
     uint8_t start;              /* 'C' or 0x15 */
@@ -109,6 +110,7 @@ typedef struct {
     bool junk_before_ack;
     bool lone_can_before_ack;
     int dup_ack_block;          /* acknowledge this block twice */
+    uint32_t dup_ack_gap_ms;    /* a duplicate block's ACK comes this long after what is queued (its processing) */
     int junk_every_s;           /* with silent_block: junk every second (no ACK) */
     /* EOT */
     int eot_naks;
@@ -123,6 +125,7 @@ typedef struct {
     /* exit */
     bool no_resetting_text;
     bool app_dead_after;        /* the application does not start after the flash */
+    uint32_t app_baud_after;    /* the new application runs COM1 at this baud (0 = the saved one) */
     bool exit_needs_second_6;   /* the first "6" after the transfer only reprints the prompt */
 
     /* ---- state ---- */
@@ -194,6 +197,10 @@ typedef struct {
     bool transfer_failed;       /* a transfer ended without success */
     uint32_t host_line_errors;
     uint32_t reads;
+    uint32_t host_bytes;        /* every byte the host wrote, at any baud */
+    int ack_delivered_block;    /* the block (1-based, not wrapped) the last ACK delivered to the host answered */
+    uint32_t dup_acks;          /* duplicate blocks acknowledged again */
+    uint32_t versiona_at_loader_baud; /* version queries the host wrote at the loader's baud */
 } sim_t;
 
 void sim_init(sim_t *s);

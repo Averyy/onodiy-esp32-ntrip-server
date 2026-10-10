@@ -16,6 +16,8 @@
 
 static uint32_t s_garbage_i;
 static uint32_t s_tx_baud[SIM_OUT_MAX];
+static int s_tx_tag[SIM_OUT_MAX];   /* an ACK's block (1-based, not wrapped); 0 for every other byte */
+static int s_next_tag;
 
 uint32_t sim_crc32(const char *s, size_t n)
 {
@@ -68,6 +70,7 @@ static void emit_at(sim_t *s, const void *data, size_t len, uint64_t at_us, uint
         s->out_due[k] = t;
         s->out_b[k] = p[i];
         s_tx_baud[k] = baud;
+        s_tx_tag[k] = s_next_tag;
         s->out_len++;
     }
     s->out_tail_us = t;
@@ -154,7 +157,7 @@ static void app_start(sim_t *s)
         return;
     }
     set_state(s, SIM_APP);
-    s->com1_baud = s->app_baud;
+    s->com1_baud = (s->flashed && s->app_baud_after != 0) ? s->app_baud_after : s->app_baud;
     s->quiet = false;
     s->next_periodic_us = s->now_us + US(s->app_period_ms);
     if (s->banner) {
@@ -267,7 +270,9 @@ static void app_line(sim_t *s, const char *line)
 static void menu_line(sim_t *s, const char *line)
 {
     if (line[0] == '\0') {
-        emit_prompt(s, 2);
+        if (!s->no_prompt_on_empty) {
+            emit_prompt(s, 2);
+        }
         return;
     }
     char *end = NULL;
@@ -374,7 +379,8 @@ static void xrx_eot(sim_t *s)
     post_report(s);
 }
 
-static void ack(sim_t *s, uint32_t delay_ms)
+/* Acknowledge block `block` (1-based, not wrapped: tags the ACK for the alignment checks). */
+static void ack(sim_t *s, uint32_t delay_ms, int block)
 {
     if (s->junk_before_ack) {
         static const uint8_t j[2] = { 0x00, 0xFF };
@@ -385,7 +391,9 @@ static void ack(sim_t *s, uint32_t delay_ms)
         emit_byte(s, FL_CAN, delay_ms);
         delay_ms = 0;
     }
+    s_next_tag = block;
     emit_byte(s, FL_ACK, delay_ms);
+    s_next_tag = 0;
     s->last_ack_us = s->out_tail_us;
 }
 
@@ -452,7 +460,12 @@ static void xrx_frame(sim_t *s)
         return;
     }
     if (blk == (uint8_t)(s->expect - 1u) && s->img_len > 0) {
-        ack(s, 2);   /* duplicate of the last block */
+        s->dup_acks++;
+        uint32_t d = 2;
+        if (s->dup_ack_gap_ms > 0 && s->out_tail_us > s->now_us) {
+            d = (uint32_t)((s->out_tail_us - s->now_us) / 1000u) + s->dup_ack_gap_ms;
+        }
+        ack(s, d, (int)(s->img_len / 1024u));   /* duplicate of the last block */
         return;
     }
     if (blk != s->expect) {
@@ -481,10 +494,12 @@ static void xrx_frame(sim_t *s)
     }
     s->expect++;
     uint32_t d = (s->pause_block == b) ? s->pause_ms : 2u;
-    ack(s, d);
+    ack(s, d, b);
     if (s->dup_ack_block == b && !s->dup_done) {
         s->dup_done = true;
+        s_next_tag = b;
         emit_byte(s, FL_ACK, 0);
+        s_next_tag = 0;
     }
 }
 
@@ -730,6 +745,10 @@ static void advance(sim_t *s, uint64_t until)
 static int io_write(void *ctx, const uint8_t *data, size_t len)
 {
     sim_t *s = ctx;
+    s->host_bytes += (uint32_t)len;
+    if (s->host_baud == s->loader_baud && len >= 8 && memcmp(data, "VERSIONA", 8) == 0) {
+        s->versiona_at_loader_baud++;
+    }
     advance(s, s->now_us);
     advance(s, s->now_us + wire_us(len, s->host_baud));
     rx_bytes(s, data, len);
@@ -739,6 +758,9 @@ static int io_write(void *ctx, const uint8_t *data, size_t len)
 static uint8_t deliver(sim_t *s, size_t k)
 {
     if (s_tx_baud[k] == s->host_baud) {
+        if (s_tx_tag[k] != 0) {
+            s->ack_delivered_block = s_tx_tag[k];
+        }
         return s->out_b[k];
     }
     static const uint8_t g[4] = { 0x00, 0xF8, 0x80, 0x78 };
@@ -760,6 +782,18 @@ static size_t io_read(void *ctx, uint8_t *buf, size_t cap, uint32_t timeout_ms)
             s->out_len--;
         }
         if (n > 0) {
+            /* As the target's UART driver (RX timeout of 10 symbols): bytes
+             * that follow each other closer than that reach the reader
+             * together, so back-to-back bytes are never split across reads. */
+            uint64_t tout = wire_us(10, s->host_baud);
+            uint64_t last = s->now_us;
+            while (n < cap && s->out_len > 0 && s->out_due[s->out_head] <= last + tout) {
+                last = s->out_due[s->out_head];
+                advance(s, last);
+                buf[n++] = deliver(s, s->out_head);
+                s->out_head = (s->out_head + 1u) % SIM_OUT_MAX;
+                s->out_len--;
+            }
             return n;
         }
         uint64_t next = s->out_len > 0 ? s->out_due[s->out_head] : UINT64_MAX;
@@ -848,6 +882,7 @@ void sim_init(sim_t *s)
     s->post_success_ms = 15000;
     s->next_periodic_us = US(500);
     s_garbage_i = 0;
+    s_next_tag = 0;
 }
 
 void sim_free(sim_t *s)

@@ -1221,8 +1221,12 @@ static esp_err_t h_wifi_put(web_req_t *r)
         /* With credentials stored before, the new ones are pending: tried, and dropped back from if they get no IP. */
         trial = network_get_status(&s_net) == ESP_OK && s_net.cred_pending &&
                 strncmp(s_net.pending_ssid, in.ssid, sizeof(s_net.pending_ssid)) == 0;
+#if CONFIG_NETWORK_QEMU_ETHERNET
+        ESP_LOGI(TAG, "Wi-Fi credentials changed: stored, not used (QEMU build: the emulated Ethernet stays the link)");
+#else
         ESP_LOGI(TAG, "Wi-Fi credentials changed: %s",
                  trial ? "tried now, the previous ones come back unless they get an IP" : "the station connects with them");
+#endif
     }
     char body[80];
     snprintf(body, sizeof(body), "{\"accepted\":true,\"persisted\":%s,\"trial\":%s}", persist ? "true" : "false",

@@ -163,7 +163,7 @@ esp_err_t diag_journal_append(diag_event_t kind, int32_t a, int32_t b)
     portENTER_CRITICAL_SAFE(&s_qlock);
     if (!s_rate_ready) {
         dj_rate_init(&s_rate, CONFIG_DIAG_JOURNAL_MIN_INTERVAL_MS, CONFIG_DIAG_JOURNAL_BUDGET_PER_H,
-                     1u << DIAG_EV_LADDER_STEP);
+                     (1u << DIAG_EV_LADDER_STEP) | (1u << DIAG_EV_GNSS_FLASH));
         s_rate_ready = true;
     }
     if (s_qcount >= QUEUE_LEN) {

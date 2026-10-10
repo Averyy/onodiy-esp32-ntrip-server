@@ -49,6 +49,14 @@ flash_journal_result_t flash_journal_decode(const uint8_t *buf, size_t len, um98
 /** True if state and phase hold known values and phase is a main (session-order) state. */
 bool flash_journal_valid(const um98x_flash_journal_t *j);
 
+/**
+ * The state recovery acts on: an entry or menu state (prepared to
+ * menu-2-sent) with transfers > 0 is a post-PoNR re-entry and counts as
+ * "failed" (the receiver's flash was already modified); any other state is
+ * itself.
+ */
+uint8_t flash_journal_effective_state(const um98x_flash_journal_t *j);
+
 /** See um98x_flash_journal_needs_race(). */
 bool flash_journal_needs_race(const um98x_flash_journal_t *j, bool receiver_was_reset);
 
@@ -77,13 +85,13 @@ typedef enum {
     FL_PLAN_APP_CHECK,         /**< APP-CHECK, re-apply, close */
     FL_PLAN_LOADER_PEEK,       /**< reset-sent / menu-2-sent, ESP-only: listen 3 s at the loader baud (start bytes -> CAN CAN), one "\r\n"; prompt -> "6"; else APP-CHECK */
     FL_PLAN_RACE_LEAVE,        /**< menu-2-sent, power-on: RACE; prompt -> "6"; then APP-CHECK */
-    FL_PLAN_LISTEN_TRANSFER,   /**< transferring / failed, ESP-only: listen-only at the loader baud (T2; 10 s for failed); prompt -> retry within the caps */
+    FL_PLAN_LISTEN_TRANSFER,   /**< transferring / failed, ESP-only: listen-only at the loader baud (T2; 10 s for failed, also an entry state after a transfer); prompt -> retry within the caps */
     FL_PLAN_RACE_RETRY,        /**< transferring / failed / eot-sent, power-on: RACE; prompt -> retry within the caps; else APP-CHECK */
     FL_PLAN_LISTEN_EOT,        /**< eot-sent, ESP-only: listen up to T2 with the outcome table */
     FL_PLAN_VERIFY_CHECK,      /**< verifying, ESP-only: APP-CHECK; else the prompt means "the application does not start" */
     FL_PLAN_RACE_VERIFY,       /**< verifying, power-on: RACE; prompt -> "6" and the exit checks; else APP-CHECK */
-    FL_PLAN_RACE_STOP,         /**< needs-user, power-on, past the menu: RACE, stop at the prompt, wait for the user */
-    FL_PLAN_CHECK_WAIT,        /**< needs-user, power-on, before the menu: APP-CHECK, then wait for the user */
+    FL_PLAN_RACE_STOP,         /**< needs-user, power-on, past the menu or after a transfer: RACE, stop at the prompt, wait for the user */
+    FL_PLAN_CHECK_WAIT,        /**< needs-user, power-on, before the menu and no transfer: APP-CHECK, then wait for the user */
 } fl_plan_t;
 
 fl_plan_t flash_journal_plan(fj_read_t read, const um98x_flash_journal_t *j, bool receiver_was_reset);

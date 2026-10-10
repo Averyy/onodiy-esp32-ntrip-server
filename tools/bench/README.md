@@ -158,13 +158,17 @@ checks that and nothing else. It asks `VERSIONA` at the application baud
 (nothing more if there is no answer), restarts the receiver with
 `\r\nreset\r\nreset\r\n`, switches to `--baud` (460800 by default) and
 streams the stop key `T@` in bursts (8 bytes at 115200, 32 at 460800, 64 at
-921600) until the prompt `boot>`; it gives up 30 s after the restart, or
-earlier when data still arrives 8 s after it without the prompt or the
-application's restart banner shows up instead. At the menu it sends nothing
-until the port is quiet, then `\r\n` (clears stop-key bytes left in the
-menu's input line) and menu item `6` (soft reset cpu), waits for
-`resetting the cpu`, and asks `VERSIONA` at the application baud until the
-application answers with the same build.
+921600), each one after the previous one has left the port plus about 5 ms
+(the station firmware's cadence; reads never hold a burst back), until the
+prompt `boot>`; it gives up 30 s after the restart, or earlier when data
+still arrives 8 s after it without the prompt or the application's restart
+banner shows up instead. At the menu it sends nothing until the port is
+quiet, then `\r\n` (clears stop-key bytes left in the menu's input line;
+a bootloader that prints its menu only on a key press prints it now) and
+menu item `6` (soft reset cpu) only if the printed menu numbers the soft
+reset as 6, waits for `resetting the cpu`, and asks `VERSIONA` at the
+application baud until the application answers; the build must be the one
+it had.
 
 It never selects any other menu item, never sends data frames, erase or
 write commands, `FRESET` or `SAVECONFIG`: every write passes the allow-list
@@ -173,8 +177,13 @@ and out with its UTC time and the port baud), `boot-menu.txt` (the
 bootloader's banner, settings and menu, verbatim), `loader-rx.bin` and the
 summary. When the prompt does not come, it says so, stops, and checks only
 that the application is back; when the application does not come back it
-tells you to power-cycle the receiver. Exit status 0 = menu reached and
-application back, 1 = no menu, 2 = application not back, 3 = not started.
+tells you to power-cycle the receiver. When the menu cannot be confirmed
+(no readable line names the soft reset, or it is not item 6) it sends
+nothing more and tells you to power-cycle the receiver. Exit status 0 =
+menu reached and the application back with the same build, 1 = no menu,
+2 = application not back (or stopped at an unconfirmed menu), 3 = not
+started, 4 = the application came back with another firmware. Only 0 lets
+the next bench step go on.
 
 ### `rtcm_inspect.py`: what is in the stream
 

@@ -27,6 +27,11 @@ web_journal_t web_journal_view(const station_status_t *st, bool safe_mode)
     if (!st->flash_journal_readable) {
         return WEB_JOURNAL_UNREADABLE;
     }
+    if (st->flash_session_running && !safe_mode) {
+        /* A retry, restart or recovery was accepted: its record still says
+         * "needs user" until the session's first write. */
+        return WEB_JOURNAL_RUNNING;
+    }
     if (safe_mode || st->flash_journal.state == UM98X_JOURNAL_NEEDS_USER || st->flash.phase == UM98X_FLASH_NEEDS_USER) {
         return WEB_JOURNAL_WAITING;
     }
@@ -1964,6 +1969,26 @@ void web_build_error(wj_t *w, web_err_t err, const char *message, const char *fi
     }
     wj_obj_close(w);
     wj_obj_close(w);
+}
+
+void web_flash_progress_msg(const um98x_flash_progress_t *p, bool final, bool check_only,
+                            const station_flash_last_t *last, web_progress_t *out)
+{
+    const char *result = NULL;
+    if (final) {
+        result = last != NULL ? web_flash_outcome_result(last->outcome) : (p->phase == UM98X_FLASH_DONE ? "ok" : "failed");
+    }
+    bool ok = final && strcmp(result, "ok") == 0;
+    memset(out, 0, sizeof(*out));
+    out->job = check_only ? "gnss_check" : "gnss_flash";
+    out->phase = check_only && !final ? "checking" : web_flash_phase_name(p->phase);
+    out->pct = p->bytes_total > 0 && !check_only ? (int)((uint64_t)p->bytes_sent * 100u / p->bytes_total) : -1;
+    out->bytes = -1;
+    out->done = final;
+    out->result = result;
+    out->err = final && !ok ? (esp_err_t)p->last_err : ESP_OK;
+    out->flash = check_only ? NULL : p;
+    out->last = final ? last : NULL;
 }
 
 void web_build_progress(wj_t *w, const web_progress_t *p)

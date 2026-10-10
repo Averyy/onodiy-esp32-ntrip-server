@@ -30,6 +30,7 @@ static bool s_fail_always;
 static bool s_copy_ok;
 static bool s_cancel;
 static unsigned s_prepares;
+static bool s_prepare_ok;
 
 static bool j_put(void *ctx, const um98x_flash_journal_t *j)
 {
@@ -46,10 +47,11 @@ static bool j_put(void *ctx, const um98x_flash_journal_t *j)
     return true;
 }
 
+/* As on the target: without a RAM copy there is nothing whose digest could match. */
 static bool copy_ok(void *ctx)
 {
     (void)ctx;
-    return s_copy_ok;
+    return s_copy_ok && s_sess.pkg != NULL;
 }
 
 static bool cancelled(void *ctx)
@@ -62,6 +64,9 @@ static bool recovery_prepare(void *ctx)
 {
     (void)ctx;
     s_prepares++;
+    if (!s_prepare_ok) {
+        return false;   /* the pinned package fails the recovery gate: no copy */
+    }
     s_sess.pkg = s_pkg;
     s_sess.pkg_len = sizeof(s_pkg);
     return true;
@@ -112,6 +117,7 @@ static void setup(void)
     s_copy_ok = true;
     s_cancel = false;
     s_prepares = 0;
+    s_prepare_ok = true;
     journal_fields(&s_sess.j);
     fl_sess_hooks_t h = hooks();
     fl_sess_init(&s_sess, &s_io, s_pkg, sizeof(s_pkg), 460800, false, &h);
@@ -522,6 +528,20 @@ TEST_CASE("session: leaving the loader: missing reset text, a second \"6\", an a
     sim_free(&s_sim);
 }
 
+TEST_CASE("session: after the update only another baud's pattern answers: silent, no version query at the loader baud", "[flash]")
+{
+    /* The new application talks at a baud none of the scan's candidates
+     * decodes: at the loader baud that is the mismatch pattern, which is not
+     * an application, so nothing is sent there. */
+    setup();
+    s_sim.app_baud_after = 230400;
+    fl_sess_result_t r = fl_sess_run(&s_sess);
+    TEST_ASSERT_EQUAL_MESSAGE(FL_SESS_NEEDS_USER, r, s_sess.out.reason);
+    TEST_ASSERT_EQUAL(UM98X_FLASH_FAIL_NO_ANSWER, s_sess.out.failure);
+    TEST_ASSERT_EQUAL_UINT32(0, s_sim.versiona_at_loader_baud);
+    sim_free(&s_sim);
+}
+
 TEST_CASE("session: journal write failures before and at the point of no return", "[flash]")
 {
     /* The first write: nothing is sent at all. */
@@ -630,6 +650,10 @@ TEST_CASE("recovery table: every journal state by reset kind", "[flash]")
         { UM98X_JOURNAL_NEEDS_USER, UM98X_JOURNAL_TRANSFERRING, 1, FL_PLAN_WAIT_USER, FL_PLAN_RACE_STOP },
         { UM98X_JOURNAL_NEEDS_USER, UM98X_JOURNAL_MENU2_SENT, 0, FL_PLAN_WAIT_USER, FL_PLAN_RACE_STOP },
         { UM98X_JOURNAL_NEEDS_USER, UM98X_JOURNAL_BAUD_CHANGING, 0, FL_PLAN_WAIT_USER, FL_PLAN_CHECK_WAIT },
+        { UM98X_JOURNAL_NEEDS_USER, UM98X_JOURNAL_RESET_SENT, 0, FL_PLAN_WAIT_USER, FL_PLAN_CHECK_WAIT },
+        /* A post-PoNR re-entry that stopped before the menu: the flash was modified, the race is the way in. */
+        { UM98X_JOURNAL_NEEDS_USER, UM98X_JOURNAL_RESET_SENT, 1, FL_PLAN_WAIT_USER, FL_PLAN_RACE_STOP },
+        { UM98X_JOURNAL_NEEDS_USER, UM98X_JOURNAL_PREPARED, 2, FL_PLAN_WAIT_USER, FL_PLAN_RACE_STOP },
         /* A retry after the point of no return records entry and menu states again: still past it. */
         { UM98X_JOURNAL_MENU2_SENT, UM98X_JOURNAL_MENU2_SENT, 1, FL_PLAN_LISTEN_TRANSFER, FL_PLAN_RACE_RETRY },
         { UM98X_JOURNAL_RESET_SENT, UM98X_JOURNAL_RESET_SENT, 2, FL_PLAN_LISTEN_TRANSFER, FL_PLAN_RACE_RETRY },
@@ -681,6 +705,39 @@ TEST_CASE("recovery: a loader still waiting for a transfer: CAN CAN, prompt, sam
     TEST_ASSERT_EQUAL_UINT32(1, s_prepares);   /* the recovery gate ran before the transfer */
     TEST_ASSERT_EQUAL_UINT8(2, s_sess.j.transfers);
     TEST_ASSERT_TRUE(s_sim.rx_cans >= 2);
+    assert_image();
+    assert_never_dangerous();
+    sim_free(&s_sim);
+}
+
+TEST_CASE("recovery: the effective state of an entry state after a transfer is failed", "[flash]")
+{
+    um98x_flash_journal_t j = journal_in(UM98X_JOURNAL_RESET_SENT, UM98X_JOURNAL_RESET_SENT, 1);
+    TEST_ASSERT_EQUAL(UM98X_JOURNAL_FAILED, flash_journal_effective_state(&j));
+    j = journal_in(UM98X_JOURNAL_RESET_SENT, UM98X_JOURNAL_RESET_SENT, 0);
+    TEST_ASSERT_EQUAL(UM98X_JOURNAL_RESET_SENT, flash_journal_effective_state(&j));
+    j = journal_in(UM98X_JOURNAL_TRANSFERRING, UM98X_JOURNAL_TRANSFERRING, 1);
+    TEST_ASSERT_EQUAL(UM98X_JOURNAL_TRANSFERRING, flash_journal_effective_state(&j));
+    j = journal_in(UM98X_JOURNAL_NEEDS_USER, UM98X_JOURNAL_RESET_SENT, 1);
+    TEST_ASSERT_EQUAL(UM98X_JOURNAL_NEEDS_USER, flash_journal_effective_state(&j));
+}
+
+TEST_CASE("recovery: an ESP32 reset during a re-entry after a transfer listens 10 s, not T2", "[flash]")
+{
+    /* The receiver sits silent at its prompt (the re-entry reached it); the
+     * journal says reset-sent with a transfer behind it. */
+    setup_recovery(UM98X_JOURNAL_RESET_SENT, UM98X_JOURNAL_RESET_SENT, 1, false);
+    s_sess.j.failure_class = UM98X_FLASH_FAIL_TRANSPORT;
+    TEST_ASSERT_EQUAL(FL_PLAN_LISTEN_TRANSFER, flash_journal_plan(FJ_OPEN, &s_sess.j, false));
+    sim_at_prompt(&s_sim, 460800);
+    s_sim.host_baud = 115200;
+    uint32_t t0 = sim_now_ms(&s_sim);
+    fl_sess_result_t r = fl_sess_recover(&s_sess, FL_PLAN_LISTEN_TRANSFER, false);
+    TEST_ASSERT_EQUAL_MESSAGE(FL_SESS_DONE, r, s_sess.out.reason);
+    /* 10 s of listening, the nudge, then the retry (transfer, commit, exit): far below T2. */
+    TEST_ASSERT_TRUE(sim_now_ms(&s_sim) - t0 < 120000u);
+    TEST_ASSERT_EQUAL_UINT(1, s_prepares);
+    TEST_ASSERT_EQUAL_UINT8(2, s_sess.j.transfers);
     assert_image();
     assert_never_dangerous();
     sim_free(&s_sim);
@@ -784,6 +841,113 @@ TEST_CASE("user choices: retry at the prompt after the point of no return, and r
     s_sim.flashed = true;
     TEST_ASSERT_EQUAL(FL_SESS_DONE, fl_sess_user_restart(&s_sess));
     TEST_ASSERT_EQUAL_UINT32(19152, s_sess.out.ver.build);
+    sim_free(&s_sim);
+}
+
+TEST_CASE("user choices: retry after the point of no return with the application answering: gate, then entry", "[flash]")
+{
+    /* Needs-user after a failed transfer, and the receiver went back to its
+     * application. The retry starts without a RAM copy: the recovery gate
+     * must run before the menu, or the copy check stops the session at boot>. */
+    setup_recovery(UM98X_JOURNAL_NEEDS_USER, UM98X_JOURNAL_TRANSFERRING, 1, false);
+    s_sess.j.failure_class = UM98X_FLASH_FAIL_TRANSPORT;
+    s_sim.st = SIM_APP;
+    fl_sess_result_t r = fl_sess_user_retry(&s_sess);
+    TEST_ASSERT_EQUAL_MESSAGE(FL_SESS_DONE, r, s_sess.out.reason);
+    TEST_ASSERT_EQUAL_UINT(1, s_prepares);
+    TEST_ASSERT_EQUAL_UINT8(2, s_sess.j.transfers);
+    TEST_ASSERT_EQUAL_UINT32(1, s_sim.rx_resets);
+    TEST_ASSERT_EQUAL_UINT32(19152, s_sess.out.ver.build);
+    assert_never_dangerous();
+    assert_image();
+    sim_free(&s_sim);
+}
+
+TEST_CASE("user choices: retry before the point of no return, at the prompt and from the application", "[flash]")
+{
+    /* At the loader prompt (a session that stopped between the menu and the first frame). */
+    setup_recovery(UM98X_JOURNAL_NEEDS_USER, UM98X_JOURNAL_MENU2_SENT, 0, false);
+    s_sess.j.failure_class = UM98X_FLASH_FAIL_NO_ANSWER;
+    sim_at_prompt(&s_sim, 460800);
+    s_sim.host_baud = 115200;
+    fl_sess_result_t r = fl_sess_user_retry(&s_sess);
+    TEST_ASSERT_EQUAL_MESSAGE(FL_SESS_DONE, r, s_sess.out.reason);
+    TEST_ASSERT_EQUAL_UINT(1, s_prepares);
+    TEST_ASSERT_EQUAL_UINT8(1, s_sess.j.transfers);
+    TEST_ASSERT_EQUAL_UINT32(1, s_sim.rx_menu[2]);
+    assert_never_dangerous();
+    assert_image();
+    sim_free(&s_sim);
+
+    /* The application answers: a full loader entry. */
+    setup_recovery(UM98X_JOURNAL_NEEDS_USER, UM98X_JOURNAL_RESET_SENT, 0, false);
+    s_sess.j.failure_class = UM98X_FLASH_FAIL_ENTRY;
+    s_sim.st = SIM_APP;
+    r = fl_sess_user_retry(&s_sess);
+    TEST_ASSERT_EQUAL_MESSAGE(FL_SESS_DONE, r, s_sess.out.reason);
+    TEST_ASSERT_EQUAL_UINT(1, s_prepares);
+    TEST_ASSERT_EQUAL_UINT8(1, s_sess.j.transfers);
+    TEST_ASSERT_EQUAL_UINT32(1, s_sim.rx_resets);
+    assert_never_dangerous();
+    assert_image();
+    sim_free(&s_sim);
+}
+
+TEST_CASE("user choices: a retry whose package fails the recovery gate sends nothing", "[flash]")
+{
+    setup_recovery(UM98X_JOURNAL_NEEDS_USER, UM98X_JOURNAL_TRANSFERRING, 1, false);
+    s_sess.j.failure_class = UM98X_FLASH_FAIL_TRANSPORT;
+    s_prepare_ok = false;
+    s_sim.st = SIM_APP;
+    TEST_ASSERT_EQUAL(FL_SESS_NEEDS_USER, fl_sess_user_retry(&s_sess));
+    TEST_ASSERT_EQUAL_UINT(1, s_prepares);
+    TEST_ASSERT_EQUAL_UINT32(0, s_sim.host_bytes);
+    TEST_ASSERT_EQUAL(UM98X_FLASH_FAIL_TRANSPORT, s_sess.j.failure_class);   /* not turned into a package fault */
+    TEST_ASSERT_EQUAL(UM98X_JOURNAL_NEEDS_USER, s_sess.j.state);
+    sim_free(&s_sim);
+}
+
+TEST_CASE("fresh prompt: a prompt that answers \"\\r\\n\", none, or the receiver gone", "[flash]")
+{
+    static fl_lis_t lis;
+    setup();
+    sim_at_prompt(&s_sim, 460800);
+    fl_lis_init(&lis, &s_io, 460800);
+    bool io_failed = true;
+    TEST_ASSERT_EQUAL(FL_PROMPT_SEEN, fl_fresh_prompt(&lis, &io_failed));
+    TEST_ASSERT_FALSE(io_failed);
+    sim_free(&s_sim);
+
+    /* The loader does not answer an empty line (its menu timed out, or the
+     * stop key left it in another input state): no prompt, and nothing but
+     * the one "\r\n" was sent. */
+    setup();
+    sim_at_prompt(&s_sim, 460800);
+    s_sim.no_prompt_on_empty = true;
+    fl_lis_init(&lis, &s_io, 460800);
+    TEST_ASSERT_EQUAL(FL_PROMPT_TIMEOUT, fl_fresh_prompt(&lis, NULL));
+    TEST_ASSERT_EQUAL_UINT32(2, s_sim.host_bytes);
+    TEST_ASSERT_EQUAL_UINT32(0, s_sim.rx_menu[2]);
+    sim_free(&s_sim);
+
+    /* The application talks at the loader baud: it left the loader. */
+    setup();
+    s_sim.com1_baud = 460800;
+    s_sim.host_baud = 460800;
+    fl_lis_init(&lis, &s_io, 460800);
+    TEST_ASSERT_EQUAL(FL_PROMPT_LEFT, fl_fresh_prompt(&lis, NULL));
+    sim_free(&s_sim);
+}
+
+TEST_CASE("session: no fresh prompt before menu item 2: the item is never sent, \"6\" ends the attempt", "[flash]")
+{
+    setup();
+    s_sim.no_prompt_on_empty = true;
+    TEST_ASSERT_EQUAL(FL_SESS_ABORTED, fl_sess_run(&s_sess));
+    TEST_ASSERT_EQUAL_UINT32(0, s_sim.rx_menu[2]);
+    TEST_ASSERT_EQUAL_UINT32(0, s_sim.rx_frames);
+    TEST_ASSERT_TRUE(s_sim.rx_six >= 1);
+    assert_never_dangerous();
     sim_free(&s_sim);
 }
 

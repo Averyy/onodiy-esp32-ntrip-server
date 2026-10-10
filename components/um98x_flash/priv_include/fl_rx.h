@@ -20,14 +20,18 @@
  *    A capture of only CR, LF, TAB and spaces carries no text and is
  *    reported as junk.
  *  - 'C' counts as a start or retransmit byte only if no other printable
- *    byte follows within FL_LONE_C_MS (a run of 'C's alone counts once);
- *    'C' followed by printable bytes starts a text line.
+ *    byte follows within FL_LONE_C_MS of it (a run of 'C's alone in that
+ *    window counts once; the window is not extended by further 'C's, so a
+ *    receiver repeating its start byte faster still gives one event per
+ *    window); 'C' followed by printable bytes starts a text line.
  *  - CAN followed by a second CAN within FL_CAN_PAIR_MS: the receiver
  *    cancelled. A lone CAN is ignored and the byte after it is processed
  *    normally (never swallowed).
  *  - Unclassified bytes are never discarded. The only drop is
  *    fl_rx_drop_stale(): single control bytes already received before a
- *    resend (a stale ACK of an earlier try must not count for the new one).
+ *    frame is written (a stale ACK of an earlier try must not count for the
+ *    new one); fl_rx_poll() first moves what the UART driver already holds
+ *    into the queue, so "already received" includes bytes not read yet.
  *  - Baud-mismatch pattern: FL_MISMATCH_BYTES bytes from {0x00, 0x78, 0x80,
  *    0xF8} and/or UART framing errors since the last ACK or NAK: what a
  *    115200 talker looks like at 460800.
@@ -129,8 +133,15 @@ void fl_rx_init(fl_rx_t *rx, const fl_io_t *io);
 void fl_rx_push(fl_rx_t *rx, const uint8_t *data, size_t len);
 /** Next event, waiting until `deadline` (lookahead of a 'C', a CAN or a text line may run past it, bounded). */
 fl_ev_t fl_rx_next(fl_rx_t *rx, uint32_t deadline);
-/** Before a (re)send: drop leading single control bytes already received (ACK, NAK, lone 'C'). */
-void fl_rx_drop_stale(fl_rx_t *rx);
+/** Move every byte the io already holds into the queue, without waiting (non-blocking reads). */
+void fl_rx_poll(fl_rx_t *rx);
+/**
+ * Before a frame is written: drop leading single control bytes already
+ * received (ACK, NAK, lone 'C'). A run of 'C's that ends the queue is kept
+ * (text may follow) unless c_run_at_end: before frame 1 every further start
+ * byte is stale.
+ */
+void fl_rx_drop_stale(fl_rx_t *rx, bool c_run_at_end);
 /** Start counting the mismatch pattern afresh. */
 void fl_rx_reset_mismatch(fl_rx_t *rx);
 /** True if the captured line contains s (NUL-safe). */

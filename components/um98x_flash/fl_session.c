@@ -196,6 +196,14 @@ static bool transfers_left(const fl_sess_t *s)
     return s->j.transfers < transfer_cap(s);
 }
 
+/* The RAM copy a transfer sends: this run's, or the pinned package checked
+ * again into RAM through the recovery gate (a user retry and a recovery run
+ * start without one). */
+static bool copy_ready(fl_sess_t *s)
+{
+    return s->pkg != NULL || (s->hooks.recovery_prepare != NULL && s->hooks.recovery_prepare(s->hooks.ctx));
+}
+
 /* Retry from the loader prompt with the same package (recovery gate when the
  * RAM copy is not this run's). */
 static int retry_from_prompt(fl_sess_t *s)
@@ -205,7 +213,7 @@ static int retry_from_prompt(fl_sess_t *s)
                           "%u transfers under this session: another one needs your confirmation",
                           (unsigned)s->j.transfers);
     }
-    if (s->pkg == NULL && (s->hooks.recovery_prepare == NULL || !s->hooks.recovery_prepare(s->hooks.ctx))) {
+    if (!copy_ready(s)) {
         return needs_user(s, s->j.failure_class, "the staged package is not available for a retry");
     }
     fl_notef(s->io, "sending the same package again (transfer %u of at most %u)", (unsigned)(s->j.transfers + 1u),
@@ -241,7 +249,7 @@ static int post_fail(fl_sess_t *s, uint8_t failure, bool retryable, bool left, c
         if (!model_ok(s, &v) || !retryable || !transfers_left(s) || s->j.entry_attempts >= FL_ENTRY_ATTEMPTS) {
             return needs_user(s, failure, "%s; the receiver runs its application again (%s)", why, v.firmware);
         }
-        if (s->pkg == NULL && (s->hooks.recovery_prepare == NULL || !s->hooks.recovery_prepare(s->hooks.ctx))) {
+        if (!copy_ready(s)) {
             return needs_user(s, failure, "%s; the staged package is not available for a retry", why);
         }
         s->j.entry_attempts++;
@@ -668,6 +676,14 @@ fl_sess_result_t fl_sess_user_retry(fl_sess_t *s)
     uint32_t boot = s->j.boot_baud != 0 ? s->j.boot_baud : s->loader_baud;
     s->j.boot_baud = boot;
     progress(s, UM98X_FLASH_ENTERING);
+    /* The retry has no RAM copy of its own: the pinned package goes through
+     * the recovery gate first, before anything is sent, so every path below
+     * (the prompt or the application, before or after the point of no
+     * return) reaches the menu with the copy it sends. */
+    if (!copy_ready(s)) {
+        return (fl_sess_result_t)needs_user(s, s->j.failure_class,
+                                            "the staged package is not available for a retry; nothing was sent");
+    }
     /* Where is the receiver? The loader prompt first (listen, one "\r\n"). */
     if (fl_lis_set_baud(&s->lis, boot) != 0) {
         return (fl_sess_result_t)needs_user(s, UM98X_FLASH_FAIL_TRANSPORT, "link error");
@@ -845,7 +861,10 @@ fl_sess_result_t fl_sess_recover(fl_sess_t *s, fl_plan_t plan, bool race_prompt)
         if (fl_lis_set_baud(&s->lis, boot) != 0) {
             return (fl_sess_result_t)needs_user(s, UM98X_FLASH_FAIL_TRANSPORT, "link error");
         }
-        uint32_t ms = s->j.state == UM98X_JOURNAL_FAILED ? FL_APPCHECK_MS : FL_T2_MS;
+        /* T2 only while a transfer may still run; a failed one (also an
+         * entry state after a transfer: a re-entry that was cut short) left
+         * the receiver out of the transfer already. */
+        uint32_t ms = flash_journal_effective_state(&s->j) == UM98X_JOURNAL_FAILED ? FL_APPCHECK_MS : FL_T2_MS;
         fl_prompt_result_t pr = loader_listen(s, ms, &sb);
         if (pr == FL_PROMPT_TIMEOUT) {
             uint64_t m = fl_lis_mark(&s->lis);

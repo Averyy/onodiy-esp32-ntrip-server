@@ -68,7 +68,10 @@
  *    reported as not written (ESP_ERR_INVALID_STATE), so a caller that
  *    accumulates deltas keeps them pending. Ladder step records are exempt
  *    from both: one step's result and the next step's start fall in the
- *    same second, and the ladder bounds their rate itself.
+ *    same second, and the ladder bounds their rate itself. Receiver-flash
+ *    results are exempt too: one per session the user started, and the
+ *    station writes it before it closes the session's own record, so a
+ *    refused one would leave no trace of how the update ended.
  *    Records carry the uptime and, once a trusted clock is known
  *    (diag_set_utc, fed by the availability ledger), the UTC time.
  *    The journal is a timeline, not the boot history: the last 16 boots are
@@ -383,7 +386,8 @@ esp_err_t diag_set_log_level(const char *tag, esp_log_level_t level);
  * task within milliseconds). Not from an interrupt handler.
  * @return ESP_OK when accepted; ESP_ERR_INVALID_STATE when a rate limit (per
  *         kind or the hourly budget) refused it (nothing written: keep the
- *         data and retry later; never for DIAG_EV_LADDER_STEP);
+ *         data and retry later; never for DIAG_EV_LADDER_STEP or
+ *         DIAG_EV_GNSS_FLASH);
  *         ESP_ERR_NO_MEM when the write queue is full; ESP_ERR_NOT_FOUND
  *         when there is no usable journal partition.
  */

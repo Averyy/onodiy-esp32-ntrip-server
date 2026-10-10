@@ -25,11 +25,18 @@ What it does:
      (plain text no receiver would send: no '$', '#', RTCM preamble or loader
      prompt in it) reach the firmware, which then reports "bytes but nothing
      valid" instead of "no bytes at all" when detection gives up;
-  4. keeps watching until --observe seconds after the start, then stops QEMU
-     and fails on a panic (Guru Meditation, abort(), stack overflow, failed
-     assert) or a reboot loop: a restart without the firmware's own
-     "rebooting (reason N)" line before it is a crash, and more than
-     --max-boots boots in the window is a loop.
+  4. keeps watching until --observe seconds after the start, checks that
+     the web server still answers (GET /, and GET /api/status with the
+     session), then stops QEMU and fails on a panic (Guru Meditation,
+     abort(), stack overflow, failed assert, a task watchdog report) or a
+     reboot loop: a restart without the firmware's own "rebooting (reason
+     N)" line before it is a crash, and more than --max-boots boots in the
+     window is a loop. The emulated watchdogs are live (run.sh leaves them
+     on), so a task that starves IDLE shows up here as on a board.
+
+QEMU always stops: on a normal end, Ctrl-C, SIGTERM or SIGHUP the script
+stops it on the way out, and run.sh gets --seconds as a backstop (observe +
+timeout + a margin) in case this script is killed outright.
 
 Everything lands in --out: the console log, the UART1 capture (raw bytes and
 a timestamped log of both directions), the HTTP answers and summary.txt.
@@ -56,7 +63,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 RUN_SH = ROOT / "tools" / "qemu" / "run.sh"
 
-FATAL = ["Guru Meditation", "abort()", "***ERROR*** A stack overflow", "assert failed:", "Backtrace:"]
+FATAL = ["Guru Meditation", "abort()", "***ERROR*** A stack overflow", "assert failed:", "Backtrace:", "task_wdt:"]
+BACKSTOP_MARGIN_S = 60  # run.sh stops QEMU this long after the latest point the checks need it
 BOOT_MARK = "ESP-ROM:"
 OWN_REBOOT = re.compile(r"lifecycle: rebooting \(reason \d+\)")
 DETECT_RESULT = re.compile(r"um98x_ctl: receiver not found \(([^)]*)\)|um98x_ctl: receiver found at")
@@ -156,6 +164,7 @@ class Smoke:
         self.results: list[tuple[bool, str]] = []
         self.proc: subprocess.Popen | None = None
         self.tap: Uart1Tap | None = None
+        self.cookie: str | None = None
         self.t0 = time.monotonic()
 
     def check(self, ok: bool, text: str) -> bool:
@@ -179,8 +188,9 @@ class Smoke:
         listener.listen(1)
         uart1_port = listener.getsockname()[1]
         self.http_port = self.args.http_port or free_port()
+        backstop = max(self.args.observe, self.args.timeout) + BACKSTOP_MARGIN_S
         cmd = [str(RUN_SH), "--no-build", "--headless", str(self.console), "--uart1", f"connect:{uart1_port}",
-               "--http-port", str(self.http_port)]
+               "--http-port", str(self.http_port), "--seconds", str(backstop)]
         print("starting: " + " ".join(cmd), flush=True)
         self.console.unlink(missing_ok=True)
         self.t0 = time.monotonic()
@@ -247,6 +257,7 @@ class Smoke:
         if not self.check(status == 200 and cookie.startswith("sid=") and len(cookie) > 4,
                           f"POST /api/setup/admin set the first password and a session (HTTP {status})"):
             return
+        self.cookie = cookie
         status, _, body = request(self.http_port, "GET", "/api/status", cookie=cookie, timeout=30)
         (self.out / "api-status.json").write_bytes(body)
         try:
@@ -284,10 +295,25 @@ class Smoke:
             self.check(result.group(1) == "bytes but nothing valid",
                        f"host -> firmware: detection ended \"{result.group(0).split(': ', 1)[1]}\"")
 
+    def still_serving(self) -> None:
+        """At the end of the window: the web server still answers (a hang after the first checks shows here)."""
+        try:
+            status, _, _ = request(self.http_port, "GET", "/", timeout=30)
+            self.check(status == 200, f"GET / still answers 200 after {self.elapsed():.0f} s (HTTP {status})")
+            if self.cookie:
+                status, _, body = request(self.http_port, "GET", "/api/status", cookie=self.cookie, timeout=30)
+                (self.out / "api-status-end.json").write_bytes(body)
+                ok = status == 200 and json.loads(body).get("api") == 1
+                self.check(ok, f"GET /api/status still answers after {self.elapsed():.0f} s (HTTP {status})")
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            self.check(False, f"web server at the end of the window: {type(e).__name__}: {e}")
+
     def observe(self) -> None:
         while self.elapsed() < self.args.observe and self.proc.poll() is None:
             time.sleep(1)
         alive = self.proc.poll() is None
+        if alive:
+            self.still_serving()
         self.stop()
         self.check(alive, f"QEMU still running after {self.args.observe} s")
         text = self.log_text()
@@ -319,7 +345,15 @@ class Smoke:
         return 1 if failed else 0
 
 
+def _exit_on_signal(signum, frame) -> None:
+    # SystemExit unwinds through Smoke.run's `finally`, which stops QEMU: run.sh
+    # and QEMU run in their own session, so the signal never reaches them.
+    raise SystemExit(128 + signum)
+
+
 def main() -> int:
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, _exit_on_signal)
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", default=str(ROOT / "build-qemu" / "smoke"), help="output directory")
     ap.add_argument("--timeout", type=int, default=150, help="seconds for the web server and the UART1 checks")

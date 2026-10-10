@@ -153,6 +153,15 @@ static bool s_journal_read;
  * user like one in "needs user" (RAM only: the record stays as written, so
  * a build that can recover it still finds it unchanged). */
 static bool s_journal_parked;
+/* A receiver update job was accepted (a new update, the user's retry or
+ * restart, the boot-time recovery) and has not ended: the receiver is worked
+ * on, whatever the record says (a retry's record says "needs user" until the
+ * session's first write). The journal does not wait for the user meanwhile.
+ * Under s_lock. */
+static bool s_flash_running;
+/* The user's clear of the journal is under way: no retry or restart may be
+ * accepted until it is done. Under s_lock. */
+static bool s_journal_clearing;
 
 /* RX task -> station task (single writer each). */
 static volatile bool s_prompt_seen;
@@ -284,9 +293,10 @@ static bool journal_open(esp_err_t err)
     return err != ESP_ERR_NOT_FOUND;
 }
 
+/* Under s_lock once the station runs (reads s_journal_parked and s_flash_running). */
 static bool journal_waits_for_user(esp_err_t err, const um98x_flash_journal_t *j)
 {
-    return err != ESP_OK || j->state == UM98X_JOURNAL_NEEDS_USER || s_journal_parked;
+    return !s_flash_running && (err != ESP_OK || j->state == UM98X_JOURNAL_NEEDS_USER || s_journal_parked);
 }
 
 /* Settings unavailable this boot: the journal's state is unknown. Nothing is
@@ -327,6 +337,19 @@ static void lockout_release(void)
         s_inhibit_held = false;
         lifecycle_inhibit_release(s_inhibit);   /* a queued reboot may follow at once */
     }
+}
+
+/* Maintenance that was on before an ESP32 software reset goes on with its
+ * time left (station_init restores it); a power cut ends it, and so does an
+ * open journal. */
+static bool maint_restore_due(uint32_t *left, uint32_t *spent)
+{
+    uint32_t stamp = 0;
+    lifecycle_boot_info_t boot;
+    lifecycle_get_boot_info(&boot);
+    bool power_lost = boot.reset_class == LIFECYCLE_RESET_POWER_ON || boot.reset_class == LIFECYCLE_RESET_BROWNOUT;
+    return !power_lost && !journal_open(s_journal_err) && stn_maint_rtc_read(&s_maint_rtc, &stamp, left, spent) &&
+           lifecycle_rtc_stamp_ok(stamp);
 }
 
 static bool app_update_running(void)
@@ -1047,7 +1070,30 @@ static void post_progress(const um98x_flash_progress_t *p, bool force)
     }
 }
 
+/* The job's last message (STATION_EVENT_FLASH_ENDED): a session, the
+ * user's action on a waiting one, the journal's close or a package check
+ * ended. A FAILED phase posted while a session runs (a transfer that failed
+ * and is tried again) is progress, never this. */
+static void post_ended(const um98x_flash_progress_t *p)
+{
+    s_progress_phase = p->phase;
+    s_progress_post_us = esp_timer_get_time();
+    esp_err_t err = esp_event_post(STATION_EVENT, STATION_EVENT_FLASH_ENDED, p, sizeof(*p), 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "flash end not posted: %s", esp_err_to_name(err));
+    }
+}
+
 static void final_progress(um98x_flash_phase_t phase)
+{
+    um98x_flash_progress_t p;
+    um98x_flash_get_progress(&p);
+    p.phase = phase;
+    post_ended(&p);
+}
+
+/* A phase change of the job itself (it goes on). */
+static void phase_progress(um98x_flash_phase_t phase)
 {
     um98x_flash_progress_t p;
     um98x_flash_get_progress(&p);
@@ -1230,6 +1276,21 @@ static void flash_new(gnss_link_lease_t lease, stn_result_t *r)
     flash_result_common(&res, r);
 }
 
+/* A user action or the boot-time recovery could not run (nothing was sent):
+ * the journal waits for the user, in reduced lockout (the update slot the
+ * action claimed is given back). A recovery that never ran is parked like a
+ * report-only one, so the journal shows as waiting instead of running. */
+static void flash_not_run(uint8_t kind, const char *why)
+{
+    if (kind == STN_FLASH_RECOVER) {
+        portENTER_CRITICAL(&s_lock);
+        s_journal_parked = true;
+        portEXIT_CRITICAL(&s_lock);
+    }
+    lockout_release();
+    flash_last_set(STATION_FLASH_OUT_NEEDS_USER, "not run: %s", why);
+}
+
 /* A journal waiting for the user (or the boot-time recovery): the journal as read. */
 static void flash_action(gnss_link_lease_t lease, uint8_t kind, stn_result_t *r)
 {
@@ -1256,9 +1317,7 @@ static void flash_action(gnss_link_lease_t lease, uint8_t kind, stn_result_t *r)
         break;
     }
     if (err != ESP_OK) {
-        r->flash_end = STN_FLASH_END_NOTHING;   /* nothing sent: the journal still waits */
-        lockout_release();
-        flash_last_set(STATION_FLASH_OUT_NEEDS_USER, "not run: %s", esp_err_to_name(err));
+        flash_not_run(kind, esp_err_to_name(err));   /* nothing sent: the journal still waits */
         return;
     }
     if (res.end == UM98X_FLASH_END_NEEDS_USER && kind == STN_FLASH_RECOVER && res.journal.state != UM98X_JOURNAL_NEEDS_USER) {
@@ -1281,31 +1340,36 @@ static void job_flash(const stn_job_t *job, stn_result_t *r)
             flash_last_set(STATION_FLASH_OUT_NOT_STARTED, "the receiver link was busy (%s)", esp_err_to_name(err));
             flash_forget(true);
         } else {
-            hold_take();
+            char why[48];
+            snprintf(why, sizeof(why), "the receiver link was busy (%s)", esp_err_to_name(err));
+            flash_not_run(job->flash_kind, why);
         }
-        return;
-    }
-    if (job->flash_kind == STN_FLASH_NEW) {
-        flash_new(lease, r);
     } else {
-        flash_action(lease, job->flash_kind, r);
+        if (job->flash_kind == STN_FLASH_NEW) {
+            flash_new(lease, r);
+        } else {
+            flash_action(lease, job->flash_kind, r);
+        }
+        release_lease(&lease, "receiver update");
     }
-    release_lease(&lease, "receiver update");
-    if (r->flash_end == STN_FLASH_END_NEEDS_USER || (job->flash_kind != STN_FLASH_NEW && r->flash_end == STN_FLASH_END_NOTHING)) {
+    bool waits = r->flash_end == STN_FLASH_END_NEEDS_USER ||
+                 (job->flash_kind != STN_FLASH_NEW && r->flash_end == STN_FLASH_END_NOTHING);
+    if (waits) {
         hold_take();   /* the journal waits: listen only */
     }
-    final_progress(r->flash_end == STN_FLASH_END_NEEDS_USER ? UM98X_FLASH_NEEDS_USER
-                   : r->flash_end == STN_FLASH_END_NOTHING   ? UM98X_FLASH_FAILED
-                                                             : UM98X_FLASH_FINISHING);
+    portENTER_CRITICAL(&s_lock);
+    s_flash_running = false;   /* the job is over: a waiting journal may be acted on (or cleared) again */
+    portEXIT_CRITICAL(&s_lock);
+    if (r->flash_end == STN_FLASH_END_REAPPLY || r->flash_end == STN_FLASH_END_REAPPLY_RTCM) {
+        phase_progress(UM98X_FLASH_FINISHING);   /* the re-apply and its check follow; flash_close ends the job */
+    } else {
+        final_progress(waits ? UM98X_FLASH_NEEDS_USER : UM98X_FLASH_FAILED);
+    }
 }
 
 /* STN_NOTE_FLASH_CLOSE: the re-apply was checked (ok) or gave up. */
 static void flash_close(bool reapply_ok)
 {
-    esp_err_t err = um98x_flash_journal_close();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "receiver flash journal not closed: %s", esp_err_to_name(err));
-    }
     uint8_t outcome;
     if (s_after_aborted) {
         outcome = STATION_FLASH_OUT_NOT_DONE;
@@ -1317,6 +1381,19 @@ static void flash_close(bool reapply_ok)
         outcome = STATION_FLASH_OUT_UNEXPECTED;
     }
     uint8_t transfers = s_journal.transfers;
+    /* The outcome reaches the event journal before the session's journal is
+     * closed, and both before the lockout ends (flash_forget, last): a reboot
+     * queued behind the inhibit may follow at once, and the shutdown writes
+     * out what diag has queued, not what waits in this task's queue. */
+    esp_err_t jr = diag_journal_append(DIAG_EV_GNSS_FLASH, outcome, transfers);
+    if (jr != ESP_OK && jr != ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "update outcome not in the event journal yet (%s): queued", esp_err_to_name(jr));
+        journal_push(DIAG_EV_GNSS_FLASH, outcome, transfers);
+    }
+    esp_err_t err = um98x_flash_journal_close();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "receiver flash journal not closed: %s", esp_err_to_name(err));
+    }
     /* The identity the receiver reported is the stored one from now on. */
     if (s_after.valid && settings_is_available()) {
         (void)settings_set_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MODEL, s_after.model);
@@ -1333,8 +1410,7 @@ static void flash_close(bool reapply_ok)
     flash_last_set(outcome, "%s (%s)%s; %s", outcome < sizeof(k_what) / sizeof(k_what[0]) ? k_what[outcome] : "?",
                    s_after.firmware, reapply_ok ? "" : ", the station profile did not come back: check the receiver",
                    s_after_reason);
-    journal_push(DIAG_EV_GNSS_FLASH, outcome, transfers);
-    flash_forget(true);
+    flash_forget(true);   /* releases the lockout last */
     final_progress(outcome == STATION_FLASH_OUT_SUCCESS ? UM98X_FLASH_DONE : UM98X_FLASH_FAILED);
 }
 
@@ -1388,7 +1464,7 @@ static void job_pkg_check(stn_result_t *r)
     memset(&p, 0, sizeof(p));
     p.phase = err == ESP_OK ? UM98X_FLASH_DONE : UM98X_FLASH_FAILED;
     p.bytes_total = req.size;
-    post_progress(&p, true);
+    post_ended(&p);
     r->err = STN_OK;
 }
 
@@ -1924,7 +2000,9 @@ static void station_task(void *arg)
     stn_start(&s_core, &in);
     if (s_recover_wanted) {
         s_recover_wanted = false;
-        (void)stn_request_flash(&s_core, STN_FLASH_RECOVER);
+        if (stn_request_flash(&s_core, STN_FLASH_RECOVER) == STN_OK) {
+            s_flash_running = true;
+        }
     }
     portEXIT_CRITICAL(&s_lock);
     after_step(&in);
@@ -2047,16 +2125,11 @@ esp_err_t station_init(void)
             ESP_LOGW(TAG, "staged receiver package not released: %s", esp_err_to_name(rel));
         }
     }
-    /* Maintenance that was on before an ESP32 software reset goes on with
-     * its time left; a power cut ends it, and so does an open journal. */
-    uint32_t stamp = 0;
     uint32_t left = 0;
     uint32_t spent = 0;
     lifecycle_boot_info_t boot;
     lifecycle_get_boot_info(&boot);
-    bool power_lost = boot.reset_class == LIFECYCLE_RESET_POWER_ON || boot.reset_class == LIFECYCLE_RESET_BROWNOUT;
-    bool restore = !power_lost && !journal_open(s_journal_err) && stn_maint_rtc_read(&s_maint_rtc, &stamp, &left, &spent) &&
-                   lifecycle_rtc_stamp_ok(stamp);
+    bool restore = maint_restore_due(&left, &spent);
     if (!restore) {
         stn_maint_rtc_write(&s_maint_rtc, 0, 0, 0);
     }
@@ -2127,6 +2200,7 @@ esp_err_t station_get_status(station_status_t *out)
     um98x_flash_journal_t journal;
     bool read;
     bool parked;
+    bool running;
     int64_t released;
     uint64_t excluded;
     portENTER_CRITICAL(&s_lock);
@@ -2138,6 +2212,7 @@ esp_err_t station_get_status(station_status_t *out)
     journal = s_journal;
     read = s_journal_read;
     parked = s_journal_parked;
+    running = s_flash_running;
     released = s_lease_release_us;
     excluded = s_rtcm_excluded;
     portEXIT_CRITICAL(&s_lock);
@@ -2179,7 +2254,8 @@ esp_err_t station_get_status(station_status_t *out)
     } else {
         memset(&out->flash_journal, 0, sizeof(out->flash_journal));
     }
-    if (out->flash_journal_open && !journal_unknown(jerr) &&
+    out->flash_session_running = running;
+    if (out->flash_journal_open && !journal_unknown(jerr) && !running &&
         (parked || jerr != ESP_OK || journal.state == UM98X_JOURNAL_NEEDS_USER)) {
         out->flash.phase = UM98X_FLASH_NEEDS_USER;
     }
@@ -2273,6 +2349,7 @@ esp_err_t station_request_flash(const station_flash_request_t *req)
         s_flash_req = *req;
         memset(&s_flash_last, 0, sizeof(s_flash_last));
         s_flash_last_us = INT64_MIN;
+        s_flash_running = true;
     }
     portEXIT_CRITICAL(&s_lock);
     if (rc != STN_OK) {
@@ -2337,10 +2414,8 @@ esp_err_t station_flash_user_action(station_flash_action_t action)
         read_journal();
     }
     esp_err_t jerr;
-    um98x_flash_journal_t journal;
     portENTER_CRITICAL(&s_lock);
     jerr = s_journal_err;
-    journal = s_journal;
     portEXIT_CRITICAL(&s_lock);
 
     if (!journal_open(jerr)) {
@@ -2361,18 +2436,29 @@ esp_err_t station_flash_user_action(station_flash_action_t action)
         }
         return ESP_ERR_NOT_FOUND;
     }
-    bool waiting = journal_waits_for_user(jerr, &journal);
-
     switch (action) {
     case STATION_FLASH_ACTION_CLEAR_JOURNAL: {
-        /* Not while a session or its recovery runs; always in safe mode,
+        /* Not while a session, a user action (queued or running) or the
+         * boot-time recovery works on the receiver; always in safe mode,
          * where nothing runs. Not with settings unavailable: there is
-         * nothing to clear and nothing could be written. */
-        if ((s_inited && !waiting) || journal_unknown(jerr)) {
+         * nothing to clear and nothing could be written. Checked and
+         * claimed in one step: no retry or restart is accepted until the
+         * clear is done. */
+        portENTER_CRITICAL(&s_lock);
+        bool busy = journal_unknown(s_journal_err) || s_journal_clearing || s_flash_running ||
+                    (s_inited && (!journal_waits_for_user(s_journal_err, &s_journal) || stn_flash_pending(&s_core)));
+        if (!busy) {
+            s_journal_clearing = true;
+        }
+        portEXIT_CRITICAL(&s_lock);
+        if (busy) {
             return ESP_ERR_INVALID_STATE;
         }
         esp_err_t err = um98x_flash_journal_close();
         if (err != ESP_OK) {
+            portENTER_CRITICAL(&s_lock);
+            s_journal_clearing = false;
+            portEXIT_CRITICAL(&s_lock);
             return err;
         }
         ESP_LOGW(TAG, "receiver flash journal cleared by the user");
@@ -2390,10 +2476,16 @@ esp_err_t station_flash_user_action(station_flash_action_t action)
             s_journal_cleared = true;   /* the station task leaves FLASH_RECOVERY (now or once it runs) */
             wake();
         }
+        portENTER_CRITICAL(&s_lock);
+        s_journal_clearing = false;
+        portEXIT_CRITICAL(&s_lock);
         return ESP_OK;
     }
     case STATION_FLASH_ACTION_RETRY:
     case STATION_FLASH_ACTION_RESTART_RECEIVER: {
+        portENTER_CRITICAL(&s_lock);
+        bool waiting = !s_journal_clearing && journal_waits_for_user(s_journal_err, &s_journal);
+        portEXIT_CRITICAL(&s_lock);
         if (!s_inited || !s_started || !waiting || jerr != ESP_OK || maint_on() || lifecycle_in_safe_mode()) {
             return ESP_ERR_INVALID_STATE;
         }
@@ -2404,17 +2496,33 @@ esp_err_t station_flash_user_action(station_flash_action_t action)
             return ESP_ERR_NOT_SUPPORTED;   /* this build sends nothing to the receiver's loader */
         }
         /* The session is the receiver's again: one update at a time (an app update may not start meanwhile). */
-        if (!s_update_claimed && lifecycle_update_claim(LIFECYCLE_UPDATE_RECEIVER) != ESP_OK) {
-            return ESP_ERR_INVALID_STATE;
+        bool claimed_now = false;
+        if (!s_update_claimed) {
+            if (lifecycle_update_claim(LIFECYCLE_UPDATE_RECEIVER) != ESP_OK) {
+                return ESP_ERR_INVALID_STATE;
+            }
+            s_update_claimed = true;
+            claimed_now = true;
         }
-        s_update_claimed = true;
         portENTER_CRITICAL(&s_lock);
-        int rc = stn_request_flash(&s_core, action == STATION_FLASH_ACTION_RETRY ? STN_FLASH_RETRY : STN_FLASH_RESTART);
+        int rc = (s_journal_clearing || s_flash_running)
+                     ? STN_E_STATE
+                     : stn_request_flash(&s_core, action == STATION_FLASH_ACTION_RETRY ? STN_FLASH_RETRY
+                                                                                       : STN_FLASH_RESTART);
         if (rc == STN_OK) {
             s_journal_parked = false;
+            s_flash_running = true;   /* from now on the journal is worked on: not cleared, not waiting */
+            /* The last outcome was the stop this action answers: the status
+             * and the job's final message tell how the action ends. */
+            memset(&s_flash_last, 0, sizeof(s_flash_last));
+            s_flash_last_us = INT64_MIN;
         }
         portEXIT_CRITICAL(&s_lock);
         if (rc != STN_OK) {
+            if (claimed_now) {
+                s_update_claimed = false;
+                lifecycle_update_release(LIFECYCLE_UPDATE_RECEIVER);
+            }
             return ESP_ERR_INVALID_STATE;
         }
         ESP_LOGW(TAG, "receiver update: the user's %s", action == STATION_FLASH_ACTION_RETRY ? "retry (same package)"
@@ -2491,6 +2599,18 @@ esp_err_t station_bench_boot_race(uint32_t max_ms, station_bench_res_t *out)
     }
     if (journal_open(s_journal_err)) {
         snprintf(out->line, sizeof(out->line), "REFUSED: a receiver update journal is open");
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* The race runs at the next boot of any kind. After an ESP32 software
+     * reset during receiver maintenance, that maintenance goes on (the user
+     * works on the receiver over its other port, e.g. a PC flashing it):
+     * no stop key and no "6" may reach the receiver then. */
+    uint32_t left = 0;
+    uint32_t spent = 0;
+    if (maint_restore_due(&left, &spent)) {
+        snprintf(out->line, sizeof(out->line),
+                 "REFUSED: receiver maintenance was on before this reset and goes on (%u s left); nothing sent",
+                 (unsigned)left);
         return ESP_ERR_INVALID_STATE;
     }
     esp_err_t err = board_init();

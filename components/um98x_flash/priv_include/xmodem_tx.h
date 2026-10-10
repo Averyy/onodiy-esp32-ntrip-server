@@ -36,8 +36,15 @@
  *   mismatch pattern  the receiver left the loader: stop
  * Limits: XM_BLOCK_TRIES failed tries on one block, XM_TOTAL_TRIES in the
  * transfer, or the per-block time cap: CAN CAN, stop. Before every frame the
- * single control bytes already received are dropped (a stale ACK of an
- * earlier try never counts for the new one).
+ * single control bytes already received are dropped, those still in the
+ * UART driver included (read in without waiting first): a stale ACK of an
+ * earlier try never counts for the new one, and before frame 1 every
+ * further start byte is stale, so a repeated 'C' that arrived while the
+ * journal was written is never taken for a retransmit request. After the
+ * ACK of a block that went out more than once, the answers to its other
+ * copies are dropped for XM_DUP_SETTLE_MS before the next block (a receiver
+ * acknowledges a duplicate block again; that ACK would otherwise count for
+ * the next block and shift every answer after it by one).
  *
  * End: EOT, wait XM_EOT_WAIT_MS. ACK: done. NAK: EOT again (XM_EOT_MAX in
  * total; after the last NAK the post-transfer wait starts anyway). Silence,
@@ -71,6 +78,9 @@ extern "C" {
 #define XM_EOT_WAIT_MS    5000u
 #define XM_EOT_MAX        10u
 #define XM_PAD_FIRST      0x1Au
+/** After the ACK of a block sent more than once: how long the answers to its other copies are dropped (one
+ *  frame at 115200 is 90 ms; PROVISIONAL, to be confirmed on hardware with a duplicate block). */
+#define XM_DUP_SETTLE_MS  250u
 
 typedef enum {
     XM_MODE_NONE = 0,
@@ -121,6 +131,7 @@ typedef struct {
     bool eot_acked;
     uint32_t last_eot_ms;    /**< when the last EOT was written (T1/T2 start) */
     uint32_t handshake_ms;   /**< from the ready line to the start byte */
+    uint32_t late_answers;   /**< answers to earlier copies of a block, dropped after its ACK */
     char text[FL_LINE_MAX + 1];   /**< the line that decided a failure ("" none) */
     uint8_t frame[XM_FRAME_MAX];  /**< work buffer */
 } xm_state_t;

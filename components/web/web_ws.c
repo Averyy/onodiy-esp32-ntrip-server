@@ -744,59 +744,58 @@ void web_ws_progress(const web_progress_t *p)
 }
 
 static portMUX_TYPE s_flash_lock = portMUX_INITIALIZER_UNLOCKED;
-static um98x_flash_progress_t s_flash;
+static um98x_flash_progress_t s_flash;        /* latest progress of the running job */
 static bool s_flash_new;
-static um98x_flash_phase_t s_flash_last_phase = UM98X_FLASH_IDLE;
+static um98x_flash_progress_t s_flash_final;  /* the job's last message, until it went out */
+static bool s_flash_final_new;
 
-void web_ws_note_flash_progress(const um98x_flash_progress_t *p)
+void web_ws_note_flash_progress(const um98x_flash_progress_t *p, bool final)
 {
     portENTER_CRITICAL(&s_flash_lock);
-    s_flash = *p;
-    s_flash_new = true;
+    if (final) {
+        s_flash_final = *p;
+        s_flash_final_new = true;
+        s_flash_new = false;   /* progress before the end is superseded by it */
+    } else {
+        s_flash = *p;
+        s_flash_new = true;
+    }
     portEXIT_CRITICAL(&s_flash_lock);
 }
 
-static void push_flash_progress(void)
+static void push_flash_message(const um98x_flash_progress_t *p, bool final)
 {
-    um98x_flash_progress_t p;
-    portENTER_CRITICAL(&s_flash_lock);
-    bool fresh = s_flash_new;
-    s_flash_new = false;
-    p = s_flash;
-    portEXIT_CRITICAL(&s_flash_lock);
-    if (!fresh) {
-        return;
-    }
-    bool done = p.phase == UM98X_FLASH_DONE || p.phase == UM98X_FLASH_FAILED || p.phase == UM98X_FLASH_NEEDS_USER;
-    if (done && p.phase == s_flash_last_phase) {
-        return;   /* the final message went out already */
-    }
-    s_flash_last_phase = p.phase;
     /* Builds without receiver flashing only check packages: their job is gnss_check. */
     bool check = !station_flash_available();
     /* The final message says how the session (or the check) ended. */
     static EXT_RAM_BSS_ATTR station_status_t s_fst;
     const station_flash_last_t *last = NULL;
-    if (done && station_get_status(&s_fst) == ESP_OK && s_fst.flash_last.outcome != STATION_FLASH_OUT_NONE) {
+    if (final && station_get_status(&s_fst) == ESP_OK && s_fst.flash_last.outcome != STATION_FLASH_OUT_NONE) {
         last = &s_fst.flash_last;
     }
-    const char *result = NULL;
-    if (done) {
-        result = last != NULL ? web_flash_outcome_result(last->outcome) : (p.phase == UM98X_FLASH_DONE ? "ok" : "failed");
-    }
-    bool ok = done && result != NULL && strcmp(result, "ok") == 0;
-    web_progress_t m = {
-        .job = check ? "gnss_check" : "gnss_flash",
-        .phase = check && !done ? "checking" : web_flash_phase_name(p.phase),
-        .pct = p.bytes_total > 0 && !check ? (int)((uint64_t)p.bytes_sent * 100u / p.bytes_total) : -1,
-        .bytes = -1,
-        .done = done,
-        .result = result,
-        .err = done && !ok ? (esp_err_t)p.last_err : ESP_OK,
-        .flash = check ? NULL : &p,
-        .last = last,
-    };
+    web_progress_t m;
+    web_flash_progress_msg(p, final, check, last, &m);
     web_ws_progress(&m);
+}
+
+static void push_flash_progress(void)
+{
+    um98x_flash_progress_t fin;
+    um98x_flash_progress_t p;
+    portENTER_CRITICAL(&s_flash_lock);
+    bool have_final = s_flash_final_new;
+    bool fresh = s_flash_new;
+    s_flash_final_new = false;
+    s_flash_new = false;
+    fin = s_flash_final;
+    p = s_flash;
+    portEXIT_CRITICAL(&s_flash_lock);
+    if (have_final) {
+        push_flash_message(&fin, true);
+    }
+    if (fresh) {
+        push_flash_message(&p, false);   /* a next job already reports */
+    }
 }
 
 static uint32_t s_upload_seq;

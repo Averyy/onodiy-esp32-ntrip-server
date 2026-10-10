@@ -24,10 +24,18 @@ Web UI:  http://localhost:8080/  (empty NVS: set the admin password on the first
 UART1:   tcp 127.0.0.1:5556 (QEMU listens)
 ```
 
-Every run starts with empty NVS: no admin password, default settings. Other
-options (`tools/qemu/run.sh --help`): `--no-build`, `--build-only`,
-`--headless LOG` (console to a file, for scripts), `--seconds N`,
-`--http-port N`, `--uart1 MODE`.
+Every run starts with empty NVS: no admin password, default settings (the
+flash image is written to a new file each run, so a QEMU left over from an
+earlier run can never write into it). Other options (`tools/qemu/run.sh
+--help`): `--no-build`, `--build-only`, `--headless LOG` (console to a
+file, for scripts), `--seconds N`, `--http-port N`, `--uart1 MODE`,
+`--no-wdt`.
+
+The emulated watchdogs are live: unlike `idf.py qemu`, `run.sh` does not
+turn off the timer groups' watchdogs, so the task watchdog (TIMG0, 10 s,
+both IDLE tasks watched, panic) and the interrupt watchdog (TIMG1) fire as
+on a board. `--no-wdt` turns them off, for a debugger session that stops
+the CPUs only.
 
 Never flash anything from `build-qemu/` to a board. Configure refuses a
 release version with the overlay, the CI firmware job fails if the station
@@ -45,8 +53,9 @@ each inside an `#if` on that option:
   key and IP events, so the web server, the casters and SNTP work
   unchanged), with an address from QEMU's user-mode network (10.0.2.15).
   There is no setup AP, no scan, and the network recovery steps are skipped.
-  Wi-Fi credentials saved in the UI are stored, not used. The station's
-  status shows the SSID `QEMU Ethernet`.
+  Wi-Fi credentials saved in the UI are stored as the station's, not used
+  and never tried (no pending credentials, no trial, no revert). The
+  station's status shows the SSID `QEMU Ethernet`.
 - **Web requests.** The Host names `localhost` and `127.0.0.1` are accepted
   (QEMU's port forward), and every request counts as coming over the setup
   AP: the first admin password can be set from the browser, and a request
@@ -121,9 +130,15 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
 3. UART1 both ways: the detection queries arrive on the host, and text the
    host sends makes detection end with "bytes but nothing valid";
 4. over 75 s: no `Guru Meditation`, `abort()`, stack overflow, failed
-   assert or backtrace on the console, and no reboot loop (a restart
-   without the firmware's own `rebooting (reason N)` line before it is a
-   crash; more than two boots is a loop).
+   assert, backtrace or task watchdog report on the console, and no reboot
+   loop (a restart without the firmware's own `rebooting (reason N)` line
+   before it is a crash; more than two boots is a loop); at the end of the
+   window `GET /` and `GET /api/status` still answer.
+
+QEMU always stops with it: on a normal end, Ctrl-C, SIGTERM or SIGHUP the
+script stops QEMU on the way out, and `run.sh` gets `--seconds` (observe or
+timeout, whichever is longer, plus 60 s) as a backstop should the script be
+killed outright.
 
 The `qemu-smoke` CI job runs the same in the pinned ESP-IDF image (which
 ships qemu-xtensa) with `--out qemu-smoke` and uploads that directory and

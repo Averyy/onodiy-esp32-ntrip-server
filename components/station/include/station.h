@@ -217,8 +217,9 @@ ESP_EVENT_DECLARE_BASE(STATION_EVENT);
 /** STATION_EVENT ids; the event data differs per id. */
 typedef enum {
     STATION_EVENT_STATE_CHANGED,     /**< data: station_state_t (the new state) */
-    STATION_EVENT_FLASH_PROGRESS,    /**< data: um98x_flash_progress_t */
+    STATION_EVENT_FLASH_PROGRESS,    /**< data: um98x_flash_progress_t (a phase change, else at most once a second; FAILED here is a transfer the session goes on from) */
     STATION_EVENT_RECEIVER_RESTARTED,/**< the receiver restarted on its own (banner or an unsolicited version log); no data */
+    STATION_EVENT_FLASH_ENDED,       /**< data: um98x_flash_progress_t: the job's last message (a session, the user's action, the journal's close or a package check ended; phase DONE, FAILED or NEEDS_USER); station_status_t.flash_last says how */
 } station_event_t;
 
 typedef enum {
@@ -380,6 +381,7 @@ typedef struct {
     bool flash_journal_open;         /**< open, or present but unreadable; valid in safe mode too */
     bool flash_journal_readable;     /**< flash_journal holds the record (false: damaged or a newer schema: waits for the user) */
     bool flash_journal_settings_unavailable; /**< settings unavailable this boot: journal state unknown (nothing sent, nothing to clear) */
+    bool flash_session_running;      /**< a receiver update job runs or is queued (a new update, the user's retry or restart, the boot-time recovery): the journal does not wait for the user, whatever its record says, and cannot be cleared */
     um98x_flash_journal_t flash_journal;
     uint32_t detect_failures;        /**< consecutive failed detections */
     bool detect_saw_bytes;           /**< the last failed detection pass received bytes at some baud (health's byte rule on entering NO_RECEIVER) */
@@ -557,8 +559,12 @@ uint32_t station_expected_flash_downtime_s(uint32_t package_size);
  * during an app trial and while an app update runs); RESTART_RECEIVER also
  * works without a journal while STATION_ALERT_RECEIVER_IN_LOADER is raised.
  * CLEAR_JOURNAL works uninitialised (safe mode) and also for an unreadable
- * journal, but not while a session is running, and not when the settings are
- * unavailable (nothing can be cleared then).
+ * journal, but not while a session, a retry or restart (queued or running)
+ * or the boot-time recovery works on the receiver (flash_session_running),
+ * and not when the settings are unavailable (nothing can be cleared then).
+ * An accepted RETRY or RESTART_RECEIVER clears station_status_t.flash_last
+ * (the stop it answers); the job's STATION_EVENT_FLASH_ENDED and the status
+ * then tell how it ended.
  * @return ESP_ERR_NOT_FOUND without an open journal (or loader alert),
  *         ESP_ERR_INVALID_STATE when the action is not allowed now.
  */

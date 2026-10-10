@@ -238,9 +238,76 @@ TEST_CASE("journal view follows the station's record", "[web_build]")
     st.flash.phase = UM98X_FLASH_IDLE;
     st.flash_journal.state = UM98X_JOURNAL_NEEDS_USER;
     TEST_ASSERT_EQUAL(WEB_JOURNAL_WAITING, web_journal_view(&st, false));
+    /* The user's retry was accepted: the record says "needs user" until the
+     * session's first write, but the journal is worked on (no clear, no
+     * second action). */
+    st.flash_session_running = true;
+    TEST_ASSERT_EQUAL(WEB_JOURNAL_RUNNING, web_journal_view(&st, false));
+    web_flash_ctx_t c = { .journal = web_journal_view(&st, false), .station_running = true, .flash_available = true };
+    TEST_ASSERT_EQUAL_STRING("not_waiting", web_flash_action_why(&c, WEB_FLASH_CLEAR, NULL));
+    TEST_ASSERT_EQUAL_STRING("not_waiting", web_flash_action_why(&c, WEB_FLASH_RETRY, NULL));
+    st.flash_session_running = false;
     st.flash_journal_settings_unavailable = true;
     TEST_ASSERT_EQUAL(WEB_JOURNAL_UNKNOWN, web_journal_view(&st, false));
     TEST_ASSERT_EQUAL_STRING("unknown", web_journal_name(WEB_JOURNAL_UNKNOWN));
+}
+
+TEST_CASE("receiver update progress: only the station's final message is done", "[web_build]")
+{
+    um98x_flash_progress_t p;
+    memset(&p, 0, sizeof(p));
+    p.bytes_total = 3000000;
+    p.bytes_sent = 1500000;
+    p.transfers = 1;
+    web_progress_t m;
+
+    /* A transfer failed after the point of no return and the session goes
+     * on (back to the loader, the same package again): not the end. */
+    p.phase = UM98X_FLASH_FAILED;
+    web_flash_progress_msg(&p, false, false, NULL, &m);
+    TEST_ASSERT_FALSE(m.done);
+    TEST_ASSERT_NULL(m.result);
+    TEST_ASSERT_EQUAL_STRING("failed", m.phase);
+    TEST_ASSERT_EQUAL_STRING("gnss_flash", m.job);
+    TEST_ASSERT_EQUAL_INT(50, m.pct);
+    TEST_ASSERT_EQUAL(ESP_OK, m.err);
+    p.phase = UM98X_FLASH_NEEDS_USER;   /* the session's own stop, before the station's end */
+    web_flash_progress_msg(&p, false, false, NULL, &m);
+    TEST_ASSERT_FALSE(m.done);
+
+    /* The end: how it ended comes from the station's last outcome. */
+    station_flash_last_t last;
+    memset(&last, 0, sizeof(last));
+    last.outcome = STATION_FLASH_OUT_NEEDS_USER;
+    p.last_err = ESP_ERR_TIMEOUT;
+    web_flash_progress_msg(&p, true, false, &last, &m);
+    TEST_ASSERT_TRUE(m.done);
+    TEST_ASSERT_EQUAL_STRING("needs_user", m.result);
+    TEST_ASSERT_EQUAL(ESP_ERR_TIMEOUT, m.err);
+    TEST_ASSERT_EQUAL_PTR(&last, m.last);
+    last.outcome = STATION_FLASH_OUT_SUCCESS;
+    p.phase = UM98X_FLASH_DONE;
+    web_flash_progress_msg(&p, true, false, &last, &m);
+    TEST_ASSERT_EQUAL_STRING("ok", m.result);
+    TEST_ASSERT_EQUAL(ESP_OK, m.err);
+    web_flash_progress_msg(&p, true, false, NULL, &m);
+    TEST_ASSERT_EQUAL_STRING("ok", m.result);
+    p.phase = UM98X_FLASH_FAILED;
+    web_flash_progress_msg(&p, true, false, NULL, &m);
+    TEST_ASSERT_EQUAL_STRING("failed", m.result);
+
+    /* Builds without flashing: a package check. */
+    p.phase = UM98X_FLASH_CHECKING;
+    web_flash_progress_msg(&p, false, true, NULL, &m);
+    TEST_ASSERT_EQUAL_STRING("gnss_check", m.job);
+    TEST_ASSERT_EQUAL_STRING("checking", m.phase);
+    TEST_ASSERT_NULL(m.flash);
+    TEST_ASSERT_EQUAL_INT(-1, m.pct);
+    last.outcome = STATION_FLASH_OUT_REJECTED;
+    p.phase = UM98X_FLASH_FAILED;
+    web_flash_progress_msg(&p, true, true, &last, &m);
+    TEST_ASSERT_TRUE(m.done);
+    TEST_ASSERT_EQUAL_STRING("package_rejected", m.result);
 }
 
 static const char *why(web_flash_ctx_t c, web_flash_action_t a, web_err_t *err)

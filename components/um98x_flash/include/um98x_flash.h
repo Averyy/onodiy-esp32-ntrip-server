@@ -295,7 +295,8 @@ esp_err_t um98x_flash_journal_close(void);
  * race into the loader? True only when both chips were reset (power-on or
  * brownout) and the session had reached the loader menu (menu item sent or
  * later, or any state after a transfer), including "needs user" with such a
- * phase. An ESP32-only reset never races: the receiver did not reset.
+ * phase or after a transfer. An ESP32-only reset never races: the receiver
+ * did not reset.
  */
 bool um98x_flash_journal_needs_race(const um98x_flash_journal_t *j, bool receiver_was_reset);
 

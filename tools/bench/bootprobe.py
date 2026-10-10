@@ -25,13 +25,17 @@ update over COM1 goes wrong. This tool checks exactly that, and nothing more:
   4. Nothing is sent while the bootloader's text (banner, settings, menu)
      comes in, until the port has been quiet for 200 ms. Then one "\\r\\n"
      clears any stop-key bytes left in the menu's input line; a fresh prompt
-     is expected within 10 s. All of it is saved verbatim: boot-menu.txt and
-     loader-rx.bin.
+     is expected within 10 s (a bootloader that prints its menu only after
+     a key press prints it now). All of it is saved verbatim: boot-menu.txt
+     and loader-rx.bin.
   5. Menu item 6 ("6\\r\\n", soft reset cpu), which restarts the
      application; "resetting the cpu" is expected within 10 s. Sent once
-     more only if the prompt comes back without it. Never sent when the
-     printed menu names the soft reset on a line without a 6 (a different
-     numbering): then the tool stops and asks for a power-cycle.
+     more only if the prompt comes back without it. Sent only when the
+     printed menu (all of it received so far, the text after the "\\r\\n"
+     included) numbers the soft reset as 6. A menu that names it on another
+     number, or no readable line naming it at all (the menu arrived at
+     another baud, or words it differently): the tool stops, sends nothing
+     more and asks for a power-cycle.
   6. Back at the application baud: VERSIONA every 2 s until it answers (up
      to 60 s), and the build is compared with step 1. Without the restart
      message, the tool first listens (nothing sent) for the application's
@@ -49,9 +53,11 @@ then sends VERSIONA (the prompt was never seen, so the receiver is not
 known to be at its menu); a prompt in the answer means the bootloader did
 stop, and it gets "6\\r\\n" once.
 
-Exit status: 0 prompt reached and the application is back; 1 no prompt, the
-application is back; 2 the application did not come back (power-cycle the
-receiver); 3 not started.
+Exit status: 0 prompt reached and the application is back with the same
+build; 1 no prompt, the application is back; 2 the application did not come
+back, or the menu could not be confirmed and the tool stopped at it
+(power-cycle the receiver); 3 not started; 4 the application came back with
+another firmware than before (the receiver did not come back as it was).
 
 Examples:
   uv run bootprobe.py --port auto --i-understand
@@ -92,10 +98,11 @@ NMEA_STARTS = (b"$GPGGA", b"$GNGGA", b"$GPRMC", b"$GNRMC", b"$GPGSV", b"$GLGSV",
 EVIDENCE = (b"uart baudrate:", b"Timeout:", b"Default action:")
 BAUDS = (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600)
 
-EXIT_OK = 0           # prompt reached, application back
+EXIT_OK = 0           # prompt reached, application back with the same build
 EXIT_NO_PROMPT = 1    # no prompt within the limits; application back
-EXIT_APP_MISSING = 2  # the application did not come back: power-cycle the receiver
+EXIT_APP_MISSING = 2  # the application did not come back (or the tool stopped at an unconfirmed menu): power-cycle
 EXIT_REFUSED = 3      # not started (no confirmation, no port, no answer before the restart)
+EXIT_OTHER_BUILD = 4  # the application came back with another firmware than before
 
 
 def allowed_tx(data: bytes) -> bool:
@@ -249,6 +256,11 @@ class BootProbe:
         n = self.port.in_waiting
         return self.port.read(n if n else 1)  # blocks for at most the port timeout when empty
 
+    def drain(self) -> bytes:
+        """What has already arrived, without waiting (the stop-key cadence must not stall on a read)."""
+        n = self.port.in_waiting
+        return self.port.read(n) if n else b""
+
     def send(self, data: bytes) -> None:
         self.port.write(data)
         self.port.flush()
@@ -334,9 +346,9 @@ class BootProbe:
         while True:
             if time.monotonic() - t0 >= self.lim.entry_s:
                 return "timeout"
-            self.send(burst)
+            self.send(burst)  # returns once the burst has left the port
             time.sleep(self.lim.burst_gap_s)
-            data = self.pump()
+            data = self.drain()
             seen = self.port.received(start)
             if PROMPT in seen:
                 self.res.prompt_after_s = time.monotonic() - t0
@@ -355,31 +367,35 @@ class BootProbe:
                 quiet_since = time.monotonic()
         text = self.loader_text()
         (self.run_dir / "boot-menu.txt").write_bytes(text)
+        evidence = []  # from everything received so far (this runs again after the "\r\n")
         for marker in EVIDENCE:
             for line in text.splitlines():
                 if marker in line:
-                    self.res.evidence.append(line.decode("latin-1").strip())
+                    evidence.append(line.decode("latin-1").strip())
         if LAST_MENU_LINE in text:
-            self.res.evidence.append(f"last menu line present ({LAST_MENU_LINE.decode()})")
+            evidence.append(f"last menu line present ({LAST_MENU_LINE.decode()})")
+        self.res.evidence = evidence
 
     def leave(self) -> bool:
         """Clear the menu's input line, then menu item 6; wait for the CPU restart message.
 
-        False when the printed menu numbers the soft reset differently: then nothing more is sent."""
-        item6 = menu_item6(self.loader_text())
-        if item6 is False:
-            self.say("   the printed menu does not list item 6 as the soft reset: nothing more is sent "
-                     "(boot-menu.txt has the menu as printed)")
-            return False
-        if item6 is None:
-            self.say("   no menu line names the soft reset; going by the documented numbering (6)")
+        "6" goes out only when the menu as printed (everything received so
+        far, the answer to the "\\r\\n" included) numbers the soft reset as 6.
+        False otherwise: nothing more is sent."""
         mark = self.port.mark()
         self.say(f"4. {LINE_END!r} at {self.boot_baud}: clears stop-key bytes left in the menu's input line")
         self.send(LINE_END)
         if self.wait_for(self.lim.prompt_wait_s, (PROMPT,), mark):
             self.say(f"   fresh {PROMPT!r}")
+            self.capture_menu()  # whatever the key brought (a menu printed only on a key press): saved too
         else:
             self.say(f"   no fresh {PROMPT!r} within {self.lim.prompt_wait_s:g} s")
+        item6 = menu_item6(self.loader_text())
+        if item6 is not True:
+            self.say("   the printed menu " + ("numbers the soft reset differently" if item6 is False else
+                                               "has no readable line naming the soft reset")
+                     + f": {EXIT_CMD!r} is not sent, nothing more is (boot-menu.txt has what was received)")
+            return False
         for attempt in (1, 2):
             mark = self.port.mark()
             self.say(f"5. menu item 6 {EXIT_CMD!r} at {self.boot_baud} (soft reset cpu)"
@@ -481,6 +497,12 @@ class BootProbe:
         same = res.before is not None and a.get("firmware") == res.before.get("firmware")
         self.say(f"   {a['model']}, firmware {a['firmware']} (build {a['build']})"
                  + ("" if same else f"; before it was {res.before.get('firmware') if res.before else '?'}"))
+        if not same:
+            res.code = EXIT_OTHER_BUILD
+            self.say("   What to do: the receiver came back with another firmware than it had. Stop here: note "
+                     "transcript.log and boot-menu.txt, check the receiver with `uv run um982.py --port <port>`, and do "
+                     "not go on to the next bench step until it runs the build it had.")
+            return res
         if res.entry == "prompt":
             res.code = EXIT_OK
         else:
@@ -499,9 +521,9 @@ def describe(app_baud: int, boot_baud: int, port: str) -> str:
         f"  2. {RESET_CMD!r} at {app_baud}: the receiver restarts. Settings it has not saved are lost,",
         "     a survey-in starts over, and a running station sees the receiver vanish for a while",
         f"  3. {STOP_KEY!r} bursts at {boot_baud} for up to 30 s, until the boot menu prompt {PROMPT!r}",
-        f"  4. {LINE_END!r} (clears the menu's input line), then {EXIT_CMD!r} (menu item 6, soft reset cpu):",
-        "     the application restarts",
-        f"  5. VERSIONA at {app_baud} until the application answers",
+        f"  4. {LINE_END!r} (clears the menu's input line), then {EXIT_CMD!r} (menu item 6, soft reset cpu)",
+        "     only if the printed menu numbers the soft reset as 6: the application restarts",
+        f"  5. VERSIONA at {app_baud} until the application answers; it must be the build it had",
         "It never selects any other menu item (no download, no settings), never sends data frames,",
         "erase or write commands, FRESET or SAVECONFIG. Use a receiver you can power-cycle by hand.",
     ])
@@ -572,9 +594,12 @@ def main(argv: list[str] | None = None, ask=ask_tty, opener=open_serial, limits:
         ser.close()
     if res.evidence:
         echo("bootloader text of note: " + "; ".join(res.evidence))
-    verdict = {EXIT_OK: "PASS: boot menu reached over this port, and the application is back",
+    before = (res.before or {}).get("firmware", "?")
+    after = (res.after or {}).get("firmware", "?")
+    verdict = {EXIT_OK: "PASS: boot menu reached over this port, and the application is back with the same build",
                EXIT_NO_PROMPT: "FAIL: no boot menu (the application is back)",
                EXIT_APP_MISSING: "FAIL: the application did not come back",
+               EXIT_OTHER_BUILD: f"FAIL: the application came back with another firmware: {after}, was {before}",
                EXIT_REFUSED: "not run"}[res.code]
     echo(verdict)
     (run_dir / "summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")

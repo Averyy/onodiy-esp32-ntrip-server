@@ -1677,10 +1677,43 @@ TEST_CASE("station core: a session waiting for the user, then the user's retry a
     sim_init(&w, true);
     w.rtcm_on = true;
     sim_start(&w);
+    TEST_ASSERT_FALSE(stn_flash_pending(&w.s));
     TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_RECOVER));
+    TEST_ASSERT_TRUE(stn_flash_pending(&w.s));
     j = sim_next(&w);
     TEST_ASSERT_EQUAL(STN_JOB_FLASH, j.kind);
     TEST_ASSERT_EQUAL_UINT8(STN_FLASH_RECOVER, j.flash_kind);
+    TEST_ASSERT_TRUE(stn_flash_pending(&w.s));   /* running */
+    r = flash_end(STN_FLASH_END_NEEDS_USER, true);
+    sim_done(&w, &r);
+    TEST_ASSERT_FALSE(stn_flash_pending(&w.s));
+}
+
+TEST_CASE("station core: clearing the journal drops a retry still queued for it", "[station]")
+{
+    sim_t w;
+    sim_init(&w, true);
+    w.rtcm_on = true;
+    sim_start(&w);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_RETRY));
+    TEST_ASSERT_TRUE(stn_flash_pending(&w.s));
+    stn_journal_cleared(&w.s, &w.in);
+    TEST_ASSERT_FALSE(stn_flash_pending(&w.s));
+    TEST_ASSERT_EQUAL(STN_IDLE, w.s.state);
+    /* The normal start, and no flash job for a journal that no longer exists. */
+    for (int i = 0; i < 120; i++) {
+        stn_job_t j = sim_next(&w);
+        TEST_ASSERT_NOT_EQUAL(STN_JOB_FLASH, j.kind);
+        if (j.kind == STN_JOB_IDENTIFY) {
+            identity_done(&w, true, true);
+        } else if (j.kind != STN_JOB_NONE) {
+            stn_result_t r = res(STN_OK);
+            sim_done(&w, &r);
+        }
+        sim_tick(&w);
+    }
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_NEW));   /* nothing stale holds a new update back */
 }
 
 TEST_CASE("station core: an update that changed nothing streams on; a receiver left at its loader is listened for", "[station]")

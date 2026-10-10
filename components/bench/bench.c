@@ -223,6 +223,14 @@ static int cmd_race_arm(int argc, char **argv)
         }
         return 1;
     }
+    /* Maintenance is the hands-off mode (the receiver may be flashed over
+     * its other port): the stop key at the next boot is not armed during it.
+     * A maintenance started after arming is caught at that boot. */
+    static station_status_t st;
+    if (station_get_status(&st) == ESP_OK && st.rx_maintenance) {
+        printf("BENCH REFUSED: receiver maintenance is on (end it first)\n");
+        return 1;
+    }
     esp_err_t err = settings_set_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BENCH_RACE, 1);
     printf("BENCH %s\n", err == ESP_OK ? "armed for the next boot only: power-cycle the board now (the result prints "
                                          "at boot and with race_result)"

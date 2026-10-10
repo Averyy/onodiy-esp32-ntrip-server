@@ -68,7 +68,9 @@ static bool version(um98x_bench_res_t *out, uint32_t *build, gnss_versiona_t *v)
     return false;
 }
 
-/* Up to a confirmed loader prompt. False with the result line set otherwise. */
+static bool leave(const um98x_bench_req_t *req, um98x_bench_res_t *out);
+
+/* Up to a confirmed, fresh loader prompt. False with the result line set otherwise. */
 static bool enter(const um98x_bench_req_t *req, um98x_bench_res_t *out)
 {
     gnss_versiona_t v;
@@ -112,11 +114,25 @@ static bool enter(const um98x_bench_req_t *req, um98x_bench_res_t *out)
                            (unsigned)st.prompt_ms, (unsigned)req->baud, (unsigned)st.key_bytes,
                            st.baud_text ? "seen" : "-", st.timeout_text ? "seen" : "-", st.action_text ? "seen" : "-",
                            st.last_menu_line ? "seen" : "-");
-    fl_lis_listen(&s_lis, FL_MENU_QUIET_MS);
-    uint64_t m = fl_lis_mark(&s_lis);
-    (void)fl_write_str(s_io, "\r\n");
-    if (fl_wait_prompt(&s_lis, m, FL_PROMPT_MS, 0) != FL_PROMPT_SEEN) {
-        um98x_flash_cap_printf(true, "no prompt after \"\\r\\n\"");
+    /* A fresh prompt, as before any menu item in a session: without one,
+     * nothing more is sent at the menu (the attempt failed) and the
+     * receiver goes back through the exit before the point of no return. */
+    fl_prompt_result_t fp = fl_fresh_prompt(&s_lis, NULL);
+    if (fp != FL_PROMPT_SEEN) {
+        bool back;
+        if (fp == FL_PROMPT_LEFT) {
+            back = fl_app_check(&s_lis, req->app_baud, FL_APP_WAIT_MS, &v);   /* listen first, then the query */
+            out->build_after = back ? v.build : 0;
+        } else {
+            back = leave(req, out);
+        }
+        result_line(out, false,
+                    "loader prompt at %u baud after %u ms, but no fresh prompt after \"\\r\\n\" (%s): nothing sent at "
+                    "the menu; application %s, build %u -> %u",
+                    (unsigned)req->baud, (unsigned)st.prompt_ms, fp == FL_PROMPT_LEFT ? "the receiver left its loader"
+                                                                                       : "no answer",
+                    back ? "back" : "NOT back", (unsigned)out->build_before, (unsigned)out->build_after);
+        return false;
     }
     return true;
 }

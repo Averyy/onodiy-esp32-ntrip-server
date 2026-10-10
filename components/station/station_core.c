@@ -342,6 +342,7 @@ void stn_journal_cleared(stn_t *s, const stn_in_t *in)
     if (s->state != STN_FLASH_RECOVERY) {
         return;
     }
+    s->flash_want = 0;   /* a retry, restart or recovery queued for the cleared journal */
     s->state = STN_IDLE;
     s->paused = false;
     stn_start(s, in);
@@ -1285,6 +1286,11 @@ int stn_request_flash(stn_t *s, uint8_t kind)
     }
     s->flash_want = kind;
     return STN_OK;
+}
+
+bool stn_flash_pending(const stn_t *s)
+{
+    return s->flash_want != 0 || (s->job_busy && s->job.kind == STN_JOB_FLASH);
 }
 
 int stn_request_bench(stn_t *s)

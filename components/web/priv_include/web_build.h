@@ -407,6 +407,19 @@ typedef struct {
 
 void web_build_progress(wj_t *w, const web_progress_t *p);
 
+/**
+ * The progress message of a receiver update (job gnss_flash) or, in builds
+ * without receiver flashing (check_only), a package check (gnss_check).
+ * Only the station's final message of the job (final:
+ * STATION_EVENT_FLASH_ENDED) is `done`, with `result` from `last` (how it
+ * ended; NULL: "ok" for DONE, else "failed"). A FAILED phase before that is
+ * a transfer that failed while the session goes on (back to the loader, a
+ * retry within the caps, or needs-user): phase "failed", not done. out
+ * points into p and last.
+ */
+void web_flash_progress_msg(const um98x_flash_progress_t *p, bool final, bool check_only,
+                            const station_flash_last_t *last, web_progress_t *out);
+
 #ifdef __cplusplus
 }
 #endif

@@ -317,8 +317,12 @@ void web_ws_event(const char *json);
 /** Send a progress message to the progress subscribers (server task). */
 void web_ws_progress(const web_progress_t *p);
 
-/** Latest receiver flash progress (from the station's event; any task: copied). */
-void web_ws_note_flash_progress(const um98x_flash_progress_t *p);
+/**
+ * Receiver flash progress from the station's events (any task: copied).
+ * final: STATION_EVENT_FLASH_ENDED, the job's last message (`done`); kept
+ * until it went out even when progress of a next job follows.
+ */
+void web_ws_note_flash_progress(const um98x_flash_progress_t *p, bool final);
 
 /** Reboot under way: send `rebooting` and close every client with 1012. */
 void web_ws_rebooting(int reason);

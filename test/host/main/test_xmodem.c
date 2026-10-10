@@ -24,6 +24,9 @@ static uint8_t s_post[4096];
 static size_t s_post_len;
 static uint32_t s_first_frame_calls;
 static bool s_refuse_first;
+static uint32_t s_first_frame_ms;   /* before_first_frame takes this long (the journal write) */
+static bool s_check_align;          /* every credited block was answered by its own ACK */
+static uint32_t s_misaligned;
 
 static void post_tap(void *ctx, const uint8_t *d, size_t n)
 {
@@ -39,7 +42,21 @@ static bool first_frame(void *ctx, xm_mode_t mode)
     (void)ctx;
     (void)mode;
     s_first_frame_calls++;
+    if (s_first_frame_ms > 0) {
+        fl_sleep(&s_io, s_first_frame_ms);   /* the receiver keeps sending start bytes meanwhile */
+    }
     return !s_refuse_first;
+}
+
+/* The ACK the sender just took is the receiver's answer to this very block. */
+static void on_acked(void *ctx, uint32_t blocks, uint32_t bytes, uint32_t retries)
+{
+    (void)ctx;
+    (void)bytes;
+    (void)retries;
+    if (s_check_align && s_sim.ack_delivered_block != (int)blocks) {
+        s_misaligned++;
+    }
 }
 
 static void setup(uint32_t baud)
@@ -51,6 +68,9 @@ static void setup(uint32_t baud)
     s_post_len = 0;
     s_first_frame_calls = 0;
     s_refuse_first = false;
+    s_first_frame_ms = 0;
+    s_check_align = true;
+    s_misaligned = 0;
     for (size_t i = 0; i < sizeof(s_data); i++) {
         s_data[i] = (uint8_t)(i * 31u + (i >> 10));
     }
@@ -62,9 +82,12 @@ static xm_result_t send(uint32_t len)
         .data = s_data,
         .len = len,
         .before_first_frame = first_frame,
+        .on_acked = on_acked,
         .post_tap = post_tap,
     };
-    return xm_send(&s_io, &s_rx, &job, &s_xm);
+    xm_result_t r = xm_send(&s_io, &s_rx, &job, &s_xm);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, s_misaligned, "an ACK was credited to a block it did not answer");
+    return r;
 }
 
 static void assert_image(uint32_t len)
@@ -252,8 +275,26 @@ TEST_CASE("xmodem: 30 s without an answer resends; 60 s per block is the cap", "
     setup(460800);
     s_sim.pause_block = 2;
     s_sim.pause_ms = 40000;    /* the ACK of the first send arrives after the resend */
+    s_sim.dup_ack_gap_ms = 1;  /* ... and the resent copy's ACK a moment after it */
     TEST_ASSERT_EQUAL(XM_OK, send(3000));
     TEST_ASSERT_EQUAL_UINT32(1, s_xm.retries);
+    /* The receiver acknowledged the resent copy again: that ACK was dropped, not credited to block 3. */
+    TEST_ASSERT_EQUAL_UINT32(1, s_sim.dup_acks);
+    TEST_ASSERT_EQUAL_UINT32(1, s_xm.late_answers);
+    TEST_ASSERT_TRUE(s_xm.eot_acked);
+    assert_image(3000);
+    sim_free(&s_sim);
+
+    /* ... and a NAK further on is answered by resending the block it names. */
+    setup(460800);
+    s_sim.pause_block = 2;
+    s_sim.pause_ms = 40000;
+    s_sim.dup_ack_gap_ms = 1;
+    s_sim.nak_block = 5;
+    s_sim.nak_times = 1;
+    TEST_ASSERT_EQUAL(XM_OK, send(8u * 1024u + 100u));
+    TEST_ASSERT_EQUAL_UINT32(2, s_xm.retries);
+    assert_image(8u * 1024u + 100u);
     sim_free(&s_sim);
 
     setup(460800);
@@ -399,6 +440,67 @@ TEST_CASE("xmodem: EOT NAK resent, at most ten; silence and text end it; nothing
     sim_free(&s_sim);
 }
 
+TEST_CASE("xmodem: a start byte repeated while the journal is written is not a retransmit request", "[xmodem]")
+{
+    /* The handshake locks on the first 'C'; the next one arrives while
+     * before_first_frame writes the journal, and the first block takes the
+     * receiver 300 ms. A NAK of a later block, or of the last one, must be
+     * answered with that very block. */
+    const int naks[] = { 5, 9 };
+    for (size_t i = 0; i < sizeof(naks) / sizeof(naks[0]); i++) {
+        setup(460800);
+        s_sim.start_repeat_ms = 150;   /* 'C' at 50 ms (handshake), 200 ms (during the journal write) */
+        s_first_frame_ms = 60;
+        s_sim.pause_block = 1;
+        s_sim.pause_ms = 300;
+        s_sim.nak_block = naks[i];
+        s_sim.nak_times = 1;
+        uint32_t len = 8u * 1024u + 100u;   /* 9 blocks */
+        TEST_ASSERT_EQUAL(XM_OK, send(len));
+        TEST_ASSERT_EQUAL_UINT32(1, s_xm.retries);          /* the NAK only */
+        TEST_ASSERT_EQUAL_UINT32(9 + 1, s_sim.rx_frames);   /* frame 1 went out once */
+        TEST_ASSERT_EQUAL_UINT32(0, s_sim.dup_acks);
+        TEST_ASSERT_TRUE(s_xm.eot_acked);
+        assert_image(len);
+        sim_free(&s_sim);
+    }
+}
+
+TEST_CASE("xmodem: a lone 'C' after frame 1 resends it; the second ACK is dropped", "[xmodem]")
+{
+    /* The receiver's next start byte goes out while frame 1 is on the wire
+     * (not stale when the frame was written): frame 1 again, and the
+     * receiver acknowledges both copies. */
+    setup(460800);
+    s_sim.start_repeat_ms = 120;   /* 'C' at 50 ms (handshake), 170 ms (during frame 1) */
+    s_sim.pause_block = 1;
+    s_sim.pause_ms = 300;
+    s_sim.dup_ack_gap_ms = 1;
+    s_sim.nak_block = 4;
+    s_sim.nak_times = 1;
+    uint32_t len = 4u * 1024u + 10u;
+    TEST_ASSERT_EQUAL(XM_OK, send(len));
+    TEST_ASSERT_EQUAL_UINT32(2, s_xm.retries);    /* the 'C' and the NAK */
+    TEST_ASSERT_EQUAL_UINT32(1, s_sim.dup_acks);
+    TEST_ASSERT_EQUAL_UINT32(1, s_xm.late_answers);
+    TEST_ASSERT_TRUE(s_xm.eot_acked);
+    assert_image(len);
+    sim_free(&s_sim);
+}
+
+TEST_CASE("xmodem: start bytes repeated faster than the lone-'C' window still start the transfer", "[xmodem]")
+{
+    setup(460800);
+    s_sim.start_repeat_ms = 40;
+    uint32_t t0 = sim_now_ms(&s_sim);
+    TEST_ASSERT_EQUAL(XM_OK, send(5000));
+    TEST_ASSERT_TRUE(s_xm.handshake_ms < 50u + FL_LONE_C_MS + 10u);
+    TEST_ASSERT_TRUE(sim_now_ms(&s_sim) - t0 < 5000u);
+    TEST_ASSERT_TRUE(s_xm.retries <= 1u);   /* a 'C' on the wire with frame 1 asks for it again */
+    assert_image(5000);
+    sim_free(&s_sim);
+}
+
 TEST_CASE("xmodem: bench stop after N blocks sends nothing more", "[xmodem]")
 {
     setup(460800);
@@ -438,12 +540,19 @@ TEST_CASE("rx classifier: lone C, C-run, C starting text, CAN rules, blank captu
     /* Stale single control bytes are dropped before a resend, text is not. */
     static const uint8_t stale[5] = { FL_ACK, FL_NAK, 'C', 0x00, FL_ACK };
     fl_rx_push(&s_rx, stale, 5);
-    fl_rx_drop_stale(&s_rx);
+    fl_rx_drop_stale(&s_rx, false);
     TEST_ASSERT_EQUAL(FL_EV_JUNK, fl_rx_next(&s_rx, far));
     TEST_ASSERT_EQUAL(FL_EV_ACK, fl_rx_next(&s_rx, far));
     fl_rx_push(&s_rx, (const uint8_t *)"Cx\r\n", 4);
-    fl_rx_drop_stale(&s_rx);
+    fl_rx_drop_stale(&s_rx, true);
     TEST_ASSERT_EQUAL(FL_EV_TEXT, fl_rx_next(&s_rx, far));
+    /* A run of 'C's that ends the queue: kept (text may follow), except before frame 1. */
+    static const uint8_t c_run[3] = { FL_ACK, 'C', 'C' };
+    fl_rx_push(&s_rx, c_run, 3);
+    fl_rx_drop_stale(&s_rx, false);
+    TEST_ASSERT_EQUAL_size_t(2, s_rx.q_len);
+    fl_rx_drop_stale(&s_rx, true);
+    TEST_ASSERT_EQUAL_size_t(0, s_rx.q_len);
     /* 32 mismatch-pattern bytes since the last ACK/NAK. */
     static uint8_t mm[40];
     for (int i = 0; i < 40; i++) {

@@ -870,7 +870,9 @@ static void on_station(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (id == STATION_EVENT_STATE_CHANGED && data != NULL) {
         event_json("station_state", "state", web_station_state_name(*(const station_state_t *)data));
     } else if (id == STATION_EVENT_FLASH_PROGRESS && data != NULL) {
-        web_ws_note_flash_progress((const um98x_flash_progress_t *)data);
+        web_ws_note_flash_progress((const um98x_flash_progress_t *)data, false);
+    } else if (id == STATION_EVENT_FLASH_ENDED && data != NULL) {
+        web_ws_note_flash_progress((const um98x_flash_progress_t *)data, true);
     } else if (id == STATION_EVENT_RECEIVER_RESTARTED) {
         event_json("receiver_restarted", NULL, NULL);
     }

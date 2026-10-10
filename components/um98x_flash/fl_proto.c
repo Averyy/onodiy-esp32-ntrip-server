@@ -572,20 +572,40 @@ static void wait_quiet(fl_lis_t *lis)
     }
 }
 
+fl_prompt_result_t fl_fresh_prompt(fl_lis_t *lis, bool *io_failed)
+{
+    if (io_failed != NULL) {
+        *io_failed = false;
+    }
+    /* Quiet first (the rest of the banner, stop-key echoes), then a prompt
+     * that answers our own "\r\n". */
+    wait_quiet(lis);
+    uint64_t m = fl_lis_mark(lis);
+    if (fl_write_str(lis->io, "\r\n") != 0) {
+        if (io_failed != NULL) {
+            *io_failed = true;
+        }
+        return FL_PROMPT_TIMEOUT;
+    }
+    fl_prompt_result_t pr = fl_wait_prompt(lis, m, FL_PROMPT_MS, 0);
+    if (pr != FL_PROMPT_SEEN) {
+        fl_notef(lis->io, "no loader prompt after \"\\r\\n\"%s",
+                 pr == FL_PROMPT_LEFT ? " (the receiver left its loader)" : "");
+    }
+    return pr;
+}
+
 fl_menu_result_t fl_menu_download(fl_lis_t *lis, fl_rx_t *rx, const fl_menu_job_t *job, fl_menu_stats_t *st)
 {
     memset(st, 0, sizeof(*st));
     if (job->confirm_prompt) {
-        /* Quiet first, then a prompt that answers our own "\r\n". */
-        wait_quiet(lis);
-        uint64_t m = fl_lis_mark(lis);
-        if (fl_write_str(lis->io, "\r\n") != 0) {
+        bool io_failed;
+        fl_prompt_result_t pr = fl_fresh_prompt(lis, &io_failed);
+        if (io_failed) {
             return FL_MENU_IO;
         }
-        fl_prompt_result_t pr = fl_wait_prompt(lis, m, FL_PROMPT_MS, 0);
         if (pr != FL_PROMPT_SEEN) {
             keep(st->text, sizeof(st->text), pr == FL_PROMPT_LEFT ? "the receiver left its loader" : "no prompt");
-            fl_notef(lis->io, "no loader prompt after \"\\r\\n\"");
             return FL_MENU_FAILED;
         }
     }
@@ -846,7 +866,10 @@ static fl_exit_result_t scan_and_listen(fl_lis_t *lis, uint32_t loader_baud, uin
         fl_notef(lis->io, "only the loader answers: the application does not start");
         return FL_EXIT_NO_APP_PROMPT;
     }
-    if (pr == FL_PROMPT_LEFT && fl_query_version(lis, &out->ver)) {
+    /* The version query only where the application itself was decoded at
+     * this baud: the mismatch pattern alone (a talker at another baud, line
+     * noise) is not an application, and whatever listens may be a loader. */
+    if (pr == FL_PROMPT_LEFT && fl_lis_app_evidence(lis) && fl_query_version(lis, &out->ver)) {
         out->app_baud_found = loader_baud;
         fl_notef(lis->io, "application answers at %u baud: %s", (unsigned)loader_baud, out->ver.firmware);
         return FL_EXIT_APP;

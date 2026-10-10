@@ -95,6 +95,17 @@ flash_journal_result_t flash_journal_decode(const uint8_t *buf, size_t len, um98
     return FLASH_JOURNAL_OK;
 }
 
+uint8_t flash_journal_effective_state(const um98x_flash_journal_t *j)
+{
+    if (j->transfers > 0 && j->state >= UM98X_JOURNAL_PREPARED && j->state <= UM98X_JOURNAL_MENU2_SENT) {
+        /* A retry after the point of no return records the entry and menu
+         * states again; the receiver's flash is presumed modified all the
+         * same, so the loader is never left with "6" here. */
+        return UM98X_JOURNAL_FAILED;
+    }
+    return j->state;
+}
+
 fl_plan_t flash_journal_plan(fj_read_t read, const um98x_flash_journal_t *j, bool receiver_was_reset)
 {
     switch (read) {
@@ -111,14 +122,7 @@ fl_plan_t flash_journal_plan(fj_read_t read, const um98x_flash_journal_t *j, boo
         return FL_PLAN_WAIT_USER;
     }
     bool esp_only = !receiver_was_reset;
-    uint8_t state = j->state;
-    if (j->transfers > 0 && state >= UM98X_JOURNAL_PREPARED && state <= UM98X_JOURNAL_MENU2_SENT) {
-        /* A retry after the point of no return records the entry and menu
-         * states again; the receiver's flash is presumed modified all the
-         * same, so the loader is never left with "6" here. */
-        state = UM98X_JOURNAL_FAILED;
-    }
-    switch (state) {
+    switch (flash_journal_effective_state(j)) {
     case UM98X_JOURNAL_PREPARED:
     case UM98X_JOURNAL_BAUD_CHANGING:
         return esp_only ? FL_PLAN_RESTORE_CHECK : FL_PLAN_APP_CHECK;
@@ -137,7 +141,10 @@ fl_plan_t flash_journal_plan(fj_read_t read, const um98x_flash_journal_t *j, boo
         if (esp_only) {
             return FL_PLAN_WAIT_USER;
         }
-        return j->phase >= UM98X_JOURNAL_MENU2_SENT ? FL_PLAN_RACE_STOP : FL_PLAN_CHECK_WAIT;
+        /* Past the menu, or after any transfer (a post-PoNR re-entry that
+         * stopped in reset-sent): the loader is the way back to a receiver
+         * whose flash was modified, and the race is its only window. */
+        return (j->phase >= UM98X_JOURNAL_MENU2_SENT || j->transfers > 0) ? FL_PLAN_RACE_STOP : FL_PLAN_CHECK_WAIT;
     default:
         return FL_PLAN_WAIT_USER;
     }

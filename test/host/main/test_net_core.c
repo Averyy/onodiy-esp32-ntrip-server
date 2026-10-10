@@ -430,10 +430,14 @@ TEST_CASE("network AP: a connected client keeps the recovery AP at most 30 min p
 TEST_CASE("network credentials: changed ones are tried first and confirmed by an IP within 90 s", "[net_core]")
 {
     /* first setup, or the same credentials again: stored as the station's */
-    TEST_ASSERT_EQUAL(NET_CRED_PLAN_ACTIVE, net_cred_plan(false, false));
-    TEST_ASSERT_EQUAL(NET_CRED_PLAN_ACTIVE, net_cred_plan(true, true));
+    TEST_ASSERT_EQUAL(NET_CRED_PLAN_ACTIVE, net_cred_plan(false, false, true));
+    TEST_ASSERT_EQUAL(NET_CRED_PLAN_ACTIVE, net_cred_plan(true, true, true));
     /* changed credentials: pending, on trial */
-    TEST_ASSERT_EQUAL(NET_CRED_PLAN_TRIAL, net_cred_plan(true, false));
+    TEST_ASSERT_EQUAL(NET_CRED_PLAN_TRIAL, net_cred_plan(true, false, true));
+    /* not on Wi-Fi (the QEMU build): stored, never applied or tried, whatever came before */
+    TEST_ASSERT_EQUAL(NET_CRED_PLAN_STORE_ONLY, net_cred_plan(false, false, false));
+    TEST_ASSERT_EQUAL(NET_CRED_PLAN_STORE_ONLY, net_cred_plan(true, false, false));
+    TEST_ASSERT_EQUAL(NET_CRED_PLAN_STORE_ONLY, net_cred_plan(true, true, false));
 
     net_cred_trial_t t = { 0 };
     uint32_t now = UINT32_MAX - 30u;   /* across the clock wrap */

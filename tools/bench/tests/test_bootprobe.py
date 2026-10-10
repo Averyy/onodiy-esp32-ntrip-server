@@ -121,7 +121,8 @@ class Receiver(threading.Thread):
     the stop key (at a baud it can follow) within `window` seconds, else the application restarts."""
 
     def __init__(self, sock: socket.socket, app_baud: int = 115200, build: int = 18975, window: float = 1.0,
-                 stops: bool = True, answers: bool = True, chatter: bool = False, menu: list[str] = MENU):
+                 stops: bool = True, answers: bool = True, chatter: bool = False, menu: list[str] = MENU,
+                 menu_unreadable: bool = False, menu_on_key: bool = False, build_after: int | None = None):
         super().__init__(daemon=True)
         self.sock = sock
         self.frames = _Frames(sock)
@@ -132,6 +133,10 @@ class Receiver(threading.Thread):
         self.answers = answers
         self.chatter = chatter          # unreadable bytes after the restart, never a prompt
         self.menu = menu
+        self.menu_unreadable = menu_unreadable  # banner and menu at another baud; only the prompt is readable
+        self.menu_on_key = menu_on_key          # the menu is printed only after a key press (an empty line)
+        self.menu_shown = False
+        self.build_after = build_after          # the application that comes back after "6" (None: the same)
         self.state = "app"
         self.loader_baud = None
         self.restart_at = 0.0
@@ -172,8 +177,14 @@ class Receiver(threading.Thread):
                 if line == b"6":
                     self.say(self.loader_baud, "resetting the cpu...\r\n")
                     time.sleep(0.05)
+                    if self.build_after is not None:
+                        self.build = self.build_after
                     self.app_restarted()
                     return
+                if not line and self.menu_on_key and not self.menu_shown:
+                    self.menu_shown = True
+                    self.say(self.loader_baud, "\r\n" + "".join(f"  {m}\r\n" for m in self.menu) + "boot>")
+                    continue
                 self.say(self.loader_baud, ("\r\n" if not line else "Invalid input\r\n") + "boot>")
             else:
                 self.line.append(b)
@@ -202,9 +213,16 @@ class Receiver(threading.Thread):
                             self.state = "loader"
                             self.loader_baud = baud
                             self.line.clear()
-                            banner = ("\r\nuart baudrate: 460800\r\nTimeout: 2s\r\nDefault action: Load OS\r\n"
-                                      + "".join(f"  {m}\r\n" for m in self.menu) + "boot>")
-                            self.say(baud, banner)
+                            banner = "\r\nuart baudrate: 460800\r\nTimeout: 2s\r\nDefault action: Load OS\r\n"
+                            menu = "".join(f"  {m}\r\n" for m in self.menu)
+                            if self.menu_unreadable:
+                                # Printed before the bootloader followed the stop key's baud.
+                                self.say(921600 if baud != 921600 else 115200, banner + menu)
+                                self.say(baud, "boot>")
+                            elif self.menu_on_key:
+                                self.say(baud, banner + "boot>")
+                            else:
+                                self.say(baud, banner + menu + "boot>")
                     elif self.state == "loader":
                         if baud == self.loader_baud:
                             self.loader_input += data
@@ -385,6 +403,69 @@ def test_menu_item6():
     assert bootprobe.menu_item6(b"\xff\xffboot>") is None
 
 
+def test_unreadable_menu_gets_no_6(tmp_path, rig):
+    # The prompt is readable but the menu above it is not (it came at another baud): item 6 is not confirmed.
+    build, _ = rig
+    rx, opener = build(window=1.0, menu_unreadable=True)
+    code, run_dir = run_probe(tmp_path, opener)
+    assert code == bootprobe.EXIT_APP_MISSING
+    assert rx.state == "loader" and b"6" not in rx.loader_lines
+    assert not any(d == b"6\r\n" for _, _, d in rx.received)
+    summary = (run_dir / "summary.txt").read_text()
+    assert "no readable line naming the soft reset" in summary and "power-cycle the receiver" in summary
+    assert_only_allowed(rx)
+
+
+def test_reworded_menu_gets_no_6(tmp_path, rig):
+    # Another bootloader version: item 6 is something else and the restart is worded differently.
+    build, _ = rig
+    other = [m.replace("6 Soft reset cpu", "6 Update factory image").replace("8 Update factory image", "8 Restart cpu")
+             for m in MENU]
+    rx, opener = build(window=1.0, menu=other)
+    code, run_dir = run_probe(tmp_path, opener)
+    assert code == bootprobe.EXIT_APP_MISSING
+    assert b"6" not in rx.loader_lines
+    assert "no readable line naming the soft reset" in (run_dir / "summary.txt").read_text()
+    assert_only_allowed(rx)
+
+
+def test_menu_printed_on_key_press(tmp_path, rig):
+    # Only "boot>" at the stop; the menu comes with the answer to the "\r\n": checked then, 6 sent once.
+    build, _ = rig
+    rx, opener = build(window=1.0, menu_on_key=True)
+    code, run_dir = run_probe(tmp_path, opener)
+    assert code == bootprobe.EXIT_OK
+    assert rx.loader_lines.count(b"6") == 1 and rx.state == "app"
+    assert b"6 Soft reset cpu" in (run_dir / "boot-menu.txt").read_bytes()
+    assert_only_allowed(rx)
+
+
+def test_application_back_with_another_build_fails(tmp_path, rig):
+    build, _ = rig
+    rx, opener = build(window=1.0, build_after=17000)
+    code, run_dir = run_probe(tmp_path, opener)
+    assert code == bootprobe.EXIT_OTHER_BUILD
+    summary = (run_dir / "summary.txt").read_text()
+    assert "FAIL: the application came back with another firmware: R4.10Build17000, was R4.10Build18975" in summary
+    assert "PASS" not in summary
+    assert_only_allowed(rx)
+
+
+def test_stop_key_bursts_follow_each_other_closely(tmp_path, rig):
+    # Each burst once the previous one has left the port, plus about 5 ms: a read must never hold one back.
+    build, _ = rig
+    rx, opener = build(stops=False, window=1.5)
+    code, run_dir = run_probe(tmp_path, opener)
+    assert code == bootprobe.EXIT_NO_PROMPT
+    times = []
+    for line in (run_dir / "transcript.log").read_text().splitlines():
+        if " TX " in line and "|T@T@" in line:
+            times.append(float(line.split()[1][2:-1]))  # "t+12.345s"
+    assert len(times) > 20
+    gaps = sorted(b - a for a, b in zip(times, times[1:]))
+    assert gaps[len(gaps) // 2] < 0.010, gaps[len(gaps) // 2]
+
+
 def test_other_numbering_gets_no_6(tmp_path, rig):
     build, _ = rig
     shifted = [m.replace("6 Soft reset cpu", "7 Soft reset cpu").replace("7 Dump efuse", "6 Dump efuse") for m in MENU]
@@ -394,4 +475,4 @@ def test_other_numbering_gets_no_6(tmp_path, rig):
     assert rx.state == "loader" and b"6" not in rx.loader_lines
     assert not any(d == b"6\r\n" for _, _, d in rx.received)
     summary = (run_dir / "summary.txt").read_text()
-    assert "does not list item 6" in summary and "power-cycle the receiver" in summary
+    assert "numbers the soft reset differently" in summary and "power-cycle the receiver" in summary

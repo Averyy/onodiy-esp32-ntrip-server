@@ -182,10 +182,16 @@ size_t net_scan_insert(net_scan_entry_t *list, size_t count, size_t cap, const n
 typedef enum {
     NET_CRED_PLAN_ACTIVE = 0,   /**< store and use as the station's credentials (none to go back to, or the same ones) */
     NET_CRED_PLAN_TRIAL,        /**< store as pending and try them; the previous ones stay */
+    NET_CRED_PLAN_STORE_ONLY,   /**< store as the station's credentials, not used: the station is not on Wi-Fi (no apply, no trial) */
 } net_cred_plan_t;
 
-/** What to do with credentials the user entered. */
-net_cred_plan_t net_cred_plan(bool have_active, bool same_as_active);
+/**
+ * What to do with credentials the user entered. wifi_used: the station
+ * connects over Wi-Fi (false in the QEMU development build, which runs on an
+ * emulated Ethernet port: there is nothing to try them on, so a trial could
+ * only ever end in a revert).
+ */
+net_cred_plan_t net_cred_plan(bool have_active, bool same_as_active, bool wifi_used);
 
 typedef enum {
     NET_TRIAL_NONE = 0,         /**< no trial, or still waiting */
