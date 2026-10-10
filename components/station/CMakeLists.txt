@@ -2,14 +2,19 @@
 # SPDX-License-Identifier: MIT
 #
 # Public header depends only on gnss_types, so readers of station status do
-# not pull in the GNSS link or the command layer.
+# not pull in the GNSS link or the command layer. station_core.c and
+# station_obs.c are pure logic (no IDF includes) and are also compiled into
+# the host test app; station.c is the task around them.
 idf_component_register(
-    SRCS "station.c"
+    SRCS "station.c" "station_core.c" "station_obs.c"
     INCLUDE_DIRS "include"
+    PRIV_INCLUDE_DIRS "priv_include"
     REQUIRES esp_event gnss_types
     PRIV_REQUIRES
         board
         esp_hw_support
+        esp_timer
+        gnss_framing
         gnss_link
         gnss_obs
         rtcm_hub

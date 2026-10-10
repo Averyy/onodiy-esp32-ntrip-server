@@ -104,7 +104,7 @@ static const boot_step_t s_init_steps[] = {
 static const boot_step_t s_start_steps[] = {
     { "network",      network_start,      false },
     { "web",          web_start,          false },
-    { "station",      station_start,      true  },
+    { "station",      station_start,      true  }, /* starts the GNSS RX task: stream-first bring-up */
     { "ntrip_server", ntrip_server_start, true  },
     { "fw_update",    fw_update_start,    false },
     { "health",       health_start,       false },

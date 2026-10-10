@@ -91,15 +91,43 @@
  *    reduced lockout (app installs and the safe-mode retry reboots stay
  *    allowed). The crash that led to safe mode may be in the flash path
  *    itself; retrying it there would take the web UI down with it;
+ *  - while the boot-time recovery is report-only, an open session that is
+ *    not waiting for the user is logged (what the recovery would do) and
+ *    then waits for the user like one in "needs user" (reduced lockout,
+ *    flash.phase UM98X_FLASH_NEEDS_USER in the status); its record is left
+ *    unchanged, so a build that can recover it still finds it as written;
  *  - a boot with no open journal releases any staged package left over;
  *    in safe mode station_safe_mode_boot() does that without the UART.
  * Every successful detection persists gnss/model and gnss/fw.
  *
- * While CONFIGURING or FLASHING it pauses the casters (a planned source
- * stall: they idle, then close after their stall limit) and tells the ledger
- * the downtime is planned. Lease state, the time since the last lease
- * release, the survey window and the journal state are published in the
- * status for the health monitor's suspension rules.
+ * While CONFIGURING or FLASHING, during the health ladder's rescan,
+ * reconfigure and receiver-reset steps, and while a flash journal is open, it
+ * pauses the casters (a planned source stall: they idle, then close after
+ * their stall limit; the ledger counts planned downtime). Lease state, the
+ * time since the last lease release, the survey window and the journal state
+ * are published in the status for the health monitor's suspension rules.
+ *
+ * The receiver's output is watched in windows of 30 s (longer for slow
+ * station messages): every MSM type of the profile at its period (the
+ * regional QZSS and NavIC types only when they arrive at all), and 1005,
+ * 1033 and, when the receiver accepted it, 1230 within twice their period,
+ * at least 30 s (not 1005/1033 while a survey runs). The first window after
+ * boot (or after a receiver restart, 30 s later) is the applied check's
+ * last part; the one after an apply checks that apply (if it fails, the
+ * station does not re-apply on drift until the receiver restarts or someone
+ * asks); later ones watch for drift: two failed windows in a row while RTCM
+ * flows re-apply (gnss/autocfg = 1, no CONFIG_FAILED). Silence is a stall
+ * for the health ladder, not drift. PROVISIONAL, to be confirmed on
+ * hardware.
+ *
+ * Base position: an apply that starts a survey-in, a receiver restart while
+ * the profile surveys, or a running survey found at boot opens the survey
+ * window; the base mode is read every 60 s while it is open. A finished
+ * survey is locked automatically (gnss/autocfg = 1, no CONFIG_FAILED): the
+ * latest 1005 becomes the fixed position, applied as ECEF, and the next 1005
+ * must be within 5 mm (else STATION_ALERT_POSITION_MISMATCH). A fixed base
+ * that sends no RTCM after a receiver restart while it still reports a fixed
+ * base raises STATION_ALERT_ANTENNA_MOVED; it is never re-surveyed on its own.
  *
  * Dependencies point down only: the station never calls health or
  * fw_update; it learns about an app trial from lifecycle.
@@ -136,7 +164,7 @@ typedef enum {
 } station_event_t;
 
 typedef enum {
-    STATION_STATE_IDLE = 0,      /**< not started (or safe mode) */
+    STATION_STATE_IDLE = 0,      /**< not started (or safe mode), or the first 3 s of a boot: listening at the stored baud */
     STATION_STATE_DETECTING,
     STATION_STATE_CONFIGURING,
     STATION_STATE_STREAMING,
@@ -247,7 +275,13 @@ esp_err_t station_start(void);
 /** Status snapshot. Works before station_init() (safe mode): state IDLE, journal read from settings. */
 esp_err_t station_get_status(station_status_t *out);
 
-/** Re-apply the stored base profile (after the user edits it). Async. */
+/**
+ * Re-apply the stored base profile (after the user edits it). Async; runs
+ * whatever gnss/autocfg says, also while CONFIG_FAILED is raised, once the
+ * receiver streams.
+ * @return ESP_ERR_INVALID_STATE uninitialised (safe mode) or with a flash
+ *         journal open, ESP_ERR_NOT_SUPPORTED for an unsupported model.
+ */
 esp_err_t station_request_reconfigure(void);
 
 /**
@@ -289,18 +323,28 @@ esp_err_t station_flash_user_action(station_flash_action_t action);
 size_t station_get_flash_log(char *buf, size_t len);
 
 /**
- * Run one recovery action. Async; ignored if a stronger one is in progress.
+ * Run one recovery action. Async; ignored if an equal or stronger one is
+ * queued or in progress. The station is RECOVERING while it runs.
  * @return ESP_ERR_INVALID_STATE when refused without sending anything:
- *         uninitialised, or RECONFIGURE while gnss/autocfg = 0 or
- *         STATION_ALERT_CONFIG_FAILED is raised (health counts a refused
- *         step as failed at once).
+ *         uninitialised, a flash journal open, not STREAMING (or
+ *         CONFIGURING / RECOVERING; while DETECTING or NO_RECEIVER the
+ *         station's own detection schedule runs), or RECONFIGURE while
+ *         gnss/autocfg = 0 or STATION_ALERT_CONFIG_FAILED is raised (health
+ *         counts a refused step as failed at once); ESP_ERR_INVALID_ARG for
+ *         an unknown action.
  */
 esp_err_t station_request_recovery(station_recovery_t action);
 
-/** Lock the current base position (persist it, switch the profile to FIXED, reconfigure). Async. */
+/**
+ * Lock the current base position (persist it, switch the profile to FIXED,
+ * reconfigure). Async.
+ * @return ESP_ERR_NOT_FOUND before the receiver sent a 1005,
+ *         ESP_ERR_NOT_SUPPORTED for an unsupported model,
+ *         ESP_ERR_INVALID_STATE uninitialised or with a flash journal open.
+ */
 esp_err_t station_lock_position(void);
 
-/** Forget the locked position and survey again (reconfigure). Async. */
+/** Forget the locked position and survey again (reconfigure). Async. Errors as station_request_reconfigure(). */
 esp_err_t station_request_resurvey(void);
 
 #ifdef __cplusplus

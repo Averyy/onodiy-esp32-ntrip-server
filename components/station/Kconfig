@@ -2,6 +2,16 @@
 # SPDX-License-Identifier: MIT
 menu "Station: receiver supervisor"
 
+    config STATION_TASK_STACK
+        int "Supervisor task stack (bytes)"
+        range 4096 16384
+        default 8192
+        help
+            Internal RAM (the task writes settings). Detection, the profile
+            apply and the command layer's session executor run on it.
+            PROVISIONAL, to be confirmed on hardware from the task's stack
+            high-water mark.
+
     config STATION_FLASH_RESTART_ALLOWANCE_S
         int "Receiver write, restart and reacquisition allowance for an update (s)"
         range 30 900
