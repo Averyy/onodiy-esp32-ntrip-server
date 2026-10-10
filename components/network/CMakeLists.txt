@@ -8,4 +8,4 @@ idf_component_register(
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "priv_include"
     REQUIRES esp_event
-    PRIV_REQUIRES settings diag lifecycle esp_wifi esp_netif lwip esp_timer)
+    PRIV_REQUIRES settings diag lifecycle ledger esp_wifi esp_netif lwip esp_timer)

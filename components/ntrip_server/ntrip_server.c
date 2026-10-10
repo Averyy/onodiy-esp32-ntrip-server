@@ -1105,9 +1105,11 @@ static io_result_t do_connect(slot_t *s, ntrip_failure_t *f)
 
 /* ---- stats and status ------------------------------------------------------------------- */
 
+/* `enabled` is the configuration: time before the client starts or while it
+ * shuts down still counts as downtime in the ledger. */
 static void ledger_report(slot_t *s)
 {
-    bool enabled = s->cfg.enabled && s_running;
+    bool enabled = s->cfg.enabled;
     bool streaming = s->sm.state == NTRIP_SM_STREAMING;
     if (!s->ledger_known || enabled != s->ledger_enabled || s->cfg.protected_slot != s->ledger_protected ||
         streaming != s->ledger_streaming) {

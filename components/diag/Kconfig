@@ -3,15 +3,35 @@
 menu "Station: diagnostics"
 
     config DIAG_LOG_RING_KB
-        int "Log ring for the web UI (KB, PSRAM, kept across resets)"
+        int "Log ring for the web UI (KB per boot, PSRAM, kept across resets)"
         range 8 1024
         default 64
         help
             Every log line is also copied here so it can be read remotely
             (web UI log view, WebSocket stream). The ring survives software,
             panic and watchdog resets, so the previous boot's last lines can
-            be read after a crash. The serial console keeps receiving all
-            output as usual.
+            be read after a crash: two rings of this size are kept in PSRAM,
+            this boot's and the previous boot's.
+
+    config DIAG_LOG_LINE_MAX
+        int "Longest log line kept (bytes)"
+        range 128 1024
+        default 256
+        help
+            Each line is formatted on the stack of the task that logs, so
+            this adds to every logging task's stack use. Longer lines are
+            cut and end in "..." on the console and in the log ring.
+
+    config DIAG_CONSOLE_TX_BUF
+        int "Console transmit buffer (bytes, internal RAM)"
+        range 1024 32768
+        default 4096
+        help
+            The serial console runs at 115200 baud (about 11.5 KB/s). A log
+            line goes to the console only when it fits in this buffer, so a
+            burst never stalls the task that logs; lines that do not fit are
+            counted as dropped (the log ring still has them) and the console
+            says how many before its output resumes.
 
     config DIAG_JOURNAL_MIN_INTERVAL_MS
         int "Minimum interval between journal records of one kind (ms)"
@@ -24,5 +44,18 @@ menu "Station: diagnostics"
             Health-ladder step records are exempt: one step's result and the
             next step's start fall in the same second, and the ladder bounds
             their rate itself (each step has a grace of at least 5 s).
+
+    config DIAG_JOURNAL_BUDGET_PER_H
+        int "Journal records per hour, all kinds together"
+        range 60 36000
+        default 1800
+        help
+            Second rate limit, over all kinds: at most this many records per
+            hour on average, of which up to ten minutes' worth may come at
+            once. Refused records are reported like the per-kind limit's;
+            ladder step records are exempt. Every 127 records cost one
+            sector erase: at the default, a journal written at the full rate
+            without a break would take more than 20 years to reach 100 000
+            erases per sector.
 
 endmenu

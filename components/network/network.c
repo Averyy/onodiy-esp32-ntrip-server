@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "captive_dns.h"
 #include "diag.h"
@@ -38,6 +39,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "ledger.h"
 #include "lifecycle.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
@@ -1276,6 +1278,8 @@ static void handle_msg(const net_msg_t *m)
         taskENTER_CRITICAL(&s_lock);
         s_st.time_synced = true;
         taskEXIT_CRITICAL(&s_lock);
+        /* The availability ledger's fallback clock (it prefers GNSS time). */
+        ledger_set_utc((int64_t)time(NULL), LEDGER_CLOCK_SNTP);
         post_event(NETWORK_EVENT_TIME_SYNCED);
         break;
     case MSG_RECOVER:
