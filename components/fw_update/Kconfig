@@ -14,9 +14,31 @@ menu "Station: firmware updates"
         string "Release manifest asset name"
         default "manifest.json"
 
-    config FW_UPDATE_APP_ASSET
-        string "App image asset name"
-        default "onocoydiy-esp-um982.bin"
+    config FW_UPDATE_MANIFEST_KEY_1
+        string "Manifest signing key 1 (public, hex)"
+        default ""
+        help
+            Public half of the offline key that signs release manifests:
+            the uncompressed P-256 point (04 || X || Y) as 130 hex digits,
+            e.g. from `openssl ec -pubin -in key.pub -text -noout` with the
+            colons removed. A manifest is used only if key 1 or key 2
+            verifies its signature. With neither set, this build cannot
+            verify any manifest and never offers an update (manual uploads
+            still work). Forks put their own keys here.
+
+    config FW_UPDATE_MANIFEST_KEY_2
+        string "Manifest signing key 2 (public, hex)"
+        default ""
+        help
+            Second accepted key, so the signing key can be rotated: ship
+            the next key here before signing releases with it.
+
+    config FW_UPDATE_HTTP_TIMEOUT_MS
+        int "HTTP network timeout (ms)"
+        range 5000 60000
+        default 15000
+        help
+            Per connect/read timeout of the update check and the downloads.
 
     config FW_UPDATE_CHECK_INTERVAL_H
         int "Hours between automatic update checks (not a runtime setting)"

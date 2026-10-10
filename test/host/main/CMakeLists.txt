@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 #
 # Pure cores are compiled straight from the firmware tree; their components
-# as a whole need the real target. settings builds whole (NVS runs on IDF's
-# emulated flash for the linux target).
+# as a whole need the real target. settings and pkg_store build whole (NVS
+# and the package slot run on IDF's emulated flash for the linux target).
 set(_fw "${CMAKE_CURRENT_LIST_DIR}/../../../components")
 
 idf_component_register(
@@ -33,10 +33,18 @@ idf_component_register(
         "test_captive_dns.c"
         "test_net_core.c"
         "test_net_ladder.c"
+        "test_manifest.c"
+        "test_update_policy.c"
+        "test_app_trial.c"
+        "test_pkg_header.c"
+        "test_pkg_store.c"
         "${_fw}/lifecycle/boot_guard.c"
         "${_fw}/lifecycle/reboot_gate.c"
         "${_fw}/lifecycle/boot_history.c"
         "${_fw}/fw_update/semver.c"
+        "${_fw}/fw_update/manifest.c"
+        "${_fw}/fw_update/update_policy.c"
+        "${_fw}/fw_update/app_trial.c"
         "${_fw}/um98x_ctl/um98x_profile.c"
         "${_fw}/um98x_ctl/um98x_base.c"
         "${_fw}/um98x_ctl/um98x_reply.c"
@@ -66,7 +74,8 @@ idf_component_register(
         "${_fw}/gnss_link/include"
         "${_fw}/gnss_link/priv_include"
         "${_fw}/network/priv_include"
-    REQUIRES unity gnss_framing gnss_types settings nvs_flash esp_partition esp_event
+        "${_fw}/pkg_store/priv_include"
+    REQUIRES unity gnss_framing gnss_types settings pkg_store nvs_flash esp_partition esp_event mbedtls
     WHOLE_ARCHIVE)
 
 # The WGS84 conversion and the caster budget estimate use libm (part of libc

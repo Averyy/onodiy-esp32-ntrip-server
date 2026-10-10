@@ -44,7 +44,9 @@ Antenna and cable notes: [`reference/antenna-specs.md`](reference/antenna-specs.
 4. **Updates from GitHub Releases** — daily check with a banner in the web UI; the
    ESP32 app (`.bin`) and UM982 firmware (`.pkg`) install only when you click Update
    (or upload a file). Downloads are HTTPS; the `.pkg` lives in
-   [`firmware/um982/`](firmware/um982/).
+   [`firmware/um982/`](firmware/um982/). Each release carries a signed manifest
+   (ECDSA P-256, offline key); the station only offers what it lists and checks every
+   download against its size and SHA-256.
 5. **Web UI** — Wi-Fi setup, NTRIP configuration, live status, firmware updates, and a
    signal/satellite view.
 6. **Health monitoring** — GNSS watchdog, auto-recovery, and data-loss counters.
@@ -94,6 +96,13 @@ Notes:
   version matters.
 - The partition table is permanent once a station is deployed (see the comments in
   `partitions.csv`).
+- Release manifest: `manifest.json` on each release is
+  `{"payload": "<base64 of the manifest JSON>", "signature": "<base64 of the DER
+  signature>"}`, signed with `openssl dgst -sha256 -sign key.pem` over the exact
+  payload bytes (format in `components/fw_update/priv_include/manifest.h`). Builds
+  verify it with the public keys in `CONFIG_FW_UPDATE_MANIFEST_KEY_1`/`_2` (130 hex
+  digits, `openssl ec -pubin -in key.pub -text -noout`); a build without a key never
+  offers updates. Forks set their own keys.
 
 ## Recovery (planned behaviour)
 
