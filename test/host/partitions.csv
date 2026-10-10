@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+#
+# Host tests only (IDF's emulated flash on the linux target): the default
+# single-app layout plus a small receiver package slot for pkg_store, same
+# type, subtype and label as in the firmware's partitions.csv.
+#
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     ,        0x6000,
+phy_init, data, phy,     ,        0x1000,
+factory,  app,  factory, ,        1M,
+gnss_pkg, 0x40, 0x00,    ,        0x10000,

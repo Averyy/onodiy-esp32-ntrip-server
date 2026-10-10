@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+# Managed dependencies of the host tests (versions pinned in
+# test/host/dependencies.lock). cJSON: the release manifest parser.
+dependencies:
+  espressif/cjson: "^1.7.19"

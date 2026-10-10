@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 #
 # Host unit tests (ESP-IDF "linux" target, Unity): the pure cores, plus the
-# settings component on IDF's emulated flash (NVS builds for the linux target).
+# settings and pkg_store components on IDF's emulated flash (NVS and raw
+# partitions build for the linux target; partitions.csv adds a package slot).
 #
 #   cd test/host
 #   idf.py --preview set-target linux
@@ -19,13 +20,14 @@ cmake_minimum_required(VERSION 3.22)
 set(EXTRA_COMPONENT_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/../../components/gnss_framing"
     "${CMAKE_CURRENT_LIST_DIR}/../../components/gnss_types"
-    "${CMAKE_CURRENT_LIST_DIR}/../../components/settings")
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/settings"
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/pkg_store")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 set(COMPONENTS main)
 project(onocoydiy_host_tests)
 
-foreach(_comp main gnss_framing settings)
+foreach(_comp main gnss_framing settings pkg_store)
     idf_component_get_property(_lib ${_comp} COMPONENT_LIB)
     target_compile_options(${_lib} PRIVATE
         -Wall -Wextra -Werror

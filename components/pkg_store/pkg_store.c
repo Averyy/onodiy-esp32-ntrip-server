@@ -4,11 +4,19 @@
  */
 #include "pkg_store.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
 #include "esp_partition.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "pkg_header.h"
 #include "psa/crypto.h"
+#include "sdkconfig.h"
+#if CONFIG_ESP_TASK_WDT_EN
+#include "esp_task_wdt.h"
+#endif
 
 static const char *TAG = "pkg_store";
 
@@ -16,26 +24,196 @@ static const char *TAG = "pkg_store";
 #define PKG_STORE_PARTITION_TYPE    ((esp_partition_type_t)0x40)
 #define PKG_STORE_PARTITION_SUBTYPE ((esp_partition_subtype_t)0x00)
 #define PKG_STORE_PARTITION_LABEL   "gnss_pkg"
-#define PKG_STORE_HEADER_SIZE       4096u
+#define PKG_STORE_HEADER_SIZE       PKG_HDR_SECTOR_SIZE
+#define PKG_STORE_ERASE_SIZE        4096u
+#define VERIFY_CHUNK                4096u
 
 /* Hashing uses PSA Crypto (Mbed TLS 4 / TF-PSA-Crypto in IDF v6.x); the
  * legacy mbedtls_sha256_* API is private there. */
 _Static_assert(PSA_HASH_LENGTH(PSA_ALG_SHA_256) == sizeof(((pkg_store_info_t *)0)->sha256),
                "pkg_store digest size must match SHA-256");
+_Static_assert(PKG_STORE_HEADER_SIZE % PKG_STORE_ERASE_SIZE == 0, "payload must start on an erase boundary");
+
+struct pkg_store_writer {
+    bool open;
+    uint32_t size;               /* expected payload bytes */
+    uint32_t written;
+    uint32_t erased;             /* payload bytes erased so far (multiple of the erase size) */
+    bool check_digest;
+    uint8_t expected[32];
+    psa_hash_operation_t hash;
+};
 
 static const esp_partition_t *s_part;
+static SemaphoreHandle_t s_mutex;
+static pkg_hdr_t s_hdr;          /* current state (valid when s_have_hdr) */
+static bool s_have_hdr;
+static int s_next_slot;          /* next free header record slot, -1 = sector full */
+static struct pkg_store_writer s_writer;
+
+static void lock(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+}
+
+static void unlock(void)
+{
+    xSemaphoreGive(s_mutex);
+}
+
+static bool staged_valid(void)
+{
+    return s_have_hdr && s_hdr.state == PKG_HDR_VALID;
+}
+
+static void fill_info(pkg_store_info_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!s_have_hdr) {
+        return;
+    }
+    out->valid = s_hdr.state == PKG_HDR_VALID;
+    out->pinned = s_hdr.pinned;
+    out->size = out->valid ? s_hdr.size : 0;
+    memcpy(out->sha256, s_hdr.sha256, sizeof(out->sha256));
+    strlcpy(out->version, s_hdr.version, sizeof(out->version));
+}
+
+/* Read the header sector and adopt its last valid record. Call locked. */
+static esp_err_t load_header(void)
+{
+    uint8_t *sector = malloc(PKG_HDR_SECTOR_SIZE);
+    if (sector == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t err = esp_partition_read(s_part, 0, sector, PKG_HDR_SECTOR_SIZE);
+    if (err == ESP_OK) {
+        pkg_hdr_scan_t scan;
+        pkg_hdr_scan(sector, &scan);
+        s_have_hdr = scan.found;
+        s_hdr = scan.hdr;
+        s_next_slot = scan.next_slot;
+        if (s_have_hdr && s_hdr.state == PKG_HDR_VALID && (s_hdr.size == 0 || s_hdr.size > pkg_store_capacity())) {
+            ESP_LOGW(TAG, "header names %u bytes, more than the slot holds: treated as empty", (unsigned)s_hdr.size);
+            s_hdr.state = PKG_HDR_EMPTY;
+            s_hdr.pinned = false;
+        }
+    }
+    free(sector);
+    return err;
+}
+
+/* Erase the header sector: the slot is empty from here on. Call locked. */
+static esp_err_t erase_header(void)
+{
+    esp_err_t err = esp_partition_erase_range(s_part, 0, PKG_HDR_SECTOR_SIZE);
+    if (err == ESP_OK) {
+        s_have_hdr = false;
+        memset(&s_hdr, 0, sizeof(s_hdr));
+        s_next_slot = 0;
+    }
+    return err;
+}
+
+/*
+ * Append a header record (the new state). A full sector is erased and
+ * restarted. A record that does not read back intact (failed write) is
+ * skipped and the next slot is tried. Call locked.
+ */
+static esp_err_t append_header(const pkg_hdr_t *h)
+{
+    pkg_hdr_t rec = *h;
+    rec.seq = s_have_hdr ? s_hdr.seq + 1u : 1u;
+    uint8_t buf[PKG_HDR_RECORD_SIZE];
+    uint8_t back[PKG_HDR_RECORD_SIZE];
+    esp_err_t err = ESP_FAIL;
+    for (unsigned attempt = 0; attempt < 3; attempt++) {
+        if (s_next_slot < 0) {
+            err = esp_partition_erase_range(s_part, 0, PKG_HDR_SECTOR_SIZE);
+            if (err != ESP_OK) {
+                return err;
+            }
+            s_next_slot = 0;
+        }
+        size_t off = (size_t)s_next_slot * PKG_HDR_RECORD_SIZE;
+        s_next_slot = (s_next_slot + 1 < (int)PKG_HDR_SLOTS) ? s_next_slot + 1 : -1;
+        pkg_hdr_encode(&rec, buf);
+        err = esp_partition_write(s_part, off, buf, sizeof(buf));
+        if (err == ESP_OK) {
+            err = esp_partition_read(s_part, off, back, sizeof(back));
+        }
+        pkg_hdr_t check;
+        if (err == ESP_OK && pkg_hdr_decode(back, &check) && check.seq == rec.seq) {
+            s_hdr = check;
+            s_have_hdr = true;
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "header record at %u did not stick (%s), trying the next slot", (unsigned)off,
+                 esp_err_to_name(err));
+        if (err == ESP_OK) {
+            err = ESP_ERR_INVALID_CRC;
+        }
+    }
+    return err;
+}
+
+static esp_err_t append_state(uint8_t state, bool pinned)
+{
+    pkg_hdr_t h = s_hdr;
+    h.state = state;
+    h.pinned = pinned;
+    if (state == PKG_HDR_EMPTY) {
+        h.size = 0;
+        memset(h.sha256, 0, sizeof(h.sha256));
+        memset(h.version, 0, sizeof(h.version));
+    }
+    return append_header(&h);
+}
+
+static void writer_close(void)
+{
+    if (s_writer.open) {
+        psa_hash_abort(&s_writer.hash);
+    }
+    memset(&s_writer, 0, sizeof(s_writer));
+}
 
 esp_err_t pkg_store_init(void)
 {
-    s_part = esp_partition_find_first(PKG_STORE_PARTITION_TYPE, PKG_STORE_PARTITION_SUBTYPE,
-                                      PKG_STORE_PARTITION_LABEL);
-    if (s_part == NULL) {
+    if (s_mutex == NULL) {
+        s_mutex = xSemaphoreCreateMutex();
+        if (s_mutex == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    if (psa_crypto_init() != PSA_SUCCESS) {
+        return ESP_FAIL;
+    }
+    lock();
+    writer_close();   /* a write cut short by a reboot left the slot empty */
+    s_have_hdr = false;
+    s_next_slot = 0;
+    s_part = esp_partition_find_first(PKG_STORE_PARTITION_TYPE, PKG_STORE_PARTITION_SUBTYPE, PKG_STORE_PARTITION_LABEL);
+    if (s_part == NULL || s_part->size <= PKG_STORE_HEADER_SIZE) {
+        s_part = NULL;
+        unlock();
         ESP_LOGE(TAG, "partition '%s' not found", PKG_STORE_PARTITION_LABEL);
         return ESP_ERR_NOT_FOUND;
     }
-    /* TODO: read and validate the header sector (state, pin). */
-    ESP_LOGI(TAG, "partition '%s' at 0x%06x, %u KB payload capacity", s_part->label,
-             (unsigned)s_part->address, (unsigned)(pkg_store_capacity() / 1024));
+    esp_err_t err = load_header();
+    pkg_store_info_t info;
+    fill_info(&info);
+    unlock();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "header unreadable: %s", esp_err_to_name(err));
+        return err;
+    }
+    if (info.valid) {
+        ESP_LOGI(TAG, "staged: %s, %u bytes%s", info.version, (unsigned)info.size, info.pinned ? ", pinned" : "");
+    } else {
+        ESP_LOGI(TAG, "partition '%s' at 0x%06x: empty, %u KB capacity", s_part->label, (unsigned)s_part->address,
+                 (unsigned)(pkg_store_capacity() / 1024));
+    }
     return ESP_OK;
 }
 
@@ -53,72 +231,271 @@ esp_err_t pkg_store_get_info(pkg_store_info_t *out)
         return ESP_ERR_INVALID_ARG;
     }
     memset(out, 0, sizeof(*out));
-    return ESP_ERR_NOT_FOUND;
+    if (s_part == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    lock();
+    fill_info(out);
+    unlock();
+    return out->valid ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t pkg_store_begin(uint32_t size, const uint8_t expected_sha256[32], pkg_store_writer_t *out)
 {
-    (void)expected_sha256;
-    if (out != NULL) {
-        *out = NULL;
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
     }
-    if (size > pkg_store_capacity()) {
+    *out = NULL;
+    if (s_part == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (size == 0 || size > pkg_store_capacity()) {
         return ESP_ERR_INVALID_SIZE;
     }
-    return ESP_ERR_NOT_SUPPORTED;
+    lock();
+    if (s_writer.open || (s_have_hdr && s_hdr.pinned)) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* The slot is empty from the first byte on: a power cut mid-write
+     * leaves no header at all, never "valid but truncated". */
+    esp_err_t err = erase_header();
+    if (err != ESP_OK) {
+        unlock();
+        return err;
+    }
+    memset(&s_writer, 0, sizeof(s_writer));
+    s_writer.hash = psa_hash_operation_init();
+    if (psa_hash_setup(&s_writer.hash, PSA_ALG_SHA_256) != PSA_SUCCESS) {
+        unlock();
+        return ESP_FAIL;
+    }
+    s_writer.open = true;
+    s_writer.size = size;
+    s_writer.check_digest = expected_sha256 != NULL;
+    if (expected_sha256 != NULL) {
+        memcpy(s_writer.expected, expected_sha256, sizeof(s_writer.expected));
+    }
+    *out = &s_writer;
+    unlock();
+    return ESP_OK;
 }
 
 esp_err_t pkg_store_write(pkg_store_writer_t w, const void *data, size_t len)
 {
-    (void)w;
-    (void)data;
-    (void)len;
-    return ESP_ERR_NOT_SUPPORTED;
+    if (w == NULL || (data == NULL && len > 0)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    lock();
+    if (w != &s_writer || !s_writer.open) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (len > s_writer.size - s_writer.written) {
+        unlock();
+        return ESP_ERR_INVALID_SIZE;
+    }
+    esp_err_t err = ESP_OK;
+    uint32_t end = s_writer.written + (uint32_t)len;
+    /* Erase ahead, one sector at a time (never a long block erase). */
+    while (err == ESP_OK && s_writer.erased < end) {
+        err = esp_partition_erase_range(s_part, PKG_STORE_HEADER_SIZE + s_writer.erased, PKG_STORE_ERASE_SIZE);
+        if (err == ESP_OK) {
+            s_writer.erased += PKG_STORE_ERASE_SIZE;
+        }
+    }
+    if (err == ESP_OK && len > 0) {
+        err = esp_partition_write(s_part, PKG_STORE_HEADER_SIZE + s_writer.written, data, len);
+    }
+    if (err == ESP_OK && len > 0 && psa_hash_update(&s_writer.hash, data, len) != PSA_SUCCESS) {
+        err = ESP_FAIL;
+    }
+    if (err == ESP_OK) {
+        s_writer.written = end;
+    }
+    unlock();
+    return err;
 }
 
 esp_err_t pkg_store_finish(pkg_store_writer_t w, const char *version, pkg_store_info_t *out)
 {
-    (void)w;
-    (void)version;
     if (out != NULL) {
         memset(out, 0, sizeof(*out));
     }
-    return ESP_ERR_NOT_SUPPORTED;
+    if (w == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    lock();
+    if (w != &s_writer || !s_writer.open) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = ESP_OK;
+    uint8_t digest[32];
+    size_t digest_len = 0;
+    if (s_writer.written != s_writer.size) {
+        err = ESP_ERR_INVALID_SIZE;
+    } else if (psa_hash_finish(&s_writer.hash, digest, sizeof(digest), &digest_len) != PSA_SUCCESS ||
+               digest_len != sizeof(digest)) {
+        err = ESP_FAIL;
+    } else if (s_writer.check_digest && memcmp(digest, s_writer.expected, sizeof(digest)) != 0) {
+        err = ESP_ERR_INVALID_CRC;
+    }
+    if (err == ESP_OK) {
+        pkg_hdr_t h;
+        memset(&h, 0, sizeof(h));
+        h.state = PKG_HDR_VALID;
+        h.size = s_writer.size;
+        memcpy(h.sha256, digest, sizeof(h.sha256));
+        strlcpy(h.version, version != NULL ? version : "", sizeof(h.version));
+        err = append_header(&h);
+    }
+    /* psa_hash_finish ends the operation whatever it returns; abort is harmless after it. */
+    writer_close();
+    if (err == ESP_OK && out != NULL) {
+        fill_info(out);
+    }
+    unlock();
+    if (err == ESP_ERR_INVALID_CRC) {
+        ESP_LOGW(TAG, "package digest does not match: not staged");
+    }
+    return err;
 }
 
 void pkg_store_abort(pkg_store_writer_t w)
 {
-    (void)w;
+    if (w == NULL || s_mutex == NULL) {
+        return;
+    }
+    lock();
+    if (w == &s_writer) {
+        writer_close();
+    }
+    unlock();
 }
 
 esp_err_t pkg_store_read(uint32_t offset, void *buf, size_t len)
 {
-    (void)offset;
-    (void)buf;
-    (void)len;
-    return ESP_ERR_NOT_SUPPORTED;
+    if (buf == NULL && len > 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_part == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    lock();
+    esp_err_t err = ESP_OK;
+    if (!staged_valid()) {
+        err = ESP_ERR_NOT_FOUND;
+    } else if (offset > s_hdr.size || len > s_hdr.size - offset) {
+        err = ESP_ERR_INVALID_SIZE;
+    } else if (len > 0) {
+        err = esp_partition_read(s_part, PKG_STORE_HEADER_SIZE + offset, buf, len);
+    }
+    unlock();
+    return err;
 }
 
 esp_err_t pkg_store_verify(void)
 {
-    return ESP_ERR_NOT_FOUND;
+    if (s_part == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    uint8_t *buf = malloc(VERIFY_CHUNK);
+    if (buf == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+#if CONFIG_ESP_TASK_WDT_EN
+    bool feed = esp_task_wdt_status(NULL) == ESP_OK;
+#endif
+    lock();
+    esp_err_t err = ESP_OK;
+    psa_hash_operation_t op = psa_hash_operation_init();
+    if (!staged_valid()) {
+        err = ESP_ERR_NOT_FOUND;
+    } else if (psa_hash_setup(&op, PSA_ALG_SHA_256) != PSA_SUCCESS) {
+        err = ESP_FAIL;
+    }
+    for (uint32_t off = 0; err == ESP_OK && off < s_hdr.size; off += VERIFY_CHUNK) {
+        size_t n = (s_hdr.size - off) < VERIFY_CHUNK ? (s_hdr.size - off) : VERIFY_CHUNK;
+        err = esp_partition_read(s_part, PKG_STORE_HEADER_SIZE + off, buf, n);
+        if (err == ESP_OK && psa_hash_update(&op, buf, n) != PSA_SUCCESS) {
+            err = ESP_FAIL;
+        }
+#if CONFIG_ESP_TASK_WDT_EN
+        if (feed && (off / VERIFY_CHUNK) % 64u == 0) {
+            esp_task_wdt_reset();
+        }
+#endif
+    }
+    if (err == ESP_OK) {
+        uint8_t digest[32];
+        size_t digest_len = 0;
+        if (psa_hash_finish(&op, digest, sizeof(digest), &digest_len) != PSA_SUCCESS || digest_len != sizeof(digest)) {
+            err = ESP_FAIL;
+        } else if (memcmp(digest, s_hdr.sha256, sizeof(digest)) != 0) {
+            err = ESP_ERR_INVALID_CRC;
+        }
+    }
+    psa_hash_abort(&op);
+    unlock();
+    free(buf);
+    if (err == ESP_ERR_INVALID_CRC) {
+        ESP_LOGE(TAG, "staged package no longer matches its digest");
+    }
+    return err;
 }
 
 esp_err_t pkg_store_set_pinned(bool pinned)
 {
-    (void)pinned;
-    return ESP_ERR_NOT_SUPPORTED;
+    if (s_part == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    lock();
+    esp_err_t err = ESP_OK;
+    if (!staged_valid()) {
+        err = ESP_ERR_NOT_FOUND;
+    } else if (s_hdr.pinned != pinned) {
+        err = append_state(PKG_HDR_VALID, pinned);
+    }
+    unlock();
+    return err;
 }
 
 esp_err_t pkg_store_invalidate(void)
 {
-    return ESP_ERR_NOT_SUPPORTED;
+    if (s_part == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    lock();
+    esp_err_t err = ESP_OK;
+    if (s_have_hdr && s_hdr.pinned) {
+        err = ESP_ERR_INVALID_STATE;
+    } else if (staged_valid()) {
+        err = append_state(PKG_HDR_EMPTY, false);
+    }
+    unlock();
+    return err;
 }
 
 esp_err_t pkg_store_release(void)
 {
-    /* TODO: one header write (unpinned, EMPTY) once the header is read and
-     * written. The stub never stages a package, so there is nothing to
-     * release. */
-    return ESP_OK;
+    if (s_part == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    lock();
+    esp_err_t err = ESP_OK;
+    if (s_have_hdr && (s_hdr.state == PKG_HDR_VALID || s_hdr.pinned)) {
+        err = append_state(PKG_HDR_EMPTY, false);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "staged package released");
+        }
+    }
+    unlock();
+    return err;
 }
