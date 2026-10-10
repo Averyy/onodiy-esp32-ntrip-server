@@ -31,8 +31,9 @@
  *  - A build without a manifest key (the default) accepts either form and
  *    checks no signature: it has nothing to check one against. The release
  *    is trusted because it came over HTTPS, with the certificate checked
- *    against the CA bundle, from GitHub's release hosts for the repository
- *    set at build time (fw_http.c, release_url.h), and every asset it names
+ *    against the CA bundle and its dates against the clock, from the
+ *    releases of the repository set at build time on GitHub's release hosts
+ *    (fw_http.c, release_url.h), and every asset it names
  *    must match its size and SHA-256 (fw_asset_check_*, pkg_store).
  *  - A build with a key (CONFIG_FW_UPDATE_MANIFEST_KEY_1/_2, e.g. a fork that
  *    signs its releases) accepts only an envelope whose signature one of its

@@ -6,11 +6,16 @@
  * package download and the app image download all go through one request
  * path (open_follow):
  *  - the server certificate is checked against the CA bundle (and its name
- *    against the host), never skipped;
+ *    against the host), never skipped, and so are the dates of every
+ *    certificate in the chain, against the station's clock (cert_time.h;
+ *    Mbed TLS itself ignores them in this build): no transfer starts before
+ *    the clock is trusted;
  *  - before every connection, the first and each redirect, the URL the
  *    client is about to use must be https on port 443 to one of GitHub's
- *    release hosts (release_url.h); anything else ends the transfer before
- *    it connects (FW_HTTP_UNTRUSTED);
+ *    release hosts, without user info, and on github.com one of this
+ *    repository's release paths (release_url.h); anything else, a redirect
+ *    off https included, ends the transfer before it connects
+ *    (FW_HTTP_UNTRUSTED);
  *  - at most CONFIG_FW_UPDATE_MAX_REDIRECTS redirects;
  *  - CONFIG_FW_UPDATE_HTTP_BUF_SIZE for the receive and the transmit buffer
  *    (the asset redirects point at signed CDN URLs longer than 1000
@@ -31,6 +36,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "cert_time.h"
 #include "fw_internal.h"
 #include "pkg_store.h"
 #include "psa/crypto.h"
@@ -47,9 +53,6 @@
 static const char *TAG = "fw_update";
 
 #define CHUNK 4096u
-/* Enough for "https://<host>:<port>" of any release host; a longer URL is
- * cut by esp_http_client_get_url and then fails the host check. */
-#define URL_CHECK_LEN 160
 
 typedef struct {
     char *etag;
@@ -80,6 +83,45 @@ static esp_err_t on_http_event(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
+/*
+ * The CA bundle's verify callback, saved when it is attached to a
+ * connection: it is the same function every time, and only the update worker
+ * opens these connections.
+ */
+static int (*s_bundle_verify)(void *, mbedtls_x509_crt *, int, uint32_t *);
+static void *s_bundle_verify_ctx;
+
+/* Every certificate of the chain, from the top: its dates, then the bundle. */
+static int verify_cert(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flags)
+{
+    (void)ctx;
+    int64_t now = 0;
+    bool clock_ok = fw_clock(&now);
+    uint32_t bad = fw_cert_time_flags(crt, clock_ok, now);
+    if (bad != 0) {
+        ESP_LOGE(TAG, "server certificate %d of the chain refused: %s", depth,
+                 (bad & MBEDTLS_X509_BADCERT_OTHER)     ? "no trusted clock to check its dates"
+                 : (bad & MBEDTLS_X509_BADCERT_EXPIRED) ? "expired"
+                                                        : "not valid yet");
+        *flags |= bad;   /* the bundle leaves a flagged certificate failed */
+    }
+    return s_bundle_verify != NULL ? s_bundle_verify(s_bundle_verify_ctx, crt, depth, flags) : 0;
+}
+
+/* esp_crt_bundle_attach, with the date check in front of its verify callback. */
+static esp_err_t attach_bundle(void *conf)
+{
+    esp_err_t err = esp_crt_bundle_attach(conf);
+    if (err != ESP_OK || conf == NULL) {
+        return err;
+    }
+    mbedtls_ssl_config *ssl_conf = (mbedtls_ssl_config *)conf;
+    s_bundle_verify = ssl_conf->MBEDTLS_PRIVATE(f_vrfy);
+    s_bundle_verify_ctx = ssl_conf->MBEDTLS_PRIVATE(p_vrfy);
+    mbedtls_ssl_conf_verify(ssl_conf, verify_cert, NULL);
+    return ESP_OK;
+}
+
 static void client_config(esp_http_client_config_t *cfg, const char *url, hdr_ctx_t *ctx)
 {
     if (s_user_agent[0] == '\0') {
@@ -87,7 +129,7 @@ static void client_config(esp_http_client_config_t *cfg, const char *url, hdr_ct
     }
     memset(cfg, 0, sizeof(*cfg));   /* skip_cert_common_name_check stays false */
     cfg->url = url;
-    cfg->crt_bundle_attach = esp_crt_bundle_attach;
+    cfg->crt_bundle_attach = attach_bundle;
     cfg->buffer_size = CONFIG_FW_UPDATE_HTTP_BUF_SIZE;
     cfg->buffer_size_tx = CONFIG_FW_UPDATE_HTTP_BUF_SIZE;
     cfg->max_redirection_count = CONFIG_FW_UPDATE_MAX_REDIRECTS;
@@ -103,18 +145,36 @@ static bool is_redirect(int status)
     return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
 
-/* The URL the client connects to next is on a release host (release_url.h). */
+/* The URL the client connects to next is one of the repository's releases
+ * on a release host (release_url.h). */
 static bool target_trusted(esp_http_client_handle_t c)
 {
-    char url[URL_CHECK_LEN];
+    char url[FW_RELEASE_HOP_CHECK_LEN];
+    char repo[FW_UPDATE_REPO_MAX];
+    fw_repo(repo, sizeof(repo));
     if (esp_http_client_get_url(c, url, sizeof(url)) != ESP_OK) {
         return false;
     }
     url[sizeof(url) - 1] = '\0';
-    if (fw_release_url_ok(url)) {
+    /* The client keeps a URL's user info apart from the URL it prints (and
+     * keeps it for later hops), so it is checked on its own. */
+    char *user = NULL;
+    char *pass = NULL;
+    if (esp_http_client_get_username(c, &user) != ESP_OK || esp_http_client_get_password(c, &pass) != ESP_OK ||
+        user != NULL || pass != NULL) {
+        ESP_LOGE(TAG, "refusing to connect: the URL carries user info");
+        return false;
+    }
+    if (fw_release_hop_ok(url, repo)) {
         return true;
     }
-    /* Log the scheme and host only: release CDN URLs carry access tokens. */
+    if (fw_release_url_ok(url)) {
+        /* github.com, outside this repository's releases (a renamed or moved
+         * repository redirects there). The printed URL has no query. */
+        ESP_LOGE(TAG, "refusing to connect to %s: not a release of %s", url, repo);
+        return false;
+    }
+    /* Log the scheme and host only: the asset CDN's paths are not ours to log. */
     const char *host = strstr(url, "://");
     host = host != NULL ? host + 3 : url;
     ESP_LOGE(TAG, "refusing to connect to %.*s: not a GitHub release host", (int)strcspn(host, "/?#"), host);
@@ -128,6 +188,12 @@ static bool target_trusted(esp_http_client_handle_t c)
  */
 static fw_http_result_t open_follow(esp_http_client_handle_t c, hdr_ctx_t *ctx, int *status, int64_t *length)
 {
+    int64_t now = 0;
+    if (!fw_clock(&now)) {
+        /* The handshake would fail anyway (verify_cert): say why. */
+        ESP_LOGW(TAG, "clock not set yet: server certificates cannot be checked, not connecting");
+        return FW_HTTP_NO_RESPONSE;
+    }
     for (int redirects = 0;; redirects++) {
         if (!target_trusted(c)) {
             return FW_HTTP_UNTRUSTED;
@@ -153,8 +219,12 @@ static fw_http_result_t open_follow(esp_http_client_handle_t c, hdr_ctx_t *ctx, 
             }
             int flushed = 0;
             (void)esp_http_client_flush_response(c, &flushed);
-            /* Only sets the next URL (https only); the check above runs before it connects. */
+            /* Only sets the next URL; the check above runs before it connects. */
             err = esp_http_client_set_redirection(c);
+            if (err == ESP_ERR_HTTP_REDIRECT_DOWNGRADE) {
+                ESP_LOGE(TAG, "refusing a redirect off https");
+                return FW_HTTP_UNTRUSTED;
+            }
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "redirect not followed: %s", esp_err_to_name(err));
                 return FW_HTTP_BAD_ANSWER;

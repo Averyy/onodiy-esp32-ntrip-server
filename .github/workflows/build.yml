@@ -16,11 +16,20 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+# What a tag build produces is what stations are offered, so the build image
+# is pinned by digest (a tag can be re-pushed): espressif/idf:v6.1, the image
+# built 2026-08-26, by its multi-platform index (linux/amd64 and linux/arm64). To move
+# to a newer image: docker pull espressif/idf:<tag>, then
+#   docker image inspect espressif/idf:<tag> --format '{{index .RepoDigests 0}}'
+# and use that digest in both jobs.
+# The actions are still referenced by version tag; pin each to a full commit
+# SHA (with the tag as a comment) before the repository goes public.
+
 jobs:
   firmware:
     name: Firmware (esp32s3)
     runs-on: ubuntu-24.04
-    container: espressif/idf:v6.1
+    container: espressif/idf@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c  # v6.1
     steps:
       - uses: actions/checkout@v7
         with:
@@ -87,7 +96,7 @@ jobs:
   host-tests:
     name: Host unit tests (linux target)
     runs-on: ubuntu-24.04
-    container: espressif/idf:v6.1
+    container: espressif/idf@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c  # v6.1
     steps:
       - uses: actions/checkout@v7
 
@@ -114,8 +123,11 @@ jobs:
   # over USB and THIRD_PARTY_NOTICES.md. A tag with "-PRE" is a pre-release:
   # stations read releases/latest only, so it is installed by manual upload.
   # The release is created as a draft and published once every file is
-  # attached, so a station never sees a manifest without its files. Needs
-  # contents: write and nothing else; it never changes repository settings.
+  # attached, so a station never sees a manifest without its files. Latest
+  # goes to the highest vX.Y.Z published, never simply to the last one, so a
+  # fix tagged on an older line does not replace a newer release for
+  # stations. Needs contents: write and nothing else; it never changes
+  # repository settings.
   release:
     name: GitHub Release
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
@@ -139,6 +151,10 @@ jobs:
           # CONFIG_FW_UPDATE_MANIFEST_KEY_1/_2 requires a signed manifest; the
           # tool refuses to write an unsigned one for such a build.
           MANIFEST_SIGNING_KEY: ${{ secrets.MANIFEST_SIGNING_KEY }}
+          # Empty except for the release that moves stations to another
+          # repository (README, "Keep the repository's name"): that build
+          # reads releases from this owner/name instead of this repository.
+          RELEASE_MOVE_TO: ${{ vars.RELEASE_MOVE_TO }}
         run: |
           set -euo pipefail
           key="$RUNNER_TEMP/manifest-key.pem"
@@ -148,13 +164,17 @@ jobs:
             (umask 077 && printf '%s\n' "$MANIFEST_SIGNING_KEY" > "$key")
             sign_args=(--sign-key "$key")
           fi
+          move_args=()
+          if [ -n "${RELEASE_MOVE_TO:-}" ]; then
+            move_args=(--move-to "$RELEASE_MOVE_TO")
+          fi
           mkdir -p release
           python3 tools/release_manifest.py --version "$TAG" \
             --app artifact/build/onocoydiy-esp-um982.bin \
             --gnss firmware/um982/*.pkg \
             --sdkconfig-json artifact/build/config/sdkconfig.json \
             --repo "$GITHUB_REPOSITORY" \
-            --out release/manifest.json ${sign_args[@]+"${sign_args[@]}"}
+            --out release/manifest.json ${sign_args[@]+"${sign_args[@]}"} ${move_args[@]+"${move_args[@]}"}
 
       - name: Publish
         shell: bash
@@ -169,8 +189,29 @@ jobs:
             "$a/flasher_args.json")
           settings=$(jq -r '.flash_settings | "--flash-mode \(.flash_mode) --flash-size \(.flash_size) --flash-freq \(.flash_freq)"' \
             "$a/flasher_args.json")
+          stable='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          upload="install onocoydiy-esp-um982.bin with a file upload in the web UI."
+          pre=()
+          latest=(--latest=false)
+          if [[ "$TAG" =~ $stable ]]; then
+            # Latest is what stations read: the highest vX.Y.Z published, this
+            # one included, not the one published last.
+            newest=$( { gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+                          --limit 1000 --json tagName --jq '.[].tagName'; echo "$TAG"; } |
+                      grep -E "$stable" | sort -V | tail -n 1)
+            if [ "$newest" = "$TAG" ]; then
+              latest=(--latest)
+              offer="Stations offer this release in their daily update check; nothing installs until you click Update."
+            else
+              echo "::notice::$TAG is lower than $newest: published without becoming Latest"
+              offer="Not the newest release ($newest is), so stations do not offer it: $upload"
+            fi
+          else
+            pre=(--prerelease)
+            offer="Pre-release: stations do not offer it; $upload"
+          fi
           {
-            echo "Stations offer this release in their daily update check; nothing installs until you click Update."
+            echo "$offer"
             echo "\`manifest.json\` lists every file with its size and SHA-256."
             echo
             echo "First flash of a new board over USB (the files below):"
@@ -180,14 +221,18 @@ jobs:
             echo '```'
             echo
           } > "$RUNNER_TEMP/notes.md"
-          pre=()
-          case "$TAG" in *-*) pre=(--prerelease) ;; esac
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$TAG" \
             --notes-file "$RUNNER_TEMP/notes.md" --generate-notes ${pre[@]+"${pre[@]}"} \
             "$a/onocoydiy-esp-um982.bin" firmware/um982/*.pkg release/manifest.json \
             "$a/bootloader/bootloader.bin" "$a/partition_table/partition-table.bin" "$a/ota_data_initial.bin" \
             artifact/THIRD_PARTY_NOTICES.md
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          # Always explicit: without it GitHub makes any newly published
+          # release Latest, a lower one included.
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false "${latest[@]}"
+          if [ "${latest[0]}" = "--latest" ]; then
+            now=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+            [ "$now" = "$TAG" ] || { echo "::error::Latest is $now, not $TAG"; exit 1; }
+          fi
 
       - name: Check the download path stations use
         shell: bash
@@ -202,18 +247,30 @@ jobs:
             echo "::warning::private repository: stations cannot download releases until it is public; not checked"
             exit 0
           fi
-          # Every hop must be a host the firmware connects to (the list in
-          # components/fw_update/release_url.c), or stations refuse the download.
+          # Every hop must pass the rules the firmware applies before it
+          # connects (components/fw_update/release_url.c, fw_release_hop_ok),
+          # or stations refuse the download: https, one of the hosts listed
+          # there, no user info, and on github.com a path inside this
+          # repository's /releases/ without dot segments or escapes.
           allowed=$(awk '/s_hosts\[.*\] = \{/{f=1} f{print} f&&/^};/{exit}' components/fw_update/release_url.c |
             grep -oE '"[A-Za-z0-9.-]+"' | tr -d '"')
           [ -n "$allowed" ] || { echo "::error::no host list found in release_url.c"; exit 1; }
+          prefix="/${GITHUB_REPOSITORY,,}/releases/"
           check() {
-            local url="$1" hops=0 code next host
+            local url="$1" hops=0 code next rest host path tail
             while :; do
-              host="${url#https://}"
-              host="${host%%[/?#]*}"
+              rest="${url#https://}"
+              host="${rest%%[/?#]*}"
+              path="${rest:${#host}}"
+              path="${path%%[?#]*}"
               if [[ "$url" != https://* ]] || ! grep -qixF -- "$host" <<<"$allowed"; then
                 echo "::error::$1 leads to $host, which stations do not trust (components/fw_update/release_url.c)"
+                return 1
+              fi
+              tail="${path:$(( ${#GITHUB_REPOSITORY} + 1 ))}"
+              if [ "${host,,}" = github.com ] &&
+                 { [[ "${path,,}" != "$prefix"* ]] || [[ "$tail" == *'/.'* || "$tail" == *'%'* || "$tail" == *'\'* ]]; }; then
+                echo "::error::$1 leads to github.com$path, outside $GITHUB_REPOSITORY's releases: stations refuse it"
                 return 1
               fi
               read -r code next < <(curl -sS -o /dev/null --max-time 120 -w '%{http_code} %{redirect_url}\n' "$url" || true)

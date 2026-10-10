@@ -396,7 +396,7 @@ TEST_CASE("update job results map the esp_err_t", "[web_build]")
     TEST_ASSERT_EQUAL_STRING("invalid_image", web_result_code("app_upload", 0x1503));
     TEST_ASSERT_EQUAL_STRING("package_rejected", web_result_code("gnss_flash", ESP_ERR_INVALID_VERSION));
     TEST_ASSERT_EQUAL_STRING("failed", web_result_code("gnss_upload", ESP_ERR_NO_MEM));
-    /* A redirect off GitHub's release hosts, on any download job. */
+    /* A redirect off the repository's releases on GitHub's release hosts, on any download job. */
     TEST_ASSERT_EQUAL_STRING("untrusted_host", web_result_code("check", ESP_ERR_NOT_ALLOWED));
     TEST_ASSERT_EQUAL_STRING("untrusted_host", web_result_code("app_update", ESP_ERR_NOT_ALLOWED));
     TEST_ASSERT_EQUAL_STRING("untrusted_host", web_result_code("gnss_update", ESP_ERR_NOT_ALLOWED));

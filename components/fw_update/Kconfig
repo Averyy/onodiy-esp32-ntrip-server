@@ -17,6 +17,17 @@ menu "Station: firmware updates"
             manifest key also takes a runtime override from settings
             (ota/repo).
 
+            The name is the trust: while stations built with it are in use,
+            never rename or delete the account that owns this repository,
+            and never rename, transfer or delete the repository. GitHub lets
+            anyone register a renamed or deleted account's old name; whoever
+            then creates a repository of this name can publish releases
+            these stations offer. A rename also stops updates: stations
+            refuse GitHub's redirect to the new name (untrusted_host). To
+            move, publish from the old repository, while you still hold it,
+            a release built with the new name here, and keep the old
+            repository afterwards (README, "Keep the repository's name").
+
     config FW_UPDATE_MANIFEST_ASSET
         string "Release manifest asset name"
         default "manifest.json"

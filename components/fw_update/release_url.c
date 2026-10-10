@@ -57,6 +57,36 @@ bool fw_release_url_ok(const char *url)
     return fw_release_host_ok(host, host_len);
 }
 
+bool fw_release_hop_ok(const char *url, const char *repo)
+{
+    if (!fw_release_url_ok(url) || !fw_release_repo_ok(repo)) {
+        return false;
+    }
+    const char *host = url + strlen("https://");
+    size_t auth_len = strcspn(host, "/?#");
+    size_t host_len = strcspn(host, ":/?#");
+    if (!(host_len == strlen(s_hosts[0]) && strncasecmp(host, s_hosts[0], host_len) == 0)) {
+        return true;   /* the asset CDN: the host is the rule */
+    }
+    /* github.com: "/<repo>/releases/" (the name is checked as configured,
+     * which may start with a dot), then no dot segment and no escapes. */
+    const char *path = host + auth_len;
+    size_t path_len = strcspn(path, "?#");
+    size_t repo_len = strlen(repo);
+    static const char releases[] = "/releases/";
+    if (path_len < 1 + repo_len + sizeof(releases) - 1 || path[0] != '/' ||
+        strncasecmp(path + 1, repo, repo_len) != 0 ||
+        strncasecmp(path + 1 + repo_len, releases, sizeof(releases) - 1) != 0) {
+        return false;
+    }
+    for (size_t i = 1 + repo_len; i < path_len; i++) {
+        if (path[i] == '%' || path[i] == '\\' || (path[i] == '/' && i + 1 < path_len && path[i + 1] == '.')) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool part_ok(const char *s, size_t len, size_t max, bool owner)
 {
     if (len == 0 || len > max) {

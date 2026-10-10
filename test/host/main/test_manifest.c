@@ -452,6 +452,11 @@ TEST_CASE("manifest content: fields outside the rules are rejected", "[manifest]
         "\"build\":18976,\"asset\":\"a.pkg\",\"size\":1,\"sha256\":\"" SHA_A "\"}]}",
         "{\"schema\":1,\"version\":\"v1.0.0\"," APP_OK ",\"gnss\":[{\"model\":\"UM982\",\"version\":\"R4.10Build\","
         "\"build\":18975,\"asset\":\"a.pkg\",\"size\":1,\"sha256\":\"" SHA_A "\"}]}",
+        /* the first "Build" names the build (tools/release_manifest.py refuses these too) */
+        "{\"schema\":1,\"version\":\"v1.0.0\"," APP_OK ",\"gnss\":[{\"model\":\"UM982\",\"version\":"
+        "\"R4.10Builder_Build18975\",\"build\":18975,\"asset\":\"a.pkg\",\"size\":1,\"sha256\":\"" SHA_A "\"}]}",
+        "{\"schema\":1,\"version\":\"v1.0.0\"," APP_OK ",\"gnss\":[{\"model\":\"UM982\",\"version\":"
+        "\"R4.10Build1_Build2\",\"build\":2,\"asset\":\"a.pkg\",\"size\":1,\"sha256\":\"" SHA_A "\"}]}",
         "{\"schema\":1,\"version\":\"v1.0.0\"," APP_OK ",\"gnss\":[{\"model\":\"\",\"version\":\"R1\","
         "\"build\":1,\"asset\":\"a.pkg\",\"size\":1,\"sha256\":\"" SHA_A "\"}]}",
         "{\"schema\":1,\"version\":\"v1.0.0\"," APP_OK ",\"gnss\":[{\"model\":\"UM982\",\"version\":\"R1\","

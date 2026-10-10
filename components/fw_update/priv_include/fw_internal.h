@@ -168,20 +168,23 @@ typedef enum {
     FW_HTTP_NO_RESPONSE,     /**< no final HTTP answer (network, DNS, TLS, timeout) */
     FW_HTTP_BAD_ANSWER,      /**< an answer, but not the expected one (status, size, too large) */
     FW_HTTP_LOCAL_ERROR,     /**< out of memory or a local write failed */
-    FW_HTTP_UNTRUSTED,       /**< the URL or a redirect left GitHub's release hosts (release_url.h): not connected */
+    FW_HTTP_UNTRUSTED,       /**< the URL or a redirect left the repository's releases on GitHub's release hosts,
+                                  or https (release_url.h): not connected */
 } fw_http_result_t;
 
 /**
- * GET url (following HTTPS redirects between release hosts only) into a new
- * buffer of at most `cap` bytes (PSRAM when available; caller frees *out).
- * With `etag_in` set, sends If-None-Match; `etag_out` gets the answer's ETag.
+ * GET url (following redirects only within the repository's releases on the
+ * release hosts, release_url.h) into a new buffer of at most `cap` bytes
+ * (PSRAM when available; caller frees *out). With `etag_in` set, sends
+ * If-None-Match; `etag_out` gets the answer's ETag. FW_HTTP_NO_RESPONSE
+ * without a trusted clock (certificate dates cannot be checked).
  */
 fw_http_result_t fw_http_fetch(const char *url, const char *etag_in, size_t cap, char **out, size_t *out_len,
                                char *etag_out, size_t etag_size);
 
 /**
  * Download `file` from `url` into pkg_store (size and SHA-256 checked there).
- * ESP_ERR_NOT_ALLOWED when a redirect leaves the release hosts.
+ * ESP_ERR_NOT_ALLOWED when a hop is refused (FW_HTTP_UNTRUSTED).
  */
 esp_err_t fw_http_download_package(const char *url, const fw_manifest_file_t *file, const char *label);
 
@@ -190,8 +193,8 @@ esp_err_t fw_http_download_package(const char *url, const fw_manifest_file_t *fi
  * (esp_ota_begin/write, sequential erase), check its size and SHA-256 on the
  * stream, validate it (esp_ota_end), check the SHA-256 again on what is in
  * flash and that its app description names the manifest's version and this
- * project, then activate it. ESP_ERR_NOT_ALLOWED when a redirect leaves the
- * release hosts, ESP_ERR_INVALID_SIZE / ESP_ERR_INVALID_CRC when the bytes
+ * project, then activate it. ESP_ERR_NOT_ALLOWED when a hop is refused
+ * (FW_HTTP_UNTRUSTED), ESP_ERR_INVALID_SIZE / ESP_ERR_INVALID_CRC when the bytes
  * are not the manifest's, ESP_ERR_INVALID_VERSION for another release or
  * project.
  */

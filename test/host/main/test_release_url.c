@@ -136,3 +136,76 @@ TEST_CASE("release URLs are built from valid parts only, on github.com", "[relea
     TEST_ASSERT_FALSE(fw_release_asset_url(small, sizeof(small), "a/b", "v1.0.0", "fw.bin"));
     TEST_ASSERT_FALSE(fw_release_latest_url(url, 0, "a/b", "m.json"));
 }
+
+TEST_CASE("release hops: github.com only within the repository's releases", "[release_url]")
+{
+    static const char *const repo = "Averyy/onocoydiy-esp-um982";
+    static const char *const good[] = {
+        /* the first request and GitHub's "latest" redirect, as the HTTP client prints them */
+        "https://github.com:443/Averyy/onocoydiy-esp-um982/releases/latest/download/manifest.json",
+        "https://github.com:443/Averyy/onocoydiy-esp-um982/releases/download/v1.0.0/manifest.json",
+        "https://github.com/averyy/ONOCOYDIY-esp-um982/releases/download/v1.0.0/onocoydiy-esp-um982.bin",
+        "https://github.com/Averyy/onocoydiy-esp-um982/releases/download/v1.0.0-rc.1/fw.bin?x=1",
+        /* the asset CDN: host only */
+        "https://release-assets.githubusercontent.com:443/github-production-release-asset/1/2",
+        "https://objects.githubusercontent.com/github-production-release-asset-2e65be/1/2",
+    };
+    for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+        TEST_ASSERT_TRUE_MESSAGE(fw_release_hop_ok(good[i], repo), good[i]);
+    }
+    static const char *const bad[] = {
+        NULL,
+        "http://github.com/Averyy/onocoydiy-esp-um982/releases/latest/download/manifest.json",
+        "https://user@github.com/Averyy/onocoydiy-esp-um982/releases/latest/download/manifest.json",
+        "https://evil.example/Averyy/onocoydiy-esp-um982/releases/download/v1.0.0/fw.bin",
+        /* a renamed or transferred repository: GitHub redirects to the new name */
+        "https://github.com:443/NewName/onocoydiy-esp-um982/releases/latest/download/manifest.json",
+        "https://github.com:443/Averyy/onocoydiy-esp-um982-old/releases/latest/download/manifest.json",
+        "https://github.com:443/Averyy/onocoydiy-esp-um98/releases/latest/download/manifest.json",
+        "https://github.com:443/Averyy/onocoydiy-esp-um982",
+        "https://github.com:443/Averyy/onocoydiy-esp-um982/",
+        "https://github.com:443/Averyy/onocoydiy-esp-um982/releases",
+        "https://github.com:443/Averyy/onocoydiy-esp-um982/archive/v1.0.0.zip",
+        "https://github.com:443/Averyy/onocoydiy-esp-um982/raw/main/fw.bin",
+        "https://github.com:443//Averyy/onocoydiy-esp-um982/releases/download/v1.0.0/fw.bin",
+        "https://github.com:443",
+        "https://github.com",
+        /* dot segments and percent-encoding could leave the repository */
+        "https://github.com/Averyy/onocoydiy-esp-um982/releases/../../../Evil/x/releases/download/v1/fw.bin",
+        "https://github.com/Averyy/onocoydiy-esp-um982/releases/./download/v1/fw.bin",
+        "https://github.com/Averyy/onocoydiy-esp-um982/releases/%2e%2e/x",
+        "https://github.com/Averyy/onocoydiy-esp-um982/releases/download\\..\\x",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        TEST_ASSERT_FALSE_MESSAGE(fw_release_hop_ok(bad[i], repo), bad[i] != NULL ? bad[i] : "(null)");
+    }
+    /* Without a valid repository nothing on github.com passes. */
+    const char *latest = "https://github.com/Averyy/onocoydiy-esp-um982/releases/latest/download/manifest.json";
+    TEST_ASSERT_FALSE(fw_release_hop_ok(latest, NULL));
+    TEST_ASSERT_FALSE(fw_release_hop_ok(latest, ""));
+    TEST_ASSERT_FALSE(fw_release_hop_ok(latest, "Averyy"));
+    TEST_ASSERT_FALSE(fw_release_hop_ok("https://github.com/a/b/c/releases/download/v1/x", "a/b/c"));
+    /* A repository name may start with a dot; the dot rule covers what follows it. */
+    TEST_ASSERT_TRUE(fw_release_hop_ok("https://github.com/x/.github/releases/download/v1.0.0/fw.bin", "x/.github"));
+    TEST_ASSERT_FALSE(fw_release_hop_ok("https://github.com/x/.github/releases/download/v1.0.0/.fw.bin", "x/.github"));
+    TEST_ASSERT_FALSE(fw_release_hop_ok("https://github.com/x/.github/releases/download/v1.0.0/fw.bin", "x/github"));
+
+    /* What the firmware builds passes for its own repository. */
+    char url[256];
+    TEST_ASSERT_TRUE(fw_release_latest_url(url, sizeof(url), repo, "manifest.json"));
+    TEST_ASSERT_TRUE(fw_release_hop_ok(url, repo));
+    TEST_ASSERT_TRUE(fw_release_asset_url(url, sizeof(url), repo, "v1.2.3", "onocoydiy-esp-um982.bin"));
+    TEST_ASSERT_TRUE(fw_release_hop_ok(url, repo));
+    TEST_ASSERT_FALSE(fw_release_hop_ok(url, "Averyy/other"));
+
+    /* The longest repository GitHub allows still fits the client's URL check buffer. */
+    char longest[160];
+    memset(longest, 'o', sizeof(longest));
+    longest[39] = '/';
+    longest[140] = '\0';
+    TEST_ASSERT_TRUE(fw_release_repo_ok(longest));
+    char hop[256];
+    snprintf(hop, sizeof(hop), "https://github.com:443/%s/releases/latest/download/manifest.json", longest);
+    TEST_ASSERT_TRUE(fw_release_hop_ok(hop, longest));
+    TEST_ASSERT_LESS_THAN(FW_RELEASE_HOP_CHECK_LEN, (int)strlen("https://github.com:443/") + 140 + (int)strlen("/releases/"));
+}

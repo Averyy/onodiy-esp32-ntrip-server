@@ -877,11 +877,15 @@ downloads an image or a package.
 
 **Trust.** A release is trusted because of where it comes from and what it
 lists. The manifest and every file are fetched over HTTPS, the server
-certificate checked against the CA bundle, from the GitHub releases of the
-repository set at build time (`release_repo`), and only from GitHub's release
-hosts: `github.com`, `release-assets.githubusercontent.com` and
-`objects.githubusercontent.com`. Every hop of a redirect must stay on them,
-or the download stops before it connects (`untrusted_host`). The manifest
+certificate checked against the CA bundle and the dates of every certificate
+in its chain against the station's clock (no transfer starts before the
+clock is set: `download_failed`, and a check retries in 1 h), from the GitHub
+releases of the repository set at build time (`release_repo`), and only from
+GitHub's release hosts: `github.com`, `release-assets.githubusercontent.com`
+and `objects.githubusercontent.com`. Every hop of a redirect must stay on
+them, over https, without user info, and on `github.com` within
+`/<release_repo>/releases/` (a renamed or moved repository is refused), or
+the download stops before it connects (`untrusted_host`). The manifest
 lists each file with its size and SHA-256, and a downloaded app image or
 receiver package is used only if both match. No signing key is needed: a
 build without one accepts the plain manifest (and reads a signed one without
@@ -940,8 +944,9 @@ a newer version appears; the server keeps no "later" state.
 `download_failed`, `checksum_mismatch`, `size_mismatch`, `invalid_image`,
 `signature_failed` (check: a build with a manifest key got a manifest that
 is unsigned or not signed with one of its keys), `untrusted_host` (check,
-`app_update`, `gnss_update`: a redirect led off GitHub's release hosts;
-nothing was fetched from there), `package_rejected` (a receiver package failed a
+`app_update`, `gnss_update`: a redirect led off `release_repo`'s releases on
+GitHub's release hosts, off https, or carried user info; nothing was fetched
+from there), `package_rejected` (a receiver package failed a
 pre-flight rule; with `failed_rule`, 1-12 as numbered in `um98x_flash.h`,
 and `cross_layout`), `failed` (anything else; `message` has the
 `esp_err_t`). An app upload that stops for `rolled_back_ack_required`

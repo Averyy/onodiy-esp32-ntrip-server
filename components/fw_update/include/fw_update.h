@@ -13,10 +13,11 @@
  * 5-15 min after boot (jittered by the MAC) only when the last one is at
  * least 24 h old by the trusted clock, otherwise when it becomes due. Without
  * a trusted clock the first check waits for one, at most 1 h after boot. A
- * check that got no answer (offline, DNS, TLS, timeout) is retried after
- * 1 h; one that got an answer without a usable manifest (HTTP error, bad or
- * missing signature where one is required, unknown format, a redirect off
- * GitHub's release hosts) waits for the next daily check. Checks pause
+ * check that got no answer (offline, DNS, TLS, timeout, still no trusted
+ * clock to check certificate dates with) is retried after 1 h; one that got
+ * an answer without a usable manifest (HTTP error, bad or missing signature
+ * where one is required, unknown format, a redirect off the repository's
+ * releases on GitHub's release hosts) waits for the next daily check. Checks pause
  * while the station is offline. A check fetches and checks the manifest
  * and refreshes the banner state; it never downloads an app image or a
  * receiver package, and never writes an OTA slot or pkg_store. Nothing waits
@@ -34,8 +35,9 @@
  * as If-None-Match while this boot holds the manifest it belongs to. GitHub's
  * asset redirects point at long signed CDN URLs, so every request uses
  * CONFIG_FW_UPDATE_HTTP_BUF_SIZE for both the receive and the transmit buffer
- * and follows up to CONFIG_FW_UPDATE_MAX_REDIRECTS redirects, each only to
- * one of GitHub's release hosts. Assets are downloaded from
+ * and follows up to CONFIG_FW_UPDATE_MAX_REDIRECTS redirects, each only
+ * within the repository's releases on GitHub's release hosts
+ * (release_url.h). Assets are downloaded from
  * https://github.com/<repo>/releases/download/<manifest version>/<asset>.
  * The repository is CONFIG_FW_UPDATE_GITHUB_REPO (and must be public: no
  * access token is sent).
@@ -102,9 +104,10 @@
  *
  * Authenticity: a release is trusted because of where it comes from. Every
  * transfer is HTTPS with the server certificate checked against the CA
- * bundle, and goes only to GitHub's release hosts (the first URL and every
- * redirect) for the repository set at build time
- * (CONFIG_FW_UPDATE_GITHUB_REPO). The manifest names every file with its
+ * bundle and every certificate's dates against the trusted clock, and goes
+ * only to GitHub's release hosts, on github.com only to the release paths
+ * of the repository set at build time (CONFIG_FW_UPDATE_GITHUB_REPO), for
+ * the first URL and every redirect. The manifest names every file with its
  * size and SHA-256, and each downloaded app image and receiver package must
  * match both before it is used. No signing key is needed: without
  * CONFIG_FW_UPDATE_MANIFEST_KEY_1/_2 the plain manifest (or a signed
@@ -133,8 +136,9 @@
  * because the station does not run there (see station.h).
  *
  * All transfers are HTTPS with the CA bundle; plain HTTP is never followed,
- * and neither is a redirect to a host outside GitHub's release hosts
- * (ESP_ERR_NOT_ALLOWED as the job's error).
+ * and neither is a redirect outside the repository's releases on GitHub's
+ * release hosts or one carrying user info (ESP_ERR_NOT_ALLOWED as the job's
+ * error).
  */
 #pragma once
 

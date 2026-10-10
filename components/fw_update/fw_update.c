@@ -283,11 +283,12 @@ static void run_check(void)
         ESP_LOGW(TAG, "no usable release manifest at github.com/%s", repo);
         break;
     case FW_HTTP_UNTRUSTED:
-        /* An answer, but one that would leave GitHub's release hosts: the
-         * next daily check, like any unusable answer. */
+        /* An answer, but one that would leave the repository's releases on
+         * GitHub's release hosts: the next daily check, like any unusable
+         * answer. */
         result = FW_CHECK_UNUSABLE;
         err = ESP_ERR_NOT_ALLOWED;
-        ESP_LOGE(TAG, "update check: GitHub redirected to a host this firmware does not trust");
+        ESP_LOGE(TAG, "update check: GitHub redirected somewhere this firmware does not trust");
         break;
     case FW_HTTP_LOCAL_ERROR:
         result = FW_CHECK_NO_RESPONSE;

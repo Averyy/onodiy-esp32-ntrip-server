@@ -9,7 +9,7 @@ The release workflow (.github/workflows/build.yml) runs this on a tag build:
   python3 tools/release_manifest.py --version v0.3.0 \\
       --app onocoydiy-esp-um982.bin --gnss firmware/um982/UM982_R4.10Build18975.pkg \\
       --sdkconfig-json sdkconfig.json --repo owner/name --out manifest.json \\
-      [--sign-key key.pem]
+      [--sign-key key.pem] [--move-to owner/new-name]
 
 The manifest lists every file the station may download, by release asset
 name (the file's base name), with its size and SHA-256 (format and rules:
@@ -25,11 +25,14 @@ Checks, so a release the stations would refuse fails here instead:
   - the app image is an ESP-IDF app whose description names this version and
     this project;
   - each receiver package is named <MODEL>_<VERSION>.pkg with "Build<N>" in
-    the version, and matches the SHA256SUMS next to it when there is one;
+    the version, the first "Build" of the version is followed by the build
+    number (the station reads it there), and the package matches the
+    SHA256SUMS next to it when there is one;
   - with --sdkconfig-json (the build's build/config/sdkconfig.json): the build
-    reads releases from --repo under the manifest name written here; a build
-    with a manifest key gets a signed manifest, and the signing key is one of
-    its keys; the manifest fits the build's size limit.
+    reads releases from --repo under the manifest name written here (or from
+    --move-to: the release that moves stations to another repository); a
+    build with a manifest key gets a signed manifest, and the signing key is
+    one of its keys; the manifest fits the build's size limit.
 
 Standard library only, plus the openssl command for signing.
 """
@@ -130,10 +133,12 @@ def gnss_entry(path):
     if not m:
         raise Fail(f"{path}: receiver packages are named <MODEL>_<VERSION>.pkg with Build<N> in the version")
     model, version, build = m.group("model"), m.group("version"), int(m.group("build"))
-    # The firmware takes the first "Build" number of the version as the build.
-    first = re.search(r"Build([0-9]+)", version)
-    if int(first.group(1)) != build:
-        raise Fail(f"{path}: more than one build number in {version!r}")
+    # The station reads the build number right after the first "Build" of the
+    # version and refuses the whole manifest when it is missing or another one.
+    first = re.match(r"[0-9]+", version[version.find("Build") + len("Build"):])
+    if first is None or int(first.group()) != build:
+        read = f"build {int(first.group())}" if first is not None else "no build number"
+        raise Fail(f"{path}: stations read {read} after the first \"Build\" in {version!r}, not {build}")
     if len(model) > 15 or len(version) > 47 or not 1 <= build <= UINT32_MAX:
         raise Fail(f"{path}: model, version or build out of range")
     entry, _ = file_entry(path)
@@ -183,6 +188,8 @@ def main():
     ap.add_argument("--sign-key", type=pathlib.Path, help="P-256 private key (PEM): write a signed manifest")
     ap.add_argument("--sdkconfig-json", type=pathlib.Path, help="the build's config/sdkconfig.json")
     ap.add_argument("--repo", help="owner/name the release is published on")
+    ap.add_argument("--move-to", help="owner/name of another repository the build reads releases from: "
+                    "the release that moves stations there")
     args = ap.parse_args()
 
     try:
@@ -218,7 +225,13 @@ def main():
         if args.sdkconfig_json is not None:
             cfg = json.loads(args.sdkconfig_json.read_text())
             build_repo = cfg.get("FW_UPDATE_GITHUB_REPO", "")
-            if args.repo is not None and build_repo.lower() != args.repo.lower():
+            if args.move_to:
+                if args.repo is not None and args.move_to.lower() == args.repo.lower():
+                    raise Fail(f"--move-to {args.move_to!r} is the repository this release is published on")
+                if build_repo.lower() != args.move_to.lower():
+                    raise Fail(f"this build reads releases from {build_repo!r}, not {args.move_to!r} (--move-to)")
+                print(f"note: moving release: stations that install it read releases from {build_repo}")
+            elif args.repo is not None and build_repo.lower() != args.repo.lower():
                 raise Fail(f"this build reads releases from {build_repo!r}, but it is being released on "
                            f"{args.repo!r}: set CONFIG_FW_UPDATE_GITHUB_REPO")
             if not REPO_RE.match(build_repo) or build_repo.split("/")[1] in (".", ".."):

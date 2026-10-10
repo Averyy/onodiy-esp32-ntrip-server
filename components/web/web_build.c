@@ -1012,7 +1012,8 @@ const char *web_result_code(const char *job, esp_err_t err)
     case ESP_ERR_INVALID_CRC:
         return check ? "signature_failed" : "checksum_mismatch";
     case ESP_ERR_NOT_ALLOWED:
-        /* fw_update: a redirect off GitHub's release hosts, refused before connecting. */
+        /* fw_update: a hop off the repository's releases on GitHub's release hosts
+         * (or off https), refused before connecting. */
         return (check || strcmp(job != NULL ? job : "", "app_update") == 0 ||
                 strcmp(job != NULL ? job : "", "gnss_update") == 0)
                    ? "untrusted_host"

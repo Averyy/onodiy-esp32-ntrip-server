@@ -135,7 +135,7 @@ const L = {
     size_mismatch: 'Size mismatch',
     invalid_image: 'Not a valid image',
     signature_failed: 'Signature check failed',
-    untrusted_host: 'Refused: GitHub sent the download to a host this firmware does not trust',
+    untrusted_host: 'Refused: GitHub sent the download somewhere this firmware does not trust',
     package_rejected: 'Package refused',
     failed: 'Failed',
   },
