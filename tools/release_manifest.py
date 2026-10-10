@@ -29,6 +29,7 @@ Checks, so a release the stations would refuse fails here instead:
     number (the station reads it there), and the package matches the
     SHA256SUMS next to it when there is one;
   - with --sdkconfig-json (the build's build/config/sdkconfig.json): the build
+    is not the QEMU development build (sdkconfig.qemu); it
     reads releases from --repo under the manifest name written here (or from
     --move-to: the release that moves stations to another repository); a
     build with a manifest key gets a signed manifest, and the signing key is
@@ -194,6 +195,12 @@ def main():
 
     try:
         check_version(args.version)
+        cfg = json.loads(args.sdkconfig_json.read_text()) if args.sdkconfig_json is not None else None
+        if cfg is not None:
+            qemu = [k for k in ("NETWORK_QEMU_ETHERNET", "ETH_USE_OPENETH") if cfg.get(k)]
+            if qemu:
+                raise Fail("this is the QEMU development build (CONFIG_" + ", CONFIG_".join(qemu) +
+                           "): it has no Wi-Fi and never runs on a station")
         manifest = {
             "schema": SCHEMA,
             "version": args.version,
@@ -222,8 +229,7 @@ def main():
             point = None
             text = payload
 
-        if args.sdkconfig_json is not None:
-            cfg = json.loads(args.sdkconfig_json.read_text())
+        if cfg is not None:
             build_repo = cfg.get("FW_UPDATE_GITHUB_REPO", "")
             if args.move_to:
                 if args.repo is not None and args.move_to.lower() == args.repo.lower():

@@ -15,6 +15,12 @@
  *  - "netprobe": the upstream probe (name lookup + TCP connect), so a slow
  *    lookup never delays a reconnect.
  *  - "dns": the captive-portal responder, only while the AP is up.
+ *
+ * QEMU development build (CONFIG_NETWORK_QEMU_ETHERNET, sdkconfig.qemu):
+ * Wi-Fi is never initialised or started. The emulated OpenCores Ethernet
+ * port is created as the station interface instead (its key and IP events),
+ * its link events stand in for the association, and there is no AP. Every
+ * difference is inside an #if on that option.
  */
 #include "network.h"
 
@@ -47,6 +53,14 @@
 #include "net_ladder.h"
 #include "sdkconfig.h"
 #include "settings.h"
+
+#if CONFIG_NETWORK_QEMU_ETHERNET
+#if !CONFIG_ETH_USE_OPENETH
+#error "CONFIG_NETWORK_QEMU_ETHERNET needs the OpenCores Ethernet MAC (QEMU only)"
+#endif
+#include "esp_eth.h"
+#include "esp_eth_mac_openeth.h"
+#endif
 
 static const char *TAG = "network";
 
@@ -153,7 +167,9 @@ typedef enum {
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_inited;
 static esp_netif_t *s_sta;
-static esp_netif_t *s_ap;
+#if !CONFIG_NETWORK_QEMU_ETHERNET
+static esp_netif_t *s_ap;                   /* no AP interface in the QEMU build */
+#endif
 static QueueHandle_t s_queue;
 static TaskHandle_t s_task;
 static volatile bool s_queue_overflow;
@@ -232,7 +248,9 @@ static bool s_drop_pending;
 static uint8_t s_drop_reason;
 static int8_t s_drop_rssi;
 static char s_hostname[33];
-static char s_portal_uri[32];
+#if !CONFIG_NETWORK_QEMU_ETHERNET
+static char s_portal_uri[32];               /* setup_ap_netif (no AP interface in the QEMU build) */
+#endif
 static uint8_t s_ap_addr[4];
 static esp_ip4_addr_t s_dns1;
 static esp_ip4_addr_t s_dns2;
@@ -259,6 +277,12 @@ static uint8_t s_ladder_note;               /* last journalled skip/withhold: (r
 /* Survives software, panic and watchdog resets: when the last network-ladder
  * reboot was. Stamped with the image generation (lifecycle). */
 static RTC_NOINIT_ATTR net_rtc_t s_rtc;
+
+#if CONFIG_NETWORK_QEMU_ETHERNET
+#define QEMU_ETH_LABEL "QEMU Ethernet"   /* the status "SSID": what the station is connected through */
+static esp_eth_handle_t s_eth;
+static volatile bool s_eth_link;            /* link up (Ethernet events), for the resync */
+#endif
 
 /* ---- small helpers ------------------------------------------------------------------- */
 
@@ -349,6 +373,62 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
         send_msg(MSG_LOST_IP, 0, 0);
     }
 }
+
+#if CONFIG_NETWORK_QEMU_ETHERNET
+/* The emulated link stands in for the station's association. */
+static void on_eth_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    (void)data;
+    if (id == ETHERNET_EVENT_CONNECTED) {
+        s_eth_link = true;
+        send_msg(MSG_STA_CONNECTED, 0, 0);
+    } else if (id == ETHERNET_EVENT_DISCONNECTED) {
+        s_eth_link = false;
+        send_msg(MSG_STA_DISCONNECTED, 0, 0);
+    }
+}
+
+/* The OpenCores MAC as the station interface: the same interface key, so the
+ * web server and the casters find it, and the station's IP events, so every
+ * listener (this file, SNTP renewal, the casters) needs nothing else. */
+static esp_err_t qemu_eth_init(void)
+{
+    esp_netif_inherent_config_t base = ESP_NETIF_INHERENT_DEFAULT_ETH();
+    base.if_key = "WIFI_STA_DEF";
+    base.if_desc = "qemu-eth";
+    base.get_ip_event = IP_EVENT_STA_GOT_IP;
+    base.lost_ip_event = IP_EVENT_STA_LOST_IP;
+    esp_netif_config_t ncfg = { .base = &base, .stack = ESP_NETIF_NETSTACK_DEFAULT_ETH };
+    s_sta = esp_netif_new(&ncfg);
+    if (s_sta == NULL) {
+        return ESP_FAIL;
+    }
+    eth_mac_config_t mac_cfg = ETH_MAC_DEFAULT_CONFIG();
+    eth_phy_config_t phy_cfg = ETH_PHY_DEFAULT_CONFIG();
+    phy_cfg.autonego_timeout_ms = 100;   /* the emulated PHY answers at once */
+    esp_eth_mac_t *mac = esp_eth_mac_new_openeth(&mac_cfg);
+    esp_eth_phy_t *phy = esp_eth_phy_new_generic(&phy_cfg);
+    if (mac == NULL || phy == NULL) {
+        return ESP_FAIL;
+    }
+    esp_eth_config_t cfg = ETH_DEFAULT_CONFIG(mac, phy);
+    esp_err_t err = esp_eth_driver_install(&cfg, &s_eth);
+    if (err != ESP_OK) {
+        return err;
+    }
+    esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(s_eth);
+    if (glue == NULL) {
+        return ESP_FAIL;
+    }
+    err = esp_netif_attach(s_sta, glue);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return esp_event_handler_instance_register(ETH_EVENT, ESP_EVENT_ANY_ID, on_eth_event, NULL, NULL);
+}
+#endif
 
 static void on_sntp_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -673,6 +753,12 @@ static void disconnect_then_connect(void)
 
 static esp_err_t wifi_start(void)
 {
+#if CONFIG_NETWORK_QEMU_ETHERNET
+    /* No radio: Wi-Fi is never started (and nothing calls this there:
+     * wifi_start_due() is false, the AP, recovery and credential paths
+     * return before it). */
+    return ESP_ERR_NOT_SUPPORTED;
+#else
     esp_err_t err = esp_wifi_start();
     if (err != ESP_OK) {
         /* Retried from housekeeping (station) or the AP policy, with backoff. */
@@ -695,6 +781,7 @@ static esp_err_t wifi_start(void)
     (void)esp_wifi_get_mode(&mode);
     set_wifi_sta_on(mode == WIFI_MODE_STA || mode == WIFI_MODE_APSTA);
     return ESP_OK;
+#endif
 }
 
 static void wifi_stop(void)
@@ -721,7 +808,11 @@ static void wifi_stop(void)
 /* Wi-Fi may be (re)started now: not running, and no failed start waiting out its backoff. */
 static bool wifi_start_due(void)
 {
+#if CONFIG_NETWORK_QEMU_ETHERNET
+    return false;   /* no radio */
+#else
     return !s_wifi_started && (s_wifi_start_fails == 0 || esp_timer_get_time() >= s_wifi_retry_at_us);
+#endif
 }
 
 /* Start Wi-Fi for the configured station (MSG_STA_START connects). */
@@ -757,6 +848,10 @@ static void apply_credentials(void)
     if (!s_sta_configured || !s_started) {
         return;
     }
+#if CONFIG_NETWORK_QEMU_ETHERNET
+    ESP_LOGW(TAG, "QEMU: Wi-Fi credentials for \"%s\" kept, the emulated Ethernet stays in use", s_ssid);
+    return;
+#endif
     s_attempt = 0;
     net_drop_log_reset(&s_drop);
     bool was_linked = (s_sta_state == STA_CONNECTED || s_sta_state == STA_CONNECTING);
@@ -909,6 +1004,10 @@ static void build_ap_config(wifi_config_t *c)
 
 static void ap_up(uint32_t reasons)
 {
+#if CONFIG_NETWORK_QEMU_ETHERNET
+    (void)reasons;
+    return;   /* no radio, no setup AP */
+#endif
     if (!s_wifi_started && !wifi_start_due()) {
         return;   /* a failed start waits out its backoff */
     }
@@ -1245,6 +1344,10 @@ static void handle_got_ip(void)
 
 static void do_recovery(network_recovery_t action)
 {
+#if CONFIG_NETWORK_QEMU_ETHERNET
+    ESP_LOGW(TAG, "QEMU: recovery %d skipped (emulated Ethernet, no Wi-Fi)", (int)action);
+    return;
+#endif
     /* A restart also helps when Wi-Fi did not start: it tries once more now. */
     if (!s_sta_configured || (!s_wifi_started && action != NETWORK_RECOVER_RESTART_WIFI)) {
         ESP_LOGW(TAG, "recovery %d skipped: station not running", (int)action);
@@ -1306,6 +1409,17 @@ static esp_err_t handle_start(void)
     }
     s_started = true;
     s_offline_since_s = now_s();
+#if CONFIG_NETWORK_QEMU_ETHERNET
+    /* The emulated port is the configured station; stored Wi-Fi credentials are not used. */
+    strlcpy(s_ssid, QEMU_ETH_LABEL, sizeof(s_ssid));
+    s_sta_configured = true;
+    taskENTER_CRITICAL(&s_lock);
+    s_st.sta_configured = true;
+    strlcpy(s_st.ssid, s_ssid, sizeof(s_st.ssid));
+    taskEXIT_CRITICAL(&s_lock);
+    ESP_LOGW(TAG, "QEMU development build: emulated Ethernet instead of Wi-Fi, no setup AP");
+    return esp_eth_start(s_eth);   /* the link event connects, DHCP gives the address */
+#endif
     if (settings_is_available()) {
         char ssid[33] = "";
         char pass[65] = "";
@@ -1422,7 +1536,12 @@ static void handle_msg(const net_msg_t *m)
         }
         s_had_link = true;
         wifi_ap_record_t ap;
+#if CONFIG_NETWORK_QEMU_ETHERNET
+        memset(&ap, 0, sizeof(ap));
+        bool have = false;   /* no access point behind the emulated link */
+#else
         bool have = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
+#endif
         taskENTER_CRITICAL(&s_lock);
         s_st.associated = true;
         if (have) {
@@ -1495,8 +1614,12 @@ static void resync(void)
 {
     s_queue_overflow = false;
     ESP_LOGW(TAG, "event queue overflow: resyncing");
+#if CONFIG_NETWORK_QEMU_ETHERNET
+    bool linked = s_eth_link;
+#else
     wifi_ap_record_t ap;
     bool linked = s_wifi_started && esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+#endif
     esp_netif_ip_info_t info = { 0 };
     bool ip = linked && esp_netif_get_ip_info(s_sta, &info) == ESP_OK && info.ip.addr != 0;
     if (!linked && s_associated) {
@@ -1621,6 +1744,7 @@ static void housekeeping(void)
     }
     if (s_associated && now - s_last_rssi_s >= RSSI_INTERVAL_S) {
         s_last_rssi_s = now;
+#if !CONFIG_NETWORK_QEMU_ETHERNET   /* the emulated link has no signal to read */
         wifi_ap_record_t ap;
         if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
             taskENTER_CRITICAL(&s_lock);
@@ -1628,6 +1752,7 @@ static void housekeeping(void)
             s_st.channel = ap.primary;
             taskEXIT_CRITICAL(&s_lock);
         }
+#endif
     }
     if (now - s_last_check_s >= CHECK_INTERVAL_S) {
         s_last_check_s = now;
@@ -1703,7 +1828,8 @@ static void load_fallback_dns(void)
  * pointer, so the URI lives in static memory. Set once, before the AP first
  * starts: the server is still unstarted (setting needs that) and keeps the
  * option across AP restarts. Not stopped first: a stopped server would not
- * be started again by the AP start. */
+ * be started again by the AP start. (No AP interface in the QEMU build.) */
+#if !CONFIG_NETWORK_QEMU_ETHERNET
 static void setup_ap_netif(void)
 {
     esp_netif_ip_info_t info;
@@ -1719,6 +1845,7 @@ static void setup_ap_netif(void)
         ESP_LOGW(TAG, "captive portal DHCP option: %s", esp_err_to_name(err));
     }
 }
+#endif
 
 static void setup_ap_name(void)
 {
@@ -1761,6 +1888,14 @@ esp_err_t network_init(void)
     }
     xEventGroupSetBits(s_probe_events, PROBE_IDLE_BIT);
 
+#if CONFIG_NETWORK_QEMU_ETHERNET
+    esp_err_t err = qemu_eth_init();   /* no Wi-Fi init, no AP interface */
+    if (err != ESP_OK) {
+        return err;
+    }
+    load_hostname();
+    load_fallback_dns();
+#else
     s_sta = esp_netif_create_default_wifi_sta();
     s_ap = esp_netif_create_default_wifi_ap();
     if (s_sta == NULL || s_ap == NULL) {
@@ -1785,6 +1920,7 @@ esp_err_t network_init(void)
         ESP_LOGE(TAG, "country code \"%s\" rejected (%s): worldwide default", CONFIG_NETWORK_WIFI_COUNTRY,
                  esp_err_to_name(err));
     }
+#endif
     setup_ap_name();
 
     err = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event, NULL, NULL);

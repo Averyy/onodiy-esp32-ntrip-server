@@ -21,7 +21,8 @@ concurrency:
 # built 2026-08-26, by its multi-platform index (linux/amd64 and linux/arm64). To move
 # to a newer image: docker pull espressif/idf:<tag>, then
 #   docker image inspect espressif/idf:<tag> --format '{{index .RepoDigests 0}}'
-# and use that digest in both jobs.
+# and use that digest in every job that runs in it (firmware, host-tests,
+# qemu-smoke).
 # The actions are still referenced by version tag; pin each to a full commit
 # SHA (with the tag as a comment) before the repository goes public.
 
@@ -76,6 +77,13 @@ jobs:
           # Same arguments again: should anything trigger a reconfigure, it
           # must not rename the release image to a dev version.
           idf.py "${ver_args[@]}" size
+          # The station image never carries the QEMU development options
+          # (sdkconfig.qemu); a symbol leaking into sdkconfig.defaults would
+          # build an image without Wi-Fi.
+          if grep -E '^CONFIG_(NETWORK_QEMU_ETHERNET|ETH_USE_OPENETH)=y' sdkconfig; then
+            echo "::error::the station build has the QEMU development options on (sdkconfig.qemu belongs to tools/qemu/run.sh only)"
+            exit 1
+          fi
 
       - name: Upload firmware
         uses: actions/upload-artifact@v7
@@ -115,6 +123,67 @@ jobs:
           fi
           ./build/onocoydiy_host_tests.elf
 
+  bench-tools:
+    name: Bench tools (pytest)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.2.0
+
+      - name: pytest
+        working-directory: tools/bench
+        run: uv run pytest
+
+  # The firmware in Espressif's QEMU (sdkconfig.qemu overlay, emulated
+  # Ethernet instead of Wi-Fi): boots without a panic or a reboot loop, the
+  # web server answers, and UART1 carries the receiver detection both ways.
+  # A development check only; nothing here is released.
+  qemu-smoke:
+    name: QEMU smoke test
+    runs-on: ubuntu-24.04
+    container: espressif/idf@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c  # v6.1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # git describe names the build
+
+      - uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Build (QEMU overlay)
+        shell: bash
+        run: |
+          set -o pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
+          # The image ships qemu-xtensa; install it only if a newer image does not.
+          if ! command -v qemu-system-xtensa >/dev/null; then
+            python "$IDF_PATH/tools/idf_tools.py" install qemu-xtensa
+            . "$IDF_PATH/export.sh"
+          fi
+          qemu-system-xtensa --version
+          tools/qemu/run.sh --build-only 2>&1 | tee qemu-build.log
+          if grep -E "unknown kconfig symbol|but is not visible" qemu-build.log; then
+            echo "::error::sdkconfig.qemu sets a symbol this IDF version does not know or ignores"
+            exit 1
+          fi
+
+      - name: Boot and check
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          uv run tools/qemu/smoke.py --out qemu-smoke
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qemu-smoke-${{ github.sha }}
+          if-no-files-found: warn
+          path: |
+            qemu-build.log
+            qemu-smoke/
+
   # A tag vX.Y.Z[-PRE] becomes a GitHub Release with what stations download:
   # the app image the firmware job built as that release version, the receiver
   # package(s) from firmware/um982/ and manifest.json listing each with its
@@ -142,6 +211,21 @@ jobs:
         with:
           name: firmware-${{ github.sha }}
           path: artifact
+
+      - name: Refuse a development build
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The QEMU development options (sdkconfig.qemu) replace Wi-Fi with an
+          # Ethernet MAC no station has. tools/release_manifest.py refuses them
+          # too; this names the problem before anything else runs.
+          if python3 -c 'import json, sys; c = json.load(open(sys.argv[1])); sys.exit(1 if c.get("NETWORK_QEMU_ETHERNET") or c.get("ETH_USE_OPENETH") else 0)' \
+               artifact/build/config/sdkconfig.json; then
+            echo "station build: no QEMU development options"
+          else
+            echo "::error::this build has the QEMU development options (sdkconfig.qemu): never released"
+            exit 1
+          fi
 
       - name: Manifest
         shell: bash
