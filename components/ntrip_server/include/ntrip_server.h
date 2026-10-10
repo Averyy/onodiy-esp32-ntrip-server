@@ -17,8 +17,11 @@
  * connect CONFIG_NTRIP_TCP_CONNECT_TIMEOUT_MS = 5 s; TLS slots: esp_tls
  * timeout_ms CONFIG_NTRIP_CONNECT_TIMEOUT_MS = 10 s, which bounds the connect
  * and each handshake wait, so the whole handshake can take about twice that;
- * SO_SNDTIMEO/SO_RCVTIMEO on the socket; lwIP's resolver gives up after ~7 s
- * per DNS server). Slot tasks are NOT subscribed to the task watchdog: a
+ * lwIP's resolver gives up after ~7 s per DNS server). After the connect the
+ * socket is non-blocking and every wait is a select() of at most 100 ms; a
+ * write that gets no byte accepted for CONFIG_NTRIP_SEND_TIMEOUT_MS is a
+ * write stall. Keepalive 10/5/3 s and TCP_NODELAY are set on every caster
+ * socket. Slot tasks are NOT subscribed to the task watchdog: a
  * slow caster must never reboot the station. Instead each slot stamps its
  * progress; the health monitor restarts only the slot that overruns its
  * per-state budget (CONNECTING <= CONFIG_NTRIP_CONNECT_BUDGET_S, a single
@@ -75,9 +78,8 @@
  * ESP_ERR_INVALID_STATE, so nothing is written over stored slots that were
  * never loaded.
  *
- * Status: PROVISIONAL, to be confirmed on hardware and against real casters:
- * request formats, reply parsing, timeouts and backoff values. Slot config
- * persistence is implemented.
+ * Status: implemented; PROVISIONAL, to be confirmed on hardware and against
+ * real casters: request formats, reply parsing, timeouts and backoff values.
  */
 #pragma once
 
@@ -142,8 +144,9 @@ typedef struct {
     char name[24];         /**< UI label */
     char host[64];
     uint16_t port;
-    char mountpoint[48];
-    char username[48];     /**< NTRIP 2.0 only */
+    char mountpoint[48];   /**< Onocoy slots: the credential username (sent as the
+                                NTRIP 1.0 mountpoint, the NTRIP 2.0 Basic-auth user) */
+    char username[48];     /**< NTRIP 2.0 only; not used by Onocoy slots */
     char password[64];     /**< secret: never returned to the web UI */
     bool password_set;     /**< output only: a password is stored */
     bool clear_password;   /**< input only (set_config): remove the stored password */
@@ -152,7 +155,8 @@ typedef struct {
     ntrip_trust_t trust_mode;      /**< TLS slots only */
     bool ca_pem_set;               /**< output only: a custom CA PEM is stored for this slot */
     ntrip_backoff_profile_t backoff_profile; /**< presets set it (Onocoy: fast) */
-    char label[48];                /**< NTRIP 2.0 dashboard label (Onocoy v2 sends it as the mountpoint) */
+    char label[48];                /**< NTRIP 2.0 dashboard label, [A-Za-z0-9] (Onocoy v2 sends it as the
+                                        mountpoint; "onocoydiy" when empty) */
     bool v2_raw_body;              /**< NTRIP 2.0 quirk: send the body unchunked */
     bool dup_stream_ack;           /**< user acknowledged streaming the same data to Onocoy and an open caster */
 } ntrip_caster_cfg_t;
@@ -243,7 +247,16 @@ esp_err_t ntrip_server_get_config(size_t slot, ntrip_caster_cfg_t *out, bool wit
  * it. An empty password keeps the stored one (the UI never sees it, so it
  * cannot send it back) only while the host stays the same: pointed at
  * another host, the slot never sends the old caster's password there.
- * @return ESP_ERR_INVALID_STATE before ntrip_server_init() (safe mode).
+ *
+ * Fields are checked before saving: no control characters; host a DNS name
+ * or IP literal; mountpoint [A-Za-z0-9._-]; NTRIP 1.0 password without
+ * spaces; NTRIP 2.0 username without ':'; an enabled slot needs host, port,
+ * mountpoint, a password (1.0) and a username (2.0, except Onocoy).
+ * @return ESP_ERR_INVALID_ARG for a field that fails these checks,
+ *         ESP_ERR_NOT_ALLOWED when enabling it would stream to Onocoy or
+ *         RTK2go from a second slot, or pair Onocoy with an open caster
+ *         (RTK2go, Centipede) without dup_stream_ack,
+ *         ESP_ERR_INVALID_STATE before ntrip_server_init() (safe mode).
  */
 esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg);
 

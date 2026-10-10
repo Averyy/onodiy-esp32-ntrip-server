@@ -2,17 +2,61 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * PROVISIONAL: slot configuration persistence is implemented; the slot tasks
- * (connect, request, stream, backoff) are not yet.
+ * Caster slots: one task per slot, created at init and never deleted. The
+ * decisions (state, backoff, reply classification, request bytes) live in
+ * the pure core (ntrip_proto.c); this file does the I/O around it:
+ *
+ *   - plain TCP over lwIP sockets (non-blocking connect bounded by
+ *     CONFIG_NTRIP_TCP_CONNECT_TIMEOUT_MS), TLS through esp-tls (timeout_ms =
+ *     CONFIG_NTRIP_CONNECT_TIMEOUT_MS; CA bundle with cross-signed
+ *     verification, a slot's own CA PEM, or no check when the user chose
+ *     it); at most one TLS handshake at a time, the protected slot first;
+ *   - keepalive 10/5/3 s and TCP_NODELAY on every caster socket; after the
+ *     connect the socket is non-blocking and every wait is a select() of at
+ *     most 100 ms, so commands (config change, restart, pause, shutdown)
+ *     are seen quickly;
+ *   - write-stall watchdog (CONFIG_NTRIP_SEND_TIMEOUT_MS without a byte
+ *     accepted), EOF polling while streaming, the request/reply deadlines;
+ *   - teardown: the NTRIP 2.0 terminator (only between chunks, <= 1 s), TLS
+ *     close_notify, then close(); never a half-close on a live session;
+ *   - IP and Wi-Fi events, pause, per-slot stats and progress stamps,
+ *     restart_slot, persistence of long backoffs in settings cstN/backoff.
+ *
+ * Nothing here logs a password, a request line, an Onocoy mountpoint or a
+ * v2 username; reply text is shown sanitised with those values masked.
  */
 #include "ntrip_server.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
 
+#include "esp_app_desc.h"
+#include "esp_attr.h"
+#include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_random.h"
+#include "esp_timer.h"
+#include "esp_tls.h"
+#include "esp_wifi_types.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "ledger.h"
 #include "lifecycle.h"
+#include "lwip/netdb.h"
+#include "lwip/sockets.h"
+#include "mbedtls/ssl.h"
+#include "mbedtls/x509.h"
+#include "ntrip_proto.h"
+#include "rtcm_hub.h"
 #include "sdkconfig.h"
 #include "settings.h"
 #include "settings_codec.h"
@@ -21,17 +65,250 @@ static const char *TAG = "ntrip";
 
 ESP_EVENT_DEFINE_BASE(NTRIP_EVENT);
 
+/* The core mirrors the public enums value for value. */
+_Static_assert((int)NTRIP_CLS_DNS == (int)NTRIP_FAIL_DNS && (int)NTRIP_CLS_CONNECT == (int)NTRIP_FAIL_CONNECT &&
+                   (int)NTRIP_CLS_TLS == (int)NTRIP_FAIL_TLS && (int)NTRIP_CLS_TIMEOUT == (int)NTRIP_FAIL_TIMEOUT &&
+                   (int)NTRIP_CLS_REMOTE_CLOSE == (int)NTRIP_FAIL_REMOTE_CLOSE &&
+                   (int)NTRIP_CLS_WRITE_STALL == (int)NTRIP_FAIL_WRITE_STALL &&
+                   (int)NTRIP_CLS_KEEPALIVE == (int)NTRIP_FAIL_KEEPALIVE && (int)NTRIP_CLS_AUTH == (int)NTRIP_FAIL_AUTH &&
+                   (int)NTRIP_CLS_MOUNT_BUSY == (int)NTRIP_FAIL_MOUNT_BUSY &&
+                   (int)NTRIP_CLS_CONFIG == (int)NTRIP_FAIL_CONFIG && (int)NTRIP_CLS_BANNED == (int)NTRIP_FAIL_BANNED &&
+                   (int)NTRIP_CLS_COUNT == (int)NTRIP_FAIL_CLASS_COUNT,
+               "core failure classes must match ntrip_fail_class_t");
+_Static_assert((int)NTRIP_SM_DISABLED == (int)NTRIP_STATE_DISABLED &&
+                   (int)NTRIP_SM_WAIT_NETWORK == (int)NTRIP_STATE_WAIT_NETWORK &&
+                   (int)NTRIP_SM_WAIT_DATA == (int)NTRIP_STATE_WAIT_DATA &&
+                   (int)NTRIP_SM_CONNECTING == (int)NTRIP_STATE_CONNECTING &&
+                   (int)NTRIP_SM_STREAMING == (int)NTRIP_STATE_STREAMING &&
+                   (int)NTRIP_SM_BACKOFF == (int)NTRIP_STATE_BACKOFF &&
+                   (int)NTRIP_SM_AUTH_FAILED == (int)NTRIP_STATE_AUTH_FAILED &&
+                   (int)NTRIP_SM_PAUSED == (int)NTRIP_STATE_PAUSED &&
+                   (int)NTRIP_SM_CONFIG_ERROR == (int)NTRIP_STATE_CONFIG_ERROR &&
+                   (int)NTRIP_SM_BANNED == (int)NTRIP_STATE_BANNED,
+               "core states must match ntrip_state_t");
+_Static_assert((int)NTRIP_PROF_FAST == (int)NTRIP_BACKOFF_FAST &&
+                   (int)NTRIP_PROF_STANDARD == (int)NTRIP_BACKOFF_STANDARD &&
+                   (int)NTRIP_PROF_POLITE == (int)NTRIP_BACKOFF_POLITE,
+               "core profiles must match ntrip_backoff_profile_t");
+_Static_assert(CONFIG_NTRIP_MAX_CASTERS <= 24, "one event-group bit per slot");
+
 #define CFG_BLOB_VERSION 1
 #define CFG_BLOB_MAX     320   /* largest v1 record: 307 bytes */
+
+#define TICK_MS             100u    /* longest single wait while a session is open */
+#define IDLE_WAIT_MS        200u    /* idle loop: fresh-data gate and backoff checks */
+#define PUBLISH_MS          250u
+#define ATTACH_RETRY_MS     5000u
+#define TX_BUF_SIZE         (NTRIP_CHUNK_HEAD_RESERVE + NTRIP_CHUNK_MAX_PAYLOAD + NTRIP_CHUNK_TAIL)
+#define RX_SCRATCH          256u
+#define CA_PEM_MAX          8192u
+#define TLS_MIN_INTERNAL_HEAP (64u * 1024u)   /* below this, non-protected TLS slots wait */
+#define LOW_HEAP_RETRY_MS   5000u
+#define STOP_WAIT_MS        2000u
+#define ONOCOY_LAG_MS       1000u
+#define CLOCK_VALID_UNIX    1704067200   /* 2024-01-01: before this the clock is not set */
+
+#define CMD_CONFIG  (1u << 0)
+#define CMD_RESTART (1u << 1)
+
+/* Status hints only the server knows (after the core's). */
+enum {
+    HINT_NO_RTCM = NTRIP_HINT_COUNT,
+    HINT_LOW_MEMORY,
+    HINT_CA_PEM,
+    HINT_NO_HUB,
+    HINT_BAD_FIELDS,
+    HINT_TOTAL,
+};
+
+static const char *const k_hint_text[HINT_TOTAL] = {
+    [NTRIP_HINT_NONE] = "",
+    [NTRIP_HINT_V1_ONLY] = "caster appears to be NTRIP 1.0 only",
+    [NTRIP_HINT_SOURCETABLE] = "caster sent its sourcetable: wrong host or protocol?",
+    [NTRIP_HINT_MOUNT_HELD] = "mountpoint held by another source (another device?)",
+    [NTRIP_HINT_TLS_CERT] = "TLS certificate failed",
+    [NTRIP_HINT_TLS_TRY_PLAIN] = "TLS keeps failing; plain port 2101 is an option",
+    [NTRIP_HINT_CASTER_BUSY] = "caster busy or restarting",
+    [NTRIP_HINT_BANNED] = "caster reports this source as banned",
+    [NTRIP_HINT_AGENT] = "caster rejected the agent string",
+    [NTRIP_HINT_UNEXPECTED] = "unexpected reply from the caster",
+    [NTRIP_HINT_NO_REPLY] = "no reply from the caster",
+    [HINT_NO_RTCM] = "waiting for RTCM from the receiver",
+    [HINT_LOW_MEMORY] = "low memory: TLS connect deferred",
+    [HINT_CA_PEM] = "custom CA certificate missing or too large",
+    [HINT_NO_HUB] = "RTCM source not available",
+    [HINT_BAD_FIELDS] = "stored settings invalid: edit and save the slot",
+};
+
+static const char *const k_class_name[NTRIP_FAIL_CLASS_COUNT] = {
+    "none", "DNS", "connect", "TLS", "timeout", "remote close", "write stall",
+    "keepalive", "auth", "mount busy", "config", "banned",
+};
+
+typedef enum {
+    IO_OK = 0,
+    IO_ABORT,      /* a command or network change ends the attempt: not a failure */
+    IO_FAIL,       /* failure described by the ntrip_failure_t */
+} io_result_t;
+
+typedef struct {
+    size_t idx;
+    TaskHandle_t task;
+    rtcm_hub_consumer_t consumer;
+    bool attach_wait;
+    uint32_t attach_at_ms;
+    bool gate_held;              /* the TLS handshake slot is ours */
+
+    /* fixed buffers (PSRAM when available) */
+    uint8_t tx[TX_BUF_SIZE];
+    char req[NTRIP_REQUEST_MAX];
+    uint8_t rx[RX_SCRATCH];
+    ntrip_reply_t reply;
+
+    ntrip_caster_cfg_t cfg;      /* task's copy, with the password */
+
+    /* session */
+    int fd;
+    esp_tls_t *tls;
+    volatile bool open;          /* streaming session (after the caster's OK) */
+    bool chunked;
+    bool mid_chunk;
+    bool paused_seen;
+    bool logged_unexpected;
+    uint32_t last_tx_ms;
+    uint32_t net_gen;
+    int last_errno;
+
+    ntrip_sm_t sm;
+    uint8_t prev_state;
+
+    /* DNS cache */
+    char cache_host[64];
+    struct sockaddr_storage cache_addr;
+    socklen_t cache_len;
+
+    /* stats (task-owned working copy, published to s_status) */
+    ntrip_caster_status_t st;
+    uint16_t hint;
+    uint32_t tls_fail_streak;
+    uint32_t low_heap_until_ms;
+    bool low_heap_wait;
+    int32_t day;
+    uint64_t on_ms;
+    uint64_t off_ms;
+    uint64_t dropped_epochs_base;
+    uint32_t last_acct_ms;
+    uint32_t last_pub_ms;
+    uint32_t max_lag_seen;
+    bool ledger_known;
+    bool ledger_enabled;
+    bool ledger_protected;
+    bool ledger_streaming;
+
+    /* shared with API callers */
+    volatile uint32_t cmd;
+    volatile uint32_t progress_ms;
+    volatile uint32_t state_since_ms;
+} slot_t;
 
 static ntrip_caster_cfg_t s_cfg[CONFIG_NTRIP_MAX_CASTERS];
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_loaded;   /* slot configs read from settings (not in safe mode) */
 
+static slot_t *s_slots[CONFIG_NTRIP_MAX_CASTERS];
+static EXT_RAM_BSS_ATTR ntrip_caster_status_t s_status[CONFIG_NTRIP_MAX_CASTERS];
+static SemaphoreHandle_t s_status_mutex;
+static SemaphoreHandle_t s_cfg_mutex;
+static SemaphoreHandle_t s_tls_sem;
+static EventGroupHandle_t s_kick;
+static char s_agent[NTRIP_AGENT_MAX];
+
+static volatile bool s_running;
+static volatile bool s_paused;
+static volatile bool s_shutdown;
+static volatile bool s_have_ip;
+static volatile bool s_wifi_up;
+static volatile uint32_t s_net_gen;
+static volatile uint32_t s_tls_protected_waiting;
+
+/* ---- small helpers ------------------------------------------------------------ */
+
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+static int32_t utc_day(void)
+{
+    time_t t = time(NULL);
+    return (t < CLOCK_VALID_UNIX) ? -1 : (int32_t)(t / 86400);
+}
+
+static int64_t unix_now(void)
+{
+    time_t t = time(NULL);
+    return (t < CLOCK_VALID_UNIX) ? 0 : (int64_t)t;
+}
+
+static void kick(size_t slot)
+{
+    if (s_kick != NULL) {
+        xEventGroupSetBits(s_kick, (EventBits_t)1u << slot);
+    }
+}
+
+static void kick_all(void)
+{
+    for (size_t i = 0; i < ntrip_server_slot_count(); i++) {
+        kick(i);
+    }
+}
+
+static void wait_kick(slot_t *s, uint32_t ms)
+{
+    if (ms == 0) {
+        return;
+    }
+    xEventGroupWaitBits(s_kick, (EventBits_t)1u << s->idx, pdTRUE, pdFALSE, pdMS_TO_TICKS(ms));
+}
+
+static uint32_t take_cmd(slot_t *s)
+{
+    return __atomic_exchange_n(&s->cmd, 0u, __ATOMIC_SEQ_CST);
+}
+
 static bool fits(const char *s, size_t size)
 {
     return strnlen(s, size) < size;
 }
+
+static bool host_is_ip(const char *host)
+{
+    struct in_addr a4;
+    if (inet_pton(AF_INET, host, &a4) == 1) {
+        return true;
+    }
+#if CONFIG_LWIP_IPV6
+    struct in6_addr a6;
+    return inet_pton(AF_INET6, host, &a6) == 1;
+#else
+    return false;
+#endif
+}
+
+/* The slot name is only a label, but it goes into logs: no control characters. */
+static bool has_bad_name(const char *s)
+{
+    for (; *s != '\0'; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c < 0x20u || c == 0x7Fu) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* ---- config persistence ---------------------------------------------------------- */
 
 static size_t encode_cfg(const ntrip_caster_cfg_t *c, uint8_t *buf, size_t cap)
 {
@@ -107,11 +384,16 @@ static void slot_defaults(size_t slot, ntrip_caster_cfg_t *out)
     }
 }
 
+static void slot_ns(size_t slot, char *ns, size_t size)
+{
+    snprintf(ns, size, SETTINGS_NS_CASTER_FMT, (unsigned)slot);
+}
+
 /* A custom CA PEM is stored under its own key in the slot namespace. */
 static bool ca_pem_present(size_t slot)
 {
     char ns[16];
-    snprintf(ns, sizeof(ns), SETTINGS_NS_CASTER_FMT, (unsigned)slot);
+    slot_ns(slot, ns, sizeof(ns));
     uint8_t probe;
     size_t len = sizeof(probe);
     esp_err_t err = settings_get_blob(ns, SETTINGS_KEY_CST_CA_PEM, &probe, &len);
@@ -121,7 +403,7 @@ static bool ca_pem_present(size_t slot)
 static esp_err_t load_slot(size_t slot, ntrip_caster_cfg_t *out)
 {
     char ns[16];
-    snprintf(ns, sizeof(ns), SETTINGS_NS_CASTER_FMT, (unsigned)slot);
+    slot_ns(slot, ns, sizeof(ns));
     uint8_t buf[CFG_BLOB_MAX];
     size_t len = sizeof(buf);
     esp_err_t err = settings_get_blob(ns, SETTINGS_KEY_CST_CFG, buf, &len);
@@ -129,45 +411,1333 @@ static esp_err_t load_slot(size_t slot, ntrip_caster_cfg_t *out)
         ESP_LOGW(TAG, "slot %u: stored config unreadable, using defaults", (unsigned)slot);
         err = ESP_ERR_INVALID_VERSION;
     }
+    memset(buf, 0, sizeof(buf));
     if (err != ESP_OK) {
         slot_defaults(slot, out);
     }
     return err;
 }
 
-/* Planned reboot: close every session so the caster frees the mountpoint at
- * once. Runs inside the lifecycle shutdown budget. */
+static ntrip_fields_t fields_of(const ntrip_caster_cfg_t *c)
+{
+    ntrip_fields_t f = {
+        .host = c->host,
+        .port = c->port,
+        .mountpoint = c->mountpoint,
+        .username = c->username,
+        .password = c->password,
+        .label = c->label,
+        .v2 = c->proto == NTRIP_PROTO_V2,
+        .enabled = c->enabled,
+    };
+    return f;
+}
+
+/* ---- network events --------------------------------------------------------------- */
+
+static void on_net_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    if (base == WIFI_EVENT) {
+        if (id == WIFI_EVENT_STA_CONNECTED) {
+            s_wifi_up = true;
+        } else if (id == WIFI_EVENT_STA_DISCONNECTED || id == WIFI_EVENT_STA_STOP) {
+            /* Keep sessions: TCP may survive a short blip; the write-stall
+             * watchdog and keepalive decide. Only new connects wait. */
+            s_wifi_up = false;
+        }
+    } else if (base == IP_EVENT) {
+        if (id == IP_EVENT_STA_GOT_IP) {
+            const ip_event_got_ip_t *e = (const ip_event_got_ip_t *)data;
+            s_have_ip = true;
+            s_wifi_up = true;
+            if (e != NULL && e->ip_changed) {
+                s_net_gen++;   /* sockets bound to the old address are dead */
+            }
+        } else if (id == IP_EVENT_STA_LOST_IP) {
+            s_have_ip = false;
+        }
+    }
+    kick_all();
+}
+
+static void refresh_network_state(void)
+{
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t ip;
+    if (sta != NULL && esp_netif_get_ip_info(sta, &ip) == ESP_OK && ip.ip.addr != 0) {
+        s_have_ip = true;
+        s_wifi_up = true;
+    }
+}
+
+/* ---- session I/O ------------------------------------------------------------------------ */
+
+static void set_sock_opts(int fd)
+{
+    int on = 1;
+    int idle = NTRIP_KEEPALIVE_IDLE_S;
+    int intvl = NTRIP_KEEPALIVE_INTVL_S;
+    int cnt = NTRIP_KEEPALIVE_COUNT;
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+}
+
+static void set_nonblocking(int fd)
+{
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl >= 0) {
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    }
+}
+
+/* Error of the socket after a failed call (errno may be stale after mbedTLS). */
+static int sock_error(slot_t *s)
+{
+    int err = 0;
+    socklen_t len = sizeof(err);
+    if (s->fd >= 0 && getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err != 0) {
+        return err;
+    }
+    return s->last_errno;
+}
+
+static ntrip_cls_t errno_class(int err)
+{
+    /* lwIP reports a keepalive abort as ECONNABORTED, a peer reset as ECONNRESET. */
+    return (err == ECONNABORTED || err == ETIMEDOUT) ? NTRIP_CLS_KEEPALIVE : NTRIP_CLS_REMOTE_CLOSE;
+}
+
+/* > 0 bytes sent, 0 would block, < 0 error. */
+static int sess_send(slot_t *s, const uint8_t *p, size_t n)
+{
+    if (s->tls != NULL) {
+        ssize_t r = esp_tls_conn_write(s->tls, p, n);
+        if (r > 0) {
+            return (int)r;
+        }
+        if (r == 0 || r == ESP_TLS_ERR_SSL_WANT_WRITE || r == ESP_TLS_ERR_SSL_WANT_READ) {
+            return 0;
+        }
+        s->last_errno = errno;
+        return -1;
+    }
+    ssize_t r = send(s->fd, p, n, MSG_DONTWAIT);
+    if (r > 0) {
+        return (int)r;
+    }
+    if (r == 0 || errno == EAGAIN || errno == EWOULDBLOCK) {
+        return 0;
+    }
+    s->last_errno = errno;
+    return -1;
+}
+
+/* > 0 bytes read, 0 nothing yet, -1 closed by the caster, -2 error. */
+static int sess_recv(slot_t *s, uint8_t *buf, size_t n)
+{
+    if (s->tls != NULL) {
+        ssize_t r = esp_tls_conn_read(s->tls, buf, n);
+        if (r > 0) {
+            return (int)r;
+        }
+        if (r == 0 || r == MBEDTLS_ERR_SSL_CONN_EOF) {
+            return -1;
+        }
+        if (r == ESP_TLS_ERR_SSL_WANT_READ || r == ESP_TLS_ERR_SSL_WANT_WRITE) {
+            return 0;
+        }
+        s->last_errno = errno;
+        return -2;
+    }
+    ssize_t r = recv(s->fd, buf, n, MSG_DONTWAIT);
+    if (r > 0) {
+        return (int)r;
+    }
+    if (r == 0) {
+        return -1;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return 0;
+    }
+    s->last_errno = errno;
+    return -2;
+}
+
+/* Wait until the socket can be written (or read) or ms pass. */
+static void sess_wait(slot_t *s, bool for_write, uint32_t ms)
+{
+    if (!for_write && s->tls != NULL && esp_tls_get_bytes_avail(s->tls) > 0) {
+        return;
+    }
+    if (s->fd < 0) {
+        vTaskDelay(pdMS_TO_TICKS(ms));
+        return;
+    }
+    fd_set set;
+    FD_ZERO(&set);
+    FD_SET(s->fd, &set);
+    struct timeval tv = { .tv_sec = (time_t)(ms / 1000u), .tv_usec = (suseconds_t)((ms % 1000u) * 1000u) };
+    (void)select(s->fd + 1, for_write ? NULL : &set, for_write ? &set : NULL, NULL, &tv);
+}
+
+/* Commands or events that end any attempt or session at once. */
+static bool hard_abort(slot_t *s)
+{
+    return s_shutdown || !s_running || !s_have_ip || (s->cmd & (CMD_CONFIG | CMD_RESTART)) != 0 ||
+           (s->open && s->net_gen != s_net_gen);
+}
+
+/* A connection attempt also stops for a pause or a Wi-Fi drop (nothing has been streamed yet). */
+static bool connect_abort(slot_t *s)
+{
+    return hard_abort(s) || s_paused || !s_wifi_up || !s->cfg.enabled;
+}
+
+typedef enum { WR_DONE = 0, WR_STALL, WR_ERROR, WR_ABORT } write_result_t;
+
+/*
+ * Write all of p. Every accepted byte is progress; nothing accepted for
+ * stall_ms is a write stall. Once part of a chunk (or frame) is out, the
+ * rest goes out before anything else, or the session is closed.
+ */
+static write_result_t write_all(slot_t *s, const uint8_t *p, size_t n, uint32_t stall_ms, bool count)
+{
+    size_t off = 0;
+    uint32_t last = now_ms();
+    while (off < n) {
+        int r = sess_send(s, p + off, n - off);
+        if (r > 0) {
+            off += (size_t)r;
+            s->mid_chunk = off < n;
+            last = now_ms();
+            s->last_tx_ms = last;
+            s->progress_ms = last;
+            if (count) {
+                ntrip_sm_sent(&s->sm, (size_t)r, last);
+            }
+            continue;
+        }
+        if (r < 0) {
+            return WR_ERROR;
+        }
+        if ((uint32_t)(now_ms() - last) >= stall_ms) {
+            return WR_STALL;
+        }
+        if (hard_abort(s)) {
+            return WR_ABORT;
+        }
+        sess_wait(s, true, TICK_MS);
+    }
+    s->mid_chunk = false;
+    return WR_DONE;
+}
+
+/* Close the socket. Clean: v2 terminator between chunks, TLS close_notify. */
+static void session_close(slot_t *s, bool clean)
+{
+    if (clean && s->open && s->chunked && !s->mid_chunk) {
+        const char *t = NTRIP_CHUNK_TERMINATOR;
+        (void)write_all(s, (const uint8_t *)t, strlen(t), NTRIP_TERMINATOR_MS, false);
+    }
+    if (s->tls != NULL) {
+        if (clean) {
+            mbedtls_ssl_context *ssl = (mbedtls_ssl_context *)esp_tls_get_ssl_context(s->tls);
+            if (ssl != NULL) {
+                (void)mbedtls_ssl_close_notify(ssl);   /* best effort, non-blocking */
+            }
+        }
+        esp_tls_conn_destroy(s->tls);   /* closes the socket */
+        s->tls = NULL;
+        s->fd = -1;
+    } else if (s->fd >= 0) {
+        close(s->fd);
+        s->fd = -1;
+    }
+    s->open = false;
+    s->mid_chunk = false;
+    s->paused_seen = false;
+}
+
+/* ---- connect ------------------------------------------------------------------------------- */
+
+static void fail_with(ntrip_failure_t *f, ntrip_cls_t cls, ntrip_row_t row, bool reached)
+{
+    memset(f, 0, sizeof(*f));
+    f->cls = cls;
+    f->row = row;
+    f->reached_caster = reached;
+}
+
+static io_result_t resolve(slot_t *s, struct sockaddr_storage *addr, socklen_t *alen, ntrip_failure_t *f)
+{
+    char port[8];
+    snprintf(port, sizeof(port), "%u", (unsigned)s->cfg.port);
+    struct addrinfo hints = { 0 };
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *res = NULL;
+    int rc = getaddrinfo(s->cfg.host, port, &hints, &res);
+    if (rc == 0 && res != NULL && res->ai_addrlen <= sizeof(*addr)) {
+        memcpy(addr, res->ai_addr, res->ai_addrlen);
+        *alen = (socklen_t)res->ai_addrlen;
+        freeaddrinfo(res);
+        strlcpy(s->cache_host, s->cfg.host, sizeof(s->cache_host));
+        memcpy(&s->cache_addr, addr, sizeof(*addr));
+        s->cache_len = *alen;
+    } else {
+        if (res != NULL) {
+            freeaddrinfo(res);
+        }
+        if (s->cache_len == 0 || strcmp(s->cache_host, s->cfg.host) != 0) {
+            fail_with(f, NTRIP_CLS_DNS, NTRIP_ROW_TRANSIENT, false);
+            s->st.last_err = ESP_ERR_NOT_FOUND;
+            return IO_FAIL;
+        }
+        memcpy(addr, &s->cache_addr, sizeof(*addr));
+        *alen = s->cache_len;
+        s->st.dns_cached_used++;
+        ESP_LOGW(TAG, "cst%u: DNS failed for %s, using the last address", (unsigned)s->idx, s->cfg.host);
+    }
+    /* the port of the cached address may be stale */
+    if (addr->ss_family == AF_INET) {
+        struct sockaddr_in *a = (struct sockaddr_in *)addr;
+        a->sin_port = htons(s->cfg.port);
+        inet_ntop(AF_INET, &a->sin_addr, s->st.resolved_ip, sizeof(s->st.resolved_ip));
+    }
+#if CONFIG_LWIP_IPV6
+    else if (addr->ss_family == AF_INET6) {
+        struct sockaddr_in6 *a = (struct sockaddr_in6 *)addr;
+        a->sin6_port = htons(s->cfg.port);
+        inet_ntop(AF_INET6, &a->sin6_addr, s->st.resolved_ip, sizeof(s->st.resolved_ip));
+    }
+#endif
+    return IO_OK;
+}
+
+static io_result_t tcp_connect(slot_t *s, const struct sockaddr_storage *addr, socklen_t alen, ntrip_failure_t *f)
+{
+    int fd = socket(addr->ss_family, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0) {
+        fail_with(f, NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false);
+        s->st.last_err = ESP_ERR_NO_MEM;
+        return IO_FAIL;
+    }
+    s->fd = fd;
+    set_sock_opts(fd);
+    set_nonblocking(fd);
+    if (connect(fd, (const struct sockaddr *)addr, alen) == 0) {
+        return IO_OK;
+    }
+    if (errno != EINPROGRESS) {
+        fail_with(f, NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false);
+        s->st.last_err = ESP_FAIL;
+        return IO_FAIL;
+    }
+    uint32_t start = now_ms();
+    for (;;) {
+        if (connect_abort(s)) {
+            return IO_ABORT;
+        }
+        uint32_t el = now_ms() - start;
+        if (el >= CONFIG_NTRIP_TCP_CONNECT_TIMEOUT_MS) {
+            fail_with(f, NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false);
+            s->st.last_err = ESP_ERR_TIMEOUT;
+            return IO_FAIL;
+        }
+        fd_set w;
+        FD_ZERO(&w);
+        FD_SET(fd, &w);
+        uint32_t ms = CONFIG_NTRIP_TCP_CONNECT_TIMEOUT_MS - el;
+        ms = ms < TICK_MS ? ms : TICK_MS;
+        struct timeval tv = { .tv_sec = 0, .tv_usec = (suseconds_t)(ms * 1000u) };
+        if (select(fd + 1, NULL, &w, NULL, &tv) > 0) {
+            int err = 0;
+            socklen_t len = sizeof(err);
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0) {
+                fail_with(f, NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false);
+                s->st.last_err = ESP_FAIL;
+                return IO_FAIL;
+            }
+            return IO_OK;
+        }
+    }
+}
+
+/* "No check" mode: the user chose it for this slot; nothing else changes. */
+static esp_err_t attach_no_verify(void *conf)
+{
+    mbedtls_ssl_conf_authmode((mbedtls_ssl_config *)conf, MBEDTLS_SSL_VERIFY_NONE);
+    return ESP_OK;
+}
+
+static char *load_ca_pem(slot_t *s, size_t *bytes)
+{
+    char ns[16];
+    slot_ns(s->idx, ns, sizeof(ns));
+    char *pem = heap_caps_malloc(CA_PEM_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (pem == NULL) {
+        pem = malloc(CA_PEM_MAX + 1);
+    }
+    if (pem == NULL) {
+        return NULL;
+    }
+    size_t len = CA_PEM_MAX;
+    if (settings_get_blob(ns, SETTINGS_KEY_CST_CA_PEM, pem, &len) != ESP_OK || len == 0) {
+        free(pem);
+        return NULL;
+    }
+    if (pem[len - 1] != '\0') {
+        pem[len++] = '\0';   /* PEM must be NUL-terminated, the NUL counted */
+    }
+    *bytes = len;
+    return pem;
+}
+
+static io_result_t tls_connect(slot_t *s, ntrip_failure_t *f)
+{
+    tls_keep_alive_cfg_t ka = {
+        .keep_alive_enable = true,
+        .keep_alive_idle = NTRIP_KEEPALIVE_IDLE_S,
+        .keep_alive_interval = NTRIP_KEEPALIVE_INTVL_S,
+        .keep_alive_count = NTRIP_KEEPALIVE_COUNT,
+    };
+    esp_tls_cfg_t cfg = { 0 };
+    cfg.timeout_ms = CONFIG_NTRIP_CONNECT_TIMEOUT_MS;
+    cfg.keep_alive_cfg = &ka;
+    /* Connect to the resolved (or cached) address; name checks and SNI use the configured host. */
+    cfg.common_name = host_is_ip(s->cfg.host) ? NULL : s->cfg.host;
+    char *pem = NULL;
+    switch (s->cfg.trust_mode) {
+    case NTRIP_TRUST_CUSTOM_CA: {
+        size_t bytes = 0;
+        pem = load_ca_pem(s, &bytes);
+        if (pem == NULL) {
+            fail_with(f, NTRIP_CLS_TLS, NTRIP_ROW_CONFIG, false);
+            s->hint = HINT_CA_PEM;
+            s->st.last_err = ESP_ERR_NOT_FOUND;
+            return IO_FAIL;
+        }
+        cfg.cacert_buf = (const unsigned char *)pem;
+        cfg.cacert_bytes = (unsigned int)bytes;
+        break;
+    }
+    case NTRIP_TRUST_INSECURE:
+        cfg.crt_bundle_attach = attach_no_verify;
+        break;
+    case NTRIP_TRUST_BUNDLE:
+    default:
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        break;
+    }
+
+    s->tls = esp_tls_init();
+    if (s->tls == NULL) {
+        free(pem);
+        fail_with(f, NTRIP_CLS_TLS, NTRIP_ROW_TRANSIENT, false);
+        s->st.last_err = ESP_ERR_NO_MEM;
+        return IO_FAIL;
+    }
+    const char *ip = s->st.resolved_ip[0] != '\0' ? s->st.resolved_ip : s->cfg.host;
+    int rc = esp_tls_conn_new_sync(ip, (int)strlen(ip), s->cfg.port, &cfg, s->tls);
+    free(pem);
+    if (rc == 1) {
+        int fd = -1;
+        if (esp_tls_get_conn_sockfd(s->tls, &fd) == ESP_OK && fd >= 0) {
+            s->fd = fd;
+            int on = 1;
+            setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+            set_nonblocking(fd);
+        }
+        mbedtls_ssl_context *ssl = (mbedtls_ssl_context *)esp_tls_get_ssl_context(s->tls);
+        if (ssl != NULL) {
+            const char *v = mbedtls_ssl_get_version(ssl);
+            const char *c = mbedtls_ssl_get_ciphersuite(ssl);
+            strlcpy(s->st.tls_version, v ? v : "", sizeof(s->st.tls_version));
+            strlcpy(s->st.tls_cipher, c ? c : "", sizeof(s->st.tls_cipher));
+        }
+        return IO_OK;
+    }
+
+    esp_tls_conn_state_t state = ESP_TLS_INIT;
+    (void)esp_tls_get_conn_state(s->tls, &state);
+    esp_tls_error_handle_t eh = NULL;
+    int code = 0;
+    int flags = 0;
+    esp_err_t last = ESP_FAIL;
+    if (esp_tls_get_error_handle(s->tls, &eh) == ESP_OK) {
+        last = esp_tls_get_and_clear_last_error(eh, &code, &flags);
+    }
+    s->st.last_err = last;
+    esp_tls_conn_destroy(s->tls);
+    s->tls = NULL;
+    s->fd = -1;
+    if (state == ESP_TLS_INIT) {
+        /* never got a TCP connection */
+        fail_with(f, NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false);
+    } else if (flags != 0 || code == -MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
+        fail_with(f, NTRIP_CLS_TLS, NTRIP_ROW_CONFIG, true);   /* never retried in plaintext */
+        s->hint = NTRIP_HINT_TLS_CERT;
+    } else {
+        fail_with(f, NTRIP_CLS_TLS, NTRIP_ROW_TRANSIENT, true);
+    }
+    return IO_FAIL;
+}
+
+/* At most one TLS handshake at a time; the protected slot is served first. */
+static bool tls_gate_take(slot_t *s)
+{
+    bool prot = s->cfg.protected_slot;
+    if (prot) {
+        __atomic_add_fetch(&s_tls_protected_waiting, 1u, __ATOMIC_SEQ_CST);
+    }
+    bool got = false;
+    while (!got && !connect_abort(s)) {
+        s->progress_ms = now_ms();
+        if (!prot && __atomic_load_n(&s_tls_protected_waiting, __ATOMIC_SEQ_CST) > 0) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        got = xSemaphoreTake(s_tls_sem, pdMS_TO_TICKS(TICK_MS)) == pdTRUE;
+    }
+    if (prot) {
+        __atomic_sub_fetch(&s_tls_protected_waiting, 1u, __ATOMIC_SEQ_CST);
+    }
+    return got;
+}
+
+static void record_reply(slot_t *s)
+{
+    const ntrip_reply_t *r = &s->reply;
+    bool onocoy = ntrip_host_is_onocoy(s->cfg.host);
+    const char *secrets[3] = { s->cfg.password, onocoy ? s->cfg.mountpoint : NULL, s->cfg.username };
+    ntrip_sanitize(r->line, r->line_len, s->st.last_status_line, sizeof(s->st.last_status_line), secrets, 3);
+    s->st.last_status_code = r->verdict.status_code;
+    ntrip_sanitize(r->server, strlen(r->server), s->st.server_header, sizeof(s->st.server_header), secrets, 3);
+}
+
+static io_result_t read_reply(slot_t *s, ntrip_failure_t *f)
+{
+    ntrip_reply_init(&s->reply, s->cfg.proto == NTRIP_PROTO_V2);
+    ntrip_rp_phase_t phase = s->reply.phase;
+    uint32_t phase_start = now_ms();
+    bool done = false;
+    while (!done) {
+        s->progress_ms = now_ms();
+        if (s->reply.phase != phase) {
+            phase = s->reply.phase;
+            phase_start = now_ms();
+        }
+        uint32_t limit = ntrip_reply_phase_ms(&s->reply);
+        uint32_t el = now_ms() - phase_start;
+        if (el >= limit) {
+            ntrip_reply_end(&s->reply, false);
+            break;
+        }
+        if (connect_abort(s)) {
+            return IO_ABORT;
+        }
+        int r = sess_recv(s, s->rx, sizeof(s->rx));
+        if (r > 0) {
+            size_t used = 0;
+            done = ntrip_reply_feed(&s->reply, s->rx, (size_t)r, &used);
+            continue;
+        }
+        if (r < 0) {
+            ntrip_reply_end(&s->reply, true);
+            break;
+        }
+        uint32_t left = limit - el;
+        sess_wait(s, false, left < TICK_MS ? left : TICK_MS);
+    }
+    record_reply(s);
+    const ntrip_verdict_t *v = &s->reply.verdict;
+    if (v->success) {
+        return IO_OK;
+    }
+    fail_with(f, v->cls, v->row, true);
+    f->mount_ambiguous = v->mount_ambiguous;
+    s->hint = v->hint;
+    s->st.last_err = ESP_FAIL;
+    return IO_FAIL;
+}
+
+static io_result_t send_request(slot_t *s, ntrip_failure_t *f)
+{
+    const ntrip_caster_cfg_t *c = &s->cfg;
+    bool v2 = c->proto == NTRIP_PROTO_V2;
+    ntrip_wire_names_t w;
+    ntrip_wire_names(c->host, v2, c->mountpoint, c->username, c->label, &w);
+    size_t n = v2 ? ntrip_build_v2_request(s->req, sizeof(s->req), c->host, c->port, c->tls, w.mount, w.user,
+                                           c->password, s_agent, c->v2_raw_body)
+                  : ntrip_build_v1_request(s->req, sizeof(s->req), c->password, w.mount, s_agent);
+    if (n == 0) {
+        fail_with(f, NTRIP_CLS_CONFIG, NTRIP_ROW_CONFIG, true);
+        s->hint = HINT_BAD_FIELDS;
+        s->st.last_err = ESP_ERR_INVALID_ARG;
+        return IO_FAIL;
+    }
+    write_result_t wr = write_all(s, (const uint8_t *)s->req, n, NTRIP_REQUEST_WRITE_MS, false);
+    ntrip_secure_zero(s->req, sizeof(s->req));
+    switch (wr) {
+    case WR_DONE:
+        return IO_OK;
+    case WR_ABORT:
+        return IO_ABORT;
+    case WR_STALL:
+        fail_with(f, NTRIP_CLS_TIMEOUT, NTRIP_ROW_TRANSIENT, true);
+        s->st.last_err = ESP_ERR_TIMEOUT;
+        return IO_FAIL;
+    default:
+        fail_with(f, errno_class(sock_error(s)), NTRIP_ROW_TRANSIENT, true);
+        s->st.last_err = ESP_FAIL;
+        return IO_FAIL;
+    }
+}
+
+static void tls_gate_give(slot_t *s)
+{
+    if (s->gate_held) {
+        s->gate_held = false;
+        xSemaphoreGive(s_tls_sem);
+    }
+}
+
+static io_result_t do_connect(slot_t *s, ntrip_failure_t *f)
+{
+    struct sockaddr_storage addr;
+    socklen_t alen = 0;
+    s->st.resolved_ip[0] = '\0';
+    s->st.tls_version[0] = '\0';
+    s->st.tls_cipher[0] = '\0';
+    s->st.last_status_line[0] = '\0';   /* evidence of this attempt only */
+    s->st.last_status_code = 0;
+    s->st.server_header[0] = '\0';
+    s->hint = NTRIP_HINT_NONE;
+    io_result_t r = resolve(s, &addr, &alen, f);
+    if (r != IO_OK) {
+        return r;
+    }
+    if (connect_abort(s)) {
+        return IO_ABORT;
+    }
+    if (s->cfg.tls) {
+        r = tls_connect(s, f);
+        tls_gate_give(s);   /* handshake done: the next slot may start its own */
+    } else {
+        r = tcp_connect(s, &addr, alen, f);
+    }
+    if (r != IO_OK) {
+        return r;
+    }
+    r = send_request(s, f);
+    if (r != IO_OK) {
+        return r;
+    }
+    return read_reply(s, f);
+}
+
+/* ---- stats and status ------------------------------------------------------------------- */
+
+static void ledger_report(slot_t *s)
+{
+    bool enabled = s->cfg.enabled && s_running;
+    bool streaming = s->sm.state == NTRIP_SM_STREAMING;
+    if (!s->ledger_known || enabled != s->ledger_enabled || s->cfg.protected_slot != s->ledger_protected ||
+        streaming != s->ledger_streaming) {
+        s->ledger_known = true;
+        s->ledger_enabled = enabled;
+        s->ledger_protected = s->cfg.protected_slot;
+        s->ledger_streaming = streaming;
+        ledger_set_slot(s->idx, enabled, s->cfg.protected_slot, streaming);
+    }
+}
+
+static void account(slot_t *s, uint32_t now)
+{
+    uint32_t dt = now - s->last_acct_ms;
+    s->last_acct_ms = now;
+    int32_t day = utc_day();
+    if (day >= 0 && day != s->day) {
+        if (s->day >= 0) {
+            /* new UTC day; until the first trusted clock everything counts as today */
+            s->on_ms = 0;
+            s->off_ms = 0;
+            s->st.epochs_sent_today = 0;
+            s->dropped_epochs_base += s->st.epochs_dropped_today;
+            s->st.epochs_dropped_today = 0;
+        }
+        s->day = day;
+    }
+    if (s->cfg.enabled && s_running) {
+        if (s->open) {
+            s->on_ms += dt;
+        } else {
+            s->off_ms += dt;
+        }
+    }
+}
+
+static void publish(slot_t *s, uint32_t now, bool force)
+{
+    if (!force && (uint32_t)(now - s->last_pub_ms) < PUBLISH_MS) {
+        return;
+    }
+    s->last_pub_ms = now;
+    ntrip_caster_status_t *st = &s->st;
+    st->state = (ntrip_state_t)s->sm.state;
+    st->reason = (ntrip_fail_class_t)s->sm.reason;
+    st->backoff_attempt = s->sm.attempt;
+    st->next_retry_s = (ntrip_sm_retry_in_ms(&s->sm, now) + 999u) / 1000u;
+    st->connected_s = s->open ? (now - s->sm.session_start_ms) / 1000u : 0;
+    if (!s->open) {
+        st->connected_since = 0;
+    }
+    st->today_online_s = (uint32_t)(s->on_ms / 1000u);
+    st->today_offline_s = (uint32_t)(s->off_ms / 1000u);
+
+    if (s->consumer != NULL) {
+        rtcm_hub_consumer_stats_t cs;
+        if (rtcm_hub_get_consumer_stats(s->consumer, &cs) == ESP_OK) {
+            st->frames_dropped = cs.frames_dropped;
+            st->bytes_dropped = cs.bytes_dropped;
+            st->epochs_dropped = cs.epochs_dropped;
+            st->frames_skipped_idle = cs.frames_skipped_idle;
+            st->lag_drops = cs.lag_drops;
+            st->laps = cs.laps;
+            st->lag_ms_now = s->open ? cs.lag_ms : 0;
+            if (st->lag_ms_now > s->max_lag_seen) {
+                s->max_lag_seen = st->lag_ms_now;
+            }
+            st->max_lag_ms = s->max_lag_seen;
+            if (cs.epochs_dropped < s->dropped_epochs_base) {
+                s->dropped_epochs_base = cs.epochs_dropped;
+            }
+            st->epochs_dropped_today = (uint32_t)(cs.epochs_dropped - s->dropped_epochs_base);
+        }
+    }
+
+    if (s->cfg.protected_slot) {
+        uint32_t online = st->today_online_s;
+        uint32_t rate = online == 0 ? 1000u : (uint32_t)((uint64_t)st->epochs_sent_today * 1000u / online);
+        if (rate > 1000u) {
+            rate = 1000u;
+        }
+        uint32_t budget = ntrip_offline_budget_s(rate);
+        uint64_t graced = ((uint64_t)online + NTRIP_GRACE_S) * 1000u / NTRIP_DAY_S;
+        st->graced_uptime_permille = (uint16_t)(graced > 1000u ? 1000u : graced);
+        st->data_rate_permille = (uint16_t)rate;
+        st->budget_left_s = budget > st->today_offline_s ? budget - st->today_offline_s : 0;
+        st->streak_ok = st->today_offline_s <= budget;
+    } else {
+        st->graced_uptime_permille = 0;
+        st->data_rate_permille = 0;
+        st->budget_left_s = 0;
+        st->streak_ok = false;
+    }
+
+    uint16_t hint = s->hint;
+    if (s->sm.hint != NTRIP_HINT_NONE) {
+        hint = s->sm.hint;
+    }
+    if (hint == NTRIP_HINT_NONE && s->cfg.enabled && s_running && s->sm.state == NTRIP_SM_WAIT_DATA &&
+        !s->sm.stagger_pending) {
+        hint = s->consumer == NULL ? HINT_NO_HUB : HINT_NO_RTCM;
+    }
+    if (s->low_heap_wait && hint == NTRIP_HINT_NONE) {
+        hint = HINT_LOW_MEMORY;
+    }
+    strlcpy(st->hint, hint < HINT_TOTAL ? k_hint_text[hint] : "", sizeof(st->hint));
+
+    if (s_status_mutex != NULL && xSemaphoreTake(s_status_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_status[s->idx] = *st;
+        xSemaphoreGive(s_status_mutex);
+    }
+}
+
+static void note_state(slot_t *s, uint32_t now)
+{
+    if (s->sm.state != s->prev_state) {
+        s->prev_state = (uint8_t)s->sm.state;
+        s->state_since_ms = s->sm.state_since_ms;
+        size_t idx = s->idx;
+        (void)esp_event_post(NTRIP_EVENT, NTRIP_EVENT_STATE_CHANGED, &idx, sizeof(idx), 0);
+        ledger_report(s);
+        publish(s, now, true);
+    }
+}
+
+/* ---- backoff persistence -------------------------------------------------------------------- */
+
+static void persist_backoff(slot_t *s, uint32_t now)
+{
+    if (!ntrip_sm_persist_due(&s->sm)) {
+        return;
+    }
+    ntrip_backoff_rec_t rec;
+    ntrip_sm_persist_get(&s->sm, now, &rec);
+    uint8_t buf[NTRIP_BACKOFF_REC_MAX];
+    size_t len = ntrip_backoff_rec_encode(&rec, buf, sizeof(buf));
+    char ns[16];
+    slot_ns(s->idx, ns, sizeof(ns));
+    esp_err_t err = len > 0 ? settings_set_blob(ns, SETTINGS_KEY_CST_BACKOFF, buf, len) : ESP_ERR_INVALID_SIZE;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "cst%u: backoff state not saved: %s", (unsigned)s->idx, esp_err_to_name(err));
+    }
+    ntrip_sm_persist_done(&s->sm);   /* never retried in a loop: flash wear */
+}
+
+static void restore_backoff(slot_t *s, uint32_t now)
+{
+    char ns[16];
+    slot_ns(s->idx, ns, sizeof(ns));
+    uint8_t buf[NTRIP_BACKOFF_REC_MAX];
+    size_t len = sizeof(buf);
+    ntrip_backoff_rec_t rec;
+    if (settings_get_blob(ns, SETTINGS_KEY_CST_BACKOFF, buf, &len) == ESP_OK &&
+        ntrip_backoff_rec_decode(buf, len, &rec)) {
+        ntrip_sm_restore(&s->sm, &rec, now);
+        if (rec.remaining_s > 0) {
+            ESP_LOGI(TAG, "cst%u: waiting out a stored %s backoff (%u s)", (unsigned)s->idx,
+                     k_class_name[(int)rec.cls < (int)NTRIP_FAIL_CLASS_COUNT ? (int)rec.cls : 0],
+                     (unsigned)rec.remaining_s);
+        }
+    }
+}
+
+/* ---- slot task ------------------------------------------------------------------------------- */
+
+static ntrip_sm_cfg_t sm_cfg_of(const ntrip_caster_cfg_t *c)
+{
+    ntrip_sm_cfg_t sc = {
+        .profile = (ntrip_prof_t)c->backoff_profile,
+        .protected_slot = c->protected_slot,
+        .stall_limit_ms = (c->protected_slot ? CONFIG_NTRIP_PROTECTED_SOURCE_STALL_S : CONFIG_NTRIP_SOURCE_STALL_S) *
+                          1000u,
+        .auth_window_ms = CONFIG_NTRIP_AUTH_TRANSIENT_WINDOW_S * 1000u,
+        .fast_late_cap_ms = CONFIG_NTRIP_PROTECTED_MAX_BACKOFF_S * 1000u,
+    };
+    return sc;
+}
+
+static uint32_t cred_hash_of(const ntrip_caster_cfg_t *c)
+{
+    return ntrip_cred_hash(c->host, c->port, c->proto == NTRIP_PROTO_V2, c->mountpoint, c->username, c->password,
+                           c->label);
+}
+
+static void copy_cfg(slot_t *s)
+{
+    ntrip_caster_cfg_t next;
+    taskENTER_CRITICAL(&s_lock);
+    next = s_cfg[s->idx];
+    taskEXIT_CRITICAL(&s_lock);
+    ntrip_secure_zero(s->cfg.password, sizeof(s->cfg.password));
+    s->cfg = next;
+    ntrip_secure_zero(next.password, sizeof(next.password));
+}
+
+static void apply_lag(slot_t *s)
+{
+    if (s->consumer != NULL) {
+        uint32_t lag = s->cfg.protected_slot ? ONOCOY_LAG_MS : CONFIG_RTCM_HUB_MAX_LAG_MS;
+        esp_err_t err = rtcm_hub_set_max_lag(s->consumer, lag);
+        if (err != ESP_OK && err != ESP_ERR_NOT_SUPPORTED) {
+            ESP_LOGW(TAG, "cst%u: lag limit not set: %s", (unsigned)s->idx, esp_err_to_name(err));
+        }
+    }
+}
+
+static void ensure_consumer(slot_t *s, uint32_t now)
+{
+    if (s->consumer != NULL || (s->attach_wait && (int32_t)(now - s->attach_at_ms) < 0)) {
+        return;
+    }
+    char name[8];
+    snprintf(name, sizeof(name), "cst%u", (unsigned)s->idx);
+    if (rtcm_hub_attach(name, &s->consumer) != ESP_OK) {
+        s->consumer = NULL;
+        s->attach_wait = true;
+        s->attach_at_ms = now + ATTACH_RETRY_MS;
+        return;
+    }
+    s->attach_wait = false;
+    apply_lag(s);
+}
+
+static bool hub_fresh(void)
+{
+    rtcm_hub_stats_t hs;
+    rtcm_hub_get_stats(&hs);
+    return hs.frames_in > 0 && hs.last_frame_age_ms <= NTRIP_FRESH_DATA_MS;
+}
+
+static void end_planned(slot_t *s, uint32_t now, bool clean)
+{
+    bool was_open = s->open;
+    session_close(s, clean);
+    ntrip_sm_closed(&s->sm, now);
+    if (was_open) {
+        s->st.connected_since = 0;
+    }
+}
+
+static void handle_commands(slot_t *s, uint32_t now)
+{
+    uint32_t cmd = take_cmd(s);
+    if (cmd & CMD_CONFIG) {
+        char old_host[64];
+        strlcpy(old_host, s->cfg.host, sizeof(old_host));
+        if (s->open || s->fd >= 0 || s->tls != NULL) {
+            end_planned(s, now, true);
+        }
+        copy_cfg(s);
+        if (strcmp(old_host, s->cfg.host) != 0) {
+            s->cache_len = 0;
+            s->cache_host[0] = '\0';
+        }
+        ntrip_sm_cfg_t sc = sm_cfg_of(&s->cfg);
+        ntrip_sm_user_edit(&s->sm, &sc, cred_hash_of(&s->cfg), now);
+        s->tls_fail_streak = 0;
+        s->hint = NTRIP_HINT_NONE;
+        s->low_heap_wait = false;
+        apply_lag(s);
+        persist_backoff(s, now);
+        ledger_report(s);
+        ESP_LOGI(TAG, "cst%u (%s): settings changed%s", (unsigned)s->idx, s->cfg.name,
+                 s->cfg.enabled ? "" : ", disabled");
+    }
+    if (cmd & CMD_RESTART) {
+        if (s->open || s->fd >= 0 || s->tls != NULL) {
+            end_planned(s, now, true);
+        }
+        s->st.restarts++;
+        ESP_LOGW(TAG, "cst%u (%s): restarted by the health monitor", (unsigned)s->idx, s->cfg.name);
+    }
+    if (s->open && s->net_gen != s_net_gen) {
+        /* the address changed: the old socket is dead, no clean close possible */
+        end_planned(s, now, false);
+        ntrip_sm_stagger(&s->sm, now, esp_random());
+        ESP_LOGI(TAG, "cst%u (%s): address changed, reconnecting", (unsigned)s->idx, s->cfg.name);
+    }
+}
+
+static void count_failure(slot_t *s, const ntrip_failure_t *f, bool after_streaming)
+{
+    if (after_streaming) {
+        s->st.disconnects++;
+    } else {
+        s->st.failures++;
+    }
+    if (f->cls < NTRIP_CLS_COUNT) {
+        s->st.failures_by_class[f->cls]++;
+    }
+    if (f->cls == NTRIP_CLS_TLS) {
+        s->tls_fail_streak++;
+        if (s->tls_fail_streak >= NTRIP_TLS_PLAIN_HINT_AFTER && ntrip_host_is_onocoy(s->cfg.host) &&
+            s->hint == NTRIP_HINT_NONE) {
+            s->hint = NTRIP_HINT_TLS_TRY_PLAIN;   /* offered, never applied */
+        }
+    } else if (f->reached_caster) {
+        s->tls_fail_streak = 0;
+    }
+}
+
+static bool link_up(void)
+{
+    return s_have_ip && s_wifi_up;
+}
+
+static void session_failed(slot_t *s, ntrip_cls_t cls, uint32_t now)
+{
+    if (!link_up()) {
+        /* The session died while the network was down: a drop, not a caster
+         * failure; the gate waits for the network instead of a backoff. */
+        session_close(s, false);
+        s->st.connected_since = 0;
+        s->st.disconnects++;
+        ntrip_sm_closed(&s->sm, now);
+        ESP_LOGW(TAG, "cst%u (%s): session to %s:%u ended while the network was down (%s)", (unsigned)s->idx,
+                 s->cfg.name, s->cfg.host, (unsigned)s->cfg.port, k_class_name[cls]);
+        return;
+    }
+    ntrip_failure_t f;
+    fail_with(&f, cls, NTRIP_ROW_TRANSIENT, true);
+    session_close(s, false);
+    s->st.connected_since = 0;
+    count_failure(s, &f, true);
+    uint32_t d = ntrip_sm_failed(&s->sm, &f, now, esp_random());
+    ESP_LOGW(TAG, "cst%u (%s): session to %s:%u ended (%s); retry in %u s", (unsigned)s->idx, s->cfg.name,
+             s->cfg.host, (unsigned)s->cfg.port, k_class_name[cls], (unsigned)((d + 999u) / 1000u));
+}
+
+static void connect_once(slot_t *s, uint32_t now)
+{
+    if (s->cfg.tls) {
+        if (!s->cfg.protected_slot && heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < TLS_MIN_INTERNAL_HEAP) {
+            if (!s->low_heap_wait) {
+                ESP_LOGW(TAG, "cst%u (%s): low internal memory, TLS connect deferred", (unsigned)s->idx, s->cfg.name);
+            }
+            s->low_heap_wait = true;
+            s->low_heap_until_ms = now + LOW_HEAP_RETRY_MS;
+            return;
+        }
+        s->low_heap_wait = false;
+        if (!tls_gate_take(s)) {
+            return;   /* aborted while waiting: no attempt */
+        }
+        s->gate_held = true;
+    }
+    session_close(s, false);   /* never two sessions for a slot */
+    uint32_t t0 = now_ms();
+    ntrip_sm_connecting(&s->sm, t0);
+    note_state(s, t0);
+    ESP_LOGI(TAG, "cst%u (%s): connecting to %s:%u (NTRIP %s%s)", (unsigned)s->idx, s->cfg.name, s->cfg.host,
+             (unsigned)s->cfg.port, s->cfg.proto == NTRIP_PROTO_V2 ? "2.0" : "1.0", s->cfg.tls ? ", TLS" : "");
+
+    ntrip_failure_t f;
+    memset(&f, 0, sizeof(f));
+    io_result_t r = do_connect(s, &f);
+    tls_gate_give(s);   /* if the attempt ended before the handshake */
+    uint32_t t1 = now_ms();
+    if (r == IO_FAIL && !link_up()) {
+        r = IO_ABORT;   /* the network went down meanwhile: not a failure */
+        ESP_LOGI(TAG, "cst%u (%s): attempt ended by a network loss (%s), not counted", (unsigned)s->idx, s->cfg.name,
+                 k_class_name[f.cls]);
+    }
+    if (r == IO_ABORT) {
+        session_close(s, false);
+        ntrip_sm_closed(&s->sm, t1);
+        return;
+    }
+    if (r == IO_FAIL) {
+        session_close(s, false);
+        count_failure(s, &f, false);
+        uint32_t d = ntrip_sm_failed(&s->sm, &f, t1, esp_random());
+        if (s->st.last_status_line[0] != '\0' && f.reached_caster) {
+            ESP_LOGW(TAG, "cst%u (%s): %s:%u refused (%s): \"%.80s\"; retry in %u s", (unsigned)s->idx, s->cfg.name,
+                     s->cfg.host, (unsigned)s->cfg.port, k_class_name[f.cls], s->st.last_status_line,
+                     (unsigned)((d + 999u) / 1000u));
+        } else {
+            ESP_LOGW(TAG, "cst%u (%s): %s:%u failed (%s); retry in %u s", (unsigned)s->idx, s->cfg.name,
+                     s->cfg.host, (unsigned)s->cfg.port, k_class_name[f.cls], (unsigned)((d + 999u) / 1000u));
+        }
+        return;
+    }
+
+    /* accepted: RTCM may flow now, starting with the station metadata */
+    s->open = true;
+    s->chunked = s->cfg.proto == NTRIP_PROTO_V2 && !s->cfg.v2_raw_body;
+    s->mid_chunk = false;
+    s->paused_seen = false;
+    s->logged_unexpected = false;
+    s->last_tx_ms = t1;
+    s->net_gen = s_net_gen;
+    s->tls_fail_streak = 0;
+    s->hint = NTRIP_HINT_NONE;
+    if (s->consumer != NULL) {
+        (void)rtcm_hub_resync(s->consumer);
+    }
+    ntrip_sm_connected(&s->sm, t1);
+    s->st.connects++;
+    s->st.connected_since = unix_now();
+    ESP_LOGI(TAG, "cst%u (%s): streaming to %s:%u (%s)", (unsigned)s->idx, s->cfg.name, s->cfg.host,
+             (unsigned)s->cfg.port, s->st.last_status_line);
+}
+
+/* Read what the caster sends while streaming: nothing is expected, EOF ends the session. */
+static bool poll_incoming(slot_t *s, uint32_t now)
+{
+    for (int i = 0; i < 4; i++) {
+        int r = sess_recv(s, s->rx, sizeof(s->rx));
+        if (r == 0) {
+            return true;
+        }
+        if (r == -1) {
+            session_failed(s, NTRIP_CLS_REMOTE_CLOSE, now);
+            return false;
+        }
+        if (r < 0) {
+            session_failed(s, errno_class(sock_error(s)), now);
+            return false;
+        }
+        if (!s->logged_unexpected) {
+            size_t a = 0;
+            while (a < (size_t)r && (s->rx[a] == '\r' || s->rx[a] == '\n')) {
+                a++;
+            }
+            size_t b = a;
+            while (b < (size_t)r && s->rx[b] != '\r' && s->rx[b] != '\n') {
+                b++;
+            }
+            if (b > a) {
+                char line[97];
+                bool onocoy = ntrip_host_is_onocoy(s->cfg.host);
+                const char *secrets[3] = { s->cfg.password, onocoy ? s->cfg.mountpoint : NULL, s->cfg.username };
+                ntrip_sanitize((const char *)s->rx + a, b - a, line, sizeof(line), secrets, 3);
+                ESP_LOGW(TAG, "cst%u (%s): caster sent \"%s\"", (unsigned)s->idx, s->cfg.name, line);
+                s->logged_unexpected = true;
+            }
+        }
+    }
+    return true;
+}
+
+static void stream_step(slot_t *s, uint32_t now)
+{
+    if (!poll_incoming(s, now)) {
+        return;
+    }
+    if (s_paused) {
+        /* stay connected and idle; the core closes the session at the stall limit */
+        s->paused_seen = true;
+        wait_kick(s, TICK_MS);
+        return;
+    }
+    if (s->consumer == NULL) {
+        wait_kick(s, TICK_MS);
+        return;
+    }
+    if (s->paused_seen) {
+        /* the receiver was reconfigured: start again with the station metadata */
+        s->paused_seen = false;
+        (void)rtcm_hub_resync(s->consumer);
+    }
+    size_t len = 0;
+    esp_err_t err = rtcm_hub_read(s->consumer, s->tx + NTRIP_CHUNK_HEAD_RESERVE, NTRIP_CHUNK_MAX_PAYLOAD, &len,
+                                  TICK_MS);
+    if (err != ESP_OK || len == 0) {
+        if (err != ESP_ERR_TIMEOUT) {
+            wait_kick(s, TICK_MS);   /* hub not ready: do not spin */
+        }
+        return;
+    }
+    uint32_t frames = 0;
+    uint32_t epochs = 0;
+    ntrip_count_frames(s->tx + NTRIP_CHUNK_HEAD_RESERVE, len, &frames, &epochs);
+    const uint8_t *p = s->tx + NTRIP_CHUNK_HEAD_RESERVE;
+    size_t n = len;
+    if (s->chunked) {
+        size_t start = 0;
+        n = ntrip_chunk_wrap(s->tx, len, &start);
+        p = s->tx + start;
+    }
+    write_result_t wr = write_all(s, p, n, CONFIG_NTRIP_SEND_TIMEOUT_MS, true);
+    uint32_t t = now_ms();
+    switch (wr) {
+    case WR_DONE:
+        s->st.bytes_sent += len;
+        s->st.frames_sent += frames;
+        s->st.epochs_sent += epochs;
+        s->st.epochs_sent_today += epochs;
+        break;
+    case WR_STALL:
+        session_failed(s, NTRIP_CLS_WRITE_STALL, t);
+        break;
+    case WR_ERROR:
+        session_failed(s, errno_class(sock_error(s)), t);
+        break;
+    case WR_ABORT:
+    default:
+        end_planned(s, t, false);   /* mid-chunk: no terminator, just close */
+        break;
+    }
+}
+
+static void slot_task(void *arg)
+{
+    slot_t *s = (slot_t *)arg;
+    uint32_t now = now_ms();
+    copy_cfg(s);
+    ntrip_sm_cfg_t sc = sm_cfg_of(&s->cfg);
+    ntrip_sm_init(&s->sm, &sc, cred_hash_of(&s->cfg), now);
+    s->prev_state = (uint8_t)s->sm.state;
+    s->state_since_ms = now;
+    s->last_acct_ms = now;
+    restore_backoff(s, now);
+
+    for (;;) {
+        now = now_ms();
+        s->progress_ms = now;
+        ensure_consumer(s, now);
+        handle_commands(s, now);
+
+        ntrip_sm_in_t in = {
+            .enabled = s->cfg.enabled && s_running && !s_shutdown,
+            .have_ip = s_have_ip,
+            .link_up = link_up(),
+            .paused = s_paused,
+            .fresh_data = s->consumer != NULL && hub_fresh(),
+            .session_open = s->open,
+            .silent_ms = s->open ? now - s->last_tx_ms : 0,
+        };
+        ntrip_close_why_t why = NTRIP_WHY_NONE;
+        ntrip_sm_act_t act = ntrip_sm_poll(&s->sm, &in, now, esp_random(), &why);
+        note_state(s, now);
+
+        if (act == NTRIP_ACT_CLOSE) {
+            static const char *const k_why[] = { "", "disabled", "no network", "paused, idle limit reached",
+                                                 "no RTCM from the receiver" };
+            ESP_LOGI(TAG, "cst%u (%s): closing session (%s)", (unsigned)s->idx, s->cfg.name,
+                     k_why[(size_t)why < sizeof(k_why) / sizeof(k_why[0]) ? (size_t)why : 0]);
+            end_planned(s, now, why != NTRIP_WHY_NO_IP);
+        } else if (act == NTRIP_ACT_CONNECT) {
+            if (s->low_heap_wait && (int32_t)(now - s->low_heap_until_ms) < 0) {
+                wait_kick(s, IDLE_WAIT_MS);
+            } else {
+                connect_once(s, now);
+            }
+        } else if (s->open) {
+            stream_step(s, now);
+        } else {
+            uint32_t wait = IDLE_WAIT_MS;
+            uint32_t retry = ntrip_sm_retry_in_ms(&s->sm, now);
+            if (retry > 0 && retry < wait) {
+                wait = retry;
+            }
+            wait_kick(s, wait);
+        }
+
+        now = now_ms();
+        note_state(s, now);
+        persist_backoff(s, now);
+        account(s, now);
+        ledger_report(s);
+        publish(s, now, false);
+    }
+}
+
+/* ---- lifecycle ----------------------------------------------------------------------------- */
+
+static bool any_session_open(void)
+{
+    for (size_t i = 0; i < ntrip_server_slot_count(); i++) {
+        if (s_slots[i] != NULL && s_slots[i]->open) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void wait_sessions_closed(uint32_t budget_ms)
+{
+    uint32_t start = now_ms();
+    while (any_session_open() && (uint32_t)(now_ms() - start) < budget_ms) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+/* Planned reboot: every slot closes its session (terminator, close_notify,
+ * close) so the caster frees the mountpoint at once. Bounded by the
+ * lifecycle shutdown budget; a slot still in a TLS handshake is skipped. */
 static void on_shutdown(uint32_t deadline_ms, void *ctx)
 {
     (void)ctx;
-    (void)deadline_ms;
-    /* TODO: signal every slot to close (TLS close_notify / shutdown(SHUT_WR))
-     * and wait for them, bounded by deadline_ms. */
+    s_shutdown = true;
+    kick_all();
+    wait_sessions_closed(deadline_ms);
+}
+
+static esp_err_t create_slot(size_t i)
+{
+    slot_t *s = heap_caps_calloc(1, sizeof(slot_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s == NULL) {
+        s = calloc(1, sizeof(slot_t));
+    }
+    if (s == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    s->idx = i;
+    s->fd = -1;
+    s->day = -1;
+    s_slots[i] = s;
+    char name[configMAX_TASK_NAME_LEN];
+    snprintf(name, sizeof(name), "cst%u", (unsigned)i);
+    if (xTaskCreatePinnedToCore(slot_task, name, CONFIG_NTRIP_TASK_STACK, s, CONFIG_NTRIP_TASK_PRIO, &s->task,
+                                tskNO_AFFINITY) != pdPASS) {
+        s_slots[i] = NULL;
+        free(s);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }
 
 esp_err_t ntrip_server_init(void)
 {
+    if (s_loaded) {
+        return ESP_OK;
+    }
     for (size_t i = 0; i < ntrip_server_slot_count(); i++) {
         (void)load_slot(i, &s_cfg[i]);
     }
+    s_status_mutex = xSemaphoreCreateMutex();
+    s_cfg_mutex = xSemaphoreCreateMutex();
+    s_tls_sem = xSemaphoreCreateBinary();
+    s_kick = xEventGroupCreate();
+    if (s_status_mutex == NULL || s_cfg_mutex == NULL || s_tls_sem == NULL || s_kick == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    xSemaphoreGive(s_tls_sem);
+    const esp_app_desc_t *app = esp_app_get_description();
+    if (ntrip_build_agent(app->version, s_agent, sizeof(s_agent)) == 0) {
+        ntrip_build_agent("", s_agent, sizeof(s_agent));
+    }
+    for (size_t i = 0; i < ntrip_server_slot_count(); i++) {
+        s_status[i].state = NTRIP_STATE_DISABLED;
+    }
     s_loaded = true;
+
     esp_err_t err = lifecycle_register_shutdown_hook(on_shutdown, NULL);
+    if (err == ESP_OK) {
+        err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_net_event, NULL);
+    }
+    if (err == ESP_OK) {
+        err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP, on_net_event, NULL);
+    }
+    if (err == ESP_OK) {
+        err = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, on_net_event, NULL);
+    }
+    if (err == ESP_OK) {
+        err = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, on_net_event, NULL);
+    }
+    if (err == ESP_OK) {
+        err = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_STOP, on_net_event, NULL);
+    }
     if (err != ESP_OK) {
         return err;
     }
-    /* TODO: create the slot tasks here (idle until start), one hub consumer
-     * and fixed buffers each. */
-    ESP_LOGI(TAG, "%d caster slots", CONFIG_NTRIP_MAX_CASTERS);
+    for (size_t i = 0; i < ntrip_server_slot_count() && err == ESP_OK; i++) {
+        err = create_slot(i);
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+    ESP_LOGI(TAG, "%d caster slots, agent \"%s\"", CONFIG_NTRIP_MAX_CASTERS, s_agent);
     return ESP_OK;
 }
 
 esp_err_t ntrip_server_start(void)
 {
-    return ESP_ERR_NOT_SUPPORTED;
+    if (!s_loaded) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    refresh_network_state();
+    s_running = true;
+    kick_all();
+    return ESP_OK;
 }
 
 esp_err_t ntrip_server_stop(void)
 {
+    if (!s_loaded) {
+        return ESP_OK;
+    }
+    s_running = false;
+    kick_all();
+    wait_sessions_closed(STOP_WAIT_MS);
     return ESP_OK;
 }
 
@@ -196,6 +1766,25 @@ esp_err_t ntrip_server_get_config(size_t slot, ntrip_caster_cfg_t *out, bool wit
     return ESP_OK;
 }
 
+static esp_err_t check_policy(size_t slot, const ntrip_caster_cfg_t *next)
+{
+    ntrip_policy_slot_t pol[CONFIG_NTRIP_MAX_CASTERS];
+    char hosts[CONFIG_NTRIP_MAX_CASTERS][64];
+    taskENTER_CRITICAL(&s_lock);
+    for (size_t i = 0; i < ntrip_server_slot_count(); i++) {
+        const ntrip_caster_cfg_t *c = (i == slot) ? next : &s_cfg[i];
+        memcpy(hosts[i], c->host, sizeof(hosts[i]));
+        pol[i].enabled = c->enabled;
+        pol[i].dup_ack = c->dup_stream_ack;
+    }
+    taskEXIT_CRITICAL(&s_lock);
+    for (size_t i = 0; i < ntrip_server_slot_count(); i++) {
+        hosts[i][sizeof(hosts[i]) - 1] = '\0';
+        pol[i].host = hosts[i];
+    }
+    return ntrip_check_policy(pol, ntrip_server_slot_count(), slot) == NTRIP_POLICY_OK ? ESP_OK : ESP_ERR_NOT_ALLOWED;
+}
+
 esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg)
 {
     if (cfg == NULL || slot >= ntrip_server_slot_count()) {
@@ -209,10 +1798,8 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg)
         !fits(cfg->password, sizeof(cfg->password)) || !fits(cfg->label, sizeof(cfg->label)) || !enums_valid(cfg)) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (cfg->enabled && (cfg->host[0] == '\0' || cfg->port == 0 || cfg->mountpoint[0] == '\0')) {
-        return ESP_ERR_INVALID_ARG;
-    }
 
+    xSemaphoreTake(s_cfg_mutex, portMAX_DELAY);
     ntrip_caster_cfg_t next = *cfg;
     next.clear_password = false;
     next.ca_pem_set = false;   /* output only */
@@ -229,24 +1816,37 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg)
     }
     next.password_set = next.password[0] != '\0';
 
+    esp_err_t err = ESP_OK;
+    ntrip_fields_t f = fields_of(&next);
+    if (has_bad_name(next.name) || ntrip_validate_fields(&f) != NTRIP_FIELDS_OK) {
+        err = ESP_ERR_INVALID_ARG;
+    } else {
+        err = check_policy(slot, &next);
+    }
     uint8_t buf[CFG_BLOB_MAX];
-    size_t len = encode_cfg(&next, buf, sizeof(buf));
-    if (len == 0) {
-        return ESP_ERR_INVALID_SIZE;
+    size_t len = 0;
+    if (err == ESP_OK) {
+        len = encode_cfg(&next, buf, sizeof(buf));
+        err = len == 0 ? ESP_ERR_INVALID_SIZE : ESP_OK;
     }
-    char ns[16];
-    snprintf(ns, sizeof(ns), SETTINGS_NS_CASTER_FMT, (unsigned)slot);
-    esp_err_t err = settings_set_blob(ns, SETTINGS_KEY_CST_CFG, buf, len);
-    memset(buf, 0, sizeof(buf));
-    if (err != ESP_OK) {
-        return err;
+    if (err == ESP_OK) {
+        char ns[16];
+        slot_ns(slot, ns, sizeof(ns));
+        err = settings_set_blob(ns, SETTINGS_KEY_CST_CFG, buf, len);
     }
-
-    taskENTER_CRITICAL(&s_lock);
-    s_cfg[slot] = next;
-    taskEXIT_CRITICAL(&s_lock);
-    /* TODO: tell only this slot's task to reconnect with the new config. */
-    return ESP_OK;
+    ntrip_secure_zero(buf, sizeof(buf));
+    if (err == ESP_OK) {
+        taskENTER_CRITICAL(&s_lock);
+        s_cfg[slot] = next;
+        taskEXIT_CRITICAL(&s_lock);
+        if (s_slots[slot] != NULL) {
+            __atomic_or_fetch(&s_slots[slot]->cmd, CMD_CONFIG, __ATOMIC_SEQ_CST);
+            kick(slot);   /* only this slot reconnects */
+        }
+    }
+    ntrip_secure_zero(next.password, sizeof(next.password));
+    xSemaphoreGive(s_cfg_mutex);
+    return err;
 }
 
 esp_err_t ntrip_server_get_status(size_t slot, ntrip_caster_status_t *out)
@@ -256,6 +1856,18 @@ esp_err_t ntrip_server_get_status(size_t slot, ntrip_caster_status_t *out)
     }
     memset(out, 0, sizeof(*out));
     out->state = NTRIP_STATE_DISABLED;
+    slot_t *s = s_slots[slot];
+    if (!s_loaded || s == NULL || s_status_mutex == NULL) {
+        return ESP_OK;
+    }
+    if (xSemaphoreTake(s_status_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    *out = s_status[slot];
+    xSemaphoreGive(s_status_mutex);
+    uint32_t now = now_ms();
+    out->state_age_s = (now - s->state_since_ms) / 1000u;
+    out->progress_age_ms = now - s->progress_ms;
     return ESP_OK;
 }
 
@@ -264,15 +1876,26 @@ esp_err_t ntrip_server_restart_slot(size_t slot)
     if (slot >= ntrip_server_slot_count()) {
         return ESP_ERR_INVALID_ARG;
     }
-    return ESP_ERR_NOT_SUPPORTED;
+    if (!s_loaded || s_slots[slot] == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    __atomic_or_fetch(&s_slots[slot]->cmd, CMD_RESTART, __ATOMIC_SEQ_CST);
+    kick(slot);
+    return ESP_OK;
 }
 
 esp_err_t ntrip_server_set_paused(bool paused)
 {
-    (void)paused;
-    /* TODO: paused slots stay connected and idle up to their source-stall
-     * limit, then close cleanly and wait in PAUSED. */
-    return ESP_ERR_NOT_SUPPORTED;
+    if (!s_loaded) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_paused != paused) {
+        ESP_LOGI(TAG, "%s", paused ? "paused for receiver work" : "resumed");
+    }
+    s_paused = paused;
+    ledger_set_planned(paused);
+    kick_all();
+    return ESP_OK;
 }
 
 void ntrip_server_onocoy_defaults(ntrip_caster_cfg_t *out)

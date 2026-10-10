@@ -18,12 +18,14 @@ idf_component_register(
         "test_semver.c"
         "test_um98x_profile.c"
         "test_flash_journal.c"
+        "test_ntrip_proto.c"
         "${_fw}/lifecycle/boot_guard.c"
         "${_fw}/lifecycle/reboot_gate.c"
         "${_fw}/lifecycle/boot_history.c"
         "${_fw}/fw_update/semver.c"
         "${_fw}/um98x_ctl/um98x_profile.c"
         "${_fw}/um98x_flash/flash_journal.c"
+        "${_fw}/ntrip_server/ntrip_proto.c"
     INCLUDE_DIRS
         "."
     PRIV_INCLUDE_DIRS
@@ -31,8 +33,10 @@ idf_component_register(
         "${_fw}/fw_update/priv_include"
         "${_fw}/um98x_ctl/include"
         "${_fw}/um98x_flash/priv_include"
+        "${_fw}/ntrip_server/priv_include"
     REQUIRES unity gnss_framing gnss_types settings nvs_flash esp_partition esp_event
     WHOLE_ARCHIVE)
 
-# The WGS84 conversion uses libm (part of libc on macOS, separate on Linux).
+# The WGS84 conversion and the caster budget estimate use libm (part of libc
+# on macOS, separate on Linux).
 target_link_libraries(${COMPONENT_LIB} PRIVATE m)
