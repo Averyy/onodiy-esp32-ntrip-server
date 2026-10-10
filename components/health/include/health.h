@@ -33,7 +33,8 @@
  *   decides: no byte at all in that step's window -> 6a; any bytes -> 6b.
  *   6a. reboot the ESP32 (the ESP32 side may be wedged), only within the
  *       reboot cap (lifecycle_ladder_reboot_allowed: 60 min apart, at most
- *       3 per 24 h, across reboots); blocked -> 7.
+ *       3 per 24 h, across reboots) and while no reboot inhibit is held;
+ *       blocked -> 7.
  *   6b. an ESP32 reboot does not reset the receiver: raise "receiver needs a
  *       power cycle" instead -> 7.
  *   7. FAILED: every 10 min re-classify and enter at max(2, class entry
@@ -48,21 +49,28 @@
  * The ladder resets after 60 s of healthy RTCM (that also clears the power
  * cycle alert); a shorter healthy period keeps the step, so a flapping link
  * escalates. Health posts the station request and returns: one tick never
- * blocks for more than 100 ms. Every step start and result is journalled
- * (DIAG_EV_LADDER_STEP).
+ * blocks for more than 100 ms. A step ends when the station leaves
+ * RECOVERING (seen through STATION_EVENT_STATE_CHANGED and the status).
+ * Every step start and result is journalled (DIAG_EV_LADDER_STEP, a = 0).
+ * With CONFIG_HEALTH_SURVEY_HOLDS_RTCM (a receiver that sends no RTCM while
+ * it surveys) no stall is declared and no grace runs out while the station's
+ * survey window is open.
  *
- * Suspension (the ladder neither starts nor advances, its timers stop):
- * station DETECTING, CONFIGURING, FLASHING or FLASH_RECOVERY; a receiver
- * flash journal open in any state, including waiting for the user, and a
- * journal whose state is unknown because the settings are unavailable; safe
- * mode; any GNSS lease held by someone other than the ladder; and for 10 s
- * after any lease release. While the station is NO_RECEIVER, health applies
- * the byte rule once per episode, using the station's classification of its
- * whole detection pass (station_status_t.detect_saw_bytes: none -> 6a,
- * some -> 6b), and then holds step 7: the station's own detection schedule
- * (short list every 30 s for 5 min, then the full list every 5 min)
- * replaces the ladder's retries. When a suspension ends the stall timer and
- * the loss window start again from there.
+ * Suspension (the ladder neither starts nor advances, its timers stop, a
+ * step in progress is abandoned and runs again later): station DETECTING,
+ * CONFIGURING, FLASHING or FLASH_RECOVERY (and IDLE: not running yet); a
+ * receiver flash journal open in any state, including waiting for the user,
+ * and a journal whose state is unknown because the settings are
+ * unavailable; safe mode; any GNSS lease held (or station recovery job run)
+ * by someone other than the ladder; and for 10 s after the release of such a
+ * lease, the stall timer then counting from the release. While the station
+ * is NO_RECEIVER, health applies the byte rule once per episode, using the
+ * station's classification of its whole detection pass
+ * (station_status_t.detect_saw_bytes: none -> 6a, some -> 6b), and then
+ * holds step 7: the station's own detection schedule (short list every 30 s
+ * for 5 min, then the full list every 5 min) replaces the ladder's retries,
+ * and the leases of those passes suspend nothing. When a suspension ends the
+ * stall timer and the loss window start again from there.
  *
  * Link-loss alert: any UART FIFO overflow, or RTCM CRC errors above 1 % with
  * at least 100 frames, within a 10-11 min window of one-minute RAM buckets
@@ -95,10 +103,13 @@
  *
  * BOOT button (GPIO0, read after boot): held >= CONFIG_HEALTH_BUTTON_ADMIN_S
  * clears the admin password and starts the recovery setup AP; held
- * >= CONFIG_HEALTH_BUTTON_FACTORY_S runs a factory reset. The factory reset
- * is refused (logged and shown in the UI) while a receiver flash journal is
- * open and not waiting for the user: it would erase the profile that the
- * session re-applies to the receiver.
+ * >= CONFIG_HEALTH_BUTTON_FACTORY_S runs a factory reset. The action is
+ * chosen by the hold time and taken on release (the log says when each
+ * threshold is reached); a button held or stuck since boot does nothing
+ * until it has been released once. The factory reset is refused (logged
+ * and shown in the UI, factory_reset_refused_age_s) while a receiver flash
+ * journal is open and not waiting for the user: it would erase the profile
+ * that the session re-applies to the receiver.
  *
  * Alerts: health_alert_t below; the station raises and clears its own
  * (station_status_t.alerts). The UI shows both.
@@ -165,6 +176,8 @@ typedef struct {
     uint32_t heap_internal_min;      /**< low-water mark since boot */
     uint32_t heap_internal_largest;  /**< largest free internal block (fragmentation) */
     uint32_t heap_psram_free;
+    uint32_t gnss_retry_in_s;        /**< FAILED: until the next retry pass (0 = none scheduled, e.g. while the station's own detection schedule runs) */
+    uint32_t factory_reset_refused_age_s; /**< since a BOOT-button factory reset was refused because a receiver update was running (UINT32_MAX = not this boot) */
 } health_status_t;
 
 /** Register handlers; read the button pin from the board. */

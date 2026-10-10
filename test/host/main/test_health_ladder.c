@@ -1,0 +1,1246 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Avery L.
+ * SPDX-License-Identifier: MIT
+ *
+ * GNSS recovery ladder core, run against a small simulated world: a receiver
+ * that sends RTCM, text lines or garbage (or nothing) every second, and a
+ * station that takes the ladder's requests, runs each step for a set time
+ * (taking a lease for steps 3-5) and reports its state, its transitions and
+ * its lease releases the way station.c and its events do. The clock starts
+ * near the 32-bit millisecond wrap.
+ */
+#include <stdint.h>
+#include <string.h>
+
+#include "health_ladder.h"
+#include "unity.h"
+
+#define T0 ((int64_t)UINT32_MAX - 2000)
+#define SEC 1000
+#define MIN (60 * SEC)
+#define HOUR (60 * MIN)
+#define NEVER INT64_MIN
+
+typedef struct {
+    uint8_t code;
+    uint8_t outcome;
+    int64_t at;
+} rec_t;
+
+typedef struct {
+    hl_t l;
+    hl_in_t in;
+    int64_t now;
+
+    /* the receiver: what arrives each second */
+    bool rtcm;
+    bool lines;
+    bool bytes;
+    int64_t last_rtcm;
+    int64_t last_rx;
+    uint8_t silence_after;      /* this finished step silences the receiver */
+
+    /* the station */
+    uint8_t pending;
+    uint8_t running;
+    int64_t run_end;
+    uint32_t dur[6];            /* step durations, ms */
+    uint8_t fix_step;           /* this finished step brings RTCM back */
+    bool rescan_finds;
+    bool events;                /* transitions are counted (events delivered) */
+    bool refuse4;               /* the station refuses RECONFIGURE */
+    bool reject;                /* the station rejects every request */
+    bool lease;
+    int64_t release_at;
+
+    /* reboot cap model (optional) */
+    bool cap_model;
+    int64_t reboots_at[16];
+    unsigned nreboots_cap;
+
+    /* recorded */
+    uint8_t req[256];
+    int64_t req_at[256];
+    unsigned nreq;
+    rec_t rec[512];
+    unsigned nrec;
+    unsigned reboots;
+    int64_t reboot_at;
+    unsigned started_steps;     /* journalled starts of steps 1-5 (not bounded by rec[]) */
+} sim_t;
+
+static hl_req_t cb_request(void *ctx, uint8_t step)
+{
+    sim_t *w = (sim_t *)ctx;
+    TEST_ASSERT_TRUE(step >= 1 && step <= 5);
+    if (w->nreq < 256) {
+        w->req[w->nreq] = step;
+        w->req_at[w->nreq] = w->now;
+        w->nreq++;
+    }
+    if (w->reject) {
+        return HL_REQ_REJECTED;
+    }
+    if (step == 4 && w->refuse4) {
+        return HL_REQ_REFUSED;
+    }
+    if (w->pending < step) {
+        w->pending = step;   /* an equal or stronger one already queued wins */
+    }
+    return HL_REQ_ACCEPTED;
+}
+
+static void cb_reboot(void *ctx)
+{
+    sim_t *w = (sim_t *)ctx;
+    w->reboots++;
+    w->reboot_at = w->now;
+    if (w->cap_model && w->nreboots_cap < 16) {
+        w->reboots_at[w->nreboots_cap++] = w->now;
+    }
+}
+
+static void cb_journal(void *ctx, uint8_t code, uint8_t outcome)
+{
+    sim_t *w = (sim_t *)ctx;
+    if (outcome == HL_OUT_STARTED && code >= 1 && code <= 5) {
+        w->started_steps++;
+    }
+    if (w->nrec < 512) {
+        w->rec[w->nrec].code = code;
+        w->rec[w->nrec].outcome = outcome;
+        w->rec[w->nrec].at = w->now;
+        w->nrec++;
+    }
+}
+
+static const hl_ops_t k_ops = { cb_request, cb_reboot, cb_journal, NULL };
+
+static void sim_init(sim_t *w)
+{
+    memset(w, 0, sizeof(*w));
+    w->now = T0;
+    hl_ops_t ops = k_ops;
+    ops.ctx = w;
+    hl_init(&w->l, &ops, T0);
+    w->last_rtcm = NEVER;
+    w->last_rx = NEVER;
+    w->release_at = NEVER;
+    w->in.stn_state = HL_STN_STREAMING;
+    w->in.reboot_allowed = true;
+    w->events = true;
+    w->rescan_finds = true;
+    w->dur[1] = 0;
+    w->dur[2] = 0;
+    w->dur[3] = 45 * SEC;
+    w->dur[4] = 20 * SEC;
+    w->dur[5] = 3 * SEC;
+    w->reboot_at = NEVER;
+}
+
+/* A reboot cap like lifecycle's: 60 min apart, fewer than 3 in 24 h. */
+static bool cap_allows(const sim_t *w)
+{
+    unsigned in_day = 0;
+    for (unsigned i = 0; i < w->nreboots_cap; i++) {
+        int64_t age = w->now - w->reboots_at[i];
+        if (age < HOUR) {
+            return false;
+        }
+        if (age < 24 * HOUR) {
+            in_day++;
+        }
+    }
+    return in_day < 3;
+}
+
+static void sim_station(sim_t *w)
+{
+    if (w->pending != 0 && w->running == 0 && w->in.stn_state == HL_STN_STREAMING) {
+        w->running = w->pending;
+        w->pending = 0;
+        w->in.stn_state = HL_STN_RECOVERING;
+        if (w->events) {
+            w->in.rec_enters++;
+        }
+        w->run_end = w->now + (int64_t)w->dur[w->running];
+        if (w->running >= 3) {
+            w->lease = true;
+        }
+    }
+    if (w->running != 0 && w->now >= w->run_end) {
+        uint8_t st = w->running;
+        w->running = 0;
+        if (st >= 3) {
+            w->lease = false;
+            w->release_at = w->now;
+        }
+        if (w->events) {
+            w->in.rec_exits++;
+        }
+        w->in.stn_state = (st == 3 && !w->rescan_finds) ? HL_STN_NO_RECEIVER : HL_STN_STREAMING;
+        if (st == w->fix_step) {
+            w->rtcm = true;
+        }
+        if (st == w->silence_after) {
+            w->rtcm = false;
+            w->lines = false;
+            w->bytes = false;
+        }
+    }
+}
+
+static void sim_world(sim_t *w)
+{
+    if (w->rtcm) {
+        w->last_rtcm = w->now;
+    }
+    if (w->rtcm || w->lines || w->bytes) {
+        w->last_rx = w->now;
+        w->in.rx_bytes += 120;
+    }
+    if (w->lines) {
+        w->in.text_lines++;
+    }
+}
+
+static uint32_t age(int64_t now, int64_t then)
+{
+    if (then == NEVER) {
+        return UINT32_MAX;
+    }
+    int64_t a = now - then;
+    return a >= (int64_t)UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)a;
+}
+
+static void sim_fill(sim_t *w)
+{
+    w->in.now_ms = w->now;
+    w->in.stall_ms = 10 * SEC;
+    w->in.rtcm_age_ms = age(w->now, w->last_rtcm);
+    w->in.rx_age_ms = age(w->now, w->last_rx);
+    w->in.lease_held = w->lease;
+    w->in.since_release_ms = age(w->now, w->release_at);
+    if (w->cap_model) {
+        w->in.reboot_allowed = cap_allows(w);
+    }
+}
+
+static void sim_step(sim_t *w)
+{
+    sim_station(w);
+    sim_world(w);
+    sim_fill(w);
+    hl_tick(&w->l, &w->in);
+    w->now += SEC;
+}
+
+static void sim_run(sim_t *w, int64_t ms)
+{
+    for (int64_t t = 0; t < ms; t += SEC) {
+        sim_step(w);
+    }
+}
+
+/* Run until the journal has `n` records (or `limit` passes). */
+static bool sim_until_rec(sim_t *w, unsigned n, int64_t limit)
+{
+    for (int64_t t = 0; t < limit; t += SEC) {
+        if (w->nrec >= n) {
+            return true;
+        }
+        sim_step(w);
+    }
+    return w->nrec >= n;
+}
+
+static int find_rec(const sim_t *w, uint8_t code, uint8_t outcome, unsigned from)
+{
+    for (unsigned i = from; i < w->nrec; i++) {
+        if (w->rec[i].code == code && w->rec[i].outcome == outcome) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static unsigned count_rec(const sim_t *w, uint8_t code, uint8_t outcome)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < w->nrec; i++) {
+        if (w->rec[i].code == code && w->rec[i].outcome == outcome) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static void expect_recs(const sim_t *w, const uint8_t (*want)[2], unsigned n)
+{
+    TEST_ASSERT_TRUE_MESSAGE(w->nrec >= n, "fewer journal records than expected");
+    for (unsigned i = 0; i < n; i++) {
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(want[i][0], w->rec[i].code, "journal step code");
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(want[i][1], w->rec[i].outcome, "journal outcome");
+    }
+}
+
+static hl_status_t st_of(const sim_t *w)
+{
+    hl_status_t s;
+    hl_get_status(&w->l, &w->in, &s);
+    return s;
+}
+
+/* Receiver streams for a while, then goes completely silent. */
+static void stream_then_silence(sim_t *w)
+{
+    w->rtcm = true;
+    sim_run(w, 20 * SEC);
+    w->rtcm = false;
+    w->lines = false;
+    w->bytes = false;
+}
+
+/* ---- basics --------------------------------------------------------------- */
+
+TEST_CASE("ladder: a healthy stream never starts a step", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 24 * HOUR);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nrec);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_OK, s.level);
+    TEST_ASSERT_EQUAL_UINT32(0, s.stalls);
+    TEST_ASSERT_FALSE(s.suspended);
+}
+
+TEST_CASE("ladder: classes and entry steps", "[health_ladder]")
+{
+    TEST_ASSERT_EQUAL_UINT8(1, hl_entry_step(HL_CLASS_NO_BYTES));
+    TEST_ASSERT_EQUAL_UINT8(3, hl_entry_step(HL_CLASS_GARBAGE));
+    TEST_ASSERT_EQUAL_UINT8(4, hl_entry_step(HL_CLASS_TEXT_ONLY));
+
+    const struct {
+        bool lines, bytes;
+        uint8_t first;
+        hl_class_t cls;
+    } cases[] = {
+        { false, false, 1, HL_CLASS_NO_BYTES },
+        { false, true, 3, HL_CLASS_GARBAGE },
+        { true, false, 4, HL_CLASS_TEXT_ONLY },
+        { true, true, 4, HL_CLASS_TEXT_ONLY },
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        sim_t w;
+        sim_init(&w);
+        w.rtcm = true;
+        sim_run(&w, 30 * SEC);
+        w.rtcm = false;
+        w.lines = cases[i].lines;
+        w.bytes = cases[i].bytes;
+        sim_run(&w, 15 * SEC);
+        TEST_ASSERT_EQUAL_INT(cases[i].cls, hl_classify(&w.l, &w.in));
+        TEST_ASSERT_EQUAL_UINT32(1, w.nreq);
+        TEST_ASSERT_EQUAL_UINT8(cases[i].first, w.req[0]);
+        TEST_ASSERT_EQUAL_UINT32(1, st_of(&w).stalls);
+    }
+}
+
+TEST_CASE("ladder: the stall is declared only past the threshold", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 30 * SEC);
+    int64_t last = w.last_rtcm;
+    w.rtcm = false;
+    while (w.nreq == 0 && w.now < last + MIN) {
+        sim_step(&w);
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, w.nreq);
+    TEST_ASSERT_TRUE(w.req_at[0] - last > 10 * SEC);
+    TEST_ASSERT_TRUE(w.req_at[0] - last <= 12 * SEC);
+
+    /* Right after start, before any RTCM: the stall timer counts from the start. */
+    sim_init(&w);
+    sim_run(&w, 10 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+    sim_run(&w, 3 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(1, w.nreq);
+}
+
+/* ---- the full ladder -------------------------------------------------------- */
+
+TEST_CASE("ladder: a silent receiver runs 1, 2, 3 and the byte rule reboots the ESP32", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rescan_finds = false;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 7, 10 * MIN));
+    static const uint8_t want[][2] = {
+        { 1, HL_OUT_STARTED }, { 1, HL_OUT_FAILED }, { 2, HL_OUT_STARTED }, { 2, HL_OUT_FAILED },
+        { 3, HL_OUT_STARTED }, { 3, HL_OUT_FAILED }, { 6, HL_OUT_STARTED },
+    };
+    expect_recs(&w, want, 7);
+    /* graces from the end of each step (steps 1 and 2 end within a tick) */
+    int64_t g1 = w.rec[1].at - w.rec[0].at;
+    int64_t g2 = w.rec[3].at - w.rec[2].at;
+    int64_t g3 = w.rec[5].at - w.rec[4].at;
+    TEST_ASSERT_TRUE(g1 >= 5 * SEC && g1 <= 7 * SEC);
+    TEST_ASSERT_TRUE(g2 >= 15 * SEC && g2 <= 17 * SEC);
+    TEST_ASSERT_TRUE(g3 >= 45 * SEC + 30 * SEC && g3 <= 45 * SEC + 33 * SEC);   /* 30 s from the end of the scan */
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_REBOOTING, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(6, s.last_step);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+    TEST_ASSERT_EQUAL_UINT32(4, s.recoveries);   /* 1, 2, 3 and the reboot */
+    TEST_ASSERT_EQUAL_UINT32(1, s.stalls);
+    TEST_ASSERT_FALSE(s.power_alert);
+}
+
+TEST_CASE("ladder: the reboot cap blocks 6a: FAILED without the alert, held in NO_RECEIVER", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rescan_finds = false;
+    w.in.reboot_allowed = false;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 8, 10 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(9, w.rec[6].code);
+    TEST_ASSERT_EQUAL_UINT8(8, w.rec[7].code);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_FAILED, s.level);
+    TEST_ASSERT_FALSE(s.power_alert);
+    TEST_ASSERT_EQUAL_UINT8(HL_CODE_FAILED, s.rung);
+    TEST_ASSERT_EQUAL_UINT32(0, s.retry_in_s);   /* the station's own schedule retries */
+
+    /* While the station stays NO_RECEIVER: no retries, no second byte rule. */
+    unsigned nreq = w.nreq;
+    unsigned nrec = w.nrec;
+    sim_run(&w, 2 * HOUR);
+    TEST_ASSERT_EQUAL_UINT32(nreq, w.nreq);
+    TEST_ASSERT_EQUAL_UINT32(nrec, w.nrec);
+}
+
+TEST_CASE("ladder: a held reboot inhibit blocks 6a like the cap", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rescan_finds = false;
+    w.in.reboot_inhibited = true;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 8, 10 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(9, w.rec[6].code);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+}
+
+TEST_CASE("ladder: a rescan that finds nothing while bytes arrive raises the power-cycle alert", "[health_ladder]")
+{
+    /* Bytes during the scan window. */
+    sim_t w;
+    sim_init(&w);
+    w.rescan_finds = false;
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.bytes = true;   /* GARBAGE: entry at step 3 */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 4, 10 * MIN));
+    static const uint8_t want[][2] = {
+        { 3, HL_OUT_STARTED }, { 3, HL_OUT_FAILED }, { 7, HL_OUT_STARTED }, { 8, HL_OUT_STARTED },
+    };
+    expect_recs(&w, want, 4);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_TRUE(s.power_alert);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_FAILED, s.level);
+    TEST_ASSERT_EQUAL_UINT8(HL_CODE_POWER_ALERT, s.rung);
+
+    /* No bytes on the link, but the station's pass saw some (a loader prompt). */
+    sim_init(&w);
+    w.rescan_finds = false;
+    w.in.detect_saw_bytes = true;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 8, 10 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(7, w.rec[6].code);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+}
+
+TEST_CASE("ladder: a found receiver without RTCM goes on to reconfigure and reset", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.bytes = true;               /* GARBAGE: 3 */
+    w.silence_after = 0;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 4, 10 * MIN));
+    /* found -> 4 (even if the class still says GARBAGE) */
+    TEST_ASSERT_EQUAL_UINT8(3, w.rec[1].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_FAILED, w.rec[1].outcome);
+    TEST_ASSERT_EQUAL_UINT8(4, w.rec[2].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_STARTED, w.rec[2].outcome);
+    int64_t scan_grace = w.rec[1].at - w.rec[0].at;
+    TEST_ASSERT_TRUE(scan_grace >= 75 * SEC && scan_grace <= 78 * SEC);
+
+    /* 4 fails after its 90 s grace -> 5; 5 fails after 120 s with bytes -> 6b */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 8, 20 * MIN));
+    static const uint8_t want[][2] = {
+        { 3, 0 }, { 3, 2 }, { 4, 0 }, { 4, 2 }, { 5, 0 }, { 5, 2 }, { 7, 0 }, { 8, 0 },
+    };
+    expect_recs(&w, want, 8);
+    int64_t g4 = w.rec[3].at - w.rec[2].at;
+    int64_t g5 = w.rec[5].at - w.rec[4].at;
+    TEST_ASSERT_TRUE(g4 >= 20 * SEC + 90 * SEC && g4 <= 20 * SEC + 93 * SEC);
+    TEST_ASSERT_TRUE(g5 >= 3 * SEC + 120 * SEC && g5 <= 3 * SEC + 124 * SEC);
+    TEST_ASSERT_TRUE(st_of(&w).power_alert);
+    TEST_ASSERT_EQUAL_UINT8(5, st_of(&w).last_step);   /* 6b starts no action */
+}
+
+TEST_CASE("ladder: step 5 byte rule looks only at its grace", "[health_ladder]")
+{
+    /* The receiver answers text until the reset, then nothing: 6a. */
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;              /* TEXT_ONLY: 4 */
+    w.silence_after = 5;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 5, 20 * MIN));
+    static const uint8_t want[][2] = {
+        { 4, 0 }, { 4, 2 }, { 5, 0 }, { 5, 2 }, { 6, 0 },
+    };
+    expect_recs(&w, want, 5);
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+}
+
+TEST_CASE("ladder: a refused reconfigure fails at once and the ladder goes on to step 5", "[health_ladder]")
+{
+    /* Refused by the status flag: the station is not even asked. */
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    w.in.reconfigure_refused = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 2, 2 * MIN));
+    static const uint8_t want[][2] = { { 4, HL_OUT_FAILED }, { 5, HL_OUT_STARTED } };
+    expect_recs(&w, want, 2);
+    TEST_ASSERT_EQUAL_INT64(w.rec[0].at, w.rec[1].at);   /* same tick, no grace */
+    TEST_ASSERT_EQUAL_UINT32(1, w.nreq);
+    TEST_ASSERT_EQUAL_UINT8(5, w.req[0]);
+    TEST_ASSERT_EQUAL_UINT32(1, st_of(&w).recoveries);   /* a refused step is not an action */
+
+    /* Refused by the station's answer (it changed between sample and call). */
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    w.refuse4 = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 2, 2 * MIN));
+    expect_recs(&w, want, 2);
+    TEST_ASSERT_EQUAL_UINT32(2, w.nreq);
+    TEST_ASSERT_EQUAL_UINT8(4, w.req[0]);
+    TEST_ASSERT_EQUAL_UINT8(5, w.req[1]);
+}
+
+/* ---- success, reset and flapping ------------------------------------------- */
+
+TEST_CASE("ladder: success, 60 s of health resets, a shorter spell escalates", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.fix_step = 1;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 2, MIN));
+    TEST_ASSERT_EQUAL_UINT8(1, w.rec[1].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_HEALTHY, w.rec[1].outcome);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_OK, st_of(&w).level);
+
+    /* healthy for 30 s only, then silent again: the next step is 2, not 1 */
+    sim_run(&w, 30 * SEC);
+    w.rtcm = false;
+    w.fix_step = 2;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 4, MIN));
+    TEST_ASSERT_EQUAL_UINT8(2, w.rec[2].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_STARTED, w.rec[2].outcome);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_HEALTHY, w.rec[3].outcome);
+    TEST_ASSERT_EQUAL_UINT32(2, st_of(&w).stalls);
+
+    /* healthy for 70 s: reset; the next stall starts at step 1 again */
+    sim_run(&w, 70 * SEC);
+    w.rtcm = false;
+    w.fix_step = 1;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 5, MIN));
+    TEST_ASSERT_EQUAL_UINT8(1, w.rec[4].code);
+}
+
+TEST_CASE("ladder: a re-stall after a successful step 5 goes to the byte rule", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    w.in.reconfigure_refused = true;   /* 4 refused -> 5 */
+    w.fix_step = 5;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 3, 3 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(5, w.rec[2].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_HEALTHY, w.rec[2].outcome);
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;      /* text lines keep coming: bytes -> 6b */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 5, MIN));
+    TEST_ASSERT_EQUAL_UINT8(7, w.rec[3].code);
+    TEST_ASSERT_EQUAL_UINT8(8, w.rec[4].code);
+}
+
+TEST_CASE("ladder: FAILED retries every 10 min at max(2, class entry)", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;      /* TEXT_ONLY: 4, 5, 6b */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 6, 20 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(8, w.rec[5].code);
+    int64_t failed_at = w.rec[5].at;
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_TRUE(s.retry_in_s >= 599 && s.retry_in_s <= 600);
+    unsigned nreq = w.nreq;
+    sim_run(&w, 9 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(nreq, w.nreq);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 7, 2 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(4, w.rec[6].code);       /* TEXT_ONLY re-enters at 4 */
+    int64_t gap = w.rec[6].at - failed_at;
+    TEST_ASSERT_TRUE(gap >= 10 * MIN && gap <= 10 * MIN + 2 * SEC);
+    TEST_ASSERT_TRUE(st_of(&w).power_alert);        /* kept through the retry */
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, st_of(&w).level);
+
+    /* back in FAILED, now silent: the next pass enters at step 2 */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 12, 20 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(8, w.rec[11].code);
+    w.lines = false;
+    unsigned n = w.nrec;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, n + 1, 11 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(2, w.rec[n].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_STARTED, w.rec[n].outcome);
+}
+
+TEST_CASE("ladder: FAILED does not re-enter a TEXT_ONLY stall while reconfigure is refused", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    w.in.reconfigure_refused = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 5, 10 * MIN));   /* 4 refused, 5, 5 failed, 7, 8 */
+    TEST_ASSERT_EQUAL_UINT8(8, w.rec[w.nrec - 1].code);
+    unsigned nreq = w.nreq;
+    unsigned nrec = w.nrec;
+    sim_run(&w, 3 * HOUR);
+    TEST_ASSERT_EQUAL_UINT32(nreq, w.nreq);   /* no reset every 10 min */
+    TEST_ASSERT_EQUAL_UINT32(nrec, w.nrec);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_FAILED, st_of(&w).level);
+
+    /* refusal lifted: the next retry runs */
+    w.in.reconfigure_refused = false;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, nrec + 1, 11 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(4, w.rec[nrec].code);
+}
+
+TEST_CASE("ladder: 60 s of health in FAILED resets and clears the power-cycle alert", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 6, 20 * MIN));
+    TEST_ASSERT_TRUE(st_of(&w).power_alert);
+    w.rtcm = true;    /* power-cycled by the user */
+    sim_run(&w, 2 * SEC);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, s.level);   /* RTCM back, ladder not reset yet */
+    TEST_ASSERT_TRUE(s.power_alert);
+    sim_run(&w, 60 * SEC);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_OK, s.level);
+    TEST_ASSERT_FALSE(s.power_alert);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_IDLE, s.phase);
+    TEST_ASSERT_TRUE(find_rec(&w, 8, HL_OUT_HEALTHY, 0) >= 0);
+
+    /* a short healthy spell in FAILED keeps FAILED and its retry timer */
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 6, 20 * MIN));
+    w.rtcm = true;
+    sim_run(&w, 30 * SEC);
+    w.rtcm = false;
+    sim_run(&w, 30 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, st_of(&w).phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_FAILED, st_of(&w).level);
+    TEST_ASSERT_EQUAL_INT(-1, find_rec(&w, 8, HL_OUT_HEALTHY, 0));
+}
+
+/* ---- suspension ------------------------------------------------------------- */
+
+TEST_CASE("ladder: station states that suspend it", "[health_ladder]")
+{
+    const uint8_t states[] = { HL_STN_IDLE, HL_STN_DETECTING, HL_STN_CONFIGURING, HL_STN_FLASHING,
+                               HL_STN_FLASH_RECOVERY };
+    for (unsigned i = 0; i < sizeof(states); i++) {
+        sim_t w;
+        sim_init(&w);
+        w.in.stn_state = states[i];
+        sim_run(&w, 30 * MIN);
+        TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+        TEST_ASSERT_EQUAL_UINT32(0, w.nrec);
+        hl_status_t s = st_of(&w);
+        TEST_ASSERT_TRUE(s.suspended);
+        TEST_ASSERT_TRUE((s.susp & HL_SUSP_STATION) != 0);
+        TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, s.level);   /* no RTCM, but never FAILED */
+    }
+}
+
+TEST_CASE("ladder: an open flash journal suspends it in every state, and the stall timer restarts", "[health_ladder]")
+{
+    /* Silent receiver with a journal waiting for the user: nothing at all. */
+    sim_t w;
+    sim_init(&w);
+    w.in.journal_open = true;
+    stream_then_silence(&w);
+    sim_run(&w, 2 * HOUR);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_TRUE(s.suspended);
+    TEST_ASSERT_TRUE((s.susp & HL_SUSP_JOURNAL) != 0);
+
+    /* Journal state unknown (settings unavailable): the same. */
+    sim_init(&w);
+    w.in.journal_unknown = true;
+    stream_then_silence(&w);
+    sim_run(&w, HOUR);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+    TEST_ASSERT_TRUE(st_of(&w).suspended);
+
+    /* A journal opening during a step's grace abandons the step; when it
+     * closes the stall timer counts from there and the step runs again. */
+    sim_init(&w);
+    w.dur[1] = 0;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    sim_run(&w, 2 * SEC);
+    w.in.journal_open = true;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(1, w.rec[1].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_ABANDONED, w.rec[1].outcome);
+    sim_run(&w, 20 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(2, w.nrec);
+    w.in.journal_open = false;
+    int64_t closed = w.now;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 3, MIN));
+    TEST_ASSERT_EQUAL_UINT8(1, w.rec[2].code);   /* the abandoned step again */
+    TEST_ASSERT_TRUE(w.rec[2].at - closed > 10 * SEC);
+    TEST_ASSERT_TRUE(w.rec[2].at - closed <= 12 * SEC);
+}
+
+TEST_CASE("ladder: safe mode suspends it and is never FAILED", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.in.safe_mode = true;
+    w.in.stn_state = HL_STN_IDLE;   /* the station does not run in safe mode */
+    sim_run(&w, 4 * HOUR);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_TRUE((s.susp & HL_SUSP_SAFE_MODE) != 0);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, s.level);
+}
+
+TEST_CASE("ladder: another owner's lease suspends it; the stall counts from the release", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lease = true;              /* e.g. a configuration session (RTCM held back) */
+    sim_run(&w, 2 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+    TEST_ASSERT_TRUE((st_of(&w).susp & HL_SUSP_LEASE) != 0);
+    w.lease = false;
+    w.release_at = w.now;
+    sim_run(&w, 9 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+    TEST_ASSERT_TRUE((st_of(&w).susp & HL_SUSP_POST_LEASE) != 0);
+    while (w.nreq == 0 && w.now < w.release_at + MIN) {
+        sim_step(&w);
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, w.nreq);
+    TEST_ASSERT_TRUE(w.req_at[0] - w.release_at > 10 * SEC);
+    TEST_ASSERT_TRUE(w.req_at[0] - w.release_at <= 12 * SEC);   /* from the release, not 10 s after it */
+
+    /* RTCM resuming within the 10 s: no stall at all */
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lease = true;
+    sim_run(&w, MIN);
+    w.lease = false;
+    w.release_at = w.now;
+    sim_run(&w, 6 * SEC);
+    w.rtcm = true;
+    sim_run(&w, 10 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+}
+
+TEST_CASE("ladder: the ladder's own lease release does not cut its grace short", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;               /* step 4: a lease, released at its end */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 2, 5 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(4, w.rec[1].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_FAILED, w.rec[1].outcome);   /* not abandoned */
+    TEST_ASSERT_EQUAL_UINT32(0, count_rec(&w, 4, HL_OUT_ABANDONED));
+}
+
+TEST_CASE("ladder: a station job that is not the ladder's suspends it", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    stream_then_silence(&w);
+    w.in.stn_state = HL_STN_RECOVERING;   /* a leftover request still running */
+    sim_run(&w, 2 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+    TEST_ASSERT_TRUE((st_of(&w).susp & HL_SUSP_LEASE) != 0);
+}
+
+TEST_CASE("ladder: a configuration session during a grace abandons the step, which runs again", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));   /* step 4 started */
+    sim_run(&w, 30 * SEC);                         /* run 20 s, then in grace */
+    w.in.stn_state = HL_STN_CONFIGURING;
+    w.lease = true;
+    sim_run(&w, 30 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(4, w.rec[1].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_ABANDONED, w.rec[1].outcome);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, st_of(&w).level);
+    w.in.stn_state = HL_STN_STREAMING;
+    w.lease = false;
+    w.release_at = w.now;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 3, MIN));
+    TEST_ASSERT_EQUAL_UINT8(4, w.rec[2].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_STARTED, w.rec[2].outcome);
+    TEST_ASSERT_TRUE(w.rec[2].at - w.release_at > 10 * SEC);
+}
+
+TEST_CASE("ladder: the receiver lost during reconfigure: abandoned, then the NO_RECEIVER rule", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    sim_run(&w, 5 * SEC);
+    /* the station gives up the apply and looks for the receiver */
+    w.running = 0;
+    w.lease = false;
+    w.release_at = w.now;
+    w.in.rec_exits++;
+    w.in.stn_state = HL_STN_DETECTING;
+    w.lines = false;
+    sim_run(&w, 45 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_ABANDONED, w.rec[1].outcome);
+    w.in.stn_state = HL_STN_NO_RECEIVER;
+    w.in.detect_saw_bytes = false;
+    sim_run(&w, 2 * SEC);
+    static const uint8_t want[][2] = { { 4, 0 }, { 4, 3 }, { 6, 0 } };
+    expect_recs(&w, want, 3);
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+}
+
+/* ---- NO_RECEIVER ----------------------------------------------------------------- */
+
+TEST_CASE("ladder: NO_RECEIVER at boot: the byte rule once per episode, then held", "[health_ladder]")
+{
+    /* No bytes in the station's pass: 6a. */
+    sim_t w;
+    sim_init(&w);
+    w.in.stn_state = HL_STN_IDLE;
+    sim_run(&w, 3 * SEC);
+    w.in.stn_state = HL_STN_DETECTING;
+    sim_run(&w, 45 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nrec);
+    w.in.stn_state = HL_STN_NO_RECEIVER;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+    TEST_ASSERT_EQUAL_UINT32(1, st_of(&w).stalls);
+
+    /* Bytes in the pass (a receiver at its loader): 6b, held without retries. */
+    sim_init(&w);
+    w.in.stn_state = HL_STN_DETECTING;
+    sim_run(&w, 45 * SEC);
+    w.in.stn_state = HL_STN_NO_RECEIVER;
+    w.in.detect_saw_bytes = true;
+    w.lease = true;               /* listen-only / detection passes hold leases */
+    sim_run(&w, 5 * SEC);
+    static const uint8_t want[][2] = { { 7, 0 }, { 8, 0 } };
+    expect_recs(&w, want, 2);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_TRUE(s.power_alert);
+    TEST_ASSERT_FALSE(s.suspended);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_FAILED, s.level);
+    for (int i = 0; i < 12; i++) {            /* passes: lease taken and released */
+        w.lease = false;
+        w.release_at = w.now;
+        sim_run(&w, 4 * MIN);
+        w.lease = true;
+        sim_run(&w, MIN);
+    }
+    TEST_ASSERT_EQUAL_UINT32(2, w.nrec);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+
+    /* the station finds it streaming text but no RTCM: retries resume 10 min later */
+    w.lease = false;
+    w.release_at = w.now;
+    w.in.stn_state = HL_STN_STREAMING;
+    w.lines = true;
+    int64_t left = w.now;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 3, 12 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(4, w.rec[2].code);
+    TEST_ASSERT_TRUE(w.rec[2].at - left >= 10 * MIN);
+    TEST_ASSERT_TRUE(w.rec[2].at - left <= 10 * MIN + 12 * SEC);
+
+    /* a new episode applies the rule again */
+    sim_init(&w);
+    w.in.stn_state = HL_STN_NO_RECEIVER;
+    w.in.detect_saw_bytes = true;
+    sim_run(&w, 2 * SEC);
+    w.in.stn_state = HL_STN_STREAMING;
+    w.rtcm = true;
+    sim_run(&w, 30 * SEC);
+    w.rtcm = false;
+    w.in.stn_state = HL_STN_DETECTING;
+    sim_run(&w, 45 * SEC);
+    w.in.stn_state = HL_STN_NO_RECEIVER;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(2, count_rec(&w, 7, 0));
+}
+
+TEST_CASE("ladder: a failed rescan's NO_RECEIVER episode is not handled twice", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rescan_finds = false;
+    w.in.reboot_allowed = false;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 8, 10 * MIN));
+    sim_run(&w, 3 * HOUR);
+    TEST_ASSERT_EQUAL_UINT32(1, count_rec(&w, 9, 0));
+    TEST_ASSERT_EQUAL_UINT32(1, count_rec(&w, 8, 0));
+    TEST_ASSERT_EQUAL_UINT32(3, w.nreq);
+}
+
+TEST_CASE("ladder: the receiver comes back during the rescan's grace", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rescan_finds = false;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 5, 5 * MIN));   /* 3 started */
+    while (w.in.stn_state != HL_STN_NO_RECEIVER) {
+        sim_step(&w);
+    }
+    sim_run(&w, 10 * SEC);
+    w.in.stn_state = HL_STN_STREAMING;   /* found between passes, data flowing */
+    w.rtcm = true;
+    sim_run(&w, 3 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(3, w.rec[5].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_HEALTHY, w.rec[5].outcome);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+}
+
+/* ---- following the station's steps ----------------------------------------------- */
+
+TEST_CASE("ladder: step ends are found without events, by sampling or by the pickup timeout", "[health_ladder]")
+{
+    /* Long steps: seen RECOVERING in the samples. */
+    sim_t w;
+    sim_init(&w);
+    w.events = false;
+    w.rescan_finds = false;
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.bytes = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 2, 5 * MIN));
+    int64_t g = w.rec[1].at - w.rec[0].at;
+    TEST_ASSERT_TRUE(g >= 75 * SEC && g <= 78 * SEC);
+
+    /* Instant steps never sampled: the pickup timeout ends them. */
+    sim_init(&w);
+    w.events = false;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 2, 5 * MIN));
+    g = w.rec[1].at - w.rec[0].at;
+    TEST_ASSERT_TRUE(g >= HL_PICKUP_TIMEOUT_MS + 5 * SEC && g <= HL_PICKUP_TIMEOUT_MS + 7 * SEC);
+}
+
+TEST_CASE("ladder: a step the station is slow to pick up is waited for", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    stream_then_silence(&w);
+    w.in.stn_state = HL_STN_STREAMING;
+    /* hold the station busy (still STREAMING) for 20 s after the request */
+    w.dur[1] = 0;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    uint8_t keep = w.pending;
+    w.pending = 0;
+    sim_run(&w, 20 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_RUN, st_of(&w).phase);
+    w.pending = keep;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_GRACE, st_of(&w).phase);
+}
+
+TEST_CASE("ladder: rejected requests are asked again without journal records", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.reject = true;
+    stream_then_silence(&w);
+    sim_run(&w, 30 * SEC);
+    TEST_ASSERT_TRUE(w.nreq >= 15);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nrec);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_WANT, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+    TEST_ASSERT_EQUAL_UINT32(1, s.stalls);
+    TEST_ASSERT_EQUAL_UINT32(0, s.recoveries);
+    w.reject = false;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(1, w.rec[0].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_STARTED, w.rec[0].outcome);
+}
+
+TEST_CASE("ladder: a requested reboot that does not happen ends in FAILED", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rescan_finds = false;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 7, 10 * MIN));
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+    sim_run(&w, HL_REBOOT_WAIT_MS + 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, st_of(&w).phase);
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);   /* never asked twice */
+}
+
+/* ---- survey window ------------------------------------------------------------------- */
+
+TEST_CASE("ladder: step 4's grace lasts while the survey window is open", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    w.in.surveying = true;           /* the apply started a survey */
+    sim_run(&w, 10 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(1, w.nrec);
+    w.in.surveying = false;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(4, w.rec[1].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_FAILED, w.rec[1].outcome);
+
+    /* other steps keep their grace while surveying */
+    sim_init(&w);
+    w.in.surveying = true;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 2, MIN));
+    TEST_ASSERT_EQUAL_UINT8(1, w.rec[1].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_FAILED, w.rec[1].outcome);
+}
+
+TEST_CASE("ladder: with RTCM held back while surveying, no stall inside the window", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.in.survey_holds_rtcm = true;
+    w.in.surveying = true;
+    stream_then_silence(&w);
+    w.lines = true;
+    sim_run(&w, 12 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+    TEST_ASSERT_FALSE(st_of(&w).suspended);
+    w.in.surveying = false;
+    int64_t end = w.now;
+    while (w.nreq == 0 && w.now < end + MIN) {
+        sim_step(&w);
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, w.nreq);
+    TEST_ASSERT_TRUE(w.req_at[0] - end >= 10 * SEC && w.req_at[0] - end <= 12 * SEC);
+
+    /* without the option the survey window does not hold the stall */
+    sim_init(&w);
+    w.in.surveying = true;
+    stream_then_silence(&w);
+    sim_run(&w, 15 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(1, w.nreq);
+}
+
+/* ---- status --------------------------------------------------------------------- */
+
+TEST_CASE("ladder: status levels follow the phase", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_OK, st_of(&w).level);
+    w.rtcm = false;
+    sim_run(&w, 10 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_OK, st_of(&w).level);   /* 10 s old is still healthy */
+    sim_run(&w, 2 * SEC);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+    TEST_ASSERT_EQUAL_UINT8(1, s.rung);
+    TEST_ASSERT_EQUAL_UINT8(1, s.last_step);
+}
+
+/* ---- long runs -------------------------------------------------------------------- */
+
+TEST_CASE("ladder: three days of a dead receiver: one capped reboot, never a loop", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.cap_model = true;
+    w.rescan_finds = false;
+    stream_then_silence(&w);
+    int64_t end = w.now + 72 * HOUR;
+    unsigned seen = 0;
+    while (w.now < end) {
+        sim_step(&w);
+        if (w.reboots != seen) {
+            /* the ESP32 restarts: a new ladder, the station boots and finds nothing */
+            seen = w.reboots;
+            w.now += 5 * SEC;
+            hl_ops_t ops = k_ops;
+            ops.ctx = &w;
+            hl_init(&w.l, &ops, w.now);
+            w.pending = 0;
+            w.running = 0;
+            w.lease = false;
+            w.release_at = NEVER;
+            w.in.stn_state = HL_STN_IDLE;
+            sim_run(&w, 3 * SEC);
+            w.in.stn_state = HL_STN_DETECTING;
+            sim_run(&w, 45 * SEC);
+            w.in.stn_state = HL_STN_NO_RECEIVER;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, st_of(&w).phase);
+
+    /* The receiver is found again every few hours but never sends RTCM:
+     * the ladder runs its passes; reboots stay within the cap. */
+    sim_init(&w);
+    w.cap_model = true;
+    w.rescan_finds = false;
+    stream_then_silence(&w);
+    end = w.now + 72 * HOUR;
+    seen = 0;
+    int64_t next_found = w.now + 3 * HOUR;
+    while (w.now < end) {
+        sim_step(&w);
+        if (w.reboots != seen) {
+            seen = w.reboots;
+            w.now += 5 * SEC;
+            hl_ops_t ops = k_ops;
+            ops.ctx = &w;
+            hl_init(&w.l, &ops, w.now);
+            w.pending = 0;
+            w.running = 0;
+            w.lease = false;
+            w.release_at = NEVER;
+            w.in.stn_state = HL_STN_DETECTING;
+            sim_run(&w, 45 * SEC);
+            w.in.stn_state = HL_STN_NO_RECEIVER;
+        }
+        if (w.now >= next_found && w.in.stn_state == HL_STN_NO_RECEIVER) {
+            w.in.stn_state = HL_STN_STREAMING;   /* found, silent again */
+            next_found = w.now + 3 * HOUR;
+        }
+    }
+    TEST_ASSERT_TRUE(w.nreboots_cap >= 2);
+    for (unsigned i = 1; i < w.nreboots_cap; i++) {
+        TEST_ASSERT_TRUE(w.reboots_at[i] - w.reboots_at[i - 1] >= HOUR);
+    }
+    for (unsigned i = 0; i < w.nreboots_cap; i++) {
+        unsigned in_day = 0;
+        for (unsigned k = 0; k < w.nreboots_cap; k++) {
+            int64_t d = w.reboots_at[k] - w.reboots_at[i];
+            if (d >= 0 && d < 24 * HOUR) {
+                in_day++;
+            }
+        }
+        TEST_ASSERT_TRUE(in_day <= 3);
+    }
+}
+
+TEST_CASE("ladder: a flapping receiver over a day escalates but stays bounded", "[health_ladder]")
+{
+    /* RTCM for 40 s, silence for 30 s, forever: each stall escalates one
+     * step since the link is never healthy for 60 s. */
+    sim_t w;
+    sim_init(&w);
+    w.cap_model = true;
+    w.rescan_finds = true;
+    w.rtcm = true;
+    int64_t end = w.now + 24 * HOUR;
+    while (w.now < end) {
+        int64_t t = (w.now - T0) % (70 * SEC);
+        w.rtcm = t < 40 * SEC;
+        sim_step(&w);
+    }
+    TEST_ASSERT_TRUE(w.nreq > 0);
+    TEST_ASSERT_TRUE(w.reboots <= 3);
+    TEST_ASSERT_EQUAL_UINT32(w.started_steps, st_of(&w).recoveries - w.reboots);
+}

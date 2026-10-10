@@ -10,6 +10,26 @@ menu "Station: health monitor"
             First rung of the recovery ladder. PROVISIONAL, to be confirmed
             on hardware.
 
+    config HEALTH_SURVEY_HOLDS_RTCM
+        bool "The receiver sends no RTCM while it surveys its position"
+        default n
+        help
+            Set this if the receiver holds back all RTCM output during its
+            survey-in. While the station's survey window is open the
+            recovery ladder then declares no stall and lets no grace period
+            run out; once the window ends, missing RTCM is a normal stall.
+            Leave it off when observations keep flowing during the survey.
+            PROVISIONAL, to be confirmed on hardware.
+
+    config HEALTH_TASK_STACK
+        int "Health monitor task stack (bytes)"
+        range 4096 16384
+        default 6144
+        help
+            Internal RAM: the task writes settings (BOOT-button actions) and
+            journal records, and formats log lines. PROVISIONAL, to be tuned
+            from the task's stack high-water mark.
+
     config HEALTH_HEAP_FRAGMENT_KB
         int "Alert when the largest free internal block drops below (KB)"
         range 4 128

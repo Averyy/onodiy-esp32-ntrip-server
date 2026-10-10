@@ -1,0 +1,562 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Avery L.
+ * SPDX-License-Identifier: MIT
+ *
+ * GNSS recovery ladder: pure state machine, see health_ladder.h.
+ * PROVISIONAL, to be confirmed on hardware.
+ */
+#include "health_ladder.h"
+
+#include <string.h>
+
+#define HL_LAST_STEP 5u
+
+static int64_t grace_ms(uint8_t step)
+{
+    switch (step) {
+    case HL_CODE_RESYNC:
+        return HL_GRACE_RESYNC_MS;
+    case HL_CODE_LINK_RESTART:
+        return HL_GRACE_LINK_RESTART_MS;
+    case HL_CODE_RESCAN:
+        return HL_GRACE_RESCAN_MS;
+    case HL_CODE_RECONFIGURE:
+        return HL_GRACE_RECONFIGURE_MS;
+    case HL_CODE_RECEIVER_RESET:
+    default:
+        return HL_GRACE_RECEIVER_RESET_MS;
+    }
+}
+
+static uint8_t max_u8(uint8_t a, uint8_t b)
+{
+    return a > b ? a : b;
+}
+
+static void journal(hl_t *l, uint8_t code, uint8_t outcome)
+{
+    if (l->ops.journal != NULL) {
+        l->ops.journal(l->ops.ctx, code, outcome);
+    }
+}
+
+static bool rtcm_fresh(const hl_in_t *in)
+{
+    return in->rtcm_age_ms != UINT32_MAX && in->rtcm_age_ms <= in->stall_ms;
+}
+
+static bool survey_hold(const hl_in_t *in)
+{
+    return in->survey_holds_rtcm && in->surveying;
+}
+
+/* Wall time of the last lease release, HL_NEVER if none. */
+static int64_t release_at(const hl_in_t *in)
+{
+    if (in->since_release_ms == UINT32_MAX) {
+        return HL_NEVER;
+    }
+    return in->now_ms - (int64_t)in->since_release_ms;
+}
+
+/* A release inside the window of the ladder's own step (its lease). */
+static bool own_release(const hl_t *l, int64_t r)
+{
+    if (r == HL_NEVER || l->own_from_ms == HL_NEVER || r < l->own_from_ms) {
+        return false;
+    }
+    return l->own_to_ms == HL_NEVER || r <= l->own_to_ms;
+}
+
+static uint8_t suspension(const hl_t *l, const hl_in_t *in)
+{
+    uint8_t s = 0;
+    switch (in->stn_state) {
+    case HL_STN_IDLE:
+    case HL_STN_DETECTING:
+    case HL_STN_CONFIGURING:
+    case HL_STN_FLASHING:
+    case HL_STN_FLASH_RECOVERY:
+        s |= HL_SUSP_STATION;
+        break;
+    default:
+        break;
+    }
+    if (in->journal_open || in->journal_unknown) {
+        s |= HL_SUSP_JOURNAL;
+    }
+    if (in->safe_mode) {
+        s |= HL_SUSP_SAFE_MODE;
+    }
+    /* In NO_RECEIVER the leases are the station's own detection passes,
+     * which replace the ladder's retries there: they suspend nothing. */
+    if (in->stn_state != HL_STN_NO_RECEIVER && l->phase != HL_PH_RUN) {
+        if (in->lease_held || in->stn_state == HL_STN_RECOVERING) {
+            s |= HL_SUSP_LEASE;
+        }
+        int64_t r = release_at(in);
+        if (r != HL_NEVER && in->now_ms - r < HL_POST_LEASE_MS && !own_release(l, r)) {
+            s |= HL_SUSP_POST_LEASE;
+        }
+    }
+    return s;
+}
+
+/* Stall: no RTCM within the threshold, counted from the later of the last
+ * frame and the end of the last suspension. */
+static bool stalled(const hl_t *l, const hl_in_t *in)
+{
+    if (rtcm_fresh(in) || survey_hold(in)) {
+        return false;
+    }
+    return in->now_ms - l->stall_ref_ms > (int64_t)in->stall_ms;
+}
+
+hl_class_t hl_classify(const hl_t *l, const hl_in_t *in)
+{
+    if (in->rx_age_ms == UINT32_MAX || in->rx_age_ms > in->stall_ms) {
+        return HL_CLASS_NO_BYTES;
+    }
+    if (l->line_ms != HL_NEVER && in->now_ms - l->line_ms <= (int64_t)in->stall_ms) {
+        return HL_CLASS_TEXT_ONLY;
+    }
+    return HL_CLASS_GARBAGE;
+}
+
+uint8_t hl_entry_step(hl_class_t c)
+{
+    switch (c) {
+    case HL_CLASS_GARBAGE:
+        return HL_CODE_RESCAN;
+    case HL_CLASS_TEXT_ONLY:
+        return HL_CODE_RECONFIGURE;
+    case HL_CLASS_NO_BYTES:
+    default:
+        return HL_CODE_RESYNC;
+    }
+}
+
+/* ---- transitions -------------------------------------------------------- */
+
+static void enter_failed(hl_t *l, const hl_in_t *in)
+{
+    journal(l, HL_CODE_FAILED, HL_OUT_STARTED);
+    l->phase = HL_PH_FAILED;
+    l->step = 0;
+    l->retry_at = l->active_ms + HL_FAILED_RETRY_MS;
+    l->hold_no_rx = (in->stn_state == HL_STN_NO_RECEIVER);
+    l->healthy = false;
+}
+
+/* After a failed step 3 (not found) or 5, and for a NO_RECEIVER episode. */
+static void byte_rule(hl_t *l, const hl_in_t *in, bool bytes)
+{
+    if (!bytes) {
+        if (in->reboot_allowed && !in->reboot_inhibited) {
+            journal(l, HL_CODE_REBOOT, HL_OUT_STARTED);
+            l->recoveries++;
+            l->last_step = HL_CODE_REBOOT;
+            l->phase = HL_PH_REBOOTING;
+            l->step = 0;
+            l->reboot_ms = in->now_ms;
+            if (l->ops.reboot != NULL) {
+                l->ops.reboot(l->ops.ctx);
+            }
+            return;
+        }
+        journal(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_STARTED);
+    } else {
+        journal(l, HL_CODE_POWER_ALERT, HL_OUT_STARTED);
+        l->power_alert = true;
+    }
+    enter_failed(l, in);
+}
+
+static void start_run(hl_t *l, const hl_in_t *in)
+{
+    journal(l, l->step, HL_OUT_STARTED);
+    l->recoveries++;
+    l->last_step = l->step;
+    l->phase = HL_PH_RUN;
+    l->req_ms = in->now_ms;
+    l->enters0 = in->rec_enters;
+    l->exits0 = in->rec_exits;
+    l->seen_running = false;
+    l->seen_ms = HL_NEVER;
+    l->win_bytes0 = in->rx_bytes;
+    l->win_saw_bytes = false;
+    l->not_found = false;
+    l->own_from_ms = in->now_ms;
+    l->own_to_ms = HL_NEVER;
+}
+
+/* A refused RECONFIGURE fails at once; the ladder goes on to step 5. */
+static void refused(hl_t *l)
+{
+    journal(l, HL_CODE_RECONFIGURE, HL_OUT_FAILED);
+    l->idx = HL_CODE_RECONFIGURE;
+    l->step = HL_CODE_RECEIVER_RESET;
+}
+
+static void try_request(hl_t *l, const hl_in_t *in)
+{
+    for (int guard = 0; guard < 2 && l->phase == HL_PH_WANT; guard++) {
+        if (l->step == HL_CODE_RECONFIGURE && in->reconfigure_refused) {
+            refused(l);
+            continue;
+        }
+        hl_req_t r = (l->ops.request != NULL) ? l->ops.request(l->ops.ctx, l->step) : HL_REQ_REJECTED;
+        if (r == HL_REQ_ACCEPTED) {
+            start_run(l, in);
+            return;
+        }
+        if (r == HL_REQ_REFUSED && l->step == HL_CODE_RECONFIGURE) {
+            refused(l);
+            continue;
+        }
+        return;   /* rejected: asked again on the next tick */
+    }
+}
+
+static void want(hl_t *l, const hl_in_t *in, uint8_t step)
+{
+    l->step = step;
+    l->phase = HL_PH_WANT;
+    l->healthy = false;
+    try_request(l, in);
+}
+
+/* Continue after the step index `idx` with the stall classed as `c`. */
+static void escalate(hl_t *l, const hl_in_t *in, hl_class_t c)
+{
+    uint8_t next = l->idx == 0 ? hl_entry_step(c) : max_u8((uint8_t)(l->idx + 1), hl_entry_step(c));
+    if (next > HL_LAST_STEP) {
+        byte_rule(l, in, c != HL_CLASS_NO_BYTES);
+        return;
+    }
+    want(l, in, next);
+}
+
+static void step_failed(hl_t *l, const hl_in_t *in)
+{
+    uint8_t step = l->step;
+    journal(l, step, HL_OUT_FAILED);
+    l->idx = step;
+    switch (step) {
+    case HL_CODE_RESCAN:
+        if (l->not_found) {
+            byte_rule(l, in, in->rx_bytes != l->win_bytes0 || l->win_saw_bytes);
+        } else {
+            want(l, in, HL_CODE_RECONFIGURE);
+        }
+        break;
+    case HL_CODE_RECONFIGURE:
+        want(l, in, HL_CODE_RECEIVER_RESET);
+        break;
+    case HL_CODE_RECEIVER_RESET:
+        byte_rule(l, in, in->rx_bytes != l->win_bytes0);
+        break;
+    default:
+        escalate(l, in, hl_classify(l, in));
+        break;
+    }
+}
+
+static void step_healthy(hl_t *l)
+{
+    journal(l, l->step, HL_OUT_HEALTHY);
+    l->idx = l->step;
+    l->step = 0;
+    l->phase = HL_PH_IDLE;
+    l->healthy = true;
+    l->healthy_since = l->active_ms;
+}
+
+/* A suspension began: a step in progress is abandoned and tried again later. */
+static void abandon(hl_t *l)
+{
+    if (l->phase == HL_PH_RUN || l->phase == HL_PH_GRACE) {
+        journal(l, l->step, HL_OUT_ABANDONED);
+        if (l->phase == HL_PH_RUN) {
+            l->own_to_ms = l->last_now;   /* the step's window closes here */
+        }
+    }
+    if (l->phase == HL_PH_WANT || l->phase == HL_PH_RUN || l->phase == HL_PH_GRACE) {
+        l->idx = (uint8_t)(l->step > 0 ? l->step - 1 : 0);
+        l->step = 0;
+        l->phase = HL_PH_IDLE;
+        l->healthy = false;
+    }
+}
+
+static void ladder_reset(hl_t *l)
+{
+    if (l->phase == HL_PH_FAILED) {
+        journal(l, HL_CODE_FAILED, HL_OUT_HEALTHY);
+    }
+    l->phase = HL_PH_IDLE;
+    l->idx = 0;
+    l->step = 0;
+    l->power_alert = false;
+    l->hold_no_rx = false;
+}
+
+/* Healthy-for-60-s tracking (IDLE and FAILED). */
+static void track_health(hl_t *l, const hl_in_t *in)
+{
+    if (!rtcm_fresh(in)) {
+        l->healthy = false;
+        return;
+    }
+    if (!l->healthy) {
+        l->healthy = true;
+        l->healthy_since = l->active_ms;
+        return;
+    }
+    if (l->active_ms - l->healthy_since >= HL_HEALTHY_RESET_MS &&
+        (l->idx != 0 || l->phase == HL_PH_FAILED || l->power_alert)) {
+        ladder_reset(l);
+    }
+}
+
+/* ---- phases -------------------------------------------------------------- */
+
+static void run_phase(hl_t *l, const hl_in_t *in)
+{
+    if (in->stn_state == HL_STN_RECOVERING && !l->seen_running) {
+        l->seen_running = true;
+        l->seen_ms = in->now_ms;
+    }
+    bool started = l->seen_running || in->rec_enters != l->enters0;
+    bool ended;
+    if (started) {
+        ended = in->stn_state != HL_STN_RECOVERING ||
+                (l->seen_ms != HL_NEVER && in->now_ms - l->seen_ms >= HL_RUN_CAP_MS);
+    } else {
+        ended = in->now_ms - l->req_ms >= HL_PICKUP_TIMEOUT_MS;   /* ran between two samples, events lost */
+    }
+    if (!ended) {
+        return;
+    }
+    l->own_to_ms = in->now_ms;
+    l->grace_start = l->active_ms;
+    l->phase = HL_PH_GRACE;
+    if (l->step == HL_CODE_RESCAN && in->stn_state == HL_STN_NO_RECEIVER) {
+        /* Not found: this NO_RECEIVER episode is the rescan's failure. */
+        l->not_found = true;
+        l->no_rx = true;
+        l->no_rx_handled = true;
+        l->win_saw_bytes = in->detect_saw_bytes;
+    }
+    if (l->step == HL_CODE_RECEIVER_RESET) {
+        l->win_bytes0 = in->rx_bytes;   /* its byte window is the grace */
+    }
+}
+
+static void grace_phase(hl_t *l, const hl_in_t *in)
+{
+    if (l->not_found && in->stn_state == HL_STN_NO_RECEIVER && in->detect_saw_bytes) {
+        l->win_saw_bytes = true;
+    }
+    if (rtcm_fresh(in)) {
+        step_healthy(l);
+        return;
+    }
+    bool hold = survey_hold(in) || (l->step == HL_CODE_RECONFIGURE && in->surveying);
+    if (l->active_ms - l->grace_start >= grace_ms(l->step) && !hold) {
+        step_failed(l, in);
+    }
+}
+
+static void failed_phase(hl_t *l, const hl_in_t *in)
+{
+    track_health(l, in);
+    if (l->phase != HL_PH_FAILED || l->hold_no_rx) {
+        return;
+    }
+    if (l->active_ms < l->retry_at || !stalled(l, in)) {
+        return;
+    }
+    hl_class_t c = hl_classify(l, in);
+    if (c == HL_CLASS_TEXT_ONLY && in->reconfigure_refused) {
+        /* The station's apply backoff (or the user) owns the re-applies. */
+        l->retry_at = l->active_ms + HL_FAILED_RETRY_MS;
+        return;
+    }
+    l->retry_at = l->active_ms + HL_FAILED_RETRY_MS;
+    want(l, in, max_u8(HL_CODE_LINK_RESTART, hl_entry_step(c)));
+}
+
+static void idle_phase(hl_t *l, const hl_in_t *in)
+{
+    track_health(l, in);
+    if (l->phase != HL_PH_IDLE || in->stn_state == HL_STN_NO_RECEIVER) {
+        return;
+    }
+    if (!stalled(l, in)) {
+        return;
+    }
+    l->stalls++;
+    escalate(l, in, hl_classify(l, in));
+}
+
+/* NO_RECEIVER episodes: the byte rule once on the station's whole pass. */
+static bool no_receiver(hl_t *l, const hl_in_t *in)
+{
+    if (in->stn_state != HL_STN_NO_RECEIVER) {
+        if (l->no_rx) {
+            l->no_rx = false;
+            l->no_rx_handled = false;
+            if (l->phase == HL_PH_FAILED && l->hold_no_rx) {
+                l->hold_no_rx = false;
+                l->retry_at = l->active_ms + HL_FAILED_RETRY_MS;
+            }
+        }
+        return false;
+    }
+    if (!l->no_rx) {
+        l->no_rx = true;
+        l->no_rx_handled = false;
+    }
+    if (l->no_rx_handled || l->phase == HL_PH_RUN || l->phase == HL_PH_GRACE) {
+        if (l->phase == HL_PH_FAILED) {
+            l->hold_no_rx = true;
+        }
+        return false;
+    }
+    l->no_rx_handled = true;
+    if (l->phase == HL_PH_IDLE && l->idx == 0) {
+        l->stalls++;   /* a new episode, not part of a declared stall */
+    }
+    l->step = 0;
+    byte_rule(l, in, in->detect_saw_bytes);
+    return true;
+}
+
+/* ---- API ----------------------------------------------------------------- */
+
+void hl_init(hl_t *l, const hl_ops_t *ops, int64_t now_ms)
+{
+    memset(l, 0, sizeof(*l));
+    if (ops != NULL) {
+        l->ops = *ops;
+    }
+    l->phase = HL_PH_IDLE;
+    l->last_now = now_ms;
+    l->stall_ref_ms = now_ms;
+    l->line_ms = HL_NEVER;
+    l->req_ms = HL_NEVER;
+    l->seen_ms = HL_NEVER;
+    l->own_from_ms = HL_NEVER;
+    l->own_to_ms = HL_NEVER;
+    l->reboot_ms = HL_NEVER;
+}
+
+void hl_tick(hl_t *l, const hl_in_t *in)
+{
+    int64_t now = in->now_ms;
+    int64_t dt = now - l->last_now;
+    if (dt < 0) {
+        dt = 0;
+    } else if (dt > HL_MAX_TICK_MS) {
+        dt = HL_MAX_TICK_MS;
+    }
+    l->last_now = now;
+
+    /* Text-line liveness, sampled. */
+    if (!l->lines_valid) {
+        l->lines_valid = true;
+        l->lines_last = in->text_lines;
+    } else if (in->text_lines != l->lines_last) {
+        l->lines_last = in->text_lines;
+        l->line_ms = now;
+    }
+
+    if (l->phase == HL_PH_REBOOTING) {
+        if (now - l->reboot_ms >= HL_REBOOT_WAIT_MS) {
+            enter_failed(l, in);   /* still alive: nothing else to try now */
+        }
+        return;
+    }
+
+    uint8_t prev = l->susp;
+    uint8_t s = suspension(l, in);
+    l->susp = s;
+    if (s != 0) {
+        abandon(l);
+        l->was_suspended = true;
+        return;
+    }
+    l->active_ms += dt;
+    if (l->was_suspended) {
+        /* The stall timer restarts at the end of the suspension, or at the
+         * release itself after a post-lease grace. */
+        l->was_suspended = false;
+        int64_t r = release_at(in);
+        l->stall_ref_ms = (prev == HL_SUSP_POST_LEASE && r != HL_NEVER) ? r : now;
+    }
+    if (survey_hold(in)) {
+        l->stall_ref_ms = now;
+    }
+
+    if (no_receiver(l, in)) {
+        return;
+    }
+
+    switch (l->phase) {
+    case HL_PH_IDLE:
+        idle_phase(l, in);
+        break;
+    case HL_PH_WANT:
+        try_request(l, in);
+        break;
+    case HL_PH_RUN:
+        run_phase(l, in);
+        break;
+    case HL_PH_GRACE:
+        grace_phase(l, in);
+        break;
+    case HL_PH_FAILED:
+        failed_phase(l, in);
+        break;
+    default:
+        break;
+    }
+}
+
+void hl_get_status(const hl_t *l, const hl_in_t *in, hl_status_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    bool fresh = in != NULL && rtcm_fresh(in);
+    switch (l->phase) {
+    case HL_PH_WANT:
+    case HL_PH_RUN:
+    case HL_PH_GRACE:
+        out->level = HL_LEVEL_RECOVERING;
+        out->rung = l->step;
+        break;
+    case HL_PH_REBOOTING:
+        out->level = HL_LEVEL_RECOVERING;
+        out->rung = HL_CODE_REBOOT;
+        break;
+    case HL_PH_FAILED:
+        out->level = fresh ? HL_LEVEL_DEGRADED : HL_LEVEL_FAILED;
+        out->rung = l->power_alert ? HL_CODE_POWER_ALERT : HL_CODE_FAILED;
+        if (!l->hold_no_rx) {
+            int64_t left = l->retry_at - l->active_ms;
+            out->retry_in_s = left <= 0 ? 0 : (uint32_t)((left + 999) / 1000);
+        }
+        break;
+    case HL_PH_IDLE:
+    default:
+        out->level = fresh ? HL_LEVEL_OK : HL_LEVEL_DEGRADED;
+        break;
+    }
+    out->phase = (uint8_t)l->phase;
+    out->last_step = l->last_step;
+    out->suspended = l->susp != 0;
+    out->susp = l->susp;
+    out->power_alert = l->power_alert;
+    out->stalls = l->stalls;
+    out->recoveries = l->recoveries;
+}
