@@ -11,7 +11,8 @@
  * rollback, a trial revert, a bootloader rollback), A finds its own blocks
  * from before B ran, intact and with valid checksums. So every RTC block
  * (lifecycle's, the ledger's, the network's) also carries a stamp: the image
- * generation of the run that wrote it.
+ * generation of the run that wrote it. diag's previous-boot log banks (PSRAM
+ * .noinit, same problem) carry it too.
  *
  * The generation is kept in settings (life/gen: the generation and the id
  * of the image that last recorded a boot) and changes only when another

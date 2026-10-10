@@ -5,15 +5,16 @@
  * Log ring (pure logic, no IDF or RTOS includes, host-testable).
  *
  * A byte ring of log records in one block of memory that survives software,
- * panic and watchdog resets (PSRAM .noinit on the target). diag.c keeps two
- * such blocks: the one this boot writes, and the previous boot's, frozen at
- * start-up. Locking and the cache write-back are the caller's: the ring
- * calls `sync` for every range it has made final, in an order that keeps the
- * stored copy valid if a reset hits between two calls.
+ * panic and watchdog resets (PSRAM .noinit on the target). diag_log.c keeps
+ * two such blocks (logbanks_t, at the end): the one this boot writes, and
+ * the previous boot's, frozen at start-up. Locking and the cache write-back
+ * are the caller's: the ring calls `sync` for every range it has made final,
+ * in an order that keeps the stored copy valid if a reset hits between two
+ * calls.
  *
  * Memory layout (all multi-byte fields little-endian, the CPU's order):
  *
- *   header (logring_hdr_t, 56 bytes), then the data area (the rest).
+ *   header (logring_hdr_t, 60 bytes), then the data area (the rest).
  *
  *   magic      "DLOG" (0x474F4C44)
  *   layout     LOGRING_LAYOUT; another value is a different layout: discard
@@ -28,13 +29,17 @@
  *   lost       records dropped to make room since the block was started
  *   bank       which of the caller's blocks wrote it (logring_set_owner)
  *   image      8 bytes naming the program image that wrote it
+ *   gen        image generation of the run that wrote it (logring_stamp;
+ *              0 = not stamped: the run ended before it knew its generation)
  *   crc        CRC-32 over the fields above
  *
  *   A block whose bank or image differs from its reader's is refused: when
  *   the program image changes, the memory the blocks live in can move (on
  *   the target by whole MMU pages, which can equal one block), so the old
  *   copy of another block, or of another image, could otherwise pass for
- *   this one.
+ *   this one. The image alone cannot tell this image's blocks from before
+ *   another image ran from the last run's (A, then B, then A again: A's
+ *   blocks may still be intact); the generation stamp can (logbanks_t).
  *
  *   Record: u32 seq, u16 len, u16 check (CRC-16 over seq, len and the
  *   text), then `len` bytes of text with no terminator. Records are stored
@@ -69,7 +74,7 @@ extern "C" {
 #endif
 
 #define LOGRING_MAGIC    0x474F4C44u   /* "DLOG" */
-#define LOGRING_LAYOUT   2u
+#define LOGRING_LAYOUT   3u
 #define LOGRING_REC_HDR  8u            /* u32 seq, u16 len, u16 check */
 #define LOGRING_MAX_TEXT 1024u         /* longer records are cut to this */
 #define LOGRING_IMAGE_ID 8u            /* bytes naming the program image */
@@ -88,6 +93,7 @@ typedef struct {
     uint32_t lost;
     uint32_t bank;
     uint8_t image[LOGRING_IMAGE_ID];
+    uint32_t gen;
     uint32_t crc;
 } logring_hdr_t;
 
@@ -143,8 +149,11 @@ bool logring_header_ok(const logring_t *r);
  */
 bool logring_recover(logring_t *r);
 
-/** Start an empty ring. `first_seq` (>= 1) is the sequence number of its first record. */
+/** Start an empty ring, not stamped (gen 0). `first_seq` (>= 1) is the sequence number of its first record. */
 void logring_format(logring_t *r, uint32_t boot_id, uint32_t first_seq);
+
+/** Stamp the block with the image generation of the run writing it, and make that durable. */
+void logring_stamp(logring_t *r, uint32_t gen);
 
 /**
  * Append one record (text without terminator, cut to LOGRING_MAX_TEXT and
@@ -179,6 +188,60 @@ typedef void (*logring_lock_fn)(void *ctx);
  */
 size_t logring_read_sliced(logring_t *r, uint32_t *cursor, char *out, size_t size, size_t slice,
                            logring_lock_fn lock, logring_lock_fn unlock, void *lock_ctx, logring_read_t *info);
+
+/*
+ * The two banks diag keeps: this boot's ring and the previous boot's.
+ *
+ * At start-up (logbanks_open, before the settings) both blocks are
+ * recovered; the valid one with the newer boot_id holds the previous boot's
+ * lines and the other one is started over for this boot, unstamped, with the
+ * boot id and the sequence numbers continuing. The image check (owner) keeps
+ * another image's blocks out, but not this image's own from before another
+ * image ran: after A, then B, then A again, A can find its banks from before
+ * B intact (when B's banks sat elsewhere or B did not overwrite both). Those
+ * lines are older than the last boot, so they must not be shown as the
+ * previous boot's. The image generation tells (lifecycle's boot_gen: it
+ * advances when another image records a boot), but it is known only once
+ * the settings are read. So the previous boot's lines stay unreadable until
+ * logbanks_check_stamp(): kept if their stamp comes from the run right before
+ * this boot, otherwise set aside for good (reported as unavailable, as after
+ * a power cut). The same call stamps this boot's bank. A boot that ends
+ * before the check leaves its bank unstamped (0); the stamp check decides
+ * about it as about any unstamped RTC block.
+ */
+typedef struct {
+    logring_t ring;       /**< this boot's: the log tap appends to it */
+    logring_t prev;       /**< the previous boot's, read-only (hdr is NULL when there is none) */
+    bool prev_found;      /**< logbanks_open recovered an earlier boot's bank holding lines */
+    bool prev_ok;         /**< and logbanks_check_stamp kept it: its lines are readable */
+} logbanks_t;
+
+/** What logbanks_check_stamp decided about the previous boot's lines. */
+typedef enum {
+    LOGBANKS_PREV_NONE = 0,   /**< none were recovered */
+    LOGBANKS_PREV_KEPT,       /**< from the run right before this boot: readable */
+    LOGBANKS_PREV_STALE,      /**< older than that run (or not checkable): set aside, unreadable */
+} logbanks_verdict_t;
+
+/**
+ * Attach both blocks (owner = index and `image`), recover what an earlier
+ * boot left when `recover` (and mem[1] is not NULL: a previous boot's bank
+ * needs the other block for this boot), and start this boot's ring.
+ * mem[0] must not be NULL. The previous boot's lines are not readable
+ * (prev_ok false) until logbanks_check_stamp().
+ */
+void logbanks_open(logbanks_t *b, uint8_t *const mem[2], size_t mem_size, const uint8_t image[LOGRING_IMAGE_ID],
+                   bool recover, logring_sync_fn sync, void *sync_ctx);
+
+/**
+ * Image generation check, once the generation is known: keep the previous
+ * boot's lines only if `stamp_ok(their stamp)` (NULL = never), and stamp
+ * this boot's ring with `stamp`. `stamp_ok` is asked without the lock (the
+ * previous boot's header no longer changes); the state changes under it.
+ * Calling it again decides the same way and restamps.
+ */
+logbanks_verdict_t logbanks_check_stamp(logbanks_t *b, bool (*stamp_ok)(uint32_t stamp), uint32_t stamp,
+                                        logring_lock_fn lock, logring_lock_fn unlock, void *lock_ctx);
 
 #ifdef __cplusplus
 }

@@ -25,16 +25,20 @@
  * Image generation (lifecycle_init): an image that runs again after another
  *   one ran (the user's rollback, a trial revert, a bootloader rollback)
  *   would find its own RTC blocks from before that run, intact. So every
- *   RTC block (lifecycle's, the ledger's, the network's) carries a stamp,
- *   the image generation of the run that wrote it, and a block whose stamp
- *   does not match the generation settings recorded last (life/gen,
- *   advanced only when another image records a boot: one small write per
- *   image change, none per boot) predates another image's run and counts
- *   as lost, as after power loss (lifecycle_rtc_stamp_ok,
- *   lifecycle_rtc_stamp). lifecycle_early_boot() runs before the settings
- *   can be read, so it accounts the boot on the block it finds;
- *   lifecycle_init() checks the stamp and, for a stale block, accounts the
- *   boot again from scratch before anything reads the result. Without
+ *   RTC block (lifecycle's, the ledger's, the network's) and diag's
+ *   previous-boot log banks carry a stamp, the image generation of the run
+ *   that wrote it, and a block whose stamp does not match the generation
+ *   settings recorded last (life/gen, advanced only when another image
+ *   records a boot: one small write per image change, none per boot)
+ *   predates another image's run and counts as lost, as after power loss
+ *   (lifecycle_rtc_stamp_ok, lifecycle_rtc_stamp). lifecycle_early_boot()
+ *   runs before the settings can be read, so it accounts the boot on the
+ *   block it finds; lifecycle_init() checks the stamp and, for a stale
+ *   block, accounts the boot again from scratch before anything reads the
+ *   result. diag (L0) recovers the previous boot's log before the settings
+ *   too: lifecycle_init hands it the check (diag_log_check_stamp), and lines
+ *   from before another image's run are reported as unavailable, never as
+ *   the previous boot's. Without
  *   settings nothing can be checked: blocks stamped with a generation are
  *   not used and this boot's blocks carry none; later boots without
  *   settings use those (crash counting keeps working, one boot late), and
@@ -214,7 +218,8 @@ void lifecycle_early_boot(void);
  * before anything reads the boot accounting, the safe-mode decision or an
  * RTC block: check the RTC state against the image generation (account the
  * boot again from scratch when it predates another image's run; store a new
- * generation when the image changed), start the lifecycle service task, then
+ * generation when the image changed; let diag keep or set aside the previous
+ * boot's log by the same check), start the lifecycle service task, then
  * append this boot to the persisted boot history (a history written by a
  * newer app is left untouched). ESP_ERR_INVALID_STATE without settings; the
  * check (see "Image generation") and the service task run anyway.
@@ -223,7 +228,8 @@ esp_err_t lifecycle_init(void);
 
 /**
  * For the other components' RTC blocks (ledger, network), when they read
- * theirs at init: true if an inherited block with this stamp comes from the
+ * theirs at init, and diag's previous-boot log (diag_log_check_stamp, called
+ * from lifecycle_init): true if an inherited block with this stamp comes from the
  * run right before this boot (this image's own, or the image that ran
  * before it, which counts only if the layouts match). A block that fails
  * predates another image's run: treat it as lost, as after power loss.

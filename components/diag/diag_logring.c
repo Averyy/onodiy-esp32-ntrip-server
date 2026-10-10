@@ -201,6 +201,12 @@ void logring_format(logring_t *r, uint32_t boot_id, uint32_t first_seq)
     hints_clear(r);
 }
 
+void logring_stamp(logring_t *r, uint32_t gen)
+{
+    r->hdr->gen = gen;
+    seal(r);
+}
+
 uint32_t logring_append(logring_t *r, const char *text, size_t len)
 {
     if (len == 0) {
@@ -412,4 +418,64 @@ size_t logring_read_sliced(logring_t *r, uint32_t *cursor, char *out, size_t siz
         *info = res;
     }
     return pos;
+}
+
+/* ---- the two banks ----------------------------------------------------------------------- */
+
+void logbanks_open(logbanks_t *b, uint8_t *const mem[2], size_t mem_size, const uint8_t image[LOGRING_IMAGE_ID],
+                   bool recover, logring_sync_fn sync, void *sync_ctx)
+{
+    memset(b, 0, sizeof(*b));
+    logring_t bank[2];
+    bool ok[2] = { false, false };
+    bool both = mem[0] != NULL && mem[1] != NULL;
+    for (int i = 0; i < 2; i++) {
+        if (mem[i] != NULL) {
+            logring_attach(&bank[i], mem[i], mem_size, sync, sync_ctx);
+            logring_set_owner(&bank[i], (uint32_t)i, image);
+            ok[i] = recover && both && logring_recover(&bank[i]);
+        }
+    }
+
+    /* The valid bank with the newer boot_id is the previous boot's. */
+    int prev = -1;
+    if (ok[0] && ok[1]) {
+        prev = ((int32_t)(bank[1].hdr->boot_id - bank[0].hdr->boot_id) > 0) ? 1 : 0;
+    } else if (ok[0]) {
+        prev = 0;
+    } else if (ok[1]) {
+        prev = 1;
+    }
+    int active = (prev == 0) ? 1 : 0;
+    uint32_t boot_id = 1;
+    uint32_t first_seq = 1;
+    if (prev >= 0) {
+        b->prev = bank[prev];
+        b->prev_found = logring_count(&b->prev) > 0;
+        boot_id = b->prev.hdr->boot_id + 1u;
+        first_seq = b->prev.hdr->next_seq;
+    }
+    b->ring = bank[active];
+    logring_format(&b->ring, boot_id == 0 ? 1u : boot_id, first_seq);
+}
+
+logbanks_verdict_t logbanks_check_stamp(logbanks_t *b, bool (*stamp_ok)(uint32_t stamp), uint32_t stamp,
+                                        logring_lock_fn lock, logring_lock_fn unlock, void *lock_ctx)
+{
+    if (b->ring.hdr == NULL) {
+        return LOGBANKS_PREV_NONE;   /* not opened */
+    }
+    bool keep = b->prev_found && stamp_ok != NULL && stamp_ok(b->prev.hdr->gen);
+    if (lock != NULL) {
+        lock(lock_ctx);
+    }
+    b->prev_ok = keep;
+    logring_stamp(&b->ring, stamp);
+    if (unlock != NULL) {
+        unlock(lock_ctx);
+    }
+    if (!b->prev_found) {
+        return LOGBANKS_PREV_NONE;
+    }
+    return keep ? LOGBANKS_PREV_KEPT : LOGBANKS_PREV_STALE;
 }

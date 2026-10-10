@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "boot_gen.h"
 #include "diag_crc.h"
 #include "diag_logring.h"
 #include "unity.h"
@@ -535,4 +536,187 @@ TEST_CASE("log ring: a reset between write-backs of one append keeps whole lines
         logring_append(&r, text, strlen(text));
         check_durable(durable, sizeof(durable), 1);
     }
+}
+
+/* ---- the two banks and the image generation ---------------------------------------------- */
+
+#define BANK_SIZE (sizeof(logring_hdr_t) + 512u)
+
+static uint8_t s_bank_mem[2][BANK_SIZE];   /* what survives a software reset */
+static boot_gen_t s_gen;                   /* this boot's generation, as lifecycle_init decides it */
+
+static bool gen_ok(uint32_t stamp)
+{
+    return boot_gen_accepts(&s_gen, stamp);
+}
+
+/* lifecycle_init's decision for the running image; the record it stores is kept in *rec. */
+static uint32_t gen_boot(boot_gen_record_t *rec, uint32_t image)
+{
+    boot_gen_decide(rec, image, &s_gen);
+    if (s_gen.store) {
+        rec->readable = true;
+        rec->found = true;
+        rec->gen = s_gen.current;
+        rec->image = image;
+    }
+    return s_gen.current;
+}
+
+/* One boot of an image (elf: what the banks are owned by; id: its image id
+ * with the slot): open the banks as the reset left them, check the stamp
+ * once the settings are read (unless the boot ends before), log one line. */
+static logbanks_verdict_t boot_banks(logbanks_t *b, const uint8_t elf[LOGRING_IMAGE_ID], boot_gen_record_t *rec,
+                                     uint32_t id, bool check, const char *line)
+{
+    uint8_t *mem[2] = { s_bank_mem[0], s_bank_mem[1] };
+    logbanks_open(b, mem, BANK_SIZE, elf, true, NULL, NULL);
+    TEST_ASSERT_FALSE(b->prev_ok);   /* nothing readable before the check */
+    logbanks_verdict_t v = LOGBANKS_PREV_NONE;
+    if (check) {
+        uint32_t stamp = gen_boot(rec, id);
+        v = logbanks_check_stamp(b, gen_ok, stamp, NULL, NULL, NULL);
+        TEST_ASSERT_EQUAL_UINT32(stamp, b->ring.hdr->gen);
+    }
+    logring_append(&b->ring, line, strlen(line));
+    return v;
+}
+
+static void prev_text(logbanks_t *b, char *out, size_t cap)
+{
+    uint32_t cursor = 0;
+    out[0] = '\0';
+    logring_read(&b->prev, &cursor, out, cap, NULL);
+}
+
+static const uint8_t k_elf_a[LOGRING_IMAGE_ID] = { 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8 };
+#define ID_A       0x0A0A0001u   /* A in slot 0 */
+#define ID_A_SLOT1 0x0A0A0002u   /* the same build in slot 1 */
+#define ID_B       0x0B0B0001u
+
+TEST_CASE("log banks: A's own lines from before B ran are not the previous boot (A, B, A)", "[diag][logring]")
+{
+    memset(s_bank_mem, 0, sizeof(s_bank_mem));
+    boot_gen_record_t rec = { .readable = true };
+    logbanks_t b;
+    char text[256];
+
+    TEST_ASSERT_EQUAL(LOGBANKS_PREV_NONE, boot_banks(&b, k_elf_a, &rec, ID_A, true, "A run 1\n"));
+    /* a software reset: the run right before is kept */
+    TEST_ASSERT_EQUAL(LOGBANKS_PREV_KEPT, boot_banks(&b, k_elf_a, &rec, ID_A, true, "A run 2\n"));
+    TEST_ASSERT_TRUE(b.prev_ok);
+    prev_text(&b, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("A run 1\n", text);
+
+    /* B runs and records its boot; its banks sit elsewhere, so A's stay intact */
+    gen_boot(&rec, ID_B);
+
+    /* A again (rollback): its bank from before B passes every check of the
+     * ring itself, but B's boot came after it: not the previous boot's */
+    TEST_ASSERT_EQUAL(LOGBANKS_PREV_STALE, boot_banks(&b, k_elf_a, &rec, ID_A, true, "A run 3\n"));
+    TEST_ASSERT_TRUE(b.prev_found);
+    TEST_ASSERT_FALSE(b.prev_ok);
+
+    /* the next boot of A keeps run 3 (stamped with the generation it ran
+     * under), and run 2's bank, reused for this boot, is gone */
+    TEST_ASSERT_EQUAL(LOGBANKS_PREV_KEPT, boot_banks(&b, k_elf_a, &rec, ID_A, true, "A run 4\n"));
+    prev_text(&b, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("A run 3\n", text);
+    TEST_ASSERT_EQUAL(LOGBANKS_PREV_KEPT, boot_banks(&b, k_elf_a, &rec, ID_A, true, "A run 5\n"));
+    prev_text(&b, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("A run 4\n", text);
+}
+
+TEST_CASE("log banks: same build in the other slot, unchecked boots and boots without settings",
+          "[diag][logring]")
+{
+    memset(s_bank_mem, 0, sizeof(s_bank_mem));
+    boot_gen_record_t rec = { .readable = true };
+    logbanks_t b;
+    char text[256];
+
+    /* the same build installed into the other slot is another image, but its
+     * banks are this build's and the run right before: kept */
+    boot_banks(&b, k_elf_a, &rec, ID_A, true, "slot 0\n");
+    TEST_ASSERT_EQUAL(LOGBANKS_PREV_KEPT, boot_banks(&b, k_elf_a, &rec, ID_A_SLOT1, true, "slot 1\n"));
+    prev_text(&b, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("slot 0\n", text);
+
+    /* a boot that ends before the check leaves its bank unstamped: the next
+     * boot of the image the record names keeps it */
+    boot_banks(&b, k_elf_a, &rec, ID_A_SLOT1, false, "crashed early\n");
+    TEST_ASSERT_EQUAL_UINT32(BOOT_GEN_UNSTAMPED, b.ring.hdr->gen);
+    TEST_ASSERT_EQUAL(LOGBANKS_PREV_KEPT, boot_banks(&b, k_elf_a, &rec, ID_A_SLOT1, true, "next\n"));
+    prev_text(&b, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("crashed early\n", text);
+
+    /* ... but not once another image recorded a boot since */
+    boot_banks(&b, k_elf_a, &rec, ID_A_SLOT1, false, "crashed early again\n");
+    gen_boot(&rec, ID_B);
+    TEST_ASSERT_EQUAL(LOGBANKS_PREV_STALE, boot_banks(&b, k_elf_a, &rec, ID_A_SLOT1, true, "after B\n"));
+
+    /* no settings: a stamped bank cannot be checked (set aside), this boot's
+     * stays unstamped, and the next boot without settings keeps it */
+    boot_gen_record_t none = { .readable = false };
+    TEST_ASSERT_EQUAL(LOGBANKS_PREV_STALE, boot_banks(&b, k_elf_a, &none, ID_A_SLOT1, true, "no settings 1\n"));
+    TEST_ASSERT_EQUAL_UINT32(BOOT_GEN_UNSTAMPED, b.ring.hdr->gen);
+    TEST_ASSERT_EQUAL(LOGBANKS_PREV_KEPT, boot_banks(&b, k_elf_a, &none, ID_A_SLOT1, true, "no settings 2\n"));
+    prev_text(&b, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("no settings 1\n", text);
+
+    /* no check function: never kept; the lock is taken once */
+    uint8_t *mem[2] = { s_bank_mem[0], s_bank_mem[1] };
+    logbanks_open(&b, mem, BANK_SIZE, k_elf_a, true, NULL, NULL);
+    TEST_ASSERT_TRUE(b.prev_found);
+    s_locks = 0;
+    TEST_ASSERT_EQUAL(LOGBANKS_PREV_STALE, logbanks_check_stamp(&b, NULL, 5, test_lock, test_unlock, &s_locks));
+    TEST_ASSERT_EQUAL_UINT32(1, s_locks);
+    TEST_ASSERT_FALSE(b.prev_ok);
+    TEST_ASSERT_EQUAL_UINT32(5, b.ring.hdr->gen);
+}
+
+static bool only_7(uint32_t stamp)
+{
+    return stamp == 7u;
+}
+
+TEST_CASE("log banks: the stamp is part of the header, written back and kept across a reset", "[diag][logring]")
+{
+    static uint8_t work[2 * BANK_SIZE];
+    static uint8_t durable[2 * BANK_SIZE];
+    static const uint8_t img[LOGRING_IMAGE_ID] = { 9, 8, 7, 6, 5, 4, 3, 2 };
+    memset(work, 0, sizeof(work));
+    memset(durable, 0, sizeof(durable));
+    shadow_t sh = { .work = work, .durable = durable, .size = sizeof(work) };
+    uint8_t *mem[2] = { work, work + BANK_SIZE };
+    logbanks_t b;
+
+    logbanks_open(&b, mem, BANK_SIZE, img, true, shadow_sync, &sh);
+    TEST_ASSERT_EQUAL_PTR(work, b.ring.hdr);   /* fresh memory: bank 0 for this boot */
+    logring_append(&b.ring, "before the check\n", 17);
+    TEST_ASSERT_EQUAL_UINT32(0, b.ring.hdr->gen);
+    uint32_t hdr_syncs = sh.hdr_syncs;
+    TEST_ASSERT_EQUAL(LOGBANKS_PREV_NONE, logbanks_check_stamp(&b, only_7, 7, NULL, NULL, NULL));
+    TEST_ASSERT_TRUE(sh.hdr_syncs > hdr_syncs);
+    logring_append(&b.ring, "after it\n", 9);
+
+    /* a reset: only what was written back is there */
+    memcpy(work, durable, sizeof(work));
+    logbanks_open(&b, mem, BANK_SIZE, img, true, shadow_sync, &sh);
+    TEST_ASSERT_TRUE(b.prev_found);
+    TEST_ASSERT_EQUAL_UINT32(7, b.prev.hdr->gen);
+    TEST_ASSERT_EQUAL_UINT32(2, logring_count(&b.prev));
+    TEST_ASSERT_EQUAL(LOGBANKS_PREV_KEPT, logbanks_check_stamp(&b, only_7, 7, NULL, NULL, NULL));
+
+    /* the CRC covers the stamp */
+    b.prev.hdr->gen = 8;
+    TEST_ASSERT_FALSE(logring_header_ok(&b.prev));
+
+    /* without persistent memory: one bank, nothing earlier */
+    uint8_t *one[2] = { work, NULL };
+    logbanks_open(&b, one, BANK_SIZE, img, true, NULL, NULL);
+    TEST_ASSERT_FALSE(b.prev_found);
+    TEST_ASSERT_NULL(b.prev.hdr);
+    TEST_ASSERT_EQUAL(LOGBANKS_PREV_NONE, logbanks_check_stamp(&b, only_7, 7, NULL, NULL, NULL));
+    TEST_ASSERT_FALSE(b.prev_ok);
 }

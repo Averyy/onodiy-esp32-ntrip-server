@@ -1116,7 +1116,9 @@ factory reset was refused because a receiver update was running (`null` =
 not this boot); `admin_resets` counts BOOT-button password resets this
 boot. `journal` and `log` are the event journal's and the log ring's
 counters (`diag_journal_info()`, `diag_log_stats()`; `journal.capacity` in
-records). Per-caster loss counters are in `/api/casters`. `boot_history` is the last
+records; `log.prev_boot_available` false and `log.prev_boot_lines` 0 when
+the previous boot's lines are not readable, see `GET /api/logs`).
+Per-caster loss counters are in `/api/casters`. `boot_history` is the last
 16 boots, newest first (`prev_uptime_s` `null` = unknown). `boot` counts
 since power-on from RTC memory; state written before another app image ran
 (an update or a rollback, then back) is not used, so the counters start over
@@ -1174,7 +1176,12 @@ information only.
 8 KB of whole lines newer than `cursor` (start with 0; pass the returned
 `cursor` back; `more: true` = call again at once). `gap` = lines were
 overwritten before they were read. `boot=prev` reads the previous boot's
-ring (empty after a power cut or an app image change). Both flags come
+ring. It is empty after a power cut or an app image change, and also when
+the lines this image finds are older than the last boot: after another
+image ran in between (an update or a rollback, then back), this image's own
+lines from before that run are reported as unavailable, never shown as the
+previous boot's or with an "older" label (checked against the image
+generation at boot). Both flags come
 from `diag_log_read_ex()`. `format=text`
 streams the whole ring as `text/plain` with
 `Content-Disposition: attachment; filename="log-<version>.txt"`.

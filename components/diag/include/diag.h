@@ -31,6 +31,16 @@
  *    moved into its place, is discarded. The event journal below is
  *    layout-independent and records those events and the reset reason
  *    instead.
+ *    Image generation: when this image runs again after another one ran (A,
+ *    then B, then A), A can find its own banks from before B intact, and
+ *    they would pass for the previous boot's although B's boot came after
+ *    them. So each bank also carries the image generation of the run that
+ *    wrote it (lifecycle's, the RTC blocks' stamp). diag starts before the
+ *    settings, when the generation is not known yet: the previous boot's
+ *    lines stay unreadable until lifecycle_init has checked their stamp
+ *    (diag_log_check_stamp), and lines from before another image's run are
+ *    then reported as unavailable, as after a power cut (never shown with a
+ *    label: a reader cannot tell how much older they are).
  *    Lines longer than CONFIG_DIAG_LOG_LINE_MAX - 1 characters are cut
  *    (ending in "..."), on the console and in the ring alike.
  *  - Console: UART at 115200 through the UART driver with a TX buffer of
@@ -228,8 +238,8 @@ typedef struct {
     uint32_t cut;                   /**< lines cut to CONFIG_DIAG_LOG_LINE_MAX */
     uint32_t console_dropped;       /**< lines not sent to the console (TX buffer full) */
     uint32_t console_dropped_bytes;
-    bool prev_boot_available;       /**< the previous boot's lines are readable */
-    uint32_t prev_boot_lines;
+    bool prev_boot_available;       /**< the previous boot's lines are readable (once diag_log_check_stamp kept them) */
+    uint32_t prev_boot_lines;       /**< 0 when not available */
 } diag_log_stats_t;
 
 /** Heap figures in bytes. */
@@ -244,8 +254,9 @@ typedef struct {
 
 /**
  * Install the log tap, set up the console, attach to the log ring (keeping
- * the previous boot's lines readable), mount the journal and start its
- * writer, check for a core dump. Call once, first thing in app_main.
+ * the previous boot's lines for diag_log_check_stamp), mount the journal and
+ * start its writer, check for a core dump. Call once, first thing in
+ * app_main (after lifecycle_early_boot).
  */
 esp_err_t diag_init(void);
 
@@ -260,10 +271,27 @@ esp_err_t diag_init(void);
 size_t diag_log_read(uint32_t *cursor, char *buf, size_t buf_size);
 
 /**
- * Same for the previous boot's log, preserved across the reset (0 if none,
- * e.g. after a power cut or when the previous boot ran a different app image).
+ * Same for the previous boot's log, preserved across the reset (0 if none:
+ * after a power cut, when the previous boot ran a different app image, when
+ * this image's lines predate another image's run, and before
+ * diag_log_check_stamp()).
  */
 size_t diag_log_read_prev_boot(uint32_t *cursor, char *buf, size_t buf_size);
+
+/**
+ * Image generation check of the previous boot's log; lifecycle_init calls it
+ * once, right after the settings, before any reader starts. The previous
+ * boot's lines are kept (readable from then on) only if
+ * `stamp_ok(their stamp)` (lifecycle_rtc_stamp_ok; NULL = never), i.e. they
+ * come from the run right before this boot. Otherwise they predate another
+ * image's run, or cannot be checked without settings, and stay unavailable
+ * for this boot (diag_log_stats, diag_log_read_prev_boot), as after a power
+ * cut. `stamp` (lifecycle_rtc_stamp(), 0 = none) is stamped into this boot's
+ * bank; a boot that ends before this call leaves it unstamped, and the next
+ * boot treats it as any unstamped RTC block. Calling it again decides the
+ * same way.
+ */
+void diag_log_check_stamp(bool (*stamp_ok)(uint32_t stamp), uint32_t stamp);
 
 /**
  * Read either ring without note lines: gaps and "more" are reported in

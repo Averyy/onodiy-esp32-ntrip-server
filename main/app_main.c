@@ -10,7 +10,8 @@
  *    in any later step counts toward safe mode. Right after the settings,
  *    lifecycle_init() checks that accounting's RTC state against the image
  *    generation (state from before another app image's run starts over),
- *    before the safe-mode decision or any other RTC block is read.
+ *    before the safe-mode decision or any other RTC block is read, and has
+ *    diag's previous-boot log checked the same way.
  *  - NVS is never erased just because it is unreadable. Written by a newer
  *    app (rolled back): boot that app if the other slot still holds it and it
  *    is newer, otherwise run without persistence. Erased only when it is full or

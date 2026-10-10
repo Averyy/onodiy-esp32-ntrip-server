@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: MIT
  *
  * Log tap: the log rings (this boot's and the previous boot's, in PSRAM
- * .noinit memory) and the best-effort console.
+ * .noinit memory; logbanks_t in diag_logring.h) and the best-effort console.
+ * The previous boot's lines become readable only once lifecycle_init has
+ * checked their image generation (diag_log_check_stamp).
  *
  * Every log line is formatted once, on the logging task's stack
  * (CONFIG_DIAG_LOG_LINE_MAX bytes), appended to the ring under a spinlock
@@ -56,10 +58,11 @@ static EXT_RAM_NOINIT_ATTR uint8_t s_bank_mem[2][BANK_BYTES] __attribute__((alig
 #endif
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
-static logring_t s_ring;            /* this boot; under s_lock */
-static logring_t s_prev;            /* previous boot; its records are read-only after init, its read hints under s_lock */
+/* ring: this boot's, under s_lock. prev: the previous boot's; its records
+ * are read-only after init, its read hints under s_lock. prev_ok is set
+ * under s_lock by diag_log_check_stamp, before any reader starts. */
+static logbanks_t s_banks;
 static bool s_ring_ok;
-static bool s_prev_ok;
 static uint32_t s_cache_line = 32;
 
 static diag_log_stats_t s_stats;    /* under s_lock */
@@ -115,44 +118,14 @@ static esp_err_t rings_init(void)
     /* Each bank is stamped with its index and this image: when the image
      * changes, the banks' physical place can move by whole MMU pages (one
      * page can be one bank), so an old bank must not pass for the other
-     * bank or for this image's. */
+     * bank or for this image's. Whether this image's own bank comes from the
+     * run right before this boot is decided later (diag_log_check_stamp). */
     uint8_t image[LOGRING_IMAGE_ID];
     memcpy(image, esp_app_get_description()->app_elf_sha256, sizeof(image));
-    logring_t bank[2];
-    bool ok[2] = { false, false };
-    for (int i = 0; i < 2; i++) {
-        if (mem[i] != NULL) {
-            logring_attach(&bank[i], mem[i], BANK_BYTES, ring_sync, NULL);
-            logring_set_owner(&bank[i], (uint32_t)i, image);
-#if BANKS_PERSIST
-            ok[i] = logring_recover(&bank[i]);
-#endif
-        }
-    }
-
-    /* The valid bank with the newer boot_id is the previous boot's. */
-    int prev = -1;
-    if (ok[0] && ok[1]) {
-        prev = ((int32_t)(bank[1].hdr->boot_id - bank[0].hdr->boot_id) > 0) ? 1 : 0;
-    } else if (ok[0]) {
-        prev = 0;
-    } else if (ok[1]) {
-        prev = 1;
-    }
-    int active = (prev == 0) ? 1 : 0;
-    uint32_t boot_id = 1;
-    uint32_t first_seq = 1;
-    if (prev >= 0) {
-        s_prev = bank[prev];
-        s_prev_ok = logring_count(&s_prev) > 0;
-        boot_id = s_prev.hdr->boot_id + 1u;
-        first_seq = s_prev.hdr->next_seq;
-    }
-    s_ring = bank[active];
-    logring_format(&s_ring, boot_id == 0 ? 1u : boot_id, first_seq);
+    logbanks_open(&s_banks, mem, BANK_BYTES, image, BANKS_PERSIST != 0, ring_sync, NULL);
     s_ring_ok = true;
-    s_stats.prev_boot_available = s_prev_ok;
-    s_stats.prev_boot_lines = s_prev_ok ? logring_count(&s_prev) : 0;
+    s_stats.prev_boot_available = false;
+    s_stats.prev_boot_lines = 0;
     return ESP_OK;
 }
 
@@ -324,10 +297,10 @@ static int diag_vprintf(const char *fmt, va_list ap)
 
     if (s_ring_ok) {
         portENTER_CRITICAL_SAFE(&s_lock);
-        uint32_t lost = s_ring.hdr->lost;
-        (void)logring_append(&s_ring, line, len);
+        uint32_t lost = s_banks.ring.hdr->lost;
+        (void)logring_append(&s_banks.ring, line, len);
         s_stats.lines++;
-        s_stats.ring_overwritten += s_ring.hdr->lost - lost;
+        s_stats.ring_overwritten += s_banks.ring.hdr->lost - lost;
         s_stats.cut += cut ? 1u : 0u;
         portEXIT_CRITICAL_SAFE(&s_lock);
     }
@@ -369,8 +342,9 @@ esp_err_t diag_log_init(void)
         ESP_LOGE("diag", "console driver not installed (%s): console output may block", esp_err_to_name(cerr));
     }
 #endif
-    if (s_prev_ok) {
-        ESP_LOGI("diag", "previous boot's log kept: %u lines", (unsigned)s_stats.prev_boot_lines);
+    if (s_banks.prev_found) {
+        ESP_LOGI("diag", "previous boot's log found: %u lines (readable once its image generation is checked)",
+                 (unsigned)logring_count(&s_banks.prev));
     }
     return ESP_OK;
 }
@@ -400,6 +374,26 @@ static void read_unlock(void *ctx)
     portEXIT_CRITICAL(&s_lock);
 }
 
+void diag_log_check_stamp(bool (*stamp_ok)(uint32_t stamp), uint32_t stamp)
+{
+    if (!s_ring_ok) {
+        return;
+    }
+    logbanks_verdict_t v = logbanks_check_stamp(&s_banks, stamp_ok, stamp, read_lock, read_unlock, NULL);
+    uint32_t lines = (v != LOGBANKS_PREV_NONE) ? logring_count(&s_banks.prev) : 0;
+    portENTER_CRITICAL(&s_lock);
+    s_stats.prev_boot_available = (v == LOGBANKS_PREV_KEPT);
+    s_stats.prev_boot_lines = (v == LOGBANKS_PREV_KEPT) ? lines : 0;
+    portEXIT_CRITICAL(&s_lock);
+    if (v == LOGBANKS_PREV_KEPT) {
+        ESP_LOGI("diag", "previous boot's log kept: %u lines", (unsigned)lines);
+    } else if (v == LOGBANKS_PREV_STALE) {
+        ESP_LOGW("diag", "previous boot's log set aside (%u lines): written before another app image ran, or "
+                         "not checkable without settings",
+                 (unsigned)lines);
+    }
+}
+
 size_t diag_log_read_ex(diag_log_src_t src, uint32_t *cursor, char *buf, size_t buf_size,
                         diag_log_read_info_t *info)
 {
@@ -408,7 +402,7 @@ size_t diag_log_read_ex(diag_log_src_t src, uint32_t *cursor, char *buf, size_t 
         buf[0] = '\0';
     }
     bool live = (src == DIAG_LOG_THIS_BOOT);
-    if (cursor == NULL || buf == NULL || buf_size < 2 || !(live ? s_ring_ok : s_prev_ok)) {
+    if (cursor == NULL || buf == NULL || buf_size < 2 || !(live ? s_ring_ok : s_banks.prev_ok)) {
         if (info != NULL) {
             *info = res;
         }
@@ -419,8 +413,8 @@ size_t diag_log_read_ex(diag_log_src_t src, uint32_t *cursor, char *buf, size_t 
      * previous boot's ring takes the lock too: readers on two tasks share
      * its hints. */
     logring_read_t ri;
-    size_t pos = logring_read_sliced(live ? &s_ring : &s_prev, cursor, buf, buf_size, READ_SLICE, read_lock,
-                                     read_unlock, NULL, &ri);
+    size_t pos = logring_read_sliced(live ? &s_banks.ring : &s_banks.prev, cursor, buf, buf_size, READ_SLICE,
+                                     read_lock, read_unlock, NULL, &ri);
     res.gap = ri.gap;
     res.more = ri.more;
     if (info != NULL) {
@@ -446,8 +440,8 @@ static size_t read_with_note(diag_log_src_t src, uint32_t *cursor, char *buf, si
 {
     static const char k_note[] = "[diag: earlier lines were overwritten before they were read]\n";
     bool live = (src == DIAG_LOG_THIS_BOOT);
-    if (cursor != NULL && buf != NULL && buf_size > sizeof(k_note) + 1u && (live ? s_ring_ok : s_prev_ok) &&
-        gap_ahead(live ? &s_ring : &s_prev, *cursor)) {
+    if (cursor != NULL && buf != NULL && buf_size > sizeof(k_note) + 1u && (live ? s_ring_ok : s_banks.prev_ok) &&
+        gap_ahead(live ? &s_banks.ring : &s_banks.prev, *cursor)) {
         memcpy(buf, k_note, sizeof(k_note) - 1u);
         size_t n = diag_log_read_ex(src, cursor, buf + sizeof(k_note) - 1u, buf_size - (sizeof(k_note) - 1u), NULL);
         return n + sizeof(k_note) - 1u;
@@ -471,8 +465,8 @@ uint32_t diag_log_head(void)
         return 0;
     }
     portENTER_CRITICAL(&s_lock);
-    uint32_t first = s_ring.hdr->first_seq;
-    uint32_t next = s_ring.hdr->next_seq;
+    uint32_t first = s_banks.ring.hdr->first_seq;
+    uint32_t next = s_banks.ring.hdr->next_seq;
     portEXIT_CRITICAL(&s_lock);
     return next == first ? (first > 1u ? first - 1u : 0u) : next - 1u;
 }

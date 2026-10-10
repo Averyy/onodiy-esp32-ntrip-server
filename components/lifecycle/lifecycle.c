@@ -626,6 +626,10 @@ static void check_generation(void)
     refresh_info();
     taskEXIT_CRITICAL(&s_lock);
 
+    /* diag (L0) recovered the previous boot's log before the settings could
+     * be read: it is shown only if it is from the run right before this boot. */
+    diag_log_check_stamp(lifecycle_rtc_stamp_ok, g.current);
+
     if (v == BOOT_GEN_STALE) {
         ESP_LOGW(TAG, "RTC state predates another app image's run%s: boot accounting started over, as after "
                       "power loss",
