@@ -574,6 +574,58 @@ TEST_CASE("health mon: power-on boots without a trusted clock count as inside th
     TEST_ASSERT_FALSE(hm_power_alert(&p, PT0 + PDAY));
 }
 
+TEST_CASE("health mon: the running boot is dated from the clock, so the alert clears 24 h after it", "[health_mon]")
+{
+    /* Three short power-on sessions, none of them with a dated record; the
+     * third one then runs for weeks without writing a dated record either. */
+    hm_power_t p;
+    hm_power_init(&p);
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    const int64_t start = PT0;   /* the running boot started here (now minus its uptime) */
+    hm_power_running(&p, start + 600, 600);
+    TEST_ASSERT_EQUAL_INT64(start, p.boot[2].t);
+    TEST_ASSERT_EQUAL_INT64(start, p.boot[0].ub);   /* the earlier ones came before it */
+    TEST_ASSERT_TRUE(hm_power_alert(&p, start + 600));
+    hm_power_running(&p, start + PDAY - 1, (uint32_t)(PDAY - 1));
+    TEST_ASSERT_TRUE(hm_power_alert(&p, start + PDAY - 1));
+    hm_power_running(&p, start + PDAY, (uint32_t)PDAY);
+    TEST_ASSERT_FALSE(hm_power_alert(&p, start + PDAY));
+    hm_power_running(&p, start + 20 * PDAY, (uint32_t)(20 * PDAY));
+    TEST_ASSERT_FALSE(hm_power_alert(&p, start + 20 * PDAY));
+
+    /* Weeks apart, each session undated: the running boot's start shows they
+     * were not within 24 h of it. */
+    hm_power_init(&p);
+    pboot(&p, RESET_PLANNED, start - 30 * PDAY);
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    pboot(&p, RESET_PLANNED, start - 15 * PDAY);
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    pboot(&p, RESET_PLANNED, start - 2 * PDAY);
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    hm_power_running(&p, start + 60, 60);
+    TEST_ASSERT_FALSE(hm_power_alert(&p, start + 60));
+
+    /* A running boot that is not a power-on boot only bounds the earlier ones. */
+    hm_power_init(&p);
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    pboot(&p, RESET_PLANNED, 0);
+    hm_power_running(&p, start + 60, 60);
+    TEST_ASSERT_EQUAL_INT64(start, p.boot[2].ub);
+    TEST_ASSERT_TRUE(hm_power_alert(&p, start + 60));
+    TEST_ASSERT_FALSE(hm_power_alert(&p, start + PDAY));
+
+    /* No trusted clock: nothing changes. */
+    hm_power_init(&p);
+    pboot(&p, HM_RESET_POWER_ON, 0);
+    hm_power_running(&p, 0, 600);
+    TEST_ASSERT_EQUAL_INT64(0, p.boot[0].t);
+    TEST_ASSERT_EQUAL_INT64(0, p.boot[0].ub);
+}
+
 TEST_CASE("health mon: a boot record with its own clock dates the boot; old boots fall out", "[health_mon]")
 {
     hm_power_t p;

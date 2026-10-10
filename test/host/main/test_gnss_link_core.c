@@ -518,6 +518,18 @@ TEST_CASE("link core: a closed driver reopens after 1 s, 5 s, 30 s, then every 6
     }
     TEST_ASSERT_EQUAL_UINT32(60000, gnss_link_core_reopen_delay_ms(UINT32_MAX));
 
+    /* The schedule as the RX task runs it: the closing failure waits
+     * delay(0); each failed attempt then waits next(failures before it). */
+    static const uint32_t gaps[] = { 1000, 5000, 30000, 60000, 60000 };
+    uint32_t failures = 0;
+    uint32_t gap = gnss_link_core_reopen_delay_ms(0);
+    for (uint32_t i = 0; i < sizeof(gaps) / sizeof(gaps[0]); i++) {
+        TEST_ASSERT_EQUAL_UINT32(gaps[i], gap);
+        gap = gnss_link_core_reopen_next_ms(failures);   /* this attempt failed */
+        failures++;
+    }
+    TEST_ASSERT_EQUAL_UINT32(60000, gnss_link_core_reopen_next_ms(UINT32_MAX));
+
     /* the first failure is logged, then at most one line per 10 min */
     TEST_ASSERT_TRUE(gnss_link_core_reopen_log_due(false, 0, T0_US));
     TEST_ASSERT_FALSE(gnss_link_core_reopen_log_due(true, T0_US, T0_US + 599LL * 1000000));

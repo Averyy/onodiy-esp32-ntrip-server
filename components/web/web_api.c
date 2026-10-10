@@ -770,9 +770,13 @@ static esp_err_t h_maint_post(web_req_t *r)
     if (e == WEB_ERR_INTERNAL) {
         return web_send_internal(r->req, err);
     }
-    return web_send_error(r->req, e,
-                          reason != NULL ? "A receiver session or job runs: offer maintenance again when it ends" : NULL,
-                          field, UINT32_MAX, NULL, reason);
+    const char *text = NULL;
+    if (why == STATION_MAINT_REFUSED_SKY_OUTPUT) {
+        text = "The live view's satellite output is turned off first: offer maintenance again in a few seconds";
+    } else if (reason != NULL) {
+        text = "A receiver session or job runs: offer maintenance again when it ends";
+    }
+    return web_send_error(r->req, e, text, field, UINT32_MAX, NULL, reason);
 }
 
 static esp_err_t h_maint_delete(web_req_t *r)

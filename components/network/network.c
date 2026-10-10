@@ -185,6 +185,9 @@ static char s_pend_ssid[33];
 static char s_pend_pass[65];
 static bool s_pend_valid;
 static bool s_cred_reverted;
+/* Credential writes to settings, from API calls and from the net task's
+ * confirmation, one at a time (the RAM pairs stay under s_lock). */
+static SemaphoreHandle_t s_cred_mux;
 
 static esp_err_t s_start_err;               /* MSG_START result */
 static SemaphoreHandle_t s_start_done;
@@ -1122,33 +1125,54 @@ static esp_err_t erase_pending_keys(void)
 
 /* The pending credentials got an IP: they become the station's. The new
  * pair is written before the pending one is erased, so a reset in between
- * only tries them first once more. */
+ * only tries them first once more. Not while a newer change waits to be
+ * applied (it replaces this trial), and the pending pair is cleared only
+ * when it is the one confirmed, so a correction made meanwhile survives. */
 static void trial_confirmed(void)
 {
+    xSemaphoreTake(s_cred_mux, portMAX_DELAY);
     taskENTER_CRITICAL(&s_lock);
-    strlcpy(s_act_ssid, s_ssid, sizeof(s_act_ssid));
-    strlcpy(s_act_pass, s_pass, sizeof(s_act_pass));
-    memset(s_pend_pass, 0, sizeof(s_pend_pass));
-    s_pend_ssid[0] = '\0';
-    s_pend_valid = false;
-    s_cred_reverted = false;
+    bool newer = s_new_pending;
+    bool pend_same = s_pend_valid && strcmp(s_pend_ssid, s_ssid) == 0 && strcmp(s_pend_pass, s_pass) == 0;
+    if (!newer) {
+        strlcpy(s_act_ssid, s_ssid, sizeof(s_act_ssid));
+        strlcpy(s_act_pass, s_pass, sizeof(s_act_pass));
+        if (pend_same) {
+            memset(s_pend_pass, 0, sizeof(s_pend_pass));
+            s_pend_ssid[0] = '\0';
+            s_pend_valid = false;
+            s_cred_reverted = false;
+        }
+    }
+    bool other_pending = s_pend_valid;
     taskEXIT_CRITICAL(&s_lock);
-    ESP_LOGI(TAG, "new Wi-Fi credentials for \"%s\" confirmed", s_ssid);
-    if (!settings_is_available()) {
+    if (newer) {
+        xSemaphoreGive(s_cred_mux);
+        ESP_LOGI(TAG, "Wi-Fi credentials for \"%s\" got an IP, but newer ones are about to be tried", s_ssid);
         return;
     }
-    esp_err_t err = store_pair(SETTINGS_KEY_WIFI_SSID, SETTINGS_KEY_WIFI_PASS, s_ssid, s_pass);
-    if (err == ESP_OK) {
-        err = erase_pending_keys();
+    ESP_LOGI(TAG, "new Wi-Fi credentials for \"%s\" confirmed", s_ssid);
+    if (settings_is_available()) {
+        esp_err_t err = store_pair(SETTINGS_KEY_WIFI_SSID, SETTINGS_KEY_WIFI_PASS, s_ssid, s_pass);
+        if (err == ESP_OK && !other_pending) {
+            err = erase_pending_keys();
+        }
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "confirmed Wi-Fi credentials not stored: %s", esp_err_to_name(err));
+        }
     }
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "confirmed Wi-Fi credentials not stored: %s", esp_err_to_name(err));
-    }
+    xSemaphoreGive(s_cred_mux);
 }
 
 /* No IP in time with the pending credentials: back to the stored ones. */
 static void trial_revert(void)
 {
+    taskENTER_CRITICAL(&s_lock);
+    bool newer = s_new_pending;
+    taskEXIT_CRITICAL(&s_lock);
+    if (newer) {
+        return;   /* a newer change replaces this trial within a second */
+    }
     if (!s_trial_revert_ok) {
         ESP_LOGW(TAG, "Wi-Fi credentials for \"%s\" got no IP in %u s; no previous credentials, still trying",
                  s_ssid, (unsigned)NET_CRED_TRIAL_S);
@@ -1188,8 +1212,14 @@ static void handle_got_ip(void)
     }
     /* Only an IP on a link the trial credentials made confirms them (an
      * event of the previous link can still arrive after the switch); the
-     * timeout is left to housekeeping. */
-    if (s_trial.on && s_trial_assoc && net_cred_trial_tick(&s_trial, true, s_ip_since_s) == NET_TRIAL_CONFIRMED) {
+     * timeout is left to housekeeping. A newer change waiting to be applied
+     * replaces the trial instead (trial_confirmed checks again under the
+     * credential lock). */
+    taskENTER_CRITICAL(&s_lock);
+    bool newer = s_new_pending;
+    taskEXIT_CRITICAL(&s_lock);
+    if (s_trial.on && s_trial_assoc && !newer &&
+        net_cred_trial_tick(&s_trial, true, s_ip_since_s) == NET_TRIAL_CONFIRMED) {
         trial_confirmed();
     }
     net_drop_log_reset(&s_drop);
@@ -1525,6 +1555,9 @@ static void housekeeping(void)
         memset(s_new_pass, 0, sizeof(s_new_pass));
         s_new_pending = false;
         trial = s_new_trial;
+        if (trial) {
+            s_cred_reverted = false;   /* a new trial: an earlier revert no longer applies */
+        }
         s_trial_revert_ok = net_ssid_valid(s_act_ssid);
         apply = true;
     }
@@ -1721,8 +1754,9 @@ esp_err_t network_init(void)
     s_queue = xQueueCreate(NET_QUEUE_LEN, sizeof(net_msg_t));
     s_start_done = xSemaphoreCreateBinary();
     s_dns_done = xSemaphoreCreateBinary();
+    s_cred_mux = xSemaphoreCreateMutex();
     s_probe_events = xEventGroupCreate();
-    if (s_queue == NULL || s_start_done == NULL || s_dns_done == NULL || s_probe_events == NULL) {
+    if (s_queue == NULL || s_start_done == NULL || s_dns_done == NULL || s_cred_mux == NULL || s_probe_events == NULL) {
         return ESP_ERR_NO_MEM;
     }
     xEventGroupSetBits(s_probe_events, PROBE_IDLE_BIT);
@@ -1837,6 +1871,7 @@ esp_err_t network_set_credentials(const char *ssid, const char *password)
     if (!s_inited) {
         return ESP_ERR_INVALID_STATE;
     }
+    xSemaphoreTake(s_cred_mux, portMAX_DELAY);
     taskENTER_CRITICAL(&s_lock);
     bool have = net_ssid_valid(s_act_ssid);
     bool same = have && strcmp(s_act_ssid, ssid) == 0 && strcmp(s_act_pass, password) == 0;
@@ -1857,6 +1892,7 @@ esp_err_t network_set_credentials(const char *ssid, const char *password)
             }
         }
         if (err != ESP_OK) {
+            xSemaphoreGive(s_cred_mux);
             return err;
         }
     } else {
@@ -1877,6 +1913,7 @@ esp_err_t network_set_credentials(const char *ssid, const char *password)
     s_cred_reverted = false;
     queue_apply_locked(ssid, password, plan == NET_CRED_PLAN_TRIAL);
     taskEXIT_CRITICAL(&s_lock);
+    xSemaphoreGive(s_cred_mux);
     ESP_LOGI(TAG, "Wi-Fi credentials for \"%s\" %s", ssid,
              plan == NET_CRED_PLAN_TRIAL ? "stored as pending: tried now, kept if they get an IP"
                                          : "stored");
@@ -1903,15 +1940,18 @@ esp_err_t network_discard_pending_credentials(void)
     if (!s_inited) {
         return ESP_ERR_INVALID_STATE;
     }
+    xSemaphoreTake(s_cred_mux, portMAX_DELAY);
     taskENTER_CRITICAL(&s_lock);
     bool pend = s_pend_valid;
     taskEXIT_CRITICAL(&s_lock);
     if (!pend) {
+        xSemaphoreGive(s_cred_mux);
         return ESP_ERR_NOT_FOUND;
     }
     if (settings_is_available()) {
         esp_err_t err = erase_pending_keys();
         if (err != ESP_OK) {
+            xSemaphoreGive(s_cred_mux);
             return err;
         }
     }
@@ -1927,6 +1967,7 @@ esp_err_t network_discard_pending_credentials(void)
         s_new_pending = false;
     }
     taskEXIT_CRITICAL(&s_lock);
+    xSemaphoreGive(s_cred_mux);
     ESP_LOGI(TAG, "pending Wi-Fi credentials discarded");
     return ESP_OK;
 }
@@ -2079,6 +2120,7 @@ esp_err_t network_ladder_tick(const network_ladder_input_t *in)
     taskENTER_CRITICAL(&s_lock);
     lin.sta_configured = s_st.sta_configured;
     lin.assoc_no_ip_s = s_st.assoc_no_ip_s;
+    lin.has_ip = s_st.online;
     lin.ap_clients = s_st.ap_clients;
     lin.probe_valid = s_probe_valid;
     lin.probe = (net_probe_t)s_st.probe;

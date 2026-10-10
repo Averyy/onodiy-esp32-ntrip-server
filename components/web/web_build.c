@@ -953,6 +953,10 @@ web_err_t web_maint_refusal(station_maint_why_t why, bool safe_mode, const char 
         e = WEB_ERR_BUSY;
         r = "receiver_session";
         break;
+    case STATION_MAINT_REFUSED_SKY_OUTPUT:
+        e = WEB_ERR_BUSY;
+        r = "live_view_output";
+        break;
     case STATION_MAINT_REFUSED_DURATION:
         e = WEB_ERR_INVALID_FIELD;
         f = "duration_s";

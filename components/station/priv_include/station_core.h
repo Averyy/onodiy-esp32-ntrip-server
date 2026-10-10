@@ -281,6 +281,8 @@ typedef enum {
     STN_MAINT_SESSION,       /**< a session or job runs: offer again when it ends */
     STN_MAINT_DURATION,      /**< not one of the choices */
     STN_MAINT_NOT_ON,        /**< "end now" without the state */
+    /* 5 is the caller's own "not running" */
+    STN_MAINT_SKY_OUTPUT = 6, /**< the live view's satellite-in-view output may be on: turned off first, offer again */
 } stn_maint_why_t;
 
 /** Why a live view window closed. */
@@ -307,12 +309,12 @@ typedef enum {
     STN_SKY_WHY_NONE = 0,
     STN_SKY_WHY_BUSY,            /**< a receiver job or session runs */
     STN_SKY_WHY_NOT_STREAMING,   /**< no receiver streaming (detecting, no receiver, boot) */
-    STN_SKY_WHY_MAINTENANCE,     /**< receiver maintenance: nothing is sent */
+    STN_SKY_WHY_MAINTENANCE,     /**< receiver maintenance: nothing is sent (pending), or turned off for a maintenance request (dropped) */
     STN_SKY_WHY_AUTOCFG_OFF,     /**< gnss/autocfg = 0: the user configures the receiver */
     STN_SKY_WHY_UNSUPPORTED,     /**< not a receiver model we configure */
     STN_SKY_WHY_RECONFIGURED,    /**< receiver reconfigured, reset or restarted: start again to turn it on */
     STN_SKY_WHY_REJECTED,        /**< the receiver rejected the command */
-    STN_SKY_WHY_NO_ANSWER,       /**< no answer (it may be on: turned off when the window closes) */
+    STN_SKY_WHY_NO_ANSWER,       /**< no answer (it may be on: turned off when the window closes; extending sends it again) */
     STN_SKY_WHY_FLASH,           /**< receiver update session */
 } stn_sky_why_t;
 
@@ -435,6 +437,7 @@ typedef struct {
     uint8_t live_last_end;     /**< stn_live_end_t */
     bool sky_want;             /**< the window wants the satellite-in-view output */
     bool sky_on;               /**< it may be on because of us (unsaved) */
+    bool sky_unsure;           /**< ... only maybe: "on" got no answer (off when the window closes, or sent again on an extension) */
     uint8_t sky_why;           /**< why the window dropped its wish (stn_sky_why_t) */
     uint8_t sky_off_tries;
     int64_t sky_retry_ms;
@@ -509,7 +512,10 @@ bool stn_maint_duration_ok(uint32_t dur_s);
 /**
  * The user's maintenance request: enter for dur_s, or, while on, extend by
  * dur_s (at most STN_MAINT_MAX_S left). lease_held: a lease is held on the
- * link now (the caller's live view).
+ * link now (the caller's live view). While the live view's satellite-in-view
+ * output may be on (and the receiver is reachable) it is refused with
+ * STN_MAINT_SKY_OUTPUT: the output goes off at the next free moment and the
+ * open window drops its wish for it (STN_SKY_WHY_MAINTENANCE).
  * @return stn_maint_why_t (STN_MAINT_OK = on now).
  */
 int stn_maint_enter(stn_t *s, uint32_t dur_s, bool lease_held, int64_t now_ms);
@@ -536,6 +542,27 @@ void stn_maint_rtc_write(stn_maint_rtc_t *r, uint32_t stamp, uint32_t left_s, ui
 
 /** Read the record: false for a cleared, damaged or foreign one, or one with nothing left. */
 bool stn_maint_rtc_read(const stn_maint_rtc_t *r, uint32_t *stamp, uint32_t *left_s, uint32_t *spent_s);
+
+/**
+ * The caller's RTC record of "the satellite-in-view output may be on because
+ * of us" (magic, image stamp, CRC): written before the "on" command and kept
+ * while sky_on holds, so an ESP32-only reset (the receiver keeps running and
+ * keeps the unsaved output) still turns it off.
+ */
+typedef struct {
+    uint32_t magic;
+    uint32_t stamp;          /**< the image generation stamp that wrote it */
+    uint32_t crc;
+} stn_sky_rtc_t;
+
+/** Write the record (on false clears it). */
+void stn_sky_rtc_write(stn_sky_rtc_t *r, uint32_t stamp, bool on);
+
+/** Read the record: false for a cleared, damaged or foreign one. */
+bool stn_sky_rtc_read(const stn_sky_rtc_t *r, uint32_t *stamp);
+
+/** After an ESP32-only reset with the record set: the output may still be on; turned off once the station streams. */
+void stn_sky_restore(stn_t *s);
 
 /* ---- live view --------------------------------------------------------------- */
 

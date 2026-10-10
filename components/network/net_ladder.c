@@ -98,6 +98,53 @@ static net_ladder_why_t reboot_blocked(net_ladder_t *l, const net_ladder_in_t *i
     return ap_check(l, in, now_s);
 }
 
+/*
+ * No trigger holds: does that count as healthy? For an episode that A or S
+ * started or kept alive, not by itself: the ladder's own rungs clear those
+ * triggers for a while (a reconnect drops the association, so A needs
+ * another NET_LADDER_ASSOC_NO_IP_S; the lost address ends every slot's
+ * unreached run, so S needs another NET_LADDER_UNREACHED_S), and the healthy
+ * time would run out first, so the episode would never get past its first
+ * rung. Healthy then also needs an IP address, and after S no slot in an
+ * unreached run at all.
+ */
+static bool calm(const net_ladder_t *l, const net_ladder_in_t *in)
+{
+    if (!in->sta_configured || (l->seen & (NET_TRIG_A | NET_TRIG_S)) == 0) {
+        return true;
+    }
+    if (!in->has_ip) {
+        return false;
+    }
+    return (l->seen & NET_TRIG_S) == 0 || in->unreached_s == 0;
+}
+
+/*
+ * The end of a hold with S as the only trigger: a fresh probe first. The
+ * internet answering means the slot's fault is remote (a host name that
+ * does not resolve, a host that drops connects): no new pass, every rung
+ * would only be skipped again; the ladder holds once more and looks again.
+ * Returns true when the caller is done for this tick (out filled in).
+ */
+static bool s_only_hold_ends(net_ladder_t *l, const net_ladder_in_t *in, uint32_t now_s, uint32_t due_age,
+                             net_ladder_out_t *out)
+{
+    if (in->probe_valid && (uint32_t)(now_s - in->probe_at_s) <= due_age) {
+        if (in->probe == NET_PROBE_OK) {
+            enter_hold(l, now_s);
+            return true;
+        }
+        return false;
+    }
+    if (!l->probe_asked) {
+        l->probe_asked = true;
+        l->probe_asked_s = now_s;
+        out->act = NET_LADDER_PROBE;
+        return true;
+    }
+    return (uint32_t)(now_s - l->probe_asked_s) < NET_LADDER_PROBE_WAIT_S;   /* no answer in time: a new pass */
+}
+
 net_ladder_out_t net_ladder_tick(net_ladder_t *l, const net_ladder_in_t *in, uint32_t now_s)
 {
     net_ladder_out_t out = { NET_LADDER_NONE, NET_RUNG_NONE, NET_WHY_NONE, 0 };
@@ -108,13 +155,19 @@ net_ladder_out_t net_ladder_tick(net_ladder_t *l, const net_ladder_in_t *in, uin
         if (needed) {
             net_ladder_init(l);   /* a new episode: the AP-client limit starts afresh */
             start_pass(l, now_s);
+            l->seen = triggers;
             out.act = NET_LADDER_PASS;
             out.triggers = triggers;
         }
         return out;
     }
+    l->seen |= triggers;
 
     if (!needed) {
+        if (!calm(l, in)) {
+            l->healthy = false;
+            return out;   /* the pass clock keeps running */
+        }
         if (!l->healthy) {
             l->healthy = true;
             l->healthy_since_s = now_s;
@@ -129,11 +182,16 @@ net_ladder_out_t net_ladder_tick(net_ladder_t *l, const net_ladder_in_t *in, uin
     l->healthy = false;
 
     if (l->phase == NET_LADDER_HOLD) {
-        if ((uint32_t)(now_s - l->hold_start_s) >= NET_LADDER_HOLD_S) {
-            start_pass(l, now_s);
-            out.act = NET_LADDER_PASS;
-            out.triggers = triggers;
+        uint32_t held = now_s - l->hold_start_s;
+        if (held < NET_LADDER_HOLD_S) {
+            return out;
         }
+        if (triggers == NET_TRIG_S && s_only_hold_ends(l, in, now_s, held - NET_LADDER_HOLD_S, &out)) {
+            return out;
+        }
+        start_pass(l, now_s);
+        out.act = NET_LADDER_PASS;
+        out.triggers = triggers;
         return out;
     }
 

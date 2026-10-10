@@ -251,13 +251,17 @@ function tileMosaic(lat, lon, onFail) {
   const x = ((lon + 180) / 360) * n * MAP_TILE;
   const y = ((1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2) * n * MAP_TILE;
   const left = x - MAP_W / 2, top = y - MAP_H / 2;
-  const box = h('div', { class: 'map', role: 'img', 'aria-label': 'Map around the station position' });
+  /* The tiles and the pin are one image to assistive technology; the
+   * attribution (a link the tile policy asks for) sits beside it, so it is
+   * not hidden as part of the image. */
+  const tiles = h('div', { class: 'map-tiles', role: 'img', 'aria-label': 'Map around the station position' });
+  const box = h('div', { class: 'map' }, tiles);
   let failed = false;
   for (let ty = Math.floor(top / MAP_TILE); ty <= Math.floor((top + MAP_H - 1) / MAP_TILE); ty++) {
     if (ty < 0 || ty >= n) continue;
     for (let tx = Math.floor(left / MAP_TILE); tx <= Math.floor((left + MAP_W - 1) / MAP_TILE); tx++) {
       const wx = ((tx % n) + n) % n;
-      box.append(h('img', { src: MAP_HOST + MAP_ZOOM + '/' + wx + '/' + ty + '.png', alt: '', referrerpolicy: 'origin',
+      tiles.append(h('img', { src: MAP_HOST + MAP_ZOOM + '/' + wx + '/' + ty + '.png', alt: '', referrerpolicy: 'origin',
         draggable: 'false', decoding: 'async',
         style: { left: (((tx * MAP_TILE - left) / MAP_W) * 100).toFixed(3) + '%', top: (((ty * MAP_TILE - top) / MAP_H) * 100).toFixed(3) + '%',
           width: ((MAP_TILE / MAP_W) * 100).toFixed(3) + '%', height: ((MAP_TILE / MAP_H) * 100).toFixed(3) + '%' },
@@ -269,8 +273,8 @@ function tileMosaic(lat, lon, onFail) {
         } }));
     }
   }
-  box.append(h('span', { class: 'pin', 'aria-hidden': 'true' }),
-    h('span', { class: 'map-attr' }, '© ', h('a', { href: 'https://www.openstreetmap.org/copyright', target: '_blank', rel: 'noopener noreferrer' },
+  tiles.append(h('span', { class: 'pin', 'aria-hidden': 'true' }));
+  box.append(h('span', { class: 'map-attr' }, '© ', h('a', { href: 'https://www.openstreetmap.org/copyright', target: '_blank', rel: 'noopener noreferrer' },
       'OpenStreetMap'), ' contributors'));
   return box;
 }
@@ -337,6 +341,14 @@ function skyOutputText(w) {
     case 'pending':
       return 'Satellite positions: waiting' + (why ? ': ' + why : '') + '.';
     case 'blocked':
+      if (w.sky_why === 'maintenance') {
+        return 'Satellite positions: turned off for receiver maintenance. Extend the view to turn them on again (after maintenance). ' +
+          'The table still lists every satellite.';
+      }
+      if (w.sky_why === 'no_answer') {
+        return 'Satellite positions: the receiver did not answer the command' + (w.sky_reply ? ' (' + w.sky_reply + ')' : '') +
+          '. They may be on all the same; they are turned off when the view closes. Extend the view to try again.';
+      }
       return 'Satellite positions: not available in this window' + (why ? ': ' + why : '') +
         (w.sky_reply ? ' (' + w.sky_reply + ')' : '') + '. The table still lists every satellite.';
     case 'stopping':
@@ -346,24 +358,45 @@ function skyOutputText(w) {
   }
 }
 
-/** The window card. opts: onStart(button), onExtend(button), onStop(button). Returns {el, update(window), left()}. */
+/**
+ * The window card. opts: onStart(button, errBox), onExtend(...), onStop(...),
+ * each returning a promise. Returns {el, update(window), connLost(text),
+ * connOk(), stop(), leftMs()}.
+ */
 function liveWindowCard(opts) {
   const badgeEl = badge('', '');
   const leftText = h('span', { class: 'countdown' });
   const state = h('p', { class: 'state-line' });
+  const announce = h('span', { class: 'sr-only', role: 'status' });   /* opened / closed, said once */
   const sky = h('p', { class: 'small' });
   const err = errBox();
-  const startBtn = btn('Start', () => opts.onStart(startBtn, err), 'primary');
-  const extendBtn = btn('Extend', () => opts.onExtend(extendBtn, err), 'primary');
-  const stopBtn = btn('Stop', () => opts.onStop(stopBtn, err));
+  const conn = h('p', { class: 'msg warn', role: 'status', hidden: true });   /* polling failed: once, until it works again */
+  let deadline = 0, open = false, seen = false;
+  /* Start hides itself, Stop hides itself and Extend: after the action the
+   * keyboard focus goes to the button that is there now (Start <-> Extend). */
+  const run = (fn, b) => async () => {
+    try {
+      await fn(b, err);
+    } finally {
+      setTimeout(() => {
+        const a = doc.activeElement;
+        if (a && a !== doc.body && !a.hidden && el.contains(a)) return;
+        if (a && a !== doc.body && a !== b && !el.contains(a)) return;   /* the user went elsewhere meanwhile */
+        const t = !b.hidden ? b : open ? extendBtn : startBtn;
+        if (!t.hidden) t.focus();
+      }, 0);
+    }
+  };
+  const startBtn = btn('Start', () => run(opts.onStart, startBtn)(), 'primary');
+  const extendBtn = btn('Extend', () => run(opts.onExtend, extendBtn)(), 'primary');
+  const stopBtn = btn('Stop', () => run(opts.onStop, stopBtn)());
   const el = h('section', { class: 'card wide' },
     h('h2', null, 'Live view', badgeEl),
-    state, sky, err,
+    announce, state, sky, conn, err,
     h('div', { class: 'form-actions' }, startBtn, extendBtn, stopBtn),
     h('p', { class: 'muted small foot' }, 'While the view is open the receiver also reports where each satellite is in the sky. ' +
       'Switching that output on and off pauses the casters for a moment. The view closes by itself when its time is up, ' +
       'or about two minutes after no page shows it.'));
-  let deadline = 0, open = false;
   const tick = () => {
     if (!open) return;
     leftText.textContent = fmt.dur(Math.max(0, Math.round((deadline - Date.now()) / 1000)));
@@ -372,13 +405,17 @@ function liveWindowCard(opts) {
   return {
     el: el,
     update(w) {
+      const was = open;
       open = !!w.open;
+      if (seen && was !== open) announce.textContent = open ? 'Live view open.' : 'Live view closed.';
+      seen = true;
       badgeEl.className = 'badge ' + (open ? 'ok' : '');
       badgeEl.textContent = open ? 'Open' : 'Closed';
       startBtn.hidden = open;
       extendBtn.hidden = stopBtn.hidden = !open;
       startBtn.textContent = 'Start (' + w.default_min + ' min)';
-      extendBtn.textContent = w.sky_why === 'reconfigured' ? 'Extend and turn positions on again' : 'Extend by ' + w.default_min + ' min';
+      const again = w.sky === 'blocked' && ['reconfigured', 'maintenance', 'no_answer'].indexOf(w.sky_why) >= 0;
+      extendBtn.textContent = again ? 'Extend and turn positions on again' : 'Extend by ' + w.default_min + ' min';
       if (open) {
         deadline = Date.now() + w.left_s * 1000;
         mount(state, 'Open: ', leftText, ' left (at most ' + w.max_min + ' min from now with extensions).');
@@ -389,6 +426,16 @@ function liveWindowCard(opts) {
       }
       sky.textContent = open ? skyOutputText(w) : '';
       sky.hidden = !sky.textContent;
+    },
+    connLost(text) {
+      const t = 'Refreshing failed: ' + text + ' The figures below are from the last answer; the page keeps asking.';
+      if (conn.hidden || conn.textContent !== t) {
+        conn.textContent = t;
+        conn.hidden = false;
+      }
+    },
+    connOk() {
+      conn.hidden = true;
     },
     stop() {
       clearInterval(timer);
@@ -401,8 +448,11 @@ function liveWindowCard(opts) {
 
 /* ---- The page ---------------------------------------------------------------------------- */
 
-/* Set by the entry buttons (Signals page, dashboard): the page starts the window when it opens. */
+/* Set by the entry button (Signals page): the page starts the window when it opens. */
 let liveAutoStart = false;
+
+/* The plain-link entry (the dashboard, rebuilt every second, carries no buttons): opens the page and starts the window. */
+const LIVE_START_HASH = '#/signals/live/start';
 
 /** Open the live view page and start the window there. */
 function openLiveView() {
@@ -411,7 +461,7 @@ function openLiveView() {
   else location.hash = '#/signals/live';
 }
 
-function livePage(el) {
+function livePage(el, startArg) {
   if (!isAdmin()) {
     mount(el, card('Live view', h('p', null, 'Log in to open the live view.'),
       h('div', { class: 'form-actions' }, btn('Log in', () => showLogin(), 'primary'))));
@@ -462,6 +512,7 @@ function livePage(el) {
   function show(d) {
     if (gone || !d) return;
     const w = d.window || {};
+    win.connOk();
     win.update(w);
     map.update(d.position);
     closedNote.hidden = !!w.open;
@@ -493,13 +544,19 @@ function livePage(el) {
     try {
       d = await api('GET', '/api/gnss/live');
     } catch (e) {
-      if (!(e instanceof ApiError && e.status === 401)) toast(errText(e), 'bad');
+      /* Once in the card, not a toast every 2 s (a phone off Wi-Fi, a restarting station). */
+      if (!gone && !(e instanceof ApiError && e.status === 401)) win.connLost(errText(e));
       return;
     }
     show(d);
   }
 
-  if (liveAutoStart) {
+  if (startArg) {
+    /* Started once: a reload or the back button must not start it again. */
+    history.replaceState(null, '', '#/signals/live');
+    if (shell.current) shell.current.arg = 'live';
+  }
+  if (liveAutoStart || startArg) {
     liveAutoStart = false;
     act(null, async () => {
       show(await api('POST', '/api/gnss/live', {}));

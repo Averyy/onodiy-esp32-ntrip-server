@@ -689,7 +689,7 @@ static void reopen_step(void)
     if (now < s_reopen_at_us) {
         return;
     }
-    uint32_t next_ms = gnss_link_core_reopen_delay_ms(s_reopen_failures);
+    uint32_t next_ms = gnss_link_core_reopen_next_ms(s_reopen_failures);   /* if this one fails too */
     open_job_t job = {
         .stored = true,
         .reopen = true,

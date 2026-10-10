@@ -115,7 +115,7 @@ function skyView(sky, onEnable) {
 Views.signals = {
   title: 'Signals',
   create(el, arg) {
-    if (arg === 'live') return livePage(el);
+    if (arg === 'live' || arg === 'live/start') return livePage(el, arg === 'live/start');
     const summary = h('section', { class: 'card wide' });
     const bandsCard = h('section', { class: 'card wide' });
     const msgsCard = h('section', { class: 'card wide' });

@@ -45,7 +45,10 @@
  *    time recorded after it (a later boot's start or any later record), or
  *    at "now" when nothing later had a clock. Without a trusted clock now,
  *    only boots that nothing later dated can be counted, and three of those
- *    raise it.
+ *    raise it. The running boot is dated from the clock itself
+ *    (hm_power_running: now minus the uptime) once every journal record
+ *    written so far has been read, since a healthy boot may write no dated
+ *    record for days; until then the alert is not judged.
  *
  * Thresholds are PROVISIONAL, to be confirmed on hardware.
  */
@@ -259,6 +262,14 @@ void hm_power_init(hm_power_t *p);
 
 /** Feed one journal record, in journal order (unix_s 0 = no trusted clock then). */
 void hm_power_feed(hm_power_t *p, uint16_t kind, int32_t a, int64_t unix_s, uint32_t uptime_s);
+
+/**
+ * The reader has fed every journal record written so far (the running
+ * boot's own boot record included) and the clock is trusted: the running
+ * boot started at now_utc - uptime_s. Dates it if it is an undated power-on
+ * boot, and places every earlier undated boot before that start.
+ */
+void hm_power_running(hm_power_t *p, int64_t now_utc, uint32_t uptime_s);
 
 /** Is the "power was lost" alert up at `now_utc` (0 = no trusted clock now)? */
 bool hm_power_alert(const hm_power_t *p, int64_t now_utc);

@@ -43,6 +43,7 @@ static void sim_init(sim_t *s, net_probe_t world)
     s->in.caster_down = true;
     s->in.rtcm_healthy = true;
     s->in.sta_configured = true;
+    s->in.has_ip = true;
     s->in.min_reboot_interval_s = 6 * 3600;
     s->in.since_reboot_s = UINT32_MAX;
 }
@@ -419,6 +420,103 @@ TEST_CASE("network ladder: a slot that never reaches its caster runs the Wi-Fi r
     s.in.unreached_s = 600;
     sim_run(&s, 700);
     TEST_ASSERT_EQUAL_UINT32(0, total_acts(&s) + s.probes);
+}
+
+TEST_CASE("network ladder: its own reconnect does not end an episode of A or S", "[net_ladder]")
+{
+    /* A: the router's DHCP server is off. Every Wi-Fi rung drops the
+     * association; it is back 3 s later (all-channel scan), and A needs
+     * another 60 s after that. */
+    sim_t s;
+    sim_init(&s, NET_PROBE_NO_IP);
+    s.in.caster_down = false;
+    s.in.has_ip = false;
+    uint32_t assoc_at = s.now - NET_LADDER_ASSOC_NO_IP_S;
+    uint32_t back_at = 0;
+    bool down = false;
+    for (uint32_t i = 0; i < 700; i++) {
+        if (down && (int32_t)(s.now - back_at) >= 0) {
+            down = false;
+            assoc_at = s.now;
+        }
+        s.in.assoc_no_ip_s = down ? 0 : s.now - assoc_at;
+        uint32_t before = total_acts(&s);
+        sim_step(&s);
+        if (total_acts(&s) != before) {
+            down = true;
+            back_at = s.now + 3;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, s.resets);
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RECONNECT]);
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RENEW_DHCP]);
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RESTART_WIFI]);
+    TEST_ASSERT_EQUAL_UINT32(0, s.acts[NET_RUNG_REBOOT]);
+    TEST_ASSERT_EQUAL(NET_LADDER_HOLD, s.l.phase);
+
+    /* S: the router's DNS is broken. A rung takes the address for 5 s, which
+     * ends every slot's unreached run; the slots fail again from 2 s after
+     * the address is back, and S needs 180 s of that. */
+    sim_init(&s, NET_PROBE_DNS_FAILED);
+    s.in.caster_down = false;
+    uint32_t run_from = s.now - NET_LADDER_UNREACHED_S;
+    down = false;
+    for (uint32_t i = 0; i < 1000; i++) {
+        if (down && (int32_t)(s.now - back_at) >= 0) {
+            down = false;
+            run_from = s.now + 2;
+        }
+        s.in.has_ip = !down;
+        s.in.unreached_s = (down || (int32_t)(s.now - run_from) < 0) ? 0 : s.now - run_from;   /* across the wrap */
+        uint32_t before = total_acts(&s);
+        sim_step(&s);
+        if (total_acts(&s) != before) {
+            down = true;
+            back_at = s.now + 5;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, s.resets);
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RECONNECT]);
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RENEW_DHCP]);   /* the fallback DNS, the actual remedy */
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RESTART_WIFI]);
+    TEST_ASSERT_EQUAL_UINT32(0, s.acts[NET_RUNG_REBOOT]);
+
+    /* Healthy again: an address and no slot in an unreached run for 60 s. */
+    s.in.has_ip = true;
+    s.in.unreached_s = 0;
+    sim_run(&s, NET_LADDER_HEALTHY_S + 1);
+    TEST_ASSERT_EQUAL_UINT32(1, s.resets);
+    TEST_ASSERT_EQUAL(NET_LADDER_IDLE, s.l.phase);
+}
+
+TEST_CASE("network ladder: S alone with the internet reachable holds without new passes", "[net_ladder]")
+{
+    /* A secondary caster's host name does not resolve (or its host is gone):
+     * the first pass skips every rung, then the ladder only looks again. */
+    sim_t s;
+    sim_init(&s, NET_PROBE_OK);
+    s.in.caster_down = false;
+    s.in.unreached_s = 3600;
+    uint8_t trig = 0;
+    uint32_t passes = run_counting_passes(&s, 6 * 3600, &trig);
+    TEST_ASSERT_EQUAL_UINT32(1, passes);
+    TEST_ASSERT_EQUAL_UINT8(NET_TRIG_S, trig);
+    TEST_ASSERT_EQUAL_UINT32(4, s.skips);
+    TEST_ASSERT_EQUAL_UINT32(0, total_acts(&s));
+    TEST_ASSERT_EQUAL(NET_LADDER_HOLD, s.l.phase);
+    TEST_ASSERT_GREATER_THAN_UINT32(20, s.probes);   /* one probe per hold */
+
+    /* The internet goes away: the next hold end starts a pass that acts. */
+    s.world = NET_PROBE_DNS_FAILED;
+    passes = run_counting_passes(&s, NET_LADDER_HOLD_S + 100, &trig);
+    TEST_ASSERT_EQUAL_UINT32(1, passes);
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RECONNECT]);
+
+    /* With another trigger as well, the passes run as before. */
+    sim_init(&s, NET_PROBE_OK);
+    s.in.unreached_s = 3600;   /* and the protected caster down */
+    passes = run_counting_passes(&s, 2 * (NET_LADDER_REBOOT_S + NET_LADDER_HOLD_S) + 100, &trig);
+    TEST_ASSERT_EQUAL_UINT32(3, passes);
 }
 
 TEST_CASE("network ladder: only the protected trigger at the reboot rung reboots", "[net_ladder]")

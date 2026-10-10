@@ -117,7 +117,11 @@
  * tick); three or more power-on boots within 24 h raise
  * HEALTH_ALERT_POWER_LOST (DEGRADED), which clears 24 h after the last
  * power-on boot. A boot dated by no trusted clock counts as inside the
- * window. Brownouts keep their own alert (HEALTH_ALERT_POWER_SUPPLY).
+ * window. The running boot is dated from the trusted clock (now minus the
+ * uptime) once the reader has caught up with the journal, so the alert
+ * clears even when the station writes no dated record for days; until it
+ * has caught up the alert is not judged (no flash of it at start-up).
+ * Brownouts keep their own alert (HEALTH_ALERT_POWER_SUPPLY).
  *
  * All reboots go through lifecycle_reboot()/lifecycle_request_reboot(), so
  * they honour reboot inhibits (receiver flash, app update) and close caster

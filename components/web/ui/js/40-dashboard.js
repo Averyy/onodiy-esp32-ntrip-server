@@ -5,9 +5,11 @@
  * Status dashboard: overall state, receiver and RTCM, the Onocoy day (UTC)
  * with the remaining offline budget, every caster, Wi-Fi, alerts. Built
  * from the status model on every update and patched into the page (no
- * inputs on this page), so the links keep keyboard focus and text stays
- * selectable across the 1 s updates. Visitors without a session see the
- * public form (names and states only).
+ * inputs and no buttons on this page: patch() replaces an element with a
+ * listener every time, which would take the keyboard focus with it), so the
+ * links keep keyboard focus and text stays selectable across the 1 s
+ * updates. The live view entry is a link that starts the window. Visitors
+ * without a session see the public form (names and states only).
  */
 
 /* Onocoy's streak needs at least 99.8 % graced uptime per UTC day. */
@@ -92,7 +94,7 @@ function receiverCard(s, admin) {
   return h('section', { class: 'card' },
     h('h2', null, 'Receiver', state),
     kv(rows),
-    admin ? h('div', { class: 'foot row' }, btn('Live view', openLiveView, 'small'), link('Receiver and position', '#/receiver'), link('Signals', '#/signals')) :
+    admin ? h('div', { class: 'foot row' }, link('Live view', LIVE_START_HASH), link('Receiver and position', '#/receiver'), link('Signals', '#/signals')) :
       h('div', { class: 'foot' }, link('Signals', '#/signals')));
 }
 

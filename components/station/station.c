@@ -87,7 +87,8 @@ _Static_assert(STN_REC_RESYNC == (int)STATION_RECOVER_RESYNC &&
 _Static_assert(STN_MAINT_OK == (int)STATION_MAINT_OK && STN_MAINT_FLASH == (int)STATION_MAINT_REFUSED_FLASH &&
                    STN_MAINT_SESSION == (int)STATION_MAINT_REFUSED_SESSION &&
                    STN_MAINT_DURATION == (int)STATION_MAINT_REFUSED_DURATION &&
-                   STN_MAINT_NOT_ON == (int)STATION_MAINT_NOT_ON,
+                   STN_MAINT_NOT_ON == (int)STATION_MAINT_NOT_ON &&
+                   STN_MAINT_SKY_OUTPUT == (int)STATION_MAINT_REFUSED_SKY_OUTPUT,
                "core maintenance reasons mirror station_maint_why_t");
 _Static_assert(STN_SKY_OFF == (int)STATION_LIVE_SKY_OFF && STN_SKY_PENDING == (int)STATION_LIVE_SKY_PENDING &&
                    STN_SKY_ON == (int)STATION_LIVE_SKY_ON && STN_SKY_ON_PROFILE == (int)STATION_LIVE_SKY_ON_PROFILE &&
@@ -159,6 +160,11 @@ static gnss_link_lease_t s_boot_lease;
 static RTC_NOINIT_ATTR stn_maint_rtc_t s_maint_rtc;
 static volatile bool s_maint_end_req;    /* the user's "end now", for the station task */
 
+/* The live view's satellite-in-view output may be on (unsaved) across an
+ * ESP32-only reset: the receiver keeps it, so the next boot turns it off.
+ * Station task only (and station_init before it runs). */
+static RTC_NOINIT_ATTR stn_sky_rtc_t s_sky_rtc;
+
 /* Station task only. */
 static um98x_base_profile_t s_profile;
 static um98x_info_t s_stored_info;       /* gnss/model and gnss/fw as stored (not confirmed) */
@@ -168,7 +174,7 @@ static station_status_t s_pub;
 static gnss_link_lease_t s_lease;        /* the running job's lease */
 static gnss_link_lease_t s_hold_lease;   /* listen-only while a flash journal is open */
 static bool s_paused;
-static bool s_gate_on;                   /* the link's hands-off gate as last set by the station task */
+static bool s_gate_on;                   /* maintenance as the ledger knows it (the link's gate follows the core) */
 static bool s_rtcm_ok;
 static uint32_t s_prompt_baud;
 static uint32_t s_arp_fed;
@@ -926,6 +932,10 @@ static void job_sky(const stn_job_t *job, stn_result_t *r)
         r->err = STN_E_STATE;
         return;
     }
+    if (job->sky_on) {
+        /* Before the command: a reset from here on still turns it off. */
+        stn_sky_rtc_write(&s_sky_rtc, lifecycle_rtc_stamp(), true);
+    }
     char reply[sizeof(s_sky_reply)];
     esp_err_t err = um98x_ctl_sat_view(s_lease, job->sky_on, CONFIG_STATION_LIVE_VIEW_SKY_PERIOD_S, reply,
                                        sizeof(reply));
@@ -1203,7 +1213,10 @@ static void handle_notes(const stn_note_t *n, unsigned count)
     }
 }
 
-/* Maintenance: the link's gate, the ledger and the RTC record follow the core. */
+/* Maintenance: the link's gate, the ledger and the RTC record follow the
+ * core. The gate is compared with the link's own state, not with what this
+ * task last set: station_maintenance_start sets it from the API task, and an
+ * "end now" handled before this ran would otherwise leave it set. */
 static void sync_maintenance(const stn_in_t *in)
 {
     bool on;
@@ -1214,14 +1227,19 @@ static void sync_maintenance(const stn_in_t *in)
     left = stn_maint_left_s(&s_core, in->now_ms);
     start = s_core.maint_start_ms;
     portEXIT_CRITICAL(&s_lock);
-    if (on != s_gate_on) {
+    gnss_link_stats_t ls;
+    bool gate = (gnss_link_get_stats(&ls) == ESP_OK) ? ls.hands_off : s_gate_on;
+    if (on != gate) {
         esp_err_t err = gnss_link_set_hands_off(on);
         if (err == ESP_OK) {
-            s_gate_on = on;
-            ledger_set_maintenance(on);
+            gate = on;
         } else {
             ESP_LOGW(TAG, "link hands-off %s: %s", on ? "not set" : "not cleared", esp_err_to_name(err));
         }
+    }
+    if (gate == on && on != s_gate_on) {
+        s_gate_on = on;
+        ledger_set_maintenance(on);
     }
     if (on) {
         int64_t spent = (in->now_ms - start) / 1000;
@@ -1235,6 +1253,7 @@ static void sync_maintenance(const stn_in_t *in)
 static void after_step(const stn_in_t *in)
 {
     bool paused;
+    bool sky_on;
     station_state_t st;
     stn_note_t notes[STN_NOTES];
     unsigned n_notes;
@@ -1245,10 +1264,16 @@ static void after_step(const stn_in_t *in)
     }
     paused = s_core.paused;
     st = (station_state_t)s_core.state;
+    sky_on = s_core.sky_on;
     n_notes = stn_take_notes(&s_core, notes, STN_NOTES);
     portEXIT_CRITICAL(&s_lock);
 
     sync_maintenance(in);
+    uint32_t sky_stamp = 0;
+    bool sky_rec = stn_sky_rtc_read(&s_sky_rtc, &sky_stamp);
+    if (sky_on != sky_rec) {
+        stn_sky_rtc_write(&s_sky_rtc, lifecycle_rtc_stamp(), sky_on);
+    }
     handle_notes(notes, n_notes);
     journal_flush();
 
@@ -1517,6 +1542,14 @@ esp_err_t station_init(void)
     if (!restore) {
         stn_maint_rtc_write(&s_maint_rtc, 0, 0, 0);
     }
+    /* The live view's output after an ESP32-only reset: the receiver did not
+     * restart, so it may still send it (a flash session restarts it). */
+    uint32_t sky_stamp = 0;
+    bool sky_restore = boot.reset_class != LIFECYCLE_RESET_POWER_ON && !journal_open(s_journal_err) &&
+                       stn_sky_rtc_read(&s_sky_rtc, &sky_stamp) && lifecycle_rtc_stamp_ok(sky_stamp);
+    if (!sky_restore) {
+        stn_sky_rtc_write(&s_sky_rtc, 0, false);
+    }
 
     portENTER_CRITICAL(&s_lock);
     stn_init(&s_core, journal_open(s_journal_err));
@@ -1525,8 +1558,15 @@ esp_err_t station_init(void)
     if (restore) {
         stn_maint_restore(&s_core, left, spent, now_ms());
     }
+    if (sky_restore) {
+        stn_sky_restore(&s_core);
+    }
     stn_obs_clear(&s_obs);
     portEXIT_CRITICAL(&s_lock);
+    if (sky_restore) {
+        ESP_LOGW(TAG, "the live view's satellite-in-view output may still be on after the reset: turned off once "
+                      "the receiver streams");
+    }
     if (restore) {
         /* Hands off from the first moment: the boot only listens. */
         if (gnss_link_set_hands_off(true) == ESP_OK) {

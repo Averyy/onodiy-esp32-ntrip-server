@@ -38,11 +38,13 @@
   --c-sbas: #5f6b7a;
   --c-navic: #c2185b;
   /* C/N0 classes of the live view: one hue, weak (light) to strong (dark);
-   * an ordinal ramp, checked for monotone steps and contrast. The ink is the
-   * label colour on each step. The dark theme runs the other way. */
+   * an ordinal ramp with even steps (1.4 to 1.6:1 between neighbours). The
+   * ink is the label colour on each step, at least 4.5:1 on its step (WCAG
+   * AA for the small labels; 4.65:1 is the lowest, on step 2). The dark
+   * theme runs the other way (lowest 5.15:1). */
   --cnr-0: #86b6ef;
   --cnr-1: #5598e7;
-  --cnr-2: #2a78d6;
+  --cnr-2: #2774d2;
   --cnr-3: #1c5cab;
   --cnr-4: #104281;
   --cnr-ink-0: #0b1220;
@@ -613,11 +615,12 @@ tbody tr:last-child td { border-bottom: 0; }
 .cnr-ok { color: var(--warn); }
 .cnr-good { color: var(--ok); }
 
-.sky-wrap > * + * { margin-top: 1rem; }
-@media (min-width: 860px) {
-  .sky-wrap { display: grid; gap: 1rem; grid-template-columns: minmax(0, 420px) 1fr; align-items: start; }
-  .sky-wrap > * + * { margin-top: 0; }
-}
+/* Sky plot beside its table when the card (not the viewport) is wide enough
+ * for both; stacked otherwise, as in the setup wizard's narrow column. The
+ * items may shrink below their content (a wide table scrolls in its box). */
+.sky-wrap { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
+.sky-wrap > * { flex: 1 1 26rem; min-width: 0; }
+.sky-wrap > :first-child { flex-basis: 17.5rem; max-width: 420px; margin: 0 auto; }
 svg.sky { width: 100%; max-width: 420px; height: auto; display: block; margin: 0 auto; }
 svg.sky .ring { fill: none; stroke: var(--border); stroke-width: 1; }
 svg.sky .axis { stroke: var(--border); stroke-width: 1; }
@@ -641,6 +644,17 @@ svg.sky .sat { stroke: var(--surface); stroke-width: 1.5; }
 .live-entry .text { flex: 1 1 18rem; }
 .live-entry .text > * + * { margin-top: 0.4rem; }
 .countdown { font-weight: 700; font-variant-numeric: tabular-nums; }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 svg.live-sky .sat { stroke: var(--surface); stroke-width: 1.5; }
 svg.live-sky .sid { font-size: 8px; font-weight: 700; }
 svg.live-sky .sat.b0 { fill: var(--cnr-0); }
@@ -713,6 +727,7 @@ table.counts tfoot th, table.counts tfoot td { border-top: 1px solid var(--borde
   border-radius: 10px;
   background: var(--surface-2);
 }
+.map .map-tiles { position: absolute; inset: 0; }
 .map img { position: absolute; display: block; max-width: none; user-select: none; }
 .map .pin {
   position: absolute;

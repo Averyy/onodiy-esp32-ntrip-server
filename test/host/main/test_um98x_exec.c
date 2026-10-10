@@ -73,6 +73,7 @@ typedef struct {
     int saves;
     char b1c, saved_b1c;  /* B1C/B2a in RTCM: 'E' enabled, 'D' disabled, 0 = not in the dump */
     bool b1c_restarts;    /* turning B1C/B2a on restarts the receiver */
+    char restart_after[40];   /* the next command with this prefix is acknowledged, then the receiver restarts */
     char ant[120], saved_ant[120];   /* antenna descriptor values ("" = not in the dump) */
     unsigned gsv;         /* satellite-in-view output period, 0 = off */
 
@@ -266,6 +267,10 @@ static void receive(sim_t *s, const char *cmd)
         restart(s, s->restart_ms);
     } else {
         reply(s, cmd, "PARSING FAILD NO MATCHING FUNC", 30);
+    }
+    if (starts(up, s->restart_after)) {
+        s->restart_after[0] = '\0';
+        restart(s, s->restart_ms);   /* "OK, then a receiver reset" */
     }
 }
 
@@ -1262,6 +1267,49 @@ TEST_CASE("exec: a restart while B1C/B2a is in flight fails the session", "[um98
     TEST_ASSERT_EQUAL_INT(0, count(s, "RTCM1005"));
 }
 
+TEST_CASE("exec: a restart after the B1C/B2a ack, before the save, fails the session", "[um98x_exec]")
+{
+    /* The receiver acknowledges, then restarts: it comes back with its saved
+     * base mode, and a save would store that with our outputs. */
+    sim_t *s = sim_init();
+    configured(s);
+    strcpy(s->mode, "MODE ROVER");   /* the base mode is sent in this session */
+    strcpy(s->saved_mode, s->mode);
+    s->b1c = s->saved_b1c = 'D';
+    snprintf(s->restart_after, sizeof(s->restart_after), "CONFIG RTCMB1CB2A");
+    um98x_base_profile_t p;
+    default_profile(&p);
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_EQUAL_STRING("CONFIG RTCMB1CB2A ENABLE", r.failed_cmd);
+    TEST_ASSERT_EQUAL_STRING("receiver restarted after RTCMB1CB2A", r.reason);
+    TEST_ASSERT_TRUE(r.mode_sent);
+    TEST_ASSERT_TRUE(r.b1cb2a_sent);
+    TEST_ASSERT_FALSE(r.b1cb2a_ok);
+    TEST_ASSERT_EQUAL_STRING("receiver restarted", r.b1cb2a_reply);
+    TEST_ASSERT_FALSE(r.saved);
+    TEST_ASSERT_TRUE(r.rolled_back);
+    TEST_ASSERT_EQUAL_INT(0, s->saves);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "SAVECONFIG"));
+    TEST_ASSERT_EQUAL_STRING("MODE ROVER", s->saved_mode);
+
+    /* Any restart between the configuring steps and the save does the same. */
+    s = sim_init();
+    configured(s);
+    strcpy(s->mode, "MODE ROVER");
+    strcpy(s->saved_mode, s->mode);
+    snprintf(s->restart_after, sizeof(s->restart_after), "RTCM1005");
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_EQUAL_STRING("", r.failed_cmd);
+    TEST_ASSERT_EQUAL_STRING("receiver restarted during the session", r.reason);
+    TEST_ASSERT_FALSE(r.b1cb2a_sent);
+    TEST_ASSERT_FALSE(r.saved);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "SAVECONFIG"));
+    TEST_ASSERT_EQUAL_STRING("MODE ROVER", s->saved_mode);
+}
+
 TEST_CASE("exec: the antenna descriptor is sent only when the receiver holds another one", "[um98x_exec]")
 {
     sim_t *s = sim_init();
@@ -1423,7 +1471,11 @@ TEST_CASE("exec: satellite-in-view output on and off, never saved", "[um98x_exec
     TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", why);
     s = sim_init();
     s->present = false;
+    int64_t t0 = s->now;
     TEST_ASSERT_EQUAL(UM98X_E_TIMEOUT, um98x_exec_sat_view(&s->ex, true, 5, why, sizeof(why)));
     TEST_ASSERT_EQUAL_STRING("timeout", why);
+    /* Two sends: the toggle holds RTCM back for less than a caster's 10 s stall limit. */
+    TEST_ASSERT_EQUAL_INT(2, count(s, "GPGSV COM1 5"));
+    TEST_ASSERT_LESS_THAN_INT64(10000, s->now - t0);
     TEST_ASSERT_EQUAL(UM98X_E_ARG, um98x_exec_sat_view(&s->ex, true, 0, why, sizeof(why)));
 }

@@ -142,7 +142,10 @@
  * reflash): a user action with a duration (15 min, 30 min, 1 h, 2 h, 4 h;
  * default 30 min; extendable while on, at most 4 h left; "end now").
  * Refused while a receiver-flash journal is open, while a receiver session
- * or job runs (offer again when it ends) and in safe mode. While on, the
+ * or job runs (offer again when it ends), while the live view's
+ * satellite-in-view output may be on (it is turned off first, so nothing
+ * done through the other port can save it; offer again in a few seconds)
+ * and in safe mode. While on, the
  * GNSS link refuses every write and every lease, so nothing reaches the
  * receiver: no detection, no queries, no apply of any kind (the request
  * functions refuse with ESP_ERR_INVALID_STATE), no loader key, no RESET, no
@@ -172,10 +175,15 @@
  * station streams with nothing else to do: never while it configures,
  * detects, recovers or flashes, never in maintenance, never with
  * gnss/autocfg = 0, never for a model it does not configure, and never when
- * the profile sends the output permanently. After a receiver
- * reconfiguration, reset or restart the output is simply off (status says
- * why); starting the view again turns it on again. Everything else in the
- * live view comes from the RTCM stream without any receiver traffic.
+ * the profile sends the output permanently. A toggle sends its command at
+ * most twice (about 7 s without an answer). An "on" without an answer may
+ * have taken: it is turned off when the window closes (extending sends it
+ * again). An ESP32-only reset while it may be on is remembered (RTC memory,
+ * like maintenance), and the next boot turns it off once the station
+ * streams. After a receiver reconfiguration, reset or restart the output is
+ * simply off (status says why); starting the view again turns it on again.
+ * Everything else in the live view comes from the RTCM stream without any
+ * receiver traffic.
  * Whether toggling the output interrupts RTCM is PROVISIONAL, to be
  * confirmed on hardware.
  *
@@ -273,6 +281,7 @@ typedef enum {
     STATION_MAINT_REFUSED_DURATION,     /**< not one of 15 min, 30 min, 1 h, 2 h, 4 h */
     STATION_MAINT_NOT_ON,               /**< "end now" without the state */
     STATION_MAINT_REFUSED_NOT_RUNNING,  /**< the station does not run (safe mode) */
+    STATION_MAINT_REFUSED_SKY_OUTPUT,   /**< the live view's satellite-in-view output may be on: the station turns it off first (the open view keeps running without it); offer again in a few seconds */
 } station_maint_why_t;
 
 /** The receiver's satellite-in-view output as the live view sees it. */
@@ -290,12 +299,12 @@ typedef enum {
     STATION_LIVE_WHY_NONE = 0,
     STATION_LIVE_WHY_BUSY,           /**< a receiver job or session runs */
     STATION_LIVE_WHY_NOT_STREAMING,  /**< no receiver streaming (detecting, no receiver, boot) */
-    STATION_LIVE_WHY_MAINTENANCE,    /**< receiver maintenance: nothing is sent */
+    STATION_LIVE_WHY_MAINTENANCE,    /**< receiver maintenance: nothing is sent (pending), or turned off for a maintenance request (blocked: extend to want it again) */
     STATION_LIVE_WHY_AUTOCFG_OFF,    /**< gnss/autocfg = 0: the user configures the receiver */
     STATION_LIVE_WHY_UNSUPPORTED,    /**< not a receiver model this firmware configures */
     STATION_LIVE_WHY_RECONFIGURED,   /**< receiver reconfigured, reset or restarted: start the view again */
     STATION_LIVE_WHY_REJECTED,       /**< the receiver rejected the command (sky_reply) */
-    STATION_LIVE_WHY_NO_ANSWER,      /**< no answer to the command */
+    STATION_LIVE_WHY_NO_ANSWER,      /**< no answer to the command (it may be on: turned off when the window closes; extending sends it again) */
     STATION_LIVE_WHY_FLASH,          /**< receiver update session (also refuses the view) */
     STATION_LIVE_WHY_NOT_RUNNING,    /**< the station does not run (safe mode; refuses the view) */
 } station_live_why_t;
@@ -483,7 +492,8 @@ esp_err_t station_request_resurvey(void);
  * return on.
  * @param why optional: the refusal reason (STATION_MAINT_OK on success)
  * @return ESP_OK; ESP_ERR_INVALID_ARG (duration); ESP_ERR_INVALID_STATE
- *         (refused: flash journal, a running session, safe mode).
+ *         (refused: flash journal, a running session, the live view's
+ *         satellite-in-view output, safe mode).
  */
 esp_err_t station_maintenance_start(uint32_t duration_s, station_maint_why_t *why);
 

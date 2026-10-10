@@ -110,6 +110,7 @@ static void sky_receiver_changed(stn_t *s)
         return;
     }
     s->sky_on = false;
+    s->sky_unsure = false;
     s->sky_off_tries = 0;
     s->sky_retry_ms = STN_NEVER;
     if (s->live_open && s->sky_want) {
@@ -463,16 +464,25 @@ static void judge_window(stn_t *s, const stn_in_t *in)
 static bool sky_job(stn_t *s, const stn_in_t *in, stn_job_t *out)
 {
     if (in->profile_sky) {
-        return false;   /* the profile sends it permanently: never toggled here */
+        /* The profile sends it permanently: never toggled here, and what we
+         * may have turned on is the profile's output now. */
+        s->sky_on = false;
+        s->sky_unsure = false;
+        s->sky_off_tries = 0;
+        s->sky_retry_ms = STN_NEVER;
+        return false;
     }
     bool want = s->live_open && s->sky_want;
     bool on;
-    if (want && !s->sky_on) {
+    if (want && (!s->sky_on || s->sky_unsure)) {
         if (!in->autocfg || !s->identity_ok || !s->supported) {
             return false;   /* the user configures the receiver, or not a model we configure (status says why) */
         }
         on = true;
     } else if (!want && s->sky_on) {
+        if (s->sky_unsure && s->live_open) {
+            return false;   /* "on" got no answer: it is turned off when the window closes */
+        }
         if (s->sky_retry_ms != STN_NEVER && in->now_ms < s->sky_retry_ms) {
             return false;
         }
@@ -644,6 +654,7 @@ static void live_tick(stn_t *s, const stn_in_t *in)
     if (flash_state(s)) {
         live_close(s, now, STN_LIVE_END_FLASH);
         s->sky_on = false;   /* the flash restarts the receiver */
+        s->sky_unsure = false;
         return;
     }
     if (!s->live_open) {
@@ -966,13 +977,16 @@ static void done_sky(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     note(s, on ? STN_NOTE_SKY_ON : STN_NOTE_SKY_OFF, r->lease_ms, (int32_t)r->err);
     if (r->err == STN_OK) {
         s->sky_on = on;
+        s->sky_unsure = false;
         s->sky_off_tries = 0;
         s->sky_retry_ms = STN_NEVER;
         return;
     }
     if (on) {
         /* Not on: the window drops its wish until the user starts it again.
-         * Without an answer it may have taken: turned off at the end. */
+         * Without an answer it may have taken: it counts as on, unconfirmed,
+         * and is turned off when the window closes (not at once: that would
+         * hold RTCM back a second time right away). */
         s->sky_want = false;
         switch (r->err) {
         case STN_E_FAIL:
@@ -981,6 +995,7 @@ static void done_sky(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         case STN_E_TIMEOUT:
             s->sky_why = STN_SKY_WHY_NO_ANSWER;
             s->sky_on = true;
+            s->sky_unsure = true;
             break;
         default:
             s->sky_why = STN_SKY_WHY_BUSY;   /* nothing was sent */
@@ -995,6 +1010,7 @@ static void done_sky(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     if (++s->sky_off_tries >= STN_SKY_OFF_TRIES) {
         note(s, STN_NOTE_SKY_LEFT_ON, 0, 0);
         s->sky_on = false;   /* given up: it ends with the receiver's next restart */
+        s->sky_unsure = false;
         s->sky_off_tries = 0;
         s->sky_retry_ms = STN_NEVER;
         return;
@@ -1198,6 +1214,20 @@ int stn_maint_enter(stn_t *s, uint32_t dur_s, bool lease_held, int64_t now_ms)
     if (lease_held || s->job_busy || s->state == STN_CONFIGURING || s->state == STN_RECOVERING) {
         return STN_MAINT_SESSION;
     }
+    if (s->sky_on && s->state != STN_DETECTING && s->state != STN_NO_RECEIVER) {
+        /* The live view's satellite-in-view output may be on (unsaved). In
+         * maintenance nothing would turn it off, and a save made through the
+         * receiver's other port would keep it for good: it goes off first
+         * (at the next free moment; the window stays open without it), and
+         * the user offers maintenance again. */
+        if (s->live_open && s->sky_want) {
+            s->sky_want = false;
+            s->sky_why = STN_SKY_WHY_MAINTENANCE;
+        }
+        s->sky_unsure = false;          /* off now, not only when the window closes */
+        s->sky_retry_ms = STN_NEVER;    /* the user waits for it */
+        return STN_MAINT_SKY_OUTPUT;
+    }
     s->maint = true;
     s->maint_start_ms = now_ms;
     s->maint_until_ms = now_ms + (int64_t)dur_s * 1000;
@@ -1244,12 +1274,11 @@ uint32_t stn_maint_left_s(const stn_t *s, int64_t now_ms)
 
 #define MAINT_RTC_MAGIC 0x544E4D52u   /* "RMNT" */
 
-/* CRC-32 (reflected 0xEDB88320) of the record's words before the CRC. */
-static uint32_t rtc_crc(const stn_maint_rtc_t *r)
+/* CRC-32 (reflected 0xEDB88320) of n words, low byte first. */
+static uint32_t crc_words(const uint32_t *w, size_t n)
 {
-    const uint32_t w[4] = { r->magic, r->stamp, r->left_s, r->spent_s };
     uint32_t crc = 0xFFFFFFFFu;
-    for (unsigned i = 0; i < 4; i++) {
+    for (size_t i = 0; i < n; i++) {
         for (unsigned k = 0; k < 4; k++) {
             crc ^= (w[i] >> (8u * k)) & 0xFFu;
             for (int b = 0; b < 8; b++) {
@@ -1258,6 +1287,13 @@ static uint32_t rtc_crc(const stn_maint_rtc_t *r)
         }
     }
     return ~crc;
+}
+
+/* The record's words before the CRC. */
+static uint32_t rtc_crc(const stn_maint_rtc_t *r)
+{
+    const uint32_t w[4] = { r->magic, r->stamp, r->left_s, r->spent_s };
+    return crc_words(w, 4);
 }
 
 void stn_maint_rtc_write(stn_maint_rtc_t *r, uint32_t stamp, uint32_t left_s, uint32_t spent_s)
@@ -1283,6 +1319,43 @@ bool stn_maint_rtc_read(const stn_maint_rtc_t *r, uint32_t *stamp, uint32_t *lef
     *left_s = r->left_s;
     *spent_s = r->spent_s;
     return true;
+}
+
+#define SKY_RTC_MAGIC 0x594B5352u   /* "RSKY" */
+
+static uint32_t sky_rtc_crc(const stn_sky_rtc_t *r)
+{
+    const uint32_t w[2] = { r->magic, r->stamp };
+    return crc_words(w, 2);
+}
+
+void stn_sky_rtc_write(stn_sky_rtc_t *r, uint32_t stamp, bool on)
+{
+    if (!on) {
+        memset(r, 0, sizeof(*r));
+        return;
+    }
+    r->magic = SKY_RTC_MAGIC;
+    r->stamp = stamp;
+    r->crc = sky_rtc_crc(r);
+}
+
+bool stn_sky_rtc_read(const stn_sky_rtc_t *r, uint32_t *stamp)
+{
+    if (r->magic != SKY_RTC_MAGIC || r->crc != sky_rtc_crc(r)) {
+        return false;
+    }
+    *stamp = r->stamp;
+    return true;
+}
+
+void stn_sky_restore(stn_t *s)
+{
+    /* No window: sky_job turns it off once the station streams. */
+    s->sky_on = true;
+    s->sky_unsure = false;
+    s->sky_off_tries = 0;
+    s->sky_retry_ms = STN_NEVER;
 }
 
 /* ---- live view ----------------------------------------------------------------- */
@@ -1377,10 +1450,11 @@ void stn_live_status(const stn_t *s, const stn_in_t *in, stn_live_status_t *out)
         out->sky = STN_SKY_ON_PROFILE;
     } else if (!s->live_open) {
         out->sky = s->sky_on ? STN_SKY_STOPPING : STN_SKY_OFF;
-    } else if (s->sky_on && s->sky_want) {
+    } else if (s->sky_on && s->sky_want && !s->sky_unsure) {
         out->sky = STN_SKY_ON;
     } else if (!s->sky_want) {
-        out->sky = s->sky_on ? STN_SKY_STOPPING : STN_SKY_BLOCKED;
+        /* Unconfirmed (no answer to "on"): left until the window closes. */
+        out->sky = (s->sky_on && !s->sky_unsure) ? STN_SKY_STOPPING : STN_SKY_BLOCKED;
         out->why = s->sky_why;
     } else {
         stn_sky_why_t why = sky_pending_why(s, in);

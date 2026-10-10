@@ -791,6 +791,26 @@ static void unsupported(session_t *s, const char *model)
     fail(s, "", why);
 }
 
+/* A restart banner since banners0 (the start of the configuring steps): the
+ * receiver came back with its saved configuration, so whatever was sent
+ * unsaved (base mode, antenna, outputs) is gone and a save now would store
+ * the old base mode with our outputs. The session fails; after the B1C/B2a
+ * command (b1c_cmd set) with that command and reason, as its outcome shows. */
+static bool restarted_since(session_t *s, uint64_t banners0, const char *b1c_cmd)
+{
+    if (banner_count(s->ex) == banners0) {
+        return false;
+    }
+    if (b1c_cmd[0] != '\0') {
+        s->r->b1cb2a_ok = false;
+        copy_str(s->r->b1cb2a_reply, sizeof(s->r->b1cb2a_reply), "receiver restarted");
+        fail(s, b1c_cmd, "receiver restarted after RTCMB1CB2A");
+    } else {
+        fail(s, "", "receiver restarted during the session");
+    }
+    return true;
+}
+
 static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_versiona_t *identity, bool queried)
 {
     um98x_exec_t *ex = s->ex;
@@ -833,6 +853,14 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
         um98x_plan_build(s->p, &s->rb, pt->get_baud(pt->ctx), force_mode, &plan);
     }
 
+    /* No restart may come between here and the SAVECONFIG ack (see
+     * restarted_since). Whether the B1C/B2a command restarts the receiver is
+     * not known (PROVISIONAL, to be confirmed on hardware); its ack may come
+     * before the banner ("OK, then a receiver reset"), so the banner count
+     * is compared again before and after the save. */
+    const uint64_t plan_banners = banner_count(ex);
+    char b1c_cmd[UM98X_CMD_MAX] = "";   /* the B1C/B2a command once sent */
+
     for (size_t i = 0; i < plan.count; i++) {
         const um98x_step_t *st = &plan.step[i];
         char cmd[UM98X_CMD_MAX];
@@ -859,7 +887,15 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
             s->r->mode_ack_ms = txn_done_ms(ex);
             break;
         case UM98X_STEP_SAVE:
+            if (restarted_since(s, plan_banners, b1c_cmd)) {
+                return UM98X_E_FAILED;   /* nothing saved: the rollback brings back the saved state */
+            }
             if (step(s, UM98X_TXN_COMMAND, cmd, false, true, NULL) != UM98X_OK) {
+                return UM98X_E_FAILED;
+            }
+            if (restarted_since(s, plan_banners, b1c_cmd)) {
+                /* The banner came while SAVECONFIG was in flight: what it
+                 * stored may be the restarted state. Not counted as applied. */
                 return UM98X_E_FAILED;
             }
             s->r->saved = true;
@@ -874,11 +910,12 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
             break;
         }
         case UM98X_STEP_B1CB2A: {
-            /* Not fatal either. Whether it restarts the receiver is not
-             * known (PROVISIONAL, to be confirmed on hardware): a restart
-             * banner while it is in flight ends the session as failed
-             * (rollback as for any failure). */
+            /* Not fatal either. A restart banner while it is in flight, or
+             * after its ack until SAVECONFIG is acknowledged (the check
+             * around the save), ends the session as failed (rollback as for
+             * any failure). */
             um98x_txn_status_t tst;
+            copy_str(b1c_cmd, sizeof(b1c_cmd), cmd);
             (void)step(s, UM98X_TXN_COMMAND, cmd, true, false, &tst);
             s->r->b1cb2a_sent = true;
             s->r->b1cb2a_ok = (tst == UM98X_TXN_OK);
@@ -1036,7 +1073,10 @@ um98x_res_t um98x_exec_sat_view(um98x_exec_t *ex, bool on, uint16_t period_s, ch
         }
         return UM98X_E_LINK;
     }
-    um98x_txn_status_t st = um98x_exec_txn(ex, UM98X_TXN_COMMAND, cmd, NULL);
+    /* Fewer sends than a configuring step: the lease holds RTCM back, and
+     * one toggle without an answer must stay under a caster's stall limit. */
+    um98x_txn_opts_t o = { .max_sends = UM98X_SAT_VIEW_SENDS };
+    um98x_txn_status_t st = um98x_exec_txn(ex, UM98X_TXN_COMMAND, cmd, &o);
     txn_reason(ex, st, reason, cap);
     return um98x_res_from_txn(st);
 }

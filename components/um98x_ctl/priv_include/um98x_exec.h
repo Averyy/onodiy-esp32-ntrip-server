@@ -82,7 +82,9 @@
  * restarts: listen until its banner (at most 15 s), then poll the version.
  *
  * Satellite-in-view output (um98x_exec_sat_view, the live view): one
- * command with normal acknowledgement handling, never saved.
+ * command with normal acknowledgement handling but at most
+ * UM98X_SAT_VIEW_SENDS sends (about 7 s without an answer, under a caster's
+ * 10 s stall limit), never saved.
  *
  * Status: timings and texts PROVISIONAL, to be confirmed on hardware.
  */
@@ -110,6 +112,7 @@ extern "C" {
 #define UM98X_RESTART_BANNER_MS       15000      /**< signal group: wait for the restart banner */
 #define UM98X_RESTART_LOST_MS         20000      /**< signal group: nothing within this of the ack -> detection */
 #define UM98X_BAUD_SETTLE_MS          200        /**< after CONFIG COM1 <new>, before the host switches */
+#define UM98X_SAT_VIEW_SENDS          2          /**< satellite-in-view toggle: sends (each waits UM98X_ACK_TIMEOUT_MS) */
 #define UM98X_BAUD_VERIFY_DELAY_MS    100        /**< after the host switch, before the version query */
 #define UM98X_BAUD_VERIFY_TRIES       2
 #define UM98X_BAUD_ATTEMPTS           2          /**< CONFIG COM1 <new> sends while the receiver still answers at the old baud */

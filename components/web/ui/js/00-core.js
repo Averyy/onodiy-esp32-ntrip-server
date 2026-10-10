@@ -70,7 +70,8 @@ function mount(el, ...kids) {
 /**
  * Make el's children match `kids` (built fresh with h()) while keeping the
  * nodes already there wherever the same tag sits at the same place: only
- * text and attributes that changed are written. Keyboard focus, a text
+ * text and attributes that changed are written (inline style property by
+ * property, see patchStyle). Keyboard focus, a text
  * selection and a screen reader's place survive a refresh this way, which
  * mount() (new nodes every time) destroys. Elements that carry a listener
  * are always taken fresh, so no handler with stale data survives. For views
@@ -81,6 +82,25 @@ function patch(el, ...kids) {
   return el;
 }
 
+/*
+ * Inline style through CSSOM only: the Content-Security-Policy (style-src
+ * 'self', no 'unsafe-inline') blocks a style attribute written with
+ * setAttribute, but allows property writes, which is how h() sets it.
+ */
+function patchStyle(a, b) {
+  const as = a.style, bs = b.style;
+  if (!as || !bs) return;
+  for (let i = as.length - 1; i >= 0; i--) {
+    const p = as[i];
+    if (!bs.getPropertyValue(p)) as.removeProperty(p);
+  }
+  for (let i = 0; i < bs.length; i++) {
+    const p = bs[i];
+    const v = bs.getPropertyValue(p), pr = bs.getPropertyPriority(p);
+    if (as.getPropertyValue(p) !== v || as.getPropertyPriority(p) !== pr) as.setProperty(p, v, pr);
+  }
+}
+
 function patchKids(cur, next) {
   let a = cur.firstChild;
   let b = next.firstChild;
@@ -89,8 +109,13 @@ function patchKids(cur, next) {
     if (a && a.nodeType === b.nodeType && a.nodeName === b.nodeName &&
         (a.nodeType !== 1 || (!a[HAS_ON] && !b[HAS_ON] && a.namespaceURI === b.namespaceURI))) {
       if (a.nodeType === 1) {
-        for (const at of Array.from(a.attributes)) if (!b.hasAttribute(at.name)) a.removeAttribute(at.name);
-        for (const at of Array.from(b.attributes)) if (a.getAttribute(at.name) !== at.value) a.setAttribute(at.name, at.value);
+        for (const at of Array.from(a.attributes)) {
+          if (at.name !== 'style' && !b.hasAttribute(at.name)) a.removeAttribute(at.name);
+        }
+        for (const at of Array.from(b.attributes)) {
+          if (at.name !== 'style' && a.getAttribute(at.name) !== at.value) a.setAttribute(at.name, at.value);
+        }
+        patchStyle(a, b);
         patchKids(a, b);
       } else if (a.nodeValue !== b.nodeValue) {
         a.nodeValue = b.nodeValue;
@@ -548,6 +573,10 @@ function errText(e) {
   if (e.code === 'caster_policy' && POLICY[e.body.reason]) t = POLICY[e.body.reason];
   if (e.code === 'busy' && e.body.reason === 'receiver_session') {
     t = 'The station is working with the receiver right now (configuring or checking it). Offer maintenance again when that ends.';
+  }
+  if (e.code === 'busy' && e.body.reason === 'live_view_output') {
+    t = 'The live view has the receiver\'s satellite positions turned on. The station turns them off first (the live view stays open ' +
+      'without them): start maintenance again in a few seconds.';
   }
   if (e.code === 'invalid_field' && e.field) t += ': ' + e.field;
   if (e.code === 'reboot_inhibited' && e.by) t += ' (' + e.by + ')';

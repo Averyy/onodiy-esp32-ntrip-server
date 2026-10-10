@@ -231,7 +231,7 @@ function availabilityTab(box) {
     const pi = prot ? slots.indexOf(prot) : -1;
     const p = av.protected || {};
     const day = av.today || {};
-    const hist = av.history || [];
+    const days = av.history || [];
     const sod = av.utc_second_of_day;
     const dayRows = slots.map((s, i) => [s.name || 'Slot ' + (s.slot + 1), fmt.dur((day.down_s || [])[i]), fmt.dur((day.planned_s || [])[i]),
       fmt.num((day.reconnects || [])[i])]);
@@ -254,8 +254,8 @@ function availabilityTab(box) {
       h('section', { class: 'card' }, h('h2', null, 'Casters today'),
         slots.length ? table(['Caster', 'Offline', 'Planned', 'Reconnects'], dayRows, { num: [1, 2, 3] }) : h('p', { class: 'muted' }, 'No casters.')),
       h('section', { class: 'card wide' }, h('h2', null, 'Last 30 days'),
-        hist.length ? table(['Day (UTC)', prot ? 'Onocoy offline' : 'Offline (slot 1)', 'Planned', 'Reconnects', 'Powered off'],
-          hist.map(d => {
+        days.length ? table(['Day (UTC)', prot ? 'Onocoy offline' : 'Offline (slot 1)', 'Planned', 'Reconnects', 'Powered off'],
+          days.map(d => {
             const i = pi >= 0 ? pi : 0;
             const down = (d.down_s || [])[i];
             const over = prot && down > 473;

@@ -204,6 +204,9 @@ TEST_CASE("maintenance and live view refusals map to the contract's errors", "[w
     TEST_ASSERT_NULL(reason);
     TEST_ASSERT_EQUAL(WEB_ERR_BUSY, web_maint_refusal(STATION_MAINT_REFUSED_SESSION, false, &field, &reason));
     TEST_ASSERT_EQUAL_STRING("receiver_session", reason);
+    TEST_ASSERT_EQUAL(WEB_ERR_BUSY, web_maint_refusal(STATION_MAINT_REFUSED_SKY_OUTPUT, false, &field, &reason));
+    TEST_ASSERT_EQUAL_STRING("live_view_output", reason);
+    TEST_ASSERT_NULL(field);
     TEST_ASSERT_EQUAL(WEB_ERR_INVALID_FIELD, web_maint_refusal(STATION_MAINT_REFUSED_DURATION, false, &field, &reason));
     TEST_ASSERT_EQUAL_STRING("duration_s", field);
     TEST_ASSERT_NULL(reason);

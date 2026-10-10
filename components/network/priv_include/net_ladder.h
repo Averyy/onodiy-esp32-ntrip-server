@@ -60,10 +60,20 @@
  * and the record carries AP_OVERRIDDEN.
  * After the reboot rung (done, skipped or withheld) the ladder holds for
  * NET_LADDER_HOLD_S and then starts a new pass at the first rung, so a
- * persistent fault is retried without a reboot loop.
+ * persistent fault is retried without a reboot loop. With S as the only
+ * trigger at the end of a hold, a fresh probe comes first: the internet
+ * answering means the slot's fault is remote (a host name that does not
+ * resolve, a host that drops connects), so no new pass starts (its rungs
+ * would only be skipped and journalled again); the ladder holds again and
+ * looks again after the next hold.
  * The ladder resets after NET_LADDER_HEALTHY_S without the condition; a
  * shorter healthy spell keeps the pass clock running, so a flapping caster
- * connection still escalates.
+ * connection still escalates. For an episode that A or S started or kept
+ * alive, time without a trigger counts as healthy only with an IP address
+ * and, after S, with no slot in an unreached run: the ladder's own reconnect
+ * clears A and S for longer than the healthy time (re-association, then the
+ * trigger thresholds again), which would otherwise end every episode at its
+ * first rung.
  *
  * Timings are PROVISIONAL, to be confirmed on hardware.
  */
@@ -154,14 +164,16 @@ typedef struct {
     uint32_t probe_asked_s;
     bool ap_held;             /**< AP clients withheld a rung in this episode */
     uint32_t ap_held_since_s; /**< ... the first time */
+    uint8_t seen;             /**< NET_TRIG_* that held at some point of this episode */
 } net_ladder_t;
 
 typedef struct {
     bool caster_down;         /**< protected caster configured and not streaming */
     bool rtcm_healthy;        /**< the GNSS path delivers RTCM */
     uint32_t assoc_no_ip_s;   /**< associated without an IP for this long (0 = not associated, or has an IP) */
-    uint32_t unreached_s;     /**< longest run of an enabled slot's failures that did not reach its caster */
+    uint32_t unreached_s;     /**< longest run of an enabled slot's failures that did not reach its caster (0 = none in a run) */
     bool sta_configured;      /**< station credentials present */
+    bool has_ip;              /**< the station has an IP address (an A or S episode is healthy only with one) */
     bool probe_valid;         /**< probe/probe_at_s hold a finished probe */
     net_probe_t probe;
     uint32_t probe_at_s;      /**< when that probe finished */

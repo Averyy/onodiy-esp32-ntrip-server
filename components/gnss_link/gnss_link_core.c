@@ -33,6 +33,11 @@ uint32_t gnss_link_core_reopen_delay_ms(uint32_t failures)
     return failures < sizeof(k) / sizeof(k[0]) ? k[failures] : 60000u;
 }
 
+uint32_t gnss_link_core_reopen_next_ms(uint32_t failed_before)
+{
+    return gnss_link_core_reopen_delay_ms(failed_before < UINT32_MAX ? failed_before + 1u : UINT32_MAX);
+}
+
 bool gnss_link_core_reopen_log_due(bool logged, int64_t last_log_us, int64_t now_us)
 {
     return !logged || now_us - last_log_us >= (int64_t)GNSS_LINK_REOPEN_LOG_MS * 1000;

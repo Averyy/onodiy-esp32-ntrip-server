@@ -31,7 +31,10 @@
  *    thing at the next boot, dropped with
  *    network_discard_pending_credentials()). So a typo never strands a
  *    remote station. Without previous credentials (first setup) the new ones
- *    are stored as the station's at once.
+ *    are stored as the station's at once. A change made while a trial runs
+ *    replaces that trial: an IP for the earlier pair that arrives before the
+ *    change is applied confirms nothing, and a pending pair is cleared only
+ *    when it is the pair confirmed.
  *  - Settings unavailable (degraded boot, NVS unreadable): no AP comes up on
  *    its own. Only a BOOT-button long press starts the recovery AP, so an
  *    unconfigured-looking station on a roof is never open to passers-by.
@@ -89,7 +92,13 @@
  * episode; after that they run anyway (reason AP_OVERRIDDEN). The
  * reconnect, renew and restart rungs run regardless of the journal, so the
  * user can still reach the UI. After the reboot rung the ladder holds 10
- * min, then starts a new pass; it resets after 60 s without a trigger.
+ * min, then starts a new pass; with S as the only trigger and the internet
+ * answering a fresh probe (a slot's remote fault: a host name that does not
+ * resolve, a host that drops connects) it holds again instead, without
+ * journalling another pass. It resets after 60 s without a trigger; for an
+ * episode A or S started or kept alive, only with an IP and, after S, no
+ * slot in an unreached run (the ladder's own reconnect clears A and S for
+ * longer than that, which would end every episode at its first rung).
  * Ladder timings are PROVISIONAL, to be confirmed on hardware.
  * Journal: DIAG_EV_LADDER_STEP with a = 1 and b = (reason << 16) |
  * (outcome << 8) | code. Codes: 0 pass started (reason = the triggers

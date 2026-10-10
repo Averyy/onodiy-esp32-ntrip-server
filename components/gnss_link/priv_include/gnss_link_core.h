@@ -180,6 +180,14 @@ void gnss_link_core_on_open_failed(gnss_link_core_t *c);
 uint32_t gnss_link_core_reopen_delay_ms(uint32_t failures);
 
 /**
+ * Delay after a reopen attempt that fails, with `failed_before` failed
+ * reopen attempts before it: gnss_link_core_reopen_delay_ms(failed_before + 1).
+ * From the closing failure the attempts so run 1 s, 6 s, 36 s, 96 s, ...
+ * later (gaps of 1, 5, 30, then 60 s).
+ */
+uint32_t gnss_link_core_reopen_next_ms(uint32_t failed_before);
+
+/**
  * Should this failed reopen be logged? The first one always
  * (`logged` false), then one at most every GNSS_LINK_REOPEN_LOG_MS after
  * `last_log_us`.

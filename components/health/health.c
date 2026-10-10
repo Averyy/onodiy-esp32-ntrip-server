@@ -158,6 +158,8 @@ static uint8_t s_mode = HL_MODE_FULL;   /* recovery mode in effect */
 static int s_mode_bad = -1;             /* last out-of-range stored value logged */
 static hm_power_t s_power;
 static uint32_t s_jcursor;              /* journal records read so far (seq) */
+static bool s_power_caught_up;          /* every record written before the reads began was fed once */
+static bool s_power_alert;              /* last judgement (kept until the reader caught up) */
 static diag_journal_entry_t s_jbuf[JOURNAL_CHUNK];
 
 /* Large snapshots, kept off the task stack. */
@@ -494,10 +496,26 @@ static const char *mode_name(uint8_t m)
     return m < sizeof(k) / sizeof(k[0]) ? k[m] : "?";
 }
 
-/* The journal's boot records, read a bounded number per tick (the whole
- * journal over the first ticks, then what is new). */
+/*
+ * The journal's boot records, read a bounded number per tick (the whole
+ * journal over the first ticks, then what is new). Until the reader has
+ * caught up (a read came back short while nothing was waiting in the
+ * journal's queue, so this boot's own boot record, appended before the
+ * health task started, has been fed), boots whose dating records were not
+ * read yet would count as "now": the alert keeps its last value (off at
+ * start) meanwhile. After that the running boot is dated from the trusted
+ * clock itself, so a boot that writes no dated record still ends the alert
+ * 24 h after it started.
+ */
 static bool power_tick(void)
 {
+    diag_journal_info_t ji;
+    bool flushed = false;
+    if (!s_power_caught_up) {
+        diag_journal_info(&ji);
+        flushed = ji.available && ji.queued == 0;
+    }
+    bool short_read = false;
     for (int i = 0; i < JOURNAL_READS_PER_TICK; i++) {
         size_t n = JOURNAL_CHUNK;
         if (diag_journal_read(&s_jcursor, s_jbuf, &n) != ESP_OK) {
@@ -507,10 +525,20 @@ static bool power_tick(void)
             hm_power_feed(&s_power, s_jbuf[k].kind, s_jbuf[k].a, s_jbuf[k].unix_s, s_jbuf[k].uptime_s);
         }
         if (n < JOURNAL_CHUNK) {
+            short_read = true;
             break;
         }
     }
-    return hm_power_alert(&s_power, diag_utc_now());
+    if (!s_power_caught_up) {
+        if (!(flushed && short_read)) {
+            return s_power_alert;
+        }
+        s_power_caught_up = true;
+    }
+    int64_t utc = diag_utc_now();
+    hm_power_running(&s_power, utc, (uint32_t)(esp_timer_get_time() / 1000000));
+    s_power_alert = hm_power_alert(&s_power, utc);
+    return s_power_alert;
 }
 
 static void log_changes(const health_status_t *o)
@@ -721,6 +749,8 @@ esp_err_t health_init(void)
     hm_deb_init(&s_deb_casters);
     hm_button_init(&s_button);
     hm_power_init(&s_power);
+    s_power_caught_up = false;
+    s_power_alert = false;
     s_mode = read_recovery_mode();
 
     esp_err_t err = esp_event_handler_register(STATION_EVENT, STATION_EVENT_STATE_CHANGED, on_station_event, NULL);

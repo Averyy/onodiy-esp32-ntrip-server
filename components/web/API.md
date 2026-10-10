@@ -74,7 +74,7 @@ offending request field (`invalid_field`), `retry_in_s` comes with
 `rate_limited` and `app_trial`, `by` with `reboot_inhibited` (the holder's
 label, e.g. `"receiver flash"`). Other fields may appear per code (listed
 with the endpoint): `reason` with `caster_policy` and with the `busy` of a
-refused receiver maintenance (`receiver_session`).
+refused receiver maintenance (`receiver_session`, `live_view_output`).
 
 | HTTP | Codes |
 |---|---|
@@ -712,6 +712,11 @@ most `max_left_s` left). `duration_s` one of `choices_s` (900, 1800, 3600,
 `400 invalid_field` (`duration_s`), `409 journal_open` (a receiver update
 session), `409 busy` with `"reason": "receiver_session"` (a receiver session
 or job runs, e.g. a configuration: offer it again when it ends),
+`409 busy` with `"reason": "live_view_output"` (the live view's
+satellite-in-view output may be on: in maintenance nothing would turn it
+off, and a save made through the receiver's other port would keep it for
+good, so the station turns it off first; an open view stays open without
+it, `sky_why: "maintenance"`; offer it again in a few seconds),
 `409 safe_mode`.
 
 #### `DELETE /api/gnss/maintenance` (adm)
@@ -736,9 +741,14 @@ casters pause for it; journalled with its length), only while the station
 streams with nothing else to do: never while it configures, detects,
 recovers or flashes, never in maintenance, never with `autocfg` off, never
 for a model the station does not configure, and never when the profile's
-`sat_view_output` sends it permanently. After a receiver reconfiguration,
-reset or restart the output is off (`sky_why: "reconfigured"`); opening or
-extending the view turns it on again. Everything else comes from the RTCM
+`sat_view_output` sends it permanently. A toggle sends its command at most
+twice (about 7 s without an answer). An "on" without an answer may have
+taken: `sky` is `blocked` with `sky_why: "no_answer"`, and it is turned off
+when the window closes (extending sends it again). An ESP32-only reset
+while it may be on (reboot, app update, crash) is remembered in RTC memory:
+the next boot turns it off once the station streams. After a receiver
+reconfiguration, reset or restart the output is off (`sky_why:
+"reconfigured"`); opening or extending the view turns it on again. Everything else comes from the RTCM
 stream without any receiver traffic. Whether toggling the output
 interrupts RTCM is PROVISIONAL, to be confirmed on hardware.
 

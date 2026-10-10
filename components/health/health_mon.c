@@ -356,6 +356,15 @@ void hm_power_feed(hm_power_t *p, uint16_t kind, int32_t a, int64_t unix_s, uint
     }
 }
 
+void hm_power_running(hm_power_t *p, int64_t now_utc, uint32_t uptime_s)
+{
+    if (now_utc <= 0) {
+        return;
+    }
+    /* A dated point of the running boot, as any of its records would give. */
+    hm_power_feed(p, 0, 0, now_utc, uptime_s);
+}
+
 bool hm_power_alert(const hm_power_t *p, int64_t now_utc)
 {
     if (p->n == 0) {

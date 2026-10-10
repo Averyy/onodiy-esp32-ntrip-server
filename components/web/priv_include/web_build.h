@@ -175,8 +175,9 @@ void web_build_flash(wj_t *w, const station_status_t *st, const web_flash_ctx_t 
 /**
  * Error of a refused POST /api/gnss/maintenance (station_maint_why_t): a
  * receiver update session (journal_open), a running receiver session or job
- * (busy, *reason "receiver_session": offer it again when that ends), a
- * duration not offered (invalid_field, *field "duration_s"), the station
+ * (busy, *reason "receiver_session": offer it again when that ends), the
+ * live view's satellite-in-view output that goes off first (busy, *reason
+ * "live_view_output": offer it again in a few seconds), a duration not offered (invalid_field, *field "duration_s"), the station
  * not running (safe_mode in safe mode, else internal); "end now" without
  * the state (STATION_MAINT_NOT_ON): not_in_maintenance. *field and *reason
  * are NULL when the body carries none.

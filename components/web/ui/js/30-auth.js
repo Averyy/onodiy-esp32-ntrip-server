@@ -424,23 +424,48 @@ function startWizard(claim) {
       }
     }
 
+    /* The step is gone when its box left the page: a lost session (login
+     * screen, then a new wizard), "Skip the rest" while the first request
+     * was still out, or anything else that replaced the page. Polling (which
+     * keeps the view from closing as idle) ends then. */
+    const gone = () => stopped || !box.isConnected;
+    let myStop = null;
+    const halt = () => {
+      stopped = true;
+      if (myStop) myStop();
+      if (stopCheck === myStop) stopCheck = null;
+    };
     (async () => {
       try {
-        render(await api('POST', '/api/gnss/live', {}));
+        const d = await api('POST', '/api/gnss/live', {});
+        if (gone()) {
+          stopped = true;
+          api('DELETE', '/api/gnss/live').catch(() => {});   /* nobody shows it: close it again */
+          return;
+        }
+        render(d);
         opened = true;
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) return;
+        if (gone()) return;
         patch(box, msg('warn', 'The live view could not be opened: ' + errText(e)),
           h('p', { class: 'muted small' }, 'You can check the reception later on the Signals page.'));
         cont.textContent = 'Continue';
         return;
       }
-      if (stopped) return;
-      stopCheck = poller(LIVE_POLL_MS, async () => {
-        if (stopped) return;
+      myStop = poller(LIVE_POLL_MS, async () => {
+        if (gone()) {
+          halt();
+          return;
+        }
         const d = await api('GET', '/api/gnss/live');
-        if (!stopped) render(d);
+        if (gone()) {
+          halt();
+          return;
+        }
+        render(d);
       }, true);
+      stopCheck = myStop;
     })();
   }
 
