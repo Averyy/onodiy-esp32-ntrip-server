@@ -29,6 +29,9 @@ menu "Station: GNSS link"
         int "RX task priority"
         range 5 22
         default 18
+        help
+            Must stay above every caster and web task, so a network stall
+            never starves the UART drain.
 
     config GNSS_LINK_RX_TASK_CORE
         int "RX task core (0/1)"
@@ -36,6 +39,15 @@ menu "Station: GNSS link"
         default 1
         help
             Wi-Fi runs on core 0; keeping the GNSS reader on core 1 isolates it
-            from radio bursts.
+            from radio bursts. The UART interrupt is allocated on the same core.
+
+    config GNSS_LINK_RX_TASK_STACK
+        int "RX task stack (bytes)"
+        range 3072 16384
+        default 4096
+        help
+            Static stack in internal RAM. The sinks (hub publish, MSM
+            inspection, reply matching) run on it. PROVISIONAL, to be
+            confirmed on hardware from the task's stack high-water mark.
 
 endmenu

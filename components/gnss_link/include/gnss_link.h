@@ -30,8 +30,14 @@
  *            there; the flasher matches the loader's text itself.
  *
  * A lease is required for COMMAND and RAW. Leases carry a generation number,
- * so a stale handle (after release or a forced reset) is rejected with
- * ESP_ERR_INVALID_STATE instead of touching the wire.
+ * so a stale handle (after release) is rejected with ESP_ERR_INVALID_STATE
+ * instead of touching the wire. The handle is a token, never dereferenced.
+ *
+ * Mode switches are synchronous with the RX task: acquire and release hand
+ * the request to the RX task, which applies it between two reads and
+ * acknowledges, so no byte is consumed by two readers and no RTCM frame is
+ * published after gnss_link_acquire() returns. Before gnss_link_start() (no
+ * RX task yet) they take effect in the caller.
  *
  * RX task loop: wait on the UART event queue (32 entries) for 20 ms, or 0 ms
  * when the previous drain pass hit its cap; handle the event, if any; drain
@@ -40,7 +46,8 @@
  * field); feed the task watchdog; repeat. Overflow and buffer-full events
  * never flush the driver or reset the event queue: they increment their
  * counter, reset the framer (the partial frame is counted as discarded) and
- * reading continues.
+ * reading continues. The RX task never logs and never touches flash; it
+ * only counts. The driver's interrupt is allocated on the RX task's core.
  *
  * Only gnss_link changes the UART RX-FIFO-full threshold, and only right
  * after a baud change (gnss_link_init, gnss_link_set_baud, gnss_link_restart).
@@ -64,7 +71,11 @@
  *
  * Counter units: events for the UART conditions (hw_fifo_overflows,
  * rx_buffer_full, line_errors; the bytes an overflow loses are unknown),
- * bytes for byte counters, frames for frame counters.
+ * bytes for byte counters, frames for frame counters. Input dropped on
+ * purpose (a lease release, gnss_link_resync, gnss_link_restart, the bytes
+ * that piled up before gnss_link_start) is read out and counted in
+ * flushed_bytes, so every byte that never reached the framer is counted
+ * somewhere.
  *
  * Time values are ages computed from 64-bit esp_timer timestamps, never
  * differences of wrapping millisecond counters.
@@ -80,6 +91,9 @@
  * link as OFF; everything else returns an error. gnss_link_init() may be
  * called twice (an early boot step can open the link before the normal init
  * runs); the second call returns ESP_OK.
+ *
+ * Lease and mode rules, routing, counters and the drain rule live in a pure
+ * core (gnss_link_core.c) that the host tests cover.
  *
  * Status: PROVISIONAL, to be confirmed on hardware: buffer sizes, RX task
  * timing, error counters, the RAW-mode contract, baud switching, break and
@@ -109,8 +123,12 @@ typedef enum {
 typedef struct gnss_link_lease *gnss_link_lease_t;
 
 /**
- * Where framed data goes. Called from the RX task: must not block for long
- * (copy and return). Any member may be NULL.
+ * Where framed data goes. Called from the RX task: must not block, allocate
+ * or log (copy and return). Any member may be NULL. From a sink only the
+ * getters of this header work (gnss_link_get_stats/_mode/_baud); everything
+ * else returns ESP_ERR_INVALID_STATE there, so a sink signals its own task
+ * instead of acting. `frame` and `line` are valid only during the call;
+ * `line` is not NUL-terminated.
  */
 typedef struct {
     void (*on_rtcm)(const uint8_t *frame, size_t len, uint16_t msg_type, void *ctx);
@@ -131,24 +149,37 @@ typedef struct {
     uint32_t hw_fifo_overflows;    /**< UART hardware FIFO overrun events (real loss, size unknown) */
     uint32_t rx_buffer_full;       /**< driver software buffer full events (back-pressure, no loss by itself) */
     uint32_t line_errors;          /**< framing/parity/break events */
-    uint64_t baud_switch_bytes;    /**< bytes discarded in the 20 ms after a baud change (expected) */
+    uint64_t baud_switch_bytes;    /**< bytes discarded in the 20 ms after a baud change or reopen (expected) */
     uint64_t rtcm_held;            /**< CRC-valid RTCM frames not published because a lease was held (expected) */
+    uint64_t flushed_bytes;        /**< input dropped on purpose: lease release, resync, restart, before start (expected) */
     uint32_t last_rx_age_ms;       /**< time since any byte arrived (UINT32_MAX = never) */
-    uint32_t last_rtcm_age_ms;     /**< time since the last valid RTCM frame */
+    uint32_t last_rtcm_age_ms;     /**< time since the last CRC-valid RTCM frame, published or held (UINT32_MAX = never) */
     gnss_framing_stats_t framing;
 } gnss_link_stats_t;
 
 /**
- * Install the UART driver (pins from board, baud from settings or Kconfig,
- * event queue of 32). ESP_ERR_INVALID_STATE unless board_is_valid(): a
- * rejected pin map never reaches the UART. A second call returns ESP_OK.
+ * Install the UART driver (pins from board, baud from gnss/baud if it is one
+ * of the receiver's rates, else CONFIG_GNSS_LINK_DEFAULT_BAUD; 8N1, no flow
+ * control, RX buffer CONFIG_GNSS_LINK_RX_BUF_SIZE, no TX buffer, event queue
+ * of 32, no pattern detection). The link is then open in STREAM mode, but
+ * nothing reads it until gnss_link_start() (or a RAW lease holder).
+ * ESP_ERR_INVALID_STATE unless board_is_valid(): a rejected pin map never
+ * reaches the UART. A second call returns ESP_OK.
  */
 esp_err_t gnss_link_init(void);
 
 /** Set the sinks. Call before gnss_link_start(); later calls replace them atomically. */
 esp_err_t gnss_link_set_sinks(const gnss_link_sinks_t *sinks);
 
-/** Start the RX task in STREAM mode. */
+/**
+ * Start the RX task (CONFIG_GNSS_LINK_RX_TASK_PRIO, pinned to
+ * CONFIG_GNSS_LINK_RX_TASK_CORE, internal-RAM stack). Without a lease it
+ * streams at once; what piled up since gnss_link_init() is dropped first
+ * (counted in flushed_bytes; the UART events of that time are not counted,
+ * since nobody was reading yet). With a RAW lease already held (the early
+ * boot step) it starts parked and the lease holder keeps the input. A second
+ * call returns ESP_OK.
+ */
 esp_err_t gnss_link_start(void);
 
 /** Current mode. */
@@ -161,17 +192,20 @@ gnss_link_mode_t gnss_link_get_mode(void);
  * supervisor is expected to call this; other components go through it.
  *
  * @param owner short label for logs/status (not copied: use a literal).
- * @return ESP_ERR_TIMEOUT if another lease is held, ESP_ERR_INVALID_ARG for
- *         mode STREAM/OFF.
+ * @return ESP_ERR_TIMEOUT if another lease is held (or a NULL-lease write
+ *         did not finish) within timeout_ms, ESP_ERR_INVALID_ARG for mode
+ *         STREAM/OFF or out == NULL, ESP_ERR_INVALID_STATE before
+ *         gnss_link_init().
  */
 esp_err_t gnss_link_acquire(gnss_link_mode_t mode, const char *owner, uint32_t timeout_ms,
                             gnss_link_lease_t *out);
 
 /**
  * Return to STREAM mode. After RAW, pending UART events are added to the
- * counters first; then stale input is flushed, the framer reset (sinks get
- * on_reset) and the RX task resubscribed to the task watchdog. The loader
- * prompt detector is disarmed.
+ * counters first; then stale input is flushed (counted in flushed_bytes),
+ * the framer reset (sinks get on_reset) and the RX task resubscribed to the
+ * task watchdog. The loader prompt detector is disarmed. The handle is stale
+ * afterwards. ESP_ERR_INVALID_STATE for a stale or unknown handle.
  */
 esp_err_t gnss_link_release(gnss_link_lease_t lease);
 
@@ -185,15 +219,21 @@ esp_err_t gnss_link_release(gnss_link_lease_t lease);
 esp_err_t gnss_link_set_prompt_detect(gnss_link_lease_t lease, bool armed);
 
 /**
- * Change the host UART baud rate (COMMAND or RAW lease required): discards
- * input for 20 ms (counted in baud_switch_bytes) and resets the framer.
- * PROVISIONAL, to be confirmed on hardware.
+ * Change the host UART baud rate (COMMAND or RAW lease required; one of
+ * 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, else
+ * ESP_ERR_INVALID_ARG). Waits for pending TX to leave, switches, discards
+ * input for 20 ms (counted in baud_switch_bytes) and resets the framer
+ * (sinks get on_reset; in RAW the framer is reset on release instead).
+ * Returns after the 20 ms, so every byte read afterwards arrived at the new
+ * rate. PROVISIONAL, to be confirmed on hardware.
  */
 esp_err_t gnss_link_set_baud(gnss_link_lease_t lease, uint32_t baud);
 
 /**
- * Hold the TX line in break for duration_ms (COMMAND or RAW lease required),
- * e.g. before a full baud rescan. PROVISIONAL, to be confirmed on hardware.
+ * Hold the TX line in break for duration_ms, 1..1000 (COMMAND or RAW lease
+ * required), e.g. before a full baud rescan. Waits for pending TX first;
+ * blocks for the duration (the caller feeds its own watchdog around it).
+ * PROVISIONAL, to be confirmed on hardware.
  */
 esp_err_t gnss_link_send_break(gnss_link_lease_t lease, uint32_t duration_ms);
 
@@ -202,17 +242,21 @@ esp_err_t gnss_link_send_break(gnss_link_lease_t lease, uint32_t duration_ms);
  * without reinstalling anything. With lease == NULL in STREAM mode (no lease
  * is taken, so no post-lease pause follows) or with the COMMAND lease. The
  * RX task does it between two reads, so no byte is read twice. Sinks get
- * on_reset; counters are kept. PROVISIONAL, to be confirmed on hardware.
+ * on_reset; counters are kept (the dropped bytes count in flushed_bytes).
+ * ESP_ERR_INVALID_STATE in any other mode/lease combination. PROVISIONAL, to
+ * be confirmed on hardware.
  */
 esp_err_t gnss_link_resync(gnss_link_lease_t lease);
 
 /**
  * Recovery: reinstall the UART driver at the stored baud (gnss/baud, else
  * CONFIG_GNSS_LINK_DEFAULT_BAUD), which may differ from the current one
- * after a scan or a failed baud change; flush input and reset the framer.
+ * after a scan or a failed baud change; flush input (flushed_bytes), discard
+ * the first 20 ms after the reopen (baud_switch_bytes) and reset the framer.
  * With lease == NULL in STREAM mode (the RX task reopens and keeps
- * streaming), or with the COMMAND lease. Counters are kept. PROVISIONAL, to
- * be confirmed on hardware.
+ * streaming), or with the COMMAND lease. Counters are kept. If the reinstall
+ * fails the link stays closed (reads and writes fail) until a later restart
+ * succeeds. PROVISIONAL, to be confirmed on hardware.
  */
 esp_err_t gnss_link_restart(gnss_link_lease_t lease);
 
@@ -227,15 +271,24 @@ uint32_t gnss_link_get_baud(void);
  * configuration, and the configuration dump CONFIG, goes through the station
  * supervisor with a COMMAND lease. This rule is by convention here (the
  * bytes are not inspected); um98x_ctl_command() enforces it.
- * Writers are serialised internally.
+ * Writers are serialised internally. Returns once the bytes have left the
+ * UART (TX done), so reply timeouts can be measured from the return.
+ *
+ * @return ESP_ERR_TIMEOUT if another writer held the line, or the bytes did
+ *         not leave, within timeout_ms; ESP_ERR_INVALID_STATE for a stale
+ *         lease or lease == NULL outside STREAM.
  */
 esp_err_t gnss_link_write(gnss_link_lease_t lease, const void *data, size_t len, uint32_t timeout_ms);
 
-/** RAW mode: read up to len bytes, waiting up to timeout_ms for the first. */
+/**
+ * RAW mode: read up to len bytes, waiting up to timeout_ms for the first,
+ * then taking whatever else is already buffered.
+ * @return ESP_OK with *out_len >= 1, or ESP_ERR_TIMEOUT with *out_len == 0.
+ */
 esp_err_t gnss_link_raw_read(gnss_link_lease_t lease, void *buf, size_t len, size_t *out_len,
                              uint32_t timeout_ms);
 
-/** RAW mode: discard everything buffered on input. */
+/** RAW mode: discard everything buffered on input (uart_flush_input; not counted). */
 esp_err_t gnss_link_raw_flush(gnss_link_lease_t lease);
 
 /** Snapshot of the counters. Works before gnss_link_init() (mode OFF, counters zero). */
