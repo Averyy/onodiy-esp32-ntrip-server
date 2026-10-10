@@ -130,6 +130,23 @@ typedef enum {
     LIFECYCLE_RESET_OTHER,
 } lifecycle_reset_class_t;
 
+/** How the previous session ended, as far as lifecycle's own record tells. */
+typedef enum {
+    LIFECYCLE_PREV_UNKNOWN = 0,   /**< no record of ours: power-on, brownout, reset pin, another image */
+    LIFECYCLE_PREV_PLANNED,       /**< a reboot of ours the user asked for (lifecycle_reboot_user_planned) */
+    LIFECYCLE_PREV_UNPLANNED,     /**< a crash, or a reboot of ours that was not planned */
+} lifecycle_prev_end_t;
+
+/**
+ * How the previous session ended, from this boot's reset class and the
+ * reason the previous boot recorded (lifecycle_boot_info_t): a crash, also
+ * one while a planned reboot was shutting down, is UNPLANNED; a reboot of
+ * ours (reset class PLANNED) is PLANNED or UNPLANNED by
+ * lifecycle_reboot_user_planned(); anything else is UNKNOWN (another
+ * component's own records decide). Pure.
+ */
+lifecycle_prev_end_t lifecycle_prev_session_end(lifecycle_reset_class_t cls, lifecycle_reboot_reason_t prev);
+
 /** This boot, as accounted by lifecycle_early_boot(). */
 typedef struct {
     esp_reset_reason_t reset_reason;           /**< raw IDF reason */

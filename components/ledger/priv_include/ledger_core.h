@@ -51,6 +51,15 @@
  *     expected slot's downtime from boot until that slot streams again, for
  *     at most the boot window (lc_set_boot_window) after boot. A slot that
  *     is up once is done: later outages count as unplanned again.
+ * The flag belongs to the one boot that follows the planned reboot: only a
+ * software restart ends that reboot (lc_restore with LC_RESET_SOFTWARE), and
+ * the snapshot of a restored ledger no longer carries it, so the wrapper
+ * stores that snapshot (and the stored today without the flag) right after
+ * restoring. A boot that crashes before its first store therefore does not
+ * hand the flag on: the gap after a crash, a watchdog or a reset pin
+ * (LC_RESET_OTHER) is never planned, whatever the books say, and neither is
+ * one lifecycle knows ended in a reboot that was not planned (a failed app
+ * trial, a ladder: lc_unplanned_boot), which no later call undoes.
  * A power cut is never planned: after one, neither the snapshot's flags nor
  * lifecycle's record make the gap or the boot window planned (planned
  * receiver work that the cut interrupted included).
@@ -74,7 +83,10 @@
  * The state that must outlive a reset is a snapshot (lc_snapshot_t): the
  * wrapper keeps one in RTC memory every second (software, panic and watchdog
  * resets) and stores today in NVS with the last-alive mark every
- * persist interval (power cuts). Blob codecs for NVS are below.
+ * persist interval and at every reboot (power cuts). Today is only ever
+ * stored together with the mark it runs up to (lc_persist_due), so a
+ * restore from NVS does not count the time the stored today covers a second
+ * time as gap. Blob codecs for NVS are below.
  */
 #pragma once
 
@@ -97,6 +109,13 @@ extern "C" {
 #define LC_GNSS_SKEW_MS      (10LL * 60000)   /* GNSS time taken within this of the running clock */
 #define LC_GNSS_BACK_MS      60000LL          /* ...or of the last-alive mark plus uptime: this much before */
 #define LC_GNSS_RESET_MS     (15LL * 60000)   /* ...to this much after (the reset itself) */
+
+/** How the previous session ended, as far as the reset itself tells (lc_restore). */
+typedef enum {
+    LC_RESET_SOFTWARE = 0,   /**< a software restart: how every reboot through lifecycle ends */
+    LC_RESET_POWER_CUT,      /**< power-on, brownout: nothing planned; the gap is power-off time too */
+    LC_RESET_OTHER,          /**< a crash, a watchdog, the reset pin: never a planned reboot */
+} lc_reset_t;
 
 /** Clock source; same values as ledger_clock_t. */
 typedef enum {
@@ -167,7 +186,9 @@ typedef struct {
     bool alive_valid;
     int64_t alive_ms;
     bool gap_power_off;
-    bool prev_planned;                  /**< its gap counts as planned */
+    bool prev_planned;                  /**< planned receiver work was going on at its end */
+    bool prev_reboot_planned;           /**< it ended in a reboot the user asked for */
+    bool prev_unplanned;                /**< it is known not to have (crash, reset pin, lifecycle's record) */
 
     /* persistence */
     bool today_dirty;
@@ -191,22 +212,36 @@ void lc_set_boot_window(lc_t *c, uint32_t window_ms);
 
 /**
  * Carry state over from the previous session (before any other call but
- * lc_init, lc_set_boot_window and lc_set_history). `power_cut`: the gap
- * since snap->alive_ms was a power cut (counted as power-off time too, and
- * never as planned). A snapshot that says the session ended in a planned
- * reboot starts the boot as lc_planned_boot() does.
+ * lc_init, lc_set_boot_window and lc_set_history). `reset`: how it ended.
+ * After a power cut the gap since snap->alive_ms is power-off time too and
+ * never planned. A snapshot that says the session ended in a planned reboot
+ * starts the boot as lc_planned_boot() does, after a software restart only:
+ * any other reset means a later boot ended (a crash before it stored its
+ * books), and the gap is not planned (lc_unplanned_boot). The restored
+ * today is stored again with the next mark (it may be newer than the
+ * stored one: an RTC copy).
  */
-void lc_restore(lc_t *c, const lc_snapshot_t *snap, bool power_cut);
+void lc_restore(lc_t *c, const lc_snapshot_t *snap, lc_reset_t reset);
 
 /**
  * The previous session ended in a reboot the user asked for (lifecycle's
  * record of it, for when the snapshot could not say so): its gap counts as
  * planned, and so does each expected slot's downtime from boot until it
- * streams again, within the boot window. Ignored after a power cut. Call
- * right after lc_restore, before the first input; calling it again changes
- * nothing.
+ * streams again, within the boot window. Ignored after a power cut and
+ * after lc_unplanned_boot. Call right after lc_restore, before the first
+ * input; calling it again changes nothing.
  */
 void lc_planned_boot(lc_t *c);
+
+/**
+ * The previous session is known not to have ended in a reboot the user
+ * asked for (lifecycle's record: a crash, a failed app trial, a ladder):
+ * whatever the snapshot said, its gap and this boot's reconnects are not
+ * planned (planned receiver work at its end still makes the gap planned),
+ * and lc_planned_boot is ignored from here on. Call right after lc_restore,
+ * before the first input.
+ */
+void lc_unplanned_boot(lc_t *c);
 
 /**
  * A reboot starts now (a shutdown hook). Accrues up to now_ms; when
@@ -276,9 +311,14 @@ void lc_snapshot(const lc_t *c, lc_snapshot_t *out);
  * Time to store the last-alive mark (with a clock, every `interval_ms`, and
  * at once when a finished day moved into the history: the RTC copy holds
  * only today, so until the history is stored a reset would lose that day).
+ * `interval_ms` 0 stores now (a reboot); without a clock that is the mark
+ * the session was restored with (today has not grown since: this boot's
+ * time is pending, kept only in the RTC copy, and a restore from NVS counts
+ * it as part of the gap), and nothing at all without any mark.
  * On true, *alive_ms is the mark; *today / *hist say whether those records
  * changed since they were last stored (the flags are cleared: call
  * lc_mark_dirty if storing fails; a failed store waits for the interval).
+ * The caller stores today only together with this mark.
  */
 bool lc_persist_due(lc_t *c, uint32_t now_ms, uint32_t interval_ms, int64_t *alive_ms, bool *today, bool *hist);
 

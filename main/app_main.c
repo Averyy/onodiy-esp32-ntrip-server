@@ -75,8 +75,10 @@ typedef struct {
  * lifecycle (L1), so the wiring is here: its shutdown hook is registered
  * before any other (hooks run in registration order), so the books are
  * stored, and a reboot the user asked for starts counting as planned, before
- * the casters close; and a boot that lifecycle says follows such a reboot is
- * reported to it before the casters report their slots.
+ * the casters close; and how lifecycle says the previous session ended (a
+ * planned reboot, or a crash or reboot that was not) is reported to it
+ * before the casters report their slots. Without a record of lifecycle's
+ * (power-on, another image) the ledger's own books decide.
  */
 static void ledger_reboot_hook(lifecycle_reboot_reason_t reason, uint32_t deadline_ms, void *ctx)
 {
@@ -93,8 +95,16 @@ static esp_err_t ledger_step(void)
     }
     lifecycle_boot_info_t boot;
     lifecycle_get_boot_info(&boot);
-    if (lifecycle_reboot_user_planned(boot.prev_reboot_reason)) {
-        ledger_note_planned_boot();
+    switch (lifecycle_prev_session_end(boot.reset_class, boot.prev_reboot_reason)) {
+    case LIFECYCLE_PREV_PLANNED:
+        ledger_note_prev_reboot(true);
+        break;
+    case LIFECYCLE_PREV_UNPLANNED:
+        ledger_note_prev_reboot(false);
+        break;
+    case LIFECYCLE_PREV_UNKNOWN:
+    default:
+        break;
     }
     return lifecycle_register_shutdown_hook(ledger_reboot_hook, NULL);
 }

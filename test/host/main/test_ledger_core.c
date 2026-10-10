@@ -130,7 +130,7 @@ TEST_CASE("ledger: a power cut's gap is downtime and power-off time, a reset's o
         s.expected_mask = 0x01;
         s.protected_mask = 0x01;
         fresh(T0, 2000);                                        /* booted 2 s ago */
-        lc_restore(&c, &s, cut != 0);
+        lc_restore(&c, &s, cut ? LC_RESET_POWER_CUT : LC_RESET_SOFTWARE);
         TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(12) + S(2)), LC_CLOCK_SNTP));
         /* 2 h gap + 2 s since boot (slot 0 not reported yet: expected, down) */
         TEST_ASSERT_EQUAL_UINT32(5000u + (uint32_t)H(2) + 2000u, c.today.down_ms[0]);
@@ -149,7 +149,7 @@ TEST_CASE("ledger: a gap that spans midnight and planned work at the reset", "[l
     s.protected_mask = 0x01;
     s.planned = true;
     fresh(T0, 0);
-    lc_restore(&c, &s, false);
+    lc_restore(&c, &s, LC_RESET_SOFTWARE);
     lc_set_utc(&c, T0, at(DAY0 + 1, H(1)), LC_CLOCK_GNSS);
     TEST_ASSERT_EQUAL_INT32(DAY0 + 1, c.today.utc_day);
     TEST_ASSERT_EQUAL_UINT32((uint32_t)H(1), c.today.down_ms[0]);
@@ -169,7 +169,7 @@ TEST_CASE("ledger: time an earlier boot counted without a clock is taken out of 
     s.expected_mask = 0x01;
     s.protected_mask = 0x01;
     fresh(T0, 0);
-    lc_restore(&c, &s, false);
+    lc_restore(&c, &s, LC_RESET_SOFTWARE);
     lc_set_utc(&c, T0, at(DAY0, H(11)), LC_CLOCK_SNTP);
     /* 50 min of gap + 10 min carried over = the hour, not 70 min */
     TEST_ASSERT_EQUAL_UINT32((uint32_t)H(1), c.today.down_ms[0]);
@@ -183,7 +183,7 @@ TEST_CASE("ledger: a gap longer than the history is capped", "[ledger]")
     s.expected_mask = 0x01;
     s.protected_mask = 0x01;
     fresh(T0, 0);
-    lc_restore(&c, &s, true);
+    lc_restore(&c, &s, LC_RESET_POWER_CUT);
     lc_set_utc(&c, T0, at(DAY0, H(6)), LC_CLOCK_SNTP);
     TEST_ASSERT_EQUAL_INT32(DAY0, c.today.utc_day);
     TEST_ASSERT_EQUAL_UINT32((uint32_t)H(6), c.today.down_ms[0]);
@@ -227,7 +227,7 @@ TEST_CASE("ledger: slots not reported yet follow the previous session", "[ledger
     s.expected_mask = 0x03;
     s.protected_mask = 0x01;
     fresh(T0, 0);
-    lc_restore(&c, &s, false);
+    lc_restore(&c, &s, LC_RESET_SOFTWARE);
     lc_set_utc(&c, T0, at(DAY0, H(3)), LC_CLOCK_GNSS);
     lc_set_rtcm_ok(&c, T0, true);
     lc_tick(&c, T0 + 10000u);
@@ -263,7 +263,7 @@ TEST_CASE("ledger: the RTC copy carries a reset across; damage is caught", "[led
     TEST_ASSERT_TRUE(lc_rtc_valid(&blk));
 
     fresh(5000u, 1000);                                          /* new boot, 1 s up */
-    lc_restore(&c, &blk.snap, false);
+    lc_restore(&c, &blk.snap, LC_RESET_SOFTWARE);
     TEST_ASSERT_EQUAL_UINT32(4000, c.today.down_ms[0]);
     lc_set_utc(&c, 5000u, at(DAY0, H(5) + S(4) + S(3)), LC_CLOCK_SNTP);
     /* 2 s of reset gap + 1 s since boot */
@@ -343,7 +343,7 @@ TEST_CASE("ledger blobs: round trip, newer writers may append, damage is refused
     fresh(T0, 0);
     lc_snapshot_t t = snap_base();
     t.today.utc_day = DAY0 - 3;
-    lc_restore(&c, &t, false);
+    lc_restore(&c, &t, LC_RESET_SOFTWARE);
     lc_set_history(&c, days, HIST);
     TEST_ASSERT_EQUAL_size_t(HIST - 3u, c.hist_n);
     TEST_ASSERT_EQUAL_INT32(DAY0 - 4, c.hist[0].utc_day);
@@ -409,7 +409,7 @@ TEST_CASE("ledger: a reset just after UTC midnight keeps the day that ended", "[
 
     /* A watchdog reset: the RTC copy (today = the new day) and what NVS holds. */
     fresh(5000u, 1000);
-    lc_restore(&c, &rtc.snap, false);
+    lc_restore(&c, &rtc.snap, LC_RESET_OTHER);
     static lc_day_t back[HIST];
     size_t n = lc_decode_hist(hist_blob, hist_len, back, HIST);
     lc_set_history(&c, back, n);
@@ -440,7 +440,7 @@ TEST_CASE("ledger: the stored today fills a day the stored history missed", "[le
     old.down_ms[0] = 42;
 
     fresh(5000u, 1000);
-    lc_restore(&c, &rtc, false);
+    lc_restore(&c, &rtc, LC_RESET_SOFTWARE);
     lc_set_history(&c, &old, 1);
     lc_merge_stored_day(&c, &stored);
     TEST_ASSERT_EQUAL_size_t(2, c.hist_n);
@@ -486,7 +486,7 @@ TEST_CASE("ledger: GNSS time keeps the clock across a reset without SNTP", "[led
     lc_snapshot(&c, &s);
 
     fresh(9000u, 4000);                                          /* 4 s after boot; 3 s of reset */
-    lc_restore(&c, &s, false);
+    lc_restore(&c, &s, LC_RESET_OTHER);
     int64_t truth = at(DAY0, H(10) + S(5) + S(3) + S(4));
     TEST_ASSERT_TRUE(lc_set_gps_tow(&c, 9000u, tow_of(truth - 300), 300));
     TEST_ASSERT_EQUAL(LC_CLOCK_GNSS, c.clock);
@@ -509,7 +509,7 @@ TEST_CASE("ledger: GNSS time without a datable week waits for SNTP", "[ledger]")
     lc_snapshot_t s;
     lc_snapshot(&c, &s);
     fresh(9000u, 4000);
-    lc_restore(&c, &s, true);
+    lc_restore(&c, &s, LC_RESET_POWER_CUT);
     int64_t truth = at(DAY0, H(12));
     TEST_ASSERT_FALSE(lc_set_gps_tow(&c, 9000u, tow_of(truth), 0));
     TEST_ASSERT_EQUAL(LC_CLOCK_NONE, c.clock);
@@ -525,11 +525,11 @@ TEST_CASE("ledger: GNSS time without a datable week waits for SNTP", "[ledger]")
     lc_set_utc(&c, T0, at(DAY0, H(1)), LC_CLOCK_SNTP);
     lc_snapshot(&c, &s);
     fresh(9000u, 4000);
-    lc_restore(&c, &s, false);
+    lc_restore(&c, &s, LC_RESET_SOFTWARE);
     lc_tick(&c, 20000u);
     lc_snapshot(&c, &s);                                         /* no clock this session */
     fresh(9000u, 4000);
-    lc_restore(&c, &s, false);
+    lc_restore(&c, &s, LC_RESET_SOFTWARE);
     TEST_ASSERT_FALSE(lc_set_gps_tow(&c, 9000u, tow_of(at(DAY0, H(1) + S(20))), 0));
     /* garbage time of week */
     TEST_ASSERT_FALSE(lc_set_gps_tow(&c, 9000u, (uint32_t)LC_GPS_WEEK_MS, 0));
@@ -593,7 +593,7 @@ TEST_CASE("ledger: after a planned reboot the gap and each slot's reconnect are 
     s.reboot_planned = true;
     fresh(T0, 2000);                                            /* booted 2 s ago */
     lc_set_boot_window(&c, 120000u);
-    lc_restore(&c, &s, false);
+    lc_restore(&c, &s, LC_RESET_SOFTWARE);
     TEST_ASSERT_TRUE(c.today_dirty);                            /* the stored flag gets replaced */
     TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(8)), LC_CLOCK_SNTP));
     /* 6 s of gap until the boot, 2 s since: all planned */
@@ -629,7 +629,7 @@ TEST_CASE("ledger: a slot back up during the window is done; one dropping within
     s.reboot_planned = true;
     fresh(T0, 0);
     lc_set_boot_window(&c, 120000u);
-    lc_restore(&c, &s, false);
+    lc_restore(&c, &s, LC_RESET_SOFTWARE);
     TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(5)), LC_CLOCK_SNTP));
     lc_set_slot(&c, T0, 0, true, true, true);                   /* streaming, but no fresh RTCM yet */
     lc_tick(&c, T0 + 10000u);
@@ -655,7 +655,7 @@ TEST_CASE("ledger: a power cut is never planned, whatever the books or lifecycle
     s.reboot_planned = true;                                    /* and a reboot had begun */
     fresh(T0, 2000);
     lc_set_boot_window(&c, 120000u);
-    lc_restore(&c, &s, true);
+    lc_restore(&c, &s, LC_RESET_POWER_CUT);
     lc_planned_boot(&c);
     TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(11)), LC_CLOCK_SNTP));
     lc_tick(&c, T0 + 30000u);
@@ -673,8 +673,8 @@ TEST_CASE("ledger: lifecycle's record plans the boot when the books could not; t
     s.protected_mask = 0x01;
     fresh(T0, 0);
     lc_set_boot_window(&c, 120000u);
-    lc_restore(&c, &s, false);                                  /* stale books: no reboot flag */
-    TEST_ASSERT_FALSE(c.prev_planned);
+    lc_restore(&c, &s, LC_RESET_SOFTWARE);                      /* stale books: no reboot flag */
+    TEST_ASSERT_FALSE(c.prev_reboot_planned);
     lc_planned_boot(&c);
     lc_set_rtcm_ok(&c, T0, true);
     lc_set_slot(&c, T0 + 20000u, 0, true, true, true);          /* up after 20 s, before any clock */
@@ -691,7 +691,7 @@ TEST_CASE("ledger: lifecycle's record plans the boot when the books could not; t
     /* Window 0: only the gap is planned. */
     fresh(T0, 0);
     lc_set_boot_window(&c, 0);
-    lc_restore(&c, &s, false);
+    lc_restore(&c, &s, LC_RESET_SOFTWARE);
     lc_planned_boot(&c);
     TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(30)), LC_CLOCK_SNTP));
     lc_tick(&c, T0 + 10000u);
@@ -701,7 +701,7 @@ TEST_CASE("ledger: lifecycle's record plans the boot when the books could not; t
     /* Without either, the boot is an ordinary one. */
     fresh(T0, 0);
     lc_set_boot_window(&c, 120000u);
-    lc_restore(&c, &s, false);
+    lc_restore(&c, &s, LC_RESET_SOFTWARE);
     TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(30)), LC_CLOCK_SNTP));
     lc_tick(&c, T0 + 10000u);
     TEST_ASSERT_EQUAL_UINT32(40000u, c.today.down_ms[0]);
@@ -746,4 +746,142 @@ TEST_CASE("ledger: a planned reboot counts as planned from its start and stores 
     TEST_ASSERT_EQUAL_UINT32(0u, c.today.planned_ms[0]);
     lc_snapshot(&c, &s);
     TEST_ASSERT_FALSE(s.reboot_planned);
+}
+
+TEST_CASE("ledger: a crash after a planned reboot is not planned; one boot uses the flag", "[ledger]")
+{
+    /* An app update's shutdown hook stored the books with the flag. */
+    lc_snapshot_t s = snap_base();
+    s.today.utc_day = DAY0;
+    s.alive_ms = at(DAY0, H(10));
+    s.expected_mask = 0x01;
+    s.protected_mask = 0x01;
+    s.reboot_planned = true;
+
+    /* The new image's boot (a software restart) is planned. Its snapshot
+     * right after the restore, which ledger.c stores at once, has no flag:
+     * a panic in a later init or start step hands nothing on. */
+    fresh(T0, 2000);
+    lc_set_boot_window(&c, 120000u);
+    lc_restore(&c, &s, LC_RESET_SOFTWARE);
+    TEST_ASSERT_TRUE(c.prev_reboot_planned);
+    lc_snapshot_t resealed;
+    lc_snapshot(&c, &resealed);
+    TEST_ASSERT_FALSE(resealed.reboot_planned);
+    TEST_ASSERT_EQUAL_INT64(s.alive_ms, resealed.alive_ms);
+    TEST_ASSERT_EQUAL_HEX8(0x01, resealed.expected_mask);
+    lc_rtc_t rtc;
+    lc_rtc_seal(&rtc, &resealed);
+
+    /* The boot after the panic: 60 s of gap, then 25 s of boot. */
+    fresh(T0, 0);
+    lc_set_boot_window(&c, 120000u);
+    lc_restore(&c, &rtc.snap, LC_RESET_OTHER);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(60)), LC_CLOCK_SNTP));
+    lc_tick(&c, T0 + 25000u);
+    TEST_ASSERT_EQUAL_UINT32(85000u, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0u, c.today.planned_ms[0]);
+
+    /* Still the flagged books (the panic came before the reseal, or a
+     * bootloader rollback reads them): a crash reset is never planned, and
+     * lifecycle's record cannot make it so. */
+    fresh(T0, 0);
+    lc_set_boot_window(&c, 120000u);
+    lc_restore(&c, &s, LC_RESET_OTHER);
+    lc_planned_boot(&c);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(60)), LC_CLOCK_SNTP));
+    lc_tick(&c, T0 + 25000u);
+    TEST_ASSERT_EQUAL_UINT32(85000u, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0u, c.today.planned_ms[0]);
+
+    /* Planned receiver work at the crash still makes the gap planned. */
+    s.planned = true;
+    fresh(T0, 0);
+    lc_set_boot_window(&c, 120000u);
+    lc_restore(&c, &s, LC_RESET_OTHER);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(60)), LC_CLOCK_SNTP));
+    TEST_ASSERT_EQUAL_UINT32(60000u, c.today.planned_ms[0]);
+}
+
+TEST_CASE("ledger: a failed app trial after an update is not planned, whatever the books say", "[ledger]")
+{
+    /* The update stored the flag; the new image crashed until its trial was
+     * reverted from init (no shutdown hook of ours ran): the old image's
+     * restart is a software one, but lifecycle knows it was APP_REVERT. */
+    lc_snapshot_t s = snap_base();
+    s.today.utc_day = DAY0;
+    s.alive_ms = at(DAY0, H(10));
+    s.expected_mask = 0x03;
+    s.protected_mask = 0x01;
+    s.reboot_planned = true;
+    fresh(T0, 0);
+    lc_set_boot_window(&c, 120000u);
+    lc_restore(&c, &s, LC_RESET_SOFTWARE);
+    lc_unplanned_boot(&c);
+    TEST_ASSERT_FALSE(c.prev_reboot_planned);
+    lc_planned_boot(&c);                                        /* nothing plans it again */
+    TEST_ASSERT_FALSE(c.prev_reboot_planned);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(40)), LC_CLOCK_SNTP));
+    lc_tick(&c, T0 + 30000u);
+    TEST_ASSERT_EQUAL_UINT32(70000u, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0u, c.today.planned_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0u, c.today.planned_ms[1]);
+
+    /* Without a record either way (another image), the books decide. */
+    fresh(T0, 0);
+    lc_set_boot_window(&c, 120000u);
+    lc_restore(&c, &s, LC_RESET_SOFTWARE);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(40)), LC_CLOCK_SNTP));
+    lc_tick(&c, T0 + 30000u);
+    TEST_ASSERT_EQUAL_UINT32(70000u, c.today.planned_ms[0]);
+}
+
+TEST_CASE("ledger: a reboot without a clock stores today with the mark it runs up to", "[ledger]")
+{
+    static uint8_t blob[200];
+    size_t blob_len = 0;
+    int64_t nvs_alive = 0;
+    int64_t alive = 0;
+    bool today = false;
+    bool hist = false;
+
+    /* S1 has a clock and slot 0 is down; stored at its first tick, then 50 s
+     * more reach only the RTC copy before a panic. */
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, at(DAY0, H(10)), LC_CLOCK_SNTP);
+    lc_set_slot(&c, T0, 0, true, true, false);
+    lc_snapshot_t snap;
+    lc_snapshot(&c, &snap);
+    TEST_ASSERT_TRUE(lc_persist_due(&c, T0, 60000u, &alive, &today, &hist));
+    blob_len = lc_encode_today(&snap, blob, sizeof(blob));
+    nvs_alive = alive;
+    lc_tick(&c, T0 + 50000u);
+    lc_snapshot(&c, &snap);
+
+    /* S2 restores the RTC copy and gets no clock (no fix, no internet); a
+     * ladder reboot after 100 s stores today with the mark it runs up to. */
+    fresh(T0, 0);
+    lc_restore(&c, &snap, LC_RESET_OTHER);
+    TEST_ASSERT_FALSE(lc_persist_due(&c, T0 + 60000u, 60000u, &alive, &today, &hist));   /* the tick: no clock */
+    lc_shutdown(&c, T0 + 100000u, false);
+    TEST_ASSERT_TRUE(lc_persist_due(&c, T0 + 100000u, 0, &alive, &today, &hist));
+    TEST_ASSERT_EQUAL_INT64(at(DAY0, H(10) + S(50)), alive);
+    TEST_ASSERT_TRUE(today);
+    lc_snapshot(&c, &snap);
+    blob_len = lc_encode_today(&snap, blob, sizeof(blob));
+    nvs_alive = alive;
+
+    /* S3 after a power cut: restored from NVS, SNTP 200 s after S1 began. */
+    lc_snapshot_t st = snap_base();
+    TEST_ASSERT_TRUE(lc_decode_today(blob, blob_len, &st));
+    st.alive_ms = nvs_alive;
+    fresh(T0, 0);
+    lc_restore(&c, &st, LC_RESET_POWER_CUT);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + S(200)), LC_CLOCK_SNTP));
+    TEST_ASSERT_EQUAL_UINT32(200000u, c.today.down_ms[0]);      /* not 250 s: nothing counted twice */
+
+    /* A station that never had a clock has no mark: nothing is stored. */
+    fresh(T0, 0);
+    lc_shutdown(&c, T0 + 1000u, true);
+    TEST_ASSERT_FALSE(lc_persist_due(&c, T0 + 1000u, 0, &alive, &today, &hist));
 }

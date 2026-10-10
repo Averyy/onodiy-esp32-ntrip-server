@@ -146,11 +146,21 @@ void web_conn_closing(web_conns_t *t, int fd, bool closing)
     }
 }
 
+void web_conn_between_requests(web_conns_t *t)
+{
+    for (size_t i = 0; i < WEB_CONN_MAX; i++) {
+        web_conn_t *e = &t->c[i];
+        if (e->fd >= 0 && e->phase == WEB_CONN_RECEIVING) {
+            e->phase = WEB_CONN_IDLE;   /* armed after its handler: no request runs now */
+        }
+    }
+}
+
 /* Eviction rank (lower goes first); -1 = never. */
 static int rank(const web_conn_t *e)
 {
     if (e->closing || e->phase != WEB_CONN_IDLE) {
-        return -1;   /* already going, or its request runs (worker) */
+        return -1;   /* already going, or its request runs on the worker */
     }
     if (!e->ws) {
         return e->admin ? 1 : 0;   /* a browser reopens an idle keep-alive connection by itself */
@@ -160,6 +170,7 @@ static int rank(const web_conn_t *e)
 
 int web_conn_victim(web_conns_t *t, int new_fd, size_t max_open, uint32_t now_ms)
 {
+    web_conn_between_requests(t);
     if (web_conn_count(t) < max_open) {
         return -1;
     }

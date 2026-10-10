@@ -41,10 +41,14 @@
  * planned, and each expected slot's downtime from boot until that slot
  * streams again, for at most CONFIG_LEDGER_PLANNED_BOOT_S after the boot.
  * The next boot learns it from the stored books, or from lifecycle's record
- * of the previous boot (ledger_note_planned_boot) when they could not say
- * so. Ladder, low-heap, crash, safe-mode-retry and trial-revert reboots are
- * not planned, and a power cut (or brownout) never is, whatever was going
- * on when it hit.
+ * of the previous boot (ledger_note_prev_reboot) when they could not say
+ * so. Only that one boot does: right after reading the books it stores them
+ * again without the flag, so a boot that crashes before it stores anything
+ * else does not hand the flag on, and the books count only after a software
+ * restart. Lifecycle's record of an unplanned end overrides them. Ladder,
+ * low-heap, crash, safe-mode-retry and trial-revert reboots are not planned
+ * (nor is the gap after a crash or the reset pin, whatever the books say),
+ * and a power cut (or brownout) never is, whatever was going on when it hit.
  *
  * Persistence: the running counters also live in RTC memory, written every
  * tick and checked with magic, size and CRC (they survive software, panic
@@ -55,7 +59,9 @@
  * the time between that mark and the next boot is added as downtime (and
  * power-off time) for the slots that were expected to stream, and a reboot
  * into another app image (whose RTC layout may differ) counts its gap from
- * the moment the reboot began.
+ * the moment the reboot began. Today is only ever stored together with the
+ * mark it runs up to (without a clock: the mark it was restored with; with
+ * no mark at all, nothing), so that gap never counts time twice.
  * Day totals roll into a CONFIG_LEDGER_HISTORY_DAYS history at UTC midnight
  * (settings: ledger/hist, written when it changes). The whole ledger
  * namespace survives a factory reset.
@@ -105,13 +111,17 @@ typedef struct {
 esp_err_t ledger_init(void);
 
 /**
- * This boot follows a reboot the user asked for, by lifecycle's record of the
- * previous boot (main calls it right after ledger_init, before the slots are
- * reported). Usually the stored books say so already (ledger_shutdown); this
- * covers a reboot whose books could not be stored. Ignored after a power cut
- * and when called again.
+ * How the previous session ended, by lifecycle's record of it
+ * (lifecycle_prev_session_end(); main calls it right after ledger_init,
+ * before the slots are reported, and only when lifecycle has a record).
+ * `planned`: it ended in a reboot the user asked for. Usually the stored
+ * books say so already (ledger_shutdown); this covers a reboot whose books
+ * could not be stored, and is ignored after a power cut, a crash or the
+ * reset pin. Not planned (a crash, a failed app trial, a ladder): the gap
+ * and this boot's reconnects are not planned, whatever the books say, and
+ * nothing makes them planned again this boot.
  */
-void ledger_note_planned_boot(void);
+void ledger_note_prev_reboot(bool planned);
 
 /**
  * A reboot begins (a lifecycle shutdown hook; main registers it first, so it

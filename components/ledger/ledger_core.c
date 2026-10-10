@@ -297,8 +297,8 @@ static void first_clock(lc_t *c, int64_t unix_ms)
                 start += gap - max_gap;
                 gap = max_gap;
             }
-            accrue_span(c, start, (uint64_t)gap, c->prev_expected_mask, 0, c->prev_planned ? 0xFFu : 0u,
-                        c->gap_power_off);
+            bool planned = c->prev_planned || c->prev_reboot_planned;
+            accrue_span(c, start, (uint64_t)gap, c->prev_expected_mask, 0, planned ? 0xFFu : 0u, c->gap_power_off);
         }
     }
     spread_pending(c, unix_ms);
@@ -327,18 +327,26 @@ void lc_set_boot_window(lc_t *c, uint32_t window_ms)
 
 void lc_planned_boot(lc_t *c)
 {
-    if (c->gap_power_off) {
-        return;   /* a power cut is never planned */
+    if (c->gap_power_off || c->prev_unplanned) {
+        return;   /* a power cut, a crash or a reboot known not to be planned never is */
     }
-    c->prev_planned = true;
+    c->prev_reboot_planned = true;
     if (c->uptime_ms < c->boot_window_ms && c->boot_planned_mask == 0 && !c->boot_planned_started) {
         c->boot_planned_mask = 0xFFu;   /* every slot until it streams again */
     }
     c->boot_planned_started = true;
 }
 
-void lc_restore(lc_t *c, const lc_snapshot_t *snap, bool power_cut)
+void lc_unplanned_boot(lc_t *c)
 {
+    c->prev_unplanned = true;
+    c->prev_reboot_planned = false;
+    c->boot_planned_mask = 0;   /* nothing accrued yet: the window never started */
+}
+
+void lc_restore(lc_t *c, const lc_snapshot_t *snap, lc_reset_t reset)
+{
+    bool power_cut = reset == LC_RESET_POWER_CUT;
     c->today = snap->today;
     if (c->today.utc_day < 0) {
         memset(&c->today, 0, sizeof(c->today));
@@ -356,9 +364,13 @@ void lc_restore(lc_t *c, const lc_snapshot_t *snap, bool power_cut)
     c->alive_ms = snap->alive_ms;
     c->gap_power_off = power_cut;
     trim_hist(c);
-    if (snap->reboot_planned) {
-        lc_planned_boot(c);
-        c->today_dirty = true;   /* the stored copy of the flag belongs to the session that ended */
+    /* Stored again with the next mark: an RTC copy may be newer than the
+     * stored today, and the stored flags belong to the session that ended. */
+    c->today_dirty = true;
+    if (reset == LC_RESET_OTHER) {
+        lc_unplanned_boot(c);   /* the flag, if any, is from a boot before the one that crashed */
+    } else if (snap->reboot_planned) {
+        lc_planned_boot(c);     /* ignored after a power cut */
     }
 }
 
@@ -565,15 +577,21 @@ void lc_snapshot(const lc_t *c, lc_snapshot_t *out)
 bool lc_persist_due(lc_t *c, uint32_t now_ms, uint32_t interval_ms, int64_t *alive_ms, bool *today, bool *hist)
 {
     if (c->clock == LC_CLOCK_NONE) {
-        return false;
-    }
-    if (!c->rolled && c->alive_saved && (uint32_t)(now_ms - c->alive_saved_ms) < interval_ms) {
-        return false;
+        /* Today has not grown since the restore: at a reboot it is stored
+         * with the mark it runs up to, never without one. */
+        if (interval_ms != 0 || !c->alive_valid) {
+            return false;
+        }
+        *alive_ms = c->alive_ms;
+    } else {
+        if (!c->rolled && c->alive_saved && (uint32_t)(now_ms - c->alive_saved_ms) < interval_ms) {
+            return false;
+        }
+        c->alive_saved = true;
+        c->alive_saved_ms = now_ms;
+        *alive_ms = c->unix_ms;
     }
     c->rolled = false;
-    c->alive_saved = true;
-    c->alive_saved_ms = now_ms;
-    *alive_ms = c->unix_ms;
     *today = c->today_dirty;
     *hist = c->hist_dirty;
     c->today_dirty = false;

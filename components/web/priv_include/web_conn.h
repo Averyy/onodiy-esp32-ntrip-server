@@ -14,9 +14,17 @@
  * byte of a request arms a deadline (`deadline_ms` after it) and every
  * receive until the request is done may wait only for what is left of it;
  * then the receive reports a timeout and the server closes the connection.
- * The handler's end, or the WebSocket handshake, disarms it. A request handed
- * to the worker (uploads, downloads) is not bounded: the worker reads large
- * bodies at the client's pace with its own limits, off the server task.
+ * The handler's end, or the WebSocket handshake, disarms it. Nothing should
+ * read after that: every handler reads its request's body, hands it to the
+ * worker, or answers and closes the connection, since the server would read
+ * a body left over (and re-arm the deadline) only after the handler. Should
+ * a receive still come after it, the arm it causes is stale, and the server
+ * task drops it the next time it is certainly between requests
+ * (web_conn_between_requests: a new connection, the web tick), so it never
+ * keeps a connection from being closed and its next request starts afresh.
+ * A request handed to the worker (uploads, downloads) is not bounded: the
+ * worker reads large bodies at the client's pace with its own limits, off
+ * the server task.
  *
  * Eviction. With lru_purge_enable, esp_http_server closes the connection
  * whose last request is oldest when a new one arrives with every socket in
@@ -27,7 +35,9 @@
  * carry an admin session, an idle one that did, a public WebSocket viewer;
  * oldest activity first within each. An admin's WebSocket, a connection
  * whose request runs on the worker and one already closing are never chosen;
- * when nothing else is left, the new connection itself is closed.
+ * when nothing else is left, the new connection itself is closed. The choice
+ * is made on the server task between requests, so no connection is in the
+ * middle of one then (an armed deadline there is stale and dropped first).
  *
  * Times are milliseconds of an injected monotonic clock, compared only as
  * (uint32_t)(now - then), so they survive the clock wrap.
@@ -47,7 +57,7 @@ extern "C" {
 
 typedef enum {
     WEB_CONN_IDLE = 0,       /**< between requests: the next byte arms the deadline */
-    WEB_CONN_RECEIVING,      /**< a request is being received on the server task */
+    WEB_CONN_RECEIVING,      /**< a request is being received on the server task (stale between requests) */
     WEB_CONN_ASYNC,          /**< its request runs on the worker: not bounded, never evicted */
 } web_conn_phase_t;
 
@@ -106,9 +116,18 @@ void web_conn_websocket(web_conns_t *t, int fd, bool admin, uint32_t now_ms);
 void web_conn_closing(web_conns_t *t, int fd, bool closing);
 
 /**
- * After `new_fd` opened: the connection to close so that one of `max_open`
- * sockets stays free, marked closing; -1 when none needs to go. It is
- * `new_fd` itself when nothing else may be closed.
+ * The server task is between requests (its open callback, work queued to
+ * it): no request is being received now, so a deadline still armed belongs
+ * to one that is over (a receive after its handler) and is dropped.
+ * Connections on the worker keep their state.
+ */
+void web_conn_between_requests(web_conns_t *t);
+
+/**
+ * After `new_fd` opened (server task, between requests: stale deadlines are
+ * dropped first, as web_conn_between_requests does): the connection to close
+ * so that one of `max_open` sockets stays free, marked closing; -1 when none
+ * needs to go. It is `new_fd` itself when nothing else may be closed.
  */
 int web_conn_victim(web_conns_t *t, int new_fd, size_t max_open, uint32_t now_ms);
 

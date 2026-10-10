@@ -142,7 +142,7 @@ TEST_CASE("web conn: an admin's idle connection goes before a viewer, a viewer b
     web_conn_done(&t, 3, T0 + 3u, true);                                     /* the admin's keep-alive */
     web_conn_async(&t, 4, true, T0);
     web_conn_async(&t, 5, true, T0);
-    web_conn_received(&t, 6, T0);
+    web_conn_async(&t, 6, true, T0);
     web_conn_open(&t, 7, T0 + 10u);
     TEST_ASSERT_EQUAL_INT(3, web_conn_victim(&t, 7, MAXS, T0 + 10u));
     web_conn_close(&t, 3);
@@ -162,7 +162,7 @@ TEST_CASE("web conn: nothing else may go: the new connection itself is closed", 
         web_conn_websocket(&t, fd, true, T0);                                /* four admin pages */
     }
     web_conn_async(&t, 5, true, T0);                                         /* an upload */
-    web_conn_received(&t, 6, T0);                                            /* a request being received */
+    web_conn_async(&t, 6, true, T0);                                         /* a download */
     web_conn_open(&t, 7, T0 + 1u);
     TEST_ASSERT_EQUAL_INT(7, web_conn_victim(&t, 7, MAXS, T0 + 1u));
     TEST_ASSERT_EQUAL_size_t(MAXS - 1u, web_conn_count(&t));
@@ -176,4 +176,59 @@ TEST_CASE("web conn: nothing else may go: the new connection itself is closed", 
     TEST_ASSERT_TRUE(web_conn_open(&t, 8, T0 + 3u));                         /* the eighth entry */
     TEST_ASSERT_FALSE(web_conn_open(&t, 9, T0 + 3u));                        /* full */
     TEST_ASSERT_FALSE(web_conn_open(&t, -1, T0 + 3u));
+}
+
+/* ---- a deadline armed after the handler -------------------------------------------------------- */
+
+TEST_CASE("web conn: an arm left after the handler never blocks eviction or the next request", "[web_conn]")
+{
+    /* Six connections, each with a request whose body nobody read: the
+     * handler answered and ended it, then the server read the body away,
+     * which re-armed the deadline (the arm is stale from then on). */
+    web_conns_init(&t, DEADLINE);
+    for (int fd = 54; fd <= 59; fd++) {
+        uint32_t at = T0 + (uint32_t)(fd - 54) * 100u;
+        TEST_ASSERT_TRUE(web_conn_open(&t, fd, at));
+        web_conn_received(&t, fd, at);
+        web_conn_done(&t, fd, at + 10u, false);
+        web_conn_received(&t, fd, at + 20u);
+    }
+    /* A minute later new connections arrive: the stale ones go, oldest
+     * first; the newcomer is never the one closed. */
+    for (int i = 0; i < 3; i++) {
+        int fd = 60 + i;
+        uint32_t now = T0 + 60000u + (uint32_t)i;
+        TEST_ASSERT_TRUE(web_conn_open(&t, fd, now));
+        TEST_ASSERT_EQUAL_INT(54 + i, web_conn_victim(&t, fd, MAXS, now));
+        web_conn_close(&t, 54 + i);
+    }
+    /* The next request on one of them is bounded afresh, not refused at once. */
+    TEST_ASSERT_EQUAL_INT32(-1, web_conn_recv_budget(&t, 58, T0 + 60010u));
+    web_conn_received(&t, 58, T0 + 60010u);
+    TEST_ASSERT_EQUAL_INT32(DEADLINE, web_conn_recv_budget(&t, 58, T0 + 60010u));
+}
+
+TEST_CASE("web conn: between requests, an arm still set is stale and dropped", "[web_conn]")
+{
+    web_conns_init(&t, DEADLINE);
+    web_conn_open(&t, 40, T0);
+    web_conn_open(&t, 41, T0);
+    web_conn_open(&t, 42, T0);
+    web_conn_received(&t, 40, T0 + 1u);
+    web_conn_done(&t, 40, T0 + 2u, true);
+    web_conn_received(&t, 40, T0 + 3u);                                      /* after its handler */
+    web_conn_received(&t, 41, T0 + 4u);
+    web_conn_async(&t, 41, true, T0 + 5u);                                   /* on the worker */
+    web_conn_websocket(&t, 42, true, T0 + 6u);
+    TEST_ASSERT_EQUAL_INT32(0, web_conn_recv_budget(&t, 40, T0 + 3u + DEADLINE));   /* would refuse it */
+
+    web_conn_between_requests(&t);                                           /* the web tick */
+    TEST_ASSERT_EQUAL_INT32(-1, web_conn_recv_budget(&t, 40, T0 + 3u + DEADLINE));
+    TEST_ASSERT_TRUE(t.c[0].admin);                                          /* what its last request had */
+    TEST_ASSERT_EQUAL_UINT32(T0 + 2u, t.c[0].active_ms);                     /* and when it ended */
+    TEST_ASSERT_EQUAL_INT(WEB_CONN_ASYNC, t.c[1].phase);                     /* the worker's stays */
+    TEST_ASSERT_EQUAL_INT(WEB_CONN_IDLE, t.c[2].phase);
+    TEST_ASSERT_TRUE(t.c[2].ws);
+    web_conn_received(&t, 40, T0 + 9000u);
+    TEST_ASSERT_EQUAL_INT32(DEADLINE, web_conn_recv_budget(&t, 40, T0 + 9000u));
 }

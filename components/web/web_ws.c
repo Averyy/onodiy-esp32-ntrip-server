@@ -159,7 +159,7 @@ static void client_close(ws_client_t *c, uint16_t code)
             .len = sizeof(payload),
         };
         (void)httpd_ws_send_frame_async(hd, c->fd, &f);
-        (void)httpd_sess_trigger_close(hd, c->fd);
+        web_conn_shut(c->fd);   /* after the close frame, which is on its way */
     }
 }
 
@@ -206,7 +206,7 @@ static void drain(ws_client_t *c)
             c->closing = true;
             queue_clear(c);
             web_conn_ws_closing(c->fd);
-            (void)httpd_sess_trigger_close(hd, c->fd);
+            web_conn_shut(c->fd);
             break;
         }
     }
@@ -283,6 +283,11 @@ esp_err_t web_ws_pre_handshake(httpd_req_t *req)
     s_pending_sess = -1;
     if (!web_ws_precheck(req)) {
         return ESP_FAIL;
+    }
+    /* A handshake carries no body. The server would read one away after the
+     * handshake, off our request deadline's books: refused and closed. */
+    if (req->content_len > 0) {
+        return web_refuse_and_close(req, WEB_ERR_BAD_REQUEST);
     }
     /* Not touched yet: a refused handshake must not keep a session alive
      * (a hidden tab retrying would); a successful one touches it. */
@@ -380,8 +385,10 @@ static esp_err_t control_frame(httpd_req_t *req, ws_client_t *c, httpd_ws_frame_
 esp_err_t web_ws_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
-        /* A plain GET without the upgrade headers. */
-        return web_send_err(req, WEB_ERR_BAD_REQUEST);
+        /* A plain GET without the upgrade headers. A body is never read: the
+         * server would read it away after this handler. */
+        return req->content_len > 0 ? web_refuse_and_close(req, WEB_ERR_BAD_REQUEST)
+                                    : web_send_err(req, WEB_ERR_BAD_REQUEST);
     }
     int fd = httpd_req_to_sockfd(req);
     ws_client_t *c = find(fd);

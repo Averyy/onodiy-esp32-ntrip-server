@@ -36,3 +36,31 @@ TEST_CASE("the user's rollback is its own reboot reason, apart from a failed tri
     TEST_ASSERT_EQUAL(13, LIFECYCLE_REBOOT_APP_ROLLBACK);   /* appended: stored numbers keep their meaning */
     TEST_ASSERT_EQUAL(12, LIFECYCLE_REBOOT_BOOT_FAILURE);
 }
+
+TEST_CASE("the previous session's end: a crash never planned, our reboots by reason, else unknown", "[lifecycle]")
+{
+    /* A crash, also one while the user's restart was shutting down (its
+     * reason was recorded), and our own fatal boot error. */
+    TEST_ASSERT_EQUAL(LIFECYCLE_PREV_UNPLANNED,
+                      lifecycle_prev_session_end(LIFECYCLE_RESET_CRASH, LIFECYCLE_REBOOT_NONE));
+    TEST_ASSERT_EQUAL(LIFECYCLE_PREV_UNPLANNED,
+                      lifecycle_prev_session_end(LIFECYCLE_RESET_CRASH, LIFECYCLE_REBOOT_USER));
+    TEST_ASSERT_EQUAL(LIFECYCLE_PREV_UNPLANNED,
+                      lifecycle_prev_session_end(LIFECYCLE_RESET_CRASH, LIFECYCLE_REBOOT_BOOT_FAILURE));
+    /* Our reboots: the reason decides (a failed trial after an update is not planned). */
+    TEST_ASSERT_EQUAL(LIFECYCLE_PREV_PLANNED,
+                      lifecycle_prev_session_end(LIFECYCLE_RESET_PLANNED, LIFECYCLE_REBOOT_APP_UPDATE));
+    TEST_ASSERT_EQUAL(LIFECYCLE_PREV_PLANNED,
+                      lifecycle_prev_session_end(LIFECYCLE_RESET_PLANNED, LIFECYCLE_REBOOT_USER));
+    TEST_ASSERT_EQUAL(LIFECYCLE_PREV_UNPLANNED,
+                      lifecycle_prev_session_end(LIFECYCLE_RESET_PLANNED, LIFECYCLE_REBOOT_APP_REVERT));
+    TEST_ASSERT_EQUAL(LIFECYCLE_PREV_UNPLANNED,
+                      lifecycle_prev_session_end(LIFECYCLE_RESET_PLANNED, LIFECYCLE_REBOOT_NETWORK_LADDER));
+    /* No record of ours: another image, a reset pin, a power cut. */
+    TEST_ASSERT_EQUAL(LIFECYCLE_PREV_UNKNOWN, lifecycle_prev_session_end(LIFECYCLE_RESET_OTHER, LIFECYCLE_REBOOT_NONE));
+    TEST_ASSERT_EQUAL(LIFECYCLE_PREV_UNKNOWN, lifecycle_prev_session_end(LIFECYCLE_RESET_OTHER, LIFECYCLE_REBOOT_USER));
+    TEST_ASSERT_EQUAL(LIFECYCLE_PREV_UNKNOWN,
+                      lifecycle_prev_session_end(LIFECYCLE_RESET_POWER_ON, LIFECYCLE_REBOOT_NONE));
+    TEST_ASSERT_EQUAL(LIFECYCLE_PREV_UNKNOWN,
+                      lifecycle_prev_session_end(LIFECYCLE_RESET_BROWNOUT, LIFECYCLE_REBOOT_USER));
+}

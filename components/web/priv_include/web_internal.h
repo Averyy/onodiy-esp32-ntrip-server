@@ -122,6 +122,12 @@ void web_set_common_headers(httpd_req_t *req, bool api);
 esp_err_t web_send_error(httpd_req_t *req, web_err_t err, const char *message, const char *field, uint32_t retry_in_s,
                          const char *by, const char *reason);
 esp_err_t web_send_err(httpd_req_t *req, web_err_t err);
+/**
+ * Answer with `err` and close the connection instead of reading a body the
+ * handler refuses (Connection: close). Returns ESP_FAIL: the handler returns
+ * it, so the server closes the connection rather than read the body away.
+ */
+esp_err_t web_refuse_and_close(httpd_req_t *req, web_err_t err);
 /** 500 internal with the esp_err_t name as message. */
 esp_err_t web_send_internal(httpd_req_t *req, esp_err_t err);
 
@@ -163,6 +169,14 @@ void web_conn_ws_open(int fd, bool admin);
 
 /** A WebSocket client's close is under way. */
 void web_conn_ws_closing(int fd);
+
+/**
+ * Close `fd`'s connection now (server task only): its socket is shut down,
+ * and the server deletes exactly that session at its next select(). Used
+ * instead of httpd_sess_trigger_close(), whose queued close names a session
+ * slot that a new connection may have taken by the time it runs.
+ */
+void web_conn_shut(int fd);
 
 /** The worker took over `fd`'s request (`on`), or finished it (any task). */
 void web_conn_worker(int fd, bool on);

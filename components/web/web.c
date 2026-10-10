@@ -242,21 +242,28 @@ static int conn_recv(httpd_handle_t hd, int fd, char *buf, size_t len, int flags
     return n;
 }
 
+/*
+ * Close a connection from the server task. Its socket is shut down here and
+ * now: the server's next select() sees it end and deletes exactly that
+ * session (its close callback then forgets it). A close queued to the
+ * server instead names a session slot, which the connection may have left,
+ * and a new one taken, by the time the queue reaches it.
+ */
+void web_conn_shut(int fd)
+{
+    if (shutdown(fd, SHUT_RDWR) != 0) {
+        /* Already reset by the peer: the server sees that by itself. */
+        ESP_LOGD(TAG, "connection %d: shutdown: errno %d", fd, errno);
+    }
+}
+
 /* Close `fd` to keep a socket free (server task, from the open callback). */
-static void evict(httpd_handle_t hd, int fd)
+static void evict(int fd)
 {
     if (web_ws_evict(fd)) {
         return;   /* a public viewer: told to come back later, then closed */
     }
-    /* esp_http_server skips the close of a session whose LRU counter is
-     * still 0 (no request finished since the server was last idle). */
-    (void)httpd_sess_update_lru_counter(hd, fd);
-    if (httpd_sess_trigger_close(hd, fd) != ESP_OK) {
-        taskENTER_CRITICAL(&s_conn_lock);
-        web_conn_closing(&s_conns, fd, false);
-        taskEXIT_CRITICAL(&s_conn_lock);
-        ESP_LOGW(TAG, "connection %d not closed (server queue full)", fd);
-    }
+    web_conn_shut(fd);
 }
 
 static esp_err_t on_sess_open(httpd_handle_t hd, int fd)
@@ -273,7 +280,7 @@ static esp_err_t on_sess_open(httpd_handle_t hd, int fd)
     (void)httpd_sess_set_recv_override(hd, fd, conn_recv);
     if (victim >= 0) {
         ESP_LOGD(TAG, "sockets full: closing connection %d%s", victim, victim == fd ? " (the new one)" : "");
-        evict(hd, victim);
+        evict(victim);
     }
     return ESP_OK;
 }
@@ -532,7 +539,7 @@ static bool header_is(httpd_req_t *req, const char *field, const char *type, boo
 }
 
 /* Answer, and close the connection instead of reading a body we refuse. */
-static esp_err_t refuse_and_close(httpd_req_t *req, web_err_t err)
+esp_err_t web_refuse_and_close(httpd_req_t *req, web_err_t err)
 {
     httpd_resp_set_hdr(req, "Connection", "close");
     web_send_err(req, err);
@@ -574,20 +581,20 @@ static esp_err_t api_handle(httpd_req_t *req, web_req_t *rp)
     }
     /* GET and DELETE take no body: refuse one instead of reading it away. */
     if (rt->body == WEB_BODY_NONE && req->content_len > 0) {
-        return refuse_and_close(req, WEB_ERR_TOO_LARGE);
+        return web_refuse_and_close(req, WEB_ERR_TOO_LARGE);
     }
     /* CSRF: a JSON or upload content type (a cross-site form cannot send either). */
     if (rt->body == WEB_BODY_JSON && !header_is(req, "Content-Type", "application/json", true)) {
-        return req->content_len > 0 ? refuse_and_close(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE)
+        return req->content_len > 0 ? web_refuse_and_close(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE)
                                     : web_send_err(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE);
     }
     if (rt->body == WEB_BODY_UPLOAD && (!header_is(req, "Content-Type", "application/octet-stream", true) ||
                                          !header_is(req, "X-Requested-With", "onocoydiy", false))) {
-        return refuse_and_close(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE);
+        return web_refuse_and_close(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE);
     }
     size_t max_body = rt->max_body != 0 ? rt->max_body : WEB_JSON_MAX;
     if (rt->body == WEB_BODY_JSON && req->content_len > max_body) {
-        return refuse_and_close(req, WEB_ERR_TOO_LARGE);
+        return web_refuse_and_close(req, WEB_ERR_TOO_LARGE);
     }
     if (httpd_req_get_url_query_str(req, r.query, sizeof(r.query)) != ESP_OK) {
         r.query[0] = '\0';
@@ -598,7 +605,7 @@ static esp_err_t api_handle(httpd_req_t *req, web_req_t *rp)
     switch (rt->access) {
     case WEB_ACC_ADMIN:
         if (r.sess < 0) {
-            return req->content_len > 0 ? refuse_and_close(req, WEB_ERR_UNAUTHORIZED)
+            return req->content_len > 0 ? web_refuse_and_close(req, WEB_ERR_UNAUTHORIZED)
                                         : web_send_err(req, WEB_ERR_UNAUTHORIZED);
         }
         r.admin = true;
@@ -679,7 +686,7 @@ static esp_err_t fallback_handle(httpd_req_t *req)
         return pre == PRE_CLOSE ? ESP_FAIL : ESP_OK;
     }
     if (req->content_len > 0) {
-        return refuse_and_close(req, WEB_ERR_TOO_LARGE);   /* nothing here takes a body */
+        return web_refuse_and_close(req, WEB_ERR_TOO_LARGE);   /* nothing here takes a body */
     }
     const char *uri = req->uri;
     size_t len = strcspn(uri, "?");
@@ -764,6 +771,12 @@ static void tick_work(void *arg)
     (void)arg;
     atomic_store(&s_tick_queued, false);
     s_ticks++;
+    /* Work queued to the server runs between requests: an armed deadline
+     * now is stale (a receive after its handler) and must not refuse the
+     * connection's next request. */
+    taskENTER_CRITICAL(&s_conn_lock);
+    web_conn_between_requests(&s_conns);
+    taskEXIT_CRITICAL(&s_conn_lock);
     bool second = (s_ticks % (1000 / TICK_MS)) == 0;
     bool half = (s_ticks % (500 / TICK_MS)) == 0;
 

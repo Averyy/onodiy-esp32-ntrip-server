@@ -396,9 +396,12 @@ accepted only when public status is on, and then only the public `status`
 topic is served. Refused handshakes get the HTTP error (`401`, `403`); a
 fifth concurrent client, and a third client without a session (public
 viewers get at most 2 of the 4 slots, so the admin's pages always find
-one), get `503 too_many_clients`. A handshake extends the session's idle
-timeout only when it succeeds. Turning public status off closes every
-client without a session (`1008`).
+one), get `503 too_many_clients`. A handshake that carries a body, and a
+plain `GET /ws` without the upgrade headers that carries one, get
+`400 bad_request` with `Connection: close` (section 18); a plain `GET /ws`
+without a body gets `400 bad_request` on a connection that stays open. A
+handshake extends the session's idle timeout only when it succeeds.
+Turning public status off closes every client without a session (`1008`).
 
 **Client to server** (text frames, JSON, at most 256 bytes; larger closes
 with `1009`):
@@ -1138,8 +1141,10 @@ rollback, a factory reset, leaving safe mode, the BOOT-button resets;
 `lifecycle_reboot_user_planned()`), from the moment it begins until each
 caster streams again, at most `CONFIG_LEDGER_PLANNED_BOOT_S` (120 s) after
 the boot. Recovery restarts (ladders, low memory, a failed app trial, the
-safe-mode retry), crashes, brownouts and power cuts are never planned. Planned
-time counts against the budget all the same. `clock` is `none` until a
+safe-mode retry), crashes, brownouts and power cuts are never planned, and
+neither is a crash that follows a planned restart: only the boot right
+after the planned restart counts it, and the gap after any crash or reset
+pin is unplanned. Planned time counts against the budget all the same. `clock` is `none` until a
 trusted time exists (`utc_second_of_day` is then `null`). The budget is
 information only.
 
@@ -1313,9 +1318,10 @@ no receiver update action.
   timeout 4 s (a client that sends nothing that long is dropped while it
   sends headers; a body read gives up after three in a row), send timeout
   10 s. A request with a body that nobody reads (every `GET` and `DELETE`,
-  anything outside the API routes, a request refused before its body, such
-  as a refused Host or Origin or a missing session) is answered and the
-  connection closed, instead of reading the body away on the server task.
+  anything outside the API routes, `/ws` and its handshake, a request
+  refused before its body, such as a refused Host or Origin or a missing
+  session) is answered and the connection closed, instead of reading the
+  body away on the server task.
   WebSocket clients: at most 4, at most 2 of them without a session.
 - **Request deadline:** the server reads every request on its one task, and
   the 4 s receive timeout alone would let a client that sends a byte every
@@ -1325,7 +1331,12 @@ no receiver update action.
   line, the headers, a JSON body and a WebSocket frame must all be in by
   then, or the connection is closed (`408` while headers are read). A
   receive override on every connection enforces it (`web_conn.h`); the
-  handler's end disarms it. A browser sends a request at once, so a slow
+  handler's end disarms it, and since no handler leaves a body for the
+  server to read away afterwards, nothing re-arms it before the next
+  request. Should a receive still come after a handler, the stale deadline
+  is dropped at the server's next tick (250 ms) or new connection, so it
+  never refuses that connection's next request or keeps it from being
+  closed for a newcomer. A browser sends a request at once, so a slow
   phone on the setup AP needs a fraction of that, and 6 s still covers two
   lost and resent TCP segments. Uploads and downloads run on the worker,
   which reads a large body at the client's pace: they are not bounded by
@@ -1339,14 +1350,21 @@ no receiver update action.
   idle admin connection, a public viewer's WebSocket (`1013`); the oldest
   activity first within each. An admin's WebSocket and a connection whose
   upload or download runs on the worker are never chosen; when nothing else
-  is left the new connection itself is closed. The trade-off: 6 connections
-  stay open at a time instead of 7, and an idle keep-alive connection may be
-  closed under a browser (it reopens one by itself); in exchange no client
-  on the network can cut off the admin's live page by opening sockets. A
-  client-side keep-alive frame was the alternative and was not taken: it
-  only helps while the admin's frames outnumber the other client's
-  requests, and the server would have to tell those frames from the page's
-  own messages so as not to extend the session.
+  is left the new connection itself is closed. The choice runs on the
+  server task between requests, so no connection is in the middle of a
+  request on that task then. The chosen socket is shut down at once (after
+  the `1013` close frame for a viewer), and the server deletes exactly that
+  session at its next pass; a close queued to the server would name a
+  session slot, which a new connection might have taken by then. Every
+  other close of ours (a WebSocket client's, after its close code) works
+  the same way. The trade-off: 6 connections stay open at a time instead
+  of 7, and an idle keep-alive connection may be closed under a browser (it
+  reopens one by itself); in exchange no client on the network can cut off
+  the admin's live page by opening sockets. A client-side keep-alive frame
+  was the alternative and was not taken: it only helps while the admin's
+  frames outnumber the other client's requests, and the server would have
+  to tell those frames from the page's own messages so as not to extend the
+  session.
 - **Handlers never block for long.** Station, caster, network and update
   calls are asynchronous; a handler reads snapshots and returns. The
   password check (about 0.3 s) runs on the server task. Uploads and

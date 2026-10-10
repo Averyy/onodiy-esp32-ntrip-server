@@ -2,9 +2,10 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Which reboot reasons are planned downtime (pure logic, no RTOS calls,
- * host-testable). The reasons and why each is or is not planned are listed
- * at lifecycle_reboot_user_planned() in lifecycle.h.
+ * Which reboot reasons are planned downtime, and how the previous session
+ * ended (pure logic, no RTOS calls, host-testable). The reasons and why each
+ * is or is not planned are listed at lifecycle_reboot_user_planned() in
+ * lifecycle.h.
  */
 #include "lifecycle.h"
 
@@ -28,5 +29,20 @@ bool lifecycle_reboot_user_planned(lifecycle_reboot_reason_t reason)
     case LIFECYCLE_REBOOT_BOOT_FAILURE:
     default:
         return false;
+    }
+}
+
+lifecycle_prev_end_t lifecycle_prev_session_end(lifecycle_reset_class_t cls, lifecycle_reboot_reason_t prev)
+{
+    switch (cls) {
+    case LIFECYCLE_RESET_CRASH:
+        return LIFECYCLE_PREV_UNPLANNED;
+    case LIFECYCLE_RESET_PLANNED:
+        return lifecycle_reboot_user_planned(prev) ? LIFECYCLE_PREV_PLANNED : LIFECYCLE_PREV_UNPLANNED;
+    case LIFECYCLE_RESET_POWER_ON:
+    case LIFECYCLE_RESET_BROWNOUT:
+    case LIFECYCLE_RESET_OTHER:
+    default:
+        return LIFECYCLE_PREV_UNKNOWN;
     }
 }
