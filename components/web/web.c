@@ -25,6 +25,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "fw_update.h"
+#include "health.h"
 #include "lifecycle.h"
 #include "lwip/sockets.h"
 #include "network.h"
@@ -512,6 +513,24 @@ static void on_sess_close(httpd_handle_t hd, int fd)
 
 /* ---- periodic tick and events -------------------------------------------------------------------- */
 
+/* A BOOT-button admin reset clears the stored password through settings
+ * (whose change event reloads it); a password set while the settings were
+ * unavailable lives only here, so the reset count is watched too. */
+static void check_admin_reset(void)
+{
+    static uint32_t seen;
+    static bool known;
+    health_status_t hs;
+    if (health_get_status(&hs) != ESP_OK) {
+        return;
+    }
+    if (known && hs.admin_resets != seen) {
+        web_auth_admin_reset();
+    }
+    seen = hs.admin_resets;
+    known = true;
+}
+
 static void tick_work(void *arg)
 {
     (void)arg;
@@ -555,6 +574,7 @@ static void tick_work(void *arg)
     }
     if (second) {
         web_auth_expire();
+        check_admin_reset();
     }
     web_ws_tick(second, half);
 }

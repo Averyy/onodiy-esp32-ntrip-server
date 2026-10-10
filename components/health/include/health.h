@@ -102,7 +102,9 @@
  * user needs down with it.
  *
  * BOOT button (GPIO0, read after boot): held >= CONFIG_HEALTH_BUTTON_ADMIN_S
- * clears the admin password and starts the recovery setup AP; held
+ * clears the admin password and starts the recovery setup AP (counted in
+ * admin_resets: with the settings unavailable the web holds a password set
+ * this boot in RAM only, and forgets it when the count goes up); held
  * >= CONFIG_HEALTH_BUTTON_FACTORY_S runs a factory reset. The action is
  * chosen by the hold time and taken on release (the log says when each
  * threshold is reached); a button held or stuck since boot does nothing
@@ -178,6 +180,7 @@ typedef struct {
     uint32_t heap_psram_free;
     uint32_t gnss_retry_in_s;        /**< FAILED: until the next retry pass (0 = none scheduled, e.g. while the station's own detection schedule runs) */
     uint32_t factory_reset_refused_age_s; /**< since a BOOT-button factory reset was refused because a receiver update was running (UINT32_MAX = not this boot) */
+    uint32_t admin_resets;           /**< BOOT-button admin password resets this boot; the web also forgets a password it holds only in RAM (settings unavailable) and ends every session */
 } health_status_t;
 
 /** Register handlers; read the button pin from the board. */

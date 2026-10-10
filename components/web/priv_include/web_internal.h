@@ -205,6 +205,13 @@ void web_auth_expire(void);
 /** SETTINGS_EVENT for sys/admin_hash or a factory reset: reload, end sessions if it changed behind our back. */
 void web_auth_reload(void);
 
+/**
+ * The BOOT button cleared the admin password (health_status_t.admin_resets
+ * went up): forget a password held only in RAM (settings unavailable), reload
+ * the stored state and end every session.
+ */
+void web_auth_admin_reset(void);
+
 /* ---- REST helpers (web_api.c) ------------------------------------------------------------------------ */
 
 /** Gather the status snapshot (into PSRAM storage the caller owns). */

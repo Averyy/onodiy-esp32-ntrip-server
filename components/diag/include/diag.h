@@ -116,7 +116,7 @@ typedef enum {
      * 1-5, 6a, 6b, 7): 1-5 = rungs 1-5 (the recovery actions), 6 = rung 6a
      * (ESP32 reboot), 7 = rung 6b ("receiver needs a power cycle" alert),
      * 8 = rung 7 (FAILED, retry pass pending), 9 = rung 6a blocked by the
-     * reboot cap. Outcome (diag_step_outcome_t): 0 started, 1 healthy again,
+     * reboot cap or a held reboot inhibit. Outcome (diag_step_outcome_t): 0 started, 1 healthy again,
      * 2 failed (also: refused by the station without sending anything),
      * 3 abandoned because the ladder was suspended. Exempt from both rate
      * limits.
@@ -164,7 +164,7 @@ typedef enum {
     DIAG_GNSS_STEP_REBOOT = 6,            /**< rung 6a: ESP32 reboot */
     DIAG_GNSS_STEP_POWER_CYCLE = 7,       /**< rung 6b: "receiver needs a power cycle" alert */
     DIAG_GNSS_STEP_FAILED = 8,            /**< rung 7: FAILED, retry pass pending */
-    DIAG_GNSS_STEP_REBOOT_BLOCKED = 9,    /**< rung 6a blocked by the reboot cap */
+    DIAG_GNSS_STEP_REBOOT_BLOCKED = 9,    /**< rung 6a blocked by the reboot cap or a held reboot inhibit */
 } diag_gnss_step_t;
 
 /** Ladder step outcome (second byte of `b`). */

@@ -90,6 +90,17 @@ void web_auth_reload(void)
     }
 }
 
+void web_auth_admin_reset(void)
+{
+    if (s_ram_only) {
+        s_ram_only = false;
+        memset(&s_rec, 0, sizeof(s_rec));
+    }
+    (void)load();
+    ESP_LOGW(TAG, "admin password cleared with the BOOT button: every session ends");
+    web_auth_end_sessions(-1);
+}
+
 /* ---- sessions -------------------------------------------------------------------------------- */
 
 static char s_cookie[1024];   /* server task only */

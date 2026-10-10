@@ -97,10 +97,10 @@ _Static_assert(CONFIG_NETWORK_RECOVERY_AP_S > 0 && CONFIG_NETWORK_STA_FALLBACK_S
 #define START_WAIT_MS        5000
 #define STA_RETRY_ATTEMPT_CAP 64
 #define EVENT_POST_TICKS     pdMS_TO_TICKS(20)
-#define LADDER_JOURNAL_A     1       /* DIAG_EV_LADDER_STEP a: network ladder */
-#define LADDER_OUTCOME_STARTED  0
-#define LADDER_OUTCOME_HEALTHY  1
-#define LADDER_OUTCOME_HELD     2
+#define LADDER_JOURNAL_A     DIAG_LADDER_NETWORK   /* DIAG_EV_LADDER_STEP a */
+#define LADDER_OUTCOME_STARTED  DIAG_STEP_STARTED
+#define LADDER_OUTCOME_HEALTHY  DIAG_STEP_HEALTHY
+#define LADDER_OUTCOME_HELD     DIAG_STEP_FAILED      /* withheld: refused */
 
 #define SNTP_POOL "pool.ntp.org"
 #if defined(CONFIG_LWIP_DHCP_GET_NTP_SRV) && CONFIG_LWIP_SNTP_MAX_SERVERS >= 2
@@ -1776,7 +1776,7 @@ esp_err_t network_probe_upstream(uint32_t timeout_ms)
 
 static void ladder_journal(uint32_t outcome, net_rung_t rung, net_ladder_why_t why)
 {
-    int32_t b = (int32_t)(((uint32_t)why << 16) | (outcome << 8) | (uint32_t)rung);
+    int32_t b = (int32_t)(((uint32_t)why << 16) | (uint32_t)diag_ladder_b((diag_step_outcome_t)outcome, (uint32_t)rung));
     (void)diag_journal_append(DIAG_EV_LADDER_STEP, LADDER_JOURNAL_A, b);
 }
 

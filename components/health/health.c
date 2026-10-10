@@ -94,6 +94,16 @@ _Static_assert(DIAG_LOSS_HW_FIFO == 1 && DIAG_LOSS_RX_BUFFER_FULL == 2 && DIAG_L
                    DIAG_LOSS_RTCM_CRC == 4 && DIAG_LOSS_FRAMER_DISCARDED == 5 && DIAG_LOSS_HUB_PUBLISH == 6 &&
                    DIAG_LOSS_BAUD_SWITCH == 7 && DIAG_LOSS_RX_EVENTS_DROPPED == HM_LOSS_IDS,
                "loss journal ids are diag_loss_id_t 1..8");
+_Static_assert(HL_CODE_RESYNC == (int)DIAG_GNSS_STEP_RESYNC && HL_CODE_LINK_RESTART == (int)DIAG_GNSS_STEP_LINK_RESTART &&
+                   HL_CODE_RESCAN == (int)DIAG_GNSS_STEP_RESCAN && HL_CODE_RECONFIGURE == (int)DIAG_GNSS_STEP_RECONFIGURE &&
+                   HL_CODE_RECEIVER_RESET == (int)DIAG_GNSS_STEP_RECEIVER_RESET &&
+                   HL_CODE_REBOOT == (int)DIAG_GNSS_STEP_REBOOT && HL_CODE_POWER_ALERT == (int)DIAG_GNSS_STEP_POWER_CYCLE &&
+                   HL_CODE_FAILED == (int)DIAG_GNSS_STEP_FAILED &&
+                   HL_CODE_REBOOT_BLOCKED == (int)DIAG_GNSS_STEP_REBOOT_BLOCKED,
+               "ladder journal codes are diag_gnss_step_t");
+_Static_assert(HL_OUT_STARTED == (int)DIAG_STEP_STARTED && HL_OUT_HEALTHY == (int)DIAG_STEP_HEALTHY &&
+                   HL_OUT_FAILED == (int)DIAG_STEP_FAILED && HL_OUT_ABANDONED == (int)DIAG_STEP_ABANDONED,
+               "ladder outcomes are diag_step_outcome_t");
 
 /* ---- shared state ----------------------------------------------------------- */
 
@@ -126,6 +136,7 @@ static hm_deb_t s_deb_frag;
 static hm_deb_t s_deb_casters;
 static hm_button_t s_button;
 static uint32_t s_caster_restarts;
+static uint32_t s_admin_resets;
 static uint64_t s_ledger_owed;
 static bool s_heap_warned;
 static bool s_heap_reboot;
@@ -193,8 +204,8 @@ static void op_journal(void *ctx, uint8_t code, uint8_t outcome)
     } else {
         ESP_LOGW(TAG, "GNSS ladder: %s: %s", step_name(code), outcome_name(outcome));
     }
-    int32_t b = (int32_t)(((uint32_t)outcome << 8) | code);
-    esp_err_t err = diag_journal_append(DIAG_EV_LADDER_STEP, 0, b);
+    int32_t b = diag_ladder_b((diag_step_outcome_t)outcome, code);
+    esp_err_t err = diag_journal_append(DIAG_EV_LADDER_STEP, DIAG_LADDER_GNSS, b);
     if (err != ESP_OK) {
         ESP_LOGD(TAG, "ladder record not journalled: %s", esp_err_to_name(err));
     }
@@ -365,6 +376,7 @@ static bool receiver_update_running(void)
 static void admin_reset(void)
 {
     ESP_LOGW(TAG, "BOOT button: clearing the admin password and opening the recovery AP");
+    s_admin_resets++;   /* the web drops a password held only in RAM and ends every session */
     if (settings_is_available()) {
         esp_err_t err = settings_erase_key(SETTINGS_NS_SYS, SETTINGS_KEY_ADMIN_HASH);
         if (err != ESP_OK) {
@@ -557,6 +569,7 @@ static void tick(void)
     o.network_recoveries = s_net.ladder_actions;
     o.rtcm_gap_ms = s_link_stats.last_rtcm_age_ms;
     o.gnss_retry_in_s = ls.retry_in_s;
+    o.admin_resets = s_admin_resets;
     if (s_factory_refused_ms == HM_NEVER) {
         o.factory_reset_refused_age_s = UINT32_MAX;
     } else {

@@ -216,6 +216,8 @@ static void __attribute__((noreturn)) do_reboot(lifecycle_reboot_reason_t reason
     taskEXIT_CRITICAL(&s_lock);
 
     ESP_LOGW(TAG, "rebooting (reason %d)", (int)reason);
+    /* Queued; diag's restart handler writes out what its task has not. */
+    (void)diag_journal_append(DIAG_EV_REBOOT, (int32_t)reason, 0);
     (void)esp_event_post(LIFECYCLE_EVENT, LIFECYCLE_EVENT_PRE_REBOOT, &reason, sizeof(reason), 0);
     run_hooks();
     esp_restart();
@@ -506,6 +508,12 @@ static void journal_boot(void)
     int32_t prev_s = (prev == BOOT_HISTORY_UPTIME_UNKNOWN) ? -1 : (int32_t)(prev > INT32_MAX ? INT32_MAX : prev);
     (void)diag_journal_append(DIAG_EV_BOOT, (int32_t)s_info.reset_class, (int32_t)s_info.prev_reboot_reason);
     (void)diag_journal_append(DIAG_EV_SESSION, prev_s, (int32_t)s_info.reset_reason);
+    if (s_info.safe_mode) {
+        taskENTER_CRITICAL(&s_lock);
+        uint32_t episode = s_rtc.safe_episodes;
+        taskEXIT_CRITICAL(&s_lock);
+        (void)diag_journal_append(DIAG_EV_SAFE_MODE, (int32_t)(episode > INT32_MAX ? INT32_MAX : episode), 0);
+    }
 }
 
 esp_err_t lifecycle_init(void)
