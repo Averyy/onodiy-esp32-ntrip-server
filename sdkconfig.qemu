@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+#
+# QEMU development overlay, applied on top of sdkconfig.defaults. Never
+# flash a build made with it to a station: its network is an emulated
+# Ethernet MAC that no chip has, and Wi-Fi is never started. Configure
+# refuses it for a release version, and the release job refuses to publish
+# it. Build and run with tools/qemu/run.sh (see tools/qemu/README.md), which
+# builds into build-qemu/ and passes the QEMU options this target needs:
+#   -m 8M      idf.py qemu passes -m 32M, and 32 MB of PSRAM leaves no MMU
+#              address space to map the partition table (NVS unusable,
+#              crash loop). The board has 8 MB.
+#   -nic user,model=open_eth,hostfwd=tcp:127.0.0.1:8080-:80
+#              the emulated Ethernet, web UI at http://localhost:8080/
+#   a second -serial for UART1, the receiver link (GPIO1/GPIO2 on the board).
+# Observed with Espressif's QEMU esp_develop_9.2.2_20260417.
+
+# QEMU's PSRAM model in octal mode hangs on the first SPI flash page program
+# (the bootloader's otadata write never returns). Quad PSRAM boots, and XIP
+# from PSRAM works.
+CONFIG_SPIRAM_MODE_QUAD=y
+
+# In QIO mode the app's flash reads do not return what was written (NVS
+# loses every key: settings, admin password, boot accounting). DIO works.
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+
+# QEMU has no Wi-Fi radio: the emulated OpenCores Ethernet MAC replaces it.
+# CONFIG_NETWORK_QEMU_ETHERNET depends on this driver, so it can only be on
+# in a build made with this overlay.
+CONFIG_ETH_USE_OPENETH=y
+CONFIG_NETWORK_QEMU_ETHERNET=y
+
+# Software crypto: with the SHA accelerator model, certificate signatures
+# fail to verify (TLS to GitHub fails, PSA error -149); with SHA in software
+# but AES in hardware, the AES-DMA model cannot read the (PSRAM) buffers and
+# the handshake never finishes. All three in software: TLS works.
+CONFIG_MBEDTLS_HARDWARE_SHA=n
+CONFIG_MBEDTLS_HARDWARE_AES=n
+CONFIG_MBEDTLS_HARDWARE_MPI=n

@@ -1,5 +1,7 @@
 # Build
 build/
+# QEMU development build (tools/qemu/run.sh)
+build-qemu/
 sdkconfig.old
 
 # IDE

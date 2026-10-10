@@ -71,4 +71,27 @@ menu "Station: network"
         range 1 65535
         default 443
 
+    config NETWORK_QEMU_ETHERNET
+        bool "QEMU development build: emulated Ethernet instead of Wi-Fi"
+        depends on ETH_USE_OPENETH
+        default y
+        help
+            For running the firmware in Espressif's QEMU only (the overlay
+            sdkconfig.qemu at the repository root, tools/qemu/run.sh). It
+            can only be turned on together with the OpenCores Ethernet MAC
+            driver (ETH_USE_OPENETH), which exists in QEMU and on no real
+            chip, and never with the defaults a station is built from.
+
+            Wi-Fi is never initialised or started (QEMU has no radio). The
+            emulated Ethernet port takes the station interface's place:
+            same interface key and IP events, link up and down reported as
+            the station's association, DHCP from QEMU's user-mode network.
+            There is no setup AP. The web server accepts the Host names
+            localhost and 127.0.0.1 (QEMU's port forward) and treats every
+            request as if it came over the setup AP, so the first admin
+            password can be set from the development machine.
+
+            Configure refuses a release build with this option, and the
+            release job refuses to publish one.
+
 endmenu

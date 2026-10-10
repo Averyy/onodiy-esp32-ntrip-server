@@ -60,6 +60,9 @@ Antenna and cable notes: [`reference/antenna-specs.md`](reference/antenna-specs.
 | `firmware/um982/` | Unicore UM982 receiver firmware the device flashes and offers as a user-confirmed update (see its README) |
 | `gnss-splitter/` | KiCad/EasyEDA PCB for an optional GNSS antenna splitter |
 | `tools/` | Release tooling (`release_manifest.py` writes a release's `manifest.json`) |
+| `tools/bench/` | Host-side bench tools for the board: port finder, captures of both serial ports, receiver queries, RTCM inspection, station API dumps, and the receiver boot menu check over its USB port (see its README) |
+| `tools/qemu/` | The firmware in Espressif's QEMU, no board needed: build and run script, smoke test (see its README) |
+| `sdkconfig.qemu` | QEMU-only configuration overlay used by `tools/qemu/run.sh`; never for a station |
 | `reference/` | Hardware notes (board, antenna); private research is kept out of the repo |
 
 ## Building
@@ -83,8 +86,8 @@ idf.py build
 ```
 
 CI runs both for pushes to `main`, release tags and pull requests
-(`.github/workflows/build.yml`); a release tag also publishes the GitHub Release (see
-below).
+(`.github/workflows/build.yml`), together with the bench tools' tests and a QEMU smoke
+test (below); a release tag also publishes the GitHub Release (see below).
 
 Notes:
 
@@ -98,6 +101,26 @@ Notes:
   version matters.
 - The partition table is permanent once a station is deployed (see the comments in
   `partitions.csv`).
+
+## Developing without hardware (QEMU)
+
+The firmware also runs in Espressif's QEMU, with an emulated Ethernet port in place of
+Wi-Fi and UART1 (the receiver link) on a local socket:
+
+```sh
+. $IDF_PATH/export.sh
+python $IDF_PATH/tools/idf_tools.py install qemu-xtensa   # once, then export.sh again
+tools/qemu/run.sh               # builds into build-qemu/, then the web UI is at http://localhost:8080/
+nc 127.0.0.1 5556               # in another terminal: the bytes the firmware sends to the receiver
+```
+
+Every run starts with empty settings, so the first page asks for the admin password.
+`uv run tools/qemu/smoke.py` boots the image headless and checks the web server, the
+status API and UART1 in both directions; CI runs it as well. The QEMU build uses
+the overlay `sdkconfig.qemu` and is never a station image: configure refuses it for a
+release version and the release job refuses to publish it. What differs from a station,
+and why UART1 drops bytes while nothing is connected, is in
+[`tools/qemu/README.md`](tools/qemu/README.md).
 
 ## Releases and updates
 

@@ -47,11 +47,14 @@ On macOS the ports appear as `/dev/cu.usbmodem*`, `/dev/cu.usbserial-*` or
 | `um982.py` (default) | read-only queries only | the list is in `--help`: CR LF, `VERSIONA`, `CONFIG`, `MODE`, `MASK`, `UNILOGLIST`, `BESTNAVA`, `GPGSV`, `OBSVMA`, and a few more one-shot logs for `send` |
 | `um982.py ... --write` | the commands you name, after you type `yes` | prints the exact text first; never resent automatically |
 | `station.py` | (HTTP only) | GET requests plus log in/out; never changes settings |
+| `bootprobe.py --i-understand` | `VERSIONA`, the soft restart, the bootloader stop key `T@`, then at the boot menu only `\r\n` and menu item `6` (soft reset cpu), after you type `yes` | restarts the receiver; every write passes a fixed allow-list |
 
 Never sent by any tool, even with `--write`: `FRESET`, `RESET` with
-parameters, bootloader keys (`T@`, bare menu numbers) and any
-firmware/bootloader command. Receiver firmware updates stay with the
-station firmware (or the vendor tool).
+parameters and any firmware/bootloader command. Bootloader keys are sent
+only by `bootprobe.py`, and only the stop key `T@` and menu item `6` (soft
+reset cpu): no other menu item, no data frames, no erase or write command.
+Receiver firmware updates stay with the station firmware (or the vendor
+tool).
 
 Modem lines: opening a port leaves DTR and RTS as the OS sets them (both
 asserted), so attaching a capture does not reset the ESP32. Only
@@ -136,6 +139,38 @@ prints the plan. With `--write` it:
 `--find-baud` tries the usual bauds (listening first, then `VERSIONA`) when
 the receiver does not answer at 115200.
 
+### `bootprobe.py`: the PC recovery channel (boot menu over COM2)
+
+```sh
+uv run bootprobe.py --port auto --i-understand               # boot menu at 460800
+uv run bootprobe.py --port auto --i-understand --baud 115200
+```
+
+Before the station firmware ever drives the receiver's bootloader over COM1
+(a receiver firmware update), the PC must be able to reach that bootloader
+over COM2: it is the way back if an update over COM1 goes wrong. This tool
+checks that and nothing else. It asks `VERSIONA` at the application baud
+(nothing more if there is no answer), restarts the receiver with
+`\r\nreset\r\nreset\r\n`, switches to `--baud` (460800 by default) and
+streams the stop key `T@` in bursts (8 bytes at 115200, 32 at 460800, 64 at
+921600) until the prompt `boot>`; it gives up 30 s after the restart, or
+earlier when data still arrives 8 s after it without the prompt or the
+application's restart banner shows up instead. At the menu it sends nothing
+until the port is quiet, then `\r\n` (clears stop-key bytes left in the
+menu's input line) and menu item `6` (soft reset cpu), waits for
+`resetting the cpu`, and asks `VERSIONA` at the application baud until the
+application answers with the same build.
+
+It never selects any other menu item, never sends data frames, erase or
+write commands, `FRESET` or `SAVECONFIG`: every write passes the allow-list
+in `allowed_tx()`. The run directory gets `transcript.log` (every byte in
+and out with its UTC time and the port baud), `boot-menu.txt` (the
+bootloader's banner, settings and menu, verbatim), `loader-rx.bin` and the
+summary. When the prompt does not come, it says so, stops, and checks only
+that the application is back; when the application does not come back it
+tells you to power-cycle the receiver. Exit status 0 = menu reached and
+application back, 1 = no menu, 2 = application not back, 3 = not started.
+
 ### `rtcm_inspect.py`: what is in the stream
 
 ```sh
@@ -196,6 +231,11 @@ never written to the logs.
    `uv run um982.py e6-check` shows what is tracked now; then
    `uv run um982.py e6-check --write` (group 3 6) and, if E6 does not show,
    `--group "7 0"` for BeiDou B2a. Note the restart timings it prints.
+   Then prove the PC recovery channel before anything touches the
+   receiver's bootloader from the ESP32: `uv run bootprobe.py --port auto
+   --i-understand` must reach `boot>` over COM2 and bring the application
+   back (try `--baud 115200` once if 460800 does not reach the menu). Keep
+   its `boot-menu.txt`.
 2. **Build and flash our firmware** from the repository root:
    ```sh
    . ~/esp/esp-idf-v6.1/export.sh
@@ -239,11 +279,11 @@ The `send` replies also show whether each message type is accepted
 
 | File | Contents |
 |---|---|
-| `ports.py`, `capture.py`, `um982.py`, `rtcm_inspect.py`, `station.py` | the tools |
+| `ports.py`, `capture.py`, `um982.py`, `rtcm_inspect.py`, `station.py`, `bootprobe.py` | the tools |
 | `benchlib/rtcm.py` | RTCM 3 framing, CRC-24Q, MSM/1005/1006/1033/1230 decoders, band mapping |
 | `benchlib/stream.py` | splits a byte stream into RTCM frames, text lines (checksum-checked), binary logs and junk |
 | `benchlib/rtcmstats.py` | counts, rates, MSM content and the Onocoy checks |
 | `benchlib/unicore.py` | receiver command rules (read-only list, block list), the command session, reply parsers |
 | `benchlib/serialio.py` | port listing, identification, listen-only probing, safe opening |
 | `benchlib/common.py` | run directories, rotating files, Ctrl-C handling |
-| `tests/` | pytest; RTCM test frames are built field by field from the public layouts and cross-checked with pyrtcm |
+| `tests/` | pytest; RTCM test frames are built field by field from the public layouts and cross-checked with pyrtcm; `bootprobe.py` runs against a scripted receiver over a socketpair |

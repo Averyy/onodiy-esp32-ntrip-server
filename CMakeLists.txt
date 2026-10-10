@@ -94,6 +94,15 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 project(onocoydiy-esp-um982)
 
+# The QEMU development build (sdkconfig.qemu, tools/qemu/run.sh) cannot run on
+# a station: its network is an emulated Ethernet MAC that no chip has. It is
+# never a release (the release job checks the same in tools/release_manifest.py).
+if(NOT "${_release_version}" STREQUAL "" AND (CONFIG_NETWORK_QEMU_ETHERNET OR CONFIG_ETH_USE_OPENETH))
+    message(FATAL_ERROR "RELEASE_VERSION ${_release_version}: this configuration is the QEMU development build "
+                        "(CONFIG_NETWORK_QEMU_ETHERNET / CONFIG_ETH_USE_OPENETH); releases are built from "
+                        "sdkconfig.defaults alone")
+endif()
+
 # Our components, by layer. A component may only depend on components of a
 # LOWER layer; peers talk through events. The configure step fails on a
 # same-layer or upward edge, so the graph stays acyclic as the implementation

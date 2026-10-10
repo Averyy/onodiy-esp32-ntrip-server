@@ -429,6 +429,13 @@ esp_err_t web_resp_end(web_resp_t *r)
 
 bool web_req_on_ap(httpd_req_t *req)
 {
+#if CONFIG_NETWORK_QEMU_ETHERNET
+    /* QEMU development build: no AP; the emulated Ethernet sits behind
+     * QEMU's user-mode NAT that only the development machine reaches, so it
+     * stands in for the setup AP (the first admin password can be set). */
+    (void)req;
+    return true;
+#endif
     int fd = httpd_req_to_sockfd(req);
     struct sockaddr_storage addr;
     socklen_t len = sizeof(addr);
@@ -491,6 +498,13 @@ static pre_t precheck(httpd_req_t *req, bool *on_ap, bool websocket)
         ip_of(s_ap, ap_ip, sizeof(ap_ip), "192.168.4.1");
         web_host_names_t names = { .sta_ip = sta_ip, .ap_ip = ap_ip, .hostname = s_hostname };
         host_ok = web_host_allowed(s_host, &names);
+#if CONFIG_NETWORK_QEMU_ETHERNET
+        if (!host_ok) {
+            /* QEMU development build: the browser reaches the device through QEMU's port forward. */
+            const web_host_names_t fwd = { .sta_ip = "127.0.0.1", .ap_ip = "localhost", .hostname = NULL };
+            host_ok = web_host_allowed(s_host, &fwd);
+        }
+#endif
     } else {
         s_host[0] = '\0';
     }
