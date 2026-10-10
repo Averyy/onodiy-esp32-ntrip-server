@@ -31,6 +31,12 @@
  *            The framer is not fed during RAW, so its loader prompt detector
  *            is unused there; the flasher matches the loader's text itself.
  *
+ * Hands off (gnss_link_set_hands_off, the station's receiver maintenance
+ * state): every write and break and every lease acquisition is refused with
+ * ESP_ERR_INVALID_STATE, so nothing reaches the receiver's COM1 while the
+ * user works on it through its other port; reception, framing and
+ * publishing go on.
+ *
  * A lease is required for COMMAND and RAW. Leases carry a generation number,
  * so a stale handle (after release) is rejected with ESP_ERR_INVALID_STATE
  * instead of touching the wire. The handle is a token, never dereferenced.
@@ -176,6 +182,7 @@ typedef struct {
     uint64_t flushed_bytes;        /**< input dropped on purpose: lease release, resync, restart, before start (expected) */
     uint32_t last_rx_age_ms;       /**< time since any byte arrived (UINT32_MAX = never) */
     uint32_t last_rtcm_age_ms;     /**< time since the last CRC-valid RTCM frame, published or held (UINT32_MAX = never) */
+    bool hands_off;                /**< transmitting and new leases are refused (receiver maintenance) */
     gnss_framing_stats_t framing;
 } gnss_link_stats_t;
 
@@ -296,6 +303,14 @@ esp_err_t gnss_link_restart(gnss_link_lease_t lease);
 uint32_t gnss_link_get_baud(void);
 
 /**
+ * Hands off on or off (see above; the station's receiver maintenance
+ * state). Turning it on while a lease is held is refused with
+ * ESP_ERR_INVALID_STATE (nothing changes). ESP_ERR_INVALID_STATE before
+ * gnss_link_init() and from a sink.
+ */
+esp_err_t gnss_link_set_hands_off(bool on);
+
+/**
  * Write bytes to the receiver.
  *
  * lease == NULL is allowed in STREAM mode only, for short read-only queries
@@ -308,7 +323,7 @@ uint32_t gnss_link_get_baud(void);
  *
  * @return ESP_ERR_TIMEOUT if another writer held the line, or the bytes did
  *         not leave, within timeout_ms; ESP_ERR_INVALID_STATE for a stale
- *         lease or lease == NULL outside STREAM.
+ *         lease, lease == NULL outside STREAM, or hands off.
  */
 esp_err_t gnss_link_write(gnss_link_lease_t lease, const void *data, size_t len, uint32_t timeout_ms);
 

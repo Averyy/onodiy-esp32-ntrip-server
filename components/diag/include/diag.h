@@ -142,7 +142,30 @@ typedef enum {
     DIAG_EV_WIFI_DISCONNECT,    /**< a = wifi_err_reason_t, b = RSSI */
     DIAG_EV_DATA_LOSS,          /**< a = diag_loss_id_t, b = increase since the previous record for that id (clamped to INT32_MAX) */
     DIAG_EV_SESSION,            /**< right after DIAG_EV_BOOT: a = previous session uptime in s (-1 = unknown), b = raw esp_reset_reason_t */
+    /**
+     * Receiver maintenance state (the user works on the receiver through
+     * its other port; nothing is sent on the station's link): a = 1 entry,
+     * 0 exit; b = the chosen duration (entry) or the time spent (exit), in
+     * seconds. Kind values are stored in the journal: never renumbered.
+     */
+    DIAG_EV_RX_MAINT = 20,
+    /** Live view: a = diag_live_ev_t | (detail << 8), b as diag_live_ev_t says. */
+    DIAG_EV_LIVE_VIEW = 21,
 } diag_event_t;
+
+/** DIAG_EV_LIVE_VIEW events (low byte of `a`). */
+typedef enum {
+    DIAG_LIVE_OPENED = 1,       /**< b = window length (s) */
+    DIAG_LIVE_EXTENDED = 2,     /**< b = time left (s) */
+    DIAG_LIVE_CLOSED = 3,       /**< detail = why (the station's live-view end reason), b = time open (s) */
+    /**
+     * Satellite-in-view output turned on for the window, never saved:
+     * detail = 0 accepted, 1 rejected, 2 no answer, 3 not sent (no lease or
+     * a link error); b = how long the command lease held RTCM back (ms).
+     */
+    DIAG_LIVE_SKY_ON = 4,
+    DIAG_LIVE_SKY_OFF = 5,      /**< turned off again: detail and b as DIAG_LIVE_SKY_ON */
+} diag_live_ev_t;
 
 /**
  * Counter ids for DIAG_EV_DATA_LOSS records (health journals the deltas,

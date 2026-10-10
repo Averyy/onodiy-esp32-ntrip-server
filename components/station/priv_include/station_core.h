@@ -66,6 +66,42 @@
  * survey profile; for a fixed profile with no RTCM by then the base mode is
  * read: a fixed base that sends nothing raises ANTENNA_MOVED (no apply).
  *
+ * Receiver maintenance (hands off; the user works on the receiver through
+ * its other port): entered by the user with a duration (15 min, 30 min,
+ * 1 h, 2 h or 4 h; extendable while on, at most 4 h left), refused while a
+ * receiver-flash journal is open (FLASHING, FLASH_RECOVERY), while a
+ * session or a job runs (a lease is held, CONFIGURING, RECOVERING: offer
+ * again when it ends). While on, the state is IDLE (listening only, as in a
+ * boot's first seconds: the health ladder stays suspended, no drift is
+ * judged) and no job is handed out at all: no detection,
+ * no queries, no apply, no loader key, no RESET, no satellite-view toggle;
+ * the caller's link refuses every write and lease (hands off). Reception
+ * goes on. Restart evidence is noted and triggers nothing. Queued ladder
+ * steps and automatic re-applies are dropped at entry (the user's own
+ * requests stay queued). Exit (the user, or the time is up): the
+ * stream-first path as at boot (IDLE, listen 3 s, identity, applied
+ * check). The time left survives an ESP32 reset through the caller's RTC
+ * record (stn_maint_restore; codec stn_maint_rtc_*), never a power cut.
+ *
+ * Live view (a time-boxed window the user opens; satellites first): while
+ * it is open the station wants the receiver's satellite-in-view output on,
+ * unsaved, at the caller's period; it is turned on and off with short
+ * COMMAND-lease jobs (STN_JOB_SKY; the casters pause for them), only while
+ * STREAMING with no other job due, never in maintenance, never with
+ * gnss/autocfg = 0 (the user configures the receiver), only for the model
+ * we configure, and never when the profile sends it permanently. A
+ * receiver reconfiguration, RESET or restart ends the output (it was never
+ * saved): the window stays open without it until the user starts the
+ * view again. The window closes when its time is up, when no admin client
+ * asked for it for the idle time (stn_live_touch), at the user's stop, or
+ * when a receiver flash begins; output still on is then turned off at the
+ * next allowed moment (a failed attempt is retried after 60 s, at most 3
+ * attempts). Whether toggling the output interrupts RTCM is PROVISIONAL,
+ * to be confirmed on hardware.
+ *
+ * Notes (stn_note_t) tell the caller what to journal: maintenance entry
+ * and exit, live view opened, extended, closed, output turned on or off.
+ *
  * Timings PROVISIONAL, to be confirmed on hardware.
  */
 #pragma once
@@ -92,6 +128,15 @@ extern "C" {
 #define STN_POS_CHECK_TRIES    10
 #define STN_LOCK_RETRY_MS      60000     /**< automatic lock without a 1005 yet: try again */
 #define STN_DRIFT_WINDOWS      2         /**< failed windows in a row before a drift re-apply */
+
+#define STN_MAINT_DEFAULT_S    (30u * 60u)   /**< receiver maintenance: default duration */
+#define STN_MAINT_MAX_S        (4u * 3600u)  /**< longest choice, and the most time left after an extension */
+#define STN_LIVE_DEFAULT_MS    (10 * 60000)  /**< live view window (the caller passes its own) */
+#define STN_LIVE_MAX_MS        (60 * 60000)  /**< longest window, extensions included */
+#define STN_LIVE_IDLE_MS       120000        /**< closes when no admin client asked for it this long */
+#define STN_SKY_RETRY_MS       60000         /**< a failed "output off" is tried again after this */
+#define STN_SKY_OFF_TRIES      3             /**< then it is left on until the receiver restarts */
+#define STN_NOTES              8             /**< notes kept for the caller between two steps */
 
 /** Same values as station_state_t. */
 typedef enum {
@@ -135,6 +180,7 @@ typedef enum {
     STN_JOB_LINK_RESTART,    /**< UART reinstall at the stored baud, no lease */
     STN_JOB_RECEIVER_RESET,  /**< COMMAND lease: the receiver's RESET command */
     STN_JOB_CHECK_POSITION,  /**< after a lock: the latest 1005 against the locked position (sends nothing) */
+    STN_JOB_SKY,             /**< COMMAND lease: satellite-in-view output on or off (sky_on), never saved */
 } stn_job_kind_t;
 
 /** Profile change an apply carries out first. */
@@ -174,6 +220,7 @@ typedef struct {
     uint8_t change;          /**< APPLY: stn_change_t */
     uint8_t why;             /**< APPLY: stn_why_t */
     uint8_t mode_why;        /**< MODE: stn_mode_why_t */
+    bool sky_on;             /**< SKY: turn the output on (else off) */
 } stn_job_t;
 
 /** Job outcome codes (the caller maps its errors). */
@@ -209,6 +256,8 @@ typedef struct {
     bool restarted;          /**< the receiver restarted in the session (signal-group reset, an answered rollback RESET) */
     bool receiver_lost;      /**< the receiver was not found again during the session */
     bool answered;           /**< the receiver answered during or after the session */
+    /* SKY */
+    uint32_t lease_ms;       /**< how long the lease held RTCM back */
 } stn_result_t;
 
 /** Inputs sampled by the caller for each stn_next() / stn_done(). */
@@ -221,8 +270,80 @@ typedef struct {
     bool profile_survey;     /**< the profile surveys (else fixed) */
     uint32_t survey_s;       /**< the profile's survey length */
     bool rtcm1230_ok;        /**< gnss/rtcm1230_ok */
+    bool profile_sky;        /**< the profile sends satellite-in-view output permanently */
     const stn_obs_t *obs;    /**< snapshot of the observed-set tracker (may be NULL) */
 } stn_in_t;
+
+/** Why maintenance (or its end) was refused. */
+typedef enum {
+    STN_MAINT_OK = 0,
+    STN_MAINT_FLASH,         /**< a receiver-flash journal is open */
+    STN_MAINT_SESSION,       /**< a session or job runs: offer again when it ends */
+    STN_MAINT_DURATION,      /**< not one of the choices */
+    STN_MAINT_NOT_ON,        /**< "end now" without the state */
+} stn_maint_why_t;
+
+/** Why a live view window closed. */
+typedef enum {
+    STN_LIVE_END_NONE = 0,
+    STN_LIVE_END_USER,       /**< the user stopped it */
+    STN_LIVE_END_EXPIRED,    /**< its time was up */
+    STN_LIVE_END_IDLE,       /**< no admin client asked for it for the idle time */
+    STN_LIVE_END_FLASH,      /**< a receiver flash began */
+} stn_live_end_t;
+
+/** The satellite-in-view output as the live view sees it. */
+typedef enum {
+    STN_SKY_OFF = 0,         /**< not wanted (no window) */
+    STN_SKY_PENDING,         /**< wanted, waits for a free moment (why) */
+    STN_SKY_ON,              /**< on for this window (unsaved) */
+    STN_SKY_ON_PROFILE,      /**< the profile sends it permanently */
+    STN_SKY_BLOCKED,         /**< not available in this window (why) */
+    STN_SKY_STOPPING,        /**< the window closed; turned off at the next free moment */
+} stn_sky_t;
+
+/** Why the output is not on while the window wants it. */
+typedef enum {
+    STN_SKY_WHY_NONE = 0,
+    STN_SKY_WHY_BUSY,            /**< a receiver job or session runs */
+    STN_SKY_WHY_NOT_STREAMING,   /**< no receiver streaming (detecting, no receiver, boot) */
+    STN_SKY_WHY_MAINTENANCE,     /**< receiver maintenance: nothing is sent */
+    STN_SKY_WHY_AUTOCFG_OFF,     /**< gnss/autocfg = 0: the user configures the receiver */
+    STN_SKY_WHY_UNSUPPORTED,     /**< not a receiver model we configure */
+    STN_SKY_WHY_RECONFIGURED,    /**< receiver reconfigured, reset or restarted: start again to turn it on */
+    STN_SKY_WHY_REJECTED,        /**< the receiver rejected the command */
+    STN_SKY_WHY_NO_ANSWER,       /**< no answer (it may be on: turned off when the window closes) */
+    STN_SKY_WHY_FLASH,           /**< receiver update session */
+} stn_sky_why_t;
+
+/** Live view status. */
+typedef struct {
+    bool open;
+    uint32_t left_s;         /**< until the window closes */
+    uint32_t idle_left_s;    /**< until it closes for lack of an admin client */
+    uint32_t open_s;         /**< since it opened */
+    uint8_t sky;             /**< stn_sky_t */
+    uint8_t why;             /**< stn_sky_why_t */
+    uint8_t last_end;        /**< stn_live_end_t of the last window */
+} stn_live_status_t;
+
+/** What the caller journals (and logs). */
+typedef enum {
+    STN_NOTE_MAINT_ON = 1,   /**< a = chosen duration (s) */
+    STN_NOTE_MAINT_OFF,      /**< a = time spent (s), b = 1 the time was up, 0 the user ended it */
+    STN_NOTE_LIVE_OPENED,    /**< a = window length (s) */
+    STN_NOTE_LIVE_EXTENDED,  /**< a = time left (s) */
+    STN_NOTE_LIVE_CLOSED,    /**< a = time open (s), b = stn_live_end_t */
+    STN_NOTE_SKY_ON,         /**< a = lease length (ms), b = stn_err_t of the job */
+    STN_NOTE_SKY_OFF,        /**< as SKY_ON */
+    STN_NOTE_SKY_LEFT_ON,    /**< turning it off failed STN_SKY_OFF_TRIES times: left on until the receiver restarts */
+} stn_note_kind_t;
+
+typedef struct {
+    uint8_t kind;            /**< stn_note_kind_t */
+    int32_t a;
+    int32_t b;
+} stn_note_t;
 
 typedef struct {
     stn_state_t state;
@@ -296,6 +417,31 @@ typedef struct {
     int64_t pos_check_ms;
     uint8_t pos_check_tries;
 
+    /* receiver maintenance (hands off) */
+    bool maint;
+    int64_t maint_start_ms;    /**< when it began (moved back by the time spent before a reset) */
+    int64_t maint_until_ms;
+    uint32_t maint_chosen_s;   /**< chosen duration (extensions added; for the status) */
+    bool maint_restart_seen;   /**< restart evidence while it was on (noted, nothing done) */
+
+    /* live view */
+    uint32_t live_idle_ms;     /**< closes after this long without stn_live_touch (STN_LIVE_IDLE_MS) */
+    uint32_t live_max_ms;      /**< longest window (STN_LIVE_MAX_MS) */
+    bool live_open;
+    int64_t live_opened_ms;
+    int64_t live_until_ms;
+    int64_t live_touch_ms;
+    uint8_t live_last_end;     /**< stn_live_end_t */
+    bool sky_want;             /**< the window wants the satellite-in-view output */
+    bool sky_on;               /**< it may be on because of us (unsaved) */
+    uint8_t sky_why;           /**< why the window dropped its wish (stn_sky_why_t) */
+    uint8_t sky_off_tries;
+    int64_t sky_retry_ms;
+
+    /* notes for the caller (journal) */
+    uint8_t note_n;
+    stn_note_t notes[STN_NOTES];
+
     /* the job handed out by stn_next() */
     stn_job_t job;
     bool job_busy;
@@ -338,7 +484,7 @@ bool stn_reconfigure_refused(const stn_t *s, bool autocfg);
  * A ladder step. @return STN_OK (queued, or ignored because an equal or
  * stronger one is queued or running), STN_E_FAIL (refused: RECONFIGURE while
  * stn_reconfigure_refused()), STN_E_STATE (not in a state the ladder acts
- * in: only STREAMING, CONFIGURING and RECOVERING).
+ * in: only STREAMING, CONFIGURING and RECOVERING; never in maintenance).
  */
 int stn_request_recovery(stn_t *s, uint8_t action, bool autocfg);
 
@@ -353,6 +499,67 @@ void stn_restart_seen(stn_t *s);
 
 /** A new CRC-valid 1005/1006 reference point (survey fallback). */
 void stn_on_arp(stn_t *s, const int64_t ecef_01mm[3]);
+
+/* ---- receiver maintenance ------------------------------------------------- */
+
+/** One of the durations the user may choose: 15 min, 30 min, 1 h, 2 h, 4 h (seconds). */
+bool stn_maint_duration_ok(uint32_t dur_s);
+
+/**
+ * The user's maintenance request: enter for dur_s, or, while on, extend by
+ * dur_s (at most STN_MAINT_MAX_S left). lease_held: a lease is held on the
+ * link now (the caller's live view).
+ * @return stn_maint_why_t (STN_MAINT_OK = on now).
+ */
+int stn_maint_enter(stn_t *s, uint32_t dur_s, bool lease_held, int64_t now_ms);
+
+/** The user's "end now". @return STN_MAINT_OK or STN_MAINT_NOT_ON. */
+int stn_maint_end(stn_t *s, const stn_in_t *in);
+
+/** Back in maintenance after an ESP32 reset (the caller's RTC record): left_s remain, spent_s were spent before the reset. */
+void stn_maint_restore(stn_t *s, uint32_t left_s, uint32_t spent_s, int64_t now_ms);
+
+uint32_t stn_maint_left_s(const stn_t *s, int64_t now_ms);
+
+/** The caller's RTC record of the maintenance state (magic, image stamp, time left, CRC). */
+typedef struct {
+    uint32_t magic;
+    uint32_t stamp;          /**< the image generation stamp that wrote it */
+    uint32_t left_s;
+    uint32_t spent_s;        /**< time spent in maintenance before the record was written */
+    uint32_t crc;
+} stn_maint_rtc_t;
+
+/** Write the record (left_s 0 clears it). */
+void stn_maint_rtc_write(stn_maint_rtc_t *r, uint32_t stamp, uint32_t left_s, uint32_t spent_s);
+
+/** Read the record: false for a cleared, damaged or foreign one, or one with nothing left. */
+bool stn_maint_rtc_read(const stn_maint_rtc_t *r, uint32_t *stamp, uint32_t *left_s, uint32_t *spent_s);
+
+/* ---- live view --------------------------------------------------------------- */
+
+/**
+ * Open the window for dur_ms, or extend an open one by dur_ms (at most
+ * live_max_ms from now), and want the satellite-in-view output again.
+ * Counts as a touch.
+ * @return STN_OK, or STN_E_STATE with *why = STN_SKY_WHY_FLASH while a
+ *         receiver-flash journal is open (nothing changes).
+ */
+int stn_live_start(stn_t *s, uint32_t dur_ms, int64_t now_ms, uint8_t *why);
+
+/** An admin client asked for the live view (keeps the window from closing as idle). */
+void stn_live_touch(stn_t *s, int64_t now_ms);
+
+/** The user's stop. */
+void stn_live_stop(stn_t *s, int64_t now_ms);
+
+void stn_live_status(const stn_t *s, const stn_in_t *in, stn_live_status_t *out);
+
+/**
+ * Take the notes written since the last call (at most STN_NOTES; older
+ * ones are dropped when more pile up). @return count copied.
+ */
+unsigned stn_take_notes(stn_t *s, stn_note_t *out, unsigned cap);
 
 /* ---- status --------------------------------------------------------------- */
 

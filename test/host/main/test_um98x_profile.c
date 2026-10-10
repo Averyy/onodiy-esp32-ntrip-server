@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "um98x_profile.h"
@@ -65,6 +66,9 @@ static void copy_fields(um98x_base_profile_t *b, const um98x_base_profile_t *a)
         b->rtcm[i].period_s = a->rtcm[i].period_s;
     }
     b->sat_view_output = a->sat_view_output;
+    memcpy(b->antenna_model, a->antenna_model, strlen(a->antenna_model) + 1u);
+    memcpy(b->antenna_serial, a->antenna_serial, strlen(a->antenna_serial) + 1u);
+    b->antenna_setup_id = a->antenna_setup_id;
 }
 
 static void fixed_profile(um98x_base_profile_t *p)
@@ -388,4 +392,134 @@ TEST_CASE("ECEF to WGS84 rejects points nowhere near the surface", "[um98x_profi
     const double bad[3] = { NAN, 0.0, 6378137.0 };
     TEST_ASSERT_FALSE(um98x_ecef_to_llh(centre, &lat, &lon, &h));
     TEST_ASSERT_FALSE(um98x_ecef_to_llh(bad, &lat, &lon, &h));
+}
+
+/* ---- antenna descriptor ------------------------------------------------------ */
+
+#define IGS_NAME "TRM59800.00     SCIS"   /* 16-character name, then the radome */
+
+TEST_CASE("antenna fields: validation", "[um98x_profile]")
+{
+    um98x_base_profile_t p;
+    um98x_profile_default(&p, TEST_STATION_ID);
+    TEST_ASSERT_EQUAL_STRING("", p.antenna_model);    /* default: leave the receiver's value */
+    TEST_ASSERT_EQUAL_STRING("", p.antenna_serial);
+    TEST_ASSERT_EQUAL_UINT8(0, p.antenna_setup_id);
+
+    snprintf(p.antenna_model, sizeof(p.antenna_model), "%s", IGS_NAME);
+    snprintf(p.antenna_serial, sizeof(p.antenna_serial), "5000112233");
+    p.antenna_setup_id = 255;
+    TEST_ASSERT_TRUE(um98x_profile_valid(&p));
+
+    /* 31 characters fit, a string without its terminator does not. */
+    memset(p.antenna_model, 'A', 31);
+    p.antenna_model[31] = '\0';
+    TEST_ASSERT_TRUE(um98x_profile_valid(&p));
+    memset(p.antenna_model, 'A', sizeof(p.antenna_model));
+    TEST_ASSERT_FALSE(um98x_profile_valid(&p));
+
+    /* Printable ASCII without '"' only (the command quotes the strings). */
+    snprintf(p.antenna_model, sizeof(p.antenna_model), "ANT\"NAME");
+    TEST_ASSERT_FALSE(um98x_profile_valid(&p));
+    snprintf(p.antenna_model, sizeof(p.antenna_model), "ANT\tNAME");
+    TEST_ASSERT_FALSE(um98x_profile_valid(&p));
+    snprintf(p.antenna_model, sizeof(p.antenna_model), "ANT\x7FNAME");
+    TEST_ASSERT_FALSE(um98x_profile_valid(&p));
+    snprintf(p.antenna_model, sizeof(p.antenna_model), "%s", IGS_NAME);
+    snprintf(p.antenna_serial, sizeof(p.antenna_serial), "SN\"1");
+    TEST_ASSERT_FALSE(um98x_profile_valid(&p));
+    TEST_ASSERT_EQUAL_UINT32(0, um98x_profile_hash(&p));
+
+    TEST_ASSERT_TRUE(um98x_antenna_str_valid("", 32));
+    TEST_ASSERT_FALSE(um98x_antenna_str_valid(NULL, 32));
+    TEST_ASSERT_EQUAL_size_t(4, um98x_antenna_str_len("NAME   "));
+    TEST_ASSERT_EQUAL_size_t(0, um98x_antenna_str_len("   "));
+    TEST_ASSERT_EQUAL_size_t(20, um98x_antenna_str_len(IGS_NAME));   /* inner spaces kept */
+}
+
+TEST_CASE("antenna fields: blob round trip, trailing spaces dropped, older blobs", "[um98x_profile]")
+{
+    um98x_base_profile_t a;
+    um98x_base_profile_t b;
+    uint8_t buf[UM98X_PROFILE_BLOB_MAX];
+    um98x_profile_default(&a, TEST_STATION_ID);
+    snprintf(a.antenna_model, sizeof(a.antenna_model), "%s  ", IGS_NAME);
+    snprintf(a.antenna_serial, sizeof(a.antenna_serial), "5000112233 ");
+    a.antenna_setup_id = 7;
+    size_t len = um98x_profile_encode(&a, buf, sizeof(buf));
+    TEST_ASSERT_NOT_EQUAL(0, len);
+    memset(&b, 0x5A, sizeof(b));
+    TEST_ASSERT_TRUE(um98x_profile_decode(buf, len, &b));
+    TEST_ASSERT_EQUAL_STRING(IGS_NAME, b.antenna_model);
+    TEST_ASSERT_EQUAL_STRING("5000112233", b.antenna_serial);
+    TEST_ASSERT_EQUAL_UINT8(7, b.antenna_setup_id);
+
+    /* The longest strings fit the blob. */
+    memset(a.antenna_model, 'M', 31);
+    a.antenna_model[31] = '\0';
+    memset(a.antenna_serial, 'S', 31);
+    a.antenna_serial[31] = '\0';
+    a.rtcm_count = UM98X_MAX_RTCM_MSGS;
+    for (size_t i = 0; i < UM98X_MAX_RTCM_MSGS; i++) {
+        a.rtcm[i].msg = (uint16_t)(1001 + i);
+        a.rtcm[i].period_s = 1;
+    }
+    len = um98x_profile_encode(&a, buf, sizeof(buf));
+    TEST_ASSERT_NOT_EQUAL(0, len);
+    TEST_ASSERT_TRUE(um98x_profile_decode(buf, len, &b));
+    TEST_ASSERT_EQUAL_STRING(a.antenna_model, b.antenna_model);
+    TEST_ASSERT_EQUAL_STRING(a.antenna_serial, b.antenna_serial);
+
+    /* Without a model the serial number and setup ID are never sent: cleared. */
+    um98x_profile_default(&a, TEST_STATION_ID);
+    snprintf(a.antenna_serial, sizeof(a.antenna_serial), "5000112233");
+    a.antenna_setup_id = 3;
+    len = um98x_profile_encode(&a, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode(buf, len, &b));
+    TEST_ASSERT_EQUAL_STRING("", b.antenna_serial);
+    TEST_ASSERT_EQUAL_UINT8(0, b.antenna_setup_id);
+
+    /* A blob written before the antenna fields existed (it ends after the
+     * RTCM list) decodes with an empty antenna. */
+    um98x_profile_default(&a, TEST_STATION_ID);
+    len = um98x_profile_encode(&a, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode(buf, len - 3, &b));   /* two empty strings and the setup ID */
+    TEST_ASSERT_EQUAL_STRING("", b.antenna_model);
+    TEST_ASSERT_EQUAL_UINT32(um98x_profile_hash(&a), um98x_profile_hash(&b));
+}
+
+TEST_CASE("antenna fields: the hash changes with each field, only with a model", "[um98x_profile]")
+{
+    um98x_base_profile_t a;
+    um98x_base_profile_t b;
+    um98x_profile_default(&a, TEST_STATION_ID);
+    um98x_profile_default(&b, TEST_STATION_ID);
+
+    /* No model: serial and setup ID change nothing (and the hash is the
+     * one profiles had before the antenna fields). */
+    snprintf(b.antenna_serial, sizeof(b.antenna_serial), "123");
+    b.antenna_setup_id = 9;
+    TEST_ASSERT_EQUAL_HEX32(DEFAULT_PROFILE_HASH, um98x_profile_hash(&b));
+    snprintf(b.antenna_model, sizeof(b.antenna_model), "   ");   /* blank = none */
+    TEST_ASSERT_EQUAL_HEX32(DEFAULT_PROFILE_HASH, um98x_profile_hash(&b));
+
+    snprintf(a.antenna_model, sizeof(a.antenna_model), "%s", IGS_NAME);
+    snprintf(b.antenna_model, sizeof(b.antenna_model), "%s", IGS_NAME);
+    a.antenna_serial[0] = '\0';
+    b.antenna_serial[0] = '\0';
+    a.antenna_setup_id = 0;
+    b.antenna_setup_id = 0;
+    uint32_t h = um98x_profile_hash(&a);
+    TEST_ASSERT_NOT_EQUAL(DEFAULT_PROFILE_HASH, h);
+    TEST_ASSERT_EQUAL_HEX32(h, um98x_profile_hash(&b));
+    snprintf(b.antenna_model, sizeof(b.antenna_model), "%s ", IGS_NAME);   /* trailing space */
+    TEST_ASSERT_EQUAL_HEX32(h, um98x_profile_hash(&b));
+    snprintf(b.antenna_model, sizeof(b.antenna_model), "TRM59800.00     NONE");
+    TEST_ASSERT_NOT_EQUAL(h, um98x_profile_hash(&b));
+    snprintf(b.antenna_model, sizeof(b.antenna_model), "%s", IGS_NAME);
+    snprintf(b.antenna_serial, sizeof(b.antenna_serial), "1");
+    TEST_ASSERT_NOT_EQUAL(h, um98x_profile_hash(&b));
+    b.antenna_serial[0] = '\0';
+    b.antenna_setup_id = 1;
+    TEST_ASSERT_NOT_EQUAL(h, um98x_profile_hash(&b));
 }

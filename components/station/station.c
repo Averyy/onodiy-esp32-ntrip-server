@@ -23,6 +23,8 @@
 #include <time.h>
 
 #include "board.h"
+#include "diag.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_task_wdt.h"
@@ -82,6 +84,31 @@ _Static_assert(STN_REC_RESYNC == (int)STATION_RECOVER_RESYNC &&
                    STN_REC_RECEIVER_RESET == (int)STATION_RECOVER_RECEIVER_RESET,
                "core recovery actions mirror station_recovery_t");
 
+_Static_assert(STN_MAINT_OK == (int)STATION_MAINT_OK && STN_MAINT_FLASH == (int)STATION_MAINT_REFUSED_FLASH &&
+                   STN_MAINT_SESSION == (int)STATION_MAINT_REFUSED_SESSION &&
+                   STN_MAINT_DURATION == (int)STATION_MAINT_REFUSED_DURATION &&
+                   STN_MAINT_NOT_ON == (int)STATION_MAINT_NOT_ON,
+               "core maintenance reasons mirror station_maint_why_t");
+_Static_assert(STN_SKY_OFF == (int)STATION_LIVE_SKY_OFF && STN_SKY_PENDING == (int)STATION_LIVE_SKY_PENDING &&
+                   STN_SKY_ON == (int)STATION_LIVE_SKY_ON && STN_SKY_ON_PROFILE == (int)STATION_LIVE_SKY_ON_PROFILE &&
+                   STN_SKY_BLOCKED == (int)STATION_LIVE_SKY_BLOCKED &&
+                   STN_SKY_STOPPING == (int)STATION_LIVE_SKY_STOPPING,
+               "core sky states mirror station_live_sky_t");
+_Static_assert(STN_SKY_WHY_NONE == (int)STATION_LIVE_WHY_NONE && STN_SKY_WHY_BUSY == (int)STATION_LIVE_WHY_BUSY &&
+                   STN_SKY_WHY_NOT_STREAMING == (int)STATION_LIVE_WHY_NOT_STREAMING &&
+                   STN_SKY_WHY_MAINTENANCE == (int)STATION_LIVE_WHY_MAINTENANCE &&
+                   STN_SKY_WHY_AUTOCFG_OFF == (int)STATION_LIVE_WHY_AUTOCFG_OFF &&
+                   STN_SKY_WHY_UNSUPPORTED == (int)STATION_LIVE_WHY_UNSUPPORTED &&
+                   STN_SKY_WHY_RECONFIGURED == (int)STATION_LIVE_WHY_RECONFIGURED &&
+                   STN_SKY_WHY_REJECTED == (int)STATION_LIVE_WHY_REJECTED &&
+                   STN_SKY_WHY_NO_ANSWER == (int)STATION_LIVE_WHY_NO_ANSWER &&
+                   STN_SKY_WHY_FLASH == (int)STATION_LIVE_WHY_FLASH,
+               "core sky reasons mirror station_live_why_t");
+_Static_assert(STN_LIVE_END_NONE == (int)STATION_LIVE_END_NONE && STN_LIVE_END_USER == (int)STATION_LIVE_END_USER &&
+                   STN_LIVE_END_EXPIRED == (int)STATION_LIVE_END_EXPIRED &&
+                   STN_LIVE_END_IDLE == (int)STATION_LIVE_END_IDLE && STN_LIVE_END_FLASH == (int)STATION_LIVE_END_FLASH,
+               "core live view end reasons mirror station_live_end_t");
+
 ESP_EVENT_DEFINE_BASE(STATION_EVENT);
 
 /* ---- shared state --------------------------------------------------------- */
@@ -127,6 +154,11 @@ static bool s_update_claimed;
 /* RAW lease taken by the early boot step (recovery actions build only). */
 static gnss_link_lease_t s_boot_lease;
 
+/* Receiver maintenance across an ESP32 software reset (never NVS; a power
+ * cut ends it: the record is ignored after a power-on or brownout reset). */
+static RTC_NOINIT_ATTR stn_maint_rtc_t s_maint_rtc;
+static volatile bool s_maint_end_req;    /* the user's "end now", for the station task */
+
 /* Station task only. */
 static um98x_base_profile_t s_profile;
 static um98x_info_t s_stored_info;       /* gnss/model and gnss/fw as stored (not confirmed) */
@@ -136,10 +168,35 @@ static station_status_t s_pub;
 static gnss_link_lease_t s_lease;        /* the running job's lease */
 static gnss_link_lease_t s_hold_lease;   /* listen-only while a flash journal is open */
 static bool s_paused;
+static bool s_gate_on;                   /* the link's hands-off gate as last set by the station task */
 static bool s_rtcm_ok;
 static uint32_t s_prompt_baud;
 static uint32_t s_arp_fed;
 static station_state_t s_posted_state = STATION_STATE_IDLE;
+
+/* What the last apply session read back and how its antenna and B1C/B2a
+ * steps went (station task; published in the status). */
+static bool s_rx_valid;
+static um98x_rx_settings_t s_rx_settings;
+static int64_t s_rx_at_ms;
+static int64_t s_rx_unix;
+static bool s_ant_sent;
+static bool s_ant_ok;
+static char s_ant_reply[64];
+static bool s_b1c_sent;
+static bool s_b1c_ok;
+static char s_b1c_reply[64];
+static char s_sky_reply[64];             /* the last failed satellite-in-view toggle */
+
+/* Journal records waiting for diag's rate limits (station task). */
+#define JQ_LEN 8
+typedef struct {
+    diag_event_t kind;
+    int32_t a;
+    int32_t b;
+} jrec_t;
+static jrec_t s_jq[JQ_LEN];
+static unsigned s_jq_n;
 
 /* ---- small helpers -------------------------------------------------------- */
 
@@ -753,6 +810,24 @@ static void job_apply(const stn_job_t *job, stn_result_t *r)
     esp_err_t err = um98x_ctl_apply_profile(s_lease, &s_profile, &opts, &s_apply);
     lease_drop();
 
+    if (s_apply.settings_read) {
+        s_rx_valid = true;
+        s_rx_settings = s_apply.settings;
+        s_rx_at_ms = now_ms();
+        s_rx_unix = unix_now();
+    }
+    s_ant_sent = s_apply.antenna_sent;
+    s_ant_ok = s_apply.antenna_ok;
+    snprintf(s_ant_reply, sizeof(s_ant_reply), "%s", s_apply.antenna_reply);
+    s_b1c_sent = s_apply.b1cb2a_sent;
+    s_b1c_ok = s_apply.b1cb2a_ok;
+    snprintf(s_b1c_reply, sizeof(s_b1c_reply), "%s", s_apply.b1cb2a_reply);
+    if (s_ant_sent && !s_ant_ok) {
+        ESP_LOGW(TAG, "antenna model rejected: %s", s_ant_reply);
+    }
+    if (s_b1c_sent && !s_b1c_ok) {
+        ESP_LOGW(TAG, "BeiDou B1C/B2a in RTCM not turned on: %s", s_b1c_reply);
+    }
     r->mode_sent = s_apply.mode_sent;
     r->mode_ack_ms = s_apply.mode_ack_ms;
     r->restarted = s_apply.signal_group_sent || (s_apply.rolled_back && s_apply.rollback_answered);
@@ -842,6 +917,43 @@ static void job_check_position(stn_result_t *r)
     }
 }
 
+/* Satellite-in-view output for the live view: one command under a short
+ * COMMAND lease (RTCM is held back meanwhile; the casters are paused). */
+static void job_sky(const stn_job_t *job, stn_result_t *r)
+{
+    int64_t t0 = esp_timer_get_time();
+    if (lease_take(job->sky_on ? "live view on" : "live view off") != ESP_OK) {
+        r->err = STN_E_STATE;
+        return;
+    }
+    char reply[sizeof(s_sky_reply)];
+    esp_err_t err = um98x_ctl_sat_view(s_lease, job->sky_on, CONFIG_STATION_LIVE_VIEW_SKY_PERIOD_S, reply,
+                                       sizeof(reply));
+    lease_drop();
+    int64_t ms = (esp_timer_get_time() - t0) / 1000;
+    r->lease_ms = ms < 0 ? 0 : (ms > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)ms);
+    switch (err) {
+    case ESP_OK:
+        r->err = STN_OK;
+        break;
+    case ESP_FAIL:
+        r->err = STN_E_FAIL;
+        break;
+    case ESP_ERR_TIMEOUT:
+        r->err = STN_E_TIMEOUT;
+        break;
+    default:
+        r->err = STN_E_STATE;
+        break;
+    }
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "satellite-in-view output %s for the live view (RTCM held %u ms)", job->sky_on ? "on" : "off",
+                 (unsigned)r->lease_ms);
+    } else {
+        snprintf(s_sky_reply, sizeof(s_sky_reply), "%s", reply[0] != '\0' ? reply : esp_err_to_name(err));
+    }
+}
+
 static void run_job(const stn_job_t *job, stn_result_t *r)
 {
     memset(r, 0, sizeof(*r));
@@ -876,6 +988,9 @@ static void run_job(const stn_job_t *job, stn_result_t *r)
     case STN_JOB_CHECK_POSITION:
         job_check_position(r);
         break;
+    case STN_JOB_SKY:
+        job_sky(job, r);
+        break;
     default:
         r->err = STN_E_STATE;
         break;
@@ -898,6 +1013,7 @@ static void fill_in(stn_in_t *in)
     in->profile_survey = (s_profile.base_mode == UM98X_BASE_SURVEY_IN);
     in->survey_s = s_profile.survey_in_s;
     in->rtcm1230_ok = rtcm1230_supported();
+    in->profile_sky = s_profile.sat_view_output;
     portENTER_CRITICAL(&s_lock);
     s_obs_snap = s_obs;
     portEXIT_CRITICAL(&s_lock);
@@ -950,16 +1066,177 @@ static void publish_status(const stn_in_t *in)
     o->detect_saw_bytes = core.detect_saw_bytes;
     um98x_flash_get_progress(&o->flash);
 
+    o->rx_settings_valid = s_rx_valid;
+    if (s_rx_valid) {
+        o->rx_settings = s_rx_settings;
+        int64_t age = (in->now_ms - s_rx_at_ms) / 1000;
+        o->rx_settings_age_s = age < 0 ? 0 : (age > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)age);
+        o->rx_settings_unix = s_rx_unix;
+    }
+    o->antenna_sent = s_ant_sent;
+    o->antenna_ok = s_ant_ok;
+    memcpy(o->antenna_reply, s_ant_reply, sizeof(o->antenna_reply));
+    o->b1cb2a_sent = s_b1c_sent;
+    o->b1cb2a_ok = s_b1c_ok;
+    memcpy(o->b1cb2a_reply, s_b1c_reply, sizeof(o->b1cb2a_reply));
+
+    o->rx_maintenance = core.maint;
+    o->maintenance_left_s = stn_maint_left_s(&core, in->now_ms);
+    o->maintenance_chosen_s = core.maint ? core.maint_chosen_s : 0;
+
+    stn_live_status_t lv;
+    stn_live_status(&core, in, &lv);
+    o->live.open = lv.open;
+    o->live.left_s = lv.left_s;
+    o->live.idle_left_s = lv.idle_left_s;
+    o->live.open_s = lv.open_s;
+    o->live.max_s = (uint32_t)CONFIG_STATION_LIVE_VIEW_MAX_MIN * 60u;
+    o->live.sky = lv.sky;
+    o->live.sky_why = lv.why;
+    o->live.sky_period_s = CONFIG_STATION_LIVE_VIEW_SKY_PERIOD_S;
+    o->live.last_end = lv.last_end;
+    if (lv.why == STN_SKY_WHY_REJECTED || lv.why == STN_SKY_WHY_NO_ANSWER) {
+        memcpy(o->live.sky_reply, s_sky_reply, sizeof(o->live.sky_reply));
+    }
+
     portENTER_CRITICAL(&s_lock);
     s_status = *o;
     s_status_valid = true;
     portEXIT_CRITICAL(&s_lock);
 }
 
+static void journal_push(diag_event_t kind, int32_t a, int32_t b)
+{
+    if (s_jq_n >= JQ_LEN) {
+        memmove(&s_jq[0], &s_jq[1], sizeof(s_jq[0]) * (JQ_LEN - 1u));   /* the oldest gives way */
+        s_jq_n = JQ_LEN - 1u;
+    }
+    s_jq[s_jq_n++] = (jrec_t){ kind, a, b };
+}
+
+/* Write what the journal takes now; a rate-limited record waits for the
+ * next loop, anything else that fails is dropped. */
+static void journal_flush(void)
+{
+    while (s_jq_n > 0) {
+        esp_err_t err = diag_journal_append(s_jq[0].kind, s_jq[0].a, s_jq[0].b);
+        if (err == ESP_ERR_INVALID_STATE) {
+            return;
+        }
+        memmove(&s_jq[0], &s_jq[1], sizeof(s_jq[0]) * (s_jq_n - 1u));
+        s_jq_n--;
+    }
+}
+
+static int32_t sky_detail(int32_t err)
+{
+    switch (err) {
+    case STN_OK:
+        return 0;
+    case STN_E_FAIL:
+        return 1;
+    case STN_E_TIMEOUT:
+        return 2;
+    default:
+        return 3;
+    }
+}
+
+static const char *live_end_name(int32_t why)
+{
+    switch (why) {
+    case STN_LIVE_END_USER:
+        return "stopped";
+    case STN_LIVE_END_EXPIRED:
+        return "time up";
+    case STN_LIVE_END_IDLE:
+        return "nobody watching";
+    case STN_LIVE_END_FLASH:
+        return "receiver update";
+    default:
+        return "?";
+    }
+}
+
+static void handle_notes(const stn_note_t *n, unsigned count)
+{
+    for (unsigned i = 0; i < count; i++) {
+        const stn_note_t *x = &n[i];
+        switch (x->kind) {
+        case STN_NOTE_MAINT_ON:
+            ESP_LOGW(TAG, "receiver maintenance for %d min: nothing is sent to the receiver", (int)(x->a / 60));
+            journal_push(DIAG_EV_RX_MAINT, 1, x->a);
+            break;
+        case STN_NOTE_MAINT_OFF:
+            ESP_LOGW(TAG, "receiver maintenance ended (%s) after %d s: listening first, as at boot",
+                     x->b ? "time up" : "by the user", (int)x->a);
+            journal_push(DIAG_EV_RX_MAINT, 0, x->a);
+            break;
+        case STN_NOTE_LIVE_OPENED:
+            ESP_LOGI(TAG, "live view open for %d s", (int)x->a);
+            journal_push(DIAG_EV_LIVE_VIEW, DIAG_LIVE_OPENED, x->a);
+            break;
+        case STN_NOTE_LIVE_EXTENDED:
+            ESP_LOGI(TAG, "live view extended: %d s left", (int)x->a);
+            journal_push(DIAG_EV_LIVE_VIEW, DIAG_LIVE_EXTENDED, x->a);
+            break;
+        case STN_NOTE_LIVE_CLOSED:
+            ESP_LOGI(TAG, "live view closed (%s) after %d s", live_end_name(x->b), (int)x->a);
+            journal_push(DIAG_EV_LIVE_VIEW, DIAG_LIVE_CLOSED | (int32_t)((uint32_t)x->b << 8), x->a);
+            break;
+        case STN_NOTE_SKY_ON:
+        case STN_NOTE_SKY_OFF:
+            journal_push(DIAG_EV_LIVE_VIEW,
+                         (x->kind == STN_NOTE_SKY_ON ? DIAG_LIVE_SKY_ON : DIAG_LIVE_SKY_OFF) |
+                             (int32_t)((uint32_t)sky_detail(x->b) << 8),
+                         x->a);
+            break;
+        case STN_NOTE_SKY_LEFT_ON:
+            ESP_LOGW(TAG, "satellite-in-view output not turned off after %d tries: it ends with the receiver's "
+                          "next restart",
+                     STN_SKY_OFF_TRIES);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+/* Maintenance: the link's gate, the ledger and the RTC record follow the core. */
+static void sync_maintenance(const stn_in_t *in)
+{
+    bool on;
+    uint32_t left;
+    int64_t start;
+    portENTER_CRITICAL(&s_lock);
+    on = s_core.maint;
+    left = stn_maint_left_s(&s_core, in->now_ms);
+    start = s_core.maint_start_ms;
+    portEXIT_CRITICAL(&s_lock);
+    if (on != s_gate_on) {
+        esp_err_t err = gnss_link_set_hands_off(on);
+        if (err == ESP_OK) {
+            s_gate_on = on;
+            ledger_set_maintenance(on);
+        } else {
+            ESP_LOGW(TAG, "link hands-off %s: %s", on ? "not set" : "not cleared", esp_err_to_name(err));
+        }
+    }
+    if (on) {
+        int64_t spent = (in->now_ms - start) / 1000;
+        stn_maint_rtc_write(&s_maint_rtc, lifecycle_rtc_stamp(), left > 0 ? left : 1,
+                            spent < 0 ? 0 : (uint32_t)spent);
+    } else if (s_maint_rtc.magic != 0) {
+        stn_maint_rtc_write(&s_maint_rtc, 0, 0, 0);
+    }
+}
+
 static void after_step(const stn_in_t *in)
 {
     bool paused;
     station_state_t st;
+    stn_note_t notes[STN_NOTES];
+    unsigned n_notes;
     portENTER_CRITICAL(&s_lock);
     if (s_core.obs_rearm) {
         stn_obs_arm(&s_obs, s_profile.rtcm, s_profile.rtcm_count, in->now_ms);
@@ -967,7 +1244,12 @@ static void after_step(const stn_in_t *in)
     }
     paused = s_core.paused;
     st = (station_state_t)s_core.state;
+    n_notes = stn_take_notes(&s_core, notes, STN_NOTES);
     portEXIT_CRITICAL(&s_lock);
+
+    sync_maintenance(in);
+    handle_notes(notes, n_notes);
+    journal_flush();
 
     if (paused != s_paused) {
         s_paused = paused;
@@ -999,6 +1281,13 @@ static void service(const stn_in_t *in)
         }
         portENTER_CRITICAL(&s_lock);
         stn_restart_seen(&s_core);
+        portEXIT_CRITICAL(&s_lock);
+    }
+
+    if (s_maint_end_req) {
+        s_maint_end_req = false;
+        portENTER_CRITICAL(&s_lock);
+        (void)stn_maint_end(&s_core, in);
         portEXIT_CRITICAL(&s_lock);
     }
 
@@ -1214,10 +1503,37 @@ esp_err_t station_init(void)
             ESP_LOGW(TAG, "staged receiver package not released: %s", esp_err_to_name(rel));
         }
     }
+    /* Maintenance that was on before an ESP32 software reset goes on with
+     * its time left; a power cut ends it, and so does an open journal. */
+    uint32_t stamp = 0;
+    uint32_t left = 0;
+    uint32_t spent = 0;
+    lifecycle_boot_info_t boot;
+    lifecycle_get_boot_info(&boot);
+    bool power_lost = boot.reset_class == LIFECYCLE_RESET_POWER_ON || boot.reset_class == LIFECYCLE_RESET_BROWNOUT;
+    bool restore = !power_lost && !journal_open(s_journal_err) && stn_maint_rtc_read(&s_maint_rtc, &stamp, &left, &spent) &&
+                   lifecycle_rtc_stamp_ok(stamp);
+    if (!restore) {
+        stn_maint_rtc_write(&s_maint_rtc, 0, 0, 0);
+    }
+
     portENTER_CRITICAL(&s_lock);
     stn_init(&s_core, journal_open(s_journal_err));
+    s_core.live_idle_ms = (uint32_t)CONFIG_STATION_LIVE_VIEW_IDLE_S * 1000u;
+    s_core.live_max_ms = (uint32_t)CONFIG_STATION_LIVE_VIEW_MAX_MIN * 60000u;
+    if (restore) {
+        stn_maint_restore(&s_core, left, spent, now_ms());
+    }
     stn_obs_clear(&s_obs);
     portEXIT_CRITICAL(&s_lock);
+    if (restore) {
+        /* Hands off from the first moment: the boot only listens. */
+        if (gnss_link_set_hands_off(true) == ESP_OK) {
+            s_gate_on = true;
+            ledger_set_maintenance(true);
+        }
+        ESP_LOGW(TAG, "receiver maintenance continues after the reset: %u s left, listening only", (unsigned)left);
+    }
     s_inited = true;
     ESP_LOGI(TAG, "sinks wired, profile hash %08x, station ID %u, %s", (unsigned)um98x_profile_hash(&s_profile),
              (unsigned)s_profile.station_id, s_profile.base_mode == UM98X_BASE_FIXED ? "fixed base" : "survey-in");
@@ -1324,6 +1640,14 @@ static esp_err_t running_gate(void)
     return journal_open(jerr) ? ESP_ERR_INVALID_STATE : ESP_OK;
 }
 
+static bool maint_on(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool on = s_core.maint;
+    portEXIT_CRITICAL(&s_lock);
+    return on;
+}
+
 static bool alert_raised(uint32_t alert)
 {
     portENTER_CRITICAL(&s_lock);
@@ -1337,6 +1661,9 @@ esp_err_t station_request_reconfigure(void)
     esp_err_t err = running_gate();
     if (err != ESP_OK) {
         return err;
+    }
+    if (maint_on()) {
+        return ESP_ERR_INVALID_STATE;   /* receiver maintenance: nothing is sent */
     }
     if (alert_raised(STN_ALERT_UNSUPPORTED_MODEL)) {
         return ESP_ERR_NOT_SUPPORTED;
@@ -1362,7 +1689,8 @@ esp_err_t station_request_flash(const station_flash_request_t *req)
     jerr = s_journal_err;
     portEXIT_CRITICAL(&s_lock);
     if (!s_inited || !s_started || journal_open(jerr) || lifecycle_app_trial_active() || app_update_running() ||
-        lifecycle_in_safe_mode() || state != STATION_STATE_STREAMING || !receiver_fresh() || !supported) {
+        lifecycle_in_safe_mode() || state != STATION_STATE_STREAMING || !receiver_fresh() || !supported ||
+        maint_on()) {
         return ESP_ERR_INVALID_STATE;
     }
     /* TODO: prepare (rules on the RAM copy; release the package on failure),
@@ -1398,7 +1726,7 @@ esp_err_t station_flash_user_action(station_flash_action_t action)
         if (action == STATION_FLASH_ACTION_RESTART_RECEIVER && alert_raised(STN_ALERT_RECEIVER_IN_LOADER)) {
             /* Receiver found at its loader without a session: one more
              * restart key at the user's request, then detection. */
-            if (!s_inited || !s_started) {
+            if (!s_inited || !s_started || maint_on()) {
                 return ESP_ERR_INVALID_STATE;
             }
             portENTER_CRITICAL(&s_lock);
@@ -1444,7 +1772,8 @@ esp_err_t station_flash_user_action(station_flash_action_t action)
         return ESP_OK;
     }
     case STATION_FLASH_ACTION_RETRY:
-        if (!s_inited || !waiting || jerr != ESP_OK || lifecycle_app_trial_active() || app_update_running()) {
+        if (!s_inited || !waiting || jerr != ESP_OK || lifecycle_app_trial_active() || app_update_running() ||
+            maint_on()) {
             return ESP_ERR_INVALID_STATE;
         }
         return ESP_ERR_NOT_SUPPORTED;   /* waits for the flasher */
@@ -1494,6 +1823,9 @@ esp_err_t station_lock_position(void)
     if (err != ESP_OK) {
         return err;
     }
+    if (maint_on()) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (alert_raised(STN_ALERT_UNSUPPORTED_MODEL)) {
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -1514,6 +1846,9 @@ esp_err_t station_request_resurvey(void)
     if (err != ESP_OK) {
         return err;
     }
+    if (maint_on()) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (alert_raised(STN_ALERT_UNSUPPORTED_MODEL)) {
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -1522,4 +1857,121 @@ esp_err_t station_request_resurvey(void)
     portEXIT_CRITICAL(&s_lock);
     wake();
     return ESP_OK;
+}
+
+/* ---- receiver maintenance and live view -------------------------------------- */
+
+esp_err_t station_maintenance_start(uint32_t duration_s, station_maint_why_t *why)
+{
+    station_maint_why_t w = STATION_MAINT_OK;
+    esp_err_t ret = ESP_OK;
+    if (duration_s == 0) {
+        duration_s = STN_MAINT_DEFAULT_S;
+    }
+    if (!s_inited || !s_started || lifecycle_in_safe_mode()) {
+        w = STATION_MAINT_REFUSED_NOT_RUNNING;
+        ret = ESP_ERR_INVALID_STATE;
+    } else {
+        esp_err_t jerr;
+        portENTER_CRITICAL(&s_lock);
+        jerr = s_journal_err;
+        portEXIT_CRITICAL(&s_lock);
+        gnss_link_mode_t mode = gnss_link_get_mode();
+        bool lease_held = (mode == GNSS_LINK_MODE_COMMAND || mode == GNSS_LINK_MODE_RAW);
+        if (journal_open(jerr)) {
+            w = STATION_MAINT_REFUSED_FLASH;
+        } else {
+            portENTER_CRITICAL(&s_lock);
+            w = (station_maint_why_t)stn_maint_enter(&s_core, duration_s, lease_held, now_ms());
+            portEXIT_CRITICAL(&s_lock);
+        }
+        if (w == STATION_MAINT_REFUSED_DURATION) {
+            ret = ESP_ERR_INVALID_ARG;
+        } else if (w != STATION_MAINT_OK) {
+            ret = ESP_ERR_INVALID_STATE;
+        } else {
+            /* Hands off from the return on; the station task follows
+             * (ledger, RTC record, journal). */
+            esp_err_t err = gnss_link_set_hands_off(true);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "link hands-off not set yet: %s", esp_err_to_name(err));
+            }
+            wake();
+        }
+    }
+    if (why != NULL) {
+        *why = w;
+    }
+    return ret;
+}
+
+esp_err_t station_maintenance_end(void)
+{
+    if (!s_inited || !s_started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!maint_on()) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    s_maint_end_req = true;
+    wake();
+    return ESP_OK;
+}
+
+esp_err_t station_live_view_start(uint32_t minutes, station_live_why_t *why)
+{
+    station_live_why_t w = STATION_LIVE_WHY_NONE;
+    esp_err_t ret = ESP_OK;
+    if (!s_inited || !s_started || lifecycle_in_safe_mode()) {
+        w = STATION_LIVE_WHY_NOT_RUNNING;
+        ret = ESP_ERR_INVALID_STATE;
+    } else {
+        if (minutes == 0) {
+            minutes = CONFIG_STATION_LIVE_VIEW_MIN;
+        }
+        if (minutes > CONFIG_STATION_LIVE_VIEW_MAX_MIN) {
+            minutes = CONFIG_STATION_LIVE_VIEW_MAX_MIN;
+        }
+        uint8_t cw = STN_SKY_WHY_NONE;
+        portENTER_CRITICAL(&s_lock);
+        int rc = stn_live_start(&s_core, minutes * 60000u, now_ms(), &cw);
+        portEXIT_CRITICAL(&s_lock);
+        if (rc != STN_OK) {
+            w = (station_live_why_t)cw;
+            ret = ESP_ERR_INVALID_STATE;
+        } else {
+            wake();
+        }
+    }
+    if (why != NULL) {
+        *why = w;
+    }
+    return ret;
+}
+
+esp_err_t station_live_view_touch(void)
+{
+    if (!s_inited) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    portENTER_CRITICAL(&s_lock);
+    bool open = s_core.live_open;
+    stn_live_touch(&s_core, now_ms());
+    portEXIT_CRITICAL(&s_lock);
+    return open ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t station_live_view_stop(void)
+{
+    if (!s_inited) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    portENTER_CRITICAL(&s_lock);
+    bool open = s_core.live_open;
+    stn_live_stop(&s_core, now_ms());
+    portEXIT_CRITICAL(&s_lock);
+    if (open) {
+        wake();
+    }
+    return open ? ESP_OK : ESP_ERR_NOT_FOUND;
 }

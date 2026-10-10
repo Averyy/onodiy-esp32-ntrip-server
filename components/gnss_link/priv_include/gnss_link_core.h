@@ -27,6 +27,12 @@
  * Everything else, and everything while the link is OFF, is refused with
  * ESP_ERR_INVALID_STATE.
  *
+ * Hands off (gnss_link_core_set_hands_off: the receiver maintenance state,
+ * the user works on the receiver through its other port): every write and
+ * break, with or without a lease, and every lease acquisition are refused
+ * with ESP_ERR_INVALID_STATE, so nothing reaches the receiver by mistake.
+ * Reception goes on (routing is unchanged).
+ *
  * Routing (gnss_link_core_route), per unit the framer emits:
  *   RTCM3   STREAM: publish. COMMAND or RAW: held, counted in rtcm_held
  *           (expected, never real loss). The RTCM age is stamped either way:
@@ -131,6 +137,7 @@ typedef struct {
     uint32_t last_token;     /**< last token issued */
     const char *owner;       /**< label of the lease holder (not copied) */
     bool prompt_armed;
+    bool hands_off;          /**< transmitting and new leases refused (receiver maintenance) */
     uint32_t baud;
     bool rx_seen;
     int64_t last_rx_us;
@@ -158,6 +165,13 @@ void gnss_link_core_init(gnss_link_core_t *c, uint32_t baud);
  *         lease is already held.
  */
 esp_err_t gnss_link_core_acquire(gnss_link_core_t *c, gnss_link_mode_t mode, const char *owner, uint32_t *token);
+
+/**
+ * Hands off on or off (see above). Turning it on while a lease is held is
+ * refused with ESP_ERR_INVALID_STATE (nothing changes): the holder would
+ * be cut off mid-session. Off always succeeds.
+ */
+esp_err_t gnss_link_core_set_hands_off(gnss_link_core_t *c, bool on);
 
 /** May `token` (0 = no lease) perform `op` now? ESP_OK or ESP_ERR_INVALID_STATE. */
 esp_err_t gnss_link_core_check(const gnss_link_core_t *c, gnss_link_op_t op, uint32_t token);

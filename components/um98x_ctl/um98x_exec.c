@@ -455,6 +455,8 @@ typedef struct {
     uint32_t saved_baud;   /* COM1 baud the receiver comes back at after a restart */
     bool accepted;         /* something was configured: roll back on failure */
     um98x_readback_t rb;
+    bool settings_read;    /* a dump was read in this session */
+    um98x_rx_settings_t settings;   /* from the latest dump */
 } session_t;
 
 /* Record the first failure of the session. */
@@ -486,6 +488,33 @@ static void fail_txn(session_t *s, const char *cmd, um98x_txn_status_t st)
         break;
     }
     fail(s, cmd, reason);
+}
+
+/* Text for a step that did not succeed: the receiver's reply, or why not. */
+static void txn_reason(um98x_exec_t *ex, um98x_txn_status_t st, char *out, size_t cap)
+{
+    if (out == NULL || cap == 0) {
+        return;
+    }
+    switch (st) {
+    case UM98X_TXN_OK:
+        out[0] = '\0';
+        break;
+    case UM98X_TXN_REJECTED:
+        lock(ex);
+        copy_str(out, cap, ex->ch->txn.reason[0] != '\0' ? ex->ch->txn.reason : "rejected");
+        unlock(ex);
+        break;
+    case UM98X_TXN_RESTARTED:
+        copy_str(out, cap, "receiver restarted");
+        break;
+    case UM98X_TXN_LINK_ERROR:
+        copy_str(out, cap, "link error");
+        break;
+    default:
+        copy_str(out, cap, "timeout");
+        break;
+    }
 }
 
 /* One configuring command; record = a failure is the session's failure. */
@@ -523,6 +552,8 @@ static um98x_res_t read_back(session_t *s)
     s->rb.config_ok = true;
     s->rb.config = s->ex->ch->txn.config;
     unlock(s->ex);
+    s->settings = s->rb.config.rx;   /* the latest dump wins */
+    s->settings_read = true;
 
     um98x_txn_status_t st = um98x_exec_txn(s->ex, UM98X_TXN_MODE, UM98X_CMD_MODE, NULL);
     if (st == UM98X_TXN_OK) {
@@ -623,8 +654,22 @@ static um98x_res_t version_tries(um98x_exec_t *ex, uint8_t tries)
     return version_query(ex, UM98X_TXN_VERSION, tries, 0, NULL, NULL);
 }
 
+/* Host to `baud`, a moment to settle, then the version within its tries. */
+static bool answers_at(um98x_exec_t *ex, uint32_t baud)
+{
+    const um98x_port_t *pt = ex->port;
+    if (pt->get_baud(pt->ctx) != baud && !pt->set_baud(pt->ctx, baud)) {
+        return false;
+    }
+    sleep_ms(ex, UM98X_BAUD_VERIFY_DELAY_MS);
+    return version_tries(ex, UM98X_BAUD_VERIFY_TRIES) == UM98X_OK;
+}
+
 /* COM1 is the link itself, so its acknowledgement cannot be relied on: verify
- * at the new baud instead. Never saved on the failure path. */
+ * at the new baud instead. Silent there: look at the old baud first. A
+ * receiver that answers there never switched, so the command goes out once
+ * more before the step fails; only when both bauds are silent is it told to
+ * go back (at the new baud). Never saved on the failure path. */
 static um98x_res_t baud_change(session_t *s)
 {
     um98x_exec_t *ex = s->ex;
@@ -633,33 +678,44 @@ static um98x_res_t baud_change(session_t *s)
     char cmd[UM98X_CMD_MAX];
     snprintf(cmd, sizeof(cmd), "CONFIG COM1 %u", (unsigned)s->p->com1_baud);
 
-    pace(ex);
-    if (!raw_line(ex, cmd)) {
-        fail(s, cmd, "link error");
-        return UM98X_E_FAILED;
-    }
-    s->accepted = true;   /* the receiver may have switched */
-    sleep_ms(ex, UM98X_BAUD_SETTLE_MS);
-    if (!pt->set_baud(pt->ctx, s->p->com1_baud)) {
-        fail(s, cmd, "host baud switch failed");
-        return UM98X_E_FAILED;
-    }
-    sleep_ms(ex, UM98X_BAUD_VERIFY_DELAY_MS);
-    if (version_tries(ex, UM98X_BAUD_VERIFY_TRIES) == UM98X_OK) {
-        s->r->baud_changed = true;
-        return UM98X_OK;
+    for (unsigned attempt = 0; attempt < UM98X_BAUD_ATTEMPTS; attempt++) {
+        pace(ex);
+        if (!raw_line(ex, cmd)) {
+            fail(s, cmd, "link error");
+            return UM98X_E_FAILED;
+        }
+        s->accepted = true;   /* the receiver may have switched */
+        sleep_ms(ex, UM98X_BAUD_SETTLE_MS);
+        if (!pt->set_baud(pt->ctx, s->p->com1_baud)) {
+            fail(s, cmd, "host baud switch failed");
+            return UM98X_E_FAILED;
+        }
+        sleep_ms(ex, UM98X_BAUD_VERIFY_DELAY_MS);
+        if (version_tries(ex, UM98X_BAUD_VERIFY_TRIES) == UM98X_OK) {
+            s->r->baud_changed = true;
+            return UM98X_OK;
+        }
+        if (!answers_at(ex, old)) {
+            break;   /* silent at both bauds */
+        }
+        /* Still at the old baud: the command did not take. */
+        if (attempt + 1 >= UM98X_BAUD_ATTEMPTS) {
+            fail(s, cmd, "receiver stays at the old baud");
+            return UM98X_E_FAILED;
+        }
     }
     fail(s, cmd, "no answer at the new baud");
 
-    /* Back to the old baud, at the new one. */
+    /* Back to the old baud, sent at the new one. */
     char back[UM98X_CMD_MAX];
     snprintf(back, sizeof(back), "CONFIG COM1 %u", (unsigned)old);
+    if (pt->get_baud(pt->ctx) != s->p->com1_baud) {
+        (void)pt->set_baud(pt->ctx, s->p->com1_baud);
+    }
     pace(ex);
     (void)raw_line(ex, back);
     sleep_ms(ex, UM98X_BAUD_SETTLE_MS);
-    (void)pt->set_baud(pt->ctx, old);
-    sleep_ms(ex, UM98X_BAUD_VERIFY_DELAY_MS);
-    if (version_tries(ex, UM98X_BAUD_VERIFY_TRIES) == UM98X_OK) {
+    if (answers_at(ex, old)) {
         return UM98X_E_FAILED;
     }
     uint32_t baud = 0;
@@ -670,8 +726,41 @@ static um98x_res_t baud_change(session_t *s)
     return UM98X_E_LOST;
 }
 
+/*
+ * RESET, written once, then the restart timeline: listen only (nothing is
+ * sent) until the restart banner or t0 + 15 s, then the version in restart
+ * mode (every second) until banner + 20 s, or t0 + 20 s without a banner.
+ * t0 is the end of the RESET write. listen_baud: the host switches there
+ * right after the write (0 = stays). *sent: the RESET went out. The caller
+ * marks the restart as its own (expect_restart).
+ */
+static um98x_res_t reset_wait(um98x_exec_t *ex, uint32_t listen_baud, bool *sent)
+{
+    const um98x_port_t *pt = ex->port;
+    *sent = false;
+    uint64_t banners0 = banner_count(ex);
+    pace(ex);
+    if (!pt->write(pt->ctx, "\r\n", 2) || !raw_line(ex, UM98X_CMD_RESET)) {
+        return UM98X_E_LINK;
+    }
+    *sent = true;
+    int64_t t0 = now_ms(ex);
+    if (listen_baud != 0 && pt->get_baud(pt->ctx) != listen_baud) {
+        (void)pt->set_baud(pt->ctx, listen_baud);
+    }
+    int64_t end = t0 + UM98X_RESTART_LOST_MS;
+    if (wait_banner(ex, banners0, t0 + UM98X_RESTART_BANNER_MS)) {
+        lock(ex);
+        end = ex->ch->last_banner_ms + UM98X_VERSION_RESTART_SPAN_MS;
+        unlock(ex);
+    }
+    return um98x_exec_version(ex, true, end, NULL, NULL);
+}
+
 /* Undo an unsaved session: a plain restart brings back the saved
- * configuration (and the saved baud). */
+ * configuration (and the saved baud), with the same timeline as the
+ * recovery RESET; nothing at the saved baud: 10 s more at the baud used
+ * before the RESET. */
 static void rollback(session_t *s)
 {
     um98x_exec_t *ex = s->ex;
@@ -679,28 +768,19 @@ static void rollback(session_t *s)
     set_expect_restart(ex, true);
     uint32_t before = pt->get_baud(pt->ctx);
     s->r->rolled_back = true;
-    um98x_res_t res = UM98X_E_LINK;
-    pace(ex);
-    if (raw_line(ex, UM98X_CMD_RESET)) {
-        int64_t t0 = now_ms(ex);
-        if (s->saved_baud != before) {
-            (void)pt->set_baud(pt->ctx, s->saved_baud);
+    bool sent = false;
+    um98x_res_t res = reset_wait(ex, s->saved_baud, &sent);
+    if (sent && res != UM98X_OK) {
+        /* Whether a plain restart drops an unsaved baud is not known:
+         * listen and ask at the baud used before the RESET as well. */
+        if (pt->get_baud(pt->ctx) != before) {
+            (void)pt->set_baud(pt->ctx, before);
         }
-        res = um98x_exec_version(ex, true, t0 + UM98X_ROLLBACK_SAVED_MS, NULL, NULL);
-        if (res != UM98X_OK) {
-            /* Whether a plain restart drops an unsaved baud is not known:
-             * listen and ask at the baud used before the RESET as well. */
-            if (pt->get_baud(pt->ctx) != before) {
-                (void)pt->set_baud(pt->ctx, before);
-            }
-            res = um98x_exec_version(ex, true, now_ms(ex) + UM98X_ROLLBACK_PREVIOUS_MS, NULL, NULL);
-        }
+        res = um98x_exec_version(ex, true, now_ms(ex) + UM98X_ROLLBACK_PREVIOUS_MS, NULL, NULL);
     }
     s->r->rollback_answered = (res == UM98X_OK);
-    if (s->r->rolled_back) {
-        /* After the RESET only an answer says where the receiver is. */
-        s->r->answer_baud = (res == UM98X_OK) ? pt->get_baud(pt->ctx) : 0;
-    }
+    /* After the RESET only an answer says where the receiver is. */
+    s->r->answer_baud = (res == UM98X_OK) ? pt->get_baud(pt->ctx) : 0;
     set_expect_restart(ex, false);
 }
 
@@ -784,6 +864,31 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
             }
             s->r->saved = true;
             break;
+        case UM98X_STEP_ANTENNA: {
+            /* Not fatal: a rejection is recorded and shown, the session goes on. */
+            um98x_txn_status_t tst;
+            (void)step(s, UM98X_TXN_COMMAND, cmd, false, false, &tst);
+            s->r->antenna_sent = true;
+            s->r->antenna_ok = (tst == UM98X_TXN_OK);
+            txn_reason(ex, tst, s->r->antenna_reply, sizeof(s->r->antenna_reply));
+            break;
+        }
+        case UM98X_STEP_B1CB2A: {
+            /* Not fatal either. Whether it restarts the receiver is not
+             * known (PROVISIONAL, to be confirmed on hardware): a restart
+             * banner while it is in flight ends the session as failed
+             * (rollback as for any failure). */
+            um98x_txn_status_t tst;
+            (void)step(s, UM98X_TXN_COMMAND, cmd, true, false, &tst);
+            s->r->b1cb2a_sent = true;
+            s->r->b1cb2a_ok = (tst == UM98X_TXN_OK);
+            txn_reason(ex, tst, s->r->b1cb2a_reply, sizeof(s->r->b1cb2a_reply));
+            if (tst == UM98X_TXN_RESTARTED) {
+                fail(s, cmd, "receiver restarted after RTCMB1CB2A");
+                return UM98X_E_FAILED;
+            }
+            break;
+        }
         default:   /* RTCM outputs and the satellite view */
             res = step(s, UM98X_TXN_COMMAND, cmd, false, st->fatal, NULL);
             if (st->kind == UM98X_STEP_RTCM && st->msg == UM98X_RTCM_OPTIONAL) {
@@ -840,6 +945,25 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
         rollback(&s);
     }
     r->baud = pt->get_baud(pt->ctx);
+    if (s.settings_read) {
+        r->settings_read = true;
+        r->settings = s.settings;
+        if (r->saved && r->antenna_ok) {
+            /* The receiver now holds the profile's antenna. */
+            um98x_rx_settings_t *x = &r->settings;
+            size_t nm = um98x_antenna_str_len(p->antenna_model);
+            size_t ns = um98x_antenna_str_len(p->antenna_serial);
+            memset(x->antenna_model, 0, sizeof(x->antenna_model));
+            memset(x->antenna_serial, 0, sizeof(x->antenna_serial));
+            memcpy(x->antenna_model, p->antenna_model, nm);
+            memcpy(x->antenna_serial, p->antenna_serial, ns);
+            x->antenna_setup_id = p->antenna_setup_id;
+            x->antenna_known = true;
+        }
+        if (r->saved && r->b1cb2a_ok) {
+            r->settings.b1cb2a = UM98X_SETTING_ON;
+        }
+    }
     if (res == UM98X_OK || res == UM98X_E_LOST) {
         return res;
     }
@@ -848,25 +972,15 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
 
 um98x_res_t um98x_exec_reset(um98x_exec_t *ex)
 {
-    const um98x_port_t *pt = ex->port;
     /* Our own restart: its banner and the version log after it are not
      * restart evidence. */
     set_expect_restart(ex, true);
-    uint64_t banners0 = banner_count(ex);
-    pace(ex);
-    if (!pt->write(pt->ctx, "\r\n", 2) || !raw_line(ex, UM98X_CMD_RESET)) {
-        set_expect_restart(ex, false);
+    bool sent = false;
+    um98x_res_t res = reset_wait(ex, 0, &sent);
+    set_expect_restart(ex, false);
+    if (!sent) {
         return UM98X_E_LINK;
     }
-    int64_t t0 = now_ms(ex);
-    int64_t end = t0 + UM98X_RESTART_LOST_MS;
-    if (wait_banner(ex, banners0, t0 + UM98X_RESTART_BANNER_MS)) {
-        lock(ex);
-        end = ex->ch->last_banner_ms + UM98X_VERSION_RESTART_SPAN_MS;
-        unlock(ex);
-    }
-    um98x_res_t res = um98x_exec_version(ex, true, end, NULL, NULL);
-    set_expect_restart(ex, false);
     return res == UM98X_OK ? UM98X_OK : UM98X_E_TIMEOUT;
 }
 
@@ -904,4 +1018,25 @@ um98x_res_t um98x_exec_restore_rtcm(um98x_exec_t *ex, const um98x_base_profile_t
         }
     }
     return out;
+}
+
+um98x_res_t um98x_exec_sat_view(um98x_exec_t *ex, bool on, uint16_t period_s, char *reason, size_t cap)
+{
+    if (reason != NULL && cap > 0) {
+        reason[0] = '\0';
+    }
+    char cmd[UM98X_CMD_MAX];
+    if (ex == NULL || um98x_sat_view_command(on, period_s, cmd, sizeof(cmd)) == 0) {
+        return UM98X_E_ARG;
+    }
+    /* Terminate whatever partial line the receiver may hold. */
+    if (!ex->port->write(ex->port->ctx, "\r\n", 2)) {
+        if (reason != NULL && cap > 0) {
+            copy_str(reason, cap, "link error");
+        }
+        return UM98X_E_LINK;
+    }
+    um98x_txn_status_t st = um98x_exec_txn(ex, UM98X_TXN_COMMAND, cmd, NULL);
+    txn_reason(ex, st, reason, cap);
+    return um98x_res_from_txn(st);
 }

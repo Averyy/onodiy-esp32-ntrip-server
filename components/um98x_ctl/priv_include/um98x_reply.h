@@ -38,13 +38,16 @@
 #include <stdint.h>
 
 #include "gnss_framing.h"
+#include "gnss_types.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/** Longest command text (without CR/LF) the layer sends or accepts, plus the terminator. */
-#define UM98X_CMD_MAX       96u
+/** Longest command text (without CR/LF) the layer sends or accepts, plus the
+ *  terminator: the antenna descriptor command with two 31-character
+ *  strings is about 100 characters. */
+#define UM98X_CMD_MAX       128u
 /** Longest failure reason kept (receiver text after "response: "). */
 #define UM98X_REASON_MAX    64u
 /** Longest base-mode log body kept. */
@@ -81,6 +84,7 @@ typedef struct {
     uint8_t signal_group_slave;
     bool com1_baud_known;
     uint32_t com1_baud;
+    um98x_rx_settings_t rx;         /**< B1C/B2a, multipath mitigation, elevation mask, antenna descriptor */
 } um98x_config_readback_t;
 
 /** XOR of n bytes (the receiver's 2-hex checksums). */
@@ -93,9 +97,26 @@ void um98x_line_classify(const char *line, size_t len, um98x_line_t *out);
 bool um98x_echo_matches(const char *echo, size_t echo_len, const char *cmd);
 
 /**
- * Fold one dump item into the read-back: "SIGNALGROUP" ("CONFIG SIGNALGROUP
- * <master> [<slave>]"; a missing slave value reads as 0) and "COM1" ("CONFIG
- * COM1 <baud> ..."). Other items only count.
+ * Fold one dump item into the read-back. Item names compare
+ * case-insensitively; the values follow the item's own name in the item
+ * text (public dump form "$CONFIG,<item>,CONFIG <item> <values>*hh"):
+ *   SIGNALGROUP       "<master> [<slave>]"; a missing slave value reads as 0
+ *   COM1              "<baud> ..."
+ *   RTCMB1CB2A, MMP   the first value: "ENABLE" = on, "DISABLE" = off,
+ *                     anything else or none = unknown; a repeated item:
+ *                     the last line wins
+ *   MASK              the first value, if it is a number of degrees
+ *                     (-90..90, up to one decimal kept): the elevation mask;
+ *                     a line whose first value is not a number (a system
+ *                     mask) leaves it alone
+ *   BASEANTENNAMODEL  "\"<name>\" \"<serial>\" <setup id> ...": the first
+ *                     quoted string is the descriptor, the second the
+ *                     serial number, the next integer (0..255) the setup
+ *                     ID; anything that does not fit (no quotes, a string
+ *                     over 31 characters, no ID) = unknown; the last line
+ *                     wins
+ * Other items only count. PROVISIONAL, to be confirmed on hardware: the
+ * value forms of RTCMB1CB2A, MMP, MASK and BASEANTENNAMODEL.
  */
 void um98x_config_item(um98x_config_readback_t *rb, const char *item, size_t item_len, const char *text,
                        size_t text_len);

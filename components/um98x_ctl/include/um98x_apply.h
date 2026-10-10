@@ -10,11 +10,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "gnss_types.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define UM98X_APPLY_CMD_MAX    96u
+#define UM98X_APPLY_CMD_MAX    128u
 #define UM98X_APPLY_REASON_MAX 64u
 
 typedef struct {
@@ -41,6 +43,22 @@ typedef struct {
     bool receiver_lost;         /**< the receiver could not be found again: nothing more was sent */
     char failed_cmd[UM98X_APPLY_CMD_MAX];     /**< the command that failed ("" on success) */
     char reason[UM98X_APPLY_REASON_MAX];      /**< the receiver's reply text, or "timeout", "link error", ... */
+
+    /** The configuration dump was read in this session (settings is valid). */
+    bool settings_read;
+    /**
+     * What the receiver runs as far as this session knows: the latest
+     * read-back, with the antenna descriptor and B1C/B2a as sent when the
+     * session saved them (a failed session's RESET brings back the read
+     * values).
+     */
+    um98x_rx_settings_t settings;
+    bool antenna_sent;          /**< the antenna descriptor was sent (the read-back differed or was unknown) */
+    bool antenna_ok;            /**< ... and accepted */
+    char antenna_reply[UM98X_APPLY_REASON_MAX];   /**< its rejection text, or "timeout" ("" when accepted) */
+    bool b1cb2a_sent;           /**< BeiDou B1C/B2a in RTCM was turned on (it read back off) */
+    bool b1cb2a_ok;             /**< ... and accepted */
+    char b1cb2a_reply[UM98X_APPLY_REASON_MAX];    /**< its rejection text, or "timeout" ("" when accepted) */
 } um98x_apply_result_t;
 
 #ifdef __cplusplus

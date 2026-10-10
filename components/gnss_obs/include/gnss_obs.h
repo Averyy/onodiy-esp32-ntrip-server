@@ -33,9 +33,17 @@
  *     outage or time reset ("jump"), counted separately, not as gaps;
  *   - the sky view: satellites with azimuth, elevation and CNR from the
  *     satellite-in-view sentences, which the receiver sends only when the
- *     profile's satellite-view output is on (every 10 s). Satellites are
- *     numbered as in the MSM satellite mask: GPS, Galileo, BeiDou and NavIC
- *     by PRN, GLONASS by slot, QZSS as PRN - 192, SBAS as PRN - 119.
+ *     profile's satellite-view output is on (every 10 s) or while the
+ *     station's live view has it on. Satellites are numbered as in the MSM
+ *     satellite mask: GPS, Galileo, BeiDou and NavIC by PRN, GLONASS by
+ *     slot, QZSS as PRN - 192, SBAS as PRN - 119;
+ *   - the live view (gnss_obs_get_live): every satellite of the latest MSM
+ *     epochs with its signals and CNR per band, joined with azimuth and
+ *     elevation from the sky view where known, and totals per
+ *     constellation and band, with ages;
+ *   - the antenna and receiver descriptor the receiver publishes (the latest
+ *     CRC-valid 1033: antenna descriptor, setup ID and serial number,
+ *     receiver type, firmware and serial number; gnss_obs_get_1033).
  *
  * Feeding runs in the GNSS RX task: decoding happens outside the lock, the
  * update under a short spinlock, no allocation, no logging, never blocks.
@@ -125,6 +133,55 @@ typedef struct {
     uint8_t cnr_dbhz;              /**< highest of its signals in the latest report, 0 = not tracked */
 } gnss_obs_sat_t;
 
+#define GNSS_OBS_MAX_LIVE      96   /**< satellites in one live list */
+#define GNSS_OBS_1033_STR_MAX  31   /**< longest 1033 string (characters) */
+
+/** One satellite of the live view. */
+typedef struct {
+    gnss_sys_t sys;
+    uint8_t prn;                   /**< satellite number as in the MSM satellite mask (see above) */
+    bool in_msm;                   /**< in an MSM within the last 10 s (signals and CNR below) */
+    uint32_t msm_age_ms;           /**< since that MSM, UINT32_MAX = only the sky view knows it */
+    uint32_t signal_mask;          /**< MSM signal IDs (bit id-1) */
+    uint8_t band_mask;             /**< bit per gnss_band_t */
+    uint8_t cnr_dbhz[GNSS_BAND_COUNT];   /**< per band: its best signal's CNR, 0 = none */
+    bool has_pos;                  /**< azimuth and elevation known (satellite-in-view output) */
+    int8_t elevation_deg;          /**< -90..90, valid with has_pos */
+    uint16_t azimuth_deg;          /**< 0..359, true north, valid with has_pos */
+    uint8_t sky_cnr_dbhz;          /**< CNR of the latest satellite-in-view report, 0 = none */
+    uint32_t pos_age_ms;           /**< since that report, UINT32_MAX = none */
+} gnss_obs_live_sat_t;
+
+/** Totals of the live view. */
+typedef struct {
+    uint16_t satellites;           /**< listed (MSM or sky view) */
+    uint16_t tracked;              /**< in an MSM within the last 10 s */
+    uint16_t signals;              /**< satellite signals in those MSMs */
+    uint16_t with_pos;             /**< with azimuth and elevation */
+    uint16_t dropped;              /**< listed but beyond the caller's capacity */
+    uint8_t sys_sats[GNSS_SYS_COUNT];                     /**< tracked per constellation */
+    uint8_t sys_band_sats[GNSS_SYS_COUNT][GNSS_BAND_COUNT];/**< tracked per constellation and band */
+    uint16_t band_sats[GNSS_BAND_COUNT];                  /**< tracked per band, every constellation */
+    uint8_t band_cnr_dbhz[GNSS_BAND_COUNT];               /**< mean CNR per band over those satellites, 0 = none */
+    uint8_t cnr_dbhz;                                     /**< mean CNR over every satellite band, 0 = none */
+    uint32_t msm_age_ms;           /**< since the latest MSM, UINT32_MAX = never */
+    uint32_t sky_age_ms;           /**< since the latest satellite-in-view sentence, UINT32_MAX = never */
+} gnss_obs_live_t;
+
+/** The latest CRC-valid 1033 (antenna and receiver descriptor) the receiver sent. */
+typedef struct {
+    bool valid;
+    uint16_t station_id;
+    char antenna[GNSS_OBS_1033_STR_MAX + 1];          /**< antenna descriptor (IGS name and radome, or the receiver's null name) */
+    uint8_t setup_id;
+    char antenna_serial[GNSS_OBS_1033_STR_MAX + 1];
+    char receiver_type[GNSS_OBS_1033_STR_MAX + 1];
+    char receiver_fw[GNSS_OBS_1033_STR_MAX + 1];
+    char receiver_serial[GNSS_OBS_1033_STR_MAX + 1];
+    uint32_t age_ms;               /**< since that frame, UINT32_MAX = never */
+    uint32_t bad_frames;           /**< 1033 frames that did not decode (a count over 31, a string beyond the frame), since boot */
+} gnss_obs_1033_t;
+
 esp_err_t gnss_obs_init(void);
 
 /** Every CRC-valid RTCM3 frame (GNSS RX task; never blocks). */
@@ -166,6 +223,24 @@ esp_err_t gnss_obs_get_sky(gnss_obs_sat_t *out, size_t *count);
 esp_err_t gnss_obs_get_arp(gnss_obs_arp_t *out);
 
 /**
+ * The live view: satellites sorted by constellation and satellite number
+ * and the totals (see above). *count in = capacity of out
+ * (GNSS_OBS_MAX_LIVE holds every satellite one receiver tracks), out =
+ * filled; totals (required) cover every satellite, also those beyond the
+ * capacity. Satellites have azimuth and elevation only while the receiver
+ * sends satellite-in-view sentences. ESP_ERR_INVALID_ARG without totals or
+ * count, or without out for a non-zero capacity.
+ */
+esp_err_t gnss_obs_get_live(gnss_obs_live_sat_t *out, size_t *count, gnss_obs_live_t *totals);
+
+/**
+ * The antenna and receiver descriptor as published (latest CRC-valid 1033;
+ * nothing is rewritten). ESP_ERR_NOT_FOUND (out->valid false, bad_frames
+ * filled) before the first one that decoded.
+ */
+esp_err_t gnss_obs_get_1033(gnss_obs_1033_t *out);
+
+/**
  * GPS time of the latest GPS MSM epoch: its epoch time as sent (ms of the
  * GPS week) and the time since that MSM arrived. ESP_ERR_NOT_FOUND when no
  * GPS MSM arrived within the last 10 s; ESP_ERR_INVALID_ARG without both
@@ -173,7 +248,7 @@ esp_err_t gnss_obs_get_arp(gnss_obs_arp_t *out);
  */
 esp_err_t gnss_obs_get_gps_time(uint32_t *tow_ms, uint32_t *age_ms);
 
-/** Forget every observation (after a receiver reconfigure or flash); the expected messages stay. */
+/** Forget every observation (after a receiver reconfigure or flash), the 1033 included; the expected messages stay. */
 void gnss_obs_reset(void);
 
 #ifdef __cplusplus

@@ -376,3 +376,155 @@ TEST_CASE("base: lock the 1005 position, verify it, re-survey", "[um98x_base]")
     TEST_ASSERT_EQUAL_INT64(0, now.locked_unix);
     TEST_ASSERT_FALSE(um98x_arp_to_position(centre, &now));
 }
+
+/* ---- antenna descriptor and B1C/B2a ---------------------------------------------- */
+
+#define PLAN_IGS_NAME "TRM59800.00     SCIS"
+
+static void antenna_readback(um98x_readback_t *rb, const char *model, const char *serial, uint8_t id)
+{
+    rb->config.rx.antenna_known = true;
+    snprintf(rb->config.rx.antenna_model, sizeof(rb->config.rx.antenna_model), "%s", model);
+    snprintf(rb->config.rx.antenna_serial, sizeof(rb->config.rx.antenna_serial), "%s", serial);
+    rb->config.rx.antenna_setup_id = id;
+}
+
+static int step_index(const um98x_plan_t *plan, um98x_step_kind_t kind)
+{
+    for (size_t i = 0; i < plan->count; i++) {
+        if (plan->step[i].kind == kind) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+TEST_CASE("plan: the antenna descriptor only with a model that the receiver does not hold", "[um98x_plan]")
+{
+    um98x_base_profile_t p;
+    um98x_readback_t rb;
+    um98x_plan_t plan;
+    char text[768];
+
+    /* No model in the profile: never sent, whatever the receiver holds. */
+    survey_profile(&p);
+    matching_readback(&p, &rb);
+    antenna_readback(&rb, "SOMETHING ELSE", "", 0);
+    um98x_plan_build(&p, &rb, 115200, false, &plan);
+    TEST_ASSERT_EQUAL_INT(-1, step_index(&plan, UM98X_STEP_ANTENNA));
+    TEST_ASSERT_TRUE(um98x_antenna_matches(&p, &rb));
+
+    /* A model the read-back does not show: sent after the base mode, before
+     * the outputs; not fatal. */
+    snprintf(p.antenna_model, sizeof(p.antenna_model), "%s", PLAN_IGS_NAME);
+    snprintf(p.antenna_serial, sizeof(p.antenna_serial), "5000112233");
+    p.antenna_setup_id = 3;
+    rb.mode_ok = false;   /* base mode sent as well */
+    um98x_plan_build(&p, &rb, 115200, false, &plan);
+    plan_text(&p, &plan, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("MODE BASE 1234 TIME 600 0|"
+                             "CONFIG BASEANTENNAMODEL \"TRM59800.00     SCIS\" \"5000112233\" 3 USER|"
+                             "RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
+                             "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1230 COM1 1|SAVECONFIG",
+                             text);
+    TEST_ASSERT_FALSE(plan.step[step_index(&plan, UM98X_STEP_ANTENNA)].fatal);
+
+    /* The same descriptor (trailing spaces aside): not sent. */
+    matching_readback(&p, &rb);
+    antenna_readback(&rb, PLAN_IGS_NAME "  ", "5000112233 ", 3);
+    um98x_plan_build(&p, &rb, 115200, false, &plan);
+    TEST_ASSERT_EQUAL_INT(-1, step_index(&plan, UM98X_STEP_ANTENNA));
+
+    /* Name, serial or setup ID different, or the read-back unknown: sent. */
+    antenna_readback(&rb, "TRM59800.00     NONE", "5000112233", 3);
+    um98x_plan_build(&p, &rb, 115200, false, &plan);
+    TEST_ASSERT_EQUAL_INT(0, step_index(&plan, UM98X_STEP_ANTENNA));
+    antenna_readback(&rb, PLAN_IGS_NAME, "5000112234", 3);
+    um98x_plan_build(&p, &rb, 115200, false, &plan);
+    TEST_ASSERT_EQUAL_INT(0, step_index(&plan, UM98X_STEP_ANTENNA));
+    antenna_readback(&rb, PLAN_IGS_NAME, "5000112233", 4);
+    um98x_plan_build(&p, &rb, 115200, false, &plan);
+    TEST_ASSERT_EQUAL_INT(0, step_index(&plan, UM98X_STEP_ANTENNA));
+    rb.config.rx.antenna_known = false;
+    um98x_plan_build(&p, &rb, 115200, false, &plan);
+    TEST_ASSERT_EQUAL_INT(0, step_index(&plan, UM98X_STEP_ANTENNA));
+    rb.config_ok = false;
+    um98x_plan_build(&p, &rb, 115200, false, &plan);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, step_index(&plan, UM98X_STEP_ANTENNA));
+
+    /* The longest strings keep the command under 128 bytes. */
+    memset(p.antenna_model, 'M', 31);
+    p.antenna_model[31] = '\0';
+    memset(p.antenna_serial, 'S', 31);
+    p.antenna_serial[31] = '\0';
+    p.antenna_setup_id = 255;
+    um98x_step_t st = { UM98X_STEP_ANTENNA, false, 0, 0 };
+    char cmd[UM98X_CMD_MAX];
+    size_t n = um98x_step_command(&p, &st, cmd, sizeof(cmd));
+    TEST_ASSERT_NOT_EQUAL(0, n);
+    TEST_ASSERT_LESS_THAN_size_t(UM98X_CMD_MAX - 4u, n);   /* with CR LF before and after */
+    TEST_ASSERT_TRUE(um98x_cmd_normalise(cmd, text, sizeof(text)));
+}
+
+TEST_CASE("plan: B1C/B2a in RTCM is turned on only when it reads back off", "[um98x_plan]")
+{
+    um98x_base_profile_t p;
+    um98x_readback_t rb;
+    um98x_plan_t plan;
+    char text[768];
+    survey_profile(&p);
+
+    matching_readback(&p, &rb);
+    rb.config.rx.b1cb2a = UM98X_SETTING_OFF;
+    um98x_plan_build(&p, &rb, 115200, false, &plan);
+    plan_text(&p, &plan, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("CONFIG RTCMB1CB2A ENABLE|RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|"
+                             "RTCM1087 COM1 1|RTCM1097 COM1 1|RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1230 COM1 1|"
+                             "SAVECONFIG",
+                             text);
+    TEST_ASSERT_FALSE(plan.step[0].fatal);
+
+    /* On or unknown: never sent. */
+    rb.config.rx.b1cb2a = UM98X_SETTING_ON;
+    um98x_plan_build(&p, &rb, 115200, false, &plan);
+    TEST_ASSERT_EQUAL_INT(-1, step_index(&plan, UM98X_STEP_B1CB2A));
+    rb.config.rx.b1cb2a = UM98X_SETTING_UNKNOWN;
+    um98x_plan_build(&p, &rb, 115200, false, &plan);
+    TEST_ASSERT_EQUAL_INT(-1, step_index(&plan, UM98X_STEP_B1CB2A));
+    rb.config.rx.b1cb2a = UM98X_SETTING_OFF;
+    rb.config_ok = false;   /* no dump at all */
+    um98x_plan_build(&p, &rb, 115200, false, &plan);
+    TEST_ASSERT_EQUAL_INT(-1, step_index(&plan, UM98X_STEP_B1CB2A));
+
+    /* Order with everything: signal group, baud, base mode, antenna, B1C/B2a, outputs, save. */
+    snprintf(p.antenna_model, sizeof(p.antenna_model), "%s", PLAN_IGS_NAME);
+    p.com1_baud = 460800;
+    matching_readback(&p, &rb);
+    rb.config.signal_group_master = 4;
+    rb.mode_ok = false;
+    rb.config.rx.b1cb2a = UM98X_SETTING_OFF;
+    um98x_plan_build(&p, &rb, 115200, false, &plan);
+    TEST_ASSERT_EQUAL_INT(0, step_index(&plan, UM98X_STEP_SIGNALGROUP));
+    TEST_ASSERT_EQUAL_INT(1, step_index(&plan, UM98X_STEP_BAUD));
+    TEST_ASSERT_EQUAL_INT(2, step_index(&plan, UM98X_STEP_MODE));
+    TEST_ASSERT_EQUAL_INT(3, step_index(&plan, UM98X_STEP_ANTENNA));
+    TEST_ASSERT_EQUAL_INT(4, step_index(&plan, UM98X_STEP_B1CB2A));
+    TEST_ASSERT_EQUAL_INT(5, step_index(&plan, UM98X_STEP_RTCM));
+
+    /* Neither belongs to the RTCM-only restore. */
+    TEST_ASSERT_TRUE(um98x_plan_rtcm_only(&p, &plan));
+    TEST_ASSERT_EQUAL_INT(-1, step_index(&plan, UM98X_STEP_B1CB2A));
+    TEST_ASSERT_EQUAL_INT(-1, step_index(&plan, UM98X_STEP_ANTENNA));
+}
+
+TEST_CASE("plan: satellite-in-view output for the live view, never saved", "[um98x_plan]")
+{
+    char cmd[UM98X_CMD_MAX];
+    TEST_ASSERT_NOT_EQUAL(0, um98x_sat_view_command(true, 5, cmd, sizeof(cmd)));
+    TEST_ASSERT_EQUAL_STRING("GPGSV COM1 5", cmd);
+    TEST_ASSERT_NOT_EQUAL(0, um98x_sat_view_command(false, 0, cmd, sizeof(cmd)));
+    TEST_ASSERT_EQUAL_STRING("UNLOG COM1 GPGSV", cmd);
+    TEST_ASSERT_EQUAL_size_t(0, um98x_sat_view_command(true, 0, cmd, sizeof(cmd)));
+    TEST_ASSERT_EQUAL_size_t(0, um98x_sat_view_command(true, UM98X_SAT_VIEW_PERIOD_MAX + 1, cmd, sizeof(cmd)));
+    TEST_ASSERT_EQUAL_size_t(0, um98x_sat_view_command(true, 5, cmd, 4));
+}

@@ -71,6 +71,10 @@ typedef struct {
     char reject_prefix[40];
     int reject_n;
     int saves;
+    char b1c, saved_b1c;  /* B1C/B2a in RTCM: 'E' enabled, 'D' disabled, 0 = not in the dump */
+    bool b1c_restarts;    /* turning B1C/B2a on restarts the receiver */
+    char ant[120], saved_ant[120];   /* antenna descriptor values ("" = not in the dump) */
+    unsigned gsv;         /* satellite-in-view output period, 0 = off */
 
     /* records */
     sim_rx_t rx[MAX_RX];
@@ -118,6 +122,9 @@ static void restart(sim_t *s, int64_t dur)
     s->rx_baud = s->saved_baud;
     strcpy(s->mode, s->saved_mode);
     s->output = s->saved_output;
+    s->b1c = s->saved_b1c;
+    strcpy(s->ant, s->saved_ant);
+    s->gsv = 0;   /* never saved */
     if (s->dies_on_restart) {
         s->present = false;
         return;
@@ -188,7 +195,15 @@ static void receive(sim_t *s, const char *cmd)
         snprintf(item, sizeof(item), "CONFIG,COM1,CONFIG COM1 %u", (unsigned)s->rx_baud);
         emit_checked(s, '$', item, 90);
         emit_checked(s, '$', "CONFIG,MMP,CONFIG MMP ENABLE", 120);
-        emit_checked(s, '$', "CONFIG,RTCMB1CB2A,CONFIG RTCMB1CB2A ENABLE", 150);
+        if (s->b1c != 0) {
+            snprintf(item, sizeof(item), "CONFIG,RTCMB1CB2A,CONFIG RTCMB1CB2A %s", s->b1c == 'E' ? "ENABLE" : "DISABLE");
+            emit_checked(s, '$', item, 150);
+        }
+        emit_checked(s, '$', "CONFIG,MASK,CONFIG MASK 5.0", 160);
+        if (s->ant[0] != '\0') {
+            snprintf(item, sizeof(item), "CONFIG,BASEANTENNAMODEL,CONFIG BASEANTENNAMODEL %s", s->ant);
+            emit_checked(s, '$', item, 170);
+        }
     } else if (strcmp(up, "MODE") == 0) {
         char log[LINE_MAX_];
         reply(s, cmd, "OK", 30);
@@ -221,12 +236,29 @@ static void receive(sim_t *s, const char *cmd)
             s->output = true;
             reply(s, cmd, "OK", 30);
         }
-    } else if (strcmp(up, "GPGSV COM1 10") == 0) {
+    } else if (sscanf(up, "GPGSV COM1 %u", &a) == 1) {
+        s->gsv = a;
+        reply(s, cmd, "OK", 30);
+    } else if (strcmp(up, "UNLOG COM1 GPGSV") == 0) {
+        s->gsv = 0;
+        reply(s, cmd, "OK", 30);
+    } else if (strcmp(up, "CONFIG RTCMB1CB2A ENABLE") == 0) {
+        s->b1c = 'E';
+        if (s->b1c_restarts) {
+            s->saved_b1c = 'E';   /* saves itself, like a signal-group change */
+            restart(s, s->restart_ms);
+        } else {
+            reply(s, cmd, "OK", 30);
+        }
+    } else if (strncmp(up, "CONFIG BASEANTENNAMODEL ", 24) == 0) {
+        snprintf(s->ant, sizeof(s->ant), "%s", cmd + 24);
         reply(s, cmd, "OK", 30);
     } else if (strcmp(up, "SAVECONFIG") == 0) {
         s->saved_baud = s->rx_baud;
         strcpy(s->saved_mode, s->mode);
         s->saved_output = s->output;
+        s->saved_b1c = s->b1c;
+        strcpy(s->saved_ant, s->ant);
         s->saves++;
         reply(s, cmd, "OK", 300);
     } else if (strcmp(up, "RESET") == 0) {
@@ -373,6 +405,7 @@ static sim_t *sim_init(void)
     strcpy(s->saved_mode, s->mode);
     s->output = s->saved_output = true;
     s->r1230 = true;
+    s->b1c = s->saved_b1c = 'E';   /* the factory value per public dumps */
     s->version = TV_VERSIONA_UM982;
     s->restart_ms = 3000;
     s->banner = true;
@@ -681,16 +714,72 @@ TEST_CASE("exec: a baud change that does not take is undone and never saved", "[
     um98x_apply_result_t r;
     TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
     TEST_ASSERT_EQUAL_STRING("CONFIG COM1 460800", r.failed_cmd);
-    TEST_ASSERT_EQUAL_STRING("no answer at the new baud", r.reason);
+    TEST_ASSERT_EQUAL_STRING("receiver stays at the old baud", r.reason);
     TEST_ASSERT_FALSE(r.baud_changed);
     TEST_ASSERT_EQUAL_UINT32(115200, s->host_baud);
     TEST_ASSERT_EQUAL_UINT32(115200, r.baud);
-    int back = nth(s, "CONFIG COM1 115200", 0);
-    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, back);
-    TEST_ASSERT_EQUAL_UINT32(460800, s->rx[back].host_baud);
+    /* Silent at the new baud, answering at the old one: it never switched,
+     * so the command went out once more; it is told to go back only when
+     * both bauds are silent. */
+    TEST_ASSERT_EQUAL_INT(2, count(s, "CONFIG COM1 460800"));
+    TEST_ASSERT_EQUAL_INT(0, count(s, "CONFIG COM1 115200"));
+    int first = nth(s, "CONFIG COM1 460800", 0);
+    int second = nth(s, "CONFIG COM1 460800", 1);
+    TEST_ASSERT_EQUAL_UINT32(115200, s->rx[first].host_baud);
+    TEST_ASSERT_EQUAL_UINT32(115200, s->rx[second].host_baud);
+    bool asked_old = false;
+    for (int i = first + 1; i < second; i++) {
+        if (strcmp(s->rx[i].cmd, "VERSIONA") == 0 && s->rx[i].host_baud == 115200) {
+            asked_old = true;   /* the old baud was checked before the second send */
+        }
+    }
+    TEST_ASSERT_TRUE(asked_old);
     TEST_ASSERT_EQUAL_INT(0, count(s, "SAVECONFIG"));
     TEST_ASSERT_EQUAL_INT(0, s->saves);
     TEST_ASSERT_TRUE(r.rolled_back);
+}
+
+TEST_CASE("exec: a baud command lost once is sent again and the change goes through", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    configured(s);
+    snprintf(s->drop_prefix, sizeof(s->drop_prefix), "CONFIG COM1");
+    s->drop_n = 1;   /* the first CONFIG COM1 460800 never arrives */
+    um98x_base_profile_t p;
+    default_profile(&p);
+    p.com1_baud = 460800;
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.baud_changed);
+    TEST_ASSERT_TRUE(r.saved);
+    TEST_ASSERT_FALSE(r.rolled_back);
+    TEST_ASSERT_EQUAL_UINT32(460800, s->saved_baud);
+    TEST_ASSERT_EQUAL_INT(2, count(s, "CONFIG COM1 460800"));
+    TEST_ASSERT_EQUAL_INT(0, count(s, "CONFIG COM1 115200"));
+    TEST_ASSERT_EQUAL_INT(0, count(s, "RESET"));
+}
+
+TEST_CASE("exec: silent at both bauds, the receiver is told to go back at the new one", "[um98x_exec]")
+{
+    /* It switches, then hears nothing at 460800 for a while. */
+    sim_t *s = sim_init();
+    configured(s);
+    s->deaf_baud = 460800;
+    s->deaf_n = 3;
+    um98x_base_profile_t p;
+    default_profile(&p);
+    p.com1_baud = 460800;
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_EQUAL_STRING("no answer at the new baud", r.reason);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "CONFIG COM1 460800"));   /* the old baud was silent too: no second send */
+    int back = nth(s, "CONFIG COM1 115200", 0);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, back);
+    TEST_ASSERT_EQUAL_UINT32(460800, s->rx[back].host_baud);
 }
 
 TEST_CASE("exec: an unsupported model is never configured", "[um98x_exec]")
@@ -1082,4 +1171,259 @@ TEST_CASE("exec: restoring output sends the RTCM messages only", "[um98x_exec]")
     TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_restore_rtcm(&s->ex, &p, &r));
     TEST_ASSERT_EQUAL_STRING("RTCM1033 COM1 1", r.failed_cmd);
     TEST_ASSERT_EQUAL_INT(1, count(s, "RTCM1127"));
+}
+
+/* ---- antenna descriptor, B1C/B2a, the rollback's RESET timeline, sky view ---- */
+
+#define EXEC_IGS_NAME "TRM59800.00     SCIS"
+
+TEST_CASE("exec: B1C/B2a that reads back off is turned on; on or unknown is left alone", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    configured(s);
+    s->b1c = s->saved_b1c = 'D';
+    um98x_base_profile_t p;
+    default_profile(&p);
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.b1cb2a_sent);
+    TEST_ASSERT_TRUE(r.b1cb2a_ok);
+    TEST_ASSERT_EQUAL_STRING("", r.b1cb2a_reply);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "CONFIG RTCMB1CB2A ENABLE"));
+    TEST_ASSERT_LESS_THAN_INT(nth(s, "RTCM1005 COM1 1", 0), nth(s, "CONFIG RTCMB1CB2A ENABLE", 0));
+    TEST_ASSERT_EQUAL('E', s->saved_b1c);   /* saved with the rest */
+    TEST_ASSERT_TRUE(r.settings_read);
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_ON, r.settings.b1cb2a);   /* as it runs now */
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_ON, r.settings.mmp);
+    TEST_ASSERT_TRUE(r.settings.mask_known);
+    TEST_ASSERT_EQUAL_INT16(50, r.settings.mask_ddeg);
+
+    /* Already on: not sent. */
+    s = sim_init();
+    configured(s);
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_FALSE(r.b1cb2a_sent);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "CONFIG RTCMB1CB2A"));
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_ON, r.settings.b1cb2a);
+
+    /* Not in the dump: unknown, not sent. */
+    s = sim_init();
+    configured(s);
+    s->b1c = s->saved_b1c = 0;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_FALSE(r.b1cb2a_sent);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "CONFIG RTCMB1CB2A"));
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_UNKNOWN, r.settings.b1cb2a);
+}
+
+TEST_CASE("exec: a rejected B1C/B2a command is recorded and the session goes on", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    configured(s);
+    s->b1c = s->saved_b1c = 'D';
+    snprintf(s->reject_prefix, sizeof(s->reject_prefix), "CONFIG RTCMB1CB2A");
+    s->reject_n = 10;
+    um98x_base_profile_t p;
+    default_profile(&p);
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.saved);
+    TEST_ASSERT_TRUE(r.b1cb2a_sent);
+    TEST_ASSERT_FALSE(r.b1cb2a_ok);
+    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", r.b1cb2a_reply);
+    TEST_ASSERT_EQUAL_INT(2, count(s, "CONFIG RTCMB1CB2A ENABLE"));   /* one resend after the refusal */
+    TEST_ASSERT_EQUAL_STRING("", r.failed_cmd);
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_OFF, r.settings.b1cb2a);   /* still off */
+    TEST_ASSERT_EQUAL_INT(8, count(s, "RTCM"));
+}
+
+TEST_CASE("exec: a restart while B1C/B2a is in flight fails the session", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    configured(s);
+    s->b1c = s->saved_b1c = 'D';
+    s->b1c_restarts = true;
+    s->restart_ms = 1500;   /* the banner comes well within the command's reply time */
+    um98x_base_profile_t p;
+    default_profile(&p);
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_EQUAL_STRING("CONFIG RTCMB1CB2A ENABLE", r.failed_cmd);
+    TEST_ASSERT_EQUAL_STRING("receiver restarted after RTCMB1CB2A", r.reason);
+    TEST_ASSERT_FALSE(r.saved);
+    TEST_ASSERT_TRUE(r.rolled_back);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "SAVECONFIG"));
+    TEST_ASSERT_EQUAL_INT(0, count(s, "RTCM1005"));
+}
+
+TEST_CASE("exec: the antenna descriptor is sent only when the receiver holds another one", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    configured(s);   /* no antenna line in its dump: unknown */
+    um98x_base_profile_t p;
+    default_profile(&p);
+    snprintf(p.antenna_model, sizeof(p.antenna_model), "%s", EXEC_IGS_NAME);
+    snprintf(p.antenna_serial, sizeof(p.antenna_serial), "5000112233");
+    p.antenna_setup_id = 3;
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.antenna_sent);
+    TEST_ASSERT_TRUE(r.antenna_ok);
+    int ant = nth(s, "CONFIG BASEANTENNAMODEL \"" EXEC_IGS_NAME "\" \"5000112233\" 3 USER", 0);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, ant);
+    TEST_ASSERT_LESS_THAN_INT(nth(s, "RTCM1005 COM1 1", 0), ant);
+    TEST_ASSERT_EQUAL_STRING("\"" EXEC_IGS_NAME "\" \"5000112233\" 3 USER", s->saved_ant);
+    TEST_ASSERT_TRUE(r.settings.antenna_known);
+    TEST_ASSERT_EQUAL_STRING(EXEC_IGS_NAME, r.settings.antenna_model);
+
+    /* The receiver holds it now: the next session reads it back and sends nothing. */
+    s->nrx = 0;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_FALSE(r.antenna_sent);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "CONFIG BASEANTENNAMODEL"));
+    TEST_ASSERT_TRUE(r.settings.antenna_known);
+    TEST_ASSERT_EQUAL_STRING("5000112233", r.settings.antenna_serial);
+    TEST_ASSERT_EQUAL_UINT8(3, r.settings.antenna_setup_id);
+
+    /* No model in the profile: never sent, the receiver keeps its own. */
+    s = sim_init();
+    configured(s);
+    default_profile(&p);
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_FALSE(r.antenna_sent);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "CONFIG BASEANTENNAMODEL"));
+
+    /* A rejection is recorded; the session is saved without it. */
+    s = sim_init();
+    configured(s);
+    snprintf(p.antenna_model, sizeof(p.antenna_model), "%s", EXEC_IGS_NAME);
+    snprintf(s->reject_prefix, sizeof(s->reject_prefix), "CONFIG BASEANTENNAMODEL");
+    s->reject_n = 10;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.saved);
+    TEST_ASSERT_TRUE(r.antenna_sent);
+    TEST_ASSERT_FALSE(r.antenna_ok);
+    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", r.antenna_reply);
+    TEST_ASSERT_EQUAL_STRING("", r.failed_cmd);
+    TEST_ASSERT_FALSE(r.settings.antenna_known);
+}
+
+/* Index of the last command named cmd, -1 if none. */
+static int last_of(const sim_t *s, const char *cmd)
+{
+    for (int i = s->nrx - 1; i >= 0; i--) {
+        if (strcmp(s->rx[i].cmd, cmd) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+TEST_CASE("exec: the rollback RESET listens until the banner, then asks", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    configured(s);
+    snprintf(s->reject_prefix, sizeof(s->reject_prefix), "RTCM1077");
+    s->reject_n = 10;
+    um98x_base_profile_t p;
+    default_profile(&p);
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.rollback_answered);
+    int reset = nth(s, "RESET", 0);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, reset);
+    TEST_ASSERT_LESS_THAN_INT(s->nrx, reset + 1);
+    /* Nothing between the RESET and its banner (3 s later): the first query
+     * comes after it. */
+    TEST_ASSERT_GREATER_OR_EQUAL_INT64(s->rx[reset].at + s->restart_ms, s->rx[reset + 1].at);
+    TEST_ASSERT_EQUAL_STRING("VERSIONA", s->rx[reset + 1].cmd);
+    TEST_ASSERT_EQUAL_UINT64(0, s->ch.stats.restarts);   /* our own restart */
+    TEST_ASSERT_FALSE(s->ch.expect_restart);
+}
+
+TEST_CASE("exec: without a banner the rollback asks from 15 s to 20 s, then 10 s at the previous baud", "[um98x_exec]")
+{
+    /* The baud change took (unsaved), then a fatal step: the RESET goes out
+     * at 460800, the receiver's saved baud is 115200; it never comes back. */
+    sim_t *s = sim_init();
+    configured(s);
+    s->banner = false;
+    s->dies_on_restart = true;
+    snprintf(s->reject_prefix, sizeof(s->reject_prefix), "RTCM1077");
+    s->reject_n = 10;
+    um98x_base_profile_t p;
+    default_profile(&p);
+    p.com1_baud = 460800;
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.rolled_back);
+    TEST_ASSERT_FALSE(r.rollback_answered);
+    TEST_ASSERT_EQUAL_UINT32(0, r.answer_baud);
+    int reset = nth(s, "RESET", 0);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, reset);
+    TEST_ASSERT_EQUAL_UINT32(460800, s->rx[reset].host_baud);
+    int64_t t0 = s->rx[reset].at;
+    int at_saved = 0;
+    int at_previous = 0;
+    for (int i = reset + 1; i < s->nrx; i++) {
+        TEST_ASSERT_EQUAL_STRING("VERSIONA", s->rx[i].cmd);
+        TEST_ASSERT_GREATER_OR_EQUAL_INT64(t0 + UM98X_RESTART_BANNER_MS, s->rx[i].at);   /* silent for 15 s */
+        if (s->rx[i].host_baud == 115200) {
+            TEST_ASSERT_LESS_OR_EQUAL_INT64(t0 + UM98X_RESTART_LOST_MS, s->rx[i].at);
+            TEST_ASSERT_EQUAL_INT(0, at_previous);   /* the saved baud first */
+            at_saved++;
+        } else {
+            TEST_ASSERT_EQUAL_UINT32(460800, s->rx[i].host_baud);
+            TEST_ASSERT_LESS_OR_EQUAL_INT64(t0 + UM98X_RESTART_LOST_MS + UM98X_ROLLBACK_PREVIOUS_MS + 100, s->rx[i].at);
+            at_previous++;
+        }
+    }
+    TEST_ASSERT_INT_WITHIN(1, 5, at_saved);       /* one a second from 15 s to 20 s */
+    TEST_ASSERT_INT_WITHIN(1, 10, at_previous);   /* one a second for 10 s */
+    TEST_ASSERT_EQUAL_INT(last_of(s, "VERSIONA"), s->nrx - 1);
+}
+
+TEST_CASE("exec: satellite-in-view output on and off, never saved", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    configured(s);
+    char why[64];
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_sat_view(&s->ex, true, 5, why, sizeof(why)));
+    TEST_ASSERT_EQUAL_UINT(5, s->gsv);
+    TEST_ASSERT_EQUAL_STRING("", why);
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_sat_view(&s->ex, false, 0, why, sizeof(why)));
+    TEST_ASSERT_EQUAL_UINT(0, s->gsv);
+    TEST_ASSERT_EQUAL_INT(2, s->nrx);
+    TEST_ASSERT_EQUAL_STRING("GPGSV COM1 5", s->rx[0].cmd);
+    TEST_ASSERT_EQUAL_STRING("UNLOG COM1 GPGSV", s->rx[1].cmd);
+    TEST_ASSERT_EQUAL_INT(0, s->saves);
+
+    /* A restart ends it (it was never saved). */
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_sat_view(&s->ex, true, 5, why, sizeof(why)));
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_reset(&s->ex));
+    TEST_ASSERT_EQUAL_UINT(0, s->gsv);
+
+    /* Rejected, or no answer. */
+    s = sim_init();
+    snprintf(s->reject_prefix, sizeof(s->reject_prefix), "GPGSV");
+    s->reject_n = 10;
+    TEST_ASSERT_EQUAL(UM98X_E_REJECTED, um98x_exec_sat_view(&s->ex, true, 5, why, sizeof(why)));
+    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", why);
+    s = sim_init();
+    s->present = false;
+    TEST_ASSERT_EQUAL(UM98X_E_TIMEOUT, um98x_exec_sat_view(&s->ex, true, 5, why, sizeof(why)));
+    TEST_ASSERT_EQUAL_STRING("timeout", why);
+    TEST_ASSERT_EQUAL(UM98X_E_ARG, um98x_exec_sat_view(&s->ex, true, 0, why, sizeof(why)));
 }

@@ -22,4 +22,39 @@ menu "Station: receiver supervisor"
             downtime for the confirmation dialog. Information only: it never
             gates an update. Refine from measured runs.
 
+    config STATION_LIVE_VIEW_MIN
+        int "Live view: window length (minutes)"
+        range 1 60
+        default 10
+        help
+            How long the live view stays open after the user opens it; the
+            user can extend it. While it is open the receiver's
+            satellite-in-view output is on (never saved), so it is kept
+            short and closes by itself.
+
+    config STATION_LIVE_VIEW_MAX_MIN
+        int "Live view: longest window, extensions included (minutes)"
+        range 10 240
+        default 60
+
+    config STATION_LIVE_VIEW_IDLE_S
+        int "Live view: close when no admin client asked for it this long (s)"
+        range 30 900
+        default 120
+        help
+            The web API reports every live-view request; a window nobody
+            looks at closes after this long and the receiver output it
+            turned on is turned off again.
+
+    config STATION_LIVE_VIEW_SKY_PERIOD_S
+        int "Live view: satellite-in-view output period (s)"
+        range 1 60
+        default 5
+        help
+            Period of the receiver's satellite-in-view sentences while the
+            live view is open (azimuth and elevation for the sky plot). A
+            modest period keeps the extra load on the receiver link small
+            next to the RTCM stream. PROVISIONAL, to be confirmed on
+            hardware.
+
 endmenu

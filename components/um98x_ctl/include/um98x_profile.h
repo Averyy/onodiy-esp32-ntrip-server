@@ -11,7 +11,13 @@
  * Fields the base mode does not use (fixed coordinates in SURVEY_IN,
  * survey_in_s in FIXED) are cleared by encode/decode and ignored by the hash,
  * so two profiles that configure the receiver the same way always look the
- * same. NaN or infinity is invalid in every field, used or not.
+ * same; likewise the antenna serial and setup ID without an antenna model,
+ * and trailing spaces of the antenna strings. NaN or infinity is invalid in
+ * every field, used or not.
+ *
+ * The antenna fields are appended to the blob (a blob without them decodes
+ * with an empty antenna) and to the hash serialisation only when a model is
+ * set, so a profile without one keeps the hash it had before they existed.
  *
  * The profile hash (gnss/applied_hash) covers only what reaches the receiver,
  * in its own fixed serialisation without the blob version byte: padding,
@@ -31,7 +37,7 @@
 extern "C" {
 #endif
 
-#define UM98X_PROFILE_BLOB_MAX  128u
+#define UM98X_PROFILE_BLOB_MAX  192u
 #define UM98X_POSITION_BLOB_MAX 48u
 
 /** Accepted ellipsoidal height range for fixed and locked positions (metres). */
@@ -70,9 +76,19 @@ bool um98x_baud_supported(uint32_t baud);
 /**
  * Plausibility check (ranges, message count, coordinates for FIXED mode,
  * station ID <= 4095, a supported COM1 baud, survey 1..3600 s, no NaN
- * anywhere).
+ * anywhere, antenna strings per um98x_antenna_str_valid()).
  */
 bool um98x_profile_valid(const um98x_base_profile_t *p);
+
+/**
+ * An antenna descriptor or serial number the profile can hold: terminated
+ * within UM98X_ANTENNA_STR_MAX characters, printable ASCII (0x20..0x7E)
+ * without '"' (the receiver command quotes it). Empty is valid.
+ */
+bool um98x_antenna_str_valid(const char *s, size_t cap);
+
+/** Length of s without its trailing spaces (the stored and compared form). */
+size_t um98x_antenna_str_len(const char *s);
 
 /** Encode (unused fields cleared); returns the blob length, or 0 if cap is too small or p is invalid. */
 size_t um98x_profile_encode(const um98x_base_profile_t *p, uint8_t *buf, size_t cap);

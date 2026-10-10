@@ -193,7 +193,7 @@ esp_err_t um98x_ctl_query_mode(gnss_link_lease_t lease, char *body, size_t len);
  *
  * @param lease      COMMAND lease, or NULL for VERSIONA / MODE while streaming.
  * @param cmd        command text; surrounding CR/LF and spaces are dropped
- *                   (at most 95 characters, no control characters).
+ *                   (at most 127 characters, no control characters).
  * @param reply      optional buffer for the reply line(s), '\n'-separated; may be NULL.
  * @param timeout_ms per-send ack timeout, 0 = the default (3000 ms,
  *                   SAVECONFIG 5000 ms); ignored for VERSIONA.
@@ -220,9 +220,13 @@ esp_err_t um98x_ctl_command(gnss_link_lease_t lease, const char *cmd, char *repl
  * read back again (the signal group must now match); the COM1 baud change
  * only when it differs (verified at the new baud, restored on failure);
  * MODE BASE only when the read-back differs or opts->force_mode (lock,
- * re-survey; fixed positions as ECEF, 4 decimals); the RTCM messages in
- * profile order (a rejected 1230 is not fatal); the satellite-view sentence
- * if enabled; one SAVECONFIG.
+ * re-survey; fixed positions as ECEF, 4 decimals); the antenna descriptor
+ * only when the profile has one and the read-back differs or is unknown;
+ * BeiDou B1C/B2a in RTCM turned on only when the read-back shows it off
+ * (both not fatal: rejections are recorded in the result); the RTCM
+ * messages in profile order (a rejected 1230 is not fatal); the
+ * satellite-view sentence if enabled; one SAVECONFIG. The elevation mask
+ * and multipath mitigation are read back and reported, never sent.
  *
  * Success: gnss/applied_hash, gnss/applied_fw (this session's firmware),
  * gnss/rtcm1230_ok and, if it changed, gnss/baud are written in one
@@ -230,7 +234,9 @@ esp_err_t um98x_ctl_command(gnss_link_lease_t lease, const char *cmd, char *repl
  *
  * Failure of a fatal step: no SAVECONFIG, nothing persisted; if any command
  * had been accepted, RESET (the receiver returns to its saved configuration;
- * the host goes back to the saved baud, then 10 s at the previous one). The
+ * the host goes back to the saved baud and sends nothing until the restart
+ * banner or 15 s, then asks for the version; then 10 s at the previous
+ * baud). The
  * station then raises its config-failed alert and, if no RTCM resumes,
  * calls um98x_ctl_restore_output(). On failure, the baud where the receiver
  * last answered (a detection inside the session, then the rollback's version
@@ -268,6 +274,21 @@ esp_err_t um98x_ctl_restore_output(gnss_link_lease_t lease, const um98x_base_pro
  *         a link error, or another call holds the command layer).
  */
 esp_err_t um98x_ctl_reset_receiver(gnss_link_lease_t lease);
+
+/**
+ * Satellite-in-view output on ("GPGSV COM1 <period_s>", 1..60 s) or off
+ * ("UNLOG COM1 GPGSV") for the live view, under the caller's COMMAND lease
+ * (a configuring command; the lease holds RTCM back while it runs: keep it
+ * short). Never saved: a receiver restart or reconfiguration ends it.
+ * Whether toggling it interrupts the receiver's RTCM output is PROVISIONAL,
+ * to be confirmed on hardware.
+ * @param reason optional: the receiver's rejection text, "timeout" or
+ *               "link error"
+ * @return ESP_OK, ESP_FAIL (rejected), ESP_ERR_TIMEOUT, ESP_ERR_INVALID_ARG
+ *         (period), ESP_ERR_INVALID_STATE (no lease, link error, another
+ *         call holds the command layer).
+ */
+esp_err_t um98x_ctl_sat_view(gnss_link_lease_t lease, bool on, uint16_t period_s, char *reason, size_t reason_len);
 
 /**
  * Current base position: the antenna reference point of the latest CRC-valid

@@ -43,11 +43,25 @@ typedef struct {
     uint16_t period_s;
 } um98x_rtcm_out_t;
 
+/** Longest antenna descriptor or antenna serial number (characters, without the terminator). */
+#define UM98X_ANTENNA_STR_MAX 31
+
 /**
  * Base-station profile stored in settings and applied by the station.
  *
  * Persisted with um98x_profile_encode() (explicit little-endian layout with
  * its own version byte), never as a raw struct.
+ *
+ * Antenna: the descriptor the receiver publishes in its antenna message
+ * (RTCM 1033), which casters show and rovers that apply antenna
+ * corrections read. Empty antenna_model (the default) = leave the
+ * receiver's own value alone, which is the honest value for an antenna
+ * without a published calibration. Otherwise the IGS antenna name with its
+ * radome (inner spaces kept: the name is padded to 16 characters before
+ * the 4-character radome code). Printable ASCII without '"', at most
+ * UM98X_ANTENNA_STR_MAX characters; trailing spaces are dropped when the
+ * profile is stored. The serial number and setup ID only matter with a
+ * model.
  */
 typedef struct {
     uint8_t signal_group_master;     /**< e.g. 3 */
@@ -61,8 +75,35 @@ typedef struct {
     uint32_t com1_baud;              /**< receiver COM1 baud rate the profile sets (one the receiver supports) */
     uint8_t rtcm_count;
     um98x_rtcm_out_t rtcm[UM98X_MAX_RTCM_MSGS];
-    bool sat_view_output;            /**< also emit satellite-in-view sentences for the web UI */
+    bool sat_view_output;            /**< also emit satellite-in-view sentences permanently (saved in the receiver) */
+    char antenna_model[UM98X_ANTENNA_STR_MAX + 1];   /**< IGS antenna name with radome; "" = leave the receiver's value */
+    char antenna_serial[UM98X_ANTENNA_STR_MAX + 1];  /**< antenna serial number, may be empty */
+    uint8_t antenna_setup_id;        /**< antenna setup ID 0..255 */
 } um98x_base_profile_t;
+
+/** A receiver on/off setting as read back from its configuration dump. */
+typedef enum {
+    UM98X_SETTING_UNKNOWN = 0,   /**< not in the dump, or a value that was not understood */
+    UM98X_SETTING_ON,            /**< "ENABLE" */
+    UM98X_SETTING_OFF,           /**< "DISABLE" */
+} um98x_setting_t;
+
+/**
+ * Receiver settings read back from its configuration dump during an apply
+ * session (for the UI; only the antenna descriptor and B1C/B2a decide
+ * anything). PROVISIONAL, to be confirmed on hardware: the dump's item
+ * names and value forms.
+ */
+typedef struct {
+    uint8_t b1cb2a;                  /**< um98x_setting_t: BeiDou B1C/B2a observations in RTCM */
+    uint8_t mmp;                     /**< um98x_setting_t: multipath mitigation (shown only, never sent) */
+    bool mask_known;                 /**< an elevation mask was read */
+    int16_t mask_ddeg;               /**< elevation mask in 0.1 degree (shown only, never sent) */
+    bool antenna_known;              /**< the base antenna descriptor was read */
+    char antenna_model[UM98X_ANTENNA_STR_MAX + 1];
+    char antenna_serial[UM98X_ANTENNA_STR_MAX + 1];
+    uint8_t antenna_setup_id;
+} um98x_rx_settings_t;
 
 /** Where a base position came from. */
 typedef enum {

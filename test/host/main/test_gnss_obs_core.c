@@ -813,3 +813,179 @@ TEST_CASE("obs: MSM7 frames built per the RTCM layout, end to end", "[gnss_obs]"
     TEST_ASSERT_EQUAL_UINT64(3, find_stat(st, n, 1077)->count);
     TEST_ASSERT_EQUAL_UINT32(1000, find_stat(st, n, 1097)->period_ms);
 }
+
+/* ---- live view: satellites of the latest MSM epochs ------------------------------ */
+
+/* A whole frame as gnss_obs feeds it, the per-satellite table included. */
+static void feed_live(const uint8_t *frame, size_t len, uint64_t t)
+{
+    gnss_rtcm3_msm_t h;
+    obs_cnr_t cnr;
+    uint16_t cells[GNSS_RTCM3_MSM_MAX_CELLS];
+    TEST_ASSERT_TRUE(gnss_rtcm3_msm_decode(frame, len, &h));
+    bool has_cnr = obs_msm_cnr(frame, len, &h, &cnr, cells);
+    obs_core_feed_msg(&s_core, h.msg_type, true, h.epoch_time, t);
+    obs_core_feed_msm(&s_core, &h, has_cnr ? &cnr : NULL, t);
+    obs_core_feed_sats(&s_core, &h, has_cnr ? cells : NULL, t);
+}
+
+static const obs_live_sat_t *live_find(const obs_live_sat_t *v, size_t n, gnss_sys_t sys, uint8_t sat)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (v[i].sys == sys && v[i].sat == sat) {
+            return &v[i];
+        }
+    }
+    return NULL;
+}
+
+TEST_CASE("obs: live view lists every satellite with its bands, CNR and position", "[gnss_obs]")
+{
+    /* GPS: 2, 13, 24 on L1/L2/L5 (24 without L2), then 30 on L1 in a second
+     * frame of the same epoch; Galileo 5 and 9 on E1/E6/E5b/E5a. */
+    static const uint8_t gps_sats[] = { 2, 13, 24 };
+    static const uint8_t gps_sigs[] = { 2, 16, 23 };                  /* 1C, 2L, 5Q */
+    static const uint16_t gps_cnr[8] = {
+        46 * 16, 40 * 16, 44 * 16,
+        41 * 16, 35 * 16, 39 * 16,
+        48 * 16, 49 * 16,
+    };
+    static const uint8_t gps2_sats[] = { 30 };
+    static const uint8_t gps2_sigs[] = { 2 };
+    static const uint16_t gps2_cnr[1] = { 30 * 16 };
+    static const uint8_t gal_sats[] = { 5, 9 };
+    static const uint8_t gal_sigs[] = { 2, 9, 15, 23 };               /* E1, E6, E5b, E5a */
+    static const uint16_t gal_cnr[8] = {
+        45 * 16, 42 * 16, 46 * 16, 47 * 16,
+        43 * 16, 40 * 16, 44 * 16, 45 * 16,
+    };
+    obs_core_init(&s_core);
+    obs_live_totals_t tot;
+    obs_live_sat_t v[OBS_LIVE_MAX];
+    TEST_ASSERT_EQUAL(0, obs_core_live(&s_core, 0, v, OBS_LIVE_MAX, &tot));
+    TEST_ASSERT_EQUAL_UINT16(0, tot.satellites);
+    TEST_ASSERT_EQUAL_UINT32(OBS_NEVER, tot.msm_age_ms);
+    TEST_ASSERT_EQUAL_UINT32(OBS_NEVER, tot.sky_age_ms);
+
+    msm_desc_t g = { .type = 1077, .epoch = TOW0, .more = true, .sats = gps_sats, .nsats = 3, .sigs = gps_sigs,
+                     .nsigs = 3, .absent = (uint64_t)1 << 7, .cnr = gps_cnr };
+    feed_live(s_frame, msm_build(s_frame, &g), 0);
+    msm_desc_t g2 = { .type = 1077, .epoch = TOW0, .more = true, .sats = gps2_sats, .nsats = 1, .sigs = gps2_sigs,
+                      .nsigs = 1, .cnr = gps2_cnr };
+    feed_live(s_frame, msm_build(s_frame, &g2), 5);
+    msm_desc_t e = { .type = 1097, .epoch = TOW0, .more = false, .sats = gal_sats, .nsats = 2, .sigs = gal_sigs,
+                     .nsigs = 4, .cnr = gal_cnr };
+    feed_live(s_frame, msm_build(s_frame, &e), 10);
+
+    /* Azimuth and elevation for GPS 2, and GPS 7 the MSMs do not carry. */
+    static const uint8_t sky_sats[] = { 2, 7 };
+    static const int8_t sky_el[] = { 45, 10 };
+    static const uint16_t sky_az[] = { 120, 300 };
+    static const uint8_t sky_cnr[] = { 46, 20 };
+    obs_gsv_t s = gsv(GNSS_SYS_GPS, sky_sats, sky_el, sky_az, sky_cnr, 2);
+    obs_core_feed_gsv(&s_core, &s, 100);
+
+    size_t n = obs_core_live(&s_core, 200, v, OBS_LIVE_MAX, &tot);
+    TEST_ASSERT_EQUAL(7, n);
+    /* Sorted by constellation, then satellite number. */
+    static const uint8_t order[] = { 2, 7, 13, 24, 30, 5, 9 };
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_EQUAL_UINT8(order[i], v[i].sat);
+        TEST_ASSERT_EQUAL(i < 5 ? GNSS_SYS_GPS : GNSS_SYS_GALILEO, v[i].sys);
+    }
+    const obs_live_sat_t *x = live_find(v, n, GNSS_SYS_GPS, 2);
+    TEST_ASSERT_TRUE(x->in_msm);
+    TEST_ASSERT_TRUE(x->has_pos);
+    TEST_ASSERT_EQUAL_INT8(45, x->elevation_deg);
+    TEST_ASSERT_EQUAL_UINT16(120, x->azimuth_deg);
+    TEST_ASSERT_EQUAL_UINT32(100, x->pos_age_ms);
+    TEST_ASSERT_EQUAL_UINT32(200, x->msm_age_ms);
+    TEST_ASSERT_EQUAL_HEX32(sigs(gps_sigs, 3), x->sig_mask);
+    TEST_ASSERT_EQUAL_UINT8(46, x->cnr_dbhz[GNSS_BAND_L1]);
+    TEST_ASSERT_EQUAL_UINT8(40, x->cnr_dbhz[GNSS_BAND_L2]);
+    TEST_ASSERT_EQUAL_UINT8(44, x->cnr_dbhz[GNSS_BAND_L5]);
+    x = live_find(v, n, GNSS_SYS_GPS, 24);
+    TEST_ASSERT_EQUAL_HEX8((1u << GNSS_BAND_L1) | (1u << GNSS_BAND_L5), x->band_mask);   /* no L2 cell */
+    TEST_ASSERT_EQUAL_UINT8(48, x->cnr_dbhz[GNSS_BAND_L1]);
+    TEST_ASSERT_EQUAL_UINT8(0, x->cnr_dbhz[GNSS_BAND_L2]);
+    TEST_ASSERT_EQUAL_UINT8(49, x->cnr_dbhz[GNSS_BAND_L5]);
+    TEST_ASSERT_FALSE(x->has_pos);
+    x = live_find(v, n, GNSS_SYS_GPS, 30);   /* from the second frame of the epoch */
+    TEST_ASSERT_EQUAL_UINT8(30, x->cnr_dbhz[GNSS_BAND_L1]);
+    x = live_find(v, n, GNSS_SYS_GPS, 7);    /* only the sky view knows it */
+    TEST_ASSERT_FALSE(x->in_msm);
+    TEST_ASSERT_TRUE(x->has_pos);
+    TEST_ASSERT_EQUAL_UINT8(0, x->band_mask);
+    TEST_ASSERT_EQUAL_UINT8(20, x->sky_cnr_dbhz);
+    TEST_ASSERT_EQUAL_UINT32(OBS_NEVER, x->msm_age_ms);
+    x = live_find(v, n, GNSS_SYS_GALILEO, 9);
+    TEST_ASSERT_EQUAL_UINT8(40, x->cnr_dbhz[GNSS_BAND_L6]);
+    TEST_ASSERT_EQUAL_UINT8(44, x->cnr_dbhz[GNSS_BAND_L2]);
+
+    /* Totals: per constellation and band, per band, tiles. */
+    TEST_ASSERT_EQUAL_UINT16(7, tot.satellites);
+    TEST_ASSERT_EQUAL_UINT16(6, tot.tracked);
+    TEST_ASSERT_EQUAL_UINT16(17, tot.signals);
+    TEST_ASSERT_EQUAL_UINT16(2, tot.with_pos);
+    TEST_ASSERT_EQUAL_UINT16(0, tot.dropped);
+    TEST_ASSERT_EQUAL_UINT8(4, tot.sys_sats[GNSS_SYS_GPS]);
+    TEST_ASSERT_EQUAL_UINT8(2, tot.sys_sats[GNSS_SYS_GALILEO]);
+    TEST_ASSERT_EQUAL_UINT8(4, tot.sys_band_sats[GNSS_SYS_GPS][GNSS_BAND_L1]);
+    TEST_ASSERT_EQUAL_UINT8(2, tot.sys_band_sats[GNSS_SYS_GPS][GNSS_BAND_L2]);
+    TEST_ASSERT_EQUAL_UINT8(3, tot.sys_band_sats[GNSS_SYS_GPS][GNSS_BAND_L5]);
+    TEST_ASSERT_EQUAL_UINT8(2, tot.sys_band_sats[GNSS_SYS_GALILEO][GNSS_BAND_L6]);
+    TEST_ASSERT_EQUAL_UINT16(6, tot.band_sats[GNSS_BAND_L1]);
+    TEST_ASSERT_EQUAL_UINT16(4, tot.band_sats[GNSS_BAND_L2]);
+    TEST_ASSERT_EQUAL_UINT16(5, tot.band_sats[GNSS_BAND_L5]);
+    TEST_ASSERT_EQUAL_UINT16(2, tot.band_sats[GNSS_BAND_L6]);
+    TEST_ASSERT_EQUAL_UINT16(0, tot.band_sats[GNSS_BAND_E5AB]);
+    TEST_ASSERT_EQUAL_UINT8(42, tot.band_cnr_dbhz[GNSS_BAND_L1]);   /* (46+41+48+30+45+43) / 6 = 42.2 */
+    TEST_ASSERT_EQUAL_UINT8(41, tot.band_cnr_dbhz[GNSS_BAND_L2]);   /* (40+35+46+44) / 4 = 41.25 */
+    TEST_ASSERT_EQUAL_UINT8(45, tot.band_cnr_dbhz[GNSS_BAND_L5]);   /* (44+39+49+47+45) / 5 = 44.8 */
+    TEST_ASSERT_EQUAL_UINT8(41, tot.band_cnr_dbhz[GNSS_BAND_L6]);
+    TEST_ASSERT_EQUAL_UINT8(0, tot.band_cnr_dbhz[GNSS_BAND_E5AB]);
+    TEST_ASSERT_EQUAL_UINT8(43, tot.cnr_dbhz);                      /* 724 / 17 = 42.6 */
+    TEST_ASSERT_EQUAL_UINT32(190, tot.msm_age_ms);
+    TEST_ASSERT_EQUAL_UINT32(100, tot.sky_age_ms);
+
+    /* A small capacity keeps the first ones; the totals still count all. */
+    n = obs_core_live(&s_core, 200, v, 3, &tot);
+    TEST_ASSERT_EQUAL(3, n);
+    TEST_ASSERT_EQUAL_UINT16(7, tot.satellites);
+    TEST_ASSERT_EQUAL_UINT16(4, tot.dropped);
+
+    /* The next epoch starts a satellite over; one it no longer lists stays
+     * for the 10 s window, then leaves. */
+    static const uint8_t one[] = { 2 };
+    static const uint16_t one_cnr[1] = { 50 * 16 };
+    msm_desc_t g3 = { .type = 1077, .epoch = TOW0 + 1000u, .more = false, .sats = one, .nsats = 1,
+                      .sigs = gps2_sigs, .nsigs = 1, .cnr = one_cnr };
+    feed_live(s_frame, msm_build(s_frame, &g3), 1000);
+    n = obs_core_live(&s_core, 1000, v, OBS_LIVE_MAX, &tot);
+    x = live_find(v, n, GNSS_SYS_GPS, 2);
+    TEST_ASSERT_EQUAL_HEX8(1u << GNSS_BAND_L1, x->band_mask);
+    TEST_ASSERT_EQUAL_UINT8(50, x->cnr_dbhz[GNSS_BAND_L1]);
+    TEST_ASSERT_EQUAL_UINT8(0, x->cnr_dbhz[GNSS_BAND_L2]);
+    TEST_ASSERT_NOT_NULL(live_find(v, n, GNSS_SYS_GPS, 13));
+    n = obs_core_live(&s_core, OBS_SIGNAL_WINDOW_MS + 10, v, OBS_LIVE_MAX, &tot);
+    TEST_ASSERT_NULL(live_find(v, n, GNSS_SYS_GPS, 13));
+    TEST_ASSERT_NOT_NULL(live_find(v, n, GNSS_SYS_GPS, 2));
+    TEST_ASSERT_NOT_NULL(live_find(v, n, GNSS_SYS_GPS, 7));   /* the sky view keeps it for 30 s */
+    TEST_ASSERT_EQUAL_UINT16(1, tot.tracked);
+
+    /* MSM1-3 carry no CNR: bands without values. */
+    obs_core_reset(&s_core);
+    gnss_rtcm3_msm_t h = msm(GNSS_SYS_GPS, TOW0, false, 1u << 3, sigs(gps_sigs, 3));
+    h.num_sats = 1;
+    h.num_sigs = 3;
+    h.num_cells = 3;
+    h.cell_mask = 0x7;
+    obs_core_feed_sats(&s_core, &h, NULL, 0);
+    n = obs_core_live(&s_core, 0, v, OBS_LIVE_MAX, &tot);
+    TEST_ASSERT_EQUAL(1, n);
+    TEST_ASSERT_EQUAL_UINT8(4, v[0].sat);
+    TEST_ASSERT_EQUAL_HEX8((1u << GNSS_BAND_L1) | (1u << GNSS_BAND_L2) | (1u << GNSS_BAND_L5), v[0].band_mask);
+    TEST_ASSERT_EQUAL_UINT8(0, v[0].cnr_dbhz[GNSS_BAND_L1]);
+    TEST_ASSERT_EQUAL_UINT8(0, tot.cnr_dbhz);
+    TEST_ASSERT_EQUAL_UINT16(3, tot.band_sats[GNSS_BAND_L1] + tot.band_sats[GNSS_BAND_L2] + tot.band_sats[GNSS_BAND_L5]);
+}

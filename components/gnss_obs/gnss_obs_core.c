@@ -343,6 +343,63 @@ void obs_core_feed_msm(obs_core_t *c, const gnss_rtcm3_msm_t *h, const obs_cnr_t
     }
 }
 
+void obs_core_feed_sats(obs_core_t *c, const gnss_rtcm3_msm_t *h, const uint16_t *cell_q4, uint64_t now_ms)
+{
+    if ((unsigned)h->sys >= GNSS_SYS_COUNT) {
+        return;
+    }
+    const unsigned s = (unsigned)h->sys;
+    const unsigned nsat = h->num_sats;
+    const unsigned nsig = h->num_sigs;
+    const unsigned grid = nsat * nsig;
+    if (nsat == 0 || nsig == 0 || grid > GNSS_RTCM3_MSM_MAX_CELLS) {
+        return;
+    }
+    uint8_t sat_no[GNSS_RTCM3_MSM_MAX_CELLS];
+    unsigned n = 0;
+    for (unsigned i = 0; i < 64 && n < GNSS_RTCM3_MSM_MAX_CELLS; i++) {
+        if (h->sat_mask & ((uint64_t)1 << i)) {
+            sat_no[n++] = (uint8_t)(i + 1u);
+        }
+    }
+    uint8_t sig_id[32];
+    unsigned m = 0;
+    for (unsigned id = 1; id <= 32; id++) {
+        if (h->sig_mask & ((uint32_t)1 << (id - 1))) {
+            sig_id[m++] = (uint8_t)id;
+        }
+    }
+    if (n != nsat || m != nsig) {
+        return;
+    }
+    unsigned k = 0;   /* present cells in sent order */
+    for (unsigned x = 0; x < grid; x++) {
+        if (!(h->cell_mask & ((uint64_t)1 << x))) {
+            continue;
+        }
+        obs_sat_entry_t *e = &c->sats[s][sat_no[x / nsig] - 1u];
+        if (!e->valid || e->epoch != h->epoch_time || !within(e->seen_ms, now_ms, OBS_SIGNAL_WINDOW_MS)) {
+            memset(e, 0, sizeof(*e));   /* a new epoch for this satellite */
+            e->valid = true;
+            e->epoch = h->epoch_time;
+        }
+        e->seen_ms = now_ms;
+        const unsigned id = sig_id[x % nsig];
+        e->sig_mask |= (uint32_t)1 << (id - 1u);
+        const gnss_band_t b = gnss_rtcm3_msm_band(h->sys, id);
+        if (b < GNSS_BAND_COUNT) {
+            e->band_mask |= (uint8_t)(1u << b);
+            if (cell_q4 != NULL && k < h->num_cells && cell_q4[k] != 0) {
+                uint8_t v = q4_to_dbhz(cell_q4[k]);
+                if (v > e->cnr[b]) {
+                    e->cnr[b] = v;
+                }
+            }
+        }
+        k++;
+    }
+}
+
 void obs_core_feed_msg(obs_core_t *c, uint16_t msg, bool has_epoch, uint32_t epoch_time, uint64_t now_ms)
 {
     if (msg == 0) {
@@ -569,4 +626,99 @@ size_t obs_core_sky(const obs_core_t *c, uint64_t now_ms, obs_sat_t *out, size_t
         };
     }
     return n;
+}
+
+size_t obs_core_live(const obs_core_t *c, uint64_t now_ms, obs_live_sat_t *out, size_t cap, obs_live_totals_t *tot)
+{
+    memset(tot, 0, sizeof(*tot));
+    tot->msm_age_ms = OBS_NEVER;
+    for (unsigned s = 0; s < GNSS_SYS_COUNT; s++) {
+        if (c->msm_ever & (1u << s)) {
+            uint32_t a = age_ms(c->msm_seen_ms[s], now_ms);
+            if (a < tot->msm_age_ms) {
+                tot->msm_age_ms = a;
+            }
+        }
+    }
+    tot->sky_age_ms = c->gsv_ever ? age_ms(c->gsv_ms, now_ms) : OBS_NEVER;
+
+    /* Sky view entries by satellite (index + 1, 0 = none). */
+    uint8_t sky_of[GNSS_SYS_COUNT][OBS_SATS_PER_SYS];
+    memset(sky_of, 0, sizeof(sky_of));
+    for (unsigned i = 0; i < c->sky_count && i < OBS_SKY_MAX; i++) {
+        const obs_sky_entry_t *e = &c->sky[i];
+        if (e->sys < GNSS_SYS_COUNT && e->sat >= 1 && e->sat <= OBS_SATS_PER_SYS &&
+            within(e->seen_ms, now_ms, OBS_SKY_WINDOW_MS)) {
+            sky_of[e->sys][e->sat - 1u] = (uint8_t)(i + 1u);
+        }
+    }
+
+    uint32_t band_sum[GNSS_BAND_COUNT] = { 0 };
+    uint32_t band_n[GNSS_BAND_COUNT] = { 0 };
+    uint32_t all_sum = 0;
+    uint32_t all_n = 0;
+    size_t written = 0;
+    for (unsigned s = 0; s < GNSS_SYS_COUNT; s++) {
+        for (unsigned i = 0; i < OBS_SATS_PER_SYS; i++) {
+            const obs_sat_entry_t *e = &c->sats[s][i];
+            const bool msm = e->valid && within(e->seen_ms, now_ms, OBS_SIGNAL_WINDOW_MS);
+            const unsigned sky = sky_of[s][i];
+            if (!msm && sky == 0) {
+                continue;
+            }
+            obs_live_sat_t v;
+            memset(&v, 0, sizeof(v));
+            v.sys = (gnss_sys_t)s;
+            v.sat = (uint8_t)(i + 1u);
+            v.msm_age_ms = OBS_NEVER;
+            v.pos_age_ms = OBS_NEVER;
+            if (msm) {
+                v.in_msm = true;
+                v.msm_age_ms = age_ms(e->seen_ms, now_ms);
+                v.sig_mask = e->sig_mask;
+                v.band_mask = e->band_mask;
+                memcpy(v.cnr_dbhz, e->cnr, sizeof(v.cnr_dbhz));
+                tot->tracked++;
+                tot->signals = (uint16_t)(tot->signals + popcount64(e->sig_mask));
+                if (tot->sys_sats[s] < UINT8_MAX) {
+                    tot->sys_sats[s]++;
+                }
+                for (unsigned b = 0; b < GNSS_BAND_COUNT; b++) {
+                    if (!(e->band_mask & (1u << b))) {
+                        continue;
+                    }
+                    if (tot->sys_band_sats[s][b] < UINT8_MAX) {
+                        tot->sys_band_sats[s][b]++;
+                    }
+                    tot->band_sats[b]++;
+                    if (e->cnr[b] != 0) {
+                        band_sum[b] += e->cnr[b];
+                        band_n[b]++;
+                        all_sum += e->cnr[b];
+                        all_n++;
+                    }
+                }
+            }
+            if (sky != 0) {
+                const obs_sky_entry_t *k = &c->sky[sky - 1u];
+                v.has_pos = true;
+                v.elevation_deg = k->elevation_deg;
+                v.azimuth_deg = k->azimuth_deg;
+                v.sky_cnr_dbhz = k->cnr_dbhz;
+                v.pos_age_ms = age_ms(k->seen_ms, now_ms);
+                tot->with_pos++;
+            }
+            tot->satellites++;
+            if (written < cap && out != NULL) {
+                out[written++] = v;
+            } else {
+                tot->dropped++;
+            }
+        }
+    }
+    for (unsigned b = 0; b < GNSS_BAND_COUNT; b++) {
+        tot->band_cnr_dbhz[b] = band_n[b] ? (uint8_t)((band_sum[b] + band_n[b] / 2u) / band_n[b]) : 0;
+    }
+    tot->cnr_dbhz = all_n ? (uint8_t)((all_sum + all_n / 2u) / all_n) : 0;
+    return written;
 }

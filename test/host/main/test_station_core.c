@@ -970,3 +970,444 @@ TEST_CASE("station core: an open flash journal holds everything until it is clea
     TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
     TEST_ASSERT_EQUAL(STN_WHY_USER, j.why);
 }
+
+/* ---- receiver maintenance -------------------------------------------------------- */
+
+static bool has_note(sim_t *w, stn_note_kind_t kind, stn_note_t *out)
+{
+    stn_note_t n[STN_NOTES];
+    unsigned c = stn_take_notes(&w->s, n, STN_NOTES);
+    bool found = false;
+    for (unsigned i = 0; i < c; i++) {
+        if (n[i].kind == kind) {
+            if (out != NULL) {
+                *out = n[i];
+            }
+            found = true;
+        }
+    }
+    return found;
+}
+
+TEST_CASE("station core: maintenance durations and entry refusals", "[station]")
+{
+    TEST_ASSERT_TRUE(stn_maint_duration_ok(15 * 60));
+    TEST_ASSERT_TRUE(stn_maint_duration_ok(30 * 60));
+    TEST_ASSERT_TRUE(stn_maint_duration_ok(3600));
+    TEST_ASSERT_TRUE(stn_maint_duration_ok(2 * 3600));
+    TEST_ASSERT_TRUE(stn_maint_duration_ok(4 * 3600));
+    TEST_ASSERT_FALSE(stn_maint_duration_ok(0));
+    TEST_ASSERT_FALSE(stn_maint_duration_ok(45 * 60));
+    TEST_ASSERT_FALSE(stn_maint_duration_ok(8 * 3600));
+    TEST_ASSERT_EQUAL_UINT32(30 * 60, STN_MAINT_DEFAULT_S);
+
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    TEST_ASSERT_EQUAL(STN_MAINT_DURATION, stn_maint_enter(&w.s, 1000, false, w.in.now_ms));
+    /* A lease held, or a job of the station running: offer again when it ends. */
+    TEST_ASSERT_EQUAL(STN_MAINT_SESSION, stn_maint_enter(&w.s, 900, true, w.in.now_ms));
+    stn_request_apply(&w.s);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, sim_next(&w).kind);
+    TEST_ASSERT_EQUAL(STN_MAINT_SESSION, stn_maint_enter(&w.s, 900, false, w.in.now_ms));
+    TEST_ASSERT_FALSE(w.s.maint);
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+    TEST_ASSERT_EQUAL(STN_MAINT_NOT_ON, stn_maint_end(&w.s, &w.in));
+
+    /* A receiver-flash journal open: refused. */
+    sim_t f;
+    sim_init(&f, true);
+    sim_start(&f);
+    TEST_ASSERT_EQUAL(STN_MAINT_FLASH, stn_maint_enter(&f.s, 900, false, f.in.now_ms));
+    TEST_ASSERT_FALSE(f.s.maint);
+}
+
+TEST_CASE("station core: in maintenance nothing is sent until it ends, then it starts as at boot", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    stn_take_notes(&w.s, (stn_note_t[STN_NOTES]){ 0 }, STN_NOTES);
+    /* A ladder step queued before is dropped; the user's own request stays. */
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_recovery(&w.s, STN_REC_RESCAN, true));
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 900, false, w.in.now_ms));
+    int64_t entered = w.in.now_ms;
+    stn_note_t n;
+    TEST_ASSERT_TRUE(has_note(&w, STN_NOTE_MAINT_ON, &n));
+    TEST_ASSERT_EQUAL_INT32(900, n.a);
+    TEST_ASSERT_EQUAL_UINT8(0, w.s.rec_pending);
+    TEST_ASSERT_EQUAL_UINT32(900, stn_maint_left_s(&w.s, w.in.now_ms));
+    TEST_ASSERT_EQUAL(STN_IDLE, w.s.state);   /* listening only: the health ladder is suspended */
+    TEST_ASSERT_FALSE(w.s.paused);
+
+    /* Nothing at all: no ladder step, no query, no apply, not even after
+     * the receiver goes silent and restarts. */
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_recovery(&w.s, STN_REC_RESYNC, true));
+    stn_request_apply(&w.s);   /* the station's API refuses it; queued here it waits for the end */
+    w.rtcm_on = false;
+    stn_restart_seen(&w.s);
+    uint32_t jobs = w.jobs;
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 600).kind);
+    TEST_ASSERT_EQUAL_UINT32(jobs, w.jobs);
+    TEST_ASSERT_TRUE(w.s.maint);
+    TEST_ASSERT_FALSE(w.s.restart_seen);   /* noted, nothing done */
+
+    /* Extended while on: added to the time left, at most 4 h left. */
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 900, false, w.in.now_ms));
+    TEST_ASSERT_UINT32_WITHIN(2, 900 - 600 + 900, stn_maint_left_s(&w.s, w.in.now_ms));
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 4 * 3600, false, w.in.now_ms));
+    TEST_ASSERT_EQUAL_UINT32(STN_MAINT_MAX_S, stn_maint_left_s(&w.s, w.in.now_ms));
+    TEST_ASSERT_EQUAL(STN_MAINT_DURATION, stn_maint_enter(&w.s, 5, false, w.in.now_ms));
+
+    /* Time up: the stream-first path, as at boot (listen, identity, check). */
+    w.rtcm_on = true;
+    stn_job_t j = sim_until_job(&w, STN_MAINT_MAX_S + 10);
+    TEST_ASSERT_FALSE(w.s.maint);
+    TEST_ASSERT_TRUE(has_note(&w, STN_NOTE_MAINT_OFF, &n));
+    TEST_ASSERT_EQUAL_INT32(1, n.b);   /* the time was up */
+    TEST_ASSERT_INT32_WITHIN(5, (int32_t)((w.in.now_ms - entered) / 1000), n.a);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+    TEST_ASSERT_FALSE(j.leased);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    identity_done(&w, true, true);
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);   /* the user's request ran once it was over */
+    TEST_ASSERT_EQUAL(STN_WHY_USER, j.why);
+}
+
+TEST_CASE("station core: maintenance ends at the user's word; a silent receiver is then looked for", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 3600, false, w.in.now_ms));
+    w.rtcm_on = false;   /* reflashed over the other port, still silent */
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 120).kind);
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_end(&w.s, &w.in));
+    stn_note_t n;
+    TEST_ASSERT_TRUE(has_note(&w, STN_NOTE_MAINT_OFF, &n));
+    TEST_ASSERT_EQUAL_INT32(0, n.b);
+    TEST_ASSERT_EQUAL(STN_IDLE, w.s.state);
+    TEST_ASSERT_FALSE(w.s.identity_ok);
+    /* Nothing valid in 3 s: detection, as at boot. */
+    stn_job_t j = sim_until_job(&w, 5);
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, j.kind);
+    TEST_ASSERT_EQUAL(STN_DETECTING, w.s.state);
+
+    /* Entered from NO_RECEIVER: no detection passes while it is on. */
+    fail_pass(&w, false);
+    TEST_ASSERT_EQUAL(STN_NO_RECEIVER, w.s.state);
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 900, false, w.in.now_ms));
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 890).kind);
+}
+
+TEST_CASE("station core: maintenance survives an ESP32 reset through its RTC record", "[station]")
+{
+    stn_maint_rtc_t r;
+    uint32_t stamp;
+    uint32_t left;
+    uint32_t spent;
+    stn_maint_rtc_write(&r, 0xA5u, 600, 300);
+    TEST_ASSERT_TRUE(stn_maint_rtc_read(&r, &stamp, &left, &spent));
+    TEST_ASSERT_EQUAL_HEX32(0xA5u, stamp);
+    TEST_ASSERT_EQUAL_UINT32(600, left);
+    TEST_ASSERT_EQUAL_UINT32(300, spent);
+    stn_maint_rtc_t bad = r;
+    bad.left_s = 601;   /* damaged */
+    TEST_ASSERT_FALSE(stn_maint_rtc_read(&bad, &stamp, &left, &spent));
+    bad = r;
+    bad.magic ^= 1u;
+    TEST_ASSERT_FALSE(stn_maint_rtc_read(&bad, &stamp, &left, &spent));
+    stn_maint_rtc_write(&r, 0xA5u, 0, 0);   /* cleared */
+    TEST_ASSERT_FALSE(stn_maint_rtc_read(&r, &stamp, &left, &spent));
+    memset(&r, 0xFF, sizeof(r));             /* random memory after a power cut */
+    TEST_ASSERT_FALSE(stn_maint_rtc_read(&r, &stamp, &left, &spent));
+
+    /* The boot only listens until the time left is up. */
+    sim_t w;
+    sim_init(&w, false);
+    stn_maint_restore(&w.s, 600, 300, w.in.now_ms);
+    TEST_ASSERT_TRUE(w.s.maint);
+    TEST_ASSERT_EQUAL_UINT32(900, w.s.maint_chosen_s);
+    w.rtcm_on = true;
+    sim_start(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 590).kind);
+    TEST_ASSERT_EQUAL(STN_IDLE, w.s.state);
+    stn_job_t j = sim_until_job(&w, 20);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+    stn_note_t n;
+    TEST_ASSERT_TRUE(has_note(&w, STN_NOTE_MAINT_OFF, &n));
+    TEST_ASSERT_INT32_WITHIN(3, 900, n.a);   /* the time before the reset counts */
+}
+
+/* ---- live view ---------------------------------------------------------------- */
+
+#define LIVE_MS (10 * MIN_MS)
+
+static stn_live_status_t live_status(sim_t *w)
+{
+    stn_live_status_t st;
+    stn_live_status(&w->s, &w->in, &st);
+    return st;
+}
+
+static void sky_done(sim_t *w, stn_err_t err)
+{
+    stn_result_t r = res(err);
+    r.lease_ms = 250;
+    sim_done(w, &r);
+}
+
+/* Open a window on a station that streams and turn the output on. */
+static void live_on(sim_t *w)
+{
+    uint8_t why = 99;
+    TEST_ASSERT_EQUAL(STN_OK, stn_live_start(&w->s, LIVE_MS, w->in.now_ms, &why));
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_WHY_NONE, why);
+    stn_job_t j = sim_next(w);
+    TEST_ASSERT_EQUAL(STN_JOB_SKY, j.kind);
+    TEST_ASSERT_TRUE(j.sky_on);
+    TEST_ASSERT_TRUE(w->s.paused);   /* the lease holds RTCM back: planned for the casters */
+    TEST_ASSERT_EQUAL(STN_STREAMING, w->s.state);
+    sky_done(w, STN_OK);
+    TEST_ASSERT_FALSE(w->s.paused);
+    TEST_ASSERT_TRUE(w->s.sky_on);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_ON, live_status(w).sky);
+}
+
+TEST_CASE("station core: the live view turns the output on and off again by itself", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    stn_take_notes(&w.s, (stn_note_t[STN_NOTES]){ 0 }, STN_NOTES);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_OFF, live_status(&w).sky);
+    live_on(&w);
+    stn_note_t n;
+    stn_note_t notes[STN_NOTES];
+    unsigned c = stn_take_notes(&w.s, notes, STN_NOTES);
+    TEST_ASSERT_EQUAL_UINT(2, c);
+    TEST_ASSERT_EQUAL_UINT8(STN_NOTE_LIVE_OPENED, notes[0].kind);
+    TEST_ASSERT_EQUAL_INT32(600, notes[0].a);
+    TEST_ASSERT_EQUAL_UINT8(STN_NOTE_SKY_ON, notes[1].kind);
+    TEST_ASSERT_EQUAL_INT32(250, notes[1].a);   /* how long RTCM was held */
+
+    /* An admin client keeps it open; it closes when its time is up. */
+    for (int i = 0; i < 9; i++) {
+        TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 60).kind);
+        stn_live_touch(&w.s, w.in.now_ms);
+    }
+    TEST_ASSERT_TRUE(live_status(&w).open);
+    stn_job_t j = sim_until_job(&w, 61);
+    TEST_ASSERT_EQUAL(STN_JOB_SKY, j.kind);
+    TEST_ASSERT_FALSE(j.sky_on);
+    TEST_ASSERT_FALSE(live_status(&w).open);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_STOPPING, live_status(&w).sky);
+    TEST_ASSERT_EQUAL_UINT8(STN_LIVE_END_EXPIRED, live_status(&w).last_end);
+    sky_done(&w, STN_OK);
+    TEST_ASSERT_FALSE(w.s.sky_on);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_OFF, live_status(&w).sky);
+    TEST_ASSERT_TRUE(has_note(&w, STN_NOTE_LIVE_CLOSED, &n));
+    TEST_ASSERT_EQUAL_INT32(STN_LIVE_END_EXPIRED, n.b);
+
+    /* Nobody asks for it: closed after the idle time. */
+    live_on(&w);
+    j = sim_until_job(&w, STN_LIVE_IDLE_MS / 1000 + 1);
+    TEST_ASSERT_EQUAL(STN_JOB_SKY, j.kind);
+    TEST_ASSERT_FALSE(j.sky_on);
+    TEST_ASSERT_EQUAL_UINT8(STN_LIVE_END_IDLE, live_status(&w).last_end);
+    sky_done(&w, STN_OK);
+
+    /* The user's stop. */
+    live_on(&w);
+    stn_live_stop(&w.s, w.in.now_ms);
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_SKY, j.kind);
+    TEST_ASSERT_FALSE(j.sky_on);
+    TEST_ASSERT_EQUAL_UINT8(STN_LIVE_END_USER, live_status(&w).last_end);
+    sky_done(&w, STN_OK);
+
+    /* Extended: from the current end, at most the longest window from now. */
+    live_on(&w);
+    TEST_ASSERT_EQUAL(STN_OK, stn_live_start(&w.s, LIVE_MS, w.in.now_ms, NULL));
+    TEST_ASSERT_UINT32_WITHIN(1, 2 * LIVE_MS / 1000, live_status(&w).left_s);
+    for (int i = 0; i < 10; i++) {
+        stn_live_start(&w.s, LIVE_MS, w.in.now_ms, NULL);
+    }
+    TEST_ASSERT_EQUAL_UINT32(STN_LIVE_MAX_MS / 1000, live_status(&w).left_s);
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_next(&w).kind);   /* already on: nothing sent */
+}
+
+TEST_CASE("station core: the live view never configures behind the user's back", "[station]")
+{
+    /* gnss/autocfg = 0: the user configures the receiver. */
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    w.in.autocfg = false;
+    TEST_ASSERT_EQUAL(STN_OK, stn_live_start(&w.s, LIVE_MS, w.in.now_ms, NULL));
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 30).kind);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_BLOCKED, live_status(&w).sky);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_WHY_AUTOCFG_OFF, live_status(&w).why);
+
+    /* The profile sends it permanently: never toggled. */
+    sim_init(&w, false);
+    boot_applied(&w);
+    w.in.profile_sky = true;
+    TEST_ASSERT_EQUAL(STN_OK, stn_live_start(&w.s, LIVE_MS, w.in.now_ms, NULL));
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 30).kind);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_ON_PROFILE, live_status(&w).sky);
+    stn_live_stop(&w.s, w.in.now_ms);
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 30).kind);
+
+    /* Not a model we configure. */
+    sim_init(&w, false);
+    w.rtcm_on = true;
+    sim_start(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
+    identity_done(&w, false, false);
+    TEST_ASSERT_EQUAL(STN_OK, stn_live_start(&w.s, LIVE_MS, w.in.now_ms, NULL));
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 30).kind);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_WHY_UNSUPPORTED, live_status(&w).why);
+
+    /* A receiver-flash journal: no live view at all. */
+    sim_init(&w, true);
+    sim_start(&w);
+    uint8_t why = 0;
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_live_start(&w.s, LIVE_MS, w.in.now_ms, &why));
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_WHY_FLASH, why);
+    TEST_ASSERT_FALSE(w.s.live_open);
+}
+
+TEST_CASE("station core: after a reconfigure or restart the live view's output is simply off", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    live_on(&w);
+
+    /* An apply quiets the port and saves without it. */
+    stn_request_apply(&w.s);
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+    TEST_ASSERT_FALSE(w.s.sky_on);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_BLOCKED, live_status(&w).sky);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_WHY_RECONFIGURED, live_status(&w).why);
+    TEST_ASSERT_TRUE(live_status(&w).open);   /* the window stays, without the output */
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 40).kind);
+    /* Starting the view again turns it on again. */
+    TEST_ASSERT_EQUAL(STN_OK, stn_live_start(&w.s, LIVE_MS, w.in.now_ms, NULL));
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_SKY, j.kind);
+    TEST_ASSERT_TRUE(j.sky_on);
+    sky_done(&w, STN_OK);
+
+    /* A receiver restart ends it too; nothing is sent to turn it off. */
+    stn_restart_seen(&w.s);
+    TEST_ASSERT_FALSE(w.s.sky_on);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_WHY_RECONFIGURED, live_status(&w).why);
+    stn_live_stop(&w.s, w.in.now_ms);
+    j = sim_until_job(&w, 5);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);   /* the restart's own handling, no output toggle */
+    TEST_ASSERT_TRUE(j.after_restart);
+
+    /* An apply that sent nothing leaves the output alone. */
+    sim_init(&w, false);
+    boot_applied(&w);
+    live_on(&w);
+    stn_request_apply(&w.s);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, sim_next(&w).kind);
+    stn_result_t r = res(STN_E_UNSUPPORTED);
+    r.nothing_sent = true;
+    sim_done(&w, &r);
+    TEST_ASSERT_TRUE(w.s.sky_on);
+
+    /* The ladder's receiver reset. */
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_recovery(&w.s, STN_REC_RECEIVER_RESET, true));
+    TEST_ASSERT_EQUAL(STN_JOB_RECEIVER_RESET, sim_next(&w).kind);
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+    TEST_ASSERT_FALSE(w.s.sky_on);
+}
+
+TEST_CASE("station core: the live view waits for the receiver to be free", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+
+    /* Wanted while an apply runs: turned on after it. */
+    stn_request_apply(&w.s);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, sim_next(&w).kind);
+    TEST_ASSERT_EQUAL(STN_OK, stn_live_start(&w.s, LIVE_MS, w.in.now_ms, NULL));
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_PENDING, live_status(&w).sky);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_WHY_BUSY, live_status(&w).why);
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_SKY, j.kind);
+    TEST_ASSERT_TRUE(j.sky_on);
+    sky_done(&w, STN_OK);
+
+    /* In maintenance: never toggled (on stays on, nothing is sent), even
+     * when the window closes; turned off once it is over. */
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 900, false, w.in.now_ms));
+    stn_live_stop(&w.s, w.in.now_ms);
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 880).kind);
+    j = sim_until_job(&w, 30);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+    identity_done(&w, true, true);
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_SKY, j.kind);
+    TEST_ASSERT_FALSE(j.sky_on);
+    sky_done(&w, STN_OK);
+
+    /* Wanted during maintenance: pending, turned on after it. */
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 900, false, w.in.now_ms));
+    TEST_ASSERT_EQUAL(STN_OK, stn_live_start(&w.s, 60 * MIN_MS, w.in.now_ms, NULL));
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_PENDING, live_status(&w).sky);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_WHY_MAINTENANCE, live_status(&w).why);
+    for (int i = 0; i < 15; i++) {
+        TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 59).kind);
+        stn_live_touch(&w.s, w.in.now_ms);
+    }
+    j = sim_until_job(&w, 30);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+    identity_done(&w, true, true);
+    stn_live_touch(&w.s, w.in.now_ms);
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_SKY, j.kind);
+    TEST_ASSERT_TRUE(j.sky_on);
+}
+
+TEST_CASE("station core: a refused or unanswered output command", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    TEST_ASSERT_EQUAL(STN_OK, stn_live_start(&w.s, LIVE_MS, w.in.now_ms, NULL));
+    TEST_ASSERT_EQUAL(STN_JOB_SKY, sim_next(&w).kind);
+    sky_done(&w, STN_E_FAIL);
+    TEST_ASSERT_FALSE(w.s.sky_on);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_BLOCKED, live_status(&w).sky);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_WHY_REJECTED, live_status(&w).why);
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 60).kind);   /* not retried on its own */
+
+    /* No answer: it may have taken, so it is turned off when the window closes. */
+    TEST_ASSERT_EQUAL(STN_OK, stn_live_start(&w.s, LIVE_MS, w.in.now_ms, NULL));
+    TEST_ASSERT_EQUAL(STN_JOB_SKY, sim_next(&w).kind);
+    sky_done(&w, STN_E_TIMEOUT);
+    TEST_ASSERT_TRUE(w.s.sky_on);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_WHY_NO_ANSWER, live_status(&w).why);
+    stn_live_stop(&w.s, w.in.now_ms);
+
+    /* Turning it off fails: again after 60 s, three tries, then left alone. */
+    for (int i = 0; i < STN_SKY_OFF_TRIES; i++) {
+        stn_job_t j = sim_until_job(&w, 61);
+        TEST_ASSERT_EQUAL(STN_JOB_SKY, j.kind);
+        TEST_ASSERT_FALSE(j.sky_on);
+        sky_done(&w, STN_E_TIMEOUT);
+    }
+    TEST_ASSERT_FALSE(w.s.sky_on);
+    TEST_ASSERT_TRUE(has_note(&w, STN_NOTE_SKY_LEFT_ON, NULL));
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 300).kind);
+}

@@ -26,6 +26,25 @@ bool um98x_signal_group_matches(const um98x_base_profile_t *p, const um98x_readb
            rb->config.signal_group_slave == p->signal_group_slave;
 }
 
+bool um98x_antenna_matches(const um98x_base_profile_t *p, const um98x_readback_t *rb)
+{
+    if (p == NULL) {
+        return false;
+    }
+    size_t n = um98x_antenna_str_len(p->antenna_model);
+    if (n == 0) {
+        return true;   /* nothing to send */
+    }
+    if (rb == NULL || !rb->config_ok || !rb->config.rx.antenna_known) {
+        return false;
+    }
+    const um98x_rx_settings_t *rx = &rb->config.rx;
+    size_t k = um98x_antenna_str_len(p->antenna_serial);
+    return um98x_antenna_str_len(rx->antenna_model) == n && memcmp(rx->antenna_model, p->antenna_model, n) == 0 &&
+           um98x_antenna_str_len(rx->antenna_serial) == k && memcmp(rx->antenna_serial, p->antenna_serial, k) == 0 &&
+           rx->antenna_setup_id == p->antenna_setup_id;
+}
+
 static void add(um98x_plan_t *out, um98x_step_kind_t kind, bool fatal, uint16_t msg, uint16_t period_s)
 {
     if (out->count < UM98X_PLAN_MAX) {
@@ -55,6 +74,12 @@ bool um98x_plan_build(const um98x_base_profile_t *p, const um98x_readback_t *rb,
     }
     if (force_mode || !rb->mode_ok || !um98x_mode_matches(p, rb->mode_body)) {
         add(out, UM98X_STEP_MODE, true, 0, 0);
+    }
+    if (!um98x_antenna_matches(p, rb)) {
+        add(out, UM98X_STEP_ANTENNA, false, 0, 0);
+    }
+    if (rb->config_ok && rb->config.rx.b1cb2a == UM98X_SETTING_OFF) {
+        add(out, UM98X_STEP_B1CB2A, false, 0, 0);
     }
     add_rtcm(p, out);
     if (p->sat_view_output) {
@@ -103,8 +128,43 @@ size_t um98x_step_command(const um98x_base_profile_t *p, const um98x_step_t *s, 
     case UM98X_STEP_SAVE:
         n = snprintf(buf, cap, "%s", UM98X_CMD_SAVE);
         break;
+    case UM98X_STEP_ANTENNA: {
+        int nm = (int)um98x_antenna_str_len(p->antenna_model);
+        int ns = (int)um98x_antenna_str_len(p->antenna_serial);
+        if (nm == 0) {
+            return 0;
+        }
+        n = snprintf(buf, cap, "CONFIG BASEANTENNAMODEL \"%.*s\" \"%.*s\" %u USER", nm, p->antenna_model, ns,
+                     p->antenna_serial, (unsigned)p->antenna_setup_id);
+        break;
+    }
+    case UM98X_STEP_B1CB2A:
+        n = snprintf(buf, cap, "CONFIG RTCMB1CB2A ENABLE");
+        break;
     default:
         return 0;
+    }
+    if (n < 0 || (size_t)n >= cap) {
+        buf[0] = '\0';
+        return 0;
+    }
+    return (size_t)n;
+}
+
+size_t um98x_sat_view_command(bool on, uint16_t period_s, char *buf, size_t cap)
+{
+    if (buf == NULL || cap == 0) {
+        return 0;
+    }
+    buf[0] = '\0';
+    int n;
+    if (on) {
+        if (period_s == 0 || period_s > UM98X_SAT_VIEW_PERIOD_MAX) {
+            return 0;
+        }
+        n = snprintf(buf, cap, "GPGSV COM1 %u", (unsigned)period_s);
+    } else {
+        n = snprintf(buf, cap, "UNLOG COM1 GPGSV");
     }
     if (n < 0 || (size_t)n >= cap) {
         buf[0] = '\0';
