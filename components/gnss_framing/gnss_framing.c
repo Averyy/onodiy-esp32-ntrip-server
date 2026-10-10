@@ -51,15 +51,3 @@ void gnss_framer_set_prompt_detect(gnss_framer_t *f, bool armed)
         f->prompt_since_rtcm = 0;
     }
 }
-
-bool gnss_versiona_parse(const char *line, size_t len, gnss_versiona_t *out)
-{
-    (void)line;
-    (void)len;
-    if (out != NULL) {
-        memset(out, 0, sizeof(*out));
-    }
-    /* TODO: prefix, CRC32, body split at the first ';', field split, quote
-     * stripping, build number; host-tested with captured version logs. */
-    return false;
-}
