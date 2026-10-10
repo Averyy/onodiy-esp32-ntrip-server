@@ -1522,3 +1522,230 @@ TEST_CASE("station core: the live view's output is turned off after an ESP32 res
     TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 40).kind);
     TEST_ASSERT_TRUE(w.s.profile_applied);
 }
+
+/* ---- receiver update sessions, bench operations, package checks ----------------------- */
+
+static stn_result_t flash_end(stn_flash_end_t end, bool supported)
+{
+    stn_result_t r = res(STN_OK);
+    r.flash_end = (uint8_t)end;
+    r.supported = supported;
+    return r;
+}
+
+TEST_CASE("station core: an update runs as FLASHING, then re-applies whatever autocfg says and closes after its check", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    live_on(&w);
+    w.in.autocfg = false;
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_NEW));
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_flash(&w.s, STN_FLASH_NEW));   /* one at a time */
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_FLASH, j.kind);
+    TEST_ASSERT_EQUAL_UINT8(STN_FLASH_NEW, j.flash_kind);
+    TEST_ASSERT_EQUAL(STN_FLASHING, w.s.state);
+    TEST_ASSERT_TRUE(w.s.paused);
+    TEST_ASSERT_FALSE(w.s.live_open);   /* the live view closed for the update */
+    TEST_ASSERT_EQUAL_UINT8(STN_LIVE_END_FLASH, w.s.live_last_end);
+    /* Maintenance and the live view are refused while it runs. */
+    TEST_ASSERT_EQUAL(STN_MAINT_FLASH, stn_maint_enter(&w.s, 1800, false, w.in.now_ms));
+    uint8_t why = 0;
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_live_start(&w.s, LIVE_MS, w.in.now_ms, &why));
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_WHY_FLASH, why);
+
+    stn_result_t r = flash_end(STN_FLASH_END_REAPPLY, true);
+    sim_done(&w, &r);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);   /* autocfg off: a flash session re-applies anyway */
+    TEST_ASSERT_EQUAL(STN_WHY_FLASH, j.why);
+    TEST_ASSERT_TRUE(j.force_mode);
+    TEST_ASSERT_FALSE(has_note(&w, STN_NOTE_FLASH_CLOSE, NULL));
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+    /* The journal closes once the re-apply's window is judged. */
+    stn_note_t n;
+    bool closed = false;
+    for (int i = 0; i < 60 && !closed; i++) {
+        sim_tick(&w);
+        TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_next(&w).kind);
+        closed = has_note(&w, STN_NOTE_FLASH_CLOSE, &n);
+    }
+    TEST_ASSERT_TRUE(closed);
+    TEST_ASSERT_EQUAL_INT32(1, n.a);
+    TEST_ASSERT_EQUAL_UINT8(0, w.s.flash_close);
+    TEST_ASSERT_FALSE(w.s.alerts & STN_ALERT_RECEIVER_ATTENTION);
+}
+
+TEST_CASE("station core: after the abort path RTCM must come back within 120 s, else attention", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_NEW));
+    TEST_ASSERT_EQUAL(STN_JOB_FLASH, sim_next(&w).kind);
+    stn_result_t r = flash_end(STN_FLASH_END_REAPPLY_RTCM, true);
+    w.rtcm_on = false;
+    sim_done(&w, &r);
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+    stn_note_t n;
+    bool closed = false;
+    int secs = 0;
+    while (!closed && secs < 200) {
+        sim_tick(&w);
+        secs++;
+        (void)sim_next(&w);
+        closed = has_note(&w, STN_NOTE_FLASH_CLOSE, &n);
+    }
+    TEST_ASSERT_TRUE(closed);
+    TEST_ASSERT_EQUAL_INT32(0, n.a);
+    TEST_ASSERT_TRUE(secs >= 119 && secs <= 122);
+    TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_RECEIVER_ATTENTION);
+
+    /* With RTCM back it closes at once. */
+    sim_init(&w, false);
+    boot_applied(&w);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_NEW));
+    TEST_ASSERT_EQUAL(STN_JOB_FLASH, sim_next(&w).kind);
+    sim_done(&w, &r);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, sim_next(&w).kind);
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+    closed = false;
+    for (int i = 0; i < 5 && !closed; i++) {
+        sim_tick(&w);
+        (void)sim_next(&w);
+        closed = has_note(&w, STN_NOTE_FLASH_CLOSE, &n);
+    }
+    TEST_ASSERT_TRUE(closed);
+    TEST_ASSERT_EQUAL_INT32(1, n.a);
+}
+
+TEST_CASE("station core: a failed re-apply after an update closes the journal with attention", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_NEW));
+    TEST_ASSERT_EQUAL(STN_JOB_FLASH, sim_next(&w).kind);
+    stn_result_t r = flash_end(STN_FLASH_END_REAPPLY, true);
+    sim_done(&w, &r);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, sim_next(&w).kind);
+    stn_result_t f = res(STN_E_FAIL);
+    f.answered = true;
+    sim_done(&w, &f);
+    stn_note_t n;
+    TEST_ASSERT_TRUE(has_note(&w, STN_NOTE_FLASH_CLOSE, &n));
+    TEST_ASSERT_EQUAL_INT32(0, n.a);
+    TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+}
+
+TEST_CASE("station core: a session waiting for the user, then the user's retry and restart", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_NEW));
+    TEST_ASSERT_EQUAL(STN_JOB_FLASH, sim_next(&w).kind);
+    stn_result_t r = flash_end(STN_FLASH_END_NEEDS_USER, true);
+    sim_done(&w, &r);
+    TEST_ASSERT_EQUAL(STN_FLASH_RECOVERY, w.s.state);
+    TEST_ASSERT_TRUE(w.s.paused);
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 600).kind);   /* nothing sent until the user acts */
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_flash(&w.s, STN_FLASH_NEW));
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_bench(&w.s));
+
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_RETRY));
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_FLASH, j.kind);
+    TEST_ASSERT_EQUAL_UINT8(STN_FLASH_RETRY, j.flash_kind);
+    r = flash_end(STN_FLASH_END_NOTHING, true);
+    sim_done(&w, &r);
+    TEST_ASSERT_EQUAL(STN_FLASH_RECOVERY, w.s.state);   /* changed nothing: still waiting */
+
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_RESTART));
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL_UINT8(STN_FLASH_RESTART, j.flash_kind);
+    r = flash_end(STN_FLASH_END_REAPPLY, true);
+    sim_done(&w, &r);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, sim_next(&w).kind);
+
+    /* Boot-time recovery with actions built in is the same job from FLASH_RECOVERY. */
+    sim_init(&w, true);
+    w.rtcm_on = true;
+    sim_start(&w);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_RECOVER));
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_FLASH, j.kind);
+    TEST_ASSERT_EQUAL_UINT8(STN_FLASH_RECOVER, j.flash_kind);
+}
+
+TEST_CASE("station core: an update that changed nothing streams on; a receiver left at its loader is listened for", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_NEW));
+    TEST_ASSERT_EQUAL(STN_JOB_FLASH, sim_next(&w).kind);
+    stn_result_t r = flash_end(STN_FLASH_END_NOTHING, true);
+    sim_done(&w, &r);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    TEST_ASSERT_FALSE(w.s.paused);
+
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_NEW));
+    TEST_ASSERT_EQUAL(STN_JOB_FLASH, sim_next(&w).kind);
+    r = flash_end(STN_FLASH_END_NOTHING, true);
+    r.in_loader = true;
+    r.loader_key_sent = true;
+    w.rtcm_on = false;   /* it stays at its loader */
+    sim_done(&w, &r);
+    TEST_ASSERT_EQUAL(STN_NO_RECEIVER, w.s.state);
+    TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_RECEIVER_IN_LOADER);
+    TEST_ASSERT_TRUE(w.s.loader_key_sent);
+    stn_job_t j = sim_until_job(&w, 60);
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, j.kind);
+    TEST_ASSERT_TRUE(j.listen_only);
+}
+
+TEST_CASE("station core: bench operations pause the casters and end with the stream-first path", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_bench(&w.s));
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_bench(&w.s));
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_BENCH, j.kind);
+    TEST_ASSERT_TRUE(w.s.paused);
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_bench(&w.s));   /* one runs */
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+    TEST_ASSERT_FALSE(w.s.paused);
+    TEST_ASSERT_EQUAL(STN_IDLE, w.s.state);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
+
+    /* Refused in maintenance and with a journal. */
+    sim_init(&w, false);
+    boot_applied(&w);
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 1800, false, w.in.now_ms));
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_bench(&w.s));
+    sim_init(&w, true);
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_bench(&w.s));
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_pkg_check(&w.s));
+}
+
+TEST_CASE("station core: a package check runs without the receiver or a pause", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_pkg_check(&w.s));
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_pkg_check(&w.s));
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_PKG_CHECK, j.kind);
+    TEST_ASSERT_FALSE(w.s.paused);
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+}

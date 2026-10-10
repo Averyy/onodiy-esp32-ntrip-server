@@ -149,17 +149,23 @@ typedef enum {
     UM98X_FLASH_FAIL_APP_NOT_STARTING, /**< the loader answers, the application does not start */
     UM98X_FLASH_FAIL_ENTRY,            /**< could not reach the loader (before the first data block) */
     UM98X_FLASH_FAIL_JOURNAL,          /**< journal unreadable or written by a newer schema */
+    UM98X_FLASH_FAIL_RECEIVER,         /**< the receiver reported an error writing or loading (not a package content error): not retried automatically */
 } um98x_flash_failure_t;
 
 /** Flash progress snapshot. */
 typedef struct {
     um98x_flash_phase_t phase;
-    uint32_t bytes_sent;
+    uint32_t bytes_sent;       /**< acknowledged bytes */
     uint32_t bytes_total;
     uint32_t retries;          /**< retransmissions so far */
     uint8_t transfers;         /**< transfers started under the open journal (counted across reboots; at most 3 without a new confirmation) */
     uint8_t failure_class;     /**< um98x_flash_failure_t of the last failure */
     int32_t last_err;          /**< esp_err_t of the last failure, 0 = none */
+    uint32_t frames_acked;     /**< acknowledged frames of this transfer */
+    uint32_t frames_total;     /**< frames of the package */
+    uint32_t frames_sent;      /**< frames written, resends included */
+    uint8_t entry_attempts;    /**< loader entry attempts in this session */
+    uint8_t journal_state;     /**< um98x_journal_state_t written last (0 = none) */
 } um98x_flash_progress_t;
 
 /**

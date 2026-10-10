@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+menu "Station: bench console (bench builds only)"
+
+    config BENCH_CONSOLE
+        bool "Bench console on the UART0 console (never in a release)"
+        default n
+        select UM98X_FLASH_BYTE_CAPTURE
+        help
+            A command line on the UART0 console (115200, alongside the log)
+            that drives the receiver flasher's bench tests one at a time:
+            listen only, the version query, the loader entry probe, the menu
+            item 2 probe, the loader idle observation, the stop key from
+            boot (armed for one boot), a full same-build flash, a deliberate
+            abort, and the journal-state helper. Every command that writes
+            to the receiver asks for a typed confirmation word, runs through
+            the station's normal ownership of the receiver link (casters
+            paused, refused in maintenance and while anything else runs),
+            records every byte (also downloadable from the web UI's
+            diagnostics) and prints a PASS/FAIL line. Nothing runs at boot
+            except the one-shot stop key, and only when armed. The release
+            job refuses a build with this on.
+
+endmenu

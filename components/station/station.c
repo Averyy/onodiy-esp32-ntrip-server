@@ -19,6 +19,8 @@
  */
 #include "station.h"
 
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -30,6 +32,7 @@
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "gnss_link.h"
 #include "gnss_obs.h"
@@ -45,8 +48,24 @@
 #include "station_obs.h"
 #include "um98x_ctl.h"
 #include "um98x_flash.h"
+#include "um98x_flash_bench.h"
 
 static const char *TAG = "station";
+
+_Static_assert(STATION_BENCH_LISTEN == (int)UM98X_BENCH_LISTEN && STATION_BENCH_VERSION == (int)UM98X_BENCH_VERSION &&
+                   STATION_BENCH_ENTRY == (int)UM98X_BENCH_ENTRY && STATION_BENCH_MENU2 == (int)UM98X_BENCH_MENU2 &&
+                   STATION_BENCH_IDLE == (int)UM98X_BENCH_IDLE,
+               "bench operations mirror um98x_bench_op_t");
+
+#ifndef CONFIG_UM98X_FLASH_BYTE_CAPTURE
+#define CONFIG_UM98X_FLASH_BYTE_CAPTURE 0
+#endif
+#ifndef CONFIG_UM98X_FLASH_ENABLE
+#define CONFIG_UM98X_FLASH_ENABLE 0
+#endif
+#ifndef CONFIG_UM98X_FLASH_RECOVERY_ACTIONS
+#define CONFIG_UM98X_FLASH_RECOVERY_ACTIONS 0
+#endif
 
 /* Boot-time race into the receiver's loader. PROVISIONAL, to be confirmed on hardware. */
 #define RACE_MAX_MS 10000u
@@ -194,6 +213,28 @@ static bool s_b1c_ok;
 static char s_b1c_reply[64];
 static char s_sky_reply[64];             /* the last failed satellite-in-view toggle */
 
+/* Receiver update sessions (station task, except where noted). */
+static station_flash_request_t s_flash_req;   /* the user's request (written under s_lock by the requester) */
+static uint32_t s_bench_stop_after;           /* bench: stop after this many blocks (under s_lock) */
+static station_flash_request_t s_check_req;   /* check-only request (under s_lock) */
+static bool s_check_running;                  /* under s_lock */
+static station_flash_last_t s_flash_last;     /* under s_lock */
+static int64_t s_flash_last_us = INT64_MIN;   /* under s_lock */
+static um98x_info_t s_after;                  /* the version log after the session */
+static bool s_after_aborted;
+static char s_after_reason[96];
+static um98x_flash_phase_t s_progress_phase;
+static int64_t s_progress_post_us;
+static int s_recover_plan;                    /* boot-time table, from station_early_boot */
+static bool s_race_prompt;                    /* the early race reached the loader prompt */
+
+#if CONFIG_UM98X_FLASH_BYTE_CAPTURE
+/* Bench console (bench builds). */
+static station_bench_req_t s_bench_req;
+static station_bench_res_t s_bench_res;
+static SemaphoreHandle_t s_bench_done;
+#endif
+
 /* Journal records waiting for diag's rate limits (station task). */
 #define JQ_LEN 8
 typedef struct {
@@ -203,6 +244,9 @@ typedef struct {
 } jrec_t;
 static jrec_t s_jq[JQ_LEN];
 static unsigned s_jq_n;
+
+static void journal_push(diag_event_t kind, int32_t a, int32_t b);
+static void hold_take(void);
 
 /* ---- small helpers -------------------------------------------------------- */
 
@@ -964,6 +1008,428 @@ static void job_sky(const stn_job_t *job, stn_result_t *r)
     }
 }
 
+/* ---- receiver update sessions ---------------------------------------------------- */
+
+static void flash_last_set(uint8_t outcome, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+
+static void flash_last_set(uint8_t outcome, const char *fmt, ...)
+{
+    station_flash_last_t l;
+    memset(&l, 0, sizeof(l));
+    portENTER_CRITICAL(&s_lock);
+    l = s_flash_last;
+    portEXIT_CRITICAL(&s_lock);
+    l.outcome = outcome;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(l.reason, sizeof(l.reason), fmt, ap);
+    va_end(ap);
+    l.ended_unix = unix_now();
+    portENTER_CRITICAL(&s_lock);
+    s_flash_last = l;
+    s_flash_last_us = esp_timer_get_time();
+    portEXIT_CRITICAL(&s_lock);
+    ESP_LOGW(TAG, "receiver update: %s", l.reason);
+}
+
+/* Progress to the web (STATION_EVENT_FLASH_PROGRESS): every phase change, else at most once a second. */
+static void post_progress(const um98x_flash_progress_t *p, bool force)
+{
+    int64_t now = esp_timer_get_time();
+    if (!force && p->phase == s_progress_phase && now - s_progress_post_us < 1000000) {
+        return;
+    }
+    s_progress_phase = p->phase;
+    s_progress_post_us = now;
+    esp_err_t err = esp_event_post(STATION_EVENT, STATION_EVENT_FLASH_PROGRESS, p, sizeof(*p), 0);
+    if (err != ESP_OK) {
+        ESP_LOGD(TAG, "flash progress not posted: %s", esp_err_to_name(err));
+    }
+}
+
+static void final_progress(um98x_flash_phase_t phase)
+{
+    um98x_flash_progress_t p;
+    um98x_flash_get_progress(&p);
+    p.phase = phase;
+    post_progress(&p, true);
+}
+
+static bool main_journal_state(uint8_t st)
+{
+    return st >= UM98X_JOURNAL_PREPARED && st <= UM98X_JOURNAL_VERIFYING;
+}
+
+static void flash_progress_cb(const um98x_flash_progress_t *p, void *ctx)
+{
+    (void)ctx;
+    if (p->journal_state != 0) {
+        /* The journal as the status reports it (the record itself is the flasher's). */
+        portENTER_CRITICAL(&s_lock);
+        s_journal_err = ESP_OK;
+        s_journal.state = p->journal_state;
+        if (main_journal_state(p->journal_state)) {
+            s_journal.phase = p->journal_state;
+        }
+        s_journal.transfers = p->transfers;
+        s_journal.entry_attempts = p->entry_attempts;
+        s_journal.failure_class = p->failure_class;
+        portEXIT_CRITICAL(&s_lock);
+    }
+    post_progress(p, false);
+}
+
+/* Nothing of the session is left: no journal, the package released, the lockout ended. */
+static void flash_forget(bool release_package)
+{
+    um98x_flash_discard();
+    if (release_package) {
+        esp_err_t rel = pkg_store_release();
+        if (rel != ESP_OK) {
+            ESP_LOGW(TAG, "staged receiver package not released: %s", esp_err_to_name(rel));
+        }
+    }
+    portENTER_CRITICAL(&s_lock);
+    s_journal_err = ESP_ERR_NOT_FOUND;
+    memset(&s_journal, 0, sizeof(s_journal));
+    s_journal_parked = false;
+    portEXIT_CRITICAL(&s_lock);
+    lockout_release();
+}
+
+/* The session left the journal waiting for the user: reduced lockout, the package stays pinned. */
+static void flash_parked(const um98x_flash_result_t *res)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_journal_err = ESP_OK;
+    s_journal = res->journal;
+    s_journal_parked = false;
+    portEXIT_CRITICAL(&s_lock);
+    lockout_release();
+    um98x_flash_discard();
+    flash_last_set(STATION_FLASH_OUT_NEEDS_USER, "waits for you: %s", res->reason);
+}
+
+static void flash_result_common(const um98x_flash_result_t *res, stn_result_t *r)
+{
+    switch (res->end) {
+    case UM98X_FLASH_END_DONE:
+    case UM98X_FLASH_END_ABORTED:
+        r->flash_end = res->end == UM98X_FLASH_END_DONE ? STN_FLASH_END_REAPPLY : STN_FLASH_END_REAPPLY_RTCM;
+        r->supported = um98x_ctl_model_supported(&res->receiver);
+        s_after = res->receiver;
+        s_after_aborted = (res->end == UM98X_FLASH_END_ABORTED);
+        snprintf(s_after_reason, sizeof(s_after_reason), "%s", res->reason);
+        portENTER_CRITICAL(&s_lock);
+        s_journal = res->journal;
+        portEXIT_CRITICAL(&s_lock);
+        um98x_flash_discard();
+        /* The journal stays open, the lockout held, until the re-apply is checked (STN_NOTE_FLASH_CLOSE). */
+        break;
+    case UM98X_FLASH_END_NEEDS_USER:
+        r->flash_end = STN_FLASH_END_NEEDS_USER;
+        flash_parked(res);
+        break;
+    default:
+        r->flash_end = STN_FLASH_END_NOTHING;
+        flash_last_set(STATION_FLASH_OUT_NOT_STARTED, "%s", res->reason);
+        (void)pkg_store_set_pinned(false);
+        flash_forget(true);
+        break;
+    }
+}
+
+static void flash_new(gnss_link_lease_t lease, stn_result_t *r)
+{
+    station_flash_request_t req;
+    uint32_t stop_after;
+    portENTER_CRITICAL(&s_lock);
+    req = s_flash_req;
+    stop_after = s_bench_stop_after;
+    s_bench_stop_after = 0;
+    bool key_allowed = !s_core.loader_key_sent;
+    portEXIT_CRITICAL(&s_lock);
+    um98x_flash_progress_t p;
+    memset(&p, 0, sizeof(p));
+    p.phase = UM98X_FLASH_CHECKING;
+    p.bytes_total = req.size;
+    post_progress(&p, true);
+
+    um98x_flash_ident_t id;
+    esp_err_t err = um98x_flash_identify(lease, home_baud(), key_allowed, &id);
+    if (err != ESP_OK || id.result != UM98X_FLASH_ID_OK) {
+        r->flash_end = STN_FLASH_END_NOTHING;
+        if (err == ESP_OK && id.result == UM98X_FLASH_ID_AT_LOADER) {
+            r->loader_key_sent = id.loader_key_sent;
+            r->in_loader = !id.app_back;
+            flash_last_set(STATION_FLASH_OUT_NOT_STARTED, "the receiver was at its boot menu (%u baud)%s",
+                           (unsigned)id.loader_baud, id.app_back ? "; it is back in its application" : "");
+        } else {
+            flash_last_set(STATION_FLASH_OUT_NOT_STARTED, "the receiver did not answer its version query (%s)",
+                           esp_err_to_name(err));
+        }
+        flash_forget(true);
+        return;
+    }
+    um98x_flash_expect_t e;
+    memset(&e, 0, sizeof(e));
+    memcpy(e.sha256, req.sha256, sizeof(e.sha256));
+    e.size = req.size;
+    snprintf(e.expected_fw, sizeof(e.expected_fw), "%s", req.expected_fw);
+    e.expected_build = req.expected_build;
+    e.receiver = id.info;
+    e.cross_layout_confirmed = req.cross_layout_confirmed;
+    um98x_flash_pkg_facts_t f;
+    err = um98x_flash_prepare(&e, &f);
+    if (err != ESP_OK) {
+        r->flash_end = STN_FLASH_END_NOTHING;
+        portENTER_CRITICAL(&s_lock);
+        s_flash_last.failed_rule = f.failed_rule;
+        s_flash_last.cross_layout = f.cross_layout;
+        s_flash_last.check_only = false;
+        portEXIT_CRITICAL(&s_lock);
+        if (f.failed_rule != 0) {
+            flash_last_set(STATION_FLASH_OUT_REJECTED, "package refused by rule %u: %s", (unsigned)f.failed_rule, f.why);
+        } else {
+            flash_last_set(STATION_FLASH_OUT_NOT_STARTED, "package not checked: %s", f.why[0] ? f.why : esp_err_to_name(err));
+        }
+        flash_forget(true);   /* a failed validation releases the package */
+        return;
+    }
+    /* Pin, inhibit (the update slot is already ours), then the journal. */
+    err = pkg_store_set_pinned(true);
+    if (err != ESP_OK) {
+        r->flash_end = STN_FLASH_END_NOTHING;
+        flash_last_set(STATION_FLASH_OUT_NOT_STARTED, "the staged package could not be pinned (%s)", esp_err_to_name(err));
+        flash_forget(true);
+        return;
+    }
+    lockout_take();
+    um98x_flash_request_t fr;
+    memset(&fr, 0, sizeof(fr));
+    um98x_flash_journal_t *j = &fr.journal;
+    memcpy(j->sha256, f.sha256, sizeof(j->sha256));
+    j->size = req.size;
+    snprintf(j->expected_fw, sizeof(j->expected_fw), "%s", req.expected_fw);
+    j->expected_build = req.expected_build;
+    snprintf(j->pre_model, sizeof(j->pre_model), "%s", id.info.model);
+    snprintf(j->pre_fw, sizeof(j->pre_fw), "%s", id.info.firmware);
+    j->pre_build = id.info.build;
+    j->app_baud = id.app_baud;
+    fr.progress_cb = flash_progress_cb;
+    fr.stop_after_blocks = stop_after;
+    um98x_flash_result_t res;
+    err = um98x_flash_run(lease, &fr, &res);
+    if (err != ESP_OK) {
+        r->flash_end = STN_FLASH_END_NOTHING;
+        flash_last_set(STATION_FLASH_OUT_NOT_STARTED, "flasher refused: %s", esp_err_to_name(err));
+        (void)pkg_store_set_pinned(false);
+        flash_forget(true);
+        return;
+    }
+    flash_result_common(&res, r);
+}
+
+/* A journal waiting for the user (or the boot-time recovery): the journal as read. */
+static void flash_action(gnss_link_lease_t lease, uint8_t kind, stn_result_t *r)
+{
+    um98x_flash_request_t fr;
+    memset(&fr, 0, sizeof(fr));
+    portENTER_CRITICAL(&s_lock);
+    fr.journal = s_journal;
+    bool race = s_race_prompt;
+    int plan = s_recover_plan;
+    portEXIT_CRITICAL(&s_lock);
+    fr.progress_cb = flash_progress_cb;
+    lockout_take();   /* the receiver is worked on again: full lockout until it waits or closes */
+    um98x_flash_result_t res;
+    esp_err_t err;
+    switch (kind) {
+    case STN_FLASH_RETRY:
+        err = um98x_flash_user_retry(lease, &fr, &res);
+        break;
+    case STN_FLASH_RESTART:
+        err = um98x_flash_user_restart(lease, &fr, &res);
+        break;
+    default:
+        err = um98x_flash_recover(lease, &fr, plan, race, &res);
+        break;
+    }
+    if (err != ESP_OK) {
+        r->flash_end = STN_FLASH_END_NOTHING;   /* nothing sent: the journal still waits */
+        lockout_release();
+        flash_last_set(STATION_FLASH_OUT_NEEDS_USER, "not run: %s", esp_err_to_name(err));
+        return;
+    }
+    if (res.end == UM98X_FLASH_END_NEEDS_USER && kind == STN_FLASH_RECOVER && res.journal.state != UM98X_JOURNAL_NEEDS_USER) {
+        /* A plan that only stops (the race at the prompt, a check): the record is left as it was. */
+        res.journal = fr.journal;
+    }
+    flash_result_common(&res, r);
+}
+
+static void job_flash(const stn_job_t *job, stn_result_t *r)
+{
+    r->err = STN_OK;
+    r->flash_end = STN_FLASH_END_NOTHING;
+    release_lease(&s_hold_lease, "listen-only");   /* the session's RAW lease replaces it */
+    gnss_link_lease_t lease = NULL;
+    esp_err_t err = gnss_link_acquire(GNSS_LINK_MODE_RAW, "receiver update", LEASE_WAIT_MS, &lease);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "no RAW lease for the receiver update: %s", esp_err_to_name(err));
+        if (job->flash_kind == STN_FLASH_NEW) {
+            flash_last_set(STATION_FLASH_OUT_NOT_STARTED, "the receiver link was busy (%s)", esp_err_to_name(err));
+            flash_forget(true);
+        } else {
+            hold_take();
+        }
+        return;
+    }
+    if (job->flash_kind == STN_FLASH_NEW) {
+        flash_new(lease, r);
+    } else {
+        flash_action(lease, job->flash_kind, r);
+    }
+    release_lease(&lease, "receiver update");
+    if (r->flash_end == STN_FLASH_END_NEEDS_USER || (job->flash_kind != STN_FLASH_NEW && r->flash_end == STN_FLASH_END_NOTHING)) {
+        hold_take();   /* the journal waits: listen only */
+    }
+    final_progress(r->flash_end == STN_FLASH_END_NEEDS_USER ? UM98X_FLASH_NEEDS_USER
+                   : r->flash_end == STN_FLASH_END_NOTHING   ? UM98X_FLASH_FAILED
+                                                             : UM98X_FLASH_FINISHING);
+}
+
+/* STN_NOTE_FLASH_CLOSE: the re-apply was checked (ok) or gave up. */
+static void flash_close(bool reapply_ok)
+{
+    esp_err_t err = um98x_flash_journal_close();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "receiver flash journal not closed: %s", esp_err_to_name(err));
+    }
+    uint8_t outcome;
+    if (s_after_aborted) {
+        outcome = STATION_FLASH_OUT_NOT_DONE;
+    } else if (s_after.build != 0 && s_after.build == s_journal.expected_build) {
+        outcome = STATION_FLASH_OUT_SUCCESS;
+    } else if (s_after.build != 0 && s_after.build == s_journal.pre_build) {
+        outcome = STATION_FLASH_OUT_OLD_FIRMWARE;
+    } else {
+        outcome = STATION_FLASH_OUT_UNEXPECTED;
+    }
+    uint8_t transfers = s_journal.transfers;
+    /* The identity the receiver reported is the stored one from now on. */
+    if (s_after.valid && settings_is_available()) {
+        (void)settings_set_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MODEL, s_after.model);
+        (void)settings_set_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FW, s_after.firmware);
+        load_stored_identity();
+    }
+    portENTER_CRITICAL(&s_lock);
+    s_flash_last.reapply_ok = reapply_ok;
+    s_flash_last.build = s_after.build;
+    snprintf(s_flash_last.firmware, sizeof(s_flash_last.firmware), "%s", s_after.firmware);
+    portEXIT_CRITICAL(&s_lock);
+    static const char *const k_what[] = { "", "updated", "the old firmware still runs", "an unexpected build runs",
+                                          "not done, receiver unchanged" };
+    flash_last_set(outcome, "%s (%s)%s; %s", outcome < sizeof(k_what) / sizeof(k_what[0]) ? k_what[outcome] : "?",
+                   s_after.firmware, reapply_ok ? "" : ", the station profile did not come back: check the receiver",
+                   s_after_reason);
+    journal_push(DIAG_EV_GNSS_FLASH, outcome, transfers);
+    flash_forget(true);
+    final_progress(outcome == STATION_FLASH_OUT_SUCCESS ? UM98X_FLASH_DONE : UM98X_FLASH_FAILED);
+}
+
+/* Check only: rules 1-12 on the RAM copy against this boot's confirmed identity. */
+static void job_pkg_check(stn_result_t *r)
+{
+    station_flash_request_t req;
+    um98x_info_t info;
+    portENTER_CRITICAL(&s_lock);
+    req = s_check_req;
+    portEXIT_CRITICAL(&s_lock);
+    bool have = um98x_ctl_get_info(&info) == ESP_OK && info.valid;
+    um98x_flash_expect_t e;
+    memset(&e, 0, sizeof(e));
+    memcpy(e.sha256, req.sha256, sizeof(e.sha256));
+    e.size = req.size;
+    snprintf(e.expected_fw, sizeof(e.expected_fw), "%s", req.expected_fw);
+    e.expected_build = req.expected_build;
+    if (have) {
+        e.receiver = info;
+    }
+    e.cross_layout_confirmed = req.cross_layout_confirmed;
+    um98x_flash_pkg_facts_t f;
+    esp_err_t err = um98x_flash_prepare(&e, &f);
+    portENTER_CRITICAL(&s_lock);
+    s_flash_last.failed_rule = f.failed_rule;
+    s_flash_last.cross_layout = f.cross_layout;
+    s_flash_last.check_only = true;
+    s_flash_last.build = 0;
+    s_flash_last.firmware[0] = '\0';
+    portEXIT_CRITICAL(&s_lock);
+    if (err == ESP_OK) {
+        flash_last_set(STATION_FLASH_OUT_CHECKED, "the package passes every rule against %s %s; receiver flashing is "
+                       "not enabled in this build, nothing was sent",
+                       info.model, info.firmware);
+    } else if (f.failed_rule != 0) {
+        flash_last_set(STATION_FLASH_OUT_REJECTED, "package refused by rule %u: %s%s", (unsigned)f.failed_rule, f.why,
+                       have ? "" : " (the receiver's identity is not confirmed yet)");
+    } else {
+        flash_last_set(STATION_FLASH_OUT_REJECTED, "package not checked: %s", f.why[0] ? f.why : esp_err_to_name(err));
+    }
+    um98x_flash_discard();
+    esp_err_t rel = pkg_store_release();   /* nothing stays staged without a session */
+    if (rel != ESP_OK) {
+        ESP_LOGW(TAG, "staged receiver package not released: %s", esp_err_to_name(rel));
+    }
+    portENTER_CRITICAL(&s_lock);
+    s_check_running = false;
+    portEXIT_CRITICAL(&s_lock);
+    um98x_flash_progress_t p;
+    memset(&p, 0, sizeof(p));
+    p.phase = err == ESP_OK ? UM98X_FLASH_DONE : UM98X_FLASH_FAILED;
+    p.bytes_total = req.size;
+    post_progress(&p, true);
+    r->err = STN_OK;
+}
+
+#if CONFIG_UM98X_FLASH_BYTE_CAPTURE
+static void job_bench(stn_result_t *r)
+{
+    station_bench_req_t req;
+    portENTER_CRITICAL(&s_lock);
+    req = s_bench_req;
+    portEXIT_CRITICAL(&s_lock);
+    station_bench_res_t out;
+    memset(&out, 0, sizeof(out));
+    gnss_link_lease_t lease = NULL;
+    esp_err_t err = gnss_link_acquire(GNSS_LINK_MODE_RAW, "bench", LEASE_WAIT_MS, &lease);
+    if (err != ESP_OK) {
+        snprintf(out.line, sizeof(out.line), "FAIL no RAW lease: %s", esp_err_to_name(err));
+    } else {
+        um98x_bench_req_t b = {
+            .op = req.op, .baud = req.baud, .seconds = req.seconds, .app_baud = home_baud(), .record_only = req.record_only,
+        };
+        um98x_bench_res_t br;
+        err = um98x_flash_bench(lease, &b, &br);
+        out.pass = (err == ESP_OK) && br.pass;
+        snprintf(out.line, sizeof(out.line), "%s", err == ESP_OK ? br.line : esp_err_to_name(err));
+        release_lease(&lease, "bench");
+    }
+    portENTER_CRITICAL(&s_lock);
+    s_bench_res = out;
+    portEXIT_CRITICAL(&s_lock);
+    if (s_bench_done != NULL) {
+        xSemaphoreGive(s_bench_done);
+    }
+    r->err = STN_OK;
+}
+#else
+static void job_bench(stn_result_t *r)
+{
+    r->err = STN_E_STATE;
+}
+#endif
+
 static void run_job(const stn_job_t *job, stn_result_t *r)
 {
     memset(r, 0, sizeof(*r));
@@ -1000,6 +1466,15 @@ static void run_job(const stn_job_t *job, stn_result_t *r)
         break;
     case STN_JOB_SKY:
         job_sky(job, r);
+        break;
+    case STN_JOB_FLASH:
+        job_flash(job, r);
+        break;
+    case STN_JOB_BENCH:
+        job_bench(r);
+        break;
+    case STN_JOB_PKG_CHECK:
+        job_pkg_check(r);
         break;
     default:
         r->err = STN_E_STATE;
@@ -1116,6 +1591,23 @@ static void publish_status(const stn_in_t *in)
     portEXIT_CRITICAL(&s_lock);
 }
 
+/* Fields every status read gets fresh (also uninitialised, safe mode). */
+static void status_flash_fields(station_status_t *out)
+{
+    portENTER_CRITICAL(&s_lock);
+    out->flash_last = s_flash_last;
+    int64_t at = s_flash_last_us;
+    out->pkg_check_running = s_check_running;
+    portEXIT_CRITICAL(&s_lock);
+    out->flash_available = station_flash_available();
+    if (at == INT64_MIN) {
+        out->flash_last.ended_age_s = UINT32_MAX;
+    } else {
+        int64_t s = (esp_timer_get_time() - at) / 1000000;
+        out->flash_last.ended_age_s = s < 0 ? 0 : (s >= (int64_t)UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)s);
+    }
+}
+
 static void journal_push(diag_event_t kind, int32_t a, int32_t b)
 {
     if (s_jq_n >= JQ_LEN) {
@@ -1206,6 +1698,9 @@ static void handle_notes(const stn_note_t *n, unsigned count)
             ESP_LOGW(TAG, "satellite-in-view output not turned off after %d tries: it ends with the receiver's "
                           "next restart",
                      STN_SKY_OFF_TRIES);
+            break;
+        case STN_NOTE_FLASH_CLOSE:
+            flash_close(x->a != 0);
             break;
         default:
             break;
@@ -1349,19 +1844,29 @@ static void service(const stn_in_t *in)
     }
 }
 
-/* An open journal: the UART is the flash session's. Listen only (a COMMAND
- * lease that is never written to keeps the hub unfed and refuses every
- * lease-free write), casters paused. This build cannot run the recovery
- * table itself, so a session that is not already waiting for the user
- * waits for the user here (reduced lockout: the inhibit and the update slot
- * are released, so app updates and reboots work again). */
-static void flash_recovery_begin(void)
+/* Listen only while a journal is open and nothing runs: a COMMAND lease that
+ * is never written to keeps the hub unfed and refuses every lease-free write. */
+static void hold_take(void)
 {
-    release_lease(&s_boot_lease, "boot");
-    if (gnss_link_acquire(GNSS_LINK_MODE_COMMAND, "flash journal", LEASE_WAIT_MS, &s_hold_lease) != ESP_OK) {
+    if (s_hold_lease == NULL &&
+        gnss_link_acquire(GNSS_LINK_MODE_COMMAND, "flash journal", LEASE_WAIT_MS, &s_hold_lease) != ESP_OK) {
         s_hold_lease = NULL;
         ESP_LOGE(TAG, "no listen-only lease for the open flash journal");
     }
+}
+
+/* An open journal: the UART is the flash session's; casters paused. With
+ * the recovery actions built in, the recovery table's plan runs as the
+ * first job (s_recover_wanted). Otherwise (report-only) the plan is logged,
+ * and a session that is not already waiting for the user waits for the user
+ * here (reduced lockout: the inhibit and the update slot are released, so
+ * app updates and reboots work again); its record is left as it was. */
+static bool s_recover_wanted;
+
+static void flash_recovery_begin(void)
+{
+    release_lease(&s_boot_lease, "boot");
+    hold_take();
     esp_err_t jerr;
     um98x_flash_journal_t j;
     portENTER_CRITICAL(&s_lock);
@@ -1369,15 +1874,22 @@ static void flash_recovery_begin(void)
     j = s_journal;
     portEXIT_CRITICAL(&s_lock);
     if (jerr == ESP_OK && j.state != UM98X_JOURNAL_NEEDS_USER) {
+        const char *text = NULL;
         lifecycle_boot_info_t boot;
         lifecycle_get_boot_info(&boot);
+        bool power = boot.reset_class == LIFECYCLE_RESET_POWER_ON || boot.reset_class == LIFECYCLE_RESET_BROWNOUT;
+        (void)um98x_flash_journal_plan(jerr, &j, power, &text);
+        if (CONFIG_UM98X_FLASH_ENABLE && CONFIG_UM98X_FLASH_RECOVERY_ACTIONS) {
+            ESP_LOGW(TAG, "interrupted receiver update (%s, %s reset): %s", um98x_flash_journal_state_name(j.state),
+                     power ? "power-on" : "ESP32-only", text);
+            s_recover_wanted = true;
+            return;
+        }
         ESP_LOGW(TAG,
-                 "report-only: the interrupted receiver update (state %u, phase %u, %s reset) would be recovered "
-                 "here; nothing is sent to the receiver and the session waits for the user",
-                 (unsigned)j.state, (unsigned)j.phase,
-                 (boot.reset_class == LIFECYCLE_RESET_POWER_ON || boot.reset_class == LIFECYCLE_RESET_BROWNOUT)
-                     ? "power-on"
-                     : "ESP32-only");
+                 "report-only: the interrupted receiver update (%s, phase %s, %u transfer(s), %s reset) would be "
+                 "recovered here: %s. Nothing is sent to the receiver and the session waits for the user",
+                 um98x_flash_journal_state_name(j.state), um98x_flash_journal_state_name(j.phase),
+                 (unsigned)j.transfers, power ? "power-on" : "ESP32-only", text);
         portENTER_CRITICAL(&s_lock);
         s_journal_parked = true;
         portEXIT_CRITICAL(&s_lock);
@@ -1410,6 +1922,10 @@ static void station_task(void *arg)
     fill_in(&in);
     portENTER_CRITICAL(&s_lock);
     stn_start(&s_core, &in);
+    if (s_recover_wanted) {
+        s_recover_wanted = false;
+        (void)stn_request_flash(&s_core, STN_FLASH_RECOVER);
+    }
     portEXIT_CRITICAL(&s_lock);
     after_step(&in);
 
@@ -1457,31 +1973,33 @@ esp_err_t station_early_boot(void)
     lifecycle_get_boot_info(&boot);
     bool receiver_was_reset =
         boot.reset_class == LIFECYCLE_RESET_POWER_ON || boot.reset_class == LIFECYCLE_RESET_BROWNOUT;
+    const char *text = NULL;
+    s_recover_plan = um98x_flash_journal_plan(jerr, &s_journal, receiver_was_reset, &text);
+    ESP_LOGW(TAG, "receiver flash journal at boot (%s reset): %s", receiver_was_reset ? "power-on" : "ESP32-only", text);
     if (jerr != ESP_OK || !um98x_flash_journal_needs_race(&s_journal, receiver_was_reset)) {
         return ESP_OK;   /* the rest of the recovery table runs in the station task */
     }
 
-#if CONFIG_UM98X_FLASH_RECOVERY_ACTIONS
-    esp_err_t err = board_init();
-    if (err == ESP_OK) {
-        err = gnss_link_init();
+    if (CONFIG_UM98X_FLASH_ENABLE && CONFIG_UM98X_FLASH_RECOVERY_ACTIONS) {
+        esp_err_t err = board_init();
+        if (err == ESP_OK) {
+            err = gnss_link_init();
+        }
+        if (err == ESP_OK) {
+            err = gnss_link_acquire(GNSS_LINK_MODE_RAW, "flash recovery", 0, &s_boot_lease);
+        }
+        if (err == ESP_OK) {
+            err = um98x_flash_race(s_boot_lease, RACE_MAX_MS);
+            s_race_prompt = (err == ESP_OK);
+            ESP_LOGW(TAG, "boot race into the receiver's loader: %s", esp_err_to_name(err));
+        } else {
+            ESP_LOGE(TAG, "boot race into the receiver's loader not possible: %s", esp_err_to_name(err));
+        }
+        return err;
     }
-    if (err == ESP_OK) {
-        err = gnss_link_acquire(GNSS_LINK_MODE_RAW, "flash recovery", 0, &s_boot_lease);
-    }
-    if (err == ESP_OK) {
-        err = um98x_flash_race(s_boot_lease, RACE_MAX_MS);
-        ESP_LOGW(TAG, "boot race into the receiver's loader: %s", esp_err_to_name(err));
-    } else {
-        ESP_LOGE(TAG, "boot race into the receiver's loader not possible: %s", esp_err_to_name(err));
-    }
-    return err;
-#else
-    ESP_LOGW(TAG, "report-only: would race into the receiver's loader at %u baud for %u ms (journal state %u)",
-             (unsigned)UM98X_FLASH_BAUD, (unsigned)RACE_MAX_MS, (unsigned)s_journal.state);
-    (void)s_boot_lease;
+    ESP_LOGW(TAG, "report-only: would race into the receiver's loader at %u baud for %u ms (journal state %s)",
+             (unsigned)UM98X_FLASH_BAUD, (unsigned)RACE_MAX_MS, um98x_flash_journal_state_name(s_journal.state));
     return ESP_OK;
-#endif
 }
 
 esp_err_t station_safe_mode_boot(void)
@@ -1665,6 +2183,7 @@ esp_err_t station_get_status(station_status_t *out)
         (parked || jerr != ESP_OK || journal.state == UM98X_JOURNAL_NEEDS_USER)) {
         out->flash.phase = UM98X_FLASH_NEEDS_USER;
     }
+    status_flash_fields(out);
     return ESP_OK;
 }
 
@@ -1729,15 +2248,76 @@ esp_err_t station_request_flash(const station_flash_request_t *req)
     supported = s_core.identity_ok && s_core.supported;
     jerr = s_journal_err;
     portEXIT_CRITICAL(&s_lock);
+    if (!station_flash_available()) {
+        return ESP_ERR_NOT_SUPPORTED;   /* the caller may check the package instead */
+    }
     if (!s_inited || !s_started || journal_open(jerr) || lifecycle_app_trial_active() || app_update_running() ||
         lifecycle_in_safe_mode() || state != STATION_STATE_STREAMING || !receiver_fresh() || !supported ||
         maint_on()) {
         return ESP_ERR_INVALID_STATE;
     }
-    /* TODO: prepare (rules on the RAM copy; release the package on failure),
-     * claim the update slot (lockout_take: refused if an app update got
-     * there first), pin, journal, RAW lease, run. Waits for the flasher. */
-    return ESP_ERR_NOT_SUPPORTED;
+    pkg_store_info_t info;
+    if (pkg_store_get_info(&info) != ESP_OK || !info.valid) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (info.pinned) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* One update at a time across both chips: check and claim in one step. */
+    if (lifecycle_update_claim(LIFECYCLE_UPDATE_RECEIVER) != ESP_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    portENTER_CRITICAL(&s_lock);
+    int rc = stn_request_flash(&s_core, STN_FLASH_NEW);
+    if (rc == STN_OK) {
+        s_flash_req = *req;
+        memset(&s_flash_last, 0, sizeof(s_flash_last));
+        s_flash_last_us = INT64_MIN;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    if (rc != STN_OK) {
+        lifecycle_update_release(LIFECYCLE_UPDATE_RECEIVER);
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_update_claimed = true;
+    ESP_LOGW(TAG, "receiver update to %s requested by the user", req->expected_fw);
+    wake();
+    return ESP_OK;
+}
+
+bool station_flash_available(void)
+{
+    return um98x_flash_enabled();
+}
+
+esp_err_t station_request_package_check(const station_flash_request_t *req)
+{
+    if (req == NULL || req->size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t jerr;
+    portENTER_CRITICAL(&s_lock);
+    jerr = s_journal_err;
+    portEXIT_CRITICAL(&s_lock);
+    if (!s_inited || !s_started || journal_open(jerr) || lifecycle_in_safe_mode()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    pkg_store_info_t info;
+    if (pkg_store_get_info(&info) != ESP_OK || !info.valid) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    portENTER_CRITICAL(&s_lock);
+    int rc = s_check_running ? STN_E_STATE : stn_request_pkg_check(&s_core);
+    if (rc == STN_OK) {
+        s_check_req = *req;
+        s_check_running = true;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    if (rc != STN_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    wake();
+    return ESP_OK;
 }
 
 uint32_t station_expected_flash_downtime_s(uint32_t package_size)
@@ -1813,16 +2393,35 @@ esp_err_t station_flash_user_action(station_flash_action_t action)
         return ESP_OK;
     }
     case STATION_FLASH_ACTION_RETRY:
-        if (!s_inited || !waiting || jerr != ESP_OK || lifecycle_app_trial_active() || app_update_running() ||
-            maint_on()) {
+    case STATION_FLASH_ACTION_RESTART_RECEIVER: {
+        if (!s_inited || !s_started || !waiting || jerr != ESP_OK || maint_on() || lifecycle_in_safe_mode()) {
             return ESP_ERR_INVALID_STATE;
         }
-        return ESP_ERR_NOT_SUPPORTED;   /* waits for the flasher */
-    case STATION_FLASH_ACTION_RESTART_RECEIVER:
-        if (!s_inited || !waiting) {
+        if (action == STATION_FLASH_ACTION_RETRY && (lifecycle_app_trial_active() || app_update_running())) {
             return ESP_ERR_INVALID_STATE;
         }
-        return ESP_ERR_NOT_SUPPORTED;   /* waits for the flasher's exit checks */
+        if (!station_flash_available()) {
+            return ESP_ERR_NOT_SUPPORTED;   /* this build sends nothing to the receiver's loader */
+        }
+        /* The session is the receiver's again: one update at a time (an app update may not start meanwhile). */
+        if (!s_update_claimed && lifecycle_update_claim(LIFECYCLE_UPDATE_RECEIVER) != ESP_OK) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        s_update_claimed = true;
+        portENTER_CRITICAL(&s_lock);
+        int rc = stn_request_flash(&s_core, action == STATION_FLASH_ACTION_RETRY ? STN_FLASH_RETRY : STN_FLASH_RESTART);
+        if (rc == STN_OK) {
+            s_journal_parked = false;
+        }
+        portEXIT_CRITICAL(&s_lock);
+        if (rc != STN_OK) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        ESP_LOGW(TAG, "receiver update: the user's %s", action == STATION_FLASH_ACTION_RETRY ? "retry (same package)"
+                                                                                        : "receiver restart");
+        wake();
+        return ESP_OK;
+    }
     default:
         return ESP_ERR_INVALID_ARG;
     }
@@ -1830,11 +2429,185 @@ esp_err_t station_flash_user_action(station_flash_action_t action)
 
 size_t station_get_flash_log(char *buf, size_t len)
 {
-    if (buf != NULL && len > 0) {
-        buf[0] = '\0';
-    }
-    return 0;   /* TODO: ring of the last 4 KB of receiver text from the flash session */
+    return um98x_flash_get_text(buf, len);
 }
+
+/* ---- bench console ------------------------------------------------------------------- */
+
+#if CONFIG_UM98X_FLASH_BYTE_CAPTURE
+esp_err_t station_bench_run(const station_bench_req_t *req, station_bench_res_t *out, uint32_t timeout_ms)
+{
+    if (req == NULL || out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    esp_err_t jerr;
+    portENTER_CRITICAL(&s_lock);
+    jerr = s_journal_err;
+    portEXIT_CRITICAL(&s_lock);
+    if (!s_inited || !s_started || journal_open(jerr) || lifecycle_in_safe_mode()) {
+        snprintf(out->line, sizeof(out->line), "REFUSED: %s",
+                 journal_open(jerr) ? "a receiver update journal is open" : "the station does not run");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_bench_done == NULL) {
+        s_bench_done = xSemaphoreCreateBinary();
+        if (s_bench_done == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    (void)xSemaphoreTake(s_bench_done, 0);
+    portENTER_CRITICAL(&s_lock);
+    int rc = stn_request_bench(&s_core);
+    if (rc == STN_OK) {
+        s_bench_req = *req;
+    }
+    bool m = s_core.maint;
+    portEXIT_CRITICAL(&s_lock);
+    if (rc != STN_OK) {
+        snprintf(out->line, sizeof(out->line), "REFUSED: %s",
+                 m ? "receiver maintenance is on" : "another receiver session or job runs (or no receiver state for it)");
+        return ESP_ERR_INVALID_STATE;
+    }
+    wake();
+    if (xSemaphoreTake(s_bench_done, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        snprintf(out->line, sizeof(out->line), "TIMEOUT waiting for the station (the operation may still run)");
+        return ESP_ERR_TIMEOUT;
+    }
+    portENTER_CRITICAL(&s_lock);
+    *out = s_bench_res;
+    portEXIT_CRITICAL(&s_lock);
+    return ESP_OK;
+}
+
+esp_err_t station_bench_boot_race(uint32_t max_ms, station_bench_res_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!s_journal_read) {
+        read_journal();
+    }
+    if (journal_open(s_journal_err)) {
+        snprintf(out->line, sizeof(out->line), "REFUSED: a receiver update journal is open");
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = board_init();
+    if (err == ESP_OK) {
+        err = gnss_link_init();
+    }
+    gnss_link_lease_t lease = NULL;
+    if (err == ESP_OK) {
+        err = gnss_link_acquire(GNSS_LINK_MODE_RAW, "bench race", 0, &lease);
+    }
+    if (err != ESP_OK) {
+        snprintf(out->line, sizeof(out->line), "FAIL link not opened: %s", esp_err_to_name(err));
+        return err;
+    }
+    um98x_bench_res_t br;
+    err = um98x_flash_bench_race(lease, max_ms, home_baud(), &br);
+    out->pass = err == ESP_OK && br.pass;
+    snprintf(out->line, sizeof(out->line), "%s", err == ESP_OK ? br.line : esp_err_to_name(err));
+    (void)gnss_link_release(lease);
+    return err;
+}
+
+esp_err_t station_bench_flash(const station_flash_request_t *req, uint32_t stop_after_blocks, uint8_t reset_at_state)
+{
+    um98x_flash_bench_reset_at(reset_at_state);
+    portENTER_CRITICAL(&s_lock);
+    s_bench_stop_after = stop_after_blocks;
+    portEXIT_CRITICAL(&s_lock);
+    esp_err_t err = station_request_flash(req);
+    if (err != ESP_OK) {
+        um98x_flash_bench_reset_at(0);
+        portENTER_CRITICAL(&s_lock);
+        s_bench_stop_after = 0;
+        portEXIT_CRITICAL(&s_lock);
+    }
+    return err;
+}
+
+esp_err_t station_bench_journal_set(uint8_t state)
+{
+    esp_err_t jerr;
+    portENTER_CRITICAL(&s_lock);
+    jerr = s_journal_err;
+    bool busy = s_core.job_busy || s_core.state == STN_FLASHING;
+    portEXIT_CRITICAL(&s_lock);
+    if (!s_inited || busy || journal_open(jerr)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (state < UM98X_JOURNAL_PREPARED || state > UM98X_JOURNAL_NEEDS_USER) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    pkg_store_info_t info;
+    if (pkg_store_get_info(&info) != ESP_OK || !info.valid) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    um98x_info_t rx;
+    if (um98x_ctl_get_info(&rx) != ESP_OK || !rx.valid) {
+        return ESP_ERR_INVALID_STATE;   /* the receiver's identity is not confirmed this boot */
+    }
+    um98x_flash_journal_t j;
+    memset(&j, 0, sizeof(j));
+    j.version = UM98X_FLASH_JOURNAL_VERSION;
+    j.state = state;
+    j.phase = (state == UM98X_JOURNAL_FAILED || state == UM98X_JOURNAL_NEEDS_USER) ? UM98X_JOURNAL_TRANSFERRING : state;
+    memcpy(j.sha256, info.sha256, sizeof(j.sha256));
+    j.size = info.size;
+    snprintf(j.expected_fw, sizeof(j.expected_fw), "%s", rx.firmware);
+    j.expected_build = rx.build;
+    snprintf(j.pre_model, sizeof(j.pre_model), "%s", rx.model);
+    snprintf(j.pre_fw, sizeof(j.pre_fw), "%s", rx.firmware);
+    j.pre_build = rx.build;
+    j.app_baud = home_baud();
+    j.boot_baud = UM98X_FLASH_BAUD;
+    j.transfers = (j.phase >= UM98X_JOURNAL_TRANSFERRING) ? 1 : 0;
+    j.entry_attempts = 1;
+    j.failure_class = state == UM98X_JOURNAL_FAILED ? UM98X_FLASH_FAIL_TRANSPORT : UM98X_FLASH_FAIL_NONE;
+    j.changed_unix = unix_now();
+    esp_err_t err = pkg_store_set_pinned(true);
+    if (err == ESP_OK) {
+        err = um98x_flash_journal_put(&j);
+    }
+    if (err == ESP_OK) {
+        ESP_LOGW(TAG, "bench: journal written in \"%s\" (nothing sent to the receiver); reset the ESP32 now",
+                 um98x_flash_journal_state_name(state));
+    }
+    return err;
+}
+#else
+esp_err_t station_bench_run(const station_bench_req_t *req, station_bench_res_t *out, uint32_t timeout_ms)
+{
+    (void)req;
+    (void)out;
+    (void)timeout_ms;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t station_bench_boot_race(uint32_t max_ms, station_bench_res_t *out)
+{
+    (void)max_ms;
+    (void)out;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t station_bench_flash(const station_flash_request_t *req, uint32_t stop_after_blocks, uint8_t reset_at_state)
+{
+    (void)req;
+    (void)stop_after_blocks;
+    (void)reset_at_state;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t station_bench_journal_set(uint8_t state)
+{
+    (void)state;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+#endif
 
 esp_err_t station_request_recovery(station_recovery_t action)
 {

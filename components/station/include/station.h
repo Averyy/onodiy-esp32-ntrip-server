@@ -318,6 +318,33 @@ typedef enum {
     STATION_LIVE_END_FLASH,          /**< a receiver update began */
 } station_live_end_t;
 
+/** How the last receiver update (or package check) ended. */
+typedef enum {
+    STATION_FLASH_OUT_NONE = 0,       /**< none this boot */
+    STATION_FLASH_OUT_SUCCESS,        /**< the expected build runs */
+    STATION_FLASH_OUT_OLD_FIRMWARE,   /**< the build from before the update still runs */
+    STATION_FLASH_OUT_UNEXPECTED,     /**< another build runs */
+    STATION_FLASH_OUT_NOT_DONE,       /**< ended before the point of no return: the receiver is unchanged */
+    STATION_FLASH_OUT_REJECTED,       /**< the package failed a pre-flight rule (failed_rule): nothing sent */
+    STATION_FLASH_OUT_NOT_STARTED,    /**< the receiver could not be identified, sat at its loader, or the journal could not be written: nothing sent */
+    STATION_FLASH_OUT_NEEDS_USER,     /**< the session waits for the user's choice */
+    STATION_FLASH_OUT_CHECKED,        /**< check only (flashing not built in): every rule passed */
+} station_flash_outcome_t;
+
+/** The last receiver update session (or check) this boot. */
+typedef struct {
+    uint8_t outcome;                 /**< station_flash_outcome_t */
+    uint8_t failed_rule;             /**< REJECTED: the first rule that failed (1..12) */
+    bool cross_layout;               /**< the package's partition layout differs from the receiver's */
+    bool check_only;                 /**< only checked: this build does not flash */
+    bool reapply_ok;                 /**< the profile was re-applied and checked (RTCM / the observed set came back) */
+    char firmware[48];               /**< the receiver's firmware afterwards ("" unknown) */
+    uint32_t build;
+    char reason[96];                 /**< what happened, in words */
+    int64_t ended_unix;              /**< 0 without a trusted clock */
+    uint32_t ended_age_s;            /**< since it ended (UINT32_MAX = none this boot) */
+} station_flash_last_t;
+
 /** Live view state (the satellites themselves: gnss_obs_get_live). */
 typedef struct {
     bool open;
@@ -378,6 +405,11 @@ typedef struct {
     uint32_t maintenance_chosen_s;   /**< chosen duration, extensions included */
 
     station_live_status_t live;      /**< live view */
+
+    /* Receiver updates. */
+    bool flash_available;            /**< receiver flashing is built in (station_flash_available) */
+    bool pkg_check_running;          /**< a check of the staged package runs (check-only builds) */
+    station_flash_last_t flash_last; /**< the last session or check this boot */
 } station_status_t;
 
 /**
@@ -426,15 +458,90 @@ esp_err_t station_request_reconfigure(void);
  * Flash the package staged in pkg_store to the receiver, only after an
  * explicit user confirmation (the request carries what was confirmed; the
  * banner's Update and the manual upload's confirm both come here). Async;
- * progress via station_get_status() and STATION_EVENT. The staged package is
- * validated on its RAM copy first; a failed validation releases it.
- * @return ESP_ERR_INVALID_STATE while a journal is open, during an app trial
- *         or crash watch, while an app update runs (update slot held by the
- *         app), unless the station is STREAMING (valid RTCM or NMEA within
- *         the last 10 s), uninitialised (safe mode) or for an unsupported
- *         model; ESP_ERR_NOT_FOUND if nothing is staged.
+ * progress via station_get_status() and STATION_EVENT. The update slot is
+ * claimed here, atomically (an app update can never start alongside); the
+ * session then runs on the station task: the receiver identified (its live
+ * version query), the staged package checked on its RAM copy against every
+ * rule (a refusal releases it), the package pinned, the reboot inhibit
+ * taken, the journal opened, the session, the profile re-applied and
+ * checked, the journal closed (station_status_t.flash_last says how it
+ * ended).
+ * @return ESP_ERR_NOT_SUPPORTED when flashing is not built in (see
+ *         station_request_package_check); ESP_ERR_INVALID_STATE while a
+ *         journal is open, during an app trial or crash watch, while an app
+ *         update runs (update slot held by the app), in receiver maintenance,
+ *         unless the station is STREAMING (valid RTCM or NMEA within the
+ *         last 10 s), uninitialised (safe mode) or for an unsupported model;
+ *         ESP_ERR_NOT_FOUND if nothing is staged.
  */
 esp_err_t station_request_flash(const station_flash_request_t *req);
+
+/** Receiver flashing is built in (CONFIG_UM98X_FLASH_ENABLE). */
+bool station_flash_available(void);
+
+/**
+ * Check the staged package against every pre-flight rule without flashing
+ * (the receiver identity is the one confirmed this boot; nothing is sent to
+ * the receiver), then release it. For builds without flashing, so the user
+ * sees whether the package would pass. Async: station_status_t.flash_last
+ * (outcome CHECKED or REJECTED) and a STATION_EVENT_FLASH_PROGRESS at the end.
+ * @return ESP_ERR_INVALID_STATE uninitialised, while a journal is open or a
+ *         check runs; ESP_ERR_NOT_FOUND if nothing is staged.
+ */
+esp_err_t station_request_package_check(const station_flash_request_t *req);
+
+/* ---- bench console (bench builds only; ESP_ERR_NOT_SUPPORTED elsewhere) ---------------- */
+
+/** One bench operation: the same values as um98x_bench_op_t. */
+typedef enum {
+    STATION_BENCH_LISTEN = 0,   /**< listen only at `baud` for `seconds` */
+    STATION_BENCH_VERSION,      /**< the version query at `baud` */
+    STATION_BENCH_ENTRY,        /**< loader entry at `baud`, banner and menu captured, "6", version */
+    STATION_BENCH_MENU2,        /**< entry, menu item 2, start bytes for `seconds`, CAN CAN / "q", "6", version (no data frame) */
+    STATION_BENCH_IDLE,         /**< entry, `seconds` untouched at the prompt, "6", version */
+} station_bench_op_t;
+
+typedef struct {
+    uint8_t op;                 /**< station_bench_op_t */
+    uint32_t baud;
+    uint32_t seconds;
+    bool record_only;           /**< LISTEN: record what COM1 carries (the receiver is flashed over its other port) */
+} station_bench_req_t;
+
+typedef struct {
+    bool pass;
+    char line[200];             /**< the PASS/FAIL line with the recorded values */
+} station_bench_res_t;
+
+/**
+ * Run one bench operation on the station task (RAW lease through the
+ * station, casters paused; refused in maintenance, while a receiver session,
+ * job or journal is open). Blocks the caller until it ends or timeout_ms.
+ */
+esp_err_t station_bench_run(const station_bench_req_t *req, station_bench_res_t *out, uint32_t timeout_ms);
+
+/**
+ * Bench step "stop key from boot": from app_main, before anything else uses
+ * the receiver's UART (no journal may be open); the station is not running
+ * yet. The RAW lease is released afterwards.
+ */
+esp_err_t station_bench_boot_race(uint32_t max_ms, station_bench_res_t *out);
+
+/**
+ * Bench: start a receiver update of the staged package like
+ * station_request_flash, but stop sending after stop_after_blocks
+ * acknowledged blocks (0 = never; the failure policy then retries), or
+ * restart the ESP32 right after the journal is written in reset_at_state
+ * (0 = never), for the boot-time table.
+ */
+esp_err_t station_bench_flash(const station_flash_request_t *req, uint32_t stop_after_blocks, uint8_t reset_at_state);
+
+/**
+ * Bench: write a journal in `state` for the staged package (identity from
+ * this boot's receiver), without any receiver traffic, for the boot-time
+ * table test (reset the ESP32 afterwards). Refused while a session runs.
+ */
+esp_err_t station_bench_journal_set(uint8_t state);
 
 /**
  * Expected receiver downtime of an update with a package of this size,

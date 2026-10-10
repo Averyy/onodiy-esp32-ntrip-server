@@ -1,5 +1,6 @@
 # Build
 build/
+build-*/
 sdkconfig.old
 
 # IDE

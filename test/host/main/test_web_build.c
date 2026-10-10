@@ -337,6 +337,75 @@ TEST_CASE("flash view: record only for an open readable journal, actions listed"
     cJSON_Delete(root);
 }
 
+TEST_CASE("flash view and progress: counters, the last session, and why flashing is off", "[web_build]")
+{
+    station_status_t st;
+    memset(&st, 0, sizeof(st));
+    st.flash.phase = UM98X_FLASH_TRANSFERRING;
+    st.flash.bytes_sent = 4096;
+    st.flash.bytes_total = 3027628;
+    st.flash.frames_acked = 4;
+    st.flash.frames_total = 2957;
+    st.flash.frames_sent = 5;
+    st.flash.entry_attempts = 1;
+    st.flash.journal_state = UM98X_JOURNAL_TRANSFERRING;
+    st.flash_last.outcome = STATION_FLASH_OUT_REJECTED;
+    st.flash_last.failed_rule = 8;
+    st.flash_last.ended_age_s = UINT32_MAX;
+    strcpy(st.flash_last.reason, "package refused by rule 8");
+    web_flash_ctx_t c = { .journal = WEB_JOURNAL_NONE, .station_running = true, .flash_available = false };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_flash(&w, &st, &c, "");
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    const cJSON *pr = at(root, "progress");
+    TEST_ASSERT_EQUAL(4, at(pr, "frames_acked")->valueint);
+    TEST_ASSERT_EQUAL(2957, at(pr, "frames_total")->valueint);
+    TEST_ASSERT_EQUAL(5, at(pr, "frames_sent")->valueint);
+    TEST_ASSERT_EQUAL_STRING("transferring", at(pr, "journal_state")->valuestring);
+    const cJSON *last = at(root, "last");
+    TEST_ASSERT_EQUAL_STRING("rejected", at(last, "outcome")->valuestring);
+    TEST_ASSERT_EQUAL(8, at(last, "failed_rule")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(last, "ended_age_s")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "flash_available")));
+    TEST_ASSERT_EQUAL_STRING("not_enabled_in_build", at(root, "flash_reason")->valuestring);
+    cJSON_Delete(root);
+
+    st.flash_last.outcome = STATION_FLASH_OUT_NONE;
+    st.flash.journal_state = 0;
+    c.flash_available = true;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_flash(&w, &st, &c, "");
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "last")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "flash_reason")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "progress"), "journal_state")));
+    cJSON_Delete(root);
+
+    /* The final progress message carries the outcome. */
+    station_flash_last_t l;
+    memset(&l, 0, sizeof(l));
+    l.outcome = STATION_FLASH_OUT_SUCCESS;
+    l.build = 19152;
+    strcpy(l.firmware, "R4.10Build19152");
+    web_progress_t p = { .job = "gnss_flash", .phase = "done", .pct = 100, .bytes = -1, .done = true,
+                         .result = web_flash_outcome_result(l.outcome), .flash = &st.flash, .last = &l };
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_progress(&w, &p);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_EQUAL_STRING("ok", at(root, "result")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("success", at(root, "outcome")->valuestring);
+    TEST_ASSERT_EQUAL(19152, at(root, "build")->valueint);
+    TEST_ASSERT_EQUAL(2957, at(root, "frames_total")->valueint);
+    cJSON_Delete(root);
+    TEST_ASSERT_EQUAL_STRING("package_rejected", web_flash_outcome_result(STATION_FLASH_OUT_REJECTED));
+    TEST_ASSERT_EQUAL_STRING("old_firmware", web_flash_outcome_result(STATION_FLASH_OUT_OLD_FIRMWARE));
+    TEST_ASSERT_EQUAL_STRING("ok", web_flash_outcome_result(STATION_FLASH_OUT_CHECKED));
+    TEST_ASSERT_EQUAL_STRING("receiver", web_flash_failure_name(UM98X_FLASH_FAIL_RECEIVER));
+}
+
 TEST_CASE("GET /api/update lists every version rolled back here, newest first", "[web_build]")
 {
     fixture();

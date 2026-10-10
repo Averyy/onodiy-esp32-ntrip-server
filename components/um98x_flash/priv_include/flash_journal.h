@@ -52,6 +52,51 @@ bool flash_journal_valid(const um98x_flash_journal_t *j);
 /** See um98x_flash_journal_needs_race(). */
 bool flash_journal_needs_race(const um98x_flash_journal_t *j, bool receiver_was_reset);
 
+/** How the journal read at boot came out. */
+typedef enum {
+    FJ_NONE = 0,       /**< no journal: normal start */
+    FJ_OPEN,           /**< a readable journal */
+    FJ_UNREADABLE,     /**< damaged or unreadable: open, waiting for the user */
+    FJ_NEWER,          /**< written by a newer schema: open, waiting for the user */
+    FJ_UNKNOWN,        /**< settings unavailable: state unknown */
+} fj_read_t;
+
+/**
+ * Boot-time recovery table: what the first bytes, bauds and timeouts are,
+ * by journal state and reset kind ("ESP-only": the receiver did not reset;
+ * "power-on": a power-on or brownout reset both chips). APP-CHECK is
+ * listen-only at the journalled application baud, the version query only
+ * after the application answered there, then the exit checks. RACE is the
+ * stop key at the loader baud for a few seconds as the first UART action.
+ */
+typedef enum {
+    FL_PLAN_NONE = 0,          /**< no journal: normal start, no probe of any kind */
+    FL_PLAN_WAIT_USER,         /**< send nothing, wait for the user */
+    FL_PLAN_UNKNOWN,           /**< settings unavailable: send nothing, nothing to clear */
+    FL_PLAN_RESTORE_CHECK,     /**< prepared / baud-changing, ESP-only: the baud restore ladder, APP-CHECK, re-apply, close */
+    FL_PLAN_APP_CHECK,         /**< APP-CHECK, re-apply, close */
+    FL_PLAN_LOADER_PEEK,       /**< reset-sent / menu-2-sent, ESP-only: listen 3 s at the loader baud (start bytes -> CAN CAN), one "\r\n"; prompt -> "6"; else APP-CHECK */
+    FL_PLAN_RACE_LEAVE,        /**< menu-2-sent, power-on: RACE; prompt -> "6"; then APP-CHECK */
+    FL_PLAN_LISTEN_TRANSFER,   /**< transferring / failed, ESP-only: listen-only at the loader baud (T2; 10 s for failed); prompt -> retry within the caps */
+    FL_PLAN_RACE_RETRY,        /**< transferring / failed / eot-sent, power-on: RACE; prompt -> retry within the caps; else APP-CHECK */
+    FL_PLAN_LISTEN_EOT,        /**< eot-sent, ESP-only: listen up to T2 with the outcome table */
+    FL_PLAN_VERIFY_CHECK,      /**< verifying, ESP-only: APP-CHECK; else the prompt means "the application does not start" */
+    FL_PLAN_RACE_VERIFY,       /**< verifying, power-on: RACE; prompt -> "6" and the exit checks; else APP-CHECK */
+    FL_PLAN_RACE_STOP,         /**< needs-user, power-on, past the menu: RACE, stop at the prompt, wait for the user */
+    FL_PLAN_CHECK_WAIT,        /**< needs-user, power-on, before the menu: APP-CHECK, then wait for the user */
+} fl_plan_t;
+
+fl_plan_t flash_journal_plan(fj_read_t read, const um98x_flash_journal_t *j, bool receiver_was_reset);
+
+/** True when the plan starts with the early race into the loader. */
+bool flash_journal_plan_races(fl_plan_t p);
+
+/** What the plan sends, in words (report-only log). */
+const char *flash_journal_plan_text(fl_plan_t p);
+
+/** Short name of a journal state. */
+const char *flash_journal_state_name(uint8_t state);
+
 #ifdef __cplusplus
 }
 #endif

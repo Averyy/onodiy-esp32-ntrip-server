@@ -234,7 +234,40 @@ static const char *const s_flash_failure[] = {
     [UM98X_FLASH_FAIL_APP_NOT_STARTING] = "app_not_starting",
     [UM98X_FLASH_FAIL_ENTRY] = "entry",
     [UM98X_FLASH_FAIL_JOURNAL] = "journal",
+    [UM98X_FLASH_FAIL_RECEIVER] = "receiver",
 };
+
+static const char *const s_flash_outcome[] = {
+    [STATION_FLASH_OUT_NONE] = "none",
+    [STATION_FLASH_OUT_SUCCESS] = "success",
+    [STATION_FLASH_OUT_OLD_FIRMWARE] = "old_firmware",
+    [STATION_FLASH_OUT_UNEXPECTED] = "unexpected_build",
+    [STATION_FLASH_OUT_NOT_DONE] = "not_done",
+    [STATION_FLASH_OUT_REJECTED] = "rejected",
+    [STATION_FLASH_OUT_NOT_STARTED] = "not_started",
+    [STATION_FLASH_OUT_NEEDS_USER] = "needs_user",
+    [STATION_FLASH_OUT_CHECKED] = "checked",
+};
+
+const char *web_flash_outcome_name(uint8_t v)
+{
+    return pick(s_flash_outcome, COUNT(s_flash_outcome), (int)v);
+}
+
+const char *web_flash_outcome_result(uint8_t v)
+{
+    switch (v) {
+    case STATION_FLASH_OUT_SUCCESS:
+    case STATION_FLASH_OUT_CHECKED:
+        return "ok";
+    case STATION_FLASH_OUT_REJECTED:
+        return "package_rejected";
+    case STATION_FLASH_OUT_NONE:
+        return "failed";
+    default:
+        return web_flash_outcome_name(v);
+    }
+}
 
 const char *web_flash_failure_name(uint8_t v)
 {

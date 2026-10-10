@@ -36,10 +36,11 @@ extern "C" {
 #endif
 
 /**
- * Receiver flashing is not built yet (blocked on bench tests): the update
- * flow stops before the flash and says so. The one place that knows it.
+ * Receiver flashing is built in (the station knows: CONFIG_UM98X_FLASH_ENABLE,
+ * off until the bench has confirmed the receiver side). Without it the
+ * update flow checks the package and stops before the flash, and says so.
  */
-#define WEB_FLASH_AVAILABLE false
+#define WEB_FLASH_AVAILABLE station_flash_available()
 
 /** Onocoy's TLS port for source connections (public Onocoy documentation). */
 #define WEB_ONOCOY_TLS_PORT 2121u
@@ -336,6 +337,8 @@ esp_err_t web_upload_gnss(web_req_t *r);
 /** GET /api/coredump and GET /api/logs?format=text. */
 esp_err_t web_download_coredump(web_req_t *r);
 esp_err_t web_download_log_text(web_req_t *r, bool prev_boot);
+/** GET /api/diag/flash-capture (bench builds; 404 otherwise). */
+esp_err_t web_download_flash_capture(web_req_t *r);
 
 /** An upload is being received or refused (one at a time). */
 bool web_upload_busy(void);

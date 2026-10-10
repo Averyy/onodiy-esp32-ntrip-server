@@ -119,9 +119,25 @@ static void sky_receiver_changed(stn_t *s)
     }
 }
 
+/* A receiver update owns the receiver: its session, a journal waiting in
+ * FLASH_RECOVERY, or the re-apply and check before the journal closes. */
 static bool flash_state(const stn_t *s)
 {
-    return s->state == STN_FLASHING || s->state == STN_FLASH_RECOVERY;
+    return s->state == STN_FLASHING || s->state == STN_FLASH_RECOVERY || s->flash_close != 0;
+}
+
+/* Close the journal now (the caller does it on the note). */
+static void flash_close_note(stn_t *s, bool ok)
+{
+    s->flash_close = 0;
+    s->flash_close_ms = STN_NEVER;
+    s->flash_rtcm_ms = STN_NEVER;
+    if (ok) {
+        s->alerts &= ~STN_ALERT_RECEIVER_ATTENTION;
+    } else {
+        s->alerts |= STN_ALERT_RECEIVER_ATTENTION;   /* the station profile did not come back: the user looks */
+    }
+    note(s, STN_NOTE_FLASH_CLOSE, ok ? 1 : 0, 0);
 }
 
 static bool config_failed(const stn_t *s)
@@ -307,6 +323,8 @@ void stn_init(stn_t *s, bool journal_open)
     s->live_max_ms = STN_LIVE_MAX_MS;
     s->live_until_ms = STN_NEVER;
     s->sky_retry_ms = STN_NEVER;
+    s->flash_close_ms = STN_NEVER;
+    s->flash_rtcm_ms = STN_NEVER;
 }
 
 void stn_start(stn_t *s, const stn_in_t *in)
@@ -412,6 +430,9 @@ static void judge_window(stn_t *s, const stn_in_t *in)
     s->check_pending = false;
     s->verify_pending = false;
     s->drift_msg = bad;
+    if (verify && s->flash_close == 1) {
+        flash_close_note(s, v == STN_OBS_PASS);   /* the post-update re-apply was checked */
+    }
 
     switch (v) {
     case STN_OBS_PASS:
@@ -667,16 +688,11 @@ static void live_tick(stn_t *s, const stn_in_t *in)
     }
 }
 
-/* Maintenance ends: the stream-first path, as at boot. */
-static void maint_exit(stn_t *s, const stn_in_t *in, bool expired)
+/* The stream-first path, as at boot: listen, identity, the applied check.
+ * restarted: the receiver may have restarted meanwhile. */
+static void stream_first(stn_t *s, const stn_in_t *in, bool restarted)
 {
     int64_t now = in->now_ms;
-    note(s, STN_NOTE_MAINT_OFF, secs(now - s->maint_start_ms), expired ? 1 : 0);
-    bool restarted = s->maint_restart_seen;
-    s->maint = false;
-    s->maint_until_ms = STN_NEVER;
-    s->maint_restart_seen = false;
-
     s->state = STN_IDLE;
     s->paused = false;
     s->last_resort = false;
@@ -707,6 +723,80 @@ static void maint_exit(stn_t *s, const stn_in_t *in, bool expired)
     take_base(s, in);
 }
 
+/* Maintenance ends: the stream-first path, as at boot. */
+static void maint_exit(stn_t *s, const stn_in_t *in, bool expired)
+{
+    note(s, STN_NOTE_MAINT_OFF, secs(in->now_ms - s->maint_start_ms), expired ? 1 : 0);
+    bool restarted = s->maint_restart_seen;
+    s->maint = false;
+    s->maint_until_ms = STN_NEVER;
+    s->maint_restart_seen = false;
+    stream_first(s, in, restarted);
+}
+
+/* The re-apply after an update: close the journal once its check is in (or
+ * the abort path's RTCM is back), at the latest after STN_FLASH_CLOSE_MAX_MS. */
+static void flash_close_tick(stn_t *s, const stn_in_t *in)
+{
+    if (s->flash_close == 0) {
+        return;
+    }
+    int64_t now = in->now_ms;
+    if (now >= s->flash_close_ms) {
+        flash_close_note(s, false);
+        return;
+    }
+    if (s->flash_close == 2 && s->state == STN_STREAMING && s->flash_rtcm_ms != STN_NEVER) {
+        if (rtcm_since_base(s, in)) {
+            flash_close_note(s, true);
+        } else if (now >= s->flash_rtcm_ms) {
+            flash_close_note(s, false);
+        }
+    }
+}
+
+/* Receiver update, bench operation or package check, when one is queued and
+ * the state allows it (they run before anything else of the state). */
+static bool special_job(stn_t *s, const stn_in_t *in, stn_job_t *j)
+{
+    if (s->state == STN_FLASH_RECOVERY) {
+        if (s->flash_want == STN_FLASH_RETRY || s->flash_want == STN_FLASH_RESTART || s->flash_want == STN_FLASH_RECOVER) {
+            *j = make_job(STN_JOB_FLASH);
+            j->flash_kind = s->flash_want;
+            s->flash_want = 0;
+            s->paused = true;
+            return true;
+        }
+        return false;
+    }
+    if (s->state == STN_STREAMING && s->flash_want == STN_FLASH_NEW && s->flash_close == 0) {
+        s->flash_want = 0;
+        s->state = STN_FLASHING;
+        s->paused = true;
+        s->obs_on = false;
+        live_tick(s, in);   /* the live view closes as the update begins */
+        *j = make_job(STN_JOB_FLASH);
+        j->flash_kind = STN_FLASH_NEW;
+        return true;
+    }
+    if (s->state != STN_STREAMING && s->state != STN_NO_RECEIVER && s->state != STN_DETECTING) {
+        return false;
+    }
+    if (s->bench_want) {
+        s->bench_want = false;
+        s->paused = true;
+        s->obs_on = false;
+        *j = make_job(STN_JOB_BENCH);
+        return true;
+    }
+    if (s->check_want) {
+        s->check_want = false;
+        *j = make_job(STN_JOB_PKG_CHECK);
+        return true;
+    }
+    return false;
+}
+
 stn_job_t stn_next(stn_t *s, const stn_in_t *in)
 {
     stn_job_t none = make_job(STN_JOB_NONE);
@@ -714,6 +804,7 @@ stn_job_t stn_next(stn_t *s, const stn_in_t *in)
         return none;
     }
     live_tick(s, in);
+    flash_close_tick(s, in);
     if (s->maint) {
         if (in->now_ms < s->maint_until_ms) {
             return none;   /* hands off: nothing is sent, nothing is decided */
@@ -731,6 +822,11 @@ stn_job_t stn_next(stn_t *s, const stn_in_t *in)
     }
 
     stn_job_t j = none;
+    if (special_job(s, in, &j)) {
+        s->job = j;
+        s->job_busy = true;
+        return j;
+    }
     switch (s->state) {
     case STN_STREAMING:
         j = next_streaming(s, in);
@@ -934,9 +1030,15 @@ static void done_apply(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         s->paused = false;
         s->last_resort = false;
         enter_streaming(s, in, ENTER_VERIFY);
+        if (s->job.why == STN_WHY_FLASH && s->flash_close == 2) {
+            s->flash_rtcm_ms = now + STN_FLASH_RTCM_MS;   /* the abort path: RTCM must come back */
+        }
         return;
     }
 
+    if (s->job.why == STN_WHY_FLASH && s->flash_close != 0) {
+        flash_close_note(s, false);   /* the re-apply after the update failed: closed, the user looks */
+    }
     if (r->nothing_sent) {
         if (r->err == STN_E_UNSUPPORTED) {
             set_identity(s, false, false);
@@ -1035,6 +1137,64 @@ static void done_position(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     }
 }
 
+static void done_flash(stn_t *s, const stn_result_t *r, const stn_in_t *in)
+{
+    int64_t now = in->now_ms;
+    if (r->loader_key_sent) {
+        s->loader_key_sent = true;   /* the identification used the boot's one restart from the loader */
+    }
+    switch (r->flash_end) {
+    case STN_FLASH_END_REAPPLY:
+    case STN_FLASH_END_REAPPLY_RTCM:
+        /* The application answers: re-apply the profile, whatever gnss/autocfg says, then check it. */
+        sky_receiver_changed(s);
+        s->paused = false;
+        s->last_resort = false;
+        set_identity(s, r->supported, false);
+        s->profile_applied = false;
+        s->flash_close = (r->flash_end == STN_FLASH_END_REAPPLY) ? 1 : 2;
+        s->flash_close_ms = now + STN_FLASH_CLOSE_MAX_MS;
+        s->flash_rtcm_ms = STN_NEVER;
+        s->check_ms = STN_NEVER;
+        s->obs_on = false;
+        enter_streaming(s, in, ENTER_KEEP);
+        if (r->supported) {
+            want_apply(s, STN_WHY_FLASH, STN_CHANGE_NONE, true);
+        } else {
+            flash_close_note(s, false);   /* not a model we configure: nothing to re-apply */
+        }
+        if (in->profile_survey) {
+            survey_restarted(s, in);   /* the receiver restarted */
+        }
+        break;
+    case STN_FLASH_END_NEEDS_USER:
+        s->state = STN_FLASH_RECOVERY;
+        s->paused = true;
+        s->obs_on = false;
+        break;
+    default:
+        if (s->state == STN_FLASH_RECOVERY) {
+            break;   /* a user action that changed nothing: the journal still waits */
+        }
+        if (r->in_loader) {
+            /* The receiver sat at its loader and did not come back: as detection would. */
+            s->alerts |= STN_ALERT_RECEIVER_IN_LOADER;
+            s->listen_only = true;
+            s->paused = false;
+            drop_stale_requests(s);
+            s->state = STN_NO_RECEIVER;
+            s->profile_applied = false;
+            s->obs_on = false;
+            s->episode_ms = now;
+            s->detect_ms = now + STN_DETECT_FAST_MS;
+            take_base(s, in);
+            break;
+        }
+        back_to_streaming(s, in);
+        break;
+    }
+}
+
 void stn_done(stn_t *s, const stn_result_t *r, const stn_in_t *in)
 {
     if (!s->job_busy) {
@@ -1080,6 +1240,15 @@ void stn_done(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     case STN_JOB_SKY:
         done_sky(s, r, in);
         break;
+    case STN_JOB_FLASH:
+        done_flash(s, r, in);
+        break;
+    case STN_JOB_BENCH:
+        s->paused = false;
+        sky_receiver_changed(s);
+        stream_first(s, in, true);   /* the receiver may have been reset: look again, as at boot */
+        break;
+    case STN_JOB_PKG_CHECK:
     default:
         break;
     }
@@ -1091,6 +1260,50 @@ void stn_done(stn_t *s, const stn_result_t *r, const stn_in_t *in)
 void stn_request_apply(stn_t *s)
 {
     want_apply(s, STN_WHY_USER, STN_CHANGE_NONE, false);
+}
+
+int stn_request_flash(stn_t *s, uint8_t kind)
+{
+    if (s->maint || s->flash_want != 0) {
+        return STN_E_STATE;
+    }
+    switch (kind) {
+    case STN_FLASH_NEW:
+        if (s->state != STN_STREAMING || s->flash_close != 0) {
+            return STN_E_STATE;
+        }
+        break;
+    case STN_FLASH_RETRY:
+    case STN_FLASH_RESTART:
+    case STN_FLASH_RECOVER:
+        if (s->state != STN_FLASH_RECOVERY || (s->job_busy && s->job.kind == STN_JOB_FLASH)) {
+            return STN_E_STATE;
+        }
+        break;
+    default:
+        return STN_E_STATE;
+    }
+    s->flash_want = kind;
+    return STN_OK;
+}
+
+int stn_request_bench(stn_t *s)
+{
+    if (s->maint || flash_state(s) || s->job_busy || s->bench_want || s->flash_want != 0 ||
+        (s->state != STN_STREAMING && s->state != STN_NO_RECEIVER)) {
+        return STN_E_STATE;
+    }
+    s->bench_want = true;
+    return STN_OK;
+}
+
+int stn_request_pkg_check(stn_t *s)
+{
+    if (flash_state(s) || s->check_want || s->flash_want != 0) {
+        return STN_E_STATE;
+    }
+    s->check_want = true;
+    return STN_OK;
 }
 
 void stn_request_lock(stn_t *s)

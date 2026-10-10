@@ -48,6 +48,9 @@ const char *web_flash_phase_name(um98x_flash_phase_t v);
 /** um98x_journal_state_t (1-based C values). */
 const char *web_journal_state_name(uint8_t v);
 const char *web_flash_failure_name(uint8_t v);
+/** station_flash_outcome_t name, and the progress `result` code it ends a job with. */
+const char *web_flash_outcome_name(uint8_t v);
+const char *web_flash_outcome_result(uint8_t v);
 const char *web_fw_state_name(fw_update_state_t v);
 const char *web_fw_trial_name(fw_update_trial_t v);
 const char *web_gnss_block_name(fw_update_gnss_block_t v);

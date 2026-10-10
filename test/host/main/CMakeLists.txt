@@ -29,6 +29,10 @@ idf_component_register(
         "test_um98x_plan.c"
         "test_um98x_exec.c"
         "test_flash_journal.c"
+        "test_pkg_check.c"
+        "test_xmodem.c"
+        "test_fl_session.c"
+        "fl_sim.c"
         "test_rtcm_epoch.c"
         "test_rtcm_hub_core.c"
         "test_ntrip_proto.c"
@@ -77,6 +81,13 @@ idf_component_register(
         "${_fw}/um98x_ctl/um98x_plan.c"
         "${_fw}/um98x_ctl/um98x_exec.c"
         "${_fw}/um98x_flash/flash_journal.c"
+        "${_fw}/um98x_flash/fl_util.c"
+        "${_fw}/um98x_flash/fl_rx.c"
+        "${_fw}/um98x_flash/xmodem_tx.c"
+        "${_fw}/um98x_flash/lzo1x.c"
+        "${_fw}/um98x_flash/pkg_check.c"
+        "${_fw}/um98x_flash/fl_proto.c"
+        "${_fw}/um98x_flash/fl_session.c"
         "${_fw}/gnss_obs/gnss_obs_core.c"
         "${_fw}/gnss_obs/gnss_obs_parse.c"
         "${_fw}/rtcm_hub/rtcm_epoch.c"
@@ -141,3 +152,8 @@ idf_component_register(
 # The WGS84 conversion and the caster budget estimate use libm (part of libc
 # on macOS, separate on Linux).
 target_link_libraries(${COMPONENT_LIB} PRIVATE m)
+
+# The receiver package the flasher's rule tests check (a data file; those
+# tests skip themselves when it is missing).
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    FL_TEST_PKG_PATH="${CMAKE_CURRENT_LIST_DIR}/../../../firmware/um982/UM982_R4.10Build18975.pkg")

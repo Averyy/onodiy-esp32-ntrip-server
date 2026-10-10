@@ -49,8 +49,20 @@
  *     session, so the queued request is never lost.
  *   A version query that needs a lease (no model ever stored) pauses the
  *   casters while it runs: the lease holds RTCM back.
+ *   FLASHING: the user's receiver update (STN_JOB_FLASH, casters paused,
+ *     the live view closed). The session's outcome decides: the application
+ *     answers -> re-apply the profile (STN_WHY_FLASH, whatever gnss/autocfg
+ *     says), then STN_NOTE_FLASH_CLOSE after the re-apply's observed-set
+ *     window (or RTCM within STN_FLASH_RTCM_MS after the abort path), at the
+ *     latest STN_FLASH_CLOSE_MAX_MS after the session; a journal waiting
+ *     for the user -> FLASH_RECOVERY; nothing changed -> STREAMING.
  *   FLASH_RECOVERY: a receiver-flash journal is open (or its state is
- *     unknown): nothing is decided here until it is cleared.
+ *     unknown): nothing is decided here until it is cleared, or until the
+ *     user's retry or restart (or the boot-time recovery, where it is built
+ *     in) runs as a STN_JOB_FLASH.
+ *   Bench operations (STN_JOB_BENCH, bench builds) run from STREAMING or
+ *     NO_RECEIVER with the casters paused; afterwards the stream-first path
+ *     runs as at boot (the receiver may have been reset).
  *
  * Survey: an apply that sent a survey-in base mode, a receiver restart while
  * the profile surveys (also one an apply session caused itself: the
@@ -181,7 +193,29 @@ typedef enum {
     STN_JOB_RECEIVER_RESET,  /**< COMMAND lease: the receiver's RESET command */
     STN_JOB_CHECK_POSITION,  /**< after a lock: the latest 1005 against the locked position (sends nothing) */
     STN_JOB_SKY,             /**< COMMAND lease: satellite-in-view output on or off (sky_on), never saved */
+    STN_JOB_FLASH,           /**< RAW lease: a receiver update session, a user action on a waiting one, or boot-time recovery (flash_kind) */
+    STN_JOB_BENCH,           /**< RAW lease: one bench console operation (bench builds) */
+    STN_JOB_PKG_CHECK,       /**< no lease: check the staged package against every rule, send nothing */
 } stn_job_kind_t;
+
+/** What a STN_JOB_FLASH does. */
+typedef enum {
+    STN_FLASH_NEW = 1,       /**< the user's update (STREAMING) */
+    STN_FLASH_RETRY,         /**< the user's "retry flash (same package)" (FLASH_RECOVERY) */
+    STN_FLASH_RESTART,       /**< the user's "restart receiver" (FLASH_RECOVERY) */
+    STN_FLASH_RECOVER,       /**< boot-time recovery of an open journal (FLASH_RECOVERY, actions built in) */
+} stn_flash_kind_t;
+
+/** How a STN_JOB_FLASH ended (the caller's mapping of the session). */
+typedef enum {
+    STN_FLASH_END_NOTHING = 0,  /**< nothing changed on the receiver and no journal is open: stream on */
+    STN_FLASH_END_REAPPLY,      /**< the application answers after a transfer: re-apply, check the observed set, close */
+    STN_FLASH_END_REAPPLY_RTCM, /**< ended before the point of no return: re-apply, RTCM within STN_FLASH_RTCM_MS, close */
+    STN_FLASH_END_NEEDS_USER,   /**< the journal waits for the user: FLASH_RECOVERY, nothing sent */
+} stn_flash_end_t;
+
+#define STN_FLASH_RTCM_MS      120000    /**< after the abort path's re-apply: RTCM within this */
+#define STN_FLASH_CLOSE_MAX_MS 600000    /**< the journal closes at the latest this long after the session (re-apply and check included) */
 
 /** Profile change an apply carries out first. */
 typedef enum {
@@ -206,6 +240,7 @@ typedef enum {
     STN_WHY_LADDER,          /**< the health ladder's reconfigure step */
     STN_WHY_LOCK,            /**< position lock (user or automatic) */
     STN_WHY_RESURVEY,        /**< the user's re-survey */
+    STN_WHY_FLASH,           /**< after a receiver update session (whatever gnss/autocfg says) */
 } stn_why_t;
 
 typedef struct {
@@ -221,6 +256,7 @@ typedef struct {
     uint8_t why;             /**< APPLY: stn_why_t */
     uint8_t mode_why;        /**< MODE: stn_mode_why_t */
     bool sky_on;             /**< SKY: turn the output on (else off) */
+    uint8_t flash_kind;      /**< FLASH: stn_flash_kind_t */
 } stn_job_t;
 
 /** Job outcome codes (the caller maps its errors). */
@@ -258,6 +294,10 @@ typedef struct {
     bool answered;           /**< the receiver answered during or after the session */
     /* SKY */
     uint32_t lease_ms;       /**< how long the lease held RTCM back */
+    /* FLASH */
+    uint8_t flash_end;       /**< stn_flash_end_t */
+    bool loader_key_sent;    /**< the identification sent the loader's restart key (the boot's one) */
+    bool in_loader;          /**< ... and the application did not come back */
 } stn_result_t;
 
 /** Inputs sampled by the caller for each stn_next() / stn_done(). */
@@ -339,6 +379,7 @@ typedef enum {
     STN_NOTE_SKY_ON,         /**< a = lease length (ms), b = stn_err_t of the job */
     STN_NOTE_SKY_OFF,        /**< as SKY_ON */
     STN_NOTE_SKY_LEFT_ON,    /**< turning it off failed STN_SKY_OFF_TRIES times: left on until the receiver restarts */
+    STN_NOTE_FLASH_CLOSE,    /**< close the receiver-flash journal now: a = 1 the re-apply's check passed, 0 it did not (RECEIVER_ATTENTION raised) */
 } stn_note_kind_t;
 
 typedef struct {
@@ -446,6 +487,14 @@ typedef struct {
     uint8_t note_n;
     stn_note_t notes[STN_NOTES];
 
+    /* receiver update sessions, bench operations, package checks */
+    uint8_t flash_want;        /**< stn_flash_kind_t queued (0 = none) */
+    bool bench_want;
+    bool check_want;
+    uint8_t flash_close;       /**< 0 none, 1 after the re-apply's window, 2 after RTCM within STN_FLASH_RTCM_MS */
+    int64_t flash_close_ms;    /**< the journal closes by then whatever happens */
+    int64_t flash_rtcm_ms;     /**< close kind 2: RTCM is required by then */
+
     /* the job handed out by stn_next() */
     stn_job_t job;
     bool job_busy;
@@ -497,6 +546,21 @@ int stn_request_recovery(stn_t *s, uint8_t action, bool autocfg);
  * @return STN_OK, STN_E_STATE without that alert.
  */
 int stn_request_restart_receiver(stn_t *s);
+
+/**
+ * A receiver update job. NEW needs STREAMING (and no session, job or
+ * maintenance); RETRY, RESTART and RECOVER need FLASH_RECOVERY. The session
+ * itself is the caller's (STN_JOB_FLASH); afterwards the core re-applies the
+ * profile (STN_WHY_FLASH, whatever gnss/autocfg says), checks it and notes
+ * STN_NOTE_FLASH_CLOSE. @return STN_OK, STN_E_STATE.
+ */
+int stn_request_flash(stn_t *s, uint8_t kind);
+
+/** A bench operation (STN_JOB_BENCH): STREAMING or NO_RECEIVER, nothing else running, not in maintenance. */
+int stn_request_bench(stn_t *s);
+
+/** Check the staged package only (STN_JOB_PKG_CHECK): not while a flash journal is open. */
+int stn_request_pkg_check(stn_t *s);
 
 /** Unsolicited restart evidence (banner or version log). */
 void stn_restart_seen(stn_t *s);

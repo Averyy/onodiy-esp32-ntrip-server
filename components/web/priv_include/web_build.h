@@ -402,6 +402,7 @@ typedef struct {
     const char *result;            /**< final message only */
     esp_err_t err;                 /**< final message: message = its name when not ESP_OK */
     const um98x_flash_progress_t *flash; /**< gnss_flash: the flash counters */
+    const station_flash_last_t *last;    /**< gnss_flash / gnss_check final message: how it ended */
 } web_progress_t;
 
 void web_build_progress(wj_t *w, const web_progress_t *p);

@@ -95,21 +95,112 @@ flash_journal_result_t flash_journal_decode(const uint8_t *buf, size_t len, um98
     return FLASH_JOURNAL_OK;
 }
 
+fl_plan_t flash_journal_plan(fj_read_t read, const um98x_flash_journal_t *j, bool receiver_was_reset)
+{
+    switch (read) {
+    case FJ_NONE:
+        return FL_PLAN_NONE;
+    case FJ_UNKNOWN:
+        return FL_PLAN_UNKNOWN;
+    case FJ_OPEN:
+        break;
+    default:
+        return FL_PLAN_WAIT_USER;   /* unreadable or newer: send nothing */
+    }
+    if (j == NULL || !flash_journal_valid(j)) {
+        return FL_PLAN_WAIT_USER;
+    }
+    bool esp_only = !receiver_was_reset;
+    uint8_t state = j->state;
+    if (j->transfers > 0 && state >= UM98X_JOURNAL_PREPARED && state <= UM98X_JOURNAL_MENU2_SENT) {
+        /* A retry after the point of no return records the entry and menu
+         * states again; the receiver's flash is presumed modified all the
+         * same, so the loader is never left with "6" here. */
+        state = UM98X_JOURNAL_FAILED;
+    }
+    switch (state) {
+    case UM98X_JOURNAL_PREPARED:
+    case UM98X_JOURNAL_BAUD_CHANGING:
+        return esp_only ? FL_PLAN_RESTORE_CHECK : FL_PLAN_APP_CHECK;
+    case UM98X_JOURNAL_RESET_SENT:
+        return esp_only ? FL_PLAN_LOADER_PEEK : FL_PLAN_APP_CHECK;
+    case UM98X_JOURNAL_MENU2_SENT:
+        return esp_only ? FL_PLAN_LOADER_PEEK : FL_PLAN_RACE_LEAVE;
+    case UM98X_JOURNAL_TRANSFERRING:
+    case UM98X_JOURNAL_FAILED:
+        return esp_only ? FL_PLAN_LISTEN_TRANSFER : FL_PLAN_RACE_RETRY;
+    case UM98X_JOURNAL_EOT_SENT:
+        return esp_only ? FL_PLAN_LISTEN_EOT : FL_PLAN_RACE_RETRY;
+    case UM98X_JOURNAL_VERIFYING:
+        return esp_only ? FL_PLAN_VERIFY_CHECK : FL_PLAN_RACE_VERIFY;
+    case UM98X_JOURNAL_NEEDS_USER:
+        if (esp_only) {
+            return FL_PLAN_WAIT_USER;
+        }
+        return j->phase >= UM98X_JOURNAL_MENU2_SENT ? FL_PLAN_RACE_STOP : FL_PLAN_CHECK_WAIT;
+    default:
+        return FL_PLAN_WAIT_USER;
+    }
+}
+
+bool flash_journal_plan_races(fl_plan_t p)
+{
+    return p == FL_PLAN_RACE_LEAVE || p == FL_PLAN_RACE_RETRY || p == FL_PLAN_RACE_VERIFY || p == FL_PLAN_RACE_STOP;
+}
+
+const char *flash_journal_plan_text(fl_plan_t p)
+{
+    switch (p) {
+    case FL_PLAN_NONE:
+        return "no session: normal start";
+    case FL_PLAN_WAIT_USER:
+        return "send nothing and wait for the user";
+    case FL_PLAN_UNKNOWN:
+        return "settings unavailable: send nothing";
+    case FL_PLAN_RESTORE_CHECK:
+        return "restore COM1 to the application baud (config com1 at the loader baud, then at both), then listen "
+               "for the application and query its version";
+    case FL_PLAN_APP_CHECK:
+        return "listen for the application at its baud, query its version, re-apply the profile, close";
+    case FL_PLAN_LOADER_PEEK:
+        return "listen 3 s at the loader baud (CAN CAN on a start byte), one \"\\r\\n\"; at the prompt \"6\", else "
+               "listen for the application";
+    case FL_PLAN_RACE_LEAVE:
+        return "stop key at the loader baud from boot; at the prompt \"6\"; then listen for the application";
+    case FL_PLAN_LISTEN_TRANSFER:
+        return "listen only at the loader baud (start bytes: CAN CAN); at the prompt send the same package again "
+               "within the caps; else listen for the application";
+    case FL_PLAN_RACE_RETRY:
+        return "stop key at the loader baud from boot; at the prompt send the same package again within the caps; "
+               "else listen for the application";
+    case FL_PLAN_LISTEN_EOT:
+        return "listen only at the loader baud until the receiver reports the outcome of the transfer";
+    case FL_PLAN_VERIFY_CHECK:
+        return "listen for the application and query its version; else listen for the loader prompt";
+    case FL_PLAN_RACE_VERIFY:
+        return "stop key at the loader baud from boot; at the prompt \"6\" and the version check; else listen for "
+               "the application";
+    case FL_PLAN_RACE_STOP:
+        return "stop key at the loader baud from boot, stop at the prompt and wait for the user";
+    case FL_PLAN_CHECK_WAIT:
+        return "listen for the application and query its version, then wait for the user";
+    default:
+        return "?";
+    }
+}
+
+const char *flash_journal_state_name(uint8_t state)
+{
+    static const char *const k[] = { "?",           "prepared",  "baud-changing", "reset-sent", "menu-2-sent",
+                                     "transferring", "eot-sent", "verifying",     "failed",     "needs-user" };
+    return state < sizeof(k) / sizeof(k[0]) ? k[state] : "?";
+}
+
 bool flash_journal_needs_race(const um98x_flash_journal_t *j, bool receiver_was_reset)
 {
     if (j == NULL || !receiver_was_reset) {
         return false;   /* an ESP32-only reset leaves the receiver where it was */
     }
-    switch (j->state) {
-    case UM98X_JOURNAL_MENU2_SENT:
-    case UM98X_JOURNAL_TRANSFERRING:
-    case UM98X_JOURNAL_EOT_SENT:
-    case UM98X_JOURNAL_VERIFYING:
-    case UM98X_JOURNAL_FAILED:
-        return true;
-    case UM98X_JOURNAL_NEEDS_USER:
-        return j->phase >= UM98X_JOURNAL_MENU2_SENT && j->phase <= UM98X_JOURNAL_VERIFYING;
-    default:
-        return false;   /* before the loader menu: check the application instead */
-    }
+    /* Before the loader menu (and without a transfer): the application is checked instead. */
+    return flash_journal_plan_races(flash_journal_plan(FJ_OPEN, j, true));
 }
