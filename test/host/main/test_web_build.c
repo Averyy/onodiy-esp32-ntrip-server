@@ -1523,3 +1523,108 @@ TEST_CASE("a caster summary with the longest stop reason still fits the WebSocke
     web_build_caster_summary(&w, &s_snap, 0, false);
     TEST_ASSERT_TRUE(wj_ok(&w));
 }
+
+/* ---- empty slots ------------------------------------------------------------------------------------ */
+
+TEST_CASE("an empty caster slot: empty and nameless for the admin, absent from the public status", "[web_build]")
+{
+    fixture();
+    s_snap.slots = 3;
+    /* slot 2: removed (no host, not enabled), its old name still stored */
+    strcpy(s_snap.cfg[2].name, "Old caster");
+    s_snap.cst[2].state = NTRIP_STATE_DISABLED;
+
+    cJSON *root = build_status(false);
+    const cJSON *casters = at(root, "casters");
+    TEST_ASSERT_EQUAL(3, cJSON_GetArraySize(casters));
+    const cJSON *c0 = cJSON_GetArrayItem(casters, 0);
+    const cJSON *c1 = cJSON_GetArrayItem(casters, 1);
+    const cJSON *c2 = cJSON_GetArrayItem(casters, 2);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(c0, "empty")));
+    TEST_ASSERT_EQUAL_STRING("Onocoy", at(c0, "name")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(c1, "empty")));   /* a host, though disabled: configured */
+    TEST_ASSERT_EQUAL_STRING("Spare", at(c1, "name")->valuestring);
+    TEST_ASSERT_EQUAL(2, at(c2, "slot")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(c2, "empty")));
+    TEST_ASSERT_EQUAL_STRING("", at(c2, "name")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(c2, "enabled")));
+    cJSON_Delete(root);
+
+    /* Public: the empty slot is left out, the others keep their public form. */
+    root = build_status(true);
+    casters = at(root, "casters");
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(casters));
+    TEST_ASSERT_EQUAL(0, at(cJSON_GetArrayItem(casters, 0), "slot")->valueint);
+    TEST_ASSERT_EQUAL(1, at(cJSON_GetArrayItem(casters, 1), "slot")->valueint);
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(casters, 1), "empty"));
+    cJSON_Delete(root);
+    char frag[256];
+    wj_t w;
+    wj_init_elements(&w, frag, sizeof(frag));
+    web_build_caster_summary(&w, &s_snap, 2, true);
+    TEST_ASSERT_EQUAL_STRING("", wj_text(&w));
+
+    /* An enabled slot without a host is not empty (a half-done edit shows as it is). */
+    s_snap.cfg[2].enabled = true;
+    TEST_ASSERT_FALSE(web_caster_slot_empty(&s_snap.cfg[2]));
+    s_snap.cfg[2].enabled = false;
+    TEST_ASSERT_TRUE(web_caster_slot_empty(&s_snap.cfg[2]));
+    TEST_ASSERT_FALSE(web_caster_slot_empty(NULL));   /* safe mode: configs not loaded */
+    /* Safe mode: names are null, nothing is called empty. */
+    s_snap.cfg_valid = false;
+    root = build_status(false);
+    c2 = cJSON_GetArrayItem(at(root, "casters"), 2);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(c2, "name")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(c2, "empty")));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("availability: slots carry the empty flag; the protected block is the enabled Onocoy slot", "[web_build]")
+{
+    ntrip_caster_cfg_t cfg[4];
+    memset(cfg, 0, sizeof(cfg));
+    strcpy(cfg[0].name, "RTK2go");
+    strcpy(cfg[0].host, "rtk2go.com");
+    cfg[0].enabled = true;
+    /* slot 1: an Onocoy slot left disabled */
+    strcpy(cfg[1].name, "Onocoy (old)");
+    strcpy(cfg[1].host, "servers.onocoy.com");
+    cfg[1].protected_slot = true;
+    /* slot 2: removed */
+    strcpy(cfg[2].name, "Gone");
+    /* slot 3: the Onocoy slot in use */
+    strcpy(cfg[3].name, "Onocoy");
+    strcpy(cfg[3].host, "servers.onocoy.com");
+    cfg[3].protected_slot = true;
+    cfg[3].enabled = true;
+    TEST_ASSERT_EQUAL(3, web_avail_protected_slot(cfg, 4));
+    TEST_ASSERT_EQUAL(1, web_avail_protected_slot(cfg, 3));   /* without slot 3: the disabled one */
+    TEST_ASSERT_EQUAL(-1, web_avail_protected_slot(cfg, 1));
+    TEST_ASSERT_EQUAL(-1, web_avail_protected_slot(NULL, 4));
+    cfg[1].enabled = true;
+    TEST_ASSERT_EQUAL(1, web_avail_protected_slot(cfg, 4));   /* both enabled: the first */
+    cfg[1].enabled = false;
+
+    ntrip_caster_status_t pst;
+    memset(&pst, 0, sizeof(pst));
+    int prot = web_avail_protected_slot(cfg, 4);
+    web_avail_snap_t a = {
+        .clock = LEDGER_CLOCK_GNSS, .second_of_day = 60, .slots = 4, .cfg = cfg, .protected_slot = prot,
+        .protected_status = &pst, .budget_left_s = UINT32_MAX,
+    };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_availability(&w, &a);
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    const cJSON *slots = at(root, "slots");
+    TEST_ASSERT_EQUAL(4, cJSON_GetArraySize(slots));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(cJSON_GetArrayItem(slots, 0), "empty")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(cJSON_GetArrayItem(slots, 1), "empty")));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(cJSON_GetArrayItem(slots, 2), "empty")));
+    TEST_ASSERT_EQUAL_STRING("", at(cJSON_GetArrayItem(slots, 2), "name")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("Onocoy", at(cJSON_GetArrayItem(slots, 3), "name")->valuestring);
+    /* the protected block is slot 3's: enabled */
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(at(root, "protected"), "enabled")));
+    cJSON_Delete(root);
+}

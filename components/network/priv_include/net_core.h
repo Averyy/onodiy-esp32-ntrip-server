@@ -269,6 +269,52 @@ net_trial_act_t net_cred_trial_disconnect(net_cred_trial_t *t, uint16_t reason);
 /** Seconds the trial still has (0 = none running). */
 uint32_t net_cred_trial_left_s(const net_cred_trial_t *t, uint32_t now_s);
 
+/**
+ * Wait before the next connect attempt after a disconnect with `reason`
+ * (`attempt` as for net_backoff_ms). A refused attempt (net_trial_reason_refused)
+ * while a trial runs whose credentials never associated is retried at once
+ * (0 ms; the connect still scans first), so the NET_CRED_TRIAL_REFUSALS
+ * refusals that end the trial come back to back: one refusal is already one
+ * driver event covering several authentication tries, and waiting between
+ * them only delays the way back. Everything else, an out-of-reach reason
+ * during a trial included, waits net_backoff_ms(attempt).
+ */
+uint32_t net_trial_retry_ms(const net_cred_trial_t *t, uint16_t reason, uint32_t attempt);
+
+/**
+ * What the status shows about changed credentials, from the state the
+ * network keeps under its lock: the pending pair, a revert, the trial the
+ * net task runs, and credentials queued to be applied (they are applied
+ * NET_CRED_APPLY_DELAY_MS after the request, so an HTTP reply goes out
+ * first). Every request that changes them publishes this view under the
+ * same lock, so the next status read is coherent at once.
+ */
+typedef struct {
+    bool pend_valid;           /**< pending credentials are stored */
+    const char *pend_ssid;     /**< their SSID (read only while pend_valid) */
+    bool reverted;             /**< the station went back to its previous credentials */
+    uint8_t reverted_why;      /**< why (network_cred_revert_t) */
+    bool trial_running;        /**< the net task runs a trial now */
+    uint32_t trial_left_s;     /**< its time left (net_cred_trial_left_s) */
+    bool trial_queued;         /**< credentials wait to be applied as a trial (a new one, or a retry) */
+    bool other_queued;         /**< credentials wait to be applied as the station's: a running trial ends then */
+    uint32_t apply_left_ms;    /**< until the queued credentials are applied */
+} net_cred_in_t;
+
+typedef struct {
+    bool cred_trial;           /**< a trial runs, or one is about to start */
+    uint32_t cred_trial_left_s;/**< until it gives up: a queued trial counts NET_CRED_TRIAL_S from its start */
+    bool cred_pending;
+    char pending_ssid[33];     /**< "" = none */
+    bool cred_reverted;        /**< only while credentials are pending and no trial of them runs */
+    uint8_t cred_reverted_why; /**< 0 unless cred_reverted */
+} net_cred_view_t;
+
+/** Delay between a credential request and its use (the reply goes out first). */
+#define NET_CRED_APPLY_DELAY_MS 1000u
+
+void net_cred_view(const net_cred_in_t *in, net_cred_view_t *out);
+
 /* ---- network-ladder reboot age across resets ---------------------------------------- */
 
 /** Age not known (no network-ladder reboot since power-on, or state lost). */

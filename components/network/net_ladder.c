@@ -246,3 +246,38 @@ net_ladder_out_t net_ladder_tick(net_ladder_t *l, const net_ladder_in_t *in, uin
     l->last_rung = (uint8_t)rung;
     return out;
 }
+
+size_t net_ladder_trigger_text(uint8_t triggers, char *buf, size_t cap)
+{
+    static const struct {
+        uint8_t bit;
+        const char *text;
+    } names[] = {
+        { NET_TRIG_P, "protected caster down" },
+        { NET_TRIG_A, "associated without IP" },
+        { NET_TRIG_S, "caster not reached" },
+    };
+    if (buf == NULL || cap == 0) {
+        return 0;
+    }
+    size_t len = 0;
+    buf[0] = '\0';
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if ((triggers & names[i].bit) == 0) {
+            continue;
+        }
+        const char *parts[2] = { len > 0 ? ", " : "", names[i].text };
+        for (size_t k = 0; k < 2; k++) {
+            for (const char *c = parts[k]; *c != '\0' && len + 1 < cap; c++) {
+                buf[len++] = *c;
+            }
+        }
+    }
+    if (len == 0) {
+        for (const char *c = "none"; *c != '\0' && len + 1 < cap; c++) {
+            buf[len++] = *c;
+        }
+    }
+    buf[len] = '\0';
+    return len;
+}

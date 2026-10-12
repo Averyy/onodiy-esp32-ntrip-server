@@ -339,6 +339,40 @@ uint32_t net_cred_trial_left_s(const net_cred_trial_t *t, uint32_t now_s)
     return el >= NET_CRED_TRIAL_S ? 0 : NET_CRED_TRIAL_S - el;
 }
 
+uint32_t net_trial_retry_ms(const net_cred_trial_t *t, uint16_t reason, uint32_t attempt)
+{
+    if (t != NULL && t->on && !t->assoc && net_trial_reason_refused(reason)) {
+        return 0;
+    }
+    return net_backoff_ms(attempt);
+}
+
+void net_cred_view(const net_cred_in_t *in, net_cred_view_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->cred_pending = in->pend_valid;
+    if (in->pend_valid && in->pend_ssid != NULL) {
+        size_t n = 0;
+        while (n < sizeof(out->pending_ssid) - 1 && in->pend_ssid[n] != '\0') {
+            out->pending_ssid[n] = in->pend_ssid[n];
+            n++;
+        }
+        out->pending_ssid[n] = '\0';
+    }
+    /* A queued trial replaces whatever runs (it starts within a second); a
+     * queued plain apply ends a running trial. */
+    if (in->trial_queued) {
+        out->cred_trial = true;
+        uint32_t wait_s = in->apply_left_ms / 1000u + (in->apply_left_ms % 1000u != 0 ? 1u : 0u);
+        out->cred_trial_left_s = NET_CRED_TRIAL_S + wait_s;
+    } else if (in->trial_running && !in->other_queued) {
+        out->cred_trial = true;
+        out->cred_trial_left_s = in->trial_left_s;
+    }
+    out->cred_reverted = in->reverted && in->pend_valid && !out->cred_trial;
+    out->cred_reverted_why = out->cred_reverted ? in->reverted_why : 0;
+}
+
 /* ---- network-ladder reboot age across resets ---------------------------------------- */
 
 static uint32_t rtc_check(const net_rtc_t *r)

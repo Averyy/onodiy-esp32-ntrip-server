@@ -14,6 +14,7 @@
 #include "diag_internal.h"
 #include "diag_task_core.h"
 
+#include "esp_attr.h"
 #include "esp_core_dump.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -217,13 +218,79 @@ void diag_heap_stats(diag_heap_info_t *out)
 
 /* ---- log level, start-up ------------------------------------------------------------------ */
 
-esp_err_t diag_set_log_level(const char *tag, esp_log_level_t level)
+/* Tags with a fixed level (diag_log_fix_level), applied again after every
+ * "*" change: esp_log_level_set("*") drops every per-tag level. */
+#define FIXED_TAG_LEN 16
+typedef struct {
+    char tag[FIXED_TAG_LEN];
+    esp_log_level_t level;
+} fixed_level_t;
+
+static portMUX_TYPE s_level_lock = portMUX_INITIALIZER_UNLOCKED;
+EXT_RAM_BSS_ATTR static fixed_level_t s_fixed[DIAG_LOG_FIXED_MAX];   /* under s_level_lock */
+static size_t s_fixed_n;
+
+static esp_err_t level_ok(esp_log_level_t level)
 {
-    if (tag == NULL || level > ESP_LOG_VERBOSE) {
+    if (level > ESP_LOG_VERBOSE) {
         return ESP_ERR_INVALID_ARG;
     }
+    return level > (esp_log_level_t)CONFIG_LOG_MAXIMUM_LEVEL ? ESP_ERR_NOT_SUPPORTED : ESP_OK;
+}
+
+esp_err_t diag_set_log_level(const char *tag, esp_log_level_t level)
+{
+    if (tag == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t err = level_ok(level);
+    if (err != ESP_OK) {
+        return err;
+    }
     esp_log_level_set(tag, level);
+    if (strcmp(tag, "*") != 0) {
+        return ESP_OK;
+    }
+    fixed_level_t fixed[DIAG_LOG_FIXED_MAX];
+    portENTER_CRITICAL(&s_level_lock);
+    size_t n = s_fixed_n;
+    memcpy(fixed, s_fixed, n * sizeof(fixed[0]));
+    portEXIT_CRITICAL(&s_level_lock);
+    for (size_t i = 0; i < n; i++) {
+        esp_log_level_set(fixed[i].tag, fixed[i].level);
+    }
     return ESP_OK;
+}
+
+esp_err_t diag_log_fix_level(const char *tag, esp_log_level_t level)
+{
+    if (tag == NULL || tag[0] == '\0' || strcmp(tag, "*") == 0 || strnlen(tag, FIXED_TAG_LEN) >= FIXED_TAG_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t err = level_ok(level);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = ESP_ERR_NO_MEM;
+    portENTER_CRITICAL(&s_level_lock);
+    for (size_t i = 0; i < s_fixed_n; i++) {
+        if (strcmp(s_fixed[i].tag, tag) == 0) {
+            s_fixed[i].level = level;
+            err = ESP_OK;
+            break;
+        }
+    }
+    if (err != ESP_OK && s_fixed_n < DIAG_LOG_FIXED_MAX) {
+        strlcpy(s_fixed[s_fixed_n].tag, tag, sizeof(s_fixed[s_fixed_n].tag));
+        s_fixed[s_fixed_n].level = level;
+        s_fixed_n++;
+        err = ESP_OK;
+    }
+    portEXIT_CRITICAL(&s_level_lock);
+    if (err == ESP_OK) {
+        esp_log_level_set(tag, level);
+    }
+    return err;
 }
 
 /* Last IDF shutdown handler to run (registered first): journal records still

@@ -116,8 +116,10 @@ Applied to every request before any handler runs.
    `fritz.box`) is not accepted; use the IP address or the `.local` name
    there. A name may also come fully qualified, with one trailing dot
    (`<mdns_host>.local.`, the target a DNS-SD browser opens for the
-   `_http._tcp` service); an IP address may not. Anything else on the
-   station interface gets `421 bad_host` (DNS
+   `_http._tcp` service); an IP address may not. An IPv6 literal
+   (`[fe80::...]`) is never accepted: a client that reaches the station
+   over IPv6 (its link-local address, section 16) uses a name. Anything
+   else on the station interface gets `421 bad_host` (DNS
    rebinding). On the AP interface a foreign Host is the captive portal
    instead (section 16).
 2. **Origin.** On every `POST`, `PUT`, `DELETE` and WebSocket handshake that
@@ -132,7 +134,21 @@ Applied to every request before any handler runs.
    header is ever sent, and `OPTIONS` gets `405`.
 4. **Sizes.** JSON bodies at most 2 KB (`PUT /api/casters/{n}/ca`: 6 KB),
    else `413`. Uploads: section 13.
-5. **Response headers** on every page and API response:
+5. **Bodies nobody reads.** A body is never read where nothing takes one:
+   the answer goes out with `Connection: close` and the connection ends
+   (section 18). A `GET` or `DELETE` route with a body:
+   `400 bad_request` ("This request takes no body"). A request no route
+   takes, with a body or not, gets the answer it would get without one: an
+   `/api/` or `/ws` path that exists for other methods `405`, any other
+   `/api/` path `404`, a UI asset `405` for a method other than `GET` and
+   `HEAD`, on the AP interface the captive redirect, else `404`
+   (`OPTIONS`: always `405`).
+6. **Connection.** Connections are persistent (HTTP/1.1). A request with
+   `Connection: close`, or an HTTP/1.0 request without
+   `Connection: keep-alive`, gets its answer with `Connection: close`, and
+   the station closes the connection after it (also after an upload or a
+   download the worker answers). Pipelined requests are answered in order.
+7. **Response headers** on every page and API response:
    `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
    `Referrer-Policy: no-referrer`; HTML also gets a Content-Security-Policy
    that allows only the device's own origin (scripts, styles, images,
@@ -175,10 +191,14 @@ first setup (`POST /api/setup/admin`) and stored as `sys/admin_hash`: a v1
 blob `{iterations u32, salt[16], PBKDF2-HMAC-SHA256[32]}`, derived through
 PSA (`psa_key_derivation_*` with `PSA_ALG_PBKDF2_HMAC(PSA_ALG_SHA_256)`,
 cost = `iterations`, salt = 16 random bytes from `esp_fill_random`, 32-byte
-output, constant-time compare). The iteration count is chosen so one check
-takes about 0.3 s on the device (starting value 10 000, to be measured); it
-is stored with each hash, so it can change without a migration. Passwords
-are 8-64 bytes of UTF-8 without control characters.
+output, constant-time compare). A new password gets
+`CONFIG_WEB_PBKDF2_ITERATIONS` iterations, 3000: measured at about 1.0 s
+per 10 000 on the ESP32-S3, one check takes about 0.3 s (PROVISIONAL, to be
+measured again on the station). The count is stored with each hash, so it
+can change without a migration: a password set by an earlier build keeps
+its count (10 000) until it is changed, and a login never re-hashes it
+behind the user's back. The check runs on the server task (section 18).
+Passwords are 8-64 bytes of UTF-8 without control characters.
 
 **Sessions.**
 - `POST /api/session` with the password sets the cookie
@@ -198,9 +218,13 @@ are 8-64 bytes of UTF-8 without control characters.
   unavailable (seen through `health_status_t.admin_resets`).
 - An ended session's WebSocket is closed with code `4001`.
 
-**Login throttling** (per client, RAM): a client is its IPv4 address (an
-IPv6 address: its /64 prefix) together with the interface it came over
-(station or AP); the 16 clients seen last are tracked. A client's first 5
+**Login throttling** (per client, RAM): a client is its IPv4 address (also
+when mapped into IPv6), an IPv6 link-local address (`fe80::/10`) as a whole
+(every device on a link shares the `fe80::/64` prefix, so the prefix would
+put every phone on the setup AP into one bucket), or another IPv6
+address's /64 prefix (one host may use any address of its prefix),
+together with the interface it came over (station or AP); the 16 clients
+seen last are tracked. A client's first 5
 consecutive failures cost nothing extra; after its n-th failure (n >= 5) its
 next attempt is accepted only `min(2^(n-4), 300)` s later. Earlier attempts
 get `429 rate_limited` with that client's `retry_in_s`, without checking the
@@ -212,11 +236,15 @@ while it is reached, attempts over that interface get `429 rate_limited`
 too. A single throttled client stays well below the ceiling, and failures
 on the station interface never touch the AP's, so nobody on the LAN can lock
 out an owner who logs in over the station's own AP. A wrong `current`
-password in `PUT /api/admin-password` counts the same way.
+password in `PUT /api/admin-password` counts the same way. Each counted
+failure is logged with the client's address, at most one line per client
+a minute: `wrong admin password from 192.168.1.23 (6 in a row from this
+client, +4 not logged)` (the `+k` part only when lines were held back).
 
 **First password ("claim").** `POST /api/setup/admin` works only while no
 admin password is stored **and** the request arrived over the device's own
-AP (the socket's local address is the AP address). The AP is up only while
+AP (the socket's local address is the AP's IPv4 address, or its IPv6
+link-local address for a phone that reaches the AP over IPv6). The AP is up only while
 the station is unconfigured, offline (fallback), or for 15 min after a
 BOOT-button hold (recovery AP; open unless `wifi/ap_pass` is set), so a
 claim needs someone within Wi-Fi range of the station while its AP is up.
@@ -331,7 +359,7 @@ form, login form, setup wizard or dashboard.
 | Field | Notes |
 |---|---|
 | `hostname` | the station name in use (status `device.hostname`); the login page shows it |
-| `mdns_host` | the host label the mDNS responder answers, without `.local`: the hostname, or `<hostname>-2` (then `-3`, ...) after the responder renamed itself because another device answered the name; `null` while the responder does not run. The renamed label is never stored: the next boot probes the hostname again |
+| `mdns_host` | the host label the mDNS responder answers, without `.local`: the hostname, or `<hostname>-2` (then `-3`, ...) after the responder renamed itself because another device answered the name; `null` while the responder does not run (and from the goodbye before a planned restart on). The renamed label is never stored: the next boot probes the hostname again. The web page's `_http._tcp` service carries the same label as its instance name and follows a rename; IPv6 (AAAA) queries for the name are answered too (section 16) |
 | `ap_ssid` | the station's own access point name (`onocoydiy-XXXX`), `null` before Wi-Fi is set up |
 | `setup_step` | the setup wizard's next step as the station keeps it (`POST /api/setup/step`): `wifi`, `reception`, `onocoy`, `casters`; `null` without a session, once setup is done, or when none is stored |
 
@@ -409,7 +437,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
                "uart_closed": false, "rx_maintenance": false, "maintenance_left_s": 0, "maintenance_chosen_s": 0,
                "next_detect_in_s": null, "first_apply_held": false},
   "casters": [
-    {"slot": 0, "name": "Onocoy", "enabled": true, "protected": true, "host": "servers.onocoy.com",
+    {"slot": 0, "name": "Onocoy", "empty": false, "enabled": true, "protected": true, "host": "servers.onocoy.com",
      "state": "streaming", "reason": "none", "state_age_s": 3600, "connected_s": 3600,
      "today_online_s": 43200, "today_offline_s": 4, "graced_uptime_permille": 503,
      "streak_ok": true, "graced_uptime_so_far_permille": 1000, "data_rate_permille": 1000, "budget_s": 473,
@@ -449,7 +477,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
 | `receiver.first_apply_held` | the receiver's first configuration waits for the user (`gnss/hold`, section 8): only queries reach the receiver until the user applies; admin form only |
 | `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
-| `casters[]` | every slot; the full status is in `/api/casters`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with the console's mountpoint, username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none); `stop_reason` why the Onocoy login guard stopped the slot (`ntrip_stop_t`; `none` unless `state` is `stopped`, section 10) |
+| `casters[]` | every slot; the full status is in `/api/casters`. `empty`: the slot has no host and is not enabled (never set up, or removed); its `name` is then `""` whatever the stored name is. In safe mode (configs not loaded) no slot is empty and every `name` is `null`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with the console's mountpoint, username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none); `stop_reason` why the Onocoy login guard stopped the slot (`ntrip_stop_t`; `none` unless `state` is `stopped`, section 10) |
 | `alerts[]` | health's alerts (`source: "health"`) and the station's (`source: "station"`); `config_failed` carries `retry_in_s` and `auto_retry` (as `config_retry_in_s` and `config_auto_retry` in `GET /api/gnss`); `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`) |
 | `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without an enabled protected slot that is set up (`onocoy_ready`), or without a trusted clock. Information only, never a gate |
 | `health.factory_reset_refused` | a BOOT-button factory reset was refused within the last 10 min because a receiver update was running (the UI shows a notice); admin form only |
@@ -472,6 +500,10 @@ Public form (no session, public status on):
  "casters": [{"slot": 0, "name": "Onocoy", "state": "streaming"}],
  "health": {"level": "ok"}}
 ```
+
+The public form lists only slots that are not empty, without the `empty`
+field. A slot that becomes empty leaves it: public WebSocket clients get a
+full status then, since a delta can only add or replace slots.
 
 ---
 
@@ -1052,6 +1084,13 @@ Slots `0` to `max_slots - 1` (`CONFIG_NTRIP_MAX_CASTERS`).
 safe mode `config` is `null` (the slots were never loaded) and every status
 is `disabled`.
 
+An **empty slot** is one with no `host` that is not enabled: never set up,
+or removed (`DELETE /api/casters/{n}`). Its `config` keeps whatever is
+stored, but the status summaries (`/api/status` `casters[]`, section 6, and
+`/api/availability` `slots[]`, section 14) mark it `empty` with the name
+`""`, and the public status leaves it out, so a removed slot's old name
+never shows.
+
 **`config`** (`ntrip_caster_cfg_t`):
 
 ```json
@@ -1360,8 +1399,21 @@ settings unavailable the credentials are used for this boot only
 stored: nothing changed (the same network and password), or the QEMU
 development build, whose emulated Ethernet stays its link.
 
-`trial` (`network_set_credentials`): with credentials stored before (and
-different), the new ones are stored as **pending** and tried for 90 s.
+`trial` is `network_set_credentials()`'s plan: `true` exactly when the
+credentials are stored as pending and tried (`NETWORK_CRED_PLAN_TRIAL`);
+`applied` is `false` for the store-only plan. From the first
+`GET /api/wifi` (or `/api/status`, or the WebSocket's network section)
+after the `202` on, the `cred_*` fields agree with it: `cred_trial` is
+`true` from the moment the trial is queued, with `cred_trial_left_s` 91
+(the 90 s of the trial plus the second until the station switches) and
+counting down from 90 once it runs; `cred_pending` and `pending_ssid`
+name the new network and `cred_reverted` is `false`. The same holds after
+`POST /api/wifi/pending/retry` (a trial again: `cred_trial` true,
+`cred_reverted` false) and `POST /api/wifi/pending/discard` (nothing
+pending, no trial, no revert).
+
+With credentials stored before (and different), the new ones are stored
+as **pending** and tried for 90 s.
 They replace the current ones once they get an IP; otherwise the station
 goes back to its previous credentials and keeps the new ones pending
 (`cred_reverted`, `pending_ssid`), so a typo never strands a remote station.
@@ -1369,7 +1421,13 @@ A network that refuses the new password goes back sooner: three refused
 attempts in a row before any association (wrong password, a handshake that
 times out, an access point of that name only with another security
 setting) end the trial at once (`cred_reverted_why: "auth_failed"`); a
-network that is just out of reach keeps the 90 s.
+network that is just out of reach keeps the 90 s. During such a trial a
+refused attempt is retried without the reconnect backoff (each attempt
+still scans first), so the three refusals come back to back and the
+station is on its previous network about 18 s after the change (measured
+parts: 3.6 s to the first attempt, about 3.1 s of authentication per
+attempt, about 2.7 s of scan before each further one; PROVISIONAL, the
+target is under 20 s).
 Pending credentials are tried again first thing at the next boot, with
 `POST /api/wifi/pending/retry`, or dropped with
 `POST /api/wifi/pending/discard`. Without stored credentials (first setup)
@@ -1756,7 +1814,7 @@ offering the download.
 ```json
 {
   "clock": "gnss", "utc_second_of_day": 43210,
-  "slots": [{"slot": 0, "name": "Onocoy", "protected": true}],
+  "slots": [{"slot": 0, "empty": false, "name": "Onocoy", "protected": true}],
   "protected": {"down_today_s": 4, "budget_left_s": 469, "budget_s": 473, "data_rate_permille": 1000,
                 "graced_uptime_permille": 503, "streak_ok": true},
   "today": {"utc_day": 20736, "date": "2026-10-10", "down_s": [4, 0, 0, 0], "planned_s": [0, 0, 0, 0],
@@ -1780,8 +1838,12 @@ safe-mode retry), crashes, brownouts and power cuts are never planned, and
 neither is a crash that follows a planned restart: only the boot right
 after the planned restart counts it, and the gap after any crash or reset
 pin is unplanned. Planned time counts against the budget all the same. `clock` is `none` until a
-trusted time exists (`utc_second_of_day` is then `null`). `protected`: the
-Onocoy slot's day (`null` without one): `down_today_s` its offline time
+trusted time exists (`utc_second_of_day` is then `null`). `slots[].empty`
+as `casters[].empty` in `/api/status` (no host, not enabled; its `name` is
+then `""`). `protected`: the day of the Onocoy slot in use, which is the
+first enabled protected slot, else the first protected one (a disabled
+Onocoy slot left over in a lower slot never hides the enabled one;
+`null` without any protected slot): `down_today_s` its offline time
 today, `budget_s` the day's offline allowance at the current data rate,
 `budget_left_s` what is left of it, and the other figures as in the caster
 status (section 10). The budget is information only.
@@ -1835,13 +1897,22 @@ stall: `rx` (the RX task) or `raw` (inside a RAW-lease read).
 
 `{"tag": "station", "level": "debug"}`: `tag` <= 15 characters or `"*"`;
 `level` `none`, `error`, `warn`, `info`, `debug`, `verbose`. Not persisted.
-`200 {"ok": true}`.
+`200 {"ok": true}`. A level above what this build logs
+(`CONFIG_LOG_MAXIMUM_LEVEL`; `level_max` in `GET /api/logs`, `info` in
+release builds) is refused: `400 invalid_field` (`level`, message "This
+build logs at most info"), since those lines are not in the image. `"*"`
+sets every tag; a few tags keep a fixed level through it: the HTTP
+server's own (`httpd_uri`, `httpd_txrx`, `httpd_ws`) stay at `error`
+(section 18). Setting such a tag by name holds until the next `"*"` or
+restart.
 
 ### `GET /api/logs?cursor=N[&boot=prev][&format=text]`
 
-`{"cursor": 51234, "more": false, "gap": false, "text": "..."}` with at most
-8 KB of whole lines newer than `cursor` (start with 0; pass the returned
-`cursor` back; `more: true` = call again at once). `gap` = lines were
+`{"cursor": 51234, "more": false, "gap": false, "level_max": "info", "text": "..."}`
+with at most 8 KB of whole lines newer than `cursor` (start with 0; pass the
+returned `cursor` back; `more: true` = call again at once). `level_max` is
+the most detailed level this build logs (`CONFIG_LOG_MAXIMUM_LEVEL`): the
+log-level picker offers nothing above it. `gap` = lines were
 overwritten before they were read. `boot=prev` reads the previous boot's
 ring. It is empty after a power cut or an app image change, and also when
 the lines this image finds are older than the last boot: after another
@@ -1974,6 +2045,20 @@ router's device list under the station name). On its own access point the
 page is at `http://192.168.4.1/`, and the `.local` name answers there too.
 The UI shows both, as links.
 
+**mDNS details.** The responder answers A and AAAA queries for the name:
+each interface (station, AP) gets an IPv6 link-local address when its link
+comes up, and no other IPv6 address (no SLAAC), so a dual-stack phone or
+computer gets its AAAA answer at once instead of waiting out a timeout; the
+web server answers on that address too (a phone on the AP that reaches it
+over IPv6 counts as on the AP, section 3). The web page is advertised as
+an `_http._tcp` service (TXT `path=/`) whose instance name is the host
+label (`mdns_host`), so it follows a rename after a name conflict. Before a
+planned restart the station says goodbye (the service records with TTL 0)
+while the network is still up, so DNS-SD browsers drop the entry at once.
+The QEMU development build answers as `onocoydiy-qemu` (its own host name:
+QEMU's user-mode network carries its announcements onto the developer's
+LAN).
+
 **First setup** (unconfigured station, open AP `onocoydiy-XXXX`):
 1. `GET /api/session`: `admin_set: false`, `claim_allowed: true`.
 2. `POST /api/setup/admin`: the admin password; the response logs in.
@@ -2080,7 +2165,22 @@ no receiver update action.
   anything outside the API routes, `/ws` and its handshake, a request
   refused before its body, such as a refused Host or Origin or a missing
   session) is answered and the connection closed, instead of reading the
-  body away on the server task.
+  body away on the server task. The answer is the one the request would
+  get without its body (section 2: `404`/`405`, the captive redirect, an
+  asset; `400 bad_request` on a route that takes no body), never `413`
+  for a body nobody would read.
+- **Connection: close and HTTP/1.0:** `esp_http_server` parses each
+  request's HTTP version but does not keep it, so the receive override
+  feeds what it reads to a small per-connection scanner (`web_conn.h`): it
+  follows request lines, header lines and `Content-Length` bodies and
+  notes, in order, whether each request line was HTTP/1.0, so pipelined
+  requests keep their own. A handler that starts takes its request's note
+  and reads the `Connection` header (a token list: `close`, `keep-alive`,
+  without case). A request that asked to close (or HTTP/1.0 without
+  keep-alive) gets `Connection: close` on its answer, and then the server
+  ends its side, drains briefly and drops the session; the worker does the
+  same for a request it took over. WebSocket upgrades are not affected
+  (the scanner stops at the handshake).
   WebSocket clients: at most 4, at most 2 of them without a session.
 - **Request deadline:** the server reads every request on its one task, and
   the 4 s receive timeout alone would let a client that sends a byte every
@@ -2132,11 +2232,24 @@ no receiver update action.
   socket would send a reset, and many clients then drop the answer still in
   their receive buffer (the browser shows "connection reset" instead of the
   413). The server's own warnings for these expected cases
-  (`httpd_uri`, `httpd_txrx`, `httpd_ws`) are logged at error level only;
-  the handlers log the refusals that matter.
+  (`httpd_uri`, `httpd_txrx`, `httpd_ws`) are logged at error level only,
+  as fixed levels (`diag_log_fix_level`) that a `"*"` change of the log
+  level keeps; the handlers log the refusals that matter.
+- **Client addresses in the log:** a wrong admin password (section 3) and a
+  refused WebSocket handshake name the client: `WebSocket refused for
+  192.168.1.23: no session, and public status is off` (also `Host or Origin
+  not accepted`, `a body with the handshake`, `every WebSocket slot is
+  taken`, `every public viewer slot is taken`). Each kind of line comes at
+  most once a minute per client (8 clients tracked); the next line says
+  how many were held back (`+k not logged`). IPv4 addresses (also
+  v4-mapped) are written dotted, IPv6 in the compressed form.
 - **Handlers never block for long.** Station, caster, network and update
   calls are asynchronous; a handler reads snapshots and returns. The
-  password check (about 0.3 s) runs on the server task. Uploads and
+  password check (about 0.3 s at the default 3000 iterations; about 1 s
+  for a password kept from a build with 10 000, PROVISIONAL) runs on the
+  server task: the per-client throttle bounds how often one client can
+  make it run, and moving it to the worker would make login asynchronous
+  and queue it behind uploads. Uploads and
   downloads run as async requests (`httpd_req_async_handler_begin`) on one
   worker task with an internal-RAM stack (flash writes), so status pushes
   continue meanwhile.
@@ -2156,7 +2269,8 @@ no receiver update action.
   lets pending responses go out first.
 - **Interface of a request:** the local socket address (`getsockname` on
   `httpd_req_to_sockfd`) tells the AP from the station interface (claim rule,
-  captive redirects).
+  captive redirects): the AP's IPv4 address (also v4-mapped) or its IPv6
+  link-local address.
 - The web component also needs `um98x_ctl` (profile codec, validation and
   WGS84/ECEF conversion) and `um98x_flash` (`um98x_flash_inspect_staged`)
   in its `PRIV_REQUIRES`; both are lower layers.

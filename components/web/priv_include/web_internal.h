@@ -177,8 +177,30 @@ esp_err_t web_resp_end(web_resp_t *r);
 /** The server task's 2 KB PSRAM response buffer (server task only). */
 char *web_http_buf(size_t *cap);
 
-/** Interface of the request: true when its local address is the AP's. */
+/**
+ * Interface of the request: true when its local address is the AP's (its
+ * IPv4 address, also v4-mapped, or its IPv6 link-local address).
+ */
 bool web_req_on_ap(httpd_req_t *req);
+
+/** The request's peer address. @return false when the socket cannot tell. */
+bool web_req_peer(httpd_req_t *req, web_addr_t *out);
+
+/** The peer address as text for the log (web_addr_text; "?" when unknown). */
+void web_peer_text(httpd_req_t *req, char *out, size_t cap);
+
+/**
+ * "Connection: close" on this request's answer, once (a refusal and the
+ * client's own "Connection: close" can both ask for it). Any task.
+ */
+void web_resp_close_hdr(httpd_req_t *req);
+
+/**
+ * The request being answered ends its connection after the answer: the
+ * client asked ("Connection: close", or HTTP/1.0 without keep-alive). The
+ * worker closes such a connection when it has answered. Any task.
+ */
+bool web_conn_req_close(httpd_req_t *req);
 
 /** Request checks of a WebSocket handshake (Host, Origin); false = answered already. */
 bool web_ws_precheck(httpd_req_t *req);
@@ -195,10 +217,11 @@ void web_conn_ws_open(int fd, bool admin);
 void web_conn_ws_closing(int fd);
 
 /**
- * Close `fd`'s connection now (server task only): its socket is shut down,
- * and the server deletes exactly that session at its next select(). Used
- * instead of httpd_sess_trigger_close(), whose queued close names a session
- * slot that a new connection may have taken by the time it runs.
+ * Close `fd`'s connection now (server task only, or the worker for the
+ * request it holds before completing it): its socket is shut down, and the
+ * server deletes exactly that session at its next select(). Used instead of
+ * httpd_sess_trigger_close(), whose queued close names a session slot that
+ * a new connection may have taken by the time it runs.
  */
 void web_conn_shut(int fd);
 

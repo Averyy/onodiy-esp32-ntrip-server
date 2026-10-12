@@ -410,6 +410,123 @@ typedef struct {
 web_wsq_decision_t web_wsq_admit(const web_msg_kind_t *kinds, const size_t *sizes, size_t count,
                                  web_msg_kind_t kind, size_t size);
 
+/* ---- client and local addresses ------------------------------------------------------- */
+
+/** A socket address without the socket headers: IPv4, or IPv6 (v4-mapped included). */
+typedef struct {
+    bool v6;
+    uint8_t b[16];       /**< IPv6: the 16 bytes; IPv4: b[0..3], network order */
+} web_addr_t;
+
+/**
+ * The client a login throttle entry (and a log rate entry) belongs to:
+ * an IPv4 address as its 32 bits (also when mapped into IPv6); an IPv6
+ * link-local address (fe80::/10) as all 128 bits folded to 64 (every host
+ * on a link shares the fe80::/64 prefix, so the prefix alone would put the
+ * whole setup AP into one bucket); any other IPv6 address as its /64 prefix
+ * (one host can use any address of its prefix). 0 for NULL.
+ */
+uint64_t web_client_key(const web_addr_t *a);
+
+/**
+ * The request came over the AP: its local address is the AP's IPv4 address
+ * (`ap_ip4`, network order, 0 = unknown), also v4-mapped, or the AP
+ * interface's IPv6 link-local address (`ap_ll6`, NULL = none).
+ */
+bool web_addr_on_ap(const web_addr_t *local, uint32_t ap_ip4, const uint8_t *ap_ll6);
+
+/**
+ * Address text for the log: dotted IPv4 (a v4-mapped IPv6 address as its
+ * IPv4 address), IPv6 in the RFC 5952 form (lower case, the longest run of
+ * two or more zero groups as "::"). "?" for NULL. @return the length.
+ */
+size_t web_addr_text(const web_addr_t *a, char *out, size_t cap);
+
+/* ---- requests no route took ------------------------------------------------------------ */
+
+/** What the catch-all answers. */
+typedef enum {
+    WEB_FB_NOT_FOUND = 0,      /**< 404 not_found */
+    WEB_FB_METHOD,             /**< 405 method_not_allowed */
+    WEB_FB_ASSET,              /**< serve the UI asset */
+    WEB_FB_REDIRECT,           /**< the captive redirect (over the AP) */
+} web_fallback_t;
+
+/**
+ * Classify a request no route took, before anything of its body is read:
+ * OPTIONS is 405 (no CORS, ever); /api, /api/... and /ws are 405 when
+ * `api_known` knows the path (query removed; a path of 64 bytes or more is
+ * unknown), else 404; a UI asset (`asset`) is served to GET and HEAD, 405
+ * otherwise; over the AP everything else is the captive redirect; 404
+ * elsewhere.
+ */
+web_fallback_t web_fallback_classify(const char *uri, bool options, bool get_or_head, bool asset, bool on_ap,
+                                     bool (*api_known)(const char *path));
+
+/* ---- connection handling ------------------------------------------------------------------- */
+
+#define WEB_CONN_TOK_CLOSE      (1u << 0)
+#define WEB_CONN_TOK_KEEP_ALIVE (1u << 1)
+
+/**
+ * Tokens of a Connection header value (a comma-separated list; tokens
+ * compared without case, spaces and tabs around them ignored): CLOSE for
+ * "close", KEEP_ALIVE for "keep-alive"; others (Upgrade, ...) are ignored.
+ * NULL or "" = none.
+ */
+unsigned web_connection_tokens(const char *value);
+
+/**
+ * The connection ends after this response: the request asked for it
+ * ("Connection: close"), or it is HTTP/1.0 without "Connection: keep-alive"
+ * (HTTP/1.0 has no persistent connections by default).
+ */
+bool web_conn_should_close(unsigned tokens, bool http10);
+
+/* ---- log lines about clients, rate-limited --------------------------------------------------- */
+
+#define WEB_LOGRATE_CLIENTS  8u
+#define WEB_LOGRATE_PERIOD_S 60u
+
+typedef struct {
+    bool used;
+    uint64_t key;              /**< web_client_key() */
+    uint32_t last_s;           /**< when its last line went out */
+    uint32_t held;             /**< lines held back since */
+} web_lograte_client_t;
+
+/**
+ * At most one log line per client per WEB_LOGRATE_PERIOD_S, for the
+ * WEB_LOGRATE_CLIENTS clients seen last (a new client takes the place of
+ * the one whose last line is oldest); the lines held back are counted and
+ * the next line that goes out says how many. A client on the network
+ * retrying something every second cannot fill the log, and its address is
+ * still in it.
+ */
+typedef struct {
+    web_lograte_client_t c[WEB_LOGRATE_CLIENTS];
+} web_lograte_t;
+
+void web_lograte_init(web_lograte_t *r);
+
+/**
+ * May a line about this client go out now? true: *held (if not NULL) gets
+ * how many were held back since its last one, and the count restarts.
+ * false: this one is counted.
+ */
+bool web_lograte_allow(web_lograte_t *r, uint64_t key, uint32_t now_s, uint32_t *held);
+
+/** "none", "error", "warn", "info", "debug", "verbose" for esp_log_level_t values 0-5; "?" otherwise. */
+const char *web_log_level_text(unsigned level);
+
+/**
+ * A query parameter that must be a decimal u32 when present (a cursor):
+ * absent -> true and *out = 0; 1-10 digits up to 4294967295 -> true and
+ * the value; anything else (empty, signs, spaces, other characters, too
+ * large) -> false.
+ */
+bool web_query_u32(const char *query, const char *key, uint32_t *out);
+
 #ifdef __cplusplus
 }
 #endif

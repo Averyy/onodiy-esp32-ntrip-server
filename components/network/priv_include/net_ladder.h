@@ -80,6 +80,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -194,6 +195,14 @@ typedef struct {
 
 /** The triggers that hold for these inputs (NET_TRIG_*; 0 without credentials). */
 uint8_t net_ladder_triggers(const net_ladder_in_t *in);
+
+/**
+ * The triggers in words for the log, in the order P, A, S, separated by
+ * ", ": "protected caster down", "associated without IP", "caster not
+ * reached"; "none" without any. Cut to fit `cap` (always terminated when
+ * cap > 0). @return the length written.
+ */
+size_t net_ladder_trigger_text(uint8_t triggers, char *buf, size_t cap);
 
 void net_ladder_init(net_ladder_t *l);
 

@@ -120,16 +120,23 @@ CONFIG_LWIP_SNTP_MAX_SERVERS=2
 
 # ---- mDNS (espressif/mdns, network component): <hostname>.local -----------
 # One service (the web page, _http._tcp) plus a spare. The responder only
-# answers: no browsing, no console commands. Its data lives in PSRAM; its
-# task stack stays internal at the component's default (4096). The default
-# lwIP raw-PCB networking is kept (MDNS_NETWORKING_SOCKET off), so it uses
-# none of the 24 lwIP sockets. The predefined STA and AP interfaces stay on
-# (component defaults): the name answers on the home network and on the
-# setup/recovery AP (192.168.4.1 there).
+# answers: no browsing, no console commands. Its data lives in PSRAM, and so
+# does its task stack (the component's default size, 4096): the component
+# allocates that stack with MALLOC_CAP_SPIRAM and creates the task on it
+# (xTaskCreateStaticPinnedToCore; FREERTOS_TASK_CREATE_ALLOW_EXT_MEM is on by
+# default on the ESP32-S3). A stack in PSRAM must never be in use while the
+# cache is off: the mDNS task does no flash or NVS work, and its one callback
+# into the station (the rename note in network.c) copies a string under a
+# spinlock. That keeps 4 KB of internal RAM free. The default lwIP raw-PCB
+# networking is kept (MDNS_NETWORKING_SOCKET off), so it uses none of the 24
+# lwIP sockets. The predefined STA and AP interfaces stay on (component
+# defaults): the name answers on the home network and on the setup/recovery
+# AP (192.168.4.1 there).
 CONFIG_MDNS_MAX_SERVICES=2
 CONFIG_MDNS_ENABLE_BROWSE=n
 CONFIG_MDNS_ENABLE_CONSOLE_CLI=n
 CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y
+CONFIG_MDNS_TASK_CREATE_FROM_SPIRAM=y
 # No interface uses the predefined Ethernet key: the station has no Ethernet,
 # and the QEMU build's emulated Ethernet port registers under the station
 # key (so mDNS answers there through the STA interface).

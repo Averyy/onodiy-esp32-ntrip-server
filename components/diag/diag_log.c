@@ -13,8 +13,8 @@
  * microseconds). The console then sends the ring's records in order
  * (diag_console_core.h): the logger writes its own line to the UART driver's
  * transmit buffer only when nothing older waits and the whole line fits;
- * otherwise the line waits in the ring and the "console" task (internal
- * stack, priority below every station task) copies it out when the buffer
+ * otherwise the line waits in the ring and the "console" task (stack in
+ * PSRAM, priority below every station task) copies it out when the buffer
  * has room, blocking only itself. A line is lost only when the ring
  * overwrote it before it was sent, and one note at a line boundary says how
  * many. A mutex keeps the fast path and the writer apart; a logger never
@@ -483,13 +483,23 @@ esp_err_t diag_log_init(void)
         cerr = (s_console_mux != NULL) ? ESP_OK : ESP_ERR_NO_MEM;
     }
     bool writer = false;
+    bool internal_stack = false;
     if (cerr == ESP_OK) {
         /* The console sends the ring's records from here on (nothing is in
          * the ring yet: the tap is installed below). */
         dcon_init(&s_con, s_banks.ring.hdr->next_seq - 1u, s_con_buf, sizeof(s_con_buf));
         TaskHandle_t t = NULL;
-        writer = xTaskCreatePinnedToCore(console_task, "console", CONFIG_DIAG_CONSOLE_TASK_STACK, NULL,
-                                         CONSOLE_TASK_PRIO, &t, tskNO_AFFINITY) == pdPASS;
+        /* The writer's stack in PSRAM: it only copies lines into the UART
+         * driver's transmit buffer and never touches flash, so the cache is
+         * never off while it runs. Internal RAM only when PSRAM has no room. */
+        writer = xTaskCreatePinnedToCoreWithCaps(console_task, "console", CONFIG_DIAG_CONSOLE_TASK_STACK, NULL,
+                                                 CONSOLE_TASK_PRIO, &t, tskNO_AFFINITY,
+                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS;
+        if (!writer) {
+            internal_stack = true;
+            writer = xTaskCreatePinnedToCore(console_task, "console", CONFIG_DIAG_CONSOLE_TASK_STACK, NULL,
+                                             CONSOLE_TASK_PRIO, &t, tskNO_AFFINITY) == pdPASS;
+        }
         s_con_task = writer ? t : NULL;
         s_con_ordered = writer;
         /* printf and friends go through the driver too, so their bytes queue
@@ -505,6 +515,8 @@ esp_err_t diag_log_init(void)
         ESP_LOGE("diag", "console driver not installed (%s): console output may block", esp_err_to_name(cerr));
     } else if (!writer) {
         ESP_LOGE("diag", "console task not started: lines that do not fit the transmit buffer are dropped");
+    } else if (internal_stack) {
+        ESP_LOGW("diag", "console task stack in internal RAM: no room for it in PSRAM");
     }
 #endif
     if (s_banks.prev_found) {

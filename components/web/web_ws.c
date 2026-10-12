@@ -279,27 +279,53 @@ static size_t public_count(void)
     return n;
 }
 
+/* Refused handshakes, per client at most one line a minute (a page that
+ * keeps retrying shows up once, with its address). */
+EXT_RAM_BSS_ATTR static web_lograte_t s_refused_log;
+
+static void log_refused(httpd_req_t *req, const char *why)
+{
+    web_addr_t a;
+    bool known = web_req_peer(req, &a);
+    uint32_t held = 0;
+    if (!web_lograte_allow(&s_refused_log, known ? web_client_key(&a) : 0, web_now_s(), &held)) {
+        return;
+    }
+    char who[48];
+    (void)web_addr_text(known ? &a : NULL, who, sizeof(who));
+    if (held > 0) {
+        ESP_LOGW(TAG, "WebSocket refused for %s: %s (+%u not logged)", who, why, (unsigned)held);
+    } else {
+        ESP_LOGW(TAG, "WebSocket refused for %s: %s", who, why);
+    }
+}
+
 esp_err_t web_ws_pre_handshake(httpd_req_t *req)
 {
     s_pending_sess = -1;
     if (!web_ws_precheck(req)) {
+        log_refused(req, "Host or Origin not accepted");
         return ESP_FAIL;
     }
     /* A handshake carries no body. The server would read one away after the
      * handshake, off our request deadline's books: refused and closed. */
     if (req->content_len > 0) {
+        log_refused(req, "a body with the handshake");
         return web_refuse_and_close(req, WEB_ERR_BAD_REQUEST);
     }
     /* Not touched yet: a refused handshake must not keep a session alive
      * (a hidden tab retrying would); a successful one touches it. */
     int sess = web_auth_session(req, false);
     if (sess < 0 && !web_public_status()) {
+        log_refused(req, "no session, and public status is off");
         web_send_error(req, WEB_ERR_FORBIDDEN, "Public status is off: log in", NULL, UINT32_MAX, NULL, NULL);
         return ESP_FAIL;
     }
     /* Public viewers get at most WS_MAX_PUBLIC slots, so they can never
      * take every slot from the admin's pages. */
     if (web_ws_client_count() >= WS_MAX_CLIENTS || (sess < 0 && public_count() >= WS_MAX_PUBLIC)) {
+        log_refused(req, sess < 0 && web_ws_client_count() < WS_MAX_CLIENTS ? "every public viewer slot is taken"
+                                                                            : "every WebSocket slot is taken");
         web_send_err(req, WEB_ERR_TOO_MANY_CLIENTS);
         return ESP_FAIL;
     }
@@ -610,6 +636,7 @@ static uint32_t s_cst_crc[2][WEB_MAX_SLOTS];
 static bool s_sec_changed[2][WEB_SEC_COUNT];
 static bool s_cst_changed[2][WEB_MAX_SLOTS];
 static bool s_have_prev[2];
+static bool s_cst_gone[2];   /* a slot left the form (an emptied slot in the public form): deltas cannot say so */
 static uint32_t s_seq[2];
 
 /* Build one form's sections and note what changed since the previous second. */
@@ -627,12 +654,17 @@ static void build_form(int form)
         s_sec_changed[form][sec] = !s_have_prev[form] || crc != s_sec_crc[form][sec];
         s_sec_crc[form][sec] = crc;
     }
+    s_cst_gone[form] = false;
     for (size_t slot = 0; slot < s_snap.slots && slot < WEB_MAX_SLOTS; slot++) {
+        bool had = s_have_prev[form] && s_cst[form][slot][0] != '\0';
         wj_t w;
         wj_init_elements(&w, s_cst[form][slot], CST_TEXT_MAX);
         web_build_caster_summary(&w, &s_snap, slot, pub);
         if (!wj_ok(&w)) {
             s_cst[form][slot][0] = '\0';
+        }
+        if (had && s_cst[form][slot][0] == '\0') {
+            s_cst_gone[form] = true;   /* the public form leaves an emptied slot out */
         }
         uint32_t crc = web_crc32(0, s_cst[form][slot], strlen(s_cst[form][slot]));
         s_cst_changed[form][slot] = !s_have_prev[form] || crc != s_cst_crc[form][slot];
@@ -719,6 +751,9 @@ static void push_status(void)
             ws_client_t *c = &s_clients[i];
             if (!c->used || c->closing || (c->topics & WEB_TOPIC_STATUS) == 0 || (c->admin ? 0 : 1) != form) {
                 continue;
+            }
+            if (s_cst_gone[form]) {
+                c->need_full = true;   /* a delta only adds or replaces slots: a full status drops the gone one */
             }
             ws_msg_t **slot = c->need_full ? &full : &delta;
             if (*slot == NULL) {
@@ -994,5 +1029,6 @@ esp_err_t web_ws_init(void)
         s_clients[i].fd = -1;
     }
     s_reboot_sent = false;
+    web_lograte_init(&s_refused_log);
     return ESP_OK;
 }

@@ -397,8 +397,32 @@ uint32_t diag_log_head(void);
 /** Log counters. */
 void diag_log_stats(diag_log_stats_t *out);
 
-/** Change a tag's runtime log level ("*" = all). */
+/**
+ * Change a tag's runtime log level ("*" = all). "*" sets the default for
+ * every tag and then applies the fixed levels (diag_log_fix_level) again, so
+ * those tags keep theirs; an explicit level for a fixed tag holds until the
+ * next "*" change or restart.
+ * @return ESP_ERR_INVALID_ARG for NULL or a level past ESP_LOG_VERBOSE,
+ *         ESP_ERR_NOT_SUPPORTED for a level above CONFIG_LOG_MAXIMUM_LEVEL
+ *         (this build leaves those lines out: setting it would change
+ *         nothing).
+ */
 esp_err_t diag_set_log_level(const char *tag, esp_log_level_t level);
+
+/** Most tags with a fixed level. */
+#define DIAG_LOG_FIXED_MAX 8
+
+/**
+ * Give a tag a fixed level, applied now and again after every "*" change
+ * (a component whose own warnings are expected noise, such as the HTTP
+ * server's about clients that went away). Setting a fixed tag again
+ * replaces its level.
+ * @return ESP_ERR_INVALID_ARG for NULL, "", "*", a tag of 16 or more
+ *         characters or a level past ESP_LOG_VERBOSE; ESP_ERR_NOT_SUPPORTED
+ *         above CONFIG_LOG_MAXIMUM_LEVEL; ESP_ERR_NO_MEM when
+ *         DIAG_LOG_FIXED_MAX tags are fixed already.
+ */
+esp_err_t diag_log_fix_level(const char *tag, esp_log_level_t level);
 
 /**
  * Append a journal record (never blocks; written to flash by diag's writer

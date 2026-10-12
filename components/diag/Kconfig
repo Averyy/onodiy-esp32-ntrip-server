@@ -36,13 +36,17 @@ menu "Station: diagnostics"
             then says how many, on a line of its own.
 
     config DIAG_CONSOLE_TASK_STACK
-        int "Console task stack (bytes, internal RAM)"
+        int "Console task stack (bytes, PSRAM)"
         range 2048 8192
         default 2560
         help
             The low-priority task that copies waiting log lines from the log
             ring to the console. It formats one short note and calls the
-            UART driver; it never logs itself.
+            UART driver; it never logs itself. Its stack is in PSRAM: the
+            task only copies lines into the UART driver's transmit buffer
+            and does no flash or NVS work (a PSRAM stack must never be in
+            use while the cache is off). Only when PSRAM cannot provide the
+            stack is it taken from internal RAM, and the boot log says so.
 
     config DIAG_JOURNAL_MIN_INTERVAL_MS
         int "Minimum interval between journal records of one kind (ms)"
