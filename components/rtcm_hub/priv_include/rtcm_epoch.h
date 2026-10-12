@@ -16,18 +16,20 @@
  *    terminating MSM, or a terminating MSM that is not an MSM here, e.g. an
  *    SBAS 1107 last in its epoch as one real stream sends it: the next
  *    epoch's GPS MSM must not join the open one),
- *  - otherwise at a frame that arrives at least `gap_ms` after the previous
- *    frame while the current epoch holds an MSM not yet terminated and the
- *    frame is no MSM (a lost terminating MSM: the next epoch's station
- *    messages; the next epoch's first MSM meets the time rule), or at any
- *    frame that late while the current epoch is unsure (below).
+ *  - otherwise at a frame that is no MSM and arrives at least `gap_ms` after
+ *    the previous frame while the current epoch holds an MSM not yet
+ *    terminated (a lost terminating MSM: the next epoch's station messages;
+ *    the next epoch's first MSM meets the time rule) or is unsure (below).
  * The checks run in that order; the first that matches is counted. An MSM
- * after a gap in a sure epoch continues it: an MSM of a later epoch on a time
- * scale the epoch holds met the time rule already, and receivers send their
- * constellations in a fixed order, so one the epoch has not seen yet is its
- * next MSM. Such gaps come from the reader, not the receiver: arrival times
- * are taken when frames are read, and a reader that stalled (flash writes stop
- * the CPU) reads the rest of an epoch late. Non-MSM
+ * after a gap continues its epoch, sure or unsure: an MSM of a later epoch on
+ * a time scale the epoch holds met the time rule already, and receivers send
+ * their constellations in a fixed order, so one the epoch has not seen yet is
+ * its next MSM. Such gaps come from the reader, not the receiver: arrival
+ * times are taken when frames are read, and a reader that stalled (flash
+ * writes stop the CPU) reads the rest of an epoch late. That happens most
+ * right after a framer reset, when the station writes its settings and
+ * journal, so an unsure epoch must not turn sure at a late MSM either: the
+ * casters waiting for a sure epoch would start on a partial one. Non-MSM
  * frames after an epoch's terminating MSM belong to the next epoch, and a gap
  * after a terminated epoch starts nothing. GLONASS and BeiDou epoch times are
  * compared within their own constellation only (other time scales; one 2012
@@ -41,9 +43,10 @@
  * be the middle or the tail of an epoch, not its start. Every frame of an
  * unsure epoch is reported as such; consumers never start on one. The next
  * epoch started by the MMB, time or gap rule is sure again. While an epoch is
- * unsure, a gap of `gap_ms` after any frame starts a sure epoch, so a stream
- * without MSMs (nothing ever terminates an epoch there) still gets a sure
- * epoch after a reset.
+ * unsure, a frame that is no MSM a gap of `gap_ms` after the previous one
+ * starts a sure epoch, so a stream without MSMs (nothing ever terminates an
+ * epoch there) still gets a sure epoch after a reset; MSMs end an unsure
+ * epoch by the MMB and time rules only.
  *
  * MSM detection follows the public RTCM numbering: 1071..1137 with a last
  * digit of 1..7, except 1101..1107 (SBAS numbers the receiver may reuse for
@@ -72,7 +75,7 @@ typedef enum {
     RTCM_EPOCH_START_FIRST,   /**< first frame, or first after a forced start */
     RTCM_EPOCH_START_MMB,     /**< the previous epoch's last MSM said so */
     RTCM_EPOCH_START_TIME,    /**< epoch-time change within one constellation */
-    RTCM_EPOCH_START_GAP,     /**< gap while an MSM epoch was open, or after an unsure one */
+    RTCM_EPOCH_START_GAP,     /**< a frame that is no MSM after a gap in an open MSM epoch or an unsure one */
 } rtcm_epoch_start_t;
 
 /** Decoded MSM header fields the epoch rules need. */

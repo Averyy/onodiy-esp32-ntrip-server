@@ -246,7 +246,9 @@ typedef enum {
 /** Live status of one slot. "today" = the current UTC day. */
 typedef struct {
     ntrip_state_t state;
-    ntrip_fail_class_t reason;  /**< class of the last failure */
+    ntrip_fail_class_t reason;  /**< class of the last failure (kept after a success) */
+    ntrip_fail_class_t retry_reason; /**< class of the failure the slot's retries follow now: NONE once it
+                                     connected, before any failure and after the user's edit or retry */
     uint32_t state_age_s;       /**< seconds in the current state */
     uint32_t progress_age_ms;   /**< since the slot task last made progress (liveness) */
     uint32_t connects;          /**< successful connections */

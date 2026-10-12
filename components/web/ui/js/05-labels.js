@@ -427,9 +427,11 @@ function noReceiverText(a) {
 
 /**
  * The station's own restart to look for the receiver, in words (health:
- * reboot_hold, reboot_hold_left_s, reboot_cap_wait_s, reboot_cap_limit,
- * reboot_recheck); null when nothing about it is pending (the station
- * reports these only while its receiver recovery runs).
+ * recovery_mode, reboot_hold, reboot_hold_left_s, reboot_cap_wait_s,
+ * reboot_cap_limit, reboot_recheck); null when nothing about it is pending
+ * (the station reports these only while its receiver recovery runs) and in
+ * every recovery mode but full recovery, where the station never restarts
+ * itself for the receiver.
  * reboot_hold_left_s is when the last reason ends at the latest (the
  * presence limit, the end of the first hour); the setup hold has no limit,
  * so no deadline is named for it, but the restart cap still is. When a hold
@@ -437,7 +439,7 @@ function noReceiverText(a) {
  * that is the time named.
  */
 function restartPlanText(hl) {
-  if (!hl) return null;
+  if (!hl || hl.recovery_mode !== 'full') return null;
   const hold = hl.reboot_hold || [];
   const cap = hl.reboot_cap_wait_s;
   const hasCap = cap !== null && cap !== undefined;

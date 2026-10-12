@@ -80,6 +80,8 @@ typedef struct {
     int64_t version_mute_ms;     /* after a restart, the version query is acknowledged without its log this long */
     int64_t version_mute_until;
     int version_empty;           /* version queries answered without the log */
+    int sg_line_lost;            /* after a signal-group change: this many dumps come without their SIGNALGROUP line */
+    int sg_line_lost_left;
 
     /* records */
     sim_rx_t rx[MAX_RX];
@@ -204,8 +206,12 @@ static void receive(sim_t *s, const char *cmd)
     } else if (strcmp(up, "CONFIG") == 0) {
         char item[LINE_MAX_];
         reply(s, cmd, "OK", 30);
-        snprintf(item, sizeof(item), "CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP %u %u", s->sg_m, s->sg_s);
-        emit_checked(s, '$', item, 60);
+        if (s->sg_line_lost_left > 0) {
+            s->sg_line_lost_left--;   /* the line is lost (a bad checksum is dropped the same way) */
+        } else {
+            snprintf(item, sizeof(item), "CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP %u %u", s->sg_m, s->sg_s);
+            emit_checked(s, '$', item, 60);
+        }
         snprintf(item, sizeof(item), "CONFIG,COM1,CONFIG COM1 %u", (unsigned)s->rx_baud);
         emit_checked(s, '$', item, 90);
         emit_checked(s, '$', "CONFIG,MMP,CONFIG MMP ENABLE", 120);
@@ -236,6 +242,7 @@ static void receive(sim_t *s, const char *cmd)
                 s->sg_m = (uint8_t)a;   /* saves itself */
                 s->sg_s = (uint8_t)b;
             }
+            s->sg_line_lost_left = s->sg_line_lost;
             restart(s, s->restart_ms);
         }
     } else if (sscanf(up, "CONFIG COM1 %u", &a) == 1) {
@@ -1101,6 +1108,52 @@ TEST_CASE("exec: a signal group the receiver refuses is reported with the group 
     TEST_ASSERT_EQUAL_UINT8(3, r.sg_read.master);   /* read back after the change */
     TEST_ASSERT_EQUAL_UINT8(6, r.sg_read.slave);
     TEST_ASSERT_EQUAL_UINT8(3, s->sg_m);
+}
+
+TEST_CASE("exec: a read-back that does not name the signal group is no refusal", "[um98x_exec]")
+{
+    /* The dump has no end marker, and a line with a bad checksum is
+     * dropped: after the restart the first dump lacks the SIGNALGROUP line.
+     * It is read once more, which names 3 6: the session goes on. */
+    um98x_base_profile_t p;
+    default_profile(&p);
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    sim_t *s = sim_init();
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    int dumps = 0;
+    while (nth(s, "CONFIG", dumps) >= 0) {
+        dumps++;
+    }
+
+    s = sim_init();
+    s->sg_line_lost = 1;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_FALSE(r.signal_group_rejected);
+    TEST_ASSERT_TRUE(r.sg_read.known);
+    TEST_ASSERT_EQUAL_UINT8(3, r.sg_read.master);
+    TEST_ASSERT_EQUAL_UINT8(6, r.sg_read.slave);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "CONFIG SIGNALGROUP"));
+    TEST_ASSERT_EQUAL_INT(1, s->saves);
+    /* one dump more than without the loss: the read-back after the restart, once more */
+    TEST_ASSERT_TRUE(nth(s, "CONFIG", dumps) >= 0);
+    TEST_ASSERT_EQUAL_INT(-1, nth(s, "CONFIG", dumps + 1));
+
+    /* Never named: an ordinary failure (the station retries later), not a
+     * refused group that would put the group from before back. */
+    s = sim_init();
+    s->sg_line_lost = 10;
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_FALSE(r.signal_group_rejected);
+    TEST_ASSERT_TRUE(r.signal_group_sent);
+    TEST_ASSERT_FALSE(r.sg_read.known);
+    TEST_ASSERT_EQUAL_STRING("CONFIG SIGNALGROUP 3 6", r.failed_cmd);
+    TEST_ASSERT_EQUAL_STRING("signal group not in the read-back", r.reason);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "CONFIG SIGNALGROUP"));
+    TEST_ASSERT_EQUAL_INT(0, count(s, "SAVECONFIG"));
+    TEST_ASSERT_TRUE(r.rolled_back);
+    TEST_ASSERT_EQUAL_UINT8(3, s->sg_m);   /* the receiver did take it (and saved it itself) */
 }
 
 TEST_CASE("exec: detection listens first and finds a streaming receiver without sending", "[um98x_exec]")

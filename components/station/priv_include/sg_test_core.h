@@ -39,7 +39,12 @@
  * Persistence: sgt_encode()/sgt_decode() (a versioned record, the caller's
  * gnss/sg_test), due (save_due) at every transition, every SGT_SAVE_MEASURE_S
  * while measuring and every SGT_SAVE_DECIDE_S while deciding (the caller
- * also stores it before a planned restart). Time is
+ * also stores it before a planned restart, sgt_store_at_shutdown). Every
+ * switch is asked for (want_switch) together with a record due, and the
+ * caller stores that record before it writes the switch's group into the
+ * profile: a restart in between finds the switch in the record and asks for
+ * it again, instead of resuming the phase before it with the receiver on
+ * the new group. Time is
  * counted in good samples and station running time, never wall-clock time,
  * so a restart resumes cleanly: SWITCHING or RESTORING asks for the switch
  * again, SETTLING or MEASURING settles again and keeps what was measured,
@@ -156,7 +161,7 @@ typedef struct {
     station_sg_t applying;      /**< the group of the re-apply queued last (switch_queued) */
     uint16_t phase_s;
     int8_t kept;                /**< groups index kept, -1 none */
-    char reason[96];
+    char reason[STATION_SGT_REASON_MAX];
     int64_t ended_unix;
     sgt_acc_t acc[2];
 
@@ -216,6 +221,14 @@ void sgt_tick(sgt_t *t, bool streaming, const sgt_sample_t *sample, int64_t now_
 
 /** The record was persisted. */
 void sgt_saved(sgt_t *t, int64_t now_ms);
+
+/**
+ * Before a planned restart: the record is worth storing now. While a test
+ * runs (what it measured since the last periodic save), and when its end
+ * or any other transition is not stored yet (save_due): keep and stop often
+ * end the test at once, and the station task stores that later.
+ */
+bool sgt_store_at_shutdown(const sgt_t *t);
 
 /** The record. @return its length, 0 when it does not fit. */
 size_t sgt_encode(const sgt_t *t, int64_t now_ms, uint8_t *buf, size_t cap);

@@ -40,6 +40,7 @@ menu "Station: RTCM fan-out hub"
             no MSM arriving this long after the previous one starts a new
             epoch while the current epoch holds an MSM not yet marked as its
             last (an MSM that late continues its epoch: the reader stalled).
-            After a framer reset any frame this late starts a whole epoch.
+            After a framer reset a frame that is no MSM this late starts a
+            whole epoch; an MSM that late continues the unsure one.
 
 endmenu

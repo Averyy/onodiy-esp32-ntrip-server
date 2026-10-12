@@ -309,7 +309,7 @@ esp_err_t web_ws_pre_handshake(httpd_req_t *req)
     }
     /* A handshake carries no body. The server would read one away after the
      * handshake, off our request deadline's books: refused and closed. */
-    if (req->content_len > 0) {
+    if (web_req_body_of(req) != WEB_REQ_BODY_NONE) {
         log_refused(req, "a body with the handshake");
         return web_refuse_and_close(req, WEB_ERR_BAD_REQUEST);
     }
@@ -414,8 +414,8 @@ esp_err_t web_ws_handler(httpd_req_t *req)
     if (req->method == HTTP_GET) {
         /* A plain GET without the upgrade headers. A body is never read: the
          * server would read it away after this handler. */
-        return req->content_len > 0 ? web_refuse_and_close(req, WEB_ERR_BAD_REQUEST)
-                                    : web_send_err(req, WEB_ERR_BAD_REQUEST);
+        return web_req_body_of(req) != WEB_REQ_BODY_NONE ? web_refuse_and_close(req, WEB_ERR_BAD_REQUEST)
+                                                          : web_send_err(req, WEB_ERR_BAD_REQUEST);
     }
     int fd = httpd_req_to_sockfd(req);
     ws_client_t *c = find(fd);

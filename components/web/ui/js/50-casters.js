@@ -174,7 +174,7 @@ function ruleText(e) {
 /** Where the Onocoy slot is, for the editor of another slot (onocoyElsewhere: {slot, ready, enabled}). */
 function onocoyElsewhereText(o) {
   const n = 'slot ' + (o.slot + 1);
-  if (!o.ready) return 'Onocoy is set up in ' + n + ': open it to add your credentials.';
+  if (!o.ready) return 'Onocoy uses ' + n + ', which is not set up yet: open it to add your credentials.';
   if (!o.enabled) return 'Onocoy is set up in ' + n + ' and turned off: open it to turn it on.';
   return 'Onocoy streams from ' + n + '. Onocoy allows one stream per station.';
 }

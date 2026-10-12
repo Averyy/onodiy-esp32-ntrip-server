@@ -48,9 +48,13 @@
  *    the first send; only a negative reply fails the step. Then UNLOG COM1
  *    again (the restart restored the saved outputs) and the read-back again:
  *    the signal group must now match. A negative reply, or a read-back that
- *    still shows another group, is a refused group (signal_group_rejected,
- *    with the group read before the change in sg_before): the session fails
- *    and rolls back like any failure, and the caller decides what to keep;
+ *    names another group, is a refused group (signal_group_rejected, with
+ *    the group read before the change in sg_before): the session fails and
+ *    rolls back like any failure, and the caller decides what to keep. A
+ *    read-back that names no group (the dump ends on a quiet gap, and a line
+ *    with a bad checksum is dropped) is read once more; still unnamed, the
+ *    session fails as an ordinary failure ("signal group not in the
+ *    read-back"), never as a refusal;
  *  - baud change: CONFIG COM1 <new> without waiting for its acknowledgement
  *    (the link itself changes), 200 ms, host baud, 100 ms, then a version
  *    log within 2000 ms (one retry). Silent at the new baud: the host goes

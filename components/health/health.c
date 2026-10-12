@@ -441,9 +441,10 @@ static void casters_tick(int64_t now, bool *any_down, bool *protected_down, bool
         if (si.enabled && s_cst.unreached_s > *unreached_s) {
             *unreached_s = s_cst.unreached_s;
         }
-        if (hm_protected_down(si.enabled, s_slot_protected[i], si.state, (uint8_t)s_cst.reason)) {
+        if (hm_protected_down(si.enabled, s_slot_protected[i], si.state, (uint8_t)s_cst.retry_reason)) {
             /* not while stopped by the login guard or waiting on a caster's
-             * reply: a network action cannot help */
+             * reply: a network action cannot help (the retry's class, not
+             * the last failure, which outlives it) */
             *protected_down = true;
         }
     }
@@ -594,9 +595,10 @@ static bool any_caster_enabled(void)
 }
 
 /* Why the ladder's ESP32 restart waits right now (health_mon.h). Logged
- * only during a ladder episode, where a restart may be pending: outside one
- * every admin visit would log the admin hold coming and going. */
-static uint8_t hold_tick(int64_t now, bool have_net, bool episode, uint32_t *left_s)
+ * only during a ladder episode in full recovery (`restarts`), where a
+ * restart may be pending: outside one every admin visit would log the admin
+ * hold coming and going, and the other modes never restart. */
+static uint8_t hold_tick(int64_t now, bool have_net, bool episode, bool restarts, uint32_t *left_s)
 {
     uint32_t admin = __atomic_load_n(&s_admin_at_s, __ATOMIC_SEQ_CST);
     hm_hold_in_t hi = {
@@ -614,7 +616,7 @@ static uint8_t hold_tick(int64_t now, bool have_net, bool episode, uint32_t *lef
         .casters_enabled = any_caster_enabled(),
     };
     uint8_t hold = hm_reboot_hold(&s_hold, &hi, left_s);
-    uint8_t shown = episode ? hold : 0u;
+    uint8_t shown = (episode && restarts) ? hold : 0u;
     if (shown != s_prev_hold) {
         char was[128];
         char now_text[128];
@@ -763,14 +765,16 @@ static void tick(void)
     bool have_net = network_get_status(&s_net) == ESP_OK;
     hl_status_t prev;
     hl_get_status(&s_ladder, in, &prev);
-    uint32_t hold_left = UINT32_MAX;
-    in->reboot_hold = hold_tick(now, have_net, prev.episode, &hold_left);
     uint8_t mode = read_recovery_mode();
     if (mode != s_mode) {
         ESP_LOGI(TAG, "automatic receiver recovery: %s -> %s", mode_name(s_mode), mode_name(mode));
         s_mode = mode;
     }
     in->recovery_mode = mode;
+    /* Only full recovery restarts the ESP32 (out-of-range values read as full). */
+    bool restarts = mode == HL_MODE_FULL;
+    uint32_t hold_left = UINT32_MAX;
+    in->reboot_hold = hold_tick(now, have_net, prev.episode, restarts, &hold_left);
     hl_tick(&s_ladder, in);
     hl_status_t ls;
     hl_get_status(&s_ladder, in, &ls);
@@ -856,7 +860,7 @@ static void tick(void)
     o.recovery_mode = (health_recovery_mode_t)mode;
     o.gnss_reboot_recheck = ls.reboot_recheck;
     hm_hold_view_t hv;
-    hm_hold_view(ls.episode, in->reboot_hold, hold_left, in->reboot_allowed, cap_wait, &hv);
+    hm_hold_view(ls.episode, restarts, in->reboot_hold, hold_left, in->reboot_allowed, cap_wait, &hv);
     o.gnss_reboot_hold = hv.hold;
     o.gnss_reboot_hold_left_s = hv.hold_left_s;
     o.gnss_reboot_cap_wait_s = hv.cap_wait_s;

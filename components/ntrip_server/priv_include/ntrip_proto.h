@@ -802,6 +802,17 @@ void ntrip_sm_retry(ntrip_sm_t *sm, uint32_t now_ms);
 uint32_t ntrip_sm_retry_in_ms(const ntrip_sm_t *sm, uint32_t now_ms);
 
 /**
+ * The class of the failure the slot's retries follow now: the last
+ * failure's class while its backoff row holds (the wait after it, the
+ * connect of the retry, a stop), NTRIP_CLS_NONE once the slot connected,
+ * after the user's edit or retry, and before any failure. `reason` keeps the
+ * last failure after that (the status shows it); this does not, so a slot
+ * that streamed for days after an in-use reply and then lost the network is
+ * not taken for one waiting on its caster.
+ */
+ntrip_cls_t ntrip_sm_retry_class(const ntrip_sm_t *sm);
+
+/**
  * Since the first failure of the slot's current run of consecutive failures
  * that never reached the caster (ntrip_failure_unreached), in ms; 0 when
  * there is no such run. A refused connect, any failure after the TCP

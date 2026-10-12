@@ -646,9 +646,24 @@ static um98x_res_t signal_group(session_t *s)
     if (read_back(s) != UM98X_OK) {
         return UM98X_E_FAILED;
     }
+    if (!s->rb.config.signal_group_known) {
+        /* The dump has no end marker (it ends on a quiet gap), and a line
+         * with a bad checksum is dropped: one cut short after the restart,
+         * or a lost SIGNALGROUP line, names no group. That is no answer:
+         * read once more. */
+        if (read_back(s) != UM98X_OK) {
+            return UM98X_E_FAILED;
+        }
+        if (!s->rb.config.signal_group_known) {
+            /* Still not named: an ordinary failure, retried later, never
+             * taken for a refusal (the caller would put the old group back). */
+            fail(s, cmd, "signal group not in the read-back");
+            return UM98X_E_FAILED;
+        }
+    }
     if (!um98x_signal_group_matches(s->p, &s->rb)) {
-        /* Acknowledged and restarted, but the group did not take (or the
-         * dump does not name it): this firmware does not run the pair. */
+        /* Acknowledged and restarted, and the read-back names another
+         * group: this firmware does not run the pair. */
         fail(s, cmd, "signal group rejected");
         s->r->signal_group_rejected = true;
         return UM98X_E_FAILED;

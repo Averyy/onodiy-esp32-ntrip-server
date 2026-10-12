@@ -14,6 +14,14 @@
 
 _Static_assert(STATION_SGT_SYS == GNSS_SYS_COUNT, "one entry per constellation");
 _Static_assert(STATION_SGT_BANDS == GNSS_BAND_COUNT, "one entry per band bucket");
+/* The longest reason: a refused (or failed) switch with the receiver's
+ * longest reply, then a failed switch back with it too, both whole. */
+#define SGT_REPLY_MAX (sizeof(((sgt_apply_t *)0)->reason) - 1u)
+_Static_assert(sizeof("The receiver refused signal group 255 255 ().") - 1u + SGT_REPLY_MAX + 1u +
+                       sizeof("Switching back to 255 255 failed ().") - 1u + SGT_REPLY_MAX <
+                   STATION_SGT_REASON_MAX,
+               "the reason holds a refusal and a failed switch back with whole replies");
+_Static_assert(STATION_SGT_REASON_MAX <= 256u, "the record stores the reason with a one-byte length");
 
 static bool same(station_sg_t a, station_sg_t b)
 {
@@ -277,7 +285,7 @@ void sgt_apply_done(sgt_t *t, const sgt_apply_t *a, int64_t now_ms, int64_t unix
     if (t->want_switch) {
         return;   /* a newer switch replaced this one: wait for that */
     }
-    char text[96];
+    char text[STATION_SGT_REASON_MAX];
     switch (t->state) {
     case STATION_SGT_SWITCHING:
         if (a->ok) {
@@ -288,19 +296,21 @@ void sgt_apply_done(sgt_t *t, const sgt_apply_t *a, int64_t now_ms, int64_t unix
         if (a->rejected) {
             t->acc[t->order[t->phase]].status = STATION_SGT_RES_REJECTED;
             note(t, SGT_EV_REFUSED, sgt_note_a(SGT_EV_REFUSED, g), pair_b(t->before));
-            snprintf(t->reason, sizeof(t->reason), "The receiver refused signal group %u %u (%.40s).",
+            /* The receiver's whole reply, as the receiver card shows it (the
+             * reason has room for it and for a failed switch back after it). */
+            snprintf(t->reason, sizeof(t->reason), "The receiver refused signal group %u %u (%s).",
                      (unsigned)g.master, (unsigned)g.slave, a->reason[0] != '\0' ? a->reason : "rejected");
             restore(t, t->before, STATION_SGT_OUT_REJECTED, now_ms, unix_s);
             return;
         }
         t->acc[t->order[t->phase]].status = STATION_SGT_RES_PENDING;
-        snprintf(t->reason, sizeof(t->reason), "Switching to signal group %u %u failed (%.40s).", (unsigned)g.master,
+        snprintf(t->reason, sizeof(t->reason), "Switching to signal group %u %u failed (%s).", (unsigned)g.master,
                  (unsigned)g.slave, a->reason[0] != '\0' ? a->reason : "failed");
         restore(t, t->before, STATION_SGT_OUT_FAILED, now_ms, unix_s);
         return;
     case STATION_SGT_RESTORING:
         if (!a->ok) {
-            snprintf(text, sizeof(text), "Switching back to %u %u failed (%.32s).", (unsigned)g.master,
+            snprintf(text, sizeof(text), "Switching back to %u %u failed (%s).", (unsigned)g.master,
                      (unsigned)g.slave, a->reason[0] != '\0' ? a->reason : "failed");
             append_reason(t, text);
         }
@@ -359,7 +369,7 @@ static void take_sample(sgt_t *t, const sgt_sample_t *s, int64_t now)
 
 void sgt_tick(sgt_t *t, bool streaming, const sgt_sample_t *sample, int64_t now_ms, int64_t unix_s)
 {
-    char text[96];
+    char text[STATION_SGT_REASON_MAX];
     switch (t->state) {
     case STATION_SGT_SWITCHING:
     case STATION_SGT_RESTORING:
@@ -441,6 +451,11 @@ void sgt_saved(sgt_t *t, int64_t now_ms)
 {
     t->save_due = false;
     t->saved_ms = now_ms;
+}
+
+bool sgt_store_at_shutdown(const sgt_t *t)
+{
+    return sgt_running(t) || t->save_due;
 }
 
 /* ---- record ------------------------------------------------------------------------ */

@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "health_ladder.h"
 #include "health_mon.h"
 #include "unity.h"
 
@@ -871,20 +872,46 @@ TEST_CASE("health mon: the status shows the restart hold only during a ladder ep
 {
     hm_hold_view_t v;
     /* a healthy station with the admin page open: nothing is pending */
-    hm_hold_view(false, HM_HOLD_ADMIN, 1800, false, 900, &v);
+    hm_hold_view(false, true, HM_HOLD_ADMIN, 1800, false, 900, &v);
     TEST_ASSERT_EQUAL_UINT8(0, v.hold);
     TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, v.hold_left_s);
     TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, v.cap_wait_s);
 
-    hm_hold_view(true, HM_HOLD_ADMIN, 1700, false, 900, &v);
+    hm_hold_view(true, true, HM_HOLD_ADMIN, 1700, false, 900, &v);
     TEST_ASSERT_EQUAL_UINT8(HM_HOLD_ADMIN, v.hold);
     TEST_ASSERT_EQUAL_UINT32(1700, v.hold_left_s);
     TEST_ASSERT_EQUAL_UINT32(900, v.cap_wait_s);
 
     /* the cap allows a restart now: no wait to show */
-    hm_hold_view(true, 0, UINT32_MAX, true, 0, &v);
+    hm_hold_view(true, true, 0, UINT32_MAX, true, 0, &v);
     TEST_ASSERT_EQUAL_UINT8(0, v.hold);
     TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, v.cap_wait_s);
+}
+
+TEST_CASE("health mon: no restart hold or cap wait is shown in a recovery mode that never restarts", "[health_mon]")
+{
+    /* "No ESP32 restart" and "alerts only": the ladder still opens an
+     * episode (stalls are declared), but no restart can be pending, so
+     * nothing is postponed and no cap wait is named, whatever holds. */
+    static const struct {
+        uint8_t mode;
+        bool restarts;
+    } modes[] = { { HL_MODE_FULL, true }, { HL_MODE_NO_REBOOT, false }, { HL_MODE_ALERTS, false } };
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+        hm_hold_view_t v;
+        hm_hold_view(true, modes[i].restarts, HM_HOLD_ADMIN | HM_HOLD_POWER_ON, 1578, false, 900, &v);
+        char msg[24];
+        snprintf(msg, sizeof(msg), "mode %u", (unsigned)modes[i].mode);
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(modes[i].restarts ? (HM_HOLD_ADMIN | HM_HOLD_POWER_ON) : 0, v.hold, msg);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(modes[i].restarts ? 1578 : UINT32_MAX, v.hold_left_s, msg);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(modes[i].restarts ? 900 : UINT32_MAX, v.cap_wait_s, msg);
+
+        /* the setup hold (no limit) and the cap alone: the same */
+        hm_hold_view(true, modes[i].restarts, HM_HOLD_SETUP, UINT32_MAX, false, 300, &v);
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(modes[i].restarts ? HM_HOLD_SETUP : 0, v.hold, msg);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(UINT32_MAX, v.hold_left_s, msg);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(modes[i].restarts ? 300 : UINT32_MAX, v.cap_wait_s, msg);
+    }
 }
 
 TEST_CASE("health mon: a stopped caster slot is down for the level, not for the protected trigger", "[health_mon]")
@@ -911,11 +938,16 @@ TEST_CASE("health mon: a stopped caster slot is down for the level, not for the 
 TEST_CASE("health mon: a protected slot waiting on a caster's reply does not hold the network trigger",
           "[health_mon]")
 {
-    /* Every state against every failure class: the trigger holds only for
-     * a failing state whose last failure is the transport (or none yet). */
+    /* Every state against every class of the failure the slot's retry
+     * follows: the trigger holds for every failing state, except while the
+     * slot waits out a caster's reply or tries again after one (a failure
+     * state, or the connect of that retry). Waiting for the network or for
+     * data is never a wait on the caster. */
     TEST_ASSERT_EQUAL(16, HM_FAIL_CLASS_COUNT);
     for (uint8_t st = HM_CST_DISABLED; st <= HM_CST_STOPPED; st++) {
         bool failing = st != HM_CST_STREAMING && st != HM_CST_PAUSED && st != HM_CST_STOPPED;
+        bool after_failure = st == HM_CST_BACKOFF || st == HM_CST_AUTH_FAILED || st == HM_CST_CONFIG_ERROR ||
+                             st == HM_CST_BANNED || st == HM_CST_CONNECTING;
         for (uint8_t r = HM_FAIL_NONE; r < HM_FAIL_CLASS_COUNT; r++) {
             bool reply = r == HM_FAIL_AUTH || r == HM_FAIL_LOGIN_BLOCKED || r == HM_FAIL_IN_USE ||
                          r == HM_FAIL_REPLACED || r == HM_FAIL_BANNED || r == HM_FAIL_MOUNT_BUSY ||
@@ -923,7 +955,7 @@ TEST_CASE("health mon: a protected slot waiting on a caster's reply does not hol
             char msg[48];
             snprintf(msg, sizeof(msg), "state %u class %u", (unsigned)st, (unsigned)r);
             TEST_ASSERT_EQUAL_MESSAGE(reply, hm_fail_is_caster_reply(r), msg);
-            TEST_ASSERT_EQUAL_MESSAGE(failing && !reply, hm_protected_down(true, true, st, r), msg);
+            TEST_ASSERT_EQUAL_MESSAGE(failing && !(after_failure && reply), hm_protected_down(true, true, st, r), msg);
             TEST_ASSERT_FALSE_MESSAGE(hm_protected_down(true, false, st, r), msg);
             TEST_ASSERT_FALSE_MESSAGE(hm_protected_down(false, true, st, r), msg);
         }
@@ -940,4 +972,25 @@ TEST_CASE("health mon: a protected slot waiting on a caster's reply does not hol
     TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_BACKOFF, HM_FAIL_LOGIN_BLOCKED));
     TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_BACKOFF, HM_FAIL_IN_USE));
     TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_CONFIG_ERROR, HM_FAIL_CONFIG));
+    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_BANNED, HM_FAIL_BANNED));
+}
+
+TEST_CASE("health mon: a protected slot that lost the network holds the trigger, whatever the caster said",
+          "[health_mon]")
+{
+    /* Waiting for the network, or for data: the trigger holds even while
+     * the slot's retry follows a caster's reply (an in-use reply, then
+     * Wi-Fi went away), or the network ladder would never start. */
+    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_WAIT_NETWORK, HM_FAIL_IN_USE));
+    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_WAIT_NETWORK, HM_FAIL_CONFIG));
+    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_WAIT_DATA, HM_FAIL_AUTH));
+    /* A slot that connected since has no failure to follow (NONE: the
+     * ntrip status' retry_reason, test_ntrip_proto.c), so its connect after
+     * a lost network holds the trigger too. */
+    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_CONNECTING, HM_FAIL_NONE));
+    /* The connect of a retry after an in-use reply, and its wait: no network action. */
+    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_CONNECTING, HM_FAIL_IN_USE));
+    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_BACKOFF, HM_FAIL_IN_USE));
+    /* Streaming: up, as always. */
+    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_STREAMING, HM_FAIL_NONE));
 }

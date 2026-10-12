@@ -29,8 +29,11 @@ What it does:
      gets its real answer (405, 404, the captive redirect) with
      "Connection: close" instead of 413, a body on a route that takes none
      gets 400, "Connection: close" and HTTP/1.0 end the connection after the
-     answer, and two pipelined HTTP/1.1 requests on one socket are both
-     answered; client addresses in the log (a wrong admin password, a
+     answer (HTTP/1.0 with "Connection: keep-alive" too, answered with
+     "Connection: close"), a chunked body is never read (one answer: 411 on
+     a route that takes a body, the route's own answer elsewhere, with
+     "Connection: close"; the chunks never come back as a second answer),
+     and two pipelined HTTP/1.1 requests on one socket are both answered; client addresses in the log (a wrong admin password, a
      refused WebSocket handshake: "from 10.0.2.2"); log levels: "*" at info
      keeps the HTTP server's own tags at error (no "W httpd_uri" line for a
      refused handshake), a level the build cannot show is refused,
@@ -429,6 +432,32 @@ class Smoke:
         self.check(data.startswith(b"HTTP/1.1 200") and eof is not None and eof < 2.0,
                    f"GET / HTTP/1.0: answered ({data[:15]!r}) and closed after "
                    f"{eof if eof is None else round(eof, 2)} s")
+        # HTTP/1.0 with keep-alive: never kept (the client would wait for the end of the connection
+        # unless the token were echoed), so the answer says close and the connection ends.
+        data, eof = raw_exchange(port, f"GET /api/session HTTP/1.0\r\n{host}Connection: keep-alive\r\n\r\n".encode())
+        head = data.split(b"\r\n\r\n", 1)[0].lower()
+        self.check(data.startswith(b"HTTP/1.1 200") and b"connection: close" in head and b"keep-alive" not in head
+                   and eof is not None and eof < 2.0,
+                   f"GET /api/session HTTP/1.0 with Connection: keep-alive: answered with Connection: close and "
+                   f"closed after {eof if eof is None else round(eof, 2)} s")
+        # A chunked body is never read: one answer (411 on a route that takes a body, the route's own answer
+        # elsewhere) with Connection: close, and the chunks never come back as a second answer.
+        chunks = b"5\r\nhello\r\n0\r\n\r\n"
+        for method, path, want, code in (("POST", "/api/nope", 404, "not_found"),
+                                         ("POST", "/api/status", 405, "method_not_allowed"),
+                                         ("POST", "/api/session", 411, "length_required"),
+                                         ("GET", "/nope", 302, None)):
+            req = (f"{method} {path} HTTP/1.1\r\n{host}Content-Type: application/json\r\n"
+                   f"Transfer-Encoding: chunked\r\n\r\n").encode() + chunks
+            data, eof = raw_exchange(port, req)
+            head, _, rest = data.partition(b"\r\n\r\n")
+            status_ok = data.startswith(f"HTTP/1.1 {want} ".encode())
+            code_ok = code is None or f'"code":"{code}"'.encode() in rest.replace(b" ", b"")
+            self.check(status_ok and code_ok and b"connection: close" in head.lower()
+                       and data.count(b"HTTP/1.1 ") == 1 and eof is not None and eof < 3.0,
+                       f"{method} {path} with a chunked body: {data[:12]!r}, one answer "
+                       f"({data.count(b'HTTP/1.1 ')}), Connection: close, closed after "
+                       f"{eof if eof is None else round(eof, 2)} s")
         two = (f"GET /api/session HTTP/1.1\r\n{host}\r\n"
                f"GET /api/session HTTP/1.1\r\n{host}Connection: close\r\n\r\n").encode()
         data, eof = raw_exchange(port, two)

@@ -81,7 +81,10 @@ uint32_t rtcm_epoch_assign(rtcm_epoch_t *e, const uint8_t *frame, size_t len, ui
         why = RTCM_EPOCH_START_MMB;
     } else if (is_msm && other_time(e, &msm)) {
         why = RTCM_EPOCH_START_TIME;
-    } else if (((e->msm_open && !is_msm) || e->unsure) && (uint32_t)(now_ms - e->last_rx_ms) >= e->gap_ms) {
+    } else if ((e->msm_open || e->unsure) && !is_msm && (uint32_t)(now_ms - e->last_rx_ms) >= e->gap_ms) {
+        /* Never at an MSM, sure epoch or unsure: an MSM read late belongs
+         * to the epoch the reader stalled in (the MMB and time rules end
+         * MSM epochs). */
         why = RTCM_EPOCH_START_GAP;
     }
 

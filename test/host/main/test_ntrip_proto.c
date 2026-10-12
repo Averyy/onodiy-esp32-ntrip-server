@@ -2026,6 +2026,62 @@ TEST_CASE("ntrip guard: a credential in use stops at once, unless right after th
     }
 }
 
+TEST_CASE("ntrip retry class: the failure a retry follows, none once connected or after a lost network",
+          "[ntrip]")
+{
+    const ntrip_failure_t inuse = reply_of("Error 3 Credentials already in use by another stream\r\n");
+    ntrip_sm_t sm;
+    ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+    TEST_ASSERT_EQUAL(NTRIP_CLS_NONE, ntrip_sm_retry_class(&sm));   /* never failed */
+
+    /* A session, then an in-use reply inside the window: the wait and the
+     * connect of the retry both follow that reply. */
+    uint32_t t = 1000;
+    uint32_t d = guard_session(&sm, t, 200000, &k_kicked, LO);
+    TEST_ASSERT_EQUAL(NTRIP_CLS_REMOTE_CLOSE, ntrip_sm_retry_class(&sm));
+    t += 200000 + d;
+    d = ntrip_sm_failed(&sm, &inuse, t, LO);
+    TEST_ASSERT_EQUAL(NTRIP_SM_BACKOFF, sm.state);
+    TEST_ASSERT_EQUAL(NTRIP_CLS_IN_USE, ntrip_sm_retry_class(&sm));
+    t += d;
+    ntrip_sm_connecting(&sm, t);
+    TEST_ASSERT_EQUAL(NTRIP_CLS_IN_USE, ntrip_sm_retry_class(&sm));
+
+    /* Accepted: the reply is history. The status' reason keeps it; the retry class does not. */
+    ntrip_sm_connected(&sm, t);
+    ntrip_sm_sent(&sm, 10000, t + NTRIP_HEALTHY_SESSION_MS);
+    TEST_ASSERT_EQUAL(NTRIP_CLS_IN_USE, sm.reason);
+    TEST_ASSERT_EQUAL(NTRIP_CLS_NONE, ntrip_sm_retry_class(&sm));
+
+    /* Days later Wi-Fi is gone: the planned close for the lost address
+     * records no failure, and the slot waits for the network, then
+     * connects, with nothing to follow. */
+    t += 3u * 86400u * 1000u;
+    ntrip_sm_in_t in = ready();
+    in.have_ip = false;
+    in.link_up = false;
+    in.session_open = true;
+    ntrip_close_why_t why;
+    sm.prev_link_up = true;
+    TEST_ASSERT_EQUAL(NTRIP_ACT_CLOSE, ntrip_sm_poll(&sm, &in, t, MID, &why));
+    TEST_ASSERT_EQUAL(NTRIP_WHY_NO_IP, why);
+    ntrip_sm_closed(&sm, t);
+    in.session_open = false;
+    TEST_ASSERT_EQUAL(NTRIP_ACT_NONE, ntrip_sm_poll(&sm, &in, t + 1000, MID, &why));
+    TEST_ASSERT_EQUAL(NTRIP_SM_WAIT_NETWORK, sm.state);
+    TEST_ASSERT_EQUAL(NTRIP_CLS_IN_USE, sm.reason);
+    TEST_ASSERT_EQUAL(NTRIP_CLS_NONE, ntrip_sm_retry_class(&sm));
+    ntrip_sm_connecting(&sm, t + 60000);
+    TEST_ASSERT_EQUAL(NTRIP_CLS_NONE, ntrip_sm_retry_class(&sm));
+
+    /* The user's retry clears it as well. */
+    t += 120000;
+    (void)ntrip_sm_failed(&sm, &inuse, t, LO);
+    TEST_ASSERT_TRUE(sm.stop != NTRIP_STOP_NONE || ntrip_sm_retry_class(&sm) == NTRIP_CLS_IN_USE);
+    ntrip_sm_retry(&sm, t);
+    TEST_ASSERT_EQUAL(NTRIP_CLS_NONE, ntrip_sm_retry_class(&sm));
+}
+
 TEST_CASE("ntrip guard: sessions taken over three times stop the slot", "[ntrip]")
 {
     static const uint32_t first[2] = { 5000, 6000 };

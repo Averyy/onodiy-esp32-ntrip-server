@@ -48,8 +48,11 @@
  * requests keep their own flag. The handler of a request takes the oldest
  * flag (web_conn_begin_request) and decides whether to close after its
  * answer; the worker finds that decision in the table. After a WebSocket
- * handshake, or a request the scanner cannot follow (a chunked body), it
- * stops: later requests count as HTTP/1.1.
+ * handshake it stops (frames follow, no request lines); after a request the
+ * scanner cannot follow (a chunked body) it stops too, and that request's
+ * handler answers with "Connection: close" and ends the connection, since
+ * nothing reads such a body (web_req_body_of). Every HTTP/1.0 request ends
+ * its connection (web_conn_should_close).
  *
  * Times are milliseconds of an injected monotonic clock, compared only as
  * (uint32_t)(now - then), so they survive the clock wrap.

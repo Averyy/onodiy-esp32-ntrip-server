@@ -785,13 +785,29 @@ TEST_CASE("Connection header tokens and when to close", "[web_core]")
     TEST_ASSERT_EQUAL_UINT(0, web_connection_tokens(NULL));
     TEST_ASSERT_EQUAL_UINT(WEB_CONN_TOK_CLOSE, web_connection_tokens(",,close,,"));
 
-    /* HTTP/1.1: persistent unless "close"; HTTP/1.0: closed unless "keep-alive". */
+    /* HTTP/1.1: persistent unless "close". HTTP/1.0: always closed, also
+     * with "keep-alive": the answer would have to echo the token for the
+     * client to treat the connection as persistent (it reads to the end of
+     * the connection otherwise), and a chunked answer cannot go to an
+     * HTTP/1.0 client on a kept connection at all. */
     TEST_ASSERT_FALSE(web_conn_should_close(0, false));
     TEST_ASSERT_FALSE(web_conn_should_close(web_connection_tokens("Keep-Alive, Upgrade"), false));
     TEST_ASSERT_TRUE(web_conn_should_close(web_connection_tokens("close"), false));
     TEST_ASSERT_TRUE(web_conn_should_close(0, true));
-    TEST_ASSERT_FALSE(web_conn_should_close(web_connection_tokens("keep-alive"), true));
+    TEST_ASSERT_TRUE(web_conn_should_close(web_connection_tokens("keep-alive"), true));
+    TEST_ASSERT_TRUE(web_conn_should_close(web_connection_tokens("Keep-Alive, Upgrade"), true));
     TEST_ASSERT_TRUE(web_conn_should_close(web_connection_tokens("keep-alive, close"), true));
+}
+
+TEST_CASE("a request's body: none, Content-Length, or a Transfer-Encoding nobody reads", "[web_core]")
+{
+    TEST_ASSERT_EQUAL(WEB_REQ_BODY_NONE, web_req_body(0, false));
+    TEST_ASSERT_EQUAL(WEB_REQ_BODY_LENGTH, web_req_body(2, false));
+    /* Chunked: the server reports a length of 0 and would parse the chunks
+     * as the next request, so it counts as a body, and one with no length. */
+    TEST_ASSERT_EQUAL(WEB_REQ_BODY_UNFRAMED, web_req_body(0, true));
+    TEST_ASSERT_EQUAL(WEB_REQ_BODY_UNFRAMED, web_req_body(5, true));
+    TEST_ASSERT_TRUE(web_req_body(0, true) != WEB_REQ_BODY_NONE);
 }
 
 /* ---- log lines about clients ----------------------------------------------------------------- */

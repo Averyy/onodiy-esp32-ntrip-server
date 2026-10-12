@@ -89,7 +89,7 @@ refused receiver maintenance (`receiver_session`, `live_view_output`).
 | 404 | `not_found`, `nothing_staged`, `no_journal`, `no_coredump`, `nothing_pending` |
 | 405 | `method_not_allowed` |
 | 409 | state conflicts: `busy`, `journal_open`, `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `same_image`, `slot_disabled` |
-| 411 | `length_required` (uploads) |
+| 411 | `length_required` (no `Content-Length`: an upload without one, or a body sent in chunks on any route that takes a body) |
 | 413 | `too_large` |
 | 415 | `unsupported_media_type` |
 | 421 | `bad_host` |
@@ -142,12 +142,16 @@ Applied to every request before any handler runs.
    `/api/` or `/ws` path that exists for other methods `405`, any other
    `/api/` path `404`, a UI asset `405` for a method other than `GET` and
    `HEAD`, on the AP interface the captive redirect, else `404`
-   (`OPTIONS`: always `405`).
+   (`OPTIONS`: always `405`). A body sent with `Transfer-Encoding` (chunked)
+   is never read anywhere: on a route that takes a body the answer is
+   `411 length_required` (send `Content-Length`), elsewhere the answer
+   above, always with `Connection: close`.
 6. **Connection.** Connections are persistent (HTTP/1.1). A request with
-   `Connection: close`, or an HTTP/1.0 request without
-   `Connection: keep-alive`, gets its answer with `Connection: close`, and
-   the station closes the connection after it (also after an upload or a
-   download the worker answers). Pipelined requests are answered in order.
+   `Connection: close`, and every HTTP/1.0 request (also one with
+   `Connection: keep-alive`: HTTP/1.0 connections are never kept), gets
+   its answer with `Connection: close`, and the station closes the
+   connection after it (also after an upload or a download the worker
+   answers). Pipelined requests are answered in order.
 7. **Response headers** on every page and API response:
    `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
    `Referrer-Policy: no-referrer`; HTML also gets a Content-Security-Policy
@@ -488,9 +492,9 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `health.factory_reset_refused` | a BOOT-button factory reset was refused within the last 10 min because a receiver update was running (the UI shows a notice); admin form only |
 | `health.recovery_mode` | automatic receiver recovery in effect (`gnss/recovery`, `health_recovery_mode_t`): `full`, `no_reboot` (everything but the ESP32 reboot), `alerts_only` (nothing is sent to the receiver: a stall is only reported and journalled, level `degraded`, `failed` once the ladder gives up); admin form only |
 | `health.reboot_recheck` | no receiver found and an ESP32 reboot was blocked or held: it is looked at again after the next detection pass, when the reboot cap allows and nothing holds it; admin form only |
-| `health.reboot_hold` | why the GNSS ladder's ESP32 restart is postponed right now (`[]` = nothing): `setup` (first setup not finished and no caster enabled; no time limit), `ap_client` (someone is connected to the station's access point), `admin` (an admin session made a request or sent a WebSocket ping in the last 5 min), `power_on` (the first 60 min of station time since power-on while nothing valid was heard from the receiver in this boot). Reported only during a ladder episode (a stall or no receiver, until the ladder resets), where a restart may be pending: `[]` otherwise, whatever holds. A held restart is never queued: it is journalled once (section 14) and looked at again later, like one the cap blocks; admin form only |
+| `health.reboot_hold` | why the GNSS ladder's ESP32 restart is postponed right now (`[]` = nothing): `setup` (first setup not finished and no caster enabled; no time limit), `ap_client` (someone is connected to the station's access point), `admin` (an admin session made a request or sent a WebSocket ping in the last 5 min), `power_on` (the first 60 min of station time since power-on while nothing valid was heard from the receiver in this boot). Reported only during a ladder episode (a stall or no receiver, until the ladder resets) in full recovery (`recovery_mode` `full`), where a restart may be pending: `[]` otherwise, whatever holds (`no_reboot` and `alerts_only` never restart the ESP32 for the receiver). A held restart is never queued: it is journalled once (section 14) and looked at again later, like one the cap blocks; admin form only |
 | `health.reboot_hold_left_s` | seconds until every reason in `reboot_hold` has ended at the latest (`ap_client` and `admin`: the 30 min limit on both together per ladder episode; `power_on`: the end of its 60 min), so a restart still needed then runs, unless the reboot cap still holds then: the restart waits for the later of `reboot_hold_left_s` and `reboot_cap_wait_s`; `null` when nothing holds or `setup` holds (no time limit; the cap may still apply after it) |
-| `health.reboot_cap_wait_s` | seconds until the reboot cap (60 min apart, at most 3 in 24 h) allows a ladder restart; `null` when it allows one now, and outside a ladder episode |
+| `health.reboot_cap_wait_s` | seconds until the reboot cap (60 min apart, at most 3 in 24 h) allows a ladder restart; `null` when it allows one now, outside a ladder episode, and when `recovery_mode` is not `full` |
 | `health.reboot_cap_limit` | which limit of the cap sets `reboot_cap_wait_s`: `hour` (the last ladder restart was less than 60 min ago) or `day` (3 in the last 24 h); the later one when both hold; `null` when `reboot_cap_wait_s` is `null` |
 | `update` | the banner (section 12); admin form only |
 
@@ -2341,12 +2345,23 @@ no receiver update action.
   notes, in order, whether each request line was HTTP/1.0, so pipelined
   requests keep their own. A handler that starts takes its request's note
   and reads the `Connection` header (a token list: `close`, `keep-alive`,
-  without case). A request that asked to close (or HTTP/1.0 without
-  keep-alive) gets `Connection: close` on its answer, and then the server
+  without case). A request that asked to close, and every HTTP/1.0
+  request, gets `Connection: close` on its answer, and then the server
   ends its side, drains briefly and drops the session; the worker does the
-  same for a request it took over. WebSocket upgrades are not affected
-  (the scanner stops at the handshake).
+  same for a request it took over. HTTP/1.0 keep-alive is not offered: the
+  client would need the token echoed, and an answer sent in chunks (a large
+  JSON document, a download) cannot go to an HTTP/1.0 client on a kept
+  connection. WebSocket upgrades are not affected (the scanner stops at the
+  handshake).
   WebSocket clients: at most 4, at most 2 of them without a session.
+- **Chunked request bodies:** `esp_http_server` reports a request with
+  `Transfer-Encoding: chunked` as one without a body (`content_len` 0) and
+  would parse the chunks as the next request, answering that with a second
+  `400`. Every handler therefore counts any `Transfer-Encoding` header as a
+  body nobody reads (`web_req_body_of`): `411` on routes that take a body,
+  `400` on routes that take none, the request's own answer in the
+  catch-all and on refused Host, Origin or session checks, and always
+  `Connection: close` with the connection ended.
 - **Request deadline:** the server reads every request on its one task, and
   the 4 s receive timeout alone would let a client that sends a byte every
   few seconds hold that task (and every status push, WebSocket message and

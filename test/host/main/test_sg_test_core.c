@@ -10,6 +10,7 @@
  */
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "gnss_rtcm3.h"
@@ -32,6 +33,7 @@ typedef struct {
     sgt_sample_t good;       /* handed in at every due sample */
     bool streaming;
     bool auto_ok;            /* every queued switch succeeds at once */
+    unsigned unsaved_switches;   /* switches asked for without a record due with them */
 } fx_t;
 
 static fx_t s_fx;
@@ -112,9 +114,24 @@ static void fx_apply(fx_t *x, bool ok, bool rejected, bool read_known, station_s
     sgt_apply_done(&x->t, &a, x->now, x->unix_s);
 }
 
+static void fx_apply_reason(fx_t *x, bool ok, bool rejected, bool read_known, station_sg_t read, const char *reason)
+{
+    sgt_apply_t a;
+    memset(&a, 0, sizeof(a));
+    a.ok = ok;
+    a.rejected = rejected;
+    a.read_known = read_known;
+    a.read = read;
+    snprintf(a.reason, sizeof(a.reason), "%s", reason);
+    sgt_apply_done(&x->t, &a, x->now, x->unix_s);
+}
+
 /* The station's side of one step: take a switch request (and, with auto_ok, its successful apply). */
 static void fx_station(fx_t *x)
 {
+    if (x->t.want_switch && !x->t.save_due) {
+        x->unsaved_switches++;   /* station.c stores the record before the switch reaches the profile */
+    }
     if (x->t.want_switch) {
         x->switched = x->t.target;
         sgt_switch_queued(&x->t);
@@ -149,6 +166,8 @@ static int fx_start(fx_t *x, station_sg_t running, station_sg_t a, station_sg_t 
     fx_station(x);
     return e;
 }
+
+static fx_t *to_deciding(station_sg_t running, station_sg_t a, station_sg_t b);
 
 static unsigned notes_of(fx_t *x, uint8_t event, sgt_note_t *last)
 {
@@ -414,6 +433,124 @@ TEST_CASE("sg test: a group refused in phase 0 or in phase 1 ends the test as re
     fx_apply(x, true, false, true, G(4, 5));
     TEST_ASSERT_EQUAL(STATION_SGT_IDLE, x->t.state);
     TEST_ASSERT_EQUAL(STATION_SGT_OUT_REJECTED, x->t.outcome);
+}
+
+TEST_CASE("sg test: the reason carries the receiver's whole reply, and a failed switch back after it", "[sg_test]")
+{
+    /* The reply a receiver firmware gives for a group it does not offer
+     * (43 characters, two spaces in it), as the receiver card shows it. */
+    static const char reply[] = "PARSING FAILD NO MATCHING FUNC  SIGNALGROUP";
+    fx_t *x = fx_new();
+    x->auto_ok = false;
+    TEST_ASSERT_EQUAL(STATION_SGT_OK, fx_start(x, G(5, 0), G(7, 0), G(5, 0), 60));
+    TEST_ASSERT_EQUAL(STATION_SGT_SETTLING, x->t.state);   /* 5 0 runs: measured first */
+    fx_run(x, 2 * MIN + 30 * SEC);
+    TEST_ASSERT_EQUAL(STATION_SGT_SWITCHING, x->t.state);
+    fx_apply_reason(x, false, true, true, G(5, 0), reply);
+    TEST_ASSERT_EQUAL(STATION_SGT_IDLE, x->t.state);
+    TEST_ASSERT_EQUAL_STRING("The receiver refused signal group 7 0 (PARSING FAILD NO MATCHING FUNC  SIGNALGROUP).",
+                             x->t.reason);
+    station_sg_test_t v;
+    sgt_view(&x->t, x->now, &v);
+    TEST_ASSERT_EQUAL_STRING(x->t.reason, v.reason);
+
+    /* The longest reply the receiver link keeps, refused, then the switch
+     * back fails with the longest reply too: both whole, in the view and
+     * through the stored record. */
+    char longest[sizeof(((sgt_apply_t *)0)->reason)];
+    memset(longest, 'X', sizeof(longest) - 1);
+    longest[sizeof(longest) - 1] = '\0';
+    longest[0] = 'A';
+    longest[sizeof(longest) - 2] = 'Z';
+    x = fx_new();
+    x->auto_ok = false;
+    TEST_ASSERT_EQUAL(STATION_SGT_OK, fx_start(x, G(255, 254), G(253, 252), G(255, 254), 60));
+    fx_run(x, 2 * MIN + 30 * SEC);
+    TEST_ASSERT_EQUAL(STATION_SGT_SWITCHING, x->t.state);
+    fx_apply_reason(x, false, true, false, G(0, 0), longest);   /* the group it runs now is not known */
+    TEST_ASSERT_EQUAL(STATION_SGT_RESTORING, x->t.state);
+    fx_station(x);
+    fx_apply_reason(x, false, false, false, G(0, 0), longest);
+    TEST_ASSERT_EQUAL(STATION_SGT_IDLE, x->t.state);
+    char want[STATION_SGT_REASON_MAX];
+    snprintf(want, sizeof(want), "The receiver refused signal group 253 252 (%s). Switching back to 255 254 failed (%s).",
+             longest, longest);
+    TEST_ASSERT_EQUAL_STRING(want, x->t.reason);
+    sgt_view(&x->t, x->now, &v);
+    TEST_ASSERT_EQUAL_STRING(want, v.reason);
+    static uint8_t buf[SGT_REC_MAX];
+    static sgt_t back;
+    size_t len = sgt_encode(&x->t, x->now, buf, sizeof(buf));
+    TEST_ASSERT_GREATER_THAN_UINT(0, len);
+    TEST_ASSERT_TRUE(sgt_decode(&back, buf, len, 5000));
+    TEST_ASSERT_EQUAL_STRING(want, back.reason);
+}
+
+TEST_CASE("sg test: a reason of the full size fits the record", "[sg_test]")
+{
+    static uint8_t buf[SGT_REC_MAX];
+    fx_t *x = fx_new();
+    memset(x->t.reason, 'R', sizeof(x->t.reason) - 1);
+    x->t.reason[sizeof(x->t.reason) - 1] = '\0';
+    x->t.have_test = true;
+    TEST_ASSERT_GREATER_THAN_UINT(0, sgt_encode(&x->t, x->now, buf, sizeof(buf)));
+}
+
+TEST_CASE("sg test: a test that ends at once has its end stored before a planned restart", "[sg_test]")
+{
+    /* Keep the group that runs now: the test ends at once (no switch), and
+     * its record is due. A restart before the station task stores it must
+     * still store it, or the next boot resumes DECIDING and restores the
+     * group from before. */
+    fx_t *x = to_deciding(G(3, 6), G(3, 6), G(7, 0));
+    TEST_ASSERT_TRUE(sgt_store_at_shutdown(&x->t));   /* running */
+    TEST_ASSERT_EQUAL(STATION_SGT_OK, sgt_keep(&x->t, 1, x->now, x->unix_s));
+    TEST_ASSERT_EQUAL(STATION_SGT_IDLE, x->t.state);
+    TEST_ASSERT_TRUE(x->t.save_due);
+    TEST_ASSERT_TRUE(sgt_store_at_shutdown(&x->t));
+    sgt_saved(&x->t, x->now);
+    TEST_ASSERT_FALSE(sgt_store_at_shutdown(&x->t));   /* stored already: nothing to add */
+
+    /* Stop while the group from before is measured: ended at once as well. */
+    x = fx_new();
+    TEST_ASSERT_EQUAL(STATION_SGT_OK, fx_start(x, G(3, 6), G(3, 6), G(7, 0), 300));
+    fx_run(x, 90 * SEC);
+    TEST_ASSERT_EQUAL(STATION_SGT_MEASURING, x->t.state);
+    TEST_ASSERT_EQUAL(STATION_SGT_OK, sgt_stop(&x->t, x->now, x->unix_s));
+    TEST_ASSERT_EQUAL(STATION_SGT_IDLE, x->t.state);
+    TEST_ASSERT_TRUE(sgt_store_at_shutdown(&x->t));
+
+    /* No test ever: nothing to store. */
+    x = fx_new();
+    TEST_ASSERT_FALSE(sgt_store_at_shutdown(&x->t));
+}
+
+TEST_CASE("sg test: every switch is asked for with its record due", "[sg_test]")
+{
+    /* station.c stores the record before it writes the switch's group into
+     * the profile, so a restart in between finds the switch in the record
+     * and asks for it again. That needs a record due with every switch. */
+    fx_t *x = fx_new();
+    TEST_ASSERT_EQUAL(STATION_SGT_OK, fx_start(x, G(4, 5), G(3, 6), G(7, 0), 60));   /* switch to A */
+    fx_run(x, 5 * MIN);                                                             /* to B, deciding */
+    TEST_ASSERT_EQUAL(STATION_SGT_DECIDING, x->t.state);
+    TEST_ASSERT_EQUAL(STATION_SGT_OK, sgt_keep(&x->t, 0, x->now, x->unix_s));      /* back to A */
+    fx_station(x);
+    TEST_ASSERT_EQUAL_UINT(3, x->switches);
+
+    x->auto_ok = false;
+    TEST_ASSERT_EQUAL(STATION_SGT_OK, fx_start(x, G(3, 6), G(7, 0), G(5, 0), 60));   /* 7 0 first */
+    fx_apply(x, false, true, true, G(3, 6));                                        /* refused: runs 3 6 */
+    fx_station(x);
+    TEST_ASSERT_EQUAL_UINT(4, x->switches);
+    TEST_ASSERT_EQUAL(STATION_SGT_OK, fx_start(x, G(3, 6), G(7, 0), G(5, 0), 60));
+    fx_run(x, 10 * MIN);                                                            /* the switch times out */
+    fx_station(x);
+    TEST_ASSERT_EQUAL(STATION_SGT_RESTORING, x->t.state);
+    TEST_ASSERT_EQUAL_UINT(6, x->switches);
+    TEST_ASSERT_EQUAL(STATION_SGT_OK, sgt_stop(&x->t, x->now, x->unix_s));
+    fx_station(x);
+    TEST_ASSERT_EQUAL_UINT(0, x->unsaved_switches);
 }
 
 TEST_CASE("sg test: other switch failures and ten minutes without streaming end the test as failed", "[sg_test]")

@@ -1879,6 +1879,11 @@ uint32_t ntrip_sm_retry_in_ms(const ntrip_sm_t *sm, uint32_t now_ms)
     return left;
 }
 
+ntrip_cls_t ntrip_sm_retry_class(const ntrip_sm_t *sm)
+{
+    return sm->row != NTRIP_ROW_NONE ? sm->reason : NTRIP_CLS_NONE;
+}
+
 uint32_t ntrip_sm_unreached_ms(const ntrip_sm_t *sm, uint32_t now_ms)
 {
     if (!sm->unreached_active) {

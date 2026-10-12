@@ -203,9 +203,9 @@ bool web_conn_req_close(httpd_req_t *req)
 }
 
 /*
- * A handler starts on a request (server task): did the client ask for the
- * connection to end after the answer ("Connection: close", or HTTP/1.0
- * without keep-alive)? Then the answer carries "Connection: close" (set
+ * A handler starts on a request (server task): does the connection end
+ * after the answer ("Connection: close", or any HTTP/1.0 request:
+ * web_conn_should_close)? Then the answer carries "Connection: close" (set
  * now, so a request the worker takes over carries it too) and
  * request_end() closes the connection.
  */
@@ -520,6 +520,13 @@ esp_err_t web_resp_end(web_resp_t *r)
 
 /* ---- request checks ---------------------------------------------------------------------- */
 
+web_req_body_t web_req_body_of(httpd_req_t *req)
+{
+    char v[2];
+    esp_err_t err = httpd_req_get_hdr_value_str(req, "Transfer-Encoding", v, sizeof(v));
+    return web_req_body(req->content_len, err == ESP_OK || err == ESP_ERR_HTTPD_RESULT_TRUNC);
+}
+
 /* A socket address as web_addr_t (IPv4, or IPv6 with v4-mapped addresses). */
 static bool sock_addr(const struct sockaddr_storage *ss, web_addr_t *out)
 {
@@ -641,8 +648,9 @@ static pre_t precheck(httpd_req_t *req, bool *on_ap, bool websocket)
     }
     /* A request answered here never has its body read: with a body, the
      * connection closes instead of the server reading and discarding it
-     * (it could announce gigabytes). */
-    bool body = req->content_len > 0;
+     * (it could announce gigabytes, or send chunks the server would take
+     * for the next request). */
+    bool body = web_req_body_of(req) != WEB_REQ_BODY_NONE;
     if (!host_ok) {
         if (body) {
             web_resp_close_hdr(req);
@@ -793,15 +801,22 @@ static esp_err_t api_handle(httpd_req_t *req, web_req_t *rp)
     if (pre != PRE_OK) {
         return pre == PRE_CLOSE ? ESP_FAIL : ESP_OK;
     }
+    web_req_body_t kind = web_req_body_of(req);
+    bool body = kind != WEB_REQ_BODY_NONE;
     /* GET and DELETE take no body: refuse one instead of reading it away
-     * (a bad request, whatever its size). */
-    if (rt->body == WEB_BODY_NONE && req->content_len > 0) {
+     * (a bad request, whatever its size or framing). */
+    if (rt->body == WEB_BODY_NONE && body) {
         return refuse_close_msg(req, WEB_ERR_BAD_REQUEST, "This request takes no body", UINT32_MAX);
+    }
+    /* A body in chunks is never read (the server would see a length of 0
+     * and take the chunks for the next request): Content-Length required. */
+    if (kind == WEB_REQ_BODY_UNFRAMED) {
+        return web_refuse_and_close(req, WEB_ERR_LENGTH_REQUIRED);
     }
     /* CSRF: a JSON or upload content type (a cross-site form cannot send either). */
     if (rt->body == WEB_BODY_JSON && !header_is(req, "Content-Type", "application/json", true)) {
-        return req->content_len > 0 ? web_refuse_and_close(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE)
-                                    : web_send_err(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE);
+        return body ? web_refuse_and_close(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE)
+                    : web_send_err(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE);
     }
     if (rt->body == WEB_BODY_UPLOAD && (!header_is(req, "Content-Type", "application/octet-stream", true) ||
                                          !header_is(req, "X-Requested-With", "onocoydiy", false))) {
@@ -820,8 +835,7 @@ static esp_err_t api_handle(httpd_req_t *req, web_req_t *rp)
     switch (rt->access) {
     case WEB_ACC_ADMIN:
         if (r.sess < 0) {
-            return req->content_len > 0 ? web_refuse_and_close(req, WEB_ERR_UNAUTHORIZED)
-                                        : web_send_err(req, WEB_ERR_UNAUTHORIZED);
+            return body ? web_refuse_and_close(req, WEB_ERR_UNAUTHORIZED) : web_send_err(req, WEB_ERR_UNAUTHORIZED);
         }
         r.admin = true;
         break;
@@ -924,7 +938,7 @@ static esp_err_t fallback_handle(httpd_req_t *req)
     web_fallback_t what = web_fallback_classify(req->uri, req->method == HTTP_OPTIONS,
                                                 req->method == HTTP_GET || req->method == HTTP_HEAD, a != NULL, on_ap,
                                                 web_api_path_known);
-    bool body = req->content_len > 0;
+    bool body = web_req_body_of(req) != WEB_REQ_BODY_NONE;
     switch (what) {
     case WEB_FB_ASSET:
     case WEB_FB_REDIRECT: {

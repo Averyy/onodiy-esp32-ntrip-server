@@ -69,6 +69,24 @@ The overlay also changes what QEMU cannot emulate (reasons in its comments):
 quad instead of octal PSRAM, DIO instead of QIO flash, and software instead
 of hardware SHA/AES/MPI.
 
+**The clock keeps running across a restart** (QEMU only). On a board,
+ESP-IDF's restart (`esp_restart_noos`, through
+`esp_system_reset_modules_on_exit`) resets the system timer
+(`SYSTEM_SYSTIMER_RST`), so every boot's `esp_timer` starts at 0. In this
+QEMU only the CPUs are reset (`rst:0xc (RTC_SW_CPU_RST)`) and the system
+timer keeps counting, so after a restart every value taken from uptime
+carries the time before it: `lifecycle: boot stable after 704 s` 13 s into
+the new boot, `uptime_s` in `/api/status`, the journal's start times
+("Start at about ..." early by the previous boot's run time), today's
+offline time of a caster slot (the outage looks as long as the whole
+previous boot), and the GNSS ladder's first-hour hold after power-on
+(counted from the first boot).
+These are QEMU artefacts, not firmware bugs; only a fresh QEMU start (or a
+board) shows them as a station would. `smoke.py` and `e2e.py` therefore
+assert nothing taken from uptime after a restart they ask for: the checks
+that span one look at stored values (the comparison's measured time, a
+caster stop that survives the restart).
+
 Expected log lines that a station does not print: `E` lines about the
 multicast MAC filter (the emulated MAC has none: `Failed to add multicast
 filter for IPv4` and `... for IPv6`, two of each at boot, and one `Failed to
@@ -153,7 +171,8 @@ its handler is entered without end while UART1's status reads 0, and the
 boot stops before `gnss_link: UART1 open` (seen with gdb: `-s` on the
 QEMU command line, every entry `INT_ST` 0, `INT_ENA` still holding the
 previous boot's bits at `call_start_cpu0`). A restart with nothing
-arriving on UART1 boots normally. `e2e.py` therefore pauses its replay
+arriving on UART1 boots normally (with the system timer still counting
+from the first boot, see above). `e2e.py` therefore pauses its replay
 (`ReplayServer.pause()`: bursts that fall due are dropped) from 2 s before
 the reboot it asks for until the web server answers again.
 
@@ -179,8 +198,14 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    `413`); `GET /nope` with a body gets the setup AP's captive redirect
    (this build counts as the AP) with `Connection: close`; `GET
    /api/session` with a body gets `400 bad_request`; a request with
-   `Connection: close` and a `GET / HTTP/1.0` are answered and closed
-   within 2 s; two pipelined HTTP/1.1 requests on one socket are both
+   `Connection: close`, a `GET / HTTP/1.0` and an HTTP/1.0 request with
+   `Connection: keep-alive` (answered with `Connection: close`: HTTP/1.0
+   connections are never kept) are answered and closed within 2 s; a
+   chunked body is never read: `POST /api/nope` gets `404`, `POST
+   /api/status` `405`, `POST /api/session` `411 length_required` and `GET
+   /nope` the captive redirect, each one answer with `Connection: close`
+   and the connection closed (the chunks never come back as a second
+   answer); two pipelined HTTP/1.1 requests on one socket are both
    answered, and an HTTP/1.1 connection stays open for the next request;
    a wrong admin password and a WebSocket handshake without a session
    (public status off) each give one console line naming `10.0.2.2` (how

@@ -1278,10 +1278,15 @@ unsigned web_connection_tokens(const char *value)
 
 bool web_conn_should_close(unsigned tokens, bool http10)
 {
-    if ((tokens & WEB_CONN_TOK_CLOSE) != 0) {
-        return true;
+    return (tokens & WEB_CONN_TOK_CLOSE) != 0 || http10;
+}
+
+web_req_body_t web_req_body(size_t content_len, bool transfer_encoding)
+{
+    if (transfer_encoding) {
+        return WEB_REQ_BODY_UNFRAMED;
     }
-    return http10 && (tokens & WEB_CONN_TOK_KEEP_ALIVE) == 0;
+    return content_len > 0 ? WEB_REQ_BODY_LENGTH : WEB_REQ_BODY_NONE;
 }
 
 /* ---- log lines about clients, rate-limited --------------------------------------------------- */

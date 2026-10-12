@@ -24,6 +24,10 @@ extern "C" {
 
 #define STATION_SGT_SYS   7u    /**< constellations (gnss_sys_t) */
 #define STATION_SGT_BANDS 5u    /**< band buckets (gnss_band_t) */
+/** A test's reason text with its terminator: a refused or failed switch
+ * with the receiver's whole reply (up to 63 characters), then a failed
+ * switch back with its reply, both whole. */
+#define STATION_SGT_REASON_MAX 224u
 
 /** Test state. */
 typedef enum {
@@ -102,7 +106,7 @@ typedef struct {
     uint8_t outcome;            /**< station_sgt_outcome_t of the last test (NONE while running) */
     bool have_kept;
     station_sg_t kept;          /**< KEPT: the group kept */
-    char reason[96];            /**< what happened, in words ("" = nothing to say) */
+    char reason[STATION_SGT_REASON_MAX]; /**< what happened, in words ("" = nothing to say) */
     int64_t ended_unix;         /**< 0 = no clock then, or not ended */
     uint32_t ended_age_s;       /**< since it ended this boot, UINT32_MAX = not this boot */
 } station_sg_test_t;

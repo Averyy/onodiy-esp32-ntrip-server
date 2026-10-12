@@ -258,6 +258,7 @@ EXT_RAM_BSS_ATTR static sgt_t s_sgt;
 EXT_RAM_BSS_ATTR static uint8_t s_sgt_rec[SGT_REC_MAX];
 EXT_RAM_BSS_ATTR static station_status_t s_sgt_st;   /* the status a start is judged on (s_sgt_mx) */
 static SemaphoreHandle_t s_sgt_mx;
+static esp_err_t sg_record_flush(int64_t now);
 
 /* Receiver update sessions (station task, except where noted). */
 static station_flash_request_t s_flash_req;   /* the user's request (written under s_lock by the requester) */
@@ -1045,6 +1046,12 @@ static void sg_test_apply_done(const stn_job_t *job, stn_result_t *r)
     } else if (!sgt_running(&s_sgt)) {
         idle = true;
         next = s_sgt.cur_known ? s_sgt.cur : s_sgt.before;
+    }
+    if (a.rejected && (want || idle)) {
+        /* The profile gets the group the test goes to next, right below:
+         * the record says so first (best effort: the refused group cannot
+         * stay in the profile either way). */
+        (void)sg_record_flush(now_ms());
     }
     xSemaphoreGive(s_sgt_mx);
     if (!a.rejected) {
@@ -2294,12 +2301,47 @@ static void service(const stn_in_t *in)
 
 /* ---- the signal-group comparison ---------------------------------------------- */
 
+/* The record buffer is used under s_sgt_mx only, encode and write (or read
+ * and decode) together, so the shutdown hook and the station task never
+ * share it half-written. */
+
+/* Store the record now (s_sgt_mx held); marked saved only once it is. */
+static esp_err_t sg_record_store(int64_t now)
+{
+    size_t len = sgt_encode(&s_sgt, now, s_sgt_rec, sizeof(s_sgt_rec));
+    esp_err_t err = len == 0 ? ESP_ERR_INVALID_SIZE
+                             : settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST, s_sgt_rec, len);
+    if (err == ESP_OK) {
+        sgt_saved(&s_sgt, now);
+    }
+    return err;
+}
+
+/* Store the record if it is due (s_sgt_mx held). A failed write is tried
+ * again at the next transition or period, not at every pass of the loop;
+ * while a switch waits for it, it stays due, so the switch never goes ahead
+ * without its record (sg_service fails it instead). */
+static esp_err_t sg_record_flush(int64_t now)
+{
+    if (!s_sgt.save_due) {
+        return ESP_OK;
+    }
+    esp_err_t err = sg_record_store(now);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "comparison record not saved: %s", esp_err_to_name(err));
+        if (!s_sgt.want_switch) {
+            sgt_saved(&s_sgt, now);
+        }
+    }
+    return err;
+}
+
 /* The record at boot: resume it; one that cannot be read ends the test. */
 static void sg_test_load(void)
 {
+    xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
     size_t len = sizeof(s_sgt_rec);
     esp_err_t err = settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST, s_sgt_rec, &len);
-    xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
     sgt_init(&s_sgt);
     bool bad = false;
     if (err == ESP_OK && !sgt_decode(&s_sgt, s_sgt_rec, len, now_ms())) {
@@ -2323,7 +2365,9 @@ static void sg_test_load(void)
 }
 
 /* A planned restart (the user's, an update's): store the running comparison
- * with what it measured since its last periodic save. */
+ * with what it measured since its last periodic save, and a test that ended
+ * (keep, stop) before the station task stored its end: otherwise the next
+ * boot resumes the test from its older record. */
 static void sg_test_on_shutdown(lifecycle_reboot_reason_t reason, uint32_t deadline_ms, void *ctx)
 {
     (void)reason;
@@ -2331,10 +2375,10 @@ static void sg_test_on_shutdown(lifecycle_reboot_reason_t reason, uint32_t deadl
     if (s_sgt_mx == NULL || xSemaphoreTake(s_sgt_mx, pdMS_TO_TICKS(deadline_ms < 200u ? deadline_ms : 200u)) != pdTRUE) {
         return;
     }
-    size_t len = sgt_running(&s_sgt) ? sgt_encode(&s_sgt, now_ms(), s_sgt_rec, sizeof(s_sgt_rec)) : 0;
+    bool due = sgt_store_at_shutdown(&s_sgt);
+    esp_err_t err = due ? sg_record_store(now_ms()) : ESP_OK;
     xSemaphoreGive(s_sgt_mx);
-    if (len > 0) {
-        esp_err_t err = settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST, s_sgt_rec, len);
+    if (due) {
         ESP_LOGI(TAG, "comparison record %s before the restart", err == ESP_OK ? "stored" : "not stored");
     }
 }
@@ -2388,6 +2432,17 @@ static void sg_service(const stn_in_t *in)
     sgt_tick(&s_sgt, streaming, have ? &smp : NULL, in->now_ms, unix_s);
     bool want = s_sgt.want_switch;
     station_sg_t target = s_sgt.target;
+    /* The record first: it names the switch before the profile does, so a
+     * restart in between asks for the switch again (sg_test_core.h). */
+    esp_err_t rec = sg_record_flush(in->now_ms);
+    if (want && rec != ESP_OK) {
+        /* No switch the stored record does not know of: it fails instead. */
+        sgt_switch_queued(&s_sgt);
+        sgt_apply_t a = { .ok = false };
+        snprintf(a.reason, sizeof(a.reason), "comparison record not saved");
+        sgt_apply_done(&s_sgt, &a, in->now_ms, unix_s);
+        want = false;
+    }
     xSemaphoreGive(s_sgt_mx);
 
     if (want) {
@@ -2413,20 +2468,10 @@ static void sg_service(const stn_in_t *in)
     }
 
     sgt_note_t notes[SGT_NOTES];
-    size_t len = 0;
     xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
     unsigned nn = sgt_take_notes(&s_sgt, notes, SGT_NOTES);
-    if (s_sgt.save_due) {
-        len = sgt_encode(&s_sgt, in->now_ms, s_sgt_rec, sizeof(s_sgt_rec));
-        sgt_saved(&s_sgt, in->now_ms);   /* a failed write is tried again at the next transition or period */
-    }
+    (void)sg_record_flush(in->now_ms);   /* what the switch's result changed */
     xSemaphoreGive(s_sgt_mx);
-    if (len > 0) {
-        esp_err_t err = settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST, s_sgt_rec, len);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "comparison record not saved: %s", esp_err_to_name(err));
-        }
-    }
     for (unsigned i = 0; i < nn; i++) {
         const sgt_note_t *n = &notes[i];
         unsigned m = ((uint32_t)n->a >> 8) & 0xFFu;

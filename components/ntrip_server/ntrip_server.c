@@ -1205,6 +1205,7 @@ static void publish(slot_t *s, uint32_t now, bool force)
     ntrip_caster_status_t *st = &s->st;
     st->state = (ntrip_state_t)s->sm.state;
     st->reason = (ntrip_fail_class_t)s->sm.reason;
+    st->retry_reason = (ntrip_fail_class_t)ntrip_sm_retry_class(&s->sm);
     st->backoff_attempt = s->sm.attempt;
     st->next_retry_s = (ntrip_sm_retry_in_ms(&s->sm, now) + 999u) / 1000u;
     st->connected_s = s->open ? (now - s->sm.session_start_ms) / 1000u : 0;

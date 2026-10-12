@@ -486,10 +486,25 @@ unsigned web_connection_tokens(const char *value);
 
 /**
  * The connection ends after this response: the request asked for it
- * ("Connection: close"), or it is HTTP/1.0 without "Connection: keep-alive"
- * (HTTP/1.0 has no persistent connections by default).
+ * ("Connection: close"), or it is HTTP/1.0, with or without
+ * "Connection: keep-alive". An HTTP/1.0 client keeps a connection only when
+ * the answer echoes the keep-alive token, and otherwise reads the answer to
+ * the end of the connection; and an answer sent in chunks (a large JSON
+ * document, a download) cannot go to an HTTP/1.0 client on a connection that
+ * stays open at all. So HTTP/1.0 connections are never persistent here.
  */
 bool web_conn_should_close(unsigned tokens, bool http10);
+
+/** A request's body as the HTTP server hands the request to its handler. */
+typedef enum {
+    WEB_REQ_BODY_NONE = 0,      /**< no body */
+    WEB_REQ_BODY_LENGTH,        /**< Content-Length bytes */
+    WEB_REQ_BODY_UNFRAMED,      /**< a Transfer-Encoding (chunked): esp_http_server reports a length of 0 and
+                                     would parse the chunks as the next request; never read here */
+} web_req_body_t;
+
+/** The body of a request with this Content-Length (0 = none) and, or not, a Transfer-Encoding header. */
+web_req_body_t web_req_body(size_t content_len, bool transfer_encoding);
 
 /* ---- log lines about clients, rate-limited --------------------------------------------------- */
 

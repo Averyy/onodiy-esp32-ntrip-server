@@ -36,9 +36,10 @@ typedef struct {
     bool signal_group_sent;     /**< CONFIG SIGNALGROUP was sent: the receiver restarted and saved it by itself */
     /**
      * The receiver refused the profile's signal group: a negative reply to
-     * CONFIG SIGNALGROUP, or a read-back after its restart that still shows
-     * another group (failed_cmd and reason say which). The session failed
-     * and was rolled back like any other failure.
+     * CONFIG SIGNALGROUP, or a read-back after its restart that names
+     * another group (failed_cmd and reason say which). A read-back that names
+     * no group, twice, is no refusal (an ordinary failure). The session
+     * failed and was rolled back like any other failure.
      */
     bool signal_group_rejected;
     um98x_sg_pair_t sg_before;  /**< the group this session read back before changing it */

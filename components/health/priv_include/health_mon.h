@@ -203,15 +203,21 @@ bool hm_fail_is_caster_reply(uint8_t reason);
 /**
  * The protected slot counts as down for the network ladder's trigger: enabled
  * and neither streaming nor paused, nor stopped by the Onocoy login guard,
- * nor failing on a caster reply (`reason`, hm_fail_class_t: AUTH,
- * LOGIN_BLOCKED, IN_USE, REPLACED, BANNED, MOUNT_BUSY or CONFIG, which
+ * nor waiting out a caster's reply: a failure state (BACKOFF, AUTH_FAILED,
+ * CONFIG_ERROR, BANNED), or the connect of the retry after it (CONNECTING),
+ * while the failure the retry follows (`retry_reason`, hm_fail_class_t: the
+ * ntrip status' retry_reason, NONE once the slot connected) is AUTH,
+ * LOGIN_BLOCKED, IN_USE, REPLACED, BANNED, MOUNT_BUSY or CONFIG (which
  * includes a refused certificate). A Wi-Fi restart or a reboot cannot fix
  * any of those; a guard wait after a rejected login must not restart the
  * network. Transport classes (DNS, CONNECT, TLS, TIMEOUT, REMOTE_CLOSE,
- * WRITE_STALL, KEEPALIVE, LOCAL) and no failure yet keep the trigger. The
- * slot still counts as down for the health level (hm_slot_down).
+ * WRITE_STALL, KEEPALIVE, LOCAL) and no failure keep the trigger, and so do
+ * WAIT_NETWORK and WAIT_DATA whatever the class: a slot that lost the
+ * network is not waiting on its caster. Not the status' `reason`: that is
+ * the last failure and outlives it (a success and a planned close keep it).
+ * The slot still counts as down for the health level (hm_slot_down).
  */
-bool hm_protected_down(bool enabled, bool protected_slot, uint8_t state, uint8_t reason);
+bool hm_protected_down(bool enabled, bool protected_slot, uint8_t state, uint8_t retry_reason);
 
 /* ---- low-heap reboot ------------------------------------------------------------ */
 
@@ -392,12 +398,15 @@ typedef struct {
 /**
  * The restart hold and the reboot cap as the status shows them: only while
  * the GNSS ladder is in an episode (a stall or NO_RECEIVER, until it
- * resets), where a restart may be pending. Outside one nothing is pending,
- * whatever holds (an admin page in use on a healthy station is no reason to
- * say a restart is postponed), and the cap's wait is nobody's concern.
+ * resets) and the recovery mode includes the ESP32 restart (`restarts`:
+ * full recovery), where a restart may be pending. Outside one, and in the
+ * modes without the restart (no ESP32 restart, alerts only: their episodes
+ * declare stalls but never restart), nothing is pending, whatever holds (an
+ * admin page in use on a healthy station is no reason to say a restart is
+ * postponed), and the cap's wait is nobody's concern.
  */
-void hm_hold_view(bool episode, uint8_t hold, uint32_t hold_left_s, bool reboot_allowed, uint32_t cap_wait_s,
-                  hm_hold_view_t *out);
+void hm_hold_view(bool episode, bool restarts, uint8_t hold, uint32_t hold_left_s, bool reboot_allowed,
+                  uint32_t cap_wait_s, hm_hold_view_t *out);
 
 /* ---- overall level ------------------------------------------------------------ */
 

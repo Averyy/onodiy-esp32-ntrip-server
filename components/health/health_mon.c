@@ -256,10 +256,21 @@ bool hm_fail_is_caster_reply(uint8_t reason)
     }
 }
 
-bool hm_protected_down(bool enabled, bool protected_slot, uint8_t state, uint8_t reason)
+/* The wait after a failure, or the connect of the retry that follows it.
+ * Waiting for the network or for data is never a wait on the caster. */
+static bool after_failure(uint8_t state)
 {
-    return enabled && protected_slot && state != HM_CST_STREAMING && state != HM_CST_PAUSED &&
-           state != HM_CST_STOPPED && !hm_fail_is_caster_reply(reason);
+    return state == HM_CST_BACKOFF || state == HM_CST_AUTH_FAILED || state == HM_CST_CONFIG_ERROR ||
+           state == HM_CST_BANNED || state == HM_CST_CONNECTING;
+}
+
+bool hm_protected_down(bool enabled, bool protected_slot, uint8_t state, uint8_t retry_reason)
+{
+    if (!enabled || !protected_slot || state == HM_CST_STREAMING || state == HM_CST_PAUSED ||
+        state == HM_CST_STOPPED) {
+        return false;
+    }
+    return !(after_failure(state) && hm_fail_is_caster_reply(retry_reason));
 }
 
 /* ---- debounce ----------------------------------------------------------------- */
@@ -499,10 +510,11 @@ uint8_t hm_reboot_hold(hm_hold_t *h, const hm_hold_in_t *in, uint32_t *left_s)
     return (uint8_t)(hold | presence);
 }
 
-void hm_hold_view(bool episode, uint8_t hold, uint32_t hold_left_s, bool reboot_allowed, uint32_t cap_wait_s,
-                  hm_hold_view_t *out)
+void hm_hold_view(bool episode, bool restarts, uint8_t hold, uint32_t hold_left_s, bool reboot_allowed,
+                  uint32_t cap_wait_s, hm_hold_view_t *out)
 {
-    out->hold = episode ? hold : 0u;
-    out->hold_left_s = (episode && hold != 0) ? hold_left_s : UINT32_MAX;
-    out->cap_wait_s = (episode && !reboot_allowed) ? cap_wait_s : UINT32_MAX;
+    bool pending = episode && restarts;
+    out->hold = pending ? hold : 0u;
+    out->hold_left_s = (pending && hold != 0) ? hold_left_s : UINT32_MAX;
+    out->cap_wait_s = (pending && !reboot_allowed) ? cap_wait_s : UINT32_MAX;
 }

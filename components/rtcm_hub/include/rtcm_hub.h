@@ -36,11 +36,14 @@
  *    unsure epoch: one that is waiting skips it whole, and one that is
  *    streaming ends the epoch it was sending there, goes back to waiting
  *    and counts the unsure frames as idle skips. The next epoch started by
- *    rule (a), (b) or (c) is sure; while an epoch is unsure, a gap of
- *    CONFIG_RTCM_HUB_BURST_GAP_MS after any frame also starts a sure one, so
- *    a stream without MSMs still flows after a reset. A caster therefore
- *    resumes after every pause or UART reset at the first frame of a whole
- *    epoch.
+ *    rule (a), (b) or (c) is sure; while an epoch is unsure, a frame that is
+ *    no MSM a gap of CONFIG_RTCM_HUB_BURST_GAP_MS after the previous one
+ *    also starts a sure one, so a stream without MSMs still flows after a
+ *    reset. An MSM after such a gap never does, unsure epoch or not: right
+ *    after a reset the station writes to flash, and the rest of the epoch
+ *    read late would otherwise start a sure epoch partway through. A caster
+ *    therefore resumes after every pause or UART reset at the first frame of
+ *    a whole epoch.
  *  - Station metadata: the latest 1005/1006, 1033 and 1230 frames are kept
  *    as sticky copies outside the ring. They are cleared on every framer
  *    reset and every receiver reconfiguration (rtcm_hub_clear_sticky), and a

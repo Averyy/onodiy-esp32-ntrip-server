@@ -376,7 +376,7 @@ ftimes dump             the whole recording as CSV, ending with "BENCH ftimes du
 | `benchlib/replay.py` | replay schedules: capture runs timed by their `.idx`, RTCM files grouped into epochs by MSM epoch time, looping on a continuous time base |
 | `benchlib/ntrip.py` | NTRIP helpers for the local tools: chunked transfer coding, request parsing with the password masked, a frame recorder (CRC, bytes outside frames, cut end) |
 | `docker/bkg-caster/` | Dockerfile, configuration and scripts for the optional BKG caster test peer |
-| `tests/` | pytest; RTCM test frames are built field by field from the public layouts and cross-checked with pyrtcm; `bootprobe.py` runs against a scripted receiver over a socketpair; the replay, fake caster and timing tools run over local sockets; `test_docker_caster.py` only with `RUN_DOCKER_TESTS=1` |
+| `tests/` | pytest; RTCM test frames are built field by field from the public layouts and cross-checked with pyrtcm; `bootprobe.py` runs against a scripted receiver over a socketpair; the replay, fake caster and timing tools run over local sockets; `test_ui_text.py` runs sentences the web UI builds from the station's status (`components/web/ui/js`) in Node.js (skipped without it); `test_docker_caster.py` only with `RUN_DOCKER_TESTS=1` |
 
 `rtcm_replay.py`, `fake_caster.py`, `ntrip_timing.py` and the `benchlib`
 modules they use (`rtcm`, `stream`, `common`, `replay`, `ntrip`) need only

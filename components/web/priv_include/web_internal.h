@@ -155,6 +155,15 @@ void web_linger_close(httpd_req_t *req);
 /** 500 internal with the esp_err_t name as message. */
 esp_err_t web_send_internal(httpd_req_t *req, esp_err_t err);
 
+/**
+ * The request's body (web_req_body): a Content-Length, or any
+ * Transfer-Encoding header, which esp_http_server reports as no body at all
+ * (content_len 0) while the chunks wait on the socket. Every handler treats
+ * anything but WEB_REQ_BODY_NONE as a body: read it, or answer with
+ * Connection: close and close; never answer as if there were none.
+ */
+web_req_body_t web_req_body_of(httpd_req_t *req);
+
 /** Send a short literal JSON body ("{\"ok\": true}"). */
 esp_err_t web_send_json_literal(httpd_req_t *req, int status, const char *json);
 
@@ -197,8 +206,9 @@ void web_resp_close_hdr(httpd_req_t *req);
 
 /**
  * The request being answered ends its connection after the answer: the
- * client asked ("Connection: close", or HTTP/1.0 without keep-alive). The
- * worker closes such a connection when it has answered. Any task.
+ * client asked ("Connection: close"), or it is HTTP/1.0 (never kept,
+ * web_conn_should_close). The worker closes such a connection when it has
+ * answered. Any task.
  */
 bool web_conn_req_close(httpd_req_t *req);
 
