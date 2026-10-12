@@ -61,6 +61,7 @@ Antenna and cable notes: [`reference/antenna-specs.md`](reference/antenna-specs.
 | `firmware/um982/` | Unicore UM982 receiver firmware the device flashes and offers as a user-confirmed update (see its README) |
 | `gnss-splitter/` | KiCad/EasyEDA PCB for an optional GNSS antenna splitter |
 | `tools/` | Release tooling (`release_manifest.py` writes a release's `manifest.json`) |
+| `tools/ci/` | CI's host-test job run locally in its pinned Linux container (see Building) |
 | `tools/bench/` | Host-side bench tools for the board: port finder, captures of both serial ports, receiver queries, RTCM inspection, station API dumps, and the receiver boot menu check over its USB port (see its README) |
 | `tools/qemu/` | The firmware in Espressif's QEMU, no board needed: build and run script, smoke test (see its README) |
 | `sdkconfig.qemu` | QEMU-only configuration overlay used by `tools/qemu/run.sh`; never for a station |
@@ -90,6 +91,19 @@ idf.py build
 CI runs both for pushes to `main`, release tags and pull requests
 (`.github/workflows/build.yml`), together with the bench tools' tests and a QEMU smoke
 test (below); a release tag also publishes the GitHub Release (see below).
+
+CI builds the host tests on Linux with gcc and glibc, which find problems a macOS
+(clang) build does not: other warnings under `-Werror`, archive order at link time, and
+the test task's real stack size. To run CI's host-test job before pushing, in the same
+pinned container, with Docker:
+
+```sh
+tools/ci/host_tests_linux.sh              # --keep-going lists every build error, not just the first
+```
+
+It reads the image and the commands from `build.yml`, builds a copy of the working tree
+inside the container (nothing in the checkout is written) and fails on any compiler
+warning in the project's own sources too.
 
 Notes:
 

@@ -25,16 +25,6 @@ static long num(const cJSON *o, const char *k)
     return fx_int(o, k);
 }
 
-static int sys_of(const char *name)
-{
-    for (unsigned s = 0; s < GNSS_SYS_COUNT; s++) {
-        if (strcmp(name, fx_sys_name(s)) == 0) {
-            return (int)s;
-        }
-    }
-    return -1;
-}
-
 static uint8_t q4_dbhz(uint32_t q4)
 {
     uint32_t v = (q4 + 8u) / 16u;

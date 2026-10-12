@@ -274,14 +274,20 @@ TEST_CASE("fixtures: every MSM header, mask and C/N0 cell matches the oracle", "
  * a message with the multiple-message bit clear (SBAS ones included), or
  * when a constellation already in the epoch comes with another epoch time
  * (a closing message that never came).
+ *
+ * The three per-MSM arrays are on the heap: together about 30 KB, which does
+ * not fit the stack of the FreeRTOS task the tests run in (on Linux that
+ * task's stack is the real thread stack).
  */
+#define MSM_LIST_MAX 512
+
 typedef struct {
     fx_units_t u;
     uint8_t *buf;
     size_t len;
-    gnss_rtcm3_msm_t h[512];
-    const fx_unit_t *fr[512];
-    unsigned grp[512];
+    gnss_rtcm3_msm_t *h;     /* MSM_LIST_MAX each */
+    const fx_unit_t **fr;
+    unsigned *grp;
     unsigned groups;
     size_t n;
 } msm_list_t;
@@ -289,6 +295,10 @@ typedef struct {
 static void msm_list(const char *name, msm_list_t *m)
 {
     memset(m, 0, sizeof(*m));
+    m->h = calloc(MSM_LIST_MAX, sizeof(m->h[0]));
+    m->fr = calloc(MSM_LIST_MAX, sizeof(m->fr[0]));
+    m->grp = calloc(MSM_LIST_MAX, sizeof(m->grp[0]));
+    TEST_ASSERT_TRUE(m->h != NULL && m->fr != NULL && m->grp != NULL);
     fx_jsonl_t j;
     TEST_ASSERT_TRUE_MESSAGE(load_oracle(name, &j), name);
     static unsigned rec_grp[1024];
@@ -336,7 +346,7 @@ static void msm_list(const char *name, msm_list_t *m)
         }
         TEST_ASSERT_LESS_THAN_size_t(j.n, r);
         if (!is_sbas_number(fr->type)) {
-            TEST_ASSERT_LESS_THAN_size_t(512, m->n);
+            TEST_ASSERT_LESS_THAN_size_t(MSM_LIST_MAX, m->n);
             TEST_ASSERT_TRUE(gnss_rtcm3_msm_decode(fr->data, fr->len, &m->h[m->n]));
             m->grp[m->n] = rec_grp[r];
             m->fr[m->n++] = fr;
@@ -350,6 +360,9 @@ static void msm_list_free(msm_list_t *m)
 {
     fx_units_free(&m->u);
     free(m->buf);
+    free(m->h);
+    free(m->fr);
+    free(m->grp);
 }
 
 TEST_CASE("fixtures: zero-satellite MSMs decode, SBAS numbers are framed but not decoded", "[fixtures]")
@@ -459,8 +472,8 @@ TEST_CASE("fixtures: epochs group by epoch time as well as the multiple-message 
         { "rtklib_GMSD7_12ep.rtcm3", 12, 0, 0 },
         { "pyrtcm_NTRIP-USCL00CHL0.log", 1, 0, 14000 },
     };
-    static unsigned grp[512];
-    static uint32_t got[512];
+    static unsigned grp[MSM_LIST_MAX];
+    static uint32_t got[MSM_LIST_MAX];
     for (size_t f = 0; f < sizeof(k) / sizeof(k[0]); f++) {
         msm_list_t m;
         msm_list(k[f].name, &m);
@@ -618,7 +631,7 @@ TEST_CASE("fixtures: epochs sent to a caster count an epoch whose closing MSM ne
         "rtklib_GMSD7_12ep.rtcm3",
     };
     static uint8_t rd[NTRIP_CHUNK_MAX_PAYLOAD];
-    static unsigned grp[512];
+    static unsigned grp[MSM_LIST_MAX];
     for (size_t f = 0; f < sizeof(k) / sizeof(k[0]); f++) {
         msm_list_t m;
         msm_list(k[f], &m);

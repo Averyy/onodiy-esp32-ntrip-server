@@ -138,7 +138,6 @@ idf_component_register(
         "${_fw}/gnss_link/include"
         "${_fw}/gnss_link/priv_include"
         "${_fw}/network/priv_include"
-        "${_fw}/pkg_store/priv_include"
         "${_fw}/station/priv_include"
         "${_fw}/health/priv_include"
         "${_fw}/diag/priv_include"
@@ -157,6 +156,13 @@ idf_component_register(
         "${_fw}/um98x_flash/include"
     REQUIRES unity gnss_framing gnss_types settings pkg_store nvs_flash esp_partition esp_event mbedtls
     WHOLE_ARCHIVE)
+
+# pkg_store's private header (its slot record format), which the tests check
+# directly. pkg_store is a component of this build, and IDF's component check
+# reports another component's private directory in PRIV_INCLUDE_DIRS (rightly
+# for firmware components); for this white-box test it is declared on the
+# target instead.
+target_include_directories(${COMPONENT_LIB} PRIVATE "${_fw}/pkg_store/priv_include")
 
 # The WGS84 conversion and the caster budget estimate use libm (part of libc
 # on macOS, separate on Linux).

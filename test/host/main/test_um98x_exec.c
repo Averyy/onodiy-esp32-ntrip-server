@@ -96,21 +96,25 @@ static sim_t S;
 
 /* ---- receiver ----------------------------------------------------------- */
 
+/* A line that does not fit is a fault in the test, so it fails the test
+ * instead of reaching the executor cut short. */
 static void emit(sim_t *s, const char *line, int64_t delay)
 {
     TEST_ASSERT_LESS_THAN_INT(MAX_EV, s->nq);
     sim_ev_t *e = &s->q[s->nq++];
     e->at = s->now + delay;
     e->baud = s->rx_baud;
-    snprintf(e->line, sizeof(e->line), "%s", line);
+    int n = snprintf(e->line, sizeof(e->line), "%s", line);
+    TEST_ASSERT_TRUE_MESSAGE(n >= 0 && (size_t)n < sizeof(e->line), "simulated line longer than LINE_MAX_");
 }
 
 static void emit_checked(sim_t *s, char lead, const char *content, int64_t delay)
 {
-    char tmp[LINE_MAX_];
+    char tmp[LINE_MAX_ - 3];   /* leaves room for "*XX" in a queued line */
     char line[LINE_MAX_];
-    snprintf(tmp, sizeof(tmp), "%c%s", lead, content);
-    snprintf(line, sizeof(line), "%s*%02X", tmp, um98x_xor8(tmp, strlen(tmp)));
+    int n = snprintf(tmp, sizeof(tmp), "%c%s", lead, content);
+    TEST_ASSERT_TRUE_MESSAGE(n >= 0 && (size_t)n < sizeof(tmp), "simulated line longer than LINE_MAX_");
+    snprintf(line, sizeof(line), "%s*%02X", tmp, um98x_xor8(tmp, (size_t)n));
     emit(s, line, delay);
 }
 

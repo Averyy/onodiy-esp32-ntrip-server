@@ -22,7 +22,8 @@ concurrency:
 # to a newer image: docker pull espressif/idf:<tag>, then
 #   docker image inspect espressif/idf:<tag> --format '{{index .RepoDigests 0}}'
 # and use that digest in every job that runs in it (firmware, firmware-bench,
-# host-tests, qemu-smoke).
+# host-tests, qemu-smoke). tools/ci/host_tests_linux.sh reads the image and
+# the commands of the host-tests job from this file.
 #
 # Jobs: firmware (the station image, uploaded), firmware-bench (the
 # sdkconfig.bench overlay built and checked like the station image, so code
