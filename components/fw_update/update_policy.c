@@ -101,6 +101,28 @@ uint32_t fw_sched_wait_s(const fw_sched_t *s)
     return due > now ? due - now : 0;
 }
 
+fw_check_outcome_t fw_policy_check_outcome(fw_http_result_t r, int http_status, bool manifest_ok)
+{
+    switch (r) {
+    case FW_HTTP_OK:
+        return manifest_ok ? FW_OUTCOME_OK : FW_OUTCOME_BAD_MANIFEST;
+    case FW_HTTP_NOT_MODIFIED:
+        return FW_OUTCOME_OK;
+    case FW_HTTP_BAD_ANSWER:
+        if (http_status == 404) {
+            return FW_OUTCOME_NO_RELEASE;
+        }
+        /* A 200 that was refused (too large) is not a usable manifest; any other status is HTTP's. */
+        return (http_status >= 200 && http_status < 300) ? FW_OUTCOME_BAD_MANIFEST : FW_OUTCOME_HTTP_ERROR;
+    case FW_HTTP_UNTRUSTED:
+        return FW_OUTCOME_UNTRUSTED_REDIRECT;
+    case FW_HTTP_LOCAL_ERROR:
+    case FW_HTTP_NO_RESPONSE:
+    default:
+        return FW_OUTCOME_NO_RESPONSE;
+    }
+}
+
 uint32_t fw_sched_jitter_s(const uint8_t mac[6])
 {
     /* FNV-1a over the MAC: neighbouring MACs land far apart. */

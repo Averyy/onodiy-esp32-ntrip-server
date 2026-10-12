@@ -189,6 +189,17 @@ typedef enum {
     FW_GNSS_BLOCK_RECEIVER_NOT_STREAMING, /**< no valid RTCM or NMEA from the receiver in the last 10 s */
 } fw_update_gnss_block_t;
 
+/** How the last update check went (status, web UI). */
+typedef enum {
+    FW_CHECK_RESULT_NONE = 0,         /**< no check attempted this boot */
+    FW_CHECK_RESULT_OK,               /**< a usable manifest, or "not modified" */
+    FW_CHECK_RESULT_NO_RELEASE,       /**< HTTP 404: the repository has no (public) release with a manifest */
+    FW_CHECK_RESULT_HTTP_ERROR,       /**< another HTTP status: last_http_status */
+    FW_CHECK_RESULT_NO_RESPONSE,      /**< no answer (offline, DNS, TLS, timeout, no trusted clock yet) */
+    FW_CHECK_RESULT_UNTRUSTED_REDIRECT, /**< GitHub redirected somewhere this firmware does not trust */
+    FW_CHECK_RESULT_BAD_MANIFEST,     /**< an answer, but no manifest this build accepts */
+} fw_update_check_result_t;
+
 /** Versions kept on the rolled-back list (ota/bad_ver). */
 #define FW_UPDATE_ROLLED_BACK_MAX 8
 
@@ -216,6 +227,11 @@ typedef struct {
     uint32_t gnss_expected_downtime_s; /**< for the confirmation dialog (never a gate) */
     uint8_t progress_pct;          /**< current download */
     int64_t last_check_unix;       /**< last successful check (ota/last_check), 0 = never */
+    int64_t last_attempt_unix;     /**< last check attempt this boot, successful or not; 0 = none or no trusted clock then */
+    fw_update_check_result_t last_check_result; /**< how that attempt went (FW_CHECK_RESULT_NONE = none this boot) */
+    uint16_t last_http_status;     /**< its final HTTP status, 0 = no answer */
+    uint32_t next_check_in_s;      /**< until the next automatic check is due (0 = due now, it waits for the network),
+                                        UINT32_MAX = checks are off in this build */
     esp_err_t last_err;
 } fw_update_status_t;
 
@@ -297,6 +313,15 @@ esp_err_t fw_update_upload_app_finish(fw_update_upload_t u, uint8_t sha256_out[3
 
 /** Abandon an upload (client gone, cancelled): releases the slot and the inhibit. */
 void fw_update_upload_app_abort(fw_update_upload_t u);
+
+/**
+ * True if an app image with this app ELF SHA-256 (esp_app_desc_t
+ * app_elf_sha256) is the code running now. The web refuses such an upload
+ * unless the user asked to install it again; fw_update_upload_app_finish()
+ * gives the identical image a stage-1-only trial (no verify window, no crash
+ * watch: receiver updates are not blocked for the watch's day).
+ */
+bool fw_update_same_as_running(const uint8_t elf_sha256[32]);
 
 /**
  * The user confirmed the receiver update: download the package for the

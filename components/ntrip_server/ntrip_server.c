@@ -230,6 +230,11 @@ typedef struct {
     bool ledger_enabled;
     bool ledger_protected;
     bool ledger_streaming;
+    /* Onocoy day figures: since when the slot counts today */
+    int32_t exp_day;             /* the UTC day exp_from_sod belongs to (-1 = none) */
+    uint32_t exp_from_sod;       /* second of that day the slot started to count (UINT32_MAX = not yet) */
+    bool counted_known;          /* account() ran this boot */
+    bool was_counted;            /* ... and the slot counted then */
 
     /* shared with API callers */
     volatile uint32_t cmd;
@@ -1178,6 +1183,22 @@ static void account(slot_t *s, uint32_t now)
             s->off_ms += dt;
         }
     }
+    /* Since when the protected slot counts today: from 00:00 UTC when it
+     * counted already (or at this boot's first look: the ledger has the
+     * downtime before it), else from the moment it was enabled and set up. */
+    bool counted = s->cfg.protected_slot && s->cfg.enabled && s_running && ntrip_server_onocoy_ready(&s->cfg);
+    time_t t = time(NULL);
+    if (day >= 0 && t >= CLOCK_VALID_UNIX) {
+        if (day != s->exp_day) {
+            s->exp_day = day;
+            s->exp_from_sod = UINT32_MAX;
+        }
+        if (counted && s->exp_from_sod == UINT32_MAX) {
+            s->exp_from_sod = (!s->counted_known || s->was_counted) ? 0u : (uint32_t)(t % 86400);
+        }
+    }
+    s->counted_known = true;
+    s->was_counted = counted;
 }
 
 static void publish(slot_t *s, uint32_t now, bool force)
@@ -1220,24 +1241,39 @@ static void publish(slot_t *s, uint32_t now, bool force)
         }
     }
 
-    if (s->cfg.protected_slot) {
-        uint32_t online = st->today_online_s;
-        uint32_t rate = online == 0 ? 1000u : (uint32_t)((uint64_t)st->epochs_sent_today * 1000u / online);
-        if (rate > 1000u) {
-            rate = 1000u;
+    /* The Onocoy day figures, only for a protected slot that is enabled and
+     * set up: numbers for a slot that cannot stream would only mislead. */
+    ntrip_day_in_t din = {
+        .counted = s->cfg.protected_slot && s->cfg.enabled && ntrip_server_onocoy_ready(&s->cfg),
+        .online_s = st->today_online_s,
+        .offline_s = st->today_offline_s,
+        .epochs_sent_today = st->epochs_sent_today,
+    };
+    time_t t = time(NULL);
+    if (din.counted && t >= CLOCK_VALID_UNIX && s->exp_day == (int32_t)(t / 86400) && s->exp_from_sod != UINT32_MAX) {
+        uint32_t sod = (uint32_t)(t % 86400);
+        din.day_known = true;
+        din.elapsed_s = sod > s->exp_from_sod ? sod - s->exp_from_sod : 0;
+        /* Unplanned downtime as the availability ledger counts it (power cuts included). */
+        ledger_day_t ld;
+        if (ledger_get_today(&ld) == ESP_OK && ld.utc_day == s->exp_day && s->idx < LEDGER_MAX_SLOTS) {
+            uint32_t down = ld.down_s[s->idx];
+            uint32_t planned = ld.planned_s[s->idx];
+            din.unplanned_offline_s = down > planned ? down - planned : 0;
+        } else {
+            din.unplanned_offline_s = st->today_offline_s;
         }
-        uint32_t budget = ntrip_offline_budget_s(rate);
-        uint64_t graced = ((uint64_t)online + NTRIP_GRACE_S) * 1000u / NTRIP_DAY_S;
-        st->graced_uptime_permille = (uint16_t)(graced > 1000u ? 1000u : graced);
-        st->data_rate_permille = (uint16_t)rate;
-        st->budget_left_s = budget > st->today_offline_s ? budget - st->today_offline_s : 0;
-        st->streak_ok = st->today_offline_s <= budget;
-    } else {
-        st->graced_uptime_permille = 0;
-        st->data_rate_permille = 0;
-        st->budget_left_s = 0;
-        st->streak_ok = false;
     }
+    ntrip_day_out_t dout;
+    ntrip_day_metrics(&din, &dout);
+    st->day_metrics_valid = dout.valid;
+    st->graced_uptime_permille = dout.graced_uptime_permille;
+    st->streak_ok = dout.streak_ok;
+    st->data_rate_permille = dout.data_rate_permille;
+    st->data_rate_valid = dout.rate_valid;
+    st->budget_left_s = dout.budget_left_s;
+    st->graced_uptime_so_far_permille = dout.graced_so_far_permille;
+    st->so_far_valid = dout.so_far_valid;
 
     uint16_t hint = s->hint;
     if (s->sm.hint != NTRIP_HINT_NONE) {
@@ -1800,6 +1836,8 @@ static esp_err_t create_slot(size_t i)
     s->idx = i;
     s->fd = -1;
     s->day = -1;
+    s->exp_day = -1;
+    s->exp_from_sod = UINT32_MAX;
     s_slots[i] = s;
     char name[configMAX_TASK_NAME_LEN];
     snprintf(name, sizeof(name), "cst%u", (unsigned)i);

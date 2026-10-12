@@ -69,7 +69,12 @@ matching `GET`).
 ```
 
 `code` is stable and machine-readable; `message` is English text for logs
-and fallbacks (the UI words its own text per code). `field` names the
+and fallbacks (the UI words its own text per code). For an `invalid_field`
+whose parser words the field's rule (the caster fields, section 10)
+`message` is that rule in lowercase words ("at most 23 bytes (fewer
+characters with accents or symbols), no control characters"), so the UI
+shows "<field label>: <rule>"; otherwise it is the code's default text.
+`field` names the
 offending request field (`invalid_field`), `retry_in_s` comes with
 `rate_limited` and `app_trial`, `by` with `reboot_inhibited` (the holder's
 label, e.g. `"receiver flash"`). Other fields may appear per code (listed
@@ -83,7 +88,7 @@ refused receiver maintenance (`receiver_session`, `live_view_output`).
 | 403 | `forbidden` (Origin or CSRF check failed, public status off), `wrong_password`, `not_on_setup_ap` |
 | 404 | `not_found`, `nothing_staged`, `no_journal`, `no_coredump`, `nothing_pending` |
 | 405 | `method_not_allowed` |
-| 409 | state conflicts: `busy`, `journal_open`, `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed` |
+| 409 | state conflicts: `busy`, `journal_open`, `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `same_image` |
 | 411 | `length_required` (uploads) |
 | 413 | `too_large` |
 | 415 | `unsupported_media_type` |
@@ -140,7 +145,11 @@ does not change still gets a fresh UI) and `Cache-Control:
 no-cache` (`304` on a matching `If-None-Match`). The UI routes with the URL
 fragment (`/#/casters`), so the server serves only `/`, `/index.html` and the
 fixed asset names; other paths outside `/api/` and `/ws` get `404` (on the
-AP interface: the captive redirect).
+AP interface: the captive redirect). `HEAD` on the page and the assets
+answers as `GET` does (status, `ETag`, `Content-Type`, `Content-Encoding`,
+`Content-Length`, the page's Content-Security-Policy; `304` on a matching
+`If-None-Match`) without the body; `HEAD` on `/api/` paths and `/ws` stays
+`405` (also without a body).
 
 The fixed asset names are `/app.js`, `/app.css` and `/favicon.svg` (`/` and
 `/index.html` are the page). The build generates the table of them from
@@ -252,6 +261,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | GET | `/api/gnss/live` | adm | Live view: window, satellites, totals | `station_live_view_touch`, `gnss_obs_get_live` |
 | POST | `/api/gnss/live` | adm | Open or extend the live view | `station_live_view_start` |
 | DELETE | `/api/gnss/live` | adm | Close it | `station_live_view_stop` |
+| POST | `/api/gnss/detect` | adm | No receiver found: search again now | `station_request_detect` |
 | GET | `/api/gnss/flash` | adm | Receiver update session, allowed actions | station |
 | POST | `/api/gnss/flash/retry` | adm | Flash the same package again | `station_flash_user_action` |
 | POST | `/api/gnss/flash/restart-receiver` | adm | Leave the loader, check the version | `station_flash_user_action` |
@@ -360,13 +370,14 @@ object as sections (section 7), so the UI keeps one model. Admin form:
                "responding": true, "identity_confirmed": true, "profile_applied": true,
                "position_locked": true, "surveying": false, "survey_window_left_s": 0,
                "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "journal": "none",
-               "uart_closed": false, "rx_maintenance": false, "maintenance_left_s": 0, "maintenance_chosen_s": 0},
+               "uart_closed": false, "rx_maintenance": false, "maintenance_left_s": 0, "maintenance_chosen_s": 0,
+               "next_detect_in_s": null},
   "casters": [
     {"slot": 0, "name": "Onocoy", "enabled": true, "protected": true, "host": "servers.onocoy.com",
      "state": "streaming", "reason": "none", "state_age_s": 3600, "connected_s": 3600,
      "today_online_s": 43200, "today_offline_s": 4, "graced_uptime_permille": 1000,
-     "streak_ok": true, "data_rate_permille": 1000, "budget_left_s": 469,
-     "bytes_sent": 74000000, "lag_ms_now": 40, "next_retry_s": 0, "unreached_s": 0, "hint": ""}
+     "streak_ok": true, "graced_uptime_so_far_permille": 1000, "data_rate_permille": 1000, "budget_left_s": 469,
+     "onocoy_ready": true, "bytes_sent": 74000000, "lag_ms_now": 40, "next_retry_s": 0, "unreached_s": 0, "hint": ""}
   ],
   "health": {"level": "degraded", "last_step": "none", "ladder_suspended": false,
              "factory_reset_refused": false, "recovery_mode": "full", "reboot_recheck": false},
@@ -394,9 +405,10 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.rx_maintenance` | receiver maintenance is on (section 8): nothing is sent to the receiver; `maintenance_left_s` until it ends by itself, `maintenance_chosen_s` the chosen duration with extensions (both 0 when off) |
 | `receiver.rtcm_age_ms` | since the last CRC-valid RTCM frame (`gnss_link`), `null` = never |
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
-| `casters[]` | every slot; the full status is in `/api/casters`. Protected-slot fields (`graced_uptime_permille`, `streak_ok`, `data_rate_permille`, `budget_left_s`) are `null` for other slots; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none) |
-| `alerts[]` | health's alerts (`source: "health"`) and the station's (`source: "station"`); `config_failed` carries `retry_in_s` |
-| `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without a protected slot or a trusted clock. Information only, never a gate |
+| `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
+| `casters[]` | every slot; the full status is in `/api/casters`. Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with the console's mountpoint, username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none) |
+| `alerts[]` | health's alerts (`source: "health"`) and the station's (`source: "station"`); `config_failed` carries `retry_in_s`; `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`) |
+| `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without an enabled protected slot that is set up (`onocoy_ready`), or without a trusted clock. Information only, never a gate |
 | `health.factory_reset_refused` | a BOOT-button factory reset was refused within the last 10 min because a receiver update was running (the UI shows a notice); admin form only |
 | `health.recovery_mode` | automatic receiver recovery in effect (`gnss/recovery`, `health_recovery_mode_t`): `full`, `no_reboot` (everything but the ESP32 reboot), `alerts_only` (nothing is sent to the receiver: a stall is only reported and journalled, level `degraded`, `failed` once the ladder gives up); admin form only |
 | `health.reboot_recheck` | no receiver found and an ESP32 reboot was blocked: it is looked at again after the next detection pass, when the reboot cap allows; admin form only |
@@ -471,9 +483,17 @@ hears nothing for 5 s reconnects.
 
 **Events:** `station_state` (`state`), `caster_state` (`slot`, `state`),
 `update_state` (`state`), `network` (`what`: `online`, `offline`, `ap_up`,
-`ap_down`, `time_synced`), `scan_done`, `settings_changed` (`ns`; advisory:
-reload that page's data), `receiver_restarted`, `rebooting` (`reason`; sent
-from `LIFECYCLE_EVENT_PRE_REBOOT`, then the server closes with `1012`).
+`ap_down`, `time_synced`), `scan_done`, `settings_changed` (`ns`, `client`;
+advisory: reload that page's data), `receiver_restarted`, `rebooting`
+(`reason`; sent from `LIFECYCLE_EVENT_PRE_REBOOT`, then the server closes
+with `1012`).
+
+`settings_changed.client` is the `X-Client-Id` request header (a random id
+per tab, `[A-Za-z0-9_-]`, at most 32 characters; the UI sends it with every
+request that is not a `GET`) of the request during which, or within 2 s
+after which, the settings changed; `null` when no such request was running.
+A page that finds its own id ignores the event as a warning (it made the
+change) and only reloads its data when no form is being edited.
 
 **Progress jobs** (`job`, `phase`; `pct` or `bytes`/`total` where known):
 
@@ -537,7 +557,7 @@ oldest.
   "profile_applied": true, "rtcm1230_supported": true,
   "config_failed": false, "config_retry_in_s": 0, "reconfigure_refused": false,
   "detect_failures": 0,
-  "link": {"baud": 115200, "mode": "stream", "rx_age_ms": 12, "rtcm_age_ms": 180,
+  "link": {"baud": 115200, "mode": "stream", "rx_bytes": 123456789, "rx_age_ms": 12, "rtcm_age_ms": 180,
            "open": true, "open_failures": 0, "hands_off": false},
   "autocfg": true,
   "recovery": "full",
@@ -571,7 +591,9 @@ oldest.
 | Field | Notes |
 |---|---|
 | `alerts` | station alerts only (`station_alert_t`) |
+| `rtcm1230_supported` | `gnss/rtcm1230_ok`: `true` the receiver accepted message 1230 at the last apply, `false` it refused it, `null` never applied (the key is not stored: "not applied yet") |
 | `link.mode` | `off`, `stream`, `command`, `raw` (`gnss_link`) |
+| `link.rx_bytes` | bytes received from the receiver since boot (0 = nothing arrived yet) |
 | `link.open`, `open_failures` | the UART driver is installed; failed installs since boot. `open: false` with a mode other than `off` = "receiver UART closed (reopening)": `gnss_link` reopens it on its own |
 | `link.hands_off` | the link refuses every write and lease (receiver maintenance) |
 | `recovery` | `gnss/recovery` as stored, `health_recovery_mode_t` (a stored value out of range reads as `full`, as health reads it) |
@@ -668,6 +690,8 @@ and admin clients.
   "rtcm1230_supported": true
 }
 ```
+
+`rtcm1230_supported` as in `GET /api/gnss` (`null` = never applied).
 
 `systems` lists only present constellations. `signal_ids` are the MSM
 signal IDs that carried at least one cell in the last 10 s (a signal an
@@ -790,7 +814,7 @@ interrupts RTCM is PROVISIONAL, to be confirmed on hardware.
 
 | Field | Notes |
 |---|---|
-| `window` | `station_status_t.live`; `left_s`, `idle_left_s`, `open_s` 0 while closed. `sky` (`station_live_sky_t`): `off`, `pending` (wanted, waits for a free moment: `sky_why`), `on`, `on_profile` (the profile sends it permanently), `blocked` (not in this window: `sky_why`), `stopping`. `sky_why` (`station_live_why_t`). `last_end` (`station_live_end_t`) why the last window closed. `sky_reply` the receiver's reply to the last failed toggle (`null` = none) |
+| `window` | `station_status_t.live`, computed at the time of the request (not as the station task last published it: a start or stop shows at once, also while a detection pass runs); `left_s`, `idle_left_s`, `open_s` 0 while closed. `sky` (`station_live_sky_t`): `off`, `pending` (wanted, waits for a free moment: `sky_why`), `on`, `on_profile` (the profile sends it permanently), `blocked` (not in this window: `sky_why`), `stopping`. `sky_why` (`station_live_why_t`). `last_end` (`station_live_end_t`) why the last window closed. `sky_reply` the receiver's reply to the last failed toggle (`null` = none) |
 | `receiver_state`, `rx_maintenance` | as in `/api/status`, for a page without the WebSocket (the setup wizard) |
 | `position` | the station's locked or last surveyed position (`null` coordinates with `source: "none"`), for the optional station map |
 | `totals` | `gnss_obs_get_live` over every satellite, also those beyond the list: `satellites` listed, `tracked` in an MSM within the last 10 s, `signals` their signals, `with_pos` with azimuth and elevation, `dropped` beyond the list; `cnr_dbhz` mean over every satellite band (`null` = none); `bands` per band with tracked satellites (count, mean C/N0); `systems` per constellation with tracked satellites, their count per band (only bands with any). `null` when the observations cannot be read |
@@ -817,6 +841,18 @@ receiver update session), `409 safe_mode`.
 
 Close it now (the output is turned off at the next free moment).
 `200 {"ok": true}`; `409 live_view_closed` when none is open.
+
+### No receiver: `POST /api/gnss/detect` (adm)
+
+`{}`. While the station found no receiver (`receiver.state`
+`no_receiver`) the next detection pass starts now instead of at
+`next_detect_in_s`; the search schedule goes on from where it was (passes
+30 s apart for the first 5 min of the episode, then every 5 min; the full
+baud list after two failed short passes and always after 5 min). A pass
+that runs already counts. `202 {"accepted": true}`. Errors:
+`409 not_no_receiver` (any other state, receiver maintenance included),
+`409 safe_mode`. The UI's no-receiver card (dashboard alert, setup
+wizard's reception step, Signals) offers it as "Check again".
 
 ---
 
@@ -931,14 +967,30 @@ is `disabled`.
 ```json
 {"enabled": true, "name": "Onocoy", "host": "servers.onocoy.com", "port": 2101,
  "ntrip_version": 1, "tls": false, "trust": "bundle", "ca_pem_set": false,
- "mountpoint": "<credential username>", "username": "", "password_set": true,
+ "mountpoint": "<console mountpoint>", "username": "<console username>", "password_set": true,
  "label": "", "v2_raw_body": false, "backoff_profile": "fast", "protected": true,
  "dup_stream_ack": false}
 ```
 
-Passwords are never returned (`password_set` only). For an Onocoy slot the
-UI labels `mountpoint` "Credential username" and `label` "Dashboard label"
-(NTRIP 2.0 only); it shows no `username` field.
+Passwords are never returned (`password_set` only). Every entry
+(`{"slot", "config", "status", "onocoy_ready"}`) says with `onocoy_ready`
+whether it is an Onocoy slot that is set up: host in `onocoy.com`,
+`mountpoint`, `username` and a stored password (false for every other
+slot).
+
+**Onocoy slots** hold exactly what the Onocoy console shows for a
+station's NTRIP credentials, and the UI asks for those in the console's
+words and order: host `servers.onocoy.com` and port 2101 (shown read-only),
+`mountpoint`, `username`, `password`. On the wire
+(`ntrip_wire_names()`): NTRIP 2.0 posts to `/<mountpoint>` with Basic
+`<username>:<password>`; NTRIP 1.0 (the default) sends
+`SOURCE <password> /<username>`, as Onocoy tells sources that speak only
+1.0 to do. A slot stored before the username field existed (Onocoy host,
+empty `username`, the old credential username in `mountpoint`) keeps
+working with the old mapping (1.0: `mountpoint` as the mountpoint; 2.0:
+`label` or `onocoydiy` as the mountpoint, `mountpoint` as the Basic-auth
+user) but is not set up (`onocoy_ready` false); its next save while enabled
+needs the username.
 
 **`status`** (`ntrip_caster_status_t`):
 
@@ -949,7 +1001,8 @@ UI labels `mountpoint` "Credential username" and `label` "Dashboard label"
                        "keepalive": 0, "auth": 0, "mount_busy": 0, "config": 0, "banned": 0},
  "connected_since_unix": 1760086400, "connected_s": 3600,
  "today_online_s": 43200, "today_offline_s": 4,
- "graced_uptime_permille": 1000, "streak_ok": true, "data_rate_permille": 1000, "budget_left_s": 469,
+ "graced_uptime_permille": 1000, "streak_ok": true, "graced_uptime_so_far_permille": 1000,
+ "data_rate_permille": 1000, "budget_left_s": 469,
  "bytes_sent": 74000000, "frames_sent": 900000, "epochs_sent": 86000, "epochs_sent_today": 43200,
  "frames_dropped": 0, "bytes_dropped": 0, "epochs_dropped": 0, "epochs_dropped_today": 0,
  "frames_skipped_idle": 12, "lag_drops": 0, "laps": 0, "lag_ms_now": 40, "max_lag_ms": 1000,
@@ -959,8 +1012,19 @@ UI labels `mountpoint` "Credential username" and `label` "Dashboard label"
  "tls_version": null, "tls_cipher": null, "hint": "", "last_err": null}
 ```
 
-"Today" is the current UTC day. The protected-slot fields are `null` for
-other slots; `tls_*` are `null` without TLS; `max_lag_ms` is the slot's lag
+"Today" is the current UTC day. The Onocoy day figures are `null` for
+other slots, and for the protected slot while it is disabled or not set up
+(`onocoy_ready` false): numbers for a slot that cannot stream would only
+mislead. `graced_uptime_permille` is the day fraction (online plus the
+300 s grant, of 86400 s; for diagnostics); `graced_uptime_so_far_permille`
+= 1 - max(0, unplanned downtime today - 300 s) / time elapsed today, with
+the downtime as the availability ledger counts it (planned time left out)
+and the time counted from 00:00 UTC, or from when the slot was enabled and
+set up during this boot when that came later (`null` without a trusted
+clock); `data_rate_permille` is `null` until something was sent today;
+`streak_ok` whether today's offline time is still within the budget for
+that data rate (the UI never shows the day in red while it is true);
+`tls_*` are `null` without TLS; `max_lag_ms` is the slot's lag
 limit; `unreached_s` the current run of failures that never reached the
 caster (DNS failures, connects that timed out or failed locally; 0 = none;
 the UI says "caster not reached for N s").
@@ -984,12 +1048,16 @@ that does not show a field cannot reset it). Output-only fields
   server applies them to the request only to name a refused field.
 - `dup_stream_ack`: see below.
 
-Validation (`400 invalid_field` with `field`): no control characters
-anywhere; `name` <= 23, `host` <= 63 (a DNS name or an IPv4 literal),
-`mountpoint` <= 47 of `[A-Za-z0-9._-]`, `username` <= 47 without `:`,
-`password` <= 63 (NTRIP 1.0: no spaces), `label` <= 47 of `[A-Za-z0-9]`;
-`port` 1-65535; `ntrip_version` 1 or 2; an enabled slot needs `host`,
-`port`, `mountpoint`, a password (1.0) and a username (2.0, except Onocoy).
+Validation (`400 invalid_field` with `field`, and the rule in `message`):
+no control characters anywhere; lengths in UTF-8 bytes: `name` <= 23,
+`host` <= 63 (a DNS name or an IPv4 literal), `mountpoint` <= 47 of
+`[A-Za-z0-9._-]`, `username` <= 47 without `:`, `password` <= 63 (NTRIP
+1.0: no spaces), `label` <= 47 of `[A-Za-z0-9]`; `port` 1-65535;
+`ntrip_version` 1 or 2; an enabled slot needs `host`, `port`, `mountpoint`,
+a password (1.0) and a username (2.0). Onocoy slots: `username`
+`[A-Za-z0-9._-]` (1.0 sends it as the mountpoint), `password` 1-63
+characters without spaces in either version; an enabled Onocoy slot needs
+`mountpoint`, `username` and a password.
 
 **Caster policy** (`409 caster_policy` with `reason`). The rules belong
 to `ntrip_server`: `ntrip_server_set_config()` checks them against the
@@ -1160,6 +1228,9 @@ a newer version appears; the server keeps no "later" state.
 {
   "state": "idle", "progress_pct": 0, "checks_enabled": true,
   "release_repo": "Averyy/onocoydiy-esp-um982", "signed_manifests": false, "last_check_unix": 1760080000,
+  "last_attempt_unix": 1760080000, "last_check_result": "ok", "last_http_status": 200, "next_check_in_s": 86100,
+  "app_max_bytes": 4194304, "pkg_max_bytes": 6287360,
+  "running_elf_sha256": "3f2a...64 hex...",
   "last_result": {"job": "gnss_update", "result": "not_available_yet", "message": "ESP_ERR_NOT_SUPPORTED"},
   "app": {"running": "v0.3.0", "dev_build": false, "latest": "v0.4.0", "available": true,
           "latest_rolled_back": false, "rolled_back": ["v0.3.1"], "reverted": "", "reverted_in_stage1": false,
@@ -1178,6 +1249,12 @@ a newer version appears; the server keeps no "later" state.
 | `release_repo` | `owner/name` whose GitHub releases the station reads (`CONFIG_FW_UPDATE_GITHUB_REPO`; `null` if unset) |
 | `signed_manifests` | `true` when the build has a manifest key and accepts signed manifests only |
 | `last_result` | outcome of the last job the backend saw end (`job`: `check`, `app_update`, `app_upload`, `gnss_update`, `gnss_upload`, `rollback`), `null` this boot until one ended |
+| `last_attempt_unix` | the last update check this boot, successful or not (`last_check_unix` stays the last success, which the daily schedule runs from); `null` before one, or without a trusted clock then |
+| `last_check_result` | how that check went (`fw_update_check_result_t`): `ok`, `no_release` (HTTP 404: no public release with a manifest at `release_repo`), `http_error` (another status: `last_http_status`), `no_response` (offline, DNS, TLS, timeout, no trusted clock yet; retried after 1 h), `untrusted_redirect`, `bad_manifest` (an answer, but no manifest this build accepts); `null` before the first check of this boot. A field of its own because `last_result` already names job outcomes |
+| `last_http_status` | the check's final HTTP status, `null` when no answer came |
+| `next_check_in_s` | until the next automatic check is due (`0` = due, it waits for the network), `null` when this build cannot check |
+| `app_max_bytes`, `pkg_max_bytes` | the largest app image (the update slot) and receiver package (`pkg_store_capacity()`) an upload may be; the UI checks a file against them before sending it |
+| `running_elf_sha256` | the running app's ELF SHA-256 (`esp_app_desc_t.app_elf_sha256`): an app image with the same one is the code running now |
 | `app.trial.stage` | `none`, `confirming`, `verifying`, `watching` |
 | `app.latest_rolled_back` | the latest release is one that was rolled back here: not offered, installable with a warning |
 | `app.rolled_back` | every version rolled back on this station, newest first (`fw_update_get_rolled_back()`: reverted by its trial, rolled back by the user, or rolled back twice in its first minute; the last 8, kept through a factory reset). The banner offers none of them, however many daily checks later; installing one, from the banner or as an upload, asks for `rolled_back_ack` first |
@@ -1281,11 +1358,27 @@ first, nothing is written. Then the image goes through
 `fw_update_upload_app_*`, which claims the update slot and a reboot inhibit
 before the first byte.
 
+An image whose app ELF SHA-256 equals the running one (the code running
+now) is refused the same way with `409 same_image`, unless the request
+carries the header `X-Reinstall: 1` (the UI asks "This is the version
+already running (v). Install it again?" first). A confirmed reinstall of
+the identical image runs stage 1 of the trial only (the bootloader's
+first-minute check): identical code needs no verify window and no crash
+watch, so receiver updates are not held back for the watch's day.
+
 `200 {"sha256": "...", "size": 1234567, "version": "v0.4.0+dev", "project": "onocoydiy-esp-um982", "reboot": true}`;
 the device reboots into the image about a second after the response and
 runs the trial. Errors: `400 invalid_image` (not a valid app for this chip),
 `400 size_mismatch` (fewer bytes than announced), `409
-rolled_back_ack_required`, `409 journal_open`, `409 busy`, `409 app_trial`.
+rolled_back_ack_required`, `409 same_image`, `409 journal_open`, `409
+busy`, `409 app_trial`.
+
+The UI reads the file's first bytes before sending anything (image magic
+`0xE9`; the app description at offset 32: magic `0xABCD5432`, `version` at
+offset 48, `project_name` at offset 80, `app_elf_sha256` at offset 176) and
+refuses another project or a file over `app_max_bytes` with the reason,
+asks for the acknowledgement of a version on `app.rolled_back`, and asks
+before reinstalling the running image.
 
 ### `POST /api/upload/gnss` (adm)
 
@@ -1308,6 +1401,10 @@ then inspected without the receiver. The response, also returned by
   "expected_downtime_s": 252, "budget_left_s": 469, "flash_available": false
 }
 ```
+
+`GET /api/upload/gnss` answers `200 {"staged": null}` when no uploaded
+package waits for confirmation (nothing waiting is the resource's normal
+state, not a missing one).
 
 `layout` is the index of the known partition table the package carries
 (`-1` unknown), `layout_build` the receiver build it belongs to (`0`
@@ -1387,9 +1484,13 @@ All admin only.
               "written": 12, "queued": 0, "refused_kind": 0, "refused_budget": 0, "queue_full": 0, "io_errors": 0},
   "log": {"lines": 812, "ring_overwritten": 0, "cut": 0, "console_dropped": 0, "console_dropped_bytes": 0,
           "prev_boot_available": true, "prev_boot_lines": 640},
-  "coredump": {"present": false, "size": 0, "task": "", "pc": null, "backtrace": []}
+  "coredump": {"present": false, "size": 0, "task": "", "pc": null, "backtrace": []},
+  "byte_capture_built": false
 }
 ```
+
+`byte_capture_built`: this build records the receiver's bytes (bench builds,
+`GET /api/diag/flash-capture`); the UI shows the download only then.
 
 `rtcm_gap_ms` is the time since the last RTCM frame. `gnss_retry_in_s` is
 the time until the receiver recovery's next retry pass (`null` = none
@@ -1497,7 +1598,7 @@ At most 64 entries per call, oldest first, `seq > cursor`. `time_unix`
 | `reboot` | reason | — |
 | `ladder_step` | ladder (0 GNSS, 1 network, 2 caster) | `(outcome << 8) \| code` (outcome 0 started, 1 healthy again, 2 failed or refused, 3 abandoned, 4 not run because of the recovery mode; network: `(reason << 16) \| ...`, and code 0 = a pass started with the trigger bits as the reason: 1 protected caster down, 2 associated without an IP, 4 a slot not reaching its caster); see `diag.h`, `network.h` |
 | `app_update` | result (`esp_err_t`) | — |
-| `app_revert` | trial stage | — |
+| `app_revert` | trial stage that gave the image up (`fw_update_trial_t`; 0 = the user's rollback) | 1 = the user's rollback; a stage-1 rollback the bootloader did: the attempt (1, 2) |
 | `gnss_flash` | the session's outcome (`station_flash_outcome_t`), written when its journal closes | transfers under the journal |
 | `safe_mode` | episode | — |
 | `wifi_disconnect` | `wifi_err_reason_t` | RSSI |
@@ -1714,6 +1815,16 @@ no receiver update action.
   frames outnumber the other client's requests, and the server would have
   to tell those frames from the page's own messages so as not to extend the
   session.
+- **Refusals that close the connection** (a body that is too large, a
+  missing session with a body, an upload refused before its body is read):
+  the error goes out with `Connection: close`, the server ends its side
+  (`shutdown(SHUT_WR)`), then reads and drops what the client still sends,
+  at most 64 KB or 2 s, before it closes. A close with unread data in the
+  socket would send a reset, and many clients then drop the answer still in
+  their receive buffer (the browser shows "connection reset" instead of the
+  413). The server's own warnings for these expected cases
+  (`httpd_uri`, `httpd_txrx`, `httpd_ws`) are logged at error level only;
+  the handlers log the refusals that matter.
 - **Handlers never block for long.** Station, caster, network and update
   calls are asynchronous; a handler reads snapshots and returns. The
   password check (about 0.3 s) runs on the server task. Uploads and
@@ -1796,7 +1907,7 @@ after it). The journal's `a` and `b` carry these C values.
 | Enum (C) | API strings |
 |---|---|
 | `station_state_t` | `idle`, `detecting`, `configuring`, `streaming`, `flashing`, `flash_recovery`, `recovering`, `no_receiver` |
-| `station_alert_t` | `unsupported_model`, `config_failed`, `position_mismatch`, `antenna_moved`, `receiver_attention`, `receiver_in_loader` |
+| `station_alert_t` | `unsupported_model`, `config_failed`, `position_mismatch`, `antenna_moved`, `receiver_attention`, `receiver_in_loader`, `no_receiver` |
 | `health_level_t` | `ok`, `degraded`, `recovering`, `failed` |
 | `health_step_t` | `none`, `resync`, `link_restart`, `rescan`, `reconfigure`, `receiver_reset`, `reboot` |
 | `health_alert_t` | `power_supply`, `receiver_power`, `bands`, `profile_drift`, `heap_fragmented`, `safe_mode`, `settings_degraded`, `no_upstream`, `link_loss`, `power_lost` |
@@ -1818,6 +1929,7 @@ after it). The journal's `a` and `b` carry these C values.
 | `fw_update_state_t` | `idle`, `checking`, `downloading_app`, `downloading_gnss`, `reboot_pending`, `failed`, `uploading_app` |
 | `fw_update_trial_t` | `none`, `confirming`, `verifying`, `watching` |
 | `fw_update_gnss_block_t` | `none`, `app_trial`, `journal_open`, `unsupported_model`, `safe_mode`, `app_update`, `receiver_not_streaming` |
+| `fw_update_check_result_t` | (none: `null`), `ok`, `no_release`, `http_error`, `no_response`, `untrusted_redirect`, `bad_manifest` |
 | `network_probe_t` | `none`, `ok`, `no_ip`, `dns_failed`, `no_upstream` |
 | `network_ap_reason_t` | `setup`, `fallback`, `linger`, `recovery` |
 | `network_ladder_why_t` | `none`, `upstream_ok`, `no_upstream`, `journal_open`, `interval`, `inhibited`, `ap_in_use`, `no_reboot_trigger`, `ap_overridden` |

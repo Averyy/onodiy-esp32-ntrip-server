@@ -253,6 +253,7 @@ typedef enum {
     STATION_ALERT_ANTENNA_MOVED      = 1u << 3, /**< fixed base and no RTCM after a receiver restart: antenna moved more than 300 m? re-survey */
     STATION_ALERT_RECEIVER_ATTENTION = 1u << 4, /**< RTCM did not resume after a receiver update session ended */
     STATION_ALERT_RECEIVER_IN_LOADER = 1u << 5, /**< receiver found at its loader prompt without an update session: listen-only until the user acts */
+    STATION_ALERT_NO_RECEIVER        = 1u << 6, /**< no receiver found (state NO_RECEIVER; not with RECEIVER_IN_LOADER or in maintenance): next_detect_in_s says when the next search runs */
 } station_alert_t;
 
 /**
@@ -369,6 +370,7 @@ typedef struct {
     uint32_t alerts;                 /**< station_alert_t flags */
     bool profile_applied;            /**< receiver runs the stored profile */
     bool rtcm1230_supported;         /**< gnss/rtcm1230_ok: the receiver accepted RTCM1230 at the last apply (required in the observed set only then) */
+    bool rtcm1230_known;             /**< gnss/rtcm1230_ok is stored (false: never applied; rtcm1230_supported is then false and means "not applied yet") */
     bool config_failed;              /**< STATION_ALERT_CONFIG_FAILED is raised */
     uint32_t config_retry_in_s;      /**< until the station's next apply retry (0 = none scheduled) */
     bool reconfigure_refused;        /**< STATION_RECOVER_RECONFIGURE would be refused now (gnss/autocfg = 0 or config_failed) */
@@ -386,6 +388,7 @@ typedef struct {
     uint32_t detect_failures;        /**< consecutive failed detections */
     bool detect_saw_bytes;           /**< the last failed detection pass received bytes at some baud (health's byte rule on entering NO_RECEIVER) */
     uint32_t detect_passes;          /**< detection passes completed since boot, found or not (health looks at a blocked ESP32 reboot again only after a newer pass) */
+    uint32_t next_detect_in_s;       /**< NO_RECEIVER or DETECTING: seconds until the next detection pass (0 = due or running), read at the time of the call; UINT32_MAX otherwise */
     uint64_t rtcm_excluded;          /**< frames of types 1101-1107 kept out of the hub */
     um98x_flash_progress_t flash;    /**< valid while FLASHING / FLASH_RECOVERY */
 
@@ -443,8 +446,27 @@ esp_err_t station_init(void);
 /** Start the supervisor task (journal recovery, or stream-first detect -> configure -> stream). */
 esp_err_t station_start(void);
 
-/** Status snapshot. Works before station_init() (safe mode): state IDLE, journal read from settings. */
+/**
+ * Status snapshot. Works before station_init() (safe mode): state IDLE,
+ * journal read from settings. Most fields are what the station task
+ * published after its last step; the live view window (`live`: open,
+ * left_s, idle_left_s, open_s, sky, sky_why, last_end), the no-receiver
+ * alert and next_detect_in_s are computed from the supervisor's state at
+ * the time of the call, so a live-view start or stop shows at once even
+ * while a long job (a detection pass) runs.
+ */
 esp_err_t station_get_status(station_status_t *out);
+
+/**
+ * The user's "check again" while no receiver is found: the next detection
+ * pass starts now, without moving the search schedule on (30 s apart for
+ * the first 5 min of the episode, then every 5 min; the full baud list
+ * after two failed short passes and always after 5 min). Accepted while a
+ * pass already runs. Async.
+ * @return ESP_OK; ESP_ERR_INVALID_STATE unless the state is NO_RECEIVER
+ *         (also uninitialised, safe mode, receiver maintenance).
+ */
+esp_err_t station_request_detect(void);
 
 /**
  * Re-apply the stored base profile (after the user edits it). Async; runs

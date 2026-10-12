@@ -283,3 +283,17 @@ TEST_CASE("schedule: jitter is 5-15 min and stable per MAC", "[update_policy]")
     TEST_ASSERT_TRUE(lo < 330);
     TEST_ASSERT_TRUE(hi > 870);
 }
+
+TEST_CASE("check outcome: a missing release is told apart from other answers", "[update_policy]")
+{
+    TEST_ASSERT_EQUAL(FW_OUTCOME_NO_RELEASE, fw_policy_check_outcome(FW_HTTP_BAD_ANSWER, 404, false));
+    TEST_ASSERT_EQUAL(FW_OUTCOME_HTTP_ERROR, fw_policy_check_outcome(FW_HTTP_BAD_ANSWER, 500, false));
+    TEST_ASSERT_EQUAL(FW_OUTCOME_HTTP_ERROR, fw_policy_check_outcome(FW_HTTP_BAD_ANSWER, 302, false));   /* too many redirects */
+    TEST_ASSERT_EQUAL(FW_OUTCOME_BAD_MANIFEST, fw_policy_check_outcome(FW_HTTP_BAD_ANSWER, 200, false));  /* too large */
+    TEST_ASSERT_EQUAL(FW_OUTCOME_BAD_MANIFEST, fw_policy_check_outcome(FW_HTTP_OK, 200, false));
+    TEST_ASSERT_EQUAL(FW_OUTCOME_OK, fw_policy_check_outcome(FW_HTTP_OK, 200, true));
+    TEST_ASSERT_EQUAL(FW_OUTCOME_OK, fw_policy_check_outcome(FW_HTTP_NOT_MODIFIED, 304, false));
+    TEST_ASSERT_EQUAL(FW_OUTCOME_NO_RESPONSE, fw_policy_check_outcome(FW_HTTP_NO_RESPONSE, 0, false));
+    TEST_ASSERT_EQUAL(FW_OUTCOME_NO_RESPONSE, fw_policy_check_outcome(FW_HTTP_LOCAL_ERROR, 0, false));
+    TEST_ASSERT_EQUAL(FW_OUTCOME_UNTRUSTED_REDIRECT, fw_policy_check_outcome(FW_HTTP_UNTRUSTED, 302, false));
+}

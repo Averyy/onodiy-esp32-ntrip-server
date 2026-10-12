@@ -78,6 +78,8 @@ typedef enum {
     WEB_ERR_NOT_AVAILABLE_YET,
     WEB_ERR_CHECKS_DISABLED,
     WEB_ERR_TOO_MANY_CLIENTS,
+    WEB_ERR_NOT_NO_RECEIVER,
+    WEB_ERR_SAME_IMAGE,
     WEB_ERR_COUNT,
 } web_err_t;
 
@@ -315,11 +317,15 @@ typedef enum {
 #define WEB_DESC_VERSION_OFS     16u
 #define WEB_DESC_PROJECT_OFS     48u
 #define WEB_DESC_FIELD_LEN       32u
+#define WEB_DESC_ELF_SHA_OFS     144u     /**< app_elf_sha256[32] */
 #define WEB_IMAGE_HEAD_MIN       (WEB_IMAGE_DESC_OFS + WEB_DESC_PROJECT_OFS + WEB_DESC_FIELD_LEN)
+#define WEB_IMAGE_HEAD_SHA       (WEB_IMAGE_DESC_OFS + WEB_DESC_ELF_SHA_OFS + 32u)
 
 typedef struct {
     char version[33];
     char project[33];
+    bool has_elf_sha;            /**< the head reached the app description's ELF SHA-256 */
+    uint8_t elf_sha256[32];      /**< SHA-256 of the app's ELF file (identical code has the same) */
 } web_image_info_t;
 
 /**
@@ -331,12 +337,16 @@ web_image_check_t web_image_check(const uint8_t *head, size_t len, uint16_t chip
 
 /**
  * What an app upload gets after its first bytes were checked: WEB_ERR_COUNT
- * = go on and install; WEB_ERR_INVALID_IMAGE, WEB_ERR_NOT_THIS_PROJECT; or
- * WEB_ERR_ROLLED_BACK_ACK_REQUIRED for a version that was rolled back on
- * this station (`rolled_back`) unless the user acknowledged it
- * (`?rolled_back_ack=1`), the same warning an install from the banner gives.
+ * = go on and install; WEB_ERR_INVALID_IMAGE, WEB_ERR_NOT_THIS_PROJECT;
+ * WEB_ERR_SAME_IMAGE for the image already running (`same_image`: its ELF
+ * SHA-256 equals the running one) unless the user asked to install it again
+ * (`reinstall`, header X-Reinstall: 1); or WEB_ERR_ROLLED_BACK_ACK_REQUIRED
+ * for a version that was rolled back on this station (`rolled_back`) unless
+ * the user acknowledged it (`?rolled_back_ack=1`), the same warning an
+ * install from the banner gives.
  */
-web_err_t web_app_upload_verdict(web_image_check_t chk, bool rolled_back, bool rolled_back_ack);
+web_err_t web_app_upload_verdict(web_image_check_t chk, bool rolled_back, bool rolled_back_ack, bool same_image,
+                                 bool reinstall);
 
 /* ---- status deltas, dates, names ------------------------------------------------------------- */
 

@@ -24,6 +24,15 @@ static bool invalid(web_bad_t *bad, const char *field)
     return fail(bad, WEB_ERR_INVALID_FIELD, field);
 }
 
+/* invalid_field with the field's rule in words (the error's message). */
+static bool invalid_rule(web_bad_t *bad, const char *field, const char *rule)
+{
+    if (bad != NULL) {
+        bad->rule = rule;
+    }
+    return fail(bad, WEB_ERR_INVALID_FIELD, field);
+}
+
 bool web_json_depth_ok(const char *text, size_t len, unsigned max_depth)
 {
     unsigned depth = 0;
@@ -405,19 +414,30 @@ bool web_parse_live(const cJSON *root, uint32_t max_min, uint32_t *minutes, web_
 
 /* ---- casters ----------------------------------------------------------------------------------- */
 
-static bool str_field(const cJSON *root, const char *key, char *dst, size_t dst_size, size_t max_len,
-                      const char *allowed_extra, web_bad_t *bad)
+static bool str_field_rule(const cJSON *root, const char *key, char *dst, size_t dst_size, size_t max_len,
+                           const char *allowed_extra, const char *rule, web_bad_t *bad)
 {
     const char *s = NULL;
     member_t m = get_str(root, key, max_len, &s);
     if (m == M_BAD || (m == M_OK && allowed_extra != NULL && !web_chars_ok(s, allowed_extra))) {
-        return invalid(bad, key);
+        return invalid_rule(bad, key, rule);
     }
     if (m == M_OK) {
         strlcpy(dst, s, dst_size);
     }
     return true;
 }
+
+/* The caster fields' rules in words (the 400's message; the UI shows "<label>: <rule>"). */
+#define RULE_NAME     "at most 23 bytes (fewer characters with accents or symbols), no control characters"
+#define RULE_HOST     "a host name or an IPv4 address, at most 63 characters"
+#define RULE_PORT     "a port from 1 to 65535"
+#define RULE_MOUNT    "letters, digits, \".\", \"_\" and \"-\", at most 47"
+#define RULE_USER     "at most 47 bytes, without \":\""
+#define RULE_PASSWORD "at most 63 bytes, no control characters"
+#define RULE_PW_V1    "no spaces (NTRIP 1.0 sends the password in the request line)"
+#define RULE_PW_ONO   "1 to 63 characters, no spaces"
+#define RULE_LABEL    "letters and digits only, at most 47"
 
 bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, ntrip_caster_cfg_t *out,
                           web_bad_t *bad)
@@ -434,18 +454,18 @@ bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, n
     } else if (m == M_OK) {
         c.enabled = b;
     }
-    if (!str_field(root, "name", c.name, sizeof(c.name), sizeof(c.name) - 1, NULL, bad)) {
+    if (!str_field_rule(root, "name", c.name, sizeof(c.name), sizeof(c.name) - 1, NULL, RULE_NAME, bad)) {
         return false;
     }
     const char *host = NULL;
     if ((m = get_str(root, "host", sizeof(c.host) - 1, &host)) == M_BAD ||
         (m == M_OK && host[0] != '\0' && !web_host_name_ok(host))) {
-        return invalid(bad, "host");
+        return invalid_rule(bad, "host", RULE_HOST);
     } else if (m == M_OK) {
         strlcpy(c.host, host, sizeof(c.host));
     }
     if ((m = get_int(root, "port", 1, 65535, &v)) == M_BAD) {
-        return invalid(bad, "port");
+        return invalid_rule(bad, "port", RULE_PORT);
     } else if (m == M_OK) {
         c.port = (uint16_t)v;
     }
@@ -463,19 +483,20 @@ bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, n
     if ((m = get_str(root, "trust", 16, &trust)) == M_BAD || (m == M_OK && !web_ntrip_trust_parse(trust, &c.trust_mode))) {
         return invalid(bad, "trust");
     }
-    if (!str_field(root, "mountpoint", c.mountpoint, sizeof(c.mountpoint), sizeof(c.mountpoint) - 1, "._-", bad)) {
+    if (!str_field_rule(root, "mountpoint", c.mountpoint, sizeof(c.mountpoint), sizeof(c.mountpoint) - 1, "._-",
+                        RULE_MOUNT, bad)) {
         return false;
     }
     const char *user = NULL;
     if ((m = get_str(root, "username", sizeof(c.username) - 1, &user)) == M_BAD ||
         (m == M_OK && strchr(user, ':') != NULL)) {
-        return invalid(bad, "username");
+        return invalid_rule(bad, "username", RULE_USER);
     } else if (m == M_OK) {
         strlcpy(c.username, user, sizeof(c.username));
     }
     const char *pw = NULL;
     if ((m = get_str(root, "password", sizeof(c.password) - 1, &pw)) == M_BAD) {
-        return invalid(bad, "password");
+        return invalid_rule(bad, "password", RULE_PASSWORD);
     } else if (m == M_OK) {
         strlcpy(c.password, pw, sizeof(c.password));
     }
@@ -485,7 +506,7 @@ bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, n
         c.clear_password = true;
         memset(c.password, 0, sizeof(c.password));
     }
-    if (!str_field(root, "label", c.label, sizeof(c.label), sizeof(c.label) - 1, "", bad)) {
+    if (!str_field_rule(root, "label", c.label, sizeof(c.label), sizeof(c.label) - 1, "", RULE_LABEL, bad)) {
         return false;
     }
     if ((m = get_bool(root, "v2_raw_body", &b)) == M_BAD) {
@@ -513,29 +534,42 @@ bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, n
     }
     c.password_set = false;
     c.ca_pem_set = false;
+    bool onocoy = c.protected_slot;   /* the host rules: exactly the Onocoy hosts */
 
-    /* NTRIP 1.0 sends the password in the request line. */
-    if (c.proto == NTRIP_PROTO_V1 && strchr(c.password, ' ') != NULL) {
-        return invalid(bad, "password");
+    if (onocoy) {
+        /* What the Onocoy console gives. NTRIP 1.0 sends the username as the
+         * mountpoint and the password in the request line, so both keep
+         * those rules whichever version is chosen. */
+        if (c.username[0] != '\0' && !web_chars_ok(c.username, "._-")) {
+            return invalid_rule(bad, "username", RULE_MOUNT);
+        }
+        if (strchr(c.password, ' ') != NULL) {
+            return invalid_rule(bad, "password", RULE_PW_ONO);
+        }
+    } else if (c.proto == NTRIP_PROTO_V1 && strchr(c.password, ' ') != NULL) {
+        /* NTRIP 1.0 sends the password in the request line. */
+        return invalid_rule(bad, "password", RULE_PW_V1);
     }
     if (c.enabled) {
         bool keep_old = !c.clear_password && stored->password_set && strcmp(c.host, stored->host) == 0;
         bool have_pw = c.password[0] != '\0' || keep_old;
         if (c.host[0] == '\0') {
-            return invalid(bad, "host");
+            return invalid_rule(bad, "host", "enter the caster's host name");
         }
         if (c.port == 0) {
-            return invalid(bad, "port");
+            return invalid_rule(bad, "port", RULE_PORT);
         }
         if (c.mountpoint[0] == '\0') {
-            return invalid(bad, "mountpoint");
+            return invalid_rule(bad, "mountpoint", "enter the mountpoint");
         }
-        if (c.proto == NTRIP_PROTO_V1 && !have_pw) {
-            return invalid(bad, "password");
+        if (onocoy && c.username[0] == '\0') {
+            return invalid_rule(bad, "username", "enter the username from the Onocoy console");
         }
-        /* The Onocoy slot (protected, by the host rules) authenticates with its mountpoint. */
-        if (c.proto == NTRIP_PROTO_V2 && !c.protected_slot && c.username[0] == '\0') {
-            return invalid(bad, "username");
+        if ((c.proto == NTRIP_PROTO_V1 || onocoy) && !have_pw) {
+            return invalid_rule(bad, "password", "enter the password");
+        }
+        if (c.proto == NTRIP_PROTO_V2 && !onocoy && c.username[0] == '\0') {
+            return invalid_rule(bad, "username", "NTRIP 2.0 needs a username");
         }
     }
     *out = c;

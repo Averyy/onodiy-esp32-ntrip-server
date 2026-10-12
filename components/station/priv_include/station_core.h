@@ -169,6 +169,7 @@ typedef enum {
 #define STN_ALERT_ANTENNA_MOVED      (1u << 3)
 #define STN_ALERT_RECEIVER_ATTENTION (1u << 4)
 #define STN_ALERT_RECEIVER_IN_LOADER (1u << 5)
+#define STN_ALERT_NO_RECEIVER        (1u << 6)   /**< derived (stn_alerts): never stored in `alerts` */
 
 /** Same values as station_recovery_t (mildest first). */
 typedef enum {
@@ -569,6 +570,14 @@ int stn_request_bench(stn_t *s);
 /** Check the staged package only (STN_JOB_PKG_CHECK): not while a flash journal is open. */
 int stn_request_pkg_check(stn_t *s);
 
+/**
+ * The user's "check again" in NO_RECEIVER: the next detection pass is due
+ * now (the episode's schedule position, short_fails and episode start, is
+ * kept). A pass that runs already counts. @return STN_OK, STN_E_STATE in
+ * any other state or in maintenance.
+ */
+int stn_request_detect(stn_t *s, int64_t now_ms);
+
 /** Unsolicited restart evidence (banner or version log). */
 void stn_restart_seen(stn_t *s);
 
@@ -666,6 +675,19 @@ bool stn_surveying(const stn_t *s, int64_t now_ms);
 uint32_t stn_survey_left_s(const stn_t *s, int64_t now_ms);
 /** Seconds to the next CONFIG_FAILED retry (0 = none scheduled). */
 uint32_t stn_config_retry_in_s(const stn_t *s, int64_t now_ms);
+
+/**
+ * The alerts to report: `alerts` plus STN_ALERT_NO_RECEIVER while the state
+ * is NO_RECEIVER, the receiver is not at its loader (RECEIVER_IN_LOADER)
+ * and maintenance is off. Leaving the state clears it.
+ */
+uint32_t stn_alerts(const stn_t *s);
+
+/**
+ * NO_RECEIVER or DETECTING: seconds until the next detection pass (0 = due
+ * now or running). UINT32_MAX in every other state.
+ */
+uint32_t stn_next_detect_in_s(const stn_t *s, int64_t now_ms);
 
 /** CONFIG_FAILED backoff: delay after the n-th failure in a row (n >= 1), ms. */
 int64_t stn_apply_backoff_ms(uint32_t failures);

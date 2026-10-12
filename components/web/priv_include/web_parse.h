@@ -27,10 +27,15 @@
 extern "C" {
 #endif
 
-/** Why a body was refused: the error and the field it names (NULL = none). */
+/**
+ * Why a body was refused: the error, the field it names (NULL = none) and,
+ * where a parser words it, the field's rule ("at most 23 bytes"; NULL =
+ * none: the code's default message).
+ */
 typedef struct {
     web_err_t err;
     const char *field;
+    const char *rule;
 } web_bad_t;
 
 /** Deepest nesting of objects and arrays a request may have (cJSON parses recursively). */

@@ -175,7 +175,8 @@ static ntrip_caster_cfg_t stored_caster(void)
     strcpy(c.host, "servers.onocoy.com");
     c.port = 2101;
     c.proto = NTRIP_PROTO_V1;
-    strcpy(c.mountpoint, "user123");
+    strcpy(c.mountpoint, "MP_123");    /* what the Onocoy console gives: mountpoint, username, password */
+    strcpy(c.username, "user123");
     c.password_set = true;
     c.backoff_profile = NTRIP_BACKOFF_FAST;
     return c;
@@ -317,7 +318,8 @@ TEST_CASE("caster edits keep left-out fields and the stored password", "[web_par
     TEST_ASSERT_TRUE(caster_put("{\"name\":\"Main\",\"password_set\":false,\"protected\":false}", &c, &b));
     TEST_ASSERT_EQUAL_STRING("Main", c.name);
     TEST_ASSERT_EQUAL_STRING("servers.onocoy.com", c.host);
-    TEST_ASSERT_EQUAL_STRING("user123", c.mountpoint);
+    TEST_ASSERT_EQUAL_STRING("MP_123", c.mountpoint);
+    TEST_ASSERT_EQUAL_STRING("user123", c.username);
     TEST_ASSERT_EQUAL_STRING("", c.password);           /* "" = keep the stored one (same host) */
     TEST_ASSERT_FALSE(c.clear_password);
     TEST_ASSERT_TRUE(c.protected_slot);                  /* server-set: Onocoy */
@@ -370,7 +372,12 @@ TEST_CASE("caster fields are validated and named", "[web_parse]")
         { "{\"host\":\"\"}", "host" },                                      /* enabled needs a host */
         { "{\"mountpoint\":\"\"}", "mountpoint" },
         { "{\"host\":\"caster.example.org\"}", "password" },                  /* new host: old password not kept */
-        { "{\"host\":\"caster.example.org\",\"ntrip_version\":2,\"password\":\"p\"}", "username" },
+        { "{\"host\":\"caster.example.org\",\"ntrip_version\":2,\"password\":\"p\",\"username\":\"\"}", "username" },
+        /* Onocoy: what its console gives. */
+        { "{\"username\":\"\"}", "username" },                               /* enabled needs the username */
+        { "{\"username\":\"user 1\"}", "username" },                         /* 1.0 sends it as the mountpoint */
+        { "{\"ntrip_version\":2,\"username\":\"user:1\"}", "username" },
+        { "{\"ntrip_version\":2,\"password\":\"with space\"}", "password" }, /* no spaces, 2.0 too */
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         ntrip_caster_cfg_t c;
@@ -381,9 +388,15 @@ TEST_CASE("caster fields are validated and named", "[web_parse]")
     }
     ntrip_caster_cfg_t c;
     web_bad_t b = { 0 };
-    /* NTRIP 2.0 Onocoy needs no username; spaces are fine in a 2.0 password. */
-    TEST_ASSERT_TRUE(caster_put("{\"ntrip_version\":2,\"password\":\"with space\",\"label\":\"Roof1\"}", &c, &b));
+    /* Spaces are fine in a 2.0 password for other casters. */
+    TEST_ASSERT_TRUE(caster_put("{\"host\":\"caster.example.org\",\"ntrip_version\":2,\"username\":\"bob\","
+                                "\"password\":\"with space\"}", &c, &b));
     TEST_ASSERT_EQUAL(NTRIP_PROTO_V2, c.proto);
+    /* Onocoy over 2.0 with the console's three values. */
+    TEST_ASSERT_TRUE(caster_put("{\"ntrip_version\":2,\"mountpoint\":\"MP_9\",\"username\":\"u.9\",\"password\":\"pw9\"}",
+                                &c, &b));
+    TEST_ASSERT_EQUAL_STRING("MP_9", c.mountpoint);
+    TEST_ASSERT_EQUAL_STRING("u.9", c.username);
     /* Disabled slots may be incomplete. */
     TEST_ASSERT_TRUE(caster_put("{\"enabled\":false,\"host\":\"\",\"mountpoint\":\"\"}", &c, &b));
 }
@@ -530,4 +543,43 @@ TEST_CASE("WebSocket client messages", "[web_parse]")
     TEST_ASSERT_EQUAL(WEB_WS_MSG_INVALID, web_parse_ws_message("{\"type\":\"subscribe\"}", 20, &topics));
     TEST_ASSERT_EQUAL(WEB_WS_MSG_INVALID, web_parse_ws_message("ping", 4, &topics));
     TEST_ASSERT_EQUAL(WEB_WS_MSG_INVALID, web_parse_ws_message("{\"type\":\"other\"}", 16, &topics));
+}
+
+TEST_CASE("caster refusals carry the field's rule in words", "[web_parse]")
+{
+    ntrip_caster_cfg_t c;
+    web_bad_t b = { 0 };
+    /* 12 x "o-umlaut" = 24 bytes: over the name's 23. */
+    TEST_ASSERT_FALSE(caster_put("{\"name\":\"\u00f6\u00f6\u00f6\u00f6\u00f6\u00f6\u00f6\u00f6\u00f6\u00f6\u00f6\u00f6\"}", &c, &b));
+    TEST_ASSERT_EQUAL_STRING("name", b.field);
+    TEST_ASSERT_NOT_NULL(b.rule);
+    TEST_ASSERT_NOT_NULL(strstr(b.rule, "23 bytes"));
+
+    memset(&b, 0, sizeof(b));
+    TEST_ASSERT_FALSE(caster_put("{\"mountpoint\":\"MP/1\"}", &c, &b));
+    TEST_ASSERT_EQUAL_STRING("mountpoint", b.field);
+    TEST_ASSERT_NOT_NULL(b.rule);
+
+    memset(&b, 0, sizeof(b));
+    TEST_ASSERT_FALSE(caster_put("{\"password\":\"with space\"}", &c, &b));
+    TEST_ASSERT_EQUAL_STRING("password", b.field);
+    TEST_ASSERT_NOT_NULL(strstr(b.rule, "no spaces"));
+}
+
+TEST_CASE("an Onocoy slot stored before the username field needs it at its next save", "[web_parse]")
+{
+    ntrip_caster_cfg_t st = stored_caster();
+    st.username[0] = '\0';
+    strcpy(st.mountpoint, "credUser");
+    ntrip_caster_cfg_t c;
+    web_bad_t b = { 0 };
+    cJSON *root = body("{\"name\":\"Onocoy\"}");
+    TEST_ASSERT_FALSE(web_parse_caster_put(root, &st, &c, &b));
+    cJSON_Delete(root);
+    TEST_ASSERT_EQUAL_STRING("username", b.field);
+    /* Turning it off needs nothing more. */
+    memset(&b, 0, sizeof(b));
+    root = body("{\"enabled\":false}");
+    TEST_ASSERT_TRUE(web_parse_caster_put(root, &st, &c, &b));
+    cJSON_Delete(root);
 }

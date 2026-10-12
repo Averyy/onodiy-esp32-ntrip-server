@@ -35,7 +35,8 @@ function enabledCasters(s) {
   return (s.casters || []).filter(c => c.enabled !== false && c.state !== 'disabled');
 }
 
-function heroCard(s) {
+/** The overall state: {tone, head} (the hero card, and what the alerts card may say). */
+function heroState(s) {
   const rcv = s.receiver || {};
   const hl = s.health || {};
   const on = enabledCasters(s);
@@ -61,12 +62,19 @@ function heroCard(s) {
   }
   if (hl.level === 'failed') tone = 'bad';
   else if (tone === 'ok' && hl.level && hl.level !== 'ok') tone = 'warn';
+  return { tone: tone, head: head, on: on, streaming: streaming };
+}
+
+function heroCard(s) {
+  const hl = s.health || {};
+  const st = heroState(s);
   const facts = [];
-  if (on.length) facts.push(streaming + ' of ' + on.length + ' casters streaming');
-  if (hl.level) facts.push(lbl(L.health, hl.level).toLowerCase());
-  if (hl.recovery_mode && hl.recovery_mode !== 'full') facts.push('receiver recovery: ' + lbl(L.recovery, hl.recovery_mode));
+  if (st.on.length) facts.push(st.streaming + ' of ' + st.on.length + ' casters streaming');
+  /* The health level in words, never the raw level ("failed", "degraded"). */
+  if (hl.level) facts.push(lbl(L.healthFact, hl.level));
+  if (hl.recovery_mode && hl.recovery_mode !== 'full') facts.push('receiver recovery: ' + lbl(L.recovery, hl.recovery_mode).toLowerCase());
   if (s.uptime_s !== undefined) facts.push('up ' + fmt.dur(s.uptime_s));
-  return h('section', { class: 'card hero ' + tone }, h('div', { class: 'state' }, head), h('div', { class: 'facts' }, facts.join(' · ')));
+  return h('section', { class: 'card hero ' + st.tone }, h('div', { class: 'state' }, st.head), h('div', { class: 'facts' }, facts.join(' · ')));
 }
 
 function receiverCard(s, admin) {
@@ -98,29 +106,56 @@ function receiverCard(s, admin) {
       h('div', { class: 'foot' }, link('Signals', '#/signals')));
 }
 
+/* Where the Onocoy credentials are entered (the caster editor opens on the Onocoy slot). */
+const ONOCOY_SETUP_HASH = '#/casters/onocoy';
+
+/** The Onocoy slot (protected) of the status casters, or null. */
+function onocoySlot(s) {
+  return (s.casters || []).find(c => c.protected) || null;
+}
+
+/** True when the Onocoy slot is enabled and has the console's mountpoint, username and password. */
+function onocoyCounting(c) {
+  return !!(c && c.enabled !== false && c.onocoy_ready);
+}
+
+/* In place of the day's figures while Onocoy is not set up (also fills the dashboard's grid cell). */
+function onocoySetupCard(c) {
+  const ready = c && c.onocoy_ready;
+  return h('section', { class: 'card' },
+    h('h2', null, 'Onocoy', badge(ready ? 'Off' : 'Not set up', '')),
+    h('p', null, ready ? 'The Onocoy slot is turned off: the station does not stream to Onocoy.' :
+      'Onocoy not set up. Onocoy rewards reference stations for their correction data; the station streams to it once ' +
+      'you enter the credentials from the Onocoy console.'),
+    h('div', { class: 'form-actions' }, link(ready ? 'Turn Onocoy on' : 'Add your Onocoy credentials', ONOCOY_SETUP_HASH, 'btn primary')),
+    h('p', { class: 'muted small foot' }, 'Today\'s figures (offline budget, graced uptime) show here once Onocoy streams.'));
+}
+
 function budgetCard(c, avail) {
   const left = avail && avail.budget_left_s !== undefined ? avail.budget_left_s : c.budget_left_s;
   const down = avail && avail.protected_down_today_s !== undefined ? avail.protected_down_today_s : c.today_offline_s;
   const total = left !== null && left !== undefined && down !== null && down !== undefined ? left + down : null;
   const used = total ? Math.min(1, down / total) : 0;
-  const tone = left === null || left === undefined ? '' : left <= 0 ? 'bad' : used > 0.6 ? 'warn' : 'ok';
+  /* Never red while the streak holds: the budget is an estimate, the streak the verdict. */
+  const tone = left === null || left === undefined ? '' : left <= 0 && !c.streak_ok ? 'bad' : used > 0.6 ? 'warn' : 'ok';
   const mid = fmt.utcMidnight();
+  const sofar = c.graced_uptime_so_far_permille;
+  const sofarTone = sofar === null || sofar === undefined ? null : c.streak_ok ? 't-ok' : sofar >= STREAK_PERMILLE ? 't-ok' : 't-bad';
   return h('section', { class: 'card' },
     h('h2', null, 'Onocoy today', c.streak_ok === null || c.streak_ok === undefined ? null :
       badge(c.streak_ok ? 'Streak on track' : 'Streak missed', c.streak_ok ? 'ok' : 'bad')),
     left === null || left === undefined ?
       h('p', { class: 'muted' }, 'The offline budget needs a trusted clock (GNSS or internet time).') :
-      [h('div', { class: 'big ' + tone }, h('span', { class: 't-' + (tone || 'ok') }, left <= 0 ? '0 s' : fmt.dur(left))),
+      [h('div', { class: 'big ' + tone }, h('span', { class: 't-' + (tone || 'ok') }, left <= 0 ? '0\u00a0s' : fmt.dur(left))),
         h('div', { class: 'muted small' }, 'offline budget left today'),
-        h('div', { class: tone }, bar(used)),
+        h('div', { class: tone }, bar(used, '', 'Share of today\'s offline budget used')),
         h('div', { class: 'muted small' }, fmt.dur(down) + ' offline so far of about ' + fmt.dur(total) + '. Resets at 00:00 UTC (' + mid.local + ' here).')],
     kv([
       ['Online today', fmt.dur(c.today_online_s)],
       ['Offline today', fmt.dur(c.today_offline_s)],
-      ['Graced uptime', c.graced_uptime_permille === null || c.graced_uptime_permille === undefined ? DASH :
-        h('span', { class: c.graced_uptime_permille >= STREAK_PERMILLE ? 't-ok' : 't-bad' },
-          fmt.permille(c.graced_uptime_permille) + ' (needs 99.8 %)')],
-      ['Data rate', fmt.permille(c.data_rate_permille)],
+      ['Graced uptime so far', sofar === null || sofar === undefined ? DASH :
+        h('span', { class: sofarTone }, fmt.permille(sofar) + ' (needs 99.8 %)')],
+      ['Data rate', c.data_rate_permille === null || c.data_rate_permille === undefined ? 'nothing sent yet today' : fmt.permille(c.data_rate_permille)],
     ]),
     h('p', { class: 'muted small foot' }, 'Our estimate of Onocoy\'s accounting for the current UTC day. Information only.'));
 }
@@ -154,11 +189,20 @@ function casterLine(c, admin) {
     admin && c.hint ? h('div', { class: 'hintline' }, c.hint) : null);
 }
 
+/* An Onocoy slot without its credentials: a call to set it up instead of a state. */
+function onocoyNotSetUp(c) {
+  return h('div', { class: 'caster' },
+    h('div', { class: 'spread' }, h('span', { class: 'name' }, c.name || 'Onocoy'), badge('Not set up', '')),
+    h('div', { class: 'muted small' }, 'Onocoy not set up.'),
+    h('div', { class: 'form-actions' }, link('Add your Onocoy credentials', ONOCOY_SETUP_HASH, 'btn primary small')));
+}
+
 function castersCard(s, admin) {
   const list = (s.casters || []).filter(c => admin ? (c.enabled || c.host || c.state !== 'disabled') : true);
   return h('section', { class: 'card' + (admin ? ' wide' : '') },
     h('h2', null, 'Casters'),
-    list.length ? h('div', { class: 'caster-list' }, list.map(c => casterLine(c, admin))) :
+    list.length ? h('div', { class: 'caster-list' }, list.map(c => admin && c.protected && c.onocoy_ready === false ?
+      onocoyNotSetUp(c) : casterLine(c, admin))) :
       h('p', { class: 'muted' }, 'No caster set up. ', admin ? link('Add one', '#/casters') : null),
     admin ? h('div', { class: 'foot' }, link('Manage casters', '#/casters')) : null);
 }
@@ -187,23 +231,36 @@ function alertText(a) {
   const t = table[a.id];
   let title = t ? t[0] : a.id, text = t ? t[1] : '';
   if (a.id === 'config_failed' && a.retry_in_s) text += ' Next try in ' + fmt.dur(a.retry_in_s) + '.';
+  if (a.source === 'station' && a.id === 'no_receiver') text = noReceiverText(a);
   return [title, text];
+}
+
+function alertTone(a) {
+  return a.id === 'safe_mode' || a.id === 'receiver_power' || a.id === 'settings_degraded' || a.id === 'no_receiver' ? 'bad' : 'warn';
+}
+
+/** The alerts (station and health) as message boxes; the Health page shows the same. */
+function alertList(alerts) {
+  return h('div', { class: 'stack' }, alerts.map(a => {
+    const t = alertText(a);
+    return msg(alertTone(a), h('strong', null, t[0]), t[1] ? h('div', { class: 'small' }, t[1]) : null);
+  }));
 }
 
 function alertsCard(s) {
   const alerts = s.alerts || [];
+  const tone = heroState(s).tone;
+  const plan = restartPlanText(s.health);
   return h('section', { class: 'card' },
-    h('h2', null, 'Alerts', alerts.length ? badge(String(alerts.length), 'warn') : badge('None', 'ok')),
-    alerts.length ? h('div', { class: 'stack' }, alerts.map(a => {
-      const t = alertText(a);
-      return msg(a.id === 'safe_mode' || a.id === 'receiver_power' || a.id === 'settings_degraded' ? 'bad' : 'warn',
-        h('strong', null, t[0]), t[1] ? h('div', { class: 'small' }, t[1]) : null);
-    })) : h('p', { class: 'muted' }, 'Nothing needs attention.'),
+    h('h2', null, 'Alerts', alerts.length ? badge(String(alerts.length), alerts.some(a => alertTone(a) === 'bad') ? 'bad' : 'warn') :
+      badge('None', tone === 'ok' ? 'ok' : '')),
+    alerts.length ? alertList(alerts) :
+      /* Never "nothing" while the state above says otherwise. */
+      h('p', { class: 'muted' }, tone === 'ok' ? 'Nothing needs attention.' : 'See the receiver card above.'),
     s.health && s.health.last_step && s.health.last_step !== 'none' ?
       h('p', { class: 'muted small foot' }, 'Last recovery step: ' + lbl(L.step, s.health.last_step) + '.') : null,
-    s.health && s.health.reboot_recheck ? h('p', { class: 'muted small foot' },
-      'ESP32 reboot blocked; checked again after the next detection pass when the cap allows.') : null,
-    s.health && s.health.recovery_mode ? h('p', { class: 'muted small foot' }, 'Automatic receiver recovery: ' + lbl(L.recovery, s.health.recovery_mode) +
+    plan ? h('p', { class: 'small foot' }, plan) : null,
+    s.health && s.health.recovery_mode ? h('p', { class: 'muted small foot' }, 'Automatic receiver recovery: ' + lbl(L.recovery, s.health.recovery_mode).toLowerCase() +
       (s.health.recovery_mode === 'alerts_only' ? ' (a stall is shown here, nothing is sent to the receiver).' : '.'), ' ',
     link('Change', '#/receiver')) : null);
 }
@@ -222,12 +279,12 @@ function deviceCard(s) {
 }
 
 function adminDashboard(s) {
-  const prot = (s.casters || []).find(c => c.protected && c.enabled !== false);
+  const ono = onocoySlot(s);
   return [
     heroCard(s),
     h('div', { class: 'grid' },
       receiverCard(s, true),
-      prot ? budgetCard(prot, s.availability) : null,
+      onocoyCounting(ono) ? budgetCard(ono, s.availability) : onocoySetupCard(ono),
       castersCard(s, true),
       networkCard(s),
       alertsCard(s),

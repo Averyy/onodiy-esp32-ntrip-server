@@ -94,7 +94,8 @@ _Static_assert(STN_ALERT_UNSUPPORTED_MODEL == (uint32_t)STATION_ALERT_UNSUPPORTE
                    STN_ALERT_POSITION_MISMATCH == (uint32_t)STATION_ALERT_POSITION_MISMATCH &&
                    STN_ALERT_ANTENNA_MOVED == (uint32_t)STATION_ALERT_ANTENNA_MOVED &&
                    STN_ALERT_RECEIVER_ATTENTION == (uint32_t)STATION_ALERT_RECEIVER_ATTENTION &&
-                   STN_ALERT_RECEIVER_IN_LOADER == (uint32_t)STATION_ALERT_RECEIVER_IN_LOADER,
+                   STN_ALERT_RECEIVER_IN_LOADER == (uint32_t)STATION_ALERT_RECEIVER_IN_LOADER &&
+                   STN_ALERT_NO_RECEIVER == (uint32_t)STATION_ALERT_NO_RECEIVER,
                "core alerts mirror station_alert_t");
 _Static_assert(STN_REC_RESYNC == (int)STATION_RECOVER_RESYNC &&
                    STN_REC_LINK_RESTART == (int)STATION_RECOVER_LINK_RESTART &&
@@ -142,6 +143,10 @@ static uint64_t s_rtcm_excluded;      /* frames of types 1101-1107 kept out of t
 static uint32_t s_arp_frames;         /* 1005/1006 frames published */
 static station_status_t s_status;     /* published by the station task */
 static bool s_status_valid;
+/* What the live view's status needs besides the core (the station task
+ * keeps them current), so a status read computes the window at read time. */
+static bool s_in_profile_sky;
+static bool s_in_autocfg = true;
 static int64_t s_lease_release_us = INT64_MIN;   /* INT64_MIN = no release this boot */
 
 /* Journal as read at boot (early step or init); changed only by the user's
@@ -366,10 +371,19 @@ static bool autocfg_enabled(void)
     return v != 0;
 }
 
-static bool rtcm1230_supported(void)
+/* gnss/rtcm1230_ok: 1 accepted, 0 refused at the last apply, -1 never applied (not stored). */
+static int rtcm1230_state(void)
 {
     uint8_t v = 0;
-    return settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RTCM1230_OK, &v) == ESP_OK && v != 0;
+    if (settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RTCM1230_OK, &v) != ESP_OK) {
+        return -1;
+    }
+    return v != 0 ? 1 : 0;
+}
+
+static bool rtcm1230_supported(void)
+{
+    return rtcm1230_state() == 1;
 }
 
 static bool model_known(void)
@@ -1577,6 +1591,8 @@ static void fill_in(stn_in_t *in)
     in->profile_sky = s_profile.sat_view_output;
     portENTER_CRITICAL(&s_lock);
     s_obs_snap = s_obs;
+    s_in_profile_sky = in->profile_sky;
+    s_in_autocfg = in->autocfg;
     portEXIT_CRITICAL(&s_lock);
     in->obs = &s_obs_snap;
 }
@@ -1603,9 +1619,10 @@ static void publish_status(const stn_in_t *in)
     }
     o->receiver_responding = receiver_fresh();
     o->identity_confirmed = core.identity_ok;
-    o->alerts = core.alerts;
+    o->alerts = stn_alerts(&core);
     o->profile_applied = core.profile_applied;
     o->rtcm1230_supported = in->rtcm1230_ok;
+    o->rtcm1230_known = rtcm1230_state() >= 0;
     o->config_failed = (core.alerts & STN_ALERT_CONFIG_FAILED) != 0;
     o->config_retry_in_s = stn_config_retry_in_s(&core, in->now_ms);
     o->reconfigure_refused = stn_reconfigure_refused(&core, in->autocfg);
@@ -1626,6 +1643,7 @@ static void publish_status(const stn_in_t *in)
     o->detect_failures = core.detect_failures;
     o->detect_saw_bytes = core.detect_saw_bytes;
     o->detect_passes = core.detect_passes;
+    o->next_detect_in_s = stn_next_detect_in_s(&core, in->now_ms);
     um98x_flash_get_progress(&o->flash);
 
     o->rx_settings_valid = s_rx_valid;
@@ -2207,6 +2225,28 @@ esp_err_t station_get_status(station_status_t *out)
     have = s_status_valid;
     if (have) {
         *out = s_status;
+        /* At read time, not as last published: the station task publishes
+         * between its steps, and one step (a detection pass) can take most
+         * of a minute; a live-view start or stop must show at once. */
+        stn_in_t lin;
+        memset(&lin, 0, sizeof(lin));
+        lin.now_ms = now_ms();
+        lin.profile_sky = s_in_profile_sky;
+        lin.autocfg = s_in_autocfg;
+        stn_live_status_t lv;
+        stn_live_status(&s_core, &lin, &lv);
+        out->live.open = lv.open;
+        out->live.left_s = lv.left_s;
+        out->live.idle_left_s = lv.idle_left_s;
+        out->live.open_s = lv.open_s;
+        out->live.sky = lv.sky;
+        out->live.sky_why = lv.why;
+        out->live.last_end = lv.last_end;
+        if (lv.why != STN_SKY_WHY_REJECTED && lv.why != STN_SKY_WHY_NO_ANSWER) {
+            out->live.sky_reply[0] = '\0';
+        }
+        out->alerts = stn_alerts(&s_core);
+        out->next_detect_in_s = stn_next_detect_in_s(&s_core, lin.now_ms);
     }
     jerr = s_journal_err;
     journal = s_journal;
@@ -2221,9 +2261,12 @@ esp_err_t station_get_status(station_status_t *out)
         /* Not started (safe mode, or before station_start): state IDLE. */
         memset(out, 0, sizeof(*out));
         out->state = STATION_STATE_IDLE;
+        out->next_detect_in_s = UINT32_MAX;
         if (s_inited) {
             out->position_locked = (s_profile.base_mode == UM98X_BASE_FIXED);
-            out->rtcm1230_supported = rtcm1230_supported();
+            int r1230 = rtcm1230_state();
+            out->rtcm1230_supported = r1230 == 1;
+            out->rtcm1230_known = r1230 >= 0;
             out->reconfigure_refused = !autocfg_enabled();
             out->receiver = s_stored_info;
         }
@@ -2789,6 +2832,23 @@ esp_err_t station_request_resurvey(void)
     portENTER_CRITICAL(&s_lock);
     stn_request_resurvey(&s_core);
     portEXIT_CRITICAL(&s_lock);
+    wake();
+    return ESP_OK;
+}
+
+esp_err_t station_request_detect(void)
+{
+    esp_err_t err = running_gate();
+    if (err != ESP_OK) {
+        return err;
+    }
+    portENTER_CRITICAL(&s_lock);
+    int rc = stn_request_detect(&s_core, now_ms());
+    portEXIT_CRITICAL(&s_lock);
+    if (rc != STN_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_LOGI(TAG, "receiver search requested by the user");
     wake();
     return ESP_OK;
 }

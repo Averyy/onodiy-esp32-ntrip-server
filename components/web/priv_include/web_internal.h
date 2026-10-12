@@ -136,6 +136,14 @@ esp_err_t web_send_err(httpd_req_t *req, web_err_t err);
  * it, so the server closes the connection rather than read the body away.
  */
 esp_err_t web_refuse_and_close(httpd_req_t *req, web_err_t err);
+/** web_refuse_and_close() with a retry_in_s (UINT32_MAX = null). */
+esp_err_t web_refuse_and_close_retry(httpd_req_t *req, web_err_t err, uint32_t retry_in_s);
+/**
+ * After an answer that closes the connection (Connection: close): end our
+ * side (shutdown SHUT_WR) and read and drop what the client still sends,
+ * at most 64 KB or 2 s, so it reads the answer instead of a reset.
+ */
+void web_linger_close(httpd_req_t *req);
 /** 500 internal with the esp_err_t name as message. */
 esp_err_t web_send_internal(httpd_req_t *req, esp_err_t err);
 

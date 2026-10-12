@@ -54,6 +54,8 @@ const char *web_flash_outcome_result(uint8_t v);
 const char *web_fw_state_name(fw_update_state_t v);
 const char *web_fw_trial_name(fw_update_trial_t v);
 const char *web_gnss_block_name(fw_update_gnss_block_t v);
+/** fw_update_check_result_t: "ok", "no_release", ...; NULL for none (no check this boot). */
+const char *web_check_result_name(fw_update_check_result_t v);
 const char *web_probe_name(network_probe_t v);
 /** Name of one network_ap_reason_t bit (NULL for an unknown bit). */
 const char *web_ap_reason_name(uint32_t bit);

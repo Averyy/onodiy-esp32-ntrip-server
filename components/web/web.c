@@ -49,6 +49,7 @@ _Static_assert(sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) =
 _Static_assert(offsetof(esp_image_header_t, chip_id) == WEB_IMAGE_CHIP_ID_OFS, "chip id offset moved");
 _Static_assert(offsetof(esp_app_desc_t, version) == WEB_DESC_VERSION_OFS, "app version offset moved");
 _Static_assert(offsetof(esp_app_desc_t, project_name) == WEB_DESC_PROJECT_OFS, "project name offset moved");
+_Static_assert(offsetof(esp_app_desc_t, app_elf_sha256) == WEB_DESC_ELF_SHA_OFS, "app ELF SHA-256 offset moved");
 _Static_assert(ESP_APP_DESC_MAGIC_WORD == WEB_DESC_MAGIC, "app description magic moved");
 _Static_assert(ESP_IMAGE_HEADER_MAGIC == WEB_IMAGE_MAGIC, "image magic moved");
 _Static_assert(ESP_ERR_OTA_VALIDATE_FAILED == 0x1503, "OTA validation error code moved (web_build.c)");
@@ -69,6 +70,15 @@ _Static_assert(ESP_ERR_OTA_VALIDATE_FAILED == 0x1503, "OTA validation error code
 #define SERVER_SEND_TIMEOUT_S 10
 #define TICK_MS              250
 #define DEADLINE_LOG_S       60   /* at most one log line about late requests per minute */
+/* A refused request's body: after the answer, read and drop at most this
+ * much, for at most this long, so the client reads the answer instead of a
+ * reset (a close with unread data in the socket sends an RST, which makes
+ * many clients drop the answer still in their receive buffer). */
+#define LINGER_DRAIN_BYTES   (64u * 1024u)
+#define LINGER_DRAIN_MS      2000
+/* X-Client-Id of the request that changed settings: a settings event this
+ * soon after that request was its own (the event comes from another task). */
+#define CLIENT_ID_HOLD_MS    2000
 
 _Static_assert(SERVER_MAX_SOCKETS <= WEB_CONN_MAX, "every connection must fit the connection table");
 _Static_assert(CONFIG_WEB_REQUEST_DEADLINE_S > SERVER_RECV_TIMEOUT_S,
@@ -94,6 +104,14 @@ static atomic_bool s_end_all_sessions;
 static atomic_bool s_public_reload;
 static atomic_bool s_fw_changed;
 static atomic_bool s_scan_done;
+
+/* The X-Client-Id of the mutating request running now or just finished
+ * (settings_changed events carry it, so the page that saved knows it was
+ * its own change). Written on the server task, read by the event task. */
+static portMUX_TYPE s_client_lock = portMUX_INITIALIZER_UNLOCKED;
+static char s_client_id[33];
+static bool s_client_active;
+static uint32_t s_client_done_ms;
 
 /* Connections: request deadlines and which one to close when the sockets
  * run out (web_conn.h). Server task, and the worker for its requests. */
@@ -357,7 +375,8 @@ esp_err_t web_send_error(httpd_req_t *req, web_err_t err, const char *message, c
     httpd_resp_set_status(req, web_status_line(web_err_status(err)));
     httpd_resp_set_type(req, "application/json");
     web_set_common_headers(req, true);
-    return httpd_resp_send(req, wj_text(&w), (ssize_t)strlen(wj_text(&w)));
+    /* HEAD: the same status and headers (Content-Length included), no body. */
+    return httpd_resp_send(req, req->method == HTTP_HEAD ? NULL : wj_text(&w), (ssize_t)strlen(wj_text(&w)));
 }
 
 esp_err_t web_send_err(httpd_req_t *req, web_err_t err)
@@ -552,11 +571,43 @@ static bool header_is(httpd_req_t *req, const char *field, const char *type, boo
     return content_type ? web_content_type_is(v, type) : strcmp(v, type) == 0;
 }
 
+void web_linger_close(httpd_req_t *req)
+{
+    int fd = httpd_req_to_sockfd(req);
+    if (fd < 0) {
+        return;
+    }
+    /* The answer is complete: our side ends here (a FIN follows it). */
+    if (shutdown(fd, SHUT_WR) != 0) {
+        return;   /* reset already: nothing to wait for */
+    }
+    char buf[512];
+    size_t dropped = 0;
+    int64_t until = esp_timer_get_time() + (int64_t)LINGER_DRAIN_MS * 1000;
+    while (dropped < LINGER_DRAIN_BYTES) {
+        int64_t left_ms = (until - esp_timer_get_time()) / 1000;
+        if (left_ms <= 0 || !readable_within(fd, (int32_t)left_ms)) {
+            break;
+        }
+        int n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n <= 0) {
+            break;   /* the client closed (it read the answer), or an error */
+        }
+        dropped += (size_t)n;
+    }
+}
+
 /* Answer, and close the connection instead of reading a body we refuse. */
 esp_err_t web_refuse_and_close(httpd_req_t *req, web_err_t err)
 {
+    return web_refuse_and_close_retry(req, err, UINT32_MAX);
+}
+
+esp_err_t web_refuse_and_close_retry(httpd_req_t *req, web_err_t err, uint32_t retry_in_s)
+{
     httpd_resp_set_hdr(req, "Connection", "close");
-    web_send_err(req, err);
+    web_send_error(req, err, NULL, NULL, retry_in_s, NULL, NULL);
+    web_linger_close(req);
     return ESP_FAIL;
 }
 
@@ -576,6 +627,30 @@ static esp_err_t read_body(httpd_req_t *req, size_t len)
     }
     s_body[got] = '\0';
     return ESP_OK;
+}
+
+/*
+ * The page's X-Client-Id (random per tab; [A-Za-z0-9_-], at most 32) of a
+ * mutating request: settings events during it and shortly after carry it.
+ * @return true when one was noted.
+ */
+static bool note_client_id(httpd_req_t *req)
+{
+    char id[sizeof(s_client_id)];
+    if (httpd_req_get_hdr_value_str(req, "X-Client-Id", id, sizeof(id)) != ESP_OK || id[0] == '\0') {
+        return false;
+    }
+    for (const char *p = id; *p != '\0'; p++) {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '-' ||
+              *p == '_')) {
+            return false;   /* never copied into an event as is */
+        }
+    }
+    taskENTER_CRITICAL(&s_client_lock);
+    strlcpy(s_client_id, id, sizeof(s_client_id));
+    s_client_active = true;
+    taskEXIT_CRITICAL(&s_client_lock);
+    return true;
 }
 
 /* Every path either reads the request's body, hands it to the worker, or
@@ -646,7 +721,14 @@ static esp_err_t api_handle(httpd_req_t *req, web_req_t *rp)
             return web_send_err(req, bad.err);
         }
     }
+    bool stash = mutating(req->method) && note_client_id(req);
     esp_err_t ret = rt->fn(&r);
+    if (stash) {
+        taskENTER_CRITICAL(&s_client_lock);
+        s_client_active = false;
+        s_client_done_ms = now_ms();
+        taskEXIT_CRITICAL(&s_client_lock);
+    }
     cJSON_Delete(r.body);
     return ret;
 }
@@ -691,7 +773,8 @@ static esp_err_t serve_asset(httpd_req_t *req, const web_asset_t *a)
     }
     httpd_resp_set_type(req, a->type);
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
-    return httpd_resp_send(req, (const char *)a->gz, (ssize_t)a->gz_len);
+    /* HEAD: the headers GET would send (its Content-Length too), no body. */
+    return httpd_resp_send(req, req->method == HTTP_HEAD ? NULL : (const char *)a->gz, (ssize_t)a->gz_len);
 }
 
 /* Everything no route matched: the UI assets, 404/405, the captive portal on the AP. */
@@ -724,7 +807,7 @@ static esp_err_t fallback_handle(httpd_req_t *req)
     }
     const web_asset_t *a = web_asset_find(web_ui_assets, web_ui_asset_count, uri);
     if (a != NULL) {
-        if (req->method != HTTP_GET) {
+        if (req->method != HTTP_GET && req->method != HTTP_HEAD) {
             return web_send_err(req, WEB_ERR_METHOD_NOT_ALLOWED);
         }
         return serve_asset(req, a);
@@ -957,8 +1040,23 @@ static void on_settings(void *arg, esp_event_base_t base, int32_t id, void *data
     if (strcmp(ns, SETTINGS_NS_WEB) == 0) {
         atomic_store(&s_public_reload, true);
     }
-    /* The namespace is ours (schema), plain ASCII: safe in the JSON string. */
-    event_json("settings_changed", "ns", ns);
+    /* The namespace is ours (schema), plain ASCII: safe in the JSON string.
+     * The client id (checked to [A-Za-z0-9_-] when it was noted) names the
+     * page whose request changed it, when one did just now. */
+    char client[sizeof(s_client_id)] = "";
+    taskENTER_CRITICAL(&s_client_lock);
+    if (s_client_id[0] != '\0' && (s_client_active || (uint32_t)(now_ms() - s_client_done_ms) < CLIENT_ID_HOLD_MS)) {
+        strlcpy(client, s_client_id, sizeof(client));
+    }
+    taskEXIT_CRITICAL(&s_client_lock);
+    char ev[160];
+    if (client[0] != '\0') {
+        snprintf(ev, sizeof(ev), "{\"type\":\"event\",\"event\":\"settings_changed\",\"ns\":\"%s\",\"client\":\"%s\"}", ns,
+                 client);
+    } else {
+        snprintf(ev, sizeof(ev), "{\"type\":\"event\",\"event\":\"settings_changed\",\"ns\":\"%s\",\"client\":null}", ns);
+    }
+    web_ws_event(ev);
     web_kick();
 }
 
@@ -1086,6 +1184,13 @@ esp_err_t web_start(void)
     s_ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     load_hostname();
 
+    /* The server's own warnings about a client that went away, a handshake
+     * our check refused or a connection our handler closed (a refusal) are
+     * expected client behaviour; our handlers log what matters. */
+    esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
+    esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
+    esp_log_level_set("httpd_ws", ESP_LOG_ERROR);
+
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.task_priority = SERVER_PRIO;
     cfg.stack_size = SERVER_STACK;
@@ -1136,6 +1241,9 @@ esp_err_t web_start(void)
         err = httpd_register_uri_handler(s_server, &ws);
     }
     if (err == ESP_OK) {
+        /* Every method, HEAD included: HEAD on the page and the assets answers
+         * as GET does without the body, HEAD on /api/ and /ws 405 (also
+         * without a body). One route, so no handler slot is spent on it. */
         httpd_uri_t any = { .uri = "/*", .method = HTTP_ANY, .handler = fallback };
         err = httpd_register_uri_handler(s_server, &any);
     }

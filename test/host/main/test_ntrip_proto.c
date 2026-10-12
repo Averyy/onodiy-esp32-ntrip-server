@@ -1435,3 +1435,121 @@ TEST_CASE("ntrip history: short sessions are written once per 10 min, the skippe
     ntrip_hist_failed(&h, t + 1);
     TEST_ASSERT_TRUE(ntrip_hist_up(&h, 1, t + 5, &a, &b));
 }
+
+/* ---- Onocoy: what its console gives (mountpoint, username, password) --------------------- */
+
+TEST_CASE("ntrip Onocoy wire names: the console's mountpoint, username and password", "[ntrip]")
+{
+    ntrip_wire_names_t w;
+    /* NTRIP 2.0: POST /<mountpoint>, Basic <username>:<password>. */
+    ntrip_wire_names("servers.onocoy.com", true, "MP_42", "user.7", "Roof1", &w);
+    TEST_ASSERT_EQUAL_STRING("MP_42", w.mount);
+    TEST_ASSERT_EQUAL_STRING("user.7", w.user);
+    /* NTRIP 1.0: SOURCE <password> /<username>. */
+    ntrip_wire_names("servers.onocoy.com", false, "MP_42", "user.7", "Roof1", &w);
+    TEST_ASSERT_EQUAL_STRING("user.7", w.mount);
+    TEST_ASSERT_EQUAL_STRING("", w.user);
+
+    char buf[NTRIP_REQUEST_MAX];
+    size_t n = ntrip_build_v1_request(buf, sizeof(buf), "s3cret", w.mount, "NTRIP onocoydiy-esp-um982/0.3.0");
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_EQUAL_STRING("SOURCE s3cret /user.7\r\nSource-Agent: NTRIP onocoydiy-esp-um982/0.3.0\r\n\r\n", buf);
+
+    ntrip_wire_names("servers.onocoy.com", true, "MP_42", "user.7", "", &w);
+    n = ntrip_build_v2_request(buf, sizeof(buf), "servers.onocoy.com", 2101, false, w.mount, w.user, "s3cret",
+                               "NTRIP onocoydiy-esp-um982/0.3.0", false);
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "POST /MP_42 HTTP/1.1\r\n"));
+    /* base64("user.7:s3cret") */
+    TEST_ASSERT_NOT_NULL(strstr(buf, "Authorization: Basic dXNlci43OnMzY3JldA==\r\n"));
+}
+
+TEST_CASE("ntrip Onocoy wire names: a slot stored before the username field keeps its mapping", "[ntrip]")
+{
+    ntrip_wire_names_t w;
+    ntrip_wire_names("servers.onocoy.com", false, "credUser", "", "label", &w);
+    TEST_ASSERT_EQUAL_STRING("credUser", w.mount);
+    TEST_ASSERT_EQUAL_STRING("", w.user);
+    ntrip_wire_names("servers.onocoy.com", true, "credUser", "", "Roof1", &w);
+    TEST_ASSERT_EQUAL_STRING("Roof1", w.mount);
+    TEST_ASSERT_EQUAL_STRING("credUser", w.user);
+    ntrip_wire_names("servers.onocoy.com", true, "credUser", "", "", &w);
+    TEST_ASSERT_EQUAL_STRING("onocoydiy", w.mount);
+    TEST_ASSERT_EQUAL_STRING("credUser", w.user);
+    /* Other casters: as stored, whatever the username. */
+    ntrip_wire_names("rtk2go.com", false, "MOUNT", "bob", "", &w);
+    TEST_ASSERT_EQUAL_STRING("MOUNT", w.mount);
+}
+
+TEST_CASE("ntrip Onocoy fields: username like a mountpoint, password without spaces", "[ntrip]")
+{
+    ntrip_fields_t f = fields("servers.onocoy.com", "MP_42", "user.7", "s3cret", true);
+    TEST_ASSERT_EQUAL(NTRIP_FIELDS_OK, ntrip_validate_fields(&f));
+    f.v2 = false;
+    TEST_ASSERT_EQUAL(NTRIP_FIELDS_OK, ntrip_validate_fields(&f));
+
+    f = fields("servers.onocoy.com", "MP_42", "user:7", "s3cret", true);
+    TEST_ASSERT_EQUAL(NTRIP_FIELDS_BAD_USERNAME, ntrip_validate_fields(&f));
+    f = fields("servers.onocoy.com", "MP_42", "user 7", "s3cret", true);   /* 1.0 sends it as the mountpoint */
+    TEST_ASSERT_EQUAL(NTRIP_FIELDS_BAD_USERNAME, ntrip_validate_fields(&f));
+    f = fields("servers.onocoy.com", "MP_42", "user.7", "two words", true);   /* also over 2.0 */
+    TEST_ASSERT_EQUAL(NTRIP_FIELDS_BAD_PASSWORD, ntrip_validate_fields(&f));
+    f = fields("servers.onocoy.com", "MP_42", "user.7", "", true);   /* an enabled Onocoy slot needs it */
+    TEST_ASSERT_EQUAL(NTRIP_FIELDS_MISSING, ntrip_validate_fields(&f));
+    f.enabled = false;
+    TEST_ASSERT_EQUAL(NTRIP_FIELDS_OK, ntrip_validate_fields(&f));
+    /* Other casters keep their rules: a ':'-free username, spaces in a 2.0 password. */
+    f = fields("caster.example.com", "M", "user 7", "two words", true);
+    TEST_ASSERT_EQUAL(NTRIP_FIELDS_OK, ntrip_validate_fields(&f));
+}
+
+TEST_CASE("ntrip Onocoy day figures: none for a slot that does not count", "[ntrip]")
+{
+    ntrip_day_in_t in = { .counted = false, .online_s = 3600, .offline_s = 10, .epochs_sent_today = 3600,
+                          .day_known = true, .unplanned_offline_s = 10, .elapsed_s = 3610 };
+    ntrip_day_out_t out;
+    ntrip_day_metrics(&in, &out);
+    TEST_ASSERT_FALSE(out.valid);
+    TEST_ASSERT_FALSE(out.rate_valid);
+    TEST_ASSERT_FALSE(out.so_far_valid);
+    TEST_ASSERT_FALSE(out.streak_ok);
+
+    /* Counted, nothing sent yet today: no data rate, the rest known. */
+    in = (ntrip_day_in_t){ .counted = true, .online_s = 0, .offline_s = 20, .epochs_sent_today = 0,
+                           .day_known = true, .unplanned_offline_s = 20, .elapsed_s = 20 };
+    ntrip_day_metrics(&in, &out);
+    TEST_ASSERT_TRUE(out.valid);
+    TEST_ASSERT_FALSE(out.rate_valid);
+    TEST_ASSERT_TRUE(out.so_far_valid);
+    TEST_ASSERT_TRUE(out.streak_ok);
+    TEST_ASSERT_EQUAL_UINT32(473 - 20, out.budget_left_s);
+
+    /* Without a trusted clock the day so far is unknown. */
+    in.day_known = false;
+    ntrip_day_metrics(&in, &out);
+    TEST_ASSERT_FALSE(out.so_far_valid);
+}
+
+TEST_CASE("ntrip Onocoy day figures: graced uptime so far", "[ntrip]")
+{
+    /* Enabled at 18:00 UTC and online since (two hours later). */
+    ntrip_day_in_t in = { .counted = true, .online_s = 7200, .offline_s = 0, .epochs_sent_today = 7200,
+                          .day_known = true, .unplanned_offline_s = 0, .elapsed_s = 7200 };
+    ntrip_day_out_t out;
+    ntrip_day_metrics(&in, &out);
+    TEST_ASSERT_TRUE(out.so_far_valid);
+    TEST_ASSERT_TRUE(out.graced_so_far_permille >= 999);
+    TEST_ASSERT_TRUE(out.rate_valid);
+    TEST_ASSERT_EQUAL_UINT16(1000, out.data_rate_permille);
+    TEST_ASSERT_TRUE(out.streak_ok);
+    /* The day fraction (diagnostics) is still the whole-day figure. */
+    TEST_ASSERT_EQUAL_UINT16((7200 + 300) * 1000 / 86400, out.graced_uptime_permille);
+
+    /* 400 s offline after the 300 s grace, 6 h into the day: about 995 per mille. */
+    TEST_ASSERT_UINT16_WITHIN(1, 995, ntrip_graced_so_far_permille(400, 6 * 3600));
+    /* Inside the grace, or nothing elapsed yet: all of it. */
+    TEST_ASSERT_EQUAL_UINT16(1000, ntrip_graced_so_far_permille(300, 3600));
+    TEST_ASSERT_EQUAL_UINT16(1000, ntrip_graced_so_far_permille(5000, 0));
+    /* Never below zero. */
+    TEST_ASSERT_EQUAL_UINT16(0, ntrip_graced_so_far_permille(100000, 3600));
+}

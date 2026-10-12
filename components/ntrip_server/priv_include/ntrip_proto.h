@@ -195,8 +195,14 @@ typedef enum {
  * <= 63 each) or IP literal, <= 63 characters; mountpoint [A-Za-z0-9._-];
  * v1 password printable ASCII without spaces; v2 username without ':';
  * label [A-Za-z0-9]. An enabled slot needs host, port and mountpoint, a v1
- * slot a password, and a v2 slot that is not an Onocoy slot a username
- * (an Onocoy slot authenticates with its mountpoint, the credential username).
+ * slot a password, and a v2 slot that is not an Onocoy slot a username.
+ *
+ * Onocoy slots hold what the Onocoy console gives: mountpoint, username
+ * and password. Their username is [A-Za-z0-9._-] (NTRIP 1.0 sends it as the
+ * mountpoint) and their password has no spaces in either version; an
+ * enabled one needs the password. A slot stored before the username field
+ * existed (Onocoy host, empty username) still passes: ntrip_wire_names()
+ * keeps its old mapping.
  */
 ntrip_fields_result_t ntrip_validate_fields(const ntrip_fields_t *f);
 
@@ -243,10 +249,15 @@ size_t ntrip_base64(const uint8_t *in, size_t len, char *out, size_t cap);
 size_t ntrip_build_agent(const char *app_version, char *out, size_t cap);
 
 /**
- * What goes on the wire for a slot. Onocoy slots carry the credential
- * username in `mountpoint`: NTRIP 1.0 sends it as the mountpoint; NTRIP 2.0
- * sends it as the Basic-auth user and the dashboard label (or "onocoydiy")
- * as the mountpoint.
+ * What goes on the wire for a slot. Other casters: mountpoint and (2.0)
+ * username as stored. Onocoy slots hold the console's mountpoint, username
+ * and password: NTRIP 2.0 posts to /<mountpoint> with Basic
+ * <username>:<password>; NTRIP 1.0 sends "SOURCE <password> /<username>"
+ * (Onocoy's instruction for 1.0-only sources). A slot stored before the
+ * username field existed (Onocoy host, empty username, the credential
+ * username in `mountpoint`) keeps the old mapping: 1.0 sends `mountpoint`
+ * as the mountpoint; 2.0 sends the dashboard label (or "onocoydiy") as the
+ * mountpoint and `mountpoint` as the Basic-auth user.
  */
 typedef struct {
     const char *mount;
@@ -639,6 +650,38 @@ bool ntrip_hist_down(ntrip_hist_t *h, uint32_t slot, uint8_t cls, uint32_t now_s
 int32_t ntrip_hist_pack(uint32_t slot, uint32_t cls, uint32_t count);
 
 /* ---- Onocoy daily budget ----------------------------------------------------------- */
+
+/**
+ * Graced uptime so far today: 1 - max(0, unplanned offline - grace) /
+ * elapsed, per mille, where elapsed counts from 00:00 UTC or from when the
+ * slot first became expected today. 1000 while nothing has elapsed.
+ */
+uint16_t ntrip_graced_so_far_permille(uint32_t unplanned_offline_s, uint32_t elapsed_s);
+
+/** Inputs of the protected slot's day figures. */
+typedef struct {
+    bool counted;                /**< the protected slot is enabled and set up (Onocoy: mountpoint, username, password) */
+    uint32_t online_s;           /**< today, connected */
+    uint32_t offline_s;          /**< today, expected but not connected */
+    uint32_t epochs_sent_today;
+    bool day_known;              /**< a trusted clock: today and the figures below are known */
+    uint32_t unplanned_offline_s;/**< today's unplanned downtime (the availability ledger) */
+    uint32_t elapsed_s;          /**< since 00:00 UTC or since the slot first became expected today */
+} ntrip_day_in_t;
+
+typedef struct {
+    bool valid;                  /**< counted: graced_uptime, budget_left and streak_ok are known (else null) */
+    bool rate_valid;             /**< ... and something was sent today: data_rate is known (else null) */
+    bool so_far_valid;           /**< ... and the day is known: graced_so_far is known (else null) */
+    uint16_t graced_uptime_permille;   /**< (online + grace) / day, capped at 1000 */
+    uint16_t graced_so_far_permille;
+    uint16_t data_rate_permille;       /**< epochs sent / seconds online (1000 assumed until something was sent) */
+    uint32_t budget_left_s;
+    bool streak_ok;
+} ntrip_day_out_t;
+
+/** The protected slot's day figures, or none (valid false) for a slot that does not count. */
+void ntrip_day_metrics(const ntrip_day_in_t *in, ntrip_day_out_t *out);
 
 /**
  * Offline seconds a UTC day may hold and still keep the streak, for a data

@@ -63,6 +63,9 @@ typedef struct {
     int64_t last_check_unix;      /**< ota/last_check */
     fw_check_result_t last_result;
     uint32_t last_attempt_s;
+    fw_check_outcome_t last_outcome;  /**< how the last attempt went (status) */
+    uint16_t last_http_status;    /**< its final HTTP status, 0 = none */
+    int64_t last_attempt_unix;    /**< its time, 0 without a trusted clock */
     bool have_success;
     uint32_t last_success_s;
     uint32_t first_check_s;       /**< MAC-jittered */
@@ -143,8 +146,12 @@ void fw_trial_status_locked(fw_update_status_t *out, bool clock_trusted, int64_t
 /** Refresh rollback_available (validates the other image: worker only). */
 void fw_trial_refresh_rollback(void);
 
-/** A new image was activated: replace the trial record (install path). */
-void fw_trial_record_install(const char *version, uint8_t baseline, uint8_t slots);
+/**
+ * A new image was activated: replace the trial record (install path).
+ * same_image: it is the image running now again (identical app ELF
+ * SHA-256, a reinstall the user asked for): stage 1 only.
+ */
+void fw_trial_record_install(const char *version, uint8_t baseline, uint8_t slots, bool same_image);
 
 /** The trial refuses an app install now: stage 1 or the verify window (call locked). */
 bool fw_trial_blocks_install_locked(void);
@@ -162,25 +169,17 @@ void fw_capture_baseline(uint8_t *baseline, uint8_t *slots);
 
 /* ---- fw_http.c ----------------------------------------------------------------------- */
 
-typedef enum {
-    FW_HTTP_OK = 0,
-    FW_HTTP_NOT_MODIFIED,
-    FW_HTTP_NO_RESPONSE,     /**< no final HTTP answer (network, DNS, TLS, timeout) */
-    FW_HTTP_BAD_ANSWER,      /**< an answer, but not the expected one (status, size, too large) */
-    FW_HTTP_LOCAL_ERROR,     /**< out of memory or a local write failed */
-    FW_HTTP_UNTRUSTED,       /**< the URL or a redirect left the repository's releases on GitHub's release hosts,
-                                  or https (release_url.h): not connected */
-} fw_http_result_t;
-
 /**
  * GET url (following redirects only within the repository's releases on the
  * release hosts, release_url.h) into a new buffer of at most `cap` bytes
  * (PSRAM when available; caller frees *out). With `etag_in` set, sends
  * If-None-Match; `etag_out` gets the answer's ETag. FW_HTTP_NO_RESPONSE
  * without a trusted clock (certificate dates cannot be checked).
+ * *http_status (optional) gets the final answer's HTTP status (the last
+ * redirect's when there were too many), 0 when no answer came.
  */
 fw_http_result_t fw_http_fetch(const char *url, const char *etag_in, size_t cap, char **out, size_t *out_len,
-                               char *etag_out, size_t etag_size);
+                               char *etag_out, size_t etag_size, int *http_status);
 
 /**
  * Download `file` from `url` into pkg_store (size and SHA-256 checked there).

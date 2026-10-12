@@ -100,22 +100,31 @@ function logStats(l) {
   ]);
 }
 
+/* "Restart 3 after power-on", or "Power-on" for the first start after one. */
+function bootWhen(x) {
+  if (x.reset_class === 'power_on' || x.boot_no <= 1) return 'Power-on';
+  return 'Restart ' + (x.boot_no - 1) + ' after power-on';
+}
+
 function healthTab(box) {
   const render = hl => {
     const b = hl.boot || {};
     const heap = hl.heap || {};
     const link = hl.link || {};
     const net = hl.network || {};
+    /* The same alerts as the dashboard (the station's and health's), under the badge. */
+    const st = S.status || {};
+    const alerts = Array.isArray(st.alerts) ? st.alerts : (hl.alerts || []).map(a => ({ id: a, source: 'health' }));
+    const plan = restartPlanText(hl);
+    const tone = healthTone(hl.level);
     mount(box, h('div', { class: 'grid' },
       h('section', { class: 'card' },
-        h('h2', null, 'Health', badge(lbl(L.health, hl.level), healthTone(hl.level))),
-        (hl.alerts || []).length ? h('div', { class: 'stack' }, hl.alerts.map(a => {
-          const t = alertText({ id: a, source: 'health' });
-          return msg('warn', h('strong', null, t[0]), t[1] ? h('div', { class: 'small' }, t[1]) : null);
-        })) : h('p', { class: 'muted' }, 'No health alerts.'),
+        h('h2', null, 'Health', badge(lbl(L.health, hl.level), tone)),
+        alerts.length ? alertList(alerts) :
+          h('p', { class: 'muted' }, tone === 'ok' || tone === '' ? 'No alerts.' : 'No alert names the cause: see the receiver and caster pages.'),
+        plan ? h('p', { class: 'small' }, plan) : null,
         kv([
           ['Automatic receiver recovery', hl.recovery_mode ? lbl(L.recovery, hl.recovery_mode) : DASH],
-          hl.reboot_recheck ? ['ESP32 reboot', h('span', { class: 't-warn' }, 'blocked; checked again after the next detection pass when the cap allows')] : null,
           link.open === false && link.mode !== 'off' ? ['Receiver UART', h('span', { class: 't-bad' }, 'closed (reopening)')] : null,
           ['Last recovery step', lbl(L.step, hl.last_step)],
           ['Receiver recovery paused', fmt.yesno(hl.ladder_suspended) + ((hl.station || {}).rx_maintenance ? ' (receiver maintenance)' : '')],
@@ -126,8 +135,8 @@ function healthTab(box) {
           ['Network recoveries', fmt.num(hl.network_recoveries)],
           ['Since the last RTCM', hl.rtcm_gap_ms === null || hl.rtcm_gap_ms === undefined ? 'never received' : fmt.ms(hl.rtcm_gap_ms)],
           hl.gnss_retry_in_s ? ['Next receiver recovery pass in', fmt.dur(hl.gnss_retry_in_s)] : null,
-          ['Restart blocked by', hl.inhibited_by || 'nothing'],
-          ['Update in progress', hl.update_slot === 'none' || !hl.update_slot ? 'none' : words(hl.update_slot)],
+          hl.inhibited_by ? ['Restarts held back by', hl.inhibited_by] : null,
+          hl.update_slot && hl.update_slot !== 'none' ? ['Update running', hl.update_slot === 'app' ? 'an app update' : 'a receiver update'] : null,
           hl.factory_reset_refused_age_s !== null && hl.factory_reset_refused_age_s !== undefined ?
             ['BOOT-button factory reset', h('span', { class: 't-warn' }, 'refused ' + fmt.dur(hl.factory_reset_refused_age_s) +
               ' ago (a receiver update was running)')] : null,
@@ -145,9 +154,8 @@ function healthTab(box) {
         ])),
       h('section', { class: 'card' },
         h('h2', null, 'This start', b.safe_mode ? badge('Safe mode', 'bad') : b.stable ? badge('Stable', 'ok') : null),
+        h('p', null, startSentence(b.reset_class, b.reset_reason, b.prev_reboot_reason) + '.'),
         kv([
-          ['Reset', words(b.reset_reason) + ' (' + words(b.reset_class) + ')'],
-          ['Planned reason', words(b.prev_reboot_reason)],
           ['Starts since power-on', fmt.num(b.boots_since_power_on)],
           ['Crashes counted', fmt.num(b.crashes)],
           ['Brownouts since power-on', fmt.num(b.brownouts_since_power_on)],
@@ -156,10 +164,11 @@ function healthTab(box) {
         ])),
       h('section', { class: 'card' },
         h('h2', null, 'Recent starts'),
-        (hl.boot_history || []).length ? table(['#', 'Kind', 'Reset', 'Planned reason', 'Version', 'Ran before'],
-          hl.boot_history.map(x => [String(x.boot_no), words(x.reset_class), words(x.reset_reason), words(x.planned_reason),
-            x.version || DASH, x.prev_uptime_s === null || x.prev_uptime_s === undefined ? 'unknown' : fmt.dur(x.prev_uptime_s)]), { num: [0] }) :
-          h('p', { class: 'muted' }, 'No history yet.')),
+        (hl.boot_history || []).length ? table(['When', 'How', 'Version', 'Ran before'],
+          hl.boot_history.map(x => [bootWhen(x), startSentence(x.reset_class, x.reset_reason, x.planned_reason),
+            x.version || DASH, x.prev_uptime_s === null || x.prev_uptime_s === undefined ? 'unknown' : fmt.dur(x.prev_uptime_s)]), { stack: true }) :
+          h('p', { class: 'muted' }, 'No history yet.'),
+        h('p', { class: 'muted small foot' }, 'Newest first. "Ran before" is how long the station ran before that start.')),
       h('section', { class: 'card' }, h('h2', null, 'Receiver link'), autoKv(link),
         h('h3', { class: 'section-title' }, 'Framing'), autoKv(link.framing)),
       h('section', { class: 'card' }, h('h2', null, 'RTCM hub'), autoKv(hl.hub),
@@ -235,6 +244,9 @@ function availabilityTab(box) {
     const sod = av.utc_second_of_day;
     const dayRows = slots.map((s, i) => [s.name || 'Slot ' + (s.slot + 1), fmt.dur((day.down_s || [])[i]), fmt.dur((day.planned_s || [])[i]),
       fmt.num((day.reconnects || [])[i])]);
+    /* Onocoy's figures only while its slot is set up and on: numbers for a slot that cannot stream mislead. */
+    const counting = prot && p.onocoy_ready !== false && p.enabled !== false;
+    const sofar = p.graced_uptime_so_far_permille;
     mount(box, h('div', { class: 'grid' },
       h('section', { class: 'card' },
         h('h2', null, 'Today', day.date ? badge(day.date + ' UTC', 'plain') : null),
@@ -243,10 +255,17 @@ function availabilityTab(box) {
           ['Clock', lbl(L.timeSource, av.clock)],
           ['UTC time', sod === null || sod === undefined ? DASH :
             String(Math.floor(sod / 3600)).padStart(2, '0') + ':' + String(Math.floor((sod % 3600) / 60)).padStart(2, '0')],
-          prot ? ['Onocoy offline today', fmt.dur(p.down_today_s)] : null,
-          prot ? ['Offline budget left', fmt.dur(p.budget_left_s)] : null,
-          prot ? ['Data rate', fmt.permille(p.data_rate_permille)] : null,
-          prot ? ['Graced uptime', fmt.permille(p.graced_uptime_permille) + (p.streak_ok === false ? ' (below 99.8 %)' : '')] : null,
+          prot && !counting ? ['Onocoy', h('span', null, p.onocoy_ready === false ? 'Onocoy not set up. ' : 'Onocoy is off. ',
+            link(p.onocoy_ready === false ? 'Add your Onocoy credentials' : 'Turn it on', '#/casters/onocoy'))] : null,
+          counting ? ['Onocoy offline today', fmt.dur(p.down_today_s)] : null,
+          counting ? ['Offline budget left', fmt.dur(p.budget_left_s)] : null,
+          counting ? ['Data rate', p.data_rate_permille === null || p.data_rate_permille === undefined ? 'nothing sent yet today' :
+            fmt.permille(p.data_rate_permille)] : null,
+          counting ? ['Graced uptime so far', sofar === null || sofar === undefined ? DASH :
+            h('span', { class: p.streak_ok ? 't-ok' : sofar < 998 ? 't-bad' : 't-ok' }, fmt.permille(sofar) + (p.streak_ok ? ' (streak on track)' :
+              sofar < 998 ? ' (below 99.8 %)' : ''))] : null,
+          counting && p.graced_uptime_permille !== null && p.graced_uptime_permille !== undefined ?
+            ['Share of the whole day online', fmt.permille(p.graced_uptime_permille)] : null,
           ['Powered off', fmt.dur(day.power_off_s)],
           ['UART overflows', fmt.num(day.rx_overflows)],
         ]),
@@ -258,7 +277,7 @@ function availabilityTab(box) {
           days.map(d => {
             const i = pi >= 0 ? pi : 0;
             const down = (d.down_s || [])[i];
-            const over = prot && down > 473;
+            const over = counting && down > 473;
             return [d.date || String(d.utc_day), h('span', { class: over ? 't-bad' : null }, fmt.dur(down)), fmt.dur((d.planned_s || [])[i]),
               fmt.num((d.reconnects || [])[i]), fmt.dur(d.power_off_s)];
           }), { num: [1, 2, 3, 4] }) : h('p', { class: 'muted' }, 'No earlier days recorded yet.'),
@@ -428,6 +447,15 @@ function logsTab(box) {
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   }, capErr), 'small');
 
+  const capCard = h('section', { class: 'card', hidden: true },
+    h('h2', null, 'Receiver byte capture'),
+    h('p', { class: 'muted small' }, 'This build records every byte the station exchanged with the receiver during a receiver update or a bench test ' +
+      '(the last 256 KB, data blocks as one line each).'),
+    h('div', { class: 'row' }, capBtn),
+    capErr);
+  api('GET', '/api/health').then(hl => {
+    capCard.hidden = !(hl && hl.byte_capture_built);
+  }).catch(() => {});
   mount(box,
     h('section', { class: 'card' },
       h('h2', null, 'Log'),
@@ -440,12 +468,7 @@ function logsTab(box) {
       h('p', { class: 'muted small' }, 'Per component tag, until the next restart. Debug output costs memory and console time; set it back when done.'),
       h('div', { class: 'cols c3' }, field('Tag', tag).el, field('Level', level).el, h('div', { class: 'field' }, h('span', { class: 'lbl' }, ' '), setBtn)),
       lvErr),
-    h('section', { class: 'card' },
-      h('h2', null, 'Receiver byte capture'),
-      h('p', { class: 'muted small' }, 'Bench builds record every byte the station exchanged with the receiver during a receiver update or a bench test ' +
-        '(the last 256 KB, data blocks as one line each). Other builds record nothing.'),
-      h('div', { class: 'row' }, capBtn),
-      capErr));
+    capCard);
   restart();
 
   return {
@@ -463,17 +486,28 @@ function journalDetail(e) {
   const a = e.a, b = e.b;
   switch (e.kind) {
     case 'boot':
-      return 'Reset: ' + (J.resetClass[a] || a) + (b ? '; planned reason: ' + (J.rebootReason[b] || b) : '');
+      return startSentence(J.resetClassKey[a], null, J.rebootKey[b]);
     case 'session':
-      return 'Previous session ' + (a < 0 ? 'length unknown' : 'ran ' + fmt.dur(a)) + '; reset reason: ' + (J.resetReason[b] || b);
+      return 'The previous run ' + (a < 0 ? 'lasted an unknown time' : 'lasted ' + fmt.dur(a)) + '; it ended ' +
+        (J.resetReason[b] ? 'with a ' + J.resetReason[b] + ' reset' : 'with reset ' + b);
     case 'reboot':
-      return 'Reason: ' + (J.rebootReason[a] || a);
+      return 'Restart: ' + (lbl(L.plannedReason, J.rebootKey[a]) || J.rebootReason[a] || a);
     case 'ladder_step': {
       const outcome = (b >> 8) & 0xff, code = b & 0xff, why = (b >> 16) & 0xff;
       if (a === 1 && code === 0) {
         const trig = J.netTrigger.filter((t, i) => why & (1 << i));
         return 'Network recovery: pass started' + (trig.length ? ' (' + trig.join(', ') + ')' : '');
       }
+      /* The receiver ladder's own restart, in words: done, waiting, postponed (and why). */
+      if (a === 0 && code === 9) {
+        if (outcome === 5) {
+          const mask = (b >>> 16) & 0xff;
+          const why9 = J.holdBits.filter((k, i) => mask & (1 << i)).map(k => L.hold[k]);
+          return 'Receiver recovery: restart postponed: ' + (why9.length ? why9.join(', ') : 'held back');
+        }
+        return 'Receiver recovery: ' + J.gnssRung[9];
+      }
+      if (a === 0 && (code === 6 || code === 8) && outcome === 0) return 'Receiver recovery: ' + J.gnssRung[code];
       let step = 'step ' + code;
       if (a === 0 && J.gnssRung[code]) step = J.gnssRung[code];
       if (a === 1 && J.netRung[code]) step = J.netRung[code];
@@ -481,9 +515,14 @@ function journalDetail(e) {
         (a === 1 && why ? ' (' + (J.netWhy[why] || why) + ')' : '');
     }
     case 'app_update':
-      return 'Result: ' + espErr(a);
+      return a === 0 ? 'Installed; the station restarted into it' : 'Not installed: ' + espErr(a);
     case 'app_revert':
-      return 'Trial stage: ' + (J.trial[a] || a);
+      /* a: the trial stage that gave the image up, 0 = the user (b = 1 since this build). */
+      if (a === 0) return 'Rolled back by you';
+      if (a === 1) return 'Rolled back during its first minute (a crash or a reset)' + (b === 2 ? ', the second time' : '');
+      if (a === 2) return 'Rolled back: it did not reach the station\'s state from before the update';
+      if (a === 3) return 'Rolled back: it kept crashing';
+      return 'Rolled back';
     case 'gnss_flash':
       return 'Outcome: ' + (J.flashOut[a] || a) + ', transfers ' + b;
     case 'safe_mode':
@@ -520,6 +559,27 @@ function journalDetail(e) {
   }
 }
 
+/**
+ * Journal entries (oldest first) grouped by start: a new group begins at a
+ * "boot" record or where the uptime goes back. Records written before the
+ * clock was trusted get the wall time the group's first dated record
+ * implies (its time minus its uptime, plus theirs), marked as estimated.
+ */
+function journalByBoot(entries) {
+  const groups = [];
+  let g = null, prevUp = -1;
+  for (const e of entries) {
+    if (!g || e.kind === 'boot' || e.uptime_s < prevUp) {
+      g = { entries: [], offset: null };
+      groups.push(g);
+    }
+    g.entries.push(e);
+    if (g.offset === null && e.time_unix) g.offset = e.time_unix - e.uptime_s;
+    prevUp = e.uptime_s;
+  }
+  return groups;
+}
+
 function journalTab(box) {
   let cursor = 0;
   const entries = [];
@@ -532,15 +592,31 @@ function journalTab(box) {
       cursor = r.cursor;
       if (!r.more) break;
     }
-    const shown = entries.slice(-500).reverse();
-    mount(out, shown.length ? table(['#', 'When', 'Event', 'Details'], shown.map(e => [String(e.seq),
-      e.time_unix ? fmt.time(e.time_unix) : h('span', { class: 'muted' }, fmt.dur(e.uptime_s) + ' after start'),
-      J.kind[e.kind] || words(e.kind), journalDetail(e)]), { num: [0] }) : h('p', { class: 'muted' }, 'The journal is empty.'));
+    const groups = journalByBoot(entries.slice(-500)).reverse();
+    const rows = [];
+    for (const g of groups) {
+      const first = g.entries[0];
+      const startTime = g.offset !== null ? fmt.time(g.offset) : null;
+      rows.push(h('tr', { class: 'sep' }, h('th', { colspan: '3', scope: 'rowgroup' },
+        'Start' + (startTime ? ' at about ' + startTime : '') + (first.kind === 'boot' ? '' : ' (its first records were overwritten)'))));
+      for (const e of g.entries.slice().reverse()) {
+        const when = e.time_unix ? fmt.time(e.time_unix) : g.offset !== null ? '≈ ' + fmt.time(g.offset + e.uptime_s) :
+          fmt.dur(e.uptime_s) + ' after the start';
+        rows.push(h('tr', null,
+          h('td', { 'data-label': 'When' }, e.time_unix ? when : h('span', { class: 'muted' }, when)),
+          h('td', { 'data-label': 'Event' }, J.kind[e.kind] || words(e.kind)),
+          h('td', { 'data-label': 'Details' }, journalDetail(e), h('span', { class: 'muted small' }, ' #' + e.seq))));
+      }
+    }
+    mount(out, rows.length ? h('div', { class: 'scroll' }, h('table', { class: 'journal stack-sm' },
+      h('thead', null, h('tr', null, h('th', null, 'When'), h('th', null, 'Event'), h('th', null, 'Details'))),
+      h('tbody', null, rows))) : h('p', { class: 'muted' }, 'The journal is empty.'));
   }
   const refresh = btn('Refresh', () => act(refresh, fetchNew, err), 'small');
   mount(box, h('section', { class: 'card' },
     h('h2', null, 'Event journal'),
-    h('p', { class: 'muted small' }, 'Starts, restarts, recovery steps, updates and data losses, kept across restarts. Newest first.'),
+    h('p', { class: 'muted small' }, 'Starts, restarts, recovery steps, updates and data losses, kept across restarts. Newest first, by start; ' +
+      'times marked ≈ are worked out from a later record of the same start (the clock was not set yet when they were written).'),
     h('div', { class: 'row' }, refresh), err, h('div', { class: 'foot' }, out)));
   act(null, fetchNew, err);
   return { stop() {} };
@@ -616,7 +692,8 @@ Views.diag = {
     const tab = DIAG_PAGES[arg] ? arg : '';
     const box = h('div', { class: 'stack' });
     mount(el, h('nav', { class: 'seg', 'aria-label': 'Diagnostics sections' },
-      DIAG_TABS.map(t => h('a', { href: '#/diag' + (t[0] ? '/' + t[0] : ''), class: t[0] === tab ? 'active' : null }, t[1]))), box);
+      DIAG_TABS.map(t => h('a', { href: '#/diag' + (t[0] ? '/' + t[0] : ''), class: t[0] === tab ? 'active' : null,
+        'aria-current': t[0] === tab ? 'page' : null }, t[1]))), box);
     mount(box, h('p', { class: 'loading' }, 'Loading…'));
     const sub = DIAG_PAGES[tab](box);
     return {

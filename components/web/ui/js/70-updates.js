@@ -143,6 +143,80 @@ function receiverSteps(state, upload, checkOnly) {
   }));
 }
 
+/* ---- The last update check, in words ---- */
+
+/** {tone, text, detail} for a failed check (GET /api/update), or null when it went well (or none ran). */
+function checkFailure(u) {
+  const r = u.last_check_result;
+  if (!r || r === 'ok') return null;
+  const repo = u.release_repo ? 'github.com/' + u.release_repo : 'the release repository';
+  const retry = u.next_check_in_s === null || u.next_check_in_s === undefined ? '' :
+    u.next_check_in_s <= 0 ? ' The station tries again as soon as it is online.' : ' The station tries again in ' + inMinutes(u.next_check_in_s) + '.';
+  const http = u.last_http_status ? ' (HTTP ' + u.last_http_status + ')' : '';
+  let text;
+  switch (r) {
+    case 'no_release':
+      text = 'No release found at ' + repo + http + '. The repository may be private or have no releases yet.';
+      break;
+    case 'no_response':
+      text = 'GitHub did not answer.' + (retry || ' The station tries again later.');
+      break;
+    case 'http_error':
+      text = 'GitHub answered with an error' + http + '. The station tries again with the next daily check.';
+      break;
+    case 'untrusted_redirect':
+      text = 'GitHub sent the request somewhere this firmware does not trust, so it stopped there. The station tries again with the next daily check.';
+      break;
+    case 'bad_manifest':
+      text = 'The latest release at ' + repo + ' has no release manifest this build accepts.';
+      break;
+    default:
+      text = 'The update check failed (' + r + ').';
+  }
+  const lr = u.last_result;
+  const detail = lr && lr.job === 'check' && lr.message ? 'Details: ' + lr.message + (u.last_http_status ? ', HTTP ' + u.last_http_status : '') : null;
+  return { tone: 'warn', text: text, detail: detail };
+}
+
+/** Time of a check as "19:10" today, else date and time. */
+function checkTime(unix) {
+  const d = new Date(unix * 1000);
+  const now = new Date();
+  return d.toDateString() === now.toDateString() ? d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : fmt.time(unix);
+}
+
+/* ---- App image checks before an upload (the first bytes of the file) ---- */
+
+const IMAGE_MAGIC = 0xE9;
+const DESC_OFS = 32;               /* image header (24) + first segment header (8) */
+const DESC_MAGIC = 0xABCD5432;
+const DESC_VERSION_OFS = 16, DESC_PROJECT_OFS = 48, DESC_ELF_SHA_OFS = 144;
+
+function cstr(bytes, ofs, len) {
+  let end = ofs;
+  while (end < ofs + len && bytes[end] !== 0) end++;
+  return String.fromCharCode.apply(null, Array.from(bytes.subarray(ofs, end)));
+}
+
+/** {version, project, elfSha} from an app image's first 256 bytes; null if it is not an app image. */
+async function readAppImage(file) {
+  let b;
+  try {
+    b = new Uint8Array(await file.slice(0, 256).arrayBuffer());
+  } catch (e) {
+    return null;
+  }
+  if (b.length < DESC_OFS + DESC_ELF_SHA_OFS + 32 || b[0] !== IMAGE_MAGIC) return null;
+  const d = DESC_OFS;
+  const magic = (b[d] | (b[d + 1] << 8) | (b[d + 2] << 16) | (b[d + 3] << 24)) >>> 0;
+  if (magic !== DESC_MAGIC) return null;
+  return {
+    version: cstr(b, d + DESC_VERSION_OFS, 32),
+    project: cstr(b, d + DESC_PROJECT_OFS, 32),
+    elfSha: Array.from(b.subarray(d + DESC_ELF_SHA_OFS, d + DESC_ELF_SHA_OFS + 32), x => x.toString(16).padStart(2, '0')).join(''),
+  };
+}
+
 /** Expected downtime against today's remaining Onocoy budget. */
 function downtimeRows(down, left) {
   const mid = fmt.utcMidnight();
@@ -191,22 +265,28 @@ Views.updates = {
     function renderVersions() {
       const a = u.app || {}, g = u.gnss || {};
       const lr = u.last_result;
+      const fail = checkFailure(u);
       const checkBtn = btn('Check now', () => act(checkBtn, async () => {
         await api('POST', '/api/update/check');
         P.check.set({ job: 'check', phase: 'checking', done: false });
       }), '', { disabled: !u.checks_enabled });
+      /* The last attempt, successful or not ("19:10 (failed)"); the last success when no attempt ran this start. */
+      const last = u.last_attempt_unix ? checkTime(u.last_attempt_unix) + (fail ? ' (failed)' : '') :
+        u.last_check_unix ? fmt.time(u.last_check_unix) : 'not yet';
       mount(versionsCard,
-        h('h2', null, 'Versions', u.state && u.state !== 'idle' ? badge(lbl(L.updState, u.state), 'info') : null),
+        h('h2', null, 'Versions', u.state && u.state !== 'idle' && u.state !== 'failed' ? badge(lbl(L.updState, u.state), 'info') : null),
         kv([
           ['App', [a.running || DASH, a.dev_build ? ' ' : null, a.dev_build ? badge('development build', 'plain') : null]],
           ['Receiver', g.running ? g.running + (g.model ? ' on ' + g.model : '') : DASH],
-          ['Last check', u.last_check_unix ? fmt.time(u.last_check_unix) : 'not yet'],
+          ['Last check', last],
           u.release_repo ? ['Releases from', ['github.com/' + u.release_repo, u.signed_manifests ? ' ' : null,
             u.signed_manifests ? badge('signed only', 'plain') : null]] : null,
-          lr ? ['Last job', lbl(L.job, lr.job) + ': ' + resultText(lr)] : null,
+          /* Check results have their own message below; other jobs show here. */
+          lr && lr.job !== 'check' ? ['Last job', lbl(L.job, lr.job) + ': ' + resultText(lr)] : null,
         ]),
         u.checks_enabled ? h('p', { class: 'muted small' }, 'The station checks for new releases once a day. Nothing is downloaded until you click.') :
           msg('', ERR.checks_disabled),
+        fail && u.state !== 'checking' ? msg(fail.tone, fail.text, fail.detail ? h('div', { class: 'small muted' }, fail.detail) : null) : null,
         P.check.el,
         h('div', { class: 'form-actions' }, checkBtn));
     }
@@ -394,30 +474,76 @@ Views.updates = {
     }
 
     /* ---- Files ---- */
-    const appFile = h('input', { type: 'file', accept: '.bin,application/octet-stream' });
+    const appFile = h('input', { type: 'file', accept: '.bin,application/octet-stream', id: 'upd-app-file' });
     const appUploadBtn = btn('Install this file', () => uploadApp({}));
     const appUploadErr = errBox();
-    /* o.anyProject, o.rolledBackAck: what the user already confirmed after a refusal. */
+    /* Too big for the station: said before anything is sent (and when a refusal ends in a reset). */
+    const tooBig = (file, max, what) => 'The file is ' + fmt.bytes(file.size) + '; ' + what + ' holds at most ' + fmt.bytes(max) + '.';
+    /* o.anyProject, o.rolledBackAck, o.reinstall: what the user already confirmed. */
     async function uploadApp(o) {
       const file = appFile.files && appFile.files[0];
       if (!file) {
         say(appUploadErr, 'Choose a .bin file first.');
         return;
       }
-      if (!o.anyProject && !o.rolledBackAck) {
-        const ok = await dialog({ title: 'Install ' + file.name + '?', ok: 'Install',
-          body: [h('p', null, fmt.bytes(file.size) + '. The station writes it to its spare app slot and restarts into it. ' +
+      appUploadErr.hidden = true;
+      const a = (u && u.app) || {};
+      const max = u && u.app_max_bytes;
+      /* Read the image's own description before sending a byte. */
+      if (max && file.size > max) {
+        say(appUploadErr, tooBig(file, max, 'the station\'s app slot'));
+        return;
+      }
+      const img = await readAppImage(file);
+      if (!img) {
+        say(appUploadErr, 'This file is not an app image for the station (it does not start like one). Choose the .bin file of a release or of your own build.');
+        return;
+      }
+      if (img.project !== 'onocoydiy-esp-um982' && !o.anyProject) {
+        say(appUploadErr, 'This image is firmware for "' + (img.project || 'an unnamed project') + '", not for this station. Nothing was sent.');
+        return;
+      }
+      const same = u && u.running_elf_sha256 && img.elfSha === u.running_elf_sha256;
+      if (same && !o.reinstall) {
+        const ok = await dialog({ title: 'Install the same version again?', ok: 'Install again',
+          body: h('p', null, 'This is the version already running (' + (img.version || a.running || 'unknown') + '). Install it again? ' +
+            'The station restarts into it; nothing else changes.') });
+        if (!ok) return;
+        uploadApp(Object.assign({}, o, { reinstall: true }));
+        return;
+      }
+      if (!same && (a.rolled_back || []).indexOf(img.version) >= 0 && !o.rolledBackAck) {
+        const ok = await dialog({ title: 'Install a version that was rolled back?', ok: 'Install anyway',
+          body: h('p', null, 'Version ' + img.version + ' was rolled back on this station before: its trial failed, or someone went back from it. ' +
+            'If it fails again, the station goes back to the version running now.'),
+          check: 'I know this version was rolled back on this station before.' });
+        if (ok) uploadApp(Object.assign({}, o, { rolledBackAck: true }));
+        return;
+      }
+      if (!o.anyProject && !o.rolledBackAck && !o.reinstall) {
+        const ok = await dialog({ title: 'Install ' + (img.version || file.name) + '?', ok: 'Install',
+          body: [h('p', null, file.name + ', ' + fmt.bytes(file.size) + '. The station writes it to its spare app slot and restarts into it. ' +
             'The new version runs on trial and goes back to this one if it fails.')] });
         if (!ok) return;
       }
-      appUploadErr.hidden = true;
       const q = [o.anyProject ? 'any_project=1' : null, o.rolledBackAck ? 'rolled_back_ack=1' : null].filter(x => x).join('&');
       let r;
       try {
         r = await busy(appUploadBtn, () => upload('/api/upload/app' + (q ? '?' + q : ''), file, (sent, total) =>
-          P.app_upload.set({ job: 'app_upload', phase: 'receiving', bytes: sent, total: total, done: false })));
+          P.app_upload.set({ job: 'app_upload', phase: 'receiving', bytes: sent, total: total, done: false }),
+        o.reinstall ? { 'X-Reinstall': '1' } : null));
       } catch (e) {
         P.app_upload.hide();
+        if (e instanceof ApiError && (e.code === 'network' || e.code === 'too_large') && max && file.size > max) {
+          say(appUploadErr, tooBig(file, max, 'the station\'s app slot'));
+          return;
+        }
+        if (e instanceof ApiError && e.code === 'same_image' && !o.reinstall) {
+          const ok = await dialog({ title: 'Install the same version again?', ok: 'Install again',
+            body: h('p', null, 'This is the version already running. Install it again?') });
+          if (ok) uploadApp(Object.assign({}, o, { reinstall: true }));
+          return;
+        }
         if (e instanceof ApiError && e.code === 'not_this_project' && !o.anyProject) {
           const ok = await dialog({ title: 'Firmware for another project?', ok: 'Install anyway', okKind: 'danger solid',
             body: h('p', null, 'This image does not say it is firmware for this station. Firmware for something else can leave the station ' +
@@ -441,7 +567,7 @@ Views.updates = {
         '. The station restarts into it now; this page reconnects by itself.');
     }
 
-    const pkgFile = h('input', { type: 'file', accept: '.pkg,application/octet-stream' });
+    const pkgFile = h('input', { type: 'file', accept: '.pkg,application/octet-stream', id: 'upd-pkg-file' });
     const pkgUploadBtn = btn('Upload and check', () => uploadPkg());
     const pkgErr = errBox();
     async function uploadPkg() {
@@ -451,6 +577,11 @@ Views.updates = {
         return;
       }
       pkgErr.hidden = true;
+      const max = u && u.pkg_max_bytes;
+      if (max && file.size > max) {
+        say(pkgErr, tooBig(file, max, 'the station\'s package area'));
+        return;
+      }
       try {
         staged = await busy(pkgUploadBtn, () => upload('/api/upload/gnss', file, (sent, total) =>
           P.gnss_upload.set({ job: 'gnss_upload', phase: sent < total ? 'receiving' : 'inspecting', bytes: sent, total: total, done: false })));
@@ -460,6 +591,10 @@ Views.updates = {
         renderStaged();
       } catch (e) {
         P.gnss_upload.hide();
+        if (e instanceof ApiError && (e.code === 'network' || e.code === 'too_large') && max && file.size > max) {
+          say(pkgErr, tooBig(file, max, 'the station\'s package area'));
+          return;
+        }
         showErr(e, pkgErr);
       }
     }
@@ -565,11 +700,13 @@ Views.updates = {
       h('h2', null, 'Install from a file'),
       h('h3', { class: 'section-title' }, 'App image (.bin)'),
       h('p', { class: 'muted small' }, 'For pre-releases, downgrades and self-built firmware.'),
+      h('label', { class: 'lbl', for: 'upd-app-file' }, 'App image file'),
       h('div', { class: 'row' }, appFile, appUploadBtn),
       P.app_upload.el,
       appUploadErr,
       h('h3', { class: 'section-title' }, 'Receiver package (.pkg)'),
       h('p', { class: 'muted small' }, 'The station stores and checks the package first. Nothing is sent to the receiver until you confirm.'),
+      h('label', { class: 'lbl', for: 'upd-pkg-file' }, 'Receiver package file'),
       h('div', { class: 'row' }, pkgFile, pkgUploadBtn),
       P.gnss_upload.el,
       pkgErr,
@@ -589,7 +726,7 @@ Views.updates = {
       ]);
       u = res[0];
       flash = res[1];
-      if (!staged && res[2]) {
+      if (!staged && res[2] && res[2].staged) {
         staged = res[2];
         stagedDeadline = Date.now() + (staged.staged.expires_in_s || 900) * 1000;
         renderStaged();
@@ -618,7 +755,11 @@ Views.updates = {
 
     offs.push(bus.on('progress', m => {
       const w = P[m.job];
-      if (w) w.set(m);
+      if (m.job === 'check' && m.done) {
+        if (w) w.hide();   /* the result shows once, as the card's own message */
+      } else if (w) {
+        w.set(m);
+      }
       if (m.job === 'gnss_update') {
         if (!m.done) {
           rflow = { state: 'download' };

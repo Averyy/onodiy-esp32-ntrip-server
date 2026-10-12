@@ -11,6 +11,7 @@
 #define TRIAL_BLOB_VERSION 1
 #define BAD_BLOB_VERSION   1
 #define REC_FLAG_BASELINE_KNOWN (1u << 0)
+#define REC_FLAG_SAME_IMAGE     (1u << 1)
 
 static uint16_t inc16(uint16_t v)
 {
@@ -37,7 +38,7 @@ size_t fw_trial_rec_encode(const fw_trial_rec_t *r, uint8_t *buf, size_t cap)
     blob_put_str(&w, r->version);
     blob_put_u8(&w, r->stage);
     blob_put_u8(&w, r->attempt);
-    blob_put_u8(&w, r->baseline_known ? REC_FLAG_BASELINE_KNOWN : 0);
+    blob_put_u8(&w, (uint8_t)((r->baseline_known ? REC_FLAG_BASELINE_KNOWN : 0u) | (r->same_image ? REC_FLAG_SAME_IMAGE : 0u)));
     blob_put_u8(&w, r->baseline);
     blob_put_u8(&w, r->streaming_slots);
     blob_put_i64(&w, r->installed_unix);
@@ -72,6 +73,7 @@ bool fw_trial_rec_decode(const uint8_t *buf, size_t len, fw_trial_rec_t *out)
         return false;
     }
     r.baseline_known = (flags & REC_FLAG_BASELINE_KNOWN) != 0;
+    r.same_image = (flags & REC_FLAG_SAME_IMAGE) != 0;
     *out = r;
     return true;
 }
@@ -90,6 +92,11 @@ void fw_trial_rec_new(fw_trial_rec_t *out, const fw_trial_rec_t *prev, const cha
     out->baseline = baseline;
     out->streaming_slots = streaming_slots;
     out->installed_unix = installed_unix;
+}
+
+fw_trial_rec_stage_t fw_trial_after_confirm(const fw_trial_rec_t *rec)
+{
+    return rec->same_image ? FW_TRIAL_REC_NONE : FW_TRIAL_REC_VERIFYING;
 }
 
 /* ---- rolled-back list ---------------------------------------------------------------- */
@@ -220,7 +227,11 @@ void fw_trial_on_boot(fw_trial_rec_t *rec, const fw_trial_boot_in_t *in, fw_tria
         break;
 
     case FW_TRIAL_REC_PENDING:
-        if (is_running) {
+        if (is_running && fw_trial_after_confirm(rec) == FW_TRIAL_REC_NONE) {
+            /* The identical image, confirmed: its trial is over. */
+            clear_rec(rec);
+            out->persist = true;
+        } else if (is_running) {
             /* Confirmed, but the record was not advanced (power cut right
              * after the confirmation): continue with stage 2. */
             rec->stage = FW_TRIAL_REC_VERIFYING;

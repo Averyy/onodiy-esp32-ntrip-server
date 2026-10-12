@@ -1782,3 +1782,136 @@ TEST_CASE("station core: a package check runs without the receiver or a pause", 
     sim_done(&w, &(stn_result_t){ .err = STN_OK });
     TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
 }
+
+/* ---- no receiver: alert, next search, "check again"; the live view at read time ---- */
+
+TEST_CASE("station core: no receiver raises its alert with the next search time", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    sim_start(&w);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, stn_next_detect_in_s(&w.s, w.in.now_ms));   /* IDLE: the boot listen */
+    stn_job_t j = sim_until_job(&w, 5);
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, j.kind);
+    TEST_ASSERT_EQUAL_UINT32(0, stn_next_detect_in_s(&w.s, w.in.now_ms));   /* the pass runs */
+    TEST_ASSERT_EQUAL_HEX32(0, stn_alerts(&w.s) & STN_ALERT_NO_RECEIVER);   /* DETECTING: not yet */
+    fail_pass(&w, false);
+    TEST_ASSERT_EQUAL(STN_NO_RECEIVER, w.s.state);
+    TEST_ASSERT_EQUAL_HEX32(STN_ALERT_NO_RECEIVER, stn_alerts(&w.s) & STN_ALERT_NO_RECEIVER);
+    TEST_ASSERT_EQUAL_HEX32(0, w.s.alerts & STN_ALERT_NO_RECEIVER);   /* derived, never stored */
+
+    /* The schedule: 30 s apart in the first 5 min, counting down. */
+    TEST_ASSERT_UINT32_WITHIN(1, STN_DETECT_FAST_MS / 1000, stn_next_detect_in_s(&w.s, w.in.now_ms));
+    w.in.now_ms += 10000;
+    TEST_ASSERT_UINT32_WITHIN(1, STN_DETECT_FAST_MS / 1000 - 10, stn_next_detect_in_s(&w.s, w.in.now_ms));
+
+    /* Then every 5 min. */
+    int64_t episode = w.s.episode_ms;
+    while (w.in.now_ms - episode < STN_DETECT_FAST_SPAN_MS) {
+        j = sim_until_job(&w, 40);
+        TEST_ASSERT_EQUAL(STN_JOB_DETECT, j.kind);
+        fail_pass(&w, false);
+    }
+    TEST_ASSERT_UINT32_WITHIN(1, STN_DETECT_SLOW_MS / 1000, stn_next_detect_in_s(&w.s, w.in.now_ms));
+
+    /* The receiver streams again: the alert clears, no search is scheduled. */
+    w.in.now_ms += 5000;
+    w.in.rtcm_frames += 1;
+    (void)sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    TEST_ASSERT_EQUAL_HEX32(0, stn_alerts(&w.s) & STN_ALERT_NO_RECEIVER);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, stn_next_detect_in_s(&w.s, w.in.now_ms));
+}
+
+TEST_CASE("station core: the no-receiver alert gives way to the loader alert and to maintenance", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    sim_start(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, sim_until_job(&w, 5).kind);
+    stn_result_t r = res(STN_E_NOT_FOUND);
+    r.prompt = true;   /* at its loader prompt, and the application did not come back */
+    r.key_sent = true;
+    sim_done(&w, &r);
+    TEST_ASSERT_EQUAL(STN_NO_RECEIVER, w.s.state);
+    uint32_t a = stn_alerts(&w.s);
+    TEST_ASSERT_EQUAL_HEX32(STN_ALERT_RECEIVER_IN_LOADER, a & STN_ALERT_RECEIVER_IN_LOADER);
+    TEST_ASSERT_EQUAL_HEX32(0, a & STN_ALERT_NO_RECEIVER);
+
+    sim_init(&w, false);
+    sim_start(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, sim_until_job(&w, 5).kind);
+    fail_pass(&w, false);
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 1800, false, w.in.now_ms));
+    TEST_ASSERT_EQUAL_HEX32(0, stn_alerts(&w.s) & STN_ALERT_NO_RECEIVER);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, stn_next_detect_in_s(&w.s, w.in.now_ms));
+}
+
+TEST_CASE("station core: check again starts the next search now and keeps the schedule", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    sim_start(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, sim_until_job(&w, 5).kind);
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_detect(&w.s, w.in.now_ms));   /* DETECTING: the first search runs */
+    fail_pass(&w, false);
+    int64_t episode = w.s.episode_ms;
+    uint8_t short_fails = w.s.short_fails;
+
+    w.in.now_ms += 5000;
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_detect(&w.s, w.in.now_ms));
+    TEST_ASSERT_EQUAL_UINT32(0, stn_next_detect_in_s(&w.s, w.in.now_ms));
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, j.kind);   /* at once, not 25 s later */
+    TEST_ASSERT_EQUAL_INT64(episode, w.s.episode_ms);
+    TEST_ASSERT_EQUAL_UINT8(short_fails, w.s.short_fails);
+    TEST_ASSERT_FALSE(j.full);   /* the second short pass, as the schedule had it */
+    fail_pass(&w, false);
+    TEST_ASSERT_UINT32_WITHIN(1, STN_DETECT_FAST_MS / 1000, stn_next_detect_in_s(&w.s, w.in.now_ms));
+
+    /* Refused while streaming, and in maintenance. */
+    w.in.now_ms += 1000;
+    w.in.rtcm_frames += 1;
+    (void)sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_detect(&w.s, w.in.now_ms));
+
+    sim_init(&w, false);
+    sim_start(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, sim_until_job(&w, 5).kind);
+    fail_pass(&w, false);
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 1800, false, w.in.now_ms));
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_detect(&w.s, w.in.now_ms));
+}
+
+TEST_CASE("station core: the live view's window reads right after a start or stop, mid-job", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    sim_start(&w);
+    /* A detection pass runs (the station task is busy for most of a minute). */
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, sim_until_job(&w, 5).kind);
+    TEST_ASSERT_TRUE(w.s.job_busy);
+
+    uint8_t why = 0xFF;
+    TEST_ASSERT_EQUAL(STN_OK, stn_live_start(&w.s, 10u * 60000u, w.in.now_ms, &why));
+    stn_live_status_t lv;
+    stn_live_status(&w.s, &w.in, &lv);   /* no stn_next() / stn_done() in between */
+    TEST_ASSERT_TRUE(lv.open);
+    TEST_ASSERT_UINT32_WITHIN(1, 600, lv.left_s);
+    TEST_ASSERT_EQUAL_UINT32(0, lv.open_s);
+
+    w.in.now_ms += 3000;
+    stn_live_stop(&w.s, w.in.now_ms);
+    stn_live_status(&w.s, &w.in, &lv);
+    TEST_ASSERT_FALSE(lv.open);
+    TEST_ASSERT_EQUAL_UINT8(STN_LIVE_END_USER, lv.last_end);
+    TEST_ASSERT_EQUAL_UINT32(0, lv.left_s);
+
+    /* Opened again: open, the previous end forgotten. */
+    TEST_ASSERT_EQUAL(STN_OK, stn_live_start(&w.s, 0, w.in.now_ms, &why));
+    stn_live_status(&w.s, &w.in, &lv);
+    TEST_ASSERT_TRUE(lv.open);
+    TEST_ASSERT_EQUAL_UINT8(STN_LIVE_END_NONE, lv.last_end);
+    TEST_ASSERT_UINT32_WITHIN(1, STN_LIVE_DEFAULT_MS / 1000, lv.left_s);
+}

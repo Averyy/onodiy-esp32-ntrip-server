@@ -58,9 +58,10 @@ const char *web_station_state_name(station_state_t v)
 
 static const char *const s_station_alert[] = {
     "unsupported_model", "config_failed", "position_mismatch", "antenna_moved", "receiver_attention",
-    "receiver_in_loader",
+    "receiver_in_loader", "no_receiver",
 };
-_Static_assert(STATION_ALERT_UNSUPPORTED_MODEL == 1u << 0 && STATION_ALERT_RECEIVER_IN_LOADER == 1u << 5,
+_Static_assert(STATION_ALERT_UNSUPPORTED_MODEL == 1u << 0 && STATION_ALERT_RECEIVER_IN_LOADER == 1u << 5 &&
+                   STATION_ALERT_NO_RECEIVER == 1u << 6,
                "station alert bits moved: update the name table");
 
 const char *web_station_alert_name(uint32_t bit)
@@ -314,6 +315,21 @@ static const char *const s_gnss_block[] = {
 const char *web_gnss_block_name(fw_update_gnss_block_t v)
 {
     return pick(s_gnss_block, COUNT(s_gnss_block), (int)v);
+}
+
+static const char *const s_check_result[] = {
+    [FW_CHECK_RESULT_NONE] = NULL,
+    [FW_CHECK_RESULT_OK] = "ok",
+    [FW_CHECK_RESULT_NO_RELEASE] = "no_release",
+    [FW_CHECK_RESULT_HTTP_ERROR] = "http_error",
+    [FW_CHECK_RESULT_NO_RESPONSE] = "no_response",
+    [FW_CHECK_RESULT_UNTRUSTED_REDIRECT] = "untrusted_redirect",
+    [FW_CHECK_RESULT_BAD_MANIFEST] = "bad_manifest",
+};
+
+const char *web_check_result_name(fw_update_check_result_t v)
+{
+    return (unsigned)v < COUNT(s_check_result) ? s_check_result[v] : NULL;
 }
 
 static const char *const s_probe[] = {

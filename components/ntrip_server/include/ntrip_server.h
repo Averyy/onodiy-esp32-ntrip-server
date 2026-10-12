@@ -91,8 +91,13 @@
  * ever logged redacted (host and slot name; never mountpoint, user or
  * password).
  *
- * Onocoy: servers.onocoy.com:2101, NTRIP 1.0, mountpoint = credential
- * username, password = credential password.
+ * Onocoy: servers.onocoy.com:2101, NTRIP 1.0 by default; the slot holds
+ * what the Onocoy console gives (mountpoint, username, password). NTRIP 2.0
+ * posts to /<mountpoint> with Basic <username>:<password>; NTRIP 1.0 sends
+ * "SOURCE <password> /<username>" (Onocoy's instruction for 1.0-only
+ * sources). A slot stored before the username field existed (empty
+ * username, the credential username in `mountpoint`) keeps working with the
+ * old mapping, but does not count as set up (ntrip_server_onocoy_ready).
  *
  * Safe mode skips ntrip_server_init() and _start(): no slot runs. Then
  * ntrip_server_get_status() still works (every slot DISABLED) and
@@ -167,9 +172,9 @@ typedef struct {
     char name[24];         /**< UI label */
     char host[64];
     uint16_t port;
-    char mountpoint[48];   /**< Onocoy slots: the credential username (sent as the
-                                NTRIP 1.0 mountpoint, the NTRIP 2.0 Basic-auth user) */
-    char username[48];     /**< NTRIP 2.0 only; not used by Onocoy slots */
+    char mountpoint[48];   /**< Onocoy slots: the console's mountpoint (the NTRIP 2.0 POST target) */
+    char username[48];     /**< NTRIP 2.0 Basic-auth user; Onocoy slots: the console's username, [A-Za-z0-9._-]
+                                (NTRIP 1.0 sends it as the mountpoint) */
     char password[64];     /**< secret: never returned to the web UI */
     bool password_set;     /**< output only: a password is stored */
     bool clear_password;   /**< input only (set_config): remove the stored password */
@@ -178,8 +183,8 @@ typedef struct {
     ntrip_trust_t trust_mode;      /**< TLS slots only */
     bool ca_pem_set;               /**< output only: a custom CA PEM is stored for this slot */
     ntrip_backoff_profile_t backoff_profile; /**< presets set it (Onocoy: fast) */
-    char label[48];                /**< NTRIP 2.0 dashboard label, [A-Za-z0-9] (Onocoy v2 sends it as the
-                                        mountpoint; "onocoydiy" when empty) */
+    char label[48];                /**< [A-Za-z0-9]; only an Onocoy slot stored before the username field uses it
+                                        (its NTRIP 2.0 mountpoint, "onocoydiy" when empty) */
     bool v2_raw_body;              /**< NTRIP 2.0 quirk: send the body unchunked */
     bool dup_stream_ack;           /**< user acknowledged streaming the same data to Onocoy and an open caster */
 } ntrip_caster_cfg_t;
@@ -212,10 +217,17 @@ typedef struct {
     uint32_t connected_s;       /**< seconds in the current session */
     uint32_t today_online_s;
     uint32_t today_offline_s;
-    uint16_t graced_uptime_permille; /**< protected slot: min(1, (online + grant) / 86400) */
+    bool day_metrics_valid;     /**< protected slot, enabled and set up (ntrip_server_onocoy_ready): the four
+                                     figures below mean something; false = unknown (the web shows null) */
+    uint16_t graced_uptime_permille; /**< protected slot: min(1, (online + grant) / 86400), the day fraction */
     bool streak_ok;             /**< protected slot: graced uptime meets the streak threshold so far */
     uint16_t data_rate_permille;/**< protected slot: epochs sent / epochs expected while connected today (estimate) */
+    bool data_rate_valid;       /**< ... and something was sent today (else the rate is unknown) */
     uint32_t budget_left_s;     /**< protected slot: offline budget left today for that data rate (estimate) */
+    uint16_t graced_uptime_so_far_permille; /**< protected slot: 1 - max(0, unplanned offline today - grant) /
+                                     time elapsed today (from 00:00 UTC or from when the slot first became
+                                     expected today); valid with so_far_valid */
+    bool so_far_valid;          /**< day_metrics_valid and a trusted clock */
     uint64_t bytes_sent;
     uint64_t frames_sent;
     uint64_t epochs_sent;       /**< ended by their closing MSM, or by the next epoch time when it never came */
@@ -310,6 +322,12 @@ esp_err_t ntrip_server_set_paused(bool paused);
 
 /** Fill a slot config with the Onocoy endpoint (credentials left empty, protected, fast backoff). */
 void ntrip_server_onocoy_defaults(ntrip_caster_cfg_t *out);
+
+/**
+ * An Onocoy slot that is set up: Onocoy host, mountpoint, username and a
+ * password (stored, password_set, or in the struct). Pure; no init needed.
+ */
+bool ntrip_server_onocoy_ready(const ntrip_caster_cfg_t *cfg);
 
 /**
  * The host rules of a slot (this component owns them, like the cross-slot
