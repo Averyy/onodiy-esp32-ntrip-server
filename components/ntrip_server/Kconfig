@@ -90,4 +90,18 @@ menu "Station: NTRIP casters"
             less than reconnecting, if the caster keeps the silent session.
             PROVISIONAL, to be confirmed against the caster's idle timeout.
 
+    config NTRIP_TEST_ONOCOY_SLOT
+        bool "Allow test Onocoy slots (bench and QEMU builds only)"
+        depends on BENCH_CONSOLE || NETWORK_QEMU_ETHERNET
+        default y
+        help
+            A slot marked test_onocoy (PUT /api/casters/{n}) is treated
+            exactly like an Onocoy slot whatever its host: protected, the
+            fast retry profile, the Onocoy fields and wire names, the
+            one-Onocoy rule and the Onocoy login guard. So a local test
+            caster (on the bench, or the Mac at 10.0.2.2 from QEMU) sees the
+            Onocoy retry behaviour without a DNS override. Never in a
+            release: it depends on the bench console or the QEMU Ethernet
+            option, and the release job refuses it.
+
 endmenu

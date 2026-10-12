@@ -1075,6 +1075,15 @@ static bool parse_slot_path(const char *uri, size_t *slot, bool *ca)
     return true;
 }
 
+static bool parse_retry_path(const char *uri, size_t *slot);
+
+/* Not a slot or its CA: 405 for the retry action (POST only), else 404. */
+static esp_err_t slot_path_refused(httpd_req_t *req)
+{
+    size_t slot = 0;
+    return web_send_err(req, parse_retry_path(req->uri, &slot) ? WEB_ERR_METHOD_NOT_ALLOWED : WEB_ERR_NOT_FOUND);
+}
+
 /* Reconnect a slot with its config unchanged (after its CA changed). */
 static void reconnect_slot(size_t slot)
 {
@@ -1159,7 +1168,7 @@ static esp_err_t h_caster_get(web_req_t *r)
     size_t slot = 0;
     bool ca = false;
     if (!parse_slot_path(r->req->uri, &slot, &ca)) {
-        return web_send_err(r->req, WEB_ERR_NOT_FOUND);
+        return slot_path_refused(r->req);
     }
     if (ca) {
         return web_send_err(r->req, WEB_ERR_METHOD_NOT_ALLOWED);
@@ -1172,7 +1181,7 @@ static esp_err_t h_caster_put(web_req_t *r)
     size_t slot = 0;
     bool ca = false;
     if (!parse_slot_path(r->req->uri, &slot, &ca)) {
-        return web_send_err(r->req, WEB_ERR_NOT_FOUND);
+        return slot_path_refused(r->req);
     }
     return ca ? caster_ca(r, slot, true) : caster_put(r, slot);
 }
@@ -1182,12 +1191,68 @@ static esp_err_t h_caster_delete(web_req_t *r)
     size_t slot = 0;
     bool ca = false;
     if (!parse_slot_path(r->req->uri, &slot, &ca)) {
-        return web_send_err(r->req, WEB_ERR_NOT_FOUND);
+        return slot_path_refused(r->req);
     }
     if (!ca) {
         return web_send_err(r->req, WEB_ERR_METHOD_NOT_ALLOWED);
     }
     return caster_ca(r, slot, false);
+}
+
+/* "/api/casters/<n>/retry": the slot index. */
+static bool parse_retry_path(const char *uri, size_t *slot)
+{
+    static const char prefix[] = "/api/casters/";
+    static const char suffix[] = "/retry";
+    size_t plen = sizeof(prefix) - 1;
+    if (strncmp(uri, prefix, plen) != 0) {
+        return false;
+    }
+    const char *p = uri + plen;
+    if (*p < '0' || *p > '9') {
+        return false;
+    }
+    size_t v = 0;
+    while (*p >= '0' && *p <= '9' && v < 100) {
+        v = v * 10u + (size_t)(*p - '0');
+        p++;
+    }
+    if (strncmp(p, suffix, sizeof(suffix) - 1) != 0) {
+        return false;
+    }
+    p += sizeof(suffix) - 1;
+    if ((*p != '\0' && *p != '?') || v >= slot_count()) {
+        return false;
+    }
+    *slot = v;
+    return true;
+}
+
+/* POST /api/casters/{n}/retry: the user's retry of a stopped (or waiting) slot. */
+static esp_err_t h_caster_post(web_req_t *r)
+{
+    size_t slot = 0;
+    bool ca = false;
+    if (!parse_retry_path(r->req->uri, &slot)) {
+        /* the slot and its CA take no POST; any other suffix is unknown */
+        return web_send_err(r->req, parse_slot_path(r->req->uri, &slot, &ca) ? WEB_ERR_METHOD_NOT_ALLOWED
+                                                                               : WEB_ERR_NOT_FOUND);
+    }
+    if (!load_configs()) {
+        return web_send_err(r->req, WEB_ERR_SAFE_MODE);
+    }
+    if (!s_cfg[slot].enabled) {
+        return web_send_err(r->req, WEB_ERR_SLOT_DISABLED);
+    }
+    esp_err_t err = ntrip_server_retry_slot(slot);
+    if (err == ESP_ERR_INVALID_STATE) {
+        return web_send_err(r->req, WEB_ERR_SLOT_DISABLED);   /* disabled meanwhile */
+    }
+    if (err != ESP_OK) {
+        return web_send_internal(r->req, err);
+    }
+    ESP_LOGI(TAG, "caster slot %u: retry requested", (unsigned)slot);
+    return accepted(r->req);
 }
 
 /* ---- Wi-Fi and system --------------------------------------------------------------------------------------- */
@@ -2122,6 +2187,7 @@ const web_route_t web_api_routes[] = {
     { .uri = "/api/casters/*", .method = HTTP_PUT, .access = WEB_ACC_ADMIN, .body = WEB_BODY_JSON,
       .max_body = WEB_JSON_MAX_CA, .fn = h_caster_put },
     ROUTE("/api/casters/*", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_caster_delete),
+    ROUTE("/api/casters/*", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_caster_post),
     ROUTE("/api/wifi", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_wifi_get),
     ROUTE("/api/wifi", HTTP_PUT, WEB_ACC_ADMIN, WEB_BODY_JSON, h_wifi_put),
     ROUTE("/api/wifi/scan", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_wifi_scan),
@@ -2155,12 +2221,14 @@ const web_route_t web_api_routes[] = {
 };
 
 const size_t web_api_route_count = sizeof(web_api_routes) / sizeof(web_api_routes[0]);
+_Static_assert(sizeof(web_api_routes) / sizeof(web_api_routes[0]) + WEB_EXTRA_URI_HANDLERS <= WEB_MAX_URI_HANDLERS,
+               "more routes than the server registers handlers for: raise WEB_MAX_URI_HANDLERS");
 
 bool web_api_path_known(const char *path)
 {
     size_t slot = 0;
     bool ca = false;
-    if (parse_slot_path(path, &slot, &ca)) {
+    if (parse_slot_path(path, &slot, &ca) || parse_retry_path(path, &slot)) {
         return true;
     }
     for (size_t i = 0; i < web_api_route_count; i++) {

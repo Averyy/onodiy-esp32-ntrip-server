@@ -120,7 +120,9 @@ static const char *const s_ntrip_state[] = {
     [NTRIP_STATE_PAUSED] = "paused",
     [NTRIP_STATE_CONFIG_ERROR] = "config_error",
     [NTRIP_STATE_BANNED] = "banned",
+    [NTRIP_STATE_STOPPED] = "stopped",
 };
+_Static_assert(COUNT(s_ntrip_state) == (size_t)NTRIP_STATE_STOPPED + 1u, "caster states moved: update the table");
 
 const char *web_ntrip_state_name(ntrip_state_t v)
 {
@@ -140,6 +142,9 @@ static const char *const s_ntrip_fail[] = {
     [NTRIP_FAIL_MOUNT_BUSY] = "mount_busy",
     [NTRIP_FAIL_CONFIG] = "config",
     [NTRIP_FAIL_BANNED] = "banned",
+    [NTRIP_FAIL_LOGIN_BLOCKED] = "login_blocked",
+    [NTRIP_FAIL_IN_USE] = "in_use",
+    [NTRIP_FAIL_REPLACED] = "replaced",
 };
 _Static_assert(COUNT(s_ntrip_fail) == NTRIP_FAIL_CLASS_COUNT, "caster failure classes moved: update the table");
 
@@ -168,6 +173,22 @@ static const char *const s_backoff[] = {
 const char *web_ntrip_backoff_name(ntrip_backoff_profile_t v)
 {
     return pick(s_backoff, COUNT(s_backoff), (int)v);
+}
+
+static const char *const s_ntrip_stop[] = {
+    [NTRIP_STOP_NONE] = "none",
+    [NTRIP_STOP_REJECTED] = "rejected",
+    [NTRIP_STOP_LOGIN_BLOCKED] = "login_blocked",
+    [NTRIP_STOP_IN_USE] = "in_use",
+    [NTRIP_STOP_KICKED] = "kicked",
+    [NTRIP_STOP_DUPLICATE] = "duplicate",
+    [NTRIP_STOP_BANNED] = "banned",
+};
+_Static_assert(COUNT(s_ntrip_stop) == NTRIP_STOP_COUNT, "caster stop reasons moved: update the table");
+
+const char *web_ntrip_stop_name(ntrip_stop_t v)
+{
+    return pick(s_ntrip_stop, COUNT(s_ntrip_stop), (int)v);
 }
 
 static const char *const s_base_mode[] = {
@@ -505,6 +526,7 @@ static const char *const s_diag_event[] = {
     [DIAG_EV_CASTER_DOWN] = "caster_down",
     [DIAG_EV_CASTER_UP] = "caster_up",
     [DIAG_EV_WIFI_UP] = "wifi_up",
+    [DIAG_EV_CASTER_STOP] = "caster_stop",
     [DIAG_EV_RX_MAINT] = "rx_maintenance",
     [DIAG_EV_LIVE_VIEW] = "live_view",
 };

@@ -92,7 +92,8 @@ _Static_assert(HM_CST_DISABLED == (int)NTRIP_STATE_DISABLED && HM_CST_WAIT_NETWO
                    HM_CST_WAIT_DATA == (int)NTRIP_STATE_WAIT_DATA && HM_CST_CONNECTING == (int)NTRIP_STATE_CONNECTING &&
                    HM_CST_STREAMING == (int)NTRIP_STATE_STREAMING && HM_CST_BACKOFF == (int)NTRIP_STATE_BACKOFF &&
                    HM_CST_AUTH_FAILED == (int)NTRIP_STATE_AUTH_FAILED && HM_CST_PAUSED == (int)NTRIP_STATE_PAUSED &&
-                   HM_CST_CONFIG_ERROR == (int)NTRIP_STATE_CONFIG_ERROR && HM_CST_BANNED == (int)NTRIP_STATE_BANNED,
+                   HM_CST_CONFIG_ERROR == (int)NTRIP_STATE_CONFIG_ERROR && HM_CST_BANNED == (int)NTRIP_STATE_BANNED &&
+                   HM_CST_STOPPED == (int)NTRIP_STATE_STOPPED,
                "caster states mirror ntrip_state_t");
 _Static_assert(DIAG_LOSS_HW_FIFO == 1 && DIAG_LOSS_RX_BUFFER_FULL == 2 && DIAG_LOSS_LINE_ERRORS == 3 &&
                    DIAG_LOSS_RTCM_CRC == 4 && DIAG_LOSS_FRAMER_DISCARDED == 5 && DIAG_LOSS_HUB_PUBLISH == 6 &&
@@ -430,9 +431,8 @@ static void casters_tick(int64_t now, bool *any_down, bool *protected_down, bool
         if (si.enabled && s_cst.unreached_s > *unreached_s) {
             *unreached_s = s_cst.unreached_s;
         }
-        if (s_slot_protected[i] && si.enabled && s_cst.state != NTRIP_STATE_STREAMING &&
-            s_cst.state != NTRIP_STATE_PAUSED) {
-            *protected_down = true;
+        if (hm_protected_down(si.enabled, s_slot_protected[i], si.state)) {
+            *protected_down = true;   /* not while stopped by the login guard: a network action cannot help */
         }
     }
 }

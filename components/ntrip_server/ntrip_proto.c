@@ -158,7 +158,7 @@ ntrip_fields_result_t ntrip_validate_fields(const ntrip_fields_t *f)
     if (has_ctrl(mount) || !mount_ok(mount)) {
         return NTRIP_FIELDS_BAD_MOUNTPOINT;
     }
-    bool onocoy = ntrip_host_is_onocoy(host);
+    bool onocoy = f->onocoy || ntrip_host_is_onocoy(host);
     if (has_ctrl(user) || strchr(user, ':') != NULL || (onocoy && !mount_ok(user))) {
         return NTRIP_FIELDS_BAD_USERNAME;   /* Onocoy over 1.0 sends the username as the mountpoint */
     }
@@ -219,12 +219,18 @@ bool ntrip_host_is_open_caster(const char *host)
     return ntrip_host_is_rtk2go(host) || ntrip_host_in_domain(host, "crtk.net");
 }
 
+static bool slot_onocoy(const ntrip_policy_slot_t *s)
+{
+    return s->onocoy || ntrip_host_is_onocoy(s->host);
+}
+
 ntrip_policy_t ntrip_check_policy(const ntrip_policy_slot_t *slots, size_t count, size_t edited)
 {
     if (edited >= count || !slots[edited].enabled) {
         return NTRIP_POLICY_OK;
     }
     const char *mine = slots[edited].host;
+    bool mine_onocoy = slot_onocoy(&slots[edited]);
     bool other_onocoy = false;
     bool other_rtk2go = false;
     bool other_open = false;
@@ -232,21 +238,73 @@ ntrip_policy_t ntrip_check_policy(const ntrip_policy_slot_t *slots, size_t count
         if (i == edited || !slots[i].enabled) {
             continue;
         }
-        other_onocoy |= ntrip_host_is_onocoy(slots[i].host);
+        other_onocoy |= slot_onocoy(&slots[i]);
         other_rtk2go |= ntrip_host_is_rtk2go(slots[i].host);
         other_open |= ntrip_host_is_open_caster(slots[i].host);
     }
-    if (ntrip_host_is_onocoy(mine) && other_onocoy) {
+    if (mine_onocoy && other_onocoy) {
         return NTRIP_POLICY_SECOND_ONOCOY;
     }
     if (ntrip_host_is_rtk2go(mine) && other_rtk2go) {
         return NTRIP_POLICY_SECOND_RTK2GO;
     }
-    bool pair = (ntrip_host_is_onocoy(mine) && other_open) || (ntrip_host_is_open_caster(mine) && other_onocoy);
+    bool pair = (mine_onocoy && other_open) || (ntrip_host_is_open_caster(mine) && other_onocoy);
     if (pair && !slots[edited].dup_ack) {
         return NTRIP_POLICY_NEED_DUP_ACK;
     }
     return NTRIP_POLICY_OK;
+}
+
+/* ---- RTK2go mountpoint rules ------------------------------------------------------- */
+
+ntrip_rtk2go_mount_t ntrip_rtk2go_mount_check(const char *mount)
+{
+    const char *m = mount ? mount : "";
+    size_t len = strlen(m);
+    for (size_t i = 0; i < len; i++) {
+        if (!is_alnum(m[i]) && m[i] != '_' && m[i] != '-') {
+            return NTRIP_RTK2GO_BAD_CHARS;   /* '.' included: the form refuses it */
+        }
+    }
+    if (len == 0) {
+        return NTRIP_RTK2GO_TOO_SHORT;
+    }
+    if (!((m[0] >= 'A' && m[0] <= 'Z') || (m[0] >= 'a' && m[0] <= 'z'))) {
+        return NTRIP_RTK2GO_FIRST_NOT_LETTER;
+    }
+    if (m[0] == 'A') {
+        return NTRIP_RTK2GO_FIRST_A;
+    }
+    if (len < 4) {
+        return NTRIP_RTK2GO_TOO_SHORT;
+    }
+    if (len > 20) {
+        return NTRIP_RTK2GO_TOO_LONG;
+    }
+    return NTRIP_RTK2GO_OK;
+}
+
+static bool same_ci(const char *a, const char *b)
+{
+    a = a ? a : "";
+    b = b ? b : "";
+    while (*a != '\0' && *b != '\0' && lower(*a) == lower(*b)) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+bool ntrip_rtk2go_rule_applies(const char *old_host, const char *old_mount, const char *new_host,
+                               const char *new_mount)
+{
+    if (!ntrip_host_is_rtk2go(new_host)) {
+        return false;
+    }
+    if (empty(old_host) || !same_ci(old_host, new_host)) {
+        return true;
+    }
+    return strcmp(old_mount ? old_mount : "", new_mount ? new_mount : "") != 0;
 }
 
 /* ---- requests -------------------------------------------------------------------- */
@@ -305,12 +363,12 @@ size_t ntrip_build_agent(const char *app_version, char *out, size_t cap)
     return (size_t)n;
 }
 
-void ntrip_wire_names(const char *host, bool v2, const char *mountpoint, const char *username,
-                      const char *label, ntrip_wire_names_t *out)
+void ntrip_wire_names(bool onocoy, bool v2, const char *mountpoint, const char *username, const char *label,
+                      ntrip_wire_names_t *out)
 {
     out->mount = mountpoint;
     out->user = username;
-    if (!ntrip_host_is_onocoy(host)) {
+    if (!onocoy) {
         return;
     }
     if (!empty(username)) {
@@ -509,6 +567,51 @@ bool ntrip_contains_ci(const char *data, size_t len, const char *needle)
     return false;
 }
 
+/* ---- Onocoy reason texts ------------------------------------------------------------- */
+
+/* The reasons Onocoy's console shows, lowercase, in priority order (the
+ * first that matches wins). PROVISIONAL: the wire form is unknown. */
+static const struct {
+    const char *text;
+    uint8_t reason;
+} k_ono_phrases[] = {
+    { "too many unsuccessful logins", NTRIP_ONO_LOGIN_BLOCKED },
+    { "already in use", NTRIP_ONO_IN_USE },
+    { "parallel connections", NTRIP_ONO_IN_USE },
+    { "device reconnected", NTRIP_ONO_REPLACED },
+    { "duplicate of another stream", NTRIP_ONO_DUPLICATE },
+    { "credential is banned", NTRIP_ONO_BANNED },
+    { "authentication failed", NTRIP_ONO_AUTH },   /* also "reauthentication failed" */
+    { "invalid request in headers", NTRIP_ONO_AUTH },
+};
+#define ONO_PHRASES (sizeof(k_ono_phrases) / sizeof(k_ono_phrases[0]))
+
+ntrip_onocoy_reason_t ntrip_onocoy_reason(const char *text, size_t len)
+{
+    for (size_t i = 0; text != NULL && i < ONO_PHRASES; i++) {
+        if (ntrip_contains_ci(text, len, k_ono_phrases[i].text)) {
+            return (ntrip_onocoy_reason_t)k_ono_phrases[i].reason;
+        }
+    }
+    return NTRIP_ONO_NONE;
+}
+
+/* Position of a reason in the priority order (NONE last). */
+static size_t ono_rank(ntrip_onocoy_reason_t r)
+{
+    for (size_t i = 0; i < ONO_PHRASES; i++) {
+        if (k_ono_phrases[i].reason == (uint8_t)r) {
+            return i;
+        }
+    }
+    return ONO_PHRASES;
+}
+
+ntrip_onocoy_reason_t ntrip_onocoy_reason_merge(ntrip_onocoy_reason_t a, ntrip_onocoy_reason_t b)
+{
+    return ono_rank(b) < ono_rank(a) ? b : a;
+}
+
 static ntrip_verdict_t fail(ntrip_cls_t cls, ntrip_row_t row, ntrip_hint_t hint, uint8_t rule)
 {
     ntrip_verdict_t v = { 0 };
@@ -590,9 +693,10 @@ static int http_code(const char *s, size_t len)
  *  17 no line in time / closed before it   TRANSIENT (ntrip_reply_end)
  *  18 anything else                        CONFIG
  * Matching is case-sensitive except rows 15 and 16, so "ERROR" and "Error"
- * are told apart.
+ * are told apart. The Onocoy reason the line names is set beside the row
+ * (ntrip_classify_line); only a guard slot acts on it.
  */
-ntrip_verdict_t ntrip_classify_line(const char *s, size_t len)
+static ntrip_verdict_t classify_rows(const char *s, size_t len)
 {
     if (equals(s, len, "ICY 200 OK")) {
         return ok(200, 1);
@@ -643,6 +747,13 @@ ntrip_verdict_t ntrip_classify_line(const char *s, size_t len)
         return fail(NTRIP_CLS_BANNED, NTRIP_ROW_BANNED, NTRIP_HINT_BANNED, 16);
     }
     return fail(NTRIP_CLS_CONFIG, NTRIP_ROW_CONFIG, NTRIP_HINT_UNEXPECTED, 18);
+}
+
+ntrip_verdict_t ntrip_classify_line(const char *s, size_t len)
+{
+    ntrip_verdict_t v = classify_rows(s, len);
+    v.onocoy_reason = (uint8_t)ntrip_onocoy_reason(s, len);
+    return v;
 }
 
 void ntrip_reply_init(ntrip_reply_t *r, bool v2_request)
@@ -712,9 +823,15 @@ static void on_line(ntrip_reply_t *r)
     }
 }
 
+/* An HTTP reply whose body is checked: 4xx, or any non-success one on a guard slot. */
+static bool body_wanted(const ntrip_reply_t *r)
+{
+    return r->verdict.rule == 4 && (is4xx(r->verdict.status_code) || r->body_always);
+}
+
 static void after_headers(ntrip_reply_t *r)
 {
-    if (r->verdict.rule == 4 && is4xx(r->verdict.status_code)) {
+    if (body_wanted(r)) {
         start_body(r);
     } else {
         finalize(r);
@@ -835,17 +952,28 @@ static bool chunk_byte(ntrip_reply_t *r, char c)
     return false;
 }
 
+static bool tail_ends_with(const ntrip_reply_t *r, const char *needle)
+{
+    size_t n = strlen(needle);
+    return r->tail_len >= n && memcmp(r->tail + (r->tail_len - n), needle, n) == 0;
+}
+
+/* One body data byte: "banned" and the Onocoy reasons, across reads and chunk boundaries. */
 static void body_byte(ntrip_reply_t *r, char c)
 {
-    static const char needle[] = "banned";
-    const size_t n = sizeof(needle) - 1;
-    if (r->tail_len == n) {
-        memmove(r->tail, r->tail + 1, n - 1);
+    if (r->tail_len == sizeof(r->tail)) {
+        memmove(r->tail, r->tail + 1, sizeof(r->tail) - 1);
         r->tail_len--;
     }
     r->tail[r->tail_len++] = lower(c);
-    if (r->tail_len == n && memcmp(r->tail, needle, n) == 0) {
+    if (tail_ends_with(r, "banned")) {
         r->banned = true;
+    }
+    for (size_t i = 0; i < ONO_PHRASES; i++) {
+        if (tail_ends_with(r, k_ono_phrases[i].text)) {
+            r->verdict.onocoy_reason = (uint8_t)ntrip_onocoy_reason_merge(
+                (ntrip_onocoy_reason_t)r->verdict.onocoy_reason, (ntrip_onocoy_reason_t)k_ono_phrases[i].reason);
+        }
     }
 }
 
@@ -865,6 +993,7 @@ bool ntrip_reply_feed(ntrip_reply_t *r, const uint8_t *data, size_t len, size_t 
             } else if (r->line_len >= NTRIP_REPLY_LINE_MAX) {
                 r->line[r->line_len] = '\0';
                 r->verdict = fail(NTRIP_CLS_CONFIG, NTRIP_ROW_CONFIG, NTRIP_HINT_UNEXPECTED, 0);
+                r->verdict.onocoy_reason = (uint8_t)ntrip_onocoy_reason(r->line, r->line_len);
                 finalize(r);
             } else {
                 r->line[r->line_len++] = c;
@@ -921,7 +1050,7 @@ void ntrip_reply_end(ntrip_reply_t *r, bool eof)
         break;
     case NTRIP_RP_HEADERS:
         if (eof) {
-            r->body_check = is4xx(r->verdict.status_code) && r->verdict.rule == 4;
+            r->body_check = body_wanted(r);
             if (r->body_check) {
                 r->banned = ntrip_contains_ci(r->line, r->line_len, "banned");
             }
@@ -969,6 +1098,75 @@ void ntrip_sanitize(const char *in, size_t len, char *out, size_t cap, const cha
         out[o++] = (c >= 0x20u && c < 0x7Fu) ? (char)c : '.';
     }
     out[o] = '\0';
+}
+
+/* ---- text during a session ------------------------------------------------------------- */
+
+void ntrip_sess_text_start(ntrip_sess_text_t *t)
+{
+    t->len = 0;
+    t->seen = 0;
+}
+
+static void sess_line(ntrip_sess_text_t *t, const char *const *secrets, size_t nsecrets)
+{
+    ntrip_onocoy_reason_t r = ntrip_onocoy_reason(t->line, t->len);
+    if (r == NTRIP_ONO_NONE && ntrip_contains_ci(t->line, t->len, "banned")) {
+        r = NTRIP_ONO_BANNED;
+    }
+    if (r != NTRIP_ONO_NONE) {
+        t->seen |= (uint8_t)(1u << r);
+    }
+    ntrip_sanitize(t->line, t->len, t->last, sizeof(t->last), secrets, nsecrets);
+    t->len = 0;
+}
+
+bool ntrip_sess_text_feed(ntrip_sess_text_t *t, const uint8_t *data, size_t len, const char *const *secrets,
+                          size_t nsecrets)
+{
+    bool ended = false;
+    for (size_t i = 0; i < len; i++) {
+        char c = (char)data[i];
+        if (c == '\r' || c == '\n') {
+            if (t->len > 0) {
+                sess_line(t, secrets, nsecrets);
+                ended = true;
+            }
+            continue;
+        }
+        t->line[t->len++] = c;
+        if (t->len == sizeof(t->line)) {
+            sess_line(t, secrets, nsecrets);   /* a long line in pieces */
+            ended = true;
+        }
+    }
+    return ended;
+}
+
+bool ntrip_sess_text_end(ntrip_sess_text_t *t, const char *const *secrets, size_t nsecrets)
+{
+    if (t->len == 0) {
+        return false;
+    }
+    sess_line(t, secrets, nsecrets);
+    return true;
+}
+
+ntrip_onocoy_reason_t ntrip_sess_text_reason(const ntrip_sess_text_t *t)
+{
+    if (t->seen & (1u << NTRIP_ONO_DUPLICATE)) {
+        return NTRIP_ONO_DUPLICATE;
+    }
+    if (t->seen & (1u << NTRIP_ONO_BANNED)) {
+        return NTRIP_ONO_BANNED;
+    }
+    ntrip_onocoy_reason_t best = NTRIP_ONO_NONE;
+    for (unsigned r = NTRIP_ONO_AUTH; r <= NTRIP_ONO_BANNED; r++) {
+        if (t->seen & (1u << r)) {
+            best = ntrip_onocoy_reason_merge(best, (ntrip_onocoy_reason_t)r);
+        }
+    }
+    return best;
 }
 
 /* ---- backoff ------------------------------------------------------------------------ */
@@ -1117,7 +1315,7 @@ static ntrip_sm_state_t failure_state(ntrip_cls_t cls, ntrip_row_t row)
     if (cls == NTRIP_CLS_CONFIG || row == NTRIP_ROW_CONFIG) {
         return NTRIP_SM_CONFIG_ERROR;
     }
-    if (cls == NTRIP_CLS_AUTH && row == NTRIP_ROW_AUTH) {
+    if ((cls == NTRIP_CLS_AUTH || cls == NTRIP_CLS_LOGIN_BLOCKED) && row == NTRIP_ROW_AUTH) {
         return NTRIP_SM_AUTH_FAILED;
     }
     return NTRIP_SM_BACKOFF;
@@ -1126,6 +1324,25 @@ static ntrip_sm_state_t failure_state(ntrip_cls_t cls, ntrip_row_t row)
 bool ntrip_failure_unreached(const ntrip_failure_t *f)
 {
     return !f->reached_caster && !f->refused && (f->cls == NTRIP_CLS_DNS || f->cls == NTRIP_CLS_CONNECT);
+}
+
+ntrip_cls_t ntrip_guard_class(const ntrip_failure_t *f)
+{
+    switch ((ntrip_onocoy_reason_t)f->onocoy) {
+    case NTRIP_ONO_LOGIN_BLOCKED:
+        return NTRIP_CLS_LOGIN_BLOCKED;
+    case NTRIP_ONO_IN_USE:
+        return NTRIP_CLS_IN_USE;
+    case NTRIP_ONO_REPLACED:
+        return NTRIP_CLS_REPLACED;
+    case NTRIP_ONO_AUTH:
+        return NTRIP_CLS_AUTH;
+    case NTRIP_ONO_DUPLICATE:
+    case NTRIP_ONO_BANNED:
+        return NTRIP_CLS_BANNED;
+    default:
+        return f->cls == NTRIP_CLS_MOUNT_BUSY ? NTRIP_CLS_IN_USE : f->cls;
+    }
 }
 
 static void reset_streaks(ntrip_sm_t *sm)
@@ -1137,12 +1354,28 @@ static void reset_streaks(ntrip_sm_t *sm)
     sm->busy_active = false;
 }
 
+/* The caster accepted a login: the guard's incident is over (the take-over score stays). */
+static void reset_guard_incident(ntrip_sm_t *sm)
+{
+    sm->rejects = 0;
+    sm->blocks = 0;
+    sm->inuse = 0;
+    sm->line_transient_used = false;
+    sm->silent_run = 0;
+}
+
 static void check_healthy(ntrip_sm_t *sm, uint32_t now)
 {
-    if (sm->session && !sm->session_healthy && (uint32_t)(now - sm->session_start_ms) >= NTRIP_HEALTHY_SESSION_MS &&
-        sm->session_bytes >= NTRIP_HEALTHY_SESSION_B) {
+    if (!sm->session) {
+        return;
+    }
+    uint32_t len = now - sm->session_start_ms;
+    if (!sm->session_healthy && len >= NTRIP_HEALTHY_SESSION_MS && sm->session_bytes >= NTRIP_HEALTHY_SESSION_B) {
         sm->session_healthy = true;
         reset_streaks(sm);
+    }
+    if (sm->kick_score != 0 && len >= NTRIP_ONO_KICK_RESET_S * 1000u) {
+        sm->kick_score = 0;   /* a long session: whatever ended the earlier ones has stopped */
     }
 }
 
@@ -1179,6 +1412,12 @@ ntrip_sm_act_t ntrip_sm_poll(ntrip_sm_t *sm, const ntrip_sm_in_t *in, uint32_t n
         sm->unreached_active = false;   /* out of the connect/backoff cycle */
         *why = NTRIP_WHY_DISABLED;
         return in->session_open ? NTRIP_ACT_CLOSE : NTRIP_ACT_NONE;
+    }
+    if (sm->stop != NTRIP_STOP_NONE) {
+        /* The login guard stopped the slot: nothing until the user acts. */
+        set_state(sm, NTRIP_SM_STOPPED, now_ms);
+        sm->unreached_active = false;
+        return NTRIP_ACT_NONE;
     }
     if (!in->have_ip) {
         set_state(sm, NTRIP_SM_WAIT_NETWORK, now_ms);
@@ -1252,6 +1491,7 @@ void ntrip_sm_connected(ntrip_sm_t *sm, uint32_t now_ms)
      * run of consecutive caster-reaching failures end. */
     sm->hourly = false;
     sm->reached_streak = 0;
+    reset_guard_incident(sm);
     if (!sm->good_valid || sm->good_hash != sm->cred_hash) {
         sm->good_valid = true;
         sm->good_hash = sm->cred_hash;
@@ -1265,12 +1505,211 @@ void ntrip_sm_sent(ntrip_sm_t *sm, size_t bytes, uint32_t now_ms)
     check_healthy(sm, now_ms);
 }
 
+/* ---- the Onocoy login guard ------------------------------------------------------------- */
+
+static const uint32_t k_ono_reject_s[] = NTRIP_ONO_REJECT_S;
+static const uint32_t k_ono_blocked_s[] = NTRIP_ONO_BLOCKED_S;
+static const uint32_t k_ono_inuse_s[] = NTRIP_ONO_INUSE_S;
+static const uint32_t k_ono_kick_s[] = NTRIP_ONO_KICK_S;
+#define COUNT_OF(a) (sizeof(a) / sizeof((a)[0]))
+
+/* The n-th entry (1-based) of a guard row, its last entry repeating. */
+static uint32_t guard_entry_s(const uint32_t *row, size_t len, uint32_t n)
+{
+    return row[(n == 0 ? 1u : (n < len ? n : len)) - 1u];
+}
+
+/* A guard delay: entry x U(1.0, 1.2), never below the entry. */
+static uint32_t guard_delay_ms(uint32_t entry_s, uint32_t rnd)
+{
+    return (uint32_t)((uint64_t)entry_s * 1000u * (2000u + rnd % 401u) / 2000u);
+}
+
+/* After a run of failures without any reply, every delay is at least the floor. */
+static uint32_t silent_floor(const ntrip_sm_t *sm, uint32_t d, uint32_t rnd)
+{
+    if (sm->cfg.onocoy_guard && sm->silent_run >= NTRIP_ONO_SILENT_RUN) {
+        uint32_t lo = guard_delay_ms(NTRIP_ONO_SILENT_FLOOR_S, rnd);
+        d = d < lo ? lo : d;
+    }
+    return d;
+}
+
+static uint32_t finish_failure(ntrip_sm_t *sm, ntrip_cls_t cls, ntrip_row_t row, uint32_t d, uint32_t now)
+{
+    if (sm->attempt < UINT32_MAX) {
+        sm->attempt++;
+    }
+    sm->retry_pending = true;
+    sm->retry_at_ms = now + d;
+    sm->row = row;
+    sm->reason = cls;
+    set_state(sm, failure_state(cls, row), now);
+    return d;
+}
+
+static uint32_t guard_wait(ntrip_sm_t *sm, ntrip_cls_t cls, ntrip_row_t row, uint32_t entry_s, uint32_t now,
+                           uint32_t rnd)
+{
+    sm->hint = NTRIP_HINT_NONE;
+    sm->busy_active = false;
+    return finish_failure(sm, cls, row, silent_floor(sm, guard_delay_ms(entry_s, rnd), rnd), now);
+}
+
+static uint32_t guard_stop(ntrip_sm_t *sm, ntrip_stop_t why, ntrip_cls_t cls, ntrip_row_t row, uint32_t now)
+{
+    sm->stop = why;
+    sm->hint = NTRIP_HINT_NONE;
+    sm->busy_active = false;
+    sm->retry_pending = false;
+    sm->stagger_pending = false;
+    sm->row = row;
+    sm->reason = cls;
+    if (sm->attempt < UINT32_MAX) {
+        sm->attempt++;
+    }
+    set_state(sm, NTRIP_SM_STOPPED, now);
+    return 0;
+}
+
+/* A refused login: 300 s (30 s once inside the window on credentials that worked), 1800 s, then stop. */
+static uint32_t guard_reject(ntrip_sm_t *sm, bool window_worked, uint32_t now, uint32_t rnd)
+{
+    if (sm->rejects < UINT8_MAX) {
+        sm->rejects++;
+    }
+    if (sm->rejects >= NTRIP_ONO_REJECT_STOP) {
+        return guard_stop(sm, NTRIP_STOP_REJECTED, NTRIP_CLS_AUTH, NTRIP_ROW_AUTH, now);
+    }
+    uint32_t entry = guard_entry_s(k_ono_reject_s, COUNT_OF(k_ono_reject_s), sm->rejects);
+    if (sm->rejects == 1u && window_worked) {
+        entry = NTRIP_ONO_REJECT_WINDOW_S;
+    }
+    return guard_wait(sm, NTRIP_CLS_AUTH, NTRIP_ROW_AUTH, entry, now, rnd);
+}
+
+/* "Too many unsuccessful logins": an hour, two hours, then stop. */
+static uint32_t guard_blocked(ntrip_sm_t *sm, uint32_t now, uint32_t rnd)
+{
+    if (sm->blocks < UINT8_MAX) {
+        sm->blocks++;
+    }
+    if (sm->blocks >= NTRIP_ONO_BLOCKED_STOP) {
+        return guard_stop(sm, NTRIP_STOP_LOGIN_BLOCKED, NTRIP_CLS_LOGIN_BLOCKED, NTRIP_ROW_AUTH, now);
+    }
+    uint32_t entry = guard_entry_s(k_ono_blocked_s, COUNT_OF(k_ono_blocked_s), sm->blocks);
+    return guard_wait(sm, NTRIP_CLS_LOGIN_BLOCKED, NTRIP_ROW_AUTH, entry, now, rnd);
+}
+
+/* The credential is in use: only this station's own dead session may explain that, briefly. */
+static uint32_t guard_in_use(ntrip_sm_t *sm, bool window_worked, uint32_t now, uint32_t rnd)
+{
+    if (!window_worked) {
+        return guard_stop(sm, NTRIP_STOP_IN_USE, NTRIP_CLS_IN_USE, NTRIP_ROW_MOUNT_BUSY, now);
+    }
+    if (sm->inuse < UINT8_MAX) {
+        sm->inuse++;
+    }
+    if (sm->inuse >= NTRIP_ONO_INUSE_STOP) {
+        return guard_stop(sm, NTRIP_STOP_IN_USE, NTRIP_CLS_IN_USE, NTRIP_ROW_MOUNT_BUSY, now);
+    }
+    uint32_t entry = guard_entry_s(k_ono_inuse_s, COUNT_OF(k_ono_inuse_s), sm->inuse);
+    return guard_wait(sm, NTRIP_CLS_IN_USE, NTRIP_ROW_MOUNT_BUSY, entry, now, rnd);
+}
+
+/*
+ * The guard's decision for a failure that reached the caster on a guard
+ * slot. @return true with *d set when it decided; false: the profile's rows
+ * apply as for any slot (TRANSIENT and the other failures without a login
+ * reply), after it counted what it needs.
+ */
+static bool guard_failed(ntrip_sm_t *sm, const ntrip_failure_t *f, bool was_session, uint32_t session_ms,
+                         uint32_t now, uint32_t rnd, uint32_t *d)
+{
+    ntrip_onocoy_reason_t why = (ntrip_onocoy_reason_t)f->onocoy;
+    ntrip_cls_t cls = ntrip_guard_class(f);
+    bool window_worked = (uint32_t)(now - sm->window_start_ms) < sm->cfg.auth_window_ms && sm->good_valid &&
+                         sm->good_hash == sm->cred_hash;
+
+    /* A duplicate stream or a ban: going on risks the account-wide penalty. */
+    if (why == NTRIP_ONO_DUPLICATE) {
+        *d = guard_stop(sm, NTRIP_STOP_DUPLICATE, cls, NTRIP_ROW_BANNED, now);
+        return true;
+    }
+    if (why == NTRIP_ONO_BANNED || f->cls == NTRIP_CLS_BANNED) {
+        *d = guard_stop(sm, NTRIP_STOP_BANNED, NTRIP_CLS_BANNED, NTRIP_ROW_BANNED, now);
+        return true;
+    }
+    if (why == NTRIP_ONO_LOGIN_BLOCKED) {
+        *d = guard_blocked(sm, now, rnd);
+        return true;
+    }
+    if (why == NTRIP_ONO_AUTH) {
+        *d = guard_reject(sm, window_worked, now, rnd);
+        return true;
+    }
+    if (was_session) {
+        /* Take-over: another device on the credential ends this station's sessions. */
+        uint32_t score = 0;
+        if (why == NTRIP_ONO_REPLACED || why == NTRIP_ONO_IN_USE) {
+            score = 2;   /* this station never opens a second session: another device logged in */
+        } else if (f->cls == NTRIP_CLS_REMOTE_CLOSE && session_ms < NTRIP_ONO_KICK_SHORT_S * 1000u) {
+            score = 1;
+        }
+        if (score == 0) {
+            return false;   /* our own drop or a long session: the fast TRANSIENT row */
+        }
+        uint32_t k = sm->kick_score + score;
+        sm->kick_score = (uint8_t)(k > UINT8_MAX ? UINT8_MAX : k);
+        if (sm->kick_score >= NTRIP_ONO_KICK_STOP_SCORE) {
+            *d = guard_stop(sm, NTRIP_STOP_KICKED, cls, NTRIP_ROW_TRANSIENT, now);
+        } else {
+            uint32_t entry = guard_entry_s(k_ono_kick_s, COUNT_OF(k_ono_kick_s), sm->kick_score);
+            *d = guard_wait(sm, cls, NTRIP_ROW_TRANSIENT, entry, now, rnd);
+        }
+        return true;
+    }
+    if (!f->replied) {
+        /* No login reply: a transport failure on the TRANSIENT row. A silent
+         * close after the request may itself be a refused login. */
+        if (f->reached_caster && !f->refused && f->cls != NTRIP_CLS_TLS && f->row == NTRIP_ROW_TRANSIENT &&
+            sm->silent_run < UINT8_MAX) {
+            sm->silent_run++;
+        }
+        return false;
+    }
+    if (why == NTRIP_ONO_IN_USE || why == NTRIP_ONO_REPLACED || f->cls == NTRIP_CLS_MOUNT_BUSY) {
+        *d = guard_in_use(sm, window_worked, now, rnd);
+        return true;
+    }
+    if (f->row == NTRIP_ROW_TRANSIENT && NTRIP_ONO_LINE_TRANSIENT_FREE > 0u && !sm->line_transient_used) {
+        sm->line_transient_used = true;   /* one unrecognised error line per run: the TRANSIENT row */
+        return false;
+    }
+    *d = guard_reject(sm, window_worked, now, rnd);
+    return true;
+}
+
 uint32_t ntrip_sm_failed(ntrip_sm_t *sm, const ntrip_failure_t *f, uint32_t now_ms, uint32_t rnd)
 {
+    bool was_session = sm->session;
+    uint32_t session_ms = now_ms - sm->session_start_ms;
     end_session(sm, now_ms);
 
+    if (sm->cfg.onocoy_guard && !ntrip_failure_unreached(f)) {
+        if (!sm->streak_active) {
+            sm->streak_active = true;
+            sm->streak_start_ms = now_ms;
+        }
+        sm->unreached_active = false;
+        uint32_t d = 0;
+        if (guard_failed(sm, f, was_session, session_ms, now_ms, rnd, &d)) {
+            return d;
+        }
+    }
+
     ntrip_row_t row = f->row == NTRIP_ROW_NONE ? NTRIP_ROW_TRANSIENT : f->row;
-    ntrip_cls_t cls = f->cls;
+    ntrip_cls_t cls = sm->cfg.onocoy_guard ? ntrip_guard_class(f) : f->cls;
     bool cred_ok = sm->good_valid && sm->good_hash == sm->cred_hash;
     if (row == NTRIP_ROW_AUTH && cred_ok && (uint32_t)(now_ms - sm->window_start_ms) < sm->cfg.auth_window_ms) {
         row = NTRIP_ROW_MOUNT_BUSY;   /* the caster may still hold our previous session */
@@ -1333,15 +1772,7 @@ uint32_t ntrip_sm_failed(ntrip_sm_t *sm, const ntrip_failure_t *f, uint32_t now_
     if (sm->hourly && d < NTRIP_HOURLY_MS) {
         d = NTRIP_HOURLY_MS;
     }
-    if (sm->attempt < UINT32_MAX) {
-        sm->attempt++;
-    }
-    sm->retry_pending = true;
-    sm->retry_at_ms = now_ms + d;
-    sm->row = row;
-    sm->reason = cls;
-    set_state(sm, failure_state(cls, row), now_ms);
-    return d;
+    return finish_failure(sm, cls, row, silent_floor(sm, d, rnd), now_ms);
 }
 
 void ntrip_sm_closed(ntrip_sm_t *sm, uint32_t now_ms)
@@ -1357,18 +1788,33 @@ void ntrip_sm_stagger(ntrip_sm_t *sm, uint32_t now_ms, uint32_t rnd)
     }
 }
 
-void ntrip_sm_user_edit(ntrip_sm_t *sm, const ntrip_sm_cfg_t *cfg, uint32_t cred_hash, uint32_t now_ms)
+/* The user acted (a save or a retry): delays, counts and a stop end; an attempt may start at once. */
+static void user_reset(ntrip_sm_t *sm)
 {
-    (void)now_ms;
-    sm->cfg = *cfg;
-    sm->cred_hash = cred_hash;
     reset_streaks(sm);
+    reset_guard_incident(sm);
+    sm->kick_score = 0;
+    sm->stop = NTRIP_STOP_NONE;
     sm->unreached_active = false;
     sm->retry_pending = false;
     sm->stagger_pending = false;
     sm->row = NTRIP_ROW_NONE;
     sm->reason = NTRIP_CLS_NONE;
     sm->hint = NTRIP_HINT_NONE;
+}
+
+void ntrip_sm_user_edit(ntrip_sm_t *sm, const ntrip_sm_cfg_t *cfg, uint32_t cred_hash, uint32_t now_ms)
+{
+    (void)now_ms;
+    sm->cfg = *cfg;
+    sm->cred_hash = cred_hash;
+    user_reset(sm);
+}
+
+void ntrip_sm_retry(ntrip_sm_t *sm, uint32_t now_ms)
+{
+    (void)now_ms;
+    user_reset(sm);
 }
 
 uint32_t ntrip_sm_retry_in_ms(const ntrip_sm_t *sm, uint32_t now_ms)
@@ -1393,11 +1839,19 @@ uint32_t ntrip_sm_unreached_ms(const ntrip_sm_t *sm, uint32_t now_ms)
     return d == 0 ? 1u : d;   /* a run in progress is never reported as none */
 }
 
+/* The take-over score as stored: it stops changing at the stop score. */
+static uint8_t kick_key(const ntrip_sm_t *sm)
+{
+    return sm->kick_score < NTRIP_ONO_KICK_STOP_SCORE ? sm->kick_score : (uint8_t)NTRIP_ONO_KICK_STOP_SCORE;
+}
+
 bool ntrip_sm_persist_due(const ntrip_sm_t *sm)
 {
     ntrip_row_t row = long_row(sm->row);
     return row != sm->saved_row || long_step(sm->cfg.profile, row, sm->attempt) != sm->saved_step ||
-           sm->hourly != sm->saved_hourly || reached_key(sm) != sm->saved_reached || sm->saved_dirty;
+           sm->hourly != sm->saved_hourly || reached_key(sm) != sm->saved_reached || sm->saved_dirty ||
+           sm->rejects != sm->saved_rejects || sm->blocks != sm->saved_blocks || kick_key(sm) != sm->saved_kick ||
+           sm->stop != sm->saved_stop;
 }
 
 void ntrip_sm_persist_get(const ntrip_sm_t *sm, uint32_t now_ms, ntrip_backoff_rec_t *out)
@@ -1416,6 +1870,10 @@ void ntrip_sm_persist_get(const ntrip_sm_t *sm, uint32_t now_ms, ntrip_backoff_r
     out->good_valid = sm->good_valid;
     out->good_hash = sm->good_hash;
     out->reached = (uint8_t)reached_key(sm);
+    out->rejects = sm->rejects;
+    out->blocks = sm->blocks;
+    out->kick_score = kick_key(sm);
+    out->stop = sm->stop;
 }
 
 void ntrip_sm_persist_done(ntrip_sm_t *sm)
@@ -1425,6 +1883,10 @@ void ntrip_sm_persist_done(ntrip_sm_t *sm)
     sm->saved_reached = reached_key(sm);
     sm->saved_hourly = sm->hourly;
     sm->saved_dirty = false;
+    sm->saved_rejects = sm->rejects;
+    sm->saved_blocks = sm->blocks;
+    sm->saved_kick = kick_key(sm);
+    sm->saved_stop = sm->stop;
 }
 
 void ntrip_sm_restore(ntrip_sm_t *sm, const ntrip_backoff_rec_t *rec, uint32_t now_ms)
@@ -1441,6 +1903,32 @@ void ntrip_sm_restore(ntrip_sm_t *sm, const ntrip_backoff_rec_t *rec, uint32_t n
         sm->reached_streak = rec->hourly ? NTRIP_POLITE_HOURLY_AFTER : reached;
     }
     sm->saved_reached = reached_key(sm);
+    if (sm->cfg.onocoy_guard) {
+        /* The guard's counts and stop (a slot that is no longer a guard slot drops them). */
+        sm->rejects = rec->rejects < NTRIP_ONO_REJECT_STOP ? rec->rejects : (uint8_t)NTRIP_ONO_REJECT_STOP;
+        sm->blocks = rec->blocks < NTRIP_ONO_BLOCKED_STOP ? rec->blocks : (uint8_t)NTRIP_ONO_BLOCKED_STOP;
+        sm->kick_score = rec->kick_score < NTRIP_ONO_KICK_STOP_SCORE ? rec->kick_score
+                                                                      : (uint8_t)NTRIP_ONO_KICK_STOP_SCORE;
+        sm->stop = rec->stop < NTRIP_STOP_COUNT ? rec->stop : NTRIP_STOP_NONE;
+        sm->saved_rejects = sm->rejects;
+        sm->saved_blocks = sm->blocks;
+        sm->saved_kick = kick_key(sm);
+        sm->saved_stop = sm->stop;
+    } else {
+        /* A stop or a count stored for a guard slot: the next write drops it. */
+        sm->saved_rejects = rec->rejects;
+        sm->saved_blocks = rec->blocks;
+        sm->saved_kick = rec->kick_score;
+        sm->saved_stop = rec->stop;
+    }
+    if (sm->stop != NTRIP_STOP_NONE) {
+        /* Stopped before the restart: still stopped, nothing pending. */
+        sm->row = row;
+        sm->reason = rec->cls;
+        sm->attempt = rec->attempt;
+        set_state(sm, NTRIP_SM_STOPPED, now_ms);
+        return;
+    }
     if (row == NTRIP_ROW_NONE && !rec->hourly) {
         return;
     }
@@ -1457,6 +1945,12 @@ void ntrip_sm_restore(ntrip_sm_t *sm, const ntrip_backoff_rec_t *rec, uint32_t n
     uint64_t wait_ms = (uint64_t)rec->remaining_s * 1000u;
     if (row != NTRIP_ROW_NONE) {
         uint64_t nominal = row_entry_s(sm->cfg.profile, row, sm->attempt > 0 ? sm->attempt - 1u : 0u) * 1000u;
+        if (sm->cfg.onocoy_guard && row == NTRIP_ROW_AUTH && rec->cls == NTRIP_CLS_LOGIN_BLOCKED && sm->blocks > 0) {
+            nominal = (uint64_t)guard_entry_s(k_ono_blocked_s, COUNT_OF(k_ono_blocked_s), sm->blocks) * 1000u;
+        } else if (sm->cfg.onocoy_guard && row == NTRIP_ROW_AUTH && sm->rejects > 0) {
+            /* the full entry: a rejection's 300 s, never the 30 s variant */
+            nominal = (uint64_t)guard_entry_s(k_ono_reject_s, COUNT_OF(k_ono_reject_s), sm->rejects) * 1000u;
+        }
         wait_ms = nominal > wait_ms ? nominal : wait_ms;
     }
     if (rec->hourly && wait_ms < NTRIP_HOURLY_MS) {
@@ -1485,6 +1979,10 @@ size_t ntrip_backoff_rec_encode(const ntrip_backoff_rec_t *rec, uint8_t *buf, si
     blob_put_bool(&w, rec->good_valid);
     blob_put_u32(&w, rec->good_hash);
     blob_put_u8(&w, rec->reached);
+    blob_put_u8(&w, rec->rejects);
+    blob_put_u8(&w, rec->blocks);
+    blob_put_u8(&w, rec->kick_score);
+    blob_put_u8(&w, (uint8_t)rec->stop);
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
@@ -1494,7 +1992,7 @@ bool ntrip_backoff_rec_decode(const uint8_t *buf, size_t len, ntrip_backoff_rec_
     blob_reader_init(&r, buf, len);
     memset(out, 0, sizeof(*out));
     uint8_t version = blob_get_u8(&r);
-    if (version != 1u && version != NTRIP_BACKOFF_REC_VERSION) {
+    if (version < 1u || version > NTRIP_BACKOFF_REC_VERSION) {
         return false;
     }
     ntrip_backoff_rec_t rec;
@@ -1509,9 +2007,18 @@ bool ntrip_backoff_rec_decode(const uint8_t *buf, size_t len, ntrip_backoff_rec_
     if (version >= 2u) {
         rec.reached = blob_get_u8(&r);
     }
-    if (!blob_reader_ok(&r) || cls >= NTRIP_CLS_COUNT || long_row((ntrip_row_t)row) != (ntrip_row_t)row) {
+    uint8_t stop = NTRIP_STOP_NONE;
+    if (version >= 3u) {
+        rec.rejects = blob_get_u8(&r);
+        rec.blocks = blob_get_u8(&r);
+        rec.kick_score = blob_get_u8(&r);
+        stop = blob_get_u8(&r);
+    }
+    if (!blob_reader_ok(&r) || cls >= NTRIP_CLS_COUNT || long_row((ntrip_row_t)row) != (ntrip_row_t)row ||
+        stop >= NTRIP_STOP_COUNT) {
         return false;
     }
+    rec.stop = (ntrip_stop_t)stop;
     rec.cls = (ntrip_cls_t)cls;
     rec.row = (ntrip_row_t)row;
     *out = rec;

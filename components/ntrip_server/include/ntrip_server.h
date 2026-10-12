@@ -78,6 +78,38 @@
  * the daily downtime budget and the network recovery ladder, and its
  * transient backoff is capped at CONFIG_NTRIP_PROTECTED_MAX_BACKOFF_S.
  *
+ * Onocoy login guard (slots that count as Onocoy, ntrip_slot_is_onocoy;
+ * the rules and their values are in ntrip_proto.h, all PROVISIONAL): a
+ * failing login is never looped, because Onocoy may block logins from the
+ * station's whole public IP and two devices on one credential knock each
+ * other off. Onocoy's reason texts are matched in the reply line, the reply
+ * body (read for every non-success HTTP reply on these slots) and every
+ * line the caster sends during a session (status last_session_text). A
+ * refused login waits 300 s (30 s once right after a session on
+ * credentials that worked), then 1800 s, and the third stops the slot;
+ * "too many unsuccessful logins" waits 1 h, then 2 h, then stops; "in use"
+ * stops at once unless it comes within 300 s of this station's own session
+ * on credentials that worked (then 15, 30, 60, 120 s, then stop); sessions
+ * the caster keeps ending soon after login (a take-over by another device)
+ * stop it after a score of 3; a duplicate-stream or banned report stops it
+ * at once. A stopped slot (NTRIP_STATE_STOPPED, status stop_reason) makes
+ * no attempt at all, across restarts (stored with its backoff record),
+ * until the user saves the slot, retries it (ntrip_server_retry_slot) or
+ * disables it; each stop is logged once and journalled (DIAG_EV_CASTER_STOP).
+ * It still counts as downtime and as a slot that is down, but the network
+ * ladder does not act on it (a network action cannot fix a credential).
+ *
+ * Test Onocoy slots (CONFIG_NTRIP_TEST_ONOCOY_SLOT, bench and QEMU builds
+ * only): a slot marked test_onocoy counts as Onocoy in every respect
+ * whatever its host (protected, fast profile, the Onocoy fields and wire
+ * names, the one-Onocoy rule, the guard), so a local test caster sees what
+ * Onocoy would. A build without the option ignores the stored mark (the
+ * slot is judged by its host) and drops it at the next save.
+ *
+ * RTK2go mountpoints: a save with a new RTK2go host or a changed
+ * mountpoint must follow RTK2go's rules for new reservations
+ * (ntrip_server_rtk2go_check); a slot stored before keeps its name.
+ *
  * Source stall and pause: a slot with no fresh RTCM closes its session
  * gracefully after CONFIG_NTRIP_SOURCE_STALL_S (casters drop or count silent
  * sources), the protected slot after CONFIG_NTRIP_PROTECTED_SOURCE_STALL_S.
@@ -164,6 +196,9 @@ typedef enum {
     NTRIP_FAIL_MOUNT_BUSY,
     NTRIP_FAIL_CONFIG,
     NTRIP_FAIL_BANNED,
+    NTRIP_FAIL_LOGIN_BLOCKED,   /**< Onocoy: too many unsuccessful logins (login guard slots) */
+    NTRIP_FAIL_IN_USE,          /**< Onocoy: another stream uses the credential (login guard slots) */
+    NTRIP_FAIL_REPLACED,        /**< Onocoy: another device logged in with the credential (login guard slots) */
     NTRIP_FAIL_CLASS_COUNT,
 } ntrip_fail_class_t;
 
@@ -189,6 +224,8 @@ typedef struct {
                                         (its NTRIP 2.0 mountpoint, "onocoydiy" when empty) */
     bool v2_raw_body;              /**< NTRIP 2.0 quirk: send the body unchunked */
     bool dup_stream_ack;           /**< user acknowledged streaming the same data to Onocoy and an open caster */
+    bool test_onocoy;              /**< bench and QEMU builds only: the slot counts as Onocoy whatever its host
+                                        (ignored without CONFIG_NTRIP_TEST_ONOCOY_SLOT) */
 } ntrip_caster_cfg_t;
 
 typedef enum {
@@ -202,6 +239,7 @@ typedef enum {
     NTRIP_STATE_PAUSED,         /**< station paused output (receiver config/flash) */
     NTRIP_STATE_CONFIG_ERROR,   /**< caster refused the request itself (unknown mountpoint, bad request, certificate); retried per profile */
     NTRIP_STATE_BANNED,         /**< caster says this source is banned; retried after hours */
+    NTRIP_STATE_STOPPED,        /**< the Onocoy login guard stopped the slot (stop_reason): no attempt until the user acts */
 } ntrip_state_t;
 
 /** Live status of one slot. "today" = the current UTC day. */
@@ -234,6 +272,7 @@ typedef struct {
                                      expected today); valid with so_far_valid */
     bool so_far_valid;          /**< day_metrics_valid and a trusted clock */
     uint64_t bytes_sent;
+    uint64_t bytes_sent_today;  /**< this start, current UTC day (RAM, rolled over like epochs_sent_today) */
     uint64_t frames_sent;
     uint64_t epochs_sent;       /**< ended by their closing MSM, or by the next epoch time when it never came */
     uint32_t epochs_sent_today;
@@ -258,6 +297,13 @@ typedef struct {
     char tls_cipher[48];
     char hint[64];              /**< e.g. "mountpoint held by another source" */
     esp_err_t last_err;
+    /* the Onocoy login guard (always NONE / 0 for other slots) */
+    ntrip_stop_t stop_reason;   /**< STOPPED: why; NTRIP_STOP_NONE otherwise */
+    uint8_t login_rejects;      /**< refused logins since the last accepted one (the 3rd stops) */
+    uint8_t login_blocks;       /**< "too many unsuccessful logins" since the last accepted login (the 3rd stops) */
+    uint8_t kicked_sessions;    /**< take-over score: sessions ended within 120 s count 1, a "device reconnected"
+                                     text 2; 3 stops; a session of 10 min or more resets it */
+    char last_session_text[97]; /**< the newest line the caster sent during a session, sanitised ("" = none) */
 } ntrip_caster_status_t;
 
 /** Load slot configs from settings, create the slot tasks (idle), register the shutdown hook. */
@@ -292,9 +338,12 @@ esp_err_t ntrip_server_get_config(size_t slot, ntrip_caster_cfg_t *out, bool wit
  * Fields are checked before saving: no control characters; host a DNS name
  * or IP literal; mountpoint [A-Za-z0-9._-]; NTRIP 1.0 password without
  * spaces; NTRIP 2.0 username without ':'; an enabled slot needs host, port,
- * mountpoint, a password (1.0) and a username (2.0, except Onocoy). The
- * host rules (ntrip_server_apply_host_rules(), with no requested profile)
- * then set protected_slot and the backoff profile.
+ * mountpoint, a password (1.0) and a username (2.0, except Onocoy); a new
+ * RTK2go host or a changed RTK2go mountpoint follows RTK2go's rules
+ * (ntrip_server_rtk2go_check, against the stored slot). The host rules
+ * (ntrip_server_apply_host_rules(), with no requested profile) then set
+ * protected_slot and the backoff profile. A save clears a stopped slot's
+ * stop and its login guard's counts.
  *
  * Cross-slot rules (this component owns them; callers only name the
  * reason): enabling a slot must not stream to Onocoy or RTK2go from a second
@@ -317,6 +366,15 @@ esp_err_t ntrip_server_get_status(size_t slot, ntrip_caster_status_t *out);
 esp_err_t ntrip_server_restart_slot(size_t slot);
 
 /**
+ * The user's retry: a stopped slot (or one waiting out a backoff) may try
+ * once at once; the stop, the login guard's counts and the backoff are
+ * cleared as by a save with the same settings.
+ * @return ESP_ERR_INVALID_STATE when the slot is not enabled, or before
+ *         ntrip_server_init() (safe mode).
+ */
+esp_err_t ntrip_server_retry_slot(size_t slot);
+
+/**
  * Pause/resume all slots for receiver work (a planned source stall). Paused
  * slots stay connected and idle up to their source-stall limit
  * (CONFIG_NTRIP_SOURCE_STALL_S, the protected slot
@@ -329,25 +387,53 @@ esp_err_t ntrip_server_set_paused(bool paused);
 void ntrip_server_onocoy_defaults(ntrip_caster_cfg_t *out);
 
 /**
- * An Onocoy slot that is set up: Onocoy host, mountpoint, username and a
- * password (stored, password_set, or in the struct). Pure; no init needed.
+ * An Onocoy slot that is set up: a slot that counts as Onocoy
+ * (ntrip_slot_is_onocoy), mountpoint, username and a password (stored,
+ * password_set, or in the struct). Pure; no init needed.
  */
 bool ntrip_server_onocoy_ready(const ntrip_caster_cfg_t *cfg);
 
 /**
+ * The slot counts as Onocoy: its host is in onocoy.com, or it is marked
+ * test_onocoy and the build allows that (ntrip_test_onocoy_allowed). Every
+ * "is this slot Onocoy" decision uses this, never the host alone. Pure.
+ */
+bool ntrip_slot_is_onocoy(const ntrip_caster_cfg_t *cfg);
+
+/** The build allows test Onocoy slots (CONFIG_NTRIP_TEST_ONOCOY_SLOT: bench and QEMU builds). */
+bool ntrip_test_onocoy_allowed(void);
+
+/** Host tests only (the linux target; the firmware has no such function): switch the option. */
+void ntrip_test_onocoy_set_allowed(bool allowed);
+
+/**
  * The host rules of a slot (this component owns them, like the cross-slot
- * rules): `protected_slot` is set exactly for a host in the onocoy.com
- * domain; the backoff profile is fast for that host, polite for rtk2go.com,
- * and elsewhere `requested` (standard or polite; fast is for Onocoy only)
- * or, with `requested` NULL, the profile cfg has, a fast one left from an
- * Onocoy host becoming standard. Hosts match by domain, case-insensitively.
- * The web API applies it to a request (to name a refused field);
+ * rules): `protected_slot` is set exactly for a slot that counts as Onocoy
+ * (ntrip_slot_is_onocoy: a host in the onocoy.com domain, or a test Onocoy
+ * slot); the backoff profile is fast for such a slot, polite for
+ * rtk2go.com, and elsewhere `requested` (standard or polite; fast is for
+ * Onocoy only) or, with `requested` NULL, the profile cfg has, a fast one
+ * left from an Onocoy host becoming standard. Hosts match by domain,
+ * case-insensitively. A test_onocoy mark the build does not allow is
+ * cleared. The web API applies it to a request (to name a refused field);
  * ntrip_server_set_config() applies it to every save (with NULL), so a
  * stored slot always follows the rules. Pure; no init needed.
- * @return false (cfg unchanged) if `requested` is fast for a host that is
+ * @return false (cfg unchanged) if `requested` is fast for a slot that is
  *         not Onocoy.
  */
 bool ntrip_server_apply_host_rules(ntrip_caster_cfg_t *cfg, const ntrip_backoff_profile_t *requested);
+
+/**
+ * RTK2go's mountpoint rules for a save (`old_*` as stored, "" for a new
+ * slot): NTRIP_RTK2GO_OK unless the new host is in rtk2go.com and there was
+ * no stored host, the host changed or the mountpoint changed, and the new
+ * mountpoint breaks one of them (ntrip_policy.h; an empty mountpoint is left
+ * to the field rules). So a slot stored before the rules keeps streaming and
+ * can be enabled and disabled unchanged. The web API names the rule;
+ * ntrip_server_set_config() refuses it too. Pure; no init needed.
+ */
+ntrip_rtk2go_mount_t ntrip_server_rtk2go_check(const char *old_host, const char *old_mount, const char *new_host,
+                                               const char *new_mount);
 
 #ifdef __cplusplus
 }

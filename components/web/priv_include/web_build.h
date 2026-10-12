@@ -388,7 +388,7 @@ void web_build_journal(wj_t *w, const diag_journal_entry_t *e, size_t count, uin
 /** Records the connection history lists (GET /api/connections). */
 #define WEB_HISTORY_MAX 64u
 
-/** A journal kind of the connection history: caster_down, caster_up, wifi_up, wifi_disconnect. */
+/** A journal kind of the connection history: caster_down, caster_up, caster_stop, wifi_up, wifi_disconnect. */
 bool web_history_kind(uint16_t kind);
 
 /**

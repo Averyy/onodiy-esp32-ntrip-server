@@ -622,3 +622,119 @@ TEST_CASE("an Onocoy slot stored before the username field needs it at its next 
     TEST_ASSERT_TRUE(web_parse_caster_put(root, &st, &c, &b));
     cJSON_Delete(root);
 }
+
+/* An RTK2go slot stored before the mountpoint rules were checked. */
+static ntrip_caster_cfg_t stored_rtk2go(const char *mount)
+{
+    ntrip_caster_cfg_t c;
+    memset(&c, 0, sizeof(c));
+    c.enabled = true;
+    strcpy(c.name, "RTK2go");
+    strcpy(c.host, "rtk2go.com");
+    c.port = 2101;
+    c.proto = NTRIP_PROTO_V1;
+    strcpy(c.mountpoint, mount);
+    c.password_set = true;
+    c.backoff_profile = NTRIP_BACKOFF_POLITE;
+    return c;
+}
+
+static bool put_on(const ntrip_caster_cfg_t *st, const char *json, ntrip_caster_cfg_t *out, web_bad_t *b)
+{
+    cJSON *root = body(json);
+    memset(b, 0, sizeof(*b));
+    bool ok = web_parse_caster_put(root, st, out, b);
+    cJSON_Delete(root);
+    return ok;
+}
+
+TEST_CASE("caster RTK2go mountpoints follow RTK2go's rules when the name is new", "[web_parse]")
+{
+    ntrip_caster_cfg_t c;
+    web_bad_t b;
+    /* A new RTK2go slot (the stored Onocoy slot pointed there). */
+    TEST_ASSERT_FALSE(caster_put("{\"host\":\"rtk2go.com\",\"mountpoint\":\"My.Base\",\"password\":\"bench-pass-1\"}",
+                                 &c, &b));
+    TEST_ASSERT_EQUAL(WEB_ERR_INVALID_FIELD, b.err);
+    TEST_ASSERT_EQUAL_STRING("mountpoint", b.field);
+    TEST_ASSERT_EQUAL_STRING("RTK2go mountpoints use letters, digits, \"_\" and \"-\" only (no \".\")", b.rule);
+    static const struct {
+        const char *mount;
+        const char *rule;
+    } k[] = {
+        { "1Bench", "RTK2go mountpoints start with a letter" },
+        { "Abench", "RTK2go no longer accepts new mountpoints that start with \"A\"" },
+        { "Bcd", "RTK2go mountpoints have 4 to 20 characters" },
+        { "Bcdefghijklmnopqrstuv", "RTK2go mountpoints have 4 to 20 characters" },
+    };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        char json[160];
+        snprintf(json, sizeof(json), "{\"host\":\"rtk2go.com\",\"mountpoint\":\"%s\",\"password\":\"bench-pass-1\"}",
+                 k[i].mount);
+        memset(&b, 0, sizeof(b));
+        TEST_ASSERT_FALSE_MESSAGE(caster_put(json, &c, &b), k[i].mount);
+        TEST_ASSERT_EQUAL_STRING("mountpoint", b.field);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(k[i].rule, b.rule, k[i].mount);
+    }
+    TEST_ASSERT_TRUE(caster_put("{\"host\":\"rtk2go.com\",\"mountpoint\":\"Bench_01-x\",\"password\":\"bench-pass-1\"}",
+                                &c, &b));
+    TEST_ASSERT_TRUE(caster_put("{\"host\":\"rtk2go.com\",\"mountpoint\":\"abench\",\"password\":\"bench-pass-1\"}",
+                                &c, &b));   /* a lowercase "a" is not refused */
+
+    /* A slot stored before the rules keeps its name: enable and disable it unchanged. */
+    ntrip_caster_cfg_t st = stored_rtk2go("A.base");
+    TEST_ASSERT_TRUE(put_on(&st, "{\"enabled\":false}", &c, &b));
+    TEST_ASSERT_EQUAL_STRING("A.base", c.mountpoint);
+    TEST_ASSERT_TRUE(put_on(&st, "{\"enabled\":true}", &c, &b));
+    TEST_ASSERT_TRUE(put_on(&st, "{\"name\":\"Roof\",\"mountpoint\":\"A.base\"}", &c, &b));
+    /* A new name has to follow them. */
+    TEST_ASSERT_FALSE(put_on(&st, "{\"mountpoint\":\"Abase\"}", &c, &b));
+    TEST_ASSERT_EQUAL_STRING("mountpoint", b.field);
+    TEST_ASSERT_EQUAL_STRING("RTK2go no longer accepts new mountpoints that start with \"A\"", b.rule);
+    TEST_ASSERT_TRUE(put_on(&st, "{\"mountpoint\":\"Bbase\"}", &c, &b));
+
+    /* Other casters keep the general rule ("." allowed, any first character). */
+    TEST_ASSERT_TRUE(caster_put("{\"host\":\"caster.example.org\",\"mountpoint\":\"A.b\",\"password\":\"bench-pass-1\"}",
+                                &c, &b));
+}
+
+TEST_CASE("caster test_onocoy: true only where the build allows it, false always", "[web_parse]")
+{
+    ntrip_caster_cfg_t c;
+    web_bad_t b;
+    const char *json = "{\"host\":\"10.0.2.2\",\"mountpoint\":\"TESTMOUNT\",\"username\":\"testuser01\","
+                       "\"password\":\"fakepass123\",\"test_onocoy\":true}";
+
+    ntrip_test_onocoy_set_allowed(false);
+    memset(&b, 0, sizeof(b));
+    TEST_ASSERT_FALSE(caster_put(json, &c, &b));
+    TEST_ASSERT_EQUAL(WEB_ERR_INVALID_FIELD, b.err);
+    TEST_ASSERT_EQUAL_STRING("test_onocoy", b.field);
+    TEST_ASSERT_EQUAL_STRING("only in bench and QEMU builds", b.rule);
+    TEST_ASSERT_TRUE(caster_put("{\"host\":\"10.0.2.2\",\"mountpoint\":\"TESTMOUNT\",\"password\":\"fakepass123\","
+                                "\"test_onocoy\":false}", &c, &b));
+    TEST_ASSERT_FALSE(c.test_onocoy);
+    TEST_ASSERT_FALSE(c.protected_slot);
+    memset(&b, 0, sizeof(b));
+    TEST_ASSERT_FALSE(caster_put("{\"test_onocoy\":1}", &c, &b));
+    TEST_ASSERT_EQUAL_STRING("test_onocoy", b.field);
+
+    /* A bench or QEMU build: the slot counts as Onocoy (protected, fast, Onocoy's field rules). */
+    ntrip_test_onocoy_set_allowed(true);
+    TEST_ASSERT_TRUE(caster_put(json, &c, &b));
+    TEST_ASSERT_TRUE(c.test_onocoy);
+    TEST_ASSERT_TRUE(c.protected_slot);
+    TEST_ASSERT_EQUAL(NTRIP_BACKOFF_FAST, c.backoff_profile);
+    memset(&b, 0, sizeof(b));
+    TEST_ASSERT_FALSE(caster_put("{\"host\":\"10.0.2.2\",\"mountpoint\":\"TESTMOUNT\",\"username\":\"\","
+                                 "\"password\":\"fakepass123\",\"test_onocoy\":true}", &c, &b));
+    TEST_ASSERT_EQUAL_STRING("username", b.field);   /* Onocoy needs the console's username */
+    /* A stored mark the request does not repeat stays. */
+    ntrip_caster_cfg_t st;
+    TEST_ASSERT_TRUE(caster_put(json, &st, &b));
+    st.password_set = true;   /* as stored */
+    memset(st.password, 0, sizeof(st.password));
+    TEST_ASSERT_TRUE(put_on(&st, "{\"name\":\"Test\"}", &c, &b));
+    TEST_ASSERT_TRUE(c.test_onocoy);
+    ntrip_test_onocoy_set_allowed(false);
+}

@@ -150,6 +150,7 @@ typedef enum {
     HM_CST_PAUSED,
     HM_CST_CONFIG_ERROR,
     HM_CST_BANNED,
+    HM_CST_STOPPED,                  /**< the Onocoy login guard stopped it until the user acts */
 } hm_cst_state_t;
 
 #define HM_SEND_SLACK_MS 5000u
@@ -172,8 +173,16 @@ void hm_slot_init(hm_slot_t *s);
 /** True: restart this slot now (and the restart is recorded). */
 bool hm_slot_overrun(hm_slot_t *s, const hm_slot_in_t *in, int64_t now_ms);
 
-/** A slot that is enabled and failing (waiting for the network, backing off, rejected or banned). */
+/** A slot that is enabled and failing (waiting for the network, backing off, rejected, banned or stopped). */
 bool hm_slot_down(const hm_slot_in_t *in);
+
+/**
+ * The protected slot counts as down for the network ladder's trigger: enabled
+ * and neither streaming nor paused, nor stopped by the Onocoy login guard (a
+ * Wi-Fi restart or a reboot cannot fix a credential problem; the stopped
+ * slot still counts as down for the health level, hm_slot_down).
+ */
+bool hm_protected_down(bool enabled, bool protected_slot, uint8_t state);
 
 /* ---- low-heap reboot ------------------------------------------------------------ */
 

@@ -405,6 +405,14 @@ function renderNotices() {
     }
     items.push(['warn', 'Receiver update needs you', what, [link('Open', '#/updates/session', 'btn small')]]);
   }
+  /* A slot the Onocoy login guard stopped: nothing is tried until the user acts. */
+  for (const c of st.casters || []) {
+    if (c.state === 'stopped') {
+      items.push(['bad', 'Onocoy stopped: ' + lbl(L.stop, c.stop_reason || 'none'),
+        (c.name || 'Slot ' + (c.slot + 1)) + ' makes no new attempt until you act. The casters page says why and what to do.',
+        [link('Details', '#/casters', 'btn small')]]);
+    }
+  }
   const onUpdates = shell.current && shell.current.name === 'updates';
   if (isAdmin() && !onUpdates && (u.app_available || u.gnss_available || u.app_reverted_in_stage1) && !bannerDismissed(u)) {
     const parts = [];

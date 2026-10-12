@@ -651,7 +651,7 @@ async function startWizard(claim) {
         h('div', { class: 'form-actions' }, btn('Continue', () => next('onocoy'), 'primary')));
       return;
     }
-    let slot = slots.find(s => s.config && isOnocoyHost(s.config.host));
+    let slot = slots.find(s => s.config && isOnocoySlot(s.config));
     if (!slot) slot = slots.find(s => s.config && !s.config.host && !s.config.enabled);
     if (!slot) {
       frame('onocoy', 'Onocoy', msg('warn', 'Every caster slot is in use. Set up Onocoy later on the Casters page.'),
@@ -659,22 +659,31 @@ async function startWizard(claim) {
       return;
     }
     const cfg = slot.config || {};
-    const ono = isOnocoyHost(cfg.host);
+    const ono = isOnocoySlot(cfg);
     /* A slot stored in the older layout (no username) holds the old credential in `mountpoint`: start empty. */
     const current = ono && cfg.username;
-    /* What the Onocoy console shows, in its words and order: host and port (fixed), mountpoint, username, password. */
-    const hostI = textInput(preset.host, { readonly: true });
-    const portI = textInput(String(preset.port), { readonly: true, inputmode: 'numeric' });
+    /* What the Onocoy console shows, in its words and order: host and port (fixed), mountpoint, username, password.
+     * A test Onocoy slot (bench and QEMU builds) keeps its own host and port. */
+    const hostI = textInput(ono ? cfg.host : preset.host, { readonly: true });
+    const portI = textInput(String(ono ? cfg.port : preset.port), { readonly: true, inputmode: 'numeric' });
     const mpI = textInput(current ? cfg.mountpoint : '', { maxlength: 47 });
     const userI = textInput(current ? cfg.username : '', { maxlength: 47 });
     const pw = pwInput({ maxlength: 63, placeholder: ono && cfg.password_set ? 'Stored (leave empty to keep)' : '' });
     const F = { mountpoint: field('Mountpoint', mpI), username: field('Username', userI), password: field('Password', pw) };
+    /* Onocoy's password rule, checked softly: a note while the typed password breaks it, saving still allowed. */
+    const pwNote = h('p', { class: 'small t-warn', role: 'status', hidden: true });
+    pw.addEventListener('input', () => {
+      pwNote.textContent = onocoyPwNote(pw.value);
+      pwNote.hidden = !pwNote.textContent;
+    });
     const err = errBox();
     const dupBox = h('div');
     const submit = h('button', { type: 'submit', class: 'btn primary' }, 'Save and continue');
     frame('onocoy', 'Onocoy',
       h('p', null, 'Onocoy rewards reference stations for their correction data.'),
       h('p', null, ONOCOY_CONSOLE),
+      h('p', { class: 'small' }, ONOCOY_PW_RULE),
+      msg('warn', ONOCOY_ONE_DEVICE),
       h('form', { onsubmit: async e => {
         e.preventDefault();
         for (const k of Object.keys(F)) F[k].error(null);
@@ -712,7 +721,7 @@ async function startWizard(claim) {
         };
         await doSave(false, submit);
       } }, h('div', { class: 'cols c2' }, field('Host', hostI).el, field('Port', portI).el),
-      F.mountpoint.el, F.username.el, F.password.el, dupBox, err, h('div', { class: 'form-actions' }, submit,
+      F.mountpoint.el, F.username.el, F.password.el, pwNote, dupBox, err, h('div', { class: 'form-actions' }, submit,
         btn('Skip for now', () => next('onocoy'), 'ghost'))),
       skipAll());
     mpI.focus();
@@ -750,7 +759,7 @@ async function startWizard(claim) {
       editor = casterEditor(target, {
         preset: data.onocoy_preset,
         hostname: W.system && W.system.hostname,
-        hideOnocoy: configured.some(s => isOnocoyHost(s.config.host)),
+        hideOnocoy: configured.some(s => isOnocoySlot(s.config)),
         onSaved: async () => {
           W.casters = await api('GET', '/api/casters');
           stepCasters();

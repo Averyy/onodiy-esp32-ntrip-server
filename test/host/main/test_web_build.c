@@ -217,7 +217,7 @@ TEST_CASE("caster config never carries the password", "[web_build]")
     TEST_ASSERT_EQUAL(1, at(cfg, "ntrip_version")->valueint);
     TEST_ASSERT_EQUAL_STRING("bundle", at(cfg, "trust")->valuestring);
     const cJSON *st = at(root, "status");
-    TEST_ASSERT_EQUAL(11, cJSON_GetArraySize(at(st, "failures_by_class")));
+    TEST_ASSERT_EQUAL(NTRIP_FAIL_CLASS_COUNT - 1, cJSON_GetArraySize(at(st, "failures_by_class")));   /* all but none */
     TEST_ASSERT_TRUE(cJSON_IsNull(at(st, "tls_version")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(st, "connected_since_unix")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(st, "last_err")));
@@ -1342,4 +1342,152 @@ TEST_CASE("Onocoy day figures are null unless the slot is enabled and set up", "
     TEST_ASSERT_TRUE(cJSON_IsNull(at(pr, "budget_s")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(pr, "graced_uptime_so_far_permille")));
     cJSON_Delete(root);
+}
+
+/* ---- the Onocoy login guard, the test Onocoy slot, the day's volume ------------------------------ */
+
+TEST_CASE("caster guard names: the stopped state, the new classes and the stop reasons", "[web_build]")
+{
+    TEST_ASSERT_EQUAL_STRING("stopped", web_ntrip_state_name(NTRIP_STATE_STOPPED));
+    TEST_ASSERT_EQUAL(10, NTRIP_STATE_STOPPED);
+    TEST_ASSERT_EQUAL_STRING("login_blocked", web_ntrip_fail_name(NTRIP_FAIL_LOGIN_BLOCKED));
+    TEST_ASSERT_EQUAL_STRING("in_use", web_ntrip_fail_name(NTRIP_FAIL_IN_USE));
+    TEST_ASSERT_EQUAL_STRING("replaced", web_ntrip_fail_name(NTRIP_FAIL_REPLACED));
+    TEST_ASSERT_EQUAL(12, NTRIP_FAIL_LOGIN_BLOCKED);
+    TEST_ASSERT_EQUAL(14, NTRIP_FAIL_REPLACED);
+    static const char *const stops[] = { "none", "rejected", "login_blocked", "in_use", "kicked", "duplicate",
+                                         "banned" };
+    TEST_ASSERT_EQUAL(sizeof(stops) / sizeof(stops[0]), NTRIP_STOP_COUNT);
+    for (int i = 0; i < NTRIP_STOP_COUNT; i++) {
+        TEST_ASSERT_EQUAL_STRING(stops[i], web_ntrip_stop_name((ntrip_stop_t)i));
+    }
+    TEST_ASSERT_EQUAL_STRING("unknown", web_ntrip_stop_name(NTRIP_STOP_COUNT));
+    TEST_ASSERT_EQUAL_STRING("caster_stop", web_diag_event_name(DIAG_EV_CASTER_STOP));
+    TEST_ASSERT_EQUAL(14, DIAG_EV_CASTER_STOP);
+    TEST_ASSERT_TRUE(web_history_kind(DIAG_EV_CASTER_STOP));
+}
+
+TEST_CASE("caster status: the guard's fields, every class counted, the day's bytes", "[web_build]")
+{
+    fixture();
+    s_snap.cst[0].state = NTRIP_STATE_STOPPED;
+    s_snap.cst[0].reason = NTRIP_FAIL_REPLACED;
+    s_snap.cst[0].stop_reason = NTRIP_STOP_KICKED;
+    s_snap.cst[0].kicked_sessions = 3;
+    s_snap.cst[0].login_rejects = 1;
+    s_snap.cst[0].login_blocks = 2;
+    s_snap.cst[0].failures_by_class[NTRIP_FAIL_IN_USE] = 4;
+    s_snap.cst[0].bytes_sent = 5000000;
+    s_snap.cst[0].bytes_sent_today = 1234567;
+    strcpy(s_snap.cst[0].last_session_text, "Device reconnected");
+    strcpy(s_snap.cst[0].hint, "stopped: sessions kept being taken over");
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_caster_entry(&w, 0, &s_snap.cfg[0], &s_snap.cst[0]);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    const cJSON *st = at(root, "status");
+    TEST_ASSERT_EQUAL_STRING("stopped", at(st, "state")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("replaced", at(st, "reason")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("kicked", at(st, "stop_reason")->valuestring);
+    TEST_ASSERT_EQUAL(3, at(st, "kicked_sessions")->valueint);
+    TEST_ASSERT_EQUAL(1, at(st, "login_rejects")->valueint);
+    TEST_ASSERT_EQUAL(2, at(st, "login_blocks")->valueint);
+    TEST_ASSERT_EQUAL_STRING("Device reconnected", at(st, "last_session_text")->valuestring);
+    TEST_ASSERT_EQUAL(1234567, at(st, "bytes_sent_today")->valuedouble);
+    const cJSON *fb = at(st, "failures_by_class");
+    TEST_ASSERT_EQUAL(14, cJSON_GetArraySize(fb));   /* every class but none */
+    TEST_ASSERT_EQUAL(4, at(fb, "in_use")->valueint);
+    TEST_ASSERT_EQUAL(0, at(fb, "login_blocked")->valueint);
+    TEST_ASSERT_EQUAL(0, at(fb, "replaced")->valueint);
+    const cJSON *cfg = at(root, "config");
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(cfg, "test_onocoy")));
+    cJSON_Delete(root);
+
+    /* The status summary carries the stop reason (admin form only). */
+    root = build_status(false);
+    const cJSON *c0 = cJSON_GetArrayItem(at(root, "casters"), 0);
+    TEST_ASSERT_EQUAL_STRING("kicked", at(c0, "stop_reason")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("stopped", at(c0, "state")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("none", at(cJSON_GetArrayItem(at(root, "casters"), 1), "stop_reason")->valuestring);
+    cJSON_Delete(root);
+    root = build_status(true);
+    c0 = cJSON_GetArrayItem(at(root, "casters"), 0);
+    TEST_ASSERT_NULL(cJSON_GetObjectItem(c0, "stop_reason"));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("caster config: test_onocoy only where the build allows it", "[web_build]")
+{
+    fixture();
+    strcpy(s_snap.cfg[1].host, "10.0.2.2");
+    s_snap.cfg[1].test_onocoy = true;
+    for (int allowed = 0; allowed < 2; allowed++) {
+        ntrip_test_onocoy_set_allowed(allowed != 0);
+        wj_t w;
+        wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+        web_build_caster_entry(&w, 1, &s_snap.cfg[1], &s_snap.cst[1]);
+        cJSON *root = cJSON_Parse(s_out);
+        TEST_ASSERT_NOT_NULL(root);
+        TEST_ASSERT_EQUAL(allowed != 0, cJSON_IsTrue(at(at(root, "config"), "test_onocoy")));
+        cJSON_Delete(root);
+    }
+    ntrip_test_onocoy_set_allowed(false);
+}
+
+TEST_CASE("connections: a caster_stop row names the slot and the stop reason", "[web_build]")
+{
+    fixture();
+    diag_journal_entry_t e[2] = {
+        { .seq = 7, .unix_s = 1760000000, .uptime_s = 300, .kind = DIAG_EV_CASTER_STOP,
+          .a = (int32_t)(0u | ((uint32_t)NTRIP_STOP_KICKED << 8)), .b = 0 },
+        { .seq = 6, .unix_s = 1759999990, .uptime_s = 290, .kind = DIAG_EV_CASTER_DOWN,
+          .a = diag_caster_a(0, NTRIP_FAIL_REPLACED, 0), .b = 10 },
+    };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_connections(&w, e, 2, s_snap.cfg, s_snap.slots, true);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    const cJSON *stop = cJSON_GetArrayItem(at(root, "entries"), 0);
+    TEST_ASSERT_EQUAL_STRING("caster_stop", at(stop, "kind")->valuestring);
+    TEST_ASSERT_EQUAL(0, at(stop, "slot")->valueint);
+    TEST_ASSERT_EQUAL_STRING("Onocoy", at(stop, "slot_name")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("kicked", at(stop, "stop_reason")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(stop, "class")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(stop, "count")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(stop, "duration_s")));
+    const cJSON *down = cJSON_GetArrayItem(at(root, "entries"), 1);
+    TEST_ASSERT_EQUAL_STRING("replaced", at(down, "class")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(down, "stop_reason")));
+    TEST_ASSERT_EQUAL(10, at(down, "duration_s")->valueint);
+    cJSON_Delete(root);
+}
+
+TEST_CASE("a caster summary with the longest stop reason still fits the WebSocket's buffer", "[web_build]")
+{
+    fixture();
+    memset(s_snap.cfg[0].name, '"', sizeof(s_snap.cfg[0].name) - 1);
+    memset(s_snap.cfg[0].host, 'a', sizeof(s_snap.cfg[0].host) - 1);
+    s_snap.cst[0].state = NTRIP_STATE_CONFIG_ERROR;
+    s_snap.cst[0].reason = NTRIP_FAIL_LOGIN_BLOCKED;
+    s_snap.cst[0].stop_reason = NTRIP_STOP_LOGIN_BLOCKED;
+    s_snap.cst[0].state_age_s = UINT32_MAX - 1;
+    s_snap.cst[0].connected_s = UINT32_MAX - 1;
+    s_snap.cst[0].today_online_s = UINT32_MAX - 1;
+    s_snap.cst[0].today_offline_s = UINT32_MAX - 1;
+    s_snap.cst[0].budget_left_s = UINT32_MAX - 1;
+    s_snap.cst[0].budget_s = UINT32_MAX - 1;
+    s_snap.cst[0].bytes_sent = UINT64_C(0x1FFFFFFFFFFFFF);
+    s_snap.cst[0].lag_ms_now = UINT32_MAX - 1;
+    s_snap.cst[0].next_retry_s = UINT32_MAX - 1;
+    s_snap.cst[0].unreached_s = UINT32_MAX - 1;
+    memset(s_snap.cst[0].hint, '"', sizeof(s_snap.cst[0].hint) - 1);
+    static char cst[896];   /* web_ws.c CST_TEXT_MAX */
+    wj_t w;
+    wj_init_elements(&w, cst, sizeof(cst));
+    web_build_caster_summary(&w, &s_snap, 0, false);
+    TEST_ASSERT_TRUE(wj_ok(&w));
 }

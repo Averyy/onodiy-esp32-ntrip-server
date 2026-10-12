@@ -6,7 +6,8 @@
  * clock and random numbers, host-tested).
  *
  *   - field validation for a caster slot and the cross-slot rules (one Onocoy
- *     slot, one RTK2go slot, acknowledged duplicate streams);
+ *     slot, one RTK2go slot, acknowledged duplicate streams), and the RTK2go
+ *     mountpoint rules checked when a slot is saved;
  *   - request builders: NTRIP 1.0 "SOURCE" and NTRIP 2.0 HTTP POST with Basic
  *     auth, both with the "NTRIP <product>/<version>" agent;
  *   - the chunked transfer encoder (one chunk per hub read);
@@ -17,11 +18,14 @@
  *     its chunk framing, so a chunk boundary never splits the word and a
  *     size line never reads as text; the last chunk ends the check; a
  *     malformed size line makes the rest count as plain body bytes);
+ *   - the Onocoy reason texts, matched in the reply line, the reply body and
+ *     every line a caster sends during a session;
  *   - the backoff calculator (fast, standard and polite profiles, +-20 %
  *     jitter, MOUNT_BUSY escalation, the AUTH transient window, the polite
  *     hourly limit) and the per-slot state machine that uses it, including
  *     the run of failures that never reached the caster (the network
- *     ladder's trigger S, and the protected slot's flat retry);
+ *     ladder's trigger S, and the protected slot's flat retry), and the
+ *     Onocoy login guard (below);
  *   - the persisted long-backoff record and the Onocoy daily budget estimate;
  *   - the connection history's journal records and their flapping limit.
  *
@@ -115,6 +119,9 @@ typedef enum {
     NTRIP_CLS_MOUNT_BUSY,
     NTRIP_CLS_CONFIG,
     NTRIP_CLS_BANNED,
+    NTRIP_CLS_LOGIN_BLOCKED,     /**< Onocoy: too many unsuccessful logins (guard slots) */
+    NTRIP_CLS_IN_USE,            /**< Onocoy: the credential is in use by another stream (guard slots) */
+    NTRIP_CLS_REPLACED,          /**< Onocoy: another device logged in with the credential (guard slots) */
     NTRIP_CLS_COUNT,
 } ntrip_cls_t;
 
@@ -137,6 +144,7 @@ typedef enum {
     NTRIP_SM_PAUSED,
     NTRIP_SM_CONFIG_ERROR,
     NTRIP_SM_BANNED,
+    NTRIP_SM_STOPPED,            /**< the login guard stopped the slot: no attempt until the user acts */
 } ntrip_sm_state_t;
 
 /** Backoff row a failure follows. */
@@ -176,6 +184,7 @@ typedef struct {
     const char *label;
     bool v2;
     bool enabled;
+    bool onocoy;                 /**< the slot counts as Onocoy (ntrip_slot_is_onocoy); a host in onocoy.com always does */
 } ntrip_fields_t;
 
 typedef enum {
@@ -197,8 +206,8 @@ typedef enum {
  * label [A-Za-z0-9]. An enabled slot needs host, port and mountpoint, a v1
  * slot a password, and a v2 slot that is not an Onocoy slot a username.
  *
- * Onocoy slots hold what the Onocoy console gives: mountpoint, username
- * and password. Their username is [A-Za-z0-9._-] (NTRIP 1.0 sends it as the
+ * Onocoy slots (f->onocoy, or a host in onocoy.com) hold what the Onocoy
+ * console gives: mountpoint, username and password. Their username is [A-Za-z0-9._-] (NTRIP 1.0 sends it as the
  * mountpoint) and their password has no spaces in either version; an
  * enabled one needs the password. A slot stored in the older layout
  * (Onocoy host, the credential username in `mountpoint`; its stored record
@@ -223,17 +232,37 @@ typedef struct {
     bool enabled;
     const char *host;
     bool dup_ack;
+    bool onocoy;                 /**< the slot counts as Onocoy (ntrip_slot_is_onocoy); a host in onocoy.com always does */
 } ntrip_policy_slot_t;
 
 /**
  * Cross-slot rules for saving slot `edited` (slots[] holds the result of the
  * save): a second enabled Onocoy slot, a second RTK2go slot, or Onocoy
  * together with an open caster (RTK2go, Centipede) without the edited slot's
- * acknowledgement. Hosts match by domain, case-insensitively; a disabled
- * edited slot breaks nothing. The only place these rules live: the web API
- * names the reason from what ntrip_server_set_config() reports.
+ * acknowledgement. Hosts match by domain, case-insensitively; a slot marked
+ * `onocoy` (a test Onocoy slot) counts as Onocoy whatever its host; a
+ * disabled edited slot breaks nothing. The only place these rules live: the
+ * web API names the reason from what ntrip_server_set_config() reports.
  */
 ntrip_policy_t ntrip_check_policy(const ntrip_policy_slot_t *slots, size_t count, size_t edited);
+
+/**
+ * RTK2go's rules for a new mountpoint, in this order: only [A-Za-z0-9_-]
+ * (so no '.'), a letter first, not an uppercase 'A' first (the reservation
+ * form names that letter; a lowercase 'a' is not refused: anything more
+ * would be a guess), 4 to 20 characters (an empty name is too short).
+ */
+ntrip_rtk2go_mount_t ntrip_rtk2go_mount_check(const char *mount);
+
+/**
+ * The RTK2go rules apply to a save: the new host is in rtk2go.com and there
+ * was no stored host, the host changed (hosts compare case-insensitively)
+ * or the mountpoint changed (case-sensitively, as RTK2go names are). So a
+ * slot stored before the rules keeps streaming, and can be enabled and
+ * disabled unchanged.
+ */
+bool ntrip_rtk2go_rule_applies(const char *old_host, const char *old_mount, const char *new_host,
+                               const char *new_mount);
 
 /* ---- Requests ---------------------------------------------------------------- */
 
@@ -250,8 +279,9 @@ size_t ntrip_base64(const uint8_t *in, size_t len, char *out, size_t cap);
 size_t ntrip_build_agent(const char *app_version, char *out, size_t cap);
 
 /**
- * What goes on the wire for a slot. Other casters: mountpoint and (2.0)
- * username as stored. Onocoy slots hold the console's mountpoint, username
+ * What goes on the wire for a slot (`onocoy`: the slot counts as Onocoy,
+ * ntrip_slot_is_onocoy). Other casters: mountpoint and (2.0) username as
+ * stored. Onocoy slots hold the console's mountpoint, username
  * and password: NTRIP 2.0 posts to /<mountpoint> with Basic
  * <username>:<password>; NTRIP 1.0 sends "SOURCE <password> /<username>"
  * (Onocoy's instruction for 1.0-only sources). A slot stored in the older
@@ -266,8 +296,8 @@ typedef struct {
     const char *user;    /**< v2 only */
 } ntrip_wire_names_t;
 
-void ntrip_wire_names(const char *host, bool v2, const char *mountpoint, const char *username,
-                      const char *label, ntrip_wire_names_t *out);
+void ntrip_wire_names(bool onocoy, bool v2, const char *mountpoint, const char *username, const char *label,
+                      ntrip_wire_names_t *out);
 
 /** "SOURCE <password> /<mount>\r\nSource-Agent: <agent>\r\n\r\n". @return length or 0. */
 size_t ntrip_build_v1_request(char *buf, size_t cap, const char *password, const char *mount, const char *agent);
@@ -319,6 +349,39 @@ void ntrip_epoch_track_init(ntrip_epoch_track_t *t);
 void ntrip_count_frames(const uint8_t *buf, size_t len, ntrip_epoch_track_t *track, uint32_t *frames,
                         uint32_t *epochs_ended);
 
+/* ---- Onocoy reason texts ---------------------------------------------------------- */
+
+/**
+ * The reasons Onocoy's console shows for a refused login or an ended
+ * session. PROVISIONAL: their wire form is unknown (the only Onocoy error
+ * form ever observed is a plain-text "Error <n> <text> [onocoy naomi ...]"
+ * line); to be confirmed when the live wrong-password and second-session
+ * checks log the real bytes.
+ */
+typedef enum {
+    NTRIP_ONO_NONE = 0,
+    NTRIP_ONO_AUTH,              /**< "authentication failed" (also "reauthentication failed"), "invalid request in headers" */
+    NTRIP_ONO_LOGIN_BLOCKED,     /**< "too many unsuccessful logins" */
+    NTRIP_ONO_IN_USE,            /**< "already in use", "parallel connections" */
+    NTRIP_ONO_REPLACED,          /**< "device reconnected" */
+    NTRIP_ONO_DUPLICATE,         /**< "duplicate of another stream" */
+    NTRIP_ONO_BANNED,            /**< "credential is banned" */
+} ntrip_onocoy_reason_t;
+
+#define NTRIP_ONO_PHRASE_MAX 32u  /**< longest phrase, with room (the body matcher's window) */
+
+/**
+ * The Onocoy reason a text names: its phrases matched case-insensitively as
+ * substrings, in this priority (the first that matches wins): too many
+ * unsuccessful logins; already in use, parallel connections; device
+ * reconnected; duplicate of another stream; credential is banned;
+ * authentication failed, invalid request in headers.
+ */
+ntrip_onocoy_reason_t ntrip_onocoy_reason(const char *text, size_t len);
+
+/** Of two reasons, the one earlier in that priority (NONE loses to any). */
+ntrip_onocoy_reason_t ntrip_onocoy_reason_merge(ntrip_onocoy_reason_t a, ntrip_onocoy_reason_t b);
+
 /* ---- Reply parser and classifier ------------------------------------------------ */
 
 typedef struct {
@@ -329,6 +392,7 @@ typedef struct {
     ntrip_hint_t hint;
     bool mount_ambiguous;     /**< the reply also means "unknown mountpoint" */
     uint8_t rule;             /**< matched row of the ordered table (1-18), 0 = cap exceeded */
+    uint8_t onocoy_reason;    /**< ntrip_onocoy_reason_t named by the first line or the body (only guard slots act on it) */
 } ntrip_verdict_t;
 
 typedef enum {
@@ -353,13 +417,20 @@ typedef struct {
     uint8_t ck_digits;
     uint32_t ck_left;         /**< chunk size, then bytes left in the chunk */
     size_t body_seen;
-    char tail[8];             /**< last bytes of the body, for matches across reads */
+    char tail[NTRIP_ONO_PHRASE_MAX];   /**< last body bytes (lowercase), for matches across reads and chunks */
     size_t tail_len;
     bool banned;
     bool body_check;          /**< finished by the body check */
+    bool body_always;         /**< set after init: read the body of every non-success HTTP reply (guard slots) */
     ntrip_verdict_t verdict;
 } ntrip_reply_t;
 
+/**
+ * Start a reply. The body check (for "banned" and the Onocoy reasons) runs
+ * for 4xx and HTML replies; a caller that sets r->body_always after this
+ * call (a slot under the Onocoy login guard) gets it for every non-success
+ * HTTP reply.
+ */
 void ntrip_reply_init(ntrip_reply_t *r, bool v2_request);
 
 /**
@@ -375,7 +446,7 @@ void ntrip_reply_end(ntrip_reply_t *r, bool eof);
 /** Time allowed for the current phase, from its start. */
 uint32_t ntrip_reply_phase_ms(const ntrip_reply_t *r);
 
-/** Classify one first line (rows in table order); the parser uses it. */
+/** Classify one first line (rows in table order, plus the Onocoy reason it names); the parser uses it. */
 ntrip_verdict_t ntrip_classify_line(const char *line, size_t len);
 
 /** Map an HTTP status code to a verdict (no body check). */
@@ -391,6 +462,41 @@ bool ntrip_contains_ci(const char *data, size_t len, const char *needle);
  */
 void ntrip_sanitize(const char *in, size_t len, char *out, size_t cap, const char *const *secrets, size_t nsecrets);
 
+/* ---- Text a caster sends during a session ----------------------------------------------- */
+
+#define NTRIP_SESS_LINE_MAX  256u   /**< a longer line is taken in pieces */
+#define NTRIP_SESS_TEXT_MAX  97u    /**< the newest line as shown (sanitised) */
+
+/**
+ * Lines a caster sends while the session streams (nothing is expected):
+ * assembled across reads (CR or LF ends one; empty lines are skipped), each
+ * sanitised with the secrets masked into `last` and matched for an Onocoy
+ * reason (a line with "banned" and no other reason counts as BANNED).
+ */
+typedef struct {
+    char line[NTRIP_SESS_LINE_MAX];
+    size_t len;
+    uint8_t seen;                     /**< bit (1 << ntrip_onocoy_reason_t) per reason seen this session */
+    char last[NTRIP_SESS_TEXT_MAX];   /**< the newest complete line, sanitised ("" = none yet) */
+} ntrip_sess_text_t;
+
+/** A session starts: no reason seen, no partial line (`last` is kept). */
+void ntrip_sess_text_start(ntrip_sess_text_t *t);
+
+/** Feed received bytes. @return true when at least one line ended (`last` holds the newest). */
+bool ntrip_sess_text_feed(ntrip_sess_text_t *t, const uint8_t *data, size_t len, const char *const *secrets,
+                          size_t nsecrets);
+
+/** The session ended: a partial line counts as a line. @return as ntrip_sess_text_feed(). */
+bool ntrip_sess_text_end(ntrip_sess_text_t *t, const char *const *secrets, size_t nsecrets);
+
+/**
+ * The session's reason: DUPLICATE, then BANNED (both stop a guard slot at
+ * once, so they win over anything seen before), else the highest-priority
+ * reason seen (ntrip_onocoy_reason_merge), NONE without one.
+ */
+ntrip_onocoy_reason_t ntrip_sess_text_reason(const ntrip_sess_text_t *t);
+
 /* ---- Backoff ------------------------------------------------------------------ */
 
 /**
@@ -405,14 +511,77 @@ uint32_t ntrip_backoff_delay_ms(ntrip_prof_t prof, ntrip_row_t row, uint32_t n, 
 /** First value of a row (the floor after jitter). */
 uint32_t ntrip_backoff_row_min_ms(ntrip_prof_t prof, ntrip_row_t row);
 
+/* ---- Onocoy login guard ------------------------------------------------------------------ */
+
+/*
+ * Slots that count as Onocoy (cfg.onocoy_guard: host in onocoy.com, or a
+ * test Onocoy slot) never loop a failing login: a refused login from Onocoy
+ * may block logins from the station's whole public IP (and so every other
+ * station on that connection), and two devices on one credential knock each
+ * other off. Standard and polite slots keep their rows unchanged. Every
+ * guard delay is its entry x U(1.0, 1.2), never below the entry. The window
+ * is cfg.auth_window_ms after a session ended or the boot (300 s), and
+ * "credentials that worked" are the ones the caster last accepted.
+ *
+ *   - Login rejection (a reply that is AUTH or CONFIG, an Onocoy
+ *     "authentication failed" text, or an unrecognised error line after the
+ *     first one in a run): 1st -> 300 s (30 s inside the window on
+ *     credentials that worked: one cheap chance after a caster deploy),
+ *     2nd -> 1800 s, 3rd -> STOPPED (rejected).
+ *   - "Too many unsuccessful logins": 3600 s, 7200 s, the 3rd -> STOPPED.
+ *   - Credential in use ("already in use", "parallel connections", or 409,
+ *     "Mount Point Taken", "Already Connected"): outside the window or on
+ *     credentials that never worked -> STOPPED at once; inside the window on
+ *     credentials that worked (the caster may still hold this station's own
+ *     dead session) -> 15, 30, 60, 120 s, the 5th -> STOPPED.
+ *   - Take-over: a session that reached STREAMING and that the caster ended
+ *     (REMOTE_CLOSE) within 120 s scores 1, a "device reconnected" or
+ *     "in use" text during a session scores 2 whatever its length; score 3
+ *     -> STOPPED (kicked); the reconnect after a scored session waits 5 s,
+ *     then 10 s; a session of 600 s or more resets the score. Write stalls,
+ *     keepalive aborts, network loss, source stalls, pauses and user edits
+ *     never score.
+ *   - Duplicate stream or banned (Onocoy's texts, or a generic "banned"
+ *     reply) -> STOPPED at once.
+ *   - Caster-reaching failures without any reply (no line in time, a close
+ *     before the newline) stay on the fast TRANSIENT row, but after 10 since
+ *     the last success every delay is at least 300 s until a success or the
+ *     user acts (a silent close may itself be a refused login).
+ *   - Failures that never reached the caster keep the flat 5 s retry and
+ *     never touch the guard's counts; TLS failures (no login sent) keep
+ *     their rows.
+ *   - STOPPED: no attempt at all, across restarts (backoff record version
+ *     3), until the user saves the slot, retries it or disables it.
+ *
+ * PROVISIONAL, every value: Onocoy documents neither its login block (length,
+ * whether attempts extend it) nor how it ends a session that another device
+ * replaced; to be confirmed by the live wrong-password and second-session
+ * checks.
+ */
+#define NTRIP_ONO_REJECT_S             { 300u, 1800u }   /**< login rejections 1 and 2; the 3rd stops (PROVISIONAL) */
+#define NTRIP_ONO_REJECT_WINDOW_S      30u      /**< the 1st inside the window on credentials that worked (PROVISIONAL) */
+#define NTRIP_ONO_REJECT_STOP          3u       /**< rejections that stop the slot (PROVISIONAL) */
+#define NTRIP_ONO_BLOCKED_S            { 3600u, 7200u }  /**< "too many unsuccessful logins" 1 and 2 (PROVISIONAL) */
+#define NTRIP_ONO_BLOCKED_STOP         3u       /**< ... the 3rd stops (PROVISIONAL) */
+#define NTRIP_ONO_INUSE_S              { 15u, 30u, 60u, 120u }   /**< "in use" inside the window (PROVISIONAL) */
+#define NTRIP_ONO_INUSE_STOP           5u       /**< ... the 5th stops (PROVISIONAL) */
+#define NTRIP_ONO_KICK_SHORT_S         120u     /**< a caster-ended session shorter than this scores 1 (PROVISIONAL) */
+#define NTRIP_ONO_KICK_RESET_S         600u     /**< a session this long resets the score (PROVISIONAL) */
+#define NTRIP_ONO_KICK_STOP_SCORE      3u       /**< the score that stops the slot (PROVISIONAL) */
+#define NTRIP_ONO_KICK_S               { 5u, 10u }   /**< reconnect after a scored session: score 1, score 2 (PROVISIONAL) */
+#define NTRIP_ONO_LINE_TRANSIENT_FREE  1u       /**< unrecognised error lines per run on the TRANSIENT row (PROVISIONAL) */
+#define NTRIP_ONO_SILENT_RUN           10u      /**< no-reply failures since the last success ... (PROVISIONAL) */
+#define NTRIP_ONO_SILENT_FLOOR_S       300u     /**< ... after which every delay is at least this (PROVISIONAL) */
+
 /* ---- Per-slot state machine --------------------------------------------------------- */
 
 typedef struct {
     ntrip_prof_t profile;
     bool protected_slot;
     uint32_t stall_limit_ms;     /**< silent session limit: source stall and pause idle */
-    uint32_t auth_window_ms;     /**< AUTH after a disconnect or boot follows the MOUNT_BUSY row */
+    uint32_t auth_window_ms;     /**< AUTH after a disconnect or boot follows the MOUNT_BUSY row; the guard's window */
     uint32_t fast_late_cap_ms;   /**< fast TRANSIENT cap after 10 min of failure */
+    bool onocoy_guard;           /**< the Onocoy login guard: exactly the slots that count as Onocoy */
 } ntrip_sm_cfg_t;
 
 /*
@@ -453,6 +622,8 @@ typedef struct {
     bool reached_caster;         /**< a TCP connection was made */
     bool mount_ambiguous;
     bool refused;                /**< the caster's host refused the TCP connect (a reset): it was reached, no connection */
+    bool replied;                /**< a reply line or HTTP status arrived (a login reply) */
+    uint8_t onocoy;              /**< ntrip_onocoy_reason_t: the reply's, or for a session end the session's */
 } ntrip_failure_t;
 
 /**
@@ -461,6 +632,14 @@ typedef struct {
  * route, socket error). A refused connect reached the caster's host.
  */
 bool ntrip_failure_unreached(const ntrip_failure_t *f);
+
+/**
+ * The class a failure has on a guard slot: the class its Onocoy reason names
+ * (too many logins: LOGIN_BLOCKED; in use: IN_USE; device reconnected:
+ * REPLACED; authentication failed: AUTH; duplicate or banned: BANNED), else
+ * IN_USE for a MOUNT_BUSY reply, else its own class.
+ */
+ntrip_cls_t ntrip_guard_class(const ntrip_failure_t *f);
 
 typedef struct {
     ntrip_sm_cfg_t cfg;
@@ -496,6 +675,18 @@ typedef struct {
     uint32_t saved_reached;      /**< polite: caster-reaching failures as last persisted */
     bool saved_hourly;
     bool saved_dirty;            /**< good_hash changed since the last write */
+    /* the Onocoy login guard (cfg.onocoy_guard) */
+    uint8_t rejects;             /**< login rejections since the last success (the 3rd stops) */
+    uint8_t blocks;              /**< "too many unsuccessful logins" since the last success (the 3rd stops) */
+    uint8_t inuse;               /**< "in use" replies inside the window since the last success (the 5th stops) */
+    uint8_t kick_score;          /**< take-over score (3 stops); a session of 10 min or more resets it */
+    bool line_transient_used;    /**< the free TRANSIENT retry after an unrecognised error line is used */
+    uint8_t silent_run;          /**< caster-reaching failures without a reply since the last success */
+    ntrip_stop_t stop;           /**< NONE, or why the slot stopped */
+    uint8_t saved_rejects;       /**< guard counts as last persisted */
+    uint8_t saved_blocks;
+    uint8_t saved_kick;
+    ntrip_stop_t saved_stop;
 } ntrip_sm_t;
 
 /** Persisted long-backoff record. */
@@ -508,9 +699,13 @@ typedef struct {
     bool good_valid;
     uint32_t good_hash;
     uint8_t reached;             /**< polite profile: consecutive caster-reaching failures (at most the hourly limit) */
+    uint8_t rejects;             /**< guard: login rejections (version 3) */
+    uint8_t blocks;              /**< guard: "too many unsuccessful logins" (version 3) */
+    uint8_t kick_score;          /**< guard: take-over score, at most the stop score (version 3) */
+    ntrip_stop_t stop;           /**< guard: why the slot stopped (version 3) */
 } ntrip_backoff_rec_t;
 
-#define NTRIP_BACKOFF_REC_VERSION 2u   /**< version 1 (no `reached`) is still read */
+#define NTRIP_BACKOFF_REC_VERSION 3u   /**< versions 1 (no `reached`) and 2 (no guard fields) are still read */
 #define NTRIP_BACKOFF_REC_MAX     32u
 
 void ntrip_sm_init(ntrip_sm_t *sm, const ntrip_sm_cfg_t *cfg, uint32_t cred_hash, uint32_t now_ms);
@@ -537,8 +732,9 @@ void ntrip_sm_sent(ntrip_sm_t *sm, size_t bytes, uint32_t now_ms);
 
 /**
  * A connection attempt or a session failed: apply the AUTH window and the
- * MOUNT_BUSY escalation, compute the delay, enter the row's state.
- * @return the delay in ms.
+ * MOUNT_BUSY escalation (or, on a guard slot, the login guard), compute the
+ * delay, enter the row's state.
+ * @return the delay in ms; 0 when the guard stopped the slot (no retry).
  */
 uint32_t ntrip_sm_failed(ntrip_sm_t *sm, const ntrip_failure_t *f, uint32_t now_ms, uint32_t rnd);
 
@@ -548,8 +744,15 @@ void ntrip_sm_closed(ntrip_sm_t *sm, uint32_t now_ms);
 /** The network came back with a new address: non-protected slots wait 0-10 s at random. */
 void ntrip_sm_stagger(ntrip_sm_t *sm, uint32_t now_ms, uint32_t rnd);
 
-/** The user saved the slot: new settings, counters and delays reset, retry at once. */
+/** The user saved the slot: new settings; counters, delays and a stop reset; retry at once. */
 void ntrip_sm_user_edit(ntrip_sm_t *sm, const ntrip_sm_cfg_t *cfg, uint32_t cred_hash, uint32_t now_ms);
+
+/**
+ * The user's retry (POST /api/casters/{n}/retry), as a save with the same
+ * settings: the stop, the guard's counts and the backoff are cleared and an
+ * attempt may start at once.
+ */
+void ntrip_sm_retry(ntrip_sm_t *sm, uint32_t now_ms);
 
 /** ms until the next attempt may start (0 = none pending). */
 uint32_t ntrip_sm_retry_in_ms(const ntrip_sm_t *sm, uint32_t now_ms);
@@ -568,8 +771,10 @@ uint32_t ntrip_sm_unreached_ms(const ntrip_sm_t *sm, uint32_t now_ms);
  * True if the record changed since the last write: the long row (AUTH,
  * CONFIG, BANNED) or its step (bounded: once the row's last entry repeats,
  * further failures change nothing), the hourly limit, a polite slot's count
- * of caster-reaching failures (up to the hourly limit) or the last-good
- * credentials. So a reboot never puts a slot back to an earlier step.
+ * of caster-reaching failures (up to the hourly limit), the last-good
+ * credentials, or the guard's rejections, blocks, take-over score or stop
+ * (bounded: each stops changing at its stop value). So a reboot never puts
+ * a slot back to an earlier step.
  */
 bool ntrip_sm_persist_due(const ntrip_sm_t *sm);
 
@@ -582,7 +787,9 @@ void ntrip_sm_persist_done(ntrip_sm_t *sm);
  * of the stored remaining delay and the full nominal delay of the stored
  * step (one hour in hourly mode) before the first attempt, so a reboot loop
  * can never shorten the escalation; the stored count of caster-reaching
- * failures carries on toward the hourly limit.
+ * failures carries on toward the hourly limit. A guard slot keeps its stop
+ * (STOPPED, no attempt) and its counts, and waits at least the full entry of
+ * a pending guard delay (a rejection's 300 s, not the 30 s variant).
  */
 void ntrip_sm_restore(ntrip_sm_t *sm, const ntrip_backoff_rec_t *rec, uint32_t now_ms);
 

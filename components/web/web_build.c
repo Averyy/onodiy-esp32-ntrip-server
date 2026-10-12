@@ -594,6 +594,7 @@ void web_build_caster_summary(wj_t *w, const web_status_snap_t *s, size_t slot, 
         wj_uint(w, "next_retry_s", t->next_retry_s);
         wj_uint(w, "unreached_s", t->unreached_s);
         wj_str(w, "hint", t->hint);
+        wj_str(w, "stop_reason", web_ntrip_stop_name(t->stop_reason));
     }
     wj_obj_close(w);
 }
@@ -1305,6 +1306,7 @@ void web_build_caster_config(wj_t *w, const char *key, const ntrip_caster_cfg_t 
     wj_str(w, "backoff_profile", web_ntrip_backoff_name(c->backoff_profile));
     wj_bool(w, "protected", c->protected_slot);
     wj_bool(w, "dup_stream_ack", c->dup_stream_ack);
+    wj_bool(w, "test_onocoy", c->test_onocoy && ntrip_test_onocoy_allowed());
     wj_obj_close(w);
 }
 
@@ -1354,6 +1356,12 @@ void web_build_caster_status(wj_t *w, const char *key, const ntrip_caster_status
     wj_str_or_null(w, "tls_cipher", t->tls_cipher);
     wj_str(w, "hint", t->hint);
     err_name(w, "last_err", t->last_err);
+    wj_str(w, "stop_reason", web_ntrip_stop_name(t->stop_reason));
+    wj_uint(w, "login_rejects", t->login_rejects);
+    wj_uint(w, "login_blocks", t->login_blocks);
+    wj_uint(w, "kicked_sessions", t->kicked_sessions);
+    wj_strn(w, "last_session_text", t->last_session_text, strnlen(t->last_session_text, sizeof(t->last_session_text)));
+    wj_uint(w, "bytes_sent_today", t->bytes_sent_today);
     wj_obj_close(w);
 }
 
@@ -1999,8 +2007,8 @@ void web_build_journal(wj_t *w, const diag_journal_entry_t *e, size_t count, uin
 
 bool web_history_kind(uint16_t kind)
 {
-    return kind == DIAG_EV_CASTER_DOWN || kind == DIAG_EV_CASTER_UP || kind == DIAG_EV_WIFI_UP ||
-           kind == DIAG_EV_WIFI_DISCONNECT;
+    return kind == DIAG_EV_CASTER_DOWN || kind == DIAG_EV_CASTER_UP || kind == DIAG_EV_CASTER_STOP ||
+           kind == DIAG_EV_WIFI_UP || kind == DIAG_EV_WIFI_DISCONNECT;
 }
 
 bool web_history_collect(const diag_journal_entry_t *page, size_t count, uint32_t hi, diag_journal_entry_t *out,
@@ -2017,7 +2025,8 @@ bool web_history_collect(const diag_journal_entry_t *page, size_t count, uint32_
 
 static void conn_entry(wj_t *w, const diag_journal_entry_t *e, const ntrip_caster_cfg_t *cfg, size_t slots)
 {
-    bool caster = e->kind == DIAG_EV_CASTER_DOWN || e->kind == DIAG_EV_CASTER_UP;
+    bool stop = e->kind == DIAG_EV_CASTER_STOP;
+    bool caster = e->kind == DIAG_EV_CASTER_DOWN || e->kind == DIAG_EV_CASTER_UP || stop;
     uint32_t a = (uint32_t)e->a;
     wj_obj_open(w, NULL);
     wj_uint(w, "seq", e->seq);
@@ -2037,7 +2046,11 @@ static void conn_entry(wj_t *w, const diag_journal_entry_t *e, const ntrip_caste
         } else {
             wj_null(w, "class");
         }
-        wj_uint(w, "count", (a >> 16) & 0x7FFFu);
+        if (stop) {
+            wj_null(w, "count");
+        } else {
+            wj_uint(w, "count", (a >> 16) & 0x7FFFu);
+        }
     } else {
         wj_null(w, "slot");
         wj_null(w, "slot_name");
@@ -2048,14 +2061,22 @@ static void conn_entry(wj_t *w, const diag_journal_entry_t *e, const ntrip_caste
             wj_null(w, "count");
         }
     }
-    if (e->kind == DIAG_EV_WIFI_DISCONNECT) {
+    if (e->kind == DIAG_EV_WIFI_DISCONNECT || stop) {
         wj_null(w, "duration_s");
+    } else {
+        wj_uint(w, "duration_s", e->b < 0 ? 0u : (uint32_t)e->b);
+    }
+    if (e->kind == DIAG_EV_WIFI_DISCONNECT) {
         wj_uint(w, "reason", a);
         wj_int(w, "rssi", e->b);
     } else {
-        wj_uint(w, "duration_s", e->b < 0 ? 0u : (uint32_t)e->b);
         wj_null(w, "reason");
         wj_null(w, "rssi");
+    }
+    if (stop) {
+        wj_str(w, "stop_reason", web_ntrip_stop_name((ntrip_stop_t)((a >> 8) & 0xFFu)));
+    } else {
+        wj_null(w, "stop_reason");
     }
     wj_obj_close(w);
 }

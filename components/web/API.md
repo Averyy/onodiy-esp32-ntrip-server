@@ -88,7 +88,7 @@ refused receiver maintenance (`receiver_session`, `live_view_output`).
 | 403 | `forbidden` (Origin or CSRF check failed, public status off), `wrong_password`, `not_on_setup_ap` |
 | 404 | `not_found`, `nothing_staged`, `no_journal`, `no_coredump`, `nothing_pending` |
 | 405 | `method_not_allowed` |
-| 409 | state conflicts: `busy`, `journal_open`, `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `same_image` |
+| 409 | state conflicts: `busy`, `journal_open`, `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `same_image`, `slot_disabled` |
 | 411 | `length_required` (uploads) |
 | 413 | `too_large` |
 | 415 | `unsupported_media_type` |
@@ -277,6 +277,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | GET | `/api/casters/{n}` | adm | One slot | ntrip_server |
 | PUT | `/api/casters/{n}` | adm | Edit slot n | `ntrip_server_set_config` |
 | PUT, DELETE | `/api/casters/{n}/ca` | adm | Store / remove the slot's CA certificate | settings `cstN/ca_pem` |
+| POST | `/api/casters/{n}/retry` | adm | Try a stopped (or waiting) slot once now | `ntrip_server_retry_slot` |
 | GET | `/api/wifi` | adm | Wi-Fi state, AP, cached scan | network |
 | PUT | `/api/wifi` | adm | Station credentials, AP password | `network_set_credentials`, settings |
 | POST | `/api/wifi/scan` | adm | Fresh scan | `network_scan_start` |
@@ -411,7 +412,8 @@ object as sections (section 7), so the UI keeps one model. Admin form:
      "today_online_s": 43200, "today_offline_s": 4, "graced_uptime_permille": 503,
      "streak_ok": true, "graced_uptime_so_far_permille": 1000, "data_rate_permille": 1000, "budget_s": 473,
      "budget_left_s": 469,
-     "onocoy_ready": true, "bytes_sent": 74000000, "lag_ms_now": 40, "next_retry_s": 0, "unreached_s": 0, "hint": ""}
+     "onocoy_ready": true, "bytes_sent": 74000000, "lag_ms_now": 40, "next_retry_s": 0, "unreached_s": 0, "hint": "",
+     "stop_reason": "none"}
   ],
   "health": {"level": "degraded", "last_step": "none", "ladder_suspended": false,
              "factory_reset_refused": false, "recovery_mode": "full", "reboot_recheck": false,
@@ -444,7 +446,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.rtcm_age_ms` | since the last CRC-valid RTCM frame (`gnss_link`), `null` = never |
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
 | `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
-| `casters[]` | every slot; the full status is in `/api/casters`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with the console's mountpoint, username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none) |
+| `casters[]` | every slot; the full status is in `/api/casters`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with the console's mountpoint, username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none); `stop_reason` why the Onocoy login guard stopped the slot (`ntrip_stop_t`; `none` unless `state` is `stopped`, section 10) |
 | `alerts[]` | health's alerts (`source: "health"`) and the station's (`source: "station"`); `config_failed` carries `retry_in_s`; `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`) |
 | `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without an enabled protected slot that is set up (`onocoy_ready`), or without a trusted clock. Information only, never a gate |
 | `health.factory_reset_refused` | a BOOT-button factory reset was refused within the last 10 min because a receiver update was running (the UI shows a notice); admin form only |
@@ -1011,14 +1013,24 @@ is `disabled`.
  "ntrip_version": 1, "tls": false, "trust": "bundle", "ca_pem_set": false,
  "mountpoint": "<console mountpoint>", "username": "<console username>", "password_set": true,
  "label": "", "v2_raw_body": false, "backoff_profile": "fast", "protected": true,
- "dup_stream_ack": false}
+ "dup_stream_ack": false, "test_onocoy": false}
 ```
 
 Passwords are never returned (`password_set` only). Every entry
 (`{"slot", "config", "status", "onocoy_ready"}`) says with `onocoy_ready`
-whether it is an Onocoy slot that is set up: host in `onocoy.com`,
-`mountpoint`, `username` and a stored password (false for every other
-slot).
+whether it is an Onocoy slot that is set up: a slot that counts as Onocoy
+(host in `onocoy.com`, or a test Onocoy slot), `mountpoint`, `username` and
+a stored password (false for every other slot).
+
+`test_onocoy` (always present) marks a **test Onocoy slot**, possible only in
+bench and QEMU builds (`CONFIG_NTRIP_TEST_ONOCOY_SLOT`, which depends on the
+bench console or the QEMU Ethernet option); in any other build it is always
+`false`, a stored mark is ignored (the slot is judged by its host) and the
+next save drops it. A test Onocoy slot counts as Onocoy in every respect
+whatever its host: `protected`, the `fast` profile, the Onocoy fields and
+wire names, `onocoy_ready`, the one-Onocoy rules (`second_onocoy`,
+`dup_stream_ack_required`) and the login guard below. So a local test caster
+(the Mac at `10.0.2.2` from QEMU, a PC on the bench) sees what Onocoy would.
 
 **Onocoy slots** hold exactly what the Onocoy console shows for a
 station's NTRIP credentials, and the UI asks for those in the console's
@@ -1043,18 +1055,21 @@ any save stores it in the current layout.
 {"state": "streaming", "reason": "none", "state_age_s": 3600, "progress_age_ms": 120,
  "connects": 3, "failures": 1, "disconnects": 2, "restarts": 0,
  "failures_by_class": {"dns": 0, "connect": 1, "tls": 0, "timeout": 0, "remote_close": 0, "write_stall": 0,
-                       "keepalive": 0, "auth": 0, "mount_busy": 0, "config": 0, "banned": 0},
+                       "keepalive": 0, "auth": 0, "mount_busy": 0, "config": 0, "banned": 0,
+                       "login_blocked": 0, "in_use": 0, "replaced": 0},
  "connected_since_unix": 1760086400, "connected_s": 3600,
  "today_online_s": 43200, "today_offline_s": 4,
  "graced_uptime_permille": 503, "streak_ok": true, "graced_uptime_so_far_permille": 1000,
  "data_rate_permille": 1000, "budget_s": 473, "budget_left_s": 469,
- "bytes_sent": 74000000, "frames_sent": 900000, "epochs_sent": 86000, "epochs_sent_today": 43200,
+ "bytes_sent": 74000000, "bytes_sent_today": 37000000, "frames_sent": 900000, "epochs_sent": 86000,
+ "epochs_sent_today": 43200,
  "frames_dropped": 0, "bytes_dropped": 0, "epochs_dropped": 0, "epochs_dropped_today": 0,
  "frames_skipped_idle": 12, "lag_drops": 0, "laps": 0, "lag_ms_now": 40, "max_lag_ms": 1000,
  "backoff_attempt": 0, "next_retry_s": 0,
  "last_status_code": 200, "last_status_line": "ICY 200 OK", "server_header": "",
  "resolved_ip": "35.207.172.57", "dns_cached_used": 0, "unreached_s": 0,
- "tls_version": null, "tls_cipher": null, "hint": "", "last_err": null}
+ "tls_version": null, "tls_cipher": null, "hint": "", "last_err": null,
+ "stop_reason": "none", "login_rejects": 0, "login_blocks": 0, "kicked_sessions": 0, "last_session_text": ""}
 ```
 
 "Today" is the current UTC day. `today_online_s` and `today_offline_s` are
@@ -1062,8 +1077,10 @@ the availability ledger's figures for the slot (section 15:
 `/api/availability` `today.up_s` and `down_s`): seconds it streamed with
 fresh RTCM, and seconds it was enabled but did not (planned time
 included); they are kept across restarts, so every "today" figure agrees
-with the others. `epochs_sent_today` and `epochs_dropped_today` are this
-start's counts (RAM; they start again at a restart). The Onocoy day figures are `null` for
+with the others. `epochs_sent_today`, `epochs_dropped_today` and
+`bytes_sent_today` (RTCM bytes, without chunk framing) are this start's
+counts for the current UTC day (RAM; they start again at a restart and at
+the UTC day change). The Onocoy day figures are `null` for
 other slots, and for the protected slot while it is disabled or not set up
 (`onocoy_ready` false): numbers for a slot that cannot stream would only
 mislead. `graced_uptime_permille` is the share of the whole day covered so
@@ -1083,7 +1100,63 @@ that data rate (the UI never shows the day in red while it is true);
 `tls_*` are `null` without TLS; `max_lag_ms` is the slot's lag
 limit; `unreached_s` the current run of failures that never reached the
 caster (DNS failures, connects that timed out or failed locally; 0 = none;
-the UI says "caster not reached for N s").
+the UI says "caster not reached for N s"); `last_session_text` the newest
+line the caster sent during a session (nothing is expected there), with
+the password, the username and an Onocoy slot's mountpoint masked (`""` =
+none since the last save).
+
+**Onocoy login guard** (slots that count as Onocoy only; standard and polite
+slots keep the rows above). A refused login from Onocoy may block logins
+from the station's whole internet connection for a while (every other
+station on it too), and two devices streaming with one credential keep
+knocking each other off, so such a slot never loops a failing login.
+Onocoy's console reasons (`too many unsuccessful logins`, `already in use`,
+`parallel connections`, `device reconnected`, `duplicate of another
+stream`, `credential is banned`, `authentication failed`, `invalid request
+in headers`) are matched case-insensitively in the reply line, in the body
+of every non-success HTTP reply and in every line received during a
+session; a match decides over the reply's generic class (the wire form of
+these texts is unknown: PROVISIONAL, like every value here). "Within the
+window" means within 300 s of this station's previous session (or start) on
+credentials the caster accepted before. Every guard delay is its entry
+x 1.0-1.2.
+
+- A refused login (`auth` or `config` reply, `authentication failed`, or an
+  unrecognised error line after the first one since the last success):
+  retry after 300 s (30 s within the window, once: a caster deploy), then
+  1800 s; the third stops the slot (`rejected`). `login_rejects` counts them,
+  the hint says "Onocoy refused the login (n of 3)", the state is
+  `auth_failed`.
+- `too many unsuccessful logins` (class `login_blocked`): 3600 s, then
+  7200 s; the third stops the slot (`login_blocked`). `login_blocks` counts
+  them; the state is `auth_failed`.
+- The credential in use (`already in use`, `parallel connections`, or
+  `409`, `Mount Point Taken`, `Already Connected`; class `in_use`): outside
+  the window, or on credentials never accepted, the slot stops at once
+  (`in_use`); within the window (the caster may still hold this station's
+  own dead session) it retries after 15, 30, 60 and 120 s, and the fifth
+  stops it.
+- Take-over: a session the caster ends within 120 s of its start counts 1,
+  a `device reconnected` or `in use` line during a session counts 2 (class
+  `replaced`); at 3 the slot stops (`kicked`). The reconnect after such a
+  session waits 5 s, then 10 s. A session of 10 min or more resets the
+  count (`kicked_sessions`). Write stalls, keepalive aborts, network loss,
+  source stalls, pauses and edits never count.
+- `duplicate of another stream`, `credential is banned`, or any other
+  `banned` reply: the slot stops at once (`duplicate`, `banned`).
+- Failures without a reply (nothing in 10 s, a close before the line) stay
+  on the `fast` transient row, but after 10 of them since the last accepted
+  login every delay is at least 300 s. Failures that never reached the
+  caster keep the flat 5 s retry; TLS failures keep their rows.
+
+A stopped slot has `state` `stopped` and a `stop_reason` (`ntrip_stop_t`;
+`none` otherwise) and makes no attempt at all, across restarts and power
+cuts (stored with its backoff record), until the user saves it, presses
+retry (`POST /api/casters/{n}/retry`) or disables it. Each stop is logged
+once and journalled (`caster_stop`, section 14). A stopped protected slot
+counts as offline in the ledger and as down for the health level, but it
+does not hold the network ladder's `protected` trigger: a Wi-Fi restart or
+a reboot cannot fix a credential.
 
 ### `PUT /api/casters/{n}` (adm)
 
@@ -1094,15 +1167,21 @@ that does not show a field cannot reset it). Output-only fields
   keeps it, but only while `host` stays the same (pointed at another host the
   slot never sends the old password there); `"clear_password": true` removes
   it.
-- `protected` is set by the server: true exactly for a host in the
-  `onocoy.com` domain. `backoff_profile` is forced to `fast` for that host
-  and to `polite` for `rtk2go.com`; elsewhere `standard` or `polite` as sent
+- `protected` is set by the server: true exactly for a slot that counts as
+  Onocoy (a host in the `onocoy.com` domain, or a test Onocoy slot).
+  `backoff_profile` is forced to `fast` for such a slot and to `polite` for
+  `rtk2go.com`; elsewhere `standard` or `polite` as sent
   (`fast` is refused there: `400 invalid_field`), or, when left out, the
   stored profile (a `fast` one left from an Onocoy host becomes
   `standard`). These host rules belong to `ntrip_server`
   (`ntrip_server_apply_host_rules()`, which every save applies too); the
   server applies them to the request only to name a refused field.
 - `dup_stream_ack`: see below.
+- `test_onocoy`: `true` only in a build with `CONFIG_NTRIP_TEST_ONOCOY_SLOT`
+  (bench and QEMU builds); elsewhere `400 invalid_field` with `field`
+  `test_onocoy` and the message `only in bench and QEMU builds`. `false` is
+  always accepted.
+- Any save clears a stopped slot's stop and the login guard's counts.
 
 Validation (`400 invalid_field` with `field`, and the rule in `message`):
 no control characters anywhere; lengths in UTF-8 bytes: `name` <= 23,
@@ -1114,6 +1193,19 @@ a password (1.0) and a username (2.0). Onocoy slots: `username`
 `[A-Za-z0-9._-]` (1.0 sends it as the mountpoint), `password` 1-63
 characters without spaces in either version; an enabled Onocoy slot needs
 `mountpoint`, `username` and a password.
+
+**RTK2go mountpoints**, checked when a slot is saved with an `rtk2go.com`
+host that is new (no stored host, or another one) or with a changed
+`mountpoint`, in this order (`400 invalid_field`, `field` `mountpoint`):
+anything but letters, digits, `_` and `-` (`RTK2go mountpoints use letters,
+digits, "_" and "-" only (no ".")`); a first character that is not a letter
+(`RTK2go mountpoints start with a letter`); an uppercase `A` first (`RTK2go
+no longer accepts new mountpoints that start with "A"`; a lowercase `a` is
+not refused); fewer than 4 or more than 20 characters (`RTK2go mountpoints
+have 4 to 20 characters`). These are the rules of RTK2go's reservation form
+for new names. A slot stored before them keeps streaming and can be
+enabled and disabled unchanged; only a new name has to follow them.
+`ntrip_server_set_config()` refuses the same saves (`ntrip_server_rtk2go_check()`).
 
 **Caster policy** (`409 caster_policy` with `reason`). The rules belong
 to `ntrip_server`: `ntrip_server_set_config()` checks them against the
@@ -1132,6 +1224,17 @@ stored slots under the same lock as the save and reports which one refused
 
 `200` with the slot's `{"slot", "config", "status"}`; only that slot
 reconnects. Also `409 safe_mode`, `409 settings_unavailable`.
+
+### `POST /api/casters/{n}/retry` (adm)
+
+The user's retry: the slot's stop (or a backoff it waits out) and the login
+guard's counts are cleared as by a save with the same settings, and it may
+try at once (the UI asks first: only after making sure no other device
+streams with the credential and the credentials match the Onocoy console,
+since every failed login counts toward Onocoy's block). Body `{}`. `202
+{"accepted": true}`; `409 slot_disabled` when the slot is not enabled;
+`409 safe_mode`. Any other suffix after the slot: `404 not_found` (`405`
+for the slot and its `ca`).
 
 ### `PUT /api/casters/{n}/ca`, `DELETE /api/casters/{n}/ca` (adm)
 
@@ -1688,6 +1791,7 @@ At most 64 entries per call, oldest first, `seq > cursor`. `time_unix`
 | `data_loss` | counter id (`diag_loss_id_t`) | increase since the previous record for that id |
 | `caster_down` | slot (bits 0-7) \| end class (`ntrip_fail_class_t`, 0 = not a caster failure; bits 8-15) \| short sessions not journalled since the previous `caster_down` (bits 16-30) | session length s |
 | `caster_up` | slot (bits 0-7) \| failed attempts since the previous session (bits 16-30) | outage s |
+| `caster_stop` | slot (bits 0-7) \| stop reason (`ntrip_stop_t`, bits 8-15): the Onocoy login guard stopped the slot until the user acts (once per stop) | 0 |
 | `wifi_up` | connect attempts during the outage | outage s |
 | `rx_maintenance` | 1 entry, 0 exit | chosen duration s (entry), time spent s (exit) |
 | `live_view` | event (bits 0-7: 1 opened, 2 extended, 3 closed, 4 satellite-in-view output on, 5 off) \| detail << 8 (closed: end reason; on/off: 0 accepted, 1 rejected, 2 no answer, 3 not sent) | opened: window s; extended: s left; closed: s open; on/off: ms the lease held RTCM back |
@@ -1698,14 +1802,14 @@ tables.
 ### `GET /api/connections`
 
 The connection history next to the ledger: the newest 64 records of
-`caster_down`, `caster_up`, `wifi_up` and `wifi_disconnect`, newest first,
-read backwards through the journal.
+`caster_down`, `caster_up`, `caster_stop`, `wifi_up` and `wifi_disconnect`,
+newest first, read backwards through the journal.
 
 ```json
 {"complete": true,
  "entries": [{"seq": 812, "time_unix": 1760000000, "uptime_s": 3600, "kind": "caster_down",
               "slot": 0, "slot_name": "Onocoy", "class": "remote_close", "count": 0, "duration_s": 3600,
-              "reason": null, "rssi": null}]}
+              "reason": null, "rssi": null, "stop_reason": null}]}
 ```
 
 | Field | Notes |
@@ -1714,9 +1818,10 @@ read backwards through the journal.
 | `time_unix` | `null` without a trusted clock then: `uptime_s` dates it after its boot |
 | `slot`, `slot_name` | caster records: the slot and its name now (`null` without one, and in safe mode); `null` for Wi-Fi |
 | `class` | `caster_down`: why the session ended (`ntrip_fail_class_t`; `none` = not a caster failure: a pause, a configuration change, a health restart, the receiver's RTCM stopping, the network going down); `null` otherwise |
-| `count` | `caster_down`: shorter sessions not journalled since the slot's previous `caster_down`; `caster_up`: failed attempts since the previous session; `wifi_up`: connect attempts during the outage; `null` for `wifi_disconnect` |
-| `duration_s` | `caster_down`: session length; `caster_up`, `wifi_up`: outage length; `null` for `wifi_disconnect` |
+| `count` | `caster_down`: shorter sessions not journalled since the slot's previous `caster_down`; `caster_up`: failed attempts since the previous session; `wifi_up`: connect attempts during the outage; `null` for `caster_stop` and `wifi_disconnect` |
+| `duration_s` | `caster_down`: session length; `caster_up`, `wifi_up`: outage length; `null` for `caster_stop` and `wifi_disconnect` |
 | `reason`, `rssi` | `wifi_disconnect`: `wifi_err_reason_t` and the RSSI at the drop; `null` otherwise |
+| `stop_reason` | `caster_stop`: why the Onocoy login guard stopped the slot (`ntrip_stop_t`); `null` otherwise |
 
 ### `GET /api/coredump`, `DELETE /api/coredump`
 
@@ -1848,7 +1953,7 @@ client stays connected): the claim works again over that AP. BOOT held
 | Action | Receiver update running | Update waiting for user | Safe mode | App update running | App trial |
 |---|---|---|---|---|---|
 | Profile save / apply / lock / re-survey | `journal_open` | `journal_open` | save ✓, others `safe_mode` | ✓ | ✓ |
-| Caster edit | ✓ | ✓ | `safe_mode` | ✓ | ✓ |
+| Caster edit, retry | ✓ | ✓ | `safe_mode` | ✓ | ✓ |
 | Wi-Fi edit, scan | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Update check | ✓ | ✓ | ✓ | `busy` | stage 1: `app_trial` |
 | App install / upload | `journal_open` | ✓ | ✓ | `busy` | stage 1, verify window: `app_trial` |
@@ -2030,10 +2135,11 @@ after it). The journal's `a` and `b` carry these C values.
 | `health_step_t` | `none`, `resync`, `link_restart`, `rescan`, `reconfigure`, `receiver_reset`, `reboot` |
 | `health_alert_t` | `power_supply`, `receiver_power`, `bands`, `profile_drift`, `heap_fragmented`, `safe_mode`, `settings_degraded`, `no_upstream`, `link_loss`, `power_lost` |
 | `health_recovery_mode_t` | `full`, `no_reboot`, `alerts_only` |
-| `ntrip_state_t` | `disabled`, `wait_network`, `wait_data`, `connecting`, `streaming`, `backoff`, `auth_failed`, `paused`, `config_error`, `banned` |
-| `ntrip_fail_class_t` | `none`, `dns`, `connect`, `tls`, `timeout`, `remote_close`, `write_stall`, `keepalive`, `auth`, `mount_busy`, `config`, `banned` |
+| `ntrip_state_t` | `disabled`, `wait_network`, `wait_data`, `connecting`, `streaming`, `backoff`, `auth_failed`, `paused`, `config_error`, `banned`, `stopped` |
+| `ntrip_fail_class_t` | `none`, `dns`, `connect`, `tls`, `timeout`, `remote_close`, `write_stall`, `keepalive`, `auth`, `mount_busy`, `config`, `banned`, `login_blocked`, `in_use`, `replaced` |
 | `ntrip_trust_t` | `bundle`, `custom_ca`, `insecure` |
 | `ntrip_backoff_profile_t` | `fast`, `standard`, `polite` |
+| `ntrip_stop_t` | `none`, `rejected`, `login_blocked`, `in_use`, `kicked`, `duplicate`, `banned` |
 | `um98x_base_mode_t` | `survey_in`, `fixed` |
 | `um98x_pos_source_t` | `none`, `survey`, `averaged`, `user` |
 | `um98x_setting_t` | `unknown`, `on`, `off` |
@@ -2062,5 +2168,5 @@ after it). The journal's `a` and `b` carry these C values.
 | `ledger_clock_t` | `none`, `sntp`, `gnss` |
 | `gnss_sys_t` | `gps`, `glonass`, `galileo`, `sbas`, `qzss`, `beidou`, `navic` |
 | `gnss_band_t` | `l1`, `l2`, `l5`, `l6`, `e5ab` |
-| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up` (1-13); `rx_maintenance` = 20, `live_view` = 21 |
+| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21 |
 | `diag_loss_id_t` | `hw_fifo`, `rx_buffer_full`, `line_errors`, `rtcm_crc`, `framer_discarded`, `hub_publish`, `baud_switch`, `rx_events_dropped`; 16 and up: caster slots |

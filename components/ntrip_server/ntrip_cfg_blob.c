@@ -32,6 +32,7 @@ size_t ntrip_cfg_encode(const ntrip_caster_cfg_t *c, uint8_t *buf, size_t cap)
     blob_put_bool(&w, c->v2_raw_body);
     blob_put_bool(&w, c->dup_stream_ack);
     blob_put_u8(&w, NTRIP_CFG_LAYOUT);   /* appended later: older records end before it */
+    blob_put_u8(&w, c->test_onocoy ? NTRIP_CFG_FLAG_TEST_ONOCOY : 0u);   /* appended later still */
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
@@ -69,6 +70,11 @@ bool ntrip_cfg_decode(const uint8_t *buf, size_t len, ntrip_caster_cfg_t *out)
     if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
         layout = blob_get_u8(&r);
     }
+    uint8_t flags = 0;
+    if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
+        flags = blob_get_u8(&r);   /* a record from before the flags byte reads as no flags */
+    }
+    c.test_onocoy = (flags & NTRIP_CFG_FLAG_TEST_ONOCOY) != 0;
     if (!blob_reader_ok(&r) || !ntrip_cfg_enums_valid(&c)) {
         ntrip_secure_zero(&c, sizeof(c));
         return false;
