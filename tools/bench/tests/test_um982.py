@@ -120,7 +120,7 @@ def test_no_versiona_answer_advises_listening_first(tmp_path, capsys, monkeypatc
     assert "No answer to VERSIONA" in out
     assert "find-baud" not in out
     assert "capture.py --receiver /dev/fake-com2 --receiver-baud 460800 --duration 20" in out
-    assert "never um982.py at that baud" in out and "still silent: stop" in out
+    assert "run neither um982.py nor bootprobe.py" in out and "still silent: stop" in out
 
 
 def test_find_baud_stops_at_a_loader_heard_while_listening(capsys):
@@ -148,9 +148,60 @@ def test_find_baud_asks_only_after_listening_everywhere(capsys):
 
 def test_main_with_find_baud_at_a_loader_exits_3(tmp_path, capsys, monkeypatch):
     real = um982.find_baud
-    monkeypatch.setattr(um982, "find_baud", lambda dev, out, opener: real(dev, out, opener=opener, listen_s=0.2))
+    monkeypatch.setattr(um982, "find_baud", lambda dev, out, opener, **kw: real(dev, out, opener=opener, listen_s=0.2,
+                                                                                **kw))
     ports: list[ScriptedPort] = []
     code = run(tmp_path, "--find-baud", opener=opener_for(ports, {115200: LOADER}))
     assert code == um982.EXIT_LOADER
     assert len(ports) == 1 and ports[0].written == []
     assert "loader was heard at 115200" in capsys.readouterr().out
+
+
+def test_advice_for_a_receiver_at_its_loader_never_names_bootprobe():
+    # bootprobe cannot leave a loader the receiver already sits at: it only listens 2 s (a prompt printed
+    # earlier is not heard), then sends VERSIONA at the application baud. Power-cycle only.
+    steps = um982.post_failure_steps("/dev/fake-com2")
+    loader_step = next(s for s in steps if "boot>" in s)
+    assert "power-cycle" in loader_step
+    assert "bootprobe" in loader_step  # named only to rule it out
+    assert "neither um982.py nor bootprobe.py" in loader_step
+    assert "sends 6" not in " ".join(steps)
+    assert "sends 6" not in (um982.__doc__ or "") and "(or bootprobe" not in (um982.__doc__ or "")
+    assert "bootprobe" not in " ".join(um982.loader_advice("/dev/fake-com2", 460800, sent_at=[]))
+
+
+class LoaderAfterQuery(ScriptedPort):
+    """A receiver that drops to its loader once VERSIONA reached it at this baud."""
+
+    def write(self, data: bytes) -> int:
+        n = super().write(data)
+        if b"VERSIONA" in data:
+            with self.lock:
+                self.rx += LOADER
+        return n
+
+
+def test_find_baud_at_a_loader_in_the_ask_phase_says_what_was_sent(tmp_path, capsys, monkeypatch):
+    real = um982.find_baud
+    monkeypatch.setattr(um982, "find_baud", lambda dev, out, opener, **kw: real(dev, out, opener=opener, listen_s=0.05,
+                                                                                **kw))
+    ports: list[ScriptedPort] = []
+    target = um982.FIND_BAUDS[3]
+
+    def opener(device, baud, timeout=0.05):
+        cls = LoaderAfterQuery if baud == target and len(ports) >= len(um982.FIND_BAUDS) else ScriptedPort
+        p = cls(baud, timeout=timeout)
+        ports.append(p)
+        return p
+
+    code = run(tmp_path, "--find-baud", opener=opener)
+    assert code == um982.EXIT_LOADER
+    asked = [p.baudrate for p in ports[len(um982.FIND_BAUDS):] if p.written]
+    assert asked == list(um982.FIND_BAUDS[:4])
+    out = capsys.readouterr().out
+    assert "nothing sent" not in out and "Nothing was sent" not in out
+    for b in asked:
+        assert str(b) in out
+    assert "VERSIONA was sent at" in out
+    summary = next((tmp_path / "logs").glob("*-um982*")) / "summary.txt"
+    assert "Nothing was sent" not in summary.read_text()

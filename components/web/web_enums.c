@@ -145,6 +145,7 @@ static const char *const s_ntrip_fail[] = {
     [NTRIP_FAIL_LOGIN_BLOCKED] = "login_blocked",
     [NTRIP_FAIL_IN_USE] = "in_use",
     [NTRIP_FAIL_REPLACED] = "replaced",
+    [NTRIP_FAIL_LOCAL] = "local",
 };
 _Static_assert(COUNT(s_ntrip_fail) == NTRIP_FAIL_CLASS_COUNT, "caster failure classes moved: update the table");
 

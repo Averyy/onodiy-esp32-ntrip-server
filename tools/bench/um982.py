@@ -25,16 +25,17 @@ garbled bytes may read as menu keys). There, listen first (below).
 
 Nothing is sent at all when the listen-first window (or the baud search's
 listening) hears the receiver's loader ("boot>" or its menu text): the
-receiver waits at its loader, and only a power-cycle (or bootprobe, which
-sends "6" only at a menu that numbers it) brings it back. Exit status 3.
+receiver waits at its loader, and only a power-cycle brings it back
+(bootprobe cannot: it needs the application, and at a loader it would only
+send VERSIONA). Exit status 3. When the baud search's ask phase hears the
+loader, it stops too (exit 3) and names every baud VERSIONA was sent at.
 
 After a failed or interrupted receiver update, or a bootprobe run that did
 not end with exit 0, or when the receiver does not answer:
   1. listen only: uv run capture.py --receiver <port> --receiver-baud 460800 --duration 20,
      and the same with --receiver-baud 115200;
-  2. "boot>" seen: the receiver is at its loader: power-cycle it (or run
-     bootprobe, which sends 6 only at a menu that numbers it); never um982.py
-     at that baud;
+  2. "boot>" seen: the receiver is at its loader: power-cycle it; run neither
+     um982.py nor bootprobe.py until the application is heard;
   3. application output seen at a baud: uv run um982.py --port <port> --baud <that baud>;
   4. nothing at either: power-cycle, then step 1 again; still silent: stop.
 
@@ -91,7 +92,8 @@ CONFIG_KEYS = ("SIGNALGROUP", "COM1", "COM2", "COM3", "RTCMB1CB2A", "BASEANTENNA
 EXIT_OK = 0
 EXIT_NOT_CONFIRMED = 1
 EXIT_NO_PORT = 2       # cannot open the port, or no baud answered
-EXIT_LOADER = 3        # the receiver's loader was heard: nothing was sent
+EXIT_LOADER = 3        # the receiver's loader was heard: nothing more was sent (the summary names any VERSIONA
+                       # the baud search's ask phase sent before)
 
 # The receiver's loader: its prompt (no line end) and words of its banner and menu.
 LOADER_PROMPT = b"boot>"
@@ -112,17 +114,23 @@ def post_failure_steps(port: str = "<port>") -> list[str]:
         "What to do (listen first; send nothing until the application is heard):",
         f"  1. listen only: `uv run capture.py --receiver {port} --receiver-baud 460800 --duration 20`, "
         "and the same with --receiver-baud 115200;",
-        "  2. \"boot>\" seen: the receiver is at its loader: power-cycle it (or run bootprobe, which sends 6 only "
-        "at a menu that numbers it); never um982.py at that baud;",
+        "  2. \"boot>\" seen: the receiver is at its loader: power-cycle it; run neither um982.py nor bootprobe.py "
+        "until the application is heard (bootprobe needs the application: at a loader it would only send VERSIONA);",
         f"  3. application output seen at a baud: `uv run um982.py --port {port} --baud <that baud>`;",
         "  4. nothing at either: power-cycle, then step 1 again; still silent: stop.",
     ]
 
 
-def loader_advice(port: str, baud: int) -> list[str]:
+def loader_advice(port: str, baud: int, sent_at: list[int] | None = None) -> list[str]:
+    """sent_at: the bauds the baud search's ask phase sent VERSIONA at before the loader was heard (none: nothing
+    was sent at all)."""
+    if sent_at:
+        sent = (f"Before it was heard, \"\\r\\nVERSIONA\\r\\n\" was sent at {', '.join(str(b) for b in sent_at)} "
+                "(the baud search's ask phase): the loader may have received those bytes; nothing else was sent.")
+    else:
+        sent = "Nothing was sent."
     return [
-        f"The receiver's loader was heard at {baud} (\"boot>\" or its menu): it waits at its loader. "
-        "Nothing was sent.",
+        f"The receiver's loader was heard at {baud} (\"boot>\" or its menu): it waits at its loader. " + sent,
         "What to do: power-cycle the receiver (unplug the board: both USB-C cables), then listen first "
         f"(`uv run capture.py --receiver {port} --receiver-baud 460800 --duration 20`, and at 115200) and use "
         "um982.py only at a baud where the application is heard.",
@@ -178,12 +186,16 @@ def describe_reply(reply) -> str:
 FIND_BAUDS = (115200, 460800, 921600, 230400, 57600, 38400, 19200, 9600)
 
 
-def find_baud(device: str, out: Out, opener=open_serial, listen_s: float = 2.0) -> int | None:
+def find_baud(device: str, out: Out, opener=open_serial, listen_s: float = 2.0,
+              sent_at: list[int] | None = None) -> int | None:
     """Listen at each baud, then ask VERSIONA at each (the baud search, only when asked for).
 
-    The listen phase stops the whole search at the loader's text: then
-    nothing is sent at all (the ask phase never runs) and the result is
-    -baud (the baud it was heard at)."""
+    The loader's text stops the whole search, the result is then -baud (the
+    baud it was heard at). Heard while listening: nothing was sent at all
+    (the ask phase never runs). Heard in the ask phase: VERSIONA went out at
+    that baud and every one before it; sent_at (when given) gets every baud
+    VERSIONA was sent at."""
+    sent: list[int] = sent_at if sent_at is not None else []
     for phase in ("listen", "ask"):
         for baud in FIND_BAUDS:
             ser = opener(device, baud, timeout=0.05)
@@ -192,6 +204,7 @@ def find_baud(device: str, out: Out, opener=open_serial, listen_s: float = 2.0) 
                 if phase == "ask":
                     ser.write(b"\r\nVERSIONA\r\n")
                     ser.flush()
+                    sent.append(baud)
                 end = time.time() + (listen_s if phase == "listen" else 2.0)
                 items = []
                 raw = bytearray()
@@ -201,7 +214,11 @@ def find_baud(device: str, out: Out, opener=open_serial, listen_s: float = 2.0) 
                         raw += data
                         items += sp.feed(data)
                 if loader_heard(raw):
-                    out(f"  {phase} @ {baud}: the receiver's loader (\"boot>\" or its menu): stopped, nothing sent")
+                    if phase == "listen":
+                        out(f"  {phase} @ {baud}: the receiver's loader (\"boot>\" or its menu): stopped, nothing sent")
+                    else:
+                        out(f"  {phase} @ {baud}: the receiver's loader (\"boot>\" or its menu) after VERSIONA: stopped, "
+                            f"nothing more sent (VERSIONA was sent at {', '.join(str(b) for b in sent)})")
                     return -baud
                 good = [i for i in items if i.kind == "rtcm" or (i.kind == "text" and i.check not in ("bad", "none"))]
                 out(f"  {phase} @ {baud}: {len(good)} valid item(s)")
@@ -567,9 +584,10 @@ def main(argv: list[str] | None = None, opener=open_serial) -> int:
 
     if args.find_baud:
         out("finding the baud (listen first, then VERSIONA at each candidate):")
-        found = find_baud(args.port, out, opener=opener)
+        sent_at: list[int] = []
+        found = find_baud(args.port, out, opener=opener, sent_at=sent_at)
         if found is not None and found < 0:
-            return done(EXIT_LOADER, loader_advice(args.port, -found))
+            return done(EXIT_LOADER, loader_advice(args.port, -found, sent_at=sent_at))
         if not found:
             return done(EXIT_NO_PORT, ["no baud answered; check the cable/port (uv run ports.py) and that the "
                                        "receiver is powered"] + post_failure_steps(args.port))

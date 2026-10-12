@@ -122,6 +122,7 @@ typedef enum {
     NTRIP_CLS_LOGIN_BLOCKED,     /**< Onocoy: too many unsuccessful logins (guard slots) */
     NTRIP_CLS_IN_USE,            /**< Onocoy: the credential is in use by another stream (guard slots) */
     NTRIP_CLS_REPLACED,          /**< Onocoy: another device logged in with the credential (guard slots) */
+    NTRIP_CLS_LOCAL,             /**< a send or receive failed on this station's side (memory, no or stale errno) */
     NTRIP_CLS_COUNT,
 } ntrip_cls_t;
 
@@ -524,10 +525,17 @@ uint32_t ntrip_backoff_row_min_ms(ntrip_prof_t prof, ntrip_row_t row);
  * "credentials that worked" are the ones the caster last accepted.
  *
  *   - Login rejection (a reply that is AUTH or CONFIG, an Onocoy
- *     "authentication failed" text, or an unrecognised error line after the
- *     first one in a run): 1st -> 300 s (30 s inside the window on
+ *     "authentication failed" text in the reply or during the session, or
+ *     an unrecognised "Error <n>" line after the first one in a run; 500,
+ *     503 and "Too many sources" are the caster's own trouble and keep the
+ *     fast TRANSIENT row): 1st -> 300 s (30 s inside the window on
  *     credentials that worked: one cheap chance after a caster deploy),
  *     2nd -> 1800 s, 3rd -> STOPPED (rejected).
+ *   - The counts below (rejections, blocks, in use, the free error line,
+ *     the run without a reply) belong to an incident that only a healthy
+ *     session ends (NTRIP_HEALTHY_SESSION_MS with NTRIP_HEALTHY_SESSION_B
+ *     sent), never the caster's acceptance alone: Onocoy may accept a
+ *     login and end it at once with a reason.
  *   - "Too many unsuccessful logins": 3600 s, 7200 s, the 3rd -> STOPPED.
  *   - Credential in use ("already in use", "parallel connections", or 409,
  *     "Mount Point Taken", "Already Connected"): outside the window or on
@@ -544,14 +552,18 @@ uint32_t ntrip_backoff_row_min_ms(ntrip_prof_t prof, ntrip_row_t row);
  *   - Duplicate stream or banned (Onocoy's texts, or a generic "banned"
  *     reply) -> STOPPED at once.
  *   - Caster-reaching failures without any reply (no line in time, a close
- *     before the newline) stay on the fast TRANSIENT row, but after 10 since
- *     the last success every delay is at least 300 s until a success or the
- *     user acts (a silent close may itself be a refused login).
+ *     before the newline that names no Onocoy reason) stay on the fast
+ *     TRANSIENT row, but after 10 since the last healthy session every
+ *     delay is at least 300 s until a healthy session or the user acts (a
+ *     silent close may itself be a refused login); a restart waits the 300 s
+ *     before its first attempt too.
  *   - Failures that never reached the caster keep the flat 5 s retry and
  *     never touch the guard's counts; TLS failures (no login sent) keep
  *     their rows.
  *   - STOPPED: no attempt at all, across restarts (backoff record version
  *     3), until the user saves the slot, retries it or disables it.
+ *   - Every count is kept across restarts (backoff record version 4), so a
+ *     reboot loop never restarts a ladder.
  *
  * PROVISIONAL, every value: Onocoy documents neither its login block (length,
  * whether attempts extend it) nor how it ends a session that another device
@@ -570,7 +582,7 @@ uint32_t ntrip_backoff_row_min_ms(ntrip_prof_t prof, ntrip_row_t row);
 #define NTRIP_ONO_KICK_STOP_SCORE      3u       /**< the score that stops the slot (PROVISIONAL) */
 #define NTRIP_ONO_KICK_S               { 5u, 10u }   /**< reconnect after a scored session: score 1, score 2 (PROVISIONAL) */
 #define NTRIP_ONO_LINE_TRANSIENT_FREE  1u       /**< unrecognised error lines per run on the TRANSIENT row (PROVISIONAL) */
-#define NTRIP_ONO_SILENT_RUN           10u      /**< no-reply failures since the last success ... (PROVISIONAL) */
+#define NTRIP_ONO_SILENT_RUN           10u      /**< no-reply failures since the last healthy session ... (PROVISIONAL) */
 #define NTRIP_ONO_SILENT_FLOOR_S       300u     /**< ... after which every delay is at least this (PROVISIONAL) */
 
 /* ---- Per-slot state machine --------------------------------------------------------- */
@@ -624,7 +636,32 @@ typedef struct {
     bool refused;                /**< the caster's host refused the TCP connect (a reset): it was reached, no connection */
     bool replied;                /**< a reply line or HTTP status arrived (a login reply) */
     uint8_t onocoy;              /**< ntrip_onocoy_reason_t: the reply's, or for a session end the session's */
+    uint8_t rule;                /**< a reply: the verdict's rule (ntrip_verdict_t); 0 otherwise */
 } ntrip_failure_t;
+
+/** Rule of a plain-text "Error <n> ..." reply line (the generic table's TRANSIENT row). */
+#define NTRIP_RULE_ERROR_LINE 12u
+
+/**
+ * The failure a login reply that was not a success makes, exactly as the
+ * server hands it to ntrip_sm_failed: reached, the verdict's class, row,
+ * rule and Onocoy reason; replied unless no line arrived in time or the
+ * caster closed before it ended (rule 17), except that a partial line that
+ * names an Onocoy reason is a reply. On a guard slot the class is the
+ * guard's (ntrip_guard_class).
+ */
+ntrip_failure_t ntrip_reply_failure(const ntrip_verdict_t *v, bool guard);
+
+/**
+ * The class of a send or receive that failed on an open connection, from
+ * its errno: ECONNRESET, EPIPE, ENOTCONN -> REMOTE_CLOSE (the caster's side
+ * ended it); ECONNABORTED, ETIMEDOUT -> KEEPALIVE (lwIP gave up on the
+ * peer); anything else, 0 included (a stale or missing errno, memory) ->
+ * LOCAL. Only REMOTE_CLOSE can score as a take-over on a guard slot.
+ * PROVISIONAL: lwIP's errno for each way a session ends, to be confirmed on
+ * hardware.
+ */
+ntrip_cls_t ntrip_errno_class(int err);
 
 /**
  * The failure never reached the caster: a failed name lookup (no cached
@@ -675,18 +712,21 @@ typedef struct {
     uint32_t saved_reached;      /**< polite: caster-reaching failures as last persisted */
     bool saved_hourly;
     bool saved_dirty;            /**< good_hash changed since the last write */
-    /* the Onocoy login guard (cfg.onocoy_guard) */
-    uint8_t rejects;             /**< login rejections since the last success (the 3rd stops) */
-    uint8_t blocks;              /**< "too many unsuccessful logins" since the last success (the 3rd stops) */
-    uint8_t inuse;               /**< "in use" replies inside the window since the last success (the 5th stops) */
+    /* the Onocoy login guard (cfg.onocoy_guard); "since the last healthy session" */
+    uint8_t rejects;             /**< login rejections (the 3rd stops) */
+    uint8_t blocks;              /**< "too many unsuccessful logins" (the 3rd stops) */
+    uint8_t inuse;               /**< "in use" replies inside the window (the 5th stops) */
     uint8_t kick_score;          /**< take-over score (3 stops); a session of 10 min or more resets it */
     bool line_transient_used;    /**< the free TRANSIENT retry after an unrecognised error line is used */
-    uint8_t silent_run;          /**< caster-reaching failures without a reply since the last success */
+    uint8_t silent_run;          /**< caster-reaching failures without a reply */
     ntrip_stop_t stop;           /**< NONE, or why the slot stopped */
     uint8_t saved_rejects;       /**< guard counts as last persisted */
     uint8_t saved_blocks;
     uint8_t saved_kick;
     ntrip_stop_t saved_stop;
+    uint8_t saved_inuse;
+    uint8_t saved_silent;
+    bool saved_line;
 } ntrip_sm_t;
 
 /** Persisted long-backoff record. */
@@ -703,9 +743,13 @@ typedef struct {
     uint8_t blocks;              /**< guard: "too many unsuccessful logins" (version 3) */
     uint8_t kick_score;          /**< guard: take-over score, at most the stop score (version 3) */
     ntrip_stop_t stop;           /**< guard: why the slot stopped (version 3) */
+    uint8_t inuse;               /**< guard: "in use" replies, at most the stop count (version 4) */
+    uint8_t silent_run;          /**< guard: failures without a reply, at most NTRIP_ONO_SILENT_RUN (version 4) */
+    bool line_transient_used;    /**< guard: the free retry after an unrecognised error line is used (version 4) */
 } ntrip_backoff_rec_t;
 
-#define NTRIP_BACKOFF_REC_VERSION 3u   /**< versions 1 (no `reached`) and 2 (no guard fields) are still read */
+#define NTRIP_BACKOFF_REC_VERSION 4u   /**< versions 1 (no `reached`), 2 (no guard fields) and 3 (no in-use,
+                                            no-reply or error-line counts) are still read */
 #define NTRIP_BACKOFF_REC_MAX     32u
 
 void ntrip_sm_init(ntrip_sm_t *sm, const ntrip_sm_cfg_t *cfg, uint32_t cred_hash, uint32_t now_ms);
@@ -723,11 +767,11 @@ void ntrip_sm_connecting(ntrip_sm_t *sm, uint32_t now_ms);
 /**
  * The caster accepted the request (state STREAMING). A success: the polite
  * hourly limit and its count of caster-reaching failures end here; the
- * attempt count itself waits for a healthy session.
+ * attempt count and the login guard's counts wait for a healthy session.
  */
 void ntrip_sm_connected(ntrip_sm_t *sm, uint32_t now_ms);
 
-/** Bytes accepted by the socket; a session that becomes healthy resets the backoff. */
+/** Bytes accepted by the socket; a session that becomes healthy resets the backoff and the guard's incident. */
 void ntrip_sm_sent(ntrip_sm_t *sm, size_t bytes, uint32_t now_ms);
 
 /**
@@ -772,9 +816,10 @@ uint32_t ntrip_sm_unreached_ms(const ntrip_sm_t *sm, uint32_t now_ms);
  * CONFIG, BANNED) or its step (bounded: once the row's last entry repeats,
  * further failures change nothing), the hourly limit, a polite slot's count
  * of caster-reaching failures (up to the hourly limit), the last-good
- * credentials, or the guard's rejections, blocks, take-over score or stop
- * (bounded: each stops changing at its stop value). So a reboot never puts
- * a slot back to an earlier step.
+ * credentials, or the guard's rejections, blocks, in-use count, take-over
+ * score, stop, run without a reply or used error line (bounded: each stops
+ * changing at its stop or floor value). So a reboot never puts a slot back
+ * to an earlier step.
  */
 bool ntrip_sm_persist_due(const ntrip_sm_t *sm);
 
@@ -789,7 +834,9 @@ void ntrip_sm_persist_done(ntrip_sm_t *sm);
  * can never shorten the escalation; the stored count of caster-reaching
  * failures carries on toward the hourly limit. A guard slot keeps its stop
  * (STOPPED, no attempt) and its counts, and waits at least the full entry of
- * a pending guard delay (a rejection's 300 s, not the 30 s variant).
+ * a pending guard delay (a rejection's 300 s, not the 30 s variant), and
+ * the 300 s floor before its first attempt once its run without a reply
+ * reached NTRIP_ONO_SILENT_RUN.
  */
 void ntrip_sm_restore(ntrip_sm_t *sm, const ntrip_backoff_rec_t *rec, uint32_t now_ms);
 

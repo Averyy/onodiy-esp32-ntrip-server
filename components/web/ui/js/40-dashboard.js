@@ -267,7 +267,10 @@ function alertText(a) {
   const table = a.source === 'station' ? L.salert : L.halert;
   const t = table[a.id];
   let title = t ? t[0] : a.id, text = t ? t[1] : '';
-  if (a.id === 'config_failed' && a.retry_in_s) text += ' Next try in ' + fmt.dur(a.retry_in_s) + '.';
+  if (a.id === 'config_failed') {
+    text += ' ' + (a.auto_retry === false ? L.configRetry.user :
+      L.configRetry.auto + (a.retry_in_s ? ' Next try in ' + fmt.dur(a.retry_in_s) + '.' : ''));
+  }
   if (a.source === 'station' && a.id === 'no_receiver') text = noReceiverText(a);
   return [title, text];
 }

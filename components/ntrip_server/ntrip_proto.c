@@ -4,6 +4,7 @@
  */
 #include "ntrip_proto.h"
 
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -1046,6 +1047,9 @@ void ntrip_reply_end(ntrip_reply_t *r, bool eof)
         r->line[r->line_len] = '\0';
         r->verdict = fail(eof ? NTRIP_CLS_REMOTE_CLOSE : NTRIP_CLS_TIMEOUT, NTRIP_ROW_TRANSIENT,
                           NTRIP_HINT_NO_REPLY, 17);
+        /* A line the caster ended without a line end (or did not finish in
+         * time) may still name Onocoy's reason: its wire form is unknown. */
+        r->verdict.onocoy_reason = (uint8_t)ntrip_onocoy_reason(r->line, r->line_len);
         finalize(r);
         break;
     case NTRIP_RP_HEADERS:
@@ -1345,6 +1349,40 @@ ntrip_cls_t ntrip_guard_class(const ntrip_failure_t *f)
     }
 }
 
+ntrip_failure_t ntrip_reply_failure(const ntrip_verdict_t *v, bool guard)
+{
+    ntrip_failure_t f;
+    memset(&f, 0, sizeof(f));
+    f.cls = v->cls;
+    f.row = v->row;
+    f.reached_caster = true;
+    f.mount_ambiguous = v->mount_ambiguous;
+    f.onocoy = v->onocoy_reason;
+    f.rule = v->rule;
+    /* rule 17: no line in time, or closed before it ended; a partial line
+     * that names Onocoy's reason is the caster's answer all the same. */
+    f.replied = v->rule != 17 || v->onocoy_reason != NTRIP_ONO_NONE;
+    if (guard) {
+        f.cls = ntrip_guard_class(&f);   /* the class Onocoy's reason names */
+    }
+    return f;
+}
+
+ntrip_cls_t ntrip_errno_class(int err)
+{
+    switch (err) {
+    case ECONNRESET:
+    case EPIPE:
+    case ENOTCONN:
+        return NTRIP_CLS_REMOTE_CLOSE;   /* the caster's side reset or closed it */
+    case ECONNABORTED:
+    case ETIMEDOUT:
+        return NTRIP_CLS_KEEPALIVE;      /* lwIP gave up on the peer (keepalive, retransmissions) */
+    default:
+        return NTRIP_CLS_LOCAL;          /* this station's own failure, or no errno to tell: never a take-over */
+    }
+}
+
 static void reset_streaks(ntrip_sm_t *sm)
 {
     sm->attempt = 0;
@@ -1354,7 +1392,7 @@ static void reset_streaks(ntrip_sm_t *sm)
     sm->busy_active = false;
 }
 
-/* The caster accepted a login: the guard's incident is over (the take-over score stays). */
+/* A healthy session (or the user): the guard's incident is over (the take-over score stays). */
 static void reset_guard_incident(ntrip_sm_t *sm)
 {
     sm->rejects = 0;
@@ -1373,6 +1411,7 @@ static void check_healthy(ntrip_sm_t *sm, uint32_t now)
     if (!sm->session_healthy && len >= NTRIP_HEALTHY_SESSION_MS && sm->session_bytes >= NTRIP_HEALTHY_SESSION_B) {
         sm->session_healthy = true;
         reset_streaks(sm);
+        reset_guard_incident(sm);
     }
     if (sm->kick_score != 0 && len >= NTRIP_ONO_KICK_RESET_S * 1000u) {
         sm->kick_score = 0;   /* a long session: whatever ended the earlier ones has stopped */
@@ -1488,10 +1527,11 @@ void ntrip_sm_connected(ntrip_sm_t *sm, uint32_t now_ms)
     sm->busy_active = false;
     sm->unreached_active = false;
     /* The caster accepted us: the hourly limit ("until a success") and the
-     * run of consecutive caster-reaching failures end. */
+     * run of consecutive caster-reaching failures end. The login guard's
+     * incident does not: Onocoy may accept a login and end the session at
+     * once with a reason, so only a healthy session ends it (check_healthy). */
     sm->hourly = false;
     sm->reached_streak = 0;
-    reset_guard_incident(sm);
     if (!sm->good_valid || sm->good_hash != sm->cred_hash) {
         sm->good_valid = true;
         sm->good_hash = sm->cred_hash;
@@ -1631,12 +1671,15 @@ static bool guard_failed(ntrip_sm_t *sm, const ntrip_failure_t *f, bool was_sess
     bool window_worked = (uint32_t)(now - sm->window_start_ms) < sm->cfg.auth_window_ms && sm->good_valid &&
                          sm->good_hash == sm->cred_hash;
 
+    /* f->cls may be the raw class or the guard's already (the server counts
+     * and logs the guard's): every test below is on the guard's class. */
+
     /* A duplicate stream or a ban: going on risks the account-wide penalty. */
     if (why == NTRIP_ONO_DUPLICATE) {
         *d = guard_stop(sm, NTRIP_STOP_DUPLICATE, cls, NTRIP_ROW_BANNED, now);
         return true;
     }
-    if (why == NTRIP_ONO_BANNED || f->cls == NTRIP_CLS_BANNED) {
+    if (why == NTRIP_ONO_BANNED || cls == NTRIP_CLS_BANNED) {
         *d = guard_stop(sm, NTRIP_STOP_BANNED, NTRIP_CLS_BANNED, NTRIP_ROW_BANNED, now);
         return true;
     }
@@ -1653,8 +1696,8 @@ static bool guard_failed(ntrip_sm_t *sm, const ntrip_failure_t *f, bool was_sess
         uint32_t score = 0;
         if (why == NTRIP_ONO_REPLACED || why == NTRIP_ONO_IN_USE) {
             score = 2;   /* this station never opens a second session: another device logged in */
-        } else if (f->cls == NTRIP_CLS_REMOTE_CLOSE && session_ms < NTRIP_ONO_KICK_SHORT_S * 1000u) {
-            score = 1;
+        } else if (cls == NTRIP_CLS_REMOTE_CLOSE && session_ms < NTRIP_ONO_KICK_SHORT_S * 1000u) {
+            score = 1;   /* EOF or a reset from the caster's side; our own failures (LOCAL, TLS) never score */
         }
         if (score == 0) {
             return false;   /* our own drop or a long session: the fast TRANSIENT row */
@@ -1672,19 +1715,25 @@ static bool guard_failed(ntrip_sm_t *sm, const ntrip_failure_t *f, bool was_sess
     if (!f->replied) {
         /* No login reply: a transport failure on the TRANSIENT row. A silent
          * close after the request may itself be a refused login. */
-        if (f->reached_caster && !f->refused && f->cls != NTRIP_CLS_TLS && f->row == NTRIP_ROW_TRANSIENT &&
-            sm->silent_run < UINT8_MAX) {
+        if (f->reached_caster && !f->refused && cls != NTRIP_CLS_TLS && cls != NTRIP_CLS_LOCAL &&
+            f->row == NTRIP_ROW_TRANSIENT && sm->silent_run < UINT8_MAX) {
             sm->silent_run++;
         }
         return false;
     }
-    if (why == NTRIP_ONO_IN_USE || why == NTRIP_ONO_REPLACED || f->cls == NTRIP_CLS_MOUNT_BUSY) {
+    /* In use: Onocoy's text, or 409 / "Mount Point Taken" / "Already Connected" (IN_USE as the guard's class). */
+    if (cls == NTRIP_CLS_IN_USE || cls == NTRIP_CLS_REPLACED) {
         *d = guard_in_use(sm, window_worked, now, rnd);
         return true;
     }
-    if (f->row == NTRIP_ROW_TRANSIENT && NTRIP_ONO_LINE_TRANSIENT_FREE > 0u && !sm->line_transient_used) {
-        sm->line_transient_used = true;   /* one unrecognised error line per run: the TRANSIENT row */
-        return false;
+    if (f->row == NTRIP_ROW_TRANSIENT) {
+        if (f->rule != NTRIP_RULE_ERROR_LINE) {
+            return false;   /* 500, 503, "Too many sources": the caster's own trouble, the TRANSIENT row */
+        }
+        if (NTRIP_ONO_LINE_TRANSIENT_FREE > 0u && !sm->line_transient_used) {
+            sm->line_transient_used = true;   /* one unrecognised error line per run: the TRANSIENT row */
+            return false;
+        }
     }
     *d = guard_reject(sm, window_worked, now, rnd);
     return true;
@@ -1845,13 +1894,26 @@ static uint8_t kick_key(const ntrip_sm_t *sm)
     return sm->kick_score < NTRIP_ONO_KICK_STOP_SCORE ? sm->kick_score : (uint8_t)NTRIP_ONO_KICK_STOP_SCORE;
 }
 
+/* The in-use count as stored: it stops changing at the stop count. */
+static uint8_t inuse_key(const ntrip_sm_t *sm)
+{
+    return sm->inuse < NTRIP_ONO_INUSE_STOP ? sm->inuse : (uint8_t)NTRIP_ONO_INUSE_STOP;
+}
+
+/* The run without a reply as stored: it stops changing once the floor applies. */
+static uint8_t silent_key(const ntrip_sm_t *sm)
+{
+    return sm->silent_run < NTRIP_ONO_SILENT_RUN ? sm->silent_run : (uint8_t)NTRIP_ONO_SILENT_RUN;
+}
+
 bool ntrip_sm_persist_due(const ntrip_sm_t *sm)
 {
     ntrip_row_t row = long_row(sm->row);
     return row != sm->saved_row || long_step(sm->cfg.profile, row, sm->attempt) != sm->saved_step ||
            sm->hourly != sm->saved_hourly || reached_key(sm) != sm->saved_reached || sm->saved_dirty ||
            sm->rejects != sm->saved_rejects || sm->blocks != sm->saved_blocks || kick_key(sm) != sm->saved_kick ||
-           sm->stop != sm->saved_stop;
+           sm->stop != sm->saved_stop || inuse_key(sm) != sm->saved_inuse || silent_key(sm) != sm->saved_silent ||
+           sm->line_transient_used != sm->saved_line;
 }
 
 void ntrip_sm_persist_get(const ntrip_sm_t *sm, uint32_t now_ms, ntrip_backoff_rec_t *out)
@@ -1874,6 +1936,9 @@ void ntrip_sm_persist_get(const ntrip_sm_t *sm, uint32_t now_ms, ntrip_backoff_r
     out->blocks = sm->blocks;
     out->kick_score = kick_key(sm);
     out->stop = sm->stop;
+    out->inuse = inuse_key(sm);
+    out->silent_run = silent_key(sm);
+    out->line_transient_used = sm->line_transient_used;
 }
 
 void ntrip_sm_persist_done(ntrip_sm_t *sm)
@@ -1887,6 +1952,9 @@ void ntrip_sm_persist_done(ntrip_sm_t *sm)
     sm->saved_blocks = sm->blocks;
     sm->saved_kick = kick_key(sm);
     sm->saved_stop = sm->stop;
+    sm->saved_inuse = inuse_key(sm);
+    sm->saved_silent = silent_key(sm);
+    sm->saved_line = sm->line_transient_used;
 }
 
 void ntrip_sm_restore(ntrip_sm_t *sm, const ntrip_backoff_rec_t *rec, uint32_t now_ms)
@@ -1910,16 +1978,25 @@ void ntrip_sm_restore(ntrip_sm_t *sm, const ntrip_backoff_rec_t *rec, uint32_t n
         sm->kick_score = rec->kick_score < NTRIP_ONO_KICK_STOP_SCORE ? rec->kick_score
                                                                       : (uint8_t)NTRIP_ONO_KICK_STOP_SCORE;
         sm->stop = rec->stop < NTRIP_STOP_COUNT ? rec->stop : NTRIP_STOP_NONE;
+        sm->inuse = rec->inuse < NTRIP_ONO_INUSE_STOP ? rec->inuse : (uint8_t)NTRIP_ONO_INUSE_STOP;
+        sm->silent_run = rec->silent_run < NTRIP_ONO_SILENT_RUN ? rec->silent_run : (uint8_t)NTRIP_ONO_SILENT_RUN;
+        sm->line_transient_used = rec->line_transient_used;
         sm->saved_rejects = sm->rejects;
         sm->saved_blocks = sm->blocks;
         sm->saved_kick = kick_key(sm);
         sm->saved_stop = sm->stop;
+        sm->saved_inuse = inuse_key(sm);
+        sm->saved_silent = silent_key(sm);
+        sm->saved_line = sm->line_transient_used;
     } else {
         /* A stop or a count stored for a guard slot: the next write drops it. */
         sm->saved_rejects = rec->rejects;
         sm->saved_blocks = rec->blocks;
         sm->saved_kick = rec->kick_score;
         sm->saved_stop = rec->stop;
+        sm->saved_inuse = rec->inuse;
+        sm->saved_silent = rec->silent_run;
+        sm->saved_line = rec->line_transient_used;
     }
     if (sm->stop != NTRIP_STOP_NONE) {
         /* Stopped before the restart: still stopped, nothing pending. */
@@ -1927,6 +2004,15 @@ void ntrip_sm_restore(ntrip_sm_t *sm, const ntrip_backoff_rec_t *rec, uint32_t n
         sm->reason = rec->cls;
         sm->attempt = rec->attempt;
         set_state(sm, NTRIP_SM_STOPPED, now_ms);
+        return;
+    }
+    if (sm->cfg.onocoy_guard && sm->silent_run >= NTRIP_ONO_SILENT_RUN && row == NTRIP_ROW_NONE && !rec->hourly) {
+        /* The floor after a run without a reply holds until a healthy
+         * session or the user: a restart waits it before its first attempt. */
+        sm->retry_pending = true;
+        sm->retry_at_ms = now_ms + NTRIP_ONO_SILENT_FLOOR_S * 1000u;
+        sm->row = NTRIP_ROW_TRANSIENT;
+        sm->reason = rec->cls;
         return;
     }
     if (row == NTRIP_ROW_NONE && !rec->hourly) {
@@ -1983,6 +2069,9 @@ size_t ntrip_backoff_rec_encode(const ntrip_backoff_rec_t *rec, uint8_t *buf, si
     blob_put_u8(&w, rec->blocks);
     blob_put_u8(&w, rec->kick_score);
     blob_put_u8(&w, (uint8_t)rec->stop);
+    blob_put_u8(&w, rec->inuse);
+    blob_put_u8(&w, rec->silent_run);
+    blob_put_bool(&w, rec->line_transient_used);
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
@@ -2013,6 +2102,11 @@ bool ntrip_backoff_rec_decode(const uint8_t *buf, size_t len, ntrip_backoff_rec_
         rec.blocks = blob_get_u8(&r);
         rec.kick_score = blob_get_u8(&r);
         stop = blob_get_u8(&r);
+    }
+    if (version >= 4u) {
+        rec.inuse = blob_get_u8(&r);
+        rec.silent_run = blob_get_u8(&r);
+        rec.line_transient_used = blob_get_bool(&r);
     }
     if (!blob_reader_ok(&r) || cls >= NTRIP_CLS_COUNT || long_row((ntrip_row_t)row) != (ntrip_row_t)row ||
         stop >= NTRIP_STOP_COUNT) {

@@ -354,9 +354,10 @@ function casterEditor(entry, opts) {
     } else {
       /* RTK2go's rules for new names: a slot stored before them keeps its mountpoint while host and name stay. */
       const rtk2goNew = hostIn(hostVal, 'rtk2go.com') && (hostChanged || mpVal !== (cfg.mountpoint || ''));
+      /* RTK2go's rule first: the generic one allows "." and 47 characters, which RTK2go refuses. */
       if (!mpVal && on) fail('mountpoint', 'Enter the mountpoint.');
-      else if (mpVal && !MOUNT_RE.test(mpVal)) fail('mountpoint', 'Letters, digits, ".", "_" and "-" only, at most 47.');
       else if (rtk2goNew && mpVal && rtk2goMountProblem(mpVal)) fail('mountpoint', rtk2goMountProblem(mpVal));
+      else if (mpVal && !MOUNT_RE.test(mpVal)) fail('mountpoint', 'Letters, digits, ".", "_" and "-" only, at most 47.');
       if (v) {
         if (userVal.indexOf(':') >= 0 || utf8Len(userVal) > 47 || hasControl(userVal)) fail('username', 'At most 47 bytes, without ":".');
         else if (on && !userVal) fail('username', 'NTRIP 2.0 needs a username.');
@@ -543,7 +544,7 @@ function casterDetails(st) {
       st.last_session_text ? ['Caster said during a session', st.last_session_text] : null,
       st.login_rejects || st.login_blocks ? ['Refused logins / login blocks', fmt.num(st.login_rejects) + ' / ' + fmt.num(st.login_blocks) +
         ' (the third of either stops the slot)'] : null,
-      st.kicked_sessions ? ['Sessions taken over (score)', st.kicked_sessions + ' of 3'] : null,
+      st.kicked_sessions ? ['Sessions taken over (score)', Math.min(st.kicked_sessions, 3) + ' of 3'] : null,
       st.server_header ? ['Caster software', st.server_header] : null,
       ['Address', st.resolved_ip ? st.resolved_ip + (st.dns_cached_used ? ' (cached DNS used ' + st.dns_cached_used + '×)' : '') : DASH],
       st.unreached_s ? ['Not reached for', fmt.dur(st.unreached_s)] : null,

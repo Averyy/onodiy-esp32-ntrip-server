@@ -159,7 +159,9 @@ garbled bytes may read as menu keys. Listen first instead (the
 `bootprobe.py` section). Whatever the options, `um982.py` sends nothing at
 all when its listen-first window (or the search's listening) hears the
 receiver's loader (`boot>` or its menu text): it stops with exit status 3
-and tells you to power-cycle the receiver.
+and tells you to power-cycle the receiver. When the search's ask phase
+hears the loader, it stops the same way and names every baud it had sent
+`VERSIONA` at (in the output and `summary.txt`).
 
 ### `bootprobe.py`: the PC recovery channel (boot menu over COM2)
 
@@ -211,9 +213,10 @@ did not end with 0, or no answer at all, listen before sending anything:
 
 1. listen only: `uv run capture.py --receiver <port> --receiver-baud 460800
    --duration 20`, and the same with `--receiver-baud 115200`;
-2. `boot>` seen: the receiver is at its loader: power-cycle it (or run
-   `bootprobe.py`, which sends `6` only at a menu that numbers it); never
-   `um982.py` at that baud;
+2. `boot>` seen: the receiver is at its loader: power-cycle it; run neither
+   `um982.py` nor `bootprobe.py` until the application is heard
+   (`bootprobe.py` needs the application: at a loader whose prompt it does
+   not hear in its 2 s listen it would send `VERSIONA`, never `6`);
 3. application output seen at a baud: `uv run um982.py --port <port> --baud
    <that baud>`;
 4. nothing at either: power-cycle, then step 1 again; still silent: stop.
@@ -415,7 +418,8 @@ uv run fake_caster.py report bench-logs/<serve run>            # connection tabl
   `Error <n> <reason> [onocoy naomi v2.5.95-fake]` and a close, the only
   error form seen from that caster so far (the numbers are made up);
   `--onocoy-form plain_line` sends the reason alone, `http_401` an HTTP 401
-  with the reason as its body.
+  with the reason as its body, `no_line_end` the error line without its
+  CR LF before the close (the wire form is not known).
 - `--sequence`: one entry per source connection, the last one repeating.
   `kick=S` ends an accepted session S seconds after the reply, after the
   line of the `text=` row if given; `record` saves that session.

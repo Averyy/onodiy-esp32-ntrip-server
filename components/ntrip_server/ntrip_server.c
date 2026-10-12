@@ -71,6 +71,7 @@
 #include "lifecycle.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
+#include "mbedtls/net_sockets.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/x509.h"
 #include "ntrip_cfg_blob.h"
@@ -94,6 +95,7 @@ _Static_assert((int)NTRIP_CLS_DNS == (int)NTRIP_FAIL_DNS && (int)NTRIP_CLS_CONNE
                    (int)NTRIP_CLS_LOGIN_BLOCKED == (int)NTRIP_FAIL_LOGIN_BLOCKED &&
                    (int)NTRIP_CLS_IN_USE == (int)NTRIP_FAIL_IN_USE &&
                    (int)NTRIP_CLS_REPLACED == (int)NTRIP_FAIL_REPLACED &&
+                   (int)NTRIP_CLS_LOCAL == (int)NTRIP_FAIL_LOCAL &&
                    (int)NTRIP_CLS_COUNT == (int)NTRIP_FAIL_CLASS_COUNT,
                "core failure classes must match ntrip_fail_class_t");
 _Static_assert((int)NTRIP_SM_DISABLED == (int)NTRIP_STATE_DISABLED &&
@@ -108,7 +110,8 @@ _Static_assert((int)NTRIP_SM_DISABLED == (int)NTRIP_STATE_DISABLED &&
                    (int)NTRIP_SM_BANNED == (int)NTRIP_STATE_BANNED &&
                    (int)NTRIP_SM_STOPPED == (int)NTRIP_STATE_STOPPED && (int)NTRIP_STATE_STOPPED == 10,
                "core states must match ntrip_state_t");
-_Static_assert((int)NTRIP_FAIL_LOGIN_BLOCKED == 12 && (int)NTRIP_FAIL_IN_USE == 13 && (int)NTRIP_FAIL_REPLACED == 14,
+_Static_assert((int)NTRIP_FAIL_LOGIN_BLOCKED == 12 && (int)NTRIP_FAIL_IN_USE == 13 && (int)NTRIP_FAIL_REPLACED == 14 &&
+                   (int)NTRIP_FAIL_LOCAL == 15,
                "the API and the journal carry these values");
 _Static_assert((int)NTRIP_PROF_FAST == (int)NTRIP_BACKOFF_FAST &&
                    (int)NTRIP_PROF_STANDARD == (int)NTRIP_BACKOFF_STANDARD &&
@@ -167,7 +170,7 @@ static const char *const k_hint_text[HINT_TOTAL] = {
 
 static const char *const k_class_name[NTRIP_FAIL_CLASS_COUNT] = {
     "none", "DNS", "connect", "TLS", "timeout", "remote close", "write stall",
-    "keepalive", "auth", "mount busy", "config", "banned", "login blocked", "in use", "replaced",
+    "keepalive", "auth", "mount busy", "config", "banned", "login blocked", "in use", "replaced", "local error",
 };
 
 /* Why the login guard stopped a slot (log line and status hint, at most 63 characters). */
@@ -218,6 +221,7 @@ typedef struct {
     uint32_t last_tx_ms;
     uint32_t net_gen;
     int last_errno;
+    bool tls_err;                /* the last failed TLS read or write failed inside TLS, not on the socket */
 
     ntrip_sm_t sm;
     uint8_t prev_state;
@@ -536,10 +540,33 @@ static int sock_error(slot_t *s)
     return s->last_errno;
 }
 
-static ntrip_cls_t errno_class(int err)
+/* What a failed TLS read or write stands for: a reset from the peer, the
+ * socket's own error, or (0, tls_err) a failure inside TLS on this station
+ * (memory, the crypto driver, a record it could not process). PROVISIONAL:
+ * the codes a board returns under low internal memory are to be confirmed
+ * on hardware. */
+static void note_tls_error(slot_t *s, ssize_t r)
 {
-    /* lwIP reports a keepalive abort as ECONNABORTED, a peer reset as ECONNRESET. */
-    return (err == ECONNABORTED || err == ETIMEDOUT) ? NTRIP_CLS_KEEPALIVE : NTRIP_CLS_REMOTE_CLOSE;
+    if (r == MBEDTLS_ERR_NET_CONN_RESET) {
+        s->last_errno = ECONNRESET;
+        s->tls_err = false;
+    } else if (r == MBEDTLS_ERR_NET_RECV_FAILED || r == MBEDTLS_ERR_NET_SEND_FAILED) {
+        s->last_errno = errno;   /* sock_error prefers the socket's SO_ERROR */
+        s->tls_err = false;
+    } else {
+        s->last_errno = 0;
+        s->tls_err = true;
+    }
+}
+
+/* The class of the last failed send or receive: only the caster's own end
+ * (REMOTE_CLOSE) may score as a take-over on a guard slot. */
+static ntrip_cls_t io_error_class(slot_t *s)
+{
+    if (s->tls != NULL && s->tls_err) {
+        return NTRIP_CLS_TLS;
+    }
+    return ntrip_errno_class(sock_error(s));
 }
 
 /* > 0 bytes sent, 0 would block, < 0 error. */
@@ -553,7 +580,7 @@ static int sess_send(slot_t *s, const uint8_t *p, size_t n)
         if (r == 0 || r == ESP_TLS_ERR_SSL_WANT_WRITE || r == ESP_TLS_ERR_SSL_WANT_READ) {
             return 0;
         }
-        s->last_errno = errno;
+        note_tls_error(s, r);
         return -1;
     }
     ssize_t r = send(s->fd, p, n, MSG_DONTWAIT);
@@ -564,6 +591,7 @@ static int sess_send(slot_t *s, const uint8_t *p, size_t n)
         return 0;
     }
     s->last_errno = errno;
+    s->tls_err = false;
     return -1;
 }
 
@@ -581,7 +609,7 @@ static int sess_recv(slot_t *s, uint8_t *buf, size_t n)
         if (r == ESP_TLS_ERR_SSL_WANT_READ || r == ESP_TLS_ERR_SSL_WANT_WRITE) {
             return 0;
         }
-        s->last_errno = errno;
+        note_tls_error(s, r);
         return -2;
     }
     ssize_t r = recv(s->fd, buf, n, MSG_DONTWAIT);
@@ -595,6 +623,7 @@ static int sess_recv(slot_t *s, uint8_t *buf, size_t n)
         return 0;
     }
     s->last_errno = errno;
+    s->tls_err = false;
     return -2;
 }
 
@@ -1028,10 +1057,7 @@ static io_result_t read_reply(slot_t *s, ntrip_failure_t *f)
     if (v->success) {
         return IO_OK;
     }
-    fail_with(f, v->cls, v->row, true);
-    f->mount_ambiguous = v->mount_ambiguous;
-    f->replied = v->rule != 17;   /* rule 17: no line in time, or closed before it */
-    f->onocoy = v->onocoy_reason;
+    *f = ntrip_reply_failure(v, s->guard);   /* on a guard slot, the class Onocoy's reason names */
     s->hint = v->hint;
     s->st.last_err = ESP_FAIL;
     return IO_FAIL;
@@ -1064,7 +1090,7 @@ static io_result_t send_request(slot_t *s, ntrip_failure_t *f)
         s->st.last_err = ESP_ERR_TIMEOUT;
         return IO_FAIL;
     default:
-        fail_with(f, errno_class(sock_error(s)), NTRIP_ROW_TRANSIENT, true);
+        fail_with(f, io_error_class(s), NTRIP_ROW_TRANSIENT, true);
         s->st.last_err = ESP_FAIL;
         return IO_FAIL;
     }
@@ -1265,8 +1291,14 @@ static void publish(slot_t *s, uint32_t now, bool force)
     st->stop_reason = s->sm.stop;
     st->login_rejects = s->sm.rejects;
     st->login_blocks = s->sm.blocks;
-    st->kicked_sessions = s->sm.kick_score;
-    bool waiting = s->sm.state != NTRIP_SM_STREAMING && s->sm.state != NTRIP_SM_CONNECTING;
+    /* The score as the stop sees it (and as stored): a "device reconnected"
+     * line adds 2, so the raw score may pass the stop score. */
+    st->kicked_sessions = s->sm.kick_score < NTRIP_ONO_KICK_STOP_SCORE ? s->sm.kick_score
+                                                                        : (uint8_t)NTRIP_ONO_KICK_STOP_SCORE;
+    /* Waiting or connecting in the incident: the guard's count, not the
+     * verdict hint of the attempt before (that one is stale while the next
+     * attempt connects). */
+    bool waiting = s->sm.state != NTRIP_SM_STREAMING;
     if (s->sm.stop != NTRIP_STOP_NONE && s->sm.stop < NTRIP_STOP_COUNT) {
         strlcpy(st->hint, k_stop_text[s->sm.stop], sizeof(st->hint));
     } else if (waiting && s->sm.blocks > 0) {
@@ -1280,7 +1312,7 @@ static void publish(slot_t *s, uint32_t now, bool force)
                  (unsigned)NTRIP_ONO_INUSE_STOP);
     } else if (waiting && s->sm.kick_score > 0) {
         snprintf(st->hint, sizeof(st->hint), "sessions ended soon after login (%u of %u)",
-                 (unsigned)s->sm.kick_score, (unsigned)NTRIP_ONO_KICK_STOP_SCORE);
+                 (unsigned)st->kicked_sessions, (unsigned)NTRIP_ONO_KICK_STOP_SCORE);
     }
 
     if (s_status_mutex != NULL && xSemaphoreTake(s_status_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -1331,14 +1363,18 @@ static void restore_backoff(slot_t *s, uint32_t now)
     if (settings_get_blob(ns, SETTINGS_KEY_CST_BACKOFF, buf, &len) == ESP_OK &&
         ntrip_backoff_rec_decode(buf, len, &rec)) {
         ntrip_sm_restore(&s->sm, &rec, now);
+        uint32_t wait_ms = ntrip_sm_retry_in_ms(&s->sm, now);
         if (s->sm.stop != NTRIP_STOP_NONE && s->sm.stop < NTRIP_STOP_COUNT) {
             s->stop_seen = s->sm.stop;   /* journalled when it happened */
             ESP_LOGW(TAG, "cst%u (%s): %s (before the restart); not retrying until you act", (unsigned)s->idx,
                      s->cfg.name, k_stop_text[s->sm.stop]);
-        } else if (rec.remaining_s > 0) {
+        } else if (wait_ms > 0 && rec.row == NTRIP_ROW_NONE && s->sm.silent_run >= NTRIP_ONO_SILENT_RUN) {
+            ESP_LOGW(TAG, "cst%u (%s): %u attempts without a reply before the restart; first attempt in %u s",
+                     (unsigned)s->idx, s->cfg.name, (unsigned)s->sm.silent_run, (unsigned)((wait_ms + 999u) / 1000u));
+        } else if (wait_ms > 0) {
             ESP_LOGI(TAG, "cst%u: waiting out a stored %s backoff (%u s)", (unsigned)s->idx,
                      k_class_name[(int)rec.cls < (int)NTRIP_FAIL_CLASS_COUNT ? (int)rec.cls : 0],
-                     (unsigned)rec.remaining_s);
+                     (unsigned)((wait_ms + 999u) / 1000u));
         }
     }
 }
@@ -1603,6 +1639,11 @@ static void connect_once(slot_t *s, uint32_t now)
     }
     session_close(s, false);   /* never two sessions for a slot */
     uint32_t t0 = now_ms();
+    if (s->guard) {
+        /* The last attempt's verdict hint would show through the whole
+         * connect (up to the reply timeout) as if it were this attempt's. */
+        s->hint = NTRIP_HINT_NONE;
+    }
     ntrip_sm_connecting(&s->sm, t0);
     note_state(s, t0);
     ESP_LOGI(TAG, "cst%u (%s): connecting to %s:%u (NTRIP %s%s)", (unsigned)s->idx, s->cfg.name, s->cfg.host,
@@ -1625,10 +1666,7 @@ static void connect_once(slot_t *s, uint32_t now)
     }
     if (r == IO_FAIL) {
         session_close(s, false);
-        if (s->guard) {
-            f.cls = ntrip_guard_class(&f);   /* the class Onocoy's reason names */
-        }
-        count_failure(s, &f, false);
+        count_failure(s, &f, false);   /* a reply's class is the guard's already (ntrip_reply_failure) */
         ntrip_hist_failed(&s->hist, uptime_s());
         uint32_t d = ntrip_sm_failed(&s->sm, &f, t1, esp_random());
         if (s->sm.state == NTRIP_SM_STOPPED) {
@@ -1703,7 +1741,7 @@ static bool poll_incoming(slot_t *s, uint32_t now)
             if (ntrip_sess_text_end(&s->stext, secrets, 3)) {
                 session_text(s);   /* a last line without its newline */
             }
-            session_failed(s, r == -1 ? NTRIP_CLS_REMOTE_CLOSE : errno_class(sock_error(s)), now);
+            session_failed(s, r == -1 ? NTRIP_CLS_REMOTE_CLOSE : io_error_class(s), now);
             return false;
         }
         if (ntrip_sess_text_feed(&s->stext, s->rx, (size_t)r, secrets, 3)) {
@@ -1772,7 +1810,7 @@ static void stream_step(slot_t *s, uint32_t now)
         session_failed(s, NTRIP_CLS_WRITE_STALL, t);
         break;
     case WR_ERROR:
-        session_failed(s, errno_class(sock_error(s)), t);
+        session_failed(s, io_error_class(s), t);
         break;
     case WR_ABORT:
     default:

@@ -130,14 +130,17 @@ function receiverInfo(g) {
       ['Profile applied', g.profile_applied ? 'Yes' : h('span', { class: 't-warn' }, 'No')],
       ['Message 1230', g.rtcm1230_supported === null || g.rtcm1230_supported === undefined ? 'Not applied yet' :
         g.rtcm1230_supported ? 'Accepted by the receiver' : h('span', { class: 't-warn' }, 'Refused by the receiver')],
-      g.config_failed ? ['Last configuration', h('span', { class: 't-bad' }, 'Failed' + (g.config_retry_in_s ? '; next try in ' + fmt.dur(g.config_retry_in_s) : ''))] : null,
+      g.config_failed ? ['Last configuration', h('span', { class: 't-bad' }, 'Failed' + (g.config_auto_retry === false ?
+        '; not retried while automatic configuration is off' :
+        g.config_retry_in_s ? '; next try in ' + fmt.dur(g.config_retry_in_s) : ''))] : null,
       g.detect_failures ? ['Detection failures', fmt.num(g.detect_failures)] : null,
     ]),
     h('h3', { class: 'section-title' }, 'Settings read back'),
     readBack(g),
     alerts.length ? h('div', { class: 'stack foot' }, alerts.map(a => {
       const t = L.salert[a] || [a, ''];
-      return msg('warn', h('strong', null, t[0]), t[1] ? h('div', { class: 'small' }, t[1]) : null);
+      const text = a === 'config_failed' ? t[1] + ' ' + (g.config_auto_retry === false ? L.configRetry.user : L.configRetry.auto) : t[1];
+      return msg('warn', h('strong', null, t[0]), text ? h('div', { class: 'small' }, text) : null);
     })) : null,
   ];
 }
@@ -376,10 +379,13 @@ function heldPanel(opts) {
     status.hidden = false;
   };
   /* Until the receiver has taken it (or the attempt failed): then the user's choice is carried out. Runs on
-   * when the panel leaves the page (the wizard goes on to the live view meanwhile). */
-  const watch = async () => {
+   * when the panel leaves the page (the wizard goes on to the live view meanwhile). After an earlier failed
+   * attempt (failedBefore) its alert stays raised until an apply works, so this attempt's failure is only
+   * its own once the station was seen configuring and has left that state. */
+  const watch = async failedBefore => {
     if (watching) return;
     watching = true;
+    let seen = false;
     const until = Date.now() + 15 * 60000;
     while (Date.now() < until) {
       await sleep(3000);
@@ -399,8 +405,11 @@ function heldPanel(opts) {
         }
         break;
       }
-      if (g.config_failed) {
-        show('bad', 'The configuration failed; the station tries again later. The receiver page shows why.');
+      if (g.state === 'configuring') seen = true;
+      if (g.config_failed && (!failedBefore || (seen && g.state !== 'configuring'))) {
+        /* Held: automatic configuration is off, so nothing retries it but this button. */
+        show('bad', 'The configuration failed and stays held: the station does not try again on its own. The receiver ' +
+          'page shows why; press Configure the receiver now to try again.');
         break;
       }
       show('info', g.state === 'streaming' || g.state === 'configuring' ? 'Configuring the receiver…' :
@@ -417,12 +426,18 @@ function heldPanel(opts) {
       auto.input.checked ? h('p', { class: 'muted small' }, 'Once it has worked, automatic configuration and full recovery are turned on.') :
         h('p', { class: 'muted small' }, 'Automatic configuration stays off: the station changes nothing on the receiver by itself afterwards.')] });
     if (!ok) return;
+    let failedBefore = false;
+    try {
+      failedBefore = !!(await api('GET', '/api/gnss')).config_failed;
+    } catch (e) {
+      /* unknown: the watch takes a failure it sees as this attempt's */
+    }
     const r = await act(confirmBtn, () => api('POST', '/api/gnss/apply'), err);
     if (r === undefined) return;
     store.set(HELD_AUTO_KEY, auto.input.checked ? true : null);
     toast('Configuring the receiver…', 'ok');
     show('info', 'Configuring the receiver…');
-    watch();
+    watch(failedBefore);
     if (opts && opts.onApplied) opts.onApplied();
   }, 'primary');
   const laterBtn = btn('Not now', () => {

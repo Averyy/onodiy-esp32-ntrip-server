@@ -696,6 +696,21 @@ TEST_CASE("caster RTK2go mountpoints follow RTK2go's rules when the name is new"
     /* Other casters keep the general rule ("." allowed, any first character). */
     TEST_ASSERT_TRUE(caster_put("{\"host\":\"caster.example.org\",\"mountpoint\":\"A.b\",\"password\":\"bench-pass-1\"}",
                                 &c, &b));
+
+    /* A new RTK2go name that breaks the general rule too gets RTK2go's words: the general ones allow "."
+     * and 47 characters, so following them would only meet RTK2go's refusal next. */
+    TEST_ASSERT_FALSE(caster_put("{\"host\":\"rtk2go.com\",\"mountpoint\":\"a b c\",\"password\":\"bench-pass-1\"}",
+                                 &c, &b));
+    TEST_ASSERT_EQUAL_STRING("mountpoint", b.field);
+    TEST_ASSERT_EQUAL_STRING("RTK2go mountpoints use letters, digits, \"_\" and \"-\" only (no \".\")", b.rule);
+    TEST_ASSERT_FALSE(caster_put("{\"host\":\"rtk2go.com\",\"mountpoint\":\"Bcdefghijklmnopqrstuvwxyzbcdefghijklmnopqrstuvwxyz\","
+                                 "\"password\":\"bench-pass-1\"}", &c, &b));
+    TEST_ASSERT_EQUAL_STRING("RTK2go mountpoints have 4 to 20 characters", b.rule);
+    /* Elsewhere the general words. */
+    TEST_ASSERT_FALSE(caster_put("{\"host\":\"caster.example.org\",\"mountpoint\":\"a b c\",\"password\":\"bench-pass-1\"}",
+                                 &c, &b));
+    TEST_ASSERT_EQUAL_STRING("mountpoint", b.field);
+    TEST_ASSERT_EQUAL_STRING("letters, digits, \".\", \"_\" and \"-\", at most 47", b.rule);
 }
 
 TEST_CASE("caster test_onocoy: true only where the build allows it, false always", "[web_parse]")

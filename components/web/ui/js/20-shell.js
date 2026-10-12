@@ -411,8 +411,10 @@ function renderNotices() {
     }
     items.push(['warn', 'Receiver update needs you', what, [link('Open', '#/updates/session', 'btn small')]]);
   }
-  /* A slot the Onocoy login guard stopped: nothing is tried until the user acts. */
-  for (const c of st.casters || []) {
+  /* A slot the Onocoy login guard stopped: nothing is tried until the user acts. The casters page shows the
+   * stop on the slot's card itself, with what to do and Try again: no notice there that points to it. */
+  const onCasters = shell.current && shell.current.name === 'casters';
+  for (const c of onCasters ? [] : st.casters || []) {
     if (c.state === 'stopped') {
       items.push(['bad', 'Onocoy stopped: ' + lbl(L.stop, c.stop_reason || 'none'),
         (c.name || 'Slot ' + (c.slot + 1)) + ' makes no new attempt until you act. The casters page says why and what to do.',

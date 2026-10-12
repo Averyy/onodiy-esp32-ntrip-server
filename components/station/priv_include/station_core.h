@@ -597,19 +597,23 @@ typedef struct {
     bool autocfg_off;        /**< gnss/autocfg = 0 */
     bool recovery_alerts;    /**< gnss/recovery = 2 (alerts only): only when it was not set */
     bool hold;               /**< gnss/hold = 1 */
+    bool ram_only;           /**< nothing can be written (settings unusable): hold for this boot only, autocfg off */
 } stn_hold_writes_t;
 
 /**
  * The first-apply hold at boot, before anything is sent to the receiver.
- * Due only with the build option on, the settings usable, and a device
- * whose profile was never applied (no gnss/applied_hash) and whose
- * automatic configuration was never set (no gnss/autocfg): then
- * gnss/autocfg = 0, gnss/hold = 1, and gnss/recovery = 2 unless it is set.
- * Anything stored already (a later boot of a held device, a device that
- * was configured once, a user's choice) writes nothing: the hold is written
- * once and lives in NVS. A presence the caller cannot read counts as
- * present (nothing is written on a doubt).
- * @return true when the batch is due (*out filled; cleared otherwise).
+ * Due only with the build option on, on a device whose profile was never
+ * applied (no gnss/applied_hash) and whose automatic configuration was
+ * never set (no gnss/autocfg): then gnss/autocfg = 0, gnss/hold = 1, and
+ * gnss/recovery = 2 unless it is set. Anything stored already (a later
+ * boot of a held device, a device that was configured once, a user's
+ * choice) writes nothing: the hold is written once and lives in NVS. A
+ * presence the caller cannot read counts as present (nothing is written on
+ * a doubt). With the settings unusable this boot the device's state is
+ * unknown: the hold fails closed, for this boot only (ram_only, autocfg off,
+ * nothing written); the caller holds in RAM as well when the batch fails.
+ * @return true when the hold applies this boot (*out filled: the batch, or
+ *         ram_only); false and *out cleared otherwise.
  */
 bool stn_hold_at_boot(bool option, bool settings_ok, bool have_applied_hash, bool have_autocfg, bool have_recovery,
                       stn_hold_writes_t *out);
@@ -709,8 +713,16 @@ unsigned stn_take_notes(stn_t *s, stn_note_t *out, unsigned cap);
 
 bool stn_surveying(const stn_t *s, int64_t now_ms);
 uint32_t stn_survey_left_s(const stn_t *s, int64_t now_ms);
-/** Seconds to the next CONFIG_FAILED retry (0 = none scheduled). */
-uint32_t stn_config_retry_in_s(const stn_t *s, int64_t now_ms);
+/**
+ * The station retries a failed apply on its own (CONFIG_FAILED's backoff):
+ * only with automatic configuration on (gnss/autocfg; off while the first
+ * apply is held) and for a model it configures (or one not identified yet).
+ * Otherwise the user's apply is the only one.
+ */
+bool stn_config_auto_retry(const stn_t *s, bool autocfg);
+
+/** Seconds to the next CONFIG_FAILED retry (0 = none scheduled, or none at all: stn_config_auto_retry false). */
+uint32_t stn_config_retry_in_s(const stn_t *s, bool autocfg, int64_t now_ms);
 
 /**
  * The alerts to report: `alerts` plus STN_ALERT_NO_RECEIVER while the state

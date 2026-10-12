@@ -22,7 +22,8 @@ the Onocoy termination reasons (onocoy_*). The Onocoy rows are sent by
 default in the one form seen from that caster so far, a plain-text line
 "Error <n> <reason> [onocoy naomi v2.5.95-fake]" and then a close;
 --onocoy-form plain_line sends the reason alone, http_401 an HTTP 401 with
-the reason as its body. The numbers <n> are made up (the real ones are not
+the reason as its body, no_line_end the error line without its CR LF (the
+wire form is not known: a client must not depend on the line end). The numbers <n> are made up (the real ones are not
 known); a client should match the reason text.
 
 --sequence SPEC: comma-separated entries, one per source connection, the
@@ -72,7 +73,7 @@ HOLD_MAX_S = 600.0  # trickle / no_reply give up after this
 DRAIN_S = 2.0  # after a refusal: read what the client still sends before closing
 TRICKLE = b"zqxj"
 DEFAULT_MOUNT = "BENCH"
-ONOCOY_FORMS = ("error_line", "plain_line", "http_401")
+ONOCOY_FORMS = ("error_line", "plain_line", "http_401", "no_line_end")
 
 # Onocoy's console termination reasons. The numbers are made up.
 ONOCOY_REASONS = {
@@ -135,6 +136,8 @@ def onocoy_row(name: str, form: str) -> Row:
         data, line = plain, plain
     elif form == "http_401":
         data, line = http_reply(401, plain), plain  # inside a session only a line makes sense
+    elif form == "no_line_end":
+        data, line = error_line[:-2], error_line[:-2]  # the error line, closed before its CR LF
     else:
         raise ValueError(f"unknown Onocoy form {form!r} ({', '.join(ONOCOY_FORMS)})")
     return Row(name, "close", data, f"Onocoy: {text} ({form})", line)

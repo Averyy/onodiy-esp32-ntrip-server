@@ -133,3 +133,30 @@ def test_a_frame_that_is_no_fixture_frame_fails(lax):
     frames[5] = rtcm.build_frame(bytes(payload))
     ok, detail, _ = e2e.check_record(b"".join(frames), lax)
     assert not ok and "no fixture frame" in detail
+
+
+def test_a_session_that_starts_with_the_hubs_sticky_replay_passes(lax):
+    # The hub replays its sticky 1005/1006/1033/1230 copies (up to 30 s old) at
+    # every session start, then live data from the next epoch. The fixture's
+    # only 1230 opens one of its epochs; replayed ahead of another epoch it is
+    # no epoch boundary of the record.
+    fx = [f for b in lax.bursts for f in b.frames]
+    sticky = [f for f in fx if e2e.frame_type(f) == 1230]
+    assert len(sticky) == 1 and fx.count(sticky[0]) == 1
+    i1230 = fx.index(sticky[0])
+    opens = [i for i, b in enumerate(lax.bursts) if b.frames and b.frames[0] == sticky[0]]
+    assert opens, "the fixture's 1230 opens an epoch"
+    for start in (5, 20, 22, 25):
+        live = forwarded(lax, loops=2, start_epoch=start)
+        ok, detail, _ = e2e.check_record(sticky[0] + b"".join(live), lax)
+        assert ok, f"live from epoch {start}: {detail}"
+    # The replay right before the epoch the 1230 itself opens: the 1230 twice, then that epoch.
+    live = forwarded(lax, loops=2, start_epoch=opens[0])
+    assert live[0] == fx[i1230]
+    ok, detail, _ = e2e.check_record(sticky[0] + b"".join(live), lax)
+    assert ok, detail
+    # A frame that is really missing after the start is still found.
+    live = forwarded(lax, loops=2, start_epoch=20)
+    del live[60]
+    ok, detail, _ = e2e.check_record(sticky[0] + b"".join(live), lax)
+    assert not ok and "missing" in detail

@@ -529,9 +529,20 @@ bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, n
     if ((m = get_str(root, "trust", 16, &trust)) == M_BAD || (m == M_OK && !web_ntrip_trust_parse(trust, &c.trust_mode))) {
         return invalid(bad, "trust");
     }
-    if (!str_field_rule(root, "mountpoint", c.mountpoint, sizeof(c.mountpoint), sizeof(c.mountpoint) - 1, "._-",
-                        RULE_MOUNT, bad)) {
-        return false;
+    /* The mountpoint. A new RTK2go name that breaks the generic rule is told
+     * RTK2go's own rule: the generic one allows "." and 47 characters, which
+     * RTK2go refuses, so its words would send the user to a second refusal. */
+    const char *mount = NULL;
+    if ((m = get_str(root, "mountpoint", sizeof(c.mountpoint) - 1, &mount)) == M_BAD ||
+        (m == M_OK && !web_chars_ok(mount, "._-"))) {
+        const cJSON *jm = get(root, "mountpoint");
+        ntrip_rtk2go_mount_t rk = NTRIP_RTK2GO_OK;
+        if (cJSON_IsString(jm) && jm->valuestring != NULL) {
+            rk = ntrip_server_rtk2go_check(stored->host, stored->mountpoint, c.host, jm->valuestring);
+        }
+        return invalid_rule(bad, "mountpoint", rk != NTRIP_RTK2GO_OK ? rtk2go_rule(rk) : RULE_MOUNT);
+    } else if (m == M_OK) {
+        strlcpy(c.mountpoint, mount, sizeof(c.mountpoint));
     }
     const char *user = NULL;
     if ((m = get_str(root, "username", sizeof(c.username) - 1, &user)) == M_BAD ||

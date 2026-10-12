@@ -120,13 +120,15 @@ def test_every_row_is_named_in_the_contract():
     assert b"banned" in d.feed(body) and d.done and d.chunks == 2 and b"banned" not in body
 
 
-@pytest.mark.parametrize("form", ["error_line", "plain_line", "http_401"])
+@pytest.mark.parametrize("form", ["error_line", "plain_line", "http_401", "no_line_end"])
 def test_onocoy_rows_in_each_form(form):
     rows = build_rows(form)
     for name, (num, text) in ONOCOY_REASONS.items():
         data = rows[name].data
         if form == "error_line":
             assert data == f"Error {num} {text} [onocoy naomi v2.5.95-fake]\r\n".encode()
+        elif form == "no_line_end":
+            assert data == f"Error {num} {text} [onocoy naomi v2.5.95-fake]".encode() and rows[name].kind == "close"
         elif form == "plain_line":
             assert data == f"{text}\r\n".encode()
         else:

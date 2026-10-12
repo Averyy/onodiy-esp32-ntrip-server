@@ -523,7 +523,8 @@ def test_failure_advice_listens_first_and_never_names_the_baud_search(tmp_path, 
     assert "--find-baud" not in summary and "find-baud" not in summary
     assert "capture.py --receiver /dev/fake-com2 --receiver-baud 460800 --duration 20" in summary
     assert "same with --receiver-baud 115200" in summary
-    assert "never um982.py at that baud" in summary and "power-cycle" in summary
+    assert "run neither um982.py nor bootprobe.py until the application is heard" in summary
+    assert "power-cycle" in summary and "sends 6" not in summary
 
 
 def test_application_missing_advice_listens_first(tmp_path, rig):

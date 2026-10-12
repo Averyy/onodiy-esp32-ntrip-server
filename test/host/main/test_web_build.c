@@ -37,6 +37,7 @@ static void fixture(void)
     s->st.receiver.build = 18975;
     s->st.alerts = STATION_ALERT_CONFIG_FAILED;
     s->st.config_retry_in_s = 600;
+    s->st.config_auto_retry = true;
     s->st.position.source = UM98X_POS_SURVEY;
     s->st.position.lat_deg = 45.123456789;
     s->rtcm_age_ms = UINT32_MAX;
@@ -125,6 +126,7 @@ TEST_CASE("admin status maps sentinels, alerts and the protected slot", "[web_bu
     TEST_ASSERT_EQUAL_STRING("health", at(cJSON_GetArrayItem(alerts, 0), "source")->valuestring);
     TEST_ASSERT_EQUAL_STRING("config_failed", at(cJSON_GetArrayItem(alerts, 1), "id")->valuestring);
     TEST_ASSERT_EQUAL(600, at(cJSON_GetArrayItem(alerts, 1), "retry_in_s")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(cJSON_GetArrayItem(alerts, 1), "auto_retry")));
 
     TEST_ASSERT_EQUAL(469, at(at(root, "availability"), "budget_left_s")->valueint);
     const cJSON *up = at(root, "update");
@@ -1178,6 +1180,33 @@ static cJSON *build_gnss_json(const station_status_t *st)
     return root;
 }
 
+TEST_CASE("receiver: a failed apply says whether the station retries it on its own", "[web_build]")
+{
+    fixture();
+    station_status_t *st = &s_snap.st;
+    st->config_failed = true;
+    st->config_retry_in_s = 0;
+    st->config_auto_retry = false;   /* automatic configuration off (the first-apply hold included) */
+    st->first_apply_held = true;
+    cJSON *root = build_gnss_json(st);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "config_failed")));
+    TEST_ASSERT_EQUAL(0, at(root, "config_retry_in_s")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "config_auto_retry")));
+    cJSON_Delete(root);
+    root = build_status(false);
+    const cJSON *alerts = at(root, "alerts");
+    const cJSON *a = NULL;
+    for (int i = 0; i < cJSON_GetArraySize(alerts); i++) {
+        if (strcmp(at(cJSON_GetArrayItem(alerts, i), "id")->valuestring, "config_failed") == 0) {
+            a = cJSON_GetArrayItem(alerts, i);
+        }
+    }
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_EQUAL(0, at(a, "retry_in_s")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(a, "auto_retry")));
+    cJSON_Delete(root);
+}
+
 TEST_CASE("receiver: message 1230 is null until it was ever applied", "[web_build]")
 {
     fixture();
@@ -1353,8 +1382,10 @@ TEST_CASE("caster guard names: the stopped state, the new classes and the stop r
     TEST_ASSERT_EQUAL_STRING("login_blocked", web_ntrip_fail_name(NTRIP_FAIL_LOGIN_BLOCKED));
     TEST_ASSERT_EQUAL_STRING("in_use", web_ntrip_fail_name(NTRIP_FAIL_IN_USE));
     TEST_ASSERT_EQUAL_STRING("replaced", web_ntrip_fail_name(NTRIP_FAIL_REPLACED));
+    TEST_ASSERT_EQUAL_STRING("local", web_ntrip_fail_name(NTRIP_FAIL_LOCAL));
     TEST_ASSERT_EQUAL(12, NTRIP_FAIL_LOGIN_BLOCKED);
     TEST_ASSERT_EQUAL(14, NTRIP_FAIL_REPLACED);
+    TEST_ASSERT_EQUAL(15, NTRIP_FAIL_LOCAL);
     static const char *const stops[] = { "none", "rejected", "login_blocked", "in_use", "kicked", "duplicate",
                                          "banned" };
     TEST_ASSERT_EQUAL(sizeof(stops) / sizeof(stops[0]), NTRIP_STOP_COUNT);
@@ -1397,7 +1428,8 @@ TEST_CASE("caster status: the guard's fields, every class counted, the day's byt
     TEST_ASSERT_EQUAL_STRING("Device reconnected", at(st, "last_session_text")->valuestring);
     TEST_ASSERT_EQUAL(1234567, at(st, "bytes_sent_today")->valuedouble);
     const cJSON *fb = at(st, "failures_by_class");
-    TEST_ASSERT_EQUAL(14, cJSON_GetArraySize(fb));   /* every class but none */
+    TEST_ASSERT_EQUAL(15, cJSON_GetArraySize(fb));   /* every class but none */
+    TEST_ASSERT_EQUAL(0, at(fb, "local")->valueint);
     TEST_ASSERT_EQUAL(4, at(fb, "in_use")->valueint);
     TEST_ASSERT_EQUAL(0, at(fb, "login_blocked")->valueint);
     TEST_ASSERT_EQUAL(0, at(fb, "replaced")->valueint);

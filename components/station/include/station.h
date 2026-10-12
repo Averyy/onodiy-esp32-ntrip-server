@@ -148,7 +148,10 @@
  * the user's receiver restart still works). The first successful apply
  * erases it, and so does turning gnss/autocfg on (the web API, then
  * station_first_apply_hold_refresh()); a factory reset erases it with the
- * other user settings. station_status_t.first_apply_held reports it.
+ * other user settings. station_status_t.first_apply_held reports it. A hold
+ * that is due but cannot be stored (settings unusable this boot, or the
+ * write failed) holds for this boot only, in RAM, with automatic
+ * configuration off: it fails closed, never open.
  *
  * Receiver maintenance (station_maintenance_start; "hands off" while the
  * user works on the receiver through its other port, e.g. a PC tool or a
@@ -261,7 +264,8 @@ typedef enum {
  */
 typedef enum {
     STATION_ALERT_UNSUPPORTED_MODEL  = 1u << 0, /**< receiver model is not one we configure or flash: stream only */
-    STATION_ALERT_CONFIG_FAILED      = 1u << 1, /**< the last profile apply failed; retried on the backoff (config_retry_in_s) */
+    STATION_ALERT_CONFIG_FAILED      = 1u << 1, /**< the last profile apply failed; retried on the backoff (config_retry_in_s) with
+                                                     automatic configuration on (config_auto_retry), else only by the user */
     STATION_ALERT_POSITION_MISMATCH  = 1u << 2, /**< 1005 position more than 5 mm from the locked one after a lock */
     STATION_ALERT_ANTENNA_MOVED      = 1u << 3, /**< fixed base and no RTCM after a receiver restart: antenna moved more than 300 m? re-survey */
     STATION_ALERT_RECEIVER_ATTENTION = 1u << 4, /**< RTCM did not resume after a receiver update session ended */
@@ -385,7 +389,9 @@ typedef struct {
     bool rtcm1230_supported;         /**< gnss/rtcm1230_ok: the receiver accepted RTCM1230 at the last apply (required in the observed set only then) */
     bool rtcm1230_known;             /**< gnss/rtcm1230_ok is stored (false: never applied; rtcm1230_supported is then false and means "not applied yet") */
     bool config_failed;              /**< STATION_ALERT_CONFIG_FAILED is raised */
-    uint32_t config_retry_in_s;      /**< until the station's next apply retry (0 = none scheduled) */
+    uint32_t config_retry_in_s;      /**< until the station's next apply retry (0 = none scheduled, or none at all) */
+    bool config_auto_retry;          /**< a failed apply is retried by the station on its own (gnss/autocfg on, a model it
+                                          configures); false: only the user's apply (the first-apply hold included) */
     bool reconfigure_refused;        /**< STATION_RECOVER_RECONFIGURE would be refused now (gnss/autocfg = 0 or config_failed) */
     bool position_locked;            /**< profile uses a locked fixed position */
     um98x_base_position_t position;  /**< locked or last surveyed position */
@@ -424,7 +430,10 @@ typedef struct {
 
     station_live_status_t live;      /**< live view */
 
-    bool first_apply_held;           /**< gnss/hold: the receiver's first configuration waits for the user (only queries are sent) */
+    bool first_apply_held;           /**< gnss/hold: the receiver's first configuration waits for the user (only queries are sent);
+                                          also a hold held for this boot only (it could not be stored) */
+    bool autocfg_off_this_boot;      /**< automatic configuration is off for this boot whatever gnss/autocfg says: a first-apply
+                                          hold that could not be stored (until the user turns automatic configuration on) */
 
     /* Receiver updates. */
     bool flash_available;            /**< receiver flashing is built in (station_flash_available) */
@@ -494,9 +503,11 @@ esp_err_t station_request_detect(void);
 esp_err_t station_request_reconfigure(void);
 
 /**
- * Read gnss/hold again after someone else erased it (the web API, when the
- * user turns gnss/autocfg on): the status and the detection's loader-key
- * rule follow at once. Works uninitialised (nothing to update then).
+ * The user turned gnss/autocfg on (the web API, after it erased a stored
+ * gnss/hold): a hold held for this boot only ends too, with its automatic
+ * configuration off, and gnss/hold is read again; the status and the
+ * detection's loader-key rule follow at once. Works uninitialised (nothing
+ * to update then).
  */
 void station_first_apply_hold_refresh(void);
 

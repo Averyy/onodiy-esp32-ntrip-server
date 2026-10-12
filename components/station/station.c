@@ -195,6 +195,13 @@ static gnss_link_lease_t s_boot_lease;
  * cut ends it: the record is ignored after a power-on or brownout reset). */
 static RTC_NOINIT_ATTR stn_maint_rtc_t s_maint_rtc;
 static volatile bool s_maint_end_req;    /* the user's "end now", for the station task */
+/* The first-apply hold for this boot only: due, but it could not be stored
+ * (settings unusable, or the write failed). Set at init, with automatic
+ * configuration off for this boot (what the batch would have stored). A
+ * successful apply ends the hold; only the user turning automatic
+ * configuration on ends both. */
+static volatile bool s_hold_ram;
+static volatile bool s_autocfg_ram_off;
 
 /* The live view's satellite-in-view output may be on (unsaved) across an
  * ESP32-only reset: the receiver keeps it, so the next boot turns it off.
@@ -367,6 +374,9 @@ static bool app_update_running(void)
 
 static bool autocfg_enabled(void)
 {
+    if (s_autocfg_ram_off) {
+        return false;   /* off for this boot (a hold that could not be stored): not the stored value or the default */
+    }
     uint8_t v = 1;   /* default: configure the receiver automatically */
     if (settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_AUTOCFG, &v) != ESP_OK) {
         v = 1;
@@ -403,18 +413,22 @@ static bool gnss_key_present_u8(const char *key)
     return settings_get_u8(SETTINGS_NS_GNSS, key, &v) != ESP_ERR_NVS_NOT_FOUND;
 }
 
-/* gnss/hold as stored: the first receiver configuration waits for the user. */
+/* The first receiver configuration waits for the user: gnss/hold as stored, or held for this boot only. */
 static bool first_apply_held_stored(void)
 {
     uint8_t v = 0;
-    return settings_is_available() && settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD, &v) == ESP_OK;
+    return s_hold_ram ||
+           (settings_is_available() && settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD, &v) == ESP_OK);
 }
 
 /*
  * The first-apply hold at init, before anything is sent to the receiver: a
  * build with the option, on a device whose profile was never applied and
  * whose automatic configuration was never set, writes it once (one batch).
- * @return gnss/hold as it stands afterwards.
+ * A hold that is due but cannot be stored (settings unusable this boot, so
+ * the device's applied state is unknown; or the write failed) holds for this
+ * boot in RAM: it fails closed, never open.
+ * @return the hold as it stands afterwards.
  */
 static bool first_apply_hold_boot(void)
 {
@@ -424,7 +438,13 @@ static bool first_apply_hold_boot(void)
     stn_hold_writes_t w;
     if (stn_hold_at_boot(CONFIG_STATION_HOLD_FIRST_APPLY, settings_ok, have_hash,
                          gnss_key_present_u8(SETTINGS_KEY_GNSS_AUTOCFG), gnss_key_present_u8(SETTINGS_KEY_GNSS_RECOVERY),
-                         &w)) {
+                         &w) &&
+        w.ram_only) {
+        s_hold_ram = true;
+        s_autocfg_ram_off = true;
+        ESP_LOGW(TAG, "first receiver configuration held for this boot only (settings unusable, nothing stored): "
+                      "nothing that changes the receiver is sent until you apply");
+    } else if (w.hold) {
         settings_batch_t b;
         esp_err_t err = settings_batch_begin(SETTINGS_NS_GNSS, &b);
         if (err == ESP_OK) {
@@ -446,7 +466,11 @@ static bool first_apply_hold_boot(void)
                           "receiver is sent until you apply",
                      w.recovery_alerts ? "alerts only" : "as set");
         } else {
-            ESP_LOGE(TAG, "first receiver configuration hold not stored: %s", esp_err_to_name(err));
+            s_hold_ram = true;
+            s_autocfg_ram_off = true;
+            ESP_LOGE(TAG, "first receiver configuration hold not stored (%s): held for this boot only; nothing that "
+                          "changes the receiver is sent until you apply",
+                     esp_err_to_name(err));
         }
     }
     bool held = first_apply_held_stored();
@@ -456,8 +480,12 @@ static bool first_apply_hold_boot(void)
     return held;
 }
 
+/* After a successful apply, or after the user turned automatic configuration
+ * on: both end a hold held for this boot only (automatic configuration stays
+ * off for the boot unless the user turned it on); a stored hold they erase. */
 static void first_apply_hold_update(void)
 {
+    s_hold_ram = false;
     bool held = first_apply_held_stored();
     portENTER_CRITICAL(&s_lock);
     bool was = s_core.first_apply_held;
@@ -1768,7 +1796,8 @@ static void publish_status(const stn_in_t *in)
     o->rtcm1230_supported = in->rtcm1230_ok;
     o->rtcm1230_known = rtcm1230_state() >= 0;
     o->config_failed = (core.alerts & STN_ALERT_CONFIG_FAILED) != 0;
-    o->config_retry_in_s = stn_config_retry_in_s(&core, in->now_ms);
+    o->config_retry_in_s = stn_config_retry_in_s(&core, in->autocfg, in->now_ms);
+    o->config_auto_retry = stn_config_auto_retry(&core, in->autocfg);
     o->reconfigure_refused = stn_reconfigure_refused(&core, in->autocfg);
     o->position_locked = (s_profile.base_mode == UM98X_BASE_FIXED);
     bool have_pos = false;
@@ -2397,6 +2426,11 @@ esp_err_t station_get_status(station_status_t *out)
         out->alerts = stn_alerts(&s_core);
         out->next_detect_in_s = stn_next_detect_in_s(&s_core, lin.now_ms);
         out->first_apply_held = s_core.first_apply_held;
+        /* Maintenance as the user's start or extension left it, not as the
+         * station task last published it (it publishes after its own work). */
+        out->rx_maintenance = s_core.maint;
+        out->maintenance_left_s = stn_maint_left_s(&s_core, lin.now_ms);
+        out->maintenance_chosen_s = s_core.maint ? s_core.maint_chosen_s : 0;
     }
     jerr = s_journal_err;
     journal = s_journal;
@@ -2423,6 +2457,7 @@ esp_err_t station_get_status(station_status_t *out)
         out->first_apply_held = first_apply_held_stored();
     }
     out->rtcm_excluded = excluded;
+    out->autocfg_off_this_boot = s_autocfg_ram_off;
     /* Live, not from the last published status: a job takes and drops its
      * lease while it runs, between two publications. Every lease on the link
      * is the station's (its jobs, the boot lease, the listen-only lease). */
@@ -2491,6 +2526,7 @@ void station_first_apply_hold_refresh(void)
     if (!s_inited) {
         return;   /* the status reads the key itself then */
     }
+    s_autocfg_ram_off = false;   /* the user turned automatic configuration on */
     first_apply_hold_update();
 }
 

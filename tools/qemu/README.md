@@ -238,7 +238,11 @@ failed):
   default 75): every one CRC-valid and byte-identical to a fixture frame, in
   fixture order from the first epoch boundary on (modulo the loop), fixture
   frames the station never forwards skipped (the SBAS numbers 1101-1107),
-  nothing between frames, a cut frame only at the very end. With
+  nothing between frames, a cut frame only at the very end (the hub's
+  replay of its sticky station frames, 1005/1006/1033/1230, at the start
+  of the session opens no epoch there); receiver maintenance answers its
+  start and extension with the time it set (900 s, then 1800 s left), and
+  `GET /api/gnss` agrees. With
   `--caster docker` the record is what a `GET /BENCH` client receives from
   the BKG caster (`tools/bench/docker/bkg-caster`, built on first use);
   bytes in front of its first frame are allowed there, because that caster
@@ -247,7 +251,11 @@ failed):
   only in builds with test-Onocoy slots: on a firmware without them it
   prints SKIP and passes) against a second fake caster scripted with
   Onocoy's termination reasons: a credential in use on credentials that
-  never worked stops the slot at once; the waits after a rejected login,
+  never worked stops the slot at once, and so do `409`, `ERROR - Mount
+  Point Taken or Invalid` and `ERROR - Already Connected` (no refused login
+  counted); three `503` replies keep the fast transient row; a refused
+  login whose line a third caster closes before its line end counts as a
+  refused login (300 s); the waits after a rejected login,
   a login block and an in-use reply (each delay within [entry, 1.2 x entry]
   plus 2 s for QEMU, read from `next_retry_s` and from the connection
   times); sessions the caster ends quickly (and a `Device reconnected` line)

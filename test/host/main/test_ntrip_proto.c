@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  */
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -704,14 +705,16 @@ static ntrip_sm_act_t step(ntrip_sm_t *sm, const ntrip_sm_in_t *in, uint32_t now
     return ntrip_sm_poll(sm, in, now, MID, &why);
 }
 
-static const ntrip_failure_t k_transient = { NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false, false, false, false, 0 };
-static const ntrip_failure_t k_reached = { NTRIP_CLS_REMOTE_CLOSE, NTRIP_ROW_TRANSIENT, true, false, false, false, 0 };
-static const ntrip_failure_t k_auth = { NTRIP_CLS_AUTH, NTRIP_ROW_AUTH, true, false, false, true, 0 };
-static const ntrip_failure_t k_busy = { NTRIP_CLS_MOUNT_BUSY, NTRIP_ROW_MOUNT_BUSY, true, false, false, true, 0 };
-static const ntrip_failure_t k_busy_ambiguous = { NTRIP_CLS_MOUNT_BUSY, NTRIP_ROW_MOUNT_BUSY, true, true, false, true, 0 };
+static const ntrip_failure_t k_transient = { NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false, false, false, false, 0, 0 };
+static const ntrip_failure_t k_reached = { NTRIP_CLS_REMOTE_CLOSE, NTRIP_ROW_TRANSIENT, true, false, false, false, 0,
+                                           0 };
+static const ntrip_failure_t k_auth = { NTRIP_CLS_AUTH, NTRIP_ROW_AUTH, true, false, false, true, 0, 0 };
+static const ntrip_failure_t k_busy = { NTRIP_CLS_MOUNT_BUSY, NTRIP_ROW_MOUNT_BUSY, true, false, false, true, 0, 0 };
+static const ntrip_failure_t k_busy_ambiguous = { NTRIP_CLS_MOUNT_BUSY, NTRIP_ROW_MOUNT_BUSY, true, true, false, true, 0,
+                                                  0 };
 /* A refused connect reached the caster's host: it follows the TRANSIENT row on every slot. */
-static const ntrip_failure_t k_refused = { NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false, false, true, false, 0 };
-static const ntrip_failure_t k_dns = { NTRIP_CLS_DNS, NTRIP_ROW_TRANSIENT, false, false, false, false, 0 };
+static const ntrip_failure_t k_refused = { NTRIP_CLS_CONNECT, NTRIP_ROW_TRANSIENT, false, false, true, false, 0, 0 };
+static const ntrip_failure_t k_dns = { NTRIP_CLS_DNS, NTRIP_ROW_TRANSIENT, false, false, false, false, 0, 0 };
 
 TEST_CASE("ntrip slot gate: enable, network, fresh data, stagger", "[ntrip]")
 {
@@ -1738,7 +1741,7 @@ TEST_CASE("ntrip Onocoy reasons leave the reply rows of other slots unchanged", 
     expect("ERROR - Bad Password\r\n", false, NTRIP_ROW_AUTH, NTRIP_CLS_AUTH, 6);
 
     /* The guard's class for each (failures_by_class and the journal on a guard slot). */
-    ntrip_failure_t f = { NTRIP_CLS_REMOTE_CLOSE, NTRIP_ROW_TRANSIENT, true, false, false, true, NTRIP_ONO_IN_USE };
+    ntrip_failure_t f = { NTRIP_CLS_REMOTE_CLOSE, NTRIP_ROW_TRANSIENT, true, false, false, true, NTRIP_ONO_IN_USE, 0 };
     TEST_ASSERT_EQUAL(NTRIP_CLS_IN_USE, ntrip_guard_class(&f));
     f.onocoy = NTRIP_ONO_LOGIN_BLOCKED;
     TEST_ASSERT_EQUAL(NTRIP_CLS_LOGIN_BLOCKED, ntrip_guard_class(&f));
@@ -1800,23 +1803,39 @@ static const ntrip_sm_cfg_t k_guard = { NTRIP_PROF_FAST, true, 60000, 300000, 30
 /* A login reply that failed. */
 static ntrip_failure_t reply_fail(ntrip_cls_t cls, ntrip_row_t row, ntrip_onocoy_reason_t why)
 {
-    ntrip_failure_t f = { cls, row, true, false, false, true, (uint8_t)why };
+    ntrip_failure_t f = { cls, row, true, false, false, true, (uint8_t)why, 0 };
     return f;
 }
 
-/* From a parsed reply, as the server builds it. */
+/* From a parsed reply, exactly as the server builds it on a guard slot (class already the guard's). */
 static ntrip_failure_t reply_of(const char *bytes)
 {
     static ntrip_reply_t r;
     ntrip_verdict_t v = run_reply(bytes, false, true, &r);
-    ntrip_failure_t f = { v.cls, v.row, true, v.mount_ambiguous, false, v.rule != 17, v.onocoy_reason };
-    return f;
+    return ntrip_reply_failure(&v, true);
+}
+
+/* The same on a standard or polite slot (the generic class). */
+static ntrip_failure_t std_reply_of(const char *bytes)
+{
+    static ntrip_reply_t r;
+    ntrip_verdict_t v = run_reply(bytes, false, true, &r);
+    return ntrip_reply_failure(&v, false);
+}
+
+/* A healthy session from t (60 s, 10 kB): the end of the guard's incident. */
+static void healthy_session(ntrip_sm_t *sm, uint32_t t)
+{
+    ntrip_sm_connecting(sm, t);
+    ntrip_sm_connected(sm, t);
+    ntrip_sm_sent(sm, 10000, t + NTRIP_HEALTHY_SESSION_MS);
 }
 
 /* No reply at all (nothing in 10 s, or a close before the line). */
-static const ntrip_failure_t k_silent = { NTRIP_CLS_TIMEOUT, NTRIP_ROW_TRANSIENT, true, false, false, false, 0 };
+static const ntrip_failure_t k_silent = { NTRIP_CLS_TIMEOUT, NTRIP_ROW_TRANSIENT, true, false, false, false, 0, 0 };
 /* A session the caster ended (EOF or a reset while the station kept its address). */
-static const ntrip_failure_t k_kicked = { NTRIP_CLS_REMOTE_CLOSE, NTRIP_ROW_TRANSIENT, true, false, false, false, 0 };
+static const ntrip_failure_t k_kicked = { NTRIP_CLS_REMOTE_CLOSE, NTRIP_ROW_TRANSIENT, true, false, false, false, 0,
+                                          0 };
 
 static const uint32_t k_rnds[2] = { LO, HI };   /* jitter x 1.0 and x 1.2 */
 
@@ -1948,9 +1967,11 @@ TEST_CASE("ntrip guard: too many unsuccessful logins waits an hour, then two, th
     }
 
     /* A standard slot meets the same line on its transient row, as before. */
+    const ntrip_failure_t fs =
+        std_reply_of("Error 5 Too many unsuccessful logins - temporarily blocking further connections [onocoy naomi v2.5.95-x]\r\n");
     ntrip_sm_t sm;
     ntrip_sm_init(&sm, &k_std, 0x77, 0);
-    TEST_ASSERT_EQUAL_UINT32(2000, ntrip_sm_failed(&sm, &f, 400000, MID));
+    TEST_ASSERT_EQUAL_UINT32(2000, ntrip_sm_failed(&sm, &fs, 400000, MID));
     TEST_ASSERT_EQUAL(NTRIP_SM_BACKOFF, sm.state);
     TEST_ASSERT_EQUAL_UINT8(0, sm.blocks);
 }
@@ -2029,7 +2050,7 @@ TEST_CASE("ntrip guard: sessions taken over three times stop the slot", "[ntrip]
 
     /* "Device reconnected" during a session counts 2, whatever its length. */
     const ntrip_failure_t replaced = { NTRIP_CLS_REMOTE_CLOSE, NTRIP_ROW_TRANSIENT, true, false, false, false,
-                                       NTRIP_ONO_REPLACED };
+                                       NTRIP_ONO_REPLACED, 0 };
     ntrip_sm_t sm;
     ntrip_sm_init(&sm, &k_guard, 0x77, 0);
     uint32_t d = guard_session(&sm, 1000, 900000, &replaced, MID);
@@ -2059,7 +2080,7 @@ TEST_CASE("ntrip guard: sessions taken over three times stop the slot", "[ntrip]
     ntrip_sm_init(&sm, &k_guard, 0x77, 0);
     t = 1000;
     for (int i = 0; i < 6; i++) {
-        ntrip_failure_t f = { own[i % 2], NTRIP_ROW_TRANSIENT, true, false, false, false, 0 };
+        ntrip_failure_t f = { own[i % 2], NTRIP_ROW_TRANSIENT, true, false, false, false, 0, 0 };
         d = guard_session(&sm, t, 10000, &f, HI);
         TEST_ASSERT_TRUE(d <= 18000);
         t += 10000 + d;
@@ -2099,13 +2120,13 @@ TEST_CASE("ntrip guard: a duplicate stream or a ban stops at once", "[ntrip]")
 
     /* Reported during a session (the server ends it at once). */
     const ntrip_failure_t dup = { NTRIP_CLS_BANNED, NTRIP_ROW_TRANSIENT, true, false, false, false,
-                                  NTRIP_ONO_DUPLICATE };
+                                  NTRIP_ONO_DUPLICATE, 0 };
     ntrip_sm_init(&sm, &k_guard, 0x77, 0);
     TEST_ASSERT_EQUAL_UINT32(0, guard_session(&sm, 1000, 3600000, &dup, MID));
     TEST_ASSERT_EQUAL(NTRIP_STOP_DUPLICATE, sm.stop);
 
     /* A standard slot keeps its banned row. */
-    f = reply_of("Your IP is BANNED for 3 hours\r\n");
+    f = std_reply_of("Your IP is BANNED for 3 hours\r\n");
     ntrip_sm_init(&sm, &k_std, 0x77, 0);
     TEST_ASSERT_EQUAL_UINT32(10800000, ntrip_sm_failed(&sm, &f, 1000, MID));
     TEST_ASSERT_EQUAL(NTRIP_SM_BANNED, sm.state);
@@ -2132,13 +2153,17 @@ TEST_CASE("ntrip guard: one unrecognised error line is a transient failure, the 
         TEST_ASSERT_EQUAL(NTRIP_SM_AUTH_FAILED, sm.state);
     }
 
-    /* A failure without a reply in between does not give the free one back; a success does. */
+    /* A failure without a reply in between does not give the free one back; a healthy session does (the
+     * caster's acceptance alone does not: it may end the session at once). */
     ntrip_sm_t sm;
     ntrip_sm_init(&sm, &k_guard, 0x77, 0);
     ntrip_sm_failed(&sm, &line, 400000, LO);
     ntrip_sm_failed(&sm, &k_silent, 401000, LO);
     TEST_ASSERT_EQUAL_UINT32(300000, ntrip_sm_failed(&sm, &line, 403000, LO));
     ntrip_sm_connected(&sm, 800000);
+    TEST_ASSERT_TRUE(sm.line_transient_used);
+    TEST_ASSERT_EQUAL_UINT8(1, sm.rejects);
+    healthy_session(&sm, 800000);
     TEST_ASSERT_FALSE(sm.line_transient_used);
     TEST_ASSERT_EQUAL_UINT8(0, sm.rejects);
 }
@@ -2155,7 +2180,7 @@ TEST_CASE("ntrip guard: ten failures without a reply hold every retry at 300 s",
     }
     /* Refused connects and TLS failures sent no login: they do not count. */
     ntrip_sm_failed(&sm, &k_refused, t, MID);
-    const ntrip_failure_t tls = { NTRIP_CLS_TLS, NTRIP_ROW_TRANSIENT, true, false, false, false, 0 };
+    const ntrip_failure_t tls = { NTRIP_CLS_TLS, NTRIP_ROW_TRANSIENT, true, false, false, false, 0, 0 };
     ntrip_sm_failed(&sm, &tls, t, MID);
     TEST_ASSERT_EQUAL_UINT8(9, sm.silent_run);
     uint32_t d = ntrip_sm_failed(&sm, &k_silent, t, LO);
@@ -2166,10 +2191,12 @@ TEST_CASE("ntrip guard: ten failures without a reply hold every retry at 300 s",
     /* ... but failures that never reached the caster keep their flat retry. */
     d = ntrip_sm_failed(&sm, &k_dns, t + 2 * d, HI);
     TEST_ASSERT_TRUE(d <= 6000);
-    /* A success ends it. */
+    /* A healthy session ends it; the caster's acceptance alone does not. */
     ntrip_sm_connected(&sm, 3000000);
+    TEST_ASSERT_TRUE(sm.silent_run >= 10);
+    healthy_session(&sm, 3000000);
     TEST_ASSERT_EQUAL_UINT8(0, sm.silent_run);
-    TEST_ASSERT_TRUE(ntrip_sm_failed(&sm, &k_silent, 3001000, HI) < 300000);   /* the transient row again */
+    TEST_ASSERT_TRUE(ntrip_sm_failed(&sm, &k_silent, 3061000, HI) < 300000);   /* the transient row again */
 }
 
 TEST_CASE("ntrip guard: failures that never reached the caster keep the flat retry and touch no count", "[ntrip]")
@@ -2277,28 +2304,42 @@ TEST_CASE("ntrip guard: backoff record version 3, older records, restored stops 
     rec.blocks = 2;
     rec.kick_score = 1;
     rec.stop = NTRIP_STOP_KICKED;
+    rec.inuse = 2;
+    rec.silent_run = 7;
+    rec.line_transient_used = true;
     uint8_t buf[NTRIP_BACKOFF_REC_MAX];
     size_t n = ntrip_backoff_rec_encode(&rec, buf, sizeof(buf));
     TEST_ASSERT_TRUE(n > 0 && n <= NTRIP_BACKOFF_REC_MAX);
-    TEST_ASSERT_EQUAL_UINT8(3, buf[0]);
+    TEST_ASSERT_EQUAL_UINT8(4, buf[0]);
     ntrip_backoff_rec_t back;
     TEST_ASSERT_TRUE(ntrip_backoff_rec_decode(buf, n, &back));
     TEST_ASSERT_EQUAL_UINT8(1, back.rejects);
     TEST_ASSERT_EQUAL_UINT8(2, back.blocks);
     TEST_ASSERT_EQUAL_UINT8(1, back.kick_score);
     TEST_ASSERT_EQUAL(NTRIP_STOP_KICKED, back.stop);
+    TEST_ASSERT_EQUAL_UINT8(2, back.inuse);
+    TEST_ASSERT_EQUAL_UINT8(7, back.silent_run);
+    TEST_ASSERT_TRUE(back.line_transient_used);
     TEST_ASSERT_EQUAL_UINT32(rec.remaining_s, back.remaining_s);
+    /* A version 3 record (before the in-use, no-reply and error-line counts): those read as none. */
+    buf[0] = 3;
+    TEST_ASSERT_TRUE(ntrip_backoff_rec_decode(buf, n - 3, &back));
+    TEST_ASSERT_EQUAL_UINT8(1, back.rejects);
+    TEST_ASSERT_EQUAL(NTRIP_STOP_KICKED, back.stop);
+    TEST_ASSERT_EQUAL_UINT8(0, back.inuse);
+    TEST_ASSERT_EQUAL_UINT8(0, back.silent_run);
+    TEST_ASSERT_FALSE(back.line_transient_used);
     /* A version 2 record (what the firmware before the guard wrote): no guard counts. */
     buf[0] = 2;
-    TEST_ASSERT_TRUE(ntrip_backoff_rec_decode(buf, n - 4, &back));
+    TEST_ASSERT_TRUE(ntrip_backoff_rec_decode(buf, n - 7, &back));
     TEST_ASSERT_EQUAL_UINT8(0, back.rejects);
     TEST_ASSERT_EQUAL_UINT8(0, back.blocks);
     TEST_ASSERT_EQUAL_UINT8(0, back.kick_score);
     TEST_ASSERT_EQUAL(NTRIP_STOP_NONE, back.stop);
     TEST_ASSERT_EQUAL(NTRIP_ROW_AUTH, back.row);
     /* An unknown stop reason: refused. */
-    buf[0] = 3;
-    buf[n - 1] = NTRIP_STOP_COUNT;
+    buf[0] = 4;
+    buf[n - 4] = NTRIP_STOP_COUNT;
     TEST_ASSERT_FALSE(ntrip_backoff_rec_decode(buf, n, &back));
 
     /* A stopped slot stays stopped after a restart (48 h, no attempt). */
@@ -2347,10 +2388,10 @@ TEST_CASE("ntrip guard: standard and polite slots keep their rows", "[ntrip]")
     /* The same replies on a standard slot: as before the guard. */
     ntrip_sm_t sm;
     ntrip_sm_init(&sm, &k_std, 0x77, 0);
-    ntrip_failure_t f = reply_of("Error 3 Credentials already in use by another stream\r\n");
+    ntrip_failure_t f = std_reply_of("Error 3 Credentials already in use by another stream\r\n");
     TEST_ASSERT_EQUAL_UINT32(2000, ntrip_sm_failed(&sm, &f, 1000, MID));
     TEST_ASSERT_EQUAL(NTRIP_SM_BACKOFF, sm.state);
-    f = reply_of("ERROR - Bad Password\r\n");
+    f = std_reply_of("ERROR - Bad Password\r\n");
     ntrip_sm_failed(&sm, &f, 400000, MID);
     TEST_ASSERT_EQUAL(NTRIP_SM_AUTH_FAILED, sm.state);
     TEST_ASSERT_EQUAL(NTRIP_STOP_NONE, sm.stop);
@@ -2366,6 +2407,328 @@ TEST_CASE("ntrip guard: standard and polite slots keep their rows", "[ntrip]")
     }
     TEST_ASSERT_EQUAL_UINT8(0, sm.kick_score);
     TEST_ASSERT_EQUAL(NTRIP_STOP_NONE, sm.stop);
+}
+
+TEST_CASE("ntrip guard: 409, Mount Point Taken, Already Connected as the server hands them over are in use", "[ntrip]")
+{
+    static const char *const busy[] = { "HTTP/1.1 409 Conflict\r\n\r\n", "ERROR - Mount Point Taken or Invalid\r\n",
+                                        "ERROR - Already Connected\r\n" };
+    static const uint32_t steps[4] = { 15000, 30000, 60000, 120000 };
+    for (size_t i = 0; i < sizeof(busy) / sizeof(busy[0]); i++) {
+        /* The server counts and logs the guard's class: it reaches ntrip_sm_failed already converted. */
+        const ntrip_failure_t f = reply_of(busy[i]);
+        TEST_ASSERT_EQUAL_MESSAGE(NTRIP_CLS_IN_USE, f.cls, busy[i]);
+        TEST_ASSERT_EQUAL_MESSAGE(NTRIP_ROW_MOUNT_BUSY, f.row, busy[i]);
+        TEST_ASSERT_EQUAL_MESSAGE(NTRIP_ONO_NONE, f.onocoy, busy[i]);
+        TEST_ASSERT_TRUE_MESSAGE(f.replied, busy[i]);
+        /* The same failure as a literal (cls IN_USE, row MOUNT_BUSY, no Onocoy text): both forms count. */
+        const ntrip_failure_t lit = { NTRIP_CLS_IN_USE, NTRIP_ROW_MOUNT_BUSY, true, f.mount_ambiguous, false, true, 0,
+                                      f.rule };
+        const ntrip_failure_t *forms[2] = { &f, &lit };
+        for (int k = 0; k < 2; k++) {
+            /* Credentials that never worked: stopped at once, no refused login counted. */
+            ntrip_sm_t sm;
+            ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, ntrip_sm_failed(&sm, forms[k], 400000, MID), busy[i]);
+            TEST_ASSERT_EQUAL_MESSAGE(NTRIP_STOP_IN_USE, sm.stop, busy[i]);
+            TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, sm.rejects, busy[i]);
+            /* Outside the window on credentials that worked: stopped at once too. */
+            ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+            uint32_t d = guard_session(&sm, 1000, 200000, &k_kicked, LO);
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, ntrip_sm_failed(&sm, forms[k], 201000 + d + 300000, MID), busy[i]);
+            TEST_ASSERT_EQUAL_MESSAGE(NTRIP_STOP_IN_USE, sm.stop, busy[i]);
+            /* Inside the window after this station's own session: 15, 30, 60, 120 s, the 5th stops. */
+            ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+            uint32_t t = 1000;
+            d = guard_session(&sm, t, 200000, &k_kicked, LO);
+            t += 200000 + d;
+            for (int n = 0; n < 4; n++) {
+                d = ntrip_sm_failed(&sm, forms[k], t, LO);
+                TEST_ASSERT_EQUAL_UINT32_MESSAGE(steps[n], d, busy[i]);
+                TEST_ASSERT_EQUAL_MESSAGE(NTRIP_CLS_IN_USE, sm.reason, busy[i]);
+                TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, sm.rejects, busy[i]);
+                t += d;
+            }
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, ntrip_sm_failed(&sm, forms[k], t, LO), busy[i]);
+            TEST_ASSERT_EQUAL_MESSAGE(NTRIP_STOP_IN_USE, sm.stop, busy[i]);
+        }
+    }
+}
+
+/* A session the caster accepted and then ended with Onocoy's reason (the server's session failure). */
+static ntrip_failure_t session_end(ntrip_onocoy_reason_t why)
+{
+    ntrip_failure_t f = { NTRIP_CLS_REMOTE_CLOSE, NTRIP_ROW_TRANSIENT, true, false, false, false, (uint8_t)why, 0 };
+    f.cls = ntrip_guard_class(&f);
+    return f;
+}
+
+TEST_CASE("ntrip guard: an accepted login that ends at once with a refusal counts toward the stop", "[ntrip]")
+{
+    /* "ICY 200 OK", then "Authentication failed" (or "Reauthentication failed") and a close: three times. */
+    const ntrip_failure_t auth = session_end(NTRIP_ONO_AUTH);
+    static const uint32_t first[2] = { 30000, 36000 };      /* inside the window on credentials that worked */
+    static const uint32_t second[2] = { 1800000, 2160000 };
+    for (int k = 0; k < 2; k++) {
+        ntrip_sm_t sm;
+        ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+        uint32_t t = 400000;
+        uint32_t d = guard_session(&sm, t, 2000, &auth, k_rnds[k]);
+        TEST_ASSERT_EQUAL_UINT32(first[k], d);
+        TEST_ASSERT_EQUAL_UINT8(1, sm.rejects);
+        TEST_ASSERT_EQUAL(NTRIP_SM_AUTH_FAILED, sm.state);
+        t += 2000 + d;
+        d = guard_session(&sm, t, 2000, &auth, k_rnds[k]);
+        TEST_ASSERT_EQUAL_UINT32(second[k], d);
+        TEST_ASSERT_EQUAL_UINT8(2, sm.rejects);
+        t += 2000 + d;
+        TEST_ASSERT_EQUAL_UINT32(0, guard_session(&sm, t, 2000, &auth, k_rnds[k]));
+        TEST_ASSERT_EQUAL(NTRIP_SM_STOPPED, sm.state);
+        TEST_ASSERT_EQUAL(NTRIP_STOP_REJECTED, sm.stop);
+        assert_stays_stopped(&sm, t + 2000, 24);
+    }
+
+    /* The counts persist across those sessions: one write per change, never back to 0 at each accept. */
+    ntrip_sm_t sm;
+    ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+    uint32_t t = 400000;
+    t += 2000 + guard_session(&sm, t, 2000, &auth, LO);
+    ntrip_sm_persist_done(&sm);
+    ntrip_sm_connecting(&sm, t);
+    ntrip_sm_connected(&sm, t);
+    TEST_ASSERT_EQUAL_UINT8(1, sm.rejects);
+    TEST_ASSERT_FALSE(ntrip_sm_persist_due(&sm) && sm.rejects != sm.saved_rejects);
+
+    /* "Too many unsuccessful logins" during a session: an hour, two hours, then stopped. */
+    const ntrip_failure_t blocked = session_end(NTRIP_ONO_LOGIN_BLOCKED);
+    ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+    t = 400000;
+    uint32_t d = guard_session(&sm, t, 2000, &blocked, LO);
+    TEST_ASSERT_EQUAL_UINT32(3600000, d);
+    t += 2000 + d;
+    TEST_ASSERT_EQUAL_UINT32(7200000, guard_session(&sm, t, 2000, &blocked, LO));
+    t += 2000 + 7200000;
+    TEST_ASSERT_EQUAL_UINT32(0, guard_session(&sm, t, 2000, &blocked, LO));
+    TEST_ASSERT_EQUAL(NTRIP_STOP_LOGIN_BLOCKED, sm.stop);
+
+    /* A healthy session in between ends the incident: the next refusal is a first one again. */
+    ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+    t = 400000;
+    t += 2000 + guard_session(&sm, t, 2000, &auth, LO);
+    t += 2000 + guard_session(&sm, t, 2000, &auth, LO);
+    TEST_ASSERT_EQUAL_UINT8(2, sm.rejects);
+    d = guard_session(&sm, t, NTRIP_HEALTHY_SESSION_MS, &auth, LO);
+    TEST_ASSERT_EQUAL_UINT8(1, sm.rejects);
+    TEST_ASSERT_EQUAL_UINT32(30000, d);
+    TEST_ASSERT_EQUAL(NTRIP_STOP_NONE, sm.stop);
+}
+
+TEST_CASE("ntrip guard: Onocoy's reason in a reply line the caster closes without its line end", "[ntrip]")
+{
+    static ntrip_reply_t r;
+    /* Closed (eof) and timed out: the partial line is matched all the same. */
+    for (int eof = 0; eof < 2; eof++) {
+        ntrip_verdict_t v = run_reply("Error 27 Authentication failed [onocoy naomi v2.5.95]", false, eof != 0, &r);
+        TEST_ASSERT_EQUAL_UINT8(17, v.rule);
+        TEST_ASSERT_EQUAL(NTRIP_ONO_AUTH, v.onocoy_reason);
+        ntrip_failure_t f = ntrip_reply_failure(&v, true);
+        TEST_ASSERT_TRUE(f.replied);
+        TEST_ASSERT_EQUAL(NTRIP_CLS_AUTH, f.cls);
+        ntrip_sm_t sm;
+        ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+        uint32_t t = 400000;
+        TEST_ASSERT_EQUAL_UINT32(300000, ntrip_sm_failed(&sm, &f, t, LO));
+        TEST_ASSERT_EQUAL_UINT32(1800000, ntrip_sm_failed(&sm, &f, t + 300000, LO));
+        TEST_ASSERT_EQUAL_UINT32(0, ntrip_sm_failed(&sm, &f, t + 2100000, LO));
+        TEST_ASSERT_EQUAL(NTRIP_STOP_REJECTED, sm.stop);
+        TEST_ASSERT_EQUAL_UINT8(0, sm.silent_run);
+    }
+    /* Every reason, each without a line end. */
+    static const struct {
+        const char *line;
+        ntrip_stop_t stop;
+    } once[] = {
+        { "Error 22 Credentials already in use by another stream", NTRIP_STOP_IN_USE },
+        { "Maximum Number of parallel connections reached for this credential", NTRIP_STOP_IN_USE },
+        { "Error 24 Device reconnected", NTRIP_STOP_IN_USE },
+        { "Error 25 Duplicate of another stream", NTRIP_STOP_DUPLICATE },
+        { "Error 26 Credential is banned", NTRIP_STOP_BANNED },
+    };
+    for (size_t i = 0; i < sizeof(once) / sizeof(once[0]); i++) {
+        ntrip_verdict_t v = run_reply(once[i].line, false, true, &r);
+        ntrip_failure_t f = ntrip_reply_failure(&v, true);
+        ntrip_sm_t sm;
+        ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, ntrip_sm_failed(&sm, &f, 400000, MID), once[i].line);
+        TEST_ASSERT_EQUAL_MESSAGE(once[i].stop, sm.stop, once[i].line);
+    }
+    ntrip_verdict_t v = run_reply("Error 21 Too many unsuccessful logins", false, true, &r);
+    ntrip_failure_t f = ntrip_reply_failure(&v, true);
+    ntrip_sm_t sm;
+    ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+    TEST_ASSERT_EQUAL_UINT32(3600000, ntrip_sm_failed(&sm, &f, 400000, LO));
+    TEST_ASSERT_EQUAL_UINT8(1, sm.blocks);
+    v = run_reply("Error 29 Invalid request in headers", false, true, &r);
+    f = ntrip_reply_failure(&v, true);
+    ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+    TEST_ASSERT_EQUAL_UINT32(300000, ntrip_sm_failed(&sm, &f, 400000, LO));
+    TEST_ASSERT_EQUAL_UINT8(1, sm.rejects);
+
+    /* A partial line that names no reason is still no reply (the silent run, the fast row). */
+    v = run_reply("Error 11 Unknown", false, true, &r);
+    f = ntrip_reply_failure(&v, true);
+    TEST_ASSERT_FALSE(f.replied);
+    ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+    TEST_ASSERT_TRUE(ntrip_sm_failed(&sm, &f, 400000, HI) <= 1200);
+    TEST_ASSERT_EQUAL_UINT8(1, sm.silent_run);
+    TEST_ASSERT_EQUAL_UINT8(0, sm.rejects);
+    /* Nothing at all: no reply either. */
+    v = run_reply("", false, true, &r);
+    TEST_ASSERT_FALSE(ntrip_reply_failure(&v, true).replied);
+}
+
+TEST_CASE("ntrip guard: 500, 503 and Too many sources are the caster's trouble, not refused logins", "[ntrip]")
+{
+    static const char *const outage[] = { "HTTP/1.1 503 Service Unavailable\r\n\r\nService Unavailable\r\n",
+                                          "HTTP/1.1 500 Internal Server Error\r\n\r\n",
+                                          "ERROR - Too many sources\r\n" };
+    for (size_t i = 0; i < sizeof(outage) / sizeof(outage[0]); i++) {
+        const ntrip_failure_t f = reply_of(outage[i]);
+        TEST_ASSERT_TRUE_MESSAGE(f.replied, outage[i]);
+        TEST_ASSERT_EQUAL_MESSAGE(NTRIP_ROW_TRANSIENT, f.row, outage[i]);
+        ntrip_sm_t sm;
+        ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+        uint32_t t = 400000;
+        /* An outage of half an hour: the fast transient row throughout (cap 15 s, then 30 s after 10 min). */
+        for (int n = 0; n < 120; n++) {
+            uint32_t d = ntrip_sm_failed(&sm, &f, t, HI);
+            TEST_ASSERT_TRUE_MESSAGE(d >= 1000 && d <= 36000, outage[i]);
+            TEST_ASSERT_EQUAL_MESSAGE(NTRIP_SM_BACKOFF, sm.state, outage[i]);
+            t += d;
+        }
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, sm.rejects, outage[i]);
+        TEST_ASSERT_EQUAL_MESSAGE(NTRIP_STOP_NONE, sm.stop, outage[i]);
+        TEST_ASSERT_FALSE_MESSAGE(sm.line_transient_used, outage[i]);
+        /* ... and they leave the free retry of an unrecognised error line alone. */
+        const ntrip_failure_t line = reply_of("Error 11 Unknown - epoll rd hup [caster v2]\r\n");
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(NTRIP_RULE_ERROR_LINE, line.rule, outage[i]);
+        TEST_ASSERT_TRUE_MESSAGE(ntrip_sm_failed(&sm, &line, t, LO) <= 30000, outage[i]);
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, sm.rejects, outage[i]);
+    }
+}
+
+TEST_CASE("ntrip guard: only the caster's own end of a short session scores, never a local failure", "[ntrip]")
+{
+    TEST_ASSERT_EQUAL(NTRIP_CLS_REMOTE_CLOSE, ntrip_errno_class(ECONNRESET));
+    TEST_ASSERT_EQUAL(NTRIP_CLS_REMOTE_CLOSE, ntrip_errno_class(EPIPE));
+    TEST_ASSERT_EQUAL(NTRIP_CLS_REMOTE_CLOSE, ntrip_errno_class(ENOTCONN));
+    TEST_ASSERT_EQUAL(NTRIP_CLS_KEEPALIVE, ntrip_errno_class(ECONNABORTED));
+    TEST_ASSERT_EQUAL(NTRIP_CLS_KEEPALIVE, ntrip_errno_class(ETIMEDOUT));
+    /* No errno, a stale one from an earlier non-blocking call, memory: this station's own. */
+    TEST_ASSERT_EQUAL(NTRIP_CLS_LOCAL, ntrip_errno_class(0));
+    TEST_ASSERT_EQUAL(NTRIP_CLS_LOCAL, ntrip_errno_class(EAGAIN));
+    TEST_ASSERT_EQUAL(NTRIP_CLS_LOCAL, ntrip_errno_class(ENOMEM));
+    TEST_ASSERT_EQUAL(NTRIP_CLS_LOCAL, ntrip_errno_class(ENOBUFS));
+    TEST_ASSERT_EQUAL(NTRIP_CLS_LOCAL, ntrip_errno_class(EINVAL));
+
+    /* Short sessions that ended in a local or TLS failure: the fast transient row, never a score. */
+    static const ntrip_cls_t own[] = { NTRIP_CLS_LOCAL, NTRIP_CLS_TLS };
+    ntrip_sm_t sm;
+    ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+    uint32_t t = 1000;
+    for (int i = 0; i < 8; i++) {
+        ntrip_failure_t f = { own[i % 2], NTRIP_ROW_TRANSIENT, true, false, false, false, 0, 0 };
+        uint32_t d = guard_session(&sm, t, 10000, &f, HI);
+        TEST_ASSERT_TRUE(d <= 18000);
+        t += 10000 + d;
+    }
+    TEST_ASSERT_EQUAL_UINT8(0, sm.kick_score);
+    TEST_ASSERT_EQUAL(NTRIP_STOP_NONE, sm.stop);
+    /* A local failure while sending the request: no silent run either (no login went out unanswered). */
+    ntrip_failure_t req = { NTRIP_CLS_LOCAL, NTRIP_ROW_TRANSIENT, true, false, false, false, 0, 0 };
+    for (int i = 0; i < 12; i++) {
+        t += ntrip_sm_failed(&sm, &req, t, MID);
+    }
+    TEST_ASSERT_EQUAL_UINT8(0, sm.silent_run);
+    /* The caster's own end (REMOTE_CLOSE) still scores. */
+    TEST_ASSERT_EQUAL_UINT32(5000, guard_session(&sm, t, 10000, &k_kicked, LO));
+    TEST_ASSERT_EQUAL_UINT8(1, sm.kick_score);
+}
+
+/* Persist as the server does after a failure, then "reboot": a fresh state machine restores the record. */
+static void reboot_guard(ntrip_sm_t *sm, uint32_t now)
+{
+    ntrip_backoff_rec_t rec;
+    ntrip_sm_persist_get(sm, now, &rec);
+    ntrip_sm_persist_done(sm);
+    uint8_t buf[NTRIP_BACKOFF_REC_MAX];
+    size_t n = ntrip_backoff_rec_encode(&rec, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(n > 0);
+    ntrip_backoff_rec_t back;
+    TEST_ASSERT_TRUE(ntrip_backoff_rec_decode(buf, n, &back));
+    ntrip_sm_init(sm, &k_guard, 0x77, 0);   /* boot: uptime 0, the window opens again */
+    ntrip_sm_restore(sm, &back, 0);
+    sm->prev_link_up = true;
+}
+
+TEST_CASE("ntrip guard: a reboot loop never restarts the in-use ladder or the run without a reply", "[ntrip]")
+{
+    /* Another device holds the credential; the station reboots every two attempts. */
+    const ntrip_failure_t inuse = reply_of("Error 3 Credentials already in use by another stream\r\n");
+    ntrip_sm_t sm;
+    ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+    uint32_t d = guard_session(&sm, 1000, 200000, &k_kicked, LO);
+    uint32_t t = 201000 + d;
+    TEST_ASSERT_EQUAL_UINT32(15000, ntrip_sm_failed(&sm, &inuse, t, LO));
+    TEST_ASSERT_EQUAL_UINT32(30000, ntrip_sm_failed(&sm, &inuse, t + 15000, LO));
+    TEST_ASSERT_TRUE(ntrip_sm_persist_due(&sm));
+    reboot_guard(&sm, t + 20000);
+    TEST_ASSERT_EQUAL_UINT8(2, sm.inuse);
+    TEST_ASSERT_TRUE(sm.good_valid);
+    /* After the boot (inside the boot's window, credentials that worked): the ladder goes on. */
+    TEST_ASSERT_EQUAL_UINT32(60000, ntrip_sm_failed(&sm, &inuse, 1000, LO));
+    reboot_guard(&sm, 2000);
+    TEST_ASSERT_EQUAL_UINT32(120000, ntrip_sm_failed(&sm, &inuse, 1000, LO));
+    reboot_guard(&sm, 2000);
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_sm_failed(&sm, &inuse, 1000, LO));
+    TEST_ASSERT_EQUAL(NTRIP_STOP_IN_USE, sm.stop);
+    reboot_guard(&sm, 2000);
+    TEST_ASSERT_EQUAL(NTRIP_SM_STOPPED, sm.state);
+
+    /* Ten failures without a reply, then a reboot: the floor holds, from the first attempt on. */
+    ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+    t = 400000;
+    for (int i = 0; i < 10; i++) {
+        t += ntrip_sm_failed(&sm, &k_silent, t, LO);
+    }
+    TEST_ASSERT_EQUAL_UINT8(10, sm.silent_run);
+    reboot_guard(&sm, t);
+    TEST_ASSERT_EQUAL_UINT8(10, sm.silent_run);
+    ntrip_sm_in_t in = ready();
+    TEST_ASSERT_EQUAL(NTRIP_ACT_NONE, step(&sm, &in, 299999));
+    TEST_ASSERT_EQUAL(NTRIP_ACT_CONNECT, step(&sm, &in, 300000));
+    TEST_ASSERT_TRUE(ntrip_sm_failed(&sm, &k_silent, 300000, LO) >= 300000);
+    /* The run is stored only up to the floor: nothing more to write after it. */
+    ntrip_sm_persist_done(&sm);
+    ntrip_sm_failed(&sm, &k_silent, 700000, LO);
+    TEST_ASSERT_FALSE(ntrip_sm_persist_due(&sm));
+
+    /* The free retry of an unrecognised error line is used up across a reboot too. */
+    const ntrip_failure_t line = reply_of("Error 11 Unknown - epoll rd hup [caster v2]\r\n");
+    ntrip_sm_init(&sm, &k_guard, 0x77, 0);
+    TEST_ASSERT_TRUE(ntrip_sm_failed(&sm, &line, 400000, LO) <= 1200);
+    reboot_guard(&sm, 401000);
+    TEST_ASSERT_TRUE(sm.line_transient_used);
+    TEST_ASSERT_EQUAL_UINT32(300000, ntrip_sm_failed(&sm, &line, 1000, LO));
+    TEST_ASSERT_EQUAL_UINT8(1, sm.rejects);
+
+    /* A healthy session ends all of it, and that is written once. */
+    healthy_session(&sm, 400000);
+    TEST_ASSERT_EQUAL_UINT8(0, sm.rejects);
+    TEST_ASSERT_FALSE(sm.line_transient_used);
+    TEST_ASSERT_TRUE(ntrip_sm_persist_due(&sm));
+    ntrip_sm_persist_done(&sm);
+    TEST_ASSERT_FALSE(ntrip_sm_persist_due(&sm));
 }
 
 TEST_CASE("ntrip a test Onocoy slot uses Onocoy's fields, wire names and the one-Onocoy rule", "[ntrip]")

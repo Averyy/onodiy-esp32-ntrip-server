@@ -393,7 +393,8 @@ TEST_CASE("station core: a failed apply raises CONFIG_FAILED and restores the RT
     boot_to_failed_apply(&w, true);
     int64_t failed_at = w.in.now_ms;
     TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
-    TEST_ASSERT_EQUAL_UINT32(600, stn_config_retry_in_s(&w.s, w.in.now_ms));
+    TEST_ASSERT_EQUAL_UINT32(600, stn_config_retry_in_s(&w.s, true, w.in.now_ms));
+    TEST_ASSERT_TRUE(stn_config_auto_retry(&w.s, true));
     TEST_ASSERT_EQUAL(STN_CONFIGURING, w.s.state);
     TEST_ASSERT_TRUE(w.s.paused);
     /* The ladder's reconfigure step is refused meanwhile. */
@@ -479,8 +480,52 @@ TEST_CASE("station core: apply retries back off 10 min, 30 min, 2 h, then every 
     TEST_ASSERT_EQUAL(STN_WHY_USER, j.why);
     sim_done(&w, &(stn_result_t){ .err = STN_OK });
     TEST_ASSERT_FALSE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
-    TEST_ASSERT_EQUAL_UINT32(0, stn_config_retry_in_s(&w.s, w.in.now_ms));
+    TEST_ASSERT_EQUAL_UINT32(0, stn_config_retry_in_s(&w.s, true, w.in.now_ms));
     TEST_ASSERT_FALSE(stn_reconfigure_refused(&w.s, true));
+}
+
+TEST_CASE("station core: with automatic configuration off (held) a failed apply is never retried, no countdown",
+          "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    w.in.autocfg = false;   /* as the first-apply hold writes it */
+    stn_set_first_apply_held(&w.s, true);
+    boot_streaming(&w, false);
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 60).kind);   /* held: nothing applied on its own */
+
+    /* The user's "Configure the receiver now" fails. */
+    stn_request_apply(&w.s);
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_WHY_USER, j.why);
+    stn_result_t r = res(STN_E_FAIL);
+    r.answered = true;
+    sim_done(&w, &r);
+    TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+    TEST_ASSERT_FALSE(stn_config_auto_retry(&w.s, false));
+    TEST_ASSERT_EQUAL_UINT32(0, stn_config_retry_in_s(&w.s, false, w.in.now_ms));
+
+    /* Seven hours: no apply of its own, and never a countdown that promises one. */
+    int64_t until = w.in.now_ms + 7 * HOUR_MS;
+    while (w.in.now_ms < until) {
+        j = sim_until_job(&w, 600);
+        TEST_ASSERT_NOT_EQUAL(STN_JOB_APPLY, j.kind);
+        TEST_ASSERT_EQUAL_UINT32(0, stn_config_retry_in_s(&w.s, false, w.in.now_ms));
+        if (j.kind != STN_JOB_NONE) {
+            sim_done(&w, &(stn_result_t){ .err = STN_OK });
+        }
+    }
+    TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+
+    /* The user turns automatic configuration on: the backoff's retry is real again, and it runs. */
+    w.in.autocfg = true;
+    TEST_ASSERT_TRUE(stn_config_auto_retry(&w.s, true));
+    uint32_t left = stn_config_retry_in_s(&w.s, true, w.in.now_ms);
+    TEST_ASSERT_TRUE(left > 0 && left <= 6 * 3600);
+    j = sim_until_job(&w, 6 * 3600 + 60);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_WHY_RETRY, j.why);
 }
 
 /* ---- detection ----------------------------------------------------------------- */
@@ -1940,9 +1985,17 @@ TEST_CASE("station core: the first-apply hold at boot, decision table", "[statio
     TEST_ASSERT_TRUE(w.autocfg_off);
     TEST_ASSERT_FALSE(w.recovery_alerts);
     TEST_ASSERT_TRUE(w.hold);
-    /* Settings unavailable this boot: nothing can be written, nothing is. */
-    TEST_ASSERT_FALSE(stn_hold_at_boot(true, false, false, false, false, &w));
-    TEST_ASSERT_FALSE(w.autocfg_off || w.recovery_alerts || w.hold);
+    TEST_ASSERT_FALSE(w.ram_only);
+    /* Settings unavailable this boot: whether the device was ever configured cannot be read, so the hold
+     * fails closed for this boot (autocfg off, held), and nothing is written. */
+    TEST_ASSERT_TRUE(stn_hold_at_boot(true, false, false, false, false, &w));
+    TEST_ASSERT_TRUE(w.ram_only && w.hold && w.autocfg_off);
+    TEST_ASSERT_FALSE(w.recovery_alerts);
+    TEST_ASSERT_TRUE(stn_hold_at_boot(true, false, true, true, true, &w));   /* presences unreadable: counted as stored */
+    TEST_ASSERT_TRUE(w.ram_only && w.hold && w.autocfg_off);
+    /* ... but never in a build without the option. */
+    TEST_ASSERT_FALSE(stn_hold_at_boot(false, false, false, false, false, &w));
+    TEST_ASSERT_FALSE(w.autocfg_off || w.recovery_alerts || w.hold || w.ram_only);
 }
 
 /* Boot with nothing on the link up to the first detection pass. */

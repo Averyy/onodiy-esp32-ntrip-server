@@ -557,7 +557,7 @@ static stn_job_t next_streaming(stn_t *s, const stn_in_t *in)
     }
 
     if (config_failed(s) && s->apply_retry_ms != STN_NEVER && now >= s->apply_retry_ms) {
-        if (in->autocfg && (!s->identity_ok || s->supported)) {
+        if (stn_config_auto_retry(s, in->autocfg)) {
             return start_apply(s, STN_WHY_RETRY, STN_CHANGE_NONE, false);
         }
         /* The user configures the receiver meanwhile: look again later. */
@@ -1391,7 +1391,18 @@ bool stn_hold_at_boot(bool option, bool settings_ok, bool have_applied_hash, boo
                       stn_hold_writes_t *out)
 {
     memset(out, 0, sizeof(*out));
-    if (!option || !settings_ok || have_applied_hash || have_autocfg) {
+    if (!option) {
+        return false;
+    }
+    if (!settings_ok) {
+        /* Whether this device was ever configured cannot be read: hold for
+         * this boot (fail closed); nothing can be written. */
+        out->autocfg_off = true;
+        out->hold = true;
+        out->ram_only = true;
+        return true;
+    }
+    if (have_applied_hash || have_autocfg) {
         return false;
     }
     out->autocfg_off = true;
@@ -1417,9 +1428,16 @@ uint32_t stn_survey_left_s(const stn_t *s, int64_t now_ms)
     return um98x_survey_window_left_s(&s->survey, now_ms);
 }
 
-uint32_t stn_config_retry_in_s(const stn_t *s, int64_t now_ms)
+bool stn_config_auto_retry(const stn_t *s, bool autocfg)
 {
-    if (!config_failed(s) || s->apply_retry_ms == STN_NEVER) {
+    return autocfg && (!s->identity_ok || s->supported);
+}
+
+uint32_t stn_config_retry_in_s(const stn_t *s, bool autocfg, int64_t now_ms)
+{
+    /* Without automatic configuration the backoff only looks again later
+     * and never applies: no countdown that leads nowhere. */
+    if (!config_failed(s) || s->apply_retry_ms == STN_NEVER || !stn_config_auto_retry(s, autocfg)) {
         return 0;
     }
     int64_t left = s->apply_retry_ms - now_ms;

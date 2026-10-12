@@ -39,11 +39,16 @@ What it does:
      from the first epoch boundary on (modulo the loop; fixture frames the
      station never forwards, such as the SBAS numbers 1101-1107, are
      skipped), nothing between frames, a partial frame only at the very end;
+     receiver maintenance answers its start and extension with the time it
+     set, and GET /api/gnss agrees;
   scenario "onocoy-guard" (firmware with test-Onocoy slots; SKIP otherwise;
   with --scenario all it runs before "stream"):
   5. slot 0 as a test-Onocoy slot (test_onocoy) against a second fake caster
      scripted with Onocoy's termination reasons: a credential in use on
-     credentials that never worked stops the slot at once; the guard's
+     credentials that never worked stops the slot at once (and so do 409,
+     "Mount Point Taken" and "Already Connected"; three 503 replies keep the
+     fast transient row; a refused login whose line is closed before its
+     line end counts as one); the guard's
      waits after rejections, login blocks and in-use replies (each delay in
      [entry, 1.2 x entry] + 2 s for QEMU, from next_retry_s and from the
      connection times); sessions the caster ends quickly (and a "Device
@@ -140,6 +145,11 @@ def expected_signals(schedule: Schedule) -> dict[str, list[str]]:
     return {k: sorted(v) for k, v in sorted(out.items())}
 
 
+# The station metadata the hub keeps as sticky copies and replays at the
+# start of every caster session (components/rtcm_hub).
+STICKY_TYPES = frozenset({1005, 1006, 1033, 1230})
+
+
 def frame_type(f: bytes) -> int | None:
     return rtcm.msg_type(rtcm.payload_of(f))
 
@@ -190,12 +200,15 @@ def check_record(data: bytes, schedule: Schedule, leading_junk_ok: bool = False)
     if unknown:
         return False, f"{len(unknown)} recorded frames are no fixture frame (first: #{unknown[0]})", 0.0
     # Start at an epoch's (a burst's) first frame that occurs only once in the
-    # fixture: a 1005 or 1230 can repeat unchanged, an MSM cannot.
+    # fixture: a 1005 or 1230 can repeat unchanged, an MSM cannot. A station
+    # metadata frame never opens it, even a unique one: the hub replays its
+    # sticky copies (up to 30 s old) at every session start, ahead of
+    # whichever epoch the live data then starts with.
     openers: set[int] = set()
     for s in starts:
         q = s
         while q < len(fx) and burst_of[q] == burst_of[s]:
-            if len(pos[fx[q]]) == 1:
+            if len(pos[fx[q]]) == 1 and frame_type(fx[q]) not in STICKY_TYPES:
                 openers.add(q)
                 break
             q += 1
@@ -540,6 +553,34 @@ class E2E:
         self.check(ok and seconds >= MIN_RECORD_S,
                    f"caster record: {seconds:.0f} s of frames (at least {MIN_RECORD_S:.0f}); {detail}")
         self.save("api-caster-1-end.json", self.slot(1))
+        self.maintenance_check()
+
+    def maintenance_check(self) -> None:
+        """Receiver maintenance answers with the state the start or extension set ("effective at once"),
+        not with what the station task last published."""
+        def post(what: str) -> tuple[int, dict]:
+            for _ in range(6):  # a receiver job may be running: offered again after it (409 busy)
+                status, m = self.api("POST", "/api/gnss/maintenance", {"duration_s": 900})
+                if status != 409 or not isinstance(m, dict) or m.get("error", {}).get("code") != "busy":
+                    break
+                time.sleep(5)
+            self.save(f"maintenance-{what}.json", m)
+            return status, m if isinstance(m, dict) else {}
+        status, m = post("start")
+        if not self.check(status == 200 and m.get("on") is True and m.get("chosen_s") == 900
+                          and 895 <= (m.get("left_s") or 0) <= 900,
+                          f"POST /api/gnss/maintenance (900 s, off before): HTTP {status} {m}"):
+            return
+        status, m = post("extend")
+        self.check(status == 200 and m.get("on") is True and m.get("chosen_s") == 1800   # with the extension
+                   and 1790 <= (m.get("left_s") or 0) <= 1800,
+                   f"POST /api/gnss/maintenance again (extended by 900 s): HTTP {status} {m}")
+        status, g = self.api("GET", "/api/gnss")
+        gm = (g or {}).get("maintenance", {}) if isinstance(g, dict) else {}
+        self.check(gm.get("on") is True and abs((gm.get("left_s") or 0) - (m.get("left_s") or 0)) <= 5,
+                   f"GET /api/gnss maintenance agrees: {gm.get('on')}, left_s {gm.get('left_s')}")
+        status, d = self.api("DELETE", "/api/gnss/maintenance")
+        self.check(status == 202, f"DELETE /api/gnss/maintenance: HTTP {status} {d}")
 
     def wait_record(self) -> tuple[bytes, bool]:
         """The first session's bytes once they span --observe seconds (or the time is up)."""
@@ -688,11 +729,34 @@ class E2E:
         self.check(first["request_line"] == f"SOURCE *** /{GUARD_USER}",
                    f"Onocoy NTRIP 1.0 wire layout: {first['request_line']!r}")
         fb = self.slot(0)["status"].get("failures_by_class", {})
-        # Every class but "none": the eleven of every slot and the guard's three.
-        self.check(len(fb) == 14 and {"login_blocked", "in_use", "replaced"} <= set(fb),
+        # Every class but "none": the eleven of every slot, the guard's three and "local".
+        self.check(len(fb) == 15 and {"login_blocked", "in_use", "replaced", "local"} <= set(fb),
                    f"failures_by_class has {len(fb)} classes")
         if self.wait_stopped("in_use"):
             self.quiet(15, "stopped (in use)")
+
+        # 1b. The generic in-use replies are the same thing on an Onocoy slot. The slot is
+        #     stopped for the same reason already: only once the retry's login reached the
+        #     caster (the retry cleared that stop first) is a stop the new one.
+        for seq in ("http_409", "mount_taken", "already_connected"):
+            n = self.retry(seq)
+            if self.check(self.wait_conn_start(n, 30) is not None, f"{seq}: slot 0 logged in again") and \
+                    self.wait_stopped("in_use"):
+                s = self.slot(0)["status"]
+                self.check(s.get("login_rejects") == 0, f"{seq}: no refused login counted ({s.get('login_rejects')})")
+                self.quiet(5, f"stopped (in use: {seq})")
+
+        # 1c. 503 is the caster's own trouble: the fast transient row, never a refused login
+        #     (three in a row within seconds), then an in-use reply stops the slot again.
+        n = self.retry("http_503,http_503,http_503,onocoy_in_use")
+        if self.check(self.wait_conn_start(n + 3, 40) is not None, "503 x3: the fourth login came within seconds") and \
+                self.wait_stopped("in_use"):
+            s = self.slot(0)["status"]
+            self.check(s.get("login_rejects") == 0, f"503 x3: no refused login counted ({s.get('login_rejects')})")
+
+        # 1d. Onocoy's reason in a reply line the caster closes before its line end (the wire
+        #     form is not known) is a refused login all the same, not a silent close.
+        self.no_line_end_check()
 
         # 2. A rejected login on credentials that never worked: 5 minutes.
         n = self.retry("onocoy_auth_failed")
@@ -761,6 +825,28 @@ class E2E:
         # 9. A stop survives a reboot; retry clears it.
         self.reboot_check()
         self.journal_check()
+
+    def no_line_end_check(self) -> None:
+        main = self.guard
+        (self.out / "guard-no-line-end").mkdir(exist_ok=True)
+        g2 = FakeCaster(0, onocoy_form="no_line_end", run_dir=self.out / "guard-no-line-end", say=self.say).start()
+        g2.set_sequence("onocoy_auth_failed")
+        self.guard = g2
+        try:
+            status, _ = self.api("PUT", "/api/casters/0", {"port": g2.port})
+            if self.check(status == 200, f"PUT /api/casters/0 (port of a caster that ends its lines early): HTTP {status}"):
+                self.next_retry_after(1, 300, "rejected login, its line closed without CR LF")
+                s = self.slot(0)["status"]
+                self.check(s.get("login_rejects") == 1 and s.get("state") == "auth_failed",
+                           f"counted as a refused login: login_rejects {s.get('login_rejects')}, state {s.get('state')!r}")
+        finally:
+            self.guard = main
+            main.set_sequence("onocoy_in_use")
+            n = len(self.guard_conns()) + 1
+            status, _ = self.api("PUT", "/api/casters/0", {"port": main.port})
+            self.check(status == 200 and self.wait_conn_start(n, 30) is not None and self.wait_stopped("in_use")
+                       is not None, f"slot 0 back on the guard caster (PUT: HTTP {status}), stopped in use")
+            g2.stop()
 
     def reboot_check(self) -> None:
         n_before = len(self.guard_conns())

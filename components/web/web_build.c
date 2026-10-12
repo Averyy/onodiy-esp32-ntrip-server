@@ -489,6 +489,7 @@ static void sec_alerts(wj_t *w, const web_status_snap_t *s)
                 wj_str(w, "source", "station");
                 if (bit == STATION_ALERT_CONFIG_FAILED) {
                     wj_uint(w, "retry_in_s", s->st.config_retry_in_s);
+                    wj_bool(w, "auto_retry", s->st.config_auto_retry);
                 } else if (bit == STATION_ALERT_NO_RECEIVER) {
                     wj_bool(w, "saw_bytes", s->st.detect_saw_bytes);
                     wj_u32_or_null(w, "next_detect_in_s", s->st.next_detect_in_s);
@@ -752,6 +753,7 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     }
     wj_bool(w, "config_failed", st->config_failed);
     wj_uint(w, "config_retry_in_s", st->config_retry_in_s);
+    wj_bool(w, "config_auto_retry", st->config_auto_retry);
     wj_bool(w, "reconfigure_refused", st->reconfigure_refused);
     wj_uint(w, "detect_failures", st->detect_failures);
 

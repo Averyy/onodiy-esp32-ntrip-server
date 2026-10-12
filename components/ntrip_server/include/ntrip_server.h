@@ -199,6 +199,7 @@ typedef enum {
     NTRIP_FAIL_LOGIN_BLOCKED,   /**< Onocoy: too many unsuccessful logins (login guard slots) */
     NTRIP_FAIL_IN_USE,          /**< Onocoy: another stream uses the credential (login guard slots) */
     NTRIP_FAIL_REPLACED,        /**< Onocoy: another device logged in with the credential (login guard slots) */
+    NTRIP_FAIL_LOCAL,           /**< a send or receive failed on this station's side (memory, no or stale errno); never a take-over */
     NTRIP_FAIL_CLASS_COUNT,
 } ntrip_fail_class_t;
 
@@ -299,10 +300,10 @@ typedef struct {
     esp_err_t last_err;
     /* the Onocoy login guard (always NONE / 0 for other slots) */
     ntrip_stop_t stop_reason;   /**< STOPPED: why; NTRIP_STOP_NONE otherwise */
-    uint8_t login_rejects;      /**< refused logins since the last accepted one (the 3rd stops) */
-    uint8_t login_blocks;       /**< "too many unsuccessful logins" since the last accepted login (the 3rd stops) */
+    uint8_t login_rejects;      /**< refused logins since the last healthy session (the 3rd stops) */
+    uint8_t login_blocks;       /**< "too many unsuccessful logins" since the last healthy session (the 3rd stops) */
     uint8_t kicked_sessions;    /**< take-over score: sessions ended within 120 s count 1, a "device reconnected"
-                                     text 2; 3 stops; a session of 10 min or more resets it */
+                                     text 2; 3 stops (reported at most 3); a session of 10 min or more resets it */
     char last_session_text[97]; /**< the newest line the caster sent during a session, sanitised ("" = none) */
 } ntrip_caster_status_t;
 

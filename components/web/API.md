@@ -450,7 +450,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.first_apply_held` | the receiver's first configuration waits for the user (`gnss/hold`, section 8): only queries reach the receiver until the user applies; admin form only |
 | `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
 | `casters[]` | every slot; the full status is in `/api/casters`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with the console's mountpoint, username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none); `stop_reason` why the Onocoy login guard stopped the slot (`ntrip_stop_t`; `none` unless `state` is `stopped`, section 10) |
-| `alerts[]` | health's alerts (`source: "health"`) and the station's (`source: "station"`); `config_failed` carries `retry_in_s`; `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`) |
+| `alerts[]` | health's alerts (`source: "health"`) and the station's (`source: "station"`); `config_failed` carries `retry_in_s` and `auto_retry` (as `config_retry_in_s` and `config_auto_retry` in `GET /api/gnss`); `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`) |
 | `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without an enabled protected slot that is set up (`onocoy_ready`), or without a trusted clock. Information only, never a gate |
 | `health.factory_reset_refused` | a BOOT-button factory reset was refused within the last 10 min because a receiver update was running (the UI shows a notice); admin form only |
 | `health.recovery_mode` | automatic receiver recovery in effect (`gnss/recovery`, `health_recovery_mode_t`): `full`, `no_reboot` (everything but the ESP32 reboot), `alerts_only` (nothing is sent to the receiver: a stall is only reported and journalled, level `degraded`, `failed` once the ladder gives up); admin form only |
@@ -601,7 +601,7 @@ oldest.
   "responding": true, "identity_confirmed": true,
   "alerts": [],
   "profile_applied": true, "rtcm1230_supported": true,
-  "config_failed": false, "config_retry_in_s": 0, "reconfigure_refused": false,
+  "config_failed": false, "config_retry_in_s": 0, "config_auto_retry": true, "reconfigure_refused": false,
   "detect_failures": 0,
   "link": {"baud": 115200, "mode": "stream", "rx_bytes": 123456789, "rx_age_ms": 12, "rtcm_age_ms": 180,
            "open": true, "open_failures": 0, "hands_off": false},
@@ -638,13 +638,14 @@ oldest.
 | Field | Notes |
 |---|---|
 | `alerts` | station alerts only (`station_alert_t`) |
+| `config_failed`, `config_retry_in_s`, `config_auto_retry` | the last profile apply failed (`config_failed` alert). `config_auto_retry`: the station retries it on its own on its backoff (10 min, 30 min, 2 h, then every 6 h), which it does only with `autocfg` on and for a model it configures; `config_retry_in_s` is the time to that retry (0 when none is due, and always 0 when `config_auto_retry` is false). With `autocfg` off (the first-apply hold included) nothing is retried until the user applies again |
 | `rtcm1230_supported` | `gnss/rtcm1230_ok`: `true` the receiver accepted message 1230 at the last apply, `false` it refused it, `null` never applied (the key is not stored: "not applied yet") |
 | `link.mode` | `off`, `stream`, `command`, `raw` (`gnss_link`) |
 | `link.rx_bytes` | bytes received from the receiver since boot (0 = nothing arrived yet) |
 | `link.open`, `open_failures` | the UART driver is installed; failed installs since boot. `open: false` with a mode other than `off` = "receiver UART closed (reopening)": `gnss_link` reopens it on its own |
 | `link.hands_off` | the link refuses every write and lease (receiver maintenance) |
 | `recovery` | `gnss/recovery` as stored, `health_recovery_mode_t` (a stored value out of range reads as `full`, as health reads it) |
-| `first_apply_held` | `gnss/hold` is stored: the receiver's first configuration is held until the user applies. A build with `CONFIG_STATION_HOLD_FIRST_APPLY` (bench builds, the `sdkconfig.hold` overlay) writes it once at boot on a device whose profile was never applied and whose `gnss/autocfg` was never set, together with `gnss/autocfg` = 0 and `gnss/recovery` = 2 (`alerts_only`, if unset), before anything reaches the receiver; it stays in NVS whatever build runs later. While it is stored the station sends the receiver only queries (version, configuration dump, base mode) and a loader prompt met during detection gets no restart key (`receiver_in_loader`, listen-only; the user's receiver restart still works). The first successful apply erases it, and so does `PUT /api/gnss/profile` with `autocfg: true`; a factory reset erases it with the other user settings. `GET /api/gnss/apply/preview` lists what the apply would send |
+| `first_apply_held` | `gnss/hold` is stored: the receiver's first configuration is held until the user applies. A build with `CONFIG_STATION_HOLD_FIRST_APPLY` (bench builds, the `sdkconfig.hold` overlay) writes it once at boot on a device whose profile was never applied and whose `gnss/autocfg` was never set, together with `gnss/autocfg` = 0 and `gnss/recovery` = 2 (`alerts_only`, if unset), before anything reaches the receiver; it stays in NVS whatever build runs later. While it is stored the station sends the receiver only queries (version, configuration dump, base mode) and a loader prompt met during detection gets no restart key (`receiver_in_loader`, listen-only; the user's receiver restart still works). The first successful apply erases it, and so does `PUT /api/gnss/profile` with `autocfg: true`; a factory reset erases it with the other user settings. When the hold is due but cannot be stored (settings unusable this boot, or the write failed), the station holds the first configuration for this boot only, as the batch would have stored it: `first_apply_held` true, `autocfg` false, nothing stored. A successful apply ends the hold (automatic configuration stays off for the boot); `autocfg: true` ends both. `GET /api/gnss/apply/preview` lists what the apply would send |
 | `profile.antenna_*` | the base antenna descriptor the receiver publishes in 1033: `antenna_model` the IGS antenna name with its radome (`""` = leave the receiver's own value, the default), `antenna_serial`, `antenna_setup_id` 0-255; serial and setup ID only matter with a model (stored cleared without one) |
 | `rx_settings` | what the receiver's configuration dump said at the last apply session this boot (`station_status_t.rx_settings`): `valid` false and every value unknown (`unknown` / `null`) after a reboot until the next apply. `b1cb2a`, `mmp` (`um98x_setting_t`): BeiDou B1C/B2a observations in RTCM, multipath mitigation; `mask_deg` the elevation mask (0.1°); `antenna` the descriptor the receiver holds (`null` = not read). `age_s` since the read-back, `read_unix` its time (`null` without a clock then). MMP and the mask are shown only, never sent (PROVISIONAL, to be confirmed on hardware) |
 | `apply_steps` | outcome of the antenna and B1C/B2a steps of the last apply session (sent only when the read-back asked for them; a refusal does not fail the session): `sent`, `ok` (accepted), `reply` the receiver's refusal text or `"timeout"` (`null` unless refused). The UI words an antenna refusal "antenna model rejected: <reply>" |
@@ -1101,7 +1102,7 @@ any save stores it in the current layout.
  "connects": 3, "failures": 1, "disconnects": 2, "restarts": 0,
  "failures_by_class": {"dns": 0, "connect": 1, "tls": 0, "timeout": 0, "remote_close": 0, "write_stall": 0,
                        "keepalive": 0, "auth": 0, "mount_busy": 0, "config": 0, "banned": 0,
-                       "login_blocked": 0, "in_use": 0, "replaced": 0},
+                       "login_blocked": 0, "in_use": 0, "replaced": 0, "local": 0},
  "connected_since_unix": 1760086400, "connected_s": 3600,
  "today_online_s": 43200, "today_offline_s": 4,
  "graced_uptime_permille": 503, "streak_ok": true, "graced_uptime_so_far_permille": 1000,
@@ -1166,12 +1167,18 @@ window" means within 300 s of this station's previous session (or start) on
 credentials the caster accepted before. Every guard delay is its entry
 x 1.0-1.2.
 
-- A refused login (`auth` or `config` reply, `authentication failed`, or an
-  unrecognised error line after the first one since the last success):
-  retry after 300 s (30 s within the window, once: a caster deploy), then
-  1800 s; the third stops the slot (`rejected`). `login_rejects` counts them,
-  the hint says "Onocoy refused the login (n of 3)", the state is
-  `auth_failed`.
+- The counts below last for an incident: only a healthy session (60 s and
+  5 KB sent) or the user ends it, not the caster's acceptance alone (Onocoy
+  may accept a login and end the session at once with a reason). They are
+  kept across restarts.
+- A refused login (`auth` or `config` reply, `authentication failed` in the
+  reply or during a session, or an unrecognised `Error <n>` line after the
+  first one in the incident): retry after 300 s (30 s within the window,
+  once: a caster deploy), then 1800 s; the third stops the slot
+  (`rejected`). `login_rejects` counts them, the hint says "Onocoy refused
+  the login (n of 3)", the state is `auth_failed`. `500`, `503` and `ERROR -
+  Too many sources` are the caster's own trouble: the `fast` transient row,
+  never a refused login.
 - `too many unsuccessful logins` (class `login_blocked`): 3600 s, then
   7200 s; the third stops the slot (`login_blocked`). `login_blocks` counts
   them; the state is `auth_failed`.
@@ -1186,14 +1193,17 @@ x 1.0-1.2.
   `replaced`); at 3 the slot stops (`kicked`). The reconnect after such a
   session waits by the count it reached: 5 s at 1, 10 s at 2 (so 10 s
   after a `device reconnected` line). A session of 10 min or more resets the
-  count (`kicked_sessions`). Write stalls, keepalive aborts, network loss,
-  source stalls, pauses and edits never count.
+  count (`kicked_sessions`, at most 3). Only an end from the caster's side
+  counts (EOF or a reset, class `remote_close`); write stalls, keepalive
+  aborts, failures on this station's side (class `local`, or a `tls` error
+  inside TLS), network loss, source stalls, pauses and edits never count.
 - `duplicate of another stream`, `credential is banned`, or any other
   `banned` reply: the slot stops at once (`duplicate`, `banned`).
-- Failures without a reply (nothing in 10 s, a close before the line) stay
-  on the `fast` transient row, but after 10 of them since the last accepted
-  login every delay is at least 300 s. Failures that never reached the
-  caster keep the flat 5 s retry; TLS failures keep their rows.
+- Failures without a reply (nothing in 10 s, a close before the line ends
+  that names none of the texts above) stay on the `fast` transient row, but
+  after 10 of them in the incident every delay is at least 300 s, and a
+  restart waits 300 s before its first attempt. Failures that never reached
+  the caster keep the flat 5 s retry; TLS failures keep their rows.
 
 A stopped slot has `state` `stopped` and a `stop_reason` (`ntrip_stop_t`;
 `none` otherwise) and makes no attempt at all, across restarts and power
@@ -2212,7 +2222,7 @@ after it). The journal's `a` and `b` carry these C values.
 | `health_alert_t` | `power_supply`, `receiver_power`, `bands`, `profile_drift`, `heap_fragmented`, `safe_mode`, `settings_degraded`, `no_upstream`, `link_loss`, `power_lost` |
 | `health_recovery_mode_t` | `full`, `no_reboot`, `alerts_only` |
 | `ntrip_state_t` | `disabled`, `wait_network`, `wait_data`, `connecting`, `streaming`, `backoff`, `auth_failed`, `paused`, `config_error`, `banned`, `stopped` |
-| `ntrip_fail_class_t` | `none`, `dns`, `connect`, `tls`, `timeout`, `remote_close`, `write_stall`, `keepalive`, `auth`, `mount_busy`, `config`, `banned`, `login_blocked`, `in_use`, `replaced` |
+| `ntrip_fail_class_t` | `none`, `dns`, `connect`, `tls`, `timeout`, `remote_close`, `write_stall`, `keepalive`, `auth`, `mount_busy`, `config`, `banned`, `login_blocked`, `in_use`, `replaced`, `local` |
 | `ntrip_trust_t` | `bundle`, `custom_ca`, `insecure` |
 | `ntrip_backoff_profile_t` | `fast`, `standard`, `polite` |
 | `ntrip_stop_t` | `none`, `rejected`, `login_blocked`, `in_use`, `kicked`, `duplicate`, `banned` |

@@ -554,7 +554,9 @@ static esp_err_t h_gnss(web_req_t *r)
         g.link.last_rx_age_ms = UINT32_MAX;
         g.link.last_rtcm_age_ms = UINT32_MAX;
     }
-    g.autocfg = read_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_AUTOCFG, 1) != 0;
+    /* Off while the first apply is held (stored with autocfg 0), and for a boot whose hold could not be stored. */
+    g.autocfg = read_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_AUTOCFG, 1) != 0 && !s_st.first_apply_held &&
+                !s_st.autocfg_off_this_boot;
     g.recovery = stored_recovery();
     load_profile(&g.profile, NULL);
     if (gnss_obs_get_arp(&g.arp) != ESP_OK) {
@@ -672,8 +674,10 @@ static esp_err_t h_gnss_profile(web_req_t *r)
             if (err != ESP_OK) {
                 return web_send_internal(r->req, err);
             }
-            station_first_apply_hold_refresh();
             ESP_LOGW(TAG, "first receiver configuration hold ended: automatic configuration turned on by the user");
+        }
+        if (autocfg) {
+            station_first_apply_hold_refresh();   /* also ends a hold held for this boot only (never stored) */
         }
     }
     if (have_recovery && recovery != stored_recovery()) {

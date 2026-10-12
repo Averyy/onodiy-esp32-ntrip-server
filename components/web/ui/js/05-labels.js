@@ -47,6 +47,7 @@ const L = {
     login_blocked: 'Onocoy is blocking logins',
     in_use: 'Credential in use elsewhere',
     replaced: 'Taken over by another session',
+    local: 'Failed on this station',
   },
   /* Why the Onocoy login guard stopped a slot: [short reason, what to do]. */
   stop: {
@@ -92,9 +93,14 @@ const L = {
     link_loss: ['Receiver data lost', 'Data from the receiver was lost or corrupted in the last 10 minutes.'],
     power_lost: ['Power was lost', 'The station started from power-off 3 or more times within 24 hours. Check the power adapter, cable and connections.'],
   },
+  /* After a failed receiver configuration: the station's own retry (automatic configuration on), or only the user's. */
+  configRetry: {
+    auto: 'The station retries it on its own.',
+    user: 'Automatic configuration is off, so the station does not retry it: configure the receiver again on the receiver page when ready.',
+  },
   salert: {
     unsupported_model: ['Receiver model not supported', 'The station forwards what the receiver sends but does not configure or update it.'],
-    config_failed: ['Receiver configuration failed', 'The last profile apply failed. The station retries it on its own.'],
+    config_failed: ['Receiver configuration failed', 'The last profile apply failed.'],
     position_mismatch: ['Position mismatch', 'The position in the stream is more than 5 mm away from the locked position.'],
     antenna_moved: ['Antenna moved?', 'The fixed base sends no RTCM after a receiver restart. If the antenna moved, survey again.'],
     receiver_attention: ['Receiver needs attention', 'RTCM did not come back after a receiver update session ended.'],
@@ -272,7 +278,7 @@ const J = {
     'no restart for this cause', 'access point wait over'],
   netTrigger: ['protected caster down', 'connected without an IP address', 'a caster not reached'],
   fail: ['none', 'dns', 'connect', 'tls', 'timeout', 'remote_close', 'write_stall', 'keepalive', 'auth', 'mount_busy', 'config', 'banned',
-    'login_blocked', 'in_use', 'replaced'],
+    'login_blocked', 'in_use', 'replaced', 'local'],
   /* ntrip_stop_t (a caster_stop record's bits 8-15) */
   stop: ['none', 'rejected', 'login_blocked', 'in_use', 'kicked', 'duplicate', 'banned'],
   liveEv: [null, 'Opened', 'Extended', 'Closed', 'Satellite output on', 'Satellite output off'],
