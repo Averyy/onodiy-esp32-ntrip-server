@@ -2320,7 +2320,9 @@ no receiver update action.
 
 - **Server:** `esp_http_server`, task priority 5, 8 KB stack in internal
   RAM; `max_open_sockets` 7 (the lwIP socket budget counts on it),
-  `max_uri_handlers` 64 with wildcard matching for `/api/casters/*`,
+  `max_uri_handlers` 72 (`WEB_MAX_URI_HANDLERS`; a static assertion keeps
+  the API routes, `/ws` and the catch-all within it) with wildcard
+  matching for `/api/casters/*`,
   `max_req_hdr_len` 2048 (cookies and long browser headers), receive
   timeout 4 s (a client that sends nothing that long is dropped while it
   sends headers; a body read gives up after three in a row), send timeout

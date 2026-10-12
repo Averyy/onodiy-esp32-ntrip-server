@@ -759,9 +759,15 @@ class E2E:
         return self.poll(ended, timeout, every=0.2)
 
     def wait_conn_start(self, n: int, timeout: float) -> dict | None:
+        """Guard connection n once the fake caster has parsed its request
+        (or the connection ended without one): the record exists from the
+        accept on, with an empty request line until the request is read."""
         def started():
             c = [x for x in self.guard.all_connections() if x["n"] == n]
-            return c[0] if c else None
+            if not c:
+                return None
+            x = c[0]
+            return x if x["request_line"] or x["request_complete"] or x["closed_by"] else None
         return self.poll(started, timeout, every=0.2)
 
     def quiet(self, seconds: float, what: str) -> bool:
@@ -972,7 +978,12 @@ class E2E:
         return "protected" in (self.health().get("network", {}).get("ladder", {}).get("triggers") or [])
 
     def no_protected_trigger(self, what: str) -> None:
-        """A wait on the caster's own reply: a network action cannot help, so no `protected` trigger."""
+        """A wait on the caster's own reply: a network action cannot help, so no `protected` trigger.
+
+        Health recomputes the triggers once a second, and during the connect
+        attempt before the reply (no failure recorded yet) the trigger holds
+        by design, so the first samples wait out the tick after the reply."""
+        time.sleep(2.0)
         seen = []
         for _ in range(5):
             seen.append(self.protected_trigger())
