@@ -200,9 +200,10 @@ typedef enum {
  * Onocoy slots hold what the Onocoy console gives: mountpoint, username
  * and password. Their username is [A-Za-z0-9._-] (NTRIP 1.0 sends it as the
  * mountpoint) and their password has no spaces in either version; an
- * enabled one needs the password. A slot stored before the username field
- * existed (Onocoy host, empty username) still passes: ntrip_wire_names()
- * keeps its old mapping.
+ * enabled one needs the password. A slot stored in the older layout
+ * (Onocoy host, the credential username in `mountpoint`; its stored record
+ * says so and the username is dropped on load, ntrip_cfg_blob.h) still
+ * passes with an empty username: ntrip_wire_names() keeps its old mapping.
  */
 ntrip_fields_result_t ntrip_validate_fields(const ntrip_fields_t *f);
 
@@ -253,11 +254,12 @@ size_t ntrip_build_agent(const char *app_version, char *out, size_t cap);
  * username as stored. Onocoy slots hold the console's mountpoint, username
  * and password: NTRIP 2.0 posts to /<mountpoint> with Basic
  * <username>:<password>; NTRIP 1.0 sends "SOURCE <password> /<username>"
- * (Onocoy's instruction for 1.0-only sources). A slot stored before the
- * username field existed (Onocoy host, empty username, the credential
- * username in `mountpoint`) keeps the old mapping: 1.0 sends `mountpoint`
- * as the mountpoint; 2.0 sends the dashboard label (or "onocoydiy") as the
- * mountpoint and `mountpoint` as the Basic-auth user.
+ * (Onocoy's instruction for 1.0-only sources). A slot stored in the older
+ * layout (Onocoy host, the credential username in `mountpoint`; loaded with
+ * an empty username whatever its record held, ntrip_cfg_blob.h) keeps the
+ * old mapping: 1.0 sends `mountpoint` as the mountpoint; 2.0 sends the
+ * dashboard label (or "onocoydiy") as the mountpoint and `mountpoint` as the
+ * Basic-auth user.
  */
 typedef struct {
     const char *mount;
@@ -658,12 +660,18 @@ int32_t ntrip_hist_pack(uint32_t slot, uint32_t cls, uint32_t count);
  */
 uint16_t ntrip_graced_so_far_permille(uint32_t unplanned_offline_s, uint32_t elapsed_s);
 
-/** Inputs of the protected slot's day figures. */
+/**
+ * Inputs of the protected slot's day figures. The day's online and offline
+ * seconds come from the availability ledger (kept across restarts); the
+ * data rate is a ratio, taken from this boot's epochs sent today over this
+ * boot's seconds online today (both start again at a restart).
+ */
 typedef struct {
     bool counted;                /**< the protected slot is enabled and set up (Onocoy: mountpoint, username, password) */
-    uint32_t online_s;           /**< today, connected */
-    uint32_t offline_s;          /**< today, expected but not connected */
-    uint32_t epochs_sent_today;
+    uint32_t online_s;           /**< today, streaming (the ledger) */
+    uint32_t offline_s;          /**< today, expected but not streaming, planned included (the ledger) */
+    uint32_t rate_online_s;      /**< this boot, today: seconds connected that epochs_sent_today covers */
+    uint32_t epochs_sent_today;  /**< this boot, today */
     bool day_known;              /**< a trusted clock: today and the figures below are known */
     uint32_t unplanned_offline_s;/**< today's unplanned downtime (the availability ledger) */
     uint32_t elapsed_s;          /**< since 00:00 UTC or since the slot first became expected today */
@@ -676,7 +684,8 @@ typedef struct {
     uint16_t graced_uptime_permille;   /**< (online + grace) / day, capped at 1000 */
     uint16_t graced_so_far_permille;
     uint16_t data_rate_permille;       /**< epochs sent / seconds online (1000 assumed until something was sent) */
-    uint32_t budget_left_s;
+    uint32_t budget_s;                 /**< offline seconds the day allows at that rate (ntrip_offline_budget_s) */
+    uint32_t budget_left_s;            /**< budget_s minus today's offline seconds, 0 once used up */
     bool streak_ok;
 } ntrip_day_out_t;
 

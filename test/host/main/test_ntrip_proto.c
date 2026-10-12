@@ -1523,6 +1523,7 @@ TEST_CASE("ntrip Onocoy day figures: none for a slot that does not count", "[ntr
     TEST_ASSERT_TRUE(out.so_far_valid);
     TEST_ASSERT_TRUE(out.streak_ok);
     TEST_ASSERT_EQUAL_UINT32(473 - 20, out.budget_left_s);
+    TEST_ASSERT_EQUAL_UINT32(473, out.budget_s);             /* the day's allowance */
 
     /* Without a trusted clock the day so far is unknown. */
     in.day_known = false;
@@ -1552,4 +1553,31 @@ TEST_CASE("ntrip Onocoy day figures: graced uptime so far", "[ntrip]")
     TEST_ASSERT_EQUAL_UINT16(1000, ntrip_graced_so_far_permille(5000, 0));
     /* Never below zero. */
     TEST_ASSERT_EQUAL_UINT16(0, ntrip_graced_so_far_permille(100000, 3600));
+}
+
+TEST_CASE("ntrip Onocoy day figures: the day from the ledger, the rate from this boot", "[ntrip]")
+{
+    /* After a restart: the ledger holds the whole day so far (10 h online,
+     * 600 s offline); this boot's own counters only its last hour, at 99.5 %. */
+    ntrip_day_in_t in = { .counted = true, .online_s = 36000, .offline_s = 600, .rate_online_s = 3600,
+                          .epochs_sent_today = 3582, .day_known = true, .unplanned_offline_s = 600,
+                          .elapsed_s = 36600 };
+    ntrip_day_out_t out;
+    ntrip_day_metrics(&in, &out);
+    TEST_ASSERT_TRUE(out.rate_valid);
+    TEST_ASSERT_EQUAL_UINT16(995, out.data_rate_permille);   /* epochs over the time online they cover */
+    TEST_ASSERT_EQUAL_UINT32(430, out.budget_s);             /* the day's allowance at that rate */
+    TEST_ASSERT_EQUAL_UINT32(0, out.budget_left_s);          /* used up: 600 s offline */
+    TEST_ASSERT_FALSE(out.streak_ok);
+    TEST_ASSERT_EQUAL_UINT16((36000 + 300) * 1000 / 86400, out.graced_uptime_permille);
+
+    /* The same day at a perfect rate: 473 s allowed, 600 s over it by 127 s. */
+    in.epochs_sent_today = 3600;
+    ntrip_day_metrics(&in, &out);
+    TEST_ASSERT_EQUAL_UINT32(473, out.budget_s);
+    TEST_ASSERT_EQUAL_UINT32(0, out.budget_left_s);
+    in.offline_s = 400;
+    ntrip_day_metrics(&in, &out);
+    TEST_ASSERT_EQUAL_UINT32(73, out.budget_left_s);
+    TEST_ASSERT_TRUE(out.streak_ok);
 }

@@ -13,7 +13,8 @@
  * view, with plain hints) before any caster is enabled, the Onocoy
  * credentials, optional extra casters. The station keeps the next step
  * (POST /api/setup/step), so the setup resumes after the move to the home
- * network, a reload or a new login; everything else stays in memory only
+ * network, a reload or a new login, but never past the Wi-Fi step while the
+ * station has no working Wi-Fi; everything else stays in memory only
  * (captive-portal browsers may not keep browser storage).
  */
 
@@ -35,7 +36,7 @@ async function boot() {
   try {
     s = await api('GET', '/api/session', undefined, { quiet401: true, timeout: 8000 });
   } catch (e) {
-    bare(h('div', { class: 'narrow' }, card('The station does not answer', msg('bad', errText(e)),
+    bare(h('div', { class: 'narrow' }, pageCard('The station does not answer', msg('bad', errText(e)),
       h('div', { class: 'form-actions' }, btn('Try again', boot, 'primary')))));
     return;
   }
@@ -99,7 +100,7 @@ async function startPublic() {
 
 function showNoAdmin() {
   const ap = apSsidText();
-  bare(h('div', { class: 'narrow' }, card('Set up this station',
+  bare(h('div', { class: 'narrow' }, pageCard('Set up this station',
     h('p', null, 'This station has no admin password yet. The first password can only be set over the station\'s own Wi-Fi network: ' +
       (ap ? 'join "' + ap + '"' : 'join the network whose name starts with "onocoydiy-"') + ' and open http://192.168.4.1/.'),
     h('p', { class: 'muted' }, 'If that network is not there, hold the BOOT button for 10 seconds; the station then opens it for 15 minutes.'),
@@ -165,7 +166,7 @@ function showLogin(note) {
   err);
   const pub = S.session && S.session.public_status ?
     h('p', null, h('button', { type: 'button', class: 'btn ghost small', onclick: startPublic }, 'View the status without logging in')) : null;
-  bare(h('div', { class: 'narrow' }, card('Log in', note ? msg('info', note) : null, form,
+  bare(h('div', { class: 'narrow' }, pageCard('Log in', note ? msg('info', note) : null, form,
     h('p', { class: 'muted small foot' }, recoveryHint()), pub)));
   pw.focus();
 }
@@ -330,17 +331,18 @@ async function startWizard(claim) {
    * while the phone is on the station's own network or the station has no
    * working Wi-Fi; the rest happens on the home network. */
   let steps = ['password', 'wifi', 'reception', 'onocoy', 'casters'];
+  /* The station has no working Wi-Fi (none stored, or not connected): the
+   * setup cannot go past the Wi-Fi step, whatever step it stored. */
+  let wifiDown = false;
   if (!claim) {
-    let wifiFirst = !!sess.on_setup_ap;
-    if (!wifiFirst) {
-      try {
-        W.wifi = await api('GET', '/api/wifi');
-        wifiFirst = !W.wifi.configured || !W.wifi.online;
-      } catch (e) {
-        if (e instanceof ApiError && e.status === 401) return;
-        /* not known: the System page has the Wi-Fi settings */
-      }
+    try {
+      W.wifi = await api('GET', '/api/wifi');
+      wifiDown = !W.wifi.configured || !W.wifi.online;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) return;
+      /* not known: the System page has the Wi-Fi settings */
     }
+    const wifiFirst = !!sess.on_setup_ap || wifiDown;
     steps = (wifiFirst ? ['wifi'] : []).concat(['reception', 'onocoy', 'casters']);
   }
 
@@ -349,7 +351,7 @@ async function startWizard(claim) {
     const head = idx >= 0 ? h('div', { class: 'wiz-head' },
       h('span', null, 'Setup · step ' + (idx + 1) + ' of ' + steps.length),
       h('div', { class: 'dots', 'aria-hidden': 'true' }, steps.map((s, i) => h('i', { class: i < idx ? 'done' : i === idx ? 'now' : null })))) : null;
-    bare(h('div', { class: 'narrow' }, head, h('section', { class: 'card' }, h('h1', null, title), body)));
+    bare(h('div', { class: 'narrow' }, head, pageCard(title, body)));
   }
 
   function after(step) {
@@ -433,9 +435,12 @@ async function startWizard(claim) {
     return true;
   }
 
-  function skipAll() {
+  /* `guard` (optional): resolves true to go on (a step with unsaved input asks first). */
+  function skipAll(guard) {
     return h('p', { class: 'muted small foot' }, 'Experienced? ', h('button', { type: 'button', class: 'btn ghost small', onclick: async e => {
-      const ok = await act(e.currentTarget, setupDone);
+      const b = e.currentTarget;
+      if (guard && !(await guard())) return;
+      const ok = await act(b, setupDone);
       /* The reception check's polling ends once its page is gone; a live
        * view it opened closes by itself after 120 s without a reader. */
       if (ok !== undefined) boot();
@@ -655,7 +660,7 @@ async function startWizard(claim) {
     }
     const cfg = slot.config || {};
     const ono = isOnocoyHost(cfg.host);
-    /* A slot stored before the username field holds the old credential in `mountpoint`: start empty. */
+    /* A slot stored in the older layout (no username) holds the old credential in `mountpoint`: start empty. */
     const current = ono && cfg.username;
     /* What the Onocoy console shows, in its words and order: host and port (fixed), mountpoint, username, password. */
     const hostI = textInput(preset.host, { readonly: true });
@@ -719,6 +724,10 @@ async function startWizard(claim) {
     const configured = (data.slots || []).filter(s => s.config && s.config.host);
     const free = (data.slots || []).filter(s => s.config && !s.config.host && !s.config.enabled);
     const editorBox = h('div');
+    /* The caster being added: while its editor is open, its own Save and
+     * Cancel decide, and Continue waits (it would finish the setup and drop
+     * what was typed, or a duplicate-stream question still open). */
+    let editor = null;
     const render = () => {
       mount(box,
         configured.length ? h('div', { class: 'caster-list' }, configured.map(s => h('div', { class: 'caster' },
@@ -726,11 +735,19 @@ async function startWizard(claim) {
             s.config.host + ':' + s.config.port)))) : h('p', { class: 'muted' }, 'No caster set up yet.'),
         editorBox);
     };
+    const contBtn = btn('Continue', () => next('casters'), 'primary');
+    const closeEditor = () => {
+      editor = null;
+      clear(editorBox);
+      addBtn.hidden = !free.length;
+      contBtn.hidden = false;
+    };
     const addBtn = btn('Add a caster', () => {
       const target = free[0];
       if (!target) return;
       addBtn.hidden = true;
-      mount(editorBox, casterEditor(target, {
+      contBtn.hidden = true;
+      editor = casterEditor(target, {
         preset: data.onocoy_preset,
         hostname: W.system && W.system.hostname,
         hideOnocoy: configured.some(s => isOnocoyHost(s.config.host)),
@@ -738,25 +755,35 @@ async function startWizard(claim) {
           W.casters = await api('GET', '/api/casters');
           stepCasters();
         },
-        onCancel: () => {
-          clear(editorBox);
-          addBtn.hidden = false;
-        },
-      }).el);
+        onCancel: closeEditor,
+      });
+      mount(editorBox, editor.el);
     }, '', { hidden: !free.length });
+    /* "Skip the rest" with a caster typed but not saved: ask first. */
+    const discardTyped = async () => {
+      if (!editor || !editor.dirty()) return true;
+      return dialog({ title: 'Discard this caster?', ok: 'Discard it', cancel: 'Back to the caster', okKind: 'danger',
+        body: h('p', null, 'The caster you are adding is not saved yet. Save it with its Save button first, or discard it and finish the setup.') });
+    };
     render();
     frame('casters', 'More casters (optional)',
       h('p', null, 'The station can stream to several casters at once, for example RTK2go or Centipede next to Onocoy. ' +
         'You can also do this later on the Casters page.'),
       box,
-      h('div', { class: 'form-actions' }, addBtn, btn('Continue', () => next('casters'), 'primary')),
-      skipAll());
+      h('div', { class: 'form-actions' }, addBtn, contBtn),
+      skipAll(discardTyped));
   }
 
-  /* The name the phone will open on the home network. */
-  function localName(w) {
-    const s = S.session || {};
-    return ((w && w.mdns_host) || s.mdns_host || s.hostname || 'onocoydiy') + '.local';
+  /* The name the phone will open on the home network, http://<mdns_host>.local/,
+   * or null while the station's mDNS responder does not run (the name would
+   * not answer): then its address, or the router's device list, finds it. */
+  function localUrl(w) {
+    return stationNameUrl(w || S.session);
+  }
+
+  /* The DHCP name, as the router's device list shows the station. */
+  function routerName() {
+    return (W.system && W.system.hostname) || (S.session && S.session.hostname) || 'onocoydiy';
   }
 
   function stepWifi() {
@@ -769,23 +796,34 @@ async function startWizard(claim) {
     const err = errBox();
     const submit = h('button', { type: 'submit', class: 'btn primary' }, 'Join this network');
     const keep = w.configured && w.online ? btn('Keep ' + w.ssid, e => busy(e.currentTarget, () => next('wifi'))) : null;
+    const url = localUrl(w);
+    /* Without a name that answers: the address, which the next screen shows once the station has joined. */
+    const where = url ? ['open ', h('strong', null, url)] :
+      ['open the station\'s address (the next screen shows it once the station has joined; your router\'s device list names the station ',
+        h('strong', null, routerName()), ')'];
     frame('wifi', 'Wi-Fi',
       h('p', null, 'Choose the Wi-Fi network the station uses to reach the casters.'),
-      onAp ? h('p', null, 'When the station has joined your network, this setup network (' + ap + ') closes. Then connect this phone to your Wi-Fi and open ',
-        h('strong', null, 'http://' + localName(w) + '/'), '. Log in with the admin password you just set; the setup continues there.') :
-        h('p', null, 'The station leaves the network it uses now and joins the one you choose; this page then loses it. Open ',
-          h('strong', null, 'http://' + localName(w) + '/'), ' on that network to continue the setup.'),
+      onAp ? h('p', null, 'When the station has joined your network, this setup network (' + ap + ') closes. Then connect this phone to your Wi-Fi and ',
+        where, '. Log in with the admin password you just set; the setup continues there.') :
+        h('p', null, 'The station leaves the network it uses now and joins the one you choose; this page then loses it. On that network, ',
+          url ? where : ['find the station in the router\'s device list as ', h('strong', null, routerName()), ' and open its address'],
+          ' to continue the setup.'),
       w.configured ? msg('info', 'Now: ' + w.ssid + (w.online ? ' (connected, ' + w.ip + ')' : ' (not connected)')) : null,
       h('form', { onsubmit: async e => {
         e.preventDefault();
         const v = picker.value();
         if (!v) return;
-        /* The step after the Wi-Fi first: the station keeps it while this page moves networks. */
+        /* The step after the Wi-Fi first: the station keeps it while this page
+         * moves networks. A join that was not sent puts the Wi-Fi step back. */
+        let stepSaved = false;
         const r = await act(submit, async () => {
-          await saveStep(following);
+          stepSaved = await saveStep(following);
           return api('PUT', '/api/wifi', v);
         }, err);
-        if (r === undefined) return;
+        if (r === undefined) {
+          if (stepSaved) saveStep('wifi');
+          return;
+        }
         W.joined = { ssid: v.ssid, persisted: r.persisted !== false, applied: r.applied !== false, since: Date.now(), following: following };
         go('connect');
       } }, picker.el, err, h('div', { class: 'form-actions' }, submit, keep)));
@@ -808,7 +846,7 @@ async function startWizard(claim) {
     const status = h('div', { class: 'stack' });
     frame('connect', 'Joining ' + joined.ssid, status);
     let fails = 0, stopped = false, shown = '', okNet = null, closeAt = 0, okSince = 0, ticker = 0;
-    let leftEl = null, trialLeft = null;
+    let leftEl = null, trialLeft = null, stepBack = false, lastNet = null;
     /* Re-render only when the situation changes, so buttons stay put. */
     const show = (mode, ...kids) => {
       if (mode !== shown) {
@@ -859,12 +897,20 @@ async function startWizard(claim) {
       if (left === 0) closedView();
     }
 
+    const setTitle = text => {
+      const title = status.parentElement && status.parentElement.querySelector('h1');
+      if (title) title.textContent = text;
+    };
+
     function okView(w) {
       okNet = w;
       if (!okSince) {
         okSince = Date.now();
-        const title = status.parentElement && status.parentElement.querySelector('h1');
-        if (title) title.textContent = 'Wi-Fi set up';
+        setTitle('Wi-Fi set up');
+      }
+      if (stepBack) {
+        stepBack = false;
+        saveStep(following);   /* joined after all: the setup goes on from the next step */
       }
       const ap = w.ap || {};
       const counting = onAp && ap.active && typeof ap.close_in_s === 'number';
@@ -907,14 +953,33 @@ async function startWizard(claim) {
       try {
         w = await api('GET', '/api/wifi', undefined, { timeout: 3000, quiet401: true });
         fails = 0;
+        lastNet = w;
       } catch (e) {
         fails++;
       }
       if (stopped || !status.isConnected) return;
       if (okNet) {
         /* Connected already: only the countdown and the AP's end matter now. */
-        if (w && w.online) okView(w);
-        else if (!w && fails >= 2) closedView();
+        if (w && w.online) {
+          okView(w);
+        } else if (w) {
+          /* The station lost the network again (within the setup network's
+           * last seconds): the setup network stays open as the fallback and
+           * the countdown is void. Back to waiting for the join.
+           * PROVISIONAL: to be confirmed on hardware (a home network that
+           * drops the station within the 15 s). */
+          clearInterval(ticker);
+          ticker = 0;
+          leftEl = null;
+          okNet = null;
+          okSince = 0;
+          joined.since = Date.now();
+          setTitle('Joining ' + joined.ssid);
+          show('relost', msg('warn', h('strong', null, 'The station lost ' + joined.ssid + ' again.'),
+            ' Its setup network (' + apName(w) + ') stays open while it reconnects; stay on it.'), h('div', { class: 'spinner' }));
+        } else if (fails >= 2) {
+          closedView();
+        }
         if (!stopped) setTimeout(loop, 1000);
         return;
       }
@@ -933,6 +998,10 @@ async function startWizard(claim) {
         /* Changed credentials that did not work: the station went back to its previous network. */
         const why = w.cred_reverted_why === 'auth_failed' ? joined.ssid + ' refused the new password: the station is back on its previous credentials.' :
           'No address on ' + joined.ssid + ' within 90 seconds: the station went back to ' + (w.ssid || 'its previous network') + '.';
+        if (shown !== 'reverted:' + w.cred_reverted_why) {
+          stepBack = true;
+          saveStep('wifi');   /* a reload or a new login comes back here */
+        }
         show('reverted:' + w.cred_reverted_why, msg('warn', h('strong', null, why), ' The new credentials stay pending.'),
           h('div', { class: 'form-actions' }, btn('Try them again', async e => {
             if (await retryPendingWifi(e)) {
@@ -960,20 +1029,25 @@ async function startWizard(claim) {
         return;
       }
       if (fails >= 3) {
-        const name = 'http://' + localName(null) + '/';
+        const name = localUrl(lastNet || W.wifi);
         const ap = apName(W.wifi);
         show('lost', msg('info', h('strong', null, 'This phone lost the setup network.'),
           ' That is normal once the station joins ' + joined.ssid + ': its setup network moves to that network\'s channel and then closes.'),
         h('ol', { class: 'howto' },
           h('li', null, 'Connect this phone to ', h('strong', null, joined.ssid), '.'),
-          h('li', null, 'Open ', h('a', { href: name }, name), ', or find the station in your router\'s device list as ', h('strong', null, host),
-            ' and open its address.'),
+          name ? h('li', null, 'Open ', h('a', { href: name }, name), ', or find the station in your router\'s device list as ', h('strong', null, host),
+            ' and open its address.') :
+            h('li', null, 'Find the station in your router\'s device list as ', h('strong', null, host), ' and open its address.'),
           h('li', null, 'Log in with the admin password; the setup continues with ' + (WIZ_NEXT[following] || 'the next step') + '.')),
         h('p', { class: 'muted small' }, 'If the station could not join, ' + ap + ' comes back within a minute: join it and open http://192.168.4.1/.'),
         h('p', { class: 'muted small' }, 'On a guest network (devices there cannot see each other) the station cannot be reached from your phone: hold its BOOT ' +
           'button for 10 seconds. Its own network then opens for 15 minutes and the admin password is cleared; join it, set a new password and choose another network.'),
         h('div', { class: 'spinner' }));
       } else if (w && secs > 40 && !w.cred_trial && (w.connect_failures > 0 || w.last_disconnect_reason)) {
+        if (shown.indexOf('failing:') !== 0) {
+          stepBack = true;
+          saveStep('wifi');   /* a reload or a new login comes back here */
+        }
         show('failing:' + w.last_disconnect_reason, msg('warn', h('strong', null, 'Not connected yet.'), ' Last error: ' + wifiReason(w.last_disconnect_reason) + '.'),
           h('p', null, 'The station keeps trying. Check the network name and password.'),
           h('div', { class: 'form-actions' }, btn('Change Wi-Fi settings', () => {
@@ -986,7 +1060,12 @@ async function startWizard(claim) {
     loop();
   }
 
-  /* Resume where the station says the setup was (a login on the home network after the Wi-Fi step, a reload). */
-  const resume = !claim && sess.setup_step && steps.indexOf(sess.setup_step) >= 0 ? sess.setup_step : steps[0];
+  /* Resume where the station says the setup was (a login on the home network
+   * after the Wi-Fi step, a reload), but never past the Wi-Fi step while the
+   * station has no working Wi-Fi: the next step is stored before the join
+   * is sent, and a join that failed (or a page that lost the station on the
+   * way) leaves it there. */
+  let resume = !claim && sess.setup_step && steps.indexOf(sess.setup_step) >= 0 ? sess.setup_step : steps[0];
+  if (!claim && wifiDown) resume = 'wifi';
   go(resume);
 }

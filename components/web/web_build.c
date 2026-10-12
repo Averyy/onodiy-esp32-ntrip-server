@@ -304,8 +304,10 @@ static void day_figures(wj_t *w, const ntrip_caster_status_t *t, bool prot)
         wj_null(w, "data_rate_permille");
     }
     if (v) {
+        wj_uint(w, "budget_s", t->budget_s);
         wj_uint(w, "budget_left_s", t->budget_left_s);
     } else {
+        wj_null(w, "budget_s");
         wj_null(w, "budget_left_s");
     }
 }
@@ -429,8 +431,10 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
     wj_obj_close(w);
 }
 
-/* Why the GNSS ladder's ESP32 restart waits now, how long the presence limit
- * still holds it, and the reboot cap's wait (status health and /api/health). */
+/* Why the GNSS ladder's ESP32 restart waits now, when the last of those
+ * reasons ends at the latest (null: setup holds, which has no limit), and
+ * the reboot cap's wait (status health and /api/health). Health reports
+ * them only during a ladder episode. */
 static void reboot_hold_fields(wj_t *w, const health_status_t *h)
 {
     static const char *const names[] = { "setup", "ap_client", "admin", "power_on" };
@@ -441,8 +445,7 @@ static void reboot_hold_fields(wj_t *w, const health_status_t *h)
         }
     }
     wj_arr_close(w);
-    bool presence = (h->gnss_reboot_hold & (HEALTH_HOLD_AP_CLIENT | HEALTH_HOLD_ADMIN)) != 0;
-    wj_u32_or_null(w, "reboot_hold_left_s", presence ? h->gnss_reboot_hold_left_s : UINT32_MAX);
+    wj_u32_or_null(w, "reboot_hold_left_s", h->gnss_reboot_hold != 0 ? h->gnss_reboot_hold_left_s : UINT32_MAX);
     wj_u32_or_null(w, "reboot_cap_wait_s", h->gnss_reboot_cap_wait_s);
 }
 
@@ -1901,6 +1904,11 @@ static void day(wj_t *w, const char *key, const ledger_day_t *d, size_t slots)
         wj_uint(w, NULL, d->reconnects[i]);
     }
     wj_arr_close(w);
+    wj_arr_open(w, "up_s");
+    for (size_t i = 0; i < slots && i < LEDGER_MAX_SLOTS; i++) {
+        wj_uint(w, NULL, d->up_s[i]);
+    }
+    wj_arr_close(w);
     wj_uint(w, "power_off_s", d->power_off_s);
     wj_uint(w, "rx_overflows", d->rx_overflows);
     wj_obj_close(w);
@@ -1934,6 +1942,7 @@ void web_build_availability(wj_t *w, const web_avail_snap_t *a)
         wj_bool(w, "onocoy_ready", ready);
         wj_uint(w, "down_today_s", a->down_today_s);
         wj_u32_or_null(w, "budget_left_s", counted ? a->budget_left_s : UINT32_MAX);
+        wj_u32_or_null(w, "budget_s", counted ? p->budget_s : UINT32_MAX);
         if (counted && p->data_rate_valid) {
             wj_uint(w, "data_rate_permille", p->data_rate_permille);
         } else {

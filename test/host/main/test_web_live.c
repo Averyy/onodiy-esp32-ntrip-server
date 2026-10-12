@@ -704,6 +704,9 @@ TEST_CASE("status sections with the new fields still fit the WebSocket's section
     s.health.recovery_mode = HEALTH_RECOVERY_NO_REBOOT;
     s.health.gnss_reboot_recheck = true;
     s.health.factory_reset_refused_age_s = 1;
+    s.health.gnss_reboot_hold = 0x0F;
+    s.health.gnss_reboot_hold_left_s = UINT32_MAX - 1;
+    s.health.gnss_reboot_cap_wait_s = UINT32_MAX - 1;
     s.slots = 1;
     s.cfg_valid = true;
     /* Caster strings are validated on input (no control characters; host a DNS name): '"' escapes worst. */
@@ -718,6 +721,13 @@ TEST_CASE("status sections with the new fields still fit the WebSocket's section
     s.cst[0].today_online_s = UINT32_MAX - 1;
     s.cst[0].today_offline_s = UINT32_MAX - 1;
     s.cst[0].budget_left_s = UINT32_MAX - 1;
+    s.cst[0].budget_s = UINT32_MAX - 1;
+    s.cst[0].day_metrics_valid = true;   /* every Onocoy day figure a number, not null */
+    s.cst[0].so_far_valid = true;
+    s.cst[0].data_rate_valid = true;
+    s.cst[0].graced_uptime_permille = 1000;
+    s.cst[0].graced_uptime_so_far_permille = 1000;
+    s.cst[0].data_rate_permille = 1000;
     s.cst[0].bytes_sent = UINT64_C(0x1FFFFFFFFFFFFF);
     s.cst[0].lag_ms_now = UINT32_MAX - 1;
     s.cst[0].next_retry_s = UINT32_MAX - 1;

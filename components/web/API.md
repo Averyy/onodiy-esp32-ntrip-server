@@ -114,7 +114,10 @@ Applied to every request before any handler runs.
    domain; names compared without case): only suffixes that never resolve
    in public DNS, so a router domain that is a public zone (such as
    `fritz.box`) is not accepted; use the IP address or the `.local` name
-   there. Anything else on the station interface gets `421 bad_host` (DNS
+   there. A name may also come fully qualified, with one trailing dot
+   (`<mdns_host>.local.`, the target a DNS-SD browser opens for the
+   `_http._tcp` service); an IP address may not. Anything else on the
+   station interface gets `421 bad_host` (DNS
    rebinding). On the AP interface a foreign Host is the captive portal
    instead (section 16).
 2. **Origin.** On every `POST`, `PUT`, `DELETE` and WebSocket handshake that
@@ -405,8 +408,9 @@ object as sections (section 7), so the UI keeps one model. Admin form:
   "casters": [
     {"slot": 0, "name": "Onocoy", "enabled": true, "protected": true, "host": "servers.onocoy.com",
      "state": "streaming", "reason": "none", "state_age_s": 3600, "connected_s": 3600,
-     "today_online_s": 43200, "today_offline_s": 4, "graced_uptime_permille": 1000,
-     "streak_ok": true, "graced_uptime_so_far_permille": 1000, "data_rate_permille": 1000, "budget_left_s": 469,
+     "today_online_s": 43200, "today_offline_s": 4, "graced_uptime_permille": 503,
+     "streak_ok": true, "graced_uptime_so_far_permille": 1000, "data_rate_permille": 1000, "budget_s": 473,
+     "budget_left_s": 469,
      "onocoy_ready": true, "bytes_sent": 74000000, "lag_ms_now": 40, "next_retry_s": 0, "unreached_s": 0, "hint": ""}
   ],
   "health": {"level": "degraded", "last_step": "none", "ladder_suspended": false,
@@ -440,15 +444,15 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.rtcm_age_ms` | since the last CRC-valid RTCM frame (`gnss_link`), `null` = never |
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
 | `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
-| `casters[]` | every slot; the full status is in `/api/casters`. Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with the console's mountpoint, username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none) |
+| `casters[]` | every slot; the full status is in `/api/casters`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with the console's mountpoint, username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none) |
 | `alerts[]` | health's alerts (`source: "health"`) and the station's (`source: "station"`); `config_failed` carries `retry_in_s`; `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`) |
 | `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without an enabled protected slot that is set up (`onocoy_ready`), or without a trusted clock. Information only, never a gate |
 | `health.factory_reset_refused` | a BOOT-button factory reset was refused within the last 10 min because a receiver update was running (the UI shows a notice); admin form only |
 | `health.recovery_mode` | automatic receiver recovery in effect (`gnss/recovery`, `health_recovery_mode_t`): `full`, `no_reboot` (everything but the ESP32 reboot), `alerts_only` (nothing is sent to the receiver: a stall is only reported and journalled, level `degraded`, `failed` once the ladder gives up); admin form only |
 | `health.reboot_recheck` | no receiver found and an ESP32 reboot was blocked or held: it is looked at again after the next detection pass, when the reboot cap allows and nothing holds it; admin form only |
-| `health.reboot_hold` | why the GNSS ladder's ESP32 restart is postponed right now (`[]` = nothing): `setup` (first setup not finished; no time limit), `ap_client` (someone is connected to the station's access point), `admin` (an admin session made a request or sent a WebSocket ping in the last 5 min), `power_on` (the first 60 min of station time since power-on while nothing valid was heard from the receiver in this boot). A held restart is never queued: it is journalled once (section 14) and looked at again later, like one the cap blocks; admin form only |
-| `health.reboot_hold_left_s` | seconds until the 30 min limit on `ap_client` and `admin` together (per ladder episode) lets a held restart run anyway; `null` when neither holds |
-| `health.reboot_cap_wait_s` | seconds until the reboot cap (60 min apart, at most 3 in 24 h) allows a ladder restart; `null` when it allows one now |
+| `health.reboot_hold` | why the GNSS ladder's ESP32 restart is postponed right now (`[]` = nothing): `setup` (first setup not finished and no caster enabled; no time limit), `ap_client` (someone is connected to the station's access point), `admin` (an admin session made a request or sent a WebSocket ping in the last 5 min), `power_on` (the first 60 min of station time since power-on while nothing valid was heard from the receiver in this boot). Reported only during a ladder episode (a stall or no receiver, until the ladder resets), where a restart may be pending: `[]` otherwise, whatever holds. A held restart is never queued: it is journalled once (section 14) and looked at again later, like one the cap blocks; admin form only |
+| `health.reboot_hold_left_s` | seconds until every reason in `reboot_hold` has ended at the latest (`ap_client` and `admin`: the 30 min limit on both together per ladder episode; `power_on`: the end of its 60 min), so a restart still needed then runs; `null` when nothing holds or `setup` holds (no time limit) |
+| `health.reboot_cap_wait_s` | seconds until the reboot cap (60 min apart, at most 3 in 24 h) allows a ladder restart; `null` when it allows one now, and outside a ladder episode |
 | `update` | the banner (section 12); admin form only |
 
 In safe mode the receiver section shows `state: "idle"` with the journal
@@ -888,8 +892,9 @@ Close it now (the output is turned off at the next free moment).
 baud list after two failed short passes and always after 5 min). A pass
 that runs already counts. `202 {"accepted": true}`. Errors:
 `409 not_no_receiver` (any other state, receiver maintenance included),
-`409 safe_mode`. The UI's no-receiver card (dashboard alert, setup
-wizard's reception step, Signals) offers it as "Check again".
+`409 safe_mode`. The UI's no-receiver card (the alert on the dashboard
+and on Diagnostics, Health; the setup wizard's reception step; Signals)
+offers it as "Check again".
 
 ---
 
@@ -1022,12 +1027,15 @@ words and order: host `servers.onocoy.com` and port 2101 (shown read-only),
 (`ntrip_wire_names()`): NTRIP 2.0 posts to `/<mountpoint>` with Basic
 `<username>:<password>`; NTRIP 1.0 (the default) sends
 `SOURCE <password> /<username>`, as Onocoy tells sources that speak only
-1.0 to do. A slot stored before the username field existed (Onocoy host,
-empty `username`, the old credential username in `mountpoint`) keeps
-working with the old mapping (1.0: `mountpoint` as the mountpoint; 2.0:
-`label` or `onocoydiy` as the mountpoint, `mountpoint` as the Basic-auth
-user) but is not set up (`onocoy_ready` false); its next save while enabled
-needs the username.
+1.0 to do. A slot stored in the older layout (an Onocoy slot whose stored
+record has no layout byte, the credential username in `mountpoint`) is loaded
+with an empty `username`, whatever its record held: a slot switched to
+Onocoy in place kept the username of the caster it was before, which meant
+nothing for Onocoy. It keeps working with the old mapping (1.0:
+`mountpoint` as the mountpoint; 2.0: `label` or `onocoydiy` as the
+mountpoint, `mountpoint` as the Basic-auth user) but is not set up
+(`onocoy_ready` false); its next save while enabled needs the username, and
+any save stores it in the current layout.
 
 **`status`** (`ntrip_caster_status_t`):
 
@@ -1038,8 +1046,8 @@ needs the username.
                        "keepalive": 0, "auth": 0, "mount_busy": 0, "config": 0, "banned": 0},
  "connected_since_unix": 1760086400, "connected_s": 3600,
  "today_online_s": 43200, "today_offline_s": 4,
- "graced_uptime_permille": 1000, "streak_ok": true, "graced_uptime_so_far_permille": 1000,
- "data_rate_permille": 1000, "budget_left_s": 469,
+ "graced_uptime_permille": 503, "streak_ok": true, "graced_uptime_so_far_permille": 1000,
+ "data_rate_permille": 1000, "budget_s": 473, "budget_left_s": 469,
  "bytes_sent": 74000000, "frames_sent": 900000, "epochs_sent": 86000, "epochs_sent_today": 43200,
  "frames_dropped": 0, "bytes_dropped": 0, "epochs_dropped": 0, "epochs_dropped_today": 0,
  "frames_skipped_idle": 12, "lag_drops": 0, "laps": 0, "lag_ms_now": 40, "max_lag_ms": 1000,
@@ -1049,11 +1057,22 @@ needs the username.
  "tls_version": null, "tls_cipher": null, "hint": "", "last_err": null}
 ```
 
-"Today" is the current UTC day. The Onocoy day figures are `null` for
+"Today" is the current UTC day. `today_online_s` and `today_offline_s` are
+the availability ledger's figures for the slot (section 15:
+`/api/availability` `today.up_s` and `down_s`): seconds it streamed with
+fresh RTCM, and seconds it was enabled but did not (planned time
+included); they are kept across restarts, so every "today" figure agrees
+with the others. `epochs_sent_today` and `epochs_dropped_today` are this
+start's counts (RAM; they start again at a restart). The Onocoy day figures are `null` for
 other slots, and for the protected slot while it is disabled or not set up
 (`onocoy_ready` false): numbers for a slot that cannot stream would only
-mislead. `graced_uptime_permille` is the day fraction (online plus the
-300 s grant, of 86400 s; for diagnostics); `graced_uptime_so_far_permille`
+mislead. `graced_uptime_permille` is the share of the whole day covered so
+far (online today plus the 300 s grant, of 86400 s: what the day reaches
+if nothing more is sent); `data_rate_permille` = this start's epochs sent
+today over its seconds connected today (a ratio, so this start's part is
+an estimate for the day); `budget_s` the offline seconds the day allows at
+that data rate (473 at 100 %); `budget_left_s` = `budget_s` minus
+`today_offline_s`, 0 once used up; `graced_uptime_so_far_permille`
 = 1 - max(0, unplanned downtime today - 300 s) / time elapsed today, with
 the downtime as the availability ledger counts it (planned time left out)
 and the time counted from 00:00 UTC, or from when the slot was enabled and
@@ -1322,9 +1341,11 @@ is unsigned or not signed with one of its keys), `untrusted_host` (check,
 GitHub's release hosts, off https, or carried user info; nothing was fetched
 from there), `package_rejected` (a receiver package failed a
 pre-flight rule; with `failed_rule`, 1-12 as numbered in `um98x_flash.h`,
-and `cross_layout`), `failed` (anything else; `message` has the
-`esp_err_t`). An app upload that stops for `rolled_back_ack_required`
-ends with `refused`.
+and `cross_layout`), `same_image` (an app upload of the image already
+running, sent without `X-Reinstall`: nothing was written),
+`rolled_back_ack_required` (an app upload of a rolled-back version sent
+without `rolled_back_ack=1`: nothing was written), `failed` (anything else;
+`message` has the `esp_err_t`).
 
 ### `POST /api/update/check` (adm)
 
@@ -1507,7 +1528,7 @@ All admin only.
   "uptime_s": 86400, "gnss_stalls": 0, "recoveries": 0, "caster_restarts": 0,
   "network_recoveries": 0, "rtcm_gap_ms": 230, "gnss_retry_in_s": null,
   "factory_reset_refused_age_s": null, "admin_resets": 0, "recovery_mode": "full", "reboot_recheck": false,
-  "reboot_hold": ["setup", "power_on"], "reboot_hold_left_s": null, "reboot_cap_wait_s": null,
+  "reboot_hold": [], "reboot_hold_left_s": null, "reboot_cap_wait_s": null,
   "heap": {"internal_free": 120000, "internal_min": 98000, "internal_largest": 64000, "psram_free": 7000000,
            "psram_min": 6900000, "psram_largest": 4000000},
   "inhibited_by": null, "update_slot": "none",
@@ -1577,17 +1598,19 @@ offering the download.
 {
   "clock": "gnss", "utc_second_of_day": 43210,
   "slots": [{"slot": 0, "name": "Onocoy", "protected": true}],
-  "protected": {"down_today_s": 4, "budget_left_s": 469, "data_rate_permille": 1000,
-                "graced_uptime_permille": 1000, "streak_ok": true},
+  "protected": {"down_today_s": 4, "budget_left_s": 469, "budget_s": 473, "data_rate_permille": 1000,
+                "graced_uptime_permille": 503, "streak_ok": true},
   "today": {"utc_day": 20736, "date": "2026-10-10", "down_s": [4, 0, 0, 0], "planned_s": [0, 0, 0, 0],
-            "reconnects": [1, 0, 0, 0], "power_off_s": 0, "rx_overflows": 0},
+            "reconnects": [1, 0, 0, 0], "up_s": [43196, 0, 0, 0], "power_off_s": 0, "rx_overflows": 0},
   "history": []
 }
 ```
 
 Per-slot arrays have `max_slots` entries. `history` holds up to 30 past days
-in the `today` shape, newest first. `down_s` counts seconds a slot should
-have streamed but did not; `planned_s` the planned part of it: casters
+in the `today` shape, newest first. `up_s` counts seconds a slot streamed
+with fresh RTCM behind it (online; 0 for days stored by a build that did
+not count it); `down_s` seconds it should have streamed but did not;
+`planned_s` the planned part of it: casters
 paused for receiver configuration or a receiver update, and a restart that
 is a direct consequence of a user action (Restart, an app update or
 rollback, a factory reset, leaving safe mode, the BOOT-button resets;
@@ -1598,8 +1621,11 @@ safe-mode retry), crashes, brownouts and power cuts are never planned, and
 neither is a crash that follows a planned restart: only the boot right
 after the planned restart counts it, and the gap after any crash or reset
 pin is unplanned. Planned time counts against the budget all the same. `clock` is `none` until a
-trusted time exists (`utc_second_of_day` is then `null`). The budget is
-information only.
+trusted time exists (`utc_second_of_day` is then `null`). `protected`: the
+Onocoy slot's day (`null` without one): `down_today_s` its offline time
+today, `budget_s` the day's offline allowance at the current data rate,
+`budget_left_s` what is left of it, and the other figures as in the caster
+status (section 10). The budget is information only.
 
 ### `GET /api/diag/tasks`
 
@@ -1769,9 +1795,13 @@ The UI shows both, as links.
    follows the station's channel once it connects, so phones may drop off
    it briefly; the UI keeps polling, and when the phone loses it for good
    tells the user how to go on (join the home Wi-Fi, open the `.local` name
-   or the router's device list; the AP comes back if the station could not
-   join; on a guest network the BOOT button opens the station's own
-   network again).
+   while the mDNS responder runs (`mdns_host`), else the router's device
+   list; the AP comes back if the station could not join; on a guest
+   network the BOOT button opens the station's own network again). A
+   `PUT /api/wifi` that fails, and a join that keeps failing or goes back
+   to the previous credentials, post `{"step": "wifi"}` again; a station
+   that loses its address during the countdown keeps the AP up (fallback),
+   and the UI says so and waits again instead of counting down.
 4. The phone is back on the home network: the user opens
    `http://<mdns_host>.local/`, logs in, and the wizard resumes at
    `setup_step`.
@@ -1796,7 +1826,13 @@ Every step posts the next one (`POST /api/setup/step`) before it shows it.
 Wi-Fi credentials can never be saved before an admin password exists
 (every Wi-Fi call needs a session). Logged in on the home network, the
 wizard shows the Wi-Fi step only while the page is on the station's own
-access point or the station has no working Wi-Fi.
+access point or the station has no working Wi-Fi. A wizard that starts
+(a reload, a new login) reads `GET /api/wifi` first: while the station
+has no working Wi-Fi (none stored, or not connected) it resumes at the
+Wi-Fi step whatever `setup_step` says. In the optional casters step,
+Continue waits while a caster being added is open in its editor (its own
+Save and Cancel decide; "Skip the rest" asks before it drops what was
+typed).
 
 **Recovery.** BOOT held 10 s clears the admin password and opens the
 recovery AP for 15 min (open unless an AP password is set; longer while a

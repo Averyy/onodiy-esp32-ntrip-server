@@ -167,10 +167,12 @@ Views.system = {
           w = await api('GET', '/api/wifi', undefined, { timeout: 3000 });
         } catch (e) {
           if (secs > 5) {
-            const name = 'http://' + ((wifi && wifi.mdns_host) || (sys && sys.hostname_active) || 'onocoydiy') + '.local/';
+            /* The .local name only while the station's mDNS responder runs (it answers nothing otherwise). */
+            const name = stationNameUrl(wifi);
+            const dhcp = (sys && sys.hostname_active) || 'onocoydiy';
             show(msg('warn', 'This page lost contact with the station. If it moved to another network, open it there: ',
-              h('a', { href: name }, name), ', or find its address in that router\'s device list (named ' +
-              ((sys && sys.hostname_active) || 'onocoydiy') + ').'));
+              name ? [h('a', { href: name }, name), ', or find its address in that router\'s device list (named ' + dhcp + ').'] :
+                'find its address in that router\'s device list (named ' + dhcp + ').'));
           }
           return;
         }
@@ -248,10 +250,14 @@ Views.system = {
     /* ---- Device ---- */
     function renderDevice() {
       const name = textInput(sys.hostname, { maxlength: 32 });
-      const active = (wifi && wifi.mdns_host) || sys.hostname_active || sys.hostname;
+      /* The .local name answers only while the mDNS responder runs (mdns_host set). */
+      const active = wifi && wifi.mdns_host;
       const ipUrl = wifi && wifi.online && wifi.ip ? 'http://' + wifi.ip + '/' : null;
-      const fName = field('Station name', name, 'Letters, digits and "-". Other devices on your network open http://' + active + '.local/' +
-        (ipUrl ? ' (or ' + ipUrl + ')' : '') + '. It is also the name the station gives your router (DHCP) and the Onocoy dashboard label default.');
+      const reach = active ? 'Other devices on your network open http://' + active + '.local/' + (ipUrl ? ' (or ' + ipUrl + ')' : '') + '.' :
+        ipUrl ? 'Other devices on your network open ' + ipUrl + ' (the .local name does not answer right now).' :
+          'The .local name does not answer right now.';
+      const fName = field('Station name', name, 'Letters, digits and "-". ' + reach +
+        ' It is also the name the station gives your router (DHCP) and the Onocoy dashboard label default.');
       const pub = checkbox('Public status page', sys.public_status,
         'Anyone on your network can see the station state, caster names and states, signals and the sky view without logging in. ' +
         'Never shown: hosts, mountpoints, users, addresses, versions or the antenna position.');
@@ -259,8 +265,8 @@ Views.system = {
       const save = h('button', { type: 'submit', class: 'btn primary' }, 'Save');
       mount(deviceCard,
         h('h2', null, 'Station'),
-        sys.hostname_active && sys.hostname_active !== sys.hostname ? msg('info', 'Reachable as http://' + active + '.local/ until the next restart, then http://' +
-          sys.hostname + '.local/.') : null,
+        sys.hostname_active && sys.hostname_active !== sys.hostname ? msg('info', (active ? 'Reachable as http://' + active + '.local/ until the next restart, then http://' :
+          'The new name takes effect at the next restart: http://') + sys.hostname + '.local/.') : null,
         h('form', { class: 'stack', oninput: () => {
           dirty = true;
         }, onsubmit: async e => {

@@ -169,7 +169,7 @@ function liveSatTable() {
   }
 
   return {
-    el: h('div', null, h('div', { class: 'scroll' }, h('table', { class: 'sats stack-sm' }, head, body)), note),
+    el: h('div', null, scrollBox('Satellites', h('table', { class: 'sats stack-sm' }, head, body)), note),
     update(d) {
       last = d;
       const nb = liveBands(d.totals);
@@ -190,7 +190,7 @@ function liveCountsTable(t) {
   const bands = liveBands(t);
   const systems = t.systems || [];
   if (!systems.length) return h('p', { class: 'muted' }, 'No satellites tracked yet.');
-  return h('div', { class: 'scroll' }, h('table', { class: 'counts' },
+  return scrollBox('Satellites per constellation', h('table', { class: 'counts' },
     h('thead', null, h('tr', null, h('th', null, 'Constellation'), h('th', { class: 'num' }, 'Satellites'),
       bands.map(b => h('th', { class: 'num' }, BAND_HEAD[b])), h('th', { class: 'num' }, 'Bands'))),
     h('tbody', null, systems.map(s => {

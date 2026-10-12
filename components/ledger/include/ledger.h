@@ -8,8 +8,10 @@
  * curve means a graced uptime of >= 99.8 % per UTC day with a 300 s grant:
  * at most ~473 s offline per day at a perfect data rate (less when epochs
  * are lost; a plain 98 % uptime scores only about 0.81). The ledger counts,
- * per slot, the seconds a slot was expected to stream (enabled) but did not;
- * planned downtime counts too and is also shown on its own as planned:
+ * per slot, the seconds a slot was expected to stream (enabled) but did not,
+ * and the seconds it streamed (online): every "today" figure the station
+ * shows comes from these, which survive restarts; planned downtime counts
+ * too and is also shown on its own as planned:
  * casters paused for receiver work, and a reboot the user asked for (see
  * "Planned reboots"). Slots flagged "protected" (the Onocoy slot)
  * drive the daily downtime budget shown in the UI and with update prompts,
@@ -113,6 +115,7 @@ typedef struct {
     uint32_t reconnects[LEDGER_MAX_SLOTS];
     uint32_t power_off_s;                     /**< power-cut gaps added at boot */
     uint32_t rx_overflows;                    /**< UART/driver overflow events */
+    uint32_t up_s[LEDGER_MAX_SLOTS];          /**< seconds a slot streamed with fresh RTCM (online) */
 } ledger_day_t;
 
 /**

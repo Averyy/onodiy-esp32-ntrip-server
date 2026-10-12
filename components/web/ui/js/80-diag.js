@@ -107,7 +107,9 @@ function bootWhen(x) {
 }
 
 function healthTab(box) {
+  let lastHl = null;
   const render = hl => {
+    lastHl = hl;
     const b = hl.boot || {};
     const heap = hl.heap || {};
     const link = hl.link || {};
@@ -120,7 +122,7 @@ function healthTab(box) {
     mount(box, h('div', { class: 'grid' },
       h('section', { class: 'card' },
         h('h2', null, 'Health', badge(lbl(L.health, hl.level), tone)),
-        alerts.length ? alertList(alerts) :
+        alerts.length ? alertList(alerts, { detect: true }) :
           h('p', { class: 'muted' }, tone === 'ok' || tone === '' ? 'No alerts.' : 'No alert names the cause: see the receiver and caster pages.'),
         plan ? h('p', { class: 'small' }, plan) : null,
         kv([
@@ -185,6 +187,9 @@ function healthTab(box) {
           ['Actions', fmt.num(net.ladder.actions)],
         ]) : null)));
   };
+  detectClicks(box, () => {
+    if (lastHl) render(lastHl);
+  });
   return { stop: pollInto(box, 5000, '/api/health', render) };
 }
 
@@ -242,8 +247,8 @@ function availabilityTab(box) {
     const day = av.today || {};
     const days = av.history || [];
     const sod = av.utc_second_of_day;
-    const dayRows = slots.map((s, i) => [s.name || 'Slot ' + (s.slot + 1), fmt.dur((day.down_s || [])[i]), fmt.dur((day.planned_s || [])[i]),
-      fmt.num((day.reconnects || [])[i])]);
+    const dayRows = slots.map((s, i) => [s.name || 'Slot ' + (s.slot + 1), fmt.dur((day.up_s || [])[i]), fmt.dur((day.down_s || [])[i]),
+      fmt.dur((day.planned_s || [])[i]), fmt.num((day.reconnects || [])[i])]);
     /* Onocoy's figures only while its slot is set up and on: numbers for a slot that cannot stream mislead. */
     const counting = prot && p.onocoy_ready !== false && p.enabled !== false;
     const sofar = p.graced_uptime_so_far_permille;
@@ -258,20 +263,22 @@ function availabilityTab(box) {
           prot && !counting ? ['Onocoy', h('span', null, p.onocoy_ready === false ? 'Onocoy not set up. ' : 'Onocoy is off. ',
             link(p.onocoy_ready === false ? 'Add your Onocoy credentials' : 'Turn it on', '#/casters/onocoy'))] : null,
           counting ? ['Onocoy offline today', fmt.dur(p.down_today_s)] : null,
+          counting && p.budget_s !== null && p.budget_s !== undefined ? ['Offline budget today', 'about ' + fmt.dur(p.budget_s) +
+            ' at the current data rate'] : null,
           counting ? ['Offline budget left', fmt.dur(p.budget_left_s)] : null,
           counting ? ['Data rate', p.data_rate_permille === null || p.data_rate_permille === undefined ? 'nothing sent yet today' :
             fmt.permille(p.data_rate_permille)] : null,
-          counting ? ['Graced uptime so far', sofar === null || sofar === undefined ? DASH :
-            h('span', { class: p.streak_ok ? 't-ok' : sofar < 998 ? 't-bad' : 't-ok' }, fmt.permille(sofar) + (p.streak_ok ? ' (streak on track)' :
-              sofar < 998 ? ' (below 99.8 %)' : ''))] : null,
+          counting ? ['Graced uptime so far', soFarView(sofar, p.streak_ok)] : null,
+          /* (online today + the 300 s grant) / 24 h: what the whole day reaches if nothing more is sent. */
           counting && p.graced_uptime_permille !== null && p.graced_uptime_permille !== undefined ?
-            ['Share of the whole day online', fmt.permille(p.graced_uptime_permille)] : null,
+            ['Day covered so far (online + 5 min grant)', fmt.permille(p.graced_uptime_permille)] : null,
           ['Powered off', fmt.dur(day.power_off_s)],
           ['UART overflows', fmt.num(day.rx_overflows)],
         ]),
         h('p', { class: 'muted small foot' }, 'Offline counts seconds a caster should have streamed but did not; planned is the part caused by receiver configuration and updates, and by restarts you started (until each caster is back, at most a couple of minutes after the restart). Information only.')),
       h('section', { class: 'card' }, h('h2', null, 'Casters today'),
-        slots.length ? table(['Caster', 'Offline', 'Planned', 'Reconnects'], dayRows, { num: [1, 2, 3] }) : h('p', { class: 'muted' }, 'No casters.')),
+        slots.length ? table(['Caster', 'Online', 'Offline', 'Planned', 'Reconnects'], dayRows, { num: [1, 2, 3, 4], stack: true, label: 'Casters today' }) :
+          h('p', { class: 'muted' }, 'No casters.')),
       h('section', { class: 'card wide' }, h('h2', null, 'Last 30 days'),
         days.length ? table(['Day (UTC)', prot ? 'Onocoy offline' : 'Offline (slot 1)', 'Planned', 'Reconnects', 'Powered off'],
           days.map(d => {
@@ -608,7 +615,7 @@ function journalTab(box) {
           h('td', { 'data-label': 'Details' }, journalDetail(e), h('span', { class: 'muted small' }, ' #' + e.seq))));
       }
     }
-    mount(out, rows.length ? h('div', { class: 'scroll' }, h('table', { class: 'journal stack-sm' },
+    mount(out, rows.length ? scrollBox('Event journal', h('table', { class: 'journal stack-sm' },
       h('thead', null, h('tr', null, h('th', null, 'When'), h('th', null, 'Event'), h('th', null, 'Details'))),
       h('tbody', null, rows))) : h('p', { class: 'muted' }, 'The journal is empty.'));
   }
@@ -634,7 +641,7 @@ function tasksTab(box) {
       const tasks = (r.tasks || []).slice().sort((x, y) => (y.cpu_pct || 0) - (x.cpu_pct || 0) || (x.name < y.name ? -1 : 1));
       mount(out, table(['Task', 'Priority', 'Core', 'CPU', 'Stack left'], tasks.map(t => [t.name, String(t.priority),
         t.core === null || t.core === undefined ? 'any' : String(t.core), fmt.pct(t.cpu_pct),
-        h('span', { class: t.stack_free_min < 512 ? 't-bad' : null }, fmt.bytes(t.stack_free_min))]), { num: [1, 2, 3, 4] }));
+        h('span', { class: t.stack_free_min < 512 ? 't-bad' : null }, fmt.bytes(t.stack_free_min))]), { num: [1, 2, 3, 4], stack: true, label: 'Tasks' }));
     }),
   };
 }

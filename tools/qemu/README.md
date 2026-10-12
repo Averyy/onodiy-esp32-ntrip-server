@@ -77,10 +77,12 @@ request with `Host: onocoydiy.local` passes the Host check like on a board.
 With nothing answering on UART1 the firmware behaves as with a dead
 receiver: detection gives up after about 26 s. The GNSS recovery ladder's
 ESP32 restart is then held (`health: no receiver: restart to look for it
-postponed (...)`): while first setup is not finished, and for the first
-hour of station time after power-on when nothing was heard from the
-receiver, so `lifecycle: rebooting (reason 6)` does not appear in a QEMU
-run. `GET /api/status` shows the reasons in `health.reboot_hold`.
+postponed (...)`): while first setup is not finished and no caster is
+enabled, and for the first hour of station time after power-on when
+nothing was heard from the receiver, so `lifecycle: rebooting (reason 6)`
+does not appear in a QEMU run. During that no-receiver episode
+`GET /api/status` shows the reasons in `health.reboot_hold` (outside a
+ladder episode it names none).
 
 ## UART1 (the receiver link)
 

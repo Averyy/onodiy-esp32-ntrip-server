@@ -423,7 +423,7 @@ uint8_t hm_reboot_hold(hm_hold_t *h, const hm_hold_in_t *in, uint32_t *left_s)
     h->last_ms = in->now_ms;
 
     uint8_t hold = 0;
-    if (in->settings_available && !in->setup_done) {
+    if (in->settings_available && !in->setup_done && !in->casters_enabled) {
         hold |= HM_HOLD_SETUP;
     }
     if (in->station_time_s < in->power_on_grace_s && !in->heard) {
@@ -454,7 +454,8 @@ uint8_t hm_reboot_hold(hm_hold_t *h, const hm_hold_in_t *in, uint32_t *left_s)
         }
     }
     h->present = presence != 0;
-    uint32_t left = UINT32_MAX;
+    /* The latest end of every reason holding now; none for SETUP (no limit). */
+    uint32_t left = 0;
     if (presence != 0) {
         if (h->presence_ms >= in->presence_max_ms) {
             presence = 0;   /* over the limit: a present person no longer holds the restart back */
@@ -463,8 +464,22 @@ uint8_t hm_reboot_hold(hm_hold_t *h, const hm_hold_in_t *in, uint32_t *left_s)
             left = (uint32_t)((rest + 999u) / 1000u);
         }
     }
+    if ((hold & HM_HOLD_POWER_ON) != 0 && in->power_on_grace_s - in->station_time_s > left) {
+        left = in->power_on_grace_s - in->station_time_s;
+    }
+    if ((hold & HM_HOLD_SETUP) != 0 || (hold | presence) == 0) {
+        left = UINT32_MAX;
+    }
     if (left_s != NULL) {
         *left_s = left;
     }
     return (uint8_t)(hold | presence);
+}
+
+void hm_hold_view(bool episode, uint8_t hold, uint32_t hold_left_s, bool reboot_allowed, uint32_t cap_wait_s,
+                  hm_hold_view_t *out)
+{
+    out->hold = episode ? hold : 0u;
+    out->hold_left_s = (episode && hold != 0) ? hold_left_s : UINT32_MAX;
+    out->cap_wait_s = (episode && !reboot_allowed) ? cap_wait_s : UINT32_MAX;
 }

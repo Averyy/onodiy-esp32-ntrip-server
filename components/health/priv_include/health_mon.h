@@ -283,9 +283,13 @@ bool hm_power_alert(const hm_power_t *p, int64_t now_utc);
  * receiver went silent, within the reboot cap. It is held back (never
  * queued: looked at again later, like a cap block) while any of these
  * holds:
- *  - SETUP: the settings are available and first setup is not finished. No
- *    time limit: a station never set up streams nothing, and its owner is on
- *    its setup network.
+ *  - SETUP: the settings are available, first setup is not finished and no
+ *    caster slot is enabled. No time limit: such a station streams nothing.
+ *    The wizard enables the Onocoy slot before setup is marked done, and an
+ *    owner may never come back to the last, optional step: once a caster is
+ *    enabled the station is in service and a restart it needs is not held
+ *    for the setup (a person still on the page holds it as ADMIN or
+ *    AP_CLIENT, within the presence limit).
  *  - AP_CLIENT: someone is connected to the station's access point.
  *  - ADMIN: an admin session made a request or sent a WebSocket ping within
  *    the admin window (5 min).
@@ -326,16 +330,36 @@ typedef struct {
     uint32_t station_time_s;   /**< since power-on, across software resets */
     uint32_t power_on_grace_s;
     bool heard;                /**< an RTCM frame or a checksum-valid text line from the receiver this boot */
+    bool casters_enabled;      /**< a caster slot is enabled: the station streams, or tries to */
 } hm_hold_in_t;
 
 void hm_hold_init(hm_hold_t *h);
 
 /**
- * The hold bits (HM_HOLD_*) now. `left_s` (optional): seconds until the
- * presence limit lets a restart held by AP_CLIENT or ADMIN run, UINT32_MAX
- * when neither holds.
+ * The hold bits (HM_HOLD_*) now. `left_s` (optional): seconds until every
+ * reason holding now has ended at the latest (AP_CLIENT and ADMIN: the
+ * presence limit; POWER_ON: the end of its grace; the later of those when
+ * several hold), so a restart still needed then runs; UINT32_MAX when
+ * nothing holds or SETUP holds (no time limit).
  */
 uint8_t hm_reboot_hold(hm_hold_t *h, const hm_hold_in_t *in, uint32_t *left_s);
+
+/** What the status shows of the restart hold and the reboot cap (hm_hold_view). */
+typedef struct {
+    uint8_t hold;              /**< HM_HOLD_* reasons (0 = nothing pending) */
+    uint32_t hold_left_s;      /**< as hm_reboot_hold's left_s; UINT32_MAX = none */
+    uint32_t cap_wait_s;       /**< until the cap allows a ladder restart; UINT32_MAX = none */
+} hm_hold_view_t;
+
+/**
+ * The restart hold and the reboot cap as the status shows them: only while
+ * the GNSS ladder is in an episode (a stall or NO_RECEIVER, until it
+ * resets), where a restart may be pending. Outside one nothing is pending,
+ * whatever holds (an admin page in use on a healthy station is no reason to
+ * say a restart is postponed), and the cap's wait is nobody's concern.
+ */
+void hm_hold_view(bool episode, uint8_t hold, uint32_t hold_left_s, bool reboot_allowed, uint32_t cap_wait_s,
+                  hm_hold_view_t *out);
 
 /* ---- overall level ------------------------------------------------------------ */
 

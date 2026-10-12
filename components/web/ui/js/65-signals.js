@@ -29,7 +29,7 @@ function cnrClass(v) {
 function bandTable(systems) {
   const showE5ab = systems.some(s => (s.bands || []).indexOf('e5ab') >= 0);
   const bands = BAND_ORDER.filter(b => b !== 'e5ab' || showE5ab);
-  return h('div', { class: 'scroll' }, h('table', { class: 'bands' },
+  return scrollBox('Bands per constellation', h('table', { class: 'bands' },
     h('thead', null, h('tr', null, h('th', null, 'Constellation'), h('th', { class: 'num' }, 'Satellites'),
       bands.map(b => h('th', null, BAND_HEAD[b])), h('th', { class: 'num' }, 'Bands'))),
     h('tbody', null, systems.map(s => {

@@ -171,6 +171,11 @@ function card(title, ...kids) {
   return h('section', { class: 'card' }, title ? h('h2', null, title) : null, kids);
 }
 
+/** A card that is the whole page (log in, no answer, the wizard): its title is the page's one h1. */
+function pageCard(title, ...kids) {
+  return h('section', { class: 'card' }, h('h1', null, title), kids);
+}
+
 /** Definition list from [label, value] rows; rows that are null are skipped. */
 function kv(rows) {
   const dl = h('dl', { class: 'kv' });
@@ -280,15 +285,25 @@ function bar(fraction, tone, label) {
 }
 
 /**
+ * The box a wide table scrolls sideways in: a named region that takes the
+ * keyboard focus, so the part beyond the edge can be scrolled into view
+ * without a pointer.
+ */
+function scrollBox(label, ...kids) {
+  return h('div', { class: 'scroll', tabindex: '0', role: 'region', 'aria-label': label }, kids);
+}
+
+/**
  * Table from header texts and rows of cells. opts.num: indexes of numeric
  * columns (right-aligned); opts.stack: on a phone (under 480 px) each row
  * becomes a list of "header: value" lines instead of a table that scrolls
- * sideways (every column stays readable).
+ * sideways (every column stays readable); opts.label: what the table shows,
+ * for assistive technology (default: its column headers).
  */
 function table(head, rows, opts) {
   const numeric = (opts && opts.num) || [];
   const stack = !!(opts && opts.stack);
-  return h('div', { class: 'scroll' }, h('table', { class: stack ? 'stack-sm' : null },
+  return scrollBox((opts && opts.label) || head.join(', '), h('table', { class: stack ? 'stack-sm' : null },
     h('thead', null, h('tr', null, head.map((t, i) => h('th', { class: numeric.indexOf(i) >= 0 ? 'num' : null }, t)))),
     h('tbody', null, rows.map(r => h('tr', null, r.map((c, i) =>
       h('td', { class: numeric.indexOf(i) >= 0 ? 'num' : null, 'data-label': stack ? head[i] : null },

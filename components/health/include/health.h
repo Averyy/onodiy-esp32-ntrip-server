@@ -82,9 +82,14 @@
  * outcome "held" and the reasons, and looked at again later like a cap
  * block; a held 6a outside NO_RECEIVER comes back with the FAILED retry
  * pass), while any of these holds:
- *   setup      the settings are available and first setup is not finished
- *              (sys/setup_done != 1); no time limit: a station never set up
- *              streams nothing, and its owner is on the setup network;
+ *   setup      the settings are available, first setup is not finished
+ *              (sys/setup_done != 1) and no caster slot is enabled; no time
+ *              limit: such a station streams nothing. The wizard enables the
+ *              Onocoy slot before setup is marked done, and an owner may
+ *              never finish the optional last step: once a caster is
+ *              enabled the station is in service and its restart is not
+ *              held for the setup (a person on the page holds it as admin
+ *              or ap_client, within the presence limit);
  *   ap_client  someone is connected to the station's access point;
  *   admin      an admin session made a request or sent a WebSocket ping
  *              within CONFIG_HEALTH_REBOOT_HOLD_ADMIN_S
@@ -99,8 +104,11 @@
  * ap_client and admin together hold for at most
  * CONFIG_HEALTH_REBOOT_HOLD_MAX_MIN of presence per ladder episode (the
  * network ladder's limit for AP clients); after that the restart runs
- * anyway. The status shows the reasons holding now (gnss_reboot_hold), the
- * time left of that limit and the reboot cap's wait.
+ * anyway. During a ladder episode (a stall or NO_RECEIVER, until the
+ * ladder resets) the status shows the reasons holding now
+ * (gnss_reboot_hold), when the last of them ends at the latest and the
+ * reboot cap's wait; outside one nothing is pending and it shows none of
+ * them (an admin page open on a healthy station postpones nothing).
  *
  * User recovery mode (gnss/recovery, read every tick; a step already running
  * completes): full (default); no ESP32 reboot (6a is journalled as not run,
@@ -255,9 +263,9 @@ typedef struct {
     uint32_t admin_resets;           /**< BOOT-button admin password resets this boot; the web also forgets a password it holds only in RAM (settings unavailable) and ends every session */
     health_recovery_mode_t recovery_mode; /**< in effect (gnss/recovery; a stored value out of range reads as FULL) */
     bool gnss_reboot_recheck;        /**< NO_RECEIVER: a blocked ESP32 reboot waits for the cap and the next detection pass */
-    uint8_t gnss_reboot_hold;        /**< health_reboot_hold_t reasons that postpone the ladder's ESP32 restart now (0 = none) */
-    uint32_t gnss_reboot_hold_left_s;/**< until the presence limit lets a restart held by ap_client or admin run; UINT32_MAX = no such hold */
-    uint32_t gnss_reboot_cap_wait_s; /**< until the reboot cap allows a ladder restart; UINT32_MAX = allowed now */
+    uint8_t gnss_reboot_hold;        /**< health_reboot_hold_t reasons that postpone the ladder's ESP32 restart now (0 = none; always 0 outside a ladder episode) */
+    uint32_t gnss_reboot_hold_left_s;/**< until every reason holding now has ended at the latest (the presence limit of ap_client and admin, the end of the power-on grace); UINT32_MAX = no hold, or setup holds (no time limit) */
+    uint32_t gnss_reboot_cap_wait_s; /**< until the reboot cap allows a ladder restart; UINT32_MAX = allowed now, or outside a ladder episode */
 } health_status_t;
 
 /** Register handlers; read the button pin from the board. */

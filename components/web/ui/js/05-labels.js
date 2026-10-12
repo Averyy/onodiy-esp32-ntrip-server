@@ -167,6 +167,8 @@ const L = {
     not_started: 'Not started',
     needs_user: 'Stopped: waiting for your decision',
     refused: 'Refused: the station state changed',
+    same_image: 'Not installed: this version is already running',
+    rolled_back_ack_required: 'Not installed: this version was rolled back on this station before (installing it needs your confirmation)',
     download_failed: 'Download failed',
     checksum_mismatch: 'Checksum mismatch',
     size_mismatch: 'Size mismatch',
@@ -335,13 +337,16 @@ function noReceiverText(a) {
 /**
  * The station's own restart to look for the receiver, in words (health:
  * reboot_hold, reboot_hold_left_s, reboot_cap_wait_s, reboot_recheck); null
- * when nothing about it is pending.
+ * when nothing about it is pending (the station reports these only while
+ * its receiver recovery runs). reboot_hold_left_s is when the last reason
+ * ends at the latest (the presence limit, the end of the first hour); the
+ * setup hold has no limit, so no deadline is named with it.
  */
 function restartPlanText(hl) {
   if (!hl) return null;
   const hold = hl.reboot_hold || [];
   const cap = hl.reboot_cap_wait_s;
-  const holdLeft = hl.reboot_hold_left_s;
+  const holdLeft = hold.indexOf('setup') >= 0 ? null : hl.reboot_hold_left_s;
   if (!hold.length && (cap === null || cap === undefined) && !hl.reboot_recheck) return null;
   const intro = 'When nothing answers, the station restarts itself to look for the receiver, at most once an hour.';
   if (hold.length) {

@@ -42,6 +42,8 @@ TEST_CASE("Host check accepts only the device's names", "[web_core]")
         "192.168.1.50", "192.168.1.50:80", "192.168.4.1", "onocoydiy", "ONOCOYDIY", "onocoydiy.local",
         "OnocoyDIY.Local:8080", "onocoydiy.lan", "onocoydiy.home", "onocoydiy.home.arpa", "onocoydiy.localdomain",
         "onocoydiy.internal", " onocoydiy ",
+        /* the fully qualified forms (a trailing dot), as a DNS-SD target or a typed FQDN gives them */
+        "onocoydiy.local.", "onocoydiy.local.:80", "onocoydiy.", "onocoydiy.lan.",
     };
     for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
         TEST_ASSERT_TRUE_MESSAGE(web_host_allowed(good[i], &s_names), good[i]);
@@ -49,7 +51,8 @@ TEST_CASE("Host check accepts only the device's names", "[web_core]")
     static const char *const bad[] = {
         "", "evil.com", "onocoydiy.evil.com", "onocoydiy.local.evil.com", "xonocoydiy", "onocoydiyx.local",
         "192.168.1.5", "192.168.1.500", "[::1]", "[::1]:80", "onocoydiy:", "onocoydiy:80:80", "onocoydiy:abc",
-        "onocoydiy:123456", "onocoydiy.", "connectivitycheck.gstatic.com", "onocoydiy/x",
+        "onocoydiy:123456", "onocoydiy..", ".", ".:80", "onocoydiy.local..", "192.168.1.50.",
+        "connectivitycheck.gstatic.com", "onocoydiy/x",
         /* a publicly delegated zone: whoever controls it could rebind the name */
         "onocoydiy.fritz.box",
     };
@@ -72,8 +75,9 @@ TEST_CASE("Host check: <mdns_host>.local follows the name the responder answers"
     TEST_ASSERT_TRUE(web_host_allowed("ONOCOYDIY.LOCAL:80", &n));
     TEST_ASSERT_FALSE(web_host_allowed("onocoydiy-2.local", &n));
     TEST_ASSERT_FALSE(web_host_allowed("evil.local", &n));
-    TEST_ASSERT_FALSE(web_host_allowed("onocoydiy.local.", &n));
+    TEST_ASSERT_TRUE(web_host_allowed("onocoydiy.local.", &n));    /* the _http._tcp service's SRV target */
     TEST_ASSERT_FALSE(web_host_allowed("x.onocoydiy.local", &n));
+    TEST_ASSERT_FALSE(web_host_allowed("evil.local.", &n));
 
     /* After a name conflict the responder answers onocoydiy-2.local: that
      * name passes; the DHCP name and its search domains stay as they were. */
@@ -486,6 +490,11 @@ TEST_CASE("app upload: the image already running is refused unless a reinstall w
     TEST_ASSERT_EQUAL(WEB_ERR_INVALID_IMAGE, web_app_upload_verdict(WEB_IMAGE_NOT_APP, false, false, true, false));
     TEST_ASSERT_EQUAL_STRING("same_image", web_err_code(WEB_ERR_SAME_IMAGE));
     TEST_ASSERT_EQUAL(409, web_err_status(WEB_ERR_SAME_IMAGE));
+    /* Noted as what it is (the Updates page's "Last job"), not as a state change. */
+    TEST_ASSERT_EQUAL_STRING("same_image", web_app_refusal_result(WEB_ERR_SAME_IMAGE));
+    TEST_ASSERT_EQUAL_STRING("rolled_back_ack_required", web_app_refusal_result(WEB_ERR_ROLLED_BACK_ACK_REQUIRED));
+    TEST_ASSERT_EQUAL_STRING("invalid_image", web_app_refusal_result(WEB_ERR_NOT_THIS_PROJECT));
+    TEST_ASSERT_EQUAL_STRING("invalid_image", web_app_refusal_result(WEB_ERR_INVALID_IMAGE));
     TEST_ASSERT_EQUAL_STRING("not_no_receiver", web_err_code(WEB_ERR_NOT_NO_RECEIVER));
     TEST_ASSERT_EQUAL(409, web_err_status(WEB_ERR_NOT_NO_RECEIVER));
 }

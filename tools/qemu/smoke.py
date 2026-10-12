@@ -19,16 +19,18 @@ What it does:
   2. waits for HTTP 200 on / (the UI page), sets the first admin password
      (POST /api/setup/admin; the QEMU build treats requests as coming over
      the setup AP) and reads GET /api/status with that session: valid JSON,
-     API version 1, the station online over the emulated Ethernet, and the
-     GNSS ladder's ESP32 restart held for first setup (health.reboot_hold
-     has "setup"); GET /api/session names the station "onocoydiy" and its
-     mDNS name "onocoydiy", and a request with "Host: onocoydiy.local"
-     passes the Host check;
+     API version 1, the station online over the emulated Ethernet; GET
+     /api/session names the station "onocoydiy" and its mDNS name
+     "onocoydiy", and a request with "Host: onocoydiy.local" (also fully
+     qualified, "onocoydiy.local.") passes the Host check;
   3. checks UART1 in both directions: the firmware's receiver detection
      queries (VERSIONA) arrive on the host side, and bytes the host sends
      (plain text no receiver would send: no '$', '#', RTCM preamble or loader
      prompt in it) reach the firmware, which then reports "bytes but nothing
-     valid" instead of "no bytes at all" when detection gives up;
+     valid" instead of "no bytes at all" when detection gives up; in the
+     no-receiver episode that follows, the GNSS ladder's ESP32 restart is
+     held for first setup (health.reboot_hold has "setup": no caster is
+     enabled; the status names holds only during a ladder episode);
   4. keeps watching until --observe seconds after the start (at least 45),
      checks that the web server still answers (GET /, and GET /api/status
      with the session), then stops QEMU and fails on a panic (Guru
@@ -286,10 +288,28 @@ class Smoke:
                    f"GET /api/status: HTTP {status}, valid JSON, API {st.get('api')}, admin form")
         self.check(net.get("online") is True and net.get("ip"),
                    f"station online over the emulated Ethernet (ip {net.get('ip')}, \"{net.get('ssid')}\")")
-        hold = (st.get("health") or {}).get("reboot_hold") if isinstance(st, dict) else None
+        self.name_checks()
+
+    def hold_checks(self) -> None:
+        """After detection gave up (a ladder episode): the restart is held for first setup."""
+        if not self.cookie:
+            return
+        hold = None
+        deadline = time.monotonic() + 20
+        try:
+            while time.monotonic() < deadline and self.proc.poll() is None:
+                status, _, body = request(self.http_port, "GET", "/api/status", cookie=self.cookie, timeout=30)
+                if status == 200:
+                    (self.out / "api-status-no-receiver.json").write_bytes(body)
+                    hold = (json.loads(body).get("health") or {}).get("reboot_hold")
+                    if isinstance(hold, list) and hold:
+                        break
+                time.sleep(1)
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            self.check(False, f"GET /api/status in the no-receiver episode: {type(e).__name__}: {e}")
+            return
         self.check(isinstance(hold, list) and "setup" in hold,
                    f"GNSS ladder restart held while first setup is not finished (health.reboot_hold {hold})")
-        self.name_checks()
 
     def name_checks(self) -> None:
         status, _, body = request(self.http_port, "GET", "/api/session", cookie=self.cookie, timeout=30)
@@ -304,6 +324,8 @@ class Smoke:
                    f"ap_ssid {sess.get('ap_ssid')!r}, setup_step {sess.get('setup_step')!r}")
         status, _, body = request(self.http_port, "GET", "/api/session", timeout=30, host="onocoydiy.local")
         self.check(status == 200, f"Host: onocoydiy.local passes the Host check (HTTP {status})")
+        status, _, body = request(self.http_port, "GET", "/api/session", timeout=30, host="onocoydiy.local.")
+        self.check(status == 200, f"Host: onocoydiy.local. (fully qualified) passes the Host check (HTTP {status})")
         status, _, _ = request(self.http_port, "GET", "/api/session", timeout=30, host="evil.local")
         self.check(status != 200, f"Host: evil.local is refused (HTTP {status})")
 
@@ -388,6 +410,7 @@ class Smoke:
             if self.proc.poll() is None and self.wait_http():
                 self.api_checks()
                 self.uart1_checks()
+                self.hold_checks()
             self.observe()
         finally:
             self.stop()

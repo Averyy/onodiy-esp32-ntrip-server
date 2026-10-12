@@ -697,12 +697,12 @@ TEST_CASE("health mon: restart hold reasons", "[health_mon]")
     TEST_ASSERT_EQUAL_UINT8(HM_HOLD_AP_CLIENT, hm_reboot_hold(&h, &in, &left));
     TEST_ASSERT_EQUAL_UINT32(1800, left);
 
-    /* power_on: early, nothing heard */
+    /* power_on: early, nothing heard; it ends with the grace at the latest */
     in = hold_in(T0);
     in.station_time_s = 27;
     in.heard = false;
     TEST_ASSERT_EQUAL_UINT8(HM_HOLD_POWER_ON, hm_reboot_hold(&h, &in, &left));
-    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, left);
+    TEST_ASSERT_EQUAL_UINT32(3600 - 27, left);
     /* a receiver heard this boot (RTCM or a valid text line): no hold, 6a at once */
     in.heard = true;
     TEST_ASSERT_EQUAL_UINT8(0, hm_reboot_hold(&h, &in, NULL));
@@ -816,4 +816,72 @@ TEST_CASE("health mon: first setup holds for days", "[health_mon]")
         TEST_ASSERT_TRUE((hold & HM_HOLD_SETUP) != 0);
     }
     TEST_ASSERT_EQUAL_UINT8(HM_HOLD_SETUP, hold);   /* power_on is over after its hour */
+}
+
+TEST_CASE("health mon: first setup holds only while no caster is enabled", "[health_mon]")
+{
+    hm_hold_t h;
+    hm_hold_init(&h);
+    uint32_t left = 0;
+    hm_hold_in_t in = hold_in(T0);
+    in.episode = true;
+    in.setup_done = false;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_SETUP, hm_reboot_hold(&h, &in, &left));
+    /* the Onocoy step saved and enabled its slot before setup was marked done:
+     * the station streams, so a restart it needs is not held for the setup */
+    in.casters_enabled = true;
+    in.now_ms = T0 + SEC;
+    TEST_ASSERT_EQUAL_UINT8(0, hm_reboot_hold(&h, &in, &left));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, left);
+    /* a person on the page still holds it, within the presence limit */
+    in.now_ms = T0 + 2 * SEC;
+    in.admin_at_ms = in.now_ms;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_ADMIN, hm_reboot_hold(&h, &in, &left));
+    TEST_ASSERT_TRUE(left <= 1800 && left >= 1798);
+}
+
+TEST_CASE("health mon: the hold ends at the latest when its last reason does", "[health_mon]")
+{
+    hm_hold_t h;
+    hm_hold_init(&h);
+    uint32_t left = 0;
+    hm_hold_in_t in = hold_in(T0);
+    in.episode = true;
+    in.station_time_s = 8 * 60;      /* 52 min of the power-on grace left */
+    in.heard = false;
+    in.admin_at_ms = T0;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_ADMIN | HM_HOLD_POWER_ON, hm_reboot_hold(&h, &in, &left));
+    TEST_ASSERT_EQUAL_UINT32(52 * 60, left);   /* not the 30 min presence limit */
+
+    /* past most of the grace, the presence limit is the later end */
+    in.station_time_s = 3600 - 60;
+    in.now_ms = T0 + SEC;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_ADMIN | HM_HOLD_POWER_ON, hm_reboot_hold(&h, &in, &left));
+    TEST_ASSERT_TRUE(left > 60 && left <= 1800);
+
+    /* first setup has no limit: no end to name */
+    in.setup_done = false;
+    in.now_ms = T0 + 2 * SEC;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_SETUP | HM_HOLD_ADMIN | HM_HOLD_POWER_ON, hm_reboot_hold(&h, &in, &left));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, left);
+}
+
+TEST_CASE("health mon: the status shows the restart hold only during a ladder episode", "[health_mon]")
+{
+    hm_hold_view_t v;
+    /* a healthy station with the admin page open: nothing is pending */
+    hm_hold_view(false, HM_HOLD_ADMIN, 1800, false, 900, &v);
+    TEST_ASSERT_EQUAL_UINT8(0, v.hold);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, v.hold_left_s);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, v.cap_wait_s);
+
+    hm_hold_view(true, HM_HOLD_ADMIN, 1700, false, 900, &v);
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_ADMIN, v.hold);
+    TEST_ASSERT_EQUAL_UINT32(1700, v.hold_left_s);
+    TEST_ASSERT_EQUAL_UINT32(900, v.cap_wait_s);
+
+    /* the cap allows a restart now: no wait to show */
+    hm_hold_view(true, 0, UINT32_MAX, true, 0, &v);
+    TEST_ASSERT_EQUAL_UINT8(0, v.hold);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, v.cap_wait_s);
 }

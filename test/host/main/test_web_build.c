@@ -57,6 +57,7 @@ static void fixture(void)
     strcpy(s->cfg[1].host, "rtk2go.com");
     s->cst[0].state = NTRIP_STATE_STREAMING;
     s->cst[0].budget_left_s = 469;
+    s->cst[0].budget_s = 473;
     s->cst[0].graced_uptime_permille = 1000;
     s->cst[0].streak_ok = true;
     s->cst[0].day_metrics_valid = true;
@@ -111,8 +112,10 @@ TEST_CASE("admin status maps sentinels, alerts and the protected slot", "[web_bu
     const cJSON *c0 = cJSON_GetArrayItem(casters, 0);
     const cJSON *c1 = cJSON_GetArrayItem(casters, 1);
     TEST_ASSERT_EQUAL(469, at(c0, "budget_left_s")->valueint);
+    TEST_ASSERT_EQUAL(473, at(c0, "budget_s")->valueint);   /* the day's allowance, not left + offline */
     TEST_ASSERT_TRUE(cJSON_IsTrue(at(c0, "protected")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(c1, "budget_left_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(c1, "budget_s")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(c1, "streak_ok")));
     TEST_ASSERT_EQUAL_STRING("disabled", at(c1, "state")->valuestring);
 
@@ -640,6 +643,7 @@ TEST_CASE("availability days carry dates and per-slot arrays", "[web_build]")
     memset(&today, 0, sizeof(today));
     today.utc_day = 20736;
     today.down_s[0] = 4;
+    today.up_s[0] = 36000;
     ntrip_caster_cfg_t cfg[2];
     memset(cfg, 0, sizeof(cfg));
     strcpy(cfg[0].name, "Onocoy");
@@ -670,6 +674,8 @@ TEST_CASE("availability days carry dates and per-slot arrays", "[web_build]")
     TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "utc_second_of_day")));
     TEST_ASSERT_EQUAL_STRING("2026-10-10", at(at(root, "today"), "date")->valuestring);
     TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(at(at(root, "today"), "down_s")));
+    TEST_ASSERT_EQUAL(36000, cJSON_GetArrayItem(at(at(root, "today"), "up_s"), 0)->valueint);
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(at(at(root, "today"), "up_s")));
     TEST_ASSERT_EQUAL(1, cJSON_GetArraySize(at(root, "history")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "protected"), "budget_left_s")));
     TEST_ASSERT_TRUE(cJSON_IsFalse(at(cJSON_GetArrayItem(at(root, "slots"), 1), "protected")));
@@ -1053,7 +1059,7 @@ TEST_CASE("status: network carries the mDNS name and the AP's countdown, admin f
     cJSON_Delete(root);
 }
 
-TEST_CASE("health: restart hold reasons, the presence limit and the cap's wait", "[web_build]")
+TEST_CASE("health: restart hold reasons, when the hold ends at the latest and the cap's wait", "[web_build]")
 {
     fixture();
     s_snap.health.gnss_reboot_hold = HEALTH_HOLD_SETUP | HEALTH_HOLD_POWER_ON;
@@ -1082,7 +1088,15 @@ TEST_CASE("health: restart hold reasons, the presence limit and the cap's wait",
     TEST_ASSERT_EQUAL(3000, at(hl, "reboot_cap_wait_s")->valueint);
     cJSON_Delete(root);
 
+    /* power_on alone: it ends with its grace, which the station names */
+    s_snap.health.gnss_reboot_hold = HEALTH_HOLD_POWER_ON;
+    s_snap.health.gnss_reboot_hold_left_s = 3120;
+    root = build_status(false);
+    TEST_ASSERT_EQUAL(3120, at(at(root, "health"), "reboot_hold_left_s")->valueint);
+    cJSON_Delete(root);
+
     s_snap.health.gnss_reboot_hold = 0;
+    s_snap.health.gnss_reboot_hold_left_s = UINT32_MAX;
     root = build_status(false);
     TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(at(root, "health"), "reboot_hold")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "health"), "reboot_hold_left_s")));
@@ -1277,6 +1291,7 @@ TEST_CASE("Onocoy day figures are null unless the slot is enabled and set up", "
     TEST_ASSERT_TRUE(cJSON_IsNull(at(c0, "graced_uptime_permille")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(c0, "streak_ok")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(c0, "budget_left_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(c0, "budget_s")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(c0, "data_rate_permille")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(c0, "graced_uptime_so_far_permille")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "availability"), "budget_left_s")));
@@ -1291,6 +1306,7 @@ TEST_CASE("Onocoy day figures are null unless the slot is enabled and set up", "
     TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
     TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "onocoy_ready")));
     TEST_ASSERT_EQUAL(1000, at(at(root, "status"), "graced_uptime_so_far_permille")->valueint);
+    TEST_ASSERT_EQUAL(473, at(at(root, "status"), "budget_s")->valueint);
     cJSON_Delete(root);
     s_snap.cfg[0].password_set = false;   /* no password: not set up */
     s_snap.cfg[0].password[0] = '\0';
@@ -1323,6 +1339,7 @@ TEST_CASE("Onocoy day figures are null unless the slot is enabled and set up", "
     TEST_ASSERT_TRUE(cJSON_IsNull(at(pr, "data_rate_permille")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(pr, "streak_ok")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(pr, "budget_left_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(pr, "budget_s")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(pr, "graced_uptime_so_far_permille")));
     cJSON_Delete(root);
 }

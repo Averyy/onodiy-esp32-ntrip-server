@@ -5,11 +5,16 @@
  * Status dashboard: overall state, receiver and RTCM, the Onocoy day (UTC)
  * with the remaining offline budget, every caster, Wi-Fi, alerts. Built
  * from the status model on every update and patched into the page (no
- * inputs and no buttons on this page: patch() replaces an element with a
- * listener every time, which would take the keyboard focus with it), so the
- * links keep keyboard focus and text stays selectable across the 1 s
- * updates. The live view entry is a link that starts the window. Visitors
- * without a session see the public form (names and states only).
+ * inputs, and no element with a listener of its own: patch() replaces such
+ * an element every time, which would take the keyboard focus with it), so
+ * the links and buttons keep keyboard focus and text stays selectable
+ * across the 1 s updates. The one button, "Check again" on the no-receiver
+ * alert, carries data-act and the page's root handles its click
+ * (detectClicks). The live view entry is a link that starts the window.
+ * Visitors without a session see the public form (names and states only).
+ *
+ * Every "today" figure (online, offline, the offline budget) comes from the
+ * availability ledger, which is kept across restarts.
  */
 
 /* Onocoy's streak needs at least 99.8 % graced uptime per UTC day. */
@@ -26,6 +31,7 @@ Views.dashboard = {
       }
       patch(el, isAdmin() && !s.public ? adminDashboard(s) : publicDashboard(s));
     };
+    detectClicks(el, render);
     render();
     return { update: render };
   },
@@ -88,7 +94,8 @@ function receiverCard(s, admin) {
   ];
   if (admin) {
     let base;
-    if (r.position_locked) base = 'Position locked';
+    /* position_locked is the stored profile's base mode: the receiver runs it only once the profile is applied. */
+    if (r.position_locked) base = r.profile_applied ? 'Position locked' : 'Fixed position (not applied yet)';
     else if (r.surveying) base = 'Surveying' + (r.survey_window_left_s ? ', ' + fmt.dur(r.survey_window_left_s) + ' left' : '');
     else base = 'Not locked';
     rows.push(['Base', base]);
@@ -131,33 +138,54 @@ function onocoySetupCard(c) {
     h('p', { class: 'muted small foot' }, 'Today\'s figures (offline budget, graced uptime) show here once Onocoy streams.'));
 }
 
+/**
+ * "Graced uptime so far" in words and tone: green when it meets 99.8 %, red
+ * when it misses it and the streak is lost; below 99.8 % while the streak
+ * still holds (early in the day, the budget not used up) neither: not red,
+ * since the streak is the verdict, and not green, since it misses the
+ * threshold it is measured against.
+ */
+function soFarView(sofar, streakOk) {
+  if (sofar === null || sofar === undefined) return DASH;
+  const meets = sofar >= STREAK_PERMILLE;
+  const tone = meets ? 't-ok' : streakOk ? null : 't-bad';
+  const note = meets ? (streakOk === false ? '' : ' (streak on track)') : streakOk ? ' (below 99.8 %; the streak still holds)' : ' (below 99.8 %)';
+  return h('span', { class: tone }, fmt.permille(sofar) + note);
+}
+
 function budgetCard(c, avail) {
+  /* All from the availability ledger (kept across restarts): today's offline
+   * time, what is left of the day's budget, and the budget itself at the
+   * current data rate. Without a trusted clock the day is unknown. */
   const left = avail && avail.budget_left_s !== undefined ? avail.budget_left_s : c.budget_left_s;
   const down = avail && avail.protected_down_today_s !== undefined ? avail.protected_down_today_s : c.today_offline_s;
-  const total = left !== null && left !== undefined && down !== null && down !== undefined ? left + down : null;
-  const used = total ? Math.min(1, down / total) : 0;
+  const allowed = c.budget_s;
+  const known = left !== null && left !== undefined && down !== null && down !== undefined &&
+    allowed !== null && allowed !== undefined;
+  const used = known && allowed > 0 ? Math.min(1, down / allowed) : known ? 1 : 0;
   /* Never red while the streak holds: the budget is an estimate, the streak the verdict. */
-  const tone = left === null || left === undefined ? '' : left <= 0 && !c.streak_ok ? 'bad' : used > 0.6 ? 'warn' : 'ok';
+  const tone = !known ? '' : left <= 0 && !c.streak_ok ? 'bad' : used > 0.6 ? 'warn' : 'ok';
   const mid = fmt.utcMidnight();
-  const sofar = c.graced_uptime_so_far_permille;
-  const sofarTone = sofar === null || sofar === undefined ? null : c.streak_ok ? 't-ok' : sofar >= STREAK_PERMILLE ? 't-ok' : 't-bad';
+  const over = known && down > allowed;
   return h('section', { class: 'card' },
     h('h2', null, 'Onocoy today', c.streak_ok === null || c.streak_ok === undefined ? null :
       badge(c.streak_ok ? 'Streak on track' : 'Streak missed', c.streak_ok ? 'ok' : 'bad')),
-    left === null || left === undefined ?
+    !known ?
       h('p', { class: 'muted' }, 'The offline budget needs a trusted clock (GNSS or internet time).') :
       [h('div', { class: 'big ' + tone }, h('span', { class: 't-' + (tone || 'ok') }, left <= 0 ? '0\u00a0s' : fmt.dur(left))),
         h('div', { class: 'muted small' }, 'offline budget left today'),
         h('div', { class: tone }, bar(used, '', 'Share of today\'s offline budget used')),
-        h('div', { class: 'muted small' }, fmt.dur(down) + ' offline so far of about ' + fmt.dur(total) + '. Resets at 00:00 UTC (' + mid.local + ' here).')],
+        h('div', { class: 'muted small' }, (over ? fmt.dur(down) + ' offline so far: over the day\'s budget of about ' + fmt.dur(allowed) +
+          ' by ' + fmt.dur(down - allowed) + '.' : fmt.dur(down) + ' offline so far of a budget of about ' + fmt.dur(allowed) + '.') +
+          ' Resets at 00:00 UTC (' + mid.local + ' here).')],
     kv([
       ['Online today', fmt.dur(c.today_online_s)],
       ['Offline today', fmt.dur(c.today_offline_s)],
-      ['Graced uptime so far', sofar === null || sofar === undefined ? DASH :
-        h('span', { class: sofarTone }, fmt.permille(sofar) + ' (needs 99.8 %)')],
+      ['Graced uptime so far', soFarView(c.graced_uptime_so_far_permille, c.streak_ok)],
       ['Data rate', c.data_rate_permille === null || c.data_rate_permille === undefined ? 'nothing sent yet today' : fmt.permille(c.data_rate_permille)],
     ]),
-    h('p', { class: 'muted small foot' }, 'Our estimate of Onocoy\'s accounting for the current UTC day. Information only.'));
+    h('p', { class: 'muted small foot' }, 'Our estimate of Onocoy\'s accounting for the current UTC day (it needs at least 99.8 % graced uptime). ' +
+      'Information only.'));
 }
 
 function casterLine(c, admin) {
@@ -242,11 +270,59 @@ function alertTone(a) {
   return a.id === 'safe_mode' || a.id === 'receiver_power' || a.id === 'settings_degraded' || a.id === 'no_receiver' ? 'bad' : 'warn';
 }
 
-/** The alerts (station and health) as message boxes; the Health page shows the same. */
-function alertList(alerts) {
+/*
+ * "Check again" (POST /api/gnss/detect) on the no-receiver alert, on pages
+ * rebuilt every refresh (the dashboard patches, the Health tab mounts): a
+ * button without a listener of its own, so patch() keeps it and the
+ * keyboard focus on it; the page's root handles its click (detectClicks).
+ * After a request it reads "Searching…" for a few seconds, until the
+ * station's own state says it searches.
+ */
+const DETECT = { askedAt: 0, busy: false };
+
+const detectWaiting = () => DETECT.busy || Date.now() - DETECT.askedAt < 4000;
+
+function detectButton(a) {
+  if (a.next_detect_in_s !== null && a.next_detect_in_s !== undefined && a.next_detect_in_s <= 0) return null;   /* searching now */
+  /* aria-disabled, not disabled: a disabled button would drop the keyboard focus. */
+  const waiting = detectWaiting();
+  return h('div', { class: 'form-actions' }, h('button', { type: 'button', class: 'btn small', 'data-act': 'detect',
+    'aria-disabled': waiting ? 'true' : null }, waiting ? 'Searching…' : 'Check again'));
+}
+
+/** Handle "Check again" clicks inside root; refresh() redraws the page at once. */
+function detectClicks(root, refresh) {
+  root.addEventListener('click', async e => {
+    const b = e.target && e.target.closest ? e.target.closest('[data-act="detect"]') : null;
+    if (!b || !root.contains(b) || detectWaiting()) return;
+    DETECT.busy = true;
+    if (refresh) refresh();
+    try {
+      await api('POST', '/api/gnss/detect', {});
+      DETECT.askedAt = Date.now();
+    } catch (ex) {
+      showErr(ex);
+    } finally {
+      DETECT.busy = false;
+      if (refresh) refresh();
+      setTimeout(() => {
+        if (refresh && root.isConnected) refresh();
+      }, 4100);
+    }
+  });
+}
+
+/**
+ * The alerts (station and health) as message boxes; the Health page shows
+ * the same. opts.detect: the no-receiver alert offers "Check again" (the
+ * page handles it with detectClicks).
+ */
+function alertList(alerts, opts) {
+  const detect = !!(opts && opts.detect);
   return h('div', { class: 'stack' }, alerts.map(a => {
     const t = alertText(a);
-    return msg(alertTone(a), h('strong', null, t[0]), t[1] ? h('div', { class: 'small' }, t[1]) : null);
+    const check = detect && a.source === 'station' && a.id === 'no_receiver' ? detectButton(a) : null;
+    return msg(alertTone(a), h('strong', null, t[0]), t[1] ? h('div', { class: 'small' }, t[1]) : null, check);
   }));
 }
 
@@ -257,7 +333,7 @@ function alertsCard(s) {
   return h('section', { class: 'card' },
     h('h2', null, 'Alerts', alerts.length ? badge(String(alerts.length), alerts.some(a => alertTone(a) === 'bad') ? 'bad' : 'warn') :
       badge('None', tone === 'ok' ? 'ok' : '')),
-    alerts.length ? alertList(alerts) :
+    alerts.length ? alertList(alerts, { detect: true }) :
       /* Never "nothing" while the state above says otherwise. */
       h('p', { class: 'muted' }, tone === 'ok' ? 'Nothing needs attention.' : 'See the receiver card above.'),
     s.health && s.health.last_step && s.health.last_step !== 'none' ?

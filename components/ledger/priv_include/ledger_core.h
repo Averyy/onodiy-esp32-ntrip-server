@@ -31,6 +31,10 @@
  *     streaming with fresh RTCM behind it (a session kept open through a
  *     receiver stall counts as down, which keeps the budget on the safe
  *     side);
+ *   - up: the slot streamed with fresh RTCM behind it (the rest of the time
+ *     it was expected), so the day's online and offline figures come from
+ *     one record that survives resets, not from counters that start again
+ *     at every boot;
  *   - planned: the part of down while planned receiver work paused the
  *     casters, and the part a reboot the user asked for caused (below);
  *   - reconnects: entries into streaming after a period of expected
@@ -139,6 +143,7 @@ typedef struct {
     uint32_t reconnects[LC_SLOTS];
     uint32_t power_off_ms;
     uint32_t rx_overflows;
+    uint32_t up_ms[LC_SLOTS];           /**< streamed with fresh RTCM (online) */
 } lc_day_t;
 
 /** What must survive a reset. */
@@ -342,7 +347,8 @@ void lc_mark_dirty(lc_t *c, bool today, bool hist);
 
 /**
  * Today's record with the slot masks, the flags and s->alive_ms: the UTC
- * mark (ms) this today runs up to, stored with it as one unit.
+ * mark (ms) this today runs up to, stored with it as one unit; each slot's
+ * online time follows the mark (appended later).
  * @return bytes written, 0 if cap is too small.
  */
 size_t lc_encode_today(const lc_snapshot_t *s, uint8_t *buf, size_t cap);
@@ -351,7 +357,8 @@ size_t lc_encode_today(const lc_snapshot_t *s, uint8_t *buf, size_t cap);
  * Decode into s->today, s->expected_mask, s->protected_mask, s->planned,
  * s->reboot_planned (false in a blob written before it existed) and
  * s->alive_ms (the blob's own mark; 0 in a blob written before it existed,
- * whose mark is the alive key alone); other fields untouched.
+ * whose mark is the alive key alone); online times 0 in a blob written
+ * before they existed; other fields untouched.
  */
 bool lc_decode_today(const uint8_t *buf, size_t len, lc_snapshot_t *s);
 
@@ -367,10 +374,29 @@ bool lc_decode_today(const uint8_t *buf, size_t len, lc_snapshot_t *s);
  */
 int64_t lc_stored_mark(int64_t blob_mark_ms, int64_t alive_s);
 
-/** History, newest first. @return bytes written, 0 if cap is too small. */
+/**
+ * A today restored from settings: `blob_mark_ms` is the mark its blob
+ * carries (written when today last changed), `mark_ms` the later one the
+ * alive key moved on to (lc_stored_mark). While only the mark moved,
+ * nothing in today changed: no downtime accrued and the slot masks stayed
+ * as stored, so every slot expected then streamed all along. Their online
+ * time grows by that span (the part on today's UTC day). Call before
+ * lc_restore with the snapshot built from the blob; nothing for a blob
+ * without a mark of its own.
+ */
+void lc_stored_online(lc_snapshot_t *s, int64_t blob_mark_ms, int64_t mark_ms);
+
+/**
+ * History, newest first: the days, then each day's online times as one
+ * section after them (a reader from before that section stops after the
+ * days). @return bytes written, 0 if cap is too small.
+ */
 size_t lc_encode_hist(const lc_day_t *days, size_t n, uint8_t *buf, size_t cap);
 
-/** @return days decoded (at most cap); 0 also for a blob that cannot be read. */
+/**
+ * @return days decoded (at most cap); 0 also for a blob that cannot be read.
+ * A blob without the online section (an older writer) gives online times 0.
+ */
 size_t lc_decode_hist(const uint8_t *buf, size_t len, lc_day_t *days, size_t cap);
 
 /** Largest encoded history for `n` days. */
@@ -379,7 +405,7 @@ size_t lc_hist_blob_max(size_t n);
 /* ---- RTC copy --------------------------------------------------------------------------- */
 
 #define LC_RTC_MAGIC   0x4C444752u   /* "RGDL" */
-#define LC_RTC_VERSION 3u   /* 2: the snapshot carries reboot_planned; 3: the stamp */
+#define LC_RTC_VERSION 4u   /* 2: the snapshot carries reboot_planned; 3: the stamp; 4: online times */
 
 /**
  * The block kept in RTC memory. `stamp` is the image generation of the run

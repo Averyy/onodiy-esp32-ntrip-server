@@ -307,26 +307,25 @@ static void upload_app(const job_t *job)
     bool rolled_back = chk == WEB_IMAGE_OK && fw_update_is_rolled_back(info.version);
     bool same = chk == WEB_IMAGE_OK && info.has_elf_sha && fw_update_same_as_running(info.elf_sha256);
     web_err_t verdict = web_app_upload_verdict(chk, rolled_back, job->ack, same, job->reinstall);
-    if (verdict == WEB_ERR_SAME_IMAGE) {
+    /* The two refusals that wait for the user's answer are noted as what
+     * they are, not as a state change: the page asks and may send it again. */
+    if (verdict == WEB_ERR_SAME_IMAGE || verdict == WEB_ERR_ROLLED_BACK_ACK_REQUIRED) {
         /* The code running now: installing it again restarts the station for
-         * nothing, unless the user asked for exactly that. */
-        progress_done(NULL, "refused", ESP_ERR_INVALID_STATE);
+         * nothing, unless the user asked for exactly that. A rolled-back
+         * version: the same warning as from the banner. Before anything is
+         * written. */
+        const char *result = web_app_refusal_result(verdict);
+        progress_done(NULL, result, ESP_ERR_INVALID_STATE);
         refuse(req, left, verdict, NULL, UINT32_MAX);
-        web_note_result("app_upload", ESP_ERR_INVALID_STATE, "refused");
-        ESP_LOGI(TAG, "app upload refused: %s is the image already running", info.version);
-        return;
-    }
-    if (verdict == WEB_ERR_ROLLED_BACK_ACK_REQUIRED) {
-        /* Before anything is written: the same warning as from the banner. */
-        progress_done(NULL, "refused", ESP_ERR_INVALID_STATE);
-        refuse(req, left, verdict, NULL, UINT32_MAX);
-        web_note_result("app_upload", ESP_ERR_INVALID_STATE, "refused");
+        web_note_result("app_upload", ESP_ERR_INVALID_STATE, result);
+        ESP_LOGI(TAG, "app upload not installed (%s): %s", result, info.version);
         return;
     }
     if (verdict != WEB_ERR_COUNT) {
-        progress_done(NULL, "invalid_image", ESP_ERR_INVALID_VERSION);
+        const char *result = web_app_refusal_result(verdict);
+        progress_done(NULL, result, ESP_ERR_INVALID_VERSION);
         refuse(req, left, verdict, NULL, UINT32_MAX);
-        web_note_result("app_upload", ESP_ERR_INVALID_VERSION, "invalid_image");
+        web_note_result("app_upload", ESP_ERR_INVALID_VERSION, result);
         return;
     }
     fw_update_upload_t up = NULL;

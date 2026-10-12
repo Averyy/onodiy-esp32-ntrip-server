@@ -118,8 +118,9 @@ typedef struct {
  * alone or with one of WEB_HOST_SUFFIXES (the DHCP name), or
  * <mdns_host>.local (the name the mDNS responder answers, which can differ
  * from the hostname after a name conflict: "onocoydiy-2"). Names compare
- * without case. A bracketed IPv6 literal, an empty host or a malformed port
- * is refused.
+ * without case and may carry one trailing dot (the fully qualified form a
+ * DNS-SD browser opens); IP addresses may not. A bracketed IPv6 literal, an
+ * empty host or a malformed port is refused.
  */
 bool web_host_allowed(const char *host_hdr, const web_host_names_t *names);
 
@@ -353,6 +354,14 @@ web_image_check_t web_image_check(const uint8_t *head, size_t len, uint16_t chip
  */
 web_err_t web_app_upload_verdict(web_image_check_t chk, bool rolled_back, bool rolled_back_ack, bool same_image,
                                  bool reinstall);
+
+/**
+ * The result an app upload refused by its verdict (not WEB_ERR_COUNT) is
+ * noted with (last_result, the final progress message): "same_image" and
+ * "rolled_back_ack_required" wait for the user's answer and say so (nothing
+ * failed and nothing changed); anything else is "invalid_image".
+ */
+const char *web_app_refusal_result(web_err_t verdict);
 
 /* ---- status deltas, dates, names ------------------------------------------------------------- */
 

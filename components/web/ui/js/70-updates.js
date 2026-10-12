@@ -71,16 +71,20 @@ function outcomeText(m) {
   }
 }
 
+/* Uploads the station did not take because they wait for the user's answer: nothing failed. */
+const NOT_INSTALLED = ['same_image', 'rolled_back_ack_required'];
+
 function resultText(m) {
   if (m.outcome && m.outcome !== 'none') return outcomeText(m);
   let t = lbl(L.result, m.result);
   if (m.result === 'package_rejected' && m.failed_rule) t += ' (rule ' + m.failed_rule + (m.cross_layout ? ', other partition layout' : '') + ')';
-  if (m.result !== 'ok' && m.result !== 'not_available_yet' && m.message) t += ' (' + m.message + ')';
+  if (m.result !== 'ok' && m.result !== 'not_available_yet' && NOT_INSTALLED.indexOf(m.result) < 0 && m.message) t += ' (' + m.message + ')';
   return t;
 }
 
 function resultTone(m) {
   if (m.outcome && m.outcome !== 'none') return outcomeTone(m.outcome);
+  if (NOT_INSTALLED.indexOf(m.result) >= 0) return '';
   return m.result === 'ok' ? 'ok' : m.result === 'not_available_yet' ? 'warn' : 'bad';
 }
 
@@ -474,6 +478,14 @@ Views.updates = {
     }
 
     /* ---- Files ---- */
+    /* An image that does not name this project: install only after the warning (?any_project=1). */
+    function anotherProject(project) {
+      return dialog({ title: 'Firmware for another project?', ok: 'Install anyway', okKind: 'danger solid',
+        body: h('p', null, (project ? 'This image says it is firmware for "' + project + '", not for this station.' :
+          project === '' ? 'This image names no project.' : 'This image does not say it is firmware for this station.') +
+          ' Firmware for something else can leave the station unreachable until it is flashed over USB.'),
+        check: 'I know what this image is.' });
+    }
     const appFile = h('input', { type: 'file', accept: '.bin,application/octet-stream', id: 'upd-app-file' });
     const appUploadBtn = btn('Install this file', () => uploadApp({}));
     const appUploadErr = errBox();
@@ -500,7 +512,9 @@ Views.updates = {
         return;
       }
       if (img.project !== 'onocoydiy-esp-um982' && !o.anyProject) {
-        say(appUploadErr, 'This image is firmware for "' + (img.project || 'an unnamed project') + '", not for this station. Nothing was sent.');
+        /* The same warning the station's own refusal (not_this_project) leads to: a fork under another
+         * project name is installable after it. */
+        if (await anotherProject(img.project)) uploadApp(Object.assign({}, o, { anyProject: true }));
         return;
       }
       const same = u && u.running_elf_sha256 && img.elfSha === u.running_elf_sha256;
@@ -545,10 +559,7 @@ Views.updates = {
           return;
         }
         if (e instanceof ApiError && e.code === 'not_this_project' && !o.anyProject) {
-          const ok = await dialog({ title: 'Firmware for another project?', ok: 'Install anyway', okKind: 'danger solid',
-            body: h('p', null, 'This image does not say it is firmware for this station. Firmware for something else can leave the station ' +
-              'unreachable until it is flashed over USB.'), check: 'I know what this image is.' });
-          if (ok) uploadApp({ anyProject: true, rolledBackAck: o.rolledBackAck });
+          if (await anotherProject(null)) uploadApp(Object.assign({}, o, { anyProject: true }));
           return;
         }
         if (e instanceof ApiError && e.code === 'rolled_back_ack_required' && !o.rolledBackAck) {
@@ -556,7 +567,7 @@ Views.updates = {
             body: h('p', null, 'This version was rolled back on this station before: its trial failed, or someone went back from it. ' +
               'If it fails again, the station goes back to the version running now.'),
             check: 'I know this version was rolled back on this station before.' });
-          if (ok) uploadApp({ anyProject: o.anyProject, rolledBackAck: true });
+          if (ok) uploadApp(Object.assign({}, o, { rolledBackAck: true }));
           return;
         }
         showErr(e, appUploadErr);

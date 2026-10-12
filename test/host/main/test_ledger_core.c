@@ -294,6 +294,7 @@ TEST_CASE("ledger blobs: round trip, newer writers may append, damage is refused
         s.today.down_ms[i] = 1000u * (uint32_t)i + 7u;
         s.today.planned_ms[i] = (uint32_t)i;
         s.today.reconnects[i] = 3u * (uint32_t)i;
+        s.today.up_ms[i] = 500u * (uint32_t)i + 3u;
     }
     s.today.power_off_ms = 99;
     s.today.rx_overflows = 4;
@@ -315,21 +316,33 @@ TEST_CASE("ledger blobs: round trip, newer writers may append, damage is refused
 
     buf[len] = 0xAB;                                             /* a newer writer's extra field */
     TEST_ASSERT_TRUE(lc_decode_today(buf, len + 1u, &d));
-    TEST_ASSERT_FALSE(lc_decode_today(buf, len - 2u, &d));       /* cut inside the mark */
-    /* Today carries the mark it runs up to: one unit. */
+    TEST_ASSERT_FALSE(lc_decode_today(buf, len - 2u, &d));       /* cut inside the online times */
+    /* Today carries the mark it runs up to (one unit), then each slot's online time. */
     s.reboot_planned = true;
     s.alive_ms = at(DAY0, H(7));
     len = lc_encode_today(&s, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_size_t(122, len);
+    TEST_ASSERT_EQUAL_size_t(122 + 4 * LC_SLOTS, len);
+    TEST_ASSERT_TRUE(len <= 160);                                /* what the previous build's buffer takes */
     TEST_ASSERT_TRUE(lc_decode_today(buf, len, &d));
     TEST_ASSERT_TRUE(d.reboot_planned);
     TEST_ASSERT_EQUAL_INT64(at(DAY0, H(7)), d.alive_ms);
-    /* A blob from before the mark existed ends 8 bytes earlier, one from
+    TEST_ASSERT_EQUAL_MEMORY(&s.today, &d.today, sizeof(d.today));
+    /* A blob from before the online times existed ends 4 bytes a slot
+     * earlier: no online time. */
+    size_t old = len - 4u * LC_SLOTS;
+    TEST_ASSERT_TRUE(lc_decode_today(buf, old, &d));
+    TEST_ASSERT_EQUAL_INT64(at(DAY0, H(7)), d.alive_ms);
+    for (size_t i = 0; i < LC_SLOTS; i++) {
+        TEST_ASSERT_EQUAL_UINT32(0, d.today.up_ms[i]);
+        TEST_ASSERT_EQUAL_UINT32(s.today.down_ms[i], d.today.down_ms[i]);
+    }
+    TEST_ASSERT_FALSE(lc_decode_today(buf, old - 2u, &d));       /* cut inside the mark */
+    /* One from before the mark existed ends 8 bytes earlier, one from
      * before the reboot flag one more. */
-    TEST_ASSERT_TRUE(lc_decode_today(buf, len - 8u, &d));
+    TEST_ASSERT_TRUE(lc_decode_today(buf, old - 8u, &d));
     TEST_ASSERT_TRUE(d.reboot_planned);
     TEST_ASSERT_EQUAL_INT64(0, d.alive_ms);
-    TEST_ASSERT_TRUE(lc_decode_today(buf, len - 9u, &d));
+    TEST_ASSERT_TRUE(lc_decode_today(buf, old - 9u, &d));
     TEST_ASSERT_FALSE(d.reboot_planned);
     TEST_ASSERT_TRUE(d.planned);
     buf[0] = 0;
@@ -342,16 +355,27 @@ TEST_CASE("ledger blobs: round trip, newer writers may append, damage is refused
         memset(&days[i], 0, sizeof(days[i]));
         days[i].utc_day = DAY0 - 1 - (int32_t)i;
         days[i].down_ms[i % LC_SLOTS] = 1000u + (uint32_t)i;
+        days[i].up_ms[(i + 1u) % LC_SLOTS] = 86000000u - (uint32_t)i;
         days[i].power_off_ms = (uint32_t)i;
     }
-    static uint8_t hb[4000];
+    static uint8_t hb[5000];
     TEST_ASSERT_TRUE(lc_hist_blob_max(HIST) <= sizeof(hb));
     size_t hlen = lc_encode_hist(days, HIST, hb, sizeof(hb));
     TEST_ASSERT_EQUAL_size_t(lc_hist_blob_max(HIST), hlen);
     TEST_ASSERT_EQUAL_size_t(HIST, lc_decode_hist(hb, hlen, back, HIST));
     TEST_ASSERT_EQUAL_MEMORY(days, back, sizeof(days));
     TEST_ASSERT_EQUAL_size_t(5, lc_decode_hist(hb, hlen, back, 5));
+    TEST_ASSERT_EQUAL_MEMORY(days, back, 5 * sizeof(days[0]));
     TEST_ASSERT_EQUAL_size_t(0, lc_decode_hist(hb, hlen - 3u, back, HIST));
+    /* A history from before the online times (the days alone): no online time. */
+    size_t hold = hlen - HIST * 4u * LC_SLOTS;
+    TEST_ASSERT_EQUAL_size_t(HIST, lc_decode_hist(hb, hold, back, HIST));
+    TEST_ASSERT_EQUAL_UINT32(days[3].down_ms[3], back[3].down_ms[3]);
+    TEST_ASSERT_EQUAL_UINT32(0, back[3].up_ms[4]);
+    /* A newer writer's extra section after the online times is ignored. */
+    hb[hlen] = 0x5A;
+    TEST_ASSERT_EQUAL_size_t(HIST, lc_decode_hist(hb, hlen + 1u, back, HIST));
+    TEST_ASSERT_EQUAL_MEMORY(days, back, sizeof(days));
 
     /* history loaded at boot: kept newest first, nothing at or after today */
     fresh(T0, 0);
@@ -983,12 +1007,31 @@ TEST_CASE("ledger: while today is unchanged the alive key alone moves the mark o
     lc_snapshot_t st = snap_base();
     TEST_ASSERT_TRUE(lc_decode_today(blob, blob_len, &st));
     TEST_ASSERT_EQUAL_INT64(at(DAY0, H(10)), st.alive_ms);
+    TEST_ASSERT_EQUAL_UINT32(0, st.today.up_ms[0]);              /* the blob is from 10:00 */
+    int64_t blob_mark = st.alive_ms;
     st.alive_ms = lc_stored_mark(st.alive_ms, alive_key_s);
     TEST_ASSERT_EQUAL_INT64(at(DAY0, H(10) + M(10)), st.alive_ms);
+    /* While the mark alone moved on, slot 0 streamed: ten minutes online. */
+    lc_stored_online(&st, blob_mark, st.alive_ms);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)M(10), st.today.up_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, st.today.up_ms[1]);              /* not expected */
     fresh(T0, 0);
     lc_restore(&c, &st, LC_RESET_POWER_CUT);
     TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + M(12)), LC_CLOCK_SNTP));
     TEST_ASSERT_EQUAL_UINT32((uint32_t)M(2), c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)M(10), c.today.up_ms[0]);   /* the cut itself is down, not online */
+
+    /* No mark of its own (an older layout): nothing to rebuild. Never past
+     * the end of the blob's day. */
+    lc_snapshot_t o = snap_base();
+    o.today.utc_day = DAY0;
+    o.expected_mask = 0x01;
+    lc_stored_online(&o, 0, at(DAY0, H(11)));
+    TEST_ASSERT_EQUAL_UINT32(0, o.today.up_ms[0]);
+    lc_stored_online(&o, at(DAY0, H(24) - M(1)), at(DAY0 + 1, H(2)));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)M(1), o.today.up_ms[0]);
+    lc_stored_online(&o, at(DAY0, H(5)), at(DAY0, H(4)));          /* a mark behind the blob's */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)M(1), o.today.up_ms[0]);
 
     /* The older two-key layout: a today blob without a mark, the alive key alone. */
     TEST_ASSERT_EQUAL_INT64(S(1234), lc_stored_mark(0, 1234));
@@ -1063,4 +1106,68 @@ TEST_CASE("ledger: after the clock went back, today is stored again with the cor
     lc_tick(&c, T0 + 60000u);
     TEST_ASSERT_TRUE(lc_persist_due(&c, T0 + 60000u, 60000u, &alive, &today, &hist));
     TEST_ASSERT_FALSE(today);
+}
+
+TEST_CASE("ledger: the time a slot streamed is counted next to its downtime", "[ledger]")
+{
+    fresh(T0, 0);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(24) - S(20)), LC_CLOCK_SNTP));
+    lc_set_rtcm_ok(&c, T0, true);
+    lc_set_slot(&c, T0, 0, true, true, true);                   /* streaming */
+    lc_set_slot(&c, T0, 1, true, false, false);                 /* expected, not streaming */
+    lc_tick(&c, T0 + 5000u);
+    TEST_ASSERT_EQUAL_UINT32(5000, c.today.up_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.up_ms[1]);
+    TEST_ASSERT_EQUAL_UINT32(5000, c.today.down_ms[1]);
+
+    /* a receiver stall with the session still open: down, not online */
+    lc_set_rtcm_ok(&c, T0 + 5000u, false);
+    lc_tick(&c, T0 + 8000u);
+    TEST_ASSERT_EQUAL_UINT32(5000, c.today.up_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(3000, c.today.down_ms[0]);
+    lc_set_rtcm_ok(&c, T0 + 8000u, true);
+
+    /* UTC midnight splits it like the downtime */
+    lc_tick(&c, T0 + 30000u);
+    TEST_ASSERT_EQUAL_INT32(DAY0 + 1, c.today.utc_day);
+    TEST_ASSERT_EQUAL_UINT32(10000, c.today.up_ms[0]);
+    TEST_ASSERT_EQUAL_INT32(DAY0, c.hist[0].utc_day);
+    TEST_ASSERT_EQUAL_UINT32(17000, c.hist[0].up_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(3000, c.hist[0].down_ms[0]);
+
+    /* a reset keeps it (the RTC copy) */
+    lc_snapshot_t snap;
+    lc_snapshot(&c, &snap);
+    lc_rtc_t blk;
+    lc_rtc_seal(&blk, &snap, 1u);
+    fresh(1000u, 0);
+    lc_restore(&c, &blk.snap, LC_RESET_SOFTWARE);
+    TEST_ASSERT_EQUAL_UINT32(10000, c.today.up_ms[0]);
+
+    /* a slot turned off counts neither */
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, at(DAY0, H(3)), LC_CLOCK_SNTP);
+    lc_set_rtcm_ok(&c, T0, true);
+    lc_set_slot(&c, T0, 0, false, true, false);
+    lc_tick(&c, T0 + 10000u);
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.up_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.down_ms[0]);
+}
+
+TEST_CASE("ledger: online time before the first clock is spread like the downtime", "[ledger]")
+{
+    fresh(T0, 0);
+    lc_set_rtcm_ok(&c, T0, true);
+    lc_set_slot(&c, T0, 0, true, true, true);
+    lc_tick(&c, T0 + 3600000u);                                 /* one hour streaming, no clock */
+    lc_day_t t;
+    lc_today(&c, &t);
+    TEST_ASSERT_EQUAL_UINT32(3600000u, t.up_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, t.down_ms[0]);
+
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0 + 3600000u, at(DAY0, M(30)), LC_CLOCK_SNTP));
+    TEST_ASSERT_EQUAL_UINT32(1800000u, c.today.up_ms[0]);
+    TEST_ASSERT_EQUAL_INT32(DAY0 - 1, c.hist[0].utc_day);
+    TEST_ASSERT_EQUAL_UINT32(1800000u, c.hist[0].up_ms[0]);
 }

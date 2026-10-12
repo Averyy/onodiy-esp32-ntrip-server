@@ -206,6 +206,14 @@ bool web_host_allowed(const char *host_hdr, const web_host_names_t *names)
         (names->ap_ip != NULL && names->ap_ip[0] != '\0' && eq_nocase(host_hdr, hlen, names->ap_ip))) {
         return true;
     }
+    /* A name may come fully qualified, with one trailing dot (the target the
+     * _http._tcp service names over DNS-SD, or a typed FQDN): the same name. */
+    if (host_hdr[hlen - 1] == '.') {
+        hlen--;
+        if (hlen == 0) {
+            return false;
+        }
+    }
     /* <mdns_host>.local: what the responder answers (the hostname, or the
      * name it moved to after a conflict). Only while it runs. */
     const char *mh = names->mdns_host;
@@ -966,6 +974,18 @@ web_err_t web_app_upload_verdict(web_image_check_t chk, bool rolled_back, bool r
         return WEB_ERR_NOT_THIS_PROJECT;
     default:
         return WEB_ERR_INVALID_IMAGE;
+    }
+}
+
+const char *web_app_refusal_result(web_err_t verdict)
+{
+    switch (verdict) {
+    case WEB_ERR_SAME_IMAGE:
+        return "same_image";
+    case WEB_ERR_ROLLED_BACK_ACK_REQUIRED:
+        return "rolled_back_ack_required";
+    default:
+        return "invalid_image";
     }
 }
 

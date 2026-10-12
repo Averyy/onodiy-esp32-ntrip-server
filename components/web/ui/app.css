@@ -449,6 +449,8 @@ small { font-size: 0.85rem; }
 .btn.ghost { border-color: transparent; background: transparent; }
 .btn.small { min-height: 36px; padding: 0.3rem 0.7rem; font-size: 0.9rem; }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
+/* Waiting, but keeps the keyboard focus (a disabled button would drop it). */
+.btn[aria-disabled="true"] { opacity: 0.55; cursor: progress; filter: none; }
 .btn.busy::after {
   content: "";
   width: 14px;
@@ -477,6 +479,8 @@ small { font-size: 0.85rem; }
 
 .field { display: block; }
 .field + .field, .field + .check, .check + .field, .check + .check, .fieldset + .field, .field + .fieldset { margin-top: 0.85rem; }
+/* A row of fields (.cols) between single fields keeps the same gap. */
+.cols + .field, .field + .cols, .cols + .check, .check + .cols { margin-top: 0.85rem; }
 .field > label:not(.check) { display: block; }
 .lbl { display: block; margin-bottom: 0.3rem; font-weight: 600; font-size: 0.95rem; }
 .hint { display: block; margin-top: 0.3rem; color: var(--muted); }

@@ -322,7 +322,7 @@ void ntrip_wire_names(const char *host, bool v2, const char *mountpoint, const c
         }
         return;
     }
-    /* Stored before the username field existed: the credential username lives in `mountpoint`. */
+    /* The older layout (ntrip_cfg_blob.h): the credential username lives in `mountpoint`. */
     if (v2) {
         out->mount = empty(label) ? "onocoydiy" : label;
         out->user = mountpoint;
@@ -1653,12 +1653,13 @@ void ntrip_day_metrics(const ntrip_day_in_t *in, ntrip_day_out_t *out)
     out->valid = true;
     out->rate_valid = in->epochs_sent_today > 0;
     uint32_t rate = 1000u;
-    if (out->rate_valid && in->online_s > 0) {
-        uint64_t r = (uint64_t)in->epochs_sent_today * 1000u / in->online_s;
+    if (out->rate_valid && in->rate_online_s > 0) {
+        uint64_t r = (uint64_t)in->epochs_sent_today * 1000u / in->rate_online_s;
         rate = r > 1000u ? 1000u : (uint32_t)r;
     }
     out->data_rate_permille = (uint16_t)rate;
     uint32_t budget = ntrip_offline_budget_s(rate);
+    out->budget_s = budget;
     uint64_t graced = ((uint64_t)in->online_s + NTRIP_GRACE_S) * 1000u / NTRIP_DAY_S;
     out->graced_uptime_permille = (uint16_t)(graced > 1000u ? 1000u : graced);
     out->budget_left_s = budget > in->offline_s ? budget - in->offline_s : 0;

@@ -140,7 +140,10 @@ function casterEditor(entry, opts) {
   version.el.append(versionNote);
   const tls = checkbox('Use TLS (encrypted connection)', cfg.tls);
   const trust = selectInput([['bundle', L.trust.bundle], ['custom_ca', L.trust.custom_ca], ['insecure', L.trust.insecure]], cfg.trust);
-  const mp = textInput(cfg.mountpoint, { maxlength: 47 });
+  /* An Onocoy slot stored in the older layout (no username) holds the old credential in `mountpoint`, not the
+   * console's mountpoint: start empty, as the wizard does. */
+  const oldLayout = presetOf(cfg.host) === 'onocoy' && !cfg.username;
+  const mp = textInput(oldLayout ? '' : cfg.mountpoint, { maxlength: 47 });
   const user = textInput(cfg.username, { maxlength: 47 });
   const pw = pwInput({ maxlength: 63, placeholder: cfg.password_set ? 'Stored (leave empty to keep)' : '' });
   const clearPw = checkbox('Remove the stored password', false);
@@ -400,7 +403,8 @@ function casterSummary(c, st, preset) {
   const on = st.today_online_s || 0, off = st.today_offline_s || 0;
   if (on + off > 0) metrics.push(['Today online', fmt.dur(on)]);
   if (off) metrics.push(['Today offline', fmt.dur(off)]);
-  if (st.epochs_dropped_today) metrics.push(['Epochs dropped today', fmt.num(st.epochs_dropped_today)]);
+  /* Epoch counts live in RAM: today since the last start (online and offline above come from the ledger). */
+  if (st.epochs_dropped_today) metrics.push(['Epochs dropped today (since the start)', fmt.num(st.epochs_dropped_today)]);
   const avg = c.backoff_profile === 'polite' && st.state === 'streaming' ? slotRate(c.slot, 60) : null;
   const out = [
     h('div', { class: 'muted small' }, [c.host + ':' + c.port, 'NTRIP ' + (c.ntrip_version === 2 ? '2.0' : '1.0'), c.tls ? 'TLS' : null,
@@ -455,7 +459,7 @@ function casterDetails(st) {
       st.unreached_s ? ['Not reached for', fmt.dur(st.unreached_s)] : null,
       st.tls_version ? ['TLS', st.tls_version + (st.tls_cipher ? ' · ' + st.tls_cipher : '')] : null,
       ['Sent', fmt.bytes(st.bytes_sent) + ' · ' + fmt.num(st.frames_sent) + ' frames · ' + fmt.num(st.epochs_sent) + ' epochs'],
-      ['Epochs today', fmt.num(st.epochs_sent_today) + ' sent · ' + fmt.num(st.epochs_dropped_today) + ' dropped'],
+      ['Epochs today (since the start)', fmt.num(st.epochs_sent_today) + ' sent · ' + fmt.num(st.epochs_dropped_today) + ' dropped'],
       ['Dropped', fmt.num(st.frames_dropped) + ' frames · ' + fmt.bytes(st.bytes_dropped) + ' · ' + fmt.num(st.epochs_dropped) + ' epochs'],
       ['Lag now / limit', fmt.ms(st.lag_ms_now) + ' / ' + fmt.ms(st.max_lag_ms)],
       ['Lag drops / laps', fmt.num(st.lag_drops) + ' / ' + fmt.num(st.laps)],
@@ -463,12 +467,12 @@ function casterDetails(st) {
       ['Retry attempt', fmt.num(st.backoff_attempt)],
       /* Onocoy's day: so far today, never red while the streak holds (null while the slot is not set up and on). */
       st.graced_uptime_so_far_permille !== null && st.graced_uptime_so_far_permille !== undefined ?
-        ['Graced uptime so far', h('span', { class: st.streak_ok || st.graced_uptime_so_far_permille >= 998 ? 't-ok' : 't-bad' },
-          fmt.permille(st.graced_uptime_so_far_permille) + (st.streak_ok ? ' (streak on track)' :
-            st.graced_uptime_so_far_permille < 998 ? ' (below 99.8 %)' : ''))] : null,
+        ['Graced uptime so far', soFarView(st.graced_uptime_so_far_permille, st.streak_ok)] : null,
+      /* (online today + the 300 s grant) / 24 h: what the whole day reaches if nothing more is sent. */
       st.graced_uptime_permille !== null && st.graced_uptime_permille !== undefined ?
-        ['Share of the whole day online', fmt.permille(st.graced_uptime_permille)] : null,
+        ['Day covered so far (online + 5 min grant)', fmt.permille(st.graced_uptime_permille)] : null,
       st.data_rate_permille !== null && st.data_rate_permille !== undefined ? ['Data rate', fmt.permille(st.data_rate_permille)] : null,
+      st.budget_s !== null && st.budget_s !== undefined ? ['Offline budget today', 'about ' + fmt.dur(st.budget_s)] : null,
       st.budget_left_s !== null && st.budget_left_s !== undefined ? ['Offline budget left', fmt.dur(st.budget_left_s)] : null,
       st.last_err ? ['Last error', st.last_err] : null,
     ]),

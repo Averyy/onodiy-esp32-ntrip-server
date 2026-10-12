@@ -570,7 +570,20 @@ static bool setup_done_now(int64_t now)
     return s_setup_done;
 }
 
-/* Why the ladder's ESP32 restart waits right now (health_mon.h). */
+/* A caster slot is enabled (the cached configs casters_tick reads). */
+static bool any_caster_enabled(void)
+{
+    for (size_t i = 0; i < MAX_SLOTS; i++) {
+        if (s_slot_enabled[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Why the ladder's ESP32 restart waits right now (health_mon.h). Logged
+ * only during a ladder episode, where a restart may be pending: outside one
+ * every admin visit would log the admin hold coming and going. */
 static uint8_t hold_tick(int64_t now, bool have_net, bool episode, uint32_t *left_s)
 {
     uint32_t admin = __atomic_load_n(&s_admin_at_s, __ATOMIC_SEQ_CST);
@@ -586,15 +599,17 @@ static uint8_t hold_tick(int64_t now, bool have_net, bool episode, uint32_t *lef
         .station_time_s = lifecycle_station_time_s(),
         .power_on_grace_s = (uint32_t)CONFIG_HEALTH_REBOOT_POWER_ON_GRACE_MIN * 60u,
         .heard = s_link_stats.last_rtcm_age_ms != UINT32_MAX || s_link_stats.framing.text_lines > 0,
+        .casters_enabled = any_caster_enabled(),
     };
     uint8_t hold = hm_reboot_hold(&s_hold, &hi, left_s);
-    if (hold != s_prev_hold) {
+    uint8_t shown = episode ? hold : 0u;
+    if (shown != s_prev_hold) {
         char was[128];
         char now_text[128];
         hold_text(s_prev_hold, was, sizeof(was));
-        hold_text(hold, now_text, sizeof(now_text));
-        ESP_LOGI(TAG, "GNSS ladder restart hold: %s -> %s", s_prev_hold ? was : "none", hold ? now_text : "none");
-        s_prev_hold = hold;
+        hold_text(shown, now_text, sizeof(now_text));
+        ESP_LOGI(TAG, "GNSS ladder restart hold: %s -> %s", s_prev_hold ? was : "none", shown ? now_text : "none");
+        s_prev_hold = shown;
     }
     return hold;
 }
@@ -826,9 +841,11 @@ static void tick(void)
     o.admin_resets = s_admin_resets;
     o.recovery_mode = (health_recovery_mode_t)mode;
     o.gnss_reboot_recheck = ls.reboot_recheck;
-    o.gnss_reboot_hold = in->reboot_hold;
-    o.gnss_reboot_hold_left_s = hold_left;
-    o.gnss_reboot_cap_wait_s = in->reboot_allowed ? UINT32_MAX : cap_wait;
+    hm_hold_view_t hv;
+    hm_hold_view(ls.episode, in->reboot_hold, hold_left, in->reboot_allowed, cap_wait, &hv);
+    o.gnss_reboot_hold = hv.hold;
+    o.gnss_reboot_hold_left_s = hv.hold_left_s;
+    o.gnss_reboot_cap_wait_s = hv.cap_wait_s;
     if (s_factory_refused_ms == HM_NEVER) {
         o.factory_reset_refused_age_s = UINT32_MAX;
     } else {

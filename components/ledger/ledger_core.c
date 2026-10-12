@@ -66,6 +66,7 @@ static void add_day(lc_day_t *dst, const lc_day_t *src)
         dst->down_ms[s] = sat_add(dst->down_ms[s], src->down_ms[s]);
         dst->planned_ms[s] = sat_add(dst->planned_ms[s], src->planned_ms[s]);
         dst->reconnects[s] = sat_add(dst->reconnects[s], src->reconnects[s]);
+        dst->up_ms[s] = sat_add(dst->up_ms[s], src->up_ms[s]);
     }
     dst->power_off_ms = sat_add(dst->power_off_ms, src->power_off_ms);
     dst->rx_overflows = sat_add(dst->rx_overflows, src->rx_overflows);
@@ -139,22 +140,30 @@ static lc_day_t *rec_for_day(lc_t *c, int32_t day)
 
 /* ---- accrual ------------------------------------------------------------------------- */
 
-/* `planned`: the slots whose downtime counts as planned. */
+/*
+ * `planned`: the slots whose downtime counts as planned. Online time alone
+ * does not make the record dirty: while every expected slot streams, today
+ * is not stored again and the mark alone moves on (lc_persist_due), and a
+ * restore from settings adds the time between the two marks as online
+ * (lc_stored_online): nothing else can have happened in it.
+ */
 static void add_state(lc_t *c, lc_day_t *r, uint64_t ms, uint8_t expected, uint8_t up, uint8_t planned)
 {
     uint8_t down = (uint8_t)(expected & ~up);
-    if (down == 0) {
-        return;
-    }
+    uint8_t online = (uint8_t)(expected & up);
     for (size_t s = 0; s < LC_SLOTS; s++) {
         if (down & bit(s)) {
             r->down_ms[s] = sat_add(r->down_ms[s], ms);
             if (planned & bit(s)) {
                 r->planned_ms[s] = sat_add(r->planned_ms[s], ms);
             }
+        } else if (online & bit(s)) {
+            r->up_ms[s] = sat_add(r->up_ms[s], ms);
         }
     }
-    mark(c, r);
+    if (down != 0) {
+        mark(c, r);
+    }
 }
 
 /* Spread [start, start + ms) over UTC days with a fixed state. */
@@ -260,6 +269,7 @@ static void spread_pending(lc_t *c, int64_t end)
         for (size_t s = 0; s < LC_SLOTS; s++) {
             add.down_ms[s] = last ? p.down_ms[s] - done.down_ms[s] : share(p.down_ms[s], piece, span);
             add.planned_ms[s] = last ? p.planned_ms[s] - done.planned_ms[s] : share(p.planned_ms[s], piece, span);
+            add.up_ms[s] = last ? p.up_ms[s] - done.up_ms[s] : share(p.up_ms[s], piece, span);
         }
         add_day(&done, &add);
         if (r != NULL) {
@@ -647,6 +657,23 @@ static void get_day(blob_reader_t *r, lc_day_t *d, size_t slots)
     d->rx_overflows = blob_get_u32(r);
 }
 
+static void put_up(blob_writer_t *w, const lc_day_t *d)
+{
+    for (size_t s = 0; s < LC_SLOTS; s++) {
+        blob_put_u32(w, d->up_ms[s]);
+    }
+}
+
+static void get_up(blob_reader_t *r, lc_day_t *d, size_t slots)
+{
+    for (size_t s = 0; s < slots; s++) {
+        uint32_t up = blob_get_u32(r);
+        if (s < LC_SLOTS) {
+            d->up_ms[s] = up;
+        }
+    }
+}
+
 size_t lc_encode_today(const lc_snapshot_t *s, uint8_t *buf, size_t cap)
 {
     blob_writer_t w;
@@ -659,6 +686,7 @@ size_t lc_encode_today(const lc_snapshot_t *s, uint8_t *buf, size_t cap)
     blob_put_bool(&w, s->planned);
     blob_put_bool(&w, s->reboot_planned);   /* appended later: older blobs end before it */
     blob_put_i64(&w, s->alive_ms);          /* appended later: the mark this today runs up to */
+    put_up(&w, &s->today);                  /* appended later: each slot's online time */
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
@@ -680,6 +708,9 @@ bool lc_decode_today(const uint8_t *buf, size_t len, lc_snapshot_t *s)
     if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
         mark = blob_get_i64(&r);   /* a blob cut inside it is damaged */
     }
+    if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
+        get_up(&r, &d, slots);     /* likewise */
+    }
     if (!blob_reader_ok(&r)) {
         return false;
     }
@@ -690,6 +721,21 @@ bool lc_decode_today(const uint8_t *buf, size_t len, lc_snapshot_t *s)
     s->reboot_planned = reboot_planned;
     s->alive_ms = (mark > 0) ? mark : 0;
     return true;
+}
+
+void lc_stored_online(lc_snapshot_t *s, int64_t blob_mark_ms, int64_t mark_ms)
+{
+    if (blob_mark_ms < LC_UTC_FLOOR_S * 1000 || mark_ms <= blob_mark_ms || s->today.utc_day < 0 ||
+        day_of(blob_mark_ms) != s->today.utc_day) {
+        return;   /* no mark of its own (an older layout), or nothing after it on that day */
+    }
+    int64_t day_end = ((int64_t)s->today.utc_day + 1) * LC_DAY_MS;
+    int64_t end = mark_ms < day_end ? mark_ms : day_end;
+    for (size_t i = 0; i < LC_SLOTS; i++) {
+        if (s->expected_mask & bit(i)) {
+            s->today.up_ms[i] = sat_add(s->today.up_ms[i], (uint64_t)(end - blob_mark_ms));
+        }
+    }
 }
 
 int64_t lc_stored_mark(int64_t blob_mark_ms, int64_t alive_s)
@@ -703,7 +749,7 @@ int64_t lc_stored_mark(int64_t blob_mark_ms, int64_t alive_s)
 
 size_t lc_hist_blob_max(size_t n)
 {
-    return 3u + n * (4u + LC_SLOTS * 12u + 8u);
+    return 3u + n * (4u + LC_SLOTS * 12u + 8u) + n * LC_SLOTS * 4u;
 }
 
 size_t lc_encode_hist(const lc_day_t *days, size_t n, uint8_t *buf, size_t cap)
@@ -718,6 +764,10 @@ size_t lc_encode_hist(const lc_day_t *days, size_t n, uint8_t *buf, size_t cap)
     blob_put_u8(&w, (uint8_t)n);
     for (size_t i = 0; i < n; i++) {
         put_day(&w, &days[i]);
+    }
+    /* Appended later, after every day, so a reader from before stops ahead of it. */
+    for (size_t i = 0; i < n; i++) {
+        put_up(&w, &days[i]);
     }
     return blob_writer_ok(&w) ? w.len : 0;
 }
@@ -740,6 +790,16 @@ size_t lc_decode_hist(const uint8_t *buf, size_t len, lc_day_t *days, size_t cap
         }
         if (out < cap) {
             days[out++] = d;
+        }
+    }
+    if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
+        for (size_t i = 0; i < n; i++) {
+            lc_day_t d;
+            memset(&d, 0, sizeof(d));
+            get_up(&r, &d, slots);   /* a section cut short is damage */
+            if (i < out) {
+                memcpy(days[i].up_ms, d.up_ms, sizeof(d.up_ms));
+            }
         }
     }
     return blob_reader_ok(&r) ? out : 0;

@@ -95,9 +95,11 @@
  * what the Onocoy console gives (mountpoint, username, password). NTRIP 2.0
  * posts to /<mountpoint> with Basic <username>:<password>; NTRIP 1.0 sends
  * "SOURCE <password> /<username>" (Onocoy's instruction for 1.0-only
- * sources). A slot stored before the username field existed (empty
- * username, the credential username in `mountpoint`) keeps working with the
- * old mapping, but does not count as set up (ntrip_server_onocoy_ready).
+ * sources). A slot stored in the older layout (the credential username in
+ * `mountpoint`; its stored record says so, and a username a previous
+ * caster left in it is dropped on load) keeps working with the old
+ * mapping, but does not count as set up (ntrip_server_onocoy_ready) until
+ * the console's values are saved.
  *
  * Safe mode skips ntrip_server_init() and _start(): no slot runs. Then
  * ntrip_server_get_status() still works (every slot DISABLED) and
@@ -183,7 +185,7 @@ typedef struct {
     ntrip_trust_t trust_mode;      /**< TLS slots only */
     bool ca_pem_set;               /**< output only: a custom CA PEM is stored for this slot */
     ntrip_backoff_profile_t backoff_profile; /**< presets set it (Onocoy: fast) */
-    char label[48];                /**< [A-Za-z0-9]; only an Onocoy slot stored before the username field uses it
+    char label[48];                /**< [A-Za-z0-9]; only an Onocoy slot stored in the older layout uses it
                                         (its NTRIP 2.0 mountpoint, "onocoydiy" when empty) */
     bool v2_raw_body;              /**< NTRIP 2.0 quirk: send the body unchunked */
     bool dup_stream_ack;           /**< user acknowledged streaming the same data to Onocoy and an open caster */
@@ -215,15 +217,18 @@ typedef struct {
     uint32_t restarts;          /**< forced by the health monitor */
     int64_t connected_since;    /**< unix time the session started, 0 = none or no clock */
     uint32_t connected_s;       /**< seconds in the current session */
-    uint32_t today_online_s;
-    uint32_t today_offline_s;
-    bool day_metrics_valid;     /**< protected slot, enabled and set up (ntrip_server_onocoy_ready): the four
+    uint32_t today_online_s;    /**< the availability ledger's today: streamed with fresh RTCM (kept across restarts) */
+    uint32_t today_offline_s;   /**< the availability ledger's today: expected to stream but did not, planned included */
+    bool day_metrics_valid;     /**< protected slot, enabled and set up (ntrip_server_onocoy_ready): the
                                      figures below mean something; false = unknown (the web shows null) */
-    uint16_t graced_uptime_permille; /**< protected slot: min(1, (online + grant) / 86400), the day fraction */
-    bool streak_ok;             /**< protected slot: graced uptime meets the streak threshold so far */
-    uint16_t data_rate_permille;/**< protected slot: epochs sent / epochs expected while connected today (estimate) */
+    uint16_t graced_uptime_permille; /**< protected slot: min(1, (online today + grant) / 86400), the share of the
+                                     whole day covered so far */
+    bool streak_ok;             /**< protected slot: today's offline time is within the day's budget */
+    uint16_t data_rate_permille;/**< protected slot: epochs sent / epochs expected while connected today in this
+                                     boot (estimate) */
     bool data_rate_valid;       /**< ... and something was sent today (else the rate is unknown) */
-    uint32_t budget_left_s;     /**< protected slot: offline budget left today for that data rate (estimate) */
+    uint32_t budget_s;          /**< protected slot: offline seconds the day allows at that data rate (estimate) */
+    uint32_t budget_left_s;     /**< protected slot: budget_s minus today's offline seconds, 0 once used up */
     uint16_t graced_uptime_so_far_permille; /**< protected slot: 1 - max(0, unplanned offline today - grant) /
                                      time elapsed today (from 00:00 UTC or from when the slot first became
                                      expected today); valid with so_far_valid */

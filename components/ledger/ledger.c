@@ -37,8 +37,8 @@ _Static_assert((int)LEDGER_CLOCK_NONE == (int)LC_CLOCK_NONE && (int)LEDGER_CLOCK
 
 #define DAY_S          86400
 #define SHUTDOWN_WAIT_MS 300   /* of the shutdown budget, for a tick's writes to finish */
-#define TODAY_BLOB_MAX 160u    /* today with its mark: 122 bytes */
-#define HIST_BLOB_MAX  (3u + (size_t)CONFIG_LEDGER_HISTORY_DAYS * (4u + LC_SLOTS * 12u + 8u))
+#define TODAY_BLOB_MAX 160u    /* today with its mark and the online times: 154 bytes */
+#define HIST_BLOB_MAX  (3u + (size_t)CONFIG_LEDGER_HISTORY_DAYS * (4u + LC_SLOTS * 16u + 8u))
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static lc_t s_core;                                     /* under s_lock */
@@ -69,6 +69,7 @@ static void to_api(const lc_day_t *d, ledger_day_t *out)
         out->down_s[s] = d->down_ms[s] / 1000u;
         out->planned_s[s] = d->planned_ms[s] / 1000u;
         out->reconnects[s] = d->reconnects[s];
+        out->up_s[s] = d->up_ms[s] / 1000u;
     }
     out->power_off_s = d->power_off_ms / 1000u;
     out->rx_overflows = d->rx_overflows;
@@ -145,6 +146,13 @@ esp_err_t ledger_init(bool (*rtc_stamp_ok)(uint32_t stamp), uint32_t rtc_stamp)
             stored.today.utc_day = -1;
         }
     }
+    /* The stored today with the online time up to the later mark: while the
+     * alive key alone moved on, every expected slot streamed. Only the copy
+     * (the flags are cleared from the blob as stored, below). */
+    lc_snapshot_t stored_now = stored;
+    if (stored_ok) {
+        lc_stored_online(&stored_now, stored.alive_ms, lc_stored_mark(stored.alive_ms, s_alive_key_s));
+    }
     /* A power cut (or a brownout) is never planned, whichever copy is read:
      * RTC memory that happens to pass its checks after one is not trusted
      * for that either; nor is a planned reboot's flag after a crash. */
@@ -159,7 +167,7 @@ esp_err_t ledger_init(bool (*rtc_stamp_ok)(uint32_t stamp), uint32_t rtc_stamp)
          * the mark on while today did not change. An older layout (no mark
          * in the blob) gives the alive key alone. */
         if (stored_ok) {
-            snap.today = stored.today;
+            snap.today = stored_now.today;
             snap.expected_mask = stored.expected_mask;
             snap.protected_mask = stored.protected_mask;
             snap.planned = stored.planned;
@@ -176,7 +184,7 @@ esp_err_t ledger_init(bool (*rtc_stamp_ok)(uint32_t stamp), uint32_t rtc_stamp)
         size_t n = lc_decode_hist(s_hist_blob, hlen, s_hist, CONFIG_LEDGER_HISTORY_DAYS);
         lc_set_history(&s_core, s_hist, n);
     }
-    lc_merge_stored_day(&s_core, &stored.today);
+    lc_merge_stored_day(&s_core, &stored_now.today);
     consume_flags(&stored, stored_ok);
     s_ready = true;
     ESP_LOGI(TAG, "restored from %s: day %ld, %u days of history, target %d.%d %%, last alive %lld%s",

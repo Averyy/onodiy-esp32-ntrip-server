@@ -68,11 +68,11 @@
 #include "lwip/sockets.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/x509.h"
+#include "ntrip_cfg_blob.h"
 #include "ntrip_proto.h"
 #include "rtcm_hub.h"
 #include "sdkconfig.h"
 #include "settings.h"
-#include "settings_codec.h"
 
 static const char *TAG = "ntrip";
 
@@ -104,9 +104,6 @@ _Static_assert((int)NTRIP_PROF_FAST == (int)NTRIP_BACKOFF_FAST &&
                    (int)NTRIP_PROF_POLITE == (int)NTRIP_BACKOFF_POLITE,
                "core profiles must match ntrip_backoff_profile_t");
 _Static_assert(CONFIG_NTRIP_MAX_CASTERS <= 24, "one event-group bit per slot");
-
-#define CFG_BLOB_VERSION 1
-#define CFG_BLOB_MAX     320   /* largest v1 record: 307 bytes */
 
 #define TICK_MS             100u    /* longest single wait while a session is open */
 #define IDLE_WAIT_MS        200u    /* idle loop: fresh-data gate and backoff checks */
@@ -220,8 +217,7 @@ typedef struct {
     uint32_t low_heap_until_ms;
     bool low_heap_wait;
     int32_t day;
-    uint64_t on_ms;
-    uint64_t off_ms;
+    uint64_t on_ms;              /* this boot, today: connected (the data rate's time base; the day's figures are the ledger's) */
     uint64_t dropped_epochs_base;
     uint32_t last_acct_ms;
     uint32_t last_pub_ms;
@@ -347,67 +343,6 @@ static bool has_bad_name(const char *s)
 
 /* ---- config persistence ---------------------------------------------------------- */
 
-static size_t encode_cfg(const ntrip_caster_cfg_t *c, uint8_t *buf, size_t cap)
-{
-    blob_writer_t w;
-    blob_writer_init(&w, buf, cap);
-    blob_put_u8(&w, CFG_BLOB_VERSION);
-    blob_put_bool(&w, c->enabled);
-    blob_put_bool(&w, c->protected_slot);
-    blob_put_u8(&w, (uint8_t)c->proto);
-    blob_put_bool(&w, c->tls);
-    blob_put_u16(&w, c->port);
-    blob_put_str(&w, c->name);
-    blob_put_str(&w, c->host);
-    blob_put_str(&w, c->mountpoint);
-    blob_put_str(&w, c->username);
-    blob_put_str(&w, c->password);
-    blob_put_u8(&w, (uint8_t)c->trust_mode);
-    blob_put_u8(&w, (uint8_t)c->backoff_profile);
-    blob_put_str(&w, c->label);
-    blob_put_bool(&w, c->v2_raw_body);
-    blob_put_bool(&w, c->dup_stream_ack);
-    return blob_writer_ok(&w) ? w.len : 0;
-}
-
-static bool enums_valid(const ntrip_caster_cfg_t *c)
-{
-    return (c->proto == NTRIP_PROTO_V1 || c->proto == NTRIP_PROTO_V2) && c->trust_mode <= NTRIP_TRUST_INSECURE &&
-           c->backoff_profile <= NTRIP_BACKOFF_POLITE;
-}
-
-static bool decode_cfg(const uint8_t *buf, size_t len, ntrip_caster_cfg_t *out)
-{
-    blob_reader_t r;
-    blob_reader_init(&r, buf, len);
-    if (blob_get_u8(&r) != CFG_BLOB_VERSION) {
-        return false;
-    }
-    ntrip_caster_cfg_t c;
-    memset(&c, 0, sizeof(c));
-    c.enabled = blob_get_bool(&r);
-    c.protected_slot = blob_get_bool(&r);
-    c.proto = (ntrip_proto_t)blob_get_u8(&r);
-    c.tls = blob_get_bool(&r);
-    c.port = blob_get_u16(&r);
-    blob_get_str(&r, c.name, sizeof(c.name));
-    blob_get_str(&r, c.host, sizeof(c.host));
-    blob_get_str(&r, c.mountpoint, sizeof(c.mountpoint));
-    blob_get_str(&r, c.username, sizeof(c.username));
-    blob_get_str(&r, c.password, sizeof(c.password));
-    c.trust_mode = (ntrip_trust_t)blob_get_u8(&r);
-    c.backoff_profile = (ntrip_backoff_profile_t)blob_get_u8(&r);
-    blob_get_str(&r, c.label, sizeof(c.label));
-    c.v2_raw_body = blob_get_bool(&r);
-    c.dup_stream_ack = blob_get_bool(&r);
-    if (!blob_reader_ok(&r) || !enums_valid(&c)) {
-        return false;
-    }
-    c.password_set = c.password[0] != '\0';
-    *out = c;
-    return true;
-}
-
 static void slot_defaults(size_t slot, ntrip_caster_cfg_t *out)
 {
     if (slot == 0) {
@@ -441,10 +376,10 @@ static esp_err_t load_slot(size_t slot, ntrip_caster_cfg_t *out)
 {
     char ns[16];
     slot_ns(slot, ns, sizeof(ns));
-    uint8_t buf[CFG_BLOB_MAX];
+    uint8_t buf[NTRIP_CFG_BLOB_MAX];
     size_t len = sizeof(buf);
     esp_err_t err = settings_get_blob(ns, SETTINGS_KEY_CST_CFG, buf, &len);
-    if (err == ESP_OK && !decode_cfg(buf, len, out)) {
+    if (err == ESP_OK && !ntrip_cfg_decode(buf, len, out)) {
         ESP_LOGW(TAG, "slot %u: stored config unreadable, using defaults", (unsigned)slot);
         err = ESP_ERR_INVALID_VERSION;
     }
@@ -1169,19 +1104,14 @@ static void account(slot_t *s, uint32_t now)
         if (s->day >= 0) {
             /* new UTC day; until the first trusted clock everything counts as today */
             s->on_ms = 0;
-            s->off_ms = 0;
             s->st.epochs_sent_today = 0;
             s->dropped_epochs_base += s->st.epochs_dropped_today;
             s->st.epochs_dropped_today = 0;
         }
         s->day = day;
     }
-    if (s->cfg.enabled && s_running) {
-        if (s->open) {
-            s->on_ms += dt;
-        } else {
-            s->off_ms += dt;
-        }
+    if (s->cfg.enabled && s_running && s->open) {
+        s->on_ms += dt;
     }
     /* Since when the protected slot counts today: from 00:00 UTC when it
      * counted already (or at this boot's first look: the ledger has the
@@ -1217,8 +1147,14 @@ static void publish(slot_t *s, uint32_t now, bool force)
     if (!s->open) {
         st->connected_since = 0;
     }
-    st->today_online_s = (uint32_t)(s->on_ms / 1000u);
-    st->today_offline_s = (uint32_t)(s->off_ms / 1000u);
+    /* Every "today" figure from the availability ledger (kept across
+     * restarts), so the day's online and offline times agree wherever they
+     * are shown; without a trusted clock that is the last known day plus
+     * the time not yet given a day. */
+    ledger_day_t ld = { .utc_day = -1 };
+    bool have_ld = s->idx < LEDGER_MAX_SLOTS && ledger_get_today(&ld) == ESP_OK;
+    st->today_online_s = have_ld ? ld.up_s[s->idx] : 0;
+    st->today_offline_s = have_ld ? ld.down_s[s->idx] : 0;
 
     if (s->consumer != NULL) {
         rtcm_hub_consumer_stats_t cs;
@@ -1244,25 +1180,22 @@ static void publish(slot_t *s, uint32_t now, bool force)
     /* The Onocoy day figures, only for a protected slot that is enabled and
      * set up: numbers for a slot that cannot stream would only mislead. */
     ntrip_day_in_t din = {
-        .counted = s->cfg.protected_slot && s->cfg.enabled && ntrip_server_onocoy_ready(&s->cfg),
+        .counted = have_ld && s->cfg.protected_slot && s->cfg.enabled && ntrip_server_onocoy_ready(&s->cfg),
         .online_s = st->today_online_s,
         .offline_s = st->today_offline_s,
+        .rate_online_s = (uint32_t)(s->on_ms / 1000u),
         .epochs_sent_today = st->epochs_sent_today,
     };
     time_t t = time(NULL);
-    if (din.counted && t >= CLOCK_VALID_UNIX && s->exp_day == (int32_t)(t / 86400) && s->exp_from_sod != UINT32_MAX) {
+    if (din.counted && t >= CLOCK_VALID_UNIX && s->exp_day == (int32_t)(t / 86400) && s->exp_from_sod != UINT32_MAX &&
+        ld.utc_day == s->exp_day) {
         uint32_t sod = (uint32_t)(t % 86400);
         din.day_known = true;
         din.elapsed_s = sod > s->exp_from_sod ? sod - s->exp_from_sod : 0;
         /* Unplanned downtime as the availability ledger counts it (power cuts included). */
-        ledger_day_t ld;
-        if (ledger_get_today(&ld) == ESP_OK && ld.utc_day == s->exp_day && s->idx < LEDGER_MAX_SLOTS) {
-            uint32_t down = ld.down_s[s->idx];
-            uint32_t planned = ld.planned_s[s->idx];
-            din.unplanned_offline_s = down > planned ? down - planned : 0;
-        } else {
-            din.unplanned_offline_s = st->today_offline_s;
-        }
+        uint32_t down = ld.down_s[s->idx];
+        uint32_t planned = ld.planned_s[s->idx];
+        din.unplanned_offline_s = down > planned ? down - planned : 0;
     }
     ntrip_day_out_t dout;
     ntrip_day_metrics(&din, &dout);
@@ -1271,6 +1204,7 @@ static void publish(slot_t *s, uint32_t now, bool force)
     st->streak_ok = dout.streak_ok;
     st->data_rate_permille = dout.data_rate_permille;
     st->data_rate_valid = dout.rate_valid;
+    st->budget_s = dout.budget_s;
     st->budget_left_s = dout.budget_left_s;
     st->graced_uptime_so_far_permille = dout.graced_so_far_permille;
     st->so_far_valid = dout.so_far_valid;
@@ -1981,7 +1915,8 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg, nt
     }
     if (!fits(cfg->name, sizeof(cfg->name)) || !fits(cfg->host, sizeof(cfg->host)) ||
         !fits(cfg->mountpoint, sizeof(cfg->mountpoint)) || !fits(cfg->username, sizeof(cfg->username)) ||
-        !fits(cfg->password, sizeof(cfg->password)) || !fits(cfg->label, sizeof(cfg->label)) || !enums_valid(cfg)) {
+        !fits(cfg->password, sizeof(cfg->password)) || !fits(cfg->label, sizeof(cfg->label)) ||
+        !ntrip_cfg_enums_valid(cfg)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -2016,10 +1951,10 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg, nt
             }
         }
     }
-    uint8_t buf[CFG_BLOB_MAX];
+    uint8_t buf[NTRIP_CFG_BLOB_MAX];
     size_t len = 0;
     if (err == ESP_OK) {
-        len = encode_cfg(&next, buf, sizeof(buf));
+        len = ntrip_cfg_encode(&next, buf, sizeof(buf));
         err = len == 0 ? ESP_ERR_INVALID_SIZE : ESP_OK;
     }
     if (err == ESP_OK) {
