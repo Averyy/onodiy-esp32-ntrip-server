@@ -366,7 +366,7 @@ static stn_job_t ladder_job(stn_t *s, stn_rec_t a)
         stn_job_t j = make_job(STN_JOB_DETECT);
         j.full = true;
         j.break_first = true;
-        j.loader_key = !s->loader_key_sent;
+        j.loader_key = !s->loader_key_sent && !s->first_apply_held;
         return j;
     }
     case STN_REC_RECONFIGURE:
@@ -653,7 +653,8 @@ static stn_job_t next_detect(stn_t *s, const stn_in_t *in)
     stn_job_t j = make_job(STN_JOB_DETECT);
     j.full = s->short_fails >= 2 || (s->episode_ms != STN_NEVER && now - s->episode_ms >= STN_DETECT_FAST_SPAN_MS);
     j.listen_only = s->listen_only;
-    j.loader_key = !s->listen_only && !s->loader_key_sent;
+    /* Held: queries only; a receiver at its loader waits for the user's restart. */
+    j.loader_key = !s->listen_only && !s->loader_key_sent && !s->first_apply_held;
     return j;
 }
 
@@ -1382,6 +1383,26 @@ void stn_restart_seen(stn_t *s)
 void stn_on_arp(stn_t *s, const int64_t ecef_01mm[3])
 {
     um98x_survey_on_arp(&s->survey, ecef_01mm);
+}
+
+/* ---- first-apply hold --------------------------------------------------------- */
+
+bool stn_hold_at_boot(bool option, bool settings_ok, bool have_applied_hash, bool have_autocfg, bool have_recovery,
+                      stn_hold_writes_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!option || !settings_ok || have_applied_hash || have_autocfg) {
+        return false;
+    }
+    out->autocfg_off = true;
+    out->hold = true;
+    out->recovery_alerts = !have_recovery;   /* a recovery mode the user chose stays */
+    return true;
+}
+
+void stn_set_first_apply_held(stn_t *s, bool held)
+{
+    s->first_apply_held = held;
 }
 
 /* ---- status ----------------------------------------------------------------- */

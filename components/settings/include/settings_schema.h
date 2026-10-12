@@ -59,6 +59,7 @@ extern "C" {
 #define SETTINGS_KEY_GNSS_BASE_POS  "base_pos"    /**< blob: locked antenna position (um98x_base_position_t, encoded) */
 #define SETTINGS_KEY_GNSS_FLASH_JOB "flash_job"   /**< blob: open receiver-flash journal (versioned record, see the flasher); survives factory reset */
 #define SETTINGS_KEY_GNSS_BENCH_RACE "bench_race" /**< u8: bench builds only: 1 = the next boot streams the receiver's stop key from its earliest point (one-shot, erased before it runs) */
+#define SETTINGS_KEY_GNSS_HOLD      "hold"        /**< u8: 1 = this device's first receiver configuration is held (only queries reach the receiver until the user applies); written once by a build with CONFIG_STATION_HOLD_FIRST_APPLY on a device whose profile was never applied (with gnss/autocfg = 0, and gnss/recovery = 2 if unset, in one batch); erased by the first successful apply, by gnss/autocfg turned on, by factory reset */
 
 /* ---- "cst0".."cst7": one namespace per caster slot ------------------------ */
 #define SETTINGS_NS_CASTER_FMT      "cst%u"

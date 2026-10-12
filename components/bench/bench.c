@@ -4,6 +4,17 @@
  *
  * Bench console (see bench.h). The commands follow the receiver flasher's
  * bench plan one step at a time; each prints one PASS/FAIL line.
+ *
+ * Receiver link hooks (with CONFIG_GNSS_LINK_BENCH_HOOKS): an RX task stall
+ * (`stall`; past the task watchdog only with TWDT-PANIC), a stall inside the
+ * next RAW-lease read (`rawstall`), the frame and drain-pass time recorder
+ * (`ftimes`, `ftimes dump`), the loader prompt detector in report-only mode
+ * (`promptdet`, and `promptwatch` at a chosen baud under the station's lease:
+ * nothing is transmitted), deleting the UART driver for the link's own
+ * reopen (`uartclose`). Link restart helpers: a fragmented internal heap
+ * (`heapfrag`) and the ladder's link restart on demand (`linkrestart`).
+ * Same refusals as the receiver commands (maintenance, an open journal,
+ * another receiver session or job).
  */
 #include "bench.h"
 
@@ -15,11 +26,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 
 #include "esp_console.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "gnss_link.h"
 #include "lifecycle.h"
+#include "network.h"
 #include "pkg_store.h"
 #include "settings.h"
 #include "station.h"
@@ -34,6 +51,9 @@ static const char *TAG = "bench";
 #define TOK_JOURNAL "WRITE-JOURNAL"
 #define TOK_CLEAR   "CLEAR-JOURNAL"
 #define TOK_RESTART "RESTART-ESP32"
+#define TOK_TWDT    "TWDT-PANIC"
+#define TOK_HEAP    "FRAGMENT-HEAP"
+#define TOK_UART    "CLOSE-UART"
 
 #define RUN_TIMEOUT_MS (20u * 60u * 1000u)
 #define RACE_MAX_MS    10000u
@@ -387,6 +407,429 @@ static int cmd_capture(int argc, char **argv)
     return 0;
 }
 
+/* ---- receiver link: stalls, timing, prompt observer, restart helpers ----------------------- */
+
+/* The refusals of the receiver commands, for the link's bench hooks: receiver
+ * maintenance, an open receiver update journal, another receiver session or job. */
+static bool link_free(void)
+{
+    static station_status_t st;
+    if (station_get_status(&st) != ESP_OK) {
+        printf("BENCH REFUSED: no station status\n");
+        return false;
+    }
+    if (st.rx_maintenance) {
+        printf("BENCH REFUSED: receiver maintenance is on (end it first)\n");
+        return false;
+    }
+    if (st.flash_journal_open || st.flash_journal_settings_unavailable) {
+        printf("BENCH REFUSED: a receiver update journal is open\n");
+        return false;
+    }
+    if (st.lease_held || st.flash_session_running || st.state == STATION_STATE_CONFIGURING ||
+        st.state == STATION_STATE_FLASHING || st.state == STATION_STATE_RECOVERING ||
+        st.state == STATION_STATE_FLASH_RECOVERY) {
+        printf("BENCH REFUSED: another receiver session or job runs; try again when it ends\n");
+        return false;
+    }
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+    if (gnss_link_bench_stall_active()) {
+        printf("BENCH REFUSED: a stall runs\n");
+        return false;
+    }
+#endif
+    return true;
+}
+
+static void sleep_ms(uint32_t ms)
+{
+    while (ms > 0) {
+        uint32_t slice = ms > 500u ? 500u : ms;
+        vTaskDelay(pdMS_TO_TICKS(slice));
+        ms -= slice;
+    }
+}
+
+static void print_heap(const char *when)
+{
+    printf("BENCH heap %s: internal free %u B, largest internal block %u B\n", when,
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+}
+
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+
+static int cmd_stall(int argc, char **argv)
+{
+    uint32_t ms = 0;
+    bool panic = argc == 3 && strcmp(argv[2], TOK_TWDT) == 0;
+    if ((argc != 2 && !panic) || !parse_u32(argv[1], 1, GNSS_LINK_BENCH_STALL_PANIC_MS, &ms) ||
+        (ms > GNSS_LINK_BENCH_STALL_SAFE_MS && ms < 10000u)) {
+        printf("usage: stall <ms 1-9000>   |   stall <ms 10000-30000> " TOK_TWDT "\n");
+        return 1;
+    }
+    if (ms > GNSS_LINK_BENCH_STALL_SAFE_MS && !panic) {
+        printf("BENCH REFUSED: a stall of 10 s or more trips the task watchdog (a panic and a restart): repeat it "
+               "with the word " TOK_TWDT " at the end\n");
+        return 1;
+    }
+    if (!link_free()) {
+        return 1;
+    }
+    gnss_link_stats_t a;
+    gnss_link_stats_t b;
+    (void)gnss_link_get_stats(&a);
+    esp_err_t err = gnss_link_bench_stall(ms, panic);
+    if (err != ESP_OK) {
+        printf("BENCH FAIL stall: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    if (panic) {
+        printf("BENCH stall %u ms: the RX task sleeps without feeding the task watchdog; a task-watchdog panic "
+               "and a restart are expected (read the boot log afterwards)\n",
+               (unsigned)ms);
+    }
+    int64_t t0 = esp_timer_get_time();
+    while (gnss_link_bench_stall_active() && esp_timer_get_time() - t0 < (int64_t)(ms + 5000u) * 1000) {
+        vTaskDelay(pdMS_TO_TICKS(100));   /* this console keeps running meanwhile */
+    }
+    (void)gnss_link_get_stats(&b);
+    printf("BENCH stall %u ms done after %u ms: +%u buffer-full, +%u FIFO overflows, +%u event-queue-full, "
+           "+%llu bytes discarded by the framer, +%llu RTCM frames, +%llu CRC errors\n",
+           (unsigned)ms, (unsigned)((esp_timer_get_time() - t0) / 1000), (unsigned)(b.rx_buffer_full - a.rx_buffer_full),
+           (unsigned)(b.hw_fifo_overflows - a.hw_fifo_overflows), (unsigned)(b.rx_events_dropped - a.rx_events_dropped),
+           (unsigned long long)(b.framing.bytes_discarded - a.framing.bytes_discarded),
+           (unsigned long long)(b.framing.rtcm_frames - a.framing.rtcm_frames),
+           (unsigned long long)(b.framing.rtcm_crc_errors - a.framing.rtcm_crc_errors));
+    return 0;
+}
+
+static int cmd_rawstall(int argc, char **argv)
+{
+    uint32_t ms = 0;
+    if (argc != 2 || !parse_u32(argv[1], 1, GNSS_LINK_BENCH_STALL_SAFE_MS, &ms)) {
+        printf("usage: rawstall <ms 1-9000>\n");
+        return 1;
+    }
+    if (!link_free()) {
+        return 1;
+    }
+    esp_err_t err = gnss_link_bench_raw_stall_arm(ms);
+    if (err != ESP_OK) {
+        printf("BENCH FAIL rawstall: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("BENCH rawstall armed: the next read under a RAW lease (listen, version, entry, flash ...) within %u s "
+           "waits %u ms once\n",
+           (unsigned)GNSS_LINK_BENCH_RAW_ARM_S, (unsigned)ms);
+    return 0;
+}
+
+/* The system clock as SNTP set it (nothing else sets it), and unix minus esp_timer. */
+static bool sntp_clock(int64_t *unix_minus_timer_us)
+{
+    static network_status_t ns;
+    if (network_get_status(&ns) != ESP_OK || !ns.time_synced) {
+        return false;
+    }
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    *unix_minus_timer_us = (int64_t)tv.tv_sec * 1000000 + tv.tv_usec - esp_timer_get_time();
+    return true;
+}
+
+static void print_pct(const char *name, const gnss_link_pct_t *p, const char *unit)
+{
+    if (p->n == 0) {
+        printf("; %s: none", name);
+        return;
+    }
+    printf("; %s p50 %d p95 %d p99 %d p99.9 %d max %d %s (n %u)", name, (int)p->p50, (int)p->p95, (int)p->p99,
+           (int)p->p999, (int)p->max, unit, (unsigned)p->n);
+}
+
+static int ftimes_dump(void)
+{
+    static char buf[1024];
+    int64_t off = 0;
+    bool clock = sntp_clock(&off);
+    gnss_link_timing_info_t info;
+    (void)gnss_link_bench_timing_read(0, NULL, 0, &info);
+    int64_t now = esp_timer_get_time();
+    printf("# esp_timer_us=%lld,unix_ms=", (long long)now);
+    if (clock) {
+        printf("%lld", (long long)((now + off) / 1000));
+    }
+    printf(",clock=%s,records=%u,full=%u,running=%u\n", clock ? "sntp" : "none", (unsigned)info.count,
+           info.full ? 1u : 0u, info.running ? 1u : 0u);
+    printf("# F,read_us,published_us,msg,len,sys,epoch,mmb,held\n# P,begin_us,end_us,bytes,capped,next_wait_ms,gap_us\n"
+           "# S,begin_us,end_us,where\n");
+    size_t cursor = 0;
+    size_t n;
+    while ((n = gnss_link_bench_timing_csv(&cursor, buf, sizeof(buf))) > 0) {
+        fwrite(buf, 1, n, stdout);
+    }
+    printf("BENCH ftimes dump end (%u records; also GET /api/diag/frame-times)\n", (unsigned)info.count);
+    return 0;
+}
+
+static int cmd_ftimes(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "dump") == 0) {
+        return ftimes_dump();
+    }
+    uint32_t secs = 0;
+    if (argc != 2 || !parse_u32(argv[1], 1, GNSS_LINK_BENCH_TIMING_MAX_S, &secs)) {
+        printf("usage: ftimes <seconds 1-600>   |   ftimes dump\n");
+        return 1;
+    }
+    if (!link_free()) {
+        return 1;
+    }
+    esp_err_t err = gnss_link_bench_timing_start(secs);
+    if (err != ESP_OK) {
+        printf("BENCH FAIL ftimes: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("BENCH ftimes: recording frame and drain-pass times for %u s ...\n", (unsigned)secs);
+    sleep_ms(secs * 1000u + 100u);
+    gnss_link_bench_timing_stop();
+    int64_t off = 0;
+    bool clock = sntp_clock(&off);
+    static gnss_link_timing_summary_t sum;
+    (void)gnss_link_bench_timing_summary(clock, off, &sum);
+    printf("BENCH ftimes %u s: %u records%s, %u frames, %u passes with data, %u stalls", (unsigned)secs,
+           (unsigned)sum.records, sum.full ? " (ring full: recording ended early)" : "", (unsigned)sum.frames,
+           (unsigned)sum.passes, (unsigned)sum.stalls);
+    print_pct("read to published", &sum.read_to_pub_us, "us");
+    printf("; longest reader gap with data waiting %u us", (unsigned)sum.longest_gap_us);
+    if (sum.stalls > 0) {
+        printf("; after a stall: %u zero-wait capped passes, ring empty %u us after it, first frame %s%u us after it",
+               (unsigned)sum.stall_capped_passes, (unsigned)sum.stall_drain_us,
+               sum.stall_first_frame_valid ? "" : "(none) ", (unsigned)sum.stall_first_frame_us);
+    }
+    if (!sum.clock) {
+        printf("; epoch delay: no clock (the system time is not set by SNTP)");
+    } else {
+        static const char *const names[GNSS_SYS_COUNT] = { "gps", "glonass", "galileo", "sbas", "qzss", "beidou",
+                                                           "navic" };
+        for (unsigned s = 0; s < GNSS_SYS_COUNT; s++) {
+            const gnss_link_pct_t *p = &sum.epoch_delay_ms[s];
+            if (p->n > 0) {
+                printf("; epoch delay %s p50 %d p95 %d max %d ms (n %u)", names[s], (int)p->p50, (int)p->p95,
+                       (int)p->max, (unsigned)p->n);
+            }
+        }
+    }
+    printf("\n");
+    return 0;
+}
+
+static void print_context(const gnss_link_prompt_obs_t *o)
+{
+    for (size_t i = 0; i < o->context_len; i++) {
+        uint8_t c = o->context[i];
+        if (c >= 0x20 && c < 0x7F && c != '\\') {
+            putchar(c);
+        } else {
+            printf("\\x%02x", c);
+        }
+    }
+}
+
+static int cmd_promptdet(int argc, char **argv)
+{
+    if (argc == 2 && (strcmp(argv[1], "on") == 0 || strcmp(argv[1], "off") == 0)) {
+        esp_err_t err = gnss_link_bench_prompt_observe(strcmp(argv[1], "on") == 0);
+        printf("BENCH promptdet %s: %s\n", argv[1],
+               err == ESP_OK ? "report-only (a hit is counted, nothing is ever sent for it)" : esp_err_to_name(err));
+        return err == ESP_OK ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "status") == 0) {
+        gnss_link_prompt_obs_t o;
+        (void)gnss_link_bench_prompt_status(&o);
+        printf("BENCH promptdet %s: %u hit(s)", o.on ? "on" : "off", (unsigned)o.hits);
+        if (o.last_hit_ms >= 0) {
+            printf(", last at uptime %lld ms, context \"", (long long)o.last_hit_ms);
+            print_context(&o);
+            printf("\"");
+        }
+        printf("\n");
+        return 0;
+    }
+    printf("usage: promptdet on|off|status\n");
+    return 1;
+}
+
+static int cmd_promptwatch(int argc, char **argv)
+{
+    uint32_t baud = 0;
+    uint32_t secs = 0;
+    if (argc != 3 || !parse_baud(argv[1], &baud) || !parse_u32(argv[2], 5, 600, &secs)) {
+        printf("usage: promptwatch <baud> <seconds 5-600>   (listen only: nothing is transmitted)\n");
+        return 1;
+    }
+    station_bench_req_t req = { .op = STATION_BENCH_PROMPT_WATCH, .baud = baud, .seconds = secs };
+    station_bench_res_t res;
+    esp_err_t err = station_bench_run(&req, &res, (secs + 60u) * 1000u);
+    printf("BENCH %s\n", res.line[0] != '\0' ? res.line : esp_err_to_name(err));
+    return (err == ESP_OK && res.pass) ? 0 : 1;
+}
+
+static int cmd_uartclose(int argc, char **argv)
+{
+    if (argc != 2 || !confirmed(argc, argv, TOK_UART)) {
+        if (argc != 2) {
+            printf("usage: uartclose " TOK_UART "\n");
+        }
+        return 1;
+    }
+    if (!link_free()) {
+        return 1;
+    }
+    esp_err_t err = gnss_link_bench_uart_close();
+    if (err != ESP_OK) {
+        printf("BENCH FAIL uartclose: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    int64_t t0 = esp_timer_get_time();
+    gnss_link_stats_t st;
+    printf("BENCH uartclose: UART driver deleted, link_open false; waiting for the link's own reopen ...\n");
+    while (esp_timer_get_time() - t0 < 120LL * 1000000) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        if (gnss_link_get_stats(&st) == ESP_OK && st.link_open) {
+            printf("BENCH uartclose: link_open true again after %u ms (failed opens since boot: %u)\n",
+                   (unsigned)((esp_timer_get_time() - t0) / 1000), (unsigned)st.open_failures);
+            print_heap("after the reopen");
+            return 0;
+        }
+    }
+    printf("BENCH FAIL uartclose: the link is still closed after 120 s (it keeps trying every 60 s)\n");
+    return 1;
+}
+
+#endif /* CONFIG_GNSS_LINK_BENCH_HOOKS */
+
+/* Internal blocks held by heapfrag (until "heapfrag free"). */
+#define FRAG_MAX 512u
+static void *s_frag[FRAG_MAX];
+static unsigned s_frag_n;
+
+static void frag_free(void)
+{
+    for (unsigned i = 0; i < s_frag_n; i++) {
+        heap_caps_free(s_frag[i]);
+        s_frag[i] = NULL;
+    }
+    s_frag_n = 0;
+}
+
+static int cmd_heapfrag(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "free") == 0) {
+        unsigned n = s_frag_n;
+        frag_free();
+        printf("BENCH heapfrag free: %u block(s) released\n", n);
+        print_heap("now");
+        return 0;
+    }
+    uint32_t kb = 0;
+    if (argc != 3 || !parse_u32(argv[1], 8, 64, &kb)) {
+        printf("usage: heapfrag <largest free internal block in KB, 8-64> " TOK_HEAP "   |   heapfrag free\n");
+        return 1;
+    }
+    if (!confirmed(argc, argv, TOK_HEAP)) {
+        return 1;
+    }
+    if (s_frag_n > 0) {
+        printf("BENCH REFUSED: blocks are held already (heapfrag free first)\n");
+        return 1;
+    }
+    const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    const size_t target = (size_t)kb * 1024u;
+    print_heap("before");
+    /* Blocks of the target size fill every larger free region; every other
+     * one is freed again, leaving holes of the target size between held
+     * blocks; holes that merged are filled again until no free block is
+     * larger than the target. */
+    static void *s_tmp[FRAG_MAX];
+    unsigned tmp_n = 0;
+    while (heap_caps_get_largest_free_block(caps) > target && tmp_n < FRAG_MAX) {
+        void *p = heap_caps_malloc(target, caps);
+        if (p == NULL) {
+            break;
+        }
+        s_tmp[tmp_n++] = p;
+    }
+    for (unsigned i = 0; i < tmp_n; i++) {
+        if ((i & 1u) == 0 || s_frag_n >= FRAG_MAX) {
+            heap_caps_free(s_tmp[i]);
+        } else {
+            s_frag[s_frag_n++] = s_tmp[i];
+        }
+        s_tmp[i] = NULL;
+    }
+    while (heap_caps_get_largest_free_block(caps) > target && s_frag_n < FRAG_MAX) {
+        void *p = heap_caps_malloc(target, caps);
+        if (p == NULL) {
+            break;
+        }
+        s_frag[s_frag_n++] = p;
+    }
+    size_t largest = heap_caps_get_largest_free_block(caps);
+    printf("BENCH heapfrag %u KB: %u block(s) of %u B held; largest free internal block %u B%s\n", (unsigned)kb,
+           s_frag_n, (unsigned)target, (unsigned)largest, largest <= target ? "" : " (NOT reached: table full)");
+    print_heap("after");
+    return largest <= target ? 0 : 1;
+}
+
+static int cmd_linkrestart(int argc, char **argv)
+{
+    (void)argv;
+    if (argc != 1) {
+        printf("usage: linkrestart   (the ladder's link restart now; nothing is sent to the receiver)\n");
+        return 1;
+    }
+    static station_status_t st;
+    if (station_get_status(&st) != ESP_OK) {
+        printf("BENCH REFUSED: no station status\n");
+        return 1;
+    }
+    print_heap("before");
+    gnss_link_stats_t a;
+    (void)gnss_link_get_stats(&a);
+    if (st.state == STATION_STATE_STREAMING) {
+        /* Through the station, as the health ladder asks for it. */
+        esp_err_t err = station_request_recovery(STATION_RECOVER_LINK_RESTART);
+        if (err != ESP_OK) {
+            printf("BENCH REFUSED linkrestart: %s\n", esp_err_to_name(err));
+            return 1;
+        }
+        int64_t t0 = esp_timer_get_time();
+        do {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        } while (station_get_status(&st) == ESP_OK && st.state == STATION_STATE_RECOVERING &&
+                 esp_timer_get_time() - t0 < 10LL * 1000000);
+        printf("BENCH linkrestart through the recovery ladder's step: station %s\n",
+               st.state == STATION_STATE_STREAMING ? "streaming again" : "not streaming (see the log)");
+    } else {
+        /* No receiver streaming (e.g. a board without one): the same restart as a station job. */
+        station_bench_req_t req = { .op = STATION_BENCH_LINK_RESTART };
+        station_bench_res_t res;
+        esp_err_t err = station_bench_run(&req, &res, 30000u);
+        printf("BENCH %s\n", res.line[0] != '\0' ? res.line : esp_err_to_name(err));
+        if (err != ESP_OK || !res.pass) {
+            return 1;
+        }
+    }
+    gnss_link_stats_t b;
+    (void)gnss_link_get_stats(&b);
+    printf("BENCH linkrestart: link_open %s, failed opens %u -> %u, flushed bytes +%llu\n", b.link_open ? "true" : "false",
+           (unsigned)a.open_failures, (unsigned)b.open_failures, (unsigned long long)(b.flushed_bytes - a.flushed_bytes));
+    print_heap("after");
+    return b.link_open ? 0 : 1;
+}
+
 static void reg(const char *name, const char *help, esp_console_cmd_func_t fn)
 {
     const esp_console_cmd_t c = { .command = name, .help = help, .func = fn };
@@ -461,6 +904,21 @@ esp_err_t bench_start(void)
     reg("restart", "Software restart of the ESP32: restart " TOK_RESTART, cmd_restart);
     reg("status", "Station state, journal and the last session", cmd_status);
     reg("capture", "Print the byte capture (last KB): capture [KB]", cmd_capture);
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+    reg("stall", "RX task stall, no reads, no watchdog feed: stall <ms 1-9000> | stall <ms 10000-30000> " TOK_TWDT,
+        cmd_stall);
+    reg("rawstall", "Stall once inside the next RAW-lease read (within 60 s): rawstall <ms 1-9000>", cmd_rawstall);
+    reg("ftimes", "Record frame and drain-pass times, then a summary: ftimes <seconds 1-600> | ftimes dump",
+        cmd_ftimes);
+    reg("promptdet", "Loader prompt detector, report-only (nothing sent): promptdet on|off|status", cmd_promptdet);
+    reg("promptwatch", "Listen for the loader prompt at a baud, nothing sent: promptwatch <baud> <seconds 5-600>",
+        cmd_promptwatch);
+    reg("uartclose", "Delete the receiver UART driver; the link reopens it: uartclose " TOK_UART, cmd_uartclose);
+#endif
+    reg("heapfrag", "Hold internal heap blocks so no free block is larger: heapfrag <KB 8-64> " TOK_HEAP
+                    " | heapfrag free",
+        cmd_heapfrag);
+    reg("linkrestart", "The ladder's link restart now (nothing sent to the receiver): linkrestart", cmd_linkrestart);
     err = esp_console_start_repl(repl);
     if (err == ESP_OK) {
         ESP_LOGW(TAG, "bench console on the UART0 console (this is a bench build, never a release); type help");

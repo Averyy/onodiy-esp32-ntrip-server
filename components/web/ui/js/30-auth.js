@@ -469,8 +469,18 @@ async function startWizard(claim) {
       skipAll());
 
     const nr = noReceiverPanel();
-    let mode = '';             /* '', 'receiver' (no receiver, or looking for it), 'live' */
+    let mode = '';             /* '', 'held', 'receiver' (no receiver, or looking for it), 'live' */
     let opened = false, stopped = false, closedShown = false;
+    /* A build that holds the first configuration: what it would send, before the live view (once per visit). */
+    let heldDone = false;
+    const heldNext = () => {
+      heldDone = true;
+      mode = '';
+      patch(box, h('div', { class: 'spinner' }), h('p', { class: 'muted' }, 'Starting the reception check…'));
+      cont.textContent = 'Continue';
+      later.textContent = '';
+    };
+    const held = heldPanel({ onLater: heldNext, onApplied: heldNext });
     let liveSince = 0, postAt = 0, closeIgnored = false;
     async function leave(b) {
       await busy(b, async () => {
@@ -591,6 +601,17 @@ async function startWizard(claim) {
       const st = await api('GET', '/api/status');
       if (gone()) return;
       const rcv = st.receiver || {};
+      if (rcv.first_apply_held && !heldDone && !rcv.rx_maintenance) {
+        if (mode !== 'held') {
+          mode = 'held';
+          mount(box, held.el);
+          held.load();
+          err.hidden = true;
+        }
+        cont.textContent = 'Continue without configuring';
+        later.textContent = 'You can configure the receiver later on the Receiver page.';
+        return;
+      }
       if (rcv.state === 'no_receiver' || rcv.state === 'detecting' || (rcv.state === 'idle' && !rcv.rx_maintenance)) {
         showReceiverMissing(st);
       } else if (rcv.rx_maintenance) {

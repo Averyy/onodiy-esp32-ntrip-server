@@ -137,6 +137,19 @@
  * asks for them; a rejection does not fail the session). Unknown after a
  * reboot until the next apply session.
  *
+ * First-apply hold (CONFIG_STATION_HOLD_FIRST_APPLY, bench builds and the
+ * sdkconfig.hold overlay): at init, before anything reaches the receiver,
+ * a device whose profile was never applied (no gnss/applied_hash) and whose
+ * gnss/autocfg was never set gets gnss/autocfg = 0, gnss/recovery = 2
+ * (alerts only, unless set) and gnss/hold = 1 in one settings batch. While
+ * gnss/hold is present (any build: it is kept in NVS) the station sends
+ * only queries (identity, settings, base mode) and a loader prompt seen
+ * during detection gets no restart key (RECEIVER_IN_LOADER, listen-only;
+ * the user's receiver restart still works). The first successful apply
+ * erases it, and so does turning gnss/autocfg on (the web API, then
+ * station_first_apply_hold_refresh()); a factory reset erases it with the
+ * other user settings. station_status_t.first_apply_held reports it.
+ *
  * Receiver maintenance (station_maintenance_start; "hands off" while the
  * user works on the receiver through its other port, e.g. a PC tool or a
  * reflash): a user action with a duration (15 min, 30 min, 1 h, 2 h, 4 h;
@@ -411,6 +424,8 @@ typedef struct {
 
     station_live_status_t live;      /**< live view */
 
+    bool first_apply_held;           /**< gnss/hold: the receiver's first configuration waits for the user (only queries are sent) */
+
     /* Receiver updates. */
     bool flash_available;            /**< receiver flashing is built in (station_flash_available) */
     bool pkg_check_running;          /**< a check of the staged package runs (check-only builds) */
@@ -479,6 +494,13 @@ esp_err_t station_request_detect(void);
 esp_err_t station_request_reconfigure(void);
 
 /**
+ * Read gnss/hold again after someone else erased it (the web API, when the
+ * user turns gnss/autocfg on): the status and the detection's loader-key
+ * rule follow at once. Works uninitialised (nothing to update then).
+ */
+void station_first_apply_hold_refresh(void);
+
+/**
  * Flash the package staged in pkg_store to the receiver, only after an
  * explicit user confirmation (the request carries what was confirmed; the
  * banner's Update and the manual upload's confirm both come here). Async;
@@ -523,6 +545,9 @@ typedef enum {
     STATION_BENCH_ENTRY,        /**< loader entry at `baud`, banner and menu captured, "6", version */
     STATION_BENCH_MENU2,        /**< entry, menu item 2, start bytes for `seconds`, CAN CAN / "q", "6", version (no data frame) */
     STATION_BENCH_IDLE,         /**< entry, `seconds` untouched at the prompt, "6", version */
+    /* Station-side operations (not the flasher's): */
+    STATION_BENCH_PROMPT_WATCH = 16, /**< COMMAND lease, host at `baud`, the report-only loader prompt observer for `seconds`; nothing transmitted; the link's baud restored */
+    STATION_BENCH_LINK_RESTART,      /**< the ladder's link restart (gnss_link_restart, driver kept) on the station task; nothing sent to the receiver */
 } station_bench_op_t;
 
 typedef struct {

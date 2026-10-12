@@ -46,6 +46,26 @@ menu "Station: receiver supervisor"
             looks at closes after this long and the receiver output it
             turned on is turned off again.
 
+    config STATION_HOLD_FIRST_APPLY
+        bool "Hold the receiver's first configuration until the user confirms (bench builds)"
+        default n
+        help
+            On a device whose receiver profile was never applied and whose
+            automatic configuration was never set, the station writes, before
+            anything is sent to the receiver, gnss/autocfg = 0, gnss/recovery
+            = 2 (alerts only, if it was not set) and gnss/hold = 1 in one
+            settings batch. Until the user applies the profile, only queries
+            reach the receiver (its version, its settings), and a loader
+            prompt seen during detection gets no restart key. The web UI
+            shows what the first configuration would send and applies it on
+            the user's confirmation.
+
+            The hold is kept in NVS, so a later build without this option
+            keeps it until the user applies. Off in the station build: there
+            the first boot configures the receiver by itself. On in
+            sdkconfig.bench and sdkconfig.hold; never in a release (the
+            release job refuses a build with it on).
+
     config STATION_LIVE_VIEW_SKY_PERIOD_S
         int "Live view: satellite-in-view output period (s)"
         range 1 60

@@ -130,3 +130,7 @@ CONFIG_MDNS_MAX_SERVICES=2
 CONFIG_MDNS_ENABLE_BROWSE=n
 CONFIG_MDNS_ENABLE_CONSOLE_CLI=n
 CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y
+# No interface uses the predefined Ethernet key: the station has no Ethernet,
+# and the QEMU build's emulated Ethernet port registers under the station
+# key (so mDNS answers there through the STA interface).
+CONFIG_MDNS_PREDEF_NETIF_ETH=n

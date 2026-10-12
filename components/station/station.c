@@ -66,6 +66,9 @@ _Static_assert(STATION_BENCH_LISTEN == (int)UM98X_BENCH_LISTEN && STATION_BENCH_
 #ifndef CONFIG_UM98X_FLASH_RECOVERY_ACTIONS
 #define CONFIG_UM98X_FLASH_RECOVERY_ACTIONS 0
 #endif
+#ifndef CONFIG_STATION_HOLD_FIRST_APPLY
+#define CONFIG_STATION_HOLD_FIRST_APPLY 0
+#endif
 
 /* Boot-time race into the receiver's loader. PROVISIONAL, to be confirmed on hardware. */
 #define RACE_MAX_MS 10000u
@@ -391,6 +394,78 @@ static bool model_known(void)
     char model[sizeof(s_stored_info.model)];
     return settings_get_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MODEL, model, sizeof(model)) == ESP_OK &&
            model[0] != '\0';
+}
+
+/* A gnss key is stored (or its presence cannot be read: counted as stored, so nothing is written on a doubt). */
+static bool gnss_key_present_u8(const char *key)
+{
+    uint8_t v = 0;
+    return settings_get_u8(SETTINGS_NS_GNSS, key, &v) != ESP_ERR_NVS_NOT_FOUND;
+}
+
+/* gnss/hold as stored: the first receiver configuration waits for the user. */
+static bool first_apply_held_stored(void)
+{
+    uint8_t v = 0;
+    return settings_is_available() && settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD, &v) == ESP_OK;
+}
+
+/*
+ * The first-apply hold at init, before anything is sent to the receiver: a
+ * build with the option, on a device whose profile was never applied and
+ * whose automatic configuration was never set, writes it once (one batch).
+ * @return gnss/hold as it stands afterwards.
+ */
+static bool first_apply_hold_boot(void)
+{
+    uint32_t hash = 0;
+    bool settings_ok = settings_is_available();
+    bool have_hash = settings_get_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_APPLIED, &hash) != ESP_ERR_NVS_NOT_FOUND;
+    stn_hold_writes_t w;
+    if (stn_hold_at_boot(CONFIG_STATION_HOLD_FIRST_APPLY, settings_ok, have_hash,
+                         gnss_key_present_u8(SETTINGS_KEY_GNSS_AUTOCFG), gnss_key_present_u8(SETTINGS_KEY_GNSS_RECOVERY),
+                         &w)) {
+        settings_batch_t b;
+        esp_err_t err = settings_batch_begin(SETTINGS_NS_GNSS, &b);
+        if (err == ESP_OK) {
+            err = settings_batch_set_u8(b, SETTINGS_KEY_GNSS_AUTOCFG, 0);
+            if (err == ESP_OK && w.recovery_alerts) {
+                err = settings_batch_set_u8(b, SETTINGS_KEY_GNSS_RECOVERY, 2);
+            }
+            if (err == ESP_OK) {
+                err = settings_batch_set_u8(b, SETTINGS_KEY_GNSS_HOLD, 1);
+            }
+            if (err == ESP_OK) {
+                err = settings_batch_commit(b);
+            } else {
+                settings_batch_abort(b);
+            }
+        }
+        if (err == ESP_OK) {
+            ESP_LOGW(TAG, "first receiver configuration held: autocfg off, recovery %s; nothing that changes the "
+                          "receiver is sent until you apply",
+                     w.recovery_alerts ? "alerts only" : "as set");
+        } else {
+            ESP_LOGE(TAG, "first receiver configuration hold not stored: %s", esp_err_to_name(err));
+        }
+    }
+    bool held = first_apply_held_stored();
+    if (held && !(w.hold)) {
+        ESP_LOGW(TAG, "first receiver configuration still held: only queries reach the receiver until you apply");
+    }
+    return held;
+}
+
+static void first_apply_hold_update(void)
+{
+    bool held = first_apply_held_stored();
+    portENTER_CRITICAL(&s_lock);
+    bool was = s_core.first_apply_held;
+    stn_set_first_apply_held(&s_core, held);
+    portEXIT_CRITICAL(&s_lock);
+    if (was && !held) {
+        ESP_LOGI(TAG, "first receiver configuration released: the station configures the receiver as set");
+    }
 }
 
 /* gnss/baud, 0 if none (the candidate list then starts at 115200). */
@@ -924,6 +999,7 @@ static void job_apply(const stn_job_t *job, stn_result_t *r)
     case ESP_OK:
         r->err = STN_OK;
         gnss_obs_reset();   /* signals, bands and the 1005 point start over */
+        first_apply_hold_update();   /* the apply's persist step erased gnss/hold */
         break;
     case ESP_ERR_NOT_SUPPORTED:
         r->err = STN_E_UNSUPPORTED;
@@ -1483,6 +1559,56 @@ static void job_pkg_check(stn_result_t *r)
 }
 
 #if CONFIG_UM98X_FLASH_BYTE_CAPTURE
+/* Bench: the report-only loader prompt observer at a chosen baud under a
+ * COMMAND lease (casters paused); nothing is transmitted. */
+static void bench_prompt_watch(const station_bench_req_t *req, station_bench_res_t *out)
+{
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+    gnss_link_prompt_obs_t before;
+    gnss_link_prompt_obs_t after;
+    if (lease_take("bench prompt watch") != ESP_OK) {
+        snprintf(out->line, sizeof(out->line), "FAIL promptwatch: no COMMAND lease");
+        return;
+    }
+    (void)gnss_link_bench_prompt_status(&before);
+    esp_err_t err = gnss_link_set_baud(s_lease, req->baud);
+    if (err == ESP_OK && !before.on) {
+        err = gnss_link_bench_prompt_observe(true);
+    }
+    if (err == ESP_OK) {
+        int64_t end = now_ms() + (int64_t)req->seconds * 1000;
+        while (now_ms() < end) {
+            vTaskDelay(pdMS_TO_TICKS(LISTEN_POLL_MS));
+            feed_watchdog();
+        }
+    }
+    if (!before.on) {
+        (void)gnss_link_bench_prompt_observe(false);
+    }
+    (void)gnss_link_set_baud(s_lease, home_baud());   /* where the link listens between jobs */
+    (void)gnss_link_bench_prompt_status(&after);
+    lease_drop();
+    if (err != ESP_OK) {
+        snprintf(out->line, sizeof(out->line), "FAIL promptwatch %u: %s", (unsigned)req->baud, esp_err_to_name(err));
+        return;
+    }
+    uint32_t hits = after.hits - before.hits;
+    char ctx[4 * GNSS_LINK_PROMPT_CTX + 1] = "";   /* every byte as \xNN at worst */
+    size_t k = 0;
+    for (size_t i = 0; hits > 0 && i < after.context_len && k + 4 < sizeof(ctx); i++) {
+        uint8_t c = after.context[i];
+        k += (size_t)snprintf(ctx + k, sizeof(ctx) - k, (c >= 0x20 && c < 0x7F && c != '\\') ? "%c" : "\\x%02x", c);
+    }
+    out->pass = true;
+    snprintf(out->line, sizeof(out->line), "PASS promptwatch %u baud %u s: %u hit(s), nothing sent%s%s%s",
+             (unsigned)req->baud, (unsigned)req->seconds, (unsigned)hits, hits ? "; last context \"" : "", ctx,
+             hits ? "\"" : "");
+#else
+    (void)req;
+    snprintf(out->line, sizeof(out->line), "FAIL promptwatch: the link's bench hooks are not built in");
+#endif
+}
+
 static void job_bench(stn_result_t *r)
 {
     station_bench_req_t req;
@@ -1491,6 +1617,24 @@ static void job_bench(stn_result_t *r)
     portEXIT_CRITICAL(&s_lock);
     station_bench_res_t out;
     memset(&out, 0, sizeof(out));
+    if (req.op == STATION_BENCH_PROMPT_WATCH || req.op == STATION_BENCH_LINK_RESTART) {
+        if (req.op == STATION_BENCH_PROMPT_WATCH) {
+            bench_prompt_watch(&req, &out);
+        } else {
+            /* The ladder's link restart: the installed driver reconfigured in place, nothing sent. */
+            esp_err_t err = gnss_link_restart(NULL);
+            out.pass = err == ESP_OK;
+            snprintf(out.line, sizeof(out.line), "%s linkrestart: %s", out.pass ? "PASS" : "FAIL", esp_err_to_name(err));
+        }
+        portENTER_CRITICAL(&s_lock);
+        s_bench_res = out;
+        portEXIT_CRITICAL(&s_lock);
+        if (s_bench_done != NULL) {
+            xSemaphoreGive(s_bench_done);
+        }
+        r->err = STN_OK;
+        return;
+    }
     gnss_link_lease_t lease = NULL;
     esp_err_t err = gnss_link_acquire(GNSS_LINK_MODE_RAW, "bench", LEASE_WAIT_MS, &lease);
     if (err != ESP_OK) {
@@ -1660,6 +1804,7 @@ static void publish_status(const stn_in_t *in)
     o->b1cb2a_ok = s_b1c_ok;
     memcpy(o->b1cb2a_reply, s_b1c_reply, sizeof(o->b1cb2a_reply));
 
+    o->first_apply_held = core.first_apply_held;
     o->rx_maintenance = core.maint;
     o->maintenance_left_s = stn_maint_left_s(&core, in->now_ms);
     o->maintenance_chosen_s = core.maint ? core.maint_chosen_s : 0;
@@ -2160,8 +2305,12 @@ esp_err_t station_init(void)
         stn_sky_rtc_write(&s_sky_rtc, 0, false);
     }
 
+    /* Before the station task starts: nothing has reached the receiver yet. */
+    bool held = first_apply_hold_boot();
+
     portENTER_CRITICAL(&s_lock);
     stn_init(&s_core, journal_open(s_journal_err));
+    stn_set_first_apply_held(&s_core, held);
     s_core.live_idle_ms = (uint32_t)CONFIG_STATION_LIVE_VIEW_IDLE_S * 1000u;
     s_core.live_max_ms = (uint32_t)CONFIG_STATION_LIVE_VIEW_MAX_MIN * 60000u;
     if (restore) {
@@ -2247,6 +2396,7 @@ esp_err_t station_get_status(station_status_t *out)
         }
         out->alerts = stn_alerts(&s_core);
         out->next_detect_in_s = stn_next_detect_in_s(&s_core, lin.now_ms);
+        out->first_apply_held = s_core.first_apply_held;
     }
     jerr = s_journal_err;
     journal = s_journal;
@@ -2270,6 +2420,7 @@ esp_err_t station_get_status(station_status_t *out)
             out->reconfigure_refused = !autocfg_enabled();
             out->receiver = s_stored_info;
         }
+        out->first_apply_held = first_apply_held_stored();
     }
     out->rtcm_excluded = excluded;
     /* Live, not from the last published status: a job takes and drops its
@@ -2333,6 +2484,14 @@ static bool alert_raised(uint32_t alert)
     bool raised = (s_core.alerts & alert) != 0;
     portEXIT_CRITICAL(&s_lock);
     return raised;
+}
+
+void station_first_apply_hold_refresh(void)
+{
+    if (!s_inited) {
+        return;   /* the status reads the key itself then */
+    }
+    first_apply_hold_update();
 }
 
 esp_err_t station_request_reconfigure(void)

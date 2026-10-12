@@ -335,3 +335,64 @@ uint8_t gnss_rtcm3_msm_band_mask(gnss_sys_t sys, uint32_t sig_mask)
     }
     return bands;
 }
+
+/* ---- MSM epoch time on the GPS time scale ------------------------------------ */
+
+/* floor(a / b) for b > 0, also for a negative a. */
+static int64_t floor_div(int64_t a, int64_t b)
+{
+    int64_t q = a / b;
+    return (a % b != 0 && a < 0) ? q - 1 : q;
+}
+
+/* The k * period + t (any integer k) nearest to now; a tie takes the later one. */
+static int64_t nearest(int64_t t, int64_t period, int64_t now)
+{
+    int64_t k = floor_div(now - t + period / 2, period);
+    return k * period + t;
+}
+
+bool gnss_rtcm3_epoch_gps_ms(gnss_sys_t sys, uint32_t epoch_field, int64_t gps_ms_now, int64_t *out_gps_ms)
+{
+    if (out_gps_ms == NULL || gps_ms_now <= 0) {
+        return false;
+    }
+    int64_t t;
+    int64_t period = GNSS_RTCM3_WEEK_MS;
+    switch (sys) {
+    case GNSS_SYS_GPS:
+    case GNSS_SYS_GALILEO:
+    case GNSS_SYS_QZSS:
+    case GNSS_SYS_NAVIC:
+        if ((int64_t)epoch_field >= GNSS_RTCM3_WEEK_MS) {
+            return false;
+        }
+        t = (int64_t)epoch_field;
+        break;
+    case GNSS_SYS_BEIDOU:
+        if ((int64_t)epoch_field >= GNSS_RTCM3_WEEK_MS) {
+            return false;
+        }
+        t = (int64_t)epoch_field + GNSS_RTCM3_BDS_OFFSET_MS;
+        break;
+    case GNSS_SYS_GLONASS: {
+        uint32_t dow = (epoch_field >> 27) & 0x7u;
+        int64_t tod = (int64_t)(epoch_field & 0x7FFFFFFu);
+        if (tod >= GNSS_RTCM3_DAY_MS + 1000) {   /* a leap second's extra second is the only overrun */
+            return false;
+        }
+        /* GLONASS (Moscow) time of the day, to UTC, to GPS. */
+        t = tod - GNSS_RTCM3_GLO_UTC_OFFSET_MS + (int64_t)GNSS_RTCM3_GPS_UTC_LEAP_S * 1000;
+        if (dow == 7u) {
+            period = GNSS_RTCM3_DAY_MS;   /* day unknown: the nearest one */
+        } else {
+            t += (int64_t)dow * GNSS_RTCM3_DAY_MS;
+        }
+        break;
+    }
+    default:
+        return false;
+    }
+    *out_gps_ms = nearest(t, period, gps_ms_now);
+    return true;
+}

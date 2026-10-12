@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: MIT
 #
 # Build the station firmware for Espressif's QEMU (sdkconfig.defaults plus the
-# sdkconfig.qemu overlay, into build-qemu/) and run it. See tools/qemu/README.md.
+# sdkconfig.qemu overlay, into build-qemu/; with --overlay FILE also that
+# overlay, into build-qemu-<name>/) and run it. See tools/qemu/README.md.
 #
 # Needs the ESP-IDF v6.1 environment (. $IDF_PATH/export.sh) and qemu-xtensa
 # (python $IDF_PATH/tools/idf_tools.py install qemu-xtensa).
@@ -20,6 +21,11 @@ password, default settings).
 
   --no-build          run the image build-qemu/ already holds
   --build-only        build, then stop (no QEMU)
+  --overlay FILE      one more sdkconfig overlay after sdkconfig.qemu, built into
+                      build-qemu-<name>/ (<name>: FILE's base name without
+                      "sdkconfig.", e.g. --overlay sdkconfig.hold builds into
+                      build-qemu-hold/); every other option then means that
+                      directory (--no-build runs the image it holds)
   --headless LOG      no terminal: the console (UART0) is written to LOG and
                       QEMU runs until this script gets Ctrl-C/SIGTERM or
                       --seconds is up (QEMU is always stopped on the way out)
@@ -58,9 +64,11 @@ seconds=""
 http_port=8080
 uart1="listen:5556"
 wdt=1
+overlay=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-build) build=0 ;;
+        --overlay) [ $# -ge 2 ] || die "--overlay needs a file"; overlay="$2"; shift ;;
         --no-wdt) wdt=0 ;;
         --build-only) run=0 ;;
         --headless) [ $# -ge 2 ] || die "--headless needs a log file"; headless="$2"; shift ;;
@@ -79,6 +87,24 @@ done
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 bdir="$root/build-qemu"
+defaults="sdkconfig.defaults;sdkconfig.qemu"
+overlay_abs=""
+if [ -n "$overlay" ]; then
+    # Relative to the current directory, else to the repository root.
+    if [ -f "$overlay" ]; then
+        overlay_abs="$(cd "$(dirname "$overlay")" && pwd)/$(basename "$overlay")"
+    elif [ -f "$root/$overlay" ]; then
+        overlay_abs="$root/$overlay"
+    else
+        die "--overlay $overlay: no such file"
+    fi
+    oname=$(basename "$overlay_abs")
+    oname=${oname#sdkconfig.}
+    [[ "$oname" =~ ^[A-Za-z0-9_-]+$ ]] || die "--overlay $overlay: the name after \"sdkconfig.\" must be letters, digits, - or _"
+    bdir="$root/build-qemu-$oname"
+    defaults="$defaults;$overlay_abs"
+fi
+bname=$(basename "$bdir")
 
 [ -n "${IDF_PATH:-}" ] && command -v idf.py >/dev/null ||
     die "no ESP-IDF environment: run . \$IDF_PATH/export.sh (ESP-IDF v6.1) first"
@@ -104,19 +130,20 @@ case "$uart1" in
 esac
 
 if [ "$build" = 1 ]; then
-    # The overlay applies to a fresh configuration only: start one again when
-    # either defaults file is newer than build-qemu/sdkconfig.
+    # The overlays apply to a fresh configuration only: start one again when
+    # any defaults file is newer than the build directory's sdkconfig.
     if [ -f "$bdir/sdkconfig" ] &&
-       { [ "$root/sdkconfig.defaults" -nt "$bdir/sdkconfig" ] || [ "$root/sdkconfig.qemu" -nt "$bdir/sdkconfig" ]; }; then
-        echo "run.sh: sdkconfig.defaults or sdkconfig.qemu changed: configuring build-qemu again"
+       { [ "$root/sdkconfig.defaults" -nt "$bdir/sdkconfig" ] || [ "$root/sdkconfig.qemu" -nt "$bdir/sdkconfig" ] ||
+         { [ -n "$overlay_abs" ] && [ "$overlay_abs" -nt "$bdir/sdkconfig" ]; }; }; then
+        echo "run.sh: a defaults file changed: configuring $bname again"
         rm -f "$bdir/sdkconfig"
     fi
     (cd "$root" && "$idf_python" "$IDF_PATH/tools/idf.py" -B "$bdir" -D SDKCONFIG="$bdir/sdkconfig" \
-        -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.qemu" build)
+        -D SDKCONFIG_DEFAULTS="$defaults" build)
 fi
-[ -f "$bdir/flash_args" ] || die "no build in build-qemu/: run without --no-build"
+[ -f "$bdir/flash_args" ] || die "no build in $bname/: run without --no-build"
 grep -q '^#define CONFIG_NETWORK_QEMU_ETHERNET 1' "$bdir/config/sdkconfig.h" ||
-    die "build-qemu/ is not a QEMU build (CONFIG_NETWORK_QEMU_ETHERNET is off): delete build-qemu/ and run again"
+    die "$bname/ is not a QEMU build (CONFIG_NETWORK_QEMU_ETHERNET is off): delete $bname/ and run again"
 [ "$run" = 1 ] || exit 0
 
 # Flash image like idf.py qemu makes it, written fresh every run, and the
@@ -125,7 +152,7 @@ grep -q '^#define CONFIG_NETWORK_QEMU_ETHERNET 1' "$bdir/config/sdkconfig.h" ||
 # that is still alive keeps writing to the old file (QEMU takes no lock on
 # it), never into this run's image.
 flash_size=$(sed -n 's/^CONFIG_ESPTOOLPY_FLASHSIZE="\(.*\)"$/\1/p' "$bdir/sdkconfig")
-[ -n "$flash_size" ] || die "no CONFIG_ESPTOOLPY_FLASHSIZE in build-qemu/sdkconfig"
+[ -n "$flash_size" ] || die "no CONFIG_ESPTOOLPY_FLASHSIZE in $bname/sdkconfig"
 (cd "$bdir" && rm -f qemu_flash.bin.new && "$idf_python" -m esptool --chip=esp32s3 merge-bin \
     --output=qemu_flash.bin.new --pad-to-size="$flash_size" @flash_args >/dev/null &&
     mv -f qemu_flash.bin.new qemu_flash.bin)
@@ -162,6 +189,7 @@ if [ "$wdt" = 0 ]; then
     echo "Watchdogs: OFF (--no-wdt): a starved task or a stuck interrupt goes unnoticed"
 fi
 
+[ -z "$overlay_abs" ] || echo "Overlay: $(basename "$overlay_abs") ($bname/)"
 echo "Web UI:  http://localhost:$http_port/  (empty NVS: set the admin password on the first page)"
 echo "UART1:   $uart1_text"
 

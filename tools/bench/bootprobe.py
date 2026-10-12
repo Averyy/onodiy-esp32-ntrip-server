@@ -11,6 +11,10 @@ the PC must be able to reach that bootloader over COM2 (the board's
 "UM982 UART2" USB-C port): that is the way back if a receiver firmware
 update over COM1 goes wrong. This tool checks exactly that, and nothing more:
 
+  0. Listen only, 2 s at --baud (the boot menu's baud) and 2 s at the
+     application baud: when the receiver's loader is heard ("boot>" or its
+     menu text) the receiver already waits at its loader: nothing is sent at
+     all (exit 3); power-cycle it, then start again.
   1. VERSIONA at the application baud (read-only): the application answers;
      its firmware build is recorded. Nothing else is sent if it does not.
   2. The soft restart "\\r\\nreset\\r\\nreset\\r\\n", one write, at the
@@ -78,6 +82,7 @@ from pathlib import Path
 from benchlib.common import add_log_args, iso, make_run_dir, write_command_line
 from benchlib.serialio import find_port, open_serial
 from benchlib.unicore import UnicoreSession, parse_versiona
+from um982 import loader_heard, post_failure_steps
 
 # The receiver side as documented for this module family. PROVISIONAL, none of
 # it seen on this board yet (this tool is how it gets seen): that a soft
@@ -101,7 +106,7 @@ BAUDS = (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600)
 EXIT_OK = 0           # prompt reached, application back with the same build
 EXIT_NO_PROMPT = 1    # no prompt within the limits; application back
 EXIT_APP_MISSING = 2  # the application did not come back (or the tool stopped at an unconfirmed menu): power-cycle
-EXIT_REFUSED = 3      # not started (no confirmation, no port, no answer before the restart)
+EXIT_REFUSED = 3      # not started (no confirmation, no port, the loader heard, no answer before the restart)
 EXIT_OTHER_BUILD = 4  # the application came back with another firmware than before
 
 
@@ -210,6 +215,7 @@ class TracedPort:
 class Limits:
     """Timings. PROVISIONAL: chosen from documented behaviour, to be checked against the bench capture."""
 
+    listen_s: float = 2.0          # listen only at each baud before anything is sent (the loader check)
     entry_s: float = 30.0          # overall, from the restart write leaving the port
     late_data_s: float = 8.001     # data at or after this, still without the prompt: give up
     menu_quiet_s: float = 0.2      # after the prompt: collect until the port is quiet this long
@@ -236,8 +242,9 @@ class Result:
 
 class BootProbe:
     def __init__(self, port: TracedPort, run_dir: Path, app_baud: int, boot_baud: int,
-                 limits: Limits | None = None, echo=print):
+                 limits: Limits | None = None, echo=print, port_name: str = "<port>"):
         self.port = port
+        self.port_name = port_name
         self.run_dir = run_dir
         self.app_baud = app_baud
         self.boot_baud = boot_baud
@@ -316,14 +323,30 @@ class BootProbe:
     # ---- the steps
 
     def check_app_first(self) -> bool:
+        # A receiver already at its loader gets nothing at all: VERSIONA there could read as menu keys.
+        for baud in dict.fromkeys((self.boot_baud, self.app_baud)):
+            self.port.baudrate = baud
+            self.say(f"0. listening at {baud} for {self.lim.listen_s:g} s (nothing sent)")
+            start = self.port.mark()
+            end = time.monotonic() + self.lim.listen_s
+            while time.monotonic() < end:
+                self.pump()
+            if loader_heard(self.port.received(start)):
+                self.res.entry = "loader"
+                self.say(f"   the receiver's loader is heard at {baud} (\"boot>\" or its menu): it already waits at "
+                         "its loader. Nothing was sent.")
+                self.say("   What to do: power-cycle the receiver (unplug the board: both USB-C cables), then start "
+                         "this tool again.")
+                return False
         self.port.baudrate = self.app_baud
         self.say(f"1. VERSIONA at {self.app_baud} (read-only)")
         b = self.versiona("app-before", 4.0)
         self.res.before = b
         if not b or "model" not in b:
             self.say(f"   no CRC-valid VERSIONA answer at {self.app_baud}: nothing else was sent.")
-            self.say("   What to do: check the port and baud with `uv run um982.py --port <port>` "
-                     "(or --find-baud); start this tool again once the receiver answers.")
+            for line in post_failure_steps(self.port_name):
+                self.say("   " + line)
+            self.say("   Start this tool again once the application answers.")
             return False
         self.say(f"   {b['model']}, firmware {b['firmware']} (build {b['build']})")
         return True
@@ -489,9 +512,11 @@ class BootProbe:
         if not res.after or "model" not in res.after:
             res.code = EXIT_APP_MISSING
             self.say("   the application did not answer.")
-            self.say("   What to do: power-cycle the receiver (unplug the board: both USB-C cables), then run "
-                     "`uv run um982.py --port <port>` to confirm it answers. If it does not, the receiver needs "
-                     "the vendor's recovery; do not try any receiver update over COM1.")
+            self.say("   First power-cycle the receiver (unplug the board: both USB-C cables).")
+            for line in post_failure_steps(self.port_name):
+                self.say("   " + line)
+            self.say("   If the application is never heard, the receiver needs the vendor's recovery; do not try any "
+                     "receiver update over COM1.")
             return res
         a = res.after
         same = res.before is not None and a.get("firmware") == res.before.get("firmware")
@@ -517,6 +542,8 @@ class BootProbe:
 def describe(app_baud: int, boot_baud: int, port: str) -> str:
     return "\n".join([
         f"bootprobe sends, on {port}:",
+        f"  0. nothing while it listens 2 s at {boot_baud} and at {app_baud}; nothing at all when the receiver's "
+        "loader is heard there",
         f"  1. VERSIONA at {app_baud} (read-only); nothing more if it gets no answer",
         f"  2. {RESET_CMD!r} at {app_baud}: the receiver restarts. Settings it has not saved are lost,",
         "     a survey-in starts over, and a running station sees the receiver vanish for a while",
@@ -586,7 +613,7 @@ def main(argv: list[str] | None = None, ask=ask_tty, opener=open_serial, limits:
         echo(f"cannot open {port_name}: {e}")
         return EXIT_REFUSED
     port = TracedPort(ser, run_dir / "transcript.log")
-    probe = BootProbe(port, run_dir, args.app_baud, args.baud, limits=limits, echo=echo)
+    probe = BootProbe(port, run_dir, args.app_baud, args.baud, limits=limits, echo=echo, port_name=port_name)
     try:
         res = probe.run()
     finally:
@@ -600,7 +627,8 @@ def main(argv: list[str] | None = None, ask=ask_tty, opener=open_serial, limits:
                EXIT_NO_PROMPT: "FAIL: no boot menu (the application is back)",
                EXIT_APP_MISSING: "FAIL: the application did not come back",
                EXIT_OTHER_BUILD: f"FAIL: the application came back with another firmware: {after}, was {before}",
-               EXIT_REFUSED: "not run"}[res.code]
+               EXIT_REFUSED: "not run: the receiver sits at its loader (power-cycle it)" if res.entry == "loader"
+               else "not run"}[res.code]
     echo(verdict)
     (run_dir / "summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     summary = {"port": port_name, "app_baud": args.app_baud, "boot_baud": args.baud, "code": res.code,

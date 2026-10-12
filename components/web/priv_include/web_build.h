@@ -26,6 +26,7 @@
 #include "pkg_store.h"
 #include "rtcm_hub.h"
 #include "station.h"
+#include "um98x_apply.h"
 #include "um98x_flash.h"
 #include "web_core.h"
 #include "web_json.h"
@@ -451,6 +452,15 @@ void web_build_progress(wj_t *w, const web_progress_t *p);
  */
 void web_flash_progress_msg(const um98x_flash_progress_t *p, bool final, bool check_only,
                             const station_flash_last_t *last, web_progress_t *out);
+
+/* ---- receiver: apply preview ----------------------------------------------------------- */
+
+/**
+ * GET /api/gnss/apply/preview: {"steps": [{"text", "kind", "when", "saved"}],
+ * "saveconfig": bool} (saveconfig: the list ends with a saved write, the
+ * receiver's whole running configuration).
+ */
+void web_build_apply_preview(wj_t *w, const um98x_preview_step_t *steps, size_t count);
 
 #ifdef __cplusplus
 }

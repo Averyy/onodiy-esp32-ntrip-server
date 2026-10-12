@@ -675,3 +675,28 @@ bool web_log_level_parse(const char *s, esp_log_level_t *out)
     *out = (esp_log_level_t)v;
     return true;
 }
+
+/* ---- receiver: apply preview ------------------------------------------------------------ */
+
+#include "um98x_apply.h"
+
+static const char *const s_preview_kind[] = {
+    [UM98X_PREVIEW_QUERY] = "query",
+    [UM98X_PREVIEW_WRITE] = "write",
+};
+
+const char *web_preview_kind_name(uint8_t v)
+{
+    return pick(s_preview_kind, COUNT(s_preview_kind), (int)v);
+}
+
+static const char *const s_preview_when[] = {
+    [UM98X_PREVIEW_ALWAYS] = "always",
+    [UM98X_PREVIEW_IF_DIFFERS] = "if_differs",
+    [UM98X_PREVIEW_IF_OFF] = "if_off",
+};
+
+const char *web_preview_when_name(uint8_t v)
+{
+    return pick(s_preview_when, COUNT(s_preview_when), (int)v);
+}

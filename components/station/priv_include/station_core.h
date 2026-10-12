@@ -111,6 +111,14 @@
  * attempts). Whether toggling the output interrupts RTCM is PROVISIONAL,
  * to be confirmed on hardware.
  *
+ * First-apply hold (gnss/hold; written by a build with the hold option on a
+ * device whose profile was never applied, stn_hold_at_boot): gnss/autocfg is
+ * 0, so nothing is applied on its own, and while the caller reports the
+ * hold (stn_set_first_apply_held) a loader prompt seen during detection or
+ * the ladder's rescan gets no restart key: RECEIVER_IN_LOADER and
+ * listen-only, as when the boot's one key was used. The user's receiver
+ * restart and the user's apply still run.
+ *
  * Notes (stn_note_t) tell the caller what to journal: maintenance entry
  * and exit, live view opened, extended, closed, output turned on or off.
  *
@@ -440,6 +448,7 @@ typedef struct {
     uint32_t detect_passes;    /**< detection passes completed since boot, found or not (health re-checks a blocked reboot on a newer pass) */
     bool detect_saw_bytes;
     bool loader_key_sent;      /**< the loader's restart key went out this boot */
+    bool first_apply_held;     /**< gnss/hold: the first receiver configuration waits for the user (no loader key) */
     bool listen_only;
     bool user_restart;         /**< the user asked for a receiver restart (loader case) */
 
@@ -580,6 +589,33 @@ int stn_request_detect(stn_t *s, int64_t now_ms);
 
 /** Unsolicited restart evidence (banner or version log). */
 void stn_restart_seen(stn_t *s);
+
+/* ---- first-apply hold --------------------------------------------------------- */
+
+/** What a hold build writes at boot, in one settings batch (gnss namespace). */
+typedef struct {
+    bool autocfg_off;        /**< gnss/autocfg = 0 */
+    bool recovery_alerts;    /**< gnss/recovery = 2 (alerts only): only when it was not set */
+    bool hold;               /**< gnss/hold = 1 */
+} stn_hold_writes_t;
+
+/**
+ * The first-apply hold at boot, before anything is sent to the receiver.
+ * Due only with the build option on, the settings usable, and a device
+ * whose profile was never applied (no gnss/applied_hash) and whose
+ * automatic configuration was never set (no gnss/autocfg): then
+ * gnss/autocfg = 0, gnss/hold = 1, and gnss/recovery = 2 unless it is set.
+ * Anything stored already (a later boot of a held device, a device that
+ * was configured once, a user's choice) writes nothing: the hold is written
+ * once and lives in NVS. A presence the caller cannot read counts as
+ * present (nothing is written on a doubt).
+ * @return true when the batch is due (*out filled; cleared otherwise).
+ */
+bool stn_hold_at_boot(bool option, bool settings_ok, bool have_applied_hash, bool have_autocfg, bool have_recovery,
+                      stn_hold_writes_t *out);
+
+/** The caller's gnss/hold as it stands (read at init, after an apply and after the user turned autocfg on). */
+void stn_set_first_apply_held(stn_t *s, bool held);
 
 /** A new CRC-valid 1005/1006 reference point (survey fallback). */
 void stn_on_arp(stn_t *s, const int64_t ecef_01mm[3]);

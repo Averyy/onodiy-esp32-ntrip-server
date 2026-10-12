@@ -106,8 +106,10 @@ function receiverCard(s, admin) {
     if (r.uart_closed && !(s.safe_mode && s.safe_mode.active)) rows.push(['Receiver link', h('span', { class: 't-bad' }, 'UART closed (reopening)')]);
   }
   const state = r.rx_maintenance ? badge('Maintenance', 'warn') : badge(lbl(L.station, r.state), stationTone(r.state));
+  /* The first configuration waits for the user (a build that holds it): only queries reach the receiver. */
+  const held = admin && r.first_apply_held ? badge('Held', 'info') : null;
   return h('section', { class: 'card' },
-    h('h2', null, 'Receiver', state),
+    h('h2', null, 'Receiver', state, held),
     kv(rows),
     admin ? h('div', { class: 'foot row' }, link('Live view', LIVE_START_HASH), link('Receiver and position', '#/receiver'), link('Signals', '#/signals')) :
       h('div', { class: 'foot' }, link('Signals', '#/signals')));

@@ -63,6 +63,7 @@ idf_component_register(
         "test_web_pw.c"
         "test_web_build.c"
         "test_web_live.c"
+        "test_web_receiver.c"
         "test_web_parse.c"
         "test_web_assets.c"
         "fixture_util.c"

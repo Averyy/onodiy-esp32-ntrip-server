@@ -37,6 +37,7 @@
 #include "sdkconfig.h"
 #include "settings.h"
 #include "station.h"
+#include "um98x_ctl.h"
 #include "um98x_flash.h"
 #include "um98x_profile.h"
 #include "web_enums.h"
@@ -75,6 +76,7 @@ EXT_RAM_BSS_ATTR static diag_journal_entry_t s_hist[WEB_HISTORY_MAX];
 EXT_RAM_BSS_ATTR static gnss_obs_live_sat_t s_live[GNSS_OBS_MAX_LIVE];
 EXT_RAM_BSS_ATTR static gnss_obs_live_t s_live_totals;
 EXT_RAM_BSS_ATTR static char s_text[LOG_PAGE + 1];
+EXT_RAM_BSS_ATTR static um98x_preview_step_t s_preview[UM98X_PREVIEW_MAX];
 
 /* ---- shared helpers ------------------------------------------------------------------------ */
 
@@ -664,6 +666,15 @@ static esp_err_t h_gnss_profile(web_req_t *r)
         if (err != ESP_OK) {
             return web_send_internal(r->req, err);
         }
+        if (autocfg && read_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD, 0) != 0) {
+            /* The user lets the station configure the receiver: the first-apply hold ends. */
+            err = settings_erase_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD);
+            if (err != ESP_OK) {
+                return web_send_internal(r->req, err);
+            }
+            station_first_apply_hold_refresh();
+            ESP_LOGW(TAG, "first receiver configuration hold ended: automatic configuration turned on by the user");
+        }
     }
     if (have_recovery && recovery != stored_recovery()) {
         /* Health reads it every tick. */
@@ -724,6 +735,21 @@ static esp_err_t station_action(web_req_t *r, esp_err_t (*fn)(void), bool lock)
 static esp_err_t h_gnss_apply(web_req_t *r)
 {
     return station_action(r, station_request_reconfigure, false);
+}
+
+/* What an apply would send: a static list (the conditional steps depend on a read-back). */
+static esp_err_t h_gnss_apply_preview(web_req_t *r)
+{
+    if (lifecycle_in_safe_mode()) {
+        return web_send_err(r->req, WEB_ERR_SAFE_MODE);
+    }
+    um98x_base_profile_t profile;
+    load_profile(&profile, NULL);
+    size_t n = um98x_ctl_apply_preview(&profile, gnss_link_get_baud(), s_preview, UM98X_PREVIEW_MAX);
+    web_resp_t resp;
+    resp_begin(&resp, r->req, 200);
+    web_build_apply_preview(&resp.w, s_preview, n);
+    return web_resp_end(&resp);
 }
 
 static esp_err_t h_gnss_lock(web_req_t *r)
@@ -2052,6 +2078,11 @@ static esp_err_t h_flash_capture(web_req_t *r)
     return web_download_flash_capture(r);
 }
 
+static esp_err_t h_frame_times(web_req_t *r)
+{
+    return web_download_frame_times(r);
+}
+
 static esp_err_t h_coredump_delete(web_req_t *r)
 {
     diag_coredump_info_t cd;
@@ -2168,6 +2199,7 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/gnss", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_gnss),
     ROUTE("/api/gnss/profile", HTTP_PUT, WEB_ACC_ADMIN, WEB_BODY_JSON, h_gnss_profile),
     ROUTE("/api/gnss/apply", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_gnss_apply),
+    ROUTE("/api/gnss/apply/preview", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_gnss_apply_preview),
     ROUTE("/api/gnss/position/lock", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_gnss_lock),
     ROUTE("/api/gnss/position/lock", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_gnss_unlock),
     ROUTE("/api/gnss/signals", HTTP_GET, WEB_ACC_PUBSTAR, WEB_BODY_NONE, h_gnss_signals),
@@ -2209,6 +2241,7 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/availability", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_availability),
     ROUTE("/api/diag/tasks", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_tasks),
     ROUTE("/api/diag/flash-capture", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_flash_capture),
+    ROUTE("/api/diag/frame-times", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_frame_times),
     ROUTE("/api/diag/log-level", HTTP_PUT, WEB_ACC_ADMIN, WEB_BODY_JSON, h_log_level),
     ROUTE("/api/logs", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_logs),
     ROUTE("/api/journal", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_journal),

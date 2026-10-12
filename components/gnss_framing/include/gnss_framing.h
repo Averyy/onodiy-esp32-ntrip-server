@@ -141,6 +141,7 @@ typedef struct {
     const uint8_t *data;     /**< frame, line (NUL-terminated at data[len]) or the prompt text */
     size_t len;
     uint16_t rtcm_msg_type;  /**< RTCM3 message number (first 12 payload bits); 0 for text and prompt */
+    uint64_t at;             /**< prompt: stream offset of the match's last byte (bytes fed before it since init); 0 otherwise */
 } gnss_frame_t;
 
 /** Called synchronously from gnss_framer_feed() (and gnss_framer_reset() for a pending prompt). */

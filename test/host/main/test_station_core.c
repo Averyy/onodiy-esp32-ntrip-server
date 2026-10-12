@@ -1915,3 +1915,111 @@ TEST_CASE("station core: the live view's window reads right after a start or sto
     TEST_ASSERT_EQUAL_UINT8(STN_LIVE_END_NONE, lv.last_end);
     TEST_ASSERT_UINT32_WITHIN(1, STN_LIVE_DEFAULT_MS / 1000, lv.left_s);
 }
+
+/* ---- first-apply hold ------------------------------------------------------------------ */
+
+TEST_CASE("station core: the first-apply hold at boot, decision table", "[station]")
+{
+    stn_hold_writes_t w;
+    /* Build option off: never anything (the station build configures at first boot). */
+    TEST_ASSERT_FALSE(stn_hold_at_boot(false, true, false, false, false, &w));
+    TEST_ASSERT_FALSE(w.autocfg_off || w.recovery_alerts || w.hold);
+    /* A fresh device in a hold build: all three. */
+    TEST_ASSERT_TRUE(stn_hold_at_boot(true, true, false, false, false, &w));
+    TEST_ASSERT_TRUE(w.autocfg_off);
+    TEST_ASSERT_TRUE(w.recovery_alerts);
+    TEST_ASSERT_TRUE(w.hold);
+    /* A profile applied once (gnss/applied_hash): nothing. */
+    TEST_ASSERT_FALSE(stn_hold_at_boot(true, true, true, false, false, &w));
+    TEST_ASSERT_FALSE(w.autocfg_off || w.recovery_alerts || w.hold);
+    /* gnss/autocfg set (the user's choice, or a held device's later boots): nothing. */
+    TEST_ASSERT_FALSE(stn_hold_at_boot(true, true, false, true, false, &w));
+    TEST_ASSERT_FALSE(w.autocfg_off || w.recovery_alerts || w.hold);
+    /* A recovery mode the user chose stays: autocfg and the hold only. */
+    TEST_ASSERT_TRUE(stn_hold_at_boot(true, true, false, false, true, &w));
+    TEST_ASSERT_TRUE(w.autocfg_off);
+    TEST_ASSERT_FALSE(w.recovery_alerts);
+    TEST_ASSERT_TRUE(w.hold);
+    /* Settings unavailable this boot: nothing can be written, nothing is. */
+    TEST_ASSERT_FALSE(stn_hold_at_boot(true, false, false, false, false, &w));
+    TEST_ASSERT_FALSE(w.autocfg_off || w.recovery_alerts || w.hold);
+}
+
+/* Boot with nothing on the link up to the first detection pass. */
+static stn_job_t boot_silent_to_detect(sim_t *w)
+{
+    w->rtcm_on = false;
+    sim_start(w);
+    stn_job_t j = sim_until_job(w, 5);
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, j.kind);
+    return j;
+}
+
+TEST_CASE("station core: while held, a loader prompt gets no restart key; the user's restart still works",
+          "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    w.in.autocfg = false;   /* as the hold writes it */
+    stn_set_first_apply_held(&w.s, true);
+    stn_job_t j = boot_silent_to_detect(&w);
+    TEST_ASSERT_FALSE(j.loader_key);
+    TEST_ASSERT_FALSE(j.listen_only);
+
+    /* The pass met the loader prompt and sent nothing: at its loader, listen-only. */
+    stn_result_t r = res(STN_E_NOT_FOUND);
+    r.prompt = true;
+    r.saw_bytes = true;
+    sim_done(&w, &r);
+    TEST_ASSERT_EQUAL(STN_NO_RECEIVER, w.s.state);
+    TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_RECEIVER_IN_LOADER);
+    TEST_ASSERT_FALSE(w.s.loader_key_sent);
+    j = sim_until_job(&w, 40);
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, j.kind);
+    TEST_ASSERT_TRUE(j.listen_only);
+    TEST_ASSERT_FALSE(j.loader_key);
+    sim_done(&w, &r);
+
+    /* The user's receiver restart goes out as before. */
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_restart_receiver(&w.s));
+    j = sim_until_job(&w, 2);
+    TEST_ASSERT_EQUAL(STN_JOB_LEAVE_LOADER, j.kind);
+}
+
+TEST_CASE("station core: the ladder's rescan sends no loader key while held; the hold's end allows it again",
+          "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    stn_set_first_apply_held(&w.s, true);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_recovery(&w.s, STN_REC_RESCAN, true));
+    stn_job_t j = sim_until_job(&w, 2);
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, j.kind);
+    TEST_ASSERT_TRUE(j.break_first);
+    TEST_ASSERT_FALSE(j.loader_key);
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+
+    /* Released (applied, or autocfg turned on): the next detection may send the boot's one key. */
+    sim_t v;
+    sim_init(&v, false);
+    stn_set_first_apply_held(&v.s, true);
+    stn_set_first_apply_held(&v.s, false);
+    j = boot_silent_to_detect(&v);
+    TEST_ASSERT_TRUE(j.loader_key);
+}
+
+TEST_CASE("station core: a held device applies nothing by itself; the user's apply runs", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    w.in.autocfg = false;
+    stn_set_first_apply_held(&w.s, true);
+    boot_streaming(&w, false);   /* never applied: the static check fails */
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 120).kind);
+    TEST_ASSERT_FALSE(w.s.profile_applied);
+    stn_request_apply(&w.s);
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_WHY_USER, j.why);
+}

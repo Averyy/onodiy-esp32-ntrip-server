@@ -165,6 +165,32 @@ gnss_band_t gnss_rtcm3_msm_band(gnss_sys_t sys, unsigned sig_id);
 /** Band buckets present in an MSM signal mask (bit n-1 = signal ID n), as a bit per gnss_band_t. */
 uint8_t gnss_rtcm3_msm_band_mask(gnss_sys_t sys, uint32_t sig_mask);
 
+/* ---- MSM epoch time on the GPS time scale ----------------------------------------- */
+
+#define GNSS_RTCM3_WEEK_MS          604800000LL   /**< one week */
+#define GNSS_RTCM3_DAY_MS           86400000LL    /**< one day */
+#define GNSS_RTCM3_GPS_EPOCH_UNIX_MS 315964800000LL /**< 1980-01-06 00:00 UTC, GPS week 0 */
+/** GPS time minus UTC (s) since 2017-01-01, no change announced: the same constant as the availability ledger's. */
+#define GNSS_RTCM3_GPS_UTC_LEAP_S   18
+#define GNSS_RTCM3_BDS_OFFSET_MS    14000         /**< BeiDou time = GPS time - 14 s */
+#define GNSS_RTCM3_GLO_UTC_OFFSET_MS (3LL * 3600000LL) /**< GLONASS time = UTC + 3 h */
+
+/**
+ * The MSM epoch time field of constellation `sys` as an absolute GPS time
+ * (ms since the GPS epoch, on the GPS scale), taking the week (or day) that
+ * puts it nearest to `gps_ms_now`, a GPS time known to within a few days
+ * (from a set clock: gps = unix_ms + GNSS_RTCM3_GPS_UTC_LEAP_S * 1000 -
+ * GNSS_RTCM3_GPS_EPOCH_UNIX_MS).
+ *  - GPS, Galileo, QZSS, NavIC: ms of the week, aligned with GPS time;
+ *  - BeiDou: ms of the BeiDou week; BeiDou time + 14 s = GPS time;
+ *  - GLONASS: day of week (bits 29..27, 0 = Sunday, 7 = unknown) and ms of
+ *    the day in GLONASS time (UTC + 3 h), converted with the constant
+ *    GPS-UTC offset above; an unknown day takes the nearest day.
+ * @return false for SBAS or another value without MSM, a time-of-week or
+ *         time-of-day field out of range, or a non-positive gps_ms_now.
+ */
+bool gnss_rtcm3_epoch_gps_ms(gnss_sys_t sys, uint32_t epoch_field, int64_t gps_ms_now, int64_t *out_gps_ms);
+
 #ifdef __cplusplus
 }
 #endif

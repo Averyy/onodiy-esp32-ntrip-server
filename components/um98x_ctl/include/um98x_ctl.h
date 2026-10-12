@@ -230,7 +230,8 @@ esp_err_t um98x_ctl_command(gnss_link_lease_t lease, const char *cmd, char *repl
  *
  * Success: gnss/applied_hash, gnss/applied_fw (this session's firmware),
  * gnss/rtcm1230_ok and, if it changed, gnss/baud are written in one
- * settings batch (result->persisted).
+ * settings batch (result->persisted); then gnss/hold (the first-apply hold:
+ * the first configuration the user held back has been made) is erased.
  *
  * Failure of a fatal step: no SAVECONFIG, nothing persisted; if any command
  * had been accepted, RESET (the receiver returns to its saved configuration;
@@ -253,6 +254,15 @@ esp_err_t um98x_ctl_command(gnss_link_lease_t lease, const char *cmd, char *repl
  */
 esp_err_t um98x_ctl_apply_profile(gnss_link_lease_t lease, const um98x_base_profile_t *profile,
                                   const um98x_apply_opts_t *opts, um98x_apply_result_t *result);
+
+/**
+ * What an apply session would send (um98x_plan_preview): a static list for
+ * the user to confirm, without a read-back (the conditional steps are
+ * marked). Pure; nothing is sent. @return steps written (0 for an invalid
+ * profile).
+ */
+size_t um98x_ctl_apply_preview(const um98x_base_profile_t *profile, uint32_t link_baud, um98x_preview_step_t *out,
+                               size_t cap);
 
 /**
  * Last resort after a failed apply when the receiver answers but sends no

@@ -362,7 +362,13 @@ function renderNotices() {
   if (rcv.rx_maintenance) {
     const left = rcv.maintenance_left_s ? ' It ends by itself in about ' + fmt.dur(Math.ceil(rcv.maintenance_left_s / 60) * 60) + '.' : '';
     items.push(['warn', 'Receiver maintenance', 'Nothing is sent to the receiver while you work on it through its other port; ' +
-      'the casters still get its RTCM.' + left, [btn('End now', endMaintenance, 'small'), link('Details', '#/receiver', 'btn small')]]);
+      'the casters still get its RTCM.' + left + ' ' + MAINT_SAVE_NOTE,
+    [btn('End now', endMaintenance, 'small'), link('Details', '#/receiver', 'btn small')]]);
+  }
+  if (rcv.first_apply_held && !(shell.current && shell.current.name === 'receiver')) {
+    items.push(['info', 'Receiver not configured yet', 'This build holds the receiver\'s first configuration until you confirm it: ' +
+      'so far the station has sent it only queries. See what it would send, then configure it.',
+    [link('Review and configure', '#/receiver', 'btn small')]]);
   }
   if (rcv.uart_closed && !sm.active) {
     items.push(['bad', 'Receiver UART closed (reopening)', 'The station could not open its serial port to the receiver and keeps trying on its own. ' +
@@ -446,11 +452,17 @@ function renderNotices() {
 
 /* ---- Receiver maintenance and pending Wi-Fi credentials (notices, pages) ---- */
 
+/* What a configuration by the station saves along with its own settings (maintenance notice, dialogs, receiver page). */
+const MAINT_SAVE_NOTE = 'The station\'s next configuration of the receiver (a profile change, a re-apply after drift, a recovery step) ' +
+  'ends with SAVECONFIG, which also saves whatever you changed from the PC, for example output on COM2, MASK or MMP. ' +
+  'Undo what should not stay before you end maintenance.';
+
 async function endMaintenance(e) {
   const b = e && e.currentTarget;
   const ok = await dialog({ title: 'End receiver maintenance?', ok: 'End now',
-    body: h('p', null, 'The station talks to the receiver again and checks it as at start-up. ' +
-      'Make sure nothing else is connected to the receiver\'s other port and working on it.') });
+    body: [h('p', null, 'The station talks to the receiver again and checks it as at start-up. ' +
+      'Make sure nothing else is connected to the receiver\'s other port and working on it.'),
+    msg('warn', MAINT_SAVE_NOTE)] });
   if (!ok) return false;
   const r = await act(b, () => api('DELETE', '/api/gnss/maintenance'));
   if (r !== undefined) toast('Receiver maintenance ends. The station checks the receiver now.', 'ok');

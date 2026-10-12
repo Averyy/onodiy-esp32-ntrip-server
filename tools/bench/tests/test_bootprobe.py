@@ -31,8 +31,8 @@ MENU = [
     "4 Set boot config", "5 Menu cmd", "6 Soft reset cpu", "7 Dump efuse", "8 Update factory image",
     "9 Download from spi to flash", "10 Program efuse from uart",
 ]
-FAST = bootprobe.Limits(entry_s=3.0, late_data_s=0.8, menu_quiet_s=0.1, menu_max_s=1.0, prompt_wait_s=1.0,
-                        exit_wait_s=1.0, app_listen_s=0.6, app_version_s=4.0, version_every_s=0.3,
+FAST = bootprobe.Limits(listen_s=0.3, entry_s=3.0, late_data_s=0.8, menu_quiet_s=0.1, menu_max_s=1.0,
+                        prompt_wait_s=1.0, exit_wait_s=1.0, app_listen_s=0.6, app_version_s=4.0, version_every_s=0.3,
                         burst_gap_s=0.005)
 
 
@@ -122,7 +122,8 @@ class Receiver(threading.Thread):
 
     def __init__(self, sock: socket.socket, app_baud: int = 115200, build: int = 18975, window: float = 1.0,
                  stops: bool = True, answers: bool = True, chatter: bool = False, menu: list[str] = MENU,
-                 menu_unreadable: bool = False, menu_on_key: bool = False, build_after: int | None = None):
+                 menu_unreadable: bool = False, menu_on_key: bool = False, build_after: int | None = None,
+                 at_loader: bool = False):
         super().__init__(daemon=True)
         self.sock = sock
         self.frames = _Frames(sock)
@@ -146,6 +147,11 @@ class Receiver(threading.Thread):
         self.loader_lines: list[bytes] = []
         self.received: list[tuple[str, int, bytes]] = []
         self.done = threading.Event()
+        # Already at its loader (a failed or interrupted update): it shows its prompt again and again at 460800.
+        self.at_loader = at_loader
+        if at_loader:
+            self.state = "loader"
+            self.loader_baud = 460800
 
     def say(self, baud: int, text: str | bytes) -> None:
         _send_frame(self.sock, baud, text.encode("latin-1") if isinstance(text, str) else text)
@@ -190,8 +196,12 @@ class Receiver(threading.Thread):
                 self.line.append(b)
 
     def run(self) -> None:
+        last_prompt = 0.0
         try:
             while not self.done.is_set():
+                if self.at_loader and self.state == "loader" and time.monotonic() - last_prompt > 0.15:
+                    last_prompt = time.monotonic()
+                    self.say(self.loader_baud, "\r\n  6 Soft reset cpu\r\nboot>")
                 if self.state == "restarting" and time.monotonic() - self.restart_at > self.window:
                     self.app_restarted()
                 if self.state == "restarting" and self.chatter:
@@ -476,3 +486,52 @@ def test_other_numbering_gets_no_6(tmp_path, rig):
     assert not any(d == b"6\r\n" for _, _, d in rx.received)
     summary = (run_dir / "summary.txt").read_text()
     assert "numbers the soft reset differently" in summary and "power-cycle the receiver" in summary
+
+
+def test_receiver_already_at_its_loader_gets_nothing(tmp_path, rig):
+    # A failed or interrupted update left the receiver at its loader: the listen window hears it, nothing is sent.
+    build, made = rig
+    rx, opener = build(at_loader=True)
+    code, run_dir = run_probe(tmp_path, opener)
+    assert code == bootprobe.EXIT_REFUSED
+    assert not rx.received, rx.received   # not one byte written
+    assert made["ser"].closed
+    summary = (run_dir / "summary.txt").read_text()
+    assert "loader is heard at 460800" in summary and "Nothing was sent" in summary
+    assert "power-cycle the receiver" in summary and "not run: the receiver sits at its loader" in summary
+    tx = [line for line in (run_dir / "transcript.log").read_text().splitlines() if " TX " in line]
+    assert not tx
+
+
+def test_loader_heard_at_the_application_baud_too(tmp_path, rig):
+    # --baud 115200: one listen window at that baud, the loader heard there.
+    build, _ = rig
+    rx, opener = build(at_loader=True)
+    rx.loader_baud = 115200
+    code, run_dir = run_probe(tmp_path, opener, "--baud", "115200")
+    assert code == bootprobe.EXIT_REFUSED and not rx.received
+    assert "loader is heard at 115200" in (run_dir / "summary.txt").read_text()
+
+
+def test_failure_advice_listens_first_and_never_names_the_baud_search(tmp_path, rig):
+    build, _ = rig
+    # No VERSIONA answer: nothing else sent, the safe sequence.
+    rx, opener = build(answers=False)
+    code, run_dir = run_probe(tmp_path, opener)
+    assert code == bootprobe.EXIT_REFUSED
+    summary = (run_dir / "summary.txt").read_text()
+    assert "--find-baud" not in summary and "find-baud" not in summary
+    assert "capture.py --receiver /dev/fake-com2 --receiver-baud 460800 --duration 20" in summary
+    assert "same with --receiver-baud 115200" in summary
+    assert "never um982.py at that baud" in summary and "power-cycle" in summary
+
+
+def test_application_missing_advice_listens_first(tmp_path, rig):
+    # The menu cannot be confirmed: stopped at the loader, the application missing: power-cycle, then listen first.
+    build, _ = rig
+    rx, opener = build(window=1.0, menu_unreadable=True)
+    code, run_dir = run_probe(tmp_path, opener)
+    assert code == bootprobe.EXIT_APP_MISSING
+    summary = (run_dir / "summary.txt").read_text()
+    assert "find-baud" not in summary
+    assert "First power-cycle the receiver" in summary and "listen only: `uv run capture.py" in summary

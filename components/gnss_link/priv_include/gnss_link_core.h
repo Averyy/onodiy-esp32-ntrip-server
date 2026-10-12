@@ -70,6 +70,18 @@
  * with data still buffered makes the next event wait zero, otherwise it is
  * GNSS_LINK_EVENT_WAIT_MS.
  *
+ * Prompt observer (bench hooks, gnss_link_core_set_observe): the framer's
+ * prompt detector also runs outside the detection's lease, report-only. A
+ * prompt the lease-armed detector does not take (anything but COMMAND with
+ * it armed) is routed GNSS_LINK_ROUTE_OBSERVE while observing: counted with
+ * its time, never to the prompt sink. The framer's own rule still applies:
+ * a CRC-valid RTCM frame within GNSS_PROMPT_WINDOW bytes of the match
+ * suppresses it. The context of a hit is the GNSS_LINK_PROMPT_CTX bytes
+ * ending at the match's last byte, as far as the link still holds them
+ * (the chunk being framed and the bytes right before it).
+ *
+ * Timing summary (gnss_link_timing_summary): see gnss_link.h, bench hooks.
+ *
  * Closed driver (gnss_link_core_reopen_*): when the UART driver could not be
  * installed, gnss_link retries the install on its own: 1 s after the
  * failure, then 5 s, 30 s, and every 60 s for ever; the first failure is
@@ -136,6 +148,7 @@ typedef enum {
     GNSS_LINK_ROUTE_HOLD,      /**< RTCM held during a lease (counted) */
     GNSS_LINK_ROUTE_LINE,      /**< text line to the line sink */
     GNSS_LINK_ROUTE_PROMPT,    /**< loader prompt to the prompt sink */
+    GNSS_LINK_ROUTE_OBSERVE,   /**< loader prompt counted by the report-only observer (no sink) */
 } gnss_link_route_t;
 
 typedef struct {
@@ -155,6 +168,20 @@ typedef struct {
     bool queue_full_seen;    /**< this full-queue episode was counted in rx_events_dropped */
     bool link_open;          /**< the UART driver is installed */
     gnss_link_stats_t stats; /**< counters; mode, baud, ages and link_open are filled by the snapshot */
+
+    /* report-only prompt observer (bench hooks) */
+    bool observe;
+    uint32_t obs_hits;
+    bool obs_hit_seen;
+    int64_t obs_hit_us;
+    uint8_t obs_ctx[GNSS_LINK_PROMPT_CTX];
+    uint8_t obs_ctx_len;
+    uint8_t obs_hist[GNSS_LINK_PROMPT_CTX];   /**< the bytes framed right before obs_hist_end */
+    uint8_t obs_hist_len;
+    uint64_t obs_hist_end;                    /**< stream offset right after the history's last byte */
+    const uint8_t *obs_chunk;                 /**< the chunk being framed (RX task, during the feed only) */
+    size_t obs_chunk_len;
+    uint64_t obs_chunk_at;                    /**< stream offset of obs_chunk[0] */
 } gnss_link_core_t;
 
 /** One drain pass. */
@@ -221,6 +248,49 @@ esp_err_t gnss_link_core_release(gnss_link_core_t *c, uint32_t token, gnss_link_
 
 /** Arm or disarm the prompt detector (COMMAND lease only). */
 esp_err_t gnss_link_core_set_prompt(gnss_link_core_t *c, uint32_t token, bool armed);
+
+/** Turn the report-only prompt observer on or off (its counters are kept). */
+void gnss_link_core_set_observe(gnss_link_core_t *c, bool on);
+
+/** Should the framer's prompt detector be armed: the detection's lease-armed detector, or the observer. */
+bool gnss_link_core_detector_on(const gnss_link_core_t *c);
+
+/**
+ * While observing, around every framer feed: the chunk about to be framed
+ * (`at` = stream offset of data[0], the framer's bytes_in before the feed),
+ * then gnss_link_core_observe_fed() once the feed returned (keeps the bytes
+ * before the next chunk for a later hit's context).
+ */
+void gnss_link_core_observe_feed(gnss_link_core_t *c, const uint8_t *data, size_t len, uint64_t at);
+void gnss_link_core_observe_fed(gnss_link_core_t *c);
+
+/** A prompt was routed GNSS_LINK_ROUTE_OBSERVE: keep the bytes ending at `at` (its last byte) as its context. */
+void gnss_link_core_observe_hit(gnss_link_core_t *c, uint64_t at);
+
+/** The observer's state, its count and its last hit (time as esp_timer ms, -1 = none). */
+void gnss_link_core_observe_get(const gnss_link_core_t *c, gnss_link_prompt_obs_t *out);
+
+/**
+ * Reduce a recording (see gnss_link.h, bench hooks). scratch: room for one
+ * value per record (sorted in place). clock_ok and unix_minus_timer_us:
+ * the SNTP-set system clock, else no epoch delays (clock false).
+ */
+void gnss_link_timing_summary(const gnss_link_rec_t *rec, size_t n, bool full, bool clock_ok,
+                              int64_t unix_minus_timer_us, int32_t *scratch, size_t scratch_cap,
+                              gnss_link_timing_summary_t *out);
+
+/** Percentiles (nearest rank) of v[0..n), sorted in place. */
+void gnss_link_pct(int32_t *v, size_t n, gnss_link_pct_t *out);
+
+/**
+ * One record as a CSV line with its newline:
+ *   F,<read us>,<published us>,<msg>,<len>,<sys>,<epoch>,<mmb>,<held>
+ *   P,<begin us>,<end us>,<bytes>,<capped>,<next wait ms>,<gap us>
+ *   S,<begin us>,<end us>,<rx|raw>
+ * (sys and epoch empty for a frame that is not an MSM).
+ * @return length, 0 if it does not fit (buf then holds "").
+ */
+size_t gnss_link_rec_csv(const gnss_link_rec_t *r, char *buf, size_t cap);
 
 /** Count one UART condition. @return true if the framer must be reset. */
 bool gnss_link_core_on_event(gnss_link_core_t *c, gnss_link_ev_t ev);

@@ -180,7 +180,8 @@ function maintenanceCtl(done) {
       body: [h('p', null, 'For ' + label() + ' the station sends nothing to the receiver: no configuration, no checks, no recovery steps, ' +
         'no updates. The receiver\'s RTCM still reaches the casters.'),
       h('p', { class: 'muted' }, 'It ends by itself, with End now, or with a power cut; then the station checks the receiver as at start-up. ' +
-        'The time counts as planned in the availability record.')] });
+        'The time counts as planned in the availability record.'),
+      msg('warn', MAINT_SAVE_NOTE)] });
     if (!ok) return;
     const r = await act(startBtn, () => api('POST', '/api/gnss/maintenance', { duration_s: Number(dur.value) }), out);
     if (r !== undefined) {
@@ -202,7 +203,7 @@ function maintenanceCtl(done) {
     el: h('div', null,
       h('h2', null, 'Receiver maintenance', badgeEl),
       h('p', { class: 'muted small' }, 'Hands off while you work on the receiver through its other port, for example with a PC tool ' +
-        'or a firmware update there: the station then sends it nothing, and the casters still get its RTCM.'),
+        'or a firmware update there: the station then sends it nothing, and the casters still get its RTCM. ' + MAINT_SAVE_NOTE),
       status, durField.el, h('div', { class: 'form-actions' }, startBtn, extendBtn, endBtn), out),
     update(g) {
       const m = g.maintenance || {};
@@ -312,6 +313,132 @@ function positionInfo(g) {
       arp.offset_m === null || arp.offset_m === undefined ? null : ['Distance to locked', h('span', { class: offTone }, fmt.m(arp.offset_m))],
     ]) : h('p', { class: 'muted' }, 'No position message (1005/1006) received yet.'),
   ];
+}
+
+/* ---- The held first configuration --------------------------------------- */
+
+/* The user's "keep it configured" choice, kept until the first configuration has worked (this browser). */
+const HELD_AUTO_KEY = 'heldAuto';
+
+/** What the station would send, from GET /api/gnss/apply/preview, as a numbered list. */
+function previewList(d) {
+  const steps = (d && d.steps) || [];
+  if (!steps.length) return h('p', { class: 'muted' }, 'Nothing to list (no valid profile).');
+  return h('ol', { class: 'stack small' }, steps.map(s => h('li', null, h('code', null, s.text), ' ',
+    h('span', { class: 'muted' }, [lbl(L.previewKind, s.kind), lbl(L.previewWhen, s.when),
+      s.saved ? 'saved in the receiver' : null].filter(Boolean).join(' · ')))));
+}
+
+/**
+ * The first configuration worked: turn automatic configuration and full
+ * recovery on when the user ticked it with the confirmation. g: GET
+ * /api/gnss. Resolves true when it did.
+ */
+async function finishHeld(g) {
+  if (!store.get(HELD_AUTO_KEY, null) || !g || g.first_apply_held || !g.profile_applied || g.autocfg) return false;
+  store.set(HELD_AUTO_KEY, null);
+  try {
+    await api('PUT', '/api/gnss/profile', { autocfg: true, recovery: 'full' });
+  } catch (e) {
+    store.set(HELD_AUTO_KEY, true);   /* tried again on the next look */
+    throw e;
+  }
+  toast('The receiver is configured. Automatic configuration and recovery are on.', 'ok');
+  return true;
+}
+
+/**
+ * The receiver's first configuration, held until the user confirms it (a
+ * build that holds it): what would be sent, the choice of automatic
+ * configuration afterwards, "Configure the receiver now" and "Not now".
+ * opts.onLater: "Not now"; opts.onApplied: the apply was accepted. Returns
+ * {el, load()}.
+ */
+function heldPanel(opts) {
+  const err = errBox();
+  const status = h('div', { hidden: true });
+  const list = h('div', null, h('p', { class: 'muted small' }, 'Reading what the station would send…'));
+  const auto = checkbox('Then keep it configured and recover it automatically (recommended)', true,
+    'Turns automatic configuration and full receiver recovery on once the first configuration has worked.');
+  let preview = null;
+  let watching = false;
+  const load = async () => {
+    try {
+      preview = await api('GET', '/api/gnss/apply/preview');
+      mount(list, previewList(preview));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) return;
+      mount(list, msg('warn', 'The list could not be read: ' + errText(e)));
+    }
+  };
+  const show = (tone, text) => {
+    mount(status, msg(tone, text));
+    status.hidden = false;
+  };
+  /* Until the receiver has taken it (or the attempt failed): then the user's choice is carried out. Runs on
+   * when the panel leaves the page (the wizard goes on to the live view meanwhile). */
+  const watch = async () => {
+    if (watching) return;
+    watching = true;
+    const until = Date.now() + 15 * 60000;
+    while (Date.now() < until) {
+      await sleep(3000);
+      let g;
+      try {
+        g = await api('GET', '/api/gnss');
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 401) break;
+        continue;
+      }
+      if (g.profile_applied && !g.first_apply_held) {
+        show('ok', 'The receiver is configured.' + (store.get(HELD_AUTO_KEY, null) ? ' Turning automatic configuration on…' : ''));
+        try {
+          await finishHeld(g);
+        } catch (e) {
+          show('warn', 'The receiver is configured, but automatic configuration was not turned on: ' + errText(e));
+        }
+        break;
+      }
+      if (g.config_failed) {
+        show('bad', 'The configuration failed; the station tries again later. The receiver page shows why.');
+        break;
+      }
+      show('info', g.state === 'streaming' || g.state === 'configuring' ? 'Configuring the receiver…' :
+        'Queued: the station configures the receiver as soon as it streams (now: ' + lbl(L.station, g.state).toLowerCase() + ').');
+    }
+    watching = false;
+  };
+  const confirmBtn = btn('Configure the receiver now', async () => {
+    if (!preview) await load();
+    const ok = await dialog({ title: 'Configure the receiver now?', ok: 'Configure',
+      body: [h('p', null, 'The station sends these commands to the receiver, the conditional ones only where it differs, and ends with ' +
+        'SAVECONFIG, which saves the receiver\'s whole running configuration. The RTCM stream pauses for a few seconds.'),
+      previewList(preview),
+      auto.input.checked ? h('p', { class: 'muted small' }, 'Once it has worked, automatic configuration and full recovery are turned on.') :
+        h('p', { class: 'muted small' }, 'Automatic configuration stays off: the station changes nothing on the receiver by itself afterwards.')] });
+    if (!ok) return;
+    const r = await act(confirmBtn, () => api('POST', '/api/gnss/apply'), err);
+    if (r === undefined) return;
+    store.set(HELD_AUTO_KEY, auto.input.checked ? true : null);
+    toast('Configuring the receiver…', 'ok');
+    show('info', 'Configuring the receiver…');
+    watch();
+    if (opts && opts.onApplied) opts.onApplied();
+  }, 'primary');
+  const laterBtn = btn('Not now', () => {
+    if (opts && opts.onLater) opts.onLater();
+  });
+  return {
+    el: h('div', { class: 'stack' },
+      h('h2', null, 'Receiver not configured yet', badge('Held', 'info')),
+      h('p', null, 'This build holds the receiver\'s first configuration until you confirm it. So far the station has only asked the ' +
+        'receiver for its version and settings; it has sent nothing that changes it. When you confirm, it sends the commands below ' +
+        '(the conditional ones only where the receiver differs) and ends with SAVECONFIG, which saves the receiver\'s whole running ' +
+        'configuration.'),
+      list, auto.el, status, err,
+      h('div', { class: 'form-actions' }, confirmBtn, laterBtn)),
+    load: load,
+  };
 }
 
 /* ---- Profile editor ----------------------------------------------------- */
@@ -540,7 +667,8 @@ Views.receiver = {
   title: 'Receiver',
   admin: true,
   create(el) {
-    let g = null, editor = null, stop = null;
+    let g = null, editor = null, stop = null, held = null, heldLater = false;
+    const heldCard = h('section', { class: 'card wide', hidden: true });
     const info = h('section', { class: 'card' });
     const posActions = positionActions(() => refresh());
     const position = h('section', { class: 'card' }, posActions.el);
@@ -552,6 +680,24 @@ Views.receiver = {
     const profile = h('section', { class: 'card wide' });
 
     const fill = () => {
+      /* The held first configuration first, until it is made (or put off for this visit). */
+      if (g.first_apply_held && !heldLater) {
+        if (!held) {
+          held = heldPanel({
+            onLater: () => {
+              heldLater = true;
+              heldCard.hidden = true;
+            },
+            onApplied: () => refresh().catch(() => {}),
+          });
+          mount(heldCard, held.el);
+          held.load();
+        }
+        heldCard.hidden = false;
+      } else {
+        heldCard.hidden = true;
+        if (!g.first_apply_held) finishHeld(g).then(done => done && refresh(), () => {});
+      }
       mount(info, receiverInfo(g));
       /* Everything in the position card but its actions, which stay put. */
       while (position.firstChild && position.firstChild !== posActions.el) position.firstChild.remove();
@@ -573,7 +719,7 @@ Views.receiver = {
     }
     async function load() {
       g = await api('GET', '/api/gnss');
-      mount(el, h('div', { class: 'grid' }, info, position, desc, maintCard, recoveryCard, profile));
+      mount(el, h('div', { class: 'grid' }, heldCard, info, position, desc, maintCard, recoveryCard, profile));
       fill();
       buildEditor();
     }

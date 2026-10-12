@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+#
+# NEVER FOR A RELEASE (the release job refuses a build with this option on).
+# An overlay on sdkconfig.defaults for a first boot with a new receiver: the
+# station's first configuration of the receiver waits for the user.
+#
+#   idf.py -B build-hold -D SDKCONFIG=build-hold/sdkconfig \
+#          -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.hold" build
+#
+# On a device whose receiver profile was never applied, the first boot
+# writes gnss/autocfg = 0, gnss/recovery = 2 (alerts only, if unset) and
+# gnss/hold = 1 before anything reaches the receiver. Until the user
+# confirms the apply on the receiver page (or in the setup wizard), only
+# queries are sent. The hold stays in NVS, so flashing the station build
+# afterwards keeps it until the user applies. In QEMU:
+# tools/qemu/run.sh --overlay sdkconfig.hold (builds into build-qemu-hold/).
+
+CONFIG_STATION_HOLD_FIRST_APPLY=y

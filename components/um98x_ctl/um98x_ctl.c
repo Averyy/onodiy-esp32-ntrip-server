@@ -300,6 +300,14 @@ static bool persist_applied(const um98x_base_profile_t *p, const um98x_apply_res
         ESP_LOGW(TAG, "applied state not saved: %s", esp_err_to_name(err));
         return false;
     }
+    /* The first configuration the user held back has now been made. */
+    uint8_t held = 0;
+    if (settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD, &held) == ESP_OK) {
+        err = settings_erase_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "gnss/hold not erased: %s", esp_err_to_name(err));
+        }
+    }
     return true;
 }
 
@@ -611,6 +619,12 @@ esp_err_t um98x_ctl_apply_profile(gnss_link_lease_t lease, const um98x_base_prof
                                      : "");
     }
     return to_esp_err(res);
+}
+
+size_t um98x_ctl_apply_preview(const um98x_base_profile_t *profile, uint32_t link_baud, um98x_preview_step_t *out,
+                               size_t cap)
+{
+    return um98x_plan_preview(profile, link_baud, out, cap);
 }
 
 esp_err_t um98x_ctl_restore_output(gnss_link_lease_t lease, const um98x_base_profile_t *profile,

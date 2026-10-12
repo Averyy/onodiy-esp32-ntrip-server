@@ -171,6 +171,7 @@ static void report_prompt(gnss_framer_t *f)
         .data = k_prompt,
         .len = sizeof(k_prompt),
         .rtcm_msg_type = 0,
+        .at = f->prompt_at,
     };
     f->cb(&fr, f->ctx);
 }

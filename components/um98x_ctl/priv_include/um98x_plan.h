@@ -52,6 +52,7 @@
 #include <stdint.h>
 
 #include "gnss_types.h"
+#include "um98x_apply.h"
 #include "um98x_reply.h"
 
 #ifdef __cplusplus
@@ -146,6 +147,32 @@ bool um98x_plan_rtcm_only(const um98x_base_profile_t *p, um98x_plan_t *out);
 
 /** Command text of one step. @return length, 0 if it does not fit or the step is invalid. */
 size_t um98x_step_command(const um98x_base_profile_t *p, const um98x_step_t *s, char *buf, size_t cap);
+
+/**
+ * What an apply session would send, without a read-back (nothing is
+ * sent): the session's quiet-port command, its queries, then every step
+ * the plan can hold, each marked with when it goes out. In session order:
+ *   UNLOG COM1                     write, always (not saved by itself)
+ *   VERSIONA                       query, always (the session's identity)
+ *   CONFIG, MODE                   queries, always (the read-back)
+ *   CONFIG SIGNALGROUP m s         write, if the read-back differs (the
+ *                                  receiver saves it and restarts)
+ *   CONFIG COM1 <baud>             write, if the profile's baud is not
+ *                                  link_baud
+ *   MODE BASE ...                  write, if the base-mode read-back
+ *                                  differs (a fixed position as ECEF)
+ *   CONFIG BASEANTENNAMODEL ...    write, only with an antenna model, if
+ *                                  the read-back differs
+ *   CONFIG RTCMB1CB2A ENABLE       write, if the read-back shows it off
+ *   RTCM<msg> COM1 <period>        write, always, one per profile message
+ *   GPGSV COM1 10                  write, always, only with satellite-view
+ *                                  output in the profile
+ *   SAVECONFIG                     write, always, saved: the receiver's whole
+ *                                  running configuration
+ * The texts come from the plan builder's own formatter (um98x_step_command).
+ * @return steps written (at most cap; 0 for an invalid profile).
+ */
+size_t um98x_plan_preview(const um98x_base_profile_t *p, uint32_t link_baud, um98x_preview_step_t *out, size_t cap);
 
 /** Detection candidates (see above). @return count written. */
 size_t um98x_detect_candidates(uint32_t stored_baud, bool full, uint32_t *out, size_t cap);

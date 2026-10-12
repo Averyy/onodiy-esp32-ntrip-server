@@ -61,6 +61,33 @@ typedef struct {
     char b1cb2a_reply[UM98X_APPLY_REASON_MAX];    /**< its rejection text, or "timeout" ("" when accepted) */
 } um98x_apply_result_t;
 
+/* ---- apply preview: what a session would send, for the user to confirm ------------- */
+
+#define UM98X_PREVIEW_TEXT_MAX UM98X_APPLY_CMD_MAX
+/** Most steps of a preview: the fixed head and tail plus one per RTCM message. */
+#define UM98X_PREVIEW_MAX      (UM98X_MAX_RTCM_MSGS + 12u)
+
+/** um98x_preview_step_t.kind */
+typedef enum {
+    UM98X_PREVIEW_QUERY = 0,   /**< reads the receiver, changes nothing */
+    UM98X_PREVIEW_WRITE,       /**< changes the receiver's running configuration */
+} um98x_preview_kind_t;
+
+/** um98x_preview_step_t.when */
+typedef enum {
+    UM98X_PREVIEW_ALWAYS = 0,  /**< sent in every session */
+    UM98X_PREVIEW_IF_DIFFERS,  /**< only when the read-back differs from the profile */
+    UM98X_PREVIEW_IF_OFF,      /**< only when the read-back shows the setting off */
+} um98x_preview_when_t;
+
+/** One command of the preview, as the session writes it. */
+typedef struct {
+    char text[UM98X_PREVIEW_TEXT_MAX];
+    uint8_t kind;              /**< um98x_preview_kind_t */
+    uint8_t when;              /**< um98x_preview_when_t */
+    bool saved;                /**< the command itself saves to the receiver's stored configuration */
+} um98x_preview_step_t;
+
 #ifdef __cplusplus
 }
 #endif
