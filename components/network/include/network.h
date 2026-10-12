@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Network: Wi-Fi station with a captive-portal setup AP as fallback, SNTP,
- * an upstream probe and the network recovery ladder.
+ * an mDNS responder, an upstream probe and the network recovery ladder.
  *
  * Behaviour:
  *  - No stored credentials: start the setup AP (open, or WPA2 with the
@@ -16,7 +16,8 @@
  *    attempts. A Wi-Fi outage never switches the station to setup-AP-only
  *    mode: after CONFIG_NETWORK_STA_FALLBACK_S without an IP the setup AP
  *    comes up *beside* the station (AP+STA, on the station's channel once it
- *    connects), and goes down again a minute after the station has an IP.
+ *    connects), and goes down again CONFIG_NETWORK_AP_LINGER_S (15 s) after
+ *    the station has an IP.
  *    The station keeps retrying all along. A Wi-Fi outage can reboot the
  *    ESP32 only through the network ladder's last rung (upstream probe
  *    NO_IP or DNS_FAILED, at most once per
@@ -30,7 +31,12 @@
  *    status, retried with network_retry_pending_credentials() and first
  *    thing at the next boot, dropped with
  *    network_discard_pending_credentials()). So a typo never strands a
- *    remote station. Without previous credentials (first setup) the new ones
+ *    remote station. A network that refuses the new password outright
+ *    (three refused attempts in a row before any association: wrong
+ *    passphrase, handshake timeout, an access point of that name only with
+ *    another security setting) ends the trial at once instead of after
+ *    90 s; the status says why the station went back (cred_reverted_why).
+ *    Without previous credentials (first setup) the new ones
  *    are stored as the station's at once. A change made while a trial runs
  *    replaces that trial: an IP for the earlier pair that arrives before the
  *    change is applied confirms nothing, and a pending pair is cleared only
@@ -43,8 +49,17 @@
  *    unless a client is still connected (then when the last one leaves, or
  *    30 min after the lifetime at the latest).
  *  - An AP that is up for setup or fallback stays up while the station tries
- *    new credentials and until a minute after it gets an IP, so the browser
- *    on the setup page receives an answer (and the new address).
+ *    new credentials and until CONFIG_NETWORK_AP_LINGER_S after it gets an
+ *    IP, so the browser on the setup page receives an answer (the new
+ *    address, and the countdown to the AP closing: ap_close_in_s).
+ *  - mDNS (Espressif's mdns component): the station answers
+ *    <hostname>.local (the name in use, the stored sys/hostname or the
+ *    default) on the home network and on its own AP, and advertises its web
+ *    page as an _http._tcp service. When another device holds that name
+ *    (a lost probe or an address conflict), the responder renames itself
+ *    (<name>-2, then -3, ...); the status shows the name it answers
+ *    (mdns_host), the log says so once, and the next boot probes the
+ *    configured name again (the renamed one is never stored).
  *  - Once online: SNTP (pool.ntp.org plus a DHCP-provided server; the
  *    fallback clock for logs and update checks, the availability ledger
  *    prefers GNSS time) and one upstream probe.
@@ -114,6 +129,10 @@
  * Wi-Fi credentials live in the settings component; the Wi-Fi driver's own
  * NVS storage is disabled (single source of truth).
  *
+ * A planned restart (lifecycle_reboot / lifecycle_request_reboot) ends the
+ * Wi-Fi link on the way down; that disconnect is neither logged as a link
+ * loss nor journalled (the journal's restart record covers it).
+ *
  * Thread safety: every function may be called from any task. None blocks for
  * long except network_probe_upstream() with a non-zero timeout.
  */
@@ -172,6 +191,13 @@ typedef enum {
     NETWORK_LADDER_WHY_AP_OVERRIDDEN,/**< the rung ran although an AP client is connected (30 min limit over) */
 } network_ladder_why_t;
 
+/** Why the station went back to its previous credentials (network_status_t.cred_reverted_why). */
+typedef enum {
+    NETWORK_CRED_REVERT_NONE = 0,
+    NETWORK_CRED_REVERT_NO_IP = 1,    /**< no IP within the 90 s trial */
+    NETWORK_CRED_REVERT_AUTH = 2,     /**< the network refused the new password (three attempts in a row) */
+} network_cred_revert_t;
+
 /** Network ladder triggers (network_status_t.ladder_triggers, pass-start record). */
 typedef enum {
     NETWORK_LADDER_TRIG_PROTECTED  = 1u << 0, /**< P: protected caster down while RTCM is healthy */
@@ -193,7 +219,9 @@ typedef struct {
     uint8_t ap_reasons;            /**< network_ap_reason_t flags while the AP is up */
     uint8_t ap_clients;            /**< stations connected to the AP */
     uint32_t recovery_ap_left_s;   /**< recovery AP lifetime left (0 = none, or kept up for a connected client) */
+    uint32_t ap_close_in_s;        /**< until the station closes its AP: the linger after the station got its IP, or the recovery AP's lifetime left; UINT32_MAX = AP down, or nothing scheduled (setup without credentials, offline fallback, a recovery AP held by a client) */
     char ap_ssid[33];              /**< setup AP name (set once Wi-Fi is initialised) */
+    char mdns_host[33];            /**< host label the mDNS responder answers, without ".local" (the hostname, or <hostname>-N after a name conflict); "" = not running */
     bool time_synced;
     char ssid[33];
     char ip[16];
@@ -214,7 +242,8 @@ typedef struct {
     uint32_t cred_trial_left_s;    /**< until the trial gives up (0 = none) */
     bool cred_pending;             /**< credentials wait to be confirmed (pending_ssid) */
     char pending_ssid[33];         /**< SSID of the pending credentials ("" = none) */
-    bool cred_reverted;            /**< the pending credentials got no IP in time: back on the previous ones */
+    bool cred_reverted;            /**< the pending credentials got no IP in time (or were refused): back on the previous ones */
+    uint8_t cred_reverted_why;     /**< network_cred_revert_t while cred_reverted */
 } network_status_t;
 
 /** One scan result. */
@@ -245,7 +274,11 @@ typedef struct {
     uint32_t min_reboot_interval_s;/**< at most one network-ladder reboot per this many seconds (counted across resets) */
 } network_ladder_input_t;
 
-/** Create netifs, init Wi-Fi (RAM storage), register handlers, start the network task. */
+/**
+ * Create netifs, init Wi-Fi (RAM storage), start the mDNS responder (never
+ * fatal: without it the station is reached by its IP), register handlers,
+ * start the network task.
+ */
 esp_err_t network_init(void);
 
 /**
@@ -268,7 +301,8 @@ bool network_is_online(void);
  * station's credentials, otherwise the station goes back to the previous
  * ones and keeps these pending (see the header). Without stored credentials
  * they are stored as the station's at once. An AP that is up stays up until
- * the station gets an IP and a minute after, so the browser gets an answer.
+ * the station gets an IP and CONFIG_NETWORK_AP_LINGER_S after, so the
+ * browser gets an answer.
  * ssid: 1-32 bytes; password: "" (open), 8-63 characters or 64 hex digits.
  * With the settings unavailable they are kept for this boot only.
  * @return ESP_ERR_INVALID_ARG for invalid values, ESP_ERR_INVALID_STATE before

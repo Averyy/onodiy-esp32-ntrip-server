@@ -165,16 +165,19 @@ function castersCard(s, admin) {
 
 function networkCard(s) {
   const n = s.network || {};
+  const stale = typeof n.probe_age_s === 'number' && n.probe_age_s > 600;
   const rows = [
     ['Wi-Fi', n.ssid ? n.ssid + (n.online ? '' : ' (not connected)') : 'Not set up'],
     n.cred_trial ? ['New network', 'trying ' + (n.pending_ssid || '') + (n.cred_trial_left_s ? ', ' + fmt.dur(n.cred_trial_left_s) + ' left' : '')] :
-      n.cred_pending ? ['New network', h('span', { class: 't-warn' }, (n.pending_ssid || '') + ' not confirmed' + (n.cred_reverted ? ' (back on the previous network)' : ''))] : null,
+      n.cred_pending ? ['New network', h('span', { class: 't-warn' }, (n.pending_ssid || '') + ' not confirmed' +
+        (n.cred_reverted ? (n.cred_reverted_why === 'auth_failed' ? ' (password refused; back on the previous network)' : ' (back on the previous network)') : ''))] : null,
     !n.online && n.assoc_no_ip_s ? ['Connected without an address for', fmt.dur(n.assoc_no_ip_s)] : null,
-    n.online ? ['Address', n.ip] : ['Offline for', fmt.dur(n.offline_s)],
+    ...(n.online ? stationAddressRows(n) : [['Offline for', fmt.dur(n.offline_s)]]),
     n.online ? ['Signal', rssiView(n.rssi)] : null,
-    ['Internet', n.upstream === 'ok' ? h('span', { class: 't-ok' }, 'Reachable') :
+    ['Internet', n.upstream === 'ok' ? h('span', { class: 't-ok' }, 'Reachable' + (stale ? ' (checked ' + fmt.dur(n.probe_age_s) + ' ago)' : '')) :
       h('span', { class: n.upstream === 'none' ? 'muted' : 't-warn' }, lbl(L.upstream, n.upstream))],
-    n.ap_active ? ['Access point', 'On (' + (n.ap_reasons || []).map(r => lbl(L.apReason, r)).join(', ') + ')'] : null,
+    n.ap_active ? ['Access point', 'On (' + (n.ap_reasons || []).map(r => lbl(L.apReason, r)).join(', ') + ')' +
+      (typeof n.ap_close_in_s === 'number' ? ', closes in ' + fmt.dur(n.ap_close_in_s) : '')] : null,
   ];
   return h('section', { class: 'card' },
     h('h2', null, 'Network', badge(n.online ? 'Online' : 'Offline', n.online ? 'ok' : 'bad')),

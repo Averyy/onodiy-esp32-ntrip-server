@@ -40,6 +40,30 @@ extern "C" {
 /** Upper bound of caster slots (CONFIG_NTRIP_MAX_CASTERS range). */
 #define WEB_MAX_SLOTS 8u
 
+/* ---- session ------------------------------------------------------------------------ */
+
+/** What GET /api/session is built from. */
+typedef struct {
+    bool authenticated;            /**< the request has a valid admin session */
+    bool admin_set;
+    bool setup_done;
+    bool claim_allowed;
+    bool on_setup_ap;
+    bool public_status;
+    bool settings_available;
+    uint32_t idle_left_s;          /**< with a session: until it expires idle */
+    const char *hostname;          /**< name in use (status device.hostname) */
+    const char *mdns_host;         /**< label the mDNS responder answers ("" = not running) */
+    const char *ap_ssid;           /**< the station's own AP name ("" = not known yet) */
+    uint8_t setup_step;            /**< sys/setup_step (web_setup_step_t, 0 = none) */
+} web_session_snap_t;
+
+/**
+ * GET /api/session. setup_step is null without a session, once setup is
+ * done, or when nothing (or nothing valid) is stored.
+ */
+void web_build_session(wj_t *w, const web_session_snap_t *s);
+
 /* ---- receiver update session view ------------------------------------------------- */
 
 /** `journal` of /api/status and /api/gnss/flash. */

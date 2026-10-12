@@ -359,24 +359,28 @@ void web_note_scan_done(void)
 static esp_err_t h_session_get(web_req_t *r)
 {
     web_admin_state_t admin = web_auth_admin_state();
+    if (network_get_status(&s_net) != ESP_OK) {
+        memset(&s_net, 0, sizeof(s_net));
+    }
+    bool authed = r->sess >= 0;
+    web_session_snap_t snap = {
+        .authenticated = authed,
+        .admin_set = admin != WEB_ADMIN_NONE,
+        .setup_done = read_u8(SETTINGS_NS_SYS, SETTINGS_KEY_SETUP_DONE, 0) != 0,
+        .claim_allowed = admin == WEB_ADMIN_NONE && r->on_ap,
+        .on_setup_ap = r->on_ap,
+        .public_status = web_public_status(),
+        .settings_available = settings_ok(),
+        .idle_left_s = authed ? web_auth_session_left_s(r->sess) : 0,
+        .hostname = web_hostname_active(),
+        .mdns_host = s_net.mdns_host,
+        .ap_ssid = s_net.ap_ssid,
+        .setup_step = authed ? read_u8(SETTINGS_NS_SYS, SETTINGS_KEY_SETUP_STEP, WEB_SETUP_STEP_NONE)
+                             : (uint8_t)WEB_SETUP_STEP_NONE,
+    };
     web_resp_t resp;
     resp_begin(&resp, r->req, 200);
-    wj_t *w = &resp.w;
-    wj_obj_open(w, NULL);
-    wj_int(w, "api", WEB_API_VERSION);
-    wj_bool(w, "authenticated", r->sess >= 0);
-    wj_bool(w, "admin_set", admin != WEB_ADMIN_NONE);
-    wj_bool(w, "setup_done", read_u8(SETTINGS_NS_SYS, SETTINGS_KEY_SETUP_DONE, 0) != 0);
-    wj_bool(w, "claim_allowed", admin == WEB_ADMIN_NONE && r->on_ap);
-    wj_bool(w, "on_setup_ap", r->on_ap);
-    wj_bool(w, "public_status", web_public_status());
-    wj_bool(w, "settings_available", settings_ok());
-    if (r->sess >= 0) {
-        wj_uint(w, "idle_left_s", web_auth_session_left_s(r->sess));
-    } else {
-        wj_null(w, "idle_left_s");
-    }
-    wj_obj_close(w);
+    web_build_session(&resp.w, &snap);
     return web_resp_end(&resp);
 }
 
@@ -457,7 +461,34 @@ static esp_err_t h_setup_done(web_req_t *r)
     if (err != ESP_OK) {
         return web_send_internal(r->req, err);
     }
+    /* The wizard's place is no longer needed; a leftover would do no harm
+     * (setup_step reads null once setup is done), so a failure only logs. */
+    err = settings_erase_key(SETTINGS_NS_SYS, SETTINGS_KEY_SETUP_STEP);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "setup step not erased: %s", esp_err_to_name(err));
+    }
     return web_send_json_literal(r->req, 200, "{\"setup_done\":true}");
+}
+
+/* The wizard's next step, kept on the station so a setup that moves from
+ * the setup network to the home network continues where it was. */
+static esp_err_t h_setup_step(web_req_t *r)
+{
+    web_bad_t b = { 0 };
+    uint8_t step = WEB_SETUP_STEP_NONE;
+    if (!web_parse_setup_step(r->body, &step, &b)) {
+        return bad(r->req, &b);
+    }
+    if (!settings_ok()) {
+        return web_send_err(r->req, WEB_ERR_SETTINGS_UNAVAILABLE);
+    }
+    esp_err_t err = settings_set_u8(SETTINGS_NS_SYS, SETTINGS_KEY_SETUP_STEP, step);
+    if (err != ESP_OK) {
+        return web_send_internal(r->req, err);
+    }
+    char body[48];
+    snprintf(body, sizeof(body), "{\"setup_step\":\"%s\"}", web_setup_step_name(step));
+    return web_send_json_literal(r->req, 200, body);
 }
 
 static esp_err_t h_admin_password(web_req_t *r)
@@ -1228,9 +1259,14 @@ static esp_err_t h_wifi_put(web_req_t *r)
                  trial ? "tried now, the previous ones come back unless they get an IP" : "the station connects with them");
 #endif
     }
-    char body[80];
-    snprintf(body, sizeof(body), "{\"accepted\":true,\"persisted\":%s,\"trial\":%s}", persist ? "true" : "false",
-             trial ? "true" : "false");
+#if CONFIG_NETWORK_QEMU_ETHERNET
+    const bool applied = false;   /* stored only: the emulated Ethernet stays the station's link */
+#else
+    const bool applied = reconnect;
+#endif
+    char body[96];
+    snprintf(body, sizeof(body), "{\"accepted\":true,\"persisted\":%s,\"trial\":%s,\"applied\":%s}",
+             persist ? "true" : "false", trial ? "true" : "false", applied ? "true" : "false");
     return web_send_json_literal(r->req, 202, body);
 }
 
@@ -2036,6 +2072,7 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/session", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_session_delete),
     ROUTE("/api/setup/admin", HTTP_POST, WEB_ACC_CLAIM, WEB_BODY_JSON, h_setup_admin),
     ROUTE("/api/setup/done", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_setup_done),
+    ROUTE("/api/setup/step", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_setup_step),
     ROUTE("/api/admin-password", HTTP_PUT, WEB_ACC_ADMIN, WEB_BODY_JSON, h_admin_password),
     ROUTE("/api/status", HTTP_GET, WEB_ACC_PUBSTAR, WEB_BODY_NONE, h_status),
     ROUTE("/api/gnss", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_gnss),

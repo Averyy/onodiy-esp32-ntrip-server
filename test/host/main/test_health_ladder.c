@@ -24,6 +24,7 @@
 typedef struct {
     uint8_t code;
     uint8_t outcome;
+    uint8_t detail;
     int64_t at;
 } rec_t;
 
@@ -112,15 +113,19 @@ static bool cb_reboot(void *ctx)
     return true;
 }
 
-static void cb_journal(void *ctx, uint8_t code, uint8_t outcome)
+static void cb_journal(void *ctx, uint8_t code, uint8_t outcome, uint8_t detail)
 {
     sim_t *w = (sim_t *)ctx;
     if (outcome == HL_OUT_STARTED && code >= 1 && code <= 5) {
         w->started_steps++;
     }
+    if (outcome != HL_OUT_HELD) {
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, detail, "only a held restart carries a detail");
+    }
     if (w->nrec < 512) {
         w->rec[w->nrec].code = code;
         w->rec[w->nrec].outcome = outcome;
+        w->rec[w->nrec].detail = detail;
         w->rec[w->nrec].at = w->now;
         w->nrec++;
     }
@@ -1630,4 +1635,155 @@ TEST_CASE("ladder: a stored recovery mode out of range acts as full", "[health_l
     TEST_ASSERT_TRUE(sim_until_rec(&w, 7, 10 * MIN));
     TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
     TEST_ASSERT_EQUAL_UINT8(HL_MODE_FULL, st_of(&w).mode);
+}
+
+/* ---- restart hold ---------------------------------------------------------------- */
+
+/* NO_RECEIVER at boot after a silent detection pass, with `hold` set. */
+static void held_in_no_receiver(sim_t *w, uint8_t hold)
+{
+    sim_init(w);
+    w->in.reboot_hold = hold;
+    w->in.stn_state = HL_STN_DETECTING;
+    sim_run(w, 45 * SEC);
+    w->in.stn_state = HL_STN_NO_RECEIVER;
+    w->in.detect_passes = 1;
+    sim_run(w, 2 * SEC);
+}
+
+TEST_CASE("ladder: first setup holds 6a: code 9 held with the mask, no restart", "[health_ladder]")
+{
+    sim_t w;
+    held_in_no_receiver(&w, HL_HOLD_SETUP);
+    static const uint8_t want[][2] = { { 9, HL_OUT_HELD }, { 8, HL_OUT_STARTED } };
+    expect_recs(&w, want, 2);
+    TEST_ASSERT_EQUAL_UINT8(HL_HOLD_SETUP, w.rec[0].detail);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+    TEST_ASSERT_TRUE(s.reboot_recheck);
+    TEST_ASSERT_TRUE(s.episode);
+
+    /* Journalled once: newer passes while the hold lasts add nothing. */
+    for (uint32_t pass = 2; pass < 20; pass++) {
+        w.in.detect_passes = pass;
+        sim_run(&w, 5 * MIN);
+    }
+    TEST_ASSERT_EQUAL_UINT32(2, w.nrec);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+}
+
+TEST_CASE("ladder: the hold cleared and a new detection pass: 6a runs", "[health_ladder]")
+{
+    sim_t w;
+    held_in_no_receiver(&w, HL_HOLD_SETUP | HL_HOLD_POWER_ON);
+    TEST_ASSERT_EQUAL_UINT8(HL_HOLD_SETUP | HL_HOLD_POWER_ON, w.rec[0].detail);
+    /* the hold ends, but no pass completed since: nothing yet */
+    w.in.reboot_hold = 0;
+    sim_run(&w, 10 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    /* a newer silent pass: 6a, journalled as a new start */
+    w.in.detect_passes = 2;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+    TEST_ASSERT_EQUAL_UINT8(6, w.rec[2].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_STARTED, w.rec[2].outcome);
+}
+
+TEST_CASE("ladder: without a hold, a receiver that streamed and went silent gets 6a at once", "[health_ladder]")
+{
+    /* health gives no power_on bit once something was heard this boot
+     * (test_health_mon.c): the ladder then restarts within the cap. */
+    sim_t w;
+    sim_init(&w);
+    w.rescan_finds = false;
+    stream_then_silence(&w);
+    w.in.reboot_hold = 0;
+    sim_run(&w, 5 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+    TEST_ASSERT_EQUAL_UINT32(0, count_rec(&w, 9, HL_OUT_HELD));
+}
+
+TEST_CASE("ladder: the cap and a hold together: the cap is journalled, the hold is not", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.in.reboot_allowed = false;
+    w.in.reboot_hold = HL_HOLD_ADMIN;
+    w.in.stn_state = HL_STN_DETECTING;
+    sim_run(&w, 45 * SEC);
+    w.in.stn_state = HL_STN_NO_RECEIVER;
+    w.in.detect_passes = 1;
+    sim_run(&w, 2 * SEC);
+    static const uint8_t want[][2] = { { 9, HL_OUT_STARTED }, { 8, HL_OUT_STARTED } };
+    expect_recs(&w, want, 2);
+    TEST_ASSERT_EQUAL_UINT8(0, w.rec[0].detail);
+    /* the cap opens while the hold lasts: still nothing */
+    w.in.reboot_allowed = true;
+    w.in.detect_passes = 2;
+    sim_run(&w, 20 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(2, w.nrec);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    TEST_ASSERT_TRUE(st_of(&w).reboot_recheck);
+    /* the hold ends: the next pass decides */
+    w.in.reboot_hold = 0;
+    w.in.detect_passes = 3;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+}
+
+TEST_CASE("ladder: a held 6a in a stall outside NO_RECEIVER comes back with the FAILED pass", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.dur[5] = 3 * SEC;
+    w.in.reboot_hold = HL_HOLD_AP_CLIENT;
+    stream_then_silence(&w);
+    /* steps 1, 2, then the rescan finds the (silent) receiver: 4, 5, byte rule */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 12, 20 * MIN));
+    int held = find_rec(&w, 9, HL_OUT_HELD, 0);
+    TEST_ASSERT_TRUE(held >= 0);
+    TEST_ASSERT_EQUAL_UINT8(HL_HOLD_AP_CLIENT, w.rec[held].detail);
+    TEST_ASSERT_EQUAL_UINT8(8, w.rec[held + 1].code);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    /* the client leaves: the FAILED retry pass (10 min) reaches 6a again and runs it */
+    w.in.reboot_hold = 0;
+    sim_run(&w, 20 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+}
+
+TEST_CASE("ladder: no-reboot and alerts-only modes never reach the hold", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.in.recovery_mode = HL_MODE_NO_REBOOT;
+    w.in.reboot_hold = HL_HOLD_SETUP;
+    w.in.stn_state = HL_STN_NO_RECEIVER;
+    sim_run(&w, 3 * SEC);
+    static const uint8_t want[][2] = { { 9, HL_OUT_NOT_RUN }, { 8, HL_OUT_STARTED } };
+    expect_recs(&w, want, 2);
+
+    sim_init(&w);
+    w.in.recovery_mode = HL_MODE_ALERTS;
+    w.in.reboot_hold = HL_HOLD_SETUP;
+    w.in.stn_state = HL_STN_NO_RECEIVER;
+    sim_run(&w, 3 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(0, count_rec(&w, 9, HL_OUT_HELD));
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+}
+
+TEST_CASE("ladder: the episode flag follows a stall until the ladder resets", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 30 * SEC);
+    TEST_ASSERT_FALSE(st_of(&w).episode);
+    w.rtcm = false;
+    sim_run(&w, 15 * SEC);
+    TEST_ASSERT_TRUE(st_of(&w).episode);
+    w.rtcm = true;
+    sim_run(&w, 2 * MIN);
+    TEST_ASSERT_FALSE(st_of(&w).episode);
 }

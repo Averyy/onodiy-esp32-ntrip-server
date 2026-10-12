@@ -26,7 +26,8 @@
  *   3     RESCAN                           30 s; found -> 4, not found -> byte rule
  *   4     RECONFIGURE                      90 s, longer while the survey window is open
  *   5     RECEIVER_RESET                   120 s, then the byte rule
- *   6a    ESP32 reboot (cap and no reboot inhibit), else blocked -> 7
+ *   6a    ESP32 reboot (cap, no reboot inhibit, no hold), else blocked or
+ *         held -> 7
  *   6b    "receiver needs a power cycle" alert -> 7
  *   7     FAILED: every 10 min, while still stalled, enter again at
  *         max(2, class entry); a TEXT_ONLY stall is not re-entered while the
@@ -56,11 +57,23 @@
  * FAILED without retries until the station leaves NO_RECEIVER. An episode
  * that began with the ladder's own failed rescan is handled by that step.
  * A 6a the episode's byte rule could not take (the reboot cap, a reboot
- * inhibit, or the "no ESP32 reboot" mode) is looked at again: on a tick
- * where the mode is full, the cap allows a reboot, no inhibit is held and
- * the station has completed a detection pass since the block, the byte rule
- * runs once more on that latest pass (no bytes -> 6a, bytes -> 6b). The cap
- * still bounds every reboot; a reboot is never queued behind an inhibit.
+ * inhibit, a hold, or the "no ESP32 reboot" mode) is looked at again: on a
+ * tick where the mode is full, the cap allows a reboot, no inhibit and no
+ * hold applies and the station has completed a detection pass since the
+ * block, the byte rule runs once more on that latest pass (no bytes -> 6a,
+ * bytes -> 6b). The cap still bounds every reboot; a reboot is never queued
+ * behind an inhibit or a hold.
+ *
+ * Hold (hl_in_t.reboot_hold, computed by health: health_mon.h
+ * hm_reboot_hold): reasons to postpone 6a right now, while a person sets the
+ * station up or uses it, or in the first hour after power-on when nothing
+ * was heard from the receiver. The byte rule treats a hold like a cap block
+ * (the cap and an inhibit are journalled first, as before): journal code 9
+ * with outcome HELD and the hold bits as detail (record b bits 16-23), go to
+ * 7, and in NO_RECEIVER look again after the next detection pass once the
+ * hold is gone. A held 6a in a stall that is not NO_RECEIVER comes back
+ * through the FAILED retry pass (every 10 min). The ALERTS and NO_REBOOT
+ * modes never reach the hold.
  *
  * User recovery mode (gnss/recovery, read before every decision; a step
  * already running completes):
@@ -147,7 +160,14 @@ typedef enum {
     HL_OUT_FAILED = 2,            /**< also: refused by the station without sending anything */
     HL_OUT_ABANDONED = 3,         /**< a suspension began */
     HL_OUT_NOT_RUN = 4,           /**< not run: the user's recovery mode */
+    HL_OUT_HELD = 5,              /**< 6a held back for now (code 9; detail = the hold bits) */
 } hl_outcome_t;
+
+/** Why 6a is held back (hl_in_t.reboot_hold, journal detail of HL_OUT_HELD). */
+#define HL_HOLD_SETUP     (1u << 0)  /**< first setup not finished */
+#define HL_HOLD_AP_CLIENT (1u << 1)  /**< a client is connected to the station's access point */
+#define HL_HOLD_ADMIN     (1u << 2)  /**< an admin used the web page in the last minutes */
+#define HL_HOLD_POWER_ON  (1u << 3)  /**< first hour after power-on, nothing heard from the receiver this boot */
 
 /** User recovery mode (gnss/recovery). */
 typedef enum {
@@ -194,8 +214,8 @@ typedef struct {
     hl_req_t (*request)(void *ctx, uint8_t step);
     /** Request the ESP32 reboot (6a). @return false if it was blocked after all (cap or inhibit, a race). */
     bool (*reboot)(void *ctx);
-    /** Journal one ladder record. */
-    void (*journal)(void *ctx, uint8_t code, uint8_t outcome);
+    /** Journal one ladder record; `detail` = the hold bits of HL_OUT_HELD, else 0. */
+    void (*journal)(void *ctx, uint8_t code, uint8_t outcome, uint8_t detail);
     void *ctx;
 } hl_ops_t;
 
@@ -223,6 +243,7 @@ typedef struct {
     bool survey_holds_rtcm;       /**< the receiver sends no RTCM while surveying: no stall inside the window */
     bool reboot_allowed;          /**< the ladder reboot cap allows a reboot now */
     bool reboot_inhibited;        /**< a reboot inhibit is held */
+    uint8_t reboot_hold;          /**< HL_HOLD_* reasons that hold 6a back now (0 = none) */
 } hl_in_t;
 
 typedef struct {
@@ -297,6 +318,7 @@ typedef struct {
     uint32_t retry_in_s;          /**< FAILED: until the next retry pass (0 = none scheduled) */
     uint8_t mode;                 /**< hl_mode_t the ladder last decided with */
     bool reboot_recheck;          /**< NO_RECEIVER: a blocked 6a waits to be looked at again */
+    bool episode;                 /**< a stall or NO_RECEIVER episode is in progress (the ladder has not reset since) */
 } hl_status_t;
 
 /** Fresh ladder; the stall timer starts at now_ms. */

@@ -166,6 +166,36 @@ bool web_parse_confirm(const cJSON *root, web_bad_t *bad)
     return true;
 }
 
+static const char *const s_setup_steps[] = {
+    [WEB_SETUP_STEP_WIFI] = "wifi",
+    [WEB_SETUP_STEP_RECEPTION] = "reception",
+    [WEB_SETUP_STEP_ONOCOY] = "onocoy",
+    [WEB_SETUP_STEP_CASTERS] = "casters",
+};
+
+const char *web_setup_step_name(uint8_t step)
+{
+    if (step == WEB_SETUP_STEP_NONE || step >= sizeof(s_setup_steps) / sizeof(s_setup_steps[0])) {
+        return NULL;
+    }
+    return s_setup_steps[step];
+}
+
+bool web_parse_setup_step(const cJSON *root, uint8_t *step, web_bad_t *bad)
+{
+    const char *name = NULL;
+    if (get_str(root, "step", 16, &name) != M_OK) {
+        return invalid(bad, "step");
+    }
+    for (uint8_t i = WEB_SETUP_STEP_WIFI; i < sizeof(s_setup_steps) / sizeof(s_setup_steps[0]); i++) {
+        if (strcmp(name, s_setup_steps[i]) == 0) {
+            *step = i;
+            return true;
+        }
+    }
+    return invalid(bad, "step");
+}
+
 /* ---- receiver ------------------------------------------------------------------------------- */
 
 bool web_rtcm_is_ephemeris(uint16_t msg)

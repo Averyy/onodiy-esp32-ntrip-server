@@ -171,6 +171,30 @@ uint32_t net_ap_reasons(const net_ap_input_t *in, bool *recovery_expired)
     return r;
 }
 
+uint32_t net_ap_close_in_s(const net_ap_input_t *in, uint32_t reasons)
+{
+    if (reasons == 0 || (reasons & (NET_AP_SETUP | NET_AP_FALLBACK)) != 0) {
+        return UINT32_MAX;   /* down, or up until the station has an IP */
+    }
+    bool any = false;
+    uint32_t left = 0;
+    if ((reasons & NET_AP_LINGER) != 0) {
+        any = true;
+        left = in->since_ip_s < in->linger_s ? in->linger_s - in->since_ip_s : 0;
+    }
+    if ((reasons & NET_AP_RECOVERY) != 0) {
+        if (in->recovery_age_s >= in->recovery_lifetime_s) {
+            return UINT32_MAX;   /* a client holds it past its lifetime */
+        }
+        uint32_t r = in->recovery_lifetime_s - in->recovery_age_s;
+        any = true;
+        if (r > left) {
+            left = r;
+        }
+    }
+    return any ? left : UINT32_MAX;
+}
+
 /* ---- disconnect journal filter -------------------------------------------------------- */
 
 void net_drop_log_reset(net_drop_log_t *s)
@@ -241,10 +265,53 @@ net_cred_plan_t net_cred_plan(bool have_active, bool same_as_active, bool wifi_u
     return (have_active && !same_as_active) ? NET_CRED_PLAN_TRIAL : NET_CRED_PLAN_ACTIVE;
 }
 
+bool net_trial_reason_refused(uint16_t reason)
+{
+    switch (reason) {
+    case NET_REASON_AUTH_FAIL:
+    case NET_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case NET_REASON_HANDSHAKE_TIMEOUT:
+    case NET_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+    case NET_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void net_cred_trial_start(net_cred_trial_t *t, uint32_t now_s)
 {
     t->on = true;
     t->since_s = now_s;
+    t->assoc = false;
+    t->refusals = 0;
+}
+
+void net_cred_trial_associated(net_cred_trial_t *t)
+{
+    if (t->on) {
+        t->assoc = true;
+        t->refusals = 0;
+    }
+}
+
+net_trial_act_t net_cred_trial_disconnect(net_cred_trial_t *t, uint16_t reason)
+{
+    if (!t->on || t->assoc) {
+        return NET_TRIAL_NONE;
+    }
+    if (!net_trial_reason_refused(reason)) {
+        t->refusals = 0;
+        return NET_TRIAL_NONE;
+    }
+    if (t->refusals < UINT8_MAX) {
+        t->refusals++;
+    }
+    if (t->refusals >= NET_CRED_TRIAL_REFUSALS) {
+        t->on = false;
+        return NET_TRIAL_REVERT_AUTH;
+    }
+    return NET_TRIAL_NONE;
 }
 
 net_trial_act_t net_cred_trial_tick(net_cred_trial_t *t, bool got_ip, uint32_t now_s)

@@ -68,12 +68,19 @@ of hardware SHA/AES/MPI.
 
 Expected log lines that a station does not print: three `E` lines about the
 multicast MAC filter (the emulated MAC has none) and `QEMU development
-build: emulated Ethernet instead of Wi-Fi, no setup AP`.
+build: emulated Ethernet instead of Wi-Fi, no setup AP`. The mDNS responder
+runs as on a station (`network: mDNS: answering as onocoydiy.local`), on
+the emulated Ethernet port; QEMU's user-mode network carries no multicast
+to the host, so the name itself cannot be looked up from there, but a
+request with `Host: onocoydiy.local` passes the Host check like on a board.
 
 With nothing answering on UART1 the firmware behaves as with a dead
-receiver: detection gives up after about 26 s and the GNSS recovery ladder
-restarts the ESP32 once (`lifecycle: rebooting (reason 6)`); it does not do
-that again for an hour.
+receiver: detection gives up after about 26 s. The GNSS recovery ladder's
+ESP32 restart is then held (`health: no receiver: restart to look for it
+postponed (...)`): while first setup is not finished, and for the first
+hour of station time after power-on when nothing was heard from the
+receiver, so `lifecycle: rebooting (reason 6)` does not appear in a QEMU
+run. `GET /api/status` shows the reasons in `health.reboot_hold`.
 
 ## UART1 (the receiver link)
 
@@ -126,14 +133,23 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
 1. HTTP 200 with the UI page on `/`;
 2. the first admin password can be set (`POST /api/setup/admin`) and
    `GET /api/status` with that session is valid JSON, API version 1, the
-   station online over the emulated Ethernet;
+   station online over the emulated Ethernet, `health.reboot_hold` with
+   `setup`; `GET /api/session` has `hostname` and `mdns_host`
+   `onocoydiy`, a request with `Host: onocoydiy.local` gets 200 and one
+   with `Host: evil.local` does not;
 3. UART1 both ways: the detection queries arrive on the host, and text the
    host sends makes detection end with "bytes but nothing valid";
-4. over 75 s: no `Guru Meditation`, `abort()`, stack overflow, failed
-   assert, backtrace or task watchdog report on the console, and no reboot
-   loop (a restart without the firmware's own `rebooting (reason N)` line
-   before it is a crash; more than two boots is a loop); at the end of the
-   window `GET /` and `GET /api/status` still answer.
+4. over 75 s (`--observe`, at least 45): no `Guru Meditation`, `abort()`,
+   stack overflow, failed assert, backtrace or task watchdog report on the
+   console, and no reboot loop (a restart without the firmware's own
+   `rebooting (reason N)` line before it is a crash; more than two boots is
+   a loop); no GNSS ladder restart (`rebooting (reason 6)`), no console
+   note about dropped lines (`[diag:`), and the mDNS line in the boot log;
+   at the end of the window `GET /` and `GET /api/status` still answer, the
+   console writer task runs (`GET /api/diag/tasks`) and `GET /api/health`
+   counts no console drop. QEMU's UART sends every byte at once, so a log
+   burst cannot back the console up here; the writer's ordering and drop
+   rules are host-tested (`test/host/main/test_diag_console.c`).
 
 QEMU always stops with it: on a normal end, Ctrl-C, SIGTERM or SIGHUP the
 script stops QEMU on the way out, and `run.sh` gets `--seconds` (observe or

@@ -33,8 +33,8 @@
  *   decides: no byte at all in that step's window -> 6a; any bytes -> 6b.
  *   6a. reboot the ESP32 (the ESP32 side may be wedged), only within the
  *       reboot cap (lifecycle_ladder_reboot_allowed: 60 min apart, at most
- *       3 per 24 h, across reboots) and while no reboot inhibit is held;
- *       blocked -> 7.
+ *       3 per 24 h, across reboots), while no reboot inhibit is held and
+ *       nothing holds it back (below); blocked or held -> 7.
  *   6b. an ESP32 reboot does not reset the receiver: raise "receiver needs a
  *       power cycle" instead -> 7.
  *   7. FAILED: every 10 min re-classify and enter at max(2, class entry
@@ -72,11 +72,35 @@
  * and the leases of those passes suspend nothing. A 6a that the reboot cap,
  * a reboot inhibit or the "no ESP32 reboot" mode kept from running is
  * looked at again while the episode lasts: on a tick in full mode where the
- * cap allows a reboot, no inhibit is held and the station has completed a
- * detection pass since (station_status_t.detect_passes), the byte rule runs
- * on that latest pass (6a or 6b). The cap still bounds every reboot. When a
- * suspension ends the stall timer and the loss window start again from
- * there.
+ * cap allows a reboot, no inhibit is held, nothing holds the restart back
+ * and the station has completed a detection pass since
+ * (station_status_t.detect_passes), the byte rule runs on that latest pass
+ * (6a or 6b). The cap still bounds every reboot. When a suspension ends the
+ * stall timer and the loss window start again from there.
+ *
+ * Restart hold (6a is never queued: held, journalled once as code 9 with
+ * outcome "held" and the reasons, and looked at again later like a cap
+ * block; a held 6a outside NO_RECEIVER comes back with the FAILED retry
+ * pass), while any of these holds:
+ *   setup      the settings are available and first setup is not finished
+ *              (sys/setup_done != 1); no time limit: a station never set up
+ *              streams nothing, and its owner is on the setup network;
+ *   ap_client  someone is connected to the station's access point;
+ *   admin      an admin session made a request or sent a WebSocket ping
+ *              within CONFIG_HEALTH_REBOOT_HOLD_ADMIN_S
+ *              (health_note_admin_activity);
+ *   power_on   less than CONFIG_HEALTH_REBOOT_POWER_ON_GRACE_MIN of station
+ *              time since power-on (lifecycle_station_time_s) and nothing
+ *              valid heard from the receiver in this boot (no RTCM frame, no
+ *              checksum-valid text line): a restart cannot clear a fault the
+ *              power-on itself just cleared. A receiver that streamed in
+ *              this boot and then stalled still gets 6a at once, within the
+ *              cap.
+ * ap_client and admin together hold for at most
+ * CONFIG_HEALTH_REBOOT_HOLD_MAX_MIN of presence per ladder episode (the
+ * network ladder's limit for AP clients); after that the restart runs
+ * anyway. The status shows the reasons holding now (gnss_reboot_hold), the
+ * time left of that limit and the reboot cap's wait.
  *
  * User recovery mode (gnss/recovery, read every tick; a step already running
  * completes): full (default); no ESP32 reboot (6a is journalled as not run,
@@ -202,6 +226,14 @@ typedef enum {
     HEALTH_RECOVERY_ALERTS = 2,      /**< nothing sent to the receiver, nothing rebooted: stalls are only reported */
 } health_recovery_mode_t;
 
+/** Why the GNSS ladder's ESP32 restart is postponed now (bit flags; journal detail of a held restart). */
+typedef enum {
+    HEALTH_HOLD_SETUP     = 1u << 0, /**< first setup not finished */
+    HEALTH_HOLD_AP_CLIENT = 1u << 1, /**< a client on the station's access point */
+    HEALTH_HOLD_ADMIN     = 1u << 2, /**< the web page in use (admin request or WebSocket ping) */
+    HEALTH_HOLD_POWER_ON  = 1u << 3, /**< first hour after power-on, nothing heard from the receiver */
+} health_reboot_hold_t;
+
 /** Snapshot for status pages. */
 typedef struct {
     health_level_t level;
@@ -223,6 +255,9 @@ typedef struct {
     uint32_t admin_resets;           /**< BOOT-button admin password resets this boot; the web also forgets a password it holds only in RAM (settings unavailable) and ends every session */
     health_recovery_mode_t recovery_mode; /**< in effect (gnss/recovery; a stored value out of range reads as FULL) */
     bool gnss_reboot_recheck;        /**< NO_RECEIVER: a blocked ESP32 reboot waits for the cap and the next detection pass */
+    uint8_t gnss_reboot_hold;        /**< health_reboot_hold_t reasons that postpone the ladder's ESP32 restart now (0 = none) */
+    uint32_t gnss_reboot_hold_left_s;/**< until the presence limit lets a restart held by ap_client or admin run; UINT32_MAX = no such hold */
+    uint32_t gnss_reboot_cap_wait_s; /**< until the reboot cap allows a ladder restart; UINT32_MAX = allowed now */
 } health_status_t;
 
 /** Register handlers; read the button pin from the board. */
@@ -233,6 +268,14 @@ esp_err_t health_start(void);
 
 /** Status snapshot. */
 esp_err_t health_get_status(health_status_t *out);
+
+/**
+ * An admin session is in use: the web server calls this for every request
+ * with a valid admin session and for each admin WebSocket ping. Holds the
+ * ladder's ESP32 restart back for CONFIG_HEALTH_REBOOT_HOLD_ADMIN_S. Never
+ * blocks (one atomic store); any task.
+ */
+void health_note_admin_activity(void);
 
 #ifdef __cplusplus
 }

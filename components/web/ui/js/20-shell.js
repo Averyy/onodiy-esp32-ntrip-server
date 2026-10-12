@@ -326,14 +326,26 @@ function renderNotices() {
       'Nothing arrives from the receiver meanwhile.', [link('Details', '#/diag', 'btn small')]]);
   }
   const net = st.network || {};
+  const pend = net.pending_ssid || 'the new network';
   if (net.cred_trial) {
-    const left = net.cred_trial_left_s ? ' (about ' + fmt.dur(Math.ceil(net.cred_trial_left_s / 10) * 10) + ' left)' : '';
-    items.push(['info', 'Trying new Wi-Fi credentials' + left, 'The station tries ' + (net.pending_ssid || 'the new network') +
-      '. If it gets no address there, it goes back to its previous network by itself.', null]);
+    /* No buttons while a trial runs: it ends by itself, either way. */
+    items.push(['info', 'Trying the new credentials for ' + pend + ': ' + fmt.dur(net.cred_trial_left_s) + ' left',
+      'Without an address there the station goes back to its previous network by itself.', null]);
   } else if (net.cred_pending) {
-    items.push(['warn', 'New Wi-Fi credentials not confirmed', 'Pending credentials for ' + (net.pending_ssid || 'a network') +
-      ' not confirmed: ' + (net.cred_reverted ? 'back on the previous network (' + (net.ssid || 'unknown') + ').' : 'they are tried at the next start.') +
-      ' Try them again, or discard them.', [btn('Try again', retryPendingWifi, 'small'), btn('Discard', discardPendingWifi, 'small')]]);
+    /* After a revert the network in use is the previous one: the same name means only the password changed. */
+    const what = net.ssid && net.pending_ssid === net.ssid ? 'the new password for ' + pend : 'the new credentials for ' + pend;
+    let title, text;
+    if (net.cred_reverted && net.cred_reverted_why === 'auth_failed') {
+      title = pend + ' refused the new password';
+      text = 'The station is back on its previous credentials' + (net.ssid ? ' (' + net.ssid + ')' : '') + '. Try them again, or discard them.';
+    } else if (net.cred_reverted) {
+      title = 'No address with ' + what;
+      text = 'The station is back on its previous network (' + (net.ssid || 'unknown') + '). Try them again, or discard them.';
+    } else {
+      title = 'Not confirmed yet: ' + what;
+      text = 'They become the station\'s once they get an address. Try them again, or discard them.';
+    }
+    items.push(['warn', title, text, [btn('Try again', retryPendingWifi, 'small'), btn('Discard', discardPendingWifi, 'small')]]);
   }
   const j = rcv.journal;
   const inLoader = alerts.indexOf('receiver_in_loader') >= 0;

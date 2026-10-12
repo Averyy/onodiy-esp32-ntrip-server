@@ -20,9 +20,22 @@ menu "Station: network"
         help
             The station keeps retrying its configured network; after this long
             without a connection it additionally starts the setup AP (AP+STA)
-            so the user can fix the credentials. The AP stops again a minute
-            after the station has an IP (so the setup page can still show the
-            new address).
+            so the user can fix the credentials. The AP stops again
+            NETWORK_AP_LINGER_S after the station has an IP (so the setup page
+            can still show the new address).
+
+    config NETWORK_AP_LINGER_S
+        int "Seconds the setup AP stays up after the station got its IP"
+        range 10 120
+        default 15
+        help
+            An AP that is up for first setup or as the offline fallback stays
+            up this long once the station has an IP on its network, so the
+            setup page (on a phone still on the AP) can show the station's
+            new address and count down to the moment the AP closes. Then the
+            phone goes back to its own Wi-Fi and finds the station there.
+            Not used for the recovery AP (BOOT button), which has its own
+            lifetime.
 
     config NETWORK_RECOVERY_AP_S
         int "Recovery AP lifetime after a BOOT-button press (s)"

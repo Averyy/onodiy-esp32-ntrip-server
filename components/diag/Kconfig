@@ -28,10 +28,21 @@ menu "Station: diagnostics"
         default 4096
         help
             The serial console runs at 115200 baud (about 11.5 KB/s). A log
-            line goes to the console only when it fits in this buffer, so a
-            burst never stalls the task that logs; lines that do not fit are
-            counted as dropped (the log ring still has them) and the console
-            says how many before its output resumes.
+            line goes straight into this buffer only when nothing older waits
+            and the whole line fits, so a burst never stalls the task that
+            logs. Otherwise the line waits in the log ring and the console
+            task sends it as the buffer drains, in order. A line is lost only
+            when the log ring overwrote it before it was sent; the console
+            then says how many, on a line of its own.
+
+    config DIAG_CONSOLE_TASK_STACK
+        int "Console task stack (bytes, internal RAM)"
+        range 2048 8192
+        default 2560
+        help
+            The low-priority task that copies waiting log lines from the log
+            ring to the console. It formats one short note and calls the
+            UART driver; it never logs itself.
 
     config DIAG_JOURNAL_MIN_INTERVAL_MS
         int "Minimum interval between journal records of one kind (ms)"

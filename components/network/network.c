@@ -15,6 +15,8 @@
  *  - "netprobe": the upstream probe (name lookup + TCP connect), so a slow
  *    lookup never delays a reconnect.
  *  - "dns": the captive-portal responder, only while the AP is up.
+ *  - the mDNS component's own task (<hostname>.local, the _http service);
+ *    its rename callback only copies the new name for the net task to log.
  *
  * QEMU development build (CONFIG_NETWORK_QEMU_ETHERNET, sdkconfig.qemu):
  * Wi-Fi is never initialised or started. The emulated OpenCores Ethernet
@@ -49,6 +51,7 @@
 #include "lifecycle.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
+#include "mdns.h"
 #include "net_core.h"
 #include "net_ladder.h"
 #include "sdkconfig.h"
@@ -89,7 +92,15 @@ _Static_assert((int)NETWORK_LADDER_TRIG_PROTECTED == (int)NET_TRIG_P &&
                "ladder triggers match the core");
 _Static_assert(sizeof(((network_scan_entry_t *)0)->ssid) == sizeof(((net_scan_entry_t *)0)->ssid),
                "scan entries carry the same SSID size");
-_Static_assert(CONFIG_NETWORK_RECOVERY_AP_S > 0 && CONFIG_NETWORK_STA_FALLBACK_S > 0, "AP timings");
+_Static_assert(CONFIG_NETWORK_RECOVERY_AP_S > 0 && CONFIG_NETWORK_STA_FALLBACK_S > 0 && CONFIG_NETWORK_AP_LINGER_S > 0,
+               "AP timings");
+_Static_assert(WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT == NET_REASON_4WAY_HANDSHAKE_TIMEOUT &&
+                   WIFI_REASON_NO_AP_FOUND == NET_REASON_NO_AP_FOUND && WIFI_REASON_AUTH_FAIL == NET_REASON_AUTH_FAIL &&
+                   WIFI_REASON_HANDSHAKE_TIMEOUT == NET_REASON_HANDSHAKE_TIMEOUT &&
+                   WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY == NET_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY &&
+                   WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD == NET_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD,
+               "disconnect reasons of the credential trial match the core");
+_Static_assert(sizeof(((network_status_t *)0)->mdns_host) == 33, "mDNS host label as in the API");
 
 /* Tasks and queue. */
 #define NET_TASK_STACK    5120    /* settings writes when trial credentials are confirmed */
@@ -104,8 +115,8 @@ _Static_assert(CONFIG_NETWORK_RECOVERY_AP_S > 0 && CONFIG_NETWORK_STA_FALLBACK_S
 #define DNS_RECV_TIMEOUT_MS 500
 #define DNS_STOP_WAIT_MS  2000
 
-/* Behaviour (PROVISIONAL, to be confirmed on hardware). */
-#define AP_LINGER_S          60      /* AP stays this long after the station got its IP */
+/* Behaviour (PROVISIONAL, to be confirmed on hardware). The AP's linger
+ * after the station got its IP is CONFIG_NETWORK_AP_LINGER_S. */
 #define AP_MAX_CLIENTS       4
 #define APPLY_DELAY_MS       1000    /* new credentials: let the HTTP reply go out first */
 #define DISCONNECT_WAIT_MS   3000    /* deliberate disconnect: connect anyway if no event came */
@@ -201,6 +212,7 @@ static char s_pend_ssid[33];
 static char s_pend_pass[65];
 static bool s_pend_valid;
 static bool s_cred_reverted;
+static uint8_t s_cred_reverted_why;         /* network_cred_revert_t of s_cred_reverted */
 /* Credential writes to settings, from API calls and from the net task's
  * confirmation, one at a time (the RAM pairs stay under s_lock). */
 static SemaphoreHandle_t s_cred_mux;
@@ -273,6 +285,15 @@ static EventGroupHandle_t s_probe_events;
 /* Ladder (network_ladder_tick, under s_lock while deciding). */
 static net_ladder_t s_ladder;
 static uint8_t s_ladder_note;               /* last journalled skip/withhold: (rung << 4) | why */
+
+/* A planned restart is under way (lifecycle shutdown hook): our own Wi-Fi
+ * stop on the way down is not a link loss. */
+static volatile bool s_leaving;
+
+/* mDNS: the responder renamed itself after a conflict (set by its callback,
+ * logged by the net task), and the name the net task logged last. */
+static volatile bool s_mdns_renamed;
+static char s_mdns_logged[33];
 
 /* Survives software, panic and watchdog resets: when the last network-ladder
  * reboot was. Stamped with the image generation (lifecycle). */
@@ -801,6 +822,7 @@ static void wifi_stop(void)
     taskENTER_CRITICAL(&s_lock);
     s_st.associated = false;
     s_st.ap_reasons = 0;
+    s_st.ap_close_in_s = UINT32_MAX;
     taskEXIT_CRITICAL(&s_lock);
     ip_lost();
 }
@@ -1013,6 +1035,7 @@ static void ap_up(uint32_t reasons)
     }
     wifi_config_t cfg;
     build_ap_config(&cfg);
+    bool secured = cfg.ap.authmode != WIFI_AUTH_OPEN;
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err == ESP_OK) {
         err = esp_wifi_set_config(WIFI_IF_AP, &cfg);
@@ -1028,9 +1051,13 @@ static void ap_up(uint32_t reasons)
         return;
     }
     s_ap_reasons = reasons;
-    ESP_LOGW(TAG, "AP \"%s\" up (%s%s%s%s)", s_st.ap_ssid, (reasons & NET_AP_SETUP) ? "setup" : "",
-             (reasons & NET_AP_FALLBACK) ? " offline fallback" : "", (reasons & NET_AP_LINGER) ? " linger" : "",
-             (reasons & NET_AP_RECOVERY) ? " recovery" : "");
+    /* After Wi-Fi is up, outside its init burst. The password is never logged. */
+    const char *why = (reasons & NET_AP_RECOVERY)   ? "recovery"
+                      : (reasons & NET_AP_SETUP)    ? "setup"
+                      : (reasons & NET_AP_FALLBACK) ? "offline fallback"
+                                                    : "linger";
+    ESP_LOGW(TAG, "setup AP \"%s\" up (%s, %s), page at http://%u.%u.%u.%u/", s_st.ap_ssid, why,
+             secured ? "WPA2" : "open", s_ap_addr[0], s_ap_addr[1], s_ap_addr[2], s_ap_addr[3]);
 }
 
 static void ap_down(void)
@@ -1062,7 +1089,7 @@ static void apply_ap_policy(void)
         .ap_clients = ap_client_count(),
         .fallback_after_s = CONFIG_NETWORK_STA_FALLBACK_S,
         .recovery_lifetime_s = CONFIG_NETWORK_RECOVERY_AP_S,
-        .linger_s = AP_LINGER_S,
+        .linger_s = CONFIG_NETWORK_AP_LINGER_S,
     };
     bool expired = false;
     uint32_t want = net_ap_reasons(&in, &expired);
@@ -1081,10 +1108,13 @@ static void apply_ap_policy(void)
     if (s_recovery && in.recovery_age_s < CONFIG_NETWORK_RECOVERY_AP_S) {
         left = CONFIG_NETWORK_RECOVERY_AP_S - in.recovery_age_s;
     }
+    /* What the AP is up for now (s_ap_reasons stays 0 when it could not come up). */
+    uint32_t close_in = net_ap_close_in_s(&in, s_ap_reasons);
     taskENTER_CRITICAL(&s_lock);
     s_st.ap_reasons = (uint8_t)s_ap_reasons;
     s_st.ap_clients = (uint8_t)in.ap_clients;
     s_st.recovery_ap_left_s = left;
+    s_st.ap_close_in_s = close_in;
     taskEXIT_CRITICAL(&s_lock);
 }
 
@@ -1111,6 +1141,103 @@ static void flush_drop_record(void)
     if (err != ESP_ERR_INVALID_STATE) {
         s_drop_pending = false;   /* written, or the journal is unavailable: nothing to keep */
     }
+}
+
+/* ---- mDNS -------------------------------------------------------------------------------- */
+
+/* The name in use: the stored sys/hostname, else the build's default. */
+static const char *hostname_in_use(void)
+{
+    return s_hostname[0] != '\0' ? s_hostname : CONFIG_LWIP_LOCAL_HOSTNAME;
+}
+
+/* The responder renamed itself (a lost probe, or another host answering for
+ * our name): runs in the mDNS task while it holds its own lock, so it only
+ * copies the name and leaves the log line to the net task. A name too long
+ * for the status (a 31- or 32-character hostname with a "-N" suffix) is
+ * not shown: the UI then offers the IP address. */
+static void on_mdns_renamed(const char *hostname, void *arg)
+{
+    (void)arg;
+    bool fits = hostname != NULL && strlen(hostname) < sizeof(s_st.mdns_host);
+    taskENTER_CRITICAL(&s_lock);
+    strlcpy(s_st.mdns_host, fits ? hostname : "", sizeof(s_st.mdns_host));
+    taskEXIT_CRITICAL(&s_lock);
+    s_mdns_renamed = true;
+}
+
+/* Net task: say once that the name is taken (the renamed one is never stored:
+ * the next boot probes the configured name again). */
+static void mdns_note_rename(void)
+{
+    if (!s_mdns_renamed) {
+        return;
+    }
+    s_mdns_renamed = false;
+    char now[33];
+    taskENTER_CRITICAL(&s_lock);
+    strlcpy(now, s_st.mdns_host, sizeof(now));
+    taskEXIT_CRITICAL(&s_lock);
+    if (now[0] == '\0') {
+        ESP_LOGW(TAG, "mDNS: %s.local is taken on this network, and the name the station moved to is too long to "
+                      "show: open it by its IP address",
+                 s_mdns_logged);
+        return;
+    }
+    if (strcmp(now, s_mdns_logged) != 0) {
+        ESP_LOGW(TAG, "mDNS: %s.local is taken on this network: this station answers as %s.local", s_mdns_logged, now);
+        strlcpy(s_mdns_logged, now, sizeof(s_mdns_logged));
+    }
+}
+
+/* <hostname>.local and the web page as an _http._tcp service, on the
+ * station interface and the AP (the predefined interfaces of the component;
+ * in the QEMU build the emulated Ethernet port carries the station's key and
+ * events). Never fatal: without it the station is reached by its IP. */
+static void mdns_setup(void)
+{
+    const char *name = hostname_in_use();
+    strlcpy(s_mdns_logged, name, sizeof(s_mdns_logged));
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "mDNS not started (%s): the station is reached by its IP address only", esp_err_to_name(err));
+        return;
+    }
+    err = mdns_hostname_set(name);
+    if (err == ESP_OK) {
+        err = mdns_instance_name_set(name);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "mDNS name %s not set (%s): the station is reached by its IP address only", name,
+                 esp_err_to_name(err));
+        mdns_free();
+        return;
+    }
+    taskENTER_CRITICAL(&s_lock);
+    strlcpy(s_st.mdns_host, name, sizeof(s_st.mdns_host));
+    taskEXIT_CRITICAL(&s_lock);
+    mdns_txt_item_t txt[] = { { .key = "path", .value = "/" } };
+    err = mdns_service_add(NULL, "_http", "_tcp", 80, txt, sizeof(txt) / sizeof(txt[0]));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "mDNS: web page not advertised (%s); %s.local still answers", esp_err_to_name(err), name);
+    }
+    err = mdns_register_hostname_changed_callback(on_mdns_renamed, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "mDNS: renames after a name conflict are not followed (%s)", esp_err_to_name(err));
+    }
+    ESP_LOGI(TAG, "mDNS: answering as %s.local (web page on port 80)", name);
+}
+
+/* ---- planned restart ------------------------------------------------------------------- */
+
+/* Lifecycle shutdown hook (after the ledger's and the casters'): from here on
+ * the Wi-Fi stop on the way down is ours, not a link loss. */
+static void on_shutdown(lifecycle_reboot_reason_t reason, uint32_t deadline_ms, void *ctx)
+{
+    (void)reason;
+    (void)deadline_ms;
+    (void)ctx;
+    s_leaving = true;
 }
 
 /* ---- message handling ---------------------------------------------------------------- */
@@ -1156,6 +1283,8 @@ static void handle_scan_done(void)
     post_event(NETWORK_EVENT_SCAN_DONE);
 }
 
+static void trial_revert(network_cred_revert_t why);
+
 static void handle_disconnected(uint8_t reason, int8_t rssi)
 {
     bool was_linked = s_associated;
@@ -1166,6 +1295,13 @@ static void handle_disconnected(uint8_t reason, int8_t rssi)
     s_st.last_disconnect_reason = reason;
     taskEXIT_CRITICAL(&s_lock);
     ip_lost();   /* IDF's default handler has already cleared the address */
+
+    if (s_leaving) {
+        /* Our own Wi-Fi stop on the way to a planned restart: the journal's
+         * restart record covers it, and nothing reconnects any more. */
+        s_sta_state = STA_IDLE;
+        return;
+    }
 
     if (s_sta_state == STA_DISCONNECTING) {
         connect_now();   /* deliberate: no backoff */
@@ -1193,6 +1329,11 @@ static void handle_disconnected(uint8_t reason, int8_t rssi)
         flush_drop_record();
     }
     schedule_retry();
+    /* A network that refuses the new password ends their trial now, not
+     * after its 90 s (apply_credentials connects again at once). */
+    if (net_cred_trial_disconnect(&s_trial, reason) == NET_TRIAL_REVERT_AUTH) {
+        trial_revert(NETWORK_CRED_REVERT_AUTH);
+    }
 }
 
 /* ---- credentials on trial ------------------------------------------------------------- */
@@ -1241,6 +1382,7 @@ static void trial_confirmed(void)
             s_pend_ssid[0] = '\0';
             s_pend_valid = false;
             s_cred_reverted = false;
+            s_cred_reverted_why = NETWORK_CRED_REVERT_NONE;
         }
     }
     bool other_pending = s_pend_valid;
@@ -1263,8 +1405,9 @@ static void trial_confirmed(void)
     xSemaphoreGive(s_cred_mux);
 }
 
-/* No IP in time with the pending credentials: back to the stored ones. */
-static void trial_revert(void)
+/* No IP in time with the pending credentials, or the network refused them:
+ * back to the stored ones. */
+static void trial_revert(network_cred_revert_t why)
 {
     taskENTER_CRITICAL(&s_lock);
     bool newer = s_new_pending;
@@ -1272,9 +1415,15 @@ static void trial_revert(void)
     if (newer) {
         return;   /* a newer change replaces this trial within a second */
     }
+    bool refused = (why == NETWORK_CRED_REVERT_AUTH);
     if (!s_trial_revert_ok) {
-        ESP_LOGW(TAG, "Wi-Fi credentials for \"%s\" got no IP in %u s; no previous credentials, still trying",
-                 s_ssid, (unsigned)NET_CRED_TRIAL_S);
+        if (refused) {
+            ESP_LOGW(TAG, "\"%s\" refused the Wi-Fi password %u times in a row; no previous credentials, still trying",
+                     s_ssid, (unsigned)NET_CRED_TRIAL_REFUSALS);
+        } else {
+            ESP_LOGW(TAG, "Wi-Fi credentials for \"%s\" got no IP in %u s; no previous credentials, still trying",
+                     s_ssid, (unsigned)NET_CRED_TRIAL_S);
+        }
         return;
     }
     char tried[33];
@@ -1283,9 +1432,16 @@ static void trial_revert(void)
     strlcpy(s_ssid, s_act_ssid, sizeof(s_ssid));
     strlcpy(s_pass, s_act_pass, sizeof(s_pass));
     s_cred_reverted = true;
+    s_cred_reverted_why = (uint8_t)why;
     taskEXIT_CRITICAL(&s_lock);
-    ESP_LOGW(TAG, "Wi-Fi credentials for \"%s\" got no IP in %u s: back to \"%s\" (the new ones stay pending)",
-             tried, (unsigned)NET_CRED_TRIAL_S, s_ssid);
+    if (refused) {
+        ESP_LOGW(TAG, "\"%s\" refused the new Wi-Fi password (%u attempts in a row): back to \"%s\" (the new "
+                      "credentials stay pending)",
+                 tried, (unsigned)NET_CRED_TRIAL_REFUSALS, s_ssid);
+    } else {
+        ESP_LOGW(TAG, "Wi-Fi credentials for \"%s\" got no IP in %u s: back to \"%s\" (the new ones stay pending)",
+                 tried, (unsigned)NET_CRED_TRIAL_S, s_ssid);
+    }
     apply_credentials();
 }
 
@@ -1528,6 +1684,7 @@ static void handle_msg(const net_msg_t *m)
         }
         if (s_trial.on) {
             s_trial_assoc = true;   /* a link the trial credentials made */
+            net_cred_trial_associated(&s_trial);
         }
         if (s_had_link) {
             taskENTER_CRITICAL(&s_lock);
@@ -1680,6 +1837,7 @@ static void housekeeping(void)
         trial = s_new_trial;
         if (trial) {
             s_cred_reverted = false;   /* a new trial: an earlier revert no longer applies */
+            s_cred_reverted_why = NETWORK_CRED_REVERT_NONE;
         }
         s_trial_revert_ok = net_ssid_valid(s_act_ssid);
         apply = true;
@@ -1762,8 +1920,9 @@ static void housekeeping(void)
     flush_drop_record();
     flush_up_record();
     if (net_cred_trial_tick(&s_trial, false, now) == NET_TRIAL_REVERT) {
-        trial_revert();
+        trial_revert(NETWORK_CRED_REVERT_NO_IP);
     }
+    mdns_note_rename();
 
     uint32_t retry_in = 0;
     if (s_sta_state == STA_WAIT_RETRY && s_retry_at_us > now_us) {
@@ -1778,6 +1937,7 @@ static void housekeeping(void)
     s_st.cred_pending = s_pend_valid;
     strlcpy(s_st.pending_ssid, s_pend_valid ? s_pend_ssid : "", sizeof(s_st.pending_ssid));
     s_st.cred_reverted = s_cred_reverted && s_pend_valid;
+    s_st.cred_reverted_why = s_st.cred_reverted ? s_cred_reverted_why : (uint8_t)NETWORK_CRED_REVERT_NONE;
     taskEXIT_CRITICAL(&s_lock);
 }
 
@@ -1876,6 +2036,7 @@ esp_err_t network_init(void)
     account_boot();
     taskENTER_CRITICAL(&s_lock);
     s_st.probe_age_s = UINT32_MAX;
+    s_st.ap_close_in_s = UINT32_MAX;
     taskEXIT_CRITICAL(&s_lock);
 
     s_queue = xQueueCreate(NET_QUEUE_LEN, sizeof(net_msg_t));
@@ -1922,6 +2083,7 @@ esp_err_t network_init(void)
     }
 #endif
     setup_ap_name();
+    mdns_setup();
 
     err = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event, NULL, NULL);
     if (err == ESP_OK) {
@@ -1946,6 +2108,11 @@ esp_err_t network_init(void)
         return ESP_ERR_NO_MEM;
     }
     net_ladder_init(&s_ladder);
+    esp_err_t herr = lifecycle_register_shutdown_hook(on_shutdown, NULL);
+    if (herr != ESP_OK) {
+        ESP_LOGW(TAG, "no shutdown hook (%s): a planned restart journals its own Wi-Fi stop as a drop",
+                 esp_err_to_name(herr));
+    }
     s_inited = true;
     ESP_LOGI(TAG, "init: AP name \"%s\", country %s", s_st.ap_ssid, CONFIG_NETWORK_WIFI_COUNTRY);
     return ESP_OK;
@@ -2052,6 +2219,7 @@ esp_err_t network_set_credentials(const char *ssid, const char *password)
         s_pend_valid = false;
     }
     s_cred_reverted = false;
+    s_cred_reverted_why = NETWORK_CRED_REVERT_NONE;
     if (plan != NET_CRED_PLAN_STORE_ONLY) {
         queue_apply_locked(ssid, password, plan == NET_CRED_PLAN_TRIAL);
     }
@@ -2073,6 +2241,7 @@ esp_err_t network_retry_pending_credentials(void)
     bool pend = s_pend_valid;
     if (pend) {
         s_cred_reverted = false;
+        s_cred_reverted_why = NETWORK_CRED_REVERT_NONE;
         queue_apply_locked(s_pend_ssid, s_pend_pass, true);
     }
     taskEXIT_CRITICAL(&s_lock);
@@ -2105,6 +2274,7 @@ esp_err_t network_discard_pending_credentials(void)
     s_pend_ssid[0] = '\0';
     s_pend_valid = false;
     s_cred_reverted = false;
+    s_cred_reverted_why = NETWORK_CRED_REVERT_NONE;
     if (on_trial && net_ssid_valid(s_act_ssid)) {
         queue_apply_locked(s_act_ssid, s_act_pass, false);   /* back to the station's credentials */
     } else if (s_new_pending && s_new_trial) {

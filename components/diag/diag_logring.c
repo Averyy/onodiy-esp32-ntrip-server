@@ -118,6 +118,7 @@ void logring_attach(logring_t *r, void *mem, size_t mem_size, logring_sync_fn sy
     r->bank = 0;
     memset(r->image, 0, sizeof(r->image));
     r->seek_steps = 0;
+    r->dropped_text = 0;
     hints_clear(r);
 }
 
@@ -199,6 +200,7 @@ void logring_format(logring_t *r, uint32_t boot_id, uint32_t first_seq)
     memcpy(h->image, r->image, sizeof(h->image));
     seal(r);
     hints_clear(r);
+    r->dropped_text = 0;
 }
 
 void logring_stamp(logring_t *r, uint32_t gen)
@@ -237,6 +239,7 @@ uint32_t logring_append(logring_t *r, const char *text, size_t len)
             h->used -= size;
             h->first_seq++;
             h->lost++;
+            r->dropped_text += size - LOGRING_REC_HDR;
         }
         seal(r);
     }

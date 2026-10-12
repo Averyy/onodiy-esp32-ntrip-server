@@ -53,6 +53,25 @@ bool web_parse_password(const cJSON *root, const char *key, const char **out, we
 /** {"confirm": true}. */
 bool web_parse_confirm(const cJSON *root, web_bad_t *bad);
 
+/** The setup wizard's steps after the password, as stored in sys/setup_step (0 = none). */
+typedef enum {
+    WEB_SETUP_STEP_NONE = 0,
+    WEB_SETUP_STEP_WIFI = 1,
+    WEB_SETUP_STEP_RECEPTION = 2,
+    WEB_SETUP_STEP_ONOCOY = 3,
+    WEB_SETUP_STEP_CASTERS = 4,
+} web_setup_step_t;
+
+/** API name of a stored step ("wifi", ...); NULL for none or a value out of range. */
+const char *web_setup_step_name(uint8_t step);
+
+/**
+ * POST /api/setup/step: {"step": "wifi" | "reception" | "onocoy" |
+ * "casters"}. Anything else (also "done": that is POST /api/setup/done) is
+ * invalid_field "step".
+ */
+bool web_parse_setup_step(const cJSON *root, uint8_t *step, web_bad_t *bad);
+
 /* ---- receiver --------------------------------------------------------------------------- */
 
 /** Ephemeris RTCM types that need a COM1 rate of at least 460800. */

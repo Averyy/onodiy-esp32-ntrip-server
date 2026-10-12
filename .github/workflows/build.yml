@@ -21,8 +21,13 @@ concurrency:
 # built 2026-08-26, by its multi-platform index (linux/amd64 and linux/arm64). To move
 # to a newer image: docker pull espressif/idf:<tag>, then
 #   docker image inspect espressif/idf:<tag> --format '{{index .RepoDigests 0}}'
-# and use that digest in every job that runs in it (firmware, host-tests,
-# qemu-smoke).
+# and use that digest in every job that runs in it (firmware, firmware-bench,
+# host-tests, qemu-smoke).
+#
+# Jobs: firmware (the station image, uploaded), firmware-bench (the
+# sdkconfig.bench overlay built and checked like the station image, so code
+# that only bench builds compile cannot rot; nothing uploaded), host-tests,
+# bench-tools (pytest), qemu-smoke, and release (tags only).
 # The actions are still referenced by version tag; pin each to a full commit
 # SHA (with the tag as a comment) before the repository goes public.
 
@@ -100,6 +105,41 @@ jobs:
             build/flasher_args.json
             build/config/sdkconfig.json
             THIRD_PARTY_NOTICES.md
+
+  # The bench overlay (sdkconfig.bench: receiver flasher and bench console
+  # on) compiles code the station image leaves out. Built with the same
+  # Kconfig check and -Werror on our components; nothing is uploaded, and the
+  # release job does not depend on it (a bench build is never released).
+  firmware-bench:
+    name: Firmware, bench overlay (esp32s3)
+    runs-on: ubuntu-24.04
+    container: espressif/idf@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c  # v6.1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # git describe names the build
+
+      - name: Build (bench overlay)
+        shell: bash
+        run: |
+          set -o pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
+          idf.py -B build-bench -D SDKCONFIG=build-bench/sdkconfig \
+            -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.bench" set-target esp32s3 2>&1 | tee set-target-bench.log
+          idf.py -B build-bench -D SDKCONFIG=build-bench/sdkconfig \
+            -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.bench" build 2>&1 | tee build-bench.log
+          if grep -E "unknown kconfig symbol|but is not visible" set-target-bench.log build-bench.log; then
+            echo "::error::sdkconfig.defaults or sdkconfig.bench sets a symbol this IDF version does not know or ignores"
+            exit 1
+          fi
+          # The overlay was really applied: both bench options are on.
+          for opt in CONFIG_BENCH_CONSOLE CONFIG_UM98X_FLASH_ENABLE; do
+            if ! grep -q "^$opt=y" build-bench/sdkconfig; then
+              echo "::error::$opt is not on in build-bench/sdkconfig: the sdkconfig.bench overlay was not applied"
+              exit 1
+            fi
+          done
 
   host-tests:
     name: Host unit tests (linux target)

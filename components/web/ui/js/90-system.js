@@ -13,6 +13,19 @@ function hostnameProblem(v) {
   return null;
 }
 
+/* AP password: 8-63 printable ASCII characters (WPA2 passphrase, the station's rule). */
+function apPasswordProblem(v) {
+  if (/^[\x20-\x7e]{8,63}$/.test(v)) return null;
+  if (v.length < 8 || v.length > 63) return '8 to 63 characters.';
+  return 'Only plain ASCII: letters, digits, spaces and the usual symbols (no accented letters or emoji).';
+}
+
+/* "the new password for Home" when only the password changes, else "the new credentials for Cafe". */
+function newCredsText(w, ssid) {
+  const p = w.pending_ssid || 'the new network';
+  return ssid && p === ssid ? 'the new password for ' + p : 'the new credentials for ' + p;
+}
+
 function wifiStatus(w) {
   const ap = w.ap || {};
   return [
@@ -20,7 +33,7 @@ function wifiStatus(w) {
       ['Network', w.configured ? w.ssid : 'Not set up'],
       w.credentials_unreadable ? ['Stored credentials', h('span', { class: 't-bad' }, 'Unreadable')] : null,
       ['Connection', w.online ? 'Online' : w.associated ? 'Connected, no IP address yet' : 'Not connected'],
-      w.online ? ['Address', w.ip] : ['Offline for', fmt.dur(w.offline_s)],
+      ...(w.online ? stationAddressRows(w) : [['Offline for', fmt.dur(w.offline_s)]]),
       w.associated ? ['Signal', rssiView(w.rssi)] : null,
       w.associated ? ['Channel', String(w.channel)] : null,
       ['Internet', lbl(L.upstream, w.upstream) + (w.probe_age_s !== null && w.probe_age_s !== undefined ? ' (checked ' + fmt.dur(w.probe_age_s) + ' ago)' : '')],
@@ -35,9 +48,12 @@ function wifiStatus(w) {
     h('h3', { class: 'section-title' }, 'Station access point'),
     kv([
       ['State', ap.active ? 'On (' + (ap.reasons || []).map(r => lbl(L.apReason, r)).join(', ') + ')' : 'Off'],
-      ['Name', ap.ssid],
+      ['Network name', ap.ssid],
+      ap.active ? ['Page on it', h('a', { href: 'http://192.168.4.1/' }, 'http://192.168.4.1/')] : null,
+      ap.active && w.mdns_host ? ['Name on it', h('a', { href: 'http://' + w.mdns_host + '.local/' }, 'http://' + w.mdns_host + '.local/')] : null,
       ap.active ? ['Connected devices', fmt.num(ap.clients)] : null,
-      ap.recovery_left_s ? ['Recovery closes in', fmt.dur(ap.recovery_left_s)] : null,
+      ap.active && typeof ap.close_in_s === 'number' ? ['Closes in', fmt.dur(ap.close_in_s)] : null,
+      ap.recovery_left_s && typeof ap.close_in_s !== 'number' ? ['Recovery closes in', fmt.dur(ap.recovery_left_s)] : null,
       ['Password', ap.password_set ? 'Set' : 'None (open)'],
     ]),
   ];
@@ -61,9 +77,10 @@ Views.system = {
     const joinBox = h('div');
     const pendingBox = h('div');
     let pendingKey = '';
+    let joinPrev = '';   /* the network before a change made on this page */
     /* New credentials on trial or pending: rebuilt only when that changes, so its buttons stay put. */
     const showPending = w => {
-      const key = [w.cred_trial, w.cred_pending, w.cred_reverted, w.pending_ssid, w.ssid].join('|');
+      const key = [w.cred_trial, w.cred_pending, w.cred_reverted, w.cred_reverted_why, w.pending_ssid, w.ssid].join('|');
       if (key === pendingKey) {
         const left = pendingBox.querySelector('.trial-left');
         if (left) left.textContent = fmt.dur(w.cred_trial_left_s);
@@ -71,9 +88,10 @@ Views.system = {
       }
       pendingKey = key;
       if (w.cred_trial) {
-        mount(pendingBox, msg('info', h('strong', null, 'Trying ' + (w.pending_ssid || 'the new network') + '. '),
-          'If it gets no address within ', h('span', { class: 'trial-left' }, fmt.dur(w.cred_trial_left_s)),
-          ', the station goes back to its previous network and keeps the new credentials as pending.'));
+        /* No buttons while a trial runs: it ends by itself, either way. */
+        mount(pendingBox, msg('info', h('strong', null, 'Trying ' + newCredsText(w, joinPrev) + ': '),
+          h('span', { class: 'trial-left' }, fmt.dur(w.cred_trial_left_s)), ' left. Without an address there the station goes back to its previous network ' +
+          'and keeps the new credentials as pending.'));
       } else if (w.cred_pending) {
         const retry = btn('Try again', async e => {
           if (await retryPendingWifi(e)) load().catch(() => {});
@@ -81,10 +99,17 @@ Views.system = {
         const discard = btn('Discard', async e => {
           if (await discardPendingWifi(e)) load().catch(() => {});
         }, 'small');
-        mount(pendingBox, msg('warn', h('strong', null, 'Pending credentials for ' + (w.pending_ssid || 'a network') + ' not confirmed. '),
-          w.cred_reverted ? 'They got no address within 90 seconds: the station is back on the previous network (' + (w.ssid || 'unknown') + ').' :
-            'They are tried first at the next start.',
-          h('div', { class: 'form-actions' }, retry, discard)));
+        let text;
+        if (w.cred_reverted && w.cred_reverted_why === 'auth_failed') {
+          text = [h('strong', null, (w.pending_ssid || 'The network') + ' refused the new password: '), 'the station is back on its previous credentials' +
+            (w.ssid ? ' (' + w.ssid + ')' : '') + '. The new ones stay pending.'];
+        } else if (w.cred_reverted) {
+          text = [h('strong', null, 'No address with ' + newCredsText(w, w.ssid) + ' within 90 seconds: '), 'the station is back on its previous network (' +
+            (w.ssid || 'unknown') + '). The new credentials stay pending.'];
+        } else {
+          text = [h('strong', null, 'Not confirmed yet: ' + newCredsText(w, w.ssid) + '. '), 'They become the station\'s once they get an address.'];
+        }
+        mount(pendingBox, msg('warn', text, h('div', { class: 'form-actions' }, retry, discard)));
       } else {
         clear(pendingBox);
       }
@@ -115,6 +140,8 @@ Views.system = {
         const r = await act(go, () => api('PUT', '/api/wifi', v), err);
         if (r === undefined) return;
         dirty = false;
+        joinPrev = wifi.ssid || '';
+        pendingKey = '';
         watchJoin(v.ssid, r.persisted !== false, r.trial === true, wifi.ssid);
       } }, picker.el, err, h('div', { class: 'form-actions' }, go, btn('Cancel', () => {
         dirty = false;
@@ -128,7 +155,8 @@ Views.system = {
       const status = h('div', { class: 'stack' });
       mount(joinBox, h('div', { class: 'foot' }, status));
       const show = (...kids) => mount(status, kids);
-      show(msg('info', 'Joining ' + ssid + '…' + (trial ? ' The station tries it for up to 90 seconds; without an address there it goes back to ' +
+      show(msg('info', (ssid === prev ? 'Trying the new password for ' + ssid + '…' : 'Joining ' + ssid + '…') +
+        (trial ? ' The station tries it for up to 90 seconds; without an address there it goes back to ' +
         (prev || 'the current network') + ' by itself, so this page may lose contact for that long.' : '')),
       persisted ? null : msg('warn', 'Settings storage unavailable: this network is used until the next restart only.'));
       if (stopJoin) stopJoin();
@@ -138,8 +166,12 @@ Views.system = {
         try {
           w = await api('GET', '/api/wifi', undefined, { timeout: 3000 });
         } catch (e) {
-          if (secs > 5) show(msg('warn', 'This page lost contact with the station. If it moved to another network, open it there: ' +
-            'its address is in that router\'s device list, named ' + ((sys && sys.hostname_active) || 'onocoydiy') + '.'));
+          if (secs > 5) {
+            const name = 'http://' + ((wifi && wifi.mdns_host) || (sys && sys.hostname_active) || 'onocoydiy') + '.local/';
+            show(msg('warn', 'This page lost contact with the station. If it moved to another network, open it there: ',
+              h('a', { href: name }, name), ', or find its address in that router\'s device list (named ' +
+              ((sys && sys.hostname_active) || 'onocoydiy') + ').'));
+          }
           return;
         }
         wifi = w;
@@ -147,8 +179,9 @@ Views.system = {
         if (trial && w.cred_reverted && w.pending_ssid === ssid && !w.cred_trial) {
           stopJoin();
           stopJoin = null;
-          show(msg('warn', 'No address on ' + ssid + ' within 90 seconds: the station is back on ' + (w.ssid || 'the previous network') +
-            '. The new credentials are kept as pending; try them again or discard them above.'));
+          show(msg('warn', (w.cred_reverted_why === 'auth_failed' ? ssid + ' refused the new password: the station is back on its previous credentials.' :
+            'No address on ' + ssid + ' within 90 seconds: the station is back on ' + (w.ssid || 'the previous network') + '.') +
+            ' The new credentials are kept as pending; try them again or discard them above.'));
           changeBtn.hidden = false;
           return;
         }
@@ -156,8 +189,8 @@ Views.system = {
           stopJoin();
           stopJoin = null;
           const moved = w.ip && location.hostname !== w.ip && /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname);
-          show(msg('ok', 'Connected to ' + ssid + ' with address ' + w.ip + '.'),
-            moved ? h('p', null, 'The station has a new address: ', h('a', { href: 'http://' + w.ip + '/' }, 'http://' + w.ip + '/')) : null);
+          show(msg('ok', 'Connected to ' + ssid + '.'), kv(stationAddressRows(w)),
+            moved ? h('p', null, 'The station has a new address: open it above.') : null);
           changeBtn.hidden = false;
         } else if (secs > 45 && !w.cred_trial) {
           show(msg('warn', 'Not connected to ' + ssid + ' yet. Last error: ' + wifiReason(w.last_disconnect_reason) + '. The station keeps trying.'));
@@ -168,14 +201,15 @@ Views.system = {
 
     const apPw = pwInput({ maxlength: 63, autocomplete: 'new-password' });
     const apErr = errBox();
-    const apField = field('Access point password', apPw, '8 to 63 characters. Takes effect the next time the access point comes up.');
+    const apField = field('Access point password', apPw, '8 to 63 characters (plain ASCII). Takes effect the next time the access point comes up.');
     /* Only the AP password: the station keeps its Wi-Fi connection. */
     const apBody = () => ({ ap_password: apPw.value });
     const apSet = btn('Set password', async () => {
       apField.error(null);
       const v = apPw.value;
-      if (v.length < 8 || v.length > 63 || hasControl(v)) {
-        apField.error('8 to 63 characters.');
+      const problem = apPasswordProblem(v);
+      if (problem) {
+        apField.error(problem);
         return;
       }
       const r = await act(apSet, () => api('PUT', '/api/wifi', apBody()), apErr);
@@ -214,7 +248,10 @@ Views.system = {
     /* ---- Device ---- */
     function renderDevice() {
       const name = textInput(sys.hostname, { maxlength: 32 });
-      const fName = field('Station name', name, 'Letters, digits and "-". The name the station gives your router (DHCP) and the Onocoy dashboard label default.');
+      const active = (wifi && wifi.mdns_host) || sys.hostname_active || sys.hostname;
+      const ipUrl = wifi && wifi.online && wifi.ip ? 'http://' + wifi.ip + '/' : null;
+      const fName = field('Station name', name, 'Letters, digits and "-". Other devices on your network open http://' + active + '.local/' +
+        (ipUrl ? ' (or ' + ipUrl + ')' : '') + '. It is also the name the station gives your router (DHCP) and the Onocoy dashboard label default.');
       const pub = checkbox('Public status page', sys.public_status,
         'Anyone on your network can see the station state, caster names and states, signals and the sky view without logging in. ' +
         'Never shown: hosts, mountpoints, users, addresses, versions or the antenna position.');
@@ -222,7 +259,8 @@ Views.system = {
       const save = h('button', { type: 'submit', class: 'btn primary' }, 'Save');
       mount(deviceCard,
         h('h2', null, 'Station'),
-        sys.hostname_active && sys.hostname_active !== sys.hostname ? msg('info', 'Now named ' + sys.hostname_active + ' on the network; ' + sys.hostname + ' takes over at the next restart.') : null,
+        sys.hostname_active && sys.hostname_active !== sys.hostname ? msg('info', 'Reachable as http://' + active + '.local/ until the next restart, then http://' +
+          sys.hostname + '.local/.') : null,
         h('form', { class: 'stack', oninput: () => {
           dirty = true;
         }, onsubmit: async e => {
@@ -272,7 +310,7 @@ Views.system = {
           cur.value = nw.value = rep.value = '';
           toast('Password changed. Other open sessions were logged out.', 'ok');
         } }, f1.el, f2.el, f3.el, err, h('div', { class: 'form-actions' }, save)),
-        h('p', { class: 'muted small foot' }, RECOVERY_HINT));
+        h('p', { class: 'muted small foot' }, recoveryHint()));
     }
 
     /* ---- About, appearance ---- */

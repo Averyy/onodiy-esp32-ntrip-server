@@ -101,14 +101,17 @@ refused receiver maintenance (`receiver_session`, `live_view_output`).
 Applied to every request before any handler runs.
 
 1. **Host.** The `Host` header (port ignored) must be the station's current
-   IPv4 address, the AP address (`192.168.4.1`), the hostname in use,
-   `<hostname>.local`, or `<hostname>.` followed by one of `lan`, `home`,
-   `home.arpa`, `localdomain`, `internal` (names compared without case):
-   only suffixes that never resolve in public DNS, so a router domain that
-   is a public zone (such as `fritz.box`) is not accepted; use the IP
-   address or `<hostname>.local` there. Anything else on the
-   station interface gets `421 bad_host` (DNS rebinding). On the AP
-   interface a foreign Host is the captive portal instead (section 16).
+   IPv4 address, the AP address (`192.168.4.1`), `<mdns_host>.local` (the
+   name the mDNS responder answers, section 5: the hostname, or
+   `<hostname>-2` after a name conflict; only while the responder runs),
+   the hostname in use, or `<hostname>.` followed by one of `lan`, `home`,
+   `home.arpa`, `localdomain`, `internal` (the DHCP name with a search
+   domain; names compared without case): only suffixes that never resolve
+   in public DNS, so a router domain that is a public zone (such as
+   `fritz.box`) is not accepted; use the IP address or the `.local` name
+   there. Anything else on the station interface gets `421 bad_host` (DNS
+   rebinding). On the AP interface a foreign Host is the captive portal
+   instead (section 16).
 2. **Origin.** On every `POST`, `PUT`, `DELETE` and WebSocket handshake that
    carries an `Origin` header, its host must equal the request's `Host` and
    its scheme must be `http`; otherwise `403 forbidden`.
@@ -237,6 +240,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | DELETE | `/api/session` | adm | Log out | web |
 | POST | `/api/setup/admin` | claim | Set the first admin password, log in | web, settings |
 | POST | `/api/setup/done` | adm | Mark first setup finished | settings `sys/setup_done` |
+| POST | `/api/setup/step` | adm | Keep the setup wizard's next step | settings `sys/setup_step` |
 | PUT | `/api/admin-password` | adm | Change the password | web, settings |
 | GET | `/api/status` | pub\*/adm | Dashboard summary and update banner | all `*_get_status` |
 | GET | `/ws` | pub\*/adm | Live status, events, progress, log | section 7 |
@@ -297,14 +301,26 @@ status is on, **adm** = admin session, **claim** = section 3.
 ### `GET /api/session` (pub)
 
 ```json
-{"api": 1, "authenticated": true, "admin_set": true, "setup_done": true,
+{"api": 1, "authenticated": true, "admin_set": true, "setup_done": false,
  "claim_allowed": false, "on_setup_ap": false, "public_status": false,
- "settings_available": true, "idle_left_s": 1740}
+ "settings_available": true, "idle_left_s": 1740,
+ "hostname": "onocoydiy", "mdns_host": "onocoydiy", "ap_ssid": "onocoydiy-1A2B",
+ "setup_step": "reception"}
 ```
 
 `claim_allowed` = no admin password stored and this request came over the
 AP. `idle_left_s` is `null` without a session. The UI starts here: claim
 form, login form, setup wizard or dashboard.
+
+| Field | Notes |
+|---|---|
+| `hostname` | the station name in use (status `device.hostname`); the login page shows it |
+| `mdns_host` | the host label the mDNS responder answers, without `.local`: the hostname, or `<hostname>-2` (then `-3`, ...) after the responder renamed itself because another device answered the name; `null` while the responder does not run. The renamed label is never stored: the next boot probes the hostname again |
+| `ap_ssid` | the station's own access point name (`onocoydiy-XXXX`), `null` before Wi-Fi is set up |
+| `setup_step` | the setup wizard's next step as the station keeps it (`POST /api/setup/step`): `wifi`, `reception`, `onocoy`, `casters`; `null` without a session, once setup is done, or when none is stored |
+
+The names are no new disclosure: DHCP, mDNS and the access point's beacon
+carry them anyway.
 
 ### `POST /api/session` (pub)
 
@@ -326,7 +342,20 @@ plus `Set-Cookie`. Errors: `400 invalid_field` (`password`),
 
 ### `POST /api/setup/done` (adm)
 
-Empty body. Writes `sys/setup_done = 1`. `200 {"setup_done": true}`.
+Empty body. Writes `sys/setup_done = 1` and erases `sys/setup_step`.
+`200 {"setup_done": true}`.
+
+### `POST /api/setup/step` (adm)
+
+Request `{"step": "wifi" | "reception" | "onocoy" | "casters"}`: the step
+the wizard shows next, kept in `sys/setup_step` (u8: 1 `wifi`, 2
+`reception`, 3 `onocoy`, 4 `casters`; 0 or missing = none; user
+configuration, so a factory reset erases it). The wizard posts it before it
+shows that step, so a setup that moves from the setup network to the home
+network (or a reload, or a new login) continues there.
+`200 {"setup_step": "onocoy"}`. Errors: `400 invalid_field` (`step`; also
+for `"done"`, which is `POST /api/setup/done`), `409 settings_unavailable`
+(the UI then keeps the order in memory).
 
 ### `PUT /api/admin-password` (adm)
 
@@ -352,10 +381,11 @@ object as sections (section 7), so the UI keeps one model. Admin form:
              "time_unix": 1760090000, "time_source": "gnss", "settings_available": true},
   "safe_mode": {"active": false, "retry_in_s": null, "crashes": 0},
   "network": {"online": true, "ssid": "Home", "ip": "192.168.1.50", "rssi": -61,
-              "upstream": "ok", "offline_s": 0, "ap_active": false, "ap_reasons": [],
+              "upstream": "ok", "probe_age_s": 120, "offline_s": 0, "ap_active": false, "ap_reasons": [],
+              "ap_close_in_s": null, "mdns_host": "onocoydiy",
               "assoc_no_ip_s": 0, "ladder_triggers": [],
               "cred_trial": false, "cred_trial_left_s": 0, "cred_pending": false, "pending_ssid": null,
-              "cred_reverted": false},
+              "cred_reverted": false, "cred_reverted_why": null},
   "receiver": {"state": "streaming", "model": "UM982", "firmware": "R4.10Build18975",
                "responding": true, "identity_confirmed": true, "profile_applied": true,
                "position_locked": true, "surveying": false, "survey_window_left_s": 0,
@@ -369,7 +399,8 @@ object as sections (section 7), so the UI keeps one model. Admin form:
      "bytes_sent": 74000000, "lag_ms_now": 40, "next_retry_s": 0, "unreached_s": 0, "hint": ""}
   ],
   "health": {"level": "degraded", "last_step": "none", "ladder_suspended": false,
-             "factory_reset_refused": false, "recovery_mode": "full", "reboot_recheck": false},
+             "factory_reset_refused": false, "recovery_mode": "full", "reboot_recheck": false,
+             "reboot_hold": [], "reboot_hold_left_s": null, "reboot_cap_wait_s": null},
   "alerts": [{"id": "link_loss", "source": "health"}],
   "availability": {"protected_down_today_s": 4, "budget_left_s": 469},
   "update": {"app_available": true, "app_version": "v0.4.0",
@@ -386,9 +417,12 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `device.time_source` | `ledger_clock_source()`: `gnss`, `sntp` or `none` (then `time_unix` is `null`) |
 | `safe_mode` | `lifecycle_get_boot_info()`: `retry_in_s` until the automatic normal-boot retry |
 | `network.upstream` | last probe: `none`, `ok`, `no_ip`, `dns_failed`, `no_upstream` |
+| `network.probe_age_s` | since that probe, in whole minutes (so the section changes at most once a minute; `/api/wifi` has the exact age); `null` = never |
+| `network.mdns_host` | as in `GET /api/session`: the station answers `http://<mdns_host>.local/` on the home network and on its own access point; `null` while the responder does not run |
+| `network.ap_close_in_s` | seconds until the station closes its access point, as `ap.close_in_s` in `/api/wifi` (section 11) |
 | `network.assoc_no_ip_s` | associated with the access point without an IP for this long (0 = not associated, or it has an IP) |
 | `network.ladder_triggers` | network ladder triggers holding (`network_ladder_trigger_t`): `protected` (the protected caster down while RTCM is healthy), `assoc_no_ip` (associated 60 s without an IP), `unreached` (a slot not reaching its caster for 180 s) |
-| `network.cred_*`, `pending_ssid` | changed Wi-Fi credentials (section 11): `cred_trial` while they are tried (`cred_trial_left_s` until the station goes back), `cred_pending` with `pending_ssid` while they wait to be confirmed (`null` = none), `cred_reverted` when they got no IP in time and the station is back on its previous credentials; `ssid` names the network in use, during a trial the one being tried |
+| `network.cred_*`, `pending_ssid` | changed Wi-Fi credentials (section 11): `cred_trial` while they are tried (`cred_trial_left_s` until the station goes back), `cred_pending` with `pending_ssid` while they wait to be confirmed (`null` = none), `cred_reverted` when they did not work and the station is back on its previous credentials, `cred_reverted_why` why (`no_ip`: no address within the 90 s; `auth_failed`: the network refused the password; `null` unless reverted); `ssid` names the network in use, during a trial the one being tried |
 | `receiver.state` | `station_state_t`; `idle` during receiver maintenance (`rx_maintenance` tells the two apart) |
 | `receiver.uart_closed` | the receiver UART is closed and `gnss_link` reopens it on its own ("receiver UART closed (reopening)"; never in safe mode, where the link is not opened) |
 | `receiver.rx_maintenance` | receiver maintenance is on (section 8): nothing is sent to the receiver; `maintenance_left_s` until it ends by itself, `maintenance_chosen_s` the chosen duration with extensions (both 0 when off) |
@@ -399,7 +433,10 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without a protected slot or a trusted clock. Information only, never a gate |
 | `health.factory_reset_refused` | a BOOT-button factory reset was refused within the last 10 min because a receiver update was running (the UI shows a notice); admin form only |
 | `health.recovery_mode` | automatic receiver recovery in effect (`gnss/recovery`, `health_recovery_mode_t`): `full`, `no_reboot` (everything but the ESP32 reboot), `alerts_only` (nothing is sent to the receiver: a stall is only reported and journalled, level `degraded`, `failed` once the ladder gives up); admin form only |
-| `health.reboot_recheck` | no receiver found and an ESP32 reboot was blocked: it is looked at again after the next detection pass, when the reboot cap allows; admin form only |
+| `health.reboot_recheck` | no receiver found and an ESP32 reboot was blocked or held: it is looked at again after the next detection pass, when the reboot cap allows and nothing holds it; admin form only |
+| `health.reboot_hold` | why the GNSS ladder's ESP32 restart is postponed right now (`[]` = nothing): `setup` (first setup not finished; no time limit), `ap_client` (someone is connected to the station's access point), `admin` (an admin session made a request or sent a WebSocket ping in the last 5 min), `power_on` (the first 60 min of station time since power-on while nothing valid was heard from the receiver in this boot). A held restart is never queued: it is journalled once (section 14) and looked at again later, like one the cap blocks; admin form only |
+| `health.reboot_hold_left_s` | seconds until the 30 min limit on `ap_client` and `admin` together (per ladder episode) lets a held restart run anyway; `null` when neither holds |
+| `health.reboot_cap_wait_s` | seconds until the reboot cap (60 min apart, at most 3 in 24 h) allows a ladder restart; `null` when it allows one now |
 | `update` | the banner (section 12); admin form only |
 
 In safe mode the receiver section shows `state: "idle"` with the journal
@@ -1024,16 +1061,17 @@ removes it. The slot reconnects. `200` with the slot entry. Errors:
 
 ```json
 {
+  "mdns_host": "onocoydiy",
   "configured": true, "credentials_unreadable": false, "ssid": "Home",
   "online": true, "associated": true, "ip": "192.168.1.50", "rssi": -60, "channel": 6,
   "time_synced": true, "upstream": "ok", "probe_age_s": 120,
   "reconnects": 1, "connect_failures": 0, "offline_s": 0, "retry_in_s": 0,
   "last_disconnect_reason": 8, "fallback_dns": false, "assoc_no_ip_s": 0,
   "cred_trial": false, "cred_trial_left_s": 0, "cred_pending": false, "pending_ssid": null,
-  "cred_reverted": false,
+  "cred_reverted": false, "cred_reverted_why": null,
   "ladder": {"active": false, "rung": 0, "withheld": "none", "triggers": [], "actions": 0},
   "ap": {"active": false, "ssid": "onocoydiy-1A2B", "reasons": [], "clients": 0,
-         "recovery_left_s": 0, "password_set": false},
+         "recovery_left_s": 0, "close_in_s": null, "password_set": false},
   "scan": {"running": false, "age_s": 30,
            "results": [{"ssid": "Home", "rssi": -55, "channel": 6, "secured": true}]}
 }
@@ -1041,8 +1079,14 @@ removes it. The slot reconnects. `200` with the slot entry. Errors:
 
 `last_disconnect_reason` is the numeric `wifi_err_reason_t`. `scan.results`
 are the cached ones (no radio activity; at most 24); `age_s` is `null`
-before the first scan. `assoc_no_ip_s`, `cred_*`, `pending_ssid` and
-`ladder.triggers` as in `/api/status` (section 6).
+before the first scan. `mdns_host`, `assoc_no_ip_s`, `cred_*`,
+`pending_ssid` and `ladder.triggers` as in `/api/status` (section 6).
+`ap.close_in_s`: seconds until the station closes its access point: the
+linger after the station got its IP (`CONFIG_NETWORK_AP_LINGER_S`, 15 s:
+the setup page counts it down), or the recovery AP's lifetime left; `null`
+while the AP is down or nothing is scheduled (first setup without
+credentials, the offline fallback, a recovery AP held past its lifetime by
+a connected client).
 
 ### `PUT /api/wifi` (adm)
 
@@ -1060,18 +1104,26 @@ Every member is optional.
   It takes effect the next time the AP comes up. The UI sends it alone, so
   changing it never touches the station's Wi-Fi connection.
 
-`202 {"accepted": true, "persisted": true, "trial": true}`. With new
-credentials the station switches about a second later; an AP that is up
-stays up until a minute after the station has an IP, so the UI polls
-`GET /api/wifi` for `online` and `ip`. Changing Wi-Fi drops every caster
-session (the UI warns). With the settings unavailable the credentials are
-used for this boot only (`"persisted": false`).
+`202 {"accepted": true, "persisted": true, "trial": true, "applied": true}`.
+With new credentials the station switches about a second later; an AP that
+is up stays up until 15 s after the station has an IP (`ap.close_in_s`
+counts down), so the UI polls `GET /api/wifi` for `online` and `ip`.
+Changing Wi-Fi drops every caster session (the UI warns). With the
+settings unavailable the credentials are used for this boot only
+(`"persisted": false`). `applied` is `false` when the credentials are only
+stored: nothing changed (the same network and password), or the QEMU
+development build, whose emulated Ethernet stays its link.
 
 `trial` (`network_set_credentials`): with credentials stored before (and
 different), the new ones are stored as **pending** and tried for 90 s.
 They replace the current ones once they get an IP; otherwise the station
 goes back to its previous credentials and keeps the new ones pending
 (`cred_reverted`, `pending_ssid`), so a typo never strands a remote station.
+A network that refuses the new password goes back sooner: three refused
+attempts in a row before any association (wrong password, a handshake that
+times out, an access point of that name only with another security
+setting) end the trial at once (`cred_reverted_why: "auth_failed"`); a
+network that is just out of reach keeps the 90 s.
 Pending credentials are tried again first thing at the next boot, with
 `POST /api/wifi/pending/retry`, or dropped with
 `POST /api/wifi/pending/discard`. Without stored credentials (first setup)
@@ -1358,6 +1410,7 @@ All admin only.
   "uptime_s": 86400, "gnss_stalls": 0, "recoveries": 0, "caster_restarts": 0,
   "network_recoveries": 0, "rtcm_gap_ms": 230, "gnss_retry_in_s": null,
   "factory_reset_refused_age_s": null, "admin_resets": 0, "recovery_mode": "full", "reboot_recheck": false,
+  "reboot_hold": ["setup", "power_on"], "reboot_hold_left_s": null, "reboot_cap_wait_s": null,
   "heap": {"internal_free": 120000, "internal_min": 98000, "internal_largest": 64000, "psram_free": 7000000,
            "psram_min": 6900000, "psram_largest": 4000000},
   "inhibited_by": null, "update_slot": "none",
@@ -1396,7 +1449,11 @@ the time until the receiver recovery's next retry pass (`null` = none
 scheduled). `factory_reset_refused_age_s` is the time since a BOOT-button
 factory reset was refused because a receiver update was running (`null` =
 not this boot); `admin_resets` counts BOOT-button password resets this
-boot. `recovery_mode` and `reboot_recheck` as in `/api/status`.
+boot. `recovery_mode`, `reboot_recheck`, `reboot_hold`,
+`reboot_hold_left_s` and `reboot_cap_wait_s` as in `/api/status`.
+`log.console_dropped` (and `_bytes`) count only lines the serial console
+never sent because the log ring overwrote them first; a burst that the
+console sends later, in order, is not a drop.
 `link.open` and `link.open_failures`: the UART driver is installed, failed
 installs since boot ("receiver UART closed (reopening)" while `open` is
 false in a mode other than `off`); `link.hands_off`: receiver maintenance. `journal` and `log` are the event journal's and the log ring's
@@ -1495,7 +1552,7 @@ At most 64 entries per call, oldest first, `seq > cursor`. `time_unix`
 | `boot` | reset class | planned reboot reason |
 | `session` | previous session uptime s (-1 unknown) | raw reset reason |
 | `reboot` | reason | — |
-| `ladder_step` | ladder (0 GNSS, 1 network, 2 caster) | `(outcome << 8) \| code` (outcome 0 started, 1 healthy again, 2 failed or refused, 3 abandoned, 4 not run because of the recovery mode; network: `(reason << 16) \| ...`, and code 0 = a pass started with the trigger bits as the reason: 1 protected caster down, 2 associated without an IP, 4 a slot not reaching its caster); see `diag.h`, `network.h` |
+| `ladder_step` | ladder (0 GNSS, 1 network, 2 caster) | `(outcome << 8) \| code` (outcome 0 started, 1 healthy again, 2 failed or refused, 3 abandoned, 4 not run because of the recovery mode, 5 held; network: `(reason << 16) \| ...`, and code 0 = a pass started with the trigger bits as the reason: 1 protected caster down, 2 associated without an IP, 4 a slot not reaching its caster). GNSS code 9 with outcome 5: the ESP32 restart is held back for now, `b = (hold << 16) \| (5 << 8) \| 9` with the hold bits 1 `setup`, 2 `ap_client`, 4 `admin`, 8 `power_on` (as `health.reboot_hold`); codes 6, 8 and 9 with outcome 0 keep their meaning; see `diag.h`, `network.h` |
 | `app_update` | result (`esp_err_t`) | — |
 | `app_revert` | trial stage | — |
 | `gnss_flash` | the session's outcome (`station_flash_outcome_t`), written when its journal closes | transfers under the journal |
@@ -1591,29 +1648,47 @@ serves claim, login and wizard; `GET /api/session` tells which. The wizard
 must work inside the OS's captive-portal browser: cookies work there for
 the session, but nothing may rely on `localStorage` surviving.
 
+**Reaching the station.** On the home network the station answers
+`http://<name>.local/` (mDNS; `mdns_host` in `GET /api/session`, usually
+the station name `onocoydiy`, `onocoydiy-2` when another device holds that
+name) and `http://<ip>/` (the address the router gave it; also in the
+router's device list under the station name). On its own access point the
+page is at `http://192.168.4.1/`, and the `.local` name answers there too.
+The UI shows both, as links.
+
 **First setup** (unconfigured station, open AP `onocoydiy-XXXX`):
 1. `GET /api/session`: `admin_set: false`, `claim_allowed: true`.
 2. `POST /api/setup/admin`: the admin password; the response logs in.
-3. Reception check, before any caster is enabled: `POST /api/gnss/live`
+3. Wi-Fi: `POST /api/setup/step` `{"step": "reception"}` (the step the
+   setup continues with on the home network), `GET /api/wifi` (cached
+   scan), `POST /api/wifi/scan` if needed (nothing streams yet), then
+   `PUT /api/wifi`. The UI polls `GET /api/wifi` every second until
+   `online`, then shows the station's name and address and counts down
+   `ap.close_in_s`: the AP closes 15 s after the station has its IP. The AP
+   follows the station's channel once it connects, so phones may drop off
+   it briefly; the UI keeps polling, and when the phone loses it for good
+   tells the user how to go on (join the home Wi-Fi, open the `.local` name
+   or the router's device list; the AP comes back if the station could not
+   join; on a guest network the BOOT button opens the station's own
+   network again).
+4. The phone is back on the home network: the user opens
+   `http://<mdns_host>.local/`, logs in, and the wizard resumes at
+   `setup_step`.
+5. Reception check, before any caster is enabled: `POST /api/gnss/live`
    opens the live view and the UI polls `GET /api/gnss/live`, with plain
    pass/warn hints (satellites tracked, mean C/N0, whether a constellation
    has 4 bands, the condition of Onocoy's top band reward; guide values,
    PROVISIONAL, to be confirmed on hardware) and "Continue anyway";
    `DELETE /api/gnss/live` when the user goes on.
-4. Optional: the Onocoy slot, `PUT /api/casters/0` with `onocoy_preset`,
-   the credential username and password.
-5. Wi-Fi: `GET /api/wifi` (cached scan), `POST /api/wifi/scan` if needed
-   (nothing streams yet), then `POST /api/setup/done` and `PUT /api/wifi`.
-6. The UI polls `GET /api/wifi` every second until `online`, then shows
-   the station's address (`ip`, and the hostname). The AP follows the
-   station's channel once it connects, so phones may drop off it briefly;
-   the UI keeps polling and otherwise tells the user to join their own
-   Wi-Fi and find the device there. The AP goes down a minute after the
-   station has an IP.
+6. Optional: the Onocoy slot, `PUT /api/casters/0` with `onocoy_preset`,
+   the credential username and password; then optional further casters.
+7. `POST /api/setup/done` (it also erases `setup_step`): the dashboard.
 
-Wi-Fi comes last because joining it ends the AP; Wi-Fi credentials can
-never be saved before an admin password exists (every Wi-Fi call needs a
-session).
+Every step posts the next one (`POST /api/setup/step`) before it shows it.
+Wi-Fi credentials can never be saved before an admin password exists
+(every Wi-Fi call needs a session). Logged in on the home network, the
+wizard shows the Wi-Fi step only while the page is on the station's own
+access point or the station has no working Wi-Fi.
 
 **Recovery.** BOOT held 10 s clears the admin password and opens the
 recovery AP for 15 min (open unless an AP password is set; longer while a
@@ -1820,6 +1895,9 @@ after it). The journal's `a` and `b` carry these C values.
 | `fw_update_gnss_block_t` | `none`, `app_trial`, `journal_open`, `unsupported_model`, `safe_mode`, `app_update`, `receiver_not_streaming` |
 | `network_probe_t` | `none`, `ok`, `no_ip`, `dns_failed`, `no_upstream` |
 | `network_ap_reason_t` | `setup`, `fallback`, `linger`, `recovery` |
+| `network_cred_revert_t` | (none: `null`), `no_ip`, `auth_failed` |
+| `health_reboot_hold_t` (bits) | `setup`, `ap_client`, `admin`, `power_on` |
+| setup step (`sys/setup_step`) | (none: `null`), `wifi`, `reception`, `onocoy`, `casters` |
 | `network_ladder_why_t` | `none`, `upstream_ok`, `no_upstream`, `journal_open`, `interval`, `inhibited`, `ap_in_use`, `no_reboot_trigger`, `ap_overridden` |
 | `network_ladder_trigger_t` (bits) | `protected`, `assoc_no_ip`, `unreached` |
 | `gnss_link_mode_t` | `off`, `stream`, `command`, `raw` |

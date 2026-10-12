@@ -485,6 +485,8 @@ static bool mutating(int method)
 
 /* Host header value (validated), kept for the Origin check and the CSP. */
 static char s_host[80];
+/* The mDNS name the network answers now (server task). */
+static network_status_t s_pre_net;
 
 /* Host (DNS rebinding; on the AP: the captive portal) and Origin. */
 static pre_t precheck(httpd_req_t *req, bool *on_ap, bool websocket)
@@ -496,12 +498,18 @@ static pre_t precheck(httpd_req_t *req, bool *on_ap, bool websocket)
         char ap_ip[16];
         ip_of(s_sta, sta_ip, sizeof(sta_ip), NULL);
         ip_of(s_ap, ap_ip, sizeof(ap_ip), "192.168.4.1");
-        web_host_names_t names = { .sta_ip = sta_ip, .ap_ip = ap_ip, .hostname = s_hostname };
+        if (network_get_status(&s_pre_net) != ESP_OK) {
+            s_pre_net.mdns_host[0] = '\0';
+        }
+        web_host_names_t names = {
+            .sta_ip = sta_ip, .ap_ip = ap_ip, .hostname = s_hostname, .mdns_host = s_pre_net.mdns_host,
+        };
         host_ok = web_host_allowed(s_host, &names);
 #if CONFIG_NETWORK_QEMU_ETHERNET
         if (!host_ok) {
             /* QEMU development build: the browser reaches the device through QEMU's port forward. */
-            const web_host_names_t fwd = { .sta_ip = "127.0.0.1", .ap_ip = "localhost", .hostname = NULL };
+            const web_host_names_t fwd = { .sta_ip = "127.0.0.1", .ap_ip = "localhost", .hostname = NULL,
+                                           .mdns_host = NULL };
             host_ok = web_host_allowed(s_host, &fwd);
         }
 #endif
@@ -655,6 +663,9 @@ static esp_err_t api_dispatch(httpd_req_t *req)
 {
     web_req_t r = { .sess = -1 };
     esp_err_t ret = api_handle(req, &r);
+    if (r.sess >= 0) {
+        health_note_admin_activity();   /* someone uses the page: the GNSS ladder's restart waits */
+    }
     web_conn_request_done(req, r.sess >= 0);
     return ret;
 }

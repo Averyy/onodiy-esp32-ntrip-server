@@ -29,6 +29,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "health.h"
 #include "station.h"
 #include "web.h"
 #include "web_enums.h"
@@ -454,6 +455,9 @@ esp_err_t web_ws_handler(httpd_req_t *req)
         break;
     }
     case WEB_WS_MSG_PING: {
+        if (c->admin && web_auth_session_alive(c->sess, c->gen)) {
+            health_note_admin_activity();   /* the page is open: the GNSS ladder's restart waits */
+        }
         static const char pong[] = "{\"type\":\"pong\"}";
         ws_msg_t *m = msg_new(WEB_MSG_OTHER, pong, sizeof(pong) - 1);
         if (m != NULL) {

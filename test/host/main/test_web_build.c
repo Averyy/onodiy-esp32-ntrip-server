@@ -881,3 +881,231 @@ TEST_CASE("status: a refused factory reset shows for 10 minutes, admin form only
     web_build_section(&w, &s_snap, WEB_SEC_HEALTH, true);
     TEST_ASSERT_NULL(strstr(wj_text(&w), "factory_reset_refused"));
 }
+
+/* ---- session, Wi-Fi and the restart hold ---------------------------------------------- */
+
+static cJSON *build_session(const web_session_snap_t *s)
+{
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_session(&w, s);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    return root;
+}
+
+TEST_CASE("session: names and the stored setup step", "[web_build]")
+{
+    web_session_snap_t s = {
+        .authenticated = true, .admin_set = true, .setup_done = false, .claim_allowed = false, .on_setup_ap = false,
+        .public_status = false, .settings_available = true, .idle_left_s = 1740, .hostname = "onocoydiy",
+        .mdns_host = "onocoydiy-2", .ap_ssid = "onocoydiy-1A2B", .setup_step = 3,
+    };
+    cJSON *root = build_session(&s);
+    TEST_ASSERT_EQUAL(1, at(root, "api")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "authenticated")));
+    TEST_ASSERT_EQUAL(1740, at(root, "idle_left_s")->valueint);
+    TEST_ASSERT_EQUAL_STRING("onocoydiy", at(root, "hostname")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("onocoydiy-2", at(root, "mdns_host")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("onocoydiy-1A2B", at(root, "ap_ssid")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("onocoy", at(root, "setup_step")->valuestring);
+    cJSON_Delete(root);
+
+    /* every stored step by name; nothing stored or out of range: null */
+    static const char *const names[] = { NULL, "wifi", "reception", "onocoy", "casters", NULL, NULL };
+    for (uint8_t v = 0; v < sizeof(names) / sizeof(names[0]); v++) {
+        s.setup_step = v == 6 ? 255 : v;
+        root = build_session(&s);
+        const cJSON *it = at(root, "setup_step");
+        if (names[v] == NULL) {
+            TEST_ASSERT_TRUE_MESSAGE(cJSON_IsNull(it), s_out);
+        } else {
+            TEST_ASSERT_EQUAL_STRING(names[v], it->valuestring);
+        }
+        cJSON_Delete(root);
+    }
+
+    /* setup done: no step, whatever is stored */
+    s.setup_step = 2;
+    s.setup_done = true;
+    root = build_session(&s);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "setup_step")));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("session: without a session no step, the names stay; mDNS off is null", "[web_build]")
+{
+    web_session_snap_t s = {
+        .authenticated = false, .admin_set = true, .setup_done = false, .settings_available = true,
+        .hostname = "onocoydiy", .mdns_host = "", .ap_ssid = "", .setup_step = 3, .idle_left_s = 99,
+    };
+    cJSON *root = build_session(&s);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "idle_left_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "setup_step")));
+    TEST_ASSERT_EQUAL_STRING("onocoydiy", at(root, "hostname")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "mdns_host")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "ap_ssid")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "claim_allowed")));
+    cJSON_Delete(root);
+}
+
+static cJSON *build_wifi(const network_status_t *n)
+{
+    web_wifi_snap_t ws = { .net = n, .scan_age_s = UINT32_MAX };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_wifi(&w, &ws);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    return root;
+}
+
+TEST_CASE("wifi: mDNS name, the AP's countdown and why credentials were reverted", "[web_build]")
+{
+    static network_status_t n;
+    memset(&n, 0, sizeof(n));
+    n.sta_configured = true;
+    n.online = true;
+    strcpy(n.ssid, "Home");
+    strcpy(n.ip, "192.168.1.50");
+    strcpy(n.ap_ssid, "onocoydiy-1A2B");
+    strcpy(n.mdns_host, "onocoydiy");
+    n.ap_close_in_s = UINT32_MAX;
+    cJSON *root = build_wifi(&n);
+    TEST_ASSERT_EQUAL_STRING("onocoydiy", at(root, "mdns_host")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "ap"), "close_in_s")));   /* AP down */
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "cred_reverted_why")));
+    cJSON_Delete(root);
+
+    /* AP up, lingering: counts down */
+    n.setup_ap_active = true;
+    n.ap_reasons = NETWORK_AP_LINGER;
+    n.ap_close_in_s = 12;
+    root = build_wifi(&n);
+    TEST_ASSERT_EQUAL(12, at(at(root, "ap"), "close_in_s")->valueint);
+    cJSON_Delete(root);
+
+    /* AP up for setup: nothing scheduled */
+    n.ap_reasons = NETWORK_AP_SETUP;
+    n.ap_close_in_s = UINT32_MAX;
+    n.mdns_host[0] = '\0';
+    root = build_wifi(&n);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "ap"), "close_in_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "mdns_host")));
+    cJSON_Delete(root);
+
+    /* a refused password sent the station back */
+    n.cred_pending = true;
+    n.cred_reverted = true;
+    n.cred_reverted_why = NETWORK_CRED_REVERT_AUTH;
+    strcpy(n.pending_ssid, "Home");
+    root = build_wifi(&n);
+    TEST_ASSERT_EQUAL_STRING("auth_failed", at(root, "cred_reverted_why")->valuestring);
+    cJSON_Delete(root);
+    n.cred_reverted_why = NETWORK_CRED_REVERT_NO_IP;
+    root = build_wifi(&n);
+    TEST_ASSERT_EQUAL_STRING("no_ip", at(root, "cred_reverted_why")->valuestring);
+    cJSON_Delete(root);
+    n.cred_reverted = false;   /* the reason only counts while reverted */
+    root = build_wifi(&n);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "cred_reverted_why")));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("status: network carries the mDNS name and the AP's countdown, admin form only", "[web_build]")
+{
+    fixture();
+    strcpy(s_snap.net.mdns_host, "onocoydiy");
+    s_snap.net.setup_ap_active = true;
+    s_snap.net.ap_reasons = NETWORK_AP_LINGER;
+    s_snap.net.ap_close_in_s = 9;
+    cJSON *root = build_status(false);
+    const cJSON *net = at(root, "network");
+    TEST_ASSERT_EQUAL_STRING("onocoydiy", at(net, "mdns_host")->valuestring);
+    TEST_ASSERT_EQUAL(9, at(net, "ap_close_in_s")->valueint);
+    TEST_ASSERT_EQUAL_STRING("192.168.1.50", at(net, "ip")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(net, "cred_reverted_why")));
+    TEST_ASSERT_EQUAL(0, at(net, "probe_age_s")->valueint);   /* the fixture's 0 s */
+    cJSON_Delete(root);
+    s_snap.net.probe_age_s = 659;   /* whole minutes only */
+    root = build_status(false);
+    TEST_ASSERT_EQUAL(600, at(at(root, "network"), "probe_age_s")->valueint);
+    cJSON_Delete(root);
+    s_snap.net.probe_age_s = UINT32_MAX;
+    root = build_status(false);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "network"), "probe_age_s")));
+    cJSON_Delete(root);
+    s_snap.net.setup_ap_active = false;
+    root = build_status(false);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "network"), "ap_close_in_s")));
+    cJSON_Delete(root);
+    root = build_status(true);
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(root, "network"));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("health: restart hold reasons, the presence limit and the cap's wait", "[web_build]")
+{
+    fixture();
+    s_snap.health.gnss_reboot_hold = HEALTH_HOLD_SETUP | HEALTH_HOLD_POWER_ON;
+    s_snap.health.gnss_reboot_hold_left_s = UINT32_MAX;
+    s_snap.health.gnss_reboot_cap_wait_s = UINT32_MAX;
+    cJSON *root = build_status(false);
+    const cJSON *hl = at(root, "health");
+    const cJSON *hold = at(hl, "reboot_hold");
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(hold));
+    TEST_ASSERT_EQUAL_STRING("setup", cJSON_GetArrayItem(hold, 0)->valuestring);
+    TEST_ASSERT_EQUAL_STRING("power_on", cJSON_GetArrayItem(hold, 1)->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(hl, "reboot_hold_left_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(hl, "reboot_cap_wait_s")));
+    cJSON_Delete(root);
+
+    s_snap.health.gnss_reboot_hold = HEALTH_HOLD_AP_CLIENT | HEALTH_HOLD_ADMIN;
+    s_snap.health.gnss_reboot_hold_left_s = 1200;
+    s_snap.health.gnss_reboot_cap_wait_s = 3000;
+    root = build_status(false);
+    hl = at(root, "health");
+    hold = at(hl, "reboot_hold");
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(hold));
+    TEST_ASSERT_EQUAL_STRING("ap_client", cJSON_GetArrayItem(hold, 0)->valuestring);
+    TEST_ASSERT_EQUAL_STRING("admin", cJSON_GetArrayItem(hold, 1)->valuestring);
+    TEST_ASSERT_EQUAL(1200, at(hl, "reboot_hold_left_s")->valueint);
+    TEST_ASSERT_EQUAL(3000, at(hl, "reboot_cap_wait_s")->valueint);
+    cJSON_Delete(root);
+
+    s_snap.health.gnss_reboot_hold = 0;
+    root = build_status(false);
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(at(root, "health"), "reboot_hold")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "health"), "reboot_hold_left_s")));
+    cJSON_Delete(root);
+    root = build_status(true);
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(at(root, "health"), "reboot_hold"));
+    cJSON_Delete(root);
+
+    /* GET /api/health: the same fields at the top level */
+    static health_status_t hs;
+    static lifecycle_boot_info_t boot;
+    static gnss_link_stats_t link;
+    static rtcm_hub_stats_t hub;
+    static station_status_t st;
+    static gnss_obs_summary_t obs;
+    static network_status_t net;
+    static diag_coredump_info_t cd;
+    memset(&hs, 0, sizeof(hs));
+    hs.gnss_reboot_hold = HEALTH_HOLD_ADMIN;
+    hs.gnss_reboot_hold_left_s = 61;
+    hs.gnss_reboot_cap_wait_s = UINT32_MAX;
+    web_health_snap_t h = { .health = &hs, .boot = &boot, .link = &link, .hub = &hub, .st = &st, .obs = &obs,
+                            .net = &net, .coredump = &cd };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_health(&w, &h);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_EQUAL_STRING("admin", cJSON_GetArrayItem(at(root, "reboot_hold"), 0)->valuestring);
+    TEST_ASSERT_EQUAL(61, at(root, "reboot_hold_left_s")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "reboot_cap_wait_s")));
+    cJSON_Delete(root);
+}

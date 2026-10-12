@@ -35,6 +35,7 @@ extern "C" {
 #define SETTINGS_KEY_HOSTNAME       "hostname"    /**< str: DHCP hostname */
 #define SETTINGS_KEY_ADMIN_HASH     "admin_hash"  /**< blob: v1 {iterations u32, salt[16], PBKDF2-HMAC-SHA256[32]} */
 #define SETTINGS_KEY_SETUP_DONE     "setup_done"  /**< u8: first-run wizard completed */
+#define SETTINGS_KEY_SETUP_STEP     "setup_step"  /**< u8: the setup wizard's next step (1 wifi, 2 reception, 3 onocoy, 4 casters; 0 or missing = none); erased by POST /api/setup/done */
 
 /* ---- "wifi": station credentials ----------------------------------------- */
 #define SETTINGS_NS_WIFI            "wifi"

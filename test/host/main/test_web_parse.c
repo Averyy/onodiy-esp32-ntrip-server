@@ -531,3 +531,42 @@ TEST_CASE("WebSocket client messages", "[web_parse]")
     TEST_ASSERT_EQUAL(WEB_WS_MSG_INVALID, web_parse_ws_message("ping", 4, &topics));
     TEST_ASSERT_EQUAL(WEB_WS_MSG_INVALID, web_parse_ws_message("{\"type\":\"other\"}", 16, &topics));
 }
+
+TEST_CASE("setup step: the four wizard steps by name, nothing else", "[web_parse]")
+{
+    static const struct {
+        const char *json;
+        const char *name;
+        uint8_t step;
+    } good[] = {
+        { "{\"step\":\"wifi\"}", "wifi", WEB_SETUP_STEP_WIFI },
+        { "{\"step\":\"reception\"}", "reception", WEB_SETUP_STEP_RECEPTION },
+        { "{\"step\":\"onocoy\"}", "onocoy", WEB_SETUP_STEP_ONOCOY },
+        { "{\"step\":\"casters\"}", "casters", WEB_SETUP_STEP_CASTERS },
+    };
+    web_bad_t b = { 0 };
+    for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+        cJSON *root = body(good[i].json);
+        uint8_t step = 0;
+        TEST_ASSERT_TRUE_MESSAGE(web_parse_setup_step(root, &step, &b), good[i].json);
+        TEST_ASSERT_EQUAL_UINT8(good[i].step, step);
+        TEST_ASSERT_EQUAL_STRING(good[i].name, web_setup_step_name(step));
+        cJSON_Delete(root);
+    }
+    static const char *const bad[] = {
+        "{\"step\":\"done\"}", "{\"step\":\"password\"}", "{\"step\":\"Wifi\"}", "{\"step\":\"\"}", "{\"step\":3}",
+        "{\"step\":null}", "{}", "{\"next\":\"wifi\"}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        cJSON *root = body(bad[i]);
+        uint8_t step = 0;
+        b.field = NULL;
+        TEST_ASSERT_FALSE_MESSAGE(web_parse_setup_step(root, &step, &b), bad[i]);
+        TEST_ASSERT_EQUAL(WEB_ERR_INVALID_FIELD, b.err);
+        TEST_ASSERT_EQUAL_STRING("step", b.field);
+        cJSON_Delete(root);
+    }
+    TEST_ASSERT_NULL(web_setup_step_name(WEB_SETUP_STEP_NONE));
+    TEST_ASSERT_NULL(web_setup_step_name(5));
+    TEST_ASSERT_NULL(web_setup_step_name(255));
+}

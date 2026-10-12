@@ -924,3 +924,16 @@ pre.log .gap { color: var(--muted); font-style: italic; }
   .view { padding-top: 1.25rem; }
   .card { padding: 1.15rem 1.25rem; }
 }
+
+/* setup flow: the station's address, the countdown to the setup network closing, the steps on the home network */
+.kv dd a { overflow-wrap: anywhere; }
+.howto { margin: 0.75rem 0; padding-left: 1.4rem; }
+.howto li { margin: 0.35rem 0; overflow-wrap: anywhere; }
+.countdown { margin: 0.75rem 0; padding: 0.6rem 0.8rem; border-radius: 8px; background: var(--info-soft); color: var(--text); }
+.countdown-n { font-variant-numeric: tabular-nums; }
+.copy-box { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.4rem; }
+.copy-field { flex: 1 1 14rem; min-width: 0; font-family: var(--mono); }
+/* the network list on a phone: a name keeps its line, the details wrap below it */
+.net { flex-wrap: wrap; row-gap: 0.15rem; }
+.net .ssid { flex: 1 1 7rem; white-space: nowrap; }
+/* end setup flow */
