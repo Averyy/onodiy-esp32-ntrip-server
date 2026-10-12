@@ -186,9 +186,13 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g);
 /** A profile object (as stored) under `key`. */
 void web_build_profile(wj_t *w, const char *key, const um98x_base_profile_t *p);
 
-/** GET /api/gnss/signals. `stats` NULL = message statistics not available. */
+/**
+ * GET /api/gnss/signals. `stats` NULL = message statistics not available.
+ * rtcm1230_supported: 1 accepted, 0 refused at the last apply, -1 never
+ * applied (null).
+ */
 void web_build_signals(wj_t *w, const gnss_obs_summary_t *sum, const gnss_obs_msg_stat_t *stats, size_t nstats,
-                       const um98x_base_profile_t *profile, bool rtcm1230_supported);
+                       const um98x_base_profile_t *profile, int rtcm1230_supported);
 
 /** GET /api/sky. `reason` NULL when available. */
 void web_build_sky(wj_t *w, const gnss_obs_sat_t *sats, size_t count, const char *reason);
@@ -301,6 +305,9 @@ typedef struct {
     bool flash_available;
     const char (*rolled_back)[32]; /**< fw_update_get_rolled_back(), newest first */
     size_t rolled_back_count;
+    uint32_t app_max_bytes;        /**< size of the app slot an upload or install writes (0 = unknown: null) */
+    uint32_t pkg_max_bytes;        /**< largest receiver package an upload may have (pkg_store_capacity(); 0 = null) */
+    const uint8_t *running_elf_sha256; /**< 32 bytes: the running app's ELF SHA-256 (NULL = null) */
 } web_update_snap_t;
 
 /** GET /api/update. */
@@ -345,6 +352,7 @@ typedef struct {
     const diag_log_stats_t *log;           /**< NULL = "log" is null */
     const char *inhibited_by;      /**< NULL = none */
     lifecycle_update_t update_slot;
+    bool byte_capture_built;       /**< this build records the receiver's bytes (bench builds: GET /api/diag/flash-capture) */
 } web_health_snap_t;
 
 /** GET /api/health. */

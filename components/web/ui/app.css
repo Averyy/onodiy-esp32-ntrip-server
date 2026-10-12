@@ -26,7 +26,7 @@
   --bad-soft: #fbe5e3;
   --info: #0a5fc2;
   --info-soft: #e5effb;
-  --off: #6b7380;
+  --off: #5f6774;   /* 4.9:1 on --off-soft (badges) */
   --off-soft: #eceef1;
   --focus: #0a5fc2;
   --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
@@ -156,7 +156,8 @@ body {
   background: var(--bg);
   color: var(--text);
   font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  overflow-wrap: anywhere;
+  /* Long words (URLs, hashes) wrap only when nothing else fits; never in the middle of an ordinary word. */
+  overflow-wrap: break-word;
 }
 
 a { color: var(--accent); }
@@ -275,7 +276,7 @@ small { font-size: 0.85rem; }
 .notices:not(:empty) { padding-top: 0.75rem; }
 .view { padding-top: 1rem; padding-bottom: 3rem; }
 .view:focus { outline: none; }
-.view > * + * { margin-top: 1rem; }
+.view-body > * + * { margin-top: 1rem; }
 
 .grid {
   display: grid;
@@ -283,7 +284,8 @@ small { font-size: 0.85rem; }
   gap: 1rem;
 }
 @media (min-width: 720px) {
-  .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* dense: a card that fits an earlier gap takes it, so no cell stays empty beside a wide card */
+  .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-flow: dense; }
   .grid .wide { grid-column: 1 / -1; }
 }
 @media (min-width: 1080px) {
@@ -814,7 +816,7 @@ pre.log .gap { color: var(--muted); font-style: italic; }
   cursor: pointer;
 }
 .net.sel { border-color: var(--accent); background: var(--accent-soft); }
-.net .ssid { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.net .ssid { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .net .meta { color: var(--muted); font-size: 0.85rem; white-space: nowrap; }
 .sig { display: inline-flex; align-items: flex-end; gap: 2px; height: 14px; }
 .sig i { width: 4px; border-radius: 1px; background: var(--border); }
@@ -915,6 +917,57 @@ pre.log .gap { color: var(--muted); font-style: italic; }
 }
 .loading { color: var(--muted); }
 .noscript { padding: 1rem; text-align: center; }
+
+/* ---- Phones and keyboards ------------------------------------------------ */
+
+/* The skip link: out of sight until the keyboard reaches it. */
+.skip {
+  position: absolute;
+  left: 0.5rem;
+  top: -10rem;
+  z-index: 80;
+  padding: 0.5rem 0.9rem;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 650;
+  text-decoration: none;
+}
+.skip:focus { top: 0.5rem; }
+
+/* Tabs that do not fit: a fade at the edge where more of them lie. */
+.tabs.more-right { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent); }
+.tabs.more-left { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 2.5rem), transparent); }
+.tabs.more-left.more-right { -webkit-mask-image: linear-gradient(to right, transparent, #000 2.5rem, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to right, transparent, #000 2.5rem, #000 calc(100% - 2.5rem), transparent); }
+
+/* Links at the foot of a card: a target of at least 24 px. */
+.foot a { display: inline-block; min-height: 24px; padding: 2px 0; line-height: 20px; }
+.foot.row a, .card .foot a + a { margin-right: 0.25rem; }
+
+/* The event journal: a heading row per start. */
+table.journal tr.sep th { padding-top: 0.9rem; color: var(--text); font-size: 0.9rem; white-space: normal; background: var(--surface-2); }
+
+/* Tables of key/value rows on a phone: each row a block of "header: value" lines (no inner scroller). */
+@media (max-width: 480px) {
+  table.stack-sm, table.stack-sm tbody, table.stack-sm tr, table.stack-sm td, table.stack-sm tr.sep th { display: block; width: 100%; }
+  table.stack-sm thead tr { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; }
+  table.stack-sm thead th { border: 0; padding: 0.2rem 0; }
+  table.stack-sm thead th:not(.sortable) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  table.stack-sm tbody tr { padding: 0.45rem 0; border-bottom: 1px solid var(--border); }
+  table.stack-sm tbody tr:last-child { border-bottom: 0; }
+  table.stack-sm td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.1rem 0;
+    border: 0;
+    text-align: right;
+    white-space: normal;
+  }
+  table.stack-sm td::before { content: attr(data-label); flex: none; max-width: 45%; color: var(--muted); font-size: 0.85rem; text-align: left; }
+  table.stack-sm td[data-label=""]::before, table.stack-sm td:not([data-label])::before { content: none; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition: none !important; }

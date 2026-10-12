@@ -26,6 +26,12 @@ void ntrip_server_onocoy_defaults(ntrip_caster_cfg_t *out)
     out->backoff_profile = NTRIP_BACKOFF_FAST;
 }
 
+bool ntrip_server_onocoy_ready(const ntrip_caster_cfg_t *cfg)
+{
+    return cfg != NULL && ntrip_host_is_onocoy(cfg->host) && cfg->mountpoint[0] != '\0' && cfg->username[0] != '\0' &&
+           (cfg->password_set || cfg->password[0] != '\0');
+}
+
 bool ntrip_server_apply_host_rules(ntrip_caster_cfg_t *cfg, const ntrip_backoff_profile_t *requested)
 {
     bool onocoy = ntrip_host_is_onocoy(cfg->host);

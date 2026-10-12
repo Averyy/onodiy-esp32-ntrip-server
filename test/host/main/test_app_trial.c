@@ -495,3 +495,48 @@ TEST_CASE("trial: a whole update over two days with a power cut and a crash", "[
     t.watch_elapsed_s = fw_trial_watch_elapsed_s(&r, t.uptime_s, 0, false, 0);
     TEST_ASSERT_EQUAL(FW_TRIAL_ACT_DONE, fw_trial_tick(&t, &r, &obs));
 }
+
+TEST_CASE("trial: a reinstall of the identical image is stage 1 only", "[app_trial]")
+{
+    /* Installed as the image already running (same app ELF SHA-256, the user asked for it). */
+    fw_trial_rec_t prev;
+    memset(&prev, 0, sizeof(prev));
+    fw_trial_rec_t r;
+    fw_trial_rec_new(&r, &prev, "v0.3.0", FW_BASELINE_STA_IP | FW_BASELINE_HUB_FED, 0x01, T0_UNIX);
+    r.same_image = true;
+
+    /* The flag survives the record's storage. */
+    uint8_t buf[FW_TRIAL_REC_MAX_BLOB];
+    size_t n = fw_trial_rec_encode(&r, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(n > 0);
+    fw_trial_rec_t d;
+    TEST_ASSERT_TRUE(fw_trial_rec_decode(buf, n, &d));
+    TEST_ASSERT_TRUE(d.same_image);
+    TEST_ASSERT_TRUE(d.baseline_known);
+
+    /* First boot: stage 1 as for any image (the bootloader still guards it). */
+    fw_trial_boot_in_t in = boot_in("v0.3.0", true);
+    fw_trial_boot_out_t out;
+    fw_trial_on_boot(&d, &in, &out);
+    TEST_ASSERT_EQUAL(FW_TRIAL_RUN_CONFIRMING, out.run);
+    fw_trial_obs_t obs;
+    memset(&obs, 0, sizeof(obs));
+    fw_trial_tick_in_t t = tick_in(FW_TRIAL_RUN_CONFIRMING, CONFIRM_S);
+    t.init_complete = true;
+    TEST_ASSERT_EQUAL(FW_TRIAL_ACT_CONFIRM, fw_trial_tick(&t, &d, &obs));
+    /* Confirmed: no verify window and no crash watch follow. */
+    TEST_ASSERT_EQUAL(FW_TRIAL_REC_NONE, fw_trial_after_confirm(&d));
+
+    /* Confirmed but the record not advanced (a power cut): over, not stage 2. */
+    fw_trial_boot_in_t later = boot_in("v0.3.0", false);
+    later.prev_uptime_s = 75;
+    fw_trial_on_boot(&d, &later, &out);
+    TEST_ASSERT_EQUAL(FW_TRIAL_RUN_NONE, out.run);
+    TEST_ASSERT_EQUAL_UINT8(FW_TRIAL_REC_NONE, d.stage);
+    TEST_ASSERT_TRUE(out.persist);
+
+    /* Any other install keeps the two-stage trial. */
+    fw_trial_rec_new(&r, &prev, "v0.4.0", FW_BASELINE_STA_IP, 0x01, T0_UNIX);
+    TEST_ASSERT_FALSE(r.same_image);
+    TEST_ASSERT_EQUAL(FW_TRIAL_REC_VERIFYING, fw_trial_after_confirm(&r));
+}

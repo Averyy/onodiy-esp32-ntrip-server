@@ -113,7 +113,7 @@ function liveSatTable() {
 
   const sortHead = (key, label, num) => {
     const on = sort === key;
-    return h('th', { class: num ? 'num' : null, 'aria-sort': on ? (key === 'sys' ? 'ascending' : 'descending') : null },
+    return h('th', { class: (num ? 'num ' : '') + 'sortable', 'aria-sort': on ? (key === 'sys' ? 'ascending' : 'descending') : null },
       h('button', { type: 'button', class: 'sort', 'data-sort': key, onclick: () => {
         sort = key;
         store.set('liveSort', key);
@@ -150,13 +150,14 @@ function liveSatTable() {
     patch(body, sorted(sats).map(s => {
       const c = s.cnr_dbhz || {};
       const best = satCnr(s);
+      /* data-label: the column's name, shown beside the value on a phone (stacked rows). */
       return h('tr', null,
-        h('td', null, h('b', null, satId(s))),
-        h('td', null, h('span', { class: 'legend' }, h('span', null, h('i', { class: 'sys-' + s.sys }), lbl(L.sys, s.sys) + ' ' + s.prn))),
-        h('td', { class: 'num' }, s.el_deg === null || s.el_deg === undefined ? DASH : s.el_deg + '°'),
-        h('td', { class: 'num' }, s.az_deg === null || s.az_deg === undefined ? DASH : s.az_deg + '°'),
-        h('td', { class: 'num' }, best ? h('span', { class: cnrClass(best) }, best + ' dB-Hz') : DASH),
-        bands.map(b => h('td', { class: 'num' }, c[b] ? h('span', { class: cnrClass(c[b]) }, String(c[b])) : b in c ? '✓' : DASH)));
+        h('td', { 'data-label': 'Satellite' }, h('b', null, satId(s))),
+        h('td', { 'data-label': SAT_SORTS.sys }, h('span', { class: 'legend' }, h('span', null, h('i', { class: 'sys-' + s.sys }), lbl(L.sys, s.sys) + ' ' + s.prn))),
+        h('td', { class: 'num', 'data-label': SAT_SORTS.el }, s.el_deg === null || s.el_deg === undefined ? DASH : s.el_deg + '°'),
+        h('td', { class: 'num', 'data-label': 'Azimuth' }, s.az_deg === null || s.az_deg === undefined ? DASH : s.az_deg + '°'),
+        h('td', { class: 'num', 'data-label': 'Best C/N0' }, best ? h('span', { class: cnrClass(best) }, best + '\u00a0dB-Hz') : DASH),
+        bands.map(b => h('td', { class: 'num', 'data-label': BAND_HEAD[b] }, c[b] ? h('span', { class: cnrClass(c[b]) }, String(c[b])) : b in c ? '✓' : DASH)));
     }));
     const t = d.totals || {};
     const noPos = sats.filter(s => !hasSkyPos(s)).length;
@@ -168,7 +169,7 @@ function liveSatTable() {
   }
 
   return {
-    el: h('div', null, h('div', { class: 'scroll' }, h('table', { class: 'sats' }, head, body)), note),
+    el: h('div', null, h('div', { class: 'scroll' }, h('table', { class: 'sats stack-sm' }, head, body)), note),
     update(d) {
       last = d;
       const nb = liveBands(d.totals);
@@ -446,6 +447,62 @@ function liveWindowCard(opts) {
   };
 }
 
+/* ---- No receiver ------------------------------------------------------------------------- */
+
+/** The receiver is not found, or the station is looking for it (a station status's receiver.state). */
+function receiverMissing(st) {
+  const r = st && st.receiver;
+  return !!r && !r.rx_maintenance && (r.state === 'no_receiver' || r.state === 'detecting');
+}
+
+/**
+ * What the page shows instead of satellites while no receiver is found:
+ * what to check, when the station looks again, and "Check again" (a
+ * search now). While a search runs: "Looking for the receiver…" with the
+ * time it has taken. Returns {el, update(status)}: a GET /api/status
+ * object (the wizard polls it, the app has it from the WebSocket).
+ */
+function noReceiverPanel() {
+  const title = h('strong');
+  const text = h('div', { class: 'small' });
+  const err = errBox();
+  let askedAt = 0, searchSince = 0, last = null;
+  const check = btn('Check again', () => act(check, async () => {
+    await api('POST', '/api/gnss/detect', {});
+    askedAt = Date.now();
+    render();
+  }, err), 'small');
+  const actions = h('div', { class: 'form-actions' }, check);
+  const el = h('div', { class: 'msg bad', role: 'status' }, title, text, actions, err);
+  function render() {
+    const r = (last && last.receiver) || {};
+    const a = ((last && last.alerts) || []).find(x => x.source === 'station' && x.id === 'no_receiver') ||
+      { saw_bytes: false, next_detect_in_s: r.next_detect_in_s };
+    const searching = r.state === 'detecting' || r.state === 'idle' ||
+      (r.state === 'no_receiver' && (a.next_detect_in_s === 0 || Date.now() - askedAt < 4000));
+    if (searching) {
+      if (!searchSince) searchSince = Date.now();
+      el.className = 'msg info';
+      title.textContent = 'Looking for the receiver… (' + fmt.dur((Date.now() - searchSince) / 1000) + ')';
+      text.textContent = 'The station tries every link speed the receiver may use.';
+      actions.hidden = true;
+    } else {
+      searchSince = 0;
+      el.className = 'msg bad';
+      title.textContent = 'No receiver found';
+      text.textContent = noReceiverText(a);
+      actions.hidden = false;
+    }
+  }
+  return {
+    el: el,
+    update(st) {
+      last = st;
+      render();
+    },
+  };
+}
+
 /* ---- The page ---------------------------------------------------------------------------- */
 
 /* Set by the entry button (Signals page): the page starts the window when it opens. */
@@ -468,6 +525,12 @@ function livePage(el, startArg) {
     return {};
   }
   let stopPoll = null, gone = false;
+  /* A 200 to our own start means open: a closed window read within 5 s of it is a stale answer, ignored once. */
+  let postAt = 0, closeIgnored = false;
+  const posted = () => {
+    postAt = Date.now();
+    closeIgnored = false;
+  };
   const startPoll = () => {
     if (!stopPoll) stopPoll = poller(LIVE_POLL_MS, fetchLive, true);
   };
@@ -477,8 +540,14 @@ function livePage(el, startArg) {
   };
 
   const win = liveWindowCard({
-    onStart: (b, out) => act(b, async () => show(await api('POST', '/api/gnss/live', {})), out),
-    onExtend: (b, out) => act(b, async () => show(await api('POST', '/api/gnss/live', {})), out),
+    onStart: (b, out) => act(b, async () => {
+      posted();
+      show(await api('POST', '/api/gnss/live', {}));
+    }, out),
+    onExtend: (b, out) => act(b, async () => {
+      posted();
+      show(await api('POST', '/api/gnss/live', {}));
+    }, out),
     onStop: (b, out) => act(b, async () => {
       try {
         await api('DELETE', '/api/gnss/live');
@@ -506,12 +575,55 @@ function livePage(el, startArg) {
   ];
   const closedNote = h('section', { class: 'card wide' }, h('p', { class: 'muted' },
     'Start the live view to see every satellite, where it is in the sky and how strong its signals are.'));
-  mount(el, h('div', { class: 'grid' }, win.el, closedNote, dataCards, map.el));
+  /* No receiver: the same card as the setup wizard's, instead of an empty window. */
+  const nr = noReceiverPanel();
+  const nrCard = h('section', { class: 'card wide', hidden: true }, h('h2', null, 'Live view'), nr.el,
+    h('p', { class: 'muted small' }, 'The live view opens once the station finds the receiver. ', link('Receiver page', '#/receiver')));
+  mount(el, h('div', { class: 'grid' }, nrCard, win.el, closedNote, dataCards, map.el));
   map.update(null);
 
+  let missing = false, pendingStart = false;
+  /* Status from the WebSocket (every second): no receiver shows the card; the receiver back starts what was asked. */
+  function receiverState(st) {
+    const m = receiverMissing(st);
+    if (m) nr.update(st);
+    if (m === missing) return;
+    missing = m;
+    nrCard.hidden = !m;
+    win.el.hidden = m;
+    map.el.hidden = m;
+    if (m) {
+      closedNote.hidden = true;
+      for (const c of dataCards) c.hidden = true;
+      endPoll();
+      return;
+    }
+    if (pendingStart) {
+      pendingStart = false;
+      start();
+    } else {
+      fetchLive();
+    }
+  }
+
+  function start() {
+    posted();
+    act(null, async () => {
+      show(await api('POST', '/api/gnss/live', {}));
+      return true;
+    }).then(r => {
+      if (r === undefined) fetchLive();   /* refused: show the window as it is */
+    });
+  }
+
   function show(d) {
-    if (gone || !d) return;
+    if (gone || !d || missing) return;
     const w = d.window || {};
+    if (w.open === false && Date.now() - postAt < 5000 && !closeIgnored) {
+      closeIgnored = true;
+      startPoll();   /* keep asking: the next answer tells */
+      return;
+    }
     win.connOk();
     win.update(w);
     map.update(d.position);
@@ -556,18 +668,21 @@ function livePage(el, startArg) {
     history.replaceState(null, '', '#/signals/live');
     if (shell.current) shell.current.arg = 'live';
   }
-  if (liveAutoStart || startArg) {
-    liveAutoStart = false;
-    act(null, async () => {
-      show(await api('POST', '/api/gnss/live', {}));
-      return true;
-    }).then(r => {
-      if (r === undefined) fetchLive();   /* refused: show the window as it is */
-    });
+  const wantStart = liveAutoStart || startArg;
+  liveAutoStart = false;
+  if (receiverMissing(S.status)) {
+    /* Nothing to open: the card says why and when the station looks again. */
+    pendingStart = wantStart;
+    receiverState(S.status);
+  } else if (wantStart) {
+    start();
   } else {
     fetchLive();
   }
   return {
+    update(st) {
+      receiverState(st);
+    },
     destroy() {
       gone = true;
       endPoll();

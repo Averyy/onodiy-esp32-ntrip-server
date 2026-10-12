@@ -21,6 +21,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_ota_ops.h"
 #include "esp_psram.h"
 #include "esp_timer.h"
 #include "fw_update.h"
@@ -79,7 +80,8 @@ EXT_RAM_BSS_ATTR static char s_text[LOG_PAGE + 1];
 
 static esp_err_t bad(httpd_req_t *req, const web_bad_t *b)
 {
-    return web_send_error(req, b->err, NULL, b->field, UINT32_MAX, NULL, NULL);
+    /* The field's rule in words where the parser gives one (the UI shows "<field label>: <rule>"). */
+    return web_send_error(req, b->err, b->rule, b->field, UINT32_MAX, NULL, NULL);
 }
 
 static esp_err_t ok(httpd_req_t *req)
@@ -226,6 +228,9 @@ uint32_t web_budget_now(void)
             break;
         }
         if (cfg->enabled && cfg->protected_slot) {
+            if (!ntrip_server_onocoy_ready(cfg)) {
+                break;   /* not set up: no budget to speak of */
+            }
             bool live = ntrip_server_get_status(i, st) == ESP_OK && st->state != NTRIP_STATE_DISABLED;
             budget = live ? st->budget_left_s : ledger_protected_budget_left_s();
             break;
@@ -745,7 +750,7 @@ static esp_err_t h_gnss_signals(web_req_t *r)
     web_resp_t resp;
     resp_begin(&resp, r->req, 200);
     web_build_signals(&resp.w, &s_obs, have_msgs ? s_msgs : NULL, have_msgs ? n : 0, &profile,
-                      s_st.rtcm1230_supported);
+                      s_st.rtcm1230_known ? (s_st.rtcm1230_supported ? 1 : 0) : -1);
     return web_resp_end(&resp);
 }
 
@@ -885,6 +890,20 @@ static esp_err_t h_live_delete(web_req_t *r)
     }
     ESP_LOGI(TAG, "live view closed by the user");
     return ok(r->req);
+}
+
+/* ---- no receiver: search again -------------------------------------------------------------------------------- */
+
+static esp_err_t h_gnss_detect(web_req_t *r)
+{
+    esp_err_t err = station_request_detect();
+    if (err == ESP_OK) {
+        return accepted(r->req);
+    }
+    if (err == ESP_ERR_INVALID_STATE) {
+        return web_send_err(r->req, lifecycle_in_safe_mode() ? WEB_ERR_SAFE_MODE : WEB_ERR_NOT_NO_RECEIVER);
+    }
+    return web_send_internal(r->req, err);
 }
 
 /* ---- receiver update sessions ------------------------------------------------------------------------------ */
@@ -1409,7 +1428,11 @@ static esp_err_t h_update_get(web_req_t *r)
     portEXIT_CRITICAL(&s_res_lock);
     static char rolled_back[FW_UPDATE_ROLLED_BACK_MAX][32];   /* server task only */
     size_t n_rolled_back = fw_update_get_rolled_back(rolled_back, FW_UPDATE_ROLLED_BACK_MAX);
+    const esp_partition_t *slot = esp_ota_get_next_update_partition(NULL);
     web_update_snap_t u = {
+        .app_max_bytes = slot != NULL ? slot->size : 0,
+        .pkg_max_bytes = (uint32_t)pkg_store_capacity(),
+        .running_elf_sha256 = esp_app_get_description()->app_elf_sha256,
         .fw = &s_fw,
         .st = &s_st,
         .last = &last,
@@ -1635,7 +1658,8 @@ static esp_err_t h_upload_gnss_get(web_req_t *r)
     um98x_flash_pkg_facts_t facts;
     uint32_t left = 0;
     if (!web_staged_get(&facts, &left)) {
-        return web_send_err(r->req, WEB_ERR_NOTHING_STAGED);
+        /* Nothing waiting is a normal state of this resource, not a missing one. */
+        return web_send_json_literal(r->req, 200, "{\"staged\":null}");
     }
     return send_staged(r->req, &facts, left);
 }
@@ -1796,6 +1820,7 @@ static esp_err_t h_health(web_req_t *r)
         .log = &log,
         .inhibited_by = by,
         .update_slot = lifecycle_update_active(),
+        .byte_capture_built = um98x_flash_capture_available(),
     };
     web_resp_t resp;
     resp_begin(&resp, r->req, 200);
@@ -2087,6 +2112,7 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/gnss/live", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_live_get),
     ROUTE("/api/gnss/live", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_live_post),
     ROUTE("/api/gnss/live", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_live_delete),
+    ROUTE("/api/gnss/detect", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_gnss_detect),
     ROUTE("/api/gnss/flash", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_flash_get),
     ROUTE("/api/gnss/flash/retry", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_flash_retry),
     ROUTE("/api/gnss/flash/restart-receiver", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_flash_restart),

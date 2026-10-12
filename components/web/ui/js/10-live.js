@@ -127,6 +127,18 @@ function outputRate() {
   return best;
 }
 
+/*
+ * Reconnecting: the delay doubles from 1 s to 15 s and starts over only
+ * after a connection that lived STABLE_MS. A handshake the station refuses
+ * (no session, public status off, too many clients) or a connection it
+ * closes at once never resets it, so a refused or evicted page backs off
+ * instead of retrying every second. After a refusal the page asks
+ * GET /api/session once: a lost session shows the login, a public view
+ * whose public status was turned off shows the login page.
+ */
+const WS_STABLE_MS = 10000;
+const WS_RETRY_MAX_MS = 15000;
+
 const live = {
   ws: null,
   state: 'off',        /* off, connecting, ws, poll */
@@ -140,6 +152,8 @@ const live = {
   polling: false,
   tick: 0,
   running: false,
+  openedAt: 0,         /* when the current socket opened (0 = not open) */
+  checked: false,      /* GET /api/session asked since the last stable connection */
 
   start() {
     if (this.running) return;
@@ -150,6 +164,8 @@ const live = {
 
   stop() {
     this.running = false;
+    this.retryMs = 1000;
+    this.checked = false;
     clearInterval(this.tick);
     if (this.ws) {
       const ws = this.ws;
@@ -183,8 +199,9 @@ const live = {
     this.ws = ws;
     this.setState('connecting');
     this.lastMsg = Date.now();
+    this.openedAt = 0;
     ws.onopen = () => {
-      this.retryMs = 1000;
+      this.openedAt = Date.now();
       this.lastMsg = Date.now();
       if (this.topics) this.send(this.subMessage());
     };
@@ -201,11 +218,25 @@ const live = {
     ws.onclose = ev => {
       if (this.ws !== ws) return;
       this.ws = null;
+      const opened = this.openedAt;
+      this.openedAt = 0;
       if (ev.code === 4001) {
         bus.emit('unauthorized');
         return;
       }
-      if (ev.code === 1012) bus.emit('rebooting', 'restart');
+      if (ev.code === 1012) {
+        bus.emit('rebooting', 'restart');   /* the restart overlay takes over (it stops this) */
+        if (this.running) this.scheduleReconnect();
+        return;
+      }
+      /* Only a connection that lived a while starts the backoff over. */
+      if (opened && Date.now() - opened >= WS_STABLE_MS) {
+        this.retryMs = 1000;
+        this.checked = false;
+      }
+      /* Refused at the handshake, or public status turned off: is the session
+       * (or the public view) still there? Asked once, not on every retry. */
+      if (!opened || ev.code === 1008) this.checkSession();
       this.scheduleReconnect();
     };
     ws.onerror = () => {
@@ -217,7 +248,29 @@ const live = {
     if (!this.running) return;
     this.setState('poll');
     this.reconnectAt = Date.now() + this.retryMs;
-    this.retryMs = Math.min(this.retryMs * 2, 15000);
+    this.retryMs = Math.min(this.retryMs * 2, WS_RETRY_MAX_MS);
+  },
+
+  /* After a refused handshake: a page whose session is gone shows the login;
+   * a public view whose public status was turned off shows the login page. */
+  async checkSession() {
+    if (this.checked) return;
+    this.checked = true;
+    let s;
+    try {
+      s = await api('GET', '/api/session', undefined, { quiet401: true, timeout: 4000 });
+    } catch (e) {
+      this.checked = false;   /* no answer: ask again after the next refusal */
+      return;
+    }
+    if (!this.running) return;
+    if (isAdmin() && !s.authenticated) {
+      sessionLost();
+    } else if (!isAdmin() && S.publicView && !s.public_status) {
+      this.stop();
+      S.session = s;
+      showLogin('Public status was turned off. Log in to see the station.');
+    }
   },
 
   send(obj) {
@@ -282,8 +335,10 @@ const live = {
     const ws = this.ws;
     if (ws && ws.readyState === 1) {
       if (now - this.lastMsg > 5000) {
-        /* Status comes every second; silence means a dead connection. */
+        /* Status comes every second (admin and public pages alike); silence
+         * means a dead connection. Its backoff goes on: no reset. */
         this.ws = null;
+        this.openedAt = 0;
         ws.onclose = null;
         try {
           ws.close();
@@ -299,6 +354,7 @@ const live = {
     } else if (ws && ws.readyState === 0 && now - this.lastMsg > 10000) {
       /* A handshake that never completes. */
       this.ws = null;
+      this.openedAt = 0;
       ws.onclose = null;
       try {
         ws.close();

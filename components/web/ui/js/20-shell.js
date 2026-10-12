@@ -32,8 +32,9 @@ const shell = {
   navKey: '',
 };
 
+/* Where a page goes: inside <main>, after its heading (the page's h1, set by openView). */
 function viewEl() {
-  return doc.getElementById('view');
+  return doc.getElementById('view-body');
 }
 
 /* ---- Theme ------------------------------------------------------------- */
@@ -130,7 +131,40 @@ function renderNav() {
     return h('a', { href: '#/' + n[0], class: name === n[0] ? 'active' : null, 'aria-current': name === n[0] ? 'page' : null },
       n[1], dot ? h('span', { class: 'dot', title: 'Update available' }) : null);
   }));
+  navShowActive();
 }
+
+/* On a phone the tabs scroll sideways: the active one is always in view,
+ * and a fade at an edge says that more tabs lie that way. */
+function navShowActive() {
+  const nav = doc.getElementById('tabs');
+  const a = nav.querySelector('a.active');
+  if (a) {
+    const left = a.offsetLeft - nav.offsetLeft;
+    if (left < nav.scrollLeft + 24 || left + a.offsetWidth > nav.scrollLeft + nav.clientWidth - 24) {
+      nav.scrollLeft = Math.max(0, left - (nav.clientWidth - a.offsetWidth) / 2);
+    }
+  }
+  navEdges();
+}
+
+function navEdges() {
+  const nav = doc.getElementById('tabs');
+  const more = nav.scrollWidth - nav.clientWidth;
+  nav.classList.toggle('more-left', more > 2 && nav.scrollLeft > 2);
+  nav.classList.toggle('more-right', more > 2 && nav.scrollLeft < more - 2);
+}
+
+doc.getElementById('tabs').addEventListener('scroll', navEdges, { passive: true });
+window.addEventListener('resize', () => {
+  if (shell.started) navShowActive();
+});
+
+/* The skip link jumps to the page's content (the address keeps its route). */
+doc.getElementById('skip').addEventListener('click', e => {
+  e.preventDefault();
+  doc.getElementById('view').focus();
+});
 
 /* ---- Router ------------------------------------------------------------ */
 
@@ -174,6 +208,9 @@ function openView(name, arg) {
   }
   const host = S.status && S.status.device ? S.status.device.hostname : '';
   doc.title = def.title + (host ? ' · ' + host : '');
+  const head = doc.getElementById('page-title');
+  head.textContent = def.title;
+  head.hidden = false;
   renderNav();
   renderNotices();
   window.scrollTo(0, 0);
@@ -199,6 +236,7 @@ function stopShell() {
   shell.current = null;
   shell.started = false;
   shell.noticeKey = '';
+  doc.getElementById('page-title').hidden = true;   /* bare pages carry their own heading */
   doc.body.classList.add('bare');
   clear(doc.getElementById('tabs'));
   clear(doc.getElementById('notices'));
@@ -262,9 +300,14 @@ bus.on('event', m => {
   if (!shell.started) return;
   if (m.event === 'settings_changed') {
     const v = shell.current && shell.current.view;
+    const own = !!m.client && m.client === CLIENT_ID;
     if (v && v.reload) {
-      if (v.dirty && v.dirty()) toast('Settings were changed elsewhere. Reload this page to see them.', 'warn');
-      else v.reload();
+      /* This tab's own save: the page knows already; a form being edited stays as it is. */
+      if (v.dirty && v.dirty()) {
+        if (!own) toast('Settings were changed elsewhere. Reload this page to see them.', 'warn');
+      } else {
+        v.reload();
+      }
     }
   } else if (m.event === 'network' && m.what === 'offline') {
     toast('The station lost its Wi-Fi connection.', 'warn');
@@ -451,7 +494,7 @@ function dialog(opts) {
     };
     /* Modal for real: the page behind it is inert (no focus, no clicks, out
      * of the accessibility tree) and Tab wraps inside the dialog. */
-    const behind = [doc.querySelector('header.top'), doc.getElementById('tabs'), doc.getElementById('notices'), viewEl()];
+    const behind = [doc.querySelector('header.top'), doc.getElementById('tabs'), doc.getElementById('notices'), doc.getElementById('view')];
     const setInert = on => {
       for (const el of behind) {
         if (!el) continue;
@@ -536,6 +579,18 @@ let rebootWatch = 0;
 function showRestarting(title, text) {
   if (rebootWatch) return;
   live.stop();
+  /* The page behind stops polling: its requests would only draw 401s once
+   * the station is back (sessions do not survive a restart). */
+  const cur = shell.current;
+  if (cur && cur.view && cur.view.destroy) {
+    try {
+      cur.view.destroy();
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  if (cur) cur.view = {};
+  const wasAdmin = isAdmin();
   const root = doc.getElementById('modal');
   const status = h('p', { class: 'muted small' }, 'Waiting for the station…');
   mount(root, h('div', { class: 'overlay', role: 'alert' },
@@ -550,6 +605,14 @@ function showRestarting(title, text) {
     try {
       await api('GET', '/api/session', undefined, { timeout: 2500, quiet401: true });
       clearInterval(rebootWatch);
+      /* The login after the reload says why it is there (30-auth.js). */
+      if (wasAdmin) {
+        try {
+          sessionStorage.setItem('station.restartedAt', String(Date.now()));
+        } catch (e) {
+          /* no storage (captive-portal browser): the login has no note */
+        }
+      }
       location.reload();
     } catch (e) {
       if (secs > 180) status.textContent = 'Still waiting (' + fmt.dur(secs) + '). If the station moved to another network, open it there.';

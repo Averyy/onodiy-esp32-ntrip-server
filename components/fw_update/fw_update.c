@@ -227,12 +227,13 @@ static void run_check(void)
     char *body = NULL;
     size_t len = 0;
     char etag[sizeof(g_fw.etag)] = "";
+    int http_status = 0;
     fw_http_result_t r;
     if (fw_release_latest_url(url, sizeof(url), repo, CONFIG_FW_UPDATE_MANIFEST_ASSET)) {
         /* "Not modified" is only useful while this boot holds the accepted
          * manifest it refers to. */
         r = fw_http_fetch(url, (have && etag_in[0] != '\0') ? etag_in : NULL, MANIFEST_CAP, &body, &len, etag,
-                          sizeof(etag));
+                          sizeof(etag), &http_status);
     } else {
         ESP_LOGE(TAG, "no release URL for %s and %s", repo, CONFIG_FW_UPDATE_MANIFEST_ASSET);
         r = FW_HTTP_BAD_ANSWER;   /* unusable: waits for the next daily check */
@@ -240,6 +241,7 @@ static void run_check(void)
 
     fw_check_result_t result;
     esp_err_t err = ESP_OK;
+    bool manifest_ok = false;
     switch (r) {
     case FW_HTTP_OK: {
         static fw_manifest_t m;   /* worker only; too large for the stack */
@@ -252,6 +254,7 @@ static void run_check(void)
             strlcpy(g_fw.etag, etag, sizeof(g_fw.etag));
             fw_unlock();
             result = FW_CHECK_OK;
+            manifest_ok = true;
             if (key >= 0) {
                 ESP_LOGI(TAG, "manifest %s signed (key %d), %u receiver package(s)", m.version, key + 1,
                          (unsigned)m.gnss_count);
@@ -280,7 +283,11 @@ static void run_check(void)
     case FW_HTTP_BAD_ANSWER:
         result = FW_CHECK_UNUSABLE;
         err = ESP_ERR_INVALID_RESPONSE;
-        ESP_LOGW(TAG, "no usable release manifest at github.com/%s", repo);
+        if (http_status == 404) {
+            ESP_LOGW(TAG, "no release found at github.com/%s (HTTP 404): private, or no release yet", repo);
+        } else {
+            ESP_LOGW(TAG, "no usable release manifest at github.com/%s (HTTP %d)", repo, http_status);
+        }
         break;
     case FW_HTTP_UNTRUSTED:
         /* An answer, but one that would leave the repository's releases on
@@ -306,9 +313,13 @@ static void run_check(void)
 
     int64_t now = 0;
     bool trusted = fw_clock(&now);
+    fw_check_outcome_t outcome = fw_policy_check_outcome(r, http_status, manifest_ok);
     fw_lock();
     g_fw.last_result = result;
     g_fw.last_attempt_s = started;
+    g_fw.last_outcome = outcome;
+    g_fw.last_http_status = (http_status > 0 && http_status < 1000) ? (uint16_t)http_status : 0;
+    g_fw.last_attempt_unix = trusted ? now : 0;
     if (result == FW_CHECK_OK) {
         g_fw.have_success = true;
         g_fw.last_success_s = started;
@@ -327,11 +338,17 @@ static void run_check(void)
     fw_set_state(err == ESP_OK ? FW_UPDATE_IDLE : FW_UPDATE_FAILED, err);
 }
 
-static bool check_due(void)
+_Static_assert(FW_OUTCOME_NONE == (int)FW_CHECK_RESULT_NONE && FW_OUTCOME_OK == (int)FW_CHECK_RESULT_OK &&
+                   FW_OUTCOME_NO_RELEASE == (int)FW_CHECK_RESULT_NO_RELEASE &&
+                   FW_OUTCOME_HTTP_ERROR == (int)FW_CHECK_RESULT_HTTP_ERROR &&
+                   FW_OUTCOME_NO_RESPONSE == (int)FW_CHECK_RESULT_NO_RESPONSE &&
+                   FW_OUTCOME_UNTRUSTED_REDIRECT == (int)FW_CHECK_RESULT_UNTRUSTED_REDIRECT &&
+                   FW_OUTCOME_BAD_MANIFEST == (int)FW_CHECK_RESULT_BAD_MANIFEST,
+               "check outcomes mirror fw_update_check_result_t");
+
+/* The daily schedule's inputs now (call locked). */
+static fw_sched_t sched_locked(bool trusted, int64_t now)
 {
-    int64_t now = 0;
-    bool trusted = fw_clock(&now);
-    fw_lock();
     fw_sched_t s = {
         .uptime_s = fw_uptime_s(),
         .clock_trusted = trusted,
@@ -344,6 +361,15 @@ static bool check_due(void)
         .have_success = g_fw.have_success,
         .last_success_s = g_fw.last_success_s,
     };
+    return s;
+}
+
+static bool check_due(void)
+{
+    int64_t now = 0;
+    bool trusted = fw_clock(&now);
+    fw_lock();
+    fw_sched_t s = sched_locked(trusted, now);
     bool idle = !g_fw.busy && g_fw.state != FW_UPDATE_REBOOT_PENDING && g_fw.run != FW_TRIAL_RUN_CONFIRMING &&
                 g_fw.checks_enabled;
     fw_unlock();
@@ -622,6 +648,7 @@ esp_err_t fw_update_get_status(fw_update_status_t *out)
         return ESP_ERR_INVALID_ARG;
     }
     memset(out, 0, sizeof(*out));
+    out->next_check_in_s = UINT32_MAX;
     strlcpy(out->running_version, running_version(), sizeof(out->running_version));
 
     station_status_t *st = malloc(sizeof(*st));
@@ -645,6 +672,11 @@ esp_err_t fw_update_get_status(fw_update_status_t *out)
     out->last_err = g_fw.last_err;
     out->progress_pct = g_fw.progress_pct;
     out->last_check_unix = g_fw.last_check_unix;
+    out->last_attempt_unix = g_fw.last_attempt_unix;
+    out->last_check_result = (fw_update_check_result_t)g_fw.last_outcome;
+    out->last_http_status = g_fw.last_http_status;
+    fw_sched_t sched = sched_locked(trusted, now);
+    out->next_check_in_s = g_fw.checks_enabled ? fw_sched_wait_s(&sched) : UINT32_MAX;
     fw_trial_status_locked(out, trusted, now);
     if (g_fw.have_manifest) {
         strlcpy(out->latest_version, g_fw.manifest.version, sizeof(out->latest_version));

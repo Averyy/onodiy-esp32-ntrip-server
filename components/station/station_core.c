@@ -1346,6 +1346,20 @@ int stn_request_recovery(stn_t *s, uint8_t action, bool autocfg)
     return STN_OK;
 }
 
+int stn_request_detect(stn_t *s, int64_t now_ms)
+{
+    if (s->state != STN_NO_RECEIVER || s->maint) {
+        return STN_E_STATE;
+    }
+    if (s->job_busy && s->job.kind == STN_JOB_DETECT) {
+        return STN_OK;   /* the search runs now */
+    }
+    if (s->detect_ms == STN_NEVER || s->detect_ms > now_ms) {
+        s->detect_ms = now_ms;   /* episode_ms and short_fails stay: the schedule goes on from where it is */
+    }
+    return STN_OK;
+}
+
 int stn_request_restart_receiver(stn_t *s)
 {
     if ((s->alerts & STN_ALERT_RECEIVER_IN_LOADER) == 0) {
@@ -1393,6 +1407,30 @@ uint32_t stn_config_retry_in_s(const stn_t *s, int64_t now_ms)
     }
     int64_t sec = (left + 999) / 1000;
     return sec > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)sec;
+}
+
+uint32_t stn_alerts(const stn_t *s)
+{
+    uint32_t a = s->alerts & ~STN_ALERT_NO_RECEIVER;
+    if (s->state == STN_NO_RECEIVER && !s->maint && (a & STN_ALERT_RECEIVER_IN_LOADER) == 0) {
+        a |= STN_ALERT_NO_RECEIVER;
+    }
+    return a;
+}
+
+uint32_t stn_next_detect_in_s(const stn_t *s, int64_t now_ms)
+{
+    if ((s->state != STN_NO_RECEIVER && s->state != STN_DETECTING) || s->maint) {
+        return UINT32_MAX;
+    }
+    if (s->job_busy && s->job.kind == STN_JOB_DETECT) {
+        return 0;   /* a pass runs now */
+    }
+    if (s->detect_ms == STN_NEVER) {
+        return UINT32_MAX;
+    }
+    uint32_t left = secs(s->detect_ms - now_ms);
+    return left == UINT32_MAX ? UINT32_MAX - 1u : left;
 }
 
 /* ---- receiver maintenance --------------------------------------------------- */

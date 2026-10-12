@@ -84,6 +84,34 @@ bool fw_policy_app_install_allowed(const char *running, const char *offered);
 const fw_manifest_gnss_t *fw_policy_gnss_offer(const fw_manifest_t *m, const char *running, const char *model,
                                                uint32_t current_build);
 
+/** Transport result of a release request (fw_http.c). */
+typedef enum {
+    FW_HTTP_OK = 0,
+    FW_HTTP_NOT_MODIFIED,
+    FW_HTTP_NO_RESPONSE,     /**< no final HTTP answer (network, DNS, TLS, timeout) */
+    FW_HTTP_BAD_ANSWER,      /**< an answer, but not the expected one (status, size, too large) */
+    FW_HTTP_LOCAL_ERROR,     /**< out of memory or a local write failed */
+    FW_HTTP_UNTRUSTED,       /**< the URL or a redirect left the repository's releases on GitHub's release hosts,
+                                  or https (release_url.h): not connected */
+} fw_http_result_t;
+
+/** How the last update check went, in the user's terms (same values as fw_update_check_result_t). */
+typedef enum {
+    FW_OUTCOME_NONE = 0,         /**< no check attempted this boot */
+    FW_OUTCOME_OK,               /**< a usable manifest (or "not modified") */
+    FW_OUTCOME_NO_RELEASE,       /**< HTTP 404: no release (or no manifest asset) at the repository */
+    FW_OUTCOME_HTTP_ERROR,       /**< another HTTP status (or too many redirects) */
+    FW_OUTCOME_NO_RESPONSE,      /**< no answer: offline, DNS, TLS, timeout, no trusted clock, out of memory */
+    FW_OUTCOME_UNTRUSTED_REDIRECT, /**< a redirect off the repository's releases on GitHub's release hosts */
+    FW_OUTCOME_BAD_MANIFEST,     /**< an answer, but not a manifest this build accepts (format, signature, size) */
+} fw_check_outcome_t;
+
+/**
+ * Classify a finished check. `http_status` is the final answer's status (0
+ * none); `manifest_ok` whether a 200 answer held a usable manifest.
+ */
+fw_check_outcome_t fw_policy_check_outcome(fw_http_result_t r, int http_status, bool manifest_ok);
+
 /** Outcome of an update check, for the schedule. */
 typedef enum {
     FW_CHECK_NONE = 0,       /**< no check attempted this boot */

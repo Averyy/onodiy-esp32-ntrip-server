@@ -70,6 +70,8 @@ static const err_row_t s_errors[WEB_ERR_COUNT] = {
     [WEB_ERR_NOT_AVAILABLE_YET] = { "not_available_yet", 501, "Not available in this firmware version yet" },
     [WEB_ERR_CHECKS_DISABLED] = { "checks_disabled", 501, "This build cannot check for updates" },
     [WEB_ERR_TOO_MANY_CLIENTS] = { "too_many_clients", 503, "Too many live connections" },
+    [WEB_ERR_NOT_NO_RECEIVER] = { "not_no_receiver", 409, "The station is not without a receiver: nothing to search for" },
+    [WEB_ERR_SAME_IMAGE] = { "same_image", 409, "This image is the one already running (send X-Reinstall: 1 to install it again)" },
 };
 
 const char *web_err_code(web_err_t e)
@@ -935,8 +937,13 @@ web_image_check_t web_image_check(const uint8_t *head, size_t len, uint16_t chip
         return WEB_IMAGE_NOT_APP;
     }
     web_image_info_t info;
+    memset(&info, 0, sizeof(info));
     copy_field(d + WEB_DESC_VERSION_OFS, info.version);
     copy_field(d + WEB_DESC_PROJECT_OFS, info.project);
+    if (len >= WEB_IMAGE_HEAD_SHA) {
+        info.has_elf_sha = true;
+        memcpy(info.elf_sha256, d + WEB_DESC_ELF_SHA_OFS, sizeof(info.elf_sha256));
+    }
     if (out != NULL) {
         *out = info;
     }
@@ -946,10 +953,14 @@ web_image_check_t web_image_check(const uint8_t *head, size_t len, uint16_t chip
     return WEB_IMAGE_OK;
 }
 
-web_err_t web_app_upload_verdict(web_image_check_t chk, bool rolled_back, bool rolled_back_ack)
+web_err_t web_app_upload_verdict(web_image_check_t chk, bool rolled_back, bool rolled_back_ack, bool same_image,
+                                 bool reinstall)
 {
     switch (chk) {
     case WEB_IMAGE_OK:
+        if (same_image && !reinstall) {
+            return WEB_ERR_SAME_IMAGE;
+        }
         return (rolled_back && !rolled_back_ack) ? WEB_ERR_ROLLED_BACK_ACK_REQUIRED : WEB_ERR_COUNT;
     case WEB_IMAGE_OTHER_PROJECT:
         return WEB_ERR_NOT_THIS_PROJECT;

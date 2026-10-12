@@ -452,12 +452,16 @@ async function startWizard(claim) {
   }
 
   /*
-   * Reception check: opens the live view and shows plain hints about the
-   * antenna's sky view before any caster streams. The guide values are in
-   * RX_CHECK (66-live.js). Leaving the step closes the view again.
+   * Reception check. It reads the station's state first: with no receiver
+   * found it shows what to check and when the station looks again ("Check
+   * again" starts a search now) and opens nothing; while the station looks
+   * for the receiver it says so; once the receiver streams it opens the
+   * live view and shows plain hints about the antenna's sky view before any
+   * caster streams (guide values: RX_CHECK, 66-live.js). Leaving the step
+   * closes the view again.
    */
   function stepReception() {
-    const box = h('div', { class: 'stack' }, h('div', { class: 'spinner' }), h('p', { class: 'muted' }, 'Opening the live view…'));
+    const box = h('div', { class: 'stack' }, h('div', { class: 'spinner' }), h('p', { class: 'muted' }, 'Reading the station\'s state…'));
     const err = errBox();
     const cont = btn('Continue', () => leave(cont), 'primary');
     const later = h('p', { class: 'muted small' });
@@ -468,7 +472,10 @@ async function startWizard(claim) {
       h('div', { class: 'form-actions' }, cont),
       skipAll());
 
+    const nr = noReceiverPanel();
+    let mode = '';             /* '', 'receiver' (no receiver, or looking for it), 'live' */
     let opened = false, stopped = false, closedShown = false;
+    let liveSince = 0, postAt = 0, closeIgnored = false;
     async function leave(b) {
       await busy(b, async () => {
         stopped = true;
@@ -483,14 +490,36 @@ async function startWizard(claim) {
       next('reception');
     }
 
-    function render(d) {
+    /* The step is gone when its box left the page: a lost session (login
+     * screen, then a new wizard), "Skip the rest", or anything else that
+     * replaced the page. Polling (which keeps the view from closing as
+     * idle) ends then. */
+    const gone = () => stopped || !box.isConnected;
+
+    function showReceiverMissing(st) {
+      if (mode !== 'receiver') {
+        mode = 'receiver';
+        mount(box, nr.el);
+        err.hidden = true;
+      }
+      nr.update(st);
+      cont.textContent = 'Continue without the check';
+      later.textContent = 'You can check the reception later on the Signals page.';
+    }
+
+    function renderLive(d) {
       const t = d.totals;
       const r = receptionChecks(d);
       const w = d.window || {};
       if (r.waiting) {
+        /* Streaming, but no satellites reported: after two minutes that is the antenna's business. */
+        const long = liveSince && Date.now() - liveSince > 120000;
         patch(box, h('div', { class: 'spinner' }), h('p', null, 'Waiting for the receiver\'s observations… (receiver: ' +
           lbl(L.station, d.receiver_state).toLowerCase() + ')'),
-        h('p', { class: 'muted small' }, 'Right after power-on the receiver needs a minute or two to find satellites, and the station may still be configuring it.'));
+        long ? msg('warn', h('strong', null, 'No satellites reported for two minutes.'), h('div', { class: 'small' },
+          'Check that the antenna cable is screwed on at both ends and that the antenna sees the open sky (not indoors, ' +
+          'not under a roof or next to a wall).')) :
+          h('p', { class: 'muted small' }, 'Right after power-on the receiver needs a minute or two to find satellites, and the station may still be configuring it.'));
       } else {
         patch(box, receptionList(r), liveTiles(t),
           h('div', { class: 'sky-wrap' }, liveSkyPlot(d.satellites || []), h('div', null, cnrLegend(), h('p', { class: 'muted small' }, SYS_KEY),
@@ -499,10 +528,16 @@ async function startWizard(claim) {
       cont.textContent = r.ok ? 'Continue' : 'Continue anyway';
       later.textContent = r.waiting || r.ok ? '' : 'The hints are rough guide values for a first check, not Onocoy\'s own scoring. ' +
         'You can open the live view any time later on the Signals page.';
+      /* A 200 to our own start means open; a closed window read within 5 s
+       * of it is a stale answer, ignored once. */
+      if (w.open === false && Date.now() - postAt < 5000 && !closeIgnored) {
+        closeIgnored = true;
+        return;
+      }
       /* Built on the change only, so its button stays put between refreshes. */
       if (w.open === false && !closedShown) {
         closedShown = true;
-        mount(err, 'The live view closed (' + (lbl(L.liveEnd, w.last_end) || 'time up') + '). ', btn('Open it again', reopen, 'small'));
+        mount(err, 'The live view closed (' + (lbl(L.liveEnd, w.last_end) || 'time up') + '). ', btn('Open it again', openLive, 'small'));
         err.className = 'msg warn';
         err.hidden = false;
       } else if (w.open !== false && closedShown) {
@@ -511,60 +546,75 @@ async function startWizard(claim) {
       }
     }
 
-    async function reopen() {
+    async function openLive() {
+      postAt = Date.now();
+      closeIgnored = false;
+      let d;
       try {
-        const d = await api('POST', '/api/gnss/live', {});
-        opened = true;
-        render(d);
-      } catch (e) {
-        closedShown = false;
-        showErr(e, err);
-      }
-    }
-
-    /* The step is gone when its box left the page: a lost session (login
-     * screen, then a new wizard), "Skip the rest" while the first request
-     * was still out, or anything else that replaced the page. Polling (which
-     * keeps the view from closing as idle) ends then. */
-    const gone = () => stopped || !box.isConnected;
-    let myStop = null;
-    const halt = () => {
-      stopped = true;
-      if (myStop) myStop();
-      if (stopCheck === myStop) stopCheck = null;
-    };
-    (async () => {
-      try {
-        const d = await api('POST', '/api/gnss/live', {});
-        if (gone()) {
-          stopped = true;
-          api('DELETE', '/api/gnss/live').catch(() => {});   /* nobody shows it: close it again */
-          return;
-        }
-        render(d);
-        opened = true;
+        d = await api('POST', '/api/gnss/live', {});
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) return;
         if (gone()) return;
-        patch(box, msg('warn', 'The live view could not be opened: ' + errText(e)),
-          h('p', { class: 'muted small' }, 'You can check the reception later on the Signals page.'));
-        cont.textContent = 'Continue';
+        closedShown = false;
+        if (mode !== 'live') {
+          mode = 'failed';   /* not asked again every 2 s: the user goes on, or checks later on the Signals page */
+          patch(box, msg('warn', 'The live view could not be opened: ' + errText(e)),
+            h('p', { class: 'muted small' }, 'You can check the reception later on the Signals page.'));
+          cont.textContent = 'Continue';
+        } else {
+          showErr(e, err);
+        }
         return;
       }
-      myStop = poller(LIVE_POLL_MS, async () => {
-        if (gone()) {
-          halt();
-          return;
-        }
+      opened = true;
+      if (gone()) {
+        api('DELETE', '/api/gnss/live').catch(() => {});   /* nobody shows it: close it again */
+        return;
+      }
+      if (mode !== 'live') {
+        mode = 'live';
+        liveSince = Date.now();
+      }
+      renderLive(d);
+    }
+
+    async function tick() {
+      if (gone() || mode === 'failed') return;
+      if (mode === 'live') {
         const d = await api('GET', '/api/gnss/live');
-        if (gone()) {
-          halt();
+        if (gone()) return;
+        if (d.receiver_state === 'no_receiver' || d.receiver_state === 'detecting') {
+          /* The receiver went away: say so (the view closes by itself). */
+          const st = await api('GET', '/api/status');
+          if (!gone()) showReceiverMissing(st);
           return;
         }
-        render(d);
-      }, true);
-      stopCheck = myStop;
-    })();
+        renderLive(d);
+        return;
+      }
+      const st = await api('GET', '/api/status');
+      if (gone()) return;
+      const rcv = st.receiver || {};
+      if (rcv.state === 'no_receiver' || rcv.state === 'detecting' || (rcv.state === 'idle' && !rcv.rx_maintenance)) {
+        showReceiverMissing(st);
+      } else if (rcv.rx_maintenance) {
+        mode = '';
+        patch(box, msg('warn', 'Receiver maintenance is on: the station sends the receiver nothing until it ends.'));
+        cont.textContent = 'Continue without the check';
+      } else {
+        await openLive();
+      }
+    }
+
+    let stopPoll = null;
+    const loop = () => {
+      if (gone()) {
+        if (stopPoll) stopPoll();
+        return Promise.resolve();
+      }
+      return tick();
+    };
+    stopPoll = poller(LIVE_POLL_MS, loop);
   }
 
   function stepPassword() {
@@ -601,7 +651,7 @@ async function startWizard(claim) {
     const preset = data.onocoy_preset || { host: 'servers.onocoy.com', port: 2101, ntrip_version: 1, backoff_profile: 'fast' };
     const slots = data.slots || [];
     if (slots.length && slots[0].config === null) {
-      frame('onocoy', 'Onocoy', msg('warn', 'The casters cannot be set up in safe mode. Continue with Wi-Fi and set them up later.'),
+      frame('onocoy', 'Onocoy', msg('warn', 'The casters cannot be set up in safe mode. Continue and set them up later.'),
         h('div', { class: 'form-actions' }, btn('Continue', () => next('onocoy'), 'primary')));
       return;
     }
@@ -613,38 +663,38 @@ async function startWizard(claim) {
       return;
     }
     const cfg = slot.config || {};
-    const user = textInput(isOnocoyHost(cfg.host) ? cfg.mountpoint : '', { maxlength: 47 });
-    const pw = pwInput({ placeholder: cfg.password_set ? 'Stored (leave empty to keep)' : '' });
-    const fUser = field('Credential username', user, 'Generated by Onocoy when you create the credential.');
-    const fPw = field('Credential password', pw, 'The password you chose for that credential.');
+    const ono = isOnocoyHost(cfg.host);
+    /* A slot stored before the username field holds the old credential in `mountpoint`: start empty. */
+    const current = ono && cfg.username;
+    /* What the Onocoy console shows, in its words and order: host and port (fixed), mountpoint, username, password. */
+    const hostI = textInput(preset.host, { readonly: true });
+    const portI = textInput(String(preset.port), { readonly: true, inputmode: 'numeric' });
+    const mpI = textInput(current ? cfg.mountpoint : '', { maxlength: 47 });
+    const userI = textInput(current ? cfg.username : '', { maxlength: 47 });
+    const pw = pwInput({ maxlength: 63, placeholder: ono && cfg.password_set ? 'Stored (leave empty to keep)' : '' });
+    const F = { mountpoint: field('Mountpoint', mpI), username: field('Username', userI), password: field('Password', pw) };
     const err = errBox();
     const dupBox = h('div');
     const submit = h('button', { type: 'submit', class: 'btn primary' }, 'Save and continue');
     frame('onocoy', 'Onocoy',
-      h('p', null, 'Onocoy rewards reference stations for their correction data. In the Onocoy console, open Reference Stations, ' +
-        'then NTRIP Credentials, and add a credential: you pick the password and Onocoy generates the username. Enter both here.'),
+      h('p', null, 'Onocoy rewards reference stations for their correction data.'),
+      h('p', null, ONOCOY_CONSOLE),
       h('form', { onsubmit: async e => {
         e.preventDefault();
-        fUser.error(null);
-        fPw.error(null);
-        const u = user.value.trim();
-        if (!/^[A-Za-z0-9._-]{1,47}$/.test(u)) {
-          fUser.error('Letters, digits, ".", "_" and "-" only, at most 47.');
-          return;
-        }
-        if (!pw.value && !cfg.password_set) {
-          fPw.error('Enter the credential password.');
-          return;
-        }
-        if (/\s/.test(pw.value) || pw.value.length > 63) {
-          fPw.error('At most 63 characters, without spaces.');
+        for (const k of Object.keys(F)) F[k].error(null);
+        const v = { mountpoint: mpI.value.trim(), username: userI.value.trim(), password: pw.value };
+        const pr = onocoyProblems(v, true, ono && cfg.password_set);
+        const bad = Object.keys(F).filter(k => pr[k]);
+        if (bad.length) {
+          for (const k of bad) F[k].error(pr[k]);
+          F[bad[0]].input.focus();
           return;
         }
         /* A slot that already points at Onocoy keeps its other settings (TLS, protocol). */
-        const body = isOnocoyHost(cfg.host) ? { enabled: true, mountpoint: u } :
+        const body = ono ? { enabled: true, mountpoint: v.mountpoint, username: v.username } :
           { enabled: true, name: 'Onocoy', host: preset.host, port: preset.port, ntrip_version: preset.ntrip_version || 1,
-            tls: false, trust: 'bundle', mountpoint: u, backoff_profile: 'fast' };
-        if (pw.value) body.password = pw.value;
+            tls: false, trust: 'bundle', mountpoint: v.mountpoint, username: v.username, backoff_profile: 'fast' };
+        if (v.password) body.password = v.password;
         const doSave = async (ack, button) => {
           if (ack) body.dup_stream_ack = true;
           err.hidden = true;
@@ -653,6 +703,9 @@ async function startWizard(claim) {
           } catch (ex) {
             if (ex instanceof ApiError && ex.code === 'caster_policy' && ex.body.reason === 'dup_stream_ack_required') {
               mount(dupBox, dupPanel(b => doSave(true, b)));
+            } else if (ex instanceof ApiError && ex.code === 'invalid_field' && F[ex.field]) {
+              F[ex.field].error(ruleText(ex));
+              F[ex.field].input.focus();
             } else {
               showErr(ex, err);
             }
@@ -662,10 +715,11 @@ async function startWizard(claim) {
           next('onocoy');
         };
         await doSave(false, submit);
-      } }, fUser.el, fPw.el, dupBox, err, h('div', { class: 'form-actions' }, submit,
+      } }, h('div', { class: 'cols c2' }, field('Host', hostI).el, field('Port', portI).el),
+      F.mountpoint.el, F.username.el, F.password.el, dupBox, err, h('div', { class: 'form-actions' }, submit,
         btn('Skip for now', () => next('onocoy'), 'ghost'))),
       skipAll());
-    user.focus();
+    mpI.focus();
   }
 
   function stepCasters() {
@@ -678,7 +732,7 @@ async function startWizard(claim) {
       mount(box,
         configured.length ? h('div', { class: 'caster-list' }, configured.map(s => h('div', { class: 'caster' },
           h('div', { class: 'name' }, s.config.name || s.config.host), h('div', { class: 'muted small' },
-            s.config.host + ':' + s.config.port + (s.config.enabled ? '' : ' · off'))))) : h('p', { class: 'muted' }, 'No caster set up yet.'),
+            s.config.host + ':' + s.config.port)))) : h('p', { class: 'muted' }, 'No caster set up yet.'),
         editorBox);
     };
     const addBtn = btn('Add a caster', () => {

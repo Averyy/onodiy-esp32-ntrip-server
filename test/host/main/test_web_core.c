@@ -468,13 +468,43 @@ TEST_CASE("app upload check reads the image header and app description", "[web_c
 
 TEST_CASE("app upload: a version rolled back here needs the acknowledgement, like the banner's", "[web_core]")
 {
-    TEST_ASSERT_EQUAL(WEB_ERR_COUNT, web_app_upload_verdict(WEB_IMAGE_OK, false, false));
-    TEST_ASSERT_EQUAL(WEB_ERR_ROLLED_BACK_ACK_REQUIRED, web_app_upload_verdict(WEB_IMAGE_OK, true, false));
-    TEST_ASSERT_EQUAL(WEB_ERR_COUNT, web_app_upload_verdict(WEB_IMAGE_OK, true, true));
-    TEST_ASSERT_EQUAL(WEB_ERR_NOT_THIS_PROJECT, web_app_upload_verdict(WEB_IMAGE_OTHER_PROJECT, false, true));
-    TEST_ASSERT_EQUAL(WEB_ERR_INVALID_IMAGE, web_app_upload_verdict(WEB_IMAGE_NOT_APP, true, true));
+    TEST_ASSERT_EQUAL(WEB_ERR_COUNT, web_app_upload_verdict(WEB_IMAGE_OK, false, false, false, false));
+    TEST_ASSERT_EQUAL(WEB_ERR_ROLLED_BACK_ACK_REQUIRED, web_app_upload_verdict(WEB_IMAGE_OK, true, false, false, false));
+    TEST_ASSERT_EQUAL(WEB_ERR_COUNT, web_app_upload_verdict(WEB_IMAGE_OK, true, true, false, false));
+    TEST_ASSERT_EQUAL(WEB_ERR_NOT_THIS_PROJECT, web_app_upload_verdict(WEB_IMAGE_OTHER_PROJECT, false, true, false, false));
+    TEST_ASSERT_EQUAL(WEB_ERR_INVALID_IMAGE, web_app_upload_verdict(WEB_IMAGE_NOT_APP, true, true, false, false));
     TEST_ASSERT_EQUAL_STRING("rolled_back_ack_required", web_err_code(WEB_ERR_ROLLED_BACK_ACK_REQUIRED));
     TEST_ASSERT_EQUAL(409, web_err_status(WEB_ERR_ROLLED_BACK_ACK_REQUIRED));
+}
+
+TEST_CASE("app upload: the image already running is refused unless a reinstall was asked for", "[web_core]")
+{
+    TEST_ASSERT_EQUAL(WEB_ERR_SAME_IMAGE, web_app_upload_verdict(WEB_IMAGE_OK, false, false, true, false));
+    TEST_ASSERT_EQUAL(WEB_ERR_COUNT, web_app_upload_verdict(WEB_IMAGE_OK, false, false, true, true));
+    /* Another project or no app at all: those refusals come first. */
+    TEST_ASSERT_EQUAL(WEB_ERR_NOT_THIS_PROJECT, web_app_upload_verdict(WEB_IMAGE_OTHER_PROJECT, false, false, true, false));
+    TEST_ASSERT_EQUAL(WEB_ERR_INVALID_IMAGE, web_app_upload_verdict(WEB_IMAGE_NOT_APP, false, false, true, false));
+    TEST_ASSERT_EQUAL_STRING("same_image", web_err_code(WEB_ERR_SAME_IMAGE));
+    TEST_ASSERT_EQUAL(409, web_err_status(WEB_ERR_SAME_IMAGE));
+    TEST_ASSERT_EQUAL_STRING("not_no_receiver", web_err_code(WEB_ERR_NOT_NO_RECEIVER));
+    TEST_ASSERT_EQUAL(409, web_err_status(WEB_ERR_NOT_NO_RECEIVER));
+}
+
+TEST_CASE("app upload check reads the app's ELF SHA-256 from the description", "[web_core]")
+{
+    uint8_t img[256];
+    web_image_info_t info;
+    fake_image(img, sizeof(img), 9, "onocoydiy-esp-um982", "v0.4.0");
+    for (int i = 0; i < 32; i++) {
+        img[WEB_IMAGE_DESC_OFS + WEB_DESC_ELF_SHA_OFS + i] = (uint8_t)(0xA0 + i);
+    }
+    TEST_ASSERT_EQUAL(WEB_IMAGE_OK, web_image_check(img, sizeof(img), 9, "onocoydiy-esp-um982", &info));
+    TEST_ASSERT_TRUE(info.has_elf_sha);
+    TEST_ASSERT_EQUAL_HEX8(0xA0, info.elf_sha256[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xBF, info.elf_sha256[31]);
+    /* A head that stops before the digest: the rest is still checked, the digest unknown. */
+    TEST_ASSERT_EQUAL(WEB_IMAGE_OK, web_image_check(img, WEB_IMAGE_HEAD_SHA - 1, 9, "onocoydiy-esp-um982", &info));
+    TEST_ASSERT_FALSE(info.has_elf_sha);
 }
 
 /* ---- misc --------------------------------------------------------------------------------------------- */

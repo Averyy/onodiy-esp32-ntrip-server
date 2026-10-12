@@ -158,10 +158,11 @@ ntrip_fields_result_t ntrip_validate_fields(const ntrip_fields_t *f)
     if (has_ctrl(mount) || !mount_ok(mount)) {
         return NTRIP_FIELDS_BAD_MOUNTPOINT;
     }
-    if (has_ctrl(user) || strchr(user, ':') != NULL) {
-        return NTRIP_FIELDS_BAD_USERNAME;
+    bool onocoy = ntrip_host_is_onocoy(host);
+    if (has_ctrl(user) || strchr(user, ':') != NULL || (onocoy && !mount_ok(user))) {
+        return NTRIP_FIELDS_BAD_USERNAME;   /* Onocoy over 1.0 sends the username as the mountpoint */
     }
-    if (has_ctrl(pass) || (!f->v2 && !v1_password_ok(pass))) {
+    if (has_ctrl(pass) || ((!f->v2 || onocoy) && !v1_password_ok(pass))) {
         return NTRIP_FIELDS_BAD_PASSWORD;
     }
     if (!label_ok(label)) {
@@ -174,10 +175,10 @@ ntrip_fields_result_t ntrip_validate_fields(const ntrip_fields_t *f)
         if (empty(host) || empty(mount)) {
             return NTRIP_FIELDS_MISSING;
         }
-        if (!f->v2 && empty(pass)) {
+        if ((!f->v2 || onocoy) && empty(pass)) {
             return NTRIP_FIELDS_MISSING;
         }
-        if (f->v2 && empty(user) && !ntrip_host_is_onocoy(host)) {
+        if (f->v2 && empty(user) && !onocoy) {
             return NTRIP_FIELDS_MISSING;
         }
     }
@@ -309,14 +310,24 @@ void ntrip_wire_names(const char *host, bool v2, const char *mountpoint, const c
 {
     out->mount = mountpoint;
     out->user = username;
-    if (ntrip_host_is_onocoy(host)) {
-        /* The credential username lives in `mountpoint`. */
-        if (v2) {
-            out->mount = empty(label) ? "onocoydiy" : label;
-            out->user = mountpoint;
-        } else {
+    if (!ntrip_host_is_onocoy(host)) {
+        return;
+    }
+    if (!empty(username)) {
+        /* What the Onocoy console gives: 2.0 posts to the mountpoint as the
+         * username; 1.0-only sources send the username as the mountpoint. */
+        if (!v2) {
+            out->mount = username;
             out->user = "";
         }
+        return;
+    }
+    /* Stored before the username field existed: the credential username lives in `mountpoint`. */
+    if (v2) {
+        out->mount = empty(label) ? "onocoydiy" : label;
+        out->user = mountpoint;
+    } else {
+        out->user = "";
     }
 }
 
@@ -1622,6 +1633,41 @@ bool ntrip_hist_down(ntrip_hist_t *h, uint32_t slot, uint8_t cls, uint32_t now_s
 }
 
 /* ---- Onocoy daily budget ----------------------------------------------------------- */
+
+uint16_t ntrip_graced_so_far_permille(uint32_t unplanned_offline_s, uint32_t elapsed_s)
+{
+    if (elapsed_s == 0 || unplanned_offline_s <= NTRIP_GRACE_S) {
+        return 1000u;
+    }
+    uint64_t lost = (uint64_t)(unplanned_offline_s - NTRIP_GRACE_S) * 1000u;
+    uint64_t per = (lost + elapsed_s / 2u) / elapsed_s;   /* rounded */
+    return per >= 1000u ? 0u : (uint16_t)(1000u - per);
+}
+
+void ntrip_day_metrics(const ntrip_day_in_t *in, ntrip_day_out_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!in->counted) {
+        return;
+    }
+    out->valid = true;
+    out->rate_valid = in->epochs_sent_today > 0;
+    uint32_t rate = 1000u;
+    if (out->rate_valid && in->online_s > 0) {
+        uint64_t r = (uint64_t)in->epochs_sent_today * 1000u / in->online_s;
+        rate = r > 1000u ? 1000u : (uint32_t)r;
+    }
+    out->data_rate_permille = (uint16_t)rate;
+    uint32_t budget = ntrip_offline_budget_s(rate);
+    uint64_t graced = ((uint64_t)in->online_s + NTRIP_GRACE_S) * 1000u / NTRIP_DAY_S;
+    out->graced_uptime_permille = (uint16_t)(graced > 1000u ? 1000u : graced);
+    out->budget_left_s = budget > in->offline_s ? budget - in->offline_s : 0;
+    out->streak_ok = in->offline_s <= budget;
+    if (in->day_known) {
+        out->so_far_valid = true;
+        out->graced_so_far_permille = ntrip_graced_so_far_permille(in->unplanned_offline_s, in->elapsed_s);
+    }
+}
 
 uint32_t ntrip_offline_budget_s(uint32_t data_rate_permille)
 {

@@ -64,6 +64,7 @@ typedef struct {
     uint32_t size;
     bool flag;               /* app: any project; log: previous boot */
     bool ack;                /* app: the user knows the version was rolled back here */
+    bool reinstall;          /* app: the user asked to install the image already running again (X-Reinstall: 1) */
     web_err_t err;
     uint32_t retry_in_s;
 } job_t;
@@ -304,7 +305,17 @@ static void upload_app(const job_t *job)
     web_image_check_t chk = web_image_check(s_io, head, (uint16_t)CONFIG_IDF_FIRMWARE_CHIP_ID,
                                             job->flag ? NULL : WEB_PROJECT_NAME, &info);
     bool rolled_back = chk == WEB_IMAGE_OK && fw_update_is_rolled_back(info.version);
-    web_err_t verdict = web_app_upload_verdict(chk, rolled_back, job->ack);
+    bool same = chk == WEB_IMAGE_OK && info.has_elf_sha && fw_update_same_as_running(info.elf_sha256);
+    web_err_t verdict = web_app_upload_verdict(chk, rolled_back, job->ack, same, job->reinstall);
+    if (verdict == WEB_ERR_SAME_IMAGE) {
+        /* The code running now: installing it again restarts the station for
+         * nothing, unless the user asked for exactly that. */
+        progress_done(NULL, "refused", ESP_ERR_INVALID_STATE);
+        refuse(req, left, verdict, NULL, UINT32_MAX);
+        web_note_result("app_upload", ESP_ERR_INVALID_STATE, "refused");
+        ESP_LOGI(TAG, "app upload refused: %s is the image already running", info.version);
+        return;
+    }
     if (verdict == WEB_ERR_ROLLED_BACK_ACK_REQUIRED) {
         /* Before anything is written: the same warning as from the banner. */
         progress_done(NULL, "refused", ESP_ERR_INVALID_STATE);
@@ -605,12 +616,10 @@ static bool queue_async(httpd_req_t *req, job_t *job)
     return true;
 }
 
-/* Answer at once and close (the body is not read). */
+/* Answer at once and close (the body is not read; what is in flight is drained for a moment, web_linger_close). */
 static esp_err_t answer_and_close(httpd_req_t *req, web_err_t err, uint32_t retry_in_s)
 {
-    httpd_resp_set_hdr(req, "Connection", "close");
-    web_send_error(req, err, NULL, NULL, retry_in_s, NULL, NULL);
-    return ESP_FAIL;
+    return web_refuse_and_close_retry(req, err, retry_in_s);
 }
 
 /* Refuse an upload after reading its body (on the worker), or at once when it is busy. */
@@ -661,7 +670,9 @@ esp_err_t web_upload_app(web_req_t *r)
     char v[4];
     bool any_project = web_query_value(r->query, "any_project", v, sizeof(v)) && strcmp(v, "1") == 0;
     bool ack = web_query_value(r->query, "rolled_back_ack", v, sizeof(v)) && strcmp(v, "1") == 0;
-    job_t job = { .kind = JOB_UPLOAD_APP, .size = (uint32_t)req->content_len, .flag = any_project, .ack = ack };
+    bool reinstall = httpd_req_get_hdr_value_str(req, "X-Reinstall", v, sizeof(v)) == ESP_OK && strcmp(v, "1") == 0;
+    job_t job = { .kind = JOB_UPLOAD_APP, .size = (uint32_t)req->content_len, .flag = any_project, .ack = ack,
+                  .reinstall = reinstall };
     if (!queue_async(req, &job)) {
         atomic_store(&s_busy, false);
         return answer_and_close(req, WEB_ERR_BUSY, UINT32_MAX);

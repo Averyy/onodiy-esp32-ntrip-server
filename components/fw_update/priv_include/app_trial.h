@@ -68,6 +68,8 @@ typedef struct {
     uint8_t stage;               /**< fw_trial_rec_stage_t */
     uint8_t attempt;             /**< 1; 2 when installed again after a stage-1 rollback */
     bool baseline_known;         /**< false: activated without a record, stage 2 has nothing to reach */
+    bool same_image;             /**< the user installed the image already running again (identical app ELF
+                                      SHA-256): stage 1 only, no stage 2 and no crash watch (identical code) */
     uint8_t baseline;            /**< FW_BASELINE_* */
     uint8_t streaming_slots;     /**< bit n: caster slot n was streaming */
     int64_t installed_unix;      /**< 0 = no trusted clock at install */
@@ -93,6 +95,14 @@ bool fw_trial_rec_decode(const uint8_t *buf, size_t len, fw_trial_rec_t *out);
  */
 void fw_trial_rec_new(fw_trial_rec_t *out, const fw_trial_rec_t *prev, const char *version, uint8_t baseline,
                       uint8_t streaming_slots, int64_t installed_unix);
+
+/**
+ * The record's stage once the image on trial was confirmed (stage 1 over):
+ * VERIFYING, or NONE for a reinstall of the identical image (same_image):
+ * identical code needs no verify window and no crash watch, so nothing
+ * (receiver updates included) waits for them.
+ */
+fw_trial_rec_stage_t fw_trial_after_confirm(const fw_trial_rec_t *rec);
 
 /* ---- rolled-back list ---------------------------------------------------------------- */
 

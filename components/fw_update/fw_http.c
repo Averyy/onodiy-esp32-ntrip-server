@@ -215,6 +215,7 @@ static fw_http_result_t open_follow(esp_http_client_handle_t c, hdr_ctx_t *ctx, 
         if (is_redirect(st)) {
             if (redirects >= CONFIG_FW_UPDATE_MAX_REDIRECTS) {
                 ESP_LOGW(TAG, "too many redirects");
+                *status = st;
                 return FW_HTTP_BAD_ANSWER;
             }
             int flushed = 0;
@@ -238,10 +239,13 @@ static fw_http_result_t open_follow(esp_http_client_handle_t c, hdr_ctx_t *ctx, 
 }
 
 fw_http_result_t fw_http_fetch(const char *url, const char *etag_in, size_t cap, char **out, size_t *out_len,
-                               char *etag_out, size_t etag_size)
+                               char *etag_out, size_t etag_size, int *http_status)
 {
     *out = NULL;
     *out_len = 0;
+    if (http_status != NULL) {
+        *http_status = 0;
+    }
     hdr_ctx_t ctx = { .etag = etag_out, .etag_size = etag_size };
     esp_http_client_config_t cfg;
     client_config(&cfg, url, &ctx);
@@ -257,6 +261,9 @@ fw_http_result_t fw_http_fetch(const char *url, const char *etag_in, size_t cap,
     char *buf = NULL;
     size_t total = 0;
     fw_http_result_t r = open_follow(c, &ctx, &status, &length);
+    if (http_status != NULL) {
+        *http_status = status;
+    }
     if (r == FW_HTTP_OK && status == 304) {
         r = etag_in != NULL ? FW_HTTP_NOT_MODIFIED : FW_HTTP_BAD_ANSWER;
     } else if (r == FW_HTTP_OK && status != 200) {

@@ -23,8 +23,11 @@ static const char *TAG = "fw_update";
 
 #define WATCH_S ((uint32_t)CONFIG_FW_UPDATE_CRASH_WATCH_H * 3600u)
 
-/* DIAG_EV_APP_REVERT `a`: the stage that gave the image up (0 = the user). */
+/* DIAG_EV_APP_REVERT `a`: the stage that gave the image up (0 = the user);
+ * `b`: 1 for the user's rollback (a stage-1 rollback the bootloader did
+ * carries the attempt, 1 or 2, with `a` = confirming, so `a` tells them apart). */
 #define REVERT_BY_USER 0
+#define REVERT_USER_B  1
 
 /* ---- persistence -------------------------------------------------------------------- */
 
@@ -333,6 +336,18 @@ static void confirm(uint32_t uptime, bool trusted, int64_t now)
         return;
     }
     fw_lock();
+    if (fw_trial_after_confirm(&g_fw.rec) == FW_TRIAL_REC_NONE) {
+        /* The identical image again (a reinstall the user asked for): the
+         * same code needs no verify window and no crash watch. */
+        g_fw.rec.stage = FW_TRIAL_REC_NONE;
+        fw_trial_rec_t done = g_fw.rec;
+        g_fw.rollback_known = false;   /* the otadata changed */
+        fw_unlock();
+        fw_trial_save_rec(&done);
+        set_run(FW_TRIAL_RUN_NONE);
+        ESP_LOGI(TAG, "app %s confirmed; the same image as before the reinstall: trial over", done.version);
+        return;
+    }
     g_fw.rec.stage = FW_TRIAL_REC_VERIFYING;
     g_fw.rec.confirm_uptime_s = uptime;
     g_fw.rec.watch_start_unix = trusted ? now : 0;
@@ -448,7 +463,7 @@ void fw_trial_refresh_rollback(void)
     fw_unlock();
 }
 
-void fw_trial_record_install(const char *version, uint8_t baseline, uint8_t slots)
+void fw_trial_record_install(const char *version, uint8_t baseline, uint8_t slots, bool same_image)
 {
     int64_t now = 0;
     bool trusted = fw_clock(&now);
@@ -456,6 +471,7 @@ void fw_trial_record_install(const char *version, uint8_t baseline, uint8_t slot
     fw_trial_rec_t prev = g_fw.rec;
     fw_trial_rec_t rec;
     fw_trial_rec_new(&rec, &prev, version, baseline, slots, trusted ? now : 0);
+    rec.same_image = same_image;
     g_fw.rec = rec;
     g_fw.run = FW_TRIAL_RUN_NONE;   /* this image's own trial (if any) is superseded */
     fw_unlock();
@@ -585,7 +601,7 @@ esp_err_t fw_update_rollback(void)
     fw_unlock();
     fw_trial_save_bad(&bad);
     fw_trial_save_rec(&rec);
-    journal(DIAG_EV_APP_REVERT, REVERT_BY_USER, 0);
+    journal(DIAG_EV_APP_REVERT, REVERT_BY_USER, REVERT_USER_B);
     fw_set_state(FW_UPDATE_REBOOT_PENDING, ESP_OK);
     ESP_LOGW(TAG, "rollback of %s requested by the user: rebooting into the previous image", version);
     /* The update slot stays claimed until the reboot: no receiver flash starts. */

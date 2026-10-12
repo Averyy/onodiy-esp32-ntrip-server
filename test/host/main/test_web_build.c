@@ -50,6 +50,7 @@ static void fixture(void)
     strcpy(s->cfg[0].name, "Onocoy");
     strcpy(s->cfg[0].host, "servers.onocoy.com");
     strcpy(s->cfg[0].mountpoint, "secretuser");
+    strcpy(s->cfg[0].username, "secretname");
     strcpy(s->cfg[0].password, "secretpw");
     s->cfg[0].password_set = true;
     strcpy(s->cfg[1].name, "Spare");
@@ -58,6 +59,11 @@ static void fixture(void)
     s->cst[0].budget_left_s = 469;
     s->cst[0].graced_uptime_permille = 1000;
     s->cst[0].streak_ok = true;
+    s->cst[0].day_metrics_valid = true;
+    s->cst[0].data_rate_valid = true;
+    s->cst[0].data_rate_permille = 1000;
+    s->cst[0].so_far_valid = true;
+    s->cst[0].graced_uptime_so_far_permille = 1000;
     s->cst[1].state = NTRIP_STATE_DISABLED;
     s->cst[1].budget_left_s = 77;
     s->health.level = HEALTH_DEGRADED;
@@ -126,6 +132,7 @@ TEST_CASE("admin status maps sentinels, alerts and the protected slot", "[web_bu
     /* Secrets are never part of a status. */
     TEST_ASSERT_NULL(strstr(s_out, "secretpw"));
     TEST_ASSERT_NULL(strstr(s_out, "secretuser"));
+    TEST_ASSERT_NULL(strstr(s_out, "secretname"));
     cJSON_Delete(root);
 }
 
@@ -1107,5 +1114,215 @@ TEST_CASE("health: restart hold reasons, the presence limit and the cap's wait",
     TEST_ASSERT_EQUAL_STRING("admin", cJSON_GetArrayItem(at(root, "reboot_hold"), 0)->valuestring);
     TEST_ASSERT_EQUAL(61, at(root, "reboot_hold_left_s")->valueint);
     TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "reboot_cap_wait_s")));
+    cJSON_Delete(root);
+}
+
+/* ---- no receiver, message 1230, update check, Onocoy set up ------------------------------------- */
+
+TEST_CASE("status: no receiver is an alert with the bytes seen and the next search", "[web_build]")
+{
+    fixture();
+    s_snap.st.state = STATION_STATE_NO_RECEIVER;
+    s_snap.st.alerts = STATION_ALERT_NO_RECEIVER;
+    s_snap.st.detect_saw_bytes = true;
+    s_snap.st.next_detect_in_s = 27;
+    s_snap.health.alerts = 0;
+    cJSON *root = build_status(false);
+    const cJSON *alerts = at(root, "alerts");
+    TEST_ASSERT_EQUAL(1, cJSON_GetArraySize(alerts));
+    const cJSON *a = cJSON_GetArrayItem(alerts, 0);
+    TEST_ASSERT_EQUAL_STRING("station", at(a, "source")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("no_receiver", at(a, "id")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(a, "saw_bytes")));
+    TEST_ASSERT_EQUAL(27, at(a, "next_detect_in_s")->valueint);
+    TEST_ASSERT_EQUAL(27, at(at(root, "receiver"), "next_detect_in_s")->valueint);
+    cJSON_Delete(root);
+
+    s_snap.st.next_detect_in_s = UINT32_MAX;   /* nothing scheduled */
+    s_snap.st.detect_saw_bytes = false;
+    root = build_status(false);
+    a = cJSON_GetArrayItem(at(root, "alerts"), 0);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(a, "saw_bytes")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(a, "next_detect_in_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "receiver"), "next_detect_in_s")));
+    cJSON_Delete(root);
+}
+
+static cJSON *build_gnss_json(const station_status_t *st)
+{
+    static web_gnss_snap_t g;
+    memset(&g, 0, sizeof(g));
+    g.st = st;
+    g.link.last_rx_age_ms = UINT32_MAX;
+    g.link.last_rtcm_age_ms = UINT32_MAX;
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_gnss(&w, &g);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    return root;
+}
+
+TEST_CASE("receiver: message 1230 is null until it was ever applied", "[web_build]")
+{
+    fixture();
+    station_status_t *st = &s_snap.st;
+    st->rtcm1230_known = false;   /* gnss/rtcm1230_ok missing */
+    st->rtcm1230_supported = false;
+    cJSON *root = build_gnss_json(st);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "rtcm1230_supported")));
+    cJSON_Delete(root);
+    st->rtcm1230_known = true;    /* stored 0 */
+    root = build_gnss_json(st);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "rtcm1230_supported")));
+    cJSON_Delete(root);
+    st->rtcm1230_supported = true;   /* stored 1 */
+    root = build_gnss_json(st);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "rtcm1230_supported")));
+    cJSON_Delete(root);
+
+    /* The signals view says the same. */
+    gnss_obs_summary_t sum;
+    memset(&sum, 0, sizeof(sum));
+    um98x_base_profile_t p;
+    memset(&p, 0, sizeof(p));
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_signals(&w, &sum, NULL, 0, &p, -1);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "rtcm1230_supported")));
+    cJSON_Delete(root);
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_signals(&w, &sum, NULL, 0, &p, 0);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "rtcm1230_supported")));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("GET /api/update: a failed check says why, when, and the app slot's size", "[web_build]")
+{
+    fixture();
+    s_snap.fw.last_check_unix = 0;   /* never succeeded */
+    s_snap.fw.last_attempt_unix = 1760090000;
+    s_snap.fw.last_check_result = FW_CHECK_RESULT_NO_RELEASE;
+    s_snap.fw.last_http_status = 404;
+    s_snap.fw.next_check_in_s = 86000;
+    static const uint8_t sha[32] = { 0xAB, 0xCD };
+    web_update_snap_t u = { .fw = &s_snap.fw, .st = &s_snap.st, .app_max_bytes = 4194304, .running_elf_sha256 = sha };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_update(&w, &u);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_EQUAL_STRING("no_release", at(root, "last_check_result")->valuestring);
+    TEST_ASSERT_EQUAL(404, at(root, "last_http_status")->valueint);
+    TEST_ASSERT_EQUAL_DOUBLE(1760090000.0, at(root, "last_attempt_unix")->valuedouble);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "last_check_unix")));
+    TEST_ASSERT_EQUAL(86000, at(root, "next_check_in_s")->valueint);
+    TEST_ASSERT_EQUAL(4194304, at(root, "app_max_bytes")->valueint);
+    TEST_ASSERT_EQUAL_STRING_LEN("abcd0000", at(root, "running_elf_sha256")->valuestring, 8);
+    TEST_ASSERT_EQUAL(64, (int)strlen(at(root, "running_elf_sha256")->valuestring));
+    cJSON_Delete(root);
+
+    /* No check this boot: nothing to say. */
+    s_snap.fw.last_attempt_unix = 0;
+    s_snap.fw.last_check_result = FW_CHECK_RESULT_NONE;
+    s_snap.fw.last_http_status = 0;
+    s_snap.fw.next_check_in_s = UINT32_MAX;
+    u.app_max_bytes = 0;
+    u.running_elf_sha256 = NULL;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_update(&w, &u);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "last_check_result")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "last_http_status")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "last_attempt_unix")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "next_check_in_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "app_max_bytes")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "running_elf_sha256")));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("Onocoy day figures are null unless the slot is enabled and set up", "[web_build]")
+{
+    fixture();
+    /* Set up and enabled: the figures, the day so far, ready. */
+    cJSON *root = build_status(false);
+    const cJSON *c0 = cJSON_GetArrayItem(at(root, "casters"), 0);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(c0, "onocoy_ready")));
+    TEST_ASSERT_EQUAL(1000, at(c0, "graced_uptime_so_far_permille")->valueint);
+    TEST_ASSERT_EQUAL(1000, at(c0, "data_rate_permille")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(cJSON_GetArrayItem(at(root, "casters"), 1), "onocoy_ready")));
+    cJSON_Delete(root);
+
+    /* Nothing sent today yet: no data rate. */
+    s_snap.cst[0].data_rate_valid = false;
+    root = build_status(false);
+    c0 = cJSON_GetArrayItem(at(root, "casters"), 0);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(c0, "data_rate_permille")));
+    TEST_ASSERT_EQUAL(469, at(c0, "budget_left_s")->valueint);
+    cJSON_Delete(root);
+
+    /* Not set up (no username: stored before the console's three values): nothing, and no budget. */
+    fixture();
+    s_snap.cfg[0].username[0] = '\0';
+    s_snap.cst[0].day_metrics_valid = false;
+    root = build_status(false);
+    c0 = cJSON_GetArrayItem(at(root, "casters"), 0);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(c0, "onocoy_ready")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(c0, "graced_uptime_permille")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(c0, "streak_ok")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(c0, "budget_left_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(c0, "data_rate_permille")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(c0, "graced_uptime_so_far_permille")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "availability"), "budget_left_s")));
+    cJSON_Delete(root);
+
+    /* GET /api/casters: the entry says whether the slot is set up. */
+    fixture();
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_caster_entry(&w, 0, &s_snap.cfg[0], &s_snap.cst[0]);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "onocoy_ready")));
+    TEST_ASSERT_EQUAL(1000, at(at(root, "status"), "graced_uptime_so_far_permille")->valueint);
+    cJSON_Delete(root);
+    s_snap.cfg[0].password_set = false;   /* no password: not set up */
+    s_snap.cfg[0].password[0] = '\0';
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_caster_entry(&w, 0, &s_snap.cfg[0], &s_snap.cst[0]);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "onocoy_ready")));
+    cJSON_Delete(root);
+
+    /* Availability with the slot off: no percentages. */
+    ledger_day_t today;
+    memset(&today, 0, sizeof(today));
+    today.utc_day = 20736;
+    fixture();
+    s_snap.cfg[0].enabled = false;
+    s_snap.cst[0].day_metrics_valid = false;
+    web_avail_snap_t a = {
+        .clock = LEDGER_CLOCK_GNSS, .second_of_day = 3600, .slots = 2, .cfg = s_snap.cfg, .protected_slot = 0,
+        .protected_status = &s_snap.cst[0], .down_today_s = 0, .budget_left_s = 473, .today_valid = true,
+        .today = &today,
+    };
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_availability(&w, &a);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    const cJSON *pr = at(root, "protected");
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(pr, "enabled")));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(pr, "onocoy_ready")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(pr, "graced_uptime_permille")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(pr, "data_rate_permille")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(pr, "streak_ok")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(pr, "budget_left_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(pr, "graced_uptime_so_far_permille")));
     cJSON_Delete(root);
 }

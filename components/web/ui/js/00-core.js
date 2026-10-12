@@ -272,23 +272,34 @@ function radios(legend, name, options, value) {
   };
 }
 
-function bar(fraction, tone) {
+/** A bar for a fraction; label names it for assistive technology. */
+function bar(fraction, tone, label) {
   const f = Math.max(0, Math.min(1, fraction || 0));
-  return h('div', { class: 'bar ' + (tone || ''), role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100,
-    'aria-valuenow': Math.round(f * 100) }, h('span', { style: { width: (f * 100).toFixed(1) + '%' } }));
+  return h('div', { class: 'bar ' + (tone || ''), role: 'progressbar', 'aria-label': label || 'Progress', 'aria-valuemin': 0,
+    'aria-valuemax': 100, 'aria-valuenow': Math.round(f * 100) }, h('span', { style: { width: (f * 100).toFixed(1) + '%' } }));
 }
 
+/**
+ * Table from header texts and rows of cells. opts.num: indexes of numeric
+ * columns (right-aligned); opts.stack: on a phone (under 480 px) each row
+ * becomes a list of "header: value" lines instead of a table that scrolls
+ * sideways (every column stays readable).
+ */
 function table(head, rows, opts) {
   const numeric = (opts && opts.num) || [];
-  return h('div', { class: 'scroll' }, h('table', null,
+  const stack = !!(opts && opts.stack);
+  return h('div', { class: 'scroll' }, h('table', { class: stack ? 'stack-sm' : null },
     h('thead', null, h('tr', null, head.map((t, i) => h('th', { class: numeric.indexOf(i) >= 0 ? 'num' : null }, t)))),
     h('tbody', null, rows.map(r => h('tr', null, r.map((c, i) =>
-      h('td', { class: numeric.indexOf(i) >= 0 ? 'num' : null }, c === null || c === undefined ? '–' : c)))))));
+      h('td', { class: numeric.indexOf(i) >= 0 ? 'num' : null, 'data-label': stack ? head[i] : null },
+        c === null || c === undefined ? '–' : c)))))));
 }
 
 /* ---- Formatting -------------------------------------------------------- */
 
 const DASH = '–';
+/* Between a number and its unit: a line never breaks there ("7 min 49 s" wraps only between the pairs). */
+const NB = '\u00a0';
 
 const fmt = {
   /** Duration in seconds, e.g. "7 min 49 s", "3 h 12 min". */
@@ -296,33 +307,33 @@ const fmt = {
     if (s === null || s === undefined || isNaN(s)) return DASH;
     s = Math.max(0, Math.round(s));
     const d = Math.floor(s / 86400), hh = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
-    if (d) return d + ' d ' + hh + ' h';
-    if (hh) return hh + ' h ' + m + ' min';
-    if (m) return m + ' min' + (ss ? ' ' + ss + ' s' : '');
-    return ss + ' s';
+    if (d) return d + NB + 'd ' + hh + NB + 'h';
+    if (hh) return hh + NB + 'h ' + m + NB + 'min';
+    if (m) return m + NB + 'min' + (ss ? ' ' + ss + NB + 's' : '');
+    return ss + NB + 's';
   },
   /** Age or latency in milliseconds. */
   ms(v) {
     if (v === null || v === undefined || isNaN(v)) return DASH;
-    if (v < 1000) return Math.round(v) + ' ms';
-    if (v < 60000) return (v / 1000).toFixed(v < 10000 ? 1 : 0) + ' s';
+    if (v < 1000) return Math.round(v) + NB + 'ms';
+    if (v < 60000) return (v / 1000).toFixed(v < 10000 ? 1 : 0) + NB + 's';
     return fmt.dur(v / 1000);
   },
   bytes(b) {
     if (b === null || b === undefined || isNaN(b)) return DASH;
-    if (b < 1024) return b + ' B';
-    if (b < 1048576) return (b / 1024).toFixed(b < 10240 ? 1 : 0) + ' KB';
-    if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
-    return (b / 1073741824).toFixed(2) + ' GB';
+    if (b < 1024) return b + NB + 'B';
+    if (b < 1048576) return (b / 1024).toFixed(b < 10240 ? 1 : 0) + NB + 'KB';
+    if (b < 1073741824) return (b / 1048576).toFixed(1) + NB + 'MB';
+    return (b / 1073741824).toFixed(2) + NB + 'GB';
   },
   num(n) {
     return n === null || n === undefined || isNaN(n) ? DASH : Number(n).toLocaleString();
   },
   permille(p) {
-    return p === null || p === undefined ? DASH : (p / 10).toFixed(1) + ' %';
+    return p === null || p === undefined ? DASH : (p / 10).toFixed(1) + NB + '%';
   },
   pct(p) {
-    return p === null || p === undefined ? DASH : p + ' %';
+    return p === null || p === undefined ? DASH : p + NB + '%';
   },
   time(unix) {
     if (!unix) return DASH;
@@ -332,10 +343,10 @@ const fmt = {
     return v === null || v === undefined ? DASH : Number(v).toFixed(9) + '°';
   },
   m(v, digits) {
-    return v === null || v === undefined ? DASH : Number(v).toFixed(digits === undefined ? 4 : digits) + ' m';
+    return v === null || v === undefined ? DASH : Number(v).toFixed(digits === undefined ? 4 : digits) + NB + 'm';
   },
   kbps(bitsPerS) {
-    return bitsPerS === null || bitsPerS === undefined ? DASH : (bitsPerS / 1000).toFixed(1) + ' kbit/s';
+    return bitsPerS === null || bitsPerS === undefined ? DASH : (bitsPerS / 1000).toFixed(1) + NB + 'kbit/s';
   },
   yesno(b) {
     return b === null || b === undefined ? DASH : b ? 'Yes' : 'No';
@@ -415,6 +426,22 @@ const bus = {
 
 /* ---- JSON client ------------------------------------------------------- */
 
+/*
+ * This tab's id (random, per page load), sent with every request that
+ * changes something: the station's settings_changed event names the client
+ * whose request caused it, so the page that saved knows the change was its
+ * own and does not warn about changes made elsewhere.
+ */
+const CLIENT_ID = (() => {
+  const b = new Uint8Array(8);
+  try {
+    crypto.getRandomValues(b);
+  } catch (e) {
+    for (let i = 0; i < b.length; i++) b[i] = Math.floor(Math.random() * 256);
+  }
+  return Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+})();
+
 class ApiError extends Error {
   constructor(status, body) {
     const e = body || {};
@@ -441,6 +468,7 @@ async function api(method, path, body, opts) {
     init.headers['Content-Type'] = 'application/json';
     init.body = body === undefined ? '' : JSON.stringify(body);
   }
+  if (method !== 'GET') init.headers['X-Client-Id'] = CLIENT_ID;
   let timer = 0;
   if (typeof AbortController === 'function') {
     const ctl = new AbortController();
@@ -473,14 +501,17 @@ async function api(method, path, body, opts) {
 
 /**
  * Raw upload (application/octet-stream plus the X-Requested-With header the
- * server requires). onProgress(sent, total) while the body goes out.
+ * server requires). onProgress(sent, total) while the body goes out;
+ * headers: more request headers ({'X-Reinstall': '1'}).
  */
-function upload(path, file, onProgress) {
+function upload(path, file, onProgress, headers) {
   return new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
     x.open('POST', path);
     x.setRequestHeader('Content-Type', 'application/octet-stream');
     x.setRequestHeader('X-Requested-With', 'onocoydiy');
+    x.setRequestHeader('X-Client-Id', CLIENT_ID);
+    for (const k of Object.keys(headers || {})) x.setRequestHeader(k, headers[k]);
     x.upload.onprogress = e => {
       if (onProgress && e.lengthComputable) onProgress(e.loaded, e.total);
     };
@@ -554,12 +585,37 @@ const ERR = {
   unsupported_media_type: 'The station refused the request type.',
   bad_host: 'Open the station by its IP address or its hostname.',
   not_this_project: 'This image is not firmware for this station.',
+  same_image: 'This is the version already running.',
+  not_no_receiver: 'The station is not looking for a receiver right now (it found one, or is busy with it).',
   rate_limited: 'Too many attempts.',
   internal: 'The station hit an internal error',
   not_available_yet: 'Receiver firmware updates are not enabled in this build yet.',
   checks_disabled: 'This build cannot check for updates. Uploading a file still works.',
   too_many_clients: 'Too many pages are open on the station.',
 };
+
+/* Request fields as the forms label them, for "<label>: <rule>" refusals. */
+const FIELD_LABEL = {
+  name: 'Name', host: 'Host', port: 'Port', mountpoint: 'Mountpoint', username: 'Username', password: 'Password',
+  label: 'Dashboard label', trust: 'Certificate check', backoff_profile: 'Retry pace', ntrip_version: 'NTRIP version',
+  ssid: 'Network name', ap_password: 'Access point password', hostname: 'Station name', duration_s: 'Duration',
+  minutes: 'Duration', pem: 'CA certificate', new: 'New password', current: 'Current password',
+  expected_fw: 'Expected firmware', station_id: 'Station ID', com1_baud: 'Receiver link speed',
+  survey_in_s: 'Survey-in time', lat_deg: 'Latitude', lon_deg: 'Longitude', height_m: 'Height',
+  signal_group_master: 'Signal group (main antenna)', signal_group_slave: 'Signal group (second antenna)',
+  antenna_model: 'Antenna model', antenna_serial: 'Antenna serial number', antenna_setup_id: 'Antenna setup ID',
+  rtcm: 'RTCM messages', recovery: 'Receiver recovery', step: 'Setup step',
+};
+
+/** The generic message of a code (the server's own default, not a rule). */
+const GENERIC_INVALID = 'A field has an invalid value';
+
+/** "<Label>: <rule>" for a 400 invalid_field (the rule the station gave, or a plain fallback). */
+function fieldErrorText(e) {
+  const label = FIELD_LABEL[e.field] || String(e.field).replace(/_/g, ' ');
+  const rule = e.body && e.body.message && e.body.message !== GENERIC_INVALID ? e.body.message : 'the station did not accept this value';
+  return label.charAt(0).toUpperCase() + label.slice(1) + ': ' + rule;
+}
 
 const POLICY = {
   second_onocoy: 'Another enabled slot already streams to Onocoy. Onocoy allows one stream per station.',
@@ -578,7 +634,7 @@ function errText(e) {
     t = 'The live view has the receiver\'s satellite positions turned on. The station turns them off first (the live view stays open ' +
       'without them): start maintenance again in a few seconds.';
   }
-  if (e.code === 'invalid_field' && e.field) t += ': ' + e.field;
+  if (e.code === 'invalid_field' && e.field) t = fieldErrorText(e);
   if (e.code === 'reboot_inhibited' && e.by) t += ' (' + e.by + ')';
   if (e.code === 'internal' && e.message) t += ' (' + e.message + ')';
   if (/[^.!?]$/.test(t)) t += '.';

@@ -116,8 +116,11 @@ function receiverInfo(g) {
     ]),
     h('h3', { class: 'section-title' }, 'Link and configuration'),
     kv([
-      ['Link', lbl(L.linkMode, link.mode) + (link.baud ? ' at ' + link.baud + ' baud' : '')],
-      ['Last data', link.rx_age_ms === null || link.rx_age_ms === undefined ? 'never' : fmt.ms(link.rx_age_ms) + ' ago'],
+      /* Until the receiver streams, the station listens on the link (and searches between): no "Streaming" claim. */
+      ['Link', g.state === 'streaming' ? lbl(L.linkMode, link.mode) + (link.baud ? ' at ' + link.baud + '\u00a0baud' : '') :
+        'Listening' + (link.baud ? ' at ' + link.baud + '\u00a0baud' : '')],
+      ['Last data', link.rx_bytes === 0 ? 'No data from the receiver yet' :
+        link.rx_age_ms === null || link.rx_age_ms === undefined ? 'never' : fmt.ms(link.rx_age_ms) + ' ago'],
       ['Last RTCM', h('span', { class: 't-' + ageTone(link.rtcm_age_ms) },
         link.rtcm_age_ms === null || link.rtcm_age_ms === undefined ? 'never' : fmt.ms(link.rtcm_age_ms) + ' ago')],
       link.open === false && link.mode !== 'off' ? ['Receiver UART', h('span', { class: 't-bad' }, 'closed (reopening)' +
@@ -252,6 +255,29 @@ function positionInfo(g) {
   const pos = g.position || {};
   const arp = g.arp || {};
   const sv = g.survey || {};
+  const prof = g.profile || {};
+  /* A fixed position saved in the profile but not applied yet (no receiver, or not configured since): show it as the profile's. */
+  if (prof.base_mode === 'fixed' && prof.fixed && !(pos.locked && pos.source && pos.source !== 'none')) {
+    const f = prof.fixed;
+    return [
+      h('h2', null, 'Base position', badge('From the profile', 'info')),
+      msg('info', 'Fixed position from the profile: ' + fmt.deg(f.lat_deg) + ', ' + fmt.deg(f.lon_deg) + ', ' + fmt.m(f.height_m) +
+        ', sent to the receiver when it is configured.'),
+      kv([
+        ['Latitude', fmt.deg(f.lat_deg)],
+        ['Longitude', fmt.deg(f.lon_deg)],
+        ['Height (ellipsoid)', fmt.m(f.height_m)],
+        ['Source', 'Entered by you (receiver profile)'],
+      ]),
+      h('h3', { class: 'section-title' }, 'Position in the RTCM stream'),
+      arp.valid ? kv([
+        ['Latitude', fmt.deg(arp.lat_deg)],
+        ['Longitude', fmt.deg(arp.lon_deg)],
+        ['Height (ellipsoid)', fmt.m(arp.height_m)],
+        ['Received', fmt.ms(arp.age_ms) + ' ago'],
+      ]) : h('p', { class: 'muted' }, 'No position message (1005/1006) received yet.'),
+    ];
+  }
   let state, tone;
   if (pos.locked) {
     state = 'Locked';
@@ -312,8 +338,10 @@ function profileEditor(g, done) {
   const antSetup = numInput(p.antenna_setup_id || 0, { inputmode: 'numeric', maxlength: 3 });
 
   const F = {
-    signal_group_master: field('Signal group (main antenna)', sgm),
-    signal_group_slave: field('Signal group (second antenna)', sgs, '3 and 6 add Galileo E6 on the UM982. 0 turns the second antenna off.'),
+    signal_group_master: field('Signal group (main antenna)', sgm, 'Which satellite signals the receiver tracks on its main antenna input ' +
+      '(a number from the receiver\'s manual). Keep the default unless you know which signals you need.'),
+    signal_group_slave: field('Signal group (second antenna)', sgs, 'The same for the second antenna input. On the UM982 groups 3 and 6 ' +
+      'add Galileo E6, a fourth band for Onocoy\'s band count; 0 turns the second input off.'),
     survey_in_s: field('Survey-in time (seconds)', survey, '1 to 3600. The receiver averages its position this long.'),
     lat_deg: field('Latitude (°)', lat),
     lon_deg: field('Longitude (°)', lon),

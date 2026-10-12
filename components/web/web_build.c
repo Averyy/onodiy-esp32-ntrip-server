@@ -268,18 +268,46 @@ bool web_section_public(web_section_t sec)
     return sec == WEB_SEC_DEVICE || sec == WEB_SEC_RECEIVER || sec == WEB_SEC_HEALTH;
 }
 
-/* Index of the enabled protected slot, -1 if none. */
+/* Index of the enabled protected slot that is set up (Onocoy: mountpoint, username, password), -1 if none. */
 static int protected_slot(const web_status_snap_t *s)
 {
     if (!s->cfg_valid) {
         return -1;
     }
     for (size_t i = 0; i < s->slots && i < WEB_MAX_SLOTS; i++) {
-        if (s->cfg[i].enabled && s->cfg[i].protected_slot) {
+        if (s->cfg[i].enabled && s->cfg[i].protected_slot && ntrip_server_onocoy_ready(&s->cfg[i])) {
             return (int)i;
         }
     }
     return -1;
+}
+
+/* The protected slot's day figures (status summary and caster status): null unless they mean something. */
+static void day_figures(wj_t *w, const ntrip_caster_status_t *t, bool prot)
+{
+    bool v = prot && t->day_metrics_valid;
+    if (v) {
+        wj_uint(w, "graced_uptime_permille", t->graced_uptime_permille);
+        wj_bool(w, "streak_ok", t->streak_ok);
+    } else {
+        wj_null(w, "graced_uptime_permille");
+        wj_null(w, "streak_ok");
+    }
+    if (v && t->so_far_valid) {
+        wj_uint(w, "graced_uptime_so_far_permille", t->graced_uptime_so_far_permille);
+    } else {
+        wj_null(w, "graced_uptime_so_far_permille");
+    }
+    if (v && t->data_rate_valid) {
+        wj_uint(w, "data_rate_permille", t->data_rate_permille);
+    } else {
+        wj_null(w, "data_rate_permille");
+    }
+    if (v) {
+        wj_uint(w, "budget_left_s", t->budget_left_s);
+    } else {
+        wj_null(w, "budget_left_s");
+    }
 }
 
 uint32_t web_budget_left_s(const web_status_snap_t *s)
@@ -396,6 +424,7 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
         wj_bool(w, "rx_maintenance", st->rx_maintenance);
         wj_uint(w, "maintenance_left_s", st->rx_maintenance ? st->maintenance_left_s : 0);
         wj_uint(w, "maintenance_chosen_s", st->rx_maintenance ? st->maintenance_chosen_s : 0);
+        wj_u32_or_null(w, "next_detect_in_s", st->next_detect_in_s);
     }
     wj_obj_close(w);
 }
@@ -456,6 +485,9 @@ static void sec_alerts(wj_t *w, const web_status_snap_t *s)
                 wj_str(w, "source", "station");
                 if (bit == STATION_ALERT_CONFIG_FAILED) {
                     wj_uint(w, "retry_in_s", s->st.config_retry_in_s);
+                } else if (bit == STATION_ALERT_NO_RECEIVER) {
+                    wj_bool(w, "saw_bytes", s->st.detect_saw_bytes);
+                    wj_u32_or_null(w, "next_detect_in_s", s->st.next_detect_in_s);
                 }
                 wj_obj_close(w);
             }
@@ -552,17 +584,8 @@ void web_build_caster_summary(wj_t *w, const web_status_snap_t *s, size_t slot, 
         wj_uint(w, "connected_s", t->connected_s);
         wj_uint(w, "today_online_s", t->today_online_s);
         wj_uint(w, "today_offline_s", t->today_offline_s);
-        if (prot) {
-            wj_uint(w, "graced_uptime_permille", t->graced_uptime_permille);
-            wj_bool(w, "streak_ok", t->streak_ok);
-            wj_uint(w, "data_rate_permille", t->data_rate_permille);
-            wj_uint(w, "budget_left_s", t->budget_left_s);
-        } else {
-            wj_null(w, "graced_uptime_permille");
-            wj_null(w, "streak_ok");
-            wj_null(w, "data_rate_permille");
-            wj_null(w, "budget_left_s");
-        }
+        day_figures(w, t, prot);
+        wj_bool(w, "onocoy_ready", c != NULL && ntrip_server_onocoy_ready(c));
         wj_uint(w, "bytes_sent", t->bytes_sent);
         wj_uint(w, "lag_ms_now", t->lag_ms_now);
         wj_uint(w, "next_retry_s", t->next_retry_s);
@@ -717,7 +740,11 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     wj_bool(w, "identity_confirmed", st->identity_confirmed);
     station_alerts(w, "alerts", st->alerts);
     wj_bool(w, "profile_applied", st->profile_applied);
-    wj_bool(w, "rtcm1230_supported", st->rtcm1230_supported);
+    if (st->rtcm1230_known) {
+        wj_bool(w, "rtcm1230_supported", st->rtcm1230_supported);
+    } else {
+        wj_null(w, "rtcm1230_supported");   /* never applied: neither accepted nor refused */
+    }
     wj_bool(w, "config_failed", st->config_failed);
     wj_uint(w, "config_retry_in_s", st->config_retry_in_s);
     wj_bool(w, "reconfigure_refused", st->reconfigure_refused);
@@ -726,6 +753,7 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     wj_obj_open(w, "link");
     wj_uint(w, "baud", g->link.baud);
     wj_str(w, "mode", web_link_mode_name((int)g->link.mode));
+    wj_uint(w, "rx_bytes", g->link.rx_bytes);
     wj_u32_or_null(w, "rx_age_ms", g->link.last_rx_age_ms);
     wj_u32_or_null(w, "rtcm_age_ms", g->link.last_rtcm_age_ms);
     wj_bool(w, "open", g->link.link_open);
@@ -849,7 +877,7 @@ static void msg_entry(wj_t *w, uint16_t msg, const gnss_obs_msg_stat_t *stat, in
 }
 
 void web_build_signals(wj_t *w, const gnss_obs_summary_t *sum, const gnss_obs_msg_stat_t *stats, size_t nstats,
-                       const um98x_base_profile_t *profile, bool rtcm1230_supported)
+                       const um98x_base_profile_t *profile, int rtcm1230_supported)
 {
     wj_obj_open(w, NULL);
     wj_str(w, "best_sys", sum->best_bands > 0 ? web_sys_name(sum->best_sys) : NULL);
@@ -920,7 +948,11 @@ void web_build_signals(wj_t *w, const gnss_obs_summary_t *sum, const gnss_obs_ms
         }
         wj_arr_close(w);
     }
-    wj_bool(w, "rtcm1230_supported", rtcm1230_supported);
+    if (rtcm1230_supported < 0) {
+        wj_null(w, "rtcm1230_supported");
+    } else {
+        wj_bool(w, "rtcm1230_supported", rtcm1230_supported != 0);
+    }
     wj_obj_close(w);
 }
 
@@ -1293,17 +1325,7 @@ void web_build_caster_status(wj_t *w, const char *key, const ntrip_caster_status
     wj_uint(w, "connected_s", t->connected_s);
     wj_uint(w, "today_online_s", t->today_online_s);
     wj_uint(w, "today_offline_s", t->today_offline_s);
-    if (prot) {
-        wj_uint(w, "graced_uptime_permille", t->graced_uptime_permille);
-        wj_bool(w, "streak_ok", t->streak_ok);
-        wj_uint(w, "data_rate_permille", t->data_rate_permille);
-        wj_uint(w, "budget_left_s", t->budget_left_s);
-    } else {
-        wj_null(w, "graced_uptime_permille");
-        wj_null(w, "streak_ok");
-        wj_null(w, "data_rate_permille");
-        wj_null(w, "budget_left_s");
-    }
+    day_figures(w, t, prot);
     wj_uint(w, "bytes_sent", t->bytes_sent);
     wj_uint(w, "frames_sent", t->frames_sent);
     wj_uint(w, "epochs_sent", t->epochs_sent);
@@ -1338,6 +1360,8 @@ void web_build_caster_entry(wj_t *w, size_t slot, const ntrip_caster_cfg_t *cfg,
     wj_uint(w, "slot", slot);
     web_build_caster_config(w, "config", cfg);
     web_build_caster_status(w, "status", st, cfg != NULL && cfg->protected_slot);
+    /* An Onocoy slot with the console's mountpoint, username and password (false for every other slot). */
+    wj_bool(w, "onocoy_ready", cfg != NULL && ntrip_server_onocoy_ready(cfg));
     wj_obj_close(w);
 }
 
@@ -1504,6 +1528,30 @@ void web_build_update(wj_t *w, const web_update_snap_t *u)
     wj_str_or_null(w, "release_repo", u->release_repo);
     wj_bool(w, "signed_manifests", u->signed_manifests);
     wj_unix(w, "last_check_unix", f->last_check_unix);
+    /* The last check attempt, successful or not (last_check_unix: the last success). */
+    wj_unix(w, "last_attempt_unix", f->last_attempt_unix);
+    wj_str(w, "last_check_result", web_check_result_name(f->last_check_result));
+    if (f->last_http_status != 0) {
+        wj_uint(w, "last_http_status", f->last_http_status);
+    } else {
+        wj_null(w, "last_http_status");
+    }
+    wj_u32_or_null(w, "next_check_in_s", f->next_check_in_s);
+    if (u->app_max_bytes != 0) {
+        wj_uint(w, "app_max_bytes", u->app_max_bytes);
+    } else {
+        wj_null(w, "app_max_bytes");
+    }
+    if (u->pkg_max_bytes != 0) {
+        wj_uint(w, "pkg_max_bytes", u->pkg_max_bytes);
+    } else {
+        wj_null(w, "pkg_max_bytes");
+    }
+    if (u->running_elf_sha256 != NULL) {
+        wj_hex(w, "running_elf_sha256", u->running_elf_sha256, 32);
+    } else {
+        wj_null(w, "running_elf_sha256");
+    }
     if (u->last != NULL && u->last->valid) {
         wj_obj_open(w, "last_result");
         wj_str(w, "job", u->last->job);
@@ -1827,6 +1875,7 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
     }
     wj_arr_close(w);
     wj_obj_close(w);
+    wj_bool(w, "byte_capture_built", h->byte_capture_built);
     wj_obj_close(w);
 }
 
@@ -1877,12 +1926,31 @@ void web_build_availability(wj_t *w, const web_avail_snap_t *a)
     wj_arr_close(w);
     if (a->protected_slot >= 0 && a->protected_status != NULL) {
         const ntrip_caster_status_t *p = a->protected_status;
+        const ntrip_caster_cfg_t *pc = a->cfg != NULL ? &a->cfg[a->protected_slot] : NULL;
+        bool ready = pc != NULL && ntrip_server_onocoy_ready(pc);
+        bool counted = ready && pc->enabled && p->day_metrics_valid;
         wj_obj_open(w, "protected");
+        wj_bool(w, "enabled", pc != NULL && pc->enabled);
+        wj_bool(w, "onocoy_ready", ready);
         wj_uint(w, "down_today_s", a->down_today_s);
-        wj_u32_or_null(w, "budget_left_s", a->budget_left_s);
-        wj_uint(w, "data_rate_permille", p->data_rate_permille);
-        wj_uint(w, "graced_uptime_permille", p->graced_uptime_permille);
-        wj_bool(w, "streak_ok", p->streak_ok);
+        wj_u32_or_null(w, "budget_left_s", counted ? a->budget_left_s : UINT32_MAX);
+        if (counted && p->data_rate_valid) {
+            wj_uint(w, "data_rate_permille", p->data_rate_permille);
+        } else {
+            wj_null(w, "data_rate_permille");
+        }
+        if (counted) {
+            wj_uint(w, "graced_uptime_permille", p->graced_uptime_permille);
+            wj_bool(w, "streak_ok", p->streak_ok);
+        } else {
+            wj_null(w, "graced_uptime_permille");
+            wj_null(w, "streak_ok");
+        }
+        if (counted && p->so_far_valid) {
+            wj_uint(w, "graced_uptime_so_far_permille", p->graced_uptime_so_far_permille);
+        } else {
+            wj_null(w, "graced_uptime_so_far_permille");
+        }
         wj_obj_close(w);
     } else {
         wj_null(w, "protected");

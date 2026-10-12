@@ -47,9 +47,9 @@ void fw_capture_baseline(uint8_t *baseline, uint8_t *slots)
 
 /* The new image is active: record its trial, then reboot into it. The update
  * slot stays claimed until the reboot, so no receiver flash starts meanwhile. */
-static void activated(const char *version, uint8_t baseline, uint8_t slots, lifecycle_inhibit_t inhibit)
+static void activated(const char *version, uint8_t baseline, uint8_t slots, lifecycle_inhibit_t inhibit, bool same_image)
 {
-    fw_trial_record_install(version, baseline, slots);
+    fw_trial_record_install(version, baseline, slots, same_image);
     (void)diag_journal_append(DIAG_EV_APP_UPDATE, ESP_OK, 0);
     fw_set_state(FW_UPDATE_REBOOT_PENDING, ESP_OK);
     ESP_LOGW(TAG, "app %s installed: rebooting into it", version);
@@ -127,7 +127,7 @@ esp_err_t fw_install_app_job(void)
         failed(err, inhibit);
         return err;
     }
-    activated(m.version, baseline, slots, inhibit);
+    activated(m.version, baseline, slots, inhibit, false);
     return ESP_OK;
 }
 
@@ -283,8 +283,15 @@ esp_err_t fw_update_upload_app_finish(fw_update_upload_t u, uint8_t sha256_out[3
     if (bad) {
         ESP_LOGW(TAG, "uploaded %s was rolled back on this station before: installing it anyway", desc.version);
     }
+    /* The image running now, again (the web asks the user first): identical
+     * code needs only the bootloader's first-minute check, no verify window
+     * and no crash watch, so receiver updates are not held back for a day. */
+    bool same = fw_update_same_as_running(desc.app_elf_sha256);
+    if (same) {
+        ESP_LOGW(TAG, "uploaded %s is the image already running: reinstalled at the user's request", desc.version);
+    }
     /* REBOOT_PENDING before fw_update is free again: nothing else starts now. */
-    activated(desc.version, baseline, slots, inhibit);
+    activated(desc.version, baseline, slots, inhibit, same);
     upload_close();
     return ESP_OK;
 }
@@ -301,6 +308,17 @@ void fw_update_upload_app_abort(fw_update_upload_t u)
     lifecycle_update_release(LIFECYCLE_UPDATE_APP);
     fw_set_state(FW_UPDATE_IDLE, ESP_OK);
     ESP_LOGW(TAG, "app upload abandoned");
+}
+
+bool fw_update_same_as_running(const uint8_t elf_sha256[32])
+{
+    if (elf_sha256 == NULL) {
+        return false;
+    }
+    const esp_app_desc_t *run = esp_app_get_description();
+    static const uint8_t zero[32] = { 0 };
+    return memcmp(run->app_elf_sha256, zero, sizeof(zero)) != 0 &&
+           memcmp(run->app_elf_sha256, elf_sha256, sizeof(run->app_elf_sha256)) == 0;
 }
 
 /* ---- receiver package ------------------------------------------------------------- */

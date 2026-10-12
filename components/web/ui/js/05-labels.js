@@ -46,7 +46,9 @@ const L = {
   },
   backoff: { fast: 'Fast', standard: 'Standard', polite: 'Polite' },
   trust: { bundle: 'Built-in certificate bundle', custom_ca: 'My own CA certificate', insecure: 'Do not check (insecure)' },
-  health: { ok: 'Healthy', degraded: 'Degraded', recovering: 'Recovering', failed: 'Failed' },
+  health: { ok: 'Healthy', degraded: 'Needs attention', recovering: 'Recovering', failed: 'Needs attention' },
+  /* The health level in a sentence (dashboard facts): never the raw level word. */
+  healthFact: { ok: 'healthy', degraded: 'needs attention', recovering: 'recovering', failed: 'needs attention' },
   step: {
     none: 'None',
     resync: 'Resync the stream',
@@ -75,6 +77,28 @@ const L = {
     antenna_moved: ['Antenna moved?', 'The fixed base sends no RTCM after a receiver restart. If the antenna moved, survey again.'],
     receiver_attention: ['Receiver needs attention', 'RTCM did not come back after a receiver update session ended.'],
     receiver_in_loader: ['Receiver in its loader', 'The receiver waits at its loader prompt without an update session. The station only listens until you choose what to do.'],
+    no_receiver: ['No receiver found', ''],   /* the text depends on the alert: noReceiverText() */
+  },
+  /* Why the station's own restart (to look for the receiver) is postponed now (health reboot_hold). */
+  hold: {
+    setup: 'first setup not finished',
+    ap_client: 'someone is on the station\'s Wi-Fi',
+    admin: 'you are using this page',
+    power_on: 'less than an hour since power-on',
+  },
+  /* How a start came about (health boot, boot history). */
+  resetReason: {
+    unknown: 'for an unknown reason', poweron: 'after power-on', ext: 'by its reset pin', sw: 'by software', panic: 'after a crash',
+    int_wdt: 'by the interrupt watchdog', task_wdt: 'by the task watchdog', wdt: 'by a watchdog', deepsleep: 'from deep sleep',
+    brownout: 'after a power dip', sdio: 'over SDIO', usb: 'over USB', jtag: 'over JTAG', efuse: 'after an eFuse error',
+    pwr_glitch: 'after a power glitch', cpu_lockup: 'after a CPU lockup',
+  },
+  plannedReason: {
+    none: '', user: 'you restarted it', factory_reset: 'a factory reset', admin_reset: 'a password reset with the BOOT button',
+    app_update: 'an app update', app_revert: 'a failed app update went back to the previous version',
+    gnss_ladder: 'it restarted to look for the receiver', network_ladder: 'Wi-Fi recovery', low_heap: 'memory ran low',
+    safe_mode_retry: 'it tried normal operation again after safe mode', safe_mode_cleared: 'you left safe mode',
+    nvs_slot_switch: 'a settings storage switch', boot_failure: 'a failed start', app_rollback: 'you went back to the previous version',
   },
   upstream: { none: 'Not checked yet', ok: 'Reachable', no_ip: 'No IP address', dns_failed: 'DNS fails', no_upstream: 'Router only, no internet' },
   apReason: { setup: 'first setup', fallback: 'Wi-Fi unreachable', linger: 'closing soon', recovery: 'recovery (BOOT button)' },
@@ -164,9 +188,9 @@ const L = {
   posSource: { none: 'None', survey: 'Survey-in', averaged: 'Averaged', user: 'Entered by you' },
   setting: { on: 'on', off: 'off', unknown: 'unknown' },
   recovery: {
-    full: ['full', 'Every recovery step, up to restarting the station when that can help.'],
-    no_reboot: ['no ESP32 reboot', 'Every step that acts on the receiver, but the station itself is never restarted for it.'],
-    alerts_only: ['alerts only', 'Nothing is sent to the receiver and nothing restarts: a stall is only shown and recorded in the journal.'],
+    full: ['Full (may restart the station)', 'Every recovery step, up to restarting the station when that can help.'],
+    no_reboot: ['Never restart the station', 'Every step that acts on the receiver, but the station itself is never restarted for it.'],
+    alerts_only: ['Alerts only', 'Nothing is sent to the receiver and nothing restarts: a stall is only shown and recorded in the journal.'],
   },
   trigger: { protected: 'Onocoy caster down', assoc_no_ip: 'connected without an IP address', unreached: 'a caster not reached' },
   liveSky: {
@@ -200,6 +224,10 @@ const J = {
     data_loss: 'Data loss', caster_down: 'Caster session ended', caster_up: 'Caster back', wifi_up: 'Wi-Fi back',
     rx_maintenance: 'Receiver maintenance', live_view: 'Live view' },
   resetClass: ['power on', 'planned', 'crash', 'brownout', 'other'],
+  /* The same by C value, as the API names them (lifecycle_reset_class_t, lifecycle_reboot_reason_t). */
+  resetClassKey: ['power_on', 'planned', 'crash', 'brownout', 'other'],
+  rebootKey: ['none', 'user', 'factory_reset', 'admin_reset', 'app_update', 'app_revert', 'gnss_ladder', 'network_ladder',
+    'low_heap', 'safe_mode_retry', 'safe_mode_cleared', 'nvs_slot_switch', 'boot_failure', 'app_rollback'],
   rebootReason: ['none', 'user', 'factory reset', 'admin reset', 'app update', 'app revert', 'receiver recovery',
     'network recovery', 'low memory', 'safe-mode retry', 'safe mode cleared', 'settings slot switch', 'start-up failure',
     'app rollback'],
@@ -207,9 +235,12 @@ const J = {
     'deep sleep', 'brownout', 'SDIO', 'USB', 'JTAG', 'eFuse', 'power glitch', 'CPU lockup'],
   trial: ['none', 'confirming', 'verifying', 'watching'],
   ladder: ['receiver', 'network', 'caster'],
-  outcome: ['started', 'healthy again', 'failed or refused', 'abandoned', 'not run (recovery mode)'],
-  gnssRung: [null, 'resync', 'restart link', 'search baud rate', 're-apply profile', 'reset receiver', 'restart station',
-    'power-cycle alert', 'gave up (retry pending)', 'restart blocked by the cap'],
+  outcome: ['started', 'healthy again', 'failed or refused', 'abandoned', 'not run (recovery mode)', 'postponed'],
+  gnssRung: [null, 'resync', 'restart link', 'search baud rate', 're-apply profile', 'reset receiver',
+    'restarted the station to look for the receiver', 'power-cycle alert', 'waiting for the next search',
+    'restart postponed: at most one an hour'],
+  /* hold_mask bits of a postponed restart (ladder_step code 9, outcome 5). */
+  holdBits: ['setup', 'ap_client', 'admin', 'power_on'],
   netRung: [null, 'reconnect', 'renew DHCP and fallback DNS', 'restart Wi-Fi', 'restart station'],
   netWhy: ['none', 'internet reachable', 'no internet', 'receiver update open', 'too soon', 'restart blocked', 'someone on the access point',
     'no restart for this cause', 'access point wait over'],
@@ -282,4 +313,58 @@ function healthTone(level) {
 function ageTone(ms) {
   if (ms === null || ms === undefined) return 'bad';
   return ms < 1500 ? 'ok' : ms < 5000 ? 'warn' : 'bad';
+}
+
+/* Minutes for a sentence ("4 min"; under a minute in seconds). */
+function inMinutes(s) {
+  if (s === null || s === undefined) return DASH;
+  return s < 60 ? fmt.dur(s) : fmt.dur(Math.ceil(s / 60) * 60);
+}
+
+/** The no-receiver alert in words: what to check, and when the station looks again. */
+function noReceiverText(a) {
+  const next = a.next_detect_in_s === null || a.next_detect_in_s === undefined ? '' :
+    a.next_detect_in_s <= 0 ? ' Searching now.' : ' Next search in ' + inMinutes(a.next_detect_in_s) + '.';
+  if (a.saw_bytes) {
+    return 'Bytes arrive but nothing the station understands: check the wiring and the receiver\'s port speed.' + next;
+  }
+  return 'No receiver found: nothing arrives on the receiver port. Check the receiver\'s power and the cable from its COM1 ' +
+    'to the station (receiver TX to GPIO1, RX to GPIO2).' + next;
+}
+
+/**
+ * The station's own restart to look for the receiver, in words (health:
+ * reboot_hold, reboot_hold_left_s, reboot_cap_wait_s, reboot_recheck); null
+ * when nothing about it is pending.
+ */
+function restartPlanText(hl) {
+  if (!hl) return null;
+  const hold = hl.reboot_hold || [];
+  const cap = hl.reboot_cap_wait_s;
+  const holdLeft = hl.reboot_hold_left_s;
+  if (!hold.length && (cap === null || cap === undefined) && !hl.reboot_recheck) return null;
+  const intro = 'When nothing answers, the station restarts itself to look for the receiver, at most once an hour.';
+  if (hold.length) {
+    return intro + ' Postponed: ' + hold.map(r => L.hold[r] || String(r).replace(/_/g, ' ')).join(', ') +
+      (holdLeft === null || holdLeft === undefined ? '' : ' (at the latest in ' + inMinutes(holdLeft) + ')') + '.';
+  }
+  if (cap !== null && cap !== undefined) return intro + ' Next possible in ' + inMinutes(cap) + '.';
+  return intro + ' The station looks at it again after the next search.';
+}
+
+/** How a start came about, as a sentence (reset class, reset reason, planned reason). */
+function startSentence(cls, reason, planned) {
+  const why = planned && planned !== 'none' ? lbl(L.plannedReason, planned) : '';
+  switch (cls) {
+    case 'power_on':
+      return 'Started after power-on';
+    case 'planned':
+      return 'Restarted on purpose' + (why ? ': ' + why : '');
+    case 'crash':
+      return 'Restarted after a crash' + (reason ? ' (' + lbl(L.resetReason, reason).replace(/^(after|by|for|from|over) /, '') + ')' : '');
+    case 'brownout':
+      return 'Restarted after a power dip (the supply voltage fell too low)';
+    default:
+      return 'Restarted' + (reason ? ' ' + lbl(L.resetReason, reason) : '') + (why ? ': ' + why : '');
+  }
 }
