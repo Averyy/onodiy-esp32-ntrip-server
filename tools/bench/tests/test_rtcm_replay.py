@@ -221,6 +221,47 @@ def test_a_new_connection_starts_the_schedule_again(tmp_path):
     assert srv.counts()["connections"] == 2
 
 
+def test_pause_drops_the_bursts_that_fall_due_and_resume_goes_on_with_the_schedule(tmp_path):
+    s = load(LAX)
+    speed = 10.0  # 0.1 s per epoch
+    srv = ReplayServer(s, loop=True, speed=speed, say=lambda m: None).start()
+    first = s.bursts[0].data
+    try:
+        with socket.create_connection((srv.host, srv.port)) as c:
+            got, _ = recv_exactly(c, len(first))
+            assert got == first
+            srv.pause()
+            time.sleep(0.6)  # what was in flight arrives; nothing after it
+            c.settimeout(0.2)
+            try:
+                while c.recv(65536):
+                    pass
+            except socket.timeout:
+                pass
+            sent = srv.counts()["bursts"]
+            time.sleep(1.0)
+            assert srv.counts()["bursts"] == sent
+            with pytest.raises(socket.timeout):
+                c.recv(65536)
+            dropped = srv.counts()["bursts_paused"]
+            assert dropped >= 8
+            srv.resume()
+            # The bursts now due arrive again, whole and CRC-valid.
+            c.settimeout(5)
+            data = bytearray(c.recv(65536))
+            end = time.monotonic() + 0.5
+            c.settimeout(0.1)
+            while time.monotonic() < end:
+                try:
+                    data += c.recv(65536)
+                except socket.timeout:
+                    pass
+            assert frames_of(bytes(data))
+            assert srv.counts()["bursts"] > sent
+    finally:
+        srv.stop()
+
+
 def test_line_rate_pacing_spreads_a_burst(tmp_path):
     f = tmp_path / "one.rtcm3"
     frame = msm_frame(1077, 1, 1000, False, {(s, 2): 40.0 for s in range(1, 13)})

@@ -398,6 +398,11 @@ uv run fake_caster.py report bench-logs/<serve run>            # connection tabl
 - Point a slot at it: host `10.0.2.2` from QEMU (the computer's
   127.0.0.1), or this computer's address from a board on the same network
   (then `--host 0.0.0.0`).
+- For the Onocoy behaviour (fast retry profile, login guard, Onocoy wire
+  layout), mark the slot `test_onocoy` (`PUT /api/casters/{n}`): bench and
+  QEMU builds allow it (`CONFIG_NTRIP_TEST_ONOCOY_SLOT`), so no DNS entry
+  for an onocoy.com name is needed. The station build refuses it
+  (`400 invalid_field`).
 - Rows: the success lines (`icy_ok`, `ok`, `http_200`, `http_1_0_200`; the
   session is checked frame by frame, NTRIP 2.0 chunked bodies are decoded),
   the HTTP errors, `sourcetable`, the `ERROR - ...` lines, refusals in plain

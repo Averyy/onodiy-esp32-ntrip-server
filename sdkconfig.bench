@@ -23,6 +23,12 @@
 # gnss/autocfg = 0, gnss/recovery = 2 (if unset) and gnss/hold = 1 before
 # anything reaches the receiver, and only queries are sent until the user
 # applies on the receiver page.
+#
+# With the bench console on, test-Onocoy caster slots are allowed
+# (CONFIG_NTRIP_TEST_ONOCOY_SLOT, default y): a slot marked test_onocoy
+# behaves as an Onocoy slot at any host, so a local test caster on this
+# network sees the Onocoy retry profile and login guard without a DNS
+# override.
 
 CONFIG_BENCH_CONSOLE=y
 CONFIG_UM98X_FLASH_ENABLE=y

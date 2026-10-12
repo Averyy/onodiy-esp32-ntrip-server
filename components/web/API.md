@@ -1184,7 +1184,8 @@ x 1.0-1.2.
 - Take-over: a session the caster ends within 120 s of its start counts 1,
   a `device reconnected` or `in use` line during a session counts 2 (class
   `replaced`); at 3 the slot stops (`kicked`). The reconnect after such a
-  session waits 5 s, then 10 s. A session of 10 min or more resets the
+  session waits by the count it reached: 5 s at 1, 10 s at 2 (so 10 s
+  after a `device reconnected` line). A session of 10 min or more resets the
   count (`kicked_sessions`). Write stalls, keepalive aborts, network loss,
   source stalls, pauses and edits never count.
 - `duplicate of another stream`, `credential is banned`, or any other

@@ -125,6 +125,25 @@ A real receiver behind a USB-serial adapter cannot stand in for the socket:
 the model never passes the firmware's baud changes to a host serial port,
 so detection at other bauds would not match the wire.
 
+**A restart while bytes arrive on UART1 hangs the next boot** (QEMU only).
+ESP-IDF restarts an ESP32-S3 by resetting both CPUs (`esp_restart_noos`);
+UART1 and the interrupt matrix keep their state, and on a board the first
+`uart_param_config()` of the next boot resets UART1 through its
+peripheral reset bit while the startup's interrupt-matrix clear drops the
+old CPU interrupt line at once. This QEMU does neither: UART1 keeps its
+registers (interrupt enables and a full RX FIFO), and remapping a source in
+the interrupt matrix (`hw/xtensa/esp32s3_intc.c`) does not lower the CPU
+line that source drove before. RTCM pending at the moment of the restart
+leaves UART1's old CPU interrupt (APP CPU, level 1) raised; when the next
+boot's `uart_driver_install()` allocates that interrupt again for UART1,
+its handler is entered without end while UART1's status reads 0, and the
+boot stops before `gnss_link: UART1 open` (seen with gdb: `-s` on the
+QEMU command line, every entry `INT_ST` 0, `INT_ENA` still holding the
+previous boot's bits at `call_start_cpu0`). A restart with nothing
+arriving on UART1 boots normally. `e2e.py` therefore pauses its replay
+(`ReplayServer.pause()`: bursts that fall due are dropped) from 2 s before
+the reboot it asks for until the web server answers again.
+
 ## Smoke test
 
 ```sh
@@ -232,7 +251,8 @@ failed):
   a login block and an in-use reply (each delay within [entry, 1.2 x entry]
   plus 2 s for QEMU, read from `next_retry_s` and from the connection
   times); sessions the caster ends quickly (and a `Device reconnected` line)
-  stop the slot after a score of 3, with 5 s then 10 s between them; banned
+  stop the slot after a score of 3, waiting 5 s at a score of 1 and 10 s at
+  2 (a `Device reconnected` line scores 2 at once); banned
   and duplicate reports stop it at once; a save and
   `POST /api/casters/0/retry` clear a stop, a reboot does not; the journal
   has the `caster_stop` records. `--long` adds the 5-minute wait after a

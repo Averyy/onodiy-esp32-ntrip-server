@@ -85,8 +85,10 @@ class ReplayServer:
         self.bytes_sent = 0
         self.frames_sent = 0
         self.bytes_received = 0
+        self.bursts_paused = 0
         self.received = bytearray()  # everything clients sent (kept for in-process checks)
         self.connected = threading.Event()
+        self.paused = threading.Event()
         self.thread = threading.Thread(target=self._serve, name="replay", daemon=True)
 
     # -- logging ----------------------------------------------------------------
@@ -120,11 +122,26 @@ class ReplayServer:
                 self.log_file.close()
                 self.log_file = None
 
+    def pause(self) -> None:
+        """Send nothing until resume(), like a receiver whose output went quiet.
+        The schedule's clock keeps running: bursts that fall due meanwhile are
+        dropped (counted in bursts_paused), never sent late."""
+        if not self.paused.is_set():
+            self.paused.set()
+            self._log("paused: bursts that fall due are dropped until resumed")
+
+    def resume(self) -> None:
+        if self.paused.is_set():
+            self.paused.clear()
+            with self.lock:
+                n = self.bursts_paused
+            self._log(f"resumed ({n} burst{'' if n == 1 else 's'} dropped while paused, in total)")
+
     def counts(self) -> dict:
         with self.lock:
             return {"connections": self.connections, "loops": self.loops_done, "bursts": self.bursts_sent,
                     "bytes_sent": self.bytes_sent, "frames_sent": self.frames_sent,
-                    "bytes_received": self.bytes_received}
+                    "bytes_received": self.bytes_received, "bursts_paused": self.bursts_paused}
 
     # -- serving ----------------------------------------------------------------
 
@@ -172,6 +189,10 @@ class ReplayServer:
                     loop_no, loop_counts, loop_start = k, [0, 0, 0], time.monotonic()
                 if self._wait_until(t0 + t, gone):
                     break
+                if self.paused.is_set():
+                    with self.lock:
+                        self.bursts_paused += 1
+                    continue
                 if not self._send(conn, burst.data, gone):
                     break
                 with self.lock:

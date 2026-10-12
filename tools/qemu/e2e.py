@@ -47,9 +47,11 @@ What it does:
      waits after rejections, login blocks and in-use replies (each delay in
      [entry, 1.2 x entry] + 2 s for QEMU, from next_retry_s and from the
      connection times); sessions the caster ends quickly (and a "Device
-     reconnected" line) stop the slot after a score of 3, with 5 s then
-     10 s between them; duplicate and banned reports stop it at once; a
-     stop survives a reboot and POST /api/casters/0/retry clears it.
+     reconnected" line, which scores 2 at once) stop the slot after a score
+     of 3, waiting 5 s at a score of 1 and 10 s at 2; duplicate and banned
+     reports stop it at once; a stop survives a reboot (the replay pauses
+     across it, see tools/qemu/README.md) and POST /api/casters/0/retry
+     clears it.
      --long adds the 5-minute wait after a rejected login and the whole
      in-use retry ladder;
   6. throughout: no panic, abort, watchdog or reboot loop on the console
@@ -610,7 +612,8 @@ class E2E:
         number the next guard connection will have."""
         self.guard.set_sequence(sequence)
         n = len(self.guard_conns()) + 1
-        status, data = self.api("POST", "/api/casters/0/retry")
+        # Body {}: every POST carries Content-Type: application/json (API.md, CSRF).
+        status, data = self.api("POST", "/api/casters/0/retry", {})
         self.check(status == 202 and isinstance(data, dict) and data.get("accepted") is True,
                    f"POST /api/casters/0/retry ({sequence}): HTTP {status} {data}")
         return n
@@ -685,7 +688,8 @@ class E2E:
         self.check(first["request_line"] == f"SOURCE *** /{GUARD_USER}",
                    f"Onocoy NTRIP 1.0 wire layout: {first['request_line']!r}")
         fb = self.slot(0)["status"].get("failures_by_class", {})
-        self.check(len(fb) == 15 and {"login_blocked", "in_use", "replaced"} <= set(fb),
+        # Every class but "none": the eleven of every slot and the guard's three.
+        self.check(len(fb) == 14 and {"login_blocked", "in_use", "replaced"} <= set(fb),
                    f"failures_by_class has {len(fb)} classes")
         if self.wait_stopped("in_use"):
             self.quiet(15, "stopped (in use)")
@@ -714,9 +718,10 @@ class E2E:
                 self.quiet(15, "stopped (kicked)")
 
         # 5. "Device reconnected" on the live session scores 2: stopped after two sessions.
+        #    The reconnect wait follows the score (5 s at 1, 10 s at 2), so 10 s here.
         n = self.retry("icy_ok:kick=3:text=onocoy_reconnected")
         if self.wait_conn_start(n, 30):
-            self.gap(n, 5, "reconnect after a 'Device reconnected' session")
+            self.gap(n, 10, "reconnect after a 'Device reconnected' session (score 2)")
             if self.wait_conn_end(n + 1, 30) and self.wait_stopped("kicked"):
                 text = self.slot(0)["status"].get("last_session_text") or ""
                 self.check("Device reconnected" in text, f"last_session_text {text!r}")
@@ -759,13 +764,23 @@ class E2E:
 
     def reboot_check(self) -> None:
         n_before = len(self.guard_conns())
-        status, data = self.api("POST", "/api/system/reboot")
+        # The replayed receiver goes quiet across the restart (a QEMU limit,
+        # tools/qemu/README.md, UART1 section): this QEMU keeps UART1's
+        # registers and a raised CPU interrupt line through the firmware's
+        # restart, so RTCM pending at that moment storms the new boot's UART
+        # interrupt. On a board the next boot resets UART1 at its first use.
+        self.replay.pause()
+        time.sleep(2)
+        status, data = self.api("POST", "/api/system/reboot", {})
         if not self.check(status == 202, f"POST /api/system/reboot: HTTP {status} {data}"):
+            self.replay.resume()
             return
         self.planned_reboots += 1
         time.sleep(5)
         self.cookie = None
-        if not self.check(self.wait_http(self.args.timeout) and self.login(first=False), "back after the reboot"):
+        back = self.wait_http(self.args.timeout)
+        self.replay.resume()
+        if not self.check(back and self.login(first=False), "back after the reboot"):
             return
         t_back = time.monotonic()
         s = self.slot(0)["status"]

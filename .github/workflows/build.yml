@@ -143,9 +143,9 @@ jobs:
           fi
           # The overlay was really applied: the bench options are on (the
           # console, the flasher, the link's bench hooks, the held first
-          # receiver configuration).
+          # receiver configuration, test-Onocoy caster slots).
           for opt in CONFIG_BENCH_CONSOLE CONFIG_UM98X_FLASH_ENABLE CONFIG_GNSS_LINK_BENCH_HOOKS \
-                     CONFIG_STATION_HOLD_FIRST_APPLY; do
+                     CONFIG_STATION_HOLD_FIRST_APPLY CONFIG_NTRIP_TEST_ONOCOY_SLOT; do
             if ! grep -q "^$opt=y" build-bench/sdkconfig; then
               echo "::error::$opt is not on in build-bench/sdkconfig: the sdkconfig.bench overlay was not applied"
               exit 1
