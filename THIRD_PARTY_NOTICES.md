@@ -20,13 +20,14 @@ every build artifact and release.
 | [TLSF allocator](https://github.com/espressif/tlsf) | Heap | BSD-3-Clause | Matthew Conte |
 | [HTTP parser](https://github.com/nodejs/http-parser) (ESP-IDF `http_parser`) | HTTP | MIT | Joyent, Inc. and other Node contributors; Igor Sysoev |
 | [cJSON](https://github.com/DaveGamble/cJSON) (`espressif/cjson`) | JSON | MIT | Dave Gamble and cJSON contributors |
+| [mDNS](https://github.com/espressif/esp-protocols/tree/master/components/mdns) (`espressif/mdns` 1.13.1) | local name `<host>.local` and service advertising | Apache-2.0 | Espressif Systems (Shanghai) Co., Ltd. |
 
 The authoritative list for ESP-IDF, including components this project does not
 link, is ESP-IDF's
 [Copyrights and Licenses](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s3/COPYRIGHT.html)
 page; each component's license file in the ESP-IDF source tree takes precedence
-over the summary above. When a dependency is added (for example LittleFS or
-mDNS from the Component Registry), add it here in the same change.
+over the summary above. When a dependency is added, add it here in the same
+change.
 
 The test data under `test/fixtures/` (receiver captures and example streams
 from other projects and from the Centipede-RTK network) is not part of any
@@ -113,9 +114,12 @@ IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 OF SUCH DAMAGE.
 ```
 
-## Apache-2.0 components (ESP-IDF, Mbed TLS)
+## Apache-2.0 components (ESP-IDF, Mbed TLS, mDNS)
 
 These are distributed under the Apache License, Version 2.0
 (<https://www.apache.org/licenses/LICENSE-2.0>). They are used unmodified, as
-shipped in ESP-IDF v6.1. ESP-IDF's and Mbed TLS's own license and NOTICE files
-are in the ESP-IDF source tree (`LICENSE`, `components/mbedtls/mbedtls/LICENSE`).
+shipped in ESP-IDF v6.1 and, for mDNS, as published in the ESP Component
+Registry (`espressif/mdns` 1.13.1, pinned in `dependencies.lock`). ESP-IDF's and
+Mbed TLS's own license and NOTICE files are in the ESP-IDF source tree
+(`LICENSE`, `components/mbedtls/mbedtls/LICENSE`); the mDNS component's
+`LICENSE` is the same Apache-2.0 text as ESP-IDF's.

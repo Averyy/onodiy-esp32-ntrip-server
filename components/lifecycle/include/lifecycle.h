@@ -358,6 +358,14 @@ bool lifecycle_claim_once(uint32_t flag);
  */
 bool lifecycle_ladder_reboot_allowed(uint32_t *retry_in_s);
 
+/**
+ * Station time: seconds since power-on, accumulated across software, panic
+ * and watchdog resets (the RTC block the reboot cap uses; a power cycle, or
+ * a block that is invalid or predates another image's run, starts it again
+ * from this boot's start). Never blocks.
+ */
+uint32_t lifecycle_station_time_s(void);
+
 /** fw_update: a new app image is in its trial (stage 1, stage 2 or the crash watch). */
 void lifecycle_set_app_trial(bool active);
 

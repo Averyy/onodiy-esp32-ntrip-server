@@ -406,3 +406,65 @@ bool hm_power_alert(const hm_power_t *p, int64_t now_utc)
     }
     return false;
 }
+
+/* ---- GNSS ladder restart hold ---------------------------------------------------- */
+
+void hm_hold_init(hm_hold_t *h)
+{
+    h->in_episode = false;
+    h->present = false;
+    h->last_ms = HM_NEVER;
+    h->presence_ms = 0;
+}
+
+uint8_t hm_reboot_hold(hm_hold_t *h, const hm_hold_in_t *in, uint32_t *left_s)
+{
+    int64_t dt = (h->last_ms == HM_NEVER || in->now_ms < h->last_ms) ? 0 : in->now_ms - h->last_ms;
+    h->last_ms = in->now_ms;
+
+    uint8_t hold = 0;
+    if (in->settings_available && !in->setup_done) {
+        hold |= HM_HOLD_SETUP;
+    }
+    if (in->station_time_s < in->power_on_grace_s && !in->heard) {
+        hold |= HM_HOLD_POWER_ON;
+    }
+    uint8_t presence = 0;
+    if (in->ap_clients > 0) {
+        presence |= HM_HOLD_AP_CLIENT;
+    }
+    if (in->admin_at_ms != HM_NEVER && in->now_ms >= in->admin_at_ms &&
+        in->now_ms - in->admin_at_ms < (int64_t)in->admin_window_ms) {
+        presence |= HM_HOLD_ADMIN;
+    }
+
+    /* The presence limit counts per ladder episode. */
+    if (!in->episode) {
+        h->in_episode = false;
+        h->presence_ms = 0;
+    } else {
+        if (!h->in_episode) {
+            h->in_episode = true;
+            h->presence_ms = 0;
+            dt = 0;   /* the episode starts with this sample */
+        }
+        /* Time counts between two samples that both had someone present. */
+        if (presence != 0 && h->present && h->presence_ms < in->presence_max_ms) {
+            h->presence_ms += (uint64_t)dt;
+        }
+    }
+    h->present = presence != 0;
+    uint32_t left = UINT32_MAX;
+    if (presence != 0) {
+        if (h->presence_ms >= in->presence_max_ms) {
+            presence = 0;   /* over the limit: a present person no longer holds the restart back */
+        } else {
+            uint64_t rest = in->presence_max_ms - h->presence_ms;
+            left = (uint32_t)((rest + 999u) / 1000u);
+        }
+    }
+    if (left_s != NULL) {
+        *left_s = left;
+    }
+    return (uint8_t)(hold | presence);
+}

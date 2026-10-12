@@ -116,6 +116,7 @@ typedef struct {
     uint32_t hint_off[LOGRING_HINTS];
     uint32_t hint_next;
     uint32_t seek_steps;       /**< records walked to find read positions (statistics) */
+    uint64_t dropped_text;     /**< text bytes of the records dropped to make room since logring_format (RAM only) */
 } logring_t;
 
 /** What a read found. */

@@ -117,3 +117,16 @@ CONFIG_ESP_WIFI_NVS_ENABLED=n
 # index 1, so networks that block outside NTP still get the time.
 CONFIG_LWIP_DHCP_GET_NTP_SRV=y
 CONFIG_LWIP_SNTP_MAX_SERVERS=2
+
+# ---- mDNS (espressif/mdns, network component): <hostname>.local -----------
+# One service (the web page, _http._tcp) plus a spare. The responder only
+# answers: no browsing, no console commands. Its data lives in PSRAM; its
+# task stack stays internal at the component's default (4096). The default
+# lwIP raw-PCB networking is kept (MDNS_NETWORKING_SOCKET off), so it uses
+# none of the 24 lwIP sockets. The predefined STA and AP interfaces stay on
+# (component defaults): the name answers on the home network and on the
+# setup/recovery AP (192.168.4.1 there).
+CONFIG_MDNS_MAX_SERVICES=2
+CONFIG_MDNS_ENABLE_BROWSE=n
+CONFIG_MDNS_ENABLE_CONSOLE_CLI=n
+CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y

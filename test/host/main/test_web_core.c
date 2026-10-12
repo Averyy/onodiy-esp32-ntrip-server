@@ -32,7 +32,9 @@ TEST_CASE("every error code has a name, a status and a message", "[web_core]")
 
 /* ---- request checks -------------------------------------------------------------------------- */
 
-static const web_host_names_t s_names = { .sta_ip = "192.168.1.50", .ap_ip = "192.168.4.1", .hostname = "onocoydiy" };
+static const web_host_names_t s_names = {
+    .sta_ip = "192.168.1.50", .ap_ip = "192.168.4.1", .hostname = "onocoydiy", .mdns_host = "onocoydiy",
+};
 
 TEST_CASE("Host check accepts only the device's names", "[web_core]")
 {
@@ -56,10 +58,50 @@ TEST_CASE("Host check accepts only the device's names", "[web_core]")
     }
     TEST_ASSERT_FALSE(web_host_allowed(NULL, &s_names));
     /* Offline: no station address, the AP address still counts. */
-    web_host_names_t off = { .sta_ip = "", .ap_ip = "192.168.4.1", .hostname = "roof" };
+    web_host_names_t off = { .sta_ip = "", .ap_ip = "192.168.4.1", .hostname = "roof", .mdns_host = "roof" };
     TEST_ASSERT_TRUE(web_host_allowed("192.168.4.1", &off));
     TEST_ASSERT_FALSE(web_host_allowed("192.168.1.50", &off));
     TEST_ASSERT_TRUE(web_host_allowed("roof.local", &off));
+}
+
+TEST_CASE("Host check: <mdns_host>.local follows the name the responder answers", "[web_core]")
+{
+    web_host_names_t n = { .sta_ip = "192.168.1.50", .ap_ip = "192.168.4.1", .hostname = "onocoydiy",
+                           .mdns_host = "onocoydiy" };
+    TEST_ASSERT_TRUE(web_host_allowed("onocoydiy.local", &n));
+    TEST_ASSERT_TRUE(web_host_allowed("ONOCOYDIY.LOCAL:80", &n));
+    TEST_ASSERT_FALSE(web_host_allowed("onocoydiy-2.local", &n));
+    TEST_ASSERT_FALSE(web_host_allowed("evil.local", &n));
+    TEST_ASSERT_FALSE(web_host_allowed("onocoydiy.local.", &n));
+    TEST_ASSERT_FALSE(web_host_allowed("x.onocoydiy.local", &n));
+
+    /* After a name conflict the responder answers onocoydiy-2.local: that
+     * name passes; the DHCP name and its search domains stay as they were. */
+    n.mdns_host = "onocoydiy-2";
+    TEST_ASSERT_TRUE(web_host_allowed("onocoydiy-2.local", &n));
+    TEST_ASSERT_TRUE(web_host_allowed("Onocoydiy-2.Local:8080", &n));
+    TEST_ASSERT_FALSE(web_host_allowed("onocoydiy-2", &n));
+    TEST_ASSERT_FALSE(web_host_allowed("onocoydiy-2.lan", &n));
+    TEST_ASSERT_FALSE(web_host_allowed("onocoydiy.local", &n));   /* another device answers that name */
+    TEST_ASSERT_TRUE(web_host_allowed("onocoydiy", &n));
+    TEST_ASSERT_TRUE(web_host_allowed("onocoydiy.lan", &n));
+    TEST_ASSERT_FALSE(web_host_allowed("evil.local", &n));
+
+    /* mDNS not running: only the IPs and the DHCP name forms. */
+    static const char *const no_mdns_good[] = { "192.168.1.50", "192.168.4.1", "onocoydiy", "onocoydiy.lan",
+                                                "onocoydiy.home", "onocoydiy.home.arpa", "onocoydiy.localdomain",
+                                                "onocoydiy.internal" };
+    static const char *const no_mdns_bad[] = { "onocoydiy.local", "onocoydiy-2.local", "evil.local", ".local" };
+    const char *const off[] = { "", NULL };
+    for (size_t k = 0; k < 2; k++) {
+        n.mdns_host = off[k];
+        for (size_t i = 0; i < sizeof(no_mdns_good) / sizeof(no_mdns_good[0]); i++) {
+            TEST_ASSERT_TRUE_MESSAGE(web_host_allowed(no_mdns_good[i], &n), no_mdns_good[i]);
+        }
+        for (size_t i = 0; i < sizeof(no_mdns_bad) / sizeof(no_mdns_bad[0]); i++) {
+            TEST_ASSERT_FALSE_MESSAGE(web_host_allowed(no_mdns_bad[i], &n), no_mdns_bad[i]);
+        }
+    }
 }
 
 TEST_CASE("Origin must be http and equal the Host", "[web_core]")

@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+# Managed dependencies (IDF Component Manager). Versions are pinned in the
+# project's dependencies.lock. Exact pin: the responder's conflict handling
+# and the hostname-changed callback were checked against this release.
+dependencies:
+  espressif/mdns: "==1.13.1"

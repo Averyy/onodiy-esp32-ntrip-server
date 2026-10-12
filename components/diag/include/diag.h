@@ -44,12 +44,17 @@
  *    Lines longer than CONFIG_DIAG_LOG_LINE_MAX - 1 characters are cut
  *    (ending in "..."), on the console and in the ring alike.
  *  - Console: UART at 115200 through the UART driver with a TX buffer of
- *    CONFIG_DIAG_CONSOLE_TX_BUF bytes. Output is best-effort: a line goes to
- *    the UART only when the buffer has room for all of it, otherwise it is
- *    counted as a console drop (diag_log_stats) and the next line that fits
- *    is preceded by a note saying how many were dropped. The ring always
- *    keeps the line, so a burst never stalls the task that logs. Before a
- *    planned restart the buffer is given up to 300 ms to drain.
+ *    CONFIG_DIAG_CONSOLE_TX_BUF bytes, fed from the log ring in record
+ *    order: a line goes straight to the buffer only when nothing older
+ *    waits and all of it fits; otherwise it waits in the ring and a
+ *    low-priority "console" task sends it as the buffer drains, so a burst
+ *    never stalls the task that logs and nothing is dropped while the ring
+ *    still holds it. Lines are lost only when the ring overwrote them before
+ *    they were sent: they count as console drops (diag_log_stats), and one
+ *    note "[diag: N console lines dropped]" says so, always at the start of
+ *    a line. printf output goes to the driver directly and can overtake
+ *    lines that wait in the ring. Before a planned restart the waiting
+ *    lines and the buffer are given up to 300 ms to go out.
  *  - Event journal: fixed-size records in the raw "journal" partition
  *    (boots with reset class and reason, the previous session's uptime,
  *    reboot reason codes, ladder steps, app update/trial/revert/rollback
@@ -137,12 +142,16 @@ typedef enum {
      * (ESP32 reboot), 7 = rung 6b ("receiver needs a power cycle" alert),
      * 8 = rung 7 (FAILED, retry pass pending), 9 = rung 6a blocked by the
      * reboot cap or a held reboot inhibit (or, with outcome 4, not taken
-     * because of the user's recovery mode). Outcome (diag_step_outcome_t):
-     * 0 started, 1 healthy again, 2 failed (also: refused by the station
-     * without sending anything), 3 abandoned because the ladder was
-     * suspended, 4 not run because of the user's recovery mode
-     * (gnss/recovery: the step the full ladder would have started). Exempt
-     * from both rate limits.
+     * because of the user's recovery mode, or, with outcome 5, held back
+     * for now). Outcome (diag_step_outcome_t): 0 started, 1 healthy again,
+     * 2 failed (also: refused by the station without sending anything),
+     * 3 abandoned because the ladder was suspended, 4 not run because of
+     * the user's recovery mode (gnss/recovery: the step the full ladder
+     * would have started), 5 held (code 9 only): b = (hold << 16) |
+     * (5 << 8) | 9, the hold bits 0 first setup not finished, 1 a client on
+     * the station's access point, 2 the web page in use, 3 the first hour
+     * after power-on with nothing heard from the receiver. Exempt from both
+     * rate limits.
      */
     DIAG_EV_LADDER_STEP,
     DIAG_EV_APP_UPDATE,         /**< a = result (esp_err_t) */
@@ -245,7 +254,7 @@ typedef enum {
     DIAG_GNSS_STEP_REBOOT = 6,            /**< rung 6a: ESP32 reboot */
     DIAG_GNSS_STEP_POWER_CYCLE = 7,       /**< rung 6b: "receiver needs a power cycle" alert */
     DIAG_GNSS_STEP_FAILED = 8,            /**< rung 7: FAILED, retry pass pending */
-    DIAG_GNSS_STEP_REBOOT_BLOCKED = 9,    /**< rung 6a blocked by the reboot cap or a held reboot inhibit */
+    DIAG_GNSS_STEP_REBOOT_BLOCKED = 9,    /**< rung 6a blocked by the reboot cap or a held reboot inhibit (outcome 0), not taken (4), held back for now (5) */
 } diag_gnss_step_t;
 
 /** Ladder step outcome (second byte of `b`). */
@@ -255,6 +264,7 @@ typedef enum {
     DIAG_STEP_FAILED = 2,       /**< also: refused without sending anything */
     DIAG_STEP_ABANDONED = 3,    /**< the ladder was suspended */
     DIAG_STEP_NOT_RUN = 4,      /**< not run: the user's recovery mode (gnss/recovery) */
+    DIAG_STEP_HELD = 5,         /**< GNSS code 9 only: the restart is held back for now (reasons in bits 16-23 of b) */
 } diag_step_outcome_t;
 
 /** `b` of a DIAG_EV_LADDER_STEP record. */
@@ -305,7 +315,7 @@ typedef struct {
     uint32_t lines;                 /**< lines logged */
     uint32_t ring_overwritten;      /**< lines the ring dropped to make room */
     uint32_t cut;                   /**< lines cut to CONFIG_DIAG_LOG_LINE_MAX */
-    uint32_t console_dropped;       /**< lines not sent to the console (TX buffer full) */
+    uint32_t console_dropped;       /**< lines never sent to the console: the ring overwrote them first */
     uint32_t console_dropped_bytes;
     bool prev_boot_available;       /**< the previous boot's lines are readable (once diag_log_check_stamp kept them) */
     uint32_t prev_boot_lines;       /**< 0 when not available */

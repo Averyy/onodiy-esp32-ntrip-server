@@ -3,17 +3,27 @@
  * SPDX-License-Identifier: MIT
  *
  * Log tap: the log rings (this boot's and the previous boot's, in PSRAM
- * .noinit memory; logbanks_t in diag_logring.h) and the best-effort console.
+ * .noinit memory; logbanks_t in diag_logring.h) and the console.
  * The previous boot's lines become readable only once lifecycle_init has
  * checked their image generation (diag_log_check_stamp).
  *
  * Every log line is formatted once, on the logging task's stack
- * (CONFIG_DIAG_LOG_LINE_MAX bytes), appended to the ring under a spinlock
- * (memcpy plus a write-back of the touched cache lines, a few microseconds)
- * and then offered to the console UART: written only if the driver's TX
- * buffer has room for the whole line, else counted as dropped. A mutex
- * keeps two loggers from both seeing the same free room; nobody holds it
- * for longer than a copy into the TX buffer.
+ * (CONFIG_DIAG_LOG_LINE_MAX bytes), and appended to the ring under a
+ * spinlock (memcpy plus a write-back of the touched cache lines, a few
+ * microseconds). The console then sends the ring's records in order
+ * (diag_console_core.h): the logger writes its own line to the UART driver's
+ * transmit buffer only when nothing older waits and the whole line fits;
+ * otherwise the line waits in the ring and the "console" task (internal
+ * stack, priority below every station task) copies it out when the buffer
+ * has room, blocking only itself. A line is lost only when the ring
+ * overwrote it before it was sent, and one note at a line boundary says how
+ * many. A mutex keeps the fast path and the writer apart; a logger never
+ * waits for it for more than CONSOLE_WAIT_MS (the line then waits in the
+ * ring instead).
+ *
+ * printf and the other stdout calls (the bench console's replies) write to
+ * the UART driver directly, as before: while log lines wait in the ring,
+ * stdout output can overtake them.
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -21,6 +31,7 @@
 #include <unistd.h>
 
 #include "diag.h"
+#include "diag_console_core.h"
 #include "diag_internal.h"
 #include "diag_logring.h"
 
@@ -44,6 +55,10 @@
 #define CONSOLE_RX_BUF    256                       /* the driver needs more than the 128-byte FIFO */
 #define CONSOLE_MARGIN    64u                       /* TX buffer item headers of one write */
 #define CONSOLE_WAIT_MS   5                         /* another logger finishing its copy */
+#define CONSOLE_TASK_PRIO 1                         /* below every station task (IDLE is 0) */
+#define CONSOLE_POLL_MS   200                       /* the writer looks at the ring at least this often */
+#define CONSOLE_RETRY_MS  10                        /* no room: about 115 bytes drain meanwhile */
+#define DRAIN_STEP_MS     5
 
 _Static_assert(CONFIG_DIAG_LOG_LINE_MAX <= LOGRING_MAX_TEXT, "a log line must fit one ring record");
 _Static_assert(BANK_BYTES > sizeof(logring_hdr_t) + LOGRING_MAX_TEXT, "log ring too small");
@@ -73,7 +88,14 @@ static diag_log_stats_t s_stats;    /* under s_lock */
 static vprintf_like_t s_chain;      /* output function before ours: console until the driver is up */
 static volatile bool s_console;     /* driver installed: write through it, never block */
 static SemaphoreHandle_t s_console_mux;
-static uint32_t s_console_pending;  /* under s_console_mux: drops not yet reported on the console */
+static uint32_t s_console_pending;  /* under s_console_mux: drops not yet reported (no ring: best effort) */
+
+/* The console writer (diag_console_core.h), under s_console_mux. */
+static dcon_t s_con;
+EXT_RAM_BSS_ATTR static char s_con_buf[DCON_BUF_SIZE];
+static TaskHandle_t s_con_task;
+static volatile bool s_con_ordered;  /* the console sends from the ring (else best effort, as without one) */
+static volatile bool s_con_backlog;  /* hint: records wait for the writer, so loggers leave their lines to it */
 
 /* ---- ring ------------------------------------------------------------------------------ */
 
@@ -207,31 +229,18 @@ static void count_drop(size_t len)
     portEXIT_CRITICAL_SAFE(&s_lock);
 }
 
-static void console_put(char *s, size_t len, size_t cap, const char *fmt, va_list ap)
-{
-    if (!s_console) {
-        if (s_chain != NULL) {
-            va_list cp;
-            va_copy(cp, ap);
-            s_chain(fmt, cp);
-            va_end(cp);
-        }
-        return;
-    }
 #if CONFIG_ESP_CONSOLE_UART
-    /* Never wait inside a critical section or with the scheduler stopped. */
-    if (!xPortCanYield() || xTaskGetSchedulerState() != taskSCHEDULER_RUNNING ||
-        xSemaphoreTake(s_console_mux, pdMS_TO_TICKS(CONSOLE_WAIT_MS)) != pdTRUE) {
-        count_drop(len);
-        return;
-    }
+/* Without a log ring (it could not be set up): best effort as the only way,
+ * a line that does not fit is dropped and counted, and the next one that
+ * fits says how many. Under s_console_mux. */
+static void best_effort_put(char *s, size_t len, size_t cap)
+{
     size_t room = 0;
     if (uart_get_tx_buffer_free_size(CONSOLE_PORT, &room) != ESP_OK) {
         room = 0;
     }
     size_t need = wire_len(s, len) + CONSOLE_MARGIN;
     if (s_console_pending > 0) {
-        /* Say what was lost before the output resumes. */
         char note[64];
         int n = snprintf(note, sizeof(note) - 1u, "[diag: %u console line%s dropped]\n",
                          (unsigned)s_console_pending, s_console_pending == 1 ? "" : "s");
@@ -249,8 +258,151 @@ static void console_put(char *s, size_t len, size_t cap, const char *fmt, va_lis
         s_console_pending++;
         count_drop(len);
     }
+}
+
+/* ---- the console writer (ordered from the ring) ---- */
+
+/* Line endings expanded into one buffer, so a batch costs one driver write
+ * (each write takes item headers of the driver's transmit buffer). */
+EXT_RAM_BSS_ATTR static char s_con_wire[2u * DCON_BUF_SIZE];
+
+static size_t con_room(void *ctx)
+{
+    (void)ctx;
+    size_t room = 0;
+    if (uart_get_tx_buffer_free_size(CONSOLE_PORT, &room) != ESP_OK) {
+        room = 0;
+    }
+    return room;
+}
+
+static void con_write(void *ctx, const char *s, size_t len)
+{
+    (void)ctx;
+    if (len > DCON_BUF_SIZE) {
+        len = DCON_BUF_SIZE;   /* a batch is never longer */
+    }
+    memcpy(s_con_wire, s, len);
+    wire_write(s_con_wire, len, sizeof(s_con_wire));
+}
+
+static const dcon_tx_t s_con_tx = {
+    .room = con_room,
+    .write = con_write,
+    .ctx = NULL,
+    .total = CONFIG_DIAG_CONSOLE_TX_BUF,
+    .margin = CONSOLE_MARGIN,
+#if CONFIG_LIBC_STDOUT_LINE_ENDING_CRLF
+    .crlf = true,
+#else
+    .crlf = false,
+#endif
+};
+
+static void ring_lock(void *ctx)
+{
+    (void)ctx;
+    portENTER_CRITICAL(&s_lock);
+}
+
+static void ring_unlock(void *ctx)
+{
+    (void)ctx;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+/* One writer step. Only from a task that may block. */
+static dcon_pump_t con_pump(TickType_t wait)
+{
+    if (xSemaphoreTake(s_console_mux, wait) != pdTRUE) {
+        return DCON_BUSY;
+    }
+    dcon_loss_t loss = { 0 };
+    dcon_pump_t r = dcon_pump(&s_con, &s_banks.ring, ring_lock, ring_unlock, NULL, &s_con_tx, &loss);
+    if (r == DCON_IDLE) {
+        s_con_backlog = false;
+    }
+    xSemaphoreGive(s_console_mux);
+    if (loss.lost > 0) {
+        portENTER_CRITICAL(&s_lock);
+        s_stats.console_dropped += loss.lost;
+        uint64_t b = (uint64_t)s_stats.console_dropped_bytes + loss.lost_bytes;
+        s_stats.console_dropped_bytes = b > UINT32_MAX ? UINT32_MAX : (uint32_t)b;
+        portEXIT_CRITICAL(&s_lock);
+    }
+    return r;
+}
+
+static void console_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(CONSOLE_POLL_MS));
+        dcon_pump_t r;
+        while ((r = con_pump(portMAX_DELAY)) != DCON_IDLE) {
+            if (r == DCON_BUSY) {
+                vTaskDelay(pdMS_TO_TICKS(CONSOLE_RETRY_MS));
+            }
+        }
+    }
+}
+
+static void wake_writer(void)
+{
+    TaskHandle_t t = s_con_task;
+    if (t != NULL) {
+        xTaskNotifyGive(t);
+    }
+}
+#endif /* CONFIG_ESP_CONSOLE_UART */
+
+/* Record `seq` of the ring (0 = not in the ring) to the console. */
+static void console_put(uint32_t seq, char *s, size_t len, size_t cap, const char *fmt, va_list ap)
+{
+    if (!s_console) {
+        if (s_chain != NULL) {
+            va_list cp;
+            va_copy(cp, ap);
+            s_chain(fmt, cp);
+            va_end(cp);
+        }
+        return;
+    }
+#if CONFIG_ESP_CONSOLE_UART
+    (void)fmt;
+    (void)ap;
+    /* Never wait inside a critical section or with the scheduler stopped. */
+    bool can_wait = xPortCanYield() && xTaskGetSchedulerState() == taskSCHEDULER_RUNNING;
+    if (!s_con_ordered || seq == 0) {
+        if (!can_wait || xSemaphoreTake(s_console_mux, pdMS_TO_TICKS(CONSOLE_WAIT_MS)) != pdTRUE) {
+            count_drop(len);
+            return;
+        }
+        best_effort_put(s, len, cap);
+        xSemaphoreGive(s_console_mux);
+        return;
+    }
+    /* The line is in the ring: it reaches the console now, or from there
+     * through the writer, in record order either way. */
+    if (!can_wait) {
+        s_con_backlog = true;   /* the writer looks again within CONSOLE_POLL_MS */
+        return;
+    }
+    if (s_con_backlog || xSemaphoreTake(s_console_mux, pdMS_TO_TICKS(CONSOLE_WAIT_MS)) != pdTRUE) {
+        s_con_backlog = true;
+        wake_writer();
+        return;
+    }
+    if (dcon_direct_ok(&s_con, seq, wire_len(s, len), con_room(NULL), CONSOLE_MARGIN)) {
+        dcon_sent(&s_con, seq, s, len);   /* before the line endings are expanded in place */
+        wire_write(s, len, cap);
+    } else {
+        s_con_backlog = true;
+        wake_writer();
+    }
     xSemaphoreGive(s_console_mux);
 #else
+    (void)seq;
     (void)s;
     (void)len;
     (void)cap;
@@ -295,16 +447,17 @@ static int diag_vprintf(const char *fmt, va_list ap)
         cut = true;
     }
 
+    uint32_t seq = 0;
     if (s_ring_ok) {
         portENTER_CRITICAL_SAFE(&s_lock);
         uint32_t lost = s_banks.ring.hdr->lost;
-        (void)logring_append(&s_banks.ring, line, len);
+        seq = logring_append(&s_banks.ring, line, len);
         s_stats.lines++;
         s_stats.ring_overwritten += s_banks.ring.hdr->lost - lost;
         s_stats.cut += cut ? 1u : 0u;
         portEXIT_CRITICAL_SAFE(&s_lock);
     }
-    console_put(line, len, sizeof(line), fmt, ap);
+    console_put(seq, line, len, sizeof(line), fmt, ap);
     return n;
 }
 
@@ -329,9 +482,19 @@ esp_err_t diag_log_init(void)
         s_console_mux = xSemaphoreCreateMutex();
         cerr = (s_console_mux != NULL) ? ESP_OK : ESP_ERR_NO_MEM;
     }
+    bool writer = false;
     if (cerr == ESP_OK) {
+        /* The console sends the ring's records from here on (nothing is in
+         * the ring yet: the tap is installed below). */
+        dcon_init(&s_con, s_banks.ring.hdr->next_seq - 1u, s_con_buf, sizeof(s_con_buf));
+        TaskHandle_t t = NULL;
+        writer = xTaskCreatePinnedToCore(console_task, "console", CONFIG_DIAG_CONSOLE_TASK_STACK, NULL,
+                                         CONSOLE_TASK_PRIO, &t, tskNO_AFFINITY) == pdPASS;
+        s_con_task = writer ? t : NULL;
+        s_con_ordered = writer;
         /* printf and friends go through the driver too, so their bytes queue
-         * behind the log lines instead of racing them into the FIFO. */
+         * behind the log lines handed over so far instead of racing them
+         * into the FIFO (lines still waiting in the ring can come later). */
         uart_vfs_dev_use_driver(CONFIG_ESP_CONSOLE_UART_NUM);
         s_console = true;
     }
@@ -340,6 +503,8 @@ esp_err_t diag_log_init(void)
 #if CONFIG_ESP_CONSOLE_UART
     if (cerr != ESP_OK) {
         ESP_LOGE("diag", "console driver not installed (%s): console output may block", esp_err_to_name(cerr));
+    } else if (!writer) {
+        ESP_LOGE("diag", "console task not started: lines that do not fit the transmit buffer are dropped");
     }
 #endif
     if (s_banks.prev_found) {
@@ -352,8 +517,26 @@ esp_err_t diag_log_init(void)
 void diag_log_drain_console(uint32_t ms)
 {
 #if CONFIG_ESP_CONSOLE_UART
-    if (s_console) {
-        (void)uart_wait_tx_done(CONSOLE_PORT, pdMS_TO_TICKS(ms));
+    if (!s_console || !xPortCanYield() || xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) {
+        return;
+    }
+    TickType_t t0 = xTaskGetTickCount();
+    TickType_t budget = pdMS_TO_TICKS(ms);
+    /* First what still waits in the ring, written from this task (the
+     * console task's low priority must not decide whether a planned
+     * restart's last lines go out), then the transmit buffer itself. */
+    while (s_con_ordered && (xTaskGetTickCount() - t0) < budget) {
+        dcon_pump_t r = con_pump(budget - (xTaskGetTickCount() - t0));
+        if (r == DCON_IDLE) {
+            break;
+        }
+        if (r == DCON_BUSY) {
+            vTaskDelay(pdMS_TO_TICKS(DRAIN_STEP_MS));
+        }
+    }
+    TickType_t used = xTaskGetTickCount() - t0;
+    if (used < budget) {
+        (void)uart_wait_tx_done(CONSOLE_PORT, budget - used);
     }
 #else
     (void)ms;

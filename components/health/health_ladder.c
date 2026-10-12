@@ -33,11 +33,16 @@ static uint8_t max_u8(uint8_t a, uint8_t b)
     return a > b ? a : b;
 }
 
-static void journal(hl_t *l, uint8_t code, uint8_t outcome)
+static void journal_detail(hl_t *l, uint8_t code, uint8_t outcome, uint8_t detail)
 {
     if (l->ops.journal != NULL) {
-        l->ops.journal(l->ops.ctx, code, outcome);
+        l->ops.journal(l->ops.ctx, code, outcome, detail);
     }
+}
+
+static void journal(hl_t *l, uint8_t code, uint8_t outcome)
+{
+    journal_detail(l, code, outcome, 0);
 }
 
 static uint8_t mode_of(const hl_in_t *in)
@@ -156,8 +161,11 @@ static void enter_failed(hl_t *l, const hl_in_t *in)
 
 /* After a failed step 3 (not found) or 5, and for a NO_RECEIVER episode.
  * ALERTS mode: neither 6a nor 6b, straight to 7. NO_REBOOT mode: 6a is
- * journalled as not run and the ladder goes to 7. A 6a that could not be
- * taken during a NO_RECEIVER episode is looked at again (no_receiver()). */
+ * journalled as not run and the ladder goes to 7. The cap and an inhibit
+ * block 6a first (outcome STARTED of code 9, as before the hold existed);
+ * otherwise a hold postpones it (outcome HELD with the hold bits). A 6a that
+ * could not be taken during a NO_RECEIVER episode is looked at again
+ * (no_receiver()). */
 static void byte_rule(hl_t *l, const hl_in_t *in, bool bytes)
 {
     uint8_t mode = mode_of(in);
@@ -169,7 +177,11 @@ static void byte_rule(hl_t *l, const hl_in_t *in, bool bytes)
     if (!bytes) {
         if (mode == HL_MODE_NO_REBOOT) {
             journal(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_NOT_RUN);
-        } else if (in->reboot_allowed && !in->reboot_inhibited) {
+        } else if (!in->reboot_allowed || in->reboot_inhibited) {
+            journal(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_STARTED);
+        } else if (in->reboot_hold != 0) {
+            journal_detail(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_HELD, in->reboot_hold);
+        } else {
             journal(l, HL_CODE_REBOOT, HL_OUT_STARTED);
             if (l->ops.reboot == NULL || l->ops.reboot(l->ops.ctx)) {
                 l->recoveries++;
@@ -180,8 +192,6 @@ static void byte_rule(hl_t *l, const hl_in_t *in, bool bytes)
                 return;
             }
             journal(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_STARTED);   /* blocked after all: a race with the cap or an inhibit */
-        } else {
-            journal(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_STARTED);
         }
         if (in->stn_state == HL_STN_NO_RECEIVER) {
             l->blocked_6a = true;
@@ -488,12 +498,13 @@ static void idle_phase(hl_t *l, const hl_in_t *in)
 }
 
 /* A 6a this episode could not take, looked at again: full mode, the cap
- * allows a reboot now, no inhibit is held, and the station has completed a
- * detection pass since the block (its result is what the rule reads). */
+ * allows a reboot now, no inhibit is held, nothing holds it back, and the
+ * station has completed a detection pass since the block (its result is
+ * what the rule reads). */
 static bool recheck_due(const hl_t *l, const hl_in_t *in)
 {
     return l->blocked_6a && mode_of(in) == HL_MODE_FULL && in->reboot_allowed && !in->reboot_inhibited &&
-           (int32_t)(in->detect_passes - l->blocked_at_pass) > 0;
+           in->reboot_hold == 0 && (int32_t)(in->detect_passes - l->blocked_at_pass) > 0;
 }
 
 /* NO_RECEIVER episodes: the byte rule once on the station's whole pass,
@@ -700,4 +711,5 @@ void hl_get_status(const hl_t *l, const hl_in_t *in, hl_status_t *out)
     out->recoveries = l->recoveries;
     out->mode = l->mode;
     out->reboot_recheck = l->blocked_6a && l->mode == HL_MODE_FULL;
+    out->episode = l->phase != HL_PH_IDLE || l->idx != 0 || l->no_rx || l->power_alert;
 }

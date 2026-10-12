@@ -34,6 +34,8 @@
  *    never runs the first action as well.
  *  - Overall level: the worst of the GNSS ladder's and "degraded" for any
  *    other alert or a caster that is down.
+ *  - GNSS ladder restart hold: why the ladder's ESP32 restart (6a) waits
+ *    right now (hm_reboot_hold, below).
  *  - Power lost: the journal's boot records are read in order and the
  *    power-on boots kept with their time. The alert is up while the newest
  *    power-on boot is less than 24 h old and, in the run of power-on boots
@@ -273,6 +275,67 @@ void hm_power_running(hm_power_t *p, int64_t now_utc, uint32_t uptime_s);
 
 /** Is the "power was lost" alert up at `now_utc` (0 = no trusted clock now)? */
 bool hm_power_alert(const hm_power_t *p, int64_t now_utc);
+
+/* ---- GNSS ladder restart hold ------------------------------------------------- */
+
+/*
+ * The ladder's ESP32 restart (6a) answers an ESP32-side fault after the
+ * receiver went silent, within the reboot cap. It is held back (never
+ * queued: looked at again later, like a cap block) while any of these
+ * holds:
+ *  - SETUP: the settings are available and first setup is not finished. No
+ *    time limit: a station never set up streams nothing, and its owner is on
+ *    its setup network.
+ *  - AP_CLIENT: someone is connected to the station's access point.
+ *  - ADMIN: an admin session made a request or sent a WebSocket ping within
+ *    the admin window (5 min).
+ *  - POWER_ON: less than the grace (60 min) of station time since power-on
+ *    and nothing valid heard from the receiver in this boot (no RTCM frame,
+ *    no checksum-valid text line). A restart cannot clear an ESP32-side
+ *    fault that the power-on itself just cleared; a receiver that streamed
+ *    in this boot and then stalled gets 6a at once, within the cap.
+ * AP_CLIENT and ADMIN (a person present) together hold for at most
+ * `presence_max_ms` of presence per ladder episode (30 min, the network
+ * ladder's limit for AP clients): after that the restart runs anyway. The
+ * presence time counts only during a ladder episode (a stall or NO_RECEIVER
+ * episode, until the ladder resets) and starts again after a ladder reset
+ * and at every boot (RAM only).
+ */
+#define HM_HOLD_SETUP     (1u << 0)
+#define HM_HOLD_AP_CLIENT (1u << 1)
+#define HM_HOLD_ADMIN     (1u << 2)
+#define HM_HOLD_POWER_ON  (1u << 3)
+#define HM_HOLD_PRESENCE  (HM_HOLD_AP_CLIENT | HM_HOLD_ADMIN)
+
+typedef struct {
+    bool in_episode;           /**< the last sample was inside a ladder episode */
+    bool present;              /**< the last sample had a person present (AP client or admin) */
+    int64_t last_ms;           /**< time of the last sample (HM_NEVER = none) */
+    uint64_t presence_ms;      /**< presence held in this ladder episode */
+} hm_hold_t;
+
+typedef struct {
+    int64_t now_ms;
+    bool episode;              /**< the GNSS ladder is in a stall or NO_RECEIVER episode */
+    bool settings_available;
+    bool setup_done;           /**< sys/setup_done == 1 */
+    uint32_t ap_clients;
+    int64_t admin_at_ms;       /**< last admin request or WebSocket ping (HM_NEVER = none this boot) */
+    uint32_t admin_window_ms;
+    uint32_t presence_max_ms;
+    uint32_t station_time_s;   /**< since power-on, across software resets */
+    uint32_t power_on_grace_s;
+    bool heard;                /**< an RTCM frame or a checksum-valid text line from the receiver this boot */
+} hm_hold_in_t;
+
+void hm_hold_init(hm_hold_t *h);
+
+/**
+ * The hold bits (HM_HOLD_*) now. `left_s` (optional): seconds until the
+ * presence limit lets a restart held by AP_CLIENT or ADMIN run, UINT32_MAX
+ * when neither holds.
+ */
+uint8_t hm_reboot_hold(hm_hold_t *h, const hm_hold_in_t *in, uint32_t *left_s);
 
 /* ---- overall level ------------------------------------------------------------ */
 

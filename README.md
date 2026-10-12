@@ -225,6 +225,25 @@ openssl ec -in manifest-key.pem -pubout | openssl ec -pubin -text -noout  # the 
 
 Manifest format and rules: `components/fw_update/priv_include/manifest.h`.
 
+## First setup and reaching the station
+
+1. Power the station. With no Wi-Fi set up it opens its own network,
+   `onocoydiy-XXXX` (the last four hex digits of its MAC address). Join it with a
+   phone; the setup page opens by itself (or open `http://192.168.4.1/`).
+2. Choose the admin password, then the Wi-Fi network the station should use.
+3. Once the station has joined that network, the page shows its name and address
+   and counts down: its own network closes about 15 seconds later. Put the phone
+   back on your Wi-Fi.
+4. Open **`http://onocoydiy.local/`** (or the address the page showed) and log in;
+   the setup continues there with the reception check, the Onocoy credentials and
+   any further casters.
+
+On your network the station answers to its name over mDNS,
+`http://<station name>.local/` (`onocoydiy` unless you rename it; when another
+device already uses that name the station takes `onocoydiy-2` and the web page
+says so), and to its IP address, which your router's device list shows under the
+station name. The System page and the dashboard show both as links.
+
 ## Recovery (planned behaviour)
 
 - **Forgot the admin password:** hold the **BOOT** button for 10 s while the station
@@ -233,7 +252,7 @@ Manifest format and rules: `components/fw_update/priv_include/manifest.h`.
   one. Casters and settings are kept.
 - **Wi-Fi gone:** the station never gives up; it keeps retrying (every 30 s at most)
   and after 5 minutes offline also opens the setup Wi-Fi network beside it, so you
-  can fix the credentials. That network closes again a minute after the station is
+  can fix the credentials. That network closes again 15 seconds after the station is
   back online. While the Onocoy stream is down for a network reason on the station's
   side, it reconnects, renews its address and restarts Wi-Fi by itself, and reboots
   for it at most once every 6 hours (never during a receiver firmware update).

@@ -53,6 +53,7 @@ static const char *TAG = "health";
 #define MAX_SLOTS          CONFIG_NTRIP_MAX_CASTERS
 #define JOURNAL_CHUNK      32      /* journal records per read (power-lost alert) */
 #define JOURNAL_READS_PER_TICK 8   /* a full 128 KB journal is read in about 16 s at start, bounded per tick */
+#define SETUP_REREAD_MS    60000   /* sys/setup_done read again at least this often (change events can be dropped) */
 
 /* Debounce of the alerts that come from sampled states (ms). */
 #define BANDS_ON_MS        60000u
@@ -106,8 +107,13 @@ _Static_assert(HL_CODE_RESYNC == (int)DIAG_GNSS_STEP_RESYNC && HL_CODE_LINK_REST
                "ladder journal codes are diag_gnss_step_t");
 _Static_assert(HL_OUT_STARTED == (int)DIAG_STEP_STARTED && HL_OUT_HEALTHY == (int)DIAG_STEP_HEALTHY &&
                    HL_OUT_FAILED == (int)DIAG_STEP_FAILED && HL_OUT_ABANDONED == (int)DIAG_STEP_ABANDONED &&
-                   HL_OUT_NOT_RUN == (int)DIAG_STEP_NOT_RUN,
+                   HL_OUT_NOT_RUN == (int)DIAG_STEP_NOT_RUN && HL_OUT_HELD == (int)DIAG_STEP_HELD,
                "ladder outcomes are diag_step_outcome_t");
+_Static_assert(HL_HOLD_SETUP == (int)HEALTH_HOLD_SETUP && HL_HOLD_AP_CLIENT == (int)HEALTH_HOLD_AP_CLIENT &&
+                   HL_HOLD_ADMIN == (int)HEALTH_HOLD_ADMIN && HL_HOLD_POWER_ON == (int)HEALTH_HOLD_POWER_ON &&
+                   HM_HOLD_SETUP == HL_HOLD_SETUP && HM_HOLD_AP_CLIENT == HL_HOLD_AP_CLIENT &&
+                   HM_HOLD_ADMIN == HL_HOLD_ADMIN && HM_HOLD_POWER_ON == HL_HOLD_POWER_ON,
+               "restart hold bits match across the cores and health.h");
 _Static_assert(HL_MODE_FULL == (int)HEALTH_RECOVERY_FULL && HL_MODE_NO_REBOOT == (int)HEALTH_RECOVERY_NO_REBOOT &&
                    HL_MODE_ALERTS == (int)HEALTH_RECOVERY_ALERTS,
                "ladder modes are health_recovery_mode_t");
@@ -128,11 +134,17 @@ static uint32_t s_rec_enters;
 static uint32_t s_rec_exits;
 static station_state_t s_ev_state = STATION_STATE_IDLE;   /* event loop task only */
 static bool s_cfg_dirty = true;                          /* caster configs to re-read */
+static bool s_setup_dirty = true;                        /* sys/setup_done to read again (settings events) */
+static uint32_t s_admin_at_s;                            /* last admin activity: uptime s + 1 (0 = none this boot) */
 
 /* ---- health task only --------------------------------------------------------- */
 
 static hl_t s_ladder;
 static hl_in_t s_in;
+static hm_hold_t s_hold;
+static bool s_setup_done;               /* sys/setup_done == 1, as last read */
+static int64_t s_setup_read_ms = HM_NEVER;
+static uint8_t s_prev_hold;
 static hm_loss_t s_loss;
 static hm_link_t s_link;
 static hm_slot_t s_slot[MAX_SLOTS];
@@ -185,8 +197,23 @@ static const char *step_name(uint8_t code)
 static const char *outcome_name(uint8_t o)
 {
     static const char *const k[] = { "started", "healthy again", "failed", "abandoned (suspended)",
-                                     "not run (user setting)" };
+                                     "not run (user setting)", "held" };
     return o < sizeof(k) / sizeof(k[0]) ? k[o] : "?";
+}
+
+/* "first setup not finished, the web page is in use" */
+static void hold_text(uint8_t hold, char *out, size_t size)
+{
+    static const char *const k[] = { "first setup not finished", "someone is on the station's access point",
+                                     "the web page is in use", "first hour after power-on" };
+    size_t n = 0;
+    out[0] = '\0';
+    for (unsigned i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        if ((hold & (1u << i)) != 0 && n < size) {
+            int w = snprintf(out + n, size - n, "%s%s", n > 0 ? ", " : "", k[i]);
+            n += w > 0 ? (size_t)w : 0;
+        }
+    }
 }
 
 /* ---- ladder callbacks ----------------------------------------------------------- */
@@ -213,23 +240,65 @@ static bool op_reboot(void *ctx)
     /* Checked again right before the request: the ladder's sample is from
      * the start of the tick, and a reboot is never queued behind an inhibit. */
     if (!lifecycle_ladder_reboot_allowed(NULL) || lifecycle_reboot_inhibited(NULL)) {
-        ESP_LOGW(TAG, "GNSS ladder: ESP32 reboot blocked after all (cap or inhibit)");
+        ESP_LOGW(TAG, "no receiver: restart to look for it blocked after all (reboot cap or a running update)");
         return false;
     }
-    ESP_LOGE(TAG, "GNSS ladder: no byte from the receiver after the recovery steps: rebooting the ESP32");
+    ESP_LOGE(TAG, "no receiver after the recovery steps: restarting the ESP32 to look for it");
     (void)lifecycle_request_reboot(LIFECYCLE_REBOOT_GNSS_LADDER);
     return true;
 }
 
-static void op_journal(void *ctx, uint8_t code, uint8_t outcome)
+/* One line per journal record, in words (the journal itself keeps the codes). */
+static void ladder_log(uint8_t code, uint8_t outcome, uint8_t detail)
 {
-    (void)ctx;
+    if (code == HL_CODE_REBOOT && outcome == HL_OUT_STARTED) {
+        return;   /* op_reboot says it when it asks for the restart */
+    }
+    if (code == HL_CODE_REBOOT_BLOCKED) {
+        if (outcome == HL_OUT_HELD) {
+            char why[128];
+            hold_text(detail, why, sizeof(why));
+            ESP_LOGW(TAG, "no receiver: restart to look for it postponed (%s)", why);
+        } else if (outcome == HL_OUT_NOT_RUN) {
+            ESP_LOGW(TAG, "no receiver: no restart to look for it (recovery mode: no ESP32 restart)");
+        } else if (lifecycle_reboot_inhibited(NULL)) {
+            ESP_LOGW(TAG, "no receiver: restart to look for it postponed (an update or receiver session holds "
+                          "restarts back)");
+        } else {
+            uint32_t wait = 0;
+            (void)lifecycle_ladder_reboot_allowed(&wait);
+            ESP_LOGW(TAG, "no receiver: restart to look for it postponed (at most one an hour and three a day; "
+                          "possible in %" PRIu32 " min)",
+                     (wait + 59u) / 60u);
+        }
+        return;
+    }
+    if (code == HL_CODE_FAILED && outcome == HL_OUT_STARTED) {
+        if (s_st.state == STATION_STATE_NO_RECEIVER) {
+            ESP_LOGW(TAG, "no receiver: the station keeps looking for it on its own schedule");
+        } else {
+            ESP_LOGW(TAG, "GNSS recovery: every step tried; the next round starts in %u min",
+                     (unsigned)(HL_FAILED_RETRY_MS / 60000u));
+        }
+        return;
+    }
+    if (code == HL_CODE_POWER_ALERT && outcome == HL_OUT_STARTED) {
+        ESP_LOGW(TAG, "receiver sends bytes but nothing usable: it needs a power cycle (an ESP32 restart cannot fix that)");
+        return;
+    }
     if (outcome == HL_OUT_HEALTHY) {
         ESP_LOGI(TAG, "GNSS ladder: %s: %s", step_name(code), outcome_name(outcome));
     } else {
         ESP_LOGW(TAG, "GNSS ladder: %s: %s", step_name(code), outcome_name(outcome));
     }
-    int32_t b = diag_ladder_b((diag_step_outcome_t)outcome, code);
+}
+
+static void op_journal(void *ctx, uint8_t code, uint8_t outcome, uint8_t detail)
+{
+    (void)ctx;
+    ladder_log(code, outcome, detail);
+    /* A held restart carries its reasons in bits 16-23 (the network ladder's reason byte). */
+    int32_t b = (int32_t)(((uint32_t)detail << 16) | (uint32_t)diag_ladder_b((diag_step_outcome_t)outcome, code));
     esp_err_t err = diag_journal_append(DIAG_EV_LADDER_STEP, DIAG_LADDER_GNSS, b);
     if (err != ESP_OK) {
         ESP_LOGD(TAG, "ladder record not journalled: %s", esp_err_to_name(err));
@@ -261,6 +330,21 @@ static void on_ntrip_event(void *arg, esp_event_base_t base, int32_t id, void *d
     (void)id;
     (void)data;
     __atomic_store_n(&s_cfg_dirty, true, __ATOMIC_SEQ_CST);
+}
+
+/* sys/setup_done changed (or several keys at once, or a factory reset): the
+ * health task reads it again. */
+static void on_settings_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    if (id == SETTINGS_EVENT_CHANGED && data != NULL) {
+        const settings_changed_t *c = data;
+        if (strcmp(c->ns, SETTINGS_NS_SYS) != 0 || (c->key[0] != '\0' && strcmp(c->key, SETTINGS_KEY_SETUP_DONE) != 0)) {
+            return;
+        }
+    }
+    __atomic_store_n(&s_setup_dirty, true, __ATOMIC_SEQ_CST);
 }
 
 /* ---- one tick, part by part --------------------------------------------------- */
@@ -356,9 +440,9 @@ static void casters_tick(int64_t now, bool *any_down, bool *protected_down, bool
 /* Network ladder inputs; the ladder itself runs in the network component.
  * @return the "no upstream" alert: an IP, the last probe reached nothing
  *         beyond the router, and no caster streams. */
-static bool network_tick(const rtcm_hub_stats_t *hub, bool protected_down, bool any_streaming, uint32_t unreached_s)
+static bool network_tick(bool have, const rtcm_hub_stats_t *hub, bool protected_down, bool any_streaming,
+                         uint32_t unreached_s)
 {
-    bool have = network_get_status(&s_net) == ESP_OK;
     network_ladder_input_t nin = {
         .caster_down = protected_down,
         .rtcm_healthy = hub->last_frame_age_ms != UINT32_MAX && hub->last_frame_age_ms <= STALL_MS,
@@ -471,6 +555,48 @@ static void button_tick(int64_t now)
     default:
         break;
     }
+}
+
+/* sys/setup_done, cached: read at start, on a settings event, and once a minute. */
+static bool setup_done_now(int64_t now)
+{
+    if (__atomic_exchange_n(&s_setup_dirty, false, __ATOMIC_SEQ_CST) || s_setup_read_ms == HM_NEVER ||
+        now - s_setup_read_ms >= SETUP_REREAD_MS) {
+        uint8_t v = 0;
+        s_setup_done = settings_is_available() &&
+                       settings_get_u8(SETTINGS_NS_SYS, SETTINGS_KEY_SETUP_DONE, &v) == ESP_OK && v == 1;
+        s_setup_read_ms = now;
+    }
+    return s_setup_done;
+}
+
+/* Why the ladder's ESP32 restart waits right now (health_mon.h). */
+static uint8_t hold_tick(int64_t now, bool have_net, bool episode, uint32_t *left_s)
+{
+    uint32_t admin = __atomic_load_n(&s_admin_at_s, __ATOMIC_SEQ_CST);
+    hm_hold_in_t hi = {
+        .now_ms = now,
+        .episode = episode,
+        .settings_available = settings_is_available(),
+        .setup_done = setup_done_now(now),
+        .ap_clients = have_net ? s_net.ap_clients : 0,
+        .admin_at_ms = admin == 0 ? HM_NEVER : (int64_t)(admin - 1u) * 1000,
+        .admin_window_ms = (uint32_t)CONFIG_HEALTH_REBOOT_HOLD_ADMIN_S * 1000u,
+        .presence_max_ms = (uint32_t)CONFIG_HEALTH_REBOOT_HOLD_MAX_MIN * 60000u,
+        .station_time_s = lifecycle_station_time_s(),
+        .power_on_grace_s = (uint32_t)CONFIG_HEALTH_REBOOT_POWER_ON_GRACE_MIN * 60u,
+        .heard = s_link_stats.last_rtcm_age_ms != UINT32_MAX || s_link_stats.framing.text_lines > 0,
+    };
+    uint8_t hold = hm_reboot_hold(&s_hold, &hi, left_s);
+    if (hold != s_prev_hold) {
+        char was[128];
+        char now_text[128];
+        hold_text(s_prev_hold, was, sizeof(was));
+        hold_text(hold, now_text, sizeof(now_text));
+        ESP_LOGI(TAG, "GNSS ladder restart hold: %s -> %s", s_prev_hold ? was : "none", hold ? now_text : "none");
+        s_prev_hold = hold;
+    }
+    return hold;
 }
 
 /* gnss/recovery, read before every ladder decision; out of range reads as full. */
@@ -601,9 +727,15 @@ static void tick(void)
 #else
     in->survey_holds_rtcm = false;
 #endif
-    in->reboot_allowed = lifecycle_ladder_reboot_allowed(NULL);
+    uint32_t cap_wait = 0;
+    in->reboot_allowed = lifecycle_ladder_reboot_allowed(&cap_wait);
     in->reboot_inhibited = lifecycle_reboot_inhibited(NULL);
     in->detect_passes = s_st.detect_passes;
+    bool have_net = network_get_status(&s_net) == ESP_OK;
+    hl_status_t prev;
+    hl_get_status(&s_ladder, in, &prev);
+    uint32_t hold_left = UINT32_MAX;
+    in->reboot_hold = hold_tick(now, have_net, prev.episode, &hold_left);
     uint8_t mode = read_recovery_mode();
     if (mode != s_mode) {
         ESP_LOGI(TAG, "automatic receiver recovery: %s -> %s", mode_name(s_mode), mode_name(mode));
@@ -624,7 +756,7 @@ static void tick(void)
     uint32_t unreached_s;
     casters_tick(now, &any_down, &protected_down, &any_streaming, &unreached_s);
     bool casters_down = hm_deb(&s_deb_casters, any_down, now, CASTER_ON_MS, CASTER_OFF_MS);
-    bool no_upstream = network_tick(&hub, protected_down, any_streaming, unreached_s);
+    bool no_upstream = network_tick(have_net, &hub, protected_down, any_streaming, unreached_s);
     bool power_lost = power_tick();
 
     gnss_obs_summary_t obs;
@@ -694,6 +826,9 @@ static void tick(void)
     o.admin_resets = s_admin_resets;
     o.recovery_mode = (health_recovery_mode_t)mode;
     o.gnss_reboot_recheck = ls.reboot_recheck;
+    o.gnss_reboot_hold = in->reboot_hold;
+    o.gnss_reboot_hold_left_s = hold_left;
+    o.gnss_reboot_cap_wait_s = in->reboot_allowed ? UINT32_MAX : cap_wait;
     if (s_factory_refused_ms == HM_NEVER) {
         o.factory_reset_refused_age_s = UINT32_MAX;
     } else {
@@ -752,6 +887,7 @@ esp_err_t health_init(void)
     s_power_caught_up = false;
     s_power_alert = false;
     s_mode = read_recovery_mode();
+    hm_hold_init(&s_hold);
 
     esp_err_t err = esp_event_handler_register(STATION_EVENT, STATION_EVENT_STATE_CHANGED, on_station_event, NULL);
     if (err != ESP_OK) {
@@ -761,6 +897,10 @@ esp_err_t health_init(void)
     err = esp_event_handler_register(NTRIP_EVENT, NTRIP_EVENT_STATE_CHANGED, on_ntrip_event, NULL);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "caster events not received (%s)", esp_err_to_name(err));
+    }
+    err = esp_event_handler_register(SETTINGS_EVENT, ESP_EVENT_ANY_ID, on_settings_event, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "settings events not received (%s): first-setup state read once a minute", esp_err_to_name(err));
     }
     s_inited = true;
     ESP_LOGI(TAG, "stall after %d s without RTCM; BOOT button %d s / %d s", CONFIG_HEALTH_GNSS_STALL_S,
@@ -820,10 +960,18 @@ esp_err_t health_get_status(health_status_t *out)
     out->uptime_s = (uint64_t)(esp_timer_get_time() / 1000000);
     out->recovery_mode = (health_recovery_mode_t)read_recovery_mode();
     out->rtcm_gap_ms = UINT32_MAX;
+    out->gnss_reboot_hold_left_s = UINT32_MAX;
+    out->gnss_reboot_cap_wait_s = UINT32_MAX;
     out->factory_reset_refused_age_s = UINT32_MAX;
     out->heap_internal_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     out->heap_internal_min = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
     out->heap_internal_largest = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     out->heap_psram_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     return ESP_OK;
+}
+
+void health_note_admin_activity(void)
+{
+    uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
+    __atomic_store_n(&s_admin_at_s, up + 1u, __ATOMIC_SEQ_CST);
 }

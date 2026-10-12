@@ -10,9 +10,36 @@
 
 #include "um98x_profile.h"
 #include "web_enums.h"
+#include "web_parse.h"
 
 /* esp_ota_ops.h is not part of the host build; web.c checks this value. */
 #define WEB_ESP_ERR_OTA_VALIDATE_FAILED 0x1503
+
+/* ---- session ------------------------------------------------------------------------------ */
+
+void web_build_session(wj_t *w, const web_session_snap_t *s)
+{
+    wj_obj_open(w, NULL);
+    wj_int(w, "api", WEB_API_VERSION);
+    wj_bool(w, "authenticated", s->authenticated);
+    wj_bool(w, "admin_set", s->admin_set);
+    wj_bool(w, "setup_done", s->setup_done);
+    wj_bool(w, "claim_allowed", s->claim_allowed);
+    wj_bool(w, "on_setup_ap", s->on_setup_ap);
+    wj_bool(w, "public_status", s->public_status);
+    wj_bool(w, "settings_available", s->settings_available);
+    if (s->authenticated) {
+        wj_uint(w, "idle_left_s", s->idle_left_s);
+    } else {
+        wj_null(w, "idle_left_s");
+    }
+    /* Not new disclosures: DHCP, mDNS and the AP's beacon carry them anyway. */
+    wj_str(w, "hostname", s->hostname != NULL ? s->hostname : "");
+    wj_str_or_null(w, "mdns_host", s->mdns_host);
+    wj_str_or_null(w, "ap_ssid", s->ap_ssid);
+    wj_str(w, "setup_step", s->authenticated && !s->setup_done ? web_setup_step_name(s->setup_step) : NULL);
+    wj_obj_close(w);
+}
 
 /* ---- receiver update session view ---------------------------------------------------- */
 
@@ -185,6 +212,22 @@ static void ladder_triggers(wj_t *w, const char *key, uint32_t bits)
     wj_arr_close(w);
 }
 
+/* "no_ip", "auth_failed", or NULL (null) when the credentials were not reverted. */
+static const char *cred_revert_name(const network_status_t *n)
+{
+    if (!n->cred_reverted) {
+        return NULL;
+    }
+    switch (n->cred_reverted_why) {
+    case NETWORK_CRED_REVERT_NO_IP:
+        return "no_ip";
+    case NETWORK_CRED_REVERT_AUTH:
+        return "auth_failed";
+    default:
+        return NULL;
+    }
+}
+
 /* Changed Wi-Fi credentials on trial, pending, or reverted (status network section and /api/wifi). */
 static void cred_fields(wj_t *w, const network_status_t *n)
 {
@@ -193,6 +236,13 @@ static void cred_fields(wj_t *w, const network_status_t *n)
     wj_bool(w, "cred_pending", n->cred_pending);
     str_arr_or_null(w, "pending_ssid", (n->cred_pending || n->cred_trial) ? n->pending_ssid : "", sizeof(n->pending_ssid));
     wj_bool(w, "cred_reverted", n->cred_reverted);
+    wj_str(w, "cred_reverted_why", cred_revert_name(n));
+}
+
+/* Seconds until the AP closes: null while it is down or nothing is scheduled. */
+static void ap_close_in(wj_t *w, const char *key, const network_status_t *n)
+{
+    wj_u32_or_null(w, key, n->setup_ap_active ? n->ap_close_in_s : UINT32_MAX);
 }
 
 /* ---- status ------------------------------------------------------------------------------- */
@@ -308,9 +358,13 @@ static void sec_network(wj_t *w, const web_status_snap_t *s)
         wj_null(w, "rssi");
     }
     wj_str(w, "upstream", web_probe_name(n->probe));
+    /* In whole minutes: the section (sent when it changes) then changes at most once a minute. */
+    wj_u32_or_null(w, "probe_age_s", n->probe_age_s == UINT32_MAX ? UINT32_MAX : n->probe_age_s / 60u * 60u);
     wj_uint(w, "offline_s", n->offline_s);
     wj_bool(w, "ap_active", n->setup_ap_active);
     ap_reasons(w, "ap_reasons", n->setup_ap_active, n->ap_reasons);
+    ap_close_in(w, "ap_close_in_s", n);
+    str_arr_or_null(w, "mdns_host", n->mdns_host, sizeof(n->mdns_host));
     wj_uint(w, "assoc_no_ip_s", n->assoc_no_ip_s);
     ladder_triggers(w, "ladder_triggers", n->ladder_triggers);
     cred_fields(w, n);
@@ -346,6 +400,23 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
     wj_obj_close(w);
 }
 
+/* Why the GNSS ladder's ESP32 restart waits now, how long the presence limit
+ * still holds it, and the reboot cap's wait (status health and /api/health). */
+static void reboot_hold_fields(wj_t *w, const health_status_t *h)
+{
+    static const char *const names[] = { "setup", "ap_client", "admin", "power_on" };
+    wj_arr_open(w, "reboot_hold");
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if ((h->gnss_reboot_hold & (1u << i)) != 0) {
+            wj_str(w, NULL, names[i]);
+        }
+    }
+    wj_arr_close(w);
+    bool presence = (h->gnss_reboot_hold & (HEALTH_HOLD_AP_CLIENT | HEALTH_HOLD_ADMIN)) != 0;
+    wj_u32_or_null(w, "reboot_hold_left_s", presence ? h->gnss_reboot_hold_left_s : UINT32_MAX);
+    wj_u32_or_null(w, "reboot_cap_wait_s", h->gnss_reboot_cap_wait_s);
+}
+
 static void sec_health(wj_t *w, const web_status_snap_t *s, bool pub)
 {
     wj_obj_open(w, "health");
@@ -357,6 +428,7 @@ static void sec_health(wj_t *w, const web_status_snap_t *s, bool pub)
         wj_bool(w, "factory_reset_refused", s->health.factory_reset_refused_age_s < WEB_FACTORY_REFUSED_SHOW_S);
         wj_str(w, "recovery_mode", web_recovery_mode_name(s->health.recovery_mode));
         wj_bool(w, "reboot_recheck", s->health.gnss_reboot_recheck);
+        reboot_hold_fields(w, &s->health);
     }
     wj_obj_close(w);
 }
@@ -1286,6 +1358,7 @@ void web_build_wifi(wj_t *w, const web_wifi_snap_t *s)
 {
     const network_status_t *n = s->net;
     wj_obj_open(w, NULL);
+    str_arr_or_null(w, "mdns_host", n->mdns_host, sizeof(n->mdns_host));
     wj_bool(w, "configured", n->sta_configured);
     wj_bool(w, "credentials_unreadable", n->sta_credentials_unreadable);
     wj_str_or_null(w, "ssid", n->sta_configured ? n->ssid : NULL);
@@ -1327,6 +1400,7 @@ void web_build_wifi(wj_t *w, const web_wifi_snap_t *s)
     ap_reasons(w, "reasons", n->setup_ap_active, n->ap_reasons);
     wj_uint(w, "clients", n->ap_clients);
     wj_uint(w, "recovery_left_s", n->recovery_ap_left_s);
+    ap_close_in(w, "close_in_s", n);
     wj_bool(w, "password_set", s->ap_password_set);
     wj_obj_close(w);
     wj_obj_open(w, "scan");
@@ -1584,6 +1658,7 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
     wj_uint(w, "admin_resets", hs->admin_resets);
     wj_str(w, "recovery_mode", web_recovery_mode_name(hs->recovery_mode));
     wj_bool(w, "reboot_recheck", hs->gnss_reboot_recheck);
+    reboot_hold_fields(w, hs);
     wj_obj_open(w, "heap");
     wj_uint(w, "internal_free", hs->heap_internal_free);
     wj_uint(w, "internal_min", hs->heap_internal_min);

@@ -815,6 +815,15 @@ bool lifecycle_ladder_reboot_allowed(uint32_t *retry_in_s)
     return allowed;
 }
 
+uint32_t lifecycle_station_time_s(void)
+{
+    uint32_t now = uptime_s();
+    taskENTER_CRITICAL(&s_lock);
+    uint32_t t = boot_guard_station_time(&s_rtc, now);
+    taskEXIT_CRITICAL(&s_lock);
+    return t;
+}
+
 void lifecycle_set_app_trial(bool active)
 {
     taskENTER_CRITICAL(&s_lock);

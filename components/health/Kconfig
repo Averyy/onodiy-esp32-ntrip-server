@@ -49,6 +49,40 @@ menu "Station: health monitor"
         range 10 60
         default 20
 
+    config HEALTH_REBOOT_HOLD_ADMIN_S
+        int "An admin's web request holds the GNSS ladder's restart for (s)"
+        range 60 1800
+        default 300
+        help
+            The ladder's ESP32 restart waits while an admin session made a
+            request or sent a WebSocket ping within this window (the open
+            web page pings every few seconds). PROVISIONAL, to be confirmed
+            on hardware.
+
+    config HEALTH_REBOOT_HOLD_MAX_MIN
+        int "Longest presence hold of the GNSS ladder's restart per episode (min)"
+        range 5 240
+        default 30
+        help
+            A client on the station's access point and an admin using the
+            web page together hold the ladder's ESP32 restart back for at
+            most this long per ladder episode; then it runs anyway. The same
+            limit as the network ladder's for AP clients. PROVISIONAL, to be
+            confirmed on hardware.
+
+    config HEALTH_REBOOT_POWER_ON_GRACE_MIN
+        int "No GNSS ladder restart this long after power-on without a receiver (min)"
+        range 0 240
+        default 60
+        help
+            Station time since power-on (across software resets) during
+            which the ladder's ESP32 restart waits as long as nothing valid
+            was heard from the receiver in this boot: a restart cannot clear
+            an ESP32-side fault that the power-on itself just cleared, and
+            it would cut the setup network on a first start without a
+            receiver. A receiver that streamed in this boot and then stalled
+            is not held. PROVISIONAL, to be confirmed on hardware.
+
     config HEALTH_NET_REBOOT_MIN_INTERVAL_H
         int "Minimum hours between network-ladder reboots"
         range 1 48

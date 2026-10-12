@@ -93,25 +93,31 @@ const char *web_status_line(int status);
 /* ---- request checks ------------------------------------------------------------------ */
 
 /**
- * Search-domain suffixes a browser may append to the bare hostname: only
- * names that never resolve in public DNS (reserved, or never delegated), so
- * nobody outside the LAN controls what they resolve to. A router's domain
- * that is a publicly delegated zone is left out on purpose: reach the
- * station by its IP address or <hostname>.local there.
+ * Search-domain suffixes a browser may append to the bare hostname (the
+ * DHCP name a router's DNS may resolve): only names that never resolve in
+ * public DNS (reserved, or never delegated), so nobody outside the LAN
+ * controls what they resolve to. A router's domain that is a publicly
+ * delegated zone is left out on purpose: reach the station by its IP
+ * address or its mDNS name there.
  */
 #define WEB_HOST_SUFFIXES "lan", "home", "home.arpa", "localdomain", "internal"
 
-/** The device's names, for the Host check. Empty strings are skipped. */
+/** The device's names, for the Host check. Empty strings (and NULL) are skipped. */
 typedef struct {
     const char *sta_ip;      /**< station IPv4 address ("" while offline) */
     const char *ap_ip;       /**< AP address ("192.168.4.1") */
-    const char *hostname;    /**< hostname in use */
+    const char *hostname;    /**< hostname in use (the DHCP name) */
+    const char *mdns_host;   /**< label the mDNS responder answers ("" = not running): <mdns_host>.local */
 } web_host_names_t;
 
 /**
  * Host header check (DNS rebinding): the host part (port ignored) must be
- * one of the device's names; names compare without case. A bracketed IPv6
- * literal, an empty host or a malformed port is refused.
+ * one of the device's names: the station's IP, the AP's IP, the hostname
+ * alone or with one of WEB_HOST_SUFFIXES (the DHCP name), or
+ * <mdns_host>.local (the name the mDNS responder answers, which can differ
+ * from the hostname after a name conflict: "onocoydiy-2"). Names compare
+ * without case. A bracketed IPv6 literal, an empty host or a malformed port
+ * is refused.
  */
 bool web_host_allowed(const char *host_hdr, const web_host_names_t *names);
 

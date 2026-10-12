@@ -642,3 +642,178 @@ TEST_CASE("health mon: a boot record with its own clock dates the boot; old boot
     TEST_ASSERT_EQUAL_UINT8(HM_POWER_BOOTS, p.n);
     TEST_ASSERT_FALSE(hm_power_alert(&p, PT0 + 10 * PDAY + 39 * 2 * PDAY + PH));
 }
+
+/* ---- GNSS ladder restart hold ---------------------------------------------------- */
+
+#define HOUR (60 * MIN)
+
+/* A configured station well past its first hour, nobody around, no episode. */
+static hm_hold_in_t hold_in(int64_t now)
+{
+    hm_hold_in_t in = {
+        .now_ms = now,
+        .episode = false,
+        .settings_available = true,
+        .setup_done = true,
+        .ap_clients = 0,
+        .admin_at_ms = HM_NEVER,
+        .admin_window_ms = 300u * SEC,
+        .presence_max_ms = 30u * MIN,
+        .station_time_s = 2u * 3600u,
+        .power_on_grace_s = 3600u,
+        .heard = true,
+    };
+    return in;
+}
+
+/* Run once a second from `from` for `ms`; returns the last hold. */
+static uint8_t hold_run(hm_hold_t *h, hm_hold_in_t *in, int64_t from, int64_t ms, uint32_t *left)
+{
+    uint8_t hold = 0;
+    for (int64_t t = 0; t <= ms; t += SEC) {
+        in->now_ms = from + t;
+        hold = hm_reboot_hold(h, in, left);
+    }
+    return hold;
+}
+
+TEST_CASE("health mon: restart hold reasons", "[health_mon]")
+{
+    hm_hold_t h;
+    hm_hold_init(&h);
+    uint32_t left = 0;
+    hm_hold_in_t in = hold_in(T0);
+    TEST_ASSERT_EQUAL_UINT8(0, hm_reboot_hold(&h, &in, &left));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, left);
+
+    in.setup_done = false;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_SETUP, hm_reboot_hold(&h, &in, &left));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, left);   /* setup is not capped */
+    in.settings_available = false;                /* nothing can be stored: no setup hold */
+    TEST_ASSERT_EQUAL_UINT8(0, hm_reboot_hold(&h, &in, NULL));
+
+    in = hold_in(T0);
+    in.ap_clients = 1;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_AP_CLIENT, hm_reboot_hold(&h, &in, &left));
+    TEST_ASSERT_EQUAL_UINT32(1800, left);
+
+    /* power_on: early, nothing heard */
+    in = hold_in(T0);
+    in.station_time_s = 27;
+    in.heard = false;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_POWER_ON, hm_reboot_hold(&h, &in, &left));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, left);
+    /* a receiver heard this boot (RTCM or a valid text line): no hold, 6a at once */
+    in.heard = true;
+    TEST_ASSERT_EQUAL_UINT8(0, hm_reboot_hold(&h, &in, NULL));
+    /* past the grace: no hold either */
+    in.heard = false;
+    in.station_time_s = 3600;
+    TEST_ASSERT_EQUAL_UINT8(0, hm_reboot_hold(&h, &in, NULL));
+}
+
+TEST_CASE("health mon: the admin window expires at 300 s", "[health_mon]")
+{
+    hm_hold_t h;
+    hm_hold_init(&h);
+    hm_hold_in_t in = hold_in(T0);
+    in.admin_at_ms = T0;
+    in.now_ms = T0;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_ADMIN, hm_reboot_hold(&h, &in, NULL));
+    in.now_ms = T0 + 299 * SEC;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_ADMIN, hm_reboot_hold(&h, &in, NULL));
+    in.now_ms = T0 + 300 * SEC;
+    TEST_ASSERT_EQUAL_UINT8(0, hm_reboot_hold(&h, &in, NULL));
+    /* a new request opens it again */
+    in.admin_at_ms = in.now_ms;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_ADMIN, hm_reboot_hold(&h, &in, NULL));
+}
+
+TEST_CASE("health mon: ap_client and admin are capped at 30 min per ladder episode", "[health_mon]")
+{
+    hm_hold_t h;
+    hm_hold_init(&h);
+    uint32_t left = 0;
+    hm_hold_in_t in = hold_in(T0);
+    in.episode = true;
+    in.ap_clients = 1;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_AP_CLIENT, hold_run(&h, &in, T0, 10 * MIN, &left));
+    TEST_ASSERT_EQUAL_UINT32(20 * 60, left);
+
+    /* the client leaves for a while: the time held so far stays used */
+    in.ap_clients = 0;
+    TEST_ASSERT_EQUAL_UINT8(0, hold_run(&h, &in, T0 + 10 * MIN + SEC, 30 * MIN, NULL));
+
+    /* the admin page takes over the rest: together at most 30 min */
+    int64_t t1 = T0 + 41 * MIN;
+    in.admin_at_ms = t1;
+    in.now_ms = t1;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_ADMIN, hm_reboot_hold(&h, &in, &left));
+    TEST_ASSERT_TRUE(left <= 20 * 60 && left >= 20 * 60 - 2);
+    in.ap_clients = 1;
+    uint8_t hold = 0;
+    int64_t t = t1;
+    for (; t < t1 + 25 * MIN; t += SEC) {
+        in.now_ms = t;
+        in.admin_at_ms = t;   /* the page pings every second */
+        hold = hm_reboot_hold(&h, &in, &left);
+        if (hold == 0) {
+            break;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT8(0, hold);
+    TEST_ASSERT_TRUE(t - t1 >= 19 * MIN && t - t1 <= 20 * MIN + 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, left);
+
+    /* setup still holds past the limit: it is not capped */
+    in.setup_done = false;
+    in.now_ms = t + SEC;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_SETUP, hm_reboot_hold(&h, &in, &left));
+
+    /* a ladder reset ends the episode: the next one has the full 30 min */
+    in.setup_done = true;
+    in.episode = false;
+    in.now_ms = t + 2 * SEC;
+    (void)hm_reboot_hold(&h, &in, NULL);
+    in.episode = true;
+    in.now_ms = t + 3 * SEC;
+    in.admin_at_ms = in.now_ms;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_AP_CLIENT | HM_HOLD_ADMIN, hm_reboot_hold(&h, &in, &left));
+    TEST_ASSERT_EQUAL_UINT32(1800, left);
+
+    /* a restart starts afresh too (the state is RAM only) */
+    hm_hold_init(&h);
+    in.now_ms = t + 4 * SEC;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_AP_CLIENT | HM_HOLD_ADMIN, hm_reboot_hold(&h, &in, &left));
+    TEST_ASSERT_EQUAL_UINT32(1800, left);
+}
+
+TEST_CASE("health mon: presence outside a ladder episode uses none of the limit", "[health_mon]")
+{
+    hm_hold_t h;
+    hm_hold_init(&h);
+    uint32_t left = 0;
+    hm_hold_in_t in = hold_in(T0);
+    in.ap_clients = 2;
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_AP_CLIENT, hold_run(&h, &in, T0, 2 * HOUR, &left));
+    TEST_ASSERT_EQUAL_UINT32(1800, left);
+}
+
+TEST_CASE("health mon: first setup holds for days", "[health_mon]")
+{
+    hm_hold_t h;
+    hm_hold_init(&h);
+    hm_hold_in_t in = hold_in(T0);
+    in.episode = true;
+    in.setup_done = false;
+    in.station_time_s = 0;
+    in.heard = false;
+    uint8_t hold = 0;
+    for (int64_t t = 0; t <= 72 * HOUR; t += MIN) {
+        in.now_ms = T0 + t;
+        in.station_time_s = (uint32_t)(t / SEC);
+        hold = hm_reboot_hold(&h, &in, NULL);
+        TEST_ASSERT_TRUE((hold & HM_HOLD_SETUP) != 0);
+    }
+    TEST_ASSERT_EQUAL_UINT8(HM_HOLD_SETUP, hold);   /* power_on is over after its hour */
+}

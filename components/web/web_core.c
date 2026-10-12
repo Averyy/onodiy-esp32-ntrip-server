@@ -204,6 +204,16 @@ bool web_host_allowed(const char *host_hdr, const web_host_names_t *names)
         (names->ap_ip != NULL && names->ap_ip[0] != '\0' && eq_nocase(host_hdr, hlen, names->ap_ip))) {
         return true;
     }
+    /* <mdns_host>.local: what the responder answers (the hostname, or the
+     * name it moved to after a conflict). Only while it runs. */
+    const char *mh = names->mdns_host;
+    if (mh != NULL && mh[0] != '\0') {
+        size_t mlen = strlen(mh);
+        if (hlen == mlen + 6u && eq_nocase_n(host_hdr, mh, mlen) && eq_nocase(host_hdr + mlen, 6u, ".local")) {
+            return true;
+        }
+    }
+    /* The DHCP name: alone, or with a search domain that never resolves in public DNS. */
     const char *hn = names->hostname;
     if (hn == NULL || hn[0] == '\0') {
         return false;
@@ -220,7 +230,7 @@ bool web_host_allowed(const char *host_hdr, const web_host_names_t *names)
     }
     const char *suffix = host_hdr + nlen + 1;
     size_t slen = hlen - nlen - 1;
-    static const char *const suffixes[] = { "local", WEB_HOST_SUFFIXES };
+    static const char *const suffixes[] = { WEB_HOST_SUFFIXES };
     for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
         if (eq_nocase(suffix, slen, suffixes[i])) {
             return true;

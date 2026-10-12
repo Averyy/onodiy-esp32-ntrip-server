@@ -116,6 +116,20 @@ typedef struct {
  */
 uint32_t net_ap_reasons(const net_ap_input_t *in, bool *recovery_expired);
 
+/**
+ * Seconds until the station closes an AP that is up for `reasons` (the
+ * result of net_ap_reasons() for the same input), UINT32_MAX when nothing
+ * is scheduled:
+ *  - the AP is down (reasons 0), or up for SETUP or FALLBACK (no deadline:
+ *    it stays until the station has an IP);
+ *  - LINGER: linger_s - since_ip_s;
+ *  - RECOVERY: the lifetime left, or UINT32_MAX while a client holds it past
+ *    its lifetime (it closes when the last one leaves, or at the 30 min
+ *    limit);
+ *  - LINGER and RECOVERY together: the later of the two.
+ */
+uint32_t net_ap_close_in_s(const net_ap_input_t *in, uint32_t reasons);
+
 /* ---- disconnect journal filter -------------------------------------------------------- */
 
 /**
@@ -174,7 +188,8 @@ size_t net_scan_insert(net_scan_entry_t *list, size_t count, size_t cap, const n
  * credentials and keeps the new ones pending: shown in the UI, retried on
  * request and first thing at the next boot (a user who enters the next
  * site's network before moving the station). So a typo never strands a
- * remote station. Without previous credentials (first setup) there is
+ * remote station; a password the network refuses outright ends the trial
+ * sooner (NET_CRED_TRIAL_REFUSALS). Without previous credentials (first setup) there is
  * nothing to go back to: the new ones are stored as the station's at once.
  */
 #define NET_CRED_TRIAL_S 90u
@@ -193,15 +208,43 @@ typedef enum {
  */
 net_cred_plan_t net_cred_plan(bool have_active, bool same_as_active, bool wifi_used);
 
+/**
+ * A trial ends early when the network refuses the new credentials: this
+ * many disconnects in a row, all for a reason that says the password or the
+ * security setting was refused (net_trial_reason_refused), while the trial
+ * credentials never got an association. Other reasons (no access point
+ * found, a weak signal) keep the NET_CRED_TRIAL_S rule: the network may
+ * simply be out of reach for a moment.
+ */
+#define NET_CRED_TRIAL_REFUSALS 3u
+
+/* Disconnect reasons (wifi_err_reason_t values; network.c checks them). */
+#define NET_REASON_4WAY_HANDSHAKE_TIMEOUT 15u
+#define NET_REASON_NO_AP_FOUND 201u
+#define NET_REASON_AUTH_FAIL 202u
+#define NET_REASON_HANDSHAKE_TIMEOUT 204u
+#define NET_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY 210u
+#define NET_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD 211u
+
+/**
+ * A disconnect reason that means the network refused the credentials: a
+ * failed authentication, a handshake that timed out (wrong passphrase), or
+ * an access point of that name only with another security setting.
+ */
+bool net_trial_reason_refused(uint16_t reason);
+
 typedef enum {
     NET_TRIAL_NONE = 0,         /**< no trial, or still waiting */
     NET_TRIAL_CONFIRMED,        /**< an IP with the new credentials: they become the station's */
     NET_TRIAL_REVERT,           /**< no IP in time: back to the previous credentials (if any) */
+    NET_TRIAL_REVERT_AUTH,      /**< the network refused them NET_CRED_TRIAL_REFUSALS times: back now */
 } net_trial_act_t;
 
 typedef struct {
     bool on;
     uint32_t since_s;
+    bool assoc;                 /**< the trial credentials got an association since the trial started */
+    uint8_t refusals;           /**< refused attempts in a row, while never associated */
 } net_cred_trial_t;
 
 void net_cred_trial_start(net_cred_trial_t *t, uint32_t now_s);
@@ -211,6 +254,17 @@ void net_cred_trial_start(net_cred_trial_t *t, uint32_t now_s);
  * (associated after the trial started). Ends the trial on CONFIRMED or REVERT.
  */
 net_trial_act_t net_cred_trial_tick(net_cred_trial_t *t, bool got_ip, uint32_t now_s);
+
+/** The station associated with the trial credentials: no early revert for this trial any more. */
+void net_cred_trial_associated(net_cred_trial_t *t);
+
+/**
+ * A disconnect while the trial runs (`reason` = wifi_err_reason_t). Counts
+ * refused attempts in a row (net_trial_reason_refused; any other reason
+ * starts the count again) until the trial credentials associate once. At
+ * NET_CRED_TRIAL_REFUSALS it ends the trial: NET_TRIAL_REVERT_AUTH.
+ */
+net_trial_act_t net_cred_trial_disconnect(net_cred_trial_t *t, uint16_t reason);
 
 /** Seconds the trial still has (0 = none running). */
 uint32_t net_cred_trial_left_s(const net_cred_trial_t *t, uint32_t now_s);

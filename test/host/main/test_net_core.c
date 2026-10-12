@@ -456,3 +456,166 @@ TEST_CASE("network credentials: changed ones are tried first and confirmed by an
     TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_tick(&t, false, now + NET_CRED_TRIAL_S + 1));
     TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_tick(&t, true, now + NET_CRED_TRIAL_S + 2));
 }
+
+/* ---- when the AP closes -------------------------------------------------------- */
+
+/* One step of the AP policy, the way network.c runs it: reasons, then the
+ * countdown for those reasons, then the reasons become "now". */
+static uint32_t ap_step(net_ap_input_t *in, uint32_t *close_in)
+{
+    uint32_t r = net_ap_reasons(in, NULL);
+    *close_in = net_ap_close_in_s(in, r);
+    in->reasons_now = r;
+    return r;
+}
+
+TEST_CASE("network AP: first setup closes 15 s after the IP, counting down", "[net_core]")
+{
+    net_ap_input_t in = ap_in();
+    in.linger_s = 15;
+    in.sta_configured = false;
+    in.has_ip = false;
+    uint32_t close_in = 0;
+    /* no credentials: setup, nothing scheduled */
+    TEST_ASSERT_EQUAL_UINT32(NET_AP_SETUP, ap_step(&in, &close_in));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, close_in);
+    /* credentials stored, no IP yet: held as fallback, still nothing scheduled */
+    in.sta_configured = true;
+    in.offline_s = 3;
+    TEST_ASSERT_EQUAL_UINT32(NET_AP_FALLBACK, ap_step(&in, &close_in));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, close_in);
+    /* the IP at t: linger 15, then down at t + 15 */
+    in.has_ip = true;
+    in.since_ip_s = 0;
+    TEST_ASSERT_EQUAL_UINT32(NET_AP_LINGER, ap_step(&in, &close_in));
+    TEST_ASSERT_EQUAL_UINT32(15, close_in);
+    in.since_ip_s = 14;
+    TEST_ASSERT_EQUAL_UINT32(NET_AP_LINGER, ap_step(&in, &close_in));
+    TEST_ASSERT_EQUAL_UINT32(1, close_in);
+    in.since_ip_s = 15;
+    TEST_ASSERT_EQUAL_UINT32(0, ap_step(&in, &close_in));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, close_in);
+}
+
+TEST_CASE("network AP: the recovery AP's countdown is its lifetime left", "[net_core]")
+{
+    net_ap_input_t in = ap_in();
+    in.linger_s = 15;
+    in.recovery_requested = true;
+    in.recovery_age_s = 100;
+    uint32_t close_in = 0;
+    TEST_ASSERT_EQUAL_UINT32(NET_AP_RECOVERY, ap_step(&in, &close_in));
+    TEST_ASSERT_EQUAL_UINT32(800, close_in);
+    /* recovery plus a station that just got its IP: the later of the two */
+    in.reasons_now |= NET_AP_FALLBACK;
+    in.since_ip_s = 2;
+    TEST_ASSERT_EQUAL_UINT32(NET_AP_RECOVERY | NET_AP_LINGER, ap_step(&in, &close_in));
+    TEST_ASSERT_EQUAL_UINT32(800, close_in);
+    in.recovery_age_s = 895;
+    in.since_ip_s = 3;
+    TEST_ASSERT_EQUAL_UINT32(NET_AP_RECOVERY | NET_AP_LINGER, ap_step(&in, &close_in));
+    TEST_ASSERT_EQUAL_UINT32(12, close_in);
+    /* a client keeps it past its lifetime: nothing scheduled until the 30 min hold ends */
+    in = ap_in();
+    in.recovery_requested = true;
+    in.ap_clients = 1;
+    in.recovery_age_s = 900;
+    TEST_ASSERT_EQUAL_UINT32(NET_AP_RECOVERY, ap_step(&in, &close_in));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, close_in);
+    in.recovery_age_s = 900 + NET_AP_CLIENT_HOLD_MAX_S - 1;
+    TEST_ASSERT_EQUAL_UINT32(NET_AP_RECOVERY, ap_step(&in, &close_in));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, close_in);
+    in.recovery_age_s = 900 + NET_AP_CLIENT_HOLD_MAX_S;
+    TEST_ASSERT_EQUAL_UINT32(0, ap_step(&in, &close_in));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, close_in);
+}
+
+TEST_CASE("network AP: offline 300 s opens the fallback with nothing scheduled", "[net_core]")
+{
+    net_ap_input_t in = ap_in();
+    in.linger_s = 15;
+    in.has_ip = false;
+    in.offline_s = 299;
+    uint32_t close_in = 0;
+    TEST_ASSERT_EQUAL_UINT32(0, ap_step(&in, &close_in));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, close_in);
+    in.offline_s = 300;
+    TEST_ASSERT_EQUAL_UINT32(NET_AP_FALLBACK, ap_step(&in, &close_in));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, close_in);
+    /* setup together with recovery: setup has no deadline, so neither has the AP */
+    in = ap_in();
+    in.sta_configured = false;
+    in.recovery_requested = true;
+    TEST_ASSERT_EQUAL_UINT32(NET_AP_SETUP | NET_AP_RECOVERY, ap_step(&in, &close_in));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, close_in);
+}
+
+/* ---- a refused password ends the trial early ------------------------------------------ */
+
+TEST_CASE("network credentials: three refusals before any association revert at once", "[net_core]")
+{
+    const uint32_t now = 4294967000u;
+    net_cred_trial_t t = { 0 };
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_AUTH_FAIL));   /* no trial */
+    net_cred_trial_start(&t, now);
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_AUTH_FAIL));
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_AUTH_FAIL));
+    TEST_ASSERT_EQUAL(NET_TRIAL_REVERT_AUTH, net_cred_trial_disconnect(&t, NET_REASON_AUTH_FAIL));
+    TEST_ASSERT_FALSE(t.on);
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_tick(&t, false, now + NET_CRED_TRIAL_S));   /* ended */
+
+    /* every refusal reason counts, mixed */
+    net_cred_trial_start(&t, now);
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_4WAY_HANDSHAKE_TIMEOUT));
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_HANDSHAKE_TIMEOUT));
+    TEST_ASSERT_EQUAL(NET_TRIAL_REVERT_AUTH, net_cred_trial_disconnect(&t, NET_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY));
+    net_cred_trial_start(&t, now);
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD));
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD));
+    TEST_ASSERT_EQUAL(NET_TRIAL_REVERT_AUTH, net_cred_trial_disconnect(&t, NET_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD));
+}
+
+TEST_CASE("network credentials: refusals, an association, a refusal: no early revert", "[net_core]")
+{
+    const uint32_t now = 1000;
+    net_cred_trial_t t = { 0 };
+    net_cred_trial_start(&t, now);
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_AUTH_FAIL));
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_AUTH_FAIL));
+    net_cred_trial_associated(&t);
+    for (int i = 0; i < 10; i++) {
+        TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_AUTH_FAIL));
+    }
+    TEST_ASSERT_TRUE(t.on);
+    TEST_ASSERT_EQUAL(NET_TRIAL_REVERT, net_cred_trial_tick(&t, false, now + NET_CRED_TRIAL_S));   /* the 90 s rule */
+
+    /* another reason in between starts the count again */
+    net_cred_trial_start(&t, now);
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_AUTH_FAIL));
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_AUTH_FAIL));
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_NO_AP_FOUND));
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_AUTH_FAIL));
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_AUTH_FAIL));
+    TEST_ASSERT_EQUAL(NET_TRIAL_REVERT_AUTH, net_cred_trial_disconnect(&t, NET_REASON_AUTH_FAIL));
+}
+
+TEST_CASE("network credentials: a network out of reach keeps the 90 s rule", "[net_core]")
+{
+    const uint32_t now = 50;
+    net_cred_trial_t t = { 0 };
+    net_cred_trial_start(&t, now);
+    for (int i = 0; i < 20; i++) {
+        TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_NO_AP_FOUND));
+    }
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_tick(&t, false, now + NET_CRED_TRIAL_S - 1));
+    TEST_ASSERT_EQUAL(NET_TRIAL_REVERT, net_cred_trial_tick(&t, false, now + NET_CRED_TRIAL_S));
+
+    /* an IP inside the trial confirms as before, refusals or not */
+    net_cred_trial_start(&t, now);
+    TEST_ASSERT_EQUAL(NET_TRIAL_NONE, net_cred_trial_disconnect(&t, NET_REASON_AUTH_FAIL));
+    net_cred_trial_associated(&t);
+    TEST_ASSERT_EQUAL(NET_TRIAL_CONFIRMED, net_cred_trial_tick(&t, true, now + 20));
+    TEST_ASSERT_TRUE(net_trial_reason_refused(NET_REASON_AUTH_FAIL));
+    TEST_ASSERT_FALSE(net_trial_reason_refused(NET_REASON_NO_AP_FOUND));
+    TEST_ASSERT_FALSE(net_trial_reason_refused(8));   /* left the network (our own disconnect) */
+}

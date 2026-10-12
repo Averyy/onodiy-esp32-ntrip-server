@@ -19,20 +19,31 @@ What it does:
   2. waits for HTTP 200 on / (the UI page), sets the first admin password
      (POST /api/setup/admin; the QEMU build treats requests as coming over
      the setup AP) and reads GET /api/status with that session: valid JSON,
-     API version 1, the station online over the emulated Ethernet;
+     API version 1, the station online over the emulated Ethernet, and the
+     GNSS ladder's ESP32 restart held for first setup (health.reboot_hold
+     has "setup"); GET /api/session names the station "onocoydiy" and its
+     mDNS name "onocoydiy", and a request with "Host: onocoydiy.local"
+     passes the Host check;
   3. checks UART1 in both directions: the firmware's receiver detection
      queries (VERSIONA) arrive on the host side, and bytes the host sends
      (plain text no receiver would send: no '$', '#', RTCM preamble or loader
      prompt in it) reach the firmware, which then reports "bytes but nothing
      valid" instead of "no bytes at all" when detection gives up;
-  4. keeps watching until --observe seconds after the start, checks that
-     the web server still answers (GET /, and GET /api/status with the
-     session), then stops QEMU and fails on a panic (Guru Meditation,
-     abort(), stack overflow, failed assert, a task watchdog report) or a
-     reboot loop: a restart without the firmware's own "rebooting (reason
-     N)" line before it is a crash, and more than --max-boots boots in the
-     window is a loop. The emulated watchdogs are live (run.sh leaves them
-     on), so a task that starves IDLE shows up here as on a board.
+  4. keeps watching until --observe seconds after the start (at least 45),
+     checks that the web server still answers (GET /, and GET /api/status
+     with the session), then stops QEMU and fails on a panic (Guru
+     Meditation, abort(), stack overflow, failed assert, a task watchdog
+     report) or a reboot loop: a restart without the firmware's own
+     "rebooting (reason N)" line before it is a crash, and more than
+     --max-boots boots in the window is a loop. It also fails on a GNSS
+     ladder restart ("rebooting (reason 6)": held while first setup is not
+     finished), on a console note about dropped lines ("[diag:"), and unless
+     the console writer task runs and /api/health counts no console drop.
+     QEMU's UART sends every byte at once, so a burst cannot back the
+     console up here: the writer's ordering and drop rules are host-tested
+     (test/host test_diag_console.c), and this checks that the writer is
+     there. The emulated watchdogs are live (run.sh leaves them on), so a
+     task that starves IDLE shows up here as on a board.
 
 QEMU always stops: on a normal end, Ctrl-C, SIGTERM or SIGHUP the script
 stops it on the way out, and run.sh gets --seconds as a backstop (observe +
@@ -67,6 +78,9 @@ FATAL = ["Guru Meditation", "abort()", "***ERROR*** A stack overflow", "assert f
 BACKSTOP_MARGIN_S = 60  # run.sh stops QEMU this long after the latest point the checks need it
 BOOT_MARK = "ESP-ROM:"
 OWN_REBOOT = re.compile(r"lifecycle: rebooting \(reason \d+\)")
+LADDER_REBOOT = "rebooting (reason 6)"   # the GNSS ladder's ESP32 restart (LIFECYCLE_REBOOT_GNSS_LADDER)
+CONSOLE_NOTE = "[diag:"                    # the console's note about lines it could not send
+MIN_OBSERVE_S = 45                         # longer than the 27 s at which a no-receiver restart came before
 DETECT_RESULT = re.compile(r"um98x_ctl: receiver not found \(([^)]*)\)|um98x_ctl: receiver found at")
 # Sent to the firmware on UART1: plain text a receiver never sends (no '$' or
 # '#' line start, no RTCM preamble, no loader prompt). The framer discards it,
@@ -134,9 +148,11 @@ class Uart1Tap:
 
 
 def request(port: int, method: str, path: str, body: dict | None = None, cookie: str | None = None,
-         timeout: float = 10.0) -> tuple[int, dict, bytes]:
+         timeout: float = 10.0, host: str | None = None) -> tuple[int, dict, bytes]:
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     headers = {"Accept-Encoding": "gzip"}
+    if host:
+        headers["Host"] = host
     data = None
     if body is not None:
         data = json.dumps(body).encode()
@@ -270,6 +286,26 @@ class Smoke:
                    f"GET /api/status: HTTP {status}, valid JSON, API {st.get('api')}, admin form")
         self.check(net.get("online") is True and net.get("ip"),
                    f"station online over the emulated Ethernet (ip {net.get('ip')}, \"{net.get('ssid')}\")")
+        hold = (st.get("health") or {}).get("reboot_hold") if isinstance(st, dict) else None
+        self.check(isinstance(hold, list) and "setup" in hold,
+                   f"GNSS ladder restart held while first setup is not finished (health.reboot_hold {hold})")
+        self.name_checks()
+
+    def name_checks(self) -> None:
+        status, _, body = request(self.http_port, "GET", "/api/session", cookie=self.cookie, timeout=30)
+        (self.out / "api-session.json").write_bytes(body)
+        try:
+            sess = json.loads(body)
+        except ValueError as e:
+            self.check(False, f"GET /api/session: not JSON ({e})")
+            return
+        self.check(status == 200 and sess.get("hostname") == "onocoydiy" and sess.get("mdns_host") == "onocoydiy",
+                   f"GET /api/session: hostname {sess.get('hostname')!r}, mdns_host {sess.get('mdns_host')!r}, "
+                   f"ap_ssid {sess.get('ap_ssid')!r}, setup_step {sess.get('setup_step')!r}")
+        status, _, body = request(self.http_port, "GET", "/api/session", timeout=30, host="onocoydiy.local")
+        self.check(status == 200, f"Host: onocoydiy.local passes the Host check (HTTP {status})")
+        status, _, _ = request(self.http_port, "GET", "/api/session", timeout=30, host="evil.local")
+        self.check(status != 200, f"Host: evil.local is refused (HTTP {status})")
 
     def uart1_checks(self) -> None:
         if self.tap is None:
@@ -305,8 +341,21 @@ class Smoke:
                 (self.out / "api-status-end.json").write_bytes(body)
                 ok = status == 200 and json.loads(body).get("api") == 1
                 self.check(ok, f"GET /api/status still answers after {self.elapsed():.0f} s (HTTP {status})")
+                self.console_checks()
         except (OSError, http.client.HTTPException, ValueError) as e:
             self.check(False, f"web server at the end of the window: {type(e).__name__}: {e}")
+
+    def console_checks(self) -> None:
+        """The console writer task runs, and no console line was lost."""
+        status, _, body = request(self.http_port, "GET", "/api/diag/tasks", cookie=self.cookie, timeout=30)
+        (self.out / "api-tasks.json").write_bytes(body)
+        names = [t.get("name") for t in json.loads(body).get("tasks", [])] if status == 200 else []
+        self.check("console" in names, f"the console writer task runs (HTTP {status}, {len(names)} tasks)")
+        status, _, body = request(self.http_port, "GET", "/api/health", cookie=self.cookie, timeout=30)
+        (self.out / "api-health-end.json").write_bytes(body)
+        log = (json.loads(body).get("log") or {}) if status == 200 else {}
+        self.check(status == 200 and log.get("console_dropped") == 0,
+                   f"/api/health log.console_dropped {log.get('console_dropped')} of {log.get('lines')} lines")
 
     def observe(self) -> None:
         while self.elapsed() < self.args.observe and self.proc.poll() is None:
@@ -328,6 +377,10 @@ class Smoke:
         self.check(n >= 1, f"{n} boot(s) in {self.args.observe} s")
         self.check(crashes == 0, f"{crashes} restart(s) without the firmware's own reboot line")
         self.check(n <= self.args.max_boots, f"at most {self.args.max_boots} boots (no reboot loop)")
+        self.check(LADDER_REBOOT not in text, "no GNSS ladder restart (\"rebooting (reason 6)\") during the run")
+        notes = [line.strip()[:160] for line in text.splitlines() if CONSOLE_NOTE in line]
+        self.check(not notes, f"no dropped console lines ({notes[0] if notes else 'no [diag: note'})")
+        self.check("network: mDNS: answering as onocoydiy.local" in text, "the boot log has the mDNS line")
 
     def run(self) -> int:
         try:
@@ -362,6 +415,8 @@ def main() -> int:
                     help="boots allowed in the window (the firmware may restart once on its own)")
     ap.add_argument("--http-port", type=int, default=0, help="host port for the web server (default: a free one)")
     args = ap.parse_args()
+    if args.observe < MIN_OBSERVE_S:
+        ap.error(f"--observe must be at least {MIN_OBSERVE_S} s (a no-receiver restart came at 27 s before it was held)")
     if not os.environ.get("IDF_PATH"):
         print("smoke.py: run . $IDF_PATH/export.sh first (tools/qemu/run.sh needs it)", file=sys.stderr)
         return 2
