@@ -130,7 +130,9 @@ each acknowledgement and its data. Every reply is saved verbatim under
 summary (`summary.txt`, `summary.json`) shows the identity (with the CRC
 check of `#VERSIONA`), signal group, port bauds, mode, masks, enabled logs,
 position, the signals tracked per constellation (from GSV signal IDs and
-from the observation log), and whether any constellation has 4 bands.
+from the observation log), and whether any rewarded constellation (GPS,
+GLONASS, Galileo, BeiDou) has 4 bands; QZSS and NavIC never count, as on
+the station.
 
 `e6-check` answers "can this receiver reach 4 bands?". Without `--write`
 it only reads (identity, current signal group, signals tracked now) and
@@ -240,8 +242,10 @@ clear. Then the Onocoy checks:
   MSM1-3 are not rewarded, MSM4-6 are accepted, faster than 1 Hz is
   ignored by Onocoy;
 - 1005 present (and 1033, 1230);
-- at least one constellation with 4 bands (L1/L2/L5/L6), which moves the
-  band reward from 0.80 to 0.95;
+- at least one rewarded constellation (GPS, GLONASS, Galileo, BeiDou) with
+  4 bands (L1/L2/L5/L6), which moves the band reward from 0.80 to 0.95
+  (the bands as the station buckets them: `benchlib/rtcm.py` equals the
+  firmware's table, and a test compares the two);
 - Galileo E6 seen or not, SBAS/1104/1105 numbers present (the station drops
   them), 1137 present.
 
@@ -470,9 +474,23 @@ Optional: nothing else needs it.
 ```sh
 docker/bkg-caster/build.sh                       # image onocoydiy-bench-bkg-caster
 docker/bkg-caster/run.sh --port 2101             # on 127.0.0.1:2101; Ctrl-C stops it
+docker/bkg-caster/run.sh --lan --detach          # on 0.0.0.0:2101, in the background
+docker/bkg-caster/run.sh --lan --print           # the docker command only; nothing runs
+docker/bkg-caster/run.sh --stop
 RUN_DOCKER_TESTS=1 uv run --locked pytest tests/test_docker_caster.py
 uv run ../qemu/e2e.py --scenario stream --caster docker
 ```
+
+The caster is published on 127.0.0.1 by default: only this computer (and
+QEMU's user network, as 10.0.2.2) reaches it. A station board reaches it
+only with `--lan`, which publishes the port on every interface: then
+everyone on your LAN reaches it too, and `run.sh` says so (`reachable from
+your LAN: use the throwaway test passwords only`). Point the board's slot
+at this computer's LAN address, port 2101, mountpoint `BENCH`, with the
+bench source password; never a password you use anywhere else. `--print`
+shows the `docker run` command (with the address it publishes on) without
+running it, and needs no Docker; `tests/test_docker_run_script.py` checks
+it on every run of the tests.
 
 What this build does (recorded on 2026-10-12, `tests/test_docker_caster.py`):
 an NTRIP 1.0 source gets `OK`; one whose agent is not an NTRIP agent (such

@@ -4,8 +4,9 @@
  *
  * App shell: header, navigation, hash router (#/casters, #/diag/logs, ...),
  * page-wide notices (safe mode, receiver maintenance, receiver UART
- * reopening, new Wi-Fi credentials on trial or pending, receiver update
- * waiting, update banner), dialogs, the restart overlay and the colour theme.
+ * reopening, new Wi-Fi credentials on trial or pending, a signal-group
+ * comparison running or finished, receiver update waiting, update banner),
+ * dialogs, the restart overlay and the colour theme.
  *
  * A view is {title, admin, create(el, arg) -> {update(status)?, destroy()?,
  * dirty()?, reload()?}}. update() runs on every status change; reload() when
@@ -294,7 +295,10 @@ bus.on('status', st => {
   refreshView();
 });
 bus.on('live', renderLive);
-setInterval(() => renderLive(live.state), 1000);
+setInterval(() => {
+  renderLive(live.state);
+  tickTrialLeft();
+}, 1000);
 
 bus.on('event', m => {
   if (!shell.started) return;
@@ -327,6 +331,39 @@ let laterKey = null; /* fallback when the browser storage is unavailable */
 function bannerDismissed(u) {
   const k = bannerKey(u);
   return store.get('later', laterKey) === k;
+}
+
+/*
+ * Seconds left of a Wi-Fi credential trial: the last status's
+ * cred_trial_left_s, counted down here from when that status arrived, so the
+ * countdown goes on while the station is out of reach (it usually is during
+ * a trial: it left the network this page reached it on).
+ */
+function trialLeft(net) {
+  const left = (net && net.cred_trial_left_s) || 0;
+  const age = S.statusAt ? (Date.now() - S.statusAt) / 1000 : 0;
+  return Math.max(0, Math.ceil(left - age));
+}
+
+function trialLeftText(net) {
+  const left = trialLeft(net);
+  return left > 0 ? fmt.dur(left) + ' left' : 'ending now';
+}
+
+/* Every countdown of the trial on the page ([data-trial-left]: the notice,
+ * the dashboard's network card), once a second. */
+function tickTrialLeft() {
+  const net = S.status && S.status.network;
+  if (!net || !net.cred_trial) return;
+  const text = trialLeftText(net);
+  for (const el of doc.querySelectorAll('[data-trial-left]')) {
+    if (el.textContent !== text) el.textContent = text;
+  }
+}
+
+/* The trial's countdown as an element: role timer, so a screen reader does not read every second out. */
+function trialLeftEl(net) {
+  return h('span', { 'data-trial-left': '', role: 'timer' }, trialLeftText(net));
 }
 
 function renderNotices() {
@@ -377,9 +414,10 @@ function renderNotices() {
   const net = st.network || {};
   const pend = net.pending_ssid || 'the new network';
   if (net.cred_trial) {
-    /* No buttons while a trial runs: it ends by itself, either way. */
-    items.push(['info', 'Trying the new credentials for ' + pend + ': ' + fmt.dur(net.cred_trial_left_s) + ' left',
-      'Without an address there the station goes back to its previous network by itself.', null]);
+    /* No buttons while a trial runs: it ends by itself, either way. The
+     * countdown (a fifth field: kept out of the key) ticks without a rebuild. */
+    items.push(['info', 'Trying the new credentials for ' + pend,
+      'Without an address there the station goes back to its previous network by itself.', null, 'trial']);
   } else if (net.cred_pending) {
     /* After a revert the network in use is the previous one: the same name means only the password changed. */
     const what = net.ssid && net.pending_ssid === net.ssid ? 'the new password for ' + pend : 'the new credentials for ' + pend;
@@ -396,6 +434,9 @@ function renderNotices() {
     }
     items.push(['warn', title, text, [btn('Try again', retryPendingWifi, 'small'), btn('Discard', discardPendingWifi, 'small')]]);
   }
+  /* A signal-group comparison running or finished (60-receiver.js). */
+  const sgn = sgTestNotice(S.status);
+  if (sgn) items.push(sgn);
   const j = rcv.journal;
   const inLoader = alerts.indexOf('receiver_in_loader') >= 0;
   if (j === 'waiting' || j === 'unreadable' || j === 'unknown' || inLoader) {
@@ -444,11 +485,14 @@ function renderNotices() {
       }, 'small')]]);
   }
 
-  const key = JSON.stringify(items.map(i => [i[0], i[1], i[2]]));
-  if (key === shell.noticeKey) return;
+  const key = JSON.stringify(items.map(i => [i[0], i[1], i[2], i[4] || null]));
+  if (key === shell.noticeKey) {
+    tickTrialLeft();
+    return;
+  }
   shell.noticeKey = key;
   mount(box, items.map(i => h('div', { class: 'notice ' + i[0], role: i[0] === 'bad' ? 'alert' : 'status' },
-    h('div', { class: 'text' }, h('strong', null, i[1]), i[2]),
+    h('div', { class: 'text' }, h('strong', null, i[1], i[4] === 'trial' ? [': ', trialLeftEl(net)] : null), i[2]),
     i[3] ? h('div', { class: 'row' }, i[3]) : null)));
 }
 

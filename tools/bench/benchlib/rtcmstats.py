@@ -344,11 +344,10 @@ class RtcmStats:
             else:
                 add(f"{mtype} present", "WARN", f"missing ({why}; on Onocoy's required list)")
 
-        best = []
-        for system in sorted(self.systems):
-            bands = [b for b in self.system_bands(system) if b != "E5ab"]
-            if len(bands) >= 4:
-                best.append(f"{system} ({'/'.join(bands)})")
+        # Only the rewarded constellations count (as on the station): a QZSS
+        # with four bands earns no band reward.
+        best = [f"{system} ({'/'.join(b for b in self.system_bands(system) if b in rtcm.REWARD_BANDS)})"
+                for system in rtcm.best_systems({s: self.system_bands(s) for s in self.systems})]
         if best:
             add("constellation with 4 bands", "PASS", ", ".join(best))
         else:

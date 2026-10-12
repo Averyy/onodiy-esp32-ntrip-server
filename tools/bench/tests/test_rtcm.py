@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 from pyrtcm import RTCMReader, parse_msm
 
@@ -82,6 +85,80 @@ def test_band_mapping():
     assert rtcm.band_of("GPS", 30) == "L1"  # L1C
     assert rtcm.msm_system(1137) == "NavIC" and rtcm.msm_system(1005) is None
     assert rtcm.is_suspect_sbas(1104) and not rtcm.is_suspect_sbas(1114)
+    assert rtcm.band_of("NavIC", 22) == "L5"  # L5 SPS
+    # The station never decodes 1101-1107: SBAS has no bands.
+    assert all(rtcm.band_of("SBAS", s) is None for s in range(1, 33))
+
+
+FIRMWARE_BANDS = Path(__file__).resolve().parents[3] / "components" / "gnss_framing" / "gnss_rtcm3.c"
+FW_SYSTEMS = {"GPS": "GPS", "GLONASS": "GLONASS", "GALILEO": "Galileo", "SBAS": "SBAS", "QZSS": "QZSS",
+              "BEIDOU": "BeiDou", "NAVIC": "NavIC"}
+FW_BANDS = {"L1": "L1", "L2": "L2", "L5": "L5", "L6": "L6", "E5AB": "E5ab"}
+
+
+def firmware_band_table(source: str) -> dict[str, dict[str, set[int]]]:
+    """k_band_sigs of gnss_rtcm3.c as {system: {band: signal IDs}}, from its
+    SIG_IDS(lo, hi) entries. Anything else in the table fails the parse, so
+    a new way of writing an entry cannot slip past the comparison."""
+    text = re.sub(r"/\*.*?\*/", " ", source, flags=re.S)
+    text = re.sub(r"//[^\n]*", " ", text)
+    m = re.search(r"\bk_band_sigs\s*\[[^]]*\]\s*\[[^]]*\]\s*=\s*\{(.*?)\n\s*\};", text, flags=re.S)
+    assert m, "k_band_sigs not found in gnss_rtcm3.c"
+    body = m.group(1)
+    table: dict[str, dict[str, set[int]]] = {}
+    rows = list(re.finditer(r"\[GNSS_SYS_(\w+)\]\s*=\s*\{([^{}]*)\}\s*,?", body))
+    assert re.sub(r"\[GNSS_SYS_\w+\]\s*=\s*\{[^{}]*\}\s*,?", "", body).strip() == "", "unexpected text in k_band_sigs"
+    for row in rows:
+        system = FW_SYSTEMS[row.group(1)]
+        assert system not in table, f"{system} twice"
+        bands: dict[str, set[int]] = {}
+        entries = re.split(r"(?=\[GNSS_BAND_)", row.group(2).strip())
+        for entry in filter(None, (e.strip() for e in entries)):
+            em = re.fullmatch(r"\[GNSS_BAND_(\w+)\]\s*=\s*(.+?)\s*,?", entry, flags=re.S)
+            assert em, f"cannot read {entry!r}"
+            ids: set[int] = set()
+            for term in em.group(2).split("|"):
+                tm = re.fullmatch(r"\s*SIG_IDS\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*", term)
+                assert tm, f"cannot read {term!r} ({system})"
+                lo, hi = int(tm.group(1)), int(tm.group(2))
+                assert 1 <= lo <= hi <= 32
+                ids |= set(range(lo, hi + 1))
+            band = FW_BANDS[em.group(1)]
+            assert band not in bands, f"{system} {band} twice"
+            bands[band] = ids
+        if bands:
+            table[system] = bands
+    return table
+
+
+def test_firmware_band_table_parser():
+    src = """
+    static const uint32_t k_band_sigs[GNSS_SYS_COUNT][GNSS_BAND_COUNT] = {
+        [GNSS_SYS_GPS] = {
+            [GNSS_BAND_L1] = SIG_IDS(2, 4) | SIG_IDS(30, 32),   /* a comment, with commas */
+            [GNSS_BAND_L5] = SIG_IDS(22,24),
+        },
+        [GNSS_SYS_NAVIC] = { [GNSS_BAND_L5] = SIG_IDS(22, 22) },
+        /* SBAS: not mapped. */
+    };
+    """
+    assert firmware_band_table(src) == {"GPS": {"L1": {2, 3, 4, 30, 31, 32}, "L5": {22, 23, 24}},
+                                        "NavIC": {"L5": {22}}}
+    with pytest.raises(AssertionError):
+        firmware_band_table(src.replace("SIG_IDS(22,24)", "(1u << 21)"))
+
+
+def test_band_table_matches_firmware():
+    # benchlib must bucket signals exactly as the station does: the firmware
+    # table is the single source of the band rule.
+    assert firmware_band_table(FIRMWARE_BANDS.read_text()) == rtcm.BAND_OF_SIGNAL
+
+
+def test_best_constellation_counts_rewarded_systems_only():
+    four = ["L1", "L2", "L5", "L6"]
+    assert rtcm.best_systems({"QZSS": four, "GPS": ["L1", "L2", "L5"]}) == []
+    assert rtcm.best_systems({"QZSS": four, "Galileo": four + ["E5ab"], "NavIC": ["L5"]}) == ["Galileo"]
+    assert rtcm.best_systems({"BeiDou": ["L1", "L2", "L5", "E5ab"]}) == []
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +253,19 @@ def test_summary_flags_what_onocoy_would_miss():
     assert c["1005 present"]["status"] == "FAIL"
     assert c["1033 present"]["status"] == "WARN"
     assert c["constellation with 4 bands"]["status"] == "FAIL"
+
+
+def test_summary_four_bands_count_on_rewarded_constellations_only():
+    out = bytearray()
+    for k in range(4):
+        tow = 345600000 + 1000 * k
+        out += msm_frame(1077, 1, tow, True, {(5, 2): 45.0, (5, 10): 38.0, (5, 23): 44.0})
+        # QZSS with L1, L6, L2 and L5: four bands, but no band reward.
+        out += msm_frame(1117, 1, tow, False, {(2, 2): 40.0, (2, 9): 40.0, (2, 15): 40.0, (2, 22): 40.0})
+    st = summarise(bytes(out))
+    assert st.system_bands("QZSS") == ["L1", "L2", "L5", "L6"]
+    c = checks_by_name(st)["constellation with 4 bands"]
+    assert c["status"] == "FAIL" and "QZSS: L1/L2/L5/L6" in c["detail"]
 
 
 def test_summary_flags_rates_above_1hz():

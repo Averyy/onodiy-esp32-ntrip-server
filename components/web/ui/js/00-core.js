@@ -608,6 +608,14 @@ const ERR = {
   not_available_yet: 'Receiver firmware updates are not enabled in this build yet.',
   checks_disabled: 'This build cannot check for updates. Uploading a file still works.',
   too_many_clients: 'Too many pages are open on the station.',
+  signal_test_running: 'A signal-group comparison is running: nothing else changes the receiver until it ends. Cancel it on the receiver page first.',
+  signal_test_idle: 'No signal-group comparison is running (it may have ended meanwhile).',
+  signal_test_not_deciding: 'The comparison is not waiting for your choice (not yet, or not any more).',
+  first_apply_held: 'The receiver is not configured yet. Review and configure it on the receiver page first.',
+  autocfg_off: 'The station does not configure the receiver (automatic configuration is off).',
+  identity_unconfirmed: 'The receiver is not identified yet.',
+  config_failed: 'The receiver\'s configuration failed. That needs fixing first.',
+  position_not_locked: 'The base position is not locked yet: every receiver restart would start a new survey.',
 };
 
 /* Request fields as the forms label them, for "<label>: <rule>" refusals. */
@@ -620,7 +628,8 @@ const FIELD_LABEL = {
   survey_in_s: 'Survey-in time', lat_deg: 'Latitude', lon_deg: 'Longitude', height_m: 'Height',
   signal_group_master: 'Signal group (main antenna)', signal_group_slave: 'Signal group (second antenna)',
   antenna_model: 'Antenna model', antenna_serial: 'Antenna serial number', antenna_setup_id: 'Antenna setup ID',
-  rtcm: 'RTCM messages', recovery: 'Receiver recovery', step: 'Setup step',
+  rtcm: 'RTCM messages', recovery: 'Receiver recovery', step: 'Setup step', tag: 'Tag', level: 'Log level',
+  groups: 'Signal groups', phase_s: 'Time per group',
 };
 
 /** The generic message of a code (the server's own default, not a rule). */

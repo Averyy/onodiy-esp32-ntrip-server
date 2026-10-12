@@ -527,6 +527,19 @@ its `slot`); a section present in `data` replaces the client's copy of it.
 `uptime_s` is in every message, so one arrives each second: a client that
 hears nothing for 5 s reconnects.
 
+**Reconnecting (the UI).** After a close, a refused handshake or 5 s of
+silence the page waits 1 s before the next handshake, doubling up to 15 s,
+each wait drawn within ±20 % so pages that lost the station together do not
+come back in the same second; only a connection that lived 10 s starts the
+wait over. A refused or evicted page so makes at most 8 handshakes in its
+first minute and then one every 12 to 18 s, never one a second. It asks
+`GET /api/session` once per run of refusals (and again on a `1008`): a page
+whose session is gone shows the login, and a public view whose public
+status was turned off shows the login and stops (no more handshakes or
+polls). While the socket is down the page polls `GET /api/status` every
+2 s; a hidden tab with a session neither polls nor reconnects until it is
+shown again.
+
 **Events:** `station_state` (`state`), `caster_state` (`slot`, `state`),
 `update_state` (`state`), `network` (`what`: `online`, `offline`, `ap_up`,
 `ap_down`, `time_synced`), `scan_done`, `settings_changed` (`ns`, `client`;
@@ -1468,7 +1481,8 @@ a newer version appears; the server keeps no "later" state.
   "gnss": {"model": "UM982", "running": "R4.10Build18975", "running_build": 18975,
            "latest": "R4.10Build19152", "latest_build": 19152, "available": true,
            "blocked": "none", "blocked_left_s": 0,
-           "expected_downtime_s": 252, "budget_left_s": 469, "flash_available": false}
+           "expected_downtime_s": 252, "budget_left_s": 469, "flash_available": false,
+           "flash_reason": "not_enabled_in_build"}
 }
 ```
 
@@ -1478,7 +1492,7 @@ a newer version appears; the server keeps no "later" state.
 | `checks_enabled` | `false` when the build cannot check: no valid release repository, or it requires signed manifests and none of its keys is usable (manual uploads still work) |
 | `release_repo` | `owner/name` whose GitHub releases the station reads (`CONFIG_FW_UPDATE_GITHUB_REPO`; `null` if unset) |
 | `signed_manifests` | `true` when the build has a manifest key and accepts signed manifests only |
-| `last_result` | outcome of the last job the backend saw end (`job`: `check`, `app_update`, `app_upload`, `gnss_update`, `gnss_upload`, `rollback`), `null` this boot until one ended |
+| `last_result` | outcome of the last job the backend saw end (`job`: `check`, `app_update`, `app_upload`, `gnss_update`, `gnss_upload`, `rollback`), `null` this boot until one ended; `message` the `esp_err_t` name; with `failed_rule` and `cross_layout` only when `result` is `package_rejected` (result codes below) |
 | `last_attempt_unix` | the last update check this boot, successful or not (`last_check_unix` stays the last success, which the daily schedule runs from); `null` before one, or without a trusted clock then |
 | `last_check_result` | how that check went (`fw_update_check_result_t`): `ok`, `no_release` (HTTP 404: no public release with a manifest at `release_repo`), `http_error` (another status: `last_http_status`), `no_response` (offline, DNS, TLS, timeout, no trusted clock yet; retried after 1 h), `untrusted_redirect`, `bad_manifest` (an answer, but no manifest this build accepts); `null` before the first check of this boot. A field of its own because `last_result` already names job outcomes |
 | `last_http_status` | the check's final HTTP status, `null` when no answer came |
@@ -1490,6 +1504,7 @@ a newer version appears; the server keeps no "later" state.
 | `app.rolled_back` | every version rolled back on this station, newest first (`fw_update_get_rolled_back()`: reverted by its trial, rolled back by the user, or rolled back twice in its first minute; the last 8, kept through a factory reset). The banner offers none of them, however many daily checks later; installing one, from the banner or as an upload, asks for `rolled_back_ack` first |
 | `gnss.expected_downtime_s` | `station_expected_flash_downtime_s()` for the offered package (PROVISIONAL, to be confirmed on hardware); information, never a gate |
 | `gnss.budget_left_s` | as in `/api/status`, for the dialog |
+| `gnss.flash_available`, `gnss.flash_reason` | as `gnss_flash_available` and `gnss_flash_reason` in `/api/status`: `station_flash_available()`; the reason is `not_enabled_in_build` when it is `false`, else `null` |
 
 **Result codes** (`last_result.result`, final `progress` messages): `ok`,
 `not_available_yet`, `refused` (the state changed between click and start),
@@ -1757,8 +1772,9 @@ offering the download.
 {
   "clock": "gnss", "utc_second_of_day": 43210,
   "slots": [{"slot": 0, "name": "Onocoy", "protected": true}],
-  "protected": {"down_today_s": 4, "budget_left_s": 469, "budget_s": 473, "data_rate_permille": 1000,
-                "graced_uptime_permille": 503, "streak_ok": true},
+  "protected": {"enabled": true, "onocoy_ready": true, "down_today_s": 4, "budget_left_s": 469, "budget_s": 473,
+                "data_rate_permille": 1000, "graced_uptime_permille": 503, "streak_ok": true,
+                "graced_uptime_so_far_permille": 1000},
   "today": {"utc_day": 20736, "date": "2026-10-10", "down_s": [4, 0, 0, 0], "planned_s": [0, 0, 0, 0],
             "reconnects": [1, 0, 0, 0], "up_s": [43196, 0, 0, 0], "power_off_s": 0, "rx_overflows": 0},
   "history": []
@@ -1785,6 +1801,12 @@ Onocoy slot's day (`null` without one): `down_today_s` its offline time
 today, `budget_s` the day's offline allowance at the current data rate,
 `budget_left_s` what is left of it, and the other figures as in the caster
 status (section 10). The budget is information only.
+
+In `protected`, `enabled` and `onocoy_ready` (the slot holds the console's
+mountpoint, username and password) are as in the caster status, and so is
+`graced_uptime_so_far_permille`. Every figure but `down_today_s` is `null`
+while the slot is off or not set up, or while the day's figures are not
+known yet.
 
 ### `GET /api/diag/tasks`
 
@@ -1852,6 +1874,8 @@ generation at boot). Both flags come
 from `diag_log_read_ex()`. `format=text`
 streams the whole ring as `text/plain` with
 `Content-Disposition: attachment; filename="log-<version>.txt"`.
+A `cursor` that is not a number answers `400 invalid_field` with
+`"field": "cursor"`.
 
 ### `GET /api/journal?cursor=N`
 
@@ -1860,8 +1884,12 @@ streams the whole ring as `text/plain` with
  "entries": [{"seq": 77, "time_unix": 1760000000, "uptime_s": 3, "kind": "boot", "a": 1, "b": 4}]}
 ```
 
-At most 64 entries per call, oldest first, `seq > cursor`. `time_unix`
-`null` = no trusted clock then. `a` and `b` by `kind`:
+At most 64 entries per call, oldest first, `seq > cursor`; a cursor past
+the newest, or from before the journal started over, starts again from the
+oldest. Pass the returned `cursor` back (`more: true` = call again at once).
+A `cursor` that is not a number answers `400 invalid_field` with
+`"field": "cursor"`. `time_unix` `null` = no trusted clock then. `a` and `b`
+by `kind`:
 
 | `kind` | `a` | `b` |
 |---|---|---|

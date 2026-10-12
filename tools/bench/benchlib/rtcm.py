@@ -174,9 +174,16 @@ def _ids(lo: int, hi: int) -> set[int]:
 
 
 # Band buckets as Onocoy's explorer shows them: L1 = L1/E1/B1/B1C/G1,
-# L2 = L2/G2/E5b/B2I/B2b, L5 = L5/E5a/B2a, L6 = E6/B3I/QZSS L6, and the
-# Galileo E5 AltBOC signal as its own fifth band. Same mapping as the
-# station firmware (components/gnss_framing/gnss_rtcm3.c).
+# L2 = L2/G2/E5b/B2I/B2b, L5 = L5/E5a/B2a and NavIC L5, L6 = E6/B3I/QZSS L6,
+# and the Galileo E5 AltBOC signal as its own fifth band.
+#
+# This must equal the station's own table, k_band_sigs in
+# components/gnss_framing/gnss_rtcm3.c, the single source of the band rule
+# (tests/test_rtcm.py parses it and compares). SBAS has no row: the station
+# never decodes MSM numbers 1101-1107, because Unicore receivers reuse some
+# of them for their own content, so SBAS is never listed and has no bands.
+# Only REWARDED_SYSTEMS can be a station's best constellation: QZSS and NavIC
+# have bands here but never count as best.
 BAND_OF_SIGNAL: dict[str, dict[str, set[int]]] = {
     "GPS": {"L1": _ids(2, 4) | _ids(30, 32), "L2": _ids(8, 10) | _ids(15, 17), "L5": _ids(22, 24)},
     "GLONASS": {"L1": _ids(2, 3), "L2": _ids(8, 9)},
@@ -185,9 +192,21 @@ BAND_OF_SIGNAL: dict[str, dict[str, set[int]]] = {
     "QZSS": {"L1": {2} | _ids(30, 32), "L6": _ids(9, 13), "L2": _ids(15, 17), "L5": _ids(22, 24)},
     "BeiDou": {"L1": _ids(2, 4) | _ids(30, 32), "L6": _ids(8, 10), "L2": _ids(14, 16) | {25},
                "L5": _ids(22, 24)},
-    "SBAS": {"L1": {2}, "L5": _ids(22, 24)},
     "NavIC": {"L5": {22}},
 }
+
+# The bands that count toward Onocoy's 4-band reward (the E5 AltBOC bucket
+# is shown but is not one of the four).
+REWARD_BANDS = ("L1", "L2", "L5", "L6")
+
+
+def best_systems(bands_of: dict[str, list[str] | set[str]]) -> list[str]:
+    """The constellations with all four reward bands, of {system: bands}.
+
+    Only REWARDED_SYSTEMS count, as on the station: a QZSS with four bands
+    must not hide a rewarded constellation that lost one."""
+    return sorted(s for s, bands in bands_of.items()
+                  if s in REWARDED_SYSTEMS and len(set(bands) & set(REWARD_BANDS)) >= len(REWARD_BANDS))
 
 
 def band_of(system: str, sig_id: int) -> str | None:

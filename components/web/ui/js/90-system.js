@@ -20,6 +20,9 @@ function apPasswordProblem(v) {
   return 'Only plain ASCII: letters, digits, spaces and the usual symbols (no accented letters or emoji).';
 }
 
+/* How long the station tries new Wi-Fi credentials before it goes back to the previous ones. */
+const TRIAL_S = 90;
+
 /* "the new password for Home" when only the password changes, else "the new credentials for Cafe". */
 function newCredsText(w, ssid) {
   const p = w.pending_ssid || 'the new network';
@@ -64,11 +67,14 @@ Views.system = {
   admin: true,
   create(el) {
     let wifi = null, sys = null, stopJoin = null;
+    let wifiAt = 0;   /* when `wifi` arrived */
     let dirty = false;
     const wifiCard = h('section', { class: 'card' });
     const wifiBody = h('div');
     const wifiBadge = badge('', '');
     const showWifi = w => {
+      wifi = w;
+      wifiAt = Date.now();
       wifiBadge.className = 'badge ' + (w.online ? 'ok' : 'bad');
       wifiBadge.textContent = w.online ? 'Online' : 'Offline';
       mount(wifiBody, wifiStatus(w));
@@ -78,26 +84,56 @@ Views.system = {
     const pendingBox = h('div');
     let pendingKey = '';
     let joinPrev = '';   /* the network before a change made on this page */
+    /*
+     * Seconds left of a credential trial: the last GET /api/wifi's
+     * cred_trial_left_s, counted down here from when it arrived, so the
+     * countdown goes on while the station is out of reach (during a trial it
+     * usually is). Every .trial-left on this page shows it.
+     */
+    const trialLeftText = () => {
+      const left = Math.max(0, Math.ceil(((wifi && wifi.cred_trial_left_s) || 0) - (Date.now() - wifiAt) / 1000));
+      return left > 0 ? fmt.dur(left) + ' left' : 'ending now';
+    };
+    const tickTrial = () => {
+      if (!wifi || !wifi.cred_trial) return;
+      const text = trialLeftText();
+      for (const t of el.querySelectorAll('.trial-left')) {
+        if (t.textContent !== text) t.textContent = text;
+      }
+    };
+    /* role timer: a screen reader does not read every second out. */
+    const trialLeftEl = () => h('span', { class: 'trial-left', role: 'timer' }, trialLeftText());
     /* New credentials on trial or pending: rebuilt only when that changes, so its buttons stay put. */
     const showPending = w => {
       const key = [w.cred_trial, w.cred_pending, w.cred_reverted, w.cred_reverted_why, w.pending_ssid, w.ssid].join('|');
       if (key === pendingKey) {
-        const left = pendingBox.querySelector('.trial-left');
-        if (left) left.textContent = fmt.dur(w.cred_trial_left_s);
+        tickTrial();
         return;
       }
       pendingKey = key;
       if (w.cred_trial) {
         /* No buttons while a trial runs: it ends by itself, either way. */
         mount(pendingBox, msg('info', h('strong', null, 'Trying ' + newCredsText(w, joinPrev) + ': '),
-          h('span', { class: 'trial-left' }, fmt.dur(w.cred_trial_left_s)), ' left. Without an address there the station goes back to its previous network ' +
+          trialLeftEl(), '. Without an address there the station goes back to its previous network ' +
           'and keeps the new credentials as pending.'));
       } else if (w.cred_pending) {
         const retry = btn('Try again', async e => {
-          if (await retryPendingWifi(e)) load().catch(() => {});
+          const ssid = w.pending_ssid, prev = w.ssid;
+          if (await retryPendingWifi(e)) {
+            /* The same trial as a change made here: follow it to its end. */
+            joinPrev = prev || '';
+            pendingKey = '';
+            changeBtn.hidden = true;
+            watchJoin(ssid, true, true, prev);
+          }
         }, 'small primary');
         const discard = btn('Discard', async e => {
-          if (await discardPendingWifi(e)) load().catch(() => {});
+          if (await discardPendingWifi(e)) {
+            /* Gone at once; the reload confirms it. */
+            pendingKey = '';
+            clear(pendingBox);
+            load().catch(() => {});
+          }
         }, 'small');
         let text;
         if (w.cred_reverted && w.cred_reverted_why === 'auth_failed') {
@@ -150,16 +186,39 @@ Views.system = {
       }, 'ghost'))));
     });
 
+    /*
+     * Follow a change of network made on this page (or a retry of pending
+     * credentials). trial: the PUT's own word that the station tries the new
+     * credentials for 90 s and goes back to `prev` without an address there;
+     * the page then reports either end of that trial and nothing before it:
+     * "Connected" only once the new credentials are the station's (no longer
+     * pending), never while the station reports them refused (cred_reverted
+     * for this network), even when the previous credentials are for the same
+     * network. While the station is out of reach the countdown goes on here.
+     */
     function watchJoin(ssid, persisted, trial, prev) {
       const t0 = Date.now();
       const status = h('div', { class: 'stack' });
+      const storeNote = persisted ? null : msg('warn', 'Settings storage unavailable: this network is used until the next restart only.');
       mount(joinBox, h('div', { class: 'foot' }, status));
-      const show = (...kids) => mount(status, kids);
-      show(msg('info', (ssid === prev ? 'Trying the new password for ' + ssid + '…' : 'Joining ' + ssid + '…') +
-        (trial ? ' The station tries it for up to 90 seconds; without an address there it goes back to ' +
-        (prev || 'the current network') + ' by itself, so this page may lose contact for that long.' : '')),
-      persisted ? null : msg('warn', 'Settings storage unavailable: this network is used until the next restart only.'));
+      /* One message at a time, rebuilt only when it changes (key). */
+      let shown = '';
+      const say = (key, box) => {
+        if (key === shown) return;
+        shown = key;
+        mount(status, box, storeNote);
+      };
+      const what = ssid === prev ? 'the new password for ' + ssid : ssid;
+      const back = prev || 'the current network';
+      /* Until the station reports the trial (with its countdown), what it does in words. */
+      say('start', msg('info', trial ? 'Trying ' + what + '… The station tries it for up to ' + TRIAL_S + ' seconds; without an address ' +
+        'there it goes back to ' + back + ' by itself, so this page may lose contact for that long.' : 'Joining ' + ssid + '…'));
       if (stopJoin) stopJoin();
+      const done = () => {
+        stopJoin();
+        stopJoin = null;
+        changeBtn.hidden = false;
+      };
       stopJoin = poller(1000, async () => {
         const secs = (Date.now() - t0) / 1000;
         let w;
@@ -170,33 +229,43 @@ Views.system = {
             /* The .local name only while the station's mDNS responder runs (it answers nothing otherwise). */
             const name = stationNameUrl(wifi);
             const dhcp = (sys && sys.hostname_active) || 'onocoydiy';
-            show(msg('warn', 'This page lost contact with the station. If it moved to another network, open it there: ',
-              name ? [h('a', { href: name }, name), ', or find its address in that router\'s device list (named ' + dhcp + ').'] :
-                'find its address in that router\'s device list (named ' + dhcp + ').'));
+            const where = name ? [h('a', { href: name }, name), ', or find its address in that router\'s device list (named ' + dhcp + ').'] :
+              'find its address in that router\'s device list (named ' + dhcp + ').';
+            if (trial && wifi && wifi.cred_trial) {
+              say('lost-trial', msg('warn', h('strong', null, 'This page lost contact with the station while it tries ' + what + ': '), trialLeftEl(),
+                '. If ' + ssid + ' gives it an address, it stays there: open it on that network, ', where,
+                ' Otherwise it goes back to ' + back + ' by itself and this page finds it again.'));
+            } else {
+              say('lost', msg('warn', 'This page lost contact with the station. If it moved to another network, open it there: ', where));
+            }
           }
+          tickTrial();
           return;
         }
-        wifi = w;
         showWifi(w);
-        if (trial && w.cred_reverted && w.pending_ssid === ssid && !w.cred_trial) {
-          stopJoin();
-          stopJoin = null;
-          show(msg('warn', (w.cred_reverted_why === 'auth_failed' ? ssid + ' refused the new password: the station is back on its previous credentials.' :
-            'No address on ' + ssid + ' within 90 seconds: the station is back on ' + (w.ssid || 'the previous network') + '.') +
+        const mine = w.pending_ssid === ssid;
+        if (mine && w.cred_reverted && !w.cred_trial) {
+          /* The trial ended without an address: only that is said. */
+          say('reverted', msg('warn', (w.cred_reverted_why === 'auth_failed' ? ssid + ' refused the new password: the station is back on its ' +
+            'previous credentials' + (w.ssid ? ' (' + w.ssid + ')' : '') + '.' : 'No address on ' + ssid + ' within ' + TRIAL_S +
+            ' seconds: the station is back on ' + (w.ssid || 'the previous network') + '.') +
             ' The new credentials are kept as pending; try them again or discard them above.'));
-          changeBtn.hidden = false;
-          return;
-        }
-        if (w.online && w.ssid === ssid && !w.cred_trial && secs > 2) {
-          stopJoin();
-          stopJoin = null;
+          done();
+        } else if (w.cred_trial) {
+          say('trial', msg('info', h('strong', null, 'Trying ' + what + ': '), trialLeftEl(),
+            '. Without an address there the station goes back to ' + back + ' by itself, so this page may lose contact until then.'));
+        } else if (w.online && w.ssid === ssid && !(mine && w.cred_pending) && (trial || secs > 2)) {
+          /* The new credentials are the station's: connected with them. */
           const moved = w.ip && location.hostname !== w.ip && /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname);
-          show(msg('ok', 'Connected to ' + ssid + '.'), kv(stationAddressRows(w)),
-            moved ? h('p', null, 'The station has a new address: open it above.') : null);
+          say('connected', [msg('ok', 'Connected to ' + ssid + '.'), kv(stationAddressRows(w)),
+            moved ? h('p', null, 'The station has a new address: open it above.') : null]);
+          done();
+        } else if (secs > 45 && !trial) {
+          const why = wifiReason(w.last_disconnect_reason);
+          say('slow|' + why, msg('warn', 'Not connected to ' + ssid + ' yet. Last error: ' + why + '. The station keeps trying.'));
           changeBtn.hidden = false;
-        } else if (secs > 45 && !w.cred_trial) {
-          show(msg('warn', 'Not connected to ' + ssid + ' yet. Last error: ' + wifiReason(w.last_disconnect_reason) + '. The station keeps trying.'));
-          changeBtn.hidden = false;
+        } else if (shown === 'lost' || shown === 'lost-trial') {
+          say('back', msg('info', (trial ? 'Trying ' + what : 'Joining ' + ssid) + '…'));
         }
       });
     }
@@ -402,10 +471,9 @@ Views.system = {
       renderPassword();
       renderLook();
     }, e => mount(el, msg('bad', errText(e)), btn('Try again', () => openView('system', ''), 'primary')));
-    const stop = poller(10000, () => (stopJoin || dirty ? Promise.resolve() : api('GET', '/api/wifi').then(w => {
-      wifi = w;
-      showWifi(w);
-    })), true);
+    const stop = poller(10000, () => (stopJoin || dirty ? Promise.resolve() : api('GET', '/api/wifi').then(showWifi)), true);
+    /* A trial's countdown between the polls. */
+    const tick = setInterval(tickTrial, 1000);
     let lastSafe = null;
 
     return {
@@ -418,6 +486,7 @@ Views.system = {
       },
       destroy() {
         stop();
+        clearInterval(tick);
         if (stopJoin) stopJoin();
       },
       dirty: () => dirty,
