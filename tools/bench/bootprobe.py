@@ -501,7 +501,7 @@ class BootProbe:
             res.code = EXIT_OTHER_BUILD
             self.say("   What to do: the receiver came back with another firmware than it had. Stop here: note "
                      "transcript.log and boot-menu.txt, check the receiver with `uv run um982.py --port <port>`, and do "
-                     "not go on to the next bench step until it runs the build it had.")
+                     "not go on to the next check on the bench until it runs the build it had.")
             return res
         if res.entry == "prompt":
             res.code = EXIT_OK

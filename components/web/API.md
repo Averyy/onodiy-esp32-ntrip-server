@@ -1775,14 +1775,21 @@ The UI shows both, as links.
 4. The phone is back on the home network: the user opens
    `http://<mdns_host>.local/`, logs in, and the wizard resumes at
    `setup_step`.
-5. Reception check, before any caster is enabled: `POST /api/gnss/live`
-   opens the live view and the UI polls `GET /api/gnss/live`, with plain
-   pass/warn hints (satellites tracked, mean C/N0, whether a constellation
-   has 4 bands, the condition of Onocoy's top band reward; guide values,
-   PROVISIONAL, to be confirmed on hardware) and "Continue anyway";
-   `DELETE /api/gnss/live` when the user goes on.
-6. Optional: the Onocoy slot, `PUT /api/casters/0` with `onocoy_preset`,
-   the credential username and password; then optional further casters.
+5. Reception check, before any caster is enabled. The UI reads
+   `GET /api/status` first: with no receiver found (alert `no_receiver`,
+   section 6) or while the station looks for one it shows the no-receiver
+   card (what to check, the next search; "Check again" is
+   `POST /api/gnss/detect`) and opens nothing. Once the receiver streams,
+   `POST /api/gnss/live` opens the live view and the UI polls
+   `GET /api/gnss/live`, with plain pass/warn hints (satellites tracked,
+   mean C/N0, whether a constellation has 4 bands, the condition of
+   Onocoy's top band reward; guide values, PROVISIONAL, to be confirmed on
+   hardware) and "Continue anyway"; `DELETE /api/gnss/live` when the user
+   goes on.
+6. Optional: the Onocoy slot, `PUT /api/casters/0` with `onocoy_preset`
+   (host `servers.onocoy.com` and port 2101, shown read-only) and what the
+   Onocoy console gives: `mountpoint`, `username` and `password`
+   (section 10); then optional further casters.
 7. `POST /api/setup/done` (it also erases `setup_step`): the dashboard.
 
 Every step posts the next one (`POST /api/setup/step`) before it shows it.

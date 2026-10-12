@@ -155,7 +155,9 @@ typedef enum {
      */
     DIAG_EV_LADDER_STEP,
     DIAG_EV_APP_UPDATE,         /**< a = result (esp_err_t) */
-    DIAG_EV_APP_REVERT,         /**< a = trial stage */
+    DIAG_EV_APP_REVERT,         /**< a = trial stage (fw_update_trial_t; 0 = the user's rollback), b = 1 for the user's
+                                     rollback; a stage-1 rollback the bootloader did: a = confirming, b = the attempt
+                                     (1, 2); a revert with no other image to go back to: b = the esp_err_t; else 0 */
     DIAG_EV_GNSS_FLASH,         /**< a = outcome (station_flash_outcome_t), b = transfers */
     DIAG_EV_SAFE_MODE,          /**< a = episode */
     DIAG_EV_WIFI_DISCONNECT,    /**< a = wifi_err_reason_t, b = RSSI */

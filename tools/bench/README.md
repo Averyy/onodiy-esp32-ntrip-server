@@ -183,7 +183,7 @@ nothing more and tells you to power-cycle the receiver. Exit status 0 =
 menu reached and the application back with the same build, 1 = no menu,
 2 = application not back (or stopped at an unconfirmed menu), 3 = not
 started, 4 = the application came back with another firmware. Only 0 lets
-the next bench step go on.
+the next check on the bench go on.
 
 ### `rtcm_inspect.py`: what is in the stream
 

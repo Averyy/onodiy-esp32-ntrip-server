@@ -87,7 +87,7 @@ typedef struct {
 esp_err_t um98x_flash_bench(gnss_link_lease_t raw_lease, const um98x_bench_req_t *req, um98x_bench_res_t *out);
 
 /**
- * Bench step "stop key from boot": the stop key at the loader baud from
+ * Bench check "stop key from boot": the stop key at the loader baud from
  * now (called from the earliest point of the boot) for max_ms; at the
  * prompt "6" and the application's version at app_baud. Records the time
  * from the ESP32 reset to the first stop-key byte and whether the prompt

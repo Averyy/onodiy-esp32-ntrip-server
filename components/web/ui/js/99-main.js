@@ -38,6 +38,7 @@ async function start() {
     return;
   }
   S.session = s;
+  if (s.hostname) setBrand(s.hostname);
   showLogin();
 }
 

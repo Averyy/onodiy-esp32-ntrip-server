@@ -352,8 +352,6 @@ async function startWizard(claim) {
     bare(h('div', { class: 'narrow' }, head, h('section', { class: 'card' }, h('h1', null, title), body)));
   }
 
-  let stopCheck = null;   /* the reception check's polling, while it is shown */
-
   function after(step) {
     const i = steps.indexOf(step);
     return i >= 0 ? steps[i + 1] : steps[0];
@@ -372,8 +370,6 @@ async function startWizard(claim) {
   }
 
   async function next(step) {
-    if (stopCheck) stopCheck();
-    stopCheck = null;
     const following = after(step);
     if (!following) {
       finish(step);
@@ -440,14 +436,9 @@ async function startWizard(claim) {
   function skipAll() {
     return h('p', { class: 'muted small foot' }, 'Experienced? ', h('button', { type: 'button', class: 'btn ghost small', onclick: async e => {
       const ok = await act(e.currentTarget, setupDone);
-      if (ok !== undefined) {
-        if (stopCheck) {
-          stopCheck();
-          stopCheck = null;
-          api('DELETE', '/api/gnss/live').catch(() => {});   /* the reception check's view: it would close by itself */
-        }
-        boot();
-      }
+      /* The reception check's polling ends once its page is gone; a live
+       * view it opened closes by itself after 120 s without a reader. */
+      if (ok !== undefined) boot();
     } }, 'Skip the rest of the setup'));
   }
 

@@ -545,7 +545,7 @@ typedef struct {
 esp_err_t station_bench_run(const station_bench_req_t *req, station_bench_res_t *out, uint32_t timeout_ms);
 
 /**
- * Bench step "stop key from boot": from app_main, before anything else uses
+ * Bench check "stop key from boot": from app_main, before anything else uses
  * the receiver's UART (no journal may be open); the station is not running
  * yet. The RAW lease is released afterwards.
  */
