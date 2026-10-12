@@ -287,6 +287,11 @@ static bool persist_applied(const um98x_base_profile_t *p, const um98x_apply_res
     if (err == ESP_OK) {
         err = settings_batch_set_u8(b, SETTINGS_KEY_GNSS_RTCM1230_OK, r->rtcm1230_ok ? 1 : 0);
     }
+    if (err == ESP_OK) {
+        /* The group this receiver runs: a later refused group goes back to it. */
+        err = settings_batch_set_u16(b, SETTINGS_KEY_GNSS_SG_OK,
+                                     (uint16_t)(((unsigned)p->signal_group_master << 8) | p->signal_group_slave));
+    }
     if (err == ESP_OK && r->baud != 0 && r->baud != stored_baud()) {
         err = settings_batch_set_u32(b, SETTINGS_KEY_GNSS_BAUD, r->baud);
     }

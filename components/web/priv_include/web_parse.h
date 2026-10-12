@@ -111,6 +111,28 @@ bool web_parse_maintenance(const cJSON *root, uint32_t *duration_s, web_bad_t *b
  */
 bool web_parse_live(const cJSON *root, uint32_t max_min, uint32_t *minutes, web_bad_t *bad);
 
+#define WEB_SG_TEST_PHASE_MIN_S     60u
+#define WEB_SG_TEST_PHASE_MAX_S     7200u
+#define WEB_SG_TEST_PHASE_DEFAULT_S 1800u
+
+/**
+ * POST /api/gnss/signal-test: {"groups": [{"master": m, "slave": s}, {...}],
+ * "phase_s": n}. groups: exactly two different pairs of 0-255 (else
+ * invalid_field "groups"); phase_s 60-7200, left out = 1800 (else
+ * invalid_field "phase_s"). out[0] is A, out[1] is B.
+ */
+bool web_parse_signal_test(const cJSON *root, uint8_t out[2][2], uint32_t *phase_s, web_bad_t *bad);
+
+/** POST /api/gnss/signal-test/keep: {"group": 0|1} (else invalid_field "group"). */
+bool web_parse_signal_test_keep(const cJSON *root, unsigned *group, web_bad_t *bad);
+
+/**
+ * The API error of a refused comparison request (station_sgt_err_t);
+ * *field names the field of an invalid_field (else NULL). `safe_mode`: the
+ * station does not run because of safe mode (else it is busy starting).
+ */
+web_err_t web_sgt_error(int err, bool safe_mode, const char **field);
+
 /* ---- casters ------------------------------------------------------------------------------ */
 
 /**

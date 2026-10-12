@@ -95,6 +95,17 @@ _Static_assert(HM_CST_DISABLED == (int)NTRIP_STATE_DISABLED && HM_CST_WAIT_NETWO
                    HM_CST_CONFIG_ERROR == (int)NTRIP_STATE_CONFIG_ERROR && HM_CST_BANNED == (int)NTRIP_STATE_BANNED &&
                    HM_CST_STOPPED == (int)NTRIP_STATE_STOPPED,
                "caster states mirror ntrip_state_t");
+_Static_assert(HM_FAIL_NONE == (int)NTRIP_FAIL_NONE && HM_FAIL_DNS == (int)NTRIP_FAIL_DNS &&
+                   HM_FAIL_CONNECT == (int)NTRIP_FAIL_CONNECT && HM_FAIL_TLS == (int)NTRIP_FAIL_TLS &&
+                   HM_FAIL_TIMEOUT == (int)NTRIP_FAIL_TIMEOUT && HM_FAIL_REMOTE_CLOSE == (int)NTRIP_FAIL_REMOTE_CLOSE &&
+                   HM_FAIL_WRITE_STALL == (int)NTRIP_FAIL_WRITE_STALL &&
+                   HM_FAIL_KEEPALIVE == (int)NTRIP_FAIL_KEEPALIVE && HM_FAIL_AUTH == (int)NTRIP_FAIL_AUTH &&
+                   HM_FAIL_MOUNT_BUSY == (int)NTRIP_FAIL_MOUNT_BUSY && HM_FAIL_CONFIG == (int)NTRIP_FAIL_CONFIG &&
+                   HM_FAIL_BANNED == (int)NTRIP_FAIL_BANNED &&
+                   HM_FAIL_LOGIN_BLOCKED == (int)NTRIP_FAIL_LOGIN_BLOCKED &&
+                   HM_FAIL_IN_USE == (int)NTRIP_FAIL_IN_USE && HM_FAIL_REPLACED == (int)NTRIP_FAIL_REPLACED &&
+                   HM_FAIL_LOCAL == (int)NTRIP_FAIL_LOCAL && HM_FAIL_CLASS_COUNT == (int)NTRIP_FAIL_CLASS_COUNT,
+               "failure classes mirror ntrip_fail_class_t");
 _Static_assert(DIAG_LOSS_HW_FIFO == 1 && DIAG_LOSS_RX_BUFFER_FULL == 2 && DIAG_LOSS_LINE_ERRORS == 3 &&
                    DIAG_LOSS_RTCM_CRC == 4 && DIAG_LOSS_FRAMER_DISCARDED == 5 && DIAG_LOSS_HUB_PUBLISH == 6 &&
                    DIAG_LOSS_BAUD_SWITCH == 7 && DIAG_LOSS_RX_EVENTS_DROPPED == HM_LOSS_IDS,
@@ -262,15 +273,14 @@ static void ladder_log(uint8_t code, uint8_t outcome, uint8_t detail)
             ESP_LOGW(TAG, "no receiver: restart to look for it postponed (%s)", why);
         } else if (outcome == HL_OUT_NOT_RUN) {
             ESP_LOGW(TAG, "no receiver: no restart to look for it (recovery mode: no ESP32 restart)");
-        } else if (lifecycle_reboot_inhibited(NULL)) {
+        } else if (detail == HL_CAP_LOCK) {
             ESP_LOGW(TAG, "no receiver: restart to look for it postponed (an update or receiver session holds "
                           "restarts back)");
         } else {
             uint32_t wait = 0;
             (void)lifecycle_ladder_reboot_allowed(&wait);
-            ESP_LOGW(TAG, "no receiver: restart to look for it postponed (at most one an hour and three a day; "
-                          "possible in %" PRIu32 " min)",
-                     (wait + 59u) / 60u);
+            ESP_LOGW(TAG, "no receiver: restart to look for it postponed (%s; possible in %" PRIu32 " min)",
+                     detail == HL_CAP_DAY ? "at most 3 in 24 hours" : "at most one an hour", (wait + 59u) / 60u);
         }
         return;
     }
@@ -431,8 +441,10 @@ static void casters_tick(int64_t now, bool *any_down, bool *protected_down, bool
         if (si.enabled && s_cst.unreached_s > *unreached_s) {
             *unreached_s = s_cst.unreached_s;
         }
-        if (hm_protected_down(si.enabled, s_slot_protected[i], si.state)) {
-            *protected_down = true;   /* not while stopped by the login guard: a network action cannot help */
+        if (hm_protected_down(si.enabled, s_slot_protected[i], si.state, (uint8_t)s_cst.reason)) {
+            /* not while stopped by the login guard or waiting on a caster's
+             * reply: a network action cannot help */
+            *protected_down = true;
         }
     }
 }
@@ -743,7 +755,9 @@ static void tick(void)
     in->survey_holds_rtcm = false;
 #endif
     uint32_t cap_wait = 0;
-    in->reboot_allowed = lifecycle_ladder_reboot_allowed(&cap_wait);
+    lifecycle_cap_t cap = lifecycle_ladder_reboot_cap(&cap_wait);
+    in->reboot_allowed = cap == LIFECYCLE_CAP_NONE;
+    in->reboot_cap_why = cap == LIFECYCLE_CAP_DAY ? HL_CAP_DAY : cap == LIFECYCLE_CAP_HOUR ? HL_CAP_HOUR : HL_CAP_UNKNOWN;
     in->reboot_inhibited = lifecycle_reboot_inhibited(NULL);
     in->detect_passes = s_st.detect_passes;
     bool have_net = network_get_status(&s_net) == ESP_OK;
@@ -846,6 +860,9 @@ static void tick(void)
     o.gnss_reboot_hold = hv.hold;
     o.gnss_reboot_hold_left_s = hv.hold_left_s;
     o.gnss_reboot_cap_wait_s = hv.cap_wait_s;
+    o.gnss_reboot_cap_limit = hv.cap_wait_s == UINT32_MAX ? HEALTH_CAP_NONE
+                              : cap == LIFECYCLE_CAP_DAY  ? HEALTH_CAP_DAY
+                                                          : HEALTH_CAP_HOUR;
     if (s_factory_refused_ms == HM_NEVER) {
         o.factory_reset_refused_age_s = UINT32_MAX;
     } else {

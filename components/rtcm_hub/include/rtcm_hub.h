@@ -18,12 +18,29 @@
  *    frame after an MSM whose multiple-message bit is 0 (last MSM of its
  *    epoch), (b) at an MSM whose constellation already has an MSM with a
  *    different epoch time in the current epoch (a receiver that never clears
- *    the bit), (c) at any frame arriving CONFIG_RTCM_HUB_BURST_GAP_MS or more
- *    after the previous one while the current epoch holds an MSM not yet
- *    terminated (a lost terminating MSM), and at the first frame after
- *    rtcm_hub_clear_sticky(). Non-MSM frames after an epoch's last MSM
+ *    the bit), (c) at a frame that is no MSM arriving
+ *    CONFIG_RTCM_HUB_BURST_GAP_MS or more after the previous one while the
+ *    current epoch holds an MSM not yet terminated (a lost terminating MSM:
+ *    the next epoch's station messages; its first MSM meets rule (b)), and
+ *    at the first frame after rtcm_hub_clear_sticky(). An MSM after such a
+ *    gap continues its epoch: arrival times are taken when the frames are
+ *    read, so a reader that stalled (flash writes stop the CPU) makes gaps
+ *    inside an epoch. Non-MSM frames after an epoch's last MSM
  *    belong to the next epoch. Epoch times are compared within one
  *    constellation only, so no time-system conversion is needed.
+ *  - Unsure epochs: the epoch started by the very first frame, and by the
+ *    first frame after rtcm_hub_clear_sticky(), is "unsure". Framer resets
+ *    (lease release, UART events, apply, flash) drop bytes anywhere in an
+ *    epoch, so that frame may be the middle or the tail of an epoch (e.g. a
+ *    GLONASS MSM whose GPS MSM was lost). No consumer ever starts on an
+ *    unsure epoch: one that is waiting skips it whole, and one that is
+ *    streaming ends the epoch it was sending there, goes back to waiting
+ *    and counts the unsure frames as idle skips. The next epoch started by
+ *    rule (a), (b) or (c) is sure; while an epoch is unsure, a gap of
+ *    CONFIG_RTCM_HUB_BURST_GAP_MS after any frame also starts a sure one, so
+ *    a stream without MSMs still flows after a reset. A caster therefore
+ *    resumes after every pause or UART reset at the first frame of a whole
+ *    epoch.
  *  - Station metadata: the latest 1005/1006, 1033 and 1230 frames are kept
  *    as sticky copies outside the ring. They are cleared on every framer
  *    reset and every receiver reconfiguration (rtcm_hub_clear_sticky), and a
@@ -31,8 +48,8 @@
  *    never sent.
  *  - A new consumer, and one that calls rtcm_hub_resync() (e.g. after a
  *    caster reconnect), first receives the sticky metadata frames, then live
- *    data starting at the next epoch start. A caster never starts with the
- *    tail of an epoch or waits for the station position. Epoch starts that
+ *    data starting at the next sure epoch start. A caster never starts with
+ *    the tail of an epoch or waits for the station position. Epoch starts that
  *    are already over the consumer's lag limit when it reads are skipped too
  *    (as idle skips).
  *  - Lag limit per consumer (rtcm_hub_set_max_lag; default
@@ -74,8 +91,8 @@
  *    than 2^31 ms, every stored frame counts as older than any lag limit.
  *
  * Loss accounting: frames a consumer skips while it is not streaming
- * (before attach, during resync after an outage or pause) are expected and
- * go to `frames_skipped_idle`. Only frames lost while streaming (lapped or
+ * (before attach, during resync after an outage or pause, unsure epochs)
+ * are expected and go to `frames_skipped_idle`. Only frames lost while streaming (lapped or
  * over the lag limit) count as `frames_dropped`, the real data-loss figure;
  * after a lap, the rest of the newest epoch skipped while resyncing counts as
  * dropped too. Every frame published while a consumer is attached ends up in
@@ -132,7 +149,7 @@ typedef struct {
     uint64_t bytes_out;
     uint64_t frames_dropped;     /**< lost while streaming (lapped or over the lag limit): real loss */
     uint64_t bytes_dropped;
-    uint64_t frames_skipped_idle;/**< skipped while not streaming (attach, resync after outage/pause): expected */
+    uint64_t frames_skipped_idle;/**< skipped while not streaming (attach, resync after outage/pause, unsure epochs): expected */
     uint64_t epochs_dropped;     /**< whole epochs dropped by the lag limit or a lap (each lowers Onocoy's data rate) */
     uint64_t epochs_out;         /**< epochs delivered whole (counted when the next epoch begins) */
     uint32_t max_lag_ms;         /**< this consumer's lag limit */
@@ -205,6 +222,16 @@ void rtcm_hub_clear_sticky(void);
 
 /** Hub-wide counters. */
 void rtcm_hub_get_stats(rtcm_hub_stats_t *out);
+
+/**
+ * True while an epoch is in flight: the newest epoch holds an MSM that
+ * announced more (multiple-message bit set) and the newest frame is younger
+ * than `quiet_ms`. Whoever is about to stop the stream to the casters (the
+ * station before a receiver session) waits for it to clear, so the casters
+ * get whole epochs. Any task.
+ * @param age_ms optional: the newest frame's age, UINT32_MAX before the first.
+ */
+bool rtcm_hub_epoch_in_flight(uint32_t quiet_ms, uint32_t *age_ms);
 
 /** Counters for one consumer. */
 esp_err_t rtcm_hub_get_consumer_stats(rtcm_hub_consumer_t consumer, rtcm_hub_consumer_stats_t *out);

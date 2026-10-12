@@ -19,6 +19,7 @@ const BAND_SIGNAL = {
   galileo: { l1: 'E1', l2: 'E5b', l5: 'E5a', l6: 'E6', e5ab: 'E5 AltBOC' },
   beidou: { l1: 'B1I, B1C', l2: 'B2I, B2b', l5: 'B2a', l6: 'B3I' },
   qzss: { l1: 'L1', l2: 'L2', l5: 'L5', l6: 'L6' },
+  navic: { l5: 'L5' },
 };
 
 function cnrClass(v) {

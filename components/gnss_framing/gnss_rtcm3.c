@@ -305,7 +305,11 @@ static const uint32_t k_band_sigs[GNSS_SYS_COUNT][GNSS_BAND_COUNT] = {
         [GNSS_BAND_L2] = SIG_IDS(14, 16) | SIG_IDS(25, 25),     /* B2I 7I 7Q 7X; B2b 7D */
         [GNSS_BAND_L5] = SIG_IDS(22, 24),                       /* B2a: 5D 5P 5X */
     },
-    /* SBAS and NavIC: not mapped. */
+    [GNSS_SYS_NAVIC] = {
+        [GNSS_BAND_L5] = SIG_IDS(22, 22),                       /* L5 SPS: 5A */
+    },
+    /* SBAS: no bands. 1101..1107 are SBAS numbers the receiver reuses for
+     * its own messages; they never reach the hub or the observation view. */
 };
 
 gnss_band_t gnss_rtcm3_msm_band(gnss_sys_t sys, unsigned sig_id)

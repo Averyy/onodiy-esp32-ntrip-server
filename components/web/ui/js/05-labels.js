@@ -108,6 +108,8 @@ const L = {
     no_receiver: ['No receiver found', ''],   /* the text depends on the alert: noReceiverText() */
   },
   /* Why the station's own restart (to look for the receiver) is postponed now (health reboot_hold). */
+  /* health.reboot_cap_limit: which limit of the restart cap sets its wait */
+  capLimit: { hour: 'at most one an hour', day: 'at most 3 in 24 hours' },
   hold: {
     setup: 'first setup not finished',
     ap_client: 'someone is on the station\'s Wi-Fi',
@@ -244,7 +246,59 @@ const L = {
   },
   previewKind: { query: 'reads only', write: 'changes the receiver' },
   previewWhen: { always: 'always', if_differs: 'only if the receiver differs', if_off: 'only if it is off in the receiver' },
+  /* Signal-group comparison (GET /api/gnss/signal-test). */
+  sgtState: {
+    idle: 'Not running', switching: 'Switching', settling: 'Settling', measuring: 'Measuring', deciding: 'Waiting for your choice',
+    restoring: 'Switching back',
+  },
+  sgtOutcome: {
+    kept: 'You kept a group.',
+    timed_out: 'No choice within 24 hours: the group from before the test is back.',
+    cancelled: 'Stopped: the group from before the test is back.',
+    rejected: 'The receiver refused one of the groups: the group from before the test is back.',
+    failed: 'A switch did not work out: the group from before the test is back.',
+    interrupted: 'The comparison could not continue after a restart.',
+  },
+  sgtResult: { pending: 'not measured', measuring: 'measuring', done: 'measured', rejected: 'refused by the receiver' },
 };
+
+/*
+ * Signal groups offered by name (the receiver's CONFIG SIGNALGROUP pairs,
+ * master and second antenna input); other pairs are entered as numbers.
+ */
+const SG_CHOICES = [
+  ['3 6', '3 6 (recommended)', 'Galileo E1, E5a, E5b and E6, QZSS L6; BeiDou B1I, B1C, B2b and B3I (no B2a)'],
+  ['7 0', '7 0', 'Every BeiDou signal (B1I, B1C, B2I, B2a, B2b, B3I) and Galileo E1, E5a, E5b (no E6); second antenna input ' +
+    'off; documented for base-station use'],
+  ['4 5', '4 5', 'The receiver\'s factory setting'],
+  ['5 0', '5 0', 'Low-power set, dual frequency, second antenna input off'],
+];
+
+/** "3 6 (recommended)" for a known pair, else "M S". */
+function sgName(m, s) {
+  const key = m + ' ' + s;
+  const c = SG_CHOICES.find(x => x[0] === key);
+  return c ? c[1] : key;
+}
+
+/* MSM signal IDs by name (public RTCM signal tables), per constellation. */
+const SIG_NAME = {
+  gps: { 2: 'L1 C/A', 3: 'L1P', 4: 'L1W', 8: 'L2C', 9: 'L2P', 10: 'L2W', 15: 'L2C(M)', 16: 'L2C(L)', 17: 'L2C', 22: 'L5I',
+    23: 'L5Q', 24: 'L5', 30: 'L1C(D)', 31: 'L1C(P)', 32: 'L1C' },
+  glonass: { 2: 'G1 C/A', 3: 'G1P', 8: 'G2 C/A', 9: 'G2P' },
+  galileo: { 2: 'E1C', 3: 'E1A', 4: 'E1B', 5: 'E1', 6: 'E1Z', 8: 'E6C', 9: 'E6A', 10: 'E6B', 11: 'E6', 12: 'E6Z', 14: 'E5bI',
+    15: 'E5bQ', 16: 'E5b', 18: 'E5 AltBOC I', 19: 'E5 AltBOC Q', 20: 'E5 AltBOC', 22: 'E5aI', 23: 'E5aQ', 24: 'E5a' },
+  qzss: { 2: 'L1 C/A', 9: 'L6D', 10: 'L6P', 11: 'L6', 12: 'L6E', 13: 'L6Z', 15: 'L2C(M)', 16: 'L2C(L)', 17: 'L2C', 22: 'L5I',
+    23: 'L5Q', 24: 'L5', 30: 'L1C(D)', 31: 'L1C(P)', 32: 'L1C' },
+  beidou: { 2: 'B1I', 3: 'B1Q', 4: 'B1', 8: 'B3I', 9: 'B3Q', 10: 'B3', 14: 'B2I', 15: 'B2Q', 16: 'B2', 22: 'B2a data',
+    23: 'B2a pilot', 24: 'B2a', 25: 'B2b', 30: 'B1C data', 31: 'B1C pilot', 32: 'B1C' },
+  navic: { 22: 'L5 SPS' },
+};
+
+function sigNames(sys, ids) {
+  const t = SIG_NAME[sys] || {};
+  return (ids || []).map(id => t[id] || 'signal ' + id).join(', ');
+}
 
 /* Receiver maintenance durations (s) as the station offers them. */
 const MAINT_CHOICES = [[900, '15 minutes'], [1800, '30 minutes'], [3600, '1 hour'], [7200, '2 hours'], [14400, '4 hours']];
@@ -254,7 +308,7 @@ const J = {
   kind: { boot: 'Start', session: 'Previous session', reboot: 'Restart', ladder_step: 'Recovery step', app_update: 'App update',
     app_revert: 'App reverted', gnss_flash: 'Receiver update', safe_mode: 'Safe mode', wifi_disconnect: 'Wi-Fi disconnect',
     data_loss: 'Data loss', caster_down: 'Caster session ended', caster_up: 'Caster back', wifi_up: 'Wi-Fi back',
-    caster_stop: 'Caster stopped', rx_maintenance: 'Receiver maintenance', live_view: 'Live view' },
+    caster_stop: 'Caster stopped', rx_maintenance: 'Receiver maintenance', live_view: 'Live view', sg_test: 'Signal groups' },
   resetClass: ['power on', 'planned', 'crash', 'brownout', 'other'],
   /* The same by C value, as the API names them (lifecycle_reset_class_t, lifecycle_reboot_reason_t). */
   resetClassKey: ['power_on', 'planned', 'crash', 'brownout', 'other'],
@@ -270,7 +324,9 @@ const J = {
   outcome: ['started', 'healthy again', 'failed or refused', 'abandoned', 'not run (recovery mode)', 'postponed'],
   gnssRung: [null, 'resync', 'restart link', 'search baud rate', 're-apply profile', 'reset receiver',
     'restarted the station to look for the receiver', 'power-cycle alert', 'waiting for the next search',
-    'restart postponed: at most one an hour'],
+    'restart postponed'],
+  /* Why a restart was postponed (ladder_step code 9, outcome 0: bits 16-23 of b; 0 = not recorded). */
+  capWhy: ['', 'at most one an hour', 'at most 3 in 24 hours', 'another job holds restarts'],
   /* hold_mask bits of a postponed restart (ladder_step code 9, outcome 5). */
   holdBits: ['setup', 'ap_client', 'admin', 'power_on'],
   netRung: [null, 'reconnect', 'renew DHCP and fallback DNS', 'restart Wi-Fi', 'restart station'],
@@ -284,6 +340,8 @@ const J = {
   liveEv: [null, 'Opened', 'Extended', 'Closed', 'Satellite output on', 'Satellite output off'],
   liveEnd: ['', 'stopped by you', 'time up', 'nobody watching', 'receiver update'],
   liveCmd: ['accepted', 'rejected', 'no answer', 'not sent'],
+  /* sg_test: the outcome in b of an end (station_sgt_outcome_t) */
+  sgtOut: ['', 'kept', 'timed out', 'cancelled', 'rejected', 'failed', 'interrupted'],
   /* station_flash_outcome_t */
   flashOut: ['none', 'updated', 'the old firmware still runs', 'an unexpected build runs', 'not done (receiver unchanged)',
     'package refused', 'not started', 'waiting for a decision', 'package checked'],
@@ -369,24 +427,34 @@ function noReceiverText(a) {
 
 /**
  * The station's own restart to look for the receiver, in words (health:
- * reboot_hold, reboot_hold_left_s, reboot_cap_wait_s, reboot_recheck); null
- * when nothing about it is pending (the station reports these only while
- * its receiver recovery runs). reboot_hold_left_s is when the last reason
- * ends at the latest (the presence limit, the end of the first hour); the
- * setup hold has no limit, so no deadline is named with it.
+ * reboot_hold, reboot_hold_left_s, reboot_cap_wait_s, reboot_cap_limit,
+ * reboot_recheck); null when nothing about it is pending (the station
+ * reports these only while its receiver recovery runs).
+ * reboot_hold_left_s is when the last reason ends at the latest (the
+ * presence limit, the end of the first hour); the setup hold has no limit,
+ * so no deadline is named for it, but the restart cap still is. When a hold
+ * and the cap both apply, the restart waits for the later of the two, so
+ * that is the time named.
  */
 function restartPlanText(hl) {
   if (!hl) return null;
   const hold = hl.reboot_hold || [];
   const cap = hl.reboot_cap_wait_s;
+  const hasCap = cap !== null && cap !== undefined;
   const holdLeft = hold.indexOf('setup') >= 0 ? null : hl.reboot_hold_left_s;
-  if (!hold.length && (cap === null || cap === undefined) && !hl.reboot_recheck) return null;
-  const intro = 'When nothing answers, the station restarts itself to look for the receiver, at most once an hour.';
+  const hasLeft = holdLeft !== null && holdLeft !== undefined;
+  if (!hold.length && !hasCap && !hl.reboot_recheck) return null;
+  const intro = 'When nothing answers, the station restarts itself to look for the receiver, ' +
+    'at most once an hour and 3 times in 24 hours.';
+  const limit = hasCap ? (L.capLimit[hl.reboot_cap_limit] || 'the restart limit') : '';
   if (hold.length) {
-    return intro + ' Postponed: ' + hold.map(r => L.hold[r] || String(r).replace(/_/g, ' ')).join(', ') +
-      (holdLeft === null || holdLeft === undefined ? '' : ' (at the latest in ' + inMinutes(holdLeft) + ')') + '.';
+    const reasons = ' Postponed: ' + hold.map(r => L.hold[r] || String(r).replace(/_/g, ' ')).join(', ');
+    if (hasCap && (!hasLeft || cap > holdLeft)) {
+      return intro + reasons + '; then ' + limit + ': next possible in ' + inMinutes(cap) + '.';
+    }
+    return intro + reasons + (hasLeft ? ' (at the latest in ' + inMinutes(holdLeft) + ')' : '') + '.';
   }
-  if (cap !== null && cap !== undefined) return intro + ' Next possible in ' + inMinutes(cap) + '.';
+  if (hasCap) return intro + ' Next possible in ' + inMinutes(cap) + ' (' + limit + ').';
   return intro + ' The station looks at it again after the next search.';
 }
 

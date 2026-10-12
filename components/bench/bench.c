@@ -8,7 +8,10 @@
  * Receiver link hooks (with CONFIG_GNSS_LINK_BENCH_HOOKS): an RX task stall
  * (`stall`; past the task watchdog only with TWDT-PANIC), a stall inside the
  * next RAW-lease read (`rawstall`), the frame and drain-pass time recorder
- * (`ftimes`, `ftimes dump`), the loader prompt detector in report-only mode
+ * (`ftimes <s>` starts it in the background and returns, so `stall`,
+ * `rawstall` and `listen` can run inside a recording; `ftimes status`,
+ * `ftimes stop`, `ftimes summary`, `ftimes dump`), the loader prompt
+ * detector in report-only mode
  * (`promptdet`, and `promptwatch` at a chosen baud under the station's lease:
  * nothing is transmitted), deleting the UART driver for the link's own
  * reopen (`uartclose`). Link restart helpers: a fragmented internal heap
@@ -441,15 +444,6 @@ static bool link_free(void)
     return true;
 }
 
-static void sleep_ms(uint32_t ms)
-{
-    while (ms > 0) {
-        uint32_t slice = ms > 500u ? 500u : ms;
-        vTaskDelay(pdMS_TO_TICKS(slice));
-        ms -= slice;
-    }
-}
-
 static void print_heap(const char *when)
 {
     printf("BENCH heap %s: internal free %u B, largest internal block %u B\n", when,
@@ -573,34 +567,30 @@ static int ftimes_dump(void)
     return 0;
 }
 
-static int cmd_ftimes(int argc, char **argv)
+/* The latest recording as `ftimes <s>` asked for it: its planned length, and
+ * when `ftimes stop` ended it (0 = it ran to its end, or still runs). */
+static uint32_t s_ft_secs;
+static int64_t s_ft_stopped_us;
+
+/* The summary line of the latest recording (running, stopped or ended by itself). */
+static void ftimes_summary(void)
 {
-    if (argc == 2 && strcmp(argv[1], "dump") == 0) {
-        return ftimes_dump();
-    }
-    uint32_t secs = 0;
-    if (argc != 2 || !parse_u32(argv[1], 1, GNSS_LINK_BENCH_TIMING_MAX_S, &secs)) {
-        printf("usage: ftimes <seconds 1-600>   |   ftimes dump\n");
-        return 1;
-    }
-    if (!link_free()) {
-        return 1;
-    }
-    esp_err_t err = gnss_link_bench_timing_start(secs);
-    if (err != ESP_OK) {
-        printf("BENCH FAIL ftimes: %s\n", esp_err_to_name(err));
-        return 1;
-    }
-    printf("BENCH ftimes: recording frame and drain-pass times for %u s ...\n", (unsigned)secs);
-    sleep_ms(secs * 1000u + 100u);
-    gnss_link_bench_timing_stop();
+    gnss_link_timing_info_t info;
+    (void)gnss_link_bench_timing_read(0, NULL, 0, &info);
     int64_t off = 0;
     bool clock = sntp_clock(&off);
     static gnss_link_timing_summary_t sum;
     (void)gnss_link_bench_timing_summary(clock, off, &sum);
-    printf("BENCH ftimes %u s: %u records%s, %u frames, %u passes with data, %u stalls", (unsigned)secs,
-           (unsigned)sum.records, sum.full ? " (ring full: recording ended early)" : "", (unsigned)sum.frames,
-           (unsigned)sum.passes, (unsigned)sum.stalls);
+    printf("BENCH ftimes %u s", (unsigned)s_ft_secs);
+    if (info.running) {
+        int64_t left = info.until_us - esp_timer_get_time();
+        printf(" (still recording, %u s left)", (unsigned)(left > 0 ? (left + 999999) / 1000000 : 0));
+    } else if (s_ft_stopped_us != 0) {
+        printf(" (stopped after %u s)", (unsigned)((s_ft_stopped_us - info.started_us) / 1000000));
+    }
+    printf(": %u records%s, %u frames, %u passes with data, %u stalls", (unsigned)sum.records,
+           sum.full ? " (ring full: recording ended early)" : "", (unsigned)sum.frames, (unsigned)sum.passes,
+           (unsigned)sum.stalls);
     print_pct("read to published", &sum.read_to_pub_us, "us");
     printf("; longest reader gap with data waiting %u us", (unsigned)sum.longest_gap_us);
     if (sum.stalls > 0) {
@@ -622,6 +612,60 @@ static int cmd_ftimes(int argc, char **argv)
         }
     }
     printf("\n");
+}
+
+static int cmd_ftimes(int argc, char **argv)
+{
+    gnss_link_timing_info_t info;
+    (void)gnss_link_bench_timing_read(0, NULL, 0, &info);
+    if (argc == 2 && strcmp(argv[1], "dump") == 0) {
+        return ftimes_dump();
+    }
+    if (argc == 2 && strcmp(argv[1], "status") == 0) {
+        if (info.running) {
+            int64_t left = info.until_us - esp_timer_get_time();
+            printf("BENCH ftimes status: running, %u records, %u s left\n", (unsigned)info.count,
+                   (unsigned)(left > 0 ? (left + 999999) / 1000000 : 0));
+        } else {
+            printf("BENCH ftimes status: not running, %u records%s\n", (unsigned)info.count,
+                   info.full ? " (ring full: the recording ended early)" : "");
+        }
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "stop") == 0) {
+        if (info.running) {
+            gnss_link_bench_timing_stop();
+            s_ft_stopped_us = esp_timer_get_time();
+        }
+        ftimes_summary();
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "summary") == 0) {
+        ftimes_summary();
+        return 0;
+    }
+    uint32_t secs = 0;
+    if (argc != 2 || !parse_u32(argv[1], 1, GNSS_LINK_BENCH_TIMING_MAX_S, &secs)) {
+        printf("usage: ftimes <seconds 1-600>   |   ftimes status | stop | summary | dump\n");
+        return 1;
+    }
+    if (info.running) {
+        printf("BENCH REFUSED: a recording runs (ftimes status, ftimes stop)\n");
+        return 1;
+    }
+    if (!link_free()) {
+        return 1;
+    }
+    esp_err_t err = gnss_link_bench_timing_start(secs);
+    if (err != ESP_OK) {
+        printf("BENCH FAIL ftimes: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    s_ft_secs = secs;
+    s_ft_stopped_us = 0;
+    printf("BENCH ftimes: recording frame and drain-pass times for %u s in the background (stall, rawstall and "
+           "listen may run meanwhile; ftimes status, stop, summary)\n",
+           (unsigned)secs);
     return 0;
 }
 
@@ -908,7 +952,8 @@ esp_err_t bench_start(void)
     reg("stall", "RX task stall, no reads, no watchdog feed: stall <ms 1-9000> | stall <ms 10000-30000> " TOK_TWDT,
         cmd_stall);
     reg("rawstall", "Stall once inside the next RAW-lease read (within 60 s): rawstall <ms 1-9000>", cmd_rawstall);
-    reg("ftimes", "Record frame and drain-pass times, then a summary: ftimes <seconds 1-600> | ftimes dump",
+    reg("ftimes", "Record frame and drain-pass times in the background: ftimes <seconds 1-600> | ftimes status | "
+                  "ftimes stop | ftimes summary | ftimes dump",
         cmd_ftimes);
     reg("promptdet", "Loader prompt detector, report-only (nothing sent): promptdet on|off|status", cmd_promptdet);
     reg("promptwatch", "Listen for the loader prompt at a baud, nothing sent: promptwatch <baud> <seconds 5-600>",

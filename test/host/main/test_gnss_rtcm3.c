@@ -233,7 +233,9 @@ TEST_CASE("MSM signal IDs map to band buckets", "[gnss_rtcm3]")
         { GNSS_SYS_BEIDOU, 2, GNSS_BAND_L1 }, { GNSS_SYS_BEIDOU, 9, GNSS_BAND_L6 },
         { GNSS_SYS_BEIDOU, 14, GNSS_BAND_L2 }, { GNSS_SYS_BEIDOU, 25, GNSS_BAND_L2 },
         { GNSS_SYS_BEIDOU, 23, GNSS_BAND_L5 }, { GNSS_SYS_BEIDOU, 30, GNSS_BAND_L1 },
-        { GNSS_SYS_NAVIC, 22, GNSS_BAND_NONE }, { GNSS_SYS_SBAS, 2, GNSS_BAND_NONE },
+        { GNSS_SYS_NAVIC, 22, GNSS_BAND_L5 }, { GNSS_SYS_NAVIC, 23, GNSS_BAND_NONE },
+        { GNSS_SYS_NAVIC, 2, GNSS_BAND_NONE }, { GNSS_SYS_SBAS, 2, GNSS_BAND_NONE },
+        { GNSS_SYS_SBAS, 22, GNSS_BAND_NONE },
         { GNSS_SYS_GPS, 0, GNSS_BAND_NONE }, { GNSS_SYS_GPS, 33, GNSS_BAND_NONE },
         { GNSS_SYS_COUNT, 2, GNSS_BAND_NONE },
     };
@@ -250,7 +252,10 @@ TEST_CASE("MSM signal IDs map to band buckets", "[gnss_rtcm3]")
     /* Two signals in one band count once. */
     TEST_ASSERT_EQUAL_HEX8(1u << GNSS_BAND_L1,
                            gnss_rtcm3_msm_band_mask(GNSS_SYS_BEIDOU, (1u << 1) | (1u << 31)));
-    TEST_ASSERT_EQUAL_HEX8(0, gnss_rtcm3_msm_band_mask(GNSS_SYS_NAVIC, UINT32_MAX));
+    /* NavIC: L5 SPS (signal 22) only; SBAS has no bands at all. */
+    TEST_ASSERT_EQUAL_HEX8(1u << GNSS_BAND_L5, gnss_rtcm3_msm_band_mask(GNSS_SYS_NAVIC, UINT32_MAX));
+    TEST_ASSERT_EQUAL_HEX8(0, gnss_rtcm3_msm_band_mask(GNSS_SYS_NAVIC, UINT32_MAX & ~(1u << (22 - 1))));
+    TEST_ASSERT_EQUAL_HEX8(0, gnss_rtcm3_msm_band_mask(GNSS_SYS_SBAS, UINT32_MAX));
 }
 
 /* ---- MSM epoch time on the GPS time scale ---------------------------------------- */

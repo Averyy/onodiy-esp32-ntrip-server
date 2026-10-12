@@ -835,6 +835,52 @@ TEST_CASE("link core: timing summary of a stall: reader gap, zero-wait passes, f
     TEST_ASSERT_EQUAL_UINT32(1, s.frames);
 }
 
+TEST_CASE("link core: a background recording that spans a stall fills the after-stall fields", "[gnss_link]")
+{
+    /* `ftimes 120` runs in the background; 30 s in, `stall 2000` stops the
+     * RX task. The records come in the RX task's order: one pass and four
+     * frames a second, the stall's record when the stall ends (its begin as
+     * t0), then the backlog in capped passes and the frames it held. */
+    size_t n = 0;
+    int64_t t = T0_US;
+    for (unsigned sec = 0; sec < 30; sec++) {
+        s_recs[n++] = pass_rec(t, 400, 1600, false, 980000);
+        for (unsigned f = 0; f < 4; f++) {
+            s_recs[n++] = frame_rec(t + 100 + f * 50, 200, (uint16_t)(1077 + 10 * f), GNSS_SYS_COUNT, 0, false);
+        }
+        t += 1000000;
+    }
+    int64_t stall0 = t - 400000;
+    gnss_link_rec_t st;
+    memset(&st, 0, sizeof(st));
+    st.kind = GNSS_LINK_REC_STALL;
+    st.t0_us = stall0;
+    st.dt_us = 2000000;
+    s_recs[n++] = st;
+    int64_t end = stall0 + 2000000;
+    s_recs[n++] = pass_rec(end + 50, 3000, 4096, true, 2000050);
+    s_recs[n++] = frame_rec(end + 900, 250, 1077, GNSS_SYS_COUNT, 0, false);
+    s_recs[n++] = pass_rec(end + 3100, 1200, 1500, false, 50);
+    t = end + 600000;
+    for (unsigned sec = 0; sec < 80 && n + 5 <= 400; sec++) {
+        s_recs[n++] = pass_rec(t, 400, 1600, false, 980000);
+        for (unsigned f = 0; f < 4; f++) {
+            s_recs[n++] = frame_rec(t + 100 + f * 50, 200, (uint16_t)(1077 + 10 * f), GNSS_SYS_COUNT, 0, false);
+        }
+        t += 1000000;
+    }
+
+    gnss_link_timing_summary_t s;
+    gnss_link_timing_summary(s_recs, n, false, false, 0, s_scratch, 400, &s);
+    TEST_ASSERT_EQUAL_UINT32(1, s.stalls);
+    TEST_ASSERT_EQUAL_UINT32(2000050, s.longest_gap_us);
+    TEST_ASSERT_EQUAL_UINT32(1, s.stall_capped_passes);
+    TEST_ASSERT_EQUAL_UINT32(3100 + 1200, s.stall_drain_us);
+    TEST_ASSERT_TRUE(s.stall_first_frame_valid);
+    TEST_ASSERT_EQUAL_UINT32(900 + 250, s.stall_first_frame_us);
+    TEST_ASSERT_FALSE(s.full);
+}
+
 TEST_CASE("link core: timing summary epoch delays per constellation from the set clock", "[gnss_link]")
 {
     /* Unix time of esp_timer 0: the clock maps T0_US to GPS week 2400, Monday 10:00:00.000 GPS. */

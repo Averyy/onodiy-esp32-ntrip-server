@@ -143,7 +143,10 @@ typedef enum {
      * 8 = rung 7 (FAILED, retry pass pending), 9 = rung 6a blocked by the
      * reboot cap or a held reboot inhibit (or, with outcome 4, not taken
      * because of the user's recovery mode, or, with outcome 5, held back
-     * for now). Outcome (diag_step_outcome_t): 0 started, 1 healthy again,
+     * for now). Code 9 with outcome 0 names what blocked it in bits 16-23
+     * of b: 1 the cap's hourly limit, 2 its daily limit (3 in 24 h), 3 a
+     * restart lock (a reboot inhibit held); 0 = not recorded (older
+     * records). Outcome (diag_step_outcome_t): 0 started, 1 healthy again,
      * 2 failed (also: refused by the station without sending anything),
      * 3 abandoned because the ladder was suspended, 4 not run because of
      * the user's recovery mode (gnss/recovery: the step the full ladder
@@ -202,6 +205,17 @@ typedef enum {
     DIAG_EV_RX_MAINT = 20,
     /** Live view: a = diag_live_ev_t | (detail << 8), b as diag_live_ev_t says. */
     DIAG_EV_LIVE_VIEW = 21,
+    /**
+     * Signal groups: a = event (bits 0-7) | master << 8 | slave << 16.
+     * Events: 1 a comparison started (the group measured first; b = the
+     * measuring time per group in s), 2 it switched the receiver (b = the
+     * phase, 0 or 1), 3 the receiver refused a signal group (in a
+     * comparison or any apply; b = (master << 8) | slave of the group the
+     * profile went back to, -1 none), 4 a comparison ended (the group it
+     * ended on; b = outcome: 1 kept, 2 timed out, 3 cancelled, 4 rejected,
+     * 5 failed, 6 interrupted).
+     */
+    DIAG_EV_SG_TEST = 22,
 } diag_event_t;
 
 /** DIAG_EV_LIVE_VIEW events (low byte of `a`). */
@@ -263,7 +277,7 @@ typedef enum {
     DIAG_GNSS_STEP_REBOOT = 6,            /**< rung 6a: ESP32 reboot */
     DIAG_GNSS_STEP_POWER_CYCLE = 7,       /**< rung 6b: "receiver needs a power cycle" alert */
     DIAG_GNSS_STEP_FAILED = 8,            /**< rung 7: FAILED, retry pass pending */
-    DIAG_GNSS_STEP_REBOOT_BLOCKED = 9,    /**< rung 6a blocked by the reboot cap or a held reboot inhibit (outcome 0), not taken (4), held back for now (5) */
+    DIAG_GNSS_STEP_REBOOT_BLOCKED = 9,    /**< rung 6a blocked by the reboot cap or a held reboot inhibit (outcome 0; why in bits 16-23 of b), not taken (4), held back for now (5) */
 } diag_gnss_step_t;
 
 /** Ladder step outcome (second byte of `b`). */

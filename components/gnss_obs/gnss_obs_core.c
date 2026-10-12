@@ -494,6 +494,14 @@ void obs_core_feed_gsv(obs_core_t *c, const obs_gsv_t *g, uint64_t now_ms)
 
 /* ---- views ---------------------------------------------------------------- */
 
+/* Constellations the best-constellation figure considers: those the network
+ * rewards. QZSS and NavIC carry no reward, so a 4-band QZSS must not hide a
+ * degraded GPS, GLONASS, Galileo or BeiDou. */
+static bool counts_for_best(unsigned s)
+{
+    return s == GNSS_SYS_GPS || s == GNSS_SYS_GLONASS || s == GNSS_SYS_GALILEO || s == GNSS_SYS_BEIDOU;
+}
+
 void obs_core_view(const obs_core_t *c, uint64_t now_ms, obs_core_view_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -524,7 +532,7 @@ void obs_core_view(const obs_core_t *c, uint64_t now_ms, obs_core_view_t *out)
                 v->cnr_dbhz[b] = q4_to_dbhz(c->cnr_q4[s][b]);
             }
         }
-        if (v->bands > out->best_bands) {
+        if (counts_for_best(s) && v->bands > out->best_bands) {
             out->best_bands = v->bands;
             out->best_sys = (gnss_sys_t)s;
         }

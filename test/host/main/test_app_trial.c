@@ -442,6 +442,26 @@ TEST_CASE("trial: time left until a receiver update is possible", "[app_trial]")
     TEST_ASSERT_EQUAL_UINT32(0, fw_trial_left_s(FW_TRIAL_RUN_NONE, 600, CONFIRM_S, 0, WATCH_S));
 }
 
+TEST_CASE("trial: a reinstall of the identical image blocks receiver updates only for stage 1", "[app_trial]")
+{
+    fw_trial_rec_t r;
+    fw_trial_rec_new(&r, NULL, "v0.3.0", FW_BASELINE_STA_IP, 0x01, T0_UNIX);
+    TEST_ASSERT_EQUAL_UINT32(WATCH_S, fw_trial_rec_watch_s(&r, WATCH_S));
+    /* A normal trial: the confirmation plus the whole crash watch. */
+    TEST_ASSERT_EQUAL_UINT32(40 + WATCH_S,
+                             fw_trial_left_s(FW_TRIAL_RUN_CONFIRMING, 20, CONFIRM_S, 0, fw_trial_rec_watch_s(&r, WATCH_S)));
+
+    /* The same image again: no crash watch, only the confirmation's time. */
+    r.same_image = true;
+    TEST_ASSERT_EQUAL_UINT32(0, fw_trial_rec_watch_s(&r, WATCH_S));
+    uint32_t left = fw_trial_left_s(FW_TRIAL_RUN_CONFIRMING, 20, CONFIRM_S, 0, fw_trial_rec_watch_s(&r, WATCH_S));
+    TEST_ASSERT_EQUAL_UINT32(40, left);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32(CONFIRM_S, left);
+    TEST_ASSERT_EQUAL_UINT32(0, fw_trial_left_s(FW_TRIAL_RUN_CONFIRMING, 90, CONFIRM_S, 0, fw_trial_rec_watch_s(&r, WATCH_S)));
+    /* And it never enters stage 2 (nothing to wait for after the confirmation). */
+    TEST_ASSERT_EQUAL(FW_TRIAL_REC_NONE, fw_trial_after_confirm(&r));
+}
+
 TEST_CASE("trial: a whole update over two days with a power cut and a crash", "[app_trial]")
 {
     /* Install record written by the old image. */

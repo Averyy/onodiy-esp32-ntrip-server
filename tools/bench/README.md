@@ -328,6 +328,36 @@ uv run um982.py send --write "UNLOG COM2"
 The `send` replies also show whether each message type is accepted
 (`OK`) or rejected (`PARSING FAILD ...`) by this firmware build.
 
+### Frame times on the bench console
+
+Bench builds (the `sdkconfig.bench` overlay) have a console on UART0 with
+the receiver link's timing recorder. `ftimes <s>` starts a recording of
+frame and drain-pass times and returns at once, so a stall can be put
+inside it; the recording ends by itself after `<s>` seconds (or when its
+ring is full):
+
+```
+ftimes 120              BENCH ftimes: recording frame and drain-pass times for 120 s in the background ...
+stall 2000              BENCH stall 2000 ms done after 2003 ms: +... buffer-full, ...
+ftimes status           BENCH ftimes status: running, 4210 records, 95 s left
+ftimes summary          BENCH ftimes 120 s (still recording, 95 s left): ... 1 stalls; after a stall: ...
+ftimes stop             BENCH ftimes 120 s (stopped after 31 s): ... (the summary line)
+ftimes dump             the whole recording as CSV, ending with "BENCH ftimes dump end (...)"
+```
+
+- `ftimes summary` prints the summary line of the latest recording, also
+  after it ended by itself; `ftimes stop` ends a running one early and
+  prints it. The line names the records, frames, passes and stalls, the
+  read-to-published percentiles, the longest reader gap and, when a stall
+  is in the recording, the zero-wait capped passes after it, when the ring
+  was empty again and when the first frame was published after it; with
+  the clock set by SNTP also the epoch delays per constellation.
+- A second `ftimes <s>` while one runs answers `BENCH REFUSED`. `stall`,
+  `rawstall` and `listen` run during a recording (with their usual
+  refusals: receiver maintenance, an open update journal, another receiver
+  job).
+- The same recording is `GET /api/diag/frame-times` (CSV).
+
 ## Layout
 
 | File | Contents |
@@ -377,12 +407,52 @@ uv run rtcm_replay.py --listen 127.0.0.1:5600 ../../test/fixtures/rtcm/centipede
   `from-firmware.bin` and, timestamped, to `replay.log`, with each loop's
   counts. Ctrl-C stops it.
 
-The replay has no receiver behind it: it never answers a query, so the
-firmware streams what it hears and leaves the receiver's configuration
-alone (an identity query that gets no answer pauses the casters for a few
-seconds while it runs). The Centipede fixtures are test inputs, not a
-correction service (see `test/fixtures/README.md`): replay them only to
-local casters.
+By default the replay has no receiver behind it: it never answers a
+query, so the firmware streams what it hears and leaves the receiver's
+configuration alone (its identity query goes unanswered and is asked again
+every 10 min, without taking the line while RTCM flows: the casters are not
+paused for it).
+
+`--respond` puts a scripted UM982 behind it (`benchlib/um982_sim.py`, test
+tooling): it answers what the station's receiver sessions send, with the
+reply formats of `benchlib/unicore.py` (the public reply samples and the
+host-test vectors), so the firmware identifies the receiver, configures it
+and can switch its signal group:
+
+```sh
+uv run rtcm_replay.py --listen 127.0.0.1:5600 ../../test/fixtures/rtcm/centipede_LAX_30ep.rtcm3 --loop \
+    --respond --respond-group 4,5 --respond-reject 7,0
+```
+
+- `VERSIONA` gets a UM982 `R4.10Build18975` version log; `CONFIG` the dump
+  (SIGNALGROUP, COM1, MMP, RTCMB1CB2A, MASK, BASEANTENNAMODEL); `MODE` the
+  base mode that `MODE BASE ...` set; `UNLOG COM1`, `RTCMxxxx COM1 n`,
+  `CONFIG COM1`, `CONFIG RTCMB1CB2A`, `CONFIG BASEANTENNAMODEL`, the
+  satellite-view toggles, `SAVECONFIG` and `RESET` an `OK`.
+- `CONFIG SIGNALGROUP m s` is taken for 4 5, 3 6, 5 0 and 7 0, less every
+  `--respond-reject M,S` (repeatable); any other pair gets the receiver's
+  refusal reply (`PARSING FAILD NO MATCHING FUNC ...`; the real text for a
+  refused signal group is not known). The group saves itself.
+  `--respond-group` is the group it starts on (default 4,5, the factory one).
+- A signal-group change or `RESET` restarts it: for about 3 s nothing is
+  answered and no RTCM goes out, then the restart banner and the saved
+  configuration (outputs, base mode). The RTCM output also stops after
+  `UNLOG COM1` until an `RTCMxxxx COM1` command. Bursts that fall due while
+  it sends no RTCM are dropped (counted as `bursts_withheld`), never sent
+  late. Replies go out between whole frames, never inside one.
+- The station messages are its own, as configured: `RTCM1005`, `RTCM1006`,
+  `RTCM1033` and `RTCM1230 COM1 n` put them at the start of every n-th
+  epoch, the recording's own of those types left out. 1005/1006 carry the
+  position `MODE BASE <id> <X> <Y> <Z>` set (a fixed base only: none while
+  it surveys or as a rover), 1033 the `CONFIG BASEANTENNAMODEL` descriptor
+  with its own receiver type, firmware and serial number, 1230 no biases;
+  all with the station ID of `MODE BASE`. So a station that configured it
+  sees what it asked for and judges its profile applied.
+- `tools/qemu/e2e.py` (scenario `signal-test`) uses it in-process
+  (`ReplayServer(..., responder=Um982Responder(...))`).
+
+The Centipede fixtures are test inputs, not a correction service (see
+`test/fixtures/README.md`): replay them only to local casters.
 
 ## A local fake caster
 

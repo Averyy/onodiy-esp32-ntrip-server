@@ -7,6 +7,7 @@
  * near the 32-bit millisecond wrap.
  */
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "health_mon.h"
@@ -894,15 +895,49 @@ TEST_CASE("health mon: a stopped caster slot is down for the level, not for the 
     TEST_ASSERT_FALSE(hm_slot_down(&in));
 
     /* The protected slot: down (trigger P) while it waits or fails, not while it streams, is paused or stopped. */
-    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_STOPPED));
-    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_BACKOFF));
-    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_AUTH_FAILED));
-    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_WAIT_NETWORK));
-    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_CONNECTING));
-    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_PAUSED));
-    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_STREAMING));
+    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_STOPPED, HM_FAIL_NONE));
+    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_BACKOFF, HM_FAIL_NONE));
+    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_AUTH_FAILED, HM_FAIL_NONE));
+    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_WAIT_NETWORK, HM_FAIL_NONE));
+    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_CONNECTING, HM_FAIL_NONE));
+    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_PAUSED, HM_FAIL_NONE));
+    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_STREAMING, HM_FAIL_NONE));
     /* Not protected, or not enabled: never. */
-    TEST_ASSERT_FALSE(hm_protected_down(true, false, HM_CST_BACKOFF));
-    TEST_ASSERT_FALSE(hm_protected_down(false, true, HM_CST_BACKOFF));
+    TEST_ASSERT_FALSE(hm_protected_down(true, false, HM_CST_BACKOFF, HM_FAIL_NONE));
+    TEST_ASSERT_FALSE(hm_protected_down(false, true, HM_CST_BACKOFF, HM_FAIL_NONE));
     TEST_ASSERT_EQUAL(10, HM_CST_STOPPED);
+}
+
+TEST_CASE("health mon: a protected slot waiting on a caster's reply does not hold the network trigger",
+          "[health_mon]")
+{
+    /* Every state against every failure class: the trigger holds only for
+     * a failing state whose last failure is the transport (or none yet). */
+    TEST_ASSERT_EQUAL(16, HM_FAIL_CLASS_COUNT);
+    for (uint8_t st = HM_CST_DISABLED; st <= HM_CST_STOPPED; st++) {
+        bool failing = st != HM_CST_STREAMING && st != HM_CST_PAUSED && st != HM_CST_STOPPED;
+        for (uint8_t r = HM_FAIL_NONE; r < HM_FAIL_CLASS_COUNT; r++) {
+            bool reply = r == HM_FAIL_AUTH || r == HM_FAIL_LOGIN_BLOCKED || r == HM_FAIL_IN_USE ||
+                         r == HM_FAIL_REPLACED || r == HM_FAIL_BANNED || r == HM_FAIL_MOUNT_BUSY ||
+                         r == HM_FAIL_CONFIG;
+            char msg[48];
+            snprintf(msg, sizeof(msg), "state %u class %u", (unsigned)st, (unsigned)r);
+            TEST_ASSERT_EQUAL_MESSAGE(reply, hm_fail_is_caster_reply(r), msg);
+            TEST_ASSERT_EQUAL_MESSAGE(failing && !reply, hm_protected_down(true, true, st, r), msg);
+            TEST_ASSERT_FALSE_MESSAGE(hm_protected_down(true, false, st, r), msg);
+            TEST_ASSERT_FALSE_MESSAGE(hm_protected_down(false, true, st, r), msg);
+        }
+    }
+    /* The transport classes, by name. */
+    static const uint8_t transport[] = { HM_FAIL_DNS, HM_FAIL_CONNECT, HM_FAIL_TLS, HM_FAIL_TIMEOUT,
+                                         HM_FAIL_REMOTE_CLOSE, HM_FAIL_WRITE_STALL, HM_FAIL_KEEPALIVE,
+                                         HM_FAIL_LOCAL };
+    for (size_t i = 0; i < sizeof(transport); i++) {
+        TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_BACKOFF, transport[i]));
+    }
+    /* A guard wait after a rejected login, a login block or an in-use reply. */
+    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_AUTH_FAILED, HM_FAIL_AUTH));
+    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_BACKOFF, HM_FAIL_LOGIN_BLOCKED));
+    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_BACKOFF, HM_FAIL_IN_USE));
+    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_CONFIG_ERROR, HM_FAIL_CONFIG));
 }

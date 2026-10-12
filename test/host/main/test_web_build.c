@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "cJSON.h"
@@ -1133,6 +1134,62 @@ TEST_CASE("health: restart hold reasons, when the hold ends at the latest and th
     cJSON_Delete(root);
 }
 
+TEST_CASE("health: the reboot cap names the limit that sets its wait", "[web_build]")
+{
+    fixture();
+    s_snap.health.gnss_reboot_cap_wait_s = UINT32_MAX;
+    s_snap.health.gnss_reboot_cap_limit = HEALTH_CAP_NONE;
+    cJSON *root = build_status(false);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "health"), "reboot_cap_limit")));
+    cJSON_Delete(root);
+
+    s_snap.health.gnss_reboot_cap_wait_s = 2239;
+    s_snap.health.gnss_reboot_cap_limit = HEALTH_CAP_HOUR;
+    root = build_status(false);
+    TEST_ASSERT_EQUAL(2239, at(at(root, "health"), "reboot_cap_wait_s")->valueint);
+    TEST_ASSERT_EQUAL_STRING("hour", at(at(root, "health"), "reboot_cap_limit")->valuestring);
+    cJSON_Delete(root);
+
+    s_snap.health.gnss_reboot_cap_wait_s = 75600;
+    s_snap.health.gnss_reboot_cap_limit = HEALTH_CAP_DAY;
+    root = build_status(false);
+    TEST_ASSERT_EQUAL_STRING("day", at(at(root, "health"), "reboot_cap_limit")->valuestring);
+    cJSON_Delete(root);
+    root = build_status(true);
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(at(root, "health"), "reboot_cap_limit"));
+    cJSON_Delete(root);
+
+    /* No wait: null whatever the limit field holds. */
+    s_snap.health.gnss_reboot_cap_wait_s = UINT32_MAX;
+    root = build_status(false);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "health"), "reboot_cap_limit")));
+    cJSON_Delete(root);
+
+    /* GET /api/health: at the top level. */
+    static health_status_t hs;
+    static lifecycle_boot_info_t boot;
+    static gnss_link_stats_t link;
+    static rtcm_hub_stats_t hub;
+    static station_status_t st;
+    static gnss_obs_summary_t obs;
+    static network_status_t net;
+    static diag_coredump_info_t cd;
+    memset(&hs, 0, sizeof(hs));
+    hs.gnss_reboot_hold_left_s = UINT32_MAX;
+    hs.gnss_reboot_cap_wait_s = 600;
+    hs.gnss_reboot_cap_limit = HEALTH_CAP_HOUR;
+    web_health_snap_t h = { .health = &hs, .boot = &boot, .link = &link, .hub = &hub, .st = &st, .obs = &obs,
+                            .net = &net, .coredump = &cd };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_health(&w, &h);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_EQUAL(600, at(root, "reboot_cap_wait_s")->valueint);
+    TEST_ASSERT_EQUAL_STRING("hour", at(root, "reboot_cap_limit")->valuestring);
+    cJSON_Delete(root);
+}
+
 /* ---- no receiver, message 1230, update check, Onocoy set up ------------------------------------- */
 
 TEST_CASE("status: no receiver is an alert with the bytes seen and the next search", "[web_build]")
@@ -1522,4 +1579,253 @@ TEST_CASE("a caster summary with the longest stop reason still fits the WebSocke
     wj_init_elements(&w, cst, sizeof(cst));
     web_build_caster_summary(&w, &s_snap, 0, false);
     TEST_ASSERT_TRUE(wj_ok(&w));
+}
+
+/* ---- signal-group comparison ------------------------------------------------------------------ */
+
+static cJSON *build_sgt(const station_sg_test_t *v)
+{
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_signal_test(&w, v);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    return root;
+}
+
+static void sgt_idle_view(station_sg_test_t *v)
+{
+    memset(v, 0, sizeof(*v));
+    v->phase = -1;
+    v->phase_s = 1800;
+    v->settle_s = 60;
+    v->left_s = UINT32_MAX;
+    v->decide_left_s = UINT32_MAX;
+    v->ended_age_s = UINT32_MAX;
+}
+
+static void sgt_results(station_sg_test_t *v)
+{
+    v->have_test = true;
+    v->groups[0] = (station_sg_t){ 3, 6 };
+    v->groups[1] = (station_sg_t){ 7, 0 };
+    v->before = (station_sg_t){ 3, 6 };
+    station_sgt_result_t *r = &v->results[0];
+    r->group = v->groups[0];
+    r->status = STATION_SGT_RES_DONE;
+    r->measured_s = 1800;
+    r->samples = 180;
+    r->epoch_gaps = 2;
+    r->best_sys = GNSS_SYS_GALILEO;
+    r->best_bands = 4;
+    r->nsys = 1;
+    r->sys[0].sys = GNSS_SYS_GALILEO;
+    r->sys[0].sats_x10 = 112;
+    r->sys[0].nband = 2;
+    r->sys[0].band[0] = (station_sgt_band_t){ .band = GNSS_BAND_L1, .sats_x10 = 110, .cnr_x10 = 451,
+                                              .signal_mask = 1u << (2 - 1) };
+    r->sys[0].band[1] = (station_sgt_band_t){ .band = GNSS_BAND_L6, .sats_x10 = 75, .cnr_x10 = 0,
+                                              .signal_mask = (1u << (9 - 1)) | (1u << (10 - 1)) };
+    v->results[1].group = v->groups[1];
+    v->results[1].status = STATION_SGT_RES_PENDING;
+    v->results[1].best_sys = 0xFF;
+}
+
+TEST_CASE("signal test: idle without a test, measuring with its progress", "[web_build]")
+{
+    station_sg_test_t v;
+    sgt_idle_view(&v);
+    cJSON *root = build_sgt(&v);
+    TEST_ASSERT_EQUAL_STRING("idle", at(root, "state")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "groups")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "before")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "phase")));
+    TEST_ASSERT_EQUAL(1800, at(root, "phase_s")->valueint);
+    TEST_ASSERT_EQUAL(60, at(root, "settle_s")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "left_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "decide_left_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "running_group")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "results")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "outcome")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "kept")));
+    TEST_ASSERT_EQUAL_STRING("", at(root, "reason")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "ended_unix")));
+    cJSON_Delete(root);
+
+    sgt_results(&v);
+    v.state = STATION_SGT_MEASURING;
+    v.phase = 0;
+    v.left_s = 1230;
+    v.have_running = true;
+    v.running = v.groups[0];
+    v.results[0].status = STATION_SGT_RES_MEASURING;
+    root = build_sgt(&v);
+    TEST_ASSERT_EQUAL_STRING("measuring", at(root, "state")->valuestring);
+    TEST_ASSERT_EQUAL(0, at(root, "phase")->valueint);
+    TEST_ASSERT_EQUAL(1230, at(root, "left_s")->valueint);
+    TEST_ASSERT_EQUAL(3, at(at(root, "running_group"), "master")->valueint);
+    TEST_ASSERT_EQUAL(6, at(at(root, "running_group"), "slave")->valueint);
+    const cJSON *groups = at(root, "groups");
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(groups));
+    TEST_ASSERT_EQUAL(7, at(cJSON_GetArrayItem(groups, 1), "master")->valueint);
+    TEST_ASSERT_EQUAL(3, at(at(root, "before"), "master")->valueint);
+    const cJSON *res = at(root, "results");
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(res));
+    const cJSON *r0 = cJSON_GetArrayItem(res, 0);
+    TEST_ASSERT_EQUAL_STRING("measuring", at(r0, "status")->valuestring);
+    TEST_ASSERT_EQUAL(1800, at(r0, "measured_s")->valueint);
+    TEST_ASSERT_EQUAL(180, at(r0, "samples")->valueint);
+    TEST_ASSERT_EQUAL(2, at(r0, "epoch_gaps")->valueint);
+    TEST_ASSERT_EQUAL_STRING("galileo", at(r0, "best_sys")->valuestring);
+    TEST_ASSERT_EQUAL(4, at(r0, "best_bands")->valueint);
+    const cJSON *gal = cJSON_GetArrayItem(at(r0, "systems"), 0);
+    TEST_ASSERT_EQUAL_STRING("galileo", at(gal, "sys")->valuestring);
+    TEST_ASSERT_EQUAL_DOUBLE(11.2, at(gal, "satellites")->valuedouble);
+    TEST_ASSERT_EQUAL_STRING("l1", cJSON_GetArrayItem(at(gal, "bands"), 0)->valuestring);
+    TEST_ASSERT_EQUAL_STRING("l6", cJSON_GetArrayItem(at(gal, "bands"), 1)->valuestring);
+    const cJSON *pb = at(gal, "per_band");
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(pb));
+    TEST_ASSERT_EQUAL_DOUBLE(11.0, at(cJSON_GetArrayItem(pb, 0), "satellites")->valuedouble);
+    TEST_ASSERT_EQUAL_DOUBLE(45.1, at(cJSON_GetArrayItem(pb, 0), "cnr_dbhz")->valuedouble);
+    TEST_ASSERT_EQUAL(2, cJSON_GetArrayItem(at(cJSON_GetArrayItem(pb, 0), "signal_ids"), 0)->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(cJSON_GetArrayItem(pb, 1), "cnr_dbhz")));
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(at(cJSON_GetArrayItem(pb, 1), "signal_ids")));
+    const cJSON *r1 = cJSON_GetArrayItem(res, 1);
+    TEST_ASSERT_EQUAL_STRING("pending", at(r1, "status")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(r1, "best_sys")));
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(r1, "systems")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "outcome")));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("signal test: deciding, and every outcome", "[web_build]")
+{
+    station_sg_test_t v;
+    sgt_idle_view(&v);
+    sgt_results(&v);
+    v.state = STATION_SGT_DECIDING;
+    v.decide_left_s = 86000;
+    v.have_running = true;
+    v.running = v.groups[1];
+    v.results[1].status = STATION_SGT_RES_DONE;
+    cJSON *root = build_sgt(&v);
+    TEST_ASSERT_EQUAL_STRING("deciding", at(root, "state")->valuestring);
+    TEST_ASSERT_EQUAL(86000, at(root, "decide_left_s")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "left_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "phase")));
+    TEST_ASSERT_EQUAL(7, at(at(root, "running_group"), "master")->valueint);
+    cJSON_Delete(root);
+
+    static const struct {
+        uint8_t outcome;
+        const char *name;
+    } k[] = {
+        { STATION_SGT_OUT_KEPT, "kept" },           { STATION_SGT_OUT_TIMED_OUT, "timed_out" },
+        { STATION_SGT_OUT_CANCELLED, "cancelled" }, { STATION_SGT_OUT_REJECTED, "rejected" },
+        { STATION_SGT_OUT_FAILED, "failed" },       { STATION_SGT_OUT_INTERRUPTED, "interrupted" },
+    };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        v.state = STATION_SGT_IDLE;
+        v.decide_left_s = UINT32_MAX;
+        v.have_running = false;
+        v.outcome = k[i].outcome;
+        v.have_kept = k[i].outcome == STATION_SGT_OUT_KEPT;
+        v.kept = v.groups[1];
+        snprintf(v.reason, sizeof(v.reason), "because %u", (unsigned)i);
+        v.ended_unix = 1790000000 + (int64_t)i;
+        root = build_sgt(&v);
+        TEST_ASSERT_EQUAL_STRING(k[i].name, at(root, "outcome")->valuestring);
+        if (v.have_kept) {
+            TEST_ASSERT_EQUAL(7, at(at(root, "kept"), "master")->valueint);
+        } else {
+            TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "kept")));
+        }
+        TEST_ASSERT_EQUAL_STRING(v.reason, at(root, "reason")->valuestring);
+        TEST_ASSERT_EQUAL_DOUBLE((double)v.ended_unix, at(root, "ended_unix")->valuedouble);
+        cJSON_Delete(root);
+    }
+    TEST_ASSERT_EQUAL_STRING("restoring", web_sgt_state_name(STATION_SGT_RESTORING));
+    TEST_ASSERT_EQUAL_STRING("switching", web_sgt_state_name(STATION_SGT_SWITCHING));
+    TEST_ASSERT_EQUAL_STRING("settling", web_sgt_state_name(STATION_SGT_SETTLING));
+    TEST_ASSERT_EQUAL_STRING("rejected", web_sgt_result_name(STATION_SGT_RES_REJECTED));
+    TEST_ASSERT_NULL(web_sgt_outcome_name(STATION_SGT_OUT_NONE));
+}
+
+TEST_CASE("signal test: the status summary, the receiver's group and a refused group", "[web_build]")
+{
+    fixture();
+    station_sgt_brief_t *b = &s_snap.st.sg_test;
+    b->state = STATION_SGT_IDLE;
+    b->phase = -1;
+    b->left_s = UINT32_MAX;
+    b->decide_left_s = UINT32_MAX;
+    b->ended_age_s = UINT32_MAX;
+    cJSON *root = build_status(false);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "receiver"), "signal_test")));
+    cJSON_Delete(root);
+
+    b->state = STATION_SGT_MEASURING;
+    b->phase = 1;
+    b->have_running = true;
+    b->running = (station_sg_t){ 7, 0 };
+    b->left_s = 1790;
+    root = build_status(false);
+    const cJSON *t = at(at(root, "receiver"), "signal_test");
+    TEST_ASSERT_EQUAL_STRING("measuring", at(t, "state")->valuestring);
+    TEST_ASSERT_EQUAL(1, at(t, "phase")->valueint);
+    TEST_ASSERT_EQUAL(7, at(at(t, "group"), "master")->valueint);
+    TEST_ASSERT_EQUAL(0, at(at(t, "group"), "slave")->valueint);
+    TEST_ASSERT_EQUAL(1790, at(t, "left_s")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(t, "decide_left_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(t, "outcome")));
+    cJSON_Delete(root);
+    root = build_status(true);
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(at(root, "receiver"), "signal_test"));
+    cJSON_Delete(root);
+
+    /* Ended this boot less than a day ago: its outcome; older: null. */
+    b->state = STATION_SGT_IDLE;
+    b->phase = -1;
+    b->have_running = false;
+    b->left_s = UINT32_MAX;
+    b->outcome = STATION_SGT_OUT_REJECTED;
+    b->ended_age_s = 30;
+    root = build_status(false);
+    t = at(at(root, "receiver"), "signal_test");
+    TEST_ASSERT_EQUAL_STRING("idle", at(t, "state")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("rejected", at(t, "outcome")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(t, "group")));
+    cJSON_Delete(root);
+    b->ended_age_s = 86400;
+    root = build_status(false);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "receiver"), "signal_test")));
+    cJSON_Delete(root);
+
+    /* GET /api/gnss: the receiver's own group and a refusal. */
+    station_status_t *st = &s_snap.st;
+    root = build_gnss_json(st);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "rx_signal_group")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "signal_group_refused")));
+    cJSON_Delete(root);
+    st->rx_sg_valid = true;
+    st->rx_sg = (station_sg_t){ 3, 6 };
+    st->sg_refused = true;
+    st->sg_refused_group = (station_sg_t){ 7, 0 };
+    st->sg_back_valid = true;
+    st->sg_back = (station_sg_t){ 3, 6 };
+    strcpy(st->sg_refused_reply, "PARSING FAILD NO MATCHING FUNC");
+    root = build_gnss_json(st);
+    TEST_ASSERT_EQUAL(3, at(at(root, "rx_signal_group"), "master")->valueint);
+    TEST_ASSERT_EQUAL(6, at(at(root, "rx_signal_group"), "slave")->valueint);
+    const cJSON *rf = at(root, "signal_group_refused");
+    TEST_ASSERT_EQUAL(7, at(rf, "master")->valueint);
+    TEST_ASSERT_EQUAL(0, at(rf, "slave")->valueint);
+    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", at(rf, "reply")->valuestring);
+    TEST_ASSERT_EQUAL(3, at(at(rf, "back_to"), "master")->valueint);
+    cJSON_Delete(root);
+    st->sg_back_valid = false;
+    root = build_gnss_json(st);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "signal_group_refused"), "back_to")));
+    cJSON_Delete(root);
 }

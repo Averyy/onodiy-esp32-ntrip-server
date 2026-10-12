@@ -214,7 +214,8 @@ typedef struct {
 
 typedef struct {
     obs_core_sys_t sys[GNSS_SYS_COUNT];
-    gnss_sys_t best_sys;       /**< most bands (GNSS_SYS_GPS with 0 bands when nothing is present) */
+    gnss_sys_t best_sys;       /**< most bands among GPS, GLONASS, Galileo and BeiDou (the first in
+                                    message order on a tie; GNSS_SYS_GPS with 0 bands when none is present) */
     uint8_t best_bands;
     bool e6_lost;              /**< Galileo E6 seen since the last reset, but not within the window */
     uint64_t epochs;

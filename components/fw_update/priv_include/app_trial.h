@@ -206,9 +206,20 @@ uint32_t fw_trial_watch_elapsed_s(const fw_trial_rec_t *rec, uint32_t uptime_s, 
  * Seconds until this boot's trial ends at the latest (banner: when a
  * receiver update becomes possible). CONFIRMING counts the confirmation, the
  * crash watch; VERIFYING and WATCHING count the rest of the crash watch.
+ * `watch_s` 0 means the trial is stage 1 only (a reinstall of the identical
+ * image, same_image): CONFIRMING then counts the confirmation alone.
  */
 uint32_t fw_trial_left_s(fw_trial_run_t run, uint32_t uptime_s, uint32_t confirm_s, uint32_t watch_elapsed_s,
                          uint32_t watch_s);
+
+/**
+ * The crash watch that applies to the record's trial: `watch_s`, or 0 for a
+ * reinstall of the identical image (same_image), whose trial ends with the
+ * confirmation. Pass it to fw_trial_left_s() and for the time left in the
+ * watch, so a reinstall never shows (or blocks receiver updates for) a
+ * day-long watch it will not run.
+ */
+uint32_t fw_trial_rec_watch_s(const fw_trial_rec_t *rec, uint32_t watch_s);
 
 #ifdef __cplusplus
 }

@@ -1041,6 +1041,68 @@ TEST_CASE("exec: a signal group the receiver keeps refusing fails the session", 
     TEST_ASSERT_TRUE(r.rolled_back);
 }
 
+TEST_CASE("exec: a signal group the receiver refuses is reported with the group it ran before", "[um98x_exec]")
+{
+    /* An older receiver firmware refuses 7 0 outright: rejected, rolled
+     * back with RESET, and the receiver keeps its own group. */
+    sim_t *s = sim_init();
+    snprintf(s->reject_prefix, sizeof(s->reject_prefix), "CONFIG SIGNALGROUP 7 0");
+    s->reject_n = 10;
+    um98x_base_profile_t p;
+    default_profile(&p);
+    p.signal_group_master = 7;
+    p.signal_group_slave = 0;
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.signal_group_rejected);
+    TEST_ASSERT_EQUAL_STRING("CONFIG SIGNALGROUP 7 0", r.failed_cmd);
+    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", r.reason);
+    TEST_ASSERT_TRUE(r.sg_before.known);
+    TEST_ASSERT_EQUAL_UINT8(4, r.sg_before.master);
+    TEST_ASSERT_EQUAL_UINT8(5, r.sg_before.slave);
+    TEST_ASSERT_TRUE(r.rolled_back);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "RESET"));
+    TEST_ASSERT_EQUAL_INT(0, count(s, "SAVECONFIG"));
+    TEST_ASSERT_EQUAL_UINT8(4, s->sg_m);   /* the saved group is unchanged */
+    TEST_ASSERT_EQUAL_UINT8(5, s->sg_s);
+
+    /* Acknowledged, restarted, and the read-back still shows 4 5. */
+    s = sim_init();
+    s->sg_sticky = true;
+    default_profile(&p);
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.signal_group_sent);
+    TEST_ASSERT_TRUE(r.signal_group_rejected);
+    TEST_ASSERT_EQUAL_STRING("CONFIG SIGNALGROUP 3 6", r.failed_cmd);
+    TEST_ASSERT_EQUAL_STRING("signal group rejected", r.reason);
+    TEST_ASSERT_TRUE(r.sg_before.known);
+    TEST_ASSERT_EQUAL_UINT8(4, r.sg_before.master);
+    TEST_ASSERT_EQUAL_UINT8(5, r.sg_before.slave);
+    TEST_ASSERT_TRUE(r.sg_read.known);   /* the read-back after the restart: still 4 5 */
+    TEST_ASSERT_EQUAL_UINT8(4, r.sg_read.master);
+    TEST_ASSERT_EQUAL_UINT8(5, r.sg_read.slave);
+    TEST_ASSERT_TRUE(r.rolled_back);
+
+    /* Any other failure is not a refused group; an accepted one carries the
+     * group from before as well. */
+    s = sim_init();
+    snprintf(s->reject_prefix, sizeof(s->reject_prefix), "RTCM1077");
+    s->reject_n = 10;
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.signal_group_sent);
+    TEST_ASSERT_FALSE(r.signal_group_rejected);
+    s = sim_init();
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_FALSE(r.signal_group_rejected);
+    TEST_ASSERT_TRUE(r.sg_before.known);
+    TEST_ASSERT_EQUAL_UINT8(4, r.sg_before.master);
+    TEST_ASSERT_EQUAL_UINT8(3, r.sg_read.master);   /* read back after the change */
+    TEST_ASSERT_EQUAL_UINT8(6, r.sg_read.slave);
+    TEST_ASSERT_EQUAL_UINT8(3, s->sg_m);
+}
+
 TEST_CASE("exec: detection listens first and finds a streaming receiver without sending", "[um98x_exec]")
 {
     sim_t *s = sim_init();

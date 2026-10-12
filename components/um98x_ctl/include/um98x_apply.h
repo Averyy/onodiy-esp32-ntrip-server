@@ -23,10 +23,26 @@ typedef struct {
     bool force_mode;   /**< send MODE BASE even when the read-back matches: a lock or a re-survey */
 } um98x_apply_opts_t;
 
+/** A signal-group pair as a session read it back. */
+typedef struct {
+    bool known;        /**< the configuration dump named it */
+    uint8_t master;
+    uint8_t slave;
+} um98x_sg_pair_t;
+
 /** What one apply session did. */
 typedef struct {
     char firmware[48];          /**< receiver firmware of this session (its version log) */
     bool signal_group_sent;     /**< CONFIG SIGNALGROUP was sent: the receiver restarted and saved it by itself */
+    /**
+     * The receiver refused the profile's signal group: a negative reply to
+     * CONFIG SIGNALGROUP, or a read-back after its restart that still shows
+     * another group (failed_cmd and reason say which). The session failed
+     * and was rolled back like any other failure.
+     */
+    bool signal_group_rejected;
+    um98x_sg_pair_t sg_before;  /**< the group this session read back before changing it */
+    um98x_sg_pair_t sg_read;    /**< the group the session's latest read-back showed (after a change, the new one) */
     bool mode_sent;             /**< MODE BASE was sent and accepted (a survey restarts) */
     int64_t mode_ack_ms;        /**< monotonic ms (esp_timer) of that acceptance: start of a survey window */
     bool baud_changed;          /**< the COM1 baud was changed in this session */

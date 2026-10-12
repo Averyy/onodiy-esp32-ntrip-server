@@ -195,6 +195,9 @@ void web_build_profile(wj_t *w, const char *key, const um98x_base_profile_t *p);
 void web_build_signals(wj_t *w, const gnss_obs_summary_t *sum, const gnss_obs_msg_stat_t *stats, size_t nstats,
                        const um98x_base_profile_t *profile, int rtcm1230_supported);
 
+/** GET /api/gnss/signal-test. */
+void web_build_signal_test(wj_t *w, const station_sg_test_t *v);
+
 /** GET /api/sky. `reason` NULL when available. */
 void web_build_sky(wj_t *w, const gnss_obs_sat_t *sats, size_t count, const char *reason);
 

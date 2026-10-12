@@ -267,6 +267,18 @@ void rtcm_hub_get_stats(rtcm_hub_stats_t *out)
     out->last_frame_age_ms = st.last_frame_age_ms;
 }
 
+bool rtcm_hub_epoch_in_flight(uint32_t quiet_ms, uint32_t *age_ms)
+{
+    rtcm_core_t *c = s_core;
+    if (c == NULL) {
+        if (age_ms != NULL) {
+            *age_ms = UINT32_MAX;
+        }
+        return false;
+    }
+    return rtcm_core_epoch_in_flight(c, now_ms(), quiet_ms, age_ms);
+}
+
 esp_err_t rtcm_hub_get_consumer_stats(rtcm_hub_consumer_t consumer, rtcm_hub_consumer_stats_t *out)
 {
     if (out == NULL) {

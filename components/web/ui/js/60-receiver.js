@@ -5,10 +5,11 @@
  * Receiver: identity and link, the settings read back at the last
  * configuration, base position (survey, lock, survey again), what the
  * receiver publishes in RTCM 1033, receiver maintenance (hands off), the
- * automatic recovery mode, and the base profile editor (signal groups, base
- * mode, station ID, COM1 baud, RTCM messages, satellite-in-view output,
- * antenna descriptor). Field rules mirror PUT /api/gnss/profile; the
- * station's own validation has the last word.
+ * automatic recovery mode, the comparison of two signal groups, and the
+ * base profile editor (signal groups by name, base mode, station ID, COM1
+ * baud, RTCM messages, satellite-in-view output, antenna descriptor). Field
+ * rules mirror PUT /api/gnss/profile; the station's own validation has the
+ * last word.
  */
 
 const RTCM_NAMES = {
@@ -134,7 +135,10 @@ function receiverInfo(g) {
         '; not retried while automatic configuration is off' :
         g.config_retry_in_s ? '; next try in ' + fmt.dur(g.config_retry_in_s) : ''))] : null,
       g.detect_failures ? ['Detection failures', fmt.num(g.detect_failures)] : null,
+      ['Signal group (receiver)', g.rx_signal_group ? sgName(g.rx_signal_group.master, g.rx_signal_group.slave) :
+        h('span', { class: 'muted' }, 'read at the next configuration')],
     ]),
+    sgRefusedMsg(g),
     h('h3', { class: 'section-title' }, 'Settings read back'),
     readBack(g),
     alerts.length ? h('div', { class: 'stack foot' }, alerts.map(a => {
@@ -143,6 +147,17 @@ function receiverInfo(g) {
       return msg('warn', h('strong', null, t[0]), text ? h('div', { class: 'small' }, text) : null);
     })) : null,
   ];
+}
+
+/** A signal group the receiver refused, in plain words (GET /api/gnss signal_group_refused), or null. */
+function sgRefusedMsg(g) {
+  const r = g.signal_group_refused;
+  if (!r) return null;
+  const why = r.reply && r.reply !== 'signal group rejected' ? ' (' + r.reply + ')' : '';
+  return msg('bad', h('strong', null, 'The receiver refused signal group ' + r.master + ' ' + r.slave + why + '.'),
+    r.back_to ? ' It went back to ' + sgName(r.back_to.master, r.back_to.slave) + ' and was configured again; ' +
+      'its firmware may not offer that group. Saving the profile clears this note.' :
+      ' The group it ran before is not known, so the configuration counts as failed.');
 }
 
 /* What the receiver publishes in its antenna and receiver descriptor (RTCM 1033), as received. */
@@ -466,6 +481,13 @@ function profileEditor(g, done) {
     'The station applies this profile whenever the receiver\'s settings differ from it.');
   const sgm = numInput(p.signal_group_master, { inputmode: 'numeric', maxlength: 3 });
   const sgs = numInput(p.signal_group_slave, { inputmode: 'numeric', maxlength: 3 });
+  /* Named choices; other pairs (a newer receiver firmware) as numbers under "Advanced". */
+  const sgKey = p.signal_group_master + ' ' + p.signal_group_slave;
+  const named = SG_CHOICES.some(c => c[0] === sgKey);
+  const sgChoice = radios('Signal group', 'sgroup', SG_CHOICES.map(c => [c[0], h('span', { class: 'opt' }, h('span', null, c[1]),
+    h('small', { class: 'hint' }, c[2]))]), named ? sgKey : null);
+  sgChoice.el.querySelector('.choices').classList.add('stacked');
+  const sgCustom = checkbox('Advanced: custom numbers', !named, 'Signal groups by number, for a receiver firmware that offers others.');
   const mode = radios('Base mode', 'basemode', [['survey_in', 'Survey-in'], ['fixed', 'Fixed position']], p.base_mode);
   const survey = numInput(p.survey_in_s || 600, { inputmode: 'numeric', maxlength: 4 });
   const fx = p.fixed || {};
@@ -484,6 +506,7 @@ function profileEditor(g, done) {
       '(a number from the receiver\'s manual). Keep the default unless you know which signals you need.'),
     signal_group_slave: field('Signal group (second antenna)', sgs, 'The same for the second antenna input. On the UM982 groups 3 and 6 ' +
       'add Galileo E6, a fourth band for Onocoy\'s band count; 0 turns the second input off.'),
+    signal_group: { el: sgChoice.el, input: null, error() {} },
     survey_in_s: field('Survey-in time (seconds)', survey, '1 to 3600. The receiver averages its position this long.'),
     lat_deg: field('Latitude (°)', lat),
     lon_deg: field('Longitude (°)', lon),
@@ -498,6 +521,29 @@ function profileEditor(g, done) {
     antenna_serial: field('Antenna serial number', antSerial, 'Optional; sent only with a model.'),
     antenna_setup_id: field('Antenna setup ID', antSetup, '0 to 255; sent only with a model.'),
   };
+  const sgNumbers = h('div', { class: 'cols c2 sg-custom' }, F.signal_group_master.el, F.signal_group_slave.el);
+  const sgSync = () => {
+    sgNumbers.hidden = !sgCustom.input.checked;
+    for (const r of sgChoice.el.querySelectorAll('input')) r.disabled = sgCustom.input.checked;
+  };
+  sgChoice.onchange(() => {
+    const v = (sgChoice.value() || '').split(' ');
+    if (v.length === 2) {
+      sgm.value = v[0];
+      sgs.value = v[1];
+    }
+  });
+  sgCustom.input.addEventListener('change', () => {
+    if (!sgCustom.input.checked) {
+      const key = sgm.value.trim() + ' ' + sgs.value.trim();
+      sgChoice.set(SG_CHOICES.some(c => c[0] === key) ? key : '3 6');
+      const v = (sgChoice.value() || '3 6').split(' ');
+      sgm.value = v[0];
+      sgs.value = v[1];
+    }
+    sgSync();
+  });
+  sgSync();
   const rows = h('div', { class: 'msgrows' });
   const rtcmErr = h('small', { class: 'err', hidden: true });
   F.rtcm.error = t => {
@@ -552,9 +598,10 @@ function profileEditor(g, done) {
       const n = Number(String(s).trim());
       return String(s).trim() !== '' && isFinite(n) ? n : null;
     };
+    const pick = sgCustom.input.checked ? null : (sgChoice.value() || '').split(' ');
     const out = {
-      signal_group_master: int(sgm.value, 0, 255),
-      signal_group_slave: int(sgs.value, 0, 255),
+      signal_group_master: pick && pick.length === 2 ? Number(pick[0]) : int(sgm.value, 0, 255),
+      signal_group_slave: pick && pick.length === 2 ? Number(pick[1]) : int(sgs.value, 0, 255),
       base_mode: mode.value(),
       survey_in_s: 0,
       fixed: null,
@@ -652,7 +699,9 @@ function profileEditor(g, done) {
     done();
   } },
   autocfg.el,
-  h('div', { class: 'cols c2' }, F.signal_group_master.el, F.signal_group_slave.el),
+  sgChoice.el,
+  sgCustom.el,
+  sgNumbers,
   mode.el,
   F.survey_in_s.el,
   fixedBox,
@@ -678,6 +727,192 @@ function profileEditor(g, done) {
   return { el: form, dirty: () => dirty };
 }
 
+/* ---- Signal-group comparison --------------------------------------------- */
+
+const SGT_MINUTES = [[15, '15 minutes'], [30, '30 minutes'], [60, '1 hour'], [120, '2 hours']];
+const SGT_RUNNING = ['switching', 'settling', 'measuring', 'deciding', 'restoring'];
+
+/**
+ * The comparison for the shell's notices (S.status, receiver.signal_test):
+ * null, or [tone, title, text, actions], the shape renderNotices pushes.
+ * A running test shows everywhere but the receiver page (its card is there);
+ * a finished one only when the station ended it without the user's choice.
+ */
+function sgTestNotice(st) {
+  const t = st && st.receiver ? st.receiver.signal_test : null;
+  if (!t) return null;
+  if (typeof shell !== 'undefined' && shell.current && shell.current.name === 'receiver') return null;
+  const details = [link('Details', '#/receiver', 'btn small')];
+  const grp = t.group ? sgName(t.group.master, t.group.slave) : '';
+  if (t.state === 'deciding') {
+    return ['warn', 'Signal-group comparison: your choice', 'Both groups are measured. Keep one on the receiver page' +
+      (t.decide_left_s ? '; without a choice the station goes back to the group from before in about ' +
+        fmt.dur(Math.ceil(t.decide_left_s / 3600) * 3600) : '') + '.', [link('Compare and choose', '#/receiver', 'btn small')]];
+  }
+  if (SGT_RUNNING.indexOf(t.state) >= 0) {
+    const what = t.state === 'restoring' ? 'switching the receiver to ' + grp :
+      lbl(L.sgtState, t.state).toLowerCase() + (grp ? ' ' + grp : '') + (t.phase !== null && t.phase !== undefined ?
+        ' (group ' + (t.phase + 1) + ' of 2' + (t.left_s ? ', about ' + fmt.dur(Math.ceil(t.left_s / 60) * 60) + ' left' : '') + ')' : '');
+    return ['info', 'Comparing signal groups: ' + what, 'Each switch restarts the receiver; the casters pause briefly for it ' +
+      '(planned downtime). Other receiver changes wait until the comparison ends.', details];
+  }
+  if (t.state === 'idle' && t.outcome && ['timed_out', 'rejected', 'failed', 'interrupted'].indexOf(t.outcome) >= 0) {
+    return ['warn', 'Signal-group comparison ended', L.sgtOutcome[t.outcome] || t.outcome, details];
+  }
+  return null;
+}
+
+function sgPairLabel(g) {
+  return g ? sgName(g.master, g.slave) : DASH;
+}
+
+/* One group's results side by side with the other's: per constellation, then per band. */
+function sgtResults(t) {
+  const res = t.results || [];
+  if (res.length !== 2) return null;
+  const sysOrder = ['gps', 'glonass', 'galileo', 'qzss', 'beidou', 'navic'];
+  const bandOrder = ['l1', 'l2', 'l5', 'l6', 'e5ab'];
+  const sysOf = (r, sys) => (r.systems || []).find(x => x.sys === sys);
+  const present = sysOrder.filter(sys => res.some(r => sysOf(r, sys)));
+  const head = ['', sgPairLabel(res[0].group), sgPairLabel(res[1].group)];
+  const rows = [];
+  rows.push(['Measured', ...res.map(r => r.status === 'rejected' ? h('span', { class: 't-bad' }, lbl(L.sgtResult, r.status)) :
+    fmt.dur(r.measured_s) + ' (' + fmt.num(r.samples) + ' samples' + (r.epoch_gaps ? ', ' + fmt.num(r.epoch_gaps) + ' epochs missing' : '') + ')' +
+    (r.status === 'measuring' ? ', measuring' : ''))]);
+  rows.push(['Best rewarded constellation', ...res.map(r => r.best_sys ?
+    h('b', { class: r.best_bands >= 4 ? 't-ok' : 't-warn' }, lbl(L.sys, r.best_sys) + ': ' + r.best_bands + ' bands (' +
+      ((sysOf(r, r.best_sys) || {}).bands || []).map(b => BAND_HEAD[b] || b).join(', ') + ')') : DASH)]);
+  for (const sys of present) {
+    rows.push([h('b', null, lbl(L.sys, sys)), ...res.map(r => {
+      const x = sysOf(r, sys);
+      return x ? h('b', null, x.satellites.toFixed(1) + ' satellites · ' + (x.bands || []).length + ' band' +
+        ((x.bands || []).length === 1 ? '' : 's')) : DASH;
+    })]);
+    for (const band of bandOrder) {
+      if (!res.some(r => (sysOf(r, sys) || {}).per_band && sysOf(r, sys).per_band.some(p => p.band === band))) continue;
+      rows.push([h('span', { class: 'sgt-band' }, BAND_HEAD[band] || band), ...res.map(r => {
+        const pb = ((sysOf(r, sys) || {}).per_band || []).find(p => p.band === band);
+        if (!pb) return DASH;
+        return [pb.satellites.toFixed(1) + ' sats', pb.cnr_dbhz === null || pb.cnr_dbhz === undefined ? '' :
+          h('span', { class: cnrClass(pb.cnr_dbhz) }, ' · ' + pb.cnr_dbhz.toFixed(1) + ' dB-Hz'),
+        h('small', { class: 'hint' }, sigNames(sys, pb.signal_ids))];
+      })]);
+    }
+  }
+  return h('div', { class: 'sgt-results' }, table(head, rows, { label: 'Signal-group comparison results' }));
+}
+
+/**
+ * "Compare two signal groups": the start form (two groups, minutes per
+ * group, a confirmation), the progress, the results side by side, keep and
+ * stop. Built once per view; update(t, g) shows GET /api/gnss/signal-test.
+ */
+function sgTestCtl(done) {
+  const out = errBox();
+  const status = h('div');
+  const results = h('div');
+  const opts = SG_CHOICES.map(c => [c[0], c[1]]);
+  const selA = selectInput(opts, '3 6', { 'aria-label': 'First group' });
+  const selB = selectInput(opts, '7 0', { 'aria-label': 'Second group' });
+  const minutes = selectInput(SGT_MINUTES, 30, { 'aria-label': 'Minutes per group' });
+  let defaultsSet = false;
+  const pair = v => {
+    const p = String(v).split(' ');
+    return { master: Number(p[0]), slave: Number(p[1]) };
+  };
+  const startBtn = btn('Compare', async () => {
+    if (selA.value === selB.value) {
+      say(out, 'Choose two different signal groups.');
+      return;
+    }
+    const mins = Number(minutes.value);
+    const ok = await dialog({ title: 'Compare two signal groups?', ok: 'Start the comparison',
+      body: [h('p', null, 'The station measures ' + sgName(...selA.value.split(' ')) + ' and ' + sgName(...selB.value.split(' ')) +
+        ' for ' + lbl(Object.fromEntries(SGT_MINUTES), mins) + ' each (after a minute of settling), then shows the results side by side ' +
+        'and waits up to 24 hours for you to keep one.'),
+      msg('warn', 'Each switch restarts the receiver; the casters pause for up to about a minute each time (counted as planned ' +
+        'downtime); up to three switches.'),
+      h('p', { class: 'muted small' }, 'Without a choice within 24 hours the station goes back to the group in use now. ' +
+        'Other receiver changes wait until the comparison ends.')] });
+    if (!ok) return;
+    const r = await act(startBtn, () => api('POST', '/api/gnss/signal-test',
+      { groups: [pair(selA.value), pair(selB.value)], phase_s: mins * 60 }), out);
+    if (r !== undefined) {
+      toast('Comparison started.', 'ok');
+      done();
+    }
+  }, 'primary');
+  const form = h('div', { class: 'stack' },
+    h('div', { class: 'cols c3' }, field('First group (A)', selA).el, field('Second group (B)', selB).el,
+      field('Measuring time per group', minutes).el),
+    h('div', { class: 'form-actions' }, startBtn));
+  const keepA = btn('Keep A', async () => keep(0, keepA), 'primary');
+  const keepB = btn('Keep B', async () => keep(1, keepB), 'primary');
+  async function keep(i, b) {
+    const r = await act(b, () => api('POST', '/api/gnss/signal-test/keep', { group: i }), out);
+    if (r !== undefined) {
+      toast('Keeping the group.', 'ok');
+      done();
+    }
+  }
+  const stopBtn = btn('Stop', async () => {
+    const ok = await dialog({ title: 'Stop the comparison?', ok: 'Stop', okKind: 'danger solid',
+      body: h('p', null, 'The station goes back to the signal group from before the comparison.') });
+    if (!ok) return;
+    const r = await act(stopBtn, () => api('DELETE', '/api/gnss/signal-test'), out);
+    if (r !== undefined) {
+      toast('Comparison stopped.', 'ok');
+      done();
+    }
+  }, 'danger');
+  const badgeEl = badge('', '');
+  return {
+    el: h('div', { class: 'stack' },
+      h('h2', null, 'Compare two signal groups', badgeEl),
+      h('p', { class: 'muted small' }, 'Measures two signal groups on this antenna, one after the other, and shows satellites, ' +
+        'signals, bands and signal strength side by side. You then keep the one you prefer.'),
+      status, results, form, h('div', { class: 'form-actions' }, keepA, keepB, stopBtn), out),
+    update(t, g) {
+      if (!t) return;
+      const running = SGT_RUNNING.indexOf(t.state) >= 0;
+      badgeEl.className = 'badge ' + (t.state === 'deciding' ? 'warn' : running ? 'info' : '');
+      badgeEl.textContent = lbl(L.sgtState, t.state);
+      form.hidden = running;
+      if (!running && !defaultsSet && g && g.profile) {
+        /* Default: the group running now, and 7 0 (or 3 6 when 7 0 runs). */
+        const now = g.profile.signal_group_master + ' ' + g.profile.signal_group_slave;
+        if (SG_CHOICES.some(c => c[0] === now)) selA.value = now;
+        selB.value = now === '7 0' ? '3 6' : '7 0';
+        defaultsSet = true;
+      }
+      const groups = t.groups || [];
+      keepA.hidden = keepB.hidden = t.state !== 'deciding';
+      if (groups.length === 2) {
+        keepA.textContent = 'Keep ' + sgName(groups[0].master, groups[0].slave);
+        keepB.textContent = 'Keep ' + sgName(groups[1].master, groups[1].slave);
+      }
+      stopBtn.hidden = !running || t.state === 'restoring';
+      const grp = sgPairLabel(t.running_group);
+      let text = null;
+      if (t.state === 'switching') text = msg('info', 'Switching the receiver to ' + grp + '. The casters pause for it.');
+      else if (t.state === 'settling') text = msg('info', 'Group ' + (t.phase + 1) + ' of 2: ' + grp + ' settles for a minute; ' +
+        'about ' + fmt.dur(Math.ceil((t.left_s || 0) / 60) * 60) + ' left in this phase.');
+      else if (t.state === 'measuring') text = msg('info', 'Group ' + (t.phase + 1) + ' of 2: measuring ' + grp + ', about ' +
+        fmt.dur(Math.ceil((t.left_s || 0) / 60) * 60) + ' left (only time with a streaming receiver counts).');
+      else if (t.state === 'deciding') text = msg('warn', h('strong', null, 'Both groups are measured: keep one.'), ' The receiver ' +
+        'stays on ' + grp + ' meanwhile. Without a choice within ' + fmt.dur(Math.ceil((t.decide_left_s || 0) / 3600) * 3600) +
+        ' the station goes back to ' + sgPairLabel(t.before) + ', the group from before the comparison.');
+      else if (t.state === 'restoring') text = msg('info', 'Switching the receiver to ' + grp + '.' +
+        (t.outcome ? ' ' + (L.sgtOutcome[t.outcome] || '') : ''));
+      else if (t.outcome) text = msg(t.outcome === 'kept' || t.outcome === 'cancelled' ? 'ok' : 'warn',
+        h('strong', null, t.outcome === 'kept' && t.kept ? 'You kept ' + sgPairLabel(t.kept) + '.' : (L.sgtOutcome[t.outcome] || t.outcome)),
+        t.reason && t.outcome !== 'kept' ? ' ' + t.reason : '', t.ended_unix ? h('span', { class: 'muted' }, ' (' + fmt.time(t.ended_unix) + ')') : null);
+      mount(status, text);
+      mount(results, t.results ? sgtResults(t) : null);
+    },
+  };
+}
+
 Views.receiver = {
   title: 'Receiver',
   admin: true,
@@ -692,6 +927,9 @@ Views.receiver = {
     const maintCard = h('section', { class: 'card' }, maint.el);
     const recovery = recoveryCtl();
     const recoveryCard = h('section', { class: 'card' }, recovery.el);
+    const sgt = sgTestCtl(() => refresh().catch(() => {}));
+    const sgtCard = h('section', { class: 'card wide' }, sgt.el);
+    let t = null;
     const profile = h('section', { class: 'card wide' });
 
     const fill = () => {
@@ -721,6 +959,7 @@ Views.receiver = {
       mount(desc, rtcm1033Info(g));
       maint.update(g);
       recovery.update(g);
+      sgt.update(t, g);
     };
     const buildEditor = () => {
       editor = profileEditor(g, refresh);
@@ -728,13 +967,21 @@ Views.receiver = {
         h('p', { class: 'muted small' }, 'What the station configures on the receiver. Saving re-applies it when it changed.'),
         editor.el);
     };
+    /* The comparison's state; a failed read only leaves its card as it was. */
+    const readTest = () => api('GET', '/api/gnss/signal-test').then(v => {
+      t = v;
+    }, e => {
+      if (e instanceof ApiError && e.status === 401) throw e;
+    });
     async function refresh() {
       g = await api('GET', '/api/gnss');
+      await readTest();
       fill();
     }
     async function load() {
       g = await api('GET', '/api/gnss');
-      mount(el, h('div', { class: 'grid' }, heldCard, info, position, desc, maintCard, recoveryCard, profile));
+      await readTest();
+      mount(el, h('div', { class: 'grid' }, heldCard, info, position, desc, maintCard, recoveryCard, sgtCard, profile));
       fill();
       buildEditor();
     }

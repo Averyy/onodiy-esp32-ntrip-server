@@ -17,6 +17,16 @@ reconnects every second); each new connection starts the schedule from the
 beginning. Local TCP only: no serial port is opened, nothing goes anywhere
 else.
 
+With --respond a scripted UM982 (benchlib.um982_sim) answers the station's
+receiver commands: its identity, configuration dump and base mode, the
+configuration it sends, and signal-group changes (accepted for 4 5, 3 6,
+5 0 and 7 0, less any --respond-reject; a change or RESET withholds the RTCM
+for about 3 s, then the restart banner). The RTCM output follows it: off
+after UNLOG COM1 until an RTCMxxxx command, off while it restarts. Bursts
+that fall due meanwhile are dropped, never sent late. The station messages
+it was told to send (1005/1006 of a fixed base, 1033, 1230) are its own: they
+open each epoch, the recording's own of those types left out.
+
 Writes to a new run directory (see --log-dir):
   from-firmware.bin   every byte the client sent, in order
   replay.log          timestamped: connections, each loop's counts, and
@@ -26,6 +36,8 @@ Writes to a new run directory (see --log-dir):
 Examples:
   uv run rtcm_replay.py --listen 127.0.0.1:5600 ../../test/fixtures/rtcm/centipede_LAX_30ep.rtcm3 --loop
   uv run rtcm_replay.py --listen 127.0.0.1:5600 bench-logs/<capture run> --speed 2
+  uv run rtcm_replay.py --listen 127.0.0.1:5600 ../../test/fixtures/rtcm/centipede_LAX_30ep.rtcm3 --loop \
+      --respond --respond-group 4,5 --respond-reject 7,0
   ../qemu/run.sh --uart1 connect:5600            # in another terminal
 """
 
@@ -39,7 +51,8 @@ import time
 from pathlib import Path
 
 from benchlib.common import StopFlag, add_log_args, hms, human_bytes, iso, make_run_dir, write_command_line
-from benchlib.replay import Schedule, load
+from benchlib.replay import Burst, Schedule, load
+from benchlib.um982_sim import Um982Responder, parse_group, with_station_messages
 
 LINE_PIECE = 64  # bytes per send when pacing at a line rate
 
@@ -58,7 +71,8 @@ class ReplayServer:
     messages. Counters are per server: totals over every connection."""
 
     def __init__(self, schedule: Schedule, host: str = "127.0.0.1", port: int = 0, loop: bool = False,
-                 speed: float = 1.0, baud: int = 0, run_dir: Path | None = None, say=print):
+                 speed: float = 1.0, baud: int = 0, run_dir: Path | None = None, say=print,
+                 responder: Um982Responder | None = None):
         if speed <= 0:
             raise ValueError("speed must be > 0")
         if baud < 0:
@@ -86,6 +100,10 @@ class ReplayServer:
         self.frames_sent = 0
         self.bytes_received = 0
         self.bursts_paused = 0
+        self.bursts_withheld = 0     # due while the responder's receiver sent no RTCM (UNLOG, restart)
+        self.replies_sent = 0        # responder bytes sent
+        self.responder = responder
+        self.send_lock = threading.Lock()   # bursts and replies never interleave inside one write
         self.received = bytearray()  # everything clients sent (kept for in-process checks)
         self.connected = threading.Event()
         self.paused = threading.Event()
@@ -137,11 +155,18 @@ class ReplayServer:
                 n = self.bursts_paused
             self._log(f"resumed ({n} burst{'' if n == 1 else 's'} dropped while paused, in total)")
 
+    def set_responder(self, responder: Um982Responder | None) -> None:
+        """Answer the client's receiver commands from now on (None: answer nothing again)."""
+        with self.lock:
+            self.responder = responder
+        self._log("responder " + ("on: a scripted UM982 answers the receiver commands" if responder else "off"))
+
     def counts(self) -> dict:
         with self.lock:
             return {"connections": self.connections, "loops": self.loops_done, "bursts": self.bursts_sent,
                     "bytes_sent": self.bytes_sent, "frames_sent": self.frames_sent,
-                    "bytes_received": self.bytes_received, "bursts_paused": self.bursts_paused}
+                    "bytes_received": self.bytes_received, "bursts_paused": self.bursts_paused,
+                    "bursts_withheld": self.bursts_withheld, "replies_sent": self.replies_sent}
 
     # -- serving ----------------------------------------------------------------
 
@@ -187,26 +212,34 @@ class ReplayServer:
                 if k != loop_no:
                     self._loop_done(n, loop_no, loop_counts, time.monotonic() - loop_start)
                     loop_no, loop_counts, loop_start = k, [0, 0, 0], time.monotonic()
-                if self._wait_until(t0 + t, gone):
+                if self._wait_until(t0 + t, gone, conn):
                     break
                 if self.paused.is_set():
                     with self.lock:
                         self.bursts_paused += 1
                     continue
-                if not self._send(conn, burst.data, gone):
+                resp = self.responder
+                if resp is not None and not resp.rtcm_on():
+                    with self.lock:
+                        self.bursts_withheld += 1
+                    continue
+                data, nframes = burst.data, len(burst.frames)
+                if resp is not None:
+                    data, nframes = self._with_station(resp, burst)
+                if not self._send(conn, data, gone):
                     break
                 with self.lock:
                     self.bursts_sent += 1
-                    self.bytes_sent += len(burst.data)
-                    self.frames_sent += len(burst.frames)
+                    self.bytes_sent += len(data)
+                    self.frames_sent += nframes
                 loop_counts[0] += 1
-                loop_counts[1] += len(burst.data)
-                loop_counts[2] += len(burst.frames)
+                loop_counts[1] += len(data)
+                loop_counts[2] += nframes
             else:
                 self._loop_done(n, loop_no, loop_counts, time.monotonic() - loop_start)
                 self._log(f"connection {n}: schedule done; still reading what the client sends")
-                while not gone.wait(0.2) and not self.stop_event.is_set():
-                    pass
+                while not gone.wait(0.05) and not self.stop_event.is_set():
+                    self._flush_replies(conn)
             if self.stop_event.is_set():
                 ended = "replay stopped"
         except OSError as e:
@@ -228,26 +261,58 @@ class ReplayServer:
         self._log(f"connection {n}: loop {loop_no + 1}: {counts[0]} bursts, {human_bytes(counts[1])}, "
                   f"{counts[2]} frames in {took:.1f} s; {rx} bytes from the client so far")
 
-    def _wait_until(self, deadline: float, gone: threading.Event) -> bool:
-        """Sleep until `deadline` (monotonic); True if the client left or the replay stops first."""
+    def _wait_until(self, deadline: float, gone: threading.Event, conn: socket.socket | None = None) -> bool:
+        """Sleep until `deadline` (monotonic), sending the responder's replies as they fall due;
+        True if the client left or the replay stops first."""
         while True:
             if gone.is_set() or self.stop_event.is_set():
                 return True
+            if conn is not None:
+                self._flush_replies(conn)
             left = deadline - time.monotonic()
             if left <= 0:
                 return False
-            time.sleep(min(left, 0.05))
+            time.sleep(min(left, 0.02 if self.responder is not None else 0.05))
+
+    def _flush_replies(self, conn: socket.socket) -> None:
+        resp = self.responder
+        if resp is None:
+            return
+        data = resp.due()
+        if not data:
+            return
+        if self.paused.is_set():
+            self._log(f"paused: {len(data)} reply bytes dropped", echo=False)   # a quiet wire, as for the RTCM
+            return
+        with self.send_lock:
+            conn.sendall(data)
+        with self.lock:
+            self.replies_sent += len(data)
+        self._log(f"to client {len(data)} reply bytes: {data!r}", echo=False)
+
+    @staticmethod
+    def _with_station(resp: Um982Responder, burst: Burst) -> tuple[bytes, int]:
+        """The burst as the responder's receiver sends it: its own station messages first (a burst of
+        whole frames only; a capture's reads go out as recorded)."""
+        station = resp.station_frames()
+        types = resp.station_types()
+        if not types or b"".join(burst.frames) != burst.data:
+            return burst.data, len(burst.frames)
+        frames = with_station_messages(burst.frames, station, types)
+        return b"".join(frames), len(frames)
 
     def _send(self, conn: socket.socket, data: bytes, gone: threading.Event) -> bool:
         if not self.baud:
-            conn.sendall(data)
+            with self.send_lock:
+                conn.sendall(data)
             return True
         # Line rate: 10 bits per byte (start, 8 data, stop), in small pieces.
         start = time.monotonic()
         sent = 0
         while sent < len(data):
             piece = data[sent : sent + LINE_PIECE]
-            conn.sendall(piece)
+            with self.send_lock:
+                conn.sendall(piece)
             sent += len(piece)
             if self._wait_until(start + sent * 10.0 / self.baud, gone):
                 return False
@@ -267,7 +332,10 @@ class ReplayServer:
                 if self.rx_file:
                     self.rx_file.write(data)
                     self.rx_file.flush()
+                resp = self.responder
             self._log(f"from client {len(data)} bytes: {data!r}", echo=False)
+            if resp is not None:
+                resp.feed(data)
         gone.set()
 
 
@@ -283,6 +351,12 @@ def main() -> int:
     ap.add_argument("--speed", type=float, default=1.0, help="replay speed: 2 halves every gap (default 1)")
     ap.add_argument("--baud", type=int, default=0,
                     help="send each burst at this line rate (10 bits per byte) instead of all at once")
+    ap.add_argument("--respond", action="store_true",
+                    help="answer the station's receiver commands as a scripted UM982 (benchlib.um982_sim)")
+    ap.add_argument("--respond-group", default="4,5", metavar="M,S",
+                    help="the responder's signal group at the start (default 4,5, the factory one)")
+    ap.add_argument("--respond-reject", action="append", default=[], metavar="M,S",
+                    help="a signal group the responder refuses (repeatable)")
     add_log_args(ap)
     args = ap.parse_args()
     if args.speed <= 0:
@@ -293,6 +367,15 @@ def main() -> int:
         host, port = parse_hostport(args.listen)
     except ValueError as e:
         ap.error(f"--listen: {e}")
+    responder = None
+    if args.respond:
+        try:
+            responder = Um982Responder(group=parse_group(args.respond_group),
+                                       reject=[parse_group(g) for g in args.respond_reject])
+        except ValueError as e:
+            ap.error(f"--respond-group/--respond-reject: {e}")
+    elif args.respond_reject or args.respond_group != "4,5":
+        ap.error("--respond-group and --respond-reject need --respond")
     try:
         schedule = load(args.input)
     except (OSError, ValueError) as e:
@@ -311,7 +394,7 @@ def main() -> int:
     stop = StopFlag()
     try:
         server = ReplayServer(schedule, host, port, loop=args.loop, speed=args.speed, baud=args.baud,
-                              run_dir=run_dir, say=lambda m: print(m, flush=True))
+                              run_dir=run_dir, say=lambda m: print(m, flush=True), responder=responder)
     except OSError as e:
         print(f"rtcm_replay: cannot listen on {host}:{port}: {e}", file=sys.stderr)
         return 2
@@ -326,6 +409,9 @@ def main() -> int:
         text = (f"replay {run_dir.name}: {c['connections']} connection(s), {c['loops']} whole loop(s), "
                 f"{c['bursts']} bursts, {human_bytes(c['bytes_sent'])} ({c['frames_sent']} frames) sent, "
                 f"{c['bytes_received']} bytes received from the client(s)")
+        if responder is not None:
+            text += (f"; responder: {c['replies_sent']} reply bytes, {c['bursts_withheld']} bursts withheld, "
+                     f"{responder.restarts} restart(s), signal group now {responder.signal_group()}")
         (run_dir / "summary.txt").write_text(text + "\n", encoding="utf-8")
         print(text)
         print(f"log: {run_dir}")

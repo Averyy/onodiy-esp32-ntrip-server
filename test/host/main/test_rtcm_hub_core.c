@@ -245,6 +245,20 @@ static void expect_range(const got_t *g, uint32_t first, size_t n)
     }
 }
 
+/* The hub's very first epoch is unsure and never sent (see the unsure-epoch
+ * tests at the end). Tests of the other rules begin the stream with this
+ * lead-in, a terminating MSM published before their consumers attach, so
+ * their first burst is a sure epoch. Test serials restart at 0 after it. */
+#define LEAD_FRAMES 1u
+
+static void fx_lead_in(fx_t *x)
+{
+    fx_pub(x, 1127, 20, false);
+    x->serial = 0;
+    x->tow += 1000;
+    x->next_at = x->now + 1000;
+}
+
 /* ---- tests --------------------------------------------------------------- */
 
 TEST_CASE("hub: init and input limits", "[rtcm_hub]")
@@ -314,9 +328,15 @@ TEST_CASE("hub: frames come out whole and in order across many ring wraps", "[rt
      * wrap markers land everywhere; frame sequence numbers about to wrap. */
     fx_t *x = fx_new(4800, 4, 3000, 1, 4096);
     x->core.frames_in = 0xFFFFFF00u;
+    /* The very first epoch is unsure (never a consumer's start): one frame
+     * before the consumers attach, so they start at the first frame below. */
+    fx_pub(x, 1077, 30, false);
+    x->now += 3;
+    x->serial = 0;
     rtcm_core_consumer_t *k = rtcm_core_attach(&x->core, "big");
     rtcm_core_consumer_t *m = rtcm_core_attach(&x->core, "min");
     uint64_t at_attach = x->core.frames_in;
+    uint64_t bytes_at_attach = x->core.bytes_in;
     got_t *g = got_new();
 
     for (uint32_t i = 0; i < 1200; i++) {
@@ -357,7 +377,7 @@ TEST_CASE("hub: frames come out whole and in order across many ring wraps", "[rt
         rtcm_core_consumer_t *c = i ? m : k;
         rtcm_core_consumer_stats_t s = cst(x, c);
         TEST_ASSERT_EQUAL_UINT64(1350, s.c.frames_out);
-        TEST_ASSERT_EQUAL_UINT64(x->core.bytes_in, s.c.bytes_out);
+        TEST_ASSERT_EQUAL_UINT64(x->core.bytes_in - bytes_at_attach, s.c.bytes_out);
         TEST_ASSERT_EQUAL_UINT64(0, s.c.frames_dropped);
         TEST_ASSERT_EQUAL_UINT64(0, s.c.frames_skipped_idle);
         TEST_ASSERT_EQUAL_UINT32(0, s.c.laps);
@@ -419,14 +439,20 @@ TEST_CASE("hub: a new consumer gets the sticky copies first, then the next epoch
     TEST_ASSERT_EQUAL_UINT64(0, s.c.epochs_dropped);
     check_accounted(x, k, at_attach);
 
-    /* A consumer attached before anything was published starts at the first frame. */
+    /* A consumer attached before anything was published skips the first
+     * epoch (unsure: nothing tells where in an epoch the stream began) and
+     * starts at the second one's first frame. */
     fx_t *y = fx_new(64 * 1024, 4, 3000, 1, 64);
     rtcm_core_consumer_t *e = rtcm_core_attach(&y->core, "early");
     g->n = 0;
     TEST_ASSERT_EQUAL_UINT(0, fx_read(y, e, 4096, g));
     fx_burst(y, false, false, 100);
     fx_drain(y, e, 4096, g);
-    expect_range(g, 0, 4);
+    TEST_ASSERT_EQUAL_UINT(0, g->n);
+    fx_burst(y, false, false, 100);
+    fx_drain(y, e, 4096, g);
+    expect_range(g, 4, 4);
+    TEST_ASSERT_EQUAL_UINT64(4, cst(y, e).c.frames_skipped_idle);
     fx_free(y);
     free(g);
     fx_free(x);
@@ -482,7 +508,8 @@ TEST_CASE("hub: sticky copies: 1006 replaces 1005, 30 s expiry, cleared on reset
     TEST_ASSERT_EQUAL_UINT(0, fx_read(x, c, GNSS_RTCM3_MAX_FRAME, g));
 
     /* Framer reset: copies forgotten, and the next frame starts an epoch even
-     * though it would otherwise continue the open one. */
+     * though it would otherwise continue the open one. That epoch is unsure
+     * (its head may be lost), so it is not sent; the next one is. */
     x->now += 10;
     fx_pub(x, 1077, 100, true);
     rtcm_core_clear_sticky(&x->core);
@@ -492,11 +519,18 @@ TEST_CASE("hub: sticky copies: 1006 replaces 1005, 30 s expiry, cleared on reset
     fx_drain(x, d, 4096, g);
     TEST_ASSERT_EQUAL_UINT(0, g->n);
     x->now += 5;
-    uint32_t cont = fx_pub(x, 1087, 100, true);
+    fx_pub(x, 1087, 100, true);
     TEST_ASSERT_EQUAL_UINT64(epochs + 1, x->core.ep.epochs);
     TEST_ASSERT_EQUAL_UINT64(0, x->core.ep.by_time + x->core.ep.by_gap);
+    x->now += 5;
+    fx_pub(x, 1127, 100, false);
     fx_drain(x, d, 4096, g);
-    expect_range(g, cont, 1);
+    TEST_ASSERT_EQUAL_UINT(0, g->n);
+    x->now += 900;
+    x->tow += 1000;
+    uint32_t next = fx_pub(x, 1077, 100, true);
+    fx_drain(x, d, 4096, g);
+    expect_range(g, next, 1);
 
     /* After the reset the stream's next 1005 is the only one replayed. */
     uint32_t s1005 = fx_pub(x, 1005, 19, false);
@@ -511,6 +545,7 @@ TEST_CASE("hub: sticky copies: 1006 replaces 1005, 30 s expiry, cleared on reset
 TEST_CASE("hub: resync replays the sticky copies and skips to the next epoch start as idle", "[rtcm_hub]")
 {
     fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    fx_lead_in(x);
     rtcm_core_consumer_t *k = rtcm_core_attach(&x->core, "cst0");
     uint64_t at_attach = x->core.frames_in;
     got_t *g = got_new();
@@ -568,6 +603,7 @@ TEST_CASE("hub: resync replays the sticky copies and skips to the next epoch sta
 TEST_CASE("hub: the lag limit drops whole oldest epochs and finishes a partly sent one", "[rtcm_hub]")
 {
     fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    fx_lead_in(x);
     rtcm_core_consumer_t *k = rtcm_core_attach(&x->core, "onocoy");
     TEST_ASSERT_TRUE(rtcm_core_set_max_lag(&x->core, k, 1000));
     got_t *g = got_new();
@@ -642,7 +678,7 @@ TEST_CASE("hub: the lag limit drops whole oldest epochs and finishes a partly se
     TEST_ASSERT_EQUAL_UINT64(5, st.c.epochs_dropped);
     TEST_ASSERT_EQUAL_UINT32(2, st.c.lag_drops);
     TEST_ASSERT_EQUAL_UINT64(2, st.c.epochs_out);
-    check_accounted(x, k, 0);
+    check_accounted(x, k, LEAD_FRAMES);
     free(g);
     fx_free(x);
 }
@@ -670,6 +706,7 @@ TEST_CASE("hub: epochs already over the limit while waiting for a start are skip
 TEST_CASE("hub: a lapped consumer counts the loss and starts over with sticky copies", "[rtcm_hub]")
 {
     fx_t *x = fx_new(8192, 4, 3000, 1, 1024);
+    fx_lead_in(x);
     rtcm_core_consumer_t *k = rtcm_core_attach(&x->core, "stalled");
     TEST_ASSERT_TRUE(rtcm_core_set_max_lag(&x->core, k, 60000));
     got_t *g = got_new();
@@ -697,7 +734,7 @@ TEST_CASE("hub: a lapped consumer counts the loss and starts over with sticky co
     g->n = 0;
     fx_drain(x, k, 4096, g);
     expect_range(g, 77, 7);
-    check_accounted(x, k, 0);
+    check_accounted(x, k, LEAD_FRAMES);
 
     /* A consumer that never read since attach is not streaming: its lap is idle. */
     rtcm_core_consumer_t *idle = rtcm_core_attach(&x->core, "idle");
@@ -769,6 +806,7 @@ TEST_CASE("hub: a frame overwritten while a consumer copies it is never delivere
     unsigned lapped = 0;
     for (unsigned at = 0; at < 400; at++) {
         fx_t *x = fx_new(4800, 4, 60000, 1, 1024);
+        fx_lead_in(x);
         rtcm_core_consumer_t *k = rtcm_core_attach(&x->core, "victim");
         fx_burst(x, true, false, 200);
         fx_drain(x, k, 4096, NULL);           /* streaming, sticky replay done */
@@ -792,7 +830,7 @@ TEST_CASE("hub: a frame overwritten while a consumer copies it is never delivere
             lapped++;
         }
         TEST_ASSERT_TRUE(s.c.laps <= 1);
-        check_accounted(x, k, 0);
+        check_accounted(x, k, LEAD_FRAMES);
         fx_free(x);
     }
     TEST_ASSERT_GREATER_THAN_UINT(20, fired);
@@ -934,6 +972,7 @@ TEST_CASE("hub: two-day run across the millisecond and epoch number wraps", "[rt
 {
     fx_t *x = fx_new(32 * 1024, 4, 1000, UINT32_MAX - 1000u, 0);
     x->now = (uint64_t)UINT32_MAX - 10000u;   /* rx_ms wraps 10 s in */
+    fx_lead_in(x);
     rtcm_core_consumer_t *fast = rtcm_core_attach(&x->core, "fast");
     rtcm_core_consumer_t *slow = rtcm_core_attach(&x->core, "slow");
     TEST_ASSERT_TRUE(rtcm_core_set_max_lag(&x->core, slow, 3000));
@@ -961,11 +1000,11 @@ TEST_CASE("hub: two-day run across the millisecond and epoch number wraps", "[rt
     TEST_ASSERT_EQUAL_UINT64(4ull * (reads - 1u) + (rem > 3u ? rem - 3u : 0u), s.c.epochs_dropped);
     TEST_ASSERT_EQUAL_UINT32(reads, s.c.lag_drops);
     TEST_ASSERT_EQUAL_UINT64(16, s.c.frames_skipped_idle);
-    check_accounted(x, fast, 0);
-    check_accounted(x, slow, 0);
-    TEST_ASSERT_EQUAL_UINT64(seconds, x->core.ep.epochs);
-    TEST_ASSERT_EQUAL_UINT64(seconds - 1, x->core.ep.by_mmb);
-    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 1000u + seconds - 1u, x->core.committed_epoch);
+    check_accounted(x, fast, LEAD_FRAMES);
+    check_accounted(x, slow, LEAD_FRAMES);
+    TEST_ASSERT_EQUAL_UINT64(LEAD_FRAMES + seconds, x->core.ep.epochs);
+    TEST_ASSERT_EQUAL_UINT64(seconds, x->core.ep.by_mmb);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 1000u + seconds, x->core.committed_epoch);
 
     rtcm_core_stats_t st;
     rtcm_core_get_stats(&x->core, x->now, &st);
@@ -1074,8 +1113,266 @@ TEST_CASE("hub: counters for epochs, frames and ages", "[rtcm_hub]")
     fx_drain(x, k, 4096, NULL);
     rtcm_core_consumer_stats_t s = cst(x, k);
     TEST_ASSERT_EQUAL_UINT32(0, s.lag_ms);
-    TEST_ASSERT_EQUAL_UINT64(3 + 12, s.c.frames_out);
-    TEST_ASSERT_EQUAL_UINT64(3, s.c.epochs_out);
+    /* The sticky copies, then everything after the first epoch (unsure: the
+     * very first frames, skipped as idle). */
+    TEST_ASSERT_EQUAL_UINT64(3 + 5, s.c.frames_out);
+    TEST_ASSERT_EQUAL_UINT64(7, s.c.frames_skipped_idle);
+    TEST_ASSERT_EQUAL_UINT64(2, s.c.epochs_out);
     check_accounted(x, k, 0);
+    fx_free(x);
+}
+
+/* ---- unsure epochs (framer resets) --------------------------------------- */
+
+/* The tail of a burst whose head was lost: 1087, 1097, 1127 (bit cleared),
+ * 5 ms apart, starting `dt` ms after the previous frame. */
+static void fx_tail(fx_t *x, uint32_t dt)
+{
+    x->now += dt;
+    fx_pub(x, 1087, 120, true);
+    x->now += 5;
+    fx_pub(x, 1097, 120, true);
+    x->now += 5;
+    fx_pub(x, 1127, 120, false);
+    x->bursts++;
+    x->tow += 1000;
+    x->next_at = x->now + 1000;
+}
+
+TEST_CASE("hub: a resync after a framer reset starts at a whole epoch, not at the tail it sees first",
+          "[rtcm_hub]")
+{
+    fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    rtcm_core_consumer_t *k = rtcm_core_attach(&x->core, "cst0");
+    got_t *g = got_new();
+    fx_burst(x, true, false, 200);
+    fx_burst(x, true, false, 200);
+    fx_drain(x, k, 4096, g);
+
+    /* A pause (the caster stops reading), the receiver line is handed back
+     * and the framer resets; the bytes up to the middle of an epoch are lost
+     * (its 1077 among them). */
+    x->now = x->next_at;
+    fx_pub(x, 1005, 19, false);
+    rtcm_core_clear_sticky(&x->core);
+    rtcm_core_resync(&x->core, k);
+    uint64_t skipped_before = cst(x, k).c.frames_skipped_idle;
+    fx_tail(x, 30);
+    g->n = 0;
+    fx_drain(x, k, 4096, g);
+    TEST_ASSERT_EQUAL_UINT(0, g->n);   /* not 1087, 1097, 1127 */
+
+    /* The next epoch is whole: delivered from its 1077 (its station
+     * messages come first in the burst and belong to it). */
+    fx_burst(x, false, false, 200);
+    uint32_t first = x->burst_first[x->bursts - 1];
+    fx_drain(x, k, 4096, g);
+    expect_range(g, first, 4);
+    TEST_ASSERT_EQUAL_UINT16(1077, g->type[0]);
+
+    rtcm_core_consumer_stats_t s = cst(x, k);
+    TEST_ASSERT_EQUAL_UINT64(3, s.c.frames_skipped_idle - skipped_before);
+    TEST_ASSERT_EQUAL_UINT64(0, s.c.frames_dropped);
+    TEST_ASSERT_EQUAL_UINT64(0, s.c.epochs_dropped);
+    TEST_ASSERT_EQUAL_UINT32(0, s.c.laps);
+    check_accounted(x, k, 0);
+    free(g);
+    fx_free(x);
+}
+
+TEST_CASE("hub: a consumer attached at boot, with the receiver mid-epoch, starts at an epoch's first frame",
+          "[rtcm_hub]")
+{
+    fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    rtcm_core_consumer_t *k = rtcm_core_attach(&x->core, "boot");
+    got_t *g = got_new();
+    TEST_ASSERT_EQUAL_UINT(0, fx_read(x, k, 4096, g));
+
+    /* The first bytes the station sees are an epoch's tail. */
+    fx_tail(x, 0);
+    fx_drain(x, k, 4096, g);
+    TEST_ASSERT_EQUAL_UINT(0, g->n);
+
+    fx_burst(x, true, false, 200);   /* 1005, 1033, 1230, 1077 .. 1127 */
+    uint32_t first = x->burst_first[x->bursts - 1];
+    fx_burst(x, true, false, 200);
+    fx_drain(x, k, 4096, g);
+    expect_range(g, first, 14);
+    TEST_ASSERT_EQUAL_UINT16(1005, g->type[0]);
+
+    rtcm_core_consumer_stats_t s = cst(x, k);
+    TEST_ASSERT_EQUAL_UINT64(3, s.c.frames_skipped_idle);
+    TEST_ASSERT_EQUAL_UINT64(0, s.c.frames_dropped);
+    TEST_ASSERT_EQUAL_UINT64(1, s.c.epochs_out);
+    TEST_ASSERT_EQUAL_UINT64(0, s.c.sticky_out);
+    check_accounted(x, k, 0);
+
+    /* A consumer attached after that tail, mid-way through the next epoch,
+     * waits for the next one as before. */
+    rtcm_core_consumer_t *m = rtcm_core_attach(&x->core, "late");
+    fx_burst(x, false, false, 200);
+    g->n = 0;
+    fx_drain(x, m, 4096, g);
+    TEST_ASSERT_EQUAL_UINT(3 + 4, g->n);   /* sticky copies, then the new epoch */
+    free(g);
+    fx_free(x);
+}
+
+TEST_CASE("hub: a streaming consumer never gets the part of an epoch after a framer reset", "[rtcm_hub]")
+{
+    fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    rtcm_core_consumer_t *k = rtcm_core_attach(&x->core, "cst0");
+    got_t *g = got_new();
+    fx_burst(x, false, false, 200);   /* unsure (first frames ever): skipped */
+    fx_burst(x, false, false, 200);
+    fx_drain(x, k, 4096, g);
+    uint32_t b1 = x->burst_first[1];
+    expect_range(g, b1, 4);
+
+    /* The next epoch is being sent when the framer resets. */
+    x->now = x->next_at;
+    uint32_t h0 = fx_pub(x, 1077, 200, true);
+    x->now += 5;
+    fx_pub(x, 1087, 200, true);
+    g->n = 0;
+    fx_drain(x, k, 4096, g);
+    expect_range(g, h0, 2);
+    rtcm_core_clear_sticky(&x->core);
+    /* The rest of it (1097 lost), then whole epochs again. */
+    x->now += 30;
+    fx_pub(x, 1127, 200, false);
+    x->bursts++;
+    x->tow += 1000;
+    x->next_at = x->now + 1000;
+    g->n = 0;
+    fx_drain(x, k, 4096, g);
+    TEST_ASSERT_EQUAL_UINT(0, g->n);
+
+    fx_burst(x, false, false, 200);
+    uint32_t b3 = x->burst_first[x->bursts - 1];
+    fx_burst(x, false, false, 200);
+    fx_drain(x, k, 4096, g);
+    expect_range(g, b3, 8);
+
+    rtcm_core_consumer_stats_t s = cst(x, k);
+    /* Four frames of the first (unsure) epoch and the 1127 after the reset. */
+    TEST_ASSERT_EQUAL_UINT64(4 + 1, s.c.frames_skipped_idle);
+    TEST_ASSERT_EQUAL_UINT64(0, s.c.frames_dropped);
+    TEST_ASSERT_EQUAL_UINT64(0, s.c.epochs_dropped);
+    /* b1 (ended by the next start), the epoch cut by the reset (sent from
+     * its start; it ended at the unsure epoch) and b3. */
+    TEST_ASSERT_EQUAL_UINT64(3, s.c.epochs_out);
+    TEST_ASSERT_EQUAL_UINT64(4 + 2 + 8, s.c.frames_out);
+    check_accounted(x, k, 0);
+    free(g);
+    fx_free(x);
+}
+
+TEST_CASE("hub: a 1 Hz stream without MSMs still flows after a framer reset", "[rtcm_hub]")
+{
+    fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    rtcm_core_consumer_t *k = rtcm_core_attach(&x->core, "cst0");
+    got_t *g = got_new();
+    uint32_t s[8];
+    for (int i = 0; i < 3; i++) {
+        s[i] = fx_pub(x, 1019, 61, false);   /* ephemeris: not a sticky type */
+        fx_drain(x, k, 4096, g);
+        x->now += 1000;
+    }
+    /* The first frame is unsure; the gap after it makes the second sure. */
+    const uint32_t want1[] = { s[1], s[2] };
+    expect_serials(g, want1, 2);
+
+    rtcm_core_clear_sticky(&x->core);
+    for (int i = 3; i < 6; i++) {
+        s[i] = fx_pub(x, 1019, 61, false);   /* ephemeris: not a sticky type */
+        fx_drain(x, k, 4096, g);
+        x->now += 1000;
+    }
+    const uint32_t want2[] = { s[1], s[2], s[4], s[5] };
+    expect_serials(g, want2, 4);
+
+    rtcm_core_consumer_stats_t st = cst(x, k);
+    TEST_ASSERT_EQUAL_UINT64(2, st.c.frames_skipped_idle);
+    TEST_ASSERT_EQUAL_UINT64(0, st.c.frames_dropped);
+    TEST_ASSERT_EQUAL_UINT64(1, st.c.epochs_out);   /* the first sure epoch, ended by the reset */
+    rtcm_core_stats_t hs;
+    rtcm_core_get_stats(&x->core, x->now, &hs);
+    TEST_ASSERT_EQUAL_UINT64(4, hs.epochs_in);
+    TEST_ASSERT_EQUAL_UINT64(2, hs.epochs_by_gap);
+    check_accounted(x, k, 0);
+    free(g);
+    fx_free(x);
+}
+
+TEST_CASE("hub: records carry the unsure flag; a waiting consumer after a lap skips unsure epochs as losses",
+          "[rtcm_hub]")
+{
+    fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    fx_pub(x, 1077, 50, false);
+    fx_pub(x, 1077, 50, false);
+    /* The stored type keeps the message number in its low 12 bits. */
+    uint16_t t0, t1;
+    memcpy(&t0, x->ring + 2, sizeof(t0));
+    size_t r1 = RTCM_CORE_REC_HDR + ((50u + 6u + 3u) & ~3u);
+    memcpy(&t1, x->ring + r1 + 2, sizeof(t1));
+    TEST_ASSERT_EQUAL_HEX16(1077u | RTCM_CORE_REC_UNSURE, t0);
+    TEST_ASSERT_EQUAL_HEX16(1077u, t1);
+    TEST_ASSERT_EQUAL_UINT16(1077, t0 & RTCM_CORE_REC_TYPE_MASK);
+
+    /* Waiting with losses counted (as after a lap): unsure frames are losses. */
+    rtcm_core_consumer_t *k = rtcm_core_attach(&x->core, "k");
+    k->wait_loss = true;
+    rtcm_core_clear_sticky(&x->core);
+    x->now += 2;
+    fx_pub(x, 1087, 50, false);
+    x->now += 900;
+    uint32_t sure = fx_pub(x, 1077, 50, false);
+    got_t *g = got_new();
+    fx_drain(x, k, 4096, g);
+    expect_range(g, sure, 1);
+    rtcm_core_consumer_stats_t s = cst(x, k);
+    TEST_ASSERT_EQUAL_UINT64(1, s.c.frames_dropped);
+    TEST_ASSERT_EQUAL_UINT64(0, s.c.frames_skipped_idle);
+    free(g);
+    fx_free(x);
+}
+
+/* ---- pausing between epochs ------------------------------------------------ */
+
+TEST_CASE("hub: an epoch is in flight from its first announcing MSM to its last, or to the gap rule",
+          "[rtcm_hub]")
+{
+    fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    uint32_t age = 0;
+    TEST_ASSERT_FALSE(rtcm_core_epoch_in_flight(&x->core, x->now, 250, &age));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, age);
+    fx_pub(x, 1005, 19, false);              /* station messages only: nothing to cut */
+    TEST_ASSERT_FALSE(rtcm_core_epoch_in_flight(&x->core, x->now, 250, &age));
+    TEST_ASSERT_EQUAL_UINT32(0, age);
+    x->now += 5;
+    fx_pub(x, 1077, 100, true);
+    x->now += 5;
+    fx_pub(x, 1087, 100, true);
+    TEST_ASSERT_TRUE(rtcm_core_epoch_in_flight(&x->core, x->now + 10, 250, &age));
+    TEST_ASSERT_EQUAL_UINT32(10, age);
+    x->now += 5;
+    fx_pub(x, 1127, 100, false);             /* its last MSM */
+    TEST_ASSERT_FALSE(rtcm_core_epoch_in_flight(&x->core, x->now, 250, &age));
+    TEST_ASSERT_EQUAL_UINT32(0, age);
+    /* The next epoch's station messages: still between MSM runs. */
+    x->now += 800;
+    x->tow += 1000;
+    fx_pub(x, 1033, 60, false);
+    TEST_ASSERT_FALSE(rtcm_core_epoch_in_flight(&x->core, x->now, 250, NULL));
+    /* Its closing MSM is lost: in flight until the gap rule would end it. */
+    x->now += 5;
+    fx_pub(x, 1077, 100, true);
+    TEST_ASSERT_TRUE(rtcm_core_epoch_in_flight(&x->core, x->now + 249, 250, NULL));
+    TEST_ASSERT_FALSE(rtcm_core_epoch_in_flight(&x->core, x->now + 250, 250, &age));
+    TEST_ASSERT_EQUAL_UINT32(250, age);
+    /* A clock that reads earlier than the newest frame: age 0, not a wrap. */
+    TEST_ASSERT_TRUE(rtcm_core_epoch_in_flight(&x->core, x->now - 3, 250, &age));
+    TEST_ASSERT_EQUAL_UINT32(0, age);
     fx_free(x);
 }

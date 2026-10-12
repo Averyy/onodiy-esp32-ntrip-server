@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 
 from .common import iso
 from .rtcm import summarize_frame
-from .stream import Item, StreamSplitter
+from .stream import Item, StreamSplitter, crc32_unicore, xor_checksum
 
 # ---------------------------------------------------------------------------
 # What may be sent
@@ -509,3 +509,49 @@ def four_band_systems(view: SignalView) -> list[str]:
         if len(bands) >= 4:
             out.append(system)
     return sorted(out)
+
+
+# ---------------------------------------------------------------------------
+# Building receiver lines (simulators and tests): the formats the parsers
+# above and the station firmware read, as in the public reply samples and the
+# host-test vectors (test/host/main/um98x_test_vectors.h).
+
+
+def xor_line(lead: str, body: str) -> str:
+    """`$body*hh` or `#body*hh`, the XOR including the lead character."""
+    return f"{lead}{body}*{xor_checksum(lead + body):02X}"
+
+
+def ack_line(cmd: str, reply: str = "OK") -> str:
+    """The acknowledgement of a command (`reply` OK, or the refusal text)."""
+    return xor_line("$", f"command,{cmd},response: {reply}")
+
+
+def refusal_text(cmd: str) -> str:
+    """The receiver's refusal of a command it does not take (its own spelling and double space)."""
+    words = cmd.split()
+    return "PARSING FAILD NO MATCHING FUNC  " + (words[-1] if words else "").upper()
+
+
+def config_line(item: str, text: str) -> str:
+    """One item of the configuration dump: `$CONFIG,<item>,<text>*hh`."""
+    return xor_line("$", f"CONFIG,{item},{text}")
+
+
+def banner_line(port: str = "COM1") -> str:
+    """What a restarting receiver prints on each port."""
+    return xor_line("$", f"devicename,{port}")
+
+
+def mode_line(body: str) -> str:
+    """The base-mode log (2-hex XOR including the `#`)."""
+    return xor_line("#", f"MODEA,COM1,0,0.0,FINE,0,0.000,0,0,0;{body}")
+
+
+def version_line(model: str, firmware: str, authorisation: str = "HRPT00-S10C-P",
+                 pn_sn: str = "1234567890123-SYNTH00000001", efuse_id: str = "0123456789abcdef",
+                 compile_date: str = "2025/04/18") -> str:
+    """The version log (CRC-32 over the bytes after the `#`, lowercase hex)."""
+    body = (f'VERSIONA,79,GPS,FINE,2350,349712000,0,0,18,975;"{model}","{firmware}","{authorisation}",'
+            f'"{pn_sn}","{efuse_id}","{compile_date}"')
+    return f"#{body}*{crc32_unicore(body.encode('latin-1')):08x}"

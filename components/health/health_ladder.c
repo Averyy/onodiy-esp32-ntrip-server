@@ -159,13 +159,24 @@ static void enter_failed(hl_t *l, const hl_in_t *in)
     l->healthy = false;
 }
 
+/* Which limit blocks 6a (journal detail of code 9, outcome STARTED): the
+ * cap's own limit when it blocks, else the inhibit. */
+static uint8_t blocked_why(const hl_in_t *in)
+{
+    if (!in->reboot_allowed) {
+        return (in->reboot_cap_why == HL_CAP_HOUR || in->reboot_cap_why == HL_CAP_DAY) ? in->reboot_cap_why
+                                                                                       : HL_CAP_UNKNOWN;
+    }
+    return HL_CAP_LOCK;
+}
+
 /* After a failed step 3 (not found) or 5, and for a NO_RECEIVER episode.
  * ALERTS mode: neither 6a nor 6b, straight to 7. NO_REBOOT mode: 6a is
  * journalled as not run and the ladder goes to 7. The cap and an inhibit
- * block 6a first (outcome STARTED of code 9, as before the hold existed);
- * otherwise a hold postpones it (outcome HELD with the hold bits). A 6a that
- * could not be taken during a NO_RECEIVER episode is looked at again
- * (no_receiver()). */
+ * block 6a first (outcome STARTED of code 9, as before the hold existed,
+ * with the limit that blocks it as the detail: hl_cap_why_t); otherwise a
+ * hold postpones it (outcome HELD with the hold bits). A 6a that could not
+ * be taken during a NO_RECEIVER episode is looked at again (no_receiver()). */
 static void byte_rule(hl_t *l, const hl_in_t *in, bool bytes)
 {
     uint8_t mode = mode_of(in);
@@ -178,7 +189,7 @@ static void byte_rule(hl_t *l, const hl_in_t *in, bool bytes)
         if (mode == HL_MODE_NO_REBOOT) {
             journal(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_NOT_RUN);
         } else if (!in->reboot_allowed || in->reboot_inhibited) {
-            journal(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_STARTED);
+            journal_detail(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_STARTED, blocked_why(in));
         } else if (in->reboot_hold != 0) {
             journal_detail(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_HELD, in->reboot_hold);
         } else {
@@ -191,7 +202,9 @@ static void byte_rule(hl_t *l, const hl_in_t *in, bool bytes)
                 l->reboot_ms = in->now_ms;
                 return;
             }
-            journal(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_STARTED);   /* blocked after all: a race with the cap or an inhibit */
+            /* Blocked after all, by an inhibit taken since this tick's
+             * sample (the cap only ever opens up within a boot). */
+            journal_detail(l, HL_CODE_REBOOT_BLOCKED, HL_OUT_STARTED, HL_CAP_LOCK);
         }
         if (in->stn_state == HL_STN_NO_RECEIVER) {
             l->blocked_6a = true;

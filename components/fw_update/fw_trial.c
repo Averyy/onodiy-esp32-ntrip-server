@@ -488,6 +488,10 @@ void fw_trial_status_locked(fw_update_status_t *out, bool clock_trusted, int64_t
     uint32_t uptime = fw_uptime_s();
     fw_trial_run_t run = g_fw.run;
     uint32_t elapsed = fw_trial_watch_elapsed_s(&g_fw.rec, uptime, g_fw.stage2_start_s, clock_trusted, now_unix);
+    /* A reinstall of the identical image has no crash watch: its trial ends
+     * with the confirmation (fw_trial_after_confirm), and so does the
+     * receiver-update block. */
+    const uint32_t watch_s = fw_trial_rec_watch_s(&g_fw.rec, WATCH_S);
     out->trial = fw_trial_public(run);
     switch (run) {
     case FW_TRIAL_RUN_CONFIRMING:
@@ -499,13 +503,13 @@ void fw_trial_status_locked(fw_update_status_t *out, bool clock_trusted, int64_t
         break;
     }
     case FW_TRIAL_RUN_WATCHING:
-        out->trial_left_s = elapsed < WATCH_S ? WATCH_S - elapsed : 0;
+        out->trial_left_s = elapsed < watch_s ? watch_s - elapsed : 0;
         break;
     case FW_TRIAL_RUN_NONE:
         break;
     }
     if (out->gnss_blocked == FW_GNSS_BLOCK_APP_TRIAL) {
-        out->gnss_blocked_left_s = fw_trial_left_s(run, uptime, CONFIG_FW_UPDATE_CONFIRM_S, elapsed, WATCH_S);
+        out->gnss_blocked_left_s = fw_trial_left_s(run, uptime, CONFIG_FW_UPDATE_CONFIRM_S, elapsed, watch_s);
     }
     if (g_fw.rec.stage == FW_TRIAL_REC_REVERTED || g_fw.rec.stage == FW_TRIAL_REC_ROLLED_BACK) {
         strlcpy(out->reverted_version, g_fw.rec.version, sizeof(out->reverted_version));

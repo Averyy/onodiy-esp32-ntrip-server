@@ -358,6 +358,20 @@ bool lifecycle_claim_once(uint32_t flag);
  */
 bool lifecycle_ladder_reboot_allowed(uint32_t *retry_in_s);
 
+/** Which limit of the GNSS-ladder reboot cap holds a reboot back. */
+typedef enum {
+    LIFECYCLE_CAP_NONE = 0,   /**< a ladder reboot is allowed now */
+    LIFECYCLE_CAP_HOUR,       /**< one happened in the last 60 min */
+    LIFECYCLE_CAP_DAY,        /**< three happened in the last 24 h */
+} lifecycle_cap_t;
+
+/**
+ * The cap of lifecycle_ladder_reboot_allowed() with the limit that holds:
+ * when both do, the one that ends later. LIFECYCLE_CAP_NONE = allowed now.
+ * @param retry_in_s optional: seconds until a ladder reboot would be allowed (0 if now).
+ */
+lifecycle_cap_t lifecycle_ladder_reboot_cap(uint32_t *retry_in_s);
+
 /**
  * Station time: seconds since power-on, accumulated across software, panic
  * and watchdog resets (the RTC block the reboot cap uses; a power cycle, or

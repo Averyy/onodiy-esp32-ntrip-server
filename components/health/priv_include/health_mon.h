@@ -176,13 +176,42 @@ bool hm_slot_overrun(hm_slot_t *s, const hm_slot_in_t *in, int64_t now_ms);
 /** A slot that is enabled and failing (waiting for the network, backing off, rejected, banned or stopped). */
 bool hm_slot_down(const hm_slot_in_t *in);
 
+/** A slot's last failure class, numbered as ntrip_fail_class_t (health.c checks each number). */
+typedef enum {
+    HM_FAIL_NONE = 0,
+    HM_FAIL_DNS,
+    HM_FAIL_CONNECT,
+    HM_FAIL_TLS,
+    HM_FAIL_TIMEOUT,
+    HM_FAIL_REMOTE_CLOSE,
+    HM_FAIL_WRITE_STALL,
+    HM_FAIL_KEEPALIVE,
+    HM_FAIL_AUTH,
+    HM_FAIL_MOUNT_BUSY,
+    HM_FAIL_CONFIG,
+    HM_FAIL_BANNED,
+    HM_FAIL_LOGIN_BLOCKED,
+    HM_FAIL_IN_USE,
+    HM_FAIL_REPLACED,
+    HM_FAIL_LOCAL,
+    HM_FAIL_CLASS_COUNT,
+} hm_fail_class_t;
+
+/** The class is the caster's own reply (credentials, mountpoint, ban, certificate), not the transport. */
+bool hm_fail_is_caster_reply(uint8_t reason);
+
 /**
  * The protected slot counts as down for the network ladder's trigger: enabled
- * and neither streaming nor paused, nor stopped by the Onocoy login guard (a
- * Wi-Fi restart or a reboot cannot fix a credential problem; the stopped
- * slot still counts as down for the health level, hm_slot_down).
+ * and neither streaming nor paused, nor stopped by the Onocoy login guard,
+ * nor failing on a caster reply (`reason`, hm_fail_class_t: AUTH,
+ * LOGIN_BLOCKED, IN_USE, REPLACED, BANNED, MOUNT_BUSY or CONFIG, which
+ * includes a refused certificate). A Wi-Fi restart or a reboot cannot fix
+ * any of those; a guard wait after a rejected login must not restart the
+ * network. Transport classes (DNS, CONNECT, TLS, TIMEOUT, REMOTE_CLOSE,
+ * WRITE_STALL, KEEPALIVE, LOCAL) and no failure yet keep the trigger. The
+ * slot still counts as down for the health level (hm_slot_down).
  */
-bool hm_protected_down(bool enabled, bool protected_slot, uint8_t state);
+bool hm_protected_down(bool enabled, bool protected_slot, uint8_t state, uint8_t reason);
 
 /* ---- low-heap reboot ------------------------------------------------------------ */
 

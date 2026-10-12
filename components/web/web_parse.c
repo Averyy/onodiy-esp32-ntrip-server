@@ -7,6 +7,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "station.h"
 #include "um98x_profile.h"
 #include "web_enums.h"
 
@@ -440,6 +441,92 @@ bool web_parse_live(const cJSON *root, uint32_t max_min, uint32_t *minutes, web_
     }
     *minutes = m == M_OK ? (uint32_t)v : 0;
     return true;
+}
+
+/* ---- signal-group comparison ------------------------------------------------------------------- */
+
+bool web_parse_signal_test(const cJSON *root, uint8_t out[2][2], uint32_t *phase_s, web_bad_t *bad)
+{
+    const cJSON *groups = get(root, "groups");
+    if (!cJSON_IsArray(groups) || cJSON_GetArraySize(groups) != 2) {
+        return invalid_rule(bad, "groups", "two signal groups, each {master, slave} of 0-255");
+    }
+    for (int i = 0; i < 2; i++) {
+        const cJSON *g = cJSON_GetArrayItem(groups, i);
+        int64_t m = 0;
+        int64_t sl = 0;
+        if (!cJSON_IsObject(g) || get_int(g, "master", 0, 255, &m) != M_OK ||
+            get_int(g, "slave", 0, 255, &sl) != M_OK) {
+            return invalid_rule(bad, "groups", "two signal groups, each {master, slave} of 0-255");
+        }
+        out[i][0] = (uint8_t)m;
+        out[i][1] = (uint8_t)sl;
+    }
+    if (out[0][0] == out[1][0] && out[0][1] == out[1][1]) {
+        return invalid_rule(bad, "groups", "two different signal groups");
+    }
+    int64_t v = 0;
+    member_t pm = get_int(root, "phase_s", WEB_SG_TEST_PHASE_MIN_S, WEB_SG_TEST_PHASE_MAX_S, &v);
+    if (pm == M_BAD) {
+        return invalid_rule(bad, "phase_s", "60 to 7200 seconds");
+    }
+    *phase_s = pm == M_OK ? (uint32_t)v : WEB_SG_TEST_PHASE_DEFAULT_S;
+    return true;
+}
+
+bool web_parse_signal_test_keep(const cJSON *root, unsigned *group, web_bad_t *bad)
+{
+    int64_t v = 0;
+    if (get_int(root, "group", 0, 1, &v) != M_OK) {
+        return invalid_rule(bad, "group", "0 (the first group) or 1 (the second)");
+    }
+    *group = (unsigned)v;
+    return true;
+}
+
+web_err_t web_sgt_error(int err, bool safe_mode, const char **field)
+{
+    *field = NULL;
+    switch (err) {
+    case STATION_SGT_E_GROUPS:
+        *field = "groups";
+        return WEB_ERR_INVALID_FIELD;
+    case STATION_SGT_E_PHASE:
+        *field = "phase_s";
+        return WEB_ERR_INVALID_FIELD;
+    case STATION_SGT_E_FIRST_APPLY_HELD:
+        return WEB_ERR_FIRST_APPLY_HELD;
+    case STATION_SGT_E_AUTOCFG_OFF:
+        return WEB_ERR_AUTOCFG_OFF;
+    case STATION_SGT_E_MAINTENANCE:
+        return WEB_ERR_RECEIVER_MAINTENANCE;
+    case STATION_SGT_E_JOURNAL_OPEN:
+        return WEB_ERR_JOURNAL_OPEN;
+    case STATION_SGT_E_SAFE_MODE:
+        return WEB_ERR_SAFE_MODE;
+    case STATION_SGT_E_UNSUPPORTED:
+        return WEB_ERR_UNSUPPORTED_MODEL;
+    case STATION_SGT_E_IDENTITY:
+        return WEB_ERR_IDENTITY_UNCONFIRMED;
+    case STATION_SGT_E_NOT_STREAMING:
+        return WEB_ERR_RECEIVER_NOT_STREAMING;
+    case STATION_SGT_E_CONFIG_FAILED:
+        return WEB_ERR_CONFIG_FAILED;
+    case STATION_SGT_E_NOT_LOCKED:
+        return WEB_ERR_POSITION_NOT_LOCKED;
+    case STATION_SGT_E_RUNNING:
+        return WEB_ERR_SIGNAL_TEST_RUNNING;
+    case STATION_SGT_E_SETTINGS:
+        return WEB_ERR_SETTINGS_UNAVAILABLE;
+    case STATION_SGT_E_NOT_DECIDING:
+        return WEB_ERR_SIGNAL_TEST_NOT_DECIDING;
+    case STATION_SGT_E_IDLE:
+        return WEB_ERR_SIGNAL_TEST_IDLE;
+    case STATION_SGT_E_NOT_RUNNING:
+        return safe_mode ? WEB_ERR_SAFE_MODE : WEB_ERR_BUSY;
+    default:
+        return WEB_ERR_INTERNAL;
+    }
 }
 
 /* ---- casters ----------------------------------------------------------------------------------- */

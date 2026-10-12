@@ -36,8 +36,10 @@ menu "Station: RTCM fan-out hub"
         range 100 500
         default 250
         help
-            Fallback epoch rule for a lost terminating MSM: a frame arriving
-            this long after the previous one starts a new epoch while the
-            current epoch holds an MSM not yet marked as its last.
+            Fallback epoch rule for a lost terminating MSM: a frame that is
+            no MSM arriving this long after the previous one starts a new
+            epoch while the current epoch holds an MSM not yet marked as its
+            last (an MSM that late continues its epoch: the reader stalled).
+            After a framer reset any frame this late starts a whole epoch.
 
 endmenu

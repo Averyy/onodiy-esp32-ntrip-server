@@ -315,7 +315,7 @@ TEST_CASE("boot guard accumulates station time across resets since power-on", "[
 /* A GNSS-ladder reboot at `uptime` of the current boot, then the boot it causes. */
 static void ladder_reboot(boot_guard_state_t *st, uint32_t uptime)
 {
-    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(st, uptime, NULL));
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(st, uptime, NULL, NULL));
     boot_guard_record_ladder_reboot(st, uptime);
     boot_guard_set_reboot_reason(st, 6);
     boot(st, BOOT_HW_SOFTWARE);
@@ -326,24 +326,24 @@ TEST_CASE("GNSS ladder reboots: an hour apart and at most three per day, across 
     boot_guard_state_t st;
     fresh(&st);
     uint32_t wait = 99;
-    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 100, &wait));
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 100, &wait, NULL));
     TEST_ASSERT_EQUAL_UINT32(0, wait);
 
     ladder_reboot(&st, 100);                             /* station time 100 */
-    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 10, &wait));
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 10, &wait, NULL));
     TEST_ASSERT_EQUAL_UINT32(3590, wait);
-    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 3599, &wait));
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 3599, &wait, NULL));
     TEST_ASSERT_EQUAL_UINT32(1, wait);
-    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 3600, &wait));
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 3600, &wait, NULL));
 
     ladder_reboot(&st, 3600);                            /* station time 3700 */
     ladder_reboot(&st, 3600);                            /* station time 7300 */
 
     /* Three in the window: the oldest must be 24 h old. */
-    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 3600, &wait));   /* now 10900 */
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 3600, &wait, NULL));   /* now 10900 */
     TEST_ASSERT_EQUAL_UINT32(86400u - 10800u, wait);
-    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 86400u - 7300u + 99u, NULL));
-    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 86400u - 7300u + 100u, &wait));
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 86400u - 7300u + 99u, NULL, NULL));
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 86400u - 7300u + 100u, &wait, NULL));
     TEST_ASSERT_EQUAL_UINT32(0, wait);
 
     /* The next one pushes the oldest out; the gap rule still applies. */
@@ -351,15 +351,57 @@ TEST_CASE("GNSS ladder reboots: an hour apart and at most three per day, across 
     TEST_ASSERT_EQUAL_UINT32(BOOT_GUARD_LADDER_KEEP, st.ladder_count);
     TEST_ASSERT_EQUAL_UINT32(3700, st.ladder_at[0]);
     TEST_ASSERT_EQUAL_UINT32(86500, st.ladder_at[2]);
-    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 1800, &wait));
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 1800, &wait, NULL));
     TEST_ASSERT_EQUAL_UINT32(1800, wait);
 
     /* A crash in between only moves station time on (now 87500 at its boot). */
     boot_guard_heartbeat(&st, 1000);
     boot(&st, BOOT_HW_CRASH);
-    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 2599, &wait));   /* 3599 s after the last one */
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 2599, &wait, NULL));   /* 3599 s after the last one */
     TEST_ASSERT_EQUAL_UINT32(1, wait);
-    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 2600, NULL));
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 2600, NULL, NULL));
+}
+
+TEST_CASE("GNSS ladder reboots: the cap names the limit that sets the wait", "[boot_guard]")
+{
+    boot_guard_state_t st;
+    fresh(&st);
+    uint32_t wait = 99;
+    boot_guard_cap_t cap = BOOT_GUARD_CAP_DAY;
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 100, &wait, &cap));
+    TEST_ASSERT_EQUAL(BOOT_GUARD_CAP_NONE, cap);
+
+    /* One reboot 10 min ago: the hourly limit, 50 min. */
+    ladder_reboot(&st, 100);                             /* station time 100 */
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 600, &wait, &cap));
+    TEST_ASSERT_EQUAL(BOOT_GUARD_CAP_HOUR, cap);
+    TEST_ASSERT_EQUAL_UINT32(50u * 60u, wait);
+
+    ladder_reboot(&st, 3600);                            /* station time 3700 */
+    ladder_reboot(&st, 3600);                            /* station time 7300 */
+    /* Both limits hold (the newest 10 min ago, three within 24 h): the
+     * daily one ends later. */
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 600, &wait, &cap));
+    TEST_ASSERT_EQUAL(BOOT_GUARD_CAP_DAY, cap);
+    TEST_ASSERT_EQUAL_UINT32(86400u - 7800u, wait);
+    /* Three in 24 h, the oldest 3 h ago: the daily limit, 21 h. */
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 3600, &wait, &cap));
+    TEST_ASSERT_EQUAL(BOOT_GUARD_CAP_DAY, cap);
+    TEST_ASSERT_EQUAL_UINT32(21u * 3600u, wait);
+
+    /* Both hold and the hourly one ends later: the oldest of three is almost
+     * a day old, the newest 10 min. */
+    fresh(&st);
+    ladder_reboot(&st, 100);                             /* station time 100 */
+    ladder_reboot(&st, 80000);                           /* 80100 */
+    ladder_reboot(&st, 5000);                            /* 85100 */
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 600, &wait, &cap));
+    TEST_ASSERT_EQUAL(BOOT_GUARD_CAP_HOUR, cap);
+    TEST_ASSERT_EQUAL_UINT32(3000, wait);
+    /* Once the hour is up, the day (the oldest left the window) holds nothing. */
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 3600, &wait, &cap));
+    TEST_ASSERT_EQUAL(BOOT_GUARD_CAP_NONE, cap);
+    TEST_ASSERT_EQUAL_UINT32(0, wait);
 }
 
 TEST_CASE("GNSS ladder reboot budget starts fresh after a power cycle or a lost RTC block", "[boot_guard]")
@@ -367,15 +409,15 @@ TEST_CASE("GNSS ladder reboot budget starts fresh after a power cycle or a lost 
     boot_guard_state_t st;
     fresh(&st);
     ladder_reboot(&st, 100);
-    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 10, NULL));
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 10, NULL, NULL));
     boot(&st, BOOT_HW_POWER_ON);
-    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 10, NULL));
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 10, NULL, NULL));
 
     ladder_reboot(&st, 100);
-    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 10, NULL));
+    TEST_ASSERT_FALSE(boot_guard_ladder_reboot_allowed(&st, 10, NULL, NULL));
     st.ladder_at[0] = 5;                                 /* corrupted: invalid block */
     TEST_ASSERT_TRUE(boot(&st, BOOT_HW_SOFTWARE).state_was_lost);
-    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 10, NULL));
+    TEST_ASSERT_TRUE(boot_guard_ladder_reboot_allowed(&st, 10, NULL, NULL));
     TEST_ASSERT_EQUAL_UINT32(0, st.ladder_count);
 }
 

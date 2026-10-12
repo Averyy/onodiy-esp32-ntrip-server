@@ -325,6 +325,22 @@ void stn_init(stn_t *s, bool journal_open)
     s->sky_retry_ms = STN_NEVER;
     s->flash_close_ms = STN_NEVER;
     s->flash_rtcm_ms = STN_NEVER;
+    s->rtcm_change_ms = STN_NEVER;
+}
+
+/* The time of the latest valid RTCM frame, as far as the samples show it. */
+static void track_rtcm(stn_t *s, const stn_in_t *in)
+{
+    if (in->rtcm_frames != s->rtcm_seen) {
+        s->rtcm_seen = in->rtcm_frames;
+        s->rtcm_change_ms = in->now_ms;
+    }
+}
+
+/* A valid RTCM frame arrived in the last STN_RTCM_QUIET_MS. */
+static bool rtcm_flowing(const stn_t *s, int64_t now)
+{
+    return s->rtcm_change_ms != STN_NEVER && now - s->rtcm_change_ms < STN_RTCM_QUIET_MS;
 }
 
 void stn_start(stn_t *s, const stn_in_t *in)
@@ -541,10 +557,12 @@ static stn_job_t next_streaming(stn_t *s, const stn_in_t *in)
     if (s->identify_ms != STN_NEVER && now >= s->identify_ms) {
         stn_job_t j = make_job(STN_JOB_IDENTIFY);
         j.after_restart = s->identify_restart;
-        j.leased = s->identify_leased;
-        if (j.leased) {
-            s->paused = true;   /* the lease holds RTCM back: a planned gap for the casters */
+        if (s->identify_leased && rtcm_flowing(s, now)) {
+            s->identify_leased = false;   /* RTCM came back meanwhile: never hold it back for this */
         }
+        /* A leased query runs only while nothing flows: the casters are not
+         * paused for it (nothing to hold back; the outage stays unplanned). */
+        j.leased = s->identify_leased;
         return j;
     }
 
@@ -802,6 +820,7 @@ static bool special_job(stn_t *s, const stn_in_t *in, stn_job_t *j)
 stn_job_t stn_next(stn_t *s, const stn_in_t *in)
 {
     stn_job_t none = make_job(STN_JOB_NONE);
+    track_rtcm(s, in);
     if (s->job_busy || !s->started) {
         return none;
     }
@@ -857,9 +876,6 @@ static void done_identify(stn_t *s, const stn_result_t *r, const stn_in_t *in)
 {
     int64_t now = in->now_ms;
     s->identify_restart = false;
-    if (s->job.leased) {
-        s->paused = false;
-    }
     if (r->err == STN_OK) {
         set_identity(s, r->supported, r->static_ok);
         after_identity(s, in);
@@ -869,8 +885,10 @@ static void done_identify(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     if (s->job.leased) {
         s->leased_tried = true;
     }
-    if (!s->job.leased && !in->model_known && !s->leased_tried) {
-        /* No model was ever stored: this once, a lease to learn it. */
+    if (!s->job.leased && !in->model_known && !s->leased_tried && !rtcm_flowing(s, now)) {
+        /* No model was ever stored and nothing flows: this once per boot, a
+         * lease to learn it. While RTCM flows the casters keep it, and the
+         * query is retried without a lease. */
         s->identify_leased = true;
         s->identify_ms = now;
     } else {
@@ -1041,6 +1059,23 @@ static void done_apply(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     if (s->job.why == STN_WHY_FLASH && s->flash_close != 0) {
         flash_close_note(s, false);   /* the re-apply after the update failed: closed, the user looks */
     }
+    if (r->sg_back && !r->nothing_sent) {
+        /* A refused signal group: the session rolled back, the profile holds
+         * a group the receiver runs again. Re-apply that at once; no
+         * CONFIG_FAILED and no backoff retry of the refused pair. */
+        if (r->restarted && in->profile_survey) {
+            survey_restarted(s, in);
+        }
+        if (r->receiver_lost) {
+            s->paused = false;
+            enter_detecting(s, in);
+            return;
+        }
+        uint8_t why = s->job.why == STN_WHY_SG_TEST ? STN_WHY_SG_TEST : STN_WHY_SG_BACK;
+        back_to_streaming(s, in);
+        stn_request_apply_why(s, why);
+        return;
+    }
     if (r->nothing_sent) {
         if (r->err == STN_E_UNSUPPORTED) {
             set_identity(s, false, false);
@@ -1199,6 +1234,7 @@ static void done_flash(stn_t *s, const stn_result_t *r, const stn_in_t *in)
 
 void stn_done(stn_t *s, const stn_result_t *r, const stn_in_t *in)
 {
+    track_rtcm(s, in);
     if (!s->job_busy) {
         return;
     }
@@ -1262,6 +1298,32 @@ void stn_done(stn_t *s, const stn_result_t *r, const stn_in_t *in)
 void stn_request_apply(stn_t *s)
 {
     want_apply(s, STN_WHY_USER, STN_CHANGE_NONE, false);
+}
+
+void stn_request_apply_why(stn_t *s, uint8_t why)
+{
+    want_apply(s, (stn_why_t)why, STN_CHANGE_NONE, false);
+    if (s->apply_change == STN_CHANGE_NONE) {
+        s->apply_why = why;   /* the comparison follows its own re-apply */
+    }
+}
+
+bool stn_sg_fallback(uint8_t refused_m, uint8_t refused_s, bool before_known, uint8_t before_m, uint8_t before_s,
+                     bool ok_known, uint16_t ok_pair, uint8_t *out_m, uint8_t *out_s)
+{
+    if (before_known && !(before_m == refused_m && before_s == refused_s)) {
+        *out_m = before_m;
+        *out_s = before_s;
+        return true;
+    }
+    uint8_t m = (uint8_t)(ok_pair >> 8);
+    uint8_t sl = (uint8_t)(ok_pair & 0xFFu);
+    if (ok_known && !(m == refused_m && sl == refused_s)) {
+        *out_m = m;
+        *out_s = sl;
+        return true;
+    }
+    return false;
 }
 
 int stn_request_flash(stn_t *s, uint8_t kind)

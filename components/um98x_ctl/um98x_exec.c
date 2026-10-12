@@ -554,6 +554,9 @@ static um98x_res_t read_back(session_t *s)
     unlock(s->ex);
     s->settings = s->rb.config.rx;   /* the latest dump wins */
     s->settings_read = true;
+    s->r->sg_read.known = s->rb.config.signal_group_known;
+    s->r->sg_read.master = s->rb.config.signal_group_master;
+    s->r->sg_read.slave = s->rb.config.signal_group_slave;
 
     um98x_txn_status_t st = um98x_exec_txn(s->ex, UM98X_TXN_MODE, UM98X_CMD_MODE, NULL);
     if (st == UM98X_TXN_OK) {
@@ -596,6 +599,7 @@ static um98x_res_t signal_group(session_t *s)
     (void)step(s, UM98X_TXN_COMMAND, cmd, true, false, &st);
     if (st == UM98X_TXN_REJECTED || st == UM98X_TXN_LINK_ERROR) {
         fail_txn(s, cmd, st);
+        s->r->signal_group_rejected = (st == UM98X_TXN_REJECTED);   /* the receiver said no to this pair */
         set_expect_restart(ex, false);
         return UM98X_E_FAILED;
     }
@@ -643,7 +647,10 @@ static um98x_res_t signal_group(session_t *s)
         return UM98X_E_FAILED;
     }
     if (!um98x_signal_group_matches(s->p, &s->rb)) {
+        /* Acknowledged and restarted, but the group did not take (or the
+         * dump does not name it): this firmware does not run the pair. */
         fail(s, cmd, "signal group rejected");
+        s->r->signal_group_rejected = true;
         return UM98X_E_FAILED;
     }
     return UM98X_OK;
@@ -842,6 +849,10 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
     if (read_back(s) != UM98X_OK) {
         return UM98X_E_FAILED;
     }
+    /* The group the receiver runs before any change: where a refused one goes back to. */
+    s->r->sg_before.known = s->rb.config.signal_group_known;
+    s->r->sg_before.master = s->rb.config.signal_group_master;
+    s->r->sg_before.slave = s->rb.config.signal_group_slave;
 
     um98x_plan_t plan;
     um98x_plan_build(s->p, &s->rb, pt->get_baud(pt->ctx), force_mode, &plan);
@@ -872,6 +883,7 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
         switch ((um98x_step_kind_t)st->kind) {
         case UM98X_STEP_SIGNALGROUP:
             fail(s, cmd, "signal group rejected");
+            s->r->signal_group_rejected = true;
             return UM98X_E_FAILED;
         case UM98X_STEP_BAUD:
             res = baud_change(s);
