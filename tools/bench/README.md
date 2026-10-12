@@ -113,6 +113,12 @@ uv run um982.py e6-check --write       # try group 3 6 (Galileo E6)
 uv run um982.py e6-check --write --group "7 0" --msm
 ```
 
+`send --write` changes are not saved by themselves, but the station's next
+configuration of the receiver (its first apply, a profile change, a re-apply
+after drift, the recovery ladder's reconfigure step) ends with `SAVECONFIG`,
+which saves the receiver's whole running configuration: a `MASK` or `MMP`
+change made here stays then. Set back what should not stay.
+
 `query` listens for 2 s first (to log anything the port streams on its
 own), sends a bare CR LF, then `VERSIONA`, `CONFIG`, `MODE`, `MASK`,
 `UNILOGLIST`, `BESTNAVA`, `GPGSV` and `OBSVMA`, one at a time, waiting for
@@ -141,8 +147,16 @@ prints the plan. With `--write` it:
 6. asks before `UNLOG COM2 RTCM1097`, and offers to restore the previous
    signal group.
 
-`--find-baud` tries the usual bauds (listening first, then `VERSIONA`) when
-the receiver does not answer at 115200.
+`--find-baud` tries the usual bauds (listening at each first, then
+`VERSIONA` at each) when the receiver does not answer at 115200. Only for a
+receiver whose application is known to run: never after a failed or
+interrupted receiver update or a `bootprobe.py` run that did not end with
+exit 0, because its queries at many bauds could reach a loader menu, where
+garbled bytes may read as menu keys. Listen first instead (the
+`bootprobe.py` section). Whatever the options, `um982.py` sends nothing at
+all when its listen-first window (or the search's listening) hears the
+receiver's loader (`boot>` or its menu text): it stops with exit status 3
+and tells you to power-cycle the receiver.
 
 ### `bootprobe.py`: the PC recovery channel (boot menu over COM2)
 
@@ -184,6 +198,22 @@ menu reached and the application back with the same build, 1 = no menu,
 2 = application not back (or stopped at an unconfirmed menu), 3 = not
 started, 4 = the application came back with another firmware. Only 0 lets
 the next check on the bench go on.
+
+Before its first `VERSIONA` it listens, sending nothing, 2 s at the boot
+menu's baud and 2 s at the application baud; when it hears the receiver's
+loader there (`boot>` or its menu text) the receiver already waits at its
+loader: it sends nothing at all and exits with 3 (power-cycle the receiver,
+then start again). After a failed or interrupted receiver update, a run that
+did not end with 0, or no answer at all, listen before sending anything:
+
+1. listen only: `uv run capture.py --receiver <port> --receiver-baud 460800
+   --duration 20`, and the same with `--receiver-baud 115200`;
+2. `boot>` seen: the receiver is at its loader: power-cycle it (or run
+   `bootprobe.py`, which sends `6` only at a menu that numbers it); never
+   `um982.py` at that baud;
+3. application output seen at a baud: `uv run um982.py --port <port> --baud
+   <that baud>`;
+4. nothing at either: power-cycle, then step 1 again; still silent: stop.
 
 ### `rtcm_inspect.py`: what is in the stream
 
@@ -276,8 +306,11 @@ never written to the logs.
 ### Seeing the RTCM on the PC
 
 COM1 goes only to the ESP32. To inspect the same messages on the PC,
-mirror them to COM2 for a while (not saved: gone after the next receiver
-restart):
+mirror them to COM2 for a while (not saved by itself, but any configuration
+the station runs later - its first apply, a profile change, a re-apply after
+drift, the recovery ladder's reconfigure step - ends with SAVECONFIG, which
+saves the receiver's whole running configuration, mirrors included: send
+UNLOG COM2 as soon as you are done):
 
 ```sh
 uv run um982.py send --write "RTCM1005 COM2 1" "RTCM1033 COM2 1" "RTCM1077 COM2 1" \

@@ -151,6 +151,66 @@ size_t um98x_step_command(const um98x_base_profile_t *p, const um98x_step_t *s, 
     return (size_t)n;
 }
 
+/* One preview line; a text that does not fit ends the list there (never a cut command). */
+static bool preview_add(um98x_preview_step_t *out, size_t cap, size_t *n, const char *text, um98x_preview_kind_t kind,
+                        um98x_preview_when_t when, bool saved)
+{
+    if (*n >= cap || text == NULL || text[0] == '\0' || strlen(text) >= UM98X_PREVIEW_TEXT_MAX) {
+        return false;
+    }
+    um98x_preview_step_t *s = &out[(*n)++];
+    memset(s, 0, sizeof(*s));
+    memcpy(s->text, text, strlen(text));
+    s->kind = (uint8_t)kind;
+    s->when = (uint8_t)when;
+    s->saved = saved;
+    return true;
+}
+
+/* A plan step through the builder's own formatter. */
+static bool preview_step(const um98x_base_profile_t *p, um98x_preview_step_t *out, size_t cap, size_t *n,
+                         um98x_step_kind_t kind, uint16_t msg, uint16_t period_s, um98x_preview_when_t when, bool saved)
+{
+    const um98x_step_t st = { (uint8_t)kind, true, msg, period_s };
+    char text[UM98X_PREVIEW_TEXT_MAX];
+    if (um98x_step_command(p, &st, text, sizeof(text)) == 0) {
+        return false;
+    }
+    return preview_add(out, cap, n, text, UM98X_PREVIEW_WRITE, when, saved);
+}
+
+size_t um98x_plan_preview(const um98x_base_profile_t *p, uint32_t link_baud, um98x_preview_step_t *out, size_t cap)
+{
+    size_t n = 0;
+    if (out == NULL || !um98x_profile_valid(p)) {
+        return 0;
+    }
+    bool ok = preview_add(out, cap, &n, UM98X_CMD_UNLOG_COM1, UM98X_PREVIEW_WRITE, UM98X_PREVIEW_ALWAYS, false) &&
+              preview_add(out, cap, &n, UM98X_CMD_VERSION, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_ALWAYS, false) &&
+              preview_add(out, cap, &n, UM98X_CMD_CONFIG, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_ALWAYS, false) &&
+              preview_add(out, cap, &n, UM98X_CMD_MODE, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_ALWAYS, false) &&
+              preview_step(p, out, cap, &n, UM98X_STEP_SIGNALGROUP, 0, 0, UM98X_PREVIEW_IF_DIFFERS, true);
+    if (ok && p->com1_baud != link_baud) {
+        ok = preview_step(p, out, cap, &n, UM98X_STEP_BAUD, 0, 0, UM98X_PREVIEW_IF_DIFFERS, false);
+    }
+    ok = ok && preview_step(p, out, cap, &n, UM98X_STEP_MODE, 0, 0, UM98X_PREVIEW_IF_DIFFERS, false);
+    if (ok && um98x_antenna_str_len(p->antenna_model) > 0) {
+        ok = preview_step(p, out, cap, &n, UM98X_STEP_ANTENNA, 0, 0, UM98X_PREVIEW_IF_DIFFERS, false);
+    }
+    ok = ok && preview_step(p, out, cap, &n, UM98X_STEP_B1CB2A, 0, 0, UM98X_PREVIEW_IF_OFF, false);
+    for (size_t i = 0; ok && i < p->rtcm_count; i++) {
+        ok = preview_step(p, out, cap, &n, UM98X_STEP_RTCM, p->rtcm[i].msg, p->rtcm[i].period_s, UM98X_PREVIEW_ALWAYS,
+                          false);
+    }
+    if (ok && p->sat_view_output) {
+        ok = preview_step(p, out, cap, &n, UM98X_STEP_SAT_VIEW, 0, 0, UM98X_PREVIEW_ALWAYS, false);
+    }
+    if (ok) {
+        (void)preview_step(p, out, cap, &n, UM98X_STEP_SAVE, 0, 0, UM98X_PREVIEW_ALWAYS, true);
+    }
+    return n;
+}
+
 size_t um98x_sat_view_command(bool on, uint16_t period_s, char *buf, size_t cap)
 {
     if (buf == NULL || cap == 0) {

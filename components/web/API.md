@@ -259,6 +259,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | GET | `/api/gnss` | adm | Receiver, profile, base position | station, gnss_obs, settings |
 | PUT | `/api/gnss/profile` | adm | Edit the base profile and auto-configuration | settings, `station_request_reconfigure` |
 | POST | `/api/gnss/apply` | adm | Re-apply the profile | `station_request_reconfigure` |
+| GET | `/api/gnss/apply/preview` | adm | What an apply would send (the held first configuration) | `um98x_ctl_apply_preview` |
 | POST | `/api/gnss/position/lock` | adm | Lock the surveyed position | `station_lock_position` |
 | DELETE | `/api/gnss/position/lock` | adm | Forget it and survey again | `station_request_resurvey` |
 | GET | `/api/gnss/signals` | pub\*/adm | Bands, CNR, observed RTCM set | gnss_obs |
@@ -298,6 +299,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | GET | `/api/availability` | adm | Per-day availability, budget | ledger, ntrip_server |
 | GET | `/api/diag/tasks` | adm | Task statistics | `diag_task_stats` |
 | GET | `/api/diag/flash-capture` | adm | Receiver byte capture download (bench builds) | `um98x_flash_capture_read` |
+| GET | `/api/diag/frame-times` | adm | Receiver link frame and drain-pass times, CSV (bench builds) | `gnss_link_bench_timing_csv` |
 | PUT | `/api/diag/log-level` | adm | Runtime log level per tag | `diag_set_log_level` |
 | GET | `/api/logs` | adm | Log ring (this or previous boot) | `diag_log_read*` |
 | GET | `/api/journal` | adm | Event journal | `diag_journal_read` |
@@ -404,7 +406,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
                "position_locked": true, "surveying": false, "survey_window_left_s": 0,
                "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "journal": "none",
                "uart_closed": false, "rx_maintenance": false, "maintenance_left_s": 0, "maintenance_chosen_s": 0,
-               "next_detect_in_s": null},
+               "next_detect_in_s": null, "first_apply_held": false},
   "casters": [
     {"slot": 0, "name": "Onocoy", "enabled": true, "protected": true, "host": "servers.onocoy.com",
      "state": "streaming", "reason": "none", "state_age_s": 3600, "connected_s": 3600,
@@ -443,6 +445,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.rx_maintenance` | receiver maintenance is on (section 8): nothing is sent to the receiver; `maintenance_left_s` until it ends by itself, `maintenance_chosen_s` the chosen duration with extensions (both 0 when off) |
 | `receiver.rtcm_age_ms` | since the last CRC-valid RTCM frame (`gnss_link`), `null` = never |
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
+| `receiver.first_apply_held` | the receiver's first configuration waits for the user (`gnss/hold`, section 8): only queries reach the receiver until the user applies; admin form only |
 | `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
 | `casters[]` | every slot; the full status is in `/api/casters`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with the console's mountpoint, username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none) |
 | `alerts[]` | health's alerts (`source: "health"`) and the station's (`source: "station"`); `config_failed` carries `retry_in_s`; `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`) |
@@ -602,6 +605,7 @@ oldest.
            "open": true, "open_failures": 0, "hands_off": false},
   "autocfg": true,
   "recovery": "full",
+  "first_apply_held": false,
   "profile": {
     "signal_group_master": 3, "signal_group_slave": 6,
     "base_mode": "survey_in", "survey_in_s": 600, "fixed": null,
@@ -638,6 +642,7 @@ oldest.
 | `link.open`, `open_failures` | the UART driver is installed; failed installs since boot. `open: false` with a mode other than `off` = "receiver UART closed (reopening)": `gnss_link` reopens it on its own |
 | `link.hands_off` | the link refuses every write and lease (receiver maintenance) |
 | `recovery` | `gnss/recovery` as stored, `health_recovery_mode_t` (a stored value out of range reads as `full`, as health reads it) |
+| `first_apply_held` | `gnss/hold` is stored: the receiver's first configuration is held until the user applies. A build with `CONFIG_STATION_HOLD_FIRST_APPLY` (bench builds, the `sdkconfig.hold` overlay) writes it once at boot on a device whose profile was never applied and whose `gnss/autocfg` was never set, together with `gnss/autocfg` = 0 and `gnss/recovery` = 2 (`alerts_only`, if unset), before anything reaches the receiver; it stays in NVS whatever build runs later. While it is stored the station sends the receiver only queries (version, configuration dump, base mode) and a loader prompt met during detection gets no restart key (`receiver_in_loader`, listen-only; the user's receiver restart still works). The first successful apply erases it, and so does `PUT /api/gnss/profile` with `autocfg: true`; a factory reset erases it with the other user settings. `GET /api/gnss/apply/preview` lists what the apply would send |
 | `profile.antenna_*` | the base antenna descriptor the receiver publishes in 1033: `antenna_model` the IGS antenna name with its radome (`""` = leave the receiver's own value, the default), `antenna_serial`, `antenna_setup_id` 0-255; serial and setup ID only matter with a model (stored cleared without one) |
 | `rx_settings` | what the receiver's configuration dump said at the last apply session this boot (`station_status_t.rx_settings`): `valid` false and every value unknown (`unknown` / `null`) after a reboot until the next apply. `b1cb2a`, `mmp` (`um98x_setting_t`): BeiDou B1C/B2a observations in RTCM, multipath mitigation; `mask_deg` the elevation mask (0.1°); `antenna` the descriptor the receiver holds (`null` = not read). `age_s` since the read-back, `read_unix` its time (`null` without a clock then). MMP and the mask are shown only, never sent (PROVISIONAL, to be confirmed on hardware) |
 | `apply_steps` | outcome of the antenna and B1C/B2a steps of the last apply session (sent only when the read-back asked for them; a refusal does not fail the session): `sent`, `ok` (accepted), `reply` the receiver's refusal text or `"timeout"` (`null` unless refused). The UI words an antenna refusal "antenna model rejected: <reply>" |
@@ -662,6 +667,10 @@ reads it every tick, a step already running completes).
              "antenna_model": "TRM59800.00     SCIS", "antenna_serial": "5000123", "antenna_setup_id": 0},
  "autocfg": true, "recovery": "full"}
 ```
+
+`autocfg: true` also ends the first-apply hold (`gnss/hold` erased, see
+`first_apply_held`): the station configures the receiver as usual from
+then on.
 
 The profile is stored with `um98x_profile_encode()` (validated by
 `um98x_profile_valid()`, which has the last word) and, when it differs from
@@ -699,7 +708,43 @@ alone changes nothing on the receiver), `409 settings_unavailable`.
 
 Empty body. `202 {"accepted": true}`. Errors: `409 journal_open`,
 `409 safe_mode`, `409 receiver_maintenance` (nothing is sent to the
-receiver then), `409 unsupported_model`.
+receiver then), `409 unsupported_model`. With the first configuration
+held (`first_apply_held`) this is the user's confirmation: the apply runs
+once the receiver streams, and its success erases `gnss/hold`
+(`gnss/autocfg` and `gnss/recovery` stay as they are; the UI turns them on
+afterwards when the user asked for it).
+
+### `GET /api/gnss/apply/preview` (adm)
+
+What an apply session would send to the receiver, in order, for the user
+to confirm the held first configuration. Static: it is built from the
+stored profile (the default one when none is stored) and the link's
+current baud, without a read-back (the conditional steps depend on one,
+and reading it needs a configuring session: `UNLOG COM1` is itself a
+write). Nothing is sent.
+
+```json
+{"steps": [{"text": "UNLOG COM1", "kind": "write", "when": "always", "saved": false},
+           {"text": "VERSIONA", "kind": "query", "when": "always", "saved": false},
+           {"text": "CONFIG", "kind": "query", "when": "always", "saved": false},
+           {"text": "MODE", "kind": "query", "when": "always", "saved": false},
+           {"text": "CONFIG SIGNALGROUP 3 6", "kind": "write", "when": "if_differs", "saved": true},
+           {"text": "MODE BASE 1234 TIME 600 0", "kind": "write", "when": "if_differs", "saved": false},
+           {"text": "CONFIG RTCMB1CB2A ENABLE", "kind": "write", "when": "if_off", "saved": false},
+           {"text": "RTCM1005 COM1 1", "kind": "write", "when": "always", "saved": false},
+           {"text": "SAVECONFIG", "kind": "write", "when": "always", "saved": true}],
+ "saveconfig": true}
+```
+
+| Field | Notes |
+|---|---|
+| `steps[].text` | the command as the session writes it (the plan builder's own text); `RTCM<msg> COM1 <period>` once per profile message, `CONFIG COM1 <baud>` only when the profile's baud is not the link's, `CONFIG BASEANTENNAMODEL ...` only with an antenna model, `GPGSV COM1 10` only with satellite-in-view output in the profile; a fixed position is sent as ECEF with 4 decimals |
+| `steps[].kind` | `um98x_preview_kind_t`: `query` (reads the receiver), `write` (changes its running configuration) |
+| `steps[].when` | `um98x_preview_when_t`: `always`; `if_differs` (only when the read-back differs from the profile); `if_off` (only when the read-back shows the setting off) |
+| `steps[].saved` | the command saves to the receiver's stored configuration by itself: `CONFIG SIGNALGROUP` (the receiver saves it and restarts) and `SAVECONFIG` |
+| `saveconfig` | the list ends with `SAVECONFIG`, which saves the receiver's whole running configuration (also whatever was changed on it from elsewhere) |
+
+Errors: `409 safe_mode`.
 
 ### `POST /api/gnss/position/lock` (adm)
 
@@ -1642,6 +1687,36 @@ attachment (`flash-capture-<version>.txt`; at most the last 256 KB; data
 frames as one summary line each). `404 not_found` in other builds. Read on
 the worker like the other downloads.
 
+### `GET /api/diag/frame-times`
+
+Bench builds only (the receiver link's bench hooks,
+`CONFIG_GNSS_LINK_BENCH_HOOKS`): the last recording of the bench console's
+`ftimes` (frame and drain-pass times of the receiver link) as a
+`text/plain` CSV attachment (`frame-times-<version>.csv`). `404 not_found`
+in other builds. Read on the worker like the other downloads. Times are
+`esp_timer` microseconds; the first line pairs them with the system clock
+(`unix_ms` empty and `clock=none` while SNTP has not set it; the clock is
+never the one derived from the receiver's own epochs):
+
+```
+# esp_timer_us=123456789,unix_ms=1760000000000,clock=sntp,records=5021,full=0,running=0
+# F,read_us,published_us,msg,len,sys,epoch,mmb,held
+# P,begin_us,end_us,bytes,capped,next_wait_ms,gap_us
+# S,begin_us,end_us,where
+P,120400118,120400410,1180,0,20,941204
+F,120400150,120400221,1077,402,gps,270524000,1,0
+S,130000000,135000012,rx
+```
+
+`F` one RTCM frame: when the read that completed it returned, when the
+sinks returned (read to published), message number, length, for an MSM the
+constellation (`gnss_sys_t`) and the epoch time field as sent, its
+multiple-message bit, and `held` (a lease held it back, not published).
+`P` one drain pass that read data: begin, end, bytes, whether it stopped
+at the drain cap (the next event wait is then 0), that next wait, and the
+time since the previous pass ended (the reader was away). `S` a bench
+stall: `rx` (the RX task) or `raw` (inside a RAW-lease read).
+
 ### `PUT /api/diag/log-level`
 
 `{"tag": "station", "level": "debug"}`: `tag` <= 15 characters or `"*"`;
@@ -2037,6 +2112,8 @@ after it). The journal's `a` and `b` carry these C values.
 | `um98x_base_mode_t` | `survey_in`, `fixed` |
 | `um98x_pos_source_t` | `none`, `survey`, `averaged`, `user` |
 | `um98x_setting_t` | `unknown`, `on`, `off` |
+| `um98x_preview_kind_t` | `query`, `write` |
+| `um98x_preview_when_t` | `always`, `if_differs`, `if_off` |
 | `station_live_sky_t` | `off`, `pending`, `on`, `on_profile`, `blocked`, `stopping` |
 | `station_live_why_t` | `none`, `busy`, `not_streaming`, `maintenance`, `autocfg_off`, `unsupported`, `reconfigured`, `rejected`, `no_answer`, `flash`, `not_running` |
 | `station_live_end_t` | `none`, `user`, `expired`, `idle`, `flash` |

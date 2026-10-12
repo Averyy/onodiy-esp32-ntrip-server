@@ -90,6 +90,13 @@ bool web_ntrip_backoff_parse(const char *s, ntrip_backoff_profile_t *out);
 bool web_log_level_parse(const char *s, esp_log_level_t *out);
 bool web_recovery_mode_parse(const char *s, health_recovery_mode_t *out);
 
+/* ---- receiver: apply preview ------------------------------------------------------------ */
+
+/** um98x_preview_kind_t ("query", "write"). */
+const char *web_preview_kind_name(uint8_t v);
+/** um98x_preview_when_t ("always", "if_differs", "if_off"). */
+const char *web_preview_when_name(uint8_t v);
+
 #ifdef __cplusplus
 }
 #endif

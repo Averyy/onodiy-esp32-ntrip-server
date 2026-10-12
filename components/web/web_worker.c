@@ -17,8 +17,10 @@
  * confirmation (released after 15 min without one) and the safe-mode exit,
  * which reboots and therefore must not run on the server task.
  */
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/time.h>
 
 #include "diag.h"
 #include "esp_app_desc.h"
@@ -31,7 +33,9 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "fw_update.h"
+#include "gnss_link.h"
 #include "lifecycle.h"
+#include "network.h"
 #include "pkg_store.h"
 #include "sdkconfig.h"
 #include "station.h"
@@ -54,6 +58,7 @@ typedef enum {
     JOB_COREDUMP,
     JOB_LOG_TEXT,
     JOB_FLASH_CAPTURE,
+    JOB_FRAME_TIMES,
     JOB_RELEASE_EXPIRED,
     JOB_SAFE_MODE_CLEAR,
 } job_kind_t;
@@ -546,6 +551,48 @@ static void send_flash_capture(httpd_req_t *req)
     (void)httpd_resp_send_chunk(req, NULL, 0);
 }
 
+/* Bench builds: the receiver link's frame and drain-pass times as CSV. */
+static void send_frame_times(httpd_req_t *req)
+{
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+    static network_status_t ns;
+    bool synced = network_get_status(&ns) == ESP_OK && ns.time_synced;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    int64_t timer_us = esp_timer_get_time();
+    gnss_link_timing_info_t info;
+    (void)gnss_link_bench_timing_read(0, NULL, 0, &info);
+    char unix_ms[24] = "";
+    if (synced) {
+        snprintf(unix_ms, sizeof(unix_ms), "%" PRId64, (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000);
+    }
+    download_headers(req, "text/plain; charset=utf-8", "frame-times", "csv");
+    int n = snprintf((char *)s_io, sizeof(s_io),
+                     "# esp_timer_us=%" PRId64 ",unix_ms=%s,clock=%s,records=%" PRIu32 ",full=%u,running=%u\n"
+                     "# F,read_us,published_us,msg,len,sys,epoch,mmb,held\n"
+                     "# P,begin_us,end_us,bytes,capped,next_wait_ms,gap_us\n"
+                     "# S,begin_us,end_us,where\n",
+                     timer_us, unix_ms, synced ? "sntp" : "none", info.count, info.full ? 1u : 0u,
+                     info.running ? 1u : 0u);
+    if (n < 0 || httpd_resp_send_chunk(req, (const char *)s_io, n) != ESP_OK) {
+        return;
+    }
+    size_t cursor = 0;
+    for (;;) {
+        size_t len = gnss_link_bench_timing_csv(&cursor, (char *)s_io, sizeof(s_io));
+        if (len == 0) {
+            break;
+        }
+        if (httpd_resp_send_chunk(req, (const char *)s_io, (ssize_t)len) != ESP_OK) {
+            return;
+        }
+    }
+    (void)httpd_resp_send_chunk(req, NULL, 0);
+#else
+    web_send_err(req, WEB_ERR_NOT_FOUND);
+#endif
+}
+
 /* ---- task ---------------------------------------------------------------------------------------------- */
 
 static void worker(void *arg)
@@ -577,6 +624,9 @@ static void worker(void *arg)
             break;
         case JOB_FLASH_CAPTURE:
             send_flash_capture(job.req);
+            break;
+        case JOB_FRAME_TIMES:
+            send_frame_times(job.req);
             break;
         case JOB_RELEASE_EXPIRED:
             release_expired();
@@ -767,6 +817,19 @@ esp_err_t web_download_flash_capture(web_req_t *r)
         return web_send_err(r->req, WEB_ERR_BUSY);
     }
     return ESP_OK;
+}
+
+esp_err_t web_download_frame_times(web_req_t *r)
+{
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+    job_t job = { .kind = JOB_FRAME_TIMES };
+    if (!queue_async(r->req, &job)) {
+        return web_send_err(r->req, WEB_ERR_BUSY);
+    }
+    return ESP_OK;
+#else
+    return web_send_err(r->req, WEB_ERR_NOT_FOUND);
+#endif
 }
 
 esp_err_t web_download_log_text(web_req_t *r, bool prev_boot)

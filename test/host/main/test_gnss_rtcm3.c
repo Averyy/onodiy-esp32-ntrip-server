@@ -252,3 +252,97 @@ TEST_CASE("MSM signal IDs map to band buckets", "[gnss_rtcm3]")
                            gnss_rtcm3_msm_band_mask(GNSS_SYS_BEIDOU, (1u << 1) | (1u << 31)));
     TEST_ASSERT_EQUAL_HEX8(0, gnss_rtcm3_msm_band_mask(GNSS_SYS_NAVIC, UINT32_MAX));
 }
+
+/* ---- MSM epoch time on the GPS time scale ---------------------------------------- */
+
+#define WEEK_MS GNSS_RTCM3_WEEK_MS
+#define DAY_MS  GNSS_RTCM3_DAY_MS
+#define HOUR_MS 3600000LL
+
+/* GPS week 2400 starts on 2026-01-04 (Sunday) at 00:00:00 GPS time. */
+#define W2400 (2400LL * WEEK_MS)
+
+TEST_CASE("MSM epoch to GPS time: GPS time of week near the week wrap", "[gnss_rtcm3]")
+{
+    int64_t out = 0;
+    /* An epoch from the end of week 2400, read just after the wrap: it stays in week 2400. */
+    TEST_ASSERT_TRUE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_GPS, 604799500u, W2400 + WEEK_MS + 300, &out));
+    TEST_ASSERT_EQUAL_INT64(W2400 + 604799500LL, out);
+    /* An epoch from the start of week 2401, read just before the wrap (a fast clock): week 2401. */
+    TEST_ASSERT_TRUE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_GPS, 200u, W2400 + 604799900LL, &out));
+    TEST_ASSERT_EQUAL_INT64(W2400 + WEEK_MS + 200, out);
+    /* Mid-week: the same week. */
+    TEST_ASSERT_TRUE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_GPS, 270524000u, W2400 + 270524850LL, &out));
+    TEST_ASSERT_EQUAL_INT64(W2400 + 270524000LL, out);
+    /* Out of range, no clock, no MSM. */
+    TEST_ASSERT_FALSE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_GPS, (uint32_t)WEEK_MS, W2400, &out));
+    TEST_ASSERT_FALSE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_GPS, 1000u, 0, &out));
+    TEST_ASSERT_FALSE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_SBAS, 1000u, W2400, &out));
+    TEST_ASSERT_FALSE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_COUNT, 1000u, W2400, &out));
+    TEST_ASSERT_FALSE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_GPS, 1000u, W2400, NULL));
+}
+
+TEST_CASE("MSM epoch to GPS time: Galileo, QZSS and NavIC count as GPS", "[gnss_rtcm3]")
+{
+    const gnss_sys_t same[] = { GNSS_SYS_GALILEO, GNSS_SYS_QZSS, GNSS_SYS_NAVIC };
+    const uint32_t fields[] = { 0u, 1000u, 270524000u, 604799999u };
+    for (size_t s = 0; s < sizeof(same) / sizeof(same[0]); s++) {
+        for (size_t f = 0; f < sizeof(fields) / sizeof(fields[0]); f++) {
+            int64_t now = W2400 + fields[f] + 700;
+            int64_t gps = 0;
+            int64_t other = 0;
+            TEST_ASSERT_TRUE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_GPS, fields[f], now, &gps));
+            TEST_ASSERT_TRUE(gnss_rtcm3_epoch_gps_ms(same[s], fields[f], now, &other));
+            TEST_ASSERT_EQUAL_INT64(gps, other);
+        }
+    }
+}
+
+TEST_CASE("MSM epoch to GPS time: BeiDou time is 14 s behind GPS", "[gnss_rtcm3]")
+{
+    int64_t out = 0;
+    TEST_ASSERT_TRUE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_BEIDOU, 1000u, W2400 + 15500, &out));
+    TEST_ASSERT_EQUAL_INT64(W2400 + 15000, out);
+    /* The BeiDou week ends 14 s after the GPS week: its last seconds fall into the next GPS week. */
+    TEST_ASSERT_TRUE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_BEIDOU, 604790000u, W2400 + WEEK_MS + 4300, &out));
+    TEST_ASSERT_EQUAL_INT64(W2400 + WEEK_MS + 4000, out);
+    /* BeiDou second 0 of a week is GPS second 14 of it. */
+    TEST_ASSERT_TRUE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_BEIDOU, 0u, W2400 + 14200, &out));
+    TEST_ASSERT_EQUAL_INT64(W2400 + 14000, out);
+    TEST_ASSERT_FALSE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_BEIDOU, (uint32_t)WEEK_MS, W2400, &out));
+}
+
+/* GLONASS epoch field: day of week (0 = Sunday) and ms of the day in Moscow time. */
+static uint32_t glo_field(unsigned dow, int64_t tod_ms)
+{
+    return ((uint32_t)dow << 27) | (uint32_t)tod_ms;
+}
+
+TEST_CASE("MSM epoch to GPS time: GLONASS around 21:00 UTC and the Moscow day change", "[gnss_rtcm3]")
+{
+    int64_t out = 0;
+    /* Monday 20:59:59 UTC = Monday 23:59:59 Moscow: GPS Monday 21:00:17. */
+    int64_t mon_2059_59_utc = W2400 + 1 * DAY_MS + 20 * HOUR_MS + 59 * 60000 + 59000;
+    int64_t gps = mon_2059_59_utc + GNSS_RTCM3_GPS_UTC_LEAP_S * 1000;
+    TEST_ASSERT_TRUE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_GLONASS, glo_field(1, 23 * HOUR_MS + 59 * 60000 + 59000),
+                                             gps + 400, &out));
+    TEST_ASSERT_EQUAL_INT64(gps, out);
+    /* Two seconds later Moscow is on Tuesday: day 2, 1 s into the day. */
+    TEST_ASSERT_TRUE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_GLONASS, glo_field(2, 1000), gps + 2400, &out));
+    TEST_ASSERT_EQUAL_INT64(gps + 2000, out);
+    /* Sunday 01:00 Moscow is Saturday 22:00 UTC: the GPS week before. */
+    int64_t sat_2200_gps = W2400 - 2 * HOUR_MS + GNSS_RTCM3_GPS_UTC_LEAP_S * 1000;
+    TEST_ASSERT_TRUE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_GLONASS, glo_field(0, HOUR_MS), sat_2200_gps + 900, &out));
+    TEST_ASSERT_EQUAL_INT64(sat_2200_gps, out);
+    /* Day unknown (7): the nearest day. */
+    TEST_ASSERT_TRUE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_GLONASS, glo_field(7, 1000), gps + 2400, &out));
+    TEST_ASSERT_EQUAL_INT64(gps + 2000, out);
+    /* A time of day past the day (and its leap second) is not a GLONASS time. */
+    TEST_ASSERT_FALSE(gnss_rtcm3_epoch_gps_ms(GNSS_SYS_GLONASS, glo_field(2, DAY_MS + 1000), gps, &out));
+}
+
+TEST_CASE("MSM epoch to GPS time: the leap seconds and the GPS epoch agree with the ledger's", "[gnss_rtcm3]")
+{
+    TEST_ASSERT_EQUAL(18, GNSS_RTCM3_GPS_UTC_LEAP_S);
+    TEST_ASSERT_EQUAL_INT64(315964800000LL, GNSS_RTCM3_GPS_EPOCH_UNIX_MS);
+}

@@ -50,4 +50,19 @@ menu "Station: GNSS link"
             inspection, reply matching) run on it. PROVISIONAL, to be
             confirmed on hardware from the task's stack high-water mark.
 
+    config GNSS_LINK_BENCH_HOOKS
+        bool "Bench hooks in the receiver link (bench builds only)"
+        depends on BENCH_CONSOLE
+        default y
+        help
+            Test hooks the bench console drives: an RX task stall (the
+            reader sleeps without reading or feeding the task watchdog), a
+            one-shot stall inside the next RAW-lease read, a recorder of
+            frame and drain-pass times in a static PSRAM ring (read to
+            published latency, drain behaviour after a stall, delay of each
+            epoch against its MSM time), the loader prompt detector in
+            report-only mode, and closing the UART driver so its reopen
+            schedule installs it again. Nothing runs unless a bench command
+            asks for it. The release job refuses a build with this on.
+
 endmenu

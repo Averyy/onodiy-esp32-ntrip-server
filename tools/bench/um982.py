@@ -17,12 +17,36 @@ which report state and change nothing:
 `send` also accepts these read-only one-shots without --write:
   BESTNAVXYZA BESTSATA GPGGA GPGSA GPRMC GPGST AGCA RTKSTATUSA SATSINFOA
   SATELLITEA BASEPOSA BASEINFOA RECTIMEA JAMSTATUSA RTCMSTATUSA
---find-baud additionally sends VERSIONA at each candidate baud until one answers.
+--find-baud listens at each candidate baud, then sends VERSIONA at each until
+one answers: only for a receiver whose application is known to run; never
+after a failed or interrupted receiver update or a bootprobe run that did not
+end with exit 0 (its queries at many bauds could reach a loader menu, where
+garbled bytes may read as menu keys). There, listen first (below).
+
+Nothing is sent at all when the listen-first window (or the baud search's
+listening) hears the receiver's loader ("boot>" or its menu text): the
+receiver waits at its loader, and only a power-cycle (or bootprobe, which
+sends "6" only at a menu that numbers it) brings it back. Exit status 3.
+
+After a failed or interrupted receiver update, or a bootprobe run that did
+not end with exit 0, or when the receiver does not answer:
+  1. listen only: uv run capture.py --receiver <port> --receiver-baud 460800 --duration 20,
+     and the same with --receiver-baud 115200;
+  2. "boot>" seen: the receiver is at its loader: power-cycle it (or run
+     bootprobe, which sends 6 only at a menu that numbers it); never um982.py
+     at that baud;
+  3. application output seen at a baud: uv run um982.py --port <port> --baud <that baud>;
+  4. nothing at either: power-cycle, then step 1 again; still silent: stop.
 
 Anything else changes the receiver and needs --write; the tool prints the
 exact bytes first and sends only after you type "yes". Never sent at all,
 not even with --write: FRESET, RESET with parameters, bootloader keys
-("T@", bare menu numbers) or any firmware/bootloader command.
+("T@", bare menu numbers) or any firmware/bootloader command. A change made
+here is not saved by itself, but the station's next configuration of the
+receiver (its first apply, a profile change, a re-apply after drift, the
+recovery ladder's reconfigure step) ends with SAVECONFIG, which saves the
+whole running configuration, MASK and MMP changes included: undo what
+should not stay.
 
 Subcommands:
   query            day-one set above, every reply saved verbatim, then a summary (default)
@@ -63,6 +87,46 @@ from benchlib.unicore import (
 
 CONFIG_KEYS = ("SIGNALGROUP", "COM1", "COM2", "COM3", "RTCMB1CB2A", "BASEANTENNAMODEL", "MMP", "UNDULATION",
                "ALLEPHRTCM", "RTCMOUTPUT", "RTCMCLOCKOFFSET", "SBAS", "CMDFORMAT")
+
+EXIT_OK = 0
+EXIT_NOT_CONFIRMED = 1
+EXIT_NO_PORT = 2       # cannot open the port, or no baud answered
+EXIT_LOADER = 3        # the receiver's loader was heard: nothing was sent
+
+# The receiver's loader: its prompt (no line end) and words of its banner and menu.
+LOADER_PROMPT = b"boot>"
+LOADER_WORDS = (b"soft reset", b"efuse from uart", b"default action:", b"uart baudrate:", b"load os")
+LISTEN_MIN_S = 1.0     # the listen-first window is never shorter: it is the loader check
+
+
+def loader_heard(data: bytes) -> bool:
+    """Bytes that only the receiver's loader prints: its prompt, or its banner and menu words."""
+    low = bytes(data).lower()
+    return LOADER_PROMPT in low or any(w in low for w in LOADER_WORDS)
+
+
+def post_failure_steps(port: str = "<port>") -> list[str]:
+    """What to do after a failed or interrupted receiver update, a bootprobe run that did not end with exit 0,
+    or a receiver that does not answer: listen first, send nothing to a receiver that may sit at its loader."""
+    return [
+        "What to do (listen first; send nothing until the application is heard):",
+        f"  1. listen only: `uv run capture.py --receiver {port} --receiver-baud 460800 --duration 20`, "
+        "and the same with --receiver-baud 115200;",
+        "  2. \"boot>\" seen: the receiver is at its loader: power-cycle it (or run bootprobe, which sends 6 only "
+        "at a menu that numbers it); never um982.py at that baud;",
+        f"  3. application output seen at a baud: `uv run um982.py --port {port} --baud <that baud>`;",
+        "  4. nothing at either: power-cycle, then step 1 again; still silent: stop.",
+    ]
+
+
+def loader_advice(port: str, baud: int) -> list[str]:
+    return [
+        f"The receiver's loader was heard at {baud} (\"boot>\" or its menu): it waits at its loader. "
+        "Nothing was sent.",
+        "What to do: power-cycle the receiver (unplug the board: both USB-C cables), then listen first "
+        f"(`uv run capture.py --receiver {port} --receiver-baud 460800 --duration 20`, and at 115200) and use "
+        "um982.py only at a baud where the application is heard.",
+    ]
 
 
 class Out:
@@ -111,23 +175,34 @@ def describe_reply(reply) -> str:
     return f"{ack}; {len(reply.data)} data line(s) in {reply.elapsed:.2f} s"
 
 
-def find_baud(device: str, out: Out) -> int | None:
-    """Listen at each baud, then ask VERSIONA at each (only with --find-baud)."""
-    bauds = (115200, 460800, 921600, 230400, 57600, 38400, 19200, 9600)
+FIND_BAUDS = (115200, 460800, 921600, 230400, 57600, 38400, 19200, 9600)
+
+
+def find_baud(device: str, out: Out, opener=open_serial, listen_s: float = 2.0) -> int | None:
+    """Listen at each baud, then ask VERSIONA at each (the baud search, only when asked for).
+
+    The listen phase stops the whole search at the loader's text: then
+    nothing is sent at all (the ask phase never runs) and the result is
+    -baud (the baud it was heard at)."""
     for phase in ("listen", "ask"):
-        for baud in bauds:
-            ser = open_serial(device, baud, timeout=0.05)
+        for baud in FIND_BAUDS:
+            ser = opener(device, baud, timeout=0.05)
             try:
                 sp = StreamSplitter()
                 if phase == "ask":
                     ser.write(b"\r\nVERSIONA\r\n")
                     ser.flush()
-                end = time.time() + 2.0
+                end = time.time() + (listen_s if phase == "listen" else 2.0)
                 items = []
+                raw = bytearray()
                 while time.time() < end:
                     data = ser.read(4096)
                     if data:
+                        raw += data
                         items += sp.feed(data)
+                if loader_heard(raw):
+                    out(f"  {phase} @ {baud}: the receiver's loader (\"boot>\" or its menu): stopped, nothing sent")
+                    return -baud
                 good = [i for i in items if i.kind == "rtcm" or (i.kind == "text" and i.check not in ("bad", "none"))]
                 out(f"  {phase} @ {baud}: {len(good)} valid item(s)")
                 if good:
@@ -168,7 +243,7 @@ def summarise(replies: dict, out: Out) -> dict:
             if v["model"] != "UM982":
                 out("   NOTE: the station firmware only configures and flashes a receiver that reports UM982")
     else:
-        out("\n== Receiver: no VERSIONA reply (wrong port or baud? try --find-baud)")
+        out("\n== Receiver: no VERSIONA reply (wrong port or baud? listen first, as below)")
     for key in ("CONFIG", "MASK"):
         r = replies.get(key)
         if not (r and r.data):
@@ -425,7 +500,7 @@ def e6_check(sess, run_dir: Path, out: Out, args, stop: StopFlag, counter: list[
     return res
 
 
-def main() -> int:
+def main(argv: list[str] | None = None, opener=open_serial) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
         epilog=__doc__.split("\n\n", 1)[1],
@@ -434,9 +509,12 @@ def main() -> int:
     ap.add_argument("--port", default="auto", help="UM982 COM2 port, or 'auto' (CH340 bridge by VID/PID; default)")
     ap.add_argument("--baud", type=int, default=115200, help="port baud (default 115200, the receiver's factory rate)")
     ap.add_argument("--find-baud", action="store_true",
-                    help="listen at each baud, then send VERSIONA (read-only) at each until one answers")
+                    help="listen at each baud, then send VERSIONA (read-only) at each until one answers: only for a "
+                         "receiver whose application is known to run; never after a failed or interrupted receiver "
+                         "update or a bootprobe run that did not end with exit 0")
     ap.add_argument("--listen-first", type=float, default=2.0,
-                    help="seconds to listen before sending anything, to log what the port streams (default 2)")
+                    help="seconds to listen before sending anything, to log what the port streams and to stop at "
+                         "the receiver's loader (default 2, at least 1)")
     add_log_args(ap)
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("query", help="day-one read-only query set (default)")
@@ -451,7 +529,7 @@ def main() -> int:
     ep.add_argument("--full", action="store_true", help="watch the whole --observe time even once E6 shows up")
     ep.add_argument("--msm", action="store_true", help="also enable RTCM1097 on COM2 during the watch (unsaved; removed after)")
     ep.add_argument("--force-unknown", action="store_true", help="go on even if the current group cannot be read")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     args.cmd = args.cmd or "query"
 
     if args.cmd == "send":
@@ -479,44 +557,65 @@ def main() -> int:
         to_confirm = [normalise(c) for c in args.commands if not is_read_only(c)]
         if to_confirm and not confirm(out, args.port, args.baud, to_confirm):
             (run_dir / "summary.txt").write_text("\n".join(out.lines) + "\n", encoding="utf-8")
-            return 1
+            return EXIT_NOT_CONFIRMED
+
+    def done(code: int, lines: list[str]) -> int:
+        for line in lines:
+            out(line)
+        (run_dir / "summary.txt").write_text("\n".join(out.lines) + "\n", encoding="utf-8")
+        return code
 
     if args.find_baud:
         out("finding the baud (listen first, then VERSIONA at each candidate):")
-        found = find_baud(args.port, out)
+        found = find_baud(args.port, out, opener=opener)
+        if found is not None and found < 0:
+            return done(EXIT_LOADER, loader_advice(args.port, -found))
         if not found:
-            out("no baud answered; check the cable/port (uv run ports.py) and that the receiver is powered")
-            return 2
+            return done(EXIT_NO_PORT, ["no baud answered; check the cable/port (uv run ports.py) and that the "
+                                       "receiver is powered"] + post_failure_steps(args.port))
         out(f"receiver answers at {found}")
         args.baud = found
 
     try:
-        ser = open_serial(args.port, args.baud, timeout=0.05)
+        ser = opener(args.port, args.baud, timeout=0.05)
     except (serial.SerialException, OSError) as e:
         out(f"cannot open {args.port}: {e}")
-        return 2
+        return EXIT_NO_PORT
     sess = UnicoreSession(ser, run_dir)
     result: dict = {"port": args.port, "baud": args.baud, "command": args.cmd}
     counter = [0]
+    code = EXIT_OK
     try:
-        if args.listen_first > 0:
-            items = sess.listen(args.listen_first)
-            kinds: dict[str, int] = {}
-            for it in items:
-                key = f"RTCM {it.rtcm_type}" if it.kind == "rtcm" else (
-                    it.text.split(",", 1)[0][:12] if it.kind == "text" else it.kind)
-                kinds[key] = kinds.get(key, 0) + 1
-            desc = ", ".join(f"{k} x{v}" for k, v in sorted(kinds.items())) or "nothing (quiet port)"
-            out(f"listened {args.listen_first:g} s before sending: {desc}")
-            result["unsolicited"] = kinds
+        listen_s = max(args.listen_first, LISTEN_MIN_S)
+        items = sess.listen(listen_s)
+        kinds: dict[str, int] = {}
+        for it in items:
+            key = f"RTCM {it.rtcm_type}" if it.kind == "rtcm" else (
+                it.text.split(",", 1)[0][:12] if it.kind == "text" else it.kind)
+            kinds[key] = kinds.get(key, 0) + 1
+        desc = ", ".join(f"{k} x{v}" for k, v in sorted(kinds.items())) or "nothing (quiet port)"
+        out(f"listened {listen_s:g} s before sending: {desc}")
+        result["unsolicited"] = kinds
+        # The loader's prompt has no line end: look at the bytes themselves (the session keeps them all).
+        sess.rx_raw.flush()
+        heard = (run_dir / "session-rx.bin").read_bytes()
+        if loader_heard(heard):
+            result["loader_heard"] = True
+            for line in loader_advice(args.port, args.baud):
+                out(line)
+            code = EXIT_LOADER
+            return code
         sess.write_raw("\r\n")
         time.sleep(0.2)
         if args.cmd == "query":
             out("\n== Day-one queries (read-only)")
             replies = run_query(sess, run_dir, out, DAY_ONE, counter)
             result["summary"] = summarise(replies, out)
-            if not replies["VERSIONA"].answered and not args.find_baud:
-                out("\nNo answer to VERSIONA. Check the port (uv run ports.py), or try --find-baud.")
+            if not replies["VERSIONA"].answered:
+                out("\nNo answer to VERSIONA. Check the port (uv run ports.py), and do not probe other bauds on a "
+                    "receiver that may sit at its loader.")
+                for line in post_failure_steps(args.port):
+                    out(line)
         elif args.cmd == "send":
             result["replies"] = []
             for c in args.commands:
@@ -538,7 +637,7 @@ def main() -> int:
         (run_dir / "summary.txt").write_text("\n".join(out.lines) + "\n", encoding="utf-8")
         (run_dir / "summary.json").write_text(json.dumps(result, indent=2, default=str) + "\n", encoding="utf-8")
         print(f"\nlog: {run_dir}  (session.log has every byte sent and received)")
-    return 0
+    return code
 
 
 if __name__ == "__main__":

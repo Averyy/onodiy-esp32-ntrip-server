@@ -317,13 +317,13 @@ const DASH = '–';
 const NB = '\u00a0';
 
 const fmt = {
-  /** Duration in seconds, e.g. "7 min 49 s", "3 h 12 min". */
+  /** Duration in seconds, e.g. "7 min 49 s", "3 h 12 min", "1 h" (a zero second unit is left out). */
   dur(s) {
     if (s === null || s === undefined || isNaN(s)) return DASH;
     s = Math.max(0, Math.round(s));
     const d = Math.floor(s / 86400), hh = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
-    if (d) return d + NB + 'd ' + hh + NB + 'h';
-    if (hh) return hh + NB + 'h ' + m + NB + 'min';
+    if (d) return d + NB + 'd' + (hh ? ' ' + hh + NB + 'h' : '');
+    if (hh) return hh + NB + 'h' + (m ? ' ' + m + NB + 'min' : '');
     if (m) return m + NB + 'min' + (ss ? ' ' + ss + NB + 's' : '');
     return ss + NB + 's';
   },

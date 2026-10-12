@@ -40,6 +40,7 @@
 
 #include "board.h"
 #include "driver/uart.h"
+#include "esp_attr.h"
 #include "esp_intr_alloc.h"
 #include "esp_log.h"
 #include "esp_task_wdt.h"
@@ -122,6 +123,25 @@ static gnss_link_sinks_t s_cur;        /* sinks snapshot for the frame callback 
 static bool s_wdt_on;                  /* RX task only */
 static bool s_wdt_failed;              /* RX task only: subscription refused, do not retry */
 
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+/* Bench hooks (gnss_link.h). The recorder ring and the summary's scratch
+ * live in PSRAM; the RX task appends under s_lock and never allocates. */
+#define REC_MAX 16384u
+EXT_RAM_BSS_ATTR static gnss_link_rec_t s_rec[REC_MAX];
+EXT_RAM_BSS_ATTR static int32_t s_rec_scratch[REC_MAX];
+static uint32_t s_rec_n;               /* under s_lock */
+static bool s_rec_on;                  /* under s_lock */
+static bool s_rec_full;                /* under s_lock */
+static int64_t s_rec_start_us;         /* under s_lock */
+static int64_t s_rec_until_us;         /* under s_lock */
+static int64_t s_read_us;              /* RX task: when the read being framed returned */
+static int64_t s_pass_end_us;          /* RX task: when the previous drain pass ended (0 = none yet) */
+static uint32_t s_stall_ms;            /* under s_lock: an RX stall asked for (0 = none) */
+static bool s_stall_running;           /* under s_lock */
+static uint32_t s_raw_stall_ms;        /* under s_lock: armed RAW-read stall (0 = none) */
+static int64_t s_raw_armed_us;         /* under s_lock */
+#endif
+
 /* ---- requests to the RX task -------------------------------------------------- */
 
 typedef enum {
@@ -131,6 +151,10 @@ typedef enum {
     REQ_RESYNC,
     REQ_RESTART,
     REQ_PROMPT,
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+    REQ_OBSERVE,
+    REQ_CLOSE,
+#endif
 } req_op_t;
 
 typedef struct {
@@ -139,7 +163,7 @@ typedef struct {
     gnss_link_mode_t mode;   /* REQ_ENTER */
     const char *owner;       /* REQ_ENTER */
     uint32_t baud;           /* REQ_SET_BAUD, REQ_RESTART */
-    bool armed;              /* REQ_PROMPT */
+    bool armed;              /* REQ_PROMPT, REQ_OBSERVE */
     esp_err_t result;
 } req_t;
 
@@ -427,12 +451,74 @@ static void framer_reset(void)
     }
 }
 
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+/* One record into the ring (RX task, or the RAW reader for its stall). */
+static void rec_append(const gnss_link_rec_t *r)
+{
+    taskENTER_CRITICAL(&s_lock);
+    if (s_rec_on) {
+        if (r->t0_us >= s_rec_until_us) {
+            s_rec_on = false;
+        } else if (s_rec_n >= REC_MAX) {
+            s_rec_on = false;
+            s_rec_full = true;
+        } else {
+            s_rec[s_rec_n++] = *r;
+        }
+    }
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+static uint32_t clamp_us(int64_t us)
+{
+    return us <= 0 ? 0 : (us > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)us);
+}
+
+/* An RTCM frame, after its sinks returned (or after it was held). */
+static void rec_frame(const gnss_frame_t *fr, bool published)
+{
+    gnss_link_rec_t r = {
+        .t0_us = s_read_us,
+        .kind = GNSS_LINK_REC_FRAME,
+        .msg = fr->rtcm_msg_type,
+        .bytes = (uint16_t)fr->len,
+        .flags = published ? 0 : GNSS_LINK_REC_F_HELD,
+    };
+    gnss_sys_t sys;
+    gnss_rtcm3_msm_t h;
+    if (gnss_rtcm3_msm_type(fr->rtcm_msg_type, &sys, NULL) && gnss_rtcm3_msm_decode(fr->data, fr->len, &h)) {
+        r.flags |= (uint8_t)(GNSS_LINK_REC_F_MSM | (h.multiple_message ? GNSS_LINK_REC_F_MMB : 0u));
+        r.sys = (uint8_t)sys;
+        r.epoch = h.epoch_time;
+    }
+    r.dt_us = clamp_us(esp_timer_get_time() - s_read_us);
+    rec_append(&r);
+}
+
+static void rec_stall(int64_t begin_us, int64_t end_us, bool raw)
+{
+    gnss_link_rec_t r = {
+        .t0_us = begin_us,
+        .dt_us = clamp_us(end_us - begin_us),
+        .kind = GNSS_LINK_REC_STALL,
+        .flags = raw ? GNSS_LINK_REC_F_RAW : 0,
+    };
+    rec_append(&r);
+}
+#endif
+
 static void on_frame(const gnss_frame_t *fr, void *ctx)
 {
     (void)ctx;
     int64_t now = esp_timer_get_time();
     taskENTER_CRITICAL(&s_lock);
     gnss_link_route_t route = gnss_link_core_route(&s_core, fr->kind, now);
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+    bool rec = s_rec_on && fr->kind == GNSS_FRAME_RTCM3;
+    if (route == GNSS_LINK_ROUTE_OBSERVE) {
+        gnss_link_core_observe_hit(&s_core, fr->at);
+    }
+#endif
     taskEXIT_CRITICAL(&s_lock);
     switch (route) {
     case GNSS_LINK_ROUTE_PUBLISH:
@@ -450,10 +536,37 @@ static void on_frame(const gnss_frame_t *fr, void *ctx)
             s_cur.on_prompt(s_cur.ctx);
         }
         break;
+    case GNSS_LINK_ROUTE_OBSERVE:   /* report-only: counted by the core, nothing else */
     case GNSS_LINK_ROUTE_HOLD:
     case GNSS_LINK_ROUTE_DROP:
         break;
     }
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+    if (rec) {
+        rec_frame(fr, route == GNSS_LINK_ROUTE_PUBLISH);
+    }
+#endif
+}
+
+/* Frame one chunk the RX task read (the bench observer sees it while it is framed). */
+static void feed(const uint8_t *data, size_t n)
+{
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+    gnss_framing_stats_t f;
+    gnss_framer_get_stats(&s_framer, &f);
+    taskENTER_CRITICAL(&s_lock);
+    bool obs = s_core.observe;
+    gnss_link_core_observe_feed(&s_core, data, n, f.bytes_in);
+    taskEXIT_CRITICAL(&s_lock);
+    gnss_framer_feed(&s_framer, data, n);
+    if (obs) {
+        taskENTER_CRITICAL(&s_lock);
+        gnss_link_core_observe_fed(&s_core);
+        taskEXIT_CRITICAL(&s_lock);
+    }
+#else
+    gnss_framer_feed(&s_framer, data, n);
+#endif
 }
 
 /* Read out and drop what is buffered now; returns the byte count. */
@@ -580,6 +693,9 @@ static uint32_t drain(bool pull_stash)
     gnss_link_pass_t pass;
     gnss_link_pass_begin(&pass);
     s_cur = sinks_snapshot();
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+    int64_t begin_us = esp_timer_get_time();
+#endif
     for (;;) {
         size_t avail = 0;
         if (uart_get_buffered_data_len(s_port, &avail) != ESP_OK) {
@@ -599,14 +715,34 @@ static uint32_t drain(bool pull_stash)
         if (n <= 0) {
             break;
         }
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+        s_read_us = esp_timer_get_time();
+#endif
         gnss_link_pass_add(&pass, (size_t)n);
         count_rx((size_t)n);
-        gnss_framer_feed(&s_framer, s_rx_buf, (size_t)n);
+        feed(s_rx_buf, (size_t)n);
     }
     if (pass.done > 0) {
         publish_framing();
     }
-    return gnss_link_pass_wait_ms(&pass);
+    uint32_t wait_ms = gnss_link_pass_wait_ms(&pass);
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+    int64_t end_us = esp_timer_get_time();
+    if (pass.done > 0 || pass.capped) {
+        gnss_link_rec_t r = {
+            .t0_us = begin_us,
+            .dt_us = clamp_us(end_us - begin_us),
+            .gap_us = s_pass_end_us != 0 ? clamp_us(begin_us - s_pass_end_us) : 0,
+            .bytes = (uint16_t)(pass.done > UINT16_MAX ? UINT16_MAX : pass.done),
+            .kind = GNSS_LINK_REC_PASS,
+            .flags = pass.capped ? GNSS_LINK_REC_F_CAPPED : 0,
+            .wait_ms = (uint8_t)(wait_ms > UINT8_MAX ? UINT8_MAX : wait_ms),
+        };
+        rec_append(&r);
+    }
+    s_pass_end_us = end_us;
+#endif
+    return wait_ms;
 }
 
 /* ---- request execution -------------------------------------------------------------- */
@@ -754,7 +890,11 @@ static void exec_req(req_t *r)
         framer_reset();
         taskENTER_CRITICAL(&s_lock);
         err = gnss_link_core_release(&s_core, r->token, NULL);
+        bool detector = gnss_link_core_detector_on(&s_core);
         taskEXIT_CRITICAL(&s_lock);
+        if (detector) {
+            gnss_framer_set_prompt_detect(&s_framer, true);   /* the bench observer goes on */
+        }
         if (in_rx_task()) {
             wdt_set(true);
         }
@@ -779,14 +919,50 @@ static void exec_req(req_t *r)
             err = restart_in_place(r->baud);
         }
         break;
-    case REQ_PROMPT:
+    case REQ_PROMPT: {
         taskENTER_CRITICAL(&s_lock);
         err = gnss_link_core_set_prompt(&s_core, r->token, r->armed);
+        bool detector = gnss_link_core_detector_on(&s_core);
         taskEXIT_CRITICAL(&s_lock);
         if (err == ESP_OK) {
-            gnss_framer_set_prompt_detect(&s_framer, r->armed);
+            gnss_framer_set_prompt_detect(&s_framer, detector);
         }
         break;
+    }
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+    case REQ_OBSERVE: {
+        taskENTER_CRITICAL(&s_lock);
+        gnss_link_core_set_observe(&s_core, r->armed);
+        bool detector = gnss_link_core_detector_on(&s_core);
+        taskEXIT_CRITICAL(&s_lock);
+        gnss_framer_set_prompt_detect(&s_framer, detector);
+        err = ESP_OK;
+        break;
+    }
+    case REQ_CLOSE: {
+        taskENTER_CRITICAL(&s_lock);
+        bool may = s_driver_ok && s_core.mode == GNSS_LINK_MODE_STREAM && s_core.lease == 0;
+        if (may) {
+            /* Nobody may use the queue or the ring from here on. */
+            s_driver_ok = false;
+            s_events = NULL;
+            gnss_link_core_set_open(&s_core, false);
+        }
+        taskEXIT_CRITICAL(&s_lock);
+        if (!may) {
+            err = ESP_ERR_INVALID_STATE;
+            break;
+        }
+        err = uart_driver_delete(s_port);
+        framer_reset();
+        /* The link's own schedule installs it again, as after a failed install. */
+        s_reopen_failures = 0;
+        s_reopen_at_us = esp_timer_get_time() + (int64_t)gnss_link_core_reopen_delay_ms(0) * 1000;
+        s_reopen_logged = true;
+        s_reopen_log_us = esp_timer_get_time();
+        break;
+    }
+#endif
     }
     r->result = err;
 }
@@ -871,6 +1047,28 @@ static void serve_request(void)
 
 /* ---- RX task ------------------------------------------------------------------------ */
 
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+/* A bench stall asked for: sleep without reading the ring or the queue and
+ * without feeding the watchdog, as a starved reader would. */
+static void rx_stall_step(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    uint32_t ms = s_stall_ms;
+    s_stall_ms = 0;
+    s_stall_running = ms != 0;
+    taskEXIT_CRITICAL(&s_lock);
+    if (ms == 0) {
+        return;
+    }
+    int64_t begin = esp_timer_get_time();
+    vTaskDelay(pdMS_TO_TICKS(ms));
+    rec_stall(begin, esp_timer_get_time(), false);
+    taskENTER_CRITICAL(&s_lock);
+    s_stall_running = false;
+    taskEXIT_CRITICAL(&s_lock);
+}
+#endif
+
 static void rx_task(void *arg)
 {
     (void)arg;
@@ -894,6 +1092,9 @@ static void rx_task(void *arg)
             continue;
         }
         wdt_set(true);
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+        rx_stall_step();
+#endif
 
         if (q == NULL) {
             /* Driver closed (its install failed): reopen it on its schedule,
@@ -1277,6 +1478,35 @@ esp_err_t gnss_link_write(gnss_link_lease_t lease, const void *data, size_t len,
     return err;
 }
 
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+/* The armed one-shot stall, inside a RAW-lease read (the update path's reader). */
+static void raw_stall_step(void)
+{
+    int64_t now = esp_timer_get_time();
+    taskENTER_CRITICAL(&s_lock);
+    uint32_t ms = s_raw_stall_ms;
+    bool due = ms != 0 && now - s_raw_armed_us <= (int64_t)GNSS_LINK_BENCH_RAW_ARM_S * 1000000;
+    s_raw_stall_ms = 0;
+    taskEXIT_CRITICAL(&s_lock);
+    if (!due) {
+        return;
+    }
+    /* The reader is late, its task is not stuck: the caller's own watchdog
+     * (the flasher feeds it between reads) is fed in 1 s slices. */
+    for (uint32_t left = ms; left > 0;) {
+        uint32_t slice = left > 1000u ? 1000u : left;
+        vTaskDelay(pdMS_TO_TICKS(slice));
+        left -= slice;
+#if CONFIG_ESP_TASK_WDT_EN
+        if (esp_task_wdt_status(NULL) == ESP_OK) {
+            (void)esp_task_wdt_reset();
+        }
+#endif
+    }
+    rec_stall(now, esp_timer_get_time(), true);
+}
+#endif
+
 esp_err_t gnss_link_raw_read(gnss_link_lease_t lease, void *buf, size_t len, size_t *out_len,
                              uint32_t timeout_ms)
 {
@@ -1299,6 +1529,9 @@ esp_err_t gnss_link_raw_read(gnss_link_lease_t lease, void *buf, size_t len, siz
     if (q == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+    raw_stall_step();
+#endif
     (void)check_queue(q, true);   /* the framer is reset on release */
     uint8_t *p = buf;
     int n = uart_read_bytes(s_port, p, 1, ms_to_ticks(timeout_ms));
@@ -1348,3 +1581,191 @@ esp_err_t gnss_link_get_stats(gnss_link_stats_t *out)
     }
     return ESP_OK;
 }
+
+/* ---- bench hooks ----------------------------------------------------------------------- */
+
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+
+esp_err_t gnss_link_bench_stall(uint32_t ms, bool allow_twdt_panic)
+{
+    bool ok = (ms >= 1 && ms <= GNSS_LINK_BENCH_STALL_SAFE_MS) ||
+              (allow_twdt_panic && ms >= 10000u && ms <= GNSS_LINK_BENCH_STALL_PANIC_MS);
+    if (!ok) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_inited || s_rx_task == NULL || in_rx_task()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = ESP_OK;
+    taskENTER_CRITICAL(&s_lock);
+    if (s_core.mode == GNSS_LINK_MODE_RAW || s_stall_ms != 0 || s_stall_running) {
+        err = ESP_ERR_INVALID_STATE;
+    } else {
+        s_stall_ms = ms;
+    }
+    taskEXIT_CRITICAL(&s_lock);
+    if (err == ESP_OK) {
+        wake_rx();
+        ESP_LOGW(TAG, "bench: RX task stall of %u ms asked for%s", (unsigned)ms,
+                 ms > GNSS_LINK_BENCH_STALL_SAFE_MS ? " (past the task watchdog: a panic is expected)" : "");
+    }
+    return err;
+}
+
+bool gnss_link_bench_stall_active(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    bool active = s_stall_ms != 0 || s_stall_running;
+    taskEXIT_CRITICAL(&s_lock);
+    return active;
+}
+
+esp_err_t gnss_link_bench_raw_stall_arm(uint32_t ms)
+{
+    if (ms < 1 || ms > GNSS_LINK_BENCH_STALL_SAFE_MS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_inited) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    int64_t now = esp_timer_get_time();
+    taskENTER_CRITICAL(&s_lock);
+    s_raw_stall_ms = ms;
+    s_raw_armed_us = now;
+    taskEXIT_CRITICAL(&s_lock);
+    return ESP_OK;
+}
+
+esp_err_t gnss_link_bench_timing_start(uint32_t seconds)
+{
+    if (seconds < 1 || seconds > GNSS_LINK_BENCH_TIMING_MAX_S) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_inited) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    int64_t now = esp_timer_get_time();
+    taskENTER_CRITICAL(&s_lock);
+    s_rec_n = 0;
+    s_rec_full = false;
+    s_rec_start_us = now;
+    s_rec_until_us = now + (int64_t)seconds * 1000000;
+    s_rec_on = true;
+    taskEXIT_CRITICAL(&s_lock);
+    return ESP_OK;
+}
+
+void gnss_link_bench_timing_stop(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    s_rec_on = false;
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+static void timing_info(gnss_link_timing_info_t *info)
+{
+    int64_t now = esp_timer_get_time();
+    taskENTER_CRITICAL(&s_lock);
+    if (s_rec_on && now >= s_rec_until_us) {
+        s_rec_on = false;   /* its time is up, also when nothing was framed since */
+    }
+    info->running = s_rec_on;
+    info->full = s_rec_full;
+    info->count = s_rec_n;
+    info->capacity = REC_MAX;
+    info->started_us = s_rec_start_us;
+    info->until_us = s_rec_until_us;
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+size_t gnss_link_bench_timing_read(size_t first, gnss_link_rec_t *out, size_t cap, gnss_link_timing_info_t *info)
+{
+    gnss_link_timing_info_t i;
+    timing_info(&i);
+    if (info != NULL) {
+        *info = i;
+    }
+    if (out == NULL || first >= i.count) {
+        return 0;
+    }
+    size_t n = i.count - first < cap ? i.count - first : cap;
+    memcpy(out, &s_rec[first], n * sizeof(out[0]));   /* records below the count are never rewritten */
+    return n;
+}
+
+esp_err_t gnss_link_bench_timing_summary(bool clock_ok, int64_t unix_minus_timer_us, gnss_link_timing_summary_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    gnss_link_timing_info_t i;
+    timing_info(&i);
+    gnss_link_timing_summary(s_rec, i.count, i.full, clock_ok, unix_minus_timer_us, s_rec_scratch, REC_MAX, out);
+    return ESP_OK;
+}
+
+size_t gnss_link_bench_timing_csv(size_t *cursor, char *buf, size_t cap)
+{
+    if (cursor == NULL || buf == NULL || cap == 0) {
+        return 0;
+    }
+    buf[0] = '\0';
+    gnss_link_timing_info_t i;
+    timing_info(&i);
+    size_t used = 0;
+    while (*cursor < i.count) {
+        size_t n = gnss_link_rec_csv(&s_rec[*cursor], buf + used, cap - used);
+        if (n == 0) {
+            break;
+        }
+        used += n;
+        (*cursor)++;
+    }
+    return used;
+}
+
+esp_err_t gnss_link_bench_prompt_observe(bool on)
+{
+    if (!s_inited || in_rx_task()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    req_t r = { .op = REQ_OBSERVE, .armed = on };
+    esp_err_t err = run_req(&r);
+    if (err == ESP_OK) {
+        ESP_LOGW(TAG, "bench: loader prompt observer %s (report-only: nothing is ever sent for a hit)",
+                 on ? "on" : "off");
+    }
+    return err;
+}
+
+esp_err_t gnss_link_bench_prompt_status(gnss_link_prompt_obs_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    taskENTER_CRITICAL(&s_lock);
+    gnss_link_core_observe_get(&s_core, out);
+    taskEXIT_CRITICAL(&s_lock);
+    return ESP_OK;
+}
+
+esp_err_t gnss_link_bench_uart_close(void)
+{
+    if (!s_inited || s_rx_task == NULL || in_rx_task()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_tx, pdMS_TO_TICKS(TX_LOCK_MS)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    req_t r = { .op = REQ_CLOSE };
+    esp_err_t err = run_req(&r);
+    xSemaphoreGive(s_tx);
+    if (err == ESP_OK) {
+        ESP_LOGW(TAG, "bench: UART driver deleted: the link reopens it on its own schedule");
+    } else {
+        ESP_LOGW(TAG, "bench: UART driver not deleted: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+#endif /* CONFIG_GNSS_LINK_BENCH_HOOKS */

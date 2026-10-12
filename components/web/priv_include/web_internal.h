@@ -351,6 +351,8 @@ esp_err_t web_download_coredump(web_req_t *r);
 esp_err_t web_download_log_text(web_req_t *r, bool prev_boot);
 /** GET /api/diag/flash-capture (bench builds; 404 otherwise). */
 esp_err_t web_download_flash_capture(web_req_t *r);
+/** GET /api/diag/frame-times (bench builds with the link's bench hooks; 404 otherwise). */
+esp_err_t web_download_frame_times(web_req_t *r);
 
 /** An upload is being received or refused (one at a time). */
 bool web_upload_busy(void);

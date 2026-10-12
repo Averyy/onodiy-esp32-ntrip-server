@@ -29,7 +29,10 @@ flash image is written to a new file each run, so a QEMU left over from an
 earlier run can never write into it). Other options (`tools/qemu/run.sh
 --help`): `--no-build`, `--build-only`, `--headless LOG` (console to a
 file, for scripts), `--seconds N`, `--http-port N`, `--uart1 MODE`,
-`--no-wdt`.
+`--no-wdt`. `--overlay FILE` adds one more sdkconfig overlay after
+`sdkconfig.qemu` and builds into `build-qemu-<name>/` (`--overlay
+sdkconfig.hold` builds into `build-qemu-hold/`, where the receiver's first
+configuration waits for the user).
 
 The emulated watchdogs are live: unlike `idf.py qemu`, `run.sh` does not
 turn off the timer groups' watchdogs, so the task watchdog (TIMG0, 10 s,

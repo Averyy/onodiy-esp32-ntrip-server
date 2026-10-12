@@ -427,6 +427,7 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
         wj_uint(w, "maintenance_left_s", st->rx_maintenance ? st->maintenance_left_s : 0);
         wj_uint(w, "maintenance_chosen_s", st->rx_maintenance ? st->maintenance_chosen_s : 0);
         wj_u32_or_null(w, "next_detect_in_s", st->next_detect_in_s);
+        wj_bool(w, "first_apply_held", st->first_apply_held);
     }
     wj_obj_close(w);
 }
@@ -766,6 +767,7 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
 
     wj_bool(w, "autocfg", g->autocfg);
     wj_str(w, "recovery", web_recovery_mode_name(g->recovery));
+    wj_bool(w, "first_apply_held", st->first_apply_held);
     web_build_profile(w, "profile", &g->profile);
     rx_settings(w, st);
     wj_obj_open(w, "apply_steps");
@@ -2173,5 +2175,26 @@ void web_build_progress(wj_t *w, const web_progress_t *p)
             wj_str(w, "reason", p->last->reason);
         }
     }
+    wj_obj_close(w);
+}
+
+/* ---- receiver: apply preview ------------------------------------------------------------ */
+
+void web_build_apply_preview(wj_t *w, const um98x_preview_step_t *steps, size_t count)
+{
+    wj_obj_open(w, NULL);
+    wj_arr_open(w, "steps");
+    for (size_t i = 0; i < count; i++) {
+        const um98x_preview_step_t *s = &steps[i];
+        wj_obj_open(w, NULL);
+        str_arr(w, "text", s->text, sizeof(s->text));
+        wj_str(w, "kind", web_preview_kind_name(s->kind));
+        wj_str(w, "when", web_preview_when_name(s->when));
+        wj_bool(w, "saved", s->saved);
+        wj_obj_close(w);
+    }
+    wj_arr_close(w);
+    bool save = count > 0 && steps[count - 1].kind == UM98X_PREVIEW_WRITE && steps[count - 1].saved;
+    wj_bool(w, "saveconfig", save);
     wj_obj_close(w);
 }

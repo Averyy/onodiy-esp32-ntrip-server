@@ -144,6 +144,8 @@
 
 #include "esp_err.h"
 #include "gnss_framing.h"
+#include "gnss_rtcm3.h"
+#include "sdkconfig.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -363,6 +365,174 @@ esp_err_t gnss_link_raw_flush(gnss_link_lease_t lease);
 
 /** Snapshot of the counters. Works before gnss_link_init() (mode OFF, counters zero). */
 esp_err_t gnss_link_get_stats(gnss_link_stats_t *out);
+
+/* ---- bench hooks (CONFIG_GNSS_LINK_BENCH_HOOKS) ------------------------------------
+ *
+ * Bench builds only (the option depends on the bench console; the release
+ * job refuses a build with it on). The types below are plain data; the
+ * functions exist only with the option.
+ *
+ * RX stall: the RX task sleeps without reading the ring or the event queue
+ * and without feeding the task watchdog, as a starved reader would; up to
+ * 9 s it stays under the 10 s watchdog, longer only on purpose (the
+ * watchdog check: a task-watchdog panic and a reboot are expected).
+ * RAW stall: armed once, it delays the next RAW-lease read (the update
+ * path's reader) by that much; it lapses unused after 60 s.
+ * Timing recorder: for a chosen time the RX task appends, into a static
+ * PSRAM ring and without allocating or logging, one record per RTCM frame
+ * (when the read that completed it returned, when the sinks returned, its
+ * type, length, MSM epoch field and multiple-message bit), one per drain
+ * pass that read data (begin, end, bytes, capped, the event wait chosen
+ * after it, the gap since the previous pass ended) and one per stall. A
+ * full ring ends the recording. gnss_link_timing_summary() (the core)
+ * reduces it; epoch delays need the SNTP-set system time (never a clock
+ * derived from the same GNSS epochs, which would measure itself).
+ * Prompt observer: the framer's loader prompt detector runs on everything
+ * the RX task frames (STREAM, or a COMMAND lease without the detection's
+ * own arming), report-only: a hit is counted with its time and the 32
+ * bytes ending at it, and never reaches on_prompt, so nothing is ever sent
+ * because of it. The detection's lease-armed detector is unchanged.
+ * UART close: the driver is deleted (STREAM, no lease) and the link's own
+ * reopen schedule (1 s, 5 s, 30 s, then every 60 s) installs it again.
+ */
+
+#define GNSS_LINK_PROMPT_CTX 32u   /**< bytes of context kept with an observed prompt hit */
+
+/** Recorder record kinds. */
+typedef enum {
+    GNSS_LINK_REC_FRAME = 1,   /**< an RTCM frame */
+    GNSS_LINK_REC_PASS,        /**< a drain pass that read data (or stopped at its cap) */
+    GNSS_LINK_REC_STALL,       /**< a bench stall (RX task, or inside a RAW-lease read) */
+} gnss_link_rec_kind_t;
+
+#define GNSS_LINK_REC_F_MMB    0x01u   /**< frame: MSM multiple-message bit set (more MSMs follow for this epoch) */
+#define GNSS_LINK_REC_F_MSM    0x02u   /**< frame: an MSM (sys and epoch valid) */
+#define GNSS_LINK_REC_F_HELD   0x04u   /**< frame: held back by a lease, not published */
+#define GNSS_LINK_REC_F_CAPPED 0x01u   /**< pass: stopped at the drain cap with data still buffered (next wait 0) */
+#define GNSS_LINK_REC_F_RAW    0x01u   /**< stall: inside a RAW-lease read (else the RX task) */
+
+/** One recorder record (32 bytes). Times are esp_timer microseconds. */
+typedef struct {
+    int64_t t0_us;       /**< frame: the read that completed it returned; pass, stall: begin */
+    uint32_t dt_us;      /**< frame: until the sinks returned (read to published); pass, stall: duration */
+    uint32_t epoch;      /**< frame (MSM): the epoch time field as sent */
+    uint32_t gap_us;     /**< pass: since the previous pass ended (the reader was away), clamped */
+    uint16_t bytes;      /**< frame: length; pass: bytes read */
+    uint16_t msg;        /**< frame: message number */
+    uint8_t kind;        /**< gnss_link_rec_kind_t */
+    uint8_t flags;       /**< GNSS_LINK_REC_F_* of its kind */
+    uint8_t sys;         /**< frame (MSM): gnss_sys_t */
+    uint8_t wait_ms;     /**< pass: the event wait chosen after it */
+} gnss_link_rec_t;
+
+/** The recorder's state. */
+typedef struct {
+    bool running;
+    bool full;            /**< the ring filled up: the recording ended there */
+    uint32_t count;       /**< records kept */
+    uint32_t capacity;
+    int64_t started_us;   /**< esp_timer */
+    int64_t until_us;     /**< planned end */
+} gnss_link_timing_info_t;
+
+/** Percentiles of one distribution (nearest rank). */
+typedef struct {
+    uint32_t n;
+    int32_t p50;
+    int32_t p95;
+    int32_t p99;
+    int32_t p999;
+    int32_t max;
+} gnss_link_pct_t;
+
+/** What gnss_link_timing_summary() makes of a recording. */
+typedef struct {
+    uint32_t records;
+    bool full;
+    uint32_t frames;                  /**< RTCM frames */
+    uint32_t passes;                  /**< drain passes that read data */
+    uint32_t stalls;
+    gnss_link_pct_t read_to_pub_us;   /**< published frames: from the read that completed them to the sinks' return */
+    uint32_t longest_gap_us;          /**< the longest time the reader was away while data waited (gap before a pass that read data) */
+    uint32_t stall_capped_passes;     /**< after a stall: zero-wait capped passes until a pass emptied the ring (the most over the stalls) */
+    uint32_t stall_drain_us;          /**< after a stall: from its end until a pass emptied the ring (the most) */
+    bool stall_first_frame_valid;
+    uint32_t stall_first_frame_us;    /**< after a stall: from its end until the first frame was published (the most) */
+    bool clock;                       /**< epoch delays computed (a set system clock) */
+    gnss_link_pct_t epoch_delay_ms[GNSS_SYS_COUNT];  /**< per gnss_sys_t: each epoch's first frame read vs its MSM time (ms) */
+} gnss_link_timing_summary_t;
+
+/** Observed loader prompt hits (report-only detector). */
+typedef struct {
+    bool on;
+    uint32_t hits;
+    int64_t last_hit_ms;                 /**< uptime (esp_timer) of the last hit, -1 = none */
+    uint8_t context[GNSS_LINK_PROMPT_CTX];   /**< the bytes ending at the last hit's last byte */
+    uint8_t context_len;
+} gnss_link_prompt_obs_t;
+
+#if CONFIG_GNSS_LINK_BENCH_HOOKS
+
+#define GNSS_LINK_BENCH_STALL_SAFE_MS  9000u    /**< longest stall that stays under the task watchdog */
+#define GNSS_LINK_BENCH_STALL_PANIC_MS 30000u   /**< longest stall with the watchdog check */
+#define GNSS_LINK_BENCH_RAW_ARM_S      60u      /**< an armed RAW stall lapses after this */
+#define GNSS_LINK_BENCH_TIMING_MAX_S   600u
+
+/**
+ * Stall the RX task for ms (1..9000; 10000..30000 only with
+ * allow_twdt_panic: the task watchdog then panics and the ESP32 restarts).
+ * Returns once the RX task has the request; the stall runs on its own.
+ * @return ESP_ERR_INVALID_ARG out of range; ESP_ERR_INVALID_STATE before
+ *         the RX task runs, under a RAW lease (the RX task is parked) or
+ *         while another stall is pending or running.
+ */
+esp_err_t gnss_link_bench_stall(uint32_t ms, bool allow_twdt_panic);
+
+/** A stall is pending or running. */
+bool gnss_link_bench_stall_active(void);
+
+/** Arm a one-shot stall of ms (1..9000) inside the next RAW-lease read (lapses after 60 s). */
+esp_err_t gnss_link_bench_raw_stall_arm(uint32_t ms);
+
+/** Start the timing recorder for seconds (1..600), dropping the previous recording. */
+esp_err_t gnss_link_bench_timing_start(uint32_t seconds);
+
+/** Stop the recorder now (what it holds stays). */
+void gnss_link_bench_timing_stop(void);
+
+/**
+ * Copy records [first, first + cap) of the recording (fewer at its end).
+ * info (may be NULL) gets the recorder's state. @return records copied.
+ */
+size_t gnss_link_bench_timing_read(size_t first, gnss_link_rec_t *out, size_t cap, gnss_link_timing_info_t *info);
+
+/**
+ * Summary of the recording. clock_ok: the system clock was set by SNTP;
+ * unix_minus_timer_us: unix time (us) minus esp_timer (us), sampled together.
+ */
+esp_err_t gnss_link_bench_timing_summary(bool clock_ok, int64_t unix_minus_timer_us, gnss_link_timing_summary_t *out);
+
+/**
+ * The recording as CSV lines ("F,...", "P,...", "S,..."), from record
+ * *cursor on, as many whole lines as fit in buf (NUL-terminated).
+ * @return bytes written (0 at the end).
+ */
+size_t gnss_link_bench_timing_csv(size_t *cursor, char *buf, size_t cap);
+
+/** Turn the report-only prompt observer on or off (counters are kept). */
+esp_err_t gnss_link_bench_prompt_observe(bool on);
+
+/** The observer's state and its last hit. */
+esp_err_t gnss_link_bench_prompt_status(gnss_link_prompt_obs_t *out);
+
+/**
+ * Delete the UART driver (STREAM, no lease): the link is closed and its
+ * reopen schedule installs the driver again. ESP_ERR_INVALID_STATE under a
+ * lease, while closed already, or before the RX task runs.
+ */
+esp_err_t gnss_link_bench_uart_close(void);
+
+#endif /* CONFIG_GNSS_LINK_BENCH_HOOKS */
 
 #ifdef __cplusplus
 }

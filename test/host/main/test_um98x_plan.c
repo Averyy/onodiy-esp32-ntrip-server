@@ -528,3 +528,122 @@ TEST_CASE("plan: satellite-in-view output for the live view, never saved", "[um9
     TEST_ASSERT_EQUAL_size_t(0, um98x_sat_view_command(true, UM98X_SAT_VIEW_PERIOD_MAX + 1, cmd, sizeof(cmd)));
     TEST_ASSERT_EQUAL_size_t(0, um98x_sat_view_command(true, 5, cmd, 4));
 }
+
+/* ---- apply preview ------------------------------------------------------------------- */
+
+static um98x_preview_step_t s_prev[UM98X_PREVIEW_MAX];
+
+/* "K:W:S text" per step (K q/w, W a/d/o for always/if differs/if off, S s/-), joined with '|'. */
+static void preview_text(const um98x_preview_step_t *s, size_t n, char *out, size_t cap)
+{
+    static const char kinds[] = { 'q', 'w' };
+    static const char whens[] = { 'a', 'd', 'o' };
+    out[0] = '\0';
+    for (size_t i = 0; i < n; i++) {
+        size_t len = strlen(out);
+        TEST_ASSERT_LESS_THAN(sizeof(kinds), s[i].kind);
+        TEST_ASSERT_LESS_THAN(sizeof(whens), s[i].when);
+        snprintf(out + len, cap - len, "%s%c%c%c %s", len ? "|" : "", kinds[s[i].kind], whens[s[i].when],
+                 s[i].saved ? 's' : '-', s[i].text);
+    }
+}
+
+TEST_CASE("plan preview: the default profile's exact list", "[um98x_plan]")
+{
+    um98x_base_profile_t p;
+    char text[2048];
+    survey_profile(&p);
+    size_t n = um98x_plan_preview(&p, 115200, s_prev, UM98X_PREVIEW_MAX);
+    preview_text(s_prev, n, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("wa- UNLOG COM1|qa- VERSIONA|qa- CONFIG|qa- MODE|"
+                             "wds CONFIG SIGNALGROUP 3 6|wd- MODE BASE 1234 TIME 600 0|wo- CONFIG RTCMB1CB2A ENABLE|"
+                             "wa- RTCM1005 COM1 1|wa- RTCM1033 COM1 1|wa- RTCM1077 COM1 1|wa- RTCM1087 COM1 1|"
+                             "wa- RTCM1097 COM1 1|wa- RTCM1117 COM1 1|wa- RTCM1127 COM1 1|wa- RTCM1230 COM1 1|"
+                             "was SAVECONFIG",
+                             text);
+    TEST_ASSERT_EQUAL_size_t(16, n);
+
+    /* Not for an invalid profile; a short buffer never holds a cut list's SAVECONFIG out of place. */
+    p.survey_in_s = 0;
+    TEST_ASSERT_EQUAL_size_t(0, um98x_plan_preview(&p, 115200, s_prev, UM98X_PREVIEW_MAX));
+    survey_profile(&p);
+    TEST_ASSERT_EQUAL_size_t(0, um98x_plan_preview(NULL, 115200, s_prev, UM98X_PREVIEW_MAX));
+    TEST_ASSERT_EQUAL_size_t(3, um98x_plan_preview(&p, 115200, s_prev, 3));
+    TEST_ASSERT_EQUAL_STRING("CONFIG", s_prev[2].text);
+}
+
+TEST_CASE("plan preview: fixed position, antenna model, satellite view, baud change", "[um98x_plan]")
+{
+    um98x_base_profile_t p;
+    char text[2048];
+    fixed_profile(&p);
+    p.com1_baud = 460800;
+    p.sat_view_output = true;
+    snprintf(p.antenna_model, sizeof(p.antenna_model), "TRM59800.00     SCIS");
+    snprintf(p.antenna_serial, sizeof(p.antenna_serial), "5000123");
+    p.antenna_setup_id = 2;
+    p.rtcm_count = 2;
+    size_t n = um98x_plan_preview(&p, 115200, s_prev, UM98X_PREVIEW_MAX);
+    char mode[UM98X_MODE_CMD_MAX];
+    TEST_ASSERT_NOT_EQUAL(0, um98x_mode_command(&p, mode, sizeof(mode)));
+    char want[2048];
+    snprintf(want, sizeof(want),
+             "wa- UNLOG COM1|qa- VERSIONA|qa- CONFIG|qa- MODE|wds CONFIG SIGNALGROUP 3 6|wd- CONFIG COM1 460800|"
+             "wd- %s|wd- CONFIG BASEANTENNAMODEL \"TRM59800.00     SCIS\" \"5000123\" 2 USER|"
+             "wo- CONFIG RTCMB1CB2A ENABLE|wa- RTCM1005 COM1 1|wa- RTCM1033 COM1 1|wa- GPGSV COM1 10|was SAVECONFIG",
+             mode);
+    preview_text(s_prev, n, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING(want, text);
+    TEST_ASSERT_NOT_NULL(strstr(mode, "MODE BASE 1234 "));
+
+    /* The link already at the profile's baud: no baud step. */
+    n = um98x_plan_preview(&p, 460800, s_prev, UM98X_PREVIEW_MAX);
+    preview_text(s_prev, n, text, sizeof(text));
+    TEST_ASSERT_NULL(strstr(text, "CONFIG COM1"));
+}
+
+TEST_CASE("plan preview: every write is what the plan sends when everything differs", "[um98x_plan]")
+{
+    um98x_base_profile_t p;
+    fixed_profile(&p);
+    p.com1_baud = 460800;
+    p.sat_view_output = true;
+    snprintf(p.antenna_model, sizeof(p.antenna_model), "TRM59800.00     SCIS");
+    snprintf(p.antenna_serial, sizeof(p.antenna_serial), "5000123");
+
+    /* A read-back that differs in everything: another signal group, no base mode, another antenna, B1C/B2a off. */
+    um98x_readback_t rb;
+    memset(&rb, 0, sizeof(rb));
+    rb.config_ok = true;
+    rb.config.signal_group_known = true;
+    rb.config.signal_group_master = 4;
+    rb.config.signal_group_slave = 5;
+    rb.config.rx.antenna_known = true;
+    snprintf(rb.config.rx.antenna_model, sizeof(rb.config.rx.antenna_model), "ADVNULLANTENNA");
+    rb.config.rx.b1cb2a = UM98X_SETTING_OFF;
+    rb.mode_ok = false;
+    um98x_plan_t plan;
+    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, 115200, false, &plan));
+
+    size_t n = um98x_plan_preview(&p, 115200, s_prev, UM98X_PREVIEW_MAX);
+    size_t writes = 0;
+    size_t k = 0;   /* the plan's step matched next */
+    for (size_t i = 0; i < n; i++) {
+        if (s_prev[i].kind != UM98X_PREVIEW_WRITE) {
+            continue;
+        }
+        writes++;
+        if (strcmp(s_prev[i].text, "UNLOG COM1") == 0) {
+            continue;   /* the session's quiet port, before the plan */
+        }
+        TEST_ASSERT_LESS_THAN(plan.count, k);
+        char cmd[UM98X_CMD_MAX];
+        TEST_ASSERT_NOT_EQUAL(0, um98x_step_command(&p, &plan.step[k], cmd, sizeof(cmd)));
+        TEST_ASSERT_EQUAL_STRING(cmd, s_prev[i].text);
+        k++;
+    }
+    TEST_ASSERT_EQUAL_size_t(plan.count, k);   /* nothing the plan sends is missing from the preview */
+    TEST_ASSERT_EQUAL_size_t(plan.count + 1, writes);
+    TEST_ASSERT_TRUE(s_prev[n - 1].saved);
+    TEST_ASSERT_EQUAL_STRING("SAVECONFIG", s_prev[n - 1].text);
+}

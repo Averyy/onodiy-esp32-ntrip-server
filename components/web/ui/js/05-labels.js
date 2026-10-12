@@ -214,6 +214,8 @@ const L = {
   liveEnd: {
     none: '', user: 'you stopped it', expired: 'its time was up', idle: 'no page showed it for a while', flash: 'a receiver update began',
   },
+  previewKind: { query: 'reads only', write: 'changes the receiver' },
+  previewWhen: { always: 'always', if_differs: 'only if the receiver differs', if_off: 'only if it is off in the receiver' },
 };
 
 /* Receiver maintenance durations (s) as the station offers them. */
