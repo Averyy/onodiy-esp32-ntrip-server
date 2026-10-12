@@ -4,8 +4,13 @@
  *
  * One caster slot's stored configuration (settings namespace "cst<N>", key
  * "cfg"): a version byte (1), the fields in a fixed order, then a layout
- * byte appended later (a reader from before it stops ahead of it, so an
- * image rolled back to still reads the record).
+ * byte appended later and a flags byte after it (a reader from before
+ * either stops ahead of it, so an image rolled back to still reads the
+ * record; a record without the flags byte reads as no flags).
+ *
+ * Flags: bit 0 test_onocoy (a test Onocoy slot; only a build with
+ * CONFIG_NTRIP_TEST_ONOCOY_SLOT acts on it). Other bits are written 0 and
+ * ignored.
  *
  * Layouts (the meaning of an Onocoy slot's fields):
  *   1  (no layout byte: written before it existed) an Onocoy slot held the
@@ -36,7 +41,8 @@ extern "C" {
 
 #define NTRIP_CFG_BLOB_VERSION 1u
 #define NTRIP_CFG_LAYOUT       2u     /* the layout byte every record is written with */
-#define NTRIP_CFG_BLOB_MAX     320u   /* largest record: 308 bytes */
+#define NTRIP_CFG_FLAG_TEST_ONOCOY 0x01u   /* flags byte, bit 0 */
+#define NTRIP_CFG_BLOB_MAX     320u   /* largest record: 309 bytes */
 
 /** The protocol, trust mode and backoff profile are values the firmware knows. */
 bool ntrip_cfg_enums_valid(const ntrip_caster_cfg_t *c);

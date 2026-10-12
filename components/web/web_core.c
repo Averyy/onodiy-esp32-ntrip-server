@@ -72,6 +72,7 @@ static const err_row_t s_errors[WEB_ERR_COUNT] = {
     [WEB_ERR_TOO_MANY_CLIENTS] = { "too_many_clients", 503, "Too many live connections" },
     [WEB_ERR_NOT_NO_RECEIVER] = { "not_no_receiver", 409, "The station is not without a receiver: nothing to search for" },
     [WEB_ERR_SAME_IMAGE] = { "same_image", 409, "This image is the one already running (send X-Reinstall: 1 to install it again)" },
+    [WEB_ERR_SLOT_DISABLED] = { "slot_disabled", 409, "The caster slot is not enabled" },
 };
 
 const char *web_err_code(web_err_t e)

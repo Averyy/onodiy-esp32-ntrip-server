@@ -57,7 +57,7 @@ _Static_assert(ESP_ERR_OTA_VALIDATE_FAILED == 0x1503, "OTA validation error code
 /* Server limits (socket budget: 7 here + 3 for the server itself, beside the
  * casters). One of the 7 is kept free for the next connection (web_conn.h). */
 #define SERVER_MAX_SOCKETS   7
-#define SERVER_MAX_URIS      64
+#define SERVER_MAX_URIS      WEB_MAX_URI_HANDLERS
 #define SERVER_STACK         8192
 #define SERVER_PRIO          5
 #define SERVER_HDR_LEN       2048

@@ -885,3 +885,24 @@ TEST_CASE("health mon: the status shows the restart hold only during a ladder ep
     TEST_ASSERT_EQUAL_UINT8(0, v.hold);
     TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, v.cap_wait_s);
 }
+
+TEST_CASE("health mon: a stopped caster slot is down for the level, not for the protected trigger", "[health_mon]")
+{
+    hm_slot_in_t in = { .enabled = true, .state = HM_CST_STOPPED };
+    TEST_ASSERT_TRUE(hm_slot_down(&in));
+    in.enabled = false;
+    TEST_ASSERT_FALSE(hm_slot_down(&in));
+
+    /* The protected slot: down (trigger P) while it waits or fails, not while it streams, is paused or stopped. */
+    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_STOPPED));
+    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_BACKOFF));
+    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_AUTH_FAILED));
+    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_WAIT_NETWORK));
+    TEST_ASSERT_TRUE(hm_protected_down(true, true, HM_CST_CONNECTING));
+    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_PAUSED));
+    TEST_ASSERT_FALSE(hm_protected_down(true, true, HM_CST_STREAMING));
+    /* Not protected, or not enabled: never. */
+    TEST_ASSERT_FALSE(hm_protected_down(true, false, HM_CST_BACKOFF));
+    TEST_ASSERT_FALSE(hm_protected_down(false, true, HM_CST_BACKOFF));
+    TEST_ASSERT_EQUAL(10, HM_CST_STOPPED);
+}

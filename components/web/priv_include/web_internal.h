@@ -120,6 +120,14 @@ typedef struct {
 extern const web_route_t web_api_routes[];
 extern const size_t web_api_route_count;
 
+/**
+ * URI handlers the server registers room for: every REST route plus the
+ * WebSocket and the catch-all (web_api.c checks the table fits at compile
+ * time, so a new route can never make the server fail to start).
+ */
+#define WEB_MAX_URI_HANDLERS 72
+#define WEB_EXTRA_URI_HANDLERS 2   /* /ws and the catch-all */
+
 /** True if `path` (no query) is one of the API paths (for 405 versus 404). */
 bool web_api_path_known(const char *path);
 

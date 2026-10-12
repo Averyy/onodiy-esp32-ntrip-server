@@ -120,6 +120,10 @@ bool web_parse_live(const cJSON *root, uint32_t max_min, uint32_t *minutes, web_
  * or "" (keep), clear_password set when asked; protected_slot and the
  * backoff profile follow ntrip_server_apply_host_rules() (a fast profile
  * requested for a host that is not Onocoy: field "backoff_profile").
+ * test_onocoy true in a build without CONFIG_NTRIP_TEST_ONOCOY_SLOT: field
+ * "test_onocoy". A new RTK2go host or a changed RTK2go mountpoint that
+ * breaks RTK2go's rules (ntrip_server_rtk2go_check): field "mountpoint"
+ * with the rule in words.
  */
 bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, ntrip_caster_cfg_t *out,
                           web_bad_t *bad);

@@ -13,7 +13,10 @@
  * the server asks for with 409 caster_policy / dup_stream_ack_required.
  *
  * Onocoy slots ask for exactly what the Onocoy console gives: host and port
- * (fixed), mountpoint, username and password.
+ * (fixed), mountpoint, username and password. A slot the station's Onocoy
+ * login guard stopped shows why and a "Try again" that warns first (every
+ * failed login counts toward Onocoy's block of the whole connection). A test
+ * Onocoy slot (bench and QEMU builds) counts as Onocoy at its own host.
  */
 
 const PRESETS = [
@@ -28,11 +31,28 @@ const PRESETS = [
 /* Where the Onocoy console shows what the slot needs. */
 const ONOCOY_CONSOLE = 'In the Onocoy console open Reference Stations, your station, NTRIP credentials: copy the mountpoint, username and password shown there.';
 
+/* Onocoy's password rule, shown and checked softly (a note, never a refusal: credentials made before the rule still work). */
+const ONOCOY_PW_RULE = 'Onocoy\'s console asks for a credential password of at least 8 characters with at least one letter and one digit. ' +
+  'This station also needs it without spaces (NTRIP 1.0 sends it in the request line).';
+
+const ONOCOY_ONE_DEVICE = 'Use a credential that no other device is streaming with. Two devices on one credential keep knocking each other off, ' +
+  'and repeated failed logins can make Onocoy block logins from your internet connection for a while, which stops every station on that connection.';
+
+/** The soft note for a typed Onocoy password that breaks the console's rule ('' when it follows it or nothing is typed). */
+function onocoyPwNote(pw) {
+  if (!pw || (pw.length >= 8 && /[A-Za-z]/.test(pw) && /[0-9]/.test(pw))) return '';
+  return 'Onocoy\'s console requires at least 8 characters with a letter and a digit: check that you copied the whole password.';
+}
+
 const PRESET_NOTES = {
-  onocoy: 'Onocoy allows one stream per station.',
-  rtk2go: 'Needs a mountpoint reservation on rtk2go.com, and the NTRIP version must match its style (Rev1 = 1.0, Rev2 = 2.0). ' +
-    'Mountpoint: letters, digits, "-" and "_", starting with a letter; keep it under 20 characters. RTK2go bans more than one stream ' +
-    'from the same public IP address, so other base stations on your network count too. Anyone may use RTK2go streams.',
+  onocoy: 'Onocoy allows one stream per station. ' + ONOCOY_ONE_DEVICE,
+  rtk2go: 'Needs a mountpoint reservation on rtk2go.com. New reservations were paused in September 2026 and the notice was still up ' +
+    'in October 2026; existing reservations are kept, so check the reservation page first. The reservation fixes the NTRIP version ' +
+    '(Rev1 = 1.0, Rev2 = 2.0). Mountpoint: 4 to 20 letters, digits, "_" or "-", starting with a letter other than "A". ' +
+    'RTK2go bans more than one stream from the same public IP address (other base stations on your network count too), more than ' +
+    'one message per second per type, more than 35 kbit/s, and "more than 500Mb per day" without saying whether that means megabits ' +
+    'or megabytes. This station\'s usual stream (MSM7, four constellations) is about 13 kbit/s, about 140 MB (1.1 Gbit) a day: under ' +
+    '500 megabytes, over 500 megabits. Ask RTK2go if unsure. Anyone may use RTK2go streams.',
   centipede: 'Register the mountpoint with Centipede first (up to 4 capital letters). The password is Centipede\'s shared community password (see its base-station guide). ' +
     'Set your precise coordinates (fixed base) before you enable it. Centipede streams are public.',
   emlid: 'Use the mountpoint and password from your Emlid Caster account.',
@@ -51,6 +71,37 @@ function hostIn(host, domain) {
 
 function isOnocoyHost(host) {
   return hostIn(host, 'onocoy.com');
+}
+
+/** The slot counts as Onocoy: an Onocoy host, or a test Onocoy slot (bench and QEMU builds only). */
+function isOnocoySlot(cfg) {
+  return !!cfg && (isOnocoyHost(cfg.host) || !!cfg.test_onocoy);
+}
+
+/* RTK2go's rules for a new mountpoint, in the station's words (null when it follows them). */
+function rtk2goMountProblem(m) {
+  if (!/^[A-Za-z0-9_-]*$/.test(m)) return 'RTK2go mountpoints use letters, digits, "_" and "-" only (no ".").';
+  if (!/^[A-Za-z]/.test(m)) return 'RTK2go mountpoints start with a letter.';
+  if (m.charAt(0) === 'A') return 'RTK2go no longer accepts new mountpoints that start with "A".';
+  if (m.length < 4 || m.length > 20) return 'RTK2go mountpoints have 4 to 20 characters.';
+  return null;
+}
+
+const RETRY_TEXT = 'Try once now? Only after you made sure no other device streams with this credential and the credentials match the ' +
+  'Onocoy console. Every failed login counts toward Onocoy\'s login block for your internet connection.';
+
+/** The user's retry of a stopped (or waiting) slot, after the warning. */
+async function retryCaster(slot) {
+  const ok = await dialog({ title: 'Try again', ok: 'Try once now', body: h('p', null, RETRY_TEXT),
+    onOk: () => api('POST', '/api/casters/' + slot + '/retry', {}) });
+  if (ok) toast('The slot tries once now.', 'ok');
+  return ok;
+}
+
+/** Bytes as decimal megabytes and megabits ("140.2 MB (1122 Mbit)"), as RTK2go's daily limit is worded. */
+function volText(b) {
+  if (b === null || b === undefined || isNaN(b)) return DASH;
+  return (b / 1e6).toFixed(1) + NB + 'MB (' + Math.round(b * 8 / 1e6) + NB + 'Mbit)';
 }
 
 function presetOf(host) {
@@ -85,7 +136,7 @@ const MOUNT_RE = /^[A-Za-z0-9._-]{1,47}$/;
 
 /** True when an Onocoy slot has what the console gives: mountpoint, username and a password. */
 function onocoyReady(cfg) {
-  return !!(cfg && isOnocoyHost(cfg.host) && cfg.mountpoint && cfg.username && cfg.password_set);
+  return !!(cfg && isOnocoySlot(cfg) && cfg.mountpoint && cfg.username && cfg.password_set);
 }
 
 /**
@@ -124,10 +175,12 @@ function casterEditor(entry, opts) {
     backoff_profile: 'standard', dup_stream_ack: false }, entry.config || {});
   const preset = Object.assign({ host: 'servers.onocoy.com', port: 2101, tls_port: 2121, ntrip_version: 1 }, opts.preset || {});
   const isNew = !cfg.host;
-  let kind = isNew ? (opts.hideOnocoy ? 'rtk2go' : 'onocoy') : presetOf(cfg.host);
+  /* A test Onocoy slot (bench and QEMU builds) counts as Onocoy at its own host and port. */
+  const testSlot = !!cfg.test_onocoy;
+  let kind = isNew ? (opts.hideOnocoy ? 'rtk2go' : 'onocoy') : isOnocoySlot(cfg) ? 'onocoy' : presetOf(cfg.host);
   let dirty = false;
   /* An Onocoy slot without its credentials yet: setting it up means using it. */
-  const noCreds = presetOf(cfg.host) === 'onocoy' && !onocoyReady(cfg);
+  const noCreds = isOnocoySlot(cfg) && !onocoyReady(cfg);
 
   const choices = PRESETS.filter(p => !(p.id === 'onocoy' && opts.hideOnocoy && kind !== 'onocoy'));
   const presetSel = selectInput(choices.map(p => [p.id, p.label]), kind);
@@ -142,7 +195,7 @@ function casterEditor(entry, opts) {
   const trust = selectInput([['bundle', L.trust.bundle], ['custom_ca', L.trust.custom_ca], ['insecure', L.trust.insecure]], cfg.trust);
   /* An Onocoy slot stored in the older layout (no username) holds the old credential in `mountpoint`, not the
    * console's mountpoint: start empty, as the wizard does. */
-  const oldLayout = presetOf(cfg.host) === 'onocoy' && !cfg.username;
+  const oldLayout = isOnocoySlot(cfg) && !cfg.username;
   const mp = textInput(oldLayout ? '' : cfg.mountpoint, { maxlength: 47 });
   const user = textInput(cfg.username, { maxlength: 47 });
   const pw = pwInput({ maxlength: 63, placeholder: cfg.password_set ? 'Stored (leave empty to keep)' : '' });
@@ -160,7 +213,14 @@ function casterEditor(entry, opts) {
     trust: field('Certificate check', trust),
     backoff_profile: field('Retry pace', backoff, 'Polite waits longer between attempts; some casters ban fast reconnects.'),
   };
-  const onoNote = h('p', { class: 'small' }, ONOCOY_CONSOLE);
+  /* What the console gives, its password rule, and a note while the typed password breaks that rule (saving stays possible). */
+  const pwNote = h('p', { class: 'small t-warn', role: 'status', hidden: true });
+  const onoNote = h('div', { class: 'stack' }, h('p', { class: 'small' }, ONOCOY_CONSOLE), h('p', { class: 'small' }, ONOCOY_PW_RULE));
+  const showPwNote = () => {
+    pwNote.textContent = kind === 'onocoy' ? onocoyPwNote(pw.value) : '';
+    pwNote.hidden = !pwNote.textContent;
+  };
+  pw.addEventListener('input', showPwNote);
   const note = h('p', { class: 'muted small' });
   const tlsNote = h('small', { class: 'hint' });
   const forcedPace = h('p', { class: 'muted small' });
@@ -229,6 +289,7 @@ function casterEditor(entry, opts) {
     raw.el.hidden = !v2() || ono;
     clearPw.el.hidden = !cfg.password_set;
     note.textContent = PRESET_NOTES[kind] || '';
+    showPwNote();
   }
 
   function applyPreset() {
@@ -238,8 +299,8 @@ function casterEditor(entry, opts) {
     const prevLabel = (PRESETS.find(x => x.id === prev) || {}).label;
     if (!name.value || name.value === prevLabel) name.value = kind === 'custom' ? '' : p.label;
     if (kind === 'onocoy') {
-      host.value = preset.host;
-      port.value = String(tls.input.checked ? preset.tls_port : preset.port);
+      host.value = testSlot ? cfg.host : preset.host;
+      port.value = String(testSlot ? cfg.port : tls.input.checked ? preset.tls_port : preset.port);
       version.set(preset.ntrip_version || 1);
     } else if (p.host) {
       host.value = p.host;
@@ -259,7 +320,7 @@ function casterEditor(entry, opts) {
     applyPreset();
   });
   tls.input.addEventListener('change', () => {
-    if (onocoy()) port.value = String(tls.input.checked ? preset.tls_port : preset.port);
+    if (onocoy() && !testSlot) port.value = String(tls.input.checked ? preset.tls_port : preset.port);
     sync();
   });
   trust.addEventListener('change', sync);
@@ -270,8 +331,8 @@ function casterEditor(entry, opts) {
     const ono = onocoy();
     const v = v2();
     const on = enabled.input.checked;
-    const hostVal = ono ? preset.host : host.value.trim();
-    const portVal = ono ? (tls.input.checked ? preset.tls_port : preset.port) : Number(port.value);
+    const hostVal = ono ? (testSlot ? cfg.host : preset.host) : host.value.trim();
+    const portVal = ono ? (testSlot ? cfg.port : tls.input.checked ? preset.tls_port : preset.port) : Number(port.value);
     const hostChanged = hostVal.toLowerCase() !== String(cfg.host || '').toLowerCase();
     let bad = null;
     const fail = (k, text) => {
@@ -291,9 +352,11 @@ function casterEditor(entry, opts) {
       const pr = onocoyProblems({ mountpoint: mpVal, username: userVal, password: pwVal }, on, keepsPw);
       for (const k of Object.keys(pr)) fail(k, pr[k]);
     } else {
+      /* RTK2go's rules for new names: a slot stored before them keeps its mountpoint while host and name stay. */
+      const rtk2goNew = hostIn(hostVal, 'rtk2go.com') && (hostChanged || mpVal !== (cfg.mountpoint || ''));
       if (!mpVal && on) fail('mountpoint', 'Enter the mountpoint.');
       else if (mpVal && !MOUNT_RE.test(mpVal)) fail('mountpoint', 'Letters, digits, ".", "_" and "-" only, at most 47.');
-      else if (kind === 'rtk2go' && mpVal && !/^[A-Za-z]/.test(mpVal)) fail('mountpoint', 'RTK2go mountpoints start with a letter.');
+      else if (rtk2goNew && mpVal && rtk2goMountProblem(mpVal)) fail('mountpoint', rtk2goMountProblem(mpVal));
       if (v) {
         if (userVal.indexOf(':') >= 0 || utf8Len(userVal) > 47 || hasControl(userVal)) fail('username', 'At most 47 bytes, without ":".');
         else if (on && !userVal) fail('username', 'NTRIP 2.0 needs a username.');
@@ -309,7 +372,7 @@ function casterEditor(entry, opts) {
     }
     const body = {
       enabled: on,
-      name: ono ? (cfg.name && presetOf(cfg.host) === 'onocoy' ? cfg.name : 'Onocoy') :
+      name: ono ? (cfg.name && isOnocoySlot(cfg) ? cfg.name : 'Onocoy') :
         name.value.trim() || (PRESETS.find(x => x.id === kind) || {}).label || '',
       host: hostVal,
       port: portVal,
@@ -324,6 +387,7 @@ function casterEditor(entry, opts) {
     if (v && !ono) body.v2_raw_body = raw.input.checked;
     if (pwVal) body.password = pwVal;
     else if (clearPw.input.checked) body.clear_password = true;
+    if (testSlot) body.test_onocoy = ono;   /* switched to another caster: no longer a test Onocoy slot */
     return body;
   }
 
@@ -361,6 +425,8 @@ function casterEditor(entry, opts) {
     dirty = true;
   } },
   field('Caster', presetSel).el,
+  testSlot ? h('p', { class: 'small' }, badge('Test Onocoy slot (bench build)', 'warn'),
+    ' Counts as Onocoy at this host, for a local test caster.') : null,
   note,
   enabled.el,
   F.name.el,
@@ -368,6 +434,7 @@ function casterEditor(entry, opts) {
   F.mountpoint.el,
   F.username.el,
   F.password.el,
+  pwNote,
   clearPw.el,
   onoNote,
   version.el,
@@ -387,9 +454,17 @@ function casterEditor(entry, opts) {
 
 /* ---- Caster page ---------------------------------------------------------- */
 
+/** A stopped slot: why, what to do, and the retry. */
+function stopPanel(c, st) {
+  const why = L.stop[st.stop_reason];
+  const text = Array.isArray(why) ? why[1] : 'The station stopped this slot and makes no attempt until you act.';
+  return msg('bad', h('strong', null, 'Stopped: ' + lbl(L.stop, st.stop_reason)), h('p', null, text),
+    h('div', { class: 'form-actions' }, btn('Try again', () => retryCaster(c.slot), 'small primary')));
+}
+
 function casterSummary(c, st, preset) {
   const tone = casterTone(st.state);
-  const ono = isOnocoyHost(c.host);
+  const ono = isOnocoySlot(c);
   const metrics = [];
   if (st.state === 'streaming') {
     metrics.push(['Connected', fmt.dur(st.connected_s)]);
@@ -406,18 +481,28 @@ function casterSummary(c, st, preset) {
   /* Epoch counts live in RAM: today since the last start (online and offline above come from the ledger). */
   if (st.epochs_dropped_today) metrics.push(['Epochs dropped today (since the start)', fmt.num(st.epochs_dropped_today)]);
   const avg = c.backoff_profile === 'polite' && st.state === 'streaming' ? slotRate(c.slot, 60) : null;
+  const stopped = st.state === 'stopped';
+  /* The login guard counting: at the third refusal the slot stops (the station's hint says the same: shown once). */
+  const refused = !stopped && st.login_rejects > 0 && st.state !== 'streaming' ?
+    'Onocoy refused the login (' + st.login_rejects + ' of 3)' : '';
   const out = [
     h('div', { class: 'muted small' }, [c.host + ':' + c.port, 'NTRIP ' + (c.ntrip_version === 2 ? '2.0' : '1.0'), c.tls ? 'TLS' : null,
       c.mountpoint ? '/' + c.mountpoint : null].filter(Boolean).join(' · ')),
+    stopped ? stopPanel(c, st) : null,
     st.reason && st.reason !== 'none' && st.state !== 'streaming' ? h('div', { class: 't-' + (tone || 'warn') + ' small' }, lbl(L.fail, st.reason)) : null,
+    refused ? h('div', { class: 't-bad small' }, refused) : null,
     h('div', { class: 'metrics' }, metrics.map(m => h('span', null, m[0] + ' ', h('b', null, m[1])))),
-    st.hint ? h('div', { class: 'hintline' }, st.hint) : null,
+    st.hint && !stopped && st.hint !== refused ? h('div', { class: 'hintline' }, st.hint) : null,
     st.unreached_s ? h('div', { class: 'hintline' }, 'Caster not reached for ' + fmt.dur(st.unreached_s) +
       ' (name lookup or connection failing before the caster answered).') : null,
   ];
   if (avg !== null) {
     out.push(h('div', { class: 'small ' + (avg > 28000 ? 't-warn' : 'muted') }, 'Average over 60 s: ' + fmt.kbps(avg) +
       (avg > 28000 ? '. That is close to the limits of public casters; consider MSM4 messages instead of MSM7.' : '')));
+  }
+  /* RTK2go and other polite casters count volume per day (RAM: since the last start). */
+  if (c.backoff_profile === 'polite' && st.bytes_sent_today !== undefined && st.bytes_sent_today !== null) {
+    out.push(h('div', { class: 'small muted' }, 'Sent today (since the start): ' + volText(st.bytes_sent_today)));
   }
   if (ono && c.tls && st.failures_by_class && st.failures_by_class.tls >= 10 && st.state !== 'streaming') {
     const sw = btn('Use plain port ' + preset.port, async () => {
@@ -453,13 +538,19 @@ function casterDetails(st) {
       ['Connected since', fmt.time(st.connected_since_unix)],
       ['Connects / failures', fmt.num(st.connects) + ' / ' + fmt.num(st.failures)],
       ['Disconnects / restarts', fmt.num(st.disconnects) + ' / ' + fmt.num(st.restarts)],
+      st.stop_reason && st.stop_reason !== 'none' ? ['Stopped because', lbl(L.stop, st.stop_reason)] : null,
       ['Last reply', st.last_status_line ? st.last_status_line + (st.last_status_code ? ' (' + st.last_status_code + ')' : '') : DASH],
+      st.last_session_text ? ['Caster said during a session', st.last_session_text] : null,
+      st.login_rejects || st.login_blocks ? ['Refused logins / login blocks', fmt.num(st.login_rejects) + ' / ' + fmt.num(st.login_blocks) +
+        ' (the third of either stops the slot)'] : null,
+      st.kicked_sessions ? ['Sessions taken over (score)', st.kicked_sessions + ' of 3'] : null,
       st.server_header ? ['Caster software', st.server_header] : null,
       ['Address', st.resolved_ip ? st.resolved_ip + (st.dns_cached_used ? ' (cached DNS used ' + st.dns_cached_used + '×)' : '') : DASH],
       st.unreached_s ? ['Not reached for', fmt.dur(st.unreached_s)] : null,
       st.tls_version ? ['TLS', st.tls_version + (st.tls_cipher ? ' · ' + st.tls_cipher : '')] : null,
       ['Sent', fmt.bytes(st.bytes_sent) + ' · ' + fmt.num(st.frames_sent) + ' frames · ' + fmt.num(st.epochs_sent) + ' epochs'],
       ['Epochs today (since the start)', fmt.num(st.epochs_sent_today) + ' sent · ' + fmt.num(st.epochs_dropped_today) + ' dropped'],
+      st.bytes_sent_today !== undefined ? ['Sent today (since the start)', volText(st.bytes_sent_today)] : null,
       ['Dropped', fmt.num(st.frames_dropped) + ' frames · ' + fmt.bytes(st.bytes_dropped) + ' · ' + fmt.num(st.epochs_dropped) + ' epochs'],
       ['Lag now / limit', fmt.ms(st.lag_ms_now) + ' / ' + fmt.ms(st.max_lag_ms)],
       ['Lag drops / laps', fmt.num(st.lag_drops) + ' / ' + fmt.num(st.laps)],
@@ -513,7 +604,7 @@ Views.casters = {
         return [h('h2', null, 'Slot ' + (s.slot + 1), badge('Empty', '')),
           h('div', { class: 'row' }, btn('Set up this slot', () => edit(s), 'primary'))];
       }
-      if (isOnocoyHost(c.host) && !onocoyReady(c)) {
+      if (isOnocoySlot(c) && !onocoyReady(c)) {
         return [h('h2', null, c.name || 'Onocoy', badge('Not set up', '')),
           h('p', null, 'Onocoy not set up.'),
           h('p', { class: 'muted small' }, ONOCOY_CONSOLE),
@@ -533,7 +624,8 @@ Views.casters = {
         open[s.slot] = det.open;
       });
       return [
-        h('h2', null, c.name || 'Slot ' + (s.slot + 1), c.enabled ? r.badge : badge('Off', '')),
+        h('h2', null, c.name || 'Slot ' + (s.slot + 1), c.enabled ? r.badge : badge('Off', ''),
+          c.test_onocoy ? badge('Test Onocoy slot (bench build)', 'warn') : null),
         r.live,
         det,
         h('div', { class: 'form-actions' }, btn('Edit', () => edit(s))),
@@ -555,7 +647,7 @@ Views.casters = {
       if (editor && editor.dirty() && !window.confirm('Discard the changes to the other slot?')) return;
       const prev = editing;
       editing = s.slot;
-      const others = data.slots.filter(x => x.slot !== s.slot && x.config && isOnocoyHost(x.config.host) && x.config.enabled);
+      const others = data.slots.filter(x => x.slot !== s.slot && x.config && isOnocoySlot(x.config) && x.config.enabled);
       editor = casterEditor(s, {
         preset: data.onocoy_preset,
         hostname: S.status && S.status.device ? S.status.device.hostname : '',
@@ -617,7 +709,7 @@ Views.casters = {
         /* From "Add your Onocoy credentials": the Onocoy slot's editor (or a free slot for it). */
         history.replaceState(null, '', '#/casters');
         if (shell.current) shell.current.arg = '';
-        const target = data.slots.find(x => x.config && isOnocoyHost(x.config.host)) ||
+        const target = data.slots.find(x => x.config && isOnocoySlot(x.config)) ||
           data.slots.find(x => x.config && !x.config.host && !x.config.enabled);
         if (target) edit(target);
       }

@@ -20,7 +20,12 @@
  *   - teardown: the NTRIP 2.0 terminator (only between chunks, <= 1 s), TLS
  *     close_notify, then close(); never a half-close on a live session;
  *   - IP and Wi-Fi events, pause, per-slot stats and progress stamps,
- *     restart_slot, persistence of long backoffs in settings cstN/backoff.
+ *     restart_slot, persistence of long backoffs in settings cstN/backoff;
+ *   - the Onocoy login guard's side of the I/O: the reply body read for every
+ *     error reply, the lines a caster sends during a session (kept, matched,
+ *     a duplicate or banned report ending the session at once), the class
+ *     an Onocoy reason names, the stop's log line and journal record, and
+ *     the user's retry.
  *
  * Network state: with ESP-IDF's default station handlers a Wi-Fi disconnect
  * takes the interface down at once: the address is cleared and lwIP aborts
@@ -86,6 +91,9 @@ _Static_assert((int)NTRIP_CLS_DNS == (int)NTRIP_FAIL_DNS && (int)NTRIP_CLS_CONNE
                    (int)NTRIP_CLS_KEEPALIVE == (int)NTRIP_FAIL_KEEPALIVE && (int)NTRIP_CLS_AUTH == (int)NTRIP_FAIL_AUTH &&
                    (int)NTRIP_CLS_MOUNT_BUSY == (int)NTRIP_FAIL_MOUNT_BUSY &&
                    (int)NTRIP_CLS_CONFIG == (int)NTRIP_FAIL_CONFIG && (int)NTRIP_CLS_BANNED == (int)NTRIP_FAIL_BANNED &&
+                   (int)NTRIP_CLS_LOGIN_BLOCKED == (int)NTRIP_FAIL_LOGIN_BLOCKED &&
+                   (int)NTRIP_CLS_IN_USE == (int)NTRIP_FAIL_IN_USE &&
+                   (int)NTRIP_CLS_REPLACED == (int)NTRIP_FAIL_REPLACED &&
                    (int)NTRIP_CLS_COUNT == (int)NTRIP_FAIL_CLASS_COUNT,
                "core failure classes must match ntrip_fail_class_t");
 _Static_assert((int)NTRIP_SM_DISABLED == (int)NTRIP_STATE_DISABLED &&
@@ -97,8 +105,11 @@ _Static_assert((int)NTRIP_SM_DISABLED == (int)NTRIP_STATE_DISABLED &&
                    (int)NTRIP_SM_AUTH_FAILED == (int)NTRIP_STATE_AUTH_FAILED &&
                    (int)NTRIP_SM_PAUSED == (int)NTRIP_STATE_PAUSED &&
                    (int)NTRIP_SM_CONFIG_ERROR == (int)NTRIP_STATE_CONFIG_ERROR &&
-                   (int)NTRIP_SM_BANNED == (int)NTRIP_STATE_BANNED,
+                   (int)NTRIP_SM_BANNED == (int)NTRIP_STATE_BANNED &&
+                   (int)NTRIP_SM_STOPPED == (int)NTRIP_STATE_STOPPED && (int)NTRIP_STATE_STOPPED == 10,
                "core states must match ntrip_state_t");
+_Static_assert((int)NTRIP_FAIL_LOGIN_BLOCKED == 12 && (int)NTRIP_FAIL_IN_USE == 13 && (int)NTRIP_FAIL_REPLACED == 14,
+               "the API and the journal carry these values");
 _Static_assert((int)NTRIP_PROF_FAST == (int)NTRIP_BACKOFF_FAST &&
                    (int)NTRIP_PROF_STANDARD == (int)NTRIP_BACKOFF_STANDARD &&
                    (int)NTRIP_PROF_POLITE == (int)NTRIP_BACKOFF_POLITE,
@@ -123,6 +134,7 @@ _Static_assert(CONFIG_NTRIP_MAX_CASTERS <= 24, "one event-group bit per slot");
 
 #define CMD_CONFIG  (1u << 0)
 #define CMD_RESTART (1u << 1)
+#define CMD_RETRY   (1u << 2)   /* the user's retry: clear a stop and the backoff */
 
 /* Status hints only the server knows (after the core's). */
 enum {
@@ -155,7 +167,18 @@ static const char *const k_hint_text[HINT_TOTAL] = {
 
 static const char *const k_class_name[NTRIP_FAIL_CLASS_COUNT] = {
     "none", "DNS", "connect", "TLS", "timeout", "remote close", "write stall",
-    "keepalive", "auth", "mount busy", "config", "banned",
+    "keepalive", "auth", "mount busy", "config", "banned", "login blocked", "in use", "replaced",
+};
+
+/* Why the login guard stopped a slot (log line and status hint, at most 63 characters). */
+static const char *const k_stop_text[NTRIP_STOP_COUNT] = {
+    [NTRIP_STOP_NONE] = "",
+    [NTRIP_STOP_REJECTED] = "stopped: Onocoy refused the login 3 times",
+    [NTRIP_STOP_LOGIN_BLOCKED] = "stopped: Onocoy is blocking logins from this connection",
+    [NTRIP_STOP_IN_USE] = "stopped: the credential is in use by another stream",
+    [NTRIP_STOP_KICKED] = "stopped: sessions kept being taken over",
+    [NTRIP_STOP_DUPLICATE] = "stopped: Onocoy reports a duplicate stream",
+    [NTRIP_STOP_BANNED] = "stopped: Onocoy reports the credential as banned",
 };
 
 typedef enum {
@@ -179,6 +202,7 @@ typedef struct {
     ntrip_reply_t reply;
 
     ntrip_caster_cfg_t cfg;      /* task's copy, with the password */
+    bool guard;                  /* the slot counts as Onocoy: the login guard applies */
 
     /* session */
     int fd;
@@ -189,6 +213,8 @@ typedef struct {
     ntrip_epoch_track_t epochs;  /* epochs sent: state across hub reads */
     bool paused_seen;
     bool logged_unexpected;
+    ntrip_sess_text_t stext;     /* lines the caster sends during the session */
+    ntrip_stop_t stop_seen;      /* the stop already logged and journalled */
     uint32_t last_tx_ms;
     uint32_t net_gen;
     int last_errno;
@@ -401,6 +427,7 @@ static ntrip_fields_t fields_of(const ntrip_caster_cfg_t *c)
         .label = c->label,
         .v2 = c->proto == NTRIP_PROTO_V2,
         .enabled = c->enabled,
+        .onocoy = ntrip_slot_is_onocoy(c),
     };
     return f;
 }
@@ -943,11 +970,19 @@ static bool tls_gate_take(slot_t *s)
     return got;
 }
 
+/* What a caster's text must never show: the password, the user, and an Onocoy slot's mountpoint (a credential). */
+static void slot_secrets(const slot_t *s, const char *secrets[3])
+{
+    secrets[0] = s->cfg.password;
+    secrets[1] = s->guard ? s->cfg.mountpoint : NULL;
+    secrets[2] = s->cfg.username;
+}
+
 static void record_reply(slot_t *s)
 {
     const ntrip_reply_t *r = &s->reply;
-    bool onocoy = ntrip_host_is_onocoy(s->cfg.host);
-    const char *secrets[3] = { s->cfg.password, onocoy ? s->cfg.mountpoint : NULL, s->cfg.username };
+    const char *secrets[3];
+    slot_secrets(s, secrets);
     ntrip_sanitize(r->line, r->line_len, s->st.last_status_line, sizeof(s->st.last_status_line), secrets, 3);
     s->st.last_status_code = r->verdict.status_code;
     ntrip_sanitize(r->server, strlen(r->server), s->st.server_header, sizeof(s->st.server_header), secrets, 3);
@@ -956,6 +991,7 @@ static void record_reply(slot_t *s)
 static io_result_t read_reply(slot_t *s, ntrip_failure_t *f)
 {
     ntrip_reply_init(&s->reply, s->cfg.proto == NTRIP_PROTO_V2);
+    s->reply.body_always = s->guard;   /* Onocoy's reason may be in any error reply's body */
     ntrip_rp_phase_t phase = s->reply.phase;
     uint32_t phase_start = now_ms();
     bool done = false;
@@ -994,6 +1030,8 @@ static io_result_t read_reply(slot_t *s, ntrip_failure_t *f)
     }
     fail_with(f, v->cls, v->row, true);
     f->mount_ambiguous = v->mount_ambiguous;
+    f->replied = v->rule != 17;   /* rule 17: no line in time, or closed before it */
+    f->onocoy = v->onocoy_reason;
     s->hint = v->hint;
     s->st.last_err = ESP_FAIL;
     return IO_FAIL;
@@ -1004,7 +1042,7 @@ static io_result_t send_request(slot_t *s, ntrip_failure_t *f)
     const ntrip_caster_cfg_t *c = &s->cfg;
     bool v2 = c->proto == NTRIP_PROTO_V2;
     ntrip_wire_names_t w;
-    ntrip_wire_names(c->host, v2, c->mountpoint, c->username, c->label, &w);
+    ntrip_wire_names(s->guard, v2, c->mountpoint, c->username, c->label, &w);
     size_t n = v2 ? ntrip_build_v2_request(s->req, sizeof(s->req), c->host, c->port, c->tls, w.mount, w.user,
                                            c->password, s_agent, c->v2_raw_body)
                   : ntrip_build_v1_request(s->req, sizeof(s->req), c->password, w.mount, s_agent);
@@ -1105,6 +1143,7 @@ static void account(slot_t *s, uint32_t now)
             /* new UTC day; until the first trusted clock everything counts as today */
             s->on_ms = 0;
             s->st.epochs_sent_today = 0;
+            s->st.bytes_sent_today = 0;
             s->dropped_epochs_base += s->st.epochs_dropped_today;
             s->st.epochs_dropped_today = 0;
         }
@@ -1222,6 +1261,28 @@ static void publish(slot_t *s, uint32_t now, bool force)
     }
     strlcpy(st->hint, hint < HINT_TOTAL ? k_hint_text[hint] : "", sizeof(st->hint));
 
+    /* The login guard: its stop, or where it counts, before any other hint. */
+    st->stop_reason = s->sm.stop;
+    st->login_rejects = s->sm.rejects;
+    st->login_blocks = s->sm.blocks;
+    st->kicked_sessions = s->sm.kick_score;
+    bool waiting = s->sm.state != NTRIP_SM_STREAMING && s->sm.state != NTRIP_SM_CONNECTING;
+    if (s->sm.stop != NTRIP_STOP_NONE && s->sm.stop < NTRIP_STOP_COUNT) {
+        strlcpy(st->hint, k_stop_text[s->sm.stop], sizeof(st->hint));
+    } else if (waiting && s->sm.blocks > 0) {
+        snprintf(st->hint, sizeof(st->hint), "Onocoy is blocking logins (%u of %u)", (unsigned)s->sm.blocks,
+                 (unsigned)NTRIP_ONO_BLOCKED_STOP);
+    } else if (waiting && s->sm.rejects > 0) {
+        snprintf(st->hint, sizeof(st->hint), "Onocoy refused the login (%u of %u)", (unsigned)s->sm.rejects,
+                 (unsigned)NTRIP_ONO_REJECT_STOP);
+    } else if (waiting && s->sm.inuse > 0) {
+        snprintf(st->hint, sizeof(st->hint), "Onocoy says the credential is in use (%u of %u)", (unsigned)s->sm.inuse,
+                 (unsigned)NTRIP_ONO_INUSE_STOP);
+    } else if (waiting && s->sm.kick_score > 0) {
+        snprintf(st->hint, sizeof(st->hint), "sessions ended soon after login (%u of %u)",
+                 (unsigned)s->sm.kick_score, (unsigned)NTRIP_ONO_KICK_STOP_SCORE);
+    }
+
     if (s_status_mutex != NULL && xSemaphoreTake(s_status_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         s_status[s->idx] = *st;
         xSemaphoreGive(s_status_mutex);
@@ -1270,7 +1331,11 @@ static void restore_backoff(slot_t *s, uint32_t now)
     if (settings_get_blob(ns, SETTINGS_KEY_CST_BACKOFF, buf, &len) == ESP_OK &&
         ntrip_backoff_rec_decode(buf, len, &rec)) {
         ntrip_sm_restore(&s->sm, &rec, now);
-        if (rec.remaining_s > 0) {
+        if (s->sm.stop != NTRIP_STOP_NONE && s->sm.stop < NTRIP_STOP_COUNT) {
+            s->stop_seen = s->sm.stop;   /* journalled when it happened */
+            ESP_LOGW(TAG, "cst%u (%s): %s (before the restart); not retrying until you act", (unsigned)s->idx,
+                     s->cfg.name, k_stop_text[s->sm.stop]);
+        } else if (rec.remaining_s > 0) {
             ESP_LOGI(TAG, "cst%u: waiting out a stored %s backoff (%u s)", (unsigned)s->idx,
                      k_class_name[(int)rec.cls < (int)NTRIP_FAIL_CLASS_COUNT ? (int)rec.cls : 0],
                      (unsigned)rec.remaining_s);
@@ -1289,6 +1354,7 @@ static ntrip_sm_cfg_t sm_cfg_of(const ntrip_caster_cfg_t *c)
                           1000u,
         .auth_window_ms = CONFIG_NTRIP_AUTH_TRANSIENT_WINDOW_S * 1000u,
         .fast_late_cap_ms = CONFIG_NTRIP_PROTECTED_MAX_BACKOFF_S * 1000u,
+        .onocoy_guard = ntrip_slot_is_onocoy(c),
     };
     return sc;
 }
@@ -1308,6 +1374,7 @@ static void copy_cfg(slot_t *s)
     ntrip_secure_zero(s->cfg.password, sizeof(s->cfg.password));
     s->cfg = next;
     ntrip_secure_zero(next.password, sizeof(next.password));
+    s->guard = ntrip_slot_is_onocoy(&s->cfg);
 }
 
 static void apply_lag(slot_t *s)
@@ -1385,6 +1452,22 @@ static void hist_down(slot_t *s, ntrip_cls_t cls)
     }
 }
 
+/* The login guard stopped the slot: log and journal it once per stop. */
+static void note_stop(slot_t *s)
+{
+    ntrip_stop_t stop = s->sm.stop;
+    if (stop == s->stop_seen) {
+        return;
+    }
+    s->stop_seen = stop;
+    if (stop == NTRIP_STOP_NONE || stop >= NTRIP_STOP_COUNT) {
+        return;
+    }
+    ESP_LOGW(TAG, "cst%u (%s): %s; not retrying until you act", (unsigned)s->idx, s->cfg.name, k_stop_text[stop]);
+    hist_queue(s, DIAG_EV_CASTER_STOP, (int32_t)((s->idx & 0xFFu) | ((uint32_t)stop << 8)), 0);
+    hist_flush(s);
+}
+
 static void end_planned(slot_t *s, uint32_t now, bool clean)
 {
     bool was_open = s->open;
@@ -1411,15 +1494,27 @@ static void handle_commands(slot_t *s, uint32_t now)
             s->cache_host[0] = '\0';
         }
         ntrip_sm_cfg_t sc = sm_cfg_of(&s->cfg);
-        ntrip_sm_user_edit(&s->sm, &sc, cred_hash_of(&s->cfg), now);
+        ntrip_sm_user_edit(&s->sm, &sc, cred_hash_of(&s->cfg), now);   /* also ends a stop */
         s->tls_fail_streak = 0;
         s->hint = NTRIP_HINT_NONE;
         s->low_heap_wait = false;
+        s->st.last_session_text[0] = '\0';
+        s->stext.last[0] = '\0';
+        note_stop(s);
         apply_lag(s);
         persist_backoff(s, now);
         ledger_report(s);
         ESP_LOGI(TAG, "cst%u (%s): settings changed%s", (unsigned)s->idx, s->cfg.name,
                  s->cfg.enabled ? "" : ", disabled");
+    }
+    if (cmd & CMD_RETRY) {
+        bool was_stopped = s->sm.stop != NTRIP_STOP_NONE;
+        ntrip_sm_retry(&s->sm, now);
+        s->hint = NTRIP_HINT_NONE;
+        note_stop(s);
+        persist_backoff(s, now);
+        ESP_LOGI(TAG, "cst%u (%s): %s at the user's request", (unsigned)s->idx, s->cfg.name,
+                 was_stopped ? "stop cleared, one attempt now" : "retrying now");
     }
     if (cmd & CMD_RESTART) {
         if (s->open || s->fd >= 0 || s->tls != NULL) {
@@ -1448,8 +1543,7 @@ static void count_failure(slot_t *s, const ntrip_failure_t *f, bool after_stream
     }
     if (f->cls == NTRIP_CLS_TLS) {
         s->tls_fail_streak++;
-        if (s->tls_fail_streak >= NTRIP_TLS_PLAIN_HINT_AFTER && ntrip_host_is_onocoy(s->cfg.host) &&
-            s->hint == NTRIP_HINT_NONE) {
+        if (s->tls_fail_streak >= NTRIP_TLS_PLAIN_HINT_AFTER && s->guard && s->hint == NTRIP_HINT_NONE) {
             s->hint = NTRIP_HINT_TLS_TRY_PLAIN;   /* offered, never applied */
         }
     } else if (f->reached_caster) {
@@ -1473,11 +1567,23 @@ static void session_failed(slot_t *s, ntrip_cls_t cls, uint32_t now)
     }
     ntrip_failure_t f;
     fail_with(&f, cls, NTRIP_ROW_TRANSIENT, true);
+    if (s->guard) {
+        /* What the caster said during the session (a take-over, a ban) travels with its end. */
+        f.onocoy = (uint8_t)ntrip_sess_text_reason(&s->stext);
+        f.cls = ntrip_guard_class(&f);
+        cls = f.cls;
+    }
     session_close(s, false);
     s->st.connected_since = 0;
     count_failure(s, &f, true);
     hist_down(s, cls);
     uint32_t d = ntrip_sm_failed(&s->sm, &f, now, esp_random());
+    if (s->sm.state == NTRIP_SM_STOPPED) {
+        ESP_LOGW(TAG, "cst%u (%s): session to %s:%u ended (%s)", (unsigned)s->idx, s->cfg.name, s->cfg.host,
+                 (unsigned)s->cfg.port, k_class_name[cls]);
+        note_stop(s);
+        return;
+    }
     ESP_LOGW(TAG, "cst%u (%s): session to %s:%u ended (%s); retry in %u s", (unsigned)s->idx, s->cfg.name,
              s->cfg.host, (unsigned)s->cfg.port, k_class_name[cls], (unsigned)((d + 999u) / 1000u));
 }
@@ -1519,10 +1625,17 @@ static void connect_once(slot_t *s, uint32_t now)
     }
     if (r == IO_FAIL) {
         session_close(s, false);
+        if (s->guard) {
+            f.cls = ntrip_guard_class(&f);   /* the class Onocoy's reason names */
+        }
         count_failure(s, &f, false);
         ntrip_hist_failed(&s->hist, uptime_s());
         uint32_t d = ntrip_sm_failed(&s->sm, &f, t1, esp_random());
-        if (s->st.last_status_line[0] != '\0' && f.reached_caster) {
+        if (s->sm.state == NTRIP_SM_STOPPED) {
+            ESP_LOGW(TAG, "cst%u (%s): %s:%u refused (%s): \"%.80s\"", (unsigned)s->idx, s->cfg.name, s->cfg.host,
+                     (unsigned)s->cfg.port, k_class_name[f.cls], s->st.last_status_line);
+            note_stop(s);
+        } else if (s->st.last_status_line[0] != '\0' && f.reached_caster) {
             ESP_LOGW(TAG, "cst%u (%s): %s:%u refused (%s): \"%.80s\"; retry in %u s", (unsigned)s->idx, s->cfg.name,
                      s->cfg.host, (unsigned)s->cfg.port, k_class_name[f.cls], s->st.last_status_line,
                      (unsigned)((d + 999u) / 1000u));
@@ -1540,6 +1653,7 @@ static void connect_once(slot_t *s, uint32_t now)
     ntrip_epoch_track_init(&s->epochs);
     s->paused_seen = false;
     s->logged_unexpected = false;
+    ntrip_sess_text_start(&s->stext);
     s->last_tx_ms = t1;
     s->net_gen = s_net_gen;
     s->tls_fail_streak = 0;
@@ -1560,38 +1674,44 @@ static void connect_once(slot_t *s, uint32_t now)
              (unsigned)s->cfg.port, s->st.last_status_line);
 }
 
-/* Read what the caster sends while streaming: nothing is expected, EOF ends the session. */
+/* A line the caster sent during the session is complete: show it, log the first of the session. */
+static void session_text(slot_t *s)
+{
+    strlcpy(s->st.last_session_text, s->stext.last, sizeof(s->st.last_session_text));
+    if (!s->logged_unexpected) {
+        ESP_LOGW(TAG, "cst%u (%s): caster sent \"%s\"", (unsigned)s->idx, s->cfg.name, s->stext.last);
+        s->logged_unexpected = true;
+    }
+}
+
+/*
+ * Read what the caster sends while streaming: nothing is expected, EOF ends
+ * the session. Every line is kept (status last_session_text) and matched for
+ * Onocoy's reasons; on a guard slot a duplicate-stream or banned report ends
+ * the session at once (the guard then stops the slot).
+ */
 static bool poll_incoming(slot_t *s, uint32_t now)
 {
+    const char *secrets[3];
+    slot_secrets(s, secrets);
     for (int i = 0; i < 4; i++) {
         int r = sess_recv(s, s->rx, sizeof(s->rx));
         if (r == 0) {
             return true;
         }
-        if (r == -1) {
-            session_failed(s, NTRIP_CLS_REMOTE_CLOSE, now);
-            return false;
-        }
         if (r < 0) {
-            session_failed(s, errno_class(sock_error(s)), now);
+            if (ntrip_sess_text_end(&s->stext, secrets, 3)) {
+                session_text(s);   /* a last line without its newline */
+            }
+            session_failed(s, r == -1 ? NTRIP_CLS_REMOTE_CLOSE : errno_class(sock_error(s)), now);
             return false;
         }
-        if (!s->logged_unexpected) {
-            size_t a = 0;
-            while (a < (size_t)r && (s->rx[a] == '\r' || s->rx[a] == '\n')) {
-                a++;
-            }
-            size_t b = a;
-            while (b < (size_t)r && s->rx[b] != '\r' && s->rx[b] != '\n') {
-                b++;
-            }
-            if (b > a) {
-                char line[97];
-                bool onocoy = ntrip_host_is_onocoy(s->cfg.host);
-                const char *secrets[3] = { s->cfg.password, onocoy ? s->cfg.mountpoint : NULL, s->cfg.username };
-                ntrip_sanitize((const char *)s->rx + a, b - a, line, sizeof(line), secrets, 3);
-                ESP_LOGW(TAG, "cst%u (%s): caster sent \"%s\"", (unsigned)s->idx, s->cfg.name, line);
-                s->logged_unexpected = true;
+        if (ntrip_sess_text_feed(&s->stext, s->rx, (size_t)r, secrets, 3)) {
+            session_text(s);
+            ntrip_onocoy_reason_t why = ntrip_sess_text_reason(&s->stext);
+            if (s->guard && (why == NTRIP_ONO_DUPLICATE || why == NTRIP_ONO_BANNED)) {
+                session_failed(s, NTRIP_CLS_BANNED, now);
+                return false;
             }
         }
     }
@@ -1643,6 +1763,7 @@ static void stream_step(slot_t *s, uint32_t now)
     switch (wr) {
     case WR_DONE:
         s->st.bytes_sent += len;
+        s->st.bytes_sent_today += len;
         s->st.frames_sent += frames;
         s->st.epochs_sent += epochs;
         s->st.epochs_sent_today += epochs;
@@ -1791,6 +1912,12 @@ esp_err_t ntrip_server_init(void)
     }
     for (size_t i = 0; i < ntrip_server_slot_count(); i++) {
         (void)load_slot(i, &s_cfg[i]);
+        if (s_cfg[i].test_onocoy && !ntrip_test_onocoy_allowed()) {
+            /* Marked in a bench or QEMU build: this build judges the slot by its host. */
+            ESP_LOGW(TAG, "slot %u: stored as a test Onocoy slot, which this build does not allow: ignored",
+                     (unsigned)i);
+            (void)ntrip_server_apply_host_rules(&s_cfg[i], NULL);
+        }
     }
     s_status_mutex = xSemaphoreCreateMutex();
     s_cfg_mutex = xSemaphoreCreateMutex();
@@ -1893,6 +2020,7 @@ static ntrip_policy_t check_policy(size_t slot, const ntrip_caster_cfg_t *next)
         memcpy(hosts[i], c->host, sizeof(hosts[i]));
         pol[i].enabled = c->enabled;
         pol[i].dup_ack = c->dup_stream_ack;
+        pol[i].onocoy = c->test_onocoy && ntrip_test_onocoy_allowed();   /* the host part follows below */
     }
     taskEXIT_CRITICAL(&s_lock);
     for (size_t i = 0; i < ntrip_server_slot_count(); i++) {
@@ -1925,6 +2053,14 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg, nt
     next.clear_password = false;
     next.ca_pem_set = false;   /* output only */
     (void)ntrip_server_apply_host_rules(&next, NULL);   /* never refuses without a requested profile */
+    char old_host[sizeof(next.host)];
+    char old_mount[sizeof(next.mountpoint)];
+    taskENTER_CRITICAL(&s_lock);
+    memcpy(old_host, s_cfg[slot].host, sizeof(old_host));
+    memcpy(old_mount, s_cfg[slot].mountpoint, sizeof(old_mount));
+    taskEXIT_CRITICAL(&s_lock);
+    old_host[sizeof(old_host) - 1] = '\0';
+    old_mount[sizeof(old_mount) - 1] = '\0';
     if (cfg->clear_password) {
         memset(next.password, 0, sizeof(next.password));
     } else if (next.password[0] == '\0') {
@@ -1940,7 +2076,8 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg, nt
 
     esp_err_t err = ESP_OK;
     ntrip_fields_t f = fields_of(&next);
-    if (has_bad_name(next.name) || ntrip_validate_fields(&f) != NTRIP_FIELDS_OK) {
+    if (has_bad_name(next.name) || ntrip_validate_fields(&f) != NTRIP_FIELDS_OK ||
+        ntrip_server_rtk2go_check(old_host, old_mount, next.host, next.mountpoint) != NTRIP_RTK2GO_OK) {
         err = ESP_ERR_INVALID_ARG;
     } else {
         ntrip_policy_t rule = check_policy(slot, &next);
@@ -2008,6 +2145,25 @@ esp_err_t ntrip_server_restart_slot(size_t slot)
         return ESP_ERR_INVALID_STATE;
     }
     __atomic_or_fetch(&s_slots[slot]->cmd, CMD_RESTART, __ATOMIC_SEQ_CST);
+    kick(slot);
+    return ESP_OK;
+}
+
+esp_err_t ntrip_server_retry_slot(size_t slot)
+{
+    if (slot >= ntrip_server_slot_count()) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_loaded || s_slots[slot] == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    taskENTER_CRITICAL(&s_lock);
+    bool enabled = s_cfg[slot].enabled;
+    taskEXIT_CRITICAL(&s_lock);
+    if (!enabled) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    __atomic_or_fetch(&s_slots[slot]->cmd, CMD_RETRY, __ATOMIC_SEQ_CST);
     kick(slot);
     return ESP_OK;
 }

@@ -468,6 +468,22 @@ static bool str_field_rule(const cJSON *root, const char *key, char *dst, size_t
 #define RULE_PW_V1    "no spaces (NTRIP 1.0 sends the password in the request line)"
 #define RULE_PW_ONO   "1 to 63 characters, no spaces"
 #define RULE_LABEL    "letters and digits only, at most 47"
+#define RULE_TEST_ONO "only in bench and QEMU builds"
+
+/* RTK2go's rule a new mountpoint breaks, in words. */
+static const char *rtk2go_rule(ntrip_rtk2go_mount_t r)
+{
+    switch (r) {
+    case NTRIP_RTK2GO_BAD_CHARS:
+        return "RTK2go mountpoints use letters, digits, \"_\" and \"-\" only (no \".\")";
+    case NTRIP_RTK2GO_FIRST_NOT_LETTER:
+        return "RTK2go mountpoints start with a letter";
+    case NTRIP_RTK2GO_FIRST_A:
+        return "RTK2go no longer accepts new mountpoints that start with \"A\"";
+    default:
+        return "RTK2go mountpoints have 4 to 20 characters";
+    }
+}
 
 bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, ntrip_caster_cfg_t *out,
                           web_bad_t *bad)
@@ -549,6 +565,14 @@ bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, n
     } else if (m == M_OK) {
         c.dup_stream_ack = b;
     }
+    if ((m = get_bool(root, "test_onocoy", &b)) == M_BAD) {
+        return invalid(bad, "test_onocoy");
+    } else if (m == M_OK) {
+        if (b && !ntrip_test_onocoy_allowed()) {
+            return invalid_rule(bad, "test_onocoy", RULE_TEST_ONO);
+        }
+        c.test_onocoy = b;
+    }
     const char *backoff_s = NULL;
     ntrip_backoff_profile_t backoff = c.backoff_profile;
     if ((m = get_str(root, "backoff_profile", 16, &backoff_s)) == M_BAD ||
@@ -564,7 +588,14 @@ bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, n
     }
     c.password_set = false;
     c.ca_pem_set = false;
-    bool onocoy = c.protected_slot;   /* the host rules: exactly the Onocoy hosts */
+    bool onocoy = c.protected_slot;   /* the host rules: exactly the slots that count as Onocoy */
+
+    /* RTK2go's rules for a new mountpoint (a new RTK2go host or a changed
+     * mountpoint only: a slot stored before keeps its name). */
+    ntrip_rtk2go_mount_t rk = ntrip_server_rtk2go_check(stored->host, stored->mountpoint, c.host, c.mountpoint);
+    if (rk != NTRIP_RTK2GO_OK) {
+        return invalid_rule(bad, "mountpoint", rtk2go_rule(rk));
+    }
 
     if (onocoy) {
         /* What the Onocoy console gives. NTRIP 1.0 sends the username as the

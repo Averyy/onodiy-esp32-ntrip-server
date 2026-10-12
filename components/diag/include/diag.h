@@ -187,6 +187,13 @@ typedef enum {
     DIAG_EV_CASTER_UP = 12,
     DIAG_EV_WIFI_UP = 13,       /**< the station got its IP back (not the first IP of a boot): a = connect attempts during the outage, b = outage in s */
     /**
+     * The Onocoy login guard stopped a caster slot (no attempt until the user
+     * saves it, retries it or disables it): a = slot index (bits 0-7) | stop
+     * reason (ntrip_stop_t, bits 8-15), b = 0. Written once per stop, not
+     * again when a stopped slot is restored at boot.
+     */
+    DIAG_EV_CASTER_STOP = 14,
+    /**
      * Receiver maintenance state (the user works on the receiver through
      * its other port; nothing is sent on the station's link): a = 1 entry,
      * 0 exit; b = the chosen duration (entry) or the time spent (exit), in

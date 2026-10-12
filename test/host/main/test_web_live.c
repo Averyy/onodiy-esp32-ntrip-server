@@ -744,7 +744,7 @@ TEST_CASE("status sections with the new fields still fit the WebSocket's section
         web_build_section(&w, &s, (web_section_t)sec, false);
         TEST_ASSERT_TRUE_MESSAGE(wj_ok(&w), web_section_name((web_section_t)sec));
     }
-    static char cst[768];
+    static char cst[896];
     wj_t w;
     wj_init_elements(&w, cst, sizeof(cst));
     web_build_caster_summary(&w, &s, 0, false);

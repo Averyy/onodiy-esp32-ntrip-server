@@ -233,10 +233,17 @@ bool hm_slot_down(const hm_slot_in_t *in)
     case HM_CST_AUTH_FAILED:
     case HM_CST_CONFIG_ERROR:
     case HM_CST_BANNED:
+    case HM_CST_STOPPED:
         return true;
     default:
         return false;
     }
+}
+
+bool hm_protected_down(bool enabled, bool protected_slot, uint8_t state)
+{
+    return enabled && protected_slot && state != HM_CST_STREAMING && state != HM_CST_PAUSED &&
+           state != HM_CST_STOPPED;
 }
 
 /* ---- debounce ----------------------------------------------------------------- */

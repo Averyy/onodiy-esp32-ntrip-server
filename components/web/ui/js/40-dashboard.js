@@ -190,7 +190,10 @@ function budgetCard(c, avail) {
 
 function casterLine(c, admin) {
   const tone = casterTone(c.state);
-  const reason = c.reason && c.reason !== 'none' ? lbl(L.fail, c.reason) : '';
+  const stopped = c.state === 'stopped';
+  /* Stopped by the Onocoy login guard: why, rather than the last failure's class. */
+  const reason = stopped && c.stop_reason && c.stop_reason !== 'none' ? 'Stopped: ' + lbl(L.stop, c.stop_reason) :
+    c.reason && c.reason !== 'none' ? lbl(L.fail, c.reason) : '';
   const metrics = [];
   if (admin) {
     if (c.state === 'streaming') {
@@ -212,9 +215,10 @@ function casterLine(c, admin) {
       h('span', null, h('span', { class: 'name' }, c.name || ('Slot ' + (c.slot + 1))),
         admin && c.host ? h('span', { class: 'muted small' }, ' · ' + c.host) : null),
       badge(lbl(L.caster, c.state), tone)),
-    reason && c.state !== 'streaming' ? h('div', { class: 'muted small' }, reason) : null,
+    reason && c.state !== 'streaming' ? h('div', { class: stopped ? 't-bad small' : 'muted small' }, reason) : null,
     metrics.length ? h('div', { class: 'metrics' }, metrics.map(m => h('span', null, m[0] + ' ', h('b', null, m[1])))) : null,
-    admin && c.hint ? h('div', { class: 'hintline' }, c.hint) : null);
+    admin && c.hint && !stopped ? h('div', { class: 'hintline' }, c.hint) : null,
+    admin && stopped ? h('div', { class: 'form-actions' }, link('What to do', '#/casters', 'btn small')) : null);
 }
 
 /* An Onocoy slot without its credentials: a call to set it up instead of a state. */

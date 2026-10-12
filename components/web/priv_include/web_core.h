@@ -80,6 +80,7 @@ typedef enum {
     WEB_ERR_TOO_MANY_CLIENTS,
     WEB_ERR_NOT_NO_RECEIVER,
     WEB_ERR_SAME_IMAGE,
+    WEB_ERR_SLOT_DISABLED,
     WEB_ERR_COUNT,
 } web_err_t;
 

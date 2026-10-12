@@ -44,7 +44,7 @@ static const char *TAG = "web";
 #define WS_STALL_CLOSE_S   30u
 #define WS_SEND_TIMEOUT_MS 3000
 #define SEC_TEXT_MAX       1024u
-#define CST_TEXT_MAX       768u
+#define CST_TEXT_MAX       896u   /* one caster summary: about 780 bytes at worst (escaped name and hint, stop_reason) */
 #define MSG_SCRATCH        16384u
 #define EVENTS_MAX         16
 #define EVENT_TEXT_MAX     160

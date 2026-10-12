@@ -29,6 +29,7 @@ const L = {
     paused: 'Paused',
     config_error: 'Configuration error',
     banned: 'Banned',
+    stopped: 'Stopped: needs you',
   },
   fail: {
     none: '',
@@ -43,6 +44,27 @@ const L = {
     mount_busy: 'Mountpoint in use',
     config: 'Configuration problem',
     banned: 'Banned by the caster',
+    login_blocked: 'Onocoy is blocking logins',
+    in_use: 'Credential in use elsewhere',
+    replaced: 'Taken over by another session',
+  },
+  /* Why the Onocoy login guard stopped a slot: [short reason, what to do]. */
+  stop: {
+    none: '',
+    rejected: ['login refused 3 times', 'Onocoy refused the login 3 times. Copy the mountpoint, username and password from the ' +
+      'Onocoy console again, then save the slot or press Try again. The station does not retry by itself, so Onocoy does not ' +
+      'start blocking logins from your internet connection.'],
+    login_blocked: ['logins blocked', 'Onocoy is blocking logins from this internet connection for a while (too many ' +
+      'unsuccessful logins). That also affects every other station on the same connection. Check the credentials, wait, ' +
+      'then press Try again.'],
+    in_use: ['credential in use', 'Onocoy says another stream already uses this credential: another device probably streams ' +
+      'with it. Stop that device or give this station its own credential, then press Try again.'],
+    kicked: ['sessions taken over', 'Onocoy kept ending this station\'s sessions soon after login: another device is probably ' +
+      'streaming with the same credential. The station stopped so the two do not keep knocking each other off. Stop the ' +
+      'other device or give this station its own credential, then press Try again.'],
+    duplicate: ['duplicate stream', 'Onocoy reports this stream as a duplicate of another stream. Check the Onocoy console ' +
+      'before you try again.'],
+    banned: ['banned', 'Onocoy reports this credential or connection as banned. Check the Onocoy console.'],
   },
   backoff: { fast: 'Fast', standard: 'Standard', polite: 'Polite' },
   trust: { bundle: 'Built-in certificate bundle', custom_ca: 'My own CA certificate', insecure: 'Do not check (insecure)' },
@@ -224,7 +246,7 @@ const J = {
   kind: { boot: 'Start', session: 'Previous session', reboot: 'Restart', ladder_step: 'Recovery step', app_update: 'App update',
     app_revert: 'App reverted', gnss_flash: 'Receiver update', safe_mode: 'Safe mode', wifi_disconnect: 'Wi-Fi disconnect',
     data_loss: 'Data loss', caster_down: 'Caster session ended', caster_up: 'Caster back', wifi_up: 'Wi-Fi back',
-    rx_maintenance: 'Receiver maintenance', live_view: 'Live view' },
+    caster_stop: 'Caster stopped', rx_maintenance: 'Receiver maintenance', live_view: 'Live view' },
   resetClass: ['power on', 'planned', 'crash', 'brownout', 'other'],
   /* The same by C value, as the API names them (lifecycle_reset_class_t, lifecycle_reboot_reason_t). */
   resetClassKey: ['power_on', 'planned', 'crash', 'brownout', 'other'],
@@ -247,7 +269,10 @@ const J = {
   netWhy: ['none', 'internet reachable', 'no internet', 'receiver update open', 'too soon', 'restart blocked', 'someone on the access point',
     'no restart for this cause', 'access point wait over'],
   netTrigger: ['protected caster down', 'connected without an IP address', 'a caster not reached'],
-  fail: ['none', 'dns', 'connect', 'tls', 'timeout', 'remote_close', 'write_stall', 'keepalive', 'auth', 'mount_busy', 'config', 'banned'],
+  fail: ['none', 'dns', 'connect', 'tls', 'timeout', 'remote_close', 'write_stall', 'keepalive', 'auth', 'mount_busy', 'config', 'banned',
+    'login_blocked', 'in_use', 'replaced'],
+  /* ntrip_stop_t (a caster_stop record's bits 8-15) */
+  stop: ['none', 'rejected', 'login_blocked', 'in_use', 'kicked', 'duplicate', 'banned'],
   liveEv: [null, 'Opened', 'Extended', 'Closed', 'Satellite output on', 'Satellite output off'],
   liveEnd: ['', 'stopped by you', 'time up', 'nobody watching', 'receiver update'],
   liveCmd: ['accepted', 'rejected', 'no answer', 'not sent'],
@@ -303,7 +328,7 @@ function stationTone(state) {
 function casterTone(state) {
   if (state === 'streaming') return 'ok';
   if (state === 'disabled' || state === 'paused') return '';
-  if (state === 'auth_failed' || state === 'config_error' || state === 'banned') return 'bad';
+  if (state === 'auth_failed' || state === 'config_error' || state === 'banned' || state === 'stopped') return 'bad';
   return 'warn';
 }
 

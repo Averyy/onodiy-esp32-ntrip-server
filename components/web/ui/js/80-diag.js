@@ -204,6 +204,8 @@ function connRow(e) {
         (e.count ? '; ' + e.count + ' shorter session' + (e.count === 1 ? '' : 's') + ' not listed' : '')];
     case 'caster_up':
       return ['Streaming again', slot, 'after ' + fmt.dur(e.duration_s) + (e.count ? ', ' + e.count + ' failed attempt' + (e.count === 1 ? '' : 's') : '')];
+    case 'caster_stop':
+      return ['Stopped: needs you', slot, lbl(L.stop, e.stop_reason) + '; no new attempt until you act'];
     case 'wifi_up':
       return ['Wi-Fi back', 'Wi-Fi', 'after ' + fmt.dur(e.duration_s) + (e.count ? ', ' + e.count + ' connect attempt' + (e.count === 1 ? '' : 's') : '')];
     case 'wifi_disconnect':
@@ -222,7 +224,7 @@ function connHistory() {
     const list = r.entries || [];
     mount(out, list.length ? table(['When', 'Event', 'Where', 'Details'], list.map(e => {
       const c = connRow(e);
-      const bad = e.kind === 'caster_down' || e.kind === 'wifi_disconnect';
+      const bad = e.kind === 'caster_down' || e.kind === 'caster_stop' || e.kind === 'wifi_disconnect';
       return [e.time_unix ? fmt.time(e.time_unix) : h('span', { class: 'muted' }, fmt.dur(e.uptime_s) + ' after a start'),
         h('span', { class: bad ? 't-warn' : 't-ok' }, c[0]), c[1] || DASH, c[2]];
     })) : h('p', { class: 'muted' }, 'No caster sessions ended or Wi-Fi drops recorded.'),
@@ -548,6 +550,10 @@ function journalDetail(e) {
       const tries = a >>> 16;
       return 'Caster slot ' + ((a & 0xff) + 1) + ': streaming again after ' + fmt.dur(b) +
         (tries ? ', ' + tries + ' failed attempt' + (tries === 1 ? '' : 's') : '');
+    }
+    case 'caster_stop': {
+      const why = (a >> 8) & 0xff;
+      return 'Caster slot ' + ((a & 0xff) + 1) + ': stopped (' + lbl(L.stop, J.stop[why] || why) + '); no new attempt until you act';
     }
     case 'wifi_up':
       return 'IP address back after ' + fmt.dur(b) + ', ' + a + ' connect attempt' + (a === 1 ? '' : 's');

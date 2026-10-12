@@ -587,6 +587,7 @@ const ERR = {
   settings_unavailable: 'The settings storage is unavailable this boot, so nothing can be saved.',
   no_position_yet: 'There is no surveyed position yet.',
   caster_policy: 'This caster setup is not allowed.',
+  slot_disabled: 'The slot is not enabled.',
   sha256_mismatch: 'The SHA-256 does not match the uploaded package.',
   downgrade: 'That build is older than the receiver\'s current firmware.',
   no_rollback_image: 'There is no previous app version to go back to.',
