@@ -232,3 +232,133 @@ TEST_CASE("web conn: between requests, an arm still set is stale and dropped", "
     web_conn_received(&t, 40, T0 + 9000u);
     TEST_ASSERT_EQUAL_INT32(DEADLINE, web_conn_recv_budget(&t, 40, T0 + 9000u));
 }
+
+/* ---- HTTP version of each request ------------------------------------------------------------ */
+
+static void feed(web_scan_t *s, const char *text)
+{
+    web_scan_feed(s, text, strlen(text));
+}
+
+/* Feed `text` in pieces of `step` bytes (the server reads what has arrived). */
+static void feed_split(web_scan_t *s, const char *text, size_t step)
+{
+    size_t len = strlen(text);
+    for (size_t at = 0; at < len; at += step) {
+        web_scan_feed(s, text + at, len - at < step ? len - at : step);
+    }
+}
+
+TEST_CASE("web conn: the request line tells HTTP/1.0 from HTTP/1.1, split anywhere", "[web_conn]")
+{
+    static const char req10[] = "GET / HTTP/1.0\r\nHost: onocoydiy.local\r\n\r\n";
+    static const char req11[] = "GET /api/status HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n";
+    for (size_t step = 1; step <= sizeof(req10); step++) {
+        web_scan_t s;
+        memset(&s, 0, sizeof(s));
+        feed_split(&s, req10, step);
+        TEST_ASSERT_EQUAL_UINT8(1, s.queued);
+        TEST_ASSERT_TRUE(web_scan_take(&s));
+        feed_split(&s, req11, step);
+        TEST_ASSERT_FALSE(web_scan_take(&s));
+        TEST_ASSERT_FALSE(web_scan_take(&s));   /* nothing noted: HTTP/1.1 */
+        TEST_ASSERT_EQUAL(WEB_SCAN_LINE, s.st);
+    }
+    /* The split falls between "HTTP/1." and "0", and inside the CR LF. */
+    web_scan_t s;
+    memset(&s, 0, sizeof(s));
+    feed(&s, "GET / HTTP/1.");
+    TEST_ASSERT_EQUAL_UINT8(0, s.queued);
+    feed(&s, "0\r");
+    feed(&s, "\nHost: a\r\n\r\n");
+    TEST_ASSERT_TRUE(web_scan_take(&s));
+    /* Empty lines before a request line are skipped; a bare LF ends lines too. */
+    feed(&s, "\r\n\r\nGET /x HTTP/1.0\nHost: a\n\n");
+    TEST_ASSERT_TRUE(web_scan_take(&s));
+}
+
+TEST_CASE("web conn: pipelined requests keep their own flags, bodies are skipped", "[web_conn]")
+{
+    web_scan_t s;
+    memset(&s, 0, sizeof(s));
+    /* A body that looks like a request line must not count as one. */
+    feed(&s, "POST /api/wifi HTTP/1.1\r\nContent-Type: application/json\r\ncontent-length: 26\r\n\r\n"
+             "GET /fake HTTP/1.0\r\n\r\n1234"
+             "GET / HTTP/1.0\r\n\r\n"
+             "GET /api/session HTTP/1.1\r\n\r\n");
+    TEST_ASSERT_EQUAL_UINT8(3, s.queued);
+    TEST_ASSERT_FALSE(web_scan_take(&s));   /* the POST */
+    TEST_ASSERT_TRUE(web_scan_take(&s));    /* GET / HTTP/1.0 */
+    TEST_ASSERT_FALSE(web_scan_take(&s));   /* GET /api/session */
+    TEST_ASSERT_EQUAL_UINT8(0, s.queued);
+
+    /* A body that arrives in pieces, then the next request. */
+    memset(&s, 0, sizeof(s));
+    feed(&s, "PUT /api/system HTTP/1.0\r\nContent-Length:   10\r\n\r\n12345");
+    feed(&s, "6789");
+    TEST_ASSERT_EQUAL(WEB_SCAN_BODY, s.st);
+    feed(&s, "0GET / HTTP/1.1\r\n\r\n");
+    TEST_ASSERT_TRUE(web_scan_take(&s));
+    TEST_ASSERT_FALSE(web_scan_take(&s));
+    TEST_ASSERT_EQUAL_UINT8(0, s.queued);
+
+    /* A chunked body cannot be followed: the scanner stops (later requests count as HTTP/1.1). */
+    memset(&s, 0, sizeof(s));
+    feed(&s, "POST /x HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nGET /\r\n");
+    TEST_ASSERT_EQUAL(WEB_SCAN_OFF, s.st);
+    TEST_ASSERT_TRUE(web_scan_take(&s));
+    feed(&s, "GET / HTTP/1.0\r\n\r\n");
+    TEST_ASSERT_FALSE(web_scan_take(&s));
+    /* So does an unreadable Content-Length. */
+    memset(&s, 0, sizeof(s));
+    feed(&s, "POST /x HTTP/1.1\r\nContent-Length: 99999999999\r\n\r\n");
+    TEST_ASSERT_EQUAL(WEB_SCAN_OFF, s.st);
+}
+
+static void scan_str(int fd, const char *text)
+{
+    web_conn_scan(&t, fd, text, strlen(text));
+}
+
+TEST_CASE("web conn: each handler takes its request's flag; WebSocket clients are not scanned", "[web_conn]")
+{
+    web_conns_init(&t, DEADLINE);
+    TEST_ASSERT_TRUE(web_conn_open(&t, 60, T0));
+    static const char two[] = "GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\nGET /app.js HTTP/1.1\r\n\r\n";
+    web_conn_scan(&t, 60, two, 20);
+    web_conn_scan(&t, 60, two + 20, sizeof(two) - 1 - 20);
+    TEST_ASSERT_TRUE(web_conn_begin_request(&t, 60));
+    web_conn_set_close_after(&t, 60, true);
+    TEST_ASSERT_TRUE(web_conn_close_after(&t, 60));
+    TEST_ASSERT_FALSE(web_conn_note_close_hdr(&t, 60));   /* first: set the header */
+    TEST_ASSERT_TRUE(web_conn_note_close_hdr(&t, 60));    /* then: it is set already */
+    web_conn_done(&t, 60, T0 + 10u, false);
+    TEST_ASSERT_FALSE(web_conn_begin_request(&t, 60));   /* the second request: HTTP/1.1 */
+    TEST_ASSERT_FALSE(web_conn_close_after(&t, 60));      /* reset for each request */
+    TEST_ASSERT_FALSE(web_conn_note_close_hdr(&t, 60));
+
+    /* On the worker, the decision stays with the connection until the next request. */
+    scan_str(60, "POST /api/upload/app HTTP/1.0\r\nContent-Length: 3\r\n\r\nabc");
+    TEST_ASSERT_TRUE(web_conn_begin_request(&t, 60));
+    web_conn_set_close_after(&t, 60, true);
+    web_conn_async(&t, 60, true, T0 + 20u);
+    TEST_ASSERT_TRUE(web_conn_on_worker(&t, 60));
+    web_conn_done(&t, 60, T0 + 21u, true);
+    TEST_ASSERT_TRUE(web_conn_close_after(&t, 60));
+    web_conn_async(&t, 60, false, T0 + 30u);
+    TEST_ASSERT_FALSE(web_conn_on_worker(&t, 60));
+
+    /* After the handshake the bytes are frames: nothing is noted. */
+    scan_str(60, "GET /ws HTTP/1.1\r\nUpgrade: websocket\r\n\r\n");
+    web_conn_websocket(&t, 60, true, T0 + 40u);
+    scan_str(60, "GET / HTTP/1.0\r\n\r\n");
+    TEST_ASSERT_FALSE(web_conn_begin_request(&t, 60));
+    TEST_ASSERT_EQUAL_UINT8(0, t.c[0].scan.queued);
+
+    /* Unknown connections: nothing to take, nothing kept. */
+    scan_str(61, "GET / HTTP/1.0\r\n\r\n");
+    TEST_ASSERT_FALSE(web_conn_begin_request(&t, 61));
+    TEST_ASSERT_FALSE(web_conn_close_after(&t, 61));
+    TEST_ASSERT_FALSE(web_conn_note_close_hdr(&t, 61));
+    TEST_ASSERT_FALSE(web_conn_on_worker(&t, 61));
+}

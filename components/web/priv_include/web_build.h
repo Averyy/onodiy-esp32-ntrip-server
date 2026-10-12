@@ -160,7 +160,17 @@ void web_build_status(wj_t *w, const web_status_snap_t *s, bool pub);
 /** One section as an object member (`"device":{...}`); nothing for a section the form leaves out. */
 void web_build_section(wj_t *w, const web_status_snap_t *s, web_section_t sec, bool pub);
 
-/** One caster summary as an array element. */
+/**
+ * A slot nobody configured (or one that was removed): no host and not
+ * enabled. Its name means nothing then. NULL (configs not loaded) is not empty.
+ */
+bool web_caster_slot_empty(const ntrip_caster_cfg_t *c);
+
+/**
+ * One caster summary as an array element. An empty slot
+ * (web_caster_slot_empty) has the name "" and "empty": true in the admin
+ * form, and nothing at all in the public form.
+ */
 void web_build_caster_summary(wj_t *w, const web_status_snap_t *s, size_t slot, bool pub);
 
 /**
@@ -367,7 +377,7 @@ typedef struct {
     int32_t second_of_day;         /**< -1 = no trusted clock */
     size_t slots;
     const ntrip_caster_cfg_t *cfg; /**< NULL when not loaded (safe mode) */
-    int protected_slot;            /**< -1 = none */
+    int protected_slot;            /**< -1 = none; the first enabled protected slot, else the first protected one */
     const ntrip_caster_status_t *protected_status;
     uint32_t down_today_s;
     uint32_t budget_left_s;        /**< UINT32_MAX = null */
@@ -376,6 +386,13 @@ typedef struct {
     const ledger_day_t *history;
     size_t history_count;
 } web_avail_snap_t;
+
+/**
+ * The slot whose day GET /api/availability reports as `protected`: the first
+ * enabled protected (Onocoy) slot, else the first protected one (a disabled
+ * leftover slot never hides the one in use); -1 = none, or `cfg` NULL.
+ */
+int web_avail_protected_slot(const ntrip_caster_cfg_t *cfg, size_t slots);
 
 /** GET /api/availability. */
 void web_build_availability(wj_t *w, const web_avail_snap_t *a);
@@ -411,8 +428,9 @@ void web_build_connections(wj_t *w, const diag_journal_entry_t *e, size_t count,
 /** GET /api/diag/tasks. */
 void web_build_tasks(wj_t *w, const diag_task_info_t *t, size_t count);
 
-/** GET /api/logs (JSON form). */
-void web_build_logs(wj_t *w, uint32_t cursor, bool more, bool gap, const char *text, size_t len);
+/** GET /api/logs (JSON form); `level_max` the most detailed level this build logs ("info"). */
+void web_build_logs(wj_t *w, uint32_t cursor, bool more, bool gap, const char *text, size_t len,
+                    const char *level_max);
 
 /* ---- errors and WebSocket messages ---------------------------------------------------------- */
 

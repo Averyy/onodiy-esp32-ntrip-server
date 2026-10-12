@@ -20,9 +20,24 @@ What it does:
      (POST /api/setup/admin; the QEMU build treats requests as coming over
      the setup AP) and reads GET /api/status with that session: valid JSON,
      API version 1, the station online over the emulated Ethernet; GET
-     /api/session names the station "onocoydiy" and its mDNS name
-     "onocoydiy", and a request with "Host: onocoydiy.local" (also fully
-     qualified, "onocoydiy.local.") passes the Host check;
+     /api/session names the station "onocoydiy-qemu" (the QEMU build's own
+     host name, so it never answers a real station's name on the LAN) and
+     its mDNS name "onocoydiy-qemu", and a request with
+     "Host: onocoydiy-qemu.local" (also fully qualified,
+     "onocoydiy-qemu.local.") passes the Host check;
+     HTTP connection handling: a request with a body that no route takes
+     gets its real answer (405, 404, the captive redirect) with
+     "Connection: close" instead of 413, a body on a route that takes none
+     gets 400, "Connection: close" and HTTP/1.0 end the connection after the
+     answer, and two pipelined HTTP/1.1 requests on one socket are both
+     answered; client addresses in the log (a wrong admin password, a
+     refused WebSocket handshake: "from 10.0.2.2"); log levels: "*" at info
+     keeps the HTTP server's own tags at error (no "W httpd_uri" line for a
+     refused handshake), a level the build cannot show is refused,
+     /api/logs says level_max "info", and a cursor that is not a number is
+     refused; PUT /api/wifi stores the credentials only in this build
+     (applied and trial false) and GET /api/wifi agrees at once (no trial,
+     nothing pending);
   3. checks UART1 in both directions: the firmware's receiver detection
      queries (VERSIONA) arrive on the host side, and bytes the host sends
      (plain text no receiver would send: no '$', '#', RTCM preamble or loader
@@ -45,7 +60,12 @@ What it does:
      console up here: the writer's ordering and drop rules are host-tested
      (test/host test_diag_console.c), and this checks that the writer is
      there. The emulated watchdogs are live (run.sh leaves them on), so a
-     task that starves IDLE shows up here as on a board.
+     task that starves IDLE shows up here as on a board. The boot log has
+     the mDNS line, the mDNS task's stack in PSRAM (the console writer's
+     is too, unless the log says otherwise) and the station's IPv6
+     link-local address. Last, POST
+     /api/system/reboot: the mDNS goodbye ("mDNS: goodbye sent") is on the
+     console before the next boot, with no shutdown-budget warning.
 
 QEMU always stops: on a normal end, Ctrl-C, SIGTERM or SIGHUP the script
 stops it on the way out, and run.sh gets --seconds as a backstop (observe +
@@ -79,6 +99,11 @@ RUN_SH = ROOT / "tools" / "qemu" / "run.sh"
 FATAL = ["Guru Meditation", "abort()", "***ERROR*** A stack overflow", "assert failed:", "Backtrace:", "task_wdt:"]
 BACKSTOP_MARGIN_S = 60  # run.sh stops QEMU this long after the latest point the checks need it
 BOOT_MARK = "ESP-ROM:"
+HOSTNAME = "onocoydiy-qemu"                # sdkconfig.qemu CONFIG_LWIP_LOCAL_HOSTNAME
+QEMU_PEER = "10.0.2.2"                     # how the guest sees this computer (QEMU user-mode network)
+IP6_LINE = re.compile(r"network: IPv6 link-local (fe80:[0-9a-f:]+) on station")
+GOODBYE = "network: mDNS: goodbye sent"
+BUDGET_WARNINGS = ("shutdown budget used up", "shutdown hooks overran")
 OWN_REBOOT = re.compile(r"lifecycle: rebooting \(reason \d+\)")
 LADDER_REBOOT = "rebooting (reason 6)"   # the GNSS ladder's ESP32 restart (LIFECYCLE_REBOOT_GNSS_LADDER)
 CONSOLE_NOTE = "[diag:"                    # the console's note about lines it could not send
@@ -171,6 +196,47 @@ def request(port: int, method: str, path: str, body: dict | None = None, cookie:
         return resp.status, hdrs, raw
     finally:
         conn.close()
+
+
+def raw_exchange(port: int, data: bytes, timeout: float = 5.0) -> tuple[bytes, float | None]:
+    """Send raw bytes, read until the server closes or `timeout`: (bytes, seconds to EOF or None)."""
+    t0 = time.monotonic()
+    got = bytearray()
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as c:
+        c.sendall(data)
+        c.settimeout(0.2)
+        while time.monotonic() - t0 < timeout:
+            try:
+                chunk = c.recv(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                return bytes(got), time.monotonic() - t0
+            if not chunk:
+                return bytes(got), time.monotonic() - t0
+            got += chunk
+    return bytes(got), None
+
+
+def raw_request(port: int, method: str, path: str, body: bytes, headers: dict[str, str] | None = None,
+                timeout: float = 30.0) -> tuple[int, dict, bytes]:
+    """A request with any method and a raw body (http.client, Content-Length set)."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        conn.request(method, path, body=body, headers=headers or {})
+        resp = conn.getresponse()
+        raw = resp.read()
+        return resp.status, {k.lower(): v for k, v in resp.getheaders()}, raw
+    finally:
+        conn.close()
+
+
+def error_code(body: bytes) -> tuple[str | None, str | None]:
+    try:
+        err = json.loads(body).get("error") or {}
+        return err.get("code"), err.get("field")
+    except (ValueError, AttributeError):
+        return None, None
 
 
 class Smoke:
@@ -289,6 +355,10 @@ class Smoke:
         self.check(net.get("online") is True and net.get("ip"),
                    f"station online over the emulated Ethernet (ip {net.get('ip')}, \"{net.get('ssid')}\")")
         self.name_checks()
+        self.connection_checks()
+        self.client_log_checks()
+        self.log_level_checks()
+        self.wifi_checks()
 
     def hold_checks(self) -> None:
         """After detection gave up (a ladder episode): the restart is held for first setup."""
@@ -319,15 +389,154 @@ class Smoke:
         except ValueError as e:
             self.check(False, f"GET /api/session: not JSON ({e})")
             return
-        self.check(status == 200 and sess.get("hostname") == "onocoydiy" and sess.get("mdns_host") == "onocoydiy",
+        self.check(status == 200 and sess.get("hostname") == HOSTNAME and sess.get("mdns_host") == HOSTNAME,
                    f"GET /api/session: hostname {sess.get('hostname')!r}, mdns_host {sess.get('mdns_host')!r}, "
                    f"ap_ssid {sess.get('ap_ssid')!r}, setup_step {sess.get('setup_step')!r}")
-        status, _, body = request(self.http_port, "GET", "/api/session", timeout=30, host="onocoydiy.local")
-        self.check(status == 200, f"Host: onocoydiy.local passes the Host check (HTTP {status})")
-        status, _, body = request(self.http_port, "GET", "/api/session", timeout=30, host="onocoydiy.local.")
-        self.check(status == 200, f"Host: onocoydiy.local. (fully qualified) passes the Host check (HTTP {status})")
+        status, _, body = request(self.http_port, "GET", "/api/session", timeout=30, host=f"{HOSTNAME}.local")
+        self.check(status == 200, f"Host: {HOSTNAME}.local passes the Host check (HTTP {status})")
+        status, _, body = request(self.http_port, "GET", "/api/session", timeout=30, host=f"{HOSTNAME}.local.")
+        self.check(status == 200, f"Host: {HOSTNAME}.local. (fully qualified) passes the Host check (HTTP {status})")
         status, _, _ = request(self.http_port, "GET", "/api/session", timeout=30, host="evil.local")
         self.check(status != 200, f"Host: evil.local is refused (HTTP {status})")
+
+    def connection_checks(self) -> None:
+        """Bodies nobody reads, Connection: close, HTTP/1.0 and pipelining."""
+        port = self.http_port
+        js = {"Content-Type": "application/json"}
+        status, hdrs, body = raw_request(port, "POST", "/api/status", b"{}", js)
+        self.check(status == 405 and error_code(body)[0] == "method_not_allowed" and hdrs.get("connection") == "close",
+                   f"POST /api/status with {{}}: HTTP {status} {error_code(body)[0]}, Connection: {hdrs.get('connection')}")
+        status, hdrs, body = raw_request(port, "POST", "/api/nope", b"{}", js)
+        self.check(status == 404 and error_code(body)[0] == "not_found" and hdrs.get("connection") == "close",
+                   f"POST /api/nope with a 2-byte body: HTTP {status} {error_code(body)[0]}, "
+                   f"Connection: {hdrs.get('connection')}")
+        # Any other path: 404 on the station interface; this build counts as the setup AP, where the
+        # answer is the captive redirect (the 404 row is host-tested, test_web_core.c).
+        status, hdrs, body = raw_request(port, "GET", "/nope", b"xyz")
+        self.check(status == 302 and hdrs.get("location", "").startswith("http://192.168.4.1")
+                   and hdrs.get("connection") == "close",
+                   f"GET /nope with a body: HTTP {status} (the setup AP's captive redirect, not 413), "
+                   f"Connection: {hdrs.get('connection')}")
+        status, hdrs, body = raw_request(port, "GET", "/api/session", b"{}", js)
+        self.check(status == 400 and error_code(body)[0] == "bad_request" and hdrs.get("connection") == "close",
+                   f"GET /api/session with a body: HTTP {status} {error_code(body)[0]}, Connection: {hdrs.get('connection')}")
+        host = f"Host: 127.0.0.1:{port}\r\n"
+        data, eof = raw_exchange(port, f"GET /api/session HTTP/1.1\r\n{host}Connection: close\r\n\r\n".encode())
+        self.check(data.startswith(b"HTTP/1.1 200") and b"connection: close" in data.lower() and eof is not None
+                   and eof < 2.0,
+                   f"Connection: close: answered and closed after {eof if eof is None else round(eof, 2)} s")
+        data, eof = raw_exchange(port, f"GET / HTTP/1.0\r\n{host}\r\n".encode())
+        self.check(data.startswith(b"HTTP/1.1 200") and eof is not None and eof < 2.0,
+                   f"GET / HTTP/1.0: answered ({data[:15]!r}) and closed after "
+                   f"{eof if eof is None else round(eof, 2)} s")
+        two = (f"GET /api/session HTTP/1.1\r\n{host}\r\n"
+               f"GET /api/session HTTP/1.1\r\n{host}Connection: close\r\n\r\n").encode()
+        data, eof = raw_exchange(port, two)
+        self.check(data.count(b"HTTP/1.1 200") == 2 and eof is not None,
+                   f"two pipelined HTTP/1.1 requests on one socket: {data.count(b'HTTP/1.1 200')} answered, "
+                   f"closed after the second")
+        # Keep-alive: an HTTP/1.1 request without "close" leaves the connection open.
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as c:
+            c.sendall(f"GET /api/session HTTP/1.1\r\n{host}\r\n".encode())
+            time.sleep(1.5)
+            c.settimeout(0.5)
+            first = c.recv(65536)
+            c.sendall(f"GET /api/session HTTP/1.1\r\n{host}Connection: close\r\n\r\n".encode())
+            c.settimeout(5)
+            second = b""
+            try:
+                while True:
+                    chunk = c.recv(65536)
+                    if not chunk:
+                        break
+                    second += chunk
+            except socket.timeout:
+                pass
+        self.check(first.startswith(b"HTTP/1.1 200") and second.startswith(b"HTTP/1.1 200"),
+                   "HTTP/1.1 keep-alive: a second request on the same socket is answered")
+
+    def wifi_checks(self) -> None:
+        """Wi-Fi credentials in this build are stored only (the emulated Ethernet stays the link): the 202 and the
+        next GET agree at once (no trial, nothing pending)."""
+        status, _, body = request(self.http_port, "PUT", "/api/wifi", {"ssid": "SmokeNet", "password": "fake-pass-123"},
+                                  cookie=self.cookie, timeout=30)
+        try:
+            put = json.loads(body)
+        except ValueError:
+            put = {}
+        self.check(status == 202 and put.get("applied") is False and put.get("trial") is False,
+                   f"PUT /api/wifi: HTTP {status}, applied {put.get('applied')}, trial {put.get('trial')} (store only)")
+        status, _, body = request(self.http_port, "GET", "/api/wifi", cookie=self.cookie, timeout=30)
+        try:
+            w = json.loads(body)
+        except ValueError:
+            w = {}
+        self.check(status == 200 and w.get("cred_trial") is False and w.get("cred_pending") is False
+                   and w.get("pending_ssid") is None,
+                   f"GET /api/wifi right after: cred_trial {w.get('cred_trial')}, cred_pending {w.get('cred_pending')}, "
+                   f"pending_ssid {w.get('pending_ssid')!r}")
+
+    def console_lines(self, start: int, needle: str) -> list[str]:
+        return [line for line in self.log_text()[start:].splitlines() if needle in line]
+
+    def wait_console(self, start: int, needle: str, seconds: float = 5.0) -> list[str]:
+        deadline = time.monotonic() + seconds
+        while True:
+            found = self.console_lines(start, needle)
+            if found or time.monotonic() >= deadline:
+                return found
+            time.sleep(0.25)
+
+    def ws_handshake(self, cookie: str | None = None) -> bytes:
+        key = "dGhlIHNhbXBsZSBub25jZQ=="
+        req = (f"GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{self.http_port}\r\nUpgrade: websocket\r\n"
+               f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+               + (f"Cookie: {cookie}\r\n" if cookie else "") + "\r\n")
+        data, _ = raw_exchange(self.http_port, req.encode(), timeout=5)
+        return data
+
+    def client_log_checks(self) -> None:
+        """A wrong admin password and a refused WebSocket handshake name the client in the log."""
+        start = len(self.log_text())
+        status, _, body = request(self.http_port, "POST", "/api/session", {"password": "not-the-password"}, timeout=60)
+        lines = self.wait_console(start, "wrong admin password from")
+        self.check(status == 403 and len(lines) == 1 and f"from {QEMU_PEER}" in lines[0],
+                   f"a wrong admin password (HTTP {status}): {len(lines)} console line(s): "
+                   f"{lines[0].strip()[:120] if lines else '-'}")
+        start = len(self.log_text())
+        data = self.ws_handshake()
+        lines = self.wait_console(start, f"WebSocket refused for {QEMU_PEER}")
+        self.check(data.startswith(b"HTTP/1.1 403") and len(lines) == 1,
+                   f"a WebSocket handshake without a session (public status off): {data[:12]!r}, "
+                   f"{len(lines)} console line(s): {lines[0].strip()[:120] if lines else '-'}")
+
+    def log_level_checks(self) -> None:
+        start = len(self.log_text())
+        status, _, body = request(self.http_port, "PUT", "/api/diag/log-level", {"tag": "*", "level": "info"},
+                                  cookie=self.cookie, timeout=30)
+        self.check(status == 200, f"PUT /api/diag/log-level * info: HTTP {status}")
+        data = self.ws_handshake()
+        time.sleep(1.0)
+        noisy = [line for line in self.log_text()[start:].splitlines() if re.search(r"^W \([^)]*\) httpd_uri:", line)]
+        self.check(data.startswith(b"HTTP/1.1 403") and not noisy,
+                   f"after \"*\" at info, a refused handshake prints no W httpd_uri line "
+                   f"({noisy[0].strip()[:100] if noisy else 'none'})")
+        status, _, body = request(self.http_port, "PUT", "/api/diag/log-level", {"tag": "station", "level": "debug"},
+                                  cookie=self.cookie, timeout=30)
+        code, field = error_code(body)
+        self.check(status == 400 and code == "invalid_field" and field == "level",
+                   f"log level debug (above this build's maximum): HTTP {status} {code} {field}")
+        status, _, body = request(self.http_port, "GET", "/api/logs?cursor=0", cookie=self.cookie, timeout=30)
+        try:
+            level_max = json.loads(body).get("level_max")
+        except ValueError:
+            level_max = None
+        self.check(status == 200 and level_max == "info", f"GET /api/logs: level_max {level_max!r}")
+        for path in ("/api/logs?cursor=abc", "/api/journal?cursor=abc"):
+            status, _, body = request(self.http_port, "GET", path, cookie=self.cookie, timeout=30)
+            code, field = error_code(body)
+            self.check(status == 400 and code == "invalid_field" and field == "cursor",
+                       f"GET {path}: HTTP {status} {code} {field}")
 
     def uart1_checks(self) -> None:
         if self.tap is None:
@@ -364,6 +573,7 @@ class Smoke:
                 ok = status == 200 and json.loads(body).get("api") == 1
                 self.check(ok, f"GET /api/status still answers after {self.elapsed():.0f} s (HTTP {status})")
                 self.console_checks()
+                self.reboot_checks()
         except (OSError, http.client.HTTPException, ValueError) as e:
             self.check(False, f"web server at the end of the window: {type(e).__name__}: {e}")
 
@@ -378,6 +588,35 @@ class Smoke:
         log = (json.loads(body).get("log") or {}) if status == 200 else {}
         self.check(status == 200 and log.get("console_dropped") == 0,
                    f"/api/health log.console_dropped {log.get('console_dropped')} of {log.get('lines')} lines")
+
+    def reboot_checks(self) -> None:
+        """A planned restart says goodbye on mDNS while the network is still up, within the hook budget."""
+        start = len(self.log_text())
+        status, _, body = request(self.http_port, "POST", "/api/system/reboot", {}, cookie=self.cookie, timeout=30)
+        if not self.check(status == 202, f"POST /api/system/reboot: HTTP {status}"):
+            return
+        deadline = time.monotonic() + 30
+        text = ""
+        while time.monotonic() < deadline and self.proc.poll() is None:
+            text = self.log_text()[start:]
+            if BOOT_MARK in text:
+                break
+            time.sleep(0.5)
+        before = text.split(BOOT_MARK, 1)[0]
+        self.check(BOOT_MARK in text and GOODBYE in before,
+                   "the mDNS goodbye is on the console before the restart" if GOODBYE in before
+                   else "no mDNS goodbye before the restart")
+        warned = [w for w in BUDGET_WARNINGS if w in before]
+        self.check(not warned, f"no shutdown-budget warning ({warned[0] if warned else 'none'})")
+        # Back up again before the window ends (the boot checks count this restart as the firmware's own).
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline and self.proc.poll() is None:
+            try:
+                if request(self.http_port, "GET", "/", timeout=5)[0] == 200:
+                    break
+            except (OSError, http.client.HTTPException):
+                pass
+            time.sleep(1)
 
     def observe(self) -> None:
         while self.elapsed() < self.args.observe and self.proc.poll() is None:
@@ -402,7 +641,13 @@ class Smoke:
         self.check(LADDER_REBOOT not in text, "no GNSS ladder restart (\"rebooting (reason 6)\") during the run")
         notes = [line.strip()[:160] for line in text.splitlines() if CONSOLE_NOTE in line]
         self.check(not notes, f"no dropped console lines ({notes[0] if notes else 'no [diag: note'})")
-        self.check("network: mDNS: answering as onocoydiy.local" in text, "the boot log has the mDNS line")
+        self.check(f"network: mDNS: answering as {HOSTNAME}.local (web page as service {HOSTNAME})" in text,
+                   "the boot log has the mDNS line")
+        self.check("mdns_mem: mDNS task will be created from SPIRAM" in text
+                   and "console task stack in internal RAM" not in text,
+                   "the mDNS and console task stacks are in PSRAM (boot log)")
+        m = IP6_LINE.search(text)
+        self.check(m is not None, f"the boot log has the station's IPv6 link-local address ({m.group(1) if m else '-'})")
 
     def run(self) -> int:
         try:

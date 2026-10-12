@@ -30,6 +30,15 @@ CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_ETH_USE_OPENETH=y
 CONFIG_NETWORK_QEMU_ETHERNET=y
 
+# A name of its own. QEMU's user-mode network (slirp) carries the guest's
+# multicast mDNS out of the developer's machine onto its LAN, where a real
+# station may answer onocoydiy.local: under the station's default name the
+# emulated one would announce itself there too and could take the name
+# from the station (or be renamed by it). Running slirp with restrict=on
+# would keep the packets in, but it also cuts the guest's outbound update
+# check and needs a guestfwd per local caster port.
+CONFIG_LWIP_LOCAL_HOSTNAME="onocoydiy-qemu"
+
 # Software crypto: with the SHA accelerator model, certificate signatures
 # fail to verify (TLS to GitHub fails, PSA error -149); with SHA in software
 # but AES in hardware, the AES-DMA model cannot read the (PSRAM) buffers and

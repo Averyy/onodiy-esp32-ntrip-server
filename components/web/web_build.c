@@ -568,6 +568,11 @@ void web_build_section(wj_t *w, const web_status_snap_t *s, web_section_t sec, b
     }
 }
 
+bool web_caster_slot_empty(const ntrip_caster_cfg_t *c)
+{
+    return c != NULL && c->host[0] == '\0' && !c->enabled;
+}
+
 void web_build_caster_summary(wj_t *w, const web_status_snap_t *s, size_t slot, bool pub)
 {
     if (slot >= WEB_MAX_SLOTS) {
@@ -576,11 +581,20 @@ void web_build_caster_summary(wj_t *w, const web_status_snap_t *s, size_t slot, 
     const ntrip_caster_cfg_t *c = s->cfg_valid ? &s->cfg[slot] : NULL;
     const ntrip_caster_status_t *t = &s->cst[slot];
     bool prot = c != NULL && c->protected_slot;
+    bool empty = web_caster_slot_empty(c);
+    if (pub && empty) {
+        return;   /* the public form lists configured slots only */
+    }
     wj_obj_open(w, NULL);
     wj_uint(w, "slot", slot);
-    wj_str_or_null(w, "name", c != NULL ? c->name : NULL);
+    if (empty) {
+        wj_str(w, "name", "");   /* whatever name a removed slot still has means nothing */
+    } else {
+        wj_str_or_null(w, "name", c != NULL ? c->name : NULL);
+    }
     wj_str(w, "state", web_ntrip_state_name(t->state));
     if (!pub) {
+        wj_bool(w, "empty", empty);
         wj_bool(w, "enabled", c != NULL && c->enabled);
         wj_bool(w, "protected", prot);
         wj_str_or_null(w, "host", c != NULL ? c->host : NULL);
@@ -1926,6 +1940,23 @@ static void day(wj_t *w, const char *key, const ledger_day_t *d, size_t slots)
     wj_obj_close(w);
 }
 
+int web_avail_protected_slot(const ntrip_caster_cfg_t *cfg, size_t slots)
+{
+    int any = -1;
+    for (size_t i = 0; cfg != NULL && i < slots && i < WEB_MAX_SLOTS; i++) {
+        if (!cfg[i].protected_slot) {
+            continue;
+        }
+        if (cfg[i].enabled) {
+            return (int)i;
+        }
+        if (any < 0) {
+            any = (int)i;
+        }
+    }
+    return any;
+}
+
 void web_build_availability(wj_t *w, const web_avail_snap_t *a)
 {
     wj_obj_open(w, NULL);
@@ -1937,10 +1968,17 @@ void web_build_availability(wj_t *w, const web_avail_snap_t *a)
     }
     wj_arr_open(w, "slots");
     for (size_t i = 0; i < a->slots && i < WEB_MAX_SLOTS; i++) {
+        const ntrip_caster_cfg_t *c = a->cfg != NULL ? &a->cfg[i] : NULL;
+        bool empty = web_caster_slot_empty(c);
         wj_obj_open(w, NULL);
         wj_uint(w, "slot", i);
-        wj_str_or_null(w, "name", a->cfg != NULL ? a->cfg[i].name : NULL);
-        wj_bool(w, "protected", a->cfg != NULL && a->cfg[i].protected_slot);
+        wj_bool(w, "empty", empty);
+        if (empty) {
+            wj_str(w, "name", "");
+        } else {
+            wj_str_or_null(w, "name", c != NULL ? c->name : NULL);
+        }
+        wj_bool(w, "protected", c != NULL && c->protected_slot);
         wj_obj_close(w);
     }
     wj_arr_close(w);
@@ -2119,12 +2157,14 @@ void web_build_tasks(wj_t *w, const diag_task_info_t *t, size_t count)
     wj_obj_close(w);
 }
 
-void web_build_logs(wj_t *w, uint32_t cursor, bool more, bool gap, const char *text, size_t len)
+void web_build_logs(wj_t *w, uint32_t cursor, bool more, bool gap, const char *text, size_t len,
+                    const char *level_max)
 {
     wj_obj_open(w, NULL);
     wj_uint(w, "cursor", cursor);
     wj_bool(w, "more", more);
     wj_bool(w, "gap", gap);
+    wj_str(w, "level_max", level_max != NULL ? level_max : "info");
     wj_strn(w, "text", text != NULL ? text : "", text != NULL ? len : 0);
     wj_obj_close(w);
 }

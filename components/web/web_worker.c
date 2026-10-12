@@ -263,7 +263,9 @@ static bool drain(httpd_req_t *req, uint32_t left)
     return true;
 }
 
-/* Refuse after reading the rest; the connection closes afterwards. */
+/* Refuse after reading the rest: the body is read, so the connection can
+ * carry the next request (unless the client asked for it to end). A client
+ * that goes away meanwhile gets nothing. */
 static void refuse(httpd_req_t *req, uint32_t left, web_err_t err, const char *message, uint32_t retry_in_s)
 {
     if (drain(req, left)) {
@@ -271,10 +273,27 @@ static void refuse(httpd_req_t *req, uint32_t left, web_err_t err, const char *m
     }
 }
 
+/* Worker: the answer went out cut short (a download that failed half way):
+ * the connection must end, or the client would wait for the rest. */
+static bool s_cut;
+
 static void finish_request(httpd_req_t *req)
 {
     if (req != NULL) {
-        web_conn_worker(httpd_req_to_sockfd(req), false);   /* its next request is bounded again */
+        int fd = httpd_req_to_sockfd(req);
+        if (s_cut || web_conn_req_close(req)) {
+            /* The client asked for the connection to end after this answer
+             * ("Connection: close", HTTP/1.0), or the answer is incomplete:
+             * our side ends now, what the client still sends is drained for
+             * a moment, and the socket is shut, so the server deletes the
+             * session once it has the connection back. The session is the
+             * worker's until the completion below, so its descriptor cannot
+             * have gone to another connection meanwhile. */
+            web_linger_close(req);
+            web_conn_shut(fd);
+        }
+        s_cut = false;
+        web_conn_worker(fd, false);   /* its next request is bounded again */
         (void)httpd_req_async_handler_complete(req);
     }
 }
@@ -510,7 +529,8 @@ static void send_coredump(httpd_req_t *req)
         esp_err_t err = diag_coredump_read(off, s_io, n);
         if (err != ESP_OK || httpd_resp_send_chunk(req, (const char *)s_io, (ssize_t)n) != ESP_OK) {
             ESP_LOGW(TAG, "core dump download stopped at %u bytes: %s", (unsigned)off, esp_err_to_name(err));
-            return;   /* the connection closes on its own; a half file is not mistaken for a whole one */
+            s_cut = true;   /* the connection ends: a half file is never mistaken for a whole one */
+            return;
         }
         off += n;
     }

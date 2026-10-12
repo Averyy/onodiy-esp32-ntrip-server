@@ -103,6 +103,193 @@ void web_conn_received(web_conns_t *t, int fd, uint32_t now_ms)
     }
 }
 
+/* ---- request-line scanner ------------------------------------------------------------------ */
+
+static char scan_lower(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
+/* The current header line starts with `name` (lower case, with the colon), case-insensitive. */
+static bool hdr_is(const web_scan_t *s, const char *name, size_t *value_at)
+{
+    size_t n = strlen(name);
+    size_t have = s->hdr_len < sizeof(s->hdr) ? s->hdr_len : sizeof(s->hdr);
+    if (have < n) {
+        return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (scan_lower(s->hdr[i]) != name[i]) {
+            return false;
+        }
+    }
+    *value_at = n;
+    return true;
+}
+
+/* A header line ended (without its CR LF). */
+static void scan_header_line(web_scan_t *s)
+{
+    size_t at = 0;
+    size_t have = s->hdr_len < sizeof(s->hdr) ? s->hdr_len : sizeof(s->hdr);
+    if (hdr_is(s, "content-length:", &at)) {
+        while (at < have && (s->hdr[at] == ' ' || s->hdr[at] == '\t')) {
+            at++;
+        }
+        uint32_t v = 0;
+        bool digits = false;
+        bool ok = true;
+        while (at < have && s->hdr[at] >= '0' && s->hdr[at] <= '9') {
+            uint32_t d = (uint32_t)(s->hdr[at] - '0');
+            if (v > (UINT32_MAX - d) / 10u) {
+                ok = false;
+                break;
+            }
+            v = v * 10u + d;
+            digits = true;
+            at++;
+        }
+        if (!ok || !digits || s->hdr_len > sizeof(s->hdr)) {
+            s->st = WEB_SCAN_OFF;   /* cannot tell where the next request starts */
+            return;
+        }
+        s->content_len = v;
+    } else if (hdr_is(s, "transfer-encoding:", &at)) {
+        s->st = WEB_SCAN_OFF;       /* a chunked body: not followed */
+    }
+}
+
+void web_scan_feed(web_scan_t *s, const char *buf, size_t len)
+{
+    size_t i = 0;
+    while (i < len && s->st != WEB_SCAN_OFF) {
+        if (s->st == WEB_SCAN_BODY) {
+            size_t take = len - i < s->body_left ? len - i : s->body_left;
+            s->body_left -= (uint32_t)take;
+            i += take;
+            if (s->body_left == 0) {
+                s->st = WEB_SCAN_LINE;
+                s->tail_len = 0;
+            }
+            continue;
+        }
+        char c = buf[i++];
+        if (s->st == WEB_SCAN_LINE) {
+            if (c == '\n') {
+                if (s->tail_len == 0) {
+                    continue;   /* an empty line before a request line (allowed) */
+                }
+                bool h10 = s->tail_len == sizeof(s->tail) && memcmp(s->tail, "HTTP/1.0", sizeof(s->tail)) == 0;
+                if (s->queued >= WEB_SCAN_QUEUE) {
+                    s->st = WEB_SCAN_OFF;   /* this many unanswered requests: give up on the order */
+                    continue;
+                }
+                s->queue |= (uint8_t)((h10 ? 1u : 0u) << s->queued);
+                s->queued++;
+                s->st = WEB_SCAN_HEADERS;
+                s->hdr_len = 0;
+                s->content_len = 0;
+                continue;
+            }
+            if (c == '\r') {
+                continue;
+            }
+            if (s->tail_len == sizeof(s->tail)) {
+                memmove(s->tail, s->tail + 1, sizeof(s->tail) - 1);
+                s->tail_len--;
+            }
+            s->tail[s->tail_len++] = c;
+            continue;
+        }
+        /* WEB_SCAN_HEADERS */
+        if (c == '\n') {
+            if (s->hdr_len == 0) {
+                if (s->content_len > 0) {
+                    s->st = WEB_SCAN_BODY;
+                    s->body_left = s->content_len;
+                } else {
+                    s->st = WEB_SCAN_LINE;
+                    s->tail_len = 0;
+                }
+            } else {
+                scan_header_line(s);
+                s->hdr_len = 0;
+            }
+            continue;
+        }
+        if (c == '\r') {
+            continue;
+        }
+        if (s->hdr_len < sizeof(s->hdr)) {
+            s->hdr[s->hdr_len] = c;
+        }
+        if (s->hdr_len < UINT8_MAX) {
+            s->hdr_len++;
+        }
+    }
+}
+
+bool web_scan_take(web_scan_t *s)
+{
+    if (s->queued == 0) {
+        return false;
+    }
+    bool h10 = (s->queue & 1u) != 0;
+    s->queue >>= 1;
+    s->queued--;
+    return h10;
+}
+
+void web_conn_scan(web_conns_t *t, int fd, const char *buf, size_t len)
+{
+    web_conn_t *e = find(t, fd);
+    if (e != NULL && !e->ws && buf != NULL) {
+        web_scan_feed(&e->scan, buf, len);
+    }
+}
+
+bool web_conn_begin_request(web_conns_t *t, int fd)
+{
+    web_conn_t *e = find(t, fd);
+    if (e == NULL) {
+        return false;
+    }
+    e->close_after = false;
+    e->close_hdr = false;
+    return web_scan_take(&e->scan);
+}
+
+bool web_conn_on_worker(const web_conns_t *t, int fd)
+{
+    const web_conn_t *e = find_c(t, fd);
+    return e != NULL && e->phase == WEB_CONN_ASYNC;
+}
+
+void web_conn_set_close_after(web_conns_t *t, int fd, bool on)
+{
+    web_conn_t *e = find(t, fd);
+    if (e != NULL) {
+        e->close_after = on;
+    }
+}
+
+bool web_conn_close_after(const web_conns_t *t, int fd)
+{
+    const web_conn_t *e = find_c(t, fd);
+    return e != NULL && e->close_after;
+}
+
+bool web_conn_note_close_hdr(web_conns_t *t, int fd)
+{
+    web_conn_t *e = find(t, fd);
+    if (e == NULL) {
+        return false;
+    }
+    bool had = e->close_hdr;
+    e->close_hdr = true;
+    return had;
+}
+
 void web_conn_done(web_conns_t *t, int fd, uint32_t now_ms, bool admin)
 {
     web_conn_t *e = find(t, fd);
@@ -136,6 +323,8 @@ void web_conn_websocket(web_conns_t *t, int fd, bool admin, uint32_t now_ms)
     e->admin = admin;
     e->phase = WEB_CONN_IDLE;
     e->active_ms = now_ms;
+    memset(&e->scan, 0, sizeof(e->scan));
+    e->scan.st = WEB_SCAN_OFF;   /* frames from here on, no request lines */
 }
 
 void web_conn_closing(web_conns_t *t, int fd, bool closing)

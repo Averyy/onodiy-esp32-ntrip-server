@@ -619,3 +619,161 @@ TEST_CASE("network credentials: a network out of reach keeps the 90 s rule", "[n
     TEST_ASSERT_FALSE(net_trial_reason_refused(NET_REASON_NO_AP_FOUND));
     TEST_ASSERT_FALSE(net_trial_reason_refused(8));   /* left the network (our own disconnect) */
 }
+
+/* ---- a refused attempt during a trial is retried at once ------------------------------- */
+
+TEST_CASE("network credentials: a refused attempt of an unassociated trial is retried at once", "[net_core]")
+{
+    net_cred_trial_t t = { 0 };
+    /* outside a trial: the backoff, refused or not */
+    TEST_ASSERT_EQUAL_UINT32(net_backoff_ms(0), net_trial_retry_ms(&t, NET_REASON_AUTH_FAIL, 0));
+    TEST_ASSERT_EQUAL_UINT32(net_backoff_ms(3), net_trial_retry_ms(&t, NET_REASON_AUTH_FAIL, 3));
+    TEST_ASSERT_EQUAL_UINT32(net_backoff_ms(1), net_trial_retry_ms(NULL, NET_REASON_AUTH_FAIL, 1));
+
+    net_cred_trial_start(&t, 100);
+    /* every refusal reason: 0 ms */
+    TEST_ASSERT_EQUAL_UINT32(0, net_trial_retry_ms(&t, NET_REASON_AUTH_FAIL, 0));
+    TEST_ASSERT_EQUAL_UINT32(0, net_trial_retry_ms(&t, NET_REASON_4WAY_HANDSHAKE_TIMEOUT, 1));
+    TEST_ASSERT_EQUAL_UINT32(0, net_trial_retry_ms(&t, NET_REASON_HANDSHAKE_TIMEOUT, 2));
+    TEST_ASSERT_EQUAL_UINT32(0, net_trial_retry_ms(&t, NET_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY, 3));
+    TEST_ASSERT_EQUAL_UINT32(0, net_trial_retry_ms(&t, NET_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD, 4));
+    /* out of reach (and any other reason): the backoff */
+    TEST_ASSERT_EQUAL_UINT32(net_backoff_ms(0), net_trial_retry_ms(&t, NET_REASON_NO_AP_FOUND, 0));
+    TEST_ASSERT_EQUAL_UINT32(net_backoff_ms(2), net_trial_retry_ms(&t, 8, 2));
+    /* after the trial credentials associated once: the backoff */
+    net_cred_trial_associated(&t);
+    TEST_ASSERT_EQUAL_UINT32(net_backoff_ms(1), net_trial_retry_ms(&t, NET_REASON_AUTH_FAIL, 1));
+    /* a trial that ended: the backoff */
+    net_cred_trial_start(&t, 100);
+    TEST_ASSERT_EQUAL(NET_TRIAL_REVERT, net_cred_trial_tick(&t, false, 100 + NET_CRED_TRIAL_S));
+    TEST_ASSERT_EQUAL_UINT32(net_backoff_ms(0), net_trial_retry_ms(&t, NET_REASON_AUTH_FAIL, 0));
+}
+
+/* Wrong password, measured on a board: the first attempt 3.6 s after the
+ * request (apply delay and the first scan), about 3.1 s of authentication
+ * per attempt, about 2.7 s of scan before every further attempt. Returns
+ * when the trial gives up, in ms after the request. */
+static uint32_t refused_trial_timeline(bool old_backoff)
+{
+    const uint32_t first_ms = 3600;
+    const uint32_t auth_ms = 3100;
+    const uint32_t scan_ms = 2700;
+    net_cred_trial_t t = { 0 };
+    net_cred_trial_start(&t, 0);
+    uint32_t at = first_ms;
+    for (uint32_t attempt = 0; attempt < 10; attempt++) {
+        at += auth_ms;
+        uint32_t wait = old_backoff ? net_backoff_ms(attempt) : net_trial_retry_ms(&t, NET_REASON_AUTH_FAIL, attempt);
+        if (net_cred_trial_disconnect(&t, NET_REASON_AUTH_FAIL) == NET_TRIAL_REVERT_AUTH) {
+            return at;
+        }
+        at += wait + scan_ms;
+    }
+    return UINT32_MAX;
+}
+
+TEST_CASE("network credentials: a refused password reverts within 19 s", "[net_core]")
+{
+    uint32_t now_ms = refused_trial_timeline(false);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32(19000, now_ms);
+    TEST_ASSERT_EQUAL_UINT32(18300, now_ms);
+    /* With the backoff between refusals (1 s, then 2 s) it took 3 s longer: the 21 s seen on a board. */
+    TEST_ASSERT_EQUAL_UINT32(21300, refused_trial_timeline(true));
+}
+
+/* ---- what the status shows about changed credentials -------------------------------------- */
+
+static net_cred_view_t cred_view(const net_cred_in_t *in)
+{
+    net_cred_view_t v;
+    memset(&v, 0xA5, sizeof(v));   /* every field is written */
+    net_cred_view(in, &v);
+    return v;
+}
+
+TEST_CASE("network credentials view: a queued trial counts from 91, then the running one from 90", "[net_core]")
+{
+    net_cred_in_t in = { .pend_valid = true, .pend_ssid = "Next", .trial_queued = true,
+                         .apply_left_ms = NET_CRED_APPLY_DELAY_MS };
+    net_cred_view_t v = cred_view(&in);
+    TEST_ASSERT_TRUE(v.cred_trial);
+    TEST_ASSERT_EQUAL_UINT32(91, v.cred_trial_left_s);
+    TEST_ASSERT_TRUE(v.cred_pending);
+    TEST_ASSERT_EQUAL_STRING("Next", v.pending_ssid);
+    TEST_ASSERT_FALSE(v.cred_reverted);
+    TEST_ASSERT_EQUAL_UINT8(0, v.cred_reverted_why);
+    in.apply_left_ms = 400;
+    TEST_ASSERT_EQUAL_UINT32(91, cred_view(&in).cred_trial_left_s);
+    in.apply_left_ms = 0;
+    TEST_ASSERT_EQUAL_UINT32(90, cred_view(&in).cred_trial_left_s);
+
+    /* the net task started it */
+    net_cred_trial_t t = { 0 };
+    net_cred_trial_start(&t, 500);
+    in.trial_queued = false;
+    in.trial_running = true;
+    in.trial_left_s = net_cred_trial_left_s(&t, 500);
+    v = cred_view(&in);
+    TEST_ASSERT_TRUE(v.cred_trial);
+    TEST_ASSERT_EQUAL_UINT32(90, v.cred_trial_left_s);
+    in.trial_left_s = net_cred_trial_left_s(&t, 530);
+    TEST_ASSERT_EQUAL_UINT32(60, cred_view(&in).cred_trial_left_s);
+    in.trial_left_s = net_cred_trial_left_s(&t, 589);
+    TEST_ASSERT_EQUAL_UINT32(1, cred_view(&in).cred_trial_left_s);
+
+    /* a newer change queued while one runs: the new trial's count */
+    in.trial_queued = true;
+    in.apply_left_ms = 1000;
+    TEST_ASSERT_EQUAL_UINT32(91, cred_view(&in).cred_trial_left_s);
+}
+
+TEST_CASE("network credentials view: reverted and pending; a discard clears every field", "[net_core]")
+{
+    net_cred_in_t in = { .pend_valid = true, .pend_ssid = "Typo", .reverted = true, .reverted_why = 2 };
+    net_cred_view_t v = cred_view(&in);
+    TEST_ASSERT_FALSE(v.cred_trial);
+    TEST_ASSERT_EQUAL_UINT32(0, v.cred_trial_left_s);
+    TEST_ASSERT_TRUE(v.cred_pending);
+    TEST_ASSERT_EQUAL_STRING("Typo", v.pending_ssid);
+    TEST_ASSERT_TRUE(v.cred_reverted);
+    TEST_ASSERT_EQUAL_UINT8(2, v.cred_reverted_why);
+
+    /* discard: nothing pending, and the revert of the dropped pair is gone too */
+    in.pend_valid = false;
+    v = cred_view(&in);
+    TEST_ASSERT_FALSE(v.cred_trial);
+    TEST_ASSERT_EQUAL_UINT32(0, v.cred_trial_left_s);
+    TEST_ASSERT_FALSE(v.cred_pending);
+    TEST_ASSERT_EQUAL_STRING("", v.pending_ssid);
+    TEST_ASSERT_FALSE(v.cred_reverted);
+    TEST_ASSERT_EQUAL_UINT8(0, v.cred_reverted_why);
+
+    /* discard during a trial: the station's own credentials are queued, the trial is over */
+    in = (net_cred_in_t){ .trial_running = true, .trial_left_s = 70, .other_queued = true, .apply_left_ms = 1000 };
+    v = cred_view(&in);
+    TEST_ASSERT_FALSE(v.cred_trial);
+    TEST_ASSERT_EQUAL_UINT32(0, v.cred_trial_left_s);
+    TEST_ASSERT_FALSE(v.cred_pending);
+    TEST_ASSERT_EQUAL_STRING("", v.pending_ssid);
+}
+
+TEST_CASE("network credentials view: a retry after a revert is a trial, not a revert", "[net_core]")
+{
+    /* the retry clears the revert under the lock and queues the trial */
+    net_cred_in_t in = { .pend_valid = true, .pend_ssid = "Next", .reverted = false, .trial_queued = true,
+                         .apply_left_ms = 1000 };
+    net_cred_view_t v = cred_view(&in);
+    TEST_ASSERT_TRUE(v.cred_trial);
+    TEST_ASSERT_FALSE(v.cred_reverted);
+    TEST_ASSERT_EQUAL_UINT32(91, v.cred_trial_left_s);
+    /* even with a revert flag still set, a trial of the pending pair is never shown as reverted */
+    in.reverted = true;
+    in.reverted_why = 1;
+    v = cred_view(&in);
+    TEST_ASSERT_TRUE(v.cred_trial);
+    TEST_ASSERT_FALSE(v.cred_reverted);
+    TEST_ASSERT_EQUAL_UINT8(0, v.cred_reverted_why);
+    /* a 32-byte SSID fits */
+    in.pend_ssid = "12345678901234567890123456789012";
+    TEST_ASSERT_EQUAL_STRING("12345678901234567890123456789012", cred_view(&in).pending_ssid);
+}

@@ -1353,9 +1353,9 @@ static esp_err_t h_wifi_put(web_req_t *r)
             return web_send_internal(r->req, err);
         }
     }
-    bool trial = false;
+    network_cred_plan_t plan = NETWORK_CRED_PLAN_STORE_ONLY;
     if (reconnect) {
-        esp_err_t err = network_set_credentials(in.ssid, pw);
+        esp_err_t err = network_set_credentials(in.ssid, pw, &plan);
         memset(stored_pw, 0, sizeof(stored_pw));
         if (err == ESP_ERR_INVALID_ARG) {
             return web_send_error(r->req, WEB_ERR_INVALID_FIELD, NULL, "password", UINT32_MAX, NULL, NULL);
@@ -1364,20 +1364,14 @@ static esp_err_t h_wifi_put(web_req_t *r)
             return web_send_internal(r->req, err);
         }
         /* With credentials stored before, the new ones are pending: tried, and dropped back from if they get no IP. */
-        trial = network_get_status(&s_net) == ESP_OK && s_net.cred_pending &&
-                strncmp(s_net.pending_ssid, in.ssid, sizeof(s_net.pending_ssid)) == 0;
-#if CONFIG_NETWORK_QEMU_ETHERNET
-        ESP_LOGI(TAG, "Wi-Fi credentials changed: stored, not used (QEMU build: the emulated Ethernet stays the link)");
-#else
         ESP_LOGI(TAG, "Wi-Fi credentials changed: %s",
-                 trial ? "tried now, the previous ones come back unless they get an IP" : "the station connects with them");
-#endif
+                 plan == NETWORK_CRED_PLAN_TRIAL ? "tried now, the previous ones come back unless they get an IP"
+                 : plan == NETWORK_CRED_PLAN_APPLY
+                     ? "the station connects with them"
+                     : "stored, not used (QEMU build: the emulated Ethernet stays the link)");
     }
-#if CONFIG_NETWORK_QEMU_ETHERNET
-    const bool applied = false;   /* stored only: the emulated Ethernet stays the station's link */
-#else
-    const bool applied = reconnect;
-#endif
+    const bool trial = reconnect && plan == NETWORK_CRED_PLAN_TRIAL;
+    const bool applied = reconnect && plan != NETWORK_CRED_PLAN_STORE_ONLY;
     char body[96];
     snprintf(body, sizeof(body), "{\"accepted\":true,\"persisted\":%s,\"trial\":%s,\"applied\":%s}",
              persist ? "true" : "false", trial ? "true" : "false", applied ? "true" : "false");
@@ -1927,12 +1921,7 @@ static esp_err_t h_availability(web_req_t *r)
 {
     bool have_cfg = load_configs();
     size_t n = slot_count();
-    int prot = -1;
-    for (size_t i = 0; have_cfg && i < n; i++) {
-        if (s_cfg[i].protected_slot && prot < 0) {
-            prot = (int)i;
-        }
-    }
+    int prot = have_cfg ? web_avail_protected_slot(s_cfg, n) : -1;
     if (prot >= 0 && ntrip_server_get_status((size_t)prot, &s_cst[prot]) != ESP_OK) {
         memset(&s_cst[prot], 0, sizeof(s_cst[prot]));
     }
@@ -1984,21 +1973,27 @@ static esp_err_t h_log_level(web_req_t *r)
         return bad(r->req, &b);
     }
     esp_err_t err = diag_set_log_level(tag, level);
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        /* Lines above the build's maximum are compiled out: the level would change nothing. */
+        char msg[48];
+        snprintf(msg, sizeof(msg), "This build logs at most %s", web_log_level_text(CONFIG_LOG_MAXIMUM_LEVEL));
+        return web_send_error(r->req, WEB_ERR_INVALID_FIELD, msg, "level", UINT32_MAX, NULL, NULL);
+    }
     if (err != ESP_OK) {
         return web_send_internal(r->req, err);
     }
     return ok(r->req);
 }
 
-static uint32_t query_u32(const char *query, const char *key)
+/* ?cursor=: absent is 0; anything but a decimal u32 is refused (400 invalid_field). */
+static bool query_cursor(web_req_t *r, uint32_t *cursor)
 {
-    char v[12];
-    if (!web_query_value(query, key, v, sizeof(v))) {
-        return 0;
+    if (web_query_u32(r->query, "cursor", cursor)) {
+        return true;
     }
-    char *end = NULL;
-    unsigned long n = strtoul(v, &end, 10);
-    return (end != v && *end == '\0') ? (uint32_t)n : 0;
+    web_send_error(r->req, WEB_ERR_INVALID_FIELD, "cursor must be a whole number from 0 to 4294967295", "cursor",
+                   UINT32_MAX, NULL, NULL);
+    return false;
 }
 
 static esp_err_t h_logs(web_req_t *r)
@@ -2008,19 +2003,25 @@ static esp_err_t h_logs(web_req_t *r)
     if (web_query_value(r->query, "format", v, sizeof(v)) && strcmp(v, "text") == 0) {
         return web_download_log_text(r, prev);
     }
-    uint32_t cursor = query_u32(r->query, "cursor");
+    uint32_t cursor = 0;
+    if (!query_cursor(r, &cursor)) {
+        return ESP_OK;
+    }
     diag_log_read_info_t info = { 0 };
     diag_log_src_t src = prev ? DIAG_LOG_PREV_BOOT : DIAG_LOG_THIS_BOOT;
     size_t n = diag_log_read_ex(src, &cursor, s_text, sizeof(s_text), &info);
     web_resp_t resp;
     resp_begin(&resp, r->req, 200);
-    web_build_logs(&resp.w, cursor, info.more, info.gap, s_text, n);
+    web_build_logs(&resp.w, cursor, info.more, info.gap, s_text, n, web_log_level_text(CONFIG_LOG_MAXIMUM_LEVEL));
     return web_resp_end(&resp);
 }
 
 static esp_err_t h_journal(web_req_t *r)
 {
-    uint32_t cursor = query_u32(r->query, "cursor");
+    uint32_t cursor = 0;
+    if (!query_cursor(r, &cursor)) {
+        return ESP_OK;
+    }
     size_t n = JOURNAL_PAGE;
     if (diag_journal_read(&cursor, s_journal, &n) != ESP_OK) {
         n = 0;

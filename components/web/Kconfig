@@ -5,13 +5,17 @@ menu "Station: web server"
     config WEB_PBKDF2_ITERATIONS
         int "Admin password hash cost (PBKDF2-HMAC-SHA256 iterations)"
         range 1000 1000000
-        default 10000
+        default 3000
         help
-            Iterations for a newly set admin password. One check should take
-            about 0.3 s on the device; the count is stored with each hash,
-            so changing it needs no migration (existing passwords keep their
-            count until they are changed). PROVISIONAL, to be measured on
-            hardware.
+            Iterations for a newly set admin password. Measured on the
+            ESP32-S3: about 1.0 s per 10 000 iterations, so 3000 take about
+            0.3 s (PROVISIONAL until measured again on the station). The
+            check runs on the web server's task, which answers nothing else
+            meanwhile; the login throttle bounds how often one client can
+            make it run. The count is stored with each hash: existing
+            passwords keep theirs (10 000 for those set by earlier builds)
+            until they are changed, and a login never re-hashes a password
+            silently.
 
     config WEB_REQUEST_DEADLINE_S
         int "Time a client gets to send one request (s)"

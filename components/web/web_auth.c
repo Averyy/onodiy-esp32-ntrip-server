@@ -7,11 +7,10 @@
  */
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_random.h"
-#include "lwip/sockets.h"
 #include "sdkconfig.h"
 #include "settings.h"
 #include "web_internal.h"
@@ -27,6 +26,7 @@ static bool s_ram_only;                        /* claimed while the settings wer
 static uint8_t s_blob[WEB_PW_BLOB_LEN + 8];    /* the stored record as last read or written */
 static size_t s_blob_len;                      /* 0 = nothing stored */
 static bool s_blob_unreadable;
+EXT_RAM_BSS_ATTR static web_lograte_t s_fail_log;   /* wrong-password lines, per client */
 
 /* Read sys/admin_hash into the cache. @return true if what is stored differs from the cache before. */
 static bool load(void)
@@ -68,6 +68,7 @@ void web_auth_init(void)
 {
     web_sess_init(&s_sess);
     web_throttles_init(&s_throttles, web_now_s());
+    web_lograte_init(&s_fail_log);
     s_ram_only = false;
     s_blob_len = 0;
     s_blob_unreadable = false;
@@ -206,35 +207,13 @@ void web_auth_expire(void)
 
 /* ---- password -------------------------------------------------------------------------------- */
 
-/* The client a throttle entry belongs to: its IPv4 address (also when
- * mapped into IPv6), or the /64 prefix of an IPv6 address (one host can use
- * any address in its prefix). 0 if the socket cannot tell. */
+/* The client a throttle entry belongs to (web_client_key): its IPv4
+ * address (also when mapped into IPv6), an IPv6 link-local address whole,
+ * or the /64 prefix of any other IPv6 address. 0 if the socket cannot tell. */
 static uint64_t client_key(httpd_req_t *req)
 {
-    int fd = httpd_req_to_sockfd(req);
-    struct sockaddr_storage addr;
-    socklen_t len = sizeof(addr);
-    if (fd < 0 || getpeername(fd, (struct sockaddr *)&addr, &len) != 0) {
-        return 0;
-    }
-    if (addr.ss_family == AF_INET) {
-        return ((const struct sockaddr_in *)&addr)->sin_addr.s_addr;
-    }
-#if CONFIG_LWIP_IPV6
-    if (addr.ss_family == AF_INET6) {
-        const uint8_t *b = ((const struct sockaddr_in6 *)&addr)->sin6_addr.s6_addr;
-        static const uint8_t mapped[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF };
-        uint32_t v4;
-        if (memcmp(b, mapped, sizeof(mapped)) == 0) {
-            memcpy(&v4, b + 12, 4);
-            return v4;
-        }
-        uint64_t prefix;
-        memcpy(&prefix, b, 8);
-        return prefix;
-    }
-#endif
-    return 0;
+    web_addr_t a;
+    return web_req_peer(req, &a) ? web_client_key(&a) : 0;
 }
 
 uint32_t web_auth_throttle_wait_s(httpd_req_t *req, bool on_ap)
@@ -250,7 +229,18 @@ bool web_auth_check(httpd_req_t *req, bool on_ap, const char *pw)
         web_throttles_ok(&s_throttles, key, on_ap);
     } else {
         uint32_t n = web_throttles_fail(&s_throttles, key, on_ap, web_now_s());
-        ESP_LOGW(TAG, "wrong admin password (%u in a row from this client)", (unsigned)n);
+        /* Who it was, at most once a minute per client (the count says how many in a row). */
+        uint32_t held = 0;
+        if (web_lograte_allow(&s_fail_log, key, web_now_s(), &held)) {
+            char who[48];
+            web_peer_text(req, who, sizeof(who));
+            if (held > 0) {
+                ESP_LOGW(TAG, "wrong admin password from %s (%u in a row from this client, +%u not logged)", who,
+                         (unsigned)n, (unsigned)held);
+            } else {
+                ESP_LOGW(TAG, "wrong admin password from %s (%u in a row from this client)", who, (unsigned)n);
+            }
+        }
     }
     return ok;
 }

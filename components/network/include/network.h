@@ -35,7 +35,14 @@
  *    (three refused attempts in a row before any association: wrong
  *    passphrase, handshake timeout, an access point of that name only with
  *    another security setting) ends the trial at once instead of after
- *    90 s; the status says why the station went back (cred_reverted_why).
+ *    90 s: during such a trial a refused attempt is retried without the
+ *    reconnect backoff (the scan before each attempt stays), so the third
+ *    refusal comes about 18 s after the change; the status says why the
+ *    station went back (cred_reverted_why). The status shows a change at
+ *    once: every call that changes the credentials publishes cred_trial,
+ *    cred_trial_left_s (90 s plus the second until the change is applied),
+ *    cred_pending, pending_ssid and cred_reverted under the status lock,
+ *    so the next network_get_status() agrees with what the call decided.
  *    Without previous credentials (first setup) the new ones
  *    are stored as the station's at once. A change made while a trial runs
  *    replaces that trial: an IP for the earlier pair that arrives before the
@@ -59,7 +66,12 @@
  *    (a lost probe or an address conflict), the responder renames itself
  *    (<name>-2, then -3, ...); the status shows the name it answers
  *    (mdns_host), the log says so once, and the next boot probes the
- *    configured name again (the renamed one is never stored).
+ *    configured name again (the renamed one is never stored). The service
+ *    instance carries no name of its own: it is named after the host name
+ *    in use, so it follows a rename. Before a planned restart the services
+ *    send their goodbye (TTL 0) while the network is still up. Every
+ *    interface gets an IPv6 link-local address when its link comes up (and
+ *    no other address), so AAAA queries for the name are answered at once.
  *  - Once online: SNTP (pool.ntp.org plus a DHCP-provided server; the
  *    fallback clock for logs and update checks, the availability ledger
  *    prefers GNSS time) and one upstream probe.
@@ -191,6 +203,13 @@ typedef enum {
     NETWORK_LADDER_WHY_AP_OVERRIDDEN,/**< the rung ran although an AP client is connected (30 min limit over) */
 } network_ladder_why_t;
 
+/** What network_set_credentials() does with the credentials it was given. */
+typedef enum {
+    NETWORK_CRED_PLAN_STORE_ONLY = 0, /**< stored as the station's, not used: the station is not on Wi-Fi (the QEMU build) */
+    NETWORK_CRED_PLAN_APPLY,          /**< stored as the station's and used about a second later (none stored before, or the same ones) */
+    NETWORK_CRED_PLAN_TRIAL,          /**< stored as pending and tried about a second later; the previous ones stay */
+} network_cred_plan_t;
+
 /** Why the station went back to its previous credentials (network_status_t.cred_reverted_why). */
 typedef enum {
     NETWORK_CRED_REVERT_NONE = 0,
@@ -305,14 +324,17 @@ bool network_is_online(void);
  * browser gets an answer.
  * ssid: 1-32 bytes; password: "" (open), 8-63 characters or 64 hex digits.
  * With the settings unavailable they are kept for this boot only.
+ * The status reflects the change before this returns (cred_trial true with
+ * cred_trial_left_s 91 for a trial).
+ * @param plan what was done with them (NULL: not wanted); set on ESP_OK only.
  * @return ESP_ERR_INVALID_ARG for invalid values, ESP_ERR_INVALID_STATE before
  *         network_init(), or the settings error if they could not be stored.
  */
-esp_err_t network_set_credentials(const char *ssid, const char *password);
+esp_err_t network_set_credentials(const char *ssid, const char *password, network_cred_plan_t *plan);
 
 /**
  * Try the pending credentials again (90 s, then back to the current ones
- * unless they got an IP).
+ * unless they got an IP). The status shows the trial at once.
  * @return ESP_ERR_NOT_FOUND when none are pending, ESP_ERR_INVALID_STATE
  *         before network_init().
  */
@@ -320,7 +342,8 @@ esp_err_t network_retry_pending_credentials(void);
 
 /**
  * Forget the pending credentials (a trial in progress ends: the station goes
- * back to its current credentials).
+ * back to its current credentials). The status shows none pending, no
+ * trial and no revert at once.
  * @return ESP_ERR_NOT_FOUND when none are pending, ESP_ERR_INVALID_STATE
  *         before network_init(), or the settings error.
  */

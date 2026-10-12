@@ -580,3 +580,287 @@ TEST_CASE("WebSocket queue keeps the newest progress and drops by kind", "[web_c
     TEST_ASSERT_TRUE(web_wsq_admit(k, s, 1, WEB_MSG_STATUS, 50).accept);
     TEST_ASSERT_FALSE(web_wsq_admit(k, s, 0, WEB_MSG_STATUS, WEB_WSQ_MAX_BYTES + 1).accept);
 }
+
+/* ---- client and local addresses ------------------------------------------------------- */
+
+static web_addr_t v4(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
+{
+    web_addr_t x = { .v6 = false, .b = { a, b, c, d } };
+    return x;
+}
+
+static web_addr_t v6(const uint8_t bytes[16])
+{
+    web_addr_t x = { .v6 = true };
+    memcpy(x.b, bytes, 16);
+    return x;
+}
+
+static uint32_t ip4(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
+{
+    uint8_t q[4] = { a, b, c, d };
+    uint32_t v;
+    memcpy(&v, q, 4);   /* network order, as sin_addr.s_addr and esp_ip4_addr_t keep it */
+    return v;
+}
+
+static const uint8_t k_mapped_ap[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 192, 168, 4, 1 };
+static const uint8_t k_ap_ll[16] = { 0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0x36, 0x85, 0x18, 0xFF, 0xFE, 0x0A, 0x2B, 0x3D };
+static const uint8_t k_sta_ll[16] = { 0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0x36, 0x85, 0x18, 0xFF, 0xFE, 0x0A, 0x2B, 0x3C };
+static const uint8_t k_phone_ll[16] = { 0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0x1C, 0x2A, 0x77, 0x01, 0x9E, 0x30, 0x4B, 0x11 };
+static const uint8_t k_laptop_ll[16] = { 0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0x88, 0x10, 0x02, 0xAA, 0x51, 0x6C, 0x09, 0xE2 };
+static const uint8_t k_global_a[16] = { 0x20, 0x01, 0x0D, 0xB8, 0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 0, 0, 0, 1 };
+static const uint8_t k_global_b[16] = { 0x20, 0x01, 0x0D, 0xB8, 0x12, 0x34, 0x56, 0x78, 0xAB, 0xCD, 0, 0, 0, 0, 0, 2 };
+static const uint8_t k_global_c[16] = { 0x20, 0x01, 0x0D, 0xB8, 0x12, 0x34, 0x56, 0x79, 0, 0, 0, 0, 0, 0, 0, 1 };
+
+TEST_CASE("client key: IPv4 and v4-mapped alike, each link-local host apart, a global /64 together", "[web_core]")
+{
+    web_addr_t a = v4(192, 168, 4, 2);
+    web_addr_t m = v6((const uint8_t[16]){ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 192, 168, 4, 2 });
+    TEST_ASSERT_EQUAL_UINT64(ip4(192, 168, 4, 2), web_client_key(&a));
+    TEST_ASSERT_EQUAL_UINT64(web_client_key(&a), web_client_key(&m));
+    web_addr_t other = v4(192, 168, 4, 3);
+    TEST_ASSERT_NOT_EQUAL(web_client_key(&a), web_client_key(&other));
+
+    /* Two phones on the setup AP share fe80::/64: they must not share a throttle bucket. */
+    web_addr_t p1 = v6(k_phone_ll);
+    web_addr_t p2 = v6(k_laptop_ll);
+    TEST_ASSERT_NOT_EQUAL(web_client_key(&p1), web_client_key(&p2));
+    TEST_ASSERT_EQUAL_UINT64(web_client_key(&p1), web_client_key(&p1));
+    /* fe80::/10 is link-local, not only fe80::/16 */
+    uint8_t febf[16];
+    memcpy(febf, k_phone_ll, 16);
+    febf[1] = 0xBF;
+    web_addr_t q1 = v6(febf);
+    febf[15] ^= 0x01;
+    web_addr_t q2 = v6(febf);
+    TEST_ASSERT_NOT_EQUAL(web_client_key(&q1), web_client_key(&q2));
+
+    /* A global address: the /64 prefix (one host may use any address in it). */
+    web_addr_t g1 = v6(k_global_a);
+    web_addr_t g2 = v6(k_global_b);
+    web_addr_t g3 = v6(k_global_c);
+    TEST_ASSERT_EQUAL_UINT64(web_client_key(&g1), web_client_key(&g2));
+    TEST_ASSERT_NOT_EQUAL(web_client_key(&g1), web_client_key(&g3));
+    TEST_ASSERT_EQUAL_UINT64(0, web_client_key(NULL));
+
+    /* The throttle keeps link-local clients apart through the key. */
+    web_throttles_t t;
+    web_throttles_init(&t, 0);
+    for (uint32_t i = 0; i < WEB_THROTTLE_FREE; i++) {
+        TEST_ASSERT_EQUAL_UINT32(0, web_throttles_wait_s(&t, web_client_key(&p1), true, 0));
+        web_throttles_fail(&t, web_client_key(&p1), true, 0);
+    }
+    TEST_ASSERT_NOT_EQUAL(0, web_throttles_wait_s(&t, web_client_key(&p1), true, 0));
+    TEST_ASSERT_EQUAL_UINT32(0, web_throttles_wait_s(&t, web_client_key(&p2), true, 0));
+}
+
+TEST_CASE("on the AP: its IPv4 address, v4-mapped too, and its link-local address", "[web_core]")
+{
+    const uint32_t ap = ip4(192, 168, 4, 1);
+    web_addr_t a = v4(192, 168, 4, 1);
+    web_addr_t sta = v4(192, 168, 1, 50);
+    web_addr_t m = v6(k_mapped_ap);
+    web_addr_t ll_ap = v6(k_ap_ll);
+    web_addr_t ll_sta = v6(k_sta_ll);
+    TEST_ASSERT_TRUE(web_addr_on_ap(&a, ap, k_ap_ll));
+    TEST_ASSERT_TRUE(web_addr_on_ap(&m, ap, k_ap_ll));
+    TEST_ASSERT_TRUE(web_addr_on_ap(&ll_ap, ap, k_ap_ll));
+    TEST_ASSERT_FALSE(web_addr_on_ap(&ll_sta, ap, k_ap_ll));
+    TEST_ASSERT_FALSE(web_addr_on_ap(&sta, ap, k_ap_ll));
+    /* the AP without a link-local address yet, or without an address at all */
+    TEST_ASSERT_FALSE(web_addr_on_ap(&ll_ap, ap, NULL));
+    TEST_ASSERT_TRUE(web_addr_on_ap(&a, ap, NULL));
+    TEST_ASSERT_FALSE(web_addr_on_ap(&a, 0, NULL));
+    TEST_ASSERT_FALSE(web_addr_on_ap(NULL, ap, k_ap_ll));
+    /* A literal IPv6 Host stays refused: only names and the IPv4 addresses pass. */
+    web_host_names_t names = { .sta_ip = "192.168.1.50", .ap_ip = "192.168.4.1", .hostname = "onocoydiy",
+                               .mdns_host = "onocoydiy" };
+    TEST_ASSERT_FALSE(web_host_allowed("[fe80::3685:18ff:fe0a:2b3d]", &names));
+    TEST_ASSERT_FALSE(web_host_allowed("[fe80::3685:18ff:fe0a:2b3d]:80", &names));
+    TEST_ASSERT_FALSE(web_host_allowed("fe80::3685:18ff:fe0a:2b3d", &names));
+    TEST_ASSERT_TRUE(web_host_allowed("onocoydiy.local", &names));
+}
+
+TEST_CASE("address text: IPv4, v4-mapped as IPv4, IPv6 compressed", "[web_core]")
+{
+    char buf[48];
+    web_addr_t a = v4(10, 0, 2, 2);
+    TEST_ASSERT_EQUAL(8, web_addr_text(&a, buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("10.0.2.2", buf);
+    web_addr_t m = v6(k_mapped_ap);
+    web_addr_text(&m, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("192.168.4.1", buf);
+    web_addr_t ll = v6(k_ap_ll);
+    web_addr_text(&ll, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("fe80::3685:18ff:fe0a:2b3d", buf);
+    web_addr_t g = v6(k_global_a);
+    web_addr_text(&g, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("2001:db8:1234:5678::1", buf);
+    static const struct {
+        uint8_t b[16];
+        const char *want;
+    } cases[] = {
+        { { 0 }, "::" },
+        { { [15] = 1 }, "::1" },
+        { { 0x20, 0x01, 0x0D, 0xB8 }, "2001:db8::" },
+        /* a single zero group is not compressed */
+        { { 0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1 }, "2001:db8:0:1:1:1:1:1" },
+        /* the longest run wins; of equal runs the first */
+        { { 0x20, 0x01, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1 }, "2001:0:0:1::1" },
+        { { 0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1 }, "2001:db8::1:0:0:1" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        web_addr_t x = v6(cases[i].b);
+        web_addr_text(&x, buf, sizeof(buf));
+        TEST_ASSERT_EQUAL_STRING(cases[i].want, buf);
+    }
+    web_addr_text(NULL, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("?", buf);
+    char small[6];
+    web_addr_text(&a, small, sizeof(small));   /* cut, terminated */
+    TEST_ASSERT_EQUAL_STRING("10.0.", small);
+}
+
+/* ---- requests no route took ------------------------------------------------------------ */
+
+static bool api_known_for_test(const char *path)
+{
+    return strcmp(path, "/api/status") == 0 || strcmp(path, "/ws") == 0 || strcmp(path, "/api/session") == 0;
+}
+
+TEST_CASE("catch-all: the answer is classified before any body is read", "[web_core]")
+{
+    static const struct {
+        const char *uri;
+        bool options;
+        bool get;
+        bool asset;
+        bool ap;
+        web_fallback_t want;
+    } rows[] = {
+        { "/api/status", true, false, false, false, WEB_FB_METHOD },      /* OPTIONS: no CORS */
+        { "/", true, false, true, true, WEB_FB_METHOD },
+        { "/api/status", false, false, false, false, WEB_FB_METHOD },     /* POST to a GET route */
+        { "/api/status?x=1", false, false, false, true, WEB_FB_METHOD },  /* the query does not count */
+        { "/ws", false, false, false, false, WEB_FB_METHOD },
+        { "/api/nope", false, false, false, false, WEB_FB_NOT_FOUND },
+        { "/api/nope", false, false, false, true, WEB_FB_NOT_FOUND },     /* no redirect for /api, even on the AP */
+        { "/api", false, true, false, false, WEB_FB_NOT_FOUND },
+        { "/apix", false, true, false, true, WEB_FB_REDIRECT },           /* not /api */
+        { "/wsx", false, true, false, false, WEB_FB_NOT_FOUND },
+        { "/app.js", false, true, true, false, WEB_FB_ASSET },
+        { "/app.js", false, true, true, true, WEB_FB_ASSET },
+        { "/app.js", false, false, true, false, WEB_FB_METHOD },          /* POST to an asset */
+        { "/nope", false, true, false, false, WEB_FB_NOT_FOUND },
+        { "/nope", false, false, false, false, WEB_FB_NOT_FOUND },
+        { "/generate_204", false, true, false, true, WEB_FB_REDIRECT },   /* the captive portal */
+        { "/nope", false, false, false, true, WEB_FB_REDIRECT },
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        TEST_ASSERT_EQUAL_MESSAGE(rows[i].want,
+                                  web_fallback_classify(rows[i].uri, rows[i].options, rows[i].get, rows[i].asset,
+                                                        rows[i].ap, api_known_for_test),
+                                  rows[i].uri);
+    }
+    /* A path too long for the route table is unknown. */
+    char longpath[80] = "/api/";
+    memset(longpath + 5, 'a', 70);
+    longpath[75] = '\0';
+    TEST_ASSERT_EQUAL(WEB_FB_NOT_FOUND, web_fallback_classify(longpath, false, false, false, false, api_known_for_test));
+    TEST_ASSERT_EQUAL(WEB_FB_NOT_FOUND, web_fallback_classify("/api/status", false, false, false, false, NULL));
+}
+
+TEST_CASE("Connection header tokens and when to close", "[web_core]")
+{
+    TEST_ASSERT_EQUAL_UINT(WEB_CONN_TOK_CLOSE, web_connection_tokens("close"));
+    TEST_ASSERT_EQUAL_UINT(WEB_CONN_TOK_CLOSE, web_connection_tokens("Close"));
+    TEST_ASSERT_EQUAL_UINT(WEB_CONN_TOK_CLOSE, web_connection_tokens(" close "));
+    TEST_ASSERT_EQUAL_UINT(WEB_CONN_TOK_KEEP_ALIVE, web_connection_tokens("Keep-Alive, Upgrade"));
+    TEST_ASSERT_EQUAL_UINT(WEB_CONN_TOK_KEEP_ALIVE, web_connection_tokens("keep-alive"));
+    TEST_ASSERT_EQUAL_UINT(WEB_CONN_TOK_CLOSE | WEB_CONN_TOK_KEEP_ALIVE, web_connection_tokens("keep-alive,\tCLOSE"));
+    TEST_ASSERT_EQUAL_UINT(0, web_connection_tokens("Upgrade"));
+    TEST_ASSERT_EQUAL_UINT(0, web_connection_tokens("closed, keep-alives"));
+    TEST_ASSERT_EQUAL_UINT(0, web_connection_tokens(""));
+    TEST_ASSERT_EQUAL_UINT(0, web_connection_tokens(NULL));
+    TEST_ASSERT_EQUAL_UINT(WEB_CONN_TOK_CLOSE, web_connection_tokens(",,close,,"));
+
+    /* HTTP/1.1: persistent unless "close"; HTTP/1.0: closed unless "keep-alive". */
+    TEST_ASSERT_FALSE(web_conn_should_close(0, false));
+    TEST_ASSERT_FALSE(web_conn_should_close(web_connection_tokens("Keep-Alive, Upgrade"), false));
+    TEST_ASSERT_TRUE(web_conn_should_close(web_connection_tokens("close"), false));
+    TEST_ASSERT_TRUE(web_conn_should_close(0, true));
+    TEST_ASSERT_FALSE(web_conn_should_close(web_connection_tokens("keep-alive"), true));
+    TEST_ASSERT_TRUE(web_conn_should_close(web_connection_tokens("keep-alive, close"), true));
+}
+
+/* ---- log lines about clients ----------------------------------------------------------------- */
+
+TEST_CASE("client log lines: one a minute per client, the held-back ones counted", "[web_core]")
+{
+    web_lograte_t r;
+    web_lograte_init(&r);
+    const uint64_t client = 0x0202000A;
+    const uint32_t t0 = 4294967200u;   /* across the clock wrap */
+    uint32_t held = 99;
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, client, t0, &held));
+    TEST_ASSERT_EQUAL_UINT32(0, held);
+    for (uint32_t i = 1; i <= 4; i++) {   /* the 2nd to 5th within the minute */
+        TEST_ASSERT_FALSE(web_lograte_allow(&r, client, t0 + i * 10, &held));
+    }
+    TEST_ASSERT_FALSE(web_lograte_allow(&r, client, t0 + WEB_LOGRATE_PERIOD_S - 1, NULL));
+    /* After the minute: the next line says how many were held back (4 + 1 just now = 5). */
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, client, t0 + WEB_LOGRATE_PERIOD_S, &held));
+    TEST_ASSERT_EQUAL_UINT32(5, held);
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, client, t0 + 2 * WEB_LOGRATE_PERIOD_S, &held));
+    TEST_ASSERT_EQUAL_UINT32(0, held);
+
+    /* The acceptance case: 1st logs, 2nd-5th held, the next after 60 s carries +4. */
+    web_lograte_init(&r);
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, 7, 100, &held));
+    for (uint32_t i = 0; i < 4; i++) {
+        TEST_ASSERT_FALSE(web_lograte_allow(&r, 7, 101 + i, &held));
+    }
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, 7, 161, &held));
+    TEST_ASSERT_EQUAL_UINT32(4, held);
+
+    /* Another client is never held back by the first. */
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, 8, 162, &held));
+    TEST_ASSERT_EQUAL_UINT32(0, held);
+
+    /* A full table makes room by dropping the client whose last line is oldest. */
+    web_lograte_init(&r);
+    for (uint64_t k = 1; k <= WEB_LOGRATE_CLIENTS; k++) {
+        TEST_ASSERT_TRUE(web_lograte_allow(&r, k, (uint32_t)(1000 + k), NULL));
+    }
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, 100, 1010, NULL));         /* replaces client 1 */
+    TEST_ASSERT_FALSE(web_lograte_allow(&r, 2, 1011, NULL));          /* still known: held */
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, 1, 1012, NULL));           /* forgotten: a line again */
+}
+
+TEST_CASE("strict u32 query values (log and journal cursors) and level names", "[web_core]")
+{
+    uint32_t v = 7;
+    TEST_ASSERT_TRUE(web_query_u32("", "cursor", &v));
+    TEST_ASSERT_EQUAL_UINT32(0, v);
+    TEST_ASSERT_TRUE(web_query_u32("boot=prev", "cursor", &v));
+    TEST_ASSERT_EQUAL_UINT32(0, v);
+    TEST_ASSERT_TRUE(web_query_u32("cursor=51234&boot=prev", "cursor", &v));
+    TEST_ASSERT_EQUAL_UINT32(51234, v);
+    TEST_ASSERT_TRUE(web_query_u32("cursor=4294967295", "cursor", &v));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, v);
+    TEST_ASSERT_TRUE(web_query_u32("cursor=0", "cursor", &v));
+    TEST_ASSERT_EQUAL_UINT32(0, v);
+    TEST_ASSERT_TRUE(web_query_u32("xcursor=abc", "cursor", &v));   /* another parameter */
+    static const char *const bad[] = {
+        "cursor=abc", "cursor=", "cursor", "cursor=-1", "cursor=+5", "cursor=%201", "cursor=1%zz", "cursor=1e3",
+        "cursor=4294967296", "cursor=99999999999", "cursor=12a", "cursor= 5", "boot=prev&cursor=x",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        TEST_ASSERT_FALSE_MESSAGE(web_query_u32(bad[i], "cursor", &v), bad[i]);
+    }
+    TEST_ASSERT_EQUAL_STRING("none", web_log_level_text(0));
+    TEST_ASSERT_EQUAL_STRING("info", web_log_level_text(3));
+    TEST_ASSERT_EQUAL_STRING("verbose", web_log_level_text(5));
+    TEST_ASSERT_EQUAL_STRING("?", web_log_level_text(6));
+}

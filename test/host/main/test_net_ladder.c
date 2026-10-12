@@ -601,3 +601,33 @@ TEST_CASE("network ladder: AP clients hold the restart and reboot back for at mo
     TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RESTART_WIFI]);
     TEST_ASSERT_EQUAL(NET_WHY_AP_IN_USE, s.last_why);
 }
+
+TEST_CASE("network ladder: the pass-start text names every trigger combination", "[net_ladder]")
+{
+    static const char *const want[8] = {
+        "none",
+        "protected caster down",
+        "associated without IP",
+        "protected caster down, associated without IP",
+        "caster not reached",
+        "protected caster down, caster not reached",
+        "associated without IP, caster not reached",
+        "protected caster down, associated without IP, caster not reached",
+    };
+    for (uint8_t t = 0; t < 8; t++) {
+        char buf[80];
+        size_t n = net_ladder_trigger_text(t, buf, sizeof(buf));
+        TEST_ASSERT_EQUAL_STRING(want[t], buf);
+        TEST_ASSERT_EQUAL(strlen(want[t]), n);
+        TEST_ASSERT_NOT_EQUAL(' ', buf[0]);   /* no leading space */
+    }
+    /* Bits outside P, A and S are not triggers. */
+    char buf[80];
+    net_ladder_trigger_text(0xF8, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("none", buf);
+    /* A short buffer is cut and stays terminated. */
+    char small[10];
+    TEST_ASSERT_EQUAL(9, net_ladder_trigger_text(NET_TRIG_P | NET_TRIG_S, small, sizeof(small)));
+    TEST_ASSERT_EQUAL_STRING("protected", small);
+    TEST_ASSERT_EQUAL(0, net_ladder_trigger_text(NET_TRIG_P, small, 0));
+}

@@ -15,8 +15,17 @@
  *  - "netprobe": the upstream probe (name lookup + TCP connect), so a slow
  *    lookup never delays a reconnect.
  *  - "dns": the captive-portal responder, only while the AP is up.
- *  - the mDNS component's own task (<hostname>.local, the _http service);
- *    its rename callback only copies the new name for the net task to log.
+ *  - the mDNS component's own task (<hostname>.local, the _http service;
+ *    its stack is in PSRAM, sdkconfig.defaults); its rename callback only
+ *    copies the new name for the net task to log.
+ *
+ * IPv6: each interface gets a link-local address when its link comes up
+ * (the station's association, the AP's start, the emulated port's link in
+ * the QEMU build), and no other (no SLAAC: CONFIG_LWIP_IPV6_AUTOCONFIG is
+ * off). That is enough for the mDNS responder to answer AAAA queries for
+ * <name>.local at once, instead of leaving every dual-stack client to wait
+ * out its AAAA timeout, and the web server (a dual-stack socket) answers
+ * on it.
  *
  * QEMU development build (CONFIG_NETWORK_QEMU_ETHERNET, sdkconfig.qemu):
  * Wi-Fi is never initialised or started. The emulated OpenCores Ethernet
@@ -118,7 +127,7 @@ _Static_assert(sizeof(((network_status_t *)0)->mdns_host) == 33, "mDNS host labe
 /* Behaviour (PROVISIONAL, to be confirmed on hardware). The AP's linger
  * after the station got its IP is CONFIG_NETWORK_AP_LINGER_S. */
 #define AP_MAX_CLIENTS       4
-#define APPLY_DELAY_MS       1000    /* new credentials: let the HTTP reply go out first */
+#define APPLY_DELAY_MS       NET_CRED_APPLY_DELAY_MS   /* new credentials: let the HTTP reply go out first */
 #define DISCONNECT_WAIT_MS   3000    /* deliberate disconnect: connect anyway if no event came */
 #define CONNECT_WATCHDOG_MS  60000   /* a connect attempt with no event at all counts as failed */
 #define SCAN_WATCHDOG_MS     20000   /* a scan without SCAN_DONE is abandoned (it would block connects) */
@@ -157,6 +166,7 @@ typedef enum {
     MSG_TIME_SYNC,
     MSG_RECOVER,
     MSG_AP_REQUEST,
+    MSG_GOT_IP6,        /* reason: 0 station, 1 access point */
 } msg_type_t;
 
 typedef struct {
@@ -213,6 +223,11 @@ static char s_pend_pass[65];
 static bool s_pend_valid;
 static bool s_cred_reverted;
 static uint8_t s_cred_reverted_why;         /* network_cred_revert_t of s_cred_reverted */
+/* The net task's trial (s_trial) as API readers see it: copied under s_lock
+ * whenever the net task changes it, in the same critical section as the
+ * credential state that goes with it, so the status never shows half of a
+ * change (publish_cred_locked). */
+static net_cred_trial_t s_trial_pub;
 /* Credential writes to settings, from API calls and from the net task's
  * confirmation, one at a time (the RAM pairs stay under s_lock). */
 static SemaphoreHandle_t s_cred_mux;
@@ -294,6 +309,12 @@ static volatile bool s_leaving;
  * logged by the net task), and the name the net task logged last. */
 static volatile bool s_mdns_renamed;
 static char s_mdns_logged[33];
+static bool s_mdns_on;                      /* the responder runs (until the shutdown hook's goodbye) */
+
+#if CONFIG_LWIP_IPV6
+/* Net task: the link-local address logged last per interface (0 station, 1 AP). */
+EXT_RAM_BSS_ATTR static char s_ip6_logged[2][48];
+#endif
 
 /* Survives software, panic and watchdog resets: when the last network-ladder
  * reboot was. Stamped with the image generation (lifecycle). */
@@ -338,6 +359,42 @@ static void set_status_str(char *dst, size_t size, const char *src)
 static bool ap_is_up(void)
 {
     return s_ap_reasons != 0;
+}
+
+/* The credential fields of the status from the state under s_lock (call
+ * with s_lock held): every change of that state publishes at once, so the
+ * next status read matches what the change decided (net_cred_view). */
+static void publish_cred_locked(void)
+{
+    int64_t now_us = esp_timer_get_time();
+    net_cred_in_t in = {
+        .pend_valid = s_pend_valid,
+        .pend_ssid = s_pend_ssid,
+        .reverted = s_cred_reverted,
+        .reverted_why = s_cred_reverted_why,
+        .trial_running = s_trial_pub.on,
+        .trial_left_s = net_cred_trial_left_s(&s_trial_pub, (uint32_t)(now_us / 1000000)),
+        .trial_queued = s_new_pending && s_new_trial,
+        .other_queued = s_new_pending && !s_new_trial,
+        .apply_left_ms = (s_new_pending && s_apply_at_us > now_us) ? (uint32_t)((s_apply_at_us - now_us) / 1000) : 0,
+    };
+    net_cred_view_t v;
+    net_cred_view(&in, &v);
+    s_st.cred_trial = v.cred_trial;
+    s_st.cred_trial_left_s = v.cred_trial_left_s;
+    s_st.cred_pending = v.cred_pending;
+    strlcpy(s_st.pending_ssid, v.pending_ssid, sizeof(s_st.pending_ssid));
+    s_st.cred_reverted = v.cred_reverted;
+    s_st.cred_reverted_why = v.cred_reverted_why;
+}
+
+/* Net task: s_trial changed (started, ended); readers see it now. */
+static void trial_publish(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    s_trial_pub = s_trial;
+    publish_cred_locked();
+    taskEXIT_CRITICAL(&s_lock);
 }
 
 /* ---- event handlers (default event loop: forward only) ------------------------------- */
@@ -387,11 +444,20 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
 {
     (void)arg;
     (void)base;
-    (void)data;
     if (id == IP_EVENT_STA_GOT_IP) {
         send_msg(MSG_GOT_IP, 0, 0);
     } else if (id == IP_EVENT_STA_LOST_IP) {
         send_msg(MSG_LOST_IP, 0, 0);
+    } else if (id == IP_EVENT_GOT_IP6 && data != NULL) {
+        const ip_event_got_ip6_t *e = data;
+        if (e->esp_netif == s_sta) {
+            send_msg(MSG_GOT_IP6, 0, 0);
+        }
+#if !CONFIG_NETWORK_QEMU_ETHERNET
+        else if (e->esp_netif == s_ap) {
+            send_msg(MSG_GOT_IP6, 1, 0);
+        }
+#endif
     }
 }
 
@@ -458,6 +524,55 @@ static void on_sntp_event(void *arg, esp_event_base_t base, int32_t id, void *da
     (void)id;
     (void)data;
     send_msg(MSG_TIME_SYNC, 0, 0);
+}
+
+/* ---- IPv6 link-local -------------------------------------------------------------------- */
+
+/* The interface's link came up: give it its link-local address (the link
+ * going down clears every IPv6 address, so this runs on every link-up). */
+static void ip6_link_up(esp_netif_t *netif, const char *what)
+{
+#if CONFIG_LWIP_IPV6
+    esp_err_t err = netif != NULL ? esp_netif_create_ip6_linklocal(netif) : ESP_ERR_INVALID_STATE;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "IPv6 link-local on %s not created: %s", what, esp_err_to_name(err));
+    }
+#else
+    (void)netif;
+    (void)what;
+#endif
+}
+
+/* The address passed duplicate detection (IP_EVENT_GOT_IP6): say which, once per interface and address. */
+static void ip6_note(uint8_t which)
+{
+#if CONFIG_LWIP_IPV6
+    esp_netif_t *netif = s_sta;
+#if !CONFIG_NETWORK_QEMU_ETHERNET
+    if (which == 1) {
+        netif = s_ap;
+    }
+#endif
+    if (which > 1 || netif == NULL) {
+        return;
+    }
+    esp_ip6_addr_t ll;
+    char text[48];
+    if (esp_netif_get_ip6_linklocal(netif, &ll) != ESP_OK || inet_ntop(AF_INET6, ll.addr, text, sizeof(text)) == NULL) {
+        return;
+    }
+    for (char *c = text; *c != '\0'; c++) {
+        if (*c >= 'A' && *c <= 'F') {
+            *c = (char)(*c - 'A' + 'a');   /* the lower-case form (RFC 5952), as the web log writes addresses */
+        }
+    }
+    if (strcmp(text, s_ip6_logged[which]) != 0) {
+        strlcpy(s_ip6_logged[which], text, sizeof(s_ip6_logged[which]));
+        ESP_LOGI(TAG, "IPv6 link-local %s on %s", text, which == 0 ? "station" : "access point");
+    }
+#else
+    (void)which;
+#endif
 }
 
 /* ---- captive DNS responder ------------------------------------------------------------ */
@@ -726,14 +841,20 @@ static void ip_lost(void)
     post_event(NETWORK_EVENT_OFFLINE);
 }
 
-static void schedule_retry(void)
+/* The next connect attempt in delay_ms. */
+static void schedule_retry_ms(uint32_t delay_ms)
 {
-    uint32_t delay_ms = net_backoff_ms(s_attempt);
     if (s_attempt < STA_RETRY_ATTEMPT_CAP) {
         s_attempt++;
     }
     s_retry_at_us = esp_timer_get_time() + (int64_t)delay_ms * 1000;
     s_sta_state = STA_WAIT_RETRY;
+}
+
+/* The next connect attempt after the backoff. */
+static void schedule_retry(void)
+{
+    schedule_retry_ms(net_backoff_ms(s_attempt));
 }
 
 static void connect_now(void)
@@ -1190,10 +1311,24 @@ static void mdns_note_rename(void)
     }
 }
 
-/* <hostname>.local and the web page as an _http._tcp service, on the
+/*
+ * <hostname>.local and the web page as an _http._tcp service, on the
  * station interface and the AP (the predefined interfaces of the component;
  * in the QEMU build the emulated Ethernet port carries the station's key and
- * events). Never fatal: without it the station is reached by its IP. */
+ * events). Never fatal: without it the station is reached by its IP.
+ *
+ * The service has no instance name of its own: the component then names it
+ * after the current host name (get_default_instance_name). After a host
+ * name conflict the component renames the host and probes the services
+ * again under the new label (restart_all_pcbs), so the service follows the
+ * host name, and a device that already announced "<name>._http._tcp" keeps
+ * it. One case remains in the component (espressif/mdns 1.13.1): its
+ * service collision check applies the length tie-break to authoritative
+ * answers too (mdns_receive.c, check_srv_collision), so when only the
+ * service instance name collides, with a device whose SRV target is
+ * shorter than ours, the station still wins that name and the other device
+ * renames its service. To be checked on the bench.
+ */
 static void mdns_setup(void)
 {
     const char *name = hostname_in_use();
@@ -1204,9 +1339,6 @@ static void mdns_setup(void)
         return;
     }
     err = mdns_hostname_set(name);
-    if (err == ESP_OK) {
-        err = mdns_instance_name_set(name);
-    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "mDNS name %s not set (%s): the station is reached by its IP address only", name,
                  esp_err_to_name(err));
@@ -1225,19 +1357,61 @@ static void mdns_setup(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "mDNS: renames after a name conflict are not followed (%s)", esp_err_to_name(err));
     }
-    ESP_LOGI(TAG, "mDNS: answering as %s.local (web page on port 80)", name);
+    s_mdns_on = true;
+    ESP_LOGI(TAG, "mDNS: answering as %s.local (web page as service %s)", name, name);
+}
+
+/* Before a planned restart, while the network is still up: the services
+ * leave with goodbye packets (TTL 0 for PTR, SRV and TXT), so browsers drop
+ * the entry at once instead of when its TTL runs out, then the responder
+ * stops. The packets get at most min(MDNS_BYE_WAIT_MS, the hook budget
+ * left) to leave before Wi-Fi stops. */
+#define MDNS_BYE_WAIT_MS 150
+#define MDNS_BYE_MIN_MS  20    /* less budget left: no goodbye (stopping the responder takes a moment too) */
+
+static void mdns_goodbye(uint32_t deadline_ms)
+{
+    if (!s_mdns_on) {
+        return;
+    }
+    if (deadline_ms < MDNS_BYE_MIN_MS) {
+        ESP_LOGW(TAG, "mDNS: no time left for a goodbye");
+        return;
+    }
+    int64_t start = esp_timer_get_time();
+    taskENTER_CRITICAL(&s_lock);
+    bool up = s_st.online || s_st.setup_ap_active;
+    s_st.mdns_host[0] = '\0';   /* the name is no longer answered */
+    taskEXIT_CRITICAL(&s_lock);
+    (void)mdns_service_remove_all();   /* the goodbyes go out here */
+    mdns_free();
+    s_mdns_on = false;
+    if (!up) {
+        ESP_LOGI(TAG, "mDNS: stopped (no network to say goodbye on)");
+        return;
+    }
+    uint32_t used_ms = (uint32_t)((esp_timer_get_time() - start) / 1000);
+    uint32_t wait_ms = deadline_ms > used_ms ? deadline_ms - used_ms : 0;
+    if (wait_ms > MDNS_BYE_WAIT_MS) {
+        wait_ms = MDNS_BYE_WAIT_MS;
+    }
+    if (wait_ms > 0) {
+        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+    }
+    ESP_LOGI(TAG, "mDNS: goodbye sent");
 }
 
 /* ---- planned restart ------------------------------------------------------------------- */
 
 /* Lifecycle shutdown hook (after the ledger's and the casters'): from here on
- * the Wi-Fi stop on the way down is ours, not a link loss. */
+ * the Wi-Fi stop on the way down is ours, not a link loss; the mDNS
+ * services say goodbye while the network is still up. */
 static void on_shutdown(lifecycle_reboot_reason_t reason, uint32_t deadline_ms, void *ctx)
 {
     (void)reason;
-    (void)deadline_ms;
     (void)ctx;
     s_leaving = true;
+    mdns_goodbye(deadline_ms);
 }
 
 /* ---- message handling ---------------------------------------------------------------- */
@@ -1328,7 +1502,10 @@ static void handle_disconnected(uint8_t reason, int8_t rssi)
         }
         flush_drop_record();
     }
-    schedule_retry();
+    /* A refused attempt of trial credentials that never associated is
+     * retried at once (the connect scans first): the refusals that end the
+     * trial then come back to back. Decided before this one is counted. */
+    schedule_retry_ms(net_trial_retry_ms(&s_trial, reason, s_attempt));
     /* A network that refuses the new password ends their trial now, not
      * after its 90 s (apply_credentials connects again at once). */
     if (net_cred_trial_disconnect(&s_trial, reason) == NET_TRIAL_REVERT_AUTH) {
@@ -1374,6 +1551,7 @@ static void trial_confirmed(void)
     taskENTER_CRITICAL(&s_lock);
     bool newer = s_new_pending;
     bool pend_same = s_pend_valid && strcmp(s_pend_ssid, s_ssid) == 0 && strcmp(s_pend_pass, s_pass) == 0;
+    s_trial_pub = s_trial;   /* over (confirmed): published with the pending pair it cleared */
     if (!newer) {
         strlcpy(s_act_ssid, s_ssid, sizeof(s_act_ssid));
         strlcpy(s_act_pass, s_pass, sizeof(s_act_pass));
@@ -1386,6 +1564,7 @@ static void trial_confirmed(void)
         }
     }
     bool other_pending = s_pend_valid;
+    publish_cred_locked();
     taskEXIT_CRITICAL(&s_lock);
     if (newer) {
         xSemaphoreGive(s_cred_mux);
@@ -1411,6 +1590,10 @@ static void trial_revert(network_cred_revert_t why)
 {
     taskENTER_CRITICAL(&s_lock);
     bool newer = s_new_pending;
+    if (newer || !s_trial_revert_ok) {
+        s_trial_pub = s_trial;   /* this trial is over either way */
+        publish_cred_locked();
+    }
     taskEXIT_CRITICAL(&s_lock);
     if (newer) {
         return;   /* a newer change replaces this trial within a second */
@@ -1433,6 +1616,8 @@ static void trial_revert(network_cred_revert_t why)
     strlcpy(s_pass, s_act_pass, sizeof(s_pass));
     s_cred_reverted = true;
     s_cred_reverted_why = (uint8_t)why;
+    s_trial_pub = s_trial;
+    publish_cred_locked();
     taskEXIT_CRITICAL(&s_lock);
     if (refused) {
         ESP_LOGW(TAG, "\"%s\" refused the new Wi-Fi password (%u attempts in a row): back to \"%s\" (the new "
@@ -1620,6 +1805,7 @@ static esp_err_t handle_start(void)
             strlcpy(s_pass, pass, sizeof(s_pass));
             net_cred_trial_start(&s_trial, now_s());
             s_trial_assoc = false;
+            trial_publish();
         } else if (unreadable) {
             ESP_LOGE(TAG, "station not started: enter the Wi-Fi credentials again on the setup page");
         }
@@ -1679,6 +1865,7 @@ static void handle_msg(const net_msg_t *m)
     case MSG_STA_CONNECTED: {
         s_associated = true;
         s_sta_state = STA_CONNECTED;
+        ip6_link_up(s_sta, "station");
         if (!s_has_ip) {
             s_noip_since_s = now_s();
         }
@@ -1718,6 +1905,9 @@ static void handle_msg(const net_msg_t *m)
         ip_lost();
         break;
     case MSG_AP_START:
+#if !CONFIG_NETWORK_QEMU_ETHERNET
+        ip6_link_up(s_ap, "access point");
+#endif
         dns_start();
         taskENTER_CRITICAL(&s_lock);
         s_st.setup_ap_active = true;
@@ -1755,6 +1945,9 @@ static void handle_msg(const net_msg_t *m)
     case MSG_RECOVER:
         do_recovery((network_recovery_t)m->reason);
         break;
+    case MSG_GOT_IP6:
+        ip6_note(m->reason);
+        break;
     case MSG_AP_REQUEST:
         s_recovery = true;
         s_recovery_start_s = now_s();
@@ -1784,6 +1977,7 @@ static void resync(void)
     } else if (linked && !s_associated) {
         s_associated = true;
         s_sta_state = STA_CONNECTED;
+        ip6_link_up(s_sta, "station");   /* its link-up message was lost */
         taskENTER_CRITICAL(&s_lock);
         s_st.associated = true;
         taskEXIT_CRITICAL(&s_lock);
@@ -1827,29 +2021,29 @@ static void housekeeping(void)
     int64_t now_us = esp_timer_get_time();
 
     bool apply = false;
-    bool trial = false;
+    uint32_t apply_s = now_s();
     taskENTER_CRITICAL(&s_lock);
     if (s_new_pending && now_us >= s_apply_at_us) {
         strlcpy(s_ssid, s_new_ssid, sizeof(s_ssid));
         strlcpy(s_pass, s_new_pass, sizeof(s_pass));
         memset(s_new_pass, 0, sizeof(s_new_pass));
         s_new_pending = false;
-        trial = s_new_trial;
-        if (trial) {
+        if (s_new_trial) {
             s_cred_reverted = false;   /* a new trial: an earlier revert no longer applies */
             s_cred_reverted_why = NETWORK_CRED_REVERT_NONE;
+            net_cred_trial_start(&s_trial, apply_s);
+            s_trial_assoc = false;
+        } else {
+            s_trial.on = false;
         }
+        /* The queued change becomes the running trial (or ends one) in one step for readers. */
+        s_trial_pub = s_trial;
+        publish_cred_locked();
         s_trial_revert_ok = net_ssid_valid(s_act_ssid);
         apply = true;
     }
     taskEXIT_CRITICAL(&s_lock);
     if (apply) {
-        if (trial) {
-            net_cred_trial_start(&s_trial, now_s());
-            s_trial_assoc = false;
-        } else {
-            s_trial.on = false;
-        }
         apply_credentials();
     }
 
@@ -1932,12 +2126,8 @@ static void housekeeping(void)
     s_st.offline_s = (s_sta_configured && !s_has_ip) ? now - s_offline_since_s : 0;
     s_st.assoc_no_ip_s = (s_associated && !s_has_ip) ? now - s_noip_since_s : 0;
     s_st.retry_in_s = retry_in;
-    s_st.cred_trial = s_trial.on;
-    s_st.cred_trial_left_s = net_cred_trial_left_s(&s_trial, now);
-    s_st.cred_pending = s_pend_valid;
-    strlcpy(s_st.pending_ssid, s_pend_valid ? s_pend_ssid : "", sizeof(s_st.pending_ssid));
-    s_st.cred_reverted = s_cred_reverted && s_pend_valid;
-    s_st.cred_reverted_why = s_st.cred_reverted ? s_cred_reverted_why : (uint8_t)NETWORK_CRED_REVERT_NONE;
+    s_trial_pub = s_trial;
+    publish_cred_locked();
     taskEXIT_CRITICAL(&s_lock);
 }
 
@@ -2093,6 +2283,9 @@ esp_err_t network_init(void)
         err = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_LOST_IP, on_ip_event, NULL, NULL);
     }
     if (err == ESP_OK) {
+        err = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_GOT_IP6, on_ip_event, NULL, NULL);
+    }
+    if (err == ESP_OK) {
         err = esp_event_handler_instance_register(NETIF_SNTP_EVENT, NETIF_SNTP_TIME_SYNC, on_sntp_event, NULL, NULL);
     }
     if (err != ESP_OK) {
@@ -2142,6 +2335,7 @@ esp_err_t network_get_status(network_status_t *out)
     }
     int64_t now_us = esp_timer_get_time();
     taskENTER_CRITICAL(&s_lock);
+    publish_cred_locked();   /* the trial's countdown to the second */
     *out = s_st;
     out->probe_age_s = s_probe_valid ? (uint32_t)((now_us - s_probe_at_us) / 1000000) : UINT32_MAX;
     taskEXIT_CRITICAL(&s_lock);
@@ -2166,7 +2360,7 @@ static void queue_apply_locked(const char *ssid, const char *pass, bool trial)
     s_apply_at_us = esp_timer_get_time() + (int64_t)APPLY_DELAY_MS * 1000;
 }
 
-esp_err_t network_set_credentials(const char *ssid, const char *password)
+esp_err_t network_set_credentials(const char *ssid, const char *password, network_cred_plan_t *plan_out)
 {
     if (ssid == NULL || password == NULL || !net_ssid_valid(ssid) || !net_password_valid(password)) {
         return ESP_ERR_INVALID_ARG;
@@ -2223,8 +2417,14 @@ esp_err_t network_set_credentials(const char *ssid, const char *password)
     if (plan != NET_CRED_PLAN_STORE_ONLY) {
         queue_apply_locked(ssid, password, plan == NET_CRED_PLAN_TRIAL);
     }
+    publish_cred_locked();
     taskEXIT_CRITICAL(&s_lock);
     xSemaphoreGive(s_cred_mux);
+    if (plan_out != NULL) {
+        *plan_out = plan == NET_CRED_PLAN_TRIAL        ? NETWORK_CRED_PLAN_TRIAL
+                    : plan == NET_CRED_PLAN_STORE_ONLY ? NETWORK_CRED_PLAN_STORE_ONLY
+                                                       : NETWORK_CRED_PLAN_APPLY;
+    }
     ESP_LOGI(TAG, "Wi-Fi credentials for \"%s\" %s", ssid,
              plan == NET_CRED_PLAN_TRIAL        ? "stored as pending: tried now, kept if they get an IP"
              : plan == NET_CRED_PLAN_STORE_ONLY ? "stored, not used: the emulated Ethernet stays the station's link"
@@ -2243,6 +2443,7 @@ esp_err_t network_retry_pending_credentials(void)
         s_cred_reverted = false;
         s_cred_reverted_why = NETWORK_CRED_REVERT_NONE;
         queue_apply_locked(s_pend_ssid, s_pend_pass, true);
+        publish_cred_locked();
     }
     taskEXIT_CRITICAL(&s_lock);
     return pend ? ESP_OK : ESP_ERR_NOT_FOUND;
@@ -2269,7 +2470,7 @@ esp_err_t network_discard_pending_credentials(void)
         }
     }
     taskENTER_CRITICAL(&s_lock);
-    bool on_trial = s_st.cred_trial || (s_new_pending && s_new_trial);
+    bool on_trial = s_trial_pub.on || (s_new_pending && s_new_trial);
     memset(s_pend_pass, 0, sizeof(s_pend_pass));
     s_pend_ssid[0] = '\0';
     s_pend_valid = false;
@@ -2280,6 +2481,7 @@ esp_err_t network_discard_pending_credentials(void)
     } else if (s_new_pending && s_new_trial) {
         s_new_pending = false;
     }
+    publish_cred_locked();
     taskEXIT_CRITICAL(&s_lock);
     xSemaphoreGive(s_cred_mux);
     ESP_LOGI(TAG, "pending Wi-Fi credentials discarded");
@@ -2454,14 +2656,15 @@ esp_err_t network_ladder_tick(const network_ladder_input_t *in)
     taskEXIT_CRITICAL(&s_lock);
 
     switch (out.act) {
-    case NET_LADDER_PASS:
+    case NET_LADDER_PASS: {
         /* rung code 0 = "pass started", the reason byte = the triggers holding now */
         s_ladder_note = 0;
         ladder_journal(LADDER_OUTCOME_STARTED, NET_RUNG_NONE, out.triggers);
-        ESP_LOGW(TAG, "network ladder: pass started (%s%s%s)", (out.triggers & NET_TRIG_P) ? " protected caster down" : "",
-                 (out.triggers & NET_TRIG_A) ? " associated without IP" : "",
-                 (out.triggers & NET_TRIG_S) ? " caster not reached" : "");
+        char why[80];
+        (void)net_ladder_trigger_text(out.triggers, why, sizeof(why));
+        ESP_LOGW(TAG, "network ladder: pass started (%s)", why);
         break;
+    }
     case NET_LADDER_PROBE:
         probe_kick();
         break;

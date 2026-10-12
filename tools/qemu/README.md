@@ -69,13 +69,26 @@ The overlay also changes what QEMU cannot emulate (reasons in its comments):
 quad instead of octal PSRAM, DIO instead of QIO flash, and software instead
 of hardware SHA/AES/MPI.
 
-Expected log lines that a station does not print: three `E` lines about the
-multicast MAC filter (the emulated MAC has none) and `QEMU development
-build: emulated Ethernet instead of Wi-Fi, no setup AP`. The mDNS responder
-runs as on a station (`network: mDNS: answering as onocoydiy.local`), on
-the emulated Ethernet port; QEMU's user-mode network carries no multicast
-to the host, so the name itself cannot be looked up from there, but a
-request with `Host: onocoydiy.local` passes the Host check like on a board.
+Expected log lines that a station does not print: `E` lines about the
+multicast MAC filter (the emulated MAC has none: `Failed to add multicast
+filter for IPv4` and `... for IPv6`, two of each at boot, and one `Failed to
+remove multicast filter for IPv6` when mDNS stops before a planned restart)
+and `QEMU development build: emulated Ethernet instead of Wi-Fi, no setup
+AP`. The mDNS responder
+runs as on a station, on the emulated Ethernet port, under the overlay's own
+host name: `network: mDNS: answering as onocoydiy-qemu.local (web page as
+service onocoydiy-qemu)`. QEMU's user-mode network sends the guest's
+multicast announcements out of this computer onto its LAN, so under the
+station's default name an emulated station would announce `onocoydiy.local`
+beside a real one and could take the name from it; `sdkconfig.qemu` sets
+`CONFIG_LWIP_LOCAL_HOSTNAME="onocoydiy-qemu"` to keep them apart. (Running
+the user-mode network with `restrict=on` would keep the packets in, but it
+also cuts the station's outbound update check and needs a `guestfwd` for
+every local caster port.) Queries do not come back in, so the name cannot
+be looked up from this computer, but a request with
+`Host: onocoydiy-qemu.local` passes the Host check like on a board. The
+emulated port also gets its IPv6 link-local address (`network: IPv6
+link-local fe80::... on station`), as a station's interfaces do.
 
 With nothing answering on UART1 the firmware behaves as with a dead
 receiver: detection gives up after about 26 s. The GNSS recovery ladder's
@@ -159,8 +172,26 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    `GET /api/status` with that session is valid JSON, API version 1, the
    station online over the emulated Ethernet, `health.reboot_hold` with
    `setup`; `GET /api/session` has `hostname` and `mdns_host`
-   `onocoydiy`, a request with `Host: onocoydiy.local` gets 200 and one
-   with `Host: evil.local` does not;
+   `onocoydiy-qemu`, a request with `Host: onocoydiy-qemu.local` gets 200
+   and one with `Host: evil.local` does not;
+   HTTP connection handling: `POST /api/status` with `{}` gets `405` and
+   `POST /api/nope` with a body `404`, both with `Connection: close` (not
+   `413`); `GET /nope` with a body gets the setup AP's captive redirect
+   (this build counts as the AP) with `Connection: close`; `GET
+   /api/session` with a body gets `400 bad_request`; a request with
+   `Connection: close` and a `GET / HTTP/1.0` are answered and closed
+   within 2 s; two pipelined HTTP/1.1 requests on one socket are both
+   answered, and an HTTP/1.1 connection stays open for the next request;
+   a wrong admin password and a WebSocket handshake without a session
+   (public status off) each give one console line naming `10.0.2.2` (how
+   the guest sees this computer); after `PUT /api/diag/log-level` `*` at
+   `info` a refused handshake prints no `W httpd_uri` line, `debug` is
+   refused (`400 invalid_field`, `level`), `GET /api/logs` says
+   `level_max` `info`, and `cursor=abc` on `/api/logs` and `/api/journal`
+   is refused (`400 invalid_field`, `cursor`); `PUT /api/wifi` answers
+   `applied: false, trial: false` (this build only stores Wi-Fi
+   credentials) and the next `GET /api/wifi` agrees (no trial, nothing
+   pending);
 3. UART1 both ways: the detection queries arrive on the host, and text the
    host sends makes detection end with "bytes but nothing valid";
 4. over 75 s (`--observe`, at least 45): no `Guru Meditation`, `abort()`,
@@ -168,10 +199,15 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    console, and no reboot loop (a restart without the firmware's own
    `rebooting (reason N)` line before it is a crash; more than two boots is
    a loop); no GNSS ladder restart (`rebooting (reason 6)`), no console
-   note about dropped lines (`[diag:`), and the mDNS line in the boot log;
-   at the end of the window `GET /` and `GET /api/status` still answer, the
-   console writer task runs (`GET /api/diag/tasks`) and `GET /api/health`
-   counts no console drop. QEMU's UART sends every byte at once, so a log
+   note about dropped lines (`[diag:`), and the mDNS line, the mDNS task's
+   stack in PSRAM (`mDNS task will be created from SPIRAM`; the console
+   writer's too, no `console task stack in internal RAM`) and the
+   station's IPv6 link-local line in the boot log; at the end of the window `GET /`
+   and `GET /api/status` still answer, the console writer task runs (`GET
+   /api/diag/tasks`) and `GET /api/health` counts no console drop; then
+   `POST /api/system/reboot`: `network: mDNS: goodbye sent` is on the
+   console before the next boot, with no shutdown-budget warning, and the
+   station answers again. QEMU's UART sends every byte at once, so a log
    burst cannot back the console up here; the writer's ordering and drop
    rules are host-tested (`test/host/main/test_diag_console.c`).
 

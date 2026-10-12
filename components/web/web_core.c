@@ -1084,3 +1084,291 @@ web_wsq_decision_t web_wsq_admit(const web_msg_kind_t *kinds, const size_t *size
     }
     return d;
 }
+
+/* ---- client and local addresses ------------------------------------------------------- */
+
+static const uint8_t s_v4_mapped[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF };
+
+/* The IPv4 address of an IPv4 or v4-mapped address (network order as stored). */
+static bool addr_v4(const web_addr_t *a, uint32_t *v4)
+{
+    if (!a->v6) {
+        memcpy(v4, a->b, 4);
+        return true;
+    }
+    if (memcmp(a->b, s_v4_mapped, sizeof(s_v4_mapped)) == 0) {
+        memcpy(v4, a->b + 12, 4);
+        return true;
+    }
+    return false;
+}
+
+uint64_t web_client_key(const web_addr_t *a)
+{
+    if (a == NULL) {
+        return 0;
+    }
+    uint32_t v4;
+    if (addr_v4(a, &v4)) {
+        return v4;
+    }
+    uint64_t hi;
+    memcpy(&hi, a->b, 8);
+    if (a->b[0] == 0xFE && (a->b[1] & 0xC0) == 0x80) {
+        uint64_t lo;
+        memcpy(&lo, a->b + 8, 8);
+        return hi ^ lo;   /* link-local: every host of the link has the same prefix */
+    }
+    return hi;
+}
+
+bool web_addr_on_ap(const web_addr_t *local, uint32_t ap_ip4, const uint8_t *ap_ll6)
+{
+    if (local == NULL) {
+        return false;
+    }
+    uint32_t v4;
+    if (addr_v4(local, &v4)) {
+        return ap_ip4 != 0 && v4 == ap_ip4;
+    }
+    return ap_ll6 != NULL && memcmp(local->b, ap_ll6, 16) == 0;
+}
+
+/* Append text, keeping out terminated; counts what it would have written. */
+static void put_text(char *out, size_t cap, size_t *len, const char *s)
+{
+    for (; *s != '\0'; s++) {
+        if (*len + 1 < cap) {
+            out[*len] = *s;
+        }
+        (*len)++;
+    }
+    if (cap > 0) {
+        out[*len < cap ? *len : cap - 1] = '\0';
+    }
+}
+
+size_t web_addr_text(const web_addr_t *a, char *out, size_t cap)
+{
+    size_t len = 0;
+    if (cap > 0) {
+        out[0] = '\0';
+    }
+    if (a == NULL) {
+        put_text(out, cap, &len, "?");
+        return len < cap ? len : (cap > 0 ? cap - 1 : 0);
+    }
+    char part[8];
+    uint32_t v4;
+    if (addr_v4(a, &v4)) {
+        const uint8_t *q = (const uint8_t *)&v4;
+        for (int i = 0; i < 4; i++) {
+            snprintf(part, sizeof(part), i == 0 ? "%u" : ".%u", (unsigned)q[i]);
+            put_text(out, cap, &len, part);
+        }
+        return len < cap ? len : (cap > 0 ? cap - 1 : 0);
+    }
+    uint16_t g[8];
+    for (int i = 0; i < 8; i++) {
+        g[i] = (uint16_t)((a->b[2 * i] << 8) | a->b[2 * i + 1]);
+    }
+    /* The longest run of zero groups (two or more; the first of equal runs) becomes "::". */
+    int best = -1;
+    int best_n = 1;
+    for (int i = 0; i < 8;) {
+        if (g[i] != 0) {
+            i++;
+            continue;
+        }
+        int j = i;
+        while (j < 8 && g[j] == 0) {
+            j++;
+        }
+        if (j - i > best_n) {
+            best = i;
+            best_n = j - i;
+        }
+        i = j;
+    }
+    for (int i = 0; i < 8; i++) {
+        if (i == best) {
+            put_text(out, cap, &len, "::");
+            i += best_n - 1;
+            continue;
+        }
+        bool after_gap = best >= 0 && i == best + best_n;
+        snprintf(part, sizeof(part), (i == 0 || after_gap) ? "%x" : ":%x", (unsigned)g[i]);
+        put_text(out, cap, &len, part);
+    }
+    return len < cap ? len : (cap > 0 ? cap - 1 : 0);
+}
+
+/* ---- requests no route took ------------------------------------------------------------ */
+
+web_fallback_t web_fallback_classify(const char *uri, bool options, bool get_or_head, bool asset, bool on_ap,
+                                     bool (*api_known)(const char *path))
+{
+    if (options) {
+        return WEB_FB_METHOD;   /* no CORS, ever */
+    }
+    if (uri == NULL) {
+        uri = "";
+    }
+    size_t len = strcspn(uri, "?");
+    bool api = (len >= 5 && strncmp(uri, "/api/", 5) == 0) || (len == 4 && strncmp(uri, "/api", 4) == 0) ||
+               (len == 3 && strncmp(uri, "/ws", 3) == 0);
+    if (api) {
+        char path[64];
+        bool known = len < sizeof(path) && api_known != NULL;
+        if (known) {
+            memcpy(path, uri, len);
+            path[len] = '\0';
+            known = api_known(path);
+        }
+        return known ? WEB_FB_METHOD : WEB_FB_NOT_FOUND;
+    }
+    if (asset) {
+        return get_or_head ? WEB_FB_ASSET : WEB_FB_METHOD;
+    }
+    return on_ap ? WEB_FB_REDIRECT : WEB_FB_NOT_FOUND;
+}
+
+/* ---- connection handling ------------------------------------------------------------------- */
+
+unsigned web_connection_tokens(const char *value)
+{
+    unsigned tok = 0;
+    if (value == NULL) {
+        return 0;
+    }
+    const char *p = value;
+    while (*p != '\0') {
+        while (*p == ' ' || *p == '\t' || *p == ',') {
+            p++;
+        }
+        const char *start = p;
+        while (*p != '\0' && *p != ',') {
+            p++;
+        }
+        const char *end = p;
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) {
+            end--;
+        }
+        size_t n = (size_t)(end - start);
+        if (eq_nocase(start, n, "close")) {
+            tok |= WEB_CONN_TOK_CLOSE;
+        } else if (eq_nocase(start, n, "keep-alive")) {
+            tok |= WEB_CONN_TOK_KEEP_ALIVE;
+        }
+    }
+    return tok;
+}
+
+bool web_conn_should_close(unsigned tokens, bool http10)
+{
+    if ((tokens & WEB_CONN_TOK_CLOSE) != 0) {
+        return true;
+    }
+    return http10 && (tokens & WEB_CONN_TOK_KEEP_ALIVE) == 0;
+}
+
+/* ---- log lines about clients, rate-limited --------------------------------------------------- */
+
+void web_lograte_init(web_lograte_t *r)
+{
+    memset(r, 0, sizeof(*r));
+}
+
+bool web_lograte_allow(web_lograte_t *r, uint64_t key, uint32_t now_s, uint32_t *held)
+{
+    web_lograte_client_t *c = NULL;
+    for (size_t i = 0; i < WEB_LOGRATE_CLIENTS && c == NULL; i++) {
+        if (r->c[i].used && r->c[i].key == key) {
+            c = &r->c[i];
+        }
+    }
+    if (c != NULL && (uint32_t)(now_s - c->last_s) < WEB_LOGRATE_PERIOD_S) {
+        if (c->held < UINT32_MAX) {
+            c->held++;
+        }
+        return false;
+    }
+    if (c == NULL) {
+        /* A free entry, else the one whose last line is oldest. */
+        c = &r->c[0];
+        for (size_t i = 0; i < WEB_LOGRATE_CLIENTS; i++) {
+            web_lograte_client_t *e = &r->c[i];
+            if (!e->used) {
+                c = e;
+                break;
+            }
+            if ((uint32_t)(now_s - e->last_s) > (uint32_t)(now_s - c->last_s)) {
+                c = e;
+            }
+        }
+        c->used = true;
+        c->key = key;
+        c->held = 0;
+    }
+    if (held != NULL) {
+        *held = c->held;
+    }
+    c->held = 0;
+    c->last_s = now_s;
+    return true;
+}
+
+const char *web_log_level_text(unsigned level)
+{
+    static const char *const names[] = { "none", "error", "warn", "info", "debug", "verbose" };
+    return level < sizeof(names) / sizeof(names[0]) ? names[level] : "?";
+}
+
+/* The query has `key` (with or without a value), whatever the value looks like. */
+static bool query_has(const char *query, const char *key)
+{
+    size_t klen = strlen(key);
+    const char *p = query;
+    while (*p != '\0') {
+        const char *pair = p;
+        while (*p != '\0' && *p != '&') {
+            p++;
+        }
+        size_t plen = (size_t)(p - pair);
+        if (*p == '&') {
+            p++;
+        }
+        if (plen >= klen && memcmp(pair, key, klen) == 0 && (plen == klen || pair[klen] == '=')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool web_query_u32(const char *query, const char *key, uint32_t *out)
+{
+    char v[128];   /* longer than any query the server keeps (96), so a value is never cut */
+    *out = 0;
+    if (query == NULL || key == NULL) {
+        return true;
+    }
+    if (!web_query_value(query, key, v, sizeof(v))) {
+        return !query_has(query, key);   /* absent, or a broken %-escape */
+    }
+    size_t n = strlen(v);
+    if (n == 0 || n > 10) {
+        return false;
+    }
+    uint64_t x = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (!is_digit(v[i])) {
+            return false;
+        }
+        x = x * 10u + (uint64_t)(v[i] - '0');
+    }
+    if (x > UINT32_MAX) {
+        return false;
+    }
+    *out = (uint32_t)x;
+    return true;
+}

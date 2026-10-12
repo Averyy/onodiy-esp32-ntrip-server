@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include "cJSON.h"
+#include "diag.h"
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
 #include "esp_attr.h"
@@ -116,7 +117,7 @@ static uint32_t s_client_done_ms;
 /* Connections: request deadlines and which one to close when the sockets
  * run out (web_conn.h). Server task, and the worker for its requests. */
 static portMUX_TYPE s_conn_lock = portMUX_INITIALIZER_UNLOCKED;
-static web_conns_t s_conns;
+EXT_RAM_BSS_ATTR static web_conns_t s_conns;   /* PSRAM: about 1 KB with the request-line scanners */
 static uint32_t s_late_logged_s;
 static uint32_t s_late_count;
 
@@ -179,6 +180,78 @@ void web_conn_worker(int fd, bool on)
     taskENTER_CRITICAL(&s_conn_lock);
     web_conn_async(&s_conns, fd, on, now);
     taskEXIT_CRITICAL(&s_conn_lock);
+}
+
+void web_resp_close_hdr(httpd_req_t *req)
+{
+    int fd = httpd_req_to_sockfd(req);
+    taskENTER_CRITICAL(&s_conn_lock);
+    bool had = web_conn_note_close_hdr(&s_conns, fd);
+    taskEXIT_CRITICAL(&s_conn_lock);
+    if (!had) {
+        httpd_resp_set_hdr(req, "Connection", "close");
+    }
+}
+
+bool web_conn_req_close(httpd_req_t *req)
+{
+    int fd = httpd_req_to_sockfd(req);
+    taskENTER_CRITICAL(&s_conn_lock);
+    bool close = web_conn_close_after(&s_conns, fd);
+    taskEXIT_CRITICAL(&s_conn_lock);
+    return close;
+}
+
+/*
+ * A handler starts on a request (server task): did the client ask for the
+ * connection to end after the answer ("Connection: close", or HTTP/1.0
+ * without keep-alive)? Then the answer carries "Connection: close" (set
+ * now, so a request the worker takes over carries it too) and
+ * request_end() closes the connection.
+ */
+static bool request_begin(httpd_req_t *req)
+{
+    int fd = httpd_req_to_sockfd(req);
+    taskENTER_CRITICAL(&s_conn_lock);
+    bool http10 = web_conn_begin_request(&s_conns, fd);
+    taskEXIT_CRITICAL(&s_conn_lock);
+    char v[64];
+    unsigned tokens = 0;
+    esp_err_t err = httpd_req_get_hdr_value_str(req, "Connection", v, sizeof(v));
+    if (err == ESP_OK || err == ESP_ERR_HTTPD_RESULT_TRUNC) {
+        tokens = web_connection_tokens(v);
+    }
+    bool close = web_conn_should_close(tokens, http10);
+    if (close) {
+        taskENTER_CRITICAL(&s_conn_lock);
+        web_conn_set_close_after(&s_conns, fd, true);
+        taskEXIT_CRITICAL(&s_conn_lock);
+        web_resp_close_hdr(req);
+    }
+    return close;
+}
+
+/*
+ * After the handler: a request that asked for it ends its connection (our
+ * side first, then what the client still sends is drained briefly, and the
+ * server deletes the session on ESP_FAIL). Not when the handler closed it
+ * already (ESP_FAIL), nor when the request runs on the worker, which closes
+ * it when it is done.
+ */
+static esp_err_t request_end(httpd_req_t *req, bool close, esp_err_t ret)
+{
+    if (!close || ret != ESP_OK) {
+        return ret;
+    }
+    int fd = httpd_req_to_sockfd(req);
+    taskENTER_CRITICAL(&s_conn_lock);
+    bool worker = web_conn_on_worker(&s_conns, fd);
+    taskEXIT_CRITICAL(&s_conn_lock);
+    if (worker) {
+        return ret;
+    }
+    web_linger_close(req);
+    return ESP_FAIL;
 }
 
 /* A request ran out of time: logged at most once a minute (a client could
@@ -255,6 +328,7 @@ static int conn_recv(httpd_handle_t hd, int fd, char *buf, size_t len, int flags
         now = now_ms();
         taskENTER_CRITICAL(&s_conn_lock);
         web_conn_received(&s_conns, fd, now);
+        web_conn_scan(&s_conns, fd, buf, (size_t)n);   /* request lines: their HTTP version */
         taskEXIT_CRITICAL(&s_conn_lock);
     }
     return n;
@@ -446,6 +520,41 @@ esp_err_t web_resp_end(web_resp_t *r)
 
 /* ---- request checks ---------------------------------------------------------------------- */
 
+/* A socket address as web_addr_t (IPv4, or IPv6 with v4-mapped addresses). */
+static bool sock_addr(const struct sockaddr_storage *ss, web_addr_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (ss->ss_family == AF_INET) {
+        memcpy(out->b, &((const struct sockaddr_in *)ss)->sin_addr.s_addr, 4);
+        return true;
+    }
+#if CONFIG_LWIP_IPV6
+    if (ss->ss_family == AF_INET6) {
+        out->v6 = true;
+        memcpy(out->b, ((const struct sockaddr_in6 *)ss)->sin6_addr.s6_addr, 16);
+        return true;
+    }
+#endif
+    return false;
+}
+
+bool web_req_peer(httpd_req_t *req, web_addr_t *out)
+{
+    int fd = httpd_req_to_sockfd(req);
+    struct sockaddr_storage addr;
+    socklen_t len = sizeof(addr);
+    if (fd < 0 || getpeername(fd, (struct sockaddr *)&addr, &len) != 0) {
+        return false;
+    }
+    return sock_addr(&addr, out);
+}
+
+void web_peer_text(httpd_req_t *req, char *out, size_t cap)
+{
+    web_addr_t a;
+    (void)web_addr_text(web_req_peer(req, &a) ? &a : NULL, out, cap);
+}
+
 bool web_req_on_ap(httpd_req_t *req)
 {
 #if CONFIG_NETWORK_QEMU_ETHERNET
@@ -458,29 +567,24 @@ bool web_req_on_ap(httpd_req_t *req)
     int fd = httpd_req_to_sockfd(req);
     struct sockaddr_storage addr;
     socklen_t len = sizeof(addr);
-    if (fd < 0 || getsockname(fd, (struct sockaddr *)&addr, &len) != 0) {
+    web_addr_t local;
+    if (fd < 0 || s_ap == NULL || getsockname(fd, (struct sockaddr *)&addr, &len) != 0 ||
+        !sock_addr(&addr, &local)) {
         return false;
     }
-    uint32_t local = 0;
-    if (addr.ss_family == AF_INET) {
-        local = ((struct sockaddr_in *)&addr)->sin_addr.s_addr;
-    }
+    esp_netif_ip_info_t info;
+    uint32_t ap4 = esp_netif_get_ip_info(s_ap, &info) == ESP_OK ? info.ip.addr : 0;
+    const uint8_t *ap6 = NULL;
 #if CONFIG_LWIP_IPV6
-    else if (addr.ss_family == AF_INET6) {
-        const struct sockaddr_in6 *a6 = (const struct sockaddr_in6 *)&addr;
-        const uint8_t *b = a6->sin6_addr.s6_addr;
-        static const uint8_t mapped[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF };
-        if (memcmp(b, mapped, sizeof(mapped)) != 0) {
-            return false;
-        }
-        memcpy(&local, b + 12, 4);
+    /* A phone that reaches the AP over IPv6 talks to the AP's link-local address. */
+    uint8_t ll[16];
+    esp_ip6_addr_t ip6;
+    if (local.v6 && esp_netif_get_ip6_linklocal(s_ap, &ip6) == ESP_OK) {
+        memcpy(ll, ip6.addr, sizeof(ll));
+        ap6 = ll;
     }
 #endif
-    esp_netif_ip_info_t info;
-    if (s_ap == NULL || esp_netif_get_ip_info(s_ap, &info) != ESP_OK || info.ip.addr == 0) {
-        return false;
-    }
-    return local == info.ip.addr;
+    return web_addr_on_ap(&local, ap4, ap6);
 }
 
 static esp_err_t captive_redirect(httpd_req_t *req)
@@ -541,12 +645,15 @@ static pre_t precheck(httpd_req_t *req, bool *on_ap, bool websocket)
     bool body = req->content_len > 0;
     if (!host_ok) {
         if (body) {
-            httpd_resp_set_hdr(req, "Connection", "close");
+            web_resp_close_hdr(req);
         }
         if (*on_ap && !websocket) {
             captive_redirect(req);
         } else {
             web_send_err(req, WEB_ERR_BAD_HOST);
+        }
+        if (body) {
+            web_linger_close(req);
         }
         return body ? PRE_CLOSE : PRE_ANSWERED;
     }
@@ -555,9 +662,12 @@ static pre_t precheck(httpd_req_t *req, bool *on_ap, bool websocket)
         esp_err_t err = httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin));
         if (err == ESP_ERR_HTTPD_RESULT_TRUNC || (err == ESP_OK && !web_origin_ok(origin, s_host))) {
             if (body) {
-                httpd_resp_set_hdr(req, "Connection", "close");
+                web_resp_close_hdr(req);
             }
             web_send_error(req, WEB_ERR_FORBIDDEN, "Cross-origin request refused", NULL, UINT32_MAX, NULL, NULL);
+            if (body) {
+                web_linger_close(req);
+            }
             return body ? PRE_CLOSE : PRE_ANSWERED;
         }
     }
@@ -605,6 +715,16 @@ void web_linger_close(httpd_req_t *req)
     }
 }
 
+/* Answer `err` (`message` NULL: its default text), and close the connection
+ * instead of reading a body we refuse. */
+static esp_err_t refuse_close_msg(httpd_req_t *req, web_err_t err, const char *message, uint32_t retry_in_s)
+{
+    web_resp_close_hdr(req);
+    web_send_error(req, err, message, NULL, retry_in_s, NULL, NULL);
+    web_linger_close(req);
+    return ESP_FAIL;
+}
+
 /* Answer, and close the connection instead of reading a body we refuse. */
 esp_err_t web_refuse_and_close(httpd_req_t *req, web_err_t err)
 {
@@ -613,10 +733,7 @@ esp_err_t web_refuse_and_close(httpd_req_t *req, web_err_t err)
 
 esp_err_t web_refuse_and_close_retry(httpd_req_t *req, web_err_t err, uint32_t retry_in_s)
 {
-    httpd_resp_set_hdr(req, "Connection", "close");
-    web_send_error(req, err, NULL, NULL, retry_in_s, NULL, NULL);
-    web_linger_close(req);
-    return ESP_FAIL;
+    return refuse_close_msg(req, err, NULL, retry_in_s);
 }
 
 static esp_err_t read_body(httpd_req_t *req, size_t len)
@@ -676,9 +793,10 @@ static esp_err_t api_handle(httpd_req_t *req, web_req_t *rp)
     if (pre != PRE_OK) {
         return pre == PRE_CLOSE ? ESP_FAIL : ESP_OK;
     }
-    /* GET and DELETE take no body: refuse one instead of reading it away. */
+    /* GET and DELETE take no body: refuse one instead of reading it away
+     * (a bad request, whatever its size). */
     if (rt->body == WEB_BODY_NONE && req->content_len > 0) {
-        return web_refuse_and_close(req, WEB_ERR_TOO_LARGE);
+        return refuse_close_msg(req, WEB_ERR_BAD_REQUEST, "This request takes no body", UINT32_MAX);
     }
     /* CSRF: a JSON or upload content type (a cross-site form cannot send either). */
     if (rt->body == WEB_BODY_JSON && !header_is(req, "Content-Type", "application/json", true)) {
@@ -744,7 +862,8 @@ static esp_err_t api_handle(httpd_req_t *req, web_req_t *rp)
 static esp_err_t api_dispatch(httpd_req_t *req)
 {
     web_req_t r = { .sess = -1 };
-    esp_err_t ret = api_handle(req, &r);
+    bool close = request_begin(req);
+    esp_err_t ret = request_end(req, close, api_handle(req, &r));
     if (r.sess >= 0) {
         health_note_admin_activity();   /* someone uses the page: the GNSS ladder's restart waits */
     }
@@ -788,7 +907,12 @@ static esp_err_t serve_asset(httpd_req_t *req, const web_asset_t *a)
     return httpd_resp_send(req, req->method == HTTP_HEAD ? NULL : (const char *)a->gz, (ssize_t)a->gz_len);
 }
 
-/* Everything no route matched: the UI assets, 404/405, the captive portal on the AP. */
+/*
+ * Everything no route matched: the UI assets, 404/405, the captive portal on
+ * the AP. The answer is decided before anything of a body is read; nothing
+ * here takes one, so with a body that answer goes out with
+ * "Connection: close" and the connection ends without reading it.
+ */
 static esp_err_t fallback_handle(httpd_req_t *req)
 {
     bool on_ap = false;
@@ -796,51 +920,49 @@ static esp_err_t fallback_handle(httpd_req_t *req)
     if (pre != PRE_OK) {
         return pre == PRE_CLOSE ? ESP_FAIL : ESP_OK;
     }
-    if (req->content_len > 0) {
-        return web_refuse_and_close(req, WEB_ERR_TOO_LARGE);   /* nothing here takes a body */
-    }
-    const char *uri = req->uri;
-    size_t len = strcspn(uri, "?");
-    bool api = (len >= 5 && strncmp(uri, "/api/", 5) == 0) || (len == 4 && strncmp(uri, "/api", 4) == 0) ||
-               (len == 3 && strncmp(uri, "/ws", 3) == 0);
-    if (req->method == HTTP_OPTIONS) {
-        return web_send_err(req, WEB_ERR_METHOD_NOT_ALLOWED);   /* no CORS, ever */
-    }
-    if (api) {
-        char path[64];
-        bool known = len < sizeof(path);
-        if (known) {
-            memcpy(path, uri, len);
-            path[len] = '\0';
-            known = web_api_path_known(path);
+    const web_asset_t *a = web_asset_find(web_ui_assets, web_ui_asset_count, req->uri);
+    web_fallback_t what = web_fallback_classify(req->uri, req->method == HTTP_OPTIONS,
+                                                req->method == HTTP_GET || req->method == HTTP_HEAD, a != NULL, on_ap,
+                                                web_api_path_known);
+    bool body = req->content_len > 0;
+    switch (what) {
+    case WEB_FB_ASSET:
+    case WEB_FB_REDIRECT: {
+        if (body) {
+            web_resp_close_hdr(req);
         }
-        return web_send_err(req, known ? WEB_ERR_METHOD_NOT_ALLOWED : WEB_ERR_NOT_FOUND);
-    }
-    const web_asset_t *a = web_asset_find(web_ui_assets, web_ui_asset_count, uri);
-    if (a != NULL) {
-        if (req->method != HTTP_GET && req->method != HTTP_HEAD) {
-            return web_send_err(req, WEB_ERR_METHOD_NOT_ALLOWED);
+        esp_err_t ret = what == WEB_FB_ASSET ? serve_asset(req, a) : captive_redirect(req);
+        if (body) {
+            web_linger_close(req);
+            return ESP_FAIL;
         }
-        return serve_asset(req, a);
+        return ret;
     }
-    if (on_ap) {
-        return captive_redirect(req);
+    case WEB_FB_METHOD:
+        /* OPTIONS too: no CORS, ever */
+        return body ? web_refuse_and_close(req, WEB_ERR_METHOD_NOT_ALLOWED)
+                    : web_send_err(req, WEB_ERR_METHOD_NOT_ALLOWED);
+    case WEB_FB_NOT_FOUND:
+    default:
+        return body ? web_refuse_and_close(req, WEB_ERR_NOT_FOUND) : web_send_err(req, WEB_ERR_NOT_FOUND);
     }
-    return web_send_err(req, WEB_ERR_NOT_FOUND);
 }
 
 static esp_err_t fallback(httpd_req_t *req)
 {
-    esp_err_t ret = fallback_handle(req);
+    bool close = request_begin(req);
+    esp_err_t ret = request_end(req, close, fallback_handle(req));
     web_conn_request_done(req, false);
     return ret;
 }
 
 /* WebSocket frames: every frame, control frames included, ends here, which
- * ends its receive deadline. */
+ * ends its receive deadline. A plain GET of /ws (no upgrade) is an HTTP
+ * request like any other: it may ask for the connection to end. */
 static esp_err_t ws_frame(httpd_req_t *req)
 {
-    esp_err_t ret = web_ws_handler(req);
+    bool close = req->method == HTTP_GET && request_begin(req);
+    esp_err_t ret = request_end(req, close, web_ws_handler(req));
     web_conn_request_done(req, false);
     return ret;
 }
@@ -1197,10 +1319,16 @@ esp_err_t web_start(void)
 
     /* The server's own warnings about a client that went away, a handshake
      * our check refused or a connection our handler closed (a refusal) are
-     * expected client behaviour; our handlers log what matters. */
-    esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
-    esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
-    esp_log_level_set("httpd_ws", ESP_LOG_ERROR);
+     * expected client behaviour; our handlers log what matters. Fixed
+     * levels: a later change of every tag's level ("*") keeps them. */
+    static const char *const quiet[] = { "httpd_uri", "httpd_txrx", "httpd_ws" };
+    for (size_t i = 0; i < sizeof(quiet) / sizeof(quiet[0]); i++) {
+        esp_err_t lerr = diag_log_fix_level(quiet[i], ESP_LOG_ERROR);
+        if (lerr != ESP_OK) {
+            ESP_LOGW(TAG, "log level of %s not fixed (%s)", quiet[i], esp_err_to_name(lerr));
+            esp_log_level_set(quiet[i], ESP_LOG_ERROR);
+        }
+    }
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.task_priority = SERVER_PRIO;
