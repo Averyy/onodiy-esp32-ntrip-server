@@ -17,6 +17,13 @@
  * login guard stopped shows why and a "Try again" that warns first (every
  * failed login counts toward Onocoy's block of the whole connection). A test
  * Onocoy slot (bench and QEMU builds) counts as Onocoy at its own host.
+ *
+ * One Onocoy slot per station: a new slot starts on RTK2go, not Onocoy,
+ * while another slot has an Onocoy host (set up or not, on or off), and
+ * says where that slot is; the Onocoy choice is hidden only while another
+ * enabled slot streams to Onocoy (the server refuses a second one). A slot
+ * saved without a host and not enabled is empty again: it is stored without
+ * a name, so no page shows the caster it held before.
  */
 
 const PRESETS = [
@@ -164,9 +171,20 @@ function ruleText(e) {
   return m.charAt(0).toUpperCase() + m.slice(1) + (/[.!?]$/.test(m) ? '' : '.');
 }
 
+/** Where the Onocoy slot is, for the editor of another slot (onocoyElsewhere: {slot, ready, enabled}). */
+function onocoyElsewhereText(o) {
+  const n = 'slot ' + (o.slot + 1);
+  if (!o.ready) return 'Onocoy is set up in ' + n + ': open it to add your credentials.';
+  if (!o.enabled) return 'Onocoy is set up in ' + n + ' and turned off: open it to turn it on.';
+  return 'Onocoy streams from ' + n + '. Onocoy allows one stream per station.';
+}
+
 /**
  * Slot editor. entry = {slot, config}. opts: preset (onocoy_preset),
- * hostname, hideOnocoy, onSaved(entry), onCancel(). Returns {el, dirty()}.
+ * hostname, hideOnocoy (another enabled slot streams to Onocoy: no Onocoy
+ * choice), onocoyElsewhere ({slot, ready, enabled} of another slot with an
+ * Onocoy host: a new slot starts on RTK2go and says where it is), openSlot(n)
+ * (opens that slot's editor), onSaved(entry), onCancel(). Returns {el, dirty()}.
  */
 function casterEditor(entry, opts) {
   const slot = entry.slot;
@@ -177,7 +195,8 @@ function casterEditor(entry, opts) {
   const isNew = !cfg.host;
   /* A test Onocoy slot (bench and QEMU builds) counts as Onocoy at its own host and port. */
   const testSlot = !!cfg.test_onocoy;
-  let kind = isNew ? (opts.hideOnocoy ? 'rtk2go' : 'onocoy') : isOnocoySlot(cfg) ? 'onocoy' : presetOf(cfg.host);
+  const elsewhere = opts.onocoyElsewhere || null;
+  let kind = isNew ? (opts.hideOnocoy || elsewhere ? 'rtk2go' : 'onocoy') : isOnocoySlot(cfg) ? 'onocoy' : presetOf(cfg.host);
   let dirty = false;
   /* An Onocoy slot without its credentials yet: setting it up means using it. */
   const noCreds = isOnocoySlot(cfg) && !onocoyReady(cfg);
@@ -222,6 +241,8 @@ function casterEditor(entry, opts) {
   };
   pw.addEventListener('input', showPwNote);
   const note = h('p', { class: 'muted small' });
+  const elsewhereNote = elsewhere ? h('div', { class: 'msg info', role: 'note' }, onocoyElsewhereText(elsewhere),
+    opts.openSlot ? h('div', { class: 'form-actions' }, btn('Open slot ' + (elsewhere.slot + 1), () => opts.openSlot(elsewhere.slot), 'small')) : null) : null;
   const tlsNote = h('small', { class: 'hint' });
   const forcedPace = h('p', { class: 'muted small' });
   const caBox = h('div', { class: 'stack' });
@@ -289,6 +310,8 @@ function casterEditor(entry, opts) {
     raw.el.hidden = !v2() || ono;
     clearPw.el.hidden = !cfg.password_set;
     note.textContent = PRESET_NOTES[kind] || '';
+    /* Where Onocoy is: for a new slot, and for any slot switched to Onocoy here. */
+    if (elsewhereNote) elsewhereNote.hidden = !(isNew || ono);
     showPwNote();
   }
 
@@ -371,10 +394,12 @@ function casterEditor(entry, opts) {
       bad.focus();
       return null;
     }
+    /* No host and not enabled: the slot is empty again, and an empty slot has no name (not the preset's). */
+    const emptied = !hostVal && !on;
     const body = {
       enabled: on,
-      name: ono ? (cfg.name && isOnocoySlot(cfg) ? cfg.name : 'Onocoy') :
-        name.value.trim() || (PRESETS.find(x => x.id === kind) || {}).label || '',
+      name: emptied ? '' : ono ? (cfg.name && isOnocoySlot(cfg) ? cfg.name : 'Onocoy') :
+        name.value.trim() || (kind === 'custom' ? hostVal.slice(0, 23) : (PRESETS.find(x => x.id === kind) || {}).label || ''),
       host: hostVal,
       port: portVal,
       ntrip_version: v ? 2 : 1,
@@ -382,7 +407,6 @@ function casterEditor(entry, opts) {
       mountpoint: mpVal,
       backoff_profile: ono ? 'fast' : kind === 'rtk2go' ? 'polite' : backoff.value,
     };
-    if (kind === 'custom' && body.name === '') body.name = hostVal.slice(0, 23);
     if (tls.input.checked) body.trust = ono ? 'bundle' : trust.value;
     if (ono || v) body.username = userVal;
     if (v && !ono) body.v2_raw_body = raw.input.checked;
@@ -426,6 +450,7 @@ function casterEditor(entry, opts) {
     dirty = true;
   } },
   field('Caster', presetSel).el,
+  elsewhereNote,
   testSlot ? h('p', { class: 'small' }, badge('Test Onocoy slot (bench build)', 'warn'),
     ' Counts as Onocoy at this host, for a local test caster.') : null,
   note,
@@ -648,11 +673,18 @@ Views.casters = {
       if (editor && editor.dirty() && !window.confirm('Discard the changes to the other slot?')) return;
       const prev = editing;
       editing = s.slot;
-      const others = data.slots.filter(x => x.slot !== s.slot && x.config && isOnocoySlot(x.config) && x.config.enabled);
+      /* Another slot with an Onocoy host (the enabled one first): this one starts elsewhere and says where Onocoy is. */
+      const onoSlots = data.slots.filter(x => x.slot !== s.slot && x.config && isOnocoySlot(x.config));
+      const ono = onoSlots.find(x => x.config.enabled) || onoSlots[0];
       editor = casterEditor(s, {
         preset: data.onocoy_preset,
         hostname: S.status && S.status.device ? S.status.device.hostname : '',
-        hideOnocoy: others.length > 0,
+        hideOnocoy: onoSlots.some(x => x.config.enabled),
+        onocoyElsewhere: ono ? { slot: ono.slot, ready: onocoyReady(ono.config), enabled: !!ono.config.enabled } : null,
+        openSlot: n => {
+          const t = data.slots.find(x => x.slot === n);
+          if (t) edit(t);
+        },
         onSaved: saved => {
           editing = null;
           editor = null;

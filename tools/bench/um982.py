@@ -81,7 +81,7 @@ from benchlib.common import StopFlag, add_log_args, make_run_dir, write_command_
 from benchlib.serialio import find_port, open_serial
 from benchlib.stream import StreamSplitter
 from benchlib.unicore import (
-    DAY_ONE, READ_ONLY, SignalView, UnicoreSession, blocked_reason, four_band_systems, is_read_only,
+    DAY_ONE, READ_ONLY, SignalView, UnicoreSession, blocked_reason, is_read_only,
     normalise, parse_bestnav, parse_config, parse_gsv, parse_mode, parse_obsvm, parse_versiona,
     signal_group, warnings_for,
 )
@@ -317,7 +317,7 @@ def summarise(replies: dict, out: Out) -> dict:
             out(f"   {line}")
         s[f"signals_{view.source.lower()}"] = view.to_dict()
     if views:
-        four = sorted(set().union(*(four_band_systems(v) for v in views)))
+        four = four_band(views)
         s["four_band_systems"] = four
         out("\n== Verdict")
         if four:
@@ -326,6 +326,13 @@ def summarise(replies: dict, out: Out) -> dict:
             out("   no constellation shows 4 bands right now -> try `um982.py e6-check --write` "
                 "(group 3 6 for Galileo E6, or --group \"7 0\" for BeiDou B2a)")
     return s
+
+
+def four_band(views: list[SignalView]) -> list[str]:
+    """The constellations that show all four reward bands in any of the views.
+    Only the rewarded ones count, as on the station (benchlib.rtcm.best_systems):
+    a QZSS with four bands earns no band reward."""
+    return sorted(set().union(*(rtcm.best_systems({s: v.band_list(s) for s in v.signals}) for v in views)))
 
 
 def observe_once(sess: UnicoreSession, run_dir: Path, counter: list[int]) -> list[SignalView]:
@@ -407,7 +414,7 @@ def e6_check(sess, run_dir: Path, out: Out, args, stop: StopFlag, counter: list[
     for view in views:
         for line in view.lines():
             out(f"   [{view.source}] {line}")
-    now4 = sorted(set().union(*(four_band_systems(v) for v in views))) if views else []
+    now4 = four_band(views)
     out(f"   4-band constellations now: {', '.join(now4) or 'none'}")
     res["four_band_before"] = now4
 
@@ -473,7 +480,7 @@ def e6_check(sess, run_dir: Path, out: Out, args, stop: StopFlag, counter: list[
                 union.setdefault(system, set()).update(v.band_list(system))
             if "L6" in v.band_list("Galileo"):
                 e6.append(v.source)
-        four = sorted(set().union(*(four_band_systems(v) for v in views))) if views else []
+        four = four_band(views)
         t = time.time() - start
         out(f"   t+{t:5.0f} s  E6: {'yes (' + ', '.join(e6) + ')' if e6 else 'no'}   "
             f"4-band: {', '.join(four) or 'none'}   " +
@@ -490,7 +497,7 @@ def e6_check(sess, run_dir: Path, out: Out, args, stop: StopFlag, counter: list[
         stop.clear()  # the clean-up steps below must still be offered
     res["bands_seen"] = {s: sorted(b) for s, b in union.items()}
     res["e6_first_seen_s"] = first_e6
-    res["four_band_after"] = sorted(s for s, b in union.items() if len(b & {"L1", "L2", "L5", "L6"}) >= 4)
+    res["four_band_after"] = rtcm.best_systems(union)
     out("\n== Result")
     out(f"   Galileo E6: {'seen ' + format(first_e6, '.0f') + ' s into the watch' if first_e6 is not None else 'NOT seen'}")
     for s, b in sorted(res["bands_seen"].items()):

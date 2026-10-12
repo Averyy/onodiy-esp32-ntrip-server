@@ -10,7 +10,8 @@
  * the links and buttons keep keyboard focus and text stays selectable
  * across the 1 s updates. The one button, "Check again" on the no-receiver
  * alert, carries data-act and the page's root handles its click
- * (detectClicks). The live view entry is a link that starts the window.
+ * (detectClicks); patchDetect() keeps the keyboard focus on the alert when
+ * that button goes. The live view entry is a link that starts the window.
  * Visitors without a session see the public form (names and states only).
  *
  * Every "today" figure (online, offline, the offline budget) comes from the
@@ -29,7 +30,7 @@ Views.dashboard = {
         patch(el, h('p', { class: 'loading' }, 'Waiting for the station…'));
         return;
       }
-      patch(el, isAdmin() && !s.public ? adminDashboard(s) : publicDashboard(s));
+      patchDetect(el, isAdmin() && !s.public ? adminDashboard(s) : publicDashboard(s));
     };
     detectClicks(el, render);
     render();
@@ -231,8 +232,13 @@ function onocoyNotSetUp(c) {
     h('div', { class: 'form-actions' }, link('Add your Onocoy credentials', ONOCOY_SETUP_HASH, 'btn primary small')));
 }
 
+/* A slot with no caster in it (no host, not enabled): not a caster, so not listed. */
+function emptySlot(c) {
+  return c.empty === true;
+}
+
 function castersCard(s, admin) {
-  const list = (s.casters || []).filter(c => admin ? (c.enabled || c.host || c.state !== 'disabled') : true);
+  const list = (s.casters || []).filter(c => !emptySlot(c) && (admin ? (c.enabled || c.host || c.state !== 'disabled') : true));
   return h('section', { class: 'card' + (admin ? ' wide' : '') },
     h('h2', null, 'Casters'),
     list.length ? h('div', { class: 'caster-list' }, list.map(c => admin && c.protected && c.onocoy_ready === false ?
@@ -246,7 +252,7 @@ function networkCard(s) {
   const stale = typeof n.probe_age_s === 'number' && n.probe_age_s > 600;
   const rows = [
     ['Wi-Fi', n.ssid ? n.ssid + (n.online ? '' : ' (not connected)') : 'Not set up'],
-    n.cred_trial ? ['New network', 'trying ' + (n.pending_ssid || '') + (n.cred_trial_left_s ? ', ' + fmt.dur(n.cred_trial_left_s) + ' left' : '')] :
+    n.cred_trial ? ['New network', ['trying ' + (n.pending_ssid || '') + ', ', trialLeftEl(n)]] :
       n.cred_pending ? ['New network', h('span', { class: 't-warn' }, (n.pending_ssid || '') + ' not confirmed' +
         (n.cred_reverted ? (n.cred_reverted_why === 'auth_failed' ? ' (password refused; back on the previous network)' : ' (back on the previous network)') : ''))] : null,
     !n.online && n.assoc_no_ip_s ? ['Connected without an address for', fmt.dur(n.assoc_no_ip_s)] : null,
@@ -281,11 +287,12 @@ function alertTone(a) {
 
 /*
  * "Check again" (POST /api/gnss/detect) on the no-receiver alert, on pages
- * rebuilt every refresh (the dashboard patches, the Health tab mounts): a
- * button without a listener of its own, so patch() keeps it and the
- * keyboard focus on it; the page's root handles its click (detectClicks).
- * After a request it reads "Searching…" for a few seconds, until the
- * station's own state says it searches.
+ * rebuilt every refresh (the dashboard and the Health tab, both through
+ * patchDetect()): a button without a listener of its own, so patch() keeps
+ * it and the keyboard focus on it; the page's root handles its click
+ * (detectClicks). After a request it reads "Searching…" for a few seconds,
+ * until the station's own state says it searches; then the button goes,
+ * and the keyboard focus moves to the alert's text, which says so.
  */
 const DETECT = { askedAt: 0, busy: false };
 
@@ -297,6 +304,23 @@ function detectButton(a) {
   const waiting = detectWaiting();
   return h('div', { class: 'form-actions' }, h('button', { type: 'button', class: 'btn small', 'data-act': 'detect',
     'aria-disabled': waiting ? 'true' : null }, waiting ? 'Searching…' : 'Check again'));
+}
+
+/**
+ * patch(el, ...kids) for a page that may show "Check again": when the button
+ * had the keyboard focus and is gone afterwards, the focus moves to a new
+ * "Check again" if there is one (the alert moved), else to the alert's text
+ * (focusable from script only), never to the page's body.
+ */
+function patchDetect(el, ...kids) {
+  const a = doc.activeElement;
+  const had = !!(a && a.matches && a.matches('[data-act="detect"]') && el.contains(a));
+  patch(el, ...kids);
+  if (had && !a.isConnected) {
+    const next = el.querySelector('[data-act="detect"]') || el.querySelector('[data-detect-text]');
+    if (next) next.focus();
+  }
+  return el;
 }
 
 /** Handle "Check again" clicks inside root; refresh() redraws the page at once. */
@@ -330,8 +354,11 @@ function alertList(alerts, opts) {
   const detect = !!(opts && opts.detect);
   return h('div', { class: 'stack' }, alerts.map(a => {
     const t = alertText(a);
-    const check = detect && a.source === 'station' && a.id === 'no_receiver' ? detectButton(a) : null;
-    return msg(alertTone(a), h('strong', null, t[0]), t[1] ? h('div', { class: 'small' }, t[1]) : null, check);
+    const noRx = detect && a.source === 'station' && a.id === 'no_receiver';
+    const check = noRx ? detectButton(a) : null;
+    /* The text that says whether it searches takes the focus when "Check again" goes (patchDetect). */
+    return msg(alertTone(a), h('strong', null, t[0]), t[1] ? h('div', { class: 'small', tabindex: noRx ? '-1' : null,
+      'data-detect-text': noRx ? '' : null }, t[1]) : null, check);
   }));
 }
 

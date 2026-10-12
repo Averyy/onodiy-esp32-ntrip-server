@@ -106,6 +106,11 @@ function bootWhen(x) {
   return 'Restart ' + (x.boot_no - 1) + ' after power-on';
 }
 
+/*
+ * Patched in place, not rebuilt (patchDetect: no form controls and no
+ * element with a listener of its own here), so the keyboard focus, on "Check
+ * again" or a table's scroll box, and a text selection survive the 5 s poll.
+ */
 function healthTab(box) {
   let lastHl = null;
   const render = hl => {
@@ -119,7 +124,7 @@ function healthTab(box) {
     const alerts = Array.isArray(st.alerts) ? st.alerts : (hl.alerts || []).map(a => ({ id: a, source: 'health' }));
     const plan = restartPlanText(hl);
     const tone = healthTone(hl.level);
-    mount(box, h('div', { class: 'grid' },
+    patchDetect(box, h('div', { class: 'grid' },
       h('section', { class: 'card' },
         h('h2', null, 'Health', badge(lbl(L.health, hl.level), tone)),
         alerts.length ? alertList(alerts, { detect: true }) :
@@ -249,8 +254,12 @@ function availabilityTab(box) {
     const day = av.today || {};
     const days = av.history || [];
     const sod = av.utc_second_of_day;
-    const dayRows = slots.map((s, i) => [s.name || 'Slot ' + (s.slot + 1), fmt.dur((day.up_s || [])[i]), fmt.dur((day.down_s || [])[i]),
-      fmt.dur((day.planned_s || [])[i]), fmt.num((day.reconnects || [])[i])]);
+    /* An empty slot (no caster in it) has a row only for what it did earlier today, under its number. */
+    const figs = ['up_s', 'down_s', 'planned_s', 'reconnects'];
+    const dayRows = slots.map((s, i) => [s, i])
+      .filter(x => !x[0].empty || figs.some(k => (day[k] || [])[x[1]]))
+      .map(x => [x[0].empty ? 'Slot ' + (x[0].slot + 1) : x[0].name || 'Slot ' + (x[0].slot + 1), fmt.dur((day.up_s || [])[x[1]]),
+        fmt.dur((day.down_s || [])[x[1]]), fmt.dur((day.planned_s || [])[x[1]]), fmt.num((day.reconnects || [])[x[1]])]);
     /* Onocoy's figures only while its slot is set up and on: numbers for a slot that cannot stream mislead. */
     const counting = prot && p.onocoy_ready !== false && p.enabled !== false;
     const sofar = p.graced_uptime_so_far_permille;
@@ -279,7 +288,7 @@ function availabilityTab(box) {
         ]),
         h('p', { class: 'muted small foot' }, 'Offline counts seconds a caster should have streamed but did not; planned is the part caused by receiver configuration and updates, and by restarts you started (until each caster is back, at most a couple of minutes after the restart). Information only.')),
       h('section', { class: 'card' }, h('h2', null, 'Casters today'),
-        slots.length ? table(['Caster', 'Online', 'Offline', 'Planned', 'Reconnects'], dayRows, { num: [1, 2, 3, 4], stack: true, label: 'Casters today' }) :
+        dayRows.length ? table(['Caster', 'Online', 'Offline', 'Planned', 'Reconnects'], dayRows, { num: [1, 2, 3, 4], stack: true, label: 'Casters today' }) :
           h('p', { class: 'muted' }, 'No casters.')),
       h('section', { class: 'card wide' }, h('h2', null, 'Last 30 days'),
         days.length ? table(['Day (UTC)', prot ? 'Onocoy offline' : 'Offline (slot 1)', 'Planned', 'Reconnects', 'Powered off'],
@@ -305,6 +314,7 @@ function availabilityTab(box) {
 /* ---- Logs ------------------------------------------------------------------ */
 
 const LOG_KEEP = 200000; /* characters kept in the view */
+const LOG_LEVELS = ['none', 'error', 'warn', 'info', 'debug', 'verbose'];
 
 /*
  * The log view reads over HTTP up to the newest line, then subscribes to the
@@ -342,6 +352,7 @@ function logsTab(box) {
     try {
       for (let i = 0; i < 64; i++) {
         const r = await api('GET', '/api/logs?cursor=' + cursor + (prev ? '&boot=prev' : ''));
+        if (r.level_max) offerLevels(r.level_max);
         if (r.text) append(r.text, r.gap);
         cursor = r.cursor;
         if (!r.more) break;
@@ -412,7 +423,22 @@ function logsTab(box) {
   const dl = h('a', { class: 'btn small', href: '/api/logs?format=text', download: '' }, 'Download log');
 
   const tag = textInput('*', { maxlength: 15, 'aria-label': 'Tag' });
-  const level = selectInput([['none', 'none'], ['error', 'error'], ['warn', 'warn'], ['info', 'info'], ['debug', 'debug'], ['verbose', 'verbose']], 'info');
+  const level = selectInput(LOG_LEVELS.map(l => [l, l]), 'info');
+  const levelNote = h('p', { class: 'muted small', hidden: true });
+  let levelMax = null;
+  /* Only the levels this build can show at all (level_max of GET /api/logs, the build's maximum): the station refuses higher ones. */
+  function offerLevels(max) {
+    const top = LOG_LEVELS.indexOf(max);
+    if (top < 0 || max === levelMax) return;
+    levelMax = max;
+    const allowed = LOG_LEVELS.slice(0, top + 1);
+    const pick = allowed.indexOf(level.value) >= 0 ? level.value : allowed.indexOf('info') >= 0 ? 'info' : max;
+    clear(level);
+    for (const l of allowed) level.append(h('option', { value: l, selected: l === pick }, l));
+    const debug = LOG_LEVELS.indexOf('debug');
+    levelNote.textContent = top < debug ? 'Debug and verbose need a debug build.' : top === debug ? 'Verbose needs a build with verbose logging.' : '';
+    levelNote.hidden = !levelNote.textContent;
+  }
   const lvErr = errBox();
   const setBtn = btn('Set', async () => {
     const t = tag.value.trim();
@@ -476,6 +502,7 @@ function logsTab(box) {
       h('h2', null, 'Log level'),
       h('p', { class: 'muted small' }, 'Per component tag, until the next restart. Debug output costs memory and console time; set it back when done.'),
       h('div', { class: 'cols c3' }, field('Tag', tag).el, field('Level', level).el, h('div', { class: 'field' }, h('span', { class: 'lbl' }, ' '), setBtn)),
+      levelNote,
       lvErr),
     capCard);
   restart();

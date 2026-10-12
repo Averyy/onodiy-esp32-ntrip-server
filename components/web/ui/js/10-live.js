@@ -128,16 +128,24 @@ function outputRate() {
 }
 
 /*
- * Reconnecting: the delay doubles from 1 s to 15 s and starts over only
- * after a connection that lived STABLE_MS. A handshake the station refuses
- * (no session, public status off, too many clients) or a connection it
- * closes at once never resets it, so a refused or evicted page backs off
- * instead of retrying every second. After a refusal the page asks
- * GET /api/session once: a lost session shows the login, a public view
- * whose public status was turned off shows the login page.
+ * Reconnecting: the delay doubles from 1 s to 15 s, each one drawn within
+ * +-20 % (WS_JITTER) so pages that lost the station together do not all
+ * come back in the same second, and starts over only after a connection
+ * that lived WS_STABLE_MS. A handshake the station refuses (no session,
+ * public status off, too many clients) or a connection it closes at once
+ * never resets it, so a refused or evicted page backs off instead of
+ * retrying every second: at most 8 handshakes in its first minute, then one
+ * every 12 to 18 s. Only live.stop() starts the delay over without a stable
+ * connection, and every caller of stop() leaves this page for another one
+ * (the login, the setup wizard, the restart overlay): start() again follows
+ * a user's action (logging in, "View the status") or a page load, never a
+ * refusal. After a refusal the page asks GET /api/session once: a lost
+ * session shows the login, a public view whose public status was turned off
+ * shows the login page and stops (no more handshakes or polls).
  */
 const WS_STABLE_MS = 10000;
 const WS_RETRY_MAX_MS = 15000;
+const WS_JITTER = 0.2;
 
 const live = {
   ws: null,
@@ -148,12 +156,14 @@ const live = {
   lastPing: 0,
   retryMs: 1000,
   reconnectAt: 0,
+  retryTimer: 0,       /* the reconnect at reconnectAt */
   lastPoll: 0,
   polling: false,
   tick: 0,
   running: false,
   openedAt: 0,         /* when the current socket opened (0 = not open) */
   checked: false,      /* GET /api/session asked since the last stable connection */
+  checking: false,     /* that request is on its way */
 
   start() {
     if (this.running) return;
@@ -167,6 +177,7 @@ const live = {
     this.retryMs = 1000;
     this.checked = false;
     clearInterval(this.tick);
+    clearTimeout(this.retryTimer);
     if (this.ws) {
       const ws = this.ws;
       this.ws = null;
@@ -221,7 +232,8 @@ const live = {
       const opened = this.openedAt;
       this.openedAt = 0;
       if (ev.code === 4001) {
-        bus.emit('unauthorized');
+        bus.emit('unauthorized');   /* a page with a session shows the login (it stops this) */
+        if (this.running) this.scheduleReconnect();
         return;
       }
       if (ev.code === 1012) {
@@ -234,9 +246,10 @@ const live = {
         this.retryMs = 1000;
         this.checked = false;
       }
-      /* Refused at the handshake, or public status turned off: is the session
-       * (or the public view) still there? Asked once, not on every retry. */
-      if (!opened || ev.code === 1008) this.checkSession();
+      /* Refused at the handshake: is the session (or the public view) still
+       * there? Asked once, not on every retry. Public status turned off (1008)
+       * is asked about even after an earlier refusal was: it is news. */
+      if (!opened || ev.code === 1008) this.checkSession(ev.code === 1008);
       this.scheduleReconnect();
     };
     ws.onerror = () => {
@@ -247,21 +260,34 @@ const live = {
   scheduleReconnect() {
     if (!this.running) return;
     this.setState('poll');
-    this.reconnectAt = Date.now() + this.retryMs;
+    const delay = Math.round(this.retryMs * (1 - WS_JITTER + 2 * WS_JITTER * Math.random()));
+    this.reconnectAt = Date.now() + delay;
     this.retryMs = Math.min(this.retryMs * 2, WS_RETRY_MAX_MS);
+    /* On time, not at the next once-a-second watch(). */
+    clearTimeout(this.retryTimer);
+    this.retryTimer = setTimeout(() => this.reconnectIfDue(), delay);
+  },
+
+  /* A hidden tab with a session waits until it is shown (see watch()). */
+  reconnectIfDue() {
+    if (!this.ws && this.running && Date.now() >= this.reconnectAt && (visible() || !isAdmin())) this.connect();
   },
 
   /* After a refused handshake: a page whose session is gone shows the login;
-   * a public view whose public status was turned off shows the login page. */
-  async checkSession() {
-    if (this.checked) return;
+   * a public view whose public status was turned off shows the login page.
+   * force: ask even when this refusal streak was asked about already. */
+  async checkSession(force) {
+    if (this.checking || (this.checked && !force)) return;
     this.checked = true;
+    this.checking = true;
     let s;
     try {
       s = await api('GET', '/api/session', undefined, { quiet401: true, timeout: 4000 });
     } catch (e) {
       this.checked = false;   /* no answer: ask again after the next refusal */
       return;
+    } finally {
+      this.checking = false;
     }
     if (!this.running) return;
     if (isAdmin() && !s.authenticated) {
@@ -362,8 +388,8 @@ const live = {
         /* ignore */
       }
       this.scheduleReconnect();
-    } else if (!ws && this.running && now >= this.reconnectAt && (visible() || !isAdmin())) {
-      this.connect();
+    } else if (!ws) {
+      this.reconnectIfDue();
     }
     /* A hidden tab with a session neither polls nor reconnects: every
      * request would extend the session, and a forgotten tab must not stay
@@ -389,8 +415,13 @@ const live = {
       }
     } catch (e) {
       if (e instanceof ApiError && e.status === 0 && this.state !== 'ws') bus.emit('live', 'down');
-      /* GET /api/status answers 403 only to a page without a session while public status is off. */
-      if (e instanceof ApiError && e.status === 403) sessionLost();
+      /* GET /api/status answers 403 only to a page without a session while
+       * public status is off: an admin page lost its session, a public view
+       * its public status (the session check stops it). */
+      if (e instanceof ApiError && e.status === 403) {
+        if (isAdmin()) sessionLost();
+        else if (S.publicView) this.checkSession(true);
+      }
     } finally {
       this.polling = false;
     }
