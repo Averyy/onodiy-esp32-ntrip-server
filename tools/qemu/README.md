@@ -181,3 +181,71 @@ with timing (none when four QEMUs shared the machine, none under gdb),
 which points at a race inside QEMU rather than at anything the firmware
 does: the guest code is the same in every run. On macOS no crash was seen
 either way.
+
+## Replayed RTCM and a local caster
+
+`e2e.py` runs the whole data path in QEMU: recorded RTCM into UART1, through
+the firmware, out to a caster on this computer.
+
+```sh
+tools/qemu/run.sh --build-only
+uv run tools/qemu/e2e.py                       # both scenarios; logs in build-qemu/e2e/
+uv run tools/qemu/e2e.py --scenario stream --caster docker
+```
+
+Like `smoke.py` it needs the ESP-IDF environment and uses only the standard
+library (it imports `tools/bench/rtcm_replay.py`, `fake_caster.py` and their
+`benchlib` modules by path). Nothing leaves this computer: the replay and
+the casters listen on 127.0.0.1, which the emulated station reaches as
+10.0.2.2.
+
+It replays the fixture (`--fixture`: an RTCM file or a `capture.py` run;
+default `test/fixtures/rtcm/centipede_LAX_30ep.rtcm3`, looped at its own one
+epoch per second) into UART1 from the first boot (`--uart1 connect:PORT`), so the
+station finds a streaming receiver by listening, sets the admin password
+and, once the station's start-up receiver query is over (it pauses the
+casters while it runs), configures slot 1: `Bench`, host `10.0.2.2`, the
+caster's port, NTRIP 1.0, mountpoint `BENCH`, a made-up password, the
+standard profile. PASS or FAIL for each of these (exit status 1 if any
+failed):
+
+- scenario `stream`: slot 1 streaming within 60 s (`ICY 200 OK` from the
+  fake caster, `OK` from the BKG caster with `--caster docker`);
+  `/api/gnss/signals` lists the fixture's constellations with their bands,
+  as computed from the fixture with `benchlib` (NavIC listed without a band:
+  the firmware maps none for it); `/api/health` `hub.frames_in` grows by at
+  least five epochs' worth of frames in 10 s and the slot's `epochs_sent`
+  rises; the caster's record holds at least 60 s of frames (`--observe`,
+  default 75): every one CRC-valid and byte-identical to a fixture frame, in
+  fixture order from the first epoch boundary on (modulo the loop), fixture
+  frames the station never forwards skipped (the SBAS numbers 1101-1107),
+  nothing between frames, a cut frame only at the very end. With
+  `--caster docker` the record is what a `GET /BENCH` client receives from
+  the BKG caster (`tools/bench/docker/bkg-caster`, built on first use);
+  bytes in front of its first frame are allowed there, because that caster
+  starts a new client inside older data;
+- scenario `onocoy-guard`: slot 0 as a test-Onocoy slot (`test_onocoy`,
+  only in builds with test-Onocoy slots: on a firmware without them it
+  prints SKIP and passes) against a second fake caster scripted with
+  Onocoy's termination reasons: a credential in use on credentials that
+  never worked stops the slot at once; the waits after a rejected login,
+  a login block and an in-use reply (each delay within [entry, 1.2 x entry]
+  plus 2 s for QEMU, read from `next_retry_s` and from the connection
+  times); sessions the caster ends quickly (and a `Device reconnected` line)
+  stop the slot after a score of 3, with 5 s then 10 s between them; banned
+  and duplicate reports stop it at once; a save and
+  `POST /api/casters/0/retry` clear a stop, a reboot does not; the journal
+  has the `caster_stop` records. `--long` adds the 5-minute wait after a
+  rejected login and the whole in-use retry ladder (about 8 minutes more).
+  It runs before `stream`: with nothing answering, the station repeats its
+  receiver query every 10 minutes and the casters pause while it runs; a
+  wait that such a query interrupted is noted and not judged;
+- throughout: `smoke.py`'s console checks (no panic, abort, stack overflow,
+  failed assert, backtrace or task watchdog report, no reboot loop, no GNSS
+  ladder restart; the reboot the scenario asks for is allowed).
+
+Everything lands in `--out`: `console.log`, `e2e.log` (the run's events),
+`replay/` (what the firmware sent on UART1), `caster/` and `guard/` (each
+caster's `connections.jsonl` and records), the HTTP answers and
+`summary.txt`. The `qemu-smoke` CI job runs it after the smoke test with
+`--out qemu-e2e --scenario all` and uploads that directory too.

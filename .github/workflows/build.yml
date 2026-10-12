@@ -230,6 +230,13 @@ jobs:
           . "$IDF_PATH/export.sh"
           uv run tools/qemu/smoke.py --out qemu-smoke
 
+      # Recorded RTCM through the firmware to local casters (tools/qemu/README.md).
+      - name: End to end
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          uv run tools/qemu/e2e.py --out qemu-e2e --scenario all
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -239,6 +246,7 @@ jobs:
           path: |
             qemu-build.log
             qemu-smoke/
+            qemu-e2e/
 
   # A tag vX.Y.Z[-PRE] becomes a GitHub Release with what stations download:
   # the app image the firmware job built as that release version, the receiver

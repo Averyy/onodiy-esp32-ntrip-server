@@ -53,6 +53,9 @@ On macOS the ports appear as `/dev/cu.usbmodem*`, `/dev/cu.usbserial-*` or
 | `um982.py ... --write` | the commands you name, after you type `yes` | prints the exact text first; never resent automatically |
 | `station.py` | (HTTP only) | GET requests plus log in/out; never changes settings |
 | `bootprobe.py --i-understand` | `VERSIONA`, the soft restart, the bootloader stop key `T@`, then at the boot menu only `\r\n` and menu item `6` (soft reset cpu), after you type `yes` | restarts the receiver; every write passes a fixed allow-list |
+| `rtcm_replay.py` | nothing (no serial port) | TCP only, local: serves a recorded stream to one client at a time (QEMU's UART1) and logs what the client sends back |
+| `fake_caster.py` | nothing (no serial port) | TCP only, local: a scripted NTRIP caster listening on 127.0.0.1; it only answers |
+| `ntrip_timing.py` | nothing (no serial port) | TCP only: one NTRIP client (GET) to the caster you name; there is no default host |
 
 Never sent by any tool, even with `--write`: `FRESET`, `RESET` with
 parameters and any firmware/bootloader command. Bootloader keys are sent
@@ -326,11 +329,148 @@ The `send` replies also show whether each message type is accepted
 
 | File | Contents |
 |---|---|
-| `ports.py`, `capture.py`, `um982.py`, `rtcm_inspect.py`, `station.py`, `bootprobe.py` | the tools |
+| `ports.py`, `capture.py`, `um982.py`, `rtcm_inspect.py`, `station.py`, `bootprobe.py`, `rtcm_replay.py`, `fake_caster.py`, `ntrip_timing.py` | the tools |
 | `benchlib/rtcm.py` | RTCM 3 framing, CRC-24Q, MSM/1005/1006/1033/1230 decoders, band mapping |
 | `benchlib/stream.py` | splits a byte stream into RTCM frames, text lines (checksum-checked), binary logs and junk |
 | `benchlib/rtcmstats.py` | counts, rates, MSM content and the Onocoy checks |
 | `benchlib/unicore.py` | receiver command rules (read-only list, block list), the command session, reply parsers |
 | `benchlib/serialio.py` | port listing, identification, listen-only probing, safe opening |
 | `benchlib/common.py` | run directories, rotating files, Ctrl-C handling |
-| `tests/` | pytest; RTCM test frames are built field by field from the public layouts and cross-checked with pyrtcm; `bootprobe.py` runs against a scripted receiver over a socketpair |
+| `benchlib/replay.py` | replay schedules: capture runs timed by their `.idx`, RTCM files grouped into epochs by MSM epoch time, looping on a continuous time base |
+| `benchlib/ntrip.py` | NTRIP helpers for the local tools: chunked transfer coding, request parsing with the password masked, a frame recorder (CRC, bytes outside frames, cut end) |
+| `docker/bkg-caster/` | Dockerfile, configuration and scripts for the optional BKG caster test peer |
+| `tests/` | pytest; RTCM test frames are built field by field from the public layouts and cross-checked with pyrtcm; `bootprobe.py` runs against a scripted receiver over a socketpair; the replay, fake caster and timing tools run over local sockets; `test_docker_caster.py` only with `RUN_DOCKER_TESTS=1` |
+
+`rtcm_replay.py`, `fake_caster.py`, `ntrip_timing.py` and the `benchlib`
+modules they use (`rtcm`, `stream`, `common`, `replay`, `ntrip`) need only
+the Python standard library, so `tools/qemu/e2e.py` can import them without
+this project's environment.
+
+## Replaying RTCM into QEMU
+
+`rtcm_replay.py` stands in for the receiver on the firmware's UART1 when the
+firmware runs in QEMU (`tools/qemu/README.md`). It serves either a
+`capture.py` run (every `receiver-NNNN.bin` part in order, each read at its
+`.idx` time) or a plain RTCM 3 file, grouped into epochs: a new epoch at the
+first frame after an MSM with the multiple-message bit clear, or at an MSM
+whose epoch time differs from the one its constellation already has; one
+epoch per burst, timed by the MSM epoch times.
+
+```sh
+cd tools/bench
+uv run rtcm_replay.py --listen 127.0.0.1:5600 ../../test/fixtures/rtcm/centipede_LAX_30ep.rtcm3 --loop
+../qemu/run.sh --uart1 connect:5600            # in a second terminal, from the same directory
+```
+
+- One client at a time; it keeps listening after a client leaves (QEMU's
+  `connect` mode reconnects every second) and starts the schedule from the
+  beginning for each connection. Start the replay first so the firmware
+  hears the stream from its first boot.
+- `--loop` starts again after the last burst on a continuous time base (the
+  gap at the seam is a normal one); `--speed 2` halves every gap; `--baud N`
+  sends each burst at that line rate (10 bits per byte) instead of all at
+  once.
+- Everything the firmware sends back (its receiver queries) goes to
+  `from-firmware.bin` and, timestamped, to `replay.log`, with each loop's
+  counts. Ctrl-C stops it.
+
+The replay has no receiver behind it: it never answers a query, so the
+firmware streams what it hears and leaves the receiver's configuration
+alone (an identity query that gets no answer pauses the casters for a few
+seconds while it runs). The Centipede fixtures are test inputs, not a
+correction service (see `test/fixtures/README.md`): replay them only to
+local casters.
+
+## A local fake caster
+
+`fake_caster.py` is a caster on this computer for testing the station's
+caster client: it answers each source with a reply row you pick and checks
+what the source sends.
+
+```sh
+uv run fake_caster.py rows                                     # every reply row and its exact bytes
+uv run fake_caster.py serve --port 2101 --mount BENCH --password bench-pass-1 --record
+uv run fake_caster.py serve --port 2101 --reply naomi_error
+uv run fake_caster.py serve --port 2102 --sequence "icy_ok:kick=5:text=onocoy_reconnected,onocoy_in_use"
+uv run fake_caster.py report bench-logs/<serve run>            # connection table with the gaps
+```
+
+- Point a slot at it: host `10.0.2.2` from QEMU (the computer's
+  127.0.0.1), or this computer's address from a board on the same network
+  (then `--host 0.0.0.0`).
+- Rows: the success lines (`icy_ok`, `ok`, `http_200`, `http_1_0_200`; the
+  session is checked frame by frame, NTRIP 2.0 chunked bodies are decoded),
+  the HTTP errors, `sourcetable`, the `ERROR - ...` lines, refusals in plain
+  text and HTML (`banned`, `sandbox`), misbehaving casters (`trickle`,
+  `no_reply`, `close_no_newline`, `close_silent`, `overlong`, `garbage`) and
+  Onocoy's termination reasons (`onocoy_login_blocked`, `onocoy_in_use`,
+  `onocoy_parallel`, `onocoy_reconnected`, `onocoy_duplicate`,
+  `onocoy_credential_banned`, `onocoy_auth_failed`, `onocoy_reauth_failed`,
+  `onocoy_invalid_headers`). Those are sent as
+  `Error <n> <reason> [onocoy naomi v2.5.95-fake]` and a close, the only
+  error form seen from that caster so far (the numbers are made up);
+  `--onocoy-form plain_line` sends the reason alone, `http_401` an HTTP 401
+  with the reason as its body.
+- `--sequence`: one entry per source connection, the last one repeating.
+  `kick=S` ends an accepted session S seconds after the reply, after the
+  line of the `text=` row if given; `record` saves that session.
+- `--mount` and `--password` refuse other mountpoints and passwords
+  (`bad_mountpoint`/`bad_password`, or HTTP 404/401 for NTRIP 2.0) before
+  the sequence is consulted. `--relay` serves `GET /<mount>` clients
+  (NTRIP 1.0 and 2.0) the frames of the current source.
+- The run directory: `connections.jsonl` (one line per connection with
+  unix and monotonic times, the request line with the password masked, the
+  agent, the reply row and bytes, bytes in, frames, CRC failures, bytes
+  outside frames, a partial frame at the end, who closed), `caster.log`,
+  and with `--record` a `record-NNN.rtcm3` and `record-NNN.json` per
+  session. No password is ever written.
+
+## Measuring latency
+
+`ntrip_timing.py capture` reads a mountpoint as an NTRIP client and saves
+it in `capture.py`'s format (`stream-NNNN.bin`, `stream-NNNN.idx`, NTRIP 2.0
+chunking removed) plus the caster's reply header; `report` then gives, for
+every epoch's first MSM frame, its arrival time minus its MSM epoch time
+per constellation and overall (p50, p95, max) and `PASS p95 < 1000 ms` or
+`FAIL`. Keep this computer's clock synchronised: the figure is only as good
+as its clock.
+
+```sh
+uv run fake_caster.py serve --port 2101 --mount BENCH --relay      # the station streams to it
+uv run ntrip_timing.py capture --host 127.0.0.1 --port 2101 --mount BENCH --duration 120
+uv run ntrip_timing.py report bench-logs/<timing run>
+uv run ntrip_timing.py report bench-logs/<capture.py run> --json   # a COM2 mirror: the receiver's own delay
+```
+
+There is no default host: name the caster. For a caster that lets you
+read your own mountpoint back, or any other mountpoint, give the user with
+`--user` and the password in an environment variable (`--password-env
+VAR`) or at a prompt (`--password-prompt`); it is never taken from the
+command line, printed or written to the run directory. `--ntrip-version 2`
+and `--tls` as the caster needs. Epoch times: GPS, Galileo, QZSS time of
+week, BeiDou + 14 s, GLONASS Moscow day time, GPS - UTC = 18 s.
+
+## A real caster in Docker
+
+`docker/bkg-caster/` builds BKG's Standard NtripCaster (NTRIP 1.0) from
+[goblimey/ntripcaster](https://github.com/goblimey/ntripcaster) at a pinned
+commit, the way that project's README describes, with our own configuration
+(mountpoint `BENCH`, source password `bench-src`, open to every client).
+Optional: nothing else needs it.
+
+```sh
+docker/bkg-caster/build.sh                       # image onocoydiy-bench-bkg-caster
+docker/bkg-caster/run.sh --port 2101             # on 127.0.0.1:2101; Ctrl-C stops it
+RUN_DOCKER_TESTS=1 uv run --locked pytest tests/test_docker_caster.py
+uv run ../qemu/e2e.py --scenario stream --caster docker
+```
+
+What this build does (recorded on 2026-10-12, `tests/test_docker_caster.py`):
+an NTRIP 1.0 source gets `OK`; one whose agent is not an NTRIP agent (such
+as `curl/8.5.0`) gets `Not authorized (no NTRIP source)`; a wrong password
+`ERROR - Bad Password`; a second source on a held mountpoint
+`ERROR - Mount Point Taken or Invalid` (each error line followed by an
+empty line). Source passwords of 10 characters or more are always
+refused with `ERROR - Bad Password`, hence the short one. A new client
+starts inside older data and misses the first few frames after it joins.
+Its log: `docker exec <container> tail -f /usr/local/ntripcaster/logs/ntripcaster.log`.
