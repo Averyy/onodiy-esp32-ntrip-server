@@ -82,6 +82,51 @@ TEST_CASE("obs: Galileo E1/E5a/E5b/E6 is four bands and the best constellation",
     TEST_ASSERT_FALSE(v.e6_lost);
 }
 
+TEST_CASE("obs: the best constellation counts only GPS, GLONASS, Galileo and BeiDou; ties keep message order",
+          "[gnss_obs]")
+{
+    static const uint8_t qzs[] = { 2, 9, 15, 22 };          /* L1, L6, L2, L5: four bands */
+    static const uint8_t gal[] = { 2, 14, 22 };             /* E1, E5b, E5a: three */
+    static const uint8_t irn[] = { 22 };                    /* NavIC L5 */
+    obs_core_init(&s_core);
+    gnss_rtcm3_msm_t h = msm(GNSS_SYS_GALILEO, 1000, true, 0x3F, sigs(gal, 3));
+    obs_core_feed_msm(&s_core, &h, NULL, 100);
+    h = msm(GNSS_SYS_QZSS, 1000, true, 0x03, sigs(qzs, 4));
+    obs_core_feed_msm(&s_core, &h, NULL, 100);
+    h = msm(GNSS_SYS_NAVIC, 1000, false, 0x07, sigs(irn, 1));
+    obs_core_feed_msm(&s_core, &h, NULL, 100);
+
+    obs_core_view_t v;
+    obs_core_view(&s_core, 200, &v);
+    TEST_ASSERT_EQUAL_UINT8(4, v.sys[GNSS_SYS_QZSS].bands);
+    TEST_ASSERT_TRUE(v.sys[GNSS_SYS_NAVIC].present);
+    TEST_ASSERT_EQUAL_HEX8(1u << GNSS_BAND_L5, v.sys[GNSS_SYS_NAVIC].band_mask);
+    TEST_ASSERT_EQUAL(GNSS_SYS_GALILEO, v.best_sys);
+    TEST_ASSERT_EQUAL_UINT8(3, v.best_bands);
+
+    /* A tie (GPS and BeiDou with three bands each) keeps the first in
+     * message order: GPS. */
+    static const uint8_t gps[] = { 2, 10, 22 };
+    static const uint8_t bds[] = { 2, 8, 14 };
+    obs_core_init(&s_core);
+    h = msm(GNSS_SYS_BEIDOU, 1000, true, 0x0F, sigs(bds, 3));
+    obs_core_feed_msm(&s_core, &h, NULL, 100);
+    h = msm(GNSS_SYS_GPS, 1000, false, 0x0F, sigs(gps, 3));
+    obs_core_feed_msm(&s_core, &h, NULL, 100);
+    obs_core_view(&s_core, 200, &v);
+    TEST_ASSERT_EQUAL(GNSS_SYS_GPS, v.best_sys);
+    TEST_ASSERT_EQUAL_UINT8(3, v.best_bands);
+
+    /* Only unrewarded constellations: no best one. */
+    obs_core_init(&s_core);
+    h = msm(GNSS_SYS_QZSS, 1000, false, 0x03, sigs(qzs, 4));
+    obs_core_feed_msm(&s_core, &h, NULL, 100);
+    obs_core_view(&s_core, 200, &v);
+    TEST_ASSERT_TRUE(v.sys[GNSS_SYS_QZSS].present);
+    TEST_ASSERT_EQUAL(GNSS_SYS_GPS, v.best_sys);
+    TEST_ASSERT_EQUAL_UINT8(0, v.best_bands);
+}
+
 TEST_CASE("obs: GPS time of the latest GPS epoch, for the ledger's clock", "[gnss_obs]")
 {
     obs_core_init(&s_core);

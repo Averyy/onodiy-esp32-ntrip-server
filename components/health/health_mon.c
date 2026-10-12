@@ -240,10 +240,26 @@ bool hm_slot_down(const hm_slot_in_t *in)
     }
 }
 
-bool hm_protected_down(bool enabled, bool protected_slot, uint8_t state)
+bool hm_fail_is_caster_reply(uint8_t reason)
+{
+    switch (reason) {
+    case HM_FAIL_AUTH:
+    case HM_FAIL_LOGIN_BLOCKED:
+    case HM_FAIL_IN_USE:
+    case HM_FAIL_REPLACED:
+    case HM_FAIL_BANNED:
+    case HM_FAIL_MOUNT_BUSY:
+    case HM_FAIL_CONFIG:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool hm_protected_down(bool enabled, bool protected_slot, uint8_t state, uint8_t reason)
 {
     return enabled && protected_slot && state != HM_CST_STREAMING && state != HM_CST_PAUSED &&
-           state != HM_CST_STOPPED;
+           state != HM_CST_STOPPED && !hm_fail_is_caster_reply(reason);
 }
 
 /* ---- debounce ----------------------------------------------------------------- */

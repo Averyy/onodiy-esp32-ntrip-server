@@ -69,7 +69,7 @@ void rtcm_epoch_force_new(rtcm_epoch_t *e)
 }
 
 uint32_t rtcm_epoch_assign(rtcm_epoch_t *e, const uint8_t *frame, size_t len, uint16_t msg_type,
-                           uint32_t now_ms, rtcm_epoch_start_t *start)
+                           uint32_t now_ms, rtcm_epoch_start_t *start, bool *unsure)
 {
     rtcm_msm_head_t msm;
     bool is_msm = rtcm_msm_head(frame, len, msg_type, &msm);
@@ -81,7 +81,7 @@ uint32_t rtcm_epoch_assign(rtcm_epoch_t *e, const uint8_t *frame, size_t len, ui
         why = RTCM_EPOCH_START_MMB;
     } else if (is_msm && other_time(e, &msm)) {
         why = RTCM_EPOCH_START_TIME;
-    } else if (e->msm_open && (uint32_t)(now_ms - e->last_rx_ms) >= e->gap_ms) {
+    } else if (((e->msm_open && !is_msm) || e->unsure) && (uint32_t)(now_ms - e->last_rx_ms) >= e->gap_ms) {
         why = RTCM_EPOCH_START_GAP;
     }
 
@@ -91,6 +91,7 @@ uint32_t rtcm_epoch_assign(rtcm_epoch_t *e, const uint8_t *frame, size_t len, ui
         e->force_new = false;
         e->terminated = false;
         e->msm_open = false;
+        e->unsure = why == RTCM_EPOCH_START_FIRST;
         e->time_mask = 0;
         e->epochs++;
         if (why == RTCM_EPOCH_START_MMB) {
@@ -115,6 +116,9 @@ uint32_t rtcm_epoch_assign(rtcm_epoch_t *e, const uint8_t *frame, size_t len, ui
     e->last_rx_ms = now_ms;
     if (start != NULL) {
         *start = why;
+    }
+    if (unsure != NULL) {
+        *unsure = e->unsure;
     }
     return e->epoch;
 }

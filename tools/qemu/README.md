@@ -244,8 +244,9 @@ the firmware, out to a caster on this computer.
 
 ```sh
 tools/qemu/run.sh --build-only
-uv run tools/qemu/e2e.py                       # both scenarios; logs in build-qemu/e2e/
+uv run tools/qemu/e2e.py                       # every scenario; logs in build-qemu/e2e/
 uv run tools/qemu/e2e.py --scenario stream --caster docker
+uv run tools/qemu/e2e.py --scenario signal-test
 ```
 
 Like `smoke.py` it needs the ESP-IDF environment and uses only the standard
@@ -258,26 +259,36 @@ It replays the fixture (`--fixture`: an RTCM file or a `capture.py` run;
 default `test/fixtures/rtcm/centipede_LAX_30ep.rtcm3`, looped at its own one
 epoch per second) into UART1 from the first boot (`--uart1 connect:PORT`), so the
 station finds a streaming receiver by listening, sets the admin password
-and, once the station's start-up receiver query is over (it pauses the
-casters while it runs), configures slot 1: `Bench`, host `10.0.2.2`, the
-caster's port, NTRIP 1.0, mountpoint `BENCH`, a made-up password, the
-standard profile. PASS or FAIL for each of these (exit status 1 if any
-failed):
+and, as soon as the station streams, configures slot 1: `Bench`, host
+`10.0.2.2`, the caster's port, NTRIP 1.0, mountpoint `BENCH`, a made-up
+password, the standard profile. Until the `signal-test` scenario nothing
+answers the station's receiver queries: its identity query goes unanswered
+and, while RTCM flows, never takes the line (the casters are never paused
+for it). PASS or FAIL for each of these (exit status 1 if any failed):
 
 - scenario `stream`: slot 1 streaming within 60 s (`ICY 200 OK` from the
-  fake caster, `OK` from the BKG caster with `--caster docker`);
-  `/api/gnss/signals` lists the fixture's constellations with their bands,
-  as computed from the fixture with `benchlib` (NavIC listed without a band:
-  the firmware maps none for it); `/api/health` `hub.frames_in` grows by at
-  least five epochs' worth of frames in 10 s and the slot's `epochs_sent`
-  rises; the caster's record holds at least 60 s of frames (`--observe`,
-  default 75): every one CRC-valid and byte-identical to a fixture frame, in
-  fixture order from the first epoch boundary on (modulo the loop), fixture
-  frames the station never forwards skipped (the SBAS numbers 1101-1107),
-  nothing between frames, a cut frame only at the very end (the hub's
-  replay of its sticky station frames, 1005/1006/1033/1230, at the start
-  of the session opens no epoch there); receiver maintenance answers its
-  start and extension with the time it set (900 s, then 1800 s left), and
+  fake caster, `OK` from the BKG caster with `--caster docker`) and never
+  `paused` while the scenario runs, with no `COMMAND lease taken by
+  identify` on the console; `/api/gnss/signals` lists the fixture's
+  constellations with their bands, as computed from the fixture with
+  `benchlib`'s band table (the firmware's own: NavIC signal 22 is L5; SBAS
+  never listed); `/api/health` `hub.frames_in` grows by at least five
+  epochs' worth of frames in 10 s and the slot's `epochs_sent` rises; the
+  caster's record holds at least 60 s of frames (`--observe`, default 75),
+  checked strictly: every one CRC-valid and byte-identical to a fixture
+  frame; after the hub's replay of its sticky station frames
+  (1005/1006/1033/1230) the record starts at a fixture epoch's first frame,
+  never inside an epoch; then fixture order (modulo the loop; fixture frames
+  the station never forwards skipped, the SBAS numbers 1101-1107); any gap
+  falls on an epoch boundary (an epoch's last frame, then sticky copies and
+  the next epoch from its first frame; at the start and after a pause the
+  epoch's leading station messages may be missing, never its MSMs: after a
+  receiver reconfiguration the hub has no copies, and a firmware reader
+  stalled by flash writes lets the hub start that epoch at its first MSM;
+  between two consecutive epochs a missing station message fails the
+  check); nothing between frames, a cut frame
+  only at the very end; receiver maintenance answers its start and
+  extension with the time it set (900 s, then 1800 s left), and
   `GET /api/gnss` agrees. With
   `--caster docker` the record is what a `GET /BENCH` client receives from
   the BKG caster (`tools/bench/docker/bkg-caster`, built on first use);
@@ -301,15 +312,42 @@ failed):
   `POST /api/casters/0/retry` clear a stop, a reboot does not; the journal
   has the `caster_stop` records. `--long` adds the 5-minute wait after a
   rejected login and the whole in-use retry ladder (about 8 minutes more).
-  It runs before `stream`: with nothing answering, the station repeats its
-  receiver query every 10 minutes and the casters pause while it runs; a
-  wait that such a query interrupted is noted and not judged;
+  While the guard waits after a rejected login, a login block or an in-use
+  reply, `/api/health` `network.ladder.triggers` has no `protected` (a
+  Wi-Fi restart or a reboot cannot fix a caster's reply); pointed at a
+  closed port (the connect refused) it has. It runs before `stream`; a wait
+  that a receiver lease interrupted is noted and not judged;
+- scenario `signal-test` (runs last, under 10 minutes): the replay gets a
+  scripted UM982 behind it (`tools/bench/benchlib/um982_sim.py`, see
+  `tools/bench/README.md`, `--respond`): it answers the identity query, the
+  configuration dump and base mode, takes the configuration and switches
+  signal groups (4 5, 3 6, 5 0 and 7 0, less those it is told to refuse),
+  withholding its RTCM for about 3 s per restart. A fixed profile (the
+  stream's own position when it carries one, else a made-up one; the
+  responder takes any) through `PUT /api/gnss/profile` makes the station
+  identify the receiver, switch it from 4 5 to 3 6 and lock; the comparison
+  is refused with automatic configuration off (`autocfg_off`) and in
+  receiver maintenance (`receiver_maintenance`); with 7 0 refused by the
+  receiver a comparison ends as `rejected`, the profile back on 3 6 and no
+  `config_failed`; 3 6 against 7 0 with `phase_s` 60 is restarted in the
+  middle of measuring (the replay paused across the reboot, as in the
+  guard's reboot) and resumes with its measured time kept, then runs
+  through settling, measuring, switching, settling, measuring and deciding
+  in that order within their time bounds, shows both results, and keep 1
+  leaves the profile on 7 0; the configured receiver sends the station
+  messages the profile asks for (its own 1005, 1033 and 1230 open every
+  epoch, so the station judges the profile applied) and every caster
+  record of the scenario (the slot is paused for each switch) passes the
+  strict epoch check above, against the fixture as that receiver sends it.
+  The replay cannot change bands, so this checks the flow, its timing,
+  the refusal, the restart and the records, not which group is better;
 - throughout: `smoke.py`'s console checks (no panic, abort, stack overflow,
   failed assert, backtrace or task watchdog report, no reboot loop, no GNSS
   ladder restart; the reboot the scenario asks for is allowed).
 
 Everything lands in `--out`: `console.log`, `e2e.log` (the run's events),
-`replay/` (what the firmware sent on UART1), `caster/` and `guard/` (each
-caster's `connections.jsonl` and records), the HTTP answers and
-`summary.txt`. The `qemu-smoke` CI job runs it after the smoke test with
+`replay/` (what the firmware sent on UART1 and, in `replay.log`, the
+responder's replies), `caster/` and `guard/` (each caster's
+`connections.jsonl` and records), the HTTP answers (`sgt-*.json` for the
+comparison) and `summary.txt`. The `qemu-smoke` CI job runs it after the smoke test with
 `--out qemu-e2e --scenario all` and uploads that directory too.

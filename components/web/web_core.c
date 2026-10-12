@@ -73,6 +73,18 @@ static const err_row_t s_errors[WEB_ERR_COUNT] = {
     [WEB_ERR_NOT_NO_RECEIVER] = { "not_no_receiver", 409, "The station is not without a receiver: nothing to search for" },
     [WEB_ERR_SAME_IMAGE] = { "same_image", 409, "This image is the one already running (send X-Reinstall: 1 to install it again)" },
     [WEB_ERR_SLOT_DISABLED] = { "slot_disabled", 409, "The caster slot is not enabled" },
+    [WEB_ERR_SIGNAL_TEST_RUNNING] = { "signal_test_running", 409,
+                                      "A signal-group comparison runs: stop it first" },
+    [WEB_ERR_SIGNAL_TEST_IDLE] = { "signal_test_idle", 409, "No signal-group comparison runs" },
+    [WEB_ERR_SIGNAL_TEST_NOT_DECIDING] = { "signal_test_not_deciding", 409,
+                                           "The comparison is not waiting for your choice yet" },
+    [WEB_ERR_FIRST_APPLY_HELD] = { "first_apply_held", 409,
+                                   "The receiver's first configuration waits for you: apply it first" },
+    [WEB_ERR_AUTOCFG_OFF] = { "autocfg_off", 409, "Automatic receiver configuration is off" },
+    [WEB_ERR_IDENTITY_UNCONFIRMED] = { "identity_unconfirmed", 409, "The receiver has not identified itself yet" },
+    [WEB_ERR_CONFIG_FAILED] = { "config_failed", 409, "The last receiver configuration failed" },
+    [WEB_ERR_POSITION_NOT_LOCKED] = { "position_not_locked", 409,
+                                      "Lock the position first: every receiver restart would survey again" },
 };
 
 const char *web_err_code(web_err_t e)

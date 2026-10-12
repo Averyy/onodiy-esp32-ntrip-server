@@ -119,8 +119,11 @@ static void cb_journal(void *ctx, uint8_t code, uint8_t outcome, uint8_t detail)
     if (outcome == HL_OUT_STARTED && code >= 1 && code <= 5) {
         w->started_steps++;
     }
-    if (outcome != HL_OUT_HELD) {
-        TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, detail, "only a held restart carries a detail");
+    if (code == HL_CODE_REBOOT_BLOCKED && outcome == HL_OUT_STARTED) {
+        /* a blocked restart names what blocked it */
+        TEST_ASSERT_TRUE_MESSAGE(detail >= HL_CAP_HOUR && detail <= HL_CAP_LOCK, "a blocked restart's why");
+    } else if (outcome != HL_OUT_HELD) {
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, detail, "only a held or blocked restart carries a detail");
     }
     if (w->nrec < 512) {
         w->rec[w->nrec].code = code;
@@ -147,6 +150,7 @@ static void sim_init(sim_t *w)
     w->apply_end = NEVER;
     w->in.stn_state = HL_STN_STREAMING;
     w->in.reboot_allowed = true;
+    w->in.reboot_cap_why = HL_CAP_HOUR;   /* when a test makes the cap block: the hourly limit */
     w->events = true;
     w->rescan_finds = true;
     w->dur[1] = 0;
@@ -259,6 +263,7 @@ static void sim_fill(sim_t *w)
     w->in.since_release_ms = age(w->now, w->release_at);
     if (w->cap_model) {
         w->in.reboot_allowed = cap_allows(w);
+        w->in.reboot_cap_why = HL_CAP_HOUR;
     }
 }
 
@@ -474,7 +479,51 @@ TEST_CASE("ladder: a held reboot inhibit blocks 6a like the cap", "[health_ladde
     stream_then_silence(&w);
     TEST_ASSERT_TRUE(sim_until_rec(&w, 8, 10 * MIN));
     TEST_ASSERT_EQUAL_UINT8(9, w.rec[6].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_CAP_LOCK, w.rec[6].detail);
     TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+}
+
+TEST_CASE("ladder: a blocked 6a journals the limit that blocked it", "[health_ladder]")
+{
+    /* The cap's hourly limit, its daily limit, a restart lock; the cap wins
+     * when both block (it is the one with a deadline). */
+    static const struct {
+        bool allowed;
+        uint8_t why;
+        bool inhibited;
+        uint8_t want;
+    } k[] = {
+        { false, HL_CAP_HOUR, false, HL_CAP_HOUR },
+        { false, HL_CAP_DAY, false, HL_CAP_DAY },
+        { true, HL_CAP_UNKNOWN, true, HL_CAP_LOCK },
+        { false, HL_CAP_DAY, true, HL_CAP_DAY },
+    };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        sim_t w;
+        sim_init(&w);
+        w.rescan_finds = false;
+        w.in.reboot_allowed = k[i].allowed;
+        w.in.reboot_cap_why = k[i].why;
+        w.in.reboot_inhibited = k[i].inhibited;
+        stream_then_silence(&w);
+        TEST_ASSERT_TRUE(sim_until_rec(&w, 8, 10 * MIN));
+        TEST_ASSERT_EQUAL_UINT8(HL_CODE_REBOOT_BLOCKED, w.rec[6].code);
+        TEST_ASSERT_EQUAL_UINT8(HL_OUT_STARTED, w.rec[6].outcome);
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(k[i].want, w.rec[6].detail, "why");
+        TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    }
+
+    /* Blocked after all (the request found an inhibit taken since the
+     * tick's sample): a restart lock. */
+    sim_t w;
+    sim_init(&w);
+    w.rescan_finds = false;
+    w.refuse_reboot = true;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 8, 10 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(HL_CODE_REBOOT, w.rec[6].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_CODE_REBOOT_BLOCKED, w.rec[7].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_CAP_LOCK, w.rec[7].detail);
 }
 
 TEST_CASE("ladder: a rescan that finds nothing while bytes arrive raises the power-cycle alert", "[health_ladder]")
@@ -1718,7 +1767,7 @@ TEST_CASE("ladder: the cap and a hold together: the cap is journalled, the hold 
     sim_run(&w, 2 * SEC);
     static const uint8_t want[][2] = { { 9, HL_OUT_STARTED }, { 8, HL_OUT_STARTED } };
     expect_recs(&w, want, 2);
-    TEST_ASSERT_EQUAL_UINT8(0, w.rec[0].detail);
+    TEST_ASSERT_EQUAL_UINT8(HL_CAP_HOUR, w.rec[0].detail);   /* the cap's limit, not the hold bits */
     /* the cap opens while the hold lasts: still nothing */
     w.in.reboot_allowed = true;
     w.in.detect_passes = 2;

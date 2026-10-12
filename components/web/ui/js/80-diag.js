@@ -514,7 +514,10 @@ function journalDetail(e) {
           const why9 = J.holdBits.filter((k, i) => mask & (1 << i)).map(k => L.hold[k]);
           return 'Receiver recovery: restart postponed: ' + (why9.length ? why9.join(', ') : 'held back');
         }
-        return 'Receiver recovery: ' + J.gnssRung[9];
+        if (outcome === 4) return 'Receiver recovery: restart not taken (' + J.outcome[4] + ')';
+        /* outcome 0: what blocked it (records from older builds carry none) */
+        const capWhy = J.capWhy[(b >>> 16) & 0xff];
+        return 'Receiver recovery: ' + J.gnssRung[9] + (capWhy ? ': ' + capWhy : '');
       }
       if (a === 0 && (code === 6 || code === 8) && outcome === 0) return 'Receiver recovery: ' + J.gnssRung[code];
       let step = 'step ' + code;
@@ -559,6 +562,14 @@ function journalDetail(e) {
       return 'IP address back after ' + fmt.dur(b) + ', ' + a + ' connect attempt' + (a === 1 ? '' : 's');
     case 'rx_maintenance':
       return a ? 'Started for ' + fmt.dur(b) : 'Ended after ' + fmt.dur(b);
+    case 'sg_test': {
+      const ev = a & 0xff, grp = ((a >>> 8) & 0xff) + ' ' + ((a >>> 16) & 0xff);
+      if (ev === 1) return 'Comparison started with ' + grp + ', ' + fmt.dur(b) + ' per group';
+      if (ev === 2) return 'Switched the receiver to ' + grp + ' (group ' + (b + 1) + ' of 2)';
+      if (ev === 3) return 'The receiver refused signal group ' + grp + (b >= 0 ? '; back to ' + ((b >>> 8) & 0xff) + ' ' + (b & 0xff) : '');
+      if (ev === 4) return 'Comparison ended (' + (J.sgtOut[b] || b) + ') on ' + grp;
+      return 'event ' + ev + ', ' + grp;
+    }
     case 'live_view': {
       const ev = a & 0xff, detail = (a >> 8) & 0xff;
       const what = J.liveEv[ev] || 'event ' + ev;

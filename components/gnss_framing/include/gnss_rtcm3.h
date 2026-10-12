@@ -32,11 +32,15 @@
  * count "bands on one constellation":
  *   L1    GPS and QZSS L1 (incl. L1C), GLONASS G1, Galileo E1, BeiDou B1I and B1C
  *   L2    GPS and QZSS L2, GLONASS G2, Galileo E5b, BeiDou B2I and B2b
- *   L5    GPS and QZSS L5, Galileo E5a, BeiDou B2a
+ *   L5    GPS and QZSS L5, Galileo E5a, BeiDou B2a, NavIC L5 SPS (signal 22)
  *   L6    Galileo E6, QZSS L6, BeiDou B3I
  *   E5AB  Galileo E5 AltBOC (counted as a fifth band)
  * The bucket mapping is PROVISIONAL, to be confirmed on hardware against
- * the caster's own band view. NavIC and SBAS signals are not mapped.
+ * the caster's own band view. SBAS has no bands and is never listed: the
+ * SBAS message numbers 1101..1107 are reused by the receiver for its own
+ * messages, so the station drops them before the hub and the observation
+ * view. This table (k_band_sigs in gnss_rtcm3.c) is the single source of the
+ * band rule; the bench tools' table is checked against it.
  */
 #pragma once
 

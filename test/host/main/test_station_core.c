@@ -293,22 +293,155 @@ TEST_CASE("station core: a failed version query keeps streaming and retries ever
     TEST_ASSERT_FALSE(w.s.apply_wanted);
 }
 
-TEST_CASE("station core: with no model ever stored, one leased version query", "[station]")
+/* Boot into STREAMING on text lines alone (a receiver that answers but sends no RTCM). */
+static void boot_lines_only(sim_t *w)
 {
+    w->rtcm_on = false;
+    sim_start(w);
+    w->in.text_lines += 2;
+}
+
+TEST_CASE("station core: with no model ever stored and nothing flowing, one leased version query", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    w.in.model_known = false;
+    boot_lines_only(&w);
+    stn_job_t j = sim_until_job(&w, 5);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+    TEST_ASSERT_FALSE(j.leased);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+    TEST_ASSERT_TRUE(j.leased);
+    TEST_ASSERT_FALSE(w.s.paused);   /* nothing flows: nothing to hold back, nothing planned */
+    sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+    TEST_ASSERT_FALSE(w.s.paused);
+    /* Exactly one per boot: every later query goes without a lease. */
+    unsigned leased = 0;
+    unsigned queries = 0;
+    for (int k = 0; k < 6; k++) {
+        j = sim_until_job(&w, 700);
+        TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+        leased += j.leased ? 1u : 0u;
+        queries++;
+        TEST_ASSERT_FALSE(w.s.paused);
+        sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+    }
+    TEST_ASSERT_EQUAL_UINT(6, queries);
+    TEST_ASSERT_EQUAL_UINT(0, leased);
+}
+
+TEST_CASE("station core: while RTCM flows the identity query never takes a lease or pauses the casters", "[station]")
+{
+    /* No model ever stored, the receiver streams but never answers the
+     * version query: three hours of unleased retries every 10 min. */
     sim_t w;
     sim_init(&w, false);
     w.in.model_known = false;
     w.rtcm_on = true;
     sim_start(&w);
+    int64_t start = w.in.now_ms;
+    int64_t last = -1;
+    unsigned queries = 0;
+    while (w.in.now_ms - start < 3 * HOUR_MS) {
+        stn_job_t j = sim_next(&w);
+        TEST_ASSERT_FALSE(w.s.paused);
+        if (j.kind == STN_JOB_IDENTIFY) {
+            TEST_ASSERT_FALSE(j.leased);
+            if (last >= 0) {
+                TEST_ASSERT_INT64_WITHIN(1000, STN_IDENTITY_RETRY_MS, w.in.now_ms - last);
+            }
+            last = w.in.now_ms;
+            queries++;
+            sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+            TEST_ASSERT_FALSE(w.s.paused);
+        } else {
+            TEST_ASSERT_EQUAL(STN_JOB_NONE, j.kind);
+        }
+        sim_tick(&w);
+    }
+    TEST_ASSERT_EQUAL_UINT(18, queries);   /* at 0, 10, ... 170 min */
+    TEST_ASSERT_FALSE(w.s.leased_tried);
+    TEST_ASSERT_FALSE(w.s.identity_ok);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+
+    /* RTCM stops for good: the next failure takes the boot's one lease
+     * (nothing left to hold back), still without pausing. */
+    w.rtcm_on = false;
+    /* The query due now still saw the last frames arrive: no lease yet. */
+    stn_job_t j = sim_until_job(&w, 700);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+    TEST_ASSERT_FALSE(j.leased);
+    sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+    /* Ten minutes later nothing has flowed since. */
+    j = sim_until_job(&w, 700);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+    TEST_ASSERT_FALSE(j.leased);
+    sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+    TEST_ASSERT_TRUE(j.leased);
+    TEST_ASSERT_FALSE(w.s.paused);
+    sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+}
+
+TEST_CASE("station core: RTCM flowing after the leased query: still no lease", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    w.in.model_known = false;
+    boot_lines_only(&w);
     TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
     sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
     stn_job_t j = sim_next(&w);
-    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
     TEST_ASSERT_TRUE(j.leased);
     sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
-    j = sim_until_job(&w, 700);
+    w.rtcm_on = true;
+    for (int k = 0; k < 3; k++) {
+        j = sim_until_job(&w, 700);
+        TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+        TEST_ASSERT_FALSE(j.leased);
+        TEST_ASSERT_FALSE(w.s.paused);
+        sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+    }
+
+    /* A lease due while nothing flowed, handed out after RTCM came back:
+     * the query goes without it. */
+    sim_init(&w, false);
+    w.in.model_known = false;
+    boot_lines_only(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
+    sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+    TEST_ASSERT_TRUE(w.s.identify_leased);
+    w.in.rtcm_frames += 3;   /* frames arrive before the job is handed out */
+    j = sim_next(&w);
     TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
-    TEST_ASSERT_FALSE(j.leased);   /* the lease was tried once */
+    TEST_ASSERT_FALSE(j.leased);
+    TEST_ASSERT_FALSE(w.s.paused);
+}
+
+TEST_CASE("station core: a stored model is never queried with a lease", "[station]")
+{
+    for (int flowing = 0; flowing < 2; flowing++) {
+        sim_t w;
+        sim_init(&w, false);
+        w.in.model_known = true;
+        if (flowing) {
+            w.rtcm_on = true;
+            sim_start(&w);
+        } else {
+            boot_lines_only(&w);
+        }
+        for (int k = 0; k < 4; k++) {
+            stn_job_t j = sim_until_job(&w, 700);
+            TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+            TEST_ASSERT_FALSE(j.leased);
+            TEST_ASSERT_FALSE(w.s.paused);
+            sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+        }
+    }
 }
 
 /* ---- drift ------------------------------------------------------------------------- */
@@ -408,6 +541,96 @@ TEST_CASE("station core: a failed apply raises CONFIG_FAILED and restores the RT
     TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
     TEST_ASSERT_FALSE(w.s.paused);
     TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+}
+
+TEST_CASE("station core: a refused signal group goes back without CONFIG_FAILED and is re-applied at once", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    stn_request_apply(&w.s);   /* the user saved a profile with 7 0 */
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_TRUE(w.s.paused);
+    /* The receiver refused the group; the caller wrote the group it runs
+     * back into the profile. */
+    stn_result_t r = res(STN_E_FAIL);
+    r.sg_back = true;
+    r.restarted = true;
+    r.answered = true;
+    sim_done(&w, &r);
+    TEST_ASSERT_FALSE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+    TEST_ASSERT_EQUAL_INT64(STN_NEVER, w.s.apply_retry_ms);
+    TEST_ASSERT_FALSE(w.s.last_resort);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    /* The re-apply runs right away, with its own reason. */
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_WHY_SG_BACK, j.why);
+    TEST_ASSERT_TRUE(w.s.paused);
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    TEST_ASSERT_FALSE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+    /* No backoff retry of the refused pair, ever. */
+    for (int k = 0; k < 7 * 3600; k++) {
+        stn_job_t n = sim_next(&w);
+        TEST_ASSERT_NOT_EQUAL(STN_JOB_APPLY, n.kind);
+        if (n.kind != STN_JOB_NONE) {
+            sim_done(&w, &(stn_result_t){ .err = STN_OK });
+        }
+        sim_tick(&w);
+    }
+
+    /* The comparison's own switch keeps its reason for the re-apply. */
+    sim_init(&w, false);
+    boot_applied(&w);
+    stn_request_apply_why(&w.s, STN_WHY_SG_TEST);
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_WHY_SG_TEST, j.why);
+    sim_done(&w, &r);
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_WHY_SG_TEST, j.why);
+    TEST_ASSERT_FALSE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+
+    /* An internal reason replaces the reason of a re-apply already queued. */
+    sim_init(&w, false);
+    boot_applied(&w);
+    stn_request_apply(&w.s);
+    stn_request_apply_why(&w.s, STN_WHY_SG_TEST);
+    TEST_ASSERT_EQUAL(STN_WHY_SG_TEST, sim_next(&w).why);
+}
+
+TEST_CASE("station core: the group a refused signal group goes back to", "[station]")
+{
+    uint8_t m = 0, sl = 0;
+    /* The session's read-back first. */
+    TEST_ASSERT_TRUE(stn_sg_fallback(7, 0, true, 3, 6, true, (4u << 8) | 5u, &m, &sl));
+    TEST_ASSERT_EQUAL_UINT8(3, m);
+    TEST_ASSERT_EQUAL_UINT8(6, sl);
+    /* Not read: the group of the last successful apply. */
+    TEST_ASSERT_TRUE(stn_sg_fallback(7, 0, false, 0, 0, true, (4u << 8) | 5u, &m, &sl));
+    TEST_ASSERT_EQUAL_UINT8(4, m);
+    TEST_ASSERT_EQUAL_UINT8(5, sl);
+    /* Never the refused pair itself. */
+    TEST_ASSERT_TRUE(stn_sg_fallback(7, 0, true, 7, 0, true, (3u << 8) | 6u, &m, &sl));
+    TEST_ASSERT_EQUAL_UINT8(3, m);
+    TEST_ASSERT_FALSE(stn_sg_fallback(7, 0, true, 7, 0, true, (7u << 8) | 0u, &m, &sl));
+    /* Neither known: an ordinary failed apply. */
+    TEST_ASSERT_FALSE(stn_sg_fallback(7, 0, false, 0, 0, false, 0, &m, &sl));
+
+    /* ... which raises CONFIG_FAILED as before. */
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    stn_request_apply(&w.s);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, sim_next(&w).kind);
+    stn_result_t r = res(STN_E_FAIL);
+    r.answered = true;
+    sim_done(&w, &r);
+    TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+    TEST_ASSERT_NOT_EQUAL(STN_NEVER, w.s.apply_retry_ms);
 }
 
 TEST_CASE("station core: after a failed apply, RTCM coming back ends the session", "[station]")
@@ -795,13 +1018,12 @@ TEST_CASE("station core: a queued lock rides along in the ladder's reconfigure",
     TEST_ASSERT_FALSE(j.force_mode);
 }
 
-TEST_CASE("station core: a leased version query pauses the casters while it runs", "[station]")
+TEST_CASE("station core: a leased version query does not pause the casters", "[station]")
 {
     sim_t w;
     sim_init(&w, false);
     w.in.model_known = false;
-    w.rtcm_on = true;
-    sim_start(&w);
+    boot_lines_only(&w);
     stn_job_t j = sim_until_job(&w, 5);
     TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
     TEST_ASSERT_FALSE(j.leased);
@@ -810,7 +1032,7 @@ TEST_CASE("station core: a leased version query pauses the casters while it runs
     j = sim_next(&w);
     TEST_ASSERT_TRUE(j.leased);
     TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
-    TEST_ASSERT_TRUE(w.s.paused);    /* the lease holds RTCM back */
+    TEST_ASSERT_FALSE(w.s.paused);   /* nothing flows: the outage stays unplanned */
     identity_done(&w, true, true);
     TEST_ASSERT_FALSE(w.s.paused);
 }

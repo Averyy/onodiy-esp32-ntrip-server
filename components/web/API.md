@@ -298,6 +298,10 @@ status is on, **adm** = admin session, **claim** = section 3.
 | POST | `/api/gnss/live` | adm | Open or extend the live view | `station_live_view_start` |
 | DELETE | `/api/gnss/live` | adm | Close it | `station_live_view_stop` |
 | POST | `/api/gnss/detect` | adm | No receiver found: search again now | `station_request_detect` |
+| GET | `/api/gnss/signal-test` | adm | Signal-group comparison: state and results | `station_sg_test_get` |
+| POST | `/api/gnss/signal-test` | adm | Compare two signal groups | `station_sg_test_start` |
+| POST | `/api/gnss/signal-test/keep` | adm | Keep one of the two | `station_sg_test_keep` |
+| DELETE | `/api/gnss/signal-test` | adm | Stop the comparison | `station_sg_test_stop` |
 | GET | `/api/gnss/flash` | adm | Receiver update session, allowed actions | station |
 | POST | `/api/gnss/flash/retry` | adm | Flash the same package again | `station_flash_user_action` |
 | POST | `/api/gnss/flash/restart-receiver` | adm | Leave the loader, check the version | `station_flash_user_action` |
@@ -447,7 +451,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
   ],
   "health": {"level": "degraded", "last_step": "none", "ladder_suspended": false,
              "factory_reset_refused": false, "recovery_mode": "full", "reboot_recheck": false,
-             "reboot_hold": [], "reboot_hold_left_s": null, "reboot_cap_wait_s": null},
+             "reboot_hold": [], "reboot_hold_left_s": null, "reboot_cap_wait_s": null, "reboot_cap_limit": null},
   "alerts": [{"id": "link_loss", "source": "health"}],
   "availability": {"protected_down_today_s": 4, "budget_left_s": 469},
   "update": {"app_available": true, "app_version": "v0.4.0",
@@ -477,6 +481,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
 | `receiver.first_apply_held` | the receiver's first configuration waits for the user (`gnss/hold`, section 8): only queries reach the receiver until the user applies; admin form only |
 | `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
+| `receiver.signal_test` | the signal-group comparison (section 8) in short: `null` when none runs and none ended in the last 24 h of this boot; else `{"state", "phase", "group", "left_s", "decide_left_s", "outcome"}`: `state` as in `GET /api/gnss/signal-test`, `phase` 0 or 1 while switching, settling or measuring (else `null`), `group` the group being switched to, measured or (deciding) running, or the one restored to (`{"master", "slave"}`, else `null`), `left_s` the time left in the phase rounded up to 10 s, `decide_left_s` the time left to choose rounded up to a minute (`null` outside those states; rounded so the section changes rarely), `outcome` once decided (`null` while running). Admin form only |
 | `casters[]` | every slot; the full status is in `/api/casters`. `empty`: the slot has no host and is not enabled (never set up, or removed); its `name` is then `""` whatever the stored name is. In safe mode (configs not loaded) no slot is empty and every `name` is `null`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with the console's mountpoint, username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none); `stop_reason` why the Onocoy login guard stopped the slot (`ntrip_stop_t`; `none` unless `state` is `stopped`, section 10) |
 | `alerts[]` | health's alerts (`source: "health"`) and the station's (`source: "station"`); `config_failed` carries `retry_in_s` and `auto_retry` (as `config_retry_in_s` and `config_auto_retry` in `GET /api/gnss`); `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`) |
 | `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without an enabled protected slot that is set up (`onocoy_ready`), or without a trusted clock. Information only, never a gate |
@@ -484,8 +489,9 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `health.recovery_mode` | automatic receiver recovery in effect (`gnss/recovery`, `health_recovery_mode_t`): `full`, `no_reboot` (everything but the ESP32 reboot), `alerts_only` (nothing is sent to the receiver: a stall is only reported and journalled, level `degraded`, `failed` once the ladder gives up); admin form only |
 | `health.reboot_recheck` | no receiver found and an ESP32 reboot was blocked or held: it is looked at again after the next detection pass, when the reboot cap allows and nothing holds it; admin form only |
 | `health.reboot_hold` | why the GNSS ladder's ESP32 restart is postponed right now (`[]` = nothing): `setup` (first setup not finished and no caster enabled; no time limit), `ap_client` (someone is connected to the station's access point), `admin` (an admin session made a request or sent a WebSocket ping in the last 5 min), `power_on` (the first 60 min of station time since power-on while nothing valid was heard from the receiver in this boot). Reported only during a ladder episode (a stall or no receiver, until the ladder resets), where a restart may be pending: `[]` otherwise, whatever holds. A held restart is never queued: it is journalled once (section 14) and looked at again later, like one the cap blocks; admin form only |
-| `health.reboot_hold_left_s` | seconds until every reason in `reboot_hold` has ended at the latest (`ap_client` and `admin`: the 30 min limit on both together per ladder episode; `power_on`: the end of its 60 min), so a restart still needed then runs; `null` when nothing holds or `setup` holds (no time limit) |
+| `health.reboot_hold_left_s` | seconds until every reason in `reboot_hold` has ended at the latest (`ap_client` and `admin`: the 30 min limit on both together per ladder episode; `power_on`: the end of its 60 min), so a restart still needed then runs, unless the reboot cap still holds then: the restart waits for the later of `reboot_hold_left_s` and `reboot_cap_wait_s`; `null` when nothing holds or `setup` holds (no time limit; the cap may still apply after it) |
 | `health.reboot_cap_wait_s` | seconds until the reboot cap (60 min apart, at most 3 in 24 h) allows a ladder restart; `null` when it allows one now, and outside a ladder episode |
+| `health.reboot_cap_limit` | which limit of the cap sets `reboot_cap_wait_s`: `hour` (the last ladder restart was less than 60 min ago) or `day` (3 in the last 24 h); the later one when both hold; `null` when `reboot_cap_wait_s` is `null` |
 | `update` | the banner (section 12); admin form only |
 
 In safe mode the receiver section shows `state: "idle"` with the journal
@@ -658,6 +664,8 @@ oldest.
                "receiver_serial": "...", "age_ms": 400, "bad_frames": 0},
   "maintenance": {"on": false, "left_s": 0, "chosen_s": 0, "choices_s": [900, 1800, 3600, 7200, 14400],
                   "default_s": 1800, "max_left_s": 14400},
+  "rx_signal_group": {"master": 3, "slave": 6},
+  "signal_group_refused": null,
   "position": {"locked": true, "source": "survey", "lat_deg": 45.123456789, "lon_deg": -75.123456789,
                "height_m": 85.1234, "sigma_m": 0.0, "locked_unix": 1759000000},
   "survey": {"active": false, "window_left_s": 0},
@@ -683,6 +691,8 @@ oldest.
 | `apply_steps` | outcome of the antenna and B1C/B2a steps of the last apply session (sent only when the read-back asked for them; a refusal does not fail the session): `sent`, `ok` (accepted), `reply` the receiver's refusal text or `"timeout"` (`null` unless refused). The UI words an antenna refusal "antenna model rejected: <reply>" |
 | `rtcm1033` | the latest CRC-valid 1033 the receiver published (`gnss_obs_get_1033`), strings as received; `{"valid": false, "bad_frames": n}` before the first that decoded; `bad_frames` counts 1033 frames that did not decode since boot |
 | `maintenance` | receiver maintenance (below): `left_s`, `chosen_s` 0 when off; `choices_s` the durations offered, `max_left_s` the most time left after extensions |
+| `rx_signal_group` | the signal group the receiver runs as its last configuration read-back this boot showed (`CONFIG SIGNALGROUP`; after a change, the new one); `null` before an apply session read it |
+| `signal_group_refused` | the receiver refused a signal group (any apply, the comparison's switches included): `{"master", "slave", "reply", "back_to"}` with the receiver's reply (`"signal group rejected"` when it acknowledged the pair but its read-back after the restart still showed another group) and the group the stored profile went back to (`{"master", "slave"}`: the group the session read back before the change, else the one of the last successful apply, `gnss/sg_ok`). The station re-applies that group at once; a refused group never raises `config_failed` and is never retried on the backoff. `back_to` `null`: neither was known, and the refusal is an ordinary failed apply (`config_failed`). Kept until the next `PUT /api/gnss/profile` with a profile; `null` otherwise. The UI says "The receiver refused signal group 7 0 (<reply>): it went back to 3 6." |
 | `profile.fixed` | `{lat_deg, lon_deg, height_m}` in `fixed` mode, else `null`; fields a mode does not use are ignored on input and come back cleared (`survey_in_s` 0 in `fixed` mode) |
 | `position` | locked or last surveyed (`station_status_t.position`); `source`: `none`, `survey`, `averaged`, `user`; `sigma_m` 0 = unknown |
 | `arp` | latest CRC-valid 1005/1006 (`gnss_obs_get_arp`), converted to WGS84; `offset_m` = 3-D distance to the locked position, `null` when not locked; `{"valid": false}` before the first frame |
@@ -737,13 +747,16 @@ A fixed position entered here is stored as the locked position with
 `source: "user"`; switching to `survey_in` forgets the locked position.
 Errors: `400 invalid_field`, `409 journal_open` (any receiver update
 journal open, for a body with `profile` or `autocfg`; the recovery mode
-alone changes nothing on the receiver), `409 settings_unavailable`.
+alone changes nothing on the receiver), `409 signal_test_running` (a
+signal-group comparison runs, for a body with `profile` or `autocfg`),
+`409 settings_unavailable`. A body with `profile` clears
+`signal_group_refused`.
 
 ### `POST /api/gnss/apply` (adm)
 
 Empty body. `202 {"accepted": true}`. Errors: `409 journal_open`,
-`409 safe_mode`, `409 receiver_maintenance` (nothing is sent to the
-receiver then), `409 unsupported_model`. With the first configuration
+`409 signal_test_running`, `409 safe_mode`, `409 receiver_maintenance`
+(nothing is sent to the receiver then), `409 unsupported_model`. With the first configuration
 held (`first_apply_held`) this is the user's confirmation: the apply runs
 once the receiver streams, and its success erases `gnss/hold`
 (`gnss/autocfg` and `gnss/recovery` stay as they are; the UI turns them on
@@ -786,7 +799,8 @@ Errors: `409 safe_mode`.
 Empty body: lock the latest surveyed position (the station switches the
 profile to `fixed` and reconfigures). `202 {"accepted": true}`. Errors:
 `409 no_position_yet` (no 1005 yet), `409 unsupported_model`,
-`409 journal_open`, `409 safe_mode`, `409 receiver_maintenance`.
+`409 journal_open`, `409 signal_test_running`, `409 safe_mode`,
+`409 receiver_maintenance`.
 
 ### `DELETE /api/gnss/position/lock` (adm)
 
@@ -814,7 +828,16 @@ and admin clients.
 
 `rtcm1230_supported` as in `GET /api/gnss` (`null` = never applied).
 
-`systems` lists only present constellations. `signal_ids` are the MSM
+`best_sys` and `best_bands`: the constellation with the most bands among
+those Onocoy rewards (GPS, GLONASS, Galileo and BeiDou; the first in
+message order on a tie), `null` and 0 when none of them is present. QZSS
+and NavIC are listed with their bands but never count as best, so a
+4-band QZSS cannot hide a degraded rewarded constellation.
+
+`systems` lists only present constellations. Bands follow one table (the
+firmware's `k_band_sigs`): NavIC signal 22 (L5 SPS) is band `l5`. SBAS is
+never listed: its message numbers 1101-1107 are ones the receiver reuses
+for its own messages, kept out of the hub and of this view. `signal_ids` are the MSM
 signal IDs that carried at least one cell in the last 10 s (a signal an
 encoder announces in its signal mask without any cell is left out, and so
 is its band); `satellites` likewise counts satellites with a cell;
@@ -878,7 +901,7 @@ satellite-in-view output may be on: in maintenance nothing would turn it
 off, and a save made through the receiver's other port would keep it for
 good, so the station turns it off first; an open view stays open without
 it, `sky_why: "maintenance"`; offer it again in a few seconds),
-`409 safe_mode`.
+`409 signal_test_running` (a signal-group comparison runs), `409 safe_mode`.
 
 #### `DELETE /api/gnss/maintenance` (adm)
 
@@ -976,6 +999,104 @@ that runs already counts. `202 {"accepted": true}`. Errors:
 and on Diagnostics, Health; the setup wizard's reception step; Signals)
 offers it as "Check again".
 
+### Signal-group comparison
+
+The user compares two signal groups on this antenna: the station measures
+each for `phase_s` seconds, then waits for the user to keep one. Each group
+in turn: a switch (the station writes the group into the stored profile and
+re-applies it, its own reconfiguration: the casters pause for it and the
+ledger counts the gap as planned downtime; the receiver restarts for a new
+signal group), a minute of settling, then `phase_s` seconds of good samples
+(one every 10 s while the station streams with an epoch younger than 3 s;
+samples taken otherwise do not count, so the phase takes longer). The group
+running now, if it is one of the two, is measured first, which saves a
+switch: at most three switches per test (to the first group, to the second,
+and back or to the kept one). After both: deciding, for up to 24 h of
+station running time, with the receiver on the group measured last; keeping
+that one switches nothing, keeping the other switches once. No choice
+within 24 h brings back the group from before the test (`timed_out`).
+A group the receiver refuses ends the test (`rejected`) and brings back the
+group from before; another failed switch, a switch not done within 10 min,
+or 10 min without streaming while settling or measuring ends it as `failed`
+the same way. Time counts in good samples and station running time, never
+in wall-clock time, and the test is stored (`gnss/sg_test`, at every
+transition, every 5 min while measuring, every 10 min while deciding and
+before a planned restart):
+after a restart a switch is asked for again, settling or measuring settles
+again and keeps what was measured, deciding keeps its countdown; a record
+that cannot be read ends the test as `interrupted`. A factory reset erases
+it. Bands follow the signal view's table (`GET /api/gnss/signals`); a band
+counts for a group when it was there in at least half of its samples.
+
+#### `GET /api/gnss/signal-test` (adm)
+
+```json
+{"state": "measuring", "groups": [{"master": 3, "slave": 6}, {"master": 7, "slave": 0}],
+ "before": {"master": 3, "slave": 6}, "phase": 0, "phase_s": 1800, "settle_s": 60,
+ "left_s": 1230, "decide_left_s": null, "running_group": {"master": 3, "slave": 6},
+ "results": [
+   {"group": {"master": 3, "slave": 6}, "status": "measuring", "measured_s": 570, "samples": 57,
+    "epoch_gaps": 0, "best_sys": "galileo", "best_bands": 4,
+    "systems": [{"sys": "galileo", "satellites": 9.4, "bands": ["l1", "l2", "l5", "l6"],
+                 "per_band": [{"band": "l1", "satellites": 9.4, "cnr_dbhz": 44.6, "signal_ids": [2]}]}]},
+   {"group": {"master": 7, "slave": 0}, "status": "pending", "measured_s": 0, "samples": 0,
+    "epoch_gaps": 0, "best_sys": null, "best_bands": 0, "systems": []}],
+ "outcome": null, "kept": null, "reason": "", "ended_unix": null}
+```
+
+| Field | Notes |
+|---|---|
+| `state` | `idle`, `switching` (the receiver is being switched to `running_group`), `settling`, `measuring`, `deciding`, `restoring` (switching to the group the test ends on: back to `before`, or to the kept one) |
+| `groups`, `before` | the two groups as chosen (A, B) and the group running when the test started; `null` before the first test (and after `interrupted`) |
+| `phase` | 0 for the group measured first, 1 for the second, while switching, settling or measuring; else `null` |
+| `phase_s`, `settle_s` | measuring time per group (the last test's, else the default 1800) and the settling time (60) |
+| `left_s` | settling or measuring: seconds left in the phase (settling plus the good samples still missing); else `null` |
+| `decide_left_s` | deciding: station running time left to choose; else `null` |
+| `running_group` | the group the phase switches to or measures, the one running while deciding, the one restored to; `null` when idle |
+| `results[]` | one per group in `groups` order (`null` with `groups`): `status` `pending`, `measuring`, `done` or `rejected` (refused by the receiver); `measured_s` (good samples x 10 s), `samples`, `epoch_gaps` (epochs missing while measuring); `best_sys`, `best_bands` the rewarded constellation (GPS, GLONASS, Galileo, BeiDou) with the most bands, as in the signal view (`null`, 0 = none); `systems[]` the constellations with at least one band (never SBAS): `satellites` the mean count (1 decimal), `bands`, and per band the mean satellites with a signal there (1 decimal), the mean C/N0 (`cnr_dbhz`, 1 decimal, `null` when none was measured: MSM4-7 only) and the MSM `signal_ids` seen there |
+| `outcome` | `null` while running, decided once restoring: `kept`, `timed_out`, `cancelled`, `rejected`, `failed`, `interrupted` |
+| `kept` | the group kept (`kept` only) |
+| `reason` | what happened, in words (`""` = nothing to say) |
+| `ended_unix` | when the last test ended, `null` without a clock then (or while one runs) |
+
+#### `POST /api/gnss/signal-test` (adm)
+
+```json
+{"groups": [{"master": 3, "slave": 6}, {"master": 7, "slave": 0}], "phase_s": 1800}
+```
+
+`202 {"accepted": true}`; `GET` shows the test. `groups`: two different
+pairs of 0-255 (else `400 invalid_field` `groups`); `phase_s` 60-7200,
+left out = 1800 (else `400 invalid_field` `phase_s`). Refused, in this
+order: `409 signal_test_running` (one runs already),
+`409 settings_unavailable` (the test could not be stored),
+`409 first_apply_held`, `409 autocfg_off` (automatic configuration is
+off: the user configures the receiver), `409 receiver_maintenance`,
+`409 journal_open`, `409 safe_mode`, `409 unsupported_model`,
+`409 identity_unconfirmed` (the receiver has not answered its version
+query this boot), `409 receiver_not_streaming`, `409 config_failed` (the
+last apply failed), `409 position_not_locked` (a surveying base would
+survey again at every receiver restart: lock the position first).
+
+While a test runs, these answer `409 signal_test_running`, so nothing else
+changes the receiver underneath it: `PUT /api/gnss/profile` with `profile`
+or `autocfg`, `POST /api/gnss/apply`, `POST` and `DELETE
+/api/gnss/position/lock`, `POST /api/gnss/maintenance`, `POST
+/api/update/gnss`, `POST /api/upload/gnss/confirm` and the
+`/api/gnss/flash/*` actions. The health ladder's own steps still run.
+
+#### `POST /api/gnss/signal-test/keep` (adm)
+
+`{"group": 0}` (0 = the first of `groups`, 1 = the second; else
+`400 invalid_field` `group`). Deciding only: `202 {"accepted": true}`;
+the test ends (`kept`) once the group runs. `409 signal_test_not_deciding`
+otherwise.
+
+#### `DELETE /api/gnss/signal-test` (adm)
+
+Stop a running test: back to `before` (`cancelled`). `202 {"accepted":
+true}`; `409 signal_test_idle` when none runs.
+
 ---
 
 ## 9. Receiver update sessions
@@ -1058,8 +1179,10 @@ only the package the journal pinned (its SHA-256 checked again on a fresh
 RAM copy, the journalled model); it is one more transfer beyond the
 automatic cap, confirmed by this request. Errors: `404 no_journal`, `409
 not_waiting`, `409 safe_mode`, `409 receiver_maintenance`, `409 app_trial`,
-`409 app_update`, `409 settings_unavailable`, `501 not_available_yet`
-(retry and restart in builds without receiver flashing).
+`409 app_update`, `409 settings_unavailable`, `409 signal_test_running` (a
+signal-group comparison runs; it cannot start while a journal is open),
+`501 not_available_yet` (retry and restart in builds without receiver
+flashing).
 
 ---
 
@@ -1506,7 +1629,7 @@ a newer version appears; the server keeps no "later" state.
 | `app_available`, `app_version` | `app_update_available`, `latest_version` |
 | `app_reverted_version`, `app_reverted_in_stage1` | the last version rolled back; true when it rolled back in its first minute (offer "install again?") |
 | `gnss_available`, `gnss_build`, `gnss_version` | `gnss_update_available`, `gnss_latest_build`, `gnss_latest` |
-| `gnss_blocked_reason`, `gnss_blocked_left_s` | `fw_update_gnss_block_t`; `left_s` for `app_trial` |
+| `gnss_blocked_reason`, `gnss_blocked_left_s` | `fw_update_gnss_block_t`; `left_s` for `app_trial`: the rest of the trial (confirmation plus crash watch; for a reinstall of the running image the confirmation only) |
 | `gnss_flash_available`, `gnss_flash_reason` | `station_flash_available()`; the reason is `not_enabled_in_build` when it is `false`, else `null` |
 | `checking`, `last_check_unix` | state `checking`; `ota/last_check` |
 
@@ -1654,7 +1777,9 @@ carries the header `X-Reinstall: 1` (the UI asks "This is the version
 already running (v). Install it again?" first). A confirmed reinstall of
 the identical image runs stage 1 of the trial only (the bootloader's
 first-minute check): identical code needs no verify window and no crash
-watch, so receiver updates are not held back for the watch's day.
+watch, so receiver updates are not held back for the watch's day: during
+that stage `gnss_blocked_left_s` (section 12) counts the confirmation
+alone (at most a minute).
 
 `200 {"sha256": "...", "size": 1234567, "version": "v0.4.0+dev", "project": "onocoydiy-esp-um982", "reboot": true}`;
 the device reboots into the image about a second after the response and
@@ -1723,7 +1848,8 @@ partition layout than the receiver's is refused unless the build allows it
 (every rule on a RAM copy, against the receiver identity confirmed this
 boot; nothing is sent to the receiver), then the package is released; the
 result is in the final message and in `GET /api/gnss/flash` (`last`).
-Other errors: `404 nothing_staged` and the `409` codes of the upload.
+Other errors: `404 nothing_staged`, `409 signal_test_running` (a
+signal-group comparison runs) and the `409` codes of the upload.
 
 ### `DELETE /api/upload/gnss` (adm)
 
@@ -1745,7 +1871,7 @@ All admin only.
   "uptime_s": 86400, "gnss_stalls": 0, "recoveries": 0, "caster_restarts": 0,
   "network_recoveries": 0, "rtcm_gap_ms": 230, "gnss_retry_in_s": null,
   "factory_reset_refused_age_s": null, "admin_resets": 0, "recovery_mode": "full", "reboot_recheck": false,
-  "reboot_hold": [], "reboot_hold_left_s": null, "reboot_cap_wait_s": null,
+  "reboot_hold": [], "reboot_hold_left_s": null, "reboot_cap_wait_s": null, "reboot_cap_limit": null,
   "heap": {"internal_free": 120000, "internal_min": 98000, "internal_largest": 64000, "psram_free": 7000000,
            "psram_min": 6900000, "psram_largest": 4000000},
   "inhibited_by": null, "update_slot": "none",
@@ -1789,7 +1915,7 @@ scheduled). `factory_reset_refused_age_s` is the time since a BOOT-button
 factory reset was refused because a receiver update was running (`null` =
 not this boot); `admin_resets` counts BOOT-button password resets this
 boot. `recovery_mode`, `reboot_recheck`, `reboot_hold`,
-`reboot_hold_left_s` and `reboot_cap_wait_s` as in `/api/status`.
+`reboot_hold_left_s`, `reboot_cap_wait_s` and `reboot_cap_limit` as in `/api/status`.
 `log.console_dropped` (and `_bytes`) count only lines the serial console
 never sent because the log ring overwrote them first; a burst that the
 console sends later, in order, is not a drop.
@@ -1939,7 +2065,7 @@ At most 64 entries per call, oldest first, `seq > cursor`. `time_unix`
 | `boot` | reset class | planned reboot reason |
 | `session` | previous session uptime s (-1 unknown) | raw reset reason |
 | `reboot` | reason | — |
-| `ladder_step` | ladder (0 GNSS, 1 network, 2 caster) | `(outcome << 8) \| code` (outcome 0 started, 1 healthy again, 2 failed or refused, 3 abandoned, 4 not run because of the recovery mode, 5 held; network: `(reason << 16) \| ...`, and code 0 = a pass started with the trigger bits as the reason: 1 protected caster down, 2 associated without an IP, 4 a slot not reaching its caster). GNSS code 9 with outcome 5: the ESP32 restart is held back for now, `b = (hold << 16) \| (5 << 8) \| 9` with the hold bits 1 `setup`, 2 `ap_client`, 4 `admin`, 8 `power_on` (as `health.reboot_hold`); codes 6, 8 and 9 with outcome 0 keep their meaning; see `diag.h`, `network.h` |
+| `ladder_step` | ladder (0 GNSS, 1 network, 2 caster) | `(outcome << 8) \| code` (outcome 0 started, 1 healthy again, 2 failed or refused, 3 abandoned, 4 not run because of the recovery mode, 5 held; network: `(reason << 16) \| ...`, and code 0 = a pass started with the trigger bits as the reason: 1 protected caster down, 2 associated without an IP, 4 a slot not reaching its caster). GNSS code 9 with outcome 5: the ESP32 restart is held back for now, `b = (hold << 16) \| (5 << 8) \| 9` with the hold bits 1 `setup`, 2 `ap_client`, 4 `admin`, 8 `power_on` (as `health.reboot_hold`). GNSS code 9 with outcome 0: the restart was blocked, `b = (why << 16) \| 9` with `why` 1 the hourly limit of the reboot cap (at most one an hour), 2 its daily limit (at most 3 in 24 hours), 3 a restart lock (another job, such as an update, holds restarts back), 0 not recorded (a record from an older build); codes 6 and 8 with outcome 0 keep their meaning; see `diag.h`, `network.h` |
 | `app_update` | result (`esp_err_t`) | — |
 | `app_revert` | trial stage that gave the image up (`fw_update_trial_t`; 0 = the user's rollback) | 1 = the user's rollback; a stage-1 rollback the bootloader did: the attempt (1, 2) |
 | `gnss_flash` | the session's outcome (`station_flash_outcome_t`), written when its journal closes | transfers under the journal |
@@ -1952,6 +2078,7 @@ At most 64 entries per call, oldest first, `seq > cursor`. `time_unix`
 | `wifi_up` | connect attempts during the outage | outage s |
 | `rx_maintenance` | 1 entry, 0 exit | chosen duration s (entry), time spent s (exit) |
 | `live_view` | event (bits 0-7: 1 opened, 2 extended, 3 closed, 4 satellite-in-view output on, 5 off) \| detail << 8 (closed: end reason; on/off: 0 accepted, 1 rejected, 2 no answer, 3 not sent) | opened: window s; extended: s left; closed: s open; on/off: ms the lease held RTCM back |
+| `sg_test` | signal groups: event (bits 0-7: 1 a comparison started, 2 it switched the receiver, 3 the receiver refused a signal group, in a comparison or any apply, 4 a comparison ended) \| master << 8 \| slave << 16 (started: the group measured first; switched: the group now running; refused: the refused group; ended: the group it ended on) | started: s per group; switched: the phase (0, 1); refused: `(master << 8) \| slave` of the group the profile went back to (-1 none); ended: the outcome (1 kept, 2 timed out, 3 cancelled, 4 rejected, 5 failed, 6 interrupted) |
 
 Enum numbers are the C values; the UI decodes them with the appendix
 tables.
@@ -2145,7 +2272,15 @@ everything else works as usual. Receiver maintenance itself is refused
 while a receiver update session is open (`journal_open`) and while a
 receiver session or job runs (`busy`).
 Receiver updates are also refused (`receiver_not_streaming`,
-`unsupported_model`, `package_pinned`) whenever those hold. With the
+`unsupported_model`, `package_pinned`) whenever those hold.
+While a signal-group comparison runs (section 8), every change of the
+receiver answers `signal_test_running`: a profile save with `profile` or
+`autocfg`, apply, lock, re-survey, receiver maintenance, receiver updates
+(banner, confirm) and the flash actions. The comparison itself is refused
+while the first configuration is held, automatic configuration is off,
+during receiver maintenance, an open receiver update session or safe mode,
+for an unsupported or unidentified receiver, while the receiver does not
+stream, after a failed apply and while the position is not locked. With the
 settings unavailable this boot, every call that would persist something
 answers `settings_unavailable`, except Wi-Fi credentials and the first admin
 password (both kept for this boot), and a journal in state `unknown` allows
@@ -2310,7 +2445,10 @@ Things this contract needs that the current headers do not provide yet:
 6. **Receiver text of a flash session**: resolved;
    `station_get_flash_log()` returns the last 4 KB the receiver sent during
    the last session.
-7. **GNSS time**: resolved in part. The ledger takes the receiver's GPS
+7. **Signal-group comparison**: resolved; `station_sg_test_*()` (station.h,
+   `station_sgt.h`) and the four `/api/gnss/signal-test` routes (66 API
+   routes, 68 of the 72 URI handlers with `/ws` and the catch-all).
+8. **GNSS time**: resolved in part. The ledger takes the receiver's GPS
    time of week (`gnss_obs_get_gps_time()`, fed by the health monitor) and
    dates it against its running clock, or after a reset that was not a
    power cut against the previous session's last-alive mark, so `clock` is
@@ -2370,5 +2508,8 @@ after it). The journal's `a` and `b` carry these C values.
 | `ledger_clock_t` | `none`, `sntp`, `gnss` |
 | `gnss_sys_t` | `gps`, `glonass`, `galileo`, `sbas`, `qzss`, `beidou`, `navic` |
 | `gnss_band_t` | `l1`, `l2`, `l5`, `l6`, `e5ab` |
-| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21 |
+| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21, `sg_test` = 22 |
+| `station_sgt_state_t` | `idle`, `switching`, `settling`, `measuring`, `deciding`, `restoring` |
+| `station_sgt_outcome_t` | (none: `null`), `kept`, `timed_out`, `cancelled`, `rejected`, `failed`, `interrupted` |
+| `station_sgt_res_status_t` | `pending`, `measuring`, `done`, `rejected` |
 | `diag_loss_id_t` | `hw_fifo`, `rx_buffer_full`, `line_errors`, `rtcm_crc`, `framer_discarded`, `hub_publish`, `baud_switch`, `rx_events_dropped`; 16 and up: caster slots |

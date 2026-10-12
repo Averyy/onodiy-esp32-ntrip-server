@@ -158,11 +158,21 @@ void boot_guard_heartbeat(boot_guard_state_t *st, uint32_t uptime_s);
 /** Station time: uptime accumulated since power-on, including this boot's `uptime_s`. */
 uint32_t boot_guard_station_time(const boot_guard_state_t *st, uint32_t uptime_s);
 
+/** Which limit of the GNSS-ladder reboot budget holds a reboot back. */
+typedef enum {
+    BOOT_GUARD_CAP_NONE = 0,   /**< none: a reboot is allowed now */
+    BOOT_GUARD_CAP_HOUR,       /**< the last one was less than BOOT_GUARD_LADDER_GAP_S ago */
+    BOOT_GUARD_CAP_DAY,        /**< BOOT_GUARD_LADDER_KEEP within BOOT_GUARD_LADDER_WINDOW_S */
+} boot_guard_cap_t;
+
 /**
  * May the GNSS ladder reboot now? `retry_in_s` (optional) gets the seconds
- * until it may, 0 when allowed.
+ * until it may, 0 when allowed. `cap` (optional) gets the limit that sets
+ * that wait: when both hold, the one that ends later (the hourly limit on a
+ * tie), BOOT_GUARD_CAP_NONE when allowed.
  */
-bool boot_guard_ladder_reboot_allowed(const boot_guard_state_t *st, uint32_t uptime_s, uint32_t *retry_in_s);
+bool boot_guard_ladder_reboot_allowed(const boot_guard_state_t *st, uint32_t uptime_s, uint32_t *retry_in_s,
+                                      boot_guard_cap_t *cap);
 
 /** Record a GNSS-ladder reboot happening now (also writes the heartbeat). Seals. */
 void boot_guard_record_ladder_reboot(boot_guard_state_t *st, uint32_t uptime_s);

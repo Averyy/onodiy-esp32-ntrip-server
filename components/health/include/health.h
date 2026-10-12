@@ -243,6 +243,13 @@ typedef enum {
 } health_reboot_hold_t;
 
 /** Snapshot for status pages. */
+/** Which limit of the ladder's reboot cap holds a restart back (lifecycle_cap_t). */
+typedef enum {
+    HEALTH_CAP_NONE = 0,
+    HEALTH_CAP_HOUR,                 /**< at most one ladder restart an hour */
+    HEALTH_CAP_DAY,                  /**< at most 3 in 24 hours */
+} health_cap_limit_t;
+
 typedef struct {
     health_level_t level;
     uint32_t alerts;                 /**< health_alert_t flags */
@@ -266,6 +273,7 @@ typedef struct {
     uint8_t gnss_reboot_hold;        /**< health_reboot_hold_t reasons that postpone the ladder's ESP32 restart now (0 = none; always 0 outside a ladder episode) */
     uint32_t gnss_reboot_hold_left_s;/**< until every reason holding now has ended at the latest (the presence limit of ap_client and admin, the end of the power-on grace); UINT32_MAX = no hold, or setup holds (no time limit) */
     uint32_t gnss_reboot_cap_wait_s; /**< until the reboot cap allows a ladder restart; UINT32_MAX = allowed now, or outside a ladder episode */
+    health_cap_limit_t gnss_reboot_cap_limit; /**< the cap's limit that sets gnss_reboot_cap_wait_s (the later one when both hold); NONE when that is UINT32_MAX */
 } health_status_t;
 
 /** Register handlers; read the button pin from the board. */

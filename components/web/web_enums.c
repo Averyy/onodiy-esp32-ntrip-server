@@ -530,12 +530,58 @@ static const char *const s_diag_event[] = {
     [DIAG_EV_CASTER_STOP] = "caster_stop",
     [DIAG_EV_RX_MAINT] = "rx_maintenance",
     [DIAG_EV_LIVE_VIEW] = "live_view",
+    [DIAG_EV_SG_TEST] = "sg_test",
 };
-_Static_assert(COUNT(s_diag_event) == (size_t)DIAG_EV_LIVE_VIEW + 1u, "journal kinds added: update the table");
+_Static_assert(COUNT(s_diag_event) == (size_t)DIAG_EV_SG_TEST + 1u, "journal kinds added: update the table");
 
 const char *web_diag_event_name(uint16_t kind)
 {
     return pick(s_diag_event, COUNT(s_diag_event), (int)kind);
+}
+
+static const char *const s_sgt_state[] = {
+    [STATION_SGT_IDLE] = "idle",
+    [STATION_SGT_SWITCHING] = "switching",
+    [STATION_SGT_SETTLING] = "settling",
+    [STATION_SGT_MEASURING] = "measuring",
+    [STATION_SGT_DECIDING] = "deciding",
+    [STATION_SGT_RESTORING] = "restoring",
+};
+_Static_assert(COUNT(s_sgt_state) == (size_t)STATION_SGT_RESTORING + 1u, "comparison states added: update the table");
+
+const char *web_sgt_state_name(uint8_t v)
+{
+    return pick(s_sgt_state, COUNT(s_sgt_state), v);
+}
+
+static const char *const s_sgt_outcome[] = {
+    [STATION_SGT_OUT_NONE] = NULL,
+    [STATION_SGT_OUT_KEPT] = "kept",
+    [STATION_SGT_OUT_TIMED_OUT] = "timed_out",
+    [STATION_SGT_OUT_CANCELLED] = "cancelled",
+    [STATION_SGT_OUT_REJECTED] = "rejected",
+    [STATION_SGT_OUT_FAILED] = "failed",
+    [STATION_SGT_OUT_INTERRUPTED] = "interrupted",
+};
+_Static_assert(COUNT(s_sgt_outcome) == (size_t)STATION_SGT_OUT_INTERRUPTED + 1u,
+               "comparison outcomes added: update the table");
+
+const char *web_sgt_outcome_name(uint8_t v)
+{
+    return (v != STATION_SGT_OUT_NONE && v < COUNT(s_sgt_outcome)) ? s_sgt_outcome[v] : NULL;
+}
+
+static const char *const s_sgt_result[] = {
+    [STATION_SGT_RES_PENDING] = "pending",
+    [STATION_SGT_RES_MEASURING] = "measuring",
+    [STATION_SGT_RES_DONE] = "done",
+    [STATION_SGT_RES_REJECTED] = "rejected",
+};
+_Static_assert(COUNT(s_sgt_result) == (size_t)STATION_SGT_RES_REJECTED + 1u, "comparison results added: update the table");
+
+const char *web_sgt_result_name(uint8_t v)
+{
+    return pick(s_sgt_result, COUNT(s_sgt_result), v);
 }
 
 static const char *const s_update_slot[] = {

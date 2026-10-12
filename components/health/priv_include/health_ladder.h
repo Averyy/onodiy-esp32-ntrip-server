@@ -163,6 +163,14 @@ typedef enum {
     HL_OUT_HELD = 5,              /**< 6a held back for now (code 9; detail = the hold bits) */
 } hl_outcome_t;
 
+/** Why 6a is blocked (code 9 outcome STARTED: the journal detail; hl_in_t.reboot_cap_why for the cap). */
+typedef enum {
+    HL_CAP_UNKNOWN = 0,           /**< not recorded (journal records from before this was kept) */
+    HL_CAP_HOUR = 1,              /**< the reboot cap: at most one an hour */
+    HL_CAP_DAY = 2,               /**< the reboot cap: at most 3 in 24 hours */
+    HL_CAP_LOCK = 3,              /**< a reboot inhibit is held (another job holds restarts back) */
+} hl_cap_why_t;
+
 /** Why 6a is held back (hl_in_t.reboot_hold, journal detail of HL_OUT_HELD). */
 #define HL_HOLD_SETUP     (1u << 0)  /**< first setup not finished */
 #define HL_HOLD_AP_CLIENT (1u << 1)  /**< a client is connected to the station's access point */
@@ -214,7 +222,8 @@ typedef struct {
     hl_req_t (*request)(void *ctx, uint8_t step);
     /** Request the ESP32 reboot (6a). @return false if it was blocked after all (cap or inhibit, a race). */
     bool (*reboot)(void *ctx);
-    /** Journal one ladder record; `detail` = the hold bits of HL_OUT_HELD, else 0. */
+    /** Journal one ladder record; `detail` = the hold bits of HL_OUT_HELD, hl_cap_why_t for code 9
+     *  outcome STARTED, else 0. */
     void (*journal)(void *ctx, uint8_t code, uint8_t outcome, uint8_t detail);
     void *ctx;
 } hl_ops_t;
@@ -242,6 +251,7 @@ typedef struct {
     bool surveying;               /**< the station's survey window is open */
     bool survey_holds_rtcm;       /**< the receiver sends no RTCM while surveying: no stall inside the window */
     bool reboot_allowed;          /**< the ladder reboot cap allows a reboot now */
+    uint8_t reboot_cap_why;       /**< hl_cap_why_t: HL_CAP_HOUR or HL_CAP_DAY when the cap blocks (else ignored) */
     bool reboot_inhibited;        /**< a reboot inhibit is held */
     uint8_t reboot_hold;          /**< HL_HOLD_* reasons that hold 6a back now (0 = none) */
 } hl_in_t;

@@ -38,6 +38,8 @@ typedef enum {
     ACT_SKIP_EPOCH,      /* waiting: an epoch start already over the lag limit, skip that epoch too */
     ACT_DROP,            /* rest of an epoch dropped by the lag limit */
     ACT_DROP_EPOCH,      /* epoch start over the lag limit: drop the whole epoch */
+    ACT_SKIP_UNSURE,     /* waiting: an unsure epoch, skip all of it */
+    ACT_STOP_UNSURE,     /* streaming: a new unsure epoch, back to waiting */
 } act_t;
 
 typedef enum { RUN_DONE, RUN_FULL, RUN_LAPPED } run_t;
@@ -173,7 +175,8 @@ bool rtcm_core_publish(rtcm_core_t *c, const uint8_t *frame, size_t len, uint16_
     const uint32_t rx = (uint32_t)now_ms;
 
     lk(c);
-    uint32_t epoch = rtcm_epoch_assign(&c->ep, frame, len, msg_type, rx, NULL);
+    bool unsure = false;
+    uint32_t epoch = rtcm_epoch_assign(&c->ep, frame, len, msg_type, rx, NULL, &unsure);
     c->reserve_off = w + waste + rlen;
     unlk(c);
 
@@ -184,7 +187,7 @@ bool rtcm_core_publish(rtcm_core_t *c, const uint8_t *frame, size_t len, uint16_
     }
     const rec_hdr_t h = {
         .len = (uint16_t)len,
-        .msg_type = msg_type,
+        .msg_type = (uint16_t)((msg_type & RTCM_CORE_REC_TYPE_MASK) | (unsure ? RTCM_CORE_REC_UNSURE : 0u)),
         .seq = (uint32_t)c->frames_in,
         .rx_ms = rx,
         .epoch = epoch,
@@ -428,11 +431,16 @@ static void lapped_now(rtcm_core_t *c, rtcm_core_consumer_t *k, bool corrupt)
     lapped(k, &s);
 }
 
-static act_t decide(const rtcm_core_consumer_t *k, uint32_t epoch, uint32_t age)
+/* `unsure`: the record belongs to an unsure epoch (its head may have been
+ * lost at a framer reset), so it is never an epoch start for a consumer. */
+static act_t decide(const rtcm_core_consumer_t *k, uint32_t epoch, uint32_t age, bool unsure)
 {
     bool old = age > k->max_lag_ms;
     if (!k->streaming) {
         if (k->wait_any || rtcm_epoch_after(epoch, k->wait_after)) {
+            if (unsure) {
+                return ACT_SKIP_UNSURE;
+            }
             return old ? ACT_SKIP_EPOCH : ACT_DELIVER_START;
         }
         return ACT_SKIP;
@@ -442,6 +450,9 @@ static act_t decide(const rtcm_core_consumer_t *k, uint32_t epoch, uint32_t age)
     }
     if (epoch == k->last_epoch) {
         return ACT_DELIVER;   /* finish an epoch already partly delivered */
+    }
+    if (unsure) {
+        return ACT_STOP_UNSURE;
     }
     return old ? ACT_DROP_EPOCH : ACT_DELIVER_START;
 }
@@ -508,6 +519,24 @@ static void apply(rtcm_core_consumer_t *k, act_t a, uint32_t epoch, uint16_t len
         n->frames_dropped++;
         n->bytes_dropped += len;
         break;
+    case ACT_SKIP_UNSURE:
+        k->wait_after = epoch;
+        k->wait_any = false;
+        count_skip(k, len);
+        break;
+    case ACT_STOP_UNSURE:
+        if (k->epoch_open) {
+            n->epochs_out++;   /* the epoch being sent ended here, complete */
+        }
+        k->streaming = false;
+        k->epoch_open = false;
+        k->wait_any = false;
+        k->wait_loss = false;
+        k->wait_after = epoch;
+        k->dropping = false;
+        k->drop_run = false;
+        n->frames_skipped_idle++;
+        break;
     }
 }
 
@@ -556,12 +585,13 @@ static run_t read_records(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf,
         /* Intact, so these checks cannot fail unless the ring is corrupt;
          * they keep a bad header from ever reaching memcpy. */
         if (!room || h.len < RTCM_CORE_MIN_FRAME || h.len > GNSS_RTCM3_MAX_FRAME ||
-            rec_len(h.len) > c->cap - pos || h.seq != (uint32_t)k->frames_pos) {
+            rec_len(h.len) > c->cap - pos || h.seq != (uint32_t)k->frames_pos ||
+            (h.msg_type & (uint16_t)~(RTCM_CORE_REC_TYPE_MASK | RTCM_CORE_REC_UNSURE)) != 0) {
             lapped_now(c, k, true);
             return RUN_LAPPED;
         }
 
-        act_t a = decide(k, h.epoch, record_age(&s, h.rx_ms, now_ms));
+        act_t a = decide(k, h.epoch, record_age(&s, h.rx_ms, now_ms), (h.msg_type & RTCM_CORE_REC_UNSURE) != 0);
         if (a == ACT_DELIVER || a == ACT_DELIVER_START) {
             if (max_len - *out < h.len) {
                 return RUN_FULL;
@@ -663,6 +693,24 @@ void rtcm_core_get_stats(rtcm_core_t *c, uint64_t now_ms, rtcm_core_stats_t *out
         uint64_t age = now_ms - last;
         out->last_frame_age_ms = age >= UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)age;
     }
+}
+
+bool rtcm_core_epoch_in_flight(rtcm_core_t *c, uint64_t now_ms, uint32_t quiet_ms, uint32_t *age_ms)
+{
+    lk(c);
+    bool have = c->have_frame;
+    uint64_t last = c->last_rx_ms;
+    bool open = c->ep.msm_open;
+    unlk(c);
+    uint32_t age = UINT32_MAX;
+    if (have) {
+        uint64_t d = now_ms > last ? now_ms - last : 0;
+        age = d >= UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)d;
+    }
+    if (age_ms != NULL) {
+        *age_ms = age;
+    }
+    return have && open && age < quiet_ms;
 }
 
 /* rx_ms of the record at `off` (skipping a wrap marker), if still intact. */

@@ -44,6 +44,7 @@
 #include "rtcm_hub.h"
 #include "sdkconfig.h"
 #include "settings.h"
+#include "sg_test_core.h"
 #include "station_core.h"
 #include "station_obs.h"
 #include "um98x_ctl.h"
@@ -83,6 +84,9 @@ _Static_assert(STATION_BENCH_LISTEN == (int)UM98X_BENCH_LISTEN && STATION_BENCH_
 #define LISTEN_MS        1500    /* listen-only scan: per baud. PROVISIONAL, to be confirmed on hardware */
 #define LISTEN_POLL_MS   100
 #define POS_MAX_AGE_MS   5000    /* position check: a 1005 at most this old */
+#define EPOCH_WAIT_MS    1000    /* a caster pause waits this long at most for the epoch in flight */
+#define EPOCH_DRAIN_MS   50      /* ... and this long after its last frame, for the casters to read it.
+                                    PROVISIONAL, to be confirmed on hardware */
 #define TRUSTED_UNIX     1700000000   /* earlier wall-clock times are not a set clock */
 
 _Static_assert(STN_IDLE == (int)STATION_STATE_IDLE && STN_DETECTING == (int)STATION_STATE_DETECTING &&
@@ -132,6 +136,8 @@ _Static_assert(STN_LIVE_END_NONE == (int)STATION_LIVE_END_NONE && STN_LIVE_END_U
                    STN_LIVE_END_EXPIRED == (int)STATION_LIVE_END_EXPIRED &&
                    STN_LIVE_END_IDLE == (int)STATION_LIVE_END_IDLE && STN_LIVE_END_FLASH == (int)STATION_LIVE_END_FLASH,
                "core live view end reasons mirror station_live_end_t");
+
+_Static_assert(STATION_SGT_OK == 0 && STATION_SGT_E_NOT_RUNNING > STATION_SGT_E_IDLE, "comparison errors");
 
 ESP_EVENT_DEFINE_BASE(STATION_EVENT);
 
@@ -236,6 +242,22 @@ static bool s_b1c_sent;
 static bool s_b1c_ok;
 static char s_b1c_reply[64];
 static char s_sky_reply[64];             /* the last failed satellite-in-view toggle */
+static bool s_rx_sg_valid;               /* the latest read-back named the receiver's signal group */
+static station_sg_t s_rx_sg;
+
+/* A refused signal group (until the next profile save; under s_lock). */
+static bool s_sg_refused;
+static station_sg_t s_sg_refused_group;
+static bool s_sg_back_valid;
+static station_sg_t s_sg_back;
+static char s_sg_refused_reply[64];
+
+/* The signal-group comparison: its core and record, under s_sgt_mx (the
+ * station task and the web's requests). Large: in PSRAM. */
+EXT_RAM_BSS_ATTR static sgt_t s_sgt;
+EXT_RAM_BSS_ATTR static uint8_t s_sgt_rec[SGT_REC_MAX];
+EXT_RAM_BSS_ATTR static station_status_t s_sgt_st;   /* the status a start is judged on (s_sgt_mx) */
+static SemaphoreHandle_t s_sgt_mx;
 
 /* Receiver update sessions (station task, except where noted). */
 static station_flash_request_t s_flash_req;   /* the user's request (written under s_lock by the requester) */
@@ -605,6 +627,28 @@ static bool store_profile(const um98x_base_profile_t *p, const um98x_base_positi
     return true;
 }
 
+/* The stored profile with another signal group (the base position stays as stored). */
+static bool store_profile_group(station_sg_t g)
+{
+    um98x_base_profile_t p = s_profile;
+    uint8_t buf[UM98X_PROFILE_BLOB_MAX];
+    size_t blen = sizeof(buf);
+    if (settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_PROFILE, buf, &blen) == ESP_OK) {
+        (void)um98x_profile_decode(buf, blen, &p);
+    }
+    p.signal_group_master = g.master;
+    p.signal_group_slave = g.slave;
+    size_t len = um98x_profile_encode(&p, buf, sizeof(buf));
+    esp_err_t err = len == 0 ? ESP_ERR_INVALID_SIZE : settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_PROFILE, buf, len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "signal group %u %u not written to the profile: %s", (unsigned)g.master, (unsigned)g.slave,
+                 esp_err_to_name(err));
+        return false;
+    }
+    s_profile = p;
+    return true;
+}
+
 static void load_stored_identity(void)
 {
     memset(&s_stored_info, 0, sizeof(s_stored_info));
@@ -935,6 +979,95 @@ static bool answered_since(int64_t t0_us)
     return esp_timer_get_time() - (int64_t)st.last_answer_age_ms * 1000 >= t0_us;
 }
 
+/* ---- refused signal groups and the comparison's applies --------------------- */
+
+static void sg_note_refused(station_sg_t refused, bool back_valid, station_sg_t back, const char *reply)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_sg_refused = true;
+    s_sg_refused_group = refused;
+    s_sg_back_valid = back_valid;
+    s_sg_back = back;
+    snprintf(s_sg_refused_reply, sizeof(s_sg_refused_reply), "%s", reply[0] != '\0' ? reply : "rejected");
+    portEXIT_CRITICAL(&s_lock);
+    journal_push(DIAG_EV_SG_TEST, sgt_note_a(SGT_EV_REFUSED, refused),
+                 back_valid ? (int32_t)(((uint32_t)back.master << 8) | back.slave) : -1);
+}
+
+/* Any apply but the comparison's: the receiver refused the profile's group.
+ * The group it runs (the session's read-back before the change, else the
+ * group of the last successful apply) goes back into the profile and is
+ * re-applied at once, without CONFIG_FAILED; with neither known it is an
+ * ordinary failed apply. */
+static void sg_refused_fallback(stn_result_t *r)
+{
+    station_sg_t refused = { .master = s_profile.signal_group_master, .slave = s_profile.signal_group_slave };
+    uint16_t ok_pair = 0;
+    bool ok_known = settings_get_u16(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_OK, &ok_pair) == ESP_OK;
+    station_sg_t back = { 0 };
+    bool have = stn_sg_fallback(refused.master, refused.slave, s_apply.sg_before.known, s_apply.sg_before.master,
+                                s_apply.sg_before.slave, ok_known, ok_pair, &back.master, &back.slave);
+    if (have && !store_profile_group(back)) {
+        have = false;
+    }
+    sg_note_refused(refused, have, back, s_apply.reason);
+    if (have) {
+        r->sg_back = true;
+        ESP_LOGW(TAG, "the receiver refused signal group %u %u (%s): back to %u %u, applied again", (unsigned)refused.master,
+                 (unsigned)refused.slave, s_apply.reason, (unsigned)back.master, (unsigned)back.slave);
+    } else {
+        ESP_LOGE(TAG, "the receiver refused signal group %u %u (%s) and the group it ran before is not known",
+                 (unsigned)refused.master, (unsigned)refused.slave, s_apply.reason);
+    }
+}
+
+/* The comparison's own switch ended: tell its core; a refused group goes
+ * where the test goes next (its restore, or the group the receiver runs). */
+static void sg_test_apply_done(const stn_job_t *job, stn_result_t *r)
+{
+    (void)job;
+    sgt_apply_t a;
+    memset(&a, 0, sizeof(a));
+    a.ok = r->err == STN_OK;
+    a.rejected = !a.ok && s_apply.signal_group_rejected;
+    a.read_known = s_apply.sg_read.known && !r->nothing_sent;
+    a.read = (station_sg_t){ .master = s_apply.sg_read.master, .slave = s_apply.sg_read.slave };
+    snprintf(a.reason, sizeof(a.reason), "%s", s_apply.reason[0] != '\0' ? s_apply.reason : "failed");
+    station_sg_t refused = { .master = s_profile.signal_group_master, .slave = s_profile.signal_group_slave };
+    station_sg_t next = refused;
+    bool want = false;
+    bool idle = false;
+    xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
+    sgt_apply_done(&s_sgt, &a, now_ms(), unix_now());
+    if (s_sgt.want_switch) {
+        want = true;
+        next = s_sgt.target;
+    } else if (!sgt_running(&s_sgt)) {
+        idle = true;
+        next = s_sgt.cur_known ? s_sgt.cur : s_sgt.before;
+    }
+    xSemaphoreGive(s_sgt_mx);
+    if (!a.rejected) {
+        return;   /* a success, or another failure: the station core's usual path (the test restores itself) */
+    }
+    ESP_LOGW(TAG, "comparison: the receiver refused signal group %u %u (%s)", (unsigned)refused.master,
+             (unsigned)refused.slave, a.reason);
+    /* The profile holds the refused group: put back the group the test goes
+     * to (or ends on) and let the station re-apply it without CONFIG_FAILED. */
+    if (!want && !idle) {
+        sg_refused_fallback(r);   /* not a switch the test waited for: as for any apply */
+        return;
+    }
+    if (store_profile_group(next)) {
+        r->sg_back = true;
+        if (want) {
+            xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
+            sgt_switch_queued(&s_sgt);   /* the core queues the re-apply (STN_WHY_SG_TEST) in stn_done */
+            xSemaphoreGive(s_sgt_mx);
+        }
+    }
+}
+
 static const char *why_name(uint8_t why)
 {
     switch (why) {
@@ -952,6 +1085,12 @@ static const char *why_name(uint8_t why)
         return "position lock";
     case STN_WHY_RESURVEY:
         return "re-survey";
+    case STN_WHY_FLASH:
+        return "after a receiver update";
+    case STN_WHY_SG_TEST:
+        return "signal-group comparison";
+    case STN_WHY_SG_BACK:
+        return "back to the receiver's signal group";
     default:
         return "?";
     }
@@ -1051,7 +1190,16 @@ static void job_apply(const stn_job_t *job, stn_result_t *r)
         r->err = STN_E_FAIL;
         break;
     }
-    if (err != ESP_OK && !r->nothing_sent) {
+    if (s_apply.sg_read.known) {
+        s_rx_sg_valid = true;
+        s_rx_sg = (station_sg_t){ .master = s_apply.sg_read.master, .slave = s_apply.sg_read.slave };
+    }
+    if (job->why == STN_WHY_SG_TEST) {
+        sg_test_apply_done(job, r);
+    } else if (err != ESP_OK && s_apply.signal_group_rejected) {
+        sg_refused_fallback(r);
+    }
+    if (err != ESP_OK && !r->nothing_sent && !r->sg_back) {
         ESP_LOGE(TAG, "profile apply failed at \"%s\" (%s)%s: retried later", s_apply.failed_cmd, s_apply.reason,
                  r->receiver_lost ? ", receiver lost" : "");
     }
@@ -1833,6 +1981,12 @@ static void publish_status(const stn_in_t *in)
     o->b1cb2a_ok = s_b1c_ok;
     memcpy(o->b1cb2a_reply, s_b1c_reply, sizeof(o->b1cb2a_reply));
 
+    o->rx_sg_valid = s_rx_sg_valid;
+    o->rx_sg = s_rx_sg;
+    xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
+    sgt_brief(&s_sgt, in->now_ms, &o->sg_test);
+    xSemaphoreGive(s_sgt_mx);
+
     o->first_apply_held = core.first_apply_held;
     o->rx_maintenance = core.maint;
     o->maintenance_left_s = stn_maint_left_s(&core, in->now_ms);
@@ -2013,6 +2167,29 @@ static void sync_maintenance(const stn_in_t *in)
     }
 }
 
+/* The casters pause for receiver work between two epochs, never inside one:
+ * an epoch in flight (an MSM announced more, its last frame under the hub's
+ * gap rule old) goes out whole first, and the casters (lower priority than
+ * this task) get EPOCH_DRAIN_MS to read the frame that ended it. A stream
+ * that never settles waits EPOCH_WAIT_MS at most; the receiver session
+ * starts after the pause. */
+static void finish_epoch(void)
+{
+    int64_t until = now_ms() + EPOCH_WAIT_MS;
+    for (;;) {
+        uint32_t age = UINT32_MAX;
+        bool flight = rtcm_hub_epoch_in_flight(CONFIG_RTCM_HUB_BURST_GAP_MS, &age);
+        if (!flight && age >= EPOCH_DRAIN_MS) {
+            return;
+        }
+        if (now_ms() >= until) {
+            ESP_LOGD(TAG, "casters paused inside an epoch (no boundary within %u ms)", (unsigned)EPOCH_WAIT_MS);
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 static void after_step(const stn_in_t *in)
 {
     bool paused;
@@ -2041,6 +2218,9 @@ static void after_step(const stn_in_t *in)
     journal_flush();
 
     if (paused != s_paused) {
+        if (paused) {
+            finish_epoch();
+        }
         s_paused = paused;
         esp_err_t err = ntrip_server_set_paused(paused);
         if (err != ESP_OK) {
@@ -2109,6 +2289,169 @@ static void service(const stn_in_t *in)
     if (ok != s_rtcm_ok) {
         s_rtcm_ok = ok;
         ledger_set_rtcm_ok(ok);
+    }
+}
+
+/* ---- the signal-group comparison ---------------------------------------------- */
+
+/* The record at boot: resume it; one that cannot be read ends the test. */
+static void sg_test_load(void)
+{
+    size_t len = sizeof(s_sgt_rec);
+    esp_err_t err = settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST, s_sgt_rec, &len);
+    xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
+    sgt_init(&s_sgt);
+    bool bad = false;
+    if (err == ESP_OK && !sgt_decode(&s_sgt, s_sgt_rec, len, now_ms())) {
+        bad = true;
+    } else if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        bad = err != ESP_ERR_INVALID_STATE;   /* settings unavailable: nothing to judge */
+    }
+    if (bad) {
+        sgt_interrupted(&s_sgt, now_ms(), unix_now());
+    }
+    bool running = sgt_running(&s_sgt);
+    uint8_t state = s_sgt.state;
+    xSemaphoreGive(s_sgt_mx);
+    if (bad) {
+        esp_err_t e = settings_erase_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST);
+        ESP_LOGW(TAG, "signal-group comparison: its record could not be read (%s): ended as interrupted%s",
+                 esp_err_to_name(err), e == ESP_OK ? "" : " (record not erased)");
+    } else if (running) {
+        ESP_LOGW(TAG, "signal-group comparison resumes after the restart (state %u)", (unsigned)state);
+    }
+}
+
+/* A planned restart (the user's, an update's): store the running comparison
+ * with what it measured since its last periodic save. */
+static void sg_test_on_shutdown(lifecycle_reboot_reason_t reason, uint32_t deadline_ms, void *ctx)
+{
+    (void)reason;
+    (void)ctx;
+    if (s_sgt_mx == NULL || xSemaphoreTake(s_sgt_mx, pdMS_TO_TICKS(deadline_ms < 200u ? deadline_ms : 200u)) != pdTRUE) {
+        return;
+    }
+    size_t len = sgt_running(&s_sgt) ? sgt_encode(&s_sgt, now_ms(), s_sgt_rec, sizeof(s_sgt_rec)) : 0;
+    xSemaphoreGive(s_sgt_mx);
+    if (len > 0) {
+        esp_err_t err = settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST, s_sgt_rec, len);
+        ESP_LOGI(TAG, "comparison record %s before the restart", err == ESP_OK ? "stored" : "not stored");
+    }
+}
+
+/* One sample for the comparison: the live totals and the observation summary. */
+static bool sg_sample(sgt_sample_t *out, bool streaming)
+{
+    static gnss_obs_summary_t sum;   /* station task only */
+    static gnss_obs_live_t live;
+    memset(out, 0, sizeof(*out));
+    out->streaming = streaming;
+    size_t n = 0;
+    if (gnss_obs_get_summary(&sum) != ESP_OK || gnss_obs_get_live(NULL, &n, &live) != ESP_OK) {
+        return false;
+    }
+    out->epoch_age_ms = sum.epoch_age_ms;
+    out->epoch_gaps = sum.epoch_gaps;
+    for (unsigned s = 0; s < STATION_SGT_SYS; s++) {
+        out->sys_sats[s] = live.sys_sats[s];
+        out->signal_mask[s] = sum.sys[s].present ? sum.sys[s].signal_mask : 0;
+        for (unsigned b = 0; b < STATION_SGT_BANDS; b++) {
+            out->band_sats[s][b] = live.sys_band_sats[s][b];
+            out->cnr_dbhz[s][b] = sum.sys[s].present ? sum.sys[s].cnr_dbhz[b] : 0;
+        }
+    }
+    return true;
+}
+
+static const char *sgt_outcome_text(int32_t o)
+{
+    static const char *const k[] = { "none", "kept", "timed out", "cancelled", "rejected", "failed", "interrupted" };
+    return (o >= 0 && (size_t)o < sizeof(k) / sizeof(k[0])) ? k[o] : "?";
+}
+
+/* The comparison's clock, samples, switches, record and journal (station task). */
+static void sg_service(const stn_in_t *in)
+{
+    static sgt_sample_t smp;
+    bool streaming;
+    portENTER_CRITICAL(&s_lock);
+    streaming = s_core.state == STN_STREAMING && !s_core.maint;
+    portEXIT_CRITICAL(&s_lock);
+    int64_t unix_s = unix_now();
+
+    xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
+    bool due = sgt_sample_due(&s_sgt, in->now_ms);
+    xSemaphoreGive(s_sgt_mx);
+    bool have = due && sg_sample(&smp, streaming);
+
+    xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
+    sgt_tick(&s_sgt, streaming, have ? &smp : NULL, in->now_ms, unix_s);
+    bool want = s_sgt.want_switch;
+    station_sg_t target = s_sgt.target;
+    xSemaphoreGive(s_sgt_mx);
+
+    if (want) {
+        /* The station's own reconfigure: casters paused, planned downtime. */
+        bool ok = store_profile_group(target);
+        xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
+        if (s_sgt.want_switch && s_sgt.target.master == target.master && s_sgt.target.slave == target.slave) {
+            sgt_switch_queued(&s_sgt);
+            if (!ok) {
+                sgt_apply_t a = { .ok = false };
+                snprintf(a.reason, sizeof(a.reason), "profile not saved");
+                sgt_apply_done(&s_sgt, &a, in->now_ms, unix_s);
+            }
+        }
+        xSemaphoreGive(s_sgt_mx);
+        if (ok) {
+            portENTER_CRITICAL(&s_lock);
+            stn_request_apply_why(&s_core, STN_WHY_SG_TEST);
+            portEXIT_CRITICAL(&s_lock);
+            ESP_LOGI(TAG, "comparison: switching the receiver to signal group %u %u", (unsigned)target.master,
+                     (unsigned)target.slave);
+        }
+    }
+
+    sgt_note_t notes[SGT_NOTES];
+    size_t len = 0;
+    xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
+    unsigned nn = sgt_take_notes(&s_sgt, notes, SGT_NOTES);
+    if (s_sgt.save_due) {
+        len = sgt_encode(&s_sgt, in->now_ms, s_sgt_rec, sizeof(s_sgt_rec));
+        sgt_saved(&s_sgt, in->now_ms);   /* a failed write is tried again at the next transition or period */
+    }
+    xSemaphoreGive(s_sgt_mx);
+    if (len > 0) {
+        esp_err_t err = settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST, s_sgt_rec, len);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "comparison record not saved: %s", esp_err_to_name(err));
+        }
+    }
+    for (unsigned i = 0; i < nn; i++) {
+        const sgt_note_t *n = &notes[i];
+        unsigned m = ((uint32_t)n->a >> 8) & 0xFFu;
+        unsigned sl = ((uint32_t)n->a >> 16) & 0xFFu;
+        switch (n->event) {
+        case SGT_EV_STARTED:
+            ESP_LOGI(TAG, "comparison started: %u s per group, %u %u first", (unsigned)n->b, m, sl);
+            break;
+        case SGT_EV_SWITCHED:
+            ESP_LOGI(TAG, "comparison: signal group %u %u runs (phase %d)", m, sl, (int)n->b);
+            break;
+        case SGT_EV_ENDED:
+            ESP_LOGI(TAG, "comparison ended (%s) on signal group %u %u", sgt_outcome_text(n->b), m, sl);
+            break;
+        default:
+            break;
+        }
+        if (n->event == SGT_EV_REFUSED) {
+            /* The refusal also shows on the receiver page until the next profile save. */
+            station_sg_t refused = { .master = (uint8_t)m, .slave = (uint8_t)sl };
+            station_sg_t back = { .master = (uint8_t)((uint32_t)n->b >> 8), .slave = (uint8_t)n->b };
+            sg_note_refused(refused, true, back, s_apply.reason);   /* journals it */
+            continue;
+        }
+        journal_push(DIAG_EV_SG_TEST, n->a, n->b);
     }
 }
 
@@ -2203,6 +2546,7 @@ static void station_task(void *arg)
         feed_watchdog();
         fill_in(&in);
         service(&in);
+        sg_service(&in);
         portENTER_CRITICAL(&s_lock);
         stn_job_t job = stn_next(&s_core, &in);
         portEXIT_CRITICAL(&s_lock);
@@ -2306,6 +2650,16 @@ esp_err_t station_init(void)
     um98x_ctl_set_restart_cb(on_receiver_restart, NULL);
     load_profile();
     load_stored_identity();
+    if (s_sgt_mx == NULL) {
+        s_sgt_mx = xSemaphoreCreateMutex();
+        if (s_sgt_mx == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    sg_test_load();
+    if (lifecycle_register_shutdown_hook(sg_test_on_shutdown, NULL) != ESP_OK) {
+        ESP_LOGW(TAG, "comparison record: no shutdown hook (it is stored on its own schedule only)");
+    }
 
     if (!s_journal_read) {
         read_journal();
@@ -2439,6 +2793,12 @@ esp_err_t station_get_status(station_status_t *out)
     running = s_flash_running;
     released = s_lease_release_us;
     excluded = s_rtcm_excluded;
+    bool sg_refused = s_sg_refused;
+    station_sg_t sg_refused_group = s_sg_refused_group;
+    bool sg_back_valid = s_sg_back_valid;
+    station_sg_t sg_back = s_sg_back;
+    char sg_reply[sizeof(s_sg_refused_reply)];
+    memcpy(sg_reply, s_sg_refused_reply, sizeof(sg_reply));
     portEXIT_CRITICAL(&s_lock);
 
     if (!have) {
@@ -2458,6 +2818,18 @@ esp_err_t station_get_status(station_status_t *out)
     }
     out->rtcm_excluded = excluded;
     out->autocfg_off_this_boot = s_autocfg_ram_off;
+    if (!have) {
+        out->sg_test.phase = -1;   /* no comparison without the station */
+        out->sg_test.left_s = UINT32_MAX;
+        out->sg_test.decide_left_s = UINT32_MAX;
+        out->sg_test.ended_age_s = UINT32_MAX;
+    }
+    /* At read time: a profile save clears it at once. */
+    out->sg_refused = sg_refused;
+    out->sg_refused_group = sg_refused ? sg_refused_group : (station_sg_t){ 0 };
+    out->sg_back_valid = sg_refused && sg_back_valid;
+    out->sg_back = out->sg_back_valid ? sg_back : (station_sg_t){ 0 };
+    snprintf(out->sg_refused_reply, sizeof(out->sg_refused_reply), "%s", sg_refused ? sg_reply : "");
     /* Live, not from the last published status: a job takes and drops its
      * lease while it runs, between two publications. Every lease on the link
      * is the station's (its jobs, the boot lease, the listen-only lease). */
@@ -2528,6 +2900,126 @@ void station_first_apply_hold_refresh(void)
     }
     s_autocfg_ram_off = false;   /* the user turned automatic configuration on */
     first_apply_hold_update();
+}
+
+/* ---- signal-group comparison: requests ------------------------------------------ */
+
+static esp_err_t sgt_result(int rc, station_sgt_err_t *why)
+{
+    if (why != NULL) {
+        *why = (station_sgt_err_t)rc;
+    }
+    if (rc == STATION_SGT_OK) {
+        wake();
+        return ESP_OK;
+    }
+    return (rc == STATION_SGT_E_GROUPS || rc == STATION_SGT_E_PHASE) ? ESP_ERR_INVALID_ARG : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t station_sg_test_start(const station_sg_t groups[2], uint32_t phase_s, station_sgt_err_t *why)
+{
+    int rc = sgt_check_args(groups, phase_s);
+    if (rc != STATION_SGT_OK) {
+        return sgt_result(rc, why);
+    }
+    if (!s_started || s_sgt_mx == NULL) {
+        return sgt_result(lifecycle_in_safe_mode() ? STATION_SGT_E_SAFE_MODE : STATION_SGT_E_NOT_RUNNING, why);
+    }
+    xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
+    station_status_t *st = &s_sgt_st;
+    if (station_get_status(st) != ESP_OK) {
+        xSemaphoreGive(s_sgt_mx);
+        return sgt_result(STATION_SGT_E_NOT_RUNNING, why);
+    }
+    um98x_base_profile_t p;
+    uint8_t buf[UM98X_PROFILE_BLOB_MAX];
+    size_t blen = sizeof(buf);
+    bool have_profile = settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_PROFILE, buf, &blen) == ESP_OK &&
+                        um98x_profile_decode(buf, blen, &p);
+    sgt_guard_t g = {
+        .settings_ok = settings_is_available(),
+        .first_apply_held = st->first_apply_held,
+        .autocfg = autocfg_enabled(),
+        .maintenance = st->rx_maintenance,
+        .journal_open = st->flash_journal_open || st->flash_journal_settings_unavailable || st->flash_session_running,
+        .safe_mode = lifecycle_in_safe_mode(),
+        .supported = (st->alerts & STATION_ALERT_UNSUPPORTED_MODEL) == 0 && um98x_ctl_model_supported(&st->receiver),
+        .identity_confirmed = st->identity_confirmed,
+        .streaming = st->state == STATION_STATE_STREAMING,
+        .config_failed = st->config_failed,
+        .position_locked = have_profile && p.base_mode == UM98X_BASE_FIXED,
+        .running = { .master = have_profile ? p.signal_group_master : 0, .slave = have_profile ? p.signal_group_slave : 0 },
+    };
+    rc = sgt_start(&s_sgt, &g, groups, phase_s, now_ms());
+    xSemaphoreGive(s_sgt_mx);
+    if (rc == STATION_SGT_OK) {
+        ESP_LOGW(TAG, "comparison of signal groups %u %u and %u %u started by the user (%u s each)",
+                 (unsigned)groups[0].master, (unsigned)groups[0].slave, (unsigned)groups[1].master,
+                 (unsigned)groups[1].slave, (unsigned)phase_s);
+    }
+    return sgt_result(rc, why);
+}
+
+esp_err_t station_sg_test_keep(unsigned group, station_sgt_err_t *why)
+{
+    if (s_sgt_mx == NULL) {
+        return sgt_result(STATION_SGT_E_NOT_DECIDING, why);
+    }
+    xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
+    int rc = sgt_keep(&s_sgt, group, now_ms(), unix_now());
+    xSemaphoreGive(s_sgt_mx);
+    return sgt_result(rc, why);
+}
+
+esp_err_t station_sg_test_stop(station_sgt_err_t *why)
+{
+    if (s_sgt_mx == NULL) {
+        return sgt_result(STATION_SGT_E_IDLE, why);
+    }
+    xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
+    int rc = sgt_stop(&s_sgt, now_ms(), unix_now());
+    xSemaphoreGive(s_sgt_mx);
+    if (rc == STATION_SGT_OK) {
+        ESP_LOGW(TAG, "comparison stopped by the user");
+    }
+    return sgt_result(rc, why);
+}
+
+esp_err_t station_sg_test_get(station_sg_test_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_sgt_mx == NULL) {
+        static sgt_t idle;   /* the station does not run: an idle view */
+        sgt_init(&idle);
+        sgt_view(&idle, now_ms(), out);
+        return ESP_OK;
+    }
+    xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
+    sgt_view(&s_sgt, now_ms(), out);
+    xSemaphoreGive(s_sgt_mx);
+    return ESP_OK;
+}
+
+bool station_sg_test_running(void)
+{
+    if (s_sgt_mx == NULL) {
+        return false;
+    }
+    xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
+    bool running = sgt_running(&s_sgt);
+    xSemaphoreGive(s_sgt_mx);
+    return running;
+}
+
+void station_profile_saved(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_sg_refused = false;
+    s_sg_back_valid = false;
+    s_sg_refused_reply[0] = '\0';
+    portEXIT_CRITICAL(&s_lock);
 }
 
 esp_err_t station_request_reconfigure(void)

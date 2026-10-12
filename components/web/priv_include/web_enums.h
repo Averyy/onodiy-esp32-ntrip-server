@@ -70,6 +70,12 @@ const char *web_reboot_reason_name(lifecycle_reboot_reason_t v);
 const char *web_reset_reason_name(esp_reset_reason_t v);
 const char *web_clock_name(ledger_clock_t v);
 const char *web_sys_name(gnss_sys_t v);
+/** station_sgt_state_t: "idle", "switching", "settling", "measuring", "deciding", "restoring". */
+const char *web_sgt_state_name(uint8_t v);
+/** station_sgt_outcome_t: NULL for none, "kept", "timed_out", "cancelled", "rejected", "failed", "interrupted". */
+const char *web_sgt_outcome_name(uint8_t v);
+/** station_sgt_res_status_t: "pending", "measuring", "done", "rejected". */
+const char *web_sgt_result_name(uint8_t v);
 const char *web_band_name(gnss_band_t v);
 /** diag_event_t (1-based C values). */
 const char *web_diag_event_name(uint16_t kind);

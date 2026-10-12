@@ -401,6 +401,43 @@ static void sec_network(wj_t *w, const web_status_snap_t *s)
     wj_obj_close(w);
 }
 
+static void sg_pair(wj_t *w, const char *key, station_sg_t g)
+{
+    wj_obj_open(w, key);
+    wj_uint(w, "master", g.master);
+    wj_uint(w, "slave", g.slave);
+    wj_obj_close(w);
+}
+
+/* receiver.signal_test: a running comparison, or one that ended this boot
+ * less than a day ago (its outcome); null otherwise. The countdowns are
+ * rounded (10 s, 60 s), so the section changes rarely. */
+#define WEB_SGT_SHOW_ENDED_S 86400u
+
+static void signal_test_brief(wj_t *w, const station_sgt_brief_t *b)
+{
+    if (b->state == STATION_SGT_IDLE && (b->outcome == STATION_SGT_OUT_NONE || b->ended_age_s >= WEB_SGT_SHOW_ENDED_S)) {
+        wj_null(w, "signal_test");
+        return;
+    }
+    wj_obj_open(w, "signal_test");
+    wj_str(w, "state", web_sgt_state_name(b->state));
+    if (b->phase >= 0) {
+        wj_uint(w, "phase", (uint64_t)b->phase);
+    } else {
+        wj_null(w, "phase");
+    }
+    if (b->have_running) {
+        sg_pair(w, "group", b->running);
+    } else {
+        wj_null(w, "group");
+    }
+    wj_u32_or_null(w, "left_s", b->left_s);
+    wj_u32_or_null(w, "decide_left_s", b->decide_left_s);
+    wj_str(w, "outcome", web_sgt_outcome_name(b->outcome));
+    wj_obj_close(w);
+}
+
 static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
 {
     const station_status_t *st = &s->st;
@@ -428,6 +465,7 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
         wj_uint(w, "maintenance_chosen_s", st->rx_maintenance ? st->maintenance_chosen_s : 0);
         wj_u32_or_null(w, "next_detect_in_s", st->next_detect_in_s);
         wj_bool(w, "first_apply_held", st->first_apply_held);
+        signal_test_brief(w, &st->sg_test);
     }
     wj_obj_close(w);
 }
@@ -448,6 +486,12 @@ static void reboot_hold_fields(wj_t *w, const health_status_t *h)
     wj_arr_close(w);
     wj_u32_or_null(w, "reboot_hold_left_s", h->gnss_reboot_hold != 0 ? h->gnss_reboot_hold_left_s : UINT32_MAX);
     wj_u32_or_null(w, "reboot_cap_wait_s", h->gnss_reboot_cap_wait_s);
+    /* Which of the cap's limits sets that wait (the later one when both hold). */
+    const char *limit = NULL;
+    if (h->gnss_reboot_cap_wait_s != UINT32_MAX) {
+        limit = h->gnss_reboot_cap_limit == HEALTH_CAP_DAY ? "day" : "hour";
+    }
+    wj_str(w, "reboot_cap_limit", limit);
 }
 
 static void sec_health(wj_t *w, const web_status_snap_t *s, bool pub)
@@ -793,6 +837,25 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     wj_obj_close(w);
     rtcm1033(w, &g->rtcm1033);
     maintenance(w, st);
+    if (st->rx_sg_valid) {
+        sg_pair(w, "rx_signal_group", st->rx_sg);
+    } else {
+        wj_null(w, "rx_signal_group");
+    }
+    if (st->sg_refused) {
+        wj_obj_open(w, "signal_group_refused");
+        wj_uint(w, "master", st->sg_refused_group.master);
+        wj_uint(w, "slave", st->sg_refused_group.slave);
+        wj_strn(w, "reply", st->sg_refused_reply, strnlen(st->sg_refused_reply, sizeof(st->sg_refused_reply)));
+        if (st->sg_back_valid) {
+            sg_pair(w, "back_to", st->sg_back);
+        } else {
+            wj_null(w, "back_to");
+        }
+        wj_obj_close(w);
+    } else {
+        wj_null(w, "signal_group_refused");
+    }
 
     const um98x_base_position_t *pos = &st->position;
     bool have_pos = pos->source != UM98X_POS_NONE;
@@ -990,6 +1053,103 @@ unsigned web_sky_prn(gnss_sys_t sys, uint8_t prn)
     default:
         return prn;
     }
+}
+
+/* ---- signal-group comparison ------------------------------------------------------------------ */
+
+static void sgt_result(wj_t *w, const station_sgt_result_t *r)
+{
+    wj_obj_open(w, NULL);
+    sg_pair(w, "group", r->group);
+    wj_str(w, "status", web_sgt_result_name(r->status));
+    wj_uint(w, "measured_s", r->measured_s);
+    wj_uint(w, "samples", r->samples);
+    wj_uint(w, "epoch_gaps", r->epoch_gaps);
+    wj_str(w, "best_sys", r->best_sys < GNSS_SYS_COUNT ? web_sys_name((gnss_sys_t)r->best_sys) : NULL);
+    wj_uint(w, "best_bands", r->best_bands);
+    wj_arr_open(w, "systems");
+    for (unsigned i = 0; i < r->nsys && i < STATION_SGT_SYS; i++) {
+        const station_sgt_sys_t *sy = &r->sys[i];
+        wj_obj_open(w, NULL);
+        wj_str(w, "sys", web_sys_name((gnss_sys_t)sy->sys));
+        wj_double(w, "satellites", sy->sats_x10 / 10.0, 1);
+        wj_arr_open(w, "bands");
+        for (unsigned b = 0; b < sy->nband && b < STATION_SGT_BANDS; b++) {
+            wj_str(w, NULL, web_band_name((gnss_band_t)sy->band[b].band));
+        }
+        wj_arr_close(w);
+        wj_arr_open(w, "per_band");
+        for (unsigned b = 0; b < sy->nband && b < STATION_SGT_BANDS; b++) {
+            const station_sgt_band_t *e = &sy->band[b];
+            wj_obj_open(w, NULL);
+            wj_str(w, "band", web_band_name((gnss_band_t)e->band));
+            wj_double(w, "satellites", e->sats_x10 / 10.0, 1);
+            if (e->cnr_x10 != 0) {
+                wj_double(w, "cnr_dbhz", e->cnr_x10 / 10.0, 1);
+            } else {
+                wj_null(w, "cnr_dbhz");
+            }
+            wj_arr_open(w, "signal_ids");
+            for (unsigned id = 1; id <= 32; id++) {
+                if ((e->signal_mask & (1u << (id - 1u))) != 0) {
+                    wj_uint(w, NULL, id);
+                }
+            }
+            wj_arr_close(w);
+            wj_obj_close(w);
+        }
+        wj_arr_close(w);
+        wj_obj_close(w);
+    }
+    wj_arr_close(w);
+    wj_obj_close(w);
+}
+
+void web_build_signal_test(wj_t *w, const station_sg_test_t *v)
+{
+    wj_obj_open(w, NULL);
+    wj_str(w, "state", web_sgt_state_name(v->state));
+    if (v->have_test) {
+        wj_arr_open(w, "groups");
+        sg_pair(w, NULL, v->groups[0]);
+        sg_pair(w, NULL, v->groups[1]);
+        wj_arr_close(w);
+        sg_pair(w, "before", v->before);
+    } else {
+        wj_null(w, "groups");
+        wj_null(w, "before");
+    }
+    if (v->phase >= 0) {
+        wj_uint(w, "phase", (uint64_t)v->phase);
+    } else {
+        wj_null(w, "phase");
+    }
+    wj_uint(w, "phase_s", v->phase_s);
+    wj_uint(w, "settle_s", v->settle_s);
+    wj_u32_or_null(w, "left_s", v->left_s);
+    wj_u32_or_null(w, "decide_left_s", v->decide_left_s);
+    if (v->have_running) {
+        sg_pair(w, "running_group", v->running);
+    } else {
+        wj_null(w, "running_group");
+    }
+    if (v->have_test) {
+        wj_arr_open(w, "results");
+        sgt_result(w, &v->results[0]);
+        sgt_result(w, &v->results[1]);
+        wj_arr_close(w);
+    } else {
+        wj_null(w, "results");
+    }
+    wj_str(w, "outcome", web_sgt_outcome_name(v->outcome));
+    if (v->have_kept) {
+        sg_pair(w, "kept", v->kept);
+    } else {
+        wj_null(w, "kept");
+    }
+    wj_strn(w, "reason", v->reason, strnlen(v->reason, sizeof(v->reason)));
+    wj_unix(w, "ended_unix", v->ended_unix);
+    wj_obj_close(w);
 }
 
 void web_build_sky(wj_t *w, const gnss_obs_sat_t *sats, size_t count, const char *reason)

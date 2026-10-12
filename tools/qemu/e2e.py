@@ -7,7 +7,7 @@
 # ///
 """QEMU end to end: recorded RTCM through the firmware to a caster on this machine.
 
-    uv run tools/qemu/e2e.py [--out DIR] [--scenario stream|onocoy-guard|all] [--long]
+    uv run tools/qemu/e2e.py [--out DIR] [--scenario stream|onocoy-guard|signal-test|all] [--long]
                              [--caster fake|docker] [--fixture PATH] [--observe S]
 
 Needs the ESP-IDF environment and a QEMU build (tools/qemu/run.sh
@@ -24,23 +24,40 @@ What it does:
   2. starts a local fake caster (or, with --caster docker, the BKG caster
      image from tools/bench/docker/bkg-caster plus a GET client that
      records what it relays), boots the image headless, sets the admin
-     password and, once the station's start-up receiver query is over,
-     configures slot 1: {name "Bench", host 10.0.2.2, the caster's port,
-     NTRIP 1.0, mountpoint BENCH, a made-up password, standard profile,
-     enabled};
+     password and, as soon as the station streams, configures slot 1:
+     {name "Bench", host 10.0.2.2, the caster's port, NTRIP 1.0, mountpoint
+     BENCH, a made-up password, standard profile, enabled};
   scenario "stream":
-  3. slot 1 streaming within 60 s ("ICY 200 OK"; "OK" from the BKG caster);
+  3. slot 1 streaming within 60 s ("ICY 200 OK"; "OK" from the BKG caster)
+     and never `paused` (the replay answers no query, and the station never
+     takes the receiver line for its identity query while RTCM flows: no
+     "COMMAND lease taken by identify" on the console);
      GET /api/gnss/signals lists the fixture's constellations with their
-     bands (computed from the fixture with benchlib); /api/health
-     hub.frames_in grows by at least 5 x the fixture's frames per epoch in
-     10 s and the slot's epochs_sent rises;
+     bands (computed from the fixture with benchlib's band table, which
+     equals the firmware's; SBAS never listed); /api/health hub.frames_in
+     grows by at least 5 x the fixture's frames per epoch in 10 s and the
+     slot's epochs_sent rises;
   4. the caster's record holds at least 60 s of frames (--observe): every
-     one CRC-valid and byte-identical to a fixture frame, in fixture order
-     from the first epoch boundary on (modulo the loop; fixture frames the
-     station never forwards, such as the SBAS numbers 1101-1107, are
-     skipped), nothing between frames, a partial frame only at the very end;
-     receiver maintenance answers its start and extension with the time it
-     set, and GET /api/gnss agrees;
+     one CRC-valid and byte-identical to a fixture frame; after the sticky
+     copies it starts at a fixture epoch's first frame, then follows the
+     fixture in order (modulo the loop; fixture frames the station never
+     forwards, such as the SBAS numbers 1101-1107, are skipped), and any gap
+     falls on an epoch boundary (an epoch's last frame, then sticky copies
+     and an epoch's first frame); nothing between frames, a partial frame
+     only at the very end; receiver maintenance answers its start and
+     extension with the time it set, and GET /api/gnss agrees;
+  scenario "signal-test" (the replay answers as a scripted UM982,
+  benchlib.um982_sim; with --scenario all it runs last, under 10 min):
+  5. a fixed profile (the stream's own position) through PUT: the station
+     identifies the receiver, switches it from 4 5 to 3 6 and locks;
+     a comparison is refused with automatic configuration off and in
+     receiver maintenance; 7 0 refused by the receiver ends a comparison as
+     rejected, back on 3 6 without config_failed; 3 6 against 7 0 with
+     phase_s 60 and a restart in the middle of measuring (the replay paused
+     across the reboot) resumes with its measured time, runs through the
+     states in order within their time bounds, shows both results and keep 1
+     leaves the profile on 7 0; every caster record of the scenario passes
+     the strict epoch check above;
   scenario "onocoy-guard" (firmware with test-Onocoy slots; SKIP otherwise;
   with --scenario all it runs before "stream"):
   5. slot 0 as a test-Onocoy slot (test_onocoy) against a second fake caster
@@ -56,7 +73,10 @@ What it does:
      of 3, waiting 5 s at a score of 1 and 10 s at 2; duplicate and banned
      reports stop it at once; a stop survives a reboot (the replay pauses
      across it, see tools/qemu/README.md) and POST /api/casters/0/retry
-     clears it.
+     clears it. While the guard waits after a rejected login, a login block
+     or an in-use reply, /api/health network.ladder.triggers has no
+     `protected` (a network action cannot fix a caster's reply); with the
+     slot pointed at a closed port (connect refused) it has.
      --long adds the 5-minute wait after a rejected login and the whole
      in-use retry ladder;
   6. throughout: no panic, abort, watchdog or reboot loop on the console
@@ -94,8 +114,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # the bench tools for the replay and the casters.
 import smoke
 from benchlib import rtcm
-from benchlib.replay import EpochGrouper, Schedule, load, msm_of
+from benchlib.replay import Burst, EpochGrouper, Schedule, load, msm_of
 from benchlib.stream import StreamSplitter
+from benchlib.um982_sim import Um982Responder, with_station_messages
 from fake_caster import FakeCaster
 from rtcm_replay import ReplayServer
 
@@ -110,10 +131,8 @@ GUARD_USER = "testuser01"
 GUARD_PASSWORD = "fakepass123"
 MIN_RECORD_S = 60.0
 QEMU_TOLERANCE_S = 2.0
-# The firmware maps no band for NavIC and SBAS signals (gnss_rtcm3.c), while
-# benchlib's band table gives NavIC L5: the signal view lists those
-# constellations without bands.
-FIRMWARE_UNMAPPED = {"NavIC", "SBAS"}
+IDENTIFY_LEASE_LINE = "COMMAND lease taken by identify"
+SGT_PHASE_S = 60
 STOP_REASONS = ["none", "rejected", "login_blocked", "in_use", "kicked", "duplicate", "banned"]
 
 
@@ -127,17 +146,16 @@ class SkipScenario(Exception):
 
 def expected_signals(schedule: Schedule) -> dict[str, list[str]]:
     """What /api/gnss/signals lists for the fixture: every constellation with
-    an MSM the station decodes (not the SBAS numbers), with the bands of the
-    signals that carry cells."""
+    an MSM the station decodes, with the bands of the signals that carry
+    cells, by benchlib's band table (the firmware's own). SBAS is never
+    listed (its message numbers never reach the signal view)."""
     out: dict[str, set[str]] = {}
     for b in schedule.bursts:
         for f in b.frames:
             m = msm_of(f)
-            if m is None:
+            if m is None or m.system == "SBAS":
                 continue
             bands = out.setdefault(m.system.lower(), set())
-            if m.system in FIRMWARE_UNMAPPED:
-                continue
             for c in m.cells:
                 band = rtcm.band_of(m.system, c.sig)
                 if band:
@@ -163,16 +181,53 @@ def frames_per_epoch(schedule: Schedule) -> float:
     return len(frames) / epochs if epochs else 0.0
 
 
+def with_station(schedule: Schedule, station: list[bytes], types) -> Schedule:
+    """The fixture as the scripted receiver sends it: its own station messages
+    open every epoch, the fixture's own of those types left out (as the
+    replay sends it with a responder; bursts of whole frames only)."""
+    bursts = []
+    for b in schedule.bursts:
+        frames = with_station_messages(b.frames, station, types) if b"".join(b.frames) == b.data else list(b.frames)
+        bursts.append(Burst(b.t, b"".join(frames), frames, dict(b.epoch_s)))
+    return Schedule(schedule.kind, schedule.source, bursts, schedule.period)
+
+
+def split_at_station(data: bytes, station: list[bytes]) -> tuple[bytes, bytes]:
+    """A caster record cut where the configured receiver's own station
+    messages first appear (a session that ran through the configuration):
+    the part before it, sent as recorded, and the rest."""
+    split = StreamSplitter()
+    own = set(station)
+    for it in split.feed(data) + split.flush():
+        if it.kind == "rtcm" and it.data in own:
+            return data[:it.offset], data[it.offset:]
+    return data, b""
+
+
 def check_record(data: bytes, schedule: Schedule, leading_junk_ok: bool = False) -> tuple[bool, str, float]:
-    """The record against the fixture. Returns (ok, detail, seconds of the
-    fixture's time the in-order part of the record covers)."""
+    """The record against the fixture, strictly. Returns (ok, detail, seconds
+    of the fixture's time the record covers).
+
+    After the sticky copies (1005/1006, 1033, 1230: replayed at every session
+    start and resume, up to 30 s old) the record starts at a fixture epoch's
+    first frame, never inside an epoch. Then every frame is the fixture's
+    next one (modulo the loop; fixture types the record never shows, the
+    SBAS numbers the station drops, are skipped). Any other step is a gap
+    (a caster pause: a receiver switch, a lease): it must fall on an epoch
+    boundary, the frame before it an epoch's last and the frames after it
+    sticky copies, then an epoch's first frame.
+
+    At the start and after a gap of at least one whole epoch, the epoch's
+    leading station messages (sticky types) may be missing, its MSMs never:
+    after a receiver reconfiguration the hub has no copies to replay, and
+    frames are timestamped when read, so a reader stalled right then (flash
+    writes) lets the hub's gap rule start that epoch at its first MSM. A
+    station message missing between two consecutive epochs is a lost frame."""
     split = StreamSplitter()
     items = split.feed(data) + split.flush()
     fx: list[bytes] = []
     burst_of: list[int] = []
-    starts: set[int] = set()
     for i, b in enumerate(schedule.bursts):
-        starts.add(len(fx))
         fx += b.frames
         burst_of += [i] * len(b.frames)
     if not fx:
@@ -199,50 +254,110 @@ def check_record(data: bytes, schedule: Schedule, leading_junk_ok: bool = False)
     unknown = [k for k, it in enumerate(frames) if it.data not in pos]
     if unknown:
         return False, f"{len(unknown)} recorded frames are no fixture frame (first: #{unknown[0]})", 0.0
-    # Start at an epoch's (a burst's) first frame that occurs only once in the
-    # fixture: a 1005 or 1230 can repeat unchanged, an MSM cannot. A station
-    # metadata frame never opens it, even a unique one: the hub replays its
-    # sticky copies (up to 30 s old) at every session start, ahead of
-    # whichever epoch the live data then starts with.
-    openers: set[int] = set()
-    for s in starts:
-        q = s
-        while q < len(fx) and burst_of[q] == burst_of[s]:
-            if len(pos[fx[q]]) == 1 and frame_type(fx[q]) not in STICKY_TYPES:
-                openers.add(q)
-                break
-            q += 1
-    k0 = next((k for k, it in enumerate(frames) if len(pos[it.data]) == 1 and pos[it.data][0] in openers), None)
-    if k0 is None:
-        return False, "no epoch boundary in the record", 0.0
-    seen_types = {frame_type(it.data) for it in frames[k0:]}
+    seen_types = {frame_type(it.data) for it in frames}
+    sticky = [frame_type(it.data) in STICKY_TYPES for it in frames]
+
+    def skippable(q: int) -> bool:
+        return frame_type(fx[q]) not in seen_types
+
+    def first_of_burst(q: int) -> bool:
+        """q is its burst's first frame that is no sticky type (and that the record could show)."""
+        k = q - 1
+        while k >= 0 and burst_of[k] == burst_of[q]:
+            if frame_type(fx[k]) not in STICKY_TYPES and not skippable(k):
+                return False
+            k -= 1
+        return True
+
+    def last_of_burst(q: int) -> bool:
+        """q is its burst's last frame the record could show."""
+        k = (q + 1) % len(fx)
+        while burst_of[k] == burst_of[q] and k != q:
+            if not skippable(k):
+                return False
+            k = (k + 1) % len(fx)
+        return True
+
+    def opener(k: int) -> tuple[int, int, bool] | None:
+        """From record frame k on: sticky copies, then an epoch from its first frame (its own leading
+        station messages among them: the hub sends an epoch from its first frame, after the copies).
+        Returns (record index of the epoch's first non-sticky frame, its fixture index, whether some of
+        its leading station messages are missing), or None."""
+        k_run = k
+        while k < len(frames) and sticky[k]:
+            k += 1
+        if k == len(frames):
+            return None
+        q = pos[frames[k].data][0]
+        if len(pos[frames[k].data]) != 1 or not first_of_burst(q):
+            return None
+        run = {frames[i].data for i in range(k_run, k)}
+        lead = q - 1
+        lead_missing = False
+        while lead >= 0 and burst_of[lead] == burst_of[q]:
+            if not skippable(lead) and fx[lead] not in run:
+                if frame_type(fx[lead]) not in STICKY_TYPES:
+                    return None   # the epoch's own first frame is missing
+                lead_missing = True
+            lead -= 1
+        return k, q, lead_missing
+
+    start = opener(0)
+    if start is None:
+        k = next((k for k, st in enumerate(sticky) if not st), None)
+        what = "only sticky copies" if k is None else f"record frame #{k} (type {frame_type(frames[k].data)})"
+        return False, f"the record does not start at an epoch's first frame: {what}", 0.0
+    k0, p, _lead = start
     skipped_types: dict[int, int] = {}
-    p = pos[frames[k0].data][0]
+    gaps = 0
     epochs = 1
     seconds = 0.0
     times = [b.t for b in schedule.bursts]
-    for k in range(k0 + 1, len(frames)):
+    anchor_k, anchor_p = k0, p   # the last frame that is no sticky type, and its fixture index
+    k = k0 + 1
+    while k < len(frames):
         q = (p + 1) % len(fx)
         hops = 0
-        while fx[q] != frames[k].data:
+        while fx[q] != frames[k].data and skippable(q) and hops <= len(fx):
             t = frame_type(fx[q])
-            if t in seen_types:
-                return False, (f"record frame #{k} (type {frame_type(frames[k].data)}) is not the next fixture frame: "
-                               f"fixture frame {q} (type {t}) is missing"), 0.0
             skipped_types[t] = skipped_types.get(t, 0) + 1
             q = (q + 1) % len(fx)
             hops += 1
-            if hops > len(fx):
-                return False, f"record frame #{k} not found after fixture frame {p}", 0.0
-        if burst_of[q] != burst_of[p] or q <= p:
-            dt = times[burst_of[q]] - times[burst_of[p]]
-            seconds += dt if q > p else dt + schedule.duration  # across the loop's seam
-        if q in openers:
-            epochs += 1
-        p = q
+        if fx[q] == frames[k].data:
+            if burst_of[q] != burst_of[p] or q <= p:
+                dt = times[burst_of[q]] - times[burst_of[p]]
+                seconds += dt if q > p else dt + schedule.duration  # across the loop's seam
+                epochs += 1
+            p = q
+            if not sticky[k]:
+                anchor_k, anchor_p = k, p
+            k += 1
+            continue
+        # A gap: only between an epoch's last frame and sticky copies plus an epoch's first frame. Station
+        # messages that matched the fixture after the last other frame may be the copies of a resume (a
+        # fixed base sends them unchanged): judge the gap from that frame.
+        if anchor_k < k - 1 and all(sticky[anchor_k + 1:k]):
+            k, p = anchor_k + 1, anchor_p
+        if not last_of_burst(p):
+            return False, (f"record frame #{k} (type {frame_type(frames[k].data)}) follows fixture frame {p} "
+                           f"(type {frame_type(fx[p])}) inside its epoch: fixture frame {q} (type "
+                           f"{frame_type(fx[q])}) is missing"), 0.0
+        nxt = opener(k)
+        if nxt is None:
+            if all(sticky[k:]):
+                break   # the record ends with sticky copies of the next session start
+            return False, (f"after the gap at record frame #{k} the record does not resume at an epoch's first "
+                           f"frame: fixture frame {q} (type {frame_type(fx[q])}) or that epoch's start is missing"), 0.0
+        if nxt[2] and burst_of[nxt[1]] == (burst_of[p] + 1) % len(schedule.bursts):
+            return False, (f"record frame #{nxt[0]} (type {frame_type(frames[nxt[0]].data)}) follows the epoch "
+                           f"before it, but that epoch's station messages are missing"), 0.0
+        k, p = nxt[0] + 1, nxt[1]
+        anchor_k, anchor_p = nxt[0], nxt[1]
+        gaps += 1
+        epochs += 1
     unit = "epochs" if schedule.kind == "rtcm" else "recorded reads"
-    detail = (f"{len(frames)} frames, {len(frames) - k0} from the first epoch boundary in fixture order over "
-              f"{epochs} {unit}; skipped fixture types never forwarded: "
+    detail = (f"{len(frames)} frames, {len(frames) - k0} from the first epoch's first frame over {epochs} {unit}, "
+              f"{gaps} gap{'' if gaps == 1 else 's'} on epoch boundaries; skipped fixture types never forwarded: "
               f"{', '.join(f'{t} x{n}' for t, n in sorted(skipped_types.items())) or 'none'}")
     return True, detail, seconds + schedule.period
 
@@ -344,6 +459,7 @@ class E2E:
         self.caster: FakeCaster | None = None
         self.docker: DockerCaster | None = None
         self.guard: FakeCaster | None = None
+        self.responder: Um982Responder | None = None
         self.cookie: str | None = None
         self.password = "e2e-" + secrets.token_hex(8)
         self.http_port = smoke.free_port()
@@ -453,6 +569,8 @@ class E2E:
         s = 240 + self.args.observe
         if self.args.scenario in ("onocoy-guard", "all"):
             s += 900 + (900 if self.args.long else 0)
+        if self.args.scenario in ("signal-test", "all"):
+            s += 720
         return s
 
     def stop(self) -> None:
@@ -485,26 +603,37 @@ class E2E:
         return self.settle()
 
     def settle(self) -> bool:
-        """Streaming, and the start-up receiver query over (it pauses the casters while it runs)."""
+        """Streaming. The identity query that gets no answer while RTCM flows never takes the
+        receiver line (no lease, the casters are never paused for it), so nothing else to wait for."""
         def ready():
             h = self.health()
-            st = h.get("station", {})
-            return st.get("state") == "streaming" and not st.get("lease_held") and \
-                st.get("since_lease_release_ms") is not None and h
+            return h if h.get("station", {}).get("state") == "streaming" else None
         h = self.poll(ready, 90)
         if h is None:
-            h = self.health()
-            st = h.get("station", {})
-            ok = st.get("state") == "streaming"
-            self.check(ok, f"station streaming the replay (state {st.get('state')}; no receiver query seen in 90 s)")
-            return ok
-        self.check(True, f"station streaming the replay; its start-up receiver query is over "
-                         f"(hub {h['hub']['frames_in']} frames in)")
+            st = self.health().get("station", {})
+            self.check(False, f"station streaming the replay within 90 s (state {st.get('state')})")
+            return False
+        self.check(True, f"station streaming the replay (hub {h['hub']['frames_in']} frames in)")
         return True
 
     # -- scenario: stream -------------------------------------------------------
 
+    def console_text(self) -> str:
+        return self.console.read_text(encoding="utf-8", errors="replace") if self.console.exists() else ""
+
     def stream(self) -> None:
+        console_at = len(self.console_text())
+        states: set[str] = set()
+        watching = threading.Event()
+
+        def watch_slot() -> None:
+            """Every state slot 1 reports while the scenario runs (it must never be `paused`)."""
+            while not watching.wait(1.0):
+                try:
+                    states.add(self.slot(1)["status"].get("state"))
+                except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError):
+                    pass
+        watcher = threading.Thread(target=watch_slot, name="slot1-watch", daemon=True)
         if self.args.caster == "docker":
             self.docker = DockerCaster(self.out / "caster", self.say)
             self.docker.start()
@@ -522,6 +651,7 @@ class E2E:
                                          f"HTTP {status}"):
             return
         t_put = time.monotonic()
+        watcher.start()
 
         def streaming():
             s = self.slot(1)["status"]
@@ -553,6 +683,13 @@ class E2E:
         self.check(ok and seconds >= MIN_RECORD_S,
                    f"caster record: {seconds:.0f} s of frames (at least {MIN_RECORD_S:.0f}); {detail}")
         self.save("api-caster-1-end.json", self.slot(1))
+        watching.set()
+        watcher.join(timeout=5)
+        self.check("paused" not in states, f"slot 1 never paused during the stream scenario (states seen: "
+                                           f"{sorted(x for x in states if x)})")
+        lease_lines = [x for x in self.console_text()[console_at:].splitlines() if IDENTIFY_LEASE_LINE in x]
+        self.check(not lease_lines, f"no {IDENTIFY_LEASE_LINE!r} on the console while RTCM flows"
+                   + (f": {lease_lines[0].strip()[:120]}" if lease_lines else ""))
         self.maintenance_check()
 
     def maintenance_check(self) -> None:
@@ -761,6 +898,7 @@ class E2E:
         # 2. A rejected login on credentials that never worked: 5 minutes.
         n = self.retry("onocoy_auth_failed")
         self.next_retry_after(n, 300, "rejected login, credentials never worked")
+        self.no_protected_trigger("waiting after a rejected login")
         if self.args.long:
             self.gap(n, 300, "rejected login: the wait before the second attempt", timeout=420)
             self.next_retry_after(n + 1, 1800, "second rejected login")
@@ -769,6 +907,7 @@ class E2E:
         # 3. Too many unsuccessful logins: 60 minutes.
         n = self.retry("onocoy_login_blocked")
         self.next_retry_after(n, 3600, "login blocked")
+        self.no_protected_trigger("waiting after a login block")
         self.quiet(10, "waiting after a login block")
 
         # 4. Sessions the caster ends within 120 s: 5 s, then 10 s, stopped at a score of 3.
@@ -802,6 +941,7 @@ class E2E:
         n = self.retry("icy_ok:kick=3,onocoy_in_use")
         if self.wait_conn_start(n, 30):
             self.gap(n + 1, 15, "in use inside the window: first wait")
+            self.no_protected_trigger("waiting after an in-use reply")
             self.gap(n + 2, 30, "in use inside the window: second wait")
             if self.args.long:
                 self.gap(n + 3, 60, "in use inside the window: third wait")
@@ -824,7 +964,36 @@ class E2E:
 
         # 9. A stop survives a reboot; retry clears it.
         self.reboot_check()
+        # 10. A slot that cannot reach its caster (a refused connect) does hold the trigger.
+        self.closed_port_trigger()
         self.journal_check()
+
+    def protected_trigger(self) -> bool:
+        return "protected" in (self.health().get("network", {}).get("ladder", {}).get("triggers") or [])
+
+    def no_protected_trigger(self, what: str) -> None:
+        """A wait on the caster's own reply: a network action cannot help, so no `protected` trigger."""
+        seen = []
+        for _ in range(5):
+            seen.append(self.protected_trigger())
+            time.sleep(1)
+        st = self.slot(0)["status"]
+        self.check(not any(seen), f"{what}: /api/health network.ladder.triggers without 'protected' "
+                                  f"(slot 0 {st.get('state')!r}, last failure {st.get('reason')!r})")
+
+    def closed_port_trigger(self) -> None:
+        closed = smoke.free_port()   # nothing listens there: the connect is refused
+        status, _ = self.api("PUT", "/api/casters/0", {"port": closed})
+        if not self.check(status == 200, f"PUT /api/casters/0 (a closed port): HTTP {status}"):
+            return
+        got = self.poll(lambda: self.protected_trigger(), 30, every=1.0)
+        st = self.slot(0)["status"]
+        self.check(bool(got), f"connect refused: /api/health network.ladder.triggers has 'protected' "
+                              f"(slot 0 {st.get('state')!r}, last failure {st.get('reason')!r})")
+        self.guard.set_sequence("icy_ok")
+        status, _ = self.api("PUT", "/api/casters/0", {"port": self.guard.port})
+        s = self.poll(lambda: (lambda x: x if x.get("state") == "streaming" else None)(self.slot(0)["status"]), 60)
+        self.check(status == 200 and s is not None, f"slot 0 back on the guard caster and streaming (PUT: HTTP {status})")
 
     def no_line_end_check(self) -> None:
         main = self.guard
@@ -898,6 +1067,218 @@ class E2E:
         want = {"in_use", "kicked", "banned", "duplicate"}
         self.check(want <= set(stops), f"journal caster_stop records for slot 0: {stops}")
 
+    # -- scenario: signal-test ---------------------------------------------------
+
+    def gnss(self) -> dict:
+        status, data = self.api("GET", "/api/gnss")
+        if status != 200 or not isinstance(data, dict):
+            raise ValueError(f"GET /api/gnss: HTTP {status}")
+        return data
+
+    def sgt(self) -> dict:
+        status, data = self.api("GET", "/api/gnss/signal-test")
+        if status != 200 or not isinstance(data, dict):
+            raise ValueError(f"GET /api/gnss/signal-test: HTTP {status}")
+        return data
+
+    def stream_slot(self) -> None:
+        """Slot 1 streaming to the local fake caster (the stream scenario's, or set up here)."""
+        if self.caster is None and self.docker is None:
+            self.caster = FakeCaster(0, mount=STREAM_MOUNT, password=STREAM_PASSWORD, record=True,
+                                     run_dir=self.out / "caster", say=self.say).start()
+            body = {"name": "Bench", "host": HOST_FROM_GUEST, "port": self.caster.port, "ntrip_version": 1,
+                    "mountpoint": STREAM_MOUNT, "password": STREAM_PASSWORD, "backoff_profile": "standard",
+                    "enabled": True}
+            status, _ = self.api("PUT", "/api/casters/1", body)
+            self.check(status == 200, f"PUT /api/casters/1 (slot 1 for the signal-test records): HTTP {status}")
+        s = self.poll(lambda: (lambda x: x if x.get("state") == "streaming" else None)(self.slot(1)["status"]), 90)
+        self.check(s is not None, "slot 1 streaming before the comparison")
+
+    def receiver_ready(self, group: tuple[int, int], timeout: float) -> dict | None:
+        """Configured as the profile says, identified, locked, streaming, on `group`."""
+        def ready():
+            g = self.gnss()
+            rx = g.get("rx_signal_group") or {}
+            ok = (g.get("state") == "streaming" and g.get("profile_applied") and g.get("identity_confirmed")
+                  and not g.get("config_failed") and (g.get("position") or {}).get("locked")
+                  and (rx.get("master"), rx.get("slave")) == group)
+            return g if ok else None
+        return self.poll(ready, timeout, every=2.0)
+
+    def sgt_post(self, groups: list[tuple[int, int]], phase_s: int) -> tuple[int, object]:
+        body = {"groups": [{"master": m, "slave": s} for m, s in groups], "phase_s": phase_s}
+        return self.api("POST", "/api/gnss/signal-test", body)
+
+    def signal_test(self) -> None:
+        t_scn = time.monotonic()
+        if self.args.caster == "docker":
+            self.skip("signal-test: needs the fake caster's per-session records (not with --caster docker)")
+            return
+        self.stream_slot()
+        first_conn = max((c["n"] for c in self.caster.all_connections()), default=0)
+        resp = Um982Responder(group=(4, 5), restart_s=3.0)
+        self.replay.set_responder(resp)
+        self.responder = resp
+
+        # 1. A fixed profile through PUT: the station identifies the receiver, switches it to 3 6, locks.
+        #    The stream's own position when it carries one (1005/1006), else a made-up one (the
+        #    responder takes any base position).
+        arp = self.gnss().get("arp") or {}
+        if not arp.get("valid"):
+            arp = {"lat_deg": 34.052235, "lon_deg": -118.243683, "height_m": 89.5}
+        prof = dict(self.gnss().get("profile") or {})
+        prof.update(signal_group_master=3, signal_group_slave=6, base_mode="fixed",
+                    fixed={"lat_deg": round(arp["lat_deg"], 9), "lon_deg": round(arp["lon_deg"], 9),
+                           "height_m": round(arp["height_m"], 4)})
+        status, data = self.api("PUT", "/api/gnss/profile", {"profile": prof, "autocfg": True})
+        self.save("sgt-put-profile.json", data)
+        if not self.check(status == 202, f"PUT /api/gnss/profile (fixed, 3 6): HTTP {status} {data}"):
+            return
+        g = self.receiver_ready((3, 6), 150)
+        if not self.check(g is not None and resp.signal_group() == (3, 6),
+                          f"receiver identified, configured on 3 6 and locked (responder on {resp.signal_group()}, "
+                          f"{resp.restarts} restart(s))"):
+            self.save("sgt-gnss-not-ready.json", self.gnss())
+            return
+
+        # 2. Refusals.
+        status, _ = self.api("PUT", "/api/gnss/profile", {"autocfg": False})
+        status2, data = self.sgt_post([(3, 6), (7, 0)], SGT_PHASE_S)
+        code = (data or {}).get("error", {}).get("code") if isinstance(data, dict) else None
+        self.check(status == 202 and status2 == 409 and code == "autocfg_off",
+                   f"comparison refused with automatic configuration off: HTTP {status2} {code}")
+        self.api("PUT", "/api/gnss/profile", {"autocfg": True})
+        status, _ = self.api("POST", "/api/gnss/maintenance", {"duration_s": 900})
+        status2, data = self.sgt_post([(3, 6), (7, 0)], SGT_PHASE_S)
+        code = (data or {}).get("error", {}).get("code") if isinstance(data, dict) else None
+        self.check(status == 200 and status2 == 409 and code == "receiver_maintenance",
+                   f"comparison refused in receiver maintenance: HTTP {status2} {code}")
+        self.api("DELETE", "/api/gnss/maintenance")
+        if not self.check(self.receiver_ready((3, 6), 120) is not None, "streaming again after maintenance"):
+            return
+
+        # 3. 7 0 refused by the receiver: rejected, back on 3 6, no config_failed.
+        resp.reject = {(7, 0)}
+        status, data = self.sgt_post([(7, 0), (5, 0)], SGT_PHASE_S)
+        if self.check(status == 202, f"POST /api/gnss/signal-test 7 0 vs 5 0 (7 0 refused): HTTP {status} {data}"):
+            t = self.poll(lambda: (lambda x: x if x.get("state") == "idle" and x.get("outcome") else None)(self.sgt()),
+                          120, every=2.0)
+            self.save("sgt-rejected.json", t)
+            res0 = ((t or {}).get("results") or [{}])[0]
+            self.check(t is not None and t.get("outcome") == "rejected" and res0.get("status") == "rejected",
+                       f"outcome rejected: {(t or {}).get('outcome')}, {(t or {}).get('reason')!r}")
+            g = self.receiver_ready((3, 6), 120) or self.gnss()
+            pr = g.get("profile") or {}
+            refused = g.get("signal_group_refused") or {}
+            self.check((pr.get("signal_group_master"), pr.get("signal_group_slave")) == (3, 6)
+                       and not g.get("config_failed") and resp.signal_group() == (3, 6),
+                       f"profile back on 3 6, config_failed {g.get('config_failed')}, receiver on {resp.signal_group()}")
+            self.check((refused.get("master"), refused.get("slave")) == (7, 0),
+                       f"GET /api/gnss signal_group_refused names 7 0: {refused}")
+        resp.reject = set()
+
+        # 4. 3 6 against 7 0, with a restart while measuring the first.
+        status, data = self.sgt_post([(3, 6), (7, 0)], SGT_PHASE_S)
+        if not self.check(status == 202, f"POST /api/gnss/signal-test 3 6 vs 7 0, phase_s {SGT_PHASE_S}: HTTP {status} {data}"):
+            return
+        trace: list[tuple[float, str, object]] = []
+
+        def look() -> dict:
+            t = self.sgt()
+            key = (t.get("state"), t.get("phase"))
+            if not trace or (trace[-1][1], trace[-1][2]) != key:
+                trace.append((time.monotonic(), key[0], key[1]))
+                self.say(f"signal test: {key[0]} phase {key[1]}")
+            return t
+        t = self.poll(lambda: (lambda x: x if x.get("state") == "measuring" and
+                               (x.get("results") or [{}])[0].get("measured_s", 0) >= 20 else None)(look()), 180, every=1.0)
+        if not self.check(t is not None, "measuring 3 6 (no switch: it runs already), 20 s measured"):
+            self.save("sgt-run-stuck.json", self.sgt())
+            return
+        measured = t["results"][0]["measured_s"]
+        self.say(f"restart while measuring ({measured} s measured)")
+        self.replay.pause()
+        time.sleep(2)
+        status, _ = self.api("POST", "/api/system/reboot", {})
+        if not self.check(status == 202, f"POST /api/system/reboot during the comparison: HTTP {status}"):
+            self.replay.resume()
+            return
+        self.planned_reboots += 1
+        time.sleep(5)
+        self.cookie = None
+        back = self.wait_http(self.args.timeout)
+        self.replay.resume()
+        if not self.check(back and self.login(first=False), "back after the restart during the comparison"):
+            return
+        trace.append((time.monotonic(), "restart", None))
+        t = look()
+        res0 = (t.get("results") or [{}])[0]
+        self.check(t.get("state") in ("settling", "measuring") and t.get("phase") == 0 and
+                   res0.get("measured_s", 0) >= measured,
+                   f"the comparison resumed: {t.get('state')} phase {t.get('phase')}, {res0.get('measured_s')} s "
+                   f"measured (at least {measured})")
+        t = self.poll(lambda: (lambda x: x if x.get("state") in ("deciding", "idle") else None)(look()), 420, every=1.0)
+        self.save("sgt-deciding.json", t if t is not None else self.sgt())
+        if not self.check(t is not None and t.get("state") == "deciding", "deciding after both groups"):
+            return
+        states = [x[1] for x in trace]
+        want = ["settling", "measuring", "restart", "settling", "measuring", "switching", "settling", "measuring",
+                "deciding"]
+        it = iter(states)
+        in_order = all(any(x == w for x in it) for w in want)
+        self.check(in_order, f"states in order: {' > '.join(states)}")
+
+        def span(name: str, phase: int) -> float | None:
+            idx = [k for k, x in enumerate(trace) if x[1] == name and x[2] == phase]
+            if not idx:
+                return None
+            k = idx[-1]
+            return trace[k + 1][0] - trace[k][0] if k + 1 < len(trace) else None
+        settle1, switch1, measure1 = span("settling", 1), span("switching", 1), span("measuring", 1)
+        self.check(settle1 is not None and 55 <= settle1 <= 60 * 1.2 + 10 and switch1 is not None and switch1 <= 90
+                   and measure1 is not None and SGT_PHASE_S - 5 <= measure1 <= SGT_PHASE_S * 3,
+                   f"timing: switch {switch1 and round(switch1)} s, settle {settle1 and round(settle1)} s, "
+                   f"measure {measure1 and round(measure1)} s (phase_s {SGT_PHASE_S})")
+        res = t.get("results") or []
+        ok_res = len(res) == 2 and all(r.get("status") == "done" and r.get("measured_s", 0) >= SGT_PHASE_S and
+                                       r.get("systems") for r in res)
+        self.check(ok_res, "both results: " + "; ".join(f"{r.get('group')}: {r.get('status')}, {r.get('measured_s')} s, "
+                                                         f"best {r.get('best_sys')}/{r.get('best_bands')}" for r in res))
+        status, _ = self.api("POST", "/api/gnss/signal-test/keep", {"group": 1})
+        t = self.poll(lambda: (lambda x: x if x.get("state") == "idle" else None)(self.sgt()), 120, every=1.0)
+        self.save("sgt-kept.json", t)
+        g = self.gnss()
+        pr = g.get("profile") or {}
+        self.check(status == 202 and (t or {}).get("outcome") == "kept" and
+                   (pr.get("signal_group_master"), pr.get("signal_group_slave")) == (7, 0) and resp.signal_group() == (7, 0),
+                   f"keep 1: outcome {(t or {}).get('outcome')}, profile {pr.get('signal_group_master')} "
+                   f"{pr.get('signal_group_slave')}, receiver on {resp.signal_group()}")
+
+        # 5. Every caster record of the scenario: whole epochs across every switch and the restart, against
+        #    the fixture as the configured receiver sends it (its own 1005/1033/1230 open every epoch).
+        time.sleep(3)
+        station = resp.station_messages()
+        configured = with_station(self.schedule, station, resp.station_types())
+        self.check({rtcm.msg_type(rtcm.payload_of(f)) for f in station} == {1005, 1033, 1230},
+                   f"the receiver sends the station messages the profile asks for: "
+                   f"{sorted(rtcm.msg_type(rtcm.payload_of(f)) for f in station)}")
+        # The session that streamed when the scenario began runs through the first configuration (a pause
+        # keeps the session): the part before the receiver's own station messages is the fixture as recorded.
+        conns = [c for c in self.caster.all_connections() if c["n"] >= max(first_conn, 1) and c["role"] == "source"]
+        checked = 0
+        for c in conns:
+            path = self.out / "caster" / f"record-{c['n']:03d}.rtcm3"
+            data = path.read_bytes() if path.exists() else b""
+            before, after = split_at_station(data, station)
+            for part, sched, what in ((before, self.schedule, "as recorded"), (after, configured, "configured")):
+                if len(part) < 2000:
+                    continue   # a session (or the part of one) that carried no epoch
+                ok, detail, _sec = check_record(part, sched)
+                self.check(ok, f"signal-test caster record {c['n']} ({what}): {detail}")
+                checked += 1
+        self.check(checked >= 1, f"{checked} caster record(s) of the signal-test scenario checked")
+        self.note(f"signal-test scenario took {time.monotonic() - t_scn:.0f} s")
+
     # -- console ----------------------------------------------------------------
 
     def console_checks(self) -> None:
@@ -933,6 +1314,8 @@ class E2E:
                         self.skip(str(e))
                 if self.args.scenario in ("stream", "all"):
                     self.stream()
+                if self.args.scenario in ("signal-test", "all"):
+                    self.signal_test()
             alive = self.proc.poll() is None
             self.check(alive, "QEMU still running at the end")
         except (OSError, http.client.HTTPException, ValueError, KeyError, RuntimeError) as e:
@@ -959,7 +1342,7 @@ def main() -> int:
         signal.signal(sig, _exit_on_signal)
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", default=str(ROOT / "build-qemu" / "e2e"), help="output directory")
-    ap.add_argument("--scenario", choices=("stream", "onocoy-guard", "all"), default="all")
+    ap.add_argument("--scenario", choices=("stream", "onocoy-guard", "signal-test", "all"), default="all")
     ap.add_argument("--long", action="store_true",
                     help="also the 5-minute wait after a rejected login and the whole in-use retry ladder")
     ap.add_argument("--caster", choices=("fake", "docker"), default="fake",

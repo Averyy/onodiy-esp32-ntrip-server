@@ -16,7 +16,10 @@
  *     nothing                                           -> DETECTING
  *   STREAMING: identity query without a lease (a failure leaves the
  *     identity unconfirmed and retries every 10 min; a lease is taken for it
- *     only when no model was ever stored), then the applied check: live
+ *     once per boot, only when no model was ever stored and no valid RTCM
+ *     frame arrived in the last STN_RTCM_QUIET_MS: while RTCM flows a
+ *     receiver that does not answer between frames gains nothing from an
+ *     exclusive line, and the casters keep streaming), then the applied check: live
  *     firmware == gnss/applied_fw, gnss/applied_hash == the profile's hash
  *     (both checked by the caller, STN result static_ok) and the observed
  *     set over one window (station_obs.h). All true: nothing is sent. Any
@@ -47,8 +50,9 @@
  *     off, or CONFIG_FAILED raised) sends nothing. A reconfigure carries out
  *     an apply that was queued (the user's lock or re-survey) in the same
  *     session, so the queued request is never lost.
- *   A version query that needs a lease (no model ever stored) pauses the
- *   casters while it runs: the lease holds RTCM back.
+ *   A version query with a lease (no model ever stored, nothing flowing)
+ *   does not pause the casters: there is no RTCM to hold back, and the
+ *   ledger keeps such an outage unplanned.
  *   FLASHING: the user's receiver update (STN_JOB_FLASH, casters paused,
  *     the live view closed). The session's outcome decides: the application
  *     answers -> re-apply the profile (STN_WHY_FLASH, whatever gnss/autocfg
@@ -138,6 +142,7 @@ extern "C" {
 
 #define STN_LISTEN_MS          3000      /**< stream-first listen at boot */
 #define STN_IDENTITY_RETRY_MS  600000    /**< unconfirmed identity: query again */
+#define STN_RTCM_QUIET_MS      3000      /**< no valid RTCM frame this long: nothing flows (the leased identity query) */
 #define STN_RESTART_CHECK_MS   30000     /**< applied check after restart evidence */
 #define STN_LAST_RESORT_MS     10000     /**< after a failed apply: wait this long for RTCM */
 #define STN_DETECT_FAST_MS     30000     /**< pass interval in the first part of an episode */
@@ -250,11 +255,13 @@ typedef enum {
     STN_WHY_LOCK,            /**< position lock (user or automatic) */
     STN_WHY_RESURVEY,        /**< the user's re-survey */
     STN_WHY_FLASH,           /**< after a receiver update session (whatever gnss/autocfg says) */
+    STN_WHY_SG_TEST,         /**< the signal-group comparison's switch (the caller wrote the group into the profile) */
+    STN_WHY_SG_BACK,         /**< the receiver refused the profile's signal group: the group it runs went back into the profile */
 } stn_why_t;
 
 typedef struct {
     uint8_t kind;            /**< stn_job_kind_t */
-    bool leased;             /**< IDENTIFY: with a COMMAND lease (no model ever stored) */
+    bool leased;             /**< IDENTIFY: with a COMMAND lease (no model ever stored, no RTCM flowing) */
     bool after_restart;      /**< IDENTIFY: restart mode (poll every second for 20 s) */
     bool full;               /**< DETECT: full baud list */
     bool listen_only;        /**< DETECT: nothing is transmitted (receiver at its loader) */
@@ -301,6 +308,13 @@ typedef struct {
     bool restarted;          /**< the receiver restarted in the session (signal-group reset, an answered rollback RESET) */
     bool receiver_lost;      /**< the receiver was not found again during the session */
     bool answered;           /**< the receiver answered during or after the session */
+    /**
+     * The receiver refused the profile's signal group and the caller wrote a
+     * group it runs back into the stored profile: no CONFIG_FAILED, no
+     * backoff (the refused pair is gone), a re-apply right away
+     * (STN_WHY_SG_BACK; STN_WHY_SG_TEST for the comparison's own switch).
+     */
+    bool sg_back;
     /* SKY */
     uint32_t lease_ms;       /**< how long the lease held RTCM back */
     /* FLASH */
@@ -413,6 +427,8 @@ typedef struct {
     bool static_ok;
     bool leased_tried;         /**< the one leased identity query was made */
     bool identify_leased;      /**< the next query takes a COMMAND lease */
+    uint64_t rtcm_seen;        /**< in->rtcm_frames as last seen */
+    int64_t rtcm_change_ms;    /**< when it last changed (STN_NEVER = never) */
     int64_t identify_ms;       /**< next query (STN_NEVER = none) */
     bool identify_restart;
 
@@ -537,6 +553,24 @@ void stn_done(stn_t *s, const stn_result_t *r, const stn_in_t *in);
 
 /** The user's "apply now" (the profile was edited). Runs once the receiver streams. */
 void stn_request_apply(stn_t *s);
+
+/**
+ * An internal re-apply with its own reason (STN_WHY_SG_TEST, STN_WHY_SG_BACK):
+ * like the user's, it runs once the receiver streams, also while
+ * CONFIG_FAILED is raised; a re-apply queued for another reason takes this
+ * one's reason, so its outcome reaches the comparison.
+ */
+void stn_request_apply_why(stn_t *s, uint8_t why);
+
+/**
+ * The group a refused signal group goes back to: the group the session read
+ * back before the change (before_known), else the one stored at the last
+ * successful apply (gnss/sg_ok), never the refused pair itself.
+ * @return false when neither is known (the refusal is then an ordinary
+ *         failed apply: CONFIG_FAILED and its backoff).
+ */
+bool stn_sg_fallback(uint8_t refused_m, uint8_t refused_s, bool before_known, uint8_t before_m, uint8_t before_s,
+                     bool ok_known, uint16_t ok_pair, uint8_t *out_m, uint8_t *out_s);
 
 /** Lock the current position (user). */
 void stn_request_lock(stn_t *s);

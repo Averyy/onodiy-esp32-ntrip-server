@@ -196,10 +196,12 @@ static uint32_t since(uint32_t now, uint32_t then)
     return (now >= then) ? now - then : 0;
 }
 
-bool boot_guard_ladder_reboot_allowed(const boot_guard_state_t *st, uint32_t uptime_s, uint32_t *retry_in_s)
+bool boot_guard_ladder_reboot_allowed(const boot_guard_state_t *st, uint32_t uptime_s, uint32_t *retry_in_s,
+                                      boot_guard_cap_t *cap)
 {
     uint32_t now = boot_guard_station_time(st, uptime_s);
     uint32_t wait = 0;
+    boot_guard_cap_t why = BOOT_GUARD_CAP_NONE;
     uint32_t n = st->ladder_count;
     if (n > BOOT_GUARD_LADDER_KEEP) {
         n = BOOT_GUARD_LADDER_KEEP;
@@ -208,16 +210,21 @@ bool boot_guard_ladder_reboot_allowed(const boot_guard_state_t *st, uint32_t upt
         uint32_t newest = since(now, st->ladder_at[n - 1]);
         if (newest < BOOT_GUARD_LADDER_GAP_S) {
             wait = BOOT_GUARD_LADDER_GAP_S - newest;
+            why = BOOT_GUARD_CAP_HOUR;
         }
     }
     if (n == BOOT_GUARD_LADDER_KEEP) {
         uint32_t oldest = since(now, st->ladder_at[0]);
         if (oldest < BOOT_GUARD_LADDER_WINDOW_S && BOOT_GUARD_LADDER_WINDOW_S - oldest > wait) {
             wait = BOOT_GUARD_LADDER_WINDOW_S - oldest;
+            why = BOOT_GUARD_CAP_DAY;
         }
     }
     if (retry_in_s != NULL) {
         *retry_in_s = wait;
+    }
+    if (cap != NULL) {
+        *cap = why;
     }
     return wait == 0;
 }

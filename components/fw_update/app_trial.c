@@ -356,3 +356,8 @@ uint32_t fw_trial_left_s(fw_trial_run_t run, uint32_t uptime_s, uint32_t confirm
     }
     return 0;
 }
+
+uint32_t fw_trial_rec_watch_s(const fw_trial_rec_t *rec, uint32_t watch_s)
+{
+    return rec->same_image ? 0 : watch_s;
+}

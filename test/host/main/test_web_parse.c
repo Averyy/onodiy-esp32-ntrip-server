@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "station.h"
 #include "um98x_profile.h"
 #include "unity.h"
 #include "web_parse.h"
@@ -752,4 +753,112 @@ TEST_CASE("caster test_onocoy: true only where the build allows it, false always
     TEST_ASSERT_TRUE(put_on(&st, "{\"name\":\"Test\"}", &c, &b));
     TEST_ASSERT_TRUE(c.test_onocoy);
     ntrip_test_onocoy_set_allowed(false);
+}
+
+TEST_CASE("signal-group comparison bodies and ranges", "[web_parse]")
+{
+    web_bad_t b = { 0 };
+    uint8_t g[2][2];
+    uint32_t phase = 0;
+    cJSON *root = body("{\"groups\":[{\"master\":3,\"slave\":6},{\"master\":7,\"slave\":0}],\"phase_s\":1800}");
+    TEST_ASSERT_TRUE(web_parse_signal_test(root, g, &phase, &b));
+    TEST_ASSERT_EQUAL_UINT8(3, g[0][0]);
+    TEST_ASSERT_EQUAL_UINT8(6, g[0][1]);
+    TEST_ASSERT_EQUAL_UINT8(7, g[1][0]);
+    TEST_ASSERT_EQUAL_UINT8(0, g[1][1]);
+    TEST_ASSERT_EQUAL_UINT32(1800, phase);
+    cJSON_Delete(root);
+    /* phase_s left out: 1800; the range ends are accepted. */
+    root = body("{\"groups\":[{\"master\":255,\"slave\":0},{\"master\":0,\"slave\":255}]}");
+    TEST_ASSERT_TRUE(web_parse_signal_test(root, g, &phase, &b));
+    TEST_ASSERT_EQUAL_UINT32(WEB_SG_TEST_PHASE_DEFAULT_S, phase);
+    cJSON_Delete(root);
+    root = body("{\"groups\":[{\"master\":3,\"slave\":6},{\"master\":7,\"slave\":0}],\"phase_s\":60}");
+    TEST_ASSERT_TRUE(web_parse_signal_test(root, g, &phase, &b));
+    TEST_ASSERT_EQUAL_UINT32(60, phase);
+    cJSON_Delete(root);
+    root = body("{\"groups\":[{\"master\":3,\"slave\":6},{\"master\":7,\"slave\":0}],\"phase_s\":7200}");
+    TEST_ASSERT_TRUE(web_parse_signal_test(root, g, &phase, &b));
+    cJSON_Delete(root);
+
+    static const struct {
+        const char *json;
+        const char *field;
+    } badb[] = {
+        { "{}", "groups" },
+        { "{\"groups\":[{\"master\":3,\"slave\":6}]}", "groups" },
+        { "{\"groups\":[{\"master\":3,\"slave\":6},{\"master\":3,\"slave\":6}]}", "groups" },
+        { "{\"groups\":[{\"master\":3,\"slave\":6},{\"master\":256,\"slave\":0}]}", "groups" },
+        { "{\"groups\":[{\"master\":3,\"slave\":6},{\"master\":7,\"slave\":-1}]}", "groups" },
+        { "{\"groups\":[{\"master\":3,\"slave\":6},{\"master\":7}]}", "groups" },
+        { "{\"groups\":[{\"master\":3,\"slave\":6},[7,0]]}", "groups" },
+        { "{\"groups\":[{\"master\":3,\"slave\":6},{\"master\":7,\"slave\":0},{\"master\":4,\"slave\":5}]}",
+          "groups" },
+        { "{\"groups\":[{\"master\":3.5,\"slave\":6},{\"master\":7,\"slave\":0}]}", "groups" },
+        { "{\"groups\":[{\"master\":3,\"slave\":6},{\"master\":7,\"slave\":0}],\"phase_s\":59}", "phase_s" },
+        { "{\"groups\":[{\"master\":3,\"slave\":6},{\"master\":7,\"slave\":0}],\"phase_s\":7201}", "phase_s" },
+        { "{\"groups\":[{\"master\":3,\"slave\":6},{\"master\":7,\"slave\":0}],\"phase_s\":\"1800\"}", "phase_s" },
+    };
+    for (size_t i = 0; i < sizeof(badb) / sizeof(badb[0]); i++) {
+        root = body(badb[i].json);
+        memset(&b, 0, sizeof(b));
+        TEST_ASSERT_FALSE_MESSAGE(web_parse_signal_test(root, g, &phase, &b), badb[i].json);
+        TEST_ASSERT_EQUAL(WEB_ERR_INVALID_FIELD, b.err);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(badb[i].field, b.field, badb[i].json);
+        TEST_ASSERT_NOT_NULL(b.rule);
+        cJSON_Delete(root);
+    }
+
+    unsigned k = 9;
+    root = body("{\"group\":1}");
+    TEST_ASSERT_TRUE(web_parse_signal_test_keep(root, &k, &b));
+    TEST_ASSERT_EQUAL_UINT(1, k);
+    cJSON_Delete(root);
+    static const char *const badk[] = { "{}", "{\"group\":2}", "{\"group\":-1}", "{\"group\":\"0\"}" };
+    for (size_t i = 0; i < sizeof(badk) / sizeof(badk[0]); i++) {
+        root = body(badk[i]);
+        memset(&b, 0, sizeof(b));
+        TEST_ASSERT_FALSE(web_parse_signal_test_keep(root, &k, &b));
+        TEST_ASSERT_EQUAL_STRING("group", b.field);
+        cJSON_Delete(root);
+    }
+}
+
+TEST_CASE("signal-group comparison refusals map to the API's errors", "[web_parse]")
+{
+    static const struct {
+        int err;
+        web_err_t want;
+        const char *code;
+    } k[] = {
+        { STATION_SGT_E_FIRST_APPLY_HELD, WEB_ERR_FIRST_APPLY_HELD, "first_apply_held" },
+        { STATION_SGT_E_AUTOCFG_OFF, WEB_ERR_AUTOCFG_OFF, "autocfg_off" },
+        { STATION_SGT_E_MAINTENANCE, WEB_ERR_RECEIVER_MAINTENANCE, "receiver_maintenance" },
+        { STATION_SGT_E_JOURNAL_OPEN, WEB_ERR_JOURNAL_OPEN, "journal_open" },
+        { STATION_SGT_E_SAFE_MODE, WEB_ERR_SAFE_MODE, "safe_mode" },
+        { STATION_SGT_E_UNSUPPORTED, WEB_ERR_UNSUPPORTED_MODEL, "unsupported_model" },
+        { STATION_SGT_E_IDENTITY, WEB_ERR_IDENTITY_UNCONFIRMED, "identity_unconfirmed" },
+        { STATION_SGT_E_NOT_STREAMING, WEB_ERR_RECEIVER_NOT_STREAMING, "receiver_not_streaming" },
+        { STATION_SGT_E_CONFIG_FAILED, WEB_ERR_CONFIG_FAILED, "config_failed" },
+        { STATION_SGT_E_NOT_LOCKED, WEB_ERR_POSITION_NOT_LOCKED, "position_not_locked" },
+        { STATION_SGT_E_RUNNING, WEB_ERR_SIGNAL_TEST_RUNNING, "signal_test_running" },
+        { STATION_SGT_E_SETTINGS, WEB_ERR_SETTINGS_UNAVAILABLE, "settings_unavailable" },
+        { STATION_SGT_E_NOT_DECIDING, WEB_ERR_SIGNAL_TEST_NOT_DECIDING, "signal_test_not_deciding" },
+        { STATION_SGT_E_IDLE, WEB_ERR_SIGNAL_TEST_IDLE, "signal_test_idle" },
+    };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        const char *field = "x";
+        web_err_t e = web_sgt_error(k[i].err, false, &field);
+        TEST_ASSERT_EQUAL_MESSAGE(k[i].want, e, k[i].code);
+        TEST_ASSERT_EQUAL_STRING(k[i].code, web_err_code(e));
+        TEST_ASSERT_EQUAL_INT(409, web_err_status(e));
+        TEST_ASSERT_NULL(field);
+    }
+    const char *field = NULL;
+    TEST_ASSERT_EQUAL(WEB_ERR_INVALID_FIELD, web_sgt_error(STATION_SGT_E_GROUPS, false, &field));
+    TEST_ASSERT_EQUAL_STRING("groups", field);
+    TEST_ASSERT_EQUAL(WEB_ERR_INVALID_FIELD, web_sgt_error(STATION_SGT_E_PHASE, false, &field));
+    TEST_ASSERT_EQUAL_STRING("phase_s", field);
+    TEST_ASSERT_EQUAL(WEB_ERR_SAFE_MODE, web_sgt_error(STATION_SGT_E_NOT_RUNNING, true, &field));
+    TEST_ASSERT_EQUAL(WEB_ERR_BUSY, web_sgt_error(STATION_SGT_E_NOT_RUNNING, false, &field));
 }

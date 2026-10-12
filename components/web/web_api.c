@@ -77,6 +77,7 @@ EXT_RAM_BSS_ATTR static gnss_obs_live_sat_t s_live[GNSS_OBS_MAX_LIVE];
 EXT_RAM_BSS_ATTR static gnss_obs_live_t s_live_totals;
 EXT_RAM_BSS_ATTR static char s_text[LOG_PAGE + 1];
 EXT_RAM_BSS_ATTR static um98x_preview_step_t s_preview[UM98X_PREVIEW_MAX];
+EXT_RAM_BSS_ATTR static station_sg_test_t s_sgt_view;
 
 /* ---- shared helpers ------------------------------------------------------------------------ */
 
@@ -649,8 +650,12 @@ static esp_err_t h_gnss_profile(web_req_t *r)
     if ((have_profile || have_autocfg) && journal_open_now(&s_st)) {
         return web_send_err(r->req, WEB_ERR_JOURNAL_OPEN);
     }
+    if ((have_profile || have_autocfg) && station_sg_test_running()) {
+        return web_send_err(r->req, WEB_ERR_SIGNAL_TEST_RUNNING);   /* the comparison owns the profile's group */
+    }
     bool changed = false;
     if (have_profile) {
+        station_profile_saved();   /* a signal-group refusal shown until now is the user's to read no more */
         uint8_t a[UM98X_PROFILE_BLOB_MAX];
         uint8_t c[UM98X_PROFILE_BLOB_MAX];
         size_t la = um98x_profile_encode(&stored, a, sizeof(a));
@@ -711,6 +716,9 @@ static esp_err_t station_action(web_req_t *r, esp_err_t (*fn)(void), bool lock)
     station_snapshot(&s_st);
     if (journal_open_now(&s_st)) {
         return web_send_err(r->req, WEB_ERR_JOURNAL_OPEN);
+    }
+    if (station_sg_test_running()) {
+        return web_send_err(r->req, WEB_ERR_SIGNAL_TEST_RUNNING);
     }
     if (lifecycle_in_safe_mode()) {
         return web_send_err(r->req, WEB_ERR_SAFE_MODE);
@@ -822,6 +830,9 @@ static esp_err_t h_maint_post(web_req_t *r)
     web_bad_t b = { 0 };
     if (!web_parse_maintenance(r->body, &duration, &b)) {
         return bad(r->req, &b);
+    }
+    if (station_sg_test_running()) {
+        return web_send_err(r->req, WEB_ERR_SIGNAL_TEST_RUNNING);
     }
     station_maint_why_t why = STATION_MAINT_OK;
     esp_err_t err = station_maintenance_start(duration, &why);
@@ -936,6 +947,71 @@ static esp_err_t h_gnss_detect(web_req_t *r)
     return web_send_internal(r->req, err);
 }
 
+/* ---- signal-group comparison ---------------------------------------------------------------------------------- */
+
+static esp_err_t sgt_refused(httpd_req_t *req, station_sgt_err_t why)
+{
+    const char *field = NULL;
+    web_err_t e = web_sgt_error(why, lifecycle_in_safe_mode(), &field);
+    if (e == WEB_ERR_INVALID_FIELD) {
+        return web_send_error(req, e, NULL, field, UINT32_MAX, NULL, NULL);
+    }
+    return web_send_err(req, e);
+}
+
+static esp_err_t h_sgt_get(web_req_t *r)
+{
+    esp_err_t err = station_sg_test_get(&s_sgt_view);
+    if (err != ESP_OK) {
+        return web_send_internal(r->req, err);
+    }
+    web_resp_t resp;
+    resp_begin(&resp, r->req, 200);
+    web_build_signal_test(&resp.w, &s_sgt_view);
+    return web_resp_end(&resp);
+}
+
+static esp_err_t h_sgt_post(web_req_t *r)
+{
+    uint8_t g[2][2];
+    uint32_t phase_s = 0;
+    web_bad_t b = { 0 };
+    if (!web_parse_signal_test(r->body, g, &phase_s, &b)) {
+        return bad(r->req, &b);
+    }
+    const station_sg_t groups[2] = { { .master = g[0][0], .slave = g[0][1] }, { .master = g[1][0], .slave = g[1][1] } };
+    station_sgt_err_t why = STATION_SGT_OK;
+    esp_err_t err = station_sg_test_start(groups, phase_s, &why);
+    if (err == ESP_OK) {
+        return accepted(r->req);
+    }
+    return sgt_refused(r->req, why);
+}
+
+static esp_err_t h_sgt_keep(web_req_t *r)
+{
+    unsigned group = 0;
+    web_bad_t b = { 0 };
+    if (!web_parse_signal_test_keep(r->body, &group, &b)) {
+        return bad(r->req, &b);
+    }
+    station_sgt_err_t why = STATION_SGT_OK;
+    if (station_sg_test_keep(group, &why) == ESP_OK) {
+        ESP_LOGW(TAG, "comparison: the user keeps group %u", group);
+        return accepted(r->req);
+    }
+    return sgt_refused(r->req, why);
+}
+
+static esp_err_t h_sgt_delete(web_req_t *r)
+{
+    station_sgt_err_t why = STATION_SGT_OK;
+    if (station_sg_test_stop(&why) == ESP_OK) {
+        return accepted(r->req);
+    }
+    return sgt_refused(r->req, why);
+}
+
 /* ---- receiver update sessions ------------------------------------------------------------------------------ */
 
 static void flash_ctx(const station_status_t *st, web_flash_ctx_t *c)
@@ -970,6 +1046,9 @@ static esp_err_t flash_action(web_req_t *r, web_flash_action_t a, station_flash_
     web_bad_t b = { 0 };
     if (!web_parse_confirm(r->body, &b)) {
         return bad(r->req, &b);
+    }
+    if (station_sg_test_running()) {
+        return web_send_err(r->req, WEB_ERR_SIGNAL_TEST_RUNNING);
     }
     station_snapshot(&s_st);
     web_flash_ctx_t ctx;
@@ -1662,6 +1741,9 @@ static esp_err_t h_update_gnss(web_req_t *r)
     if (!web_parse_update_gnss(r->body, &build, &ack, &b)) {
         return bad(r->req, &b);
     }
+    if (station_sg_test_running()) {
+        return web_send_err(r->req, WEB_ERR_SIGNAL_TEST_RUNNING);
+    }
     if (fw_update_get_status(&s_fw) != ESP_OK) {
         return web_send_internal(r->req, ESP_FAIL);
     }
@@ -1762,6 +1844,9 @@ static esp_err_t h_upload_gnss_confirm(web_req_t *r)
     web_bad_t b = { 0 };
     if (!web_parse_upload_confirm(r->body, sha, &fw, &build, &ack, &b)) {
         return bad(r->req, &b);
+    }
+    if (station_sg_test_running()) {
+        return web_send_err(r->req, WEB_ERR_SIGNAL_TEST_RUNNING);
     }
     um98x_flash_pkg_facts_t facts;
     if (!web_staged_get(&facts, NULL)) {
@@ -2215,6 +2300,10 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/gnss/live", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_live_post),
     ROUTE("/api/gnss/live", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_live_delete),
     ROUTE("/api/gnss/detect", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_gnss_detect),
+    ROUTE("/api/gnss/signal-test", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_sgt_get),
+    ROUTE("/api/gnss/signal-test", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_sgt_post),
+    ROUTE("/api/gnss/signal-test", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_sgt_delete),
+    ROUTE("/api/gnss/signal-test/keep", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_sgt_keep),
     ROUTE("/api/gnss/flash", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_flash_get),
     ROUTE("/api/gnss/flash/retry", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_flash_retry),
     ROUTE("/api/gnss/flash/restart-receiver", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_flash_restart),

@@ -76,8 +76,10 @@ static lifecycle_update_t s_update; /* under s_lock: holder of the update slot *
 
 /* Shutdown hooks run once per boot. If they overrun the budget, a one-shot
  * timer restarts anyway, well before the task watchdog of a subscribed caller
- * would turn a planned reboot into a crash reset. */
-#define MAX_HOOKS              4
+ * would turn a planned reboot into a crash reset. Registered today: the
+ * ledger, the casters, the network, the web server and the station (its
+ * signal-group comparison record); one spare. */
+#define MAX_HOOKS              6
 #define HOOK_OVERRUN_MARGIN_MS 500
 static struct {
     lifecycle_shutdown_hook_t fn;
@@ -808,11 +810,21 @@ bool lifecycle_claim_once(uint32_t flag)
 
 bool lifecycle_ladder_reboot_allowed(uint32_t *retry_in_s)
 {
+    return lifecycle_ladder_reboot_cap(retry_in_s) == LIFECYCLE_CAP_NONE;
+}
+
+_Static_assert((int)LIFECYCLE_CAP_NONE == (int)BOOT_GUARD_CAP_NONE && (int)LIFECYCLE_CAP_HOUR == (int)BOOT_GUARD_CAP_HOUR &&
+                   (int)LIFECYCLE_CAP_DAY == (int)BOOT_GUARD_CAP_DAY,
+               "cap limits mirror boot_guard_cap_t");
+
+lifecycle_cap_t lifecycle_ladder_reboot_cap(uint32_t *retry_in_s)
+{
     uint32_t now = uptime_s();
+    boot_guard_cap_t cap = BOOT_GUARD_CAP_NONE;
     taskENTER_CRITICAL(&s_lock);
-    bool allowed = boot_guard_ladder_reboot_allowed(&s_rtc, now, retry_in_s);
+    (void)boot_guard_ladder_reboot_allowed(&s_rtc, now, retry_in_s, &cap);
     taskEXIT_CRITICAL(&s_lock);
-    return allowed;
+    return (lifecycle_cap_t)cap;
 }
 
 uint32_t lifecycle_station_time_s(void)

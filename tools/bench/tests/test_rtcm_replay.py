@@ -296,3 +296,272 @@ def test_cli_help_and_imports_without_the_bench_dependencies():
             "bad = [m for m in ('serial', 'httpx', 'pytest') if m in sys.modules]; assert not bad, bad")
     out = subprocess.run([sys.executable, "-I", "-c", code], cwd=BENCH, capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
+
+
+# -- the scripted receiver (--respond) --------------------------------------------------
+
+from benchlib import unicore  # noqa: E402
+from benchlib.stream import check_text  # noqa: E402
+from benchlib.um982_sim import Um982Responder, parse_group  # noqa: E402
+
+HOST_VECTORS = BENCH.parents[1] / "test" / "host" / "main" / "um98x_test_vectors.h"
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def host_vector(name: str) -> str:
+    """One string vector of the host tests (adjacent C literals joined)."""
+    import re
+    lines = HOST_VECTORS.read_text().splitlines()
+    i = next(k for k, line in enumerate(lines) if line.startswith(f"#define {name}"))
+    block = [lines[i]]
+    while block[-1].rstrip().endswith("\\"):   # a continued macro
+        i += 1
+        block.append(lines[i])
+    parts = re.findall(r'"((?:[^"\\]|\\.)*)"', "\n".join(block))
+    return "".join(parts).replace('\\"', '"')
+
+
+def lines_of(data: bytes) -> list[str]:
+    return [x for x in data.decode("latin-1").split("\r\n") if x]
+
+
+def test_reply_builders_reproduce_the_host_test_vectors():
+    assert unicore.version_line("UM982", "R4.10Build18975") == host_vector("TV_VERSIONA_UM982")
+    assert unicore.ack_line("unlog") == host_vector("TV_ACK_UNLOG")
+    assert unicore.ack_line("VERSIONA") == host_vector("TV_ACK_VERSIONA")
+    assert unicore.config_line("SIGNALGROUP", "CONFIG SIGNALGROUP 3 6") == host_vector("TV_CONFIG_SG")
+    assert unicore.banner_line("COM1") == host_vector("TV_BANNER")
+    assert unicore.mode_line("MODE BASE 1234 TIME 600 0") == host_vector("TV_MODE_SURVEY")
+    assert unicore.ack_line("rtcm1230 10", unicore.refusal_text("rtcm1230")) == host_vector("TV_NACK_1230")
+    for line in (unicore.ack_line("MODE"), unicore.config_line("COM1", "CONFIG COM1 115200"),
+                 unicore.version_line("UM982", "R4.10Build17000")):
+        assert check_text(line) in ("unicore", "crc32")
+
+
+def test_responder_identifies_itself_and_dumps_its_configuration():
+    clk = FakeClock()
+    r = Um982Responder(group=(4, 5), clock=clk)
+    r.feed(b"\r\nVERSIONA\r\nCONF")
+    clk.t += 0.01
+    assert r.due() == b""          # not yet: the receiver takes a moment
+    r.feed(b"IG\r\nMODE\r\n")
+    clk.t += 0.2
+    out = lines_of(r.due())
+    assert out[0] == unicore.ack_line("VERSIONA")
+    ver = next(x for x in out if x.startswith("#VERSIONA"))
+    assert check_text(ver) == "crc32"
+    v = unicore.parse_versiona(ver)
+    assert v["model"] == "UM982" and v["firmware"] == "R4.10Build18975" and v["build"] == 18975
+    cfg = unicore.parse_config(out)
+    assert unicore.signal_group(cfg) == (4, 5)
+    assert {"SIGNALGROUP", "COM1", "MMP", "RTCMB1CB2A", "MASK", "BASEANTENNAMODEL"} <= set(cfg)
+    mode = next(x for x in out if x.startswith("#MODEA"))
+    assert unicore.parse_mode(mode) == "MODE ROVER" and check_text(mode) == "unicore"
+    assert all(check_text(x) != "bad" for x in out)
+
+
+def test_responder_takes_a_signal_group_restarts_and_comes_back_with_it():
+    clk = FakeClock()
+    r = Um982Responder(group=(4, 5), restart_s=3.0, clock=clk)
+    assert r.rtcm_on()
+    r.feed(b"UNLOG COM1\r\n")
+    assert not r.rtcm_on()                          # quiet port
+    clk.t += 0.1
+    assert lines_of(r.due()) == [unicore.ack_line("UNLOG COM1")]
+    r.feed(b"CONFIG SIGNALGROUP 3 6\r\n")
+    clk.t += 0.1
+    assert lines_of(r.due()) == [unicore.ack_line("CONFIG SIGNALGROUP 3 6")]
+    assert r.restarting()
+    clk.t += 1.0
+    r.feed(b"VERSIONA\r\n")                         # unheard while restarting
+    clk.t += 1.0
+    assert r.due() == b"" and not r.rtcm_on()
+    clk.t += 1.2
+    assert r.rtcm_on()                              # the saved outputs are back
+    assert lines_of(r.due()) == [unicore.banner_line("COM1")]
+    r.feed(b"CONFIG\r\n")
+    clk.t += 0.2
+    assert unicore.signal_group(unicore.parse_config(lines_of(r.due()))) == (3, 6)
+    assert r.signal_group() == (3, 6) and r.restarts == 1
+    # The same group again: no restart.
+    r.feed(b"CONFIG SIGNALGROUP 3 6\r\n")
+    clk.t += 0.2
+    assert lines_of(r.due()) == [unicore.ack_line("CONFIG SIGNALGROUP 3 6")] and r.restarts == 1
+
+
+def test_responder_refuses_unknown_and_rejected_groups_without_restarting():
+    clk = FakeClock()
+    r = Um982Responder(group=(3, 6), reject=[(7, 0)], clock=clk)
+    for cmd in ("CONFIG SIGNALGROUP 7 0", "CONFIG SIGNALGROUP 2 0"):
+        r.feed(cmd.encode() + b"\r\n")
+        clk.t += 0.2
+        (line,) = lines_of(r.due())
+        assert line.startswith(f"$command,{cmd},response: PARSING FAILD NO MATCHING FUNC")
+        assert check_text(line) == "unicore"
+    assert r.signal_group() == (3, 6) and r.restarts == 0 and r.rtcm_on()
+    r.reject = set()
+    r.feed(b"CONFIG SIGNALGROUP 7 0\r\n")
+    clk.t += 0.2
+    assert r.due().startswith(b"$command,CONFIG SIGNALGROUP 7 0,response: OK")
+    assert r.signal_group() == (7, 0)
+
+
+def test_responder_saves_outputs_and_mode_and_a_reset_brings_back_what_was_saved():
+    clk = FakeClock()
+    r = Um982Responder(clock=clk)
+    for cmd in (b"UNLOG COM1", b"MODE BASE 1234 918129.1234 -4346071.2345 4561977.3456", b"RTCM1077 COM1 1",
+                b"SAVECONFIG", b"UNLOG COM1", b"MODE BASE 1 TIME 60 0", b"RESET"):
+        r.feed(cmd + b"\r\n")
+        clk.t += 0.1
+    acks = [a for a in lines_of(r.due()) if a.startswith("$command")]
+    assert len(acks) == 7 and all(",response: OK*" in a for a in acks)
+    assert r.saves == 1 and r.restarts == 1 and not r.rtcm_on()
+    clk.t += 3.5
+    assert r.rtcm_on()                              # saved with the output on
+    r.feed(b"MODE\r\n")
+    clk.t += 0.2
+    mode = next(x for x in lines_of(r.due()) if x.startswith("#MODEA"))
+    assert unicore.parse_mode(mode) == "MODE BASE 1234 918129.1234 -4346071.2345 4561977.3456"
+    # Anything else gets the receiver's refusal.
+    r.feed(b"FRESET\r\n")
+    clk.t += 0.2
+    assert lines_of(r.due()) == [unicore.ack_line("FRESET", unicore.refusal_text("FRESET"))]
+
+
+def test_station_message_builders_decode_with_benchlib():
+    from benchlib.um982_sim import arp_frame, descriptor_frame, glo_bias_frame
+    xyz = (-2503389.9916, -4660267.5866, 3551298.6913)
+    for mtype in (1005, 1006):
+        f = arp_frame(mtype, 1234, xyz, 1.5)
+        assert rtcm.frame_ok(f)
+        a = rtcm.decode_arp(rtcm.payload_of(f))
+        assert a.mtype == mtype and a.station_id == 1234 and (a.gps, a.glonass, a.galileo) == (True, True, True)
+        assert max(abs(a.x - xyz[0]), abs(a.y - xyz[1]), abs(a.z - xyz[2])) < 1e-4
+        assert a.height == (1.5 if mtype == 1006 else None)
+    f = descriptor_frame(7, "TRM59800.00     NONE", 3, "A123", "UM982", "R4.10Build18975", "SYNTH00000001")
+    d = rtcm.decode_1033(rtcm.payload_of(f))
+    assert (d.station_id, d.antenna, d.setup_id, d.antenna_serial) == (7, "TRM59800.00     NONE", 3, "A123")
+    assert (d.receiver_type, d.receiver_firmware, d.receiver_serial) == ("UM982", "R4.10Build18975", "SYNTH00000001")
+    g = rtcm.decode_1230(rtcm.payload_of(glo_bias_frame(7)))
+    assert g.station_id == 7 and not g.aligned and g.biases == {}
+
+
+def test_responder_sends_the_station_messages_it_was_told_to():
+    clk = FakeClock()
+    r = Um982Responder(clock=clk)
+    for cmd in (b"UNLOG COM1", b"RTCM1005 COM1 1", b"RTCM1033 COM1 1", b"RTCM1230 COM1 2", b"RTCM1077 COM1 1"):
+        r.feed(cmd + b"\r\n")
+    types = lambda frames: [rtcm.msg_type(rtcm.payload_of(f)) for f in frames]  # noqa: E731
+    # A rover: no position to send.
+    assert r.station_types() == {1033, 1230} and types(r.station_messages()) == [1033, 1230]
+    r.feed(b"MODE BASE 21 -2503389.9916 -4660267.5866 3551298.6913\r\n")
+    assert types(r.station_messages()) == [1005, 1033, 1230]
+    # One call per epoch: 1230 every second epoch (RTCM1230 COM1 2).
+    assert [types(r.station_frames()) for _ in range(3)] == [[1005, 1033, 1230], [1005, 1033], [1005, 1033, 1230]]
+    arp = rtcm.decode_arp(rtcm.payload_of(r.station_messages()[0]))
+    assert arp.station_id == 21 and abs(arp.x + 2503389.9916) < 1e-4
+    d = rtcm.decode_1033(rtcm.payload_of(r.station_messages()[1]))
+    assert (d.station_id, d.antenna, d.receiver_type, d.receiver_firmware) == (21, "", "UM982", "R4.10Build18975")
+    r.feed(b'CONFIG BASEANTENNAMODEL "HXCCGX601A      HXCS" "SN9" 2 USER\r\n')
+    d = rtcm.decode_1033(rtcm.payload_of(r.station_messages()[1]))
+    assert (d.antenna, d.antenna_serial, d.setup_id) == ("HXCCGX601A      HXCS", "SN9", 2)
+    # A survey sends no fixed position; UNLOG COM1 stops them all; a restart brings back what was saved.
+    r.feed(b"MODE BASE 21 TIME 60 0\r\n")
+    assert types(r.station_messages()) == [1033, 1230]
+    r.feed(b"MODE BASE 21 -2503389.9916 -4660267.5866 3551298.6913\r\nSAVECONFIG\r\nUNLOG COM1\r\n")
+    assert r.station_messages() == [] and r.station_frames() == []
+    r.feed(b"RESET\r\n")
+    clk.t += 0.1
+    assert r.station_frames() == []                 # restarting: nothing goes out
+    clk.t += 3.5
+    assert types(r.station_frames()) in ([1005, 1033, 1230], [1005, 1033])
+    # Latitude, longitude, height work as well.
+    r.feed(b"MODE BASE 21 34.052235 -118.243683 89.5\r\n")
+    lat, lon, h = rtcm.decode_arp(rtcm.payload_of(r.station_messages()[0])).llh()
+    assert abs(lat - 34.052235) < 1e-7 and abs(lon + 118.243683) < 1e-7 and abs(h - 89.5) < 1e-3
+
+
+def test_parse_group():
+    assert parse_group("3,6") == (3, 6) and parse_group("7 0") == (7, 0)
+    for bad in ("3", "3,6,1", "a,b", "256,0"):
+        with pytest.raises(ValueError):
+            parse_group(bad)
+
+
+def test_replay_answers_between_whole_frames_and_follows_the_receivers_output(tmp_path):
+    s = load(LAX)
+    resp = Um982Responder(group=(4, 5), restart_s=0.5)
+    srv = ReplayServer(s, loop=True, speed=10.0, run_dir=tmp_path, say=lambda m: None, responder=resp).start()
+    try:
+        with socket.create_connection((srv.host, srv.port)) as c:
+            c.settimeout(0.2)
+            got = bytearray()
+
+            def read_for(seconds: float) -> None:
+                end = time.monotonic() + seconds
+                while time.monotonic() < end:
+                    try:
+                        got.extend(c.recv(65536))
+                    except socket.timeout:
+                        pass
+
+            read_for(0.5)
+            c.sendall(b"VERSIONA\r\nCONFIG\r\n")
+            read_for(0.8)
+            sp = StreamSplitter()
+            items = sp.feed(bytes(got)) + sp.flush()
+            texts = [it.text for it in items if it.kind == "text"]
+            assert unicore.ack_line("VERSIONA") in texts and any(t.startswith("#VERSIONA") for t in texts)
+            assert unicore.signal_group(unicore.parse_config(texts)) == (4, 5)
+            assert [it for it in items if it.kind == "rtcm_bad"] == []      # no reply inside a frame
+            assert sum(1 for it in items if it.kind == "rtcm") > 20
+            # A quiet port: no more bursts until an RTCM output comes back.
+            c.sendall(b"UNLOG COM1\r\n")
+            read_for(0.4)
+            got.clear()
+            read_for(0.6)
+            sp = StreamSplitter()
+            assert [it for it in sp.feed(bytes(got)) + sp.flush() if it.kind == "rtcm"] == []
+            assert srv.counts()["bursts_withheld"] >= 4
+            c.sendall(b"RTCM1077 COM1 1\r\n")
+            read_for(0.6)
+            sp = StreamSplitter()
+            assert [it for it in sp.feed(bytes(got)) + sp.flush() if it.kind == "rtcm"]
+            # Its own station messages open every epoch; the recording's 1230 is left out.
+            c.sendall(b"MODE BASE 5 -2503389.9916 -4660267.5866 3551298.6913\r\nRTCM1005 COM1 1\r\n"
+                      b"RTCM1230 COM1 1\r\n")
+            read_for(0.4)
+            got.clear()
+            read_for(1.5)
+            sp = StreamSplitter()
+            frames = [it.data for it in sp.feed(bytes(got)) + sp.flush() if it.kind == "rtcm"]
+            own = resp.station_messages()
+            assert [rtcm.msg_type(rtcm.payload_of(f)) for f in own] == [1005, 1230]
+            fixture_1230 = [f for b in s.bursts for f in b.frames if rtcm.msg_type(rtcm.payload_of(f)) == 1230]
+            assert fixture_1230 and not any(f in frames for f in fixture_1230)
+            starts = [k for k, f in enumerate(frames) if f == own[0]]
+            assert len(starts) >= 5 and all(frames[k + 1] == own[1] for k in starts if k + 1 < len(frames))
+            assert all(rtcm.msg_type(rtcm.payload_of(frames[k + 2])) == 1077 for k in starts if k + 2 < len(frames))
+    finally:
+        srv.stop()
+    log = (tmp_path / "replay.log").read_text()
+    assert "reply bytes" in log
+    assert srv.counts()["replies_sent"] > 0
+
+
+def test_cli_respond_options():
+    out = subprocess.run([sys.executable, "rtcm_replay.py", "--help"], cwd=BENCH, capture_output=True, text=True)
+    assert "--respond" in out.stdout and "--respond-reject" in out.stdout
+    out = subprocess.run([sys.executable, "rtcm_replay.py", "--listen", "127.0.0.1:0", str(LAX), "--respond-reject",
+                          "7,0"], cwd=BENCH, capture_output=True, text=True)
+    assert out.returncode == 2 and "need --respond" in out.stderr
+    out = subprocess.run([sys.executable, "rtcm_replay.py", "--listen", "127.0.0.1:0", str(LAX), "--respond",
+                          "--respond-group", "3,6,1"], cwd=BENCH, capture_output=True, text=True)
+    assert out.returncode == 2 and "signal group" in out.stderr

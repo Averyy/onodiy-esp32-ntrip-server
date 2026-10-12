@@ -21,9 +21,10 @@
  *     set and rates, listed next to the profile's messages and periods
  *     (gnss_obs_set_expected), seen or not;
  *   - "bands on the best constellation": Onocoy rewards 4 bands on one
- *     constellation (Galileo E1/E5a/E5b/E6 via signal group 3/6). Fewer than
- *     4 is reported as DEGRADED with an alert even while everything else
- *     looks fine;
+ *     constellation (Galileo E1/E5a/E5b/E6 via signal group 3/6). Only GPS,
+ *     GLONASS, Galileo and BeiDou count (QZSS and NavIC carry no reward); the
+ *     first in message order wins a tie. Fewer than 4 is reported as
+ *     DEGRADED with an alert even while everything else looks fine;
  *   - epoch gaps against the configured period: an MSM epoch time that
  *     advances by more than the profile's period counts the missing epochs
  *     as lost data, independent of byte counters. Each missing epoch counts
@@ -96,7 +97,7 @@ typedef struct {
 
 typedef struct {
     gnss_obs_sys_t sys[GNSS_SYS_COUNT];
-    gnss_sys_t best_sys;           /**< constellation with the most bands */
+    gnss_sys_t best_sys;           /**< rewarded constellation (GPS, GLONASS, Galileo, BeiDou) with the most bands */
     uint8_t best_bands;            /**< fewer than 4: DEGRADED with an alert */
     bool e6_lost;                  /**< Galileo E6 seen since the last reset, now missing: alert */
     uint32_t epoch_age_ms;         /**< since the last epoch ended, UINT32_MAX = never */

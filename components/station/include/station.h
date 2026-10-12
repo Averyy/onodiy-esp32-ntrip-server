@@ -223,6 +223,7 @@
 #include "esp_err.h"
 #include "esp_event.h"
 #include "gnss_types.h"
+#include "station_sgt.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -439,6 +440,16 @@ typedef struct {
     bool flash_available;            /**< receiver flashing is built in (station_flash_available) */
     bool pkg_check_running;          /**< a check of the staged package runs (check-only builds) */
     station_flash_last_t flash_last; /**< the last session or check this boot */
+
+    /* Signal groups. */
+    bool rx_sg_valid;                /**< an apply session's read-back named the receiver's signal group this boot */
+    station_sg_t rx_sg;              /**< ... that group (the latest read-back) */
+    bool sg_refused;                 /**< the receiver refused a signal group (kept until the next profile save) */
+    station_sg_t sg_refused_group;   /**< the refused pair */
+    bool sg_back_valid;              /**< the profile went back to sg_back (else: an ordinary failed apply, CONFIG_FAILED) */
+    station_sg_t sg_back;
+    char sg_refused_reply[64];       /**< the receiver's reply ("signal group rejected" when its read-back kept another group) */
+    station_sgt_brief_t sg_test;     /**< the signal-group comparison, in short */
 } station_status_t;
 
 /**
@@ -696,6 +707,41 @@ esp_err_t station_live_view_touch(void);
 
 /** Close the live view now (the output is turned off at the next free moment). ESP_ERR_NOT_FOUND when none is open. */
 esp_err_t station_live_view_stop(void);
+
+/* ---- signal-group comparison ----------------------------------------------------
+ *
+ * The user's comparison of two signal groups (station_sgt.h): each is
+ * measured for phase_s seconds of good samples after a minute of settling,
+ * the one running now first; then the station waits up to 24 h of running
+ * time for the user to keep one (the receiver stays on the group measured
+ * last), else it goes back to the group from before. Each switch is the
+ * station's own profile write and re-apply: the casters pause for it and the
+ * ledger counts it as planned downtime. Stored in gnss/sg_test, so a restart
+ * resumes it. While a test runs the web answers 409 signal_test_running to
+ * every other change of the receiver (profile, automatic configuration,
+ * apply, position lock, maintenance, receiver updates).
+ */
+
+/**
+ * Start a comparison. @return ESP_OK (*why STATION_SGT_OK), ESP_ERR_INVALID_ARG
+ * (*why _E_GROUPS or _E_PHASE), ESP_ERR_INVALID_STATE (*why the refusal).
+ */
+esp_err_t station_sg_test_start(const station_sg_t groups[2], uint32_t phase_s, station_sgt_err_t *why);
+
+/** Keep group 0 or 1 (while deciding). @return as station_sg_test_start (_E_NOT_DECIDING, _E_GROUPS). */
+esp_err_t station_sg_test_keep(unsigned group, station_sgt_err_t *why);
+
+/** Stop a running comparison (back to the group from before). @return ESP_OK, ESP_ERR_INVALID_STATE (_E_IDLE). */
+esp_err_t station_sg_test_stop(station_sgt_err_t *why);
+
+/** The comparison as GET /api/gnss/signal-test shows it (an idle view when the station does not run). */
+esp_err_t station_sg_test_get(station_sg_test_t *out);
+
+/** A comparison runs: every other change of the receiver is refused meanwhile. */
+bool station_sg_test_running(void);
+
+/** The user saved a profile: a signal-group refusal shown until now is cleared. */
+void station_profile_saved(void);
 
 #ifdef __cplusplus
 }

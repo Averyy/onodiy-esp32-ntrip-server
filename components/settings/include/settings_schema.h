@@ -59,6 +59,8 @@ extern "C" {
 #define SETTINGS_KEY_GNSS_BASE_POS  "base_pos"    /**< blob: locked antenna position (um98x_base_position_t, encoded) */
 #define SETTINGS_KEY_GNSS_FLASH_JOB "flash_job"   /**< blob: open receiver-flash journal (versioned record, see the flasher); survives factory reset */
 #define SETTINGS_KEY_GNSS_BENCH_RACE "bench_race" /**< u8: bench builds only: 1 = the next boot streams the receiver's stop key from its earliest point (one-shot, erased before it runs) */
+#define SETTINGS_KEY_GNSS_SG_OK     "sg_ok"       /**< u16: (master << 8) | slave of the signal group the receiver accepted at the last successful apply (same batch as applied_hash): where a refused group goes back to when the session's own read-back is unknown */
+#define SETTINGS_KEY_GNSS_SG_TEST   "sg_test"     /**< blob: the signal-group comparison's record (sg_test_core.h, versioned), written at each transition, every 5 min while measuring, every 10 min while deciding and before a planned restart; the last test's record stays (its results are shown after a restart); erased by factory reset */
 #define SETTINGS_KEY_GNSS_HOLD      "hold"        /**< u8: 1 = this device's first receiver configuration is held (only queries reach the receiver until the user applies); written once by a build with CONFIG_STATION_HOLD_FIRST_APPLY on a device whose profile was never applied (with gnss/autocfg = 0, and gnss/recovery = 2 if unset, in one batch); erased by the first successful apply, by gnss/autocfg turned on, by factory reset */
 
 /* ---- "cst0".."cst7": one namespace per caster slot ------------------------ */

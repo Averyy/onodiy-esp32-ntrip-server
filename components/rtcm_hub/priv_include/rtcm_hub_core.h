@@ -8,7 +8,10 @@
  * notifications; the policy itself is described in rtcm_hub.h.
  *
  * Ring: records {u16 len, u16 msg_type, u32 seq, u32 rx_ms, u32 epoch} +
- * frame bytes, padded to 4. A record never wraps: when it does not fit at the
+ * frame bytes, padded to 4. msg_type holds the 12-bit message number
+ * (RTCM_CORE_REC_TYPE_MASK) and RTCM_CORE_REC_UNSURE when the record belongs
+ * to an unsure epoch (rtcm_epoch.h); readers mask the number with
+ * RTCM_CORE_REC_TYPE_MASK. A record never wraps: when it does not fit at the
  * end, a wrap marker (len 0xFFFF) fills the rest and the record starts at
  * offset 0. Offsets are monotonic 64-bit byte counts; ring position = offset
  * modulo capacity.
@@ -60,6 +63,8 @@ extern "C" {
 #define RTCM_CORE_MAX_REC         (RTCM_CORE_REC_HDR + ((GNSS_RTCM3_MAX_FRAME + 3u) & ~3u))
 #define RTCM_CORE_MIN_RING        (4u * RTCM_CORE_MAX_REC)
 #define RTCM_CORE_WRAP_MARKER     0xFFFFu
+#define RTCM_CORE_REC_TYPE_MASK   0x0FFFu  /**< message number bits of a record's msg_type */
+#define RTCM_CORE_REC_UNSURE      0x8000u  /**< record flag: its epoch is unsure (rtcm_epoch.h) */
 #define RTCM_CORE_STICKY_SLOTS    3u       /**< 1005/1006, 1033, 1230, replayed in this order */
 #define RTCM_CORE_STICKY_MAX_AGE_MS 30000u /**< an older sticky copy is never replayed */
 #define RTCM_CORE_LAG_MIN_MS      100u
@@ -97,7 +102,7 @@ typedef struct {
     uint64_t bytes_out;
     uint64_t frames_dropped;      /**< lost while streaming: lapped or over the lag limit */
     uint64_t bytes_dropped;
-    uint64_t frames_skipped_idle; /**< skipped while not streaming (attach, resync) */
+    uint64_t frames_skipped_idle; /**< skipped while not streaming (attach, resync, unsure epochs) */
     uint64_t epochs_dropped;
     uint64_t epochs_out;          /**< epochs delivered from their first frame to their last */
     uint64_t sticky_out;          /**< sticky copies replayed (part of frames_out) */
@@ -203,8 +208,16 @@ void rtcm_core_wake_done(rtcm_core_t *c);
 void rtcm_core_clear_sticky(rtcm_core_t *c);
 
 /**
- * Attach a consumer: sticky copies first, then live data from the next epoch
- * start. @return NULL when max_consumers are attached.
+ * Attach a consumer: sticky copies first, then live data from the next sure
+ * epoch start. @return NULL when max_consumers are attached.
+ *
+ * A waiting consumer (after attach, resync or a lap) never starts on an
+ * unsure epoch: it skips it whole (idle skips, or losses after a lap). A
+ * streaming consumer that meets a new unsure epoch ends the epoch it was
+ * sending (counted in epochs_out if it was sent from its start), goes back to
+ * waiting and skips the unsure frames as idle; it starts again at the next
+ * sure epoch. So a caster never sends the tail of an epoch whose head was
+ * lost at a framer reset.
  */
 rtcm_core_consumer_t *rtcm_core_attach(rtcm_core_t *c, const char *name);
 
@@ -242,6 +255,14 @@ void rtcm_core_cancel_wait(rtcm_core_t *c, rtcm_core_consumer_t *k);
 
 /** Hub-wide counters. */
 void rtcm_core_get_stats(rtcm_core_t *c, uint64_t now_ms, rtcm_core_stats_t *out);
+
+/**
+ * True while an epoch is in flight (any task): the newest epoch holds an MSM
+ * that announced more (multiple-message bit set) and the newest frame is
+ * younger than `quiet_ms` (a lost terminating MSM ends it that way).
+ * @param age_ms optional: the newest frame's age, UINT32_MAX before the first.
+ */
+bool rtcm_core_epoch_in_flight(rtcm_core_t *c, uint64_t now_ms, uint32_t quiet_ms, uint32_t *age_ms);
 
 /** Counters of one consumer (any task). */
 void rtcm_core_get_consumer_stats(rtcm_core_t *c, rtcm_core_consumer_t *k, uint64_t now_ms,
