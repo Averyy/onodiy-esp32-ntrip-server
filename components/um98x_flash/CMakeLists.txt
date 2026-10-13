@@ -21,4 +21,4 @@ idf_component_register(
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "priv_include"
     REQUIRES gnss_link gnss_types
-    PRIV_REQUIRES gnss_framing pkg_store settings mbedtls esp_timer esp_system esp_hw_support heap)
+    PRIV_REQUIRES diag gnss_framing pkg_store settings mbedtls esp_timer esp_system esp_hw_support heap)

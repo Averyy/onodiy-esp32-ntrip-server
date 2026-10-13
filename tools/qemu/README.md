@@ -217,12 +217,18 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    and the connection closed (the chunks never come back as a second
    answer); two pipelined HTTP/1.1 requests on one socket are both
    answered, and an HTTP/1.1 connection stays open for the next request;
+   both ways a JSON answer goes out, on one HTTP/1.1 connection kept open
+   throughout: `GET /api/session` (within the web server's response buffer,
+   whose size the script reads from `components/web/web.c`) with its
+   `Content-Length`, `GET /api/status` (larger) streamed, chunked; which
+   way each must take follows from its measured size, both ways must have
+   been taken, and the connection answers again after the streamed answer;
    answers that are streamed go to HTTP/1.0 without chunked framing (which
    HTTP/1.0 does not know): `GET /api/logs?format=text HTTP/1.0` and `GET
-   /api/status HTTP/1.0` (larger than the 2 KB response buffer: chunked to
-   HTTP/1.1, where that socket still answers a second request) come without
-   `Transfer-Encoding`, the log's first line and JSON that parses as the
-   body, and the connection closes within 2 s;
+   /api/status HTTP/1.0` come without `Transfer-Encoding` (the status, being
+   larger than the buffer, without a `Content-Length` either), the log's
+   first line and JSON that parses as the body, and the connection closes
+   within 2 s of the answer;
    a wrong admin password and a WebSocket handshake without a session
    (public status off) each give one console line naming `10.0.2.2` (how
    the guest sees this computer); after `PUT /api/diag/log-level` `*` at
@@ -256,6 +262,17 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    burst cannot back the console up here; the writer's ordering and drop
    rules are host-tested (`test/host/main/test_diag_console.c`).
 
+Every HTTP answer is read to the end its framing gives (`Content-Length`,
+the last chunk, or the end of the connection), waiting up to 30 s for it,
+and a "closed within" time counts from the end of the answer. The emulated
+Ethernet MAC drops a received frame when the firmware has no free receive
+buffer (`opencores.emac: ... RX frame dropped (0x14)` on the console), and
+TCP sends it again only seconds later: in CI an answer once came 5.5 s
+late that way, which a check reading for 5 s took for an answer without
+chunked framing. `sdkconfig.qemu` gives the MAC 16 receive buffers instead
+of IDF's 4, so a burst of frames waits for the receive task instead of
+being dropped.
+
 QEMU always stops with it: on a normal end, Ctrl-C, SIGTERM or SIGHUP the
 script stops QEMU on the way out, and `run.sh` gets `--seconds` (observe or
 timeout, whichever is longer, plus 60 s) as a backstop should the script be
@@ -263,7 +280,10 @@ killed outright.
 
 The `qemu-smoke` CI job runs the same in the pinned ESP-IDF image (which
 ships qemu-xtensa) with `--out qemu-smoke` and uploads that directory and
-the build log as an artifact.
+the build log as an artifact. `tools/ci/qemu_linux.sh --job smoke` runs that
+job on this computer, in the same image with its steps read from
+`build.yml` (README, Building), and copies what it uploads to
+`build-ci/qemu-smoke/`.
 
 ## Bench console
 
@@ -297,15 +317,33 @@ reports PASS or FAIL for each of these (exit status 1 if any failed):
 4. `GET /` answers; with the first admin password set, the web log (`GET
    /api/logs?format=text`) has the start line and no console driver error,
    and `GET /api/health` counts no console drop;
-5. throughout: no `UART driver already installed` or `uart driver error`
+5. replies stay whole while another task logs: `logflood 15 2` makes a
+   task above the command line's log a line every 2 ms for 15 s, and
+   meanwhile `status`, `race_result`, `heapfrag free`, a second `logflood`
+   (refused), `ftimes status`, `ftimes summary` and `help` are typed round
+   after round; every console line with `BENCH` in it must be one of those
+   replies in its whole form, none with a log line's time and tag inside,
+   `help` still lists every command, every flood line arrives whole and
+   once, flood lines did arrive while the replies were printed, and `GET
+   /api/health` counts no console drop afterwards (this runs after the web
+   checks: the flood overwrites the web log's ring);
+6. throughout: no `UART driver already installed` or `uart driver error`
    line, no `[diag:` note, no panic and one boot only.
+
+The bench console's replies, its prompt in the dumb-terminal mode and the
+receiver flasher's byte echo go to the console through the log's console
+writer (`diag_console_write`), a whole line at a time under the lock the
+log lines take, so a log line never lands inside one. What still goes out
+a byte at a time is the echo of what is typed (linenoise's), so a log line
+can land inside an echoed command.
 
 The firmware's dumb-terminal mode applies here (the script does not answer
 the terminal status request), so a log line that comes while the prompt
 waits follows it on the same line (`bench> I (2014) network: ...`). QEMU
 stops with the script as with `smoke.py`. The `qemu-bench-console` CI job
 runs it with `--out qemu-bench-console` and uploads that directory and the
-build log.
+build log; `tools/ci/qemu_linux.sh --job bench-console` runs that job on this
+computer.
 
 ## One host thread for both cores
 

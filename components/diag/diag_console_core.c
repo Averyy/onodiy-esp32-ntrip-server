@@ -46,6 +46,98 @@ bool dcon_caught_up(const dcon_t *c, uint32_t next_seq)
     return c->len == 0 && (int32_t)(next_seq - (c->cursor + 1u)) <= 0;
 }
 
+bool dcon_other_text(dcon_t *c, const char *text, size_t len)
+{
+    if (text == NULL || len == 0) {
+        return false;
+    }
+    bool brk = c->mid_line && text[0] != '\n';
+    /* It ends its line, or it is a prompt whose line the typed input's
+     * echo (which never comes through here) ends. */
+    c->mid_line = false;
+    return brk;
+}
+
+/* ---- lines gathered from pieces ---------------------------------------------------------- */
+
+void dcon_lines_init(dcon_lines_t *g, char *buf, size_t cap)
+{
+    g->buf = buf;
+    g->cap = buf != NULL ? cap : 0;
+    g->len = 0;
+}
+
+/* Every whole line gathered, in one call; a full buffer without a line end
+ * as it is (a line longer than the buffer). */
+static void lines_emit(dcon_lines_t *g, dcon_emit_fn emit, void *ctx)
+{
+    size_t end = g->len;
+    while (end > 0 && g->buf[end - 1u] != '\n') {
+        end--;
+    }
+    if (end == 0) {
+        if (g->len == g->cap && g->len > 0) {
+            emit(ctx, g->buf, g->len);
+            g->len = 0;
+        }
+        return;
+    }
+    emit(ctx, g->buf, end);
+    memmove(g->buf, g->buf + end, g->len - end);
+    g->len -= end;
+}
+
+void dcon_lines_added(dcon_lines_t *g, size_t len, dcon_emit_fn emit, void *ctx)
+{
+    if (len > g->cap - g->len) {
+        len = g->cap - g->len;   /* never past the buffer */
+    }
+    size_t from = g->len;
+    g->len += len;
+    if (g->len == g->cap || (len > 0 && memchr(g->buf + from, '\n', len) != NULL)) {
+        lines_emit(g, emit, ctx);
+    }
+}
+
+void dcon_lines_put(dcon_lines_t *g, const char *s, size_t len, dcon_emit_fn emit, void *ctx)
+{
+    if (s == NULL) {
+        return;
+    }
+    if (g->cap == 0) {
+        if (len > 0) {
+            emit(ctx, s, len);   /* nowhere to gather: as it comes */
+        }
+        return;
+    }
+    while (len > 0) {
+        size_t k = g->cap - g->len < len ? g->cap - g->len : len;
+        memcpy(g->buf + g->len, s, k);
+        dcon_lines_added(g, k, emit, ctx);
+        s += k;
+        len -= k;
+    }
+}
+
+void dcon_lines_flush(dcon_lines_t *g, bool end_line, dcon_emit_fn emit, void *ctx)
+{
+    if (g->len == 0) {
+        return;
+    }
+    if (end_line) {
+        if (g->len < g->cap) {
+            g->buf[g->len++] = '\n';
+        } else {
+            emit(ctx, g->buf, g->len);
+            g->len = 0;
+            emit(ctx, "\n", 1);
+            return;
+        }
+    }
+    emit(ctx, g->buf, g->len);
+    g->len = 0;
+}
+
 /* Read the records after the cursor into a new batch. false = nothing waits. */
 static bool load_batch(dcon_t *c, logring_t *ring, logring_lock_fn lock, logring_lock_fn unlock, void *lock_ctx,
                        dcon_loss_t *loss)

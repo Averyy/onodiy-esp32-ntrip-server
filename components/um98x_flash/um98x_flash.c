@@ -13,6 +13,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "diag.h"
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -164,19 +165,21 @@ static void cap_put(const char *s, size_t n)
 
 void um98x_flash_cap_printf(bool console, const char *fmt, ...)
 {
-    char line[200];
+    char line[201];   /* up to 199 characters, the line end, the terminator */
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    int n = vsnprintf(line, sizeof(line) - 1u, fmt, ap);
     va_end(ap);
     if (n < 0) {
         return;
     }
-    size_t len = (size_t)n < sizeof(line) - 1u ? (size_t)n : sizeof(line) - 1u;
+    size_t len = (size_t)n < sizeof(line) - 2u ? (size_t)n : sizeof(line) - 2u;
+    line[len++] = '\n';
     cap_put(line, len);
-    cap_put("\n", 1);
     if (console) {
-        printf("%s\n", line);
+        /* Whole, through the log's console writer: a log line from another
+         * task never lands inside it (the bench tools read these lines). */
+        diag_console_write(line, len);
     }
 }
 

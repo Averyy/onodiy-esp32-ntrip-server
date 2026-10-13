@@ -8,9 +8,11 @@
 #   idf.py -B build-hold -D SDKCONFIG=build-hold/sdkconfig \
 #          -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.hold" build
 #
-# On a device whose receiver profile was never applied, the first boot
-# writes gnss/autocfg = 0, gnss/recovery = 2 (alerts only, if unset) and
-# gnss/hold = 1 before anything reaches the receiver. Until the user
+# On a device whose receiver profile was never applied and whose automatic
+# configuration (gnss/autocfg) was never set (saving the receiver page sets
+# it), the first boot writes gnss/autocfg = 0, gnss/recovery = 2 (alerts
+# only, if unset) and gnss/hold = 1 before anything reaches the receiver.
+# A device with either one gets no hold. Until the user
 # confirms the apply on the receiver page (or in the setup wizard), only
 # queries are sent. The hold stays in NVS, so flashing the station build
 # afterwards keeps it until the user applies. In QEMU:

@@ -30,6 +30,15 @@ CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_ETH_USE_OPENETH=y
 CONFIG_NETWORK_QEMU_ETHERNET=y
 
+# Receive buffers of that MAC (1600 bytes each, internal RAM; the default
+# is 4). When all are full the MAC drops the frame ("RX frame dropped
+# (0x14)" on the console: no free buffer), and TCP sends it again only
+# seconds later: in CI an HTTP answer came 5.5 s late that way, and drops
+# showed in passing end-to-end runs too. 16 hold a burst of frames while
+# the receive task waits to run (19 KB more than the default; the QEMU
+# build has no Wi-Fi, and well over 100 KB of internal RAM stays free).
+CONFIG_ETH_OPENETH_DMA_RX_BUFFER_NUM=16
+
 # A name of its own. QEMU's user-mode network (slirp) carries the guest's
 # multicast mDNS out of the developer's machine onto its LAN, where a real
 # station may answer onocoydiy.local: under the station's default name the

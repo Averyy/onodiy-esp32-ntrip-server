@@ -23,7 +23,10 @@ concurrency:
 #   docker image inspect espressif/idf:<tag> --format '{{index .RepoDigests 0}}'
 # and use that digest in every job that runs in it (firmware, firmware-bench,
 # host-tests, qemu-smoke, qemu-bench-console). tools/ci/host_tests_linux.sh
-# reads the image and the commands of the host-tests job from this file.
+# and tools/ci/qemu_linux.sh read the image and the steps of the host-tests
+# and the two QEMU jobs from this file (tools/ci/ci_job.py runs the steps; it
+# stands in for checkout, setup-uv and upload-artifact and refuses any other
+# action, so a new one there needs it taught first).
 #
 # Jobs: firmware (the station image, uploaded), firmware-bench (the
 # sdkconfig.bench overlay built and checked like the station image, so code
@@ -252,7 +255,8 @@ jobs:
 
   # The bench overlay in QEMU (sdkconfig.qemu plus sdkconfig.bench): the bench
   # console's command line answers on UART0 while the log keeps reaching the
-  # console beside it (tools/qemu/bench_console.py). Both use the console
+  # console beside it, and its replies stay whole while another task floods
+  # the log (tools/qemu/bench_console.py). Both use the console
   # UART's one driver, which only a running image shows; firmware-bench only
   # builds the overlay. A development check only; nothing here is released.
   qemu-bench-console:

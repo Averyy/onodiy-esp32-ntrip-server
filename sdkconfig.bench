@@ -19,10 +19,11 @@
 # tests pass.
 #
 # It also holds the receiver's first configuration until the user confirms
-# it (as sdkconfig.hold): a device whose profile was never applied gets
-# gnss/autocfg = 0, gnss/recovery = 2 (if unset) and gnss/hold = 1 before
-# anything reaches the receiver, and only queries are sent until the user
-# applies on the receiver page.
+# it (as sdkconfig.hold): a device whose profile was never applied and whose
+# automatic configuration (gnss/autocfg) was never set (saving the receiver
+# page sets it) gets gnss/autocfg = 0, gnss/recovery = 2 (if unset) and
+# gnss/hold = 1 before anything reaches the receiver, and only queries are
+# sent until the user applies on the receiver page.
 #
 # With the bench console on, test-Onocoy caster slots are allowed
 # (CONFIG_NTRIP_TEST_ONOCOY_SLOT, default y): a slot marked test_onocoy

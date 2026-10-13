@@ -21,12 +21,17 @@
  * waits for it for more than CONSOLE_WAIT_MS (the line then waits in the
  * ring instead).
  *
- * printf and the other stdout calls (the bench console's replies) write to
- * the UART driver directly, as before: while log lines wait in the ring,
- * stdout output can overtake them.
+ * Text that is not a log line (diag_console_write: the bench console's
+ * replies, gathered into whole lines first when printed in parts) goes to
+ * the driver whole, under the same mutex and with the same line endings, so
+ * no log line lands inside one of its lines; it may overtake log lines that
+ * wait in the ring. printf and the other stdout calls still write to the
+ * driver directly, one byte per driver call (the UART VFS), so a log line
+ * can land inside their lines.
  */
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -59,6 +64,7 @@
 #define CONSOLE_POLL_MS   200                       /* the writer looks at the ring at least this often */
 #define CONSOLE_RETRY_MS  10                        /* no room: about 115 bytes drain meanwhile */
 #define DRAIN_STEP_MS     5
+#define OTHER_WAIT_TRIES  50                        /* console text waits up to 0.5 s for room, then in the driver */
 
 _Static_assert(CONFIG_DIAG_LOG_LINE_MAX <= LOGRING_MAX_TEXT, "a log line must fit one ring record");
 _Static_assert(BANK_BYTES > sizeof(logring_hdr_t) + LOGRING_MAX_TEXT, "log ring too small");
@@ -354,7 +360,142 @@ static void wake_writer(void)
         xTaskNotifyGive(t);
     }
 }
+
+/* Text that is not a log line, under s_console_mux: through the batch's
+ * wire buffer (free while the mutex is held), the line endings expanded as
+ * for the log. Every driver write of it happens under the mutex, so no log
+ * line comes between them. */
+static void other_write(const char *s, size_t len)
+{
+    while (len > 0) {
+        size_t k = len < DCON_BUF_SIZE ? len : DCON_BUF_SIZE;
+        memcpy(s_con_wire, s, k);
+        wire_write(s_con_wire, k, sizeof(s_con_wire));
+        s += k;
+        len -= k;
+    }
+}
 #endif /* CONFIG_ESP_CONSOLE_UART */
+
+void diag_console_write(const char *s, size_t len)
+{
+    if (s == NULL || len == 0 || xPortInIsrContext()) {
+        return;
+    }
+    if (!s_console) {
+        /* No console of ours (yet): stdout as it is. */
+        (void)fwrite(s, 1, len, stdout);
+        (void)fflush(stdout);
+        return;
+    }
+#if CONFIG_ESP_CONSOLE_UART
+    if (!xPortCanYield() || xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) {
+        return;   /* would have to wait for the mutex or the driver */
+    }
+    /* The mutex is held only while all of it fits the transmit buffer at
+     * once, so a logger waiting for the mutex never waits for the UART:
+     * without the room, let go and look again (the writer and the fast path
+     * go on meanwhile). Text that can never fit at once, or that waited
+     * OTHER_WAIT_TRIES times, waits in the driver under the mutex: loggers
+     * then leave their lines to the writer after CONSOLE_WAIT_MS. */
+    size_t need = wire_len(s, len) + 2u + CONSOLE_MARGIN * (2u + len / DCON_BUF_SIZE);
+    for (unsigned tries = 0;; tries++) {
+        (void)xSemaphoreTake(s_console_mux, portMAX_DELAY);
+        if (con_room(NULL) >= need || need > CONFIG_DIAG_CONSOLE_TX_BUF || tries >= OTHER_WAIT_TRIES) {
+            break;
+        }
+        xSemaphoreGive(s_console_mux);
+        vTaskDelay(pdMS_TO_TICKS(CONSOLE_RETRY_MS));
+    }
+    if (s_con_ordered && dcon_other_text(&s_con, s, len)) {
+        other_write("\n", 1);
+    }
+    other_write(s, len);
+    xSemaphoreGive(s_console_mux);
+#endif
+}
+
+/* ---- lines gathered from pieces (diag_console_printf) ---------------------------------- */
+
+static void lines_emit(void *ctx, const char *s, size_t len)
+{
+    (void)ctx;
+    diag_console_write(s, len);
+}
+
+static void lines_view(diag_console_lines_t *l, dcon_lines_t *g)
+{
+    dcon_lines_init(g, l->buf, sizeof(l->buf));
+    g->len = l->len < sizeof(l->buf) ? l->len : sizeof(l->buf);
+}
+
+void diag_console_put(diag_console_lines_t *l, const char *s, size_t len)
+{
+    if (l == NULL) {
+        return;
+    }
+    dcon_lines_t g;
+    lines_view(l, &g);
+    dcon_lines_put(&g, s, len, lines_emit, NULL);
+    l->len = g.len;
+}
+
+void diag_console_vprintf(diag_console_lines_t *l, const char *fmt, va_list ap)
+{
+    if (l == NULL || fmt == NULL) {
+        return;
+    }
+    dcon_lines_t g;
+    lines_view(l, &g);
+    /* Straight into the gatherer when it fits (with its terminator), else
+     * formatted again into a heap buffer of its length. */
+    size_t room = g.cap - g.len;
+    va_list cp;
+    va_copy(cp, ap);
+    int n = vsnprintf(g.buf + g.len, room, fmt, cp);
+    va_end(cp);
+    if (n < 0) {
+        return;
+    }
+    if ((size_t)n < room) {
+        dcon_lines_added(&g, (size_t)n, lines_emit, NULL);
+        l->len = g.len;
+        return;
+    }
+    char *tmp = malloc((size_t)n + 1u);
+    if (tmp != NULL) {
+        va_copy(cp, ap);
+        int m = vsnprintf(tmp, (size_t)n + 1u, fmt, cp);
+        va_end(cp);
+        if (m > 0) {
+            dcon_lines_put(&g, tmp, (size_t)m < (size_t)n ? (size_t)m : (size_t)n, lines_emit, NULL);
+        }
+        free(tmp);
+    } else {
+        /* No memory for it: the part that fit, gathered as it stands. */
+        dcon_lines_added(&g, room > 0 ? room - 1u : 0, lines_emit, NULL);
+    }
+    l->len = g.len;
+}
+
+void diag_console_printf(diag_console_lines_t *l, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    diag_console_vprintf(l, fmt, ap);
+    va_end(ap);
+}
+
+void diag_console_flush(diag_console_lines_t *l, bool end_line)
+{
+    if (l == NULL) {
+        return;
+    }
+    dcon_lines_t g;
+    lines_view(l, &g);
+    dcon_lines_flush(&g, end_line, lines_emit, NULL);
+    l->len = g.len;
+}
 
 /* Record `seq` of the ring (0 = not in the ring) to the console. */
 static void console_put(uint32_t seq, char *s, size_t len, size_t cap, const char *fmt, va_list ap)

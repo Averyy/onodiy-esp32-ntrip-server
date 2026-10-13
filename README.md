@@ -61,7 +61,7 @@ Antenna and cable notes: [`reference/antenna-specs.md`](reference/antenna-specs.
 | `firmware/um982/` | Unicore UM982 receiver firmware the device flashes and offers as a user-confirmed update (see its README) |
 | `gnss-splitter/` | KiCad/EasyEDA PCB for an optional GNSS antenna splitter |
 | `tools/` | Release tooling (`release_manifest.py` writes a release's `manifest.json`) |
-| `tools/ci/` | CI's host-test job run locally in its pinned Linux container (see Building) |
+| `tools/ci/` | CI's host-test and QEMU jobs run locally in their pinned Linux container (see Building) |
 | `tools/bench/` | Host-side bench tools for the board: port finder, captures of both serial ports, receiver queries, RTCM inspection, station API dumps, and the receiver boot menu check over its USB port (see its README) |
 | `tools/qemu/` | The firmware in Espressif's QEMU, no board needed: build and run script, smoke test (see its README) |
 | `sdkconfig.qemu` | QEMU-only configuration overlay used by `tools/qemu/run.sh`; never for a station |
@@ -104,6 +104,21 @@ tools/ci/host_tests_linux.sh              # --keep-going lists every build error
 It reads the image and the commands from `build.yml`, builds a copy of the working tree
 inside the container (nothing in the checkout is written) and fails on any compiler
 warning in the project's own sources too.
+
+CI's two QEMU jobs (the smoke test with the end-to-end run, and the bench console; see
+[`tools/qemu/README.md`](tools/qemu/README.md)) run the same way:
+
+```sh
+tools/ci/qemu_linux.sh                    # both jobs; --job smoke or --job bench-console for one
+```
+
+The container gets the repository's history too (the jobs name the build with `git
+describe`) and, by default, the 2 CPUs of GitHub's runner for a private repository
+(`--cpus`), since the QEMU checks depend on timing. What a job uploads lands in
+`build-ci/<job>/`, with `steps.log` holding every step's output. CI's runners are
+amd64 (the default `--platform`); on Apple silicon Docker emulates them, and a run
+of both jobs took 36 minutes there (`--platform linux/arm64` is native and
+faster, but not what CI runs).
 
 Notes:
 

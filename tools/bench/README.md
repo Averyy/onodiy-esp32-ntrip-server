@@ -378,6 +378,28 @@ ftimes dump             the whole recording as CSV, ending with "BENCH ftimes du
   `rawstall` and `listen` run during a recording (with their usual
   refusals: receiver maintenance, an open update journal, another receiver
   job).
+
+### Reading the bench console's replies
+
+Every reply line (`BENCH ...`, `help`, the usage lines), the flasher's byte
+echo and, for a script (a terminal that does not answer linenoise's status
+request), the prompt reach the console whole: they go through the log's
+console writer a line at a time, so a log line from another task comes
+before or after a reply line, never inside it, and a script can take each
+console line as it is. Only the echo of what is typed can still be split by
+a log line. `status` names what its numbers mean:
+
+```
+status   BENCH state 3 (streaming), receiver UM982 R4.10Build18975, journal none (state 0 none, phase 0 none, 0 transfer(s)), flashing built in
+         BENCH progress: phase 0 (idle), 0/0 bytes, 0/0 frames, 0 retries; last: outcome 0 (none), rule 0, reason none
+```
+
+The station state, update phase and outcome names are the web API's; the
+journal states are the ones `jstate` and `reset_at` take; a receiver not
+identified yet is `receiver none`. `logflood <s> [ms]` logs a line every
+`ms` (default 10) for `s` seconds from a task of its own, to see that
+replies stay whole while the log is busy (`tools/qemu/bench_console.py`
+does that in QEMU).
 - The same recording is `GET /api/diag/frame-times` (CSV).
 
 ## Layout

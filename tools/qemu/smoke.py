@@ -34,12 +34,21 @@ What it does:
      a route that takes a body, the route's own answer elsewhere, with
      "Connection: close"; the chunks never come back as a second answer),
      and two pipelined HTTP/1.1 requests on one socket are both answered;
+     both ways a JSON answer goes out, on one kept HTTP/1.1 connection: one
+     that fits the web server's response buffer (its size read from
+     components/web/web.c) with its Content-Length, a larger one streamed
+     (chunked), each expectation following the answer's measured size, both
+     ways taken, and the connection answers again after the streamed one;
      streamed answers to HTTP/1.0 carry no chunked framing: GET
-     /api/logs?format=text and a JSON answer larger than the 2 KB response
-     buffer (chunked to HTTP/1.1, which proves it is streamed, and the
-     socket still answers a second request) come without Transfer-Encoding,
-     their body as it is (a log line first, JSON that parses) and the
-     connection ends after them; client addresses in the log (a wrong admin password, a
+     /api/logs?format=text and GET /api/status come without
+     Transfer-Encoding (the status, larger than the buffer, also without a
+     Content-Length), their body as it is (a log line first, JSON that
+     parses) and the connection ends after them. Every answer is read to
+     the end its framing gives, waiting up to 30 s for it: QEMU's emulated
+     Ethernet drops a frame when the firmware has no free receive buffer,
+     and TCP resends it only seconds later, so a late answer is never taken
+     for a missing or different one; a "closed" time counts from the end of
+     the answer; client addresses in the log (a wrong admin password, a
      refused WebSocket handshake: "from 10.0.2.2"); log levels: "*" at info
      keeps the HTTP server's own tags at error (no "W httpd_uri" line for a
      refused handshake), a level the build cannot show is refused,
@@ -106,6 +115,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[2]
 RUN_SH = ROOT / "tools" / "qemu" / "run.sh"
@@ -130,6 +140,10 @@ DETECT_RESULT = re.compile(r"um98x_ctl: receiver not found \(([^)]*)\)|um98x_ctl
 # '#' line start, no RTCM preamble, no loader prompt). The framer discards it,
 # so the firmware sees bytes but no reply.
 LINK_TEST = b"qemu uart1 link test\r\n"
+# How long an HTTP answer may take to arrive. QEMU's emulated Ethernet MAC drops a received frame when the
+# firmware has no free receive buffer ("RX frame dropped" on the console), and TCP sends it again only seconds
+# later (an answer 5.5 s late in CI): a late answer is waited for, never read as a missing or a different one.
+ANSWER_TIMEOUT_S = 30.0
 
 
 def free_port() -> int:
@@ -215,9 +229,12 @@ def request(port: int, method: str, path: str, body: dict | None = None, cookie:
         conn.close()
 
 
-def raw_exchange(port: int, data: bytes, timeout: float = 5.0) -> tuple[bytes, float | None]:
-    """Send raw bytes, read until the server closes or `timeout`: (bytes, seconds to EOF or None)."""
+def raw_exchange(port: int, data: bytes, timeout: float = ANSWER_TIMEOUT_S) -> tuple[bytes, float | None]:
+    """Send raw bytes, read until the server closes or `timeout`: (bytes, seconds from the last byte received to
+    the end of the connection, or None when it did not end). Measured from the answer, not from the request: an
+    answer that a lost frame delayed (see ANSWER_TIMEOUT_S) still shows whether the server closed right after it."""
     t0 = time.monotonic()
+    last = t0
     got = bytearray()
     with socket.create_connection(("127.0.0.1", port), timeout=timeout) as c:
         c.sendall(data)
@@ -228,11 +245,140 @@ def raw_exchange(port: int, data: bytes, timeout: float = 5.0) -> tuple[bytes, f
             except socket.timeout:
                 continue
             except OSError:
-                return bytes(got), time.monotonic() - t0
+                return bytes(got), time.monotonic() - last
             if not chunk:
-                return bytes(got), time.monotonic() - t0
+                return bytes(got), time.monotonic() - last
             got += chunk
+            last = time.monotonic()
     return bytes(got), None
+
+
+def secs(t: float | None) -> str:
+    """A time for a check's text (None: it did not happen within the timeout)."""
+    return f"(not within {ANSWER_TIMEOUT_S:.0f} s)" if t is None else f"{t:.2f} s"
+
+
+class Answer(NamedTuple):
+    """One HTTP answer as read off its socket."""
+    status: int                  # 0: no status line
+    head: bytes                  # status line and header lines
+    headers: dict[str, str]      # lower-case names
+    body: bytes                  # without chunked framing
+    framing: str                 # "chunked", "length" (Content-Length), "close" (to the end), "" (none: incomplete)
+    complete: bool               # the answer ended where its framing says
+    seconds: float               # from the read's start to its end
+
+
+class AnswerReader:
+    """HTTP/1.x answers read off one socket in turn (keep-alive, pipelining), each until its framing says it
+    ended: Content-Length, the last chunk, or the end of the connection. Never a guess from a quiet socket."""
+
+    def __init__(self, sock: socket.socket):
+        self.sock = sock
+        self.buf = bytearray()
+        self.eof = False
+
+    def _fill(self, deadline: float) -> bool:
+        """More bytes; False once the connection ended or the deadline passed."""
+        while not self.eof:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            self.sock.settimeout(min(left, 0.5))
+            try:
+                chunk = self.sock.recv(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                self.eof = True
+                return False
+            if not chunk:
+                self.eof = True
+                return False
+            self.buf += chunk
+            return True
+        return False
+
+    def _until(self, need, deadline: float) -> bool:
+        while not need():
+            if not self._fill(deadline):
+                return need()
+        return True
+
+    def read(self, timeout: float = ANSWER_TIMEOUT_S) -> Answer:
+        t0 = time.monotonic()
+        deadline = t0 + timeout
+
+        def done(status=0, head=b"", headers=None, body=b"", framing="", complete=False) -> Answer:
+            return Answer(status, head, headers or {}, bytes(body), framing, complete, time.monotonic() - t0)
+
+        if not self._until(lambda: b"\r\n\r\n" in self.buf, deadline):
+            return done(head=bytes(self.buf))
+        head, _, rest = bytes(self.buf).partition(b"\r\n\r\n")
+        self.buf = bytearray(rest)
+        lines = head.split(b"\r\n")
+        m = re.match(rb"HTTP/1\.[01] (\d{3})", lines[0])
+        status = int(m.group(1)) if m else 0
+        headers = {}
+        for line in lines[1:]:
+            name, sep, value = line.partition(b":")
+            if sep:
+                headers[name.strip().lower().decode("latin-1")] = value.strip().decode("latin-1")
+        if 100 <= status < 200 or status in (204, 304):
+            return done(status, head, headers, b"", "length", True)   # no body (a WebSocket's 101 included)
+        if "chunked" in headers.get("transfer-encoding", "").lower():
+            body = bytearray()
+            while True:
+                if not self._until(lambda: b"\r\n" in self.buf, deadline):
+                    return done(status, head, headers, body, "chunked")
+                size_line, _, rest = bytes(self.buf).partition(b"\r\n")
+                try:
+                    size = int(size_line.split(b";")[0].strip(), 16)
+                except ValueError:
+                    return done(status, head, headers, body, "chunked")
+                if size == 0:
+                    # The last chunk, then trailer lines up to an empty one (none here: "0\r\n\r\n").
+                    self.buf = bytearray(rest)
+                    if not self._until(lambda: self.buf.startswith(b"\r\n") or b"\r\n\r\n" in self.buf, deadline):
+                        return done(status, head, headers, body, "chunked")
+                    end = 2 if self.buf.startswith(b"\r\n") else self.buf.index(b"\r\n\r\n") + 4
+                    del self.buf[:end]
+                    return done(status, head, headers, body, "chunked", True)
+                need = len(size_line) + 2 + size + 2
+                if not self._until(lambda: len(self.buf) >= need, deadline):
+                    return done(status, head, headers, body, "chunked")
+                data = bytes(self.buf[len(size_line) + 2:need])
+                if not data.endswith(b"\r\n"):
+                    return done(status, head, headers, body, "chunked")
+                body += data[:-2]
+                del self.buf[:need]
+        if "content-length" in headers:
+            try:
+                n = int(headers["content-length"])
+            except ValueError:
+                return done(status, head, headers, b"", "length")
+            ok = self._until(lambda: len(self.buf) >= n, deadline)
+            body = bytes(self.buf[:n])
+            del self.buf[:n]
+            return done(status, head, headers, body, "length", ok)
+        self._until(lambda: False, deadline)   # to the end of the connection
+        body = bytes(self.buf)
+        self.buf.clear()
+        return done(status, head, headers, body, "close", self.eof)
+
+    def wait_close(self, seconds: float) -> float | None:
+        """Seconds until the server ended the connection, or None (bytes that still come are kept in buf)."""
+        t0 = time.monotonic()
+        while self._fill(t0 + seconds):
+            pass
+        return time.monotonic() - t0 if self.eof else None
+
+
+def response_buffer_size() -> int | None:
+    """The web server's response buffer (components/web/web.c, s_http_buf): a JSON answer larger than it is
+    streamed (chunked to HTTP/1.1), one that fits goes out with its Content-Length."""
+    m = re.search(r"\bs_http_buf\[(\d+)\];", (ROOT / "components" / "web" / "web.c").read_text(encoding="utf-8"))
+    return int(m.group(1)) if m else None
 
 
 def raw_request(port: int, method: str, path: str, body: bytes, headers: dict[str, str] | None = None,
@@ -442,11 +588,11 @@ class Smoke:
         data, eof = raw_exchange(port, f"GET /api/session HTTP/1.1\r\n{host}Connection: close\r\n\r\n".encode())
         self.check(data.startswith(b"HTTP/1.1 200") and b"connection: close" in data.lower() and eof is not None
                    and eof < 2.0,
-                   f"Connection: close: answered and closed after {eof if eof is None else round(eof, 2)} s")
+                   f"Connection: close: answered and closed {secs(eof)} after the answer")
         data, eof = raw_exchange(port, f"GET / HTTP/1.0\r\n{host}\r\n".encode())
         self.check(data.startswith(b"HTTP/1.1 200") and eof is not None and eof < 2.0,
-                   f"GET / HTTP/1.0: answered ({data[:15]!r}) and closed after "
-                   f"{eof if eof is None else round(eof, 2)} s")
+                   f"GET / HTTP/1.0: answered ({data[:15]!r}) and closed "
+                   f"{secs(eof)} after the answer")
         # HTTP/1.0 with keep-alive: never kept (the client would wait for the end of the connection
         # unless the token were echoed), so the answer says close and the connection ends.
         data, eof = raw_exchange(port, f"GET /api/session HTTP/1.0\r\n{host}Connection: keep-alive\r\n\r\n".encode())
@@ -454,7 +600,7 @@ class Smoke:
         self.check(data.startswith(b"HTTP/1.1 200") and b"connection: close" in head and b"keep-alive" not in head
                    and eof is not None and eof < 2.0,
                    f"GET /api/session HTTP/1.0 with Connection: keep-alive: answered with Connection: close and "
-                   f"closed after {eof if eof is None else round(eof, 2)} s")
+                   f"closed {secs(eof)} after the answer")
         # A chunked body is never read: one answer (411 on a route that takes a body, the route's own answer
         # elsewhere) with Connection: close, and the chunks never come back as a second answer.
         chunks = b"5\r\nhello\r\n0\r\n\r\n"
@@ -471,33 +617,29 @@ class Smoke:
             self.check(status_ok and code_ok and b"connection: close" in head.lower()
                        and data.count(b"HTTP/1.1 ") == 1 and eof is not None and eof < 3.0,
                        f"{method} {path} with a chunked body: {data[:12]!r}, one answer "
-                       f"({data.count(b'HTTP/1.1 ')}), Connection: close, closed after "
-                       f"{eof if eof is None else round(eof, 2)} s")
+                       f"({data.count(b'HTTP/1.1 ')}), Connection: close, closed "
+                       f"{secs(eof)} after the answer")
         two = (f"GET /api/session HTTP/1.1\r\n{host}\r\n"
                f"GET /api/session HTTP/1.1\r\n{host}Connection: close\r\n\r\n").encode()
         data, eof = raw_exchange(port, two)
         self.check(data.count(b"HTTP/1.1 200") == 2 and eof is not None,
                    f"two pipelined HTTP/1.1 requests on one socket: {data.count(b'HTTP/1.1 200')} answered, "
                    f"closed after the second")
-        # Keep-alive: an HTTP/1.1 request without "close" leaves the connection open.
+        # Keep-alive: an HTTP/1.1 request without "close" leaves the connection open (its answer read whole by its
+        # Content-Length, then the connection still there 1 s later), and the second request is answered on it.
         with socket.create_connection(("127.0.0.1", port), timeout=10) as c:
+            rd = AnswerReader(c)
             c.sendall(f"GET /api/session HTTP/1.1\r\n{host}\r\n".encode())
-            time.sleep(1.5)
-            c.settimeout(0.5)
-            first = c.recv(65536)
+            first = rd.read()
+            open_after = rd.wait_close(1.0) is None and not rd.buf
             c.sendall(f"GET /api/session HTTP/1.1\r\n{host}Connection: close\r\n\r\n".encode())
-            c.settimeout(5)
-            second = b""
-            try:
-                while True:
-                    chunk = c.recv(65536)
-                    if not chunk:
-                        break
-                    second += chunk
-            except socket.timeout:
-                pass
-        self.check(first.startswith(b"HTTP/1.1 200") and second.startswith(b"HTTP/1.1 200"),
-                   "HTTP/1.1 keep-alive: a second request on the same socket is answered")
+            second = rd.read()
+        self.check(first.status == 200 and first.complete and open_after and second.status == 200
+                   and second.complete,
+                   f"HTTP/1.1 keep-alive: the first answer ({first.status or 'none'}, {first.framing or 'incomplete'}, "
+                   f"after {first.seconds:.2f} s) leaves the connection open "
+                   f"({'yes' if open_after else 'NO'}), and a second request on it is answered "
+                   f"({second.status or 'none'}, after {second.seconds:.2f} s)")
 
     def http10_stream_checks(self) -> None:
         """Streamed answers to HTTP/1.0: no chunked framing, the body as it is, the connection ends after it."""
@@ -513,51 +655,62 @@ class Smoke:
                    and b"connection: close" in head.lower() and first and not re.fullmatch(rb"[0-9a-fA-F]+", first)
                    and b" " in first and eof is not None and eof < 2.0,
                    f"GET /api/logs?format=text HTTP/1.0: no Transfer-Encoding, first body line {first[:40]!r}, "
-                   f"closed after {eof if eof is None else round(eof, 2)} s")
-        # A JSON answer larger than the 2 KB response buffer: chunked to HTTP/1.1 (the streamed path), and that
-        # socket still answers a second request ...
-        path = "/api/status"
+                   f"closed {secs(eof)} after the answer")
+        # Both ways a JSON answer goes out, on one HTTP/1.1 connection kept alive throughout: an answer that fits
+        # the response buffer with its Content-Length, a larger one streamed (chunked). Which way an answer must
+        # take follows from its size, measured here, against the buffer the firmware has (read from web.c), so the
+        # expectation holds wherever the answers' sizes differ; that both ways were taken is checked on its own.
+        cap = response_buffer_size()
+        if not self.check(cap is not None, f"the web server's response buffer read from web.c ({cap} bytes)"):
+            return
+        answers: list[tuple[str, Answer]] = []
         with socket.create_connection(("127.0.0.1", port), timeout=10) as c:
-            c.sendall(f"GET {path} HTTP/1.1\r\n{host}\r\n".encode())
-            got = b""
-            c.settimeout(5)
-            try:
-                while not got.endswith(b"\r\n0\r\n\r\n"):
-                    chunk = c.recv(65536)
-                    if not chunk:
-                        break
-                    got += chunk
-            except socket.timeout:
-                pass
+            rd = AnswerReader(c)
+            for path in ("/api/session", "/api/status"):
+                c.sendall(f"GET {path} HTTP/1.1\r\n{host}\r\n".encode())
+                answers.append((path, rd.read()))
             c.sendall(f"GET /api/session HTTP/1.1\r\n{host}Connection: close\r\n\r\n".encode())
-            second = b""
+            last = rd.read()
+            closed = rd.wait_close(5.0)
+        for path, a in answers:
+            want = "chunked" if len(a.body) > cap else "length"
             try:
-                while True:
-                    chunk = c.recv(65536)
-                    if not chunk:
-                        break
-                    second += chunk
-            except socket.timeout:
-                pass
-        head11 = got.partition(b"\r\n\r\n")[0].lower()
-        chunked = b"transfer-encoding: chunked" in head11
-        self.check(got.startswith(b"HTTP/1.1 200") and chunked and got.endswith(b"\r\n0\r\n\r\n")
-                   and second.startswith(b"HTTP/1.1 200"),
-                   f"GET {path} HTTP/1.1: chunked ({chunked}: larger than the response buffer, so streamed), "
-                   f"and a second request on that socket is answered ({second[:12]!r})")
-        # ... and to HTTP/1.0 it comes without Transfer-Encoding: JSON that parses, then the end of the connection.
+                parses = isinstance(json.loads(a.body), dict)
+            except ValueError:
+                parses = False
+            self.check(a.status == 200 and a.complete and a.framing == want and parses,
+                       f"GET {path} HTTP/1.1 on the kept connection: {len(a.body)} bytes of JSON "
+                       f"({'parses' if parses else 'does not parse'}), "
+                       + (f"larger than the {cap}-byte response buffer, so streamed (chunked)" if want == "chunked"
+                          else f"within the {cap}-byte response buffer, so with its Content-Length")
+                       + f": {a.framing or 'no answer'}{'' if a.complete else ' (incomplete)'}, "
+                       f"HTTP {a.status or '-'}, after {a.seconds:.2f} s")
+        sizes = [len(a.body) for _, a in answers]
+        self.check(any(n > cap for n in sizes) and any(0 < n <= cap for n in sizes),
+                   f"both ways taken: answers of {' and '.join(map(str, sizes))} bytes against the {cap}-byte buffer "
+                   f"(one larger, one within)")
+        self.check(last.status == 200 and last.complete and closed is not None and closed < 2.0,
+                   f"after the streamed answer the same connection answers again (HTTP {last.status or '-'}, after "
+                   f"{last.seconds:.2f} s) and ends {secs(closed)} after that Connection: close answer")
+        # To HTTP/1.0 nothing is chunked: the streamed answer comes without Transfer-Encoding and without a
+        # Content-Length (its end is the connection's), a buffered one with its Content-Length.
+        path = "/api/status"
         data, eof = raw_exchange(port, f"GET {path} HTTP/1.0\r\n{host}\r\n".encode())
         head, _, body = data.partition(b"\r\n\r\n")
         try:
             parsed = json.loads(body)
         except ValueError:
             parsed = None
-        self.check(data.startswith(b"HTTP/1.1 200") and b"transfer-encoding" not in head.lower()
+        streamed = len(body) > cap
+        length = re.search(rb"(?im)^content-length:\s*(\d+)\s*$", head)
+        length_ok = length is None if streamed else (length is not None and int(length.group(1)) == len(body))
+        self.check(data.startswith(b"HTTP/1.1 200") and b"transfer-encoding" not in head.lower() and length_ok
                    and b"connection: close" in head.lower() and b"cache-control: no-store" in head.lower()
                    and isinstance(parsed, dict) and parsed.get("api") == 1 and eof is not None and eof < 2.0,
-                   f"GET {path} HTTP/1.0: {len(body)} bytes of JSON without Transfer-Encoding "
-                   f"({'parses' if isinstance(parsed, dict) else 'does not parse'}), closed after "
-                   f"{eof if eof is None else round(eof, 2)} s")
+                   f"GET {path} HTTP/1.0: {len(body)} bytes of JSON "
+                   f"({'parses' if isinstance(parsed, dict) else 'does not parse'}) without Transfer-Encoding, "
+                   + ("streamed: no Content-Length" if streamed else "buffered: its Content-Length")
+                   + f" ({'as expected' if length_ok else 'NOT as expected'}), closed {secs(eof)} after the answer")
 
     def signal_test_checks(self) -> None:
         """No receiver attached: a signal-group comparison is refused with no_receiver, and none runs."""
@@ -630,8 +783,10 @@ class Smoke:
         req = (f"GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{self.http_port}\r\nUpgrade: websocket\r\n"
                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
                + (f"Cookie: {cookie}\r\n" if cookie else "") + "\r\n")
-        data, _ = raw_exchange(self.http_port, req.encode(), timeout=5)
-        return data
+        with socket.create_connection(("127.0.0.1", self.http_port), timeout=10) as c:
+            c.sendall(req.encode())
+            a = AnswerReader(c).read()
+        return a.head + (b"\r\n\r\n" if a.head else b"") + a.body
 
     def client_log_checks(self) -> None:
         """A wrong admin password and a refused WebSocket handshake name the client in the log."""

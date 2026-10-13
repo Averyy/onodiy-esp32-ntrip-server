@@ -36,7 +36,16 @@ build cannot show whether both still work, so this runs the image:
   5. the web server answers; with the first admin password set, the web log
      (GET /api/logs?format=text) has the start line, and /api/health counts
      no console drop;
-  6. throughout: no "UART driver already installed" or "uart driver error"
+  6. replies stay whole while another task logs: `logflood` makes a task
+     above the command line's log a line every FLOOD_MS ms for FLOOD_S s,
+     and meanwhile `status`, `race_result`, `heapfrag free`, a second
+     `logflood` (refused), `ftimes status`, `ftimes summary` (with the link
+     hooks) and `help` are typed round after round. Every console line with
+     BENCH in it must be one of the replies in its whole form (WHOLE), none
+     with a log line's time and tag inside it; `help` still lists every
+     command; every flood line arrives whole, once; flood lines did arrive
+     while the replies were printed; and /api/health counts no console drop;
+  7. throughout: no "UART driver already installed" or "uart driver error"
      line, no console note about dropped lines ("[diag:"), no panic and one
      boot only.
 
@@ -88,6 +97,48 @@ SUMMARY = re.compile(
     r"; longest reader gap with data waiting \d+ us")
 SINCE_BOOT = re.compile(r"BENCH ftimes interrupt times since boot: \d+ frames with one, \d+ without, \d+ resyncs, "
                         r"\d+ mismatches, \d+ pairings dropped by a known cause")
+# The log flood (`logflood`): log lines from a task above the command line's, while commands are typed.
+FLOOD_S = 15
+FLOOD_MS = 2
+FLOOD_MARGIN_S = 5           # no round starts in the flood's last seconds (a round took under 1 s in QEMU on a Mac)
+FLOOD_TEXT = "a log line from another task while the command line answers"
+FLOOD_LINE = re.compile(r"I \(\d+\) logflood: line (\d+) of (\d+): " + re.escape(FLOOD_TEXT) + r"$", re.M)
+FLOOD_DONE = re.compile(r"I \(\d+\) logflood: done: (\d+) lines")
+# Every BENCH line the commands typed during the flood print, in its whole form (the whole console line).
+WHOLE = [
+    re.compile(r"BENCH logflood: \d+ log lines, one every \d+ ms, from another task in the background \(commands "
+               r"keep working meanwhile; the last line says done\)"),
+    re.compile(r"BENCH REFUSED: a log flood runs"),
+    re.compile(r"BENCH state \d+ \([a-z_]+\), receiver .+, journal (?:none|open|unknown) \(state \d+ [a-z0-9-]+, "
+               r"phase \d+ [a-z0-9-]+, \d+ transfer\(s\)\), flashing (?:built in|not built in)"),
+    re.compile(r"BENCH progress: phase \d+ \([a-z_]+\), \d+/\d+ bytes, \d+/\d+ frames, \d+ retries; last: outcome "
+               r"\d+ \([a-z_]+\), rule \d+, reason .+"),
+    re.compile(r"BENCH no stop-key-from-boot run this boot"),
+    re.compile(r"BENCH heapfrag free: \d+ block\(s\) released"),
+    re.compile(r"BENCH heap now: internal free \d+ B, largest internal block \d+ B"),
+    re.compile(r"BENCH ftimes status: not running, \d+ records"),
+    # Without a frame: nothing after the reader gap but the clock's note when SNTP has not set the time.
+    re.compile(SUMMARY.pattern + r"(?:; epoch delay: no clock \(the system time is not set by SNTP\))?"),
+    SINCE_BOOT,
+]
+# Typed during the flood, each with what its reply ends with (the link hooks' commands only when built in).
+FLOOD_COMMANDS = [
+    ("status", "BENCH progress:", False),
+    ("race_result", "BENCH no stop-key-from-boot", False),
+    ("heapfrag free", "BENCH heap now:", False),
+    (f"logflood {FLOOD_S} {FLOOD_MS}", "BENCH REFUSED", False),
+    ("ftimes status", "BENCH ftimes status:", True),
+    ("ftimes summary", "interrupt times since boot", True),
+]
+
+
+def split_bench_lines(text: str) -> tuple[list[str], list[str], list[str]]:
+    """The console lines that carry BENCH; those with a log line inside (a log line's time and tag after the
+    reply's start); those not in a whole form of WHOLE."""
+    lines = [x.rstrip("\r") for x in text.split("\n") if "BENCH" in x]
+    inside = [x for x in lines if STAMP.search(x)]
+    cut = [x for x in lines if not any(w.fullmatch(x) for w in WHOLE)]
+    return lines, inside, cut
 
 
 def registered_commands(source: str, hooks: bool) -> list[str]:
@@ -96,6 +147,11 @@ def registered_commands(source: str, hooks: bool) -> list[str]:
     if not hooks:
         body = re.sub(r"#if CONFIG_GNSS_LINK_BENCH_HOOKS\n.*?#endif", "", body, flags=re.DOTALL)
     return re.findall(r'\breg\("([A-Za-z0-9_]+)"', body)
+
+
+def expected_commands(hooks: bool) -> list[str]:
+    """What `help` must list: help itself and every command bench.c registers."""
+    return list(dict.fromkeys(["help"] + registered_commands(BENCH_C.read_text(encoding="utf-8"), hooks)))
 
 
 def listed_commands(reply: str) -> set[str]:
@@ -258,7 +314,7 @@ class BenchConsole:
 
     def command_checks(self) -> None:
         hooks = sdkconfig_on(BUILD, "CONFIG_GNSS_LINK_BENCH_HOOKS")
-        expected = ["help"] + registered_commands(BENCH_C.read_text(encoding="utf-8"), hooks)
+        expected = expected_commands(hooks)
         reply = self.command("help", lambda t: set(expected) <= listed_commands(t))
         (self.out / "help.txt").write_text(reply, encoding="utf-8")
         missing = [c for c in expected if c not in listed_commands(reply)]
@@ -281,6 +337,71 @@ class BenchConsole:
 
         reply = self.command("nosuchcommand", lambda t: "Unrecognized command" in t)
         self.check("Unrecognized command" in reply, "an unknown command answers \"Unrecognized command\"")
+
+    def flood_checks(self) -> None:
+        """Replies stay whole while another task logs: a log flood from a task above the command line's, commands
+        typed meanwhile, and every BENCH line on the console in its whole form, none with a log line inside."""
+        hooks = sdkconfig_on(BUILD, "CONFIG_GNSS_LINK_BENCH_HOOKS")
+        start = self.tap.size()
+        reply = self.command(f"logflood {FLOOD_S} {FLOOD_MS}", lambda t: "BENCH " in t)
+        if not self.check("BENCH logflood:" in reply, "logflood started: " + next(
+                (x.strip()[:160] for x in reply.splitlines() if "BENCH" in x), "no answer")):
+            return
+        commands = [(c, end) for c, end, needs_hooks in FLOOD_COMMANDS if hooks or not needs_hooks]
+        expected = expected_commands(hooks)
+        windows: list[tuple[int, int]] = []
+        unanswered: list[str] = []
+        help_missing: set[str] = set()
+        rounds = 0
+        # Rounds start only while the flood surely runs (it must refuse a second one), then its end is awaited.
+        until = time.monotonic() + FLOOD_S - FLOOD_MARGIN_S
+        while time.monotonic() < until and self.alive() and not FLOOD_DONE.search(self.tap.text()[start:]):
+            for line, end in commands + [("help", None)]:
+                at = self.tap.size()
+                if end is None:
+                    got = self.command(line, lambda t: set(expected) <= listed_commands(t))
+                    help_missing |= set(expected) - listed_commands(got)
+                else:
+                    got = self.command(line, lambda t, e=end: e in t)
+                if PROMPT not in got:
+                    unanswered.append(line)
+                windows.append((at, self.tap.size()))
+            rounds += 1
+        text = self.wait_text(start, lambda t: FLOOD_DONE.search(t) is not None, FLOOD_S + 60)
+        (self.out / "flood.txt").write_text(text, encoding="utf-8")
+        done = FLOOD_DONE.search(text)
+        total = int(done.group(1)) if done else None
+        numbers = [int(m.group(1)) for m in FLOOD_LINE.finditer(text.replace("\r", ""))]
+        self.check(done is not None and len(numbers) == total and set(numbers) == set(range(1, total + 1)),
+                   f"the flood's log lines all reached the console whole, once each ({len(set(numbers))} of "
+                   f"{total}, {len(numbers)} in all)")
+        refused = text.count("BENCH REFUSED: a log flood runs")
+        self.check(rounds > 0 and refused == rounds,
+                   f"a second flood is refused while one runs ({refused} refusal(s) in {rounds} round(s))")
+        full = self.tap.text()
+        during = sum(len(FLOOD_LINE.findall(full[a:b].replace("\r", ""))) for a, b in windows)
+        self.check(rounds > 0 and during > 0 and not unanswered,
+                   f"{rounds} round(s) of {len(commands) + 1} commands typed during the flood, all answered, "
+                   f"with {during} flood line(s) arriving while they were answered"
+                   + (f"; no answer to: {', '.join(unanswered[:4])}" if unanswered else ""))
+        lines, inside, cut = split_bench_lines(text)
+        self.check(bool(lines) and not inside,
+                   f"{len(lines)} BENCH line(s) during the flood, none with a log line inside"
+                   + (f" ({len(inside)}: {inside[0][:160]!r})" if inside else ""))
+        self.check(bool(lines) and not cut,
+                   f"every BENCH line during the flood in its whole form"
+                   + (f" ({len(cut)} not: {cut[0][:160]!r})" if cut else ""))
+        self.check(not help_missing, "help during the flood lists every command"
+                   + (f" (missing: {', '.join(sorted(help_missing))})" if help_missing else ""))
+        if self.cookie:
+            try:
+                status, _, body = smoke.request(self.http_port, "GET", "/api/health", cookie=self.cookie, timeout=30)
+                log = (json.loads(body).get("log") or {}) if status == 200 else {}
+                self.check(status == 200 and log.get("console_dropped") == 0,
+                           f"after the flood /api/health log.console_dropped {log.get('console_dropped')} of "
+                           f"{log.get('lines')} lines")
+            except (OSError, http.client.HTTPException, ValueError) as e:
+                self.check(False, f"/api/health after the flood: {type(e).__name__}: {e}")
 
     def log_flows(self) -> None:
         """A log line well after the start line: the log writer still reaches the console."""
@@ -363,10 +484,13 @@ class BenchConsole:
     def run(self) -> int:
         try:
             if self.start():
-                if self.wait_start():
+                started = self.wait_start()
+                if started:
                     self.command_checks()
                     self.log_flows()
                 self.web_checks()   # also without a command line: the web log shows what the console could not
+                if started:
+                    self.flood_checks()   # after the web log check: the flood overwrites the log ring
             self.final_checks()
         finally:
             self.stop()

@@ -23,6 +23,8 @@ menu "Station: bench console (bench builds only)"
             job refuses a build with this on.
 
             The command line reads the console UART through the driver the
-            log tap installs at boot (it never installs a second one).
+            log tap installs at boot (it never installs a second one), and
+            its replies go out through the log's console writer a whole
+            line at a time, so a log line never lands inside one.
 
 endmenu

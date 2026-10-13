@@ -52,9 +52,14 @@
  *    still holds it. Lines are lost only when the ring overwrote them before
  *    they were sent: they count as console drops (diag_log_stats), and one
  *    note "[diag: N console lines dropped]" says so, always at the start of
- *    a line. printf output goes to the driver directly and can overtake
- *    lines that wait in the ring. Before a planned restart the waiting
- *    lines and the buffer are given up to 300 ms to go out.
+ *    a line. Console text that is not a log line and must stay readable
+ *    (the bench console's replies, the receiver flasher's byte echo in bench
+ *    builds) goes through diag_console_write: whole, under the same lock,
+ *    so no log line lands inside one of its lines. printf output goes to
+ *    the driver directly, one byte per driver write: a log line can land
+ *    inside a printf line, and printf output can overtake lines that wait
+ *    in the ring. Before a planned restart the waiting lines and the buffer
+ *    are given up to 300 ms to go out.
  *  - Event journal: fixed-size records in the raw "journal" partition
  *    (boots with reset class and reason, the previous session's uptime,
  *    reboot reason codes, ladder steps, app update/trial/revert/rollback
@@ -96,6 +101,7 @@
  */
 #pragma once
 
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -410,6 +416,50 @@ uint32_t diag_log_head(void);
 
 /** Log counters. */
 void diag_log_stats(diag_log_stats_t *out);
+
+/**
+ * Console text that is not a log line, whole: handed to the console UART's
+ * driver in one piece under the console's lock, with the log's line ending
+ * ("\n" goes out as "\r\n" when the console is set to CR LF), so no log
+ * line can land inside it. `s` should end at a line end (several lines go
+ * out together); text without one is sent as it is and taken for a prompt
+ * that waits on its line, which the typed input's echo ends (a log line
+ * that comes first continues that line). When the console stopped inside a log
+ * line (one longer than the transmit buffer, or a library's line logged in
+ * fragments), a line break comes first, so the text starts at a line
+ * start. Unlike a log line it is never dropped: the call blocks until the
+ * driver has taken every byte, so only from a task that may block (from an
+ * interrupt, a critical section or with the scheduler stopped it does
+ * nothing). Before the console is set up, and in a build without the UART
+ * console, it goes to stdout.
+ */
+void diag_console_write(const char *s, size_t len);
+
+/** Longest line diag_console_printf keeps whole (a longer one goes out in parts of this size). */
+#define DIAG_CONSOLE_LINE_MAX 1024
+
+/**
+ * A command line's replies printed in parts (several printf calls per line):
+ * each part is gathered here until its line ends, and every whole line then
+ * goes to diag_console_write. One writer per gatherer; zero-initialised is
+ * empty.
+ */
+typedef struct {
+    char buf[DIAG_CONSOLE_LINE_MAX];
+    size_t len;
+} diag_console_lines_t;
+
+/** printf into the gatherer. */
+void diag_console_printf(diag_console_lines_t *l, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+void diag_console_vprintf(diag_console_lines_t *l, const char *fmt, va_list ap) __attribute__((format(printf, 2, 0)));
+/** `len` bytes of text into the gatherer. */
+void diag_console_put(diag_console_lines_t *l, const char *s, size_t len);
+/**
+ * Send what is gathered of a line that has not ended: as it is (a prompt
+ * that waits on its line for input), or with `end_line` ended first (the
+ * end of a reply). Nothing when nothing is gathered.
+ */
+void diag_console_flush(diag_console_lines_t *l, bool end_line);
 
 /**
  * Change a tag's runtime log level ("*" = all). "*" sets the default for

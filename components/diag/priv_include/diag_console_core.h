@@ -31,6 +31,13 @@
  *
  * Locking is the caller's: one mutex around the fast path and every pump
  * (dcon_t), the ring's own lock around each read (passed to dcon_pump).
+ *
+ * Text that is not a log line (diag_console_write: the bench console's
+ * replies) goes to the UART under that same mutex, whole, with the same line
+ * endings, so a log line can never land inside one of its lines; when the
+ * console stopped inside a line, a line break comes first
+ * (dcon_other_text). Such text written in pieces (a reply printed in parts)
+ * is gathered first and handed over a whole line at a time (dcon_lines_t).
  */
 #pragma once
 
@@ -123,6 +130,54 @@ dcon_pump_t dcon_pump(dcon_t *c, logring_t *ring, logring_lock_fn lock, logring_
 
 /** Has the console handed over every record before `next_seq` (no batch in flight)? */
 bool dcon_caught_up(const dcon_t *c, uint32_t next_seq);
+
+/**
+ * Text that is not a record is about to be handed over (under the same
+ * mutex): true when a line break has to come first, because the last
+ * record byte handed over did not end a line (a record longer than the
+ * transmit buffer handed over in parts, or a line logged in fragments).
+ * Afterwards the console counts as at a line start: such text ends its
+ * line, or it is a prompt that waits on its line, which the typed input's
+ * echo ends (that echo never comes through here). Empty text changes
+ * nothing (false).
+ */
+bool dcon_other_text(dcon_t *c, const char *text, size_t len);
+
+/* ---- lines gathered from pieces ---------------------------------------------------------- */
+
+/** Hands over `len` bytes: whole lines, or a part of a line longer than the gatherer. */
+typedef void (*dcon_emit_fn)(void *ctx, const char *s, size_t len);
+
+/**
+ * A gatherer: text written in pieces is kept until its line ends; every
+ * whole line gathered then goes to `emit` in one call (several lines
+ * together when one piece ended several). A line longer than the buffer is
+ * handed over in parts of the buffer's size, the only way a line is split.
+ * One writer per gatherer.
+ */
+typedef struct {
+    char *buf;
+    size_t cap;
+    size_t len;               /**< bytes of the line not ended yet */
+} dcon_lines_t;
+
+void dcon_lines_init(dcon_lines_t *g, char *buf, size_t cap);
+
+/** Append `len` bytes, handing over every line they end. */
+void dcon_lines_put(dcon_lines_t *g, const char *s, size_t len, dcon_emit_fn emit, void *ctx);
+
+/**
+ * The caller wrote `len` bytes into the buffer itself, at buf + g->len (at
+ * most cap - g->len): take them as dcon_lines_put would.
+ */
+void dcon_lines_added(dcon_lines_t *g, size_t len, dcon_emit_fn emit, void *ctx);
+
+/**
+ * Hand over what is gathered of a line that has not ended: as it is (a
+ * prompt that waits for input on its line), or, with `end_line`, ended with
+ * '\n' first (the end of a reply). Nothing when nothing is gathered.
+ */
+void dcon_lines_flush(dcon_lines_t *g, bool end_line, dcon_emit_fn emit, void *ctx);
 
 #ifdef __cplusplus
 }
