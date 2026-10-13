@@ -18,6 +18,36 @@ TEST_CASE("network backoff: 1, 2, 4, 8, 16 s, then 30 s forever", "[net_core]")
     TEST_ASSERT_EQUAL_UINT32(NET_BACKOFF_CAP_MS, net_backoff_ms(UINT32_MAX));
 }
 
+TEST_CASE("network RSSI: a reading is -127..-1 dBm, anything else is unknown", "[net_core]")
+{
+    TEST_ASSERT_FALSE(net_rssi_known(-128));   /* the driver's "no signal" */
+    TEST_ASSERT_FALSE(net_rssi_known(0));
+    TEST_ASSERT_FALSE(net_rssi_known(1));
+    TEST_ASSERT_FALSE(net_rssi_known(127));
+    TEST_ASSERT_TRUE(net_rssi_known(-1));
+    TEST_ASSERT_TRUE(net_rssi_known(-67));
+    TEST_ASSERT_TRUE(net_rssi_known(-127));
+}
+
+TEST_CASE("network IPv6: only fe80::/10 is link-local", "[net_core]")
+{
+    static const uint8_t ll[] = { 0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0x02, 0x00, 0x00, 0xFF, 0xFE, 0x00, 0x00, 0x01 };
+    static const uint8_t ll_top[] = { 0xFE, 0xBF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };   /* fe80::/10's end */
+    static const uint8_t ula[] = { 0xFD, 0x40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };              /* fd40:: */
+    static const uint8_t site[] = { 0xFE, 0xC0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };            /* fec0:: (slirp) */
+    static const uint8_t doc[] = { 0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };       /* 2001:db8:: */
+    static const uint8_t any[16] = { 0 };                                                                 /* :: */
+    static const uint8_t fe00[] = { 0xFE, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    TEST_ASSERT_TRUE(net_ip6_is_link_local(ll));
+    TEST_ASSERT_TRUE(net_ip6_is_link_local(ll_top));
+    TEST_ASSERT_FALSE(net_ip6_is_link_local(ula));
+    TEST_ASSERT_FALSE(net_ip6_is_link_local(site));
+    TEST_ASSERT_FALSE(net_ip6_is_link_local(doc));
+    TEST_ASSERT_FALSE(net_ip6_is_link_local(any));
+    TEST_ASSERT_FALSE(net_ip6_is_link_local(fe00));
+    TEST_ASSERT_FALSE(net_ip6_is_link_local(NULL));
+}
+
 TEST_CASE("network credential and hostname validation", "[net_core]")
 {
     TEST_ASSERT_FALSE(net_ssid_valid(NULL));

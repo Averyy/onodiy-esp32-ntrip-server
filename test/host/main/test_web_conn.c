@@ -362,3 +362,41 @@ TEST_CASE("web conn: each handler takes its request's flag; WebSocket clients ar
     TEST_ASSERT_FALSE(web_conn_note_close_hdr(&t, 61));
     TEST_ASSERT_FALSE(web_conn_on_worker(&t, 61));
 }
+
+TEST_CASE("web conn: the HTTP/1.0 flag follows pipelined requests and stays for the request's lifetime",
+          "[web_conn]")
+{
+    web_conns_init(&t, DEADLINE);
+    TEST_ASSERT_TRUE(web_conn_open(&t, 70, T0));
+    TEST_ASSERT_FALSE(web_conn_http10(&t, 70));   /* nothing taken yet */
+    scan_str(70, "GET /api/status HTTP/1.1\r\n\r\nGET /api/logs?format=text HTTP/1.0\r\n\r\n"
+                 "GET /api/status HTTP/1.1\r\n\r\n");
+    /* First request: HTTP/1.1, for as long as it is answered. */
+    TEST_ASSERT_FALSE(web_conn_begin_request(&t, 70));
+    TEST_ASSERT_FALSE(web_conn_http10(&t, 70));
+    web_conn_done(&t, 70, T0 + 1u, true);
+    /* Second: HTTP/1.0, also while the worker answers it and after its handler is done. */
+    TEST_ASSERT_TRUE(web_conn_begin_request(&t, 70));
+    TEST_ASSERT_TRUE(web_conn_http10(&t, 70));
+    web_conn_async(&t, 70, true, T0 + 2u);
+    web_conn_done(&t, 70, T0 + 3u, true);
+    TEST_ASSERT_TRUE(web_conn_http10(&t, 70));
+    TEST_ASSERT_TRUE(web_conn_http10(&t, 70));   /* reading it takes nothing */
+    web_conn_async(&t, 70, false, T0 + 4u);
+    TEST_ASSERT_TRUE(web_conn_http10(&t, 70));   /* until the next request's handler starts */
+    /* Third: HTTP/1.1 again. */
+    TEST_ASSERT_FALSE(web_conn_begin_request(&t, 70));
+    TEST_ASSERT_FALSE(web_conn_http10(&t, 70));
+    /* A connection is its own: another one, and an unknown fd, are not HTTP/1.0. */
+    TEST_ASSERT_TRUE(web_conn_open(&t, 71, T0));
+    scan_str(71, "GET / HTTP/1.0\r\n\r\n");
+    TEST_ASSERT_FALSE(web_conn_http10(&t, 71));   /* not taken by a handler yet */
+    TEST_ASSERT_TRUE(web_conn_begin_request(&t, 71));
+    TEST_ASSERT_TRUE(web_conn_http10(&t, 71));
+    TEST_ASSERT_FALSE(web_conn_http10(&t, 70));
+    TEST_ASSERT_FALSE(web_conn_http10(&t, 99));
+    /* A closed and reopened number starts afresh. */
+    web_conn_close(&t, 71);
+    TEST_ASSERT_TRUE(web_conn_open(&t, 71, T0 + 5u));
+    TEST_ASSERT_FALSE(web_conn_http10(&t, 71));
+}

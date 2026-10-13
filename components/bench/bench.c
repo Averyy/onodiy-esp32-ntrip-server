@@ -556,8 +556,7 @@ static int ftimes_dump(void)
     }
     printf(",clock=%s,records=%u,full=%u,running=%u\n", clock ? "sntp" : "none", (unsigned)info.count,
            info.full ? 1u : 0u, info.running ? 1u : 0u);
-    printf("# F,read_us,published_us,msg,len,sys,epoch,mmb,held\n# P,begin_us,end_us,bytes,capped,next_wait_ms,gap_us\n"
-           "# S,begin_us,end_us,where\n");
+    printf("%s", GNSS_LINK_CSV_HEADER);
     size_t cursor = 0;
     size_t n;
     while ((n = gnss_link_bench_timing_csv(&cursor, buf, sizeof(buf))) > 0) {
@@ -592,6 +591,8 @@ static void ftimes_summary(void)
            sum.full ? " (ring full: recording ended early)" : "", (unsigned)sum.frames, (unsigned)sum.passes,
            (unsigned)sum.stalls);
     print_pct("read to published", &sum.read_to_pub_us, "us");
+    print_pct("arrival to read", &sum.arrival_to_read_us, "us");
+    printf("; %u frames without an interrupt time", (unsigned)sum.frames_inexact);
     printf("; longest reader gap with data waiting %u us", (unsigned)sum.longest_gap_us);
     if (sum.stalls > 0) {
         printf("; after a stall: %u zero-wait capped passes, ring empty %u us after it, first frame %s%u us after it",
@@ -612,6 +613,14 @@ static void ftimes_summary(void)
         }
     }
     printf("\n");
+    /* The link's interrupt-time pairing since boot (its own line: the summary line above keeps its form). */
+    gnss_link_arrival_stats_t a;
+    if (gnss_link_get_arrival_stats(&a) == ESP_OK) {
+        printf("BENCH ftimes interrupt times since boot: %u frames with one, %u without, %u resyncs, %u mismatches, "
+               "%u pairings dropped by a known cause\n",
+               (unsigned)a.exact_frames, (unsigned)a.inexact_frames, (unsigned)a.resyncs, (unsigned)a.mismatches,
+               (unsigned)a.degrades);
+    }
 }
 
 static int cmd_ftimes(int argc, char **argv)

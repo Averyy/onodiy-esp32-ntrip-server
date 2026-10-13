@@ -836,6 +836,7 @@ TEST_CASE("signal-group comparison refusals map to the API's errors", "[web_pars
         { STATION_SGT_E_MAINTENANCE, WEB_ERR_RECEIVER_MAINTENANCE, "receiver_maintenance" },
         { STATION_SGT_E_JOURNAL_OPEN, WEB_ERR_JOURNAL_OPEN, "journal_open" },
         { STATION_SGT_E_SAFE_MODE, WEB_ERR_SAFE_MODE, "safe_mode" },
+        { STATION_SGT_E_NO_RECEIVER, WEB_ERR_NO_RECEIVER, "no_receiver" },
         { STATION_SGT_E_UNSUPPORTED, WEB_ERR_UNSUPPORTED_MODEL, "unsupported_model" },
         { STATION_SGT_E_IDENTITY, WEB_ERR_IDENTITY_UNCONFIRMED, "identity_unconfirmed" },
         { STATION_SGT_E_NOT_STREAMING, WEB_ERR_RECEIVER_NOT_STREAMING, "receiver_not_streaming" },

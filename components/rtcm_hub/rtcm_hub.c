@@ -110,7 +110,8 @@ esp_err_t rtcm_hub_init(void)
     return ESP_OK;
 }
 
-esp_err_t rtcm_hub_publish(const uint8_t *frame, size_t len, uint16_t msg_type)
+esp_err_t rtcm_hub_publish(const uint8_t *frame, size_t len, uint16_t msg_type, int64_t arrival_us,
+                           bool arrival_exact)
 {
     rtcm_core_t *c = s_core;
     if (c == NULL) {
@@ -125,7 +126,8 @@ esp_err_t rtcm_hub_publish(const uint8_t *frame, size_t len, uint16_t msg_type)
     }
     void *wake[RTCM_CORE_MAX_CONSUMERS];
     size_t n = 0;
-    if (!rtcm_core_publish(c, frame, len, msg_type, now_ms(), wake, &n)) {
+    uint64_t arrival_ms = arrival_us > 0 ? (uint64_t)(arrival_us / 1000) : 0;
+    if (!rtcm_core_publish(c, frame, len, msg_type, arrival_ms, arrival_exact, wake, &n)) {
         return ESP_ERR_INVALID_ARG;
     }
     if (n > 0) {

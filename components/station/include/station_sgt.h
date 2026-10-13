@@ -133,7 +133,7 @@ typedef enum {
     STATION_SGT_E_MAINTENANCE,      /**< receiver maintenance is on */
     STATION_SGT_E_JOURNAL_OPEN,     /**< a receiver update journal is open */
     STATION_SGT_E_SAFE_MODE,
-    STATION_SGT_E_UNSUPPORTED,      /**< not the receiver model this firmware configures */
+    STATION_SGT_E_UNSUPPORTED,      /**< an identified model this firmware does not configure (or its alert is raised) */
     STATION_SGT_E_IDENTITY,         /**< the receiver's identity is not confirmed this boot */
     STATION_SGT_E_NOT_STREAMING,
     STATION_SGT_E_CONFIG_FAILED,    /**< the last profile apply failed */
@@ -143,6 +143,7 @@ typedef enum {
     STATION_SGT_E_NOT_DECIDING,     /**< keep: only while deciding */
     STATION_SGT_E_IDLE,             /**< stop: nothing runs */
     STATION_SGT_E_NOT_RUNNING,      /**< the station does not run */
+    STATION_SGT_E_NO_RECEIVER,      /**< no receiver is connected (the station's state is no_receiver) */
 } station_sgt_err_t;
 
 #ifdef __cplusplus

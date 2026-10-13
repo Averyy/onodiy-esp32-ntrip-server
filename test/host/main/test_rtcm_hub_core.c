@@ -113,7 +113,7 @@ static uint32_t fx_pub(fx_t *x, uint16_t type, size_t plen, bool more)
     size_t len = tf_build(f, type, plen, x->tow, more, serial);
     void *wake[RTCM_CORE_MAX_CONSUMERS];
     size_t n = 99;
-    TEST_ASSERT_TRUE(rtcm_core_publish(&x->core, f, len, type, x->now, wake, &n));
+    TEST_ASSERT_TRUE(rtcm_core_publish(&x->core, f, len, type, x->now, true, wake, &n));
     if (n > 0) {
         rtcm_core_wake_done(&x->core);
     }
@@ -283,10 +283,10 @@ TEST_CASE("hub: init and input limits", "[rtcm_hub]")
     size_t n;
     uint8_t f[GNSS_RTCM3_MAX_FRAME + 1];
     size_t len = tf_build(f, 1077, 100, 0, false, 1);
-    TEST_ASSERT_FALSE(rtcm_core_publish(h, NULL, len, 1077, x->now, wake, &n));
-    TEST_ASSERT_FALSE(rtcm_core_publish(h, f, RTCM_CORE_MIN_FRAME - 1, 1077, x->now, wake, &n));
-    TEST_ASSERT_FALSE(rtcm_core_publish(h, f, GNSS_RTCM3_MAX_FRAME + 1, 1077, x->now, wake, &n));
-    TEST_ASSERT_TRUE(rtcm_core_publish(h, f, len, 1077, x->now, wake, &n));
+    TEST_ASSERT_FALSE(rtcm_core_publish(h, NULL, len, 1077, x->now, true, wake, &n));
+    TEST_ASSERT_FALSE(rtcm_core_publish(h, f, RTCM_CORE_MIN_FRAME - 1, 1077, x->now, true, wake, &n));
+    TEST_ASSERT_FALSE(rtcm_core_publish(h, f, GNSS_RTCM3_MAX_FRAME + 1, 1077, x->now, true, wake, &n));
+    TEST_ASSERT_TRUE(rtcm_core_publish(h, f, len, 1077, x->now, true, wake, &n));
     rtcm_core_stats_t st;
     rtcm_core_get_stats(h, x->now, &st);
     TEST_ASSERT_EQUAL_UINT64(3, st.publish_failures);
@@ -1044,7 +1044,7 @@ TEST_CASE("hub: waiters are handed back once; detach waits for a running wake pa
     TEST_ASSERT_TRUE(rtcm_core_prepare_wait(h, a, wa));
     TEST_ASSERT_TRUE(rtcm_core_prepare_wait(h, b, wb));
 
-    TEST_ASSERT_TRUE(rtcm_core_publish(h, f, len, 1077, x->now, wake, &n));
+    TEST_ASSERT_TRUE(rtcm_core_publish(h, f, len, 1077, x->now, true, wake, &n));
     TEST_ASSERT_EQUAL_UINT(2, n);
     TEST_ASSERT_TRUE((wake[0] == wa && wake[1] == wb) || (wake[0] == wb && wake[1] == wa));
     /* A detach during the wake pass must wait for its end. */
@@ -1055,14 +1055,14 @@ TEST_CASE("hub: waiters are handed back once; detach waits for a running wake pa
     TEST_ASSERT_TRUE(rtcm_core_wake_passed(h, gen));
 
     /* Handed back once: no registration, no wake. */
-    TEST_ASSERT_TRUE(rtcm_core_publish(h, f, len, 1077, x->now, wake, &n));
+    TEST_ASSERT_TRUE(rtcm_core_publish(h, f, len, 1077, x->now, true, wake, &n));
     TEST_ASSERT_EQUAL_UINT(0, n);
     /* Data pending: no registration. */
     TEST_ASSERT_FALSE(rtcm_core_prepare_wait(h, a, wa));
     TEST_ASSERT_TRUE(fx_read(x, a, 4096, NULL) > 0);
     TEST_ASSERT_TRUE(rtcm_core_prepare_wait(h, a, wa));
     rtcm_core_cancel_wait(h, a);
-    TEST_ASSERT_TRUE(rtcm_core_publish(h, f, len, 1077, x->now, wake, &n));
+    TEST_ASSERT_TRUE(rtcm_core_publish(h, f, len, 1077, x->now, true, wake, &n));
     TEST_ASSERT_EQUAL_UINT(0, n);
     /* No wake pass running: detach returns at once. */
     TEST_ASSERT_FALSE(rtcm_core_detach(h, a, &gen));
@@ -1374,5 +1374,98 @@ TEST_CASE("hub: an epoch is in flight from its first announcing MSM to its last,
     /* A clock that reads earlier than the newest frame: age 0, not a wrap. */
     TEST_ASSERT_TRUE(rtcm_core_epoch_in_flight(&x->core, x->now - 3, 250, &age));
     TEST_ASSERT_EQUAL_UINT32(0, age);
+    fx_free(x);
+}
+
+/* ---- arrival times ------------------------------------------------------- */
+
+/* Publish one frame that arrived at `arrival` (`timed`: an exact arrival); x->now is the consumers' clock. */
+static uint32_t fx_pub_at(fx_t *x, uint16_t type, size_t plen, bool more, uint64_t arrival, bool timed)
+{
+    uint8_t f[GNSS_RTCM3_MAX_FRAME];
+    uint32_t serial = x->serial++;
+    size_t len = tf_build(f, type, plen, x->tow, more, serial);
+    void *wake[RTCM_CORE_MAX_CONSUMERS];
+    size_t n = 99;
+    TEST_ASSERT_TRUE(rtcm_core_publish(&x->core, f, len, type, arrival, timed, wake, &n));
+    if (n > 0) {
+        rtcm_core_wake_done(&x->core);
+    }
+    return serial;
+}
+
+TEST_CASE("hub: an epoch that arrived 5 ms apart but was published 2 s later stays one epoch", "[rtcm_hub]")
+{
+    /* A reader kept off the CPU (flash writes) reads half of an epoch at
+     * once and the rest 2 s later. The frames carry their arrival, 5 ms
+     * apart: no gap starts an epoch inside it, and ages count from arrival. */
+    fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 0);
+    fx_lead_in(x);
+    rtcm_core_consumer_t *k = rtcm_core_attach(&x->core, "k");
+    uint64_t t = x->now + 1000;
+    fx_pub_at(x, 1005, 19, false, t, true);
+    fx_pub_at(x, 1077, 100, true, t + 5, true);
+    x->now = t + 10;
+    fx_pub_at(x, 1087, 100, true, t + 10, true);
+    /* published 2 s later: */
+    x->now = t + 2010;
+    fx_pub_at(x, 1019, 61, false, t + 15, true);   /* no MSM, in an open MSM epoch */
+    fx_pub_at(x, 1097, 100, true, t + 20, true);
+    fx_pub_at(x, 1127, 100, false, t + 25, true);
+    rtcm_core_stats_t st;
+    rtcm_core_get_stats(&x->core, x->now, &st);
+    TEST_ASSERT_EQUAL_UINT64(0, st.epochs_by_gap);
+    TEST_ASSERT_EQUAL_UINT64(1, st.epochs_by_mmb);   /* the 1005 after the lead-in's last MSM */
+    TEST_ASSERT_EQUAL_UINT64(2, st.epochs_in);
+    TEST_ASSERT_EQUAL_UINT32(2010 - 25, st.last_frame_age_ms);
+    /* The consumer's lag is now minus the oldest unread frame's arrival. */
+    TEST_ASSERT_EQUAL_UINT32(2010, cst(x, k).lag_ms);
+    got_t *g = got_new();
+    fx_drain(x, k, 4096, g);
+    rtcm_core_consumer_stats_t cs = cst(x, k);
+    /* The sticky 1005, then the whole epoch in one piece from its first frame. */
+    TEST_ASSERT_EQUAL_UINT64(1, cs.c.sticky_out);
+    TEST_ASSERT_EQUAL_UINT64(6, cs.c.frames_out - cs.c.sticky_out);
+    TEST_ASSERT_EQUAL_UINT64(0, cs.c.frames_dropped);
+    TEST_ASSERT_EQUAL_UINT(7, g->n);
+    TEST_ASSERT_EQUAL_UINT16(1005, g->type[1]);
+    TEST_ASSERT_EQUAL_UINT16(1127, g->type[6]);
+    free(g);
+    fx_free(x);
+}
+
+TEST_CASE("hub: frames with only their read time never start an epoch by gap", "[rtcm_hub]")
+{
+    fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 0);
+    fx_lead_in(x);
+    uint64_t t = x->now + 1000;
+    fx_pub_at(x, 1077, 100, true, t, true);           /* the terminating MSM is lost */
+    fx_pub_at(x, 1005, 19, false, t + 900, false);    /* read 900 ms later, no interrupt time */
+    fx_pub_at(x, 1033, 60, false, t + 1800, false);
+    rtcm_core_stats_t st;
+    rtcm_core_get_stats(&x->core, t + 1800, &st);
+    TEST_ASSERT_EQUAL_UINT64(0, st.epochs_by_gap);
+    /* With exact arrivals the same stream splits at the 1005. */
+    fx_pub_at(x, 1230, 12, false, t + 2700, true);    /* exact, but after an inexact frame: no */
+    fx_pub_at(x, 1005, 19, false, t + 3600, true);    /* two exact arrivals 900 ms apart: a gap */
+    rtcm_core_get_stats(&x->core, t + 3600, &st);
+    TEST_ASSERT_EQUAL_UINT64(1, st.epochs_by_gap);
+    fx_free(x);
+}
+
+TEST_CASE("hub: consumer lag and epoch_in_flight count from arrival", "[rtcm_hub]")
+{
+    fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 0);
+    fx_lead_in(x);
+    rtcm_core_consumer_t *k = rtcm_core_attach(&x->core, "k");
+    uint64_t t = x->now + 1000;
+    x->now = t + 1500;   /* published 1.5 s after it arrived */
+    fx_pub_at(x, 1077, 100, true, t, true);
+    TEST_ASSERT_EQUAL_UINT32(1500, cst(x, k).lag_ms);
+    uint32_t age = 0;
+    TEST_ASSERT_FALSE(rtcm_core_epoch_in_flight(&x->core, x->now, 250, &age));   /* 1.5 s old: not in flight */
+    TEST_ASSERT_EQUAL_UINT32(1500, age);
+    TEST_ASSERT_TRUE(rtcm_core_epoch_in_flight(&x->core, t + 100, 250, &age));
+    TEST_ASSERT_EQUAL_UINT32(100, age);
     fx_free(x);
 }

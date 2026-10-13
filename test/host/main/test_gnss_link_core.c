@@ -167,17 +167,17 @@ TEST_CASE("link core: the prompt detector needs the COMMAND lease and the releas
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&c, GNSS_LINK_MODE_COMMAND, "detect", &cmd));
 
     /* Not armed yet: a prompt the framer might report goes nowhere. */
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US, T0_US));
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_set_prompt(&c, cmd, true));
     TEST_ASSERT_TRUE(c.prompt_armed);
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_PROMPT, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_PROMPT, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US, T0_US));
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_set_prompt(&c, cmd, false));
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US, T0_US));
 
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_set_prompt(&c, cmd, true));
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_release(&c, cmd, NULL));
     TEST_ASSERT_FALSE(c.prompt_armed);
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US, T0_US));
 
     /* A new lease starts disarmed. */
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&c, GNSS_LINK_MODE_COMMAND, "detect", &cmd));
@@ -190,28 +190,34 @@ TEST_CASE("link core: RTCM is published only in STREAM and counted as held under
     open_link(&c);
     gnss_link_stats_t s;
 
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_PUBLISH, gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US));
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_LINE, gnss_link_core_route(&c, GNSS_FRAME_TEXT, T0_US));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_PUBLISH, gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US, T0_US));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_LINE, gnss_link_core_route(&c, GNSS_FRAME_TEXT, T0_US, T0_US));
     gnss_link_core_snapshot(&c, T0_US + 250000, &s);
     TEST_ASSERT_EQUAL_UINT64(0, s.rtcm_held);
     TEST_ASSERT_EQUAL_UINT32(250, s.last_rtcm_age_ms);
 
     uint32_t cmd = 0;
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&c, GNSS_LINK_MODE_COMMAND, "cfg", &cmd));
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_HOLD, gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US + 1000000));
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_HOLD, gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US + 2000000));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_HOLD,
+                      gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US + 1000000, T0_US + 1000000));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_HOLD,
+                      gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US + 2000000, T0_US + 2000000));
     /* Replies keep flowing to the command layer during the session. */
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_LINE, gnss_link_core_route(&c, GNSS_FRAME_TEXT, T0_US + 2000000));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_LINE,
+                      gnss_link_core_route(&c, GNSS_FRAME_TEXT, T0_US + 2000000, T0_US + 2000000));
     gnss_link_core_snapshot(&c, T0_US + 2000000, &s);
     TEST_ASSERT_EQUAL_UINT64(2, s.rtcm_held);
     TEST_ASSERT_EQUAL_UINT32(0, s.last_rtcm_age_ms);   /* held frames were still received */
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_release(&c, cmd, NULL));
 
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_PUBLISH, gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US + 3000000));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_PUBLISH,
+                      gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US + 3000000, T0_US + 3000000));
     uint32_t raw = 0;
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&c, GNSS_LINK_MODE_RAW, "flash", &raw));
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_HOLD, gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US + 4000000));
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&c, GNSS_FRAME_TEXT, T0_US + 4000000));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_HOLD,
+                      gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US + 4000000, T0_US + 4000000));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP,
+                      gnss_link_core_route(&c, GNSS_FRAME_TEXT, T0_US + 4000000, T0_US + 4000000));
     gnss_link_core_snapshot(&c, T0_US + 4000000, &s);
     TEST_ASSERT_EQUAL_UINT64(3, s.rtcm_held);
 }
@@ -485,8 +491,8 @@ TEST_CASE("link core: hands off refuses every write and every lease, reception g
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, gnss_link_core_acquire(&c, GNSS_LINK_MODE_RAW, "flash", &tok));
     TEST_ASSERT_EQUAL(GNSS_LINK_MODE_STREAM, c.mode);
     /* The stream is still published. */
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_PUBLISH, gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US));
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_LINE, gnss_link_core_route(&c, GNSS_FRAME_TEXT, T0_US));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_PUBLISH, gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US, T0_US));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_LINE, gnss_link_core_route(&c, GNSS_FRAME_TEXT, T0_US, T0_US));
 
     /* Off again: as before. */
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_set_hands_off(&c, false));
@@ -580,7 +586,7 @@ static obs_rig_t s_obs;
 static void obs_on_frame(const gnss_frame_t *fr, void *ctx)
 {
     obs_rig_t *r = ctx;
-    gnss_link_route_t route = gnss_link_core_route(&r->c, fr->kind, T0_US);
+    gnss_link_route_t route = gnss_link_core_route(&r->c, fr->kind, T0_US, T0_US);
     if (route == GNSS_LINK_ROUTE_OBSERVE) {
         gnss_link_core_observe_hit(&r->c, fr->at);
     }
@@ -638,7 +644,7 @@ TEST_CASE("link core: the observer counts a loader prompt in STREAM and never ro
     /* Off: the detector stays off and a prompt goes nowhere. */
     gnss_link_core_set_observe(&r->c, false);
     TEST_ASSERT_FALSE(gnss_link_core_detector_on(&r->c));
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&r->c, GNSS_FRAME_PROMPT, T0_US));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&r->c, GNSS_FRAME_PROMPT, T0_US, T0_US));
     gnss_link_core_observe_get(&r->c, &o);
     TEST_ASSERT_FALSE(o.on);
     TEST_ASSERT_EQUAL_UINT32(1, o.hits);   /* counters are kept */
@@ -704,17 +710,17 @@ TEST_CASE("link core: the lease-armed detector is unchanged while the observer r
     /* RAW: the framer is not fed; a prompt that reached the core would go nowhere. */
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_release(&r->c, tok, NULL));
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&r->c, GNSS_LINK_MODE_RAW, "flash", &tok));
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&r->c, GNSS_FRAME_PROMPT, T0_US));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&r->c, GNSS_FRAME_PROMPT, T0_US, T0_US));
 
     /* Without the observer, lease-armed routing is exactly as before. */
     gnss_link_core_t c;
     open_link(&c);
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US, T0_US));
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&c, GNSS_LINK_MODE_COMMAND, "detect", &tok));
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US, T0_US));
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_set_prompt(&c, tok, true));
     TEST_ASSERT_TRUE(gnss_link_core_detector_on(&c));
-    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_PROMPT, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_PROMPT, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US, T0_US));
     TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_release(&c, tok, NULL));
     TEST_ASSERT_FALSE(gnss_link_core_detector_on(&c));
 }
@@ -730,8 +736,9 @@ static gnss_link_rec_t frame_rec(int64_t t0, uint32_t dt, uint16_t msg, gnss_sys
     r.dt_us = dt;
     r.msg = msg;
     r.bytes = 200;
+    r.flags = GNSS_LINK_REC_F_EXACT;   /* arrived at the read (gap_us 0) unless a test says otherwise */
     if (sys != GNSS_SYS_COUNT) {
-        r.flags = (uint8_t)(GNSS_LINK_REC_F_MSM | (mmb ? GNSS_LINK_REC_F_MMB : 0u));
+        r.flags |= (uint8_t)(GNSS_LINK_REC_F_MSM | (mmb ? GNSS_LINK_REC_F_MMB : 0u));
         r.sys = (uint8_t)sys;
         r.epoch = epoch;
     }
@@ -918,12 +925,20 @@ TEST_CASE("link core: recorder records as CSV lines", "[gnss_link]")
 {
     char line[160];
     gnss_link_rec_t f = frame_rec(1000, 250, 1077, GNSS_SYS_GPS, 270524000u, true);
-    TEST_ASSERT_EQUAL_size_t(strlen("F,1000,1250,1077,200,gps,270524000,1,0\n"), gnss_link_rec_csv(&f, line, sizeof(line)));
-    TEST_ASSERT_EQUAL_STRING("F,1000,1250,1077,200,gps,270524000,1,0\n", line);
+    f.gap_us = 4000;   /* arrived 4 ms before the read */
+    TEST_ASSERT_EQUAL_size_t(strlen("F,-3000,1000,1250,1077,200,gps,270524000,1,0,1\n"),
+                             gnss_link_rec_csv(&f, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("F,-3000,1000,1250,1077,200,gps,270524000,1,0,1\n", line);
     gnss_link_rec_t h = frame_rec(5, 5, 1005, GNSS_SYS_COUNT, 0, false);
     h.flags |= GNSS_LINK_REC_F_HELD;
+    h.flags &= (uint8_t)~GNSS_LINK_REC_F_EXACT;   /* no interrupt time: the arrival is the read */
     gnss_link_rec_csv(&h, line, sizeof(line));
-    TEST_ASSERT_EQUAL_STRING("F,5,10,1005,200,,,0,1\n", line);
+    TEST_ASSERT_EQUAL_STRING("F,5,5,10,1005,200,,,0,1,0\n", line);
+    /* The column line names the eleven fields, in this order. */
+    TEST_ASSERT_EQUAL_STRING("# F,arrival_us,read_us,published_us,msg,len,sys,epoch,mmb,held,exact\n"
+                             "# P,begin_us,end_us,bytes,capped,next_wait_ms,gap_us\n"
+                             "# S,begin_us,end_us,where\n",
+                             GNSS_LINK_CSV_HEADER);
     gnss_link_rec_t p = pass_rec(100, 50, 16384, true, 7);
     gnss_link_rec_csv(&p, line, sizeof(line));
     TEST_ASSERT_EQUAL_STRING("P,100,150,16384,1,0,7\n", line);
@@ -938,4 +953,342 @@ TEST_CASE("link core: recorder records as CSV lines", "[gnss_link]")
     /* Too small: nothing, never half a line. */
     TEST_ASSERT_EQUAL_size_t(0, gnss_link_rec_csv(&f, line, 10));
     TEST_ASSERT_EQUAL_STRING("", line);
+}
+
+TEST_CASE("link core: arrival to read percentiles and frames without an interrupt time", "[gnss_link]")
+{
+    /* 100 frames read 1..100 ms after their arrival, 7 frames with only their read time. */
+    size_t n = 0;
+    for (unsigned i = 1; i <= 100; i++) {
+        gnss_link_rec_t r = frame_rec(T0_US + i * 1000, 50, 1005, GNSS_SYS_COUNT, 0, false);
+        r.gap_us = i * 1000;
+        s_recs[n++] = r;
+    }
+    for (unsigned i = 0; i < 7; i++) {
+        gnss_link_rec_t r = frame_rec(T0_US + 200000 + i, 50, 1077, GNSS_SYS_COUNT, 0, false);
+        r.flags &= (uint8_t)~GNSS_LINK_REC_F_EXACT;
+        s_recs[n++] = r;
+    }
+    gnss_link_timing_summary_t s;
+    gnss_link_timing_summary(s_recs, n, false, false, 0, s_scratch, 400, &s);
+    TEST_ASSERT_EQUAL_UINT32(107, s.frames);
+    TEST_ASSERT_EQUAL_UINT32(7, s.frames_inexact);
+    TEST_ASSERT_EQUAL_UINT32(100, s.arrival_to_read_us.n);
+    TEST_ASSERT_EQUAL_INT32(50000, s.arrival_to_read_us.p50);
+    TEST_ASSERT_EQUAL_INT32(95000, s.arrival_to_read_us.p95);
+    TEST_ASSERT_EQUAL_INT32(99000, s.arrival_to_read_us.p99);
+    TEST_ASSERT_EQUAL_INT32(100000, s.arrival_to_read_us.p999);
+    TEST_ASSERT_EQUAL_INT32(100000, s.arrival_to_read_us.max);
+    TEST_ASSERT_EQUAL_UINT32(107, s.read_to_pub_us.n);   /* unchanged: every published frame */
+}
+
+TEST_CASE("link core: epoch delays are measured from each epoch's first frame arrival, exact frames only",
+          "[gnss_link]")
+{
+    const int64_t week2400 = 2400LL * GNSS_RTCM3_WEEK_MS;
+    const int64_t tow0 = GNSS_RTCM3_DAY_MS + 10LL * 3600000;
+    const int64_t gps0_ms = week2400 + tow0;
+    const int64_t unix0_ms = gps0_ms + GNSS_RTCM3_GPS_EPOCH_UNIX_MS - GNSS_RTCM3_GPS_UTC_LEAP_S * 1000;
+    const int64_t off_us = unix0_ms * 1000 - T0_US;
+
+    /* Ten GPS epochs that arrived 40 ms after their time and were read 2 s
+     * later (a reader kept off the CPU): the delay is the arrival's, 40 ms. */
+    size_t n = 0;
+    for (int i = 0; i < 10; i++) {
+        uint32_t epoch = (uint32_t)(tow0 + i * 1000);
+        int64_t arrival = T0_US + (int64_t)i * 1000000 + 40000;
+        gnss_link_rec_t r = frame_rec(arrival + 2000000, 300, 1077, GNSS_SYS_GPS, epoch, true);
+        r.gap_us = 2000000;
+        s_recs[n++] = r;
+        r = frame_rec(arrival + 2000000 + 3000, 300, 1077, GNSS_SYS_GPS, epoch, false);
+        r.gap_us = 2000000;
+        s_recs[n++] = r;
+    }
+    /* Two more epochs whose first frame has only its read time: left out,
+     * also when a later frame of that epoch has an interrupt time. */
+    for (int i = 10; i < 12; i++) {
+        uint32_t epoch = (uint32_t)(tow0 + i * 1000);
+        gnss_link_rec_t r = frame_rec(T0_US + (int64_t)i * 1000000 + 900000, 300, 1077, GNSS_SYS_GPS, epoch, true);
+        r.flags &= (uint8_t)~GNSS_LINK_REC_F_EXACT;
+        s_recs[n++] = r;
+        r = frame_rec(T0_US + (int64_t)i * 1000000 + 950000, 300, 1077, GNSS_SYS_GPS, epoch, false);
+        r.gap_us = 10;
+        s_recs[n++] = r;
+    }
+    gnss_link_timing_summary_t s;
+    gnss_link_timing_summary(s_recs, n, false, true, off_us, s_scratch, 400, &s);
+    TEST_ASSERT_EQUAL_UINT32(10, s.epoch_delay_ms[GNSS_SYS_GPS].n);
+    TEST_ASSERT_EQUAL_INT32(40, s.epoch_delay_ms[GNSS_SYS_GPS].p50);
+    TEST_ASSERT_EQUAL_INT32(40, s.epoch_delay_ms[GNSS_SYS_GPS].max);
+    TEST_ASSERT_EQUAL_UINT32(2, s.frames_inexact);
+}
+
+/* ---- arrival ledger ------------------------------------------------------------------------ */
+
+typedef struct {
+    gnss_link_arr_t a;
+    uint32_t stamps[GNSS_LINK_ARR_STAMPS];
+    uint32_t head;
+} arr_fx_t;
+
+static arr_fx_t s_arr;
+
+/* The interrupt moved a chunk into the ring at `t_us` (its stamp). */
+static void isr_chunk(arr_fx_t *x, int64_t t_us)
+{
+    x->stamps[x->head % GNSS_LINK_ARR_STAMPS] = (uint32_t)t_us;
+    x->head++;
+}
+
+static void arr_new(arr_fx_t *x)
+{
+    memset(x, 0, sizeof(*x));
+    gnss_link_arr_init(&x->a);
+    gnss_link_arr_quiet(&x->a, x->head);   /* the first quiet point pairs it */
+}
+
+static void data_event(arr_fx_t *x, size_t size)
+{
+    gnss_link_arr_on_data(&x->a, size, x->stamps, x->head);
+}
+
+/* A read of n bytes at read_us, as segments (at most cap). */
+static size_t read_segs(arr_fx_t *x, size_t n, int64_t read_us, gnss_link_arr_seg_t *out, size_t cap)
+{
+    size_t k = 0;
+    while (n > 0 && k < cap) {
+        out[k] = gnss_link_arr_next(&x->a, n, read_us);
+        TEST_ASSERT_TRUE(out[k].len >= 1 && out[k].len <= n);
+        n -= out[k].len;
+        k++;
+    }
+    TEST_ASSERT_EQUAL_size_t(0, n);
+    return k;
+}
+
+TEST_CASE("arrival ledger: data events pair with stamps in order; one read over three chunks", "[gnss_link]")
+{
+    arr_fx_t *x = &s_arr;
+    arr_new(x);
+    TEST_ASSERT_EQUAL_UINT32(1, x->a.st.resyncs);
+    isr_chunk(x, T0_US + 1000);
+    isr_chunk(x, T0_US + 11000);
+    isr_chunk(x, T0_US + 21000);
+    data_event(x, 120);
+    data_event(x, 120);
+    data_event(x, 60);
+    gnss_link_arr_seg_t g[8];
+    size_t k = read_segs(x, 300, T0_US + 2000000, g, 8);   /* read 2 s later */
+    TEST_ASSERT_EQUAL_size_t(3, k);
+    TEST_ASSERT_EQUAL_size_t(120, g[0].len);
+    TEST_ASSERT_EQUAL_INT64(T0_US + 1000, g[0].arrival_us);
+    TEST_ASSERT_TRUE(g[0].exact);
+    TEST_ASSERT_EQUAL_size_t(120, g[1].len);
+    TEST_ASSERT_EQUAL_INT64(T0_US + 11000, g[1].arrival_us);
+    TEST_ASSERT_EQUAL_size_t(60, g[2].len);
+    TEST_ASSERT_EQUAL_INT64(T0_US + 21000, g[2].arrival_us);
+    TEST_ASSERT_TRUE(g[2].exact);
+    /* A quiet point with everything read: still paired, nothing counted. */
+    gnss_link_arr_quiet(&x->a, x->head);
+    TEST_ASSERT_TRUE(x->a.synced);
+    TEST_ASSERT_EQUAL_UINT32(0, x->a.st.mismatches);
+    TEST_ASSERT_EQUAL_UINT32(1, x->a.st.resyncs);
+}
+
+TEST_CASE("arrival ledger: a chunk read in part carries its rest into the next read", "[gnss_link]")
+{
+    arr_fx_t *x = &s_arr;
+    arr_new(x);
+    isr_chunk(x, T0_US + 5000);
+    isr_chunk(x, T0_US + 15000);
+    data_event(x, 120);
+    data_event(x, 120);
+    gnss_link_arr_seg_t g[4];
+    size_t k = read_segs(x, 100, T0_US + 16000, g, 4);   /* the first 100 bytes of chunk 1 */
+    TEST_ASSERT_EQUAL_size_t(1, k);
+    TEST_ASSERT_EQUAL_INT64(T0_US + 5000, g[0].arrival_us);
+    k = read_segs(x, 140, T0_US + 17000, g, 4);           /* its last 20, then chunk 2 */
+    TEST_ASSERT_EQUAL_size_t(2, k);
+    TEST_ASSERT_EQUAL_size_t(20, g[0].len);
+    TEST_ASSERT_EQUAL_INT64(T0_US + 5000, g[0].arrival_us);
+    TEST_ASSERT_TRUE(g[0].exact);
+    TEST_ASSERT_EQUAL_size_t(120, g[1].len);
+    TEST_ASSERT_EQUAL_INT64(T0_US + 15000, g[1].arrival_us);
+    TEST_ASSERT_EQUAL_UINT32(0, x->a.st.mismatches);
+}
+
+TEST_CASE("arrival ledger: bytes beyond the known chunks take the read time and drop the pairing", "[gnss_link]")
+{
+    arr_fx_t *x = &s_arr;
+    arr_new(x);
+    isr_chunk(x, T0_US + 1000);
+    data_event(x, 50);
+    gnss_link_arr_seg_t g[4];
+    size_t k = read_segs(x, 80, T0_US + 30000, g, 4);
+    TEST_ASSERT_EQUAL_size_t(2, k);
+    TEST_ASSERT_TRUE(g[0].exact);
+    TEST_ASSERT_EQUAL_size_t(50, g[0].len);
+    TEST_ASSERT_FALSE(g[1].exact);
+    TEST_ASSERT_EQUAL_size_t(30, g[1].len);
+    TEST_ASSERT_EQUAL_INT64(T0_US + 30000, g[1].arrival_us);
+    TEST_ASSERT_FALSE(x->a.synced);
+    TEST_ASSERT_EQUAL_UINT32(1, x->a.st.mismatches);
+    /* Degraded: further events and reads take the read time, inexact. */
+    isr_chunk(x, T0_US + 40000);
+    data_event(x, 120);
+    k = read_segs(x, 120, T0_US + 50000, g, 4);
+    TEST_ASSERT_EQUAL_size_t(1, k);
+    TEST_ASSERT_FALSE(g[0].exact);
+    TEST_ASSERT_EQUAL_INT64(T0_US + 50000, g[0].arrival_us);
+    /* The next quiet point pairs again from the head. */
+    gnss_link_arr_quiet(&x->a, x->head);
+    TEST_ASSERT_TRUE(x->a.synced);
+    TEST_ASSERT_EQUAL_UINT32(2, x->a.st.resyncs);
+    isr_chunk(x, T0_US + 60000);
+    data_event(x, 10);
+    k = read_segs(x, 10, T0_US + 61000, g, 4);
+    TEST_ASSERT_TRUE(g[0].exact);
+    TEST_ASSERT_EQUAL_INT64(T0_US + 60000, g[0].arrival_us);
+}
+
+TEST_CASE("arrival ledger: every known cause drops the pairing; it comes back only at a quiet point",
+          "[gnss_link]")
+{
+    /* The causes (a full event queue, buffer-full, FIFO overflow, a flush
+     * or drop of input, a lease grant or release, a baud change, a restart
+     * or reopen) all call the same degrade in gnss_link.c. */
+    static const char *const causes[] = { "queue full", "buffer full", "fifo overflow", "flush", "drop input",
+                                          "lease grant", "lease release", "baud change", "restart", "reopen" };
+    arr_fx_t *x = &s_arr;
+    arr_new(x);
+    for (size_t c = 0; c < sizeof(causes) / sizeof(causes[0]); c++) {
+        isr_chunk(x, T0_US + (int64_t)c * 100000);
+        data_event(x, 64);
+        gnss_link_arr_degrade(&x->a);
+        TEST_ASSERT_FALSE_MESSAGE(x->a.synced, causes[c]);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(c + 1, x->a.st.degrades, causes[c]);
+        gnss_link_arr_seg_t g = gnss_link_arr_next(&x->a, 64, T0_US + (int64_t)c * 100000 + 500);
+        TEST_ASSERT_FALSE_MESSAGE(g.exact, causes[c]);
+        TEST_ASSERT_EQUAL_size_t(64, g.len);
+        /* Not quiet yet: data and events keep coming, still no pairing. */
+        isr_chunk(x, T0_US + (int64_t)c * 100000 + 600);
+        data_event(x, 64);
+        g = gnss_link_arr_next(&x->a, 64, T0_US + (int64_t)c * 100000 + 700);
+        TEST_ASSERT_FALSE_MESSAGE(g.exact, causes[c]);
+        /* Quiet: paired again, exact from the next chunk on. */
+        gnss_link_arr_quiet(&x->a, x->head);
+        TEST_ASSERT_TRUE_MESSAGE(x->a.synced, causes[c]);
+        isr_chunk(x, T0_US + (int64_t)c * 100000 + 800);
+        data_event(x, 64);
+        g = gnss_link_arr_next(&x->a, 64, T0_US + (int64_t)c * 100000 + 900);
+        TEST_ASSERT_TRUE_MESSAGE(g.exact, causes[c]);
+        TEST_ASSERT_EQUAL_INT64(T0_US + (int64_t)c * 100000 + 800, g.arrival_us);
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, x->a.st.mismatches);
+    TEST_ASSERT_EQUAL_UINT32(11, x->a.st.resyncs);
+    /* A degrade while degraded counts once. */
+    gnss_link_arr_degrade(&x->a);
+    gnss_link_arr_degrade(&x->a);
+    TEST_ASSERT_EQUAL_UINT32(11, x->a.st.degrades);
+}
+
+TEST_CASE("arrival ledger: a head that differs from the events taken at a quiet point is a mismatch",
+          "[gnss_link]")
+{
+    arr_fx_t *x = &s_arr;
+    arr_new(x);
+    /* A stamp whose data event never came (dropped by a full queue). */
+    isr_chunk(x, T0_US + 1000);
+    gnss_link_arr_quiet(&x->a, x->head);
+    TEST_ASSERT_EQUAL_UINT32(1, x->a.st.mismatches);
+    TEST_ASSERT_TRUE(x->a.synced);   /* paired again right there */
+    TEST_ASSERT_EQUAL_UINT32(2, x->a.st.resyncs);
+    /* A data event without its stamp. */
+    data_event(x, 30);
+    TEST_ASSERT_EQUAL_UINT32(2, x->a.st.mismatches);
+    TEST_ASSERT_FALSE(x->a.synced);
+    gnss_link_arr_quiet(&x->a, x->head);
+    /* A stamp overwritten before its event was taken (more than the ring holds). */
+    for (unsigned i = 0; i < GNSS_LINK_ARR_STAMPS + 1u; i++) {
+        isr_chunk(x, T0_US + 2000 + i);
+    }
+    data_event(x, 30);
+    TEST_ASSERT_EQUAL_UINT32(3, x->a.st.mismatches);
+    gnss_link_arr_quiet(&x->a, x->head);
+    /* Bytes still owed to a chunk at a quiet point (the ring is empty). */
+    isr_chunk(x, T0_US + 9000);
+    data_event(x, 30);
+    gnss_link_arr_quiet(&x->a, x->head);
+    TEST_ASSERT_EQUAL_UINT32(4, x->a.st.mismatches);
+    TEST_ASSERT_TRUE(x->a.synced);
+}
+
+TEST_CASE("arrival ledger: 32-bit stamps across their wrap, and arrivals never go back", "[gnss_link]")
+{
+    arr_fx_t *x = &s_arr;
+    arr_new(x);
+    /* esp_timer just past a multiple of 2^32 us: the stamp from before the wrap. */
+    const int64_t wrap = (int64_t)1 << 33;
+    isr_chunk(x, wrap - 3000);
+    data_event(x, 40);
+    gnss_link_arr_seg_t g[2];
+    read_segs(x, 40, wrap + 5000, g, 2);
+    TEST_ASSERT_TRUE(g[0].exact);
+    TEST_ASSERT_EQUAL_INT64(wrap - 3000, g[0].arrival_us);
+
+    /* An inexact segment takes its read time; the next exact chunk with an
+     * older stamp cannot go back before it. */
+    gnss_link_arr_degrade(&x->a);
+    gnss_link_arr_seg_t r = gnss_link_arr_next(&x->a, 10, wrap + 9000);
+    TEST_ASSERT_FALSE(r.exact);
+    TEST_ASSERT_EQUAL_INT64(wrap + 9000, r.arrival_us);
+    gnss_link_arr_quiet(&x->a, x->head);
+    isr_chunk(x, wrap + 8000);   /* stamped before that read time */
+    data_event(x, 10);
+    r = gnss_link_arr_next(&x->a, 10, wrap + 12000);
+    TEST_ASSERT_TRUE(r.exact);
+    TEST_ASSERT_EQUAL_INT64(wrap + 9000, r.arrival_us);   /* clamped: never before an arrival handed out */
+    /* Never after its own read either (the clamp up stops at the read time). */
+    isr_chunk(x, wrap + 1000);
+    data_event(x, 10);
+    r = gnss_link_arr_next(&x->a, 10, wrap + 8500);
+    TEST_ASSERT_TRUE(r.exact);
+    TEST_ASSERT_EQUAL_INT64(wrap + 8500, r.arrival_us);
+}
+
+TEST_CASE("arrival ledger: before the first quiet point every byte takes its read time", "[gnss_link]")
+{
+    gnss_link_arr_t a;
+    gnss_link_arr_init(&a);
+    uint32_t stamps[GNSS_LINK_ARR_STAMPS] = { 0 };
+    stamps[0] = (uint32_t)(T0_US + 10);
+    gnss_link_arr_on_data(&a, 100, stamps, 1);
+    gnss_link_arr_seg_t g = gnss_link_arr_next(&a, 100, T0_US + 50);
+    TEST_ASSERT_FALSE(g.exact);
+    TEST_ASSERT_EQUAL_size_t(100, g.len);
+    TEST_ASSERT_EQUAL_INT64(T0_US + 50, g.arrival_us);
+    TEST_ASSERT_EQUAL_UINT32(0, a.st.mismatches);
+    gnss_link_arr_count_frame(&a, false);
+    gnss_link_arr_count_frame(&a, true);
+    gnss_link_arr_count_frame(&a, true);
+    TEST_ASSERT_EQUAL_UINT32(2, a.st.exact_frames);
+    TEST_ASSERT_EQUAL_UINT32(1, a.st.inexact_frames);
+}
+
+TEST_CASE("link core: the RTCM age is measured from the frame's arrival", "[gnss_link]")
+{
+    gnss_link_core_t c;
+    open_link(&c);
+    /* Read and routed at T0 + 2 s, but it arrived at T0. */
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_PUBLISH, gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US + 2000000, T0_US));
+    gnss_link_stats_t s;
+    gnss_link_core_snapshot(&c, T0_US + 2500000, &s);
+    TEST_ASSERT_EQUAL_UINT32(2500, s.last_rtcm_age_ms);
+    /* A frame held under a lease is stamped the same way; ages never go back. */
+    uint32_t tok = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&c, GNSS_LINK_MODE_COMMAND, "cfg", &tok));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_HOLD,
+                      gnss_link_core_route(&c, GNSS_FRAME_RTCM3, T0_US + 2600000, T0_US + 2400000));
+    gnss_link_core_snapshot(&c, T0_US + 2600000, &s);
+    TEST_ASSERT_EQUAL_UINT32(200, s.last_rtcm_age_ms);
 }

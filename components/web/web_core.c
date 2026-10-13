@@ -85,6 +85,7 @@ static const err_row_t s_errors[WEB_ERR_COUNT] = {
     [WEB_ERR_CONFIG_FAILED] = { "config_failed", 409, "The last receiver configuration failed" },
     [WEB_ERR_POSITION_NOT_LOCKED] = { "position_not_locked", 409,
                                       "Lock the position first: every receiver restart would survey again" },
+    [WEB_ERR_NO_RECEIVER] = { "no_receiver", 409, "No receiver is connected" },
 };
 
 const char *web_err_code(web_err_t e)
@@ -125,6 +126,76 @@ const char *web_status_line(int status)
     case 503: return "503 Service Unavailable";
     default: return "500 Internal Server Error";
     }
+}
+
+/* ---- response headers ------------------------------------------------------------------ */
+
+static const web_hdr_t s_common_hdrs[] = {
+    { "X-Content-Type-Options", "nosniff" },
+    { "X-Frame-Options", "DENY" },
+    { "Referrer-Policy", "no-referrer" },
+    { "Cache-Control", "no-store" },   /* API answers only: the last row */
+};
+#define COMMON_HDRS_ALL (sizeof(s_common_hdrs) / sizeof(s_common_hdrs[0]))
+
+const web_hdr_t *web_common_header(size_t i, bool api)
+{
+    size_t n = api ? COMMON_HDRS_ALL : COMMON_HDRS_ALL - 1u;
+    return i < n ? &s_common_hdrs[i] : NULL;
+}
+
+/* Append `text` at *len; false (and nothing more is written) when it does not fit with its terminator. */
+static bool head_put(char *buf, size_t cap, size_t *len, const char *text)
+{
+    size_t n = strlen(text);
+    if (*len + n + 1u > cap) {
+        return false;
+    }
+    memcpy(buf + *len, text, n + 1u);
+    *len += n;
+    return true;
+}
+
+static bool head_hdr(char *buf, size_t cap, size_t *len, const char *name, const char *value)
+{
+    return head_put(buf, cap, len, name) && head_put(buf, cap, len, ": ") && head_put(buf, cap, len, value) &&
+           head_put(buf, cap, len, "\r\n");
+}
+
+size_t web_stream_head(char *buf, size_t cap, int status, const char *type, const char *disposition, bool api,
+                       int64_t content_length)
+{
+    if (buf == NULL || cap == 0) {
+        return 0;
+    }
+    buf[0] = '\0';
+    size_t len = 0;
+    bool ok = head_put(buf, cap, &len, "HTTP/1.1 ") && head_put(buf, cap, &len, web_status_line(status)) &&
+              head_put(buf, cap, &len, "\r\n") &&
+              head_hdr(buf, cap, &len, "Content-Type", type != NULL ? type : "application/octet-stream");
+    const web_hdr_t *h;
+    for (size_t i = 0; ok && (h = web_common_header(i, api)) != NULL; i++) {
+        ok = head_hdr(buf, cap, &len, h->name, h->value);
+    }
+    if (ok && disposition != NULL) {
+        ok = head_hdr(buf, cap, &len, "Content-Disposition", disposition);
+    }
+    if (ok) {
+        ok = head_hdr(buf, cap, &len, "Connection", "close");
+    }
+    if (ok && content_length >= 0) {
+        char n[24];
+        snprintf(n, sizeof(n), "%lld", (long long)content_length);
+        ok = head_hdr(buf, cap, &len, "Content-Length", n);
+    }
+    if (ok) {
+        ok = head_put(buf, cap, &len, "\r\n");
+    }
+    if (!ok) {
+        buf[0] = '\0';
+        return 0;
+    }
+    return len;
 }
 
 /* ---- small string helpers ------------------------------------------------------------ */
@@ -1296,11 +1367,11 @@ void web_lograte_init(web_lograte_t *r)
     memset(r, 0, sizeof(*r));
 }
 
-bool web_lograte_allow(web_lograte_t *r, uint64_t key, uint32_t now_s, uint32_t *held)
+bool web_lograte_allow(web_lograte_t *r, uint64_t key, uint8_t tag, uint32_t now_s, uint32_t *held)
 {
     web_lograte_client_t *c = NULL;
     for (size_t i = 0; i < WEB_LOGRATE_CLIENTS && c == NULL; i++) {
-        if (r->c[i].used && r->c[i].key == key) {
+        if (r->c[i].used && r->c[i].key == key && r->c[i].tag == tag) {
             c = &r->c[i];
         }
     }
@@ -1325,6 +1396,7 @@ bool web_lograte_allow(web_lograte_t *r, uint64_t key, uint32_t now_s, uint32_t 
         }
         c->used = true;
         c->key = key;
+        c->tag = tag;
         c->held = 0;
     }
     if (held != NULL) {

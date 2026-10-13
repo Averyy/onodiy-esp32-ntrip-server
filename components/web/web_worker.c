@@ -506,14 +506,15 @@ static void upload_gnss(const job_t *job)
 
 /* ---- downloads ---------------------------------------------------------------------------------------- */
 
-static void download_headers(httpd_req_t *req, const char *type, const char *prefix, const char *ext)
+/* A download as a streamed answer (web_stream_t): chunked to HTTP/1.1, with
+ * its Content-Length (`size` >= 0) or ending with the connection to HTTP/1.0. */
+static esp_err_t download_begin(web_stream_t *st, httpd_req_t *req, const char *type, const char *prefix,
+                                const char *ext, int64_t size)
 {
     char ver[32];
     web_safe_filename_part(esp_app_get_description()->version, ver, sizeof(ver));
     snprintf(s_disposition, sizeof(s_disposition), "attachment; filename=\"%s-%s.%s\"", prefix, ver, ext);
-    httpd_resp_set_type(req, type);
-    httpd_resp_set_hdr(req, "Content-Disposition", s_disposition);
-    web_set_common_headers(req, true);
+    return web_stream_begin(st, req, 200, type, s_disposition, size);
 }
 
 static void send_coredump(httpd_req_t *req)
@@ -523,23 +524,31 @@ static void send_coredump(httpd_req_t *req)
         web_send_err(req, WEB_ERR_NO_COREDUMP);
         return;
     }
-    download_headers(req, "application/octet-stream", "coredump", "elf");
+    web_stream_t st;
+    if (download_begin(&st, req, "application/octet-stream", "coredump", "elf", (int64_t)info.size) != ESP_OK) {
+        s_cut = true;
+        return;
+    }
     for (size_t off = 0; off < info.size;) {
         size_t n = info.size - off < sizeof(s_io) ? info.size - off : sizeof(s_io);
         esp_err_t err = diag_coredump_read(off, s_io, n);
-        if (err != ESP_OK || httpd_resp_send_chunk(req, (const char *)s_io, (ssize_t)n) != ESP_OK) {
+        if (err != ESP_OK || web_stream_write(&st, s_io, n) != ESP_OK) {
             ESP_LOGW(TAG, "core dump download stopped at %u bytes: %s", (unsigned)off, esp_err_to_name(err));
             s_cut = true;   /* the connection ends: a half file is never mistaken for a whole one */
             return;
         }
         off += n;
     }
-    (void)httpd_resp_send_chunk(req, NULL, 0);
+    (void)web_stream_end(&st);
 }
 
 static void send_log_text(httpd_req_t *req, bool prev)
 {
-    download_headers(req, "text/plain; charset=utf-8", "log", "txt");
+    web_stream_t st;
+    if (download_begin(&st, req, "text/plain; charset=utf-8", "log", "txt", -1) != ESP_OK) {
+        s_cut = true;
+        return;
+    }
     uint32_t cursor = 0;
     for (;;) {
         size_t n = prev ? diag_log_read_prev_boot(&cursor, (char *)s_io, sizeof(s_io))
@@ -547,28 +556,34 @@ static void send_log_text(httpd_req_t *req, bool prev)
         if (n == 0) {
             break;
         }
-        if (httpd_resp_send_chunk(req, (const char *)s_io, (ssize_t)n) != ESP_OK) {
+        if (web_stream_write(&st, s_io, n) != ESP_OK) {
+            s_cut = true;
             return;
         }
     }
-    (void)httpd_resp_send_chunk(req, NULL, 0);
+    (void)web_stream_end(&st);
 }
 
 /* Bench builds: the receiver byte capture, oldest kept line first. */
 static void send_flash_capture(httpd_req_t *req)
 {
-    download_headers(req, "text/plain; charset=utf-8", "flash-capture", "txt");
+    web_stream_t st;
+    if (download_begin(&st, req, "text/plain; charset=utf-8", "flash-capture", "txt", -1) != ESP_OK) {
+        s_cut = true;
+        return;
+    }
     uint32_t cursor = 0;
     for (;;) {
         size_t n = um98x_flash_capture_read(&cursor, (char *)s_io, sizeof(s_io));
         if (n == 0) {
             break;
         }
-        if (httpd_resp_send_chunk(req, (const char *)s_io, (ssize_t)n) != ESP_OK) {
+        if (web_stream_write(&st, s_io, n) != ESP_OK) {
+            s_cut = true;
             return;
         }
     }
-    (void)httpd_resp_send_chunk(req, NULL, 0);
+    (void)web_stream_end(&st);
 }
 
 /* Bench builds: the receiver link's frame and drain-pass times as CSV. */
@@ -586,15 +601,18 @@ static void send_frame_times(httpd_req_t *req)
     if (synced) {
         snprintf(unix_ms, sizeof(unix_ms), "%" PRId64, (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000);
     }
-    download_headers(req, "text/plain; charset=utf-8", "frame-times", "csv");
+    web_stream_t st;
+    if (download_begin(&st, req, "text/plain; charset=utf-8", "frame-times", "csv", -1) != ESP_OK) {
+        s_cut = true;
+        return;
+    }
     int n = snprintf((char *)s_io, sizeof(s_io),
                      "# esp_timer_us=%" PRId64 ",unix_ms=%s,clock=%s,records=%" PRIu32 ",full=%u,running=%u\n"
-                     "# F,read_us,published_us,msg,len,sys,epoch,mmb,held\n"
-                     "# P,begin_us,end_us,bytes,capped,next_wait_ms,gap_us\n"
-                     "# S,begin_us,end_us,where\n",
+                     "%s",
                      timer_us, unix_ms, synced ? "sntp" : "none", info.count, info.full ? 1u : 0u,
-                     info.running ? 1u : 0u);
-    if (n < 0 || httpd_resp_send_chunk(req, (const char *)s_io, n) != ESP_OK) {
+                     info.running ? 1u : 0u, GNSS_LINK_CSV_HEADER);
+    if (n < 0 || (size_t)n >= sizeof(s_io) || web_stream_write(&st, s_io, (size_t)n) != ESP_OK) {
+        s_cut = true;
         return;
     }
     size_t cursor = 0;
@@ -603,11 +621,12 @@ static void send_frame_times(httpd_req_t *req)
         if (len == 0) {
             break;
         }
-        if (httpd_resp_send_chunk(req, (const char *)s_io, (ssize_t)len) != ESP_OK) {
+        if (web_stream_write(&st, s_io, len) != ESP_OK) {
+            s_cut = true;
             return;
         }
     }
-    (void)httpd_resp_send_chunk(req, NULL, 0);
+    (void)web_stream_end(&st);
 #else
     web_send_err(req, WEB_ERR_NOT_FOUND);
 #endif

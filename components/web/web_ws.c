@@ -279,24 +279,45 @@ static size_t public_count(void)
     return n;
 }
 
-/* Refused handshakes, per client at most one line a minute (a page that
- * keeps retrying shows up once, with its address). */
+/* Why a handshake was refused: one value per refusal text. */
+typedef enum {
+    WS_REFUSED_HOST_ORIGIN = 0,
+    WS_REFUSED_BODY,
+    WS_REFUSED_NO_SESSION,
+    WS_REFUSED_PUBLIC_FULL,
+    WS_REFUSED_ALL_FULL,
+    WS_REFUSED_COUNT,
+} ws_refused_t;
+
+static const char *const k_refused_text[WS_REFUSED_COUNT] = {
+    [WS_REFUSED_HOST_ORIGIN] = "Host or Origin not accepted",
+    [WS_REFUSED_BODY] = "a body with the handshake",
+    [WS_REFUSED_NO_SESSION] = "no session, and public status is off",
+    [WS_REFUSED_PUBLIC_FULL] = "every public viewer slot is taken",
+    [WS_REFUSED_ALL_FULL] = "every WebSocket slot is taken",
+};
+
+/* Refused handshakes: at most one line a minute per client and reason (a
+ * page that keeps retrying shows up once, with its address, and its "no
+ * session" lines never hide a full slot met by another tab of the same
+ * client). "+N not logged" counts the lines that pair held back. */
 EXT_RAM_BSS_ATTR static web_lograte_t s_refused_log;
 
-static void log_refused(httpd_req_t *req, const char *why)
+static void log_refused(httpd_req_t *req, ws_refused_t why)
 {
     web_addr_t a;
     bool known = web_req_peer(req, &a);
     uint32_t held = 0;
-    if (!web_lograte_allow(&s_refused_log, known ? web_client_key(&a) : 0, web_now_s(), &held)) {
+    if (!web_lograte_allow(&s_refused_log, known ? web_client_key(&a) : 0, (uint8_t)why, web_now_s(), &held)) {
         return;
     }
     char who[48];
     (void)web_addr_text(known ? &a : NULL, who, sizeof(who));
+    const char *text = (unsigned)why < WS_REFUSED_COUNT ? k_refused_text[why] : "?";
     if (held > 0) {
-        ESP_LOGW(TAG, "WebSocket refused for %s: %s (+%u not logged)", who, why, (unsigned)held);
+        ESP_LOGW(TAG, "WebSocket refused for %s: %s (+%u not logged)", who, text, (unsigned)held);
     } else {
-        ESP_LOGW(TAG, "WebSocket refused for %s: %s", who, why);
+        ESP_LOGW(TAG, "WebSocket refused for %s: %s", who, text);
     }
 }
 
@@ -304,28 +325,28 @@ esp_err_t web_ws_pre_handshake(httpd_req_t *req)
 {
     s_pending_sess = -1;
     if (!web_ws_precheck(req)) {
-        log_refused(req, "Host or Origin not accepted");
+        log_refused(req, WS_REFUSED_HOST_ORIGIN);
         return ESP_FAIL;
     }
     /* A handshake carries no body. The server would read one away after the
      * handshake, off our request deadline's books: refused and closed. */
     if (web_req_body_of(req) != WEB_REQ_BODY_NONE) {
-        log_refused(req, "a body with the handshake");
+        log_refused(req, WS_REFUSED_BODY);
         return web_refuse_and_close(req, WEB_ERR_BAD_REQUEST);
     }
     /* Not touched yet: a refused handshake must not keep a session alive
      * (a hidden tab retrying would); a successful one touches it. */
     int sess = web_auth_session(req, false);
     if (sess < 0 && !web_public_status()) {
-        log_refused(req, "no session, and public status is off");
+        log_refused(req, WS_REFUSED_NO_SESSION);
         web_send_error(req, WEB_ERR_FORBIDDEN, "Public status is off: log in", NULL, UINT32_MAX, NULL, NULL);
         return ESP_FAIL;
     }
     /* Public viewers get at most WS_MAX_PUBLIC slots, so they can never
      * take every slot from the admin's pages. */
     if (web_ws_client_count() >= WS_MAX_CLIENTS || (sess < 0 && public_count() >= WS_MAX_PUBLIC)) {
-        log_refused(req, sess < 0 && web_ws_client_count() < WS_MAX_CLIENTS ? "every public viewer slot is taken"
-                                                                            : "every WebSocket slot is taken");
+        log_refused(req, sess < 0 && web_ws_client_count() < WS_MAX_CLIENTS ? WS_REFUSED_PUBLIC_FULL
+                                                                            : WS_REFUSED_ALL_FULL);
         web_send_err(req, WEB_ERR_TOO_MANY_CLIENTS);
         return ESP_FAIL;
     }

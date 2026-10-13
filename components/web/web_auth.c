@@ -231,7 +231,7 @@ bool web_auth_check(httpd_req_t *req, bool on_ap, const char *pw)
         uint32_t n = web_throttles_fail(&s_throttles, key, on_ap, web_now_s());
         /* Who it was, at most once a minute per client (the count says how many in a row). */
         uint32_t held = 0;
-        if (web_lograte_allow(&s_fail_log, key, web_now_s(), &held)) {
+        if (web_lograte_allow(&s_fail_log, key, 0, web_now_s(), &held)) {   /* one reason: tag 0 */
             char who[48];
             web_peer_text(req, who, sizeof(who));
             if (held > 0) {

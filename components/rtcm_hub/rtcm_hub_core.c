@@ -155,8 +155,8 @@ bool rtcm_core_init(rtcm_core_t *c, uint8_t *ring, size_t ring_len, const rtcm_c
 
 /* ---- producer ------------------------------------------------------------ */
 
-bool rtcm_core_publish(rtcm_core_t *c, const uint8_t *frame, size_t len, uint16_t msg_type, uint64_t now_ms,
-                       void **wake, size_t *n_wake)
+bool rtcm_core_publish(rtcm_core_t *c, const uint8_t *frame, size_t len, uint16_t msg_type, uint64_t arrival_ms,
+                       bool timed, void **wake, size_t *n_wake)
 {
     *n_wake = 0;
     if (frame == NULL || len < RTCM_CORE_MIN_FRAME || len > GNSS_RTCM3_MAX_FRAME) {
@@ -172,11 +172,11 @@ bool rtcm_core_publish(rtcm_core_t *c, const uint8_t *frame, size_t len, uint16_
     const size_t rlen = rec_len(len);
     size_t pos = ring_pos(c, w);
     const size_t waste = (c->cap - pos < rlen) ? c->cap - pos : 0;
-    const uint32_t rx = (uint32_t)now_ms;
+    const uint32_t rx = (uint32_t)arrival_ms;
 
     lk(c);
     bool unsure = false;
-    uint32_t epoch = rtcm_epoch_assign(&c->ep, frame, len, msg_type, rx, NULL, &unsure);
+    uint32_t epoch = rtcm_epoch_assign(&c->ep, frame, len, msg_type, rx, timed, NULL, &unsure);
     c->reserve_off = w + waste + rlen;
     unlk(c);
 
@@ -208,14 +208,14 @@ bool rtcm_core_publish(rtcm_core_t *c, const uint8_t *frame, size_t len, uint16_
     c->write_off = c->reserve_off;
     c->frames_in++;
     c->bytes_in += len;
-    c->last_rx_ms = now_ms;
+    c->last_rx_ms = arrival_ms;
     c->have_frame = true;
     c->committed_epoch = epoch;
     c->have_epoch = true;
     if (slot >= 0) {
         rtcm_core_sticky_t *s = &c->sticky[slot];
         s->len[next] = (uint16_t)len;
-        s->rx_ms[next] = now_ms;
+        s->rx_ms[next] = arrival_ms;
         s->active = next;
         s->valid = true;
         s->gen++;

@@ -52,7 +52,11 @@
  * scanner cannot follow (a chunked body) it stops too, and that request's
  * handler answers with "Connection: close" and ends the connection, since
  * nothing reads such a body (web_req_body_of). Every HTTP/1.0 request ends
- * its connection (web_conn_should_close).
+ * its connection (web_conn_should_close), and its flag stays with the
+ * connection while the request is answered (web_conn_http10), so an answer
+ * that is streamed (a large JSON body, a download) goes without chunked
+ * framing, which HTTP/1.0 does not know: its body ends where the
+ * connection does, or at its Content-Length when the size is known.
  *
  * Times are milliseconds of an injected monotonic clock, compared only as
  * (uint32_t)(now - then), so they survive the clock wrap.
@@ -117,6 +121,7 @@ typedef struct {
     web_scan_t scan;         /**< request lines received (HTTP version) */
     bool close_after;        /**< the request being answered ends the connection */
     bool close_hdr;          /**< its answer carries "Connection: close" already */
+    bool http10;             /**< the request being answered is HTTP/1.0 (its streamed answer is not chunked) */
 } web_conn_t;
 
 typedef struct {
@@ -151,9 +156,17 @@ void web_conn_scan(web_conns_t *t, int fd, const char *buf, size_t len);
 
 /**
  * A handler starts on the request (server task): takes its request line's
- * flag and resets the close decision. @return true for HTTP/1.0.
+ * flag, keeps it for the request's lifetime (web_conn_http10) and resets
+ * the close decision. @return true for HTTP/1.0.
  */
 bool web_conn_begin_request(web_conns_t *t, int fd);
+
+/**
+ * The request being answered on `fd` is HTTP/1.0 (as its handler found it,
+ * until the next request's handler starts; false for an unknown fd). A
+ * streamed answer to it goes without chunked framing.
+ */
+bool web_conn_http10(const web_conns_t *t, int fd);
 
 /** Its request runs on the worker (web_conn_async on). */
 bool web_conn_on_worker(const web_conns_t *t, int fd);

@@ -69,7 +69,7 @@ void rtcm_epoch_force_new(rtcm_epoch_t *e)
 }
 
 uint32_t rtcm_epoch_assign(rtcm_epoch_t *e, const uint8_t *frame, size_t len, uint16_t msg_type,
-                           uint32_t now_ms, rtcm_epoch_start_t *start, bool *unsure)
+                           uint32_t now_ms, bool timed, rtcm_epoch_start_t *start, bool *unsure)
 {
     rtcm_msm_head_t msm;
     bool is_msm = rtcm_msm_head(frame, len, msg_type, &msm);
@@ -81,10 +81,11 @@ uint32_t rtcm_epoch_assign(rtcm_epoch_t *e, const uint8_t *frame, size_t len, ui
         why = RTCM_EPOCH_START_MMB;
     } else if (is_msm && other_time(e, &msm)) {
         why = RTCM_EPOCH_START_TIME;
-    } else if ((e->msm_open || e->unsure) && !is_msm && (uint32_t)(now_ms - e->last_rx_ms) >= e->gap_ms) {
-        /* Never at an MSM, sure epoch or unsure: an MSM read late belongs
-         * to the epoch the reader stalled in (the MMB and time rules end
-         * MSM epochs). */
+    } else if ((e->msm_open || e->unsure) && !is_msm && timed && e->last_timed &&
+               (uint32_t)(now_ms - e->last_rx_ms) >= e->gap_ms) {
+        /* Never at an MSM, sure epoch or unsure (the MMB and time rules end
+         * MSM epochs), and only between two exact arrivals: a read time says
+         * when the reader got to a frame, not when it came. */
         why = RTCM_EPOCH_START_GAP;
     }
 
@@ -117,6 +118,7 @@ uint32_t rtcm_epoch_assign(rtcm_epoch_t *e, const uint8_t *frame, size_t len, ui
         }
     }
     e->last_rx_ms = now_ms;
+    e->last_timed = timed;
     if (start != NULL) {
         *start = why;
     }

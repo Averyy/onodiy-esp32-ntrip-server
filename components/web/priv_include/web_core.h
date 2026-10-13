@@ -89,6 +89,7 @@ typedef enum {
     WEB_ERR_IDENTITY_UNCONFIRMED,
     WEB_ERR_CONFIG_FAILED,
     WEB_ERR_POSITION_NOT_LOCKED,
+    WEB_ERR_NO_RECEIVER,
     WEB_ERR_COUNT,
 } web_err_t;
 
@@ -100,6 +101,35 @@ const char *web_err_message(web_err_t e);
 int web_err_status(web_err_t e);
 /** Status line for a status code ("409 Conflict"); "500 Internal Server Error" for unknown ones. */
 const char *web_status_line(int status);
+
+/* ---- response headers ------------------------------------------------------------------ */
+
+/** One response header. */
+typedef struct {
+    const char *name;
+    const char *value;
+} web_hdr_t;
+
+/**
+ * The headers every API and page answer carries, from one table: the i-th
+ * of an answer (`api`: an API answer, which adds "Cache-Control: no-store"),
+ * NULL past the last. web_set_common_headers() sets them on an answer of the
+ * server, web_stream_head() writes them into a head of its own, so the two
+ * cannot drift apart.
+ */
+const web_hdr_t *web_common_header(size_t i, bool api);
+
+/**
+ * The head of a streamed answer to an HTTP/1.0 request, which cannot take
+ * chunked framing: "HTTP/1.1 <code> <text>" (the server's own status line
+ * for every answer), Content-Type, the common headers (web_common_header),
+ * Content-Disposition when `disposition` is not NULL, "Connection: close",
+ * and Content-Length when `content_length` >= 0 (else the body ends where
+ * the connection does), then the empty line. Never Transfer-Encoding.
+ * @return its length, 0 when it does not fit in `cap` (buf then holds "").
+ */
+size_t web_stream_head(char *buf, size_t cap, int status, const char *type, const char *disposition, bool api,
+                       int64_t content_length);
 
 /* ---- request checks ------------------------------------------------------------------ */
 
@@ -514,17 +544,20 @@ web_req_body_t web_req_body(size_t content_len, bool transfer_encoding);
 typedef struct {
     bool used;
     uint64_t key;              /**< web_client_key() */
+    uint8_t tag;               /**< the caller's reason for the line (0 when it has only one) */
     uint32_t last_s;           /**< when its last line went out */
     uint32_t held;             /**< lines held back since */
 } web_lograte_client_t;
 
 /**
- * At most one log line per client per WEB_LOGRATE_PERIOD_S, for the
- * WEB_LOGRATE_CLIENTS clients seen last (a new client takes the place of
- * the one whose last line is oldest); the lines held back are counted and
- * the next line that goes out says how many. A client on the network
- * retrying something every second cannot fill the log, and its address is
- * still in it.
+ * At most one log line per client and reason (`tag`) per
+ * WEB_LOGRATE_PERIOD_S, for the WEB_LOGRATE_CLIENTS (client, reason) pairs
+ * seen last (a new pair takes the place of the one whose last line is
+ * oldest); the lines held back are counted per pair and the next line of
+ * that pair says how many. A client on the network retrying something every
+ * second cannot fill the log, its address is still in it, and one reason
+ * never hides another (a full slot is still logged while another tab of
+ * the same client keeps being refused for want of a session).
  */
 typedef struct {
     web_lograte_client_t c[WEB_LOGRATE_CLIENTS];
@@ -533,11 +566,11 @@ typedef struct {
 void web_lograte_init(web_lograte_t *r);
 
 /**
- * May a line about this client go out now? true: *held (if not NULL) gets
- * how many were held back since its last one, and the count restarts.
- * false: this one is counted.
+ * May a line about this client, for this reason, go out now? true: *held
+ * (if not NULL) gets how many of that pair were held back since its last
+ * one, and the count restarts. false: this one is counted.
  */
-bool web_lograte_allow(web_lograte_t *r, uint64_t key, uint32_t now_s, uint32_t *held);
+bool web_lograte_allow(web_lograte_t *r, uint64_t key, uint8_t tag, uint32_t now_s, uint32_t *held);
 
 /** "none", "error", "warn", "info", "debug", "verbose" for esp_log_level_t values 0-5; "?" otherwise. */
 const char *web_log_level_text(unsigned level);

@@ -68,10 +68,17 @@
  *    (mdns_host), the log says so once, and the next boot probes the
  *    configured name again (the renamed one is never stored). The service
  *    instance carries no name of its own: it is named after the host name
- *    in use, so it follows a rename. Before a planned restart the services
- *    send their goodbye (TTL 0) while the network is still up. Every
- *    interface gets an IPv6 link-local address when its link comes up (and
- *    no other address), so AAAA queries for the name are answered at once.
+ *    in use, so it follows a rename. Before a planned restart (a new
+ *    hostname takes effect through one), while the network is still up,
+ *    the station withdraws its web service's PTR record with TTL 0, so
+ *    DNS-SD browsers drop the entry at once. The pinned mDNS component
+ *    withdraws nothing else: the service's SRV record, its TXT record and
+ *    the old name's A/AAAA records expire from caches within their 120 s
+ *    TTL, and until then a client using the old name reaches the station
+ *    and gets 421 bad_host. Every interface gets an IPv6 link-local address
+ *    when its link comes up, and no other address (stateless
+ *    autoconfiguration is turned off per interface), so AAAA queries for
+ *    the name are answered at once.
  *  - Once online: SNTP (pool.ntp.org plus a DHCP-provided server; the
  *    fallback clock for logs and update checks, the availability ledger
  *    prefers GNSS time) and one upstream probe.
@@ -81,7 +88,8 @@
  * stalls), full channel scan and strongest-AP selection (scan_method =
  * WIFI_ALL_CHANNEL_SCAN, sort_method = WIFI_CONNECT_AP_BY_SIGNAL, so mesh
  * homes pick the best node), country code from CONFIG_NETWORK_WIFI_COUNTRY
- * with 802.11d. Disconnect reasons and the RSSI at the drop go to the event
+ * with 802.11d. Disconnect reasons and the RSSI at the drop (0 when the
+ * driver had no reading: anything outside -127..-1 dBm) go to the event
  * journal (DIAG_EV_WIFI_DISCONNECT): every drop of an established link, and
  * during an outage only changed reasons (at most one a minute) plus one
  * record every 10 min, so a long outage cannot flood the journal.

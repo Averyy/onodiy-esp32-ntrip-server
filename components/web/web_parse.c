@@ -504,6 +504,8 @@ web_err_t web_sgt_error(int err, bool safe_mode, const char **field)
         return WEB_ERR_JOURNAL_OPEN;
     case STATION_SGT_E_SAFE_MODE:
         return WEB_ERR_SAFE_MODE;
+    case STATION_SGT_E_NO_RECEIVER:
+        return WEB_ERR_NO_RECEIVER;
     case STATION_SGT_E_UNSUPPORTED:
         return WEB_ERR_UNSUPPORTED_MODEL;
     case STATION_SGT_E_IDENTITY:

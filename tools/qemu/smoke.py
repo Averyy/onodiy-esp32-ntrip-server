@@ -33,7 +33,13 @@ What it does:
      "Connection: close"), a chunked body is never read (one answer: 411 on
      a route that takes a body, the route's own answer elsewhere, with
      "Connection: close"; the chunks never come back as a second answer),
-     and two pipelined HTTP/1.1 requests on one socket are both answered; client addresses in the log (a wrong admin password, a
+     and two pipelined HTTP/1.1 requests on one socket are both answered;
+     streamed answers to HTTP/1.0 carry no chunked framing: GET
+     /api/logs?format=text and a JSON answer larger than the 2 KB response
+     buffer (chunked to HTTP/1.1, which proves it is streamed, and the
+     socket still answers a second request) come without Transfer-Encoding,
+     their body as it is (a log line first, JSON that parses) and the
+     connection ends after them; client addresses in the log (a wrong admin password, a
      refused WebSocket handshake: "from 10.0.2.2"); log levels: "*" at info
      keeps the HTTP server's own tags at error (no "W httpd_uri" line for a
      refused handshake), a level the build cannot show is refused,
@@ -48,7 +54,10 @@ What it does:
      valid" instead of "no bytes at all" when detection gives up; in the
      no-receiver episode that follows, the GNSS ladder's ESP32 restart is
      held for first setup (health.reboot_hold has "setup": no caster is
-     enabled; the status names holds only during a ladder episode);
+     enabled; the status names holds only during a ladder episode); with no
+     receiver (GET /api/gnss state "no_receiver") a signal-group comparison
+     is refused with 409 no_receiver and GET /api/gnss/signal-test stays
+     idle;
   4. keeps watching until --observe seconds after the start (at least 45),
      checks that the web server still answers (GET /, and GET /api/status
      with the session), then stops QEMU and fails on a panic (Guru
@@ -66,7 +75,9 @@ What it does:
      task that starves IDLE shows up here as on a board. The boot log has
      the mDNS line, the mDNS task's stack in PSRAM (the console writer's
      is too, unless the log says otherwise) and the station's IPv6
-     link-local address. Last, POST
+     link-local address, and in the 30 s after that line no "is not
+     link-local" warning (QEMU's network advertises fec0::/64 to the guest:
+     an address from it would mean stateless autoconfiguration is on). Last, POST
      /api/system/reboot: the mDNS goodbye ("mDNS: goodbye sent") is on the
      console before the next boot, with no shutdown-budget warning.
 
@@ -105,6 +116,9 @@ BOOT_MARK = "ESP-ROM:"
 HOSTNAME = "onocoydiy-qemu"                # sdkconfig.qemu CONFIG_LWIP_LOCAL_HOSTNAME
 QEMU_PEER = "10.0.2.2"                     # how the guest sees this computer (QEMU user-mode network)
 IP6_LINE = re.compile(r"network: IPv6 link-local (fe80:[0-9a-f:]+) on station")
+IP6_OTHER = "is not link-local"            # network.c: an IPv6 address other than link-local (never expected)
+IP6_QUIET_S = 30                           # seconds after the link-local line that must show no such warning
+LOG_STAMP = re.compile(r"^[EWIDV] \((\d+)\) ")  # ESP log line: its milliseconds since boot
 GOODBYE = "network: mDNS: goodbye sent"
 BUDGET_WARNINGS = ("shutdown budget used up", "shutdown hooks overran")
 OWN_REBOOT = re.compile(r"lifecycle: rebooting \(reason \d+\)")
@@ -359,6 +373,7 @@ class Smoke:
                    f"station online over the emulated Ethernet (ip {net.get('ip')}, \"{net.get('ssid')}\")")
         self.name_checks()
         self.connection_checks()
+        self.http10_stream_checks()
         self.client_log_checks()
         self.log_level_checks()
         self.wifi_checks()
@@ -483,6 +498,100 @@ class Smoke:
                 pass
         self.check(first.startswith(b"HTTP/1.1 200") and second.startswith(b"HTTP/1.1 200"),
                    "HTTP/1.1 keep-alive: a second request on the same socket is answered")
+
+    def http10_stream_checks(self) -> None:
+        """Streamed answers to HTTP/1.0: no chunked framing, the body as it is, the connection ends after it."""
+        if not self.cookie:
+            return
+        port = self.http_port
+        host = f"Host: 127.0.0.1:{port}\r\nCookie: {self.cookie}\r\n"
+        # A download (the worker): the log as text.
+        data, eof = raw_exchange(port, f"GET /api/logs?format=text HTTP/1.0\r\n{host}\r\n".encode())
+        head, _, body = data.partition(b"\r\n\r\n")
+        first = body.split(b"\n", 1)[0].strip()
+        self.check(data.startswith(b"HTTP/1.1 200") and b"transfer-encoding" not in head.lower()
+                   and b"connection: close" in head.lower() and first and not re.fullmatch(rb"[0-9a-fA-F]+", first)
+                   and b" " in first and eof is not None and eof < 2.0,
+                   f"GET /api/logs?format=text HTTP/1.0: no Transfer-Encoding, first body line {first[:40]!r}, "
+                   f"closed after {eof if eof is None else round(eof, 2)} s")
+        # A JSON answer larger than the 2 KB response buffer: chunked to HTTP/1.1 (the streamed path), and that
+        # socket still answers a second request ...
+        path = "/api/status"
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as c:
+            c.sendall(f"GET {path} HTTP/1.1\r\n{host}\r\n".encode())
+            got = b""
+            c.settimeout(5)
+            try:
+                while not got.endswith(b"\r\n0\r\n\r\n"):
+                    chunk = c.recv(65536)
+                    if not chunk:
+                        break
+                    got += chunk
+            except socket.timeout:
+                pass
+            c.sendall(f"GET /api/session HTTP/1.1\r\n{host}Connection: close\r\n\r\n".encode())
+            second = b""
+            try:
+                while True:
+                    chunk = c.recv(65536)
+                    if not chunk:
+                        break
+                    second += chunk
+            except socket.timeout:
+                pass
+        head11 = got.partition(b"\r\n\r\n")[0].lower()
+        chunked = b"transfer-encoding: chunked" in head11
+        self.check(got.startswith(b"HTTP/1.1 200") and chunked and got.endswith(b"\r\n0\r\n\r\n")
+                   and second.startswith(b"HTTP/1.1 200"),
+                   f"GET {path} HTTP/1.1: chunked ({chunked}: larger than the response buffer, so streamed), "
+                   f"and a second request on that socket is answered ({second[:12]!r})")
+        # ... and to HTTP/1.0 it comes without Transfer-Encoding: JSON that parses, then the end of the connection.
+        data, eof = raw_exchange(port, f"GET {path} HTTP/1.0\r\n{host}\r\n".encode())
+        head, _, body = data.partition(b"\r\n\r\n")
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            parsed = None
+        self.check(data.startswith(b"HTTP/1.1 200") and b"transfer-encoding" not in head.lower()
+                   and b"connection: close" in head.lower() and b"cache-control: no-store" in head.lower()
+                   and isinstance(parsed, dict) and parsed.get("api") == 1 and eof is not None and eof < 2.0,
+                   f"GET {path} HTTP/1.0: {len(body)} bytes of JSON without Transfer-Encoding "
+                   f"({'parses' if isinstance(parsed, dict) else 'does not parse'}), closed after "
+                   f"{eof if eof is None else round(eof, 2)} s")
+
+    def signal_test_checks(self) -> None:
+        """No receiver attached: a signal-group comparison is refused with no_receiver, and none runs."""
+        if not self.cookie:
+            return
+        state = None
+        deadline = time.monotonic() + 30
+        try:
+            while time.monotonic() < deadline and self.proc.poll() is None:
+                status, _, body = request(self.http_port, "GET", "/api/gnss", cookie=self.cookie, timeout=30)
+                if status == 200:
+                    state = json.loads(body).get("state")
+                    if state == "no_receiver":
+                        break
+                time.sleep(1)
+            if not self.check(state == "no_receiver", f"GET /api/gnss: state {state!r} (no receiver attached)"):
+                return
+            body_in = {"groups": [{"master": 3, "slave": 6}, {"master": 7, "slave": 0}], "phase_s": 1800}
+            status, _, body = request(self.http_port, "POST", "/api/gnss/signal-test", body_in, cookie=self.cookie,
+                                      timeout=30)
+            (self.out / "signal-test-refused.json").write_bytes(body)
+            try:
+                err = json.loads(body).get("error") or {}
+            except ValueError:
+                err = {}
+            self.check(status == 409 and err.get("code") == "no_receiver"
+                       and err.get("message") == "No receiver is connected",
+                       f"POST /api/gnss/signal-test without a receiver: HTTP {status} {err.get('code')} "
+                       f"({err.get('message')!r})")
+            status, _, body = request(self.http_port, "GET", "/api/gnss/signal-test", cookie=self.cookie, timeout=30)
+            st = json.loads(body).get("state") if status == 200 else None
+            self.check(status == 200 and st == "idle", f"GET /api/gnss/signal-test after it: state {st!r}")
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            self.check(False, f"signal-group comparison without a receiver: {type(e).__name__}: {e}")
 
     def wifi_checks(self) -> None:
         """Wi-Fi credentials in this build are stored only (the emulated Ethernet stays the link): the 202 and the
@@ -677,6 +786,33 @@ class Smoke:
                    "the mDNS and console task stacks are in PSRAM (boot log)")
         m = IP6_LINE.search(text)
         self.check(m is not None, f"the boot log has the station's IPv6 link-local address ({m.group(1) if m else '-'})")
+        self.ip6_only_link_local(text)
+
+    def ip6_only_link_local(self, text: str) -> None:
+        """No IPv6 address but the link-local one: no "is not link-local" warning in the 30 s after the station's
+        link-local line (first boot; QEMU's network advertises a prefix, so stateless autoconfiguration would
+        show here)."""
+        boot = text.split(BOOT_MARK)[1] if BOOT_MARK in text else text
+        lines = boot.splitlines()
+        at = next((i for i, line in enumerate(lines) if IP6_LINE.search(line)), None)
+        if at is None:
+            self.check(False, "no IPv6 link-local line to check the 30 s after it")
+            return
+        stamp = LOG_STAMP.match(lines[at].strip())
+        t0 = int(stamp.group(1)) if stamp else None
+        last = None
+        warned = []
+        for line in lines[at:]:
+            s = LOG_STAMP.match(line.strip())
+            if s:
+                last = int(s.group(1))
+            if IP6_OTHER in line:
+                warned.append(line.strip()[:160])
+        covered = t0 is not None and last is not None and last - t0 >= IP6_QUIET_S * 1000
+        self.check(covered and not warned,
+                   f"no IPv6 address but the link-local one in the {IP6_QUIET_S} s after it "
+                   f"(log covers {((last - t0) / 1000) if covered or (t0 is not None and last is not None) else 0:.0f} s; "
+                   f"{warned[0] if warned else 'no is-not-link-local warning'})")
 
     def run(self) -> int:
         try:
@@ -685,6 +821,7 @@ class Smoke:
                 self.api_checks()
                 self.uart1_checks()
                 self.hold_checks()
+                self.signal_test_checks()
             self.observe()
         finally:
             self.stop()

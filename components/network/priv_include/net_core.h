@@ -160,6 +160,18 @@ void net_drop_log_reset(net_drop_log_t *s);
  */
 bool net_drop_log_should(net_drop_log_t *s, bool was_connected, uint8_t reason, uint32_t now_s);
 
+/**
+ * Is a signal reading from the driver a real one? An integer from -127 to
+ * -1 dBm; anything else (the driver's -128 for "no signal", 0, positive
+ * values) means unknown. A drop records 0 for unknown in its journal entry.
+ */
+bool net_rssi_known(int8_t rssi);
+
+/* ---- IPv6 ---------------------------------------------------------------------------- */
+
+/** True for an IPv6 link-local unicast address (fe80::/10); `addr` is 16 bytes in network order. */
+bool net_ip6_is_link_local(const uint8_t addr[16]);
+
 /* ---- cached scan list ----------------------------------------------------------------- */
 
 typedef struct {

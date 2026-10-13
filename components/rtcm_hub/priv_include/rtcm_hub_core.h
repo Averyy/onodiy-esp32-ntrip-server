@@ -39,9 +39,12 @@
  * Each consumer is driven by one task (read, resync, prepare/cancel wait,
  * set_max_lag); stats and detach may be called from any task.
  *
- * Time: `now_ms` is a monotonic 64-bit millisecond clock. Records keep its low
- * 32 bits (rx_ms) and ages are computed as (uint32_t)(now - rx_ms). If the
- * newest frame is older than 2^31 ms every record counts as stale.
+ * Time: `now_ms` is a monotonic 64-bit millisecond clock. A frame is stored
+ * with its arrival on that clock (the UART interrupt's time of its last
+ * byte, else its read time): records keep its low 32 bits (rx_ms), and ages,
+ * consumer lag, the newest frame's age and epoch_in_flight are all measured
+ * from it as (uint32_t)(now - rx_ms). If the newest frame is older than
+ * 2^31 ms every record counts as stale.
  */
 #pragma once
 
@@ -190,7 +193,8 @@ bool rtcm_core_init(rtcm_core_t *c, uint8_t *ring, size_t ring_len, const rtcm_c
                     const rtcm_core_lock_t *lock);
 
 /**
- * Store one whole frame (producer). Never blocks.
+ * Store one whole frame (producer) that arrived at `arrival_ms` (`timed`:
+ * the exact arrival, which the epoch gap rule needs). Never blocks.
  *
  * @param wake receives the waiters to notify (room for RTCM_CORE_MAX_CONSUMERS).
  * @param n_wake number of waiters handed back; if > 0, call
@@ -198,8 +202,8 @@ bool rtcm_core_init(rtcm_core_t *c, uint8_t *ring, size_t ring_len, const rtcm_c
  * @return false if the frame was rejected (NULL, shorter than an empty frame
  *         or longer than a maximum frame); counted in publish_failures.
  */
-bool rtcm_core_publish(rtcm_core_t *c, const uint8_t *frame, size_t len, uint16_t msg_type, uint64_t now_ms,
-                       void **wake, size_t *n_wake);
+bool rtcm_core_publish(rtcm_core_t *c, const uint8_t *frame, size_t len, uint16_t msg_type, uint64_t arrival_ms,
+                       bool timed, void **wake, size_t *n_wake);
 
 /** End of the wake pass started by a publish that returned waiters. */
 void rtcm_core_wake_done(rtcm_core_t *c);

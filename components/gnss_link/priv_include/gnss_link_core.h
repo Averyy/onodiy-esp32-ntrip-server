@@ -35,8 +35,8 @@
  *
  * Routing (gnss_link_core_route), per unit the framer emits:
  *   RTCM3   STREAM: publish. COMMAND or RAW: held, counted in rtcm_held
- *           (expected, never real loss). The RTCM age is stamped either way:
- *           the frame was received and CRC-valid.
+ *           (expected, never real loss). The RTCM age is stamped either way,
+ *           from the frame's arrival: it was received and CRC-valid.
  *   text    STREAM and COMMAND: to the line sink. RAW: dropped.
  *   prompt  only in COMMAND with the detector armed.
  *
@@ -81,6 +81,30 @@
  * (the chunk being framed and the bytes right before it).
  *
  * Timing summary (gnss_link_timing_summary): see gnss_link.h, bench hooks.
+ *
+ * Arrival ledger (gnss_link_arr_*, the RX task's; see gnss_link.h "Arrival
+ * times"). The UART interrupt writes one 32-bit esp_timer stamp per RX chunk
+ * it moves into the driver's ring (the select notification, called before
+ * the chunk's data event is queued) into a ring of GNSS_LINK_ARR_STAMPS
+ * entries and advances a head counter. The ledger:
+ *   - pairs the k-th data event taken since the last resync with stamp
+ *     index base + k (gnss_link_arr_on_data), keeping {stamp, bytes left}
+ *     per chunk; an event with no stamp, or whose stamp was overwritten
+ *     already, is a mismatch;
+ *   - turns each read of n bytes into segments (gnss_link_arr_next), one per
+ *     chunk it touches, each with that chunk's arrival rebuilt to 64 bits
+ *     against the read time (the stamp is never after the read), clamped so
+ *     arrivals never go back and never pass the read time; a chunk only
+ *     partly read keeps the rest for the next read;
+ *   - bytes beyond the chunks it knows take the read time, inexact, and
+ *     drop the pairing (a mismatch);
+ *   - drops the pairing on every known cause (gnss_link_arr_degrade);
+ *   - starts afresh only at a quiet point (gnss_link_arr_quiet: the ring and
+ *     the event queue both empty, read with the stamp head in one critical
+ *     section on the RX core, where the interrupt cannot run): base = head.
+ *     A head that differs from the events taken there, or bytes still owed
+ *     to a chunk, count as a mismatch.
+ * Without the pairing every byte takes its read time and is inexact.
  *
  * Closed driver (gnss_link_core_reopen_*): when the UART driver could not be
  * installed, gnss_link retries the install on its own: 1 s after the
@@ -184,6 +208,59 @@ typedef struct {
     uint64_t obs_chunk_at;                    /**< stream offset of obs_chunk[0] */
 } gnss_link_core_t;
 
+#define GNSS_LINK_ARR_STAMPS GNSS_LINK_EVENT_QUEUE_LEN   /**< interrupt stamps kept: one per data event the queue holds */
+#define GNSS_LINK_ARR_CHUNKS 128u                        /**< chunks paired with their stamp and not read yet */
+
+/** One chunk the interrupt moved into the ring: its stamp and the bytes not read yet. */
+typedef struct {
+    uint32_t stamp;          /**< (uint32_t) esp_timer microseconds at the interrupt */
+    uint16_t left;
+} gnss_link_arr_chunk_t;
+
+/** The arrival ledger (RX task; in PSRAM). */
+typedef struct {
+    bool synced;             /**< the pairing is known (false: every byte takes its read time) */
+    uint32_t next;           /**< stamp index the next data event pairs with */
+    uint16_t first;          /**< chunk FIFO */
+    uint16_t n;
+    gnss_link_arr_chunk_t c[GNSS_LINK_ARR_CHUNKS];
+    bool have_last;
+    int64_t last_us;         /**< the latest arrival handed out (arrivals never go back) */
+    gnss_link_arrival_stats_t st;
+} gnss_link_arr_t;
+
+/** One part of a read: `len` bytes that arrived at `arrival_us` (`exact` false: the read time). */
+typedef struct {
+    size_t len;
+    int64_t arrival_us;
+    bool exact;
+} gnss_link_arr_seg_t;
+
+/** Not paired yet (the first quiet point pairs it). */
+void gnss_link_arr_init(gnss_link_arr_t *a);
+
+/** A known cause broke the pairing (bytes or events went past the ledger): read times until a quiet point. */
+void gnss_link_arr_degrade(gnss_link_arr_t *a);
+
+/**
+ * The RX task took a data event of `size` bytes. `stamps` is the interrupt's
+ * ring (GNSS_LINK_ARR_STAMPS entries) and `head` its head counter, read
+ * together in one critical section.
+ */
+void gnss_link_arr_on_data(gnss_link_arr_t *a, size_t size, const volatile uint32_t *stamps, uint32_t head);
+
+/**
+ * The next segment of a read with `left` bytes still to place, which
+ * returned at `read_us`. Its len is at least 1 and at most `left` (left > 0).
+ */
+gnss_link_arr_seg_t gnss_link_arr_next(gnss_link_arr_t *a, size_t left, int64_t read_us);
+
+/** A quiet point (ring and event queue empty) with the stamp ring's head at `head`. */
+void gnss_link_arr_quiet(gnss_link_arr_t *a, uint32_t head);
+
+/** An RTCM frame was framed with an interrupt time (`exact`) or without. */
+void gnss_link_arr_count_frame(gnss_link_arr_t *a, bool exact);
+
 /** One drain pass. */
 typedef struct {
     size_t done;     /**< bytes read in this pass */
@@ -284,7 +361,7 @@ void gnss_link_pct(int32_t *v, size_t n, gnss_link_pct_t *out);
 
 /**
  * One record as a CSV line with its newline:
- *   F,<read us>,<published us>,<msg>,<len>,<sys>,<epoch>,<mmb>,<held>
+ *   F,<arrival us>,<read us>,<published us>,<msg>,<len>,<sys>,<epoch>,<mmb>,<held>,<exact>
  *   P,<begin us>,<end us>,<bytes>,<capped>,<next wait ms>,<gap us>
  *   S,<begin us>,<end us>,<rx|raw>
  * (sys and epoch empty for a frame that is not an MSM).
@@ -317,8 +394,9 @@ void gnss_link_core_on_level(gnss_link_core_t *c, size_t buffered, size_t ring_s
 /** `n` bytes were read from the driver at `now_us`. */
 void gnss_link_core_on_rx(gnss_link_core_t *c, size_t n, int64_t now_us);
 
-/** Route one framed unit and count it. */
-gnss_link_route_t gnss_link_core_route(gnss_link_core_t *c, gnss_frame_kind_t kind, int64_t now_us);
+/** Route one framed unit and count it (`arrival_us`: when an RTCM frame's last byte arrived). */
+gnss_link_route_t gnss_link_core_route(gnss_link_core_t *c, gnss_frame_kind_t kind, int64_t now_us,
+                                       int64_t arrival_us);
 
 /** `n` bytes were written to the receiver. */
 void gnss_link_core_on_tx(gnss_link_core_t *c, size_t n);

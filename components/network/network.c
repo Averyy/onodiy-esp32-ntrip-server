@@ -13,19 +13,25 @@
  *    recovery actions, keeps the fallback DNS and SNTP servers in place and
  *    updates the status snapshot.
  *  - "netprobe": the upstream probe (name lookup + TCP connect), so a slow
- *    lookup never delays a reconnect.
+ *    lookup never delays a reconnect (its stack in PSRAM: no flash work).
  *  - "dns": the captive-portal responder, only while the AP is up.
  *  - the mDNS component's own task (<hostname>.local, the _http service;
- *    its stack is in PSRAM, sdkconfig.defaults); its rename callback only
- *    copies the new name for the net task to log.
+ *    its stack is in PSRAM, sdkconfig.defaults, and so are its static
+ *    packet and name buffers, linker.lf); its rename callback only copies
+ *    the new name for the net task to log.
  *
  * IPv6: each interface gets a link-local address when its link comes up
  * (the station's association, the AP's start, the emulated port's link in
- * the QEMU build), and no other (no SLAAC: CONFIG_LWIP_IPV6_AUTOCONFIG is
- * off). That is enough for the mDNS responder to answer AAAA queries for
- * <name>.local at once, instead of leaving every dual-stack client to wait
- * out its AAAA timeout, and the web server (a dual-stack socket) answers
- * on it.
+ * the QEMU build), and no other. No SLAAC: lwIP turns stateless
+ * autoconfiguration on for every interface it adds, whatever
+ * CONFIG_LWIP_IPV6_AUTOCONFIG says (off, that option only keeps esp_netif
+ * from setting it), so ip6_link_up turns it off in the lwIP context right
+ * before it creates the link-local address, at every link-up. An address
+ * that is not link-local is logged as a warning ("IPv6 address ... is not
+ * link-local"). The link-local address is enough for the mDNS responder to
+ * answer AAAA queries for <name>.local at once, instead of leaving every
+ * dual-stack client to wait out its AAAA timeout, and the web server (a
+ * dual-stack socket) answers on it.
  *
  * QEMU development build (CONFIG_NETWORK_QEMU_ETHERNET, sdkconfig.qemu):
  * Wi-Fi is never initialised or started. The emulated OpenCores Ethernet
@@ -44,21 +50,25 @@
 #include "captive_dns.h"
 #include "diag.h"
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_netif_net_stack.h"
 #include "esp_netif_sntp.h"
 #include "esp_sntp.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "ledger.h"
 #include "lifecycle.h"
 #include "lwip/netdb.h"
+#include "lwip/netif.h"
 #include "lwip/sockets.h"
 #include "mdns.h"
 #include "net_core.h"
@@ -314,6 +324,10 @@ static bool s_mdns_on;                      /* the responder runs (until the shu
 #if CONFIG_LWIP_IPV6
 /* Net task: the link-local address logged last per interface (0 station, 1 AP). */
 EXT_RAM_BSS_ATTR static char s_ip6_logged[2][48];
+/* Net task: addresses other than link-local already warned about, per interface. */
+#define IP6_WARNED_MAX 4
+EXT_RAM_BSS_ATTR static uint8_t s_ip6_warned[2][IP6_WARNED_MAX][16];
+EXT_RAM_BSS_ATTR static uint8_t s_ip6_warned_n[2];
 #endif
 
 /* Survives software, panic and watchdog resets: when the last network-ladder
@@ -528,12 +542,42 @@ static void on_sntp_event(void *arg, esp_event_base_t base, int32_t id, void *da
 
 /* ---- IPv6 link-local -------------------------------------------------------------------- */
 
+#if CONFIG_LWIP_IPV6
+/* lwIP context: no stateless address autoconfiguration on this interface.
+ * lwIP turns it on for every interface it adds (netif_add), and esp_netif
+ * removes and adds the interface again at every stop and start, so this runs
+ * at every link-up. CONFIG_LWIP_IPV6_AUTOCONFIG=n only keeps esp_netif from
+ * copying its own flag into the interface; lwIP's default stays on. */
+static esp_err_t ip6_autoconfig_off(void *ctx)
+{
+    struct netif *lw = esp_netif_get_netif_impl((esp_netif_t *)ctx);
+    if (lw == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+#if LWIP_IPV6_AUTOCONFIG
+    netif_set_ip6_autoconfig_enabled(lw, 0);
+#endif
+    return ESP_OK;
+}
+#endif
+
 /* The interface's link came up: give it its link-local address (the link
- * going down clears every IPv6 address, so this runs on every link-up). */
+ * going down clears every IPv6 address, so this runs on every link-up), and
+ * no other. Autoconfiguration is turned off first: it needs a valid
+ * link-local address in the first slot, so a router advertisement can never
+ * be acted on in between. */
 static void ip6_link_up(esp_netif_t *netif, const char *what)
 {
 #if CONFIG_LWIP_IPV6
-    esp_err_t err = netif != NULL ? esp_netif_create_ip6_linklocal(netif) : ESP_ERR_INVALID_STATE;
+    if (netif == NULL) {
+        ESP_LOGW(TAG, "IPv6 link-local on %s not created: %s", what, esp_err_to_name(ESP_ERR_INVALID_STATE));
+        return;
+    }
+    esp_err_t err = esp_netif_tcpip_exec(ip6_autoconfig_off, netif);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "IPv6 autoconfiguration on %s not turned off: %s", what, esp_err_to_name(err));
+    }
+    err = esp_netif_create_ip6_linklocal(netif);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "IPv6 link-local on %s not created: %s", what, esp_err_to_name(err));
     }
@@ -543,7 +587,53 @@ static void ip6_link_up(esp_netif_t *netif, const char *what)
 #endif
 }
 
-/* The address passed duplicate detection (IP_EVENT_GOT_IP6): say which, once per interface and address. */
+#if CONFIG_LWIP_IPV6
+/* The lower-case text of an address (RFC 5952), as the web log writes addresses. */
+static bool ip6_text(const esp_ip6_addr_t *a, char *text, size_t cap)
+{
+    if (inet_ntop(AF_INET6, a->addr, text, cap) == NULL) {
+        return false;
+    }
+    for (char *c = text; *c != '\0'; c++) {
+        if (*c >= 'A' && *c <= 'F') {
+            *c = (char)(*c - 'A' + 'a');
+        }
+    }
+    return true;
+}
+
+/* An address that is not link-local must never be there (ip6_link_up turns
+ * autoconfiguration off): say so, once per interface and address. */
+static void ip6_check_others(esp_netif_t *netif, uint8_t which)
+{
+    esp_ip6_addr_t all[LWIP_IPV6_NUM_ADDRESSES];
+    int n = esp_netif_get_all_ip6(netif, all);
+    for (int i = 0; i < n && i < LWIP_IPV6_NUM_ADDRESSES; i++) {
+        uint8_t raw[16];
+        memcpy(raw, all[i].addr, sizeof(raw));
+        if (net_ip6_is_link_local(raw)) {
+            continue;
+        }
+        bool seen = false;
+        for (uint8_t k = 0; k < s_ip6_warned_n[which] && !seen; k++) {
+            seen = memcmp(s_ip6_warned[which][k], raw, sizeof(raw)) == 0;
+        }
+        if (seen) {
+            continue;
+        }
+        uint8_t slot = s_ip6_warned_n[which] < IP6_WARNED_MAX ? s_ip6_warned_n[which]++ : IP6_WARNED_MAX - 1;
+        memcpy(s_ip6_warned[which][slot], raw, sizeof(raw));
+        char text[48];
+        if (ip6_text(&all[i], text, sizeof(text))) {
+            ESP_LOGW(TAG, "IPv6 address %s on %s is not link-local", text, which == 0 ? "station" : "access point");
+        }
+    }
+}
+#endif
+
+/* An address passed duplicate detection (IP_EVENT_GOT_IP6): say which
+ * link-local address the interface has, once per interface and address, and
+ * warn about any other address. */
 static void ip6_note(uint8_t which)
 {
 #if CONFIG_LWIP_IPV6
@@ -558,18 +648,12 @@ static void ip6_note(uint8_t which)
     }
     esp_ip6_addr_t ll;
     char text[48];
-    if (esp_netif_get_ip6_linklocal(netif, &ll) != ESP_OK || inet_ntop(AF_INET6, ll.addr, text, sizeof(text)) == NULL) {
-        return;
-    }
-    for (char *c = text; *c != '\0'; c++) {
-        if (*c >= 'A' && *c <= 'F') {
-            *c = (char)(*c - 'A' + 'a');   /* the lower-case form (RFC 5952), as the web log writes addresses */
-        }
-    }
-    if (strcmp(text, s_ip6_logged[which]) != 0) {
+    if (esp_netif_get_ip6_linklocal(netif, &ll) == ESP_OK && ip6_text(&ll, text, sizeof(text)) &&
+        strcmp(text, s_ip6_logged[which]) != 0) {
         strlcpy(s_ip6_logged[which], text, sizeof(s_ip6_logged[which]));
         ESP_LOGI(TAG, "IPv6 link-local %s on %s", text, which == 0 ? "station" : "access point");
     }
+    ip6_check_others(netif, which);
 #else
     (void)which;
 #endif
@@ -1361,11 +1445,18 @@ static void mdns_setup(void)
     ESP_LOGI(TAG, "mDNS: answering as %s.local (web page as service %s)", name, name);
 }
 
-/* Before a planned restart, while the network is still up: the services
- * leave with goodbye packets (TTL 0 for PTR, SRV and TXT), so browsers drop
- * the entry at once instead of when its TTL runs out, then the responder
- * stops. The packets get at most min(MDNS_BYE_WAIT_MS, the hook budget
- * left) to leave before Wi-Fi stops. */
+/* Before a planned restart (a new hostname takes effect through one), while
+ * the network is still up: removing the services makes the pinned mDNS
+ * component send its goodbye, which carries the web service's PTR record
+ * with TTL 0 and nothing else (its remove-all and free paths withdraw no
+ * SRV, TXT or A/AAAA record). DNS-SD browsers drop the entry at once; the
+ * SRV record, the TXT record and the old name's addresses expire from
+ * caches within their 120 s TTL, and until then a client using the old name
+ * reaches the station and gets 421 bad_host. A goodbye of our own is not
+ * possible: it would have to leave from UDP port 5353, which the
+ * component's socket holds. Then the responder stops. The packet gets at
+ * most min(MDNS_BYE_WAIT_MS, the hook budget left) to leave before Wi-Fi
+ * stops. */
 #define MDNS_BYE_WAIT_MS 150
 #define MDNS_BYE_MIN_MS  20    /* less budget left: no goodbye (stopping the responder takes a moment too) */
 
@@ -1489,16 +1580,22 @@ static void handle_disconnected(uint8_t reason, int8_t rssi)
         s_st.connect_failures++;
         taskEXIT_CRITICAL(&s_lock);
     }
+    /* The driver reports -128 when it has no reading: recorded as 0 (unknown). */
+    bool rssi_known = net_rssi_known(rssi);
     if (net_drop_log_should(&s_drop, was_linked, reason, now_s())) {
         if (was_linked) {
-            ESP_LOGW(TAG, "link lost: reason %u, RSSI %d dBm", reason, rssi);
+            if (rssi_known) {
+                ESP_LOGW(TAG, "link lost: reason %u, RSSI %d dBm", reason, rssi);
+            } else {
+                ESP_LOGW(TAG, "link lost: reason %u, RSSI unknown", reason);
+            }
         } else {
             ESP_LOGI(TAG, "connect failed: reason %u", reason);
         }
         if (!s_drop_pending) {
             s_drop_pending = true;
             s_drop_reason = reason;
-            s_drop_rssi = rssi;
+            s_drop_rssi = rssi_known ? rssi : 0;
         }
         flush_drop_record();
     }
@@ -2297,7 +2394,11 @@ esp_err_t network_init(void)
         pdPASS) {
         return ESP_ERR_NO_MEM;
     }
-    if (xTaskCreate(probe_task, "netprobe", PROBE_TASK_STACK, NULL, PROBE_TASK_PRIO, &s_probe_task) != pdPASS) {
+    /* Its stack in PSRAM: the probe only resolves a name and connects (lwIP)
+     * and logs; it never reads or writes flash, so it never runs while the
+     * cache is off. The task is never deleted. */
+    if (xTaskCreatePinnedToCoreWithCaps(probe_task, "netprobe", PROBE_TASK_STACK, NULL, PROBE_TASK_PRIO, &s_probe_task,
+                                        tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     net_ladder_init(&s_ladder);

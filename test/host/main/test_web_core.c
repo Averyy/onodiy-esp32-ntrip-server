@@ -28,6 +28,17 @@ TEST_CASE("every error code has a name, a status and a message", "[web_core]")
     TEST_ASSERT_EQUAL(503, web_err_status(WEB_ERR_TOO_MANY_CLIENTS));
     TEST_ASSERT_EQUAL(411, web_err_status(WEB_ERR_LENGTH_REQUIRED));
     TEST_ASSERT_EQUAL_STRING("202 Accepted", web_status_line(202));
+    /* The comparison's refusal without a receiver; not the detection's not_no_receiver. */
+    TEST_ASSERT_EQUAL_STRING("no_receiver", web_err_code(WEB_ERR_NO_RECEIVER));
+    TEST_ASSERT_EQUAL(409, web_err_status(WEB_ERR_NO_RECEIVER));
+    TEST_ASSERT_EQUAL_STRING("No receiver is connected", web_err_message(WEB_ERR_NO_RECEIVER));
+    TEST_ASSERT_EQUAL_STRING("not_no_receiver", web_err_code(WEB_ERR_NOT_NO_RECEIVER));
+    for (int e = 0; e < WEB_ERR_COUNT; e++) {   /* every code once */
+        for (int f = e + 1; f < WEB_ERR_COUNT; f++) {
+            TEST_ASSERT_TRUE_MESSAGE(strcmp(web_err_code((web_err_t)e), web_err_code((web_err_t)f)) != 0,
+                                     web_err_code((web_err_t)e));
+        }
+    }
 }
 
 /* ---- request checks -------------------------------------------------------------------------- */
@@ -819,39 +830,74 @@ TEST_CASE("client log lines: one a minute per client, the held-back ones counted
     const uint64_t client = 0x0202000A;
     const uint32_t t0 = 4294967200u;   /* across the clock wrap */
     uint32_t held = 99;
-    TEST_ASSERT_TRUE(web_lograte_allow(&r, client, t0, &held));
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, client, 0, t0, &held));
     TEST_ASSERT_EQUAL_UINT32(0, held);
     for (uint32_t i = 1; i <= 4; i++) {   /* the 2nd to 5th within the minute */
-        TEST_ASSERT_FALSE(web_lograte_allow(&r, client, t0 + i * 10, &held));
+        TEST_ASSERT_FALSE(web_lograte_allow(&r, client, 0, t0 + i * 10, &held));
     }
-    TEST_ASSERT_FALSE(web_lograte_allow(&r, client, t0 + WEB_LOGRATE_PERIOD_S - 1, NULL));
+    TEST_ASSERT_FALSE(web_lograte_allow(&r, client, 0, t0 + WEB_LOGRATE_PERIOD_S - 1, NULL));
     /* After the minute: the next line says how many were held back (4 + 1 just now = 5). */
-    TEST_ASSERT_TRUE(web_lograte_allow(&r, client, t0 + WEB_LOGRATE_PERIOD_S, &held));
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, client, 0, t0 + WEB_LOGRATE_PERIOD_S, &held));
     TEST_ASSERT_EQUAL_UINT32(5, held);
-    TEST_ASSERT_TRUE(web_lograte_allow(&r, client, t0 + 2 * WEB_LOGRATE_PERIOD_S, &held));
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, client, 0, t0 + 2 * WEB_LOGRATE_PERIOD_S, &held));
     TEST_ASSERT_EQUAL_UINT32(0, held);
 
     /* The acceptance case: 1st logs, 2nd-5th held, the next after 60 s carries +4. */
     web_lograte_init(&r);
-    TEST_ASSERT_TRUE(web_lograte_allow(&r, 7, 100, &held));
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, 7, 0, 100, &held));
     for (uint32_t i = 0; i < 4; i++) {
-        TEST_ASSERT_FALSE(web_lograte_allow(&r, 7, 101 + i, &held));
+        TEST_ASSERT_FALSE(web_lograte_allow(&r, 7, 0, 101 + i, &held));
     }
-    TEST_ASSERT_TRUE(web_lograte_allow(&r, 7, 161, &held));
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, 7, 0, 161, &held));
     TEST_ASSERT_EQUAL_UINT32(4, held);
 
     /* Another client is never held back by the first. */
-    TEST_ASSERT_TRUE(web_lograte_allow(&r, 8, 162, &held));
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, 8, 0, 162, &held));
     TEST_ASSERT_EQUAL_UINT32(0, held);
 
     /* A full table makes room by dropping the client whose last line is oldest. */
     web_lograte_init(&r);
     for (uint64_t k = 1; k <= WEB_LOGRATE_CLIENTS; k++) {
-        TEST_ASSERT_TRUE(web_lograte_allow(&r, k, (uint32_t)(1000 + k), NULL));
+        TEST_ASSERT_TRUE(web_lograte_allow(&r, k, 0, (uint32_t)(1000 + k), NULL));
     }
-    TEST_ASSERT_TRUE(web_lograte_allow(&r, 100, 1010, NULL));         /* replaces client 1 */
-    TEST_ASSERT_FALSE(web_lograte_allow(&r, 2, 1011, NULL));          /* still known: held */
-    TEST_ASSERT_TRUE(web_lograte_allow(&r, 1, 1012, NULL));           /* forgotten: a line again */
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, 100, 0, 1010, NULL));         /* replaces client 1 */
+    TEST_ASSERT_FALSE(web_lograte_allow(&r, 2, 0, 1011, NULL));          /* still known: held */
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, 1, 0, 1012, NULL));           /* forgotten: a line again */
+}
+
+TEST_CASE("client log lines: one a minute per client and reason, held-back lines counted per pair", "[web_core]")
+{
+    web_lograte_t r;
+    web_lograte_init(&r);
+    const uint64_t client = 0x0202000A;
+    uint32_t held = 99;
+    /* Two reasons in one minute: two lines. */
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, client, 2, 100, &held));
+    TEST_ASSERT_EQUAL_UINT32(0, held);
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, client, 4, 101, &held));
+    TEST_ASSERT_EQUAL_UINT32(0, held);
+    /* The same reason again within the minute: held, counted for its own pair. */
+    TEST_ASSERT_FALSE(web_lograte_allow(&r, client, 2, 102, &held));
+    TEST_ASSERT_FALSE(web_lograte_allow(&r, client, 2, 103, &held));
+    TEST_ASSERT_FALSE(web_lograte_allow(&r, client, 2, 104, &held));
+    TEST_ASSERT_FALSE(web_lograte_allow(&r, client, 4, 105, &held));
+    /* After the minute each pair says how many of its own were held back. */
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, client, 2, 100 + WEB_LOGRATE_PERIOD_S, &held));
+    TEST_ASSERT_EQUAL_UINT32(3, held);
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, client, 4, 101 + WEB_LOGRATE_PERIOD_S, &held));
+    TEST_ASSERT_EQUAL_UINT32(1, held);
+    /* Another client with the same reason is its own pair. */
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, client + 1, 2, 170, &held));
+    TEST_ASSERT_EQUAL_UINT32(0, held);
+
+    /* A full table still makes room by dropping the pair whose last line is oldest. */
+    web_lograte_init(&r);
+    for (uint32_t k = 0; k < WEB_LOGRATE_CLIENTS; k++) {
+        TEST_ASSERT_TRUE(web_lograte_allow(&r, 7, (uint8_t)k, 1000 + k, NULL));   /* one client, 8 reasons */
+    }
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, 7, 200, 1010, NULL));   /* a ninth pair replaces (7, 0) */
+    TEST_ASSERT_FALSE(web_lograte_allow(&r, 7, 1, 1011, NULL));    /* still known: held */
+    TEST_ASSERT_TRUE(web_lograte_allow(&r, 7, 0, 1012, NULL));     /* forgotten: a line again */
 }
 
 TEST_CASE("strict u32 query values (log and journal cursors) and level names", "[web_core]")
@@ -879,4 +925,90 @@ TEST_CASE("strict u32 query values (log and journal cursors) and level names", "
     TEST_ASSERT_EQUAL_STRING("info", web_log_level_text(3));
     TEST_ASSERT_EQUAL_STRING("verbose", web_log_level_text(5));
     TEST_ASSERT_EQUAL_STRING("?", web_log_level_text(6));
+}
+
+/* ---- streamed answers to HTTP/1.0 ------------------------------------------------------------ */
+
+TEST_CASE("stream head: a download with its length, an API answer without one, never chunked", "[web_core]")
+{
+    char buf[512];
+    /* A download whose size is known (the core dump). */
+    size_t n = web_stream_head(buf, sizeof(buf), 200, "application/octet-stream",
+                               "attachment; filename=\"coredump-1.2.3.elf\"", true, 65536);
+    TEST_ASSERT_EQUAL_size_t(strlen(buf), n);
+    TEST_ASSERT_EQUAL_STRING("HTTP/1.1 200 OK\r\n"
+                             "Content-Type: application/octet-stream\r\n"
+                             "X-Content-Type-Options: nosniff\r\n"
+                             "X-Frame-Options: DENY\r\n"
+                             "Referrer-Policy: no-referrer\r\n"
+                             "Cache-Control: no-store\r\n"
+                             "Content-Disposition: attachment; filename=\"coredump-1.2.3.elf\"\r\n"
+                             "Connection: close\r\n"
+                             "Content-Length: 65536\r\n"
+                             "\r\n",
+                             buf);
+    /* A JSON answer larger than the buffer: no length (the body ends with the connection), no disposition. */
+    n = web_stream_head(buf, sizeof(buf), 409, "application/json", NULL, true, -1);
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_EQUAL_STRING("HTTP/1.1 409 Conflict\r\n"
+                             "Content-Type: application/json\r\n"
+                             "X-Content-Type-Options: nosniff\r\n"
+                             "X-Frame-Options: DENY\r\n"
+                             "Referrer-Policy: no-referrer\r\n"
+                             "Cache-Control: no-store\r\n"
+                             "Connection: close\r\n"
+                             "\r\n",
+                             buf);
+    TEST_ASSERT_NULL(strstr(buf, "Transfer-Encoding"));
+    TEST_ASSERT_NULL(strstr(buf, "Content-Length"));
+    TEST_ASSERT_NULL(strstr(buf, "Content-Disposition"));
+    /* Not an API answer: no Cache-Control; a zero length is a length. */
+    n = web_stream_head(buf, sizeof(buf), 200, "text/plain; charset=utf-8", NULL, false, 0);
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_NULL(strstr(buf, "Cache-Control"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\r\nContent-Length: 0\r\n"));
+    TEST_ASSERT_NULL(strstr(buf, "Transfer-Encoding"));
+    /* Every head ends with the empty line, once. */
+    TEST_ASSERT_EQUAL_STRING("\r\n\r\n", buf + n - 4);
+    TEST_ASSERT_EQUAL_PTR(buf + n - 4, strstr(buf, "\r\n\r\n"));
+}
+
+TEST_CASE("stream head: a buffer too small gives nothing, never half a head", "[web_core]")
+{
+    char buf[512];
+    size_t full = web_stream_head(buf, sizeof(buf), 200, "text/plain; charset=utf-8",
+                                  "attachment; filename=\"log-1.txt\"", true, -1);
+    TEST_ASSERT_TRUE(full > 0);
+    for (size_t cap = 0; cap <= full; cap++) {   /* the terminator needs one more byte */
+        char small[512];
+        memset(small, 'x', sizeof(small));
+        TEST_ASSERT_EQUAL_size_t(0, web_stream_head(cap == 0 ? NULL : small, cap, 200, "text/plain; charset=utf-8",
+                                                    "attachment; filename=\"log-1.txt\"", true, -1));
+        if (cap > 0) {
+            TEST_ASSERT_EQUAL_CHAR('\0', small[0]);
+        }
+    }
+    char exact[512];
+    TEST_ASSERT_EQUAL_size_t(full, web_stream_head(exact, full + 1, 200, "text/plain; charset=utf-8",
+                                                   "attachment; filename=\"log-1.txt\"", true, -1));
+    TEST_ASSERT_EQUAL_STRING(buf, exact);
+}
+
+TEST_CASE("common headers: one table for every answer, Cache-Control only on API answers", "[web_core]")
+{
+    static const char *const want[] = { "X-Content-Type-Options", "X-Frame-Options", "Referrer-Policy",
+                                        "Cache-Control" };
+    size_t i = 0;
+    for (const web_hdr_t *h; (h = web_common_header(i, true)) != NULL; i++) {
+        TEST_ASSERT_TRUE(i < 4);
+        TEST_ASSERT_EQUAL_STRING(want[i], h->name);
+    }
+    TEST_ASSERT_EQUAL_size_t(4, i);
+    TEST_ASSERT_EQUAL_STRING("no-store", web_common_header(3, true)->value);
+    i = 0;
+    while (web_common_header(i, false) != NULL) {
+        TEST_ASSERT_TRUE(strcmp(web_common_header(i, false)->name, "Cache-Control") != 0);
+        i++;
+    }
+    TEST_ASSERT_EQUAL_size_t(3, i);
 }

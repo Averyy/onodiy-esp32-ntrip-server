@@ -20,16 +20,20 @@
  *    the previous frame while the current epoch holds an MSM not yet
  *    terminated (a lost terminating MSM: the next epoch's station messages;
  *    the next epoch's first MSM meets the time rule) or is unsure (below).
+ *    The gap rule applies only between two frames whose arrival times are
+ *    exact (`timed`: the UART interrupt's time of their last byte); a frame
+ *    with only its read time never starts an epoch by gap, and neither does
+ *    the frame after it.
  * The checks run in that order; the first that matches is counted. An MSM
  * after a gap continues its epoch, sure or unsure: an MSM of a later epoch on
  * a time scale the epoch holds met the time rule already, and receivers send
  * their constellations in a fixed order, so one the epoch has not seen yet is
- * its next MSM. Such gaps come from the reader, not the receiver: arrival
- * times are taken when frames are read, and a reader that stalled (flash
- * writes stop the CPU) reads the rest of an epoch late. That happens most
- * right after a framer reset, when the station writes its settings and
- * journal, so an unsure epoch must not turn sure at a late MSM either: the
- * casters waiting for a sure epoch would start on a partial one. Non-MSM
+ * its next MSM. Arrival times are the UART interrupt's, so a reader that
+ * stalled (flash writes stop every task) no longer makes gaps inside an
+ * epoch; the rule still holds for frames whose times are only read times
+ * (then the gap rule is off anyway) and for receivers that pause between
+ * constellations. An unsure epoch must not turn sure at a late MSM either:
+ * the casters waiting for a sure epoch would start on a partial one. Non-MSM
  * frames after an epoch's terminating MSM belong to the next epoch, and a gap
  * after a terminated epoch starts nothing. GLONASS and BeiDou epoch times are
  * compared within their own constellation only (other time scales; one 2012
@@ -95,6 +99,7 @@ typedef struct {
     bool unsure;         /**< the current epoch was started by START_FIRST */
     uint32_t epoch;      /**< current epoch sequence number */
     uint32_t last_rx_ms; /**< arrival of the previous frame */
+    bool last_timed;     /**< ... an exact one (the gap rule needs two) */
     uint8_t time_mask;   /**< constellations with an MSM in the current epoch */
     uint32_t msm_time[RTCM_EPOCH_GNSS_SLOTS];
     uint64_t epochs;     /**< epochs started (every reason) */
@@ -111,7 +116,9 @@ void rtcm_epoch_init(rtcm_epoch_t *e, uint32_t gap_ms, uint32_t first_epoch);
 
 /**
  * Assign the epoch for one frame (whole RTCM3 frame incl. header and CRC)
- * arriving at `now_ms`, and update the counters.
+ * arriving at `now_ms`, and update the counters. `timed`: `now_ms` is the
+ * exact arrival (the UART interrupt's time); false: a read time, which never
+ * takes part in the gap rule.
  *
  * @param start optional: why the frame started an epoch (or CONTINUES).
  * @param unsure optional: the frame belongs to an unsure epoch (see the file
@@ -119,7 +126,7 @@ void rtcm_epoch_init(rtcm_epoch_t *e, uint32_t gap_ms, uint32_t first_epoch);
  * @return the frame's epoch sequence number.
  */
 uint32_t rtcm_epoch_assign(rtcm_epoch_t *e, const uint8_t *frame, size_t len, uint16_t msg_type,
-                           uint32_t now_ms, rtcm_epoch_start_t *start, bool *unsure);
+                           uint32_t now_ms, bool timed, rtcm_epoch_start_t *start, bool *unsure);
 
 /** Make the next frame start a new epoch (counted in `epochs` only). */
 void rtcm_epoch_force_new(rtcm_epoch_t *e);
