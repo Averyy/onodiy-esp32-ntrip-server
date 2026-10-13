@@ -353,14 +353,18 @@ ftimes dump             the whole recording as CSV, ending with "BENCH ftimes du
   after it ended by itself; `ftimes stop` ends a running one early and
   prints it. The line names the records, frames, passes and stalls, the
   read-to-published percentiles, right after them the arrival-to-read
-  percentiles and the frames without an interrupt time
-  (`; arrival to read p50 A p95 B p99 C p99.9 D max E us (n N); M frames
-  without an interrupt time`), the longest reader gap and, when a stall
+  percentiles over the frames with an interrupt time and the frames
+  without one (`; arrival to read p50 A p95 B p99 C p99.9 D max E us (n
+  N); M frames without an interrupt time`, or `; arrival to read: none`
+  when no frame had one), the longest reader gap and, when a stall
   is in the recording, the zero-wait capped passes after it, when the ring
   was empty again and when the first frame was published after it; with
   the clock set by SNTP also the epoch delays per constellation, counted
   from the arrival of each epoch's first frame (frames with an interrupt
-  time only).
+  time only). A second line always follows it with the link's pairing of
+  interrupt times since boot: `BENCH ftimes interrupt times since boot: X
+  frames with one, Y without, R resyncs, M mismatches, D pairings dropped
+  by a known cause`.
 - `ftimes dump` (and `GET /api/diag/frame-times`) writes one CSV line per
   record. A frame is `F,arrival_us,read_us,published_us,msg,len,sys,epoch,mmb,held,exact`
   (header `# F,arrival_us,read_us,published_us,msg,len,sys,epoch,mmb,held,exact`;

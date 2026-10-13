@@ -88,7 +88,7 @@ refused receiver maintenance (`receiver_session`, `live_view_output`).
 | 403 | `forbidden` (Origin or CSRF check failed, public status off), `wrong_password`, `not_on_setup_ap` |
 | 404 | `not_found`, `nothing_staged`, `no_journal`, `no_coredump`, `nothing_pending` |
 | 405 | `method_not_allowed` |
-| 409 | state conflicts: `busy`, `journal_open`, `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `no_receiver`, `same_image`, `slot_disabled` |
+| 409 | state conflicts: `busy`, `journal_open`, `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `no_receiver`, `same_image`, `slot_disabled`, `signal_test_running`, `signal_test_idle`, `signal_test_not_deciding`, `first_apply_held`, `autocfg_off`, `identity_unconfirmed`, `config_failed`, `position_not_locked` |
 | 411 | `length_required` (no `Content-Length`: an upload without one, or a body sent in chunks on any route that takes a body) |
 | 413 | `too_large` |
 | 415 | `unsupported_media_type` |
@@ -2063,7 +2063,8 @@ time since the previous pass ended (the reader was away). `S` a bench
 stall: `rx` (the RX task) or `raw` (inside a RAW-lease read). The
 console's `ftimes summary` line gives, right after its read-to-published
 percentiles, the arrival-to-read percentiles (`arrival to read p50 A p95 B
-p99 C p99.9 D max E us (n N)`) and how many frames had no interrupt time
+p99 C p99.9 D max E us (n N)`, over the frames with `exact` 1, or `arrival
+to read: none` without one) and how many frames had no interrupt time
 (`M frames without an interrupt time`); its epoch delay per constellation
 counts from the arrival of each epoch's first frame (frames with `exact` 1
 only).
@@ -2338,12 +2339,12 @@ receiver answers `signal_test_running`: a profile save with `profile` or
 (banner, confirm) and the flash actions. The comparison itself is refused
 while the first configuration is held, automatic configuration is off,
 during receiver maintenance, an open receiver update session or safe mode,
-for an unsupported or unidentified receiver, while the receiver does not
-stream, after a failed apply and while the position is not locked. With the
-settings unavailable this boot, every call that would persist something
-answers `settings_unavailable`, except Wi-Fi credentials and the first admin
-password (both kept for this boot), and a journal in state `unknown` allows
-no receiver update action.
+without a receiver (`no_receiver`), for an unsupported or unidentified
+receiver, while the receiver does not stream, after a failed apply and
+while the position is not locked. With the settings unavailable this boot,
+every call that would persist something answers `settings_unavailable`,
+except Wi-Fi credentials and the first admin password (both kept for this
+boot), and a journal in state `unknown` allows no receiver update action.
 
 ---
 
@@ -2459,8 +2460,10 @@ no receiver update action.
   192.168.1.23: no session, and public status is off` (also `Host or Origin
   not accepted`, `a body with the handshake`, `every WebSocket slot is
   taken`, `every public viewer slot is taken`). Each kind of line comes at
-  most once a minute per client (8 clients tracked); the next line says
-  how many were held back (`+k not logged`). IPv4 addresses (also
+  most once a minute per client and reason (the 8 client and reason pairs
+  seen last are tracked, so one tab's `no session` lines never hide a full
+  slot met by another tab of the same client); the next line of that pair
+  says how many it held back (`+k not logged`). IPv4 addresses (also
   v4-mapped) are written dotted, IPv6 in the compressed form.
 - **Handlers never block for long.** Station, caster, network and update
   calls are asynchronous; a handler reads snapshots and returns. The
@@ -2475,7 +2478,9 @@ no receiver update action.
 - **Memory:** large snapshots (`station_status_t`, caster status) are read
   into PSRAM or static storage, never onto the server stack. JSON is
   written by a streaming writer into a 2 KB PSRAM buffer and sent with
-  `httpd_resp_send_chunk`, so no response needs a large contiguous block
+  `httpd_resp_send_chunk` (to an HTTP/1.0 request: raw on the socket after
+  a head of the station's own, the body ending at the close, section 2
+  item 6), so no response needs a large contiguous block
   (`/api/casters` with 8 slots is about 10 KB). The upload buffer is 4 KB of
   internal RAM. cJSON (PSRAM hooks) parses requests only.
 - **Events:** the web subscribes to `STATION_EVENT`, `NTRIP_EVENT`,
