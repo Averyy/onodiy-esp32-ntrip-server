@@ -103,7 +103,10 @@ tools/ci/host_tests_linux.sh              # --keep-going lists every build error
 
 It reads the image and the commands from `build.yml`, builds a copy of the working tree
 inside the container (nothing in the checkout is written) and fails on any compiler
-warning in the project's own sources too.
+warning in the project's own sources too. Whatever in the job it would not run as CI
+does (an action other than checkout, setup-uv and upload-artifact, a matrix, a job
+timeout, an expression to evaluate, a workflow-level `env:`) stops it before the first
+step (`tools/ci/ci_job.py`).
 
 CI's two QEMU jobs (the smoke test with the end-to-end run, and the bench console; see
 [`tools/qemu/README.md`](tools/qemu/README.md)) run the same way:

@@ -24,9 +24,12 @@ concurrency:
 # and use that digest in every job that runs in it (firmware, firmware-bench,
 # host-tests, qemu-smoke, qemu-bench-console). tools/ci/host_tests_linux.sh
 # and tools/ci/qemu_linux.sh read the image and the steps of the host-tests
-# and the two QEMU jobs from this file (tools/ci/ci_job.py runs the steps; it
-# stands in for checkout, setup-uv and upload-artifact and refuses any other
-# action, so a new one there needs it taught first).
+# and the two QEMU jobs from this file (tools/ci/ci_job.py runs the steps as
+# the runner does: if: always(), continue-on-error, a step's timeout-minutes;
+# it stands in for checkout, setup-uv and upload-artifact). It refuses, before
+# the first step, whatever it would not run as CI does: another action or
+# input, a matrix, a job timeout, an expression it would have to evaluate, a
+# workflow-level env: or defaults:. Such a change there needs it taught first.
 #
 # Jobs: firmware (the station image, uploaded), firmware-bench (the
 # sdkconfig.bench overlay built and checked like the station image, so code

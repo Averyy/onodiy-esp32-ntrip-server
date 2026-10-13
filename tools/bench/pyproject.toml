@@ -16,6 +16,8 @@ dev = [
     # Independent RTCM decoder, used only by the tests to cross-check the
     # frames they build and our own MSM decoding.
     "pyrtcm>=1.1",
+    # tools/ci/ci_job.py reads build.yml with it (tests/test_ci_job.py).
+    "pyyaml>=6",
 ]
 
 [tool.uv]
