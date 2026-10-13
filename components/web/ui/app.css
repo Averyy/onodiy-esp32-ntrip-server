@@ -540,6 +540,8 @@ input[type="file"] { max-width: 100%; font: inherit; }
   gap: 0.5rem;
   margin-top: 1rem;
 }
+/* A short note beside the buttons (why one is off), centred on their line. */
+.form-actions > .note { align-self: center; }
 
 details.more { margin-top: 0.85rem; }
 details.more > summary { cursor: pointer; color: var(--accent); font-weight: 600; padding: 0.3rem 0; }

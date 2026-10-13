@@ -88,7 +88,7 @@ refused receiver maintenance (`receiver_session`, `live_view_output`).
 | 403 | `forbidden` (Origin or CSRF check failed, public status off), `wrong_password`, `not_on_setup_ap` |
 | 404 | `not_found`, `nothing_staged`, `no_journal`, `no_coredump`, `nothing_pending` |
 | 405 | `method_not_allowed` |
-| 409 | state conflicts: `busy`, `journal_open`, `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `same_image`, `slot_disabled` |
+| 409 | state conflicts: `busy`, `journal_open`, `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `no_receiver`, `same_image`, `slot_disabled` |
 | 411 | `length_required` (no `Content-Length`: an upload without one, or a body sent in chunks on any route that takes a body) |
 | 413 | `too_large` |
 | 415 | `unsupported_media_type` |
@@ -151,7 +151,15 @@ Applied to every request before any handler runs.
    `Connection: keep-alive`: HTTP/1.0 connections are never kept), gets
    its answer with `Connection: close`, and the station closes the
    connection after it (also after an upload or a download the worker
-   answers). Pipelined requests are answered in order.
+   answers). Pipelined requests are answered in order. An answer that is
+   streamed (JSON larger than the 2 KB response buffer, the upload
+   results, and the downloads `/api/logs?format=text`, `/api/coredump`,
+   `/api/diag/flash-capture` and `/api/diag/frame-times`) goes to an
+   HTTP/1.0 request without `Transfer-Encoding`: with `Content-Length`
+   when the size is known up front (the core dump), otherwise the body
+   ends when the station closes the connection (section 18). HTTP/1.1 is
+   unchanged: such answers go in chunks (`Transfer-Encoding: chunked`) and
+   the connection stays open unless the request asked to close it.
 7. **Response headers** on every page and API response:
    `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
    `Referrer-Policy: no-referrer`; HTML also gets a Content-Security-Policy
@@ -1089,9 +1097,13 @@ order: `409 signal_test_running` (one runs already),
 `409 settings_unavailable` (the test could not be stored),
 `409 first_apply_held`, `409 autocfg_off` (automatic configuration is
 off: the user configures the receiver), `409 receiver_maintenance`,
-`409 journal_open`, `409 safe_mode`, `409 unsupported_model`,
+`409 journal_open`, `409 safe_mode`, `409 no_receiver` (no receiver is
+connected: `GET /api/gnss` `state` is `no_receiver`),
+`409 unsupported_model` (an identified receiver model this firmware does
+not configure, or while the `unsupported_model` alert is raised),
 `409 identity_unconfirmed` (the receiver has not answered its version
-query this boot), `409 receiver_not_streaming`, `409 config_failed` (the
+query this boot: a connected receiver that is not identified yet gets
+this one), `409 receiver_not_streaming`, `409 config_failed` (the
 last apply failed), `409 position_not_locked` (a surveying base would
 survey again at every receiver restart: lock the position first).
 
@@ -2028,22 +2040,33 @@ never the one derived from the receiver's own epochs):
 
 ```
 # esp_timer_us=123456789,unix_ms=1760000000000,clock=sntp,records=5021,full=0,running=0
-# F,read_us,published_us,msg,len,sys,epoch,mmb,held
+# F,arrival_us,read_us,published_us,msg,len,sys,epoch,mmb,held,exact
 # P,begin_us,end_us,bytes,capped,next_wait_ms,gap_us
 # S,begin_us,end_us,where
 P,120400118,120400410,1180,0,20,941204
-F,120400150,120400221,1077,402,gps,270524000,1,0
+F,120396877,120400150,120400221,1077,402,gps,270524000,1,0,1
 S,130000000,135000012,rx
 ```
 
-`F` one RTCM frame: when the read that completed it returned, when the
-sinks returned (read to published), message number, length, for an MSM the
-constellation (`gnss_sys_t`) and the epoch time field as sent, its
-multiple-message bit, and `held` (a lease held it back, not published).
+`F` one RTCM frame: when its last byte arrived (`arrival_us`), when the
+read that completed it returned, when the sinks returned (read to
+published), message number, length, for an MSM the constellation
+(`gnss_sys_t`) and the epoch time field as sent, its multiple-message bit,
+`held` (a lease held it back, not published) and `exact`. `arrival_us` is
+the time at which the UART interrupt moved the chunk holding the frame's
+last byte into the driver's ring buffer (`exact` 1); its resolution is one
+FIFO chunk, about 10 ms at 115200 Bd. When no interrupt time is known for
+the frame, `arrival_us` is `read_us` and `exact` is 0.
 `P` one drain pass that read data: begin, end, bytes, whether it stopped
 at the drain cap (the next event wait is then 0), that next wait, and the
 time since the previous pass ended (the reader was away). `S` a bench
-stall: `rx` (the RX task) or `raw` (inside a RAW-lease read).
+stall: `rx` (the RX task) or `raw` (inside a RAW-lease read). The
+console's `ftimes summary` line gives, right after its read-to-published
+percentiles, the arrival-to-read percentiles (`arrival to read p50 A p95 B
+p99 C p99.9 D max E us (n N)`) and how many frames had no interrupt time
+(`M frames without an interrupt time`); its epoch delay per constellation
+counts from the arrival of each epoch's first frame (frames with `exact` 1
+only).
 
 ### `PUT /api/diag/log-level`
 
@@ -2090,7 +2113,7 @@ the newest, or from before the journal started over, starts again from the
 oldest. Pass the returned `cursor` back (`more: true` = call again at once).
 A `cursor` that is not a number answers `400 invalid_field` with
 `"field": "cursor"`. `time_unix` `null` = no trusted clock then. `a` and `b`
-by `kind`:
+by `kind` (integers; only a `wifi_disconnect` entry's `b` can be `null`):
 
 | `kind` | `a` | `b` |
 |---|---|---|
@@ -2102,7 +2125,7 @@ by `kind`:
 | `app_revert` | trial stage that gave the image up (`fw_update_trial_t`; 0 = the user's rollback) | 1 = the user's rollback; a stage-1 rollback the bootloader did: the attempt (1, 2) |
 | `gnss_flash` | the session's outcome (`station_flash_outcome_t`), written when its journal closes | transfers under the journal |
 | `safe_mode` | episode | — |
-| `wifi_disconnect` | `wifi_err_reason_t` | RSSI |
+| `wifi_disconnect` | `wifi_err_reason_t` | RSSI at the drop in dBm (-127 to -1); `null` when unknown (stored as 0; also the -128 of records from earlier builds) |
 | `data_loss` | counter id (`diag_loss_id_t`) | increase since the previous record for that id |
 | `caster_down` | slot (bits 0-7) \| end class (`ntrip_fail_class_t`, 0 = not a caster failure; bits 8-15) \| short sessions not journalled since the previous `caster_down` (bits 16-30) | session length s |
 | `caster_up` | slot (bits 0-7) \| failed attempts since the previous session (bits 16-30) | outage s |
@@ -2136,7 +2159,7 @@ newest first, read backwards through the journal.
 | `class` | `caster_down`: why the session ended (`ntrip_fail_class_t`; `none` = not a caster failure: a pause, a configuration change, a health restart, the receiver's RTCM stopping, the network going down); `null` otherwise |
 | `count` | `caster_down`: shorter sessions not journalled since the slot's previous `caster_down`; `caster_up`: failed attempts since the previous session; `wifi_up`: connect attempts during the outage; `null` for `caster_stop` and `wifi_disconnect` |
 | `duration_s` | `caster_down`: session length; `caster_up`, `wifi_up`: outage length; `null` for `caster_stop` and `wifi_disconnect` |
-| `reason`, `rssi` | `wifi_disconnect`: `wifi_err_reason_t` and the RSSI at the drop; `null` otherwise |
+| `reason`, `rssi` | `wifi_disconnect`: `wifi_err_reason_t` and the RSSI at the drop in dBm (-127 to -1; `rssi` `null` when unknown, as the journal's `b`); both `null` otherwise |
 | `stop_reason` | `caster_stop`: why the Onocoy login guard stopped the slot (`ntrip_stop_t`); `null` otherwise |
 
 ### `GET /api/coredump`, `DELETE /api/coredump`
@@ -2212,8 +2235,12 @@ web server answers on that address too (a phone on the AP that reaches it
 over IPv6 counts as on the AP, section 3). The web page is advertised as
 an `_http._tcp` service (TXT `path=/`) whose instance name is the host
 label (`mdns_host`), so it follows a rename after a name conflict. Before a
-planned restart the station says goodbye (the service records with TTL 0)
-while the network is still up, so DNS-SD browsers drop the entry at once.
+planned restart (while the network is still up) or after a rename, the
+station withdraws its web service's PTR record with TTL 0, so DNS-SD
+browsers drop the entry at once. The pinned mDNS component does not
+withdraw the service's SRV and TXT records or the old host name's A/AAAA
+records: they expire from caches within their 120 s TTL, and until then a
+client using the old name reaches the station and gets `421 bad_host`.
 The QEMU development build answers as `onocoydiy-qemu` (its own host name:
 QEMU's user-mode network carries its announcements onto the developer's
 LAN).
@@ -2349,10 +2376,22 @@ no receiver update action.
   request, gets `Connection: close` on its answer, and then the server
   ends its side, drains briefly and drops the session; the worker does the
   same for a request it took over. HTTP/1.0 keep-alive is not offered: the
-  client would need the token echoed, and an answer sent in chunks (a large
-  JSON document, a download) cannot go to an HTTP/1.0 client on a kept
-  connection. WebSocket upgrades are not affected (the scanner stops at the
-  handshake).
+  client would need the `keep-alive` token echoed on every answer, so
+  HTTP/1.0 connections are never kept. An answer that is streamed (JSON
+  larger than the 2 KB response buffer, the upload results, and the
+  downloads `/api/logs?format=text`, `/api/coredump`,
+  `/api/diag/flash-capture` and `/api/diag/frame-times`) goes to an
+  HTTP/1.0 request without `Transfer-Encoding`, which HTTP/1.1 forbids
+  toward a 1.0 client. It carries the status line `HTTP/1.1 <code> <text>`,
+  like the server's other answers; `Content-Type`,
+  `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy`;
+  `Cache-Control: no-store` on API answers; `Content-Disposition` on
+  downloads; `Connection: close`; and `Content-Length` when the size is
+  known up front (the core dump). Otherwise the body ends when the station
+  closes the connection. To an HTTP/1.1 request the same answers go in
+  chunks, as before, and the connection stays open unless the request
+  asked to close it. WebSocket upgrades are not affected (the scanner stops
+  at the handshake).
   WebSocket clients: at most 4, at most 2 of them without a session.
 - **Chunked request bodies:** `esp_http_server` reports a request with
   `Transfer-Encoding: chunked` as one without a body (`content_len` 0) and

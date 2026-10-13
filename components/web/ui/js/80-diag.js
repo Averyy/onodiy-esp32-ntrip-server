@@ -200,6 +200,16 @@ function healthTab(box) {
 
 /* ---- Availability -------------------------------------------------------- */
 
+/* An RSSI reading in dBm: -127 to -1. Anything else means unknown (null from the station; a raw 0, or -128 from earlier builds). */
+function rssiKnown(v) {
+  return typeof v === 'number' && v >= -127 && v <= -1;
+}
+
+/* ", signal -67 dBm", or nothing when the RSSI is unknown. */
+function rssiSuffix(v) {
+  return rssiKnown(v) ? ', signal ' + v + ' dBm' : '';
+}
+
 /* One connection-history record in words: [event, where, details]. */
 function connRow(e) {
   const slot = e.slot_name || (e.slot === null || e.slot === undefined ? '' : 'Slot ' + (e.slot + 1));
@@ -214,7 +224,7 @@ function connRow(e) {
     case 'wifi_up':
       return ['Wi-Fi back', 'Wi-Fi', 'after ' + fmt.dur(e.duration_s) + (e.count ? ', ' + e.count + ' connect attempt' + (e.count === 1 ? '' : 's') : '')];
     case 'wifi_disconnect':
-      return ['Wi-Fi dropped', 'Wi-Fi', wifiReason(e.reason) + (e.rssi ? ', signal ' + e.rssi + ' dBm' : '')];
+      return ['Wi-Fi dropped', 'Wi-Fi', wifiReason(e.reason) + rssiSuffix(e.rssi)];
     default:
       return [words(e.kind), slot, ''];
   }
@@ -567,7 +577,7 @@ function journalDetail(e) {
     case 'safe_mode':
       return 'Episode ' + a;
     case 'wifi_disconnect':
-      return wifiReason(a) + ', signal ' + b + ' dBm';
+      return wifiReason(a) + rssiSuffix(b);
     case 'data_loss':
       return (a >= 16 ? 'Caster slot ' + (a - 15) : J.loss[a] || 'counter ' + a) + ': +' + fmt.num(b);
     case 'caster_down': {

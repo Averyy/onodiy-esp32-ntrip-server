@@ -45,8 +45,10 @@ const ctx = {
   crypto: globalThis.crypto, console,
 };
 vm.createContext(ctx);
+/* refusalText: what the UI says for an error answer {status, error: {code, ...}} (errText on an ApiError). */
 const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
-  '\nreturn { restartPlanText, onocoyElsewhereText };\n})()', ctx);
+  '\nreturn { restartPlanText, onocoyElsewhereText, connRow, journalDetail,\n' +
+  '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
 process.stdout.write(JSON.stringify(out));
 """
@@ -107,3 +109,45 @@ def test_onocoy_hint_never_says_set_up_for_a_slot_that_is_not():
     assert "credentials" in not_ready
     assert off == "Onocoy is set up in slot 1 and turned off: open it to turn it on."
     assert "slot 3" in streams
+
+
+def test_no_receiver_refusal_text():
+    no_rx, other = run_ui([
+        ("refusalText", {"status": 409, "error": {"code": "no_receiver", "message": "No receiver is connected"}}),
+        ("refusalText", {"status": 409, "error": {"code": "not_no_receiver", "message": "x"}}),
+    ])
+    assert no_rx == "No receiver is connected. Connect it, then try again."
+    # The detection refusal keeps its own words: the two codes are not the same thing.
+    assert other != no_rx and "not looking for a receiver" in other
+
+
+def test_unknown_rssi_never_shows_dbm():
+    """A Wi-Fi drop's RSSI is a reading only from -127 to -1 dBm: null (this build's unknown), 0 and the -128
+    of journal records from earlier builds are unknown and show no signal figure."""
+    drop = {"kind": "wifi_disconnect", "a": 201}
+    out = run_ui([
+        ("journalDetail", {**drop, "b": None}),
+        ("journalDetail", {**drop, "b": -128}),
+        ("journalDetail", {**drop, "b": 0}),
+        ("journalDetail", {**drop, "b": -67}),
+        ("journalDetail", {**drop, "b": -127}),
+        ("journalDetail", {**drop, "b": -1}),
+    ])
+    for text in out[:3]:
+        assert "dBm" not in text and "signal" not in text
+        assert "201" in text  # the reason stays
+    assert "signal -67 dBm" in out[3]
+    assert "signal -127 dBm" in out[4] and "signal -1 dBm" in out[5]
+
+
+def test_connection_row_rssi():
+    row = {"kind": "wifi_disconnect", "reason": 8, "slot": None, "slot_name": None}
+    unknown, known, zero, old = run_ui([
+        ("connRow", {**row, "rssi": None}),
+        ("connRow", {**row, "rssi": -60}),
+        ("connRow", {**row, "rssi": 0}),
+        ("connRow", {**row, "rssi": -128}),
+    ])
+    assert unknown[0] == "Wi-Fi dropped" and "dBm" not in unknown[2]
+    assert "signal -60 dBm" in known[2]
+    assert "dBm" not in zero[2] and "dBm" not in old[2]

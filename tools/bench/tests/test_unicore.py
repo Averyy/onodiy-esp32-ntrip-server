@@ -92,3 +92,28 @@ def test_parse_obsvm_tracking_status():
     assert view.band_list("Galileo") == ["L1", "L2", "L5", "L6"]
     assert "E6C" in view.signals["Galileo"]
     assert view.band_list("BeiDou") == ["L1"] and view.band_list("GPS") == ["L1"]
+
+
+def test_four_band_systems_counts_rewarded_constellations_only():
+    # QZSS and Galileo both with L1, L2, L5 and L6: only Galileo earns the band reward (as um982.four_band).
+    obs = [_obs(3, 2, 5, 47.0), _obs(3, 17, 5, 46.0), _obs(3, 12, 5, 45.0), _obs(3, 22, 5, 44.0),
+           _obs(5, 0, 194, 43.0), _obs(5, 17, 194, 42.0), _obs(5, 6, 194, 41.0), _obs(5, 21, 194, 40.0)]
+    line = "#OBSVMA,94,GPS,FINE,2190,117395000,0,0,18,17;" + f"{len(obs)}," + ",".join(obs)
+    view = parse_obsvm(f"{line}*{crc32_unicore(line[1:].encode()):08x}")
+    assert view.band_list("QZSS") == ["L1", "L2", "L5", "L6"]
+    assert view.band_list("Galileo") == ["L1", "L2", "L5", "L6"]
+    assert four_band_systems(view) == ["Galileo"]
+
+
+def test_four_band_systems_qzss_alone_is_none():
+    lines = [
+        nmea("GPGSV,1,1,01,194,61,163,44,1"),  # QZSS L1C/A
+        nmea("GPGSV,1,1,01,194,61,163,43,5"),  # L2C-M
+        nmea("GPGSV,1,1,01,194,61,163,42,7"),  # L5-I
+        nmea("GPGSV,1,1,01,194,61,163,41,9"),  # L6D
+        nmea("GAGSV,1,1,01,05,61,163,49,7"),   # Galileo E1 only
+    ]
+    view = parse_gsv(lines)
+    assert view.band_list("QZSS") == ["L1", "L2", "L5", "L6"]
+    assert view.band_list("Galileo") == ["L1"]
+    assert four_band_systems(view) == []

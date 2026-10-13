@@ -603,6 +603,7 @@ const ERR = {
   not_this_project: 'This image is not firmware for this station.',
   same_image: 'This is the version already running.',
   not_no_receiver: 'The station is not looking for a receiver right now (it found one, or is busy with it).',
+  no_receiver: 'No receiver is connected. Connect it, then try again.',
   rate_limited: 'Too many attempts.',
   internal: 'The station hit an internal error',
   not_available_yet: 'Receiver firmware updates are not enabled in this build yet.',
