@@ -219,6 +219,16 @@ bool net_drop_log_should(net_drop_log_t *s, bool was_connected, uint8_t reason, 
     return log;
 }
 
+bool net_rssi_known(int8_t rssi)
+{
+    return rssi >= -127 && rssi <= -1;
+}
+
+bool net_ip6_is_link_local(const uint8_t addr[16])
+{
+    return addr != NULL && addr[0] == 0xFEu && (addr[1] & 0xC0u) == 0x80u;
+}
+
 /* ---- cached scan list ----------------------------------------------------------------- */
 
 size_t net_scan_insert(net_scan_entry_t *list, size_t count, size_t cap, const net_scan_entry_t *e)

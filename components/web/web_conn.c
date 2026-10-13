@@ -256,7 +256,14 @@ bool web_conn_begin_request(web_conns_t *t, int fd)
     }
     e->close_after = false;
     e->close_hdr = false;
-    return web_scan_take(&e->scan);
+    e->http10 = web_scan_take(&e->scan);
+    return e->http10;
+}
+
+bool web_conn_http10(const web_conns_t *t, int fd)
+{
+    const web_conn_t *e = find_c(t, fd);
+    return e != NULL && e->http10;
 }
 
 bool web_conn_on_worker(const web_conns_t *t, int fd)

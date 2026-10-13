@@ -152,14 +152,44 @@ def test_repeated_identical_frames_do_not_confuse_the_start(tmp_path):
     bad = b"".join(b"".join(e) for e in epochs[2:6]) + b"".join(epochs[6][1:])  # epoch 6 lost its 1005
     ok, detail, _ = e2e.check_record(bad, sched)
     assert not ok and "station messages are missing" in detail
-    # After a pause (epoch 5 never came) the epoch may come without its station messages: after a
-    # receiver reconfiguration the hub has no copies, and a stalled reader lets it start at the MSM.
+    # After a pause (epoch 5 never came) the epoch comes whole: frames carry their interrupt arrival
+    # time, so no stalled reader lets the hub start it at its first MSM. Without its 1005: refused.
     resumed = b"".join(b"".join(e) for e in epochs[2:5]) + b"".join(epochs[6][1:]) + b"".join(epochs[7])
+    ok, detail, _ = e2e.check_record(resumed, sched)
+    assert not ok and "resumes after a pause" in detail and "station messages are missing" in detail, detail
+    # With it: a gap on an epoch boundary.
+    resumed = b"".join(b"".join(e) for e in epochs[2:5] + epochs[6:8])
     ok, detail, _ = e2e.check_record(resumed, sched)
     assert ok and "1 gap" in detail, detail
     # Its MSMs never: epoch 6 without its 1077 fails.
     ok, detail, _ = e2e.check_record(b"".join(b"".join(e) for e in epochs[2:5]) + epochs[6][2], sched)
     assert not ok
+
+
+def test_only_the_first_epoch_without_sticky_copies_may_lack_its_station_messages(tmp_path):
+    # Every epoch opens with its own 1005 and 1033, then two MSMs.
+    from builders import arp_payload, descriptor_payload, msm_frame
+    arp = rtcm.build_frame(arp_payload(1, 1113194.9, -4842853.7, 3985496.0))
+    desc = rtcm.build_frame(descriptor_payload(1, "", 0, "", "UM982", "R4.10", "SYNTH1"))
+    assert e2e.frame_type(desc) == 1033
+    epochs = [[arp, desc, msm_frame(1077, 1, 1000 * k, True, {(3, 2): 40.0}),
+               msm_frame(1097, 1, 1000 * k, False, {(4, 2): 41.0})] for k in range(1, 11)]
+    f = tmp_path / "base.rtcm3"
+    f.write_bytes(b"".join(b"".join(e) for e in epochs))
+    sched = load(f)
+    flat = lambda eps: b"".join(f for e in eps for f in e)  # noqa: E731
+    # The very first epoch without its station messages and no copies in front (the hub had none): allowed.
+    ok, detail, _ = e2e.check_record(b"".join(epochs[2][2:]) + flat(epochs[3:9]), sched)
+    assert ok, detail
+    # The same after the hub's sticky copies: those came from somewhere, so the epoch's own are lost frames.
+    ok, detail, _ = e2e.check_record(arp + b"".join(epochs[2][2:]) + flat(epochs[3:9]), sched)
+    assert not ok and "sticky copies" in detail and "station messages are missing" in detail, detail
+    # The copies cover what the epoch lacks (the hub sends the epoch from its first frame after them).
+    ok, detail, _ = e2e.check_record(arp + desc + b"".join(epochs[2][2:]) + flat(epochs[3:9]), sched)
+    assert ok, detail
+    # After a pause, never: the next epoch comes whole.
+    ok, detail, _ = e2e.check_record(flat(epochs[2:4]) + b"".join(epochs[6][2:]) + flat(epochs[7:9]), sched)
+    assert not ok and "resumes after a pause" in detail, detail
 
 
 def test_a_frame_that_is_no_fixture_frame_fails(lax):

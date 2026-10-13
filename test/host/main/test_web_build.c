@@ -1555,6 +1555,51 @@ TEST_CASE("connections: a caster_stop row names the slot and the stop reason", "
     cJSON_Delete(root);
 }
 
+TEST_CASE("a Wi-Fi drop's RSSI outside -127..-1 dBm is null in the journal and the connections", "[web_build]")
+{
+    fixture();
+    /* -128 from an earlier build, 0 from this one, a real reading; then other
+     * kinds whose b stays an integer, negative values included. */
+    diag_journal_entry_t e[6] = {
+        { .seq = 1, .kind = DIAG_EV_WIFI_DISCONNECT, .a = 8, .b = -128 },
+        { .seq = 2, .kind = DIAG_EV_WIFI_DISCONNECT, .a = 200, .b = 0 },
+        { .seq = 3, .kind = DIAG_EV_WIFI_DISCONNECT, .a = 2, .b = -67 },
+        { .seq = 4, .kind = DIAG_EV_DATA_LOSS, .a = 1, .b = -128 },
+        { .seq = 5, .kind = DIAG_EV_CASTER_DOWN, .a = diag_caster_a(0, 5, 2), .b = -3 },
+        { .seq = 6, .kind = DIAG_EV_WIFI_DISCONNECT, .a = 2, .b = -127 },
+    };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_journal(&w, e, 6, 6, false);
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    const cJSON *list = at(root, "entries");
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(cJSON_GetArrayItem(list, 0), "b")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(cJSON_GetArrayItem(list, 1), "b")));
+    TEST_ASSERT_EQUAL(-67, at(cJSON_GetArrayItem(list, 2), "b")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsNumber(at(cJSON_GetArrayItem(list, 3), "b")));
+    TEST_ASSERT_EQUAL(-128, at(cJSON_GetArrayItem(list, 3), "b")->valueint);
+    TEST_ASSERT_EQUAL(-3, at(cJSON_GetArrayItem(list, 4), "b")->valueint);
+    TEST_ASSERT_EQUAL(-127, at(cJSON_GetArrayItem(list, 5), "b")->valueint);
+    TEST_ASSERT_EQUAL(8, at(cJSON_GetArrayItem(list, 0), "a")->valueint);
+    cJSON_Delete(root);
+
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_connections(&w, e, 6, s_snap.cfg, s_snap.slots, true);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    list = at(root, "entries");
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(cJSON_GetArrayItem(list, 0), "rssi")));
+    TEST_ASSERT_EQUAL(8, at(cJSON_GetArrayItem(list, 0), "reason")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(cJSON_GetArrayItem(list, 1), "rssi")));
+    TEST_ASSERT_EQUAL(-67, at(cJSON_GetArrayItem(list, 2), "rssi")->valueint);
+    /* Rows that are no Wi-Fi drop: null as before. */
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(cJSON_GetArrayItem(list, 4), "rssi")));
+    TEST_ASSERT_EQUAL(-127, at(cJSON_GetArrayItem(list, 5), "rssi")->valueint);
+    cJSON_Delete(root);
+}
+
 TEST_CASE("a caster summary with the longest stop reason still fits the WebSocket's buffer", "[web_build]")
 {
     fixture();

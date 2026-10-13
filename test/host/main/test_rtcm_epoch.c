@@ -29,7 +29,7 @@ static uint32_t feed(ep_fx_t *x, uint32_t dt, uint16_t type, uint32_t tow, bool 
     uint8_t f[GNSS_RTCM3_MAX_FRAME];
     size_t len = tf_build(f, type, 40, tow, more, x->serial++);
     x->now += dt;
-    return rtcm_epoch_assign(&x->e, f, len, type, x->now, why, NULL);
+    return rtcm_epoch_assign(&x->e, f, len, type, x->now, true, why, NULL);
 }
 
 TEST_CASE("epoch: MSM header fields from a published 1074 frame", "[rtcm_epoch]")
@@ -314,7 +314,7 @@ static uint32_t feed_u(ep_fx_t *x, uint32_t dt, uint16_t type, uint32_t tow, boo
     uint8_t f[GNSS_RTCM3_MAX_FRAME];
     size_t len = tf_build(f, type, 40, tow, more, x->serial++);
     x->now += dt;
-    return rtcm_epoch_assign(&x->e, f, len, type, x->now, why, unsure);
+    return rtcm_epoch_assign(&x->e, f, len, type, x->now, true, why, unsure);
 }
 
 TEST_CASE("epoch: first and forced epochs are unsure; MMB, time and gap epochs are sure", "[rtcm_epoch]")
@@ -451,4 +451,75 @@ TEST_CASE("epoch: a gap ends an unsure epoch of a stream without MSMs", "[rtcm_e
     TEST_ASSERT_EQUAL(RTCM_EPOCH_START_GAP, why);
     TEST_ASSERT_FALSE(unsure);
     TEST_ASSERT_EQUAL_UINT64(2, x.e.by_gap);
+}
+
+/* Feed one frame `dt` ms after the previous one, with an exact arrival or only a read time. */
+static uint32_t feed_t(ep_fx_t *x, uint32_t dt, uint16_t type, uint32_t tow, bool more, bool timed,
+                       rtcm_epoch_start_t *why, bool *unsure)
+{
+    uint8_t f[GNSS_RTCM3_MAX_FRAME];
+    size_t len = tf_build(f, type, 40, tow, more, x->serial++);
+    x->now += dt;
+    return rtcm_epoch_assign(&x->e, f, len, type, x->now, timed, why, unsure);
+}
+
+TEST_CASE("epoch: the gap rule applies only between two exact arrivals", "[rtcm_epoch]")
+{
+    ep_fx_t x;
+    rtcm_epoch_start_t why;
+    ep_init(&x, 1, 0);
+    uint32_t tow = 400000;
+    /* A sure epoch whose terminating MSM was lost (an MSM still open). */
+    feed_t(&x, 0, 1127, tow - 1000, false, true, NULL, NULL);
+    uint32_t e1 = feed_t(&x, 1000, 1077, tow, true, true, &why, NULL);
+    TEST_ASSERT_EQUAL(RTCM_EPOCH_START_MMB, why);
+    /* A frame that is no MSM, a second later but with only its read time: no gap start. */
+    TEST_ASSERT_EQUAL_UINT32(e1, feed_t(&x, 1000, 1005, 0, false, false, &why, NULL));
+    TEST_ASSERT_EQUAL(RTCM_EPOCH_CONTINUES, why);
+    /* An exact one right after an inexact one: still none (the gap needs two exact arrivals). */
+    TEST_ASSERT_EQUAL_UINT32(e1, feed_t(&x, 1000, 1033, 0, false, true, &why, NULL));
+    TEST_ASSERT_EQUAL(RTCM_EPOCH_CONTINUES, why);
+    /* Two exact arrivals a second apart: the gap rule. */
+    uint32_t e2 = feed_t(&x, 1000, 1230, 0, false, true, &why, NULL);
+    TEST_ASSERT_EQUAL(RTCM_EPOCH_START_GAP, why);
+    TEST_ASSERT_EQUAL_UINT32(e1 + 1, e2);
+    TEST_ASSERT_EQUAL_UINT64(1, x.e.by_gap);
+
+    /* An unsure epoch (a framer reset) is never ended by a gap between read times either. */
+    rtcm_epoch_force_new(&x.e);
+    bool unsure = false;
+    uint32_t e3 = feed_t(&x, 1000, 1033, 0, false, false, &why, &unsure);
+    TEST_ASSERT_EQUAL(RTCM_EPOCH_START_FIRST, why);
+    TEST_ASSERT_TRUE(unsure);
+    TEST_ASSERT_EQUAL_UINT32(e3, feed_t(&x, 2000, 1005, 0, false, false, &why, &unsure));
+    TEST_ASSERT_EQUAL(RTCM_EPOCH_CONTINUES, why);
+    TEST_ASSERT_TRUE(unsure);
+}
+
+TEST_CASE("epoch: after a forced epoch the next epoch's station messages start a sure one by gap",
+          "[rtcm_epoch]")
+{
+    /* A framer reset lands inside an epoch: its tail (an MSM that announces
+     * more) is unsure. The next epoch's 1005, 1033 and 1230 arrive a second
+     * later (exact arrivals): the 1005 starts a sure epoch by the gap rule,
+     * before that epoch's first MSM, which continues it. */
+    ep_fx_t x;
+    rtcm_epoch_start_t why;
+    bool unsure = false;
+    ep_init(&x, 1, 0);
+    uint32_t tow = 500000;
+    feed_t(&x, 0, 1077, tow - 1000, false, true, NULL, NULL);
+    rtcm_epoch_force_new(&x.e);
+    uint32_t e1 = feed_t(&x, 700, 1097, tow, true, true, &why, &unsure);
+    TEST_ASSERT_EQUAL(RTCM_EPOCH_START_FIRST, why);
+    TEST_ASSERT_TRUE(unsure);
+    uint32_t e2 = feed_t(&x, 1000, 1005, 0, false, true, &why, &unsure);
+    TEST_ASSERT_EQUAL(RTCM_EPOCH_START_GAP, why);
+    TEST_ASSERT_EQUAL_UINT32(e1 + 1, e2);
+    TEST_ASSERT_FALSE(unsure);
+    TEST_ASSERT_EQUAL_UINT32(e2, feed_t(&x, 5, 1033, 0, false, true, &why, &unsure));
+    TEST_ASSERT_EQUAL_UINT32(e2, feed_t(&x, 5, 1230, 0, false, true, &why, &unsure));
+    TEST_ASSERT_EQUAL_UINT32(e2, feed_t(&x, 5, 1077, tow + 1000, true, true, &why, &unsure));
+    TEST_ASSERT_EQUAL(RTCM_EPOCH_CONTINUES, why);
+    TEST_ASSERT_FALSE(unsure);
 }

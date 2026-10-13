@@ -106,7 +106,8 @@ typedef struct {
     bool maintenance;
     bool journal_open;
     bool safe_mode;
-    bool supported;             /**< the model is the one this firmware configures */
+    bool no_receiver;           /**< no receiver is connected (the station's state is no_receiver) */
+    bool supported;             /**< not an identified model this firmware does not configure, and no such alert */
     bool identity_confirmed;
     bool streaming;
     bool config_failed;
@@ -234,8 +235,10 @@ bool sgt_store_at_shutdown(const sgt_t *t);
 size_t sgt_encode(const sgt_t *t, int64_t now_ms, uint8_t *buf, size_t cap);
 
 /**
- * Restore a record after a restart (see the file comment).
- * @return false for a short, damaged or unknown-version record (t unchanged).
+ * Restore a record after a restart (see the file comment), decoding
+ * straight into t.
+ * @return false for a short, damaged or unknown-version record (t reset to
+ *         idle, as sgt_init() leaves it).
  */
 bool sgt_decode(sgt_t *t, const uint8_t *buf, size_t len, int64_t now_ms);
 

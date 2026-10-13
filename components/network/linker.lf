@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+#
+# Placement of the mDNS responder's static buffers (the pinned
+# espressif/mdns component; no file of it is changed): its packet buffer,
+# name buffers and per-interface table are zero-initialised .bss that only
+# the mDNS task, the esp_timer task and the TCP/IP thread touch, never with
+# the cache off (the component has no interrupt handler), so they live in
+# PSRAM like the stacks of those tasks. The same mechanism IDF uses for
+# lwIP and Wi-Fi with CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY, with a
+# scheme of our own so nothing depends on another component's fragment.
+#
+# Object-level entries only. mdns_service stays internal on purpose: it
+# holds the task's static TCB, and xTaskCreateStatic requires a TCB in
+# internal RAM. mdns_networking_lwip and mdns_netif stay as they are too.
+# If a later mdns release renames one of these objects, the size check
+# (_heap_start, idf.py size-components) shows it.
+
+[scheme:onocoydiy_ext_bss]
+entries:
+    bss -> extern_ram
+    common -> extern_ram
+
+[mapping:onocoydiy_mdns_ext_bss]
+archive: libespressif__mdns.a
+entries:
+    if SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
+        mdns_send (onocoydiy_ext_bss)
+        mdns_receive (onocoydiy_ext_bss)
+        mdns_utils (onocoydiy_ext_bss)
+        mdns_pcb (onocoydiy_ext_bss)

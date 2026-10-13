@@ -2187,6 +2187,14 @@ void web_build_availability(wj_t *w, const web_avail_snap_t *a)
     wj_obj_close(w);
 }
 
+/* A Wi-Fi drop's RSSI (its journal b) is a reading only from -127 to -1 dBm:
+ * this build records 0 for "unknown", earlier builds recorded the driver's
+ * -128, and both stay in a journal across updates. */
+static bool drop_rssi_known(int32_t b)
+{
+    return b >= -127 && b <= -1;
+}
+
 void web_build_journal(wj_t *w, const diag_journal_entry_t *e, size_t count, uint32_t cursor, bool more)
 {
     wj_obj_open(w, NULL);
@@ -2200,7 +2208,11 @@ void web_build_journal(wj_t *w, const diag_journal_entry_t *e, size_t count, uin
         wj_uint(w, "uptime_s", e[i].uptime_s);
         wj_str(w, "kind", web_diag_event_name(e[i].kind));
         wj_int(w, "a", e[i].a);
-        wj_int(w, "b", e[i].b);
+        if (e[i].kind == DIAG_EV_WIFI_DISCONNECT && !drop_rssi_known(e[i].b)) {
+            wj_null(w, "b");
+        } else {
+            wj_int(w, "b", e[i].b);
+        }
         wj_obj_close(w);
     }
     wj_arr_close(w);
@@ -2270,7 +2282,11 @@ static void conn_entry(wj_t *w, const diag_journal_entry_t *e, const ntrip_caste
     }
     if (e->kind == DIAG_EV_WIFI_DISCONNECT) {
         wj_uint(w, "reason", a);
-        wj_int(w, "rssi", e->b);
+        if (drop_rssi_known(e->b)) {
+            wj_int(w, "rssi", e->b);
+        } else {
+            wj_null(w, "rssi");
+        }
     } else {
         wj_null(w, "reason");
         wj_null(w, "rssi");

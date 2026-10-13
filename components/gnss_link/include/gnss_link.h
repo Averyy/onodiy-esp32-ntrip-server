@@ -50,8 +50,11 @@
  * RX task loop: wait on the UART event queue (32 entries) for 20 ms, or 0 ms
  * when the previous drain pass hit its cap; handle the event, if any; drain
  * by buffered length in 1024 B reads with zero timeout, at most 16 KB per
- * pass, feeding each chunk to the framer (never sized from an event's size
- * field); feed the task watchdog; repeat. Overflow and buffer-full events
+ * pass: each read first takes the buffered length, then every pending event
+ * (a data event's size only places its chunk's arrival time, see "Arrival
+ * times"), then reads at most that length (never sized from an event's size
+ * field), and feeds it to the framer one chunk's segment at a time; feed
+ * the task watchdog; repeat. Overflow and buffer-full events
  * never flush the driver or reset the event queue: they increment their
  * counter, reset the framer (the partial frame is counted as discarded) and
  * reading continues. The RX task never logs and never touches flash; it
@@ -117,6 +120,27 @@
  * Time values are ages computed from 64-bit esp_timer timestamps, never
  * differences of wrapping millisecond counters.
  *
+ * Arrival times: every RTCM frame reaches its sink with the time it arrived,
+ * not the time it was read: the esp_timer time at which the UART interrupt
+ * moved the chunk holding the frame's last byte into the driver's ring
+ * (resolution one FIFO chunk, about 10 ms at 115200 Bd). The interrupt
+ * stamps each chunk through the driver's select notification (a callback in
+ * IRAM writing a 32-entry ring of 32-bit stamps in internal RAM, which also
+ * runs while flash writes stop every task); the RX task pairs the k-th data
+ * event of the queue with the k-th stamp and hands each read out in segments
+ * of one chunk each. So a reader that was kept off the CPU (flash writes,
+ * bursts of higher-priority work) no longer makes frames look late or makes
+ * gaps inside an epoch. When the pairing is not known (a full event queue,
+ * buffer-full, a FIFO overflow, any flush or drop of input, a lease grant or
+ * release, a baud change, a restart or reopen) frames take their read time
+ * and are marked inexact (arrival_exact false) until the next quiet point
+ * (ring and event queue both empty, seen together with the stamp ring's head
+ * in one critical section on the RX core), where the pairing starts afresh.
+ * The counters: gnss_link_get_arrival_stats().
+ *
+ * Nothing may select() on the receiver's UART: VFS select installs its own
+ * select notification on the port and would replace the stamp callback.
+ *
  * Writers: only the station supervisor and the command layer it drives write
  * to the wire. Other readers of this header (health, web) use the counters
  * only; gnss_link_write(NULL, ...) cannot tell a query from a configuring
@@ -170,7 +194,10 @@ typedef struct gnss_link_lease *gnss_link_lease_t;
  * `line` is not NUL-terminated.
  */
 typedef struct {
-    void (*on_rtcm)(const uint8_t *frame, size_t len, uint16_t msg_type, void *ctx);
+    /** An RTCM frame. arrival_us: esp_timer time its last byte arrived (see
+     *  "Arrival times"); arrival_exact false: the read time instead. */
+    void (*on_rtcm)(const uint8_t *frame, size_t len, uint16_t msg_type, int64_t arrival_us, bool arrival_exact,
+                    void *ctx);
     void (*on_line)(const char *line, size_t len, void *ctx);
     /** The framer was reset (overflow, baud change, lease release): data before it is discontinuous. */
     void (*on_reset)(void *ctx);
@@ -178,6 +205,15 @@ typedef struct {
     void (*on_prompt)(void *ctx);
     void *ctx;
 } gnss_link_sinks_t;
+
+/** Interrupt arrival times (see "Arrival times"), since boot. */
+typedef struct {
+    uint32_t exact_frames;     /**< RTCM frames with the interrupt time of their last byte */
+    uint32_t inexact_frames;   /**< RTCM frames with their read time (no interrupt time known) */
+    uint32_t resyncs;          /**< the pairing of stamps and data events started afresh at a quiet point */
+    uint32_t mismatches;       /**< stamps and data events (or their bytes) disagreed: pairing dropped */
+    uint32_t degrades;         /**< pairing dropped by a known cause (queue full, buffer full, overflow, flush, ...) */
+} gnss_link_arrival_stats_t;
 
 /** Link counters (monotonic since boot). */
 typedef struct {
@@ -197,7 +233,7 @@ typedef struct {
     uint64_t rtcm_held;            /**< CRC-valid RTCM frames not published because a lease was held (expected) */
     uint64_t flushed_bytes;        /**< input dropped on purpose: lease release, resync, restart, before start (expected) */
     uint32_t last_rx_age_ms;       /**< time since any byte arrived (UINT32_MAX = never) */
-    uint32_t last_rtcm_age_ms;     /**< time since the last CRC-valid RTCM frame, published or held (UINT32_MAX = never) */
+    uint32_t last_rtcm_age_ms;     /**< time since the last CRC-valid RTCM frame arrived, published or held (UINT32_MAX = never) */
     bool hands_off;                /**< transmitting and new leases are refused (receiver maintenance) */
     bool link_open;                /**< the UART driver is installed (false: closed, gnss_link reopens it on its own) */
     uint32_t open_failures;        /**< failed driver installs since boot (the first open and the reopens) */
@@ -366,6 +402,9 @@ esp_err_t gnss_link_raw_flush(gnss_link_lease_t lease);
 /** Snapshot of the counters. Works before gnss_link_init() (mode OFF, counters zero). */
 esp_err_t gnss_link_get_stats(gnss_link_stats_t *out);
 
+/** The arrival-time counters (see "Arrival times"). Works before gnss_link_init() (all zero). */
+esp_err_t gnss_link_get_arrival_stats(gnss_link_arrival_stats_t *out);
+
 /* ---- bench hooks (CONFIG_GNSS_LINK_BENCH_HOOKS) ------------------------------------
  *
  * Bench builds only (the option depends on the bench console; the release
@@ -380,8 +419,9 @@ esp_err_t gnss_link_get_stats(gnss_link_stats_t *out);
  * path's reader) by that much; it lapses unused after 60 s.
  * Timing recorder: for a chosen time the RX task appends, into a static
  * PSRAM ring and without allocating or logging, one record per RTCM frame
- * (when the read that completed it returned, when the sinks returned, its
- * type, length, MSM epoch field and multiple-message bit), one per drain
+ * (its arrival time, when the read that completed it returned, when the
+ * sinks returned, its type, length, MSM epoch field, multiple-message bit
+ * and whether the arrival is an interrupt time), one per drain
  * pass that read data (begin, end, bytes, capped, the event wait chosen
  * after it, the gap since the previous pass ended) and one per stall. A
  * full ring ends the recording. gnss_link_timing_summary() (the core)
@@ -408,6 +448,7 @@ typedef enum {
 #define GNSS_LINK_REC_F_MMB    0x01u   /**< frame: MSM multiple-message bit set (more MSMs follow for this epoch) */
 #define GNSS_LINK_REC_F_MSM    0x02u   /**< frame: an MSM (sys and epoch valid) */
 #define GNSS_LINK_REC_F_HELD   0x04u   /**< frame: held back by a lease, not published */
+#define GNSS_LINK_REC_F_EXACT  0x08u   /**< frame: its arrival is the interrupt time (else the read time) */
 #define GNSS_LINK_REC_F_CAPPED 0x01u   /**< pass: stopped at the drain cap with data still buffered (next wait 0) */
 #define GNSS_LINK_REC_F_RAW    0x01u   /**< stall: inside a RAW-lease read (else the RX task) */
 
@@ -416,7 +457,8 @@ typedef struct {
     int64_t t0_us;       /**< frame: the read that completed it returned; pass, stall: begin */
     uint32_t dt_us;      /**< frame: until the sinks returned (read to published); pass, stall: duration */
     uint32_t epoch;      /**< frame (MSM): the epoch time field as sent */
-    uint32_t gap_us;     /**< pass: since the previous pass ended (the reader was away), clamped */
+    uint32_t gap_us;     /**< pass: since the previous pass ended (the reader was away), clamped;
+                              frame: from its arrival to the read (0 without an interrupt time) */
     uint16_t bytes;      /**< frame: length; pass: bytes read */
     uint16_t msg;        /**< frame: message number */
     uint8_t kind;        /**< gnss_link_rec_kind_t */
@@ -453,13 +495,16 @@ typedef struct {
     uint32_t passes;                  /**< drain passes that read data */
     uint32_t stalls;
     gnss_link_pct_t read_to_pub_us;   /**< published frames: from the read that completed them to the sinks' return */
+    gnss_link_pct_t arrival_to_read_us;   /**< frames with an interrupt time: from their arrival to the read */
+    uint32_t frames_inexact;          /**< frames without an interrupt time (their arrival is the read) */
     uint32_t longest_gap_us;          /**< the longest time the reader was away while data waited (gap before a pass that read data) */
     uint32_t stall_capped_passes;     /**< after a stall: zero-wait capped passes until a pass emptied the ring (the most over the stalls) */
     uint32_t stall_drain_us;          /**< after a stall: from its end until a pass emptied the ring (the most) */
     bool stall_first_frame_valid;
     uint32_t stall_first_frame_us;    /**< after a stall: from its end until the first frame was published (the most) */
     bool clock;                       /**< epoch delays computed (a set system clock) */
-    gnss_link_pct_t epoch_delay_ms[GNSS_SYS_COUNT];  /**< per gnss_sys_t: each epoch's first frame read vs its MSM time (ms) */
+    gnss_link_pct_t epoch_delay_ms[GNSS_SYS_COUNT];  /**< per gnss_sys_t: each epoch's first frame arrival vs its MSM time
+                                                          (ms; epochs whose first frame has an interrupt time) */
 } gnss_link_timing_summary_t;
 
 /** Observed loader prompt hits (report-only detector). */
@@ -470,6 +515,12 @@ typedef struct {
     uint8_t context[GNSS_LINK_PROMPT_CTX];   /**< the bytes ending at the last hit's last byte */
     uint8_t context_len;
 } gnss_link_prompt_obs_t;
+
+/** The recording's CSV column lines (GET /api/diag/frame-times, `ftimes dump`; gnss_link_rec_csv). */
+#define GNSS_LINK_CSV_HEADER                                                                                         \
+    "# F,arrival_us,read_us,published_us,msg,len,sys,epoch,mmb,held,exact\n"                                         \
+    "# P,begin_us,end_us,bytes,capped,next_wait_ms,gap_us\n"                                                          \
+    "# S,begin_us,end_us,where\n"
 
 #if CONFIG_GNSS_LINK_BENCH_HOOKS
 

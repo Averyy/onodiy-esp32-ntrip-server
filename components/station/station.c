@@ -250,7 +250,7 @@ static bool s_sg_refused;
 static station_sg_t s_sg_refused_group;
 static bool s_sg_back_valid;
 static station_sg_t s_sg_back;
-static char s_sg_refused_reply[64];
+EXT_RAM_BSS_ATTR static char s_sg_refused_reply[64];   /* never touched with the cache off */
 
 /* The signal-group comparison: its core and record, under s_sgt_mx (the
  * station task and the web's requests). Large: in PSRAM. */
@@ -691,22 +691,24 @@ static bool rtcm_type_excluded(uint16_t msg_type)
     return msg_type >= 1101 && msg_type <= 1107;
 }
 
-static void on_rtcm_frame(const uint8_t *frame, size_t len, uint16_t msg_type, void *ctx)
+static void on_rtcm_frame(const uint8_t *frame, size_t len, uint16_t msg_type, int64_t arrival_us,
+                          bool arrival_exact, void *ctx)
 {
     (void)ctx;
     /* If the hub is not ready the frame is lost; the hub counts the failed
      * publish and the link counters still show it as received, so health
-     * sees the mismatch. */
+     * sees the mismatch. The hub measures ages and its epoch gaps from the
+     * frame's arrival (the UART interrupt's time when exact). */
     bool excluded = rtcm_type_excluded(msg_type);
     if (!excluded) {
-        (void)rtcm_hub_publish(frame, len, msg_type);
+        (void)rtcm_hub_publish(frame, len, msg_type, arrival_us, arrival_exact);
     }
     gnss_obs_feed_rtcm(frame, len, msg_type);
     /* A busy constellation comes as several MSMs of one type per epoch:
      * the observed-set tracker counts epochs. */
     gnss_rtcm3_msm_t msm;
     bool has_epoch = !excluded && gnss_rtcm3_msm_type(msg_type, NULL, NULL) && gnss_rtcm3_msm_decode(frame, len, &msm);
-    int64_t t = now_ms();
+    int64_t t = arrival_us / 1000;   /* on the station's millisecond clock (esp_timer) */
     portENTER_CRITICAL(&s_lock);
     if (excluded) {
         s_rtcm_excluded++;
@@ -2386,8 +2388,8 @@ static void sg_test_on_shutdown(lifecycle_reboot_reason_t reason, uint32_t deadl
 /* One sample for the comparison: the live totals and the observation summary. */
 static bool sg_sample(sgt_sample_t *out, bool streaming)
 {
-    static gnss_obs_summary_t sum;   /* station task only */
-    static gnss_obs_live_t live;
+    EXT_RAM_BSS_ATTR static gnss_obs_summary_t sum;   /* station task only */
+    EXT_RAM_BSS_ATTR static gnss_obs_live_t live;
     memset(out, 0, sizeof(*out));
     out->streaming = streaming;
     size_t n = 0;
@@ -2416,7 +2418,7 @@ static const char *sgt_outcome_text(int32_t o)
 /* The comparison's clock, samples, switches, record and journal (station task). */
 static void sg_service(const stn_in_t *in)
 {
-    static sgt_sample_t smp;
+    EXT_RAM_BSS_ATTR static sgt_sample_t smp;
     bool streaming;
     portENTER_CRITICAL(&s_lock);
     streaming = s_core.state == STN_STREAMING && !s_core.maint;
@@ -2988,7 +2990,11 @@ esp_err_t station_sg_test_start(const station_sg_t groups[2], uint32_t phase_s, 
         .maintenance = st->rx_maintenance,
         .journal_open = st->flash_journal_open || st->flash_journal_settings_unavailable || st->flash_session_running,
         .safe_mode = lifecycle_in_safe_mode(),
-        .supported = (st->alerts & STATION_ALERT_UNSUPPORTED_MODEL) == 0 && um98x_ctl_model_supported(&st->receiver),
+        .no_receiver = st->state == STATION_STATE_NO_RECEIVER,
+        /* Unsupported: an identified model this firmware does not configure
+         * (a receiver not identified yet is identity_unconfirmed). */
+        .supported = (st->alerts & STATION_ALERT_UNSUPPORTED_MODEL) == 0 &&
+                     (!st->receiver.valid || um98x_ctl_model_supported(&st->receiver)),
         .identity_confirmed = st->identity_confirmed,
         .streaming = st->state == STATION_STATE_STREAMING,
         .config_failed = st->config_failed,
@@ -3036,7 +3042,7 @@ esp_err_t station_sg_test_get(station_sg_test_t *out)
         return ESP_ERR_INVALID_ARG;
     }
     if (s_sgt_mx == NULL) {
-        static sgt_t idle;   /* the station does not run: an idle view */
+        EXT_RAM_BSS_ATTR static sgt_t idle;   /* the station does not run: an idle view */
         sgt_init(&idle);
         sgt_view(&idle, now_ms(), out);
         return ESP_OK;

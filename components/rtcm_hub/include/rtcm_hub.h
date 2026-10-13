@@ -22,12 +22,15 @@
  *    CONFIG_RTCM_HUB_BURST_GAP_MS or more after the previous one while the
  *    current epoch holds an MSM not yet terminated (a lost terminating MSM:
  *    the next epoch's station messages; its first MSM meets rule (b)), and
- *    at the first frame after rtcm_hub_clear_sticky(). An MSM after such a
- *    gap continues its epoch: arrival times are taken when the frames are
- *    read, so a reader that stalled (flash writes stop the CPU) makes gaps
- *    inside an epoch. Non-MSM frames after an epoch's last MSM
- *    belong to the next epoch. Epoch times are compared within one
- *    constellation only, so no time-system conversion is needed.
+ *    at the first frame after rtcm_hub_clear_sticky(). Rule (c) applies
+ *    only between two frames with exact arrival times (the UART interrupt's
+ *    time of their last byte, gnss_link.h "Arrival times"): a frame with
+ *    only its read time never starts an epoch by a gap, so a reader that
+ *    stalled (flash writes stop every task) makes no gap inside an epoch.
+ *    An MSM after a gap continues its epoch. Non-MSM frames after an
+ *    epoch's last MSM belong to the next epoch. Epoch times are compared
+ *    within one constellation only, so no time-system conversion is
+ *    needed.
  *  - Unsure epochs: the epoch started by the very first frame, and by the
  *    first frame after rtcm_hub_clear_sticky(), is "unsure". Framer resets
  *    (lease release, UART events, apply, flash) drop bytes anywhere in an
@@ -168,14 +171,21 @@ esp_err_t rtcm_hub_init(void);
  * Publish one complete RTCM3 frame (header + payload + CRC).
  *
  * Never blocks, allocates or logs. A rejected frame is counted in
- * publish_failures.
+ * publish_failures. Ages, consumer lag, last_frame_age_ms and
+ * rtcm_hub_epoch_in_flight() are measured from the frame's arrival, not
+ * from the publish, so a frame that waited in the UART ring counts as old
+ * as it is.
  *
  * @param msg_type RTCM3 message number (epoch rules, sticky copies).
+ * @param arrival_us esp_timer time the frame's last byte arrived.
+ * @param arrival_exact the UART interrupt's time (else a read time, which
+ *        the epoch gap rule ignores).
  * @return ESP_OK, ESP_ERR_INVALID_ARG if len exceeds a maximum RTCM3 frame
  *         (or frame is NULL or shorter than an empty frame),
  *         ESP_ERR_INVALID_STATE before init.
  */
-esp_err_t rtcm_hub_publish(const uint8_t *frame, size_t len, uint16_t msg_type);
+esp_err_t rtcm_hub_publish(const uint8_t *frame, size_t len, uint16_t msg_type, int64_t arrival_us,
+                           bool arrival_exact);
 
 /**
  * Attach a consumer: sticky metadata first, then live data from the next

@@ -488,7 +488,7 @@ TEST_CASE("fixtures: epochs group by epoch time as well as the multiple-message 
             if (fr->kind != GNSS_FRAME_RTCM3) {
                 continue;
             }
-            uint32_t ep = rtcm_epoch_assign(&e, fr->data, fr->len, fr->type, 0, NULL, NULL);
+            uint32_t ep = rtcm_epoch_assign(&e, fr->data, fr->len, fr->type, 0, true, NULL, NULL);
             if (mi < m.n && m.fr[mi] == fr) {
                 got[mi++] = ep;
             }
@@ -549,7 +549,7 @@ TEST_CASE("fixtures: a constellation split over two MSMs of one type stays one e
     rtcm_epoch_init(&e, 1000, 1);
     uint32_t prev = 0;
     for (size_t i = 0; i < m.n; i++) {
-        uint32_t ep = rtcm_epoch_assign(&e, m.fr[i]->data, m.fr[i]->len, m.fr[i]->type, 0, NULL, NULL);
+        uint32_t ep = rtcm_epoch_assign(&e, m.fr[i]->data, m.fr[i]->len, m.fr[i]->type, 0, true, NULL, NULL);
         if (i > 0 && m.h[i].msg_type == 1127 && m.h[i - 1].msg_type == 1127) {
             TEST_ASSERT_EQUAL_UINT32(prev, ep);
         }

@@ -427,11 +427,9 @@ static void ip_of(esp_netif_t *netif, char *out, size_t out_size, const char *fa
 
 void web_set_common_headers(httpd_req_t *req, bool api)
 {
-    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
-    httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
-    httpd_resp_set_hdr(req, "Referrer-Policy", "no-referrer");
-    if (api) {
-        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    const web_hdr_t *h;
+    for (size_t i = 0; (h = web_common_header(i, api)) != NULL; i++) {
+        httpd_resp_set_hdr(req, h->name, h->value);   /* the table is static: the pointers stay valid */
     }
 }
 
@@ -471,21 +469,97 @@ esp_err_t web_send_json_literal(httpd_req_t *req, int status, const char *json)
     return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
 
-static void resp_headers(web_resp_t *r)
+/* ---- streamed answers ---------------------------------------------------------------------- */
+
+bool web_conn_req_http10(httpd_req_t *req)
 {
-    if (!r->headers_sent) {
-        httpd_resp_set_status(r->req, web_status_line(r->status));
-        httpd_resp_set_type(r->req, "application/json");
-        web_set_common_headers(r->req, true);
-        r->headers_sent = true;
+    int fd = httpd_req_to_sockfd(req);
+    taskENTER_CRITICAL(&s_conn_lock);
+    bool h10 = web_conn_http10(&s_conns, fd);
+    taskEXIT_CRITICAL(&s_conn_lock);
+    return h10;
+}
+
+/* Every byte out, or a failure: a partial send goes on, a send timeout fails. */
+static esp_err_t send_all(httpd_req_t *req, const char *data, size_t len)
+{
+    while (len > 0) {
+        int n = httpd_send(req, data, len);
+        if (n <= 0) {
+            return ESP_FAIL;
+        }
+        data += n;
+        len -= (size_t)n;
     }
+    return ESP_OK;
+}
+
+esp_err_t web_stream_begin(web_stream_t *s, httpd_req_t *req, int status, const char *type, const char *disposition,
+                           int64_t content_length)
+{
+    memset(s, 0, sizeof(*s));
+    s->req = req;
+    s->raw = web_conn_req_http10(req);
+    if (!s->raw) {
+        /* HTTP/1.1: chunked, as the server sends it (the head goes out with the first chunk). */
+        httpd_resp_set_status(req, web_status_line(status));
+        httpd_resp_set_type(req, type);
+        web_set_common_headers(req, true);
+        if (disposition != NULL) {
+            httpd_resp_set_hdr(req, "Content-Disposition", disposition);
+        }
+        return ESP_OK;
+    }
+    /* HTTP/1.0 knows no chunked framing: a head of our own, then the body as
+     * it is, ending at Content-Length or where the connection does (every
+     * HTTP/1.0 connection ends after its answer). */
+    char head[384];
+    size_t n = web_stream_head(head, sizeof(head), status, type, disposition, true, content_length);
+    if (n == 0 || send_all(req, head, n) != ESP_OK) {
+        s->failed = true;
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+esp_err_t web_stream_write(web_stream_t *s, const void *data, size_t len)
+{
+    if (s->failed) {
+        return ESP_FAIL;
+    }
+    if (len == 0) {
+        return ESP_OK;   /* an empty chunk would end a chunked body */
+    }
+    esp_err_t err = s->raw ? send_all(s->req, data, len) : httpd_resp_send_chunk(s->req, data, (ssize_t)len);
+    if (err != ESP_OK) {
+        s->failed = true;
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+esp_err_t web_stream_end(web_stream_t *s)
+{
+    if (s->failed) {
+        return ESP_FAIL;
+    }
+    if (s->raw) {
+        return ESP_OK;   /* the connection's end ends the body (the close-after logic) */
+    }
+    return httpd_resp_send_chunk(s->req, NULL, 0);
 }
 
 static bool resp_flush(void *ctx, const char *data, size_t len)
 {
     web_resp_t *r = ctx;
-    resp_headers(r);
-    if (httpd_resp_send_chunk(r->req, data, (ssize_t)len) != ESP_OK) {
+    if (!r->headers_sent) {
+        r->headers_sent = true;
+        if (web_stream_begin(&r->stream, r->req, r->status, "application/json", NULL, -1) != ESP_OK) {
+            r->send_failed = true;
+            return false;
+        }
+    }
+    if (web_stream_write(&r->stream, data, len) != ESP_OK) {
         r->send_failed = true;
         return false;
     }
@@ -509,13 +583,16 @@ esp_err_t web_resp_end(web_resp_t *r)
         if (!wj_ok(&r->w)) {
             return web_send_internal(r->req, ESP_ERR_INVALID_SIZE);
         }
-        resp_headers(r);
+        /* It fit in the buffer: one literal answer with its Content-Length. */
+        httpd_resp_set_status(r->req, web_status_line(r->status));
+        httpd_resp_set_type(r->req, "application/json");
+        web_set_common_headers(r->req, true);
         return httpd_resp_send(r->req, r->w.buf, (ssize_t)r->w.len);
     }
     if (!wj_finish(&r->w)) {
         return ESP_FAIL;   /* half a body went out: close the connection */
     }
-    return httpd_resp_send_chunk(r->req, NULL, 0);
+    return web_stream_end(&r->stream);
 }
 
 /* ---- request checks ---------------------------------------------------------------------- */
@@ -615,8 +692,8 @@ static bool mutating(int method)
 
 /* Host header value (validated), kept for the Origin check and the CSP. */
 static char s_host[80];
-/* The mDNS name the network answers now (server task). */
-static network_status_t s_pre_net;
+/* The mDNS name the network answers now (server task; never with the cache off). */
+EXT_RAM_BSS_ATTR static network_status_t s_pre_net;
 
 /* Host (DNS rebinding; on the AP: the captive portal) and Origin. */
 static pre_t precheck(httpd_req_t *req, bool *on_ap, bool websocket)

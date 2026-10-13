@@ -168,16 +168,51 @@ web_req_body_t web_req_body_of(httpd_req_t *req);
 esp_err_t web_send_json_literal(httpd_req_t *req, int status, const char *json);
 
 /**
- * JSON response through the streaming writer: chunked once the buffer
- * fills, a plain Content-Length response otherwise. `buf` is the caller's
- * (the server task uses web_http_buf()).
+ * A streamed answer: a JSON answer larger than its buffer (web_resp_t), an
+ * upload's result, a download. To an HTTP/1.1 request it goes chunked, as
+ * httpd_resp_send_chunk() sends it. HTTP/1.0 knows no chunked framing, so
+ * an answer to an HTTP/1.0 request gets a head of our own (web_stream_head:
+ * the status line, Content-Type, the common headers, Content-Disposition of
+ * a download, "Connection: close", Content-Length when `content_length` >= 0)
+ * and the body as it is: it ends at Content-Length, or where the connection
+ * ends (an HTTP/1.0 connection always ends after its answer: the
+ * close-after logic of the server task and of the worker closes it).
+ *
+ * Invariant: a streamed answer carries no header besides these. The
+ * HTTP/1.0 head is written here, not by the server, so headers set on the
+ * request (httpd_resp_set_hdr) would go out on HTTP/1.1 only. Cookies are
+ * therefore only ever set on literal answers (web_send_json_literal), which
+ * the server sends with every header it was given.
+ */
+typedef struct {
+    httpd_req_t *req;
+    bool raw;            /**< HTTP/1.0: our own head, the body unframed */
+    bool failed;         /**< a send failed: the rest is not sent */
+} web_stream_t;
+
+/** Start a streamed answer (an API answer: Cache-Control: no-store; `disposition` NULL = none). */
+esp_err_t web_stream_begin(web_stream_t *s, httpd_req_t *req, int status, const char *type, const char *disposition,
+                           int64_t content_length);
+/** Send part of its body (nothing for len 0). */
+esp_err_t web_stream_write(web_stream_t *s, const void *data, size_t len);
+/** End it: the last chunk (HTTP/1.1), nothing (HTTP/1.0: the connection's end ends the body). */
+esp_err_t web_stream_end(web_stream_t *s);
+
+/** The request being answered is HTTP/1.0 (web_conn_http10). Any task. */
+bool web_conn_req_http10(httpd_req_t *req);
+
+/**
+ * JSON response through the streaming writer: a streamed answer
+ * (web_stream_t) once the buffer fills, a literal Content-Length response
+ * otherwise. `buf` is the caller's (the server task uses web_http_buf()).
  */
 typedef struct {
     wj_t w;
     httpd_req_t *req;
     int status;
-    bool headers_sent;
+    bool headers_sent;   /**< the stream started */
     bool send_failed;
+    web_stream_t stream;
 } web_resp_t;
 
 void web_resp_begin(web_resp_t *r, httpd_req_t *req, int status, char *buf, size_t cap);

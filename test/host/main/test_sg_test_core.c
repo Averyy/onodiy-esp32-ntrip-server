@@ -209,6 +209,7 @@ TEST_CASE("sg test: every start refusal, arguments first", "[sg_test]")
         { offsetof(sgt_guard_t, maintenance), true, STATION_SGT_E_MAINTENANCE },
         { offsetof(sgt_guard_t, journal_open), true, STATION_SGT_E_JOURNAL_OPEN },
         { offsetof(sgt_guard_t, safe_mode), true, STATION_SGT_E_SAFE_MODE },
+        { offsetof(sgt_guard_t, no_receiver), true, STATION_SGT_E_NO_RECEIVER },
         { offsetof(sgt_guard_t, supported), false, STATION_SGT_E_UNSUPPORTED },
         { offsetof(sgt_guard_t, identity_confirmed), false, STATION_SGT_E_IDENTITY },
         { offsetof(sgt_guard_t, streaming), false, STATION_SGT_E_NOT_STREAMING },
@@ -229,6 +230,51 @@ TEST_CASE("sg test: every start refusal, arguments first", "[sg_test]")
     TEST_ASSERT_EQUAL(STATION_SGT_E_NOT_DECIDING, sgt_keep(&x->t, 0, x->now, x->unix_s));
     fx_t *y = fx_new();
     TEST_ASSERT_EQUAL(STATION_SGT_E_IDLE, sgt_stop(&y->t, y->now, y->unix_s));
+}
+
+TEST_CASE("sg test: no receiver, an unidentified one and an unsupported model are refused in that order",
+          "[sg_test]")
+{
+    fx_t *x = fx_new();
+    station_sg_t groups[2] = { G(3, 6), G(7, 0) };
+
+    /* No receiver: no_receiver, also with supported false (the guard of a
+     * station without a receiver says nothing about a model). */
+    sgt_guard_t g = ok_guard(G(3, 6));
+    g.no_receiver = true;
+    g.identity_confirmed = false;
+    g.streaming = false;
+    TEST_ASSERT_EQUAL(STATION_SGT_E_NO_RECEIVER, sgt_start(&x->t, &g, groups, 1800, x->now));
+    g.supported = false;
+    TEST_ASSERT_EQUAL(STATION_SGT_E_NO_RECEIVER, sgt_start(&x->t, &g, groups, 1800, x->now));
+
+    /* Earlier refusals still come first: safe mode, maintenance, an open journal. */
+    sgt_guard_t s = g;
+    s.safe_mode = true;
+    TEST_ASSERT_EQUAL(STATION_SGT_E_SAFE_MODE, sgt_start(&x->t, &s, groups, 1800, x->now));
+    s = g;
+    s.maintenance = true;
+    TEST_ASSERT_EQUAL(STATION_SGT_E_MAINTENANCE, sgt_start(&x->t, &s, groups, 1800, x->now));
+    s = g;
+    s.journal_open = true;
+    TEST_ASSERT_EQUAL(STATION_SGT_E_JOURNAL_OPEN, sgt_start(&x->t, &s, groups, 1800, x->now));
+
+    /* A receiver that answers but has not identified itself (receiver.valid
+     * false: the station's guard keeps supported true): identity_unconfirmed. */
+    g = ok_guard(G(3, 6));
+    g.identity_confirmed = false;
+    g.streaming = false;
+    TEST_ASSERT_EQUAL(STATION_SGT_E_IDENTITY, sgt_start(&x->t, &g, groups, 1800, x->now));
+
+    /* An identified model this firmware does not configure, or the raised
+     * alert: unsupported_model, before identity and streaming. */
+    g.supported = false;
+    TEST_ASSERT_EQUAL(STATION_SGT_E_UNSUPPORTED, sgt_start(&x->t, &g, groups, 1800, x->now));
+    g = ok_guard(G(3, 6));
+    g.supported = false;
+    TEST_ASSERT_EQUAL(STATION_SGT_E_UNSUPPORTED, sgt_start(&x->t, &g, groups, 1800, x->now));
+    TEST_ASSERT_FALSE(sgt_running(&x->t));
+    TEST_ASSERT_FALSE(x->t.want_switch);
 }
 
 /* ---- order and a whole run ---------------------------------------------------------- */
@@ -834,8 +880,36 @@ TEST_CASE("sg test: a short, damaged or old record is refused; an unreadable one
     buf[0] = SGT_REC_VERSION;
     buf[1] = 9;                                                /* no such state */
     TEST_ASSERT_FALSE(sgt_decode(&t, buf, len, x->now));
-    TEST_ASSERT_EQUAL(STATION_SGT_IDLE, t.state);             /* unchanged */
+    TEST_ASSERT_EQUAL(STATION_SGT_IDLE, t.state);
     buf[1] = STATION_SGT_MEASURING;
+    TEST_ASSERT_TRUE(sgt_decode(&t, buf, len, x->now));
+
+    /* A failed decode leaves the test idle, whatever t held before: it
+     * decodes in place, so a record that turns out damaged half way must
+     * not leave half of it behind. */
+    TEST_ASSERT_TRUE(sgt_running(&t));
+    TEST_ASSERT_TRUE(t.have_test);
+    buf[len - 1] ^= 0xFFu;                                     /* still a record, damaged at its end */
+    static uint8_t bad[SGT_REC_MAX];
+    memcpy(bad, buf, len);
+    bad[1] = STATION_SGT_MEASURING;
+    bad[2] = 0x7F;                                             /* no such outcome: refused after the whole read */
+    TEST_ASSERT_FALSE(sgt_decode(&t, bad, len, x->now));
+    TEST_ASSERT_FALSE(sgt_running(&t));
+    TEST_ASSERT_FALSE(t.have_test);
+    TEST_ASSERT_EQUAL(STATION_SGT_OUT_NONE, t.outcome);
+    TEST_ASSERT_EQUAL_INT8(-1, t.kept);
+    TEST_ASSERT_EQUAL_UINT16(SGT_PHASE_DEFAULT_S, t.phase_s);
+    TEST_ASSERT_EQUAL_UINT32(0, t.acc[0].samples);
+    TEST_ASSERT_FALSE(t.want_switch);
+    TEST_ASSERT_FALSE(t.save_due);
+    TEST_ASSERT_EQUAL_STRING("", t.reason);
+    buf[len - 1] ^= 0xFFu;
+    TEST_ASSERT_TRUE(sgt_decode(&t, buf, len, x->now));
+    TEST_ASSERT_TRUE(sgt_running(&t));
+    TEST_ASSERT_FALSE(sgt_decode(&t, buf, len - 1, x->now));   /* short */
+    TEST_ASSERT_FALSE(sgt_running(&t));
+    TEST_ASSERT_FALSE(t.have_test);
     TEST_ASSERT_TRUE(sgt_decode(&t, buf, len, x->now));
 
     sgt_interrupted(&t, x->now, x->unix_s);

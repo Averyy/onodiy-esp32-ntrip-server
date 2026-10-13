@@ -223,12 +223,15 @@ void gnss_link_core_on_rx(gnss_link_core_t *c, size_t n, int64_t now_us)
     c->last_rx_us = now_us;
 }
 
-gnss_link_route_t gnss_link_core_route(gnss_link_core_t *c, gnss_frame_kind_t kind, int64_t now_us)
+gnss_link_route_t gnss_link_core_route(gnss_link_core_t *c, gnss_frame_kind_t kind, int64_t now_us,
+                                       int64_t arrival_us)
 {
     switch (kind) {
     case GNSS_FRAME_RTCM3:
+        if (!c->rtcm_seen || arrival_us > c->last_rtcm_us) {
+            c->last_rtcm_us = arrival_us;
+        }
         c->rtcm_seen = true;
-        c->last_rtcm_us = now_us;
         if (c->mode == GNSS_LINK_MODE_STREAM) {
             return GNSS_LINK_ROUTE_PUBLISH;
         }
@@ -280,6 +283,114 @@ void gnss_link_core_on_flush(gnss_link_core_t *c, size_t n)
 void gnss_link_core_set_framing(gnss_link_core_t *c, const gnss_framing_stats_t *f)
 {
     c->stats.framing = *f;
+}
+
+/* ---- arrival ledger ------------------------------------------------------------------ */
+
+void gnss_link_arr_init(gnss_link_arr_t *a)
+{
+    memset(a, 0, sizeof(*a));
+}
+
+static void arr_drop(gnss_link_arr_t *a)
+{
+    a->synced = false;
+    a->first = 0;
+    a->n = 0;
+}
+
+void gnss_link_arr_degrade(gnss_link_arr_t *a)
+{
+    if (a->synced) {
+        a->st.degrades++;
+    }
+    arr_drop(a);
+}
+
+static void arr_mismatch(gnss_link_arr_t *a)
+{
+    a->st.mismatches++;
+    arr_drop(a);
+}
+
+void gnss_link_arr_on_data(gnss_link_arr_t *a, size_t size, const volatile uint32_t *stamps, uint32_t head)
+{
+    if (!a->synced) {
+        return;
+    }
+    uint32_t pending = head - a->next;   /* stamps written and not paired yet */
+    if (pending == 0 || pending > GNSS_LINK_ARR_STAMPS) {
+        arr_mismatch(a);   /* an event without its stamp, or its stamp overwritten already */
+        return;
+    }
+    uint32_t stamp = stamps[a->next % GNSS_LINK_ARR_STAMPS];
+    a->next++;
+    if (size == 0) {
+        return;
+    }
+    if (a->n >= GNSS_LINK_ARR_CHUNKS || size > UINT16_MAX) {
+        gnss_link_arr_degrade(a);   /* more chunks owed than the ledger keeps */
+        return;
+    }
+    gnss_link_arr_chunk_t *k = &a->c[(a->first + a->n) % GNSS_LINK_ARR_CHUNKS];
+    k->stamp = stamp;
+    k->left = (uint16_t)size;
+    a->n++;
+}
+
+gnss_link_arr_seg_t gnss_link_arr_next(gnss_link_arr_t *a, size_t left, int64_t read_us)
+{
+    gnss_link_arr_seg_t g = { .len = left, .arrival_us = read_us, .exact = false };
+    if (a->synced && a->n == 0 && left > 0) {
+        arr_mismatch(a);   /* bytes no chunk accounts for */
+    }
+    if (a->synced && a->n > 0) {
+        gnss_link_arr_chunk_t *k = &a->c[a->first];
+        size_t take = left < k->left ? left : k->left;
+        /* The stamp is the low 32 bits of a time before the read: its age
+         * modulo 2^32 is the real age (stamps are paired within seconds). */
+        uint32_t age = (uint32_t)((uint32_t)read_us - k->stamp);
+        g.len = take;
+        g.arrival_us = read_us - (int64_t)age;
+        g.exact = true;
+        k->left = (uint16_t)(k->left - take);
+        if (k->left == 0) {
+            a->first = (uint16_t)((a->first + 1u) % GNSS_LINK_ARR_CHUNKS);
+            a->n--;
+        }
+    }
+    if (a->have_last && g.arrival_us < a->last_us) {
+        g.arrival_us = a->last_us;   /* never before an arrival handed out already */
+    }
+    if (g.arrival_us > read_us) {
+        g.arrival_us = read_us;
+    }
+    a->have_last = true;
+    a->last_us = g.arrival_us;
+    return g;
+}
+
+void gnss_link_arr_quiet(gnss_link_arr_t *a, uint32_t head)
+{
+    if (a->synced && (head != a->next || a->n != 0)) {
+        arr_mismatch(a);
+    }
+    if (!a->synced) {
+        a->synced = true;
+        a->next = head;
+        a->first = 0;
+        a->n = 0;
+        a->st.resyncs++;
+    }
+}
+
+void gnss_link_arr_count_frame(gnss_link_arr_t *a, bool exact)
+{
+    if (exact) {
+        a->st.exact_frames++;
+    } else {
+        a->st.inexact_frames++;
+    }
 }
 
 uint32_t gnss_link_core_age_ms(bool seen, int64_t stamp_us, int64_t now_us)
@@ -575,6 +686,9 @@ void gnss_link_timing_summary(const gnss_link_rec_t *rec, size_t n, bool full, b
         switch (r->kind) {
         case GNSS_LINK_REC_FRAME:
             out->frames++;
+            if ((r->flags & GNSS_LINK_REC_F_EXACT) == 0) {
+                out->frames_inexact++;
+            }
             if (published_frame(r) && m < scratch_cap) {
                 scratch[m++] = clamp_i32(r->dt_us);
             }
@@ -599,10 +713,21 @@ void gnss_link_timing_summary(const gnss_link_rec_t *rec, size_t n, bool full, b
     }
     gnss_link_pct(scratch, m, &out->read_to_pub_us);
 
+    /* Arrival to read: frames with an interrupt time (published or held: both were read). */
+    m = 0;
+    for (size_t i = 0; i < n; i++) {
+        const gnss_link_rec_t *r = &rec[i];
+        if (r->kind == GNSS_LINK_REC_FRAME && (r->flags & GNSS_LINK_REC_F_EXACT) != 0 && m < scratch_cap) {
+            scratch[m++] = clamp_i32(r->gap_us);
+        }
+    }
+    gnss_link_pct(scratch, m, &out->arrival_to_read_us);
+
     if (!clock_ok) {
         return;   /* no epoch delays without the SNTP-set clock */
     }
-    /* Each epoch's first frame per constellation: its read time against its MSM time. */
+    /* Each epoch's first frame per constellation: its arrival against its MSM
+     * time; an epoch whose first frame has no interrupt time is left out. */
     for (unsigned sys = 0; sys < GNSS_SYS_COUNT; sys++) {
         bool have = false;
         uint32_t last = 0;
@@ -617,7 +742,11 @@ void gnss_link_timing_summary(const gnss_link_rec_t *rec, size_t n, bool full, b
             }
             have = true;
             last = r->epoch;
-            int64_t unix_ms = (r->t0_us + unix_minus_timer_us) / 1000;
+            if ((r->flags & GNSS_LINK_REC_F_EXACT) == 0) {
+                continue;
+            }
+            int64_t arrival_us = r->t0_us - (int64_t)r->gap_us;
+            int64_t unix_ms = (arrival_us + unix_minus_timer_us) / 1000;
             int64_t gps_now = unix_ms + (int64_t)GNSS_RTCM3_GPS_UTC_LEAP_S * 1000 - GNSS_RTCM3_GPS_EPOCH_UNIX_MS;
             int64_t gps_epoch = 0;
             if (gnss_rtcm3_epoch_gps_ms((gnss_sys_t)sys, r->epoch, gps_now, &gps_epoch) && m < scratch_cap) {
@@ -645,9 +774,12 @@ size_t gnss_link_rec_csv(const gnss_link_rec_t *r, char *buf, size_t cap)
         if (msm) {
             snprintf(epoch, sizeof(epoch), "%" PRIu32, r->epoch);
         }
-        n = snprintf(buf, cap, "F,%" PRId64 ",%" PRId64 ",%u,%u,%s,%s,%u,%u\n", r->t0_us, end, (unsigned)r->msg,
-                     (unsigned)r->bytes, msm ? k_sys_csv[r->sys] : "", epoch,
-                     (r->flags & GNSS_LINK_REC_F_MMB) ? 1u : 0u, (r->flags & GNSS_LINK_REC_F_HELD) ? 1u : 0u);
+        bool exact = (r->flags & GNSS_LINK_REC_F_EXACT) != 0;
+        int64_t arrival = exact ? r->t0_us - (int64_t)r->gap_us : r->t0_us;
+        n = snprintf(buf, cap, "F,%" PRId64 ",%" PRId64 ",%" PRId64 ",%u,%u,%s,%s,%u,%u,%u\n", arrival, r->t0_us, end,
+                     (unsigned)r->msg, (unsigned)r->bytes, msm ? k_sys_csv[r->sys] : "", epoch,
+                     (r->flags & GNSS_LINK_REC_F_MMB) ? 1u : 0u, (r->flags & GNSS_LINK_REC_F_HELD) ? 1u : 0u,
+                     exact ? 1u : 0u);
         break;
     }
     case GNSS_LINK_REC_PASS:

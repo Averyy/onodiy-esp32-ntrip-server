@@ -9,7 +9,10 @@
  *
  * Locks:
  *  - s_lock (spinlock): the core state, the sinks and the request mailbox.
- *    Held only for copies and counter updates, never across a driver call.
+ *    Held only for copies and counter updates, never across a driver call
+ *    other than the two getters of a quiet point (the RX task, see
+ *    "Arrival times": with the stamp ring and its head, which the UART
+ *    interrupt on the same core cannot change meanwhile).
  *  - s_slot (binary semaphore): the one lease slot. Taken by acquire, given
  *    by release, possibly from another task (the boot step hands its RAW
  *    lease on), hence not a mutex.
@@ -35,11 +38,23 @@
  * heap may not have again): a restart reconfigures it in place, and only a
  * failed install leaves it closed, which the RX task then reopens on its
  * own schedule.
+ *
+ * Arrival times (gnss_link.h): after every install the driver's select
+ * notification is pointed at uart_rx_stamp(), an IRAM callback the UART
+ * interrupt calls once for every RX chunk it moves into the ring, before it
+ * queues that chunk's data event; it writes the esp_timer time into a
+ * 32-entry stamp ring in internal RAM. The interrupt runs on the RX task's
+ * core, so the chunk, its stamp and its event appear at once to the RX
+ * task, which pairs them in the core's arrival ledger (in PSRAM, RX task
+ * only). NOTHING MAY select() ON THE RECEIVER'S UART: VFS select installs
+ * its own notification on the port and would replace the callback (the
+ * frames would then all take their read time and count as inexact).
  */
 #include "gnss_link.h"
 
 #include "board.h"
 #include "driver/uart.h"
+#include "driver/uart_select.h"
 #include "esp_attr.h"
 #include "esp_intr_alloc.h"
 #include "esp_log.h"
@@ -74,6 +89,10 @@ _Static_assert(SOC_UART_FIFO_LEN == GNSS_LINK_HW_FIFO_LEN, "the full-ring mark a
 
 _Static_assert(CONFIG_FREERTOS_TASK_NOTIFICATION_ARRAY_ENTRIES >= 2,
                "the GNSS RX task parks and wakes on task notification index 1");
+
+#if CONFIG_UART_ISR_IN_IRAM && !CONFIG_ESP_TIMER_IN_IRAM
+#error "the UART interrupt stamps chunks with esp_timer_get_time(): it must be in IRAM too (CONFIG_ESP_TIMER_IN_IRAM)"
+#endif
 
 #if CONFIG_UART_ISR_IN_IRAM
 /* The flag the driver would add on its own with the ISR in IRAM; passing it
@@ -120,6 +139,17 @@ static int64_t s_reopen_log_us;
 static gnss_framer_t s_framer;
 static uint8_t s_rx_buf[GNSS_LINK_READ_CHUNK];
 static gnss_link_sinks_t s_cur;        /* sinks snapshot for the frame callback */
+
+/* Arrival times. The stamp ring and its head are written by the UART
+ * interrupt (internal RAM: it runs while flash writes stop the cache); the
+ * ledger is the RX task's (PSRAM). The RX task reads the ring and its head
+ * under s_lock, which masks the interrupt on the RX core meanwhile. */
+DRAM_ATTR static volatile uint32_t s_arr_stamps[GNSS_LINK_ARR_STAMPS];
+DRAM_ATTR static volatile uint32_t s_arr_head;
+EXT_RAM_BSS_ATTR static gnss_link_arr_t s_arr;
+EXT_RAM_BSS_ATTR static gnss_link_arrival_stats_t s_arr_pub;   /* its counters for other tasks (under s_lock) */
+EXT_RAM_BSS_ATTR static int64_t s_arrival_us;   /* RX task: the arrival of the segment being framed */
+EXT_RAM_BSS_ATTR static bool s_arrival_exact;
 static bool s_wdt_on;                  /* RX task only */
 static bool s_wdt_failed;              /* RX task only: subscription refused, do not retry */
 
@@ -346,6 +376,27 @@ static uint32_t stored_baud(void)
     return gnss_link_core_open_baud(serr, stored, CONFIG_GNSS_LINK_DEFAULT_BAUD);
 }
 
+/* UART interrupt (IRAM, the RX core): one stamp per RX chunk moved into the
+ * ring, called right before the chunk's data event is queued. Other
+ * notifications (the TX side, errors) carry no chunk. */
+static void IRAM_ATTR uart_rx_stamp(uart_port_t port, uart_select_notif_t what, BaseType_t *woken)
+{
+    (void)port;
+    (void)woken;
+    if (what == UART_SELECT_READ_NOTIF) {
+        uint32_t h = s_arr_head;
+        s_arr_stamps[h % GNSS_LINK_ARR_STAMPS] = (uint32_t)esp_timer_get_time();
+        s_arr_head = h + 1u;
+    }
+}
+
+/* The pairing of chunks and data events is lost (RX task, or the single
+ * reader while the RX task does not run yet or is parked). */
+static void arrival_degrade(void)
+{
+    gnss_link_arr_degrade(&s_arr);
+}
+
 static esp_err_t driver_open_here(uint32_t baud)
 {
     taskENTER_CRITICAL(&s_lock);
@@ -369,6 +420,8 @@ static esp_err_t driver_open_here(uint32_t baud)
     if (err != ESP_OK) {
         return err;
     }
+    /* The install clears the notification: point it at the stamp ring again. */
+    uart_set_select_notif_callback(s_port, uart_rx_stamp);
     apply_rx_thresholds(baud);
     taskENTER_CRITICAL(&s_lock);
     s_events = q;
@@ -479,10 +532,11 @@ static void rec_frame(const gnss_frame_t *fr, bool published)
 {
     gnss_link_rec_t r = {
         .t0_us = s_read_us,
+        .gap_us = s_arrival_exact ? clamp_us(s_read_us - s_arrival_us) : 0,   /* arrival to read */
         .kind = GNSS_LINK_REC_FRAME,
         .msg = fr->rtcm_msg_type,
         .bytes = (uint16_t)fr->len,
-        .flags = published ? 0 : GNSS_LINK_REC_F_HELD,
+        .flags = (uint8_t)((published ? 0u : GNSS_LINK_REC_F_HELD) | (s_arrival_exact ? GNSS_LINK_REC_F_EXACT : 0u)),
     };
     gnss_sys_t sys;
     gnss_rtcm3_msm_t h;
@@ -512,7 +566,7 @@ static void on_frame(const gnss_frame_t *fr, void *ctx)
     (void)ctx;
     int64_t now = esp_timer_get_time();
     taskENTER_CRITICAL(&s_lock);
-    gnss_link_route_t route = gnss_link_core_route(&s_core, fr->kind, now);
+    gnss_link_route_t route = gnss_link_core_route(&s_core, fr->kind, now, s_arrival_us);
 #if CONFIG_GNSS_LINK_BENCH_HOOKS
     bool rec = s_rec_on && fr->kind == GNSS_FRAME_RTCM3;
     if (route == GNSS_LINK_ROUTE_OBSERVE) {
@@ -520,10 +574,13 @@ static void on_frame(const gnss_frame_t *fr, void *ctx)
     }
 #endif
     taskEXIT_CRITICAL(&s_lock);
+    if (fr->kind == GNSS_FRAME_RTCM3) {
+        gnss_link_arr_count_frame(&s_arr, s_arrival_exact);
+    }
     switch (route) {
     case GNSS_LINK_ROUTE_PUBLISH:
         if (s_cur.on_rtcm != NULL) {
-            s_cur.on_rtcm(fr->data, fr->len, fr->rtcm_msg_type, s_cur.ctx);
+            s_cur.on_rtcm(fr->data, fr->len, fr->rtcm_msg_type, s_arrival_us, s_arrival_exact, s_cur.ctx);
         }
         break;
     case GNSS_LINK_ROUTE_LINE:
@@ -572,6 +629,7 @@ static void feed(const uint8_t *data, size_t n)
 /* Read out and drop what is buffered now; returns the byte count. */
 static size_t read_out(void)
 {
+    arrival_degrade();   /* bytes leave the ring without the ledger */
     size_t total = 0;
     while (total < FLUSH_LIMIT) {
         size_t avail = 0;
@@ -674,10 +732,20 @@ static unsigned check_queue(QueueHandle_t q, bool raw)
     return out;
 }
 
-/* One UART event (RX task). Returns true after a buffer-full event. */
+/* One UART event (RX task). A data event places its chunk's arrival in the
+ * ledger; a buffer-full or overflow event loses the pairing (the stashed
+ * chunk enters the ring at a read, without a stamp; an overflow loses bytes
+ * the stamps never saw). Returns true after a buffer-full event. */
 static bool handle_event(const uart_event_t *ev)
 {
     gnss_link_ev_t e = map_event(ev->type);
+    if (e == GNSS_LINK_EV_DATA) {
+        taskENTER_CRITICAL(&s_lock);
+        gnss_link_arr_on_data(&s_arr, ev->size, s_arr_stamps, s_arr_head);
+        taskEXIT_CRITICAL(&s_lock);
+    } else if (e == GNSS_LINK_EV_BUFFER_FULL || e == GNSS_LINK_EV_FIFO_OVF) {
+        arrival_degrade();
+    }
     taskENTER_CRITICAL(&s_lock);
     bool reset = gnss_link_core_on_event(&s_core, e);
     taskEXIT_CRITICAL(&s_lock);
@@ -687,8 +755,55 @@ static bool handle_event(const uart_event_t *ev)
     return e == GNSS_LINK_EV_BUFFER_FULL;
 }
 
+/* Inside a drain pass (RX task): every event queued now. Returns true after a buffer-full event. */
+static bool take_events(QueueHandle_t q)
+{
+    bool full = false;
+    uart_event_t ev;
+    for (unsigned i = 0; i < 2 * GNSS_LINK_EVENT_QUEUE_LEN && xQueueReceive(q, &ev, 0) == pdTRUE; i++) {
+        full |= handle_event(&ev);
+    }
+    return full;
+}
+
+/* The ring and the event queue are empty: a quiet point, where the pairing
+ * starts afresh (read together with the stamp head; the interrupt cannot
+ * run on this core meanwhile). */
+static void arrival_quiet(QueueHandle_t q)
+{
+    taskENTER_CRITICAL(&s_lock);
+    size_t buffered = 1;
+    bool quiet = uart_get_buffered_data_len(s_port, &buffered) == ESP_OK && buffered == 0 &&
+                 uxQueueMessagesWaiting(q) == 0;
+    if (quiet) {
+        gnss_link_arr_quiet(&s_arr, s_arr_head);
+    }
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+static void publish_arrival(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    s_arr_pub = s_arr.st;
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+/* Frame one read, one ledger segment at a time: a frame takes the arrival of
+ * the chunk that holds its last byte. */
+static void feed_read(const uint8_t *data, size_t n, int64_t read_us)
+{
+    size_t off = 0;
+    while (off < n) {
+        gnss_link_arr_seg_t g = gnss_link_arr_next(&s_arr, n - off, read_us);
+        s_arrival_us = g.arrival_us;
+        s_arrival_exact = g.exact;
+        feed(data + off, g.len);
+        off += g.len;
+    }
+}
+
 /* One drain pass (RX task). Returns the wait before the next event. */
-static uint32_t drain(bool pull_stash)
+static uint32_t drain(QueueHandle_t q, bool pull_stash)
 {
     gnss_link_pass_t pass;
     gnss_link_pass_begin(&pass);
@@ -697,9 +812,15 @@ static uint32_t drain(bool pull_stash)
     int64_t begin_us = esp_timer_get_time();
 #endif
     for (;;) {
+        /* The length first, then the events: every chunk counted in the
+         * length has its data event (and stamp) queued already, so the read
+         * below never gets ahead of the ledger. */
         size_t avail = 0;
         if (uart_get_buffered_data_len(s_port, &avail) != ESP_OK) {
             break;
+        }
+        if (take_events(q)) {
+            pull_stash = true;
         }
         if (avail == 0 && pull_stash) {
             /* After buffer-full the driver may still hold a stashed chunk
@@ -709,22 +830,27 @@ static uint32_t drain(bool pull_stash)
         pull_stash = false;
         size_t want = gnss_link_pass_next(&pass, avail);
         if (want == 0) {
+            if (!pass.capped) {
+                arrival_quiet(q);
+            }
             break;
         }
         int n = uart_read_bytes(s_port, s_rx_buf, (uint32_t)want, 0);
         if (n <= 0) {
             break;
         }
+        int64_t read_us = esp_timer_get_time();
 #if CONFIG_GNSS_LINK_BENCH_HOOKS
-        s_read_us = esp_timer_get_time();
+        s_read_us = read_us;
 #endif
         gnss_link_pass_add(&pass, (size_t)n);
         count_rx((size_t)n);
-        feed(s_rx_buf, (size_t)n);
+        feed_read(s_rx_buf, (size_t)n, read_us);
     }
     if (pass.done > 0) {
         publish_framing();
     }
+    publish_arrival();
     uint32_t wait_ms = gnss_link_pass_wait_ms(&pass);
 #if CONFIG_GNSS_LINK_BENCH_HOOKS
     int64_t end_us = esp_timer_get_time();
@@ -752,6 +878,7 @@ static esp_err_t do_set_baud(uint32_t baud, bool reset_framer)
     if (!driver_ok()) {
         return ESP_ERR_INVALID_STATE;
     }
+    arrival_degrade();   /* chunks at two rates; the settle drops input */
     esp_err_t err = uart_set_baudrate(s_port, baud);
     if (err != ESP_OK) {
         return err;
@@ -774,6 +901,7 @@ static esp_err_t restart_in_place(uint32_t baud)
     if (!driver_ok()) {
         return ESP_ERR_INVALID_STATE;   /* closed: the reopen loop owns it */
     }
+    arrival_degrade();   /* events taken and input flushed past the ledger */
     esp_err_t first = ESP_OK;
     esp_err_t e = uart_disable_rx_intr(s_port);
     first = (first == ESP_OK) ? e : first;
@@ -836,6 +964,7 @@ static void reopen_step(void)
     esp_err_t err = driver_open_job(&job);
     if (err == ESP_OK) {
         s_reopen_failures = 0;
+        arrival_degrade();
         taskENTER_CRITICAL(&s_lock);
         gnss_link_core_set_open(&s_core, true);
         taskEXIT_CRITICAL(&s_lock);
@@ -866,6 +995,9 @@ static void exec_req(req_t *r)
         err = gnss_link_core_acquire(&s_core, r->mode, r->owner, &token);
         taskEXIT_CRITICAL(&s_lock);
         r->token = token;
+        if (err == ESP_OK) {
+            arrival_degrade();   /* a lease: other readers, flushes and baud changes may follow */
+        }
         if (err == ESP_OK && r->mode == GNSS_LINK_MODE_RAW && in_rx_task()) {
             wdt_set(false);   /* parks next; the lease holder feeds its own watchdog */
         }
@@ -876,6 +1008,7 @@ static void exec_req(req_t *r)
         if (err != ESP_OK) {
             break;
         }
+        arrival_degrade();
         if (current_mode() == GNSS_LINK_MODE_RAW) {
             /* They describe the link, whoever read it; a full queue also
              * stands for the events it dropped. */
@@ -953,6 +1086,7 @@ static void exec_req(req_t *r)
             err = ESP_ERR_INVALID_STATE;
             break;
         }
+        arrival_degrade();
         err = uart_driver_delete(s_port);
         framer_reset();
         /* The link's own schedule installs it again, as after a failed install. */
@@ -1111,6 +1245,7 @@ static void rx_task(void *arg)
             framer_reset();
         }
         if (qc & QCHECK_SERVICED) {
+            arrival_degrade();   /* events dropped by the driver, and taken past the ledger */
             pull_stash = true;   /* the ring may be full: read at once */
         } else {
             uart_event_t ev;
@@ -1118,7 +1253,7 @@ static void rx_task(void *arg)
                 pull_stash = handle_event(&ev);
             }
         }
-        wait_ms = drain(pull_stash);
+        wait_ms = drain(q, pull_stash);
         wdt_feed();
     }
 }
@@ -1161,6 +1296,7 @@ esp_err_t gnss_link_init(void)
     }
 
     gnss_framer_init(&s_framer, on_frame, NULL);
+    gnss_link_arr_init(&s_arr);   /* paired at the first quiet point */
     esp_err_t err = driver_open(baud);
     taskENTER_CRITICAL(&s_lock);
     gnss_link_core_init(&s_core, baud);
@@ -1579,6 +1715,17 @@ esp_err_t gnss_link_get_stats(gnss_link_stats_t *out)
     if (out->mode == GNSS_LINK_MODE_OFF) {
         out->baud = gnss_link_core_open_baud(ESP_FAIL, 0, CONFIG_GNSS_LINK_DEFAULT_BAUD);
     }
+    return ESP_OK;
+}
+
+esp_err_t gnss_link_get_arrival_stats(gnss_link_arrival_stats_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    taskENTER_CRITICAL(&s_lock);
+    *out = s_arr_pub;
+    taskEXIT_CRITICAL(&s_lock);
     return ESP_OK;
 }
 

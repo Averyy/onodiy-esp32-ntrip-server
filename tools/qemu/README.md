@@ -106,7 +106,15 @@ every local caster port.) Queries do not come back in, so the name cannot
 be looked up from this computer, but a request with
 `Host: onocoydiy-qemu.local` passes the Host check like on a board. The
 emulated port also gets its IPv6 link-local address (`network: IPv6
-link-local fe80::... on station`), as a station's interfaces do.
+link-local fe80::... on station`), as a station's interfaces do, and no
+other: QEMU's user-mode network answers the guest's router solicitation
+with a router advertisement for `fec0::/64`, and lwIP would form an
+address from it on its own (lwIP turns stateless autoconfiguration on for
+every interface it adds, whatever `CONFIG_LWIP_IPV6_AUTOCONFIG` says), so
+the firmware turns it off per interface right before it creates the
+link-local address. An address that is not link-local would show as a
+warning, `network: IPv6 address fec0::... on station is not link-local`;
+the smoke test fails on one in the 30 s after the link-local line.
 
 With nothing answering on UART1 the firmware behaves as with a dead
 receiver: detection gives up after about 26 s. The GNSS recovery ladder's
@@ -207,6 +215,12 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    and the connection closed (the chunks never come back as a second
    answer); two pipelined HTTP/1.1 requests on one socket are both
    answered, and an HTTP/1.1 connection stays open for the next request;
+   answers that are streamed go to HTTP/1.0 without chunked framing (which
+   HTTP/1.0 does not know): `GET /api/logs?format=text HTTP/1.0` and `GET
+   /api/status HTTP/1.0` (larger than the 2 KB response buffer: chunked to
+   HTTP/1.1, where that socket still answers a second request) come without
+   `Transfer-Encoding`, the log's first line and JSON that parses as the
+   body, and the connection closes within 2 s;
    a wrong admin password and a WebSocket handshake without a session
    (public status off) each give one console line naming `10.0.2.2` (how
    the guest sees this computer); after `PUT /api/diag/log-level` `*` at
@@ -218,7 +232,10 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    credentials) and the next `GET /api/wifi` agrees (no trial, nothing
    pending);
 3. UART1 both ways: the detection queries arrive on the host, and text the
-   host sends makes detection end with "bytes but nothing valid";
+   host sends makes detection end with "bytes but nothing valid"; with the
+   station then without a receiver (`GET /api/gnss` state `no_receiver`),
+   `POST /api/gnss/signal-test` is refused with `409 no_receiver` ("No
+   receiver is connected") and `GET /api/gnss/signal-test` stays `idle`;
 4. over 75 s (`--observe`, at least 45): no `Guru Meditation`, `abort()`,
    stack overflow, failed assert, backtrace or task watchdog report on the
    console, and no reboot loop (a restart without the firmware's own
@@ -227,7 +244,8 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    note about dropped lines (`[diag:`), and the mDNS line, the mDNS task's
    stack in PSRAM (`mDNS task will be created from SPIRAM`; the console
    writer's too, no `console task stack in internal RAM`) and the
-   station's IPv6 link-local line in the boot log; at the end of the window `GET /`
+   station's IPv6 link-local line in the boot log, with no `is not
+   link-local` warning in the 30 s after it; at the end of the window `GET /`
    and `GET /api/status` still answer, the console writer task runs (`GET
    /api/diag/tasks`) and `GET /api/health` counts no console drop; then
    `POST /api/system/reboot`: `network: mDNS: goodbye sent` is on the
@@ -306,12 +324,12 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
   never inside an epoch; then fixture order (modulo the loop; fixture frames
   the station never forwards skipped, the SBAS numbers 1101-1107); any gap
   falls on an epoch boundary (an epoch's last frame, then sticky copies and
-  the next epoch from its first frame; at the start and after a pause the
-  epoch's leading station messages may be missing, never its MSMs: after a
-  receiver reconfiguration the hub has no copies, and a firmware reader
-  stalled by flash writes lets the hub start that epoch at its first MSM;
-  between two consecutive epochs a missing station message fails the
-  check); nothing between frames, a cut frame
+  the next epoch from its first frame, whole: frames carry the UART
+  interrupt's arrival time, so a firmware reader stalled by flash writes
+  no longer makes the hub start an epoch at its first MSM; only the
+  record's very first epoch, and only without sticky copies in front of it,
+  may lack its leading station messages, never its MSMs; anywhere else a
+  missing station message fails the check); nothing between frames, a cut frame
   only at the very end; receiver maintenance answers its start and
   extension with the time it set (900 s, then 1800 s left), and
   `GET /api/gnss` agrees. With

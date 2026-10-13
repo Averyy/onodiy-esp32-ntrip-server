@@ -182,6 +182,9 @@ int sgt_start(sgt_t *t, const sgt_guard_t *g, const station_sg_t groups[2], uint
     if (g->safe_mode) {
         return STATION_SGT_E_SAFE_MODE;
     }
+    if (g->no_receiver) {
+        return STATION_SGT_E_NO_RECEIVER;
+    }
     if (!g->supported) {
         return STATION_SGT_E_UNSUPPORTED;
     }
@@ -524,35 +527,43 @@ size_t sgt_encode(const sgt_t *t, int64_t now_ms, uint8_t *buf, size_t cap)
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
+/* A record that cannot be read leaves the test idle (sgt_decode). */
+static bool decode_failed(sgt_t *t)
+{
+    sgt_init(t);
+    return false;
+}
+
 bool sgt_decode(sgt_t *t, const uint8_t *buf, size_t len, int64_t now_ms)
 {
+    /* Straight into *t (the record is large: no second copy anywhere); any
+     * failure leaves it as sgt_init() does. */
+    sgt_init(t);
     if (buf == NULL || len < 1 || buf[0] != SGT_REC_VERSION) {
         return false;
     }
-    static sgt_t n;   /* the record is large: not on the caller's stack */
-    sgt_init(&n);
     blob_reader_t r;
     blob_reader_init(&r, buf, len);
     (void)blob_get_u8(&r);
-    n.state = blob_get_u8(&r);
-    n.outcome = blob_get_u8(&r);
-    n.have_test = blob_get_bool(&r);
-    n.phase = blob_get_u8(&r);
-    n.order[0] = blob_get_u8(&r);
-    n.order[1] = blob_get_u8(&r);
-    n.groups[0] = get_pair(&r);
-    n.groups[1] = get_pair(&r);
-    n.before = get_pair(&r);
-    n.cur_known = blob_get_bool(&r);
-    n.cur = get_pair(&r);
-    n.target = get_pair(&r);
-    n.phase_s = blob_get_u16(&r);
+    t->state = blob_get_u8(&r);
+    t->outcome = blob_get_u8(&r);
+    t->have_test = blob_get_bool(&r);
+    t->phase = blob_get_u8(&r);
+    t->order[0] = blob_get_u8(&r);
+    t->order[1] = blob_get_u8(&r);
+    t->groups[0] = get_pair(&r);
+    t->groups[1] = get_pair(&r);
+    t->before = get_pair(&r);
+    t->cur_known = blob_get_bool(&r);
+    t->cur = get_pair(&r);
+    t->target = get_pair(&r);
+    t->phase_s = blob_get_u16(&r);
     uint8_t kept = blob_get_u8(&r);
     uint32_t decide_left = blob_get_u32(&r);
-    n.ended_unix = blob_get_i64(&r);
-    blob_get_str(&r, n.reason, sizeof(n.reason));
+    t->ended_unix = blob_get_i64(&r);
+    blob_get_str(&r, t->reason, sizeof(t->reason));
     for (unsigned i = 0; i < 2; i++) {
-        sgt_acc_t *a = &n.acc[i];
+        sgt_acc_t *a = &t->acc[i];
         a->status = blob_get_u8(&r);
         a->samples = blob_get_u32(&r);
         a->epoch_gaps = blob_get_u32(&r);
@@ -567,37 +578,37 @@ bool sgt_decode(sgt_t *t, const uint8_t *buf, size_t len, int64_t now_ms)
             }
         }
         if (a->status > STATION_SGT_RES_REJECTED) {
-            return false;
+            return decode_failed(t);
         }
     }
-    if (!blob_reader_ok(&r) || n.state > STATION_SGT_RESTORING || n.outcome > STATION_SGT_OUT_INTERRUPTED ||
-        n.phase > 1 || n.order[0] > 1 || n.order[1] != 1u - n.order[0] || (kept != 0xFFu && kept > 1) ||
+    if (!blob_reader_ok(&r) || t->state > STATION_SGT_RESTORING || t->outcome > STATION_SGT_OUT_INTERRUPTED ||
+        t->phase > 1 || t->order[0] > 1 || t->order[1] != 1u - t->order[0] || (kept != 0xFFu && kept > 1) ||
         decide_left > SGT_DECIDE_S) {
-        return false;
+        return decode_failed(t);
     }
-    if (n.state != STATION_SGT_IDLE &&
-        (!n.have_test || n.phase_s < SGT_PHASE_MIN_S || n.phase_s > SGT_PHASE_MAX_S || same(n.groups[0], n.groups[1]))) {
-        return false;
+    if (t->state != STATION_SGT_IDLE &&
+        (!t->have_test || t->phase_s < SGT_PHASE_MIN_S || t->phase_s > SGT_PHASE_MAX_S ||
+         same(t->groups[0], t->groups[1]))) {
+        return decode_failed(t);
     }
-    n.kept = kept == 0xFFu ? -1 : (int8_t)kept;
-    n.saved_ms = now_ms;
-    n.state_ms = now_ms;
-    switch (n.state) {
+    t->kept = kept == 0xFFu ? -1 : (int8_t)kept;
+    t->saved_ms = now_ms;
+    t->state_ms = now_ms;
+    switch (t->state) {
     case STATION_SGT_SWITCHING:
     case STATION_SGT_RESTORING:
-        n.want_switch = true;   /* ask for the switch again */
+        t->want_switch = true;   /* ask for the switch again */
         break;
     case STATION_SGT_SETTLING:
     case STATION_SGT_MEASURING:
-        enter_settling(&n, now_ms);   /* settle again; what was measured stays */
+        enter_settling(t, now_ms);   /* settle again; what was measured stays */
         break;
     case STATION_SGT_DECIDING:
-        n.decide_until_ms = now_ms + (int64_t)decide_left * 1000;
+        t->decide_until_ms = now_ms + (int64_t)decide_left * 1000;
         break;
     default:
         break;
     }
-    *t = n;
     return true;
 }
 

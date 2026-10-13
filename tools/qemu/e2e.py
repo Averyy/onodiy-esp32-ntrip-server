@@ -217,12 +217,13 @@ def check_record(data: bytes, schedule: Schedule, leading_junk_ok: bool = False)
     boundary, the frame before it an epoch's last and the frames after it
     sticky copies, then an epoch's first frame.
 
-    At the start and after a gap of at least one whole epoch, the epoch's
-    leading station messages (sticky types) may be missing, its MSMs never:
-    after a receiver reconfiguration the hub has no copies to replay, and
-    frames are timestamped when read, so a reader stalled right then (flash
-    writes) lets the hub's gap rule start that epoch at its first MSM. A
-    station message missing between two consecutive epochs is a lost frame."""
+    Only the record's very first epoch, and only when no sticky copies come
+    before it (the hub had none to replay), may lack its leading station
+    messages (sticky types), never its MSMs. After a pause the epoch comes
+    whole, from its first frame: frames carry their arrival time from the
+    UART interrupt, so a reader stalled by flash writes no longer makes the
+    hub's gap rule start an epoch late. A station message missing anywhere
+    else is a lost frame."""
     split = StreamSplitter()
     items = split.feed(data) + split.flush()
     fx: list[bytes] = []
@@ -307,7 +308,10 @@ def check_record(data: bytes, schedule: Schedule, leading_junk_ok: bool = False)
         k = next((k for k, st in enumerate(sticky) if not st), None)
         what = "only sticky copies" if k is None else f"record frame #{k} (type {frame_type(frames[k].data)})"
         return False, f"the record does not start at an epoch's first frame: {what}", 0.0
-    k0, p, _lead = start
+    k0, p, lead = start
+    if lead and k0 > 0:
+        return False, (f"record frame #{k0} (type {frame_type(frames[k0].data)}) opens the record after the hub's "
+                       f"sticky copies, but that epoch's own station messages are missing"), 0.0
     skipped_types: dict[int, int] = {}
     gaps = 0
     epochs = 1
@@ -348,9 +352,11 @@ def check_record(data: bytes, schedule: Schedule, leading_junk_ok: bool = False)
                 break   # the record ends with sticky copies of the next session start
             return False, (f"after the gap at record frame #{k} the record does not resume at an epoch's first "
                            f"frame: fixture frame {q} (type {frame_type(fx[q])}) or that epoch's start is missing"), 0.0
-        if nxt[2] and burst_of[nxt[1]] == (burst_of[p] + 1) % len(schedule.bursts):
-            return False, (f"record frame #{nxt[0]} (type {frame_type(frames[nxt[0]].data)}) follows the epoch "
-                           f"before it, but that epoch's station messages are missing"), 0.0
+        if nxt[2]:
+            what = ("follows the epoch before it" if burst_of[nxt[1]] == (burst_of[p] + 1) % len(schedule.bursts)
+                    else "resumes after a pause")
+            return False, (f"record frame #{nxt[0]} (type {frame_type(frames[nxt[0]].data)}) {what}, but that "
+                           f"epoch's station messages are missing"), 0.0
         k, p = nxt[0] + 1, nxt[1]
         anchor_k, anchor_p = nxt[0], nxt[1]
         gaps += 1
