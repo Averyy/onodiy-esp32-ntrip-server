@@ -29,6 +29,14 @@ password, default settings).
   --headless LOG      no terminal: the console (UART0) is written to LOG and
                       QEMU runs until this script gets Ctrl-C/SIGTERM or
                       --seconds is up (QEMU is always stopped on the way out)
+  --console MODE      with --headless, where the console (UART0) goes (default file):
+                        file            only what the firmware prints, written to LOG
+                        connect:PORT    QEMU connects at start to a program already
+                                        listening on 127.0.0.1:PORT (no retry: QEMU
+                                        stops if nothing listens), which then sees every
+                                        byte from the first boot and can type on the
+                                        console (the bench console's commands); what the
+                                        firmware prints is also written to LOG
   --seconds N         stop QEMU after N seconds (with --headless)
   --http-port N       host port forwarded to the web server's port 80
                       (default 8080; the UI is at http://localhost:N/)
@@ -63,6 +71,7 @@ headless=""
 seconds=""
 http_port=8080
 uart1="listen:5556"
+console="file"
 wdt=1
 overlay=""
 while [ $# -gt 0 ]; do
@@ -75,6 +84,7 @@ while [ $# -gt 0 ]; do
         --seconds) [ $# -ge 2 ] || die "--seconds needs a number"; seconds="$2"; shift ;;
         --http-port) [ $# -ge 2 ] || die "--http-port needs a port"; http_port="$2"; shift ;;
         --uart1) [ $# -ge 2 ] || die "--uart1 needs a mode"; uart1="$2"; shift ;;
+        --console) [ $# -ge 2 ] || die "--console needs a mode"; console="$2"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) usage >&2; die "unknown option $1" ;;
     esac
@@ -84,6 +94,15 @@ done
 [ -z "$seconds" ] || [[ "$seconds" =~ ^[0-9]+$ ]] || die "bad --seconds"
 [ -z "$seconds" ] || [ -n "$headless" ] || die "--seconds needs --headless"
 [ "$build" = 1 ] || [ "$run" = 1 ] || die "--no-build and --build-only together do nothing"
+console_port=""
+case "$console" in
+    file) ;;
+    connect:*) console_port=${console#connect:}
+        [[ "$console_port" =~ ^[0-9]+$ ]] && [ "$console_port" -ge 1 ] && [ "$console_port" -le 65535 ] ||
+            die "bad --console $console"
+        [ -n "$headless" ] || die "--console $console needs --headless (an interactive run has the console on this terminal)" ;;
+    *) die "bad --console $console (file, connect:PORT)" ;;
+esac
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 bdir="$root/build-qemu"
@@ -214,8 +233,20 @@ stop_qemu() {
 trap stop_qemu EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-echo "Console: $headless"
-args+=(-display none -monitor none -serial "file:$headless" "${uart1_dev[@]}" -serial chardev:uart1)
+if [ -z "$console_port" ]; then
+    echo "Console: $headless"
+    args+=(-display none -monitor none -serial "file:$headless")
+else
+    # No reconnect option: QEMU connects before the CPUs start (nothing the
+    # firmware prints is lost) and stops at once when nothing listens. The
+    # chardev's log file gets every byte the firmware sends (commas doubled:
+    # QEMU's option syntax).
+    echo "Console: tcp 127.0.0.1:$console_port (QEMU connects), also written to $headless"
+    args+=(-display none -monitor none
+        -chardev "socket,id=con,host=127.0.0.1,port=$console_port,server=off,logfile=${headless//,/,,}"
+        -serial chardev:con)
+fi
+args+=("${uart1_dev[@]}" -serial chardev:uart1)
 qemu-system-xtensa "${args[@]}" </dev/null &
 qpid=$!
 echo "QEMU pid $qpid"

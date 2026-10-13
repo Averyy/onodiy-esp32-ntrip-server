@@ -28,8 +28,10 @@ Every run starts with empty NVS: no admin password, default settings (the
 flash image is written to a new file each run, so a QEMU left over from an
 earlier run can never write into it). Other options (`tools/qemu/run.sh
 --help`): `--no-build`, `--build-only`, `--headless LOG` (console to a
-file, for scripts), `--seconds N`, `--http-port N`, `--uart1 MODE`,
-`--no-wdt`. `--overlay FILE` adds one more sdkconfig overlay after
+file, for scripts), `--console connect:PORT` (with `--headless`: the
+console on a socket a script listens on, so it can type commands; the log
+file still gets everything the firmware prints), `--seconds N`,
+`--http-port N`, `--uart1 MODE`, `--no-wdt`. `--overlay FILE` adds one more sdkconfig overlay after
 `sdkconfig.qemu` and builds into `build-qemu-<name>/` (`--overlay
 sdkconfig.hold` builds into `build-qemu-hold/`, where the receiver's first
 configuration waits for the user).
@@ -262,6 +264,48 @@ killed outright.
 The `qemu-smoke` CI job runs the same in the pinned ESP-IDF image (which
 ships qemu-xtensa) with `--out qemu-smoke` and uploads that directory and
 the build log as an artifact.
+
+## Bench console
+
+The bench overlay (`sdkconfig.bench`) runs in QEMU too, built into
+`build-qemu-bench/`. Its command line shares the console UART with the log:
+the log's console writer installs the UART driver at boot, and the command
+line reads through that same driver. Building the overlay cannot show that
+both still work; `bench_console.py` runs it:
+
+```sh
+tools/qemu/run.sh --overlay sdkconfig.bench --build-only
+uv run tools/qemu/bench_console.py    # logs in build-qemu-bench/bench-console/
+```
+
+It listens for the console (`--console connect:<port>`, UART1 not
+connected: a station without a receiver), boots the image headless and
+reports PASS or FAIL for each of these (exit status 1 if any failed):
+
+1. the start line (`bench console on the UART0 console`) and the prompt
+   (`bench> `) are on the console;
+2. typed commands are answered: `help` lists `help` and every command
+   `components/bench/bench.c` registers (the receiver link's hooks only when
+   the build has them), `ftimes status` answers `not running, 0 records`,
+   `ftimes summary` prints the summary line in its form for a recording
+   without a frame (`...; read to published: none; arrival to read: none;
+   0 frames without an interrupt time; longest reader gap ...`) with the
+   `interrupt times since boot` line after it, and an unknown command
+   answers `Unrecognized command`;
+3. the log still reaches the console after the command line started (a log
+   line at least 5 s after the start line);
+4. `GET /` answers; with the first admin password set, the web log (`GET
+   /api/logs?format=text`) has the start line and no console driver error,
+   and `GET /api/health` counts no console drop;
+5. throughout: no `UART driver already installed` or `uart driver error`
+   line, no `[diag:` note, no panic and one boot only.
+
+The firmware's dumb-terminal mode applies here (the script does not answer
+the terminal status request), so a log line that comes while the prompt
+waits follows it on the same line (`bench> I (2014) network: ...`). QEMU
+stops with the script as with `smoke.py`. The `qemu-bench-console` CI job
+runs it with `--out qemu-bench-console` and uploads that directory and the
+build log.
 
 ## One host thread for both cores
 

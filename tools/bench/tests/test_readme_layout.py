@@ -28,5 +28,6 @@ def test_layout_names_every_benchlib_module():
 def test_layout_names_every_test_with_its_own_rule():
     """Tests that need something special (Node.js, Docker, a script's options) are named in the tests/ row."""
     table = layout_table((BENCH / "README.md").read_text(encoding="utf-8"))
-    for name in ("test_ui_text.py", "test_docker_caster.py", "test_docker_run_script.py", "test_readme_layout.py"):
+    for name in ("test_ui_text.py", "test_ui_casters.py", "test_docker_caster.py", "test_docker_run_script.py",
+                 "test_readme_layout.py"):
         assert f"`{name}`" in table, name

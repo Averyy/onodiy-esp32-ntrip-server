@@ -22,13 +22,14 @@ concurrency:
 # to a newer image: docker pull espressif/idf:<tag>, then
 #   docker image inspect espressif/idf:<tag> --format '{{index .RepoDigests 0}}'
 # and use that digest in every job that runs in it (firmware, firmware-bench,
-# host-tests, qemu-smoke). tools/ci/host_tests_linux.sh reads the image and
-# the commands of the host-tests job from this file.
+# host-tests, qemu-smoke, qemu-bench-console). tools/ci/host_tests_linux.sh
+# reads the image and the commands of the host-tests job from this file.
 #
 # Jobs: firmware (the station image, uploaded), firmware-bench (the
 # sdkconfig.bench overlay built and checked like the station image, so code
 # that only bench builds compile cannot rot; nothing uploaded), host-tests,
-# bench-tools (pytest), qemu-smoke, and release (tags only).
+# bench-tools (pytest), qemu-smoke, qemu-bench-console (the bench overlay
+# run in QEMU: its console answers), and release (tags only).
 # The actions are still referenced by version tag; pin each to a full commit
 # SHA (with the tag as a comment) before the repository goes public.
 
@@ -248,6 +249,57 @@ jobs:
             qemu-build.log
             qemu-smoke/
             qemu-e2e/
+
+  # The bench overlay in QEMU (sdkconfig.qemu plus sdkconfig.bench): the bench
+  # console's command line answers on UART0 while the log keeps reaching the
+  # console beside it (tools/qemu/bench_console.py). Both use the console
+  # UART's one driver, which only a running image shows; firmware-bench only
+  # builds the overlay. A development check only; nothing here is released.
+  qemu-bench-console:
+    name: QEMU bench console
+    runs-on: ubuntu-24.04
+    container: espressif/idf@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c  # v6.1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # git describe names the build
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.24"
+
+      - name: Build (QEMU and bench overlays)
+        shell: bash
+        run: |
+          set -o pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
+          # The image ships qemu-xtensa; install it only if a newer image does not.
+          if ! command -v qemu-system-xtensa >/dev/null; then
+            python "$IDF_PATH/tools/idf_tools.py" install qemu-xtensa
+            . "$IDF_PATH/export.sh"
+          fi
+          tools/qemu/run.sh --overlay sdkconfig.bench --build-only 2>&1 | tee qemu-bench-build.log
+          if grep -E "unknown kconfig symbol|but is not visible" qemu-bench-build.log; then
+            echo "::error::sdkconfig.qemu or sdkconfig.bench sets a symbol this IDF version does not know or ignores"
+            exit 1
+          fi
+
+      - name: Bench console
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          uv run tools/qemu/bench_console.py --out qemu-bench-console
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qemu-bench-console-${{ github.sha }}
+          if-no-files-found: warn
+          path: |
+            qemu-bench-build.log
+            qemu-bench-console/
 
   # A tag vX.Y.Z[-PRE] becomes a GitHub Release with what stations download:
   # the app image the firmware job built as that release version, the receiver

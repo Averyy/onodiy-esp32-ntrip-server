@@ -353,13 +353,14 @@ ftimes dump             the whole recording as CSV, ending with "BENCH ftimes du
   after it ended by itself; `ftimes stop` ends a running one early and
   prints it. The line names the records, frames, passes and stalls, the
   read-to-published percentiles, right after them the arrival-to-read
-  percentiles over the frames with an interrupt time and the frames
-  without one (`; arrival to read p50 A p95 B p99 C p99.9 D max E us (n
-  N); M frames without an interrupt time`, or `; arrival to read: none`
-  when no frame had one), the longest reader gap and, when a stall
-  is in the recording, the zero-wait capped passes after it, when the ring
-  was empty again and when the first frame was published after it; with
-  the clock set by SNTP also the epoch delays per constellation, counted
+  percentiles over the frames with an interrupt time (`; arrival to read
+  p50 A p95 B p99 C p99.9 D max E us (n N)`, or `; arrival to read: none`
+  when no frame had one), always followed by the count of frames without
+  one (`; M frames without an interrupt time`, also when it is 0 or every
+  frame), the longest reader gap and, when a stall is in the recording,
+  the zero-wait capped passes after it, when the ring was empty again and
+  when the first frame was published after it; with the clock set by
+  SNTP also the epoch delays per constellation, counted
   from the arrival of each epoch's first frame (frames with an interrupt
   time only). A second line always follows it with the link's pairing of
   interrupt times since boot: `BENCH ftimes interrupt times since boot: X
@@ -394,7 +395,7 @@ ftimes dump             the whole recording as CSV, ending with "BENCH ftimes du
 | `benchlib/ntrip.py` | NTRIP helpers for the local tools: chunked transfer coding, request parsing with the password masked, a frame recorder (CRC, bytes outside frames, cut end) |
 | `benchlib/um982_sim.py` | the scripted UM982 command responder (test tooling) behind `rtcm_replay.py --respond`, which the replay and the QEMU e2e use: version, configuration dump, signal-group switches with restarts, the station messages as configured |
 | `docker/bkg-caster/` | Dockerfile, configuration and scripts for the optional BKG caster test peer |
-| `tests/` | pytest; RTCM test frames are built field by field from the public layouts and cross-checked with pyrtcm; `bootprobe.py` runs against a scripted receiver over a socketpair; the replay, fake caster and timing tools run over local sockets; `test_ui_text.py` runs sentences the web UI builds from the station's status (`components/web/ui/js`) in Node.js (skipped without it); `test_docker_run_script.py` checks the options of `docker/bkg-caster/run.sh` (`--print`, no Docker needed); `test_docker_caster.py` only with `RUN_DOCKER_TESTS=1`; `test_readme_layout.py` checks that this table names every `benchlib` module |
+| `tests/` | pytest; RTCM test frames are built field by field from the public layouts and cross-checked with pyrtcm; `bootprobe.py` runs against a scripted receiver over a socketpair; the replay, fake caster and timing tools run over local sockets; `test_ui_text.py` runs sentences the web UI builds from the station's status (`components/web/ui/js`) in Node.js (skipped without it); `test_ui_casters.py` drives the caster editor over a small DOM in Node.js and checks the body its Save sends (skipped without it); `test_bench_console_checks.py` checks the pure parts of `tools/qemu/bench_console.py` (the commands it expects from `components/bench/bench.c`, the `ftimes summary` form); `test_docker_run_script.py` checks the options of `docker/bkg-caster/run.sh` (`--print`, no Docker needed); `test_docker_caster.py` only with `RUN_DOCKER_TESTS=1`; `test_readme_layout.py` checks that this table names every `benchlib` module |
 
 `rtcm_replay.py`, `fake_caster.py`, `ntrip_timing.py` and the `benchlib`
 modules they use (`rtcm`, `stream`, `common`, `replay`, `ntrip`, `um982_sim`

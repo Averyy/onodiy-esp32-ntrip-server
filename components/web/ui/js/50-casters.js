@@ -220,6 +220,11 @@ function casterEditor(entry, opts) {
   const pw = pwInput({ maxlength: 63, placeholder: cfg.password_set ? 'Stored (leave empty to keep)' : '' });
   const clearPw = checkbox('Remove the stored password', false);
   const backoff = selectInput([['standard', 'Standard'], ['polite', 'Polite (slower retries)']], cfg.backoff_profile === 'polite' ? 'polite' : 'standard');
+  /* The retry pace across caster switches. presetPace: a preset set the pace shown (in this editor, or RTK2go's fixed
+   * polite of a stored RTK2go slot), not the owner. ownPace: the owner's pace to go back to: the stored one where the
+   * owner sets it (Other caster, Centipede, Emlid, RTKDirect), or what they picked here; else standard. */
+  let presetPace = !isNew && kind === 'rtk2go';
+  let ownPace = !isNew && kind !== 'rtk2go' && kind !== 'onocoy' ? backoff.value : 'standard';
   const raw = checkbox('Send NTRIP 2.0 data without chunked encoding', cfg.v2_raw_body, 'Only for casters that need it; most expect chunks.');
 
   const F = {
@@ -319,12 +324,15 @@ function casterEditor(entry, opts) {
     const prev = kind;
     kind = presetSel.value;
     const p = PRESETS.find(x => x.id === kind) || {};
-    const prevPreset = PRESETS.find(x => x.id === prev) || {};
-    const prevLabel = prevPreset.label;
-    /* A preset without a pace of its own (Other caster; Onocoy, whose pace the save fixes) never keeps the one the
-     * previous preset set (RTK2go's polite): back to the pace stored for this slot as a custom caster, else standard. */
-    if (!p.backoff_profile && prevPreset.backoff_profile) {
-      backoff.value = !isNew && presetOf(cfg.host) === 'custom' && cfg.backoff_profile === 'polite' ? 'polite' : 'standard';
+    const prevLabel = (PRESETS.find(x => x.id === prev) || {}).label;
+    /* A preset with a pace of its own sets it. One without (Other caster; Onocoy, whose pace the save fixes) never
+     * keeps a pace a preset set (RTK2go's polite): back to the owner's. A pace the owner set stays. */
+    if (p.backoff_profile === 'polite' || p.backoff_profile === 'standard') {
+      backoff.value = p.backoff_profile;
+      presetPace = true;
+    } else if (presetPace) {
+      backoff.value = ownPace;
+      presetPace = false;
     }
     if (!name.value || name.value === prevLabel) name.value = kind === 'custom' ? '' : p.label;
     if (kind === 'onocoy') {
@@ -336,7 +344,6 @@ function casterEditor(entry, opts) {
       port.value = String(p.port);
       version.set(p.ntrip_version);
       tls.input.checked = false;
-      if (p.backoff_profile === 'polite' || p.backoff_profile === 'standard') backoff.value = p.backoff_profile;
     } else if (prev !== 'custom') {
       host.value = '';
       port.value = '2101';
@@ -347,6 +354,10 @@ function casterEditor(entry, opts) {
   presetSel.addEventListener('change', () => {
     dirty = true;
     applyPreset();
+  });
+  backoff.addEventListener('change', () => {
+    ownPace = backoff.value;
+    presetPace = false;
   });
   tls.input.addEventListener('change', () => {
     if (onocoy() && !testSlot) port.value = String(tls.input.checked ? preset.tls_port : preset.port);

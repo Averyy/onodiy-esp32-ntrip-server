@@ -4,6 +4,7 @@ menu "Station: bench console (bench builds only)"
 
     config BENCH_CONSOLE
         bool "Bench console on the UART0 console (never in a release)"
+        depends on ESP_CONSOLE_UART
         default n
         select UM98X_FLASH_BYTE_CAPTURE
         help
@@ -20,5 +21,8 @@ menu "Station: bench console (bench builds only)"
             diagnostics) and prints a PASS/FAIL line. Nothing runs at boot
             except the one-shot stop key, and only when armed. The release
             job refuses a build with this on.
+
+            The command line reads the console UART through the driver the
+            log tap installs at boot (it never installs a second one).
 
 endmenu

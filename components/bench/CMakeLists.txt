@@ -6,4 +6,4 @@
 idf_component_register(
     SRCS "bench.c"
     INCLUDE_DIRS "include"
-    PRIV_REQUIRES console station um98x_flash pkg_store settings lifecycle esp_timer gnss_link network)
+    PRIV_REQUIRES console esp_driver_uart station um98x_flash pkg_store settings lifecycle esp_timer gnss_link network)

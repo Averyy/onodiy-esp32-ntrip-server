@@ -31,6 +31,8 @@
 #include <string.h>
 #include <sys/time.h>
 
+#include "driver/uart.h"
+#include "driver/uart_vfs.h"
 #include "esp_console.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -39,6 +41,7 @@
 #include "freertos/task.h"
 #include "gnss_link.h"
 #include "lifecycle.h"
+#include "linenoise/linenoise.h"
 #include "network.h"
 #include "pkg_store.h"
 #include "settings.h"
@@ -916,24 +919,118 @@ esp_err_t bench_boot_early(void)
     return err;
 }
 
+/* ---- the command line ------------------------------------------------------------------ */
+
+#define CONSOLE_UART   CONFIG_ESP_CONSOLE_UART_NUM
+#define CONSOLE_RX_BUF 256    /* the driver needs more than the 128-byte FIFO */
+#define REPL_PROMPT    "bench> "
+#define REPL_STACK     6144   /* internal RAM: commands write settings and the journal (flash) */
+#define REPL_PRIO      2
+#define REPL_HISTORY   32
+
+/* Input through the console UART's driver as it is. The log tap (diag)
+ * installs that driver at boot, with the transmit buffer its console writer
+ * needs, and writes every log line through it. IDF's REPL constructors
+ * (esp_console_new_repl_uart, and esp_console_new_repl_stdio through
+ * esp_stdio_install_io_driver) install a driver of their own; with one
+ * already there that fails, and their error path then deletes the installed
+ * driver: no command line, and every log line after it fails in the driver.
+ * So nothing is installed here while a driver is there. */
+static esp_err_t console_input(void)
+{
+    if (!uart_is_driver_installed(CONSOLE_UART)) {
+        /* The log tap could not install it (it logged why): reads need a driver. */
+        esp_err_t err = uart_driver_install(CONSOLE_UART, CONSOLE_RX_BUF, 0, 0, NULL, 0);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    /* Terminals send CR for Enter and linenoise ends a line at LF. Output
+     * keeps the console's configured line ending, which the log tap's own
+     * writes follow too. */
+    if (uart_vfs_dev_port_set_rx_line_endings(CONSOLE_UART, ESP_LINE_ENDINGS_CR) != 0) {
+        return ESP_FAIL;
+    }
+    /* stdin (and stdout, as the log tap already set it) through the driver:
+     * reads block on its receive buffer instead of polling the FIFO. */
+    uart_vfs_dev_use_driver(CONSOLE_UART);
+    return ESP_OK;
+}
+
+/* esp_console and linenoise as IDF's REPL sets them up. */
+static esp_err_t repl_init(void)
+{
+    esp_console_config_t cc = ESP_CONSOLE_CONFIG_DEFAULT();
+#if CONFIG_LOG_COLORS
+    cc.hint_color = atoi(LOG_COLOR_CYAN);
+#else
+    cc.hint_color = -1;
+#endif
+    esp_err_t err = esp_console_init(&cc);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = esp_console_register_help_command();
+    if (err == ESP_OK && linenoiseHistorySetMaxLen(REPL_HISTORY) != 1) {
+        err = ESP_ERR_NO_MEM;
+    }
+    if (err == ESP_OK && linenoiseSetMaxLineLen(cc.max_cmdline_length) != 0) {
+        err = ESP_ERR_INVALID_ARG;
+    }
+    if (err != ESP_OK) {
+        (void)esp_console_deinit();
+        return err;
+    }
+    linenoiseSetMultiLine(1);
+    linenoiseSetCompletionCallback(&esp_console_get_completion);
+    linenoiseSetHintsCallback((linenoiseHintsCallback *)&esp_console_get_hint);
+    /* A terminal that does not answer the status request (a capture, a
+     * script on a socket) gets plain line input without escape sequences. */
+    if (linenoiseProbe() != 0) {
+        linenoiseSetDumbMode(1);
+    }
+    return ESP_OK;
+}
+
+static void repl_task(void *arg)
+{
+    (void)arg;
+    /* Unbuffered: linenoise reads one byte at a time. */
+    setvbuf(stdin, NULL, _IONBF, 0);
+    printf("\nBench console: type help for the commands.\n");
+    for (;;) {
+        char *line = linenoise(REPL_PROMPT);
+        if (line == NULL) {
+            /* A read error: try again without spinning. */
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        if (line[0] != '\0') {
+            (void)linenoiseHistoryAdd(line);
+        }
+        int ret = 0;
+        esp_err_t err = esp_console_run(line, &ret);
+        if (err == ESP_ERR_NOT_FOUND) {
+            printf("Unrecognized command\n");
+        } else if (err == ESP_OK && ret != 0) {
+            printf("Command returned non-zero error code: 0x%x (%s)\n", ret, esp_err_to_name(ret));
+        } else if (err != ESP_OK && err != ESP_ERR_INVALID_ARG) {   /* INVALID_ARG: an empty line */
+            printf("Internal error: %s\n", esp_err_to_name(err));
+        }
+        linenoiseFree(line);
+    }
+}
+
 esp_err_t bench_start(void)
 {
-    esp_console_repl_t *repl = NULL;
-    esp_console_repl_config_t rc = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
-    rc.prompt = "bench> ";
-    rc.task_stack_size = 6144;
-    esp_console_dev_uart_config_t uc = {
-        .channel = CONFIG_ESP_CONSOLE_UART_NUM,
-        .baud_rate = CONFIG_ESP_CONSOLE_UART_BAUDRATE,
-        .tx_gpio_num = -1,
-        .rx_gpio_num = -1,
-    };
-    esp_err_t err = esp_console_new_repl_uart(&uc, &rc, &repl);
+    esp_err_t err = console_input();
+    if (err == ESP_OK) {
+        err = repl_init();
+    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "bench console not started: %s", esp_err_to_name(err));
         return err;
     }
-    (void)esp_console_register_help_command();
     reg("listen", "Listen only on the receiver's COM1: listen <baud> <seconds>", cmd_listen);
     reg("version", "The version query: version <baud> " TOK_SEND, cmd_version);
     reg("listen_pc", "Listen only while a PC flashes the receiver over its other port: listen_pc <baud> <seconds>",
@@ -973,11 +1070,15 @@ esp_err_t bench_start(void)
                     " | heapfrag free",
         cmd_heapfrag);
     reg("linkrestart", "The ladder's link restart now (nothing sent to the receiver): linkrestart", cmd_linkrestart);
-    err = esp_console_start_repl(repl);
-    if (err == ESP_OK) {
-        ESP_LOGW(TAG, "bench console on the UART0 console (this is a bench build, never a release); type help");
+    if (xTaskCreatePinnedToCore(repl_task, "console_repl", REPL_STACK, NULL, REPL_PRIO, NULL, tskNO_AFFINITY) !=
+        pdPASS) {
+        ESP_LOGE(TAG, "bench console not started: no memory for its task");
+        (void)esp_console_deinit();
+        return ESP_ERR_NO_MEM;
     }
-    return err;
+    ESP_LOGW(TAG, "bench console on the UART%d console (this is a bench build, never a release); type help",
+             CONSOLE_UART);
+    return ESP_OK;
 }
 
 #else
