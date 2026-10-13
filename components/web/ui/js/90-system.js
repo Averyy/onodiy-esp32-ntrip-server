@@ -189,19 +189,22 @@ Views.system = {
     /*
      * Follow a change of network made on this page (or a retry of pending
      * credentials). trial: the PUT's own word that the station tries the new
-     * credentials for 90 s and goes back to `prev` without an address there;
-     * the page then reports either end of that trial and nothing before it:
-     * "Connected" only once the new credentials are the station's (no longer
-     * pending), never while the station reports them refused (cred_reverted
-     * for this network), even when the previous credentials are for the same
-     * network. While the station is out of reach the countdown goes on here.
+     * credentials for 90 s and goes back to `prev` without an address there.
+     * The box above (showPending, from GET /api/wifi) owns the trial's
+     * countdown and the refused, no-address and not-confirmed messages with
+     * their buttons; this line says only what that box cannot know: the
+     * change before the station reports its trial, contact lost and back,
+     * "Connected" (only once the new credentials are the station's, no
+     * longer pending, never while the station reports them refused, even
+     * when the previous credentials are for the same network) and a slow
+     * join without a trial.
      */
     function watchJoin(ssid, persisted, trial, prev) {
       const t0 = Date.now();
       const status = h('div', { class: 'stack' });
       const storeNote = persisted ? null : msg('warn', 'Settings storage unavailable: this network is used until the next restart only.');
       mount(joinBox, h('div', { class: 'foot' }, status));
-      /* One message at a time, rebuilt only when it changes (key). */
+      /* One message at a time, rebuilt only when it changes (key); null = nothing of its own (the box above speaks). */
       let shown = '';
       const say = (key, box) => {
         if (key === shown) return;
@@ -232,8 +235,9 @@ Views.system = {
             const where = name ? [h('a', { href: name }, name), ', or find its address in that router\'s device list (named ' + dhcp + ').'] :
               'find its address in that router\'s device list (named ' + dhcp + ').';
             if (trial && wifi && wifi.cred_trial) {
-              say('lost-trial', msg('warn', h('strong', null, 'This page lost contact with the station while it tries ' + what + ': '), trialLeftEl(),
-                '. If ' + ssid + ' gives it an address, it stays there: open it on that network, ', where,
+              /* The countdown stays in the box above (it keeps ticking without the station). */
+              say('lost-trial', msg('warn', h('strong', null, 'This page lost contact with the station while it tries ' + what + '.'),
+                ' The countdown above keeps going. If ' + ssid + ' gives it an address, it stays there: open it on that network, ', where,
                 ' Otherwise it goes back to ' + back + ' by itself and this page finds it again.'));
             } else {
               say('lost', msg('warn', 'This page lost contact with the station. If it moved to another network, open it there: ', where));
@@ -245,15 +249,12 @@ Views.system = {
         showWifi(w);
         const mine = w.pending_ssid === ssid;
         if (mine && w.cred_reverted && !w.cred_trial) {
-          /* The trial ended without an address: only that is said. */
-          say('reverted', msg('warn', (w.cred_reverted_why === 'auth_failed' ? ssid + ' refused the new password: the station is back on its ' +
-            'previous credentials' + (w.ssid ? ' (' + w.ssid + ')' : '') + '.' : 'No address on ' + ssid + ' within ' + TRIAL_S +
-            ' seconds: the station is back on ' + (w.ssid || 'the previous network') + '.') +
-            ' The new credentials are kept as pending; try them again or discard them above.'));
+          /* The trial ended without an address: the box above says why, with Try again and Discard. */
+          clear(joinBox);
           done();
         } else if (w.cred_trial) {
-          say('trial', msg('info', h('strong', null, 'Trying ' + what + ': '), trialLeftEl(),
-            '. Without an address there the station goes back to ' + back + ' by itself, so this page may lose contact until then.'));
+          /* The box above shows the trial and its countdown. */
+          say('trial', null);
         } else if (w.online && w.ssid === ssid && !(mine && w.cred_pending) && (trial || secs > 2)) {
           /* The new credentials are the station's: connected with them. */
           const moved = w.ip && location.hostname !== w.ip && /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname);
@@ -475,6 +476,14 @@ Views.system = {
     /* A trial's countdown between the polls. */
     const tick = setInterval(tickTrial, 1000);
     let lastSafe = null;
+    /*
+     * The Wi-Fi card is the only place on this page for a trial or pending
+     * credentials (the shell shows no notice here), so a change the status
+     * reports (a trial started in another tab, its end) is read at once
+     * instead of at the next poll, which waits while a form is being edited.
+     */
+    const credKey = n => [n.cred_trial, n.cred_pending, n.cred_reverted, n.cred_reverted_why, n.pending_ssid].join('|');
+    let credReadAt = 0;
 
     return {
       update(st) {
@@ -482,6 +491,13 @@ Views.system = {
         if (sys && active !== lastSafe) {
           lastSafe = active;
           renderMaint();
+        }
+        const n = st && st.network;
+        if (n && wifi && !stopJoin && credKey(n) !== credKey(wifi) && Date.now() - credReadAt > 3000) {
+          credReadAt = Date.now();
+          api('GET', '/api/wifi').then(w => {
+            if (!stopJoin) showWifi(w);
+          }, () => {});
         }
       },
       destroy() {

@@ -413,12 +413,14 @@ function renderNotices() {
   }
   const net = st.network || {};
   const pend = net.pending_ssid || 'the new network';
-  if (net.cred_trial) {
+  /* The System page shows the trial and pending credentials itself (its Wi-Fi card, with the buttons): no notice there. */
+  const onSystem = !!(shell.current && shell.current.name === 'system');
+  if (!onSystem && net.cred_trial) {
     /* No buttons while a trial runs: it ends by itself, either way. The
      * countdown (a fifth field: kept out of the key) ticks without a rebuild. */
     items.push(['info', 'Trying the new credentials for ' + pend,
       'Without an address there the station goes back to its previous network by itself.', null, 'trial']);
-  } else if (net.cred_pending) {
+  } else if (!onSystem && net.cred_pending) {
     /* After a revert the network in use is the previous one: the same name means only the password changed. */
     const what = net.ssid && net.pending_ssid === net.ssid ? 'the new password for ' + pend : 'the new credentials for ' + pend;
     let title, text;

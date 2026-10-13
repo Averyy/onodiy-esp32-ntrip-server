@@ -842,10 +842,13 @@ function sgTestCtl(done) {
       done();
     }
   }, 'primary');
+  /* No receiver connected (GET /api/gnss state no_receiver): nothing to compare, so Compare waits for one.
+   * The station refuses a start then anyway (409 no_receiver). */
+  const noRxNote = h('span', { class: 'note muted small', id: 'sgt-no-rx', hidden: true }, 'Connect a receiver to compare signal groups.');
   const form = h('div', { class: 'stack' },
     h('div', { class: 'cols c3' }, field('First group (A)', selA).el, field('Second group (B)', selB).el,
       field('Measuring time per group', minutes).el),
-    h('div', { class: 'form-actions' }, startBtn));
+    h('div', { class: 'form-actions' }, startBtn, noRxNote));
   const keepA = btn('Keep A', async () => keep(0, keepA), 'primary');
   const keepB = btn('Keep B', async () => keep(1, keepB), 'primary');
   async function keep(i, b) {
@@ -878,6 +881,12 @@ function sgTestCtl(done) {
       badgeEl.className = 'badge ' + (t.state === 'deciding' ? 'warn' : running ? 'info' : '');
       badgeEl.textContent = lbl(L.sgtState, t.state);
       form.hidden = running;
+      const noRx = !running && !!g && g.state === 'no_receiver';
+      /* A start in flight keeps its own disabled state (busy() gives it back when the answer is in). */
+      if (!startBtn.classList.contains('busy')) startBtn.disabled = noRx;
+      noRxNote.hidden = !noRx;
+      if (noRx) startBtn.setAttribute('aria-describedby', noRxNote.id);
+      else startBtn.removeAttribute('aria-describedby');
       if (!running && !defaultsSet && g && g.profile) {
         /* Default: the group running now, and 7 0 (or 3 6 when 7 0 runs). */
         const now = g.profile.signal_group_master + ' ' + g.profile.signal_group_slave;

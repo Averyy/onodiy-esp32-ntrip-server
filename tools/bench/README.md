@@ -344,7 +344,7 @@ ring is full):
 ftimes 120              BENCH ftimes: recording frame and drain-pass times for 120 s in the background ...
 stall 2000              BENCH stall 2000 ms done after 2003 ms: +... buffer-full, ...
 ftimes status           BENCH ftimes status: running, 4210 records, 95 s left
-ftimes summary          BENCH ftimes 120 s (still recording, 95 s left): ... 1 stalls; after a stall: ...
+ftimes summary          BENCH ftimes 120 s (still recording, 95 s left): ... 1 stalls; read to published ...; arrival to read ...; after a stall: ...
 ftimes stop             BENCH ftimes 120 s (stopped after 31 s): ... (the summary line)
 ftimes dump             the whole recording as CSV, ending with "BENCH ftimes dump end (...)"
 ```
@@ -352,10 +352,23 @@ ftimes dump             the whole recording as CSV, ending with "BENCH ftimes du
 - `ftimes summary` prints the summary line of the latest recording, also
   after it ended by itself; `ftimes stop` ends a running one early and
   prints it. The line names the records, frames, passes and stalls, the
-  read-to-published percentiles, the longest reader gap and, when a stall
+  read-to-published percentiles, right after them the arrival-to-read
+  percentiles and the frames without an interrupt time
+  (`; arrival to read p50 A p95 B p99 C p99.9 D max E us (n N); M frames
+  without an interrupt time`), the longest reader gap and, when a stall
   is in the recording, the zero-wait capped passes after it, when the ring
   was empty again and when the first frame was published after it; with
-  the clock set by SNTP also the epoch delays per constellation.
+  the clock set by SNTP also the epoch delays per constellation, counted
+  from the arrival of each epoch's first frame (frames with an interrupt
+  time only).
+- `ftimes dump` (and `GET /api/diag/frame-times`) writes one CSV line per
+  record. A frame is `F,arrival_us,read_us,published_us,msg,len,sys,epoch,mmb,held,exact`
+  (header `# F,arrival_us,read_us,published_us,msg,len,sys,epoch,mmb,held,exact`;
+  the `P` and `S` lines are as before). `arrival_us` is the `esp_timer`
+  time at which the UART interrupt moved the chunk holding the frame's last
+  byte into the driver's ring buffer, `exact` 1: one FIFO chunk of
+  resolution, about 10 ms at 115200 Bd. Without an interrupt time
+  `arrival_us` is `read_us` and `exact` is 0.
 - A second `ftimes <s>` while one runs answers `BENCH REFUSED`. `stall`,
   `rawstall` and `listen` run during a recording (with their usual
   refusals: receiver maintenance, an open update journal, another receiver
@@ -375,11 +388,13 @@ ftimes dump             the whole recording as CSV, ending with "BENCH ftimes du
 | `benchlib/common.py` | run directories, rotating files, Ctrl-C handling |
 | `benchlib/replay.py` | replay schedules: capture runs timed by their `.idx`, RTCM files grouped into epochs by MSM epoch time, looping on a continuous time base |
 | `benchlib/ntrip.py` | NTRIP helpers for the local tools: chunked transfer coding, request parsing with the password masked, a frame recorder (CRC, bytes outside frames, cut end) |
+| `benchlib/um982_sim.py` | the scripted UM982 command responder (test tooling) behind `rtcm_replay.py --respond`, which the replay and the QEMU e2e use: version, configuration dump, signal-group switches with restarts, the station messages as configured |
 | `docker/bkg-caster/` | Dockerfile, configuration and scripts for the optional BKG caster test peer |
-| `tests/` | pytest; RTCM test frames are built field by field from the public layouts and cross-checked with pyrtcm; `bootprobe.py` runs against a scripted receiver over a socketpair; the replay, fake caster and timing tools run over local sockets; `test_ui_text.py` runs sentences the web UI builds from the station's status (`components/web/ui/js`) in Node.js (skipped without it); `test_docker_caster.py` only with `RUN_DOCKER_TESTS=1` |
+| `tests/` | pytest; RTCM test frames are built field by field from the public layouts and cross-checked with pyrtcm; `bootprobe.py` runs against a scripted receiver over a socketpair; the replay, fake caster and timing tools run over local sockets; `test_ui_text.py` runs sentences the web UI builds from the station's status (`components/web/ui/js`) in Node.js (skipped without it); `test_docker_run_script.py` checks the options of `docker/bkg-caster/run.sh` (`--print`, no Docker needed); `test_docker_caster.py` only with `RUN_DOCKER_TESTS=1`; `test_readme_layout.py` checks that this table names every `benchlib` module |
 
 `rtcm_replay.py`, `fake_caster.py`, `ntrip_timing.py` and the `benchlib`
-modules they use (`rtcm`, `stream`, `common`, `replay`, `ntrip`) need only
+modules they use (`rtcm`, `stream`, `common`, `replay`, `ntrip`, `um982_sim`
+and the `unicore` it builds its replies with) need only
 the Python standard library, so `tools/qemu/e2e.py` can import them without
 this project's environment.
 

@@ -25,7 +25,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from .common import iso
-from .rtcm import summarize_frame
+from .rtcm import best_systems, summarize_frame
 from .stream import Item, StreamSplitter, crc32_unicore, xor_checksum
 
 # ---------------------------------------------------------------------------
@@ -503,12 +503,12 @@ def parse_obsvm(line: str) -> SignalView:
 
 
 def four_band_systems(view: SignalView) -> list[str]:
-    out = []
-    for system in view.signals:
-        bands = [b for b in view.band_list(system) if b in ("L1", "L2", "L5", "L6")]
-        if len(bands) >= 4:
-            out.append(system)
-    return sorted(out)
+    """The rewarded constellations (GPS, GLONASS, Galileo, BeiDou) that show all
+    four reward bands (L1, L2, L5, L6) in this view, sorted.
+
+    The same rule as um982.four_band and the station (rtcm.best_systems): a
+    QZSS with four bands earns no band reward, so it is never listed."""
+    return best_systems({s: view.band_list(s) for s in view.signals})
 
 
 # ---------------------------------------------------------------------------

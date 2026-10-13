@@ -319,7 +319,13 @@ function casterEditor(entry, opts) {
     const prev = kind;
     kind = presetSel.value;
     const p = PRESETS.find(x => x.id === kind) || {};
-    const prevLabel = (PRESETS.find(x => x.id === prev) || {}).label;
+    const prevPreset = PRESETS.find(x => x.id === prev) || {};
+    const prevLabel = prevPreset.label;
+    /* A preset without a pace of its own (Other caster; Onocoy, whose pace the save fixes) never keeps the one the
+     * previous preset set (RTK2go's polite): back to the pace stored for this slot as a custom caster, else standard. */
+    if (!p.backoff_profile && prevPreset.backoff_profile) {
+      backoff.value = !isNew && presetOf(cfg.host) === 'custom' && cfg.backoff_profile === 'polite' ? 'polite' : 'standard';
+    }
     if (!name.value || name.value === prevLabel) name.value = kind === 'custom' ? '' : p.label;
     if (kind === 'onocoy') {
       host.value = testSlot ? cfg.host : preset.host;
