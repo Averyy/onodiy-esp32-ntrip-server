@@ -335,14 +335,32 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    the pcap show one per connection, told apart by their initial sequence
    numbers: lwIP sends a SYN-ACK again with the same one when the client's
    ACK is lost, as when QEMU's MAC drops a received frame, and that is no
-   third connection). lwIP never takes a new SYN on a
-   connection it holds in TIME_WAIT (`tcp_timewait_input`: a reset, or a
-   bare ACK the client answers with a reset), and with lwIP's default MSL
-   that lasts 120 s; Linux hands the same port out again well within that
-   (in a CI-parity run on arm64 the 47th half-closing request reused the
-   port of a connection the station had closed 21 s before, and every SYN
-   for 40 s got a bare ACK). `sdkconfig.defaults` sets MSL to 5 s
-   (TIME_WAIT 10 s); with lwIP's 60 s this check fails (one SYN-ACK);
+   third connection). The check binds that port on purpose, to hold the
+   station to the TIME_WAIT it is configured for: lwIP answers a SYN on a
+   connection it holds in TIME_WAIT with a bare ACK (a reset when the SYN
+   falls inside the old window) and ignores the client's reset
+   (`tcp_in.c`, `tcp_timewait_input`), which TCP allows, since reopening
+   from TIME_WAIT is optional (RFC 9293 section 3.6.1); with lwIP's
+   default MSL that state lasts 120 s. QEMU's network gives the station
+   the host client's own port (libslirp accepts the host connection, then
+   opens the guest one from the same port), so on a Linux host the run
+   meets what a Linux client on the LAN meets: Linux (since 2022) takes
+   the local ports of its connections to one server from a starting point
+   drawn anew every 10 s, and a later connection can land on a port the
+   station still holds. This run's refusals with a body, `Connection:
+   close` and HTTP/1.0 requests leave such ports early on, and its
+   half-closing requests come from the same host. Reproduced in CI's image
+   with lwIP's 60 s and the container's port range narrowed to raise the
+   odds: a half-closing request on a port the station had closed 27 s
+   before got no answer within 30 s, libslirp sent the guest SYN again
+   6 s after the first and then every 12 s, each one got a bare ACK, and
+   the SYN-ACK came 128 s after the station's close; two runs of two
+   failed so, and two of two passed with 10 s. `sdkconfig.defaults` sets
+   MSL to 5 s (TIME_WAIT 10 s). That shortens a hit, it does not remove
+   it: such an answer can still come up to about 18 s late here
+   (libslirp's SYN schedule), inside the 30 s an answer may take, and a
+   slow request names its client port, which finds its packets in the
+   pcap (below). With lwIP's 60 s this check fails (one SYN-ACK);
 4. over 75 s (`--observe`, at least 45): no `Guru Meditation`, `abort()`,
    stack overflow, failed assert, backtrace or task watchdog report on the
    console, and no reboot loop (a restart without the firmware's own
@@ -377,18 +395,23 @@ being dropped.
 
 Every request is watched rather than retried or given a longer timeout
 (all but the polls that wait for the station to come up: QEMU's network
-holds those connections until the guest listens): one still unanswered
-after 5 s gets a line every second in
+holds those connections until the guest listens), the checks' own socket
+exchanges (half-closing requests, pipelining, keep-alive, HTTP/1.0, the
+WebSocket handshake) as well: one still unanswered after 5 s gets a line
+every second in
 `slow-requests.log` with a probe on another connection (does the server
 answer meanwhile?), each QEMU thread's CPU time (is the emulator running?)
 and every console line printed since the request began, all on the host's
-clock; `run.sh --pcap` puts every frame of the run in `qemu-net.pcap`, so
-the request's own packets show whether it reached the station and what
-came back. A request lost without a firmware log line was seen once in CI;
-two causes were found and fixed since (the drain above, and a client port
-reused while the station held it in TIME_WAIT, which the pcap of a parity
-run showed), and the next one, if any, leaves this evidence. The summary
-names the requests that were watched.
+clock, each line naming the request's client port; `run.sh --pcap` puts
+every frame of the run in `qemu-net.pcap`, where QEMU's network keeps that
+port, so the request's own packets show whether it reached the station and
+what came back. Requests lost without a firmware log line in QEMU runs
+had two causes: the drain above (fixed), and a client port the station
+still held in TIME_WAIT (check 3: shortened to 10 s, not removed, so such
+an answer can still come up to about 18 s late here, and a half-closing
+request answered after 5 s or more is named with its port in the check's
+line). The next one, if any, leaves this evidence. The last lines of the
+run say how many requests were watched.
 
 QEMU always stops with it: on a normal end, Ctrl-C, SIGTERM or SIGHUP the
 script stops QEMU on the way out, and `run.sh` gets `--seconds` (observe or

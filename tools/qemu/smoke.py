@@ -110,12 +110,13 @@ or timeout, whichever is longer, plus 180 s for the half-close, drain and
 port reuse checks and a margin) in case this script is killed outright.
 
 Every request but the polls that wait for the station to come up (QEMU's
-network holds those connections until the guest listens) is watched: one
-still unanswered after 5 s gets probes on
-other connections, the QEMU threads' CPU time and the console lines
-meanwhile written to slow-requests.log (no retry, no longer timeout: the
-next one shows why), and every Ethernet frame goes to qemu-net.pcap
-(run.sh --pcap).
+network holds those connections until the guest listens) is watched, the
+checks' own socket exchanges included: one still unanswered after 5 s gets
+probes on other connections, the QEMU threads' CPU time and the console
+lines meanwhile written to slow-requests.log (no retry, no longer timeout:
+the next one shows why), each line naming the request's client port, and
+every Ethernet frame goes to qemu-net.pcap (run.sh --pcap), where QEMU's
+network keeps that port: its packets are the ones to and from it.
 
 Everything lands in --out: the console log, the UART1 capture (raw bytes and
 a timestamped log of both directions), the HTTP answers, qemu-net.pcap,
@@ -178,7 +179,7 @@ HALFCLOSE_ROUTE_REQUESTS = 100
 HALFCLOSE_ROUTE_BODY = 1024
 HALFCLOSE_BUDGET_S = 180   # what they, the drain check and the port reuse check may add (run.sh's backstop)
 # A client reuses its local port this long after the station ended the connection first: the station keeps
-# it in TIME_WAIT for 2 x CONFIG_LWIP_TCP_MSL (sdkconfig.defaults: 10 s) and refuses the port until then.
+# it in TIME_WAIT for 2 x CONFIG_LWIP_TCP_MSL (sdkconfig.defaults: 10 s) and takes no new SYN on it until then.
 REUSE_AFTER_S = 15.0
 # A request still unanswered after this long is watched: probes on other connections, the QEMU threads'
 # CPU time and the console lines meanwhile go to slow-requests.log in the output directory.
@@ -411,11 +412,12 @@ def qemu_threads(pid: int) -> str:
 class SlowWatch:
     """Evidence for an HTTP request that takes long, instead of a retry or a longer timeout.
 
-    request() reports every request here. Once one has waited SLOW_S, a thread writes to slow-requests.log,
-    every second until it ends: a probe on another connection (GET /, does the server answer meanwhile?),
-    the QEMU threads' CPU time (is the emulator running, or starved by the host?) and every console line
-    printed since the request began (what the firmware did meanwhile), all on the host's clock. The pcap
-    (run.sh --pcap) shows the request's own packets."""
+    Every request is reported here (Watched: request() and the checks that use a socket themselves). Once one
+    has waited SLOW_S, a thread writes to slow-requests.log, every second until it ends: a probe on another
+    connection (GET /, does the server answer meanwhile?), the QEMU threads' CPU time (is the emulator running,
+    or starved by the host?) and every console line printed since the request began (what the firmware did
+    meanwhile), all on the host's clock. Each line names the request's client port: the pcap (run.sh --pcap)
+    shows its own packets."""
 
     def __init__(self, out: Path, console: Path, run_log: Path, port: int, t0: float):
         self.path = out / "slow-requests.log"
@@ -477,17 +479,16 @@ class SlowWatch:
         w["watching"] = True
         with self.lock:
             self.count += 1
-        what = w["what"]
-        self._write(f"{what}: no answer after {SLOW_S:.0f} s, watching")
+        self._write(f"{w['what']}: no answer after {SLOW_S:.0f} s, watching")
         pid = qemu_pid_from(self.run_log)
         while True:
             self._console_lines(w)
             if w["done"].is_set():
                 break
-            self._write(f"{what}: {self._probe()}")
-            self._write(f"{what}: QEMU threads (pid {pid}): {qemu_threads(pid) if pid else 'pid unknown'}")
+            self._write(f"{w['what']}: {self._probe()}")
+            self._write(f"{w['what']}: QEMU threads (pid {pid}): {qemu_threads(pid) if pid else 'pid unknown'}")
             w["done"].wait(1.0)
-        self._write(f"{what}: {w['outcome']} after {time.monotonic() - w['t']:.2f} s")
+        self._write(f"{w['what']}: {w['outcome']} after {time.monotonic() - w['t']:.2f} s")
 
     def end(self, w: dict, outcome: str) -> None:
         w["outcome"] = outcome
@@ -500,7 +501,7 @@ _slow_watch: SlowWatch | None = None
 
 
 def watch_requests(out: Path, console: Path, run_log: Path, port: int, t0: float) -> None:
-    """Watch every request() from now on (slow-requests.log in `out`)."""
+    """Watch every request from now on (slow-requests.log in `out`)."""
     global _slow_watch
     _slow_watch = SlowWatch(out, console, run_log, port, t0)
 
@@ -510,26 +511,50 @@ def slow_requests() -> int:
     return _slow_watch.count if _slow_watch is not None else 0
 
 
+class Watched:
+    """One request reported to the watch on slow requests (slow-requests.log), by request() and by the checks
+    that use a socket themselves. port() adds the client's local port to its name once connected: QEMU's
+    network gives the station that same port, so the request's packets are the ones to and from it in
+    qemu-net.pcap (a SYN that got a bare ACK there met a port the station still held in TIME_WAIT). `outcome`
+    is what its last line in the log says; an exception ends it with the exception's text. `on` False: not
+    watched (the polls that wait for the station to come up)."""
+
+    def __init__(self, what: str, on: bool = True):
+        self.w = _slow_watch.begin(what) if _slow_watch is not None and on else None
+        self.outcome = "ended"
+
+    def port(self, sock: socket.socket | None) -> None:
+        if self.w is not None and sock is not None:
+            try:
+                self.w["what"] += f" (client port {sock.getsockname()[1]})"
+            except OSError:
+                pass
+
+    def __enter__(self) -> Watched:
+        return self
+
+    def __exit__(self, kind, err, tb) -> None:
+        if self.w is not None and _slow_watch is not None:
+            _slow_watch.end(self.w, f"{kind.__name__}: {err}" if kind is not None else self.outcome)
+
+
+def answer_text(a: Answer) -> str:
+    """An answer read off a socket, for the watch's last line."""
+    return f"HTTP {a.status or 'no answer'}{'' if a.complete else ' (incomplete)'}"
+
+
 def request(port: int, method: str, path: str, body: dict | None = None, cookie: str | None = None,
             timeout: float = 10.0, host: str | None = None, watch: bool = True) -> tuple[int, dict, bytes]:
     """One HTTP request (a new connection), its answer read whole. `watch`: False for the polls that wait for
     the station to come up (QEMU's network holds a connection until the guest listens: slow by design)."""
-    w = _slow_watch.begin(f"{method} {path}") if _slow_watch is not None and watch else None
-    outcome = "failed"
-    try:
-        r = _request(port, method, path, body, cookie, timeout, host)
-        outcome = f"HTTP {r[0]}"
+    with Watched(f"{method} {path}", on=watch) as w:
+        r = _request(port, method, path, body, cookie, timeout, host, w)
+        w.outcome = f"HTTP {r[0]}"
         return r
-    except Exception as e:
-        outcome = f"{type(e).__name__}: {e}"
-        raise
-    finally:
-        if w is not None:
-            _slow_watch.end(w, outcome)
 
 
 def _request(port: int, method: str, path: str, body: dict | None, cookie: str | None, timeout: float,
-             host: str | None) -> tuple[int, dict, bytes]:
+             host: str | None, w: Watched) -> tuple[int, dict, bytes]:
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     headers = {"Accept-Encoding": "gzip"}
     if host:
@@ -541,6 +566,8 @@ def _request(port: int, method: str, path: str, body: dict | None, cookie: str |
     if cookie:
         headers["Cookie"] = cookie
     try:
+        conn.connect()
+        w.port(conn.sock)
         conn.request(method, path, body=data, headers=headers)
         resp = conn.getresponse()
         raw = resp.read()
@@ -559,7 +586,9 @@ def raw_exchange(port: int, data: bytes, timeout: float = ANSWER_TIMEOUT_S) -> t
     t0 = time.monotonic()
     last = t0
     got = bytearray()
-    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as c:
+    with Watched(data.split(b"\r\n", 1)[0].decode("latin-1")) as w, \
+            socket.create_connection(("127.0.0.1", port), timeout=timeout) as c:
+        w.port(c)
         c.sendall(data)
         c.settimeout(0.2)
         while time.monotonic() - t0 < timeout:
@@ -568,11 +597,13 @@ def raw_exchange(port: int, data: bytes, timeout: float = ANSWER_TIMEOUT_S) -> t
             except socket.timeout:
                 continue
             except OSError:
-                return bytes(got), time.monotonic() - last
+                chunk = b""
             if not chunk:
+                w.outcome = f"{len(got)} bytes, then the end of the connection"
                 return bytes(got), time.monotonic() - last
             got += chunk
             last = time.monotonic()
+        w.outcome = f"{len(got)} bytes, the connection still open"
     return bytes(got), None
 
 
@@ -708,13 +739,17 @@ def raw_request(port: int, method: str, path: str, body: bytes, headers: dict[st
                 timeout: float = 30.0) -> tuple[int, dict, bytes]:
     """A request with any method and a raw body (http.client, Content-Length set)."""
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-    try:
-        conn.request(method, path, body=body, headers=headers or {})
-        resp = conn.getresponse()
-        raw = resp.read()
-        return resp.status, {k.lower(): v for k, v in resp.getheaders()}, raw
-    finally:
-        conn.close()
+    with Watched(f"{method} {path} ({len(body)}-byte body)") as w:
+        try:
+            conn.connect()
+            w.port(conn.sock)
+            conn.request(method, path, body=body, headers=headers or {})
+            resp = conn.getresponse()
+            raw = resp.read()
+            w.outcome = f"HTTP {resp.status}"
+            return resp.status, {k.lower(): v for k, v in resp.getheaders()}, raw
+        finally:
+            conn.close()
 
 
 def error_code(body: bytes) -> tuple[str | None, str | None]:
@@ -955,13 +990,16 @@ class Smoke:
                    f"closed after the second")
         # Keep-alive: an HTTP/1.1 request without "close" leaves the connection open (its answer read whole by its
         # Content-Length, then the connection still there 1 s later), and the second request is answered on it.
-        with socket.create_connection(("127.0.0.1", port), timeout=10) as c:
+        with Watched("GET /api/session twice (keep-alive)") as w, \
+                socket.create_connection(("127.0.0.1", port), timeout=10) as c:
+            w.port(c)
             rd = AnswerReader(c)
             c.sendall(f"GET /api/session HTTP/1.1\r\n{host}\r\n".encode())
             first = rd.read()
             open_after = rd.wait_close(1.0) is None and not rd.buf
             c.sendall(f"GET /api/session HTTP/1.1\r\n{host}Connection: close\r\n\r\n".encode())
             second = rd.read()
+            w.outcome = f"{answer_text(first)}, then {answer_text(second)}"
         self.check(first.status == 200 and first.complete and open_after and second.status == 200
                    and second.complete,
                    f"HTTP/1.1 keep-alive: the first answer ({first.status or 'none'}, {first.framing or 'incomplete'}, "
@@ -993,12 +1031,15 @@ class Smoke:
             return
         answers: list[tuple[str, Answer]] = []
         with socket.create_connection(("127.0.0.1", port), timeout=10) as c:
-            rd = AnswerReader(c)
-            for path in ("/api/session", "/api/status"):
-                c.sendall(f"GET {path} HTTP/1.1\r\n{host}\r\n".encode())
-                answers.append((path, rd.read()))
-            c.sendall(f"GET /api/session HTTP/1.1\r\n{host}Connection: close\r\n\r\n".encode())
-            last = rd.read()
+            with Watched("GET /api/session, /api/status, /api/session (one connection)") as w:
+                w.port(c)
+                rd = AnswerReader(c)
+                for path in ("/api/session", "/api/status"):
+                    c.sendall(f"GET {path} HTTP/1.1\r\n{host}\r\n".encode())
+                    answers.append((path, rd.read()))
+                c.sendall(f"GET /api/session HTTP/1.1\r\n{host}Connection: close\r\n\r\n".encode())
+                last = rd.read()
+                w.outcome = ", ".join(answer_text(a) for a in [a for _, a in answers] + [last])
             closed = rd.wait_close(5.0)
         for path, a in answers:
             want = "chunked" if len(a.body) > cap else "length"
@@ -1065,24 +1106,35 @@ class Smoke:
 
     def halfclose_run(self, method: str, path: str, body: bytes, want: int, code: str, n: int) -> None:
         """`n` requests with `body`, each client half-closing after it: every one answered `want` (error `code`)
-        with Connection: close, and no crash or restart on the console meanwhile."""
+        with Connection: close, and no crash or restart on the console meanwhile. An answer that took SLOW_S or
+        longer passes but is named with its client port (and watched in slow-requests.log): on a Linux host one
+        can meet a port the station still holds in TIME_WAIT, which its packets in the pcap show (a bare ACK to
+        the SYN), see port_reuse_check."""
         port = self.http_port
         req = (f"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
                f"Content-Length: {len(body)}\r\n\r\n").encode() + body
         start = len(self.log_text())
         answered = 0
         first_bad = ""
+        late: list[str] = []
         t0 = time.monotonic()
         for i in range(n):
+            local = None
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=10) as c:
+                with Watched(f"{method} {path} (half-closed, {i + 1} of {n})") as w, \
+                        socket.create_connection(("127.0.0.1", port), timeout=10) as c:
+                    w.port(c)
+                    local = c.getsockname()[1]
                     c.sendall(req)
                     c.shutdown(socket.SHUT_WR)
                     a = AnswerReader(c).read()
+                    w.outcome = answer_text(a)
                 ok = (a.status == want and a.complete and a.headers.get("connection") == "close"
                       and error_code(a.body)[0] == code)
-                what = (f"{a.status or 'no answer'} {error_code(a.body)[0]}{'' if a.complete else ' (incomplete)'}"
-                        f" after {a.seconds:.1f} s")
+                what = ((f"{a.status} {error_code(a.body)[0]}" if a.status else "no answer")
+                        + f"{'' if a.complete else ' (incomplete)'} after {a.seconds:.1f} s")
+                if ok and a.seconds >= SLOW_S:
+                    late.append(f"request {i + 1} after {a.seconds:.1f} s (client port {local})")
             except OSError as e:
                 ok = False
                 what = f"{type(e).__name__}: {e}"
@@ -1091,13 +1143,15 @@ class Smoke:
             if ok and not fatal and BOOT_MARK not in text:
                 answered += 1
                 continue
-            first_bad = f"request {i + 1}: {what}" + (f"; console: {fatal}" if fatal else "") + (
-                "; the station restarted" if BOOT_MARK in text else "")
+            first_bad = (f"request {i + 1}" + (f" (client port {local})" if local else "") + f": {what}"
+                         + (f"; console: {fatal}" if fatal else "")
+                         + ("; the station restarted" if BOOT_MARK in text else ""))
             break
         self.check(answered == n,
                    f"{n} refused requests ({method} {path} with a {len(body)}-byte body) whose client half-closed "
                    f"after it: {answered} answered {want} {code} with Connection: close, no crash "
-                   f"({time.monotonic() - t0:.0f} s" + (f"; {first_bad}" if first_bad else "") + ")")
+                   f"({time.monotonic() - t0:.0f} s" + (f"; {first_bad}" if first_bad else "")
+                   + (f"; answered late: {', '.join(late)}" if late else "") + ")")
 
     def drain_check(self) -> None:
         """A refused body several TCP windows long, sent whole before the client reads: the server answers, ends
@@ -1113,9 +1167,12 @@ class Smoke:
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=10) as c:
                 local = c.getsockname()[1]
-                c.sendall(head + body)
-                rd = AnswerReader(c)
-                a = rd.read()
+                with Watched(f"POST /api/nope ({len(body)}-byte body)") as w:
+                    w.port(c)
+                    c.sendall(head + body)
+                    rd = AnswerReader(c)
+                    a = rd.read()
+                    w.outcome = answer_text(a)
                 closed = rd.wait_close(5.0)
         except OSError as e:
             self.check(False, f"POST /api/nope with a {len(body)}-byte body: {type(e).__name__}: {e}")
@@ -1133,13 +1190,17 @@ class Smoke:
 
     def port_reuse_check(self) -> None:
         """A client that comes back from the same local port after the station ended its connection first.
-        The station holds such a connection in TIME_WAIT for 2 x MSL, and lwIP answers a SYN on it with a
-        bare ACK or a reset, never a SYN-ACK (tcp_in.c, tcp_timewait_input): with lwIP's 120 s, a client
-        whose system hands out the same port again (Linux does, within seconds to a minute) could not
-        connect for up to two minutes. The firmware sets MSL to 5 s (sdkconfig.defaults), so the port
-        must work again REUSE_AFTER_S later: the station's packets (pcap) show a SYN-ACK for each of the
-        two connections (told apart by their initial sequence numbers, so a SYN-ACK sent again is not a third),
-        never a bare ACK to the second SYN."""
+        The station holds such a connection in TIME_WAIT for 2 x MSL. lwIP answers a SYN on it with a bare ACK
+        (a reset when the SYN falls inside the old window) and ignores the client's reset (tcp_in.c,
+        tcp_timewait_input), as TCP allows: reopening from TIME_WAIT is optional (RFC 9293 section 3.6.1).
+        Linux (since 2022) takes the local ports of its connections to one server from a starting point drawn
+        anew every 10 s, so a Linux client now and then comes back on a port the station still holds; QEMU's
+        network passes the host client's port through, so the runs on Linux meet that too, at random. With
+        lwIP's 120 s such a client waited up to two minutes, or its connect() failed. This check does not wait
+        for chance: it binds the port on purpose, to hold the station to the TIME_WAIT it is configured for.
+        The firmware sets MSL to 5 s (sdkconfig.defaults), so the port must work again REUSE_AFTER_S later: the
+        station's packets (pcap) show a SYN-ACK for each of the two connections (told apart by their initial
+        sequence numbers, so a SYN-ACK sent again is not a third), never a bare ACK to the second SYN."""
         port = self.http_port
         req = f"GET /api/session HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n".encode()
 
@@ -1148,11 +1209,14 @@ class Smoke:
                 c.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 c.bind(("127.0.0.1", local))
                 c.settimeout(10)
-                c.connect(("127.0.0.1", port))
-                bound = c.getsockname()[1]
-                c.sendall(req)
-                rd = AnswerReader(c)
-                a = rd.read(timeout)
+                with Watched("GET /api/session (Connection: close, from a bound port)") as w:
+                    c.connect(("127.0.0.1", port))
+                    w.port(c)
+                    bound = c.getsockname()[1]
+                    c.sendall(req)
+                    rd = AnswerReader(c)
+                    a = rd.read(timeout)
+                    w.outcome = answer_text(a)
                 return bound, a, rd.wait_close(5.0) if a.complete else None
         try:
             local, first, closed = exchange(0, ANSWER_TIMEOUT_S)
@@ -1253,9 +1317,12 @@ class Smoke:
         req = (f"GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{self.http_port}\r\nUpgrade: websocket\r\n"
                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
                + (f"Cookie: {cookie}\r\n" if cookie else "") + "\r\n")
-        with socket.create_connection(("127.0.0.1", self.http_port), timeout=10) as c:
+        with Watched("GET /ws (handshake)") as w, \
+                socket.create_connection(("127.0.0.1", self.http_port), timeout=10) as c:
+            w.port(c)
             c.sendall(req.encode())
             a = AnswerReader(c).read()
+            w.outcome = answer_text(a)
         return a.head + (b"\r\n\r\n" if a.head else b"") + a.body
 
     def client_log_checks(self) -> None:

@@ -103,8 +103,11 @@ CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 # ---- Networking -------------------------------------------------------------
 # Casters (up to 8) + web clients (httpd 7) + captive DNS + OTA + SNTP + probes.
 CONFIG_LWIP_MAX_SOCKETS=24
-# Same budget for TCP PCBs: lwIP only evicts lower-priority connections, so a
-# full pool would refuse the next web client or OTA download.
+# Same budget for TCP PCBs. With none left, lwIP frees the oldest one in
+# TIME_WAIT, then one in LAST_ACK, CLOSING, FIN_WAIT_2 or FIN_WAIT_1, and only
+# then an open connection of lower priority (tcp.c, tcp_alloc). Every socket
+# gets the same priority, so 24 open connections would refuse the next web
+# client or OTA download.
 CONFIG_LWIP_MAX_ACTIVE_TCP=24
 CONFIG_LWIP_LOCAL_HOSTNAME="onocoydiy"
 # DNS fallback server used when DHCP leaves no working one (needs
@@ -122,14 +125,25 @@ CONFIG_LWIP_SNTP_MAX_SERVERS=2
 # and never the client's FIN behind them (components/web/web.c,
 # web_linger_close). The receive limit itself stays lwIP's default (none).
 CONFIG_LWIP_SO_RCVBUF=y
-# TIME_WAIT (and the longest LAST_ACK) is 2 x MSL: 10 s instead of lwIP's
-# 120 s. lwIP never takes a new SYN on a connection it holds in TIME_WAIT
-# (tcp_in.c tcp_timewait_input: a reset or a bare ACK), so a client that
-# reuses its port after the station closed first (Connection: close,
-# HTTP/1.0, refusals) cannot connect until TIME_WAIT ends; Linux clients
-# reuse ports that soon (seen in QEMU: SYN, bare ACK, reset, every retry for
-# 40 s). On a LAN a segment never lives seconds, and outgoing connections
-# take a new local port each time.
+# TIME_WAIT (and the longest LAST_ACK) is 2 x MSL: 10 s instead of the 120 s
+# of lwIP's default. The web server ends a connection first after
+# "Connection: close" or HTTP/1.0 (HTTP requires it), after a refusal with a
+# body and when it evicts an idle connection; the station then holds that
+# client port in TIME_WAIT. A new SYN from it gets a bare ACK (a reset when it
+# falls inside the old window) and the client's reset is ignored (tcp_in.c,
+# tcp_timewait_input), which TCP allows: reopening from TIME_WAIT is optional
+# (RFC 9293 section 3.6.1; RFC 1337 for the reset). Linux clients (since 2022,
+# stable kernels too) take the local ports of their connections to one server
+# from a starting point drawn anew every 10 s, so now and then a new
+# connection lands on a port the station still holds. With 120 s such a client
+# waited up to 2 minutes, or its connect() failed; with 10 s it waits 15 s at
+# most (Linux sends the SYN again 1, 3, 7 and 15 s after the first; since 6.5
+# each second up to 5 s, then at 7 and 11 s). Not for memory: TIME_WAIT pcbs
+# count among the 24 above, and lwIP frees the oldest on demand. A stale
+# segment would have to outlive 10 s and fall inside the new connection's
+# window (the station's initial sequence numbers follow RFC 6528): not
+# plausible on a LAN. The station's own outgoing connections skip every port
+# lwIP still holds (tcp.c, tcp_new_port).
 CONFIG_LWIP_TCP_MSL=5000
 
 # ---- mDNS (espressif/mdns, network component): <hostname>.local -----------

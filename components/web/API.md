@@ -2475,11 +2475,19 @@ boot), and a journal in state `unknown` allows no receiver update action.
 - **Connections the station ends first** (`Connection: close`, HTTP/1.0,
   the refusals above, idle ones it evicts) stay in TIME_WAIT on the station
   for 10 s (2 x MSL; `CONFIG_LWIP_TCP_MSL` is 5 s instead of lwIP's 60 s).
-  lwIP never reopens a connection in TIME_WAIT on a new SYN (it answers
-  with a reset or a bare ACK), so a client that reuses its local port for
-  the station within that time cannot connect until it ends; Linux clients
-  reuse ports that soon. With 120 s a script polling the station could
-  lose requests for two minutes.
+  A new connection from the same client port within that time is not
+  taken: lwIP answers its SYN with a bare ACK (or a reset) and ignores the
+  client's reset, which TCP allows (reopening from TIME_WAIT is optional,
+  RFC 9293 section 3.6.1). Such a client waits until TIME_WAIT ends: up to
+  15 s with Linux's SYN retries. Linux clients (since 2022) take the local
+  ports of their connections to one server from a starting point drawn
+  anew every 10 s, so this happens now and then, at random: for each port
+  the station holds, at most about one new connection in 14,000 lands on
+  it (Linux's default range has 14,116 even ports, the ones `connect()`
+  takes first). macOS hands its ports out in order across the whole system
+  and was not seen to come back on one. With lwIP's 120 s, a Linux script
+  that polled with `Connection: close` would now and then wait up to two
+  minutes, or see its `connect()` fail.
 - **Client addresses in the log:** a wrong admin password (section 3) and a
   refused WebSocket handshake name the client: `WebSocket refused for
   192.168.1.23: no session, and public status is off` (also `Host or Origin

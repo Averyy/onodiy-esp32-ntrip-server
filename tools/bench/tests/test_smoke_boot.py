@@ -9,6 +9,7 @@ from __future__ import annotations
 import http.server
 import importlib.util
 import os
+import re
 import sys
 import threading
 import time
@@ -106,9 +107,11 @@ def test_qemu_pid_from_run_log(tmp_path):
 
 class _Slow(http.server.BaseHTTPRequestHandler):
     delay = 1.0
+    slow_client_port = 0   # the client port the last GET /slow came from, as the server saw it
 
     def do_GET(self):  # noqa: N802 - http.server's name
         if self.path == "/slow":
+            type(self).slow_client_port = self.client_address[1]
             time.sleep(self.delay)
         body = b"ok"
         self.send_response(200)
@@ -145,13 +148,45 @@ def test_a_slow_request_is_watched(tmp_path, monkeypatch):
         srv.shutdown()
     assert smoke.slow_requests() == 1
     log = (tmp_path / "slow-requests.log").read_text()
-    assert "GET /slow: no answer after 0 s, watching" in log
-    assert "GET /slow: probe GET / on another connection: HTTP 200" in log
-    assert f"GET /slow: QEMU threads (pid {os.getpid()}): " in log
-    assert "GET /slow: console: W (2) web: printed while the request waited" in log
+    # Each line names the request's client port: the station's peer port in qemu-net.pcap.
+    m = re.search(r"(GET /slow \(client port (\d+)\)): no answer after 0 s, watching", log)
+    assert m and int(m.group(2)) == _Slow.slow_client_port != 0
+    what = m.group(1)
+    assert f"{what}: probe GET / on another connection: HTTP 200" in log
+    assert f"{what}: QEMU threads (pid {os.getpid()}): " in log
+    assert f"{what}: console: W (2) web: printed while the request waited" in log
     assert "old: before the request" not in log
-    assert "GET /slow: HTTP 200 after" in log
+    assert f"{what}: HTTP 200 after" in log
     assert "GET / " not in log.replace("probe GET / ", "")
+
+
+def test_a_checks_own_socket_exchange_is_watched_with_its_port(tmp_path, monkeypatch):
+    # The checks that talk to a socket themselves (raw_exchange, half-closing requests, ...) are watched like
+    # request(): a TIME_WAIT hit in QEMU shows up as a late answer, and its client port finds its packets.
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Slow)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    console = tmp_path / "console.log"
+    console.write_text("")
+    run_log = tmp_path / "run.log"
+    run_log.write_text("")
+    monkeypatch.setattr(smoke, "SLOW_S", 0.3)
+    monkeypatch.setattr(smoke, "_slow_watch", None)
+    smoke.watch_requests(tmp_path, console, run_log, port, time.monotonic())
+    try:
+        data, eof = smoke.raw_exchange(port, b"GET /slow HTTP/1.0\r\n\r\n", timeout=5)
+        with smoke.Watched("not watched", on=False) as w:
+            assert w.w is None
+    finally:
+        srv.shutdown()
+    assert data.startswith(b"HTTP/1.0 200") and eof is not None
+    assert smoke.slow_requests() == 1
+    log = (tmp_path / "slow-requests.log").read_text()
+    m = re.search(r"(GET /slow HTTP/1\.0 \(client port (\d+)\)): no answer after 0 s, watching", log)
+    assert m and int(m.group(2)) == _Slow.slow_client_port != 0
+    assert re.search(re.escape(m.group(1)) + r": \d+ bytes, then the end of the connection after", log)
+    assert "QEMU threads (pid None): pid unknown" in log
+    assert "not watched" not in log
 
 
 def _pcap(segments: list[tuple[str, int, str, int, int, int, int]]) -> bytes:
