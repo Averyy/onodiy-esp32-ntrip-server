@@ -76,7 +76,10 @@ What it does:
      free the connection behind the socket), and 100 more refused by a route
      itself (GET /api/session with a 1 KB body: 400 bad_request); and a
      client back on its local port 15 s after the station ended the
-     connection first (the station's TIME_WAIT is 10 s) is answered at once;
+     connection first (the station's TIME_WAIT is 10 s) is answered less
+     than 5 s after its connect, and the station's packets show its first
+     SYN taken (no bare ACK or reset before the SYN-ACK), so a TIME_WAIT
+     over about 15 s fails;
   4. keeps watching until --observe seconds after the start (at least 45),
      checks that the web server still answers (GET /, and GET /api/status
      with the session), then stops QEMU and fails on a panic (Guru
@@ -182,7 +185,8 @@ HALFCLOSE_BUDGET_S = 180   # what they, the drain check and the port reuse check
 # it in TIME_WAIT for 2 x CONFIG_LWIP_TCP_MSL (sdkconfig.defaults: 10 s) and takes no new SYN on it until then.
 REUSE_AFTER_S = 15.0
 # A request still unanswered after this long is watched: probes on other connections, the QEMU threads'
-# CPU time and the console lines meanwhile go to slow-requests.log in the output directory.
+# CPU time and the console lines meanwhile go to slow-requests.log in the output directory. port_reuse_check
+# also wants its second exchange over within it: a SYN the station turns away costs 5.5 s or more here.
 SLOW_S = 5.0
 # How long an HTTP answer may take to arrive. QEMU's emulated Ethernet MAC drops a received frame when the
 # firmware has no free receive buffer ("RX frame dropped" on the console), and TCP sends it again only seconds
@@ -309,7 +313,7 @@ def boot_text(r: BootReport) -> str:
 
 
 GUEST_IP = "10.0.2.15"                     # the station's address on QEMU's user-mode network
-TCP_FIN, TCP_SYN, TCP_RST = 0x01, 0x02, 0x04
+TCP_FIN, TCP_SYN, TCP_RST, TCP_ACK = 0x01, 0x02, 0x04, 0x10
 
 
 class Segment(NamedTuple):
@@ -318,10 +322,11 @@ class Segment(NamedTuple):
     ack: int
 
 
-def tcp_from_guest(pcap: Path, peer_port: int) -> list[Segment]:
-    """Every TCP segment the station sent from its port 80 to `peer_port`, in a run.sh --pcap file (Ethernet
-    frames, IPv4). QEMU's user-mode network forwards a host connection with the client's own port, so
-    `peer_port` is the host socket's local port."""
+def tcp_segments(pcap: Path, peer_port: int) -> list[tuple[bool, Segment]]:
+    """Every TCP segment between the station's port 80 and `peer_port` in a run.sh --pcap file (Ethernet frames,
+    IPv4), both ways, in the order QEMU passed them: (True when the station sent it, the segment). QEMU's
+    user-mode network forwards a host connection with the client's own port, so `peer_port` is the host
+    socket's local port."""
     try:
         d = pcap.read_bytes()
     except OSError:
@@ -339,11 +344,43 @@ def tcp_from_guest(pcap: Path, peer_port: int) -> list[Segment]:
             continue
         ip = pkt[14:]
         ihl = (ip[0] & 0x0F) * 4
-        if ip[9] != 6 or ip[12:16] != guest or len(ip) < ihl + 14:
+        if ip[9] != 6 or len(ip) < ihl + 14:
             continue
         tcp = ip[ihl:]
-        if int.from_bytes(tcp[0:2], "big") == 80 and int.from_bytes(tcp[2:4], "big") == peer_port:
-            out.append(Segment(tcp[13], int.from_bytes(tcp[4:8], "big"), int.from_bytes(tcp[8:12], "big")))
+        ports = (int.from_bytes(tcp[0:2], "big"), int.from_bytes(tcp[2:4], "big"))
+        if ip[12:16] == guest and ports == (80, peer_port):
+            from_guest = True
+        elif ip[16:20] == guest and ports == (peer_port, 80):
+            from_guest = False
+        else:
+            continue
+        out.append((from_guest, Segment(tcp[13], int.from_bytes(tcp[4:8], "big"), int.from_bytes(tcp[8:12], "big"))))
+    return out
+
+
+def tcp_from_guest(pcap: Path, peer_port: int) -> list[Segment]:
+    """Every TCP segment the station sent from its port 80 to `peer_port` (tcp_segments)."""
+    return [s for from_guest, s in tcp_segments(pcap, peer_port) if from_guest]
+
+
+def refused_syns(segments: list[tuple[bool, Segment]]) -> list[Segment]:
+    """The station's answers to a client's SYN other than a SYN-ACK: every segment it sent while a SYN from the
+    client (tcp_segments) was not yet acknowledged by its SYN-ACK. On a port the station still holds in
+    TIME_WAIT, lwIP answers a SYN with a bare ACK, or with a reset when the SYN falls inside the old window
+    (tcp_in.c, tcp_timewait_input), and takes no connection: any segment here means a SYN was turned away."""
+    waiting: set[int] = set()   # the client's SYNs (by sequence number) without the station's SYN-ACK yet
+    taken: set[int] = set()
+    out: list[Segment] = []
+    for from_guest, s in segments:
+        if not from_guest:
+            if s.flags & (TCP_SYN | TCP_ACK) == TCP_SYN and s.seq not in taken:
+                waiting.add(s.seq)
+        elif s.flags & TCP_SYN:
+            isn = (s.ack - 1) % (1 << 32)
+            waiting.discard(isn)
+            taken.add(isn)
+        elif waiting:
+            out.append(s)
     return out
 
 
@@ -376,7 +413,7 @@ def acked_by_guest(segments: list[Segment]) -> int | None:
     syn = next((x for x in segments if x.flags & TCP_SYN), None)
     if syn is None:
         return None
-    return max((x.ack - syn.ack) % (1 << 32) for x in segments if x.flags & 0x10)
+    return max((x.ack - syn.ack) % (1 << 32) for x in segments if x.flags & TCP_ACK)
 
 
 def qemu_pid_from(run_log: Path) -> int | None:
@@ -1190,61 +1227,78 @@ class Smoke:
 
     def port_reuse_check(self) -> None:
         """A client that comes back from the same local port after the station ended its connection first.
-        The station holds such a connection in TIME_WAIT for 2 x MSL. lwIP answers a SYN on it with a bare ACK
-        (a reset when the SYN falls inside the old window) and ignores the client's reset (tcp_in.c,
-        tcp_timewait_input), as TCP allows: reopening from TIME_WAIT is optional (RFC 9293 section 3.6.1).
-        Linux (since 2022) takes the local ports of its connections to one server from a starting point drawn
-        anew every 10 s, so a Linux client now and then comes back on a port the station still holds; QEMU's
-        network passes the host client's port through, so the runs on Linux meet that too, at random. With
-        lwIP's 120 s such a client waited up to two minutes, or its connect() failed. This check does not wait
-        for chance: it binds the port on purpose, to hold the station to the TIME_WAIT it is configured for.
-        The firmware sets MSL to 5 s (sdkconfig.defaults), so the port must work again REUSE_AFTER_S later: the
-        station's packets (pcap) show a SYN-ACK for each of the two connections (told apart by their initial
-        sequence numbers, so a SYN-ACK sent again is not a third), never a bare ACK to the second SYN."""
+        The station holds such a connection in TIME_WAIT for 2 x MSL and takes no new connection on it until then
+        (tcp_in.c, tcp_timewait_input): a SYN gets a bare ACK (a reset in the rare case that it falls inside the
+        old window), and the reset the client sends back is ignored. Both are upstream lwIP's choices: reopening
+        from TIME_WAIT is optional (RFC 9293 section 3.6.1), and ignoring that reset is RFC 1337's fix against
+        TIME-WAIT assassination, where RFC 9293 section 3.10.7.4 would end TIME_WAIT on it (Linux does by
+        default). The fault was the firmware's: it ran with lwIP's 120 s. Linux (since 2022) takes the local
+        ports of its connections to one server from a starting point drawn anew every 10 s, so a Linux client now
+        and then comes back on a port the station still holds; QEMU's network passes the host client's port
+        through, so the runs on Linux meet that too, at random. With 120 s such a client waited up to two
+        minutes, or its connect() failed. This check does not wait for chance: it binds the port on purpose, to
+        hold the station to the TIME_WAIT it is configured for. The firmware sets MSL to 5 s (sdkconfig.defaults),
+        so REUSE_AFTER_S later the station must take the second connection's first SYN: its packets (pcap) show
+        no bare ACK or reset before its SYN-ACK to that SYN (refused_syns) and one SYN-ACK for each of the two
+        connections (told apart by their initial sequence numbers, so a SYN-ACK sent again is not a third), and
+        the answer ends less than SLOW_S after the connect. A SYN turned away costs more than that here: libslirp
+        sends the guest SYN again only 5.5 to 6 s after the first (6 s, counted in 500 ms ticks). A TIME_WAIT longer
+        than about REUSE_AFTER_S (MSL over about 7.5 s) fails the check. So would a frame of the exchange that
+        QEMU's MAC drops (an answer seconds late with no SYN turned away; slow-requests.log has the console)."""
         port = self.http_port
         req = f"GET /api/session HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n".encode()
 
-        def exchange(local: int, timeout: float) -> tuple[int, Answer, float | None]:
+        def exchange(local: int, timeout: float) -> tuple[int, Answer, float | None, float]:
+            """(local port, answer, when the station's FIN came, seconds from the connect to the answer's end)"""
             with socket.socket() as c:
                 c.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 c.bind(("127.0.0.1", local))
                 c.settimeout(10)
                 with Watched("GET /api/session (Connection: close, from a bound port)") as w:
+                    t0 = time.monotonic()
                     c.connect(("127.0.0.1", port))
                     w.port(c)
                     bound = c.getsockname()[1]
                     c.sendall(req)
                     rd = AnswerReader(c)
                     a = rd.read(timeout)
+                    took = time.monotonic() - t0
                     w.outcome = answer_text(a)
-                return bound, a, rd.wait_close(5.0) if a.complete else None
+                return bound, a, rd.wait_close(5.0) if a.complete else None, took
         try:
-            local, first, closed = exchange(0, ANSWER_TIMEOUT_S)
+            local, first, closed, _ = exchange(0, ANSWER_TIMEOUT_S)
             time.sleep(1.0)   # the station's last segments of it
-            segs = tcp_from_guest(self.out / "qemu-net.pcap", local)
+            both = tcp_segments(self.out / "qemu-net.pcap", local)
+            seen = len(both)  # the first connection's packets; the second's come after them
+            segs = [s for from_guest, s in both if from_guest]
             first_close = guest_closed_first(segs, len(req))
             before = synack_isns(segs)   # the first connection's (every SYN-ACK of it is in by now)
             time.sleep(max(0.0, REUSE_AFTER_S - 1.0))
-            _, again, _ = exchange(local, ANSWER_TIMEOUT_S)
+            _, again, _, took = exchange(local, ANSWER_TIMEOUT_S)
             time.sleep(1.0)
         except OSError as e:
             self.check(False, f"a client back on its port after the station closed first: {type(e).__name__}: {e}")
             return
-        segs = tcp_from_guest(self.out / "qemu-net.pcap", local)
+        both = tcp_segments(self.out / "qemu-net.pcap", local)
+        segs = [s for from_guest, s in both if from_guest]
         isns = synack_isns(segs)
         later = [i for i in isns if i not in before]
         resent = sum(1 for x in segs if x.flags & TCP_SYN) - len(isns)
+        refused = refused_syns(both[seen:])
+        resets = sum(1 for x in refused if x.flags & TCP_RST)
+        turned_away = f"{len(refused) - resets} bare ACK(s), {resets} reset(s)" if refused else "none"
+        held = refused or (before and not later)
         self.check(first.status == 200 and closed is not None and first_close is True and again.status == 200
-                   and again.complete and len(before) == 1 and len(later) == 1,
+                   and again.complete and len(before) == 1 and len(later) == 1 and not refused and took < SLOW_S,
                    f"a client back on its local port {REUSE_AFTER_S:.0f} s after the station ended its connection "
                    f"first (HTTP {first.status or '-'}, the station's FIN "
                    f"{'first' if first_close else 'NOT first' if first_close is False else 'not in the pcap'}): "
-                   f"HTTP {again.status or 'no answer'}{'' if again.complete else ' (incomplete)'} after "
-                   f"{again.seconds:.2f} s; SYN-ACKs from the station: {len(before)} for the first connection, "
-                   f"{len(later)} for the second (by initial sequence number"
-                   + (f"; {resent} sent again" if resent else "") + ")"
-                   + (" (no SYN-ACK for the second: the station still held the first in TIME_WAIT)"
-                      if before and not later else ""))
+                   f"HTTP {again.status or 'no answer'}{'' if again.complete else ' (incomplete)'} "
+                   f"{took:.2f} s after its connect (must be under {SLOW_S:.0f} s); the station's answers to its SYN "
+                   f"before a SYN-ACK: {turned_away}"
+                   + f"; SYN-ACKs from the station: {len(before)} for the first connection, {len(later)} for the "
+                   f"second (by initial sequence number" + (f"; {resent} sent again" if resent else "") + ")"
+                   + (" (the station still held the first connection in TIME_WAIT)" if held else ""))
 
     def signal_test_checks(self) -> None:
         """No receiver attached: a signal-group comparison is refused with no_receiver, and none runs."""

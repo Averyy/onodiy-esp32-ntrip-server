@@ -129,16 +129,22 @@ CONFIG_LWIP_SO_RCVBUF=y
 # of lwIP's default. The web server ends a connection first after
 # "Connection: close" or HTTP/1.0 (HTTP requires it), after a refusal with a
 # body and when it evicts an idle connection; the station then holds that
-# client port in TIME_WAIT. A new SYN from it gets a bare ACK (a reset when it
-# falls inside the old window) and the client's reset is ignored (tcp_in.c,
-# tcp_timewait_input), which TCP allows: reopening from TIME_WAIT is optional
-# (RFC 9293 section 3.6.1; RFC 1337 for the reset). Linux clients (since 2022,
-# stable kernels too) take the local ports of their connections to one server
-# from a starting point drawn anew every 10 s, so now and then a new
-# connection lands on a port the station still holds. With 120 s such a client
-# waited up to 2 minutes, or its connect() failed; with 10 s it waits 15 s at
-# most (Linux sends the SYN again 1, 3, 7 and 15 s after the first; since 6.5
-# each second up to 5 s, then at 7 and 11 s). Not for memory: TIME_WAIT pcbs
+# client port in TIME_WAIT and takes no new connection on it (tcp_in.c,
+# tcp_timewait_input). A new SYN from that port gets a bare ACK, and the reset
+# the client sends back is ignored. Both are upstream lwIP's choices:
+# reopening from TIME_WAIT is optional (RFC 9293 section 3.6.1), and ignoring
+# that reset is RFC 1337's fix against TIME-WAIT assassination
+# (Informational; RFC 9293 section 3.10.7.4 would end TIME_WAIT on it, as
+# Linux does by default). Holding such ports for 120 s was our configuration's
+# fault. Linux clients (since 2022, stable kernels too) take the local ports
+# of their connections to one server from a starting point drawn anew every
+# 10 s, so now and then a new connection lands on a port the station still
+# holds. With 120 s such a client waited up to 2 minutes, or its connect()
+# failed; with 10 s it waits 15 s at most (Linux sends the SYN again 1, 3, 7
+# and 15 s after the first; since 6.5 each second up to 5 s, then at 7 and
+# 11 s). A SYN that falls inside the old connection's window (rare: a client's
+# new initial sequence number lands there by chance) gets a reset instead,
+# and that client's connect() fails at once. Not for memory: TIME_WAIT pcbs
 # count among the 24 above, and lwIP frees the oldest on demand. A stale
 # segment would have to outlive 10 s and fall inside the new connection's
 # window (the station's initial sequence numbers follow RFC 6528): not

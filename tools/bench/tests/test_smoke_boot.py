@@ -254,3 +254,44 @@ def test_connections_counted_by_their_syn_ack_isn():
     held = first + [smoke.Segment(0x10, 9201, 562)]
     assert smoke.synack_isns(held) == [9000]
     assert smoke.synack_isns([]) == []
+
+
+def test_syns_the_station_turned_away(tmp_path):
+    # The shape of a kept capture (lwIP's 60 s MSL): the station closes first, acknowledges the client's FIN,
+    # then answers the client's next SYN from that port with the very same bare ACK, and libslirp resets and
+    # sends the SYN again until TIME_WAIT is over.
+    g, h, p = smoke.GUEST_IP, "10.0.2.2", 40648
+    fin_ack = (g, 80, h, p, 0x10, 2809847892, 1344135)
+    first = [
+        (h, p, g, 80, 0x02, 1344001, 0),                  # SYN
+        (g, 80, h, p, 0x12, 2809847561, 1344002),         # SYN-ACK
+        (h, p, g, 80, 0x18, 1344002, 2809847562),         # the request
+        (g, 80, h, p, 0x19, 2809847648, 1344134),         # the answer with the station's FIN
+        (h, p, g, 80, 0x11, 1344134, 2809847892),         # the client's FIN
+        fin_ack,                                          # its ACK: the station is in TIME_WAIT
+        (g, 80, h, 41000, 0x10, 5, 5),                    # another connection
+    ]
+    held = [(h, p, g, 80, 0x02, 12096001, 0), fin_ack, (h, p, g, 80, 0x04, 1344135, 0)] * 2
+    taken = [
+        (h, p, g, 80, 0x02, 12096001, 0),
+        (g, 80, h, p, 0x12, 2841889311, 12096002),        # SYN-ACK: TIME_WAIT is over
+        (h, p, g, 80, 0x10, 12096002, 2841889312),
+        (g, 80, h, p, 0x18, 2841889312, 12096106),
+    ]
+    pcap = tmp_path / "net.pcap"
+    pcap.write_bytes(_pcap(first + held + taken))
+    both = smoke.tcp_segments(pcap, p)
+    assert [from_guest for from_guest, _ in both] == ([False, True] * 3 + [False, True, False] * 2
+                                                      + [False, True, False, True])
+    assert smoke.tcp_from_guest(pcap, p) == [s for from_guest, s in both if from_guest]
+    # The ACK of the client's FIN in the first connection is no answer to a SYN; the two after the second SYN are.
+    assert smoke.refused_syns(both[:6]) == []
+    assert smoke.refused_syns(both[6:]) == [smoke.Segment(0x10, 2809847892, 1344135)] * 2
+    assert smoke.refused_syns(both) == [smoke.Segment(0x10, 2809847892, 1344135)] * 2
+    # Taken at once: nothing before the SYN-ACK, even when the client sends that SYN again after it.
+    pcap.write_bytes(_pcap(first + taken[:2] + [taken[0]] + taken[2:]))
+    assert smoke.refused_syns(smoke.tcp_segments(pcap, p)[6:]) == []
+    # A SYN inside the old window: lwIP answers with a reset that acknowledges it (RST+ACK).
+    pcap.write_bytes(_pcap(first + [(h, p, g, 80, 0x02, 1344200, 0), (g, 80, h, p, 0x14, 0, 1344201)]))
+    assert smoke.refused_syns(smoke.tcp_segments(pcap, p)[6:]) == [smoke.Segment(0x14, 0, 1344201)]
+    assert smoke.tcp_segments(tmp_path / "missing.pcap", p) == []

@@ -331,36 +331,50 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    only the drain put back as it was aborted six times in 8000, and the
    same build with the drain as it is answered all 8000; last, a client back on
    its local port 15 s after the station ended its connection first
-   (`Connection: close`) gets a SYN-ACK at once (the station's packets in
-   the pcap show one per connection, told apart by their initial sequence
-   numbers: lwIP sends a SYN-ACK again with the same one when the client's
-   ACK is lost, as when QEMU's MAC drops a received frame, and that is no
-   third connection). The check binds that port on purpose, to hold the
-   station to the TIME_WAIT it is configured for: lwIP answers a SYN on a
-   connection it holds in TIME_WAIT with a bare ACK (a reset when the SYN
-   falls inside the old window) and ignores the client's reset
-   (`tcp_in.c`, `tcp_timewait_input`), which TCP allows, since reopening
-   from TIME_WAIT is optional (RFC 9293 section 3.6.1); with lwIP's
-   default MSL that state lasts 120 s. QEMU's network gives the station
-   the host client's own port (libslirp accepts the host connection, then
-   opens the guest one from the same port), so on a Linux host the run
-   meets what a Linux client on the LAN meets: Linux (since 2022) takes
-   the local ports of its connections to one server from a starting point
-   drawn anew every 10 s, and a later connection can land on a port the
-   station still holds. This run's refusals with a body, `Connection:
-   close` and HTTP/1.0 requests leave such ports early on, and its
-   half-closing requests come from the same host. Reproduced in CI's image
-   with lwIP's 60 s and the container's port range narrowed to raise the
-   odds: a half-closing request on a port the station had closed 27 s
-   before got no answer within 30 s, libslirp sent the guest SYN again
-   6 s after the first and then every 12 s, each one got a bare ACK, and
-   the SYN-ACK came 128 s after the station's close; two runs of two
-   failed so, and two of two passed with 10 s. `sdkconfig.defaults` sets
-   MSL to 5 s (TIME_WAIT 10 s). That shortens a hit, it does not remove
-   it: such an answer can still come up to about 18 s late here
-   (libslirp's SYN schedule), inside the 30 s an answer may take, and a
-   slow request names its client port, which finds its packets in the
-   pcap (below). With lwIP's 60 s this check fails (one SYN-ACK);
+   (`Connection: close`) is answered less than 5 s after its connect, and
+   the station's packets in the pcap show that it took the client's first
+   SYN: no bare ACK or reset before its SYN-ACK to it, and one SYN-ACK per
+   connection, told apart by their initial sequence numbers (lwIP sends a
+   SYN-ACK again with the same one when the client's ACK is lost, as when
+   QEMU's MAC drops a received frame, and that is no third connection). A
+   SYN turned away costs more than 5 s here (libslirp sends the guest SYN
+   again 5.5 to 6 s after the first, its 6 s counted in 500 ms ticks; in
+   captures from CI's image 32 such first resends came 5.51 to 5.97 s
+   after the SYN), so either condition catches it, and a TIME_WAIT longer
+   than about 15 s fails the check. A frame of
+   that exchange dropped by QEMU's MAC would fail it too, late with no SYN
+   turned away. The check binds that port on purpose, to hold the station
+   to the TIME_WAIT it is configured for. lwIP takes no new connection on
+   a port it holds in TIME_WAIT (`tcp_in.c`, `tcp_timewait_input`): it
+   answers the SYN with a bare ACK (a reset in the rare case that the SYN
+   falls inside the old window) and ignores the reset the client sends
+   back. Both are upstream lwIP's choices: reopening from TIME_WAIT is
+   optional (RFC 9293 section 3.6.1), and ignoring that reset is RFC
+   1337's fix against TIME-WAIT assassination (Informational; RFC 9293
+   section 3.10.7.4 would end TIME_WAIT on it, as Linux does by default).
+   The fault was ours: with lwIP's default MSL the station held such ports
+   for 120 s. QEMU's network gives the station the host client's own port
+   (libslirp accepts the host connection, then opens the guest one from the
+   same port), so on a Linux host the run meets what a Linux client on the
+   LAN meets: Linux (since 2022) takes the local ports of its connections
+   to one server from a starting point drawn anew every 10 s, and a later
+   connection can land on a port the station still holds. This run's
+   refusals with a body, `Connection: close` and HTTP/1.0 requests leave
+   such ports early on, and its half-closing requests come from the same
+   host. Reproduced in CI's image with lwIP's 60 s and the container's port
+   range narrowed to raise the odds: a half-closing request on a port the
+   station had closed 27 s before got no answer within 30 s, libslirp sent
+   the guest SYN again 5.6 s after the first and then every 12 s, each one
+   got a bare ACK, and the SYN-ACK came 128 s after the station's close;
+   two runs of two failed so, and two of two passed with 10 s.
+   `sdkconfig.defaults` sets MSL to 5 s (TIME_WAIT 10 s). That shortens a
+   hit, it does not remove it: such an answer can still come up to about
+   18 s late here (libslirp's SYN schedule), inside the 30 s an answer may
+   take, and a slow request names its client port, which finds its packets
+   in the pcap (below). With lwIP's 60 s this check fails (measured: four
+   bare ACKs to the second SYN, no answer within 30 s), and so does an MSL
+   of 10 s (TIME_WAIT 20 s; measured: one bare ACK, the answer 5.9 s after
+   the connect);
 4. over 75 s (`--observe`, at least 45): no `Guru Meditation`, `abort()`,
    stack overflow, failed assert, backtrace or task watchdog report on the
    console, and no reboot loop (a restart without the firmware's own
