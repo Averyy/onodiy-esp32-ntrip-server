@@ -80,9 +80,9 @@ _Static_assert(ESP_ERR_OTA_VALIDATE_FAILED == 0x1503, "OTA validation error code
 #define LINGER_DRAIN_BYTES   (64u * 1024u)
 #define LINGER_DRAIN_MS      2000
 
-/* web_linger_close drains only what FIONREAD reports, which lwIP answers
- * only with SO_RCVBUF support (sockets.c, lwip_ioctl; the receive limit
- * itself stays lwIP's default, none). */
+/* web_linger_close drains only what FIONREAD reports (never the client's
+ * FIN), which lwIP answers only with SO_RCVBUF support (sockets.c,
+ * lwip_ioctl; the receive limit itself stays lwIP's default, none). */
 #if !CONFIG_LWIP_SO_RCVBUF
 #error "web_linger_close needs CONFIG_LWIP_SO_RCVBUF (FIONREAD)"
 #endif
@@ -783,6 +783,30 @@ static bool header_is(httpd_req_t *req, const char *field, const char *type, boo
     return content_type ? web_content_type_is(v, type) : strcmp(v, type) == 0;
 }
 
+/* web_conn_drain's socket: the connection's descriptor. */
+static bool drain_readable(void *ctx, uint32_t wait_ms)
+{
+    return readable_within(*(const int *)ctx, (int32_t)wait_ms);
+}
+
+static int drain_queued(void *ctx)
+{
+    int queued = 0;
+    return ioctl(*(const int *)ctx, FIONREAD, &queued) == 0 ? queued : -1;
+}
+
+static int drain_drop(void *ctx, size_t n)
+{
+    char buf[512];
+    return recv(*(const int *)ctx, buf, n < sizeof(buf) ? n : sizeof(buf), MSG_DONTWAIT);
+}
+
+static uint32_t drain_now(void *ctx)
+{
+    (void)ctx;
+    return now_ms();
+}
+
 void web_linger_close(httpd_req_t *req)
 {
     int fd = httpd_req_to_sockfd(req);
@@ -794,37 +818,26 @@ void web_linger_close(httpd_req_t *req)
         return;   /* reset already: nothing to wait for */
     }
     /*
-     * Drop what the client still sends, but never let recv() take its FIN.
-     * After our half-close a FIN taken by recv() shuts lwIP's receive side
-     * too, and in LAST_ACK (the client's FIN came before ours) lwIP counts
-     * that as a half-close, not a close (api_msg.c do_close_internal): the
-     * socket keeps the connection. The client's ACK of our FIN then frees it
-     * without telling the socket (tcp_in.c tcp_input_delayed_close skips the
-     * error callback once the receive side is shut), and the close() that
-     * follows works on freed memory: a double free, or a newer connection
-     * that reused the block torn down with its request unanswered. So only
-     * the bytes FIONREAD counts are read (recv() stops at that count and never
-     * reaches the FIN behind them); readable with none queued is the FIN or
-     * an error, and the session's close() then does a full close.
+     * Drop what the client still sends (web_conn_drain): the bytes FIONREAD
+     * counts, never the client's FIN behind them. The drain is for the body;
+     * this function used to read on until recv() returned 0, which took the
+     * FIN too, and that was our defect. When the client's FIN came before
+     * ours, our shutdown() above leaves the connection in LAST_ACK; a FIN
+     * taken by recv() then makes the socket layer shut lwIP's receive side
+     * as well (api_lib.c, netconn_recv_data_tcp), which in LAST_ACK stays a
+     * half-close (api_msg.c, lwip_netconn_do_close_internal closes only in
+     * FIN_WAIT_1, FIN_WAIT_2 and CLOSING). The client's ACK of our FIN then
+     * frees the connection without the error callback that tells the socket
+     * (tcp_in.c, tcp_input_delayed_close skips it once the receive side is
+     * shut; lwIP bug #62141, open upstream), and the close() that followed
+     * worked on freed memory (on a test board with heap poisoning: an abort
+     * at the next connection's tcp_alloc). Leaving the FIN unread keeps that
+     * sequence from starting: readable with nothing queued is the FIN (or an
+     * error), and the session's close() then does a full close.
      */
-    char buf[512];
-    size_t dropped = 0;
-    int64_t until = esp_timer_get_time() + (int64_t)LINGER_DRAIN_MS * 1000;
-    while (dropped < LINGER_DRAIN_BYTES) {
-        int64_t left_ms = (until - esp_timer_get_time()) / 1000;
-        if (left_ms <= 0 || !readable_within(fd, (int32_t)left_ms)) {
-            break;
-        }
-        int queued = 0;
-        if (ioctl(fd, FIONREAD, &queued) != 0 || queued <= 0) {
-            break;   /* the client closed (it read the answer), or an error */
-        }
-        int n = recv(fd, buf, (size_t)queued < sizeof(buf) ? (size_t)queued : sizeof(buf), MSG_DONTWAIT);
-        if (n <= 0) {
-            break;
-        }
-        dropped += (size_t)n;
-    }
+    (void)web_conn_drain(&(web_drain_io_t){ .readable = drain_readable, .queued = drain_queued,
+                                            .drop = drain_drop, .now_ms = drain_now, .ctx = &fd },
+                         LINGER_DRAIN_BYTES, LINGER_DRAIN_MS, NULL);
 }
 
 /* Answer `err` (`message` NULL: its default text), and close the connection

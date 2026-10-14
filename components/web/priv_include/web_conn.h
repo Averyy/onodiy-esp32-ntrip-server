@@ -2,10 +2,10 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Per-connection bookkeeping of the HTTP server (pure logic, no IDF or RTOS
- * includes, host-testable). web.c keeps one table under a spinlock and feeds
- * it from the server's open and close callbacks, its receive override, the
- * handlers and the worker.
+ * Per-connection bookkeeping of the HTTP server, and the lingering close's
+ * drain (pure logic, no IDF or RTOS includes, host-testable). web.c keeps one
+ * table under a spinlock and feeds it from the server's open and close
+ * callbacks, its receive override, the handlers and the worker.
  *
  * Request deadline. esp_http_server reads a request (request line, headers,
  * a JSON body, a WebSocket frame) on its one task with only a per-receive
@@ -213,6 +213,56 @@ void web_conn_between_requests(web_conns_t *t);
  * needs to go. It is `new_fd` itself when nothing else may be closed.
  */
 int web_conn_victim(web_conns_t *t, int new_fd, size_t max_open, uint32_t now_ms);
+
+/*
+ * Lingering close (web_linger_close: an answer with "Connection: close" is
+ * out and our side is shut with shutdown(SHUT_WR)). What the client still
+ * sends, a body the handler refused, is read and dropped, so its upload
+ * completes and it reads the answer instead of a reset: unread, the body
+ * keeps the receive window shut.
+ *
+ * The drain is for the body only, and it never reads the client's FIN. Each
+ * step reads at most the bytes the socket reports queued (FIONREAD, which
+ * counts data and never the FIN), so no read reaches the FIN behind them;
+ * readable with nothing queued is that FIN (or an error), and the drain ends
+ * there, leaving the FIN to the full close that follows. The drain this
+ * server had before read on until recv() returned 0, so it took the FIN, and
+ * with our FIN already out that let lwIP free the connection on the client's
+ * ACK without telling the socket; the close() after it then worked on freed
+ * memory (the sequence is in web.c, web_linger_close). The host tests hold
+ * the drain to this against a model of lwIP's socket receive side.
+ */
+
+/** Why web_conn_drain() stopped. */
+typedef enum {
+    WEB_DRAIN_CLOSED = 0,    /**< readable with nothing queued: the client's FIN (left unread), or an error to come */
+    WEB_DRAIN_LIMIT,         /**< max_bytes dropped */
+    WEB_DRAIN_TIMEOUT,       /**< max_ms passed */
+    WEB_DRAIN_ERROR,         /**< queued() or drop() failed */
+} web_drain_end_t;
+
+/** The connection's socket, as the drain sees it. */
+typedef struct {
+    /** Wait at most wait_ms for the socket to be readable (data, the FIN or an error); false = nothing came. */
+    bool (*readable)(void *ctx, uint32_t wait_ms);
+    /** Data bytes queued (FIONREAD: the FIN is not counted); < 0 = error. */
+    int (*queued)(void *ctx);
+    /**
+     * Read and drop at most n bytes without waiting; n > 0 and never more
+     * than queued() just reported. @return bytes read (at most n), <= 0 = error.
+     */
+    int (*drop)(void *ctx, size_t n);
+    /** Monotonic milliseconds (compared as (uint32_t)(now - then)). */
+    uint32_t (*now_ms)(void *ctx);
+    void *ctx;
+} web_drain_io_t;
+
+/**
+ * Read and drop what the client still sends, at most `max_bytes` and for at
+ * most `max_ms`, never its FIN (see above). `dropped` (may be NULL): the
+ * bytes dropped.
+ */
+web_drain_end_t web_conn_drain(const web_drain_io_t *io, size_t max_bytes, uint32_t max_ms, size_t *dropped);
 
 #ifdef __cplusplus
 }

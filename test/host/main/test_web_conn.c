@@ -400,3 +400,237 @@ TEST_CASE("web conn: the HTTP/1.0 flag follows pipelined requests and stays for 
     TEST_ASSERT_TRUE(web_conn_open(&t, 71, T0 + 5u));
     TEST_ASSERT_FALSE(web_conn_http10(&t, 71));
 }
+
+/* ---- lingering close: the drain ------------------------------------------------------------ */
+
+/*
+ * A model of what the drain sees of an lwIP TCP socket (lwIP 2.2, as in
+ * ESP-IDF v6.1), from the client's side: data segments that arrive at given
+ * times, then possibly the client's FIN.
+ *  - FIONREAD (queued) counts data arrived and not read, never the FIN: the
+ *    FIN reaches the socket as a zero-length entry (api_msg.c, recv_tcp).
+ *  - recv() (drop) copies queued data, at most n and the caller's 512-byte
+ *    buffer. A call that finds data returns it and leaves a FIN behind it for
+ *    the next call (sockets.c lwip_recv_tcp, NETCONN_NOFIN); a call that
+ *    finds no data but the FIN returns 0 and takes it, which shuts lwIP's
+ *    receive side (api_lib.c, netconn_recv_data_tcp): `fin_taken`. With
+ *    neither, -1 (EWOULDBLOCK).
+ *  - readable: data unread or the FIN there; otherwise the clock moves on
+ *    to the next arrival, or by the whole wait.
+ */
+#define DRAIN_MAX_BYTES (64u * 1024u)   /* web.c LINGER_DRAIN_BYTES */
+#define DRAIN_MAX_MS    2000u           /* web.c LINGER_DRAIN_MS */
+#define DRAIN_BUF       512u            /* web.c drain_drop's buffer */
+#define NO_FIN          UINT32_MAX
+
+typedef struct {
+    uint32_t now;
+    size_t segs;
+    uint32_t seg_at[64];       /* ms after the start */
+    size_t seg_len[64];
+    uint32_t fin_at;           /* ms after the start (after the last segment), NO_FIN = never */
+    uint32_t start;
+    size_t read;               /* data bytes read */
+    int last_queued;           /* what queued() reported last */
+    bool queued_fails;
+    bool fin_taken;            /* a recv() returned the FIN */
+    bool over_asked;           /* drop() asked for more than queued() had reported */
+    unsigned drops;
+} sock_model_t;
+
+static size_t model_arrived(const sock_model_t *m)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < m->segs; i++) {
+        if ((uint32_t)(m->now - m->start) >= m->seg_at[i]) {
+            n += m->seg_len[i];
+        }
+    }
+    return n;
+}
+
+static bool model_fin_in(const sock_model_t *m)
+{
+    return m->fin_at != NO_FIN && (uint32_t)(m->now - m->start) >= m->fin_at;
+}
+
+static bool model_readable(void *ctx, uint32_t wait_ms)
+{
+    sock_model_t *m = ctx;
+    if (model_arrived(m) > m->read || model_fin_in(m)) {
+        return true;
+    }
+    uint32_t at = (uint32_t)(m->now - m->start);
+    uint32_t next = UINT32_MAX;
+    for (size_t i = 0; i < m->segs; i++) {
+        if (m->seg_at[i] > at && m->seg_at[i] < next) {
+            next = m->seg_at[i];
+        }
+    }
+    if (m->fin_at != NO_FIN && m->fin_at > at && m->fin_at < next) {
+        next = m->fin_at;
+    }
+    if (next != UINT32_MAX && next - at <= wait_ms) {
+        m->now = m->start + next;
+        return true;
+    }
+    m->now += wait_ms;
+    return false;
+}
+
+static int model_queued(void *ctx)
+{
+    sock_model_t *m = ctx;
+    m->last_queued = m->queued_fails ? -1 : (int)(model_arrived(m) - m->read);
+    return m->last_queued;
+}
+
+static int model_drop(void *ctx, size_t n)
+{
+    sock_model_t *m = ctx;
+    m->drops++;
+    if (m->last_queued < 0 || n > (size_t)m->last_queued || n == 0) {
+        m->over_asked = true;
+    }
+    size_t avail = model_arrived(m) - m->read;
+    if (avail == 0) {
+        if (model_fin_in(m)) {
+            m->fin_taken = true;
+            return 0;
+        }
+        return -1;
+    }
+    size_t got = n < avail ? n : avail;
+    got = got < DRAIN_BUF ? got : DRAIN_BUF;
+    m->read += got;
+    return (int)got;
+}
+
+static uint32_t model_now(void *ctx)
+{
+    return ((sock_model_t *)ctx)->now;
+}
+
+static void model_init(sock_model_t *m)
+{
+    memset(m, 0, sizeof(*m));
+    m->start = m->now = T0;   /* the clock wraps during the drain */
+    m->fin_at = NO_FIN;
+}
+
+static void model_seg(sock_model_t *m, uint32_t at_ms, size_t len)
+{
+    TEST_ASSERT_LESS_THAN_size_t(64, m->segs);
+    m->seg_at[m->segs] = at_ms;
+    m->seg_len[m->segs] = len;
+    m->segs++;
+}
+
+static web_drain_end_t model_drain(sock_model_t *m, size_t *dropped)
+{
+    web_drain_io_t io = { .readable = model_readable, .queued = model_queued, .drop = model_drop,
+                          .now_ms = model_now, .ctx = m };
+    return web_conn_drain(&io, DRAIN_MAX_BYTES, DRAIN_MAX_MS, dropped);
+}
+
+TEST_CASE("web conn drain: a client that half-closed after its body: the body is read, its FIN is not",
+          "[web_conn]")
+{
+    /* The client's FIN is queued behind its 2-byte body before the drain starts
+     * (the QEMU smoke's half-closing client). */
+    sock_model_t m;
+    model_init(&m);
+    model_seg(&m, 0, 2);
+    m.fin_at = 0;
+    size_t dropped = 0;
+    TEST_ASSERT_EQUAL(WEB_DRAIN_CLOSED, model_drain(&m, &dropped));
+    TEST_ASSERT_EQUAL_size_t(2, dropped);
+    TEST_ASSERT_FALSE(m.fin_taken);
+    TEST_ASSERT_FALSE(m.over_asked);
+    TEST_ASSERT_EQUAL_UINT32(T0, m.now);   /* no waiting */
+
+    /* Only the FIN: nothing is read at all. */
+    model_init(&m);
+    m.fin_at = 0;
+    TEST_ASSERT_EQUAL(WEB_DRAIN_CLOSED, model_drain(&m, &dropped));
+    TEST_ASSERT_EQUAL_size_t(0, dropped);
+    TEST_ASSERT_EQUAL_UINT(0, m.drops);
+    TEST_ASSERT_FALSE(m.fin_taken);
+}
+
+TEST_CASE("web conn drain: a body arriving in segments is read whole, the FIN after it is not", "[web_conn]")
+{
+    /* 16 KB in 1460-byte segments every 5 ms, then the FIN 5 ms after the last:
+     * more than one buffer per segment, and reads that meet a segment half read. */
+    sock_model_t m;
+    model_init(&m);
+    size_t total = 16u * 1024u;
+    uint32_t at = 0;
+    for (size_t left = total; left > 0; at += 5u) {
+        size_t len = left < 1460u ? left : 1460u;
+        model_seg(&m, at, len);
+        left -= len;
+    }
+    m.fin_at = at;
+    size_t dropped = 0;
+    TEST_ASSERT_EQUAL(WEB_DRAIN_CLOSED, model_drain(&m, &dropped));
+    TEST_ASSERT_EQUAL_size_t(total, dropped);
+    TEST_ASSERT_FALSE(m.fin_taken);
+    TEST_ASSERT_FALSE(m.over_asked);
+    TEST_ASSERT_EQUAL_UINT32(T0 + at, m.now);   /* ended when the FIN came */
+
+    /* The FIN in the same instant as the last segment. */
+    model_init(&m);
+    model_seg(&m, 0, 1000u);
+    model_seg(&m, 40u, 3000u);
+    m.fin_at = 40u;
+    TEST_ASSERT_EQUAL(WEB_DRAIN_CLOSED, model_drain(&m, &dropped));
+    TEST_ASSERT_EQUAL_size_t(4000u, dropped);
+    TEST_ASSERT_FALSE(m.fin_taken);
+    TEST_ASSERT_FALSE(m.over_asked);
+}
+
+TEST_CASE("web conn drain: bounded by bytes and by time, the FIN still unread", "[web_conn]")
+{
+    /* More than the limit queued, FIN behind it: stops at exactly the limit. */
+    sock_model_t m;
+    model_init(&m);
+    model_seg(&m, 0, DRAIN_MAX_BYTES + 5000u);
+    m.fin_at = 0;
+    size_t dropped = 0;
+    TEST_ASSERT_EQUAL(WEB_DRAIN_LIMIT, model_drain(&m, &dropped));
+    TEST_ASSERT_EQUAL_size_t(DRAIN_MAX_BYTES, dropped);
+    TEST_ASSERT_FALSE(m.fin_taken);
+    TEST_ASSERT_FALSE(m.over_asked);
+
+    /* A client that sends nothing more and keeps its side open: the time limit. */
+    model_init(&m);
+    TEST_ASSERT_EQUAL(WEB_DRAIN_TIMEOUT, model_drain(&m, &dropped));
+    TEST_ASSERT_EQUAL_size_t(0, dropped);
+    TEST_ASSERT_EQUAL_UINT32(T0 + DRAIN_MAX_MS, m.now);
+
+    /* A trickle: 100 bytes every 500 ms; what came within the time is read. */
+    model_init(&m);
+    for (uint32_t at = 500u; at <= 3000u; at += 500u) {
+        model_seg(&m, at, 100u);
+    }
+    m.fin_at = 3000u;
+    TEST_ASSERT_EQUAL(WEB_DRAIN_TIMEOUT, model_drain(&m, &dropped));
+    TEST_ASSERT_EQUAL_size_t(400u, dropped);
+    TEST_ASSERT_EQUAL_UINT32(T0 + DRAIN_MAX_MS, m.now);
+    TEST_ASSERT_FALSE(m.fin_taken);
+    TEST_ASSERT_FALSE(m.over_asked);
+}
+
+TEST_CASE("web conn drain: an error ends it", "[web_conn]")
+{
+    sock_model_t m;
+    model_init(&m);
+    model_seg(&m, 0, 10u);
+    m.queued_fails = true;
+    size_t dropped = 1;
+    TEST_ASSERT_EQUAL(WEB_DRAIN_ERROR, model_drain(&m, &dropped));
+    TEST_ASSERT_EQUAL_size_t(0, dropped);
+    TEST_ASSERT_EQUAL_UINT(0, m.drops);
+    TEST_ASSERT_EQUAL(WEB_DRAIN_ERROR, model_drain(&m, NULL));   /* `dropped` may be NULL */
+}

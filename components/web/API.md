@@ -2457,11 +2457,17 @@ boot), and a journal in state `unknown` allows no receiver update action.
   window probe; many clients then drop the answer still in their receive
   buffer (the browser shows "connection reset" instead of the 413). Only
   the bytes the socket reports queued (`FIONREAD`, which needs
-  `CONFIG_LWIP_SO_RCVBUF`) are read, never the client's FIN behind them: a
-  `recv()` that takes the FIN after our own makes lwIP free the connection
-  without telling the socket (a half-close in `LAST_ACK`), and the close
-  after it would work on freed memory. Readable with nothing queued is that
-  FIN; the close is then a full one. The server's own warnings for these
+  `CONFIG_LWIP_SO_RCVBUF`) are read, never the client's FIN behind them:
+  the drain is for the body, and readable with nothing queued is that FIN,
+  after which the close is a full one. An earlier drain of this server
+  read until `recv()` returned 0, which took the FIN as well; when the
+  client's FIN had come before ours, that shut lwIP's receive side while
+  the connection waited in `LAST_ACK` for the client's last ACK, and lwIP
+  then freed the connection on that ACK without telling the socket (lwIP
+  bug #62141, open); the close after it worked on freed memory. Reading
+  the FIN was this server's defect, fixed in the drain (`components/web/web.c`,
+  `web_linger_close`; host-tested in `test/host/main/test_web_conn.c`
+  against a model of the socket). The server's own warnings for these
   expected cases (`httpd_uri`, `httpd_txrx`, `httpd_ws`) are logged at
   error level only, as fixed levels (`diag_log_fix_level`) that a `"*"`
   change of the log level keeps; the handlers log the refusals that

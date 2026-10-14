@@ -71,8 +71,9 @@ What it does:
      is refused with 409 no_receiver and GET /api/gnss/signal-test stays
      idle; then 400 refused requests (POST /api/nope with a body) whose
      client ends its sending side right after the body: every one answered
-     404 with "Connection: close", no crash, no restart (a drain that took
-     the client's FIN let lwIP free the connection behind the socket); and a
+     404 with "Connection: close", no crash, no restart (the drain must leave
+     the client's FIN unread: the one before the fix took it, which let lwIP
+     free the connection behind the socket); and a
      client back on its local port 15 s after the station ended the
      connection first (the station's TIME_WAIT is 10 s) is answered at once;
   4. keeps watching until --observe seconds after the start (at least 45),
@@ -1036,10 +1037,14 @@ class Smoke:
     def halfclose_checks(self, n: int = HALFCLOSE_REQUESTS) -> None:
         """Refused requests whose client ends its sending side right after the body (its FIN queued before the
         answer): the server answers, ends its side and drains what the client still sends (web_linger_close).
-        Every one must be answered, with no crash and no restart. A drain that took that FIN shut lwIP's receive
-        side while our FIN was out, and lwIP then freed the connection on the client's ACK without telling the
-        socket: the close() after it worked on freed memory (a double free, or a newer connection torn down
-        with its request unanswered). One bad request in a few hundred, so a few hundred are sent."""
+        Every one must be answered, with no crash and no restart. The drain reads only what FIONREAD counts and
+        leaves that FIN unread; the drain before the fix read until recv() returned 0, took the FIN while our
+        FIN was out (LAST_ACK) and so shut lwIP's receive side too, after which lwIP freed the connection on
+        the client's ACK without telling the socket (lwIP bug #62141) and the close() after it worked on freed
+        memory. Reading the FIN was our defect; test/host/main/test_web_conn.c holds the drain to never reading
+        it. Here that image lost one request in a few hundred or crashed, so a few hundred are sent. That rate is
+        QEMU's (on a test board it answered thousands without a fault): a guard for the path, not a measure of
+        how often a station would fail."""
         port = self.http_port
         req = (f"POST /api/nope HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
                f"Content-Length: 2\r\n\r\n{{}}").encode()

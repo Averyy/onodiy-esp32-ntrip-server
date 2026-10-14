@@ -398,3 +398,40 @@ int web_conn_victim(web_conns_t *t, int new_fd, size_t max_open, uint32_t now_ms
     best->closing = true;
     return best->fd;
 }
+
+web_drain_end_t web_conn_drain(const web_drain_io_t *io, size_t max_bytes, uint32_t max_ms, size_t *dropped)
+{
+    size_t done = 0;
+    web_drain_end_t end = WEB_DRAIN_LIMIT;
+    uint32_t start = io->now_ms(io->ctx);
+    while (done < max_bytes) {
+        uint32_t spent = io->now_ms(io->ctx) - start;
+        if (spent >= max_ms || !io->readable(io->ctx, max_ms - spent)) {
+            end = WEB_DRAIN_TIMEOUT;
+            break;
+        }
+        int queued = io->queued(io->ctx);
+        if (queued < 0) {
+            end = WEB_DRAIN_ERROR;
+            break;
+        }
+        if (queued == 0) {
+            end = WEB_DRAIN_CLOSED;   /* the FIN (or an error) is next: not ours to read */
+            break;
+        }
+        size_t n = (size_t)queued;
+        if (n > max_bytes - done) {
+            n = max_bytes - done;
+        }
+        int got = io->drop(io->ctx, n);
+        if (got <= 0) {
+            end = WEB_DRAIN_ERROR;
+            break;
+        }
+        done += (size_t)got < n ? (size_t)got : n;
+    }
+    if (dropped != NULL) {
+        *dropped = done;
+    }
+    return end;
+}

@@ -149,7 +149,8 @@ esp_err_t web_refuse_and_close_retry(httpd_req_t *req, web_err_t err, uint32_t r
 /**
  * After an answer that closes the connection (Connection: close): end our
  * side (shutdown SHUT_WR) and read and drop what the client still sends,
- * at most 64 KB or 2 s, so it reads the answer instead of a reset.
+ * at most 64 KB or 2 s, so it reads the answer instead of a reset; never
+ * the client's FIN (web_conn_drain): the session's close() is a full close.
  */
 void web_linger_close(httpd_req_t *req);
 /** 500 internal with the esp_err_t name as message. */

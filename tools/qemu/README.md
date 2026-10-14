@@ -305,18 +305,25 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    then 400 refused requests (`POST /api/nope` with a 2-byte body) whose
    client ends its sending side right after the body: each one answered
    `404` with `Connection: close`, no crash and no restart. The client's
-   FIN is then queued before the answer goes out, and a lingering close
-   that let `recv()` take it after our own FIN shut lwIP's receive side in
-   `LAST_ACK`, which lwIP counts as a half-close; the client's ACK of our
-   FIN then freed the connection without telling the socket, and the
-   `close()` that followed worked on freed memory (a double free in the
-   heap, or a newer connection that reused the block closed right after
-   its SYN-ACK, its request unanswered). On the image before the fix this
-   check lost its 22nd request that way (the pcap shows the station's FIN
-   right after the SYN-ACK, before the request), and the same image
-   crashed after 72 and after 165 such requests in two earlier runs; the
-   drain now reads only the bytes `FIONREAD` counts
-   (`components/web/web.c`, `web_linger_close`); last, a client back on
+   FIN is then queued before the answer goes out, and the lingering close
+   reads only the bytes `FIONREAD` counts, never that FIN
+   (`components/web/web.c`, `web_linger_close`). The drain before the fix
+   read on until `recv()` returned 0 and so took the FIN after our own FIN
+   was out: that shut lwIP's receive side in `LAST_ACK`, where lwIP frees
+   the connection on the client's last ACK without telling the socket
+   (lwIP bug #62141), and the `close()` that followed worked on freed
+   memory. Reading the FIN was our defect (the drain only needs the body);
+   this check guards the whole path, and `test/host/main/test_web_conn.c`
+   holds the drain itself to never reading the FIN, against a model of
+   lwIP's socket. How often the old image failed in QEMU is no rate a
+   station would see: here it lost the 22nd request of this check (the
+   pcap shows the station's FIN right after the SYN-ACK, before the
+   request) and crashed after 72 and after 165 in two earlier runs, while
+   on a test board (ESP32-S3 on Wi-Fi) the old drain answered 4400 such
+   requests, one at a time and six at once, without a fault; built with
+   `CONFIG_HEAP_POISONING_COMPREHENSIVE` it aborted three times in 4000
+   (freed memory written, found at the next connection's `tcp_alloc`),
+   and the fixed drain in that build answered all 4000; last, a client back on
    its local port 15 s after the station ended its connection first
    (`Connection: close`) gets a SYN-ACK at once (the station's packets in
    the pcap show one per connection, told apart by their initial sequence
