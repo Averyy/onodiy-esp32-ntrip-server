@@ -2472,29 +2472,41 @@ boot), and a journal in state `unknown` allows no receiver update action.
   error level only, as fixed levels (`diag_log_fix_level`) that a `"*"`
   change of the log level keeps; the handlers log the refusals that
   matter.
-- **Connections the station ends first** (`Connection: close`, HTTP/1.0,
-  the refusals above, idle ones it evicts) stay in TIME_WAIT on the station
-  for 10 s (2 x MSL; `CONFIG_LWIP_TCP_MSL` is 5 s instead of lwIP's 60 s).
-  A new connection from the same client port within that time is not
-  taken: lwIP answers its SYN with a bare ACK and ignores the reset the
-  client sends back, so the client waits until TIME_WAIT ends: up to 15 s
-  with Linux's SYN retries. (A SYN that falls inside the old connection's
-  window gets a reset instead, and the client's `connect()` fails at once;
-  a new initial sequence number lands there only by rare chance.) Both are
-  upstream lwIP's choices: reopening from TIME_WAIT is optional (RFC 9293
-  section 3.6.1), and ignoring that reset is RFC 1337's fix against
-  TIME-WAIT assassination (an Informational RFC; RFC 9293 section 3.10.7.4
-  would end TIME_WAIT on that reset, as Linux does by default). The fault
-  was this firmware's configuration, which held such ports for lwIP's
-  default 120 s. Linux clients (since 2022) take the local ports of their
-  connections to one server from a starting point drawn anew every 10 s,
-  so this happens now and then, at random: for each port the station
-  holds, at most about one new connection in 14,000 lands on it (Linux's
-  default range has 14,116 even ports, the ones `connect()` takes first).
-  macOS hands its ports out in order across the whole system and was not
-  seen to come back on one. With lwIP's 120 s, a Linux script that polled
-  with `Connection: close` would now and then wait up to two minutes, or
-  see its `connect()` fail.
+- **Connections the station ends first** (`Connection: close`, HTTP/1.0, the
+  refusals above, idle ones it evicts) stay in TIME_WAIT on the station for
+  10 s (2 x MSL; `CONFIG_LWIP_TCP_MSL` is 5 s instead of lwIP's 60 s). A new
+  connection from the same client port within that time is not taken at
+  once: lwIP answers its SYN with a bare ACK (not reopening from TIME_WAIT
+  is upstream lwIP's choice, and optional: RFC 9293 section 3.6.1), and the
+  client answers that ACK with a reset. lwIP alone ignores that reset (RFC
+  1337's fix against TIME-WAIT assassination, an Informational RFC); RFC
+  9293 section 3.10.7.4 ends TIME_WAIT on it, as Linux does by default, and
+  so does this firmware: an lwIP hook ends the TIME_WAIT on a reset that
+  carries exactly the next sequence number the station expects (RFC 5961's
+  check), once the station's socket for that connection is closed
+  (`components/network/net_tw.c`), and the client's next SYN is taken. Linux
+  (5.10 and later) sends it a few milliseconds after its reset: a Linux 7.0
+  client back on its port 1 to 9 s after the station's close, measured
+  against this firmware in QEMU on a tap network, connected within 0.04 s,
+  where it waited 2.1 to 10.2 s without the hook. A client whose reset does
+  not come waits until TIME_WAIT ends: up to 15 s with Linux's SYN retries.
+  (A SYN that falls inside the old connection's window gets a reset instead,
+  and the client's `connect()` fails at once; a new initial sequence number
+  lands there only by rare chance.) The fault was this firmware's: it held
+  such ports for lwIP's default 120 s, and nothing in it acted on the
+  client's reset. Linux clients (since 2022) take the local ports of their
+  connections to one server from a starting point drawn anew every 10 s, so
+  this happens now and then, at random: for each port the station holds, at
+  most about one new connection in 14,000 lands on it (Linux's default range
+  has 14,116 even ports, the ones `connect()` takes first). macOS hands its
+  ports out in order across the whole system and was not seen to come back
+  on one. Other systems, Windows among them, were not checked (neither their
+  ports nor whether they send that reset); one lwIP user reports clients of
+  a web server on lwIP coming back on their port within 24 s, more often
+  Chrome on Windows 11 than others (lwip-users list, "Bug in TCP connect", 4
+  November 2025). With lwIP's 120 s and no hook, a Linux script that polled
+  with `Connection: close` would now and then wait up to two minutes, or see
+  its `connect()` fail.
 - **Client addresses in the log:** a wrong admin password (section 3) and a
   refused WebSocket handshake name the client: `WebSocket refused for
   192.168.1.23: no session, and public status is off` (also `Host or Origin

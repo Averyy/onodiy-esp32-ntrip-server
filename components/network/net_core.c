@@ -229,6 +229,28 @@ bool net_ip6_is_link_local(const uint8_t addr[16])
     return addr != NULL && addr[0] == 0xFEu && (addr[1] & 0xC0u) == 0x80u;
 }
 
+/* ---- TIME_WAIT ended by the peer's reset ------------------------------------------------ */
+
+bool net_tw_reset_ends(uint8_t flags, uint32_t seqno, uint32_t rcv_nxt, bool owned)
+{
+    return !owned && (flags & (NET_TCP_RST | NET_TCP_SYN)) == NET_TCP_RST && seqno == rcv_nxt;
+}
+
+bool net_tw_over(uint32_t now, uint32_t start, uint32_t tw_ticks)
+{
+    return (uint32_t)(now - start) > tw_ticks;
+}
+
+bool net_tw_free_now(uint32_t now, uint32_t start, uint32_t tw_ticks, bool owned)
+{
+    return !owned && net_tw_over(now, start, tw_ticks);
+}
+
+uint32_t net_tw_over_start(uint32_t now, uint32_t tw_ticks)
+{
+    return now - tw_ticks - 1u;
+}
+
 /* ---- cached scan list ----------------------------------------------------------------- */
 
 size_t net_scan_insert(net_scan_entry_t *list, size_t count, size_t cap, const net_scan_entry_t *e)

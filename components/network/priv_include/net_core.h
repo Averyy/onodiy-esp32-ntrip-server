@@ -6,7 +6,8 @@
  * host-testable): reconnect backoff, input validation, the setup AP's name,
  * when the setup/recovery AP is up, which disconnects go to the event
  * journal, the cached scan list, the age of the last network-ladder reboot
- * across resets, and the trial of changed station credentials. Times are seconds of an injected monotonic clock,
+ * across resets, the trial of changed station credentials, and when a peer's
+ * reset ends a TCP TIME_WAIT. Times are seconds of an injected monotonic clock,
  * compared only as (uint32_t)(now - then), so they survive the clock wrap.
  */
 #pragma once
@@ -171,6 +172,53 @@ bool net_rssi_known(int8_t rssi);
 
 /** True for an IPv6 link-local unicast address (fe80::/10); `addr` is 16 bytes in network order. */
 bool net_ip6_is_link_local(const uint8_t addr[16]);
+
+/* ---- TIME_WAIT ended by the peer's reset (net_tw.c) ------------------------------------ */
+
+/** TCP header flags (RFC 9293 section 3.1), as lwIP's TCPH_FLAGS() gives them. */
+#define NET_TCP_SYN 0x02u
+#define NET_TCP_RST 0x04u
+
+/**
+ * Whether a segment for a connection the station holds in TIME_WAIT ends
+ * that TIME_WAIT: a reset without SYN whose sequence number is exactly the
+ * station's RCV.NXT (`rcv_nxt`), on a connection no socket holds any more
+ * (`owned` false). RFC 9293 section 3.10.7.4 ends TIME-WAIT on a reset;
+ * with RFC 5961 section 3.2's check only an exact RCV.NXT does that, so a
+ * blind reset has to guess all 32 bits. A client that comes back on a port
+ * the station still holds gets the old connection's ACK to its SYN and
+ * answers it with exactly this reset (its sequence number is that ACK's
+ * acknowledgment number, RFC 9293 section 3.10.7.3).
+ *
+ * `owned`: a socket that has only shut its sending side (shutdown(SHUT_WR),
+ * the web server's lingering close) still holds the connection when the
+ * client's FIN puts it in TIME_WAIT, and still reads from it. lwIP frees a
+ * TIME_WAIT pcb without telling a socket (tcp.c, tcp_slowtmr and
+ * tcp_abandon), so ending such a TIME_WAIT would leave the socket on freed
+ * memory: it is left to lwIP. Every other segment leaves TIME_WAIT as it is.
+ */
+bool net_tw_reset_ends(uint8_t flags, uint32_t seqno, uint32_t rcv_nxt, bool owned);
+
+/**
+ * lwIP's test for a TIME_WAIT that is over (tcp.c, tcp_slowtmr): more than
+ * `tw_ticks` (2 x MSL in slow-timer ticks) since its start, compared as
+ * (uint32_t)(now - start), so it survives the tick count's wrap.
+ */
+bool net_tw_over(uint32_t now, uint32_t start, uint32_t tw_ticks);
+
+/**
+ * Whether the station may free a TIME_WAIT pcb now, as lwIP's timer would at
+ * its next tick: it is over (net_tw_over) and no socket holds it (`owned`
+ * false, see net_tw_reset_ends).
+ */
+bool net_tw_free_now(uint32_t now, uint32_t start, uint32_t tw_ticks, bool owned);
+
+/**
+ * A TIME_WAIT start that net_tw_over() takes as over from tick count `now`
+ * on, whether lwIP's timer counts its tick before the comparison or not
+ * (until the count wraps, 2^32 ticks).
+ */
+uint32_t net_tw_over_start(uint32_t now, uint32_t tw_ticks);
 
 /* ---- cached scan list ----------------------------------------------------------------- */
 

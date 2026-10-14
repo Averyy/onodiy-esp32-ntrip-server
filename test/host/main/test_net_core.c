@@ -48,6 +48,93 @@ TEST_CASE("network IPv6: only fe80::/10 is link-local", "[net_core]")
     TEST_ASSERT_FALSE(net_ip6_is_link_local(NULL));
 }
 
+TEST_CASE("network TIME_WAIT: only a reset with exactly RCV.NXT ends it", "[net_core]")
+{
+    /* The station's bare ACK to a SYN on a port it held (Ack=1040052053) and
+     * the client's reset to it (Seq=1040052053): a capture on a test board. */
+    const uint32_t rcv_nxt = 1040052053u;
+    const uint8_t ack = 0x10, fin = 0x01, psh = 0x08;
+    TEST_ASSERT_TRUE(net_tw_reset_ends(NET_TCP_RST, rcv_nxt, rcv_nxt, false));
+    TEST_ASSERT_TRUE(net_tw_reset_ends(NET_TCP_RST | ack, rcv_nxt, rcv_nxt, false));
+    /* RFC 5961: anything but an exact RCV.NXT leaves it (lwIP then ignores the reset). */
+    TEST_ASSERT_FALSE(net_tw_reset_ends(NET_TCP_RST, rcv_nxt + 1u, rcv_nxt, false));
+    TEST_ASSERT_FALSE(net_tw_reset_ends(NET_TCP_RST, rcv_nxt - 1u, rcv_nxt, false));
+    TEST_ASSERT_FALSE(net_tw_reset_ends(NET_TCP_RST, rcv_nxt + 100u, rcv_nxt, false));    /* inside the window */
+    TEST_ASSERT_FALSE(net_tw_reset_ends(NET_TCP_RST, 0, rcv_nxt, false));
+    /* Not a reset, or a reset with SYN: the SYN itself, the client's FIN or ACK again. */
+    TEST_ASSERT_FALSE(net_tw_reset_ends(NET_TCP_SYN, rcv_nxt, rcv_nxt, false));
+    TEST_ASSERT_FALSE(net_tw_reset_ends(NET_TCP_SYN | NET_TCP_RST, rcv_nxt, rcv_nxt, false));
+    TEST_ASSERT_FALSE(net_tw_reset_ends(fin | ack, rcv_nxt, rcv_nxt, false));
+    TEST_ASSERT_FALSE(net_tw_reset_ends(ack, rcv_nxt, rcv_nxt, false));
+    TEST_ASSERT_FALSE(net_tw_reset_ends(psh | ack, rcv_nxt, rcv_nxt, false));
+    TEST_ASSERT_FALSE(net_tw_reset_ends(0, rcv_nxt, rcv_nxt, false));
+    /* Sequence numbers wrap. */
+    TEST_ASSERT_TRUE(net_tw_reset_ends(NET_TCP_RST, 0, 0, false));
+    TEST_ASSERT_TRUE(net_tw_reset_ends(NET_TCP_RST, UINT32_MAX, UINT32_MAX, false));
+    TEST_ASSERT_FALSE(net_tw_reset_ends(NET_TCP_RST, UINT32_MAX, 0, false));
+    TEST_ASSERT_FALSE(net_tw_reset_ends(NET_TCP_RST, 0, UINT32_MAX, false));
+}
+
+TEST_CASE("network TIME_WAIT: a connection a socket still holds is left to lwIP", "[net_core]")
+{
+    /* The QEMU smoke run that found it: a refused 16 KB upload, the station's
+     * lingering close (shutdown(SHUT_WR), then the drain), the client's FIN
+     * (TIME_WAIT, the socket still open) and 1.5 ms later the client's reset
+     * with exactly RCV.NXT (Seq=2512492). Ending that TIME_WAIT freed the pcb
+     * under the socket. */
+    const uint32_t rcv_nxt = 2512492u;
+    TEST_ASSERT_FALSE(net_tw_reset_ends(NET_TCP_RST, rcv_nxt, rcv_nxt, true));
+    TEST_ASSERT_FALSE(net_tw_reset_ends(NET_TCP_RST | 0x10, rcv_nxt, rcv_nxt, true));
+    TEST_ASSERT_TRUE(net_tw_reset_ends(NET_TCP_RST, rcv_nxt, rcv_nxt, false));   /* once the socket is closed */
+    /* Nor does a sweep free it, however long its TIME_WAIT is over. */
+    for (uint32_t d = 0; d <= 100u; d++) {
+        TEST_ASSERT_FALSE(net_tw_free_now(1000u + d, 1000u, 20u, true));
+        TEST_ASSERT_EQUAL(d > 20u, net_tw_free_now(1000u + d, 1000u, 20u, false));
+    }
+}
+
+/* lwIP's test for a TIME_WAIT that is over, as tcp.c (tcp_slowtmr) writes it. */
+static bool tw_over(uint32_t ticks, uint32_t start, uint32_t tw_ticks)
+{
+    return (uint32_t)(ticks - start) > tw_ticks;
+}
+
+TEST_CASE("network TIME_WAIT: over exactly when lwIP's timer takes it as over", "[net_core]")
+{
+    const uint32_t tw = 20;
+    const uint32_t starts[] = { 0, 7, 0x7FFFFFFFu, UINT32_MAX - 10u, UINT32_MAX };
+    for (size_t i = 0; i < sizeof(starts) / sizeof(starts[0]); i++) {
+        for (uint32_t d = 0; d <= 2u * tw; d++) {
+            const uint32_t now = starts[i] + d;   /* wraps */
+            TEST_ASSERT_EQUAL(tw_over(now, starts[i], tw), net_tw_over(now, starts[i], tw));
+            TEST_ASSERT_EQUAL(d > tw, net_tw_over(now, starts[i], tw));
+        }
+    }
+}
+
+TEST_CASE("network TIME_WAIT: the moved start is over at lwIP's next tick, also across the wrap", "[net_core]")
+{
+    const uint32_t tw = 2u * 5000u / 500u;   /* 2 x MSL (5 s) in 500 ms ticks: 20 */
+    const uint32_t nows[] = { 0, 1, 19, 20, 21, 12345, 0x80000000u, UINT32_MAX - 20u, UINT32_MAX - 1u, UINT32_MAX };
+    for (size_t i = 0; i < sizeof(nows) / sizeof(nows[0]); i++) {
+        const uint32_t now = nows[i];
+        /* lwIP's own start, the tick TIME_WAIT began, is over 2 x MSL later and not sooner. */
+        TEST_ASSERT_FALSE(tw_over(now + tw, now, tw));
+        TEST_ASSERT_TRUE(tw_over(now + tw + 1u, now, tw));
+        /* The moved start is over now and at every following tick, counted before
+         * the comparison (tcp_slowtmr's ++tcp_ticks) or not. */
+        const uint32_t start = net_tw_over_start(now, tw);
+        TEST_ASSERT_TRUE(tw_over(now, start, tw));
+        TEST_ASSERT_TRUE(tw_over(now + 1u, start, tw));
+        TEST_ASSERT_TRUE(tw_over(now + 2u, start, tw));
+        TEST_ASSERT_TRUE(tw_over(now + 1000u, start, tw));
+        TEST_ASSERT_EQUAL_UINT32(tw + 1u, now - start);
+    }
+    /* Any TIME_WAIT length, including none. */
+    TEST_ASSERT_TRUE(tw_over(7, net_tw_over_start(7, 0), 0));
+    TEST_ASSERT_TRUE(tw_over(7, net_tw_over_start(7, 240), 240));   /* lwIP's default MSL, 60 s */
+}
+
 TEST_CASE("network credential and hostname validation", "[net_core]")
 {
     TEST_ASSERT_FALSE(net_ssid_valid(NULL));

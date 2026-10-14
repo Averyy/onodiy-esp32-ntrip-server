@@ -126,30 +126,37 @@ CONFIG_LWIP_SNTP_MAX_SERVERS=2
 # web_linger_close). The receive limit itself stays lwIP's default (none).
 CONFIG_LWIP_SO_RCVBUF=y
 # TIME_WAIT (and the longest LAST_ACK) is 2 x MSL: 10 s instead of the 120 s
-# of lwIP's default. The web server ends a connection first after
-# "Connection: close" or HTTP/1.0 (HTTP requires it), after a refusal with a
-# body and when it evicts an idle connection; the station then holds that
-# client port in TIME_WAIT and takes no new connection on it (tcp_in.c,
-# tcp_timewait_input). A new SYN from that port gets a bare ACK, and the reset
-# the client sends back is ignored. Both are upstream lwIP's choices:
-# reopening from TIME_WAIT is optional (RFC 9293 section 3.6.1), and ignoring
-# that reset is RFC 1337's fix against TIME-WAIT assassination
-# (Informational; RFC 9293 section 3.10.7.4 would end TIME_WAIT on it, as
-# Linux does by default). Holding such ports for 120 s was our configuration's
-# fault. Linux clients (since 2022, stable kernels too) take the local ports
-# of their connections to one server from a starting point drawn anew every
-# 10 s, so now and then a new connection lands on a port the station still
-# holds. With 120 s such a client waited up to 2 minutes, or its connect()
-# failed; with 10 s it waits 15 s at most (Linux sends the SYN again 1, 3, 7
-# and 15 s after the first; since 6.5 each second up to 5 s, then at 7 and
-# 11 s). A SYN that falls inside the old connection's window (rare: a client's
-# new initial sequence number lands there by chance) gets a reset instead,
-# and that client's connect() fails at once. Not for memory: TIME_WAIT pcbs
-# count among the 24 above, and lwIP frees the oldest on demand. A stale
-# segment would have to outlive 10 s and fall inside the new connection's
-# window (the station's initial sequence numbers follow RFC 6528): not
-# plausible on a LAN. The station's own outgoing connections skip every port
-# lwIP still holds (tcp.c, tcp_new_port).
+# of lwIP's default. The web server ends a connection first after "Connection:
+# close" or HTTP/1.0 (HTTP requires it), after a refusal with a body and when
+# it evicts an idle connection; the station then holds that client port in
+# TIME_WAIT and takes no new connection on it at once (tcp_in.c,
+# tcp_timewait_input). A new SYN from that port gets a bare ACK: not reopening
+# from TIME_WAIT is upstream lwIP's choice, and optional (RFC 9293 section
+# 3.6.1). The client answers that ACK with a reset. lwIP alone ignores it (RFC
+# 1337's fix against TIME-WAIT assassination, an Informational RFC); RFC 9293
+# section 3.10.7.4 ends TIME_WAIT on it, as Linux does by default, and so does
+# this firmware's lwIP hook when the reset carries exactly the station's
+# RCV.NXT and no socket holds the connection any more
+# (components/network/net_tw.c): the client's next SYN is taken. Linux (5.10
+# and later) sends it a few milliseconds after its reset. Measured with Linux
+# 7.0 against this firmware in QEMU on a tap network, back on its port 1 to 9
+# s after the station's close: connected within 0.04 s, where it waited 2.1 to
+# 10.2 s without the hook. Linux clients (since 2022, stable kernels too) take
+# the local ports of their connections to one server from a starting point
+# drawn anew every 10 s, so now and then a new connection lands on a port the
+# station still holds. Until the 10 s and the hook, such a client waited up to
+# 2 minutes, or its connect() failed: our configuration's fault. The 10 s
+# remain the bound for a client whose reset does not come, does not match or
+# comes while the station's socket still holds the connection: it waits 15 s
+# at most (Linux sends the SYN again 1, 3, 7 and 15 s after the first; since
+# 6.5 each second up to 5 s, then at 7 and 11 s). A SYN that falls inside the
+# old connection's window (rare: a client's new initial sequence number lands
+# there by chance) gets a reset instead, and that client's connect() fails at
+# once. Not for memory: TIME_WAIT pcbs count among the 24 above, and lwIP
+# frees the oldest on demand. A stale segment would have to outlive 10 s and
+# fall inside the new connection's window (the station's initial sequence
+# numbers follow RFC 6528): not plausible on a LAN. The station's own outgoing
+# connections skip every port lwIP still holds (tcp.c, tcp_new_port).
 CONFIG_LWIP_TCP_MSL=5000
 
 # ---- mDNS (espressif/mdns, network component): <hostname>.local -----------

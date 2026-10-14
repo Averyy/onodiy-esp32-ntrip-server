@@ -295,3 +295,40 @@ def test_syns_the_station_turned_away(tmp_path):
     pcap.write_bytes(_pcap(first + [(h, p, g, 80, 0x02, 1344200, 0), (g, 80, h, p, 0x14, 0, 1344201)]))
     assert smoke.refused_syns(smoke.tcp_segments(pcap, p)[6:]) == [smoke.Segment(0x14, 0, 1344201)]
     assert smoke.tcp_segments(tmp_path / "missing.pcap", p) == []
+
+
+def test_the_reset_that_ends_time_wait_and_the_syn_taken(tmp_path):
+    # port_reuse_reset_check's shape: back inside TIME_WAIT, one bare ACK, libslirp's reset with the bare ACK's
+    # acknowledgment number (the station's RCV.NXT), and the SYN-ACK to libslirp's first resend of the SYN.
+    g, h, p = smoke.GUEST_IP, "10.0.2.2", 40648
+    fin_ack = (g, 80, h, p, 0x10, 2809847892, 1344135)
+    first = [
+        (h, p, g, 80, 0x02, 1344001, 0),
+        (g, 80, h, p, 0x12, 2809847561, 1344002),
+        (h, p, g, 80, 0x18, 1344002, 2809847562),
+        (g, 80, h, p, 0x19, 2809847648, 1344134),
+        (h, p, g, 80, 0x11, 1344134, 2809847892),
+        fin_ack,
+    ]
+    syn, reset = (h, p, g, 80, 0x02, 12096001, 0), (h, p, g, 80, 0x04, 1344135, 0)
+    taken = [(g, 80, h, p, 0x12, 2841889311, 12096002), (h, p, g, 80, 0x10, 12096002, 2841889312)]
+    pcap = tmp_path / "net.pcap"
+    pcap.write_bytes(_pcap(first + [syn, fin_ack, reset, syn] + taken))
+    second = smoke.tcp_segments(pcap, p)[6:]
+    refused = smoke.refused_syns(second)
+    assert refused == [smoke.Segment(0x10, 2809847892, 1344135)]
+    assert smoke.client_resets(second) == [smoke.Segment(0x04, 1344135, 0)]
+    assert smoke.client_resets(second)[0].seq == refused[0].ack
+    assert smoke.syns_until_taken(second) == 2
+    # Without the hook the resend is turned away too, and only the third SYN is taken.
+    pcap.write_bytes(_pcap(first + [syn, fin_ack, reset] * 2 + [syn] + taken))
+    second = smoke.tcp_segments(pcap, p)[6:]
+    assert len(smoke.refused_syns(second)) == 2 and len(smoke.client_resets(second)) == 2
+    assert smoke.syns_until_taken(second) == 3
+    # Taken at once; never taken; the client's ACK after the SYN-ACK is no SYN.
+    pcap.write_bytes(_pcap(first + [syn] + taken))
+    assert smoke.syns_until_taken(smoke.tcp_segments(pcap, p)[6:]) == 1
+    assert smoke.client_resets(smoke.tcp_segments(pcap, p)[6:]) == []
+    pcap.write_bytes(_pcap(first + [syn, fin_ack, reset]))
+    assert smoke.syns_until_taken(smoke.tcp_segments(pcap, p)[6:]) is None
+    assert smoke.syns_until_taken([]) is None
