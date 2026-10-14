@@ -36,5 +36,7 @@ compile_commands.json
 
 # Bench tool run logs (tools/bench; default ./bench-logs wherever they run)
 bench-logs/
+# Serial console captures made outside tools/bench (logs/esp32-serial.log)
+/logs/
 # Python bytecode (tools/qemu/e2e.py imports smoke.py and the bench tools)
 __pycache__/

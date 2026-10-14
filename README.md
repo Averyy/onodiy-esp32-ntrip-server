@@ -25,13 +25,66 @@ The goal is a turnkey, auditable, free alternative on cheap hardware.
 
 UM982 + ESP32-S3 dev board (AliExpress, ~C$200):
 
+![The UM982 + ESP32-S3 board seen from the front: a black circuit board with the silver Unicore UM982 module left of centre, the ESP32-S3-WROOM-1 module on the right, a USB-C port on the top edge and another on the bottom edge, two gold SMA antenna sockets sticking out of the left end, and rows of unpopulated header holes along the top and bottom edges](docs/images/board-front.jpg)
+
+*Front of the board: Unicore UM982 receiver (left of centre), ESP32-S3-WROOM-1 module (right), USB-C to the receiver's COM2 (top edge), USB-C printed `ESP32S3` for the ESP32-S3 (bottom edge), and the SMA antenna sockets `M` (lower) and `S` (upper) on the left.*
+
 - ESP32-S3-WROOM-1 N16R8 (16 MB flash, 8 MB PSRAM)
 - Unicore UM982 all-band GNSS RTK module
-- UM982 COM1 ↔ ESP32 GPIO1 (RX) / GPIO2 (TX)
+- UM982 COM1 ↔ ESP32 GPIO1 (RX) / GPIO2 (TX): the station's data path
 - UM982 COM2 → USB-C (direct PC access)
 
 Board and pin details: [`reference/um982-board-onocoy.md`](reference/um982-board-onocoy.md).
 Antenna and cable notes: [`reference/antenna-specs.md`](reference/antenna-specs.md).
+
+### The two USB-C ports
+
+| Port | Printed on the board | What the computer sees |
+|---|---|---|
+| Top edge | nothing | a CH340N USB-serial bridge (`1a86:7523`) on the receiver's COM2, 115200 baud |
+| Bottom edge | `ESP32S3` | **depends on which way round the plug goes in:** the ESP32-S3's built-in USB (USB Serial/JTAG, `303a:1001`), or, with the plug turned over, a WCH CH343P bridge (`1a86:55d3`) on the ESP32's UART0 |
+
+The `ESP32S3` port carries both (the seller calls it "ESP32S3 USB&&UART"). On the
+CH343P side the bridge drives the usual auto-reset transistor pair (EN and IO0), as on
+most ESP32 dev boards. On macOS both sides show up as `/dev/cu.usbmodem*`;
+`tools/bench/ports.py` tells them apart (see [`tools/bench/README.md`](tools/bench/README.md)).
+If you get the wrong one, unplug and turn the plug over.
+
+Our firmware's console is on UART0, so plug the `ESP32S3` port in the CH343P way
+round to see its log. Either side should flash the ESP32: esptool works over the
+built-in USB, and the CH343P side has the auto-reset pair. Sending the log over the
+built-in USB as well, so that either way round shows it and flashing resets the chip
+by itself on both, is planned. Until then the current build turns the built-in USB
+off while it runs (`CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=n`), so that side shows only the
+chip's ROM output, and to flash through it you hold **BOT** and press **RST** first.
+
+**Cables and power.** A USB-C-to-C cable gives neither power nor data on either port:
+the board leaves out the USB-C CC resistors. Plug each port into a USB-A port instead,
+through a USB-C-to-A adapter or a hub, with an A-to-C data cable. Power an installed
+station from a plain 5 V USB-A charger with an A-to-C cable, not a USB-C or PD
+charger.
+
+**Console notes.** Opening or closing the console port with `idf.py monitor
+--no-reset`, `tools/bench/capture.py --console` or another pyserial terminal does not
+reset the ESP32 (measured on the built-in USB side; the CH343P side matched another
+ESP32-S3 board with the same bridge). An ESP32 reset neither resets nor reconfigures
+the receiver, and opening the receiver's USB-C does not reset it either.
+
+**As delivered** (one board, October 2026):
+
+- ESP32: a small Arduino SD-card test sketch from 2022 that prints `error opening
+  test.txt` on UART0 every 400 ms; no Wi-Fi or Bluetooth, and it leaves the receiver
+  alone. 4 MB Arduino partition table. Secure Boot and flash encryption are off and
+  download mode is on, so the board takes an unsigned image as it is. To keep a copy
+  before the first flash: `esptool --chip esp32s3 -p <port> read-flash 0 0x1000000
+  stock-esp32.bin`.
+- Receiver: UM982 firmware R4.10 Build 25164 (compiled 2026-05-21), newer than the
+  package in [`firmware/um982/`](firmware/um982/README.md). Signal group `4 5`, rover
+  mode, COM1/COM2/COM3 at 115200, and COM1 sending a position line and a status report
+  at 1 Hz. This build accepts the signal groups `4 5`, `3 6`, `5 0` and `7 0`; `3 6`
+  (Galileo E6) and `7 0` (BeiDou B2a) each give 4 bands on one constellation, which
+  Onocoy rewards most. Checked without an antenna so far; tracking with sky is still
+  to be confirmed.
 
 ## Features (planned)
 
@@ -40,7 +93,9 @@ Antenna and cable notes: [`reference/antenna-specs.md`](reference/antenna-specs.
 2. **UM982 auto-config** — base mode, the signal group needed for 4-band tracking, and
    the right RTCM messages, applied on first boot.
 3. **UM982 firmware update over UART (XMODEM)** from the ESP32 — no Windows or vendor
-   tool needed.
+   tool needed. Lower priority now: the board ships with a newer receiver build than
+   the package in this repository, so the flasher stays in bench builds until a newer
+   package is added.
 4. **Updates from GitHub Releases** — daily check with a banner in the web UI; the
    ESP32 app (`.bin`) and UM982 firmware (`.pkg`) install only when you click Update
    (or upload a file). The `.pkg` lives in [`firmware/um982/`](firmware/um982/). Each
@@ -76,7 +131,7 @@ Requires ESP-IDF v6.1. From the repository root:
 . $IDF_PATH/export.sh            # your ESP-IDF v6.1 checkout
 idf.py set-target esp32s3
 idf.py build
-idf.py -p <port> flash monitor   # the "ESP32S3 USB&&UART" USB-C port
+idf.py -p <port> flash monitor   # the USB-C printed "ESP32S3", CH343P way round (see Target hardware)
 ```
 
 Host unit tests (Linux or macOS, no hardware needed):
@@ -126,7 +181,9 @@ native and faster, but not what CI runs).
 Notes:
 
 - The console runs at 115200 baud on UART0, the same rate as the chip's ROM
-  bootloader output.
+  bootloader output. The computer reaches UART0 through the CH343P, that is the
+  `ESP32S3` USB-C plugged in the CH343P way round (see
+  [The two USB-C ports](#the-two-usb-c-ports)).
 - Only tag builds in CI are release versions (`vX.Y.Z`, passed as
   `-DRELEASE_VERSION=`; configure refuses it unless HEAD carries that tag). Every
   other build is named `<git describe>+dev` and is never offered updates by the daily
@@ -283,7 +340,8 @@ station name. The System page and the dashboard show both as links.
 
 ## Recovery (planned behaviour)
 
-- **Forgot the admin password:** hold the **BOOT** button for 10 s while the station
+- **Forgot the admin password:** hold the **BOOT** button (printed `BOT`, next to the
+  `ESP32S3` USB-C) for 10 s while the station
   is running. The password is cleared and the setup Wi-Fi network (`onocoydiy-XXXX`)
   comes up for 15 minutes (longer while you stay connected to it) so you can set a new
   one. Casters and settings are kept.

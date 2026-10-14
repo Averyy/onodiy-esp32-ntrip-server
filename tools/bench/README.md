@@ -27,10 +27,27 @@ gitignored.
 
 ## The board's two USB-C ports
 
-| Silkscreen | Bridge | USB ID | What it is |
-|---|---|---|---|
-| ESP32S3 USB&&UART | CH343P | `1a86:55d3` | ESP32-S3 UART0 console, 115200; `idf.py flash` goes here |
-| UM982 UART2 | CH340N | `1a86:7523` | UM982 **COM2**, 115200 by default |
+| Port (silkscreen) | Bridge | USB ID | `ports.py` role | What it is |
+|---|---|---|---|---|
+| bottom edge (`ESP32S3`), one way round | CH343P | `1a86:55d3` | `esp32-console` | ESP32-S3 UART0 console, 115200; `idf.py flash` and bench work go here |
+| bottom edge (`ESP32S3`), plug turned over | none: the chip's built-in USB Serial/JTAG | `303a:1001` | `esp32-native-usb` | ESP32-S3 built-in USB: ROM output and esptool; no log from our firmware yet |
+| top edge (no label) | CH340N | `1a86:7523` | `um982-com2` | UM982 **COM2**, 115200 by default |
+
+The `ESP32S3` port is orientation-dependent: which of the two devices the
+computer sees depends on which way round the plug goes in (the seller calls
+the port "ESP32S3 USB&&UART"). The firmware's console and the bench console
+are on UART0, so bench work uses the CH343P orientation: if `ports.py`
+lists the port as `esp32-native-usb` (and the console as not found), unplug
+and turn the plug over. `--console auto` picks the CH343P by VID/PID only;
+in the other orientation name the port. Sending the log over the built-in
+USB as well, so that either
+orientation shows it, is a planned firmware change; until then the current
+build switches the built-in USB off while it runs, and flashing through it
+needs **BOT** held while pressing **RST**.
+
+Neither port works on a USB-C-to-C cable, not even for power (the board
+leaves out the USB-C CC resistors): plug both into USB-A ports, through a
+USB-C-to-A adapter or a hub, with A-to-C data cables.
 
 The ESP32 talks to the receiver on UM982 **COM1** (GPIO1/GPIO2), which the
 PC cannot see. COM2 is a separate port: what you capture there is only
@@ -41,6 +58,8 @@ same messages to COM2 for a while (see "Seeing the RTCM on the PC" below).
 
 On macOS the ports appear as `/dev/cu.usbmodem*`, `/dev/cu.usbserial-*` or
 `/dev/cu.wchusbserial*` depending on the driver; `ports.py` sorts it out.
+Both sides of the `ESP32S3` port show up as `/dev/cu.usbmodem*`, so the name
+alone does not say which way round the plug is.
 
 ## What sends what
 
@@ -68,6 +87,14 @@ Modem lines: opening a port leaves DTR and RTS as the OS sets them (both
 asserted), so attaching a capture does not reset the ESP32. Only
 `capture.py --reset-esp32` pulses EN on purpose.
 
+Measured on the board (2026-10-14): opening and closing the console with
+`capture.py --console`, serial-mcp or `idf.py monitor --no-reset` left the
+ESP32 running on the built-in USB side; the CH343P side matched another
+ESP32-S3 board with the same bridge. `capture.py --reset-esp32` resets the
+chip on the built-in USB side too, without the port dropping, so the ROM
+banner is captured from its first line. An ESP32 reset neither resets nor
+reconfigures the UM982, and opening COM2 does not reset the receiver.
+
 ## The tools
 
 ### `ports.py`: which port is which
@@ -81,6 +108,11 @@ Probing looks for ESP-IDF log lines and ROM boot text (console) or NMEA,
 RTCM 3 frames and receiver replies (UM982). The run directory gets
 `ports.txt` and `ports.json`. The other tools accept `auto` instead of a
 port and pick by VID/PID.
+
+The `ESP32S3` USB-C shows up as `esp32-console` (the CH343P, `1a86:55d3`)
+or as `esp32-native-usb` (the built-in USB, `303a:1001`), depending on which
+way round the plug is (see "The board's two USB-C ports"); the receiver's
+port is `um982-com2`.
 
 ### `capture.py`: both ports, timestamped
 
@@ -141,7 +173,9 @@ prints the plan. With `--write` it:
 1. asks, then sends `CONFIG SIGNALGROUP <group>` (the receiver restarts by
    itself and saves the group);
 2. listens for the restart banner and polls `VERSIONA` until the receiver
-   answers, and prints both delays;
+   answers, and prints both delays (build 25164: the banner about 9 s after
+   the `OK`, answers about 2 s after the banner; the group it already has
+   gives `OK` and no restart);
 3. reads `CONFIG` again to confirm the new group;
 4. with `--msm`, asks, then enables `RTCM1097 COM2 1` (not saved) and
    decodes the Galileo MSM signal mask too;
@@ -151,6 +185,16 @@ prints the plan. With `--write` it:
    rounds (`--full` to keep going, `--observe` for the limit);
 6. asks before `UNLOG COM2 RTCM1097`, and offers to restore the previous
    signal group.
+
+What build 25164 does (measured 2026-10-14, no antenna): it accepts exactly
+`CONFIG SIGNALGROUP 4 5`, `3 6`, `5 0` and `7 0`; any other pair gets
+`PARSING FAILED GRAMMAR ERROR,` and no restart. A command sent while it
+restarts gets the line `The Board is resetting,do not response any
+command!` (no leading `$`). Before there is any sky,
+`uv run um982.py send --write ANT1GROUPA` (no rate: with one it becomes a
+periodic log) lists the signals the current group tracks on the master
+antenna: `3 6` gives Galileo E1/E5a/E5b/E6 (4 bands), `7 0` all six BeiDou
+signals including B2a (4 bands), `4 5` and `5 0` at most 3 bands.
 
 `--find-baud` tries the usual bauds (listening at each first, then
 `VERSIONA` at each) when the receiver does not answer at 115200. Only for a
@@ -277,9 +321,12 @@ never written to the logs.
 ## Bench day
 
 0. **Unbox, antenna on the master SMA with the board unpowered**, then plug
-   in both USB-C cables. `uv run ports.py` should show one console and one
-   UM982 port.
-1. **Receiver first, still on the stock ESP32 firmware or none:**
+   both USB-C ports into USB-A ports (A-to-C data cables; C-to-C does not
+   work), the `ESP32S3` one the CH343P way round. `uv run ports.py` should
+   show `esp32-console` and `um982-com2`; `esp32-native-usb` instead of the
+   console means that plug is the other way round.
+1. **Receiver first, still on the stock ESP32 firmware or none** (the stock
+   firmware is an SD-card test sketch that leaves the receiver alone):
    `uv run um982.py` and keep the run directory: it records the build,
    the factory signal group, the enabled logs and the bauds.
    `uv run um982.py e6-check` shows what is tracked now; then
@@ -295,7 +342,7 @@ never written to the logs.
    . ~/esp/esp-idf-v6.1/export.sh
    idf.py set-target esp32s3        # once per checkout
    idf.py build
-   idf.py -p <console port> flash   # stop any capture on that port first
+   idf.py -p <console port> flash   # the CH343P port; stop any capture on it first
    ```
 3. **Capture both ports from the first boot line:**
    ```sh
@@ -330,11 +377,13 @@ uv run um982.py send --write "UNLOG COM2"
 ```
 
 The `send` replies also show whether each message type is accepted
-(`OK`) or rejected (`PARSING FAILD ...`) by this firmware build.
+(`OK`) or rejected (`PARSING FAILED ...` on build 25164; some builds spell
+it `FAILD`) by this firmware build.
 
 ### Frame times on the bench console
 
-Bench builds (the `sdkconfig.bench` overlay) have a console on UART0 with
+Bench builds (the `sdkconfig.bench` overlay) have a console on UART0 (the
+`ESP32S3` USB-C, CH343P way round) with
 the receiver link's timing recorder. `ftimes <s>` starts a recording of
 frame and drain-pass times and returns at once, so a stall can be put
 inside it; the recording ends by itself after `<s>` seconds (or when its
@@ -476,13 +525,16 @@ uv run rtcm_replay.py --listen 127.0.0.1:5600 ../../test/fixtures/rtcm/centipede
   `CONFIG COM1`, `CONFIG RTCMB1CB2A`, `CONFIG BASEANTENNAMODEL`, the
   satellite-view toggles, `SAVECONFIG` and `RESET` an `OK`.
 - `CONFIG SIGNALGROUP m s` is taken for 4 5, 3 6, 5 0 and 7 0, less every
-  `--respond-reject M,S` (repeatable); any other pair gets the receiver's
-  refusal reply (`PARSING FAILD NO MATCHING FUNC ...`; the real text for a
-  refused signal group is not known). The group saves itself.
+  `--respond-reject M,S` (repeatable); any other pair gets a refusal reply
+  in the older spelling (`PARSING FAILD NO MATCHING FUNC ...`), while a real
+  build 25164 answers a refused group with `PARSING FAILED GRAMMAR ERROR,`.
+  The group saves itself.
   `--respond-group` is the group it starts on (default 4,5, the factory one).
 - A signal-group change or `RESET` restarts it: for about 3 s nothing is
   answered and no RTCM goes out, then the restart banner and the saved
-  configuration (outputs, base mode). The RTCM output also stops after
+  configuration (outputs, base mode). A real build 25164 takes about 9 s
+  and meanwhile answers a command with `The Board is resetting,...`; the
+  simulator stays silent. The RTCM output also stops after
   `UNLOG COM1` until an `RTCMxxxx COM1` command. Bursts that fall due while
   it sends no RTCM are dropped (counted as `bursts_withheld`), never sent
   late. Replies go out between whole frames, never inside one.

@@ -29,7 +29,7 @@ KNOWN_USB = {
     (0x1A86, 0x7523): ("um982-com2", "WCH CH340 family (the board's UM982 COM2 bridge is a CH340N)"),
     (0x1A86, 0x7522): ("um982-com2", "WCH CH340 variant"),
     (0x1A86, 0x5523): ("um982-com2", "WCH CH341/CH340 variant"),
-    (0x303A, 0x1001): ("esp32-native-usb", "ESP32-S3 native USB (not wired on this board)"),
+    (0x303A, 0x1001): ("esp32-native-usb", "ESP32-S3 built-in USB Serial/JTAG (the ESP32S3 port with the plug turned over)"),
 }
 
 ROLE_TEXT = {

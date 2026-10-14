@@ -17,6 +17,13 @@ confirms.
 
 Verify with `shasum -a 256 -c SHA256SUMS`.
 
+**Boards ship with newer firmware.** The UM982 + ESP32-S3 board this project targets
+arrived (October 2026) with **R4.10 Build 25164**, compiled 2026-05-21, which is newer
+than the package here. The flasher never installs a build lower than the one
+running, so this package is of no use on such a receiver. A newer package has to come
+from Unicore's UPrecise tool (see below). Receiver flashing from the station stays in
+bench builds for now and is lower priority than streaming.
+
 ### What's in this build
 
 TruePoint ionosphere-quality service, QZSS L6 MADOCA-PPP, improved PPP fusion and
@@ -24,8 +31,11 @@ RTK-assisted PPP convergence, a configurable PVT reliability threshold, smoother
 best-position output, anti-jamming tuning, and a GSV message fix (NMEA 4.11 errata).
 
 Galileo E6 tracking (needed for Onocoy's 4-band reward) is available on this
-firmware line via `CONFIG SIGNALGROUP 3 6`. This is confirmed from Unicore's
-signal-group tables but not yet verified on our hardware — see the project TODO.
+firmware line via `CONFIG SIGNALGROUP 3 6`, according to Unicore's signal-group
+tables. Build 18975 itself has not run on our hardware. On the shipped Build 25164,
+`CONFIG SIGNALGROUP 3 6` and `7 0` are accepted, and the receiver's `ANT1GROUPA`
+query lists Galileo E6 in group `3 6` and BeiDou B2a in group `7 0` (checked without
+an antenna; tracking with sky is still to be confirmed).
 
 ## Package format
 
@@ -66,12 +76,13 @@ confirmed on hardware.
 
 ## Where newer firmware comes from
 
-Unicore distributes UM982 firmware through their UPrecise software, which performs
-an online update check against Unicore's servers. The receiver has to be connected
-for that check — it signs the request — so pulling the newest build requires a
-physical UM982. Once we have the board we can retrieve the latest package that way
-and add it here. Build 18975 is the latest version we could obtain without a
-connected receiver.
+Unicore distributes UM982 firmware through their UPrecise software (Windows), which
+performs an online update check against Unicore's servers. The receiver has to be
+connected for that check — it signs the request — so pulling the newest build
+requires a physical UM982 on the receiver's USB-C. Build 18975 is the latest version
+we could obtain without a connected receiver. Now that the board is here (with Build
+25164), the next step is to fetch the current package with UPrecise and add it here;
+that has not been done yet.
 
 ## Source and licensing
 
