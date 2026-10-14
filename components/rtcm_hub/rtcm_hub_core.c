@@ -356,6 +356,8 @@ void rtcm_core_resync(rtcm_core_t *c, rtcm_core_consumer_t *k)
     snapshot(c, &s);
     k->cnt.frames_skipped_idle += s.frames - k->frames_pos;
     reposition(k, &s, false);
+    k->finishing = false;
+    k->finished = false;
     publish_counters(c, k);
 }
 
@@ -559,6 +561,9 @@ static run_t read_records(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf,
     snap_t s;
     snapshot(c, &s);
     for (;;) {
+        if (k->finished) {
+            return RUN_HELD;   /* finishing, and its epoch is over */
+        }
         if (s.release_gen != k->release_gen) {
             return RUN_RELEASED;   /* start over first (rtcm_core_read) */
         }
@@ -617,6 +622,10 @@ static run_t read_records(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf,
         }
 
         act_t a = decide(k, h.epoch, record_age(&s, h.rx_ms, now_ms), (h.msg_type & RTCM_CORE_REC_UNSURE) != 0);
+        if (k->finishing && a != ACT_DELIVER) {
+            k->finished = true;   /* not the epoch being delivered: it is over (or none was) */
+            return RUN_HELD;
+        }
         if (a == ACT_DELIVER || a == ACT_DELIVER_START) {
             if (max_len - *out < h.len) {
                 return RUN_FULL;
@@ -695,8 +704,9 @@ size_t rtcm_core_read(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf, siz
             k->restarted = true;
         }
         /* While held no sticky copy goes out (they may be newer than the
-         * hold point); the release starts every consumer over anyway. */
-        if (!s.held && !replay_sticky(c, k, buf, max_len, &out, now_ms)) {
+         * hold point); the release starts every consumer over anyway. Nor
+         * while finishing: sticky copies open an epoch. */
+        if (!s.held && !k->finishing && !replay_sticky(c, k, buf, max_len, &out, now_ms)) {
             break;
         }
         run_t r = read_records(c, k, buf, max_len, &out, now_ms);
@@ -708,12 +718,45 @@ size_t rtcm_core_read(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf, siz
     return out;
 }
 
+/* Under the lock: the newest epoch needs nothing more, as far as the frames
+ * stored so far show (an epoch whose last MSM is in, one with no MSM yet, or
+ * none at all; the next frame starts an epoch anyway after a reset). */
+static bool newest_closed_locked(const rtcm_core_t *c)
+{
+    const rtcm_epoch_t *e = &c->ep;
+    return !e->started || e->force_new || e->terminated || e->time_mask == 0;
+}
+
+/* Under the lock, finishing: the epoch this consumer was delivering is over. */
+static bool finish_done_locked(const rtcm_core_t *c, const rtcm_core_consumer_t *k)
+{
+    if (k->finished || !k->streaming || !k->epoch_open) {
+        return true;   /* not inside an epoch (or the read already met the next one) */
+    }
+    if (k->rd != c->write_off || c->reserve_off != c->write_off) {
+        return false;  /* records to read, or one being stored (its epoch state is already in c->ep) */
+    }
+    /* Every record read: the newest epoch is the one delivered, or it ended
+     * before the next one was skipped or dropped. */
+    return c->committed_epoch != k->last_epoch || newest_closed_locked(c);
+}
+
 bool rtcm_core_at_hold(rtcm_core_t *c, rtcm_core_consumer_t *k)
 {
     lk(c);
     bool at = c->held && k->rd >= c->hold_off;
+    if (!at && k->finishing && finish_done_locked(c, k)) {
+        k->finished = true;
+        at = true;
+    }
     unlk(c);
     return at;
+}
+
+void rtcm_core_finish(rtcm_core_t *c, rtcm_core_consumer_t *k)
+{
+    (void)c;
+    k->finishing = true;
 }
 
 bool rtcm_core_take_restart(rtcm_core_consumer_t *k)
@@ -769,7 +812,7 @@ bool rtcm_core_epoch_in_flight(rtcm_core_t *c, uint64_t now_ms, uint32_t quiet_m
     return have && open && age < quiet_ms;
 }
 
-rtcm_core_hold_t rtcm_core_hold(rtcm_core_t *c, uint64_t now_ms, uint32_t quiet_ms, bool force)
+rtcm_core_hold_t rtcm_core_hold(rtcm_core_t *c, uint64_t now_ms, uint32_t quiet_ms, bool force, bool arriving)
 {
     lk(c);
     if (c->held) {
@@ -790,14 +833,16 @@ rtcm_core_hold_t rtcm_core_hold(rtcm_core_t *c, uint64_t now_ms, uint32_t quiet_
         unlk(c);
         return RTCM_CORE_HOLD_NONE;
     } else {
-        /* The caller waited long enough. Quiet for the gap rule: its last
-         * MSM never came (or the receiver never clears the bit), and what
-         * came is the epoch. Otherwise it is still arriving: nobody starts
-         * it. The newest frame's arrival is the epoch tracker's (a frame
-         * being copied right now counts; last_rx_ms moves only at commit). */
+        /* The caller waited long enough. Quiet for the gap rule, with nothing
+         * received and unpublished: its last MSM never came (or the receiver
+         * never clears the bit), and what came is the epoch. Otherwise it is
+         * still arriving: nobody starts it. The newest frame's arrival is the
+         * epoch tracker's (a frame being copied right now counts; last_rx_ms
+         * moves only at commit). */
         int32_t age = (int32_t)((uint32_t)now_ms - e->last_rx_ms);
-        if (age >= 0 && (uint32_t)age >= quiet_ms) {
+        if (!arriving && age >= 0 && (uint32_t)age >= quiet_ms) {
             at = c->reserve_off;
+            kind = RTCM_CORE_HOLD_QUIET;
         } else {
             at = c->epoch_start_off;
             kind = RTCM_CORE_HOLD_CUT;

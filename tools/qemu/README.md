@@ -159,15 +159,28 @@ restart prints one banner, and its power-on log shows the bootloader
 reaching its RTC watchdog setup about 80 ms after the reset, well inside
 the 1 s that `esp_restart_noos` arms that watchdog for.
 
-The firmware runs every planned restart on the PRO CPU: the lifecycle
-service task (which runs the queued ones) is pinned to core 0, and the
-other paths run there anyway (`app_main`, the boot-time trial check, the
-hook-overrun timer in the `esp_timer` task). A board restarts the same from
-either core. `smoke.py` checks the pin (`GET /api/diag/tasks`: `lifecycle`
-on core 0), and the boot checks of `smoke.py` and `e2e.py` stay strict: a
-boot that ends in a second `rst:0xc` banner inside the bootloader right
-after a planned restart still fails, named as "the restart ran on the APP
-CPU, and QEMU has no CPU stall".
+The firmware runs every restart it plans on a task pinned to the PRO CPU:
+the lifecycle service task, pinned to core 0, runs the queued ones and
+every immediate one whose caller is not pinned there (`lifecycle.c`
+`reboot_now`: leaving safe mode runs in the web server's worker, which has
+no core of its own, and its restart is handed to the service task), a
+caller pinned to core 0 runs its own (`app_main`, the boot-time trial
+check), and the hook-overrun timer (`esp_timer` task) and the fatal boot
+error retry (`app_main`) run there too. The one exception is a bench-only
+test hook on a board (`CONFIG_UM98X_FLASH_BYTE_CAPTURE`, an abrupt restart
+from the station task). A board restarts the same from either core. Which
+core an unpinned task is on decides nothing here, and a clean boot proves
+nothing either (the unpinned path needs load to land on the APP CPU), so
+the checks look at the runner itself: the reboot line names it and its pin
+(`lifecycle: rebooting (reason N) from lifecycle, pinned to core 0`), and
+the boot checks of `smoke.py`, `e2e.py` and `bench_console.py` fail on a
+planned restart from a task not pinned to core 0. `smoke.py` also checks
+the service task's pin (`GET /api/diag/tasks`: `lifecycle` on core 0), and
+`bench_console.py` leaves safe mode through the web API (the worker's
+restart must come from the lifecycle task). The boot checks stay strict
+too: a boot that ends in a second `rst:0xc` banner inside the bootloader
+right after a planned restart still fails, named as "the restart ran on
+the APP CPU, and QEMU has no CPU stall".
 
 ## UART1 (the receiver link)
 
@@ -306,7 +319,10 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    (`components/web/web.c`, `web_linger_close`); last, a client back on
    its local port 15 s after the station ended its connection first
    (`Connection: close`) gets a SYN-ACK at once (the station's packets in
-   the pcap show one per connection). lwIP never takes a new SYN on a
+   the pcap show one per connection, told apart by their initial sequence
+   numbers: lwIP sends a SYN-ACK again with the same one when the client's
+   ACK is lost, as when QEMU's MAC drops a received frame, and that is no
+   third connection). lwIP never takes a new SYN on a
    connection it holds in TIME_WAIT (`tcp_timewait_input`: a reset, or a
    bare ACK the client answers with a reset), and with lwIP's default MSL
    that lasts 120 s; Linux hands the same port out again well within that
@@ -325,8 +341,9 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    station's IPv6 link-local line in the boot log, with no `is not
    link-local` warning in the 30 s after it; at the end of the window `GET /`
    and `GET /api/status` still answer, the console writer task runs (`GET
-   /api/diag/tasks`), the `lifecycle` task is pinned to core 0 (see "A
-   planned restart on the APP CPU" above) and `GET /api/health` counts no
+   /api/diag/tasks`), the `lifecycle` task is pinned to core 0 and every
+   planned restart's reboot line names a task pinned to core 0 (see "A
+   planned restart on the APP CPU" above), and `GET /api/health` counts no
    console drop; then
    `POST /api/system/reboot`: `network: mDNS: goodbye sent` is on the
    console before the next boot, with no shutdown-budget warning, and the
@@ -414,8 +431,18 @@ reports PASS or FAIL for each of these (exit status 1 if any failed):
    once, flood lines did arrive while the replies were printed, and `GET
    /api/health` counts no console drop afterwards (this runs after the web
    checks: the flood overwrites the web log's ring);
-6. throughout: no `UART driver already installed` or `uart driver error`
-   line, no `[diag:` note, no panic and one boot only.
+6. safe mode, entered and left: `safemode ENTER-SAFE-MODE` restarts as a
+   failed boot at the crash limit (`lifecycle_bench_reboot_into_safe_mode`,
+   bench builds only), the next boot runs in safe mode (`SAFE MODE` on the
+   console, `GET /api/status` `safe_mode.active`), and `POST
+   /api/system/safe-mode/clear` leaves it: the request is served by the
+   web server's worker, a task with no core of its own, and its reboot line
+   must read `(reason 10) from lifecycle, pinned to core 0` (the restart
+   handed to the lifecycle task); the boot after it is a normal one;
+7. throughout: no `UART driver already installed` or `uart driver error`
+   line, no `[diag:` note, no panic, and three boots: the two restarts
+   above, each with the firmware's own reboot line from a task pinned to
+   core 0, and no other.
 
 The bench console's replies, its prompt in the dumb-terminal mode and the
 receiver flasher's byte echo go to the console through the log's console
@@ -562,12 +589,30 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
   more, and warns when it had to hold without a boundary, which the
   scenario prints); the configured receiver sends the station messages
   the profile asks for (its own 1005, 1033 and 1230 open every epoch, so
-  the station judges the profile applied) and
+  the station judges the profile applied); then, still with each epoch's
+  last MSM 0.7 s late, 6 saves of slot 1's settings (each closes the
+  session for the new settings and reconnects; every other one 0.1 s after
+  a burst began going out, inside its epoch, the others at a random moment)
+  with at least one close that waited for the end of the epoch it was
+  sending (`ending the session after the epoch it was sending` on the
+  console) and none that gave up on it (`closing inside an epoch`), and a
+  restart asked for 0.1 s after a burst began (the web server restarts 1 s
+  later, so the shutdown comes early in the next one) with the replay
+  streaming until that session has ended (then paused, a waiting late MSM
+  dropped too: the next boot must not see RTCM arrive across the restart,
+  see the UART1 section): the session the restart ends finishes its epoch
+  first (tried again, up to 3 restarts, when the request came late and the
+  shutdown found no epoch in flight). Before this a planned close (reboot,
+  new settings, a restart by the health monitor) closed every session at
+  once, and the last chunk a caster got ended inside an epoch whenever the
+  close fell in the receiver's MSM burst; the restart in the comparison
+  above, with the replay paused 2 s before it, could not show that. And
   every caster record of the scenario (the slot is paused for each switch
   and each apply) passes the strict epoch check above, against the fixture
   as that receiver sends it; a record that ended (the station closed the
-  session during a pause, or the restart did) and the part of the first
-  session before the configuration's pause also end on a whole epoch: their
+  session during a pause, for new settings, or a restart did) and the part
+  of the first session before the configuration's pause also end on a
+  whole epoch: their
   last frame that is no station message is its epoch's last, with nothing
   cut after it (the next epoch's station messages may follow: a caster can
   send them before the pause, and they never belong to an MSM run). Before

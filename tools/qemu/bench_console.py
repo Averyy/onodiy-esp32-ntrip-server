@@ -45,9 +45,18 @@ build cannot show whether both still work, so this runs the image:
      with a log line's time and tag inside it; `help` still lists every
      command; every flood line arrives whole, once; flood lines did arrive
      while the replies were printed; and /api/health counts no console drop;
-  7. throughout: no "UART driver already installed" or "uart driver error"
-     line, no console note about dropped lines ("[diag:"), no panic and one
-     boot only.
+  7. safe mode, entered and left: `safemode ENTER-SAFE-MODE` restarts as a
+     failed boot at the crash limit; the next boot runs in safe mode
+     ("SAFE MODE" on the console, GET /api/status safe_mode.active), and
+     POST /api/system/safe-mode/clear leaves it from the web server's worker,
+     a task not pinned to a core: its restart must run on the lifecycle
+     task, pinned to core 0 (its reboot line names the task and the pin; on
+     the APP CPU this QEMU boots twice, see tools/qemu/README.md), and the
+     boot after it is a normal one;
+  8. throughout: no "UART driver already installed" or "uart driver error"
+     line, no console note about dropped lines ("[diag:"), no panic, three
+     boots (the two restarts above, each with the firmware's own reboot line
+     and on a task pinned to core 0) and no other.
 
 QEMU always stops: on a normal end, Ctrl-C, SIGTERM or SIGHUP, and run.sh
 gets --seconds as a backstop in case this script is killed outright.
@@ -222,6 +231,8 @@ class BenchConsole:
         self.proc: subprocess.Popen | None = None
         self.tap: ConsoleTap | None = None
         self.cookie: str | None = None
+        self.password: str | None = None
+        self.planned = 0             # restarts this script asked for
         self.http_port = 0
         self.t0 = time.monotonic()
 
@@ -243,7 +254,8 @@ class BenchConsole:
         listener.listen(1)
         port = listener.getsockname()[1]
         self.http_port = smoke.free_port()
-        backstop = 3 * self.args.timeout + BACKSTOP_MARGIN_S
+        # Each wait at most --timeout: the first boot's three, two for each of the two restarts.
+        backstop = 7 * self.args.timeout + BACKSTOP_MARGIN_S
         cmd = [str(smoke.RUN_SH), "--no-build", "--overlay", "sdkconfig.bench", "--headless", str(self.console),
                "--console", f"connect:{port}", "--uart1", "none", "--http-port", str(self.http_port),
                "--seconds", str(backstop)]
@@ -446,6 +458,7 @@ class BenchConsole:
                               f"POST /api/setup/admin set the first password (HTTP {status})"):
                 return
             self.cookie = cookie
+            self.password = password
             status, _, body = smoke.request(self.http_port, "GET", "/api/logs?format=text", cookie=cookie, timeout=30)
             (self.out / "api-logs.txt").write_bytes(body)
             log = body.decode("utf-8", errors="replace")
@@ -460,6 +473,67 @@ class BenchConsole:
                        f"/api/health log.console_dropped {log.get('console_dropped')} of {log.get('lines')} lines")
         except (OSError, http.client.HTTPException, ValueError) as e:
             self.check(False, f"web API: {type(e).__name__}: {e}")
+
+    def web_up(self) -> bool:
+        """The web server answers again (after a restart) and the session is back (POST /api/session)."""
+        deadline = time.monotonic() + self.args.timeout
+        while time.monotonic() < deadline and self.alive():
+            try:
+                if smoke.request(self.http_port, "GET", "/", timeout=10, watch=False)[0] == 200:
+                    status, hdrs, _ = smoke.request(self.http_port, "POST", "/api/session",
+                                                    {"password": self.password}, timeout=60)
+                    cookie = hdrs.get("set-cookie", "").split(";", 1)[0]
+                    if status == 200 and cookie.startswith("sid="):
+                        self.cookie = cookie
+                        return True
+            except (OSError, http.client.HTTPException):
+                pass
+            time.sleep(1)
+        return False
+
+    def safe_mode_active(self) -> bool | None:
+        status, _, body = smoke.request(self.http_port, "GET", "/api/status", cookie=self.cookie, timeout=30)
+        if status != 200:
+            return None
+        return bool((json.loads(body).get("safe_mode") or {}).get("active"))
+
+    def safe_mode_checks(self) -> None:
+        """Into safe mode by a bench restart, out of it through the web API: the way out restarts from the web
+        server's worker (not pinned to a core), which lifecycle.c hands to its task on core 0."""
+        if self.password is None:
+            return
+        start = self.tap.size()
+        reply = self.command("safemode ENTER-SAFE-MODE", lambda t: "BENCH " in t, 20)
+        if not self.check("BENCH restart into safe mode requested" in reply,
+                          "safemode: " + next((x.strip() for x in reply.splitlines() if "BENCH" in x), "no answer")):
+            return
+        self.planned += 1
+        text = self.wait_text(start, lambda t: "SAFE MODE" in t and t.count(START_LINE) >= 1, self.args.timeout)
+        if not self.check("SAFE MODE" in text and smoke.BOOT_MARK in text,
+                          "the next boot runs in safe mode (\"SAFE MODE\" on the console)"):
+            return
+        try:
+            if not self.check(self.web_up(), "the web server answers in safe mode, the session is back"):
+                return
+            active = self.safe_mode_active()
+            if not self.check(active is True, f"GET /api/status: safe_mode.active {active}"):
+                return
+            start = self.tap.size()
+            status, _, body = smoke.request(self.http_port, "POST", "/api/system/safe-mode/clear", {},
+                                            cookie=self.cookie, timeout=30)
+            if not self.check(status == 202, f"POST /api/system/safe-mode/clear: HTTP {status} {body[:120]!r}"):
+                return
+            self.planned += 1
+            text = self.wait_text(start, lambda t: smoke.BOOT_MARK in t and START_LINE in t, self.args.timeout)
+            line = next((x.strip() for x in text.splitlines() if smoke.OWN_REBOOT.search(x)), None)
+            self.check(line is not None and "(reason 10) from lifecycle, pinned to core 0" in line,
+                       f"leaving safe mode restarts from the lifecycle task on core 0: {line or 'no reboot line'}")
+            if not self.check(self.web_up(), "the web server answers after leaving safe mode"):
+                return
+            active = self.safe_mode_active()
+            self.check(active is False, f"GET /api/status after it: safe_mode.active {active}")
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            self.check(False, f"safe mode: {type(e).__name__}: {e}")
 
     def final_checks(self) -> None:
         alive = self.alive()
@@ -478,8 +552,11 @@ class BenchConsole:
         self.check(not notes, f"no dropped console lines ({notes[0] if notes else 'no [diag: note'})")
         fatal = next((x.strip()[:160] for x in text.splitlines() if any(f in x for f in smoke.FATAL)), None)
         self.check(fatal is None, f"no panic on the console ({fatal or 'none'})")
-        boots = text.count(smoke.BOOT_MARK)
-        self.check(boots == 1, f"{boots} boot(s): no restart during the run")
+        r = smoke.boot_report(text)
+        self.check(r.boots == 1 + self.planned,
+                   f"{r.boots} boot(s): {self.planned} restart(s) asked for, no other")
+        self.check(not r.unplanned, smoke.boot_text(r))
+        self.check(not r.off_pro, smoke.runner_text(r, len(smoke.OWN_REBOOT.findall(text))))
 
     def run(self) -> int:
         try:
@@ -491,6 +568,7 @@ class BenchConsole:
                 self.web_checks()   # also without a command line: the web log shows what the console could not
                 if started:
                     self.flood_checks()   # after the web log check: the flood overwrites the log ring
+                    self.safe_mode_checks()   # last: two restarts
             self.final_checks()
         finally:
             self.stop()

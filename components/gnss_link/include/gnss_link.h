@@ -403,11 +403,13 @@ esp_err_t gnss_link_raw_flush(gnss_link_lease_t lease);
 esp_err_t gnss_link_get_stats(gnss_link_stats_t *out);
 
 /**
- * Bytes that arrived on the receiver link and wait in the UART driver for
- * the reader (0 while the driver is closed or before init). Any task. The
- * station counts them as an epoch still in flight before it holds the
- * casters (rtcm_hub_hold): a reader kept off the CPU leaves the newest
- * published epoch looking finished while the rest of it is still here.
+ * Bytes that arrived on the receiver link and are not framed yet: waiting in
+ * the UART driver for the reader, or read by it and not yet through the
+ * framer (0 while the driver is closed or before init; an upper bound while
+ * a read is under way). Any task. The station passes them to a forced
+ * rtcm_hub_hold() as an epoch still arriving: a reader kept off the CPU
+ * leaves the newest published frame old, and the line looking quiet, while
+ * the rest of the epoch is still here.
  */
 size_t gnss_link_rx_unread(void);
 

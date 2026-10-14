@@ -243,7 +243,11 @@ static void __attribute__((noreturn)) do_reboot(lifecycle_reboot_reason_t reason
     }
     taskEXIT_CRITICAL(&s_lock);
 
-    ESP_LOGW(TAG, "rebooting (reason %d)", (int)reason);
+    /* The runner's core pin goes with it: the QEMU checks require core 0
+     * for every planned restart (see start_service). */
+    BaseType_t pin = xTaskGetCoreID(NULL);
+    ESP_LOGW(TAG, "rebooting (reason %d) from %s, pinned to %s", (int)reason, pcTaskGetName(NULL),
+             pin == 0 ? "core 0" : pin == 1 ? "core 1" : "no core");
     /* Queued; diag's restart handler writes out what its task has not. */
     (void)diag_journal_append(DIAG_EV_REBOOT, (int32_t)reason, 0);
     (void)esp_event_post(LIFECYCLE_EVENT, LIFECYCLE_EVENT_PRE_REBOOT, &reason, sizeof(reason), 0);
@@ -268,6 +272,14 @@ static void run_deferred(bool here, lifecycle_reboot_reason_t reason, TaskHandle
         do_reboot(reason);
     }
     xTaskNotifyGiveIndexed(service, SERVICE_NOTIFY_IDX);
+}
+
+/* The calling task is pinned to the PRO CPU (core 0), where every planned
+ * restart runs (see start_service). Pinned, not merely running there now: an
+ * unpinned task can move to the APP CPU while the shutdown hooks block. */
+static bool caller_on_pro_cpu(void)
+{
+    return xTaskGetCoreID(NULL) == 0;
 }
 
 /* Queued request: commit now, queue behind an inhibit, or join a reboot in progress. */
@@ -301,20 +313,32 @@ static esp_err_t request_reboot(lifecycle_reboot_reason_t reason, uint32_t flags
     }
 }
 
-/* Immediate reboot in the caller: commit now, refuse while inhibited, or wait
- * for a reboot already in progress. */
+/* Immediate reboot: commit now, refuse while inhibited, or wait for a reboot
+ * already in progress. A committed one runs in the caller when its task is
+ * pinned to the PRO CPU (app_main, the boot-time trial check), else on the
+ * service task while the caller waits (the web server's worker, unpinned,
+ * leaves safe mode this way); without a service task, in the caller. */
 static esp_err_t reboot_now(lifecycle_reboot_reason_t reason, bool force, uint32_t flags)
 {
     uint32_t apply;
+    bool pro = caller_on_pro_cpu();
+    bool here = true;
+    TaskHandle_t service;
     taskENTER_CRITICAL(&s_lock);
     reboot_gate_result_t res = reboot_gate_now(&s_gate, (uint32_t)reason, flags, force, &apply);
     apply_flags_locked(apply);
+    service = s_service;
+    if (res == REBOOT_GATE_COMMIT) {
+        here = pro || service == NULL;
+        s_deferred = !here;
+    }
     const char *holder = reboot_gate_holder(&s_gate);
     taskEXIT_CRITICAL(&s_lock);
 
     switch (res) {
     case REBOOT_GATE_COMMIT:
-        do_reboot(reason);
+        run_deferred(here, reason, service);
+        wait_for_reboot();
     case REBOOT_GATE_BUSY:
         wait_for_reboot();
     default:
@@ -404,9 +428,14 @@ static esp_err_t start_service(void)
         return err;
     }
     TaskHandle_t task = NULL;
-    /* On the PRO CPU (core 0), where every other planned restart runs too
-     * (app_main, the boot-time trial check, the hook-overrun timer in the
-     * esp_timer task). A board restarts the same from either core.
+    /* On the PRO CPU (core 0), with every other restart the firmware plans:
+     * reboot_now() runs one in a caller pinned there (app_main, the
+     * boot-time trial check) and hands any other caller's to this task (the
+     * web server's unpinned worker leaving safe mode), and the hook-overrun
+     * timer (esp_timer task) and lifecycle_fatal_boot_error() (app_main)
+     * run there too. The one exception is a bench-only test hook
+     * (CONFIG_UM98X_FLASH_BYTE_CAPTURE: an abrupt restart in the station
+     * task, on a board). A board restarts the same from either core.
      * Espressif's QEMU does not: esp_restart_noos() on the APP CPU resets
      * the PRO CPU and asks the RTC controller to stall it, but the esp32s3
      * machine's stall handler is empty (hw/xtensa/esp32s3.c
@@ -706,6 +735,17 @@ esp_err_t lifecycle_clear_safe_mode(void)
     /* The counters are cleared together with the commit of this reboot: a
      * refused request leaves the safe-mode state exactly as it was. */
     return reboot_now(LIFECYCLE_REBOOT_SAFE_MODE_CLEARED, false, FLAG_CLEAR_SAFE);
+}
+
+esp_err_t lifecycle_bench_reboot_into_safe_mode(void)
+{
+#if CONFIG_BENCH_CONSOLE
+    /* The retry's preparation (counter = limit - 1) at the commit, and a
+     * reboot that counts as a crash: the next boot reaches the limit. */
+    return request_reboot(LIFECYCLE_REBOOT_BOOT_FAILURE, FLAG_SAFE_RETRY);
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
 
 /* ---- inhibits and reboots ---------------------------------------------------------- */

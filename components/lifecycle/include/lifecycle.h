@@ -277,6 +277,15 @@ esp_err_t lifecycle_get_boot_history(lifecycle_boot_record_t *out, size_t *count
  */
 esp_err_t lifecycle_clear_safe_mode(void);
 
+/**
+ * Bench builds only (CONFIG_BENCH_CONSOLE): restart as a failed boot with
+ * the crash counter one short of the limit, so the next boot starts safe
+ * mode as a boot loop would (the QEMU bench check then leaves it through the
+ * web API). Queued like lifecycle_request_reboot().
+ * @return ESP_ERR_NOT_SUPPORTED in any other build.
+ */
+esp_err_t lifecycle_bench_reboot_into_safe_mode(void);
+
 /** Opaque inhibit token. */
 typedef int lifecycle_inhibit_t;
 
@@ -302,8 +311,11 @@ void lifecycle_inhibit_release(lifecycle_inhibit_t token);
 bool lifecycle_reboot_inhibited(const char **what);
 
 /**
- * Reboot now, in the calling task. Never returns on success (also not when
- * another reboot is already under way: the caller then waits for it).
+ * Reboot now. Never returns on success (also not when another reboot is
+ * already under way: the caller then waits for it). The restart runs in the
+ * calling task when that task is pinned to core 0, else on the lifecycle
+ * service task (pinned there) while the caller waits: every planned restart
+ * runs on the PRO CPU.
  * @param force reboot even while inhibited (fatal paths only).
  * @return ESP_ERR_INVALID_STATE if inhibited and not forced.
  */

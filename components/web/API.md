@@ -1470,7 +1470,10 @@ stored slots under the same lock as the save and reports which one refused
   being saved.
 
 `200` with the slot's `{"slot", "config", "status"}`; only that slot
-reconnects. Also `409 safe_mode`, `409 settings_unavailable`.
+reconnects. A session inside an epoch first sends the rest of it (at most
+1 s), so the caster's last epoch of that session is a whole one; a reboot
+ends sessions the same way. Also `409 safe_mode`,
+`409 settings_unavailable`.
 
 ### `POST /api/casters/{n}/retry` (adm)
 

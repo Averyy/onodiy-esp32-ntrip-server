@@ -272,17 +272,18 @@ void rtcm_hub_get_stats(rtcm_hub_stats_t *out)
     out->last_frame_age_ms = st.last_frame_age_ms;
 }
 
-rtcm_hub_hold_t rtcm_hub_hold(uint32_t quiet_ms, bool force)
+rtcm_hub_hold_t rtcm_hub_hold(uint32_t quiet_ms, bool force, bool arriving)
 {
     _Static_assert((int)RTCM_HUB_HOLD_NONE == (int)RTCM_CORE_HOLD_NONE &&
                        (int)RTCM_HUB_HOLD_BOUNDARY == (int)RTCM_CORE_HOLD_BOUNDARY &&
+                       (int)RTCM_HUB_HOLD_QUIET == (int)RTCM_CORE_HOLD_QUIET &&
                        (int)RTCM_HUB_HOLD_CUT == (int)RTCM_CORE_HOLD_CUT,
                    "hold kinds mirror the core's");
     rtcm_core_t *c = s_core;
     if (c == NULL) {
         return RTCM_HUB_HOLD_BOUNDARY;   /* no ring, no consumer: nothing to hold back */
     }
-    return (rtcm_hub_hold_t)rtcm_core_hold(c, now_ms(), quiet_ms, force);
+    return (rtcm_hub_hold_t)rtcm_core_hold(c, now_ms(), quiet_ms, force, arriving);
 }
 
 void rtcm_hub_release(void)
@@ -305,16 +306,14 @@ bool rtcm_hub_restarted(rtcm_hub_consumer_t consumer)
     return k != NULL && rtcm_core_take_restart(k);
 }
 
-bool rtcm_hub_epoch_in_flight(uint32_t quiet_ms, uint32_t *age_ms)
+esp_err_t rtcm_hub_finish_epoch(rtcm_hub_consumer_t consumer)
 {
-    rtcm_core_t *c = s_core;
-    if (c == NULL) {
-        if (age_ms != NULL) {
-            *age_ms = UINT32_MAX;
-        }
-        return false;
+    rtcm_core_consumer_t *k = lookup(consumer);
+    if (k == NULL) {
+        return ESP_ERR_INVALID_ARG;
     }
-    return rtcm_core_epoch_in_flight(c, now_ms(), quiet_ms, age_ms);
+    rtcm_core_finish(s_core, k);
+    return ESP_OK;
 }
 
 esp_err_t rtcm_hub_get_consumer_stats(rtcm_hub_consumer_t consumer, rtcm_hub_consumer_stats_t *out)

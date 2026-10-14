@@ -39,6 +39,9 @@
  *    together with the epoch state and reserve_off, that no consumer reads
  *    past until rtcm_core_release(). The release bumps a generation; a
  *    consumer whose position predates it starts over at its next read.
+ *  - finishing (rtcm_core_finish): one consumer stops at the end of the
+ *    epoch it is delivering, decided by its own task from the records it
+ *    reads and, at the write head, from the epoch state under the lock.
  *
  * Each consumer is driven by one task (read, resync, prepare/cancel wait,
  * set_max_lag); stats and detach may be called from any task.
@@ -151,6 +154,8 @@ typedef struct {
     uint8_t sticky_next;          /**< next sticky slot to replay (RTCM_CORE_STICKY_SLOTS = done) */
     uint32_t release_gen;         /**< the hub's release_gen when this position was taken */
     bool restarted;               /**< the last read started over after a release (rtcm_core_take_restart) */
+    bool finishing;               /**< deliver only the rest of the epoch being delivered (rtcm_core_finish) */
+    bool finished;                /**< ... and that epoch is over: nothing more until rtcm_core_resync() */
     rtcm_core_counters_t cnt;
 } rtcm_core_consumer_t;
 
@@ -158,6 +163,7 @@ typedef struct {
 typedef enum {
     RTCM_CORE_HOLD_NONE = 0,  /**< not placed: an epoch is in flight (try again, or force) */
     RTCM_CORE_HOLD_BOUNDARY,  /**< between two epochs */
+    RTCM_CORE_HOLD_QUIET,     /**< forced: after an open epoch whose line went quiet (its last MSM never came) */
     RTCM_CORE_HOLD_CUT,       /**< forced while an epoch was in flight: at that epoch's start */
 } rtcm_core_hold_t;
 
@@ -260,7 +266,7 @@ bool rtcm_core_wake_passed(rtcm_core_t *c, uint32_t gen);
  */
 size_t rtcm_core_read(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf, size_t max_len, uint64_t now_ms);
 
-/** Re-position as on attach; everything unread counts as idle skips (owner task). */
+/** Re-position as on attach; everything unread counts as idle skips; ends finishing (owner task). */
 void rtcm_core_resync(rtcm_core_t *c, rtcm_core_consumer_t *k);
 
 /** Set the lag limit. @return false outside RTCM_CORE_LAG_MIN_MS..RTCM_CORE_LAG_MAX_MS. */
@@ -281,9 +287,13 @@ void rtcm_core_cancel_wait(rtcm_core_t *c, rtcm_core_consumer_t *k);
 void rtcm_core_get_stats(rtcm_core_t *c, uint64_t now_ms, rtcm_core_stats_t *out);
 
 /**
- * True while an epoch is in flight (any task): the newest epoch holds an MSM
- * that announced more (multiple-message bit set) and the newest frame is
- * younger than `quiet_ms` (a lost terminating MSM ends it that way).
+ * The quiet-line view of the newest epoch (any task): true while it holds an
+ * MSM that announced more (multiple-message bit set) and the newest frame is
+ * younger than `quiet_ms`, so a line quiet that long ends an open epoch here.
+ * rtcm_core_hold() does not decide by it: there an open epoch stays in
+ * flight however quiet the line is, until the caller forces the hold (a
+ * late last MSM after a quiet line is the normal case under load, and this
+ * view cut such an epoch). Nothing in the firmware uses it to stop a stream.
  * @param age_ms optional: the newest frame's age, UINT32_MAX before the first.
  */
 bool rtcm_core_epoch_in_flight(rtcm_core_t *c, uint64_t now_ms, uint32_t quiet_ms, uint32_t *age_ms);
@@ -302,14 +312,19 @@ bool rtcm_core_epoch_in_flight(rtcm_core_t *c, uint64_t now_ms, uint32_t quiet_m
  *  - the newest epoch holds an MSM that announced more: it is in flight,
  *    however quiet the line is (the rest may come late: a slow reader, a
  *    stalled line), so RTCM_CORE_HOLD_NONE and no hold. With `force` (the
- *    caller waited long enough): its newest frame `quiet_ms` or more old
- *    means its last MSM never came (or the receiver never clears the bit),
- *    so the write head (RTCM_CORE_HOLD_BOUNDARY); else that epoch's first
- *    record (RTCM_CORE_HOLD_CUT), so no consumer starts it and one already
- *    inside it is cut there.
+ *    caller waited long enough): its newest frame `quiet_ms` or more old and
+ *    nothing `arriving` means its last MSM never came (or the receiver never
+ *    clears the bit), so the write head (RTCM_CORE_HOLD_QUIET); else that
+ *    epoch's first record (RTCM_CORE_HOLD_CUT), so no consumer starts it and
+ *    one already inside it is cut there.
+ * `arriving`: the producer has bytes it received and not yet published (the
+ * caller knows, the core cannot): the line is not quiet, its reader is
+ * behind, so an open epoch is still arriving however old its newest frame
+ * is. It changes only the forced decision; the others are positions that
+ * hold whatever comes next.
  * A hold already set is kept (its kind is returned).
  */
-rtcm_core_hold_t rtcm_core_hold(rtcm_core_t *c, uint64_t now_ms, uint32_t quiet_ms, bool force);
+rtcm_core_hold_t rtcm_core_hold(rtcm_core_t *c, uint64_t now_ms, uint32_t quiet_ms, bool force, bool arriving);
 
 /**
  * End the hold (any task; nothing if none is set). Every consumer starts over
@@ -323,10 +338,27 @@ void rtcm_core_release(rtcm_core_t *c);
 bool rtcm_core_held(rtcm_core_t *c);
 
 /**
- * True when a hold is set and this consumer has passed every record before
- * the hold point (owner task): it gets nothing more until the release.
+ * True when this consumer gets nothing more for now (owner task): a hold is
+ * set and it has passed every record before the hold point (until the
+ * release), or it is finishing (rtcm_core_finish) and the epoch it was
+ * delivering is over (until rtcm_core_resync()).
  */
 bool rtcm_core_at_hold(rtcm_core_t *c, rtcm_core_consumer_t *k);
+
+/**
+ * Finish this consumer's epoch (owner task), before its reader stops for
+ * good (a caster session that is about to close): from now on it gets the
+ * rest of the epoch it is delivering, and nothing of another one, nor a
+ * sticky copy. The epoch is over at the first record of another epoch, or,
+ * with every record read and none being stored, when the newest epoch is
+ * that one and needs nothing more: its last MSM is in, it holds only its
+ * leading station messages so far, or the next frame starts an epoch anyway.
+ * Never by a quiet line: an epoch whose last MSM was lost ends when the next
+ * one starts (the caller bounds the wait). A consumer that is not inside an
+ * epoch (waiting for an epoch start, or dropping one by the lag limit) is
+ * done at once. rtcm_core_resync() ends finishing.
+ */
+void rtcm_core_finish(rtcm_core_t *c, rtcm_core_consumer_t *k);
 
 /**
  * True once after a read that started this consumer over because a hold was

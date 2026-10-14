@@ -672,7 +672,10 @@ static void worker(void *arg)
             break;
         case JOB_SAFE_MODE_CLEAR: {
             vTaskDelay(pdMS_TO_TICKS(SAFE_MODE_DELAY_MS));
-            esp_err_t err = lifecycle_clear_safe_mode();   /* does not return on success */
+            /* Does not return on success. This task has no core of its own:
+             * lifecycle hands the restart to its task on core 0 and this one
+             * waits (lifecycle.c reboot_now). */
+            esp_err_t err = lifecycle_clear_safe_mode();
             ESP_LOGW(TAG, "leaving safe mode refused: %s", esp_err_to_name(err));
             break;
         }

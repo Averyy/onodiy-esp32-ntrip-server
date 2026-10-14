@@ -71,6 +71,10 @@
  *    rtcm_hub_hold(). After the release every consumer starts over at its
  *    next read, as after rtcm_hub_resync(): sticky copies, then the next
  *    sure epoch; what was published from the hold point on is never sent.
+ *  - Finishing (a session about to close, one consumer): after
+ *    rtcm_hub_finish_epoch() the consumer gets the rest of the epoch it is
+ *    sending and nothing of the next one, so a planned close (reboot, new
+ *    settings) ends the stream on a whole epoch.
  *  - Lag limit per consumer (rtcm_hub_set_max_lag; default
  *    CONFIG_RTCM_HUB_MAX_LAG_MS, the Onocoy slot 1000 ms): a consumer whose
  *    oldest unread frame is older than its limit drops whole oldest epochs
@@ -120,8 +124,8 @@
  *
  * Thread safety: rtcm_hub_publish() and rtcm_hub_clear_sticky() from one task
  * (the GNSS link RX task); every consumer handle used by exactly one task for
- * read, resync, set_max_lag, restarted and detach. The stats getters, the
- * hold and the release may be called from any task.
+ * read, resync, finish_epoch, set_max_lag, restarted and detach. The stats
+ * getters, the hold and the release may be called from any task.
  *
  * The ring, epoch and cursor logic is a pure core (rtcm_hub_core.c,
  * rtcm_epoch.c) with host tests; this component wraps it with the spinlock,
@@ -185,8 +189,8 @@ esp_err_t rtcm_hub_init(void);
  * Publish one complete RTCM3 frame (header + payload + CRC).
  *
  * Never blocks, allocates or logs. A rejected frame is counted in
- * publish_failures. Ages, consumer lag, last_frame_age_ms and
- * rtcm_hub_epoch_in_flight() are measured from the frame's arrival, not
+ * publish_failures. Ages, consumer lag, last_frame_age_ms and the quiet line
+ * of a forced rtcm_hub_hold() are measured from the frame's arrival, not
  * from the publish, so a frame that waited in the UART ring counts as old
  * as it is.
  *
@@ -215,16 +219,18 @@ void rtcm_hub_detach(rtcm_hub_consumer_t consumer);
 
 /**
  * Copy as many whole frames as fit into `buf`, waiting up to timeout_ms for
- * the first one. While the hub is held, only frames before the hold point.
+ * the first one. While the hub is held, only frames before the hold point;
+ * after rtcm_hub_finish_epoch(), only the rest of the epoch being sent.
  *
  * @param max_len must be >= RTCM_HUB_MIN_READ_BUF.
  * @param out_len bytes written (whole frames only; 0 on timeout).
  * @return ESP_OK with *out_len > 0, ESP_ERR_TIMEOUT if nothing arrived,
  *         ESP_ERR_INVALID_STATE at once when the hub is held and this
  *         consumer has passed every frame before the hold point (nothing
- *         more until rtcm_hub_release()), ESP_ERR_INVALID_SIZE if max_len <
- *         RTCM_HUB_MIN_READ_BUF (checked first, so a too-small buffer fails
- *         at once instead of forever).
+ *         more until rtcm_hub_release()) or when it was finishing its epoch
+ *         and that epoch is over (nothing more until rtcm_hub_resync()),
+ *         ESP_ERR_INVALID_SIZE if max_len < RTCM_HUB_MIN_READ_BUF (checked
+ *         first, so a too-small buffer fails at once instead of forever).
  */
 esp_err_t rtcm_hub_read(rtcm_hub_consumer_t consumer, uint8_t *buf, size_t max_len,
                         size_t *out_len, uint32_t timeout_ms);
@@ -232,8 +238,24 @@ esp_err_t rtcm_hub_read(rtcm_hub_consumer_t consumer, uint8_t *buf, size_t max_l
 /**
  * Re-position a consumer as on attach (sticky metadata, then the next epoch
  * start), e.g. after a caster reconnects. Skipped frames count as idle skips.
+ * Ends rtcm_hub_finish_epoch().
  */
 esp_err_t rtcm_hub_resync(rtcm_hub_consumer_t consumer);
+
+/**
+ * Finish the epoch this consumer is sending, before its reader stops (a
+ * caster session about to close for a reboot, new settings or a restart):
+ * rtcm_hub_read() then delivers the rest of that epoch and nothing of the
+ * next one (no sticky copy either), and returns ESP_ERR_INVALID_STATE once
+ * it is over: at the next epoch's first frame, or, with every frame read,
+ * as soon as the newest epoch is that one and needs nothing more (its last
+ * MSM is in, or it holds only its leading station messages so far). Never
+ * by a quiet line: the caller bounds the wait (an epoch whose last MSM was
+ * lost ends only when the next one starts). A consumer that is not inside
+ * an epoch gets ESP_ERR_INVALID_STATE at once. The consumer's task;
+ * rtcm_hub_resync() ends it.
+ */
+esp_err_t rtcm_hub_finish_epoch(rtcm_hub_consumer_t consumer);
 
 /**
  * Set a consumer's lag limit (the Onocoy slot uses 1000 ms; others keep
@@ -253,18 +275,11 @@ void rtcm_hub_clear_sticky(void);
 /** Hub-wide counters. */
 void rtcm_hub_get_stats(rtcm_hub_stats_t *out);
 
-/**
- * True while an epoch is in flight: the newest epoch holds an MSM that
- * announced more (multiple-message bit set) and the newest frame is younger
- * than `quiet_ms`. rtcm_hub_hold() decides by the same rule. Any task.
- * @param age_ms optional: the newest frame's age, UINT32_MAX before the first.
- */
-bool rtcm_hub_epoch_in_flight(uint32_t quiet_ms, uint32_t *age_ms);
-
 /** Where rtcm_hub_hold() put the hold point. */
 typedef enum {
     RTCM_HUB_HOLD_NONE = 0,   /**< not placed: an epoch is in flight (try again, or force) */
     RTCM_HUB_HOLD_BOUNDARY,   /**< between two epochs */
+    RTCM_HUB_HOLD_QUIET,      /**< forced: after an open epoch on a quiet line (its last MSM never came) */
     RTCM_HUB_HOLD_CUT,        /**< forced while an epoch was in flight: at that epoch's first frame */
 } rtcm_hub_hold_t;
 
@@ -281,16 +296,20 @@ typedef enum {
  *  - while the newest epoch's MSMs announced more, never on its own: the
  *    epoch is in flight however quiet the line is (its rest may come late),
  *    RTCM_HUB_HOLD_NONE and no hold. With `force` (the caller waited long
- *    enough): after it when its newest frame is `quiet_ms` or more old (its
- *    last MSM was lost, or the receiver never clears the bit), else at its
- *    first frame (RTCM_HUB_HOLD_CUT), so no caster starts it, and one
- *    already inside it ends there.
- * The caller also counts bytes the receiver link has not read yet as in
- * flight (gnss_link_rx_unread()), which the hub cannot see. A hold already
- * set is kept and its kind returned. Without a hub (init failed):
- * RTCM_HUB_HOLD_BOUNDARY, nothing to hold.
+ *    enough): after it when its newest frame is `quiet_ms` or more old and
+ *    nothing is `arriving` (its last MSM was lost, or the receiver never
+ *    clears the bit: RTCM_HUB_HOLD_QUIET), else at its first frame
+ *    (RTCM_HUB_HOLD_CUT), so no caster starts it, and one already inside it
+ *    ends there.
+ * `arriving`: bytes the producer received and has not published yet (the
+ * caller reads gnss_link_rx_unread(), which the hub cannot see): the reader
+ * is behind, not the line quiet, so a forced hold never goes after an open
+ * epoch then. The other placements are positions that hold whatever comes
+ * next, so it does not change them. A hold already set is kept and its kind
+ * returned. Without a hub (init failed): RTCM_HUB_HOLD_BOUNDARY, nothing to
+ * hold.
  */
-rtcm_hub_hold_t rtcm_hub_hold(uint32_t quiet_ms, bool force);
+rtcm_hub_hold_t rtcm_hub_hold(uint32_t quiet_ms, bool force, bool arriving);
 
 /**
  * End the hold (any task; nothing if none is set): every consumer starts over

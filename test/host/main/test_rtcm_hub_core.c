@@ -1405,9 +1405,9 @@ TEST_CASE("hub: a hold after an epoch's last MSM: nothing after it, a lagging co
     expect_range(ga, 0, 14);
 
     TEST_ASSERT_FALSE(rtcm_core_held(&x->core));
-    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, false));
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, false, false));
     TEST_ASSERT_TRUE(rtcm_core_held(&x->core));
-    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, true));   /* kept */
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, true, false));   /* kept */
 
     /* RTCM keeps coming until the receiver session takes the line. */
     fx_burst(x, true, false, 200);   /* 14..20 */
@@ -1458,7 +1458,7 @@ TEST_CASE("hub: an epoch holding only its station messages is withheld whole", "
     x->now += 5;
     fx_pub(x, 1230, 12, false);       /* 9 */
     TEST_ASSERT_FALSE(rtcm_core_epoch_in_flight(&x->core, x->now, 250, NULL));
-    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, false));
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, false, false));
     /* Its MSMs come before the lease: no consumer gets any of them. */
     static const uint16_t msm[] = { 1077, 1087, 1097, 1127 };
     for (unsigned i = 0; i < 4; i++) {
@@ -1495,11 +1495,11 @@ TEST_CASE("hub: no hold inside an epoch in flight unless forced, then at its fir
     fx_drain(x, a, 4096, ga);
     expect_range(ga, 0, 10);
 
-    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_NONE, rtcm_core_hold(&x->core, x->now, 250, false));
-    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_NONE, rtcm_core_hold(&x->core, x->now + 249, 250, false));
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_NONE, rtcm_core_hold(&x->core, x->now, 250, false, false));
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_NONE, rtcm_core_hold(&x->core, x->now + 249, 250, false, false));
     TEST_ASSERT_FALSE(rtcm_core_held(&x->core));
     TEST_ASSERT_FALSE(rtcm_core_at_hold(&x->core, a));
-    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_CUT, rtcm_core_hold(&x->core, x->now, 250, true));
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_CUT, rtcm_core_hold(&x->core, x->now, 250, true, false));
     x->now += 5;
     fx_pub(x, 1097, 200, true);       /* 10 */
     x->now += 5;
@@ -1530,12 +1530,12 @@ TEST_CASE("hub: an open epoch is never held on quiet alone: its late last MSM st
     fx_pub(x, 1077, 200, true);       /* 8 */
     x->now += 5;
     fx_pub(x, 1087, 200, true);       /* 9 */
-    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_NONE, rtcm_core_hold(&x->core, x->now + 300, 250, false));
-    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_NONE, rtcm_core_hold(&x->core, x->now + 590, 250, false));
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_NONE, rtcm_core_hold(&x->core, x->now + 300, 250, false, false));
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_NONE, rtcm_core_hold(&x->core, x->now + 590, 250, false, false));
     TEST_ASSERT_FALSE(rtcm_core_held(&x->core));
     x->now += 600;
     fx_pub(x, 1127, 200, false);      /* 10: its last, late */
-    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, false));
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, false, false));
     x->now += 400;
     x->tow += 1000;
     fx_pub(x, 1005, 19, false);       /* 11: the next epoch, after the hold */
@@ -1557,8 +1557,8 @@ TEST_CASE("hub: forced, an epoch whose last MSM never came is held after its new
     fx_pub(x, 1005, 19, false);       /* 7 */
     x->now += 5;
     fx_pub(x, 1077, 200, true);       /* 8: its terminating MSM is lost */
-    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_NONE, rtcm_core_hold(&x->core, x->now + 1000, 250, false));
-    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now + 1000, 250, true));
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_NONE, rtcm_core_hold(&x->core, x->now + 1000, 250, false, false));
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_QUIET, rtcm_core_hold(&x->core, x->now + 1000, 250, true, false));
     x->now += 900;
     x->tow += 1000;
     fx_pub(x, 1005, 19, false);       /* 9: the next epoch (gap rule) */
@@ -1570,10 +1570,277 @@ TEST_CASE("hub: forced, an epoch whose last MSM never came is held after its new
     fx_free(x);
 }
 
+TEST_CASE("hub: forced while bytes still arrive, an open epoch on a quiet line is held at its first frame",
+          "[rtcm_hub]")
+{
+    /* The link's reader is behind (bytes wait in the UART driver, or in a
+     * read not framed yet): the newest frame is old, so the line looks
+     * quiet, but the rest of the epoch is among those bytes. The forced hold
+     * must not go after the part that came: a caster not inside the epoch
+     * yet would send it cut. */
+    fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    fx_lead_in(x);
+    rtcm_core_consumer_t *a = fx_attach_live(x, "a");   /* inside the epoch already */
+    rtcm_core_consumer_t *b = fx_attach_live(x, "b");   /* not yet */
+    got_t *ga = got_new();
+    got_t *gb = got_new();
+    fx_burst(x, true, false, 200);   /* 0..6 */
+    x->now = x->next_at;
+    fx_pub(x, 1005, 19, false);       /* 7 */
+    x->now += 5;
+    fx_pub(x, 1077, 200, true);       /* 8: announces more */
+    fx_drain(x, a, 4096, ga);
+    expect_range(ga, 0, 9);
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_NONE, rtcm_core_hold(&x->core, x->now + 1000, 250, false, true));
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_CUT, rtcm_core_hold(&x->core, x->now + 1000, 250, true, true));
+    /* The reader catches up: the rest of the epoch comes after the hold point. */
+    x->now += 1000;
+    fx_pub(x, 1087, 200, true);       /* 9 */
+    fx_pub(x, 1127, 200, false);      /* 10: its last */
+    ga->n = 0;
+    fx_drain(x, a, 4096, ga);
+    TEST_ASSERT_EQUAL_UINT(0, ga->n);   /* inside it: ends there (the forced case) */
+    fx_drain(x, b, 4096, gb);
+    expect_range(gb, 0, 7);              /* never starts it */
+    free(ga);
+    free(gb);
+    fx_free(x);
+
+    /* Bytes arriving change only the forced decision: after a terminated
+     * epoch, or at an epoch holding only station messages, the hold is a
+     * boundary whatever comes next. */
+    x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    fx_lead_in(x);
+    b = fx_attach_live(x, "b");
+    gb = got_new();
+    fx_burst(x, true, false, 200);   /* 0..6 */
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, false, true));
+    fx_burst(x, true, false, 200);   /* 7..13 */
+    fx_drain(x, b, 4096, gb);
+    expect_range(gb, 0, 7);
+    free(gb);
+    fx_free(x);
+
+    x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    fx_lead_in(x);
+    b = fx_attach_live(x, "b");
+    gb = got_new();
+    fx_burst(x, true, false, 200);   /* 0..6 */
+    x->now = x->next_at;
+    fx_pub(x, 1005, 19, false);       /* 7 */
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, false, true));
+    x->now += 5;
+    fx_pub(x, 1077, 200, false);      /* 8 */
+    fx_drain(x, b, 4096, gb);
+    expect_range(gb, 0, 7);
+    free(gb);
+    fx_free(x);
+}
+
+/* ---- finishing one consumer's epoch (a session about to close) --------------- */
+
+TEST_CASE("hub: finishing inside an epoch sends its rest, never on quiet alone, and nothing of the next",
+          "[rtcm_hub]")
+{
+    fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    fx_lead_in(x);
+    rtcm_core_consumer_t *a = fx_attach_live(x, "a");   /* at the head */
+    rtcm_core_consumer_t *b = fx_attach_live(x, "b");   /* behind (stuck in a write meanwhile) */
+    rtcm_core_consumer_t *c = fx_attach_live(x, "c");   /* not finishing: unaffected */
+    got_t *ga = got_new();
+    got_t *gb = got_new();
+    got_t *gc = got_new();
+    fx_burst(x, true, false, 200);   /* 0..6 */
+    x->now = x->next_at;
+    fx_pub(x, 1005, 19, false);       /* 7 */
+    x->now += 5;
+    fx_pub(x, 1077, 200, true);       /* 8 */
+    fx_drain(x, b, 4096, gb);
+    expect_range(gb, 0, 9);           /* up to 8, inside the epoch */
+    x->now += 5;
+    fx_pub(x, 1087, 200, true);       /* 9 */
+    fx_drain(x, a, 4096, ga);
+    expect_range(ga, 0, 10);
+
+    rtcm_core_finish(&x->core, a);
+    rtcm_core_finish(&x->core, b);
+    TEST_ASSERT_FALSE(rtcm_core_at_hold(&x->core, a));   /* its epoch is still open at the head */
+    TEST_ASSERT_TRUE(rtcm_core_prepare_wait(&x->core, a, (void *)(uintptr_t)0xA0));   /* it may sleep */
+    rtcm_core_cancel_wait(&x->core, a);
+    TEST_ASSERT_FALSE(rtcm_core_at_hold(&x->core, b));
+    x->now += 600;                    /* a quiet line does not end it: its rest comes late */
+    ga->n = 0;
+    TEST_ASSERT_EQUAL_UINT(0, fx_read(x, a, 4096, ga));
+    TEST_ASSERT_FALSE(rtcm_core_at_hold(&x->core, a));
+    fx_pub(x, 1097, 200, true);       /* 10 */
+    x->now += 5;
+    fx_pub(x, 1127, 200, false);      /* 11: its last */
+    fx_drain(x, a, 4096, ga);
+    expect_range(ga, 10, 2);
+    TEST_ASSERT_TRUE(rtcm_core_at_hold(&x->core, a));    /* over at its last MSM, before the next frame */
+    fx_burst(x, true, false, 200);    /* 12..18: the next epoch */
+    ga->n = 0;
+    fx_drain(x, a, 4096, ga);
+    TEST_ASSERT_EQUAL_UINT(0, ga->n);
+    TEST_ASSERT_TRUE(rtcm_core_at_hold(&x->core, a));
+    gb->n = 0;
+    fx_drain(x, b, GNSS_RTCM3_MAX_FRAME, gb);
+    expect_range(gb, 9, 3);           /* the rest of its epoch, then nothing of the next (already stored) */
+    TEST_ASSERT_TRUE(rtcm_core_at_hold(&x->core, b));
+    fx_drain(x, c, 4096, gc);
+    expect_range(gc, 0, 19);
+    TEST_ASSERT_FALSE(rtcm_core_at_hold(&x->core, c));
+
+    /* A resync (the next session) ends it: sticky copies, then the next whole epoch. */
+    rtcm_core_resync(&x->core, a);
+    TEST_ASSERT_FALSE(rtcm_core_at_hold(&x->core, a));
+    ga->n = 0;
+    fx_drain(x, a, 4096, ga);
+    fx_burst(x, true, false, 200);    /* 19..25 */
+    fx_drain(x, a, 4096, ga);
+    static const uint32_t again[] = { 12, 13, 14, 19, 20, 21, 22, 23, 24, 25 };
+    expect_serials(ga, again, sizeof(again) / sizeof(again[0]));
+    rtcm_core_consumer_stats_t sb = cst(x, b);
+    TEST_ASSERT_EQUAL_UINT64(0, sb.c.frames_dropped);
+    free(ga);
+    free(gb);
+    free(gc);
+    fx_free(x);
+}
+
+TEST_CASE("hub: finishing between epochs, after station messages or while waiting is over at once", "[rtcm_hub]")
+{
+    /* After an epoch's last MSM: over without waiting for the next frame. */
+    fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    fx_lead_in(x);
+    rtcm_core_consumer_t *a = fx_attach_live(x, "a");
+    got_t *g = got_new();
+    fx_burst(x, true, false, 200);   /* 0..6 */
+    fx_drain(x, a, 4096, g);
+    expect_range(g, 0, 7);
+    rtcm_core_finish(&x->core, a);
+    TEST_ASSERT_TRUE(rtcm_core_at_hold(&x->core, a));
+    fx_burst(x, true, false, 200);   /* 7..13 */
+    g->n = 0;
+    fx_drain(x, a, 4096, g);
+    TEST_ASSERT_EQUAL_UINT(0, g->n);
+    free(g);
+    fx_free(x);
+
+    /* After the next epoch's station messages (no MSM yet): they are never
+     * part of an MSM run, so it stops there and its MSMs never go out. */
+    x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    fx_lead_in(x);
+    a = fx_attach_live(x, "a");
+    g = got_new();
+    fx_burst(x, true, false, 200);   /* 0..6 */
+    x->now = x->next_at;
+    fx_pub(x, 1005, 19, false);       /* 7 */
+    x->now += 5;
+    fx_pub(x, 1033, 60, false);       /* 8 */
+    fx_drain(x, a, 4096, g);
+    expect_range(g, 0, 9);
+    rtcm_core_finish(&x->core, a);
+    TEST_ASSERT_TRUE(rtcm_core_at_hold(&x->core, a));
+    x->now += 5;
+    fx_pub(x, 1230, 12, false);       /* 9 */
+    x->now += 5;
+    fx_pub(x, 1077, 200, false);      /* 10 */
+    g->n = 0;
+    fx_drain(x, a, 4096, g);
+    TEST_ASSERT_EQUAL_UINT(0, g->n);
+    free(g);
+    fx_free(x);
+
+    /* Waiting for an epoch start (attached, sticky copies pending): over at
+     * once, no sticky copy. */
+    x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    fx_lead_in(x);
+    g = got_new();
+    fx_burst(x, true, false, 200);   /* 0..6 */
+    rtcm_core_consumer_t *w = rtcm_core_attach(&x->core, "w");
+    TEST_ASSERT_NOT_NULL(w);
+    rtcm_core_finish(&x->core, w);
+    fx_burst(x, true, false, 200);   /* 7..13 */
+    fx_drain(x, w, 4096, g);
+    TEST_ASSERT_EQUAL_UINT(0, g->n);
+    TEST_ASSERT_TRUE(rtcm_core_at_hold(&x->core, w));
+    TEST_ASSERT_EQUAL_UINT64(0, cst(x, w).c.sticky_out);
+    free(g);
+    fx_free(x);
+}
+
+TEST_CASE("hub: finishing an epoch whose last MSM was lost ends at the next epoch's first frame", "[rtcm_hub]")
+{
+    fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    fx_lead_in(x);
+    rtcm_core_consumer_t *a = fx_attach_live(x, "a");
+    got_t *g = got_new();
+    fx_burst(x, true, false, 200);   /* 0..6 */
+    x->now = x->next_at;
+    fx_pub(x, 1005, 19, false);       /* 7 */
+    x->now += 5;
+    fx_pub(x, 1077, 200, true);       /* 8: its terminating MSM never comes */
+    fx_drain(x, a, 4096, g);
+    expect_range(g, 0, 9);
+    rtcm_core_finish(&x->core, a);
+    x->now += 2000;
+    TEST_ASSERT_FALSE(rtcm_core_at_hold(&x->core, a));   /* the caller bounds this wait */
+    x->tow += 1000;
+    fx_pub(x, 1005, 19, false);       /* 9: the next epoch, by the gap rule */
+    g->n = 0;
+    fx_drain(x, a, 4096, g);
+    TEST_ASSERT_EQUAL_UINT(0, g->n);
+    TEST_ASSERT_TRUE(rtcm_core_at_hold(&x->core, a));
+    free(g);
+    fx_free(x);
+}
+
+/* Hook: whether the consumer is over its finished epoch, asked while a frame is being stored. */
+static rtcm_core_consumer_t *s_finish_k;
+static bool s_finish_at;
+static void finish_check_now(fx_t *x)
+{
+    s_finish_at = rtcm_core_at_hold(&x->core, s_finish_k);
+}
+
+TEST_CASE("hub: finishing is not over while the epoch's last MSM is being stored", "[rtcm_hub]")
+{
+    /* Assigned to the epoch (it already ended it in the epoch state), still
+     * being copied: the consumer has every committed frame, but not that one. */
+    fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 1024);
+    fx_lead_in(x);
+    rtcm_core_consumer_t *k = fx_attach_live(x, "k");
+    got_t *g = got_new();
+    x->now = x->next_at;
+    fx_pub(x, 1005, 19, false);       /* 0 */
+    fx_pub(x, 1077, 200, true);       /* 1 */
+    fx_drain(x, k, 4096, g);
+    expect_range(g, 0, 2);
+    rtcm_core_finish(&x->core, k);
+    s_finish_k = k;
+    s_finish_at = true;
+    x->hook = finish_check_now;
+    x->hook_at = 0;                   /* the first unlock of the publish: after the reserve, before the commit */
+    x->unlocks = 0;
+    x->hook_fired = false;
+    x->hook_armed = true;
+    fx_pub(x, 1127, 200, false);      /* 2: its last */
+    x->hook_armed = false;
+    TEST_ASSERT_TRUE(x->hook_fired);
+    TEST_ASSERT_FALSE(s_finish_at);
+    g->n = 0;
+    fx_drain(x, k, 4096, g);
+    expect_range(g, 2, 1);
+    TEST_ASSERT_TRUE(rtcm_core_at_hold(&x->core, k));
+    free(g);
+    fx_free(x);
+}
+
 /* Hook: place a hold at once (the "other core" decides while a frame is being stored). */
 static void hold_now(fx_t *x)
 {
-    (void)rtcm_core_hold(&x->core, x->now, 250, false);
+    (void)rtcm_core_hold(&x->core, x->now, 250, false, false);
 }
 
 TEST_CASE("hub: a frame being stored when the hold is decided lands on its epoch's side", "[rtcm_hub]")
@@ -1623,10 +1890,10 @@ TEST_CASE("hub: a frame being stored when the hold is decided lands on its epoch
     x->hook_armed = false;
     TEST_ASSERT_TRUE(x->hook_fired);
     TEST_ASSERT_FALSE(rtcm_core_held(&x->core));
-    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_NONE, rtcm_core_hold(&x->core, x->now + 10, 250, false));
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_NONE, rtcm_core_hold(&x->core, x->now + 10, 250, false, false));
     x->now += 5;
     fx_pub(x, 1127, 200, false);      /* 5: its last */
-    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, false));
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, false, false));
     fx_drain(x, k, 4096, g);
     expect_range(g, 0, 6);
     free(g);
@@ -1665,7 +1932,7 @@ TEST_CASE("hub: the release starts every consumer over: sticky copies, then the 
     fx_burst(x, true, false, 200);   /* 0..6 */
     fx_drain(x, a, 4096, g);
     expect_range(g, 0, 7);
-    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, false));
+    TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, false, false));
     /* The cut epoch: part of it before the lease. */
     x->now = x->next_at;
     uint32_t cut = fx_pub(x, 1005, 19, false);   /* 7 */
@@ -1738,7 +2005,7 @@ TEST_CASE("hub: a release during a read never lets a frame after the hold point 
         got_t *g = got_new();
         fx_burst(x, true, false, 200);   /* 0..6 */
         fx_burst(x, true, false, 200);   /* 7..13 */
-        TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, false));
+        TEST_ASSERT_EQUAL_INT(RTCM_CORE_HOLD_BOUNDARY, rtcm_core_hold(&x->core, x->now, 250, false, false));
         x->now = x->next_at;
         fx_pub(x, 1005, 19, false);       /* 14 */
         x->now += 5;

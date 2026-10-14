@@ -139,6 +139,11 @@ static int64_t s_reopen_log_us;
 static gnss_framer_t s_framer;
 static uint8_t s_rx_buf[GNSS_LINK_READ_CHUNK];
 static gnss_link_sinks_t s_cur;        /* sinks snapshot for the frame callback */
+/* Bytes a drain pass took (or is taking) out of the UART driver and has not
+ * framed yet: set before the read moves them, cleared once they are framed,
+ * so with the driver's own count nothing that arrived is missed by
+ * gnss_link_rx_unread() (it reads the driver first, then this). */
+static size_t s_unframed;
 
 /* Arrival times. The stamp ring and its head are written by the UART
  * interrupt (internal RAM: it runs while flash writes stop the cache); the
@@ -835,8 +840,10 @@ static uint32_t drain(QueueHandle_t q, bool pull_stash)
             }
             break;
         }
+        __atomic_store_n(&s_unframed, want, __ATOMIC_SEQ_CST);   /* before the read takes them out */
         int n = uart_read_bytes(s_port, s_rx_buf, (uint32_t)want, 0);
         if (n <= 0) {
+            __atomic_store_n(&s_unframed, 0, __ATOMIC_SEQ_CST);
             break;
         }
         int64_t read_us = esp_timer_get_time();
@@ -846,6 +853,7 @@ static uint32_t drain(QueueHandle_t q, bool pull_stash)
         gnss_link_pass_add(&pass, (size_t)n);
         count_rx((size_t)n);
         feed_read(s_rx_buf, (size_t)n, read_us);
+        __atomic_store_n(&s_unframed, 0, __ATOMIC_SEQ_CST);
     }
     if (pass.done > 0) {
         publish_framing();
@@ -1732,7 +1740,9 @@ size_t gnss_link_rx_unread(void)
         n = 0;
     }
     taskEXIT_CRITICAL(&s_lock);
-    return n;
+    /* After the driver's count: a read that took bytes out meanwhile had
+     * already set this (see s_unframed). */
+    return n + __atomic_load_n(&s_unframed, __ATOMIC_SEQ_CST);
 }
 
 esp_err_t gnss_link_get_arrival_stats(gnss_link_arrival_stats_t *out)

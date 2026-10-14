@@ -33,6 +33,15 @@
  * session. While streaming, the socket is also polled for EOF so a
  * caster-side close is seen at once.
  *
+ * Planned closes end on a whole epoch: before the shutdown's close, and
+ * before the close for new settings (ntrip_server_set_config) or a restart
+ * by the health monitor (ntrip_server_restart_slot), a session that is
+ * inside an epoch (it sent an MSM that announced more) sends the rest of it
+ * and nothing of the next (rtcm_hub_finish_epoch): at most 1 s, on a reboot
+ * at most half the shutdown budget left. Only terminated epochs count for
+ * Onocoy, and a close in the receiver's MSM burst would otherwise cut one.
+ * A close for a lost network or a failure is at once.
+ *
  * Failures and backoff: every failure has a class (ntrip_fail_class_t) and
  * every slot a backoff profile (fast for Onocoy, standard, polite for
  * community casters that ban hammering sources). Transient failures back off

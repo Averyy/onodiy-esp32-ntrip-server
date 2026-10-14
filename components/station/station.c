@@ -2182,37 +2182,47 @@ static void sync_maintenance(const stn_in_t *in)
  * RTCM that arrives until the receiver session takes the line (the next
  * epoch's station messages and first MSMs) never reaches a caster as an
  * epoch the session then cuts. An epoch in flight (an MSM announced more,
- * however quiet the line is now, or bytes still wait for the link's reader,
- * which may be off the CPU while the rest of the epoch sits in the UART
- * driver) goes out whole first. After EPOCH_WAIT_MS the hold goes after an
- * open epoch quiet for the hub's gap rule (its last MSM was lost, or the
- * receiver never clears the bit), else at that epoch's start. The release
- * (resume) starts every caster over at a whole epoch. */
+ * however quiet the line is now) goes out whole first. After EPOCH_WAIT_MS
+ * the hold is forced: after an open epoch whose line went quiet for the
+ * hub's gap rule with nothing waiting for the link's reader (its last MSM
+ * was lost, or the receiver never clears the bit), else at that epoch's
+ * start. Bytes waiting for the reader (gnss_link_rx_unread: in the UART
+ * driver, or read and not yet framed) mean the rest of the epoch may be
+ * among them, so the forced hold never goes after the epoch then. The
+ * release (resume) starts every caster over at a whole epoch. */
 static void hold_casters(void)
 {
     int64_t start = now_ms();
     bool backlog = false;
+    rtcm_hub_hold_t h;
     for (;;) {
-        bool unread = gnss_link_rx_unread() > 0;
+        bool force = now_ms() - start >= EPOCH_WAIT_MS;
+        bool unread = gnss_link_rx_unread() > 0;   /* read right before the decision */
         backlog = backlog || unread;
-        if (!unread && rtcm_hub_hold(CONFIG_RTCM_HUB_BURST_GAP_MS, false) != RTCM_HUB_HOLD_NONE) {
+        h = rtcm_hub_hold(CONFIG_RTCM_HUB_BURST_GAP_MS, force, unread);
+        if (h != RTCM_HUB_HOLD_NONE) {
             break;
-        }
-        if (now_ms() - start >= EPOCH_WAIT_MS) {
-            rtcm_hub_hold_t h = rtcm_hub_hold(CONFIG_RTCM_HUB_BURST_GAP_MS, true);
-            ESP_LOGW(TAG, "casters held %s: no epoch boundary within %u ms",
-                     h == RTCM_HUB_HOLD_CUT ? "at the start of the epoch in flight" : "after an epoch without its last MSM",
-                     (unsigned)EPOCH_WAIT_MS);
-            return;
         }
         vTaskDelay(pdMS_TO_TICKS(EPOCH_POLL_MS));
     }
-    int64_t waited = now_ms() - start;
-    if (waited >= HOLD_NOTE_MS) {
-        /* A note, not a warning: an epoch in flight is normal; how long it
-         * took tells whether the line or the reader was slow. */
-        ESP_LOGI(TAG, "casters held at an epoch boundary after %u ms%s", (unsigned)waited,
-                 backlog ? " (bytes were waiting for the link's reader)" : "");
+    unsigned waited = (unsigned)(now_ms() - start);
+    const char *why = backlog ? " (bytes were waiting for the link's reader)" : "";
+    switch (h) {
+    case RTCM_HUB_HOLD_QUIET:
+        ESP_LOGW(TAG, "casters held after an epoch without its last MSM: no epoch end within %u ms, the line "
+                 "quiet for %u ms or more%s", (unsigned)EPOCH_WAIT_MS, (unsigned)CONFIG_RTCM_HUB_BURST_GAP_MS, why);
+        break;
+    case RTCM_HUB_HOLD_CUT:
+        ESP_LOGW(TAG, "casters held at the start of the epoch in flight: no epoch end within %u ms%s",
+                 (unsigned)EPOCH_WAIT_MS, why);
+        break;
+    default:
+        if (waited >= HOLD_NOTE_MS) {
+            /* A note, not a warning: an epoch in flight is normal; how long it
+             * took tells whether the line or the reader was slow. */
+            ESP_LOGI(TAG, "casters held at an epoch boundary after %u ms%s", waited, why);
+        }
+        break;
     }
 }
 

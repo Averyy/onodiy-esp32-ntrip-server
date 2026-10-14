@@ -62,11 +62,16 @@ What it does:
      pause at any moment of the second), then 12 more with each epoch's
      last MSM sent 0.7 s after the rest of it (about 0.4 s after the MSM
      before it reaches the station: longer than the hub's 250 ms gap rule,
-     so a pause decided in that time must still wait for it);
+     so a pause decided in that time must still wait for it); still with
+     the late last MSM, 6 saves of slot 1's settings (each a planned close
+     and a reconnect; every other one inside an epoch) with at least one
+     close that waited for its epoch's end and none that gave up, and a
+     restart timed to come inside an epoch while the replay streams (paused
+     once that session has ended) whose session finished its epoch first;
      every caster record of the scenario passes the strict epoch check
-     above, and a session that ended (closed during a pause, or by the
-     restart) ends on a whole epoch, as does the part of the first session
-     before the configuration's pause;
+     above, and a session that ended (closed during a pause, for new
+     settings, or by a restart) ends on a whole epoch, as does the part of
+     the first session before the configuration's pause;
   scenario "onocoy-guard" (firmware with test-Onocoy slots; SKIP otherwise;
   with --scenario all it runs before "stream"):
   5. slot 0 as a test-Onocoy slot (test_onocoy) against a second fake caster
@@ -149,7 +154,12 @@ SGT_PAUSES = 12              # applies in a row for the pause check, twice (sign
 # reach the station (the emulated UART paces it), so the last MSM comes about 0.4 s after the one before it:
 # longer than the hub's 250 ms gap rule, well within the station's 1 s wait for an epoch in flight.
 LATE_LAST_S = 0.7
+SGT_EDITS = 6                # saves of slot 1's settings, each a planned close (signal-test scenario, step 5)
 RESUMED_LINE = "ntrip: resumed"
+# A planned close (new settings, a restart) that waited for the end of the epoch the session was sending, and
+# one that gave up on it (ntrip_server.c drain_step).
+DRAINED_LINE = "ending the session after the epoch it was sending"
+CUT_CLOSE_LINE = "closing inside an epoch"
 STOP_REASONS = ["none", "rejected", "login_blocked", "in_use", "kicked", "duplicate", "banned"]
 
 
@@ -506,6 +516,7 @@ class E2E:
         self.password = "e2e-" + secrets.token_hex(8)
         self.http_port = smoke.free_port()
         self.planned_reboots = 0
+        self.slot1_body: dict | None = None   # slot 1's settings as PUT (saved again for planned closes)
         self.t0 = time.monotonic()
         self.events = open(self.out / "e2e.log", "w", encoding="utf-8")
 
@@ -692,6 +703,7 @@ class E2E:
             port, password, want_line = self.caster.port, STREAM_PASSWORD, "ICY 200 OK"
         body = {"name": "Bench", "host": HOST_FROM_GUEST, "port": port, "ntrip_version": 1,
                 "mountpoint": STREAM_MOUNT, "password": password, "backoff_profile": "standard", "enabled": True}
+        self.slot1_body = body
         status, data = self.api("PUT", "/api/casters/1", body)
         self.save("put-caster-1.json", data)
         if not self.check(status == 200, f"PUT /api/casters/1 (slot 1 'Bench' -> {HOST_FROM_GUEST}:{port}): "
@@ -1147,6 +1159,7 @@ class E2E:
             body = {"name": "Bench", "host": HOST_FROM_GUEST, "port": self.caster.port, "ntrip_version": 1,
                     "mountpoint": STREAM_MOUNT, "password": STREAM_PASSWORD, "backoff_profile": "standard",
                     "enabled": True}
+            self.slot1_body = body
             status, _ = self.api("PUT", "/api/casters/1", body)
             self.check(status == 200, f"PUT /api/casters/1 (slot 1 for the signal-test records): HTTP {status}")
         s = self.poll(lambda: (lambda x: x if x.get("state") == "streaming" else None)(self.slot(1)["status"]), 90)
@@ -1203,6 +1216,118 @@ class E2E:
         late = f", each epoch's last MSM {late_last_s:.1f} s late" if late_last_s > 0 else ""
         self.check(done == n, f"{done} of {n} applies paused and resumed the casters, each after two epochs "
                               f"streamed{late} ({time.monotonic() - t0:.0f} s, waits seeded {seed})")
+
+    def sources(self) -> list[dict]:
+        return [c for c in self.caster.all_connections() if c["role"] == "source"]
+
+    def streams_again(self, after_n: int, timeout: float) -> bool:
+        """Slot 1 streams on a caster session newer than connection `after_n`."""
+        def again():
+            new = [c for c in self.sources() if c["n"] > after_n and c["row"] == "icy_ok"]
+            return new and self.slot(1)["status"].get("state") == "streaming"
+        return self.poll(again, timeout, every=0.5) is not None
+
+    def two_more_epochs(self, what: str) -> bool:
+        e0 = self.slot(1)["status"].get("epochs_sent", 0)
+        if self.poll(lambda: self.slot(1)["status"].get("epochs_sent", 0) >= e0 + 2, 60, every=0.5) is None:
+            self.note(f"{what}: slot 1 sent no two epochs within 60 s")
+            return False
+        return True
+
+    def planned_closes(self, n: int, late_last_s: float) -> None:
+        """`n` saves of slot 1's settings, unchanged: each closes the session for the new settings and
+        reconnects. Each after the slot streamed two more epochs, with each epoch's last MSM `late_last_s` late;
+        every other one 0.1 s after a burst began going out (inside its epoch: the session sent its MSMs but
+        not the last), the others at a random moment of the second. A session inside an epoch sends the rest
+        of it before it closes (ntrip_server.c drain_step): the records are judged in step 6 (whole tails);
+        here at least one close waited for its epoch, none gave up on it, and every save streamed again."""
+        if self.slot1_body is None:
+            return
+        seed = secrets.randbits(32)
+        rng = random.Random(seed)
+        at = len(self.console_text())
+        self.replay.set_last_frame_delay(late_last_s)
+        done = 0
+        for i in range(n):
+            if not self.two_more_epochs(f"save {i + 1}"):
+                break
+            if i % 2 == 0:
+                h = self.replay.wait_burst_head(5.0)
+                time.sleep(max(0.0, (h or time.monotonic()) + 0.1 - time.monotonic()))
+            else:
+                time.sleep(rng.uniform(0.0, 1.0))
+            last = max((c["n"] for c in self.sources()), default=0)
+            status, data = self.api("PUT", "/api/casters/1", self.slot1_body)
+            if status != 200:
+                self.note(f"save {i + 1}: PUT /api/casters/1: HTTP {status} {data}")
+                break
+            if not self.streams_again(last, 60):
+                self.note(f"save {i + 1}: slot 1 did not stream again within 60 s")
+                break
+            done += 1
+        self.replay.set_last_frame_delay(0)
+        text = self.console_text()[at:]
+        drained = text.count(DRAINED_LINE)
+        cut = [x.strip()[:160] for x in text.splitlines() if CUT_CLOSE_LINE in x]
+        self.check(done == n and drained >= 1 and not cut,
+                   f"{done} of {n} saves of slot 1 closed the session and streamed again; {drained} close(s) "
+                   f"waited for the epoch being sent, {len(cut)} gave up on it" + (f" ({cut[0]})" if cut else "")
+                   + f" (each epoch's last MSM {late_last_s:.1f} s late, waits seeded {seed})")
+
+    def restart_in_epoch(self, late_last_s: float, attempts: int = 3) -> None:
+        """A restart that comes inside an epoch while the receiver streams: the session it ends finishes that
+        epoch first (its record is judged in step 6). The web server restarts 1 s after the request
+        (REBOOT_DELAY_MS), so the request goes out 0.1 s after a burst began: the shutdown comes early in the
+        next burst, whose last MSM is `late_last_s` late. The replayed receiver stops as soon as that session
+        has ended: this QEMU hangs the next boot when RTCM arrives across a restart (tools/qemu/README.md,
+        UART1 section), and the restart comes about 0.2 s after the casters close (the network's shutdown
+        hook); a late last MSM still waiting then is dropped too. A shutdown that found no epoch in flight
+        (the request was slow) proves nothing: tried again, up to `attempts` restarts."""
+        if self.caster is None:
+            return
+        for k in range(attempts):
+            if not self.two_more_epochs(f"restart {k + 1}"):
+                return
+            live = [c for c in self.sources() if c.get("end_mono") is None]
+            if not self.check(len(live) == 1, f"restart {k + 1}: one live caster session before it ({len(live)})"):
+                return
+            n = live[0]["n"]
+            at = len(self.console_text())
+            self.replay.set_last_frame_delay(late_last_s)
+            h = self.replay.wait_burst_head(5.0)
+            time.sleep(max(0.0, (h or time.monotonic()) + 0.1 - time.monotonic()))
+            status, _ = self.api("POST", "/api/system/reboot", {})
+            if not self.check(status == 202, f"POST /api/system/reboot inside an epoch: HTTP {status}"):
+                self.replay.set_last_frame_delay(0)
+                return
+            self.planned_reboots += 1
+            deadline = time.monotonic() + 10
+            ended = None
+            while time.monotonic() < deadline and ended is None:
+                ended = next((c for c in self.sources() if c["n"] == n and c.get("end_mono") is not None), None)
+                time.sleep(0.01)
+            self.replay.pause()
+            self.replay.set_last_frame_delay(0)
+            time.sleep(5)
+            self.cookie = None
+            back = self.wait_http(self.args.timeout)
+            self.replay.resume()
+            if not self.check(back and self.login(first=False), f"back after restart {k + 1} (inside an epoch)"):
+                return
+            shutdown = self.console_text()[at:].split(smoke.BOOT_MARK)[0]
+            drained = DRAINED_LINE in shutdown
+            cut = [x.strip()[:160] for x in shutdown.splitlines() if CUT_CLOSE_LINE in x]
+            if ended is None or cut:
+                self.check(False, f"restart {k + 1}: the caster session "
+                                  + ("did not end within 10 s" if ended is None else f"was cut: {cut[0]}"))
+                return
+            if drained:
+                self.check(True, f"restart {k + 1} came inside an epoch: the session finished it, then closed "
+                                 f"(connection {n}; its record is checked below)")
+                return
+            self.note(f"restart {k + 1}: no epoch in flight when the casters closed (the request came late); "
+                      f"trying again")
+        self.check(False, f"none of {attempts} restarts came inside an epoch: the drain at the restart is untested")
 
     def signal_test(self) -> None:
         t_scn = time.monotonic()
@@ -1354,11 +1479,15 @@ class E2E:
         #    records below must show that pause between two epochs.
         self.pause_storm(SGT_PAUSES)
         self.pause_storm(SGT_PAUSES, LATE_LAST_S)
+        # 5b. Planned closes inside an epoch: new settings, then a restart, while each epoch's last MSM comes
+        #     late. The session sends the rest of its epoch before it closes; the records below show it.
+        self.planned_closes(SGT_EDITS, LATE_LAST_S)
+        self.restart_in_epoch(LATE_LAST_S)
 
-        # 6. Every caster record of the scenario: whole epochs across every switch, pause and the restart, against
-        #    the fixture as the configured receiver sends it (its own 1005/1033/1230 open every epoch). A session
-        #    that has ended (the station closed it during a pause, or the restart did) ends on a whole epoch, and
-        #    so does the part of the first session before the configuration's pause.
+        # 6. Every caster record of the scenario: whole epochs across every switch, pause and the restarts,
+        #    against the fixture as the configured receiver sends it (its own 1005/1033/1230 open every epoch). A
+        #    session that has ended (the station closed it during a pause, for new settings, or a restart did)
+        #    ends on a whole epoch, and so does the part of the first session before the configuration's pause.
         time.sleep(3)
         station = resp.station_messages()
         configured = with_station(self.schedule, station, resp.station_types())
@@ -1402,6 +1531,7 @@ class E2E:
         allowed = 2 + self.planned_reboots
         self.check(n >= 1, f"{n} boot(s), {self.planned_reboots} of them asked for")
         self.check(not r.unplanned, smoke.boot_text(r))
+        self.check(not r.off_pro, smoke.runner_text(r, len(smoke.OWN_REBOOT.findall(text))))
         self.check(n <= allowed, f"at most {allowed} boots (no reboot loop)")
         self.check(smoke.LADDER_REBOOT not in text, "no GNSS ladder restart during the run")
 

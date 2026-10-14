@@ -38,14 +38,32 @@ BOOTLOADER = ("I (37) boot: ESP-IDF v6.1 2nd stage bootloader\nI (39) boot: comp
               "I (40) boot: Multicore bootloader\nI (47) boot: chip revision: v0.3\n")
 LOADED = "I (102) boot.esp32s3: SPI Flash Size : 16MB\nI (242) boot: Loaded app from partition at offset 0x30000\n"
 APP = "I (340) cpu_start: Multicore app\nI (423) cpu_start: Pro cpu start user code\nI (492) main_task: Started on CPU0\n"
-PLANNED = "W (6767) lifecycle: rebooting (reason 1)\n"
+PLANNED = "W (6767) lifecycle: rebooting (reason 1) from lifecycle, pinned to core 0\n"
 
 
 def test_one_boot_per_planned_restart():
     text = ROM + POWER_ON + BOOTLOADER + LOADED + APP + PLANNED + ROM + SW_CPU + BOOTLOADER + LOADED + APP
     r = smoke.boot_report(text)
-    assert (r.boots, r.unplanned, r.app_cpu) == (2, [], [])
+    assert (r.boots, r.unplanned, r.app_cpu, r.off_pro) == (2, [], [], [])
     assert smoke.boot_text(r) == "0 restart(s) without the firmware's own reboot line"
+    assert smoke.runner_text(r, 1) == "every planned restart (1) ran on a task pinned to core 0"
+
+
+def test_a_planned_restart_off_the_pro_cpu_is_named_even_when_it_booted_once():
+    # The web server's worker (unpinned) leaving safe mode: scheduling decides the core, so one clean boot
+    # proves nothing; the reboot line's runner does.
+    off = "W (9100) lifecycle: rebooting (reason 10) from web_io, pinned to no core\n"
+    text = (ROM + POWER_ON + BOOTLOADER + LOADED + APP + PLANNED + ROM + SW_CPU + BOOTLOADER + LOADED + APP + off
+            + ROM + SW_CPU + BOOTLOADER + LOADED + APP)
+    r = smoke.boot_report(text)
+    assert (r.boots, r.unplanned, r.app_cpu) == (3, [], [])
+    assert r.off_pro == ["reason 10 from web_io, pinned to no core"]
+    t = smoke.runner_text(r, 2)
+    assert t.startswith("1 planned restart(s) not on a task pinned to the PRO CPU: reason 10 from web_io")
+    # A reboot line without its runner (an older image) is named too.
+    old = "W (6767) lifecycle: rebooting (reason 1)\n"
+    r = smoke.boot_report(ROM + POWER_ON + APP + old + ROM + SW_CPU + APP)
+    assert r.off_pro == ["lifecycle: rebooting (reason 1)"]
 
 
 def test_a_planned_restart_cut_short_in_the_bootloader_is_named():
@@ -186,3 +204,18 @@ def test_who_closed_first_from_the_stations_packets():
     assert smoke.guest_closed_first(second, 60) is False      # the client's FIN came first (LAST_ACK)
     assert smoke.guest_closed_first([syn], 60) is None
     assert smoke.guest_closed_first([], 60) is None
+
+
+def test_connections_counted_by_their_syn_ack_isn():
+    # Two connections from one client port; the station sends the first SYN-ACK again (the client's ACK was
+    # dropped), which carries the same initial sequence number and is not a third connection.
+    first = [smoke.Segment(0x12, 9000, 501), smoke.Segment(0x12, 9000, 501), smoke.Segment(0x18, 9001, 561),
+             smoke.Segment(0x11, 9200, 561)]
+    assert smoke.synack_isns(first) == [9000]
+    both = first + [smoke.Segment(0x12, 44000, 7001), smoke.Segment(0x12, 44000, 7001),
+                    smoke.Segment(0x18, 44001, 7061)]
+    assert smoke.synack_isns(both) == [9000, 44000]
+    # The port still in TIME_WAIT: a bare ACK (or a reset) to the second SYN, no SYN-ACK.
+    held = first + [smoke.Segment(0x10, 9201, 562)]
+    assert smoke.synack_isns(held) == [9000]
+    assert smoke.synack_isns([]) == []

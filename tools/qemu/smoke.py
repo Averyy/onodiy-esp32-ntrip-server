@@ -85,7 +85,8 @@ What it does:
      ladder restart ("rebooting (reason 6)": held while first setup is not
      finished), on a console note about dropped lines ("[diag:"), and unless
      the console writer task runs and /api/health counts no console drop,
-     and the lifecycle task (planned restarts) is pinned to core 0: on the
+     and the lifecycle task (planned restarts) is pinned to core 0, and
+     every "rebooting (reason N)" line names a task pinned to core 0: on the
      APP CPU a restart in this QEMU is cut short in the bootloader (no CPU
      stall), which the boot check names when it sees one.
      QEMU's UART sends every byte at once, so a burst cannot back the
@@ -153,6 +154,8 @@ LOG_STAMP = re.compile(r"^[EWIDV] \((\d+)\) ")  # ESP log line: its milliseconds
 GOODBYE = "network: mDNS: goodbye sent"
 BUDGET_WARNINGS = ("shutdown budget used up", "shutdown hooks overran")
 OWN_REBOOT = re.compile(r"lifecycle: rebooting \(reason \d+\)")
+# The same line names the task that runs the restart and its core pin (lifecycle.c do_reboot).
+REBOOT_RUNNER = re.compile(r"lifecycle: rebooting \(reason (\d+)\) from (\S+), pinned to (core \d|no core)")
 LADDER_REBOOT = "rebooting (reason 6)"   # the GNSS ladder's ESP32 restart (LIFECYCLE_REBOOT_GNSS_LADDER)
 CONSOLE_NOTE = "[diag:"                    # the console's note about lines it could not send
 MIN_OBSERVE_S = 45                         # longer than the 27 s at which a no-receiver restart came before
@@ -242,6 +245,7 @@ class BootReport(NamedTuple):
     boots: int
     unplanned: list[int]   # boots (1-based) that ended in a restart without the firmware's reboot line
     app_cpu: list[int]     # ... of those: a planned restart run on the APP CPU (QEMU artefact, see boot_report)
+    off_pro: list[str] = []   # planned restarts whose task is not pinned to core 0: "reason N from TASK, ..."
 
 
 def boot_report(text: str) -> BootReport:
@@ -253,8 +257,12 @@ def boot_report(text: str) -> BootReport:
     esp32s3 machine leaves the stall handler empty (hw/xtensa/esp32s3.c, esp32s3_cpu_stall), so the PRO CPU
     runs the ROM and the 2nd-stage bootloader while the APP CPU goes on, and the APP CPU's own reset of the
     PRO CPU then starts it over: a boot that never got past the bootloader, between two rst:0xc banners,
-    right after a planned restart. The firmware runs every planned restart on the PRO CPU (lifecycle.c),
-    so this must not happen; when it does it is reported as that, and it still fails."""
+    right after a planned restart. When it happens it is reported as that, and it still fails.
+
+    Whether it can happen does not hang on scheduling luck here: the firmware runs every restart it plans on
+    a task pinned to the PRO CPU (lifecycle.c: a caller pinned there runs its own, any other caller's goes
+    to the lifecycle task), and its reboot line names that task and its pin. A planned restart whose task
+    is not pinned to core 0 is listed in `off_pro`, even when the restart happened to run on the PRO CPU."""
     parts = text.split(BOOT_MARK)
     n = len(parts) - 1
     unplanned: list[int] = []
@@ -267,7 +275,19 @@ def boot_report(text: str) -> BootReport:
         if (i >= 2 and OWN_REBOOT.search(parts[i - 1]) and SW_CPU_RESET in seg and BOOTLOADER in seg
                 and APP_START not in seg and SW_CPU_RESET in parts[i + 1]):
             app_cpu.append(i)
-    return BootReport(n, unplanned, app_cpu)
+    off_pro = [f"reason {m.group(1)} from {m.group(2)}, pinned to {m.group(3)}"
+               for m in REBOOT_RUNNER.finditer(text) if m.group(3) != "core 0"]
+    off_pro += [m.group(0) for m in OWN_REBOOT.finditer(text)
+                if not REBOOT_RUNNER.match(text, m.start())]   # a reboot line without its runner
+    return BootReport(n, unplanned, app_cpu, off_pro)
+
+
+def runner_text(r: BootReport, planned: int) -> str:
+    """The check's text for where the planned restarts ran."""
+    if r.off_pro:
+        return (f"{len(r.off_pro)} planned restart(s) not on a task pinned to the PRO CPU: {'; '.join(r.off_pro[:3])}"
+                f" (in this QEMU one on the APP CPU boots twice; lifecycle.c hands such a restart to its task)")
+    return f"every planned restart ({planned}) ran on a task pinned to core 0"
 
 
 def boot_text(r: BootReport) -> str:
@@ -316,6 +336,18 @@ def tcp_from_guest(pcap: Path, peer_port: int) -> list[Segment]:
         tcp = ip[ihl:]
         if int.from_bytes(tcp[0:2], "big") == 80 and int.from_bytes(tcp[2:4], "big") == peer_port:
             out.append(Segment(tcp[13], int.from_bytes(tcp[4:8], "big"), int.from_bytes(tcp[8:12], "big")))
+    return out
+
+
+def synack_isns(segments: list[Segment]) -> list[int]:
+    """The initial sequence numbers of the station's SYN-ACKs, in the order first seen: one per connection it
+    accepted. lwIP sends a SYN-ACK again when the client's ACK does not reach it (QEMU's MAC drops a received
+    frame when the firmware has no free buffer), with the same ISN, so a resent one never counts as another
+    connection."""
+    out: list[int] = []
+    for x in segments:
+        if x.flags & TCP_SYN and x.seq not in out:
+            out.append(x.seq)
     return out
 
 
@@ -1078,7 +1110,8 @@ class Smoke:
         whose system hands out the same port again (Linux does, within seconds to a minute) could not
         connect for up to two minutes. The firmware sets MSL to 5 s (sdkconfig.defaults), so the port
         must work again REUSE_AFTER_S later: the station's packets (pcap) show a SYN-ACK for each of the
-        two connections, never a bare ACK to the second SYN."""
+        two connections (told apart by their initial sequence numbers, so a SYN-ACK sent again is not a third),
+        never a bare ACK to the second SYN."""
         port = self.http_port
         req = f"GET /api/session HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n".encode()
 
@@ -1098,6 +1131,7 @@ class Smoke:
             time.sleep(1.0)   # the station's last segments of it
             segs = tcp_from_guest(self.out / "qemu-net.pcap", local)
             first_close = guest_closed_first(segs, len(req))
+            before = synack_isns(segs)   # the first connection's (every SYN-ACK of it is in by now)
             time.sleep(max(0.0, REUSE_AFTER_S - 1.0))
             _, again, _ = exchange(local, ANSWER_TIMEOUT_S)
             time.sleep(1.0)
@@ -1105,16 +1139,20 @@ class Smoke:
             self.check(False, f"a client back on its port after the station closed first: {type(e).__name__}: {e}")
             return
         segs = tcp_from_guest(self.out / "qemu-net.pcap", local)
-        synacks = sum(1 for x in segs if x.flags & TCP_SYN)
+        isns = synack_isns(segs)
+        later = [i for i in isns if i not in before]
+        resent = sum(1 for x in segs if x.flags & TCP_SYN) - len(isns)
         self.check(first.status == 200 and closed is not None and first_close is True and again.status == 200
-                   and again.complete and synacks == 2,
+                   and again.complete and len(before) == 1 and len(later) == 1,
                    f"a client back on its local port {REUSE_AFTER_S:.0f} s after the station ended its connection "
                    f"first (HTTP {first.status or '-'}, the station's FIN "
                    f"{'first' if first_close else 'NOT first' if first_close is False else 'not in the pcap'}): "
                    f"HTTP {again.status or 'no answer'}{'' if again.complete else ' (incomplete)'} after "
-                   f"{again.seconds:.2f} s; {synacks} SYN-ACK(s) from the station for the two connections"
+                   f"{again.seconds:.2f} s; SYN-ACKs from the station: {len(before)} for the first connection, "
+                   f"{len(later)} for the second (by initial sequence number"
+                   + (f"; {resent} sent again" if resent else "") + ")"
                    + (" (no SYN-ACK for the second: the station still held the first in TIME_WAIT)"
-                      if synacks == 1 else ""))
+                      if before and not later else ""))
 
     def signal_test_checks(self) -> None:
         """No receiver attached: a signal-group comparison is refused with no_receiver, and none runs."""
@@ -1281,8 +1319,8 @@ class Smoke:
         tasks = json.loads(body).get("tasks", []) if status == 200 else []
         names = [t.get("name") for t in tasks]
         self.check("console" in names, f"the console writer task runs (HTTP {status}, {len(names)} tasks)")
-        # Every planned restart runs on the PRO CPU (see boot_report: on the APP CPU this QEMU restarts the
-        # PRO CPU twice); the lifecycle task runs the queued ones.
+        # Every planned restart runs on a task pinned to the PRO CPU (see boot_report: on the APP CPU this QEMU
+        # restarts the PRO CPU twice); the lifecycle task runs every one whose caller is not pinned there.
         core = next((t.get("core", "absent") for t in tasks if t.get("name") == "lifecycle"), "no task")
         self.check(core == 0, f"the lifecycle task (planned restarts) is pinned to core 0 (core {core})")
         status, _, body = request(self.http_port, "GET", "/api/health", cookie=self.cookie, timeout=30)
@@ -1338,6 +1376,7 @@ class Smoke:
         n = r.boots
         self.check(n >= 1, f"{n} boot(s) in {self.args.observe} s")
         self.check(not r.unplanned, boot_text(r))
+        self.check(not r.off_pro, runner_text(r, len(OWN_REBOOT.findall(text))))
         self.check(n <= self.args.max_boots, f"at most {self.args.max_boots} boots (no reboot loop)")
         self.check(LADDER_REBOOT not in text, "no GNSS ladder restart (\"rebooting (reason 6)\") during the run")
         notes = [line.strip()[:160] for line in text.splitlines() if CONSOLE_NOTE in line]

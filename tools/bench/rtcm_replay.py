@@ -12,7 +12,9 @@ back (the firmware's receiver queries) is logged.
 
 In process (tools/qemu/e2e.py), set_last_frame_delay() sends each burst's
 last frame a set time after the rest of it: an epoch whose last MSM comes
-late, as a stalled line or reader makes it look to the station.
+late, as a stalled line or reader makes it look to the station; a pause
+that begins while such a frame waits drops it too. wait_burst_head() waits
+for the next burst to start going out (to time a request inside an epoch).
 
 Made for the firmware in QEMU: start the replay first, then
 `tools/qemu/run.sh --uart1 connect:PORT`, so the firmware hears the stream
@@ -108,6 +110,10 @@ class ReplayServer:
         self.replies_sent = 0        # responder bytes sent
         self.last_frame_delay_s = 0.0  # set_last_frame_delay: each burst's last frame held back this long
         self.bursts_late = 0         # bursts sent with their last frame late
+        self.late_paused = 0         # late last frames dropped by a pause that began while they waited
+        self.heads = threading.Condition()   # wait_burst_head: the bursts started so far and the last one's time
+        self.heads_sent = 0
+        self.head_t = 0.0
         self.responder = responder
         self.send_lock = threading.Lock()   # bursts and replies never interleave inside one write
         self.received = bytearray()  # everything clients sent (kept for in-process checks)
@@ -169,6 +175,21 @@ class ReplayServer:
             self.last_frame_delay_s = max(0.0, float(seconds))
         self._log(f"last frame of each burst {f'{seconds:.3f} s late' if seconds > 0 else 'at once again'}")
 
+    def wait_burst_head(self, timeout: float) -> float | None:
+        """Wait until the next burst starts going out (its first byte sent, after this call); its monotonic
+        time, or None after `timeout`."""
+        with self.heads:
+            n = self.heads_sent
+            if not self.heads.wait_for(lambda: self.heads_sent > n, timeout):
+                return None
+            return self.head_t
+
+    def _head_sent(self) -> None:
+        with self.heads:
+            self.heads_sent += 1
+            self.head_t = time.monotonic()
+            self.heads.notify_all()
+
     def set_responder(self, responder: Um982Responder | None) -> None:
         """Answer the client's receiver commands from now on (None: answer nothing again)."""
         with self.lock:
@@ -181,7 +202,7 @@ class ReplayServer:
                     "bytes_sent": self.bytes_sent, "frames_sent": self.frames_sent,
                     "bytes_received": self.bytes_received, "bursts_paused": self.bursts_paused,
                     "bursts_withheld": self.bursts_withheld, "replies_sent": self.replies_sent,
-                    "bursts_late": self.bursts_late}
+                    "bursts_late": self.bursts_late, "late_paused": self.late_paused}
 
     # -- serving ----------------------------------------------------------------
 
@@ -245,16 +266,28 @@ class ReplayServer:
                 with self.lock:
                     late = self.last_frame_delay_s
                 if late > 0 and nframes > 1 and b"".join(frames) == data:
+                    self._head_sent()
                     if not self._send(conn, b"".join(frames[:-1]), gone):
                         break
                     if self._wait_until(time.monotonic() + late, gone, conn):
                         break
+                    if self.paused.is_set():
+                        head = len(data) - len(frames[-1])
+                        with self.lock:   # it fell due while paused: dropped, like a burst
+                            self.late_paused += 1
+                            self.bytes_sent += head
+                            self.frames_sent += nframes - 1
+                        loop_counts[1] += head
+                        loop_counts[2] += nframes - 1
+                        continue
                     if not self._send(conn, frames[-1], gone):
                         break
                     with self.lock:
                         self.bursts_late += 1
-                elif not self._send(conn, data, gone):
-                    break
+                else:
+                    self._head_sent()
+                    if not self._send(conn, data, gone):
+                        break
                 with self.lock:
                     self.bursts_sent += 1
                     self.bytes_sent += len(data)

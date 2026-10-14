@@ -63,6 +63,7 @@ static const char *TAG = "bench";
 #define TOK_TWDT    "TWDT-PANIC"
 #define TOK_HEAP    "FRAGMENT-HEAP"
 #define TOK_UART    "CLOSE-UART"
+#define TOK_SAFE    "ENTER-SAFE-MODE"
 
 #define RUN_TIMEOUT_MS (20u * 60u * 1000u)
 #define RACE_MAX_MS    10000u
@@ -388,6 +389,17 @@ static int cmd_restart(int argc, char **argv)
     }
     esp_err_t err = lifecycle_request_reboot(LIFECYCLE_REBOOT_USER);
     say("BENCH %s\n", err == ESP_OK ? "restart requested (it waits for a held reboot inhibit)" : esp_err_to_name(err));
+    return err == ESP_OK ? 0 : 1;
+}
+
+static int cmd_safemode(int argc, char **argv)
+{
+    if (argc != 2 || !confirmed(argc, argv, TOK_SAFE)) {
+        return 1;
+    }
+    esp_err_t err = lifecycle_bench_reboot_into_safe_mode();
+    say("BENCH %s\n", err == ESP_OK ? "restart into safe mode requested (a failed boot at the crash limit)"
+                                    : esp_err_to_name(err));
     return err == ESP_OK ? 0 : 1;
 }
 
@@ -1242,6 +1254,7 @@ esp_err_t bench_start(void)
     reg("jstate", "Write a journal in a state, nothing sent: jstate <state> " TOK_JOURNAL, cmd_jstate);
     reg("jclear", "Clear the receiver update journal: jclear " TOK_CLEAR, cmd_jclear);
     reg("restart", "Software restart of the ESP32: restart " TOK_RESTART, cmd_restart);
+    reg("safemode", "Restart into safe mode (a failed boot at the crash limit): safemode " TOK_SAFE, cmd_safemode);
     reg("status", "Station state, journal and the last session", cmd_status);
     reg("capture", "Print the byte capture (last KB): capture [KB]", cmd_capture);
 #if CONFIG_GNSS_LINK_BENCH_HOOKS

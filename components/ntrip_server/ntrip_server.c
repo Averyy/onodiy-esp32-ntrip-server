@@ -130,6 +130,7 @@ _Static_assert(CONFIG_NTRIP_MAX_CASTERS <= 24, "one event-group bit per slot");
 #define TLS_MIN_INTERNAL_HEAP (64u * 1024u)   /* below this, non-protected TLS slots wait */
 #define LOW_HEAP_RETRY_MS   5000u
 #define STOP_WAIT_MS        2000u
+#define DRAIN_MS            1000u   /* a planned close waits this long at most for the end of the epoch being sent */
 #define ONOCOY_LAG_MS       1000u
 #define NET_SETTLE_MS       200u    /* a failure while the network looks up: wait this long for a drop to show */
 #define NET_SETTLE_STEP_MS  20u
@@ -214,6 +215,10 @@ typedef struct {
     bool chunked;
     bool mid_chunk;
     ntrip_epoch_track_t epochs;  /* epochs sent: state across hub reads */
+    bool draining;               /* a planned close waits for the end of the epoch being sent (drain_step) */
+    bool drained;                /* ... that epoch is over */
+    uint32_t drain_start_ms;
+    uint32_t drain_until_ms;
     bool paused_seen;
     bool logged_unexpected;
     ntrip_sess_text_t stext;     /* lines the caster sends during the session */
@@ -283,6 +288,7 @@ static char s_agent[NTRIP_AGENT_MAX];
 static volatile bool s_running;
 static volatile bool s_paused;
 static volatile bool s_shutdown;
+static volatile uint32_t s_shutdown_drain_until;   /* set before s_shutdown: sessions finish their epoch until then */
 static volatile bool s_net_up;           /* station got an IP and has not dropped since */
 static volatile uint32_t s_net_gen;      /* bumped when the address returns or changes: older sockets are dead */
 static esp_netif_t *volatile s_sta_netif;
@@ -644,11 +650,25 @@ static void sess_wait(slot_t *s, bool for_write, uint32_t ms)
     (void)select(s->fd + 1, for_write ? NULL : &set, for_write ? &set : NULL, NULL, &tv);
 }
 
-/* Commands or events that end any attempt or session at once. */
+/* A planned close is pending: the reboot's shutdown, new settings, or a
+ * restart by the health monitor. A session first finishes its epoch
+ * (drain_step). */
+static bool close_planned(const slot_t *s)
+{
+    return s_shutdown || (s->cmd & (CMD_CONFIG | CMD_RESTART)) != 0;
+}
+
+/* The session still has time to finish its epoch before a planned close. */
+static bool draining(const slot_t *s)
+{
+    return s->draining && (int32_t)(now_ms() - s->drain_until_ms) < 0;
+}
+
+/* Commands or events that end any attempt or session at once (a planned
+ * close once the session's epoch is out, or its time is up). */
 static bool hard_abort(slot_t *s)
 {
-    return s_shutdown || !s_running || !net_ready() || (s->cmd & (CMD_CONFIG | CMD_RESTART)) != 0 ||
-           (s->open && s->net_gen != s_net_gen);
+    return (close_planned(s) && !draining(s)) || !s_running || !net_ready() || (s->open && s->net_gen != s_net_gen);
 }
 
 /* A connection attempt also stops for a pause (nothing has been streamed yet). */
@@ -720,6 +740,8 @@ static void session_close(slot_t *s, bool clean)
     s->open = false;
     s->mid_chunk = false;
     s->paused_seen = false;
+    s->draining = false;
+    s->drained = false;
 }
 
 /* ---- connect ------------------------------------------------------------------------------- */
@@ -1790,6 +1812,10 @@ static void stream_step(slot_t *s, uint32_t now)
     esp_err_t err = rtcm_hub_read(s->consumer, s->tx + NTRIP_CHUNK_HEAD_RESERVE, NTRIP_CHUNK_MAX_PAYLOAD, &len,
                                   TICK_MS);
     if (err == ESP_ERR_INVALID_STATE) {
+        if (s->draining) {
+            s->drained = true;   /* the epoch being sent is over (or the hub's hold point is reached) */
+            return;
+        }
         wait_kick(s, TICK_MS);   /* held, and every frame before the hold point is out */
         return;
     }
@@ -1835,6 +1861,98 @@ static void stream_step(slot_t *s, uint32_t now)
     }
 }
 
+/*
+ * Before a planned close the session sends the rest of the epoch it is inside
+ * (rtcm_hub_finish_epoch) and nothing of the next, so the caster's last epoch
+ * is a whole one: the hub hands out frames as they arrive, so the last chunk
+ * of a session closed at once ends inside an epoch whenever the close falls
+ * in the receiver's MSM burst, and only terminated epochs count for Onocoy.
+ * Bounded by DRAIN_MS, on a reboot by half the shutdown budget that was left
+ * (on_shutdown). @return true while the session drains (this pass streamed),
+ * false when the close may go ahead.
+ */
+static bool drain_step(slot_t *s, uint32_t now)
+{
+    if (!s->open || !close_planned(s) || s->consumer == NULL) {
+        s->draining = false;
+        return false;
+    }
+    uint32_t until = s_shutdown ? __atomic_load_n(&s_shutdown_drain_until, __ATOMIC_SEQ_CST) : now + DRAIN_MS;
+    if (!s->draining) {
+        s->draining = true;
+        /* No MSM run open in what this session sent (ntrip_count_frames):
+         * it stands between two epochs, or after some station messages,
+         * which are never part of an MSM run. */
+        s->drained = s->epochs.open_mask == 0;
+        s->drain_start_ms = now;
+        s->drain_until_ms = (int32_t)(until - (now + DRAIN_MS)) < 0 ? until : now + DRAIN_MS;
+        if (!s->drained) {
+            (void)rtcm_hub_finish_epoch(s->consumer);
+        }
+    } else if (s_shutdown && (int32_t)(until - s->drain_until_ms) < 0) {
+        s->drain_until_ms = until;   /* a reboot during a drain for new settings: its budget counts */
+    }
+    if (!s->drained && draining(s)) {
+        stream_step(s, now);
+        if (s->open && !s->drained) {
+            return true;
+        }
+        if (s->open) {
+            ESP_LOGI(TAG, "cst%u (%s): ending the session after the epoch it was sending (%u ms)", (unsigned)s->idx,
+                     s->cfg.name, (unsigned)(now_ms() - s->drain_start_ms));
+        }
+    }
+    if (s->open && !s->drained && s->epochs.open_mask != 0) {
+        ESP_LOGW(TAG, "cst%u (%s): closing inside an epoch: its end did not come within %u ms", (unsigned)s->idx,
+                 s->cfg.name, (unsigned)(now_ms() - s->drain_start_ms));
+    }
+    s->draining = false;
+    return false;
+}
+
+/* One pass of the slot: commands, the state machine and what it asks for. */
+static void slot_step(slot_t *s, uint32_t now)
+{
+    handle_commands(s, now);
+
+    bool net = net_ready();   /* the address goes with the link (see "Network state") */
+    ntrip_sm_in_t in = {
+        .enabled = s->cfg.enabled && s_running && !s_shutdown,
+        .have_ip = net,
+        .link_up = net,
+        .paused = s_paused,
+        .fresh_data = s->consumer != NULL && hub_fresh(),
+        .session_open = s->open,
+        .silent_ms = s->open ? now - s->last_tx_ms : 0,
+    };
+    ntrip_close_why_t why = NTRIP_WHY_NONE;
+    ntrip_sm_act_t act = ntrip_sm_poll(&s->sm, &in, now, esp_random(), &why);
+    note_state(s, now);
+
+    if (act == NTRIP_ACT_CLOSE) {
+        static const char *const k_why[] = { "", "disabled", "no network", "paused, idle limit reached",
+                                             "no RTCM from the receiver" };
+        ESP_LOGI(TAG, "cst%u (%s): closing session (%s)", (unsigned)s->idx, s->cfg.name,
+                 k_why[(size_t)why < sizeof(k_why) / sizeof(k_why[0]) ? (size_t)why : 0]);
+        end_planned(s, now, why != NTRIP_WHY_NO_IP);
+    } else if (act == NTRIP_ACT_CONNECT) {
+        if (s->low_heap_wait && (int32_t)(now - s->low_heap_until_ms) < 0) {
+            wait_kick(s, IDLE_WAIT_MS);
+        } else {
+            connect_once(s, now);
+        }
+    } else if (s->open) {
+        stream_step(s, now);
+    } else {
+        uint32_t wait = IDLE_WAIT_MS;
+        uint32_t retry = ntrip_sm_retry_in_ms(&s->sm, now);
+        if (retry > 0 && retry < wait) {
+            wait = retry;
+        }
+        wait_kick(s, wait);
+    }
+}
+
 static void slot_task(void *arg)
 {
     slot_t *s = (slot_t *)arg;
@@ -1852,43 +1970,8 @@ static void slot_task(void *arg)
         now = now_ms();
         s->progress_ms = now;
         ensure_consumer(s, now);
-        handle_commands(s, now);
-
-        bool net = net_ready();   /* the address goes with the link (see "Network state") */
-        ntrip_sm_in_t in = {
-            .enabled = s->cfg.enabled && s_running && !s_shutdown,
-            .have_ip = net,
-            .link_up = net,
-            .paused = s_paused,
-            .fresh_data = s->consumer != NULL && hub_fresh(),
-            .session_open = s->open,
-            .silent_ms = s->open ? now - s->last_tx_ms : 0,
-        };
-        ntrip_close_why_t why = NTRIP_WHY_NONE;
-        ntrip_sm_act_t act = ntrip_sm_poll(&s->sm, &in, now, esp_random(), &why);
-        note_state(s, now);
-
-        if (act == NTRIP_ACT_CLOSE) {
-            static const char *const k_why[] = { "", "disabled", "no network", "paused, idle limit reached",
-                                                 "no RTCM from the receiver" };
-            ESP_LOGI(TAG, "cst%u (%s): closing session (%s)", (unsigned)s->idx, s->cfg.name,
-                     k_why[(size_t)why < sizeof(k_why) / sizeof(k_why[0]) ? (size_t)why : 0]);
-            end_planned(s, now, why != NTRIP_WHY_NO_IP);
-        } else if (act == NTRIP_ACT_CONNECT) {
-            if (s->low_heap_wait && (int32_t)(now - s->low_heap_until_ms) < 0) {
-                wait_kick(s, IDLE_WAIT_MS);
-            } else {
-                connect_once(s, now);
-            }
-        } else if (s->open) {
-            stream_step(s, now);
-        } else {
-            uint32_t wait = IDLE_WAIT_MS;
-            uint32_t retry = ntrip_sm_retry_in_ms(&s->sm, now);
-            if (retry > 0 && retry < wait) {
-                wait = retry;
-            }
-            wait_kick(s, wait);
+        if (!drain_step(s, now)) {
+            slot_step(s, now);
         }
 
         now = now_ms();
@@ -1921,14 +2004,18 @@ static void wait_sessions_closed(uint32_t budget_ms)
     }
 }
 
-/* Planned reboot: every slot closes its session (terminator, close_notify,
- * close) so the caster frees the mountpoint at once. Bounded by the
- * lifecycle shutdown budget; a slot still in a TLS handshake is skipped. */
+/* Planned reboot: every slot sends the rest of the epoch it is inside
+ * (drain_step, at most half the budget left), then closes its session
+ * (terminator, close_notify, close) so the caster frees the mountpoint at
+ * once. Bounded by the lifecycle shutdown budget; a slot still in a TLS
+ * handshake is skipped. */
 static void on_shutdown(lifecycle_reboot_reason_t reason, uint32_t deadline_ms, void *ctx)
 {
     (void)reason;
     (void)ctx;
-    s_shutdown = true;
+    uint32_t drain = deadline_ms / 2u < DRAIN_MS ? deadline_ms / 2u : DRAIN_MS;
+    __atomic_store_n(&s_shutdown_drain_until, now_ms() + drain, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&s_shutdown, true, __ATOMIC_SEQ_CST);
     kick_all();
     wait_sessions_closed(deadline_ms);
 }

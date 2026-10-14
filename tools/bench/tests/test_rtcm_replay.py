@@ -306,6 +306,42 @@ def test_a_late_last_frame_comes_that_long_after_the_rest_of_its_burst(tmp_path)
     assert srv.counts()["bursts_late"] == 2
 
 
+def test_a_pause_while_a_late_last_frame_waits_drops_it_and_bursts_can_be_timed(tmp_path):
+    # As e2e.py stops the line across a restart that came inside an epoch: the head of the burst went out,
+    # its late last frame falls due while paused and is never sent.
+    f = tmp_path / "three.rtcm3"
+    epochs = [[msm_frame(t, 1, 1000 * k, t != 1097, {(3, 2): 40.0}) for t in (1077, 1087, 1097)] for k in (1, 2, 3)]
+    f.write_bytes(b"".join(b"".join(e) for e in epochs))
+    s = load(f)
+    srv = ReplayServer(s, say=lambda m: None)
+    srv.set_last_frame_delay(0.5)
+    srv.start()
+    try:
+        assert srv.wait_burst_head(0.2) is None   # nobody connected: nothing goes out
+        with socket.create_connection((srv.host, srv.port)) as c:
+            head = len(b"".join(epochs[0][:2]))
+            got, _ = recv_exactly(c, head)
+            t = srv.wait_burst_head(5.0)           # the second burst's head, about 1 s after the first
+            assert t is not None and time.monotonic() - t < 1.0
+            srv.pause()
+            rest = bytearray()
+            c.settimeout(0.3)
+            end = time.monotonic() + 1.5
+            while time.monotonic() < end:
+                try:
+                    data = c.recv(65536)
+                except socket.timeout:
+                    continue
+                if not data:
+                    break
+                rest += data
+    finally:
+        srv.stop()
+    # The first burst whole (its late frame came before the pause), the second's head only.
+    assert got + bytes(rest) == b"".join(epochs[0]) + b"".join(epochs[1][:2])
+    assert srv.counts()["late_paused"] == 1 and srv.counts()["bursts_late"] == 1
+
+
 def test_parse_hostport():
     assert parse_hostport("127.0.0.1:5600") == ("127.0.0.1", 5600)
     assert parse_hostport(":5600") == ("127.0.0.1", 5600)
