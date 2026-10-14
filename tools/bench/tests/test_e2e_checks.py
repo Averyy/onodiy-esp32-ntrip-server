@@ -246,3 +246,37 @@ def test_a_record_of_the_configured_receiver_is_checked_against_its_own_station_
     record = b"".join(own) + b"".join(f for e in epochs[2:6] + [own] + epochs[12:20] for f in e)
     ok, detail, _ = e2e.check_record(record, sched)
     assert ok and "1 gap" in detail, detail
+
+
+def test_a_record_that_ended_at_a_pause_must_end_on_a_whole_epoch(lax):
+    # A session the station closed while the casters were paused, or the part of one before a pause: the
+    # data stopped at the hold point, an epoch boundary. The configured receiver opens every epoch with its
+    # own station messages, which a caster may have sent before the hold (never part of an MSM run).
+    from benchlib.um982_sim import arp_frame, descriptor_frame, glo_bias_frame
+    own = [arp_frame(1005, 0, (-2503389.9916, -4660267.5866, 3551298.6913)),
+           descriptor_frame(0, "", 0, "", "UM982", "R4.10Build18975", "SYNTH00000001"), glo_bias_frame(0)]
+    sched = e2e.with_station(lax, own, {1005, 1033, 1230})
+    epochs = [[f for f in b.frames if not 1101 <= e2e.frame_type(f) <= 1107] for b in sched.bursts]
+    assert [e2e.frame_type(f) for f in epochs[9][:4]] == [1005, 1033, 1230, 1077]
+    whole = b"".join(own) + b"".join(f for e in epochs[4:9] for f in e)
+    ok, detail, _ = e2e.check_record(whole, sched, whole_tail=True)
+    assert ok, detail
+    # The next epoch's station messages after it: still whole.
+    ok, detail, _ = e2e.check_record(whole + b"".join(epochs[9][:3]), sched, whole_tail=True)
+    assert ok, detail
+    # Its first MSM too (an MSM that arrived after the pause was decided went out): an epoch cut.
+    cut = whole + b"".join(epochs[9][:4])
+    ok, detail, _ = e2e.check_record(cut, sched, whole_tail=True)
+    assert not ok and "ends inside an epoch" in detail and "type 1077" in detail, detail
+    # A record still growing when it is read may end anywhere.
+    ok, detail, _ = e2e.check_record(cut, sched)
+    assert ok, detail
+    # A cut frame at the end of a record that ended.
+    ok, detail, _ = e2e.check_record(whole + epochs[9][3][:7], sched, whole_tail=True)
+    assert not ok and "after the last whole frame" in detail, detail
+    # After a gap (a pause the session stayed through), the same rule at its end.
+    resumed = whole + b"".join(own) + b"".join(f for e in epochs[14:17] for f in e)
+    ok, detail, _ = e2e.check_record(resumed, sched, whole_tail=True)
+    assert ok and "1 gap" in detail, detail
+    ok, detail, _ = e2e.check_record(resumed + b"".join(epochs[17][:5]), sched, whole_tail=True)
+    assert not ok and "ends inside an epoch" in detail, detail

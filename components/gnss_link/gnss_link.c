@@ -1718,6 +1718,23 @@ esp_err_t gnss_link_get_stats(gnss_link_stats_t *out)
     return ESP_OK;
 }
 
+size_t gnss_link_rx_unread(void)
+{
+    if (!s_inited) {
+        return 0;
+    }
+    size_t n = 0;
+    /* Under s_lock: the driver is only deleted after s_driver_ok is cleared
+     * under it, so it cannot go away during the call (the driver's own
+     * spinlock nests inside, as in arrival_quiet). */
+    taskENTER_CRITICAL(&s_lock);
+    if (!s_driver_ok || uart_get_buffered_data_len(s_port, &n) != ESP_OK) {
+        n = 0;
+    }
+    taskEXIT_CRITICAL(&s_lock);
+    return n;
+}
+
 esp_err_t gnss_link_get_arrival_stats(gnss_link_arrival_stats_t *out)
 {
     if (out == NULL) {

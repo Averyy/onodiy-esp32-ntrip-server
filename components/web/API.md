@@ -2448,13 +2448,29 @@ boot), and a journal in state `unknown` allows no receiver update action.
   missing session with a body, an upload refused before its body is read):
   the error goes out with `Connection: close`, the server ends its side
   (`shutdown(SHUT_WR)`), then reads and drops what the client still sends,
-  at most 64 KB or 2 s, before it closes. A close with unread data in the
-  socket would send a reset, and many clients then drop the answer still in
-  their receive buffer (the browser shows "connection reset" instead of the
-  413). The server's own warnings for these expected cases
-  (`httpd_uri`, `httpd_txrx`, `httpd_ws`) are logged at error level only,
-  as fixed levels (`diag_log_fix_level`) that a `"*"` change of the log
-  level keeps; the handlers log the refusals that matter.
+  at most 64 KB or 2 s, before it closes. Without that read lwIP's receive
+  window would stay shut: the client's upload stalls in front of the
+  answer, and the station resets the connection at the client's next
+  window probe; many clients then drop the answer still in their receive
+  buffer (the browser shows "connection reset" instead of the 413). Only
+  the bytes the socket reports queued (`FIONREAD`, which needs
+  `CONFIG_LWIP_SO_RCVBUF`) are read, never the client's FIN behind them: a
+  `recv()` that takes the FIN after our own makes lwIP free the connection
+  without telling the socket (a half-close in `LAST_ACK`), and the close
+  after it would work on freed memory. Readable with nothing queued is that
+  FIN; the close is then a full one. The server's own warnings for these
+  expected cases (`httpd_uri`, `httpd_txrx`, `httpd_ws`) are logged at
+  error level only, as fixed levels (`diag_log_fix_level`) that a `"*"`
+  change of the log level keeps; the handlers log the refusals that
+  matter.
+- **Connections the station ends first** (`Connection: close`, HTTP/1.0,
+  the refusals above, idle ones it evicts) stay in TIME_WAIT on the station
+  for 10 s (2 x MSL; `CONFIG_LWIP_TCP_MSL` is 5 s instead of lwIP's 60 s).
+  lwIP never reopens a connection in TIME_WAIT on a new SYN (it answers
+  with a reset or a bare ACK), so a client that reuses its local port for
+  the station within that time cannot connect until it ends; Linux clients
+  reuse ports that soon. With 120 s a script polling the station could
+  lose requests for two minutes.
 - **Client addresses in the log:** a wrong admin password (section 3) and a
   refused WebSocket handshake name the client: `WebSocket refused for
   192.168.1.23: no session, and public status is off` (also `Host or Origin

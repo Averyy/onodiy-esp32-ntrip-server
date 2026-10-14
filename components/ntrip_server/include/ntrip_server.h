@@ -116,7 +116,10 @@
  * A pause for receiver work (configuration or a flash) is a planned source
  * stall with the same limits: paused slots stay connected and idle up to
  * their limit, then close cleanly and wait in PAUSED until the station
- * resumes them; never counted as a failure.
+ * resumes them; never counted as a failure. The station holds the RTCM hub
+ * at an epoch boundary first (rtcm_hub_hold): a slot still behind it sends
+ * the rest up to that point before it idles, and after the release the hub
+ * starts it over at a whole epoch (sticky copies first).
  *
  * Logging: request lines carry the password (NTRIP 1.0) and the Onocoy
  * mountpoint is the credential username, so requests and replies are only
@@ -378,8 +381,10 @@ esp_err_t ntrip_server_restart_slot(size_t slot);
 esp_err_t ntrip_server_retry_slot(size_t slot);
 
 /**
- * Pause/resume all slots for receiver work (a planned source stall). Paused
- * slots stay connected and idle up to their source-stall limit
+ * Pause/resume all slots for receiver work (a planned source stall). The
+ * station holds the hub before the pause and releases it before the resume
+ * (rtcm_hub_hold, rtcm_hub_release). Paused slots finish what the hub has
+ * before its hold point, then stay connected and idle up to their source-stall limit
  * (CONFIG_NTRIP_SOURCE_STALL_S, the protected slot
  * CONFIG_NTRIP_PROTECTED_SOURCE_STALL_S), then close cleanly and wait in
  * PAUSED; never a failure. The ledger counts the time as planned downtime.

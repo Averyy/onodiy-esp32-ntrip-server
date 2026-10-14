@@ -281,6 +281,31 @@ def test_line_rate_pacing_spreads_a_burst(tmp_path):
     assert took >= len(data) * 10 / baud * 0.85
 
 
+def test_a_late_last_frame_comes_that_long_after_the_rest_of_its_burst(tmp_path):
+    # Two epochs of three MSMs each, one second apart: the last of each held back 0.4 s, then at once again.
+    f = tmp_path / "two.rtcm3"
+    epochs = [[msm_frame(t, 1, 1000 * k, t != 1097, {(3, 2): 40.0}) for t in (1077, 1087, 1097)] for k in (1, 2, 3)]
+    f.write_bytes(b"".join(b"".join(e) for e in epochs))
+    s = load(f)
+    assert len(s.bursts) == 3
+    srv = ReplayServer(s, say=lambda m: None)
+    srv.set_last_frame_delay(0.4)
+    srv.start()
+    try:
+        with socket.create_connection((srv.host, srv.port)) as c:
+            head = len(b"".join(epochs[0][:2]))
+            got, marks = recv_exactly(c, len(b"".join(epochs[0])) + len(b"".join(epochs[1])))
+            t_head = next(t for t, n in marks if n >= head)
+            t_last = next(t for t, n in marks if n >= len(b"".join(epochs[0])))
+            srv.set_last_frame_delay(0)
+            rest, _ = recv_exactly(c, len(b"".join(epochs[2])))
+    finally:
+        srv.stop()
+    assert got + rest == s.data()   # byte identical, nothing lost or reordered
+    assert 0.3 <= t_last - t_head <= 0.9, t_last - t_head
+    assert srv.counts()["bursts_late"] == 2
+
+
 def test_parse_hostport():
     assert parse_hostport("127.0.0.1:5600") == ("127.0.0.1", 5600)
     assert parse_hostport(":5600") == ("127.0.0.1", 5600)

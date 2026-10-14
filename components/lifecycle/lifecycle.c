@@ -404,7 +404,18 @@ static esp_err_t start_service(void)
         return err;
     }
     TaskHandle_t task = NULL;
-    if (xTaskCreate(service_task, "lifecycle", SERVICE_STACK, NULL, SERVICE_PRIO, &task) != pdPASS) {
+    /* On the PRO CPU (core 0), where every other planned restart runs too
+     * (app_main, the boot-time trial check, the hook-overrun timer in the
+     * esp_timer task). A board restarts the same from either core.
+     * Espressif's QEMU does not: esp_restart_noos() on the APP CPU resets
+     * the PRO CPU and asks the RTC controller to stall it, but the esp32s3
+     * machine's stall handler is empty (hw/xtensa/esp32s3.c
+     * esp32s3_cpu_stall), so the PRO CPU runs the ROM and the bootloader at
+     * once while the APP CPU carries on, and the APP CPU's own reset of the
+     * PRO CPU then cuts that boot short: a second rst:0xc banner, or on a
+     * fast host the bootloader loading the app over code the APP CPU still
+     * runs. tools/qemu/README.md has the measurements. */
+    if (xTaskCreatePinnedToCore(service_task, "lifecycle", SERVICE_STACK, NULL, SERVICE_PRIO, &task, 0) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     taskENTER_CRITICAL(&s_lock);

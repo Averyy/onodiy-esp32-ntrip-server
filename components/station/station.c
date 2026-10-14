@@ -85,8 +85,8 @@ _Static_assert(STATION_BENCH_LISTEN == (int)UM98X_BENCH_LISTEN && STATION_BENCH_
 #define LISTEN_POLL_MS   100
 #define POS_MAX_AGE_MS   5000    /* position check: a 1005 at most this old */
 #define EPOCH_WAIT_MS    1000    /* a caster pause waits this long at most for the epoch in flight */
-#define EPOCH_DRAIN_MS   50      /* ... and this long after its last frame, for the casters to read it.
-                                    PROVISIONAL, to be confirmed on hardware */
+#define EPOCH_POLL_MS    10
+#define HOLD_NOTE_MS     300     /* a caster hold that waited this long for its epoch is logged */
 #define TRUSTED_UNIX     1700000000   /* earlier wall-clock times are not a set clock */
 
 _Static_assert(STN_IDLE == (int)STATION_STATE_IDLE && STN_DETECTING == (int)STATION_STATE_DETECTING &&
@@ -2176,26 +2176,43 @@ static void sync_maintenance(const stn_in_t *in)
     }
 }
 
-/* The casters pause for receiver work between two epochs, never inside one:
- * an epoch in flight (an MSM announced more, its last frame under the hub's
- * gap rule old) goes out whole first, and the casters (lower priority than
- * this task) get EPOCH_DRAIN_MS to read the frame that ended it. A stream
- * that never settles waits EPOCH_WAIT_MS at most; the receiver session
- * starts after the pause. */
-static void finish_epoch(void)
+/* The casters pause for receiver work between two epochs, never inside one.
+ * The hub is held at an epoch boundary (rtcm_hub_hold): each caster sends
+ * every frame before that point, at its own pace, and nothing after it, so
+ * RTCM that arrives until the receiver session takes the line (the next
+ * epoch's station messages and first MSMs) never reaches a caster as an
+ * epoch the session then cuts. An epoch in flight (an MSM announced more,
+ * however quiet the line is now, or bytes still wait for the link's reader,
+ * which may be off the CPU while the rest of the epoch sits in the UART
+ * driver) goes out whole first. After EPOCH_WAIT_MS the hold goes after an
+ * open epoch quiet for the hub's gap rule (its last MSM was lost, or the
+ * receiver never clears the bit), else at that epoch's start. The release
+ * (resume) starts every caster over at a whole epoch. */
+static void hold_casters(void)
 {
-    int64_t until = now_ms() + EPOCH_WAIT_MS;
+    int64_t start = now_ms();
+    bool backlog = false;
     for (;;) {
-        uint32_t age = UINT32_MAX;
-        bool flight = rtcm_hub_epoch_in_flight(CONFIG_RTCM_HUB_BURST_GAP_MS, &age);
-        if (!flight && age >= EPOCH_DRAIN_MS) {
+        bool unread = gnss_link_rx_unread() > 0;
+        backlog = backlog || unread;
+        if (!unread && rtcm_hub_hold(CONFIG_RTCM_HUB_BURST_GAP_MS, false) != RTCM_HUB_HOLD_NONE) {
+            break;
+        }
+        if (now_ms() - start >= EPOCH_WAIT_MS) {
+            rtcm_hub_hold_t h = rtcm_hub_hold(CONFIG_RTCM_HUB_BURST_GAP_MS, true);
+            ESP_LOGW(TAG, "casters held %s: no epoch boundary within %u ms",
+                     h == RTCM_HUB_HOLD_CUT ? "at the start of the epoch in flight" : "after an epoch without its last MSM",
+                     (unsigned)EPOCH_WAIT_MS);
             return;
         }
-        if (now_ms() >= until) {
-            ESP_LOGD(TAG, "casters paused inside an epoch (no boundary within %u ms)", (unsigned)EPOCH_WAIT_MS);
-            return;
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(EPOCH_POLL_MS));
+    }
+    int64_t waited = now_ms() - start;
+    if (waited >= HOLD_NOTE_MS) {
+        /* A note, not a warning: an epoch in flight is normal; how long it
+         * took tells whether the line or the reader was slow. */
+        ESP_LOGI(TAG, "casters held at an epoch boundary after %u ms%s", (unsigned)waited,
+                 backlog ? " (bytes were waiting for the link's reader)" : "");
     }
 }
 
@@ -2228,7 +2245,9 @@ static void after_step(const stn_in_t *in)
 
     if (paused != s_paused) {
         if (paused) {
-            finish_epoch();
+            hold_casters();
+        } else {
+            rtcm_hub_release();   /* before the casters see the resume */
         }
         s_paused = paused;
         esp_err_t err = ntrip_server_set_paused(paused);

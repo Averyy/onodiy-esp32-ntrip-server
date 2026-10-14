@@ -73,10 +73,19 @@ _Static_assert(ESP_ERR_OTA_VALIDATE_FAILED == 0x1503, "OTA validation error code
 #define DEADLINE_LOG_S       60   /* at most one log line about late requests per minute */
 /* A refused request's body: after the answer, read and drop at most this
  * much, for at most this long, so the client reads the answer instead of a
- * reset (a close with unread data in the socket sends an RST, which makes
- * many clients drop the answer still in their receive buffer). */
+ * reset. Unread, the body keeps lwIP's receive window shut (it opens only as
+ * the socket is read): the client's upload stalls in front of the answer,
+ * and its next window probe gets an RST, which makes many clients drop the
+ * answer still in their receive buffer. */
 #define LINGER_DRAIN_BYTES   (64u * 1024u)
 #define LINGER_DRAIN_MS      2000
+
+/* web_linger_close drains only what FIONREAD reports, which lwIP answers
+ * only with SO_RCVBUF support (sockets.c, lwip_ioctl; the receive limit
+ * itself stays lwIP's default, none). */
+#if !CONFIG_LWIP_SO_RCVBUF
+#error "web_linger_close needs CONFIG_LWIP_SO_RCVBUF (FIONREAD)"
+#endif
 /* X-Client-Id of the request that changed settings: a settings event this
  * soon after that request was its own (the event comes from another task). */
 #define CLIENT_ID_HOLD_MS    2000
@@ -784,6 +793,20 @@ void web_linger_close(httpd_req_t *req)
     if (shutdown(fd, SHUT_WR) != 0) {
         return;   /* reset already: nothing to wait for */
     }
+    /*
+     * Drop what the client still sends, but never let recv() take its FIN.
+     * After our half-close a FIN taken by recv() shuts lwIP's receive side
+     * too, and in LAST_ACK (the client's FIN came before ours) lwIP counts
+     * that as a half-close, not a close (api_msg.c do_close_internal): the
+     * socket keeps the connection. The client's ACK of our FIN then frees it
+     * without telling the socket (tcp_in.c tcp_input_delayed_close skips the
+     * error callback once the receive side is shut), and the close() that
+     * follows works on freed memory: a double free, or a newer connection
+     * that reused the block torn down with its request unanswered. So only
+     * the bytes FIONREAD counts are read (recv() stops at that count and never
+     * reaches the FIN behind them); readable with none queued is the FIN or
+     * an error, and the session's close() then does a full close.
+     */
     char buf[512];
     size_t dropped = 0;
     int64_t until = esp_timer_get_time() + (int64_t)LINGER_DRAIN_MS * 1000;
@@ -792,9 +815,13 @@ void web_linger_close(httpd_req_t *req)
         if (left_ms <= 0 || !readable_within(fd, (int32_t)left_ms)) {
             break;
         }
-        int n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
-        if (n <= 0) {
+        int queued = 0;
+        if (ioctl(fd, FIONREAD, &queued) != 0 || queued <= 0) {
             break;   /* the client closed (it read the answer), or an error */
+        }
+        int n = recv(fd, buf, (size_t)queued < sizeof(buf) ? (size_t)queued : sizeof(buf), MSG_DONTWAIT);
+        if (n <= 0) {
+            break;
         }
         dropped += (size_t)n;
     }

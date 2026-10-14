@@ -10,6 +10,10 @@ its time x 1/--speed. With --baud each burst also goes out at that line
 rate (10 bits per byte) instead of all at once. Everything the client sends
 back (the firmware's receiver queries) is logged.
 
+In process (tools/qemu/e2e.py), set_last_frame_delay() sends each burst's
+last frame a set time after the rest of it: an epoch whose last MSM comes
+late, as a stalled line or reader makes it look to the station.
+
 Made for the firmware in QEMU: start the replay first, then
 `tools/qemu/run.sh --uart1 connect:PORT`, so the firmware hears the stream
 from its first boot. The replay keeps listening after a client leaves (QEMU
@@ -102,6 +106,8 @@ class ReplayServer:
         self.bursts_paused = 0
         self.bursts_withheld = 0     # due while the responder's receiver sent no RTCM (UNLOG, restart)
         self.replies_sent = 0        # responder bytes sent
+        self.last_frame_delay_s = 0.0  # set_last_frame_delay: each burst's last frame held back this long
+        self.bursts_late = 0         # bursts sent with their last frame late
         self.responder = responder
         self.send_lock = threading.Lock()   # bursts and replies never interleave inside one write
         self.received = bytearray()  # everything clients sent (kept for in-process checks)
@@ -155,6 +161,14 @@ class ReplayServer:
                 n = self.bursts_paused
             self._log(f"resumed ({n} burst{'' if n == 1 else 's'} dropped while paused, in total)")
 
+    def set_last_frame_delay(self, seconds: float) -> None:
+        """Send each burst's last frame `seconds` after the rest of it (0: at once again): an epoch whose last
+        MSM comes late, as a line or a reader that stalls inside an epoch makes it look to the station. Only
+        bursts of whole frames (a capture's reads go out as recorded)."""
+        with self.lock:
+            self.last_frame_delay_s = max(0.0, float(seconds))
+        self._log(f"last frame of each burst {f'{seconds:.3f} s late' if seconds > 0 else 'at once again'}")
+
     def set_responder(self, responder: Um982Responder | None) -> None:
         """Answer the client's receiver commands from now on (None: answer nothing again)."""
         with self.lock:
@@ -166,7 +180,8 @@ class ReplayServer:
             return {"connections": self.connections, "loops": self.loops_done, "bursts": self.bursts_sent,
                     "bytes_sent": self.bytes_sent, "frames_sent": self.frames_sent,
                     "bytes_received": self.bytes_received, "bursts_paused": self.bursts_paused,
-                    "bursts_withheld": self.bursts_withheld, "replies_sent": self.replies_sent}
+                    "bursts_withheld": self.bursts_withheld, "replies_sent": self.replies_sent,
+                    "bursts_late": self.bursts_late}
 
     # -- serving ----------------------------------------------------------------
 
@@ -223,10 +238,22 @@ class ReplayServer:
                     with self.lock:
                         self.bursts_withheld += 1
                     continue
-                data, nframes = burst.data, len(burst.frames)
+                data, frames = burst.data, list(burst.frames)
                 if resp is not None:
-                    data, nframes = self._with_station(resp, burst)
-                if not self._send(conn, data, gone):
+                    data, frames = self._with_station(resp, burst)
+                nframes = len(frames)
+                with self.lock:
+                    late = self.last_frame_delay_s
+                if late > 0 and nframes > 1 and b"".join(frames) == data:
+                    if not self._send(conn, b"".join(frames[:-1]), gone):
+                        break
+                    if self._wait_until(time.monotonic() + late, gone, conn):
+                        break
+                    if not self._send(conn, frames[-1], gone):
+                        break
+                    with self.lock:
+                        self.bursts_late += 1
+                elif not self._send(conn, data, gone):
                     break
                 with self.lock:
                     self.bursts_sent += 1
@@ -291,15 +318,15 @@ class ReplayServer:
         self._log(f"to client {len(data)} reply bytes: {data!r}", echo=False)
 
     @staticmethod
-    def _with_station(resp: Um982Responder, burst: Burst) -> tuple[bytes, int]:
-        """The burst as the responder's receiver sends it: its own station messages first (a burst of
-        whole frames only; a capture's reads go out as recorded)."""
+    def _with_station(resp: Um982Responder, burst: Burst) -> tuple[bytes, list[bytes]]:
+        """The burst as the responder's receiver sends it, and its frames: its own station messages first
+        (a burst of whole frames only; a capture's reads go out as recorded)."""
         station = resp.station_frames()
         types = resp.station_types()
         if not types or b"".join(burst.frames) != burst.data:
-            return burst.data, len(burst.frames)
+            return burst.data, list(burst.frames)
         frames = with_station_messages(burst.frames, station, types)
-        return b"".join(frames), len(frames)
+        return b"".join(frames), frames
 
     def _send(self, conn: socket.socket, data: bytes, gone: threading.Event) -> bool:
         if not self.baud:

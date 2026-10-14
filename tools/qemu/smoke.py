@@ -34,6 +34,9 @@ What it does:
      a route that takes a body, the route's own answer elsewhere, with
      "Connection: close"; the chunks never come back as a second answer),
      and two pipelined HTTP/1.1 requests on one socket are both answered;
+     a refused body several TCP windows long is drained after the answer
+     (the station's packets in the pcap acknowledge every byte of it and
+     the client's FIN);
      both ways a JSON answer goes out, on one kept HTTP/1.1 connection: one
      that fits the web server's response buffer (its size read from
      components/web/web.c) with its Content-Length, a larger one streamed
@@ -66,7 +69,12 @@ What it does:
      enabled; the status names holds only during a ladder episode); with no
      receiver (GET /api/gnss state "no_receiver") a signal-group comparison
      is refused with 409 no_receiver and GET /api/gnss/signal-test stays
-     idle;
+     idle; then 400 refused requests (POST /api/nope with a body) whose
+     client ends its sending side right after the body: every one answered
+     404 with "Connection: close", no crash, no restart (a drain that took
+     the client's FIN let lwIP free the connection behind the socket); and a
+     client back on its local port 15 s after the station ended the
+     connection first (the station's TIME_WAIT is 10 s) is answered at once;
   4. keeps watching until --observe seconds after the start (at least 45),
      checks that the web server still answers (GET /, and GET /api/status
      with the session), then stops QEMU and fails on a panic (Guru
@@ -76,7 +84,10 @@ What it does:
      --max-boots boots in the window is a loop. It also fails on a GNSS
      ladder restart ("rebooting (reason 6)": held while first setup is not
      finished), on a console note about dropped lines ("[diag:"), and unless
-     the console writer task runs and /api/health counts no console drop.
+     the console writer task runs and /api/health counts no console drop,
+     and the lifecycle task (planned restarts) is pinned to core 0: on the
+     APP CPU a restart in this QEMU is cut short in the bootloader (no CPU
+     stall), which the boot check names when it sees one.
      QEMU's UART sends every byte at once, so a burst cannot back the
      console up here: the writer's ordering and drop rules are host-tested
      (test/host test_diag_console.c), and this checks that the writer is
@@ -91,11 +102,21 @@ What it does:
      console before the next boot, with no shutdown-budget warning.
 
 QEMU always stops: on a normal end, Ctrl-C, SIGTERM or SIGHUP the script
-stops it on the way out, and run.sh gets --seconds as a backstop (observe +
-timeout + a margin) in case this script is killed outright.
+stops it on the way out, and run.sh gets --seconds as a backstop (observe
+or timeout, whichever is longer, plus 180 s for the half-close, drain and
+port reuse checks and a margin) in case this script is killed outright.
+
+Every request but the polls that wait for the station to come up (QEMU's
+network holds those connections until the guest listens) is watched: one
+still unanswered after 5 s gets probes on
+other connections, the QEMU threads' CPU time and the console lines
+meanwhile written to slow-requests.log (no retry, no longer timeout: the
+next one shows why), and every Ethernet frame goes to qemu-net.pcap
+(run.sh --pcap).
 
 Everything lands in --out: the console log, the UART1 capture (raw bytes and
-a timestamped log of both directions), the HTTP answers and summary.txt.
+a timestamped log of both directions), the HTTP answers, qemu-net.pcap,
+slow-requests.log (when a request was slow) and summary.txt.
 Exit status 0 when every check passed, 1 otherwise.
 """
 
@@ -140,6 +161,18 @@ DETECT_RESULT = re.compile(r"um98x_ctl: receiver not found \(([^)]*)\)|um98x_ctl
 # '#' line start, no RTCM preamble, no loader prompt). The framer discards it,
 # so the firmware sees bytes but no reply.
 LINK_TEST = b"qemu uart1 link test\r\n"
+APP_START = "cpu_start: "                 # the app's startup: a boot that got past the 2nd-stage bootloader
+BOOTLOADER = "2nd stage bootloader"
+SW_CPU_RESET = "rst:0xc (RTC_SW_CPU_RST)"
+# Refused requests whose client ends its sending side right after its body (half-close checks).
+HALFCLOSE_REQUESTS = 400
+HALFCLOSE_BUDGET_S = 180   # what they, the drain check and the port reuse check may add (run.sh's backstop)
+# A client reuses its local port this long after the station ended the connection first: the station keeps
+# it in TIME_WAIT for 2 x CONFIG_LWIP_TCP_MSL (sdkconfig.defaults: 10 s) and refuses the port until then.
+REUSE_AFTER_S = 15.0
+# A request still unanswered after this long is watched: probes on other connections, the QEMU threads'
+# CPU time and the console lines meanwhile go to slow-requests.log in the output directory.
+SLOW_S = 5.0
 # How long an HTTP answer may take to arrive. QEMU's emulated Ethernet MAC drops a received frame when the
 # firmware has no free receive buffer ("RX frame dropped" on the console), and TCP sends it again only seconds
 # later (an answer 5.5 s late in CI): a late answer is waited for, never read as a missing or a different one.
@@ -205,8 +238,259 @@ class Uart1Tap:
         self.log.close()
 
 
+class BootReport(NamedTuple):
+    boots: int
+    unplanned: list[int]   # boots (1-based) that ended in a restart without the firmware's reboot line
+    app_cpu: list[int]     # ... of those: a planned restart run on the APP CPU (QEMU artefact, see boot_report)
+
+
+def boot_report(text: str) -> BootReport:
+    """Boots on a console and how each one ended.
+
+    A boot that ends in the next ROM banner without the firmware's own "rebooting (reason N)" line is a
+    restart nobody asked for. One kind has a known cause in this QEMU: a planned restart run on the APP CPU.
+    esp_restart_noos() there resets the PRO CPU and has the RTC controller stall it, but Espressif's
+    esp32s3 machine leaves the stall handler empty (hw/xtensa/esp32s3.c, esp32s3_cpu_stall), so the PRO CPU
+    runs the ROM and the 2nd-stage bootloader while the APP CPU goes on, and the APP CPU's own reset of the
+    PRO CPU then starts it over: a boot that never got past the bootloader, between two rst:0xc banners,
+    right after a planned restart. The firmware runs every planned restart on the PRO CPU (lifecycle.c),
+    so this must not happen; when it does it is reported as that, and it still fails."""
+    parts = text.split(BOOT_MARK)
+    n = len(parts) - 1
+    unplanned: list[int] = []
+    app_cpu: list[int] = []
+    for i in range(1, n):   # every boot but the last ends at the next banner
+        seg = parts[i]
+        if OWN_REBOOT.search(seg):
+            continue
+        unplanned.append(i)
+        if (i >= 2 and OWN_REBOOT.search(parts[i - 1]) and SW_CPU_RESET in seg and BOOTLOADER in seg
+                and APP_START not in seg and SW_CPU_RESET in parts[i + 1]):
+            app_cpu.append(i)
+    return BootReport(n, unplanned, app_cpu)
+
+
+def boot_text(r: BootReport) -> str:
+    """The check's text for restarts without the firmware's reboot line."""
+    text = f"{len(r.unplanned)} restart(s) without the firmware's own reboot line"
+    if r.app_cpu:
+        text += (f" ({len(r.app_cpu)} of them right after a planned restart, cut short inside the 2nd-stage "
+                 f"bootloader by a second rst:0xc: the restart ran on the APP CPU, and QEMU has no CPU stall; "
+                 f"tools/qemu/README.md)")
+    return text
+
+
+GUEST_IP = "10.0.2.15"                     # the station's address on QEMU's user-mode network
+TCP_FIN, TCP_SYN, TCP_RST = 0x01, 0x02, 0x04
+
+
+class Segment(NamedTuple):
+    flags: int
+    seq: int
+    ack: int
+
+
+def tcp_from_guest(pcap: Path, peer_port: int) -> list[Segment]:
+    """Every TCP segment the station sent from its port 80 to `peer_port`, in a run.sh --pcap file (Ethernet
+    frames, IPv4). QEMU's user-mode network forwards a host connection with the client's own port, so
+    `peer_port` is the host socket's local port."""
+    try:
+        d = pcap.read_bytes()
+    except OSError:
+        return []
+    if len(d) < 24 or d[:4] != b"\xd4\xc3\xb2\xa1":
+        return []
+    out = []
+    off = 24
+    guest = bytes(int(x) for x in GUEST_IP.split("."))
+    while off + 16 <= len(d):
+        incl = int.from_bytes(d[off + 8:off + 12], "little")
+        pkt = d[off + 16:off + 16 + incl]
+        off += 16 + incl
+        if len(pkt) < 14 + 20 or pkt[12:14] != b"\x08\x00":
+            continue
+        ip = pkt[14:]
+        ihl = (ip[0] & 0x0F) * 4
+        if ip[9] != 6 or ip[12:16] != guest or len(ip) < ihl + 14:
+            continue
+        tcp = ip[ihl:]
+        if int.from_bytes(tcp[0:2], "big") == 80 and int.from_bytes(tcp[2:4], "big") == peer_port:
+            out.append(Segment(tcp[13], int.from_bytes(tcp[4:8], "big"), int.from_bytes(tcp[8:12], "big")))
+    return out
+
+
+def guest_closed_first(segments: list[Segment], sent: int) -> bool | None:
+    """Whether the station sent its FIN before the client's FIN reached it: its FIN acknowledges the client's
+    `sent` bytes and no FIN (the station then holds the connection in TIME_WAIT). None without a SYN-ACK or
+    a FIN from the station."""
+    syn = next((x for x in segments if x.flags & TCP_SYN), None)
+    fin = next((x for x in segments if x.flags & TCP_FIN), None)
+    if syn is None or fin is None:
+        return None
+    return (fin.ack - syn.ack) % (1 << 32) == sent
+
+
+def acked_by_guest(segments: list[Segment]) -> int | None:
+    """Bytes of the client's stream the station acknowledged (its FIN counts one), from its SYN-ACK on; None
+    without a SYN-ACK."""
+    syn = next((x for x in segments if x.flags & TCP_SYN), None)
+    if syn is None:
+        return None
+    return max((x.ack - syn.ack) % (1 << 32) for x in segments if x.flags & 0x10)
+
+
+def qemu_pid_from(run_log: Path) -> int | None:
+    """The QEMU process run.sh started (its "QEMU pid N" line)."""
+    try:
+        m = re.search(r"^QEMU pid (\d+)$", run_log.read_text(encoding="utf-8", errors="replace"), re.M)
+    except OSError:
+        return None
+    return int(m.group(1)) if m else None
+
+
+def qemu_threads(pid: int) -> str:
+    """CPU time of each QEMU thread: Linux /proc (tid:name:state:utime+stime ticks), else ps -M."""
+    task = Path(f"/proc/{pid}/task")
+    if task.is_dir():
+        out = []
+        for t in sorted(task.iterdir(), key=lambda p: int(p.name)):
+            try:
+                st = (t / "stat").read_text()
+            except OSError:
+                continue
+            name = st[st.index("(") + 1:st.rindex(")")]
+            f = st[st.rindex(")") + 2:].split()
+            out.append(f"{t.name}:{name}:{f[0]}:{int(f[11]) + int(f[12])}")
+        return " ".join(out)
+    try:
+        r = subprocess.run(["ps", "-M", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+        return " | ".join(" ".join(line.split()) for line in r.stdout.splitlines()[1:])
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"ps failed: {e}"
+
+
+class SlowWatch:
+    """Evidence for an HTTP request that takes long, instead of a retry or a longer timeout.
+
+    request() reports every request here. Once one has waited SLOW_S, a thread writes to slow-requests.log,
+    every second until it ends: a probe on another connection (GET /, does the server answer meanwhile?),
+    the QEMU threads' CPU time (is the emulator running, or starved by the host?) and every console line
+    printed since the request began (what the firmware did meanwhile), all on the host's clock. The pcap
+    (run.sh --pcap) shows the request's own packets."""
+
+    def __init__(self, out: Path, console: Path, run_log: Path, port: int, t0: float):
+        self.path = out / "slow-requests.log"
+        self.console = console
+        self.run_log = run_log
+        self.port = port
+        self.t0 = t0
+        self.lock = threading.Lock()
+        self.count = 0
+
+    def _write(self, text: str) -> None:
+        with self.lock, open(self.path, "a", encoding="utf-8") as f:
+            f.write(f"{time.monotonic() - self.t0:9.3f} {text}\n")
+
+    def _console_size(self) -> int:
+        try:
+            return self.console.stat().st_size
+        except OSError:
+            return 0
+
+    def _probe(self) -> str:
+        t = time.monotonic()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=4)
+            try:
+                conn.request("GET", "/")
+                resp = conn.getresponse()
+                resp.read()
+                return f"probe GET / on another connection: HTTP {resp.status} in {time.monotonic() - t:.2f} s"
+            finally:
+                conn.close()
+        except (OSError, http.client.HTTPException) as e:
+            return f"probe GET / on another connection: {type(e).__name__} {e} after {time.monotonic() - t:.2f} s"
+
+    def begin(self, what: str) -> dict:
+        w = {"what": what, "t": time.monotonic(), "pos": self._console_size(), "done": threading.Event(),
+             "watching": False, "outcome": ""}
+        w["thread"] = threading.Thread(target=self._watch, args=(w,), name="slow-watch", daemon=True)
+        w["thread"].start()
+        return w
+
+    def _console_lines(self, w: dict) -> None:
+        try:
+            with open(self.console, "rb") as f:
+                f.seek(w["pos"])
+                data = f.read()
+        except OSError:
+            return
+        if b"\n" not in data:
+            return
+        data = data[:data.rindex(b"\n") + 1]
+        w["pos"] += len(data)
+        for line in data.decode("utf-8", "replace").splitlines():
+            self._write(f"{w['what']}: console: {line}")
+
+    def _watch(self, w: dict) -> None:
+        if w["done"].wait(SLOW_S):
+            return
+        w["watching"] = True
+        with self.lock:
+            self.count += 1
+        what = w["what"]
+        self._write(f"{what}: no answer after {SLOW_S:.0f} s, watching")
+        pid = qemu_pid_from(self.run_log)
+        while True:
+            self._console_lines(w)
+            if w["done"].is_set():
+                break
+            self._write(f"{what}: {self._probe()}")
+            self._write(f"{what}: QEMU threads (pid {pid}): {qemu_threads(pid) if pid else 'pid unknown'}")
+            w["done"].wait(1.0)
+        self._write(f"{what}: {w['outcome']} after {time.monotonic() - w['t']:.2f} s")
+
+    def end(self, w: dict, outcome: str) -> None:
+        w["outcome"] = outcome
+        w["done"].set()
+        if w["watching"]:
+            w["thread"].join(timeout=10)
+
+
+_slow_watch: SlowWatch | None = None
+
+
+def watch_requests(out: Path, console: Path, run_log: Path, port: int, t0: float) -> None:
+    """Watch every request() from now on (slow-requests.log in `out`)."""
+    global _slow_watch
+    _slow_watch = SlowWatch(out, console, run_log, port, t0)
+
+
+def slow_requests() -> int:
+    """Requests that took SLOW_S or longer so far (each one in slow-requests.log)."""
+    return _slow_watch.count if _slow_watch is not None else 0
+
+
 def request(port: int, method: str, path: str, body: dict | None = None, cookie: str | None = None,
-         timeout: float = 10.0, host: str | None = None) -> tuple[int, dict, bytes]:
+            timeout: float = 10.0, host: str | None = None, watch: bool = True) -> tuple[int, dict, bytes]:
+    """One HTTP request (a new connection), its answer read whole. `watch`: False for the polls that wait for
+    the station to come up (QEMU's network holds a connection until the guest listens: slow by design)."""
+    w = _slow_watch.begin(f"{method} {path}") if _slow_watch is not None and watch else None
+    outcome = "failed"
+    try:
+        r = _request(port, method, path, body, cookie, timeout, host)
+        outcome = f"HTTP {r[0]}"
+        return r
+    except Exception as e:
+        outcome = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        if w is not None:
+            _slow_watch.end(w, outcome)
+
+
+def _request(port: int, method: str, path: str, body: dict | None, cookie: str | None, timeout: float,
+             host: str | None) -> tuple[int, dict, bytes]:
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     headers = {"Accept-Encoding": "gzip"}
     if host:
@@ -435,12 +719,16 @@ class Smoke:
         listener.listen(1)
         uart1_port = listener.getsockname()[1]
         self.http_port = self.args.http_port or free_port()
-        backstop = max(self.args.observe, self.args.timeout) + BACKSTOP_MARGIN_S
+        backstop = max(self.args.observe, self.args.timeout) + HALFCLOSE_BUDGET_S + BACKSTOP_MARGIN_S
+        pcap = self.out / "qemu-net.pcap"
         cmd = [str(RUN_SH), "--no-build", "--headless", str(self.console), "--uart1", f"connect:{uart1_port}",
-               "--http-port", str(self.http_port), "--seconds", str(backstop)]
+               "--http-port", str(self.http_port), "--seconds", str(backstop), "--pcap", str(pcap)]
         print("starting: " + " ".join(cmd), flush=True)
         self.console.unlink(missing_ok=True)
+        pcap.unlink(missing_ok=True)
+        (self.out / "slow-requests.log").unlink(missing_ok=True)
         self.t0 = time.monotonic()
+        watch_requests(self.out, self.console, self.out / "run.log", self.http_port, self.t0)
         self.proc = subprocess.Popen(cmd, stdout=open(self.out / "run.log", "w"), stderr=subprocess.STDOUT,
                                      stdin=subprocess.DEVNULL, start_new_session=True)
         listener.settimeout(1)
@@ -479,7 +767,7 @@ class Smoke:
                 last = f"QEMU exited ({self.proc.returncode})"
                 break
             try:
-                status, hdrs, body = request(self.http_port, "GET", "/")
+                status, hdrs, body = request(self.http_port, "GET", "/", watch=False)
                 last = f"HTTP {status}"
                 if status == 200:
                     (self.out / "index.html").write_bytes(body)
@@ -519,6 +807,7 @@ class Smoke:
                    f"station online over the emulated Ethernet (ip {net.get('ip')}, \"{net.get('ssid')}\")")
         self.name_checks()
         self.connection_checks()
+        self.drain_check()
         self.http10_stream_checks()
         self.client_log_checks()
         self.log_level_checks()
@@ -712,6 +1001,121 @@ class Smoke:
                    + ("streamed: no Content-Length" if streamed else "buffered: its Content-Length")
                    + f" ({'as expected' if length_ok else 'NOT as expected'}), closed {secs(eof)} after the answer")
 
+    def halfclose_checks(self, n: int = HALFCLOSE_REQUESTS) -> None:
+        """Refused requests whose client ends its sending side right after the body (its FIN queued before the
+        answer): the server answers, ends its side and drains what the client still sends (web_linger_close).
+        Every one must be answered, with no crash and no restart. A drain that took that FIN shut lwIP's receive
+        side while our FIN was out, and lwIP then freed the connection on the client's ACK without telling the
+        socket: the close() after it worked on freed memory (a double free, or a newer connection torn down
+        with its request unanswered). One bad request in a few hundred, so a few hundred are sent."""
+        port = self.http_port
+        req = (f"POST /api/nope HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
+               f"Content-Length: 2\r\n\r\n{{}}").encode()
+        start = len(self.log_text())
+        answered = 0
+        first_bad = ""
+        t0 = time.monotonic()
+        for i in range(n):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=10) as c:
+                    c.sendall(req)
+                    c.shutdown(socket.SHUT_WR)
+                    a = AnswerReader(c).read()
+                ok = a.status == 404 and a.complete and a.headers.get("connection") == "close"
+                what = f"{a.status or 'no answer'}{'' if a.complete else ' (incomplete)'} after {a.seconds:.1f} s"
+            except OSError as e:
+                ok = False
+                what = f"{type(e).__name__}: {e}"
+            text = self.log_text()[start:]
+            fatal = next((line.strip()[:160] for line in text.splitlines() if any(m in line for m in FATAL)), "")
+            if ok and not fatal and BOOT_MARK not in text:
+                answered += 1
+                continue
+            first_bad = f"request {i + 1}: {what}" + (f"; console: {fatal}" if fatal else "") + (
+                "; the station restarted" if BOOT_MARK in text else "")
+            break
+        self.check(answered == n,
+                   f"{n} refused requests whose client half-closed after its body: {answered} answered 404 "
+                   f"with Connection: close, no crash ({time.monotonic() - t0:.0f} s"
+                   + (f"; {first_bad}" if first_bad else "") + ")")
+
+    def drain_check(self) -> None:
+        """A refused body several TCP windows long, sent whole before the client reads: the server answers, ends
+        its side and reads what the client still sends (web_linger_close), so the client's upload completes and
+        the client reads the answer. Seen in the station's own packets (run.sh --pcap): it acknowledges every
+        byte of the request and the client's FIN. A server that read nothing after its answer would leave its
+        receive window shut (lwIP opens it only as the socket is read): the client's upload stalls with the
+        answer behind it, and the acknowledgements stop a window or so into the body."""
+        port = self.http_port
+        body = b"x" * (16 * 1024)
+        head = (f"POST /api/nope HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
+                f"Content-Length: {len(body)}\r\n\r\n").encode()
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=10) as c:
+                local = c.getsockname()[1]
+                c.sendall(head + body)
+                rd = AnswerReader(c)
+                a = rd.read()
+                closed = rd.wait_close(5.0)
+        except OSError as e:
+            self.check(False, f"POST /api/nope with a {len(body)}-byte body: {type(e).__name__}: {e}")
+            return
+        time.sleep(2.0)   # the station's last segments of it come after the client's close
+        segs = tcp_from_guest(self.out / "qemu-net.pcap", local)
+        acked = acked_by_guest(segs)
+        want = len(head) + len(body) + 1
+        rst = any(x.flags & TCP_RST for x in segs)
+        self.check(a.status == 404 and a.complete and closed is not None and acked == want and not rst,
+                   f"POST /api/nope with a {len(body)}-byte body sent whole: HTTP {a.status or '-'}"
+                   f"{'' if a.complete else ' (incomplete)'}, the server's FIN {secs(closed)} after the answer; "
+                   f"the station acknowledged {acked if acked is not None else 'nothing (no SYN-ACK in the pcap)'} "
+                   f"of {want} (the request and the client's FIN){', and reset the connection' if rst else ''}")
+
+    def port_reuse_check(self) -> None:
+        """A client that comes back from the same local port after the station ended its connection first.
+        The station holds such a connection in TIME_WAIT for 2 x MSL, and lwIP answers a SYN on it with a
+        bare ACK or a reset, never a SYN-ACK (tcp_in.c, tcp_timewait_input): with lwIP's 120 s, a client
+        whose system hands out the same port again (Linux does, within seconds to a minute) could not
+        connect for up to two minutes. The firmware sets MSL to 5 s (sdkconfig.defaults), so the port
+        must work again REUSE_AFTER_S later: the station's packets (pcap) show a SYN-ACK for each of the
+        two connections, never a bare ACK to the second SYN."""
+        port = self.http_port
+        req = f"GET /api/session HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n".encode()
+
+        def exchange(local: int, timeout: float) -> tuple[int, Answer, float | None]:
+            with socket.socket() as c:
+                c.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                c.bind(("127.0.0.1", local))
+                c.settimeout(10)
+                c.connect(("127.0.0.1", port))
+                bound = c.getsockname()[1]
+                c.sendall(req)
+                rd = AnswerReader(c)
+                a = rd.read(timeout)
+                return bound, a, rd.wait_close(5.0) if a.complete else None
+        try:
+            local, first, closed = exchange(0, ANSWER_TIMEOUT_S)
+            time.sleep(1.0)   # the station's last segments of it
+            segs = tcp_from_guest(self.out / "qemu-net.pcap", local)
+            first_close = guest_closed_first(segs, len(req))
+            time.sleep(max(0.0, REUSE_AFTER_S - 1.0))
+            _, again, _ = exchange(local, ANSWER_TIMEOUT_S)
+            time.sleep(1.0)
+        except OSError as e:
+            self.check(False, f"a client back on its port after the station closed first: {type(e).__name__}: {e}")
+            return
+        segs = tcp_from_guest(self.out / "qemu-net.pcap", local)
+        synacks = sum(1 for x in segs if x.flags & TCP_SYN)
+        self.check(first.status == 200 and closed is not None and first_close is True and again.status == 200
+                   and again.complete and synacks == 2,
+                   f"a client back on its local port {REUSE_AFTER_S:.0f} s after the station ended its connection "
+                   f"first (HTTP {first.status or '-'}, the station's FIN "
+                   f"{'first' if first_close else 'NOT first' if first_close is False else 'not in the pcap'}): "
+                   f"HTTP {again.status or 'no answer'}{'' if again.complete else ' (incomplete)'} after "
+                   f"{again.seconds:.2f} s; {synacks} SYN-ACK(s) from the station for the two connections"
+                   + (" (no SYN-ACK for the second: the station still held the first in TIME_WAIT)"
+                      if synacks == 1 else ""))
+
     def signal_test_checks(self) -> None:
         """No receiver attached: a signal-group comparison is refused with no_receiver, and none runs."""
         if not self.cookie:
@@ -874,8 +1278,13 @@ class Smoke:
         """The console writer task runs, and no console line was lost."""
         status, _, body = request(self.http_port, "GET", "/api/diag/tasks", cookie=self.cookie, timeout=30)
         (self.out / "api-tasks.json").write_bytes(body)
-        names = [t.get("name") for t in json.loads(body).get("tasks", [])] if status == 200 else []
+        tasks = json.loads(body).get("tasks", []) if status == 200 else []
+        names = [t.get("name") for t in tasks]
         self.check("console" in names, f"the console writer task runs (HTTP {status}, {len(names)} tasks)")
+        # Every planned restart runs on the PRO CPU (see boot_report: on the APP CPU this QEMU restarts the
+        # PRO CPU twice); the lifecycle task runs the queued ones.
+        core = next((t.get("core", "absent") for t in tasks if t.get("name") == "lifecycle"), "no task")
+        self.check(core == 0, f"the lifecycle task (planned restarts) is pinned to core 0 (core {core})")
         status, _, body = request(self.http_port, "GET", "/api/health", cookie=self.cookie, timeout=30)
         (self.out / "api-health-end.json").write_bytes(body)
         log = (json.loads(body).get("log") or {}) if status == 200 else {}
@@ -905,7 +1314,7 @@ class Smoke:
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline and self.proc.poll() is None:
             try:
-                if request(self.http_port, "GET", "/", timeout=5)[0] == 200:
+                if request(self.http_port, "GET", "/", timeout=5, watch=False)[0] == 200:
                     break
             except (OSError, http.client.HTTPException):
                 pass
@@ -925,11 +1334,10 @@ class Smoke:
                 if marker in line:
                     self.check(False, f"console: {line.strip()[:160]}")
                     break
-        boots = text.split(BOOT_MARK)
-        n = len(boots) - 1
-        crashes = sum(1 for before in boots[1:-1] if not OWN_REBOOT.search(before))
+        r = boot_report(text)
+        n = r.boots
         self.check(n >= 1, f"{n} boot(s) in {self.args.observe} s")
-        self.check(crashes == 0, f"{crashes} restart(s) without the firmware's own reboot line")
+        self.check(not r.unplanned, boot_text(r))
         self.check(n <= self.args.max_boots, f"at most {self.args.max_boots} boots (no reboot loop)")
         self.check(LADDER_REBOOT not in text, "no GNSS ladder restart (\"rebooting (reason 6)\") during the run")
         notes = [line.strip()[:160] for line in text.splitlines() if CONSOLE_NOTE in line]
@@ -977,9 +1385,14 @@ class Smoke:
                 self.uart1_checks()
                 self.hold_checks()
                 self.signal_test_checks()
+                self.halfclose_checks()
+                self.port_reuse_check()
             self.observe()
         finally:
             self.stop()
+        if slow_requests():
+            print(f"     {slow_requests()} request(s) took {SLOW_S:.0f} s or more: watched in "
+                  f"{self.out / 'slow-requests.log'} (packets in qemu-net.pcap)", flush=True)
         failed = [t for ok, t in self.results if not ok]
         summary = "\n".join(("PASS " if ok else "FAIL ") + t for ok, t in self.results)
         (self.out / "summary.txt").write_text(summary + "\n", encoding="utf-8")

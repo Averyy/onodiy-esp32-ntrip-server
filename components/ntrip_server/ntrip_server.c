@@ -1762,18 +1762,26 @@ static void stream_step(slot_t *s, uint32_t now)
     if (!poll_incoming(s, now)) {
         return;
     }
-    if (s_paused) {
-        /* stay connected and idle; the core closes the session at the stall limit */
-        s->paused_seen = true;
-        wait_kick(s, TICK_MS);
-        return;
-    }
     if (s->consumer == NULL) {
         wait_kick(s, TICK_MS);
         return;
     }
+    /*
+     * A pause for receiver work holds the hub at an epoch boundary
+     * (rtcm_hub_hold, before the pause flag is set): this slot sends what is
+     * left before the hold point at its own pace, then stays connected and
+     * idle (the core closes the session at the stall limit). The release
+     * (before the flag clears) makes the hub start this consumer over at its
+     * next read: sticky copies, then the next whole epoch. A pause without a
+     * hold (none is ever set without the hub) idles at once and resyncs on
+     * the resume, as before holds existed.
+     */
+    if (s_paused && !rtcm_hub_held()) {
+        s->paused_seen = true;
+        wait_kick(s, TICK_MS);
+        return;
+    }
     if (s->paused_seen) {
-        /* the receiver was reconfigured: start again with the station metadata */
         s->paused_seen = false;
         (void)rtcm_hub_resync(s->consumer);
         ntrip_epoch_track_init(&s->epochs);   /* the hub restarts at an epoch start */
@@ -1781,11 +1789,18 @@ static void stream_step(slot_t *s, uint32_t now)
     size_t len = 0;
     esp_err_t err = rtcm_hub_read(s->consumer, s->tx + NTRIP_CHUNK_HEAD_RESERVE, NTRIP_CHUNK_MAX_PAYLOAD, &len,
                                   TICK_MS);
+    if (err == ESP_ERR_INVALID_STATE) {
+        wait_kick(s, TICK_MS);   /* held, and every frame before the hold point is out */
+        return;
+    }
     if (err != ESP_OK || len == 0) {
         if (err != ESP_ERR_TIMEOUT) {
             wait_kick(s, TICK_MS);   /* hub not ready: do not spin */
         }
         return;
+    }
+    if (rtcm_hub_restarted(s->consumer)) {
+        ntrip_epoch_track_init(&s->epochs);   /* the hub started over at an epoch start (end of a hold) */
     }
     uint32_t frames = 0;
     uint32_t epochs = 0;

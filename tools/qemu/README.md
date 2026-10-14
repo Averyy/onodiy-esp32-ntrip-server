@@ -31,7 +31,9 @@ earlier run can never write into it). Other options (`tools/qemu/run.sh
 file, for scripts), `--console connect:PORT` (with `--headless`: the
 console on a socket a script listens on, so it can type commands; the log
 file still gets everything the firmware prints), `--seconds N`,
-`--http-port N`, `--uart1 MODE`, `--no-wdt`. `--overlay FILE` adds one more sdkconfig overlay after
+`--http-port N`, `--uart1 MODE`, `--no-wdt`, `--pcap FILE` (every Ethernet
+frame between the station and QEMU's user-mode network, both ways, in pcap
+form: QEMU's `filter-dump` on the NIC's netdev). `--overlay FILE` adds one more sdkconfig overlay after
 `sdkconfig.qemu` and builds into `build-qemu-<name>/` (`--overlay
 sdkconfig.hold` builds into `build-qemu-hold/`, where the receiver's first
 configuration waits for the user).
@@ -128,6 +130,45 @@ does not appear in a QEMU run. During that no-receiver episode
 `GET /api/status` shows the reasons in `health.reboot_hold` (outside a
 ladder episode it names none).
 
+**A planned restart on the APP CPU boots twice** (QEMU only). ESP-IDF's
+restart (`esp_restart_noos`, `components/esp_system/port/soc/esp32s3/
+system_internal.c`) first resets the other CPU and asks the RTC controller
+to stall it (lines 123-124), so on a board the restarting CPU runs alone
+until it resets both. Espressif's `esp32s3` machine works out the stall
+(`hw/misc/esp32s3_rtc_cntl.c`, `esp32s3_rtc_update_cpu_stall`, lines
+148-162) but its handler does nothing (`hw/xtensa/esp32s3.c`,
+`esp32s3_cpu_stall`, lines 228-230; tag esp-develop-9.2.2-20260417). A
+restart that runs on the APP CPU therefore starts the PRO CPU on the ROM
+and the 2nd-stage bootloader at once while the APP CPU carries on, and the
+APP CPU's own reset of the PRO CPU a moment later (lines 165-167) starts it
+over: two `rst:0xc (RTC_SW_CPU_RST)` banners, the first boot stopped inside
+the bootloader. How far that first boot gets depends on QEMU's round-robin
+time slice (up to 100 ms, `TCG_KICK_PERIOD` in
+`accel/tcg/tcg-accel-ops-rr.h`): on a slow host it reached about `SPI
+Flash Size` (the CI log); on a fast one the bootloader loaded the app over
+code the APP CPU was still running (`Guru Meditation Core 1 (BREAK)` in
+`esp_restart_noos` right after the PRO CPU's reset, then QEMU hung for
+good). Nothing else resets the CPU in the bootloader here: this machine has
+no RTC watchdog, and the timer-group watchdog's reset output is not
+connected. Measured with QEMU's `-d cpu_reset` and the lifecycle task
+pinned to core 1: 4 of 4 reboots booted twice in the CI image (amd64, 2
+CPUs), 2 of 2 hung on macOS; pinned to core 0, 8 of 8 booted once. The
+unpinned task took the PRO CPU in 16 of 16 idle reboots: the APP CPU path
+needs load, as during the e2e comparison. On the test board a software
+restart prints one banner, and its power-on log shows the bootloader
+reaching its RTC watchdog setup about 80 ms after the reset, well inside
+the 1 s that `esp_restart_noos` arms that watchdog for.
+
+The firmware runs every planned restart on the PRO CPU: the lifecycle
+service task (which runs the queued ones) is pinned to core 0, and the
+other paths run there anyway (`app_main`, the boot-time trial check, the
+hook-overrun timer in the `esp_timer` task). A board restarts the same from
+either core. `smoke.py` checks the pin (`GET /api/diag/tasks`: `lifecycle`
+on core 0), and the boot checks of `smoke.py` and `e2e.py` stay strict: a
+boot that ends in a second `rst:0xc` banner inside the bootloader right
+after a planned restart still fails, named as "the restart ran on the APP
+CPU, and QEMU has no CPU stall".
+
 ## UART1 (the receiver link)
 
 In Espressif's `esp32s3` machine the second `-serial` is UART1:
@@ -205,7 +246,11 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    and one with `Host: evil.local` does not;
    HTTP connection handling: `POST /api/status` with `{}` gets `405` and
    `POST /api/nope` with a body `404`, both with `Connection: close` (not
-   `413`); `GET /nope` with a body gets the setup AP's captive redirect
+   `413`); a refused 16 KB body sent whole before the client reads is
+   drained after the answer: the station's packets (`qemu-net.pcap`)
+   acknowledge every byte of the request and the client's FIN (a server
+   that stopped reading would leave its receive window shut, the upload
+   stalled in front of the answer); `GET /nope` with a body gets the setup AP's captive redirect
    (this build counts as the AP) with `Connection: close`; `GET
    /api/session` with a body gets `400 bad_request`; a request with
    `Connection: close`, a `GET / HTTP/1.0` and an HTTP/1.0 request with
@@ -244,6 +289,31 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    station then without a receiver (`GET /api/gnss` state `no_receiver`),
    `POST /api/gnss/signal-test` is refused with `409 no_receiver` ("No
    receiver is connected") and `GET /api/gnss/signal-test` stays `idle`;
+   then 400 refused requests (`POST /api/nope` with a 2-byte body) whose
+   client ends its sending side right after the body: each one answered
+   `404` with `Connection: close`, no crash and no restart. The client's
+   FIN is then queued before the answer goes out, and a lingering close
+   that let `recv()` take it after our own FIN shut lwIP's receive side in
+   `LAST_ACK`, which lwIP counts as a half-close; the client's ACK of our
+   FIN then freed the connection without telling the socket, and the
+   `close()` that followed worked on freed memory (a double free in the
+   heap, or a newer connection that reused the block closed right after
+   its SYN-ACK, its request unanswered). On the image before the fix this
+   check lost its 22nd request that way (the pcap shows the station's FIN
+   right after the SYN-ACK, before the request), and the same image
+   crashed after 72 and after 165 such requests in two earlier runs; the
+   drain now reads only the bytes `FIONREAD` counts
+   (`components/web/web.c`, `web_linger_close`); last, a client back on
+   its local port 15 s after the station ended its connection first
+   (`Connection: close`) gets a SYN-ACK at once (the station's packets in
+   the pcap show one per connection). lwIP never takes a new SYN on a
+   connection it holds in TIME_WAIT (`tcp_timewait_input`: a reset, or a
+   bare ACK the client answers with a reset), and with lwIP's default MSL
+   that lasts 120 s; Linux hands the same port out again well within that
+   (in a CI-parity run on arm64 the 47th half-closing request reused the
+   port of a connection the station had closed 21 s before, and every SYN
+   for 40 s got a bare ACK). `sdkconfig.defaults` sets MSL to 5 s
+   (TIME_WAIT 10 s); with lwIP's 60 s this check fails (one SYN-ACK);
 4. over 75 s (`--observe`, at least 45): no `Guru Meditation`, `abort()`,
    stack overflow, failed assert, backtrace or task watchdog report on the
    console, and no reboot loop (a restart without the firmware's own
@@ -255,7 +325,9 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    station's IPv6 link-local line in the boot log, with no `is not
    link-local` warning in the 30 s after it; at the end of the window `GET /`
    and `GET /api/status` still answer, the console writer task runs (`GET
-   /api/diag/tasks`) and `GET /api/health` counts no console drop; then
+   /api/diag/tasks`), the `lifecycle` task is pinned to core 0 (see "A
+   planned restart on the APP CPU" above) and `GET /api/health` counts no
+   console drop; then
    `POST /api/system/reboot`: `network: mDNS: goodbye sent` is on the
    console before the next boot, with no shutdown-budget warning, and the
    station answers again. QEMU's UART sends every byte at once, so a log
@@ -273,10 +345,25 @@ chunked framing. `sdkconfig.qemu` gives the MAC 16 receive buffers instead
 of IDF's 4, so a burst of frames waits for the receive task instead of
 being dropped.
 
+Every request is watched rather than retried or given a longer timeout
+(all but the polls that wait for the station to come up: QEMU's network
+holds those connections until the guest listens): one still unanswered
+after 5 s gets a line every second in
+`slow-requests.log` with a probe on another connection (does the server
+answer meanwhile?), each QEMU thread's CPU time (is the emulator running?)
+and every console line printed since the request began, all on the host's
+clock; `run.sh --pcap` puts every frame of the run in `qemu-net.pcap`, so
+the request's own packets show whether it reached the station and what
+came back. A request lost without a firmware log line was seen once in CI;
+two causes were found and fixed since (the drain above, and a client port
+reused while the station held it in TIME_WAIT, which the pcap of a parity
+run showed), and the next one, if any, leaves this evidence. The summary
+names the requests that were watched.
+
 QEMU always stops with it: on a normal end, Ctrl-C, SIGTERM or SIGHUP the
 script stops QEMU on the way out, and `run.sh` gets `--seconds` (observe or
-timeout, whichever is longer, plus 60 s) as a backstop should the script be
-killed outright.
+timeout, whichever is longer, plus 180 s for the half-close, drain and port
+reuse checks and 60 s) as a backstop should the script be killed outright.
 
 The `qemu-smoke` CI job runs the same in the pinned ESP-IDF image (which
 ships qemu-xtensa) with `--out qemu-smoke` and uploads that directory and
@@ -442,7 +529,7 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
   Wi-Fi restart or a reboot cannot fix a caster's reply); pointed at a
   closed port (the connect refused) it has. It runs before `stream`; a wait
   that a receiver lease interrupted is noted and not judged;
-- scenario `signal-test` (runs last, under 10 minutes): the replay gets a
+- scenario `signal-test` (runs last, under 15 minutes on this computer): the replay gets a
   scripted UM982 behind it (`tools/bench/benchlib/um982_sim.py`, see
   `tools/bench/README.md`, `--respond`): it answers the identity query, the
   configuration dump and base mode, takes the configuration and switches
@@ -459,13 +546,38 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
   guard's reboot) and resumes with its measured time kept, then runs
   through settling, measuring, switching, settling, measuring and deciding
   in that order within their time bounds, shows both results, and keep 1
-  leaves the profile on 7 0; the configured receiver sends the station
-  messages the profile asks for (its own 1005, 1033 and 1230 open every
-  epoch, so the station judges the profile applied) and every caster
-  record of the scenario (the slot is paused for each switch) passes the
-  strict epoch check above, against the fixture as that receiver sends it.
-  The replay cannot change bands, so this checks the flow, its timing,
-  the refusal, the restart and the records, not which group is better;
+  leaves the profile on 7 0; then 12 applies of the stored profile
+  (`POST /api/gnss/apply`), each after the slot streamed two more epochs
+  and a random wait of up to 1 s, so the station decides to pause at any
+  moment of the receiver's second (after an epoch, between its station
+  messages and its first MSM, inside its MSMs), and 12 more with each
+  epoch's last MSM sent 0.7 s after the rest of it
+  (`ReplayServer.set_last_frame_delay`; the rest takes about 0.3 s to
+  reach the station, so the last MSM comes about 0.4 s after the one
+  before it): longer than the hub's 250 ms gap rule, so a pause decided in
+  that time must wait for the last MSM rather than take the quiet line for
+  the epoch's end (as a stalled line or reader makes it look: under load
+  in CI's container an epoch's last MSM reached the station that late, and
+  the caster record lost it; the station logs a hold that waited 300 ms or
+  more, and warns when it had to hold without a boundary, which the
+  scenario prints); the configured receiver sends the station messages
+  the profile asks for (its own 1005, 1033 and 1230 open every epoch, so
+  the station judges the profile applied) and
+  every caster record of the scenario (the slot is paused for each switch
+  and each apply) passes the strict epoch check above, against the fixture
+  as that receiver sends it; a record that ended (the station closed the
+  session during a pause, or the restart did) and the part of the first
+  session before the configuration's pause also end on a whole epoch: their
+  last frame that is no station message is its epoch's last, with nothing
+  cut after it (the next epoch's station messages may follow: a caster can
+  send them before the pause, and they never belong to an MSM run). Before
+  the hub's hold point (`rtcm_hub_hold`, see `components/rtcm_hub`) a
+  record could end `1005, 1033, 1230, 1077` with the rest of that epoch
+  never sent: the station paused by a timer while RTCM kept arriving until
+  the receiver session took the line, and a caster waiting for data sent
+  what came. The replay cannot change bands, so this checks the flow, its
+  timing, the refusal, the restart and the records, not which group is
+  better;
 - throughout: `smoke.py`'s console checks (no panic, abort, stack overflow,
   failed assert, backtrace or task watchdog report, no reboot loop, no GNSS
   ladder restart; the reboot the scenario asks for is allowed).
@@ -474,5 +586,6 @@ Everything lands in `--out`: `console.log`, `e2e.log` (the run's events),
 `replay/` (what the firmware sent on UART1 and, in `replay.log`, the
 responder's replies), `caster/` and `guard/` (each caster's
 `connections.jsonl` and records), the HTTP answers (`sgt-*.json` for the
-comparison) and `summary.txt`. The `qemu-smoke` CI job runs it after the smoke test with
+comparison), `qemu-net.pcap` and `slow-requests.log` (as `smoke.py` writes
+them) and `summary.txt`. The `qemu-smoke` CI job runs it after the smoke test with
 `--out qemu-e2e --scenario all` and uploads that directory too.

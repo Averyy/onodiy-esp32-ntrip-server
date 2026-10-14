@@ -56,8 +56,17 @@ What it does:
      phase_s 60 and a restart in the middle of measuring (the replay paused
      across the reboot) resumes with its measured time, runs through the
      states in order within their time bounds, shows both results and keep 1
-     leaves the profile on 7 0; every caster record of the scenario passes
-     the strict epoch check above;
+     leaves the profile on 7 0; 12 applies of the stored profile in a row,
+     each after the slot streamed two more epochs and a random wait of up
+     to 1 s (each a pause for receiver work, so the station decides to
+     pause at any moment of the second), then 12 more with each epoch's
+     last MSM sent 0.7 s after the rest of it (about 0.4 s after the MSM
+     before it reaches the station: longer than the hub's 250 ms gap rule,
+     so a pause decided in that time must still wait for it);
+     every caster record of the scenario passes the strict epoch check
+     above, and a session that ended (closed during a pause, or by the
+     restart) ends on a whole epoch, as does the part of the first session
+     before the configuration's pause;
   scenario "onocoy-guard" (firmware with test-Onocoy slots; SKIP otherwise;
   with --scenario all it runs before "stream"):
   5. slot 0 as a test-Onocoy slot (test_onocoy) against a second fake caster
@@ -84,7 +93,8 @@ What it does:
 
 Everything lands in --out: the console log, replay/ (what the firmware sent
 on UART1), caster/ and guard/ (connections.jsonl, the records), the HTTP
-answers and summary.txt. Exit status 0 when every check passed (a SKIP
+answers, qemu-net.pcap and slow-requests.log (as smoke.py writes them) and
+summary.txt. Exit status 0 when every check passed (a SKIP
 passes), 1 otherwise.
 """
 
@@ -94,6 +104,7 @@ import argparse
 import http.client
 import json
 import os
+import random
 import secrets
 import signal
 import socket
@@ -133,6 +144,12 @@ MIN_RECORD_S = 60.0
 QEMU_TOLERANCE_S = 2.0
 IDENTIFY_LEASE_LINE = "COMMAND lease taken by identify"
 SGT_PHASE_S = 60
+SGT_PAUSES = 12              # applies in a row for the pause check, twice (signal-test scenario, step 5)
+# The second time each epoch's last MSM is sent this long after the rest of it. The rest takes about 0.3 s to
+# reach the station (the emulated UART paces it), so the last MSM comes about 0.4 s after the one before it:
+# longer than the hub's 250 ms gap rule, well within the station's 1 s wait for an epoch in flight.
+LATE_LAST_S = 0.7
+RESUMED_LINE = "ntrip: resumed"
 STOP_REASONS = ["none", "rejected", "login_blocked", "in_use", "kicked", "duplicate", "banned"]
 
 
@@ -204,7 +221,8 @@ def split_at_station(data: bytes, station: list[bytes]) -> tuple[bytes, bytes]:
     return data, b""
 
 
-def check_record(data: bytes, schedule: Schedule, leading_junk_ok: bool = False) -> tuple[bool, str, float]:
+def check_record(data: bytes, schedule: Schedule, leading_junk_ok: bool = False,
+                 whole_tail: bool = False) -> tuple[bool, str, float]:
     """The record against the fixture, strictly. Returns (ok, detail, seconds
     of the fixture's time the record covers).
 
@@ -223,7 +241,15 @@ def check_record(data: bytes, schedule: Schedule, leading_junk_ok: bool = False)
     whole, from its first frame: frames carry their arrival time from the
     UART interrupt, so a reader stalled by flash writes no longer makes the
     hub's gap rule start an epoch late. A station message missing anywhere
-    else is a lost frame."""
+    else is a lost frame.
+
+    whole_tail: the record ended before the data did (a session the station
+    closed while the casters were paused, or the part of a session before a
+    pause): its last frame that is no sticky type must be an epoch's last,
+    with no partial frame after it. Station messages after it are allowed
+    (the next epoch's, sent before the pause: they are never part of an MSM
+    run). Without it the record's last epoch may be cut, as a record still
+    growing when it is read is."""
     split = StreamSplitter()
     items = split.feed(data) + split.flush()
     fx: list[bytes] = []
@@ -243,6 +269,9 @@ def check_record(data: bytes, schedule: Schedule, leading_junk_ok: bool = False)
     # Bytes outside frames: none, except a partial frame at the very end (and,
     # for a relay that starts a client inside older data, bytes before the first frame).
     tail_start = frames[-1].offset + len(frames[-1].data)
+    if whole_tail and tail_start < len(data):
+        return False, (f"{len(data) - tail_start} bytes after the last whole frame of a record that ended at a pause "
+                       f"(a frame cut at the end)"), 0.0
     for it in items:
         if it.kind == "rtcm":
             continue
@@ -361,6 +390,13 @@ def check_record(data: bytes, schedule: Schedule, leading_junk_ok: bool = False)
         anchor_k, anchor_p = nxt[0], nxt[1]
         gaps += 1
         epochs += 1
+    if whole_tail and not last_of_burst(anchor_p):
+        q = (anchor_p + 1) % len(fx)
+        while skippable(q) and q != anchor_p:
+            q = (q + 1) % len(fx)
+        return False, (f"the record ends inside an epoch: record frame #{anchor_k} (type "
+                       f"{frame_type(frames[anchor_k].data)}, fixture frame {anchor_p}) is not its epoch's last; "
+                       f"fixture frame {q} (type {frame_type(fx[q])}) never came"), 0.0
     unit = "epochs" if schedule.kind == "rtcm" else "recorded reads"
     detail = (f"{len(frames)} frames, {len(frames) - k0} from the first epoch's first frame over {epochs} {unit}, "
               f"{gaps} gap{'' if gaps == 1 else 's'} on epoch boundaries; skipped fixture types never forwarded: "
@@ -513,7 +549,7 @@ class E2E:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and self.proc.poll() is None:
             try:
-                status, _h, _b = smoke.request(self.http_port, "GET", "/", timeout=10)
+                status, _h, _b = smoke.request(self.http_port, "GET", "/", timeout=10, watch=False)
                 if status == 200:
                     return True
             except Exception:  # noqa: BLE001 - not up yet (refused, reset, timed out, half an answer)
@@ -563,10 +599,15 @@ class E2E:
     def start(self) -> None:
         self.replay = ReplayServer(self.schedule, loop=True, run_dir=self.out / "replay", say=self.say).start()
         backstop = self.budget_s() + smoke.BACKSTOP_MARGIN_S
+        pcap = self.out / "qemu-net.pcap"
         cmd = [str(smoke.RUN_SH), "--no-build", "--headless", str(self.console), "--uart1",
-               f"connect:{self.replay.port}", "--http-port", str(self.http_port), "--seconds", str(int(backstop))]
+               f"connect:{self.replay.port}", "--http-port", str(self.http_port), "--seconds", str(int(backstop)),
+               "--pcap", str(pcap)]
         print("starting: " + " ".join(cmd), flush=True)
         self.console.unlink(missing_ok=True)
+        pcap.unlink(missing_ok=True)
+        (self.out / "slow-requests.log").unlink(missing_ok=True)
+        smoke.watch_requests(self.out, self.console, self.out / "run.log", self.http_port, self.t0)
         self.proc = subprocess.Popen(cmd, stdout=open(self.out / "run.log", "w"), stderr=subprocess.STDOUT,
                                      stdin=subprocess.DEVNULL, start_new_session=True)
 
@@ -576,7 +617,7 @@ class E2E:
         if self.args.scenario in ("onocoy-guard", "all"):
             s += 900 + (900 if self.args.long else 0)
         if self.args.scenario in ("signal-test", "all"):
-            s += 720
+            s += 720 + 2 * SGT_PAUSES * 30
         return s
 
     def stop(self) -> None:
@@ -1126,6 +1167,43 @@ class E2E:
         body = {"groups": [{"master": m, "slave": s} for m, s in groups], "phase_s": phase_s}
         return self.api("POST", "/api/gnss/signal-test", body)
 
+    def pause_storm(self, n: int, late_last_s: float = 0.0) -> None:
+        """`n` applies of the stored profile, each a pause for receiver work (the casters paused, the receiver
+        configured, the casters resumed). Before each one the slot has streamed two more epochs (so the pause
+        meets a live stream and the session is not idle), then a random wait of up to 1 s: the moment the
+        station decides to pause lands anywhere in the receiver's second, at the end of an epoch, between an
+        epoch's station messages and its first MSM, inside its MSMs. With `late_last_s` each epoch's last MSM
+        comes that long after the rest (the replay holds it back), longer than the hub's 250 ms gap rule: a
+        pause decided in that time must wait for it, not take the quiet line for the epoch's end. The records
+        are judged afterwards."""
+        if not self.check(self.receiver_ready((7, 0), 120) is not None, "streaming on 7 0 before the pauses"):
+            return
+        seed = secrets.randbits(32)
+        rng = random.Random(seed)
+        done = 0
+        t0 = time.monotonic()
+        self.replay.set_last_frame_delay(late_last_s)
+        for i in range(n):
+            e0 = self.slot(1)["status"].get("epochs_sent", 0)
+            if self.poll(lambda: self.slot(1)["status"].get("epochs_sent", 0) >= e0 + 2, 60, every=0.5) is None:
+                self.note(f"pause {i + 1}: slot 1 sent no two epochs within 60 s")
+                break
+            time.sleep(rng.uniform(0.0, 1.0))
+            before = self.console_text().count(RESUMED_LINE)
+            status, data = self.api("POST", "/api/gnss/apply", {})
+            if status != 202:
+                self.note(f"pause {i + 1}: POST /api/gnss/apply: HTTP {status} {data}")
+                break
+            # One pause per apply: "paused for receiver work" ... "resumed".
+            if self.poll(lambda: self.console_text().count(RESUMED_LINE) > before, 90, every=0.5) is None:
+                self.note(f"pause {i + 1}: the casters did not resume within 90 s")
+                break
+            done += 1
+        self.replay.set_last_frame_delay(0)
+        late = f", each epoch's last MSM {late_last_s:.1f} s late" if late_last_s > 0 else ""
+        self.check(done == n, f"{done} of {n} applies paused and resumed the casters, each after two epochs "
+                              f"streamed{late} ({time.monotonic() - t0:.0f} s, waits seeded {seed})")
+
     def signal_test(self) -> None:
         t_scn = time.monotonic()
         if self.args.caster == "docker":
@@ -1271,8 +1349,16 @@ class E2E:
                    f"keep 1: outcome {(t or {}).get('outcome')}, profile {pr.get('signal_group_master')} "
                    f"{pr.get('signal_group_slave')}, receiver on {resp.signal_group()}")
 
-        # 5. Every caster record of the scenario: whole epochs across every switch and the restart, against
-        #    the fixture as the configured receiver sends it (its own 1005/1033/1230 open every epoch).
+        # 5. Pauses at any moment of the second: the same profile applied again and again (each apply is a
+        #    pause for receiver work), a random wait between them. Whenever the station decides to pause, the
+        #    records below must show that pause between two epochs.
+        self.pause_storm(SGT_PAUSES)
+        self.pause_storm(SGT_PAUSES, LATE_LAST_S)
+
+        # 6. Every caster record of the scenario: whole epochs across every switch, pause and the restart, against
+        #    the fixture as the configured receiver sends it (its own 1005/1033/1230 open every epoch). A session
+        #    that has ended (the station closed it during a pause, or the restart did) ends on a whole epoch, and
+        #    so does the part of the first session before the configuration's pause.
         time.sleep(3)
         station = resp.station_messages()
         configured = with_station(self.schedule, station, resp.station_types())
@@ -1284,16 +1370,22 @@ class E2E:
         conns = [c for c in self.caster.all_connections() if c["n"] >= max(first_conn, 1) and c["role"] == "source"]
         checked = 0
         for c in conns:
+            ended = c.get("end_mono") is not None   # read before the record: an ended record is complete
             path = self.out / "caster" / f"record-{c['n']:03d}.rtcm3"
             data = path.read_bytes() if path.exists() else b""
             before, after = split_at_station(data, station)
-            for part, sched, what in ((before, self.schedule, "as recorded"), (after, configured, "configured")):
+            for part, sched, what, whole in ((before, self.schedule, "as recorded", ended or bool(after)),
+                                             (after, configured, "configured", ended)):
                 if len(part) < 2000:
                     continue   # a session (or the part of one) that carried no epoch
-                ok, detail, _sec = check_record(part, sched)
+                ok, detail, _sec = check_record(part, sched, whole_tail=whole)
                 self.check(ok, f"signal-test caster record {c['n']} ({what}): {detail}")
                 checked += 1
         self.check(checked >= 1, f"{checked} caster record(s) of the signal-test scenario checked")
+        # Holds the station had to force (no epoch boundary within its 1 s wait) and the long ones it noted.
+        for line in self.console_text().splitlines():
+            if "station: casters held" in line:
+                self.note(f"console: {line.strip()[:160]}")
         self.note(f"signal-test scenario took {time.monotonic() - t_scn:.0f} s")
 
     # -- console ----------------------------------------------------------------
@@ -1305,12 +1397,11 @@ class E2E:
                 if marker in line:
                     self.check(False, f"console: {line.strip()[:160]}")
                     break
-        boots = text.split(smoke.BOOT_MARK)
-        n = len(boots) - 1
-        crashes = sum(1 for before in boots[1:-1] if not smoke.OWN_REBOOT.search(before))
+        r = smoke.boot_report(text)
+        n = r.boots
         allowed = 2 + self.planned_reboots
         self.check(n >= 1, f"{n} boot(s), {self.planned_reboots} of them asked for")
-        self.check(crashes == 0, f"{crashes} restart(s) without the firmware's own reboot line")
+        self.check(not r.unplanned, smoke.boot_text(r))
         self.check(n <= allowed, f"at most {allowed} boots (no reboot loop)")
         self.check(smoke.LADDER_REBOOT not in text, "no GNSS ladder restart during the run")
 
@@ -1340,6 +1431,9 @@ class E2E:
         finally:
             self.stop()
             self.console_checks()
+        if smoke.slow_requests():
+            self.note(f"{smoke.slow_requests()} request(s) took {smoke.SLOW_S:.0f} s or more: watched in "
+                      f"{self.out / 'slow-requests.log'} (packets in qemu-net.pcap)")
         failed = [t for s, t in self.results if s == "FAIL"]
         summary = "\n".join(f"{s} {t}" for s, t in self.results)
         (self.out / "summary.txt").write_text(summary + "\n", encoding="utf-8")

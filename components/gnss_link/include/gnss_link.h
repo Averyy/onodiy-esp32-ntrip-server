@@ -402,6 +402,15 @@ esp_err_t gnss_link_raw_flush(gnss_link_lease_t lease);
 /** Snapshot of the counters. Works before gnss_link_init() (mode OFF, counters zero). */
 esp_err_t gnss_link_get_stats(gnss_link_stats_t *out);
 
+/**
+ * Bytes that arrived on the receiver link and wait in the UART driver for
+ * the reader (0 while the driver is closed or before init). Any task. The
+ * station counts them as an epoch still in flight before it holds the
+ * casters (rtcm_hub_hold): a reader kept off the CPU leaves the newest
+ * published epoch looking finished while the rest of it is still here.
+ */
+size_t gnss_link_rx_unread(void);
+
 /** The arrival-time counters (see "Arrival times"). Works before gnss_link_init() (all zero). */
 esp_err_t gnss_link_get_arrival_stats(gnss_link_arrival_stats_t *out);
 

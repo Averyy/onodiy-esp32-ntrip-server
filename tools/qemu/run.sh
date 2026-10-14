@@ -40,6 +40,9 @@ password, default settings).
   --seconds N         stop QEMU after N seconds (with --headless)
   --http-port N       host port forwarded to the web server's port 80
                       (default 8080; the UI is at http://localhost:N/)
+  --pcap FILE         write every Ethernet frame between the emulated station
+                      and QEMU's user-mode network to FILE (pcap, both
+                      directions; QEMU's filter-dump on the NIC's netdev)
   --no-wdt            turn off the emulated timer-group watchdogs (the task
                       and interrupt watchdogs never fire then): only for a
                       debugger session that stops the CPUs; never for checks
@@ -74,6 +77,7 @@ uart1="listen:5556"
 console="file"
 wdt=1
 overlay=""
+pcap=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-build) build=0 ;;
@@ -83,6 +87,7 @@ while [ $# -gt 0 ]; do
         --headless) [ $# -ge 2 ] || die "--headless needs a log file"; headless="$2"; shift ;;
         --seconds) [ $# -ge 2 ] || die "--seconds needs a number"; seconds="$2"; shift ;;
         --http-port) [ $# -ge 2 ] || die "--http-port needs a port"; http_port="$2"; shift ;;
+        --pcap) [ $# -ge 2 ] || die "--pcap needs a file"; pcap="$2"; shift ;;
         --uart1) [ $# -ge 2 ] || die "--uart1 needs a mode"; uart1="$2"; shift ;;
         --console) [ $# -ge 2 ] || die "--console needs a mode"; console="$2"; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -201,8 +206,13 @@ args=(
     -drive "file=$bdir/qemu_flash.bin,if=mtd,format=raw"
     -drive "file=$bdir/qemu_efuse.bin,if=none,format=raw,id=efuse"
     -global driver=nvram.esp32s3.efuse,property=drive,value=efuse
-    -nic "user,model=open_eth,hostfwd=tcp:127.0.0.1:$http_port-:80"
+    -nic "user,id=net0,model=open_eth,hostfwd=tcp:127.0.0.1:$http_port-:80"
 )
+if [ -n "$pcap" ]; then
+    # Commas doubled: QEMU's option syntax.
+    args+=(-object "filter-dump,id=netdump,netdev=net0,file=${pcap//,/,,}")
+    echo "Network: every frame written to $pcap"
+fi
 if [ "$wdt" = 0 ]; then
     args+=(-global driver=timer.esp32s3.timg,property=wdt_disable,value=true)
     echo "Watchdogs: OFF (--no-wdt): a starved task or a stuck interrupt goes unnoticed"

@@ -120,8 +120,8 @@ describe`) and, by default, the 2 CPUs of GitHub's runner for a private reposito
 (`--cpus`), since the QEMU checks depend on timing. What a job uploads lands in
 `build-ci/<job>/`, with `steps.log` holding every step's output. CI's runners are
 amd64 (the default `--platform`); on Apple silicon Docker emulates them, and a run
-of both jobs took 36 minutes there (`--platform linux/arm64` is native and
-faster, but not what CI runs).
+of both jobs took 39 minutes there, 21 natively (`--platform linux/arm64` is
+native and faster, but not what CI runs).
 
 Notes:
 
@@ -166,7 +166,12 @@ status API and UART1 in both directions; CI runs it as well. The QEMU build uses
 the overlay `sdkconfig.qemu` and is never a station image: configure refuses it for a
 release version and the release job refuses to publish it. What differs from a station,
 and why UART1 drops bytes while nothing is connected, is in
-[`tools/qemu/README.md`](tools/qemu/README.md).
+[`tools/qemu/README.md`](tools/qemu/README.md), with each place where this QEMU
+behaves unlike the chip and the measurements behind it (a restart run on the APP CPU
+boots twice there, because the emulated chip never stalls a CPU, so the firmware runs
+every planned restart on the PRO CPU). The checks never retry a request or wait longer
+for one: a slow request is watched (`slow-requests.log`) and every Ethernet frame of a
+run is kept (`qemu-net.pcap`), so a failure carries its own evidence.
 
 ## Releases and updates
 

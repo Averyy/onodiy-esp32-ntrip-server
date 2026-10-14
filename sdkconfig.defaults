@@ -117,6 +117,20 @@ CONFIG_ESP_WIFI_NVS_ENABLED=n
 # index 1, so networks that block outside NTP still get the time.
 CONFIG_LWIP_DHCP_GET_NTP_SRV=y
 CONFIG_LWIP_SNTP_MAX_SERVERS=2
+# FIONREAD on sockets (lwIP answers it only with this): the web server's
+# lingering close reads exactly the bytes a refused client still has queued
+# and never the client's FIN behind them (components/web/web.c,
+# web_linger_close). The receive limit itself stays lwIP's default (none).
+CONFIG_LWIP_SO_RCVBUF=y
+# TIME_WAIT (and the longest LAST_ACK) is 2 x MSL: 10 s instead of lwIP's
+# 120 s. lwIP never takes a new SYN on a connection it holds in TIME_WAIT
+# (tcp_in.c tcp_timewait_input: a reset or a bare ACK), so a client that
+# reuses its port after the station closed first (Connection: close,
+# HTTP/1.0, refusals) cannot connect until TIME_WAIT ends; Linux clients
+# reuse ports that soon (seen in QEMU: SYN, bare ACK, reset, every retry for
+# 40 s). On a LAN a segment never lives seconds, and outgoing connections
+# take a new local port each time.
+CONFIG_LWIP_TCP_MSL=5000
 
 # ---- mDNS (espressif/mdns, network component): <hostname>.local -----------
 # One service (the web page, _http._tcp) plus a spare. The responder only

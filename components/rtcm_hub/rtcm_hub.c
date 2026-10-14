@@ -200,6 +200,9 @@ esp_err_t rtcm_hub_read(rtcm_hub_consumer_t consumer, uint8_t *buf, size_t max_l
             *out_len = n;
             return ESP_OK;
         }
+        if (rtcm_core_at_hold(c, k)) {
+            return ESP_ERR_INVALID_STATE;   /* nothing more until the release */
+        }
         uint64_t elapsed_ms = (uint64_t)(esp_timer_get_time() - start_us) / 1000u;
         if (elapsed_ms >= timeout_ms) {
             return ESP_ERR_TIMEOUT;
@@ -267,6 +270,39 @@ void rtcm_hub_get_stats(rtcm_hub_stats_t *out)
     out->consumers = st.consumers;
     out->capacity = st.capacity;
     out->last_frame_age_ms = st.last_frame_age_ms;
+}
+
+rtcm_hub_hold_t rtcm_hub_hold(uint32_t quiet_ms, bool force)
+{
+    _Static_assert((int)RTCM_HUB_HOLD_NONE == (int)RTCM_CORE_HOLD_NONE &&
+                       (int)RTCM_HUB_HOLD_BOUNDARY == (int)RTCM_CORE_HOLD_BOUNDARY &&
+                       (int)RTCM_HUB_HOLD_CUT == (int)RTCM_CORE_HOLD_CUT,
+                   "hold kinds mirror the core's");
+    rtcm_core_t *c = s_core;
+    if (c == NULL) {
+        return RTCM_HUB_HOLD_BOUNDARY;   /* no ring, no consumer: nothing to hold back */
+    }
+    return (rtcm_hub_hold_t)rtcm_core_hold(c, now_ms(), quiet_ms, force);
+}
+
+void rtcm_hub_release(void)
+{
+    rtcm_core_t *c = s_core;
+    if (c != NULL) {
+        rtcm_core_release(c);
+    }
+}
+
+bool rtcm_hub_held(void)
+{
+    rtcm_core_t *c = s_core;
+    return c != NULL && rtcm_core_held(c);
+}
+
+bool rtcm_hub_restarted(rtcm_hub_consumer_t consumer)
+{
+    rtcm_core_consumer_t *k = lookup(consumer);
+    return k != NULL && rtcm_core_take_restart(k);
 }
 
 bool rtcm_hub_epoch_in_flight(uint32_t quiet_ms, uint32_t *age_ms)

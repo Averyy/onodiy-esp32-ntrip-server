@@ -35,6 +35,10 @@
  *    rtcm_core_wake_done(); detach reports whether a pass that may still hold
  *    the waiter is running, so the caller can wait for it to end before the
  *    waiting task may go away.
+ *  - the hold (rtcm_core_hold): an offset in the ring, chosen under the lock
+ *    together with the epoch state and reserve_off, that no consumer reads
+ *    past until rtcm_core_release(). The release bumps a generation; a
+ *    consumer whose position predates it starts over at its next read.
  *
  * Each consumer is driven by one task (read, resync, prepare/cancel wait,
  * set_max_lag); stats and detach may be called from any task.
@@ -145,8 +149,17 @@ typedef struct {
     uint32_t drop_epoch;
     bool drop_run;                /**< in a lag-limit event (no frame delivered since it began) */
     uint8_t sticky_next;          /**< next sticky slot to replay (RTCM_CORE_STICKY_SLOTS = done) */
+    uint32_t release_gen;         /**< the hub's release_gen when this position was taken */
+    bool restarted;               /**< the last read started over after a release (rtcm_core_take_restart) */
     rtcm_core_counters_t cnt;
 } rtcm_core_consumer_t;
+
+/** Where rtcm_core_hold() put the hold. */
+typedef enum {
+    RTCM_CORE_HOLD_NONE = 0,  /**< not placed: an epoch is in flight (try again, or force) */
+    RTCM_CORE_HOLD_BOUNDARY,  /**< between two epochs */
+    RTCM_CORE_HOLD_CUT,       /**< forced while an epoch was in flight: at that epoch's start */
+} rtcm_core_hold_t;
 
 /** Latest copy of one station message type, double-buffered. */
 typedef struct {
@@ -176,6 +189,11 @@ typedef struct {
     uint32_t committed_epoch;     /**< epoch of the newest committed record */
     bool have_epoch;
     rtcm_epoch_t ep;              /**< changed under the lock (publish, clear_sticky) */
+    uint64_t epoch_start_off;     /**< under the lock: offset of the newest epoch's first record (or its wrap marker) */
+    bool held;                    /**< under the lock: a hold is set (rtcm_core_hold) */
+    uint64_t hold_off;            /**< ... no consumer reads a record at or after this offset */
+    rtcm_core_hold_t hold_kind;
+    uint32_t release_gen;         /**< under the lock: holds released so far */
     rtcm_core_sticky_t sticky[RTCM_CORE_STICKY_SLOTS];
     bool waking;                  /**< a wake pass is running */
     uint32_t wake_gen;            /**< completed wake passes */
@@ -251,6 +269,8 @@ bool rtcm_core_set_max_lag(rtcm_core_t *c, rtcm_core_consumer_t *k, uint32_t ms)
 /**
  * Register `waiter` to be handed back by the next publish (owner task, after
  * a read that returned 0). @return false if data arrived meanwhile: read again.
+ * At a hold point (or with only sticky copies pending while held) there is
+ * nothing to read: the waiter is registered.
  */
 bool rtcm_core_prepare_wait(rtcm_core_t *c, rtcm_core_consumer_t *k, void *waiter);
 
@@ -267,6 +287,53 @@ void rtcm_core_get_stats(rtcm_core_t *c, uint64_t now_ms, rtcm_core_stats_t *out
  * @param age_ms optional: the newest frame's age, UINT32_MAX before the first.
  */
 bool rtcm_core_epoch_in_flight(rtcm_core_t *c, uint64_t now_ms, uint32_t quiet_ms, uint32_t *age_ms);
+
+/**
+ * Hold the stream at an epoch boundary (any task): no consumer gets a record
+ * at or after the hold point (nor a sticky replay) until rtcm_core_release().
+ * The point is chosen under the lock with the epoch state, so a frame being
+ * stored at that moment is on the right side of it:
+ *  - nothing stored yet, the newest epoch ended by its last MSM, or the next
+ *    frame starts an epoch anyway (rtcm_core_clear_sticky): the write head,
+ *    including a record still being copied;
+ *  - the newest epoch holds no MSM yet (its leading station messages): that
+ *    epoch's first record. A consumer that already sent some of them stops
+ *    where it is: they are station messages, never part of an MSM run;
+ *  - the newest epoch holds an MSM that announced more: it is in flight,
+ *    however quiet the line is (the rest may come late: a slow reader, a
+ *    stalled line), so RTCM_CORE_HOLD_NONE and no hold. With `force` (the
+ *    caller waited long enough): its newest frame `quiet_ms` or more old
+ *    means its last MSM never came (or the receiver never clears the bit),
+ *    so the write head (RTCM_CORE_HOLD_BOUNDARY); else that epoch's first
+ *    record (RTCM_CORE_HOLD_CUT), so no consumer starts it and one already
+ *    inside it is cut there.
+ * A hold already set is kept (its kind is returned).
+ */
+rtcm_core_hold_t rtcm_core_hold(rtcm_core_t *c, uint64_t now_ms, uint32_t quiet_ms, bool force);
+
+/**
+ * End the hold (any task; nothing if none is set). Every consumer starts over
+ * as on rtcm_core_resync() at its next read (what was published from the
+ * hold point on belongs to the pause): sticky copies, then the next sure
+ * epoch. The frames it skips count as idle skips.
+ */
+void rtcm_core_release(rtcm_core_t *c);
+
+/** A hold is set (any task). */
+bool rtcm_core_held(rtcm_core_t *c);
+
+/**
+ * True when a hold is set and this consumer has passed every record before
+ * the hold point (owner task): it gets nothing more until the release.
+ */
+bool rtcm_core_at_hold(rtcm_core_t *c, rtcm_core_consumer_t *k);
+
+/**
+ * True once after a read that started this consumer over because a hold was
+ * released since its position was taken (owner task): the frames from that
+ * read on begin with sticky copies and a whole epoch.
+ */
+bool rtcm_core_take_restart(rtcm_core_consumer_t *k);
 
 /** Counters of one consumer (any task). */
 void rtcm_core_get_consumer_stats(rtcm_core_t *c, rtcm_core_consumer_t *k, uint64_t now_ms,
