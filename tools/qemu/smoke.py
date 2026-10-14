@@ -73,7 +73,8 @@ What it does:
      client ends its sending side right after the body: every one answered
      404 with "Connection: close", no crash, no restart (the drain must leave
      the client's FIN unread: the one before the fix took it, which let lwIP
-     free the connection behind the socket); and a
+     free the connection behind the socket), and 100 more refused by a route
+     itself (GET /api/session with a 1 KB body: 400 bad_request); and a
      client back on its local port 15 s after the station ended the
      connection first (the station's TIME_WAIT is 10 s) is answered at once;
   4. keeps watching until --observe seconds after the start (at least 45),
@@ -168,8 +169,13 @@ LINK_TEST = b"qemu uart1 link test\r\n"
 APP_START = "cpu_start: "                 # the app's startup: a boot that got past the 2nd-stage bootloader
 BOOTLOADER = "2nd stage bootloader"
 SW_CPU_RESET = "rst:0xc (RTC_SW_CPU_RST)"
-# Refused requests whose client ends its sending side right after its body (half-close checks).
+# Refused requests whose client ends its sending side right after its body (half-close checks): on the
+# catch-all, and on a route that refuses the body itself.
 HALFCLOSE_REQUESTS = 400
+HALFCLOSE_ROUTE_REQUESTS = 100
+# The route's refused body: more than esp_http_server reads along with the head (128-byte blocks,
+# PARSER_BLOCK_SIZE), so most of it is still on the socket for the drain.
+HALFCLOSE_ROUTE_BODY = 1024
 HALFCLOSE_BUDGET_S = 180   # what they, the drain check and the port reuse check may add (run.sh's backstop)
 # A client reuses its local port this long after the station ended the connection first: the station keeps
 # it in TIME_WAIT for 2 x CONFIG_LWIP_TCP_MSL (sdkconfig.defaults: 10 s) and refuses the port until then.
@@ -1034,7 +1040,7 @@ class Smoke:
                    + ("streamed: no Content-Length" if streamed else "buffered: its Content-Length")
                    + f" ({'as expected' if length_ok else 'NOT as expected'}), closed {secs(eof)} after the answer")
 
-    def halfclose_checks(self, n: int = HALFCLOSE_REQUESTS) -> None:
+    def halfclose_checks(self) -> None:
         """Refused requests whose client ends its sending side right after the body (its FIN queued before the
         answer): the server answers, ends its side and drains what the client still sends (web_linger_close).
         Every one must be answered, with no crash and no restart. The drain reads only what FIONREAD counts and
@@ -1044,10 +1050,25 @@ class Smoke:
         memory. Reading the FIN was our defect; test/host/main/test_web_conn.c holds the drain to never reading
         it. Here that image lost one request in a few hundred or crashed, so a few hundred are sent. That rate is
         QEMU's (on a test board it answered thousands without a fault): a guard for the path, not a measure of
-        how often a station would fail."""
+        how often a station would fail.
+
+        Both kinds of refusal: the catch-all's (POST /api/nope, 404) and a route's own (GET /api/session with a
+        body, 400: api_handle). Each must end its request with ESP_FAIL after the drain, so that the server
+        deletes the session without reading; ended with ESP_OK, the server would read away the rest of the
+        announced body, find the drained socket empty and take the FIN (web_internal.h, web_linger_close). The
+        route's body is larger than what the server reads along with the head, so the drain has bytes to take
+        there too. Like the rest of this check, a guard for the path: the race a FIN read opens is rare, so a
+        run that passes does not prove the FIN was left unread (the host tests do that for the drain)."""
+        self.halfclose_run("POST", "/api/nope", b"{}", 404, "not_found", HALFCLOSE_REQUESTS)
+        self.halfclose_run("GET", "/api/session", b"x" * HALFCLOSE_ROUTE_BODY, 400, "bad_request",
+                           HALFCLOSE_ROUTE_REQUESTS)
+
+    def halfclose_run(self, method: str, path: str, body: bytes, want: int, code: str, n: int) -> None:
+        """`n` requests with `body`, each client half-closing after it: every one answered `want` (error `code`)
+        with Connection: close, and no crash or restart on the console meanwhile."""
         port = self.http_port
-        req = (f"POST /api/nope HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
-               f"Content-Length: 2\r\n\r\n{{}}").encode()
+        req = (f"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
+               f"Content-Length: {len(body)}\r\n\r\n").encode() + body
         start = len(self.log_text())
         answered = 0
         first_bad = ""
@@ -1058,8 +1079,10 @@ class Smoke:
                     c.sendall(req)
                     c.shutdown(socket.SHUT_WR)
                     a = AnswerReader(c).read()
-                ok = a.status == 404 and a.complete and a.headers.get("connection") == "close"
-                what = f"{a.status or 'no answer'}{'' if a.complete else ' (incomplete)'} after {a.seconds:.1f} s"
+                ok = (a.status == want and a.complete and a.headers.get("connection") == "close"
+                      and error_code(a.body)[0] == code)
+                what = (f"{a.status or 'no answer'} {error_code(a.body)[0]}{'' if a.complete else ' (incomplete)'}"
+                        f" after {a.seconds:.1f} s")
             except OSError as e:
                 ok = False
                 what = f"{type(e).__name__}: {e}"
@@ -1072,9 +1095,9 @@ class Smoke:
                 "; the station restarted" if BOOT_MARK in text else "")
             break
         self.check(answered == n,
-                   f"{n} refused requests whose client half-closed after its body: {answered} answered 404 "
-                   f"with Connection: close, no crash ({time.monotonic() - t0:.0f} s"
-                   + (f"; {first_bad}" if first_bad else "") + ")")
+                   f"{n} refused requests ({method} {path} with a {len(body)}-byte body) whose client half-closed "
+                   f"after it: {answered} answered {want} {code} with Connection: close, no crash "
+                   f"({time.monotonic() - t0:.0f} s" + (f"; {first_bad}" if first_bad else "") + ")")
 
     def drain_check(self) -> None:
         """A refused body several TCP windows long, sent whole before the client reads: the server answers, ends

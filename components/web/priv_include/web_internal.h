@@ -150,7 +150,18 @@ esp_err_t web_refuse_and_close_retry(httpd_req_t *req, web_err_t err, uint32_t r
  * After an answer that closes the connection (Connection: close): end our
  * side (shutdown SHUT_WR) and read and drop what the client still sends,
  * at most 64 KB or 2 s, so it reads the answer instead of a reset; never
- * the client's FIN (web_conn_drain): the session's close() is a full close.
+ * the client's FIN (web_conn_drain).
+ *
+ * Nothing may read the socket after it: the caller ends the request with
+ * ESP_FAIL, and the server then deletes the session without reading
+ * (httpd_sess_process stops before httpd_req_delete) and its close() is a
+ * full close; on the worker, the caller shuts both sides (web_conn_shut)
+ * before it hands the request back. A caller that returned ESP_OK instead
+ * would have the server read away what is left of the announced body
+ * (httpd_req_delete). The drain took those bytes off the socket itself, so
+ * that read would find the client's FIN and take it, the very read the
+ * drain avoids: with our FIN out, it lets lwIP free the connection behind
+ * the socket (web.c, web_linger_close).
  */
 void web_linger_close(httpd_req_t *req);
 /** 500 internal with the esp_err_t name as message. */

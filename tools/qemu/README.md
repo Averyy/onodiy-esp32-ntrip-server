@@ -304,7 +304,11 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    receiver is connected") and `GET /api/gnss/signal-test` stays `idle`;
    then 400 refused requests (`POST /api/nope` with a 2-byte body) whose
    client ends its sending side right after the body: each one answered
-   `404` with `Connection: close`, no crash and no restart. The client's
+   `404` with `Connection: close`, no crash and no restart, and 100 more
+   that a route refuses itself (`GET /api/session` with a 1 KB body:
+   `400 bad_request`; a refusal must end its request with `ESP_FAIL`, or
+   the server would read away the rest of the body and take the client's
+   FIN after the drain, see `web_internal.h`). The client's
    FIN is then queued before the answer goes out, and the lingering close
    reads only the bytes `FIONREAD` counts, never that FIN
    (`components/web/web.c`, `web_linger_close`). The drain before the fix
@@ -322,8 +326,10 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    on a test board (ESP32-S3 on Wi-Fi) the old drain answered 4400 such
    requests, one at a time and six at once, without a fault; built with
    `CONFIG_HEAP_POISONING_COMPREHENSIVE` it aborted three times in 4000
-   (freed memory written, found at the next connection's `tcp_alloc`),
-   and the fixed drain in that build answered all 4000; last, a client back on
+   (freed memory written, found when the block was next allocated), and
+   the fixed drain in that build answered all 4000; the current code with
+   only the drain put back as it was aborted six times in 8000, and the
+   same build with the drain as it is answered all 8000; last, a client back on
    its local port 15 s after the station ended its connection first
    (`Connection: close`) gets a SYN-ACK at once (the station's packets in
    the pcap show one per connection, told apart by their initial sequence

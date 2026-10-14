@@ -831,7 +831,7 @@ void web_linger_close(httpd_req_t *req)
      * (tcp_in.c, tcp_input_delayed_close skips it once the receive side is
      * shut; lwIP bug #62141, open upstream), and the close() that followed
      * worked on freed memory (on a test board with heap poisoning: an abort
-     * at the next connection's tcp_alloc). Leaving the FIN unread keeps that
+     * when the block was next allocated). Leaving the FIN unread keeps that
      * sequence from starting: readable with nothing queued is the FIN (or an
      * error), and the session's close() then does a full close.
      */
