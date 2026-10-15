@@ -43,8 +43,14 @@ TEST_CASE("reply: public acknowledgement samples classify with echo and response
     TEST_ASSERT_EQUAL(UM98X_LINE_ACK, l.kind);
     TEST_ASSERT_FALSE(l.ok);
     TEST_ASSERT_TRUE(um98x_echo_matches(l.echo, l.echo_len, "RTCM1230 10"));
+    TEST_ASSERT_EQUAL_STRING_LEN("PARSING FAILED NO MATCHING FUNC  RTCM1230", l.text, l.text_len);
+    TEST_ASSERT_EQUAL_size_t(strlen("PARSING FAILED NO MATCHING FUNC  RTCM1230"), l.text_len);
+
+    /* The older spelling is a refusal just the same: the text is never matched. */
+    classify(TV_NACK_FAILD, &l);
+    TEST_ASSERT_EQUAL(UM98X_LINE_ACK, l.kind);
+    TEST_ASSERT_FALSE(l.ok);
     TEST_ASSERT_EQUAL_STRING_LEN("PARSING FAILD NO MATCHING FUNC  RTCM1230", l.text, l.text_len);
-    TEST_ASSERT_EQUAL_size_t(strlen("PARSING FAILD NO MATCHING FUNC  RTCM1230"), l.text_len);
 
     classify(TV_CONFIG_SG, &l);
     TEST_ASSERT_EQUAL(UM98X_LINE_CONFIG, l.kind);
@@ -383,4 +389,57 @@ TEST_CASE("reply: commands are normalised and checked before sending", "[um98x_r
     TEST_ASSERT_FALSE(um98x_cmd_normalise(longcmd, out, sizeof(out)));
     longcmd[UM98X_CMD_MAX - 1] = '\0';
     TEST_ASSERT_TRUE(um98x_cmd_normalise(longcmd, out, sizeof(out)));
+}
+
+TEST_CASE("reply: build 25164's refusals, the restarting answer and the signal-group logs", "[um98x_reply]")
+{
+    um98x_line_t l;
+    classify(TV_NACK_FOOBAR, &l);
+    TEST_ASSERT_EQUAL(UM98X_LINE_ACK, l.kind);
+    TEST_ASSERT_FALSE(l.ok);
+    TEST_ASSERT_TRUE(um98x_echo_matches(l.echo, l.echo_len, "FOOBAR"));
+    TEST_ASSERT_EQUAL_STRING_LEN("PARSING FAILED NO MATCHING FUNC  FOOBAR", l.text, l.text_len);
+
+    /* A refused signal group: a trailing comma, no echo of the group in the text. */
+    classify(TV_NACK_SG, &l);
+    TEST_ASSERT_EQUAL(UM98X_LINE_ACK, l.kind);
+    TEST_ASSERT_FALSE(l.ok);
+    TEST_ASSERT_TRUE(um98x_echo_matches(l.echo, l.echo_len, "CONFIG SIGNALGROUP 1"));
+    TEST_ASSERT_EQUAL_STRING_LEN(TV_SG_REFUSAL, l.text, l.text_len);
+
+    /* The restarting answer: no lead character, the XOR of the text before '*'. */
+    classify(TV_NOTICE, &l);
+    TEST_ASSERT_EQUAL(UM98X_LINE_RESETTING, l.kind);
+    TEST_ASSERT_EQUAL_STRING_LEN("The Board is resetting,do not response any command!", l.text, l.text_len);
+    classify("The Board is resetting,do not response any command!*38", &l);
+    TEST_ASSERT_EQUAL(UM98X_LINE_BAD, l.kind);
+    classify("The Board is resetting,do not response any command!", &l);
+    TEST_ASSERT_EQUAL(UM98X_LINE_BAD, l.kind);
+    classify("The Board", &l);   /* not the whole prefix: nothing for this layer */
+    TEST_ASSERT_EQUAL(UM98X_LINE_OTHER, l.kind);
+
+    /* Signal-group logs, either checksum; the body follows the first ';'. */
+    classify(TV_GROUPS_36, &l);
+    TEST_ASSERT_EQUAL(UM98X_LINE_GROUPS, l.kind);
+    TEST_ASSERT_EQUAL_UINT8(1, l.ant);
+    TEST_ASSERT_EQUAL_STRING_LEN("3,5,GP,0x1D,GL,0x03,GA,0x0F,GB,0x2D,GQ,0x35", l.text, l.text_len);
+    classify(TV_GROUPS_70, &l);
+    TEST_ASSERT_EQUAL(UM98X_LINE_GROUPS, l.kind);
+    TEST_ASSERT_EQUAL_UINT8(1, l.ant);
+    classify(TV_GROUPS_SLAVE, &l);
+    TEST_ASSERT_EQUAL(UM98X_LINE_GROUPS, l.kind);
+    TEST_ASSERT_EQUAL_UINT8(2, l.ant);
+    char bad[sizeof(TV_GROUPS_36)];
+    memcpy(bad, TV_GROUPS_36, sizeof(bad));
+    bad[sizeof(bad) - 2] = '0';   /* checksum changed */
+    classify(bad, &l);
+    TEST_ASSERT_EQUAL(UM98X_LINE_BAD, l.kind);
+    /* No header: the body follows the log name. */
+    char nohdr[128];
+    snprintf(nohdr, sizeof(nohdr), "#ANT1GROUPA,5,5,GP,0x0D,GL,0x03,GA,0x05,GB,0x07,GQ,0x05");
+    char line[160];
+    snprintf(line, sizeof(line), "%s*%02X", nohdr, um98x_xor8(nohdr, strlen(nohdr)));
+    classify(line, &l);
+    TEST_ASSERT_EQUAL(UM98X_LINE_GROUPS, l.kind);
+    TEST_ASSERT_EQUAL_STRING_LEN("5,5,GP,0x0D,GL,0x03,GA,0x05,GB,0x07,GQ,0x05", l.text, l.text_len);
 }

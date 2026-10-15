@@ -106,6 +106,20 @@ bool obs_msm_cnr(const uint8_t *frame, size_t len, const gnss_rtcm3_msm_t *h, ob
  */
 bool obs_gsv_parse(const char *line, size_t len, obs_gsv_t *out);
 
+/** What a position sentence says about the fix. */
+typedef struct {
+    uint8_t quality;          /**< fix quality (0 = no fix) */
+    uint8_t satellites;       /**< satellites used in the position */
+} obs_gga_t;
+
+/**
+ * Parse one text line (without its terminator) as a position sentence
+ * ("$..GGA", any talker): the fix quality (field 6) and the satellites used
+ * (field 7). false (out cleared) for any other line, a malformed one or one
+ * without those two fields.
+ */
+bool obs_gga_parse(const char *line, size_t len, obs_gga_t *out);
+
 #define OBS_1033_STR_MAX 31u   /**< longest string of a 1033 (characters) */
 
 /** The strings of one 1033. */

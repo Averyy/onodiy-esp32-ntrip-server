@@ -11,6 +11,8 @@
 #define BANNER_PREFIX  "$devicename,"
 #define VERSION_PREFIX "#VERSIONA,"
 #define MODE_PREFIX    "#MODE"
+#define GROUPS1_PREFIX "#ANT1GROUPA,"
+#define GROUPS2_PREFIX "#ANT2GROUPA,"
 #define RESPONSE_SEP   ",response: "
 
 #define PLEN(s) (sizeof(s) - 1u)
@@ -209,6 +211,37 @@ static void classify_mode(const char *line, size_t len, um98x_line_t *out)
     }
 }
 
+/* The signal-group log: the body after the first ';' (the header form is
+ * not captured yet), else everything after the log name. */
+static void classify_groups(const char *line, size_t len, uint8_t ant, um98x_line_t *out)
+{
+    size_t star = hash_checked(line, len);
+    if (star == 0) {
+        out->kind = UM98X_LINE_BAD;
+        return;
+    }
+    const size_t name = PLEN(GROUPS1_PREFIX);
+    const char *semi = memchr(line + name, ';', star - name);
+    out->kind = UM98X_LINE_GROUPS;
+    out->ant = ant;
+    out->text = semi != NULL ? semi + 1 : line + name;
+    out->text_len = (size_t)(line + star - out->text);
+}
+
+/* "The Board is resetting,...*hh": the XOR of everything before '*'. */
+static void classify_resetting(const char *line, size_t len, um98x_line_t *out)
+{
+    uint32_t want;
+    if (len < 4 || line[len - 3] != '*' || !parse_hex(line + len - 2, 2, &want) ||
+        um98x_xor8(line, len - 3) != want) {
+        out->kind = UM98X_LINE_BAD;
+        return;
+    }
+    out->kind = UM98X_LINE_RESETTING;
+    out->text = line;
+    out->text_len = len - 3;
+}
+
 void um98x_line_classify(const char *line, size_t len, um98x_line_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -250,7 +283,15 @@ void um98x_line_classify(const char *line, size_t len, um98x_line_t *out)
             out->kind = gnss_versiona_parse(line, len, &out->version) ? UM98X_LINE_VERSION : UM98X_LINE_BAD;
         } else if (prefix_ci(line, len, MODE_PREFIX)) {
             classify_mode(line, len, out);
+        } else if (prefix_ci(line, len, GROUPS1_PREFIX)) {
+            classify_groups(line, len, 1, out);
+        } else if (prefix_ci(line, len, GROUPS2_PREFIX)) {
+            classify_groups(line, len, 2, out);
         }
+        return;
+    }
+    if (len >= PLEN(GNSS_NOTICE_PREFIX) && memcmp(line, GNSS_NOTICE_PREFIX, PLEN(GNSS_NOTICE_PREFIX)) == 0) {
+        classify_resetting(line, len, out);
     }
 }
 

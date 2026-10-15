@@ -778,10 +778,12 @@ esp_err_t um98x_ctl_get_stats(um98x_ctl_stats_t *out)
     um98x_chan_stats_t st = s_chan.stats;
     int64_t answer = s_chan.last_answer_ms;
     int64_t restart = s_chan.last_restart_ms;
+    bool restarting = um98x_chan_restarting(&s_chan, now);
     portEXIT_CRITICAL(&s_lock);
     if (!s_inited) {
         answer = UM98X_NONE_MS;
         restart = UM98X_NONE_MS;
+        restarting = false;
     }
     out->lines = st.lines;
     out->matched = st.matched;
@@ -789,7 +791,9 @@ esp_err_t um98x_ctl_get_stats(um98x_ctl_stats_t *out)
     out->bad = st.bad;
     out->other = st.other;
     out->banners = st.banners;
+    out->resetting = st.resetting;
     out->restarts = st.restarts;
+    out->restarting = restarting;
     out->last_answer_age_ms = age_ms(answer, now);
     out->last_restart_age_ms = age_ms(restart, now);
     return ESP_OK;

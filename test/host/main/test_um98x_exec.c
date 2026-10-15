@@ -10,12 +10,17 @@
  * set and reply formats (acknowledgement with the '$'-inclusive XOR, version
  * and base-mode logs, configuration dump, restart banner at the saved baud),
  * not captured behaviour. Its timings (30 ms replies, 3 s restarts) are made
- * up for the test.
+ * up for the test. Its refusals are worded as UM982 build 25164 words them
+ * ("PARSING FAILED GRAMMAR ERROR," for a signal group, "PARSING FAILED NO
+ * MATCHING FUNC" otherwise), it can answer commands sent while it restarts
+ * with build 25164's restarting answer (notices), and it answers the
+ * signal-group query with the bodies the bench recorded for its group.
  */
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "um98x_bands.h"
 #include "um98x_base.h"
 #include "um98x_exec.h"
 #include "um98x_profile.h"
@@ -23,6 +28,7 @@
 #include "unity.h"
 
 #define T_START   ((int64_t)UINT32_MAX + 1000)
+#define SIM_REFUSAL "PARSING FAILED NO MATCHING FUNC"
 #define MAX_EV    256
 #define MAX_RX    160
 #define LINE_MAX_ 200
@@ -82,6 +88,9 @@ typedef struct {
     int version_empty;           /* version queries answered without the log */
     int sg_line_lost;            /* after a signal-group change: this many dumps come without their SIGNALGROUP line */
     int sg_line_lost_left;
+    bool notices;                /* commands sent while it restarts get the restarting answer */
+    int groups;                  /* signal-group query: 0 the bench body for its group, 1 refused (no such
+                                    command), 2 acknowledged without a log */
 
     /* records */
     sim_rx_t rx[MAX_RX];
@@ -160,7 +169,13 @@ static void receive(sim_t *s, const char *cmd)
     r->host_baud = s->host_baud;
     r->gap = s->last_line_at == INT64_MIN ? INT64_MAX : s->now - s->last_line_at;
 
-    if (!s->present || s->now < s->busy_until) {
+    if (!s->present) {
+        return;
+    }
+    if (s->now < s->busy_until) {
+        if (s->notices && !s->in_loader && s->host_baud == s->rx_baud) {
+            emit(s, TV_NOTICE, 30);   /* no echo: it answers whatever comes while it restarts */
+        }
         return;
     }
     if (s->host_baud != (s->in_loader ? s->loader_baud : s->rx_baud)) {
@@ -189,7 +204,7 @@ static void receive(sim_t *s, const char *cmd)
     }
     if (s->reject_n > 0 && starts(up, s->reject_prefix)) {
         s->reject_n--;
-        reply(s, cmd, "PARSING FAILD NO MATCHING FUNC", 30);
+        reply(s, cmd, starts(up, "CONFIG SIGNALGROUP") ? TV_SG_REFUSAL : SIM_REFUSAL, 30);
         return;
     }
     unsigned a, b;
@@ -253,9 +268,24 @@ static void receive(sim_t *s, const char *cmd)
     } else if (strncmp(up, "MODE BASE ", 10) == 0) {
         snprintf(s->mode, sizeof(s->mode), "%s", up);
         reply(s, cmd, "OK", 30);
+    } else if (strcmp(up, "ANT1GROUPA") == 0 && s->groups != 1) {
+        reply(s, cmd, "OK", 30);
+        if (s->groups == 0) {
+            /* Main antenna input, per group, as build 25164 reported it. */
+            static const char *const k_body[8] = {
+                [3] = "3,5,GP,0x1D,GL,0x03,GA,0x0F,GB,0x2D,GQ,0x35",
+                [4] = "4,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x07,GQ,0x15",
+                [5] = "5,5,GP,0x0D,GL,0x03,GA,0x05,GB,0x07,GQ,0x05",
+                [7] = "7,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x3F,GQ,0x15",
+            };
+            char log[LINE_MAX_];
+            const char *body = s->sg_m < 8 && k_body[s->sg_m] != NULL ? k_body[s->sg_m] : "0,0";
+            snprintf(log, sizeof(log), "ANT1GROUPA,COM1,0,0.0,FINE,0,0.000,0,0,0;%s", body);
+            emit_checked(s, '#', log, 50);
+        }
     } else if (sscanf(up, "RTCM%u COM1 %u", &a, &b) == 2) {
         if (a == 1230 && !s->r1230) {
-            reply(s, cmd, "PARSING FAILD NO MATCHING FUNC  RTCM1230", 30);
+            reply(s, cmd, "PARSING FAILED NO MATCHING FUNC  RTCM1230", 30);
         } else {
             s->output = true;
             reply(s, cmd, "OK", 30);
@@ -289,7 +319,7 @@ static void receive(sim_t *s, const char *cmd)
         reply(s, cmd, "OK", 30);
         restart(s, s->restart_ms);
     } else {
-        reply(s, cmd, "PARSING FAILD NO MATCHING FUNC", 30);
+        reply(s, cmd, SIM_REFUSAL, 30);
     }
     if (starts(up, s->restart_after)) {
         s->restart_after[0] = '\0';
@@ -699,7 +729,7 @@ TEST_CASE("exec: a fatal rejection stops the session and rolls back with RESET",
     um98x_apply_result_t r;
     TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
     TEST_ASSERT_EQUAL_STRING("RTCM1077 COM1 1", r.failed_cmd);
-    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", r.reason);
+    TEST_ASSERT_EQUAL_STRING(SIM_REFUSAL, r.reason);
     TEST_ASSERT_FALSE(r.saved);
     TEST_ASSERT_TRUE(r.rolled_back);
     TEST_ASSERT_TRUE(r.rollback_answered);
@@ -945,15 +975,18 @@ TEST_CASE("exec: an unacknowledged signal group that lands at the saved baud is 
     TEST_ASSERT_EQUAL_UINT64(0, s->ch.stats.restarts);
     TEST_ASSERT_FALSE(s->ch.expect_restart);
 
-    /* A negative reply still fails the step at once. */
+    /* A negative reply still fails the step at once (and changed nothing:
+     * with the group read back to go to, no RESET). */
     s = sim_init();
     snprintf(s->reject_prefix, sizeof(s->reject_prefix), "CONFIG SIGNALGROUP");
     s->reject_n = 10;
     TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
     TEST_ASSERT_EQUAL_STRING("CONFIG SIGNALGROUP 3 6", r.failed_cmd);
-    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", r.reason);
+    TEST_ASSERT_EQUAL_STRING(TV_SG_REFUSAL, r.reason);
     TEST_ASSERT_EQUAL_INT(2, count(s, "CONFIG SIGNALGROUP"));
-    TEST_ASSERT_TRUE(r.rolled_back);
+    TEST_ASSERT_TRUE(r.signal_group_refused_plain);
+    TEST_ASSERT_FALSE(r.rolled_back);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "RESET"));
 }
 
 TEST_CASE("exec: after a rollback the receiver's baud is where it answered last", "[um98x_exec]")
@@ -1050,8 +1083,10 @@ TEST_CASE("exec: a signal group the receiver keeps refusing fails the session", 
 
 TEST_CASE("exec: a signal group the receiver refuses is reported with the group it ran before", "[um98x_exec]")
 {
-    /* An older receiver firmware refuses 7 0 outright: rejected, rolled
-     * back with RESET, and the receiver keeps its own group. */
+    /* A receiver firmware that does not offer 7 0 refuses it outright, as
+     * build 25164 refuses every pair but its four: nothing changed and no
+     * restart, so no RESET either (the caller applies 4 5 again at once,
+     * which restores the quieted output). The receiver keeps its group. */
     sim_t *s = sim_init();
     snprintf(s->reject_prefix, sizeof(s->reject_prefix), "CONFIG SIGNALGROUP 7 0");
     s->reject_n = 10;
@@ -1064,16 +1099,41 @@ TEST_CASE("exec: a signal group the receiver refuses is reported with the group 
     um98x_apply_result_t r;
     TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
     TEST_ASSERT_TRUE(r.signal_group_rejected);
+    TEST_ASSERT_TRUE(r.signal_group_refused_plain);
+    TEST_ASSERT_FALSE(r.signal_group_sent);
     TEST_ASSERT_EQUAL_STRING("CONFIG SIGNALGROUP 7 0", r.failed_cmd);
-    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", r.reason);
+    TEST_ASSERT_EQUAL_STRING(TV_SG_REFUSAL, r.reason);
     TEST_ASSERT_TRUE(r.sg_before.known);
     TEST_ASSERT_EQUAL_UINT8(4, r.sg_before.master);
     TEST_ASSERT_EQUAL_UINT8(5, r.sg_before.slave);
-    TEST_ASSERT_TRUE(r.rolled_back);
-    TEST_ASSERT_EQUAL_INT(1, count(s, "RESET"));
+    TEST_ASSERT_FALSE(r.rolled_back);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "RESET"));
     TEST_ASSERT_EQUAL_INT(0, count(s, "SAVECONFIG"));
+    TEST_ASSERT_EQUAL_UINT64(0, s->ch.stats.banners);   /* the receiver never restarted */
     TEST_ASSERT_EQUAL_UINT8(4, s->sg_m);   /* the saved group is unchanged */
     TEST_ASSERT_EQUAL_UINT8(5, s->sg_s);
+
+    /* The same refusal when the read-back named no group: nothing to go
+     * back to, so the rollback restores the outputs with RESET as for any
+     * failure; unless the caller has a group of its own to go back to. */
+    s = sim_init();
+    snprintf(s->reject_prefix, sizeof(s->reject_prefix), "CONFIG SIGNALGROUP 7 0");
+    s->reject_n = 10;
+    s->sg_line_lost_left = 1;   /* the first dump comes without its SIGNALGROUP line */
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.signal_group_refused_plain);
+    TEST_ASSERT_FALSE(r.sg_before.known);
+    TEST_ASSERT_TRUE(r.rolled_back);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "RESET"));
+    s = sim_init();
+    snprintf(s->reject_prefix, sizeof(s->reject_prefix), "CONFIG SIGNALGROUP 7 0");
+    s->reject_n = 10;
+    s->sg_line_lost_left = 1;
+    um98x_apply_opts_t o = { .sg_fallback = true };
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, &o, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.signal_group_refused_plain);
+    TEST_ASSERT_FALSE(r.rolled_back);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "RESET"));
 
     /* Acknowledged, restarted, and the read-back still shows 4 5. */
     s = sim_init();
@@ -1407,7 +1467,7 @@ TEST_CASE("exec: a rejected B1C/B2a command is recorded and the session goes on"
     TEST_ASSERT_TRUE(r.saved);
     TEST_ASSERT_TRUE(r.b1cb2a_sent);
     TEST_ASSERT_FALSE(r.b1cb2a_ok);
-    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", r.b1cb2a_reply);
+    TEST_ASSERT_EQUAL_STRING(SIM_REFUSAL, r.b1cb2a_reply);
     TEST_ASSERT_EQUAL_INT(2, count(s, "CONFIG RTCMB1CB2A ENABLE"));   /* one resend after the refusal */
     TEST_ASSERT_EQUAL_STRING("", r.failed_cmd);
     TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_OFF, r.settings.b1cb2a);   /* still off */
@@ -1527,7 +1587,7 @@ TEST_CASE("exec: the antenna descriptor is sent only when the receiver holds ano
     TEST_ASSERT_TRUE(r.saved);
     TEST_ASSERT_TRUE(r.antenna_sent);
     TEST_ASSERT_FALSE(r.antenna_ok);
-    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", r.antenna_reply);
+    TEST_ASSERT_EQUAL_STRING(SIM_REFUSAL, r.antenna_reply);
     TEST_ASSERT_EQUAL_STRING("", r.failed_cmd);
     TEST_ASSERT_FALSE(r.settings.antenna_known);
 }
@@ -1636,7 +1696,7 @@ TEST_CASE("exec: satellite-in-view output on and off, never saved", "[um98x_exec
     snprintf(s->reject_prefix, sizeof(s->reject_prefix), "GPGSV");
     s->reject_n = 10;
     TEST_ASSERT_EQUAL(UM98X_E_REJECTED, um98x_exec_sat_view(&s->ex, true, 5, why, sizeof(why)));
-    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", why);
+    TEST_ASSERT_EQUAL_STRING(SIM_REFUSAL, why);
     s = sim_init();
     s->present = false;
     int64_t t0 = s->now;
@@ -1646,4 +1706,183 @@ TEST_CASE("exec: satellite-in-view output on and off, never saved", "[um98x_exec
     TEST_ASSERT_EQUAL_INT(2, count(s, "GPGSV COM1 5"));
     TEST_ASSERT_LESS_THAN_INT64(10000, s->now - t0);
     TEST_ASSERT_EQUAL(UM98X_E_ARG, um98x_exec_sat_view(&s->ex, true, 0, why, sizeof(why)));
+}
+
+/* ---- the restarting answer and the signal-group query -------------------- */
+
+static unsigned feed_line(sim_t *s, const char *line, int64_t at)
+{
+    um98x_line_t l;
+    um98x_line_classify(line, strlen(line), &l);
+    return um98x_chan_dispatch(&s->ch, line, strlen(line), &l, at);
+}
+
+TEST_CASE("exec: the restarting answer is restart evidence once, and the receiver answers meanwhile", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    int64_t t0 = s->now;
+    unsigned ev = feed_line(s, TV_NOTICE, t0);
+    TEST_ASSERT_TRUE(ev & UM98X_CHAN_RESTART);
+    TEST_ASSERT_TRUE(ev & UM98X_CHAN_WAKE);
+    TEST_ASSERT_EQUAL_UINT64(1, s->ch.stats.restarts);
+    TEST_ASSERT_EQUAL_UINT64(1, s->ch.stats.resetting);
+    TEST_ASSERT_EQUAL_INT64(t0, s->ch.last_answer_ms);   /* it answers: not silent */
+    TEST_ASSERT_TRUE(um98x_chan_restarting(&s->ch, t0 + 1000));
+
+    /* More answers of the same restart, then its banner: still one restart,
+     * the evidence time moved to the banner, and no longer restarting. */
+    TEST_ASSERT_FALSE(feed_line(s, TV_NOTICE, t0 + 1000) & UM98X_CHAN_RESTART);
+    TEST_ASSERT_FALSE(feed_line(s, TV_NOTICE, t0 + 2000) & UM98X_CHAN_RESTART);
+    ev = feed_line(s, TV_BANNER, t0 + 8500);
+    TEST_ASSERT_FALSE(ev & UM98X_CHAN_RESTART);
+    TEST_ASSERT_TRUE(ev & UM98X_CHAN_WAKE);
+    TEST_ASSERT_EQUAL_UINT64(1, s->ch.stats.restarts);
+    TEST_ASSERT_EQUAL_UINT64(3, s->ch.stats.resetting);
+    TEST_ASSERT_EQUAL_INT64(t0 + 8500, s->ch.last_restart_ms);
+    TEST_ASSERT_FALSE(um98x_chan_restarting(&s->ch, t0 + 8600));
+
+    /* Said once and never followed by a banner: restarting for 20 s only. */
+    s = sim_init();
+    t0 = s->now;
+    (void)feed_line(s, TV_NOTICE, t0);
+    TEST_ASSERT_TRUE(um98x_chan_restarting(&s->ch, t0 + UM98X_RESTART_LOST_MS));
+    TEST_ASSERT_FALSE(um98x_chan_restarting(&s->ch, t0 + UM98X_RESTART_LOST_MS + 1));
+    /* A later restart counts again. */
+    TEST_ASSERT_TRUE(feed_line(s, TV_NOTICE, t0 + UM98X_RESTART_LOST_MS + 1) & UM98X_CHAN_RESTART);
+    TEST_ASSERT_EQUAL_UINT64(2, s->ch.stats.restarts);
+    /* A banner long after it is a restart of its own. */
+    TEST_ASSERT_TRUE(feed_line(s, TV_BANNER, t0 + 3 * UM98X_RESTART_LOST_MS) & UM98X_CHAN_RESTART);
+    TEST_ASSERT_EQUAL_UINT64(3, s->ch.stats.restarts);
+
+    /* During our own restart it is expected: no evidence. */
+    s = sim_init();
+    s->ch.expect_restart = true;
+    TEST_ASSERT_FALSE(feed_line(s, TV_NOTICE, s->now) & UM98X_CHAN_RESTART);
+    TEST_ASSERT_EQUAL_UINT64(0, s->ch.stats.restarts);
+    TEST_ASSERT_EQUAL_UINT64(1, s->ch.stats.resetting);
+    TEST_ASSERT_EQUAL_INT64(UM98X_NONE_MS, s->ch.notice_restart_ms);
+}
+
+TEST_CASE("exec: an identity query that meets a restart says not ready, and counts it", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    s->notices = true;
+    s->restart_ms = 9000;   /* as build 25164: the banner 8-9 s after the restart began */
+    restart(s, s->restart_ms);   /* the receiver restarts on its own */
+    gnss_versiona_t v;
+    bool not_ready = false;
+    TEST_ASSERT_EQUAL(UM98X_E_TIMEOUT, um98x_exec_version(&s->ex, false, 0, &v, &not_ready));
+    TEST_ASSERT_TRUE(not_ready);   /* it answered: restarting, not silent */
+    TEST_ASSERT_EQUAL_UINT64(1, s->ch.stats.restarts);
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT64(1, s->ch.stats.resetting);
+    TEST_ASSERT_TRUE(s->events & UM98X_CHAN_RESTART);
+
+    /* In restart mode the polls run on until the banner and the log. */
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_version(&s->ex, true, s->now + 20000, &v, &not_ready));
+    TEST_ASSERT_EQUAL_STRING("UM982", v.model);
+    TEST_ASSERT_EQUAL_UINT64(1, s->ch.stats.restarts);   /* the banner ends the same restart */
+    TEST_ASSERT_EQUAL_UINT64(1, s->ch.stats.banners);
+}
+
+TEST_CASE("exec: detection finds a restarting receiver by its answer", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    s->notices = true;
+    s->output = s->saved_output = false;   /* nothing to hear while listening */
+    s->restart_ms = 9000;
+    restart(s, s->restart_ms);
+    uint32_t cands[] = { 115200 };
+    um98x_detect_out_t d;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_detect(&s->ex, cands, 1, &d));
+    TEST_ASSERT_EQUAL_UINT32(115200, d.baud);
+    TEST_ASSERT_FALSE(d.by_listen);
+    TEST_ASSERT_FALSE(d.version_valid);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "VERSIONA"));
+}
+
+TEST_CASE("exec: a signal-group resend met by the restarting answer stops there and waits for the banner", "[um98x_exec]")
+{
+    /* The ack is lost in the restart; the resend 4 s later is answered with
+     * the restarting notice: the change took effect, nothing more is sent
+     * until the banner, and the restart is ours (no evidence). */
+    sim_t *s = sim_init();
+    s->notices = true;
+    s->sg_no_ack = true;
+    s->restart_ms = 9000;
+    strcpy(s->saved_mode, "MODE BASE 1234 TIME 600 0");
+    strcpy(s->mode, s->saved_mode);
+    um98x_base_profile_t p;
+    default_profile(&p);
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.signal_group_sent);
+    TEST_ASSERT_TRUE(r.saved);
+    TEST_ASSERT_EQUAL_INT(2, count(s, "CONFIG SIGNALGROUP"));
+    TEST_ASSERT_EQUAL_UINT8(3, s->sg_m);
+    TEST_ASSERT_EQUAL_UINT64(0, s->ch.stats.restarts);
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT64(1, s->ch.stats.resetting);
+    TEST_ASSERT_EQUAL_UINT64(1, s->ch.stats.banners);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "RESET"));
+    /* Nothing was sent between the notice and the banner. */
+    int sg = nth(s, "CONFIG SIGNALGROUP 3 6", 1);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sg);
+    TEST_ASSERT_EQUAL_STRING("VERSIONA", s->rx[sg + 1].cmd);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT64(s->rx[sg].at + 4000, s->rx[sg + 1].at);
+}
+
+TEST_CASE("exec: every session asks once what the group configures, after the signal-group step", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    um98x_base_profile_t p;
+    default_profile(&p);
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_EQUAL_INT(1, count(s, "ANT1GROUPA"));
+    TEST_ASSERT_GREATER_THAN_INT(nth(s, "CONFIG SIGNALGROUP 3 6", 0), nth(s, "ANT1GROUPA", 0));
+    TEST_ASSERT_LESS_THAN_INT(nth(s, "SAVECONFIG", 0), nth(s, "ANT1GROUPA", 0));
+    TEST_ASSERT_TRUE(r.bands_asked);
+    TEST_ASSERT_EQUAL_UINT8(UM98X_BANDS_OK, r.bands.state);
+    TEST_ASSERT_EQUAL_UINT8(3, r.bands.group);   /* after the change: the new group */
+    TEST_ASSERT_EQUAL_HEX32(0x0F, r.bands.mask[UM98X_BSYS_GALILEO]);
+    TEST_ASSERT_EQUAL_STRING("", r.bands_reply);
+
+    /* Nothing to change: still asked once. */
+    configured(s);
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_EQUAL_INT(2, count(s, "ANT1GROUPA"));
+    TEST_ASSERT_EQUAL_UINT8(3, r.bands.group);
+
+    /* A firmware without the query refuses it: unknown, the session goes on. */
+    s = sim_init();
+    configured(s);
+    s->groups = 1;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.saved);
+    TEST_ASSERT_EQUAL_UINT8(UM98X_BANDS_REFUSED, r.bands.state);
+    TEST_ASSERT_EQUAL_STRING(SIM_REFUSAL, r.bands_reply);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "ANT1GROUPA"));   /* a refusal is final at once */
+
+    /* Accepted, but no log this firmware reads: unread after a second, not resent. */
+    s = sim_init();
+    configured(s);
+    s->groups = 2;
+    int64_t t0 = s->now;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.saved);
+    TEST_ASSERT_EQUAL_UINT8(UM98X_BANDS_UNREAD, r.bands.state);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "ANT1GROUPA"));
+    TEST_ASSERT_LESS_THAN_INT64(10000, s->now - t0);
+
+    /* A session that fails before the query never asked it. */
+    s = sim_init();
+    snprintf(s->reject_prefix, sizeof(s->reject_prefix), "CONFIG SIGNALGROUP");
+    s->reject_n = 10;
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_FALSE(r.bands_asked);
+    TEST_ASSERT_EQUAL_UINT8(UM98X_BANDS_UNKNOWN, r.bands.state);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "ANT1GROUPA"));
 }

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "um98x_bands.h"
 #include "um98x_profile.h"
 #include "web_enums.h"
 #include "web_parse.h"
@@ -448,6 +449,7 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
         wj_str_or_null(w, "model", st->receiver.valid ? st->receiver.model : NULL);
         wj_str_or_null(w, "firmware", st->receiver.valid ? st->receiver.firmware : NULL);
         wj_bool(w, "responding", st->receiver_responding);
+        wj_bool(w, "restarting", st->receiver_restarting);
         wj_bool(w, "identity_confirmed", st->identity_confirmed);
         wj_bool(w, "profile_applied", st->profile_applied);
         wj_bool(w, "position_locked", st->position_locked);
@@ -777,6 +779,71 @@ static void rtcm1033(wj_t *w, const gnss_obs_1033_t *d)
     wj_obj_close(w);
 }
 
+/* The signal names of one constellation's mask, as an array. */
+static void signal_names(wj_t *w, const char *key, unsigned sys, uint32_t mask)
+{
+    wj_arr_open(w, key);
+    for (unsigned bit = 0; bit < 32; bit++) {
+        if ((mask & (1u << bit)) != 0) {
+            const char *name = um98x_bands_signal_name(sys, bit);
+            if (name != NULL) {
+                wj_str(w, NULL, name);
+            } else {
+                char other[16];
+                snprintf(other, sizeof(other), "bit %u", bit);
+                wj_str(w, NULL, other);
+            }
+        }
+    }
+    wj_arr_close(w);
+}
+
+/* What the running signal group configures on the main antenna input (the
+ * last apply session's signal-group query), compared with the profile's
+ * main-antenna group at that time. */
+static void rx_bands(wj_t *w, const station_status_t *st)
+{
+    const um98x_bands_t *b = &st->rx_bands;
+    bool asked = st->rx_bands_age_s != UINT32_MAX;
+    bool ok = asked && b->state == UM98X_BANDS_OK;
+    wj_obj_open(w, "rx_bands");
+    wj_str(w, "state", web_bands_state_name(asked ? b->state : (uint8_t)UM98X_BANDS_UNKNOWN));
+    wj_u32_or_null(w, "age_s", asked ? st->rx_bands_age_s : UINT32_MAX);
+    wj_unix(w, "read_unix", asked ? st->rx_bands_unix : 0);
+    if (ok) {
+        wj_uint(w, "group", b->group);
+    } else {
+        wj_null(w, "group");
+    }
+    if (asked) {
+        wj_uint(w, "profile_master", st->rx_bands_profile_master);
+    } else {
+        wj_null(w, "profile_master");
+    }
+    if (ok) {
+        wj_bool(w, "matches", st->rx_bands_match);
+    } else {
+        wj_null(w, "matches");
+    }
+    uint32_t missing[UM98X_BANDS_SYS];
+    (void)um98x_bands_match(st->rx_bands_profile_master, b, missing);
+    wj_arr_open(w, "systems");
+    for (unsigned sys = 0; ok && sys < UM98X_BANDS_SYS; sys++) {
+        if ((b->present & (1u << sys)) == 0 && missing[sys] == 0) {
+            continue;
+        }
+        wj_obj_open(w, NULL);
+        wj_str(w, "sys", um98x_bands_sys_name(sys));
+        signal_names(w, "signals", sys, b->mask[sys]);
+        wj_uint(w, "bands", um98x_bands_count(sys, b->mask[sys]));
+        signal_names(w, "missing", sys, missing[sys]);
+        wj_obj_close(w);
+    }
+    wj_arr_close(w);
+    str_arr_or_null(w, "reply", asked ? st->rx_bands_reply : "", sizeof(st->rx_bands_reply));
+    wj_obj_close(w);
+}
+
 static void maintenance(wj_t *w, const station_status_t *st)
 {
     static const uint32_t choices[] = WEB_MAINT_CHOICES_S;
@@ -801,6 +868,7 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     wj_str(w, "state", web_station_state_name(st->state));
     receiver_info(w, "receiver", &st->receiver);
     wj_bool(w, "responding", st->receiver_responding);
+    wj_bool(w, "restarting", st->receiver_restarting);
     wj_bool(w, "identity_confirmed", st->identity_confirmed);
     station_alerts(w, "alerts", st->alerts);
     wj_bool(w, "profile_applied", st->profile_applied);
@@ -842,6 +910,7 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     } else {
         wj_null(w, "rx_signal_group");
     }
+    rx_bands(w, st);
     if (st->sg_refused) {
         wj_obj_open(w, "signal_group_refused");
         wj_uint(w, "master", st->sg_refused_group.master);
@@ -1552,6 +1621,37 @@ void web_build_caster_entry(wj_t *w, size_t slot, const ntrip_caster_cfg_t *cfg,
     /* An Onocoy slot with the console's mountpoint, username and password (false for every other slot). */
     wj_bool(w, "onocoy_ready", cfg != NULL && ntrip_server_onocoy_ready(cfg));
     wj_obj_close(w);
+}
+
+static void slot_list(wj_t *w, const char *key, uint32_t mask)
+{
+    wj_arr_open(w, key);
+    for (unsigned i = 0; i < 32; i++) {
+        if ((mask & (1u << i)) != 0) {
+            wj_uint(w, NULL, i);
+        }
+    }
+    wj_arr_close(w);
+}
+
+void web_build_caster_warnings(wj_t *w, const ntrip_caster_cfg_t *cfgs, size_t n)
+{
+    wj_arr_open(w, "warnings");
+    uint32_t open = 0;
+    uint32_t onocoy = cfgs != NULL ? ntrip_server_open_caster_pair(cfgs, n, &open) : 0;
+    if (onocoy != 0) {
+        bool rtk2go = false;
+        for (size_t i = 0; i < n && i < 32; i++) {
+            rtk2go |= (open & (1u << i)) != 0 && ntrip_slot_is_rtk2go(&cfgs[i]);
+        }
+        wj_obj_open(w, NULL);
+        wj_str(w, "id", "onocoy_open_caster");
+        slot_list(w, "onocoy_slots", onocoy);
+        slot_list(w, "open_slots", open);
+        wj_bool(w, "rtk2go", rtk2go);
+        wj_obj_close(w);
+    }
+    wj_arr_close(w);
 }
 
 void web_build_onocoy_preset(wj_t *w, const ntrip_caster_cfg_t *p, uint16_t tls_port)

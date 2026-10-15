@@ -277,6 +277,45 @@ static bool hex_field(field_t f, uint8_t *v)
     return true;
 }
 
+bool obs_gga_parse(const char *line, size_t len, obs_gga_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    talker_t talker;
+    if (line == NULL || len < 7 || line[0] != '$' || memcmp(line + 3, "GGA,", 4) != 0 ||
+        !talker_of(line[1], line[2], &talker)) {
+        return false;
+    }
+    /* Fields 1-7 after the address: time, latitude, N/S, longitude, E/W,
+     * quality, satellites used. */
+    field_t f[7];
+    unsigned nf = 0;
+    size_t start = 7;
+    for (size_t i = start; nf < 7; i++) {
+        bool end = (i >= len || line[i] == '*');
+        if (end || line[i] == ',') {
+            f[nf].s = line + start;
+            f[nf].n = i - start;
+            nf++;
+            start = i + 1;
+        }
+        if (end) {
+            break;
+        }
+    }
+    if (nf < 7) {
+        return false;
+    }
+    bool p_q, p_n;
+    int32_t q, n;
+    if (!dec_field(f[5], false, &p_q, &q) || !dec_field(f[6], false, &p_n, &n) || !p_q || !p_n || !in(q, 0, 9) ||
+        !in(n, 0, 99)) {
+        return false;
+    }
+    out->quality = (uint8_t)q;
+    out->satellites = (uint8_t)n;
+    return true;
+}
+
 bool obs_gsv_parse(const char *line, size_t len, obs_gsv_t *out)
 {
     memset(out, 0, sizeof(*out));

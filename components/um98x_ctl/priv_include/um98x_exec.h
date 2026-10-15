@@ -15,13 +15,20 @@
  *
  * Restart evidence: a restart banner, unless our own restart (signal group,
  * RESET rollback) is under way or the banner ended the command that caused
- * it; or a CRC-valid version log nobody waits for when no version query was
+ * it; the receiver's restarting answer ("The Board is resetting,..."), on
+ * the same terms (it answers a command sent while the receiver restarts);
+ * or a CRC-valid version log nobody waits for when no version query was
  * written in the preceding 10 s (measured from the end of that write), so a
- * late reply to our own retried query never counts.
+ * late reply to our own retried query never counts. One restart counts
+ * once: further restarting answers within 20 s of the first, and the
+ * banner that ends that restart, are the same restart (the banner still
+ * moves the evidence time, last_restart_ms, to the banner).
  *
- * Every line of the command layer (acknowledgement, dump item, banner, log)
- * that passes its checksum counts as "the receiver answers"
- * (last_answer_ms), also while a lease is held.
+ * Every line of the command layer (acknowledgement, dump item, banner, log,
+ * the restarting answer) that passes its checksum counts as "the receiver
+ * answers" (last_answer_ms), also while a lease is held. A restarting answer
+ * also marks the receiver as restarting until its banner
+ * (last_resetting_ms; um98x_chan_restarting()).
  *
  * Detection (one pass over a candidate list): per baud, switch the host
  * baud, listen 1500 ms (at least one CRC-valid RTCM frame or two
@@ -63,11 +70,24 @@
  *    before the step fails. Only when both bauds are silent: CONFIG COM1
  *    <old> at the new baud, host back, version again; still nothing:
  *    short-list detection. Never saved on this path;
+ *  - the signal-group query (ANT1GROUPA, once, after the signal-group step
+ *    whether or not it changed anything): what the running group
+ *    configures on the main antenna input (result bands; um98x_bands.h).
+ *    A refusal (a firmware without the query) or no readable answer leaves
+ *    the bands unknown and never fails the session;
  *  - antenna descriptor and B1C/B2a (only when the read-back asks for
  *    them, um98x_plan.h): not fatal; the outcome and the receiver's reply
  *    are recorded in the result. A restart banner while the B1C/B2a
  *    command is in flight fails the session (PROVISIONAL, to be confirmed
  *    on hardware);
+ *  - a plain refusal of CONFIG SIGNALGROUP (a negative reply: the receiver
+ *    changed nothing and did not restart) is not rolled back with RESET when
+ *    there is a group to go back to (the session read the running group
+ *    back, or opts->sg_fallback): the caller puts that group back into the
+ *    profile and applies again at once, which restores the outputs the
+ *    session quieted and saves them, without restarting the receiver (and
+ *    a survey with it). Without such a group it is rolled back like any
+ *    other failure;
  *  - a fatal failure stops the session (no SAVECONFIG). If any command was
  *    accepted, RESET (a plain restart to the saved configuration), on the
  *    recovery RESET's timeline: the host goes back to the saved baud, then
@@ -133,6 +153,7 @@ typedef struct {
     uint64_t bad;         /**< command-layer prefix with a wrong checksum or form */
     uint64_t other;       /**< NMEA and other lines (not for this layer) */
     uint64_t banners;     /**< restart banners */
+    uint64_t resetting;   /**< restarting answers ("The Board is resetting,...") */
     uint64_t restarts;    /**< unsolicited restart evidence */
 } um98x_chan_stats_t;
 
@@ -144,6 +165,8 @@ typedef struct {
     int64_t last_answer_ms;       /**< last checksum-valid command-layer line (liveness; pacing: next write 100 ms later) */
     int64_t last_version_write_ms;/**< end of our last version-query write */
     int64_t last_banner_ms;
+    int64_t last_resetting_ms;    /**< last restarting answer */
+    int64_t notice_restart_ms;    /**< an unsolicited restart counted from a restarting answer, its banner not seen yet */
     int64_t last_restart_ms;      /**< last unsolicited restart evidence */
     um98x_chan_stats_t stats;
 } um98x_chan_t;
@@ -156,6 +179,12 @@ void um98x_chan_init(um98x_chan_t *ch);
 
 /** Offer one classified line (caller holds the lock). @return UM98X_CHAN_* bits. */
 unsigned um98x_chan_dispatch(um98x_chan_t *ch, const char *line, size_t len, const um98x_line_t *l, int64_t now_ms);
+
+/**
+ * The receiver says it is restarting: a restarting answer within the last
+ * UM98X_RESTART_LOST_MS and no restart banner since (caller holds the lock).
+ */
+bool um98x_chan_restarting(const um98x_chan_t *ch, int64_t now_ms);
 
 typedef struct {
     uint64_t rtcm_frames;  /**< CRC-valid RTCM frames framed (monotonic) */
@@ -236,6 +265,17 @@ um98x_res_t um98x_exec_version(um98x_exec_t *ex, bool after_restart, int64_t end
 
 /** Base-mode query; body = the log body (may be empty if the log has none). */
 um98x_res_t um98x_exec_query_mode(um98x_exec_t *ex, char *body, size_t cap);
+
+/**
+ * Signal-group query (ANT1GROUPA, one-shot): what the running group
+ * configures on the main antenna input. out->state: OK (parsed), REFUSED
+ * (the receiver refused the query; reason gets its reply), UNREAD (an
+ * answer this firmware does not read), UNKNOWN (no answer, or a link
+ * error). reason (optional) gets the refusal text, "timeout" or "link
+ * error" ("" otherwise).
+ * @return OK only for a parsed report.
+ */
+um98x_res_t um98x_exec_groups(um98x_exec_t *ex, um98x_bands_t *out, char *reason, size_t cap);
 
 typedef struct {
     uint32_t baud;              /**< where the receiver answered */

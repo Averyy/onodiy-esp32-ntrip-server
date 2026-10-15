@@ -5,12 +5,13 @@
  * Observation summary: what the receiver is actually sending.
  *
  * Fed from the RTCM path (every CRC-valid frame, including the ones the hub
- * drops) and from the receiver's text lines (only its satellite-in-view
- * sentences are used). It decodes only public structures: the RTCM 10403
- * MSM header (epoch time, multiple-message bit, satellite/signal/cell
- * masks), the per-cell carrier-to-noise values of MSM4 to MSM7, the
- * antenna reference point of 1005/1006, and NMEA satellite-in-view
- * sentences. From that it maintains:
+ * drops) and from the receiver's text lines (only its satellite-in-view and
+ * position sentences are used). It decodes only public structures: the
+ * RTCM 10403 MSM header (epoch time, multiple-message bit,
+ * satellite/signal/cell masks), the per-cell carrier-to-noise values of
+ * MSM4 to MSM7, the antenna reference point of 1005/1006, NMEA
+ * satellite-in-view sentences and the fix of NMEA position sentences
+ * (gnss_obs_get_fix). From that it maintains:
  *
  *   - per constellation: satellites in the latest epoch, signals (bands)
  *     present, and the mean CNR per band over the cells of the latest
@@ -222,6 +223,22 @@ esp_err_t gnss_obs_get_sky(gnss_obs_sat_t *out, size_t *count);
 
 /** Latest antenna reference point (the base position shown and locked). ESP_ERR_NOT_FOUND before the first 1005/1006. */
 esp_err_t gnss_obs_get_arp(gnss_obs_arp_t *out);
+
+/**
+ * The receiver's latest position sentence (any talker's GGA), when it sends
+ * one: a receiver as delivered does, one this station configured does not.
+ * Health reads "no fix, no satellites used" as evidence that the antenna
+ * sees no sky.
+ */
+typedef struct {
+    bool valid;                    /**< a position sentence arrived since boot */
+    uint8_t quality;               /**< fix quality, 0 = no fix */
+    uint8_t satellites;            /**< satellites used in the position */
+    uint32_t age_ms;               /**< since it arrived, UINT32_MAX = never */
+} gnss_obs_fix_t;
+
+/** ESP_ERR_NOT_FOUND (out->valid false) before the first one. */
+esp_err_t gnss_obs_get_fix(gnss_obs_fix_t *out);
 
 /**
  * The live view: satellites sorted by constellation and satellite number

@@ -1148,6 +1148,7 @@ static esp_err_t h_casters(web_req_t *r)
         web_build_caster_entry(w, i, have ? &s_cfg[i] : NULL, &s_cst[i]);
     }
     wj_arr_close(w);
+    web_build_caster_warnings(w, have ? s_cfg : NULL, n);
     wj_obj_close(w);
     return web_resp_end(&resp);
 }

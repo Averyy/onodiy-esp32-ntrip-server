@@ -137,6 +137,23 @@
  * asks for them; a rejection does not fail the session). Unknown after a
  * reboot until the next apply session.
  *
+ * Signals per group: every apply session also asks which signals the
+ * running signal group configures on the main antenna input (rx_bands,
+ * um98x_bands.h) and compares them with what the profile's group should
+ * give: a report that differs raises STATION_ALERT_SIGNALS_MISMATCH, one
+ * that matches or is not read (a firmware without the query refuses it)
+ * clears it. Never a failed apply.
+ *
+ * A signal group the receiver refuses outright (a negative reply: nothing
+ * changed, no restart; build 25164 refuses every pair but 4 5, 3 6, 5 0 and
+ * 7 0) goes back to the group it runs and is applied again at once, without
+ * a RESET in between when there is such a group to go back to.
+ *
+ * Restarting: between a receiver's restarting answer ("The Board is
+ * resetting,...", its reply to a command sent while it restarts) and its
+ * banner, receiver_restarting says so; it counts as restart evidence once
+ * unless the restart is the station's own.
+ *
  * First-apply hold (CONFIG_STATION_HOLD_FIRST_APPLY, bench builds and the
  * sdkconfig.hold overlay): at init, before anything reaches the receiver,
  * a device whose profile was never applied (no gnss/applied_hash) and whose
@@ -272,6 +289,8 @@ typedef enum {
     STATION_ALERT_RECEIVER_ATTENTION = 1u << 4, /**< RTCM did not resume after a receiver update session ended */
     STATION_ALERT_RECEIVER_IN_LOADER = 1u << 5, /**< receiver found at its loader prompt without an update session: listen-only until the user acts */
     STATION_ALERT_NO_RECEIVER        = 1u << 6, /**< no receiver found (state NO_RECEIVER; not with RECEIVER_IN_LOADER or in maintenance): next_detect_in_s says when the next search runs */
+    STATION_ALERT_SIGNALS_MISMATCH   = 1u << 7, /**< the signals the receiver reports for its signal group are not what the profile's group
+                                                     should configure (rx_bands, um98x_bands.h); set and cleared by each apply session's report */
 } station_alert_t;
 
 /**
@@ -441,6 +460,19 @@ typedef struct {
     bool pkg_check_running;          /**< a check of the staged package runs (check-only builds) */
     station_flash_last_t flash_last; /**< the last session or check this boot */
 
+    /* The receiver as it answers right now (read at the time of the call). */
+    bool receiver_restarting;        /**< it answered "The Board is resetting" within 20 s and its restart banner has not come yet */
+    uint64_t rx_answers;             /**< checksum-valid command-layer lines since boot (acks, logs, banners, restarting answers) */
+    uint32_t rx_answer_age_ms;       /**< since the last of them, UINT32_MAX = never: "the receiver answers" */
+
+    /* What the running signal group configures (the last apply session's query this boot). */
+    um98x_bands_t rx_bands;          /**< state UNKNOWN until a session asked (um98x_bands.h) */
+    uint32_t rx_bands_age_s;         /**< since that query, UINT32_MAX = none this boot */
+    int64_t rx_bands_unix;           /**< its wall-clock time, 0 = clock not set then */
+    uint8_t rx_bands_profile_master; /**< the profile's main-antenna group it was compared with */
+    bool rx_bands_match;             /**< the report names that group and lists its signals (false unless state OK) */
+    char rx_bands_reply[64];         /**< the receiver's refusal text, or "timeout" ("" when read) */
+
     /* Signal groups. */
     bool rx_sg_valid;                /**< an apply session's read-back named the receiver's signal group this boot */
     station_sg_t rx_sg;              /**< ... that group (the latest read-back) */
@@ -538,6 +570,7 @@ void station_first_apply_hold_refresh(void);
  *         station_request_package_check); ESP_ERR_INVALID_STATE while a
  *         journal is open, during an app trial or crash watch, while an app
  *         update runs (update slot held by the app), in receiver maintenance,
+ *         while a signal-group comparison runs (station_sg_test_running),
  *         unless the station is STREAMING (valid RTCM or NMEA within the
  *         last 10 s), uninitialised (safe mode) or for an unsupported model;
  *         ESP_ERR_NOT_FOUND if nothing is staged.
@@ -600,7 +633,8 @@ esp_err_t station_bench_boot_race(uint32_t max_ms, station_bench_res_t *out);
 
 /**
  * Bench: start a receiver update of the staged package like
- * station_request_flash, but stop sending after stop_after_blocks
+ * station_request_flash (the same refusals, a running signal-group
+ * comparison included), but stop sending after stop_after_blocks
  * acknowledged blocks (0 = never; the failure policy then retries), or
  * restart the ESP32 right after the journal is written in reset_at_state
  * (0 = never), for the boot-time table.

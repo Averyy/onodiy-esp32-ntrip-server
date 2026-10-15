@@ -302,6 +302,12 @@ static int cmd_race_result(int argc, char **argv)
 
 static int start_flash(const char *sha8, const char *fw, uint32_t stop_after, uint8_t reset_at)
 {
+    /* As the web's 409 signal_test_running: the comparison owns the
+     * receiver until it ends (the station refuses the flash too). */
+    if (station_sg_test_running()) {
+        say("BENCH REFUSED: a signal-group comparison is running (stop it on the receiver page first)\n");
+        return 1;
+    }
     station_flash_request_t req;
     if (!flash_request(sha8, fw, &req)) {
         return 1;
@@ -357,6 +363,12 @@ static int cmd_reset_at(int argc, char **argv)
 
 static int cmd_jstate(int argc, char **argv)
 {
+#if CONFIG_UM98X_FLASH_RECOVERY_ACTIONS
+    /* The next boot would act on the journal written here (sending to the receiver's loader). */
+    say("BENCH REFUSED: jstate writes a journal for the report-only boot table; this build acts on journals "
+        "(UM98X_FLASH_RECOVERY_ACTIONS)\n");
+    return 1;
+#endif
     if (argc != 3) {
         say("usage: jstate <journal state> " TOK_JOURNAL "\n");
         return 1;

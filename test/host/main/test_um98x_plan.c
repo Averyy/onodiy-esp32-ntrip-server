@@ -556,12 +556,13 @@ TEST_CASE("plan preview: the default profile's exact list", "[um98x_plan]")
     size_t n = um98x_plan_preview(&p, 115200, s_prev, UM98X_PREVIEW_MAX);
     preview_text(s_prev, n, text, sizeof(text));
     TEST_ASSERT_EQUAL_STRING("wa- UNLOG COM1|qa- VERSIONA|qa- CONFIG|qa- MODE|"
-                             "wds CONFIG SIGNALGROUP 3 6|wd- MODE BASE 1234 TIME 600 0|wo- CONFIG RTCMB1CB2A ENABLE|"
+                             "wds CONFIG SIGNALGROUP 3 6|qa- ANT1GROUPA|wd- MODE BASE 1234 TIME 600 0|"
+                             "wo- CONFIG RTCMB1CB2A ENABLE|"
                              "wa- RTCM1005 COM1 1|wa- RTCM1033 COM1 1|wa- RTCM1077 COM1 1|wa- RTCM1087 COM1 1|"
                              "wa- RTCM1097 COM1 1|wa- RTCM1117 COM1 1|wa- RTCM1127 COM1 1|wa- RTCM1230 COM1 1|"
                              "was SAVECONFIG",
                              text);
-    TEST_ASSERT_EQUAL_size_t(16, n);
+    TEST_ASSERT_EQUAL_size_t(17, n);
 
     /* Not for an invalid profile; a short buffer never holds a cut list's SAVECONFIG out of place. */
     p.survey_in_s = 0;
@@ -588,7 +589,8 @@ TEST_CASE("plan preview: fixed position, antenna model, satellite view, baud cha
     TEST_ASSERT_NOT_EQUAL(0, um98x_mode_command(&p, mode, sizeof(mode)));
     char want[2048];
     snprintf(want, sizeof(want),
-             "wa- UNLOG COM1|qa- VERSIONA|qa- CONFIG|qa- MODE|wds CONFIG SIGNALGROUP 3 6|wd- CONFIG COM1 460800|"
+             "wa- UNLOG COM1|qa- VERSIONA|qa- CONFIG|qa- MODE|wds CONFIG SIGNALGROUP 3 6|qa- ANT1GROUPA|"
+             "wd- CONFIG COM1 460800|"
              "wd- %s|wd- CONFIG BASEANTENNAMODEL \"TRM59800.00     SCIS\" \"5000123\" 2 USER|"
              "wo- CONFIG RTCMB1CB2A ENABLE|wa- RTCM1005 COM1 1|wa- RTCM1033 COM1 1|wa- GPGSV COM1 10|was SAVECONFIG",
              mode);

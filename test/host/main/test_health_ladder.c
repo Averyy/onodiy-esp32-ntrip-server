@@ -40,6 +40,7 @@ typedef struct {
     int64_t last_rtcm;
     int64_t last_rx;
     uint8_t silence_after;      /* this finished step silences the receiver */
+    uint8_t answers_during;     /* the receiver answers the station's commands while this step runs */
 
     /* the station */
     uint8_t pending;
@@ -241,6 +242,9 @@ static void sim_world(sim_t *w)
     }
     if (w->lines) {
         w->in.text_lines++;
+    }
+    if (w->running != 0 && w->running == w->answers_during) {
+        w->in.answers++;   /* its replies to the step's commands */
     }
 }
 
@@ -697,26 +701,30 @@ TEST_CASE("ladder: FAILED retries every 10 min at max(2, class entry)", "[health
     w.rtcm = true;
     sim_run(&w, 20 * SEC);
     w.rtcm = false;
-    w.lines = true;      /* TEXT_ONLY: 4, 5, 6b */
-    TEST_ASSERT_TRUE(sim_until_rec(&w, 6, 20 * MIN));
-    TEST_ASSERT_EQUAL_UINT8(8, w.rec[5].code);
-    int64_t failed_at = w.rec[5].at;
+    w.bytes = true;      /* GARBAGE: 3 (found), 4, 5, 6b (bytes, no answer) */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 8, 20 * MIN));
+    static const uint8_t want[][2] = {
+        { 3, 0 }, { 3, 2 }, { 4, 0 }, { 4, 2 }, { 5, 0 }, { 5, 2 }, { 7, 0 }, { 8, 0 },
+    };
+    expect_recs(&w, want, 8);
+    int64_t failed_at = w.rec[7].at;
     hl_status_t s = st_of(&w);
     TEST_ASSERT_TRUE(s.retry_in_s >= 599 && s.retry_in_s <= 600);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_ANSWER, s.why);
     unsigned nreq = w.nreq;
     sim_run(&w, 9 * MIN);
     TEST_ASSERT_EQUAL_UINT32(nreq, w.nreq);
-    TEST_ASSERT_TRUE(sim_until_rec(&w, 7, 2 * MIN));
-    TEST_ASSERT_EQUAL_UINT8(4, w.rec[6].code);       /* TEXT_ONLY re-enters at 4 */
-    int64_t gap = w.rec[6].at - failed_at;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 9, 2 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(3, w.rec[8].code);       /* GARBAGE re-enters at 3 */
+    int64_t gap = w.rec[8].at - failed_at;
     TEST_ASSERT_TRUE(gap >= 10 * MIN && gap <= 10 * MIN + 2 * SEC);
     TEST_ASSERT_TRUE(st_of(&w).power_alert);        /* kept through the retry */
     TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, st_of(&w).level);
 
     /* back in FAILED, now silent: the next pass enters at step 2 */
-    TEST_ASSERT_TRUE(sim_until_rec(&w, 12, 20 * MIN));
-    TEST_ASSERT_EQUAL_UINT8(8, w.rec[11].code);
-    w.lines = false;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 16, 20 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(8, w.rec[15].code);
+    w.bytes = false;
     unsigned n = w.nrec;
     TEST_ASSERT_TRUE(sim_until_rec(&w, n + 1, 11 * MIN));
     TEST_ASSERT_EQUAL_UINT8(2, w.rec[n].code);
@@ -725,15 +733,23 @@ TEST_CASE("ladder: FAILED retries every 10 min at max(2, class entry)", "[health
 
 TEST_CASE("ladder: FAILED does not re-enter a TEXT_ONLY stall while reconfigure is refused", "[health_ladder]")
 {
+    /* The receiver goes quiet with the reset (the reboot cap blocks 6a),
+     * then sends text again: a TEXT_ONLY stall in FAILED. */
     sim_t w;
     sim_init(&w);
     w.rtcm = true;
     sim_run(&w, 20 * SEC);
     w.rtcm = false;
     w.lines = true;
+    w.silence_after = 5;
+    w.in.reboot_allowed = false;
     w.in.reconfigure_refused = true;
-    TEST_ASSERT_TRUE(sim_until_rec(&w, 5, 10 * MIN));   /* 4 refused, 5, 5 failed, 7, 8 */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 5, 10 * MIN));   /* 4 refused, 5, 5 failed, 6a blocked, 8 */
+    TEST_ASSERT_EQUAL_UINT8(9, w.rec[w.nrec - 2].code);
     TEST_ASSERT_EQUAL_UINT8(8, w.rec[w.nrec - 1].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_SILENT, st_of(&w).why);
+    w.lines = true;
+    w.bytes = true;
     unsigned nreq = w.nreq;
     unsigned nrec = w.nrec;
     sim_run(&w, 3 * HOUR);
@@ -754,8 +770,8 @@ TEST_CASE("ladder: 60 s of health in FAILED resets and clears the power-cycle al
     w.rtcm = true;
     sim_run(&w, 20 * SEC);
     w.rtcm = false;
-    w.lines = true;
-    TEST_ASSERT_TRUE(sim_until_rec(&w, 6, 20 * MIN));
+    w.bytes = true;   /* bytes but no answer: 3, 4, 5, 6b */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 8, 20 * MIN));
     TEST_ASSERT_TRUE(st_of(&w).power_alert);
     w.rtcm = true;    /* power-cycled by the user */
     sim_run(&w, 2 * SEC);
@@ -774,8 +790,8 @@ TEST_CASE("ladder: 60 s of health in FAILED resets and clears the power-cycle al
     w.rtcm = true;
     sim_run(&w, 20 * SEC);
     w.rtcm = false;
-    w.lines = true;
-    TEST_ASSERT_TRUE(sim_until_rec(&w, 6, 20 * MIN));
+    w.bytes = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 8, 20 * MIN));
     w.rtcm = true;
     sim_run(&w, 30 * SEC);
     w.rtcm = false;
@@ -1835,4 +1851,203 @@ TEST_CASE("ladder: the episode flag follows a stall until the ladder resets", "[
     w.rtcm = true;
     sim_run(&w, 2 * MIN);
     TEST_ASSERT_FALSE(st_of(&w).episode);
+}
+
+/* ---- the receiver answers but sends no RTCM; the held first configuration ---- */
+
+static unsigned count_req(const sim_t *w, uint8_t step)
+{
+    return w->nreq_step[step];
+}
+
+TEST_CASE("ladder: a receiver that sends text after the reset gets no power-cycle advice, and no reset every pass", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;      /* it answers (text lines), but no RTCM: 4, 5, then 7 with the reason */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 5, 20 * MIN));
+    static const uint8_t want[][2] = { { 4, 0 }, { 4, 2 }, { 5, 0 }, { 5, 2 }, { 8, 0 } };
+    expect_recs(&w, want, 5);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_FALSE(s.power_alert);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_FAILED, s.level);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+    TEST_ASSERT_EQUAL_INT(-1, find_rec(&w, 7, HL_OUT_STARTED, 0));
+
+    /* It keeps answering without RTCM: no configuration and no reset again. */
+    unsigned nreq = w.nreq;
+    sim_run(&w, 3 * HOUR);
+    TEST_ASSERT_EQUAL_UINT32(nreq, w.nreq);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, st_of(&w).why);
+
+    /* Then it goes silent: the retry pass asks it again (steps 2 and 3),
+     * finds it, and goes back to 7 without steps 4 and 5. */
+    w.lines = false;
+    unsigned n4 = count_req(&w, 4), n5 = count_req(&w, 5);
+    sim_run(&w, 12 * MIN);
+    TEST_ASSERT_EQUAL_UINT(1, count_req(&w, 2));
+    TEST_ASSERT_EQUAL_UINT(1, count_req(&w, 3));
+    TEST_ASSERT_EQUAL_UINT(n4, count_req(&w, 4));
+    TEST_ASSERT_EQUAL_UINT(n5, count_req(&w, 5));
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, st_of(&w).phase);
+
+    /* RTCM back for a minute: reset, and the reason is gone. */
+    w.rtcm = true;
+    sim_run(&w, 70 * SEC);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_OK, s.level);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NONE, s.why);
+}
+
+TEST_CASE("ladder: replies after the receiver reset count as answers", "[health_ladder]")
+{
+    /* A configured receiver without satellites: nothing on the line, but the
+     * rescan finds it and it answers the reset's queries. */
+    sim_t w;
+    sim_init(&w);
+    stream_then_silence(&w);
+    w.answers_during = 5;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 11, 20 * MIN));
+    static const uint8_t want[][2] = {
+        { 1, 0 }, { 1, 2 }, { 2, 0 }, { 2, 2 }, { 3, 0 }, { 3, 2 }, { 4, 0 }, { 4, 2 }, { 5, 0 }, { 5, 2 }, { 8, 0 },
+    };
+    expect_recs(&w, want, 11);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_FALSE(s.power_alert);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+
+    /* The retry pass: 2 and 3 again (the rescan finds it), never 4 or 5. */
+    sim_run(&w, 25 * MIN);
+    TEST_ASSERT_EQUAL_UINT(1, count_req(&w, 4));
+    TEST_ASSERT_EQUAL_UINT(1, count_req(&w, 5));
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT(2, count_req(&w, 3));
+
+    /* The rescan finds nothing any more: the byte rule as usual (no bytes: 6a). */
+    w.rescan_finds = false;
+    sim_run(&w, 12 * MIN);
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT(1, w.reboots);
+}
+
+TEST_CASE("ladder: a receiver that answers and uses no satellites gets no reset", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    w.in.no_sky = true;   /* its position sentence: no fix, no satellites */
+    w.in.reconfigure_refused = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 2, 2 * MIN));
+    static const uint8_t want[][2] = { { 4, HL_OUT_FAILED }, { 8, HL_OUT_STARTED } };
+    expect_recs(&w, want, 2);
+    TEST_ASSERT_EQUAL_UINT(0, count_req(&w, 5));
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_FAILED, s.level);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_SKY, s.why);
+    sim_run(&w, 2 * HOUR);
+    TEST_ASSERT_EQUAL_UINT(0, count_req(&w, 5));
+
+    /* The same in alerts-only mode: nothing sent, the reason shown. */
+    sim_init(&w);
+    w.in.recovery_mode = HL_MODE_ALERTS;
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    w.in.no_sky = true;
+    sim_run(&w, 5 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+    TEST_ASSERT_EQUAL_INT(-1, find_rec(&w, 5, HL_OUT_NOT_RUN, 0));
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_SKY, s.why);
+}
+
+TEST_CASE("ladder: alerts-only mode and NO_RECEIVER carry their reason", "[health_ladder]")
+{
+    /* Silent, nothing answered for a long time: SILENT, already while the
+     * steps are only journalled (DEGRADED), and in 7 (FAILED). */
+    sim_t w;
+    sim_init(&w);
+    w.in.recovery_mode = HL_MODE_ALERTS;
+    sim_run(&w, 15 * MIN);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_FAILED, s.level);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_SILENT, s.why);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+
+    sim_init(&w);
+    w.in.recovery_mode = HL_MODE_ALERTS;
+    sim_run(&w, 12 * SEC);   /* the stall is declared; step 1 is only journalled */
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, s.level);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_SILENT, s.why);
+
+    /* It answered the station a minute before the RTCM stopped: alive. */
+    sim_init(&w);
+    w.in.recovery_mode = HL_MODE_ALERTS;
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.in.answers++;
+    sim_run(&w, 60 * SEC);
+    w.rtcm = false;
+    sim_run(&w, 15 * MIN);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, st_of(&w).why);
+
+    /* NO_RECEIVER: the station's own alert says it; no reason here. */
+    sim_init(&w);
+    w.in.stn_state = HL_STN_NO_RECEIVER;
+    w.in.reboot_allowed = false;
+    sim_run(&w, 2 * MIN);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NONE, s.why);
+}
+
+TEST_CASE("ladder: a held first configuration with a receiver that answers is no stall", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.in.rx_held = true;
+    w.in.recovery_mode = HL_MODE_ALERTS;   /* what a hold build sets */
+    w.lines = true;                        /* the receiver as delivered: text, no RTCM */
+    sim_run(&w, 2 * HOUR);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nrec);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, s.level);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_HELD, s.why);
+    TEST_ASSERT_EQUAL_UINT32(0, s.stalls);
+    TEST_ASSERT_FALSE(s.episode);
+
+    /* Silent while held: a stall like any other (the receiver may be off). */
+    w.lines = false;
+    sim_run(&w, 15 * MIN);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_SILENT, s.why);
+    TEST_ASSERT_EQUAL_UINT32(1, s.stalls);
+
+    /* It answers again: back to waiting for the user, quietly. */
+    unsigned nrec = w.nrec;
+    w.lines = true;
+    sim_run(&w, 5 * SEC);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_IDLE, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, s.level);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_HELD, s.why);
+    TEST_ASSERT_EQUAL_UINT32(nrec, w.nrec);   /* no "healthy again" */
+
+    /* The user applies: the hold ends; RTCM flows. */
+    w.in.rx_held = false;
+    w.rtcm = true;
+    sim_run(&w, 10 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NONE, st_of(&w).why);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_OK, st_of(&w).level);
 }

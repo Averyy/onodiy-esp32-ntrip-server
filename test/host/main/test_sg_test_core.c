@@ -110,7 +110,7 @@ static void fx_apply(fx_t *x, bool ok, bool rejected, bool read_known, station_s
     a.rejected = rejected;
     a.read_known = read_known;
     a.read = read;
-    strcpy(a.reason, ok ? "" : rejected ? "PARSING FAILD NO MATCHING FUNC" : "timeout");
+    strcpy(a.reason, ok ? "" : rejected ? "PARSING FAILED GRAMMAR ERROR," : "timeout");
     sgt_apply_done(&x->t, &a, x->now, x->unix_s);
 }
 
@@ -433,7 +433,7 @@ TEST_CASE("sg test: a group refused in phase 0 or in phase 1 ends the test as re
     TEST_ASSERT_EQUAL(STATION_SGT_IDLE, x->t.state);   /* it runs 3 6 already: no switch back */
     TEST_ASSERT_EQUAL(STATION_SGT_OUT_REJECTED, x->t.outcome);
     TEST_ASSERT_EQUAL_UINT8(STATION_SGT_RES_REJECTED, x->t.acc[0].status);
-    TEST_ASSERT_NOT_NULL(strstr(x->t.reason, "refused signal group 7 0"));
+    TEST_ASSERT_NOT_NULL(strstr(x->t.reason, "does not accept signal group 7 0"));
     sgt_note_t n[SGT_NOTES];
     unsigned c = sgt_take_notes(&x->t, n, SGT_NOTES);
     TEST_ASSERT_EQUAL_UINT(2, c);
@@ -483,9 +483,10 @@ TEST_CASE("sg test: a group refused in phase 0 or in phase 1 ends the test as re
 
 TEST_CASE("sg test: the reason carries the receiver's whole reply, and a failed switch back after it", "[sg_test]")
 {
-    /* The reply a receiver firmware gives for a group it does not offer
-     * (43 characters, two spaces in it), as the receiver card shows it. */
-    static const char reply[] = "PARSING FAILD NO MATCHING FUNC  SIGNALGROUP";
+    /* The reply UM982 build 25164 gives for a group it does not offer
+     * (our bench, 2026-10-14: a trailing comma, no echo of the group), as
+     * the receiver card shows it. */
+    static const char reply[] = "PARSING FAILED GRAMMAR ERROR,";
     fx_t *x = fx_new();
     x->auto_ok = false;
     TEST_ASSERT_EQUAL(STATION_SGT_OK, fx_start(x, G(5, 0), G(7, 0), G(5, 0), 60));
@@ -494,8 +495,7 @@ TEST_CASE("sg test: the reason carries the receiver's whole reply, and a failed 
     TEST_ASSERT_EQUAL(STATION_SGT_SWITCHING, x->t.state);
     fx_apply_reason(x, false, true, true, G(5, 0), reply);
     TEST_ASSERT_EQUAL(STATION_SGT_IDLE, x->t.state);
-    TEST_ASSERT_EQUAL_STRING("The receiver refused signal group 7 0 (PARSING FAILD NO MATCHING FUNC  SIGNALGROUP).",
-                             x->t.reason);
+    TEST_ASSERT_EQUAL_STRING("The receiver does not accept signal group 7 0 (PARSING FAILED GRAMMAR ERROR,).", x->t.reason);
     station_sg_test_t v;
     sgt_view(&x->t, x->now, &v);
     TEST_ASSERT_EQUAL_STRING(x->t.reason, v.reason);
@@ -519,8 +519,9 @@ TEST_CASE("sg test: the reason carries the receiver's whole reply, and a failed 
     fx_apply_reason(x, false, false, false, G(0, 0), longest);
     TEST_ASSERT_EQUAL(STATION_SGT_IDLE, x->t.state);
     char want[STATION_SGT_REASON_MAX];
-    snprintf(want, sizeof(want), "The receiver refused signal group 253 252 (%s). Switching back to 255 254 failed (%s).",
-             longest, longest);
+    snprintf(want, sizeof(want),
+             "The receiver does not accept signal group 253 252 (%s). Switching back to 255 254 failed (%s).", longest,
+             longest);
     TEST_ASSERT_EQUAL_STRING(want, x->t.reason);
     sgt_view(&x->t, x->now, &v);
     TEST_ASSERT_EQUAL_STRING(want, v.reason);

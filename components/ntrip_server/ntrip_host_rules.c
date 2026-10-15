@@ -43,6 +43,40 @@ bool ntrip_slot_is_onocoy(const ntrip_caster_cfg_t *cfg)
     return cfg != NULL && (ntrip_host_is_onocoy(cfg->host) || (cfg->test_onocoy && ntrip_test_onocoy_allowed()));
 }
 
+bool ntrip_slot_is_open_caster(const ntrip_caster_cfg_t *cfg)
+{
+    return cfg != NULL && !ntrip_slot_is_onocoy(cfg) && ntrip_host_is_open_caster(cfg->host);
+}
+
+bool ntrip_slot_is_rtk2go(const ntrip_caster_cfg_t *cfg)
+{
+    return cfg != NULL && ntrip_host_is_rtk2go(cfg->host);
+}
+
+uint32_t ntrip_server_open_caster_pair(const ntrip_caster_cfg_t *cfgs, size_t n, uint32_t *open_mask)
+{
+    uint32_t onocoy = 0;
+    uint32_t open = 0;
+    for (size_t i = 0; cfgs != NULL && i < n && i < 32; i++) {
+        if (!cfgs[i].enabled) {
+            continue;
+        }
+        if (ntrip_slot_is_onocoy(&cfgs[i])) {
+            onocoy |= 1u << i;
+        } else if (ntrip_slot_is_open_caster(&cfgs[i])) {
+            open |= 1u << i;
+        }
+    }
+    if (onocoy == 0 || open == 0) {
+        onocoy = 0;
+        open = 0;
+    }
+    if (open_mask != NULL) {
+        *open_mask = open;
+    }
+    return onocoy;
+}
+
 void ntrip_server_onocoy_defaults(ntrip_caster_cfg_t *out)
 {
     memset(out, 0, sizeof(*out));

@@ -91,6 +91,37 @@
  *            and FAILED at 7. Leaving this mode while stalled starts a fresh
  *            pass at the class entry step.
  *
+ * Why the receiver path is down (hl_status_t.why, the reason health's
+ * alerts carry, so a FAILED level is never shown without one):
+ *   HELD      the first configuration is held (hl_in_t.rx_held) and the
+ *             receiver answers (text lines or replies within the stall
+ *             threshold): it was never set to send RTCM. No stall is
+ *             declared for it (no step, no journal record); a FAILED ladder
+ *             that meets it goes back to idle. The level stays DEGRADED.
+ *   NO_ANSWER 6b: bytes but no answers (the power-cycle alert).
+ *   NO_SKY    the receiver answers and its own position sentence says it
+ *             uses no satellites (hl_in_t.no_sky): the antenna.
+ *   NO_RTCM   the receiver answers but sends no RTCM: text lines or
+ *             replies in this episode, text lines when it began, or replies
+ *             to the station within HL_ALIVE_MS before it began (replies
+ *             come only when asked, so their age is the evidence; a text
+ *             output that stopped is silence).
+ *   SILENT    nothing usable and no answer.
+ * Only while the ladder is in 7 or (ALERTS mode) in a journalled step's
+ * grace, never in NO_RECEIVER (the station's own alert says that).
+ *
+ * The receiver answers but sends no RTCM (amends the byte rule and the
+ * retry pass; 6b is "bytes but no answers"):
+ *  - after step 5, a receiver that answered (replies from the RESET's start:
+ *    its banner, its version log; text lines in the step's grace) goes to 7
+ *    with NO_RTCM (or NO_SKY), not to 6b: a power cycle is not the advice;
+ *  - step 5 is not taken while the receiver answers and says it uses no
+ *    satellites (no_sky): a reset cannot bring satellites; straight to 7;
+ *  - in 7 after either, the retry pass does not run steps 4 and 5 again: a
+ *    TEXT_ONLY stall holds 7, and a silent one goes up to step 3 only (its
+ *    rescan asks the receiver again); found there, back to 7. A rescan that
+ *    finds nothing ends that (the byte rule as usual).
+ *
  * Timings are PROVISIONAL, to be confirmed on hardware.
  */
 #pragma once
@@ -114,6 +145,7 @@ extern "C" {
 #define HL_RUN_CAP_MS             600000     /**< a step seen running this long counts as ended */
 #define HL_REBOOT_WAIT_MS         60000      /**< reboot requested and still alive: count as FAILED */
 #define HL_MAX_TICK_MS            5000       /**< longest tick gap credited to the ladder clock */
+#define HL_ALIVE_MS               600000     /**< replies this recent when a stall begins: the receiver is alive */
 
 #define HL_NEVER INT64_MIN
 
@@ -201,6 +233,16 @@ typedef enum {
     HL_PH_FAILED,                 /**< 7 (after 6b with the power-cycle alert) */
 } hl_phase_t;
 
+/** Why the receiver path is down (hl_status_t.why; see above). */
+typedef enum {
+    HL_WHY_NONE = 0,
+    HL_WHY_HELD,                  /**< the first configuration is held; the receiver answers */
+    HL_WHY_SILENT,                /**< nothing usable from the receiver and no answer */
+    HL_WHY_NO_ANSWER,             /**< 6b: bytes but no answers (power-cycle alert) */
+    HL_WHY_NO_SKY,                /**< it answers and uses no satellites */
+    HL_WHY_NO_RTCM,               /**< it answers but sends no RTCM */
+} hl_why_t;
+
 /** Severity the ladder adds to the overall level (same order as health_level_t). */
 typedef enum {
     HL_LEVEL_OK = 0,
@@ -254,6 +296,10 @@ typedef struct {
     uint8_t reboot_cap_why;       /**< hl_cap_why_t: HL_CAP_HOUR or HL_CAP_DAY when the cap blocks (else ignored) */
     bool reboot_inhibited;        /**< a reboot inhibit is held */
     uint8_t reboot_hold;          /**< HL_HOLD_* reasons that hold 6a back now (0 = none) */
+    uint64_t answers;             /**< the receiver's checksum-valid replies to the command layer (acks, logs, banners,
+                                       restarting answers; monotonic) */
+    bool no_sky;                  /**< the receiver's own position sentence within the stall threshold: no fix, no satellites */
+    bool rx_held;                 /**< the first configuration is held: the receiver was never set to send RTCM */
 } hl_in_t;
 
 typedef struct {
@@ -275,6 +321,13 @@ typedef struct {
     bool lines_valid;
     uint64_t lines_last;
     int64_t line_ms;              /**< wall time a new line was last seen (HL_NEVER = never) */
+    uint64_t answers_last;
+    int64_t answer_ms;            /**< wall time a new reply was last seen (HL_NEVER = never) */
+
+    /* the receiver answers but sends no RTCM */
+    bool ep_alive;                /**< it answers: in this episode, or (replies) within HL_ALIVE_MS before it began */
+    bool no_rtcm;                 /**< 7 reached while it answers: the retry pass stops after step 3 */
+    bool held_wait;               /**< stalled, and the held first configuration explains it: no stall declared */
 
     /* healthy tracking */
     bool healthy;
@@ -287,6 +340,8 @@ typedef struct {
     int64_t seen_ms;              /**< wall time it was first seen running */
     int64_t grace_start;          /**< ladder clock */
     uint64_t win_bytes0;          /**< rx_bytes at the start of the byte-rule window */
+    uint64_t win_answers0;        /**< answers at the start of the step */
+    int64_t win_from_ms;          /**< text lines after this count as answers (step 5: its grace) */
     bool win_saw_bytes;           /**< the station reported bytes during the window */
     bool not_found;               /**< step 3 ended without finding the receiver */
     int64_t own_from_ms;          /**< lease releases in [own_from, own_to] were the ladder's own */
@@ -329,6 +384,7 @@ typedef struct {
     uint8_t mode;                 /**< hl_mode_t the ladder last decided with */
     bool reboot_recheck;          /**< NO_RECEIVER: a blocked 6a waits to be looked at again */
     bool episode;                 /**< a stall or NO_RECEIVER episode is in progress (the ladder has not reset since) */
+    uint8_t why;                  /**< hl_why_t: why the receiver path is down (see above) */
 } hl_status_t;
 
 /** Fresh ladder; the stall timer starts at now_ms. */

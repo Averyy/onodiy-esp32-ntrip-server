@@ -58,10 +58,10 @@ const char *web_station_state_name(station_state_t v)
 
 static const char *const s_station_alert[] = {
     "unsupported_model", "config_failed", "position_mismatch", "antenna_moved", "receiver_attention",
-    "receiver_in_loader", "no_receiver",
+    "receiver_in_loader", "no_receiver", "signals_mismatch",
 };
 _Static_assert(STATION_ALERT_UNSUPPORTED_MODEL == 1u << 0 && STATION_ALERT_RECEIVER_IN_LOADER == 1u << 5 &&
-                   STATION_ALERT_NO_RECEIVER == 1u << 6,
+                   STATION_ALERT_NO_RECEIVER == 1u << 6 && STATION_ALERT_SIGNALS_MISMATCH == 1u << 7,
                "station alert bits moved: update the name table");
 
 const char *web_station_alert_name(uint32_t bit)
@@ -99,9 +99,12 @@ const char *web_health_step_name(health_step_t v)
 static const char *const s_health_alert[] = {
     "power_supply", "receiver_power", "bands", "profile_drift", "heap_fragmented",
     "safe_mode", "settings_degraded", "no_upstream", "link_loss", "power_lost",
+    "receiver_silent", "no_satellites", "no_rtcm", "rx_held",
 };
 _Static_assert(HEALTH_ALERT_POWER_SUPPLY == 1u << 0 && HEALTH_ALERT_LINK_LOSS == 1u << 8 &&
-               HEALTH_ALERT_POWER_LOST == 1u << 9,
+               HEALTH_ALERT_POWER_LOST == 1u << 9 && HEALTH_ALERT_RECEIVER_SILENT == 1u << 10 &&
+               HEALTH_ALERT_NO_SATELLITES == 1u << 11 && HEALTH_ALERT_NO_RTCM == 1u << 12 &&
+               HEALTH_ALERT_RX_HELD == 1u << 13,
                "health alert bits moved: update the name table");
 
 const char *web_health_alert_name(uint32_t bit)
@@ -616,6 +619,19 @@ static const char *const s_setting[] = {
 const char *web_setting_name(uint8_t v)
 {
     return pick(s_setting, COUNT(s_setting), (int)v);
+}
+
+static const char *const s_bands_state[] = {
+    [UM98X_BANDS_UNKNOWN] = "unknown",
+    [UM98X_BANDS_OK] = "ok",
+    [UM98X_BANDS_REFUSED] = "refused",
+    [UM98X_BANDS_UNREAD] = "unread",
+};
+_Static_assert(COUNT(s_bands_state) == (size_t)UM98X_BANDS_UNREAD + 1u, "signal report states moved: update the table");
+
+const char *web_bands_state_name(uint8_t v)
+{
+    return pick(s_bands_state, COUNT(s_bands_state), (int)v);
 }
 
 static const char *const s_live_sky[] = {

@@ -97,6 +97,37 @@ function readBack(g) {
   ];
 }
 
+/* Constellation names of the signal report (GET /api/gnss rx_bands). */
+const BAND_SYS = { gps: 'GPS', glonass: 'GLONASS', galileo: 'Galileo', beidou: 'BeiDou', qzss: 'QZSS' };
+
+/**
+ * What the running signal group configures on the main antenna input, from
+ * the last configuration (rx_bands), short: bands per constellation, the
+ * signals on hover, and what is missing against the profile's group.
+ */
+function bandsRow(g) {
+  const b = g.rx_bands || {};
+  if (b.state === 'refused') return ['Signals configured', h('span', { class: 'muted' }, 'not reported by this receiver firmware')];
+  if (b.state === 'unread') return ['Signals configured', h('span', { class: 'muted' }, 'answer not read (unknown)')];
+  if (b.state !== 'ok') return ['Signals configured', h('span', { class: 'muted' }, 'read at the next configuration')];
+  const parts = (b.systems || []).filter(x => (x.signals || []).length).map(x =>
+    h('span', { title: (BAND_SYS[x.sys] || x.sys) + ': ' + x.signals.join(', ') },
+      (BAND_SYS[x.sys] || x.sys) + ' ' + x.bands));
+  const list = [];
+  parts.forEach((p, i) => list.push(i ? ' · ' : '', p));
+  return ['Signals configured (bands)', [list, ' (group ' + b.group + ')']];
+}
+
+/* The signals the profile's group should give and the report lacks, or null. */
+function bandsMissingMsg(g) {
+  const b = g.rx_bands || {};
+  if (b.state !== 'ok' || b.matches !== false) return null;
+  const lack = (b.systems || []).filter(x => (x.missing || []).length)
+    .map(x => (BAND_SYS[x.sys] || x.sys) + ' ' + x.missing.join(', '));
+  return msg('warn', h('strong', null, 'The receiver reports signal group ' + b.group + ', not what group ' + b.profile_master +
+    ' should configure.'), lack.length ? ' Missing: ' + lack.join('; ') + '.' : '');
+}
+
 function receiverInfo(g) {
   const r = g.receiver || {};
   const link = g.link || {};
@@ -112,7 +143,8 @@ function receiverInfo(g) {
       ['Part number', r.pn],
       ['Chip ID', r.efuse_id],
       ['Firmware date', r.compile_date],
-      ['Answers commands', fmt.yesno(g.responding)],
+      ['Answers commands', g.restarting ? h('span', { class: 't-warn' }, 'Restarting (it said so; it answers again in about 10 s)') :
+        fmt.yesno(g.responding)],
       ['Identity confirmed', fmt.yesno(g.identity_confirmed)],
     ]),
     h('h3', { class: 'section-title' }, 'Link and configuration'),
@@ -137,8 +169,10 @@ function receiverInfo(g) {
       g.detect_failures ? ['Detection failures', fmt.num(g.detect_failures)] : null,
       ['Signal group (receiver)', g.rx_signal_group ? sgName(g.rx_signal_group.master, g.rx_signal_group.slave) :
         h('span', { class: 'muted' }, 'read at the next configuration')],
+      bandsRow(g),
     ]),
     sgRefusedMsg(g),
+    bandsMissingMsg(g),
     h('h3', { class: 'section-title' }, 'Settings read back'),
     readBack(g),
     alerts.length ? h('div', { class: 'stack foot' }, alerts.map(a => {
@@ -153,10 +187,11 @@ function receiverInfo(g) {
 function sgRefusedMsg(g) {
   const r = g.signal_group_refused;
   if (!r) return null;
-  const why = r.reply && r.reply !== 'signal group rejected' ? ' (' + r.reply + ')' : '';
-  return msg('bad', h('strong', null, 'The receiver refused signal group ' + r.master + ' ' + r.slave + why + '.'),
-    r.back_to ? ' It went back to ' + sgName(r.back_to.master, r.back_to.slave) + ' and was configured again; ' +
-      'its firmware may not offer that group. Saving the profile clears this note.' :
+  const why = r.reply && r.reply !== 'signal group rejected' ? ' (it answered "' + r.reply + '")' : '';
+  return msg('bad', h('strong', null, 'This receiver firmware does not accept signal group ' + r.master + ' ' + r.slave + why + '.'),
+    ' Build 25164 accepts only ' + SG_KNOWN_PAIRS + '.',
+    r.back_to ? ' It went back to ' + sgName(r.back_to.master, r.back_to.slave) + ' and was configured again. ' +
+      'Saving the profile clears this note.' :
       ' The group it ran before is not known, so the configuration counts as failed.');
 }
 
@@ -487,7 +522,8 @@ function profileEditor(g, done) {
   const sgChoice = radios('Signal group', 'sgroup', SG_CHOICES.map(c => [c[0], h('span', { class: 'opt' }, h('span', null, c[1]),
     h('small', { class: 'hint' }, c[2]))]), named ? sgKey : null);
   sgChoice.el.querySelector('.choices').classList.add('stacked');
-  const sgCustom = checkbox('Advanced: custom numbers', !named, 'Signal groups by number, for a receiver firmware that offers others.');
+  const sgCustom = checkbox('Advanced: custom numbers', !named, 'Only for a receiver firmware that offers other groups. Build 25164 ' +
+    'accepts exactly ' + SG_KNOWN_PAIRS + ' and refuses any other pair (the station then goes back to the group it ran).');
   const mode = radios('Base mode', 'basemode', [['survey_in', 'Survey-in'], ['fixed', 'Fixed position']], p.base_mode);
   const survey = numInput(p.survey_in_s || 600, { inputmode: 'numeric', maxlength: 4 });
   const fx = p.fixed || {};
@@ -503,9 +539,9 @@ function profileEditor(g, done) {
 
   const F = {
     signal_group_master: field('Signal group (main antenna)', sgm, 'Which satellite signals the receiver tracks on its main antenna input ' +
-      '(a number from the receiver\'s manual). Keep the default unless you know which signals you need.'),
-    signal_group_slave: field('Signal group (second antenna)', sgs, 'The same for the second antenna input. On the UM982 groups 3 and 6 ' +
-      'add Galileo E6, a fourth band for Onocoy\'s band count; 0 turns the second input off.'),
+      '(a number from the receiver\'s manual). Build 25164 takes the pairs ' + SG_KNOWN_PAIRS + ' only.'),
+    signal_group_slave: field('Signal group (second antenna)', sgs, 'The same for the second antenna input; 0 turns it off. The two ' +
+      'numbers only work as one of the receiver\'s pairs.'),
     signal_group: { el: sgChoice.el, input: null, error() {} },
     survey_in_s: field('Survey-in time (seconds)', survey, '1 to 3600. The receiver averages its position this long.'),
     lat_deg: field('Latitude (°)', lat),

@@ -40,6 +40,9 @@ static bool s_1033_valid;
 static int64_t s_1033_us;
 static uint32_t s_1033_bad;
 static obs_1033_t s_1033_rx;   /* decode scratch: GNSS RX task only (the only feeder) */
+static obs_gga_t s_fix;
+static bool s_fix_valid;
+static int64_t s_fix_us;
 
 static uint64_t now_ms(void)
 {
@@ -94,12 +97,44 @@ void gnss_obs_feed_line(const char *line, size_t len)
 {
     obs_gsv_t g;
     if (!obs_gsv_parse(line, len, &g)) {
+        obs_gga_t fix;
+        if (obs_gga_parse(line, len, &fix)) {
+            int64_t t_us = esp_timer_get_time();
+            portENTER_CRITICAL(&s_lock);
+            s_fix = fix;
+            s_fix_valid = true;
+            s_fix_us = t_us;
+            portEXIT_CRITICAL(&s_lock);
+        }
         return;
     }
     uint64_t t = now_ms();
     portENTER_CRITICAL(&s_lock);
     obs_core_feed_gsv(&s_core, &g, t);
     portEXIT_CRITICAL(&s_lock);
+}
+
+esp_err_t gnss_obs_get_fix(gnss_obs_fix_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    out->age_ms = UINT32_MAX;
+    portENTER_CRITICAL(&s_lock);
+    obs_gga_t fix = s_fix;
+    bool valid = s_fix_valid;
+    int64_t at_us = s_fix_us;
+    portEXIT_CRITICAL(&s_lock);
+    if (!valid) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    out->valid = true;
+    out->quality = fix.quality;
+    out->satellites = fix.satellites;
+    int64_t age_ms = (esp_timer_get_time() - at_us) / 1000;
+    out->age_ms = age_ms < 0 ? 0 : (age_ms >= (int64_t)UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)age_ms);
+    return ESP_OK;
 }
 
 void gnss_obs_set_expected(const um98x_rtcm_out_t *rtcm, size_t count)

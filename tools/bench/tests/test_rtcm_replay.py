@@ -401,6 +401,8 @@ def test_reply_builders_reproduce_the_host_test_vectors():
     assert unicore.banner_line("COM1") == host_vector("TV_BANNER")
     assert unicore.mode_line("MODE BASE 1234 TIME 600 0") == host_vector("TV_MODE_SURVEY")
     assert unicore.ack_line("rtcm1230 10", unicore.refusal_text("rtcm1230")) == host_vector("TV_NACK_1230")
+    assert unicore.ack_line("CONFIG SIGNALGROUP 1", unicore.SG_REFUSAL) == host_vector("TV_NACK_SG")
+    assert unicore.notice_line() == host_vector("TV_NOTICE")
     for line in (unicore.ack_line("MODE"), unicore.config_line("COM1", "CONFIG COM1 115200"),
                  unicore.version_line("UM982", "R4.10Build17000")):
         assert check_text(line) in ("unicore", "crc32")
@@ -441,9 +443,9 @@ def test_responder_takes_a_signal_group_restarts_and_comes_back_with_it():
     assert lines_of(r.due()) == [unicore.ack_line("CONFIG SIGNALGROUP 3 6")]
     assert r.restarting()
     clk.t += 1.0
-    r.feed(b"VERSIONA\r\n")                         # unheard while restarting
+    r.feed(b"VERSIONA\r\n")                         # answered with the restarting notice only
     clk.t += 1.0
-    assert r.due() == b"" and not r.rtcm_on()
+    assert lines_of(r.due()) == [unicore.notice_line()] and not r.rtcm_on()
     clk.t += 1.2
     assert r.rtcm_on()                              # the saved outputs are back
     assert lines_of(r.due()) == [unicore.banner_line("COM1")]
@@ -464,7 +466,7 @@ def test_responder_refuses_unknown_and_rejected_groups_without_restarting():
         r.feed(cmd.encode() + b"\r\n")
         clk.t += 0.2
         (line,) = lines_of(r.due())
-        assert line.startswith(f"$command,{cmd},response: PARSING FAILD NO MATCHING FUNC")
+        assert line == unicore.ack_line(cmd, unicore.SG_REFUSAL)   # as build 25164 refuses a group
         assert check_text(line) == "unicore"
     assert r.signal_group() == (3, 6) and r.restarts == 0 and r.rtcm_on()
     r.reject = set()
@@ -626,3 +628,17 @@ def test_cli_respond_options():
     out = subprocess.run([sys.executable, "rtcm_replay.py", "--listen", "127.0.0.1:0", str(LAX), "--respond",
                           "--respond-group", "3,6,1"], cwd=BENCH, capture_output=True, text=True)
     assert out.returncode == 2 and "signal group" in out.stderr
+
+
+def test_responder_reports_the_signals_of_its_group():
+    clk = FakeClock()
+    r = Um982Responder(group=(3, 6), clock=clk)
+    r.feed(b"ANT1GROUPA\r\nANT2GROUPA\r\n")
+    clk.t += 0.2
+    out = lines_of(r.due())
+    assert out[0] == unicore.ack_line("ANT1GROUPA")
+    logs = [x for x in out if x.startswith("#ANT")]
+    assert logs == [unicore.groups_line(unicore.GROUP_BODIES[(3, 6)][0], 1),
+                    unicore.groups_line(unicore.GROUP_BODIES[(3, 6)][1], 2)]
+    assert all(check_text(x) == "crc32" for x in logs)
+    assert logs[0].split(";", 1)[1].startswith("3,5,GP,0x1D,GL,0x03,GA,0x0F")

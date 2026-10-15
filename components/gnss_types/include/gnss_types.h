@@ -105,6 +105,29 @@ typedef struct {
     uint8_t antenna_setup_id;
 } um98x_rx_settings_t;
 
+/** Constellations a signal-group report decodes (um98x_bands.h: GPS, GLONASS, Galileo, BeiDou, QZSS). */
+#define UM98X_BANDS_SYS 5
+
+/** What the receiver said about the signals its running signal group configures. */
+typedef enum {
+    UM98X_BANDS_UNKNOWN = 0,   /**< not asked this boot, or no answer */
+    UM98X_BANDS_OK,            /**< reported: group, present and mask are valid */
+    UM98X_BANDS_REFUSED,       /**< the receiver refused the query (a firmware without it): unknown, never a fault */
+    UM98X_BANDS_UNREAD,        /**< answered in a form this firmware does not read: unknown */
+} um98x_bands_state_t;
+
+/**
+ * The signals the running signal group configures on the main antenna
+ * input, as the receiver reported them after a configuration (no sky
+ * needed). Bit order and the expectation per group: um98x_bands.h.
+ */
+typedef struct {
+    uint8_t state;                   /**< um98x_bands_state_t */
+    uint8_t group;                   /**< the group the receiver named (main antenna input) */
+    uint8_t present;                 /**< bit per constellation: listed in the report */
+    uint32_t mask[UM98X_BANDS_SYS];  /**< configured signals per constellation */
+} um98x_bands_t;
+
 /** Where a base position came from. */
 typedef enum {
     UM98X_POS_NONE = 0,

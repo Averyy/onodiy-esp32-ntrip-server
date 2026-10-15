@@ -177,6 +177,7 @@ static bool s_heap_held_logged;
 static int64_t s_factory_refused_ms = HM_NEVER;
 static uint8_t s_prev_level;
 static uint32_t s_prev_alerts;
+static uint8_t s_prev_why;
 static bool s_prev_suspended;
 static uint8_t s_mode = HL_MODE_FULL;   /* recovery mode in effect */
 static int s_mode_bad = -1;             /* last out-of-range stored value logged */
@@ -287,6 +288,11 @@ static void ladder_log(uint8_t code, uint8_t outcome, uint8_t detail)
     if (code == HL_CODE_FAILED && outcome == HL_OUT_STARTED) {
         if (s_st.state == STATION_STATE_NO_RECEIVER) {
             ESP_LOGW(TAG, "no receiver: the station keeps looking for it on its own schedule");
+        } else if (s_ladder.no_rtcm) {
+            /* Set before this record (health task: the ladder runs in it). */
+            ESP_LOGW(TAG, "GNSS recovery: the receiver answers but sends no RTCM; the configuration and the receiver "
+                          "reset are not repeated (a check every %u min)",
+                     (unsigned)(HL_FAILED_RETRY_MS / 60000u));
         } else {
             ESP_LOGW(TAG, "GNSS recovery: every step tried; the next round starts in %u min",
                      (unsigned)(HL_FAILED_RETRY_MS / 60000u));
@@ -696,6 +702,33 @@ static bool power_tick(void)
     return s_power_alert;
 }
 
+/* The ladder's reason in words, once when it changes. */
+static void log_why(uint8_t why)
+{
+    if (why == s_prev_why) {
+        return;
+    }
+    s_prev_why = why;
+    switch (why) {
+    case HL_WHY_HELD:
+        ESP_LOGI(TAG, "no RTCM: the receiver's first configuration waits for you (the receiver page); not a failure");
+        break;
+    case HL_WHY_SILENT:
+        ESP_LOGW(TAG, "no RTCM and nothing usable from the receiver, no answer to commands: power-cycle the station");
+        break;
+    case HL_WHY_NO_SKY:
+        ESP_LOGW(TAG, "no RTCM: the receiver answers but uses no satellites; check that the antenna is on the socket "
+                      "marked M and sees the sky");
+        break;
+    case HL_WHY_NO_RTCM:
+        ESP_LOGW(TAG, "no RTCM although the receiver answers: check that the antenna is on the socket marked M and "
+                      "sees the sky");
+        break;
+    default:
+        break;   /* none, or 6b (its own log line) */
+    }
+}
+
 static void log_changes(const health_status_t *o)
 {
     if (o->level != s_prev_level) {
@@ -762,6 +795,10 @@ static void tick(void)
     in->reboot_cap_why = cap == LIFECYCLE_CAP_DAY ? HL_CAP_DAY : cap == LIFECYCLE_CAP_HOUR ? HL_CAP_HOUR : HL_CAP_UNKNOWN;
     in->reboot_inhibited = lifecycle_reboot_inhibited(NULL);
     in->detect_passes = s_st.detect_passes;
+    in->answers = s_st.rx_answers;
+    in->rx_held = s_st.first_apply_held;
+    gnss_obs_fix_t fix;
+    in->no_sky = gnss_obs_get_fix(&fix) == ESP_OK && fix.age_ms <= STALL_MS && fix.quality == 0 && fix.satellites == 0;
     bool have_net = network_get_status(&s_net) == ESP_OK;
     hl_status_t prev;
     hl_get_status(&s_ladder, in, &prev);
@@ -843,8 +880,29 @@ static void tick(void)
     if (power_lost) {
         alerts |= HEALTH_ALERT_POWER_LOST;
     }
+    /* Why the receiver path is down: a FAILED level never comes bare. */
+    switch (ls.why) {
+    case HL_WHY_HELD:
+        alerts |= HEALTH_ALERT_RX_HELD;
+        break;
+    case HL_WHY_SILENT:
+        alerts |= HEALTH_ALERT_RECEIVER_SILENT;
+        break;
+    case HL_WHY_NO_SKY:
+        alerts |= HEALTH_ALERT_NO_SATELLITES;
+        break;
+    case HL_WHY_NO_RTCM:
+        alerts |= HEALTH_ALERT_NO_RTCM;
+        break;
+    default:
+        break;   /* none, or 6b (HEALTH_ALERT_RECEIVER_POWER above) */
+    }
+    log_why(ls.why);
 
-    bool degraded = (alerts & ~(uint32_t)HEALTH_ALERT_RECEIVER_POWER) != 0 || casters_down;
+    /* The ladder's reason alerts come with its own level (FAILED, or DEGRADED while only reported or held). */
+    const uint32_t ladder_alerts = HEALTH_ALERT_RECEIVER_POWER | HEALTH_ALERT_RECEIVER_SILENT | HEALTH_ALERT_NO_SATELLITES |
+                                   HEALTH_ALERT_NO_RTCM | HEALTH_ALERT_RX_HELD;
+    bool degraded = (alerts & ~ladder_alerts) != 0 || casters_down;
     o.level = (health_level_t)hm_level(ls.level, degraded);
     o.alerts = alerts;
     o.last_step = (health_step_t)ls.last_step;

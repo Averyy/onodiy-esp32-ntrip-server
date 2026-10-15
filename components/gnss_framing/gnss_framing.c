@@ -15,6 +15,7 @@ enum {
     ST_TEXT_SKIP,    /* overlong line: consume up to its terminator */
     ST_BIN_HDR,      /* binary log header in buf[0 .. fill) */
     ST_BIN_SKIP,     /* binary log body and CRC: `need` bytes left */
+    ST_NOTICE,       /* the receiver's restarting answer: its prefix in buf[0 .. fill) */
 };
 
 /* What the CR that ended the previous line means for a LF right after it. */
@@ -30,6 +31,10 @@ static const uint8_t k_prompt[] = { 'b', 'o', 'o', 't', '>' };
  * suffix of it. Keep that true if the prompt text ever changes. */
 
 static const uint8_t k_bin_sync[] = { 0xAA, 0x44, 0xB5 };
+
+/* The one line without a lead character (gnss_framing.h). */
+static const char k_notice[] = GNSS_NOTICE_PREFIX;
+#define NOTICE_LEN (sizeof(k_notice) - 1u)
 
 static bool is_text_byte(uint8_t c)
 {
@@ -105,6 +110,22 @@ bool gnss_text_line_valid(const char *line, size_t len)
         return crc32_log(line + 1, len - 10) == want;
     }
     return false;
+}
+
+/* The restarting answer: its prefix, then "*hh", the XOR of every byte
+ * before the '*' (there is no lead character to leave out or include). */
+static bool notice_valid(const char *line, size_t len)
+{
+    uint32_t want;
+    if (len < NOTICE_LEN + 3u || memcmp(line, k_notice, NOTICE_LEN) != 0 || line[len - 3] != '*' ||
+        !parse_hex(line + len - 2, 2, &want)) {
+        return false;
+    }
+    uint8_t x = 0;
+    for (size_t i = 0; i < len - 3; i++) {
+        x ^= (uint8_t)line[i];
+    }
+    return x == want;
 }
 
 /* ---- framer ------------------------------------------------------------- */
@@ -212,7 +233,9 @@ static bool has_lead(const uint8_t *p, size_t n)
 static void end_line(gnss_framer_t *f, uint8_t term)
 {
     size_t len = f->fill;
-    if (!gnss_text_line_valid((const char *)f->buf, len)) {
+    bool valid = (f->buf[0] == '$' || f->buf[0] == '#') ? gnss_text_line_valid((const char *)f->buf, len)
+                                                         : notice_valid((const char *)f->buf, len);
+    if (!valid) {
         f->stats.text_rejected++;
         if (len > 1 && has_lead(f->buf + 1, len - 1)) {
             /* Junk that began with a lead byte may hold a real line after
@@ -266,6 +289,9 @@ static void sync_byte(gnss_framer_t *f, uint8_t c)
         break;
     case 0xAA:
         start_unit(f, ST_BIN_HDR, c);
+        break;
+    case 'T':   /* the first byte of GNSS_NOTICE_PREFIX */
+        start_unit(f, ST_NOTICE, c);
         break;
     default:
         discard(f, 1);
@@ -370,6 +396,18 @@ static void step(gnss_framer_t *f, uint8_t c)
             }
             return;
 
+        case ST_NOTICE:
+            /* Only the exact prefix continues; any other byte ends the
+             * candidate, and the bytes after its first are scanned again
+             * (that byte included), so nothing behind it is lost. */
+            f->buf[f->fill++] = c;
+            if (c != (uint8_t)k_notice[f->fill - 1]) {
+                rescan(f);
+            } else if (f->fill == NOTICE_LEN) {
+                f->state = ST_TEXT;   /* the rest is an ordinary line */
+            }
+            return;
+
         case ST_BIN_SKIP:
             f->stats.bytes_discarded++;
             if (--f->need == 0) {
@@ -429,7 +467,7 @@ void gnss_framer_init(gnss_framer_t *f, gnss_frame_cb_t cb, void *ctx)
 
 void gnss_framer_reset(gnss_framer_t *f)
 {
-    if (f->state == ST_RTCM || f->state == ST_TEXT || f->state == ST_BIN_HDR) {
+    if (f->state == ST_RTCM || f->state == ST_TEXT || f->state == ST_BIN_HDR || f->state == ST_NOTICE) {
         discard(f, f->fill);
     }
     f->fill = 0;

@@ -21,6 +21,13 @@ extern "C" {
 
 typedef struct {
     bool force_mode;   /**< send MODE BASE even when the read-back matches: a lock or a re-survey */
+    /**
+     * The caller has a signal group to go back to if the receiver refuses
+     * the profile's (its last successful apply's group, not the profile's):
+     * a plain refusal is then not rolled back with RESET, as when the
+     * session read the running group back (um98x_exec.h).
+     */
+    bool sg_fallback;
 } um98x_apply_opts_t;
 
 /** A signal-group pair as a session read it back. */
@@ -42,6 +49,13 @@ typedef struct {
      * failed and was rolled back like any other failure.
      */
     bool signal_group_rejected;
+    /**
+     * That refusal was a negative reply to CONFIG SIGNALGROUP: the receiver
+     * changed nothing and did not restart. Not rolled back with RESET when
+     * there is a group to go back to (sg_before known, or opts.sg_fallback):
+     * the caller applies that group again at once.
+     */
+    bool signal_group_refused_plain;
     um98x_sg_pair_t sg_before;  /**< the group this session read back before changing it */
     um98x_sg_pair_t sg_read;    /**< the group the session's latest read-back showed (after a change, the new one) */
     bool mode_sent;             /**< MODE BASE was sent and accepted (a survey restarts) */
@@ -76,13 +90,23 @@ typedef struct {
     bool b1cb2a_sent;           /**< BeiDou B1C/B2a in RTCM was turned on (it read back off) */
     bool b1cb2a_ok;             /**< ... and accepted */
     char b1cb2a_reply[UM98X_APPLY_REASON_MAX];    /**< its rejection text, or "timeout" ("" when accepted) */
+
+    /**
+     * The signal-group query of this session (ANT1GROUPA, after the
+     * signal-group step): what the running group configures on the main
+     * antenna input. bands.state UNKNOWN when the session did not get that
+     * far (or no answer); REFUSED with the receiver's reply in bands_reply.
+     */
+    bool bands_asked;
+    um98x_bands_t bands;
+    char bands_reply[UM98X_APPLY_REASON_MAX];     /**< refusal text, "timeout" or "link error" ("" when read) */
 } um98x_apply_result_t;
 
 /* ---- apply preview: what a session would send, for the user to confirm ------------- */
 
 #define UM98X_PREVIEW_TEXT_MAX UM98X_APPLY_CMD_MAX
 /** Most steps of a preview: the fixed head and tail plus one per RTCM message. */
-#define UM98X_PREVIEW_MAX      (UM98X_MAX_RTCM_MSGS + 12u)
+#define UM98X_PREVIEW_MAX      (UM98X_MAX_RTCM_MSGS + 13u)
 
 /** um98x_preview_step_t.kind */
 typedef enum {

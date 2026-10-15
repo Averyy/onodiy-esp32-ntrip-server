@@ -1,0 +1,83 @@
+{
+ "license": "MIT (this project: recorded on our own bench)",
+ "source": "our bench, 2026-10-14: a UM982 running R4.10Build25164 (the board as delivered, no antenna), answers on its COM2 at 115200, captured with a timestamped serial log",
+ "samples": [
+  {
+   "text": "$command,CONFIG SIGNALGROUP 3 6,response: OK*30",
+   "kind": "command_ok",
+   "checksum": "xor8_incl_sync",
+   "note": "accepted; the receiver then restarts (banner 8.0 to 9.2 s after the ack)"
+  },
+  {
+   "text": "$command,CONFIG SIGNALGROUP 7 0,response: OK*32",
+   "kind": "command_ok",
+   "checksum": "xor8_incl_sync",
+   "note": "accepted"
+  },
+  {
+   "text": "$command,CONFIG SIGNALGROUP 5 0,response: OK*30",
+   "kind": "command_ok",
+   "checksum": "xor8_incl_sync",
+   "note": "accepted"
+  },
+  {
+   "text": "$command,CONFIG SIGNALGROUP 4 5,response: OK*34",
+   "kind": "command_ok",
+   "checksum": "xor8_incl_sync",
+   "note": "accepted (the factory group)"
+  },
+  {
+   "text": "$command,CONFIG SIGNALGROUP 5,response: OK*20",
+   "kind": "command_ok",
+   "checksum": "xor8_incl_sync",
+   "note": "one value forms a listed pair (5 = 5 0); no restart, the group was already 5 0"
+  },
+  {
+   "text": "$command,VERSIONB,response: OK*46",
+   "kind": "command_ok",
+   "checksum": "xor8_incl_sync",
+   "note": "a binary log follows"
+  },
+  {
+   "text": "$command,CONFIG SIGNALGROUP 1,response: PARSING FAILED GRAMMAR ERROR,*60",
+   "kind": "signal_group_refused",
+   "checksum": "xor8_incl_sync",
+   "note": "a pair this build does not offer: refused with a trailing comma and no echo of the value, nothing changed, no restart"
+  },
+  {
+   "text": "$command,CONFIG SIGNALGROUP 99 99,response: PARSING FAILED GRAMMAR ERROR,*71",
+   "kind": "signal_group_refused",
+   "checksum": "xor8_incl_sync",
+   "note": "the same for a value out of any table"
+  },
+  {
+   "text": "$command,FOOBAR,response: PARSING FAILED NO MATCHING FUNC  FOOBAR*05",
+   "kind": "command_error",
+   "checksum": "xor8_incl_sync",
+   "note": "an unknown command: 'FAILED' (other builds write 'FAILD'), two spaces, the word repeated"
+  },
+  {
+   "text": "$devicename,COM2*64",
+   "kind": "boot_banner",
+   "checksum": "xor8_incl_sync",
+   "note": "the restart banner on the port that was asked (COM2 here)"
+  },
+  {
+   "text": "The Board is resetting,do not response any command!*39",
+   "kind": "restarting",
+   "checksum": "xor8_text",
+   "note": "the answer to a command sent while the receiver restarts (here VERSIONA 0.4 s after a signal-group ack): no leading '$', the XOR of the text before '*'"
+  }
+ ],
+ "signal_group_bodies": [
+  { "group": "4 5", "query": "ANT1GROUPA", "body": "4,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x07,GQ,0x15" },
+  { "group": "4 5", "query": "ANT2GROUPA", "body": "5,5,GP,0x0D,GL,0x03,GA,0x05,GB,0x07,GQ,0x05" },
+  { "group": "3 6", "query": "ANT1GROUPA", "body": "3,5,GP,0x1D,GL,0x03,GA,0x0F,GB,0x2D,GQ,0x35" },
+  { "group": "3 6", "query": "ANT2GROUPA", "body": "6,4,GP,0x0D,GA,0x05,GB,0x05,GQ,0x05" },
+  { "group": "7 0", "query": "ANT1GROUPA", "body": "7,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x3F,GQ,0x15" },
+  { "group": "7 0", "query": "ANT2GROUPA", "body": "0,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x3F,GQ,0x15" },
+  { "group": "5 0", "query": "ANT1GROUPA", "body": "5,5,GP,0x0D,GL,0x03,GA,0x05,GB,0x07,GQ,0x05" },
+  { "group": "5 0", "query": "ANT2GROUPA", "body": "0,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x3F,GQ,0x15" }
+ ],
+ "signal_group_bodies_note": "the one-shot queries (sent without a rate), answered without sky in each group the build accepts; only the bodies were recorded (the text between the log's header and its checksum), not whole lines"
+}

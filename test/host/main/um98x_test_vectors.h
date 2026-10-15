@@ -14,7 +14,12 @@
  * or extend them with captured lines once the bench runs.
  *
  * The acknowledgement, dump item and banner lines are the public reply
- * samples (their '$'-inclusive XOR checksums verified by hand).
+ * samples (their '$'-inclusive XOR checksums verified by hand). The refusal
+ * lines and the restarting answer are UM982 build 25164's own (our bench,
+ * 2026-10-14; test/fixtures/unicore/um982_build25164_replies.json); the
+ * older "FAILD" spelling of other builds is kept beside them. The
+ * signal-group logs are SYNTHETIC in their header (not captured yet) around
+ * the bodies the bench recorded.
  */
 #pragma once
 
@@ -35,5 +40,18 @@
 #define TV_ACK_UNLOG    "$command,unlog,response: OK*21"
 #define TV_ACK_VERSIONA "$command,VERSIONA,response: OK*45"
 #define TV_CONFIG_SG    "$CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP 3 6*01"
-#define TV_NACK_1230    "$command,rtcm1230 10,response: PARSING FAILD NO MATCHING FUNC  RTCM1230*61"
+#define TV_NACK_1230    "$command,rtcm1230 10,response: PARSING FAILED NO MATCHING FUNC  RTCM1230*24"
+#define TV_NACK_FAILD   "$command,rtcm1230 10,response: PARSING FAILD NO MATCHING FUNC  RTCM1230*61"
 #define TV_BANNER       "$devicename,COM1*67"
+
+/* UM982 build 25164 (our bench, 2026-10-14). */
+#define TV_NACK_FOOBAR  "$command,FOOBAR,response: PARSING FAILED NO MATCHING FUNC  FOOBAR*05"
+#define TV_NACK_SG      "$command,CONFIG SIGNALGROUP 1,response: PARSING FAILED GRAMMAR ERROR,*60"
+#define TV_NOTICE       "The Board is resetting,do not response any command!*39"
+/* The reply to a signal group this build does not offer (after ",response: "). */
+#define TV_SG_REFUSAL   "PARSING FAILED GRAMMAR ERROR,"
+
+/* Signal-group logs: bench bodies in a made-up header (XOR and CRC32 forms). */
+#define TV_GROUPS_36    "#ANT1GROUPA,COM1,0,0.0,FINE,0,0.000,0,0,0;3,5,GP,0x1D,GL,0x03,GA,0x0F,GB,0x2D,GQ,0x35*1F"
+#define TV_GROUPS_SLAVE "#ANT2GROUPA,COM1,0,0.0,FINE,0,0.000,0,0,0;6,4,GP,0x0D,GA,0x05,GB,0x05,GQ,0x05*5A"
+#define TV_GROUPS_70    "#ANT1GROUPA,COM1,0,0.0,FINE,0,0.000,0,0,0;7,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x3F,GQ,0x15*2e149c7f"

@@ -388,6 +388,12 @@ esp_err_t fw_install_gnss_job(uint32_t build, bool cross_layout_ack)
         strlcpy(req.expected_fw, entry.version, sizeof(req.expected_fw));
         req.expected_build = entry.build;
         req.cross_layout_confirmed = cross_layout_ack;
+        if (station_sg_test_running()) {
+            /* Started while the package downloaded: the comparison owns the
+             * receiver until it ends (the web refuses an update during one). */
+            ESP_LOGE(TAG, "a signal-group comparison is running: receiver update not started (start it again "
+                          "when the comparison has ended)");
+        }
         err = station_request_flash(&req);
         bool checking = false;
         if (err == ESP_ERR_NOT_SUPPORTED) {

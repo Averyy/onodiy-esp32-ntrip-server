@@ -2298,3 +2298,42 @@ TEST_CASE("station core: a held device applies nothing by itself; the user's app
     TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
     TEST_ASSERT_EQUAL(STN_WHY_USER, j.why);
 }
+
+TEST_CASE("station core: a plain signal-group refusal is applied back at once, no restart", "[station]")
+{
+    /* The receiver said no and changed nothing: the session was not rolled
+     * back with RESET (nothing restarted), the group it runs went back into
+     * the profile and is applied again right away. */
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    stn_request_apply(&w.s);
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    stn_result_t r = res(STN_E_FAIL);
+    r.sg_back = true;
+    r.restarted = false;
+    r.answered = true;
+    sim_done(&w, &r);
+    TEST_ASSERT_FALSE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+    TEST_ASSERT_FALSE(w.s.last_resort);
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_WHY_SG_BACK, j.why);
+}
+
+TEST_CASE("station core: the signal report raises and clears its alert", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    TEST_ASSERT_FALSE(stn_alerts(&w.s) & STN_ALERT_SIGNALS_MISMATCH);
+    stn_note_signals(&w.s, 0);   /* the receiver reports other signals than the profile's group gives */
+    TEST_ASSERT_TRUE(stn_alerts(&w.s) & STN_ALERT_SIGNALS_MISMATCH);
+    TEST_ASSERT_FALSE(stn_alerts(&w.s) & STN_ALERT_CONFIG_FAILED);
+    stn_note_signals(&w.s, 1);   /* a later report matches */
+    TEST_ASSERT_FALSE(stn_alerts(&w.s) & STN_ALERT_SIGNALS_MISMATCH);
+    stn_note_signals(&w.s, 0);
+    stn_note_signals(&w.s, -1);  /* a firmware that does not report: unknown, no alert to stand on */
+    TEST_ASSERT_FALSE(stn_alerts(&w.s) & STN_ALERT_SIGNALS_MISMATCH);
+}

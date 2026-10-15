@@ -14,7 +14,7 @@
  *  - COMMAND: done on its acknowledgement. Ack timeout 3000 ms from the end
  *    of the write (5000 ms for SAVECONFIG, set by the caller). On a timeout
  *    it is resent 1000 ms after the timeout expired, up to 4 sends in total;
- *    on a negative reply ("PARSING FAILD ...") it is resent once, 100 ms
+ *    on a negative reply ("PARSING FAILED ...") it is resent once, 100 ms
  *    later, and a second negative reply is final (MODE and CONFIG alike;
  *    the version kinds below keep their own schedule and only record the
  *    reason, finishing REJECTED instead of TIMEOUT when no log came). A late
@@ -36,8 +36,23 @@
  *    write every 1000 ms, until a version log arrives or until end_ms
  *    (restart evidence + 20 s).
  *  - PROBE: detection probe: the version query with a leading CR LF, done
- *    on any acknowledgement of it or on a version log; 2 sends, 2000 ms
+ *    on any acknowledgement of it, on a version log or on the receiver's
+ *    restarting answer (a receiver is at this baud); 2 sends, 2000 ms
  *    each.
+ *  - GROUPS: the signal-group query (ANT1GROUPA, one-shot: no rate). Done
+ *    on the main antenna's signal-group log; the ack comes first. After an
+ *    accepting ack the log has 1000 ms, then the query ends as a timeout
+ *    without a resend (the receiver knows the command: its answer was not
+ *    read). A negative reply is final at once (a firmware without the
+ *    query refuses every send alike). No ack: 2 sends, 3000 ms each, 1000
+ *    ms apart. Never fatal to a session.
+ *
+ * The receiver's restarting answer ("The Board is resetting,...") carries
+ * no echo: it answers whatever was sent while the receiver restarts. It is
+ * taken by the transaction in flight: it ends a PROBE (OK) and a command
+ * that restarts the receiver (restart_ends: RESTARTED, the restart is under
+ * way); every other kind only notes it (restarting) and keeps its
+ * schedule, so the command goes out again after the restart.
  *
  * The first write waits for not_before (pacing: 100 ms after the previous
  * reply line).
@@ -70,6 +85,9 @@ extern "C" {
 #define UM98X_VERSION_RESTART_SPAN_MS   20000
 #define UM98X_PROBE_WINDOW_MS           2000
 #define UM98X_PROBE_SENDS               2
+#define UM98X_GROUPS_SENDS              2
+#define UM98X_GROUPS_LOG_MS             1000
+#define UM98X_GROUPS_BODY_MAX           96
 
 #define UM98X_NEVER INT64_MAX
 
@@ -80,6 +98,7 @@ typedef enum {
     UM98X_TXN_VERSION,
     UM98X_TXN_VERSION_RESTART,
     UM98X_TXN_PROBE,
+    UM98X_TXN_GROUPS,
 } um98x_txn_kind_t;
 
 typedef enum {
@@ -107,6 +126,7 @@ typedef struct {
     uint8_t sends;
     uint8_t rejects;
     bool ack_seen;              /**< an acknowledgement for it arrived */
+    bool restarting;            /**< the receiver answered with its restarting notice */
     int64_t first_sent_ms;      /**< end of the first write, UM98X_NEVER before it */
     int64_t next_send_ms;       /**< next write due, UM98X_NEVER = none planned */
     int64_t deadline_ms;        /**< end of the current reply window, UM98X_NEVER = none */
@@ -117,6 +137,7 @@ typedef struct {
     char reason[UM98X_REASON_MAX]; /**< negative reply text */
     um98x_config_readback_t config; /**< CONFIG: parsed items */
     char mode_body[UM98X_MODE_BODY_MAX]; /**< MODE: log body */
+    char groups_body[UM98X_GROUPS_BODY_MAX]; /**< GROUPS: log body (cut to fit) */
     gnss_versiona_t version;    /**< VERSION, VERSION_RESTART, PROBE: parsed log */
     bool version_valid;
     char *text;                 /**< optional: reply line(s), '\n'-separated */

@@ -447,7 +447,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
               "cred_trial": false, "cred_trial_left_s": 0, "cred_pending": false, "pending_ssid": null,
               "cred_reverted": false, "cred_reverted_why": null},
   "receiver": {"state": "streaming", "model": "UM982", "firmware": "R4.10Build18975",
-               "responding": true, "identity_confirmed": true, "profile_applied": true,
+               "responding": true, "restarting": false, "identity_confirmed": true, "profile_applied": true,
                "position_locked": true, "surveying": false, "survey_window_left_s": 0,
                "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "journal": "none",
                "uart_closed": false, "rx_maintenance": false, "maintenance_left_s": 0, "maintenance_chosen_s": 0,
@@ -490,13 +490,15 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.uart_closed` | the receiver UART is closed and `gnss_link` reopens it on its own ("receiver UART closed (reopening)"; never in safe mode, where the link is not opened) |
 | `receiver.rx_maintenance` | receiver maintenance is on (section 8): nothing is sent to the receiver; `maintenance_left_s` until it ends by itself, `maintenance_chosen_s` the chosen duration with extensions (both 0 when off) |
 | `receiver.rtcm_age_ms` | since the last CRC-valid RTCM frame (`gnss_link`), `null` = never |
+| `receiver.restarting` | the receiver said it is restarting (it answered a command with `The Board is resetting,do not response any command!`) within the last 20 s and its restart banner has not come yet: it answers, it is not silent; admin form only (also in `GET /api/gnss`) |
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
 | `receiver.first_apply_held` | the receiver's first configuration waits for the user (`gnss/hold`, section 8): only queries reach the receiver until the user applies; admin form only |
 | `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
 | `receiver.signal_test` | the signal-group comparison (section 8) in short: `null` when none runs and none ended in the last 24 h of this boot; else `{"state", "phase", "group", "left_s", "decide_left_s", "outcome"}`: `state` as in `GET /api/gnss/signal-test`, `phase` 0 or 1 while switching, settling or measuring (else `null`), `group` the group being switched to, measured or (deciding) running, or the one restored to (`{"master", "slave"}`, else `null`), `left_s` the time left in the phase rounded up to 10 s, `decide_left_s` the time left to choose rounded up to a minute (`null` outside those states; rounded so the section changes rarely), `outcome` once decided (`null` while running). Admin form only |
 | `casters[]` | every slot; the full status is in `/api/casters`. `empty`: the slot has no host and is not enabled (never set up, or removed); its `name` is then `""` whatever the stored name is. In safe mode (configs not loaded) no slot is empty and every `name` is `null`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with the console's mountpoint, username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none); `stop_reason` why the Onocoy login guard stopped the slot (`ntrip_stop_t`; `none` unless `state` is `stopped`, section 10) |
-| `alerts[]` | health's alerts (`source: "health"`) and the station's (`source: "station"`); `config_failed` carries `retry_in_s` and `auto_retry` (as `config_retry_in_s` and `config_auto_retry` in `GET /api/gnss`); `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`) |
+| `alerts[]` | health's alerts (`source: "health"`, `health_alert_t`) and the station's (`source: "station"`, `station_alert_t`). A `failed` health level always comes with the alert that says why (below); `config_failed` carries `retry_in_s` and `auto_retry` (as `config_retry_in_s` and `config_auto_retry` in `GET /api/gnss`); `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`) |
 | `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without an enabled protected slot that is set up (`onocoy_ready`), or without a trusted clock. Information only, never a gate |
+| health alerts that say why there is no RTCM | set from the GNSS ladder's evidence while it is in its last step (`failed`), or while a stall is only reported (`alerts_only`, `degraded`): `receiver_power` (bytes but no answer after the receiver reset: power-cycle the station), `receiver_silent` (nothing usable from the receiver and no answer to commands: power-cycle the station), `no_satellites` (the receiver answers, and its own position sentence says no fix with no satellites used: check that the antenna is on the socket marked M and sees the sky), `no_rtcm` (the receiver answers, by text lines or replies to the station, but sends no RTCM: most often the antenna), `rx_held` (the first configuration is held, `first_apply_held`, and the receiver answers: no RTCM is expected yet; level `degraded`, never `failed`, and the ladder declares no stall for it). None of them while the station finds no receiver: its own `no_receiver` alert says that. With `no_satellites` or `no_rtcm` the ladder does not reset the receiver again on its 10-min retry pass (a silent receiver gets the link restart and the rescan only) |
 | `health.factory_reset_refused` | a BOOT-button factory reset was refused within the last 10 min because a receiver update was running (the UI shows a notice); admin form only |
 | `health.recovery_mode` | automatic receiver recovery in effect (`gnss/recovery`, `health_recovery_mode_t`): `full`, `no_reboot` (everything but the ESP32 reboot), `alerts_only` (nothing is sent to the receiver: a stall is only reported and journalled, level `degraded`, `failed` once the ladder gives up); admin form only |
 | `health.reboot_recheck` | no receiver found and an ESP32 reboot was blocked or held: it is looked at again after the next detection pass, when the reboot cap allows and nothing holds it; admin form only |
@@ -661,7 +663,7 @@ oldest.
   "state": "streaming",
   "receiver": {"valid": true, "model": "UM982", "firmware": "R4.10Build18975", "build": 18975,
                "serial": "...", "pn": "...", "efuse_id": "...", "compile_date": "2025/04/30"},
-  "responding": true, "identity_confirmed": true,
+  "responding": true, "restarting": false, "identity_confirmed": true,
   "alerts": [],
   "profile_applied": true, "rtcm1230_supported": true,
   "config_failed": false, "config_retry_in_s": 0, "config_auto_retry": true, "reconfigure_refused": false,
@@ -690,6 +692,10 @@ oldest.
   "maintenance": {"on": false, "left_s": 0, "chosen_s": 0, "choices_s": [900, 1800, 3600, 7200, 14400],
                   "default_s": 1800, "max_left_s": 14400},
   "rx_signal_group": {"master": 3, "slave": 6},
+  "rx_bands": {"state": "ok", "age_s": 3600, "read_unix": 1760000000, "group": 3, "profile_master": 3, "matches": true,
+               "systems": [{"sys": "gps", "signals": ["L1C/A", "L2C", "L2P", "L5"], "bands": 3, "missing": []},
+                           {"sys": "galileo", "signals": ["E1", "E5a", "E5b", "E6"], "bands": 4, "missing": []}],
+               "reply": null},
   "signal_group_refused": null,
   "position": {"locked": true, "source": "survey", "lat_deg": 45.123456789, "lon_deg": -75.123456789,
                "height_m": 85.1234, "sigma_m": 0.0, "locked_unix": 1759000000},
@@ -702,7 +708,8 @@ oldest.
 
 | Field | Notes |
 |---|---|
-| `alerts` | station alerts only (`station_alert_t`) |
+| `alerts` | station alerts only (`station_alert_t`): `unsupported_model`, `config_failed`, `position_mismatch`, `antenna_moved`, `receiver_attention`, `receiver_in_loader`, `no_receiver`, `signals_mismatch` (the signals the receiver reported for its group at the last configuration are not what the profile's group should give: `rx_bands.matches` false; cleared by a report that matches or by one that is not read) |
+| `restarting` | the receiver answered a command with its restarting notice (`The Board is resetting,do not response any command!`, no leading `$`) within the last 20 s and its restart banner has not come yet: it answers, it is not silent. An unasked restart (no signal-group change or RESET of the station's own) counts as restart evidence once, like the banner that ends it |
 | `config_failed`, `config_retry_in_s`, `config_auto_retry` | the last profile apply failed (`config_failed` alert). `config_auto_retry`: the station retries it on its own on its backoff (10 min, 30 min, 2 h, then every 6 h), which it does only with `autocfg` on and for a model it configures; `config_retry_in_s` is the time to that retry (0 when none is due, and always 0 when `config_auto_retry` is false). With `autocfg` off (the first-apply hold included) nothing is retried until the user applies again |
 | `rtcm1230_supported` | `gnss/rtcm1230_ok`: `true` the receiver accepted message 1230 at the last apply, `false` it refused it, `null` never applied (the key is not stored: "not applied yet") |
 | `link.mode` | `off`, `stream`, `command`, `raw` (`gnss_link`) |
@@ -717,7 +724,8 @@ oldest.
 | `rtcm1033` | the latest CRC-valid 1033 the receiver published (`gnss_obs_get_1033`), strings as received; `{"valid": false, "bad_frames": n}` before the first that decoded; `bad_frames` counts 1033 frames that did not decode since boot |
 | `maintenance` | receiver maintenance (below): `left_s`, `chosen_s` 0 when off; `choices_s` the durations offered, `max_left_s` the most time left after extensions |
 | `rx_signal_group` | the signal group the receiver runs as its last configuration read-back this boot showed (`CONFIG SIGNALGROUP`; after a change, the new one); `null` before an apply session read it |
-| `signal_group_refused` | the receiver refused a signal group (any apply, the comparison's switches included): `{"master", "slave", "reply", "back_to"}` with the receiver's reply (`"signal group rejected"` when it acknowledged the pair but its read-back after the restart still showed another group) and the group the stored profile went back to (`{"master", "slave"}`: the group the session read back before the change, else the one of the last successful apply, `gnss/sg_ok`). The station re-applies that group at once; a refused group never raises `config_failed` and is never retried on the backoff. `back_to` `null`: neither was known, and the refusal is an ordinary failed apply (`config_failed`). Kept until the next `PUT /api/gnss/profile` with a profile; `null` otherwise. The UI says "The receiver refused signal group 7 0 (<reply>): it went back to 3 6." |
+| `rx_bands` | what the receiver's running signal group configures on its main antenna input, from the last apply session this boot: every session asks once, after its signal-group step (`ANT1GROUPA`, one-shot without a rate; it answers without sky). `state` (`um98x_bands_state_t`): `unknown` (not asked this boot, or no answer; `age_s` `null`), `ok`, `refused` (the receiver refused the query: a firmware without it; `reply` its text; never a failed apply), `unread` (an answer this firmware does not read). With `ok`: `group` as the receiver named it, `profile_master` the profile's main-antenna group it was compared with, `matches` (the report names that group and lists every signal it should configure; extra signals are fine) and `systems` per constellation (`gps`, `glonass`, `galileo`, `beidou`, `qzss`): `signals` configured, `bands` the frequency bands they cover (L1, L2, L5, L6 buckets, as `GET /api/gnss/signals` counts them), `missing` the signals the profile's group should give and the report lacks. What a group should give (main input, UM982 build 25164, our bench 2026-10-14; the manual's table): `4` GPS L1C/A L2C L2P L5, GLONASS G1 G2, Galileo E1 E5a E5b, BeiDou B1I B2I B3I, QZSS L1C/A L2C L5; `3` the same with Galileo E6 and QZSS L6, BeiDou B1I B3I B1C B2b; `7` the same as `4` with every BeiDou signal (B1C, B2a, B2b added); `5` no L5 at all. Other groups: only the number is compared. The log's header form is PROVISIONAL (the bench recorded the bodies only) |
+| `signal_group_refused` | the receiver refused a signal group (any apply, the comparison's switches included): `{"master", "slave", "reply", "back_to"}` with the receiver's reply (UM982 build 25164: `PARSING FAILED GRAMMAR ERROR,` for every pair but `4 5`, `3 6`, `5 0` and `7 0`; `"signal group rejected"` when it acknowledged the pair but its read-back after the restart still showed another group) and the group the stored profile went back to (`{"master", "slave"}`: the group the session read back before the change, else the one of the last successful apply, `gnss/sg_ok`). The station re-applies that group at once; a refused group never raises `config_failed` and is never retried on the backoff. A plain refusal (a negative reply: nothing changed on the receiver and it did not restart) with such a group to go back to is not rolled back with `RESET`: the re-apply restores the outputs the session quieted, so the receiver is not restarted (nor its survey) for it. `back_to` `null`: neither was known, and the refusal is an ordinary failed apply (`config_failed`, rolled back with `RESET`). Kept until the next `PUT /api/gnss/profile` with a profile; `null` otherwise. The UI says "This receiver firmware does not accept signal group 7 0 (it answered "<reply>"). Build 25164 accepts only 4 5, 3 6, 5 0 and 7 0. It went back to 3 6 and was configured again." |
 | `profile.fixed` | `{lat_deg, lon_deg, height_m}` in `fixed` mode, else `null`; fields a mode does not use are ignored on input and come back cleared (`survey_in_s` 0 in `fixed` mode) |
 | `position` | locked or last surveyed (`station_status_t.position`); `source`: `none`, `survey`, `averaged`, `user`; `sigma_m` 0 = unknown |
 | `arp` | latest CRC-valid 1005/1006 (`gnss_obs_get_arp`), converted to WGS84; `offset_m` = 3-D distance to the locked position, `null` when not locked; `{"valid": false}` before the first frame |
@@ -802,6 +810,7 @@ write). Nothing is sent.
            {"text": "CONFIG", "kind": "query", "when": "always", "saved": false},
            {"text": "MODE", "kind": "query", "when": "always", "saved": false},
            {"text": "CONFIG SIGNALGROUP 3 6", "kind": "write", "when": "if_differs", "saved": true},
+           {"text": "ANT1GROUPA", "kind": "query", "when": "always", "saved": false},
            {"text": "MODE BASE 1234 TIME 600 0", "kind": "write", "when": "if_differs", "saved": false},
            {"text": "CONFIG RTCMB1CB2A ENABLE", "kind": "write", "when": "if_off", "saved": false},
            {"text": "RTCM1005 COM1 1", "kind": "write", "when": "always", "saved": false},
@@ -811,7 +820,7 @@ write). Nothing is sent.
 
 | Field | Notes |
 |---|---|
-| `steps[].text` | the command as the session writes it (the plan builder's own text); `RTCM<msg> COM1 <period>` once per profile message, `CONFIG COM1 <baud>` only when the profile's baud is not the link's, `CONFIG BASEANTENNAMODEL ...` only with an antenna model, `GPGSV COM1 10` only with satellite-in-view output in the profile; a fixed position is sent as ECEF with 4 decimals |
+| `steps[].text` | the command as the session writes it (the plan builder's own text); `ANT1GROUPA` is the signal-group query after the signal-group step (`rx_bands`), sent in every session; `RTCM<msg> COM1 <period>` once per profile message, `CONFIG COM1 <baud>` only when the profile's baud is not the link's, `CONFIG BASEANTENNAMODEL ...` only with an antenna model, `GPGSV COM1 10` only with satellite-in-view output in the profile; a fixed position is sent as ECEF with 4 decimals |
 | `steps[].kind` | `um98x_preview_kind_t`: `query` (reads the receiver), `write` (changes its running configuration) |
 | `steps[].when` | `um98x_preview_when_t`: `always`; `if_differs` (only when the read-back differs from the profile); `if_off` (only when the read-back shows the setting off) |
 | `steps[].saved` | the command saves to the receiver's stored configuration by itself: `CONFIG SIGNALGROUP` (the receiver saves it and restarts) and `SAVECONFIG` |
@@ -1226,11 +1235,25 @@ Slots `0` to `max_slots - 1` (`CONFIG_NTRIP_MAX_CASTERS`).
   "max_slots": 4,
   "onocoy_preset": {"host": "servers.onocoy.com", "port": 2101, "tls_port": 2121, "ntrip_version": 1,
                     "backoff_profile": "fast"},
-  "slots": [{"slot": 0, "config": {}, "status": {}}]
+  "slots": [{"slot": 0, "config": {}, "status": {}}],
+  "warnings": [{"id": "onocoy_open_caster", "onocoy_slots": [0], "open_slots": [1], "rtk2go": true}]
 }
 ```
 
 `config` and `status` are the objects below.
+
+`warnings` (an empty list most of the time; also in safe mode, where the
+configs are not loaded): `onocoy_open_caster` while an enabled slot streams
+to Onocoy and another enabled slot to an open caster (RTK2go, Centipede):
+`onocoy_slots` and `open_slots` name them, `rtk2go` says whether one of the
+open slots is RTK2go (`ntrip_server_open_caster_pair()`). Streams on open
+casters are public, so anyone can take the station's stream there and submit
+it to Onocoy as well, and Onocoy's FAQ says: "Please note that multiple
+submissions of the same streams, e.g. from free or public networks such as
+IGS or RTK2GO, even when done by separate users in the onocoy platform, will
+result in banning." The UI shows that above the slots. It blocks nothing
+(RTK2go slots stay off unless the user turns one on); saving such a pair
+still asks for `dup_stream_ack` (below).
 
 `GET /api/casters/{n}` returns one `{"slot", "config", "status"}` entry. In
 safe mode `config` is `null` (the slots were never loaded) and every status
@@ -1461,11 +1484,11 @@ stored slots under the same lock as the save and reports which one refused
 - `second_onocoy`: another enabled slot already streams to Onocoy;
 - `second_rtk2go`: another enabled slot already streams to RTK2go;
 - `dup_stream_ack_required`: enabling this slot would stream to Onocoy and
-  to an open caster (RTK2go, Centipede) at the same time. Onocoy bans
-  duplicated streams, and anyone can re-inject a stream from an open caster.
-  The UI shows the warning (suggesting a private RTK2go reservation and
-  telling Onocoy support that the user is the original provider of that
-  stream), and on the user's tick sends the same body again with
+  to an open caster (RTK2go, Centipede) at the same time. Streams on open
+  casters are public, anyone can submit them to Onocoy as well, and Onocoy's
+  FAQ says multiple submissions of the same stream, e.g. from RTK2go, "will
+  result in banning" (the rule quoted under `warnings` above). The UI shows
+  that, and on the user's tick sends the same body again with
   `"dup_stream_ack": true`. The acknowledgement is stored with the slot
   being saved.
 
@@ -1943,7 +1966,8 @@ All admin only.
 `byte_capture_built`: this build records the receiver's bytes (bench builds,
 `GET /api/diag/flash-capture`); the UI shows the download only then.
 
-`rtcm_gap_ms` is the time since the last RTCM frame. `gnss_retry_in_s` is
+`alerts` are health's alerts with the names of `GET /api/status` (the
+reasons for no RTCM among them). `rtcm_gap_ms` is the time since the last RTCM frame. `gnss_retry_in_s` is
 the time until the receiver recovery's next retry pass (`null` = none
 scheduled). `factory_reset_refused_age_s` is the time since a BOOT-button
 factory reset was refused because a receiver update was running (`null` =
@@ -2609,10 +2633,10 @@ after it). The journal's `a` and `b` carry these C values.
 | Enum (C) | API strings |
 |---|---|
 | `station_state_t` | `idle`, `detecting`, `configuring`, `streaming`, `flashing`, `flash_recovery`, `recovering`, `no_receiver` |
-| `station_alert_t` | `unsupported_model`, `config_failed`, `position_mismatch`, `antenna_moved`, `receiver_attention`, `receiver_in_loader`, `no_receiver` |
+| `station_alert_t` | `unsupported_model`, `config_failed`, `position_mismatch`, `antenna_moved`, `receiver_attention`, `receiver_in_loader`, `no_receiver`, `signals_mismatch` |
 | `health_level_t` | `ok`, `degraded`, `recovering`, `failed` |
 | `health_step_t` | `none`, `resync`, `link_restart`, `rescan`, `reconfigure`, `receiver_reset`, `reboot` |
-| `health_alert_t` | `power_supply`, `receiver_power`, `bands`, `profile_drift`, `heap_fragmented`, `safe_mode`, `settings_degraded`, `no_upstream`, `link_loss`, `power_lost` |
+| `health_alert_t` | `power_supply`, `receiver_power`, `bands`, `profile_drift`, `heap_fragmented`, `safe_mode`, `settings_degraded`, `no_upstream`, `link_loss`, `power_lost`, `receiver_silent`, `no_satellites`, `no_rtcm`, `rx_held` |
 | `health_recovery_mode_t` | `full`, `no_reboot`, `alerts_only` |
 | `ntrip_state_t` | `disabled`, `wait_network`, `wait_data`, `connecting`, `streaming`, `backoff`, `auth_failed`, `paused`, `config_error`, `banned`, `stopped` |
 | `ntrip_fail_class_t` | `none`, `dns`, `connect`, `tls`, `timeout`, `remote_close`, `write_stall`, `keepalive`, `auth`, `mount_busy`, `config`, `banned`, `login_blocked`, `in_use`, `replaced`, `local` |
@@ -2622,6 +2646,7 @@ after it). The journal's `a` and `b` carry these C values.
 | `um98x_base_mode_t` | `survey_in`, `fixed` |
 | `um98x_pos_source_t` | `none`, `survey`, `averaged`, `user` |
 | `um98x_setting_t` | `unknown`, `on`, `off` |
+| `um98x_bands_state_t` | `unknown`, `ok`, `refused`, `unread` |
 | `um98x_preview_kind_t` | `query`, `write` |
 | `um98x_preview_when_t` | `always`, `if_differs`, `if_off` |
 | `station_live_sky_t` | `off`, `pending`, `on`, `on_profile`, `blocked`, `stopping` |

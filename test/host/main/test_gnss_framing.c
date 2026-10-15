@@ -8,9 +8,11 @@
  * each, long lines, NUL noise, binary logs, a fuzzed stream with exact byte
  * accounting, and the loader prompt detector.
  *
- * Text vectors: the '$' acknowledgement, configuration, failure and banner
- * lines are public examples of the receiver's replies; the NMEA sentence is
- * the textbook GGA example. The '#' mode and version lines are constructed
+ * Text vectors: the '$' acknowledgement, configuration and banner lines are
+ * public examples of the receiver's replies; the failure lines and the
+ * restarting answer are UM982 build 25164's own (our bench, 2026-10-14;
+ * test/fixtures/unicore), with the older "FAILD" spelling of other builds
+ * kept as well; the NMEA sentence is the textbook GGA example. The '#' mode and version lines are constructed
  * here in the documented layout (not captures from our receiver) and carry
  * checksums computed for this test.
  */
@@ -26,7 +28,10 @@
 #define L_ACK      "$command,unlog,response: OK*21"
 #define L_ACK_VER  "$command,VERSIONA,response: OK*45"
 #define L_CONFIG   "$CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP 3 6*01"
+#define L_FAILED   "$command,FOOBAR,response: PARSING FAILED NO MATCHING FUNC  FOOBAR*05"
+#define L_SG_NO    "$command,CONFIG SIGNALGROUP 1,response: PARSING FAILED GRAMMAR ERROR,*60"
 #define L_FAILD    "$command,rtcm1230 10,response: PARSING FAILD NO MATCHING FUNC  RTCM1230*61"
+#define L_NOTICE   "The Board is resetting,do not response any command!*39"
 #define L_BANNER   "$devicename,COM1*67"
 #define L_NMEA     "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47"
 #define L_NMEA_IN  "$RESET*55"
@@ -334,7 +339,7 @@ TEST_CASE("text lines interleave with RTCM frames", "[gnss_framing]")
     feed(k_v1074, sizeof(k_v1074));
     feed_str(L_MODE "\r\n" L_ACK_VER "\r\n" L_VERSION "\r\n");
     feed(k_v1005, sizeof(k_v1005));
-    feed_str(L_CONFIG "\r\n" L_FAILD "\r\n" L_BANNER "\r\n" L_NMEA_IN "\r\n");
+    feed_str(L_CONFIG "\r\n" L_FAILED "\r\n" L_BANNER "\r\n" L_NMEA_IN "\r\n");
 
     TEST_ASSERT_EQUAL_size_t(12, s_count);
     expect_line(0, L_ACK);
@@ -346,7 +351,7 @@ TEST_CASE("text lines interleave with RTCM frames", "[gnss_framing]")
     expect_line(6, L_VERSION);
     expect_rtcm(7, k_v1005, sizeof(k_v1005), 1005);
     expect_line(8, L_CONFIG);
-    expect_line(9, L_FAILD);
+    expect_line(9, L_FAILED);
     expect_line(10, L_BANNER);
     expect_line(11, L_NMEA_IN);
 
@@ -361,7 +366,8 @@ TEST_CASE("text lines interleave with RTCM frames", "[gnss_framing]")
 TEST_CASE("both '$' rules and both '#' rules are accepted", "[gnss_framing]")
 {
     static const char *const valid[] = {
-        L_ACK, L_ACK_VER, L_CONFIG, L_FAILD, L_BANNER,   /* '$' included */
+        L_ACK, L_ACK_VER, L_CONFIG, L_FAILED, L_BANNER,  /* '$' included */
+        L_SG_NO, L_FAILD,                                /* build 25164's refusal; the older spelling */
         L_NMEA, L_NMEA_IN,                               /* NMEA rule */
         L_MODE,                                          /* '#' XOR */
         L_VERSION,                                       /* '#' CRC32 */
@@ -372,6 +378,60 @@ TEST_CASE("both '$' rules and both '#' rules are accepted", "[gnss_framing]")
     for (size_t i = 0; i < sizeof(valid) / sizeof(valid[0]); i++) {
         TEST_ASSERT_TRUE_MESSAGE(gnss_text_line_valid(valid[i], strlen(valid[i])), valid[i]);
     }
+}
+
+TEST_CASE("the receiver's restarting answer is a line without a lead character", "[gnss_framing]")
+{
+    /* As build 25164 sends it between other output, whole and byte by byte. */
+    start();
+    feed_str(L_ACK "\r\n" L_NOTICE "\r\n");
+    feed(k_v1005, sizeof(k_v1005));
+    feed_str(L_NOTICE "\r\n" L_BANNER "\r\n");
+    TEST_ASSERT_EQUAL_size_t(5, s_count);
+    expect_line(0, L_ACK);
+    expect_line(1, L_NOTICE);
+    expect_rtcm(2, k_v1005, sizeof(k_v1005), 1005);
+    expect_line(3, L_NOTICE);
+    expect_line(4, L_BANNER);
+    gnss_framing_stats_t st = stats();
+    TEST_ASSERT_EQUAL_UINT64(4, st.text_lines);
+    TEST_ASSERT_EQUAL_UINT64(0, st.bytes_discarded);
+    TEST_ASSERT_EQUAL_UINT64(0, st.text_rejected);
+
+    start();
+    static const char one[] = L_NOTICE "\n";
+    for (size_t i = 0; i < sizeof(one) - 1; i++) {
+        feed(one + i, 1);
+    }
+    TEST_ASSERT_EQUAL_size_t(1, s_count);
+    expect_line(0, L_NOTICE);
+
+    /* The other checksum forms do not apply to it. */
+    TEST_ASSERT_FALSE(gnss_text_line_valid(L_NOTICE, strlen(L_NOTICE)));
+}
+
+TEST_CASE("a 'T' that does not start the restarting answer costs nothing behind it", "[gnss_framing]")
+{
+    start();
+    feed_str("The Board is resetting,do not response any command!*38\r\n");   /* checksum off by one */
+    feed_str("T" L_ACK "\r\n");                                               /* a lone 'T' before a line */
+    feed_str("The Board is");                                                 /* cut short by an RTCM frame */
+    feed(k_v1074, sizeof(k_v1074));
+    feed_str("The Board was resetting\r\n");                                  /* not the prefix */
+    feed_str("Th" L_NOTICE "\r\n");                                           /* a false start right before it */
+    feed_str("The Board is resetting,do not response any command!" "\r\n");  /* no checksum */
+    feed_str(L_NMEA "\r\n");
+
+    TEST_ASSERT_EQUAL_size_t(4, s_count);
+    expect_line(0, L_ACK);
+    expect_rtcm(1, k_v1074, sizeof(k_v1074), 1074);
+    expect_line(2, L_NOTICE);
+    expect_line(3, L_NMEA);
+    gnss_framing_stats_t st = stats();
+    TEST_ASSERT_EQUAL_UINT64(3, st.text_lines);
+    TEST_ASSERT_EQUAL_UINT64(2, st.text_rejected);   /* wrong checksum, no checksum */
+    size_t kept = strlen(L_ACK "\r\n" L_NOTICE "\r\n" L_NMEA "\r\n") + sizeof(k_v1074);
+    TEST_ASSERT_EQUAL_UINT64(st.bytes_in - kept, st.bytes_discarded);
 }
 
 TEST_CASE("corrupted lines are rejected and counted", "[gnss_framing]")
@@ -667,7 +727,7 @@ static size_t put_noise(uint8_t *p, size_t max)
 TEST_CASE("fuzzed stream: every unit recovered in order, every byte accounted", "[gnss_framing]")
 {
     static const char *const lines[] = {
-        L_ACK, L_ACK_VER, L_CONFIG, L_FAILD, L_BANNER, L_NMEA, L_NMEA_IN, L_MODE, L_VERSION,
+        L_ACK, L_ACK_VER, L_CONFIG, L_FAILED, L_BANNER, L_NMEA, L_NMEA_IN, L_MODE, L_VERSION, L_NOTICE, L_SG_NO,
     };
     static gnss_framer_t fr;
     for (uint32_t seed = 1; seed <= 4; seed++) {

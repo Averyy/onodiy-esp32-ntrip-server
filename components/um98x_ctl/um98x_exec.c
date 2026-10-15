@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "um98x_bands.h"
 #include "um98x_base.h"
 #include "um98x_profile.h"
 
@@ -88,7 +89,22 @@ void um98x_chan_init(um98x_chan_t *ch)
     ch->last_answer_ms = UM98X_NONE_MS;
     ch->last_version_write_ms = UM98X_NONE_MS;
     ch->last_banner_ms = UM98X_NONE_MS;
+    ch->last_resetting_ms = UM98X_NONE_MS;
+    ch->notice_restart_ms = UM98X_NONE_MS;
     ch->last_restart_ms = UM98X_NONE_MS;
+}
+
+/* A restart counted from a restarting answer, whose banner has not come
+ * yet: the same restart as a line now. */
+static bool notice_restart_open(const um98x_chan_t *ch, int64_t now_ms)
+{
+    return ch->notice_restart_ms != UM98X_NONE_MS && now_ms - ch->notice_restart_ms <= UM98X_RESTART_LOST_MS;
+}
+
+bool um98x_chan_restarting(const um98x_chan_t *ch, int64_t now_ms)
+{
+    return ch->last_resetting_ms != UM98X_NONE_MS && now_ms - ch->last_resetting_ms <= UM98X_RESTART_LOST_MS &&
+           (ch->last_banner_ms == UM98X_NONE_MS || ch->last_banner_ms < ch->last_resetting_ms);
 }
 
 unsigned um98x_chan_dispatch(um98x_chan_t *ch, const char *line, size_t len, const um98x_line_t *l, int64_t now_ms)
@@ -117,8 +133,29 @@ unsigned um98x_chan_dispatch(um98x_chan_t *ch, const char *line, size_t len, con
         ch->last_banner_ms = now_ms;
         ev |= UM98X_CHAN_WAKE;   /* a restart wait may be watching for it */
         if (!consumed && !ch->expect_restart) {
+            bool counted = notice_restart_open(ch, now_ms);   /* its restarting answer came first */
+            ch->notice_restart_ms = UM98X_NONE_MS;
+            ch->last_restart_ms = now_ms;
+            if (!counted) {
+                ch->stats.restarts++;
+                ev |= UM98X_CHAN_RESTART;
+            }
+        }
+        return ev;
+    }
+    if (l->kind == UM98X_LINE_RESETTING) {
+        /* The receiver restarts: it answered a command sent meanwhile. Ours
+         * (a signal-group change, RESET) when one is under way or the
+         * command in flight restarts it; otherwise it restarted by itself,
+         * counted once however many commands it answers so. */
+        ch->stats.resetting++;
+        ch->last_resetting_ms = now_ms;
+        ev |= UM98X_CHAN_WAKE;
+        bool ours = ch->expect_restart || (consumed && ch->txn.restart_ends);
+        if (!ours && !notice_restart_open(ch, now_ms)) {
             ch->stats.restarts++;
             ch->last_restart_ms = now_ms;
+            ch->notice_restart_ms = now_ms;
             ev |= UM98X_CHAN_RESTART;
         }
         return ev;
@@ -252,7 +289,8 @@ static um98x_res_t version_query(um98x_exec_t *ex, um98x_txn_kind_t kind, uint8_
     um98x_txn_status_t st = um98x_exec_txn(ex, kind, UM98X_CMD_VERSION, &o);
     lock(ex);
     if (ack_seen != NULL) {
-        *ack_seen = ex->ch->txn.ack_seen;
+        /* An answer without the log: not ready (a restarting answer included). */
+        *ack_seen = ex->ch->txn.ack_seen || ex->ch->txn.restarting;
     }
     if (out != NULL) {
         if (st == UM98X_TXN_OK && ex->ch->txn.version_valid) {
@@ -517,6 +555,40 @@ static void txn_reason(um98x_exec_t *ex, um98x_txn_status_t st, char *out, size_
     }
 }
 
+um98x_res_t um98x_exec_groups(um98x_exec_t *ex, um98x_bands_t *out, char *reason, size_t cap)
+{
+    memset(out, 0, sizeof(*out));
+    out->state = UM98X_BANDS_UNKNOWN;
+    if (reason != NULL && cap > 0) {
+        reason[0] = '\0';
+    }
+    um98x_txn_status_t st = um98x_exec_txn(ex, UM98X_TXN_GROUPS, UM98X_CMD_GROUPS, NULL);
+    char body[UM98X_GROUPS_BODY_MAX];
+    bool acked;
+    lock(ex);
+    copy_str(body, sizeof(body), ex->ch->txn.groups_body);
+    acked = ex->ch->txn.ack_seen;
+    unlock(ex);
+    switch (st) {
+    case UM98X_TXN_OK:
+        if (um98x_bands_parse(body, strlen(body), out)) {
+            return UM98X_OK;
+        }
+        out->state = UM98X_BANDS_UNREAD;   /* a log in a form this firmware does not read */
+        return UM98X_E_FAILED;
+    case UM98X_TXN_REJECTED:
+        out->state = UM98X_BANDS_REFUSED;
+        txn_reason(ex, st, reason, cap);
+        return UM98X_E_REJECTED;
+    default:
+        /* Accepted with no log this firmware reads: an answer, not a
+         * silence. Nothing at all: unknown. */
+        out->state = acked ? UM98X_BANDS_UNREAD : UM98X_BANDS_UNKNOWN;
+        txn_reason(ex, st, reason, cap);
+        return st == UM98X_TXN_LINK_ERROR ? UM98X_E_LINK : UM98X_E_TIMEOUT;
+    }
+}
+
 /* One configuring command; record = a failure is the session's failure. */
 static um98x_res_t step(session_t *s, um98x_txn_kind_t kind, const char *cmd, bool restart_ends, bool record,
                         um98x_txn_status_t *st_out)
@@ -599,7 +671,9 @@ static um98x_res_t signal_group(session_t *s)
     (void)step(s, UM98X_TXN_COMMAND, cmd, true, false, &st);
     if (st == UM98X_TXN_REJECTED || st == UM98X_TXN_LINK_ERROR) {
         fail_txn(s, cmd, st);
-        s->r->signal_group_rejected = (st == UM98X_TXN_REJECTED);   /* the receiver said no to this pair */
+        /* The receiver said no to this pair: nothing changed, no restart. */
+        s->r->signal_group_rejected = (st == UM98X_TXN_REJECTED);
+        s->r->signal_group_refused_plain = (st == UM98X_TXN_REJECTED);
         set_expect_restart(ex, false);
         return UM98X_E_FAILED;
     }
@@ -617,7 +691,9 @@ static um98x_res_t signal_group(session_t *s)
         t_ack = ex->ch->txn.first_sent_ms;
         unlock(ex);
     }
-    bool banner = (st == UM98X_TXN_RESTARTED) || wait_banner(ex, banners0, t_ack + UM98X_RESTART_BANNER_MS);
+    /* RESTARTED may come from the receiver's restarting answer, which comes
+     * before its banner: the banner is waited for either way. */
+    bool banner = wait_banner(ex, banners0, t_ack + UM98X_RESTART_BANNER_MS);
     int64_t end = t_ack + UM98X_RESTART_LOST_MS;
     if (banner) {
         lock(ex);
@@ -887,6 +963,12 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
     const uint64_t plan_banners = banner_count(ex);
     char b1c_cmd[UM98X_CMD_MAX] = "";   /* the B1C/B2a command once sent */
 
+    /* What the running group configures on the main antenna input, while
+     * the port is quiet (never fatal: a firmware without the query just
+     * leaves it unknown). */
+    s->r->bands_asked = true;
+    (void)um98x_exec_groups(ex, &s->r->bands, s->r->bands_reply, sizeof(s->r->bands_reply));
+
     for (size_t i = 0; i < plan.count; i++) {
         const um98x_step_t *st = &plan.step[i];
         char cmd[UM98X_CMD_MAX];
@@ -1005,7 +1087,11 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
     }
 
     um98x_res_t res = run_plan(&s, opts, identity, queried);
-    if (res != UM98X_OK && res != UM98X_E_LOST && s.accepted) {
+    /* A plain refusal of the signal group changed nothing on the receiver:
+     * with a group to go back to, the caller applies that at once, which
+     * restores the quieted outputs without restarting the receiver. */
+    bool refused_kept = r->signal_group_refused_plain && (r->sg_before.known || (opts != NULL && opts->sg_fallback));
+    if (res != UM98X_OK && res != UM98X_E_LOST && s.accepted && !refused_kept) {
         rollback(&s);
     }
     r->baud = pt->get_baud(pt->ctx);

@@ -43,7 +43,8 @@
  *
  * Replies (one command in flight): ack timeout 3000 ms (SAVECONFIG 5000 ms)
  * from the end of the write; on a timeout up to 3 resends (4 sends), each
- * 1000 ms after the timeout; on "PARSING FAILD" one resend, then final; a
+ * 1000 ms after the timeout; on a negative reply ("PARSING FAILED ...", or
+ * "PARSING FAILD ..." as older builds spell it) one resend, then final; a
  * late acknowledgement of an earlier send completes the command; the next
  * command goes out 100 ms after the previous reply line. Queries with data
  * (VERSIONA, MODE, CONFIG) complete on their data, not on the ack; the
@@ -65,10 +66,20 @@
  * when they change).
  *
  * Restart evidence: the restart banner (unless our own restart is under
- * way), or a version log nobody asked for (no VERSIONA written in the
- * preceding 10 s). It is counted and reported through the callback set with
+ * way), the receiver's restarting answer ("The Board is resetting,...", its
+ * reply to a command sent while it restarts; same terms), or a version log
+ * nobody asked for (no VERSIONA written in the preceding 10 s); one restart
+ * counts once. It is counted and reported through the callback set with
  * um98x_ctl_set_restart_cb(); the station posts its receiver-restarted
- * event from there.
+ * event from there. Between a restarting answer and the banner the stats
+ * say the receiver is restarting (um98x_ctl_stats_t.restarting): it
+ * answers, it is not silent.
+ *
+ * Signal groups: every apply session asks once, after its signal-group
+ * step, which signals the running group configures on the main antenna
+ * input (ANT1GROUPA, one-shot: a rate would start a periodic log), and
+ * reports it in the result (um98x_bands.h). A receiver firmware without
+ * the query refuses it: unknown, never a failure.
  *
  * Base position: survey-in restarts on every reconfigure, receiver reset or
  * power cut and lands somewhere else each time (metre-level scatter), which
@@ -335,9 +346,11 @@ typedef struct {
     uint64_t bad;                /**< command-layer prefix with a wrong checksum or form */
     uint64_t other;              /**< NMEA and other lines (not for this layer) */
     uint64_t banners;            /**< restart banners */
+    uint64_t resetting;          /**< restarting answers ("The Board is resetting,...") */
     uint64_t restarts;           /**< unsolicited restart evidence */
     uint32_t last_answer_age_ms; /**< since the last checksum-valid command-layer line (UINT32_MAX = never): "the receiver answers" */
     uint32_t last_restart_age_ms;/**< since the last unsolicited restart evidence (UINT32_MAX = never) */
+    bool restarting;             /**< the receiver said it restarts (within 20 s) and its banner has not come yet */
 } um98x_ctl_stats_t;
 
 esp_err_t um98x_ctl_get_stats(um98x_ctl_stats_t *out);
