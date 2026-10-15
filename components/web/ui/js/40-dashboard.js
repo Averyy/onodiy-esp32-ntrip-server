@@ -2,22 +2,16 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Status page: the top card (a title, one line with the most important
- * thing and what to do, its button, "Also:" lines for other alerts and a few
- * labelled facts), Onocoy's day (while its slot counts), three receiver rows
- * and, once a second caster is set up, the other casters. Everything comes
- * from stationState() (15-state.js), so no card contradicts another; the
- * browser tab's title follows the top card ("Not streaming · onocoydiy").
+ * Status page: the top card (title, one line, its button, "Also:" lines,
+ * a few facts), Onocoy's day, three receiver rows and the other casters,
+ * all from stationState() (15-state.js), so no card contradicts another.
  *
- * Built from the status model on every update and patched into the page (no
- * inputs, and no element with a listener of its own: patch() replaces such
- * an element every time, which would take the keyboard focus with it), so
- * links and buttons keep the keyboard focus across the 1 s updates. The
- * buttons ("Check again", "End now", "Leave safe mode") carry data-act and
- * the page's root handles their clicks; patchDetect() keeps the focus on the
- * line when "Check again" goes. The title is announced to screen readers
- * when it changes. Visitors without a session see the public page: the top
- * card, the casters by name and state, and the signals with the band table.
+ * Patched into the page on every update with no element that has a
+ * listener of its own (patch() would replace it, and the focus with it):
+ * the buttons carry data-act and the page's root handles their clicks;
+ * patchDetect() keeps the focus when "Check again" goes. The title is
+ * announced when it changes. Visitors without a session see the top card,
+ * the casters by name and state, and the signals with the band table.
  */
 
 Views.dashboard = {
@@ -81,14 +75,15 @@ function heroAction(a) {
 
 function heroCard(s, st) {
   const acts = st.actions.map(heroAction).filter(Boolean);
-  /* The no-receiver line says whether a search runs: it takes the focus when "Check again" goes (patchDetect). */
+  /* The no-receiver plan line says whether a search runs: it takes the focus when "Check again" goes (patchDetect). */
   const noRx = st.key === 'no_receiver';
+  const focusLine = on => (on ? { tabindex: '-1', 'data-detect-text': '' } : {});
   const lead = st.trial ? ['Trying ' + st.trial + ': ', trialLeftEl(s.network || {}), '. ', st.lead] : st.lead;
   return h('section', { class: 'card hero ' + st.tone },
     h('h2', { class: 'state', 'aria-live': 'polite', 'aria-atomic': 'true' }, st.head),
-    h('p', { class: 'line', tabindex: noRx ? '-1' : null, 'data-detect-text': noRx ? '' : null }, lead),
+    h('p', Object.assign({ class: 'line' }, focusLine(noRx && !st.plan)), lead),
     acts.length ? h('div', { class: 'hero-actions form-actions' }, acts) : null,
-    st.plan ? h('p', { class: 'muted small' }, st.plan) : null,
+    st.plan ? h('p', Object.assign({ class: 'muted small' }, focusLine(noRx)), st.plan) : null,
     st.also.length ? h('ul', { class: 'also' }, st.also.map(a => h('li', { class: a.tone },
       h('span', { class: 'ic', 'aria-hidden': 'true' }, a.tone === 'bad' ? '✕' : a.tone === 'info' ? 'i' : '!'),
       h('span', null, h('strong', null, 'Also: ' + a.title + '.'), a.text ? ' ' + a.text : ''),
@@ -147,12 +142,14 @@ function glonassView(r, q) {
   return r.rtcm1230_supported === true ? ['Tracked ', okMark(true)] : 'Tracked';
 }
 
-/* Three receiver rows, no buttons, and a link to the page with the rest. */
+/* Three receiver rows and a link to the page with the rest; without corrections only the position. */
 function receiverCard(s, st) {
   const r = s.receiver || {};
+  const live = st.delivering;
   return h('section', { class: 'card fit-kv' },
     cardHead('Receiver', link('Details', '#/receiver', 'head-link')),
-    kv([['Bands', bandsView(r, st.quality)], ['GLONASS', glonassView(r, st.quality)], ['Position', positionText(r, st.delivering)]]));
+    kv([live ? ['Bands', bandsView(r, st.quality)] : null, live ? ['GLONASS', glonassView(r, st.quality)] : null,
+      ['Position', positionText(r, live)]]));
 }
 
 /** Today's online share: whole at 0 % and 100 %, else two decimals, rounded down (never "100.00" short of 100). */
@@ -172,20 +169,21 @@ function casterWhy(c) {
 }
 
 /*
- * One caster in one line: name · state · today's online share; why and a
- * button when it is on but does not stream (neither again when the top card
- * says it, with its own button: `subject`).
+ * One caster in one line: name · state · today's share; why and a button
+ * when it does not stream. The one the top card names: name and share only.
  */
 function casterRow(c, admin, subject) {
   const off = c.enabled === false || c.state === 'disabled';
   const tone = casterTone(c.state);
   const share = admin && !off && (c.today_online_s || c.today_offline_s) ?
     onlineShare(c.today_online_s || 0, c.today_offline_s || 0) + ' today' : null;
-  const trouble = admin && !off && c.state !== 'streaming' && c.slot !== subject;
+  const named = admin && c.slot === subject;
+  const trouble = admin && !off && c.state !== 'streaming' && !named;
   const why = trouble ? casterWhy(c) : null;
   return h('div', { class: 'cline' },
     h('div', null,
-      h('span', { class: 'name' }, casterName(c)), ' · ', h('span', { class: tone ? 't-' + tone : 'muted' }, lbl(L.caster, c.state)),
+      h('span', { class: 'name' }, casterName(c)),
+      named ? null : [' · ', h('span', { class: tone ? 't-' + tone : 'muted' }, lbl(L.caster, c.state))],
       share ? h('span', { class: 'muted' }, ' · ' + share) : null,
       why ? h('div', { class: 'muted small' }, why) : null),
     trouble ? link(c.state === 'stopped' ? 'What to do' : 'Details', '#/casters', 'btn small') : null);
@@ -216,7 +214,7 @@ function adminDashboard(s, st, openSlots) {
   const rx = receiverCard(s, st);
   /* A lone receiver card takes the row (no empty cell beside it). */
   if (!ono && !others) rx.classList.add('wide');
-  return [heroCard(s, st), h('div', { class: 'grid' }, ono, rx, others)];
+  return [heroCard(s, st), h('div', { class: 'grid starts' }, ono, rx, others)];
 }
 
 /* The public page: the top card, the casters, and the signals while the receiver delivers them. */
@@ -228,13 +226,11 @@ function publicDashboard(s, st, sig) {
 }
 
 /*
- * "Check again" (POST /api/gnss/detect) on the no-receiver alert, on pages
- * rebuilt every refresh (the dashboard and the Health tab, both through
- * patchDetect()): a button without a listener of its own, so patch() keeps
- * it and the keyboard focus on it; the page's root handles its click
- * (detectClicks). After a request it reads "Searching…" for a few seconds,
- * until the station's own state says it searches; then the button goes,
- * and the keyboard focus moves to the alert's text, which says so.
+ * "Check again" (POST /api/gnss/detect) on pages rebuilt every refresh
+ * (patchDetect()): no listener of its own, so patch() keeps it and the
+ * focus; the root handles its click (detectClicks). It reads "Searching…"
+ * until the station says it searches; then it goes, and the focus moves to
+ * the line that says so.
  */
 const DETECT = { askedAt: 0, busy: false };
 

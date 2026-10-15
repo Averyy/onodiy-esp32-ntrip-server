@@ -2,38 +2,28 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Casters: one card per caster with live state and the full connection
- * statistics, one card to add a caster while slots are free, and the
- * caster editor (also used by the setup wizard).
+ * Casters: one card per caster (live state, folded connection details),
+ * one card to add a caster while slots are free, and the caster editor (the
+ * setup's Onocoy step uses its Onocoy rules).
  *
- * Editor rules mirror the server's (PUT /api/casters/{n}); the server has
- * the last word. Byte limits are checked in UTF-8 bytes, as the station
- * stores them. Passwords are write-only: an empty field keeps the stored
- * one while the host stays the same. Streaming to Onocoy and to an open
- * caster at the same time needs the user's explicit acknowledgement, which
- * the server asks for with 409 caster_policy / dup_stream_ack_required, and
- * while both stream the open caster's card shows a standing warning (GET
- * /api/casters warnings) that sums up Onocoy's rule and links it; it blocks
- * nothing.
+ * Editor rules mirror the server's (PUT /api/casters/{n}), which has the
+ * last word; byte limits count UTF-8 bytes. Passwords are write-only: an
+ * empty field keeps the stored one while the host stays. Onocoy and an open
+ * caster at once need the user's acknowledgement (409 caster_policy /
+ * dup_stream_ack_required); while both stream, the open caster's card
+ * carries a standing warning (GET /api/casters warnings) that blocks nothing.
  *
- * Every caster choice shows the same box: what the caster is, what to do
- * before it works, and a link to the caster's own guide (PRESET_INFO); once
- * the caster is set up the box folds away. The editor asks for what the
- * chosen caster needs; the rest waits under "More options".
+ * Every caster choice shows the same box (PRESET_INFO: what it is, what to
+ * do, its guide), folded once the caster is set up; the rest waits under
+ * "More options". Onocoy asks for what its console gives (the server as
+ * text, mountpoint, username, password); a slot the login guard stopped
+ * shows why and a "Try again" that warns first. A test Onocoy slot (bench
+ * and QEMU builds) counts as Onocoy at its own host.
  *
- * Onocoy slots ask for exactly what the Onocoy console gives: the server
- * (fixed, shown as a line of text), mountpoint, username and password. A
- * slot the station's Onocoy login guard stopped shows why and a "Try again"
- * that warns first (every failed login counts toward Onocoy's login block).
- * A test Onocoy slot (bench and QEMU builds) counts as Onocoy at its own
- * host.
- *
- * One Onocoy slot per station: a new slot starts on RTK2go, not Onocoy,
- * while another slot has an Onocoy host (set up or not, on or off), and
- * says so once Onocoy is chosen; the Onocoy choice is hidden only while
- * another enabled slot streams to Onocoy (the server refuses a second one).
- * A slot saved without a host and not enabled is empty again: it is stored
- * without a name, so no page shows the caster it held before.
+ * One Onocoy slot per station: a new slot starts on RTK2go while another
+ * slot has an Onocoy host, and says so once Onocoy is chosen; the Onocoy
+ * choice is hidden while another enabled slot streams to Onocoy. A slot
+ * saved without a host and not enabled is empty again, stored without a name.
  */
 
 const PRESETS = [
@@ -106,11 +96,6 @@ function presetBox(id, box) {
 /** The summary of a set-up caster's folded box ("How to set up Onocoy"). */
 function presetFoldText(id) {
   return 'How to set up ' + ((PRESETS.find(x => x.id === id) || {}).label || 'this caster');
-}
-
-/** The box, or for a caster that is set up already the same box folded away under presetFoldText(). */
-function presetPanel(id, setUp) {
-  return setUp ? disclosure(presetFoldText(id), false, presetBox(id)) : presetBox(id);
 }
 
 /** Onocoy's fixed server, as a line of text ("Server: servers.onocoy.com:2101"), not as inputs that look editable. */
@@ -193,7 +178,7 @@ function volText(b) {
   return (b / 1e6).toFixed(1) + NB + 'MB';
 }
 
-/** A station sentence ("waiting for RTCM…") as a line of its own. */
+/** A station sentence ("waiting for the receiver…") as a line of its own. */
 function capFirst(t) {
   t = String(t || '');
   return t.charAt(0).toUpperCase() + t.slice(1);
@@ -268,19 +253,11 @@ function onocoyElsewhereText(o) {
 
 /**
  * Caster editor. entry = {slot, config}. opts: preset (onocoy_preset),
- * hostname, hideOnocoy (another enabled slot streams to Onocoy: no Onocoy
- * choice), onocoyElsewhere ({slot, ready, enabled} of another slot with an
- * Onocoy host: a new slot starts on RTK2go, and says where Onocoy is once
- * Onocoy is chosen), openSlot(n) (opens that slot's editor), onSaved(entry),
- * onCancel(). Returns {el (the form, its heading first), dirty()}.
- *
- * Layout: the heading ("New caster", or "Edit <name>"), the caster, its box
- * (folded once the stored caster is set up), then what that caster needs
- * (Onocoy's server as a line of text; host and port for Other caster only;
- * mountpoint, username, password; the NTRIP version where the caster or the
- * reservation decides it; TLS for Other caster), "Stream to this caster",
- * and the rest under "More options". The fields move between the two places
- * when the choice changes (place()).
+ * hostname, hideOnocoy (no Onocoy choice), onocoyElsewhere ({slot, ready,
+ * enabled} of another Onocoy slot), openSlot(n), onSaved(entry), onCancel().
+ * Returns {el, dirty()}. Layout: heading, caster, its box, what that caster
+ * needs, "Stream to this caster", then "More options"; place() moves the
+ * fields when the choice changes.
  */
 function casterEditor(entry, opts) {
   const slot = entry.slot;
@@ -646,7 +623,7 @@ function stopPanel(c, st) {
 /**
  * A caster's one detail line (the chip says the state): why it stopped
  * (opts.stopped: the page shows that in its stop panel instead), the login
- * guard's count or the station's hint (not while waiting for RTCM: the chip
+ * guard's count or the station's hint (not while waiting for data: the chip
  * says so), else the last failure (opts.unreached: the page says that in its
  * not-reached line). null when there is nothing to add.
  */
@@ -685,8 +662,9 @@ function casterSummary(c, st, preset) {
   if (off) metrics.push(['Today offline', fmt.dur(off)]);
   const avg = c.backoff_profile === 'polite' && st.state === 'streaming' ? slotRate(c.slot, 60) : null;
   const out = [
-    h('div', { class: 'muted small' }, [c.host + ':' + c.port, 'NTRIP ' + (c.ntrip_version === 2 ? '2.0' : '1.0'), c.tls ? 'TLS' : null,
-      c.mountpoint ? '/' + c.mountpoint : null].filter(Boolean).join(' · ')),
+    /* Where it streams: host and mountpoint (the protocol details are in the editor); a test slot says so here. */
+    h('div', { class: 'muted small' }, c.host + (c.mountpoint ? '/' + c.mountpoint : '') +
+      (c.test_onocoy ? ' · Test Onocoy slot (bench build)' : '')),
     st.state === 'stopped' ? stopPanel(c, st) : null,
     casterDetail(st, { unreached: true }),
     metrics.length ? h('div', { class: 'metrics' }, metrics.map(m => h('span', null, m[0] + ' ', h('b', null, m[1])))) : null,
@@ -721,6 +699,11 @@ function casterSummary(c, st, preset) {
       h('div', { class: 'form-actions' }, sw)));
   }
   return out;
+}
+
+/** A caster card's one chip: its state, or "Needs you" while the card shows the stopped panel (which says why). */
+function casterChip(st) {
+  return st.state === 'stopped' ? ['Needs you', 'bad'] : [lbl(L.caster, st.state), casterTone(st.state)];
 }
 
 /** When something began, from its age in seconds: "9:41 AM" today, else date and time. */
@@ -807,7 +790,7 @@ Views.casters = {
           h('div', { class: 'form-actions' }, btn('Add your Onocoy credentials', () => edit(s), editing === null ? 'primary' : ''))];
       }
       const r = {
-        badge: badge(lbl(L.caster, st.state), casterTone(st.state)),
+        badge: badge(...casterChip(st)),
         live: h('div', { class: 'caster-live' }),
         details: h('div'),
       };
@@ -822,8 +805,7 @@ Views.casters = {
         if (!reconnects) loadReconnects().then(() => now() && fill(now()));
       });
       return [
-        cardHead(c.name || 'Slot ' + (s.slot + 1), c.enabled ? r.badge : badge('Off', ''),
-          c.test_onocoy ? badge('Test Onocoy slot (bench build)', 'warn') : null),
+        cardHead(c.name || 'Slot ' + (s.slot + 1), c.enabled ? r.badge : badge('Off', '')),
         r.live,
         /* Onocoy and this open caster both stream: the risk, on this caster's own card. */
         openCasterWarning(data, s.slot),
@@ -848,8 +830,9 @@ Views.casters = {
       const r = refs[s.slot];
       if (!r) return;
       const st = statusOf(s);
-      r.badge.className = 'badge ' + casterTone(st.state);
-      r.badge.textContent = lbl(L.caster, st.state);
+      const chip = casterChip(st);
+      r.badge.className = 'badge ' + chip[1];
+      r.badge.textContent = chip[0];
       mount(r.live, casterSummary(Object.assign({ slot: s.slot }, s.config), st, data.onocoy_preset || {}));
       if (open[s.slot]) mount(r.details, casterDetails(st, reconnects ? reconnects[s.slot] : undefined));
     }

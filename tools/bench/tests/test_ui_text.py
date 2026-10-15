@@ -49,7 +49,7 @@ const ctx = {
 vm.createContext(ctx);
 /* refusalText: what the UI says for an error answer {status, error: {code, ...}} (errText on an ApiError). */
 const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
-  '\nreturn { restartPlanText, onocoyElsewhereText, connRow, journalDetail, presetInfo: () => ({ PRESETS, PRESET_INFO }),\n' +
+  '\nreturn { restartPlanText, restartPlanShort, onocoyNow: a => onocoyNow(a[0], a[1]), onocoyElsewhereText, connRow, journalDetail, presetInfo: () => ({ PRESETS, PRESET_INFO }),\n' +
   '  journalItems: a => { S.status = a[3] || null; return journalItems(a[0], a[1], a[2]); }, evFilter: () => EV_FILTER,\n' +
   '  healthChip: a => healthChip(a[0], a[1], a[2]), sinceStart: hl => sinceStart(hl), logParts: l => logParts(l),\n' +
   '  timeRange: a => timeRange(a[0], a[1]), diagTabs: () => DIAG_TABS.map(t => t[1]), dayParts: a => dayParts(a[0], a[1]),\n' +
@@ -126,6 +126,91 @@ def test_restart_plan_cap_and_recheck_in_full_recovery_only():
     assert out[2:] == [None, None, None, None]
     # Nothing pending in full recovery: no sentence either.
     assert run_ui([("restartPlanText", {"recovery_mode": "full", "reboot_hold": []})]) == [None]
+
+
+def test_restart_plan_in_a_few_words_for_the_status_page():
+    """The Status and Receiver pages' short form of the restart plan: the same cases as the full sentence, in a few
+    words, and nothing whenever the full sentence says nothing (Diagnostics keeps that one)."""
+    base = {"recovery_mode": "full", "reboot_hold": [], "reboot_hold_left_s": None, "reboot_cap_wait_s": None,
+            "reboot_cap_limit": None, "reboot_recheck": False}
+    out = run_ui([
+        ("restartPlanShort", {**base, **HOLD}),
+        ("restartPlanShort", {**base, "reboot_hold": ["setup"], "reboot_hold_left_s": 1200}),
+        ("restartPlanShort", {**base, "reboot_cap_wait_s": 2400, "reboot_cap_limit": "hour"}),
+        ("restartPlanShort", {**base, **HOLD, "reboot_cap_wait_s": 2400, "reboot_cap_limit": "day"}),
+        ("restartPlanShort", {**base, "reboot_recheck": True}),
+        ("restartPlanShort", base),
+        ("restartPlanShort", {**base, **HOLD, "recovery_mode": "no_reboot"}),
+        ("restartPlanShort", {**base, **HOLD, "recovery_mode": "alerts_only"}),
+    ])
+    assert out[0] == "station restart in 27\u00a0min at the latest"
+    # The setup hold has no end: what it waits for, not a time.
+    assert out[1] == "station restart postponed (first setup not finished)"
+    assert out[2] == "station restart possible in 40\u00a0min"
+    # The cap outlasts the hold: the restart waits for the cap.
+    assert out[3] == "station restart possible in 40\u00a0min"
+    assert out[4] == "station may restart after the next search"
+    assert out[5:] == [None, None, None]
+    # On the Status page it follows the next search on one muted line.
+    no_rx = status(receiver={"state": "no_receiver", "rtcm_age_ms": None}, alerts=[NO_RX],
+                   health={"level": "recovering", "last_step": "rescan", **HOLD})
+    searching = status(receiver={"state": "no_receiver", "rtcm_age_ms": None},
+                       alerts=[{**NO_RX, "next_detect_in_s": 0, "saw_bytes": True}])
+    a, b = heroes(no_rx, searching)
+    assert a["line"] == "Nothing arrives from the receiver. Check its power and the COM1 cable."
+    assert a["plan"] == "Next search in 24\u00a0s \u00b7 station restart in 27\u00a0min at the latest"
+    assert "GPIO" not in a["line"] + a["plan"]
+    assert b["line"] == "Data arrives, but the station cannot read it. Check the wiring and the receiver's port speed."
+    assert b["plan"] == "Searching now"
+
+
+def test_setup_done_says_onocoy_as_it_is():
+    """The setup's last screen: Onocoy's state from the same state as the Status page. Streaming only with
+    corrections behind it; a refused login with its count and Edit; not set up offers the Onocoy step again."""
+    no_rx = dict(receiver={"state": "no_receiver", "rtcm_age_ms": None}, alerts=[NO_RX])
+    stall = dict(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "link_restart"})
+    cases = [
+        (status(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False)]), None),
+        (status(casters=[caster(0, "Onocoy", "disabled", enabled=False)]), None),
+        (status(casters=[caster(0, "Onocoy", "connecting")]), None),
+        (status(casters=[caster(0, "Onocoy", "auth_failed", reason="auth", next_retry_s=290)]), 1),
+        (status(casters=[caster(0, "Onocoy", "auth_failed", reason="auth")]), None),
+        (status(casters=[caster(0, "Onocoy", "auth_failed", reason="login_blocked")]), None),
+        (status(casters=[caster(0, "Onocoy", "stopped", stop_reason="rejected")]), 3),
+        (status(), None),
+        # The station still says streaming during a stall: never "Streaming" here either.
+        (status(**stall), None),
+        (status(casters=[caster(0, "Onocoy", "wait_data")], **no_rx), None),
+        (status(casters=[caster(0, "Onocoy", "backoff", reason="dns", next_retry_s=20)]), None),
+        # Trying again after a failure: the title stays (no flicker with each attempt).
+        (status(casters=[caster(0, "Onocoy", "connecting", reason="timeout")]), None),
+        (status(safe_mode={"active": True, "crashes": 3}, receiver={"state": "idle"}, casters=[caster(0, "Onocoy", "disabled")],
+                alerts=[{"id": "safe_mode", "source": "health"}]), None),
+    ]
+    out = run_ui([("onocoyNow", [s, n]) for s, n in cases])
+    got = [(o["key"], o["tone"], o["head"], o["act"]) for o in out]
+    assert got == [
+        ("setup", "warn", "Onocoy is not set up", "setup"),
+        ("setup", "warn", "Onocoy is turned off", "setup"),
+        ("connecting", "info", "Connecting to Onocoy\u2026", None),
+        ("refused", "bad", "Login refused (1 of 3)", "edit"),
+        ("refused", "bad", "Login refused", "edit"),
+        ("refused", "bad", "Onocoy is blocking logins", "edit"),
+        ("stopped", "bad", "Onocoy stopped: login refused 3 times", "edit"),
+        ("streaming", "ok", "Streaming to Onocoy", None),
+        ("receiver", "info", "Waiting for the receiver", None),
+        ("receiver", "info", "Waiting for the receiver", None),
+        ("failing", "warn", "Not connected yet", None),
+        ("failing", "warn", "Not connected yet", None),
+        ("safe_mode", "bad", "Casters are off in safe mode", None),
+    ], got
+    assert out[3]["text"].endswith("Next try in 4\u00a0min 50\u00a0s.")
+    assert out[8]["text"] == "Onocoy starts once corrections arrive. Now: receiver stopped sending data."
+    assert out[10]["text"] == "DNS lookup failed. Next try in 20\u00a0s."
+    assert out[11]["text"] == "Timed out. Trying again now."
+    # Plain words only: no state names or protocol terms.
+    for o in out:
+        assert not any(w in (o["head"] + o["text"]).lower() for w in ("rtcm", "auth_failed", "ntrip", "backoff")), o
 
 
 def test_onocoy_hint_never_says_set_up_for_a_slot_that_is_not():
@@ -408,7 +493,9 @@ def test_hero_says_what_blocks_first_and_what_to_do():
     assert out[1]["action"] == "end-maint" and out[1]["notice"] == "maintenance"
 
     assert out[2]["title"] == "No receiver found" and out[2]["tone"] == "bad", out[2]
-    assert out[2]["line"].startswith("Nothing arrives from the receiver. Check its power") and "Next search in 24 s." in out[2]["line"]
+    # One plain line on top (the pins are in the Receiver page's panel); the next search in the short muted line.
+    assert out[2]["line"] == "Nothing arrives from the receiver. Check its power and the COM1 cable."
+    assert out[2]["plan"] == "Next search in 24 s"
     assert out[2]["action"] == "detect" and out[2]["alert"] == "no_receiver" and out[2]["also"] == []
 
     # A stall while the station still says streaming: never "Streaming" on top, and Onocoy does not count as streaming.
@@ -437,10 +524,12 @@ def test_hero_casters_down_one_two_three_and_all_good():
     out = heroes(one, two, three, good_one, good_two, waiting, dns)
     assert out[0]["title"] == "Partly streaming"
     assert out[0]["line"] == "Bench is not streaming: login refused. Next try in 30 s." and out[0]["action"] == "Casters"
-    assert out[0]["facts"] == [["Casters", "1 of 2 streaming"]]
+    # The line names the caster that does not stream: no "1 of 2" count beside it.
+    assert out[0]["facts"] == [] and out[0]["subject"] == 1
     assert out[1]["title"] == "Not streaming" and out[1]["tone"] == "bad"
-    assert out[1]["line"] == "Onocoy and Bench are not streaming."
+    assert out[1]["line"] == "Onocoy and Bench are not streaming." and out[1]["facts"] == []
     assert out[2]["line"] == "3 casters are not streaming."
+    assert out[2]["facts"] == [["Casters", "0 of 3 streaming"]]
     assert out[3] == {**out[3], "title": "Streaming", "tone": "ok", "line": "Onocoy is receiving corrections.", "action": None}
     # One caster turned on: no "1 of 1" fact.
     assert out[3]["facts"] == []
@@ -564,7 +653,7 @@ def test_state_during_maintenance_restarts_and_one_caster_down():
     out = heroes(maint, maint_quiet, stall, stall_alerts_only, one_down, status())
     assert out[0]["key"] == "maintenance" and out[0]["delivering"] is True and out[0]["ono"] is True
     assert out[1]["delivering"] is False
-    assert out[2]["plan"] is not None and "restarts itself in 27\u00a0min at the latest" in out[2]["plan"]
+    assert out[2]["plan"] == "Station restart in 27\u00a0min at the latest"
     assert out[3]["plan"] is None
     assert out[4]["subject"] == 2 and out[5]["plan"] is None and out[5]["subject"] is None
     days = run_ui([("onocoy", maint), ("onocoy", maint_quiet)])

@@ -106,7 +106,8 @@ const ctx = {
 };
 vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
-  '\nreturn { casterEditor, openCasterWarning, casterDetails };\n})()', ctx);
+  '\nreturn { casterEditor, openCasterWarning, casterDetails, casterSummary, casterChip, stationState, adminDashboard,\n' +
+  '  publicDashboard };\n})()', ctx);
 
 /* The elements on screen: hidden ones and everything inside them left out. */
 function* visible(e) {
@@ -163,6 +164,35 @@ for (const c of JSON.parse(casesJson)) {
   if (c.fn === 'warning') {
     const w = ui.openCasterWarning(c.data, c.slot);
     out.push(w ? [...w.walk()].filter(e => e.tagName === 'STRONG').map(e => e.textContent).join('') : null);
+    continue;
+  }
+  if (c.fn === 'card') {
+    const parts = ui.casterSummary(Object.assign({ slot: 0 }, c.cfg), c.st, { port: 2101 }).filter(Boolean);
+    out.push({ address: parts[0].textContent, chip: ui.casterChip(c.st) });
+    continue;
+  }
+  if (c.fn === 'dashboard') {
+    /* The Status page as built from a status: the top card's title, line and short line, its facts, and per card
+     * (by title) the label/value rows and the one-line casters. */
+    const st = ui.stationState(c.status, c.admin);
+    const kids = (c.admin ? ui.adminDashboard(c.status, st, c.open || []) : ui.publicDashboard(c.status, st, null)).filter(Boolean);
+    const all = kids.flatMap(k => [...visible(k)]);
+    const pairs = v => v.filter(e => e.tagName === 'DL').flatMap(dl => {
+      const r = [];
+      for (let i = 0; i + 1 < dl.kids.length; i += 2) r.push([dl.kids[i].textContent, dl.kids[i + 1].textContent]);
+      return r;
+    });
+    const hero = all.find(e => e.tagName === 'SECTION' && e.className.indexOf('hero') >= 0);
+    const hv = [...visible(hero)];
+    const cards = {};
+    for (const sec of all.filter(e => e.tagName === 'SECTION' && e !== hero)) {
+      const v = [...visible(sec)];
+      cards[v.find(e => e.tagName === 'H2').textContent] = { rows: pairs(v),
+        lines: v.filter(e => e.className === 'cline').map(e => e.kids[0].textContent) };
+    }
+    const plan = hv.find(e => e.tagName === 'P' && e.className === 'muted small');
+    out.push({ head: hv.find(e => e.tagName === 'H2').textContent, line: hv.find(e => e.className === 'line').textContent,
+      plan: plan ? plan.textContent : null, facts: pairs(hv), cards: cards });
     continue;
   }
   if (c.fn === 'details') {
@@ -389,3 +419,77 @@ def test_connection_details_list_only_what_happened():
     assert dict(rough["rows"])["Reconnects today"] == "–"
     assert [r[0] for r in waiting["rows"]] == ["State since", "Epochs dropped today (since the last restart)",
                                                "Reconnects today", "Sent today (since the last restart)"], waiting
+
+
+# ---- The caster cards' address line and chip; the Status page's receiver rows and caster lines ----
+
+def test_caster_card_shows_host_and_mountpoint_and_one_chip():
+    """The card's line says where it streams (host and mountpoint), not the protocol; a test slot says so in that
+    line, not in a second chip; a stopped slot's chip says "Needs you" (its panel says why)."""
+    out = run_editor([
+        {"fn": "card", "cfg": stored("rtk2go.com", "polite", ntrip_version=2, tls=True), "st": {"state": "streaming"}},
+        {"fn": "card", "cfg": stored("10.0.2.2", "fast", port=2111, mountpoint="MP0TEST1", test_onocoy=True),
+         "st": {"state": "stopped", "stop_reason": "rejected"}},
+        {"fn": "card", "cfg": stored("servers.onocoy.com", "fast", mountpoint=""), "st": {"state": "wait_data"}},
+    ])
+    assert out[0] == {"address": "rtk2go.com/MINE01", "chip": ["Streaming", "ok"]}
+    assert out[1] == {"address": "10.0.2.2/MP0TEST1 \u00b7 Test Onocoy slot (bench build)", "chip": ["Needs you", "bad"]}
+    assert out[2] == {"address": "servers.onocoy.com", "chip": ["Waiting for the receiver", "warn"]}
+
+
+def st_caster(slot: int, name: str, state: str, **kw) -> dict:
+    """A caster of GET /api/status (Onocoy set up and counting)."""
+    c = {"slot": slot, "name": name, "empty": False, "enabled": state != "disabled", "protected": name == "Onocoy",
+         "host": name.lower() + ".example", "state": state, "reason": "none", "next_retry_s": 0, "stop_reason": "none",
+         "onocoy_ready": name == "Onocoy", "today_online_s": 600, "today_offline_s": 0}
+    if name == "Onocoy":
+        c.update({"streak_ok": True, "budget_s": 473, "budget_left_s": 463, "data_rate_permille": 1000, "connected_s": 600})
+    c.update(kw)
+    return c
+
+
+def st_status(**kw) -> dict:
+    s = {"api": 1, "public": False, "device": {"hostname": "onocoydiy", "settings_available": True},
+         "safe_mode": {"active": False}, "network": {"online": True},
+         "receiver": {"state": "streaming", "model": "UM982", "rtcm_age_ms": 180, "journal": "none", "best_sys": "galileo",
+                      "best_bands": 4, "glonass": True, "rtcm1230_supported": True, "position_locked": False,
+                      "surveying": True, "survey_window_left_s": 300},
+         "casters": [st_caster(0, "Onocoy", "streaming")],
+         "health": {"level": "ok", "last_step": "none", "recovery_mode": "full"},
+         "alerts": [], "availability": {"protected_down_today_s": 0, "budget_left_s": 463}}
+    for k, v in kw.items():
+        s[k] = {**s[k], **v} if isinstance(v, dict) and isinstance(s.get(k), dict) else v
+    return s
+
+
+def test_status_page_says_each_fact_once():
+    """No receiver: one plain line on top, the next search and the restart in one short line, and no band or GLONASS
+    rows (nothing to say) while the survey reads paused. A caster the top card names shows its name and today's share
+    only, with no count of streaming casters beside it. The public page waits for the receiver in plain words."""
+    hold = {"reboot_hold": ["admin"], "reboot_hold_left_s": 1578}
+    no_rx = st_status(receiver={"state": "no_receiver", "rtcm_age_ms": None},
+                      alerts=[{"id": "no_receiver", "source": "station", "saw_bytes": False, "next_detect_in_s": 23}],
+                      health={"level": "recovering", "last_step": "rescan", **hold},
+                      casters=[st_caster(0, "Onocoy", "wait_data")])
+    stall = st_status(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "link_restart"})
+    partly = st_status(casters=[st_caster(0, "Onocoy", "streaming"),
+                                st_caster(1, "Bench", "auth_failed", reason="auth", next_retry_s=50, today_online_s=0,
+                                          today_offline_s=20)])
+    public = {"api": 1, "public": True, "device": {"hostname": "onocoydiy"}, "receiver": {"state": "no_receiver"},
+              "casters": [{"slot": 0, "name": "Onocoy", "state": "wait_data"}, {"slot": 1, "name": "Bench", "state": "disabled",
+                                                                               "enabled": False}],
+              "health": {"level": "recovering"}}
+    out = run_editor([{"fn": "dashboard", "status": x, "admin": True} for x in (no_rx, stall, st_status(), partly)] +
+                     [{"fn": "dashboard", "status": public, "admin": False}])
+    assert out[0]["line"] == "Nothing arrives from the receiver. Check its power and the COM1 cable."
+    assert out[0]["plan"] == "Next search in 23\u00a0s \u00b7 station restart in 27\u00a0min at the latest"
+    assert out[0]["cards"]["Receiver"]["rows"] == [["Position", "Surveying, paused"]]
+    assert out[1]["head"] == "Receiver stopped sending data"
+    assert out[1]["cards"]["Receiver"]["rows"] == [["Position", "Surveying, paused"]]
+    assert [r[0] for r in out[2]["cards"]["Receiver"]["rows"]] == ["Bands", "GLONASS", "Position"]
+    assert out[2]["cards"]["Receiver"]["rows"][2] == ["Position", "Surveying, 5\u00a0min left"]
+    assert out[3]["line"] == "Bench is not streaming: login refused. Next try in 50\u00a0s."
+    assert out[3]["cards"]["Other casters"]["lines"] == ["Bench \u00b7 0\u00a0% today"]
+    assert out[3]["facts"] == []
+    assert out[4]["cards"]["Casters"]["lines"] == ["Onocoy \u00b7 Waiting for the receiver", "Bench \u00b7 Off"]
+

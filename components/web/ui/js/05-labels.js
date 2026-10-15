@@ -21,7 +21,7 @@ const L = {
   caster: {
     disabled: 'Off',
     wait_network: 'Waiting for the network',
-    wait_data: 'Waiting for RTCM',
+    wait_data: 'Waiting for the receiver',
     connecting: 'Connecting',
     streaming: 'Streaming',
     backoff: 'Waiting to retry',
@@ -433,6 +433,19 @@ function noReceiverText(a) {
     '(receiver TX to GPIO1, RX to GPIO2).' + next;
 }
 
+/* The Status page's no-receiver line (the pins are in the Receiver page's panel). */
+function noReceiverLead(a) {
+  if (a.saw_bytes) return 'Data arrives, but the station cannot read it. Check the wiring and the receiver\'s port speed.';
+  return 'Nothing arrives from the receiver. Check its power and the COM1 cable.';
+}
+
+/* "next search in 23 s", or null. */
+function nextSearchText(a) {
+  const n = a.next_detect_in_s;
+  if (n === null || n === undefined) return null;
+  return n <= 0 ? 'searching now' : 'next search in ' + inMinutes(n);
+}
+
 /** The failed-configuration alert's text: when the station tries again, or that only the user does (alert or GET /api/gnss). */
 function configFailedText(autoRetry, retryInS) {
   if (autoRetry === false) return L.configRetry.user;
@@ -440,36 +453,46 @@ function configFailedText(autoRetry, retryInS) {
 }
 
 /**
- * The station's own restart to look for the receiver, in words (health:
+ * The station's own restart to look for the receiver (health:
  * recovery_mode, reboot_hold, reboot_hold_left_s, reboot_cap_wait_s,
- * reboot_cap_limit, reboot_recheck); null when nothing about it is pending
- * (the station reports these only while its receiver recovery runs) and in
- * every recovery mode but full recovery, where the station never restarts
- * itself for the receiver.
- * reboot_hold_left_s is when the last reason ends at the latest (the
- * presence limit, the end of the first hour); the setup hold has no limit,
- * so no deadline is named for it, but the restart cap still is. When a hold
- * and the cap both apply, the restart waits for the later of the two, so
- * that is the time named.
+ * reboot_cap_limit, reboot_recheck) as {k, t, why, limit}: k 'cap' (next
+ * possible in t), 'latest' (in t at the latest), 'later' (a hold with no
+ * end: the setup's), 'recheck'; null when nothing is pending (reported only
+ * while the receiver recovery runs) and in every mode but full recovery,
+ * where the station never restarts itself for the receiver. With a hold and
+ * the cap, the restart waits for the later of the two.
  */
-function restartPlanText(hl) {
+function restartPlan(hl) {
   if (!hl || hl.recovery_mode !== 'full') return null;
   const hold = hl.reboot_hold || [];
   const cap = hl.reboot_cap_wait_s;
   const hasCap = cap !== null && cap !== undefined;
-  const holdLeft = hold.indexOf('setup') >= 0 ? null : hl.reboot_hold_left_s;
-  const hasLeft = holdLeft !== null && holdLeft !== undefined;
+  const left = hold.indexOf('setup') >= 0 ? null : hl.reboot_hold_left_s;
+  const hasLeft = left !== null && left !== undefined;
   if (!hold.length && !hasCap && !hl.reboot_recheck) return null;
-  const why = ' to get the receiver back.';
-  const next = hasCap ? ' Next possible in ' + inMinutes(cap) + ' (' + (L.capLimit[hl.reboot_cap_limit] || 'the restart limit') + ').' : '';
-  if (hold.length) {
-    const reasons = ' Postponed: ' + hold.map(r => L.hold[r] || String(r).replace(/_/g, ' ')).join(', ') + '.';
-    /* The cap outlasts the hold (or the hold has no end): the restart waits for the cap. */
-    if (hasCap && (!hasLeft || cap > holdLeft)) return 'The station restarts itself' + why + reasons + next;
-    return 'The station restarts itself ' + (hasLeft ? 'in ' + inMinutes(holdLeft) + ' at the latest' : 'later') + why + reasons;
-  }
-  if (hasCap) return 'The station restarts itself' + why + next;
+  const why = hold.map(r => L.hold[r] || String(r).replace(/_/g, ' ')).join(', ');
+  if (hasCap && (!hold.length || !hasLeft || cap > left)) return { k: 'cap', t: inMinutes(cap), why: why, limit: hl.reboot_cap_limit };
+  if (hold.length) return { k: hasLeft ? 'latest' : 'later', t: hasLeft ? inMinutes(left) : '', why: why };
+  return { k: 'recheck', why: '' };
+}
+
+/** restartPlan() as a sentence (Diagnostics). */
+function restartPlanText(hl) {
+  const p = restartPlan(hl);
+  if (!p) return null;
+  const why = ' to get the receiver back.' + (p.why ? ' Postponed: ' + p.why + '.' : '');
+  if (p.k === 'cap') return 'The station restarts itself' + why + ' Next possible in ' + p.t + ' (' + (L.capLimit[p.limit] || 'the restart limit') + ').';
+  if (p.k === 'latest') return 'The station restarts itself in ' + p.t + ' at the latest' + why;
+  if (p.k === 'later') return 'The station restarts itself later' + why;
   return 'The station decides after the next search whether to restart itself.';
+}
+
+/** restartPlan() in a few words, lower case, to follow the next search on one muted line (Status, Receiver). */
+function restartPlanShort(hl) {
+  const p = restartPlan(hl);
+  if (!p) return null;
+  return p.k === 'cap' ? 'station restart possible in ' + p.t : p.k === 'latest' ? 'station restart in ' + p.t + ' at the latest' :
+    p.k === 'later' ? 'station restart postponed (' + p.why + ')' : 'station may restart after the next search';
 }
 
 /** After a power-on start: whether the receiver kept running (health station.rx_boot). */

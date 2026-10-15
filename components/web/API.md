@@ -2418,8 +2418,14 @@ LAN).
 6. Optional: the Onocoy slot, `PUT /api/casters/0` with `onocoy_preset`
    (host `servers.onocoy.com` and port 2101, shown, not editable) and what the
    Onocoy console gives: `mountpoint`, `username` and `password`
-   (section 10); then optional further casters.
-7. `POST /api/setup/done` (it also erases `setup_step`): the dashboard.
+   (section 10).
+7. The last screen (`setup_step` `casters`): the UI polls `GET /api/status`
+   and shows the Onocoy slot's state as it happens (connecting, a refused
+   login with `login_rejects` from `GET /api/casters`, streaming once
+   corrections flow), the next steps in the Onocoy console, and a link to
+   the Casters page for more casters.
+8. `POST /api/setup/done` (it also erases `setup_step`): the dashboard, or
+   the Casters page from that link.
 
 Every step posts the next one (`POST /api/setup/step`) before it shows it.
 Wi-Fi credentials can never be saved before an admin password exists
@@ -2428,9 +2434,9 @@ wizard shows the Wi-Fi step only while the page is on the station's own
 access point or the station has no working Wi-Fi. A wizard that starts
 (a reload, a new login) reads `GET /api/wifi` first: while the station
 has no working Wi-Fi (none stored, or not connected) it resumes at the
-Wi-Fi step whatever `setup_step` says. In the optional casters step (the
-last one), "Finish setup" waits while a caster is being added: it shows
-again once that caster is saved or cancelled.
+Wi-Fi step whatever `setup_step` says. A stored `casters` step resumes at
+the last screen, which has no fields; the UI never stores another value for
+it.
 
 **Recovery.** BOOT held 10 s clears the admin password and opens the
 recovery AP for 15 min (open unless an AP password is set; longer while a

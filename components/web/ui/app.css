@@ -289,6 +289,8 @@ small { font-size: 0.85rem; }
   /* dense: a card that fits an earlier gap takes it, so no cell stays empty beside a wide card */
   .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-flow: dense; }
   .grid .wide { grid-column: 1 / -1; }
+  /* Status: a short card stays short beside a tall one (no blank card space) */
+  .grid.starts { align-items: start; }
 }
 
 .card {

@@ -5,17 +5,14 @@
  * Start-up decisions (GET /api/session), log in, the public status view and
  * the first-run setup wizard.
  *
- * Wizard order: the admin password (only over the station's own access
- * point), then Wi-Fi: once the station has joined the home network, its
- * setup network closes a few seconds later (the page counts down), the
- * phone goes back to its own Wi-Fi and logs in at http://<name>.local/.
- * There the setup continues: the antenna check (the live view, with
- * plain hints) before any caster is enabled, the Onocoy
- * credentials, optional extra casters. The station keeps the next step
- * (POST /api/setup/step), so the setup resumes after the move to the home
- * network, a reload or a new login, but never past the Wi-Fi step while the
- * station has no working Wi-Fi; everything else stays in memory only
- * (captive-portal browsers may not keep browser storage).
+ * Wizard: the admin password (over the station's own access point), Wi-Fi
+ * (the setup network closes once the station has joined; the phone logs in
+ * again at http://<name>.local/), the antenna check, Onocoy, and a last
+ * screen with Onocoy's live state and the next steps in its console. The
+ * station keeps the next step (POST /api/setup/step: wifi, reception,
+ * onocoy, casters = the last screen), so a reload or a login resumes there,
+ * never past Wi-Fi while the station has none; the rest stays in memory
+ * (captive-portal browsers may not keep storage).
  */
 
 /* The station's own network, as the session names it. */
@@ -350,7 +347,12 @@ function wifiPicker(wifi, opts) {
 /* ---- Wizard ------------------------------------------------------------- */
 
 /* What the step after the Wi-Fi is called in the instructions. */
-const WIZ_NEXT = { reception: 'the antenna check', onocoy: 'the Onocoy step', casters: 'more casters' };
+const WIZ_NEXT = { reception: 'the antenna check', onocoy: 'the Onocoy step', casters: 'the last step' };
+
+/* The setup's last screen: the next steps in the Onocoy console (Onocoy's guide). */
+const ONOCOY_NEXT = ['Connect a wallet (top right).', 'Wait while Onocoy validates the station: 24 to 36 hours.',
+  'Then press Register on this station\'s credential under NTRIP Credentials.', 'Rewards follow a day later: claim them with Claim Rewards.'];
+const ONOCOY_REWARDS_GUIDE = 'https://docs.onocoy.com/documentation/3.-become-a-miner/4.-receive-rewards';
 
 async function startWizard(claim) {
   live.stop();
@@ -376,7 +378,7 @@ async function startWizard(claim) {
   }
 
   function frame(step, title, ...body) {
-    const idx = steps.indexOf(step);
+    const idx = steps.indexOf(step === 'connect' ? 'wifi' : step);
     const head = idx >= 0 ? h('div', { class: 'wiz-head' },
       h('span', null, 'Setup step ' + (idx + 1) + ' of ' + steps.length),
       h('div', { class: 'dots', 'aria-hidden': 'true' }, steps.map((s, i) => h('i', { class: i < idx ? 'done' : i === idx ? 'now' : null })))) : null;
@@ -411,15 +413,16 @@ async function startWizard(claim) {
     if (await saveStep(following)) go(following);
   }
 
-  /* The last step is done: setup_done, then the dashboard. */
-  async function finish(step) {
+  /* The last step is done: setup_done, then the app at `hash` (the Status page, or Casters to add one). */
+  async function finish(step, hash) {
     try {
       await setupDone();
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) return;
-      frame(step, 'Setup', msg('bad', errText(e)), h('div', { class: 'form-actions' }, btn('Try again', () => finish(step), 'primary')));
+      frame(step, 'Setup', msg('bad', errText(e)), h('div', { class: 'form-actions' }, btn('Try again', () => finish(step, hash), 'primary')));
       return;
     }
+    if (hash) history.replaceState(null, '', hash);
     boot();
   }
 
@@ -439,9 +442,11 @@ async function startWizard(claim) {
     try {
       if (step === 'password') return stepPassword();
       if (step === 'reception') return stepReception();
-      if (step === 'onocoy' || step === 'casters') await loadBasics();
-      if (step === 'onocoy') return stepOnocoy();
-      if (step === 'casters') return stepCasters();
+      if (step === 'onocoy') {
+        await loadBasics();
+        return stepOnocoy();
+      }
+      if (step === 'casters') return stepDone();
       if (step === 'wifi') {
         W.wifi = await api('GET', '/api/wifi');
         return stepWifi();
@@ -479,18 +484,19 @@ async function startWizard(claim) {
   }
 
   /*
-   * Antenna check. It reads the station's state first: with no receiver
-   * found it shows what to check and when the station looks again ("Check
-   * again" starts a search now) and opens nothing; while the station looks
-   * for the receiver it says so; once the receiver streams it opens the
-   * live view and shows plain hints about the antenna's sky view before any
-   * caster streams (guide values: RX_CHECK, 66-live.js). Leaving the step
-   * closes the view again.
+   * Antenna check: with no receiver (or while looking for it) the
+   * no-receiver panel and nothing opened; once it streams the live view
+   * with plain hints (RX_CHECK, 66-live.js), closed again on leaving. Going
+   * on without the check is a secondary button.
    */
   function stepReception() {
     const box = h('div', { class: 'stack' }, h('div', { class: 'spinner' }), h('p', { class: 'muted' }, 'Checking the receiver…'));
     const err = errBox();
     const cont = btn('Continue', () => leave(cont), 'primary');
+    const setCont = (text, main) => {
+      cont.textContent = text;
+      cont.className = 'btn' + (main ? ' primary' : '');
+    };
     const note = h('p', { class: 'muted small', hidden: true });
     const later = h('p', { class: 'muted small' });
     frame('reception', 'Check the antenna',
@@ -513,7 +519,7 @@ async function startWizard(claim) {
       heldDone = true;
       mode = '';
       patch(box, h('div', { class: 'spinner' }), h('p', { class: 'muted' }, 'Starting the check…'));
-      cont.textContent = 'Continue';
+      setCont('Continue', true);
       later.textContent = '';
       setNote('');
     };
@@ -546,7 +552,7 @@ async function startWizard(claim) {
         err.hidden = true;
       }
       nr.update(st);
-      cont.textContent = 'Continue without the check';
+      setCont('Continue without the check', false);
       setNote('');
       later.textContent = 'You can check the antenna later on the Receiver page.';
     }
@@ -572,7 +578,7 @@ async function startWizard(claim) {
               h('div', { class: 'sky-wrap' }, liveSkyPlot(d.satellites || []), h('div', null, cnrLegend(),
                 h('p', { class: 'muted small' }, SYS_KEY), liveCountsTable(t))))));
       }
-      cont.textContent = r.ok ? 'Continue' : 'Continue anyway';
+      setCont(r.ok ? 'Continue' : 'Continue anyway', true);
       setNote(r.waiting ? '' : 'These are rough guide values, not Onocoy\'s scoring. The sky is also on the Receiver page.');
       later.textContent = '';
       /* A 200 to our own start means open; a closed window read within 5 s
@@ -607,7 +613,7 @@ async function startWizard(claim) {
           mode = 'failed';   /* not asked again every 2 s: the user goes on, or checks later on the Receiver page */
           patch(box, msg('warn', 'The sky view could not be opened: ' + errText(e)),
             h('p', { class: 'muted small' }, 'You can check the antenna later on the Receiver page.'));
-          cont.textContent = 'Continue';
+          setCont('Continue', true);
         } else {
           showErr(e, err);
         }
@@ -649,7 +655,7 @@ async function startWizard(claim) {
           held.load();
           err.hidden = true;
         }
-        cont.textContent = 'Continue without configuring';
+        setCont('Continue without configuring', false);
         later.textContent = 'You can configure the receiver later on the Receiver page.';
         return;
       }
@@ -658,7 +664,7 @@ async function startWizard(claim) {
       } else if (rcv.rx_maintenance) {
         mode = '';
         patch(box, msg('warn', 'Receiver maintenance is on, so the station sends the receiver nothing. Check the antenna after it ends.'));
-        cont.textContent = 'Continue without the check';
+        setCont('Continue without the check', false);
       } else {
         await openLive();
       }
@@ -707,6 +713,7 @@ async function startWizard(claim) {
     pw.focus();
   }
 
+  /* Onocoy: the server as text, the console's three values, one line on sharing, the duplicate-stream question. */
   function stepOnocoy() {
     const data = W.casters;
     const preset = data.onocoy_preset || { host: 'servers.onocoy.com', port: 2101, ntrip_version: 1, backoff_profile: 'fast' };
@@ -743,9 +750,12 @@ async function startWizard(claim) {
     const dupBox = h('div');
     const submit = h('button', { type: 'submit', class: 'btn primary' }, 'Save and continue');
     frame('onocoy', 'Connect to Onocoy',
-      /* Back here with Onocoy set up already: the box folds away. */
-      presetPanel('onocoy', onocoyReady(cfg)),
-      h('form', { onsubmit: async e => {
+      h('p', null, 'In the Onocoy console, open Reference Stations, NTRIP Credentials and pick or add this station\'s credential. ',
+        extLink('Onocoy\'s guide', PRESET_INFO.onocoy.guide[1])),
+      h('form', { oninput: () => {
+        clear(dupBox);
+        submit.hidden = false;
+      }, onsubmit: async e => {
         e.preventDefault();
         for (const k of Object.keys(F)) F[k].error(null);
         const v = { mountpoint: mpI.value.trim(), username: userI.value.trim(), password: pw.value };
@@ -769,6 +779,7 @@ async function startWizard(claim) {
           } catch (ex) {
             if (ex instanceof ApiError && ex.code === 'caster_policy' && ex.body.reason === 'dup_stream_ack_required') {
               mount(dupBox, dupPanel(b => doSave(true, b)));
+              submit.hidden = true;
             } else if (ex instanceof ApiError && ex.code === 'invalid_field' && F[ex.field]) {
               F[ex.field].error(ruleText(ex));
               F[ex.field].input.focus();
@@ -782,73 +793,66 @@ async function startWizard(claim) {
         };
         await doSave(false, submit);
       } }, serverLine(null, ono ? cfg.host : preset.host, ono ? cfg.port : preset.port),
-      F.mountpoint.el, F.username.el, F.password.el, pwNote, dupBox, err, h('div', { class: 'form-actions' },
-        btn('Skip for now', () => next('onocoy')), submit)),
+      F.mountpoint.el, F.username.el, F.password.el, pwNote,
+      h('p', { class: 'small t-warn' }, 'Never use a credential another device is streaming with.'),
+      dupBox, err, h('div', { class: 'form-actions' }, btn('Skip for now', () => next('onocoy')), submit)),
       skipAll());
     mpI.focus();
   }
 
   /*
-   * More casters (the last step): the casters set up so far, each with a
-   * plain chip (Onocoy not set up offers its step again), "Add a caster"
-   * while a slot is free (its editor opens below the list), and "Finish
-   * setup". While the editor is open its Save is the one main button:
-   * "Finish setup" waits until the caster is saved or cancelled.
+   * The last screen (stored step "casters"): Onocoy's state as it happens
+   * (onocoyNow), the next steps in the Onocoy console, a link to Casters and
+   * "Go to Status"; both mark the setup done. GET /api/casters only when
+   * Onocoy's state changes (the count of refused logins).
    */
-  function stepCasters() {
-    const data = W.casters;
-    const slots = data.slots || [];
-    const configured = slots.filter(s => s.config && s.config.host);
-    const free = slots.filter(s => s.config && !s.config.host && !s.config.enabled);
-    const editorBox = h('div', { class: 'subcard', hidden: true });
-    let editor = null;
-    let finishRow = null;   /* hidden while the editor is open */
-    /* Back to the Onocoy step with a caster typed but not saved: ask first. */
-    const discardTyped = async () => {
-      if (!editor || !editor.dirty()) return true;
-      return dialog({ title: 'Discard this caster?', ok: 'Discard it', cancel: 'Back to the caster', okKind: 'danger',
-        body: h('p', null, 'The caster you are adding is not saved yet. Save it with its Save button first, or discard it.') });
+  function stepDone() {
+    const row = h('ul', { class: 'checks', 'aria-live': 'polite' });
+    const nextBox = h('div', null, h('h2', { class: 'sub' }, 'Next, in the Onocoy console'),
+      h('ol', { class: 'howto' }, ONOCOY_NEXT.map(t => h('li', null, t))), extLink('Onocoy\'s guide', ONOCOY_REWARDS_GUIDE));
+    const add = h('a', { href: '#/casters', onclick: e => {
+      e.preventDefault();
+      finish('casters', '#/casters');
+    } }, 'Add RTK2go or another caster');
+    const goStatus = btn('Go to Status', e => busy(e.currentTarget, () => finish('casters', '#/')), 'primary');
+    frame('casters', 'Setup done', row, nextBox, h('p', null, add), h('div', { class: 'form-actions' }, goStatus));
+    const icon = { ok: '✓', warn: '!', bad: '✕', info: '…' };
+    let shown = '', rejects = null, seen = '';
+    const gone = () => !row.isConnected;
+    const back = async () => {
+      if (await saveStep('onocoy')) go('onocoy');
     };
-    const row = s => {
-      const c = s.config;
-      const notSetUp = isOnocoySlot(c) && !onocoyReady(c);
-      return h('div', { class: 'caster' },
-        h('div', { class: 'item-head' }, h('div', { class: 'name' }, c.name || c.host),
-          notSetUp ? badge('Not set up', '') : c.enabled ? badge('On', 'ok') : badge('Off', '')),
-        notSetUp ? h('div', { class: 'form-actions' }, btn('Set up', async () => {
-          if (!(await discardTyped())) return;
-          if (await saveStep('onocoy')) go('onocoy');
-        }, 'small')) : null);
+    const render = o => {
+      const key = JSON.stringify(o);
+      if (key === shown) return;
+      shown = key;
+      mount(row, h('li', { class: o.tone }, h('span', { class: 'ic', 'aria-hidden': 'true' }, icon[o.tone]),
+        h('span', null, h('strong', null, o.head), o.text ? h('div', { class: 'muted small' }, o.text) : null,
+          o.act ? h('div', { class: 'form-actions' }, btn(o.act === 'edit' ? 'Edit' : 'Set up Onocoy', back, 'small')) : null)));
+      nextBox.hidden = o.key === 'setup' || o.key === 'safe_mode' || o.key === 'wait';
     };
-    const addRow = free.length ? h('div', { class: 'form-actions' }, btn('Add a caster', () => {
-      addRow.hidden = true;
-      finishRow.hidden = true;
-      editor = casterEditor(free[0], {
-        preset: data.onocoy_preset,
-        hostname: W.system && W.system.hostname,
-        hideOnocoy: configured.some(s => isOnocoySlot(s.config)),
-        onSaved: async () => {
-          W.casters = await api('GET', '/api/casters');
-          stepCasters();
-        },
-        onCancel: () => {
-          editor = null;
-          clear(editorBox);
-          editorBox.hidden = true;
-          addRow.hidden = false;
-          finishRow.hidden = false;
-        },
-      });
-      mount(editorBox, editor.el);
-      editorBox.hidden = false;
-    })) : h('p', { class: 'muted small' }, 'All ' + (data.max_slots || slots.length) + ' slots are in use.');
-    frame('casters', 'More casters (optional)',
-      h('p', null, 'Stream to other casters as well, now or later on the Casters page.'),
-      h('h2', null, 'Your casters'),
-      configured.length ? h('div', { class: 'caster-list' }, configured.map(row)) : h('p', { class: 'muted' }, 'No caster set up yet.'),
-      addRow,
-      editorBox,
-      finishRow = h('div', { class: 'form-actions sep' }, btn('Finish setup', e => busy(e.currentTarget, () => next('casters')), 'primary')));
+    render({ key: 'wait', tone: 'info', head: 'Checking Onocoy…', text: '', act: null });
+    let stop = null;
+    stop = poller(LIVE_POLL_MS, async () => {
+      if (gone()) {
+        if (stop) stop();
+        return;
+      }
+      const st = await api('GET', '/api/status');
+      const c = onocoySlot(st);
+      const now = c ? c.state + '|' + (c.hint || '') : '';
+      if (c && c.state === 'auth_failed' && now !== seen) {
+        try {
+          const d = await api('GET', '/api/casters');
+          const sl = (d.slots || []).find(x => x.slot === c.slot);
+          rejects = sl && sl.status ? sl.status.login_rejects || null : null;
+        } catch (e) {
+          rejects = null;
+        }
+      }
+      seen = now;
+      if (!gone()) render(onocoyNow(st, rejects));
+    });
   }
 
   /* The name the phone will open on the home network, http://<mdns_host>.local/,
@@ -904,12 +908,10 @@ async function startWizard(claim) {
   }
 
   /*
-   * After PUT /api/wifi: polls GET /api/wifi every second. Connected and on
-   * the setup network: the name and the address, the countdown to the
-   * moment the setup network closes (ap.close_in_s, re-synced by every poll
-   * and counted down here in between) and what to do on the home network.
-   * Without a countdown (the page is not on the setup network, or the
-   * build has none): Continue goes on in place.
+   * After PUT /api/wifi: polls GET /api/wifi every second. Connected on the
+   * setup network: name, address, the countdown to its closing (ap.close_in_s,
+   * re-synced by each poll) and what to do next; without a countdown,
+   * Continue goes on in place.
    */
   function stepConnect() {
     const joined = W.joined || { ssid: W.wifi ? W.wifi.ssid : '', since: Date.now(), persisted: true, applied: true };
@@ -1135,11 +1137,9 @@ async function startWizard(claim) {
     loop();
   }
 
-  /* Resume where the station says the setup was (a login on the home network
-   * after the Wi-Fi step, a reload), but never past the Wi-Fi step while the
-   * station has no working Wi-Fi: the next step is stored before the join
-   * is sent, and a join that failed (or a page that lost the station on the
-   * way) leaves it there. */
+  /* Resume where the station says (after a login or a reload), never past
+   * Wi-Fi while the station has none: the next step is stored before the
+   * join is sent, and a join that failed leaves it there. */
   let resume = !claim && sess.setup_step && steps.indexOf(sess.setup_step) >= 0 ? sess.setup_step : steps[0];
   if (!claim && wifiDown) resume = 'wifi';
   go(resume);

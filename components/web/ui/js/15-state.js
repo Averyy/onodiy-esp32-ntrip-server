@@ -3,16 +3,13 @@
  * SPDX-License-Identifier: MIT
  *
  * The station's state, decided in one place (stationState): the Status
- * page's top card, its "Onocoy today" verdict (onocoyDay) and receiver rows,
- * the public view, the browser tab's title and the page-wide notice the
- * Status page leaves out all read it, so they never say different things.
+ * page's cards, the public view, the tab's title, the notices and the
+ * setup's last screen (onocoyNow) all read it, so they never disagree.
  *
- * The first condition that applies wins, from what stops everything to
- * "streaming to Onocoy". The colour comes from that condition alone: a
- * health level with no alert named never changes it. Other named alerts
- * follow as "Also:" lines. Green: streaming as it should; blue: something
- * planned or passing (maintenance, a comparison, a Wi-Fi trial, the
- * receiver starting or updating); amber: needs a look; red: broken.
+ * The first condition that applies wins; its colour comes from it alone (a
+ * bare health level never changes it), and other alerts follow as "Also:"
+ * lines. Green: streaming; blue: planned or passing; amber: needs a look;
+ * red: broken.
  */
 
 /* The top card's title while the receiver does not stream (L.station keeps the longer words for Diagnostics). */
@@ -135,37 +132,24 @@ function qualityLead(q, name) {
 }
 
 /**
- * The station's state from a status (admin false: the public form, which
- * names states only). Returns {key, head, tone, lead, actions, alertId,
- * notice, trial, also, facts, delivering, quality, ono, onoStreaming}:
- *   key: which condition (one per entry of the list below);
- *   head, tone ('ok', 'info', 'warn', 'bad'), lead: the title, its colour and
- *     one sentence with the most important thing and what to do;
- *   actions: the one button (two in safe mode), each {label, href, primary}
- *     (a link) or {act, label} (a button the page handles through data-act:
- *     'detect', 'end-maint', 'leave-safe'), so a refresh keeps the focus;
- *   alertId: the alert the line says (never an "Also:" line too); notice: the
- *     page-wide notice it covers (the Status page leaves that one out);
- *     subject: the caster slot the line is about (its row does not repeat why);
- *   plan: when the station restarts itself to get the receiver back, while
- *     it fixes or looks for it (restartPlanText), else null;
- *   trial: the Wi-Fi network on trial (the card adds its countdown);
- *   also: the other named alerts [{id, title, text, tone, href}];
- *   facts: [label, text] ("Casters 1 of 2 streaming" with more than one
- *     turned on, unless the line names them all as streaming; the recovery
- *     choice when it is not the default);
- *   delivering: corrections come from the receiver; quality: rxQuality();
- *   ono: the Onocoy slot while it counts (on and set up), else null;
- *   onoStreaming: it streams with corrections behind it.
+ * The station's state from a status (admin false: the public form, states
+ * only): {key, head, tone ('ok', 'info', 'warn', 'bad'), lead (one sentence:
+ * the most important thing and what to do), actions (one; two in safe mode:
+ * {label, href, primary} links or {act, label} data-act buttons, so a
+ * refresh keeps the focus), alertId (the alert the line says), notice (the
+ * notice it covers), subject (the caster slot the line names), named (the
+ * line names the casters down), plan (next search and restart, one short
+ * line), trial (the Wi-Fi on trial), also (other alerts), facts (the caster
+ * count unless the line names them; the recovery choice when not the
+ * default), delivering, quality (rxQuality()), ono (the Onocoy slot while
+ * it counts), onoStreaming (with corrections behind it)}.
  *
  * Order: safe mode; receiver update needs you; settings storage; updating
- * the receiver; receiver port closed (a closed port explains a missing
- * receiver, so it goes before "No receiver found"); no receiver; receiver
- * stopped sending data; no satellites; no corrections; Onocoy stopped by its
- * login guard; receiver maintenance; comparing signal groups; trying new
- * Wi-Fi; receiver not configured yet, looking for or configuring the
- * receiver; Onocoy not set up; no caster turned on, not or partly streaming;
- * streaming with too few bands or no GLONASS for Onocoy; streaming.
+ * the receiver; receiver port closed (it explains a missing receiver); no
+ * receiver; receiver stopped; no satellites; no corrections; Onocoy stopped;
+ * maintenance; comparing signal groups; new Wi-Fi; receiver not configured,
+ * looked for or configuring; Onocoy not set up; not or partly streaming;
+ * too few bands or no GLONASS for Onocoy; streaming.
  */
 function stationState(s, admin) {
   const rcv = s.receiver || {};
@@ -188,7 +172,7 @@ function stationState(s, admin) {
   const alertsOnly = hl.recovery_mode === 'alerts_only';
   const go = (label, href, primary) => ({ label: label, href: href, primary: !!primary });
   const pick = (key, head, tone, lead, more) => Object.assign({ key: key, head: head, tone: tone, lead: lead, actions: [],
-    alertId: null, notice: null, trial: null, subject: null }, more || {});
+    alertId: null, notice: null, trial: null, subject: null, named: false, search: null }, more || {});
 
   const decide = () => {
     if (sm.active) {
@@ -226,8 +210,8 @@ function stationState(s, admin) {
     if (nr || state === 'no_receiver') {
       if (!admin) return pick('no_receiver', HERO_TITLE.no_receiver, 'bad', HERO_STATE_LINE.no_receiver);
       const a = nr || { next_detect_in_s: rcv.next_detect_in_s };
-      return pick('no_receiver', HERO_TITLE.no_receiver, 'bad', noReceiverText(a),
-        { actions: [{ act: 'detect', alert: a, label: 'Check again' }], alertId: nr ? 'no_receiver' : null });
+      return pick('no_receiver', HERO_TITLE.no_receiver, 'bad', noReceiverLead(a),
+        { actions: [{ act: 'detect', alert: a, label: 'Check again' }], alertId: nr ? 'no_receiver' : null, search: nextSearchText(a) });
     }
     if (ladder && (ladder.id === 'receiver_power' || ladder.id === 'receiver_silent')) {
       return pick('rx_stopped', 'Receiver stopped sending data', 'bad',
@@ -318,6 +302,7 @@ function stationState(s, admin) {
       } else {
         lead = (down.length === 2 ? andList(down.map(casterName)) : down.length + ' casters') + ' are not streaming.';
       }
+      more.named = down.length <= 2;
       return pick('casters_down', head, tone, lead, more);
     }
     if (onoStreaming && quality.any) {
@@ -336,11 +321,14 @@ function stationState(s, admin) {
     .map(a => ({ id: a.id, title: alertText(a)[0], text: alertText(a)[1], tone: alertTone(a), href: ALERT_PAGE[a.id] || '#/diag' }))
     .sort((a, b) => (order[a.tone] || 0) - (order[b.tone] || 0));
   r.facts = [];
-  /* The count adds nothing to a line that names every caster as streaming. */
-  if (on.length > 1 && r.key !== 'streaming') r.facts.push(['Casters', streaming.length + ' of ' + on.length + ' streaming']);
+  /* The count adds nothing to a line that names the casters. */
+  if (on.length > 1 && r.key !== 'streaming' && r.subject === null && !r.named) {
+    r.facts.push(['Casters', streaming.length + ' of ' + on.length + ' streaming']);
+  }
   if (admin && hl.recovery_mode && hl.recovery_mode !== 'full') r.facts.push(['If corrections stop', lbl(L.recovery, hl.recovery_mode)]);
-  /* While the receiver is being fixed or looked for: when the station restarts itself for it (full recovery only). */
-  r.plan = admin && ['rx_stopped', 'no_receiver', 'no_satellites', 'no_rtcm'].indexOf(r.key) >= 0 ? restartPlanText(hl) : null;
+  const plan = admin && ['rx_stopped', 'no_receiver', 'no_satellites', 'no_rtcm'].indexOf(r.key) >= 0 ?
+    [r.search, restartPlanShort(hl)].filter(Boolean) : [];
+  r.plan = plan.length ? capFirst(plan.join(' · ')) : null;
   r.delivering = delivering;
   r.quality = quality;
   r.ono = ono;
@@ -396,4 +384,36 @@ function onocoyDay(s, st) {
     d.why = causes.find(Boolean) || null;
   }
   return d;
+}
+
+/**
+ * Onocoy on the setup's last screen, from stationState(): {key, tone, head,
+ * text, act ('edit', 'setup' or null)}. Streaming only with corrections
+ * behind it. rejects: login_rejects (GET /api/casters), null while unknown.
+ */
+function onocoyNow(s, rejects) {
+  const st = stationState(s, true);
+  const c = onocoySlot(s);
+  const r = (key, tone, head, text, act) => ({ key: key, tone: tone, head: head, text: text || '', act: act || null });
+  if (st.key === 'safe_mode') return r('safe_mode', 'bad', 'Casters are off in safe mode', 'The Status page says what to do.');
+  if (!c || c.onocoy_ready === false) return r('setup', 'warn', 'Onocoy is not set up', 'Add it now, or later on the Casters page.', 'setup');
+  if (c.enabled === false || c.state === 'disabled') return r('setup', 'warn', 'Onocoy is turned off', 'Saving its credentials turns it on.', 'setup');
+  if (st.onoStreaming) return r('streaming', 'ok', 'Streaming to Onocoy', '');
+  const next = c.next_retry_s ? ' Next try in ' + fmt.dur(c.next_retry_s) + '.' : '';
+  if (c.state === 'stopped') {
+    return r('stopped', 'bad', 'Onocoy stopped: ' + lbl(L.stop, c.stop_reason || 'none'),
+      'Check the credential in the Onocoy console, then save it again.', 'edit');
+  }
+  if (c.state === 'auth_failed' && c.reason === 'login_blocked') {
+    return r('refused', 'bad', 'Onocoy is blocking logins', 'Check the credential in the Onocoy console, then save it again.' + next, 'edit');
+  }
+  if (c.state === 'auth_failed') {
+    return r('refused', 'bad', 'Login refused' + (rejects ? ' (' + rejects + ' of 3)' : ''),
+      'Check the mountpoint, username and password against the Onocoy console.' + next, 'edit');
+  }
+  if (!st.delivering) return r('receiver', 'info', 'Waiting for the receiver', 'Onocoy starts once corrections arrive. Now: ' + st.head.toLowerCase() + '.');
+  /* After a failure the title stays put while the station tries again (no flicker with each attempt). */
+  const why = c.reason && c.reason !== 'none' ? lbl(L.fail, c.reason) : '';
+  if (why) return r('failing', 'warn', 'Not connected yet', why + '.' + (c.state === 'connecting' ? ' Trying again now.' : next));
+  return r('connecting', 'info', 'Connecting to Onocoy…', 'This takes a few seconds.');
 }
