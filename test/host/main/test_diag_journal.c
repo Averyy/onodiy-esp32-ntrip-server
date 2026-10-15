@@ -339,6 +339,147 @@ TEST_CASE("journal: a partition full of garbage is started over", "[diag][journa
     TEST_ASSERT_EQUAL_INT(DJ_ERR_STATE, dj_append(&s_j, &e));
 }
 
+/* Every record readable from cursor 0: strictly increasing, never a number twice; returns the count, *last the newest. */
+static uint32_t read_rising(dj_t *j, uint32_t *last)
+{
+    static dj_entry_t out[2048];
+    uint32_t cur = 0;
+    size_t n = dj_read(j, &cur, out, 2048, NULL);
+    for (size_t i = 1; i < n; i++) {
+        TEST_ASSERT_TRUE(out[i].seq > out[i - 1].seq);
+    }
+    *last = n ? out[n - 1].seq : 0;
+    return (uint32_t)n;
+}
+
+static int clear_all(dj_t *j)
+{
+    int r = dj_clear_start(j);
+    if (r != DJ_OK) {
+        return r;
+    }
+    int steps = 0;
+    int left;
+    while ((left = dj_clear_step(j)) != 0) {
+        steps++;
+        TEST_ASSERT_TRUE(steps <= (int)DJ_MAX_SECTORS);
+    }
+    return DJ_OK;
+}
+
+TEST_CASE("journal clear: every record gone at once, numbering goes on, every sector erased once", "[diag][journal]")
+{
+    nor_reset(4);
+    mount(&s_j);
+    for (int i = 1; i <= 300; i++) {
+        TEST_ASSERT_EQUAL_INT(DJ_OK, append(&s_j, 1, i));
+    }
+    TEST_ASSERT_EQUAL_INT32(2, s_j.cur);
+    uint32_t before[4];
+    memcpy(before, s_nor.erases, sizeof(before));
+    uint32_t reader = 250;   /* a reader in the middle of the records */
+
+    TEST_ASSERT_EQUAL_INT(DJ_OK, dj_clear_start(&s_j));
+    /* Gone from every read at once, before any old sector is erased. */
+    TEST_ASSERT_EQUAL_INT32(3, s_j.cur);
+    TEST_ASSERT_EQUAL_UINT32(301, s_j.next_seq);
+    TEST_ASSERT_EQUAL_UINT32(0, dj_oldest_seq(&s_j));
+    uint32_t last = 0;
+    TEST_ASSERT_EQUAL_UINT32(0, read_rising(&s_j, &last));
+    dj_entry_t out[8];
+    TEST_ASSERT_EQUAL_size_t(0, dj_read(&s_j, &reader, out, 8, NULL));
+    TEST_ASSERT_EQUAL_UINT32(250, reader);
+    TEST_ASSERT_EQUAL_UINT32(before[0], s_nor.erases[0]);
+
+    int steps = 0;
+    while (dj_clear_step(&s_j) != 0) {
+        steps++;
+    }
+    TEST_ASSERT_EQUAL_INT(2, steps);   /* three old sectors: two steps say more follow, the third ends it */
+    for (int k = 0; k < 4; k++) {
+        TEST_ASSERT_EQUAL_UINT32(before[k] + 1u, s_nor.erases[k]);
+    }
+    TEST_ASSERT_EQUAL_INT(0, dj_clear_step(&s_j));
+    /* top + the sector count: the newest number over the sector count still counts each sector's erases */
+    TEST_ASSERT_EQUAL_UINT32(3u + 4u, s_j.top_sector_seq);
+
+    /* The next record goes on from the old numbering; the old cursor finds it. */
+    TEST_ASSERT_EQUAL_INT(DJ_OK, append(&s_j, 1, 301));
+    TEST_ASSERT_EQUAL_size_t(1, dj_read(&s_j, &reader, out, 8, NULL));
+    TEST_ASSERT_EQUAL_UINT32(301, out[0].seq);
+    TEST_ASSERT_EQUAL_UINT32(301, dj_oldest_seq(&s_j));
+    mount(&s_j);
+    TEST_ASSERT_EQUAL_INT32(3, s_j.cur);
+    TEST_ASSERT_EQUAL_UINT32(302, s_j.next_seq);
+    read_check(&s_j, 301, 1);
+    TEST_ASSERT_EQUAL_UINT32(0, s_nor.overwrites);
+
+    /* A journal never written to has nothing to clear. */
+    nor_reset(4);
+    mount(&s_j);
+    TEST_ASSERT_EQUAL_INT(DJ_OK, clear_all(&s_j));
+    TEST_ASSERT_EQUAL_UINT32(0, s_nor.ops);
+    TEST_ASSERT_EQUAL_INT(DJ_OK, append(&s_j, 1, 1));
+    read_check(&s_j, 1, 1);
+}
+
+TEST_CASE("journal clear: a sector the ring opens again during the clear keeps its new records", "[diag][journal]")
+{
+    nor_reset(4);
+    mount(&s_j);
+    for (int i = 1; i <= 300; i++) {
+        append(&s_j, 1, i);
+    }
+    TEST_ASSERT_EQUAL_INT(DJ_OK, dj_clear_start(&s_j));
+    /* 128 records: the new sector (3) fills, the last opens sector 0, which the clear still had to erase */
+    for (int i = 301; i <= 428; i++) {
+        TEST_ASSERT_EQUAL_INT(DJ_OK, append(&s_j, 1, i));
+    }
+    TEST_ASSERT_EQUAL_INT32(0, s_j.cur);
+    uint32_t e0 = s_nor.erases[0];
+    while (dj_clear_step(&s_j) != 0) {
+    }
+    TEST_ASSERT_EQUAL_UINT32(e0, s_nor.erases[0]);
+    read_check(&s_j, 301, 128);
+    mount(&s_j);
+    read_check(&s_j, 301, 128);
+    TEST_ASSERT_EQUAL_UINT32(0, s_nor.overwrites);
+}
+
+TEST_CASE("journal clear: a power cut at any point leaves a ring that numbers on", "[diag][journal]")
+{
+    /* ops of a clear of three used sectors out of four: erase and header of the new sector, then three erases */
+    for (uint32_t cut = 1; cut <= 6; cut++) {
+        nor_reset(4);
+        mount(&s_j);
+        for (int i = 1; i <= 300; i++) {
+            append(&s_j, 1, i);
+        }
+        s_nor.cut_at = s_nor.ops + cut;
+        if (dj_clear_start(&s_j) == DJ_OK) {
+            while (dj_clear_step(&s_j) != 0) {
+            }
+        }
+        mount(&s_j);
+        TEST_ASSERT_EQUAL_UINT32(301, s_j.next_seq);
+        uint32_t last = 0;
+        uint32_t n = read_rising(&s_j, &last);
+        if (cut <= 2) {
+            /* the new header never made it: nothing else changed */
+            TEST_ASSERT_EQUAL_INT32(2, s_j.cur);
+            TEST_ASSERT_EQUAL_UINT32(300, n);
+        } else {
+            /* the new sector is current; the sectors not erased yet came back with their older records */
+            TEST_ASSERT_EQUAL_INT32(3, s_j.cur);
+            TEST_ASSERT_TRUE(n < 300u);
+        }
+        TEST_ASSERT_EQUAL_INT(DJ_OK, append(&s_j, 1, 301));
+        TEST_ASSERT_EQUAL_UINT32(n + 1u, read_rising(&s_j, &last));
+        TEST_ASSERT_EQUAL_UINT32(301, last);
+        TEST_ASSERT_EQUAL_UINT32(0, s_nor.overwrites);
+    }
+}
+
 TEST_CASE("journal rate limit: per kind, exempt kinds, across the clock wrap", "[diag][journal]")
 {
     dj_rate_t r;

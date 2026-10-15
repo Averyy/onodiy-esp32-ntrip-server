@@ -218,9 +218,11 @@ int dj_mount(dj_t *j, const dj_flash_t *fl, uint32_t size)
 
 /* ---- append ------------------------------------------------------------------------ */
 
-static int open_next(dj_t *j)
+/* Open the ring's next sector with sector_seq top + `step` (1; a clear adds the sector count). */
+static int open_sector(dj_t *j, uint32_t step)
 {
     uint32_t k = (j->cur < 0) ? 0u : ((uint32_t)j->cur + 1u) % j->sectors;
+    j->stale &= ~(1ull << k);   /* erased here: nothing left for a clear to do */
     /* The oldest records are dropped here, whatever happens next. The
      * sector is always erased, also when it reads blank: a blank sector can
      * be one whose erase a power cut interrupted, and such cells may read
@@ -233,7 +235,7 @@ static int open_next(dj_t *j)
         return DJ_ERR_IO;
     }
     j->erases++;
-    uint32_t seq = j->top_sector_seq + 1u;
+    uint32_t seq = j->top_sector_seq + step;
     uint8_t hdr[DJ_SLOT_SIZE];
     dj_encode_sector_hdr(seq, j->next_seq, DJ_REC_FORMAT, hdr);
     if (j->fl.write(j->fl.ctx, sector_off(k), hdr, sizeof(hdr)) != 0) {
@@ -249,6 +251,11 @@ static int open_next(dj_t *j)
     j->cur = (int32_t)k;
     j->cur_slot = 1;
     return DJ_OK;
+}
+
+static int open_next(dj_t *j)
+{
+    return open_sector(j, 1u);
 }
 
 bool dj_needs_open(const dj_t *j)
@@ -283,6 +290,56 @@ int dj_append(dj_t *j, dj_entry_t *e)
     }
     j->written++;
     return DJ_OK;
+}
+
+/* ---- clear ------------------------------------------------------------------------ */
+
+int dj_clear_start(dj_t *j)
+{
+    if (!j->mounted) {
+        return DJ_ERR_STATE;
+    }
+    if (j->cur < 0) {
+        return DJ_OK;   /* no sector was ever opened: nothing to clear */
+    }
+    uint64_t others = 0;
+    for (uint32_t k = 0; k < j->sectors; k++) {
+        if (j->sec[k].valid) {
+            others |= 1ull << k;
+        }
+    }
+    /* The new header first: from then on a mount finds it as the current sector. Every sector is erased once
+     * (this one now, the others by dj_clear_step), so its number goes up by the sector count: the newest
+     * number over the sector count stays the erase cycles each sector has seen. */
+    int r = open_sector(j, j->sectors);
+    if (r != DJ_OK) {
+        return r;
+    }
+    others &= ~(1ull << (uint32_t)j->cur);
+    for (uint32_t k = 0; k < j->sectors; k++) {
+        if ((others >> k) & 1u) {
+            j->sec[k].valid = false;
+        }
+    }
+    j->stale |= others;
+    return DJ_OK;
+}
+
+int dj_clear_step(dj_t *j)
+{
+    for (uint32_t k = 0; k < j->sectors; k++) {
+        if (((j->stale >> k) & 1u) == 0) {
+            continue;
+        }
+        j->stale &= ~(1ull << k);
+        if (j->fl.erase(j->fl.ctx, sector_off(k), DJ_SECTOR_SIZE) != 0) {
+            j->io_errors++;
+            return DJ_ERR_IO;
+        }
+        j->erases++;
+        return j->stale != 0 ? 1 : 0;
+    }
+    return 0;
 }
 
 /* ---- read ------------------------------------------------------------------------- */

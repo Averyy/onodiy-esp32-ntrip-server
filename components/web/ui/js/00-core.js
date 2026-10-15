@@ -180,6 +180,11 @@ function cardHead(title, ...chips) {
   return h('div', { class: 'card-head' }, h('h2', null, title), chips);
 }
 
+/** A setting and its button: the title in bold and one muted line at the left, the button at the right (a phone: under it). */
+function settingRow(title, text, button) {
+  return h('div', { class: 'setting-row' }, h('div', null, h('strong', null, title), h('span', null, text)), button);
+}
+
 /**
  * A disclosure (details.more): its summary, then kids. open: the state to
  * start in (a refresh that rebuilds it passes what the user left it at).
@@ -585,7 +590,7 @@ const ERR = {
   nothing_staged: 'No uploaded receiver package is waiting.',
   no_journal: 'There is no receiver update session.',
   no_coredump: 'There is no core dump.',
-  nothing_pending: 'No new Wi-Fi credentials are waiting (they were confirmed or discarded meanwhile).',
+  nothing_pending: 'No new Wi-Fi settings are waiting (they were confirmed or discarded meanwhile).',
   method_not_allowed: 'The station does not support this action.',
   busy: 'The station is busy with another job. Try again in a moment.',
   journal_open: 'A receiver update session is open. Finish or clear it first.',

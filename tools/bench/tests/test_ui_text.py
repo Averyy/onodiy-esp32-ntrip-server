@@ -12,6 +12,7 @@ Skipped when Node.js is not installed.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -49,6 +50,8 @@ vm.createContext(ctx);
 /* refusalText: what the UI says for an error answer {status, error: {code, ...}} (errText on an ApiError). */
 const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { restartPlanText, onocoyElsewhereText, connRow, journalDetail, presetInfo: () => ({ PRESETS, PRESET_INFO }),\n' +
+  '  connItems: l => connItems(l), journalItems: a => journalItems(a[0], a[1], a[2]), evFilter: () => EV_FILTER,\n' +
+  '  wifiChip: w => wifiChip(w), recoveryHint: () => recoveryHint(),\n' +
   '  onlineShare: a => onlineShare(a[0], a[1]),\n' +
   '  hero: a => { const l = heroLead(a[0], a[1]), t = heroState(a[0], a[1]);\n' +
   '    return { title: t.head, tone: t.tone, key: l.key, line: l.line, alert: l.alertId, notice: l.notice,\n' +
@@ -181,9 +184,81 @@ def test_connection_row_rssi():
         ("connRow", {**row, "rssi": 0}),
         ("connRow", {**row, "rssi": -128}),
     ])
-    assert unknown[0] == "Wi-Fi dropped" and "dBm" not in unknown[2]
-    assert "signal -60 dBm" in known[2]
-    assert "dBm" not in zero[2] and "dBm" not in old[2]
+    assert unknown[:2] == ["Wi-Fi dropped", "left the network (8)"]
+    assert known[1] == "left the network (8), signal -60 dBm"
+    assert "dBm" not in zero[1] and "dBm" not in old[1]
+
+
+def conn(seq: int, kind: str, **kw) -> dict:
+    e = {"seq": seq, "time_unix": None, "uptime_s": seq * 10, "kind": kind, "slot": None, "slot_name": None, "class": None,
+         "count": None, "duration_s": None, "reason": None, "rssi": None, "stop_reason": None}
+    e.update(kw)
+    return e
+
+
+def test_connection_history_pairs_a_drop_with_its_return_and_folds_repeats():
+    """Newest first, as GET /api/connections sends it: a drop and the return after it are one row, the same row
+    three times in a row is one row with a "x3" toggle; a drop without a return stays as it is."""
+    onocoy = {"slot": 0, "slot_name": "Onocoy"}
+    pairs = []
+    for i in range(3):
+        pairs = [conn(10 + 2 * i + 1, "caster_up", duration_s=20, count=2, **onocoy),
+                 conn(10 + 2 * i, "caster_down", duration_s=3600, **{"class": "remote_close"}, **onocoy)] + pairs
+    hist = ([conn(30, "caster_down", duration_s=60, **{"class": "timeout"}, **onocoy),
+             conn(21, "wifi_up", duration_s=40, count=3), conn(20, "wifi_disconnect", reason=202, rssi=-67)]
+            + pairs + [conn(5, "caster_stop", stop_reason="duplicate", **onocoy)])
+    (rows,) = run_ui([("connItems", hist)])
+    assert [r["ev"] for r in rows] == ["Onocoy disconnected", "Wi-Fi dropped", "Onocoy disconnected", "Onocoy stopped"]
+    assert rows[0]["det"] == "after 1\u00a0min online, timed out" and rows[0]["tone"] == "warn"
+    assert rows[1]["det"] == "back after 40\u00a0s, authentication failed (wrong password?) (202), signal -67 dBm"
+    assert rows[2]["det"] == "back after 20\u00a0s, closed by the caster, 2 failed attempts"
+    assert len(rows[2]["all"]) == 3 and rows[2]["id"] == "r10"
+    assert rows[3]["det"] == "duplicate stream, no new attempt until you act" and rows[3]["tone"] == "bad"
+    for r in rows:
+        assert "slot" not in (r["ev"] + r["det"]).lower()
+
+
+def jrec(seq: int, kind: str, a: int = 0, b: int = 0, up: int = 1, t: int | None = None) -> dict:
+    return {"seq": seq, "time_unix": t, "uptime_s": up, "kind": kind, "a": a, "b": b}
+
+
+def test_event_journal_one_heading_per_start_and_repeats_folded():
+    """A start is one heading (its boot and session records, and the restart record that announced it, folded in),
+    its other records newest first, 27 recovery steps in a row one row with a toggle; no "#seq" or "≈" in the text."""
+    t0 = 1760500000
+    first = [jrec(1, "boot", 0, 0, 1), jrec(2, "session", -1, 1, 1)]
+    steps = [jrec(3 + i, "ladder_step", 0, (0 << 8) | 2, 60 + i, t0 + 60 + i) for i in range(27)]
+    second = [jrec(30, "reboot", 1, up=200, t=t0 + 200), jrec(31, "boot", 1, 1, 1), jrec(32, "session", 44, 3, 1),
+              jrec(33, "wifi_disconnect", 201, -70, 30, t0 + 400)]
+    entries = first + steps + second
+    every, starts, casters, part = run_ui([
+        ("journalItems", [entries, True, None]),
+        ("journalItems", [entries, True, ["boot", "session", "reboot", "safe_mode", "rx_boot"]]),
+        ("journalItems", [entries, True, ["caster_down", "caster_up", "caster_stop"]]),
+        ("journalItems", [steps[-5:] + second, False, None]),
+    ])
+    heads = [i["head"][1] for i in every if "head" in i]
+    assert heads == ["Restarted by you (previous run 44\u00a0s)", "Started after power-on or a reset by its pin"]
+    rows = [i for i in every if "head" not in i]
+    assert [r["ev"] for r in rows] == ["Wi-Fi dropped", "Recovery step"]   # the restart record went into the heading
+    assert len(rows[1]["all"]) == 27 and " to " in rows[1]["when"]
+    assert rows[0]["det"] == "network not found (201), signal -70 dBm"
+    text = json.dumps(every, ensure_ascii=False)
+    assert "≈" not in text and "#" not in text and "slot" not in text.lower()
+    # Starts only: the two headings; casters only: nothing; the oldest start not loaded yet is a plain "Start".
+    assert [("head" in i) for i in starts] == [True, True]
+    assert casters == []
+    assert [i["head"][1] for i in part if "head" in i] == ["Restarted by you (previous run 44\u00a0s)", "Start"]
+
+
+def test_event_filter_covers_every_journal_kind():
+    (filters,) = run_ui([("evFilter", None)])
+    kinds = {k for f in filters if f[2] for k in f[2]}
+    api = (ROOT / "components" / "web" / "API.md").read_text(encoding="utf-8")
+    section = api[api.index("### `GET /api/journal?cursor=N`"):api.index("### `DELETE /api/journal`")]
+    documented = set(re.findall(r"^\| `([a-z_]+)` \|", section, flags=re.M)) - {"kind"}
+    assert documented and documented <= kinds, documented - kinds
+    assert filters[0][:2] == ["all", "All events"]
 
 
 def test_today_online_share_on_the_dashboard():
@@ -420,3 +495,15 @@ def test_profile_chip_and_maintenance_notice_on_the_receiver_page():
     rx, signals = run_ui([("notices", [maint, "receiver"]), ("notices", [maint, "signals"])])
     # The Receiver page has the maintenance card with its buttons: no notice that repeats it there.
     assert [k for k, _ in rx] == [] and [k for k, _ in signals] == ["maintenance"]
+
+
+# ---- The system pages (90-system.js, 30-auth.js) ----
+
+def test_system_wifi_chip_and_recovery_line():
+    out = run_ui([("wifiChip", {"configured": False}), ("wifiChip", {"configured": True, "online": True}),
+                  ("wifiChip", {"configured": True, "associated": True}), ("wifiChip", {"configured": True}),
+                  ("recoveryHint", None)])
+    assert out[:4] == [["Not set up", "plain"], ["Online", "ok"], ["Connecting", "warn"], ["Offline", "bad"]]
+    # One line under the admin password: what to do, no paragraph.
+    assert out[4].startswith("Forgot it? Hold the BOOT button for 10 seconds") and "http://192.168.4.1/" in out[4]
+    assert len(out[4]) < 160

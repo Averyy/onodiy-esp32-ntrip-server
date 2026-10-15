@@ -11,7 +11,7 @@ const DIAG_TABS = [
   ['', 'Health'],
   ['availability', 'Availability'],
   ['logs', 'Logs'],
-  ['journal', 'Event journal'],
+  ['journal', 'Events'],
   ['tasks', 'Tasks'],
   ['coredump', 'Core dump'],
 ];
@@ -108,10 +108,17 @@ function bootWhen(x) {
   return 'Restart ' + (x.boot_no - 1) + ' after power-on';
 }
 
+/* "If corrections stop": the choice's name, or "Paused" while the station holds the recovery. */
+function recoveryNow(hl) {
+  if (hl.ladder_suspended) return 'Paused' + ((hl.station || {}).rx_maintenance ? ' (receiver maintenance)' : '');
+  return hl.recovery_mode ? lbl(L.recovery, hl.recovery_mode) : DASH;
+}
+
 /*
  * Patched in place, not rebuilt (patchDetect: no form controls and no
  * element with a listener of its own here), so the keyboard focus, on "Check
- * again" or a table's scroll box, and a text selection survive the 5 s poll.
+ * again" or a table's scroll box, a text selection and the counters' open
+ * sections survive the 5 s poll.
  */
 function healthTab(box) {
   let lastHl = null;
@@ -121,11 +128,15 @@ function healthTab(box) {
     const heap = hl.heap || {};
     const link = hl.link || {};
     const net = hl.network || {};
-    /* The same alerts as the dashboard (the station's and health's), under the badge. */
+    /* The same alerts as the dashboard (the station's and health's), under the chip. */
     const st = S.status || {};
     const alerts = Array.isArray(st.alerts) ? st.alerts : (hl.alerts || []).map(a => ({ id: a, source: 'health' }));
     const plan = restartPlanText(hl);
     const tone = healthTone(hl.level);
+    /* The counters' sections stay as the user left them. */
+    const opened = new Set(Array.from(box.querySelectorAll('details[data-k]')).filter(d => d.open).map(d => d.getAttribute('data-k')));
+    const sect = (k, title, ...kids) => h('details', { class: 'more', 'data-k': k, open: opened.has(k) }, h('summary', null, title), kids);
+    const rxBoot = rxBootSentence((hl.station || {}).rx_boot);
     patchDetect(box, h('div', { class: 'grid' },
       h('section', { class: 'card' },
         cardHead('Health', badge(lbl(L.health, hl.level), tone)),
@@ -133,24 +144,43 @@ function healthTab(box) {
           h('p', { class: 'muted' }, tone === 'ok' || tone === '' ? 'No alerts.' : 'No alert names the cause: see the receiver and caster pages.'),
         plan ? h('p', { class: 'small' }, plan) : null,
         kv([
-          ['If corrections stop', hl.recovery_mode ? lbl(L.recovery, hl.recovery_mode) : DASH],
-          link.open === false && link.mode !== 'off' ? ['Receiver UART', h('span', { class: 't-bad' }, 'closed (reopening)')] : null,
+          ['If corrections stop', recoveryNow(hl)],
+          link.open === false && link.mode !== 'off' ? ['Receiver link', h('span', { class: 't-bad' }, 'Closed (reopening)')] : null,
           ['Last recovery step', lbl(L.step, hl.last_step)],
-          ['Receiver recovery paused', fmt.yesno(hl.ladder_suspended) + ((hl.station || {}).rx_maintenance ? ' (receiver maintenance)' : '')],
           ['Running for', fmt.dur(hl.uptime_s)],
-          ['Receiver stalls', fmt.num(hl.gnss_stalls)],
-          ['Recovery steps', fmt.num(hl.recoveries)],
-          ['Caster restarts', fmt.num(hl.caster_restarts)],
-          ['Network recoveries', fmt.num(hl.network_recoveries)],
           ['Since the last RTCM', hl.rtcm_gap_ms === null || hl.rtcm_gap_ms === undefined ? 'never received' : fmt.ms(hl.rtcm_gap_ms)],
-          hl.gnss_retry_in_s ? ['Next receiver recovery pass in', fmt.dur(hl.gnss_retry_in_s)] : null,
+          hl.gnss_retry_in_s ? ['Next recovery attempt in', fmt.dur(hl.gnss_retry_in_s)] : null,
           hl.inhibited_by ? ['Restarts held back by', hl.inhibited_by] : null,
           hl.update_slot && hl.update_slot !== 'none' ? ['Update running', hl.update_slot === 'app' ? 'an app update' : 'a receiver update'] : null,
           hl.factory_reset_refused_age_s !== null && hl.factory_reset_refused_age_s !== undefined ?
             ['BOOT-button factory reset', h('span', { class: 't-warn' }, 'refused ' + fmt.dur(hl.factory_reset_refused_age_s) +
               ' ago (a receiver update was running)')] : null,
           hl.admin_resets ? ['BOOT-button password resets', fmt.num(hl.admin_resets)] : null,
+        ]),
+        h('h3', { class: 'sub' }, 'Since this start'),
+        kv([
+          ['Receiver stalls', fmt.num(hl.gnss_stalls)],
+          ['Recovery steps', fmt.num(hl.recoveries)],
+          ['Caster restarts', fmt.num(hl.caster_restarts)],
+          ['Network recoveries', fmt.num(hl.network_recoveries)],
         ])),
+      h('section', { class: 'card' },
+        cardHead('This start', b.safe_mode ? badge('Safe mode', 'bad') : b.stable ? badge('Stable', 'ok') : null),
+        h('p', null, startSentence(b.reset_class, b.reset_reason, b.prev_reboot_reason) + '.'),
+        rxBoot ? h('p', null, rxBoot + '.') : null,
+        kv([
+          ['Starts since power-on', fmt.num(b.boots_since_power_on)],
+          ['Crashes counted', fmt.num(b.crashes)],
+          ['Brownouts since power-on', fmt.num(b.brownouts_since_power_on)],
+          ['Previous run', fmt.dur(b.prev_session_uptime_s)],
+          b.safe_mode ? ['Normal retry in', fmt.dur(b.safe_mode_retry_in_s)] : null,
+        ])),
+      h('section', { class: 'card' },
+        h('h2', null, 'Recent starts'),
+        (hl.boot_history || []).length ? table(['When', 'How', 'Version', 'Previous run'],
+          hl.boot_history.map(x => [h('span', { class: 'nowrap' }, bootWhen(x)), startSentence(x.reset_class, x.reset_reason, x.planned_reason),
+            x.version || DASH, x.prev_uptime_s === null || x.prev_uptime_s === undefined ? 'unknown' : fmt.dur(x.prev_uptime_s)]), { stack: true }) :
+          h('p', { class: 'muted' }, 'No history yet.')),
       h('section', { class: 'card' },
         h('h2', null, 'Memory'),
         kv([
@@ -161,44 +191,115 @@ function healthTab(box) {
           heap.psram_min !== undefined ? ['PSRAM lowest', fmt.bytes(heap.psram_min)] : null,
           heap.psram_largest !== undefined ? ['Largest PSRAM block', fmt.bytes(heap.psram_largest)] : null,
         ])),
-      h('section', { class: 'card' },
-        cardHead('This start', b.safe_mode ? badge('Safe mode', 'bad') : b.stable ? badge('Stable', 'ok') : null),
-        h('p', null, startSentence(b.reset_class, b.reset_reason, b.prev_reboot_reason) + '.'),
-        rxBootSentence((hl.station || {}).rx_boot) ? h('p', null, rxBootSentence((hl.station || {}).rx_boot) + '.') : null,
-        kv([
-          ['Starts since power-on', fmt.num(b.boots_since_power_on)],
-          ['Crashes counted', fmt.num(b.crashes)],
-          ['Brownouts since power-on', fmt.num(b.brownouts_since_power_on)],
-          ['Previous session', fmt.dur(b.prev_session_uptime_s)],
-          b.safe_mode ? ['Normal retry in', fmt.dur(b.safe_mode_retry_in_s)] : null,
-        ])),
-      h('section', { class: 'card' },
-        h('h2', null, 'Recent starts'),
-        (hl.boot_history || []).length ? table(['When', 'How', 'Version', 'Ran before'],
-          hl.boot_history.map(x => [bootWhen(x), startSentence(x.reset_class, x.reset_reason, x.planned_reason),
-            x.version || DASH, x.prev_uptime_s === null || x.prev_uptime_s === undefined ? 'unknown' : fmt.dur(x.prev_uptime_s)]), { stack: true }) :
-          h('p', { class: 'muted' }, 'No history yet.'),
-        h('p', { class: 'muted small foot' }, 'Newest first. "Ran before" is how long the station ran before that start.')),
-      h('section', { class: 'card' }, h('h2', null, 'Receiver link'), autoKv(link),
-        h('h3', { class: 'section-title' }, 'Framing'), autoKv(link.framing)),
-      h('section', { class: 'card' }, h('h2', null, 'RTCM hub'), autoKv(hl.hub),
-        h('h3', { class: 'section-title' }, 'Station'), autoKv(hl.station),
-        h('h3', { class: 'section-title' }, 'Observations'), autoKv(hl.obs)),
-      h('section', { class: 'card' }, h('h2', null, 'Event journal'), journalStats(hl.journal),
-        h('h3', { class: 'section-title' }, 'Log'), logStats(hl.log)),
-      h('section', { class: 'card' }, h('h2', null, 'Network'), autoKv(net),
-        h('h3', { class: 'section-title' }, 'Recovery'), net.ladder ? kv([
+      h('section', { class: 'card wide tight-kv' },
+        h('h2', null, 'Counters'),
+        h('p', { class: 'muted small' }, 'Raw figures for troubleshooting, since this start.'),
+        sect('link', 'Receiver link', autoKv(link)),
+        sect('framing', 'Framing', autoKv(link.framing)),
+        sect('hub', 'RTCM hub', autoKv(hl.hub)),
+        sect('station', 'Station', autoKv(hl.station)),
+        sect('obs', 'Observations', autoKv(hl.obs)),
+        sect('net', 'Network', autoKv(net)),
+        net.ladder ? sect('ladder', 'Network recovery', kv([
           ['Active', fmt.yesno(net.ladder.active)],
           ['Step', String(net.ladder.rung)],
           ['Held back because', net.ladder.withheld === 'none' ? DASH : lbl(L.ladderWhy, net.ladder.withheld)],
           ['Triggers now', (net.ladder.triggers || []).length ? net.ladder.triggers.map(t => lbl(L.trigger, t)).join(', ') : 'none'],
           ['Actions', fmt.num(net.ladder.actions)],
-        ]) : null)));
+        ])) : null,
+        sect('journal', 'Event journal', journalStats(hl.journal)),
+        sect('log', 'Log', logStats(hl.log)))));
   };
   detectClicks(box, () => {
     if (lastHl) render(lastHl);
   });
   return { stop: pollInto(box, 5000, '/api/health', render) };
+}
+
+/* ---- Event lists (the connection history, the journal) -------------------- */
+
+/* Rows an event list shows first, and how many more each "Show older" adds. */
+const EV_PAGE = 20;
+
+/* "9:41 AM" */
+function clockTime(unix) {
+  return new Date(unix * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+/* A record's time: the clock time on `day` (a Date's toDateString), else date and time. */
+function dayTime(unix, day) {
+  return new Date(unix * 1000).toDateString() === day ? clockTime(unix) : fmt.time(unix);
+}
+
+/*
+ * Consecutive rows with the same key k become one: the newest, its `all`
+ * holding every one (newest first) and its time the span they cover.
+ */
+function collapse(rows) {
+  const out = [];
+  for (const r of rows) {
+    const last = out[out.length - 1];
+    if (last && !last.head && !r.head && last.k === r.k) {
+      if (!last.all) {
+        last.all = [Object.assign({}, last)];
+        last.newest = last.when;
+      }
+      last.all.push(r);
+      last.id = 'r' + r.seq;
+      last.when = r.when !== last.newest && r.when.length + last.newest.length < 28 ? r.when + ' to ' + last.newest : last.newest;
+    } else {
+      out.push(Object.assign({}, r));
+    }
+  }
+  return out;
+}
+
+/*
+ * Newest first: heading rows {head: [time, text]} and event rows {when, ev,
+ * det, tone, seq, all (a collapsed repeat: its "×N" toggle), id}. open: ids
+ * of the repeats shown in full (the toggles carry data-rep; the page
+ * handles their clicks).
+ */
+function eventTable(label, rows, open) {
+  const tr = [];
+  const row = (r, sub) => h('tr', { class: sub ? 'rep-row' : null, title: r.seq ? '#' + r.seq : null },
+    h('td', null, r.when),
+    h('td', { class: 'ev' + (r.tone ? ' t-' + r.tone : '') }, r.ev, !sub && r.all ? h('button', { type: 'button', class: 'rep', 'data-rep': r.id,
+      'aria-expanded': open.has(r.id) ? 'true' : 'false', 'aria-label': (open.has(r.id) ? 'Hide' : 'Show') + ' all ' + r.all.length },
+    '×' + r.all.length) : null),
+    h('td', null, r.det));
+  for (const r of rows) {
+    if (r.head) {
+      tr.push(h('tr', { class: 'sep' }, h('th', { colspan: '3', scope: 'rowgroup' }, r.head[0] ? h('span', { class: 't' }, r.head[0]) : null, r.head[1])));
+      continue;
+    }
+    tr.push(row(r));
+    if (r.all && open.has(r.id)) for (const x of r.all) tr.push(row(x, true));
+  }
+  return scrollBox(label, h('table', { class: 'events' },
+    h('thead', null, h('tr', null, h('th', null, 'When'), h('th', null, 'Event'), h('th', null, 'Details'))),
+    h('tbody', null, tr)));
+}
+
+/* Repeat toggles in root: flip the id in `open`, then redraw. */
+function repeatClicks(root, open, redraw) {
+  root.addEventListener('click', e => {
+    const b = e.target && e.target.closest ? e.target.closest('[data-rep]') : null;
+    if (!b || !root.contains(b)) return;
+    const id = b.getAttribute('data-rep');
+    if (open.has(id)) open.delete(id);
+    else open.add(id);
+    redraw();
+    const again = root.querySelector('[data-rep="' + id + '"]');
+    if (again) again.focus();
+  });
+}
+
+/* A filter select for a card's title row: [[value, label], ...]. */
+function filterSelect(choices, onchange) {
+  const s = selectInput(choices.map(c => [c[0], c[1]]), choices[0][0], { 'aria-label': 'Show' });
+  s.addEventListener('change', () => onchange(s.value));
+  return s;
 }
 
 /* ---- Availability -------------------------------------------------------- */
@@ -213,52 +314,120 @@ function rssiSuffix(v) {
   return rssiKnown(v) ? ', signal ' + v + ' dBm' : '';
 }
 
-/* One connection-history record in words: [event, where, details]. */
-function connRow(e) {
-  const slot = e.slot_name || (e.slot === null || e.slot === undefined ? '' : 'Slot ' + (e.slot + 1));
+/* A caster slot by its name now (the status), else its number. */
+function slotName(i, name) {
+  const c = ((S.status && S.status.casters) || []).find(x => x.slot === i);
+  return name || (c && c.name) || 'Caster ' + (i + 1);
+}
+
+const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+
+/*
+ * One connection-history record in words, or a drop together with the
+ * return that ended it (back: the caster_up or wifi_up after it):
+ * [event, details, tone].
+ */
+function connRow(e, back) {
+  const name = e.slot === null || e.slot === undefined ? '' : slotName(e.slot, e.slot_name);
+  const tries = c => (c ? ', ' + plural(c, 'failed attempt', 'failed attempts') : '');
   switch (e.kind) {
-    case 'caster_down':
-      return ['Session ended', slot, 'after ' + fmt.dur(e.duration_s) + (e.class && e.class !== 'none' ? ': ' + lbl(L.fail, e.class).toLowerCase() : '') +
-        (e.count ? '; ' + e.count + ' shorter session' + (e.count === 1 ? '' : 's') + ' not listed' : '')];
+    case 'caster_down': {
+      const why = e.class && e.class !== 'none' ? ', ' + lbl(L.fail, e.class).toLowerCase() : '';
+      return [name + ' disconnected', (back ? 'back after ' + fmt.dur(back.duration_s) : 'after ' + fmt.dur(e.duration_s) + ' online') + why +
+        (back ? tries(back.count) : '') + (e.count ? ', ' + plural(e.count, 'shorter session', 'shorter sessions') + ' not listed' : ''), 'warn'];
+    }
     case 'caster_up':
-      return ['Streaming again', slot, 'after ' + fmt.dur(e.duration_s) + (e.count ? ', ' + e.count + ' failed attempt' + (e.count === 1 ? '' : 's') : '')];
+      return [name + ' back', 'after ' + fmt.dur(e.duration_s) + tries(e.count), 'ok'];
     case 'caster_stop':
-      return ['Stopped: needs you', slot, lbl(L.stop, e.stop_reason) + '; no new attempt until you act'];
+      return [name + ' stopped', lbl(L.stop, e.stop_reason) + ', no new attempt until you act', 'bad'];
     case 'wifi_up':
-      return ['Wi-Fi back', 'Wi-Fi', 'after ' + fmt.dur(e.duration_s) + (e.count ? ', ' + e.count + ' connect attempt' + (e.count === 1 ? '' : 's') : '')];
+      return ['Wi-Fi back', 'after ' + fmt.dur(e.duration_s) + (e.count ? ', ' + plural(e.count, 'connect attempt', 'connect attempts') : ''), 'ok'];
     case 'wifi_disconnect':
-      return ['Wi-Fi dropped', 'Wi-Fi', wifiReason(e.reason) + rssiSuffix(e.rssi)];
+      return ['Wi-Fi dropped', (back ? 'back after ' + fmt.dur(back.duration_s) + ', ' : '') + wifiReason(e.reason) + rssiSuffix(e.rssi), 'warn'];
     default:
-      return [words(e.kind), slot, ''];
+      return [words(e.kind), name, ''];
   }
 }
 
+/*
+ * The connection history (GET /api/connections, newest first) as event
+ * rows: a drop and the return after it (same caster, or Wi-Fi) make one
+ * row, repeats of the same kind of row one row with a "×N" toggle.
+ */
+function connItems(list) {
+  const drop = {}, backOf = new Map(), used = new Set();
+  for (const e of list.slice().reverse()) {
+    const key = e.kind.indexOf('wifi') === 0 ? 'w' : 'c' + e.slot;
+    if (e.kind === 'caster_down' || e.kind === 'wifi_disconnect') {
+      drop[key] = e;
+    } else if ((e.kind === 'caster_up' || e.kind === 'wifi_up') && drop[key]) {
+      backOf.set(drop[key], e);
+      used.add(e);
+      drop[key] = null;
+    } else {
+      drop[key] = null;
+    }
+  }
+  const today = new Date().toDateString();
+  return collapse(list.filter(e => !used.has(e)).map(e => {
+    const c = connRow(e, backOf.get(e));
+    return { k: [e.kind, e.slot, e.class || e.reason || e.stop_reason, backOf.has(e)].join('|'), seq: e.seq, ev: c[0], det: c[1], tone: c[2],
+      when: e.time_unix ? dayTime(e.time_unix, today) : fmt.dur(e.uptime_s) + ' after a start' };
+  }));
+}
+
+const CONN_FILTER = [['all', 'All'], ['caster', 'Casters'], ['wifi', 'Wi-Fi']];
+
 /** The connection-history card (GET /api/connections), refreshed every minute and on demand. */
 function connHistory() {
+  let list = [], complete = true, shown = EV_PAGE, filter = 'all';
+  const open = new Set();
   const out = h('div');
   const err = errBox();
+  const older = btn('Show older', () => {
+    shown += EV_PAGE;
+    render();
+  });
+  function render() {
+    const items = connItems(filter === 'all' ? list : list.filter(e => e.kind.indexOf(filter) === 0));
+    mount(out, items.length ? eventTable('Connection history', items.slice(0, shown), open) :
+      h('p', { class: 'muted' }, 'No dropped connections recorded.'),
+    !complete && items.length <= shown ? h('p', { class: 'muted small' }, 'Older records are on the Events tab.') : null);
+    older.hidden = items.length <= shown;
+  }
   const load = async () => {
     const r = await api('GET', '/api/connections');
-    const list = r.entries || [];
-    mount(out, list.length ? table(['When', 'Event', 'Where', 'Details'], list.map(e => {
-      const c = connRow(e);
-      const bad = e.kind === 'caster_down' || e.kind === 'caster_stop' || e.kind === 'wifi_disconnect';
-      return [e.time_unix ? fmt.time(e.time_unix) : h('span', { class: 'muted' }, fmt.dur(e.uptime_s) + ' after a start'),
-        h('span', { class: bad ? 't-warn' : 't-ok' }, c[0]), c[1] || DASH, c[2]];
-    })) : h('p', { class: 'muted' }, 'No caster sessions ended or Wi-Fi drops recorded.'),
-    r.complete === false && list.length ? h('p', { class: 'muted small foot' }, 'The newest ' + list.length + ' records; older ones are in the event journal.') : null);
+    list = r.entries || [];
+    complete = r.complete !== false;
+    render();
   };
-  const refresh = btn('Refresh', () => act(refresh, load, err), 'small');
-  const el = h('section', { class: 'card wide' }, h('h2', null, 'Connection history'),
-    h('p', { class: 'muted small' }, 'Caster sessions and Wi-Fi drops, newest first.'),
-    h('div', { class: 'form-actions' }, refresh), err, h('div', { class: 'foot' }, out));
+  const refresh = btn('Refresh', () => act(refresh, load, err));
+  const sel = filterSelect(CONN_FILTER, v => {
+    filter = v;
+    shown = EV_PAGE;
+    render();
+  });
+  const el = h('section', { class: 'card wide' },
+    cardHead('Connection history', h('div', { class: 'tools grow' }, sel, refresh)),
+    h('p', { class: 'muted small' }, 'Caster and Wi-Fi drops, newest first.'),
+    err, out, h('div', { class: 'form-actions' }, older));
+  repeatClicks(out, open, render);
   const stop = poller(60000, () => load().catch(e => showErr(e, err)));
   return { el: el, stop: stop };
 }
 
 function availabilityTab(box) {
   const hist = connHistory();
+  const today = h('section', { class: 'card' });
+  const casters = h('section', { class: 'card' });
+  const month = h('section', { class: 'card wide' });
+  /* Built once: the 10 s refresh redraws the three cards, never the history (its filter keeps the focus). */
+  let built = false;
   const render = av => {
+    if (!built) {
+      built = true;
+      mount(box, h('div', { class: 'grid' }, today, casters, month, hist.el));
+    }
     const slots = av.slots || [];
     const prot = slots.find(s => s.protected);
     const pi = prot ? slots.indexOf(prot) : -1;
@@ -270,50 +439,47 @@ function availabilityTab(box) {
     const figs = ['up_s', 'down_s', 'planned_s', 'reconnects'];
     const dayRows = slots.map((s, i) => [s, i])
       .filter(x => !x[0].empty || figs.some(k => (day[k] || [])[x[1]]))
-      .map(x => [x[0].empty ? 'Slot ' + (x[0].slot + 1) : x[0].name || 'Slot ' + (x[0].slot + 1), fmt.dur((day.up_s || [])[x[1]]),
+      .map(x => [x[0].empty ? 'Caster ' + (x[0].slot + 1) : x[0].name || 'Caster ' + (x[0].slot + 1), fmt.dur((day.up_s || [])[x[1]]),
         fmt.dur((day.down_s || [])[x[1]]), fmt.dur((day.planned_s || [])[x[1]]), fmt.num((day.reconnects || [])[x[1]])]);
     /* Onocoy's figures only while its slot is set up and on: numbers for a slot that cannot stream mislead. */
     const counting = prot && p.onocoy_ready !== false && p.enabled !== false;
     const sofar = p.graced_uptime_so_far_permille;
-    mount(box, h('div', { class: 'grid' },
-      h('section', { class: 'card' },
-        cardHead('Today', day.date ? badge(day.date + ' UTC', 'plain') : null),
-        av.clock === 'none' ? msg('warn', 'No trusted clock yet (GNSS or internet time), so seconds cannot be assigned to a day.') : null,
-        kv([
-          ['Clock', lbl(L.timeSource, av.clock)],
-          ['UTC time', sod === null || sod === undefined ? DASH :
-            String(Math.floor(sod / 3600)).padStart(2, '0') + ':' + String(Math.floor((sod % 3600) / 60)).padStart(2, '0')],
-          prot && !counting ? ['Onocoy', [p.onocoy_ready === false ? 'Not set up · ' : 'Off · ',
-            link(p.onocoy_ready === false ? 'Add your Onocoy credentials' : 'Turn it on', '#/casters/onocoy')]] : null,
-          counting ? ['Onocoy offline today', fmt.dur(p.down_today_s)] : null,
-          counting && p.budget_s !== null && p.budget_s !== undefined ? ['Offline budget today', 'about ' + fmt.dur(p.budget_s) +
-            ' at the current data rate'] : null,
-          counting ? ['Offline budget left', fmt.dur(p.budget_left_s)] : null,
-          counting ? ['Data rate', p.data_rate_permille === null || p.data_rate_permille === undefined ? 'nothing sent yet today' :
-            fmt.permille(p.data_rate_permille)] : null,
-          counting ? ['Graced uptime so far', soFarView(sofar, p.streak_ok)] : null,
-          /* (online today + the 300 s grant) / 24 h: what the whole day reaches if nothing more is sent. */
-          counting && p.graced_uptime_permille !== null && p.graced_uptime_permille !== undefined ?
-            ['Day covered so far (online + 5 min grant)', fmt.permille(p.graced_uptime_permille)] : null,
-          ['Powered off', fmt.dur(day.power_off_s)],
-          ['UART overflows', fmt.num(day.rx_overflows)],
-        ])),
-      h('section', { class: 'card' }, h('h2', null, 'Casters today'),
-        dayRows.length ? [table(['Caster', 'Online', 'Offline', 'Planned', 'Reconnects'], dayRows, { num: [1, 2, 3, 4], stack: true, label: 'Casters today' }),
-          h('p', { class: 'muted small foot' }, 'Offline: time a caster should have streamed but did not. Planned: the part caused by ' +
-            'receiver setup and updates, and by restarts you started.')] :
-          h('p', { class: 'muted' }, 'No casters.')),
-      h('section', { class: 'card wide' }, h('h2', null, 'Last 30 days'),
-        days.length ? table(['Day (UTC)', prot ? 'Onocoy offline' : 'Offline (slot 1)', 'Planned', 'Reconnects', 'Powered off'],
-          days.map(d => {
-            const i = pi >= 0 ? pi : 0;
-            const down = (d.down_s || [])[i];
-            const over = counting && down > 473;
-            return [d.date || String(d.utc_day), h('span', { class: over ? 't-bad' : null }, fmt.dur(down)), fmt.dur((d.planned_s || [])[i]),
-              fmt.num((d.reconnects || [])[i]), fmt.dur(d.power_off_s)];
-          }), { num: [1, 2, 3, 4] }) : h('p', { class: 'muted' }, 'No earlier days recorded yet.'),
-        counting && days.length ? h('p', { class: 'muted small foot' }, 'Red: more than 473 s offline, about the most Onocoy\'s streak allows in a UTC day.') : null),
-      hist.el));
+    const notReady = p.onocoy_ready === false;
+    mount(today,
+      cardHead('Today', day.date ? badge(day.date + ' UTC', 'plain') : null),
+      av.clock === 'none' ? msg('warn', 'No trusted clock yet (GNSS or internet time), so seconds cannot be assigned to a day.') : null,
+      kv([
+        ['Clock', lbl(L.timeSource, av.clock)],
+        ['UTC time', sod === null || sod === undefined ? DASH :
+          String(Math.floor(sod / 3600)).padStart(2, '0') + ':' + String(Math.floor((sod % 3600) / 60)).padStart(2, '0')],
+        prot && !counting ? ['Onocoy', [notReady ? 'Not set up. ' : 'Off. ', link(notReady ? 'Set it up' : 'Turn it on', '#/casters/onocoy')]] : null,
+        counting ? ['Onocoy offline today', fmt.dur(p.down_today_s)] : null,
+        counting && p.budget_s !== null && p.budget_s !== undefined ? ['Offline budget today', 'about ' + fmt.dur(p.budget_s) +
+          ' at the current data rate'] : null,
+        counting ? ['Offline budget left', fmt.dur(p.budget_left_s)] : null,
+        counting ? ['Data rate', p.data_rate_permille === null || p.data_rate_permille === undefined ? 'nothing sent yet today' :
+          fmt.permille(p.data_rate_permille)] : null,
+        counting ? ['Graced uptime so far', soFarView(sofar, p.streak_ok)] : null,
+        /* (online today + the 300 s grant) / 24 h: what the whole day reaches if nothing more is sent. */
+        counting && p.graced_uptime_permille !== null && p.graced_uptime_permille !== undefined ?
+          ['Day covered so far (online + 5 min grant)', fmt.permille(p.graced_uptime_permille)] : null,
+        ['Powered off', fmt.dur(day.power_off_s)],
+        ['UART overflows', fmt.num(day.rx_overflows)],
+      ]));
+    mount(casters, h('h2', null, 'Casters today'),
+      dayRows.length ? [table(['Caster', 'Online', 'Offline', 'Planned', 'Reconnects'], dayRows, { num: [1, 2, 3, 4], stack: true, label: 'Casters today' }),
+        h('p', { class: 'muted small foot' }, 'Offline: should have streamed but did not. Planned: receiver setup, updates and restarts you asked for.')] :
+        h('p', { class: 'muted' }, 'No casters.'));
+    mount(month, h('h2', null, 'Last 30 days'),
+      days.length ? table(['Day (UTC)', prot ? 'Onocoy offline' : 'Offline (caster 1)', 'Planned', 'Reconnects', 'Powered off'],
+        days.map(d => {
+          const i = pi >= 0 ? pi : 0;
+          const down = (d.down_s || [])[i];
+          const over = counting && down > 473;
+          return [d.date || String(d.utc_day), h('span', { class: over ? 't-bad' : null }, fmt.dur(down)), fmt.dur((d.planned_s || [])[i]),
+            fmt.num((d.reconnects || [])[i]), fmt.dur(d.power_off_s)];
+        }), { num: [1, 2, 3, 4] }) : h('p', { class: 'muted' }, 'No earlier days recorded yet.'),
+      counting && days.length ? h('p', { class: 'muted small foot' }, 'Red: more than 473 s offline, about the most Onocoy\'s streak allows in a UTC day.') : null);
   };
   const stopAv = pollInto(box, 10000, '/api/availability', render);
   return {
@@ -423,6 +589,7 @@ function logsTab(box) {
   const stopPoll = poller(2000, () => (following() && live.state !== 'ws' ? fetchMore() : Promise.resolve()), true);
 
   const which = radios('Which start', 'logboot', [['now', 'This start'], ['prev', 'Previous start']], 'now');
+  which.el.querySelector('legend').className = 'sr-only';
   which.onchange(() => {
     prev = which.value() === 'prev';
     restart();
@@ -435,7 +602,7 @@ function logsTab(box) {
   }, 'small');
   const dl = h('a', { class: 'btn small', href: '/api/logs?format=text', download: '' }, 'Download log');
 
-  const tag = textInput('*', { maxlength: 15, 'aria-label': 'Tag' });
+  const tag = textInput('*', { maxlength: 15 });
   const level = selectInput(LOG_LEVELS.map(l => [l, l]), 'info');
   const levelNote = h('p', { class: 'muted small', hidden: true });
   let levelMax = null;
@@ -456,7 +623,7 @@ function logsTab(box) {
   const setBtn = btn('Set', async () => {
     const t = tag.value.trim();
     if (!t || (t !== '*' && t.length > 15)) {
-      say(lvErr, 'A tag (component name, at most 15 characters) or * for all.');
+      say(lvErr, 'Enter a component tag (at most 15 characters), or * for all.');
       return;
     }
     const r = await act(setBtn, () => api('PUT', '/api/diag/log-level', { tag: t, level: level.value }), lvErr);
@@ -493,27 +660,26 @@ function logsTab(box) {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
-  }, capErr), 'small');
+  }, capErr));
 
   const capCard = h('section', { class: 'card', hidden: true },
     h('h2', null, 'Receiver byte capture'),
-    h('p', { class: 'muted small' }, 'This build records every byte the station exchanged with the receiver during a receiver update or a bench test ' +
-      '(the last 256 KB, data blocks as one line each).'),
-    h('div', { class: 'form-actions' }, capBtn),
-    capErr);
+    h('p', { class: 'muted small' }, 'The last 256 KB the station exchanged with the receiver in a receiver update or a bench test.'),
+    capErr,
+    h('div', { class: 'form-actions' }, capBtn));
   api('GET', '/api/health').then(hl => {
     capCard.hidden = !(hl && hl.byte_capture_built);
   }).catch(() => {});
   mount(box,
     h('section', { class: 'card' },
-      h('h2', null, 'Log'),
-      h('div', { class: 'spread' }, which.el, h('div', { class: 'row' }, pauseBtn, dl)),
-      h('div', { class: 'foot' }, pre),
-      h('div', { class: 'row foot' }, follow.el),
+      cardHead('Log', h('div', { class: 'tools' }, pauseBtn, dl)),
+      which.el,
+      pre,
+      follow.el,
       err),
     h('section', { class: 'card' },
       h('h2', null, 'Log level'),
-      h('p', { class: 'muted small' }, 'Per component tag, until the next restart. Debug output costs memory and console time; set it back when done.'),
+      h('p', { class: 'muted small' }, 'Per component tag (* for all), until the next restart. Set it back when done: debug output costs memory.'),
       h('div', { class: 'cols c3' }, field('Tag', tag).el, field('Level', level).el, h('div', { class: 'act' }, setBtn)),
       levelNote,
       lvErr),
@@ -539,8 +705,10 @@ function journalDetail(e) {
     case 'session':
       return 'The previous run ' + (a < 0 ? 'lasted an unknown time' : 'lasted ' + fmt.dur(a)) + '; it ended ' +
         (J.resetReason[b] ? 'with a ' + J.resetReason[b] + ' reset' : 'with reset ' + b);
-    case 'reboot':
-      return 'Restart: ' + (lbl(L.plannedReason, J.rebootKey[a]) || J.rebootReason[a] || a);
+    case 'reboot': {
+      const why = lbl(L.plannedReason, J.rebootKey[a]) || J.rebootReason[a] || String(a);
+      return why.charAt(0).toUpperCase() + why.slice(1);
+    }
     case 'ladder_step': {
       const outcome = (b >> 8) & 0xff, code = b & 0xff, why = (b >> 16) & 0xff;
       if (a === 1 && code === 0) {
@@ -582,24 +750,24 @@ function journalDetail(e) {
     case 'wifi_disconnect':
       return wifiReason(a) + rssiSuffix(b);
     case 'data_loss':
-      return (a >= 16 ? 'Caster slot ' + (a - 15) : J.loss[a] || 'counter ' + a) + ': +' + fmt.num(b);
+      return (a >= 16 ? slotName(a - 16) : J.loss[a] || 'counter ' + a) + ': +' + fmt.num(b);
     case 'caster_down': {
       const cls = (a >> 8) & 0xff, skipped = a >>> 16;
-      return 'Caster slot ' + ((a & 0xff) + 1) + ': session ended after ' + fmt.dur(b) +
-        (cls ? ' (' + lbl(L.fail, J.fail[cls] || cls) + ')' : '') +
+      return slotName(a & 0xff) + ', after ' + fmt.dur(b) + ' online' +
+        (cls ? ': ' + lbl(L.fail, J.fail[cls] || cls).toLowerCase() : '') +
         (skipped ? '; ' + skipped + ' short session' + (skipped === 1 ? '' : 's') + ' not listed' : '');
     }
     case 'caster_up': {
       const tries = a >>> 16;
-      return 'Caster slot ' + ((a & 0xff) + 1) + ': streaming again after ' + fmt.dur(b) +
+      return slotName(a & 0xff) + ', after ' + fmt.dur(b) +
         (tries ? ', ' + tries + ' failed attempt' + (tries === 1 ? '' : 's') : '');
     }
     case 'caster_stop': {
       const why = (a >> 8) & 0xff;
-      return 'Caster slot ' + ((a & 0xff) + 1) + ': stopped (' + lbl(L.stop, J.stop[why] || why) + '); no new attempt until you act';
+      return slotName(a & 0xff) + ': ' + lbl(L.stop, J.stop[why] || why) + ', no new attempt until you act';
     }
     case 'wifi_up':
-      return 'IP address back after ' + fmt.dur(b) + ', ' + a + ' connect attempt' + (a === 1 ? '' : 's');
+      return 'After ' + fmt.dur(b) + ', ' + plural(a, 'connect attempt', 'connect attempts');
     case 'rx_maintenance':
       return a ? 'Started for ' + fmt.dur(b) : 'Ended after ' + fmt.dur(b);
     case 'rx_boot': {
@@ -650,45 +818,159 @@ function journalByBoot(entries) {
   return groups;
 }
 
-function journalTab(box) {
-  let cursor = 0;
-  const entries = [];
-  const out = h('div');
-  const err = errBox();
-  async function fetchNew() {
-    for (let i = 0; i < 40; i++) {
-      const r = await api('GET', '/api/journal?cursor=' + cursor);
-      for (const e of r.entries || []) entries.push(e);
-      cursor = r.cursor;
-      if (!r.more) break;
-    }
-    const groups = journalByBoot(entries.slice(-500)).reverse();
+/* The filter of the event list: [value, label, kinds (null: all)]. */
+const EV_FILTER = [
+  ['all', 'All events', null],
+  ['starts', 'Starts and restarts', ['boot', 'session', 'reboot', 'safe_mode', 'rx_boot']],
+  ['recovery', 'Recovery', ['ladder_step']],
+  ['casters', 'Casters', ['caster_down', 'caster_up', 'caster_stop']],
+  ['wifi', 'Wi-Fi', ['wifi_disconnect', 'wifi_up']],
+  ['updates', 'Updates', ['app_update', 'app_revert', 'gnss_flash']],
+  ['receiver', 'Receiver', ['rx_maintenance', 'live_view', 'sg_test']],
+  ['loss', 'Data loss', ['data_loss']],
+];
+
+/* esp_reset_reason_t by C value, as L.resetReason names them. */
+const RESET_KEYS = Object.keys(L.resetReason);
+
+/*
+ * The event list's rows, newest first (eventTable): per start a heading
+ * that says when and how it started (its boot and session records, and the
+ * restart record that announced it), then its other records newest first,
+ * repeats of one kind collapsed. entries: oldest first; atStart: they reach
+ * back to the journal's oldest record (else the oldest start may just not
+ * be loaded yet); kinds: the filter (null: everything).
+ */
+function journalItems(entries, atStart, kinds) {
+  const groups = journalByBoot(entries);
+  const items = [];
+  for (let gi = groups.length - 1; gi >= 0; gi--) {
+    const g = groups[gi], es = g.entries;
+    const boot = es[0].kind === 'boot' ? es[0] : null;
+    const sess = boot && es[1] && es[1].kind === 'session' ? es[1] : null;
+    /* The restart this start was announced by: folded into the next start's heading when that names the same reason. */
+    const nb = groups[gi + 1] && groups[gi + 1].entries[0];
+    const reboots = es.filter(e => e.kind === 'reboot');
+    const told = nb && nb.kind === 'boot' && J.resetClassKey[nb.a] === 'planned' && reboots.length && reboots[reboots.length - 1].a === nb.b ?
+      reboots[reboots.length - 1] : null;
+    const day = g.offset !== null ? new Date(g.offset * 1000).toDateString() : '';
     const rows = [];
-    for (const g of groups) {
-      const first = g.entries[0];
-      const startTime = g.offset !== null ? fmt.time(g.offset) : null;
-      rows.push(h('tr', { class: 'sep' }, h('th', { colspan: '3', scope: 'rowgroup' },
-        'Start' + (startTime ? ' at about ' + startTime : '') + (first.kind === 'boot' ? '' : ' (its first records were overwritten)'))));
-      for (const e of g.entries.slice().reverse()) {
-        const when = e.time_unix ? fmt.time(e.time_unix) : g.offset !== null ? '≈ ' + fmt.time(g.offset + e.uptime_s) :
-          fmt.dur(e.uptime_s) + ' after the start';
-        rows.push(h('tr', null,
-          h('td', { 'data-label': 'When' }, e.time_unix ? when : h('span', { class: 'muted' }, when)),
-          h('td', { 'data-label': 'Event' }, J.kind[e.kind] || words(e.kind)),
-          h('td', { 'data-label': 'Details' }, journalDetail(e), h('span', { class: 'muted small' }, ' #' + e.seq))));
+    for (let i = es.length - 1; i >= 0; i--) {
+      const e = es[i];
+      if (e === boot || e === sess || e === told || (kinds && kinds.indexOf(e.kind) < 0)) continue;
+      rows.push({ k: e.kind, seq: e.seq, ev: J.kind[e.kind] || words(e.kind), det: journalDetail(e),
+        when: e.time_unix ? dayTime(e.time_unix, day) : g.offset !== null ? 'about ' + dayTime(g.offset + e.uptime_s, day) :
+          fmt.dur(e.uptime_s) + ' after the start' });
+    }
+    if (!kinds || kinds.indexOf('boot') >= 0 || rows.length) {
+      let text = boot ? startSentence(J.resetClassKey[boot.a], sess ? RESET_KEYS[sess.b] : null, J.rebootKey[boot.b]) :
+        gi === 0 && !atStart ? 'Start' : 'Start (its first records are gone)';
+      if (sess && sess.a >= 0) text += ' (previous run ' + fmt.dur(sess.a) + ')';
+      items.push({ head: [g.offset !== null ? fmt.time(g.offset) : '', g.offset !== null ? text : text + ', time not known yet'] });
+    }
+    for (const r of collapse(rows)) items.push(r);
+  }
+  return items;
+}
+
+/*
+ * The event journal, newest first. It reads the newest 64 records (from
+ * health.journal.newest_seq), then 64 at a time backwards until it has a
+ * page of rows (or the journal's start); "Show older" adds a page the same
+ * way, Refresh reads what came since. No record is read twice.
+ */
+function journalTab(box) {
+  const recs = new Map();   /* seq -> record */
+  const open = new Set();
+  let avail = true, oldest = 0, atStart = false, shown = EV_PAGE, kinds = null;
+  const out = h('div', null, h('p', { class: 'loading' }, 'Loading…'));
+  const err = errBox();
+  const keys = () => Array.from(recs.keys());
+  const items = () => journalItems(Array.from(recs.values()).sort((x, y) => x.seq - y.seq), atStart, kinds);
+  async function read(cursor) {
+    const r = await api('GET', '/api/journal?cursor=' + cursor);
+    let added = 0;
+    for (const e of r.entries || []) {
+      if (!recs.has(e.seq)) {
+        recs.set(e.seq, e);
+        added++;
       }
     }
-    mount(out, rows.length ? scrollBox('Event journal', h('table', { class: 'journal stack-sm' },
-      h('thead', null, h('tr', null, h('th', null, 'When'), h('th', null, 'Event'), h('th', null, 'Details'))),
-      h('tbody', null, rows))) : h('p', { class: 'muted' }, 'The journal is empty.'));
+    return { r: r, added: added };
   }
-  const refresh = btn('Refresh', () => act(refresh, fetchNew, err), 'small');
+  /* Older records until a page of rows shows (or the journal's start). */
+  async function fill() {
+    for (let i = 0; i < 64 && !atStart && items().length < shown; i++) {
+      const lo = Math.min(...keys());
+      const c = await read(Math.max(0, lo - 65));
+      if (!c.added || Math.min(...keys()) <= oldest) atStart = true;
+    }
+  }
+  async function start() {
+    const hl = await api('GET', '/api/health');
+    const j = hl.journal || {};
+    avail = !!j.available;
+    oldest = j.oldest_seq || 0;
+    recs.clear();
+    atStart = !j.newest_seq;
+    if (j.newest_seq) {
+      await read(Math.max(0, j.newest_seq - 64));
+      if (!recs.size || Math.min(...keys()) <= oldest) atStart = true;
+    }
+    await fill();
+    render();
+  }
+  async function refresh() {
+    if (!recs.size) return start();
+    let cursor = Math.max(...keys());
+    for (let i = 0; i < 64; i++) {
+      const c = await read(cursor);
+      cursor = c.r.cursor;
+      if (!c.r.more) break;
+    }
+    return render();
+  }
+  function render() {
+    const all = items();
+    mount(out, !avail ? msg('warn', 'The journal partition is missing or unusable: events are not recorded.') :
+      !recs.size ? h('p', { class: 'muted' }, 'No events recorded.') :
+        all.length ? eventTable('Event journal', all.slice(0, shown), open) :
+          h('p', { class: 'muted' }, 'No events of this kind.'),
+    avail && recs.size && atStart && all.length <= shown ? h('p', { class: 'muted small' }, 'No older events.') : null);
+    older.hidden = all.length <= shown && atStart;
+    wipe.hidden = !avail || !recs.size;
+  }
+  const older = btn('Show older', () => act(older, async () => {
+    shown += EV_PAGE;
+    await fill();
+    render();
+  }, err));
+  const wipe = btn('Clear journal…', async () => {
+    const ok = await dialog({ title: 'Clear the event journal?', ok: 'Clear journal', okKind: 'danger solid',
+      body: [h('p', null, 'Every recorded event is deleted. The start history, the availability record and the logs are kept.'),
+        h('p', { class: 'muted' }, 'The connection history starts again empty, and the power-loss alert forgets earlier power cuts.')] });
+    if (!ok) return;
+    const r = await act(wipe, () => api('DELETE', '/api/journal'), err);
+    if (r === undefined) return;
+    toast('Event journal cleared.', 'ok');
+    shown = EV_PAGE;
+    open.clear();
+    act(null, start, err);
+  }, 'danger', { hidden: true });
+  const refreshBtn = btn('Refresh', () => act(refreshBtn, refresh, err));
+  const sel = filterSelect(EV_FILTER, v => act(null, async () => {
+    kinds = EV_FILTER.find(f => f[0] === v)[2];
+    shown = EV_PAGE;
+    await fill();
+    render();
+  }, err));
   mount(box, h('section', { class: 'card' },
-    h('h2', null, 'Event journal'),
-    h('p', { class: 'muted small' }, 'Starts, restarts, recovery steps, updates and data losses, kept across restarts. Newest first, by start; ' +
-      'times marked ≈ are worked out from a later record of the same start (the clock was not set yet when they were written).'),
-    h('div', { class: 'form-actions' }, refresh), err, h('div', { class: 'foot' }, out)));
-  act(null, fetchNew, err);
+    cardHead('Event journal', h('div', { class: 'tools grow' }, sel, refreshBtn)),
+    h('p', { class: 'muted small' }, 'Starts, recovery steps, caster and Wi-Fi drops, updates and data losses, newest first. Kept across restarts.'),
+    err, out,
+    h('div', { class: 'form-actions' }, wipe, older)));
+  repeatClicks(out, open, render);
+  act(null, start, err);
   return { stop() {} };
 }
 
@@ -718,13 +1000,14 @@ function coredumpTab(box) {
     const cd = hl.coredump || {};
     if (!cd.present) {
       mount(box, h('section', { class: 'card' }, cardHead('Core dump', badge('None', 'ok')),
-        h('p', { class: 'muted' }, 'The station stores a core dump when it crashes. There is none.')));
+        h('p', { class: 'muted' }, 'The station keeps a copy of its memory when it crashes. There is none.')));
       return;
     }
     const dlBtn = btn('Download', async () => {
       const ok = await dialog({ title: 'Download the core dump?', ok: 'Download',
-        body: [h('p', null, 'A core dump is a copy of the station\'s memory at the crash. It can contain your Wi-Fi and caster passwords.'),
-          h('p', { class: 'muted' }, 'Share it only with people you trust. Decode it with idf.py coredump-info and the ELF file of the same version.')],
+        body: [h('p', null, 'It is a copy of the station\'s memory at the crash and can contain your Wi-Fi and caster passwords. ' +
+          'Share it only with people you trust.'),
+        h('p', { class: 'muted' }, 'Decode it with idf.py coredump-info and the ELF file of the same version.')],
         check: 'I understand it may contain passwords.' });
       if (!ok) return;
       const a = h('a', { href: '/api/coredump', download: 'coredump.elf', hidden: true });
@@ -747,7 +1030,7 @@ function coredumpTab(box) {
         ['Backtrace', (cd.backtrace || []).length ? h('code', null, cd.backtrace.join(' ')) : DASH],
       ]),
       err,
-      h('div', { class: 'form-actions' }, dlBtn, delBtn)));
+      h('div', { class: 'form-actions' }, delBtn, dlBtn)));
   }
   load().catch(e => mount(box, msg('bad', errText(e))));
   return { stop() {} };
@@ -761,13 +1044,24 @@ Views.diag = {
   create(el, arg) {
     const tab = DIAG_PAGES[arg] ? arg : '';
     const box = h('div', { class: 'stack' });
-    mount(el, h('nav', { class: 'seg', 'aria-label': 'Diagnostics sections' },
+    const seg = h('nav', { class: 'seg', 'aria-label': 'Diagnostics sections', onscroll: () => edgeFade(seg) },
       DIAG_TABS.map(t => h('a', { href: '#/diag' + (t[0] ? '/' + t[0] : ''), class: t[0] === tab ? 'active' : null,
-        'aria-current': t[0] === tab ? 'page' : null }, t[1]))), box);
+        'aria-current': t[0] === tab ? 'page' : null }, t[1])));
+    mount(el, seg, box);
+    /* On a phone the sections scroll sideways: the active one in view, a fade where more lie. */
+    const fit = () => {
+      const a = seg.querySelector('.active');
+      const left = a ? a.offsetLeft - seg.offsetLeft : 0;
+      if (a && left + a.offsetWidth > seg.clientWidth) seg.scrollLeft = left - 16;
+      edgeFade(seg);
+    };
+    fit();
+    window.addEventListener('resize', fit);
     mount(box, h('p', { class: 'loading' }, 'Loading…'));
     const sub = DIAG_PAGES[tab](box);
     return {
       destroy() {
+        window.removeEventListener('resize', fit);
         if (sub && sub.stop) sub.stop();
       },
     };

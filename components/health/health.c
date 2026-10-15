@@ -185,6 +185,7 @@ static uint8_t s_mode = HL_MODE_FULL;   /* recovery mode in effect */
 static int s_mode_bad = -1;             /* last out-of-range stored value logged */
 static hm_power_t s_power;
 static uint32_t s_jcursor;              /* journal records read so far (seq) */
+static uint32_t s_jclears;              /* the journal's clear count those records belong to */
 static bool s_power_caught_up;          /* every record written before the reads began was fed once */
 static bool s_power_alert;              /* last judgement (kept until the reader caught up) */
 static diag_journal_entry_t s_jbuf[JOURNAL_CHUNK];
@@ -668,12 +669,21 @@ static const char *mode_name(uint8_t m)
  * read yet would count as "now": the alert keeps its last value (off at
  * start) meanwhile. After that the running boot is dated from the trusted
  * clock itself, so a boot that writes no dated record still ends the alert
- * 24 h after it started.
+ * 24 h after it started. When the user clears the journal, the boots read
+ * from it are forgotten too and the reading starts again from what follows
+ * the clear (the running boot's own records went with it, so the alert is
+ * off until new power losses are recorded).
  */
 static bool power_tick(void)
 {
     diag_journal_info_t ji;
     bool flushed = false;
+    uint32_t clears = diag_journal_clear_count();
+    if (clears != s_jclears) {
+        s_jclears = clears;
+        hm_power_init(&s_power);
+        s_jcursor = 0;
+    }
     if (!s_power_caught_up) {
         diag_journal_info(&ji);
         flushed = ji.available && ji.queued == 0;

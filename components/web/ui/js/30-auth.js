@@ -23,10 +23,11 @@ function apSsidText() {
   return (S.session && S.session.ap_ssid) || '';
 }
 
+/* The System page's one line under the admin password. */
 function recoveryHint() {
   const ap = apSsidText();
-  return 'Forgot the password? Hold the station\'s BOOT button for 10 seconds. That clears the password and opens the ' +
-    'station\'s own Wi-Fi network' + (ap ? ' (' + ap + ')' : '') + ' for 15 minutes; join it, open http://192.168.4.1/ and set a new password.';
+  return 'Forgot it? Hold the BOOT button for 10 seconds, then within 15 minutes join the station\'s own Wi-Fi' +
+    (ap ? ' (' + ap + ')' : '') + ' and open http://192.168.4.1/ to set a new one.';
 }
 
 /* Forgot the password: the two steps (the login's disclosure). */
@@ -233,7 +234,7 @@ function wifiPicker(wifi, opts) {
   const pwHint = pwField.el.querySelector('.hint');
   const scanInfo = h('span', { class: 'muted small' });
   const err = errBox();
-  const scanBtn = btn('Scan again', () => scan(), 'small');
+  const scanBtn = btn('Scan', () => scan(), 'small');
 
   function nets() {
     const res = current && current.scan && current.scan.results ? current.scan.results : [];
@@ -253,15 +254,19 @@ function wifiPicker(wifi, opts) {
   function render() {
     const items = nets();
     const sc = current && current.scan ? current.scan : {};
-    scanInfo.textContent = sc.running ? 'Scanning…' : sc.age_s === null || sc.age_s === undefined ? 'Not scanned yet.' :
+    const never = sc.age_s === null || sc.age_s === undefined;
+    scanInfo.textContent = sc.running ? 'Scanning…' : never ? 'Not scanned yet.' :
       items.length + (items.length === 1 ? ' network' : ' networks') + ' found ' + fmt.dur(sc.age_s) + ' ago.';
+    /* The saved network, chosen at the start, has its row even when the last scan did not see it. */
+    if (stored(selected) && !items.some(r => r.ssid === selected.ssid)) items.unshift({ ssid: selected.ssid, secured: true, rssi: null, saved: true });
+    scanBtn.textContent = never && !sc.running ? 'Scan' : 'Scan again';
     mount(list, items.map(r => {
       const isSel = selected && !selected.other && selected.ssid === r.ssid;
       return h('button', { type: 'button', class: 'net' + (isSel ? ' sel' : ''), 'aria-pressed': isSel ? 'true' : 'false',
         onclick: () => pick({ ssid: r.ssid, secured: r.secured }) },
       h('span', { class: 'ssid' }, r.ssid),
-      h('span', { class: 'meta' }, r.secured ? h('span', { role: 'img', 'aria-label': 'Secured', title: 'Secured' }, '🔒') : 'Open'),
-      rssiView(r.rssi, true));
+      r.saved ? h('span', { class: 'meta' }, 'Saved') : r.secured ? null : h('span', { class: 'meta' }, 'Open'),
+      r.saved ? null : rssiView(r.rssi, true));
     }), h('button', { type: 'button', class: 'net' + (selected && selected.other ? ' sel' : ''),
       onclick: () => pick({ other: true }) }, h('span', { class: 'ssid' }, 'Other network…')));
     otherField.el.hidden = !(selected && selected.other);
@@ -876,7 +881,7 @@ async function startWizard(claim) {
         h('p', null, 'The station switches to the network you pick, and this page loses it. Then ',
           url ? ['open ', h('strong', null, url), ' on that network'] : ['find ', h('strong', null, routerName()),
             ' in your router\'s device list and open its address'], ' to continue.'),
-      w.configured ? h('p', { class: 'muted small' }, w.online ? 'Connected to ' + w.ssid + (w.ip ? ' (' + w.ip + ')' : '') + '.' :
+      w.configured ? h('p', { class: 'muted small' }, w.online ? 'Now on ' + w.ssid + (w.ip ? ' (' + w.ip + ')' : '') + '.' :
         'Saved network: ' + w.ssid + ' (not connected).') : null,
       h('form', { onsubmit: async e => {
         e.preventDefault();

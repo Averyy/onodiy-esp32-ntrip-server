@@ -257,17 +257,16 @@ Views.updates = {
       check: progressWidget(), app_update: progressWidget(), app_upload: progressWidget(),
       gnss_update: progressWidget(), gnss_flash: progressWidget(), gnss_upload: progressWidget(), gnss_check: progressWidget(),
     };
-    const versionsCard = h('section', { class: 'card' });
+    const versionsCard = h('section', { class: 'card wide tight-kv' });
     const appCard = h('section', { class: 'card' });
     const gnssCard = h('section', { class: 'card' });
-    const sessionCard = h('section', { class: 'card wide', hidden: true });
+    const sessionCard = h('section', { class: 'card wide tight-kv', hidden: true });
     const filesCard = h('section', { class: 'card wide' });
     const stagedBox = h('div');
     const appErr = errBox(), gnssErr = errBox(), sessionErr = errBox();
 
     /* ---- Versions and "check now" ---- */
     function renderVersions() {
-      const a = u.app || {}, g = u.gnss || {};
       const lr = u.last_result;
       const fail = checkFailure(u);
       const checkBtn = btn('Check now', () => act(checkBtn, async () => {
@@ -277,19 +276,18 @@ Views.updates = {
       /* The last attempt, successful or not ("19:10 (failed)"); the last success when no attempt ran this start. */
       const last = u.last_attempt_unix ? checkTime(u.last_attempt_unix) + (fail ? ' (failed)' : '') :
         u.last_check_unix ? fmt.time(u.last_check_unix) : 'not yet';
+      const rows = kv([
+        ['Last check', last],
+        u.release_repo ? ['Releases from', ['github.com/' + u.release_repo, u.signed_manifests ? ' ' : null,
+          u.signed_manifests ? badge('signed only', 'plain') : null]] : null,
+        /* Check results have their own message below; other jobs show here. */
+        lr && lr.job !== 'check' ? ['Last job', lbl(L.job, lr.job) + ': ' + resultText(lr)] : null,
+      ]);
       mount(versionsCard,
-        cardHead('Versions', u.state && u.state !== 'idle' && u.state !== 'failed' ? badge(lbl(L.updState, u.state), 'info') : null),
-        kv([
-          ['App', [a.running || DASH, a.dev_build ? ' ' : null, a.dev_build ? badge('development build', 'plain') : null]],
-          ['Receiver', g.running ? g.running + (g.model ? ' on ' + g.model : '') : DASH],
-          ['Last check', last],
-          u.release_repo ? ['Releases from', ['github.com/' + u.release_repo, u.signed_manifests ? ' ' : null,
-            u.signed_manifests ? badge('signed only', 'plain') : null]] : null,
-          /* Check results have their own message below; other jobs show here. */
-          lr && lr.job !== 'check' ? ['Last job', lbl(L.job, lr.job) + ': ' + resultText(lr)] : null,
-        ]),
-        u.checks_enabled ? h('p', { class: 'muted small' }, 'The station checks for new releases once a day. Nothing is downloaded until you click.') :
+        cardHead('Updates', u.state && u.state !== 'idle' && u.state !== 'failed' ? badge(lbl(L.updState, u.state), 'info') : null),
+        u.checks_enabled ? h('p', { class: 'muted small' }, 'The station checks once a day. Nothing is installed until you choose.') :
           msg('', ERR.checks_disabled),
+        rows,
         fail && u.state !== 'checking' ? msg(fail.tone, fail.text, fail.detail ? h('div', { class: 'small muted' }, fail.detail) : null) : null,
         P.check.el,
         h('div', { class: 'form-actions' }, checkBtn));
@@ -323,44 +321,49 @@ Views.updates = {
     function renderApp() {
       const a = u.app || {};
       const trial = a.trial || {};
-      const parts = [];
+      const lines = [], acts = [];
+      if (a.rollback_available) {
+        const rb = btn('Go back to the previous version', async () => {
+          const ok = await dialog({ title: 'Go back to the previous version?', ok: 'Go back', okKind: 'danger solid',
+            body: h('p', null, 'The station restarts into the version installed before ' + a.running + '. ' + a.running +
+              ' is not offered again; you can still install it from a file.') });
+          if (!ok) return;
+          const r = await act(rb, () => api('POST', '/api/update/rollback', { confirm: true }), appErr);
+          if (r !== undefined) showRestarting('Going back to the previous version');
+        }, 'danger');
+        acts.push(rb);
+      }
       if (a.reverted_in_stage1 && a.reverted) {
+        lines.push(msg('warn', 'Update ' + a.reverted + ' was rolled back in its first minute (a crash or a power dip). If it rolls back again, ' +
+          'it is not offered any more.'));
         const again = btn('Install ' + a.reverted + ' again', () => installApp(a.reverted, false, again), 'primary');
-        parts.push(msg('warn', 'Update ' + a.reverted + ' was rolled back during its first minute (a crash or a power blip). If it rolls back again, it is not offered any more.',
-          h('div', { class: 'form-actions' }, again)));
+        acts.push(again);
       }
       if (a.available && a.latest && !(a.reverted_in_stage1 && a.reverted === a.latest)) {
         const inst = btn('Install ' + a.latest, () => installApp(a.latest, false, inst), 'primary');
-        parts.push(msg('info', 'Version ' + a.latest + ' is available.', h('div', { class: 'form-actions' }, inst)));
+        acts.push(inst);
       } else if (a.latest_rolled_back && a.latest) {
+        lines.push(msg('warn', 'The latest release, ' + a.latest + ', was rolled back here before, so it is not offered.'));
         const anyway = btn('Install ' + a.latest + ' anyway', () => installApp(a.latest, true, anyway));
-        parts.push(msg('warn', 'The latest release, ' + a.latest + ', was rolled back on this station before, so it is not offered.',
-          h('div', { class: 'form-actions' }, anyway)));
+        acts.push(anyway);
       } else if (a.dev_build) {
-        parts.push(h('p', { class: 'muted' }, 'Development builds are not offered releases. Install a release from a file below.'));
-      } else {
-        parts.push(h('p', { class: 'muted' }, a.latest ? 'This is the latest release.' : 'No release information yet.'));
+        lines.push(h('p', { class: 'muted small' }, 'Development builds get no release offers. Install a release from a file below.'));
+      } else if (!a.latest) {
+        lines.push(h('p', { class: 'muted small' }, 'No release information yet.'));
       }
-      const rb = btn('Go back to the previous version', async () => {
-        const ok = await dialog({ title: 'Go back to the previous version?', ok: 'Go back', okKind: 'danger solid',
-          body: h('p', null, 'The station marks ' + a.running + ' as rolled back and restarts into the version installed before it. ' +
-            a.running + ' is not offered again; you can still install it by hand.') });
-        if (!ok) return;
-        const r = await act(rb, () => api('POST', '/api/update/rollback', { confirm: true }), appErr);
-        if (r !== undefined) showRestarting('Going back to the previous version');
-      }, 'danger small');
       mount(appCard,
-        cardHead('App', a.available ? badge('Update available', 'info') : null),
+        cardHead('App', a.available ? badge('Update available', 'info') : a.dev_build ? badge('Development build', 'plain') :
+          a.latest ? badge('Up to date', 'ok') : null),
         kv([
           ['Running', a.running],
           ['Latest release', a.latest || DASH],
           trial.stage && trial.stage !== 'none' ? ['Trial', lbl(L.trial, trial.stage) + (trial.left_s ? ', ' + fmt.dur(trial.left_s) + ' left' : '')] : null,
           (a.rolled_back || []).length ? ['Rolled back here', a.rolled_back.join(', ') + ' (not offered again)'] : null,
         ]),
-        parts,
+        lines,
         P.app_update.el,
         appErr,
-        a.rollback_available ? h('div', { class: 'form-actions' }, rb) : null);
+        h('div', { class: 'form-actions' }, acts));
     }
 
     /* ---- Receiver (offered package) ---- */
@@ -393,7 +396,7 @@ Views.updates = {
       const lr = u.last_result;
       const last = flash && flash.last;
       mount(gnssCard,
-        cardHead('Receiver firmware', g.available ? badge('Update available', 'info') : null),
+        cardHead('Receiver firmware', g.available ? badge('Update available', 'info') : g.latest ? badge('Up to date', 'ok') : null),
         kv([
           ['Receiver', g.model],
           ['Running', fwText(g.running, g.running_build)],
@@ -402,11 +405,10 @@ Views.updates = {
             [badge(lbl(L.flashOutcome, last.outcome), outcomeTone(last.outcome)),
               last.ended_age_s !== null && last.ended_age_s !== undefined ? ' ' + fmt.dur(last.ended_age_s) + ' ago' : null]] : null,
         ]),
-        g.available ? downtimeRows(g.expected_downtime_s, g.budget_left_s) : h('p', { class: 'muted' }, g.latest ? 'Up to date.' : 'No release information yet.'),
-        blocked ? msg('warn', 'Not possible right now: ' + lbl(L.gnssBlock, g.blocked).toLowerCase() +
+        g.available ? downtimeRows(g.expected_downtime_s, g.budget_left_s) : g.latest ? null : h('p', { class: 'muted small' }, 'No release information yet.'),
+        blocked && g.available ? msg('warn', 'Not possible right now: ' + lbl(L.gnssBlock, g.blocked).toLowerCase() +
           (g.blocked_left_s ? ' (about ' + fmt.dur(g.blocked_left_s) + ' left).' : '.')) : null,
-        g.flash_available ? null : msg('', 'Installing receiver firmware is not enabled in this build. You can still download or upload a ' +
-          'package to have it checked.'),
+        g.flash_available ? null : h('p', { class: 'muted small' }, 'This build checks receiver packages but cannot install them yet.'),
         rflow ? receiverSteps(rflow.state, rflow.upload, !g.flash_available) : null,
         P.gnss_update.el,
         P.gnss_check.el,
@@ -429,6 +431,7 @@ Views.updates = {
       const rec = f.record;
       const pr = f.progress;
       const acts = f.actions || {};
+      const notNow = [];
       const buttons = FLASH_ACTIONS.map(a => {
         const info = acts[a[0]] || { allowed: false };
         const b = btn(a[2], async () => {
@@ -440,7 +443,8 @@ Views.updates = {
             load();
           }
         }, a[0] === 'clear' ? 'danger' : '', { disabled: !info.allowed, title: info.allowed ? null : lbl(L.why, info.why) });
-        return h('div', null, b, !info.allowed && info.why ? h('small', { class: 'hint' }, 'Not now: ' + lbl(L.why, info.why)) : null);
+        if (!info.allowed && info.why) notNow.push(h('li', null, a[2] + ': not now, ' + lbl(L.why, info.why) + '.'));
+        return b;
       });
       mount(sessionCard,
         h('div', { class: 'card-head', id: 'session' }, h('h2', null, 'Receiver update session'), badge(lbl(L.journal, f.journal), f.journal === 'running' ? 'info' : 'warn')),
@@ -474,7 +478,8 @@ Views.updates = {
         f.receiver_text ? h('details', { class: 'more' }, h('summary', null, 'Receiver output'), h('pre', { class: 'log' }, f.receiver_text)) : null,
         f.flash_available ? null : msg('', NOT_ENABLED + ' Retrying and restarting the receiver from here need a build with receiver flashing; clearing works.'),
         sessionErr,
-        h('div', { class: 'form-actions' }, buttons));
+        h('div', { class: 'form-actions' }, buttons.slice().reverse()),
+        notNow.length ? h('ul', { class: 'muted small' }, notNow) : null);
     }
 
     /* ---- Files ---- */
@@ -702,26 +707,31 @@ Views.updates = {
         shaOk.el,
         staged.flash_available ? null : msg('warn', NOT_ENABLED + ' Continuing checks the package against every rule and releases it; nothing is sent to the receiver.'),
         err,
-        h('div', { class: 'form-actions' }, go, cancel));
+        h('div', { class: 'form-actions' }, cancel, go));
       tick();
       if (staged) stagedTimer = setInterval(tick, 1000);
     }
 
     mount(filesCard,
       h('h2', null, 'Install from a file'),
-      h('h3', { class: 'section-title' }, 'App image (.bin)'),
-      h('p', { class: 'muted small' }, 'For pre-releases, downgrades and self-built firmware.'),
-      h('label', { class: 'lbl', for: 'upd-app-file' }, 'App image file'),
-      h('div', { class: 'row' }, appFile, appUploadBtn),
-      P.app_upload.el,
-      appUploadErr,
-      h('h3', { class: 'section-title' }, 'Receiver package (.pkg)'),
-      h('p', { class: 'muted small' }, 'The station stores and checks the package first. Nothing is sent to the receiver until you confirm.'),
-      h('label', { class: 'lbl', for: 'upd-pkg-file' }, 'Receiver package file'),
-      h('div', { class: 'row' }, pkgFile, pkgUploadBtn),
-      P.gnss_upload.el,
-      pkgErr,
-      stagedBox);
+      h('div', { class: 'cols c2' },
+        h('div', { class: 'stack' },
+          h('h3', null, 'App image (.bin)'),
+          h('p', { class: 'muted small' }, 'For pre-releases, older versions and your own builds.'),
+          h('label', { class: 'lbl', for: 'upd-app-file' }, 'App image file'),
+          appFile,
+          P.app_upload.el,
+          appUploadErr,
+          h('div', { class: 'form-actions' }, appUploadBtn)),
+        h('div', { class: 'stack' },
+          h('h3', null, 'Receiver package (.pkg)'),
+          h('p', { class: 'muted small' }, 'Checked first. Nothing reaches the receiver until you confirm.'),
+          h('label', { class: 'lbl', for: 'upd-pkg-file' }, 'Receiver package file'),
+          pkgFile,
+          P.gnss_upload.el,
+          pkgErr,
+          h('div', { class: 'form-actions' }, pkgUploadBtn),
+          stagedBox)));
 
     /* ---- Loading and live progress ---- */
     /* The 10 s poll re-renders only when something changed and nobody is

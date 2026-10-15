@@ -20,7 +20,9 @@
  *     6  u16 rec_format     layout of this sector's records (1 = below);
  *                           sectors with an unknown one are skipped when
  *                           reading, but keep their place in the ring
- *     8  u32 sector_seq     1, 2, 3, ...: +1 every time a sector is opened;
+ *     8  u32 sector_seq     1, 2, 3, ...: +1 every time a sector is opened,
+ *                           +sector count when the journal is cleared
+ *                           (dj_clear_start: every sector is erased once);
  *                           the highest is the sector being written
  *    12  u32 first_rec_seq  sequence number of this sector's first record
  *    16  u16 rec_size       32
@@ -54,6 +56,16 @@
  * first_rec_seq). A sector written in an unknown record format counts as
  * full. A partition without any valid header is empty: the first append
  * opens sector 0.
+ *
+ * Clear (dj_clear_start, then dj_clear_step until it returns 0): the ring's
+ * next sector is erased and opened first, numbered on from the newest
+ * sector and record, so sequence numbers are never reused and a reader's
+ * cursor stays valid; every other sector leaves the index at once (no read
+ * returns its records again) and is erased afterwards, one per step. A
+ * power cut at any point leaves a ring a mount reads: before the new header
+ * is written nothing has changed but the one sector the ring would have
+ * dropped next anyway; after it, the new sector is the current one, and the
+ * sectors not erased yet come back with their older records.
  */
 #pragma once
 
@@ -114,6 +126,7 @@ typedef struct {
     uint32_t cur_slot;     /**< next free slot in cur (DJ_SLOTS = full) */
     uint32_t next_seq;
     uint32_t top_sector_seq;
+    uint64_t stale;        /**< sectors a clear dropped from the index, still to erase (bit = sector) */
     dj_sector_t sec[DJ_MAX_SECTORS];
     /* statistics since mount */
     uint32_t written;
@@ -148,6 +161,25 @@ bool dj_needs_open(const dj_t *j);
  * @return number of records (0 also when unmounted).
  */
 size_t dj_read(dj_t *j, uint32_t *cursor, dj_entry_t *out, size_t cap, bool *more);
+
+/**
+ * Clear the journal: open the ring's next sector (erased, numbered on from
+ * the newest record) and drop every other sector from the index; they are
+ * erased by dj_clear_step. A journal never written to (no sector opened)
+ * has nothing to clear.
+ * @return DJ_OK; DJ_ERR_IO when the new sector could not be opened (nothing
+ *         else changed); DJ_ERR_STATE when not mounted.
+ */
+int dj_clear_start(dj_t *j);
+
+/**
+ * Erase the next sector a clear dropped (a sector the ring opened again
+ * meanwhile is not touched: opening erased it).
+ * @return 1 more remain, 0 none left, DJ_ERR_IO this one could not be erased
+ *         (it is given up: not in the index, its old records come back at
+ *         the next mount).
+ */
+int dj_clear_step(dj_t *j);
 
 /** Oldest sequence number still held (0 if empty). */
 uint32_t dj_oldest_seq(const dj_t *j);

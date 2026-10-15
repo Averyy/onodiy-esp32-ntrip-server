@@ -150,10 +150,14 @@ function navShowActive() {
 }
 
 function navEdges() {
-  const nav = doc.getElementById('tabs');
-  const more = nav.scrollWidth - nav.clientWidth;
-  nav.classList.toggle('more-left', more > 2 && nav.scrollLeft > 2);
-  nav.classList.toggle('more-right', more > 2 && nav.scrollLeft < more - 2);
+  edgeFade(doc.getElementById('tabs'));
+}
+
+/* A row that scrolls sideways (the tabs, Diagnostics' sub-tabs): a fade at each edge where more of it lies. */
+function edgeFade(el) {
+  const more = el.scrollWidth - el.clientWidth;
+  el.classList.toggle('more-left', more > 2 && el.scrollLeft > 2);
+  el.classList.toggle('more-right', more > 2 && el.scrollLeft < more - 2);
 }
 
 doc.getElementById('tabs').addEventListener('scroll', navEdges, { passive: true });
@@ -393,7 +397,8 @@ function noticeItems(st, page) {
     add('factory_reset', 'warn', 'Factory reset refused', 'The BOOT button was held for a factory reset during a receiver update. ' +
       'Hold it again after the update.', [link('Details', '#/diag', 'btn small')]);
   }
-  if (sm.active) {
+  /* The System page has the safe-mode box itself, with "Leave safe mode". */
+  if (sm.active && page !== 'system') {
     add('safe_mode', 'bad', 'Safe mode', 'After ' + (sm.crashes || 'repeated') + ' crashes the receiver and casters are off. ' +
       'Wi-Fi, this page and updates still work.' + (sm.retry_in_s ? ' Normal operation is tried again in ' + upMin(sm.retry_in_s) + '.' : ''),
     [link('Updates', '#/updates', 'btn small'), link('Details', '#/system', 'btn small')]);
@@ -668,15 +673,15 @@ function showRestarting(title, text) {
   if (cur) cur.view = {};
   const wasAdmin = isAdmin();
   const root = doc.getElementById('modal');
-  const status = h('p', { class: 'muted small' }, 'Waiting for the station…');
+  const status = h('p', { class: 'muted small' }, 'Waiting…');
   mount(root, h('div', { class: 'overlay', role: 'alert' },
-    h('div', { class: 'card' }, h('div', { class: 'spinner' }), h('h2', null, title || 'The station is restarting'),
-      h('p', null, text || 'This page reconnects by itself when the station is back. That usually takes less than a minute.'),
+    h('div', { class: 'card' }, h('div', { class: 'spinner' }), h('h2', null, title || 'Restarting'),
+      h('p', null, text || 'This page reconnects by itself when the station is back, usually within a minute.'),
       status)));
   const started = Date.now();
   rebootWatch = setInterval(async () => {
     const secs = Math.round((Date.now() - started) / 1000);
-    status.textContent = 'Waiting for the station… ' + fmt.dur(secs);
+    status.textContent = 'Waiting… ' + fmt.dur(secs);
     if (secs < 4) return;
     try {
       await api('GET', '/api/session', undefined, { timeout: 2500, quiet401: true });

@@ -2121,6 +2121,22 @@ static esp_err_t h_journal(web_req_t *r)
     return web_resp_end(&resp);
 }
 
+/* Clear the journal: what reads it (the connection history, the power-lost alert) starts over with it. */
+static esp_err_t h_journal_delete(web_req_t *r)
+{
+    esp_err_t err = diag_journal_clear();
+    if (err == ESP_ERR_NOT_FOUND) {
+        return web_send_err(r->req, WEB_ERR_NOT_FOUND);
+    }
+    if (err == ESP_ERR_INVALID_STATE) {
+        return web_send_err(r->req, WEB_ERR_BUSY);
+    }
+    if (err != ESP_OK) {
+        return web_send_internal(r->req, err);
+    }
+    return ok(r->req);
+}
+
 /*
  * The connection history: the newest WEB_HISTORY_MAX caster session ends and
  * returns, Wi-Fi drops and returns, read backwards through the journal one
@@ -2340,6 +2356,7 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/diag/log-level", HTTP_PUT, WEB_ACC_ADMIN, WEB_BODY_JSON, h_log_level),
     ROUTE("/api/logs", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_logs),
     ROUTE("/api/journal", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_journal),
+    ROUTE("/api/journal", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_journal_delete),
     ROUTE("/api/connections", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_connections),
     ROUTE("/api/coredump", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_coredump_get),
     ROUTE("/api/coredump", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_coredump_delete),

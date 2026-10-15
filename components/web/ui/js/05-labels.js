@@ -126,12 +126,13 @@ const L = {
     brownout: 'after a power dip', sdio: 'over SDIO', usb: 'over USB', jtag: 'over JTAG', efuse: 'after an eFuse error',
     pwr_glitch: 'after a power glitch', cpu_lockup: 'after a CPU lockup',
   },
+  /* Why a restart was planned, as it follows "Restarted " (startSentence) or "Restart " (the journal). */
   plannedReason: {
-    none: '', user: 'you restarted it', factory_reset: 'a factory reset', admin_reset: 'a password reset with the BOOT button',
-    app_update: 'an app update', app_revert: 'a failed app update went back to the previous version',
-    gnss_ladder: 'it restarted to look for the receiver', network_ladder: 'Wi-Fi recovery', low_heap: 'memory ran low',
-    safe_mode_retry: 'it tried normal operation again after safe mode', safe_mode_cleared: 'you left safe mode',
-    nvs_slot_switch: 'a settings storage switch', boot_failure: 'a failed start', app_rollback: 'you went back to the previous version',
+    none: '', user: 'by you', factory_reset: 'for a factory reset', admin_reset: 'after a password reset with the BOOT button',
+    app_update: 'into an app update', app_revert: 'back to the previous version after a failed app update',
+    gnss_ladder: 'to look for the receiver', network_ladder: 'by Wi-Fi recovery', low_heap: 'because memory ran low',
+    safe_mode_retry: 'to try normal operation after safe mode', safe_mode_cleared: 'as you left safe mode',
+    nvs_slot_switch: 'for a settings storage switch', boot_failure: 'after a failed start', app_rollback: 'as you went back to the previous version',
   },
   upstream: { none: 'Not checked yet', ok: 'Reachable', no_ip: 'No IP address', dns_failed: 'DNS fails', no_upstream: 'Router only, no internet' },
   apReason: { setup: 'first setup', fallback: 'Wi-Fi unreachable', linger: 'closing soon', recovery: 'recovery (BOOT button)' },
@@ -318,9 +319,9 @@ const MAINT_CHOICES = [[900, '15 minutes'], [1800, '30 minutes'], [3600, '1 hour
 
 /* Journal enumerations by C value (API.md appendix: position in C order). */
 const J = {
-  kind: { boot: 'Start', session: 'Previous session', reboot: 'Restart', ladder_step: 'Recovery step', app_update: 'App update',
-    app_revert: 'App reverted', gnss_flash: 'Receiver update', safe_mode: 'Safe mode', wifi_disconnect: 'Wi-Fi disconnect',
-    data_loss: 'Data loss', caster_down: 'Caster session ended', caster_up: 'Caster back', wifi_up: 'Wi-Fi back',
+  kind: { boot: 'Start', session: 'Previous run', reboot: 'Restart', ladder_step: 'Recovery step', app_update: 'App update',
+    app_revert: 'App rolled back', gnss_flash: 'Receiver update', safe_mode: 'Safe mode', wifi_disconnect: 'Wi-Fi dropped',
+    data_loss: 'Data lost', caster_down: 'Caster disconnected', caster_up: 'Caster back', wifi_up: 'Wi-Fi back',
     caster_stop: 'Caster stopped', rx_maintenance: 'Receiver maintenance', live_view: 'Live view', sg_test: 'Signal groups',
     rx_boot: 'Receiver at power-on' },
   resetClass: ['power on', 'planned', 'crash', 'brownout', 'other'],
@@ -503,14 +504,14 @@ function startSentence(cls, reason, planned) {
   const why = planned && planned !== 'none' ? lbl(L.plannedReason, planned) : '';
   switch (cls) {
     case 'power_on':
-      return 'Started after power-on, or a reset by its pin (this chip reports both alike)';
+      return 'Started after power-on or a reset by its pin';
     case 'planned':
-      return 'Restarted on purpose' + (why ? ': ' + why : '');
+      return 'Restarted ' + (why || 'on purpose');
     case 'crash':
       return 'Restarted after a crash' + (reason ? ' (' + lbl(L.resetReason, reason).replace(/^(after|by|for|from|over) /, '') + ')' : '');
     case 'brownout':
-      return 'Restarted after a power dip (the supply voltage fell too low)';
+      return 'Restarted after a power dip (low supply voltage)';
     default:
-      return 'Restarted' + (reason ? ' ' + lbl(L.resetReason, reason) : '') + (why ? ': ' + why : '');
+      return 'Restarted' + (reason ? ' ' + lbl(L.resetReason, reason) : '') + (why ? ', ' + why : '');
   }
 }

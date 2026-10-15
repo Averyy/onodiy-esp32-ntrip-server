@@ -348,6 +348,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | PUT | `/api/diag/log-level` | adm | Runtime log level per tag | `diag_set_log_level` |
 | GET | `/api/logs` | adm | Log ring (this or previous boot) | `diag_log_read*` |
 | GET | `/api/journal` | adm | Event journal | `diag_journal_read` |
+| DELETE | `/api/journal` | adm | Clear the event journal | `diag_journal_clear` |
 | GET | `/api/connections` | adm | Connection history (casters, Wi-Fi) | `diag_journal_read`, ntrip_server |
 | GET, DELETE | `/api/coredump` | adm | Download / erase the core dump | `diag_coredump_*` |
 | POST | `/api/system/reboot` | adm | Reboot | lifecycle |
@@ -1795,8 +1796,9 @@ how it ended).
 the start step answers `not_available_yet`, the package is checked against
 every rule (progress job `gnss_check`), then released; nothing is sent to
 the receiver. `last_result` says `not_available_yet`; the UI shows
-"Receiver package downloaded and checked; receiver firmware updates are not
-enabled in this build yet. Nothing on the receiver changed."
+"Receiver package downloaded and verified. Receiver firmware updates are
+not enabled in this build yet. The station now checks the package against
+every rule; nothing is sent to the receiver."
 
 Errors (all before anything is downloaded): `409 not_offered` (the build
 changed or nothing is offered; dev builds are offered nothing), `409
@@ -2221,6 +2223,30 @@ by `kind` (integers; only a `wifi_disconnect` entry's `b` can be `null`):
 
 Enum numbers are the C values; the UI decodes them with the appendix
 tables.
+
+### `DELETE /api/journal`
+
+Empty body. Clears the event journal: `200 {"ok": true}` once every record
+written or queued before the request is gone. Later records go on with the
+next `seq` (never reused), so a client's cursor stays valid and simply
+finds nothing older. It erases each journal sector once (32 sectors of 4 KB;
+PROVISIONAL: a second or two, to be measured on hardware); a concurrent `GET /api/journal` or `/api/connections` waits for one
+sector erase at most and never sees part of the old records. Errors:
+`404 not_found` (no usable journal partition: `health.journal.available`
+false), `409 busy` (another clear runs), `500 internal` (a flash error:
+the records are gone from every read all the same; a sector that could not
+be erased brings its records back at the next boot, as does a power cut
+during the clear).
+
+What clearing resets: the journal's records (`GET /api/journal`), the
+connection history (`GET /api/connections`, empty and `complete`), the
+`power_lost` alert's count of power losses (it starts again from the
+records written after the clear, so the alert goes off), and
+`health.journal.oldest_seq` and `newest_seq` (0 until the next record).
+What it keeps: the start history (`health.boot_history`, settings
+`life/boots`), the availability ledger (`GET /api/availability`), the logs,
+the `seq` numbering, `health.journal.sector_cycles` (it counts the clear's
+erases too) and the journal counters since boot.
 
 ### `GET /api/connections`
 

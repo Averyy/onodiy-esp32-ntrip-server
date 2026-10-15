@@ -398,6 +398,8 @@ small { font-size: 0.85rem; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; min-width: 0; font-variant-numeric: tabular-nums; }
 .kv + .kv { margin-top: 0.5rem; }
+/* A short list in a wide card: the values stay near their labels. */
+.tight-kv .kv { grid-template-columns: minmax(7.5rem, 13rem) 1fr; }
 /* A list of figures under a line of text in a card keeps the card's gap. */
 .card > * + .kv { margin-top: 0.75rem; }
 
@@ -578,7 +580,7 @@ input[type="file"] { max-width: 100%; font: inherit; }
 .choice input { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 .choice:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
 
-.cols { display: grid; grid-template-columns: 1fr; gap: 0.85rem; }
+.cols { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.85rem; }
 .cols > :is(.field, .check, .fieldset, .cols) { margin-top: 0; }
 /* A button in a row of fields: level with their boxes. */
 .cols > .act { display: flex; align-items: flex-end; }
@@ -610,7 +612,28 @@ input[type="file"] { max-width: 100%; font: inherit; }
   .form-actions > .field { order: -2; flex: 0 1 15rem; margin-right: auto; }
 }
 
+/* A setting and its button (Restart or reset): the text at the left, the button at the right from 560 px; stacked on a phone. */
+.setting-row { display: flex; flex-direction: column; gap: 0.5rem; }
+.setting-row + .setting-row { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.setting-row > div { min-width: 0; }
+.setting-row strong { display: block; }
+.setting-row span { color: var(--muted); font-size: 0.9rem; }
+.setting-row > .btn { width: 100%; }
+@media (min-width: 560px) {
+  .setting-row { flex-direction: row; align-items: center; justify-content: space-between; gap: 1rem; }
+  .setting-row > .btn { width: auto; flex: none; }
+}
+/* Tools in a card's title row that act on its list (Refresh, a filter): at the right, under the title on a phone. */
+.card-head > .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.tools select { width: auto; }
+@media (max-width: 559px) {
+  .card-head > .tools.grow { flex: 1 1 100%; }
+  .tools.grow select { flex: 1 1 10rem; }
+}
+
 details.more { margin-top: 0.85rem; }
+/* A list of disclosures (the counters): one under the other, close together. */
+.card > details.more + details.more { margin-top: 0.2rem; }
 details.more > summary { cursor: pointer; color: var(--accent); font-weight: 600; padding: 0.3rem 0; }
 details.more[open] > summary { margin-bottom: 0.6rem; }
 
@@ -886,12 +909,18 @@ pre.log {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* In a card the log box keeps the card's gap above it (pre.log's own margin is 0). */
+.card > * + pre.log { margin-top: 0.75rem; }
 pre.log .e { color: var(--bad); }
 pre.log .w { color: var(--warn); }
 pre.log .gap { color: var(--muted); font-style: italic; }
 
-.seg { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+/* Sub-tabs (Diagnostics): one row; on a phone it scrolls sideways with the tabs' edge fade (edgeFade()). */
+.seg { display: flex; gap: 0.35rem; overflow-x: auto; scrollbar-width: none; }
+.seg::-webkit-scrollbar { display: none; }
 .seg a {
+  flex: none;
+  white-space: nowrap;
   padding: 0.45rem 0.8rem;
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -1043,16 +1072,49 @@ pre.log .gap { color: var(--muted); font-style: italic; }
 .skip:focus { top: 0.5rem; }
 
 /* Tabs that do not fit: a fade at the edge where more of them lie. */
-.tabs.more-right { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent); }
-.tabs.more-left { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 2.5rem), transparent); }
-.tabs.more-left.more-right { -webkit-mask-image: linear-gradient(to right, transparent, #000 2.5rem, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to right, transparent, #000 2.5rem, #000 calc(100% - 2.5rem), transparent); }
+.more-right { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent); }
+.more-left { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 2.5rem), transparent); }
+.more-left.more-right { -webkit-mask-image: linear-gradient(to right, transparent, #000 2.5rem, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to right, transparent, #000 2.5rem, #000 calc(100% - 2.5rem), transparent); }
 
 /* Links at the foot of a card: a target of at least 24 px. */
 .foot a { display: inline-block; min-height: 24px; padding: 2px 0; line-height: 20px; }
 .foot.row a, .card .foot a + a { margin-right: 0.25rem; }
 
-/* The event journal: a heading row per start. */
-table.journal tr.sep th { padding-top: 0.9rem; color: var(--text); font-size: 0.9rem; white-space: normal; background: var(--surface-2); }
+/* Event lists (the journal, the connection history): a heading row per start, a "×N" toggle on repeats. */
+table.events td:first-child { white-space: nowrap; color: var(--muted); }
+table.events tr.sep th { padding-top: 0.8rem; color: var(--text); font-size: 0.95rem; font-weight: 650; white-space: normal; background: var(--surface-2); }
+table.events tr.sep .t { margin-right: 0.5rem; color: var(--muted); font-weight: 500; }
+table.events td.ev { font-weight: 600; }
+table.events tr.rep-row td { background: var(--surface-2); font-size: 0.9rem; }
+table.events tr.rep-row td.ev { padding-left: 1.25rem; font-weight: 500; }
+.rep {
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+.rep[aria-expanded="true"] { border-color: var(--accent); background: var(--accent-soft); }
+/* On a phone each row is a block: the time small on its own line, then the event in bold and its details. */
+@media (max-width: 480px) {
+  table.events, table.events tbody, table.events tr, table.events th { display: block; width: 100%; }
+  table.events thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  table.events tbody tr { padding: 0.5rem 0.25rem; border-bottom: 1px solid var(--border); }
+  table.events tbody tr:last-child { border-bottom: 0; }
+  table.events td { display: inline; padding: 0; border: 0; }
+  table.events td:first-child { display: block; font-size: 0.85rem; white-space: normal; }
+  table.events td.ev { margin-right: 0.4rem; }
+  table.events tbody tr.sep { padding: 0; }
+  table.events tr.sep th { padding: 0.6rem 0.5rem; border: 0; }
+  table.events tr.sep .t { display: block; }
+  table.events tbody tr.rep-row { padding-left: 1rem; background: var(--surface-2); }
+  table.events tr.rep-row td.ev { padding-left: 0; }
+}
 
 /* Tables of key/value rows on a phone: each row a block of "header: value" lines (no inner scroller). */
 @media (max-width: 480px) {
