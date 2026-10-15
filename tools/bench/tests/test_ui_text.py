@@ -51,7 +51,8 @@ vm.createContext(ctx);
 const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { restartPlanText, onocoyElsewhereText, connRow, journalDetail, presetInfo: () => ({ PRESETS, PRESET_INFO }),\n' +
   '  connItems: l => connItems(l), journalItems: a => journalItems(a[0], a[1], a[2]), evFilter: () => EV_FILTER,\n' +
-  '  wifiChip: w => wifiChip(w), recoveryHint: () => recoveryHint(),\n' +
+  '  wifiChip: w => wifiChip(w), apChip: ap => apChip(ap), recoveryHint: () => recoveryHint(),\n' +
+  '  ago: s => checkedAgo(Date.now() / 1000 - s),\n' +
   '  onlineShare: a => onlineShare(a[0], a[1]),\n' +
   '  hero: a => { const t = stationState(a[0], a[1]);\n' +
   '    return { title: t.head, tone: t.tone, key: t.key, line: t.lead, alert: t.alertId, notice: t.notice, trial: t.trial,\n' +
@@ -783,7 +784,7 @@ def test_comparison_lines_short_and_in_hours():
     assert sw[2] == "Corrections pause briefly."
 
 
-def test_profile_chip_and_maintenance_notice_on_the_receiver_page():
+def test_profile_chip_and_maintenance_notice_everywhere_but_settings():
     chips = run_ui([("profileChip", {"state": "configuring", "profile_applied": True}),
                     ("profileChip", {"state": "streaming", "config_failed": True}),
                     ("profileChip", {"state": "streaming", "profile_applied": True}),
@@ -791,8 +792,9 @@ def test_profile_chip_and_maintenance_notice_on_the_receiver_page():
                     ("profileChip", {"state": "no_receiver", "profile_applied": False})])
     assert chips == [["Applying", "info"], ["Failed", "bad"], ["Applied", "ok"], ["Not applied", "warn"], ["Not applied", "warn"]]
     maint = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600})
-    out = run_ui([("notices", [maint, p]) for p in ("receiver/settings", "receiver", "receiver/live", "casters", "settings", "diag")])
-    # Receiver settings has the maintenance card with its buttons: no notice that repeats it there. Every other page has it.
+    out = run_ui([("notices", [maint, p]) for p in ("settings", "receiver", "receiver/settings", "receiver/live", "casters", "diag")])
+    # Settings has maintenance next to the receiver update, with End now: no notice that repeats it there. Every other
+    # page has it.
     assert [[k for k, _ in o] for o in out] == [[]] + [["maintenance"]] * 5
 
 
@@ -803,9 +805,30 @@ def test_system_wifi_chip_and_recovery_line():
                   ("wifiChip", {"configured": True, "associated": True}), ("wifiChip", {"configured": True}),
                   ("recoveryHint", None)])
     assert out[:4] == [["Not set up", "plain"], ["Online", "ok"], ["Connecting", "warn"], ["Offline", "bad"]]
-    # One line under the admin password: what to do, no paragraph.
-    assert out[4].startswith("Forgot it? Hold the BOOT button for 10 seconds") and "http://192.168.4.1/" in out[4]
-    assert len(out[4]) < 160
+    # One line under the admin password: what to do, no paragraph (the login page has the steps in full).
+    assert out[4] == ("Forgot it? Hold the BOOT button for 10 seconds, then join the station's own Wi-Fi and open "
+                      "http://192.168.4.1/.")
+
+
+def test_own_wifi_chip_warns_only_while_it_is_open_to_anyone():
+    out = run_ui([("apChip", {"active": False}), ("apChip", {"active": False, "password_set": True}),
+                  ("apChip", {"active": True, "password_set": True}), ("apChip", {"active": True})])
+    # Folded in the Wi-Fi card: its chip is all a closed fold shows, so an open access point without a password says
+    # so there.
+    assert out == [["Off", ""], ["Off", ""], ["On", "info"], ["On, no password", "warn"]]
+
+
+def test_update_check_age_in_whole_units():
+    out = run_ui([("ago", s) for s in (30, 600, 5400, 7 * 3600, 3 * 86400)])
+    assert out == ["just now", "10\u00a0min ago", "2\u00a0h ago", "7\u00a0h ago", "3\u00a0days ago"]
+
+
+def test_receiver_maintenance_starts_in_one_place():
+    """Settings' Updates card, next to the receiver update, is the one place that starts it (the notices and the
+    Status page end it); Receiver settings has no maintenance card any more."""
+    starts = [f.name for f in sorted(UI_JS.glob("*.js")) if "/api/gnss/maintenance', { duration_s" in f.read_text()]
+    assert starts == ["70-updates.js"]
+    assert "'Receiver maintenance'" not in (UI_JS / "60-receiver.js").read_text()
 
 
 def test_no_top_level_name_is_declared_twice():
@@ -901,8 +924,8 @@ def test_a_notice_hides_on_the_page_whose_card_says_it():
     cases = [(BUSY, p) for p in pages] + [(x, p) for x in (safe, uart, journal, trial) for p in ("", "settings", "receiver")]
     out = [[k for k, _ in o] for o in run_ui([("notices", list(c)) for c in cases])]
     every = {"settings", "onocoy_stopped:0", "wifi", "maintenance", "held", "signal_test", "update"}
-    hidden = {"casters": {"onocoy_stopped:0"}, "receiver": {"held"}, "receiver/settings": {"maintenance", "signal_test"},
-              "settings": {"wifi", "update"}, "diag": set()}
+    hidden = {"casters": {"onocoy_stopped:0"}, "receiver": {"held"}, "receiver/settings": {"signal_test"},
+              "settings": {"wifi", "update", "maintenance"}, "diag": set()}
     for p, keys in zip(pages, out[:5]):
         assert set(keys) == every - hidden[p], p
     safe_k, uart_k, journal_k, trial_k = out[5:8], out[8:11], out[11:14], out[14:17]

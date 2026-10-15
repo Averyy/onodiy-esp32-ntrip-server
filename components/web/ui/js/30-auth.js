@@ -23,11 +23,10 @@ function apSsidText() {
   return (S.session && S.session.ap_ssid) || '';
 }
 
-/* Settings' one line under the admin password. */
+/* Settings' one line under the admin password (the login page has the steps in full). */
 function recoveryHint() {
-  const ap = apSsidText();
-  return 'Forgot it? Hold the BOOT button for 10 seconds, then within 15 minutes join the station\'s own Wi-Fi' +
-    (ap ? ' (' + ap + ')' : '') + ' and open http://192.168.4.1/ to set a new one.';
+  return 'Forgot it? Hold the BOOT button for 10 seconds, then join ' + (apSsidText() || 'the station\'s own Wi-Fi') +
+    ' and open http://192.168.4.1/.';
 }
 
 /* Forgot the password: the two steps (the login's disclosure). */

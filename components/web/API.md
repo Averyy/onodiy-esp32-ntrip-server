@@ -934,7 +934,9 @@ memory through an EN reset is to be confirmed on the board. The end runs
 the station's stream-first check, as at boot. Entry and
 exit are journalled (`rx_maintenance`). Whether input on the link can
 disturb a receiver worked on through its other port is PROVISIONAL, to be
-confirmed on hardware.
+confirmed on hardware. The UI starts it in Settings, next to the receiver
+update; while it is on, that row has Add 30 min and End now, and every
+other page a one-line notice with End now (the Status page's top card).
 
 While it is on, the receiver actions answer `409 receiver_maintenance`
 ("receiver maintenance: nothing is sent to the receiver"): apply, lock,

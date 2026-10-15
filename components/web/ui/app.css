@@ -572,7 +572,6 @@ select {
 textarea { min-height: 7rem; font-family: var(--mono); font-size: 0.85rem; }
 input.invalid, select.invalid, textarea.invalid { border-color: var(--bad); }
 input:disabled, select:disabled { opacity: 0.65; }
-input[type="file"] { max-width: 100%; font: inherit; }
 
 .check {
   display: flex;
@@ -638,12 +637,19 @@ input[type="file"] { max-width: 100%; font: inherit; }
 .setting-row strong { display: block; }
 .setting-row span { color: var(--muted); font-size: 0.9rem; }
 .setting-row > .btn { width: 100%; }
+.setting-row > .form-actions { margin-top: 0; }
 @media (min-width: 560px) {
   .setting-row { flex-direction: row; align-items: center; justify-content: space-between; gap: 1rem; }
   .setting-row > .btn { width: auto; flex: none; }
+  .setting-row > .form-actions { flex: none; }
 }
+/* A card's list of parts (Updates: app, receiver, maintenance, the files): a line between them. */
+.rows > :not([hidden]) ~ :not([hidden]) { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
+.rows > * > * + * { margin-top: 0.6rem; }
 /* Tools in a card's title row that act on its list (Refresh, a filter): at the right, under the title on a phone. */
 .card-head > .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+/* A short title and its tools on one line, also on a phone (Updates: the last check, Check now). */
+.card-head.fit > :first-child { flex-basis: auto; }
 .tools select { width: auto; }
 @media (max-width: 559px) {
   .card-head > .tools.grow { flex: 1 1 100%; }
@@ -651,7 +657,7 @@ input[type="file"] { max-width: 100%; font: inherit; }
 }
 
 details.more { margin-top: 0.85rem; }
-/* A card that folds to its title row (Receiver settings: the comparison, details, maintenance). */
+/* A card that folds to its title row (Receiver settings: the comparison, the receiver's details). */
 details.fold > summary { display: flex; align-items: center; gap: 0.6rem; min-height: 32px; cursor: pointer; list-style: none; }
 details.fold > summary::-webkit-details-marker { display: none; }
 details.fold > summary::before { content: '›'; flex: none; width: 1rem; color: var(--accent); font-size: 1.35rem; font-weight: 700; line-height: 1; transition: transform 0.15s; }

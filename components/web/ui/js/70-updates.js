@@ -2,18 +2,21 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Updates, the first cards of Settings (#/settings/updates; #/settings/session
- * opens it at the receiver update session). Every update starts with a click
- * here: the station only checks once a day (or on "Check now") and shows the
- * notice and the dot on the Settings tab.
- *   App: install the offered release (download, verify, restart, trial), go
- *        back to the previous version, or install a .bin file.
- *   Receiver: download and verify the offered package or upload a .pkg,
- *        confirm its SHA-256 and the expected firmware, then install. In
- *        builds without receiver flashing the package is checked against
- *        every rule instead and released; the page says so, and nothing is
- *        sent to the receiver.
- *   Session: a receiver update session waiting for a decision (retry,
+ * The Updates card of Settings (#/settings/updates; #/settings/session opens
+ * the receiver update session's card under it). Every update starts with a
+ * click here: the station only checks once a day (or on "Check now") and
+ * shows the notice and the dot on the Settings tab. One row each:
+ *   App: the running version and what is offered (install, install again
+ *        after a rollback in the first minute, or anyway).
+ *   Receiver: its firmware and the offered package (download and verify,
+ *        then install; in builds without receiver flashing the package is
+ *        checked against every rule instead and released, and nothing is
+ *        sent to the receiver).
+ *   Receiver maintenance: hands off while a PC tool updates the receiver.
+ * The last check and "Check now" sit in the title row.
+ * Folded: install an app image (.bin) or a receiver package (.pkg) from a
+ * file, and go back to the previous app version.
+ * Session: a receiver update session waiting for a decision (retry,
  *        restart the receiver, clear), and how the last one ended.
  */
 
@@ -184,11 +187,11 @@ function checkFailure(u) {
   return { tone: 'warn', text: text, detail: detail };
 }
 
-/** Time of a check as "19:10" today, else date and time. */
-function checkTime(unix) {
-  const d = new Date(unix * 1000);
-  const now = new Date();
-  return d.toDateString() === now.toDateString() ? d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : fmt.time(unix);
+/** "2 h ago": the age of an update check in whole minutes, hours or days. */
+function checkedAgo(unix) {
+  const s = Date.now() / 1000 - unix;
+  return s < 90 ? 'just now' : s < 5400 ? Math.round(s / 60) + NB + 'min ago' : s < 172800 ? Math.round(s / 3600) + NB + 'h ago' :
+    Math.round(s / 86400) + NB + 'days ago';
 }
 
 /* ---- App image checks before an upload (the first bytes of the file) ---- */
@@ -247,50 +250,68 @@ function receiverWarnings(flashAvailable) {
   ];
 }
 
+/*
+ * A file chooser that looks and works like the other buttons (the
+ * browser's own input stays hidden): onFile(file) once one is chosen.
+ * {input, b}: both go on the page.
+ */
+function fileButton(label, accept, onFile) {
+  const input = h('input', { type: 'file', accept: accept, hidden: true, onchange: () => {
+    const f = input.files && input.files[0];
+    input.value = '';   /* the same file again fires again */
+    if (f) onFile(f);
+  } });
+  return { input: input, b: btn(label, () => input.click()) };
+}
+
+/* Receiver maintenance (Settings, next to the receiver update): the duration, what it does and what a configuration saves, then start. */
+async function startMaintenance(b, out) {
+  const dur = selectInput(MAINT_CHOICES, 1800);
+  const ok = await dialog({ title: 'Start receiver maintenance?', ok: 'Start',
+    body: [h('p', null, MAINT_WHAT), field('Duration', dur).el,
+      h('p', { class: 'muted' }, 'It ends by itself, with End now, or at a power cut. Then the station checks the receiver as at start-up.'),
+      msg('warn', MAINT_SAVE_NOTE + ' Undo any you do not want to keep before you end.')] });
+  if (!ok) return;
+  const r = await act(b, () => api('POST', '/api/gnss/maintenance', { duration_s: Number(dur.value) }), out);
+  if (r !== undefined) toast('Receiver maintenance on.', 'ok');
+}
+
 const updatesPart = {
-  create(el, arg) {
+  create(arg) {
     let u = null, staged = null, flash = null;
     let rflow = null;          /* receiver flow: {state, text, tone} */
     let stagedDeadline = 0, stagedTimer = 0;
+    let appMain = false;       /* the app row shows the card's main button */
+    let mainShown = false;     /* the app or receiver row does */
+    let maintKey = null;
     const offs = [];
     const P = {
       check: progressWidget(), app_update: progressWidget(), app_upload: progressWidget(),
       gnss_update: progressWidget(), gnss_flash: progressWidget(), gnss_upload: progressWidget(), gnss_check: progressWidget(),
     };
-    const versionsCard = h('section', { class: 'card wide tight-kv' });
-    const appCard = h('section', { class: 'card' });
-    const gnssCard = h('section', { class: 'card' });
+    const headBox = h('div'), appBox = h('div'), gnssBox = h('div'), maintBox = h('div'), rbBox = h('div');
     const sessionCard = h('section', { class: 'card wide tight-kv', hidden: true });
-    const filesCard = h('section', { class: 'card wide' });
     const stagedBox = h('div');
-    const appErr = errBox(), gnssErr = errBox(), sessionErr = errBox();
+    const appErr = errBox(), gnssErr = errBox(), sessionErr = errBox(), maintErr = errBox();
+    const maintLeft = h('span');
 
-    /* ---- Versions and "check now" ---- */
-    function renderVersions() {
-      const lr = u.last_result;
+    /* ---- The card's title row: the last check and "Check now" (a tool, like Refresh) ---- */
+    function renderCheck() {
       const fail = checkFailure(u);
-      const checkBtn = btn('Check now', () => act(checkBtn, async () => {
+      const checkBtn = u.checks_enabled ? btn('Check now', () => act(checkBtn, async () => {
         await api('POST', '/api/update/check');
         P.check.set({ job: 'check', phase: 'checking', done: false });
-      }), '', { disabled: !u.checks_enabled });
-      /* The last attempt, successful or not ("19:10 (failed)"); the last success when no attempt ran this start. */
-      const last = u.last_attempt_unix ? checkTime(u.last_attempt_unix) + (fail ? ' (failed)' : '') :
-        u.last_check_unix ? fmt.time(u.last_check_unix) : 'not yet';
-      const rows = kv([
-        ['Last check', last],
-        u.release_repo ? ['Releases from', ['github.com/' + u.release_repo, u.signed_manifests ? ' ' : null,
-          u.signed_manifests ? badge('signed only', 'plain') : null]] : null,
-        /* Check results have their own message below; other jobs show here. */
-        lr && lr.job !== 'check' ? ['Last job', lbl(L.job, lr.job) + ': ' + resultText(lr)] : null,
-      ]);
-      mount(versionsCard,
-        cardHead('Updates', u.state && u.state !== 'idle' && u.state !== 'failed' ? badge(lbl(L.updState, u.state), 'info') : null),
-        u.checks_enabled ? h('p', { class: 'muted small' }, 'The station checks once a day. Nothing is installed until you choose.') :
-          msg('', ERR.checks_disabled),
-        rows,
+      }), 'small') : null;
+      /* The last attempt, successful or not; the last success when no attempt ran this start. */
+      const at = u.last_attempt_unix || u.last_check_unix;
+      const head = cardHead('Updates', u.state && u.state !== 'idle' && u.state !== 'failed' ? badge(lbl(L.updState, u.state), 'info') : null,
+        checkBtn ? h('div', { class: 'tools' }, h('span', { class: 'muted small' }, at ? 'Checked ' + checkedAgo(at) +
+          (fail && u.last_attempt_unix ? ', failed' : '') : 'Not checked yet'), checkBtn) : null);
+      head.classList.add('fit');
+      mount(headBox, head,
+        u.checks_enabled ? null : h('p', { class: 'muted small' }, ERR.checks_disabled),
         fail && u.state !== 'checking' ? msg(fail.tone, fail.text, fail.detail ? h('div', { class: 'small muted' }, fail.detail) : null) : null,
-        P.check.el,
-        h('div', { class: 'form-actions' }, checkBtn));
+        P.check.el);
     }
 
     /* ---- App ---- */
@@ -318,52 +339,41 @@ const updatesPart = {
       }
     }
 
+    /* "App v0.3.0: up to date" or what is offered, with its one button; going back sits in the files' fold. */
     function renderApp() {
       const a = u.app || {};
       const trial = a.trial || {};
-      const lines = [], acts = [];
-      if (a.rollback_available) {
-        const rb = btn('Go back to the previous version', async () => {
-          const ok = await dialog({ title: 'Go back to the previous version?', ok: 'Go back', okKind: 'danger solid',
-            body: h('p', null, 'The station restarts into the version installed before ' + a.running + '. ' + a.running +
-              ' is not offered again; you can still install it from a file.') });
-          if (!ok) return;
-          const r = await act(rb, () => api('POST', '/api/update/rollback', { confirm: true }), appErr);
-          if (r !== undefined) showRestarting('Going back to the previous version');
-        }, 'danger');
-        acts.push(rb);
-      }
-      if (a.reverted_in_stage1 && a.reverted) {
-        lines.push(msg('warn', 'Update ' + a.reverted + ' was rolled back in its first minute (a crash or a power dip). If it rolls back again, ' +
-          'it is not offered any more.'));
-        const again = btn('Install ' + a.reverted + ' again', () => installApp(a.reverted, false, again), 'primary');
-        acts.push(again);
-      }
+      const lr = u.last_result;
+      let text, b = null;
       if (a.available && a.latest && !(a.reverted_in_stage1 && a.reverted === a.latest)) {
-        const inst = btn('Install ' + a.latest, () => installApp(a.latest, false, inst), 'primary');
-        acts.push(inst);
+        text = a.latest + ' is available.';
+        b = btn('Update', () => installApp(a.latest, false, b), 'primary');
+      } else if (a.reverted_in_stage1 && a.reverted) {
+        text = a.reverted + ' was rolled back in its first minute. If that happens again, it is no longer offered.';
+        b = btn('Install again', () => installApp(a.reverted, false, b), 'primary');
       } else if (a.latest_rolled_back && a.latest) {
-        lines.push(msg('warn', 'The latest release, ' + a.latest + ', was rolled back here before, so it is not offered.'));
-        const anyway = btn('Install ' + a.latest + ' anyway', () => installApp(a.latest, true, anyway));
-        acts.push(anyway);
-      } else if (a.dev_build) {
-        lines.push(h('p', { class: 'muted small' }, 'Development builds get no release offers. Install a release from a file below.'));
-      } else if (!a.latest) {
-        lines.push(h('p', { class: 'muted small' }, 'No release information yet.'));
+        text = a.latest + ' was rolled back here before, so it is not offered.';
+        b = btn('Install anyway', () => installApp(a.latest, true, b));
+      } else {
+        text = a.dev_build ? 'Development build: no release offers.' : a.latest ? 'Up to date.' : 'No release information yet.';
       }
-      mount(appCard,
-        cardHead('App', a.available ? badge('Update available', 'info') : a.dev_build ? badge('Development build', 'plain') :
-          a.latest ? badge('Up to date', 'ok') : null),
-        kv([
-          ['Running', a.running],
-          ['Latest release', a.latest || DASH],
-          trial.stage && trial.stage !== 'none' ? ['Trial', lbl(L.trial, trial.stage) + (trial.left_s ? ', ' + fmt.dur(trial.left_s) + ' left' : '')] : null,
-          (a.rolled_back || []).length ? ['Rolled back here', a.rolled_back.join(', ') + ' (not offered again)'] : null,
-        ]),
-        lines,
-        P.app_update.el,
-        appErr,
-        h('div', { class: 'form-actions' }, acts));
+      if (trial.stage && trial.stage !== 'none') text += ' On trial' + (trial.left_s ? ', ' + fmt.dur(trial.left_s) + ' left' : '') + '.';
+      appMain = !!b && b.classList.contains('primary');
+      mount(appBox, settingRow('App ' + (a.running || ''), text, b),
+        lr && ['app_update', 'app_upload', 'rollback'].indexOf(lr.job) >= 0 && lr.result !== 'ok' ?
+          h('p', { class: 'muted small' }, 'Last attempt: ' + resultText(lr)) : null,
+        P.app_update.el, appErr);
+      const rb = a.rollback_available ? btn('Go back…', async () => {
+        const ok = await dialog({ title: 'Go back to the previous version?', ok: 'Go back', okKind: 'danger solid',
+          body: h('p', null, 'The station restarts into the version installed before ' + a.running + '. ' + a.running +
+            ' is not offered again; you can still install it from a file.') });
+        if (!ok) return;
+        const r = await act(rb, () => api('POST', '/api/update/rollback', { confirm: true }), appErr);
+        if (r !== undefined) showRestarting('Going back to the previous version');
+      }, 'danger') : null;
+      mount(rbBox, rb ? settingRow('Go back to the previous version', 'The one installed before ' + a.running + '.', rb) : null,
+        (a.rolled_back || []).length ? h('p', { class: 'muted small' }, 'Rolled back here, not offered again: ' + a.rolled_back.join(', ') + '.') : null);
+      rbBox.hidden = !rbBox.firstChild;
     }
 
     /* ---- Receiver (offered package) ---- */
@@ -388,36 +398,57 @@ const updatesPart = {
       }
     }
 
+    /* "Receiver R4.10Build18975: up to date" or the offered build with its button; the downtime against the Onocoy budget is in the dialog. */
     function renderGnss() {
       const g = u.gnss || {};
       const blocked = g.blocked && g.blocked !== 'none';
-      const upd = btn(g.flash_available ? 'Update receiver…' : 'Download and verify…', () => updateReceiver(upd), 'primary',
-        { disabled: blocked || !g.available || (rflow && rflow.state === 'download') });
+      const upd = g.available ? btn(g.flash_available ? 'Update receiver…' : 'Download and verify…', () => updateReceiver(upd), appMain ? '' : 'primary',
+        { disabled: blocked || (rflow && rflow.state === 'download') }) : null;
       const lr = u.last_result;
       const last = flash && flash.last;
-      mount(gnssCard,
-        cardHead('Receiver firmware', g.available ? badge('Update available', 'info') : g.latest ? badge('Up to date', 'ok') : null),
-        kv([
-          ['Receiver', g.model],
-          ['Running', fwText(g.running, g.running_build)],
-          ['Latest release', fwText(g.latest, g.latest_build)],
-          last ? [last.check_only ? 'Last package check' : 'Last receiver update',
-            [badge(lbl(L.flashOutcome, last.outcome), outcomeTone(last.outcome)),
-              last.ended_age_s !== null && last.ended_age_s !== undefined ? ' ' + fmt.dur(last.ended_age_s) + ' ago' : null]] : null,
-        ]),
-        g.available ? downtimeRows(g.expected_downtime_s, g.budget_left_s) : g.latest ? null : h('p', { class: 'muted small' }, 'No release information yet.'),
+      mainShown = appMain || !!upd;
+      mount(gnssBox,
+        settingRow('Receiver ' + (g.running ? fwText(g.running, g.running_build) : ''),
+          g.available ? fwText(g.latest, g.latest_build) + ' is available.' + (g.flash_available ? '' : ' This build can only download and check it.') :
+            !g.running ? 'Its firmware shows once the station finds it.' : g.latest ? 'Up to date.' : 'No release information yet.', upd),
         blocked && g.available ? msg('warn', 'Not possible right now: ' + lbl(L.gnssBlock, g.blocked).toLowerCase() +
           (g.blocked_left_s ? ' (about ' + fmt.dur(g.blocked_left_s) + ' left).' : '.')) : null,
-        g.flash_available ? null : h('p', { class: 'muted small' }, 'This build checks receiver packages but cannot install them yet.'),
         rflow ? receiverSteps(rflow.state, rflow.upload, !g.flash_available) : null,
         P.gnss_update.el,
         P.gnss_check.el,
         P.gnss_flash.el,
         rflow && rflow.text ? msg(rflow.tone || 'info', rflow.text) : null,
         !rflow && last ? msg(outcomeTone(last.outcome), outcomeText(last)) : null,
-        !rflow && !last && lr && (lr.job === 'gnss_update' || lr.job === 'gnss_upload') ? h('p', { class: 'muted small' }, 'Last attempt: ' + resultText(lr)) : null,
-        gnssErr,
-        g.available ? h('div', { class: 'form-actions' }, upd) : null);
+        !rflow && !last && lr && (lr.job === 'gnss_update' || lr.job === 'gnss_upload') && lr.result !== 'ok' ?
+          h('p', { class: 'muted small' }, 'Last attempt: ' + resultText(lr)) : null,
+        gnssErr);
+    }
+
+    /*
+     * Receiver maintenance under the receiver row (from the status, every
+     * second): rebuilt only when it starts or ends, the time left written in
+     * place, so a button keeps the keyboard focus. Not in safe mode (the
+     * receiver is off).
+     */
+    function renderMaint(st) {
+      const r = (st && st.receiver) || {};
+      const on = !!r.rx_maintenance;
+      maintBox.hidden = !!(st && st.safe_mode && st.safe_mode.active);
+      maintLeft.textContent = on && r.maintenance_left_s ? ' Ends in about ' + upMin(r.maintenance_left_s) + '.' : '';
+      const key = on ? 'on' + mainShown : 'off';
+      if (key === maintKey) return;
+      maintKey = key;
+      if (on) {
+        const more = btn('Add 30 min', async () => {
+          const x = await act(more, () => api('POST', '/api/gnss/maintenance', { duration_s: 1800 }), maintErr);
+          if (x !== undefined) toast('Receiver maintenance: ' + fmt.dur(x.left_s) + ' left.', 'ok');
+        });
+        mount(maintBox, settingRow('Receiver maintenance is on', ['The station sends the receiver no commands.', maintLeft],
+          h('div', { class: 'form-actions' }, more, btn('End now', endMaintenance, mainShown ? '' : 'primary'))), maintErr);
+      } else {
+        const start = btn('Start', () => startMaintenance(start, maintErr));
+        mount(maintBox, settingRow('Updating the receiver from a PC?', 'Start receiver maintenance first.', start), maintErr);
+      }
     }
 
     /* ---- Receiver update session ---- */
@@ -443,7 +474,8 @@ const updatesPart = {
             load();
           }
         }, a[0] === 'clear' ? 'danger' : '', { disabled: !info.allowed, title: info.allowed ? null : lbl(L.why, info.why) });
-        if (!info.allowed && info.why) notNow.push(h('li', null, a[2] + ': not now, ' + lbl(L.why, info.why) + '.'));
+        /* Not in this build: the card's own line says it once for both. */
+        if (!info.allowed && info.why && info.why !== 'not_available_yet') notNow.push(h('li', null, a[2] + ': not now, ' + lbl(L.why, info.why) + '.'));
         return b;
       });
       mount(sessionCard,
@@ -491,18 +523,20 @@ const updatesPart = {
           ' Firmware for something else can leave the station unreachable until it is flashed over USB.'),
         check: 'I know what this image is.' });
     }
-    const appFile = h('input', { type: 'file', accept: '.bin,application/octet-stream', id: 'upd-app-file' });
-    const appUploadBtn = btn('Install this file', () => uploadApp({}));
+    /* The same image as the one running, or a version rolled back here before: install only after asking. */
+    const sameOk = v => dialog({ title: 'Install the same version again?', ok: 'Install again',
+      body: h('p', null, 'This is the version already running' + (v ? ' (' + v + ')' : '') + '. Install it again? ' +
+        'The station restarts into it; nothing else changes.') });
+    const rolledBackOk = v => dialog({ title: 'Install a version that was rolled back?', ok: 'Install anyway',
+      body: h('p', null, (v ? 'Version ' + v : 'This version') + ' was rolled back on this station before: its trial failed, or someone ' +
+        'went back from it. If it fails again, the station goes back to the version running now.'),
+      check: 'I know this version was rolled back on this station before.' });
+    const appPick = fileButton('Choose a .bin file…', '.bin,application/octet-stream', f => uploadApp(f, {}));
     const appUploadErr = errBox();
     /* Too big for the station: said before anything is sent (and when a refusal ends in a reset). */
     const tooBig = (file, max, what) => 'The file is ' + fmt.bytes(file.size) + '; ' + what + ' holds at most ' + fmt.bytes(max) + '.';
     /* o.anyProject, o.rolledBackAck, o.reinstall: what the user already confirmed. */
-    async function uploadApp(o) {
-      const file = appFile.files && appFile.files[0];
-      if (!file) {
-        say(appUploadErr, 'Choose a .bin file first.');
-        return;
-      }
+    async function uploadApp(file, o) {
       appUploadErr.hidden = true;
       const a = (u && u.app) || {};
       const max = u && u.app_max_bytes;
@@ -519,24 +553,16 @@ const updatesPart = {
       if (img.project !== 'onocoydiy-esp-um982' && !o.anyProject) {
         /* The same warning the station's own refusal (not_this_project) leads to: a fork under another
          * project name is installable after it. */
-        if (await anotherProject(img.project)) uploadApp(Object.assign({}, o, { anyProject: true }));
+        if (await anotherProject(img.project)) uploadApp(file, Object.assign({}, o, { anyProject: true }));
         return;
       }
       const same = u && u.running_elf_sha256 && img.elfSha === u.running_elf_sha256;
       if (same && !o.reinstall) {
-        const ok = await dialog({ title: 'Install the same version again?', ok: 'Install again',
-          body: h('p', null, 'This is the version already running (' + (img.version || a.running || 'unknown') + '). Install it again? ' +
-            'The station restarts into it; nothing else changes.') });
-        if (!ok) return;
-        uploadApp(Object.assign({}, o, { reinstall: true }));
+        if (await sameOk(img.version || a.running)) uploadApp(file, Object.assign({}, o, { reinstall: true }));
         return;
       }
       if (!same && (a.rolled_back || []).indexOf(img.version) >= 0 && !o.rolledBackAck) {
-        const ok = await dialog({ title: 'Install a version that was rolled back?', ok: 'Install anyway',
-          body: h('p', null, 'Version ' + img.version + ' was rolled back on this station before: its trial failed, or someone went back from it. ' +
-            'If it fails again, the station goes back to the version running now.'),
-          check: 'I know this version was rolled back on this station before.' });
-        if (ok) uploadApp(Object.assign({}, o, { rolledBackAck: true }));
+        if (await rolledBackOk(img.version)) uploadApp(file, Object.assign({}, o, { rolledBackAck: true }));
         return;
       }
       if (!o.anyProject && !o.rolledBackAck && !o.reinstall) {
@@ -548,7 +574,7 @@ const updatesPart = {
       const q = [o.anyProject ? 'any_project=1' : null, o.rolledBackAck ? 'rolled_back_ack=1' : null].filter(x => x).join('&');
       let r;
       try {
-        r = await busy(appUploadBtn, () => upload('/api/upload/app' + (q ? '?' + q : ''), file, (sent, total) =>
+        r = await busy(appPick.b, () => upload('/api/upload/app' + (q ? '?' + q : ''), file, (sent, total) =>
           P.app_upload.set({ job: 'app_upload', phase: 'receiving', bytes: sent, total: total, done: false }),
         o.reinstall ? { 'X-Reinstall': '1' } : null));
       } catch (e) {
@@ -558,21 +584,15 @@ const updatesPart = {
           return;
         }
         if (e instanceof ApiError && e.code === 'same_image' && !o.reinstall) {
-          const ok = await dialog({ title: 'Install the same version again?', ok: 'Install again',
-            body: h('p', null, 'This is the version already running. Install it again?') });
-          if (ok) uploadApp(Object.assign({}, o, { reinstall: true }));
+          if (await sameOk(null)) uploadApp(file, Object.assign({}, o, { reinstall: true }));
           return;
         }
         if (e instanceof ApiError && e.code === 'not_this_project' && !o.anyProject) {
-          if (await anotherProject(null)) uploadApp(Object.assign({}, o, { anyProject: true }));
+          if (await anotherProject(null)) uploadApp(file, Object.assign({}, o, { anyProject: true }));
           return;
         }
         if (e instanceof ApiError && e.code === 'rolled_back_ack_required' && !o.rolledBackAck) {
-          const ok = await dialog({ title: 'Install a version that was rolled back?', ok: 'Install anyway',
-            body: h('p', null, 'This version was rolled back on this station before: its trial failed, or someone went back from it. ' +
-              'If it fails again, the station goes back to the version running now.'),
-            check: 'I know this version was rolled back on this station before.' });
-          if (ok) uploadApp(Object.assign({}, o, { rolledBackAck: true }));
+          if (await rolledBackOk(null)) uploadApp(file, Object.assign({}, o, { rolledBackAck: true }));
           return;
         }
         showErr(e, appUploadErr);
@@ -583,15 +603,9 @@ const updatesPart = {
         '. The station restarts into it now; this page reconnects by itself.');
     }
 
-    const pkgFile = h('input', { type: 'file', accept: '.pkg,application/octet-stream', id: 'upd-pkg-file' });
-    const pkgUploadBtn = btn('Upload and check', () => uploadPkg());
+    const pkgPick = fileButton('Choose a .pkg file…', '.pkg,application/octet-stream', f => uploadPkg(f));
     const pkgErr = errBox();
-    async function uploadPkg() {
-      const file = pkgFile.files && pkgFile.files[0];
-      if (!file) {
-        say(pkgErr, 'Choose a .pkg file first.');
-        return;
-      }
+    async function uploadPkg(file) {
       pkgErr.hidden = true;
       const max = u && u.pkg_max_bytes;
       if (max && file.size > max) {
@@ -599,11 +613,10 @@ const updatesPart = {
         return;
       }
       try {
-        staged = await busy(pkgUploadBtn, () => upload('/api/upload/gnss', file, (sent, total) =>
+        staged = await busy(pkgPick.b, () => upload('/api/upload/gnss', file, (sent, total) =>
           P.gnss_upload.set({ job: 'gnss_upload', phase: sent < total ? 'receiving' : 'inspecting', bytes: sent, total: total, done: false })));
         P.gnss_upload.hide();
         stagedDeadline = Date.now() + (staged.staged.expires_in_s || 900) * 1000;
-        pkgFile.value = '';
         renderStaged();
       } catch (e) {
         P.gnss_upload.hide();
@@ -674,10 +687,10 @@ const updatesPart = {
             /* No receiver flashing in this build: the station checks the package and releases it. */
             rflow = { state: 'check', upload: true, tone: 'warn', text: CHECK_STARTED };
             P.gnss_check.set({ job: 'gnss_check', phase: 'checking', done: false });
-            renderStaged(msg('info', 'The package check started. Its result shows under Receiver firmware.'));
+            renderStaged(msg('info', 'The package check started. Its result shows above.'));
           } else {
             rflow = { state: 'install', upload: true };
-            renderStaged(msg('info', 'Receiver update started. Progress shows under Receiver firmware.'));
+            renderStaged(msg('info', 'Receiver update started. Its progress shows above.'));
           }
           renderGnss();
         } catch (e) {
@@ -712,32 +725,20 @@ const updatesPart = {
       if (staged) stagedTimer = setInterval(tick, 1000);
     }
 
-    mount(filesCard,
-      h('h2', null, 'Install from a file'),
-      h('div', { class: 'cols c2' },
-        h('div', { class: 'stack' },
-          h('h3', null, 'App image (.bin)'),
-          h('p', { class: 'muted small' }, 'For pre-releases, older versions and your own builds.'),
-          h('label', { class: 'lbl', for: 'upd-app-file' }, 'App image file'),
-          appFile,
-          P.app_upload.el,
-          appUploadErr,
-          h('div', { class: 'form-actions' }, appUploadBtn)),
-        h('div', { class: 'stack' },
-          h('h3', null, 'Receiver package (.pkg)'),
-          h('p', { class: 'muted small' }, 'Checked first. Nothing reaches the receiver until you confirm.'),
-          h('label', { class: 'lbl', for: 'upd-pkg-file' }, 'Receiver package file'),
-          pkgFile,
-          P.gnss_upload.el,
-          pkgErr,
-          h('div', { class: 'form-actions' }, pkgUploadBtn),
-          stagedBox)));
+    const filesFold = h('details', { class: 'more' }, h('summary', null, 'Install from a file or go back'),
+      h('div', { class: 'rows' },
+        h('div', null, settingRow('App image (.bin)', 'For pre-releases, older versions and your own builds.', appPick.b), appPick.input,
+          P.app_upload.el, appUploadErr),
+        h('div', null, settingRow('Receiver package (.pkg)', 'Checked first. Nothing reaches the receiver until you confirm.', pkgPick.b),
+          pkgPick.input, P.gnss_upload.el, pkgErr, stagedBox),
+        rbBox));
+    const updCard = h('section', { class: 'card' }, headBox, h('div', { class: 'rows' }, appBox, gnssBox, maintBox, filesFold));
 
     /* ---- Loading and live progress ---- */
     /* The 10 s poll re-renders only when something changed and nobody is
-     * working in the page (keyboard focus, a text selection): every render
-     * builds the cards' buttons anew. Loads after an action or an event
-     * always render. */
+     * working in the card (keyboard focus, a text selection): every render
+     * builds its buttons anew. Loads after an action or an event always
+     * render. */
     let shownKey = '';
     async function load(periodic) {
       const res = await Promise.all([
@@ -751,6 +752,7 @@ const updatesPart = {
         staged = res[2];
         stagedDeadline = Date.now() + (staged.staged.expires_in_s || 900) * 1000;
         renderStaged();
+        filesFold.open = true;   /* an uploaded package waits for its confirmation there */
       }
       if (u.state === 'downloading_gnss' && !rflow) {
         rflow = { state: 'download' };
@@ -766,18 +768,20 @@ const updatesPart = {
         P.gnss_flash.set(Object.assign({ job: 'gnss_flash' }, flash.progress, { done: false }));
       }
       const key = JSON.stringify([u, flash, rflow]);
-      if (periodic && (key === shownKey || interacting(el))) return;
+      if (periodic && (key === shownKey || interacting(updCard) || interacting(sessionCard))) return;
       shownKey = key;
-      renderVersions();
+      renderCheck();
       renderApp();
       renderGnss();
       renderSession();
+      maintKey = null;
+      renderMaint(S.status);
     }
 
     offs.push(bus.on('progress', m => {
       const w = P[m.job];
       if (m.job === 'check' && m.done) {
-        if (w) w.hide();   /* the result shows once, as the card's own message */
+        if (w) w.hide();   /* the result shows once, as the row's own message */
       } else if (w) {
         w.set(m);
       }
@@ -818,14 +822,16 @@ const updatesPart = {
       if (m.event === 'update_state') load().catch(() => {});
     }));
 
-    mount(el, h('div', { class: 'grid' }, versionsCard, appCard, gnssCard, sessionCard, filesCard));
-    mount(versionsCard, h('p', { class: 'loading' }, 'Loading…'));
-    const ready = load().catch(e => mount(versionsCard, msg('bad', errText(e)), btn('Try again', () => openView('settings', arg), 'primary')));
+    mount(headBox, cardHead('Updates'));
+    mount(appBox, h('p', { class: 'loading' }, 'Loading…'));
+    renderMaint(S.status);
+    const ready = load().catch(e => mount(updCard, msg('bad', errText(e)), btn('Try again', () => openView('settings', arg), 'primary')));
     const stop = poller(10000, () => load(true), true);
 
     return {
       ready: ready,
-      cards: { updates: versionsCard, session: sessionCard },
+      cards: { updates: updCard, session: sessionCard },
+      update: renderMaint,
       destroy() {
         stop();
         for (const off of offs) off();

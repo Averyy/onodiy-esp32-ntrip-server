@@ -9,8 +9,9 @@
  * Receiver settings (#/receiver/settings): the base position, the receiver
  * profile (signals, corrections, antenna, more options), receiver
  * management (who configures the receiver and what happens if corrections
- * stop), then folded: the comparison of two signal groups, what the
- * receiver read back and publishes, and receiver maintenance (hands off).
+ * stop), then folded: the comparison of two signal groups and what the
+ * receiver read back and publishes. Receiver maintenance (hands off) is in
+ * Settings, next to the receiver update (70-updates.js).
  * Field rules mirror PUT /api/gnss/profile; the station's own validation
  * has the last word.
  */
@@ -317,53 +318,7 @@ function receiverDetails(g) {
   ];
 }
 
-/* ---- Receiver maintenance, receiver management ----------------------------------- */
-
-/* Receiver maintenance: start (with its duration), extend, end now; update(g) sets its chip. nodes: the card's body. */
-function maintenanceCtl(done) {
-  const out = errBox();
-  const badgeEl = badge('', '');
-  const dur = selectInput(MAINT_CHOICES, 1800);
-  const durField = field('Duration', dur);
-  const label = () => lbl(Object.fromEntries(MAINT_CHOICES), dur.value);
-  const startBtn = btn('Start maintenance', async () => {
-    const ok = await dialog({ title: 'Start receiver maintenance?', ok: 'Start',
-      body: [h('p', null, 'For ' + label() + ' the station sends the receiver nothing. Corrections keep streaming.'),
-        h('p', { class: 'muted' }, 'It ends by itself, with End now, or at a power cut. Then the station checks the receiver as at start-up.'),
-        msg('warn', MAINT_SAVE_NOTE + ' Undo any you do not want to keep before you end.')] });
-    if (!ok) return;
-    const r = await act(startBtn, () => api('POST', '/api/gnss/maintenance', { duration_s: Number(dur.value) }), out);
-    if (r !== undefined) {
-      toast('Receiver maintenance on.', 'ok');
-      done();
-    }
-  });
-  const extendBtn = btn('Add time', async () => {
-    const r = await act(extendBtn, () => api('POST', '/api/gnss/maintenance', { duration_s: Number(dur.value) }), out);
-    if (r !== undefined) {
-      toast('Receiver maintenance extended: ' + fmt.dur(r.left_s) + ' left.', 'ok');
-      done();
-    }
-  });
-  const endBtn = btn('End now', async e => {
-    if (await endMaintenance(e)) done();
-  }, 'primary');
-  return {
-    badge: badgeEl,
-    nodes: [
-      h('p', null, MAINT_WHAT),
-      h('p', { class: 'muted small' }, MAINT_SAVE_NOTE),
-      out,
-      h('div', { class: 'form-actions' }, durField.el, startBtn, extendBtn, endBtn)],
-    update(g) {
-      const m = g.maintenance || {};
-      badgeEl.className = 'badge ' + (m.on ? 'info' : '');
-      badgeEl.textContent = m.on ? 'On · ' + inMinutes(m.left_s || 0) + ' left' : 'Off';
-      startBtn.hidden = !!m.on;
-      extendBtn.hidden = endBtn.hidden = !m.on;
-    },
-  };
-}
+/* ---- Receiver management ----------------------------------- */
 
 /* Receiver management: one choice over gnss/autocfg and gnss/recovery. [autocfg, recovery, name, what it does]. */
 const MANAGE = {
@@ -1212,7 +1167,7 @@ Views.receiver = {
 function receiverPage(el, arg) {
   const settings = arg === 'settings';
   let g = null, t = null, forms = null, stop = null, held = null, heldLater = false, sigs = null, missing = null;
-  let wasRunning = false, wasMaint = false;
+  let wasRunning = false;
   /* -- The Receiver page -- */
   const heldCard = h('section', { class: 'card wide', hidden: true });
   const chip = badge('', '');
@@ -1235,8 +1190,6 @@ function receiverPage(el, arg) {
   const compare = foldCard('Compare two signal groups', sgt.badge, 'compare', sgt.nodes);
   const rdBody = h('div');
   const rdFold = foldCard('Receiver details', null, null, rdBody);
-  const maint = maintenanceCtl(() => refresh().catch(() => {}));
-  const maintFold = foldCard('Receiver maintenance', maint.badge, null, maint.nodes);
   const openCompare = () => {
     compare.details.open = true;
     compare.el.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1270,15 +1223,11 @@ function receiverPage(el, arg) {
       profChip.textContent = c[0];
       if (forms) forms.update(g);
       manage.update(g);
-      maint.update(g);
       sgt.update(t, g);
-      /* A comparison that starts, or maintenance that is on, opens its card. */
+      /* A comparison that starts opens its card. */
       const running = !!t && SGT_RUNNING.indexOf(t.state) >= 0;
-      const on = !!(g.maintenance || {}).on;
       if (running && !wasRunning) compare.details.open = true;
-      if (on && !wasMaint) maintFold.details.open = true;
       wasRunning = running;
-      wasMaint = on;
       if (!interacting(rdFold.el)) patch(rdBody, readBack(g), rtcm1033Rows(g));
       return;
     }
@@ -1334,7 +1283,7 @@ function receiverPage(el, arg) {
     const grid = h('div', { class: 'grid' });
     mount(el, grid);
     if (settings) {
-      add(grid, [sgtNote, posCard, profile, manageCard, compare.el, rdFold.el, maintFold.el]);
+      add(grid, [sgtNote, posCard, profile, manageCard, compare.el, rdFold.el]);
       buildForms();
     } else {
       add(grid, [heldCard, info]);

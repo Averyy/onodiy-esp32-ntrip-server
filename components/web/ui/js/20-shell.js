@@ -422,8 +422,8 @@ function noticeItems(st, page) {
   }
   /* Settings has the safe-mode box itself, with "Leave safe mode". */
   if (sm.active && page !== 'settings') add('safe_mode', 'bad', 'Safe mode', 'The receiver and casters are off.', go('Details', '#/settings/restart'), true);
-  /* Receiver settings has the maintenance card, with End now. */
-  if (rcv.rx_maintenance && page !== 'receiver/settings') {
+  /* Settings has maintenance next to the receiver update, with End now. */
+  if (rcv.rx_maintenance && page !== 'settings') {
     add('maintenance', 'info', 'Receiver maintenance', rcv.maintenance_left_s ? 'Ends in about ' + upMin(rcv.maintenance_left_s) + '.' : '',
       btn('End now', endMaintenance, 'small'), true);
   }
@@ -510,9 +510,9 @@ function renderNotices() {
 
 /* ---- Receiver maintenance and pending Wi-Fi credentials (notices, pages) ---- */
 
-/* Receiver maintenance in the owner's words (its card in Receiver settings). */
+/* Receiver maintenance in the owner's words (its start dialog in Settings). */
 const MAINT_WHAT = 'The station stops sending commands to the receiver while you use a PC tool on its USB port. Streaming continues.';
-/* What a configuration by the station saves along with its own settings (start and end dialogs, the card). */
+/* What a configuration by the station saves along with its own settings (the start and end dialogs). */
 const MAINT_SAVE_NOTE = 'Changes you make from the PC are saved the next time the station configures the receiver.';
 /* The first configuration waits for the user; the receiver port does not open (the Status page's top card). */
 const HELD_TEXT = 'The station waits for your OK before it configures the receiver.';

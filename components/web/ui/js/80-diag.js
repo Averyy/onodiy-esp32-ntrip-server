@@ -122,9 +122,10 @@ function recoveryNow(hl) {
  * sections survive the 5 s poll.
  */
 function healthTab(box) {
-  let lastHl = null;
+  let lastHl = null, sys = null;
   const render = hl => {
     lastHl = hl;
+    const chip = (sys && sys.chip) || {};
     const b = hl.boot || {};
     const heap = hl.heap || {};
     const link = hl.link || {};
@@ -183,8 +184,12 @@ function healthTab(box) {
             x.version || DASH, x.prev_uptime_s === null || x.prev_uptime_s === undefined ? 'unknown' : fmt.dur(x.prev_uptime_s)]), { stack: true }) :
           h('p', { class: 'muted' }, 'No history yet.')),
       h('section', { class: 'card' },
-        h('h2', null, 'Memory'),
+        h('h2', null, 'Chip and memory'),
         kv([
+          sys ? ['Chip', [[chip.model, chip.revision].filter(Boolean).join(' '), chip.flash_mb ? chip.flash_mb + NB + 'MB flash' : null,
+            chip.psram_mb ? chip.psram_mb + NB + 'MB PSRAM' : null].filter(Boolean).join(', ')] : null,
+          sys ? ['ESP-IDF', sys.idf] : null,
+          sys ? ['Project', sys.project] : null,
           ['Internal free', fmt.bytes(heap.internal_free)],
           ['Internal lowest', fmt.bytes(heap.internal_min)],
           ['Largest internal block', fmt.bytes(heap.internal_largest)],
@@ -211,9 +216,15 @@ function healthTab(box) {
         sect('journal', 'Event journal', journalStats(hl.journal)),
         sect('log', 'Log', logStats(hl.log)))));
   };
-  detectClicks(box, () => {
+  const again = () => {
     if (lastHl) render(lastHl);
-  });
+  };
+  detectClicks(box, again);
+  /* The chip and the build, once (GET /api/system). */
+  api('GET', '/api/system').then(v => {
+    sys = v;
+    again();
+  }, () => {});
   return { stop: pollInto(box, 5000, '/api/health', render) };
 }
 

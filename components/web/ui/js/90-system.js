@@ -2,11 +2,12 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Settings (#/settings): the Updates cards (70-updates.js), then Wi-Fi, the
- * station's own Wi-Fi (its access point), station name and public status,
- * the admin password, about, and restart, safe mode and factory reset
- * (#/settings/wifi and #/settings/restart open it there), and the way to
- * Diagnostics.
+ * Settings (#/settings), one card each: Wi-Fi (the station's own Wi-Fi, its
+ * access point, folded in it), Updates (70-updates.js, with receiver
+ * maintenance), the station's name and public status, the admin password
+ * (its form behind a button), restart, safe mode and factory reset, and the
+ * way to Diagnostics. #/settings/wifi, /updates, /session and /restart open
+ * it at that card.
  */
 
 function hostnameProblem(v) {
@@ -38,35 +39,29 @@ function wifiChip(w) {
   return w.associated ? ['Connecting', 'warn'] : ['Offline', 'bad'];
 }
 
+/* The station's own Wi-Fi's chip: [text, tone]; open without a password, a warning while it is on. */
+function apChip(ap) {
+  if (!ap.active) return ['Off', ''];
+  return ap.password_set ? ['On', 'info'] : ['On, no password', 'warn'];
+}
+
 /* The station's address rows (stationAddressRows) in this page's words. */
 function addressRows(net, prefix) {
   const names = { Name: 'Web address', Address: 'IP address' };
   return stationAddressRows(net).map(r => [r[0] ? (prefix || '') + (names[r[0]] || r[0]) : '', r[1]]);
 }
 
-/* What a normal user reads about the Wi-Fi; the rest (detailOpen: the disclosure as the user left it) under Details. */
-function wifiStatus(w, detailOpen) {
-  return [
-    kv([
-      ['Network', w.configured ? w.ssid : 'Not set up'],
-      w.credentials_unreadable ? ['Saved Wi-Fi settings', h('span', { class: 't-bad' }, 'Unreadable: choose the network again')] : null,
-      w.online && w.rssi < 0 ? ['Signal', rssiView(w.rssi, true)] : null,
-      ...(w.online ? addressRows(w) : [['Offline for', fmt.dur(w.offline_s)]]),
-      w.retry_in_s && !w.online ? ['Next attempt in', fmt.dur(w.retry_in_s)] : null,
-      ['Internet', lbl(L.upstream, w.upstream)],
-    ]),
-    disclosure('Details', detailOpen, kv([
-      w.associated ? ['Signal strength', w.rssi ? w.rssi + NB + 'dBm' : DASH] : null,
-      w.associated ? ['Channel', String(w.channel)] : null,
-      ['Clock synced', fmt.yesno(w.time_synced)],
-      ['Reconnects / failures', fmt.num(w.reconnects) + ' / ' + fmt.num(w.connect_failures)],
-      ['Last disconnect', wifiReason(w.last_disconnect_reason)],
-      w.probe_age_s !== null && w.probe_age_s !== undefined ? ['Last internet check', fmt.dur(w.probe_age_s) + ' ago'] : null,
-      w.fallback_dns ? ['DNS', 'Using the fallback servers'] : null,
-      w.associated && !w.online && w.assoc_no_ip_s ? ['Without an address for', fmt.dur(w.assoc_no_ip_s)] : null,
-      w.ladder && (w.ladder.triggers || []).length ? ['Network recovery', 'running: ' + w.ladder.triggers.map(t => lbl(L.trigger, t)).join(', ')] : null,
-    ])),
-  ];
+/* The Wi-Fi in a few rows; the counters behind it are in Diagnostics. mac: GET /api/system's. */
+function wifiStatus(w, mac) {
+  return kv([
+    ['Network', w.configured ? w.ssid : 'Not set up'],
+    w.credentials_unreadable ? ['Saved Wi-Fi settings', h('span', { class: 't-bad' }, 'Unreadable: choose the network again')] : null,
+    w.online && w.rssi < 0 ? ['Signal', rssiView(w.rssi, true)] : null,
+    ...(w.online ? addressRows(w) : [['Offline for', fmt.dur(w.offline_s)]]),
+    w.retry_in_s && !w.online ? ['Next attempt in', fmt.dur(w.retry_in_s)] : null,
+    ['Internet', lbl(L.upstream, w.upstream)],
+    ['MAC address', mac],
+  ]);
 }
 
 /* The station's own Wi-Fi (its access point) in a few rows. */
@@ -90,14 +85,12 @@ function onocoyStreams(st) {
 }
 
 const systemPart = {
-  create(el, arg) {
+  create(arg) {
     let wifi = null, sys = null, stopJoin = null;
     let wifiAt = 0;   /* when `wifi` arrived */
-    let dirty = false;
-    const wifiCard = h('section', { class: 'card' });
+    let joinDirty = false, devDirty = false;
     const wifiBody = h('div');
     const wifiBadge = badge('', '');
-    const apCard = h('section', { class: 'card' });
     const apBody = h('div');
     const apBadge = badge('', '');
     const showWifi = w => {
@@ -106,13 +99,12 @@ const systemPart = {
       const chip = wifiChip(w);
       wifiBadge.className = 'badge ' + chip[1];
       wifiBadge.textContent = chip[0];
-      const was = wifiBody.querySelector('details');
-      mount(wifiBody, wifiStatus(w, was && was.open));
-      const ap = w.ap || {};
-      apBadge.className = 'badge ' + (ap.active ? 'info' : '');
-      apBadge.textContent = ap.active ? 'On' : 'Off';
+      mount(wifiBody, wifiStatus(w, sys && sys.mac));
+      const ap = apChip(w.ap || {});
+      apBadge.className = 'badge ' + ap[1];
+      apBadge.textContent = ap[0];
       mount(apBody, apStatus(w));
-      apClear.hidden = !ap.password_set;
+      apClear.hidden = !(w.ap || {}).password_set;
       showPending(w);
     };
     const joinBox = h('div');
@@ -132,7 +124,7 @@ const systemPart = {
     const tickTrial = () => {
       if (!wifi || !wifi.cred_trial) return;
       const text = trialLeftText();
-      for (const t of el.querySelectorAll('.trial-left')) {
+      for (const t of wifiCard.querySelectorAll('.trial-left')) {
         if (t.textContent !== text) t.textContent = text;
       }
     };
@@ -180,10 +172,6 @@ const systemPart = {
         clear(pendingBox);
       }
     };
-    const deviceCard = h('section', { class: 'card' });
-    const pwCard = h('section', { class: 'card' });
-    const aboutCard = h('section', { class: 'card' });
-    const maintCard = h('section', { class: 'card wide' });
 
     /* ---- Wi-Fi ---- */
     const changeBtn = btn('Change network', () => {
@@ -192,7 +180,7 @@ const systemPart = {
       const err = errBox();
       const go = h('button', { type: 'submit', class: 'btn primary' }, 'Join');
       mount(joinBox, h('form', { class: 'subcard', oninput: () => {
-        dirty = true;
+        joinDirty = true;
       }, onsubmit: async e => {
         e.preventDefault();
         const v = picker.value();
@@ -205,12 +193,12 @@ const systemPart = {
         if (!ok) return;
         const r = await act(go, () => api('PUT', '/api/wifi', v), err);
         if (r === undefined) return;
-        dirty = false;
+        joinDirty = false;
         joinPrev = wifi.ssid || '';
         pendingKey = '';
         watchJoin(v.ssid, r.persisted !== false, r.trial === true, wifi.ssid);
       } }, picker.el, err, h('div', { class: 'form-actions' }, btn('Cancel', () => {
-        dirty = false;
+        joinDirty = false;
         clear(joinBox);
         changeBtn.hidden = false;
       }), go)));
@@ -301,23 +289,13 @@ const systemPart = {
       });
     }
 
-    function renderWifi() {
-      showWifi(wifi);
-      mount(wifiCard,
-        cardHead('Wi-Fi', wifiBadge),
-        wifiBody,
-        pendingBox,
-        h('div', { class: 'form-actions' }, changeBtn),
-        joinBox);
-    }
-
-    /* ---- The station's own Wi-Fi ---- */
+    /* ---- The station's own Wi-Fi, folded in the Wi-Fi card ---- */
     const apPw = pwInput({ maxlength: 63, autocomplete: 'new-password' });
     const apErr = errBox();
     const apField = field('New password', apPw, '8 to 63 characters, no accents or emoji. Used the next time it opens.');
     /* Only the AP password: the station keeps its Wi-Fi connection. */
     const apPut = () => api('PUT', '/api/wifi', { ap_password: apPw.value });
-    const apSet = h('button', { type: 'submit', class: 'btn primary' }, 'Set password');
+    const apSet = h('button', { type: 'submit', class: 'btn' }, 'Set password');
     const apClear = btn('Remove password', async () => {
       const ok = await dialog({ title: 'Remove the password?', ok: 'Remove', okKind: 'danger solid',
         body: h('p', null, 'Anyone nearby can then join the station\'s own Wi-Fi while it is open.') });
@@ -329,8 +307,7 @@ const systemPart = {
         load();
       }
     }, 'danger');
-    mount(apCard,
-      cardHead('Station\'s own Wi-Fi', apBadge),
+    const apFold = h('details', { class: 'more' }, h('summary', null, 'Station\'s own Wi-Fi ', apBadge),
       h('p', { class: 'muted small' }, 'Opens for first setup, when the station cannot reach your Wi-Fi, and after the BOOT button is held.'),
       apBody,
       h('form', { class: 'subcard', onsubmit: async e => {
@@ -348,8 +325,11 @@ const systemPart = {
           load();
         }
       } }, apField.el, apErr, h('div', { class: 'form-actions' }, apClear, apSet)));
+    const wifiCard = h('section', { class: 'card' }, cardHead('Wi-Fi', wifiBadge), wifiBody, pendingBox,
+      h('div', { class: 'form-actions' }, changeBtn), joinBox, apFold);
 
-    /* ---- Station ---- */
+    /* ---- Station: its own Save once something changed ---- */
+    const deviceCard = h('section', { class: 'card', hidden: true });
     function renderDevice() {
       const name = textInput(sys.hostname, { maxlength: 32 });
       const fName = field('Station name', name, 'Letters, digits and "-". Also its web address (name.local) and its name in your router.');
@@ -357,7 +337,7 @@ const systemPart = {
         'Anyone on your network sees the station state, caster names and signals without logging in. Caster addresses and logins, ' +
         'versions and the position stay hidden.');
       const err = errBox();
-      const save = h('button', { type: 'submit', class: 'btn primary' }, 'Save');
+      const save = h('button', { type: 'submit', class: 'btn primary', hidden: true }, 'Save');
       /* The .local name answers only while the mDNS responder runs (mdns_host set). */
       const active = wifi && wifi.mdns_host;
       mount(deviceCard,
@@ -365,7 +345,8 @@ const systemPart = {
         sys.hostname_active && sys.hostname_active !== sys.hostname ? msg('info', 'The new name takes effect at the next restart: http://' +
           sys.hostname + '.local/' + (active ? ' (until then http://' + active + '.local/).' : '.')) : null,
         h('form', { oninput: () => {
-          dirty = true;
+          devDirty = name.value.trim() !== sys.hostname || pub.input.checked !== !!sys.public_status;
+          save.hidden = !devDirty;
         }, onsubmit: async e => {
           e.preventDefault();
           fName.error(null);
@@ -377,15 +358,15 @@ const systemPart = {
           }
           const r = await act(save, () => api('PUT', '/api/system', { hostname: v, public_status: pub.input.checked }), err);
           if (r === undefined) return;
-          dirty = false;
+          devDirty = false;
           sys = r;
           toast(r.reboot_required ? 'Saved. The new name takes effect after the next restart.' : 'Saved.', 'ok');
           renderDevice();
-          renderAbout();
         } }, fName.el, pub.el, err, h('div', { class: 'form-actions' }, save)));
     }
 
-    /* ---- Admin password ---- */
+    /* ---- Admin password: the form behind one button ---- */
+    const pwCard = h('section', { class: 'card', hidden: true });
     function renderPassword() {
       const cur = pwInput({ autocomplete: 'current-password' });
       const nw = pwInput({ autocomplete: 'new-password' });
@@ -393,46 +374,44 @@ const systemPart = {
       const f1 = field('Current password', cur), f2 = field('New password', nw, '8 to 64 characters.'), f3 = field('Repeat the new password', rep);
       const err = errBox();
       const save = h('button', { type: 'submit', class: 'btn primary' }, 'Change password');
-      mount(pwCard, h('h2', null, 'Admin password'),
-        h('form', { onsubmit: async e => {
-          e.preventDefault();
-          f1.error(null);
-          f2.error(null);
-          f3.error(null);
-          if (!cur.value) {
-            f1.error('Enter the current password.');
-            return;
-          }
-          const problem = adminPasswordProblem(nw.value, rep.value);
-          if (problem) {
-            (problem === PW_MISMATCH ? f3 : f2).error(problem);
-            return;
-          }
-          const r = await act(save, () => api('PUT', '/api/admin-password', { current: cur.value, new: nw.value }), err);
-          if (r === undefined) return;
-          cur.value = nw.value = rep.value = '';
-          toast('Password changed. Other open sessions were logged out.', 'ok');
-        } }, f1.el, f2.el, f3.el, err, h('div', { class: 'form-actions' }, save)),
-        h('p', { class: 'muted small foot' }, recoveryHint()));
+      const shut = () => {
+        cur.value = nw.value = rep.value = '';
+        form.hidden = true;
+        open.hidden = false;
+      };
+      const open = btn('Change password', () => {
+        form.hidden = false;
+        open.hidden = true;
+        cur.focus();
+      });
+      const form = h('form', { hidden: true, onsubmit: async e => {
+        e.preventDefault();
+        f1.error(null);
+        f2.error(null);
+        f3.error(null);
+        if (!cur.value) {
+          f1.error('Enter the current password.');
+          return;
+        }
+        const problem = adminPasswordProblem(nw.value, rep.value);
+        if (problem) {
+          (problem === PW_MISMATCH ? f3 : f2).error(problem);
+          return;
+        }
+        const r = await act(save, () => api('PUT', '/api/admin-password', { current: cur.value, new: nw.value }), err);
+        if (r === undefined) return;
+        shut();
+        toast('Password changed. Other open sessions were logged out.', 'ok');
+      } }, f1.el, f2.el, f3.el, err, h('div', { class: 'form-actions' }, btn('Cancel', () => {
+        shut();
+        open.focus();
+      }), save));
+      mount(pwCard, h('h2', null, 'Admin password'), h('p', { class: 'muted small' }, recoveryHint()),
+        h('div', { class: 'form-actions' }, open), form);
     }
-
-    /* ---- About, appearance ---- */
-    function renderAbout() {
-      const c = sys.chip || {};
-      const mem = [c.flash_mb ? c.flash_mb + NB + 'MB flash' : null, c.psram_mb ? c.psram_mb + NB + 'MB PSRAM' : null].filter(Boolean).join(', ');
-      mount(aboutCard, h('h2', null, 'About'), kv([
-        ['Firmware', sys.version],
-        ['Project', sys.project],
-        ['ESP-IDF', sys.idf],
-        ['Chip', [c.model, c.revision].filter(Boolean).join(' ')],
-        ['Memory', mem],
-        ['MAC address', sys.mac],
-        ['Settings storage', sys.settings_available === false ? h('span', { class: 't-bad' }, 'Unavailable since this start') : 'Working'],
-      ]));
-    }
-
 
     /* ---- Restart, safe mode, factory reset ---- */
+    const maintCard = h('section', { class: 'card wide', hidden: true });
     function renderMaint() {
       const err = errBox();
       const sm = (S.status && S.status.safe_mode) || {};
@@ -476,20 +455,18 @@ const systemPart = {
 
     async function load() {
       const r = await Promise.all([api('GET', '/api/wifi'), api('GET', '/api/system')]);
-      wifi = r[0];
       sys = r[1];
-      renderWifi();
-      if (!dirty) renderDevice();
-      renderAbout();
+      showWifi(r[0]);
+      if (!devDirty) renderDevice();
       renderMaint();
     }
 
-    mount(el, h('p', { class: 'loading' }, 'Loading…'));
+    mount(wifiBody, h('p', { class: 'loading' }, 'Loading…'));
     const ready = load().then(() => {
-      mount(el, h('div', { class: 'grid' }, wifiCard, apCard, deviceCard, pwCard, aboutCard, maintCard));
+      deviceCard.hidden = pwCard.hidden = maintCard.hidden = false;
       renderPassword();
-    }, e => mount(el, msg('bad', errText(e)), h('div', { class: 'form-actions' }, btn('Try again', () => openView('settings', arg), 'primary'))));
-    const stop = poller(10000, () => (stopJoin || dirty ? Promise.resolve() : api('GET', '/api/wifi').then(showWifi)), true);
+    }, e => mount(wifiCard, msg('bad', errText(e)), h('div', { class: 'form-actions' }, btn('Try again', () => openView('settings', arg), 'primary'))));
+    const stop = poller(10000, () => (stopJoin || joinDirty ? Promise.resolve() : api('GET', '/api/wifi').then(showWifi)), true);
     /* A trial's countdown between the polls. */
     const tick = setInterval(tickTrial, 1000);
     let lastSafe = null;
@@ -504,7 +481,7 @@ const systemPart = {
 
     return {
       ready: ready,
-      cards: { wifi: wifiCard, restart: maintCard },
+      cards: { wifi: wifiCard, station: deviceCard, password: pwCard, restart: maintCard },
       update(st) {
         const active = !!(st && st.safe_mode && st.safe_mode.active);
         if (sys && active !== lastSafe) {
@@ -524,9 +501,9 @@ const systemPart = {
         clearInterval(tick);
         if (stopJoin) stopJoin();
       },
-      dirty: () => dirty,
+      dirty: () => joinDirty || devDirty,
       reload() {
-        if (!dirty) load().catch(() => {});
+        if (!joinDirty && !devDirty) load().catch(() => {});
       },
     };
   },
@@ -536,16 +513,20 @@ Views.settings = {
   title: 'Settings',
   admin: true,
   create(el, arg) {
-    const a = h('div'), b = h('div');
-    mount(el, a, b, h('section', { class: 'card' }, settingRow('Diagnostics', 'Health, history and logs.', link('Open', '#/diag', 'btn'))));
-    const u = updatesPart.create(a, arg), s = systemPart.create(b, arg);
-    /* Opened at a card (#/settings/wifi): once both parts are in, so the place does not move. */
+    const s = systemPart.create(arg), u = updatesPart.create(arg);
+    const c = Object.assign({}, s.cards, u.cards);
+    mount(el, h('div', { class: 'grid' }, c.wifi, c.updates, c.session, c.station, c.password, c.restart,
+      h('p', { class: 'wide' }, link('Diagnostics', '#/diag'), h('span', { class: 'muted' }, ': health, history and logs.'))));
+    /* Opened at a card (#/settings/restart): once both parts are in, so the place does not move. */
     Promise.all([u.ready, s.ready]).then(() => {
-      const at = Object.assign({}, u.cards, s.cards)[arg];
-      if (at && a.isConnected && !at.hidden) at.scrollIntoView({ block: 'start' });
+      const at = c[arg];
+      if (at && at.isConnected && !at.hidden) at.scrollIntoView({ block: 'start' });
     });
     return {
-      update: st => s.update(st),
+      update(st) {
+        s.update(st);
+        u.update(st);
+      },
       destroy() {
         u.destroy();
         s.destroy();
