@@ -166,7 +166,7 @@ Applied to every request before any handler runs.
    that allows only the device's own origin (scripts, styles, images,
    connections including the WebSocket) and forbids framing, with one
    exception for images: `https://tile.openstreetmap.org`, the tiles of the
-   live view's optional station map (section 8). The page requests tiles
+   Receiver page's optional station map (section 8). The page requests tiles
    only after the user asks for the map; the tile images carry
    `referrerpolicy="origin"`, because the tile server's usage policy asks
    for a Referer (the page's origin, nothing more); everything else keeps
@@ -755,6 +755,14 @@ reads it every tick, a step already running completes).
 `first_apply_held`): the station configures the receiver as usual from
 then on.
 
+The UI's Receiver settings show `autocfg` and `recovery` as one choice,
+"Receiver management": "The station" (`true`, `full`), "The station, but
+never restart itself" (`true`, `no_reboot`), "Me (alerts only)" (`false`,
+`alerts_only`); any other pair shows as "Custom" with the nearest choice
+offered. A save sends only the members that change. The Position card and
+the Receiver profile card each send the whole profile: their own fields
+over the profile as last read.
+
 The profile is stored with `um98x_profile_encode()` (validated by
 `um98x_profile_valid()`, which has the last word) and, when it differs from
 the stored one, re-applied with `station_request_reconfigure()` (runs once
@@ -903,8 +911,9 @@ when the statistics cannot be read.
 At most 64 satellites, from the receiver's satellite-in-view output of the
 last 30 s. `prn` is the satellite's PRN (GLONASS: its slot number).
 `available: false` with `reason`: `sat_view_off` (the profile's
-`sat_view_output` is off; the UI offers to turn it on) or `no_data` (it is
-on, but nothing arrived in the last 30 s).
+`sat_view_output` is off) or `no_data` (it is on, but nothing arrived in
+the last 30 s). The UI draws its sky from the live view (`GET
+/api/gnss/live`), not from this endpoint.
 
 ### Receiver maintenance
 
@@ -1007,17 +1016,18 @@ interrupts RTCM is PROVISIONAL, to be confirmed on hardware.
 |---|---|
 | `window` | `station_status_t.live`, computed at the time of the request (not as the station task last published it: a start or stop shows at once, also while a detection pass runs); `left_s`, `idle_left_s`, `open_s` 0 while closed. `sky` (`station_live_sky_t`): `off`, `pending` (wanted, waits for a free moment: `sky_why`), `on`, `on_profile` (the profile sends it permanently), `blocked` (not in this window: `sky_why`), `stopping`. `sky_why` (`station_live_why_t`). `last_end` (`station_live_end_t`) why the last window closed. `sky_reply` the receiver's reply to the last failed toggle (`null` = none) |
 | `receiver_state`, `rx_maintenance` | as in `/api/status`, for a page without the WebSocket (the setup wizard) |
-| `position` | the station's locked or last surveyed position (`null` coordinates with `source: "none"`), for the optional station map |
+| `position` | the station's locked or last surveyed position (`null` coordinates with `source: "none"`), as in `GET /api/gnss` |
 | `totals` | `gnss_obs_get_live` over every satellite, also those beyond the list: `satellites` listed, `tracked` in an MSM within the last 10 s, `signals` their signals, `with_pos` with azimuth and elevation, `dropped` beyond the list; `cnr_dbhz` mean over every satellite band (`null` = none); `bands` per band with tracked satellites (count, mean C/N0); `systems` per constellation with tracked satellites, their count per band (only bands with any). `null` when the observations cannot be read |
 | `satellites` | at most 96, by constellation and number. `prn` as in `/api/sky` (QZSS and SBAS by PRN, GLONASS by slot). `in_msm` and `msm_age_ms` (`null` = only the sky view knows it); `signal_ids` the MSM signal IDs; `cnr_dbhz` per band present: its best signal's C/N0 (`null` = no C/N0 in the MSM type). `el_deg`, `az_deg` (`null` until the satellite-in-view output reported it), `sky_cnr_dbhz` from that report, `pos_age_ms` its age |
 
-The UI shows the window card with the totals (tracked satellites, signals,
-mean C/N0, satellites in the sky plot), then the satellites: a sky plot
-(satellites with a position, coloured by C/N0, labelled), the per-satellite
-table, counts per constellation and band with per-band totals and the mean
-C/N0 per band; then, last and optional, a station map: the position with a small OpenStreetMap tile mosaic, fetched
-only after the user asks for it, with the attribution and a plain link to
-open the position in an external map (offline: the coordinates only).
+The UI opens it from the Receiver page's Signals card ("Show the sky"):
+the time left with Extend and Close, the sky plot (satellites with a
+position, coloured by C/N0, labelled) beside the card's band table, and
+every satellite behind "Show all", one line each (best C/N0 and the C/N0
+per band). The station map sits in the Receiver card's Details: the
+position with a small OpenStreetMap tile mosaic, fetched only after the
+user asks for it, with the attribution and a plain link to open the
+position in an external map (offline: the coordinates only).
 
 #### `POST /api/gnss/live` (adm)
 

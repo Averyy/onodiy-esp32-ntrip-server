@@ -72,6 +72,9 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  recoveryLbl: k => lbl(L.recovery, k), fwText: a => fwText(a[0], a[1]), dist: m => fmtDist(m),\n' +
   '  sgtBlock: g => sgtBlock(g), sgtLine: t => sgtLine(t), profileChip: g => profileChip(g),\n' +
   '  sgtNotice: st => { const n = sgTestNotice(st); return n && n.slice(0, 3); },\n' +
+  '  rxChip: s => receiverChip(s), posLine: a => positionLine(a[0], a[1]), statusPos: a => positionText(a[0], a[1]),\n' +
+  '  headline: sig => signalsHeadline(sig), sigChecks: sig => signalChecks(sig), msgCheck: a => msgCheck(a[0], a[1], a[2]),\n' +
+  '  manage: () => MANAGE, manageKey: a => manageKey(a[0], a[1]), manageCustom: a => manageCustom(a[0], a[1]),\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
 process.stdout.write(JSON.stringify(out));
@@ -637,17 +640,106 @@ def test_signal_groups_short_and_plain():
         assert not any(m in line for m in ("25164", "build", "2026")), pair
 
 
-def test_recovery_choices_say_what_happens():
-    (rec,) = run_ui([("recovery", None)])
-    assert [rec[k][0] for k in ("full", "no_reboot", "alerts_only")] == [
-        "Fix it automatically", "Fix it, but never restart the station", "Only tell me"]
-    assert "restarts the station" in rec["full"][1] and "once an hour" in rec["full"][1]
-    assert "keeps running" in rec["no_reboot"][1]
-    assert rec["alerts_only"][1].startswith("Nothing is sent to the receiver")
-    for name, line in rec.values():
-        assert line.endswith(".") and len(line) <= 130 and "RTCM" not in line
-    # The Status page and Diagnostics show the name alone: no "(recommended)" there.
+def test_receiver_management_one_choice_over_two_settings():
+    """Receiver settings: one choice for automatic configuration and what happens if corrections stop. Each option one
+    concrete line; any other combination is Custom, says what it does and offers the option nearest to it."""
+    (m,) = run_ui([("manage", None)])
+    assert {k: v[:3] for k, v in m.items()} == {
+        "station": [True, "full", "The station (recommended)"],
+        "no_restart": [True, "no_reboot", "The station, but never restart itself"],
+        "me": [False, "alerts_only", "Me (alerts only)"]}
+    for _, _, name, line in m.values():
+        assert line.endswith(".") and len(line) <= 140 and not any(w in line for w in ("RTCM", "SAVECONFIG", "autocfg"))
+    assert "restarts itself" in m["station"][3] and "never restarts" in m["no_restart"][3]
+    assert m["me"][3].startswith("The station sends the receiver nothing")
+    keys = run_ui([("manageKey", [a, r]) for a in (True, False) for r in ("full", "no_reboot", "alerts_only")])
+    assert keys == ["station", "no_restart", None, None, None, "me"]
+    custom = run_ui([("manageCustom", [True, "alerts_only"]), ("manageCustom", [False, "full"]),
+                     ("manageCustom", [False, "no_reboot"])])
+    assert custom[0] == ["The station configures the receiver but does nothing if corrections stop.", "station"]
+    assert custom[1][1] == custom[2][1] == "me"
+    assert custom[1][0].endswith("still resets it and may restart itself.") and custom[2][0].endswith("still resets it.")
+    # The Status page and Diagnostics name the recovery choice alone, without "(recommended)".
     assert run_ui([("recoveryLbl", "full"), ("recoveryLbl", "alerts_only")]) == ["Fix it automatically", "Only tell me"]
+
+
+def test_receiver_chip_never_says_streaming_while_corrections_stopped():
+    """The Receiver card's chip comes from the same state as the Status page's top card."""
+    stall = status(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "link_restart"})
+    silent = status(alerts=[{"id": "receiver_silent", "source": "health"}], health={"level": "failed"})
+    no_rx = status(receiver={"state": "no_receiver"}, alerts=[NO_RX], casters=[caster(0, "Onocoy", "wait_data")])
+    maint = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600, "rtcm_age_ms": 300})
+    detect = status(receiver={"state": "detecting"}, casters=[caster(0, "Onocoy", "wait_data")])
+    stopped = status(casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate")])
+    out = run_ui([("rxChip", x) for x in (status(), stall, silent, no_rx, maint, detect, stopped)])
+    assert out == [["Streaming", "ok"], ["Stopped sending data", "warn"], ["Stopped sending data", "bad"],
+                   ["No receiver found", "bad"], ["Maintenance", "info"], ["Looking for the receiver", "info"],
+                   ["Streaming", "ok"]]
+
+
+def test_survey_pauses_without_data_on_both_pages():
+    surveying = {"position": {"locked": False, "source": "survey"}, "survey": {"active": True, "window_left_s": 660},
+                 "profile": {"base_mode": "survey_in"}}
+    locked = {"position": {"locked": True, "source": "survey"}, "survey": {"active": False}, "profile": {"base_mode": "fixed",
+              "fixed": {"lat_deg": 1, "lon_deg": 2, "height_m": 3}}}
+    typed = {"position": {"locked": False, "source": "none"}, "profile": {"base_mode": "fixed", "fixed": {"lat_deg": 1}}}
+    out = run_ui([("posLine", [surveying, True]), ("posLine", [surveying, False]), ("posLine", [locked, False]),
+                  ("posLine", [typed, True]), ("posLine", [{"position": {"source": "none"}}, True]),
+                  ("statusPos", [{"surveying": True, "survey_window_left_s": 660}, True]),
+                  ("statusPos", [{"surveying": True, "survey_window_left_s": 660}, False])])
+    assert out[0] == "Surveying, about 11\u00a0min left. Then lock it."
+    assert out[1] == "Surveying, paused while no corrections arrive."
+    assert out[2].startswith("Locked.") and out[3].startswith("Fixed (typed in).") and out[4] == "No position yet."
+    assert out[5] == "Surveying, 11\u00a0min left" and out[6] == "Surveying, paused"
+
+
+SIG = {"best_sys": "galileo", "best_bands": 4, "e6_lost": False, "epoch_age_ms": 420, "rtcm1230_supported": True,
+       "systems": [{"sys": "gps", "satellites": 11, "bands": ["l1", "l2", "l5"], "cnr_dbhz": {"l1": 45, "l2": 41, "l5": 44}},
+                   {"sys": "glonass", "satellites": 9, "bands": ["l1", "l2"], "cnr_dbhz": {"l1": 45, "l2": 43}},
+                   {"sys": "galileo", "satellites": 11, "bands": ["l1", "l2", "l5", "l6"],
+                    "cnr_dbhz": {"l1": 41, "l2": 41, "l5": 41, "l6": 38}},
+                   {"sys": "qzss", "satellites": 1, "bands": ["l1", "l2", "l5", "l6"], "cnr_dbhz": {"l1": 40}}]}
+
+
+def test_signals_card_headline_and_hints():
+    """The Signals card: the best constellation while observations arrive, how long they have been missing when they
+    stop (never "No signals yet" after a stall). The hints are the antenna check's, from the signal summary: QZSS never
+    counts as the best; E6 lost, no GLONASS and a refused 1230 are added when they apply."""
+    stale = {**SIG, "epoch_age_ms": 37000}
+    out = run_ui([("headline", SIG), ("headline", stale), ("headline", {"epoch_age_ms": None, "systems": []})])
+    assert out == ["Galileo · 4 bands", "No signals for 37\u00a0s", "No signals yet"]
+    no_e6 = {**SIG, "best_bands": 3, "systems": [s if s["sys"] != "galileo" else {**s, "bands": ["l1", "l2", "l5"]}
+                                                 for s in SIG["systems"] if s["sys"] != "qzss"]}
+    lost = {**SIG, "e6_lost": True}
+    no_glo = {**SIG, "systems": [s for s in SIG["systems"] if s["sys"] != "glonass"]}
+    refused = {**SIG, "rtcm1230_supported": False}
+    good, bad3, e6, glo, r1230 = run_ui([("sigChecks", x) for x in (SIG, no_e6, lost, no_glo, refused)])
+    assert [i[0] for i in good["items"]] == ["ok", "ok", "ok"] and good["ok"] is True
+    assert good["items"][0][1] == "32 satellites tracked" and good["items"][2][1] == "Galileo: 4 bands"
+    assert bad3["items"][2][0] == "warn" and bad3["items"][2][2].endswith("Signal group 3 6 adds Galileo E6.")
+    assert e6["items"][-1] == ["bad", "Galileo E6 lost", "It was tracked before with this signal group."] and e6["ok"] is False
+    assert glo["items"][-1][:2] == ["warn", "No GLONASS"]
+    assert r1230["items"][-1][:2] == ["warn", "GLONASS biases refused"]
+
+
+def test_position_message_waits_for_the_survey():
+    """While the receiver surveys it sends no position (1005): that row waits, it is not red."""
+    never = {"msg": 1005, "count": 0, "age_ms": None, "expected_period_s": 1}
+    ok = {"msg": 1077, "count": 900, "age_ms": 400, "expected_period_s": 1}
+    late = {"msg": 1077, "count": 900, "age_ms": 9000, "expected_period_s": 1}
+    out = run_ui([("msgCheck", [never, True, True]), ("msgCheck", [never, True, False]), ("msgCheck", [ok, True, True]),
+                  ("msgCheck", [late, True, True]), ("msgCheck", [late, False, False])])
+    assert out == ["waits", "missing", "", "missing", ""]
+
+
+def test_message_and_satellite_lists_are_one_line_rows():
+    """No stacked blocks for the RTCM messages and the satellites on a phone: one line per row."""
+    for name in ("65-signals.js", "66-live.js"):
+        text = (UI_JS / name).read_text()
+        assert "stack-sm" not in text and "stack: true" not in text, name
+        assert "class: 'rows'" in text, name
+    css = (UI_JS.parent / "app.css").read_text()
+    assert "table.rows th, table.rows td { padding: 0.35rem 0.45rem; white-space: nowrap; }" in css
 
 
 def test_firmware_build_shown_once_and_distances_in_mm_and_cm():

@@ -222,17 +222,9 @@ const L = {
   linkMode: { off: 'Off', stream: 'Streaming', command: 'Command session', raw: 'Raw (update)' },
   baseMode: { survey_in: 'Survey-in', fixed: 'Fixed position' },
   posSource: { none: 'None', survey: 'Survey-in', averaged: 'Averaged', user: 'Entered by you' },
-  /* If corrections stop (gnss/recovery): [the choice's name, what it does]. The Receiver page marks full as recommended. */
-  recovery: {
-    full: ['Fix it automatically', 'Reconnects, reconfigures and, if needed, restarts the receiver. As a last resort it ' +
-      'restarts the station (at most once an hour).'],
-    no_reboot: ['Fix it, but never restart the station', 'The same steps on the receiver; the station itself keeps running.'],
-    alerts_only: ['Only tell me', 'Nothing is sent to the receiver and nothing restarts; the problem shows on the Status page.'],
-  },
+  /* If corrections stop (gnss/recovery), for the Status page and Diagnostics; Receiver settings has the whole choice (MANAGE). */
+  recovery: { full: 'Fix it automatically', no_reboot: 'Fix it, but never restart the station', alerts_only: 'Only tell me' },
   trigger: { protected: 'Onocoy caster down', assoc_no_ip: 'connected without an IP address', unreached: 'a caster not reached' },
-  liveSky: {
-    off: 'off', pending: 'waiting', on: 'on', on_profile: 'on (receiver profile)', blocked: 'not available', stopping: 'turning off',
-  },
   liveWhy: {
     none: '',
     busy: 'the station is busy with the receiver',
@@ -322,7 +314,7 @@ const J = {
   kind: { boot: 'Start', session: 'Previous run', reboot: 'Restart', ladder_step: 'Recovery step', app_update: 'App update',
     app_revert: 'App rolled back', gnss_flash: 'Receiver update', safe_mode: 'Safe mode', wifi_disconnect: 'Wi-Fi dropped',
     data_loss: 'Data lost', caster_down: 'Caster disconnected', caster_up: 'Caster back', wifi_up: 'Wi-Fi back',
-    caster_stop: 'Caster stopped', rx_maintenance: 'Receiver maintenance', live_view: 'Live view', sg_test: 'Signal groups',
+    caster_stop: 'Caster stopped', rx_maintenance: 'Receiver maintenance', live_view: 'Sky view', sg_test: 'Signal groups',
     rx_boot: 'Receiver at power-on' },
   resetClass: ['power on', 'planned', 'crash', 'brownout', 'other'],
   /* The same by C value, as the API names them (lifecycle_reset_class_t, lifecycle_reboot_reason_t). */

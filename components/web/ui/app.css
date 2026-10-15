@@ -173,7 +173,7 @@ h2 { font-size: 1.05rem; }
 h3 { font-size: 0.95rem; }
 p { margin: 0 0 0.75rem; }
 ul { margin: 0 0 0.75rem; padding-left: 1.25rem; }
-code, .mono, pre { font-family: var(--mono); font-size: 0.875em; }
+code, pre { font-family: var(--mono); font-size: 0.875em; }
 small { font-size: 0.85rem; }
 
 /* ---- Header and navigation ------------------------------------------- */
@@ -290,9 +290,6 @@ small { font-size: 0.85rem; }
   .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-flow: dense; }
   .grid .wide { grid-column: 1 / -1; }
 }
-@media (min-width: 1080px) {
-  .grid.g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-}
 
 .card {
   background: var(--surface);
@@ -316,10 +313,6 @@ small { font-size: 0.85rem; }
 .card-head { flex-wrap: wrap; justify-content: flex-end; row-gap: 0.35rem; }
 .card-head > :first-child { flex-basis: 8rem; }
 .card .foot { margin-top: 0.75rem; font-size: 0.9rem; }
-/* A card's buttons at its foot (.card-actions): in a row of cards they line up at the bottom. */
-.card.has-actions { display: flex; flex-direction: column; }
-.card.has-actions > :not(.card-head) { margin-bottom: 0; }
-.card.has-actions > .card-actions { margin-top: auto; padding-top: 0.75rem; }
 .section-title { margin: 1.5rem 0 0.5rem; color: var(--muted); font-size: 0.85rem; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; }
 
 .row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
@@ -429,8 +422,8 @@ small { font-size: 0.85rem; }
 .tight-kv .kv { grid-template-columns: minmax(7.5rem, 13rem) 1fr; }
 /* Short labels (the Status page): as wide as the longest, the values beside them at every width. */
 .fit-kv .kv { grid-template-columns: max-content minmax(0, 1fr); column-gap: 1.5rem; }
-/* A list of figures under a line of text in a card keeps the card's gap. */
-.card > * + .kv { margin-top: 0.75rem; }
+/* A list of figures or a choice under a line of text keeps the gap. */
+.card > * + :is(.kv, .fieldset), .stack > .msg + .kv { margin-top: 0.75rem; }
 
 /* ---- Badges and messages ---------------------------------------------- */
 
@@ -658,6 +651,20 @@ input[type="file"] { max-width: 100%; font: inherit; }
 }
 
 details.more { margin-top: 0.85rem; }
+/* A card that folds to its title row (Receiver settings: the comparison, details, maintenance). */
+details.fold > summary { display: flex; align-items: center; gap: 0.6rem; min-height: 32px; cursor: pointer; list-style: none; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '›'; flex: none; width: 1rem; color: var(--accent); font-size: 1.35rem; font-weight: 700; line-height: 1; transition: transform 0.15s; }
+details.fold[open] > summary::before { transform: rotate(90deg); }
+details.fold > summary > h2 { flex: 1 1 auto; margin: 0; }
+details.fold[open] > summary { margin-bottom: 0.75rem; }
+details.fold > :not(summary) + * { margin-top: 0.75rem; }
+/* A button that reads as a link ("Not sure? Compare two groups"). */
+.linkbtn { min-height: 24px; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; }
+.linkbtn:hover { text-decoration: underline; }
+/* A setting in one line with its Edit button at the right (Corrections, the antenna name). */
+.edit-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.edit-row > .btn { flex: none; }
 /* A list of disclosures (the counters): one under the other, close together. */
 .card > details.more + details.more { margin-top: 0.2rem; }
 details.more > summary { cursor: pointer; color: var(--accent); font-weight: 600; padding: 0.3rem 0; }
@@ -760,6 +767,8 @@ tbody tr:last-child td { border-bottom: 0; }
 .bands td.off { color: var(--muted); }
 .bands td small { display: block; color: var(--muted); font-weight: 500; }
 /* A phone: a tick and the figure per band (the column names the band; the cell's title the signals). */
+/* The sky beside the table: the names give way. */
+.sky-open .bands .wide-only { display: none; }
 @media (max-width: 719px) {
   .bands .wide-only { display: none; }
   .bands th, .bands td { padding-left: 0.3rem; padding-right: 0.3rem; }
@@ -778,8 +787,6 @@ svg.sky { width: 100%; max-width: 420px; height: auto; display: block; margin: 0
 svg.sky .ring { fill: none; stroke: var(--border); stroke-width: 1; }
 svg.sky .axis { stroke: var(--border); stroke-width: 1; }
 svg.sky .lbl { fill: var(--muted); font-size: 11px; font-family: inherit; }
-svg.sky .prn { fill: var(--surface); font-size: 9px; font-weight: 700; }
-svg.sky .sat { stroke: var(--surface); stroke-width: 1.5; }
 .sys-gps { fill: var(--c-gps); background: var(--c-gps); }
 .sys-glonass { fill: var(--c-glonass); background: var(--c-glonass); }
 .sys-galileo { fill: var(--c-galileo); background: var(--c-galileo); }
@@ -839,7 +846,15 @@ th .sort {
 }
 th .sort:hover { color: var(--text); }
 th[aria-sort] .sort { color: var(--text); }
-table.sats td, table.counts td { white-space: nowrap; }
+table.counts td { white-space: nowrap; }
+/* One line per row (the satellites, the RTCM messages): no stacked blocks on a phone; a long name ends in "…". */
+table.rows th, table.rows td { padding: 0.35rem 0.45rem; white-space: nowrap; }
+table.rows td.name { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; }
+table.rows i.dot { display: inline-block; width: 8px; height: 8px; margin-right: 0.35rem; border-radius: 50%; }
+@media (max-width: 559px) {
+  table.rows { font-size: 0.875rem; }
+  table.rows th, table.rows td, table.counts th, table.counts td { padding-left: 0.3rem; padding-right: 0.3rem; }
+}
 table.counts tfoot th, table.counts tfoot td { border-top: 1px solid var(--border); border-bottom: 0; font-weight: 650; }
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: 0.75rem; }
@@ -847,9 +862,6 @@ table.counts tfoot th, table.counts tfoot td { border-top: 1px solid var(--borde
 .tile .k { color: var(--muted); font-size: 0.85rem; }
 .tile .v { font-size: 1.6rem; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; }
 
-.bandbars { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr) auto; gap: 0.45rem 0.75rem; align-items: center; }
-.bandbars .bar { margin: 0; }
-.bandbars .band { font-weight: 600; }
 
 .checks { display: grid; gap: 0.6rem; margin: 0; padding: 0; list-style: none; }
 .checks li { display: flex; align-items: flex-start; gap: 0.6rem; }
@@ -877,6 +889,7 @@ table.counts tfoot th, table.counts tfoot td { border-top: 1px solid var(--borde
   border-radius: 10px;
   background: var(--surface-2);
 }
+.map-box { margin-top: 0.75rem; }
 .map .map-tiles { position: absolute; inset: 0; }
 .map img { position: absolute; display: block; max-width: none; user-select: none; }
 .map .pin {
@@ -908,6 +921,7 @@ table.counts tfoot th, table.counts tfoot td { border-top: 1px solid var(--borde
 input.ant { white-space: normal; }
 /* The profile's groups (Signals, Position, Corrections, Advanced): a line above each. */
 .pgroup { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.pgroup:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
 .pgroup > h3 { margin: 0; font-size: 1rem; }
 .pgroup > details.more:first-child { margin-top: 0; }
 /* A heading inside Details. */

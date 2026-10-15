@@ -119,9 +119,11 @@ function onocoyCard(s, st) {
     kv([['Online today', fmt.dur(c.today_online_s)], ['Offline today', fmt.dur(d.known ? d.down : c.today_offline_s)]]));
 }
 
-/* "Locked", "Surveying, 11 min left"... (position_locked is the stored profile's base mode: it runs once the profile is applied). */
-function positionText(r) {
+/* "Locked", "Surveying, 11 min left"... (position_locked is the stored profile's base mode: it runs once the profile is applied).
+ * A survey needs data: while none arrives (delivering false) it is paused, not counting down. */
+function positionText(r, delivering) {
   if (r.position_locked) return r.profile_applied ? 'Locked' : 'Fixed, not applied yet';
+  if (r.surveying && !delivering) return 'Surveying, paused';
   if (r.surveying) return 'Surveying' + (r.survey_window_left_s ? ', ' + inMinutes(r.survey_window_left_s) + ' left' : '');
   return 'Not locked';
 }
@@ -150,7 +152,7 @@ function receiverCard(s, st) {
   const r = s.receiver || {};
   return h('section', { class: 'card fit-kv' },
     cardHead('Receiver', link('Details', '#/receiver', 'head-link')),
-    kv([['Bands', bandsView(r, st.quality)], ['GLONASS', glonassView(r, st.quality)], ['Position', positionText(r)]]));
+    kv([['Bands', bandsView(r, st.quality)], ['GLONASS', glonassView(r, st.quality)], ['Position', positionText(r, st.delivering)]]));
 }
 
 /** Today's online share: whole at 0 % and 100 %, else two decimals, rounded down (never "100.00" short of 100). */

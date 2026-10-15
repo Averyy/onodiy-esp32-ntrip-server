@@ -574,7 +574,7 @@ async function startWizard(claim) {
                 h('p', { class: 'muted small' }, SYS_KEY), liveCountsTable(t))))));
       }
       cont.textContent = r.ok ? 'Continue' : 'Continue anyway';
-      setNote(r.waiting ? '' : 'These are rough guide values, not Onocoy\'s scoring. The live view is also on the Receiver page.');
+      setNote(r.waiting ? '' : 'These are rough guide values, not Onocoy\'s scoring. The sky is also on the Receiver page.');
       later.textContent = '';
       /* A 200 to our own start means open; a closed window read within 5 s
        * of it is a stale answer, ignored once. */
@@ -585,7 +585,7 @@ async function startWizard(claim) {
       /* Built on the change only, so its button stays put between refreshes. */
       if (w.open === false && !closedShown) {
         closedShown = true;
-        mount(err, 'The live view closed (' + (lbl(L.liveEnd, w.last_end) || 'time up') + '). ', btn('Open it again', openLive, 'small'));
+        mount(err, 'The sky view closed (' + (lbl(L.liveEnd, w.last_end) || 'time up') + '). ', btn('Open it again', openLive, 'small'));
         err.className = 'msg warn';
         err.hidden = false;
       } else if (w.open !== false && closedShown) {
@@ -606,7 +606,7 @@ async function startWizard(claim) {
         closedShown = false;
         if (mode !== 'live') {
           mode = 'failed';   /* not asked again every 2 s: the user goes on, or checks later on the Receiver page */
-          patch(box, msg('warn', 'The live view could not be opened: ' + errText(e)),
+          patch(box, msg('warn', 'The sky view could not be opened: ' + errText(e)),
             h('p', { class: 'muted small' }, 'You can check the antenna later on the Receiver page.'));
           cont.textContent = 'Continue';
         } else {

@@ -2,14 +2,12 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Signals, on the Receiver page: the summary (best constellation, Galileo
- * E6, the entry to the live view, #/receiver/live in 66-live.js), frequency
- * bands per constellation from the MSM data (with the mean C/N0 from MSM4 to
- * MSM7), the RTCM messages seen against the profile, and the sky view of
- * satellites in view. Without a receiver (none found, or the station still
- * looking for it) these cards hide: the Receiver card says so, and empty
- * tables and red "missing" rows would only mislead. The public page shows
- * the summary and the band table (signalsCard).
+ * Signals, on the Receiver page: one card with the best constellation, the
+ * Good / Check / Problem hints, the frequency bands per constellation from
+ * the MSM data (with the mean C/N0 from MSM4 to MSM7), the sky on request
+ * (66-live.js) and, behind "Signal details", the epochs and the RTCM
+ * messages seen against the profile. The public page shows the summary and
+ * the band table (signalsCard).
  */
 
 const BAND_ORDER = ['l1', 'l2', 'l5', 'l6', 'e5ab'];
@@ -54,91 +52,53 @@ function bandTable(systems) {
     }))));
 }
 
-/* Galileo E6: tracked, or lost; "not tracked" only while no constellation has 4 bands (then it would help). */
-function e6View(sig) {
-  const gal = (sig.systems || []).find(s => s.sys === 'galileo');
-  const e6 = gal && (gal.bands || []).indexOf('l6') >= 0;
-  if (sig.e6_lost) return msg('bad', h('strong', null, 'Galileo E6 lost.'), ' It was tracked before with this signal group.');
-  if (e6) return msg('ok', h('strong', null, 'Galileo E6 tracked:'), ' a fourth Galileo band.');
-  if (sig.best_bands >= 4) return null;
-  return msg('', h('strong', null, 'Galileo E6 not tracked.'), ' Signal group 3 6 adds it.');
-}
-
-/* A seen period in words: whole seconds when it is close to them ("1 s" for 996 ms). */
+/* A seen period in words: whole seconds within 10 % of them ("1 s" for 950 ms: jitter, not another rate). */
 function periodText(ms) {
   const s = ms / 1000, r = Math.round(s);
-  return r >= 1 && Math.abs(s - r) < 0.05 * r ? r + NB + 's' : fmt.ms(ms);
+  return r >= 1 && Math.abs(s - r) <= 0.1 * r ? r + NB + 's' : fmt.ms(ms);
 }
 
 /* A message name without its MSM type, for the one line of extra messages ("1107 SBAS observations"). */
 const rtcmShort = n => (rtcmName(n) || '').replace(/ \(.*\)$/, '');
 
-/*
- * The profile's messages: number and name, how often each arrives (the
- * profile's period beside it when it differs), when it was last seen. The
- * messages outside the profile are one line under the table. colour: mark
- * messages the receiver should send but does not (only while it streams).
- */
-function messagesView(list, colour) {
+
+const neverSeen = m => m.age_ms === null || m.age_ms === undefined;
+
+/** A profile message's row state: 'missing' (red), 'waits' (the position, while surveying) or '' (as it should be). */
+function msgCheck(m, colour, surveying) {
+  const late = !m.count || (!neverSeen(m) && m.age_ms > m.expected_period_s * 3000 + 2000);
+  if (!late) return '';
+  if (surveying && (m.msg === 1005 || m.msg === 1006)) return 'waits';
+  return colour ? 'missing' : '';
+}
+
+/* The profile's messages in one line each (number and name, every, last seen); the others in one line under them. */
+function messagesView(list, colour, surveying) {
   const mine = list.filter(m => m.expected_period_s !== null && m.expected_period_s !== undefined);
   const extra = list.filter(m => (m.expected_period_s === null || m.expected_period_s === undefined) && m.count);
   let red = false;
   const rows = mine.map(m => {
     const expected = m.expected_period_s;
-    const missing = colour && (!m.count || (m.age_ms !== null && m.age_ms !== undefined && m.age_ms > expected * 3000 + 2000));
+    const st = msgCheck(m, colour, surveying);
+    const waits = st === 'waits';
+    const missing = st === 'missing';
     red = red || missing;
     const seen = m.period_ms ? periodText(m.period_ms) : DASH;
-    return [
-      h('span', { class: missing ? 't-bad' : null }, h('b', null, String(m.msg)), ' ' + (rtcmName(m.msg) || '')),
-      [seen, m.period_ms && seen !== expected + NB + 's' ? h('span', { class: 'muted' }, ' (profile: ' + expected + NB + 's)') : null],
-      m.age_ms === null || m.age_ms === undefined ? 'Never' : h('span', { class: missing ? 't-bad' : null }, fmt.ms(m.age_ms) + NB + 'ago'),
-    ];
+    const bad = missing ? 't-bad' : null;
+    return h('tr', null,
+      h('td', { class: 'name', title: rtcmName(m.msg) || null }, h('b', { class: bad }, String(m.msg)), h('span', { class: bad }, ' ' + (rtcmName(m.msg) || ''))),
+      waits ? h('td', { class: 'num muted', colspan: 2 }, 'Waits for the survey') : [
+        h('td', { class: 'num' }, seen, m.period_ms && seen !== expected + NB + 's' ? h('span', { class: 'muted' }, ' (' + expected + NB + 's)') : null),
+        h('td', { class: 'num' + (bad ? ' t-bad' : '') }, neverSeen(m) ? 'Never' : fmt.ms(m.age_ms) + NB + 'ago')]);
   });
   return [
-    rows.length ? table(['Message', 'Every', 'Last seen'], rows, { num: [1, 2] }) : h('p', { class: 'muted' }, 'No messages in the profile.'),
+    rows.length ? scrollBox('Messages', h('table', { class: 'rows' },
+      h('thead', null, h('tr', null, h('th', null, 'Message'), h('th', { class: 'num' }, 'Every'), h('th', { class: 'num' }, 'Last seen'))),
+      h('tbody', null, rows))) : h('p', { class: 'muted' }, 'No messages in the profile.'),
     red ? h('p', { class: 'small' }, h('span', { class: 't-bad' }, 'Red:'), ' in the profile but not arriving.') : null,
     extra.length ? h('p', { class: 'muted small' }, 'Also in the stream, not in the profile: ' +
       extra.map(m => m.msg + (rtcmShort(m.msg) ? ' ' + rtcmShort(m.msg) : '')).join(', ') + '.') : null,
   ];
-}
-
-function skyPlot(sats) {
-  const C = 170, R = 145;
-  const plot = svg('svg', { class: 'sky', viewBox: '0 0 340 340', role: 'img', 'aria-label': 'Sky view: ' + sats.length + ' satellites' });
-  for (const el of [0, 30, 60]) plot.append(svg('circle', { class: 'ring', cx: C, cy: C, r: (R * (90 - el)) / 90 }));
-  plot.append(svg('line', { class: 'axis', x1: C, y1: C - R, x2: C, y2: C + R }), svg('line', { class: 'axis', x1: C - R, y1: C, x2: C + R, y2: C }));
-  const labels = [['N', C, C - R - 8], ['S', C, C + R + 16], ['E', C + R + 10, C + 4], ['W', C - R - 10, C + 4]];
-  for (const l of labels) plot.append(svg('text', { class: 'lbl', x: l[1], y: l[2], 'text-anchor': 'middle' }, l[0]));
-  plot.append(svg('text', { class: 'lbl', x: C + 4, y: C - (R * 60) / 90 + 12 }, '30°'), svg('text', { class: 'lbl', x: C + 4, y: C - (R * 30) / 90 + 12 }, '60°'));
-  for (const s of sats) {
-    if (s.el_deg === null || s.el_deg === undefined || s.az_deg === null || s.az_deg === undefined) continue;
-    const r = (R * (90 - Math.max(0, Math.min(90, s.el_deg)))) / 90;
-    const a = (s.az_deg * Math.PI) / 180;
-    const x = C + r * Math.sin(a), y = C - r * Math.cos(a);
-    plot.append(svg('g', null,
-      svg('title', null, lbl(L.sys, s.sys) + ' ' + s.prn + ': elevation ' + s.el_deg + '°, azimuth ' + s.az_deg + '°' +
-        (s.cnr_dbhz ? ', ' + s.cnr_dbhz + ' dB-Hz' : '')),
-      svg('circle', { class: 'sat sys-' + s.sys, cx: x.toFixed(1), cy: y.toFixed(1), r: 10 }),
-      svg('text', { class: 'prn', x: x.toFixed(1), y: (y + 3).toFixed(1), 'text-anchor': 'middle' }, String(s.prn))));
-  }
-  return plot;
-}
-
-function skyView(sky, onEnable) {
-  if (!sky.available) {
-    if (sky.reason === 'sat_view_off') {
-      return [h('p', null, 'Satellite positions are off in the receiver profile. The live view turns them on while it is open.'),
-        onEnable ? h('div', { class: 'form-actions' }, onEnable) : null];
-    }
-    return h('p', { class: 'muted' }, 'No satellite positions from the receiver in the last 30 seconds.');
-  }
-  const sats = (sky.satellites || []).slice().sort((a, b) => (a.sys < b.sys ? -1 : a.sys > b.sys ? 1 : a.prn - b.prn));
-  const systems = [];
-  for (const s of sats) if (systems.indexOf(s.sys) < 0) systems.push(s.sys);
-  return h('div', { class: 'sky-wrap' },
-    h('div', null, skyPlot(sats), h('div', { class: 'legend foot' }, systems.map(s => h('span', null, h('i', { class: 'sys-' + s }), lbl(L.sys, s))))),
-    table(['Constellation', 'Satellite', 'Elevation', 'Azimuth', 'C/N0'], sats.map(s => [lbl(L.sys, s.sys), String(s.prn),
-      s.el_deg + '°', s.az_deg + '°', s.cnr_dbhz ? h('span', { class: cnrClass(s.cnr_dbhz) }, s.cnr_dbhz + '\u00a0dB-Hz') : DASH]), { num: [1, 2, 3, 4], stack: true }));
 }
 
 /* Under every band table. */
@@ -151,104 +111,112 @@ function signalsCard(sig) {
     bandTable(sig.systems), h('p', { class: 'muted small foot' }, BANDS_FOOT));
 }
 
-/** The Receiver page's signal cards in el (a grid): {update(status), destroy()}. */
+/* The antenna check's hints from GET /api/gnss/signals (C/N0: band means weighted by satellites), plus E6 lost, no GLONASS, 1230 refused. */
+function signalChecks(sig) {
+  const systems = sig.systems || [];
+  let n = 0, sum = 0, w = 0;
+  const sys = systems.map(s => {
+    const bands = {};
+    for (const b of s.bands || []) bands[b] = s.satellites;
+    for (const b of Object.keys(s.cnr_dbhz || {})) {
+      if (s.cnr_dbhz[b]) {
+        sum += s.cnr_dbhz[b] * s.satellites;
+        w += s.satellites;
+      }
+    }
+    n += s.satellites;
+    return { sys: s.sys, bands: bands };
+  });
+  const r = receptionChecks({ totals: { tracked: n, cnr_dbhz: w ? Math.round(sum / w) : null, msm_age_ms: sig.epoch_age_ms, systems: sys } });
+  if (r.waiting) return r;
+  const gal = systems.find(s => s.sys === 'galileo');
+  if (sig.e6_lost) r.items.push(['bad', 'Galileo E6 lost', 'It was tracked before with this signal group.']);
+  else if (gal && sig.best_bands < 4 && (gal.bands || []).indexOf('l6') < 0) r.items[2][2] += ' Signal group 3 6 adds Galileo E6.';
+  if (!systems.some(s => s.sys === 'glonass')) r.items.push(['warn', 'No GLONASS', 'Onocoy\'s quality score needs it.']);
+  else if (sig.rtcm1230_supported === false) {
+    r.items.push(['warn', 'GLONASS biases refused', 'The receiver refused message 1230, so GLONASS does not count for Onocoy.']);
+  }
+  r.ok = r.items.every(i => i[0] === 'ok');
+  return r;
+}
+
+/** The big line: the best constellation while observations arrive, else how long they have been missing. */
+function signalsHeadline(sig) {
+  const age = sig.epoch_age_ms;
+  if (age === null || age === undefined) return 'No signals yet';
+  if (age >= 5000) return 'No signals for ' + fmt.dur(age / 1000);
+  return sig.best_sys ? lbl(L.sys, sig.best_sys) + ' · ' + sig.best_bands + ' bands' : 'No signals yet';
+}
+
+/**
+ * The Receiver page's Signals card in el: the best constellation, the hints
+ * (while the receiver delivers), the band table with the sky beside it once
+ * shown, "Signal details". Hidden without a receiver (the Receiver card says
+ * so). Returns {update(status), gnss(g), destroy(), sky}.
+ */
 function signalsSection(el) {
-  const summary = h('section', { class: 'card wide' });
-  const bandsCard = h('section', { class: 'card wide' });
-  const msgsCard = h('section', { class: 'card wide' });
-  const skyCard = h('section', { class: 'card wide' });
-  const cards = [summary, bandsCard, msgsCard, skyCard];
-  /* The way into the live view: in the summary card, built once (a refresh moves it, never rebuilds it). */
-  const liveRow = h('div', { class: 'form-actions' },
-    h('span', { class: 'note muted small' }, 'Every satellite in view and how strong its signals are, live for a few minutes.'),
-    btn('Open the live view', openLiveView));
-  add(el, cards);
-  mount(summary, h('p', { class: 'loading' }, 'Loading signals…'));
-  let collapsed = false;
-  const streaming = () => !!(S.status && S.status.receiver && S.status.receiver.state === 'streaming');
-  /* No receiver, or the station looking for it: the cards hide. */
+  const sky = skySection();
+  const head = h('div', { class: 'stack' }, h('p', { class: 'loading' }, 'Loading signals…'));
+  const bands = h('div');
+  const body = h('div');
+  const details = moreAs('sig-details', 'Signal details', false, body);
+  const card = h('section', { class: 'card wide' }, h('h2', null, 'Signals'), head, sky.head,
+    h('div', { class: 'sky-wrap' }, sky.plot, bands),
+    h('div', { class: 'form-actions' }, sky.note, sky.button), sky.el, details);
+  el.append(card);
+  let collapsed = false, g = null;
+  /* Verdicts (hints, red messages) only while corrections come from the receiver. */
+  const delivering = () => !!(S.status && stationState(S.status, true).delivering);
+  /* No receiver, or the station looking for it: the card hides. */
   function receiverState(st) {
     const r = (st && st.receiver) || {};
     const c = !r.rx_maintenance && (r.state === 'no_receiver' || r.state === 'detecting' || r.state === 'idle');
+    card.classList.toggle('sky-open', !sky.plot.hidden);
     if (c === collapsed) return;
     collapsed = c;
-    for (const x of cards) x.hidden = c;
+    card.hidden = c;
+    if (c) sky.hide();
   }
   receiverState(S.status);
-
-  const enableBtn = btn('Turn on', async () => {
-    const ok = await dialog({ title: 'Turn on satellite positions?', ok: 'Turn on',
-      body: h('p', null, 'The station saves this in the receiver profile and configures the receiver. Corrections pause for a few seconds.') });
-    if (!ok) return;
-    await act(enableBtn, async () => {
-      const g = await api('GET', '/api/gnss');
-      const profile = Object.assign({}, g.profile, { sat_view_output: true });
-      await api('PUT', '/api/gnss/profile', { profile: profile });
-      toast('Saved. The Sky card fills once the receiver sends the positions.', 'ok');
-    });
-  });
 
   async function loadSignals() {
     let sig;
     try {
       sig = await api('GET', '/api/gnss/signals');
     } catch (e) {
-      mount(summary, msg('bad', errText(e)), liveRow);
+      patch(head, msg('bad', errText(e)));
       return;
     }
     if (collapsed) return;
     const systems = sig.systems || [];
-    const live = streaming();   /* verdicts (bands, E6, refused messages) only while the receiver streams */
-    /* A rebuild waits while the user reads or selects in the card; the Details stay as the user left them. */
-    if (!interacting(summary)) {
-      mount(summary,
-        cardHead('Signals', live ? badge(sig.best_bands >= 4 ? 'Enough bands' : 'Few bands', sig.best_bands >= 4 ? 'ok' : 'warn') : null),
-        h('div', { class: 'big' }, sig.best_sys ? lbl(L.sys, sig.best_sys) + ' · ' + sig.best_bands + ' bands' : 'No signals yet'),
-        h('p', { class: 'muted small' }, 'Best constellation. Onocoy\'s quality score needs 4 bands on one constellation.'),
-        live ? e6View(sig) : null,
-        kv([['Last epoch', sig.epoch_age_ms === null || sig.epoch_age_ms === undefined ? 'Never' : fmt.ms(sig.epoch_age_ms) + ' ago']]),
-        moreAs('sig-details', 'Details', isOpen(summary, 'sig-details'), kv([
-          ['Epochs', fmt.num(sig.epochs)],
-          ['Missing epochs', sig.epoch_gaps === null || sig.epoch_gaps === undefined ? 'Not counted (no observation messages in the profile)' :
-            fmt.num(sig.epoch_gaps)],
-          ['Outages or time jumps', fmt.num(sig.epoch_jumps || 0)],
-          live && sig.rtcm1230_supported === false ? ['GLONASS biases (1230)', h('span', { class: 't-warn' }, 'Refused by the receiver')] : null,
-        ])),
-        liveRow);
-    }
-    mount(bandsCard, h('h2', null, 'Bands per constellation'),
-      systems.length ? bandTable(systems) : h('p', { class: 'muted' }, 'No observations yet.'),
-      h('p', { class: 'muted small foot' }, BANDS_FOOT));
-    mount(msgsCard, h('h2', null, 'RTCM messages'),
-      sig.messages ? messagesView(sig.messages, live) : h('p', { class: 'muted' }, 'No message statistics.'));
+    const live = delivering();
+    const checks = live && sig.epoch_age_ms < 5000 ? signalChecks(sig) : null;
+    patch(head, h('div', { class: 'big' }, signalsHeadline(sig)), checks && !checks.waiting ? receptionList(checks) : null);
+    patch(bands, systems.length ? [bandTable(systems), h('p', { class: 'muted small foot' }, BANDS_FOOT)] : h('p', { class: 'muted' },
+      sig.epoch_age_ms === null || sig.epoch_age_ms === undefined ? 'No observations yet.' : 'No observations in the last 10 seconds.'));
+    if (interacting(details)) return;
+    patch(body, kv([
+      ['Last epoch', sig.epoch_age_ms === null || sig.epoch_age_ms === undefined ? 'Never' : fmt.ms(sig.epoch_age_ms) + ' ago'],
+      ['Epochs', fmt.num(sig.epochs)],
+      ['Missing epochs', sig.epoch_gaps === null || sig.epoch_gaps === undefined ? 'Not counted (no observation messages in the profile)' :
+        fmt.num(sig.epoch_gaps)],
+      ['Outages or time jumps', fmt.num(sig.epoch_jumps || 0)],
+    ]), h('h3', { class: 'sub' }, 'Messages'),
+    sig.messages ? messagesView(sig.messages, live, !!(g && (g.survey || {}).active)) : h('p', { class: 'muted' }, 'No message statistics.'));
   }
 
-  let lastSky = '';
-  async function loadSky() {
-    let sky;
-    try {
-      sky = await api('GET', '/api/sky');
-    } catch (e) {
-      lastSky = '';
-      mount(skyCard, h('h2', null, 'Sky'), msg('bad', errText(e)));
-      return;
-    }
-    const live = streaming();
-    const key = JSON.stringify([sky, live]);
-    if (key === lastSky) return;
-    lastSky = key;
-    /* "Turn on" saves the profile and reconfigures the receiver: only with a receiver that streams. */
-    mount(skyCard, cardHead('Sky', sky.available ? badge((sky.satellites || []).length + ' satellites', 'plain') : null),
-      skyView(sky, live ? enableBtn : null));
-  }
-
-  const stopA = poller(2000, loadSignals);
-  const stopB = poller(5000, () => (collapsed ? Promise.resolve() : loadSky()));
+  const stop = poller(2000, loadSignals);
   return {
+    sky: sky,
     update: receiverState,
+    /* GET /api/gnss: the survey (1005 waits for it) and whether the sky can open (it needs automatic configuration). */
+    gnss(gg) {
+      g = gg;
+      sky.block(g.autocfg ? '' : 'Not available while you manage the receiver yourself (Receiver settings).');
+    },
     destroy() {
-      stopA();
-      stopB();
+      stop();
+      sky.destroy();
     },
   };
 }

@@ -622,7 +622,7 @@ const ERR = {
   admin_not_set: 'No admin password is set yet. Set one over the station\'s own Wi-Fi network.',
   receiver_maintenance: 'Receiver maintenance is on: nothing is sent to the receiver. End it first.',
   not_in_maintenance: 'Receiver maintenance is not on (it may have ended meanwhile).',
-  live_view_closed: 'The live view is not open (it may have closed meanwhile).',
+  live_view_closed: 'The sky view is not open (it may have closed meanwhile).',
   length_required: 'The upload needs a known size.',
   too_large: 'Too large for the station.',
   unsupported_media_type: 'The station refused the request type.',
@@ -684,7 +684,7 @@ function errText(e) {
     t = 'The station is working with the receiver right now (configuring or checking it). Offer maintenance again when that ends.';
   }
   if (e.code === 'busy' && e.body.reason === 'live_view_output') {
-    t = 'The live view has the receiver\'s satellite positions turned on. The station turns them off first (the live view stays open ' +
+    t = 'The sky view has the receiver\'s satellite positions turned on. The station turns them off first (the sky view stays open ' +
       'without them): start maintenance again in a few seconds.';
   }
   if (e.code === 'invalid_field' && e.field) t = fieldErrorText(e);
