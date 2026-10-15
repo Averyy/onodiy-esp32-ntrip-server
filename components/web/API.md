@@ -1043,8 +1043,8 @@ baud list after two failed short passes and always after 5 min). A pass
 that runs already counts. `202 {"accepted": true}`. Errors:
 `409 not_no_receiver` (any other state, receiver maintenance included),
 `409 safe_mode`. The UI offers it as "Check again" wherever it says no
-receiver was found (the dashboard's status card; Diagnostics, Health; the
-setup wizard's antenna check; Signals).
+receiver was found (the Status page; Diagnostics, Health; the setup
+wizard's antenna check; the Receiver page).
 
 ### Signal-group comparison
 
@@ -1692,11 +1692,12 @@ e.g. a fork that signs its releases) accepts only manifests signed with one
 of its keys and refuses unsigned ones (`signature_failed`). Manual uploads
 are not affected by any of this.
 
-**Banner** (`update` in `/api/status`, admin sessions only, on every page):
-shown when `app_available`, `gnss_available` or `app_reverted_in_stage1`.
-"App vX / receiver build Y available - Update / Later". "Later" is kept in
-the browser (`localStorage`, keyed by `app_version` and `gnss_build`) until
-a newer version appears; the server keeps no "later" state.
+**Banner** (`update` in `/api/status`, admin sessions only): while
+`app_available`, `gnss_available` or `app_reverted_in_stage1`, a dot on the
+Settings tab and a one-line notice on every other page, "Update available:
+app vX and receiver build Y. Later / Update". "Later" hides the notice, kept
+in the browser (`localStorage`, keyed by `app_version` and `gnss_build`)
+until a newer version appears; the server keeps no "later" state.
 
 | Field | Source |
 |---|---|

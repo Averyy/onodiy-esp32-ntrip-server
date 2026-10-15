@@ -63,6 +63,10 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '    return d && { verdict: d.verdict, tone: d.tone, why: d.why, left: d.left, used: d.used, hero: t.key }; },\n' +
   '  checks: d => receptionChecks(d),\n' +
   '  notices: a => noticeItems(a[0], a[1]).map(i => [i.key, i.title]),\n' +
+  '  noticeLines: a => noticeItems(a[0], a[1]).map(i => [i.key, i.tone, i.urgent, i.title + (i.text ? \'. \' + i.text : \'\'),\n' +
+  '    Array.isArray(i.actions) ? i.actions.length : i.actions ? 1 : 0]),\n' +
+  '  fold: a => { const f = foldNotices(noticeItems(a[0], a[1]), a[2]); return [f.shown.map(i => i.key), f.more]; },\n' +
+  '  moved: a => movedTo(a[0], a[1]), tab: n => tabOf(n), nav: () => NAV.map(n => n[1]),\n' +
   '  pwProblem: a => adminPasswordProblem(a[0], a[1]), rssi: a => rssiView(a),\n' +
   '  sgName: a => sgName(a[0], a[1]), sgChoices: () => SG_CHOICES, recovery: () => L.recovery,\n' +
   '  recoveryLbl: k => lbl(L.recovery, k), fwText: a => fwText(a[0], a[1]), dist: m => fmtDist(m),\n' +
@@ -675,13 +679,16 @@ def test_comparison_lines_short_and_in_hours():
     assert line == "Group 1 of 2, 3 6 (Galileo E6): measuring, about 25\u00a0min left."
     assert sw == "Switching the receiver to 7 0 (BeiDou B2a). Corrections pause briefly."
     assert idle is None
-    assert notice[1] == "Signal-group comparison: choose a group"
-    assert notice[2].endswith("in about 24\u00a0h.") and " 1 d" not in notice[2]
-    # Elsewhere a running comparison is one title and one line (the status names the measured group "group").
+    # The notice says what the top card says, in one line.
+    assert notice[1] == "Choose a signal group"
+    assert notice[2] == "With no choice the old group comes back in about 24\u00a0h." and " 1 d" not in notice[2]
+    # Elsewhere a running comparison is one title and a few words.
     running = status(receiver={"signal_test": {"state": "measuring", "phase": 1, "left_s": 300, "group": {"master": 7, "slave": 0}}})
-    (n,) = run_ui([("sgtNotice", running)])
+    switching = status(receiver={"signal_test": {"state": "switching", "phase": 0, "left_s": 0, "group": {"master": 3, "slave": 6}}})
+    n, sw = run_ui([("sgtNotice", running), ("sgtNotice", switching)])
     assert n[1] == "Comparing signal groups"
-    assert n[2] == "Group 2 of 2, 7 0 (BeiDou B2a): measuring, about 5\u00a0min left. Other receiver changes wait until it ends."
+    assert n[2] == "Group 2 of 2, about 5\u00a0min left."
+    assert sw[2] == "Corrections pause briefly."
 
 
 def test_profile_chip_and_maintenance_notice_on_the_receiver_page():
@@ -692,9 +699,9 @@ def test_profile_chip_and_maintenance_notice_on_the_receiver_page():
                     ("profileChip", {"state": "no_receiver", "profile_applied": False})])
     assert chips == [["Applying", "info"], ["Failed", "bad"], ["Applied", "ok"], ["Not applied", "warn"], ["Not applied", "warn"]]
     maint = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600})
-    rx, signals = run_ui([("notices", [maint, "receiver"]), ("notices", [maint, "signals"])])
-    # The Receiver page has the maintenance card with its buttons: no notice that repeats it there.
-    assert [k for k, _ in rx] == [] and [k for k, _ in signals] == ["maintenance"]
+    out = run_ui([("notices", [maint, p]) for p in ("receiver/settings", "receiver", "receiver/live", "casters", "settings", "diag")])
+    # Receiver settings has the maintenance card with its buttons: no notice that repeats it there. Every other page has it.
+    assert [[k for k, _ in o] for o in out] == [[]] + [["maintenance"]] * 5
 
 
 # ---- The system pages (90-system.js, 30-auth.js) ----
@@ -725,3 +732,91 @@ def test_no_top_level_name_is_declared_twice():
                 dup.append((name, seen[name], where))
             seen.setdefault(name, where)
     assert dup == [], dup
+
+
+# ---- The shell: four tabs, old addresses, notices (20-shell.js) ----
+
+def test_four_tabs_and_old_addresses_land_on_the_new_pages():
+    out = run_ui([("nav", None)] + [("moved", a) for a in (
+        ["signals", ""], ["signals", "live"], ["signals", "live/start"], ["live", ""], ["system", ""], ["updates", ""],
+        ["updates", "session"], ["diag", "logs"], ["casters", "onocoy"], ["receiver", "settings"], ["settings", ""], ["", ""])]
+        + [("tab", n) for n in ("diag", "settings", "receiver", "casters", "")])
+    assert out[0] == ["Status", "Casters", "Receiver", "Settings"]
+    assert out[1:8] == ["receiver", "receiver/live", "receiver/live/start", "receiver/live", "settings/wifi", "settings/updates",
+                        "settings/session"]
+    # Pages that exist stay where they are; Diagnostics keeps its sub-routes.
+    assert out[8:13] == [None] * 5
+    # Diagnostics is reached from Settings: that tab is the one marked there.
+    assert out[13:] == ["settings", "settings", "receiver", "casters", ""]
+
+
+def test_every_link_in_the_ui_goes_to_a_page_that_exists():
+    """No button, link or notice points at an address of the seven tabs (it would only redirect)."""
+    pages = {"": None, "casters": None, "receiver": {"settings", "live"}, "settings": {"updates", "session", "wifi", "restart"},
+             "diag": None}
+    bad = []
+    for f in sorted(UI_JS.glob("*.js")):
+        for m in re.finditer(r"'#/([a-z]*)(?:/([a-z]+))?[a-z/]*'", f.read_text()):
+            name, sub = m.group(1), m.group(2)
+            if name not in pages or (sub and pages[name] is not None and sub not in pages[name]):
+                bad.append(f"{f.name}: {m.group(0)}")
+    assert bad == []
+
+
+# Every notice at once: a slot stopped by the login guard, settings storage gone, maintenance, new Wi-Fi settings
+# waiting, the first configuration held, a comparison running and an update.
+BUSY = status(device={"settings_available": False},
+              receiver={"rx_maintenance": True, "maintenance_left_s": 600, "first_apply_held": True,
+                        "signal_test": {"state": "measuring", "phase": 0, "left_s": 300, "group": {"master": 3, "slave": 6}}},
+              network={"online": True, "ssid": "Home", "cred_pending": True, "pending_ssid": "Cabin"},
+              casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate")],
+              update={"app_available": True, "app_version": "v0.4.0"})
+
+
+def test_notices_one_line_one_button_worst_first():
+    (lines,) = run_ui([("noticeLines", [BUSY, "diag"])])
+    assert [ln[0] for ln in lines] == ["settings", "onocoy_stopped:0", "wifi", "maintenance", "held", "signal_test", "update"]
+    assert [ln[1] for ln in lines] == ["bad", "bad", "warn", "info", "info", "info", "info"]
+    # What needs the user now never folds away: settings storage, the stopped slot, maintenance.
+    assert [ln[0] for ln in lines if ln[2]] == ["settings", "onocoy_stopped:0", "maintenance"]
+    for key, _, _, line, buttons in lines:
+        # One line each: the title and a few words; one button (the update adds Later).
+        assert len(line) <= 70, line
+        assert buttons == (2 if key == "update" else 1), key
+    assert lines[0][3] == "Settings cannot be saved. Restart the station."
+    assert lines[2][3] == "New Wi-Fi settings for Cabin not confirmed yet"
+    assert lines[3][3] == "Receiver maintenance. Ends in about 10\u00a0min."
+
+
+def test_notices_fold_after_two_but_never_the_urgent_ones():
+    folded, opened = run_ui([("fold", [BUSY, "diag", False]), ("fold", [BUSY, "diag", True])])
+    # The first two of the others (by tone), then "+2 more".
+    assert folded == [["settings", "onocoy_stopped:0", "wifi", "maintenance", "held"], 2]
+    assert opened == [["settings", "onocoy_stopped:0", "wifi", "maintenance", "held", "signal_test", "update"], 2]
+    # Two or fewer others: nothing folds.
+    calm = status(update={"app_available": True, "app_version": "v0.4.0"}, receiver={"first_apply_held": True})
+    (f,) = run_ui([("fold", [calm, "casters", False])])
+    assert f == [["held", "update"], 0]
+
+
+def test_a_notice_hides_on_the_page_whose_card_says_it():
+    safe = status(safe_mode={"active": True, "crashes": 3, "retry_in_s": 2690}, receiver={"state": "idle"},
+                  casters=[caster(0, "Onocoy", "disabled")])
+    uart = status(receiver={"state": "no_receiver", "uart_closed": True})
+    journal = status(receiver={"journal": "waiting"})
+    trial = status(network={"cred_trial": True, "cred_trial_left_s": 80, "pending_ssid": "Cabin"})
+    pages = ["casters", "receiver", "receiver/settings", "settings", "diag"]
+    cases = [(BUSY, p) for p in pages] + [(x, p) for x in (safe, uart, journal, trial) for p in ("", "settings", "receiver")]
+    out = [[k for k, _ in o] for o in run_ui([("notices", list(c)) for c in cases])]
+    every = {"settings", "onocoy_stopped:0", "wifi", "maintenance", "held", "signal_test", "update"}
+    hidden = {"casters": {"onocoy_stopped:0"}, "receiver": {"held"}, "receiver/settings": {"maintenance", "signal_test"},
+              "settings": {"wifi", "update"}, "diag": set()}
+    for p, keys in zip(pages, out[:5]):
+        assert set(keys) == every - hidden[p], p
+    safe_k, uart_k, journal_k, trial_k = out[5:8], out[8:11], out[11:14], out[14:17]
+    # The Status page's top card says each of them; Settings has safe mode, the update session and the Wi-Fi trial.
+    assert safe_k == [[], [], ["safe_mode"]]
+    assert uart_k == [[], ["uart_closed"], ["uart_closed"]]
+    assert journal_k == [[], [], ["journal"]]
+    assert trial_k == [[], [], ["wifi"]]
+

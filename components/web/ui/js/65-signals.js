@@ -2,13 +2,14 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Signals: the summary (best constellation, Galileo E6, the entry to the
- * live view, #/signals/live in 66-live.js), frequency bands per
- * constellation from the MSM data (with the mean C/N0 from MSM4 to MSM7),
- * the RTCM messages seen against the profile, and the sky view of
+ * Signals, on the Receiver page: the summary (best constellation, Galileo
+ * E6, the entry to the live view, #/receiver/live in 66-live.js), frequency
+ * bands per constellation from the MSM data (with the mean C/N0 from MSM4 to
+ * MSM7), the RTCM messages seen against the profile, and the sky view of
  * satellites in view. Without a receiver (none found, or the station still
- * looking for it) the page is one card that says so: empty tables and red
- * "missing" rows would only mislead.
+ * looking for it) these cards hide: the Receiver card says so, and empty
+ * tables and red "missing" rows would only mislead. The public page shows
+ * the summary and the band table (signalsCard).
  */
 
 const BAND_ORDER = ['l1', 'l2', 'l5', 'l6', 'e5ab'];
@@ -140,114 +141,114 @@ function skyView(sky, onEnable) {
       s.el_deg + '°', s.az_deg + '°', s.cnr_dbhz ? h('span', { class: cnrClass(s.cnr_dbhz) }, s.cnr_dbhz + '\u00a0dB-Hz') : DASH]), { num: [1, 2, 3, 4], stack: true }));
 }
 
-Views.signals = {
-  title: 'Signals',
-  create(el, arg) {
-    if (arg === 'live' || arg === 'live/start') return livePage(el, arg === 'live/start');
-    const summary = h('section', { class: 'card wide' });
-    const bandsCard = h('section', { class: 'card wide' });
-    const msgsCard = h('section', { class: 'card wide' });
-    const skyCard = h('section', { class: 'card wide' });
-    /* The way into the live view: in the summary card, built once (a refresh moves it, never rebuilds it). */
-    const liveRow = isAdmin() ? h('div', { class: 'form-actions' },
-      h('span', { class: 'note muted small' }, 'Every satellite in view and how strong its signals are, live for a few minutes.'),
-      btn('Open the live view', openLiveView, 'primary')) : null;
-    /* No receiver: the page is this one card. */
-    const nr = isAdmin() ? noReceiverPanel() : null;
-    const nrPub = h('div');
-    const nrCard = h('section', { class: 'card wide', hidden: true }, h('h2', null, 'Signals'), nr ? nr.el : nrPub);
-    mount(el, h('div', { class: 'grid' }, nrCard, summary, bandsCard, msgsCard, skyCard));
-    mount(summary, h('p', { class: 'loading' }, 'Loading signals…'));
-    let collapsed = false;
-    const streaming = () => !!(S.status && S.status.receiver && S.status.receiver.state === 'streaming');
-    function receiverState(st) {
-      const r = (st && st.receiver) || {};
-      const c = !r.rx_maintenance && (r.state === 'no_receiver' || r.state === 'detecting' || r.state === 'idle');
-      if (c && nr) nr.update(st);
-      if (c && !nr) mount(nrPub, msg(r.state === 'no_receiver' ? 'bad' : 'info', r.state === 'no_receiver' ? 'No receiver found.' : 'Looking for the receiver.'));
-      if (c === collapsed) return;
-      collapsed = c;
-      nrCard.hidden = !c;
-      for (const x of [summary, bandsCard, msgsCard, skyCard]) x.hidden = c;
+/* Under every band table. */
+const BANDS_FOOT = 'Last 10 seconds. Figures: mean C/N0 per band, in dB-Hz.';
+
+/* The public page's signals: the best constellation in large type and the band table. */
+function signalsCard(sig) {
+  return h('section', { class: 'card wide' }, h('h2', null, 'Signals'),
+    h('div', { class: 'big' }, lbl(L.sys, sig.best_sys) + ' · ' + sig.best_bands + ' bands'),
+    bandTable(sig.systems), h('p', { class: 'muted small foot' }, BANDS_FOOT));
+}
+
+/** The Receiver page's signal cards in el (a grid): {update(status), destroy()}. */
+function signalsSection(el) {
+  const summary = h('section', { class: 'card wide' });
+  const bandsCard = h('section', { class: 'card wide' });
+  const msgsCard = h('section', { class: 'card wide' });
+  const skyCard = h('section', { class: 'card wide' });
+  const cards = [summary, bandsCard, msgsCard, skyCard];
+  /* The way into the live view: in the summary card, built once (a refresh moves it, never rebuilds it). */
+  const liveRow = h('div', { class: 'form-actions' },
+    h('span', { class: 'note muted small' }, 'Every satellite in view and how strong its signals are, live for a few minutes.'),
+    btn('Open the live view', openLiveView));
+  add(el, cards);
+  mount(summary, h('p', { class: 'loading' }, 'Loading signals…'));
+  let collapsed = false;
+  const streaming = () => !!(S.status && S.status.receiver && S.status.receiver.state === 'streaming');
+  /* No receiver, or the station looking for it: the cards hide. */
+  function receiverState(st) {
+    const r = (st && st.receiver) || {};
+    const c = !r.rx_maintenance && (r.state === 'no_receiver' || r.state === 'detecting' || r.state === 'idle');
+    if (c === collapsed) return;
+    collapsed = c;
+    for (const x of cards) x.hidden = c;
+  }
+  receiverState(S.status);
+
+  const enableBtn = btn('Turn on', async () => {
+    const ok = await dialog({ title: 'Turn on satellite positions?', ok: 'Turn on',
+      body: h('p', null, 'The station saves this in the receiver profile and configures the receiver. Corrections pause for a few seconds.') });
+    if (!ok) return;
+    await act(enableBtn, async () => {
+      const g = await api('GET', '/api/gnss');
+      const profile = Object.assign({}, g.profile, { sat_view_output: true });
+      await api('PUT', '/api/gnss/profile', { profile: profile });
+      toast('Saved. The Sky card fills once the receiver sends the positions.', 'ok');
+    });
+  });
+
+  async function loadSignals() {
+    let sig;
+    try {
+      sig = await api('GET', '/api/gnss/signals');
+    } catch (e) {
+      mount(summary, msg('bad', errText(e)), liveRow);
+      return;
     }
-    receiverState(S.status);
-
-    const enableBtn = isAdmin() ? btn('Turn on', async () => {
-      const ok = await dialog({ title: 'Turn on satellite positions?', ok: 'Turn on',
-        body: h('p', null, 'The station saves this in the receiver profile and configures the receiver. Corrections pause for a few seconds.') });
-      if (!ok) return;
-      await act(enableBtn, async () => {
-        const g = await api('GET', '/api/gnss');
-        const profile = Object.assign({}, g.profile, { sat_view_output: true });
-        await api('PUT', '/api/gnss/profile', { profile: profile });
-        toast('Saved. The Sky card fills once the receiver sends the positions.', 'ok');
-      });
-    }) : null;
-
-    async function loadSignals() {
-      let sig;
-      try {
-        sig = await api('GET', '/api/gnss/signals');
-      } catch (e) {
-        mount(summary, msg('bad', errText(e)), liveRow);
-        return;
-      }
-      if (collapsed) return;
-      const systems = sig.systems || [];
-      const live = streaming();   /* verdicts (bands, E6, refused messages) only while the receiver streams */
-      /* A rebuild waits while the user reads or selects in the card; the Details stay as the user left them. */
-      if (!interacting(summary)) {
-        mount(summary,
-          cardHead('Signals', live ? badge(sig.best_bands >= 4 ? 'Enough bands' : 'Few bands', sig.best_bands >= 4 ? 'ok' : 'warn') : null),
-          h('div', { class: 'big' }, sig.best_sys ? lbl(L.sys, sig.best_sys) + ' · ' + sig.best_bands + ' bands' : 'No signals yet'),
-          h('p', { class: 'muted small' }, 'Best constellation. Onocoy\'s quality score needs 4 bands on one constellation.'),
-          live ? e6View(sig) : null,
-          kv([['Last epoch', sig.epoch_age_ms === null || sig.epoch_age_ms === undefined ? 'Never' : fmt.ms(sig.epoch_age_ms) + ' ago']]),
-          moreAs('sig-details', 'Details', isOpen(summary, 'sig-details'), kv([
-            ['Epochs', fmt.num(sig.epochs)],
-            ['Missing epochs', sig.epoch_gaps === null || sig.epoch_gaps === undefined ? 'Not counted (no observation messages in the profile)' :
-              fmt.num(sig.epoch_gaps)],
-            ['Outages or time jumps', fmt.num(sig.epoch_jumps || 0)],
-            live && sig.rtcm1230_supported === false ? ['GLONASS biases (1230)', h('span', { class: 't-warn' }, 'Refused by the receiver')] : null,
-          ])),
-          liveRow);
-      }
-      mount(bandsCard, h('h2', null, 'Bands per constellation'),
-        systems.length ? bandTable(systems) : h('p', { class: 'muted' }, 'No observations yet.'),
-        h('p', { class: 'muted small foot' }, 'Last 10 seconds. Figures: mean C/N0 per band, in dB-Hz.'));
-      mount(msgsCard, h('h2', null, 'RTCM messages'),
-        sig.messages ? messagesView(sig.messages, live) : h('p', { class: 'muted' }, 'No message statistics.'));
+    if (collapsed) return;
+    const systems = sig.systems || [];
+    const live = streaming();   /* verdicts (bands, E6, refused messages) only while the receiver streams */
+    /* A rebuild waits while the user reads or selects in the card; the Details stay as the user left them. */
+    if (!interacting(summary)) {
+      mount(summary,
+        cardHead('Signals', live ? badge(sig.best_bands >= 4 ? 'Enough bands' : 'Few bands', sig.best_bands >= 4 ? 'ok' : 'warn') : null),
+        h('div', { class: 'big' }, sig.best_sys ? lbl(L.sys, sig.best_sys) + ' · ' + sig.best_bands + ' bands' : 'No signals yet'),
+        h('p', { class: 'muted small' }, 'Best constellation. Onocoy\'s quality score needs 4 bands on one constellation.'),
+        live ? e6View(sig) : null,
+        kv([['Last epoch', sig.epoch_age_ms === null || sig.epoch_age_ms === undefined ? 'Never' : fmt.ms(sig.epoch_age_ms) + ' ago']]),
+        moreAs('sig-details', 'Details', isOpen(summary, 'sig-details'), kv([
+          ['Epochs', fmt.num(sig.epochs)],
+          ['Missing epochs', sig.epoch_gaps === null || sig.epoch_gaps === undefined ? 'Not counted (no observation messages in the profile)' :
+            fmt.num(sig.epoch_gaps)],
+          ['Outages or time jumps', fmt.num(sig.epoch_jumps || 0)],
+          live && sig.rtcm1230_supported === false ? ['GLONASS biases (1230)', h('span', { class: 't-warn' }, 'Refused by the receiver')] : null,
+        ])),
+        liveRow);
     }
+    mount(bandsCard, h('h2', null, 'Bands per constellation'),
+      systems.length ? bandTable(systems) : h('p', { class: 'muted' }, 'No observations yet.'),
+      h('p', { class: 'muted small foot' }, BANDS_FOOT));
+    mount(msgsCard, h('h2', null, 'RTCM messages'),
+      sig.messages ? messagesView(sig.messages, live) : h('p', { class: 'muted' }, 'No message statistics.'));
+  }
 
-    let lastSky = '';
-    async function loadSky() {
-      let sky;
-      try {
-        sky = await api('GET', '/api/sky');
-      } catch (e) {
-        lastSky = '';
-        mount(skyCard, h('h2', null, 'Sky'), msg('bad', errText(e)));
-        return;
-      }
-      const live = streaming();
-      const key = JSON.stringify([sky, live]);
-      if (key === lastSky) return;
-      lastSky = key;
-      /* "Turn on" saves the profile and reconfigures the receiver: only with a receiver that streams. */
-      mount(skyCard, cardHead('Sky', sky.available ? badge((sky.satellites || []).length + ' satellites', 'plain') : null),
-        skyView(sky, live ? enableBtn : null));
+  let lastSky = '';
+  async function loadSky() {
+    let sky;
+    try {
+      sky = await api('GET', '/api/sky');
+    } catch (e) {
+      lastSky = '';
+      mount(skyCard, h('h2', null, 'Sky'), msg('bad', errText(e)));
+      return;
     }
+    const live = streaming();
+    const key = JSON.stringify([sky, live]);
+    if (key === lastSky) return;
+    lastSky = key;
+    /* "Turn on" saves the profile and reconfigures the receiver: only with a receiver that streams. */
+    mount(skyCard, cardHead('Sky', sky.available ? badge((sky.satellites || []).length + ' satellites', 'plain') : null),
+      skyView(sky, live ? enableBtn : null));
+  }
 
-    const stopA = poller(2000, loadSignals);
-    const stopB = poller(5000, () => (collapsed ? Promise.resolve() : loadSky()));
-    return {
-      update(st) {
-        receiverState(st);
-      },
-      destroy() {
-        stopA();
-        stopB();
-      },
-    };
-  },
-};
+  const stopA = poller(2000, loadSignals);
+  const stopB = poller(5000, () => (collapsed ? Promise.resolve() : loadSky()));
+  return {
+    update: receiverState,
+    destroy() {
+      stopA();
+      stopB();
+    },
+  };
+}

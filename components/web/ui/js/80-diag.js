@@ -2,9 +2,10 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Diagnostics: health and loss counters, per-day availability with the
- * connection history next to it, the log (live, previous start, download,
- * levels), the event journal, task statistics and the core dump.
+ * Diagnostics (#/diag, not a tab: reached from Settings): health and loss
+ * counters, per-day availability with the connection history next to it,
+ * the log (live, previous start, download, levels), the event journal, task
+ * statistics and the core dump.
  */
 
 const DIAG_TABS = [
@@ -1059,6 +1060,7 @@ const DIAG_PAGES = { '': healthTab, availability: availabilityTab, logs: logsTab
 
 Views.diag = {
   title: 'Diagnostics',
+  showTitle: true,
   admin: true,
   create(el, arg) {
     const tab = DIAG_PAGES[arg] ? arg : '';

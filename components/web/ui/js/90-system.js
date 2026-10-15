@@ -2,9 +2,11 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * System: Wi-Fi, the station's own Wi-Fi (its access point), station name
- * and public status, the admin password, appearance, about, and restart,
- * safe mode and factory reset.
+ * Settings (#/settings): the Updates cards (70-updates.js), then Wi-Fi, the
+ * station's own Wi-Fi (its access point), station name and public status,
+ * the admin password, about, and restart, safe mode and factory reset
+ * (#/settings/wifi and #/settings/restart open it there), and the way to
+ * Diagnostics.
  */
 
 function hostnameProblem(v) {
@@ -87,10 +89,8 @@ function onocoyStreams(st) {
   return ((st && st.casters) || []).some(c => c.protected && c.enabled && c.onocoy_ready !== false);
 }
 
-Views.system = {
-  title: 'System',
-  admin: true,
-  create(el) {
+const systemPart = {
+  create(el, arg) {
     let wifi = null, sys = null, stopJoin = null;
     let wifiAt = 0;   /* when `wifi` arrived */
     let dirty = false;
@@ -183,7 +183,6 @@ Views.system = {
     const deviceCard = h('section', { class: 'card' });
     const pwCard = h('section', { class: 'card' });
     const aboutCard = h('section', { class: 'card' });
-    const lookCard = h('section', { class: 'card' });
     const maintCard = h('section', { class: 'card wide' });
 
     /* ---- Wi-Fi ---- */
@@ -432,11 +431,6 @@ Views.system = {
       ]));
     }
 
-    function renderLook() {
-      const theme = radios('Colours', 'theme', [['auto', 'Like the system'], ['light', 'Light'], ['dark', 'Dark']], store.get('theme', 'auto'));
-      theme.onchange(() => setTheme(theme.value()));
-      mount(lookCard, h('h2', null, 'Appearance'), theme.el, h('p', { class: 'muted small foot' }, 'Kept in this browser only.'));
-    }
 
     /* ---- Restart, safe mode, factory reset ---- */
     function renderMaint() {
@@ -491,11 +485,10 @@ Views.system = {
     }
 
     mount(el, h('p', { class: 'loading' }, 'Loading…'));
-    load().then(() => {
-      mount(el, h('div', { class: 'grid' }, wifiCard, apCard, deviceCard, pwCard, lookCard, aboutCard, maintCard));
+    const ready = load().then(() => {
+      mount(el, h('div', { class: 'grid' }, wifiCard, apCard, deviceCard, pwCard, aboutCard, maintCard));
       renderPassword();
-      renderLook();
-    }, e => mount(el, msg('bad', errText(e)), h('div', { class: 'form-actions' }, btn('Try again', () => openView('system', ''), 'primary'))));
+    }, e => mount(el, msg('bad', errText(e)), h('div', { class: 'form-actions' }, btn('Try again', () => openView('settings', arg), 'primary'))));
     const stop = poller(10000, () => (stopJoin || dirty ? Promise.resolve() : api('GET', '/api/wifi').then(showWifi)), true);
     /* A trial's countdown between the polls. */
     const tick = setInterval(tickTrial, 1000);
@@ -510,6 +503,8 @@ Views.system = {
     let credReadAt = 0;
 
     return {
+      ready: ready,
+      cards: { wifi: wifiCard, restart: maintCard },
       update(st) {
         const active = !!(st && st.safe_mode && st.safe_mode.active);
         if (sys && active !== lastSafe) {
@@ -532,6 +527,33 @@ Views.system = {
       dirty: () => dirty,
       reload() {
         if (!dirty) load().catch(() => {});
+      },
+    };
+  },
+};
+
+Views.settings = {
+  title: 'Settings',
+  admin: true,
+  create(el, arg) {
+    const a = h('div'), b = h('div');
+    mount(el, a, b, h('section', { class: 'card' }, settingRow('Diagnostics', 'Health, history and logs.', link('Open', '#/diag', 'btn'))));
+    const u = updatesPart.create(a, arg), s = systemPart.create(b, arg);
+    /* Opened at a card (#/settings/wifi): once both parts are in, so the place does not move. */
+    Promise.all([u.ready, s.ready]).then(() => {
+      const at = Object.assign({}, u.cards, s.cards)[arg];
+      if (at && a.isConnected && !at.hidden) at.scrollIntoView({ block: 'start' });
+    });
+    return {
+      update: st => s.update(st),
+      destroy() {
+        u.destroy();
+        s.destroy();
+      },
+      dirty: () => s.dirty(),
+      reload() {
+        u.reload();
+        s.reload();
       },
     };
   },

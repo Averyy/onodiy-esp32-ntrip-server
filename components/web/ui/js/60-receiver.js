@@ -2,13 +2,14 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Receiver page: the receiver (identity, link, alerts; the settings read
- * back, what it publishes in RTCM 1033 behind Details), the base position
- * (survey, lock, survey again), the receiver profile in four groups (signals,
- * position, corrections, advanced), what the station does if corrections
- * stop, receiver maintenance (hands off), and last the comparison of two
- * signal groups. Field rules mirror PUT /api/gnss/profile; the station's own
- * validation has the last word.
+ * Receiver page (#/receiver): the receiver (identity, link, alerts; the
+ * settings read back, what it publishes in RTCM 1033 behind Details), the
+ * base position (survey, lock, survey again), then the signals (65-signals.js).
+ * Receiver settings (#/receiver/settings): the receiver profile in four groups
+ * (signals, position, corrections, advanced), what the station does if
+ * corrections stop, receiver maintenance (hands off), and last the comparison
+ * of two signal groups. Field rules mirror PUT /api/gnss/profile; the
+ * station's own validation has the last word.
  */
 
 const RTCM_NAMES = {
@@ -609,7 +610,7 @@ function profileEditor(g, done) {
   const sid = numInput(p.station_id, { inputmode: 'numeric', maxlength: 4 });
   const baud = selectInput(BAUDS.map(b => [b, b + ' baud']), p.com1_baud);
   const satView = checkbox('Satellite positions output', p.sat_view_output,
-    'For the Sky card on the Signals page. The live view does not need it.');
+    'For the Sky card on the Receiver page. The live view does not need it.');
   const antModel = textInput(p.antenna_model || '', { maxlength: 64, class: 'ant' });
   const antSerial = textInput(p.antenna_serial || '', { maxlength: 64 });
   const antSetup = numInput(p.antenna_setup_id || 0, { inputmode: 'numeric', maxlength: 3 });
@@ -888,24 +889,22 @@ function sgtLine(t) {
 
 /**
  * The comparison for the shell's notices (S.status, receiver.signal_test):
- * null, or [tone, title, text, actions], as noticeItems (20-shell.js) takes it.
- * A running test shows everywhere but the receiver page (its card is there);
+ * null, or [tone, title, text, button], as noticeItems (20-shell.js) takes it.
+ * A running test shows everywhere but Receiver settings (its card is there);
  * a finished one only when the station ended it without the user's choice.
  */
 function sgTestNotice(st) {
   const t = st && st.receiver ? st.receiver.signal_test : null;
   if (!t) return null;
-  if (typeof shell !== 'undefined' && shell.current && shell.current.name === 'receiver') return null;
-  const details = [link('Details', '#/receiver', 'btn small')];
+  const details = link('Details', '#/receiver/settings', 'btn small');
   if (t.state === 'deciding') {
-    return ['warn', 'Signal-group comparison: choose a group', 'Both groups are measured. Keep one on the Receiver page' +
-      (t.decide_left_s ? '; with no choice the old group comes back in about ' + sgtHours(t.decide_left_s) : '') + '.',
-    [link('Compare and choose', '#/receiver', 'btn small')]];
+    return ['warn', 'Choose a signal group', 'With no choice the old group comes back in about ' + sgtHours(t.decide_left_s) + '.',
+      link('Compare and choose', '#/receiver/settings', 'btn small')];
   }
   if (SGT_RUNNING.indexOf(t.state) >= 0) {
-    /* The status names the group being measured "group". */
-    return ['info', 'Comparing signal groups', sgtLine(Object.assign({}, t, { running_group: t.group })) +
-      ' Other receiver changes wait until it ends.', details];
+    return ['info', 'Comparing signal groups', t.state === 'switching' ? 'Corrections pause briefly.' : t.state === 'restoring' ?
+      'Switching back.' : capFirst((t.phase !== null && t.phase !== undefined ? 'Group ' + (t.phase + 1) + ' of 2, ' : '') +
+      'about ' + inMinutes(Math.ceil((t.left_s || 0) / 60) * 60) + ' left.'), details];
   }
   if (t.state === 'idle' && t.outcome && ['timed_out', 'rejected', 'failed', 'interrupted'].indexOf(t.outcome) >= 0) {
     return ['warn', 'Signal-group comparison ended', L.sgtOutcome[t.outcome] || t.outcome, details];
@@ -1084,56 +1083,47 @@ function sgTestCtl(done) {
 /** The receiver page's own note while a comparison runs or waits for a choice: [title, line] or null. */
 function sgtPageNote(t) {
   if (!t || SGT_RUNNING.indexOf(t.state) < 0) return null;
-  if (t.state === 'deciding') return ['Signal-group comparison: choose a group', 'Both groups are measured.'];
+  if (t.state === 'deciding') return ['Choose a signal group', 'Both groups are measured.'];
   return ['Comparing signal groups', sgtLine(t)];
 }
 
 Views.receiver = {
   title: 'Receiver',
   admin: true,
-  create(el) {
-    let g = null, t = null, editor = null, stop = null, held = null, heldLater = false, infoMode = '';
-    const heldCard = h('section', { class: 'card wide', hidden: true });
-    const info = h('section', { class: 'card' });
-    /* No receiver, or the station looking for it: the same panel as on Signals and in the setup. */
-    const nr = noReceiverPanel();
-    const posActions = positionActions(() => refresh());
-    const position = h('section', { class: 'card' }, posActions.el);
-    const profChip = badge('', '');
-    const profile = h('section', { class: 'card wide' });
-    const recovery = recoveryCtl();
-    const recoveryCard = h('section', { class: 'card has-actions' }, recovery.nodes);
-    const maint = maintenanceCtl(() => refresh().catch(() => {}));
-    const maintCard = h('section', { class: 'card has-actions' }, maint.nodes);
-    const sgt = sgTestCtl(() => refresh().catch(() => {}));
-    const sgtCard = h('section', { class: 'card wide', id: 'compare', tabindex: '-1' }, sgt.nodes);
-    const noteTitle = h('strong'), noteLine = h('span');
-    const sgtNote = h('div', { class: 'notice info wide', hidden: true },
-      h('div', { class: 'text' }, noteTitle, noteLine),
-      h('div', { class: 'form-actions' }, btn('Go to the comparison', () => {
-        sgtCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        sgtCard.focus({ preventScroll: true });
-      }, 'small')));
+  heading: arg => (arg === 'settings' ? ['Receiver settings', true] : /^live/.test(arg) ? ['Live view'] : null),
+  create(el, arg) {
+    return /^live/.test(arg) ? livePage(el, arg === 'live/start') : receiverPage(el, arg === 'settings');
+  },
+};
 
-    const fill = () => {
-      /* The held first configuration first, until it is made (or put off for this visit). */
-      if (g.first_apply_held && !heldLater) {
-        if (!held) {
-          held = heldPanel({
-            onLater: () => {
-              heldLater = true;
-              heldCard.hidden = true;
-            },
-            onApplied: () => refresh().catch(() => {}),
-          });
-          mount(heldCard, held.el);
-          held.load();
-        }
-        heldCard.hidden = false;
-      } else {
-        heldCard.hidden = true;
-        if (!g.first_apply_held) finishHeld(g).then(done => done && refresh(), () => {});
-      }
+/** The Receiver page, or with `settings` the Receiver settings page; both read GET /api/gnss every 5 s. */
+function receiverPage(el, settings) {
+  let g = null, t = null, editor = null, stop = null, held = null, heldLater = false, infoMode = '', sigs = null;
+  const heldCard = h('section', { class: 'card wide', hidden: true });
+  const info = h('section', { class: 'card' });
+  const toSettings = h('div', { class: 'form-actions' }, link('Receiver settings', '#/receiver/settings', 'btn'));
+  /* No receiver, or the station looking for it: the same panel as in the setup. */
+  const nr = noReceiverPanel();
+  const posActions = positionActions(() => refresh());
+  const position = h('section', { class: 'card' }, posActions.el);
+  const profChip = badge('', '');
+  const profile = h('section', { class: 'card wide' });
+  const recovery = recoveryCtl();
+  const recoveryCard = h('section', { class: 'card has-actions' }, recovery.nodes);
+  const maint = maintenanceCtl(() => refresh().catch(() => {}));
+  const maintCard = h('section', { class: 'card has-actions' }, maint.nodes);
+  const sgt = sgTestCtl(() => refresh().catch(() => {}));
+  const sgtCard = h('section', { class: 'card wide', id: 'compare', tabindex: '-1' }, sgt.nodes);
+  const noteTitle = h('strong'), noteLine = h('span');
+  const sgtNote = h('div', { class: 'notice info wide', hidden: true },
+    h('div', { class: 'text' }, noteTitle, ' ', noteLine),
+    btn('Go to the comparison', () => {
+      sgtCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      sgtCard.focus({ preventScroll: true });
+    }, 'small'));
+
+  const fill = () => {
+    if (settings) {
       const note = sgtPageNote(t);
       sgtNote.hidden = !note;
       if (note) {
@@ -1141,22 +1131,6 @@ Views.receiver = {
         noteTitle.textContent = note[0];
         noteLine.textContent = note[1];
       }
-      if ((g.state === 'no_receiver' || g.state === 'detecting') && !(g.maintenance || {}).on) {
-        if (infoMode !== 'nr') mount(info, h('h2', null, 'Receiver'), nr.el);
-        infoMode = 'nr';
-        nr.update(S.status || { receiver: { state: g.state } });
-      } else if (infoMode !== 'rx' || !interacting(info)) {
-        /* A rebuild waits while the user reads or selects in the card; the Details stay as the user left them. */
-        mount(info, receiverInfo(g, isOpen(info, 'rx-details')));
-        infoMode = 'rx';
-      }
-      /* Everything in the position card but its actions, which stay put. */
-      if (!interacting(position)) {
-        const open = isOpen(position, 'pos-details');
-        while (position.firstChild && position.firstChild !== posActions.el) position.firstChild.remove();
-        position.insertBefore(add(doc.createDocumentFragment(), positionInfo(g, open)), posActions.el);
-      }
-      posActions.update(g);
       const c = profileChip(g);
       profChip.className = 'badge ' + c[1];
       profChip.textContent = c[0];
@@ -1164,49 +1138,93 @@ Views.receiver = {
       maint.update(g);
       recovery.update(g);
       sgt.update(t, g);
-    };
-    const buildEditor = () => {
-      editor = profileEditor(g, refresh);
-      mount(profile, cardHead('Receiver profile', profChip),
-        h('p', { class: 'muted small' }, 'What the station sets on the receiver.'),
-        editor.el);
-    };
-    /* The comparison's state; a failed read only leaves its card as it was. */
-    const readTest = () => api('GET', '/api/gnss/signal-test').then(v => {
-      t = v;
-    }, e => {
-      if (e instanceof ApiError && e.status === 401) throw e;
-    });
-    async function refresh() {
-      g = await api('GET', '/api/gnss');
-      await readTest();
-      fill();
+      return;
     }
-    async function load() {
-      g = await api('GET', '/api/gnss');
-      await readTest();
-      mount(el, h('div', { class: 'grid' }, heldCard, sgtNote, info, position, profile, recoveryCard, maintCard, sgtCard));
+    /* The held first configuration first, until it is made (or put off for this visit). */
+    if (g.first_apply_held && !heldLater) {
+      if (!held) {
+        held = heldPanel({
+          onLater: () => {
+            heldLater = true;
+            heldCard.hidden = true;
+          },
+          onApplied: () => refresh().catch(() => {}),
+        });
+        mount(heldCard, held.el);
+        held.load();
+      }
+      heldCard.hidden = false;
+    } else {
+      heldCard.hidden = true;
+      if (!g.first_apply_held) finishHeld(g).then(done => done && refresh(), () => {});
+    }
+    if ((g.state === 'no_receiver' || g.state === 'detecting') && !(g.maintenance || {}).on) {
+      if (infoMode !== 'nr') mount(info, h('h2', null, 'Receiver'), nr.el, toSettings);
+      infoMode = 'nr';
+      nr.update(S.status || { receiver: { state: g.state } });
+    } else if (infoMode !== 'rx' || !interacting(info)) {
+      /* A rebuild waits while the user reads or selects in the card; the Details stay as the user left them. */
+      mount(info, receiverInfo(g, isOpen(info, 'rx-details')), toSettings);
+      infoMode = 'rx';
+    }
+    /* Everything in the position card but its actions, which stay put. */
+    if (!interacting(position)) {
+      const open = isOpen(position, 'pos-details');
+      while (position.firstChild && position.firstChild !== posActions.el) position.firstChild.remove();
+      position.insertBefore(add(doc.createDocumentFragment(), positionInfo(g, open)), posActions.el);
+    }
+    posActions.update(g);
+  };
+  const buildEditor = () => {
+    editor = profileEditor(g, refresh);
+    mount(profile, cardHead('Receiver profile', profChip),
+      h('p', { class: 'muted small' }, 'What the station sets on the receiver.'),
+      editor.el);
+  };
+  /* The comparison's state (Receiver settings only); a failed read only leaves its card as it was. */
+  const readTest = () => (!settings ? null : api('GET', '/api/gnss/signal-test').then(v => {
+    t = v;
+  }, e => {
+    if (e instanceof ApiError && e.status === 401) throw e;
+  }));
+  async function refresh() {
+    g = await api('GET', '/api/gnss');
+    await readTest();
+    fill();
+  }
+  async function load() {
+    g = await api('GET', '/api/gnss');
+    await readTest();
+    const grid = h('div', { class: 'grid' });
+    mount(el, grid);
+    if (settings) {
+      add(grid, [sgtNote, profile, recoveryCard, maintCard, sgtCard]);
       buildEditor();
-      fill();
+    } else {
+      add(grid, [heldCard, info, position]);
+      sigs = signalsSection(grid);
     }
-    mount(el, h('p', { class: 'loading' }, 'Loading the receiver…'));
-    load().then(() => {
-      stop = poller(5000, refresh, true);
-    }, e => mount(el, msg('bad', errText(e)), btn('Try again', () => openView('receiver', ''), 'primary')));
-    return {
-      update(st) {
-        if (infoMode === 'nr') nr.update(st);
-      },
-      destroy() {
-        if (stop) stop();
-      },
-      dirty: () => !!(editor && editor.dirty()) || recovery.dirty(),
-      reload() {
-        if (!g) return;
-        refresh().then(() => {
-          if (!(editor && editor.dirty())) buildEditor();
-        }).catch(() => {});
-      },
-    };
-  },
-};
+    fill();
+  }
+  mount(el, h('p', { class: 'loading' }, 'Loading the receiver…'));
+  load().then(() => {
+    stop = poller(5000, refresh, true);
+  }, e => mount(el, msg('bad', errText(e)), btn('Try again', () => openView('receiver', settings ? 'settings' : ''), 'primary')));
+  return {
+    update(st) {
+      if (infoMode === 'nr') nr.update(st);
+      if (sigs) sigs.update(st);
+    },
+    destroy() {
+      if (stop) stop();
+      if (sigs) sigs.destroy();
+    },
+    dirty: () => !!(editor && editor.dirty()) || recovery.dirty(),
+    reload() {
+      if (!g) return;
+      refresh().then(() => {
+        if (settings && !(editor && editor.dirty())) buildEditor();
+      }).catch(() => {});
+    },
+  };
+}

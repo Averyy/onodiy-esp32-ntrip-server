@@ -2,8 +2,10 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Updates. Every update starts with a click here: the station only checks
- * once a day (or on "Check now") and shows the banner.
+ * Updates, the first cards of Settings (#/settings/updates; #/settings/session
+ * opens it at the receiver update session). Every update starts with a click
+ * here: the station only checks once a day (or on "Check now") and shows the
+ * notice and the dot on the Settings tab.
  *   App: install the offered release (download, verify, restart, trial), go
  *        back to the previous version, or install a .bin file.
  *   Receiver: download and verify the offered package or upload a .pkg,
@@ -245,9 +247,7 @@ function receiverWarnings(flashAvailable) {
   ];
 }
 
-Views.updates = {
-  title: 'Updates',
-  admin: true,
+const updatesPart = {
   create(el, arg) {
     let u = null, staged = null, flash = null;
     let rflow = null;          /* receiver flow: {state, text, tone} */
@@ -820,12 +820,12 @@ Views.updates = {
 
     mount(el, h('div', { class: 'grid' }, versionsCard, appCard, gnssCard, sessionCard, filesCard));
     mount(versionsCard, h('p', { class: 'loading' }, 'Loading…'));
-    load().then(() => {
-      if (arg === 'session' && !sessionCard.hidden) sessionCard.scrollIntoView({ block: 'start' });
-    }, e => mount(versionsCard, msg('bad', errText(e)), btn('Try again', () => openView('updates', arg), 'primary')));
+    const ready = load().catch(e => mount(versionsCard, msg('bad', errText(e)), btn('Try again', () => openView('settings', arg), 'primary')));
     const stop = poller(10000, () => load(true), true);
 
     return {
+      ready: ready,
+      cards: { updates: versionsCard, session: sessionCard },
       destroy() {
         stop();
         for (const off of offs) off();

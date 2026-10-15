@@ -98,7 +98,7 @@ const L = {
   /* After a failed receiver configuration: the station's own retry (automatic configuration on), or only the user's (configFailedText). */
   configRetry: {
     auto: 'The station tries again on its own.',
-    user: 'Automatic configuration is off, so the station does not retry. Press Apply again on the Receiver page.',
+    user: 'Automatic configuration is off, so the station does not retry. Press Apply again in Receiver settings.',
   },
   salert: {
     unsupported_model: ['Receiver model not supported', 'The station streams what this receiver sends but does not configure or update it.'],
@@ -106,7 +106,7 @@ const L = {
     position_mismatch: ['Position mismatch', 'The streamed position is more than 5 mm from the locked one.'],
     antenna_moved: ['Antenna moved?', 'The fixed base sends nothing since the receiver restarted. If the antenna moved, survey again.'],
     receiver_attention: ['Receiver needs attention', 'Corrections did not come back after the receiver update.'],
-    receiver_in_loader: ['Receiver in its update loader', 'The station only listens until you choose what to do on the Updates page.'],
+    receiver_in_loader: ['Receiver in its update loader', 'The station only listens until you choose what to do in Settings.'],
     no_receiver: ['No receiver found', ''],   /* the text depends on the alert: noReceiverText() */
     signals_mismatch: ['Signals differ from the signal group', 'The receiver reports other signals than its signal group should give.'],
   },

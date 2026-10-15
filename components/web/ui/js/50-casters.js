@@ -71,7 +71,7 @@ const PRESET_INFO = {
     what: 'A free community network of RTK bases: anyone can use its streams.',
     steps: ['Pick a mountpoint of a few capital letters that no other base uses (the guide links the list).',
       'Password: Centipede\'s shared password, see its guide.',
-      'First set a precisely measured position as the fixed base position on the Receiver page; the guide shows how to measure it.',
+      'First set a precisely measured position as the fixed base position in Receiver settings; the guide shows how to measure it.',
       'Then declare the base to Centipede by email, as the guide explains.'],
     guide: ['Centipede\'s guide', 'https://docs.centipede-rtk.org/connect-base/'],
   },

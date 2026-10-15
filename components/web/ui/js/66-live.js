@@ -518,25 +518,17 @@ function noReceiverPanel() {
 
 /* ---- The page ---------------------------------------------------------------------------- */
 
-/* Set by the entry button (Signals page): the page starts the window when it opens. */
+/* Set by the entry button (the Receiver page's Signals card): the page starts the window when it opens. */
 let liveAutoStart = false;
 
-/* The plain-link entry (the dashboard, rebuilt every second, carries no buttons): opens the page and starts the window. */
-const LIVE_START_HASH = '#/signals/live/start';
-
-/** Open the live view page and start the window there. */
+/** Open the live view page (#/receiver/live; #/receiver/live/start opens and starts it too) and start the window there. */
 function openLiveView() {
   liveAutoStart = true;
-  if (location.hash === '#/signals/live') openView('signals', 'live');
-  else location.hash = '#/signals/live';
+  if (location.hash === '#/receiver/live') openView('receiver', 'live');
+  else location.hash = '#/receiver/live';
 }
 
 function livePage(el, startArg) {
-  if (!isAdmin()) {
-    mount(el, card('Live view', h('p', null, 'Log in to open the live view.'),
-      h('div', { class: 'form-actions' }, btn('Log in', () => showLogin(), 'primary'))));
-    return {};
-  }
   let stopPoll = null, gone = false;
   /* A 200 to our own start means open: a closed window read within 5 s of it is a stale answer, ignored once. */
   let postAt = 0, closeIgnored = false;
@@ -671,7 +663,7 @@ function livePage(el, startArg) {
 
   if (startArg) {
     /* Started once: a reload or the back button must not start it again. */
-    history.replaceState(null, '', '#/signals/live');
+    history.replaceState(null, '', '#/receiver/live');
     if (shell.current) shell.current.arg = 'live';
   }
   const wantStart = liveAutoStart || startArg;
@@ -738,7 +730,7 @@ function receptionChecks(d) {
     items.push(['ok', lbl(L.sys, best) + ': ' + bestN + ' bands', '4 bands on one constellation: the most this receiver can reach.']);
   } else {
     items.push(['warn', best ? 'Best: ' + lbl(L.sys, best) + ' with ' + bestN + (bestN === 1 ? ' band' : ' bands') : 'No bands yet',
-      'Onocoy\'s quality score needs 4 bands on one constellation. The signal group on the Receiver page sets them; ' +
+      'Onocoy\'s quality score needs 4 bands on one constellation. The signal group in Receiver settings sets them; ' +
       'right after a start this can take a minute.']);
   }
   return { items: items, ok: items.every(i => i[0] === 'ok') };

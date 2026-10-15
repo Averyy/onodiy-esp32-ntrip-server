@@ -39,11 +39,11 @@ const LADDER_REASONS = ['receiver_power', 'receiver_silent', 'no_satellites', 'n
 /* Where an "Also:" line's Details button goes. */
 const ALERT_PAGE = {
   settings_degraded: '#/diag', link_loss: '#/diag', power_supply: '#/diag', power_lost: '#/diag', heap_fragmented: '#/diag',
-  no_upstream: '#/system', receiver_power: '#/diag', receiver_silent: '#/diag', safe_mode: '#/system',
-  no_satellites: '#/signals', no_rtcm: '#/signals', bands: '#/signals', no_receiver: '#/signals',
+  no_upstream: '#/settings/wifi', receiver_power: '#/diag', receiver_silent: '#/diag', safe_mode: '#/settings/restart',
+  no_satellites: '#/receiver', no_rtcm: '#/receiver', bands: '#/receiver', no_receiver: '#/receiver',
   config_failed: '#/receiver', antenna_moved: '#/receiver', unsupported_model: '#/receiver', signals_mismatch: '#/receiver',
   profile_drift: '#/receiver', position_mismatch: '#/receiver', rx_held: '#/receiver',
-  receiver_attention: '#/updates', receiver_in_loader: '#/updates/session',
+  receiver_attention: '#/settings/updates', receiver_in_loader: '#/settings/session',
 };
 /* Where the Onocoy credentials are entered (the caster editor opens on the Onocoy slot). */
 const ONOCOY_SETUP_HASH = '#/casters/onocoy';
@@ -195,7 +195,7 @@ function stationState(s, admin) {
       return pick('safe_mode', 'Safe mode', 'bad', 'The receiver and casters are off after ' +
         (sm.crashes ? sm.crashes + ' crashes' : 'repeated crashes') + '.' +
         (sm.retry_in_s ? ' The station tries normal operation again in ' + upMin(sm.retry_in_s) + '.' : ''),
-      { actions: [go('Updates', '#/updates'), { act: 'leave-safe', label: 'Leave safe mode' }], alertId: 'safe_mode',
+      { actions: [go('Updates', '#/settings/updates'), { act: 'leave-safe', label: 'Leave safe mode' }], alertId: 'safe_mode',
         notice: 'safe_mode' });
     }
     if (admin) {
@@ -206,7 +206,7 @@ function stationState(s, admin) {
           j === 'unknown' ? 'The receiver update state is unknown this boot, so nothing is sent to the receiver.' :
             j === 'waiting' ? JOURNAL_LINE.waiting + ' Keep the station powered.' : JOURNAL_LINE.unreadable;
         return pick('journal', 'Receiver update needs you', 'warn', lead,
-          { actions: [go('Open', '#/updates/session')], alertId: loader ? 'receiver_in_loader' : null, notice: 'journal' });
+          { actions: [go('Open', '#/settings/session')], alertId: loader ? 'receiver_in_loader' : null, notice: 'journal' });
       }
       if ((s.device && s.device.settings_available === false) || find('settings_degraded')) {
         return pick('settings', 'Settings cannot be saved', 'bad', 'The station runs, but changes are not saved this boot. ' +
@@ -217,7 +217,7 @@ function stationState(s, admin) {
     if (state === 'flashing' || state === 'flash_recovery' || (admin && rcv.journal === 'running')) {
       const st = state === 'flash_recovery' ? 'flash_recovery' : 'flashing';
       return pick('updating', HERO_TITLE[st], st === 'flashing' ? 'info' : 'warn', HERO_STATE_LINE[st],
-        { actions: admin ? [go('Open', '#/updates/session')] : [] });
+        { actions: admin ? [go('Open', '#/settings/session')] : [] });
     }
     if (admin && rcv.uart_closed) {
       return pick('uart_closed', 'Receiver port closed', 'bad', UART_CLOSED_TEXT, { actions: [go('Details', '#/diag')], notice: 'uart_closed' });
@@ -257,13 +257,13 @@ function stationState(s, admin) {
     }
     const t = admin ? rcv.signal_test : null;
     if (t && t.state === 'deciding') {
-      return pick('signal_test', 'Choose a signal group', 'warn', 'Both groups are measured. Keep one on the Receiver page' +
+      return pick('signal_test', 'Choose a signal group', 'warn', 'Both groups are measured. Keep one in Receiver settings' +
         (t.decide_left_s ? '; with no choice the old group comes back in about ' + sgtHours(t.decide_left_s) : '') + '.',
-      { actions: [go('Compare and choose', '#/receiver')], notice: 'signal_test' });
+      { actions: [go('Compare and choose', '#/receiver/settings')], notice: 'signal_test' });
     }
     if (t && SGT_RUNNING.indexOf(t.state) >= 0) {
       return pick('signal_test', 'Comparing signal groups', 'info', sgtLine(Object.assign({}, t, { running_group: t.group })) +
-        ' Other receiver changes wait until it ends.', { actions: [go('Details', '#/receiver')], notice: 'signal_test' });
+        ' Other receiver changes wait until it ends.', { actions: [go('Details', '#/receiver/settings')], notice: 'signal_test' });
     }
     const net = (admin && s.network) || {};
     if (net.cred_trial) {
@@ -302,7 +302,7 @@ function stationState(s, admin) {
       if (noNet) return pick('casters_down', head, tone, alertText(noNet)[1], Object.assign(more, { alertId: 'no_upstream' }));
       if (down.every(c => c.state === 'wait_data')) {
         /* The receiver delivers, yet the casters wait: an alert of the station's may say why. */
-        for (const [id, label, href] of [['antenna_moved', 'Receiver', '#/receiver'], ['receiver_attention', 'Updates', '#/updates'],
+        for (const [id, label, href] of [['antenna_moved', 'Receiver', '#/receiver'], ['receiver_attention', 'Updates', '#/settings/updates'],
           ['config_failed', 'Receiver', '#/receiver']]) {
           const a = find(id, 'station');
           if (a) return pick('casters_down', head, tone, alertText(a)[1], { actions: [go(label, href)], alertId: id });

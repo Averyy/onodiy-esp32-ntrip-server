@@ -5,7 +5,7 @@
  * How to reach the station: its mDNS name (<name>.local, answered on the
  * home network and on the station's own access point) and its IP address,
  * always as plain http:// links. Used by the setup wizard, the dashboard's
- * network card and the System page.
+ * network card and Settings.
  */
 
 /** The name in use (the DHCP name): from the object itself, the status or the session. */

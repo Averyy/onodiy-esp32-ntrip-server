@@ -636,7 +636,7 @@ const ERR = {
   not_available_yet: 'Receiver firmware updates are not enabled in this build yet.',
   checks_disabled: 'This build cannot check for updates. Uploading a file still works.',
   too_many_clients: 'Too many pages are open on the station.',
-  signal_test_running: 'A signal-group comparison is running. Wait for it to end, or stop it on the Receiver page.',
+  signal_test_running: 'A signal-group comparison is running. Wait for it to end, or stop it in Receiver settings.',
   signal_test_idle: 'No signal-group comparison is running (it may have ended meanwhile).',
   signal_test_not_deciding: 'The comparison is not waiting for your choice (not yet, or not any more).',
   first_apply_held: 'The receiver is not configured yet. Confirm its configuration on the Receiver page first.',

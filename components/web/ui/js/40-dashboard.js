@@ -16,13 +16,19 @@
  * buttons ("Check again", "End now", "Leave safe mode") carry data-act and
  * the page's root handles their clicks; patchDetect() keeps the focus on the
  * line when "Check again" goes. The title is announced to screen readers
- * when it changes. Visitors without a session see the public form (names
- * and states only).
+ * when it changes. Visitors without a session see the public page: the top
+ * card, the casters by name and state, and the signals with the band table.
  */
 
 Views.dashboard = {
   title: 'Status',
   create(el) {
+    /* The public page's signals (GET /api/gnss/signals, open to visitors while public status is on). */
+    let sig = null;
+    const stopSig = isAdmin() ? null : poller(5000, async () => {
+      sig = await api('GET', '/api/gnss/signals');
+      render();
+    });
     /* Open casters that stream while Onocoy does (GET /api/casters warnings): fetched when the turned-on casters change. */
     let openSlots = [], openKey = '';
     const loadOpen = async () => {
@@ -42,8 +48,6 @@ Views.dashboard = {
       }
       const admin = isAdmin() && !s.public;
       const st = stationState(s, admin);
-      const host = s.device && s.device.hostname;
-      doc.title = st.head + (host ? ' · ' + host : '');
       if (admin) {
         const on = enabledCasters(s);
         const key = on.some(c => c.protected) && on.length > 1 ? on.map(c => c.slot + ':' + c.host).join('|') : '';
@@ -53,13 +57,18 @@ Views.dashboard = {
           if (key) loadOpen();
         }
       }
-      patchDetect(el, admin ? adminDashboard(s, st, openSlots) : publicDashboard(s, st));
+      patchDetect(el, admin ? adminDashboard(s, st, openSlots) : publicDashboard(s, st, sig));
     };
     detectClicks(el, render);
     endMaintClicks(el, render);
     leaveSafeClicks(el, render);
     render();
-    return { update: render };
+    return {
+      update: render,
+      destroy() {
+        if (stopSig) stopSig();
+      },
+    };
   },
 };
 
@@ -120,10 +129,10 @@ function positionText(r) {
 const okMark = ok => h('span', { class: ok ? 't-ok' : 't-warn' }, ok ? '✓' : '✕');
 
 /* The band row: "4 bands on Galileo ✓ (the most this receiver can reach)"; a dash while the receiver does not deliver. */
-function bandsView(r, q, admin) {
+function bandsView(r, q) {
   if (!q.known) return DASH;
   const ok = !q.fewBands;
-  const note = !ok ? 'Onocoy needs 4.' : admin && /UM982/.test(r.model || '') ? 'The most this receiver can reach.' : null;
+  const note = !ok ? 'Onocoy needs 4.' : /UM982/.test(r.model || '') ? 'The most this receiver can reach.' : null;
   return [q.bands + ' bands' + (q.sys ? ' on ' + lbl(L.sys, q.sys) : ''), ' ', okMark(ok),
     note ? h('div', { class: 'muted small' }, note) : null];
 }
@@ -136,16 +145,12 @@ function glonassView(r, q) {
   return r.rtcm1230_supported === true ? ['Tracked ', okMark(true)] : 'Tracked';
 }
 
-/* Three receiver rows, no buttons (the public form: the bands only), and a link to the page with the rest. */
-function receiverCard(s, st, admin) {
+/* Three receiver rows, no buttons, and a link to the page with the rest. */
+function receiverCard(s, st) {
   const r = s.receiver || {};
   return h('section', { class: 'card fit-kv' },
-    cardHead('Receiver', admin ? link('Details', '#/receiver', 'head-link') : link('Signals', '#/signals', 'head-link')),
-    kv([
-      ['Bands', bandsView(r, st.quality, admin)],
-      admin ? ['GLONASS', glonassView(r, st.quality)] : null,
-      admin ? ['Position', positionText(r)] : null,
-    ]));
+    cardHead('Receiver', link('Details', '#/receiver', 'head-link')),
+    kv([['Bands', bandsView(r, st.quality)], ['GLONASS', glonassView(r, st.quality)], ['Position', positionText(r)]]));
 }
 
 /** Today's online share: whole at 0 % and 100 %, else two decimals, rounded down (never "100.00" short of 100). */
@@ -206,17 +211,18 @@ function castersCard(s, st, admin, openSlots) {
 function adminDashboard(s, st, openSlots) {
   const ono = onocoyCard(s, st);
   const others = castersCard(s, st, true, openSlots);
-  const rx = receiverCard(s, st, true);
+  const rx = receiverCard(s, st);
   /* A lone receiver card takes the row (no empty cell beside it). */
   if (!ono && !others) rx.classList.add('wide');
   return [heroCard(s, st), h('div', { class: 'grid' }, ono, rx, others)];
 }
 
-function publicDashboard(s, st) {
+/* The public page: the top card, the casters, and the signals while the receiver delivers them. */
+function publicDashboard(s, st, sig) {
   const casters = castersCard(s, st, false, null);
-  const rx = receiverCard(s, st, false);
-  if (!casters) rx.classList.add('wide');
-  return [heroCard(s, st), h('div', { class: 'grid' }, casters, rx)];
+  const sigCard = st.delivering && sig && (sig.systems || []).length ? signalsCard(sig) : null;
+  if (casters) casters.classList.add('wide');
+  return [heroCard(s, st), h('div', { class: 'grid' }, casters, sigCard)];
 }
 
 /*

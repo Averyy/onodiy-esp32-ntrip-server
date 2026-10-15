@@ -23,7 +23,7 @@ function apSsidText() {
   return (S.session && S.session.ap_ssid) || '';
 }
 
-/* The System page's one line under the admin password. */
+/* Settings' one line under the admin password. */
 function recoveryHint() {
   const ap = apSsidText();
   return 'Forgot it? Hold the BOOT button for 10 seconds, then within 15 minutes join the station\'s own Wi-Fi' +
@@ -215,7 +215,7 @@ function wifiPasswordProblem(pw) {
   return null;
 }
 
-/* ---- Wi-Fi picker (wizard and System page) ------------------------------ */
+/* ---- Wi-Fi picker (wizard and Settings) ---------------------------------- */
 
 /**
  * Network list from the cached scan plus "Other network". opts.warnScan:
@@ -370,7 +370,7 @@ async function startWizard(claim) {
       wifiDown = !W.wifi.configured || !W.wifi.online;
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) return;
-      /* not known: the System page has the Wi-Fi settings */
+      /* not known: Settings has the Wi-Fi settings */
     }
     const wifiFirst = !!sess.on_setup_ap || wifiDown;
     steps = (wifiFirst ? ['wifi'] : []).concat(['reception', 'onocoy', 'casters']);
@@ -549,7 +549,7 @@ async function startWizard(claim) {
       nr.update(st);
       cont.textContent = 'Continue without the check';
       setNote('');
-      later.textContent = 'You can check the antenna later on the Signals page.';
+      later.textContent = 'You can check the antenna later on the Receiver page.';
     }
 
     function renderLive(d) {
@@ -574,7 +574,7 @@ async function startWizard(claim) {
                 h('p', { class: 'muted small' }, SYS_KEY), liveCountsTable(t))))));
       }
       cont.textContent = r.ok ? 'Continue' : 'Continue anyway';
-      setNote(r.waiting ? '' : 'These are rough guide values, not Onocoy\'s scoring. The live view is also on the Signals page.');
+      setNote(r.waiting ? '' : 'These are rough guide values, not Onocoy\'s scoring. The live view is also on the Receiver page.');
       later.textContent = '';
       /* A 200 to our own start means open; a closed window read within 5 s
        * of it is a stale answer, ignored once. */
@@ -605,9 +605,9 @@ async function startWizard(claim) {
         if (gone()) return;
         closedShown = false;
         if (mode !== 'live') {
-          mode = 'failed';   /* not asked again every 2 s: the user goes on, or checks later on the Signals page */
+          mode = 'failed';   /* not asked again every 2 s: the user goes on, or checks later on the Receiver page */
           patch(box, msg('warn', 'The live view could not be opened: ' + errText(e)),
-            h('p', { class: 'muted small' }, 'You can check the antenna later on the Signals page.'));
+            h('p', { class: 'muted small' }, 'You can check the antenna later on the Receiver page.'));
           cont.textContent = 'Continue';
         } else {
           showErr(e, err);
