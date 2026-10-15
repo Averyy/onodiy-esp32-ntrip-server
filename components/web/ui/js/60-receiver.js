@@ -177,7 +177,7 @@ function receiverInfo(g) {
     readBack(g),
     alerts.length ? h('div', { class: 'stack foot' }, alerts.map(a => {
       const t = L.salert[a] || [a, ''];
-      const text = a === 'config_failed' ? t[1] + ' ' + (g.config_auto_retry === false ? L.configRetry.user : L.configRetry.auto) : t[1];
+      const text = a === 'config_failed' ? configFailedText(g.config_auto_retry, g.config_retry_in_s) : t[1];
       return msg('warn', h('strong', null, t[0]), text ? h('div', { class: 'small' }, text) : null);
     })) : null,
   ];
@@ -770,7 +770,7 @@ const SGT_RUNNING = ['switching', 'settling', 'measuring', 'deciding', 'restorin
 
 /**
  * The comparison for the shell's notices (S.status, receiver.signal_test):
- * null, or [tone, title, text, actions], the shape renderNotices pushes.
+ * null, or [tone, title, text, actions], as noticeItems (20-shell.js) takes it.
  * A running test shows everywhere but the receiver page (its card is there);
  * a finished one only when the station ended it without the user's choice.
  */
@@ -789,8 +789,8 @@ function sgTestNotice(st) {
     const what = t.state === 'restoring' ? 'switching the receiver to ' + grp :
       lbl(L.sgtState, t.state).toLowerCase() + (grp ? ' ' + grp : '') + (t.phase !== null && t.phase !== undefined ?
         ' (group ' + (t.phase + 1) + ' of 2' + (t.left_s ? ', about ' + fmt.dur(Math.ceil(t.left_s / 60) * 60) + ' left' : '') + ')' : '');
-    return ['info', 'Comparing signal groups: ' + what, 'Each switch restarts the receiver; the casters pause briefly for it ' +
-      '(planned downtime). Other receiver changes wait until the comparison ends.', details];
+    return ['info', 'Comparing signal groups: ' + what, 'Each switch restarts the receiver; casters pause briefly. ' +
+      'Other receiver changes wait until it ends.', details];
   }
   if (t.state === 'idle' && t.outcome && ['timed_out', 'rejected', 'failed', 'interrupted'].indexOf(t.outcome) >= 0) {
     return ['warn', 'Signal-group comparison ended', L.sgtOutcome[t.outcome] || t.outcome, details];

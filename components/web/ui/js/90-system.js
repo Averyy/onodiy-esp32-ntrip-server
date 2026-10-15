@@ -378,7 +378,7 @@ Views.system = {
           }
           const problem = adminPasswordProblem(nw.value, rep.value);
           if (problem) {
-            (problem.indexOf('differ') >= 0 ? f3 : f2).error(problem);
+            (problem === PW_MISMATCH ? f3 : f2).error(problem);
             return;
           }
           const r = await act(save, () => api('PUT', '/api/admin-password', { current: cur.value, new: nw.value }), err);

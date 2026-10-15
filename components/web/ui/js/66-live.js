@@ -729,10 +729,11 @@ function receptionChecks(d) {
     }
   }
   if (bestN >= RX_CHECK.bands) {
-    items.push(['ok', lbl(L.sys, best) + ': ' + bestN + ' bands', 'Four bands on one constellation: the condition for Onocoy\'s top band reward.']);
+    items.push(['ok', lbl(L.sys, best) + ': ' + bestN + ' bands', '4 bands on one constellation: enough for Onocoy\'s top band reward.']);
   } else {
     items.push(['warn', best ? 'Best: ' + lbl(L.sys, best) + ' with ' + bestN + (bestN === 1 ? ' band' : ' bands') : 'No bands yet',
-      'Onocoy\'s top band reward needs 4 bands on one constellation. The receiver profile chooses the signals; right after a start it can also take a minute.']);
+      'Onocoy\'s top band reward needs 4 bands on one constellation. The signal group on the Receiver page sets them; ' +
+      'right after a start this can take a minute.']);
   }
   return { items: items, ok: items.every(i => i[0] === 'ok') };
 }
@@ -743,5 +744,5 @@ const CHECK_WORD = { ok: 'Good', warn: 'Check', bad: 'Problem' };
 function receptionList(r) {
   return h('ul', { class: 'checks' }, r.items.map(i => h('li', { class: i[0] },
     h('span', { class: 'ic', 'aria-hidden': 'true' }, CHECK_ICON[i[0]]),
-    h('span', null, h('strong', null, CHECK_WORD[i[0]] + ': ' + i[1]), h('span', { class: 'muted small' }, ' ' + i[2])))));
+    h('span', null, h('strong', null, CHECK_WORD[i[0]] + ': ' + i[1]), h('div', { class: 'muted small' }, i[2])))));
 }

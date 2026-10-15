@@ -313,6 +313,10 @@ small { font-size: 0.85rem; }
 .card-head { flex-wrap: wrap; justify-content: flex-end; row-gap: 0.35rem; }
 .card-head > :first-child { flex-basis: 8rem; }
 .card .foot { margin-top: 0.75rem; font-size: 0.9rem; }
+/* A card's buttons at its foot (.card-actions): in a row of cards they line up at the bottom. */
+.card.has-actions { display: flex; flex-direction: column; }
+.card.has-actions > :not(.card-head) { margin-bottom: 0; }
+.card.has-actions > .card-actions { margin-top: auto; padding-top: 0.75rem; }
 .section-title { margin: 1.5rem 0 0.5rem; color: var(--muted); font-size: 0.85rem; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; }
 
 .row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
@@ -334,12 +338,13 @@ small { font-size: 0.85rem; }
 }
 .big small { font-size: 0.9rem; font-weight: 500; color: var(--muted); }
 
-.hero {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.75rem 1.25rem;
-}
+/*
+ * The Status page's top card: the title with its dot, one line, at most one
+ * button and a row of labelled facts. On a phone one column; from 560 px the
+ * button sits at the right of the title and line, the facts under both.
+ */
+.hero { display: grid; grid-template-columns: minmax(0, 1fr); row-gap: 0.35rem; }
+.card.hero > * { margin: 0; }
 .hero .state {
   display: flex;
   align-items: center;
@@ -358,7 +363,27 @@ small { font-size: 0.85rem; }
 .hero.ok .state::before { background: var(--ok); }
 .hero.warn .state::before { background: var(--warn); }
 .hero.bad .state::before { background: var(--bad); }
-.hero .facts { color: var(--muted); }
+.hero .hero-actions { display: flex; margin-top: 0.4rem; }
+.hero .hero-actions .btn { width: 100%; }
+.hero .facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.5rem;
+  margin-top: 0.4rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+.hero .facts > div { display: flex; gap: 0.4rem; }
+.hero .facts dt { color: var(--muted); }
+.hero .facts dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+@media (min-width: 560px) {
+  .hero { grid-template-columns: minmax(0, 1fr) auto; column-gap: 1.25rem; }
+  .hero > * { grid-column: 1; }
+  .card.hero > .hero-actions { grid-column: 2; grid-row: 1 / span 2; align-self: center; margin: 0; }
+  .hero .hero-actions .btn { width: auto; }
+  .hero .facts { grid-column: 1 / -1; }
+}
 
 /* ---- Key/value lists -------------------------------------------------- */
 
@@ -426,7 +451,9 @@ small { font-size: 0.85rem; }
 .notice + .notice { margin-top: 0.5rem; }
 .notice .text { flex: 1 1 16rem; }
 .notice .text strong { display: block; }
-.notice .row { flex: none; }
+/* Its buttons: full width under the text on a phone, at the right from 560 px. */
+.notice .form-actions { flex: 1 1 100%; margin-top: 0; }
+@media (min-width: 560px) { .notice .form-actions { flex: none; } }
 
 /* ---- Buttons ----------------------------------------------------------- */
 
@@ -647,6 +674,13 @@ tbody tr:last-child td { border-bottom: 0; }
 .metrics b { color: var(--text); font-weight: 600; }
 .hintline { margin-top: 0.35rem; color: var(--warn); font-size: 0.9rem; }
 .caster .form-actions { margin-top: 0.6rem; }
+/* A row's one button: under the row on a phone, at its right (level with its last line) from 560 px. */
+@media (min-width: 560px) {
+  .caster.has-act { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 1rem; }
+  .caster.has-act > * { grid-column: 1; }
+  .caster.has-act > .item-head { grid-column: 1 / -1; }
+  .caster.has-act > .form-actions { grid-column: 2; grid-row: 2 / span 2; align-self: end; margin-top: 0.35rem; }
+}
 .caster-live > * + * { margin-top: 0.35rem; }
 .caster-live > .msg { margin-top: 0.6rem; }
 /* A card that holds only a row of actions (the add card): no gap above it. */
@@ -890,6 +924,9 @@ pre.log .gap { color: var(--muted); font-style: italic; }
 .dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--border); }
 .dots i.done { background: var(--ok); }
 .dots i.now { background: var(--accent); }
+/* "Skip the rest of the setup": under the card, never among a form's buttons. */
+.wiz-skip { display: flex; justify-content: center; margin-top: 0.75rem; }
+.wiz-skip .btn { color: var(--muted); font-weight: 550; }
 
 /* ---- Modal, toasts, overlay -------------------------------------------- */
 

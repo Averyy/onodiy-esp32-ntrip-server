@@ -9,8 +9,8 @@
  * point), then Wi-Fi: once the station has joined the home network, its
  * setup network closes a few seconds later (the page counts down), the
  * phone goes back to its own Wi-Fi and logs in at http://<name>.local/.
- * There the setup continues: a reception check of the antenna (the live
- * view, with plain hints) before any caster is enabled, the Onocoy
+ * There the setup continues: the antenna check (the live view, with
+ * plain hints) before any caster is enabled, the Onocoy
  * credentials, optional extra casters. The station keeps the next step
  * (POST /api/setup/step), so the setup resumes after the move to the home
  * network, a reload or a new login, but never past the Wi-Fi step while the
@@ -29,6 +29,15 @@ function recoveryHint() {
     'station\'s own Wi-Fi network' + (ap ? ' (' + ap + ')' : '') + ' for 15 minutes; join it, open http://192.168.4.1/ and set a new password.';
 }
 
+/* Forgot the password: the two steps (the login's disclosure). */
+function recoverySteps() {
+  const ap = apSsidText();
+  return h('ol', { class: 'howto' },
+    h('li', null, 'Hold the BOOT button on the station for 10 seconds. This clears the password.'),
+    h('li', null, 'Within 15 minutes, join ', ap ? ['the Wi-Fi network ', h('strong', null, ap)] : 'the station\'s own Wi-Fi network', ', open ',
+      h('strong', null, 'http://192.168.4.1/'), ' and set a new password.'));
+}
+
 async function boot() {
   applyTheme();
   renderTopActions();
@@ -36,7 +45,9 @@ async function boot() {
   try {
     s = await api('GET', '/api/session', undefined, { quiet401: true, timeout: 8000 });
   } catch (e) {
-    bare(h('div', { class: 'narrow' }, pageCard('The station does not answer', msg('bad', errText(e)),
+    const lost = e instanceof ApiError && (e.code === 'network' || e.code === 'timeout');
+    bare(h('div', { class: 'narrow' }, pageCard('The station is not answering',
+      h('p', null, lost ? 'Check that this device is on the same network as the station.' : errText(e)),
       h('div', { class: 'form-actions' }, btn('Try again', boot, 'primary')))));
     return;
   }
@@ -101,9 +112,11 @@ async function startPublic() {
 function showNoAdmin() {
   const ap = apSsidText();
   bare(h('div', { class: 'narrow' }, pageCard('Set up this station',
-    h('p', null, 'This station has no admin password yet. The first password can only be set over the station\'s own Wi-Fi network: ' +
-      (ap ? 'join "' + ap + '"' : 'join the network whose name starts with "onocoydiy-"') + ' and open http://192.168.4.1/.'),
-    h('p', { class: 'muted' }, 'If that network is not there, hold the BOOT button for 10 seconds; the station then opens it for 15 minutes.'),
+    h('p', null, 'This station has no admin password yet. Set it over the station\'s own Wi-Fi:'),
+    h('ol', { class: 'howto' },
+      h('li', null, ap ? ['Join the Wi-Fi network ', h('strong', null, ap), '.'] : 'Join the Wi-Fi network whose name starts with onocoydiy-.'),
+      h('li', null, 'Open ', h('strong', null, 'http://192.168.4.1/'), '.')),
+    h('p', { class: 'muted small' }, 'Network not there? Hold the BOOT button for 10 seconds; it opens for 15 minutes.'),
     h('div', { class: 'form-actions' }, btn('Check again', boot, 'primary')))));
 }
 
@@ -126,6 +139,7 @@ function showLogin(note) {
   const restarted = restartNote();
   note = note || restarted;
   const pw = pwInput({ autocomplete: 'current-password', id: 'login-pw' });
+  const F = field('Admin password', pw);
   const err = errBox();
   const submit = h('button', { type: 'submit', class: 'btn primary' }, 'Log in');
   let lockUntil = 0;
@@ -140,6 +154,8 @@ function showLogin(note) {
       submit.textContent = 'Log in';
     }
   };
+  const pub = S.session && S.session.public_status ?
+    h('button', { type: 'button', class: 'btn', onclick: startPublic }, 'View status without logging in') : null;
   const form = h('form', { onsubmit: async e => {
     e.preventDefault();
     if (!pw.value) {
@@ -147,38 +163,46 @@ function showLogin(note) {
       return;
     }
     err.hidden = true;
+    F.error(null);
     try {
       await busy(submit, () => api('POST', '/api/session', { password: pw.value }, { quiet401: true }));
     } catch (ex) {
       pw.select();
-      showErr(ex, err);
-      if (ex instanceof ApiError && ex.code === 'rate_limited' && ex.retry_in_s) {
-        lockUntil = Date.now() + ex.retry_in_s * 1000;
-        tickLock();
+      /* A refused password or too many attempts: under the field (the button counts the wait down). */
+      if (ex instanceof ApiError && ex.code === 'wrong_password') {
+        F.error('Wrong password.');
+      } else if (ex instanceof ApiError && ex.code === 'rate_limited') {
+        F.error('Too many attempts.');
+        if (ex.retry_in_s) {
+          lockUntil = Date.now() + ex.retry_in_s * 1000;
+          tickLock();
+        }
+      } else {
+        showErr(ex, err);
       }
       return;
     }
     pw.value = '';
     boot();
   } },
-  field('Admin password', pw).el,
-  h('div', { class: 'form-actions' }, submit),
-  err);
-  const pub = S.session && S.session.public_status ?
-    h('p', null, h('button', { type: 'button', class: 'btn ghost small', onclick: startPublic }, 'View the status without logging in')) : null;
+  F.el, err,
+  h('div', { class: 'form-actions' }, pub, submit));
   bare(h('div', { class: 'narrow' }, pageCard('Log in', note ? msg('info', note) : null, form,
-    h('p', { class: 'muted small foot' }, recoveryHint()), pub)));
+    h('details', { class: 'more' }, h('summary', null, 'Forgot the password?'), recoverySteps()))));
   pw.focus();
 }
 
 /* ---- Password rules (8-64 bytes of UTF-8, no control characters) -------- */
 
+/* The repeat does not match: the form marks the repeat field (the other problems mark the password). */
+const PW_MISMATCH = 'The passwords do not match.';
+
 function adminPasswordProblem(pw, repeat) {
-  if (hasControl(pw)) return 'The password must not contain control characters.';
+  if (hasControl(pw)) return 'The password contains a character that is not allowed.';
   const n = utf8Len(pw);
   if (n < 8) return 'Use at least 8 characters.';
-  if (n > 64) return 'Use at most 64 bytes (fewer characters if they are not plain letters).';
-  if (repeat !== undefined && pw !== repeat) return 'The two passwords differ.';
+  if (n > 64) return 'Too long: use fewer characters.';
+  if (repeat !== undefined && pw !== repeat) return PW_MISMATCH;
   return null;
 }
 
@@ -229,23 +253,24 @@ function wifiPicker(wifi, opts) {
   function render() {
     const items = nets();
     const sc = current && current.scan ? current.scan : {};
-    scanInfo.textContent = sc.running ? 'Scanning…' : sc.age_s === null || sc.age_s === undefined ? 'No scan yet.' :
-      items.length + ' networks, scanned ' + fmt.dur(sc.age_s) + ' ago.';
+    scanInfo.textContent = sc.running ? 'Scanning…' : sc.age_s === null || sc.age_s === undefined ? 'Not scanned yet.' :
+      items.length + (items.length === 1 ? ' network' : ' networks') + ' found ' + fmt.dur(sc.age_s) + ' ago.';
     mount(list, items.map(r => {
       const isSel = selected && !selected.other && selected.ssid === r.ssid;
       return h('button', { type: 'button', class: 'net' + (isSel ? ' sel' : ''), 'aria-pressed': isSel ? 'true' : 'false',
         onclick: () => pick({ ssid: r.ssid, secured: r.secured }) },
       h('span', { class: 'ssid' }, r.ssid),
-      h('span', { class: 'meta' }, (r.secured ? '🔒 ' : 'open · ') + 'ch ' + r.channel),
-      rssiView(r.rssi));
+      h('span', { class: 'meta' }, r.secured ? h('span', { role: 'img', 'aria-label': 'Secured', title: 'Secured' }, '🔒') : 'Open'),
+      rssiView(r.rssi, true));
     }), h('button', { type: 'button', class: 'net' + (selected && selected.other ? ' sel' : ''),
       onclick: () => pick({ other: true }) }, h('span', { class: 'ssid' }, 'Other network…')));
     otherField.el.hidden = !(selected && selected.other);
     pwField.el.hidden = !selected || (!selected.other && !selected.secured);
     /* What an empty field means depends on the choice. */
     if (pwHint) {
-      pwHint.textContent = !selected ? '' : selected.other ? 'Leave it empty for an open network.' :
-        stored(selected) ? 'Leave it empty to keep the stored password.' : '8 to 63 characters (or 64 hex digits).';
+      pwHint.textContent = !selected ? '' : selected.other ? 'Leave empty for an open network.' :
+        stored(selected) ? 'Leave empty to keep the saved password.' : '';
+      pwHint.hidden = !pwHint.textContent;
     }
   }
 
@@ -261,7 +286,7 @@ function wifiPicker(wifi, opts) {
   async function scan() {
     if (opts.warnScan && current && current.online) {
       const ok = await dialog({ title: 'Scan for networks?', ok: 'Scan',
-        body: h('p', null, 'While the station scans, the casters stall for a few seconds.') });
+        body: h('p', null, 'Casters pause for a few seconds while the station scans.') });
       if (!ok) return;
     }
     await act(scanBtn, async () => {
@@ -296,7 +321,7 @@ function wifiPicker(wifi, opts) {
       const ssid = selected.other ? other.value : selected.ssid;
       const bytes = utf8Len(ssid);
       if (bytes < 1 || bytes > 32) {
-        otherField.error('A network name has 1 to 32 bytes.');
+        otherField.error(bytes < 1 ? 'Enter the network name.' : 'That network name is too long.');
         return null;
       }
       const p = pwField.el.hidden ? '' : pw.value;
@@ -307,7 +332,7 @@ function wifiPicker(wifi, opts) {
       }
       /* A secured network from the list needs its password, unless it is the stored one. */
       if (!selected.other && selected.secured && p === '' && !stored(selected)) {
-        pwField.error('Enter the password of ' + ssid + '.');
+        pwField.error('Enter the password for ' + ssid + '.');
         return null;
       }
       const out = { ssid: ssid };
@@ -321,7 +346,7 @@ function wifiPicker(wifi, opts) {
 /* ---- Wizard ------------------------------------------------------------- */
 
 /* What the step after the Wi-Fi is called in the instructions. */
-const WIZ_NEXT = { reception: 'the reception check', onocoy: 'the Onocoy step', casters: 'more casters' };
+const WIZ_NEXT = { reception: 'the antenna check', onocoy: 'the Onocoy step', casters: 'more casters' };
 
 async function startWizard(claim) {
   live.stop();
@@ -349,9 +374,11 @@ async function startWizard(claim) {
   function frame(step, title, ...body) {
     const idx = steps.indexOf(step);
     const head = idx >= 0 ? h('div', { class: 'wiz-head' },
-      h('span', null, 'Setup · step ' + (idx + 1) + ' of ' + steps.length),
+      h('span', null, 'Setup step ' + (idx + 1) + ' of ' + steps.length),
       h('div', { class: 'dots', 'aria-hidden': 'true' }, steps.map((s, i) => h('i', { class: i < idx ? 'done' : i === idx ? 'now' : null })))) : null;
-    bare(h('div', { class: 'narrow' }, head, pageCard(title, body)));
+    /* "Skip the rest" (skipAll) goes under the card. */
+    const skip = body.filter(k => k && k.nodeType === 1 && k.classList.contains('wiz-skip'));
+    bare(h('div', { class: 'narrow' }, head, pageCard(title, body.filter(k => skip.indexOf(k) < 0)), skip));
   }
 
   function after(step) {
@@ -437,7 +464,7 @@ async function startWizard(claim) {
 
   /* `guard` (optional): resolves true to go on (a step with unsaved input asks first). */
   function skipAll(guard) {
-    return h('p', { class: 'muted small foot' }, 'Experienced? ', h('button', { type: 'button', class: 'btn ghost small', onclick: async e => {
+    return h('div', { class: 'wiz-skip' }, h('button', { type: 'button', class: 'btn ghost small', onclick: async e => {
       const b = e.currentTarget;
       if (guard && !(await guard())) return;
       const ok = await act(b, setupDone);
@@ -448,7 +475,7 @@ async function startWizard(claim) {
   }
 
   /*
-   * Reception check. It reads the station's state first: with no receiver
+   * Antenna check. It reads the station's state first: with no receiver
    * found it shows what to check and when the station looks again ("Check
    * again" starts a search now) and opens nothing; while the station looks
    * for the receiver it says so; once the receiver streams it opens the
@@ -457,16 +484,21 @@ async function startWizard(claim) {
    * closes the view again.
    */
   function stepReception() {
-    const box = h('div', { class: 'stack' }, h('div', { class: 'spinner' }), h('p', { class: 'muted' }, 'Reading the station\'s state…'));
+    const box = h('div', { class: 'stack' }, h('div', { class: 'spinner' }), h('p', { class: 'muted' }, 'Checking the receiver…'));
     const err = errBox();
     const cont = btn('Continue', () => leave(cont), 'primary');
+    const note = h('p', { class: 'muted small', hidden: true });
     const later = h('p', { class: 'muted small' });
-    frame('reception', 'Reception check',
-      h('p', null, 'Before the station streams to any caster, check what the antenna sees. Put it where it will stay, with a clear view of the sky, ' +
-        'and watch the numbers settle for a minute or two. Moving the antenna shows its effect within seconds.'),
-      box, err, later,
+    frame('reception', 'Check the antenna',
+      h('p', null, 'Put the antenna where it will stay, with a clear view of the sky. The checks below update within seconds.'),
+      box, err, note,
       h('div', { class: 'form-actions' }, cont),
+      later,
       skipAll());
+    const setNote = t => {
+      note.textContent = t;
+      note.hidden = !t;
+    };
 
     const nr = noReceiverPanel();
     let mode = '';             /* '', 'held', 'receiver' (no receiver, or looking for it), 'live' */
@@ -476,9 +508,10 @@ async function startWizard(claim) {
     const heldNext = () => {
       heldDone = true;
       mode = '';
-      patch(box, h('div', { class: 'spinner' }), h('p', { class: 'muted' }, 'Starting the reception check…'));
+      patch(box, h('div', { class: 'spinner' }), h('p', { class: 'muted' }, 'Starting the check…'));
       cont.textContent = 'Continue';
       later.textContent = '';
+      setNote('');
     };
     const held = heldPanel({ onLater: heldNext, onApplied: heldNext });
     let liveSince = 0, postAt = 0, closeIgnored = false;
@@ -510,7 +543,8 @@ async function startWizard(claim) {
       }
       nr.update(st);
       cont.textContent = 'Continue without the check';
-      later.textContent = 'You can check the reception later on the Signals page.';
+      setNote('');
+      later.textContent = 'You can check the antenna later on the Signals page.';
     }
 
     function renderLive(d) {
@@ -520,20 +554,23 @@ async function startWizard(claim) {
       if (r.waiting) {
         /* Streaming, but no satellites reported: after two minutes that is the antenna's business. */
         const long = liveSince && Date.now() - liveSince > 120000;
-        patch(box, h('div', { class: 'spinner' }), h('p', null, 'Waiting for the receiver\'s observations… (receiver: ' +
-          lbl(L.station, d.receiver_state).toLowerCase() + ')'),
+        patch(box, h('div', { class: 'spinner' }), h('p', null, 'Waiting for satellite data. Now: ' +
+          lbl(L.station, d.receiver_state).toLowerCase() + '.'),
         long ? msg('warn', h('strong', null, 'No satellites reported for two minutes.'), h('div', { class: 'small' },
-          'Check that the antenna cable is screwed on at both ends and that the antenna sees the open sky (not indoors, ' +
-          'not under a roof or next to a wall).')) :
-          h('p', { class: 'muted small' }, 'Right after power-on the receiver needs a minute or two to find satellites, and the station may still be configuring it.'));
+          'Check that the antenna cable is screwed on at both ends and that the antenna sees the open sky, not a roof or a wall.')) :
+          h('p', { class: 'muted small' }, 'Right after power-on this takes a minute or two.'));
       } else {
-        patch(box, receptionList(r), liveTiles(t),
-          h('div', { class: 'sky-wrap' }, liveSkyPlot(d.satellites || []), h('div', null, cnrLegend(), h('p', { class: 'muted small' }, SYS_KEY),
-            liveCountsTable(t))));
+        /* The sky view stays as the user left it (open or closed) across the refreshes. */
+        const was = box.querySelector('details.sky-more');
+        patch(box, receptionList(r),
+          h('details', { class: 'more sky-more', open: was && was.open ? true : null }, h('summary', null, 'Sky view and satellite counts'),
+            h('div', { class: 'stack' }, liveTiles(t),
+              h('div', { class: 'sky-wrap' }, liveSkyPlot(d.satellites || []), h('div', null, cnrLegend(),
+                h('p', { class: 'muted small' }, SYS_KEY), liveCountsTable(t))))));
       }
       cont.textContent = r.ok ? 'Continue' : 'Continue anyway';
-      later.textContent = r.waiting || r.ok ? '' : 'The hints are rough guide values for a first check, not Onocoy\'s own scoring. ' +
-        'You can open the live view any time later on the Signals page.';
+      setNote(r.waiting ? '' : 'These are rough guide values, not Onocoy\'s scoring. The live view is also on the Signals page.');
+      later.textContent = '';
       /* A 200 to our own start means open; a closed window read within 5 s
        * of it is a stale answer, ignored once. */
       if (w.open === false && Date.now() - postAt < 5000 && !closeIgnored) {
@@ -565,7 +602,7 @@ async function startWizard(claim) {
         if (mode !== 'live') {
           mode = 'failed';   /* not asked again every 2 s: the user goes on, or checks later on the Signals page */
           patch(box, msg('warn', 'The live view could not be opened: ' + errText(e)),
-            h('p', { class: 'muted small' }, 'You can check the reception later on the Signals page.'));
+            h('p', { class: 'muted small' }, 'You can check the antenna later on the Signals page.'));
           cont.textContent = 'Continue';
         } else {
           showErr(e, err);
@@ -616,7 +653,7 @@ async function startWizard(claim) {
         showReceiverMissing(st);
       } else if (rcv.rx_maintenance) {
         mode = '';
-        patch(box, msg('warn', 'Receiver maintenance is on: the station sends the receiver nothing until it ends.'));
+        patch(box, msg('warn', 'Receiver maintenance is on, so the station sends the receiver nothing. Check the antenna after it ends.'));
         cont.textContent = 'Continue without the check';
       } else {
         await openLive();
@@ -637,19 +674,22 @@ async function startWizard(claim) {
   function stepPassword() {
     const pw = pwInput({ autocomplete: 'new-password' });
     const pw2 = pwInput({ autocomplete: 'new-password' });
-    const f1 = field('Admin password', pw, '8 to 64 characters. You need it to change any setting later.');
-    const f2 = field('Repeat the password', pw2);
+    const f1 = field('Admin password', pw, 'At least 8 characters.');
+    const f2 = field('Repeat password', pw2);
+    const hint1 = f1.el.querySelector('.hint');
     const err = errBox();
     const submit = h('button', { type: 'submit', class: 'btn primary' }, 'Set password');
-    frame('password', 'Welcome',
-      h('p', null, 'This station is not set up yet. First choose the admin password for this page. There is no default password.'),
+    frame('password', 'Set an admin password',
+      h('p', null, 'You need it to open this page and change settings. There is no default password.'),
       h('form', { onsubmit: async e => {
         e.preventDefault();
         f1.error(null);
         f2.error(null);
         const problem = adminPasswordProblem(pw.value, pw2.value);
+        /* The rule's own words replace the hint while they show. */
+        hint1.hidden = !!problem && problem !== PW_MISMATCH;
         if (problem) {
-          (problem.indexOf('differ') >= 0 ? f2 : f1).error(problem);
+          (problem === PW_MISMATCH ? f2 : f1).error(problem);
           return;
         }
         const r = await act(submit, () => api('POST', '/api/setup/admin', { password: pw.value }), err);
@@ -657,7 +697,7 @@ async function startWizard(claim) {
         pw.value = '';
         pw2.value = '';
         S.session = await api('GET', '/api/session', undefined, { quiet401: true }).catch(() => S.session);
-        if (r.persisted === false) toast('The settings storage is unavailable: the password holds until the next restart only.', 'warn');
+        if (r.persisted === false) toast('Settings cannot be saved right now: this password works until the next restart.', 'warn');
         next('password');
       } }, f1.el, f2.el, err, h('div', { class: 'form-actions' }, submit)));
     pw.focus();
@@ -668,14 +708,14 @@ async function startWizard(claim) {
     const preset = data.onocoy_preset || { host: 'servers.onocoy.com', port: 2101, ntrip_version: 1, backoff_profile: 'fast' };
     const slots = data.slots || [];
     if (slots.length && slots[0].config === null) {
-      frame('onocoy', 'Onocoy', msg('warn', 'The casters cannot be set up in safe mode. Continue and set them up later.'),
+      frame('onocoy', 'Connect to Onocoy', msg('warn', 'Casters cannot be set up in safe mode. Continue, and set up Onocoy later on the Casters page.'),
         h('div', { class: 'form-actions' }, btn('Continue', () => next('onocoy'), 'primary')));
       return;
     }
     let slot = slots.find(s => s.config && isOnocoySlot(s.config));
     if (!slot) slot = slots.find(s => s.config && !s.config.host && !s.config.enabled);
     if (!slot) {
-      frame('onocoy', 'Onocoy', msg('warn', 'Every caster slot is in use. Set up Onocoy later on the Casters page.'),
+      frame('onocoy', 'Connect to Onocoy', msg('warn', 'Every caster slot is in use. Set up Onocoy later on the Casters page.'),
         h('div', { class: 'form-actions' }, btn('Continue', () => next('onocoy'), 'primary')));
       return;
     }
@@ -683,13 +723,12 @@ async function startWizard(claim) {
     const ono = isOnocoySlot(cfg);
     /* A slot stored in the older layout (no username) holds the old credential in `mountpoint`: start empty. */
     const current = ono && cfg.username;
-    /* What the Onocoy console shows, in its words and order: host and port (fixed), mountpoint, username, password.
+    /* What the Onocoy console shows, in its words and order: the server (fixed), mountpoint, username, password.
      * A test Onocoy slot (bench and QEMU builds) keeps its own host and port. */
-    const hostI = textInput(ono ? cfg.host : preset.host, { readonly: true });
-    const portI = textInput(String(ono ? cfg.port : preset.port), { readonly: true, inputmode: 'numeric' });
+    const server = (ono ? cfg.host : preset.host) + ':' + (ono ? cfg.port : preset.port);
     const mpI = textInput(current ? cfg.mountpoint : '', { maxlength: 47 });
     const userI = textInput(current ? cfg.username : '', { maxlength: 47 });
-    const pw = pwInput({ maxlength: 63, placeholder: ono && cfg.password_set ? 'Stored (leave empty to keep)' : '' });
+    const pw = pwInput({ maxlength: 63, placeholder: ono && cfg.password_set ? 'Saved (leave empty to keep)' : '' });
     const F = { mountpoint: field('Mountpoint', mpI), username: field('Username', userI), password: field('Password', pw) };
     /* Onocoy's password rule, checked softly: a note while the typed password breaks it, saving still allowed. */
     const pwNote = h('p', { class: 'small t-warn', role: 'status', hidden: true });
@@ -700,7 +739,7 @@ async function startWizard(claim) {
     const err = errBox();
     const dupBox = h('div');
     const submit = h('button', { type: 'submit', class: 'btn primary' }, 'Save and continue');
-    frame('onocoy', 'Onocoy',
+    frame('onocoy', 'Connect to Onocoy',
       presetBox('onocoy'),
       h('form', { onsubmit: async e => {
         e.preventDefault();
@@ -738,9 +777,9 @@ async function startWizard(claim) {
           next('onocoy');
         };
         await doSave(false, submit);
-      } }, h('div', { class: 'cols c2' }, field('Host', hostI).el, field('Port', portI).el),
-      F.mountpoint.el, F.username.el, F.password.el, pwNote, dupBox, err, h('div', { class: 'form-actions' }, submit,
-        btn('Skip for now', () => next('onocoy'), 'ghost'))),
+      } }, h('p', { class: 'muted small' }, 'Server ', h('strong', { class: 'nowrap' }, server)),
+      F.mountpoint.el, F.username.el, F.password.el, pwNote, dupBox, err, h('div', { class: 'form-actions' },
+        btn('Skip for now', () => next('onocoy')), submit)),
       skipAll());
     mpI.focus();
   }
@@ -824,24 +863,21 @@ async function startWizard(claim) {
     const s = S.session || {};
     const onAp = !!s.on_setup_ap;
     const following = after('wifi') || 'reception';
-    const ap = (w.ap && w.ap.ssid) || s.ap_ssid || 'the setup network';
     const picker = wifiPicker(w, { warnScan: !onAp && !!w.online });
     const err = errBox();
     const submit = h('button', { type: 'submit', class: 'btn primary' }, 'Join this network');
-    const keep = w.configured && w.online ? btn('Keep ' + w.ssid, e => busy(e.currentTarget, () => next('wifi'))) : null;
+    const keep = w.configured && w.online ? btn('Keep using ' + w.ssid, e => busy(e.currentTarget, () => next('wifi'))) : null;
     const url = localUrl(w);
     /* Without a name that answers: the address, which the next screen shows once the station has joined. */
-    const where = url ? ['open ', h('strong', null, url)] :
-      ['open the station\'s address (the next screen shows it once the station has joined; your router\'s device list names the station ',
-        h('strong', null, routerName()), ')'];
-    frame('wifi', 'Wi-Fi',
-      h('p', null, 'Choose the Wi-Fi network the station uses to reach the casters.'),
-      onAp ? h('p', null, 'When the station has joined your network, this setup network (' + ap + ') closes. Then connect this phone to your Wi-Fi and ',
-        where, '. Log in with the admin password you just set; the setup continues there.') :
-        h('p', null, 'The station leaves the network it uses now and joins the one you choose; this page then loses it. On that network, ',
-          url ? where : ['find the station in the router\'s device list as ', h('strong', null, routerName()), ' and open its address'],
-          ' to continue the setup.'),
-      w.configured ? msg('info', 'Now: ' + w.ssid + (w.online ? ' (connected, ' + w.ip + ')' : ' (not connected)')) : null,
+    frame('wifi', 'Connect to Wi-Fi',
+      h('p', null, 'Pick the network the station uses to reach the internet.'),
+      onAp ? h('p', null, 'Once the station has joined it, this setup network closes. Then connect this phone to the same Wi-Fi, open ',
+        url ? h('strong', null, url) : 'the address the next screen shows', ' and log in to continue.') :
+        h('p', null, 'The station switches to the network you pick, and this page loses it. Then ',
+          url ? ['open ', h('strong', null, url), ' on that network'] : ['find ', h('strong', null, routerName()),
+            ' in your router\'s device list and open its address'], ' to continue.'),
+      w.configured ? h('p', { class: 'muted small' }, w.online ? 'Connected to ' + w.ssid + (w.ip ? ' (' + w.ip + ')' : '') + '.' :
+        'Saved network: ' + w.ssid + ' (not connected).') : null,
       h('form', { onsubmit: async e => {
         e.preventDefault();
         const v = picker.value();
@@ -859,7 +895,7 @@ async function startWizard(claim) {
         }
         W.joined = { ssid: v.ssid, persisted: r.persisted !== false, applied: r.applied !== false, since: Date.now(), following: following };
         go('connect');
-      } }, picker.el, err, h('div', { class: 'form-actions' }, submit, keep)));
+      } }, picker.el, err, h('div', { class: 'form-actions' }, keep, submit)));
   }
 
   /*
@@ -920,7 +956,7 @@ async function startWizard(claim) {
       stop();
       show('closed', msg('info', h('strong', null, 'The setup network is closed.'), ' This phone goes back to its own Wi-Fi by itself, or join it now.'),
         howTo(okNet, true), copyRow(okNet),
-        joined.persisted ? null : msg('warn', 'The settings storage is unavailable: the station forgets this network at the next restart.'));
+        joined.persisted ? null : msg('warn', 'Settings cannot be saved right now: the station forgets this network when it restarts.'));
     }
 
     function tick() {
@@ -955,7 +991,7 @@ async function startWizard(claim) {
             kv(stationAddressRows(w)),
             h('p', { class: 'countdown', role: 'status' }, 'The setup network ', h('strong', null, apName(w)), ' closes in ', leftEl, ' s.'),
             howTo(w, false), copyRow(w),
-            joined.persisted ? null : msg('warn', 'The settings storage is unavailable: the station forgets this network at the next restart.'));
+            joined.persisted ? null : msg('warn', 'Settings cannot be saved right now: the station forgets this network when it restarts.'));
           clearInterval(ticker);
           ticker = setInterval(tick, 250);
         }
@@ -975,7 +1011,7 @@ async function startWizard(claim) {
       }
       stop();
       show('ok', msg('ok', h('strong', null, 'Connected to ' + joined.ssid + '.')), kv(stationAddressRows(w)),
-        joined.persisted ? null : msg('warn', 'The settings storage is unavailable: the station forgets this network at the next restart.'),
+        joined.persisted ? null : msg('warn', 'Settings cannot be saved right now: the station forgets this network when it restarts.'),
         h('div', { class: 'form-actions' }, btn('Continue', cont, 'primary')));
     }
 
@@ -1029,30 +1065,31 @@ async function startWizard(claim) {
        * connection. Only the chosen network, past the switch, counts. */
       if (w && w.cred_reverted && w.pending_ssid === joined.ssid && !w.cred_trial) {
         /* Changed credentials that did not work: the station went back to its previous network. */
-        const why = w.cred_reverted_why === 'auth_failed' ? joined.ssid + ' refused the new password: the station is back on its previous credentials.' :
-          'No address on ' + joined.ssid + ' within 90 seconds: the station went back to ' + (w.ssid || 'its previous network') + '.';
+        const back = ' The station is back on ' + (w.ssid || 'the previous network') + '.';
+        const why = (w.cred_reverted_why === 'auth_failed' ? joined.ssid + ' refused the password.' :
+          'No address on ' + joined.ssid + ' within 90 seconds.') + back;
         if (shown !== 'reverted:' + w.cred_reverted_why) {
           stepBack = true;
           saveStep('wifi');   /* a reload or a new login comes back here */
         }
-        show('reverted:' + w.cred_reverted_why, msg('warn', h('strong', null, why), ' The new credentials stay pending.'),
-          h('div', { class: 'form-actions' }, btn('Try them again', async e => {
+        show('reverted:' + w.cred_reverted_why, msg('warn', why),
+          h('div', { class: 'form-actions' }, btn('Change Wi-Fi settings', () => {
+            stop();
+            go('wifi');
+          }), btn('Try again', async e => {
             if (await retryPendingWifi(e)) {
               joined.since = Date.now();
               shown = '';
             }
-          }, 'primary'), btn('Change Wi-Fi settings', () => {
-            stop();
-            go('wifi');
-          })));
+          }, 'primary')));
         setTimeout(loop, 1000);
         return;
       }
       if (w && w.cred_trial && w.pending_ssid === joined.ssid) {
         if (shown !== 'trial') {
           trialLeft = h('span', null, '');
-          show('trial', h('div', { class: 'spinner' }), h('p', null, 'Trying the new credentials for ' + joined.ssid + ': ', trialLeft,
-            ' left. Without an address there the station goes back to its previous network by itself.'));
+          show('trial', h('div', { class: 'spinner' }), h('p', null, 'Trying ' + joined.ssid + ': ', trialLeft,
+            ' left. If it gets no address, the station goes back to the previous network by itself.'));
         }
         trialLeft.textContent = fmt.dur(w.cred_trial_left_s);
       }
@@ -1064,8 +1101,8 @@ async function startWizard(claim) {
       if (fails >= 3) {
         const name = localUrl(lastNet || W.wifi);
         const ap = apName(W.wifi);
-        show('lost', msg('info', h('strong', null, 'This phone lost the setup network.'),
-          ' That is normal once the station joins ' + joined.ssid + ': its setup network moves to that network\'s channel and then closes.'),
+        show('lost', msg('info', h('strong', null, 'This phone left the setup network'),
+          h('div', null, 'That is normal once the station has joined ' + joined.ssid + '.')),
         h('ol', { class: 'howto' },
           h('li', null, 'Connect this phone to ', h('strong', null, joined.ssid), '.'),
           name ? h('li', null, 'Open ', h('a', { href: name }, name), ', or find the station in your router\'s device list as ', h('strong', null, host),
@@ -1073,16 +1110,16 @@ async function startWizard(claim) {
             h('li', null, 'Find the station in your router\'s device list as ', h('strong', null, host), ' and open its address.'),
           h('li', null, 'Log in with the admin password; the setup continues with ' + (WIZ_NEXT[following] || 'the next step') + '.')),
         h('p', { class: 'muted small' }, 'If the station could not join, ' + ap + ' comes back within a minute: join it and open http://192.168.4.1/.'),
-        h('p', { class: 'muted small' }, 'On a guest network (devices there cannot see each other) the station cannot be reached from your phone: hold its BOOT ' +
-          'button for 10 seconds. Its own network then opens for 15 minutes and the admin password is cleared; join it, set a new password and choose another network.'),
+        h('p', { class: 'muted small' }, 'On a guest network your phone cannot reach the station. Hold its BOOT button for 10 seconds to open ' +
+          'its own network again (this also clears the admin password), then pick another network.'),
         h('div', { class: 'spinner' }));
       } else if (w && secs > 40 && !w.cred_trial && (w.connect_failures > 0 || w.last_disconnect_reason)) {
         if (shown.indexOf('failing:') !== 0) {
           stepBack = true;
           saveStep('wifi');   /* a reload or a new login comes back here */
         }
-        show('failing:' + w.last_disconnect_reason, msg('warn', h('strong', null, 'Not connected yet.'), ' Last error: ' + wifiReason(w.last_disconnect_reason) + '.'),
-          h('p', null, 'The station keeps trying. Check the network name and password.'),
+        show('failing:' + w.last_disconnect_reason, msg('warn', h('strong', null, 'Not connected yet'),
+          h('div', null, 'Last error: ' + wifiReason(w.last_disconnect_reason, true) + '. The station keeps trying. Check the network name and password.')),
           h('div', { class: 'form-actions' }, btn('Change Wi-Fi settings', () => {
             stop();
             go('wifi');

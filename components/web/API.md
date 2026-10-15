@@ -487,7 +487,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `network.ladder_triggers` | network ladder triggers holding (`network_ladder_trigger_t`): `protected` (the protected caster down while RTCM is healthy), `assoc_no_ip` (associated 60 s without an IP), `unreached` (a slot not reaching its caster for 180 s) |
 | `network.cred_*`, `pending_ssid` | changed Wi-Fi credentials (section 11): `cred_trial` while they are tried (`cred_trial_left_s` until the station goes back), `cred_pending` with `pending_ssid` while they wait to be confirmed (`null` = none), `cred_reverted` when they did not work and the station is back on its previous credentials, `cred_reverted_why` why (`no_ip`: no address within the 90 s; `auth_failed`: the network refused the password; `null` unless reverted); `ssid` names the network in use, during a trial the one being tried |
 | `receiver.state` | `station_state_t`; `idle` during receiver maintenance (`rx_maintenance` tells the two apart) |
-| `receiver.uart_closed` | the receiver UART is closed and `gnss_link` reopens it on its own ("receiver UART closed (reopening)"; never in safe mode, where the link is not opened) |
+| `receiver.uart_closed` | the receiver UART is closed and `gnss_link` reopens it on its own (the UI's "Receiver port closed"; never in safe mode, where the link is not opened) |
 | `receiver.rx_maintenance` | receiver maintenance is on (section 8): nothing is sent to the receiver; `maintenance_left_s` until it ends by itself, `maintenance_chosen_s` the chosen duration with extensions (both 0 when off) |
 | `receiver.rtcm_age_ms` | since the last CRC-valid RTCM frame (`gnss_link`), `null` = never |
 | `receiver.restarting` | the receiver said it is restarting (it answered a command with `The Board is resetting,do not response any command!`) within the last 20 s and its restart banner has not come yet: it answers, it is not silent; admin form only (also in `GET /api/gnss`) |
@@ -715,7 +715,7 @@ oldest.
 | `rtcm1230_supported` | `gnss/rtcm1230_ok`: `true` the receiver accepted message 1230 at the last apply, `false` it refused it, `null` never applied (the key is not stored: "not applied yet") |
 | `link.mode` | `off`, `stream`, `command`, `raw` (`gnss_link`) |
 | `link.rx_bytes` | bytes received from the receiver since boot (0 = nothing arrived yet) |
-| `link.open`, `open_failures` | the UART driver is installed; failed installs since boot. `open: false` with a mode other than `off` = "receiver UART closed (reopening)": `gnss_link` reopens it on its own |
+| `link.open`, `open_failures` | the UART driver is installed; failed installs since boot. `open: false` with a mode other than `off` = the UI's "Receiver port closed": `gnss_link` reopens it on its own |
 | `link.hands_off` | the link refuses every write and lease (receiver maintenance) |
 | `recovery` | `gnss/recovery` as stored, `health_recovery_mode_t` (a stored value out of range reads as `full`, as health reads it) |
 | `first_apply_held` | `gnss/hold` is stored: the receiver's first configuration is held until the user applies. A build with `CONFIG_STATION_HOLD_FIRST_APPLY` (bench builds, the `sdkconfig.hold` overlay) writes it once at boot on a device whose profile was never applied and whose `gnss/autocfg` was never set, together with `gnss/autocfg` = 0 and `gnss/recovery` = 2 (`alerts_only`, if unset), before anything reaches the receiver; it stays in NVS whatever build runs later. While it is stored the station sends the receiver only queries (version, configuration dump, base mode) and a loader prompt met during detection gets no restart key (`receiver_in_loader`, listen-only; the user's receiver restart still works). The first successful apply erases it, and so does `PUT /api/gnss/profile` with `autocfg: true`; a factory reset erases it with the other user settings. When the hold is due but cannot be stored (settings unusable this boot, or the write failed), the station holds the first configuration for this boot only, as the batch would have stored it: `first_apply_held` true, `autocfg` false, nothing stored. A successful apply ends the hold (automatic configuration stays off for the boot); `autocfg: true` ends both. `GET /api/gnss/apply/preview` lists what the apply would send |
@@ -1039,9 +1039,9 @@ Close it now (the output is turned off at the next free moment).
 baud list after two failed short passes and always after 5 min). A pass
 that runs already counts. `202 {"accepted": true}`. Errors:
 `409 not_no_receiver` (any other state, receiver maintenance included),
-`409 safe_mode`. The UI's no-receiver card (the alert on the dashboard
-and on Diagnostics, Health; the setup wizard's reception step; Signals)
-offers it as "Check again".
+`409 safe_mode`. The UI offers it as "Check again" wherever it says no
+receiver was found (the dashboard's status card; Diagnostics, Health; the
+setup wizard's antenna check; Signals).
 
 ### Signal-group comparison
 
@@ -2027,7 +2027,7 @@ probe waits up to 1 s for the version log that follows its acknowledgement
 before its lease ends, so that log is read whole (it gives the identity)
 instead of being cut.
 `link.open` and `link.open_failures`: the UART driver is installed, failed
-installs since boot ("receiver UART closed (reopening)" while `open` is
+installs since boot (the UI's "Receiver port closed" while `open` is
 false in a mode other than `off`); `link.hands_off`: receiver maintenance. `journal` and `log` are the event journal's and the log ring's
 counters (`diag_journal_info()`, `diag_log_stats()`; `journal.capacity` in
 records; `log.prev_boot_available` false and `log.prev_boot_lines` 0 when
@@ -2352,7 +2352,7 @@ LAN).
 4. The phone is back on the home network: the user opens
    `http://<mdns_host>.local/`, logs in, and the wizard resumes at
    `setup_step`.
-5. Reception check, before any caster is enabled. The UI reads
+5. Antenna check, before any caster is enabled. The UI reads
    `GET /api/status` first: with no receiver found (alert `no_receiver`,
    section 6) or while the station looks for one it shows the no-receiver
    card (what to check, the next search; "Check again" is
@@ -2364,7 +2364,7 @@ LAN).
    hardware) and "Continue anyway"; `DELETE /api/gnss/live` when the user
    goes on.
 6. Optional: the Onocoy slot, `PUT /api/casters/0` with `onocoy_preset`
-   (host `servers.onocoy.com` and port 2101, shown read-only) and what the
+   (host `servers.onocoy.com` and port 2101, shown, not editable) and what the
    Onocoy console gives: `mountpoint`, `username` and `password`
    (section 10); then optional further casters.
 7. `POST /api/setup/done` (it also erases `setup_step`): the dashboard.

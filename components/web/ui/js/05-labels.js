@@ -68,8 +68,6 @@ const L = {
   backoff: { fast: 'Fast', standard: 'Standard', polite: 'Polite' },
   trust: { bundle: 'Built-in certificate bundle', custom_ca: 'My own CA certificate', insecure: 'Do not check (insecure)' },
   health: { ok: 'Healthy', degraded: 'Needs attention', recovering: 'Recovering', failed: 'Needs attention' },
-  /* The health level in a sentence (dashboard facts): never the raw level word. */
-  healthFact: { ok: 'healthy', degraded: 'needs attention', recovering: 'recovering', failed: 'needs attention' },
   step: {
     none: 'None',
     resync: 'Resync the stream',
@@ -80,44 +78,41 @@ const L = {
     reboot: 'Restart the station',
   },
   halert: {
-    power_supply: ['Power supply', 'The station restarted from low voltage since it was powered on. Check the power adapter and cable.'],
-    receiver_power: ['Receiver not answering', 'The receiver does not answer commands. Power-cycle the station.'],
-    bands: ['Few signal bands', 'Fewer than 4 frequency bands on the best constellation.'],
-    profile_drift: ['RTCM differs from the profile', 'The messages or rates in the stream differ from the receiver profile.'],
-    heap_fragmented: ['Memory fragmented', 'Free memory is fragmented. A restart clears it.'],
+    power_supply: ['Low voltage', 'Low voltage restarted the station. Check the power adapter and cable.'],
+    receiver_power: ['Receiver not answering', 'The receiver does not answer, even after a reset. Unplug the station for a few seconds.'],
+    bands: ['Few signal bands', 'Fewer than 4 bands on any constellation; Onocoy\'s top band reward needs 4.'],
+    profile_drift: ['Output differs from the profile', 'The receiver\'s messages or rates differ from its profile.'],
+    heap_fragmented: ['Memory fragmented', 'Restart the station when convenient.'],
     safe_mode: ['Safe mode', 'Receiver and casters are off after repeated crashes.'],
-    settings_degraded: ['Settings unavailable', 'The settings storage is unusable this boot. Nothing is saved.'],
-    no_upstream: ['No internet', 'Wi-Fi is connected but the internet cannot be reached.'],
-    link_loss: ['Receiver data lost', 'Data from the receiver was lost or corrupted in the last 10 minutes.'],
-    power_lost: ['Power was lost', 'The station lost its power 3 or more times within 24 hours (each time the receiver restarted with it). Check the power adapter, cable and connections.'],
-    receiver_silent: ['Nothing from the receiver', 'The station gets nothing usable from the receiver and no answer to its commands. ' +
-      'Power-cycle the station; if that does not help, check the receiver\'s power and its cable.'],
-    no_satellites: ['No satellites', 'The receiver answers but uses no satellites, so it sends no RTCM. Check that the antenna ' +
-      'is connected to the socket marked M and has a clear view of the sky.'],
-    no_rtcm: ['Receiver answers, no RTCM', 'The receiver answers the station but sends no RTCM. Most often the antenna sees no ' +
-      'satellites: check that it is connected to the socket marked M and has a clear view of the sky.'],
-    rx_held: ['Waiting for you to configure the receiver', 'The station has not configured the receiver yet, so it sends no RTCM. ' +
-      'This is not a failure: confirm the configuration on the Receiver page when you are ready.'],
+    settings_degraded: ['Settings cannot be saved', 'Changes are not saved this boot. Restart the station; if that does not help, see Diagnostics.'],
+    no_upstream: ['No internet', 'Wi-Fi works, but the internet cannot be reached. Check your router.'],
+    link_loss: ['Receiver data lost', 'Some data from the receiver was lost or damaged in the last 10 minutes. Diagnostics has the details.'],
+    power_lost: ['Power was lost', 'The station lost power 3 or more times in 24 hours. Check the power adapter, cable and connections.'],
+    receiver_silent: ['Nothing from the receiver', 'The receiver sends nothing and does not answer. Unplug the station for a few seconds; ' +
+      'if that does not help, check the receiver\'s power and cable.'],
+    no_satellites: ['No satellites', 'The receiver sees no satellites. Check that the antenna is on the socket marked M and sees the open sky.'],
+    no_rtcm: ['No corrections from the receiver', 'The receiver answers but sends no corrections. Check that the antenna is on the socket ' +
+      'marked M and sees the open sky.'],
+    rx_held: ['Receiver not configured yet', 'Confirm its configuration on the Receiver page. Until then it sends no corrections.'],
   },
-  /* After a failed receiver configuration: the station's own retry (automatic configuration on), or only the user's. */
+  /* After a failed receiver configuration: the station's own retry (automatic configuration on), or only the user's (configFailedText). */
   configRetry: {
-    auto: 'The station retries it on its own.',
-    user: 'Automatic configuration is off, so the station does not retry it: configure the receiver again on the receiver page when ready.',
+    auto: 'The station tries again on its own.',
+    user: 'Automatic configuration is off: configure it again on the Receiver page.',
   },
   salert: {
-    unsupported_model: ['Receiver model not supported', 'The station forwards what the receiver sends but does not configure or update it.'],
-    config_failed: ['Receiver configuration failed', 'The last profile apply failed.'],
-    position_mismatch: ['Position mismatch', 'The position in the stream is more than 5 mm away from the locked position.'],
-    antenna_moved: ['Antenna moved?', 'The fixed base sends no RTCM after a receiver restart. If the antenna moved, survey again.'],
-    receiver_attention: ['Receiver needs attention', 'RTCM did not come back after a receiver update session ended.'],
-    receiver_in_loader: ['Receiver in its loader', 'The receiver waits at its loader prompt without an update session. The station only listens until you choose what to do.'],
+    unsupported_model: ['Receiver model not supported', 'The station streams what this receiver sends but does not configure or update it.'],
+    config_failed: ['Receiver configuration failed', ''],   /* the text depends on the retry: configFailedText() */
+    position_mismatch: ['Position mismatch', 'The streamed position is more than 5 mm from the locked one.'],
+    antenna_moved: ['Antenna moved?', 'The fixed base sends nothing since the receiver restarted. If the antenna moved, survey again.'],
+    receiver_attention: ['Receiver needs attention', 'Corrections did not come back after the receiver update.'],
+    receiver_in_loader: ['Receiver in its update loader', 'The station only listens until you choose what to do on the Updates page.'],
     no_receiver: ['No receiver found', ''],   /* the text depends on the alert: noReceiverText() */
-    signals_mismatch: ['Signals differ from the signal group', 'After the last configuration the receiver reported other ' +
-      'signals than the profile\'s signal group should give. See the receiver page.'],
+    signals_mismatch: ['Signals differ from the signal group', 'The receiver reports other signals than its signal group should give.'],
   },
   /* Why the station's own restart (to look for the receiver) is postponed now (health reboot_hold). */
   /* health.reboot_cap_limit: which limit of the restart cap sets its wait */
-  capLimit: { hour: 'at most one an hour', day: 'at most 3 in 24 hours' },
+  capLimit: { hour: 'at most one restart an hour', day: 'at most 3 restarts in 24 hours' },
   hold: {
     setup: 'first setup not finished',
     ap_client: 'someone is on the station\'s Wi-Fi',
@@ -383,18 +378,24 @@ const WIFI_REASON = {
   210: 'network not found with a supported security mode', 211: 'network security too weak', 212: 'signal too weak',
 };
 
-function wifiReason(code) {
+/** A Wi-Fi reason in words; noCode: without the number (the setup's connect view). */
+function wifiReason(code, noCode) {
   if (code === null || code === undefined || code === 0) return DASH;
-  return WIFI_REASON[code] ? WIFI_REASON[code] + ' (' + code + ')' : 'reason ' + code;
+  if (!WIFI_REASON[code]) return 'reason ' + code;
+  return noCode ? WIFI_REASON[code] : WIFI_REASON[code] + ' (' + code + ')';
 }
 
-/** "Good", "Fair", "Weak" plus bars for an RSSI in dBm. */
-function rssiView(rssi) {
-  if (rssi === null || rssi === undefined) return DASH;
+/**
+ * "Good", "Fair", "Weak" plus bars for an RSSI in dBm; noDbm: the word only
+ * (the dashboard, the network list). A reading is -127 to -1 dBm: null and 0
+ * are unknown and show a dash.
+ */
+function rssiView(rssi, noDbm) {
+  if (rssi === null || rssi === undefined || rssi >= 0) return DASH;
   const n = rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : 1;
   const word = ['', 'Weak', 'Fair', 'Good', 'Excellent'][n];
   return h('span', { class: 'nowrap' }, h('span', { class: 'sig s' + n, 'aria-hidden': 'true' }, h('i'), h('i'), h('i'), h('i')),
-    ' ' + word + ' (' + rssi + ' dBm)');
+    ' ' + word + (noDbm ? '' : ' (' + rssi + ' dBm)'));
 }
 
 /** Tone for a station state. */
@@ -432,11 +433,15 @@ function inMinutes(s) {
 function noReceiverText(a) {
   const next = a.next_detect_in_s === null || a.next_detect_in_s === undefined ? '' :
     a.next_detect_in_s <= 0 ? ' Searching now.' : ' Next search in ' + inMinutes(a.next_detect_in_s) + '.';
-  if (a.saw_bytes) {
-    return 'Bytes arrive but nothing the station understands: check the wiring and the receiver\'s port speed.' + next;
-  }
-  return 'No receiver found: nothing arrives on the receiver port. Check the receiver\'s power and the cable from its COM1 ' +
-    'to the station (receiver TX to GPIO1, RX to GPIO2).' + next;
+  if (a.saw_bytes) return 'Data arrives, but the station cannot read it. Check the wiring and the receiver\'s port speed.' + next;
+  return 'Nothing arrives from the receiver. Check its power and the cable from its COM1 to the station ' +
+    '(receiver TX to GPIO1, RX to GPIO2).' + next;
+}
+
+/** The failed-configuration alert's text: when the station tries again, or that only the user does (alert or GET /api/gnss). */
+function configFailedText(autoRetry, retryInS) {
+  if (autoRetry === false) return L.configRetry.user;
+  return retryInS ? 'The station tries again in ' + inMinutes(retryInS) + '.' : L.configRetry.auto;
 }
 
 /**
@@ -460,18 +465,16 @@ function restartPlanText(hl) {
   const holdLeft = hold.indexOf('setup') >= 0 ? null : hl.reboot_hold_left_s;
   const hasLeft = holdLeft !== null && holdLeft !== undefined;
   if (!hold.length && !hasCap && !hl.reboot_recheck) return null;
-  const intro = 'When nothing answers, the station restarts itself to look for the receiver, ' +
-    'at most once an hour and 3 times in 24 hours.';
-  const limit = hasCap ? (L.capLimit[hl.reboot_cap_limit] || 'the restart limit') : '';
+  const why = ' to get the receiver back.';
+  const next = hasCap ? ' Next possible in ' + inMinutes(cap) + ' (' + (L.capLimit[hl.reboot_cap_limit] || 'the restart limit') + ').' : '';
   if (hold.length) {
-    const reasons = ' Postponed: ' + hold.map(r => L.hold[r] || String(r).replace(/_/g, ' ')).join(', ');
-    if (hasCap && (!hasLeft || cap > holdLeft)) {
-      return intro + reasons + '; then ' + limit + ': next possible in ' + inMinutes(cap) + '.';
-    }
-    return intro + reasons + (hasLeft ? ' (at the latest in ' + inMinutes(holdLeft) + ')' : '') + '.';
+    const reasons = ' Postponed: ' + hold.map(r => L.hold[r] || String(r).replace(/_/g, ' ')).join(', ') + '.';
+    /* The cap outlasts the hold (or the hold has no end): the restart waits for the cap. */
+    if (hasCap && (!hasLeft || cap > holdLeft)) return 'The station restarts itself' + why + reasons + next;
+    return 'The station restarts itself ' + (hasLeft ? 'in ' + inMinutes(holdLeft) + ' at the latest' : 'later') + why + reasons;
   }
-  if (hasCap) return intro + ' Next possible in ' + inMinutes(cap) + ' (' + limit + ').';
-  return intro + ' The station looks at it again after the next search.';
+  if (hasCap) return 'The station restarts itself' + why + next;
+  return 'The station decides after the next search whether to restart itself.';
 }
 
 /** After a power-on start: whether the receiver kept running (health station.rx_boot). */

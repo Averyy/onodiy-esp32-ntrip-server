@@ -109,7 +109,7 @@ function presetBox(id, box) {
 /** The soft note for a typed Onocoy password that breaks the console's rule ('' when it follows it or nothing is typed). */
 function onocoyPwNote(pw) {
   if (!pw || (pw.length >= 8 && /[A-Za-z]/.test(pw) && /[0-9]/.test(pw))) return '';
-  return 'Onocoy\'s console requires at least 8 characters with a letter and a digit: check that you copied the whole password.';
+  return 'Onocoy passwords have at least 8 characters with a letter and a digit. Check that you copied all of it.';
 }
 
 /* Onocoy's rule on the same stream submitted more than once (its FAQ, linked). */
