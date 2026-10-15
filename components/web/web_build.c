@@ -2043,6 +2043,10 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
         wj_uint(w, "console_dropped_bytes", lg->console_dropped_bytes);
         wj_bool(w, "prev_boot_available", lg->prev_boot_available);
         wj_uint(w, "prev_boot_lines", lg->prev_boot_lines);
+        wj_bool(w, "usb_mirror", lg->usb_mirror);
+        wj_bool(w, "usb_connected", lg->usb_connected);
+        wj_uint(w, "usb_dropped", lg->usb_dropped);
+        wj_uint(w, "usb_dropped_bytes", lg->usb_dropped_bytes);
         wj_obj_close(w);
     } else {
         wj_null(w, "log");

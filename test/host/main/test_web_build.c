@@ -841,6 +841,9 @@ TEST_CASE("health: retry, refused factory reset, journal and log counters", "[we
     journal.newest_seq = 77;
     log.lines = 812;
     log.prev_boot_available = true;
+    log.usb_mirror = true;
+    log.usb_dropped = 3;
+    log.usb_dropped_bytes = 171;
     web_health_snap_t h = {
         .health = &hs, .boot = &boot, .link = &link, .hub = &hub, .st = &st, .obs = &obs, .net = &net,
         .coredump = &cd, .heap = &heap, .journal = &journal, .log = &log,
@@ -857,6 +860,10 @@ TEST_CASE("health: retry, refused factory reset, journal and log counters", "[we
     TEST_ASSERT_EQUAL(2, at(at(root, "obs"), "epoch_gaps")->valueint);
     TEST_ASSERT_EQUAL(4064, at(at(root, "journal"), "capacity")->valueint);
     TEST_ASSERT_EQUAL(812, at(at(root, "log"), "lines")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(at(root, "log"), "usb_mirror")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(at(root, "log"), "usb_connected")));
+    TEST_ASSERT_EQUAL(3, at(at(root, "log"), "usb_dropped")->valueint);
+    TEST_ASSERT_EQUAL(171, at(at(root, "log"), "usb_dropped_bytes")->valueint);
     cJSON_Delete(root);
 
     hs.gnss_retry_in_s = 420;

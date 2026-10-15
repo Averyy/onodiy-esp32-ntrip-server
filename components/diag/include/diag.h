@@ -60,6 +60,14 @@
  *    inside a printf line, and printf output can overtake lines that wait
  *    in the ring. Before a planned restart the waiting lines and the buffer
  *    are given up to 300 ms to go out.
+ *    With CONFIG_DIAG_CONSOLE_USB_MIRROR (the default) everything this
+ *    console writes (not printf output) is copied to the chip's built-in
+ *    USB Serial/JTAG too, which the board's ESP32S3 USB-C port reaches with
+ *    the plug the other way round. The copy never waits: a write goes to
+ *    the USB driver's buffer whole or not at all; without a host there
+ *    nothing is sent, and what a host that does not read leaves no room for
+ *    is dropped, counted (diag_log_stats: usb_dropped) and announced there
+ *    by "[diag: N lines not sent on USB]". Input stays on UART0.
  *  - Event journal: fixed-size records in the raw "journal" partition
  *    (boots with reset class and reason, the previous session's uptime,
  *    reboot reason codes, ladder steps, app update/trial/revert/rollback
@@ -348,6 +356,10 @@ typedef struct {
     uint32_t console_dropped_bytes;
     bool prev_boot_available;       /**< the previous boot's lines are readable (once diag_log_check_stamp kept them) */
     uint32_t prev_boot_lines;       /**< 0 when not available */
+    bool usb_mirror;                /**< the console is copied to the built-in USB (CONFIG_DIAG_CONSOLE_USB_MIRROR) */
+    bool usb_connected;             /**< a USB host is attached there now (it may not be reading) */
+    uint32_t usb_dropped;           /**< lines not copied there although a host was attached (it did not read) */
+    uint32_t usb_dropped_bytes;
 } diag_log_stats_t;
 
 /** Heap figures in bytes. */

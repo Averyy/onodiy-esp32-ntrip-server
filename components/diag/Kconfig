@@ -48,6 +48,50 @@ menu "Station: diagnostics"
             use while the cache is off). Only when PSRAM cannot provide the
             stack is it taken from internal RAM, and the boot log says so.
 
+    config DIAG_CONSOLE_USB_MIRROR
+        bool "Copy the console to the built-in USB (USB Serial/JTAG)"
+        default y
+        depends on SOC_USB_SERIAL_JTAG_SUPPORTED && ESP_CONSOLE_UART
+        select USJ_ENABLE_USB_SERIAL_JTAG
+        select ESP_PHY_ENABLE_USB if SOC_WIFI_PHY_NEEDS_USB_WORKAROUND
+        help
+            The station board's ESP32S3 USB-C port reaches the UART0
+            console's USB bridge (CH343P) with the plug one way round and the
+            chip's built-in USB Serial/JTAG the other way round. With this
+            option the console's output (log lines, the bench console's
+            replies) also goes out on the built-in USB, so either way round
+            shows the log, and the built-in USB stays on while the station
+            runs, so esptool can reset the chip into download mode through
+            it. Console input stays on UART0 only.
+
+            The copy never holds up the console: each write goes to the USB
+            port's transmit buffer whole or not at all, without waiting.
+            Without a host on that port nothing is sent; with one that does
+            not read, what does not fit is dropped and counted (GET
+            /api/health, log.usb_dropped), and the next line sent there says
+            how many. The copy starts with diag, the first thing the app
+            does: the app's startup lines before it and panic output are not
+            copied.
+
+            It keeps the USB PHY powered while Wi-Fi runs (it selects
+            ESP_PHY_ENABLE_USB and USJ_ENABLE_USB_SERIAL_JTAG), which the
+            ESP-IDF help says can lower Wi-Fi performance. Switched off, both
+            go back to off (sdkconfig.defaults) in a new build directory; an
+            existing sdkconfig keeps the values it has until they are set to
+            n there too.
+
+    config DIAG_CONSOLE_USB_TX_BUF
+        int "Built-in USB transmit buffer (bytes, internal RAM)"
+        depends on DIAG_CONSOLE_USB_MIRROR
+        range 512 16384
+        default 4096
+        help
+            Room for what the console copies to the built-in USB while the
+            host has not read it yet. The copy gets what the UART gets, as
+            the UART's transmit buffer takes it, so the same size as that
+            buffer (DIAG_CONSOLE_TX_BUF) holds a full burst while the host
+            reads at USB speed.
+
     config DIAG_JOURNAL_MIN_INTERVAL_MS
         int "Minimum interval between journal records of one kind (ms)"
         range 0 60000

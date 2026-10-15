@@ -50,12 +50,18 @@ most ESP32 dev boards. On macOS both sides show up as `/dev/cu.usbmodem*`;
 `tools/bench/ports.py` tells them apart (see [`tools/bench/README.md`](tools/bench/README.md)).
 If you get the wrong one, unplug and turn the plug over.
 
-Our firmware's console is on UART0, so plug the `ESP32S3` port in the CH343P way
-round to see its log. Either side should flash the ESP32: esptool works over the
-built-in USB, and the CH343P side has the auto-reset pair. Sending the log over the
-built-in USB as well, so that either way round shows it and flashing resets the chip
-by itself on both, is planned. Until then the current build turns the built-in USB
-off while it runs (`CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=n`), so that side shows only the
+Our firmware's console is on UART0 (the CH343P side), and the firmware copies it to
+the built-in USB as well (`CONFIG_DIAG_CONSOLE_USB_MIRROR`, on by default), so either
+way round shows the log. The bench console reads its input on the CH343P side only.
+The built-in USB then keeps running while the station runs, so esptool can reset the
+chip into download mode through it, as it does through the CH343P side's auto-reset
+pair (to be confirmed on the board). The copy never holds the console up: with no
+host on the built-in USB nothing is sent there, and lines that a host that does not
+read has no room for are dropped and counted (`GET /api/health`, `log.usb_dropped`).
+The copy starts with the app's first step: its startup lines before that, and panic
+output, are not copied. Keeping the built-in USB running keeps the USB PHY powered
+while Wi-Fi runs, which the ESP-IDF documentation says can lower Wi-Fi performance.
+With the option off, a build turns both off again: that side then shows only the
 chip's ROM output, and to flash through it you hold **BOT** and press **RST** first.
 
 **Cables and power.** A USB-C-to-C cable gives neither power nor data on either port:
