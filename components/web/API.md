@@ -1261,9 +1261,9 @@ casters are public, so anyone can take the station's stream there and submit
 it to Onocoy as well, and Onocoy's FAQ says: "Please note that multiple
 submissions of the same streams, e.g. from free or public networks such as
 IGS or RTK2GO, even when done by separate users in the onocoy platform, will
-result in banning." The UI warns about it above the casters and links that
-FAQ. It blocks nothing (RTK2go slots stay off unless the user turns one on);
-saving such a pair still asks for `dup_stream_ack` (below).
+result in banning." The UI warns about it on the card of each open slot and
+links that FAQ. It blocks nothing (RTK2go slots stay off unless the user
+turns one on); saving such a pair still asks for `dup_stream_ack` (below).
 
 `GET /api/casters/{n}` returns one `{"slot", "config", "status"}` entry. In
 safe mode `config` is `null` (the slots were never loaded) and every status
@@ -1367,10 +1367,11 @@ set up during this boot when that came later (`null` without a trusted
 clock); `data_rate_permille` is `null` until something was sent today;
 `streak_ok` whether today's offline time is still within the budget for
 that data rate (the UI never shows the day in red while it is true);
-`tls_*` are `null` without TLS; `max_lag_ms` is the slot's lag
-limit; `unreached_s` the current run of failures that never reached the
-caster (DNS failures, connects that timed out or failed locally; 0 = none;
-the UI says "caster not reached for N s"); `last_session_text` the newest
+`tls_*` are `null` without TLS; `max_lag_ms` is the highest
+`lag_ms_now` seen since the start; `unreached_s` the current run of
+failures that never reached the caster (DNS failures, connects that timed
+out or failed locally; 0 = none; the UI says "caster not reached for N
+s"); `last_session_text` the newest
 line the caster sent during a session (nothing is expected there), with
 the password, the username and an Onocoy slot's mountpoint masked (`""` =
 none since the last save).
@@ -2402,8 +2403,8 @@ access point or the station has no working Wi-Fi. A wizard that starts
 (a reload, a new login) reads `GET /api/wifi` first: while the station
 has no working Wi-Fi (none stored, or not connected) it resumes at the
 Wi-Fi step whatever `setup_step` says. In the optional casters step (the
-last one), "Finish setup" asks before it drops a caster being added that is
-not saved yet.
+last one), "Finish setup" waits while a caster is being added: it shows
+again once that caster is saved or cancelled.
 
 **Recovery.** BOOT held 10 s clears the admin password and opens the
 recovery AP for 15 min (open unless an AP password is set; longer while a

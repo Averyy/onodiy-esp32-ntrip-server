@@ -728,9 +728,8 @@ async function startWizard(claim) {
     const ono = isOnocoySlot(cfg);
     /* A slot stored in the older layout (no username) holds the old credential in `mountpoint`: start empty. */
     const current = ono && cfg.username;
-    /* What the Onocoy console shows, in its words and order: the server (fixed), mountpoint, username, password.
-     * A test Onocoy slot (bench and QEMU builds) keeps its own host and port. */
-    const server = (ono ? cfg.host : preset.host) + ':' + (ono ? cfg.port : preset.port);
+    /* What the Onocoy console shows, in its words and order: the server (fixed, a line of text), mountpoint,
+     * username, password. A test Onocoy slot (bench and QEMU builds) keeps its own host and port. */
     const mpI = textInput(current ? cfg.mountpoint : '', { maxlength: 47 });
     const userI = textInput(current ? cfg.username : '', { maxlength: 47 });
     const pw = pwInput({ maxlength: 63, placeholder: ono && cfg.password_set ? 'Saved (leave empty to keep)' : '' });
@@ -745,7 +744,8 @@ async function startWizard(claim) {
     const dupBox = h('div');
     const submit = h('button', { type: 'submit', class: 'btn primary' }, 'Save and continue');
     frame('onocoy', 'Connect to Onocoy',
-      presetBox('onocoy'),
+      /* Back here with Onocoy set up already: the box folds away. */
+      presetPanel('onocoy', onocoyReady(cfg)),
       h('form', { onsubmit: async e => {
         e.preventDefault();
         for (const k of Object.keys(F)) F[k].error(null);
@@ -782,7 +782,7 @@ async function startWizard(claim) {
           next('onocoy');
         };
         await doSave(false, submit);
-      } }, h('p', { class: 'muted small' }, 'Server ', h('strong', { class: 'nowrap' }, server)),
+      } }, serverLine(null, ono ? cfg.host : preset.host, ono ? cfg.port : preset.port),
       F.mountpoint.el, F.username.el, F.password.el, pwNote, dupBox, err, h('div', { class: 'form-actions' },
         btn('Skip for now', () => next('onocoy')), submit)),
       skipAll());
@@ -793,7 +793,8 @@ async function startWizard(claim) {
    * More casters (the last step): the casters set up so far, each with a
    * plain chip (Onocoy not set up offers its step again), "Add a caster"
    * while a slot is free (its editor opens below the list), and "Finish
-   * setup", which asks first while a caster being added is not saved.
+   * setup". While the editor is open its Save is the one main button:
+   * "Finish setup" waits until the caster is saved or cancelled.
    */
   function stepCasters() {
     const data = W.casters;
@@ -802,7 +803,8 @@ async function startWizard(claim) {
     const free = slots.filter(s => s.config && !s.config.host && !s.config.enabled);
     const editorBox = h('div', { class: 'subcard', hidden: true });
     let editor = null;
-    /* "Finish setup" or the Onocoy step with a caster typed but not saved: ask first. */
+    let finishRow = null;   /* hidden while the editor is open */
+    /* Back to the Onocoy step with a caster typed but not saved: ask first. */
     const discardTyped = async () => {
       if (!editor || !editor.dirty()) return true;
       return dialog({ title: 'Discard this caster?', ok: 'Discard it', cancel: 'Back to the caster', okKind: 'danger',
@@ -821,6 +823,7 @@ async function startWizard(claim) {
     };
     const addRow = free.length ? h('div', { class: 'form-actions' }, btn('Add a caster', () => {
       addRow.hidden = true;
+      finishRow.hidden = true;
       editor = casterEditor(free[0], {
         preset: data.onocoy_preset,
         hostname: W.system && W.system.hostname,
@@ -834,6 +837,7 @@ async function startWizard(claim) {
           clear(editorBox);
           editorBox.hidden = true;
           addRow.hidden = false;
+          finishRow.hidden = false;
         },
       });
       mount(editorBox, editor.el);
@@ -845,10 +849,7 @@ async function startWizard(claim) {
       configured.length ? h('div', { class: 'caster-list' }, configured.map(row)) : h('p', { class: 'muted' }, 'No caster set up yet.'),
       addRow,
       editorBox,
-      h('div', { class: 'form-actions sep' }, btn('Finish setup', async e => {
-        const b = e.currentTarget;
-        if (await discardTyped()) await busy(b, () => next('casters'));
-      }, 'primary')));
+      finishRow = h('div', { class: 'form-actions sep' }, btn('Finish setup', e => busy(e.currentTarget, () => next('casters')), 'primary')));
   }
 
   /* The name the phone will open on the home network, http://<mdns_host>.local/,

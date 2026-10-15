@@ -507,3 +507,21 @@ def test_system_wifi_chip_and_recovery_line():
     # One line under the admin password: what to do, no paragraph.
     assert out[4].startswith("Forgot it? Hold the BOOT button for 10 seconds") and "http://192.168.4.1/" in out[4]
     assert len(out[4]) < 160
+
+
+def test_no_top_level_name_is_declared_twice():
+    """The modules share one scope in the bundle: a second top-level function of the same name silently replaces
+    the first everywhere (a page's own link helper once dropped the caster box's "↗")."""
+    seen: dict[str, str] = {}
+    dup = []
+    for f in sorted(UI_JS.glob("*.js")):
+        for n, line in enumerate(f.read_text().splitlines(), 1):
+            m = re.match(r"(?:async\s+)?function\s+(\w+)|(?:const|let|var|class)\s+(\w+)\b", line)
+            if not m:
+                continue
+            name = m.group(1) or m.group(2)
+            where = f"{f.name}:{n}"
+            if name in seen:
+                dup.append((name, seen[name], where))
+            seen.setdefault(name, where)
+    assert dup == [], dup

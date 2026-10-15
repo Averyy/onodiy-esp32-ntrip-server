@@ -224,6 +224,11 @@ function link(label, href, cls) {
   return h('a', { href: href, class: cls || null }, label);
 }
 
+/** A link to another site, in a new tab, marked as such ("Onocoy's FAQ ↗"). */
+function extLink(label, url) {
+  return h('a', { class: 'ext', href: url, target: '_blank', rel: 'noopener noreferrer' }, label + '\u00a0↗');
+}
+
 /** Labelled input with hint and error line. Returns {el, input, error(msg)}. */
 function field(label, input, hint) {
   const err = h('small', { class: 'err', hidden: true });

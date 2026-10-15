@@ -33,11 +33,6 @@ function rtcmName(n) {
   return '';
 }
 
-/** A link that opens outside the station's page. */
-function extLink(label, href) {
-  return h('a', { href: href, target: '_blank', rel: 'noopener noreferrer', class: 'ext' }, label);
-}
-
 /** A distance in words: mm under 1 cm, cm under 1 m, else m or km. */
 function fmtDist(m) {
   if (m === null || m === undefined || isNaN(m)) return DASH;

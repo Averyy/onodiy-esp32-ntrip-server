@@ -277,6 +277,8 @@ small { font-size: 0.85rem; }
 .view { padding-top: 1rem; padding-bottom: 3rem; }
 .view:focus { outline: none; }
 .view-body > * + * { margin-top: 1rem; }
+/* A page without a title card (Casters): its h1 as one line above the cards. */
+.page-title { margin: 0 0 0.75rem; font-size: 1.35rem; }
 
 .grid {
   display: grid;

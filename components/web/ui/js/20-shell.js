@@ -213,8 +213,10 @@ function openView(name, arg) {
   }
   const host = S.status && S.status.device ? S.status.device.hostname : '';
   doc.title = def.title + (host ? ' · ' + host : '');
+  /* The page's one h1: read out only, or shown as the page's heading where the view has no title card (showTitle). */
   const head = doc.getElementById('page-title');
   head.textContent = def.title;
+  head.className = def.showTitle ? 'page-title' : 'sr-only';
   head.hidden = false;
   renderNav();
   renderNotices();
