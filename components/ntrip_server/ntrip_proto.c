@@ -2264,16 +2264,38 @@ void ntrip_day_metrics(const ntrip_day_in_t *in, ntrip_day_out_t *out)
         rate = r > 1000u ? 1000u : (uint32_t)r;
     }
     out->data_rate_permille = (uint16_t)rate;
-    uint32_t budget = ntrip_offline_budget_s(rate);
+    /* The budget and the streak from the best rate the day can still reach,
+     * not from this boot's ratio: one epoch lost 30 s after a start is 97 %
+     * of that boot, but a day that loses nothing more ends near 100 %. */
+    out->best_rate_ppm = ntrip_best_rate_ppm(in->lost_epochs, in->offline_s);
+    uint32_t budget = ntrip_offline_budget_ppm_s(out->best_rate_ppm);
     out->budget_s = budget;
     uint64_t graced = ((uint64_t)in->online_s + NTRIP_GRACE_S) * 1000u / NTRIP_DAY_S;
     out->graced_uptime_permille = (uint16_t)(graced > 1000u ? 1000u : graced);
     out->budget_left_s = budget > in->offline_s ? budget - in->offline_s : 0;
-    out->streak_ok = in->offline_s <= budget;
+    out->streak_ok = out->best_rate_ppm >= NTRIP_TARGET_PERMILLE * 1000u && in->offline_s <= budget;
     if (in->day_known) {
         out->so_far_valid = true;
         out->graced_so_far_permille = ntrip_graced_so_far_permille(in->unplanned_offline_s, in->elapsed_s);
     }
+}
+
+uint32_t ntrip_lost_epochs(uint32_t connected_s, uint32_t epochs_sent)
+{
+    return connected_s > epochs_sent ? connected_s - epochs_sent : 0;
+}
+
+uint32_t ntrip_best_rate_ppm(uint32_t lost_epochs, uint32_t offline_s)
+{
+    if (offline_s >= NTRIP_DAY_S) {
+        return lost_epochs == 0 ? 1000000u : 0;
+    }
+    uint32_t expected = NTRIP_DAY_S - offline_s;   /* epochs the day can still expect at 1 Hz */
+    if (lost_epochs >= expected) {
+        return 0;
+    }
+    uint64_t lost_ppm = ((uint64_t)lost_epochs * 1000000u + expected - 1u) / expected;   /* rounded up */
+    return (uint32_t)(1000000u - lost_ppm);
 }
 
 uint32_t ntrip_offline_budget_s(uint32_t data_rate_permille)
@@ -2281,10 +2303,18 @@ uint32_t ntrip_offline_budget_s(uint32_t data_rate_permille)
     if (data_rate_permille > 1000u) {
         data_rate_permille = 1000u;
     }
-    if (data_rate_permille < NTRIP_TARGET_PERMILLE) {
+    return ntrip_offline_budget_ppm_s(data_rate_permille * 1000u);
+}
+
+uint32_t ntrip_offline_budget_ppm_s(uint32_t data_rate_ppm)
+{
+    if (data_rate_ppm > 1000000u) {
+        data_rate_ppm = 1000000u;
+    }
+    if (data_rate_ppm < NTRIP_TARGET_PERMILLE * 1000u) {
         return 0;
     }
-    double rate = (double)data_rate_permille / 1000.0;
+    double rate = (double)data_rate_ppm / 1000000.0;
     double target = (double)NTRIP_TARGET_PERMILLE / 1000.0;
     double u = 0.8 + 0.2 * sqrt(target / rate);           /* lowest graced uptime that still qualifies */
     double offline = (double)NTRIP_DAY_S + (double)NTRIP_GRACE_S - (double)NTRIP_DAY_S * u;

@@ -189,6 +189,7 @@ void web_snap_status(web_status_snap_t *s)
         s->obs_valid = true;
         s->best_sys = s_obs.best_sys;
         s->best_bands = s_obs.best_bands;
+        s->glonass = s_obs.sys[GNSS_SYS_GLONASS].present && s_obs.sys[GNSS_SYS_GLONASS].bands > 0;
     }
     s->slots = ntrip_server_slot_count();
     if (s->slots > WEB_MAX_SLOTS) {

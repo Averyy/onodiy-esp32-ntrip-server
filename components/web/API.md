@@ -450,7 +450,8 @@ object as sections (section 7), so the UI keeps one model. Admin form:
   "receiver": {"state": "streaming", "model": "UM982", "firmware": "R4.10Build18975",
                "responding": true, "restarting": false, "identity_confirmed": true, "profile_applied": true,
                "position_locked": true, "surveying": false, "survey_window_left_s": 0,
-               "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "journal": "none",
+               "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "glonass": true,
+               "rtcm1230_supported": true, "journal": "none",
                "uart_closed": false, "rx_maintenance": false, "maintenance_left_s": 0, "maintenance_chosen_s": 0,
                "next_detect_in_s": null, "first_apply_held": false},
   "casters": [
@@ -491,6 +492,8 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.uart_closed` | the receiver UART is closed and `gnss_link` reopens it on its own (the UI's "Receiver port closed"; never in safe mode, where the link is not opened) |
 | `receiver.rx_maintenance` | receiver maintenance is on (section 8): nothing is sent to the receiver; `maintenance_left_s` until it ends by itself, `maintenance_chosen_s` the chosen duration with extensions (both 0 when off) |
 | `receiver.rtcm_age_ms` | since the last CRC-valid RTCM frame (`gnss_link`), `null` = never |
+| `receiver.glonass` | the receiver's stream carried GLONASS signals in the last 10 s (the signal summary of `GET /api/gnss/signals`; `false` before the first summary); admin form only |
+| `receiver.rtcm1230_supported` | as in `GET /api/gnss/signals`: the receiver accepted message 1230 (GLONASS biases) at the last configuration, `false` refused, `null` never configured. With `glonass` and `best_bands` it says whether the stream meets Onocoy's quality minimums (4 bands on one constellation, GLONASS with 1230) without polling the larger signals object; admin form only |
 | `receiver.restarting` | the receiver said it is restarting (it answered a command with `The Board is resetting,do not response any command!`) within the last 20 s and its restart banner has not come yet: it answers, it is not silent; admin form only (also in `GET /api/gnss`) |
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
 | `receiver.first_apply_held` | the receiver's first configuration waits for the user (`gnss/hold`, section 8): only queries reach the receiver until the user applies; admin form only |
@@ -1356,17 +1359,22 @@ other slots, and for the protected slot while it is disabled or not set up
 mislead. `graced_uptime_permille` is the share of the whole day covered so
 far (online today plus the 300 s grant, of 86400 s: what the day reaches
 if nothing more is sent); `data_rate_permille` = this start's epochs sent
-today over its seconds connected today (a ratio, so this start's part is
-an estimate for the day); `budget_s` the offline seconds the day allows at
-that data rate (473 at 100 %); `budget_left_s` = `budget_s` minus
-`today_offline_s`, 0 once used up; `graced_uptime_so_far_permille`
+today over its seconds connected today (a ratio of this start only, shown
+as the current data rate); `budget_s` the offline seconds the day allows at
+the best data rate it can still reach (473 at 100 %): 1 - lost / (86400 -
+`today_offline_s`), with lost the epochs the slot should have sent while
+connected (one a second) but did not, today, across restarts (the
+availability ledger keeps the count), so one epoch lost right after a
+start costs about nothing instead of the whole budget; `budget_left_s` =
+`budget_s` minus `today_offline_s`, 0 once used up; `graced_uptime_so_far_permille`
 = 1 - max(0, unplanned downtime today - 300 s) / time elapsed today, with
 the downtime as the availability ledger counts it (planned time left out)
 and the time counted from 00:00 UTC, or from when the slot was enabled and
 set up during this boot when that came later (`null` without a trusted
 clock); `data_rate_permille` is `null` until something was sent today;
-`streak_ok` whether today's offline time is still within the budget for
-that data rate (the UI never shows the day in red while it is true);
+`streak_ok` whether that best rate still reaches 98 % and today's offline
+time is still within `budget_s` (the UI shows "Missed" exactly while it
+is false);
 `tls_*` are `null` without TLS; `max_lag_ms` is the highest
 `lag_ms_now` seen since the start; `unreached_s` the current run of
 failures that never reached the caster (DNS failures, connects that timed
@@ -2057,7 +2065,8 @@ offering the download.
                 "data_rate_permille": 1000, "graced_uptime_permille": 503, "streak_ok": true,
                 "graced_uptime_so_far_permille": 1000},
   "today": {"utc_day": 20736, "date": "2026-10-10", "down_s": [4, 0, 0, 0], "planned_s": [0, 0, 0, 0],
-            "reconnects": [1, 0, 0, 0], "up_s": [43196, 0, 0, 0], "power_off_s": 0, "rx_overflows": 0},
+            "reconnects": [1, 0, 0, 0], "up_s": [43196, 0, 0, 0], "power_off_s": 0, "rx_overflows": 0,
+            "lost_epochs": 0},
   "history": []
 }
 ```
@@ -2083,9 +2092,12 @@ then `""`). `protected`: the day of the Onocoy slot in use, which is the
 first enabled protected slot, else the first protected one (a disabled
 Onocoy slot left over in a lower slot never hides the enabled one;
 `null` without any protected slot): `down_today_s` its offline time
-today, `budget_s` the day's offline allowance at the current data rate,
-`budget_left_s` what is left of it, and the other figures as in the caster
-status (section 10). The budget is information only.
+today, `budget_s` the day's offline allowance at the best data rate the
+day can still reach, `budget_left_s` what is left of it, and the other
+figures as in the caster status (section 10). The budget is information
+only. `today.lost_epochs` (only in `today`: a finished day does not keep
+it) the protected slot's epochs lost while connected, across restarts:
+the losses that budget is figured from.
 
 In `protected`, `enabled` and `onocoy_ready` (the slot holds the console's
 mountpoint, username and password) are as in the caster status, and so is

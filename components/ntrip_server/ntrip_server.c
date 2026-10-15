@@ -253,6 +253,7 @@ typedef struct {
     bool low_heap_wait;
     int32_t day;
     uint64_t on_ms;              /* this boot, today: connected (the data rate's time base; the day's figures are the ledger's) */
+    uint32_t lost_reported;      /* this boot, today: the protected slot's lost epochs handed to the ledger */
     uint64_t dropped_epochs_base;
     uint32_t last_acct_ms;
     uint32_t last_pub_ms;
@@ -1190,6 +1191,7 @@ static void account(slot_t *s, uint32_t now)
         if (s->day >= 0) {
             /* new UTC day; until the first trusted clock everything counts as today */
             s->on_ms = 0;
+            s->lost_reported = 0;
             s->st.epochs_sent_today = 0;
             s->st.bytes_sent_today = 0;
             s->dropped_epochs_base += s->st.epochs_dropped_today;
@@ -1235,6 +1237,17 @@ static void publish(slot_t *s, uint32_t now, bool force)
     if (!s->open) {
         st->connected_since = 0;
     }
+    /* The protected slot's epochs lost while connected this boot (one a
+     * second expected), handed to the ledger as the count grows, so the day
+     * keeps them across restarts. Never taken back: a count that shrinks
+     * again (epochs that caught up) leaves what was reported. */
+    if (s->cfg.protected_slot) {
+        uint32_t lost = ntrip_lost_epochs((uint32_t)(s->on_ms / 1000u), st->epochs_sent_today);
+        if (lost > s->lost_reported) {
+            ledger_count_lost_epochs(lost - s->lost_reported);
+            s->lost_reported = lost;
+        }
+    }
     /* Every "today" figure from the availability ledger (kept across
      * restarts), so the day's online and offline times agree wherever they
      * are shown; without a trusted clock that is the last known day plus
@@ -1273,6 +1286,7 @@ static void publish(slot_t *s, uint32_t now, bool force)
         .offline_s = st->today_offline_s,
         .rate_online_s = (uint32_t)(s->on_ms / 1000u),
         .epochs_sent_today = st->epochs_sent_today,
+        .lost_epochs = have_ld ? ld.lost_epochs : s->lost_reported,
     };
     time_t t = time(NULL);
     if (din.counted && t >= CLOCK_VALID_UNIX && s->exp_day == (int32_t)(t / 86400) && s->exp_from_sod != UINT32_MAX &&

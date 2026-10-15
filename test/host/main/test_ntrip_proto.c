@@ -1535,6 +1535,75 @@ TEST_CASE("ntrip Onocoy day figures: none for a slot that does not count", "[ntr
     TEST_ASSERT_FALSE(out.so_far_valid);
 }
 
+TEST_CASE("ntrip Onocoy day figures: the budget and the streak use the best rate the day can still reach", "[ntrip]")
+{
+    /* Lost epochs: seconds connected (one epoch each) minus epochs sent. */
+    TEST_ASSERT_EQUAL_UINT32(1, ntrip_lost_epochs(34, 33));
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_lost_epochs(34, 35));   /* epochs that caught up */
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_lost_epochs(0, 0));
+
+    /* The best rate: 1 - lost / (86400 - offline so far), in ppm, rounded down. */
+    TEST_ASSERT_EQUAL_UINT32(1000000, ntrip_best_rate_ppm(0, 0));
+    TEST_ASSERT_EQUAL_UINT32(999988, ntrip_best_rate_ppm(1, 0));
+    TEST_ASSERT_EQUAL_UINT32(999004, ntrip_best_rate_ppm(86, 0));
+    TEST_ASSERT_EQUAL_UINT32(999698, ntrip_best_rate_ppm(26, 26));
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_best_rate_ppm(86400, 0));   /* the losses fill the day */
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_best_rate_ppm(10, 86395));
+    TEST_ASSERT_EQUAL_UINT32(1000000, ntrip_best_rate_ppm(0, 86400));
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_best_rate_ppm(1, 86400));
+
+    /* The ppm budget agrees with the per-mille one at whole per mille. */
+    TEST_ASSERT_EQUAL_UINT32(ntrip_offline_budget_s(999), ntrip_offline_budget_ppm_s(999000));
+    TEST_ASSERT_EQUAL_UINT32(473, ntrip_offline_budget_ppm_s(999988));   /* one lost epoch costs nothing */
+    TEST_ASSERT_EQUAL_UINT32(465, ntrip_offline_budget_ppm_s(999004));
+    TEST_ASSERT_EQUAL_UINT32(300, ntrip_offline_budget_ppm_s(980000));
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_offline_budget_ppm_s(979999));
+    TEST_ASSERT_EQUAL_UINT32(473, ntrip_offline_budget_ppm_s(2000000));
+
+    /* 34 s after a start, one epoch lost (this boot's rate 97.1 %): the old
+     * rule gave a budget of 0 and "missed" with any offline second. */
+    ntrip_day_in_t in = { .counted = true, .online_s = 34, .offline_s = 20, .rate_online_s = 34,
+                          .epochs_sent_today = 33, .lost_epochs = 1 };
+    ntrip_day_out_t out;
+    ntrip_day_metrics(&in, &out);
+    TEST_ASSERT_EQUAL_UINT16(970, out.data_rate_permille);   /* the shown rate is still this boot's */
+    TEST_ASSERT_EQUAL_UINT32(999988, out.best_rate_ppm);
+    TEST_ASSERT_EQUAL_UINT32(473, out.budget_s);
+    TEST_ASSERT_EQUAL_UINT32(453, out.budget_left_s);
+    TEST_ASSERT_TRUE(out.streak_ok);
+
+    /* The stall the screenshots showed: 26 epochs lost in 101 s connected, 26 s offline. */
+    in = (ntrip_day_in_t){ .counted = true, .online_s = 75, .offline_s = 26, .rate_online_s = 101,
+                           .epochs_sent_today = 75, .lost_epochs = 26 };
+    ntrip_day_metrics(&in, &out);
+    TEST_ASSERT_EQUAL_UINT16(742, out.data_rate_permille);
+    TEST_ASSERT_EQUAL_UINT32(471, out.budget_s);
+    TEST_ASSERT_TRUE(out.streak_ok);
+
+    /* Losses from earlier boots count (the ledger keeps them): 86 lost cost about 8 s. */
+    in = (ntrip_day_in_t){ .counted = true, .online_s = 3600, .offline_s = 0, .rate_online_s = 600,
+                           .epochs_sent_today = 600, .lost_epochs = 86 };
+    ntrip_day_metrics(&in, &out);
+    TEST_ASSERT_EQUAL_UINT16(1000, out.data_rate_permille);
+    TEST_ASSERT_EQUAL_UINT32(465, out.budget_s);
+    TEST_ASSERT_TRUE(out.streak_ok);
+
+    /* Over the budget: missed. */
+    in.offline_s = 466;
+    ntrip_day_metrics(&in, &out);
+    TEST_ASSERT_EQUAL_UINT32(0, out.budget_left_s);
+    TEST_ASSERT_FALSE(out.streak_ok);
+
+    /* So many lost that even a perfect rest of the day stays under 98 %:
+     * missed without a single offline second. */
+    in = (ntrip_day_in_t){ .counted = true, .online_s = 3000, .offline_s = 0, .rate_online_s = 3000,
+                           .epochs_sent_today = 1000, .lost_epochs = 2000 };
+    ntrip_day_metrics(&in, &out);
+    TEST_ASSERT_EQUAL_UINT32(976851, out.best_rate_ppm);
+    TEST_ASSERT_EQUAL_UINT32(0, out.budget_s);
+    TEST_ASSERT_FALSE(out.streak_ok);
+}
+
 TEST_CASE("ntrip Onocoy day figures: graced uptime so far", "[ntrip]")
 {
     /* Enabled at 18:00 UTC and online since (two hours later). */
@@ -1562,26 +1631,33 @@ TEST_CASE("ntrip Onocoy day figures: graced uptime so far", "[ntrip]")
 TEST_CASE("ntrip Onocoy day figures: the day from the ledger, the rate from this boot", "[ntrip]")
 {
     /* After a restart: the ledger holds the whole day so far (10 h online,
-     * 600 s offline); this boot's own counters only its last hour, at 99.5 %. */
+     * 600 s offline, and this boot's 18 lost epochs); this boot's own
+     * counters only its last hour, at 99.5 %. The rate shown is this boot's;
+     * the budget is the day's, from every epoch it lost. */
     ntrip_day_in_t in = { .counted = true, .online_s = 36000, .offline_s = 600, .rate_online_s = 3600,
-                          .epochs_sent_today = 3582, .day_known = true, .unplanned_offline_s = 600,
-                          .elapsed_s = 36600 };
+                          .epochs_sent_today = 3582, .lost_epochs = 18, .day_known = true,
+                          .unplanned_offline_s = 600, .elapsed_s = 36600 };
     ntrip_day_out_t out;
     ntrip_day_metrics(&in, &out);
     TEST_ASSERT_TRUE(out.rate_valid);
     TEST_ASSERT_EQUAL_UINT16(995, out.data_rate_permille);   /* epochs over the time online they cover */
-    TEST_ASSERT_EQUAL_UINT32(430, out.budget_s);             /* the day's allowance at that rate */
+    TEST_ASSERT_EQUAL_UINT32(471, out.budget_s);             /* 18 lost of the day's 85800 still expected */
     TEST_ASSERT_EQUAL_UINT32(0, out.budget_left_s);          /* used up: 600 s offline */
     TEST_ASSERT_FALSE(out.streak_ok);
     TEST_ASSERT_EQUAL_UINT16((36000 + 300) * 1000 / 86400, out.graced_uptime_permille);
 
-    /* The same day at a perfect rate: 473 s allowed, 600 s over it by 127 s. */
-    in.epochs_sent_today = 3600;
-    ntrip_day_metrics(&in, &out);
-    TEST_ASSERT_EQUAL_UINT32(473, out.budget_s);
-    TEST_ASSERT_EQUAL_UINT32(0, out.budget_left_s);
+    /* Earlier boots lost 430 more: the day's allowance shrinks, whatever this boot's rate. */
+    in.lost_epochs = 448;
     in.offline_s = 400;
     ntrip_day_metrics(&in, &out);
+    TEST_ASSERT_EQUAL_UINT32(428, out.budget_s);
+    TEST_ASSERT_EQUAL_UINT32(28, out.budget_left_s);
+    TEST_ASSERT_TRUE(out.streak_ok);
+
+    /* Nothing lost all day: 473 s allowed, 400 s used. */
+    in.lost_epochs = 0;
+    ntrip_day_metrics(&in, &out);
+    TEST_ASSERT_EQUAL_UINT32(473, out.budget_s);
     TEST_ASSERT_EQUAL_UINT32(73, out.budget_left_s);
     TEST_ASSERT_TRUE(out.streak_ok);
 }

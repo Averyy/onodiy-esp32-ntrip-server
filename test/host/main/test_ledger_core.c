@@ -336,6 +336,7 @@ TEST_CASE("ledger blobs: round trip, newer writers may append, damage is refused
     }
     s.today.power_off_ms = 99;
     s.today.rx_overflows = 4;
+    s.today.lost_epochs = 17;
     s.expected_mask = 0x81;
     s.protected_mask = 0x01;
     s.planned = true;
@@ -354,20 +355,27 @@ TEST_CASE("ledger blobs: round trip, newer writers may append, damage is refused
 
     buf[len] = 0xAB;                                             /* a newer writer's extra field */
     TEST_ASSERT_TRUE(lc_decode_today(buf, len + 1u, &d));
-    TEST_ASSERT_FALSE(lc_decode_today(buf, len - 2u, &d));       /* cut inside the online times */
+    TEST_ASSERT_FALSE(lc_decode_today(buf, len - 2u, &d));       /* cut inside the lost epochs */
+    TEST_ASSERT_FALSE(lc_decode_today(buf, len - 6u, &d));       /* cut inside the online times */
     /* Today carries the mark it runs up to (one unit), then each slot's online time. */
     s.reboot_planned = true;
     s.alive_ms = at(DAY0, H(7));
     len = lc_encode_today(&s, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_size_t(122 + 4 * LC_SLOTS, len);
+    TEST_ASSERT_EQUAL_size_t(126 + 4 * LC_SLOTS, len);
     TEST_ASSERT_TRUE(len <= 160);                                /* what the previous build's buffer takes */
     TEST_ASSERT_TRUE(lc_decode_today(buf, len, &d));
     TEST_ASSERT_TRUE(d.reboot_planned);
     TEST_ASSERT_EQUAL_INT64(at(DAY0, H(7)), d.alive_ms);
     TEST_ASSERT_EQUAL_MEMORY(&s.today, &d.today, sizeof(d.today));
-    /* A blob from before the online times existed ends 4 bytes a slot
-     * earlier: no online time. */
-    size_t old = len - 4u * LC_SLOTS;
+    /* A blob from before the lost epochs existed ends 4 bytes earlier: none
+     * lost, everything else as stored. */
+    TEST_ASSERT_TRUE(lc_decode_today(buf, len - 4u, &d));
+    TEST_ASSERT_EQUAL_UINT32(0, d.today.lost_epochs);
+    TEST_ASSERT_EQUAL_UINT32(s.today.up_ms[3], d.today.up_ms[3]);
+    TEST_ASSERT_EQUAL_INT64(at(DAY0, H(7)), d.alive_ms);
+    /* One from before the online times existed ends 4 bytes a slot earlier
+     * than that: no online time. */
+    size_t old = len - 4u - 4u * LC_SLOTS;
     TEST_ASSERT_TRUE(lc_decode_today(buf, old, &d));
     TEST_ASSERT_EQUAL_INT64(at(DAY0, H(7)), d.alive_ms);
     for (size_t i = 0; i < LC_SLOTS; i++) {
@@ -1208,4 +1216,123 @@ TEST_CASE("ledger: online time before the first clock is spread like the downtim
     TEST_ASSERT_EQUAL_UINT32(1800000u, c.today.up_ms[0]);
     TEST_ASSERT_EQUAL_INT32(DAY0 - 1, c.hist[0].utc_day);
     TEST_ASSERT_EQUAL_UINT32(1800000u, c.hist[0].up_ms[0]);
+}
+
+/* ---- Lost epochs (the protected slot's data rate across restarts) ---------------------------- */
+
+TEST_CASE("ledger: today's lost epochs add up, go with today and start again at midnight", "[ledger]")
+{
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, at(DAY0, H(23) + M(59)), LC_CLOCK_SNTP);
+    lc_set_rtcm_ok(&c, T0, true);
+    lc_set_slot(&c, T0, 0, true, true, true);
+    lc_count_lost_epochs(&c, T0, 0);                             /* nothing */
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.lost_epochs);
+    lc_count_lost_epochs(&c, T0 + 1000u, 2);
+    lc_count_lost_epochs(&c, T0 + 2000u, 3);
+    TEST_ASSERT_EQUAL_UINT32(5, c.today.lost_epochs);
+    TEST_ASSERT_TRUE(c.today_dirty);                             /* stored with today at the next store */
+    lc_day_t t;
+    lc_today(&c, &t);
+    TEST_ASSERT_EQUAL_UINT32(5, t.lost_epochs);
+    /* UTC midnight: the new day starts with none, and the finished day does
+     * not keep them (the history blob has no room: an older build reads it
+     * into a buffer of exactly its size). */
+    lc_tick(&c, T0 + 61000u);
+    TEST_ASSERT_EQUAL_INT32(DAY0 + 1, c.today.utc_day);
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.lost_epochs);
+    TEST_ASSERT_EQUAL_INT32(DAY0, c.hist[0].utc_day);
+    TEST_ASSERT_EQUAL_UINT32(0, c.hist[0].lost_epochs);
+    lc_count_lost_epochs(&c, T0 + 62000u, 1);
+    TEST_ASSERT_EQUAL_UINT32(1, c.today.lost_epochs);
+    /* A clock set back behind today keeps counting into today, never into a history day. */
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0 + 63000u, at(DAY0, H(23) + M(30)), LC_CLOCK_GNSS));
+    lc_count_lost_epochs(&c, T0 + 64000u, 4);
+    TEST_ASSERT_EQUAL_UINT32(5, c.today.lost_epochs);
+    TEST_ASSERT_EQUAL_UINT32(0, c.hist[0].lost_epochs);
+}
+
+TEST_CASE("ledger: lost epochs before the first clock go to today with it", "[ledger]")
+{
+    fresh(T0, 0);
+    lc_count_lost_epochs(&c, T0 + 1000u, 7);
+    TEST_ASSERT_EQUAL_UINT32(7, c.pending.lost_epochs);
+    lc_day_t t;
+    lc_today(&c, &t);
+    TEST_ASSERT_EQUAL_UINT32(7, t.lost_epochs);                  /* shown while there is no clock */
+    /* The pending span reaches back into yesterday: the time is spread, the lost epochs are today's. */
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0 + 10000u, at(DAY0, S(2)), LC_CLOCK_SNTP));
+    TEST_ASSERT_EQUAL_INT32(DAY0, c.today.utc_day);
+    TEST_ASSERT_EQUAL_UINT32(7, c.today.lost_epochs);
+    TEST_ASSERT_EQUAL_UINT32(0, c.pending.lost_epochs);
+    for (size_t i = 0; i < c.hist_n; i++) {
+        TEST_ASSERT_EQUAL_UINT32(0, c.hist[i].lost_epochs);
+    }
+}
+
+TEST_CASE("ledger: lost epochs survive a reset (RTC copy) and a power cut (as last stored)", "[ledger]")
+{
+    static uint8_t blob[200];
+    size_t blob_len = 0;
+    int64_t alive = 0;
+    bool today = false;
+    bool hist = false;
+
+    /* 10:00, Onocoy streams; 5 epochs lost, stored at the next store. */
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, at(DAY0, H(10)), LC_CLOCK_SNTP);
+    lc_set_rtcm_ok(&c, T0, true);
+    lc_set_slot(&c, T0, 0, true, true, true);
+    lc_count_lost_epochs(&c, T0 + 1000u, 5);
+    lc_tick(&c, T0 + 60000u);
+    lc_snapshot_t snap;
+    lc_snapshot(&c, &snap);
+    TEST_ASSERT_TRUE(lc_persist_due(&c, T0 + 60000u, 60000u, &alive, &today, &hist));
+    TEST_ASSERT_TRUE(today);
+    snap.alive_ms = alive;
+    blob_len = lc_encode_today(&snap, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(blob_len > 0 && blob_len <= 160);
+
+    /* 3 more, then the store a minute later is cut by a power cut while
+     * NVS writes it: NVS replaces a key as a unit, so the stored blob stays
+     * the one from the first store, with its own mark. */
+    lc_count_lost_epochs(&c, T0 + 70000u, 3);
+    lc_tick(&c, T0 + 120000u);
+    TEST_ASSERT_TRUE(lc_persist_due(&c, T0 + 120000u, 60000u, &alive, &today, &hist));
+    TEST_ASSERT_TRUE(today);
+    lc_snapshot(&c, &snap);
+    TEST_ASSERT_EQUAL_UINT32(8, snap.today.lost_epochs);
+
+    /* A software reset first: the RTC copy has all 8. */
+    lc_rtc_t blk;
+    lc_rtc_seal(&blk, &snap, 3u);
+    fresh(5000u, 1000);
+    TEST_ASSERT_TRUE(lc_rtc_valid(&blk));
+    lc_restore(&c, &blk.snap, LC_RESET_SOFTWARE);
+    TEST_ASSERT_EQUAL_UINT32(8, c.today.lost_epochs);
+    lc_set_utc(&c, 5000u, at(DAY0, H(10) + M(2) + S(3)), LC_CLOCK_SNTP);
+    TEST_ASSERT_EQUAL_UINT32(8, c.today.lost_epochs);
+
+    /* The power cut instead: restored from the stored blob, the count as of
+     * its store (5), never more than was stored, and the gap from its mark. */
+    lc_snapshot_t st = snap_base();
+    TEST_ASSERT_TRUE(lc_decode_today(blob, blob_len, &st));
+    TEST_ASSERT_EQUAL_UINT32(5, st.today.lost_epochs);
+    st.alive_ms = lc_stored_mark(st.alive_ms, 0);
+    fresh(T0, 0);
+    lc_restore(&c, &st, LC_RESET_POWER_CUT);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(10) + M(5)), LC_CLOCK_SNTP));
+    TEST_ASSERT_EQUAL_UINT32(5, c.today.lost_epochs);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)M(4), c.today.down_ms[0]);   /* the gap from the 10:01 mark */
+
+    /* An older build's blob (no lost epochs) after an update: none lost, nothing else changed. */
+    st = snap_base();
+    TEST_ASSERT_TRUE(lc_decode_today(blob, blob_len - 4u, &st));
+    TEST_ASSERT_EQUAL_UINT32(0, st.today.lost_epochs);
+    TEST_ASSERT_EQUAL_INT64(at(DAY0, H(10) + M(1)), st.alive_ms);
+
+    /* The RTC block of an older build (version 4) is refused: the stored blob decides. */
+    lc_rtc_seal(&blk, &snap, 3u);
+    blk.version = 4u;
+    TEST_ASSERT_FALSE(lc_rtc_valid(&blk));
 }

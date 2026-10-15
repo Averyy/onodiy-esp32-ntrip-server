@@ -15,9 +15,11 @@
  * casters paused for receiver work, and a reboot the user asked for (see
  * "Planned reboots"). Slots flagged "protected" (the Onocoy slot)
  * drive the daily downtime budget shown in the UI and with update prompts,
- * and the network recovery ladder. The budget never gates anything: every
- * update is started by the user, who sees the expected downtime against
- * what is left.
+ * and the network recovery ladder. For today only it also keeps the
+ * protected slot's lost epochs (ledger_count_lost_epochs), so the budget's
+ * data rate does not start again at every boot. The budget never gates
+ * anything: every update is started by the user, who sees the expected
+ * downtime against what is left.
  *
  * Inputs (all push-style, so this L1 component depends on nobody above it):
  *   - ntrip_server reports each slot's state on every change;
@@ -116,6 +118,7 @@ typedef struct {
     uint32_t power_off_s;                     /**< power-cut gaps added at boot */
     uint32_t rx_overflows;                    /**< UART/driver overflow events */
     uint32_t up_s[LEDGER_MAX_SLOTS];          /**< seconds a slot streamed with fresh RTCM (online) */
+    uint32_t lost_epochs;                     /**< today only (0 in the history): the protected slot's epochs lost while connected */
 } ledger_day_t;
 
 /**
@@ -205,6 +208,14 @@ void ledger_set_gps_time(uint32_t tow_ms, uint32_t age_ms);
 /** Count a data-loss event against today (UART overflow etc.). */
 void ledger_count_overflow(void);
 
+/**
+ * Count `n` more epochs the protected (Onocoy) slot should have sent while
+ * connected but did not (ntrip_server, as its count for this boot grows).
+ * Kept for today across restarts with the other counters, so the day's data
+ * rate does not start again at every boot; a finished day does not keep it.
+ */
+void ledger_count_lost_epochs(uint32_t n);
+
 /** 1 Hz tick from the health monitor: accrue, roll the day, refresh the RTC copy, store (may write settings). */
 void ledger_tick(void);
 
@@ -221,8 +232,8 @@ uint32_t ledger_protected_down_today_s(void);
  * Protected-slot downtime still allowed today: 86400 - (86400 x
  * CONFIG_LEDGER_TARGET_PERMILLE / 1000 - CONFIG_LEDGER_GRACE_S) minus the
  * protected downtime so far, clamped at 0 (998 per mille with the 300 s
- * grant: 473 s a day). The Onocoy slot's estimate adjusted for its data rate
- * comes from the caster status.
+ * grant: 473 s a day). The Onocoy slot's estimate adjusted for the best
+ * data rate its day can still reach comes from the caster status.
  */
 uint32_t ledger_protected_budget_left_s(void);
 

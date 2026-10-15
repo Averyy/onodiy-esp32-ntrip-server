@@ -60,6 +60,7 @@ static void mark(lc_t *c, const lc_day_t *r)
     }
 }
 
+/* Every per-day figure but the lost epochs, which only today keeps (lc_today, spread_pending). */
 static void add_day(lc_day_t *dst, const lc_day_t *src)
 {
     for (size_t s = 0; s < LC_SLOTS; s++) {
@@ -287,6 +288,12 @@ static void spread_pending(lc_t *c, int64_t end)
         r->rx_overflows = sat_add(r->rx_overflows, p.rx_overflows);
         r->power_off_ms = sat_add(r->power_off_ms, p.power_off_ms);
         mark(c, r);
+    }
+    /* Lost epochs go to today whatever day the span ends on (the caster
+     * client counted them as today's): a history day never holds them. */
+    if (p.lost_epochs != 0 && c->today.utc_day >= 0) {
+        c->today.lost_epochs = sat_add(c->today.lost_epochs, p.lost_epochs);
+        c->today_dirty = true;
     }
     memset(&c->pending, 0, sizeof(c->pending));
     c->pending.utc_day = -1;
@@ -546,6 +553,21 @@ void lc_count_overflow(lc_t *c, uint32_t now_ms)
     mark(c, r);
 }
 
+void lc_count_lost_epochs(lc_t *c, uint32_t now_ms, uint32_t n)
+{
+    if (n == 0) {
+        return;
+    }
+    advance(c, now_ms);
+    lc_day_t *r = &c->pending;
+    if (c->clock != LC_CLOCK_NONE) {
+        (void)rec_for_day(c, day_of(c->unix_ms));   /* today follows the clock forward, never back */
+        r = &c->today;
+    }
+    r->lost_epochs = sat_add(r->lost_epochs, n);
+    mark(c, r);
+}
+
 int64_t lc_unix_now(const lc_t *c, uint32_t now_ms)
 {
     if (c->clock == LC_CLOCK_NONE) {
@@ -560,6 +582,7 @@ void lc_today(const lc_t *c, lc_day_t *out)
     if (c->clock == LC_CLOCK_NONE) {
         lc_day_t p = c->pending;
         add_day(out, &p);
+        out->lost_epochs = sat_add(out->lost_epochs, p.lost_epochs);
     }
 }
 
@@ -697,6 +720,7 @@ size_t lc_encode_today(const lc_snapshot_t *s, uint8_t *buf, size_t cap)
     blob_put_bool(&w, s->reboot_planned);   /* appended later: older blobs end before it */
     blob_put_i64(&w, s->alive_ms);          /* appended later: the mark this today runs up to */
     put_up(&w, &s->today);                  /* appended later: each slot's online time */
+    blob_put_u32(&w, s->today.lost_epochs); /* appended later: the protected slot's lost epochs */
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
@@ -720,6 +744,9 @@ bool lc_decode_today(const uint8_t *buf, size_t len, lc_snapshot_t *s)
     }
     if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
         get_up(&r, &d, slots);     /* likewise */
+    }
+    if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
+        d.lost_epochs = blob_get_u32(&r);   /* likewise */
     }
     if (!blob_reader_ok(&r)) {
         return false;

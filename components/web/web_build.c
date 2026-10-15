@@ -460,6 +460,16 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
     }
     wj_uint(w, "best_bands", s->obs_valid ? s->best_bands : 0);
     if (!pub) {
+        /* Onocoy's quality score needs GLONASS with its message 1230: both from
+         * what the station has (the signal summary, the last apply's answer). */
+        wj_bool(w, "glonass", s->obs_valid && s->glonass);
+        if (st->rtcm1230_known) {
+            wj_bool(w, "rtcm1230_supported", st->rtcm1230_supported);
+        } else {
+            wj_null(w, "rtcm1230_supported");   /* never applied: neither accepted nor refused */
+        }
+    }
+    if (!pub) {
         wj_str(w, "journal", web_journal_name(web_journal_view(st, s->boot.safe_mode)));
         wj_bool(w, "uart_closed", s->uart_closed);
         wj_bool(w, "rx_maintenance", st->rx_maintenance);
@@ -2175,7 +2185,8 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
     wj_obj_close(w);
 }
 
-static void day(wj_t *w, const char *key, const ledger_day_t *d, size_t slots)
+/* `is_today`: the lost epochs too, which only today keeps. */
+static void day(wj_t *w, const char *key, const ledger_day_t *d, size_t slots, bool is_today)
 {
     char date[11];
     web_utc_date(d->utc_day, date);
@@ -2204,6 +2215,9 @@ static void day(wj_t *w, const char *key, const ledger_day_t *d, size_t slots)
     wj_arr_close(w);
     wj_uint(w, "power_off_s", d->power_off_s);
     wj_uint(w, "rx_overflows", d->rx_overflows);
+    if (is_today) {
+        wj_uint(w, "lost_epochs", d->lost_epochs);
+    }
     wj_obj_close(w);
 }
 
@@ -2282,13 +2296,13 @@ void web_build_availability(wj_t *w, const web_avail_snap_t *a)
         wj_null(w, "protected");
     }
     if (a->today_valid && a->today != NULL) {
-        day(w, "today", a->today, a->slots);
+        day(w, "today", a->today, a->slots, true);
     } else {
         wj_null(w, "today");
     }
     wj_arr_open(w, "history");
     for (size_t i = 0; a->history != NULL && i < a->history_count; i++) {
-        day(w, NULL, &a->history[i], a->slots);
+        day(w, NULL, &a->history[i], a->slots, false);
     }
     wj_arr_close(w);
     wj_obj_close(w);
