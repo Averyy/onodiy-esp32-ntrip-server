@@ -672,7 +672,7 @@ details.fold > :not(summary) + * { margin-top: 0.75rem; }
 .edit-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
 .edit-row > .btn { flex: none; }
 /* A list of disclosures (the counters): one under the other, close together. */
-.card > details.more + details.more { margin-top: 0.2rem; }
+.card > details.more + details.more, details.fold > details.more + details.more { margin-top: 0.2rem; }
 details.more > summary { cursor: pointer; color: var(--accent); font-weight: 600; padding: 0.3rem 0; }
 details.more[open] > summary { margin-bottom: 0.6rem; }
 
@@ -859,7 +859,7 @@ table.rows td.name { width: 100%; max-width: 0; overflow: hidden; text-overflow:
 table.rows i.dot { display: inline-block; width: 8px; height: 8px; margin-right: 0.35rem; border-radius: 50%; }
 @media (max-width: 559px) {
   table.rows { font-size: 0.875rem; }
-  table.rows th, table.rows td, table.counts th, table.counts td { padding-left: 0.3rem; padding-right: 0.3rem; }
+  table.rows th, table.rows td, table.counts th, table.counts td, table.events th, table.events td { padding-left: 0.3rem; padding-right: 0.3rem; }
 }
 table.counts tfoot th, table.counts tfoot td { border-top: 1px solid var(--border); border-bottom: 0; font-weight: 650; }
 
@@ -953,18 +953,19 @@ pre.log {
   background: var(--surface-2);
   font-size: 0.78rem;
   line-height: 1.4;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
+/* One row per line, also on a phone: the time since the start, then the text, cut at the edge; a tap shows the whole line. */
+pre.log .ln { display: block; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+pre.log .ln.open { white-space: pre-wrap; overflow-wrap: anywhere; }
+pre.log .t { color: var(--muted); }
 /* In a card the log box keeps the card's gap above it (pre.log's own margin is 0). */
 .card > * + pre.log { margin-top: 0.75rem; }
 pre.log .e { color: var(--bad); }
 pre.log .w { color: var(--warn); }
-pre.log .gap { color: var(--muted); font-style: italic; }
+pre.log .gap { color: var(--muted); font-style: italic; cursor: auto; }
 
-/* Sub-tabs (Diagnostics): one row; on a phone it scrolls sideways with the tabs' edge fade (edgeFade()). */
-.seg { display: flex; gap: 0.35rem; overflow-x: auto; scrollbar-width: none; }
-.seg::-webkit-scrollbar { display: none; }
+/* Sub-tabs (Diagnostics: Overview, History, Logs): one row, also on a phone. */
+.seg { display: flex; gap: 0.35rem; }
 .seg a {
   flex: none;
   white-space: nowrap;
@@ -1127,13 +1128,13 @@ pre.log .gap { color: var(--muted); font-style: italic; }
 .foot a { display: inline-block; min-height: 24px; padding: 2px 0; line-height: 20px; }
 .foot.row a, .card .foot a + a { margin-right: 0.25rem; }
 
-/* Event lists (the journal, the connection history): a heading row per start, a "×N" toggle on repeats. */
-table.events td:first-child { white-space: nowrap; color: var(--muted); }
+/* The event list (the journal) and the recent starts: one row each, the time, then the event and its details; a heading row per start, a "×N" toggle on repeats. */
+td.when { width: 1%; white-space: nowrap; color: var(--muted); }
 table.events tr.sep th { padding-top: 0.8rem; color: var(--text); font-size: 0.95rem; font-weight: 650; white-space: normal; background: var(--surface-2); }
 table.events tr.sep .t { margin-right: 0.5rem; color: var(--muted); font-weight: 500; }
-table.events td.ev { font-weight: 600; }
 table.events tr.rep-row td { background: var(--surface-2); font-size: 0.9rem; }
-table.events tr.rep-row td.ev { padding-left: 1.25rem; font-weight: 500; }
+table.events tr.rep-row td + td { padding-left: 1.25rem; }
+table.events tr.rep-row strong { font-weight: 500; }
 .rep {
   margin-left: 0.4rem;
   padding: 0.05rem 0.5rem;
@@ -1147,42 +1148,12 @@ table.events tr.rep-row td.ev { padding-left: 1.25rem; font-weight: 500; }
   cursor: pointer;
 }
 .rep[aria-expanded="true"] { border-color: var(--accent); background: var(--accent-soft); }
-/* On a phone each row is a block: the time small on its own line, then the event in bold and its details. */
-@media (max-width: 480px) {
-  table.events, table.events tbody, table.events tr, table.events th { display: block; width: 100%; }
-  table.events thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-  table.events tbody tr { padding: 0.5rem 0.25rem; border-bottom: 1px solid var(--border); }
-  table.events tbody tr:last-child { border-bottom: 0; }
-  table.events td { display: inline; padding: 0; border: 0; }
-  table.events td:first-child { display: block; font-size: 0.85rem; white-space: normal; }
-  table.events td.ev { margin-right: 0.4rem; }
-  table.events tbody tr.sep { padding: 0; }
-  table.events tr.sep th { padding: 0.6rem 0.5rem; border: 0; }
+/* On a phone an event is one line, cut at the edge; a tap shows it whole. */
+@media (max-width: 559px) {
+  table.events { font-size: 0.875rem; }
+  table.events td + td { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  table.events tr.open td + td { white-space: normal; }
   table.events tr.sep .t { display: block; }
-  table.events tbody tr.rep-row { padding-left: 1rem; background: var(--surface-2); }
-  table.events tr.rep-row td.ev { padding-left: 0; }
-}
-
-/* Tables of key/value rows on a phone: each row a block of "header: value" lines (no inner scroller). */
-@media (max-width: 480px) {
-  table.stack-sm, table.stack-sm tbody, table.stack-sm tr, table.stack-sm td, table.stack-sm tr.sep th { display: block; width: 100%; }
-  table.stack-sm thead tr { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; }
-  table.stack-sm thead th { border: 0; padding: 0.2rem 0; }
-  table.stack-sm thead th:not(.sortable) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-  table.stack-sm tbody tr { padding: 0.45rem 0; border-bottom: 1px solid var(--border); }
-  table.stack-sm tbody tr:last-child { border-bottom: 0; }
-  table.stack-sm td {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: 0.75rem;
-    padding: 0.1rem 0;
-    border: 0;
-    text-align: right;
-    white-space: normal;
-  }
-  table.stack-sm td::before { content: attr(data-label); flex: none; max-width: 45%; color: var(--muted); font-size: 0.85rem; text-align: left; }
-  table.stack-sm td[data-label=""]::before, table.stack-sm td:not([data-label])::before { content: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

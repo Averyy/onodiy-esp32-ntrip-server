@@ -321,20 +321,17 @@ function scrollBox(label, ...kids) {
 }
 
 /**
- * Table from header texts and rows of cells. opts.num: indexes of numeric
- * columns (right-aligned); opts.stack: on a phone (under 480 px) each row
- * becomes a list of "header: value" lines instead of a table that scrolls
- * sideways (every column stays readable); opts.label: what the table shows,
- * for assistive technology (default: its column headers).
+ * Table from header texts and rows of cells, one line per row at every
+ * width. opts.num: indexes of numeric columns (right-aligned); opts.cls:
+ * the table's class ('rows': no cell wraps); opts.label: what the table
+ * shows, for assistive technology (default: its column headers).
  */
 function table(head, rows, opts) {
   const numeric = (opts && opts.num) || [];
-  const stack = !!(opts && opts.stack);
-  return scrollBox((opts && opts.label) || head.join(', '), h('table', { class: stack ? 'stack-sm' : null },
+  return scrollBox((opts && opts.label) || head.join(', '), h('table', { class: (opts && opts.cls) || null },
     h('thead', null, h('tr', null, head.map((t, i) => h('th', { class: numeric.indexOf(i) >= 0 ? 'num' : null }, t)))),
     h('tbody', null, rows.map(r => h('tr', null, r.map((c, i) =>
-      h('td', { class: numeric.indexOf(i) >= 0 ? 'num' : null, 'data-label': stack ? head[i] : null },
-        c === null || c === undefined ? '–' : c)))))));
+      h('td', { class: numeric.indexOf(i) >= 0 ? 'num' : null }, c === null || c === undefined ? '–' : c)))))));
 }
 
 /* ---- Formatting -------------------------------------------------------- */

@@ -50,7 +50,9 @@ vm.createContext(ctx);
 /* refusalText: what the UI says for an error answer {status, error: {code, ...}} (errText on an ApiError). */
 const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { restartPlanText, onocoyElsewhereText, connRow, journalDetail, presetInfo: () => ({ PRESETS, PRESET_INFO }),\n' +
-  '  connItems: l => connItems(l), journalItems: a => journalItems(a[0], a[1], a[2]), evFilter: () => EV_FILTER,\n' +
+  '  journalItems: a => { S.status = a[3] || null; return journalItems(a[0], a[1], a[2]); }, evFilter: () => EV_FILTER,\n' +
+  '  healthChip: a => healthChip(a[0], a[1], a[2]), sinceStart: hl => sinceStart(hl), logParts: l => logParts(l),\n' +
+  '  timeRange: a => timeRange(a[0], a[1]), diagTabs: () => DIAG_TABS.map(t => t[1]), dayParts: a => dayParts(a[0], a[1]),\n' +
   '  wifiChip: w => wifiChip(w), apChip: ap => apChip(ap), recoveryHint: () => recoveryHint(),\n' +
   '  ago: s => checkedAgo(Date.now() / 1000 - s),\n' +
   '  onlineShare: a => onlineShare(a[0], a[1]),\n' +
@@ -174,20 +176,13 @@ def test_no_receiver_refusal_text():
 def test_unknown_rssi_never_shows_dbm():
     """A Wi-Fi drop's RSSI is a reading only from -127 to -1 dBm: null (this build's unknown), 0 and the -128
     of journal records from earlier builds are unknown and show no signal figure."""
-    drop = {"kind": "wifi_disconnect", "a": 201}
-    out = run_ui([
-        ("journalDetail", {**drop, "b": None}),
-        ("journalDetail", {**drop, "b": -128}),
-        ("journalDetail", {**drop, "b": 0}),
-        ("journalDetail", {**drop, "b": -67}),
-        ("journalDetail", {**drop, "b": -127}),
-        ("journalDetail", {**drop, "b": -1}),
-    ])
-    for text in out[:3]:
+    out = run_ui([("journalItems", [[jrec(1, "wifi_disconnect", 201, b, 5)], True, None]) for b in (None, -128, 0, -67, -127, -1)])
+    det = [[i["det"] for i in items if "head" not in i][0] for items in out]
+    for text in det[:3]:
         assert "dBm" not in text and "signal" not in text
         assert "201" in text  # the reason stays
-    assert "signal -67 dBm" in out[3]
-    assert "signal -127 dBm" in out[4] and "signal -1 dBm" in out[5]
+    assert "signal -67 dBm" in det[3]
+    assert "signal -127 dBm" in det[4] and "signal -1 dBm" in det[5]
 
 
 def test_connection_row_rssi():
@@ -203,25 +198,19 @@ def test_connection_row_rssi():
     assert "dBm" not in zero[1] and "dBm" not in old[1]
 
 
-def conn(seq: int, kind: str, **kw) -> dict:
-    e = {"seq": seq, "time_unix": None, "uptime_s": seq * 10, "kind": kind, "slot": None, "slot_name": None, "class": None,
-         "count": None, "duration_s": None, "reason": None, "rssi": None, "stop_reason": None}
-    e.update(kw)
-    return e
-
-
-def test_connection_history_pairs_a_drop_with_its_return_and_folds_repeats():
-    """Newest first, as GET /api/connections sends it: a drop and the return after it are one row, the same row
-    three times in a row is one row with a "x3" toggle; a drop without a return stays as it is."""
-    onocoy = {"slot": 0, "slot_name": "Onocoy"}
-    pairs = []
+def test_event_list_pairs_a_drop_with_its_return_and_folds_repeats():
+    """The journal's connection records as one list (no separate connection history): a drop and the return after
+    it are one row, the same row three times in a row is one row with a "x3" toggle; a drop without a return stays
+    as it is. Casters by their name now, never a slot number."""
+    rc, to, dup = 5, 4, 5   # remote_close and timeout (ntrip_fail_class_t), duplicate (ntrip_stop_t)
+    recs = [jrec(5, "caster_stop", dup << 8, 0, 5)]
     for i in range(3):
-        pairs = [conn(10 + 2 * i + 1, "caster_up", duration_s=20, count=2, **onocoy),
-                 conn(10 + 2 * i, "caster_down", duration_s=3600, **{"class": "remote_close"}, **onocoy)] + pairs
-    hist = ([conn(30, "caster_down", duration_s=60, **{"class": "timeout"}, **onocoy),
-             conn(21, "wifi_up", duration_s=40, count=3), conn(20, "wifi_disconnect", reason=202, rssi=-67)]
-            + pairs + [conn(5, "caster_stop", stop_reason="duplicate", **onocoy)])
-    (rows,) = run_ui([("connItems", hist)])
+        recs += [jrec(10 + 2 * i, "caster_down", rc << 8, 3600, 10 + 2 * i), jrec(11 + 2 * i, "caster_up", 2 << 16, 20, 11 + 2 * i)]
+    recs += [jrec(20, "wifi_disconnect", 202, -67, 20), jrec(21, "wifi_up", 3, 40, 21), jrec(30, "caster_down", to << 8, 60, 30)]
+    st = {"casters": [{"slot": 0, "name": "Onocoy"}]}
+    every, casters = run_ui([("journalItems", [recs, True, None, st]),
+                             ("journalItems", [recs, True, ["caster_down", "caster_up", "caster_stop"], st])])
+    rows = [i for i in every if "head" not in i]
     assert [r["ev"] for r in rows] == ["Onocoy disconnected", "Wi-Fi dropped", "Onocoy disconnected", "Onocoy stopped"]
     assert rows[0]["det"] == "after 1\u00a0min online, timed out" and rows[0]["tone"] == "warn"
     assert rows[1]["det"] == "back after 40\u00a0s, authentication failed (wrong password?) (202), signal -67 dBm"
@@ -230,6 +219,8 @@ def test_connection_history_pairs_a_drop_with_its_return_and_folds_repeats():
     assert rows[3]["det"] == "duplicate stream, no new attempt until you act" and rows[3]["tone"] == "bad"
     for r in rows:
         assert "slot" not in (r["ev"] + r["det"]).lower()
+    # The Casters filter keeps the pairs and drops the Wi-Fi.
+    assert [r["ev"] for r in casters if "head" not in r] == ["Onocoy disconnected", "Onocoy disconnected", "Onocoy stopped"]
 
 
 def jrec(seq: int, kind: str, a: int = 0, b: int = 0, up: int = 1, t: int | None = None) -> dict:
@@ -254,8 +245,10 @@ def test_event_journal_one_heading_per_start_and_repeats_folded():
     heads = [i["head"][1] for i in every if "head" in i]
     assert heads == ["Restarted by you (previous run 44\u00a0s)", "Started after power-on or a reset by its pin"]
     rows = [i for i in every if "head" not in i]
-    assert [r["ev"] for r in rows] == ["Wi-Fi dropped", "Recovery step"]   # the restart record went into the heading
-    assert len(rows[1]["all"]) == 27 and " to " in rows[1]["when"]
+    # The restart record went into the heading; a recovery step is named after its recovery, the step is the detail.
+    assert [r["ev"] for r in rows] == ["Wi-Fi dropped", "Receiver recovery"]
+    assert rows[1]["det"] == "restart link, started"
+    assert len(rows[1]["all"]) == 27 and "\u2013" in rows[1]["when"]
     assert rows[0]["det"] == "network not found (201), signal -70 dBm"
     text = json.dumps(every, ensure_ascii=False)
     assert "≈" not in text and "#" not in text and "slot" not in text.lower()
@@ -859,16 +852,24 @@ def test_four_tabs_and_old_addresses_land_on_the_new_pages():
     assert out[0] == ["Status", "Casters", "Receiver", "Settings"]
     assert out[1:8] == ["receiver", "receiver/live", "receiver/live/start", "receiver/live", "settings/wifi", "settings/updates",
                         "settings/session"]
-    # Pages that exist stay where they are; Diagnostics keeps its sub-routes.
+    # Pages that exist stay where they are.
     assert out[8:13] == [None] * 5
     # Diagnostics is reached from Settings: that tab is the one marked there.
     assert out[13:] == ["settings", "settings", "receiver", "casters", ""]
 
 
+def test_diagnostics_three_parts_and_its_old_addresses():
+    """Overview, History and Logs; the six old parts land where their content is now."""
+    out = run_ui([("diagTabs", None)] + [("moved", ["diag", a]) for a in
+                                         ("", "history", "logs", "availability", "journal", "tasks", "coredump")])
+    assert out[0] == ["Overview", "History", "Logs"]
+    assert out[1:] == [None, None, None, "diag/history", "diag/history", "diag", "diag"]
+
+
 def test_every_link_in_the_ui_goes_to_a_page_that_exists():
     """No button, link or notice points at an address of the seven tabs (it would only redirect)."""
     pages = {"": None, "casters": None, "receiver": {"settings", "live"}, "settings": {"updates", "session", "wifi", "restart"},
-             "diag": None}
+             "diag": {"history", "logs"}}
     bad = []
     for f in sorted(UI_JS.glob("*.js")):
         for m in re.finditer(r"'#/([a-z]*)(?:/([a-z]+))?[a-z/]*'", f.read_text()):
@@ -935,3 +936,60 @@ def test_a_notice_hides_on_the_page_whose_card_says_it():
     assert journal_k == [[], [], ["journal"]]
     assert trial_k == [[], [], ["wifi"]]
 
+
+
+# ---- Diagnostics (80-diag.js) ----
+
+def test_health_chip_never_disagrees_with_the_status_page():
+    """The chip's colour comes from the alerts; with none named (a caster down makes the station "degraded"), from
+    the Status page's own state, so Diagnostics never shows amber beside a green Status page or the other way."""
+    rx = {"id": "no_receiver", "source": "station"}
+    power = {"id": "power_supply", "source": "health"}
+    held = {"id": "rx_held", "source": "health"}
+    out = run_ui([("healthChip", ["ok", [], None]), ("healthChip", ["failed", [rx, power], None]),
+                  ("healthChip", ["degraded", [power], None]), ("healthChip", ["degraded", [], {"tone": "warn"}]),
+                  ("healthChip", ["degraded", [], {"tone": "ok"}]), ("healthChip", ["degraded", [held], None]),
+                  ("healthChip", ["recovering", [], None]), ("healthChip", ["degraded", [], {"tone": "info"}])])
+    assert out == [["Healthy", "ok"], ["Needs attention", "bad"], ["Needs attention", "warn"], ["Needs attention", "warn"],
+                   ["Healthy", "ok"], ["Needs attention", "info"], ["Recovering", "warn"], ["Busy", "info"]]
+
+
+def test_since_this_start_names_only_what_happened():
+    out = run_ui([("sinceStart", {"gnss_stalls": 0, "recoveries": 0, "caster_restarts": 0, "network_recoveries": 0}),
+                  ("sinceStart", {"gnss_stalls": 2, "recoveries": 1, "caster_restarts": 0, "network_recoveries": 3})])
+    assert out == ["No stalls or recoveries", "2 receiver stalls, 1 recovery step, 3 network recoveries"]
+
+
+def test_log_lines_and_event_times_fit_one_line():
+    out = run_ui([("logParts", "I (122407) gnss_link: host baud 460800 -> 115200"), ("logParts", "E (3723000) ntrip: x"),
+                  ("logParts", "ets Jun  8 2016 00:22:57"), ("timeRange", ["9:40 AM", "9:42 AM"]),
+                  ("timeRange", ["9:40 AM", "9:42 AM"]), ("timeRange", ["Oct 14, 11:58 PM", "Oct 15, 12:03 AM"])])
+    assert out[0] == ["0:02:02", "I", "gnss_link: host baud 460800 -> 115200"]
+    assert out[1] == ["1:02:03", "E", "ntrip: x"]
+    assert out[2] is None   # shown as it is
+    assert out[3] == "9:40–9:42 AM" and out[4] == "9:40–9:42 AM"
+    assert out[5] == "Oct 15, 12:03 AM"   # too long for the time column: the newest only
+
+
+def test_diagnostics_lists_are_one_line_rows():
+    """No stacked blocks on a phone: the log, the event list, the starts and the tasks keep one row per item."""
+    js = (UI_JS / "80-diag.js").read_text()
+    assert "stack: true" not in js and "stack-sm" not in js
+    css = (UI_JS.parent / "app.css").read_text()
+    assert "stack-sm" not in css and "table.events, table.events tbody" not in css
+    assert "pre.log .ln { display: block; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }" in css
+    assert "td.when { width: 1%; white-space: nowrap;" in css
+    assert ("table.events td + td { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }"
+            in css)
+
+
+def test_a_day_of_the_last_30_in_words():
+    """One line a day, only what happened; the planned time is a part of the offline time."""
+    out = run_ui([("dayParts", [{"down_s": [612, 5], "planned_s": [60, 0], "reconnects": [4, 0], "power_off_s": 1800, "lost_epochs": 38,
+                                 "rx_overflows": 1}, 0]),
+                  ("dayParts", [{"down_s": [0, 5], "planned_s": [0, 0], "reconnects": [1, 0], "power_off_s": 0}, 0]),
+                  ("dayParts", [{"down_s": [0], "planned_s": [0], "reconnects": [0], "power_off_s": 0, "lost_epochs": 0}, 0])])
+    assert out[0] == ["10\u00a0min 12\u00a0s offline", "1\u00a0min of it planned", "4 reconnects", "38 epochs lost",
+                      "30\u00a0min powered off", "1 receiver data overflow"]
+    assert out[1] == ["1 reconnect"]
+    assert out[2] == []

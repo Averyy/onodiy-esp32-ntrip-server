@@ -311,13 +311,11 @@ const MAINT_CHOICES = [[900, '15 minutes'], [1800, '30 minutes'], [3600, '1 hour
 
 /* Journal enumerations by C value (API.md appendix: position in C order). */
 const J = {
-  kind: { boot: 'Start', session: 'Previous run', reboot: 'Restart', ladder_step: 'Recovery step', app_update: 'App update',
-    app_revert: 'App rolled back', gnss_flash: 'Receiver update', safe_mode: 'Safe mode', wifi_disconnect: 'Wi-Fi dropped',
-    data_loss: 'Data lost', caster_down: 'Caster disconnected', caster_up: 'Caster back', wifi_up: 'Wi-Fi back',
-    caster_stop: 'Caster stopped', rx_maintenance: 'Receiver maintenance', live_view: 'Sky view', sg_test: 'Signal groups',
-    rx_boot: 'Receiver at power-on' },
-  resetClass: ['power on', 'planned', 'crash', 'brownout', 'other'],
-  /* The same by C value, as the API names them (lifecycle_reset_class_t, lifecycle_reboot_reason_t). */
+  /* The event list's names (a connection or a recovery step is named by connRow, by its recovery). */
+  kind: { boot: 'Start', session: 'Previous run', reboot: 'Restart', app_update: 'App update', app_revert: 'App rolled back',
+    gnss_flash: 'Receiver update', safe_mode: 'Safe mode', data_loss: 'Data lost', rx_maintenance: 'Receiver maintenance',
+    live_view: 'Sky view', sg_test: 'Signal groups', rx_boot: 'Receiver at power-on' },
+  /* By C value, as the API names them (lifecycle_reset_class_t, lifecycle_reboot_reason_t). */
   resetClassKey: ['power_on', 'planned', 'crash', 'brownout', 'other'],
   rebootKey: ['none', 'user', 'factory_reset', 'admin_reset', 'app_update', 'app_revert', 'gnss_ladder', 'network_ladder',
     'low_heap', 'safe_mode_retry', 'safe_mode_cleared', 'nvs_slot_switch', 'boot_failure', 'app_rollback'],
@@ -326,7 +324,6 @@ const J = {
     'app rollback'],
   resetReason: ['unknown', 'power on', 'reset pin', 'software', 'panic', 'interrupt watchdog', 'task watchdog', 'watchdog',
     'deep sleep', 'brownout', 'SDIO', 'USB', 'JTAG', 'eFuse', 'power glitch', 'CPU lockup'],
-  trial: ['none', 'confirming', 'verifying', 'watching'],
   ladder: ['receiver', 'network', 'caster'],
   outcome: ['started', 'healthy again', 'failed or refused', 'abandoned', 'not run (recovery mode)', 'postponed'],
   gnssRung: [null, 'resync', 'restart link', 'search baud rate', 're-apply profile', 'reset receiver',
@@ -500,7 +497,7 @@ function startSentence(cls, reason, planned) {
     case 'planned':
       return 'Restarted ' + (why || 'on purpose');
     case 'crash':
-      return 'Restarted after a crash' + (reason ? ' (' + lbl(L.resetReason, reason).replace(/^(after|by|for|from|over) /, '') + ')' : '');
+      return 'Restarted after a crash' + (reason && reason !== 'panic' ? ' (' + lbl(L.resetReason, reason).replace(/^(after|by|for|from|over) /, '') + ')' : '');
     case 'brownout':
       return 'Restarted after a power dip (low supply voltage)';
     default:

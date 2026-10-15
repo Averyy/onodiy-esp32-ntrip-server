@@ -1055,7 +1055,7 @@ baud list after two failed short passes and always after 5 min). A pass
 that runs already counts. `202 {"accepted": true}`. Errors:
 `409 not_no_receiver` (any other state, receiver maintenance included),
 `409 safe_mode`. The UI offers it as "Check again" wherever it says no
-receiver was found (the Status page; Diagnostics, Health; the setup
+receiver was found (the Status page; Diagnostics, Overview; the setup
 wizard's antenna check; the Receiver page).
 
 ### Signal-group comparison

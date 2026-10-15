@@ -15,9 +15,14 @@
 const Views = {};
 const NAV = [['', 'Status'], ['casters', 'Casters'], ['receiver', 'Receiver'], ['settings', 'Settings']];
 
-/* Old addresses (the seven tabs) and where that content is now: #/signals/live opens #/receiver/live. */
+/*
+ * Old addresses (the seven tabs, Diagnostics' six parts) and where that
+ * content is now: #/signals/live opens #/receiver/live, the journal and the
+ * availability Diagnostics' History, its tasks and core dump its Overview.
+ */
 function movedTo(name, arg) {
   if (name === 'updates') return 'settings/' + (arg || 'updates');
+  if (name === 'diag') return { availability: 'diag/history', journal: 'diag/history', tasks: 'diag', coredump: 'diag' }[arg] || null;
   const to = { signals: 'receiver', live: 'receiver/live', system: 'settings/wifi' }[name];
   return to ? to + (arg ? '/' + arg : '') : null;
 }
@@ -153,7 +158,7 @@ function navEdges() {
   edgeFade(doc.getElementById('tabs'));
 }
 
-/* A row that scrolls sideways (the tabs, Diagnostics' sub-tabs): a fade at each edge where more of it lies. */
+/* The tabs when they do not fit: a fade at each edge where more of them lie. */
 function edgeFade(el) {
   const more = el.scrollWidth - el.clientWidth;
   el.classList.toggle('more-left', more > 2 && el.scrollLeft > 2);
