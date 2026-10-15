@@ -39,9 +39,9 @@ bool um98x_antenna_matches(const um98x_base_profile_t *p, const um98x_readback_t
         return false;
     }
     const um98x_rx_settings_t *rx = &rb->config.rx;
-    size_t k = um98x_antenna_str_len(p->antenna_serial);
-    return um98x_antenna_str_len(rx->antenna_model) == n && memcmp(rx->antenna_model, p->antenna_model, n) == 0 &&
-           um98x_antenna_str_len(rx->antenna_serial) == k && memcmp(rx->antenna_serial, p->antenna_serial, k) == 0 &&
+    /* Runs of spaces read as one: the receiver stores them so (build 25164). */
+    return um98x_antenna_str_same(rx->antenna_model, p->antenna_model) &&
+           um98x_antenna_str_same(rx->antenna_serial, p->antenna_serial) &&
            rx->antenna_setup_id == p->antenna_setup_id;
 }
 
@@ -196,7 +196,10 @@ size_t um98x_plan_preview(const um98x_base_profile_t *p, uint32_t link_baud, um9
     }
     ok = ok && preview_step(p, out, cap, &n, UM98X_STEP_MODE, 0, 0, UM98X_PREVIEW_IF_DIFFERS, false);
     if (ok && um98x_antenna_str_len(p->antenna_model) > 0) {
-        ok = preview_step(p, out, cap, &n, UM98X_STEP_ANTENNA, 0, 0, UM98X_PREVIEW_IF_DIFFERS, false);
+        /* The dump again right after an accepted antenna step: the name as
+         * the receiver stores it. */
+        ok = preview_step(p, out, cap, &n, UM98X_STEP_ANTENNA, 0, 0, UM98X_PREVIEW_IF_DIFFERS, false) &&
+             preview_add(out, cap, &n, UM98X_CMD_CONFIG, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_IF_DIFFERS, false);
     }
     ok = ok && preview_step(p, out, cap, &n, UM98X_STEP_B1CB2A, 0, 0, UM98X_PREVIEW_IF_OFF, false);
     for (size_t i = 0; ok && i < p->rtcm_count; i++) {

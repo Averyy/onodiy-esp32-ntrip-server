@@ -92,6 +92,8 @@ void um98x_chan_init(um98x_chan_t *ch)
     ch->last_resetting_ms = UM98X_NONE_MS;
     ch->notice_restart_ms = UM98X_NONE_MS;
     ch->last_restart_ms = UM98X_NONE_MS;
+    ch->last_version_ms = UM98X_NONE_MS;
+    ch->version_uptime_ms = UINT32_MAX;
 }
 
 /* A restart counted from a restarting answer, whose banner has not come
@@ -119,6 +121,12 @@ unsigned um98x_chan_dispatch(um98x_chan_t *ch, const char *line, size_t len, con
     }
     ch->stats.lines++;
     ch->last_answer_ms = now_ms;   /* the receiver answers */
+    if (l->kind == UM98X_LINE_VERSION) {
+        /* Whoever asked: its header may tell how long the receiver has run. */
+        uint32_t up;
+        ch->last_version_ms = now_ms;
+        ch->version_uptime_ms = gnss_versiona_uptime_ms(&l->version, &up) && up != UINT32_MAX ? up : UINT32_MAX;
+    }
 
     unsigned ev = 0;
     bool consumed = ch->txn_active && um98x_txn_on_line(&ch->txn, line, len, l, now_ms);
@@ -495,7 +503,23 @@ typedef struct {
     um98x_readback_t rb;
     bool settings_read;    /* a dump was read in this session */
     um98x_rx_settings_t settings;   /* from the latest dump */
+    uint8_t ant_read;      /* after an accepted antenna step: 0 none, 1 read back (ant_rx), 2 not read */
+    um98x_rx_settings_t ant_rx;     /* that read-back: the antenna fields as the receiver holds them */
 } session_t;
+
+/* An RTCM message the receiver refused in this session (a negative reply,
+ * not a timeout): the last resort's restore leaves it out. */
+static void note_rtcm_refused(um98x_apply_result_t *r, uint16_t msg)
+{
+    for (uint8_t i = 0; i < r->rtcm_refused_n; i++) {
+        if (r->rtcm_refused[i] == msg) {
+            return;
+        }
+    }
+    if (r->rtcm_refused_n < UM98X_MAX_RTCM_MSGS) {
+        r->rtcm_refused[r->rtcm_refused_n++] = msg;
+    }
+}
 
 /* Record the first failure of the session. */
 static void fail(session_t *s, const char *cmd, const char *reason)
@@ -1016,6 +1040,26 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
             s->r->antenna_sent = true;
             s->r->antenna_ok = (tst == UM98X_TXN_OK);
             txn_reason(ex, tst, s->r->antenna_reply, sizeof(s->r->antenna_reply));
+            if (s->r->antenna_ok) {
+                /* What the receiver holds now, while the port is still
+                 * quiet: it may store the name in another form than sent
+                 * (build 25164 collapses runs of spaces), and the status
+                 * shows the receiver's own value. Not fatal either: an
+                 * unread one shows as unknown. */
+                um98x_txn_status_t rst = um98x_exec_txn(ex, UM98X_TXN_CONFIG, UM98X_CMD_CONFIG, NULL);
+                if (rst == UM98X_TXN_OK) {
+                    lock(ex);
+                    s->ant_rx = ex->ch->txn.config.rx;
+                    unlock(ex);
+                    s->ant_read = s->ant_rx.antenna_known ? 1 : 2;
+                } else {
+                    s->ant_read = 2;
+                }
+                if (rst == UM98X_TXN_LINK_ERROR) {
+                    fail_txn(s, UM98X_CMD_CONFIG, rst);
+                    return UM98X_E_FAILED;
+                }
+            }
             break;
         }
         case UM98X_STEP_B1CB2A: {
@@ -1035,15 +1079,20 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
             }
             break;
         }
-        default:   /* RTCM outputs and the satellite view */
-            res = step(s, UM98X_TXN_COMMAND, cmd, false, st->fatal, NULL);
+        default: { /* RTCM outputs and the satellite view */
+            um98x_txn_status_t tst;
+            res = step(s, UM98X_TXN_COMMAND, cmd, false, st->fatal, &tst);
             if (st->kind == UM98X_STEP_RTCM && st->msg == UM98X_RTCM_OPTIONAL) {
                 s->r->rtcm1230_ok = (res == UM98X_OK);
+            }
+            if (st->kind == UM98X_STEP_RTCM && tst == UM98X_TXN_REJECTED) {
+                note_rtcm_refused(s->r, st->msg);
             }
             if (res != UM98X_OK && st->fatal) {
                 return UM98X_E_FAILED;
             }
             break;
+        }
         }
     }
     return UM98X_OK;
@@ -1099,16 +1148,19 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
         r->settings_read = true;
         r->settings = s.settings;
         if (r->saved && r->antenna_ok) {
-            /* The receiver now holds the profile's antenna. */
+            /* The receiver now holds the antenna it was sent, in its own
+             * form: as read back right after the step (unknown if that
+             * read failed), never the profile's text. */
             um98x_rx_settings_t *x = &r->settings;
-            size_t nm = um98x_antenna_str_len(p->antenna_model);
-            size_t ns = um98x_antenna_str_len(p->antenna_serial);
             memset(x->antenna_model, 0, sizeof(x->antenna_model));
             memset(x->antenna_serial, 0, sizeof(x->antenna_serial));
-            memcpy(x->antenna_model, p->antenna_model, nm);
-            memcpy(x->antenna_serial, p->antenna_serial, ns);
-            x->antenna_setup_id = p->antenna_setup_id;
-            x->antenna_known = true;
+            x->antenna_setup_id = 0;
+            x->antenna_known = (s.ant_read == 1);
+            if (x->antenna_known) {
+                memcpy(x->antenna_model, s.ant_rx.antenna_model, sizeof(x->antenna_model));
+                memcpy(x->antenna_serial, s.ant_rx.antenna_serial, sizeof(x->antenna_serial));
+                x->antenna_setup_id = s.ant_rx.antenna_setup_id;
+            }
         }
         if (r->saved && r->b1cb2a_ok) {
             r->settings.b1cb2a = UM98X_SETTING_ON;
@@ -1134,12 +1186,27 @@ um98x_res_t um98x_exec_reset(um98x_exec_t *ex)
     return res == UM98X_OK ? UM98X_OK : UM98X_E_TIMEOUT;
 }
 
-um98x_res_t um98x_exec_restore_rtcm(um98x_exec_t *ex, const um98x_base_profile_t *p, um98x_apply_result_t *r)
+static bool msg_listed(const uint16_t *list, size_t n, uint16_t msg)
+{
+    for (size_t i = 0; list != NULL && i < n; i++) {
+        if (list[i] == msg) {
+            return true;
+        }
+    }
+    return false;
+}
+
+um98x_res_t um98x_exec_restore_rtcm(um98x_exec_t *ex, const um98x_base_profile_t *p, const uint16_t *skip,
+                                    size_t n_skip, um98x_apply_result_t *r)
 {
     if (ex == NULL || r == NULL) {
         return UM98X_E_ARG;
     }
     memset(r, 0, sizeof(*r));
+    /* Still refused as far as anyone knows: carried into this result. */
+    for (size_t i = 0; skip != NULL && i < n_skip; i++) {
+        note_rtcm_refused(r, skip[i]);
+    }
     const um98x_port_t *pt = ex->port;
     r->baud = pt->get_baud(pt->ctx);
     um98x_plan_t plan;
@@ -1156,12 +1223,19 @@ um98x_res_t um98x_exec_restore_rtcm(um98x_exec_t *ex, const um98x_base_profile_t
     for (size_t i = 0; i < plan.count; i++) {
         const um98x_step_t *st = &plan.step[i];
         char cmd[UM98X_CMD_MAX];
+        if (msg_listed(skip, n_skip, st->msg)) {
+            continue;   /* the receiver refused it in the failed session: it would only refuse it again */
+        }
         if (um98x_step_command(p, st, cmd, sizeof(cmd)) == 0) {
             continue;
         }
-        um98x_res_t res = step(&s, UM98X_TXN_COMMAND, cmd, false, st->fatal, NULL);
+        um98x_txn_status_t tst;
+        um98x_res_t res = step(&s, UM98X_TXN_COMMAND, cmd, false, st->fatal, &tst);
         if (st->msg == UM98X_RTCM_OPTIONAL) {
             r->rtcm1230_ok = (res == UM98X_OK);
+        }
+        if (tst == UM98X_TXN_REJECTED) {
+            note_rtcm_refused(r, st->msg);
         }
         if (res != UM98X_OK && st->fatal) {
             out = UM98X_E_FAILED;   /* keep going: every output that works helps */

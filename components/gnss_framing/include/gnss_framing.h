@@ -110,7 +110,11 @@
  * is stripped from each field; at least six fields are required: model,
  * firmware, authorisation, PN-SN (split at the first '-'), efuse/board ID,
  * compile date. The build is the integer after "Build" in the firmware field
- * (0 if absent); builds are compared as integers, never as substrings.
+ * (0 if absent); builds are compared as integers, never as substrings. The
+ * header (before the ';') is read for its clock when it has the UM982 form
+ * "<cpu idle>,<time reference>,<time status>,<week>,<ms>,..." (digits,
+ * letters, letters, digits, digits); any other header still parses, without
+ * a clock (gnss_versiona_uptime_ms).
  *
  * Status: implemented and host-tested. The checksum rules, the version log
  * layout and the binary log length are PROVISIONAL, to be confirmed on
@@ -206,6 +210,12 @@ typedef struct {
     char serial[32];
     char efuse_id[24];
     char compile_date[12];
+    /* The header's clock, in the form UM982 builds 18975 and 25164 write it
+     * ("#VERSIONA,<cpu idle>,<time reference>,<time status>,<week>,<ms>,..."). */
+    bool hdr_clock;          /**< the header has that form (else the three below are 0) */
+    bool hdr_time_unknown;   /**< its time status is UNKNOWN: the receiver has no time yet */
+    uint32_t hdr_week;
+    uint32_t hdr_ms;         /**< the millisecond field (the time of week once the receiver has a time) */
 } gnss_versiona_t;
 
 /** Initialise a framer and zero its counters. `cb` must not be NULL. Prompt detector disarmed. */
@@ -247,6 +257,17 @@ bool gnss_text_line_valid(const char *line, size_t len);
  * @return false (out cleared) if the line is not a valid version log.
  */
 bool gnss_versiona_parse(const char *line, size_t len, gnss_versiona_t *out);
+
+/**
+ * The receiver's time since its last restart (ms), as its version log tells
+ * it: while the receiver has no time (time status UNKNOWN, week 0 or 1),
+ * the header's millisecond field counts from its restart (UM982 build 25164
+ * on our bench: zero in the first answer after the banner, then in step with
+ * the wall clock; the count starts about 1 s after the banner). False when
+ * the receiver has a time (the field is then the GPS time of week), or the
+ * header has another form.
+ */
+bool gnss_versiona_uptime_ms(const gnss_versiona_t *v, uint32_t *ms);
 
 #ifdef __cplusplus
 }

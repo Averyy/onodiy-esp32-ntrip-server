@@ -45,7 +45,8 @@
  *   text), then `len` bytes of text with no terminator. Records are stored
  *   back to back and wrap around the end of the data area byte by byte.
  *   One record is one call of the log output function: a whole line,
- *   newline included, for the default log format.
+ *   newline included, or a part of one (ESP-IDF's text formatter prints
+ *   the prefix, the message and the newline in separate calls).
  *
  * Writes: the record goes in first and is synced, then the header; when old
  * records must be dropped to make room, the header that drops them is
@@ -162,6 +163,18 @@ void logring_stamp(logring_t *r, uint32_t gen);
  * @return the record's sequence number (0 if len is 0: nothing stored).
  */
 uint32_t logring_append(logring_t *r, const char *text, size_t len);
+
+/**
+ * Make one record's text safe to keep and to download as text, in place:
+ * every C0 control character (0x00..0x1F) except tab and newline becomes
+ * '?'. A driver that prints a character array with %c can put a NUL inside
+ * a line (the Wi-Fi driver's country code), which made tools take the whole
+ * downloaded log for binary data; a stray CR or escape would garble it too.
+ * @return the newlines in the text: the lines it ends (a record can be part
+ *         of a line: the log output function may be called more than once
+ *         per line).
+ */
+size_t logring_clean_text(char *text, size_t len);
 
 /** Records currently held. */
 uint32_t logring_count(const logring_t *r);

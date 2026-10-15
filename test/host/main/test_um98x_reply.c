@@ -305,6 +305,14 @@ TEST_CASE("reply: the base antenna descriptor reads back, or unknown", "[um98x_r
     TEST_ASSERT_EQUAL_STRING("5000112233", rb.rx.antenna_serial);
     TEST_ASSERT_EQUAL_UINT8(3, rb.rx.antenna_setup_id);
 
+    /* Build 25164's read-back on the bench, after it was sent
+     * "TRM59800.00     SCIS": runs of spaces collapsed. Read as it is. */
+    fold_item(&rb, "CONFIG,BASEANTENNAMODEL,CONFIG BASEANTENNAMODEL \"TRM59800.00 SCIS\" \"5000123\" 0 USER");
+    TEST_ASSERT_TRUE(rb.rx.antenna_known);
+    TEST_ASSERT_EQUAL_STRING("TRM59800.00 SCIS", rb.rx.antenna_model);
+    TEST_ASSERT_EQUAL_STRING("5000123", rb.rx.antenna_serial);
+    TEST_ASSERT_EQUAL_UINT8(0, rb.rx.antenna_setup_id);
+
     /* The receiver's null antenna with an empty serial. */
     fold_item(&rb, "CONFIG,BASEANTENNAMODEL,CONFIG BASEANTENNAMODEL \"ADVNULLANTENNA\" \"\" 0 USER");
     TEST_ASSERT_TRUE(rb.rx.antenna_known);

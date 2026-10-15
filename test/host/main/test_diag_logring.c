@@ -56,6 +56,31 @@ TEST_CASE("diag checksums match the published check values", "[diag]")
     TEST_ASSERT_EQUAL_HEX32(0xCBF43926u, diag_crc32_final(c));
 }
 
+TEST_CASE("log ring: control characters become '?', newlines and tabs stay, lines counted", "[diag][logring]")
+{
+    /* The Wi-Fi driver's line as the bench recorded it: the country code's
+     * third byte, a NUL, inside the line. */
+    char wifi[] = "I (1123) wifi:(2.4G)set country: cc=01\0 schan=1 nchan=11 policy=0\n";
+    size_t len = sizeof(wifi) - 1u;
+    TEST_ASSERT_EQUAL_size_t(1, logring_clean_text(wifi, len));
+    TEST_ASSERT_EQUAL_size_t(len, strlen(wifi));   /* no NUL left inside */
+    TEST_ASSERT_EQUAL_STRING("I (1123) wifi:(2.4G)set country: cc=01? schan=1 nchan=11 policy=0\n", wifi);
+
+    /* DEL and bytes above 0x7F are not C0 controls: kept. */
+    char mixed[] = "a\tb\rc\x1b[0;32md\x01\x1f\x7f\x80" "e\nf\n";
+    TEST_ASSERT_EQUAL_size_t(2, logring_clean_text(mixed, sizeof(mixed) - 1u));
+    TEST_ASSERT_EQUAL_STRING("a\tb?c?[0;32md??\x7f\x80" "e\nf\n", mixed);
+
+    /* A line in parts (prefix, message, newline: three records, one line). */
+    char p1[] = "I (5) tag: ";
+    char p2[] = "message";
+    char p3[] = "\n";
+    size_t lines = logring_clean_text(p1, strlen(p1)) + logring_clean_text(p2, strlen(p2)) +
+                   logring_clean_text(p3, strlen(p3));
+    TEST_ASSERT_EQUAL_size_t(1, lines);
+    TEST_ASSERT_EQUAL_size_t(0, logring_clean_text(p1, 0));
+}
+
 TEST_CASE("log ring: append, read with a cursor, nothing new", "[diag][logring]")
 {
     static uint8_t mem[MEM_SIZE];

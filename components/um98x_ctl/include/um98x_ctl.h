@@ -75,6 +75,12 @@
  * say the receiver is restarting (um98x_ctl_stats_t.restarting): it
  * answers, it is not silent.
  *
+ * Receiver uptime: every version log's header is read for the receiver's
+ * time since its last restart, which its millisecond field counts while it
+ * has no time (gnss_versiona_uptime_ms; um98x_ctl_stats_t.rx_uptime_ms with
+ * the log's age). After a power-on reset the station compares it with its
+ * own uptime to tell an ESP32-only reset from a power cut.
+ *
  * Signal groups: every apply session asks once, after its signal-group
  * step, which signals the running group configures on the main antenna
  * input (ANT1GROUPA, one-shot: a rate would start a periodic log), and
@@ -157,8 +163,9 @@ typedef struct {
  * full_list adds 57600, 38400, 19200, 9600. Per baud: listen 1500 ms (a
  * CRC-valid RTCM frame or two checksum-valid text lines = found, nothing
  * sent), else probe "\r\nVERSIONA\r\n" twice with 2000 ms windows (any
- * acknowledgement or the version log = found; the identity is the next
- * query). A loader prompt reported during the pass (um98x_ctl_notify_prompt)
+ * acknowledgement or the version log = found; after an accepting
+ * acknowledgement the log has 1000 ms more, and then gives the identity,
+ * else the identity is the next query). A loader prompt reported during the pass (um98x_ctl_notify_prompt)
  * stops it before anything more is sent; one seen before the call is the
  * caller's to handle. Found -> gnss/baud persisted if it changed.
  * @return ESP_OK (found), ESP_ERR_NOT_FOUND, ESP_ERR_INVALID_RESPONSE (loader
@@ -278,11 +285,14 @@ size_t um98x_ctl_apply_preview(const um98x_base_profile_t *profile, uint32_t lin
 /**
  * Last resort after a failed apply when the receiver answers but sends no
  * RTCM: the profile's RTCM outputs only (no base mode, no baud change, no
- * save), normal reply handling. The applied state is not written.
- * @return ESP_OK if every message except 1230 was accepted, else ESP_FAIL.
+ * save), normal reply handling. The applied state is not written. failed
+ * (optional): the failed session's result; the RTCM messages the receiver
+ * refused there (failed->rtcm_refused) are left out, since they would only
+ * be refused again. result may be the same object as failed.
+ * @return ESP_OK if every message sent except 1230 was accepted, else ESP_FAIL.
  */
 esp_err_t um98x_ctl_restore_output(gnss_link_lease_t lease, const um98x_base_profile_t *profile,
-                                   um98x_apply_result_t *result);
+                                   const um98x_apply_result_t *failed, um98x_apply_result_t *result);
 
 /**
  * Recovery: the receiver's RESET command under the caller's COMMAND lease.
@@ -351,6 +361,9 @@ typedef struct {
     uint32_t last_answer_age_ms; /**< since the last checksum-valid command-layer line (UINT32_MAX = never): "the receiver answers" */
     uint32_t last_restart_age_ms;/**< since the last unsolicited restart evidence (UINT32_MAX = never) */
     bool restarting;             /**< the receiver said it restarts (within 20 s) and its banner has not come yet */
+    uint32_t version_age_ms;     /**< since the last version log, whoever asked (UINT32_MAX = none this boot) */
+    uint32_t rx_uptime_ms;       /**< from that log: the receiver's time since its last restart (its header's millisecond
+                                      field while it has no time, gnss_versiona_uptime_ms); UINT32_MAX = it did not tell */
 } um98x_ctl_stats_t;
 
 esp_err_t um98x_ctl_get_stats(um98x_ctl_stats_t *out);

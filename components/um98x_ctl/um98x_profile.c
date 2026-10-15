@@ -98,6 +98,50 @@ size_t um98x_antenna_str_len(const char *s)
     return n;
 }
 
+/* The next character of s[0 .. n) in the compared form (leading spaces
+ * skipped, a run of spaces read as one, trailing spaces dropped); '\0' at
+ * the end. */
+static char spaced_next(const char *s, size_t n, size_t *i)
+{
+    if (*i >= n) {
+        return '\0';
+    }
+    char c = s[(*i)++];
+    if (c == ' ') {
+        while (*i < n && s[*i] == ' ') {
+            (*i)++;
+        }
+        if (*i >= n) {
+            return '\0';   /* only trailing spaces were left (cannot happen after um98x_antenna_str_len) */
+        }
+    }
+    return c;
+}
+
+bool um98x_antenna_str_same(const char *a, const char *b)
+{
+    size_t na = um98x_antenna_str_len(a);
+    size_t nb = um98x_antenna_str_len(b);
+    size_t ia = 0;
+    size_t ib = 0;
+    while (ia < na && a[ia] == ' ') {
+        ia++;
+    }
+    while (ib < nb && b[ib] == ' ') {
+        ib++;
+    }
+    for (;;) {
+        char ca = spaced_next(a, na, &ia);
+        char cb = spaced_next(b, nb, &ib);
+        if (ca != cb) {
+            return false;
+        }
+        if (ca == '\0') {
+            return true;
+        }
+    }
+}
+
 void um98x_profile_default(um98x_base_profile_t *out, uint16_t station_id)
 {
     /* Station messages and MSM7 for every constellation the receiver

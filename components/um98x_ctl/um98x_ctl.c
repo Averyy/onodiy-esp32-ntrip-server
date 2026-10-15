@@ -633,10 +633,17 @@ size_t um98x_ctl_apply_preview(const um98x_base_profile_t *profile, uint32_t lin
 }
 
 esp_err_t um98x_ctl_restore_output(gnss_link_lease_t lease, const um98x_base_profile_t *profile,
-                                   um98x_apply_result_t *result)
+                                   const um98x_apply_result_t *failed, um98x_apply_result_t *result)
 {
     if (result == NULL) {
         return ESP_ERR_INVALID_ARG;
+    }
+    /* Copied first: result may be the failed session's own result. */
+    uint16_t skip[UM98X_MAX_RTCM_MSGS];
+    size_t n_skip = 0;
+    if (failed != NULL) {
+        n_skip = failed->rtcm_refused_n < UM98X_MAX_RTCM_MSGS ? failed->rtcm_refused_n : UM98X_MAX_RTCM_MSGS;
+        memcpy(skip, failed->rtcm_refused, n_skip * sizeof(skip[0]));
     }
     memset(result, 0, sizeof(*result));
     if (!um98x_profile_valid(profile)) {
@@ -651,7 +658,10 @@ esp_err_t um98x_ctl_restore_output(gnss_link_lease_t lease, const um98x_base_pro
     }
     call_t c;
     call_setup(&c, lease);
-    um98x_res_t res = um98x_exec_restore_rtcm(&c.ex, profile, result);
+    for (size_t i = 0; i < n_skip; i++) {
+        ESP_LOGI(TAG, "RTCM%u left out of the restore: the receiver refused it in the failed apply", (unsigned)skip[i]);
+    }
+    um98x_res_t res = um98x_exec_restore_rtcm(&c.ex, profile, skip, n_skip, result);
     call_end();
     if (res != UM98X_OK) {
         ESP_LOGW(TAG, "RTCM output not fully restored: \"%s\": %s", result->failed_cmd, result->reason);
@@ -779,11 +789,17 @@ esp_err_t um98x_ctl_get_stats(um98x_ctl_stats_t *out)
     int64_t answer = s_chan.last_answer_ms;
     int64_t restart = s_chan.last_restart_ms;
     bool restarting = um98x_chan_restarting(&s_chan, now);
+    int64_t version = s_chan.last_version_ms;
+    uint32_t uptime = s_chan.version_uptime_ms;
     portEXIT_CRITICAL(&s_lock);
     if (!s_inited) {
         answer = UM98X_NONE_MS;
         restart = UM98X_NONE_MS;
         restarting = false;
+        version = UM98X_NONE_MS;
+    }
+    if (version == UM98X_NONE_MS) {
+        uptime = UINT32_MAX;
     }
     out->lines = st.lines;
     out->matched = st.matched;
@@ -796,5 +812,7 @@ esp_err_t um98x_ctl_get_stats(um98x_ctl_stats_t *out)
     out->restarting = restarting;
     out->last_answer_age_ms = age_ms(answer, now);
     out->last_restart_age_ms = age_ms(restart, now);
+    out->version_age_ms = age_ms(version, now);
+    out->rx_uptime_ms = uptime;
     return ESP_OK;
 }

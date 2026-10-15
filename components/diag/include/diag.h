@@ -89,7 +89,9 @@
  *    same second, and the ladder bounds their rate itself. Receiver-flash
  *    results are exempt too: one per session the user started, and the
  *    station writes it before it closes the session's own record, so a
- *    refused one would leave no trace of how the update ended.
+ *    refused one would leave no trace of how the update ended. So is the
+ *    power-on verdict (DIAG_EV_RX_BOOT): one per power-on boot, and the
+ *    power-lost alert counts a boot only with it.
  *    Records carry the uptime and, once a trusted clock is known
  *    (diag_set_utc, fed by the availability ledger), the UTC time.
  *    The journal is a timeline, not the boot history: the last 16 boots are
@@ -230,7 +232,31 @@ typedef enum {
      * 5 failed, 6 interrupted).
      */
     DIAG_EV_SG_TEST = 22,
+    /**
+     * After a power-on reset, whether the receiver kept running (written once
+     * per such boot by the station, when it knows): a = diag_rx_boot_t,
+     * b = diag_rx_boot_by_t. On the ESP32-S3 a reset by the EN pin (the USB
+     * serial chip's auto-reset, the RST button) reads as power-on while the
+     * receiver keeps running; only DIAG_RX_BOOT_RESTARTED is a power loss
+     * (health's power-lost alert).
+     */
+    DIAG_EV_RX_BOOT = 23,
 } diag_event_t;
+
+/** DIAG_EV_RX_BOOT `a`. */
+typedef enum {
+    DIAG_RX_BOOT_KEPT = 1,       /**< the receiver kept running: only the ESP32 was reset (its reset pin) */
+    DIAG_RX_BOOT_RESTARTED = 2,  /**< the receiver restarted with the ESP32: the power was cut */
+    DIAG_RX_BOOT_UNKNOWN = 3,    /**< nothing the receiver sent told within 30 s */
+} diag_rx_boot_t;
+
+/** DIAG_EV_RX_BOOT `b`: what told it. */
+typedef enum {
+    DIAG_RX_BOOT_BY_NONE = 0,
+    DIAG_RX_BOOT_BY_RESTART = 1, /**< its restart banner (or restarting answer, an unasked version log) before any data */
+    DIAG_RX_BOOT_BY_UPTIME = 2,  /**< its version log's time since its restart */
+    DIAG_RX_BOOT_BY_STREAM = 3,  /**< RTCM or NMEA at once */
+} diag_rx_boot_by_t;
 
 /** DIAG_EV_LIVE_VIEW events (low byte of `a`). */
 typedef enum {
@@ -349,8 +375,8 @@ typedef struct {
 
 /** Log counters since boot. */
 typedef struct {
-    uint32_t lines;                 /**< lines logged */
-    uint32_t ring_overwritten;      /**< lines the ring dropped to make room */
+    uint32_t lines;                 /**< lines logged (newlines written: a line can take more than one record) */
+    uint32_t ring_overwritten;      /**< records the ring dropped to make room (a record is a line or a part of one) */
     uint32_t cut;                   /**< lines cut to CONFIG_DIAG_LOG_LINE_MAX */
     uint32_t console_dropped;       /**< lines never sent to the console: the ring overwrote them first */
     uint32_t console_dropped_bytes;
@@ -505,8 +531,8 @@ esp_err_t diag_log_fix_level(const char *tag, esp_log_level_t level);
  * task within milliseconds). Not from an interrupt handler.
  * @return ESP_OK when accepted; ESP_ERR_INVALID_STATE when a rate limit (per
  *         kind or the hourly budget) refused it (nothing written: keep the
- *         data and retry later; never for DIAG_EV_LADDER_STEP or
- *         DIAG_EV_GNSS_FLASH);
+ *         data and retry later; never for DIAG_EV_LADDER_STEP,
+ *         DIAG_EV_GNSS_FLASH or DIAG_EV_RX_BOOT);
  *         ESP_ERR_NO_MEM when the write queue is full; ESP_ERR_NOT_FOUND
  *         when there is no usable journal partition.
  */

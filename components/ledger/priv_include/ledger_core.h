@@ -257,6 +257,16 @@ void lc_planned_boot(lc_t *c);
 void lc_unplanned_boot(lc_t *c);
 
 /**
+ * A power-on reset whose receiver kept running (the station's verdict): on
+ * the ESP32-S3 the reset pin reads as power-on, so the gap was the reset
+ * pin's, not a power cut: it stops counting as power-off time (unplanned all
+ * the same, lc_unplanned_boot). Only while the gap has not been accrued
+ * (no clock yet this boot); afterwards it stays as counted.
+ * @return true if the gap changed.
+ */
+bool lc_power_kept(lc_t *c);
+
+/**
  * A reboot starts now (a shutdown hook). Accrues up to now_ms; when
  * `planned` (the user asked for it), the rest of the session counts as
  * planned and the snapshot carries reboot_planned for the next boot. Then

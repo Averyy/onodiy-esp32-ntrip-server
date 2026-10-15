@@ -81,6 +81,7 @@ typedef struct {
     bool b1c_restarts;    /* turning B1C/B2a on restarts the receiver */
     char restart_after[40];   /* the next command with this prefix is acknowledged, then the receiver restarts */
     char ant[120], saved_ant[120];   /* antenna descriptor values ("" = not in the dump) */
+    bool ant_collapse;    /* stores the descriptor with runs of spaces as one, as build 25164 does */
     unsigned gsv;         /* satellite-in-view output period, 0 = off */
     bool sg_quiet_only;   /* a signal-group command is taken (and acknowledged) only with COM1 output off */
     int64_t version_mute_ms;     /* after a restart, the version query is acknowledged without its log this long */
@@ -306,6 +307,15 @@ static void receive(sim_t *s, const char *cmd)
         }
     } else if (strncmp(up, "CONFIG BASEANTENNAMODEL ", 24) == 0) {
         snprintf(s->ant, sizeof(s->ant), "%s", cmd + 24);
+        if (s->ant_collapse) {
+            size_t o = 0;
+            for (size_t i = 0; s->ant[i] != '\0'; i++) {
+                if (!(s->ant[i] == ' ' && o > 0 && s->ant[o - 1] == ' ')) {
+                    s->ant[o++] = s->ant[i];
+                }
+            }
+            s->ant[o] = '\0';
+        }
         reply(s, cmd, "OK", 30);
     } else if (strcmp(up, "SAVECONFIG") == 0) {
         s->saved_baud = s->rx_baud;
@@ -1246,10 +1256,18 @@ TEST_CASE("exec: detection probes a quiet receiver and reads its identity", "[um
     TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_detect(&s->ex, cands, n, &d));
     TEST_ASSERT_EQUAL_UINT32(921600, d.baud);
     TEST_ASSERT_FALSE(d.by_listen);
-    /* The acknowledgement (it comes first) is enough to find it; the
-     * identity is the next query, and the log that followed the ack is a
-     * late reply, not a restart. */
-    TEST_ASSERT_FALSE(d.version_valid);
+    /* The acknowledgement comes first; the probe then waits for the log
+     * that follows it, which gives the identity (and is read whole, not cut
+     * by the caller's lease release), and is no restart. */
+    TEST_ASSERT_TRUE(d.version_valid);
+    TEST_ASSERT_EQUAL_STRING("UM982", d.version.model);
+    int at_baud = 0;
+    for (int i = 0; i < s->nrx; i++) {
+        at_baud += (s->rx[i].host_baud == 921600);
+    }
+    TEST_ASSERT_EQUAL_INT(1, at_baud);   /* one probe at the right baud: no second query for the identity */
+    TEST_ASSERT_EQUAL_UINT64(0, s->ch.stats.restarts);
+    TEST_ASSERT_EQUAL_UINT64(0, s->ch.stats.unmatched);
     gnss_versiona_t v;
     TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_version(&s->ex, false, 0, &v, NULL));
     TEST_ASSERT_EQUAL_STRING("UM982", v.model);
@@ -1304,6 +1322,44 @@ TEST_CASE("exec: the loader prompt stops detection; its restart key brings the a
     s->loader_baud = 115200;
     s->dies_on_restart = true;
     TEST_ASSERT_EQUAL(UM98X_E_TIMEOUT, um98x_exec_leave_loader(&s->ex, UM98X_LOADER_WAIT_MS));
+}
+
+/* "#<content>*crc32" (the reflected CRC-32 0xEDB88320, initial 0, no final XOR). */
+static void crc_log(char *out, size_t cap, const char *content)
+{
+    uint32_t crc = 0;
+    for (const char *p = content; *p != '\0'; p++) {
+        crc ^= (uint8_t)*p;
+        for (int b = 0; b < 8; b++) {
+            crc = (crc & 1u) ? (crc >> 1) ^ 0xEDB88320u : (crc >> 1);
+        }
+    }
+    snprintf(out, cap, "#%s*%08x", content, (unsigned)crc);
+}
+
+TEST_CASE("exec: every version log tells the receiver's time since its restart while it has no time", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    TEST_ASSERT_EQUAL_INT64(UM98X_NONE_MS, s->ch.last_version_ms);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, s->ch.version_uptime_ms);
+    char line[300];
+    crc_log(line, sizeof(line),
+            "VERSIONA,40,GPS,UNKNOWN,1,1014000,0,0,18,41;\"UM982\",\"R4.10Build25164\",\"HRPT00-S10C-P\","
+            "\"1234567890123-SYNTH00000001\",\"0123456789abcdef\",\"2025/06/17\"");
+    um98x_line_t l;
+    um98x_line_classify(line, strlen(line), &l);
+    TEST_ASSERT_EQUAL(UM98X_LINE_VERSION, l.kind);
+    /* Whoever asked: here a late reply to our own query. */
+    s->ch.last_version_write_ms = s->now - 100;
+    (void)um98x_chan_dispatch(&s->ch, line, strlen(line), &l, s->now);
+    TEST_ASSERT_EQUAL_INT64(s->now, s->ch.last_version_ms);
+    TEST_ASSERT_EQUAL_UINT32(1014000, s->ch.version_uptime_ms);
+
+    /* With a time it does not tell. */
+    um98x_line_classify(TV_VERSIONA_UM982, strlen(TV_VERSIONA_UM982), &l);
+    (void)um98x_chan_dispatch(&s->ch, TV_VERSIONA_UM982, strlen(TV_VERSIONA_UM982), &l, s->now + 10);
+    TEST_ASSERT_EQUAL_INT64(s->now + 10, s->ch.last_version_ms);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, s->ch.version_uptime_ms);
 }
 
 TEST_CASE("exec: restart evidence: banners and version logs nobody asked for", "[um98x_exec]")
@@ -1389,21 +1445,78 @@ TEST_CASE("exec: restoring output sends the RTCM messages only", "[um98x_exec]")
     um98x_base_profile_t p;
     default_profile(&p);
     um98x_apply_result_t r;
-    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_restore_rtcm(&s->ex, &p, &r));
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_restore_rtcm(&s->ex, &p, NULL, 0, &r));
     TEST_ASSERT_TRUE(s->output);
     TEST_ASSERT_TRUE(r.rtcm1230_ok);
     TEST_ASSERT_EQUAL_INT(p.rtcm_count, s->nrx);
     TEST_ASSERT_EQUAL_INT(p.rtcm_count, count(s, "RTCM"));
     TEST_ASSERT_EQUAL_INT(0, s->saves);
+    TEST_ASSERT_EQUAL_UINT8(0, r.rtcm_refused_n);
 
     /* A failing message does not stop the others. */
     s = sim_init();
     configured(s);
     snprintf(s->reject_prefix, sizeof(s->reject_prefix), "RTCM1033");
     s->reject_n = 10;
-    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_restore_rtcm(&s->ex, &p, &r));
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_restore_rtcm(&s->ex, &p, NULL, 0, &r));
     TEST_ASSERT_EQUAL_STRING("RTCM1033 COM1 1", r.failed_cmd);
     TEST_ASSERT_EQUAL_INT(1, count(s, "RTCM1127"));
+    TEST_ASSERT_EQUAL_UINT8(1, r.rtcm_refused_n);
+    TEST_ASSERT_EQUAL_UINT16(1033, r.rtcm_refused[0]);
+}
+
+TEST_CASE("exec: a type the receiver refused in the failed apply is left out of the restore", "[um98x_exec]")
+{
+    /* As on the bench: the profile holds a type this firmware does not
+     * know; the apply fails on it (rolled back), and the restore that
+     * follows must not send it again. */
+    sim_t *s = sim_init();
+    configured(s);
+    um98x_base_profile_t p;
+    default_profile(&p);
+    p.rtcm[p.rtcm_count].msg = 1999;
+    p.rtcm[p.rtcm_count].period_s = 1;
+    p.rtcm_count++;
+    snprintf(s->reject_prefix, sizeof(s->reject_prefix), "RTCM1999");
+    s->reject_n = 100;
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_EQUAL_STRING("RTCM1999 COM1 1", r.failed_cmd);
+    TEST_ASSERT_EQUAL_UINT8(1, r.rtcm_refused_n);
+    TEST_ASSERT_EQUAL_UINT16(1999, r.rtcm_refused[0]);
+    int sent = count(s, "RTCM1999 COM1 1");
+
+    /* The restore: every other type, 1999 not again; still listed as refused. */
+    s->nrx = 0;
+    uint16_t skip[UM98X_MAX_RTCM_MSGS];
+    memcpy(skip, r.rtcm_refused, sizeof(skip));
+    size_t n_skip = r.rtcm_refused_n;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_restore_rtcm(&s->ex, &p, skip, n_skip, &r));
+    TEST_ASSERT_EQUAL_INT(0, count(s, "RTCM1999 COM1 1"));
+    TEST_ASSERT_EQUAL_INT(p.rtcm_count - 1, count(s, "RTCM"));
+    TEST_ASSERT_EQUAL_STRING("", r.failed_cmd);
+    TEST_ASSERT_EQUAL_UINT8(1, r.rtcm_refused_n);
+    TEST_ASSERT_EQUAL_UINT16(1999, r.rtcm_refused[0]);
+    TEST_ASSERT_GREATER_THAN_INT(0, sent);
+
+    /* An optional type refused in the apply (1230 on a firmware without it)
+     * is listed too, and the restore leaves it out as well. */
+    s = sim_init();
+    configured(s);
+    s->r1230 = false;
+    default_profile(&p);
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_FALSE(r.rtcm1230_ok);
+    TEST_ASSERT_EQUAL_UINT8(1, r.rtcm_refused_n);
+    TEST_ASSERT_EQUAL_UINT16(1230, r.rtcm_refused[0]);
+    s->nrx = 0;
+    memcpy(skip, r.rtcm_refused, sizeof(skip));
+    n_skip = r.rtcm_refused_n;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_restore_rtcm(&s->ex, &p, skip, n_skip, &r));
+    TEST_ASSERT_EQUAL_INT(0, count(s, "RTCM1230"));
+    TEST_ASSERT_FALSE(r.rtcm1230_ok);
 }
 
 /* ---- antenna descriptor, B1C/B2a, the rollback's RESET timeline, sky view ---- */
@@ -1590,6 +1703,45 @@ TEST_CASE("exec: the antenna descriptor is sent only when the receiver holds ano
     TEST_ASSERT_EQUAL_STRING(SIM_REFUSAL, r.antenna_reply);
     TEST_ASSERT_EQUAL_STRING("", r.failed_cmd);
     TEST_ASSERT_FALSE(r.settings.antenna_known);
+    TEST_ASSERT_EQUAL_INT(-1, nth(s, "CONFIG", 1));   /* the session's dump only: no read-back after a refused step */
+}
+
+TEST_CASE("exec: a receiver that collapses spaces in the antenna name: read back, sent once", "[um98x_exec]")
+{
+    /* Build 25164 on the bench: "TRM59800.00     SCIS" (the IGS name
+     * padded to 16 characters, then the radome) is stored as
+     * "TRM59800.00 SCIS". */
+    sim_t *s = sim_init();
+    configured(s);
+    s->ant_collapse = true;
+    um98x_base_profile_t p;
+    default_profile(&p);
+    snprintf(p.antenna_model, sizeof(p.antenna_model), "TRM59800.00     SCIS");
+    snprintf(p.antenna_serial, sizeof(p.antenna_serial), "5000123");
+    p.antenna_setup_id = 0;
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.antenna_sent);
+    TEST_ASSERT_TRUE(r.antenna_ok);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "CONFIG BASEANTENNAMODEL \"TRM59800.00     SCIS\" \"5000123\" 0 USER"));
+    TEST_ASSERT_EQUAL_STRING("\"TRM59800.00 SCIS\" \"5000123\" 0 USER", s->saved_ant);
+    /* The dump read right after the step, before the outputs: what the
+     * receiver holds is what the status shows, not the profile's text. */
+    int ant = nth(s, "CONFIG BASEANTENNAMODEL \"TRM59800.00     SCIS\" \"5000123\" 0 USER", 0);
+    TEST_ASSERT_EQUAL_STRING("CONFIG", s->rx[ant + 1].cmd);
+    TEST_ASSERT_LESS_THAN_INT(nth(s, "RTCM1005 COM1 1", 0), ant + 1);
+    TEST_ASSERT_TRUE(r.settings.antenna_known);
+    TEST_ASSERT_EQUAL_STRING("TRM59800.00 SCIS", r.settings.antenna_model);
+    TEST_ASSERT_EQUAL_STRING("5000123", r.settings.antenna_serial);
+
+    /* The next apply reads "TRM59800.00 SCIS" back: the same name, nothing sent. */
+    s->nrx = 0;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_FALSE(r.antenna_sent);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "CONFIG BASEANTENNAMODEL"));
+    TEST_ASSERT_EQUAL_STRING("TRM59800.00 SCIS", r.settings.antenna_model);
 }
 
 /* Index of the last command named cmd, -1 if none. */

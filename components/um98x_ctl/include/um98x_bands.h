@@ -41,8 +41,9 @@
  * add some). Other group numbers have no expectation: only the number is
  * compared.
  *
- * Status: the log's header form is not captured yet (the body is what the
- * bench recorded), PROVISIONAL, to be confirmed on hardware.
+ * Status: the log's form is confirmed on build 25164: the station read it
+ * in a real apply on 2026-10-14 (state OK, group 3, matches). The signal
+ * tables per group are the bench's (no sky needed).
  */
 #pragma once
 

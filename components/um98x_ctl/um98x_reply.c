@@ -211,8 +211,8 @@ static void classify_mode(const char *line, size_t len, um98x_line_t *out)
     }
 }
 
-/* The signal-group log: the body after the first ';' (the header form is
- * not captured yet), else everything after the log name. */
+/* The signal-group log: the body after the first ';' (build 25164's form),
+ * else everything after the log name. */
 static void classify_groups(const char *line, size_t len, uint8_t ant, um98x_line_t *out)
 {
     size_t star = hash_checked(line, len);

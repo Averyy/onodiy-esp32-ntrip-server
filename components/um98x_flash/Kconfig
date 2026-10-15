@@ -27,6 +27,12 @@ menu "Station: receiver flasher"
             after a power cut). Off: it logs what it would send and sends
             nothing; the session then waits for the user. PROVISIONAL, to be
             confirmed on hardware.
+            Not ready to turn on: the table takes a power-on reset for a
+            receiver restart, but on the ESP32-S3 a reset by the EN pin
+            (the USB serial chip's auto-reset, the RST button) reads as
+            power-on while the receiver keeps running, still in its loader
+            or in a transfer. The recovery must check the receiver first
+            (station.c, station_early_boot).
 
     config UM98X_FLASH_FALLBACK_115200
         bool "Allow the 115200 baud fallback for loader entry and transfer"

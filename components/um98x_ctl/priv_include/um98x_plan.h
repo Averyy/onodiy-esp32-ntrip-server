@@ -118,9 +118,9 @@ bool um98x_signal_group_matches(const um98x_base_profile_t *p, const um98x_readb
 
 /**
  * True if the read-back shows the profile's antenna: descriptor and serial
- * number equal after trailing spaces are dropped, same setup ID. Unknown
- * (or no dump) = different. A profile without a model never needs the step:
- * true.
+ * number the same by um98x_antenna_str_same() (runs of spaces read as one,
+ * as the receiver stores them), same setup ID. Unknown (or no dump) =
+ * different. A profile without a model never needs the step: true.
  */
 bool um98x_antenna_matches(const um98x_base_profile_t *p, const um98x_readback_t *rb);
 
