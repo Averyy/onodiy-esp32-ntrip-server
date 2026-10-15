@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 
+#include "board_pins.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "sdkconfig.h"
@@ -47,18 +48,6 @@ bool board_is_valid(void)
     return s_valid;
 }
 
-/* Pins the module itself uses on the N16R8: SPI flash (26-32), octal PSRAM
- * (33-37) and the UART0 console (43/44). */
-static bool pin_is_reserved(int gpio)
-{
-    return (gpio >= 26 && gpio <= 37) || gpio == 43 || gpio == 44;
-}
-
-static bool pin_is_strapping(int gpio)
-{
-    return gpio == 0 || gpio == 3 || gpio == 45 || gpio == 46;
-}
-
 static esp_err_t check_pin(const char *what, int gpio, bool output, bool optional, bool strapping_ok)
 {
     if (gpio < 0) {
@@ -73,11 +62,12 @@ static esp_err_t check_pin(const char *what, int gpio, bool output, bool optiona
         ESP_LOGE(TAG, "%s: GPIO%d is not a valid %s pin", what, gpio, output ? "output" : "input");
         return ESP_ERR_INVALID_ARG;
     }
-    if (pin_is_reserved(gpio)) {
-        ESP_LOGE(TAG, "%s: GPIO%d is used by flash/PSRAM/console", what, gpio);
+    const char *owner = board_pin_owner(gpio);
+    if (owner != NULL) {
+        ESP_LOGE(TAG, "%s: GPIO%d is used by %s", what, gpio, owner);
         return ESP_ERR_INVALID_ARG;
     }
-    if (pin_is_strapping(gpio) && !strapping_ok) {
+    if (board_pin_strapping(gpio) && !strapping_ok) {
         ESP_LOGW(TAG, "%s: GPIO%d is a strapping pin", what, gpio);
     }
     return ESP_OK;
