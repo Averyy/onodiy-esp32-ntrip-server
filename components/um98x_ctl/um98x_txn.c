@@ -91,6 +91,10 @@ void um98x_txn_begin(um98x_txn_t *t, um98x_txn_kind_t kind, const char *cmd, int
         t->timeout_ms = UM98X_PROBE_WINDOW_MS;
         t->max_sends = UM98X_PROBE_SENDS;
         break;
+    case UM98X_TXN_GROUPS:
+        t->timeout_ms = UM98X_ACK_TIMEOUT_MS;
+        t->max_sends = UM98X_GROUPS_SENDS;
+        break;
     default:
         t->timeout_ms = is_saveconfig(t->cmd) ? UM98X_SAVE_TIMEOUT_MS : UM98X_ACK_TIMEOUT_MS;
         t->max_sends = UM98X_MAX_SENDS;
@@ -128,7 +132,8 @@ bool um98x_txn_leading_crlf(const um98x_txn_t *t)
 
 static bool command_like(const um98x_txn_t *t)
 {
-    return t->kind == UM98X_TXN_COMMAND || t->kind == UM98X_TXN_MODE || t->kind == UM98X_TXN_CONFIG;
+    return t->kind == UM98X_TXN_COMMAND || t->kind == UM98X_TXN_MODE || t->kind == UM98X_TXN_CONFIG ||
+           t->kind == UM98X_TXN_GROUPS;
 }
 
 um98x_txn_action_t um98x_txn_poll(um98x_txn_t *t, int64_t now_ms, int64_t *wake_ms)
@@ -158,6 +163,12 @@ um98x_txn_action_t um98x_txn_poll(um98x_txn_t *t, int64_t now_ms, int64_t *wake_
          * the expiry itself, not from when this poll noticed it. */
         int64_t expired = t->deadline_ms;
         t->deadline_ms = UM98X_NEVER;
+        if (t->kind == UM98X_TXN_GROUPS && t->ack_seen) {
+            /* Accepted, but no log this firmware reads: asking again
+             * would only get the same. */
+            finish(t, UM98X_TXN_TIMEOUT, now_ms);
+            return UM98X_TXN_ACT_DONE;
+        }
         if (t->sends >= t->max_sends) {
             /* A version query that only drew negative replies says so. */
             finish(t, (!command_like(t) && t->rejects > 0) ? UM98X_TXN_REJECTED : UM98X_TXN_TIMEOUT, now_ms);
@@ -240,6 +251,10 @@ static void on_reject(um98x_txn_t *t, const um98x_line_t *l, int64_t now_ms)
     if (t->rejects < UINT8_MAX) {
         t->rejects++;
     }
+    if (t->kind == UM98X_TXN_GROUPS) {
+        finish(t, UM98X_TXN_REJECTED, now_ms);   /* a firmware without the query: every send alike */
+        return;
+    }
     if (!command_like(t)) {
         /* Version queries keep their own schedule (tries, or polling until
          * end_ms after a restart, whose parser may answer with a failure
@@ -277,6 +292,8 @@ bool um98x_txn_on_line(um98x_txn_t *t, const char *line, size_t len, const um98x
             on_reject(t, l, now_ms);
         } else if (t->kind == UM98X_TXN_COMMAND) {
             finish(t, UM98X_TXN_OK, now_ms);
+        } else if (t->kind == UM98X_TXN_GROUPS) {
+            t->deadline_ms = now_ms + UM98X_GROUPS_LOG_MS;   /* the log follows the ack */
         } else if (t->kind == UM98X_TXN_CONFIG && t->ack_ms == UM98X_NEVER) {
             t->ack_ms = now_ms;
             if (t->config.items == 0) {
@@ -328,6 +345,30 @@ bool um98x_txn_on_line(um98x_txn_t *t, const char *line, size_t len, const um98x
             return true;
         }
         return false;
+
+    case UM98X_LINE_GROUPS:
+        if (t->kind != UM98X_TXN_GROUPS || l->ant != 1) {
+            return false;
+        }
+        {
+            size_t n = l->text_len < sizeof(t->groups_body) - 1u ? l->text_len : sizeof(t->groups_body) - 1u;
+            memcpy(t->groups_body, l->text, n);
+            t->groups_body[n] = '\0';
+        }
+        append_text(t, line, len);
+        finish(t, UM98X_TXN_OK, now_ms);
+        return true;
+
+    case UM98X_LINE_RESETTING:
+        /* No echo: it answers whatever was sent while the receiver restarts. */
+        t->restarting = true;
+        append_text(t, line, len);
+        if (t->kind == UM98X_TXN_PROBE) {
+            finish(t, UM98X_TXN_OK, now_ms);   /* a receiver is at this baud */
+        } else if (t->kind == UM98X_TXN_COMMAND && t->restart_ends) {
+            finish(t, UM98X_TXN_RESTARTED, now_ms);   /* the restart is under way: no resend */
+        }
+        return true;
 
     default:
         return false;

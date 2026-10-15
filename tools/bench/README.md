@@ -525,16 +525,19 @@ uv run rtcm_replay.py --listen 127.0.0.1:5600 ../../test/fixtures/rtcm/centipede
   `CONFIG COM1`, `CONFIG RTCMB1CB2A`, `CONFIG BASEANTENNAMODEL`, the
   satellite-view toggles, `SAVECONFIG` and `RESET` an `OK`.
 - `CONFIG SIGNALGROUP m s` is taken for 4 5, 3 6, 5 0 and 7 0, less every
-  `--respond-reject M,S` (repeatable); any other pair gets a refusal reply
-  in the older spelling (`PARSING FAILD NO MATCHING FUNC ...`), while a real
-  build 25164 answers a refused group with `PARSING FAILED GRAMMAR ERROR,`.
-  The group saves itself.
+  `--respond-reject M,S` (repeatable); any other pair gets build 25164's
+  refusal, `PARSING FAILED GRAMMAR ERROR,`, and nothing changes or restarts.
+  The group saves itself. Other unknown commands get
+  `PARSING FAILED NO MATCHING FUNC  <WORD>`.
   `--respond-group` is the group it starts on (default 4,5, the factory one).
-- A signal-group change or `RESET` restarts it: for about 3 s nothing is
-  answered and no RTCM goes out, then the restart banner and the saved
-  configuration (outputs, base mode). A real build 25164 takes about 9 s
-  and meanwhile answers a command with `The Board is resetting,...`; the
-  simulator stays silent. The RTCM output also stops after
+- `ANT1GROUPA` and `ANT2GROUPA` (the signal-group query, one-shot) get an
+  `OK` and a log with the body build 25164 gave for the running group, in a
+  made-up header (the bench recorded the bodies only).
+- A signal-group change or `RESET` restarts it: for about 3 s no RTCM goes
+  out and every command is answered with build 25164's
+  `The Board is resetting,do not response any command!` (no leading `$`),
+  then the restart banner and the saved configuration (outputs, base mode).
+  A real build 25164 takes about 9 s. The RTCM output also stops after
   `UNLOG COM1` until an `RTCMxxxx COM1` command. Bursts that fall due while
   it sends no RTCM are dropped (counted as `bursts_withheld`), never sent
   late. Replies go out between whole frames, never inside one.

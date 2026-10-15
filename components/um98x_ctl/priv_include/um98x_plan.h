@@ -7,7 +7,8 @@
  * configuring commands, sent only where something differs.
  *
  * Session order (the executor runs it): CR LF; UNLOG COM1 (quiet port);
- * CONFIG and MODE read-back; then this plan:
+ * CONFIG and MODE read-back; then this plan (with the signal-group query,
+ * ANT1GROUPA, between step 1 and step 2, sent in every session):
  *   1. CONFIG SIGNALGROUP <master> <slave>   only if the read-back differs
  *      (the receiver restarts and saves it by itself; sent first so its
  *      restart loses no unsaved setting and its ack is read on a quiet port)
@@ -65,6 +66,8 @@ extern "C" {
 #define UM98X_CMD_VERSION    "VERSIONA"
 #define UM98X_CMD_SAVE       "SAVECONFIG"
 #define UM98X_CMD_RESET      "RESET"
+/** Signal-group query, main antenna input: one-shot, never with a rate (um98x_bands.h). */
+#define UM98X_CMD_GROUPS     "ANT1GROUPA"
 
 /** The only receiver model this layer configures (exact match). */
 #define UM98X_SUPPORTED_MODEL "UM982"
@@ -157,6 +160,8 @@ size_t um98x_step_command(const um98x_base_profile_t *p, const um98x_step_t *s, 
  *   CONFIG, MODE                   queries, always (the read-back)
  *   CONFIG SIGNALGROUP m s         write, if the read-back differs (the
  *                                  receiver saves it and restarts)
+ *   ANT1GROUPA                     query, always (what the running group
+ *                                  configures on the main antenna input)
  *   CONFIG COM1 <baud>             write, if the profile's baud is not
  *                                  link_baud
  *   MODE BASE ...                  write, if the base-mode read-back

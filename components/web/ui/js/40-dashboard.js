@@ -282,7 +282,9 @@ function alertText(a) {
 }
 
 function alertTone(a) {
-  return a.id === 'safe_mode' || a.id === 'receiver_power' || a.id === 'settings_degraded' || a.id === 'no_receiver' ? 'bad' : 'warn';
+  if (a.id === 'rx_held') return 'info';   /* waiting for the user: not a fault */
+  return a.id === 'safe_mode' || a.id === 'receiver_power' || a.id === 'receiver_silent' || a.id === 'settings_degraded' ||
+    a.id === 'no_receiver' ? 'bad' : 'warn';
 }
 
 /*

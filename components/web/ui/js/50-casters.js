@@ -10,7 +10,9 @@
  * stores them. Passwords are write-only: an empty field keeps the stored
  * one while the host stays the same. Streaming to Onocoy and to an open
  * caster at the same time needs the user's explicit acknowledgement, which
- * the server asks for with 409 caster_policy / dup_stream_ack_required.
+ * the server asks for with 409 caster_policy / dup_stream_ack_required, and
+ * while both stream the page shows a standing warning (GET /api/casters
+ * warnings) that quotes Onocoy's rule; it blocks nothing.
  *
  * Onocoy slots ask for exactly what the Onocoy console gives: host and port
  * (fixed), mountpoint, username and password. A slot the station's Onocoy
@@ -67,9 +69,33 @@ const PRESET_NOTES = {
   custom: '',
 };
 
-const DUP_TEXT = 'Onocoy bans duplicated streams, also when someone else re-sends your stream from an open caster. ' +
-  'Streams on RTK2go and Centipede can be used by anyone, so a third party could hand yours to Onocoy as theirs. To lower the risk, ' +
-  'use a private RTK2go reservation, and tell Onocoy support that you are the original provider of that stream.';
+/* Onocoy's rule on the same stream submitted more than once, word for word from its FAQ. */
+const RESUBMIT_RULE = '\u201cPlease note that multiple submissions of the same streams, e.g. from free or public networks such as ' +
+  'IGS or RTK2GO, even when done by separate users in the onocoy platform, will result in banning.\u201d';
+
+const DUP_TEXT = 'Streams on RTK2go and Centipede are public: anyone can take this station\'s stream there and submit it to ' +
+  'Onocoy as well. Onocoy\'s FAQ says: ' + RESUBMIT_RULE;
+
+/** The standing warning while Onocoy and an open caster both stream (GET /api/casters warnings), or null. Blocks nothing. */
+function openCasterWarning(d) {
+  const w = ((d && d.warnings) || []).find(x => x.id === 'onocoy_open_caster');
+  if (!w) return null;
+  const cfgOf = n => ((d.slots || []).find(x => x.slot === n) || {}).config || null;
+  const slotName = n => {
+    const c = cfgOf(n);
+    return 'slot ' + (n + 1) + (c && c.name ? ' (' + c.name + ')' : '');
+  };
+  const casterOf = n => {
+    const p = PRESETS.find(x => x.id === presetOf((cfgOf(n) || {}).host));
+    return p && (p.id === 'rtk2go' || p.id === 'centipede') ? p.label : 'an open caster';
+  };
+  const onocoy = (w.onocoy_slots || []).map(slotName).join(' and ');
+  const open = (w.open_slots || []).map(n => slotName(n) + ' to ' + casterOf(n)).join(', ');
+  return msg('warn', h('strong', null, 'Onocoy and ' + (w.rtk2go ? 'RTK2go' : 'an open caster') + ' are both on'),
+    h('p', null, onocoy.charAt(0).toUpperCase() + onocoy.slice(1) + ' streams to Onocoy, and ' + open + ' at the same time. ' +
+      DUP_TEXT),
+    h('p', { class: 'small' }, 'Nothing is blocked. Turn one of them off if you do not want that risk.'));
+}
 
 function hostIn(host, domain) {
   host = String(host || '').toLowerCase().replace(/\.$/, '');
@@ -725,14 +751,18 @@ Views.casters = {
       if (s && cards[n]) mount(cards[n], cardBody(s));
     }
 
+    const warnEl = h('div');
+
     function render() {
       const safe = data.slots.length > 0 && data.slots.every(s => s.config === null);
       for (const k of Object.keys(cards)) delete cards[k];
+      mount(warnEl, openCasterWarning(data));
       mount(el,
         h('section', { class: 'card' }, h('h2', null, 'Casters'),
           h('p', null, 'The station sends the same RTCM stream to every enabled caster, up to ' + data.max_slots +
             ' at a time. Onocoy takes one slot; the others are optional.'),
-          safe ? msg('warn', 'Safe mode: the casters are off and cannot be changed until the station runs normally again.') : null),
+          safe ? msg('warn', 'Safe mode: the casters are off and cannot be changed until the station runs normally again.') : null,
+          warnEl),
         data.slots.map(s => (cards[s.slot] = h('section', { class: 'card' }, cardBody(s)))));
     }
 
@@ -744,6 +774,7 @@ Views.casters = {
         render();
         return;
       }
+      if (JSON.stringify(old.warnings || []) !== JSON.stringify(d.warnings || [])) mount(warnEl, openCasterWarning(d));
       for (const s of d.slots) {
         if (s.slot === editing) continue;
         const before = old.slots.find(x => x.slot === s.slot);

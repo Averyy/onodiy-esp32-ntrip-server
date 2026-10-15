@@ -261,6 +261,16 @@ void web_build_caster_status(wj_t *w, const char *key, const ntrip_caster_status
 /** {"slot", "config", "status"} as an array element or a top-level object (key NULL either way). */
 void web_build_caster_entry(wj_t *w, size_t slot, const ntrip_caster_cfg_t *cfg, const ntrip_caster_status_t *st);
 
+/**
+ * The "warnings" member of GET /api/casters (cfgs NULL: the configs were not
+ * loaded, safe mode: an empty list). One warning today: "onocoy_open_caster"
+ * while an enabled Onocoy slot and an enabled open-caster slot (RTK2go,
+ * Centipede) stream at once (ntrip_server_open_caster_pair): {"id",
+ * "onocoy_slots": [n...], "open_slots": [n...], "rtk2go": bool (one of the
+ * open slots is RTK2go)}. Nothing is refused for it.
+ */
+void web_build_caster_warnings(wj_t *w, const ntrip_caster_cfg_t *cfgs, size_t n);
+
 /** The "onocoy_preset" member. */
 void web_build_onocoy_preset(wj_t *w, const ntrip_caster_cfg_t *preset, uint16_t tls_port);
 

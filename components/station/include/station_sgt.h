@@ -29,6 +29,15 @@ extern "C" {
  * switch back with its reply, both whole. */
 #define STATION_SGT_REASON_MAX 224u
 
+/**
+ * The signal groups (main and second antenna input) UM982 build 25164
+ * accepts, in words for messages: exactly the manual's UM982 list. Any
+ * other pair is refused with "PARSING FAILED GRAMMAR ERROR," and nothing
+ * changes on the receiver (our bench, 2026-10-14). Other builds may offer
+ * other groups.
+ */
+#define STATION_SG_KNOWN_PAIRS "4 5, 3 6, 5 0 and 7 0"
+
 /** Test state. */
 typedef enum {
     STATION_SGT_IDLE = 0,

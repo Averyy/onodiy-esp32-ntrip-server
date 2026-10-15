@@ -17,7 +17,7 @@ _Static_assert(STATION_SGT_BANDS == GNSS_BAND_COUNT, "one entry per band bucket"
 /* The longest reason: a refused (or failed) switch with the receiver's
  * longest reply, then a failed switch back with it too, both whole. */
 #define SGT_REPLY_MAX (sizeof(((sgt_apply_t *)0)->reason) - 1u)
-_Static_assert(sizeof("The receiver refused signal group 255 255 ().") - 1u + SGT_REPLY_MAX + 1u +
+_Static_assert(sizeof("The receiver does not accept signal group 255 255 ().") - 1u + SGT_REPLY_MAX + 1u +
                        sizeof("Switching back to 255 255 failed ().") - 1u + SGT_REPLY_MAX <
                    STATION_SGT_REASON_MAX,
                "the reason holds a refusal and a failed switch back with whole replies");
@@ -301,7 +301,7 @@ void sgt_apply_done(sgt_t *t, const sgt_apply_t *a, int64_t now_ms, int64_t unix
             note(t, SGT_EV_REFUSED, sgt_note_a(SGT_EV_REFUSED, g), pair_b(t->before));
             /* The receiver's whole reply, as the receiver card shows it (the
              * reason has room for it and for a failed switch back after it). */
-            snprintf(t->reason, sizeof(t->reason), "The receiver refused signal group %u %u (%s).",
+            snprintf(t->reason, sizeof(t->reason), "The receiver does not accept signal group %u %u (%s).",
                      (unsigned)g.master, (unsigned)g.slave, a->reason[0] != '\0' ? a->reason : "rejected");
             restore(t, t->before, STATION_SGT_OUT_REJECTED, now_ms, unix_s);
             return;

@@ -61,6 +61,21 @@ static bool survey_hold(const hl_in_t *in)
     return in->survey_holds_rtcm && in->surveying;
 }
 
+/* The receiver showed within `ms` that it answers: checksum-valid text
+ * lines, or replies to the command layer. */
+static bool answered_within(const hl_t *l, const hl_in_t *in, int64_t ms)
+{
+    return (l->line_ms != HL_NEVER && in->now_ms - l->line_ms <= ms) ||
+           (l->answer_ms != HL_NEVER && in->now_ms - l->answer_ms <= ms);
+}
+
+/* The first configuration is held and the receiver answers: no RTCM is
+ * expected yet, so there is no stall to recover from. */
+static bool held_explains(const hl_t *l, const hl_in_t *in)
+{
+    return in->rx_held && answered_within(l, in, in->stall_ms);
+}
+
 /* Wall time of the last lease release, HL_NEVER if none. */
 static int64_t release_at(const hl_in_t *in)
 {
@@ -151,6 +166,9 @@ uint8_t hl_entry_step(hl_class_t c)
 
 static void enter_failed(hl_t *l, const hl_in_t *in)
 {
+    if (l->ep_alive) {
+        l->no_rtcm = true;   /* it answers: steps 4 and 5 are not run again (the retry pass) */
+    }
     journal(l, HL_CODE_FAILED, HL_OUT_STARTED);
     l->phase = HL_PH_FAILED;
     l->step = 0;
@@ -229,6 +247,8 @@ static void start_run(hl_t *l, const hl_in_t *in)
     l->seen_running = false;
     l->seen_ms = HL_NEVER;
     l->win_bytes0 = in->rx_bytes;
+    l->win_answers0 = in->answers;
+    l->win_from_ms = in->now_ms;
     l->win_saw_bytes = false;
     l->not_found = false;
     l->own_from_ms = in->now_ms;
@@ -259,6 +279,13 @@ static void dry_start(hl_t *l)
 static void try_request(hl_t *l, const hl_in_t *in)
 {
     for (int guard = 0; guard < 2 && l->phase == HL_PH_WANT; guard++) {
+        if (l->step == HL_CODE_RECEIVER_RESET && in->no_sky && answered_within(l, in, in->stall_ms)) {
+            /* It answers and says it uses no satellites: a reset cannot
+             * bring satellites back, the antenna can. */
+            l->ep_alive = true;
+            enter_failed(l, in);
+            return;
+        }
         if (l->step == HL_CODE_RECONFIGURE && in->reconfigure_refused) {
             refused(l, in);
             continue;
@@ -308,7 +335,11 @@ static void step_failed(hl_t *l, const hl_in_t *in)
     switch (step) {
     case HL_CODE_RESCAN:
         if (l->not_found) {
+            l->ep_alive = false;   /* asked at every baud: nothing answered */
+            l->no_rtcm = false;
             byte_rule(l, in, in->rx_bytes != l->win_bytes0 || l->win_saw_bytes);
+        } else if (l->no_rtcm) {
+            enter_failed(l, in);   /* found, and it answered before without RTCM: not steps 4 and 5 again */
         } else {
             want(l, in, HL_CODE_RECONFIGURE);
         }
@@ -316,9 +347,19 @@ static void step_failed(hl_t *l, const hl_in_t *in)
     case HL_CODE_RECONFIGURE:
         want(l, in, HL_CODE_RECEIVER_RESET);
         break;
-    case HL_CODE_RECEIVER_RESET:
-        byte_rule(l, in, in->rx_bytes != l->win_bytes0);
+    case HL_CODE_RECEIVER_RESET: {
+        /* Replies since the RESET went out (its banner, its version log) or
+         * text lines in its grace: the receiver answers, it is not a
+         * power-cycle case. */
+        bool answered = in->answers != l->win_answers0 || (l->line_ms != HL_NEVER && l->line_ms >= l->win_from_ms);
+        l->ep_alive = answered;
+        if (answered) {
+            enter_failed(l, in);
+        } else {
+            byte_rule(l, in, in->rx_bytes != l->win_bytes0);
+        }
         break;
+    }
     default:
         escalate(l, in, hl_classify(l, in));
         break;
@@ -400,6 +441,9 @@ static void ladder_reset(hl_t *l)
     l->abandoned = 0;
     l->blocked_6a = false;
     l->dry = false;
+    l->ep_alive = false;
+    l->no_rtcm = false;
+    l->held_wait = false;
 }
 
 /* Healthy-for-60-s tracking (IDLE and FAILED). */
@@ -450,7 +494,12 @@ static void run_phase(hl_t *l, const hl_in_t *in)
         l->win_saw_bytes = in->detect_saw_bytes;
     }
     if (l->step == HL_CODE_RECEIVER_RESET) {
-        l->win_bytes0 = in->rx_bytes;   /* its byte window is the grace */
+        /* Its byte window is the grace, and so is its text-line window: a
+         * line from before the RESET took effect says nothing about after.
+         * Replies count from the step's start (the RESET's own banner and
+         * version log come while it runs). */
+        l->win_bytes0 = in->rx_bytes;
+        l->win_from_ms = in->now_ms;
     }
 }
 
@@ -479,12 +528,22 @@ static void failed_phase(hl_t *l, const hl_in_t *in)
     if (l->phase != HL_PH_FAILED || l->hold_no_rx) {
         return;
     }
+    if (held_explains(l, in)) {
+        /* It answers again and was never set to send RTCM: waiting for the
+         * user's configuration is no failure (and no recovery either, so the
+         * journal gets no "healthy again"). */
+        l->phase = HL_PH_IDLE;
+        ladder_reset(l);
+        l->held_wait = true;
+        return;
+    }
     if (l->active_ms < l->retry_at || !stalled(l, in)) {
         return;
     }
     hl_class_t c = hl_classify(l, in);
-    if (c == HL_CLASS_TEXT_ONLY && in->reconfigure_refused) {
-        /* The station's apply backoff (or the user) owns the re-applies. */
+    if (c == HL_CLASS_TEXT_ONLY && (in->reconfigure_refused || l->no_rtcm)) {
+        /* The station's apply backoff (or the user) owns the re-applies; or
+         * the receiver answers without RTCM and steps 4-5 were tried. */
         l->retry_at = l->active_ms + HL_FAILED_RETRY_MS;
         return;
     }
@@ -501,12 +560,24 @@ static void idle_phase(hl_t *l, const hl_in_t *in)
 {
     track_health(l, in);
     if (l->phase != HL_PH_IDLE || in->stn_state == HL_STN_NO_RECEIVER) {
+        l->held_wait = false;
         return;
     }
     if (!stalled(l, in)) {
+        l->held_wait = false;
         return;
     }
+    if (held_explains(l, in)) {
+        l->held_wait = true;   /* no stall: the receiver was never set to send RTCM */
+        return;
+    }
+    l->held_wait = false;
     l->stalls++;
+    /* Alive: it sends text now, or it replied to the station not long ago
+     * (replies come only when asked, so their age is the evidence; a text
+     * output that stopped is silence). */
+    l->ep_alive = answered_within(l, in, in->stall_ms) ||
+                  (l->answer_ms != HL_NEVER && in->now_ms - l->answer_ms <= HL_ALIVE_MS);
     escalate(l, in, hl_classify(l, in));
 }
 
@@ -555,6 +626,9 @@ static bool no_receiver(hl_t *l, const hl_in_t *in)
         l->stalls++;   /* a new episode, not part of a declared stall */
     }
     l->step = 0;
+    l->ep_alive = false;   /* the station's search found nothing that answers */
+    l->no_rtcm = false;
+    l->held_wait = false;
     byte_rule(l, in, in->detect_saw_bytes);
     return true;
 }
@@ -600,6 +674,8 @@ void hl_init(hl_t *l, const hl_ops_t *ops, int64_t now_ms)
     l->last_now = now_ms;
     l->stall_ref_ms = now_ms;
     l->line_ms = HL_NEVER;
+    l->answer_ms = HL_NEVER;
+    l->win_from_ms = HL_NEVER;
     l->req_ms = HL_NEVER;
     l->seen_ms = HL_NEVER;
     l->own_from_ms = HL_NEVER;
@@ -618,13 +694,22 @@ void hl_tick(hl_t *l, const hl_in_t *in)
     }
     l->last_now = now;
 
-    /* Text-line liveness, sampled. */
+    /* Text-line and reply liveness, sampled. */
     if (!l->lines_valid) {
         l->lines_valid = true;
         l->lines_last = in->text_lines;
-    } else if (in->text_lines != l->lines_last) {
-        l->lines_last = in->text_lines;
-        l->line_ms = now;
+        l->answers_last = in->answers;
+    } else {
+        if (in->text_lines != l->lines_last) {
+            l->lines_last = in->text_lines;
+            l->line_ms = now;
+            l->ep_alive = true;
+        }
+        if (in->answers != l->answers_last) {
+            l->answers_last = in->answers;
+            l->answer_ms = now;
+            l->ep_alive = true;
+        }
     }
 
     if (l->phase == HL_PH_REBOOTING) {
@@ -686,6 +771,30 @@ void hl_tick(hl_t *l, const hl_in_t *in)
     }
 }
 
+/* Why the receiver path is down, from the evidence at hand (see the header). */
+static uint8_t why_of(const hl_t *l, const hl_in_t *in, bool fresh)
+{
+    if (in == NULL || fresh) {
+        return HL_WHY_NONE;
+    }
+    if (l->held_wait) {
+        return HL_WHY_HELD;
+    }
+    if (l->phase != HL_PH_FAILED && !(l->dry && l->phase == HL_PH_GRACE)) {
+        return HL_WHY_NONE;   /* healthy, recovering, or not declared yet */
+    }
+    if (l->power_alert) {
+        return HL_WHY_NO_ANSWER;
+    }
+    if (l->hold_no_rx || in->stn_state == HL_STN_NO_RECEIVER) {
+        return HL_WHY_NONE;   /* the station's no-receiver alert says it */
+    }
+    if (l->ep_alive) {
+        return in->no_sky ? HL_WHY_NO_SKY : HL_WHY_NO_RTCM;
+    }
+    return HL_WHY_SILENT;
+}
+
 void hl_get_status(const hl_t *l, const hl_in_t *in, hl_status_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -725,4 +834,5 @@ void hl_get_status(const hl_t *l, const hl_in_t *in, hl_status_t *out)
     out->mode = l->mode;
     out->reboot_recheck = l->blocked_6a && l->mode == HL_MODE_FULL;
     out->episode = l->phase != HL_PH_IDLE || l->idx != 0 || l->no_rx || l->power_alert;
+    out->why = why_of(l, in, fresh);
 }

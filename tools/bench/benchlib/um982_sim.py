@@ -19,15 +19,20 @@ the host-test vectors), so the firmware in QEMU identifies the replayed
   RESET                       OK, then a restart
   CONFIG SIGNALGROUP m s      OK for 4 5, 3 6, 5 0 and 7 0 (minus `reject`),
                               saved by itself, then a restart when it
-                              changed; any other pair gets the receiver's
-                              refusal reply (the real refusal text for a
-                              signal group is not known)
+                              changed; any other pair gets build 25164's
+                              refusal ("PARSING FAILED GRAMMAR ERROR,"),
+                              nothing changes and nothing restarts
+  ANT1GROUPA, ANT2GROUPA      OK and the signal-group log: the body build
+                              25164 gave for the running group (main and
+                              second antenna input) in a made-up header
   anything else               the receiver's refusal reply
 
-A restart withholds the RTCM output and every answer for `restart_s`, then
-prints the restart banner and comes back with what was saved (signal group,
-base mode, outputs). Nothing here touches a real receiver: the station's
-commands arrive over the replay's local TCP connection.
+A restart withholds the RTCM output for `restart_s` and answers every
+command meanwhile with build 25164's restarting notice ("The Board is
+resetting,do not response any command!"), then prints the restart banner
+and comes back with what was saved (signal group, base mode, outputs).
+Nothing here touches a real receiver: the station's commands arrive over
+the replay's local TCP connection.
 
 The replayed RTCM is a recording of another receiver; the station messages
 are this receiver's own, as configured: `RTCM1005|1006|1033|1230 COM1 n`
@@ -48,7 +53,8 @@ import threading
 import time
 
 from .rtcm import BitWriter, build_frame, llh_to_ecef, msg_type, payload_of
-from .unicore import ack_line, banner_line, config_line, mode_line, refusal_text, version_line
+from .unicore import (GROUP_BODIES, SG_REFUSAL, ack_line, banner_line, config_line, groups_line, mode_line,
+                      notice_line, refusal_text, version_line)
 
 ACCEPTED_GROUPS = ((4, 5), (3, 6), (5, 0), (7, 0))
 ACK_DELAY_S = 0.03
@@ -274,7 +280,8 @@ class Um982Responder:
 
     def _command(self, cmd: str, now: float) -> None:
         if now < self.restart_until:
-            self.log.append((now, cmd, "ignored (restarting)"))
+            self._say(now, ACK_DELAY_S, notice_line())   # no echo: it answers anything so while it restarts
+            self.log.append((now, cmd, "restarting (notice)"))
             return
         up = " ".join(cmd.upper().split())
         words = up.split()
@@ -305,7 +312,7 @@ class Um982Responder:
                 and words[3].isdigit():
             g = (int(words[2]), int(words[3]))
             if g not in ACCEPTED_GROUPS or g in self.reject:
-                answer = refusal_text("SIGNALGROUP")
+                answer = SG_REFUSAL
                 self._ack(cmd, now, answer)
             else:
                 self._ack(cmd, now)
@@ -313,6 +320,12 @@ class Um982Responder:
                     self.group = g   # saved by the receiver itself
                     self._restart(now + ACK_DELAY_S)
                     answer = "OK, restarting"
+        elif up in ("ANT1GROUPA", "ANT2GROUPA"):
+            ant = 1 if up == "ANT1GROUPA" else 2
+            self._ack(cmd, now)
+            bodies = GROUP_BODIES.get(self.group)
+            if bodies is not None:
+                self._say(now, DATA_DELAY_S, groups_line(bodies[ant - 1], ant))
         elif words[:2] == ["MODE", "BASE"]:
             self.mode = up
             self._ack(cmd, now)

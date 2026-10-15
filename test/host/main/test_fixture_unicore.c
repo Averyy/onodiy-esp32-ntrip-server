@@ -3,8 +3,10 @@
  * SPDX-License-Identifier: MIT
  *
  * Receiver reply lines from a real receiver (test/fixtures/unicore: reply
- * samples quoted in a public MIT-licensed library): checksum rules,
- * classification, dump items and the base-mode helpers.
+ * samples quoted in a public MIT-licensed library, and the lines our bench
+ * recorded from a UM982 running build 25164): checksum rules,
+ * classification, dump items, the base-mode helpers, the restarting answer
+ * and the signal-group reports.
  *
  * Checksum fact these lines confirm: the replies, dump items, restart
  * banner and the base-mode log end in a 2-hex XOR that includes the leading
@@ -16,6 +18,7 @@
 
 #include "fixture_util.h"
 #include "gnss_framing.h"
+#include "um98x_bands.h"
 #include "um98x_base.h"
 #include "um98x_profile.h"
 #include "um98x_reply.h"
@@ -199,4 +202,116 @@ TEST_CASE("fixtures: a version log whose PN-SN field is a lone dash", "[fixtures
     TEST_ASSERT_EQUAL_STRING("", l.version.serial);
     TEST_ASSERT_EQUAL_STRING("0123456789abcdef", l.version.efuse_id);
     TEST_ASSERT_EQUAL_STRING("2025/04/18", l.version.compile_date);
+}
+
+/* ---- UM982 build 25164 (our bench, 2026-10-14) ------------------------------ */
+
+static cJSON *load_25164(void)
+{
+    size_t n;
+    char *text = (char *)fx_read("unicore/um982_build25164_replies.json", &n);
+    cJSON *j = cJSON_Parse(text);
+    free(text);
+    TEST_ASSERT_NOT_NULL(j);
+    return j;
+}
+
+static gnss_frame_kind_t s_fx_kind;
+static size_t s_fx_units;
+static char s_fx_line[GNSS_TEXT_MAX_LINE + 1];
+
+static void fx_unit(const gnss_frame_t *fr, void *ctx)
+{
+    (void)ctx;
+    s_fx_units++;
+    s_fx_kind = fr->kind;
+    size_t n = fr->len < sizeof(s_fx_line) - 1 ? fr->len : sizeof(s_fx_line) - 1;
+    memcpy(s_fx_line, fr->data, n);
+    s_fx_line[n] = '\0';
+}
+
+TEST_CASE("fixtures: build 25164's lines frame and classify, the restarting answer included", "[fixtures]")
+{
+    cJSON *j = load_25164();
+    const cJSON *s;
+    unsigned n = 0, refused = 0, restarting = 0;
+    cJSON_ArrayForEach(s, cJSON_GetObjectItemCaseSensitive(j, "samples"))
+    {
+        const char *line = cJSON_GetObjectItemCaseSensitive(s, "text")->valuestring;
+        const char *kind = cJSON_GetObjectItemCaseSensitive(s, "kind")->valuestring;
+        const size_t len = strlen(line);
+
+        /* The framer emits each as one whole text line. */
+        static gnss_framer_t f;
+        gnss_framer_init(&f, fx_unit, NULL);
+        s_fx_units = 0;
+        gnss_framer_feed(&f, (const uint8_t *)line, len);
+        gnss_framer_feed(&f, (const uint8_t *)"\r\n", 2);
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(1, s_fx_units, line);
+        TEST_ASSERT_EQUAL_MESSAGE(GNSS_FRAME_TEXT, s_fx_kind, line);
+        TEST_ASSERT_EQUAL_STRING(line, s_fx_line);
+
+        unsigned want = (unsigned)strtoul(line + len - 2, NULL, 16);
+        TEST_ASSERT_EQUAL_HEX8_MESSAGE(want, um98x_xor8(line, len - 3), line);   /* the lead (if any) included */
+
+        um98x_line_t l;
+        um98x_line_classify(line, len, &l);
+        if (strcmp(kind, "command_ok") == 0) {
+            TEST_ASSERT_EQUAL_MESSAGE(UM98X_LINE_ACK, l.kind, line);
+            TEST_ASSERT_TRUE(l.ok);
+        } else if (strcmp(kind, "signal_group_refused") == 0) {
+            TEST_ASSERT_EQUAL_MESSAGE(UM98X_LINE_ACK, l.kind, line);
+            TEST_ASSERT_FALSE(l.ok);
+            TEST_ASSERT_EQUAL_STRING_LEN("PARSING FAILED GRAMMAR ERROR,", l.text, l.text_len);
+            TEST_ASSERT_TRUE(l.echo_len > strlen("CONFIG SIGNALGROUP "));
+            TEST_ASSERT_EQUAL_MEMORY("CONFIG SIGNALGROUP ", l.echo, strlen("CONFIG SIGNALGROUP "));
+            refused++;
+        } else if (strcmp(kind, "command_error") == 0) {
+            TEST_ASSERT_EQUAL_MESSAGE(UM98X_LINE_ACK, l.kind, line);
+            TEST_ASSERT_FALSE(l.ok);
+            TEST_ASSERT_TRUE(um98x_echo_matches(l.echo, l.echo_len, "FOOBAR"));
+            TEST_ASSERT_EQUAL_STRING_LEN("PARSING FAILED NO MATCHING FUNC  FOOBAR", l.text, l.text_len);
+        } else if (strcmp(kind, "boot_banner") == 0) {
+            TEST_ASSERT_EQUAL_MESSAGE(UM98X_LINE_BANNER, l.kind, line);
+            TEST_ASSERT_EQUAL_STRING_LEN("COM2", l.text, l.text_len);
+        } else if (strcmp(kind, "restarting") == 0) {
+            TEST_ASSERT_EQUAL_MESSAGE(UM98X_LINE_RESETTING, l.kind, line);
+            TEST_ASSERT_FALSE(gnss_text_line_valid(line, len));   /* no lead character */
+            restarting++;
+        } else {
+            TEST_FAIL_MESSAGE(kind);
+        }
+        n++;
+    }
+    TEST_ASSERT_EQUAL_UINT(11, n);
+    TEST_ASSERT_EQUAL_UINT(2, refused);
+    TEST_ASSERT_EQUAL_UINT(1, restarting);
+    cJSON_Delete(j);
+}
+
+TEST_CASE("fixtures: build 25164's signal-group reports decode as the bench read them", "[fixtures]")
+{
+    cJSON *j = load_25164();
+    const cJSON *b;
+    unsigned n = 0;
+    cJSON_ArrayForEach(b, cJSON_GetObjectItemCaseSensitive(j, "signal_group_bodies"))
+    {
+        const char *group = cJSON_GetObjectItemCaseSensitive(b, "group")->valuestring;
+        const char *query = cJSON_GetObjectItemCaseSensitive(b, "query")->valuestring;
+        const char *body = cJSON_GetObjectItemCaseSensitive(b, "body")->valuestring;
+        unsigned m = 0, sl = 0;
+        TEST_ASSERT_EQUAL_INT(2, sscanf(group, "%u %u", &m, &sl));
+        um98x_bands_t r;
+        TEST_ASSERT_TRUE_MESSAGE(um98x_bands_parse(body, strlen(body), &r), body);
+        if (strcmp(query, "ANT1GROUPA") == 0) {
+            /* The main input names its group and has what that group should configure. */
+            TEST_ASSERT_EQUAL_UINT8(m, r.group);
+            TEST_ASSERT_TRUE_MESSAGE(um98x_bands_match((uint8_t)m, &r, NULL), body);
+        } else {
+            TEST_ASSERT_EQUAL_UINT8(sl, r.group);   /* the second input names its own (0 = off) */
+        }
+        n++;
+    }
+    TEST_ASSERT_EQUAL_UINT(8, n);
+    cJSON_Delete(j);
 }

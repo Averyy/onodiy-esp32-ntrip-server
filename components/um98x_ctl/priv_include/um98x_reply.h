@@ -12,16 +12,35 @@
  *   $command,<echo>,response: <text>*hh   acknowledgement; XOR from '$'
  *                                         (inclusive) to '*'. <text> starting
  *                                         with "OK" = accepted, anything else
- *                                         (e.g. "PARSING FAILD <reason>") =
- *                                         rejected, the text being the reason.
- *                                         The echo is everything up to the
- *                                         last ",response: ".
+ *                                         = rejected, the text being the
+ *                                         reason: "PARSING FAILED NO MATCHING
+ *                                         FUNC  <word>" for an unknown
+ *                                         command, "PARSING FAILED GRAMMAR
+ *                                         ERROR," for a signal group the
+ *                                         firmware does not offer (UM982
+ *                                         build 25164; older builds spell it
+ *                                         "FAILD"; the spelling is never
+ *                                         matched). The echo is everything up
+ *                                         to the last ",response: ".
  *   $CONFIG,<item>,<text>*hh              one configuration dump item, same XOR
  *   $devicename,<port>*hh                 restart banner, same XOR
+ *   The Board is resetting,<text>*hh      the receiver's answer to any command
+ *                                         while it restarts: no lead
+ *                                         character, the XOR of the text
+ *                                         before '*' (gnss_framing emits it as
+ *                                         a text line)
  *   #VERSIONA,...;<body>*crc32            version log (gnss_versiona_parse)
  *   #MODE...,...;<body>*hh                base-mode log; 2-hex XOR including
  *                                         '#', or an 8-hex CRC32 (either is
  *                                         accepted)
+ *   #ANT1GROUPA,...;<body>*hh|crc32       the signals the running signal group
+ *   #ANT2GROUPA,...;<body>*hh|crc32       configures on the main (1) or the
+ *                                         second (2) antenna input, either
+ *                                         checksum: <group>,<n>,<sys>,<mask>...
+ *                                         (um98x_bands.h). The header is not
+ *                                         captured yet: the body is the text
+ *                                         after the first ';', or after the
+ *                                         log name when there is none
  *
  * Anything else (NMEA sentences, other logs) is OTHER: not for this layer.
  *
@@ -29,7 +48,9 @@
  * receiver echoes the command as it was sent).
  *
  * Status: reply formats PROVISIONAL, to be confirmed on hardware (the
- * base-mode log header and the dump item texts in particular). Public
+ * base-mode log header, the dump item texts and the signal-group log's
+ * header in particular). The acknowledgement and refusal lines, the banner
+ * and the restarting answer are as UM982 build 25164 sends them. Public
  * samples from a sibling receiver (test/fixtures/unicore) follow these
  * rules: the acknowledgement, error, dump and banner lines and a "#MODE,"
  * log with its 2-hex XOR including the lead character; the base-mode body
@@ -65,6 +86,8 @@ typedef enum {
     UM98X_LINE_VERSION,     /**< version log, CRC-valid and parsed */
     UM98X_LINE_MODE,        /**< base-mode log */
     UM98X_LINE_BAD,         /**< has a command-layer prefix but a wrong checksum or form */
+    UM98X_LINE_RESETTING,   /**< the receiver restarts: it answered a command with its restarting notice */
+    UM98X_LINE_GROUPS,      /**< signal-group log: the signals the running group configures (ant: 1 or 2) */
 } um98x_line_kind_t;
 
 /** A classified line. Pointers point into the line and live only as long as it. */
@@ -72,12 +95,13 @@ typedef struct {
     um98x_line_kind_t kind;
     const char *echo;       /**< ACK: echoed command */
     size_t echo_len;
-    const char *text;       /**< ACK: response text; CONFIG: item text; MODE: body; BANNER: port */
+    const char *text;       /**< ACK: response text; CONFIG: item text; MODE, GROUPS: body; BANNER: port */
     size_t text_len;
     bool ok;                /**< ACK: the response starts with "OK" */
     const char *item;       /**< CONFIG: item name */
     size_t item_len;
     gnss_versiona_t version;/**< VERSION: parsed body */
+    uint8_t ant;            /**< GROUPS: 1 the main antenna input, 2 the second */
 } um98x_line_t;
 
 /** What the receiver's configuration dump said about the items the apply needs. */

@@ -47,6 +47,7 @@
 #include "sg_test_core.h"
 #include "station_core.h"
 #include "station_obs.h"
+#include "um98x_bands.h"
 #include "um98x_ctl.h"
 #include "um98x_flash.h"
 #include "um98x_flash_bench.h"
@@ -102,7 +103,8 @@ _Static_assert(STN_ALERT_UNSUPPORTED_MODEL == (uint32_t)STATION_ALERT_UNSUPPORTE
                    STN_ALERT_ANTENNA_MOVED == (uint32_t)STATION_ALERT_ANTENNA_MOVED &&
                    STN_ALERT_RECEIVER_ATTENTION == (uint32_t)STATION_ALERT_RECEIVER_ATTENTION &&
                    STN_ALERT_RECEIVER_IN_LOADER == (uint32_t)STATION_ALERT_RECEIVER_IN_LOADER &&
-                   STN_ALERT_NO_RECEIVER == (uint32_t)STATION_ALERT_NO_RECEIVER,
+                   STN_ALERT_NO_RECEIVER == (uint32_t)STATION_ALERT_NO_RECEIVER &&
+                   STN_ALERT_SIGNALS_MISMATCH == (uint32_t)STATION_ALERT_SIGNALS_MISMATCH,
                "core alerts mirror station_alert_t");
 _Static_assert(STN_REC_RESYNC == (int)STATION_RECOVER_RESYNC &&
                    STN_REC_LINK_RESTART == (int)STATION_RECOVER_LINK_RESTART &&
@@ -244,6 +246,15 @@ static char s_b1c_reply[64];
 static char s_sky_reply[64];             /* the last failed satellite-in-view toggle */
 static bool s_rx_sg_valid;               /* the latest read-back named the receiver's signal group */
 static station_sg_t s_rx_sg;
+/* What the running group configures, from the last session that asked
+ * (ANT1GROUPA), and how it compared with the profile's group then. */
+static bool s_bands_asked;
+static um98x_bands_t s_bands;
+static int64_t s_bands_at_ms;
+static int64_t s_bands_unix;
+static uint8_t s_bands_master;
+static bool s_bands_match;
+static char s_bands_reply[64];
 
 /* A refused signal group (until the next profile save; under s_lock). */
 static bool s_sg_refused;
@@ -1016,10 +1027,13 @@ static void sg_refused_fallback(stn_result_t *r)
     sg_note_refused(refused, have, back, s_apply.reason);
     if (have) {
         r->sg_back = true;
-        ESP_LOGW(TAG, "the receiver refused signal group %u %u (%s): back to %u %u, applied again", (unsigned)refused.master,
-                 (unsigned)refused.slave, s_apply.reason, (unsigned)back.master, (unsigned)back.slave);
+        ESP_LOGW(TAG, "this receiver firmware does not accept signal group %u %u (%s; build 25164 accepts only "
+                      STATION_SG_KNOWN_PAIRS "): back to %u %u, applied again%s",
+                 (unsigned)refused.master, (unsigned)refused.slave, s_apply.reason, (unsigned)back.master,
+                 (unsigned)back.slave, s_apply.rolled_back ? "" : " (nothing changed on the receiver: no restart)");
     } else {
-        ESP_LOGE(TAG, "the receiver refused signal group %u %u (%s) and the group it ran before is not known",
+        ESP_LOGE(TAG, "this receiver firmware does not accept signal group %u %u (%s; build 25164 accepts only "
+                      STATION_SG_KNOWN_PAIRS ") and the group it ran before is not known",
                  (unsigned)refused.master, (unsigned)refused.slave, s_apply.reason);
     }
 }
@@ -1074,6 +1088,74 @@ static void sg_test_apply_done(const stn_job_t *job, stn_result_t *r)
             sgt_switch_queued(&s_sgt);   /* the core queues the re-apply (STN_WHY_SG_TEST) in stn_done */
             xSemaphoreGive(s_sgt_mx);
         }
+    }
+}
+
+/* "galileo E1 E5a E5b E6 (4 bands)" for each constellation of a report, into out. */
+static void bands_text(const um98x_bands_t *b, char *out, size_t size)
+{
+    size_t n = 0;
+    out[0] = '\0';
+    for (unsigned sys = 0; sys < UM98X_BANDS_SYS && n < size; sys++) {
+        if ((b->present & (1u << sys)) == 0) {
+            continue;
+        }
+        int w = snprintf(out + n, size - n, "%s%s", n > 0 ? "; " : "", um98x_bands_sys_name(sys));
+        n += w > 0 ? (size_t)w : 0;
+        for (unsigned bit = 0; bit < 32 && n < size; bit++) {
+            if ((b->mask[sys] & (1u << bit)) == 0) {
+                continue;
+            }
+            const char *name = um98x_bands_signal_name(sys, bit);
+            w = name != NULL ? snprintf(out + n, size - n, " %s", name) : snprintf(out + n, size - n, " bit%u", bit);
+            n += w > 0 ? (size_t)w : 0;
+        }
+        if (n < size) {
+            w = snprintf(out + n, size - n, " (%u bands)", (unsigned)um98x_bands_count(sys, b->mask[sys]));
+            n += w > 0 ? (size_t)w : 0;
+        }
+    }
+}
+
+/* The session's signal report: kept for the status, judged against the
+ * profile's main-antenna group (a mismatch raises the station's alert; an
+ * unknown report clears it), logged. */
+static void note_bands(void)
+{
+    if (!s_apply.bands_asked) {
+        return;   /* the session ended before the query */
+    }
+    s_bands_asked = true;
+    s_bands = s_apply.bands;
+    s_bands_at_ms = now_ms();
+    s_bands_unix = unix_now();
+    s_bands_master = s_profile.signal_group_master;
+    snprintf(s_bands_reply, sizeof(s_bands_reply), "%s", s_apply.bands_reply);
+    uint32_t missing[UM98X_BANDS_SYS];
+    s_bands_match = um98x_bands_match(s_bands_master, &s_bands, missing);
+    int verdict = s_bands.state != UM98X_BANDS_OK ? -1 : s_bands_match ? 1 : 0;
+    portENTER_CRITICAL(&s_lock);
+    stn_note_signals(&s_core, verdict);
+    portEXIT_CRITICAL(&s_lock);
+
+    static char text[200];   /* station task only */
+    switch ((um98x_bands_state_t)s_bands.state) {
+    case UM98X_BANDS_OK:
+        bands_text(&s_bands, text, sizeof(text));
+        if (s_bands_match) {
+            ESP_LOGI(TAG, "signal group %u configures: %s", (unsigned)s_bands.group, text);
+        } else {
+            ESP_LOGW(TAG, "the receiver reports signal group %u with %s, not what group %u should configure",
+                     (unsigned)s_bands.group, text, (unsigned)s_bands_master);
+        }
+        break;
+    case UM98X_BANDS_REFUSED:
+        ESP_LOGI(TAG, "this receiver firmware does not report its signals per group (%s): unknown", s_bands_reply);
+        break;
+    default:
+        ESP_LOGI(TAG, "the receiver's signals per group are unknown (%s)",
+                 s_bands_reply[0] != '\0' ? s_bands_reply : "answer not read");
+        break;
     }
 }
 
@@ -1144,9 +1226,15 @@ static void job_apply(const stn_job_t *job, stn_result_t *r)
     }
     ESP_LOGI(TAG, "applying the station profile (%s)", why_name(job->why));
     int64_t t0 = esp_timer_get_time();
-    um98x_apply_opts_t opts = { .force_mode = job->force_mode };
+    /* A group to go back to if the receiver refuses this one (the last
+     * successful apply's): a plain refusal then needs no RESET. */
+    uint16_t ok_pair = 0;
+    uint16_t want_pair = (uint16_t)(((unsigned)s_profile.signal_group_master << 8) | s_profile.signal_group_slave);
+    bool fallback = settings_get_u16(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_OK, &ok_pair) == ESP_OK && ok_pair != want_pair;
+    um98x_apply_opts_t opts = { .force_mode = job->force_mode, .sg_fallback = fallback };
     esp_err_t err = um98x_ctl_apply_profile(s_lease, &s_profile, &opts, &s_apply);
     lease_drop();
+    note_bands();
 
     if (s_apply.settings_read) {
         s_rx_valid = true;
@@ -1992,6 +2080,16 @@ static void publish_status(const stn_in_t *in)
 
     o->rx_sg_valid = s_rx_sg_valid;
     o->rx_sg = s_rx_sg;
+    o->rx_bands_age_s = UINT32_MAX;
+    if (s_bands_asked) {
+        o->rx_bands = s_bands;
+        int64_t age = (in->now_ms - s_bands_at_ms) / 1000;
+        o->rx_bands_age_s = age < 0 ? 0 : (age >= (int64_t)UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)age);
+        o->rx_bands_unix = s_bands_unix;
+        o->rx_bands_profile_master = s_bands_master;
+        o->rx_bands_match = s_bands_match;
+        memcpy(o->rx_bands_reply, s_bands_reply, sizeof(o->rx_bands_reply));
+    }
     xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
     sgt_brief(&s_sgt, in->now_ms, &o->sg_test);
     xSemaphoreGive(s_sgt_mx);
@@ -2281,7 +2379,7 @@ static void service(const stn_in_t *in)
 {
     if (s_restart_pending) {
         s_restart_pending = false;
-        ESP_LOGW(TAG, "the receiver restarted (restart banner or an unasked version log)");
+        ESP_LOGW(TAG, "the receiver restarted (its restart banner, its restarting answer or an unasked version log)");
         esp_err_t err = esp_event_post(STATION_EVENT, STATION_EVENT_RECEIVER_RESTARTED, NULL, 0, 0);
         if (err != ESP_OK) {
             ESP_LOGD(TAG, "restart event not posted: %s", esp_err_to_name(err));
@@ -2882,6 +2980,7 @@ esp_err_t station_get_status(station_status_t *out)
         memset(out, 0, sizeof(*out));
         out->state = STATION_STATE_IDLE;
         out->next_detect_in_s = UINT32_MAX;
+        out->rx_bands_age_s = UINT32_MAX;
         if (s_inited) {
             out->position_locked = (s_profile.base_mode == UM98X_BASE_FIXED);
             int r1230 = rtcm1230_state();
@@ -2911,6 +3010,18 @@ esp_err_t station_get_status(station_status_t *out)
      * is the station's (its jobs, the boot lease, the listen-only lease). */
     gnss_link_mode_t mode = gnss_link_get_mode();
     out->lease_held = (mode == GNSS_LINK_MODE_COMMAND || mode == GNSS_LINK_MODE_RAW);
+    /* Live as well: whether the receiver answers (health's reasons) and
+     * whether it said it restarts, also in the middle of a long job. */
+    um98x_ctl_stats_t cs;
+    if (s_inited && um98x_ctl_get_stats(&cs) == ESP_OK) {
+        out->rx_answers = cs.lines;
+        out->rx_answer_age_ms = cs.last_answer_age_ms;
+        out->receiver_restarting = cs.restarting;
+    } else {
+        out->rx_answers = 0;
+        out->rx_answer_age_ms = UINT32_MAX;
+        out->receiver_restarting = false;
+    }
     if (released == INT64_MIN) {
         out->since_lease_release_ms = UINT32_MAX;
     } else {
@@ -3140,6 +3251,12 @@ esp_err_t station_request_flash(const station_flash_request_t *req)
     if (!s_inited || !s_started || journal_open(jerr) || lifecycle_app_trial_active() || app_update_running() ||
         lifecycle_in_safe_mode() || state != STATION_STATE_STREAMING || !receiver_fresh() || !supported ||
         maint_on()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* A signal-group comparison owns the receiver until it ends (the web
+     * answers 409 signal_test_running before this; an update that was
+     * downloading when a comparison started, and the bench, end here). */
+    if (station_sg_test_running()) {
         return ESP_ERR_INVALID_STATE;
     }
     pkg_store_info_t info;

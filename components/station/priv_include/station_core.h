@@ -183,6 +183,7 @@ typedef enum {
 #define STN_ALERT_RECEIVER_ATTENTION (1u << 4)
 #define STN_ALERT_RECEIVER_IN_LOADER (1u << 5)
 #define STN_ALERT_NO_RECEIVER        (1u << 6)   /**< derived (stn_alerts): never stored in `alerts` */
+#define STN_ALERT_SIGNALS_MISMATCH   (1u << 7)   /**< the receiver's signal report differs from the profile's group (stn_note_signals) */
 
 /** Same values as station_recovery_t (mildest first). */
 typedef enum {
@@ -764,6 +765,14 @@ uint32_t stn_config_retry_in_s(const stn_t *s, bool autocfg, int64_t now_ms);
  * and maintenance is off. Leaving the state clears it.
  */
 uint32_t stn_alerts(const stn_t *s);
+
+/**
+ * An apply session's signal report was judged against the profile's
+ * main-antenna group: 1 it matches (clears STN_ALERT_SIGNALS_MISMATCH), 0 it
+ * differs (raises it), -1 unknown (the query was refused or not read:
+ * clears it, an alert needs a report to stand on).
+ */
+void stn_note_signals(stn_t *s, int verdict);
 
 /**
  * NO_RECEIVER or DETECTING: seconds until the next detection pass (0 = due

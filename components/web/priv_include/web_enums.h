@@ -84,6 +84,8 @@ const char *web_update_slot_name(lifecycle_update_t v);
 const char *web_recovery_mode_name(health_recovery_mode_t v);
 /** um98x_setting_t of a receiver read-back ("unknown", "on", "off"). */
 const char *web_setting_name(uint8_t v);
+/** um98x_bands_state_t of a signal report ("unknown", "ok", "refused", "unread"). */
+const char *web_bands_state_name(uint8_t v);
 /** station_live_sky_t, station_live_why_t, station_live_end_t. */
 const char *web_live_sky_name(uint8_t v);
 const char *web_live_why_name(uint8_t v);

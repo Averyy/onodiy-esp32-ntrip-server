@@ -92,6 +92,14 @@ const L = {
     no_upstream: ['No internet', 'Wi-Fi is connected but the internet cannot be reached.'],
     link_loss: ['Receiver data lost', 'Data from the receiver was lost or corrupted in the last 10 minutes.'],
     power_lost: ['Power was lost', 'The station started from power-off 3 or more times within 24 hours. Check the power adapter, cable and connections.'],
+    receiver_silent: ['Nothing from the receiver', 'The station gets nothing usable from the receiver and no answer to its commands. ' +
+      'Power-cycle the station; if that does not help, check the receiver\'s power and its cable.'],
+    no_satellites: ['No satellites', 'The receiver answers but uses no satellites, so it sends no RTCM. Check that the antenna ' +
+      'is connected to the socket marked M and has a clear view of the sky.'],
+    no_rtcm: ['Receiver answers, no RTCM', 'The receiver answers the station but sends no RTCM. Most often the antenna sees no ' +
+      'satellites: check that it is connected to the socket marked M and has a clear view of the sky.'],
+    rx_held: ['Waiting for you to configure the receiver', 'The station has not configured the receiver yet, so it sends no RTCM. ' +
+      'This is not a failure: confirm the configuration on the Receiver page when you are ready.'],
   },
   /* After a failed receiver configuration: the station's own retry (automatic configuration on), or only the user's. */
   configRetry: {
@@ -106,6 +114,8 @@ const L = {
     receiver_attention: ['Receiver needs attention', 'RTCM did not come back after a receiver update session ended.'],
     receiver_in_loader: ['Receiver in its loader', 'The receiver waits at its loader prompt without an update session. The station only listens until you choose what to do.'],
     no_receiver: ['No receiver found', ''],   /* the text depends on the alert: noReceiverText() */
+    signals_mismatch: ['Signals differ from the signal group', 'After the last configuration the receiver reported other ' +
+      'signals than the profile\'s signal group should give. See the receiver page.'],
   },
   /* Why the station's own restart (to look for the receiver) is postponed now (health reboot_hold). */
   /* health.reboot_cap_limit: which limit of the restart cap sets its wait */
@@ -264,15 +274,20 @@ const L = {
 
 /*
  * Signal groups offered by name (the receiver's CONFIG SIGNALGROUP pairs,
- * master and second antenna input); other pairs are entered as numbers.
+ * main and second antenna input): exactly the pairs UM982 build 25164
+ * accepts, with the bands each gives on the main input (as that build
+ * reported them). Other pairs are entered as numbers, for another firmware.
  */
 const SG_CHOICES = [
-  ['3 6', '3 6 (recommended)', 'Galileo E1, E5a, E5b and E6, QZSS L6; BeiDou B1I, B1C, B2b and B3I (no B2a)'],
-  ['7 0', '7 0', 'Every BeiDou signal (B1I, B1C, B2I, B2a, B2b, B3I) and Galileo E1, E5a, E5b (no E6); second antenna input ' +
-    'off; documented for base-station use'],
-  ['4 5', '4 5', 'The receiver\'s factory setting'],
-  ['5 0', '5 0', 'Low-power set, dual frequency, second antenna input off'],
+  ['3 6', '3 6 (recommended): Galileo E6', 'Four Galileo bands (E1, E5a, E5b, E6) and QZSS L6; BeiDou B1I, B1C, B2b and B3I ' +
+    '(no B2a)'],
+  ['7 0', '7 0: BeiDou B2a', 'Four BeiDou bands (every BeiDou signal, B2a included); Galileo E1, E5a, E5b (no E6); second ' +
+    'antenna input off; meant for base stations'],
+  ['4 5', '4 5: factory', 'The receiver\'s factory setting: at most three bands on any constellation'],
+  ['5 0', '5 0: no L5', 'Low-power set: GPS L1 and L2, Galileo E1 and E5b, no L5 at all; second antenna input off'],
 ];
+/* The pairs UM982 build 25164 accepts; it refuses every other pair. */
+const SG_KNOWN_PAIRS = '4 5, 3 6, 5 0 and 7 0';
 
 /** "3 6 (recommended)" for a known pair, else "M S". */
 function sgName(m, s) {

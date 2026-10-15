@@ -45,6 +45,15 @@
  *    over the bytes after '#' up to '*' (e.g. the version log; the common
  *    reflected CRC-32 with polynomial 0xEDB88320, initial value 0 and no final
  *    XOR). Hex digits are accepted in either case.
+ *  - One line has no lead character: while the receiver restarts it answers
+ *    every command with "The Board is resetting,do not response any
+ *    command!*39" (seen on UM982 build 25164), whose "*hh" is the XOR of
+ *    the text before '*'. A unit that starts with the exact bytes of
+ *    GNSS_NOTICE_PREFIX is collected as a line and emitted when that
+ *    checksum verifies (data[0] is then 'T', not '$' or '#'; the line
+ *    counts in text_lines). Only this prefix starts such a line: a 'T'
+ *    that does not continue it is discarded as before and the bytes after
+ *    it are scanned again, so the rule costs no following unit.
  *  - Lines that fail are dropped and counted in text_rejected; payload bytes
  *    that happen to contain '$' or CR/LF therefore never produce a fake reply
  *    line. A line that fails but holds another '$' or '#' after its first
@@ -127,6 +136,8 @@ extern "C" {
 #define GNSS_VERSIONA_MIN_FIELDS 6u     /**< body fields the version log must carry */
 #define GNSS_BIN_HEADER_LEN      24u    /**< receiver binary log header */
 #define GNSS_BIN_MAX_MSG         4096u  /**< larger binary message lengths are false syncs */
+/** Start of the receiver's "restarting" answer, the one text line without a lead character. */
+#define GNSS_NOTICE_PREFIX       "The Board is resetting"
 
 /** Kind of unit the framer emits. */
 typedef enum {

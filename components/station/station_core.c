@@ -1510,6 +1510,15 @@ uint32_t stn_config_retry_in_s(const stn_t *s, bool autocfg, int64_t now_ms)
     return sec > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)sec;
 }
 
+void stn_note_signals(stn_t *s, int verdict)
+{
+    if (verdict == 0) {
+        s->alerts |= STN_ALERT_SIGNALS_MISMATCH;
+    } else {
+        s->alerts &= ~STN_ALERT_SIGNALS_MISMATCH;
+    }
+}
+
 uint32_t stn_alerts(const stn_t *s)
 {
     uint32_t a = s->alerts & ~STN_ALERT_NO_RECEIVER;

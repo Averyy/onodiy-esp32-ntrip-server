@@ -189,7 +189,8 @@ size_t um98x_plan_preview(const um98x_base_profile_t *p, uint32_t link_baud, um9
               preview_add(out, cap, &n, UM98X_CMD_VERSION, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_ALWAYS, false) &&
               preview_add(out, cap, &n, UM98X_CMD_CONFIG, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_ALWAYS, false) &&
               preview_add(out, cap, &n, UM98X_CMD_MODE, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_ALWAYS, false) &&
-              preview_step(p, out, cap, &n, UM98X_STEP_SIGNALGROUP, 0, 0, UM98X_PREVIEW_IF_DIFFERS, true);
+              preview_step(p, out, cap, &n, UM98X_STEP_SIGNALGROUP, 0, 0, UM98X_PREVIEW_IF_DIFFERS, true) &&
+              preview_add(out, cap, &n, UM98X_CMD_GROUPS, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_ALWAYS, false);
     if (ok && p->com1_baud != link_baud) {
         ok = preview_step(p, out, cap, &n, UM98X_STEP_BAUD, 0, 0, UM98X_PREVIEW_IF_DIFFERS, false);
     }

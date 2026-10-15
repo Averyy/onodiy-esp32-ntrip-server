@@ -4,11 +4,14 @@
 
 Command syntax and reply formats are the public Unicore N4 command set:
 plain ASCII commands ending CR LF; each command is acknowledged with
-`$command,<echo>,response: OK*hh` (or `PARSING FAILD <reason>`), XOR
-including the `$`; queries then send their data: `#` logs with a CRC-32
-(`#VERSIONA`, `#OBSVMA`, ...) or a 2-hex XOR (`#MODE`), `$CONFIG,...` lines,
-NMEA sentences, and `<` continuation lines (`UNILOGLIST`). A receiver that
-restarts prints `$devicename,COMn` on each port.
+`$command,<echo>,response: OK*hh` (or `PARSING FAILED <reason>`, which
+builds before 25164 spell `FAILD`), XOR including the `$`; queries then send
+their data: `#` logs with a CRC-32 (`#VERSIONA`, `#OBSVMA`, ...) or a 2-hex
+XOR (`#MODE`), `$CONFIG,...` lines, NMEA sentences, and `<` continuation
+lines (`UNILOGLIST`). A receiver that restarts prints `$devicename,COMn` on
+each port; a command sent while it restarts gets `The Board is
+resetting,do not response any command!*39` (no `$`, the XOR of the text
+before `*`; build 25164).
 
 This module decides what may be sent (read-only allow-list, a block list,
 and everything else = needs --write), runs one command at a time, and
@@ -528,9 +531,39 @@ def ack_line(cmd: str, reply: str = "OK") -> str:
 
 
 def refusal_text(cmd: str) -> str:
-    """The receiver's refusal of a command it does not take (its own spelling and double space)."""
+    """The receiver's refusal of a command it does not take (build 25164's words and double space)."""
     words = cmd.split()
-    return "PARSING FAILD NO MATCHING FUNC  " + (words[-1] if words else "").upper()
+    return "PARSING FAILED NO MATCHING FUNC  " + (words[-1] if words else "").upper()
+
+
+# Build 25164's refusal of a signal group it does not offer (a trailing comma,
+# no echo of the value; nothing changes and the receiver does not restart).
+SG_REFUSAL = "PARSING FAILED GRAMMAR ERROR,"
+
+# Its answer to any command sent while it restarts.
+NOTICE_TEXT = "The Board is resetting,do not response any command!"
+
+# What ANT1GROUPA / ANT2GROUPA (one-shot, no rate) answered on build 25164 in
+# each signal group it accepts (main, second antenna input; bodies only, as
+# recorded on our bench; test/fixtures/unicore/um982_build25164_replies.json).
+GROUP_BODIES = {
+    (4, 5): ("4,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x07,GQ,0x15", "5,5,GP,0x0D,GL,0x03,GA,0x05,GB,0x07,GQ,0x05"),
+    (3, 6): ("3,5,GP,0x1D,GL,0x03,GA,0x0F,GB,0x2D,GQ,0x35", "6,4,GP,0x0D,GA,0x05,GB,0x05,GQ,0x05"),
+    (7, 0): ("7,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x3F,GQ,0x15", "0,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x3F,GQ,0x15"),
+    (5, 0): ("5,5,GP,0x0D,GL,0x03,GA,0x05,GB,0x07,GQ,0x05", "0,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x3F,GQ,0x15"),
+}
+
+
+def notice_line() -> str:
+    """The restarting answer: no lead character, the XOR of the text before `*`."""
+    return f"{NOTICE_TEXT}*{xor_checksum(NOTICE_TEXT):02X}"
+
+
+def groups_line(body: str, ant: int = 1) -> str:
+    """A signal-group log with `body` (CRC-32 over the bytes after the `#`).
+    The header is made up: the bench recorded only the bodies."""
+    text = f"ANT{ant}GROUPA,COM1,0,0.0,FINE,0,0.000,0,0,0;{body}"
+    return f"#{text}*{crc32_unicore(text.encode('latin-1')):08x}"
 
 
 def config_line(item: str, text: str) -> str:

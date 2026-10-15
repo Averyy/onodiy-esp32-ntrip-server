@@ -410,3 +410,32 @@ TEST_CASE("obs parse: 1033 frames that overrun or are not 1033 are refused", "[g
     TEST_ASSERT_FALSE(obs_1033_parse(s_frame, len - 1, &d));
     TEST_ASSERT_FALSE(obs_1033_parse(NULL, 0, &d));
 }
+
+TEST_CASE("obs parse: position sentences give the fix quality and the satellites used", "[gnss_obs]")
+{
+    obs_gga_t f;
+    /* No antenna: no fix, no satellites (the form a receiver sends without sky). */
+    static const char none[] = "$GPGGA,000000.00,,,,,0,00,99.99,,,,,,*48";
+    TEST_ASSERT_TRUE(obs_gga_parse(none, strlen(none), &f));
+    TEST_ASSERT_EQUAL_UINT8(0, f.quality);
+    TEST_ASSERT_EQUAL_UINT8(0, f.satellites);
+    /* The textbook example: a fix with 8 satellites; another talker. */
+    static const char fix[] = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47";
+    TEST_ASSERT_TRUE(obs_gga_parse(fix, strlen(fix), &f));
+    TEST_ASSERT_EQUAL_UINT8(1, f.quality);
+    TEST_ASSERT_EQUAL_UINT8(8, f.satellites);
+    static const char gn[] = "$GNGGA,123519,4807.038,N,01131.000,E,4,23,0.6,545.4,M,46.9,M,1.0,0000*5B";
+    TEST_ASSERT_TRUE(obs_gga_parse(gn, strlen(gn), &f));
+    TEST_ASSERT_EQUAL_UINT8(4, f.quality);
+    TEST_ASSERT_EQUAL_UINT8(23, f.satellites);
+    /* Not a position sentence, or without its quality and count. */
+    static const char *const bad[] = {
+        "$GPGSV,1,1,00,,,,,*55", "$GPGGA,000000.00,,,,,,,99.99,,,,,,*48", "$GPGGA,000000.00,,,,,0", "$GPGGA",
+        "$XXGGA,000000.00,,,,,0,00,99.99,,,,,,*48", "#MODE,BASE", "$GPGGA,000000.00,,,,,0,x0,99.99,,,,,,*48",
+        "$GPGGA,000000.00,,,,,12,00,99.99,,,,,,*48",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        TEST_ASSERT_FALSE_MESSAGE(obs_gga_parse(bad[i], strlen(bad[i]), &f), bad[i]);
+        TEST_ASSERT_EQUAL_UINT8(0, f.satellites);
+    }
+}

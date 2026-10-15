@@ -424,6 +424,26 @@ bool ntrip_test_onocoy_allowed(void);
 void ntrip_test_onocoy_set_allowed(bool allowed);
 
 /**
+ * Onocoy and an open caster at once (a warning, never a refusal): `cfgs`
+ * holds n slot configs; the result has a bit per enabled slot that counts
+ * as Onocoy (ntrip_slot_is_onocoy) while at least one other enabled slot
+ * streams to an open caster (RTK2go, Centipede), whose streams anyone may
+ * take, and *open_mask (optional) a bit per such open-caster slot; both 0
+ * without such a pair. Onocoy's FAQ: "multiple submissions of the same
+ * streams, e.g. from free or public networks such as IGS or RTK2GO, even
+ * when done by separate users in the onocoy platform, will result in
+ * banning." Saving such a pair needs dup_stream_ack (above); this tells it
+ * while it lasts. At most 32 slots are looked at. Pure; no init needed.
+ */
+uint32_t ntrip_server_open_caster_pair(const ntrip_caster_cfg_t *cfgs, size_t n, uint32_t *open_mask);
+
+/** The slot streams to an open caster (RTK2go, Centipede): anyone may take its stream. Pure. */
+bool ntrip_slot_is_open_caster(const ntrip_caster_cfg_t *cfg);
+
+/** The slot streams to RTK2go (the host is in rtk2go.com). Pure. */
+bool ntrip_slot_is_rtk2go(const ntrip_caster_cfg_t *cfg);
+
+/**
  * The host rules of a slot (this component owns them, like the cross-slot
  * rules): `protected_slot` is set exactly for a slot that counts as Onocoy
  * (ntrip_slot_is_onocoy: a host in the onocoy.com domain, or a test Onocoy

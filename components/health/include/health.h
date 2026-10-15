@@ -39,6 +39,20 @@
  *       power cycle" instead -> 7.
  *   7. FAILED: every 10 min re-classify and enter at max(2, class entry
  *      step); 6a stays subject to the cap. Never a reboot loop.
+ * The receiver answers but sends no RTCM (replies to the station's
+ * commands, its restart banner, text lines): after step 5 that is not 6b
+ * ("needs a power cycle") but FAILED with the reason; step 5 is skipped
+ * when the receiver's own position sentence says it uses no satellites;
+ * and the retry pass then runs no step 4 or 5 again (a silent receiver gets
+ * steps 2 and 3, whose rescan asks it again). While the first
+ * configuration is held (the hold builds), a receiver that answers is not
+ * stalled at all: it was never set to send RTCM.
+ * Every FAILED level carries its reason as an alert (and an alerts-only
+ * stall's DEGRADED level too): RECEIVER_POWER (6b), RECEIVER_SILENT
+ * (nothing usable, no answer; power-cycle the station), NO_SATELLITES (it
+ * answers and uses no satellites: the antenna), NO_RTCM (it answers but
+ * sends no RTCM) and RX_HELD (the held first configuration: DEGRADED,
+ * waiting for the user). In NO_RECEIVER the station's own alert says it.
  * Step 4 needs the station's consent: it refuses RECONFIGURE without
  * sending anything while gnss/autocfg = 0 or after a failed apply
  * (station_status_t.reconfigure_refused). A refused step 4 counts as failed
@@ -198,7 +212,8 @@ typedef enum {
     HEALTH_OK = 0,
     HEALTH_DEGRADED,       /**< something is off (one caster down, fewer than 4 bands, link losing data, safe mode, ...) */
     HEALTH_RECOVERING,     /**< stall declared: a ladder step runs or is in its grace */
-    HEALTH_FAILED,         /**< ladder at 6b (with HEALTH_ALERT_RECEIVER_POWER) or 7 (FAILED, retry pass pending); nothing else */
+    HEALTH_FAILED,         /**< ladder at 6b (with HEALTH_ALERT_RECEIVER_POWER) or 7 (FAILED, retry pass pending, with its
+                                reason's alert); nothing else */
 } health_level_t;
 
 /** Last ladder action started (6b and 7 start no action and leave it unchanged). */
@@ -225,6 +240,11 @@ typedef enum {
     HEALTH_ALERT_NO_UPSTREAM       = 1u << 7, /**< Wi-Fi connected but no internet */
     HEALTH_ALERT_LINK_LOSS         = 1u << 8, /**< UART overflows or RTCM CRC errors in the last 10 min */
     HEALTH_ALERT_POWER_LOST        = 1u << 9, /**< power was lost: >= 3 power-on boots within 24 h (clears 24 h after the last) */
+    HEALTH_ALERT_RECEIVER_SILENT   = 1u << 10,/**< nothing usable from the receiver and no answer to commands (FAILED, or an
+                                                   alerts-only stall): power-cycle the station */
+    HEALTH_ALERT_NO_SATELLITES     = 1u << 11,/**< the receiver answers, sends no RTCM and uses no satellites: check the antenna */
+    HEALTH_ALERT_NO_RTCM           = 1u << 12,/**< the receiver answers but sends no RTCM */
+    HEALTH_ALERT_RX_HELD           = 1u << 13,/**< no RTCM because the first configuration waits for the user (DEGRADED) */
 } health_alert_t;
 
 /** Automatic receiver recovery chosen by the user (settings gnss/recovery). */

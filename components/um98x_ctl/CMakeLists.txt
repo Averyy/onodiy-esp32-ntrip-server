@@ -13,6 +13,7 @@ idf_component_register(
         "um98x_txn.c"
         "um98x_plan.c"
         "um98x_exec.c"
+        "um98x_bands.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "priv_include"
     REQUIRES gnss_link gnss_types

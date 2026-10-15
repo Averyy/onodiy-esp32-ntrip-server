@@ -8,6 +8,7 @@
 
 #include "cJSON.h"
 #include "unity.h"
+#include "um98x_bands.h"
 #include "web_build.h"
 #include "web_enums.h"
 
@@ -1964,18 +1965,156 @@ TEST_CASE("signal test: the status summary, the receiver's group and a refused g
     st->sg_refused_group = (station_sg_t){ 7, 0 };
     st->sg_back_valid = true;
     st->sg_back = (station_sg_t){ 3, 6 };
-    strcpy(st->sg_refused_reply, "PARSING FAILD NO MATCHING FUNC");
+    strcpy(st->sg_refused_reply, "PARSING FAILED GRAMMAR ERROR,");
     root = build_gnss_json(st);
     TEST_ASSERT_EQUAL(3, at(at(root, "rx_signal_group"), "master")->valueint);
     TEST_ASSERT_EQUAL(6, at(at(root, "rx_signal_group"), "slave")->valueint);
     const cJSON *rf = at(root, "signal_group_refused");
     TEST_ASSERT_EQUAL(7, at(rf, "master")->valueint);
     TEST_ASSERT_EQUAL(0, at(rf, "slave")->valueint);
-    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC", at(rf, "reply")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("PARSING FAILED GRAMMAR ERROR,", at(rf, "reply")->valuestring);
     TEST_ASSERT_EQUAL(3, at(at(rf, "back_to"), "master")->valueint);
     cJSON_Delete(root);
     st->sg_back_valid = false;
     root = build_gnss_json(st);
     TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "signal_group_refused"), "back_to")));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("receiver: what the signal group configures, restarting, and the new alert names", "[web_build]")
+{
+    fixture();
+    station_status_t *st = &s_snap.st;
+    st->rx_bands_age_s = UINT32_MAX;   /* not asked this boot */
+    cJSON *root = build_gnss_json(st);
+    const cJSON *b = at(root, "rx_bands");
+    TEST_ASSERT_EQUAL_STRING("unknown", at(b, "state")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(b, "age_s")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(b, "group")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(b, "matches")));
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(b, "systems")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "restarting")));
+    cJSON_Delete(root);
+
+    /* 3 6 as build 25164 reports it, but with E6 missing: the alert's case. */
+    TEST_ASSERT_TRUE(um98x_bands_parse("3,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x2D,GQ,0x35", 43, &st->rx_bands));
+    st->rx_bands_age_s = 30;
+    st->rx_bands_profile_master = 3;
+    st->rx_bands_match = false;
+    st->alerts |= STATION_ALERT_SIGNALS_MISMATCH;
+    st->receiver_restarting = true;
+    root = build_gnss_json(st);
+    b = at(root, "rx_bands");
+    TEST_ASSERT_EQUAL_STRING("ok", at(b, "state")->valuestring);
+    TEST_ASSERT_EQUAL(30, at(b, "age_s")->valueint);
+    TEST_ASSERT_EQUAL(3, at(b, "group")->valueint);
+    TEST_ASSERT_EQUAL(3, at(b, "profile_master")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(b, "matches")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(b, "reply")));
+    const cJSON *sys = at(b, "systems");
+    TEST_ASSERT_EQUAL(5, cJSON_GetArraySize(sys));
+    const cJSON *ga = cJSON_GetArrayItem(sys, 2);
+    TEST_ASSERT_EQUAL_STRING("galileo", at(ga, "sys")->valuestring);
+    TEST_ASSERT_EQUAL(3, cJSON_GetArraySize(at(ga, "signals")));
+    TEST_ASSERT_EQUAL_STRING("E5b", cJSON_GetArrayItem(at(ga, "signals"), 2)->valuestring);
+    TEST_ASSERT_EQUAL(3, at(ga, "bands")->valueint);
+    TEST_ASSERT_EQUAL(1, cJSON_GetArraySize(at(ga, "missing")));
+    TEST_ASSERT_EQUAL_STRING("E6", cJSON_GetArrayItem(at(ga, "missing"), 0)->valuestring);
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(cJSON_GetArrayItem(sys, 3), "missing")));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "restarting")));
+    bool named = false;
+    const cJSON *a;
+    cJSON_ArrayForEach(a, at(root, "alerts"))
+    {
+        named |= strcmp(a->valuestring, "signals_mismatch") == 0;
+    }
+    TEST_ASSERT_TRUE(named);
+    cJSON_Delete(root);
+
+    /* A firmware without the query: refused, its reply shown. */
+    memset(&st->rx_bands, 0, sizeof(st->rx_bands));
+    st->rx_bands.state = UM98X_BANDS_REFUSED;
+    strcpy(st->rx_bands_reply, "PARSING FAILED NO MATCHING FUNC  ANT1GROUPA");
+    root = build_gnss_json(st);
+    b = at(root, "rx_bands");
+    TEST_ASSERT_EQUAL_STRING("refused", at(b, "state")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(b, "matches")));
+    TEST_ASSERT_EQUAL_STRING("PARSING FAILED NO MATCHING FUNC  ANT1GROUPA", at(b, "reply")->valuestring);
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(b, "systems")));
+    cJSON_Delete(root);
+
+    /* The status receiver section says it too (admin form). */
+    root = build_status(false);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(at(root, "receiver"), "restarting")));
+    cJSON_Delete(root);
+
+    TEST_ASSERT_EQUAL_STRING("receiver_silent", web_health_alert_name(HEALTH_ALERT_RECEIVER_SILENT));
+    TEST_ASSERT_EQUAL_STRING("no_satellites", web_health_alert_name(HEALTH_ALERT_NO_SATELLITES));
+    TEST_ASSERT_EQUAL_STRING("no_rtcm", web_health_alert_name(HEALTH_ALERT_NO_RTCM));
+    TEST_ASSERT_EQUAL_STRING("rx_held", web_health_alert_name(HEALTH_ALERT_RX_HELD));
+    TEST_ASSERT_EQUAL_STRING("signals_mismatch", web_station_alert_name(STATION_ALERT_SIGNALS_MISMATCH));
+}
+
+TEST_CASE("casters: Onocoy and an open caster at once is a warning, nothing more", "[web_build]")
+{
+    fixture();
+    ntrip_caster_cfg_t c[3];
+    memset(c, 0, sizeof(c));
+    c[0].enabled = true;
+    strcpy(c[0].host, "servers.onocoy.com");
+    strcpy(c[1].host, "rtk2go.com");
+    strcpy(c[2].host, "crtk.net");
+    wj_t w;
+
+    /* RTK2go off (the default): no warning. */
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    wj_obj_open(&w, NULL);
+    web_build_caster_warnings(&w, c, 3);
+    wj_obj_close(&w);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(root, "warnings")));
+    cJSON_Delete(root);
+
+    /* Both on: the warning names the slots. */
+    c[1].enabled = true;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    wj_obj_open(&w, NULL);
+    web_build_caster_warnings(&w, c, 3);
+    wj_obj_close(&w);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    const cJSON *warn = at(root, "warnings");
+    TEST_ASSERT_EQUAL(1, cJSON_GetArraySize(warn));
+    const cJSON *w0 = cJSON_GetArrayItem(warn, 0);
+    TEST_ASSERT_EQUAL_STRING("onocoy_open_caster", at(w0, "id")->valuestring);
+    TEST_ASSERT_EQUAL(1, cJSON_GetArraySize(at(w0, "onocoy_slots")));
+    TEST_ASSERT_EQUAL(0, cJSON_GetArrayItem(at(w0, "onocoy_slots"), 0)->valueint);
+    TEST_ASSERT_EQUAL(1, cJSON_GetArraySize(at(w0, "open_slots")));
+    TEST_ASSERT_EQUAL(1, cJSON_GetArrayItem(at(w0, "open_slots"), 0)->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(w0, "rtk2go")));
+    cJSON_Delete(root);
+
+    /* Centipede instead of RTK2go: the same rule, not RTK2go. Onocoy off: none. */
+    c[1].enabled = false;
+    c[2].enabled = true;
+    uint32_t open = 0;
+    TEST_ASSERT_EQUAL_HEX32(0x1, ntrip_server_open_caster_pair(c, 3, &open));
+    TEST_ASSERT_EQUAL_HEX32(0x4, open);
+    TEST_ASSERT_FALSE(ntrip_slot_is_rtk2go(&c[2]));
+    c[0].enabled = false;
+    TEST_ASSERT_EQUAL_HEX32(0, ntrip_server_open_caster_pair(c, 3, &open));
+    TEST_ASSERT_EQUAL_HEX32(0, open);
+
+    /* Safe mode (no configs): an empty list. */
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    wj_obj_open(&w, NULL);
+    web_build_caster_warnings(&w, NULL, 3);
+    wj_obj_close(&w);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(root, "warnings")));
     cJSON_Delete(root);
 }
