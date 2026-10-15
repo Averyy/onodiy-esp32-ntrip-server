@@ -180,6 +180,14 @@ function cardHead(title, ...chips) {
   return h('div', { class: 'card-head' }, h('h2', null, title), chips);
 }
 
+/**
+ * A disclosure (details.more): its summary, then kids. open: the state to
+ * start in (a refresh that rebuilds it passes what the user left it at).
+ */
+function disclosure(summary, open, ...kids) {
+  return h('details', { class: 'more', open: !!open }, h('summary', null, summary), kids);
+}
+
 /** A card that is the whole page (log in, no answer, the wizard): its title is the page's one h1. */
 function pageCard(title, ...kids) {
   return h('section', { class: 'card' }, h('h1', null, title), kids);
@@ -618,14 +626,14 @@ const ERR = {
   not_available_yet: 'Receiver firmware updates are not enabled in this build yet.',
   checks_disabled: 'This build cannot check for updates. Uploading a file still works.',
   too_many_clients: 'Too many pages are open on the station.',
-  signal_test_running: 'A signal-group comparison is running: nothing else changes the receiver until it ends. Cancel it on the receiver page first.',
+  signal_test_running: 'A signal-group comparison is running. Wait for it to end, or stop it on the Receiver page.',
   signal_test_idle: 'No signal-group comparison is running (it may have ended meanwhile).',
   signal_test_not_deciding: 'The comparison is not waiting for your choice (not yet, or not any more).',
-  first_apply_held: 'The receiver is not configured yet. Review and configure it on the receiver page first.',
+  first_apply_held: 'The receiver is not configured yet. Confirm its configuration on the Receiver page first.',
   autocfg_off: 'The station does not configure the receiver (automatic configuration is off).',
   identity_unconfirmed: 'The receiver is not identified yet.',
   config_failed: 'The receiver\'s configuration failed. That needs fixing first.',
-  position_not_locked: 'The base position is not locked yet: every receiver restart would start a new survey.',
+  position_not_locked: 'Lock the base position first; until then every receiver restart starts a new survey.',
 };
 
 /* Request fields as the forms label them, for "<label>: <rule>" refusals. */

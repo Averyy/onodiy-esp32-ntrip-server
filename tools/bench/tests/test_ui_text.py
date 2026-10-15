@@ -55,6 +55,10 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '      action: l.action ? (l.action.act || l.action.label) : null, primary: !!(l.action && l.action.primary) }; },\n' +
   '  notices: a => noticeItems(a[0], a[1]).map(i => [i.key, i.title]),\n' +
   '  pwProblem: a => adminPasswordProblem(a[0], a[1]), rssi: a => rssiView(a),\n' +
+  '  sgName: a => sgName(a[0], a[1]), sgChoices: () => SG_CHOICES, recovery: () => L.recovery,\n' +
+  '  recoveryLbl: k => lbl(L.recovery, k), fwText: a => fwText(a[0], a[1]), dist: m => fmtDist(m),\n' +
+  '  sgtBlock: g => sgtBlock(g), sgtLine: t => sgtLine(t), profileChip: g => profileChip(g),\n' +
+  '  sgtNotice: st => { const n = sgTestNotice(st); return n && n.slice(0, 3); },\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
 process.stdout.write(JSON.stringify(out));
@@ -339,3 +343,80 @@ def test_password_mismatch_and_unknown_signal():
     assert mismatch == "The passwords do not match."
     assert short == "Use at least 8 characters." and ok is None
     assert run_ui([("rssi", 0), ("rssi", None)]) == ["–", "–"]
+
+
+# ---- The receiver pages (60-receiver.js, 05-labels.js) ----
+
+def test_signal_groups_short_and_plain():
+    (choices,) = run_ui([("sgChoices", None)])
+    names = run_ui([("sgName", [int(c[0].split()[0]), int(c[0].split()[1])]) for c in choices] + [("sgName", [9, 9])])
+    assert names == ["3 6 (Galileo E6)", "7 0 (BeiDou B2a)", "4 5 (factory)", "5 0 (no L5)", "9 9"]
+    for pair, name, line, short in choices:
+        # One short line each; "(recommended)" is the Receiver page's mark, never part of the name others reuse.
+        assert line.endswith(".") and len(line) <= 60, pair
+        assert "recommended" not in (name + line + short).lower(), pair
+        assert not any(m in line for m in ("25164", "build", "2026")), pair
+
+
+def test_recovery_choices_say_what_happens():
+    (rec,) = run_ui([("recovery", None)])
+    assert [rec[k][0] for k in ("full", "no_reboot", "alerts_only")] == [
+        "Fix it automatically", "Fix it, but never restart the station", "Only tell me"]
+    assert "restarts the station" in rec["full"][1] and "once an hour" in rec["full"][1]
+    assert "keeps running" in rec["no_reboot"][1]
+    assert rec["alerts_only"][1].startswith("Nothing is sent to the receiver")
+    for name, line in rec.values():
+        assert line.endswith(".") and len(line) <= 130 and "RTCM" not in line
+    # The Status page and Diagnostics show the name alone: no "(recommended)" there.
+    assert run_ui([("recoveryLbl", "full"), ("recoveryLbl", "alerts_only")]) == ["Fix it automatically", "Only tell me"]
+
+
+def test_firmware_build_shown_once_and_distances_in_mm_and_cm():
+    out = run_ui([("fwText", ["R4.10Build25164", 25164]), ("fwText", ["R4.10", 25164]), ("fwText", [None, 25164]),
+                  ("dist", 0.0021), ("dist", 0.0), ("dist", 0.023), ("dist", 3.5), ("dist", None)])
+    assert out[:3] == ["R4.10Build25164", "R4.10 (build 25164)", "\u2013"]
+    assert out[3:] == ["2\u00a0mm", "0\u00a0mm", "2.3\u00a0cm", "3.50\u00a0m", "\u2013"]
+
+
+def test_comparison_says_why_it_cannot_start_in_the_stations_order():
+    ok = {"state": "streaming", "autocfg": True, "first_apply_held": False, "maintenance": {"on": False},
+          "position": {"locked": True}}
+    out = run_ui([("sgtBlock", {**ok, "first_apply_held": True, "autocfg": False}),
+                  ("sgtBlock", {**ok, "autocfg": False}),
+                  ("sgtBlock", {**ok, "maintenance": {"on": True}}),
+                  ("sgtBlock", {**ok, "state": "no_receiver", "position": {"locked": False}}),
+                  ("sgtBlock", {**ok, "position": {"locked": False}}),
+                  ("sgtBlock", ok)])
+    assert out == ["Configure the receiver first.", "Needs automatic configuration on.", "Not during receiver maintenance.",
+                   "Needs a connected receiver.", "Lock the base position first.", ""]
+
+
+def test_comparison_lines_short_and_in_hours():
+    measuring = {"state": "measuring", "phase": 0, "left_s": 1490, "running_group": {"master": 3, "slave": 6}}
+    switching = {"state": "switching", "phase": 1, "left_s": 0, "running_group": {"master": 7, "slave": 0}}
+    st = status(receiver={"signal_test": {"state": "deciding", "decide_left_s": 86000, "group": {"master": 7, "slave": 0}}})
+    line, sw, idle, notice = run_ui([("sgtLine", measuring), ("sgtLine", switching), ("sgtLine", {"state": "idle"}),
+                                     ("sgtNotice", st)])
+    assert line == "Group 1 of 2, 3 6 (Galileo E6): measuring, about 25\u00a0min left."
+    assert sw == "Switching the receiver to 7 0 (BeiDou B2a). Corrections pause briefly."
+    assert idle is None
+    assert notice[1] == "Signal-group comparison: choose a group"
+    assert notice[2].endswith("in about 24\u00a0h.") and " 1 d" not in notice[2]
+    # Elsewhere a running comparison is one title and one line (the status names the measured group "group").
+    running = status(receiver={"signal_test": {"state": "measuring", "phase": 1, "left_s": 300, "group": {"master": 7, "slave": 0}}})
+    (n,) = run_ui([("sgtNotice", running)])
+    assert n[1] == "Comparing signal groups"
+    assert n[2] == "Group 2 of 2, 7 0 (BeiDou B2a): measuring, about 5\u00a0min left. Other receiver changes wait until it ends."
+
+
+def test_profile_chip_and_maintenance_notice_on_the_receiver_page():
+    chips = run_ui([("profileChip", {"state": "configuring", "profile_applied": True}),
+                    ("profileChip", {"state": "streaming", "config_failed": True}),
+                    ("profileChip", {"state": "streaming", "profile_applied": True}),
+                    ("profileChip", {"state": "streaming", "profile_applied": True, "first_apply_held": True}),
+                    ("profileChip", {"state": "no_receiver", "profile_applied": False})])
+    assert chips == [["Applying", "info"], ["Failed", "bad"], ["Applied", "ok"], ["Not applied", "warn"], ["Not applied", "warn"]]
+    maint = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600})
+    rx, signals = run_ui([("notices", [maint, "receiver"]), ("notices", [maint, "signals"])])
+    # The Receiver page has the maintenance card with its buttons: no notice that repeats it there.
+    assert [k for k, _ in rx] == [] and [k for k, _ in signals] == ["maintenance"]

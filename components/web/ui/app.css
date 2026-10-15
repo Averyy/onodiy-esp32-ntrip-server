@@ -365,18 +365,20 @@ small { font-size: 0.85rem; }
 .hero.bad .state::before { background: var(--bad); }
 .hero .hero-actions { display: flex; margin-top: 0.4rem; }
 .hero .hero-actions .btn { width: 100%; }
-.hero .facts {
+/* Small labelled facts in a row (the top card, the live view's totals). */
+.facts {
   display: flex;
   flex-wrap: wrap;
   gap: 0.25rem 1.5rem;
-  margin-top: 0.4rem;
+  margin: 0;
   padding-top: 0.6rem;
   border-top: 1px solid var(--border);
   font-size: 0.9rem;
 }
-.hero .facts > div { display: flex; gap: 0.4rem; }
-.hero .facts dt { color: var(--muted); }
-.hero .facts dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.facts > div { display: flex; gap: 0.4rem; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.hero .facts { margin-top: 0.4rem; }
 @media (min-width: 560px) {
   .hero { grid-template-columns: minmax(0, 1fr) auto; column-gap: 1.25rem; }
   .hero > * { grid-column: 1; }
@@ -573,7 +575,7 @@ input[type="file"] { max-width: 100%; font: inherit; }
   border-radius: 10px;
   cursor: pointer;
 }
-.choice input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.choice input { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 .choice:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
 
 .cols { display: grid; grid-template-columns: 1fr; gap: 0.85rem; }
@@ -597,11 +599,15 @@ input[type="file"] { max-width: 100%; font: inherit; }
 .form-actions > .primary, .form-actions > [type="submit"] { order: -1; }
 .form-actions > .note { order: -2; }
 .form-actions:not(:has(> :not([hidden]))) { display: none; }
+/* A field that belongs to the buttons (maintenance's duration): on top on a phone, at the left on a desktop. */
+.form-actions > .field { order: -3; margin: 0; }
 @media (min-width: 560px) {
   .form-actions { flex-flow: row wrap; justify-content: flex-end; align-items: center; }
   .form-actions .btn { width: auto; }
   .form-actions > .primary, .form-actions > [type="submit"] { order: 1; }
   .form-actions > .note { order: -1; margin-right: auto; }
+  .form-actions:has(> .field) { align-items: flex-end; }
+  .form-actions > .field { order: -2; flex: 0 1 15rem; margin-right: auto; }
 }
 
 details.more { margin-top: 0.85rem; }
@@ -703,6 +709,11 @@ tbody tr:last-child td { border-bottom: 0; }
 .bands td.on { color: var(--ok); font-weight: 650; }
 .bands td.off { color: var(--muted); }
 .bands td small { display: block; color: var(--muted); font-weight: 500; }
+/* A phone: a tick and the figure per band (the column names the band; the cell's title the signals). */
+@media (max-width: 719px) {
+  .bands .wide-only { display: none; }
+  .bands th, .bands td { padding-left: 0.3rem; padding-right: 0.3rem; }
+}
 .cnr-weak { color: var(--bad); }
 .cnr-ok { color: var(--warn); }
 .cnr-good { color: var(--ok); }
@@ -732,10 +743,7 @@ svg.sky .sat { stroke: var(--surface); stroke-width: 1.5; }
 
 /* ---- Live view ---------------------------------------------------------- */
 
-.live-entry { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem 1.5rem; }
-.live-entry .text { flex: 1 1 18rem; }
-.live-entry .text > * + * { margin-top: 0.4rem; }
-.countdown { font-weight: 700; font-variant-numeric: tabular-nums; }
+.live-left { font-weight: 700; font-variant-numeric: tabular-nums; }
 .sr-only {
   position: absolute;
   width: 1px;
@@ -848,8 +856,16 @@ table.counts tfoot th, table.counts tfoot td { border-top: 1px solid var(--borde
 
 .ant { font-family: var(--mono); white-space: pre; }
 input.ant { white-space: normal; }
-.fieldset.group { margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
+/* The profile's groups (Signals, Position, Corrections, Advanced): a line above each. */
+.pgroup { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.pgroup > h3 { margin: 0; font-size: 1rem; }
+.pgroup > details.more:first-child { margin-top: 0; }
+/* A heading inside Details. */
+.sub { margin: 1rem 0 0.4rem; color: var(--muted); font-size: 0.9rem; font-weight: 650; }
+summary + .sub { margin-top: 0; }
 .choices.stacked { flex-direction: column; align-items: stretch; }
+.choices.grid2 { display: grid; }
+@media (min-width: 560px) { .choices.grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .choices.stacked .choice { align-items: flex-start; padding: 0.55rem 0.8rem; }
 .choices.stacked .choice input { margin-top: 0.15rem; }
 .choice .opt { display: block; font-weight: 600; }
@@ -1073,7 +1089,7 @@ table.journal tr.sep th { padding-top: 0.9rem; color: var(--text); font-size: 0.
 .kv dd a { overflow-wrap: anywhere; }
 .howto { margin: 0.75rem 0; padding-left: 1.4rem; }
 .howto li { margin: 0.35rem 0; overflow-wrap: anywhere; }
-.countdown { margin: 0.75rem 0; padding: 0.6rem 0.8rem; border-radius: 8px; background: var(--info-soft); color: var(--text); }
+.countdown { margin: 0.75rem 0; padding: 0.6rem 0.8rem; border-radius: 8px; background: var(--info-soft); color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
 .countdown-n { font-variant-numeric: tabular-nums; }
 .copy-box { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.4rem; }
 .copy-field { flex: 1 1 14rem; min-width: 0; font-family: var(--mono); }

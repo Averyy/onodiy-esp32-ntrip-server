@@ -98,7 +98,7 @@ const L = {
   /* After a failed receiver configuration: the station's own retry (automatic configuration on), or only the user's (configFailedText). */
   configRetry: {
     auto: 'The station tries again on its own.',
-    user: 'Automatic configuration is off: configure it again on the Receiver page.',
+    user: 'Automatic configuration is off, so the station does not retry. Press Apply again on the Receiver page.',
   },
   salert: {
     unsupported_model: ['Receiver model not supported', 'The station streams what this receiver sends but does not configure or update it.'],
@@ -221,11 +221,12 @@ const L = {
   linkMode: { off: 'Off', stream: 'Streaming', command: 'Command session', raw: 'Raw (update)' },
   baseMode: { survey_in: 'Survey-in', fixed: 'Fixed position' },
   posSource: { none: 'None', survey: 'Survey-in', averaged: 'Averaged', user: 'Entered by you' },
-  setting: { on: 'on', off: 'off', unknown: 'unknown' },
+  /* If corrections stop (gnss/recovery): [the choice's name, what it does]. The Receiver page marks full as recommended. */
   recovery: {
-    full: ['Full (may restart the station)', 'Every recovery step, up to restarting the station when that can help.'],
-    no_reboot: ['Never restart the station', 'Every step that acts on the receiver, but the station itself is never restarted for it.'],
-    alerts_only: ['Alerts only', 'Nothing is sent to the receiver and nothing restarts: a stall is only shown and recorded in the journal.'],
+    full: ['Fix it automatically', 'Reconnects, reconfigures and, if needed, restarts the receiver. As a last resort it ' +
+      'restarts the station (at most once an hour).'],
+    no_reboot: ['Fix it, but never restart the station', 'The same steps on the receiver; the station itself keeps running.'],
+    alerts_only: ['Only tell me', 'Nothing is sent to the receiver and nothing restarts; the problem shows on the Status page.'],
   },
   trigger: { protected: 'Onocoy caster down', assoc_no_ip: 'connected without an IP address', unreached: 'a caster not reached' },
   liveSky: {
@@ -233,12 +234,12 @@ const L = {
   },
   liveWhy: {
     none: '',
-    busy: 'the station is busy with the receiver; it turns on once that ends',
+    busy: 'the station is busy with the receiver',
     not_streaming: 'the receiver is not streaming',
-    maintenance: 'receiver maintenance: nothing is sent to the receiver',
-    autocfg_off: 'automatic configuration is off, so the station sends the receiver nothing',
+    maintenance: 'receiver maintenance is on',
+    autocfg_off: 'automatic configuration is off',
     unsupported: 'the station does not configure this receiver model',
-    reconfigured: 'the receiver was configured or restarted since; extend the view to turn it on again',
+    reconfigured: 'the receiver was configured or restarted; extend to turn them on again',
     rejected: 'the receiver refused the command',
     no_answer: 'the receiver did not answer',
     flash: 'a receiver update runs',
@@ -251,7 +252,7 @@ const L = {
   previewWhen: { always: 'always', if_differs: 'only if the receiver differs', if_off: 'only if it is off in the receiver' },
   /* Signal-group comparison (GET /api/gnss/signal-test). */
   sgtState: {
-    idle: 'Not running', switching: 'Switching', settling: 'Settling', measuring: 'Measuring', deciding: 'Waiting for your choice',
+    idle: '', switching: 'Switching', settling: 'Settling', measuring: 'Measuring', deciding: 'Waiting for your choice',
     restoring: 'Switching back',
   },
   sgtOutcome: {
@@ -268,25 +269,29 @@ const L = {
 /*
  * Signal groups offered by name (the receiver's CONFIG SIGNALGROUP pairs,
  * main and second antenna input): exactly the pairs UM982 build 25164
- * accepts, with the bands each gives on the main input (as that build
- * reported them). Other pairs are entered as numbers, for another firmware.
+ * accepts, with what each gives on the main input (as that build reported
+ * it): [pair, name, one line, short name]. Other pairs are entered as
+ * numbers, for another firmware.
  */
 const SG_CHOICES = [
-  ['3 6', '3 6 (recommended): Galileo E6', 'Four Galileo bands (E1, E5a, E5b, E6) and QZSS L6; BeiDou B1I, B1C, B2b and B3I ' +
-    '(no B2a)'],
-  ['7 0', '7 0: BeiDou B2a', 'Four BeiDou bands (every BeiDou signal, B2a included); Galileo E1, E5a, E5b (no E6); second ' +
-    'antenna input off; meant for base stations'],
-  ['4 5', '4 5: factory', 'The receiver\'s factory setting: at most three bands on any constellation'],
-  ['5 0', '5 0: no L5', 'Low-power set: GPS L1 and L2, Galileo E1 and E5b, no L5 at all; second antenna input off'],
+  ['3 6', 'Galileo E6', 'Four Galileo bands; no BeiDou B2a.', 'Galileo E6'],
+  ['7 0', 'BeiDou B2a', 'Four BeiDou bands; no Galileo E6; second antenna off.', 'BeiDou B2a'],
+  ['4 5', 'Factory setting', 'At most three bands on any constellation.', 'factory'],
+  ['5 0', 'No L5', 'Low power, no L5 signals; second antenna off.', 'no L5'],
 ];
-/* The pairs UM982 build 25164 accepts; it refuses every other pair. */
-const SG_KNOWN_PAIRS = '4 5, 3 6, 5 0 and 7 0';
+const SG_RECOMMENDED = '3 6';
 
-/** "3 6 (recommended)" for a known pair, else "M S". */
+/** "3 6 (Galileo E6)" for a named pair, else "M S". */
 function sgName(m, s) {
   const key = m + ' ' + s;
   const c = SG_CHOICES.find(x => x[0] === key);
-  return c ? c[1] : key;
+  return c ? key + ' (' + c[3] + ')' : key;
+}
+
+/** A receiver's firmware string, with " (build N)" only when the string does not hold the build already. */
+function fwText(fw, build) {
+  if (!fw) return DASH;
+  return build && String(fw).indexOf(String(build)) < 0 ? fw + ' (build ' + build + ')' : fw;
 }
 
 /* MSM signal IDs by name (public RTCM signal tables), per constellation. */

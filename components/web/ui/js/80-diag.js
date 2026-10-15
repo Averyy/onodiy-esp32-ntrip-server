@@ -133,7 +133,7 @@ function healthTab(box) {
           h('p', { class: 'muted' }, tone === 'ok' || tone === '' ? 'No alerts.' : 'No alert names the cause: see the receiver and caster pages.'),
         plan ? h('p', { class: 'small' }, plan) : null,
         kv([
-          ['Automatic receiver recovery', hl.recovery_mode ? lbl(L.recovery, hl.recovery_mode) : DASH],
+          ['If corrections stop', hl.recovery_mode ? lbl(L.recovery, hl.recovery_mode) : DASH],
           link.open === false && link.mode !== 'off' ? ['Receiver UART', h('span', { class: 't-bad' }, 'closed (reopening)')] : null,
           ['Last recovery step', lbl(L.step, hl.last_step)],
           ['Receiver recovery paused', fmt.yesno(hl.ladder_suspended) + ((hl.station || {}).rx_maintenance ? ' (receiver maintenance)' : '')],

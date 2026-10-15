@@ -398,7 +398,8 @@ function noticeItems(st, page) {
       'Wi-Fi, this page and updates still work.' + (sm.retry_in_s ? ' Normal operation is tried again in ' + upMin(sm.retry_in_s) + '.' : ''),
     [link('Updates', '#/updates', 'btn small'), link('Details', '#/system', 'btn small')]);
   }
-  if (rcv.rx_maintenance) {
+  /* The Receiver page has the maintenance card itself, with the same buttons. */
+  if (rcv.rx_maintenance && page !== 'receiver') {
     add('maintenance', 'warn', 'Receiver maintenance', MAINT_WHAT + (rcv.maintenance_left_s ? ' Ends by itself in about ' +
       upMin(rcv.maintenance_left_s) + '.' : '') + ' ' + MAINT_SAVE_NOTE,
     [link('Details', '#/receiver', 'btn small'), btn('End now', endMaintenance, 'small')]);

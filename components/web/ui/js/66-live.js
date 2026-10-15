@@ -10,9 +10,9 @@
  * receiver also sends azimuth and elevation, so the sky plot can place the
  * satellites; everything else comes from the RTCM stream.
  *
- * Order on the page: the window (time left, Extend, Stop), the sky plot
- * coloured by C/N0, the satellite table, satellites per constellation and
- * band, the mean C/N0 per band, the totals as tiles; last and optional, the
+ * Order on the page: the window (time left, Extend, Stop, the totals), the
+ * sky plot coloured by C/N0, the satellite table, satellites per
+ * constellation and band, the mean C/N0 per band; last and optional, the
  * station map. The setup wizard's reception check reuses the pieces.
  */
 
@@ -162,9 +162,9 @@ function liveSatTable() {
     const t = d.totals || {};
     const noPos = sats.filter(s => !hasSkyPos(s)).length;
     note.textContent = [
-      noPos ? noPos + ' without a position in the sky yet (or below the horizon): listed here, not plotted.' : '',
+      noPos ? noPos + ' not in the sky plot yet (no position, or below the horizon).' : '',
       t.dropped ? t.dropped + ' more not listed.' : '',
-      'C/N0 per band from the RTCM observations; ✓ = signal tracked without a C/N0 value.',
+      '✓ = tracked, no C/N0 value.',
     ].filter(Boolean).join(' ');
   }
 
@@ -218,19 +218,31 @@ function liveBandBars(t) {
       h('div', { class: 'bar', role: 'meter', 'aria-label': BAND_HEAD[b] + ' mean C/N0', 'aria-valuemin': 0, 'aria-valuemax': CNR_SCALE,
         'aria-valuenow': v || 0 }, h('span', { style: { width: (Math.min(1, (v || 0) / CNR_SCALE) * 100).toFixed(1) + '%' } })),
       h('span', { class: 'num' }, v ? v + ' dB-Hz' : DASH, h('small', { class: 'muted' }, ' · ' + t.bands[b].satellites + ' sat.'))];
-  })), h('p', { class: 'muted small foot' }, 'Mean over the satellites tracked on each band. Scale 0 to ' + CNR_SCALE + ' dB-Hz.')];
+  })), h('p', { class: 'muted small foot' }, 'Mean over the satellites on each band; scale 0 to ' + CNR_SCALE + ' dB-Hz.')];
 }
 
 function tile(label, value, sub) {
   return h('div', { class: 'tile' }, h('div', { class: 'k' }, label), h('div', { class: 'v' }, value), sub ? h('div', { class: 'muted small' }, sub) : null);
 }
 
+/* The totals as tiles (the setup wizard's reception check). */
 function liveTiles(t) {
   return h('div', { class: 'tiles' },
     tile('Satellites tracked', fmt.num(t.tracked), t.satellites > t.tracked ? 'of ' + t.satellites + ' listed' : null),
     tile('Signals', fmt.num(t.signals)),
     tile('Mean C/N0', t.cnr_dbhz ? String(t.cnr_dbhz) : DASH, 'dB-Hz'),
-    tile('Placed in the sky', fmt.num(t.with_pos), 'azimuth and elevation known'));
+    tile('In the sky plot', fmt.num(t.with_pos)));
+}
+
+/* The totals as small labelled items (the live view's window card). */
+function liveFacts(t) {
+  const facts = [
+    ['Satellites tracked', fmt.num(t.tracked) + (t.satellites > t.tracked ? ' of ' + t.satellites : '')],
+    ['Signals', fmt.num(t.signals)],
+    ['Mean C/N0', t.cnr_dbhz ? t.cnr_dbhz + NB + 'dB-Hz' : DASH],
+    ['In the sky plot', fmt.num(t.with_pos)],
+  ];
+  return h('dl', { class: 'facts' }, facts.map(f => h('div', null, h('dt', null, f[0]), h('dd', null, f[1]))));
 }
 
 /* ---- Station map (optional, last) ------------------------------------------------------ */
@@ -287,26 +299,25 @@ function mapPanel() {
   function render(pos) {
     const have = pos && pos.source && pos.source !== 'none' && pos.lat_deg !== null && pos.lat_deg !== undefined;
     if (!have) {
-      mount(el, h('h2', null, 'Station map'), h('p', { class: 'muted' }, 'No surveyed or locked position yet.'));
+      mount(el, h('h2', null, 'Station map'), h('p', { class: 'muted' }, 'No position yet.'));
       return;
     }
     const lat = pos.lat_deg, lon = pos.lon_deg;
     const ext = 'https://www.openstreetmap.org/?mlat=' + lat.toFixed(7) + '&mlon=' + lon.toFixed(7) + '#map=17/' + lat.toFixed(6) + '/' + lon.toFixed(6);
     const mapBox = h('div');
     const offer = () => mount(mapBox, h('div', { class: 'stack' }, h('p', { class: 'muted small' },
-      'The map is loaded from OpenStreetMap over the internet by this browser (the tiles show the area around the station).'),
+      'The map loads from OpenStreetMap over the internet.'),
     h('div', null, btn('Show the map', show, 'small'))));
     function show() {
       store.set('map', true);
-      mount(mapBox, tileMosaic(lat, lon, () => mount(mapBox, msg('', 'The map tiles could not be loaded: this device may have no internet. ' +
-        'The coordinates above are what the map would show.'))),
+      mount(mapBox, tileMosaic(lat, lon, () => mount(mapBox, msg('', 'The map did not load. This device may have no internet.'))),
       h('div', { class: 'row foot' }, btn('Hide the map', () => {
         store.set('map', false);
         offer();
       }, 'small ghost')));
     }
     mount(el,
-      cardHead('Station map', badge(pos.locked ? 'Locked position' : 'Last surveyed', pos.locked ? 'ok' : '')),
+      cardHead('Station map', badge(pos.locked ? 'Locked' : 'Surveyed', pos.locked ? 'ok' : '')),
       kv([
         ['Latitude', fmt.deg(lat)],
         ['Longitude', fmt.deg(lon)],
@@ -314,7 +325,7 @@ function mapPanel() {
         ['Source', lbl(L.posSource, pos.source)],
       ]),
       mapBox,
-      h('div', { class: 'row foot' }, h('a', { href: ext, target: '_blank', rel: 'noopener noreferrer' }, 'Open this position in OpenStreetMap')));
+      h('div', { class: 'row foot' }, h('a', { href: ext, target: '_blank', rel: 'noopener noreferrer' }, 'Open in OpenStreetMap')));
     if (store.get('map', false)) show();
     else offer();
   }
@@ -336,22 +347,15 @@ function skyOutputText(w) {
   const why = w.sky_why && w.sky_why !== 'none' ? lbl(L.liveWhy, w.sky_why) : '';
   switch (w.sky) {
     case 'on':
-      return 'Satellite positions: on, every ' + w.sky_period_s + ' s (not saved in the receiver).';
+      return 'Satellite positions: on.';
     case 'on_profile':
-      return 'Satellite positions: on (the receiver profile sends them all the time).';
+      return 'Satellite positions: on (receiver profile).';
     case 'pending':
       return 'Satellite positions: waiting' + (why ? ': ' + why : '') + '.';
     case 'blocked':
-      if (w.sky_why === 'maintenance') {
-        return 'Satellite positions: turned off for receiver maintenance. Extend the view to turn them on again (after maintenance). ' +
-          'The table still lists every satellite.';
-      }
-      if (w.sky_why === 'no_answer') {
-        return 'Satellite positions: the receiver did not answer the command' + (w.sky_reply ? ' (' + w.sky_reply + ')' : '') +
-          '. They may be on all the same; they are turned off when the view closes. Extend the view to try again.';
-      }
-      return 'Satellite positions: not available in this window' + (why ? ': ' + why : '') +
-        (w.sky_reply ? ' (' + w.sky_reply + ')' : '') + '. The table still lists every satellite.';
+      if (w.sky_why === 'maintenance') return 'Satellite positions: off during receiver maintenance. Extend afterwards to turn them on.';
+      if (w.sky_why === 'no_answer') return 'Satellite positions: the receiver did not answer. Extend to try again.';
+      return 'Satellite positions: not available' + (why ? ' (' + why + ')' : '') + '.';
     case 'stopping':
       return 'Satellite positions: turning off.';
     default:
@@ -366,12 +370,13 @@ function skyOutputText(w) {
  */
 function liveWindowCard(opts) {
   const badgeEl = badge('', '');
-  const leftText = h('span', { class: 'countdown' });
+  const leftText = h('span', { class: 'live-left' });
   const state = h('p', { class: 'state-line' });
   const announce = h('span', { class: 'sr-only', role: 'status' });   /* opened / closed, said once */
   const sky = h('p', { class: 'small' });
   const err = errBox();
   const conn = h('p', { class: 'msg warn', role: 'status', hidden: true });   /* polling failed: once, until it works again */
+  const facts = h('div', { hidden: true });   /* the totals, while open */
   let deadline = 0, open = false, seen = false;
   /* Start hides itself, Stop hides itself and Extend: after the action the
    * keyboard focus goes to the button that is there now (Start <-> Extend). */
@@ -394,10 +399,10 @@ function liveWindowCard(opts) {
   const el = h('section', { class: 'card wide' },
     cardHead('Live view', badgeEl),
     announce, state, sky, conn, err,
-    h('div', { class: 'form-actions' }, startBtn, extendBtn, stopBtn),
-    h('p', { class: 'muted small foot' }, 'While the view is open the receiver also reports where each satellite is in the sky. ' +
-      'Switching that output on and off pauses the casters for a moment. The view closes by itself when its time is up, ' +
-      'or about two minutes after no page shows it.'));
+    h('div', { class: 'form-actions' }, stopBtn, startBtn, extendBtn),
+    facts,
+    h('p', { class: 'muted small foot' }, 'Turning satellite positions on and off pauses corrections for a moment. ' +
+      'The view closes by itself when time is up or no page shows it.'));
   const tick = () => {
     if (!open) return;
     leftText.textContent = fmt.dur(Math.max(0, Math.round((deadline - Date.now()) / 1000)));
@@ -419,17 +424,25 @@ function liveWindowCard(opts) {
       extendBtn.textContent = again ? 'Extend and turn positions on again' : 'Extend by ' + w.default_min + ' min';
       if (open) {
         deadline = Date.now() + w.left_s * 1000;
-        mount(state, 'Open: ', leftText, ' left (at most ' + w.max_min + ' min from now with extensions).');
+        mount(state, leftText, ' left (up to ' + w.max_min + NB + 'min with extensions).');
         tick();
       } else {
-        const end = w.last_end && w.last_end !== 'none' ? ' It closed because ' + lbl(L.liveEnd, w.last_end) + '.' : '';
-        mount(state, 'The live view is closed.' + end);
+        /* Why it closed (the chip already says Closed), then what it shows. */
+        const why = w.last_end && w.last_end !== 'none' ? lbl(L.liveEnd, w.last_end) : '';
+        const end = why ? why.charAt(0).toUpperCase() + why.slice(1) + '. ' : '';
+        mount(state, end + 'Start it to see every satellite and its signal strength.');
       }
       sky.textContent = open ? skyOutputText(w) : '';
       sky.hidden = !sky.textContent;
+      facts.hidden = !open;
+    },
+    /* The totals under the buttons while the view is open (null: the observations cannot be read). */
+    totals(t) {
+      if (t) patch(facts, liveFacts(t));
+      else clear(facts);
     },
     connLost(text) {
-      const t = 'Refreshing failed: ' + text + ' The figures below are from the last answer; the page keeps asking.';
+      const t = 'No answer from the station: ' + text + ' Showing the last figures; still trying.';
       if (conn.hidden || conn.textContent !== t) {
         conn.textContent = t;
         conn.hidden = false;
@@ -562,7 +575,6 @@ function livePage(el, startArg) {
   const table = liveSatTable();
   const countsBox = h('div');
   const barsBox = h('div');
-  const tilesBox = h('div');
   const map = mapPanel();
   const dataCards = [
     h('section', { class: 'card wide' }, h('h2', null, 'Sky'), h('div', { class: 'sky-wrap' }, skyBox,
@@ -571,15 +583,11 @@ function livePage(el, startArg) {
     h('section', { class: 'card' }, h('h2', null, 'Per constellation and band'), countsBox,
       h('p', { class: 'muted small foot' }, 'Satellites tracked on each band. Onocoy\'s top band reward needs 4 bands on one constellation.')),
     h('section', { class: 'card' }, h('h2', null, 'Mean C/N0 per band'), barsBox),
-    h('section', { class: 'card wide' }, h('h2', null, 'Totals'), tilesBox),
   ];
-  const closedNote = h('section', { class: 'card wide' }, h('p', { class: 'muted' },
-    'Start the live view to see every satellite, where it is in the sky and how strong its signals are.'));
   /* No receiver: the same card as the setup wizard's, instead of an empty window. */
   const nr = noReceiverPanel();
-  const nrCard = h('section', { class: 'card wide', hidden: true }, h('h2', null, 'Live view'), nr.el,
-    h('p', { class: 'muted small' }, 'The live view opens once the station finds the receiver. ', link('Receiver page', '#/receiver')));
-  mount(el, h('div', { class: 'grid' }, nrCard, win.el, closedNote, dataCards, map.el));
+  const nrCard = h('section', { class: 'card wide', hidden: true }, h('h2', null, 'Live view'), nr.el);
+  mount(el, h('div', { class: 'grid' }, nrCard, win.el, dataCards, map.el));
   map.update(null);
 
   let missing = false, pendingStart = false;
@@ -593,7 +601,6 @@ function livePage(el, startArg) {
     win.el.hidden = m;
     map.el.hidden = m;
     if (m) {
-      closedNote.hidden = true;
       for (const c of dataCards) c.hidden = true;
       endPoll();
       return;
@@ -627,7 +634,6 @@ function livePage(el, startArg) {
     win.connOk();
     win.update(w);
     map.update(d.position);
-    closedNote.hidden = !!w.open;
     for (const c of dataCards) c.hidden = !w.open;
     if (!w.open) {
       endPoll();
@@ -635,6 +641,7 @@ function livePage(el, startArg) {
     }
     startPoll();
     const t = d.totals;
+    win.totals(t);
     if (!t) {
       patch(skyBox, msg('warn', 'The station cannot read the observations right now.'));
       return;
@@ -642,13 +649,12 @@ function livePage(el, startArg) {
     const sats = d.satellites || [];
     patch(skyBox, liveSkyPlot(sats));
     const placed = sats.filter(hasSkyPos).length;
-    skyNote.textContent = placed ? placed + ' of ' + sats.length + ' satellites placed.' :
+    skyNote.textContent = placed ? placed + ' of ' + sats.length + ' satellites shown.' :
       w.sky === 'on' || w.sky === 'on_profile' ? 'Waiting for the first satellite positions from the receiver.' :
-        'No satellite positions in this window: see the line under Live view.';
+        'No satellite positions: see the Live view card.';
     table.update(d);
     patch(countsBox, liveCountsTable(t));
     patch(barsBox, liveBandBars(t));
-    patch(tilesBox, liveTiles(t));
   }
 
   async function fetchLive() {

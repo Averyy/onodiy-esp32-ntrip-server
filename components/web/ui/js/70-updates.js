@@ -396,17 +396,17 @@ Views.updates = {
         cardHead('Receiver firmware', g.available ? badge('Update available', 'info') : null),
         kv([
           ['Receiver', g.model],
-          ['Running', g.running ? g.running + (g.running_build ? ' (build ' + g.running_build + ')' : '') : DASH],
-          ['Latest release', g.latest ? g.latest + ' (build ' + g.latest_build + ')' : DASH],
+          ['Running', fwText(g.running, g.running_build)],
+          ['Latest release', fwText(g.latest, g.latest_build)],
           last ? [last.check_only ? 'Last package check' : 'Last receiver update',
             [badge(lbl(L.flashOutcome, last.outcome), outcomeTone(last.outcome)),
               last.ended_age_s !== null && last.ended_age_s !== undefined ? ' ' + fmt.dur(last.ended_age_s) + ' ago' : null]] : null,
         ]),
-        g.available ? downtimeRows(g.expected_downtime_s, g.budget_left_s) : h('p', { class: 'muted' }, g.latest ? 'No newer receiver firmware is offered.' : 'No release information yet.'),
+        g.available ? downtimeRows(g.expected_downtime_s, g.budget_left_s) : h('p', { class: 'muted' }, g.latest ? 'Up to date.' : 'No release information yet.'),
         blocked ? msg('warn', 'Not possible right now: ' + lbl(L.gnssBlock, g.blocked).toLowerCase() +
           (g.blocked_left_s ? ' (about ' + fmt.dur(g.blocked_left_s) + ' left).' : '.')) : null,
-        g.flash_available ? null : msg('', NOT_ENABLED + ' You can download the offered package or upload one and have it checked against every rule; ' +
-          'nothing is sent to the receiver.'),
+        g.flash_available ? null : msg('', 'Installing receiver firmware is not enabled in this build. You can still download or upload a ' +
+          'package to have it checked.'),
         rflow ? receiverSteps(rflow.state, rflow.upload, !g.flash_available) : null,
         P.gnss_update.el,
         P.gnss_check.el,

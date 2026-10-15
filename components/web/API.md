@@ -726,7 +726,7 @@ oldest.
 | `maintenance` | receiver maintenance (below): `left_s`, `chosen_s` 0 when off; `choices_s` the durations offered, `max_left_s` the most time left after extensions |
 | `rx_signal_group` | the signal group the receiver runs as its last configuration read-back this boot showed (`CONFIG SIGNALGROUP`; after a change, the new one); `null` before an apply session read it |
 | `rx_bands` | what the receiver's running signal group configures on its main antenna input, from the last apply session this boot: every session asks once, after its signal-group step (`ANT1GROUPA`, one-shot without a rate; it answers without sky). `state` (`um98x_bands_state_t`): `unknown` (not asked this boot, or no answer; `age_s` `null`), `ok`, `refused` (the receiver refused the query: a firmware without it; `reply` its text; never a failed apply), `unread` (an answer this firmware does not read). With `ok`: `group` as the receiver named it, `profile_master` the profile's main-antenna group it was compared with, `matches` (the report names that group and lists every signal it should configure; extra signals are fine) and `systems` per constellation (`gps`, `glonass`, `galileo`, `beidou`, `qzss`): `signals` configured, `bands` the frequency bands they cover (L1, L2, L5, L6 buckets, as `GET /api/gnss/signals` counts them), `missing` the signals the profile's group should give and the report lacks. What a group should give (main input, UM982 build 25164, our bench 2026-10-14; the manual's table): `4` GPS L1C/A L2C L2P L5, GLONASS G1 G2, Galileo E1 E5a E5b, BeiDou B1I B2I B3I, QZSS L1C/A L2C L5; `3` the same with Galileo E6 and QZSS L6, BeiDou B1I B3I B1C B2b; `7` the same as `4` with every BeiDou signal (B1C, B2a, B2b added); `5` no L5 at all. Other groups: only the number is compared. The log's whole form (header and checksum) is confirmed on build 25164: the station read it in a real apply on 2026-10-14 (`state` `ok`, `group` 3, `matches` true) |
-| `signal_group_refused` | the receiver refused a signal group (any apply, the comparison's switches included): `{"master", "slave", "reply", "back_to"}` with the receiver's reply (UM982 build 25164: `PARSING FAILED GRAMMAR ERROR,` for every pair but `4 5`, `3 6`, `5 0` and `7 0`; `"signal group rejected"` when it acknowledged the pair but its read-back after the restart still showed another group) and the group the stored profile went back to (`{"master", "slave"}`: the group the session read back before the change, else the one of the last successful apply, `gnss/sg_ok`). The station re-applies that group at once; a refused group never raises `config_failed` and is never retried on the backoff. A plain refusal (a negative reply: nothing changed on the receiver and it did not restart) with such a group to go back to is not rolled back with `RESET`: the re-apply restores the outputs the session quieted, so the receiver is not restarted (nor its survey) for it. `back_to` `null`: neither was known, and the refusal is an ordinary failed apply (`config_failed`, rolled back with `RESET`). Kept until the next `PUT /api/gnss/profile` with a profile; `null` otherwise. The UI says "This receiver firmware does not accept signal group 7 0 (it answered "<reply>"). Build 25164 accepts only 4 5, 3 6, 5 0 and 7 0. It went back to 3 6 and was configured again." |
+| `signal_group_refused` | the receiver refused a signal group (any apply, the comparison's switches included): `{"master", "slave", "reply", "back_to"}` with the receiver's reply (UM982 build 25164: `PARSING FAILED GRAMMAR ERROR,` for every pair but `4 5`, `3 6`, `5 0` and `7 0`; `"signal group rejected"` when it acknowledged the pair but its read-back after the restart still showed another group) and the group the stored profile went back to (`{"master", "slave"}`: the group the session read back before the change, else the one of the last successful apply, `gnss/sg_ok`). The station re-applies that group at once; a refused group never raises `config_failed` and is never retried on the backoff. A plain refusal (a negative reply: nothing changed on the receiver and it did not restart) with such a group to go back to is not rolled back with `RESET`: the re-apply restores the outputs the session quieted, so the receiver is not restarted (nor its survey) for it. `back_to` `null`: neither was known, and the refusal is an ordinary failed apply (`config_failed`, rolled back with `RESET`). Kept until the next `PUT /api/gnss/profile` with a profile; `null` otherwise. The UI says "The receiver refused signal group 7 1. It is back on 3 6 (Galileo E6) and configured again. Choose a group from the list and save." with "Receiver reply: <reply>" under it |
 | `profile.fixed` | `{lat_deg, lon_deg, height_m}` in `fixed` mode, else `null`; fields a mode does not use are ignored on input and come back cleared (`survey_in_s` 0 in `fixed` mode) |
 | `position` | locked or last surveyed (`station_status_t.position`); `source`: `none`, `survey`, `averaged`, `user`; `sigma_m` 0 = unknown |
 | `arp` | latest CRC-valid 1005/1006 (`gnss_obs_get_arp`), converted to WGS84; `offset_m` = 3-D distance to the locked position, `null` when not locked; `{"valid": false}` before the first frame |
@@ -765,10 +765,9 @@ never reach a caster); ephemeris types (1019, 1020, 1042, 1045, 1046) need
 trailing spaces (the stored form) and must then be at most 31 printable
 ASCII characters without `"` (inner spaces stay: the IGS name pads the
 antenna type to 16 characters before the radome); `antenna_setup_id` 0-255.
-The UI's hint: enter the IGS antenna name with its radome only if the
-antenna has a published calibration; leave it empty to keep the receiver's
-value; to clear a model the receiver already holds, enter its null-antenna
-name (`ADVNULLANTENNA`).
+The UI's hint: only for an antenna in the IGS list, its name and radome as
+listed; empty keeps the receiver's value; `ADVNULLANTENNA` (the null-antenna
+name) clears a model the receiver already holds.
 
 `202 {"accepted": true, "saved": true, "apply": "queued"}`. `apply` is
 `queued`, `unchanged` (same profile, or only `autocfg` changed),
@@ -840,8 +839,8 @@ profile to `fixed` and reconfigures). `202 {"accepted": true}`. Errors:
 ### `DELETE /api/gnss/position/lock` (adm)
 
 Forget the locked position and survey again. The UI warns first: the
-reported antenna position moves, and casters that check it may re-validate
-the station. `202 {"accepted": true}`. Errors as for apply.
+position sent to casters changes, and Onocoy may validate the station
+again. `202 {"accepted": true}`. Errors as for apply.
 
 ### `GET /api/gnss/signals` (pub\*/adm)
 
@@ -1008,11 +1007,11 @@ interrupts RTCM is PROVISIONAL, to be confirmed on hardware.
 | `totals` | `gnss_obs_get_live` over every satellite, also those beyond the list: `satellites` listed, `tracked` in an MSM within the last 10 s, `signals` their signals, `with_pos` with azimuth and elevation, `dropped` beyond the list; `cnr_dbhz` mean over every satellite band (`null` = none); `bands` per band with tracked satellites (count, mean C/N0); `systems` per constellation with tracked satellites, their count per band (only bands with any). `null` when the observations cannot be read |
 | `satellites` | at most 96, by constellation and number. `prn` as in `/api/sky` (QZSS and SBAS by PRN, GLONASS by slot). `in_msm` and `msm_age_ms` (`null` = only the sky view knows it); `signal_ids` the MSM signal IDs; `cnr_dbhz` per band present: its best signal's C/N0 (`null` = no C/N0 in the MSM type). `el_deg`, `az_deg` (`null` until the satellite-in-view output reported it), `sky_cnr_dbhz` from that report, `pos_age_ms` its age |
 
-The UI shows satellites first: a sky plot (satellites with a position,
-coloured by C/N0, labelled), the per-satellite table, counts per
-constellation and band with per-band totals, the mean C/N0 per band and
-tiles (tracked satellites, signals, mean C/N0); then, last and optional, a
-station map: the position with a small OpenStreetMap tile mosaic, fetched
+The UI shows the window card with the totals (tracked satellites, signals,
+mean C/N0, satellites in the sky plot), then the satellites: a sky plot
+(satellites with a position, coloured by C/N0, labelled), the per-satellite
+table, counts per constellation and band with per-band totals and the mean
+C/N0 per band; then, last and optional, a station map: the position with a small OpenStreetMap tile mosaic, fetched
 only after the user asks for it, with the attribution and a plain link to
 open the position in an external map (offline: the coordinates only).
 
