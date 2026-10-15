@@ -364,6 +364,7 @@ def test_cli_help_and_imports_without_the_bench_dependencies():
 from benchlib import unicore  # noqa: E402
 from benchlib.stream import check_text  # noqa: E402
 from benchlib.um982_sim import Um982Responder, parse_group  # noqa: E402
+from receiver_25164 import LINES as R25164  # noqa: E402
 
 HOST_VECTORS = BENCH.parents[1] / "test" / "host" / "main" / "um98x_test_vectors.h"
 
@@ -400,10 +401,27 @@ def test_reply_builders_reproduce_the_host_test_vectors():
     assert unicore.config_line("SIGNALGROUP", "CONFIG SIGNALGROUP 3 6") == host_vector("TV_CONFIG_SG")
     assert unicore.banner_line("COM1") == host_vector("TV_BANNER")
     assert unicore.mode_line("MODE BASE 1234 TIME 600 0") == host_vector("TV_MODE_SURVEY")
-    assert unicore.ack_line("rtcm1230 10", unicore.refusal_text("rtcm1230")) == host_vector("TV_NACK_1230")
+    # The vectors are build 18975's, which spells the refusal FAILD.
+    assert unicore.ack_line("rtcm1230 10", unicore.refusal_text("rtcm1230", "FAILD")) == host_vector("TV_NACK_1230")
     for line in (unicore.ack_line("MODE"), unicore.config_line("COM1", "CONFIG COM1 115200"),
                  unicore.version_line("UM982", "R4.10Build17000")):
         assert check_text(line) in ("unicore", "crc32")
+
+
+def test_reply_builders_reproduce_build_25164():
+    b = R25164
+    assert unicore.ack_line("FOOBAR", unicore.refusal_text("FOOBAR")) == b["refused"]
+    assert unicore.ack_line("CONFIG SIGNALGROUP 1", unicore.GROUP_REFUSAL) == b["group 1"]
+    assert unicore.ack_line("CONFIG SIGNALGROUP 99 99", unicore.GROUP_REFUSAL) == b["group 99 99"]
+    for g in ("3 6", "7 0", "5 0", "4 5", "5"):
+        assert unicore.ack_line(f"CONFIG SIGNALGROUP {g}") == b[f"group {g}"]
+    assert unicore.banner_line("COM2") == b["banner"]
+    assert unicore.restarting_line() == b["restarting"]
+    assert unicore.is_restarting_line(b["restarting"]) and not unicore.is_restarting_line(b["banner"])
+    for key, line in b.items():
+        assert check_text(line) == {"restarting": "none", "no satellites": "nmea"}.get(key, "unicore"), key
+        assert (unicore.ACK.match(line) is not None) == key.startswith(("group", "refused")), key
+    assert unicore.ACK.match(b["group 1"]).group(2) == "PARSING FAILED GRAMMAR ERROR,"
 
 
 def test_responder_identifies_itself_and_dumps_its_configuration():
@@ -419,7 +437,7 @@ def test_responder_identifies_itself_and_dumps_its_configuration():
     ver = next(x for x in out if x.startswith("#VERSIONA"))
     assert check_text(ver) == "crc32"
     v = unicore.parse_versiona(ver)
-    assert v["model"] == "UM982" and v["firmware"] == "R4.10Build18975" and v["build"] == 18975
+    assert v["model"] == "UM982" and v["firmware"] == "R4.10Build25164" and v["build"] == 25164
     cfg = unicore.parse_config(out)
     assert unicore.signal_group(cfg) == (4, 5)
     assert {"SIGNALGROUP", "COM1", "MMP", "RTCMB1CB2A", "MASK", "BASEANTENNAMODEL"} <= set(cfg)
@@ -440,13 +458,18 @@ def test_responder_takes_a_signal_group_restarts_and_comes_back_with_it():
     clk.t += 0.1
     assert lines_of(r.due()) == [unicore.ack_line("CONFIG SIGNALGROUP 3 6")]
     assert r.restarting()
-    clk.t += 1.0
-    r.feed(b"VERSIONA\r\n")                         # unheard while restarting
-    clk.t += 1.0
+    clk.t += 0.4
+    r.feed(b"VERSIONA\r\n")                         # not taken while restarting: the receiver says so
+    clk.t += 0.1
+    assert lines_of(r.due()) == [R25164["restarting"]]
+    clk.t += 1.5
     assert r.due() == b"" and not r.rtcm_on()
-    clk.t += 1.2
+    clk.t = r.restart_until - 0.01
+    r.feed(b"VERSIONA\r\n")                         # just before the banner: its answer still comes first
+    clk.t = r.restart_until + 0.01
     assert r.rtcm_on()                              # the saved outputs are back
-    assert lines_of(r.due()) == [unicore.banner_line("COM1")]
+    assert lines_of(r.due()) == [R25164["restarting"], unicore.banner_line("COM1")]
+    assert [a for _t, c, a in r.log if c == "VERSIONA"] == ["restarting", "restarting"]
     r.feed(b"CONFIG\r\n")
     clk.t += 0.2
     assert unicore.signal_group(unicore.parse_config(lines_of(r.due()))) == (3, 6)
@@ -460,18 +483,31 @@ def test_responder_takes_a_signal_group_restarts_and_comes_back_with_it():
 def test_responder_refuses_unknown_and_rejected_groups_without_restarting():
     clk = FakeClock()
     r = Um982Responder(group=(3, 6), reject=[(7, 0)], clock=clk)
-    for cmd in ("CONFIG SIGNALGROUP 7 0", "CONFIG SIGNALGROUP 2 0"):
+    # 7 0 rejected by the test, every group build 25164 refused on the bench, and (not tried there) three
+    # numbers and words.
+    for g in ("7 0", "1", "1 0", "2 0", "7 6", "99 99", "3 0", "4 0", "3 6 1", "x y"):
+        cmd = f"CONFIG SIGNALGROUP {g}"
         r.feed(cmd.encode() + b"\r\n")
         clk.t += 0.2
         (line,) = lines_of(r.due())
-        assert line.startswith(f"$command,{cmd},response: PARSING FAILD NO MATCHING FUNC")
+        assert line == unicore.ack_line(cmd, "PARSING FAILED GRAMMAR ERROR,")
         assert check_text(line) == "unicore"
+    r.feed(b"CONFIG SIGNALGROUP 1\r\nCONFIG SIGNALGROUP 99 99\r\n")
+    clk.t += 0.2
+    assert lines_of(r.due()) == [R25164["group 1"], R25164["group 99 99"]]
     assert r.signal_group() == (3, 6) and r.restarts == 0 and r.rtcm_on()
     r.reject = set()
     r.feed(b"CONFIG SIGNALGROUP 7 0\r\n")
     clk.t += 0.2
-    assert r.due().startswith(b"$command,CONFIG SIGNALGROUP 7 0,response: OK")
-    assert r.signal_group() == (7, 0)
+    assert lines_of(r.due()) == [R25164["group 7 0"]]
+    assert r.signal_group() == (7, 0) and r.restarts == 1
+    # One number is the master group with the slave off: "5" is 5 0.
+    clk.t += 5.0
+    r.due()
+    r.feed(b"CONFIG SIGNALGROUP 5\r\n")
+    clk.t += 0.2
+    assert lines_of(r.due()) == [R25164["group 5"]]
+    assert r.signal_group() == (5, 0) and r.restarts == 2
 
 
 def test_responder_saves_outputs_and_mode_and_a_reset_brings_back_what_was_saved():
@@ -529,7 +565,7 @@ def test_responder_sends_the_station_messages_it_was_told_to():
     arp = rtcm.decode_arp(rtcm.payload_of(r.station_messages()[0]))
     assert arp.station_id == 21 and abs(arp.x + 2503389.9916) < 1e-4
     d = rtcm.decode_1033(rtcm.payload_of(r.station_messages()[1]))
-    assert (d.station_id, d.antenna, d.receiver_type, d.receiver_firmware) == (21, "", "UM982", "R4.10Build18975")
+    assert (d.station_id, d.antenna, d.receiver_type, d.receiver_firmware) == (21, "", "UM982", "R4.10Build25164")
     r.feed(b'CONFIG BASEANTENNAMODEL "HXCCGX601A      HXCS" "SN9" 2 USER\r\n')
     d = rtcm.decode_1033(rtcm.payload_of(r.station_messages()[1]))
     assert (d.antenna, d.antenna_serial, d.setup_id) == ("HXCCGX601A      HXCS", "SN9", 2)
@@ -626,3 +662,12 @@ def test_cli_respond_options():
     out = subprocess.run([sys.executable, "rtcm_replay.py", "--listen", "127.0.0.1:0", str(LAX), "--respond",
                           "--respond-group", "3,6,1"], cwd=BENCH, capture_output=True, text=True)
     assert out.returncode == 2 and "signal group" in out.stderr
+    assert "--respond-restart" in subprocess.run([sys.executable, "rtcm_replay.py", "--help"], cwd=BENCH,
+                                                 capture_output=True, text=True).stdout
+    out = subprocess.run([sys.executable, "rtcm_replay.py", "--listen", "127.0.0.1:0", str(LAX), "--respond-restart",
+                          "9"], cwd=BENCH, capture_output=True, text=True)
+    assert out.returncode == 2 and "need --respond" in out.stderr
+    for bad in ("0", "-1", "61"):
+        out = subprocess.run([sys.executable, "rtcm_replay.py", "--listen", "127.0.0.1:0", str(LAX), "--respond",
+                              "--respond-restart", bad], cwd=BENCH, capture_output=True, text=True)
+        assert out.returncode == 2 and "--respond-restart must be" in out.stderr

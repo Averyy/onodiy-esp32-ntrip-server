@@ -10,6 +10,10 @@ which report state and change nothing:
   CONFIG       configuration dump (signal group, port bauds, RTCM options, antenna, ...)
   MODE         operating mode (rover/base, survey-in or fixed)
   MASK         elevation, constellation and C/N0 masks
+  ANT1GROUPA   signals the signal group sets up on the master antenna, per
+               constellation, once; known without sky (sent alone: with a
+               period, "ANT1GROUPA 1", it would become a periodic log)
+  ANT2GROUPA   the same for the slave antenna
   UNILOGLIST   logs enabled on every port (what COM1 sends to the ESP32)
   BESTNAVA     one position solution (no rate: output once)
   GPGSV        satellites in view with signal IDs, once (shows E6 / B2a if tracked)
@@ -17,6 +21,9 @@ which report state and change nothing:
 `send` also accepts these read-only one-shots without --write:
   BESTNAVXYZA BESTSATA GPGGA GPGSA GPRMC GPGST AGCA RTKSTATUSA SATSINFOA
   SATELLITEA BASEPOSA BASEINFOA RECTIMEA JAMSTATUSA RTCMSTATUSA
+A receiver that is restarting answers "The Board is resetting,do not
+response any command!" instead of an acknowledgement: the tool reports
+"receiver restarting" and does not resend.
 --find-baud listens at each candidate baud, then sends VERSIONA at each until
 one answers: only for a receiver whose application is known to run; never
 after a failed or interrupted receiver update or a bootprobe run that did not
@@ -52,10 +59,13 @@ should not stay.
 Subcommands:
   query            day-one set above, every reply saved verbatim, then a summary (default)
   send CMD ...     send commands one by one (read-only ones freely, others with --write)
-  e6-check         is a 4-band constellation tracked? Read-only part first; with --write:
-                   set the signal group (default "3 6", Galileo E6), wait for the receiver
-                   to restart, watch GPGSV/OBSVMA (and RTCM 1097 with --msm) for E6, then
-                   offer to restore the previous group
+  e6-check         is a 4-band constellation tracked? Read-only part first (including
+                   ANT1GROUPA: the signals the current group sets up, without sky);
+                   with --write: set the signal group (default "3 6", Galileo E6), wait
+                   for the receiver to restart (build 25164: about 9 s to its banner),
+                   confirm with ANT1GROUPA that the new group sets up E6 or B2a, watch
+                   GPGSV/OBSVMA (and RTCM 1097 with --msm) for E6, then offer to
+                   restore the previous group
 
 Examples:
   uv run um982.py --port auto
@@ -81,8 +91,8 @@ from benchlib.common import StopFlag, add_log_args, make_run_dir, write_command_
 from benchlib.serialio import find_port, open_serial
 from benchlib.stream import StreamSplitter
 from benchlib.unicore import (
-    DAY_ONE, READ_ONLY, SignalView, UnicoreSession, blocked_reason, is_read_only,
-    normalise, parse_bestnav, parse_config, parse_gsv, parse_mode, parse_obsvm, parse_versiona,
+    DAY_ONE, READ_ONLY, GroupSignals, SignalView, UnicoreSession, blocked_reason, is_read_only,
+    normalise, parse_antgroup, parse_bestnav, parse_config, parse_gsv, parse_mode, parse_obsvm, parse_versiona,
     signal_group, warnings_for,
 )
 
@@ -99,6 +109,12 @@ EXIT_LOADER = 3        # the receiver's loader was heard: nothing more was sent 
 LOADER_PROMPT = b"boot>"
 LOADER_WORDS = (b"soft reset", b"efuse from uart", b"default action:", b"uart baudrate:", b"load os")
 LISTEN_MIN_S = 1.0     # the listen-first window is never shorter: it is the loader check
+
+# A signal-group change restarts the receiver. Build 25164: the banner 8.0-9.2 s
+# after the OK, VERSIONA answered within 4 s of the banner. Both waits keep
+# more than twice that.
+BANNER_WAIT_S = 20.0   # listening only, from the command
+ANSWER_WAIT_S = 20.0   # then VERSIONA once a second
 
 
 def loader_heard(data: bytes) -> bool:
@@ -177,6 +193,8 @@ def save_reply(run_dir: Path, n: int, reply) -> Path:
 
 
 def describe_reply(reply) -> str:
+    if reply.restarting:
+        return "receiver restarting (it answered \"The Board is resetting\"): not taken"
     if not reply.answered:
         return f"no answer within the timeout ({reply.sends} send(s))"
     ack = reply.reason if reply.ack else "no ack"
@@ -259,6 +277,8 @@ def summarise(replies: dict, out: Out) -> dict:
             out(f"   header has {v['header_fields']} fields")
             if v["model"] != "UM982":
                 out("   NOTE: the station firmware only configures and flashes a receiver that reports UM982")
+    elif r and r.restarting:
+        out("\n== Receiver: restarting (it answered \"The Board is resetting\" to VERSIONA)")
     else:
         out("\n== Receiver: no VERSIONA reply (wrong port or baud? listen first, as below)")
     for key in ("CONFIG", "MASK"):
@@ -285,6 +305,19 @@ def summarise(replies: dict, out: Out) -> dict:
             out("\n== Masks (MASK)")
             for k, vals in cfg.items():
                 out(f"   {k}: {' | '.join(vals)}")
+    groups = []
+    for key, antenna in (("ANT1GROUPA", "master"), ("ANT2GROUPA", "slave")):
+        r = replies.get(key)
+        if r and r.data:
+            groups.append(parse_antgroup(r.data[-1].text, antenna))
+        elif r and r.ack and not r.ok:
+            out(f"\n== {key}: refused ({r.reason}): this build may not have it")
+    if groups:
+        out("\n== Signals the signal group sets up (ANT1GROUPA, ANT2GROUPA; known without sky)")
+        for g in groups:
+            for line in g.lines():
+                out(f"   {line}")
+        s["group_signals"] = {g.antenna: g.to_dict() for g in groups}
     r = replies.get("MODE")
     if r and r.data:
         s["mode"] = parse_mode(r.data[-1].text)
@@ -316,10 +349,16 @@ def summarise(replies: dict, out: Out) -> dict:
         for line in view.lines():
             out(f"   {line}")
         s[f"signals_{view.source.lower()}"] = view.to_dict()
+    master = next((g for g in groups if g.antenna == "master" and not g.error), None)
+    if views or master:
+        out("\n== Verdict")
+    if master:
+        s["four_band_set_up"] = master.four_band()
+        out(f"   signal group {master.group} sets up 4 bands on the master antenna for: "
+            f"{', '.join(master.four_band()) or 'no rewarded constellation'}")
     if views:
         four = four_band(views)
         s["four_band_systems"] = four
-        out("\n== Verdict")
         if four:
             out(f"   4 bands tracked on: {', '.join(four)} -> band reward 0.95 possible")
         else:
@@ -333,6 +372,24 @@ def four_band(views: list[SignalView]) -> list[str]:
     Only the rewarded ones count, as on the station (benchlib.rtcm.best_systems):
     a QZSS with four bands earns no band reward."""
     return sorted(set().union(*(rtcm.best_systems({s: v.band_list(s) for s in v.signals}) for v in views)))
+
+
+def group_signals(sess: UnicoreSession, run_dir: Path, out: Out, counter: list[int]) -> GroupSignals | None:
+    """ANT1GROUPA, sent alone (one answer; with a period it would become a periodic log): the signals the
+    current signal group sets up on the master antenna. Printed; None when it gives no answer to decode."""
+    counter[0] += 1
+    reply = sess.command("ANT1GROUPA", ack_timeout=3.0, quiet=0.7, max_data=4.0, retries=1)
+    path = save_reply(run_dir, counter[0], reply)
+    if not reply.data:
+        why = " (this build may not have it)" if reply.ack and not reply.ok else ""
+        out(f"   ANT1GROUPA: {describe_reply(reply)}{why}  -> {path.relative_to(run_dir)}")
+        return None
+    g = parse_antgroup(reply.data[-1].text, "master")
+    for line in g.lines():
+        out(f"   {line}")
+    if not g.error:
+        out(f"   4 bands set up for: {', '.join(g.four_band()) or 'no rewarded constellation'}")
+    return g
 
 
 def observe_once(sess: UnicoreSession, run_dir: Path, counter: list[int]) -> list[SignalView]:
@@ -363,10 +420,12 @@ def msm_view(frames) -> SignalView:
 
 
 def wait_restart(sess: UnicoreSession, sent_at: float, out: Out, stop: StopFlag) -> bool:
-    """Listen for the restart banner (<= 45 s), then poll VERSIONA once a second (<= 25 s)."""
-    out("   waiting for the receiver to restart (listening only, up to 45 s) ...")
+    """Listen for the restart banner (up to BANNER_WAIT_S), then poll VERSIONA once a second
+    (up to ANSWER_WAIT_S). "The Board is resetting" answers to a poll mean: not back yet."""
+    out(f"   waiting for the receiver to restart (listening only, up to {BANNER_WAIT_S:g} s; "
+        "build 25164 prints its banner 8-9 s after the OK) ...")
     t_banner = None
-    while time.time() - sent_at < 45 and not stop.is_set():
+    while time.time() - sent_at < BANNER_WAIT_S and not stop.is_set():
         hits = [b for b in sess.banners if b.t and b.t >= sent_at]
         if hits:
             t_banner = hits[0].t
@@ -376,12 +435,22 @@ def wait_restart(sess: UnicoreSession, sent_at: float, out: Out, stop: StopFlag)
     if t_banner is None:
         out("   no restart banner seen (the port may print it at another baud); polling VERSIONA anyway")
     start = time.time()
-    while time.time() - start < 25 and not stop.is_set():
+    told = False
+    while time.time() - start < ANSWER_WAIT_S and not stop.is_set():
+        asked = time.time()
         r = sess.command("VERSIONA", ack_timeout=1.0, quiet=0.3, max_data=1.0)
         if r.data:
-            out(f"   VERSIONA answered {time.time() - sent_at:.1f} s after the command: receiver is back")
+            now = time.time()
+            after = f", {now - t_banner:.1f} s after the banner" if t_banner else ""
+            out(f"   VERSIONA answered {now - sent_at:.1f} s after the command{after}: receiver is back")
             return True
-    out("   receiver did not answer VERSIONA within 25 s of the banner wait")
+        if r.restarting and not told:
+            out(f"   still restarting {time.time() - sent_at:.1f} s after the command "
+                "(it answered \"The Board is resetting\")")
+            told = True
+        stop.wait(max(0.0, 1.0 - (time.time() - asked)))
+    out(f"   receiver did not answer VERSIONA within {ANSWER_WAIT_S:g} s "
+        + ("of its banner" if t_banner else "after the banner wait"))
     return False
 
 
@@ -392,6 +461,9 @@ def set_group(sess, out, args, group: tuple[int, int], stop, label: str) -> bool
     sent = time.time()
     r = sess.command(cmd, ack_timeout=5.0, retries=0)
     out(f"   {cmd}: {describe_reply(r)}")
+    if r.restarting:
+        out(f"   the receiver is restarting and did not take it ({label}); nothing changed: try again once it is back")
+        return False
     if r.ack and not r.ok:
         out(f"   the receiver rejected it ({label}); nothing changed")
         return False
@@ -410,6 +482,12 @@ def e6_check(sess, run_dir: Path, out: Out, args, stop: StopFlag, counter: list[
         res["version"] = v
         out(f"   receiver {v.get('model')} {v.get('firmware')}")
     out(f"   current signal group: {prev if prev else 'unknown (CONFIG gave no SIGNALGROUP line)'}")
+    out("   signals it sets up now (ANT1GROUPA, master antenna; known without sky):")
+    before = group_signals(sess, run_dir, out, counter)
+    if before is not None:
+        res["set_up_before"] = before.to_dict()
+        if prev and not before.error and before.group != prev[0]:
+            out(f"   note: ANT1GROUPA names group {before.group}, CONFIG {prev[0]}")
     views = observe_once(sess, run_dir, counter)
     for view in views:
         for line in view.lines():
@@ -424,6 +502,7 @@ def e6_check(sess, run_dir: Path, out: Out, args, stop: StopFlag, counter: list[
     plan = []
     if prev != target:
         plan.append(f"CONFIG SIGNALGROUP {target[0]} {target[1]}   (receiver restarts, group saved by itself)")
+        plan.append("ANT1GROUPA   (read-only: does the new group set up E6 / B2a? Known before any sky)")
     if args.msm:
         plan.append("RTCM1097 COM2 1   (Galileo MSM7 on this port, not saved)")
     plan.append(f"then every {args.every:g} s for up to {args.observe:g} s: GPGSV and OBSVMA once each (read-only)")
@@ -450,6 +529,15 @@ def e6_check(sess, run_dir: Path, out: Out, args, stop: StopFlag, counter: list[
         now = signal_group(parse_config([d.text for d in r.data]))
         res["group_after"] = now
         out(f"   signal group now: {now}" + ("" if now == target else "   (NOT the requested group)"))
+        out("   signals it sets up now (ANT1GROUPA, master antenna):")
+        after = group_signals(sess, run_dir, out, counter)
+        if after is not None and not after.error:
+            res["set_up_after"] = after.to_dict()
+            e6 = "E6" in after.signals.get("Galileo", [])
+            b2a = "B2a" in after.signals.get("BeiDou", [])
+            out(f"   set up: Galileo E6 {'yes' if e6 else 'no'}, BeiDou B2a {'yes' if b2a else 'no'}")
+            if not after.four_band():
+                out("   ANT1GROUPA lists no rewarded constellation on 4 bands for this group")
     else:
         out("\n== Already in the requested group: observing only")
 
@@ -636,7 +724,11 @@ def main(argv: list[str] | None = None, opener=open_serial) -> int:
             out("\n== Day-one queries (read-only)")
             replies = run_query(sess, run_dir, out, DAY_ONE, counter)
             result["summary"] = summarise(replies, out)
-            if not replies["VERSIONA"].answered:
+            if replies["VERSIONA"].restarting:
+                out("\nThe receiver answered \"The Board is resetting\": it is restarting. Run the query again in "
+                    "about 15 s (build 25164: its banner 8-9 s after a signal-group change, answers within 4 s "
+                    "of it).")
+            elif not replies["VERSIONA"].answered:
                 out("\nNo answer to VERSIONA. Check the port (uv run ports.py), and do not probe other bauds on a "
                     "receiver that may sit at its loader.")
                 for line in post_failure_steps(args.port):
@@ -651,8 +743,18 @@ def main(argv: list[str] | None = None, opener=open_serial) -> int:
                 out(f"\n> {normalise(c)}   [{describe_reply(r)}]  -> {path.relative_to(run_dir)}")
                 for line in r.lines:
                     out(f"  {line}")
-                result["replies"].append({"command": r.command, "ack": r.reason, "lines": r.lines})
-                if not ro and not r.answered:
+                entry = {"command": r.command, "ack": r.reason, "lines": r.lines}
+                antenna = {"ANT1GROUPA": "master", "ANT2GROUPA": "slave"}.get(r.command.upper())
+                if antenna and r.data:
+                    g = parse_antgroup(r.data[-1].text, antenna)
+                    for line in g.lines():
+                        out(f"  {line}")
+                    entry["decoded"] = g.to_dict()
+                result["replies"].append(entry)
+                if r.restarting:
+                    out("  the receiver is restarting: it did not take this; send it again once it is back "
+                        "(build 25164: its banner 8-9 s after a signal-group change, answers within 4 s of it)")
+                elif not ro and not r.answered:
                     out("  no acknowledgement: not resent automatically (state-changing); check the receiver")
         elif args.cmd == "e6-check":
             result["e6_check"] = e6_check(sess, run_dir, out, args, stop, counter)

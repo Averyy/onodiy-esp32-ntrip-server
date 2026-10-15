@@ -6,10 +6,16 @@ first, never a search over other bauds."""
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 
 import um982
+from benchlib import unicore
+from benchlib.stream import crc32_unicore
+from benchlib.um982_sim import Um982Responder
+from benchlib.unicore import UnicoreSession
+from receiver_25164 import GROUP_BODIES, LINES, group_log
 
 
 class ScriptedPort:
@@ -205,3 +211,165 @@ def test_find_baud_at_a_loader_in_the_ask_phase_says_what_was_sent(tmp_path, cap
     assert "VERSIONA was sent at" in out
     summary = next((tmp_path / "logs").glob("*-um982*")) / "summary.txt"
     assert "Nothing was sent" not in summary.read_text()
+
+
+# -- a receiver that answers: the replay's scripted UM982 behind COM2 ----------------------------------------------
+
+def obsvm_empty() -> str:
+    """One epoch with no observations (no antenna)."""
+    text = "OBSVMA,97,GPS,UNKNOWN,1,1000,25164,0,18,975;0"
+    return f"#{text}*{crc32_unicore(text.encode()):08x}"
+
+
+class ReceiverPort(ScriptedPort):
+    """COM2 of a UM982 build 25164 without an antenna: the replay's scripted receiver (benchlib.um982_sim) for
+    identity, configuration, signal groups and restarts, plus the one-shot logs it does not have (ANT1GROUPA and
+    ANT2GROUPA with the bodies the bench saw, an empty sky). banner=False loses the restart banner."""
+
+    def __init__(self, baud: int, responder: Um982Responder, timeout: float = 0.05, banner: bool = True):
+        super().__init__(baud, timeout=timeout)
+        self.resp = responder
+        self.banner = banner
+        self.pending = b""
+
+    def _tick(self) -> None:
+        data = self.resp.due()
+        if data and not self.banner:
+            data = b"".join(x for x in data.splitlines(keepends=True) if not x.startswith(b"$devicename"))
+        if data:
+            with self.lock:
+                self.rx += data
+
+    def _answer(self, cmd: str) -> list[str]:
+        master, slave = GROUP_BODIES[self.resp.signal_group()]
+        data = {"ANT1GROUPA": group_log("ANT1GROUPA", master), "ANT2GROUPA": group_log("ANT2GROUPA", slave),
+                "GPGSV": LINES["no satellites"], "OBSVMA": obsvm_empty()}[cmd.upper()]
+        return [unicore.ack_line(cmd), data]
+
+    def write(self, data: bytes) -> int:
+        n = super().write(data)
+        self.pending += data
+        while b"\n" in self.pending:
+            line, self.pending = self.pending.split(b"\n", 1)
+            cmd = line.strip().decode()
+            if cmd.upper() in ("ANT1GROUPA", "ANT2GROUPA", "GPGSV", "OBSVMA") and not self.resp.restarting():
+                with self.lock:
+                    self.rx += "".join(x + "\r\n" for x in self._answer(cmd)).encode()
+            else:
+                self.resp.feed(line + b"\n")
+        return n
+
+
+def receiver_opener(ports: list, responder: Um982Responder, banner: bool = True):
+    def opener(device, baud, timeout=0.05):
+        p = ReceiverPort(baud, responder, timeout=timeout, banner=banner)
+        ports.append(p)
+        return p
+    return opener
+
+
+def run_result(tmp_path) -> dict:
+    return json.loads((next((tmp_path / "logs").glob("*-um982*")) / "summary.json").read_text())
+
+
+def test_query_reads_the_signals_the_group_sets_up(tmp_path, capsys):
+    ports: list[ScriptedPort] = []
+    code = run(tmp_path, "--listen-first", "0.3", opener=receiver_opener(ports, Um982Responder(group=(3, 6))))
+    assert code == um982.EXIT_OK
+    sent = b"".join(ports[0].written)
+    # One-shots: sent alone, never with a period (that would start a periodic log).
+    assert b"\r\nANT1GROUPA\r\n" in sent and b"\r\nANT2GROUPA\r\n" in sent and b"GROUPA 1" not in sent
+    out = capsys.readouterr().out
+    assert "master: group 3" in out and "slave: group 6" in out
+    assert "Galileo  E1, E5a, E5b, E6" in out
+    assert "signal group 3 sets up 4 bands on the master antenna for: Galileo" in out
+    s = run_result(tmp_path)["summary"]
+    assert s["signal_group"] == [3, 6] and s["four_band_set_up"] == ["Galileo"]
+    assert s["group_signals"]["master"]["systems"]["Galileo"]["bands"] == ["L1", "L2", "L5", "L6"]
+    assert s["group_signals"]["slave"]["four_band"] == []
+    assert s["four_band_systems"] == []       # nothing tracked without an antenna
+    replies = next((tmp_path / "logs").glob("*-um982*")) / "replies"
+    assert any("ANT1GROUPA" in p.name for p in replies.iterdir())
+
+
+def test_send_decodes_the_group_queries(tmp_path, capsys):
+    ports: list[ScriptedPort] = []
+    code = run(tmp_path, "--listen-first", "0.3", "send", "ANT1GROUPA", "ant2groupa",
+               opener=receiver_opener(ports, Um982Responder(group=(7, 0))))
+    assert code == um982.EXIT_OK            # read-only: no --write, nothing to confirm
+    out = capsys.readouterr().out
+    assert "BeiDou   B1I, B2I, B3I, B1C, B2a, B2b" in out
+    assert "slave: group 0, the slave antenna is off" in out
+    replies = run_result(tmp_path)["replies"]
+    assert replies[0]["decoded"]["four_band"] == ["BeiDou"] and replies[1]["decoded"]["off"] is True
+
+
+def test_e6_check_waits_out_the_restart_and_confirms_e6_without_sky(tmp_path, capsys, monkeypatch):
+    # The banner is lost and the banner wait ends early, so VERSIONA polls reach the receiver while it restarts.
+    resp = Um982Responder(group=(4, 5), restart_s=2.0)
+    monkeypatch.setattr(um982, "BANNER_WAIT_S", 0.5)
+    confirmed: list[str] = []
+
+    def confirm(out, port, baud, cmds):
+        confirmed.extend(cmds)
+        return cmds != ["CONFIG SIGNALGROUP 4 5"]   # keep 3 6: no restore
+
+    monkeypatch.setattr(um982, "confirm", confirm)
+    ports: list[ScriptedPort] = []
+    code = run(tmp_path, "--listen-first", "0.3", "e6-check", "--write", "--observe", "1", "--every", "1",
+               opener=receiver_opener(ports, resp, banner=False))
+    assert code == um982.EXIT_OK
+    out = capsys.readouterr().out
+    assert confirmed == ["CONFIG SIGNALGROUP 3 6", "CONFIG SIGNALGROUP 4 5"]
+    assert "ANT1GROUPA   (read-only" in out                      # in the plan
+    assert "still restarting" in out and "The Board is resetting" in out and "receiver is back" in out
+    assert "set up: Galileo E6 yes, BeiDou B2a no" in out
+    res = run_result(tmp_path)["e6_check"]
+    assert res["group_before"] == [4, 5] and res["group_after"] == [3, 6]
+    assert res["set_up_before"]["four_band"] == [] and res["set_up_after"]["four_band"] == ["Galileo"]
+    assert "E6" not in res["set_up_before"]["systems"]["Galileo"]["signals"]
+    sent = b"".join(ports[0].written)
+    assert b"GROUPA 1" not in sent and sent.count(b"CONFIG SIGNALGROUP") == 1
+    # Polled once a second while it restarted, not resent at once on its "resetting" answer.
+    polls = [t for t, c, a in resp.log if c == "VERSIONA" and a == "restarting"]
+    assert polls and all(b - a >= 0.9 for a, b in zip(polls, polls[1:]))
+    assert "kept 3 6" in out and resp.signal_group() == (3, 6)
+
+
+def test_a_restarting_receiver_is_reported_and_nothing_is_resent(tmp_path, capsys):
+    resp = Um982Responder(group=(4, 5), restart_s=30.0)
+    resp.feed(b"RESET\r\n")
+    ports: list[ScriptedPort] = []
+    code = run(tmp_path, "--listen-first", "0.3", "send", "VERSIONA", opener=receiver_opener(ports, resp))
+    assert code == um982.EXIT_OK
+    assert b"".join(ports[0].written).count(b"VERSIONA") == 1    # read-only, yet no resend
+    out = capsys.readouterr().out
+    assert "receiver restarting" in out and "send it again once it is back" in out
+    assert LINES["restarting"] in out
+    log = (next((tmp_path / "logs").glob("*-um982*")) / "session.log").read_text()
+    assert "RX[restarting] The Board is resetting" in log
+
+
+def test_query_of_a_restarting_receiver_says_so(tmp_path, capsys):
+    resp = Um982Responder(group=(4, 5), restart_s=30.0)
+    resp.feed(b"RESET\r\n")
+    ports: list[ScriptedPort] = []
+    code = run(tmp_path, "--listen-first", "0.3", opener=receiver_opener(ports, resp))
+    assert code == um982.EXIT_OK
+    out = capsys.readouterr().out
+    assert "it is restarting. Run the query again" in out and "No answer to VERSIONA" not in out
+    sent = b"".join(ports[0].written)
+    assert sent.count(b"VERSIONA") == 1
+
+
+def test_a_refused_query_ends_at_its_acknowledgement(tmp_path):
+    # No data follows a refusal: the session does not wait out max_data for it.
+    port = ReceiverPort(115200, Um982Responder())
+    sess = UnicoreSession(port, tmp_path)
+    try:
+        t0 = time.monotonic()
+        r = sess.command("UNILOGLIST", max_data=8.0)
+        assert r.ok is False and r.reason == "PARSING FAILED NO MATCHING FUNC  UNILOGLIST" and not r.data
+        assert time.monotonic() - t0 < 2.0
+    finally:
+        sess.close()

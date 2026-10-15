@@ -3,12 +3,14 @@
 """A scripted UM982 on COM1, for the replay in QEMU (test tooling).
 
 Um982Responder answers the commands a station's receiver session sends,
-with the reply formats of benchlib.unicore (the public reply samples and
-the host-test vectors), so the firmware in QEMU identifies the replayed
-"receiver", configures it and switches its signal group:
+with the reply formats of benchlib.unicore (the public reply samples, the
+host-test vectors and what UM982 build 25164 answered on the bench), so the
+firmware in QEMU identifies the replayed "receiver", configures it and
+switches its signal group:
 
   UNLOG COM1                  OK; the RTCM output stops
-  VERSIONA                    OK and a UM982 version log (firmware chosen)
+  VERSIONA                    OK and a UM982 version log (firmware chosen;
+                              build 25164 by default)
   CONFIG                      OK and the dump: SIGNALGROUP, COM1, MMP,
                               RTCMB1CB2A, MASK, BASEANTENNAMODEL
   MODE                        OK and the base-mode log (what MODE BASE set)
@@ -17,17 +19,21 @@ the host-test vectors), so the firmware in QEMU identifies the replayed
                               OK (RTCMxxxx turns the RTCM output on)
   SAVECONFIG                  OK; what runs is saved
   RESET                       OK, then a restart
-  CONFIG SIGNALGROUP m s      OK for 4 5, 3 6, 5 0 and 7 0 (minus `reject`),
-                              saved by itself, then a restart when it
-                              changed; any other pair gets the receiver's
-                              refusal reply (the real refusal text for a
-                              signal group is not known)
-  anything else               the receiver's refusal reply
+  CONFIG SIGNALGROUP m [s]    OK for 4 5, 3 6, 5 0 and 7 0 (minus `reject`;
+                              a missing s is 0, so "5" is 5 0), saved by
+                              itself, then a restart when it changed; any
+                              other group gets `PARSING FAILED GRAMMAR
+                              ERROR,` and no restart, as on build 25164
+  anything else               `PARSING FAILED NO MATCHING FUNC  <word>`
 
-A restart withholds the RTCM output and every answer for `restart_s`, then
-prints the restart banner and comes back with what was saved (signal group,
-base mode, outputs). Nothing here touches a real receiver: the station's
-commands arrive over the replay's local TCP connection.
+A restart withholds the RTCM output for `restart_s`, answers every command
+meanwhile with `The Board is resetting,do not response any command!*39`
+(build 25164 answered a command 0.4 s into a restart so; later in a restart
+it was not tried), then prints the restart banner and comes back with what
+was saved (signal group, base mode, outputs). Build 25164 takes 8.0-9.2 s
+to its banner; the default here is shorter, to keep the tests quick.
+Nothing here touches a real receiver: the station's commands arrive over the
+replay's local TCP connection.
 
 The replayed RTCM is a recording of another receiver; the station messages
 are this receiver's own, as configured: `RTCM1005|1006|1033|1230 COM1 n`
@@ -48,7 +54,9 @@ import threading
 import time
 
 from .rtcm import BitWriter, build_frame, llh_to_ecef, msg_type, payload_of
-from .unicore import ack_line, banner_line, config_line, mode_line, refusal_text, version_line
+from .unicore import (
+    GROUP_REFUSAL, ack_line, banner_line, config_line, mode_line, refusal_text, restarting_line, version_line,
+)
 
 ACCEPTED_GROUPS = ((4, 5), (3, 6), (5, 0), (7, 0))
 ACK_DELAY_S = 0.03
@@ -107,7 +115,7 @@ class Um982Responder:
     rtcm_on() says whether the receiver's RTCM output runs now. Thread-safe
     (the replay feeds from its reader thread and sends from its session)."""
 
-    def __init__(self, group: tuple[int, int] = (4, 5), firmware: str = "R4.10Build18975",
+    def __init__(self, group: tuple[int, int] = (4, 5), firmware: str = "R4.10Build25164",
                  reject: tuple[tuple[int, int], ...] | list = (), restart_s: float = 3.0, model: str = "UM982",
                  baud: int = 115200, clock=time.monotonic):
         self.clock = clock
@@ -274,7 +282,9 @@ class Um982Responder:
 
     def _command(self, cmd: str, now: float) -> None:
         if now < self.restart_until:
-            self.log.append((now, cmd, "ignored (restarting)"))
+            # Due before the banner at the latest, so it never follows it.
+            self.outbox.append((min(now + ACK_DELAY_S, self.restart_until), (restarting_line() + "\r\n").encode()))
+            self.log.append((now, cmd, "restarting"))
             return
         up = " ".join(cmd.upper().split())
         words = up.split()
@@ -301,11 +311,11 @@ class Um982Responder:
         elif up == "MODE":
             self._ack(cmd, now)
             self._say(now, DATA_DELAY_S, mode_line(self.mode))
-        elif len(words) == 4 and words[0] == "CONFIG" and words[1] == "SIGNALGROUP" and words[2].isdigit() \
-                and words[3].isdigit():
-            g = (int(words[2]), int(words[3]))
-            if g not in ACCEPTED_GROUPS or g in self.reject:
-                answer = refusal_text("SIGNALGROUP")
+        elif words[:2] == ["CONFIG", "SIGNALGROUP"] and len(words) >= 3:
+            args = words[2:] + ["0"]   # a missing slave group is 0
+            g = (int(args[0]), int(args[1])) if len(words) <= 4 and all(a.isdigit() for a in args[:2]) else None
+            if g is None or g not in ACCEPTED_GROUPS or g in self.reject:
+                answer = GROUP_REFUSAL
                 self._ack(cmd, now, answer)
             else:
                 self._ack(cmd, now)

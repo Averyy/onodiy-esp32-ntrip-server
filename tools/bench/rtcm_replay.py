@@ -27,7 +27,9 @@ With --respond a scripted UM982 (benchlib.um982_sim) answers the station's
 receiver commands: its identity, configuration dump and base mode, the
 configuration it sends, and signal-group changes (accepted for 4 5, 3 6,
 5 0 and 7 0, less any --respond-reject; a change or RESET withholds the RTCM
-for about 3 s, then the restart banner). The RTCM output follows it: off
+for --respond-restart seconds, 3 by default, a real UM982 build 25164 about
+9, answering any command meanwhile with the receiver's "The Board is
+resetting" line, then the restart banner). The RTCM output follows it: off
 after UNLOG COM1 until an RTCMxxxx command, off while it restarts. Bursts
 that fall due meanwhile are dropped, never sent late. The station messages
 it was told to send (1005/1006 of a fixed base, 1033, 1230) are its own: they
@@ -417,6 +419,9 @@ def main() -> int:
                     help="the responder's signal group at the start (default 4,5, the factory one)")
     ap.add_argument("--respond-reject", action="append", default=[], metavar="M,S",
                     help="a signal group the responder refuses (repeatable)")
+    ap.add_argument("--respond-restart", type=float, default=None, metavar="S",
+                    help="seconds the responder takes to restart after a signal-group change or RESET (default 3; "
+                         "UM982 build 25164 takes 8.0-9.2 s to its banner)")
     add_log_args(ap)
     args = ap.parse_args()
     if args.speed <= 0:
@@ -429,13 +434,16 @@ def main() -> int:
         ap.error(f"--listen: {e}")
     responder = None
     if args.respond:
+        restart_s = 3.0 if args.respond_restart is None else args.respond_restart
+        if not 0 < restart_s <= 60:
+            ap.error("--respond-restart must be more than 0 and at most 60 s")
         try:
             responder = Um982Responder(group=parse_group(args.respond_group),
-                                       reject=[parse_group(g) for g in args.respond_reject])
+                                       reject=[parse_group(g) for g in args.respond_reject], restart_s=restart_s)
         except ValueError as e:
             ap.error(f"--respond-group/--respond-reject: {e}")
-    elif args.respond_reject or args.respond_group != "4,5":
-        ap.error("--respond-group and --respond-reject need --respond")
+    elif args.respond_reject or args.respond_group != "4,5" or args.respond_restart is not None:
+        ap.error("--respond-group, --respond-reject and --respond-restart need --respond")
     try:
         schedule = load(args.input)
     except (OSError, ValueError) as e:
