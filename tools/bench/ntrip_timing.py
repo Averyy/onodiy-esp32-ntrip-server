@@ -45,7 +45,9 @@ import time
 from pathlib import Path
 
 from benchlib import rtcm
-from benchlib.common import RotatingFile, StopFlag, add_log_args, human_bytes, make_run_dir, write_command_line
+from benchlib.common import (
+    FLUSH_EVERY_S, RotatingFile, StopFlag, add_log_args, human_bytes, make_run_dir, write_command_line,
+)
 from benchlib.ntrip import Dechunker, basic_auth
 from benchlib.replay import EpochGrouper, read_idx
 from benchlib.stream import StreamSplitter
@@ -286,6 +288,7 @@ def capture(args) -> int:
     offset = 0
     start = time.monotonic()
     next_status = start + 10
+    next_flush = start + FLUSH_EVERY_S
     split = StreamSplitter()
     frames = 0
     end_reason = "duration reached"
@@ -311,6 +314,10 @@ def capture(args) -> int:
             now = time.monotonic()
             if args.duration and now - start >= args.duration:
                 break
+            if now >= next_flush or now >= next_status:
+                rot.flush()   # tail -f works, and a killed run loses at most about a second
+                idx.flush()
+                next_flush = now + FLUSH_EVERY_S
             if now >= next_status:
                 print(f"[timing] {now - start:.0f} s: {human_bytes(offset)}, {frames} frames", flush=True)
                 next_status = now + 10

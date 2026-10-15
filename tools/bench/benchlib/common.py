@@ -14,6 +14,9 @@ import threading
 from pathlib import Path
 
 DEFAULT_LOG_BASE = "bench-logs"
+# How often a running tool pushes its log files to the disk: `tail -f` follows
+# them, and a run that is killed loses at most this much.
+FLUSH_EVERY_S = 1.0
 
 
 def utc_now() -> _dt.datetime:
@@ -63,7 +66,8 @@ class RotatingFile:
     """Append-only file that starts a new part when it reaches `limit` bytes.
 
     Parts are named <stem>-0000<suffix>, <stem>-0001<suffix>, ... so sorting
-    the names gives stream order."""
+    the names gives stream order. Writes are buffered: the tool calls flush()
+    at least every FLUSH_EVERY_S while it runs."""
 
     def __init__(self, directory: Path, stem: str, suffix: str, limit: int, binary: bool):
         self.directory = directory
@@ -75,6 +79,7 @@ class RotatingFile:
         self.size = 0
         self.total = 0
         self.fh = None
+        self.dirty = False   # written since the last flush
         self._open_next()
 
     def _open_next(self) -> None:
@@ -97,10 +102,13 @@ class RotatingFile:
         self.fh.write(data)
         self.size += n
         self.total += n
+        self.dirty = True
 
     def flush(self) -> None:
-        if self.fh:
+        """Push what was written to the disk (cheap when nothing was)."""
+        if self.fh and self.dirty:
             self.fh.flush()
+            self.dirty = False
 
     def close(self) -> None:
         if self.fh:

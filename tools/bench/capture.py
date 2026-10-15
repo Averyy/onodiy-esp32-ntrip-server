@@ -18,8 +18,11 @@ Writes to a new run directory (see --log-dir):
                       NMEA / $command / $CONFIG / # log lines verbatim with checksum verdict,
                       CRC failures and junk bytes
   summary.txt         counts and the RTCM inspection report at the end
-Files rotate at --rotate-mb; parts sort in stream order. Ctrl-C stops
-cleanly (twice to force).
+Files rotate at --rotate-mb; parts sort in stream order. Every file is
+flushed to the disk at least once a second, on each status line, and the
+console files on each event, so `tail -f` follows them and a capture that
+is killed loses at most about a second. Ctrl-C stops cleanly (twice to
+force).
 
 Examples:
   uv run capture.py --auto
@@ -44,12 +47,13 @@ from pathlib import Path
 import serial
 
 from benchlib.common import (
-    RotatingFile, StopFlag, add_log_args, hms, human_bytes, iso, make_run_dir, write_command_line,
+    FLUSH_EVERY_S, RotatingFile, StopFlag, add_log_args, hms, human_bytes, iso, make_run_dir, write_command_line,
 )
 from benchlib.rtcm import summarize_frame
 from benchlib.rtcmstats import RtcmStats
 from benchlib.serialio import find_port, open_serial, pulse_esp32_reset
 from benchlib.stream import StreamSplitter
+from benchlib.unicore import is_restarting_line
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 EVENT_PATTERNS = [
@@ -194,12 +198,13 @@ class ConsoleSink:
             self.event_counts[hit] = self.event_counts.get(hit, 0) + 1
             if hit != "error-log":
                 self.events.write(f"{iso(t)} [{hit}] {text}\n")
-                self.events.flush()
         if self.echo:
             mark = f" <<< {hit.upper()}" if hit and hit != "error-log" else ""
             say(f"{hms(t)} C| {text}{mark}")
         if hit == "backtrace" and self.addr2line:
             self._decode_backtrace(text, t)
+        if hit:
+            self._flush()   # an event reaches the disk at once, with the console lines before it
 
     def _decode_backtrace(self, text: str, t: float) -> None:
         pcs = ["0x" + m.group(1) for m in PC_PAIR.finditer(text)]
@@ -216,7 +221,17 @@ class ConsoleSink:
             self.log.write(f"{iso(t)} [decoded] {line}\n")
             if self.echo:
                 say(f"{hms(t)} C| [decoded] {line}")
+
+    def _flush(self) -> None:
+        self.log.flush()
+        if self.raw:
+            self.raw.flush()
         self.events.flush()
+
+    def flush(self) -> None:
+        """Every console file to the disk (the main loop, at least every FLUSH_EVERY_S)."""
+        with self.lock:
+            self._flush()
 
     def close(self) -> None:
         with self.lock:
@@ -273,7 +288,9 @@ class ReceiverSink:
                 say(f"{hms(item.t)} R| {line}")
         elif item.kind == "text":
             note = f" ({item.note})" if item.note else ""
-            line = f"TXT[{item.check}]{note} {item.text}"
+            # The receiver's "The Board is resetting" answer has no checksum lead: named, not left unchecked.
+            check = "restarting" if is_restarting_line(item.text) else item.check
+            line = f"TXT[{check}]{note} {item.text}"
             if self.echo != "none":
                 say(f"{hms(item.t)} R| {line}")
         elif item.kind == "binary":
@@ -282,6 +299,13 @@ class ReceiverSink:
             head = item.data[:32].hex(" ")
             line = f"JUNK {len(item.data)} bytes @{item.offset}: {head}{' ...' if len(item.data) > 32 else ''}"
         self.log.write(f"{stamp} {line}\n")
+
+    def flush(self) -> None:
+        """Every receiver file to the disk (the main loop, at least every FLUSH_EVERY_S)."""
+        with self.lock:
+            self.bin.flush()
+            self.idx.flush()
+            self.log.flush()
 
     def window(self) -> str:
         with self.lock:
@@ -359,8 +383,10 @@ def main() -> int:
     for r in readers:
         r.start()
 
+    sinks = [s for s in (console, receiver) if s]
     start = time.time()
     next_status = start + args.status_every if args.status_every else None
+    next_flush = start + FLUSH_EVERY_S
     try:
         while not stop.is_set():
             stop.wait(0.2)
@@ -369,6 +395,10 @@ def main() -> int:
                 console.tick(now)
             if args.duration and now - start >= args.duration:
                 break
+            if now >= next_flush or (next_status and now >= next_status):
+                for sink in sinks:
+                    sink.flush()
+                next_flush = now + FLUSH_EVERY_S
             if next_status and now >= next_status:
                 parts = [f"{int(now - start)} s"]
                 if console:
