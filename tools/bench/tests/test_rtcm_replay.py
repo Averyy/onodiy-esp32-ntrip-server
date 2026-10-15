@@ -5,6 +5,7 @@ and the TCP server (byte identity over loops, pacing, what the client sends)."""
 
 from __future__ import annotations
 
+import json
 import socket
 import subprocess
 import sys
@@ -364,9 +365,11 @@ def test_cli_help_and_imports_without_the_bench_dependencies():
 from benchlib import unicore  # noqa: E402
 from benchlib.stream import check_text  # noqa: E402
 from benchlib.um982_sim import Um982Responder, parse_group  # noqa: E402
+from receiver_25164 import GROUP_BODIES as R25164_BODIES  # noqa: E402
 from receiver_25164 import LINES as R25164  # noqa: E402
 
 HOST_VECTORS = BENCH.parents[1] / "test" / "host" / "main" / "um98x_test_vectors.h"
+FIXTURE_25164 = BENCH.parents[1] / "test" / "fixtures" / "unicore" / "um982_build25164_replies.json"
 
 
 class FakeClock:
@@ -688,3 +691,13 @@ def test_responder_reports_the_signals_of_its_group():
                     unicore.groups_line(unicore.GROUP_BODIES[(3, 6)][1], 2)]
     assert all(check_text(x) == "crc32" for x in logs)
     assert logs[0].split(";", 1)[1].startswith("3,5,GP,0x1D,GL,0x03,GA,0x0F")
+
+
+def test_responder_signal_group_bodies_are_the_bench_ones():
+    """The scripted receiver's bodies, the bench tools' copy and the firmware's fixture are the same lines."""
+    assert unicore.GROUP_BODIES == R25164_BODIES
+    fixture = {}
+    for x in json.loads(FIXTURE_25164.read_text())["signal_group_bodies"]:
+        group = tuple(int(n) for n in x["group"].split())
+        fixture.setdefault(group, ["", ""])[0 if x["query"] == "ANT1GROUPA" else 1] = x["body"]
+    assert {g: tuple(b) for g, b in fixture.items()} == unicore.GROUP_BODIES

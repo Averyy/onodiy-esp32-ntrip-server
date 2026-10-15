@@ -15,7 +15,7 @@ from benchlib import unicore
 from benchlib.stream import crc32_unicore
 from benchlib.um982_sim import Um982Responder
 from benchlib.unicore import UnicoreSession
-from receiver_25164 import GROUP_BODIES, LINES, group_log
+from receiver_25164 import LINES
 
 
 class ScriptedPort:
@@ -223,8 +223,9 @@ def obsvm_empty() -> str:
 
 class ReceiverPort(ScriptedPort):
     """COM2 of a UM982 build 25164 without an antenna: the replay's scripted receiver (benchlib.um982_sim) for
-    identity, configuration, signal groups and restarts, plus the one-shot logs it does not have (ANT1GROUPA and
-    ANT2GROUPA with the bodies the bench saw, an empty sky). banner=False loses the restart banner."""
+    identity, configuration, signal groups and restarts and the signal-group queries (ANT1GROUPA and ANT2GROUPA,
+    with the bodies the bench saw), plus the one-shot logs it does not have (an empty sky). banner=False loses the
+    restart banner."""
 
     def __init__(self, baud: int, responder: Um982Responder, timeout: float = 0.05, banner: bool = True):
         super().__init__(baud, timeout=timeout)
@@ -241,9 +242,7 @@ class ReceiverPort(ScriptedPort):
                 self.rx += data
 
     def _answer(self, cmd: str) -> list[str]:
-        master, slave = GROUP_BODIES[self.resp.signal_group()]
-        data = {"ANT1GROUPA": group_log("ANT1GROUPA", master), "ANT2GROUPA": group_log("ANT2GROUPA", slave),
-                "GPGSV": LINES["no satellites"], "OBSVMA": obsvm_empty()}[cmd.upper()]
+        data = {"GPGSV": LINES["no satellites"], "OBSVMA": obsvm_empty()}[cmd.upper()]
         return [unicore.ack_line(cmd), data]
 
     def write(self, data: bytes) -> int:
@@ -252,7 +251,7 @@ class ReceiverPort(ScriptedPort):
         while b"\n" in self.pending:
             line, self.pending = self.pending.split(b"\n", 1)
             cmd = line.strip().decode()
-            if cmd.upper() in ("ANT1GROUPA", "ANT2GROUPA", "GPGSV", "OBSVMA") and not self.resp.restarting():
+            if cmd.upper() in ("GPGSV", "OBSVMA") and not self.resp.restarting():
                 with self.lock:
                     self.rx += "".join(x + "\r\n" for x in self._answer(cmd)).encode()
             else:
