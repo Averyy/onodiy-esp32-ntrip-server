@@ -47,7 +47,8 @@ const ctx = {
 vm.createContext(ctx);
 /* refusalText: what the UI says for an error answer {status, error: {code, ...}} (errText on an ApiError). */
 const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
-  '\nreturn { restartPlanText, onocoyElsewhereText, connRow, journalDetail,\n' +
+  '\nreturn { restartPlanText, onocoyElsewhereText, connRow, journalDetail, presetInfo: () => ({ PRESETS, PRESET_INFO }),\n' +
+  '  onlineShare: a => onlineShare(a[0], a[1]),\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
 process.stdout.write(JSON.stringify(out));
@@ -105,10 +106,32 @@ def test_onocoy_hint_never_says_set_up_for_a_slot_that_is_not():
         ("onocoyElsewhereText", {"slot": 2, "ready": True, "enabled": True}),
     ])
     # The Onocoy card on the same page says "Not set up" for a slot without credentials.
-    assert "is set up" not in not_ready and "not set up" in not_ready and "slot 1" in not_ready
-    assert "credentials" in not_ready
-    assert off == "Onocoy is set up in slot 1 and turned off: open it to turn it on."
-    assert "slot 3" in streams
+    assert "is set up" not in not_ready and "not set up" in not_ready and "credentials" in not_ready
+    assert off == "Onocoy is already set up here and turned off. Open it to turn it on."
+    assert "already streams to Onocoy" in streams and "one stream per station" in streams
+    # The user never sees slot numbers: the note names Onocoy (its button reads "Open Onocoy").
+    for text in (not_ready, off, streams):
+        assert "slot" not in text.lower()
+
+
+def test_every_caster_choice_has_its_box():
+    """Every caster in the editor's list has a box: one line saying what it is, 1 to 4 short steps, and a link
+    to the caster's own guide (Other caster has no guide). Nothing that goes stale: no dates."""
+    (got,) = run_ui([("presetInfo", None)])
+    ids = [p["id"] for p in got["PRESETS"]]
+    info = got["PRESET_INFO"]
+    assert sorted(ids) == sorted(info), (ids, list(info))
+    for pid, p in info.items():
+        assert p["what"] and p["what"].endswith("."), pid
+        assert 1 <= len(p["steps"]) <= 4, pid
+        assert all(s.endswith(".") and len(s) <= 130 for s in p["steps"]), pid
+        text = " ".join([p["what"], *p["steps"]])
+        assert not any(m in text for m in ("2025", "2026", "2027", "as of", "Rev1 =", "kbit", "Mbit")), pid
+        if pid == "custom":
+            assert p["guide"] is None
+        else:
+            label, url = p["guide"]
+            assert label and url.startswith(("https://", "http://rtk2go.com/")), pid
 
 
 def test_no_receiver_refusal_text():
@@ -151,3 +174,11 @@ def test_connection_row_rssi():
     assert unknown[0] == "Wi-Fi dropped" and "dBm" not in unknown[2]
     assert "signal -60 dBm" in known[2]
     assert "dBm" not in zero[2] and "dBm" not in old[2]
+
+
+def test_today_online_share_on_the_dashboard():
+    """Whole numbers at 0 % and 100 % (no "0.00 %"), two decimals in between, rounded down: never "100.00 %"
+    while the caster was offline for a moment."""
+    out = run_ui([("onlineShare", [0, 600]), ("onlineShare", [600, 0]), ("onlineShare", [1, 2]),
+                  ("onlineShare", [86399, 1])])
+    assert out == ["0\u00a0%", "100\u00a0%", "33.33\u00a0%", "99.99\u00a0%"], out

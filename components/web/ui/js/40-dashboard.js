@@ -129,18 +129,6 @@ function onocoyCounting(c) {
   return !!(c && c.enabled !== false && c.onocoy_ready);
 }
 
-/* In place of the day's figures while Onocoy is not set up (also fills the dashboard's grid cell). */
-function onocoySetupCard(c) {
-  const ready = c && c.onocoy_ready;
-  return h('section', { class: 'card' },
-    cardHead('Onocoy', badge(ready ? 'Off' : 'Not set up', '')),
-    h('p', null, ready ? 'The Onocoy slot is turned off: the station does not stream to Onocoy.' :
-      'Onocoy not set up. Onocoy rewards reference stations for their correction data; the station streams to it once ' +
-      'you enter the credentials from the Onocoy console.'),
-    h('div', { class: 'form-actions' }, link(ready ? 'Turn Onocoy on' : 'Add your Onocoy credentials', ONOCOY_SETUP_HASH, 'btn primary')),
-    h('p', { class: 'muted small foot' }, 'Today\'s figures (offline budget, graced uptime) show here once Onocoy streams.'));
-}
-
 /**
  * "Graced uptime so far" in words and tone: green when it meets 99.8 %, red
  * when it misses it and the streak is lost; below 99.8 % while the streak
@@ -148,11 +136,12 @@ function onocoySetupCard(c) {
  * since the streak is the verdict, and not green, since it misses the
  * threshold it is measured against.
  */
-function soFarView(sofar, streakOk) {
+function soFarView(sofar, streakOk, bare) {
   if (sofar === null || sofar === undefined) return DASH;
   const meets = sofar >= STREAK_PERMILLE;
   const tone = meets ? 't-ok' : streakOk ? null : 't-bad';
-  const note = meets ? (streakOk === false ? '' : ' (streak on track)') : streakOk ? ' (below 99.8 %; the streak still holds)' : ' (below 99.8 %)';
+  /* bare: the value only, where a streak chip beside it says the rest. */
+  const note = bare ? '' : meets ? (streakOk === false ? '' : ' (streak on track)') : streakOk ? ' (below 99.8 %; the streak still holds)' : ' (below 99.8 %)';
   return h('span', { class: tone }, fmt.permille(sofar) + note);
 }
 
@@ -178,58 +167,58 @@ function budgetCard(c, avail) {
       [h('div', { class: 'big ' + tone }, h('span', { class: 't-' + (tone || 'ok') }, left <= 0 ? '0\u00a0s' : fmt.dur(left))),
         h('div', { class: 'muted small' }, 'offline budget left today'),
         h('div', { class: tone }, bar(used, '', 'Share of today\'s offline budget used')),
-        h('div', { class: 'muted small' }, (over ? fmt.dur(down) + ' offline so far: over the day\'s budget of about ' + fmt.dur(allowed) +
-          ' by ' + fmt.dur(down - allowed) + '.' : fmt.dur(down) + ' offline so far of a budget of about ' + fmt.dur(allowed) + '.') +
-          ' Resets at 00:00 UTC (' + mid.local + ' here).')],
+        h('div', { class: 'muted small' }, fmt.dur(down) + (over ? ' offline today: over the day\'s allowance of about ' :
+          ' offline today, of about ') + fmt.dur(allowed) + (over ? '.' : ' allowed.') + ' Resets at ' + mid.local + ' (00:00 UTC).')],
     kv([
       ['Online today', fmt.dur(c.today_online_s)],
-      ['Offline today', fmt.dur(c.today_offline_s)],
-      ['Graced uptime so far', soFarView(c.graced_uptime_so_far_permille, c.streak_ok)],
+      ['Graced uptime so far', soFarView(c.graced_uptime_so_far_permille, c.streak_ok, true)],
       ['Data rate', c.data_rate_permille === null || c.data_rate_permille === undefined ? 'nothing sent yet today' : fmt.permille(c.data_rate_permille)],
     ]),
-    h('p', { class: 'muted small foot' }, 'Our estimate of Onocoy\'s accounting for the current UTC day (it needs at least 99.8 % graced uptime). ' +
-      'Information only.'));
+    h('p', { class: 'muted small foot' }, 'Our estimate of Onocoy\'s count for the current UTC day. The streak needs at least 99.8 % graced uptime.'));
 }
 
+/** Today's online share: whole at 0 % and 100 %, else two decimals, rounded down (never "100.00" short of 100). */
+function onlineShare(on, off) {
+  const p = 100 * on / (on + off);
+  return (p === 0 || p === 100 ? String(p) : (Math.floor(p * 100) / 100).toFixed(2)) + NB + '%';
+}
+
+/**
+ * One caster on the dashboard: name (and host, for the admin) with the state
+ * chip, one detail line, the figures, and the one thing to do, if any. An
+ * Onocoy slot not set up or turned off says that and offers the fix.
+ */
 function casterLine(c, admin) {
-  const tone = casterTone(c.state);
-  const stopped = c.state === 'stopped';
-  /* Stopped by the Onocoy login guard: why, rather than the last failure's class. */
-  const reason = stopped && c.stop_reason && c.stop_reason !== 'none' ? 'Stopped: ' + lbl(L.stop, c.stop_reason) :
-    c.reason && c.reason !== 'none' ? lbl(L.fail, c.reason) : '';
+  const ono = admin && c.protected;
+  const notSetUp = ono && c.onocoy_ready === false;
+  const off = c.enabled === false || c.state === 'disabled';
   const metrics = [];
-  if (admin) {
+  if (admin && !notSetUp) {
     if (c.state === 'streaming') {
       if (c.connected_s !== null && c.connected_s !== undefined) metrics.push(['Connected', fmt.dur(c.connected_s)]);
       if (c.lag_ms_now !== null && c.lag_ms_now !== undefined) metrics.push(['Lag', fmt.ms(c.lag_ms_now)]);
       const r = slotRate(c.slot, 10);
       if (r !== null) metrics.push(['Rate', fmt.kbps(r)]);
-    } else if (c.state_age_s !== null && c.state_age_s !== undefined) {
+    } else if (c.state_age_s !== null && c.state_age_s !== undefined && !off) {
       metrics.push(['For', fmt.dur(c.state_age_s)]);
     }
     if (c.next_retry_s) metrics.push(['Retry in', fmt.dur(c.next_retry_s)]);
     if (c.unreached_s) metrics.push(['Not reached for', fmt.dur(c.unreached_s)]);
-    const on = c.today_online_s || 0, off = c.today_offline_s || 0;
-    if (on + off > 0) metrics.push(['Today', (100 * on / (on + off)).toFixed(on === on + off ? 0 : 2) + ' % online']);
+    const on = c.today_online_s || 0, offS = c.today_offline_s || 0;
+    if (on + offS > 0) metrics.push(['Today', onlineShare(on, offS) + ' online']);
     if (c.bytes_sent) metrics.push(['Sent', fmt.bytes(c.bytes_sent)]);
   }
+  const act = !admin ? null : notSetUp ? link('Add your Onocoy credentials', ONOCOY_SETUP_HASH, 'btn primary small') :
+    ono && off ? link('Turn Onocoy on', ONOCOY_SETUP_HASH, 'btn primary small') :
+      c.state === 'stopped' ? link('What to do', '#/casters', 'btn small') : null;
   return h('div', { class: 'caster' },
     h('div', { class: 'item-head' },
       h('div', null, h('div', { class: 'name' }, c.name || ('Slot ' + (c.slot + 1))),
         admin && c.host ? h('div', { class: 'muted small' }, c.host) : null),
-      badge(lbl(L.caster, c.state), tone)),
-    reason && c.state !== 'streaming' ? h('div', { class: stopped ? 't-bad small' : 'muted small' }, reason) : null,
+      notSetUp ? badge('Not set up', '') : badge(lbl(L.caster, c.state), casterTone(c.state))),
+    admin && !notSetUp ? casterDetail(c, { stopped: true }) : null,
     metrics.length ? h('div', { class: 'metrics' }, metrics.map(m => h('span', null, m[0] + ' ', h('b', null, m[1])))) : null,
-    admin && c.hint && !stopped ? h('div', { class: 'hintline' }, c.hint) : null,
-    admin && stopped ? h('div', { class: 'form-actions' }, link('What to do', '#/casters', 'btn small')) : null);
-}
-
-/* An Onocoy slot without its credentials: a call to set it up instead of a state. */
-function onocoyNotSetUp(c) {
-  return h('div', { class: 'caster' },
-    h('div', { class: 'item-head' }, h('div', { class: 'name' }, c.name || 'Onocoy'), badge('Not set up', '')),
-    h('div', { class: 'muted small' }, 'Onocoy not set up.'),
-    h('div', { class: 'form-actions' }, link('Add your Onocoy credentials', ONOCOY_SETUP_HASH, 'btn primary small')));
+    act ? h('div', { class: 'form-actions' }, act) : null);
 }
 
 /* A slot with no caster in it (no host, not enabled): not a caster, so not listed. */
@@ -241,9 +230,9 @@ function castersCard(s, admin) {
   const list = (s.casters || []).filter(c => !emptySlot(c) && (admin ? (c.enabled || c.host || c.state !== 'disabled') : true));
   return h('section', { class: 'card' + (admin ? ' wide' : '') },
     h('h2', null, 'Casters'),
-    list.length ? h('div', { class: 'caster-list' }, list.map(c => admin && c.protected && c.onocoy_ready === false ?
-      onocoyNotSetUp(c) : casterLine(c, admin))) :
-      h('p', { class: 'muted' }, 'No caster set up. ', admin ? link('Add one', '#/casters') : null),
+    list.length ? h('div', { class: 'caster-list' }, list.map(c => casterLine(c, admin))) :
+      admin ? h('div', { class: 'form-actions' }, h('span', { class: 'note muted' }, 'No caster set up yet.'),
+        link('Add a caster', '#/casters', 'btn primary small')) : h('p', { class: 'muted' }, 'No caster set up yet.'),
     admin ? h('div', { class: 'foot' }, link('Manage casters', '#/casters')) : null);
 }
 
@@ -401,7 +390,7 @@ function adminDashboard(s) {
     heroCard(s),
     h('div', { class: 'grid' },
       receiverCard(s, true),
-      onocoyCounting(ono) ? budgetCard(ono, s.availability) : onocoySetupCard(ono),
+      onocoyCounting(ono) ? budgetCard(ono, s.availability) : null,
       castersCard(s, true),
       networkCard(s),
       alertsCard(s),

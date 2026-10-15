@@ -53,17 +53,15 @@ const L = {
   stop: {
     none: '',
     rejected: ['login refused 3 times', 'Onocoy refused the login 3 times. Copy the mountpoint, username and password from the ' +
-      'Onocoy console again, then save the slot or press Try again. The station does not retry by itself, so Onocoy does not ' +
-      'start blocking logins from your internet connection.'],
-    login_blocked: ['logins blocked', 'Onocoy is blocking logins from this internet connection for a while (too many ' +
-      'unsuccessful logins). That also affects every other station on the same connection. Check the credentials, wait, ' +
-      'then press Try again.'],
-    in_use: ['credential in use', 'Onocoy says another stream already uses this credential: another device probably streams ' +
-      'with it. Stop that device or give this station its own credential, then press Try again.'],
-    kicked: ['sessions taken over', 'Onocoy kept ending this station\'s sessions soon after login: another device is probably ' +
-      'streaming with the same credential. The station stopped so the two do not keep knocking each other off. Stop the ' +
-      'other device or give this station its own credential, then press Try again.'],
-    duplicate: ['duplicate stream', 'Onocoy reports this stream as a duplicate of another stream. Check the Onocoy console ' +
+      'Onocoy console again, then save or press Try again. The station does not retry on its own: repeated failed logins can ' +
+      'make Onocoy block logins for a while.'],
+    login_blocked: ['logins blocked', 'Onocoy is blocking logins for a while after too many failed ones. Check the credentials, ' +
+      'wait, then press Try again.'],
+    in_use: ['credential in use', 'Onocoy says another stream already uses this credential. Stop the other device or give this ' +
+      'station its own credential, then press Try again.'],
+    kicked: ['sessions taken over', 'Onocoy kept ending this station\'s sessions soon after login: another device probably ' +
+      'streams with the same credential. Stop it or give this station its own credential, then press Try again.'],
+    duplicate: ['duplicate stream', 'Onocoy reports this stream as a duplicate of another one. Check the Onocoy console ' +
       'before you try again.'],
     banned: ['banned', 'Onocoy reports this credential or connection as banned. Check the Onocoy console.'],
   },

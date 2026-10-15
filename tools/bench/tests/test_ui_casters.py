@@ -80,7 +80,7 @@ class El extends Node {
   querySelector() { return null; }
   querySelectorAll() { return []; }
   closest() { return null; }
-  contains() { return false; }
+  contains(x) { for (const e of this.walk()) if (e === x) return true; return false; }
   *walk() { yield this; for (const c of this.kids) if (c instanceof El) yield* c.walk(); }
 }
 
@@ -117,6 +117,9 @@ function controls(root) {
     host: all.find(e => e.tagName === 'INPUT' && e.attrs.inputmode === 'url'),
     mountpoint: all.find(e => e.tagName === 'INPUT' && e.attrs.maxlength === '47'),
     password: all.find(e => e.tagName === 'INPUT' && e.attrs.type === 'password'),
+    name: all.find(e => e.tagName === 'INPUT' && e.attrs.maxlength === '23'),
+    more: all.find(e => e.tagName === 'DETAILS'),
+    title: all.find(e => e.tagName === 'H2'),
     errors: () => all.filter(e => e.tagName === 'SMALL' && e.className === 'err' && !e.hidden).map(e => e.textContent),
   };
 }
@@ -137,7 +140,7 @@ for (const c of JSON.parse(casesJson)) {
   }
   ed.el.fire('submit');
   const put = sent.find(s => s.method === 'PUT');
-  out.push(put ? put.body : { errors: f.errors() });
+  out.push(put ? put.body : { errors: f.errors(), more_open: !!f.more.open, title: f.title.textContent });
 }
 process.stdout.write(JSON.stringify(out));
 """
@@ -218,3 +221,15 @@ def test_presets_with_a_pace_and_unchanged_slots():
         case(2, stored("my.caster.net", "polite"), []),
     ])
     assert [b.get("backoff_profile") for b in out] == ["polite", "standard", "standard", "polite", "polite"], out
+
+
+def test_a_refused_field_under_more_options_opens_it():
+    """Name, host and port of a preset wait under "More options": a field refused there opens it first, so the
+    error is on screen; one in the main part leaves it closed. The heading names the chosen caster."""
+    out = run_editor([
+        case(1, None, [("caster", "centipede"), ("name", "N" * 30)] + NEW, ONOCOY_ELSEWHERE),
+        case(1, None, [("caster", "centipede"), ("password", "secret")], ONOCOY_ELSEWHERE),
+    ])
+    assert out[0]["errors"] == ["Too long: use a shorter name."] and out[0]["more_open"] is True, out[0]
+    assert out[1]["errors"] == ["Enter the mountpoint."] and out[1]["more_open"] is False, out[1]
+    assert out[0]["title"] == out[1]["title"] == "New caster: Centipede"

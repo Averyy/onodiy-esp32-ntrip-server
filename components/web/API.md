@@ -1261,9 +1261,9 @@ casters are public, so anyone can take the station's stream there and submit
 it to Onocoy as well, and Onocoy's FAQ says: "Please note that multiple
 submissions of the same streams, e.g. from free or public networks such as
 IGS or RTK2GO, even when done by separate users in the onocoy platform, will
-result in banning." The UI shows that above the slots. It blocks nothing
-(RTK2go slots stay off unless the user turns one on); saving such a pair
-still asks for `dup_stream_ack` (below).
+result in banning." The UI warns about it above the casters and links that
+FAQ. It blocks nothing (RTK2go slots stay off unless the user turns one on);
+saving such a pair still asks for `dup_stream_ack` (below).
 
 `GET /api/casters/{n}` returns one `{"slot", "config", "status"}` entry. In
 safe mode `config` is `null` (the slots were never loaded) and every status
@@ -2376,10 +2376,9 @@ wizard shows the Wi-Fi step only while the page is on the station's own
 access point or the station has no working Wi-Fi. A wizard that starts
 (a reload, a new login) reads `GET /api/wifi` first: while the station
 has no working Wi-Fi (none stored, or not connected) it resumes at the
-Wi-Fi step whatever `setup_step` says. In the optional casters step,
-Continue waits while a caster being added is open in its editor (its own
-Save and Cancel decide; "Skip the rest" asks before it drops what was
-typed).
+Wi-Fi step whatever `setup_step` says. In the optional casters step (the
+last one), "Finish setup" asks before it drops a caster being added that is
+not saved yet.
 
 **Recovery.** BOOT held 10 s clears the admin password and opens the
 recovery AP for 15 min (open unless an AP password is set; longer while a

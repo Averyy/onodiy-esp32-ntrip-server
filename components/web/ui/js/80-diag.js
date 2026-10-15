@@ -250,8 +250,7 @@ function connHistory() {
   };
   const refresh = btn('Refresh', () => act(refresh, load, err), 'small');
   const el = h('section', { class: 'card wide' }, h('h2', null, 'Connection history'),
-    h('p', { class: 'muted small' }, 'Caster sessions ending and coming back, Wi-Fi drops and returns, newest first. ' +
-      'Not every session shorter than a minute is listed: the next record counts the ones left out.'),
+    h('p', { class: 'muted small' }, 'Caster sessions and Wi-Fi drops, newest first.'),
     h('div', { class: 'form-actions' }, refresh), err, h('div', { class: 'foot' }, out));
   const stop = poller(60000, () => load().catch(e => showErr(e, err)));
   return { el: el, stop: stop };
@@ -284,8 +283,8 @@ function availabilityTab(box) {
           ['Clock', lbl(L.timeSource, av.clock)],
           ['UTC time', sod === null || sod === undefined ? DASH :
             String(Math.floor(sod / 3600)).padStart(2, '0') + ':' + String(Math.floor((sod % 3600) / 60)).padStart(2, '0')],
-          prot && !counting ? ['Onocoy', h('span', null, p.onocoy_ready === false ? 'Onocoy not set up. ' : 'Onocoy is off. ',
-            link(p.onocoy_ready === false ? 'Add your Onocoy credentials' : 'Turn it on', '#/casters/onocoy'))] : null,
+          prot && !counting ? ['Onocoy', [p.onocoy_ready === false ? 'Not set up · ' : 'Off · ',
+            link(p.onocoy_ready === false ? 'Add your Onocoy credentials' : 'Turn it on', '#/casters/onocoy')]] : null,
           counting ? ['Onocoy offline today', fmt.dur(p.down_today_s)] : null,
           counting && p.budget_s !== null && p.budget_s !== undefined ? ['Offline budget today', 'about ' + fmt.dur(p.budget_s) +
             ' at the current data rate'] : null,
@@ -298,10 +297,11 @@ function availabilityTab(box) {
             ['Day covered so far (online + 5 min grant)', fmt.permille(p.graced_uptime_permille)] : null,
           ['Powered off', fmt.dur(day.power_off_s)],
           ['UART overflows', fmt.num(day.rx_overflows)],
-        ]),
-        h('p', { class: 'muted small foot' }, 'Offline counts seconds a caster should have streamed but did not; planned is the part caused by receiver configuration and updates, and by restarts you started (until each caster is back, at most a couple of minutes after the restart). Information only.')),
+        ])),
       h('section', { class: 'card' }, h('h2', null, 'Casters today'),
-        dayRows.length ? table(['Caster', 'Online', 'Offline', 'Planned', 'Reconnects'], dayRows, { num: [1, 2, 3, 4], stack: true, label: 'Casters today' }) :
+        dayRows.length ? [table(['Caster', 'Online', 'Offline', 'Planned', 'Reconnects'], dayRows, { num: [1, 2, 3, 4], stack: true, label: 'Casters today' }),
+          h('p', { class: 'muted small foot' }, 'Offline: time a caster should have streamed but did not. Planned: the part caused by ' +
+            'receiver setup and updates, and by restarts you started.')] :
           h('p', { class: 'muted' }, 'No casters.')),
       h('section', { class: 'card wide' }, h('h2', null, 'Last 30 days'),
         days.length ? table(['Day (UTC)', prot ? 'Onocoy offline' : 'Offline (slot 1)', 'Planned', 'Reconnects', 'Powered off'],
@@ -312,7 +312,7 @@ function availabilityTab(box) {
             return [d.date || String(d.utc_day), h('span', { class: over ? 't-bad' : null }, fmt.dur(down)), fmt.dur((d.planned_s || [])[i]),
               fmt.num((d.reconnects || [])[i]), fmt.dur(d.power_off_s)];
           }), { num: [1, 2, 3, 4] }) : h('p', { class: 'muted' }, 'No earlier days recorded yet.'),
-        prot ? h('p', { class: 'muted small foot' }, 'Onocoy\'s streak allows about 473 s offline per UTC day at a perfect data rate.') : null),
+        counting && days.length ? h('p', { class: 'muted small foot' }, 'Red: more than 473 s offline, about the most Onocoy\'s streak allows in a UTC day.') : null),
       hist.el));
   };
   const stopAv = pollInto(box, 10000, '/api/availability', render);

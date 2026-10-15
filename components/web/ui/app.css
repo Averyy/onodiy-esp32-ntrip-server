@@ -309,6 +309,9 @@ small { font-size: 0.85rem; }
 .card-head > :first-child, .item-head > :first-child { flex: 1 1 auto; min-width: 0; margin: 0; }
 .card-head > * + *, .item-head > * + * { flex: none; }
 .card-head > .badge + .badge, .item-head > .badge + .badge { margin-left: -0.4rem; }
+/* Title and chips that do not fit one line (a phone, two chips): the chips move under the title, at the right. */
+.card-head { flex-wrap: wrap; justify-content: flex-end; row-gap: 0.35rem; }
+.card-head > :first-child { flex-basis: 8rem; }
 .card .foot { margin-top: 0.75rem; font-size: 0.9rem; }
 .section-title { margin: 1.5rem 0 0.5rem; color: var(--muted); font-size: 0.85rem; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; }
 
@@ -368,6 +371,8 @@ small { font-size: 0.85rem; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; min-width: 0; font-variant-numeric: tabular-nums; }
 .kv + .kv { margin-top: 0.5rem; }
+/* A list of figures under a line of text in a card keeps the card's gap. */
+.card > * + .kv { margin-top: 0.75rem; }
 
 /* ---- Badges and messages ---------------------------------------------- */
 
@@ -641,6 +646,22 @@ tbody tr:last-child td { border-bottom: 0; }
 .metrics { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin-top: 0.35rem; color: var(--muted); font-size: 0.9rem; }
 .metrics b { color: var(--text); font-weight: 600; }
 .hintline { margin-top: 0.35rem; color: var(--warn); font-size: 0.9rem; }
+.caster .form-actions { margin-top: 0.6rem; }
+.caster-live > * + * { margin-top: 0.35rem; }
+.caster-live > .msg { margin-top: 0.6rem; }
+/* A card that holds only a row of actions (the add card): no gap above it. */
+.card > .form-actions:first-child { margin-top: 0; }
+.card > p:last-child { margin-bottom: 0; }
+/* A caster's box: what it is, the steps before it works, its own guide. */
+.preset { padding: 0.75rem; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.preset p { margin: 0 0 0.4rem; }
+.steps-small { margin: 0 0 0.5rem; padding-left: 1.2rem; font-size: 0.9rem; }
+.steps-small li + li { margin-top: 0.25rem; }
+.preset .ext { display: inline-block; font-size: 0.9rem; font-weight: 600; }
+.ext { white-space: nowrap; }
+/* The editor below a list (setup), and the setup's last row of actions. */
+.subcard { padding-top: 1rem; border-top: 1px solid var(--border); }
+.form-actions.sep { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
 
 /* ---- Signals ----------------------------------------------------------- */
 

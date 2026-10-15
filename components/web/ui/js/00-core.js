@@ -653,9 +653,9 @@ function fieldErrorText(e) {
 }
 
 const POLICY = {
-  second_onocoy: 'Another enabled slot already streams to Onocoy. Onocoy allows one stream per station.',
-  second_rtk2go: 'Another enabled slot already streams to RTK2go. Use one RTK2go slot per station.',
-  dup_stream_ack_required: 'Streaming to Onocoy and an open caster at the same time needs your acknowledgement.',
+  second_onocoy: 'Another caster here already streams to Onocoy, and Onocoy allows one stream per station.',
+  second_rtk2go: 'Another caster here already streams to RTK2go. Stream to RTK2go from one caster only.',
+  dup_stream_ack_required: 'Streaming to Onocoy and to RTK2go or Centipede at the same time needs your OK first.',
 };
 
 function errText(e) {

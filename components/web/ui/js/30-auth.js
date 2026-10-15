@@ -701,10 +701,7 @@ async function startWizard(claim) {
     const dupBox = h('div');
     const submit = h('button', { type: 'submit', class: 'btn primary' }, 'Save and continue');
     frame('onocoy', 'Onocoy',
-      h('p', null, 'Onocoy rewards reference stations for their correction data.'),
-      h('p', null, ONOCOY_CONSOLE),
-      h('p', { class: 'small' }, ONOCOY_PW_RULE),
-      msg('warn', ONOCOY_ONE_DEVICE),
+      presetBox('onocoy'),
       h('form', { onsubmit: async e => {
         e.preventDefault();
         for (const k of Object.keys(F)) F[k].error(null);
@@ -748,36 +745,39 @@ async function startWizard(claim) {
     mpI.focus();
   }
 
+  /*
+   * More casters (the last step): the casters set up so far, each with a
+   * plain chip (Onocoy not set up offers its step again), "Add a caster"
+   * while a slot is free (its editor opens below the list), and "Finish
+   * setup", which asks first while a caster being added is not saved.
+   */
   function stepCasters() {
     const data = W.casters;
-    const box = h('div', { class: 'stack' });
-    const configured = (data.slots || []).filter(s => s.config && s.config.host);
-    const free = (data.slots || []).filter(s => s.config && !s.config.host && !s.config.enabled);
-    const editorBox = h('div');
-    /* The caster being added: while its editor is open, its own Save and
-     * Cancel decide, and Continue waits (it would finish the setup and drop
-     * what was typed, or a duplicate-stream question still open). */
+    const slots = data.slots || [];
+    const configured = slots.filter(s => s.config && s.config.host);
+    const free = slots.filter(s => s.config && !s.config.host && !s.config.enabled);
+    const editorBox = h('div', { class: 'subcard', hidden: true });
     let editor = null;
-    const render = () => {
-      mount(box,
-        configured.length ? h('div', { class: 'caster-list' }, configured.map(s => h('div', { class: 'caster' },
-          h('div', { class: 'name' }, s.config.name || s.config.host), h('div', { class: 'muted small' },
-            s.config.host + ':' + s.config.port)))) : h('p', { class: 'muted' }, 'No caster set up yet.'),
-        editorBox);
+    /* "Finish setup" or the Onocoy step with a caster typed but not saved: ask first. */
+    const discardTyped = async () => {
+      if (!editor || !editor.dirty()) return true;
+      return dialog({ title: 'Discard this caster?', ok: 'Discard it', cancel: 'Back to the caster', okKind: 'danger',
+        body: h('p', null, 'The caster you are adding is not saved yet. Save it with its Save button first, or discard it.') });
     };
-    const contBtn = btn('Continue', () => next('casters'), 'primary');
-    const closeEditor = () => {
-      editor = null;
-      clear(editorBox);
-      addBtn.hidden = !free.length;
-      contBtn.hidden = false;
+    const row = s => {
+      const c = s.config;
+      const notSetUp = isOnocoySlot(c) && !onocoyReady(c);
+      return h('div', { class: 'caster' },
+        h('div', { class: 'item-head' }, h('div', { class: 'name' }, c.name || c.host),
+          notSetUp ? badge('Not set up', '') : c.enabled ? badge('On', 'ok') : badge('Off', '')),
+        notSetUp ? h('div', { class: 'form-actions' }, btn('Set up', async () => {
+          if (!(await discardTyped())) return;
+          if (await saveStep('onocoy')) go('onocoy');
+        }, 'small')) : null);
     };
-    const addBtn = btn('Add a caster', () => {
-      const target = free[0];
-      if (!target) return;
-      addBtn.hidden = true;
-      contBtn.hidden = true;
-      editor = casterEditor(target, {
+    const addRow = free.length ? h('div', { class: 'form-actions' }, btn('Add a caster', () => {
+      addRow.hidden = true;
+      editor = casterEditor(free[0], {
         preset: data.onocoy_preset,
         hostname: W.system && W.system.hostname,
         hideOnocoy: configured.some(s => isOnocoySlot(s.config)),
@@ -785,23 +785,26 @@ async function startWizard(claim) {
           W.casters = await api('GET', '/api/casters');
           stepCasters();
         },
-        onCancel: closeEditor,
+        onCancel: () => {
+          editor = null;
+          clear(editorBox);
+          editorBox.hidden = true;
+          addRow.hidden = false;
+        },
       });
       mount(editorBox, editor.el);
-    }, '', { hidden: !free.length });
-    /* "Skip the rest" with a caster typed but not saved: ask first. */
-    const discardTyped = async () => {
-      if (!editor || !editor.dirty()) return true;
-      return dialog({ title: 'Discard this caster?', ok: 'Discard it', cancel: 'Back to the caster', okKind: 'danger',
-        body: h('p', null, 'The caster you are adding is not saved yet. Save it with its Save button first, or discard it and finish the setup.') });
-    };
-    render();
+      editorBox.hidden = false;
+    })) : h('p', { class: 'muted small' }, 'All ' + (data.max_slots || slots.length) + ' slots are in use.');
     frame('casters', 'More casters (optional)',
-      h('p', null, 'The station can stream to several casters at once, for example RTK2go or Centipede next to Onocoy. ' +
-        'You can also do this later on the Casters page.'),
-      box,
-      h('div', { class: 'form-actions' }, addBtn, contBtn),
-      skipAll(discardTyped));
+      h('p', null, 'Stream to other casters as well, now or later on the Casters page.'),
+      h('h2', null, 'Your casters'),
+      configured.length ? h('div', { class: 'caster-list' }, configured.map(row)) : h('p', { class: 'muted' }, 'No caster set up yet.'),
+      addRow,
+      editorBox,
+      h('div', { class: 'form-actions sep' }, btn('Finish setup', async e => {
+        const b = e.currentTarget;
+        if (await discardTyped()) await busy(b, () => next('casters'));
+      }, 'primary')));
   }
 
   /* The name the phone will open on the home network, http://<mdns_host>.local/,
