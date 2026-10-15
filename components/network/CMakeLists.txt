@@ -11,8 +11,9 @@
 # linker.lf places the mDNS responder's static buffers in PSRAM (see the
 # file).
 #
-# net_tw.c is an lwIP hook (lwip_hooks/net_lwip_hooks.h): a client's reset
-# ends a TIME_WAIT the station holds. ESP-IDF takes a project's hooks
+# net_tw.c is an lwIP hook (lwip_hooks/net_lwip_hooks.h): a half-closed
+# socket lets go of its connection at TIME_WAIT, and a client's reset ends a
+# TIME_WAIT the station holds. ESP-IDF takes a project's hooks
 # through ESP_IDF_LWIP_HOOK_FILENAME, defined for the lwIP library alone
 # (ESP-IDF's lwIP guide, "Customized lwIP Hooks"). Only lwIP's tcp_in.c
 # calls net_tw_inpacket, which is in this component's library: "-u" makes

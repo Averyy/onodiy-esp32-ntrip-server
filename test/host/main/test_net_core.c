@@ -93,6 +93,68 @@ TEST_CASE("network TIME_WAIT: a connection a socket still holds is left to lwIP"
     }
 }
 
+TEST_CASE("network TIME_WAIT: a half-closed socket's connection is watched until the client's FIN", "[net_core]")
+{
+    /* A socket that shut only its sending side holds it, our FIN is out, the client's is not in. */
+    TEST_ASSERT_TRUE(net_tw_watch(NET_TCP_FIN_WAIT, true));
+    /* Closed whole: the socket let go of it in its close(). */
+    TEST_ASSERT_FALSE(net_tw_watch(NET_TCP_FIN_WAIT, false));
+    /* ESTABLISHED, CLOSE_WAIT, LAST_ACK: lwIP itself tells the socket when it frees one of those. */
+    TEST_ASSERT_FALSE(net_tw_watch(NET_TCP_OTHER, true));
+    /* Watched already when it got there (the FIN came through the watched callback). */
+    TEST_ASSERT_FALSE(net_tw_watch(NET_TCP_CLOSING, true));
+    TEST_ASSERT_FALSE(net_tw_watch(NET_TCP_TIME_WAIT, true));
+}
+
+TEST_CASE("network TIME_WAIT: the socket lets go once the client's FIN reached it in CLOSING or TIME_WAIT",
+          "[net_core]")
+{
+    /* Each way lwIP's tcp_input calls the socket layer's receive callback on a
+     * connection whose sending side alone the socket shut (tcp_in.c: the state
+     * is the one tcp_process left; tcp.c, tcp_process_refused_data). */
+    const struct {
+        net_tcp_state_t st;
+        bool fin;
+        bool taken;
+        bool let_go;
+        bool drop;
+        const char *path;
+    } cases[] = {
+        { NET_TCP_FIN_WAIT, false, true, false, false, "data before the client's FIN: the socket reads on" },
+        { NET_TCP_FIN_WAIT, false, false, false, false, "data refused before the FIN: lwIP offers it again" },
+        { NET_TCP_TIME_WAIT, false, true, false, false, "FIN_WAIT_2, data with the FIN: the FIN comes next" },
+        { NET_TCP_TIME_WAIT, true, true, true, false, "FIN_WAIT_1 or FIN_WAIT_2 to TIME_WAIT: the FIN" },
+        { NET_TCP_TIME_WAIT, true, false, true, false, "the FIN the socket's queue had no room for" },
+        { NET_TCP_TIME_WAIT, false, false, true, true, "data refused in TIME_WAIT: the FIN never comes" },
+        { NET_TCP_CLOSING, true, true, true, false, "the FINs crossed: the client's FIN in FIN_WAIT_1" },
+        { NET_TCP_CLOSING, true, false, true, false, "the same, the socket's queue full" },
+        { NET_TCP_CLOSING, false, true, false, false, "refused data offered again in CLOSING: its FIN follows" },
+        { NET_TCP_CLOSING, false, false, true, false, "refused again: lwIP drops it on the way to TIME_WAIT" },
+        { NET_TCP_OTHER, true, true, false, false, "not a state a watched connection gets to with a FIN" },
+        { NET_TCP_OTHER, false, false, false, false, "nor with data" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        TEST_ASSERT_EQUAL_MESSAGE(cases[i].let_go, net_tw_let_go(cases[i].st, cases[i].fin, cases[i].taken),
+                                  cases[i].path);
+        TEST_ASSERT_EQUAL_MESSAGE(cases[i].drop, net_tw_drop_refused(cases[i].st, cases[i].fin, cases[i].taken),
+                                  cases[i].path);
+        /* Dropped only where the socket lets go: nothing is left that would read it. */
+        TEST_ASSERT_TRUE_MESSAGE(!cases[i].drop || cases[i].let_go, cases[i].path);
+    }
+}
+
+TEST_CASE("network TIME_WAIT: one a socket still holds is let go at its next segment", "[net_core]")
+{
+    TEST_ASSERT_TRUE(net_tw_let_go_now(NET_TCP_TIME_WAIT, true));
+    TEST_ASSERT_FALSE(net_tw_let_go_now(NET_TCP_TIME_WAIT, false));
+    TEST_ASSERT_FALSE(net_tw_let_go_now(NET_TCP_CLOSING, true));    /* lwIP tells the socket if it frees one */
+    TEST_ASSERT_FALSE(net_tw_let_go_now(NET_TCP_FIN_WAIT, true));
+    TEST_ASSERT_FALSE(net_tw_let_go_now(NET_TCP_OTHER, true));
+    /* Let go, the client's exact reset ends it (the drain check's reset, 1.5 ms after the FIN). */
+    const uint32_t rcv_nxt = 2512492u;
+    TEST_ASSERT_TRUE(net_tw_reset_ends(NET_TCP_RST, rcv_nxt, rcv_nxt, false));
+}
+
 /* lwIP's test for a TIME_WAIT that is over, as tcp.c (tcp_slowtmr) writes it. */
 static bool tw_over(uint32_t ticks, uint32_t start, uint32_t tw_ticks)
 {

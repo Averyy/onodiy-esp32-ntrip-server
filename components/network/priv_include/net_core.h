@@ -190,12 +190,13 @@ bool net_ip6_is_link_local(const uint8_t addr[16]);
  * answers it with exactly this reset (its sequence number is that ACK's
  * acknowledgment number, RFC 9293 section 3.10.7.3).
  *
- * `owned`: a socket that has only shut its sending side (shutdown(SHUT_WR),
- * the web server's lingering close) still holds the connection when the
- * client's FIN puts it in TIME_WAIT, and still reads from it. lwIP frees a
- * TIME_WAIT pcb without telling a socket (tcp.c, tcp_slowtmr and
- * tcp_abandon), so ending such a TIME_WAIT would leave the socket on freed
- * memory: it is left to lwIP. Every other segment leaves TIME_WAIT as it is.
+ * `owned`: a socket still holds the connection. lwIP frees a TIME_WAIT pcb
+ * without telling a socket (tcp.c, tcp_slowtmr and tcp_abandon), so ending
+ * such a TIME_WAIT would leave the socket on freed memory: it is left to
+ * lwIP. A socket that has only shut its sending side (shutdown(SHUT_WR),
+ * the web server's lingering close) lets go of its connection when the
+ * client's FIN puts it in TIME_WAIT (net_tw_let_go), so this is only a
+ * guard. Every other segment leaves TIME_WAIT as it is.
  */
 bool net_tw_reset_ends(uint8_t flags, uint32_t seqno, uint32_t rcv_nxt, bool owned);
 
@@ -219,6 +220,68 @@ bool net_tw_free_now(uint32_t now, uint32_t start, uint32_t tw_ticks, bool owned
  * (until the count wraps, 2^32 ticks).
  */
 uint32_t net_tw_over_start(uint32_t now, uint32_t tw_ticks);
+
+/* ---- a half-closed socket lets go of its connection at TIME_WAIT (net_tw.c) ----------- */
+
+/*
+ * A socket that shut only its sending side (shutdown(SHUT_WR): the web
+ * server's lingering close, web_linger_close) holds its connection while it
+ * reads what the client still sends. Once the client's FIN has come, lwIP
+ * moves the connection to TIME_WAIT (from FIN_WAIT_1 or FIN_WAIT_2 at once,
+ * or through CLOSING when the FINs crossed), and a TIME_WAIT pcb can be
+ * freed at any time without a word to its socket: tcp_kill_timewait when a
+ * new connection needs a pcb and all CONFIG_LWIP_MAX_ACTIVE_TCP are taken
+ * (the oldest TIME_WAIT goes; a new one is the oldest when it is the only
+ * one), and tcp_slowtmr after 2 x MSL (tcp.c: both free a TIME_WAIT pcb
+ * with no error callback, unlike a pcb in any other state). The socket
+ * would then work on freed memory, or on a new connection's pcb in the
+ * same memory, at its next read or at its close(). So the socket lets go
+ * of the connection as soon as the client's FIN has reached it in CLOSING
+ * or TIME_WAIT, from the socket layer's own receive callback, before lwIP
+ * handles anything else: what it holds after that is its own queue.
+ */
+
+/** A connection's state, as these rules need it (lwIP's enum tcp_state, mapped in net_tw.c). */
+typedef enum {
+    NET_TCP_OTHER = 0,          /**< every state not below */
+    NET_TCP_FIN_WAIT,           /**< FIN_WAIT_1 or FIN_WAIT_2: our FIN is out, the client's has not come */
+    NET_TCP_CLOSING,            /**< both FINs are out, ours not acknowledged yet */
+    NET_TCP_TIME_WAIT,
+} net_tcp_state_t;
+
+/**
+ * Should the hook watch the receive callback of this connection, before
+ * lwIP handles the segment that came for it? A socket holds it (`owned`)
+ * with its sending side shut and the client's FIN not in (FIN_WAIT).
+ */
+bool net_tw_watch(net_tcp_state_t st, bool owned);
+
+/**
+ * After the socket layer's receive callback ran for a watched connection,
+ * now in state `st`: does the socket let go of the connection now? `fin`:
+ * the callback got the client's FIN (else data); `taken`: the socket took
+ * it (the callback returned ERR_OK). Yes in CLOSING or TIME_WAIT once the
+ * FIN came, taken or not, and when the socket could not take data that
+ * came there: the FIN behind that data would never reach it (lwIP keeps
+ * refused data on a TIME_WAIT pcb until it frees the pcb, and drops it
+ * when CLOSING turns into TIME_WAIT). Never before the FIN.
+ */
+bool net_tw_let_go(net_tcp_state_t st, bool fin, bool taken);
+
+/**
+ * With net_tw_let_go: data the socket could not take on a connection now in
+ * TIME_WAIT is dropped by the hook's callback (which then reports it taken)
+ * instead of left to lwIP, which would keep it on the TIME_WAIT pcb and free
+ * the pcb without it (tcp.c: tcp_pcb_purge skips a TIME_WAIT pcb), a lost
+ * buffer. The socket has let go by then and would never read it.
+ */
+bool net_tw_drop_refused(net_tcp_state_t st, bool fin, bool taken);
+
+/**
+ * Any segment for a connection in TIME_WAIT that a socket still holds
+ * (none should: see net_tw_let_go): the socket lets go of it at once.
+ */
+bool net_tw_let_go_now(net_tcp_state_t st, bool owned);
 
 /* ---- cached scan list ----------------------------------------------------------------- */
 

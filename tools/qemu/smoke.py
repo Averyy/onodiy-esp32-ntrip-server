@@ -184,7 +184,11 @@ HALFCLOSE_ROUTE_REQUESTS = 100
 # The route's refused body: more than esp_http_server reads along with the head (128-byte blocks,
 # PARSER_BLOCK_SIZE), so most of it is still on the socket for the drain.
 HALFCLOSE_ROUTE_BODY = 1024
-HALFCLOSE_BUDGET_S = 180   # what they, the drain check and the port reuse checks may add (run.sh's backstop)
+# Refused bodies whose client closes right after the answer and the station's FIN, then connects again at once
+# (linger_fin_check): the client's FIN reaches the station while its lingering close still reads.
+LINGER_FIN_ROUNDS = 20
+LINGER_FIN_BODY = 4096
+HALFCLOSE_BUDGET_S = 200   # what they, the drain checks and the port reuse checks may add (run.sh's backstop)
 # A client reuses its local port this long after the station ended the connection first: the station keeps
 # it in TIME_WAIT for 2 x CONFIG_LWIP_TCP_MSL (sdkconfig.defaults: 10 s), so by then it must take the first SYN.
 REUSE_AFTER_S = 15.0
@@ -962,6 +966,7 @@ class Smoke:
         self.name_checks()
         self.connection_checks()
         self.drain_check()
+        self.linger_fin_check()
         self.http10_stream_checks()
         self.client_log_checks()
         self.log_level_checks()
@@ -1240,12 +1245,14 @@ class Smoke:
         the client reads the answer. Seen in the station's own packets (run.sh --pcap): it acknowledges every
         byte of the request and the client's FIN. A server that read nothing after its answer would leave its
         receive window shut (lwIP opens it only as the socket is read): the client's upload stalls with the
-        answer behind it, and the acknowledgements stop a window or so into the body. libslirp then also sends
-        a reset with exactly the station's RCV.NXT right after the client's FIN (every run on the Mac so far),
-        while the lingering close still holds the socket on a connection now in TIME_WAIT: the firmware's
-        TIME_WAIT hook (components/network/net_tw.c) must leave that one to lwIP. A version of it that did not
-        freed the pcb under the socket, and the station aborted (the crash checks at the end catch that); the
-        line says whether such a reset came."""
+        answer behind it, and the acknowledgements stop a window or so into the body. libslirp has also sent a
+        reset with exactly the station's RCV.NXT right after the client's FIN (every run on the Mac before the
+        socket let go at TIME_WAIT), while the lingering close still read. The client's FIN puts the connection
+        in TIME_WAIT, and the socket lets go of it right there, inside lwIP's handling of that FIN
+        (components/network/net_tw.c), so the firmware's TIME_WAIT hook may end that TIME_WAIT on the reset at
+        once. A version of the hook from before the letting go ended it with the socket still on the pcb, and
+        the station aborted (the crash checks at the end catch that); the line says whether such a reset
+        came."""
         port = self.http_port
         body = b"x" * (16 * 1024)
         head = (f"POST /api/nope HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
@@ -1277,6 +1284,66 @@ class Smoke:
                    f"the station acknowledged {acked if acked is not None else 'nothing (no SYN-ACK in the pcap)'} "
                    f"of {want} (the request and the client's FIN){', and reset the connection' if rst else ''}"
                    + ("; the client's reset with RCV.NXT after its FIN reached it too" if late_rst else ""))
+
+    def linger_fin_check(self) -> None:
+        """LINGER_FIN_ROUNDS refused bodies (POST /api/nope, LINGER_FIN_BODY bytes sent whole), each client
+        reading the answer and the station's FIN and then closing, and the next one connecting at once. The
+        client's FIN reaches the station while its lingering close still reads (web_linger_close) and puts the
+        connection in TIME_WAIT there, with the next connection's SYN right behind it: the socket lets go of
+        that connection inside lwIP's handling of the FIN (components/network/net_tw.c), so lwIP may free the
+        TIME_WAIT at any time after it without the socket ever touching it again. Every round must be answered
+        404 with Connection: close and end with the station's FIN, with no crash or restart on the console. A
+        round that took SLOW_S or more passes but is named: a drain that missed the end of the connection
+        would keep the server task for its full 2 s (LINGER_DRAIN_MS) before the next answer."""
+        port = self.http_port
+        body = b"x" * LINGER_FIN_BODY
+        req = (f"POST /api/nope HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
+               f"Content-Length: {len(body)}\r\n\r\n").encode() + body
+        start = len(self.log_text())
+        answered = 0
+        first_bad = ""
+        late: list[str] = []
+        t0 = time.monotonic()
+        for i in range(LINGER_FIN_ROUNDS):
+            local = None
+            try:
+                with Watched(f"POST /api/nope ({len(body)}-byte body, closed after the station's FIN, "
+                             f"{i + 1} of {LINGER_FIN_ROUNDS})") as w, \
+                        socket.create_connection(("127.0.0.1", port), timeout=10) as c:
+                    w.port(c)
+                    local = c.getsockname()[1]
+                    t1 = time.monotonic()
+                    c.sendall(req)
+                    rd = AnswerReader(c)
+                    a = rd.read()
+                    w.outcome = answer_text(a)
+                    closed = rd.wait_close(5.0) if a.complete else None
+                    took = time.monotonic() - t1
+                ok = (a.status == 404 and a.complete and a.headers.get("connection") == "close"
+                      and closed is not None)
+                what = ((f"{a.status} {error_code(a.body)[0]}" if a.status else "no answer")
+                        + f"{'' if a.complete else ' (incomplete)'}"
+                        + ("" if closed is not None else ", no FIN from the station within 5 s"))
+                if ok and took >= SLOW_S:
+                    late.append(f"round {i + 1} after {took:.1f} s (client port {local})")
+            except OSError as e:
+                ok = False
+                what = f"{type(e).__name__}: {e}"
+            text = self.log_text()[start:]
+            fatal = next((line.strip()[:160] for line in text.splitlines() if any(m in line for m in FATAL)), "")
+            if ok and not fatal and BOOT_MARK not in text:
+                answered += 1
+                continue
+            first_bad = (f"round {i + 1}" + (f" (client port {local})" if local else "") + f": {what}"
+                         + (f"; console: {fatal}" if fatal else "")
+                         + ("; the station restarted" if BOOT_MARK in text else ""))
+            break
+        self.check(answered == LINGER_FIN_ROUNDS,
+                   f"{LINGER_FIN_ROUNDS} refused {len(body)}-byte bodies, each client closing after the answer and "
+                   f"the station's FIN and the next connecting at once: {answered} answered 404 with Connection: "
+                   f"close and the station's FIN, no crash ({time.monotonic() - t0:.0f} s"
+                   + (f"; {first_bad}" if first_bad else "")
+                   + (f"; slow: {', '.join(late)}" if late else "") + ")")
 
     def reuse_pair(self, after_s: float) -> ReusePair:
         """Two connections from one local port, each a GET /api/session with Connection: close, so the station
