@@ -75,7 +75,7 @@ alone does not say which way round the plug is.
 | `ports.py` | nothing | listens only when probing |
 | `capture.py` | nothing | `--reset-esp32` toggles RTS to reset the ESP32; still no bytes |
 | `rtcm_inspect.py` | nothing | `--port` listens only |
-| `um982.py` (default) | read-only queries only | the list is in `--help`: CR LF, `VERSIONA`, `CONFIG`, `MODE`, `MASK`, `UNILOGLIST`, `BESTNAVA`, `GPGSV`, `OBSVMA`, and a few more one-shot logs for `send` |
+| `um982.py` (default) | read-only queries only | the list is in `--help`: CR LF, `VERSIONA`, `CONFIG`, `MODE`, `MASK`, `ANT1GROUPA`, `ANT2GROUPA`, `UNILOGLIST`, `BESTNAVA`, `GPGSV`, `OBSVMA`, and a few more one-shot logs for `send` |
 | `um982.py ... --write` | the commands you name, after you type `yes` | prints the exact text first; never resent automatically |
 | `station.py` | (HTTP only) | GET requests plus log in/out; never changes settings |
 | `bootprobe.py --i-understand` | `VERSIONA`, the soft restart, the bootloader stop key `T@`, then at the boot menu only `\r\n` and menu item `6` (soft reset cpu), after you type `yes` | restarts the receiver; every write passes a fixed allow-list |
@@ -136,9 +136,13 @@ uv run capture.py --receiver auto --duration 3600 --label survey
 - Receiver: `receiver-NNNN.bin` (the exact byte stream), `receiver-NNNN.idx`
   (host time of every read, so the `.bin` can be timed later) and
   `receiver-NNNN.log` (one line per RTCM frame with type, length, decoded
-  summary and CRC result; text lines verbatim with their checksum verdict;
-  CRC failures; junk bytes).
+  summary and CRC result; text lines verbatim with their checksum verdict,
+  the receiver's `The Board is resetting` answer marked `restarting`; CRC
+  failures; junk bytes).
 - A status line every 10 s, a summary (with the RTCM report) at the end.
+- Every file is flushed to the disk at least once a second and on each
+  status line, the console files also on each event, so `tail -f` follows
+  a running capture and one that is killed loses at most about a second.
 - Ctrl-C stops cleanly (twice to force). Files rotate at `--rotate-mb`.
   A port that disappears (unplug, re-enumeration) is reopened every second.
 - The console port is opened exclusively: stop the capture before
@@ -163,27 +167,58 @@ change made here stays then. Set back what should not stay.
 
 `query` listens for 2 s first (to log anything the port streams on its
 own), sends a bare CR LF, then `VERSIONA`, `CONFIG`, `MODE`, `MASK`,
-`UNILOGLIST`, `BESTNAVA`, `GPGSV` and `OBSVMA`, one at a time, waiting for
-each acknowledgement and its data. Every reply is saved verbatim under
-`replies/`, every byte in and out in `session.log`/`session-rx.bin`, and the
-summary (`summary.txt`, `summary.json`) shows the identity (with the CRC
-check of `#VERSIONA`), signal group, port bauds, mode, masks, enabled logs,
-position, the signals tracked per constellation (from GSV signal IDs and
-from the observation log), and whether any rewarded constellation (GPS,
-GLONASS, Galileo, BeiDou) has 4 bands; QZSS and NavIC never count, as on
-the station.
+`ANT1GROUPA`, `ANT2GROUPA`, `UNILOGLIST`, `BESTNAVA`, `GPGSV` and `OBSVMA`,
+one at a time, waiting for each acknowledgement and its data. Every reply
+is saved verbatim under `replies/`, every byte in and out in
+`session.log`/`session-rx.bin`, and the summary (`summary.txt`,
+`summary.json`) shows the identity (with the CRC check of `#VERSIONA`),
+signal group, port bauds, mode, masks, the signals the signal group sets up
+on each antenna (from `ANT1GROUPA`/`ANT2GROUPA`, known without sky), enabled
+logs, position, the signals tracked per constellation (from GSV signal IDs
+and from the observation log), and whether any rewarded constellation (GPS,
+GLONASS, Galileo, BeiDou) has 4 bands, set up and tracked; QZSS and NavIC
+never count, as on the station.
+
+`ANT1GROUPA` (master antenna) and `ANT2GROUPA` (slave) go out alone: with a
+period (`ANT1GROUPA 1`, the manual's example) they would become a periodic
+log on COM2, so that form needs `--write` and says why. Each answer is
+`<group>,<n systems>`, then a constellation and a signal mask per system
+(`3,5,GP,0x1D,GL,0x03,GA,0x0F,GB,0x2D,GQ,0x35`), decoded with this bit order,
+lowest bit first (inferred: it matches the manual's signal-group table for
+every mask build 25164 reported):
+
+| System | Bits |
+|---|---|
+| `GP` GPS | L1C/A, L1C, L2C, L2P, L5 |
+| `GL` GLONASS | G1, G2, G3 |
+| `GA` Galileo | E1, E5a, E5b, E6 |
+| `GB` BeiDou | B1I, B2I, B3I, B1C, B2a, B2b |
+| `GQ` QZSS | L1C/A, L1C, L2C, (bit 3 never seen), L5, L6 |
+
+A slave group of 0 means the slave antenna is off; the masks reported with
+it then are not read.
+
+A receiver that is restarting answers any command with `The Board is
+resetting,do not response any command!` (no `$`). The tool reports
+"receiver restarting", never resends on it (even a read-only query) and
+logs the line as `RX[restarting]`, not as an unknown line.
 
 `e6-check` answers "can this receiver reach 4 bands?". Without `--write`
-it only reads (identity, current signal group, signals tracked now) and
-prints the plan. With `--write` it:
+it only reads (identity, current signal group, the signals that group sets
+up on the master antenna from `ANT1GROUPA`, signals tracked now) and prints
+the plan. With `--write` it:
 
 1. asks, then sends `CONFIG SIGNALGROUP <group>` (the receiver restarts by
    itself and saves the group);
-2. listens for the restart banner and polls `VERSIONA` until the receiver
-   answers, and prints both delays (build 25164: the banner about 9 s after
-   the `OK`, answers about 2 s after the banner; the group it already has
-   gives `OK` and no restart);
-3. reads `CONFIG` again to confirm the new group;
+2. listens for the restart banner (up to 20 s) and then polls `VERSIONA`
+   once a second (up to 20 s) until the receiver answers, and prints both
+   delays (build 25164: the banner 8.0-9.2 s after the `OK`, answers within
+   4 s of the banner; the group it already has gives `OK` and no restart);
+   a poll answered with `The Board is resetting` is reported as "still
+   restarting";
+3. reads `CONFIG` again to confirm the new group, and `ANT1GROUPA` to
+   confirm, before any sky, that the new group sets up Galileo E6 (`3 6`)
+   or BeiDou B2a (`7 0`) and a 4-band constellation;
 4. with `--msm`, asks, then enables `RTCM1097 COM2 1` (not saved) and
    decodes the Galileo MSM signal mask too;
 5. every 15 s sends `GPGSV` and `OBSVMA` once and reports E6 (GSV signal
@@ -195,13 +230,14 @@ prints the plan. With `--write` it:
 
 What build 25164 does (measured 2026-10-14, no antenna): it accepts exactly
 `CONFIG SIGNALGROUP 4 5`, `3 6`, `5 0` and `7 0`; any other pair gets
-`PARSING FAILED GRAMMAR ERROR,` and no restart. A command sent while it
+`PARSING FAILED GRAMMAR ERROR,` and no restart; one number is taken
+when it makes a listed pair (`5` is `5 0`). A command sent while it
 restarts gets the line `The Board is resetting,do not response any
 command!` (no leading `$`). Before there is any sky,
-`uv run um982.py send --write ANT1GROUPA` (no rate: with one it becomes a
-periodic log) lists the signals the current group tracks on the master
-antenna: `3 6` gives Galileo E1/E5a/E5b/E6 (4 bands), `7 0` all six BeiDou
-signals including B2a (4 bands), `4 5` and `5 0` at most 3 bands.
+`uv run um982.py send ANT1GROUPA` lists the signals the current group sets
+up on the master antenna: `3 6` gives Galileo E1/E5a/E5b/E6 (4 bands), `7 0`
+all six BeiDou signals including B2a (4 bands), `4 5` and `5 0` at most 3
+bands.
 
 `--find-baud` tries the usual bauds (listening at each first, then
 `VERSIONA` at each) when the receiver does not answer at 115200. Only for a
@@ -473,7 +509,7 @@ does that in QEMU).
 | `benchlib/ntrip.py` | NTRIP helpers for the local tools: chunked transfer coding, request parsing with the password masked, a frame recorder (CRC, bytes outside frames, cut end) |
 | `benchlib/um982_sim.py` | the scripted UM982 command responder (test tooling) behind `rtcm_replay.py --respond`, which the replay and the QEMU e2e use: version, configuration dump, signal-group switches with restarts, the station messages as configured |
 | `docker/bkg-caster/` | Dockerfile, configuration and scripts for the optional BKG caster test peer |
-| `tests/` | pytest; RTCM test frames are built field by field from the public layouts and cross-checked with pyrtcm; `bootprobe.py` runs against a scripted receiver over a socketpair; the replay, fake caster and timing tools run over local sockets; `test_ui_text.py` runs sentences the web UI builds from the station's status (`components/web/ui/js`) in Node.js (skipped without it); `test_ui_casters.py` drives the caster editor over a small DOM in Node.js and checks the body its Save sends (skipped without it); `test_bench_console_checks.py` checks the pure parts of `tools/qemu/bench_console.py` (the commands it expects from `components/bench/bench.c`, the `ftimes summary` form); `test_smoke_boot.py` checks `tools/qemu/smoke.py`'s boot accounting (a planned restart cut short in the bootloader named as QEMU's APP-CPU artefact, never a crash), its slow-request watch over a local server (`request()` and a socket exchange of its own, each named with its client port) and its reading of a pcap (the station's packets, the client SYNs it turned away with a bare ACK or a reset, the client's resets, and which of the client's SYNs it took); `test_ci_job.py` checks `tools/ci/ci_job.py` (`build.yml` read as Actions reads it, what it refuses, continue-on-error, timeout-minutes and the upload stand-in over small jobs run with bash); `test_docker_run_script.py` checks the options of `docker/bkg-caster/run.sh` (`--print`, no Docker needed); `test_docker_caster.py` only with `RUN_DOCKER_TESTS=1`; `test_readme_layout.py` checks that this table names every `benchlib` module |
+| `tests/` | pytest; RTCM test frames are built field by field from the public layouts and cross-checked with pyrtcm; `bootprobe.py` runs against a scripted receiver over a socketpair; the replay, fake caster and timing tools run over local sockets; `test_ui_text.py` runs sentences the web UI builds from the station's status (`components/web/ui/js`) in Node.js (skipped without it); `test_ui_casters.py` drives the caster editor over a small DOM in Node.js and checks the body its Save sends (skipped without it); `test_bench_console_checks.py` checks the pure parts of `tools/qemu/bench_console.py` (the commands it expects from `components/bench/bench.c`, the `ftimes summary` form); `test_smoke_boot.py` checks `tools/qemu/smoke.py`'s boot accounting (a planned restart cut short in the bootloader named as QEMU's APP-CPU artefact, never a crash), its slow-request watch over a local server (`request()` and a socket exchange of its own, each named with its client port) and its reading of a pcap (the station's packets, the client SYNs it turned away with a bare ACK or a reset, the client's resets, and which of the client's SYNs it took); `test_ci_job.py` checks `tools/ci/ci_job.py` (`build.yml` read as Actions reads it, what it refuses, continue-on-error, timeout-minutes and the upload stand-in over small jobs run with bash); `test_docker_run_script.py` checks the options of `docker/bkg-caster/run.sh` (`--print`, no Docker needed); `test_docker_caster.py` only with `RUN_DOCKER_TESTS=1`; `test_readme_layout.py` checks that this table names every `benchlib` module; `test_um982.py` runs `um982.py` against scripted ports (a loader, a silent port, and the replay's scripted receiver with `ANT1GROUPA`/`ANT2GROUPA` answers, for `query`, `e6-check --write` and a restart); `receiver_25164.py` holds what build 25164 wrote on the bench, byte for byte; `test_capture.py` checks that a running capture's files are on the disk within about a second |
 
 `rtcm_replay.py`, `fake_caster.py`, `ntrip_timing.py` and the `benchlib`
 modules they use (`rtcm`, `stream`, `common`, `replay`, `ntrip`, `um982_sim`
@@ -526,25 +562,27 @@ uv run rtcm_replay.py --listen 127.0.0.1:5600 ../../test/fixtures/rtcm/centipede
     --respond --respond-group 4,5 --respond-reject 7,0
 ```
 
-- `VERSIONA` gets a UM982 `R4.10Build18975` version log; `CONFIG` the dump
+- `VERSIONA` gets a UM982 `R4.10Build25164` version log; `CONFIG` the dump
   (SIGNALGROUP, COM1, MMP, RTCMB1CB2A, MASK, BASEANTENNAMODEL); `MODE` the
   base mode that `MODE BASE ...` set; `UNLOG COM1`, `RTCMxxxx COM1 n`,
   `CONFIG COM1`, `CONFIG RTCMB1CB2A`, `CONFIG BASEANTENNAMODEL`, the
   satellite-view toggles, `SAVECONFIG` and `RESET` an `OK`.
 - `CONFIG SIGNALGROUP m s` is taken for 4 5, 3 6, 5 0 and 7 0, less every
-  `--respond-reject M,S` (repeatable); any other pair gets build 25164's
-  refusal, `PARSING FAILED GRAMMAR ERROR,`, and nothing changes or restarts.
-  The group saves itself. Other unknown commands get
-  `PARSING FAILED NO MATCHING FUNC  <WORD>`.
+  `--respond-reject M,S` (repeatable), and `CONFIG SIGNALGROUP m` as `m 0`;
+  any other group gets `PARSING FAILED GRAMMAR ERROR,` as on build 25164,
+  and nothing changes or restarts; any other command gets
+  `PARSING FAILED NO MATCHING FUNC  <word>`. The group saves itself.
   `--respond-group` is the group it starts on (default 4,5, the factory one).
 - `ANT1GROUPA` and `ANT2GROUPA` (the signal-group query, one-shot) get an
   `OK` and a log with the body build 25164 gave for the running group, in a
   made-up header (the bench recorded the bodies only).
-- A signal-group change or `RESET` restarts it: for about 3 s no RTCM goes
-  out and every command is answered with build 25164's
-  `The Board is resetting,do not response any command!` (no leading `$`),
-  then the restart banner and the saved configuration (outputs, base mode).
-  A real build 25164 takes about 9 s. The RTCM output also stops after
+- A signal-group change or `RESET` restarts it: for `--respond-restart`
+  seconds (default 3; a real build 25164 takes 8.0-9.2 s to its banner) no
+  RTCM goes out and every command is answered with `The Board is
+  resetting,do not response any command!*39` (no leading `$`), as build
+  25164 answered one 0.4 s into a restart (later in a restart it was not
+  tried); then the restart banner and the saved configuration (outputs,
+  base mode). The RTCM output also stops after
   `UNLOG COM1` until an `RTCMxxxx COM1` command. Bursts that fall due while
   it sends no RTCM are dropped (counted as `bursts_withheld`), never sent
   late. Replies go out between whole frames, never inside one.
@@ -616,11 +654,11 @@ uv run fake_caster.py report bench-logs/<serve run>            # connection tabl
 
 `ntrip_timing.py capture` reads a mountpoint as an NTRIP client and saves
 it in `capture.py`'s format (`stream-NNNN.bin`, `stream-NNNN.idx`, NTRIP 2.0
-chunking removed) plus the caster's reply header; `report` then gives, for
-every epoch's first MSM frame, its arrival time minus its MSM epoch time
-per constellation and overall (p50, p95, max) and `PASS p95 < 1000 ms` or
-`FAIL`. Keep this computer's clock synchronised: the figure is only as good
-as its clock.
+chunking removed, flushed to the disk at least once a second) plus the
+caster's reply header; `report` then gives, for every epoch's first MSM
+frame, its arrival time minus its MSM epoch time per constellation and
+overall (p50, p95, max) and `PASS p95 < 1000 ms` or `FAIL`. Keep this
+computer's clock synchronised: the figure is only as good as its clock.
 
 ```sh
 uv run fake_caster.py serve --port 2101 --mount BENCH --relay      # the station streams to it

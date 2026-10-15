@@ -4,14 +4,16 @@
 
 Command syntax and reply formats are the public Unicore N4 command set:
 plain ASCII commands ending CR LF; each command is acknowledged with
-`$command,<echo>,response: OK*hh` (or `PARSING FAILED <reason>`, which
-builds before 25164 spell `FAILD`), XOR including the `$`; queries then send
-their data: `#` logs with a CRC-32 (`#VERSIONA`, `#OBSVMA`, ...) or a 2-hex
-XOR (`#MODE`), `$CONFIG,...` lines, NMEA sentences, and `<` continuation
-lines (`UNILOGLIST`). A receiver that restarts prints `$devicename,COMn` on
-each port; a command sent while it restarts gets `The Board is
-resetting,do not response any command!*39` (no `$`, the XOR of the text
-before `*`; build 25164).
+`$command,<echo>,response: OK*hh` (or a refusal: `PARSING FAILED <reason>`
+on build 25164; build 18975 and the public samples spell it `FAILD`), XOR
+including the `$`; queries then send their data: `#` logs with a CRC-32
+(`#VERSIONA`, `#OBSVMA`, ...) or a 2-hex XOR (`#MODE`), `$CONFIG,...` lines,
+NMEA sentences, and `<` continuation lines (`UNILOGLIST`). A receiver that
+restarts prints `$devicename,COMn` on each port. While it restarts after a
+signal-group change (build 25164: the banner 8.0-9.2 s after the `OK`), a
+command gets the bare line `The Board is resetting,do not response any
+command!*39` instead of an acknowledgement (no `$`; the XOR of the text
+before the `*`).
 
 This module decides what may be sent (read-only allow-list, a block list,
 and everything else = needs --write), runs one command at a time, and
@@ -60,10 +62,15 @@ READ_ONLY = {
     "RECTIMEA": "receiver time (once)",
     "JAMSTATUSA": "jamming detection (once)",
     "RTCMSTATUSA": "RTCM data status (once)",
+    # Sent alone, these answer once; with a period ("ANT1GROUPA 1") they would
+    # become a periodic log on this port.
+    "ANT1GROUPA": "signals the current signal group sets up on the master antenna, per constellation (once)",
+    "ANT2GROUPA": "signals the current signal group sets up on the slave antenna, per constellation (once)",
 }
 
 # The day-one query set: run by `um982.py query` (the default), in this order.
-DAY_ONE = ["VERSIONA", "CONFIG", "MODE", "MASK", "UNILOGLIST", "BESTNAVA", "GPGSV", "OBSVMA"]
+DAY_ONE = ["VERSIONA", "CONFIG", "MODE", "MASK", "ANT1GROUPA", "ANT2GROUPA", "UNILOGLIST", "BESTNAVA", "GPGSV",
+           "OBSVMA"]
 
 _BLOCKED = [
     (re.compile(r"^\s*FRESET\b", re.I), "FRESET wipes the receiver's saved configuration, almanac and baud; never sent"),
@@ -77,7 +84,10 @@ _BLOCKED = [
 
 _WARNINGS = [
     (re.compile(r"^\s*CONFIG\s+SIGNALGROUP\b", re.I),
-     "the receiver restarts by itself (about 30 s) when the group changes, and saves the group on its own"),
+     "the receiver restarts by itself when the group changes (build 25164: its banner 8-9 s after the OK, "
+     "answers again within 4 s of it), and saves the group on its own"),
+    (re.compile(r"^\s*ANT[12]GROUPA?\s+\S", re.I),
+     "with a period this becomes a periodic log on this port; send ANT1GROUPA or ANT2GROUPA alone for one answer"),
     (re.compile(r"^\s*SAVECONFIG\b", re.I), "writes the current configuration (logs, ports) to the receiver's flash"),
     (re.compile(r"^\s*CONFIG\s+COM2\b", re.I), "changes the port you are connected through; reopen at the new baud afterwards"),
     (re.compile(r"^\s*CONFIG\s+COM1\b", re.I), "changes the ESP32 link; the station firmware must follow the new baud"),
@@ -113,6 +123,18 @@ def warnings_for(cmd: str) -> list[str]:
 
 ACK = re.compile(r"^\$command,(.*),response:\s*(.*?)\*[0-9A-Fa-f]{2}$")
 
+# What the receiver answers to any command while it restarts after a
+# signal-group change, in place of an acknowledgement (build 25164; seen for a
+# command sent 0.4 s after the OK). No `$`; the checksum is the XOR of the text
+# before the `*`.
+RESTARTING_TEXT = "The Board is resetting,do not response any command!"
+_RESTARTING = re.compile(r"^\s*The Board is resetting\b", re.I)
+
+
+def is_restarting_line(text: str) -> bool:
+    """The receiver's "I am restarting" answer (not an acknowledgement, not garbage)."""
+    return _RESTARTING.match(text) is not None
+
 
 @dataclass
 class Reply:
@@ -125,14 +147,16 @@ class Reply:
     others: list[Item] = field(default_factory=list)
     elapsed: float = 0.0
     sends: int = 1
+    restarting: Item | None = None   # the receiver answered that it is restarting: the command was not taken
 
     @property
     def lines(self) -> list[str]:
-        out = [self.ack.text] if self.ack else []
+        out = [self.ack.text] if self.ack else ([self.restarting.text] if self.restarting else [])
         return out + [d.text for d in self.data]
 
     @property
     def answered(self) -> bool:
+        """Acknowledged or answered with data (a restarting receiver's line is neither)."""
         return self.ack is not None or bool(self.data)
 
 
@@ -145,6 +169,10 @@ def data_matcher(cmd: str):
         return lambda t: t.startswith("#UNILOGLIST") or t.startswith("<")
     if c == "MODE":
         return lambda t: t.startswith("#MODE")
+    if c in ("ANT1GROUPA", "ANT2GROUPA"):
+        # A log line named after the command, or any line whose body is `<group>,<n>,GP,0x1D,...`.
+        names = ("#" + c[:-1], "$" + c[:-1])
+        return lambda t: t.upper().startswith(names) or GROUP_BODY.match(group_body(t)) is not None
     if re.fullmatch(r"GP[A-Z]{3}", c):
         sentence = c[2:]
         return lambda t: re.match(rf"^\$G[A-Z]{sentence},", t) is not None
@@ -165,6 +193,7 @@ class UnicoreSession:
         self.rx_raw = open(run_dir / "session-rx.bin", "wb")
         self.log = open(run_dir / "session.log", "a", encoding="utf-8")
         self.banners: list[Item] = []
+        self.restarting: list[Item] = []  # "The Board is resetting..." answers, in order
         self.frames: list[Item] = []  # CRC-valid RTCM frames seen on the port, in order
         self.lock = threading.Lock()
         self.reader = threading.Thread(target=self._read, name="um982-rx", daemon=True)
@@ -187,6 +216,8 @@ class UnicoreSession:
                 self._log_item(it)
                 if it.kind == "text" and it.text.startswith("$devicename"):
                     self.banners.append(it)
+                elif it.kind == "text" and is_restarting_line(it.text):
+                    self.restarting.append(it)
                 elif it.kind == "rtcm":
                     self.frames.append(it)
                 self.items.put(it)
@@ -199,7 +230,8 @@ class UnicoreSession:
     def _log_item(self, it: Item) -> None:
         if it.kind == "text":
             note = f"({it.note})" if it.note else ""
-            self._log(f"{iso(it.t)} RX[{it.check}]{note} {it.text}")
+            check = "restarting" if is_restarting_line(it.text) else it.check
+            self._log(f"{iso(it.t)} RX[{check}]{note} {it.text}")
         elif it.kind == "rtcm":
             self._log(f"{iso(it.t)} RX {summarize_frame(it.data)}")
         else:
@@ -234,7 +266,9 @@ class UnicoreSession:
         """Send one command and collect its ack and data lines.
 
         retries: extra sends when nothing at all came back within ack_timeout
-        (use only for read-only queries)."""
+        (use only for read-only queries). A receiver that answers it is
+        restarting ends the command at once (reply.restarting), without a
+        resend: it takes nothing until its restart banner."""
         cmd = normalise(cmd)
         if blocked_reason(cmd):
             raise ValueError(f"refusing to send {cmd!r}: {blocked_reason(cmd)}")
@@ -255,6 +289,8 @@ class UnicoreSession:
                         break  # nothing came back
                 elif match is None:
                     break  # ack-only command, acknowledged
+                elif reply.ok is False and not reply.data:
+                    break  # refused: no data follows
                 elif last_data is not None and now - last_data >= quiet:
                     break  # data came and the port went quiet
                 elif data_deadline is not None and now >= data_deadline:
@@ -266,6 +302,9 @@ class UnicoreSession:
                 if it.kind != "text":
                     reply.others.append(it)
                     continue
+                if is_restarting_line(it.text) and reply.ack is None and not reply.data:
+                    reply.restarting = it
+                    break
                 m = ACK.match(it.text)
                 if m and normalise(m.group(1)).upper() == cmd.upper():
                     reply.ack = it
@@ -280,11 +319,14 @@ class UnicoreSession:
                         data_deadline = time.time() + max_data
                     continue
                 reply.others.append(it)
-            if reply.answered:
+            if reply.answered or reply.restarting:
                 break
         reply.elapsed = time.time() - reply.sent_at
-        status = "no answer" if not reply.answered else (
-            f"{reply.reason or 'no ack'}, {len(reply.data)} data lines")
+        if reply.restarting:
+            status = "receiver restarting (not taken)"
+        else:
+            status = "no answer" if not reply.answered else (
+                f"{reply.reason or 'no ack'}, {len(reply.data)} data lines")
         self._log(f"{iso()} DONE {cmd!r}: {status} in {reply.elapsed:.2f} s ({reply.sends} send(s))")
         return reply
 
@@ -346,6 +388,113 @@ def signal_group(config: dict[str, list[str]]) -> tuple[int, int | None] | None:
 
 def parse_mode(line: str) -> str:
     return log_body(line).strip().rstrip(",")
+
+
+# ANT1GROUPA / ANT2GROUPA: the signals the current signal group sets up on the
+# master / slave antenna, known without sky. Body: `<group>,<n systems>`, then
+# `<system>,<mask>` per constellation, e.g. `3,5,GP,0x1D,GL,0x03,GA,0x0F,GB,0x2D,GQ,0x35`.
+# Mask bits, lowest first, with the Onocoy band of each signal. The order is
+# inferred: every mask build 25164 reports for groups 4 5, 3 6, 5 0 and 7 0
+# matches the public N4 manual's signal-group table with it. QZSS bit 3 was
+# never set.
+GROUP_BODY = re.compile(r"^\d+,\d+(,[A-Za-z]{2},0x[0-9A-Fa-f]+)+,?$")
+GROUP_SYSTEMS: dict[str, tuple[str, list[tuple[str, str | None] | None]]] = {
+    "GP": ("GPS", [("L1C/A", "L1"), ("L1C", "L1"), ("L2C", "L2"), ("L2P", "L2"), ("L5", "L5")]),
+    "GL": ("GLONASS", [("G1", "L1"), ("G2", "L2"), ("G3", None)]),
+    "GA": ("Galileo", [("E1", "L1"), ("E5a", "L5"), ("E5b", "L2"), ("E6", "L6")]),
+    "GB": ("BeiDou", [("B1I", "L1"), ("B2I", "L2"), ("B3I", "L6"), ("B1C", "L1"), ("B2a", "L5"), ("B2b", "L2")]),
+    "GQ": ("QZSS", [("L1C/A", "L1"), ("L1C", "L1"), ("L2C", "L2"), None, ("L5", "L5"), ("L6", "L6")]),
+}
+
+
+@dataclass
+class GroupSignals:
+    """One ANT1GROUPA / ANT2GROUPA answer, decoded."""
+
+    antenna: str                     # "master" or "slave"
+    group: int | None = None         # the signal group number the receiver reports for this antenna
+    masks: dict = field(default_factory=dict)     # {system: mask}, in the order of the reply
+    signals: dict = field(default_factory=dict)   # {system: [signal, ...]}, lowest bit first
+    band_sets: dict = field(default_factory=dict)  # {system: {Onocoy band, ...}}
+    error: str = ""
+    raw: str = ""
+
+    def bands(self, system: str) -> list[str]:
+        return [b for b in ("L1", "L2", "L5", "L6") if b in self.band_sets.get(system, set())]
+
+    @property
+    def off(self) -> bool:
+        """The slave antenna's group 0: the slave is off. Build 25164 still reports masks
+        with it (in 5 0, those of another group), so they are not read."""
+        return self.antenna == "slave" and self.group == 0
+
+    def four_band(self) -> list[str]:
+        """The rewarded constellations this configuration gives all four bands (QZSS never counts)."""
+        if self.off or self.error:
+            return []
+        return best_systems({s: self.bands(s) for s in self.signals})
+
+    def lines(self) -> list[str]:
+        if self.error:
+            return [f"{self.antenna}: could not decode ({self.error}): {self.raw}"]
+        if self.off:
+            return [f"{self.antenna}: group 0, the slave antenna is off (the masks reported with it are not read)"]
+        out = [f"{self.antenna}: group {self.group}"]
+        for system, sigs in self.signals.items():
+            bands = "/".join(self.bands(system)) or "-"
+            out.append(f"  {system:<8} {', '.join(sigs) or 'none':<28} bands {bands:<12} "
+                       f"mask 0x{self.masks[system]:02X}")
+        return out
+
+    def to_dict(self) -> dict:
+        if self.error:
+            return {"antenna": self.antenna, "error": self.error, "raw": self.raw}
+        return {"antenna": self.antenna, "group": self.group, "off": self.off,
+                "systems": {s: {"mask": f"0x{self.masks[s]:02X}", "signals": self.signals[s], "bands": self.bands(s)}
+                            for s in self.signals},
+                "four_band": self.four_band()}
+
+
+def group_body(line: str) -> str:
+    """`<group>,<n>,<system>,<mask>,...` out of an ANT1GROUPA / ANT2GROUPA answer: the text after the
+    header's `;`, or after a leading `#ANT1GROUPA,` / `$ANT1GROUPA,` field, or the line itself."""
+    body = log_body(line).strip()
+    m = re.match(r"^[$#]ANT[12]GROUPA?,", body, re.I)
+    return body[m.end():] if m else body
+
+
+def parse_antgroup(line: str, antenna: str = "master") -> GroupSignals:
+    """Decode an ANT1GROUPA (antenna "master") or ANT2GROUPA ("slave") answer: a whole log line, or its body."""
+    out = GroupSignals(antenna, raw=line)
+    f = [x.strip() for x in group_body(line).rstrip(",").split(",")]
+    try:
+        out.group, n = int(f[0]), int(f[1])
+    except (IndexError, ValueError):
+        out.error = "no group and system count at the start"
+        return out
+    pairs = f[2:]
+    if len(pairs) % 2 or len(pairs) // 2 != n:
+        out.error = f"{n} systems announced, {len(pairs) / 2:g} given"
+        return out
+    for k in range(0, len(pairs), 2):
+        code = pairs[k].upper()
+        try:
+            mask = int(pairs[k + 1], 16)
+        except ValueError:
+            out.error = f"mask {pairs[k + 1]!r} of {code} is not hex"
+            return out
+        system, bits = GROUP_SYSTEMS.get(code, (code, []))
+        names, bands = [], set()
+        for bit in range(mask.bit_length()):
+            if mask >> bit & 1:
+                entry = bits[bit] if bit < len(bits) else None
+                names.append(entry[0] if entry else f"bit{bit}")
+                if entry and entry[1]:
+                    bands.add(entry[1])
+        out.masks[system] = mask
+        out.signals[system] = names
+        out.band_sets[system] = bands
+    return out
 
 
 def parse_bestnav(line: str) -> dict:
@@ -530,18 +679,24 @@ def ack_line(cmd: str, reply: str = "OK") -> str:
     return xor_line("$", f"command,{cmd},response: {reply}")
 
 
-def refusal_text(cmd: str) -> str:
-    """The receiver's refusal of a command it does not take (build 25164's words and double space)."""
+# The receiver's refusal of a signal group it does not have (build 25164: a
+# trailing comma, and the bad word is not echoed).
+GROUP_REFUSAL = "PARSING FAILED GRAMMAR ERROR,"
+
+
+def refusal_text(cmd: str, failed: str = "FAILED") -> str:
+    """The receiver's refusal of a command it does not take, with its double space.
+
+    failed: "FAILED" as build 25164 writes it, "FAILD" as build 18975 and the
+    public samples do."""
     words = cmd.split()
-    return "PARSING FAILED NO MATCHING FUNC  " + (words[-1] if words else "").upper()
+    return f"PARSING {failed} NO MATCHING FUNC  " + (words[-1] if words else "").upper()
 
 
-# Build 25164's refusal of a signal group it does not offer (a trailing comma,
-# no echo of the value; nothing changes and the receiver does not restart).
-SG_REFUSAL = "PARSING FAILED GRAMMAR ERROR,"
+def restarting_line() -> str:
+    """What a restarting receiver answers to a command (no `$`; XOR of the text before the `*`)."""
+    return f"{RESTARTING_TEXT}*{xor_checksum(RESTARTING_TEXT):02X}"
 
-# Its answer to any command sent while it restarts.
-NOTICE_TEXT = "The Board is resetting,do not response any command!"
 
 # What ANT1GROUPA / ANT2GROUPA (one-shot, no rate) answered on build 25164 in
 # each signal group it accepts (main, second antenna input; bodies only, as
@@ -552,11 +707,6 @@ GROUP_BODIES = {
     (7, 0): ("7,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x3F,GQ,0x15", "0,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x3F,GQ,0x15"),
     (5, 0): ("5,5,GP,0x0D,GL,0x03,GA,0x05,GB,0x07,GQ,0x05", "0,5,GP,0x1D,GL,0x03,GA,0x07,GB,0x3F,GQ,0x15"),
 }
-
-
-def notice_line() -> str:
-    """The restarting answer: no lead character, the XOR of the text before `*`."""
-    return f"{NOTICE_TEXT}*{xor_checksum(NOTICE_TEXT):02X}"
 
 
 def groups_line(body: str, ant: int = 1) -> str:
