@@ -278,7 +278,7 @@ Views.updates = {
       const last = u.last_attempt_unix ? checkTime(u.last_attempt_unix) + (fail ? ' (failed)' : '') :
         u.last_check_unix ? fmt.time(u.last_check_unix) : 'not yet';
       mount(versionsCard,
-        h('h2', null, 'Versions', u.state && u.state !== 'idle' && u.state !== 'failed' ? badge(lbl(L.updState, u.state), 'info') : null),
+        cardHead('Versions', u.state && u.state !== 'idle' && u.state !== 'failed' ? badge(lbl(L.updState, u.state), 'info') : null),
         kv([
           ['App', [a.running || DASH, a.dev_build ? ' ' : null, a.dev_build ? badge('development build', 'plain') : null]],
           ['Receiver', g.running ? g.running + (g.model ? ' on ' + g.model : '') : DASH],
@@ -350,7 +350,7 @@ Views.updates = {
         if (r !== undefined) showRestarting('Going back to the previous version');
       }, 'danger small');
       mount(appCard,
-        h('h2', null, 'App', a.available ? badge('Update available', 'info') : null),
+        cardHead('App', a.available ? badge('Update available', 'info') : null),
         kv([
           ['Running', a.running],
           ['Latest release', a.latest || DASH],
@@ -393,7 +393,7 @@ Views.updates = {
       const lr = u.last_result;
       const last = flash && flash.last;
       mount(gnssCard,
-        h('h2', null, 'Receiver firmware', g.available ? badge('Update available', 'info') : null),
+        cardHead('Receiver firmware', g.available ? badge('Update available', 'info') : null),
         kv([
           ['Receiver', g.model],
           ['Running', g.running ? g.running + (g.running_build ? ' (build ' + g.running_build + ')' : '') : DASH],
@@ -443,7 +443,7 @@ Views.updates = {
         return h('div', null, b, !info.allowed && info.why ? h('small', { class: 'hint' }, 'Not now: ' + lbl(L.why, info.why)) : null);
       });
       mount(sessionCard,
-        h('h2', { id: 'session' }, 'Receiver update session', badge(lbl(L.journal, f.journal), f.journal === 'running' ? 'info' : 'warn')),
+        h('div', { class: 'card-head', id: 'session' }, h('h2', null, 'Receiver update session'), badge(lbl(L.journal, f.journal), f.journal === 'running' ? 'info' : 'warn')),
         f.journal !== 'none' ? h('p', null, (L.journal[f.journal] || ['', ''])[1]) : null,
         f.receiver_in_loader ? msg('warn', L.salert.receiver_in_loader[1]) : null,
         rec ? kv([

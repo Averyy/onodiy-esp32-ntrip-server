@@ -666,15 +666,15 @@ Views.casters = {
       }
       const st = statusOf(s);
       if (!c) {
-        return [h('h2', null, 'Slot ' + (s.slot + 1), badge(lbl(L.caster, st.state), casterTone(st.state))),
+        return [cardHead('Slot ' + (s.slot + 1), badge(lbl(L.caster, st.state), casterTone(st.state))),
           h('p', { class: 'muted' }, 'Not loaded (safe mode).')];
       }
       if (!c.host && !c.enabled) {
-        return [h('h2', null, 'Slot ' + (s.slot + 1), badge('Empty', '')),
-          h('div', { class: 'row' }, btn('Set up this slot', () => edit(s), 'primary'))];
+        return [cardHead('Slot ' + (s.slot + 1), badge('Empty', '')),
+          h('div', { class: 'form-actions' }, btn('Set up this slot', () => edit(s), 'primary'))];
       }
       if (isOnocoySlot(c) && !onocoyReady(c)) {
-        return [h('h2', null, c.name || 'Onocoy', badge('Not set up', '')),
+        return [cardHead(c.name || 'Onocoy', badge('Not set up', '')),
           h('p', null, 'Onocoy not set up.'),
           h('p', { class: 'muted small' }, ONOCOY_CONSOLE),
           st.state === 'streaming' ? msg('info', 'It streams with credentials stored by an earlier version. Enter the three values ' +
@@ -693,7 +693,7 @@ Views.casters = {
         open[s.slot] = det.open;
       });
       return [
-        h('h2', null, c.name || 'Slot ' + (s.slot + 1), c.enabled ? r.badge : badge('Off', ''),
+        cardHead(c.name || 'Slot ' + (s.slot + 1), c.enabled ? r.badge : badge('Off', ''),
           c.test_onocoy ? badge('Test Onocoy slot (bench build)', 'warn') : null),
         r.live,
         det,

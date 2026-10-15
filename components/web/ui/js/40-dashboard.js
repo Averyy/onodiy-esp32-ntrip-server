@@ -110,7 +110,7 @@ function receiverCard(s, admin) {
   /* The first configuration waits for the user (a build that holds it): only queries reach the receiver. */
   const held = admin && r.first_apply_held ? badge('Held', 'info') : null;
   return h('section', { class: 'card' },
-    h('h2', null, 'Receiver', state, held),
+    cardHead('Receiver', state, held),
     kv(rows),
     admin ? h('div', { class: 'foot row' }, link('Live view', LIVE_START_HASH), link('Receiver and position', '#/receiver'), link('Signals', '#/signals')) :
       h('div', { class: 'foot' }, link('Signals', '#/signals')));
@@ -133,7 +133,7 @@ function onocoyCounting(c) {
 function onocoySetupCard(c) {
   const ready = c && c.onocoy_ready;
   return h('section', { class: 'card' },
-    h('h2', null, 'Onocoy', badge(ready ? 'Off' : 'Not set up', '')),
+    cardHead('Onocoy', badge(ready ? 'Off' : 'Not set up', '')),
     h('p', null, ready ? 'The Onocoy slot is turned off: the station does not stream to Onocoy.' :
       'Onocoy not set up. Onocoy rewards reference stations for their correction data; the station streams to it once ' +
       'you enter the credentials from the Onocoy console.'),
@@ -171,7 +171,7 @@ function budgetCard(c, avail) {
   const mid = fmt.utcMidnight();
   const over = known && down > allowed;
   return h('section', { class: 'card' },
-    h('h2', null, 'Onocoy today', c.streak_ok === null || c.streak_ok === undefined ? null :
+    cardHead('Onocoy today', c.streak_ok === null || c.streak_ok === undefined ? null :
       badge(c.streak_ok ? 'Streak on track' : 'Streak missed', c.streak_ok ? 'ok' : 'bad')),
     !known ?
       h('p', { class: 'muted' }, 'The offline budget needs a trusted clock (GNSS or internet time).') :
@@ -214,9 +214,9 @@ function casterLine(c, admin) {
     if (c.bytes_sent) metrics.push(['Sent', fmt.bytes(c.bytes_sent)]);
   }
   return h('div', { class: 'caster' },
-    h('div', { class: 'spread' },
-      h('span', null, h('span', { class: 'name' }, c.name || ('Slot ' + (c.slot + 1))),
-        admin && c.host ? h('span', { class: 'muted small' }, ' · ' + c.host) : null),
+    h('div', { class: 'item-head' },
+      h('div', null, h('div', { class: 'name' }, c.name || ('Slot ' + (c.slot + 1))),
+        admin && c.host ? h('div', { class: 'muted small' }, c.host) : null),
       badge(lbl(L.caster, c.state), tone)),
     reason && c.state !== 'streaming' ? h('div', { class: stopped ? 't-bad small' : 'muted small' }, reason) : null,
     metrics.length ? h('div', { class: 'metrics' }, metrics.map(m => h('span', null, m[0] + ' ', h('b', null, m[1])))) : null,
@@ -227,7 +227,7 @@ function casterLine(c, admin) {
 /* An Onocoy slot without its credentials: a call to set it up instead of a state. */
 function onocoyNotSetUp(c) {
   return h('div', { class: 'caster' },
-    h('div', { class: 'spread' }, h('span', { class: 'name' }, c.name || 'Onocoy'), badge('Not set up', '')),
+    h('div', { class: 'item-head' }, h('div', { class: 'name' }, c.name || 'Onocoy'), badge('Not set up', '')),
     h('div', { class: 'muted small' }, 'Onocoy not set up.'),
     h('div', { class: 'form-actions' }, link('Add your Onocoy credentials', ONOCOY_SETUP_HASH, 'btn primary small')));
 }
@@ -264,7 +264,7 @@ function networkCard(s) {
       (typeof n.ap_close_in_s === 'number' ? ', closes in ' + fmt.dur(n.ap_close_in_s) : '')] : null,
   ];
   return h('section', { class: 'card' },
-    h('h2', null, 'Network', badge(n.online ? 'Online' : 'Offline', n.online ? 'ok' : 'bad')),
+    cardHead('Network', badge(n.online ? 'Online' : 'Offline', n.online ? 'ok' : 'bad')),
     kv(rows),
     h('div', { class: 'foot' }, link('Wi-Fi settings', '#/system')));
 }
@@ -369,7 +369,7 @@ function alertsCard(s) {
   const tone = heroState(s).tone;
   const plan = restartPlanText(s.health);
   return h('section', { class: 'card' },
-    h('h2', null, 'Alerts', alerts.length ? badge(String(alerts.length), alerts.some(a => alertTone(a) === 'bad') ? 'bad' : 'warn') :
+    cardHead('Alerts', alerts.length ? badge(String(alerts.length), alerts.some(a => alertTone(a) === 'bad') ? 'bad' : 'warn') :
       badge('None', tone === 'ok' ? 'ok' : '')),
     alerts.length ? alertList(alerts, { detect: true }) :
       /* Never "nothing" while the state above says otherwise. */
@@ -416,7 +416,7 @@ function publicDashboard(s) {
     h('div', { class: 'grid' },
       receiverCard(s, false),
       castersCard(s, false),
-      h('section', { class: 'card' }, h('h2', null, 'Health', badge(lbl(L.health, hl.level), healthTone(hl.level))),
+      h('section', { class: 'card' }, cardHead('Health', badge(lbl(L.health, hl.level), healthTone(hl.level))),
         kv([['Running for', fmt.dur(s.uptime_s)]]))),
   ];
 }

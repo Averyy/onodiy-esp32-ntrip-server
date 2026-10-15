@@ -175,7 +175,7 @@ Views.signals = {
       const systems = sig.systems || [];
       const live = streaming();   /* verdicts (bands, E6, refused messages) only while the receiver streams */
       mount(summary,
-        h('h2', null, 'Signals', live ? badge(sig.best_bands >= 4 ? 'Enough bands' : 'Few bands', sig.best_bands >= 4 ? 'ok' : 'warn') : null),
+        cardHead('Signals', live ? badge(sig.best_bands >= 4 ? 'Enough bands' : 'Few bands', sig.best_bands >= 4 ? 'ok' : 'warn') : null),
         h('div', { class: 'big' }, sig.best_sys ? lbl(L.sys, sig.best_sys) + ' · ' + sig.best_bands + ' bands' : 'No signals yet'),
         h('p', { class: 'muted small' }, 'Best constellation by distinct frequency bands; Onocoy rewards four or more.'),
         live ? e6View(sig) : null,
@@ -209,7 +209,7 @@ Views.signals = {
       if (key === lastSky) return;
       lastSky = key;
       /* "Turn it on" saves the profile and reconfigures the receiver: only with a receiver that streams. */
-      mount(skyCard, h('h2', null, 'Sky', sky.available ? badge((sky.satellites || []).length + ' satellites', 'plain') : null),
+      mount(skyCard, cardHead('Sky', sky.available ? badge((sky.satellites || []).length + ' satellites', 'plain') : null),
         skyView(sky, live ? enableBtn : null));
     }
 

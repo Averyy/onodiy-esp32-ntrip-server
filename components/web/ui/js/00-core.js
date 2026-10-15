@@ -171,6 +171,15 @@ function card(title, ...kids) {
   return h('section', { class: 'card' }, title ? h('h2', null, title) : null, kids);
 }
 
+/**
+ * A card's title row: the h2 holds the title only and the status chips sit
+ * beside it at the right, so a chip never runs into the title (on screen, in
+ * copied text or for a screen reader).
+ */
+function cardHead(title, ...chips) {
+  return h('div', { class: 'card-head' }, h('h2', null, title), chips);
+}
+
 /** A card that is the whole page (log in, no answer, the wizard): its title is the page's one h1. */
 function pageCard(title, ...kids) {
   return h('section', { class: 'card' }, h('h1', null, title), kids);

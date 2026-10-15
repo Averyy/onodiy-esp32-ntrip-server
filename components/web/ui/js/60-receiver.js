@@ -134,7 +134,7 @@ function receiverInfo(g) {
   const alerts = g.alerts || [];
   const maint = (g.maintenance || {}).on;
   return [
-    h('h2', null, 'Receiver', maint ? badge('Maintenance', 'warn') : badge(lbl(L.station, g.state), stationTone(g.state))),
+    cardHead('Receiver', maint ? badge('Maintenance', 'warn') : badge(lbl(L.station, g.state), stationTone(g.state))),
     r.valid === false ? h('p', { class: 'muted' }, 'The receiver has not identified itself yet.') : null,
     kv([
       ['Model', r.model],
@@ -199,7 +199,7 @@ function sgRefusedMsg(g) {
 function rtcm1033Info(g) {
   const d = g.rtcm1033 || {};
   return [
-    h('h2', null, 'Published in RTCM 1033', d.valid ? badge('Received', 'ok') : badge('Not yet', '')),
+    cardHead('Published in RTCM 1033', d.valid ? badge('Received', 'ok') : badge('Not yet', '')),
     d.valid ? kv([
       ['Station ID', String(d.station_id)],
       ['Antenna', d.antenna ? h('span', { class: 'ant' }, d.antenna) : h('span', { class: 'muted' }, 'empty')],
@@ -254,7 +254,7 @@ function maintenanceCtl(done) {
   });
   return {
     el: h('div', null,
-      h('h2', null, 'Receiver maintenance', badgeEl),
+      cardHead('Receiver maintenance', badgeEl),
       h('p', { class: 'muted small' }, 'Hands off while you work on the receiver through its other port, for example with a PC tool ' +
         'or a firmware update there: the station then sends it nothing, and the casters still get its RTCM. ' + MAINT_SAVE_NOTE),
       status, durField.el, h('div', { class: 'form-actions' }, startBtn, extendBtn, endBtn), out),
@@ -314,7 +314,7 @@ function positionInfo(g) {
   if (prof.base_mode === 'fixed' && prof.fixed && !(pos.locked && pos.source && pos.source !== 'none')) {
     const f = prof.fixed;
     return [
-      h('h2', null, 'Base position', badge('From the profile', 'info')),
+      cardHead('Base position', badge('From the profile', 'info')),
       msg('info', 'Fixed position from the profile: ' + fmt.deg(f.lat_deg) + ', ' + fmt.deg(f.lon_deg) + ', ' + fmt.m(f.height_m) +
         ', sent to the receiver when it is configured.'),
       kv([
@@ -345,7 +345,7 @@ function positionInfo(g) {
   }
   const offTone = arp.offset_m === null || arp.offset_m === undefined ? '' : arp.offset_m > 0.005 ? 't-warn' : 't-ok';
   return [
-    h('h2', null, 'Base position', badge(state, tone)),
+    cardHead('Base position', badge(state, tone)),
     sv.active ? msg('info', 'The receiver is surveying its position' + (sv.window_left_s ? ': about ' + fmt.dur(sv.window_left_s) + ' left.' : '.')) : null,
     pos.source && pos.source !== 'none' ? h('h3', { class: 'section-title' }, pos.locked ? 'Locked position' : 'Last surveyed position') : null,
     pos.source && pos.source !== 'none' ? kv([
@@ -495,7 +495,7 @@ function heldPanel(opts) {
   });
   return {
     el: h('div', { class: 'stack' },
-      h('h2', null, 'Receiver not configured yet', badge('Held', 'info')),
+      cardHead('Receiver not configured yet', badge('Held', 'info')),
       h('p', null, 'This build holds the receiver\'s first configuration until you confirm it. So far the station has only asked the ' +
         'receiver for its version and settings; it has sent nothing that changes it. When you confirm, it sends the commands below ' +
         '(the conditional ones only where the receiver differs) and ends with SAVECONFIG, which saves the receiver\'s whole running ' +
@@ -907,7 +907,7 @@ function sgTestCtl(done) {
   const badgeEl = badge('', '');
   return {
     el: h('div', { class: 'stack' },
-      h('h2', null, 'Compare two signal groups', badgeEl),
+      cardHead('Compare two signal groups', badgeEl),
       h('p', { class: 'muted small' }, 'Measures two signal groups on this antenna, one after the other, and shows satellites, ' +
         'signals, bands and signal strength side by side. You then keep the one you prefer.'),
       status, results, form, h('div', { class: 'form-actions' }, keepA, keepB, stopBtn), out),

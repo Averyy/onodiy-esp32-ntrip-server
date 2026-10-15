@@ -306,7 +306,7 @@ function mapPanel() {
       }, 'small ghost')));
     }
     mount(el,
-      h('h2', null, 'Station map', badge(pos.locked ? 'Locked position' : 'Last surveyed', pos.locked ? 'ok' : '')),
+      cardHead('Station map', badge(pos.locked ? 'Locked position' : 'Last surveyed', pos.locked ? 'ok' : '')),
       kv([
         ['Latitude', fmt.deg(lat)],
         ['Longitude', fmt.deg(lon)],
@@ -392,7 +392,7 @@ function liveWindowCard(opts) {
   const extendBtn = btn('Extend', () => run(opts.onExtend, extendBtn)(), 'primary');
   const stopBtn = btn('Stop', () => run(opts.onStop, stopBtn)());
   const el = h('section', { class: 'card wide' },
-    h('h2', null, 'Live view', badgeEl),
+    cardHead('Live view', badgeEl),
     announce, state, sky, conn, err,
     h('div', { class: 'form-actions' }, startBtn, extendBtn, stopBtn),
     h('p', { class: 'muted small foot' }, 'While the view is open the receiver also reports where each satellite is in the sky. ' +

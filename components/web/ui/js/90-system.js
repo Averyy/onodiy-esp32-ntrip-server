@@ -306,14 +306,14 @@ Views.system = {
     function renderWifi() {
       showWifi(wifi);
       mount(wifiCard,
-        h('h2', null, 'Wi-Fi', wifiBadge),
+        cardHead('Wi-Fi', wifiBadge),
         wifiBody,
         pendingBox,
         h('div', { class: 'form-actions' }, changeBtn),
         joinBox,
         h('h3', { class: 'section-title' }, 'Access point password'),
         apField.el,
-        h('div', { class: 'row foot' }, apSet, wifi.ap && wifi.ap.password_set ? apClear : null),
+        h('div', { class: 'form-actions' }, apSet, wifi.ap && wifi.ap.password_set ? apClear : null),
         apErr);
     }
 

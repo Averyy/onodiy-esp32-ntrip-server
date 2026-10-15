@@ -128,7 +128,7 @@ function healthTab(box) {
     const tone = healthTone(hl.level);
     patchDetect(box, h('div', { class: 'grid' },
       h('section', { class: 'card' },
-        h('h2', null, 'Health', badge(lbl(L.health, hl.level), tone)),
+        cardHead('Health', badge(lbl(L.health, hl.level), tone)),
         alerts.length ? alertList(alerts, { detect: true }) :
           h('p', { class: 'muted' }, tone === 'ok' || tone === '' ? 'No alerts.' : 'No alert names the cause: see the receiver and caster pages.'),
         plan ? h('p', { class: 'small' }, plan) : null,
@@ -162,7 +162,7 @@ function healthTab(box) {
           heap.psram_largest !== undefined ? ['Largest PSRAM block', fmt.bytes(heap.psram_largest)] : null,
         ])),
       h('section', { class: 'card' },
-        h('h2', null, 'This start', b.safe_mode ? badge('Safe mode', 'bad') : b.stable ? badge('Stable', 'ok') : null),
+        cardHead('This start', b.safe_mode ? badge('Safe mode', 'bad') : b.stable ? badge('Stable', 'ok') : null),
         h('p', null, startSentence(b.reset_class, b.reset_reason, b.prev_reboot_reason) + '.'),
         rxBootSentence((hl.station || {}).rx_boot) ? h('p', null, rxBootSentence((hl.station || {}).rx_boot) + '.') : null,
         kv([
@@ -252,7 +252,7 @@ function connHistory() {
   const el = h('section', { class: 'card wide' }, h('h2', null, 'Connection history'),
     h('p', { class: 'muted small' }, 'Caster sessions ending and coming back, Wi-Fi drops and returns, newest first. ' +
       'Not every session shorter than a minute is listed: the next record counts the ones left out.'),
-    h('div', { class: 'row' }, refresh), err, h('div', { class: 'foot' }, out));
+    h('div', { class: 'form-actions' }, refresh), err, h('div', { class: 'foot' }, out));
   const stop = poller(60000, () => load().catch(e => showErr(e, err)));
   return { el: el, stop: stop };
 }
@@ -278,7 +278,7 @@ function availabilityTab(box) {
     const sofar = p.graced_uptime_so_far_permille;
     mount(box, h('div', { class: 'grid' },
       h('section', { class: 'card' },
-        h('h2', null, 'Today', day.date ? badge(day.date + ' UTC', 'plain') : null),
+        cardHead('Today', day.date ? badge(day.date + ' UTC', 'plain') : null),
         av.clock === 'none' ? msg('warn', 'No trusted clock yet (GNSS or internet time), so seconds cannot be assigned to a day.') : null,
         kv([
           ['Clock', lbl(L.timeSource, av.clock)],
@@ -461,7 +461,7 @@ function logsTab(box) {
     }
     const r = await act(setBtn, () => api('PUT', '/api/diag/log-level', { tag: t, level: level.value }), lvErr);
     if (r !== undefined) toast('Log level of ' + t + ' set to ' + level.value + ' until the next restart.', 'ok');
-  }, 'small');
+  });
 
   /* Receiver byte capture: only bench builds record it (404 elsewhere). */
   const capErr = errBox();
@@ -499,7 +499,7 @@ function logsTab(box) {
     h('h2', null, 'Receiver byte capture'),
     h('p', { class: 'muted small' }, 'This build records every byte the station exchanged with the receiver during a receiver update or a bench test ' +
       '(the last 256 KB, data blocks as one line each).'),
-    h('div', { class: 'row' }, capBtn),
+    h('div', { class: 'form-actions' }, capBtn),
     capErr);
   api('GET', '/api/health').then(hl => {
     capCard.hidden = !(hl && hl.byte_capture_built);
@@ -514,7 +514,7 @@ function logsTab(box) {
     h('section', { class: 'card' },
       h('h2', null, 'Log level'),
       h('p', { class: 'muted small' }, 'Per component tag, until the next restart. Debug output costs memory and console time; set it back when done.'),
-      h('div', { class: 'cols c3' }, field('Tag', tag).el, field('Level', level).el, h('div', { class: 'field' }, h('span', { class: 'lbl' }, ' '), setBtn)),
+      h('div', { class: 'cols c3' }, field('Tag', tag).el, field('Level', level).el, h('div', { class: 'act' }, setBtn)),
       levelNote,
       lvErr),
     capCard);
@@ -687,7 +687,7 @@ function journalTab(box) {
     h('h2', null, 'Event journal'),
     h('p', { class: 'muted small' }, 'Starts, restarts, recovery steps, updates and data losses, kept across restarts. Newest first, by start; ' +
       'times marked ≈ are worked out from a later record of the same start (the clock was not set yet when they were written).'),
-    h('div', { class: 'row' }, refresh), err, h('div', { class: 'foot' }, out)));
+    h('div', { class: 'form-actions' }, refresh), err, h('div', { class: 'foot' }, out)));
   act(null, fetchNew, err);
   return { stop() {} };
 }
@@ -717,7 +717,7 @@ function coredumpTab(box) {
     const hl = await api('GET', '/api/health');
     const cd = hl.coredump || {};
     if (!cd.present) {
-      mount(box, h('section', { class: 'card' }, h('h2', null, 'Core dump', badge('None', 'ok')),
+      mount(box, h('section', { class: 'card' }, cardHead('Core dump', badge('None', 'ok')),
         h('p', { class: 'muted' }, 'The station stores a core dump when it crashes. There is none.')));
       return;
     }
@@ -739,7 +739,7 @@ function coredumpTab(box) {
       const r = await act(delBtn, () => api('DELETE', '/api/coredump'), err);
       if (r !== undefined) load().catch(e => showErr(e, err));
     }, 'danger');
-    mount(box, h('section', { class: 'card' }, h('h2', null, 'Core dump', badge('Stored', 'warn')),
+    mount(box, h('section', { class: 'card' }, cardHead('Core dump', badge('Stored', 'warn')),
       kv([
         ['Size', fmt.bytes(cd.size)],
         ['Crashed task', cd.task || DASH],
