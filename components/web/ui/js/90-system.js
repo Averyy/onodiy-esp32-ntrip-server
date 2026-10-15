@@ -450,13 +450,7 @@ Views.system = {
         const r = await act(restart, () => api('POST', '/api/system/reboot'), err);
         if (r !== undefined) showRestarting();
       });
-      const leaveSafe = btn('Leave safe mode', async () => {
-        const ok = await dialog({ title: 'Leave safe mode?', ok: 'Restart normally',
-          body: h('p', null, 'The station restarts normally. If the problem is still there, it can crash again and go back to safe mode.') });
-        if (!ok) return;
-        const r = await act(leaveSafe, () => api('POST', '/api/system/safe-mode/clear'), err);
-        if (r !== undefined) showRestarting();
-      }, 'primary');
+      const leaveSafe = btn('Leave safe mode', () => leaveSafeMode(leaveSafe, err), 'primary');
       const reset = btn('Factory reset…', async () => {
         const apName = wifi && wifi.ap && wifi.ap.ssid ? wifi.ap.ssid : 'the station\'s own Wi-Fi';
         const ok = await dialog({

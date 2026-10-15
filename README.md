@@ -362,7 +362,7 @@ On your network the station answers to its name over mDNS,
 `http://<station name>.local/` (`onocoydiy` unless you rename it; when another
 device already uses that name the station takes `onocoydiy-2` and the web page
 says so), and to its IP address, which your router's device list shows under the
-station name. The System page and the dashboard show both as links.
+station name. The System page shows both as links.
 
 ## Recovery (planned behaviour)
 

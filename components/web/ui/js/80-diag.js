@@ -219,6 +219,24 @@ function healthTab(box) {
 /* ---- Event lists (the connection history, the journal) -------------------- */
 
 /* Rows an event list shows first, and how many more each "Show older" adds. */
+/* Onocoy's streak needs at least 99.8 % graced uptime per UTC day. */
+const STREAK_PERMILLE = 998;
+
+/**
+ * "Graced uptime so far" in words and tone: green when it meets 99.8 %, red
+ * when it misses it and the streak is lost; below 99.8 % while the streak
+ * still holds (early in the day, the budget not used up) neither: not red,
+ * since the streak is the verdict, and not green, since it misses the
+ * threshold it is measured against.
+ */
+function soFarView(sofar, streakOk) {
+  if (sofar === null || sofar === undefined) return DASH;
+  const meets = sofar >= STREAK_PERMILLE;
+  const tone = meets ? 't-ok' : streakOk ? null : 't-bad';
+  const note = meets ? (streakOk === false ? '' : ' (streak on track)') : streakOk ? ' (below 99.8 %; the streak still holds)' : ' (below 99.8 %)';
+  return h('span', { class: tone }, fmt.permille(sofar) + note);
+}
+
 const EV_PAGE = 20;
 
 /* "9:41 AM" */
@@ -454,11 +472,12 @@ function availabilityTab(box) {
           String(Math.floor(sod / 3600)).padStart(2, '0') + ':' + String(Math.floor((sod % 3600) / 60)).padStart(2, '0')],
         prot && !counting ? ['Onocoy', [notReady ? 'Not set up. ' : 'Off. ', link(notReady ? 'Set it up' : 'Turn it on', '#/casters/onocoy')]] : null,
         counting ? ['Onocoy offline today', fmt.dur(p.down_today_s)] : null,
-        counting && p.budget_s !== null && p.budget_s !== undefined ? ['Offline budget today', 'about ' + fmt.dur(p.budget_s) +
-          ' at the current data rate'] : null,
+        counting && p.budget_s !== null && p.budget_s !== undefined ? ['Offline budget today', 'about ' + fmt.dur(p.budget_s)] : null,
         counting ? ['Offline budget left', fmt.dur(p.budget_left_s)] : null,
-        counting ? ['Data rate', p.data_rate_permille === null || p.data_rate_permille === undefined ? 'nothing sent yet today' :
+        counting ? ['Data rate since the start', p.data_rate_permille === null || p.data_rate_permille === undefined ? 'nothing sent yet today' :
           fmt.permille(p.data_rate_permille)] : null,
+        /* What the budget is figured from: every epoch Onocoy missed today while connected, across restarts. */
+        counting && day.lost_epochs !== undefined ? ['Epochs lost today', fmt.num(day.lost_epochs)] : null,
         counting ? ['Graced uptime so far', soFarView(sofar, p.streak_ok)] : null,
         /* (online today + the 300 s grant) / 24 h: what the whole day reaches if nothing more is sent. */
         counting && p.graced_uptime_permille !== null && p.graced_uptime_permille !== undefined ?

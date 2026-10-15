@@ -341,23 +341,27 @@ small { font-size: 0.85rem; }
 .big small { font-size: 0.9rem; font-weight: 500; color: var(--muted); }
 
 /*
- * The Status page's top card: the title with its dot, one line, at most one
- * button and a row of labelled facts. On a phone one column; from 560 px the
- * button sits at the right of the title and line, the facts under both.
+ * The Status page's top card: the title with its dot, one line, its button
+ * (two in safe mode), "Also:" lines and a row of labelled facts. On a phone
+ * one column; from 560 px the buttons sit at the right of the title and
+ * line, the "Also:" lines and the facts under both.
  */
 .hero { display: grid; grid-template-columns: minmax(0, 1fr); row-gap: 0.35rem; }
 .card.hero > * { margin: 0; }
 .hero .state {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.6rem;
   font-size: 1.3rem;
   font-weight: 700;
+  line-height: 1.25;
 }
+/* The dot sits on the title's first line when a long title wraps. */
 .hero .state::before {
   content: "";
   width: 14px;
   height: 14px;
+  margin-top: calc(0.8125rem - 7px);
   border-radius: 50%;
   background: var(--off);
   flex: none;
@@ -365,7 +369,27 @@ small { font-size: 0.85rem; }
 .hero.ok .state::before { background: var(--ok); }
 .hero.warn .state::before { background: var(--warn); }
 .hero.bad .state::before { background: var(--bad); }
+.hero.info .state::before { background: var(--info); }
 .hero .hero-actions { display: flex; margin-top: 0.4rem; }
+/* Other named alerts: one line each, its mark, the words, Details at the right. */
+.also { display: grid; gap: 0.5rem; padding: 0.6rem 0 0; border-top: 1px solid var(--border); list-style: none; }
+.card.hero > .also { margin-top: 0.4rem; }
+.also li { display: flex; align-items: flex-start; gap: 0.6rem; font-size: 0.95rem; }
+.also li > :nth-child(2) { flex: 1 1 auto; min-width: 0; }
+.also .ic {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 50%;
+  background: var(--tone-soft);
+  color: var(--tone);
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+.also .btn { flex: none; align-self: center; }
 .hero .hero-actions .btn { width: 100%; }
 /* Small labelled facts in a row (the top card, the live view's totals). */
 .facts {
@@ -386,7 +410,7 @@ small { font-size: 0.85rem; }
   .hero > * { grid-column: 1; }
   .card.hero > .hero-actions { grid-column: 2; grid-row: 1 / span 2; align-self: center; margin: 0; }
   .hero .hero-actions .btn { width: auto; }
-  .hero .facts { grid-column: 1 / -1; }
+  .hero .facts, .hero .also { grid-column: 1 / -1; }
 }
 
 /* ---- Key/value lists -------------------------------------------------- */
@@ -402,6 +426,8 @@ small { font-size: 0.85rem; }
 .kv + .kv { margin-top: 0.5rem; }
 /* A short list in a wide card: the values stay near their labels. */
 .tight-kv .kv { grid-template-columns: minmax(7.5rem, 13rem) 1fr; }
+/* Short labels (the Status page): as wide as the longest, the values beside them at every width. */
+.fit-kv .kv { grid-template-columns: max-content minmax(0, 1fr); column-gap: 1.5rem; }
 /* A list of figures under a line of text in a card keeps the card's gap. */
 .card > * + .kv { margin-top: 0.75rem; }
 
@@ -705,13 +731,14 @@ tbody tr:last-child td { border-bottom: 0; }
 .metrics b { color: var(--text); font-weight: 600; }
 .hintline { margin-top: 0.35rem; color: var(--warn); font-size: 0.9rem; }
 .caster .form-actions { margin-top: 0.6rem; }
-/* A row's one button: under the row on a phone, at its right (level with its last line) from 560 px. */
-@media (min-width: 560px) {
-  .caster.has-act { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 1rem; }
-  .caster.has-act > * { grid-column: 1; }
-  .caster.has-act > .item-head { grid-column: 1 / -1; }
-  .caster.has-act > .form-actions { grid-column: 2; grid-row: 2 / span 2; align-self: end; margin-top: 0.35rem; }
-}
+/* The Status page's casters, one line each: name, state and share at the left, a button at the right. */
+.clines { display: grid; gap: 0.6rem; }
+.cline { display: flex; align-items: center; gap: 0.75rem; }
+.cline > :first-child { flex: 1 1 auto; min-width: 0; }
+.cline > .btn { flex: none; }
+.cline .name { font-weight: 650; }
+/* A link beside a card's title (cardHead): "Details". */
+.card-head > .head-link { font-size: 0.9rem; font-weight: 600; }
 .caster-live > * + * { margin-top: 0.35rem; }
 .caster-live > .msg { margin-top: 0.6rem; }
 /* A card that holds only a row of actions (the add card): no gap above it. */

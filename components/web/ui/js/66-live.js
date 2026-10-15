@@ -581,7 +581,7 @@ function livePage(el, startArg) {
       h('div', null, cnrLegend(), h('p', { class: 'muted small' }, SYS_KEY), skyNote))),
     h('section', { class: 'card wide' }, h('h2', null, 'Satellites'), table.el),
     h('section', { class: 'card' }, h('h2', null, 'Per constellation and band'), countsBox,
-      h('p', { class: 'muted small foot' }, 'Satellites tracked on each band. Onocoy\'s top band reward needs 4 bands on one constellation.')),
+      h('p', { class: 'muted small foot' }, 'Satellites tracked on each band. Onocoy\'s quality score needs 4 bands on one constellation.')),
     h('section', { class: 'card' }, h('h2', null, 'Mean C/N0 per band'), barsBox),
   ];
   /* No receiver: the same card as the setup wizard's, instead of an empty window. */
@@ -735,10 +735,10 @@ function receptionChecks(d) {
     }
   }
   if (bestN >= RX_CHECK.bands) {
-    items.push(['ok', lbl(L.sys, best) + ': ' + bestN + ' bands', '4 bands on one constellation: enough for Onocoy\'s top band reward.']);
+    items.push(['ok', lbl(L.sys, best) + ': ' + bestN + ' bands', '4 bands on one constellation: the most this receiver can reach.']);
   } else {
     items.push(['warn', best ? 'Best: ' + lbl(L.sys, best) + ' with ' + bestN + (bestN === 1 ? ' band' : ' bands') : 'No bands yet',
-      'Onocoy\'s top band reward needs 4 bands on one constellation. The signal group on the Receiver page sets them; ' +
+      'Onocoy\'s quality score needs 4 bands on one constellation. The signal group on the Receiver page sets them; ' +
       'right after a start this can take a minute.']);
   }
   return { items: items, ok: items.every(i => i[0] === 'ok') };

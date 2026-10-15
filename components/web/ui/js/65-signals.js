@@ -200,7 +200,7 @@ Views.signals = {
         mount(summary,
           cardHead('Signals', live ? badge(sig.best_bands >= 4 ? 'Enough bands' : 'Few bands', sig.best_bands >= 4 ? 'ok' : 'warn') : null),
           h('div', { class: 'big' }, sig.best_sys ? lbl(L.sys, sig.best_sys) + ' · ' + sig.best_bands + ' bands' : 'No signals yet'),
-          h('p', { class: 'muted small' }, 'Best constellation. Onocoy\'s top band reward needs 4 bands on one constellation.'),
+          h('p', { class: 'muted small' }, 'Best constellation. Onocoy\'s quality score needs 4 bands on one constellation.'),
           live ? e6View(sig) : null,
           kv([['Last epoch', sig.epoch_age_ms === null || sig.epoch_age_ms === undefined ? 'Never' : fmt.ms(sig.epoch_age_ms) + ' ago']]),
           moreAs('sig-details', 'Details', isOpen(summary, 'sig-details'), kv([

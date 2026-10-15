@@ -379,7 +379,7 @@ const upMin = s => fmt.dur(Math.ceil(s / 60) * 60);
  * The page-wide notices for a status, on the page named `page` (shell route
  * name: '' is the Status page): [{key, tone, title, text, actions, trial}].
  * key names what a notice is about: the Status page leaves out the one its
- * top card already says, with its button (heroLead).
+ * top card already says, with its button (stationState().notice).
  */
 function noticeItems(st, page) {
   const items = [];
@@ -479,7 +479,7 @@ function noticeItems(st, page) {
       link('Update', '#/updates', 'btn small primary')]);
   }
   if (page === '') {
-    const covered = heroLead(st, true).notice;
+    const covered = stationState(st, true).notice;
     if (covered) return items.filter(i => i.key !== covered);
   }
   return items;
@@ -529,6 +529,16 @@ async function endMaintenance(e) {
   if (!ok) return false;
   const r = await act(b, () => api('DELETE', '/api/gnss/maintenance'));
   if (r !== undefined) toast('Maintenance ended. The station checks the receiver now.', 'ok');
+  return r !== undefined;
+}
+
+/** "Leave safe mode" (the Status page's top card, the System page): asks, then restarts normally. */
+async function leaveSafeMode(b, err) {
+  const ok = await dialog({ title: 'Leave safe mode?', ok: 'Restart normally',
+    body: h('p', null, 'The station restarts normally. If the problem is still there, it can crash again and go back to safe mode.') });
+  if (!ok) return false;
+  const r = await act(b, () => api('POST', '/api/system/safe-mode/clear'), err);
+  if (r !== undefined) showRestarting();
   return r !== undefined;
 }
 

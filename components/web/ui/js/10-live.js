@@ -114,19 +114,6 @@ function slotRate(slot, window) {
   return ((end[1] - start[1]) * 8) / (end[0] - start[0]);
 }
 
-/** RTCM output rate: the busiest streaming slot over the last 10 s. */
-function outputRate() {
-  const st = S.status;
-  if (!st || !Array.isArray(st.casters)) return null;
-  let best = null;
-  for (const c of st.casters) {
-    if (c.state !== 'streaming') continue;
-    const r = slotRate(c.slot, 10);
-    if (r !== null && (best === null || r > best)) best = r;
-  }
-  return best;
-}
-
 /*
  * Reconnecting: the delay doubles from 1 s to 15 s, each one drawn within
  * +-20 % (WS_JITTER) so pages that lost the station together do not all

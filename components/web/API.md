@@ -1265,7 +1265,7 @@ it to Onocoy as well, and Onocoy's FAQ says: "Please note that multiple
 submissions of the same streams, e.g. from free or public networks such as
 IGS or RTK2GO, even when done by separate users in the onocoy platform, will
 result in banning." The UI warns about it on the card of each open slot and
-links that FAQ. It blocks nothing (RTK2go slots stay off unless the user
+in one line on the Status page, and links that FAQ. It blocks nothing (RTK2go slots stay off unless the user
 turns one on); saving such a pair still asks for `dup_stream_ack` (below).
 
 `GET /api/casters/{n}` returns one `{"slot", "config", "status"}` entry. In
@@ -2397,8 +2397,9 @@ LAN).
    `POST /api/gnss/detect`) and opens nothing. Once the receiver streams,
    `POST /api/gnss/live` opens the live view and the UI polls
    `GET /api/gnss/live`, with plain pass/warn hints (satellites tracked,
-   mean C/N0, whether a constellation has 4 bands, the condition of
-   Onocoy's top band reward; guide values, PROVISIONAL, to be confirmed on
+   mean C/N0, whether a constellation has 4 bands, which Onocoy's quality
+   score needs and the most this receiver reaches (the fifth band is
+   Galileo E5 AltBOC, which it lacks); guide values, PROVISIONAL, to be confirmed on
    hardware) and "Continue anyway"; `DELETE /api/gnss/live` when the user
    goes on.
 6. Optional: the Onocoy slot, `PUT /api/casters/0` with `onocoy_preset`

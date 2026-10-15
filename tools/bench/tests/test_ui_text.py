@@ -53,9 +53,15 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  connItems: l => connItems(l), journalItems: a => journalItems(a[0], a[1], a[2]), evFilter: () => EV_FILTER,\n' +
   '  wifiChip: w => wifiChip(w), recoveryHint: () => recoveryHint(),\n' +
   '  onlineShare: a => onlineShare(a[0], a[1]),\n' +
-  '  hero: a => { const l = heroLead(a[0], a[1]), t = heroState(a[0], a[1]);\n' +
-  '    return { title: t.head, tone: t.tone, key: l.key, line: l.line, alert: l.alertId, notice: l.notice,\n' +
-  '      action: l.action ? (l.action.act || l.action.label) : null, primary: !!(l.action && l.action.primary) }; },\n' +
+  '  hero: a => { const t = stationState(a[0], a[1]);\n' +
+  '    return { title: t.head, tone: t.tone, key: t.key, line: t.lead, alert: t.alertId, notice: t.notice, trial: t.trial,\n' +
+  '      action: t.actions.length ? (t.actions[0].act || t.actions[0].label) : null, actions: t.actions.map(x => x.act || x.label),\n' +
+  '      primary: t.actions.some(x => x.primary), also: t.also.map(x => x.id), alsoText: t.also.map(x => x.title + \'. \' + x.text),\n' +
+  '      facts: t.facts, delivering: t.delivering, ono: t.onoStreaming, quality: t.quality,\n' +
+  '      subject: t.subject, plan: t.plan }; },\n' +
+  '  onocoy: a => { const t = stationState(a, true), d = onocoyDay(a, t);\n' +
+  '    return d && { verdict: d.verdict, tone: d.tone, why: d.why, left: d.left, used: d.used, hero: t.key }; },\n' +
+  '  checks: d => receptionChecks(d),\n' +
   '  notices: a => noticeItems(a[0], a[1]).map(i => [i.key, i.title]),\n' +
   '  pwProblem: a => adminPasswordProblem(a[0], a[1]), rssi: a => rssiView(a),\n' +
   '  sgName: a => sgName(a[0], a[1]), sgChoices: () => SG_CHOICES, recovery: () => L.recovery,\n' +
@@ -269,27 +275,32 @@ def test_today_online_share_on_the_dashboard():
     assert out == ["0\u00a0%", "100\u00a0%", "33.33\u00a0%", "99.99\u00a0%"], out
 
 
-# ---- The Status page's top card (heroLead, heroState) and the notices it covers (noticeItems) ----
+# ---- The station's state (stationState): the Status page's top card, Onocoy's day, the notices it covers ----
 
 def caster(slot: int, name: str, state: str, **kw) -> dict:
     c = {"slot": slot, "name": name, "empty": False, "enabled": state != "disabled", "protected": name == "Onocoy",
          "host": "servers.onocoy.com" if name == "Onocoy" else name.lower() + ".example", "state": state, "reason": "none",
          "next_retry_s": 0, "stop_reason": "none", "onocoy_ready": name == "Onocoy"}
+    if name == "Onocoy":
+        c.update({"streak_ok": True, "budget_s": 473, "budget_left_s": 463, "today_online_s": 3600, "today_offline_s": 10,
+                  "data_rate_permille": 1000, "connected_s": 3600})
     c.update(kw)
     return c
 
 
 def status(**kw) -> dict:
-    """An admin GET /api/status: the receiver streams, Onocoy streams, nothing is wrong."""
+    """An admin GET /api/status: the receiver streams 4 bands with GLONASS, Onocoy streams, nothing is wrong."""
     s = {"api": 1, "public": False, "uptime_s": 23520,
          "device": {"hostname": "onocoydiy", "settings_available": True},
          "safe_mode": {"active": False, "retry_in_s": None, "crashes": 0},
          "network": {"online": True, "ssid": "Home"},
-         "receiver": {"state": "streaming", "rtcm_age_ms": 180, "journal": "none", "uart_closed": False,
-                      "rx_maintenance": False, "maintenance_left_s": 0, "first_apply_held": False},
+         "receiver": {"state": "streaming", "model": "UM982", "rtcm_age_ms": 180, "journal": "none", "uart_closed": False,
+                      "rx_maintenance": False, "maintenance_left_s": 0, "first_apply_held": False, "best_sys": "galileo",
+                      "best_bands": 4, "glonass": True, "rtcm1230_supported": True, "position_locked": True,
+                      "profile_applied": True, "signal_test": None},
          "casters": [caster(0, "Onocoy", "streaming")],
          "health": {"level": "ok", "last_step": "none", "recovery_mode": "full"},
-         "alerts": [], "update": {}}
+         "alerts": [], "availability": {"protected_down_today_s": 10, "budget_left_s": 463}, "update": {}}
     for k, v in kw.items():
         if isinstance(v, dict) and isinstance(s.get(k), dict):
             s[k] = {**s[k], **v}
@@ -302,22 +313,94 @@ def heroes(*statuses, admin: bool = True) -> list[dict]:
     return run_ui([("hero", [st, admin]) for st in statuses])
 
 
+NO_RX = {"id": "no_receiver", "source": "station", "saw_bytes": False, "next_detect_in_s": 24}
+
+
+def test_state_every_condition_in_order():
+    """Each condition of the list, alone: its key, title and colour. Then each next to the one after it: the
+    earlier one wins (what stops everything first, Onocoy's quality last)."""
+    conds = {
+        "safe_mode": dict(safe_mode={"active": True, "crashes": 3, "retry_in_s": 2690}, receiver={"state": "idle"},
+                          casters=[caster(0, "Onocoy", "disabled")], alerts=[{"id": "safe_mode", "source": "health"}]),
+        "journal": dict(receiver={"journal": "waiting"}),
+        "settings": dict(device={"settings_available": False}, alerts=[{"id": "settings_degraded", "source": "health"}]),
+        "updating": dict(receiver={"state": "flashing", "journal": "running"}),
+        "uart_closed": dict(receiver={"state": "no_receiver", "uart_closed": True}, alerts=[NO_RX]),
+        "no_receiver": dict(receiver={"state": "no_receiver", "rtcm_age_ms": None}, alerts=[NO_RX],
+                            health={"level": "recovering", "last_step": "rescan"}),
+        "rx_stopped": dict(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "link_restart"}),
+        "no_satellites": dict(health={"level": "failed"}, alerts=[{"id": "no_satellites", "source": "health"}],
+                              casters=[caster(0, "Onocoy", "wait_data")]),
+        "no_rtcm": dict(health={"level": "failed"}, alerts=[{"id": "no_rtcm", "source": "health"}],
+                        casters=[caster(0, "Onocoy", "wait_data")]),
+        "stopped": dict(casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate")]),
+        "maintenance": dict(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 830}),
+        "signal_test": dict(receiver={"state": "configuring", "signal_test": {"state": "measuring", "phase": 0, "left_s": 600,
+                                                                              "group": {"master": 3, "slave": 6}}}),
+        "wifi_trial": dict(network={"cred_trial": True, "cred_trial_left_s": 80, "pending_ssid": "Cabin"}),
+        "receiver": dict(receiver={"state": "configuring"}, casters=[caster(0, "Onocoy", "wait_data")]),
+        "onocoy_setup": dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "backoff")]),
+        "casters_down": dict(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "auth_failed", reason="auth")],
+                             receiver={"best_bands": 3}),
+        "quality": dict(receiver={"best_bands": 3}),
+        "streaming": dict(),
+    }
+    expect = {
+        "safe_mode": ("Safe mode", "bad"), "journal": ("Receiver update needs you", "warn"),
+        "settings": ("Settings cannot be saved", "bad"), "updating": ("Updating the receiver", "info"),
+        "uart_closed": ("Receiver port closed", "bad"), "no_receiver": ("No receiver found", "bad"),
+        "rx_stopped": ("Receiver stopped sending data", "warn"), "no_satellites": ("Antenna sees no satellites", "bad"),
+        "no_rtcm": ("Receiver sends no corrections", "bad"), "stopped": ("Onocoy stopped", "bad"),
+        "maintenance": ("Receiver maintenance", "info"), "signal_test": ("Comparing signal groups", "info"),
+        "wifi_trial": ("Trying new Wi-Fi", "info"), "receiver": ("Configuring the receiver", "info"),
+        "onocoy_setup": ("Onocoy not set up", "warn"), "casters_down": ("Partly streaming", "warn"),
+        "quality": ("Too few bands for Onocoy", "warn"), "streaming": ("Streaming", "ok"),
+    }
+    keys = list(conds)
+    out = heroes(*[status(**conds[k]) for k in keys])
+    for k, o in zip(keys, out):
+        assert (o["key"], o["title"], o["tone"]) == (k, *expect[k]), (k, o)
+        text = (o["title"] + " " + o["line"]).lower()
+        # No health level, no setting name and no internal state on top, ever.
+        assert not any(w in text for w in ("alerts only", "alerts_only", "needs attention", "healthy", "recovery:",
+                                           "degraded", "saveconfig", "rtcm")), (k, o)
+    # Two conditions at once: the earlier one in the list wins.
+    pairs = []
+    for a, b in zip(keys, keys[1:]):
+        merged = {}
+        for part in (conds[b], conds[a]):
+            for kk, vv in part.items():
+                if kk == "alerts":
+                    merged["alerts"] = merged.get("alerts", []) + vv
+                elif isinstance(vv, dict) and isinstance(merged.get(kk), dict):
+                    merged[kk] = {**merged[kk], **vv}
+                else:
+                    merged[kk] = vv
+        pairs.append((a, b, status(**merged)))
+    got = heroes(*[p[2] for p in pairs])
+    for (a, b, _), o in zip(pairs, got):
+        assert o["key"] == a, (a, b, o)
+
+
 def test_hero_says_what_blocks_first_and_what_to_do():
     onocoy_not_set_up = status(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False)],
                                health={"level": "degraded", "recovery_mode": "alerts_only"})
     maintenance = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 830})
     # The QEMU run: no receiver found while the recovery still reports recovering.
     no_rx = status(receiver={"state": "no_receiver", "rtcm_age_ms": None}, health={"level": "recovering", "last_step": "rescan"},
-                   alerts=[{"id": "no_receiver", "source": "station", "saw_bytes": False, "next_detect_in_s": 24}],
-                   casters=[caster(0, "Onocoy", "wait_data")])
+                   alerts=[NO_RX], casters=[caster(0, "Onocoy", "wait_data")])
     stall = status(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "link_restart"})
     alerts_only = status(health={"level": "degraded", "recovery_mode": "alerts_only"},
                          alerts=[{"id": "no_rtcm", "source": "health"}], casters=[caster(0, "Onocoy", "wait_data")])
-    out = heroes(onocoy_not_set_up, maintenance, no_rx, stall, alerts_only)
+    silent_alerts_only = status(health={"level": "degraded", "recovery_mode": "alerts_only"},
+                                alerts=[{"id": "receiver_silent", "source": "health"}], casters=[caster(0, "Onocoy", "wait_data")])
+    out = heroes(onocoy_not_set_up, maintenance, no_rx, stall, alerts_only, silent_alerts_only)
 
-    assert out[0]["title"] == "No caster turned on" and out[0]["tone"] == "warn", out[0]
+    assert out[0]["title"] == "Onocoy not set up" and out[0]["tone"] == "warn", out[0]
     assert out[0]["line"] == "Add your Onocoy credentials to start streaming."
     assert out[0]["action"] == "Set up Onocoy" and out[0]["primary"] is True
+    # The recovery choice shows as a fact only when it is not the default.
+    assert out[0]["facts"] == [["If corrections stop", "Only tell me"]]
 
     assert out[1]["title"] == "Receiver maintenance"
     assert out[1]["line"] == "The station sends the receiver no commands. Ends in about 14 min."
@@ -325,19 +408,19 @@ def test_hero_says_what_blocks_first_and_what_to_do():
 
     assert out[2]["title"] == "No receiver found" and out[2]["tone"] == "bad", out[2]
     assert out[2]["line"].startswith("Nothing arrives from the receiver. Check its power") and "Next search in 24 s." in out[2]["line"]
-    assert out[2]["action"] == "detect" and out[2]["alert"] == "no_receiver"
+    assert out[2]["action"] == "detect" and out[2]["alert"] == "no_receiver" and out[2]["also"] == []
 
-    # A stall while the station still says streaming: never "Streaming" on top.
-    assert out[3]["title"] == "Fixing the receiver" and out[3]["tone"] == "warn", out[3]
-    assert out[3]["line"] == "Corrections from the receiver stopped. The station is fixing it: reconnecting to the receiver."
+    # A stall while the station still says streaming: never "Streaming" on top, and Onocoy does not count as streaming.
+    assert out[3]["title"] == "Receiver stopped sending data" and out[3]["tone"] == "warn", out[3]
+    assert out[3]["line"] == "The station is fixing it: reconnecting to the receiver."
+    assert out[3]["ono"] is False and out[3]["delivering"] is False
 
-    assert out[4]["title"] == "Not streaming" and out[4]["alert"] == "no_rtcm", out[4]
-    assert out[4]["line"] == "The receiver answers but sends no corrections. Check that the antenna is on the socket marked M and sees the open sky."
-
-    # No health level and no setting name on top, ever.
-    for o in out:
-        text = (o["title"] + " " + o["line"]).lower()
-        assert not any(w in text for w in ("alerts only", "needs attention", "healthy", "recovery:", "degraded")), o
+    assert out[4]["title"] == "Receiver sends no corrections" and out[4]["alert"] == "no_rtcm", out[4]
+    assert out[4]["line"] == ("The receiver answers but sends no corrections. Check that the antenna is on the socket marked M "
+                              "and sees the open sky. Automatic recovery is off (your choice).")
+    assert out[5]["title"] == "Receiver stopped sending data" and out[5]["tone"] == "bad"
+    assert out[5]["line"].endswith("Automatic recovery is off (your choice).")
+    assert out[5]["facts"] == [["If corrections stop", "Only tell me"]]
 
 
 def test_hero_casters_down_one_two_three_and_all_good():
@@ -353,42 +436,138 @@ def test_hero_casters_down_one_two_three_and_all_good():
     out = heroes(one, two, three, good_one, good_two, waiting, dns)
     assert out[0]["title"] == "Partly streaming"
     assert out[0]["line"] == "Bench is not streaming: login refused. Next try in 30 s." and out[0]["action"] == "Casters"
+    assert out[0]["facts"] == [["Casters", "1 of 2 streaming"]]
     assert out[1]["title"] == "Not streaming" and out[1]["tone"] == "bad"
     assert out[1]["line"] == "Onocoy and Bench are not streaming."
     assert out[2]["line"] == "3 casters are not streaming."
     assert out[3] == {**out[3], "title": "Streaming", "tone": "ok", "line": "Onocoy is receiving corrections.", "action": None}
+    # One caster turned on: no "1 of 1" fact.
+    assert out[3]["facts"] == []
     assert out[4]["line"] == "Onocoy and RTK2go are receiving corrections."
+    # The line names both as streaming: the count would say it again.
+    assert out[4]["facts"] == []
     assert out[5]["line"] == "Waiting for corrections from the receiver."
     assert out[6]["line"] == "Bench is not streaming: DNS lookup failed."
     # The public form: states only, no reason, no button.
     pub = heroes({"api": 1, "public": True, "uptime_s": 60, "device": {"hostname": "onocoydiy"},
                   "receiver": {"state": "streaming", "best_bands": 4},
                   "casters": [{"slot": 0, "name": "Onocoy", "state": "streaming"}, {"slot": 1, "name": "Bench", "state": "backoff"}],
-                  "health": {"level": "ok"}}, admin=False)[0]
-    assert pub["line"] == "Bench is not streaming." and pub["action"] is None and pub["title"] == "Partly streaming"
+                  "health": {"level": "ok"}}, {"api": 1, "public": True, "uptime_s": 60, "device": {"hostname": "onocoydiy"},
+                  "receiver": {"state": "no_receiver", "best_bands": 0}, "casters": [{"slot": 0, "name": "Onocoy", "state": "wait_data"}],
+                  "health": {"level": "recovering"}}, admin=False)
+    assert pub[0]["line"] == "Bench is not streaming." and pub[0]["action"] is None and pub[0]["title"] == "Partly streaming"
+    assert pub[1]["title"] == "No receiver found" and pub[1]["line"] == "Nothing arrives from the receiver." and pub[1]["actions"] == []
 
 
 def test_hero_safe_mode_stop_and_alerts_while_streaming():
     safe = status(safe_mode={"active": True, "crashes": 3, "retry_in_s": 2690}, receiver={"state": "idle"},
                   casters=[caster(0, "Onocoy", "disabled")], alerts=[{"id": "safe_mode", "source": "health"}])
     stopped = status(casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate")])
-    link_loss = status(alerts=[{"id": "link_loss", "source": "health"}])
+    link_loss = status(alerts=[{"id": "link_loss", "source": "health"}, {"id": "power_supply", "source": "health"},
+                               {"id": "heap_fragmented", "source": "health"}])
     bare_level = status(health={"level": "degraded"})
     off = status(casters=[caster(0, "Onocoy", "disabled", enabled=False), caster(1, "RTK2go", "disabled", enabled=False, onocoy_ready=False)])
     none = status(casters=[])
     out = heroes(safe, stopped, link_loss, bare_level, off, none)
     assert out[0]["title"] == "Safe mode" and out[0]["tone"] == "bad"
     assert out[0]["line"] == "The receiver and casters are off after 3 crashes. The station tries normal operation again in 45 min."
-    assert out[0]["alert"] == "safe_mode" and out[0]["notice"] == "safe_mode"
-    assert out[1]["line"] == "Onocoy stopped: duplicate stream. It makes no new attempt until you act."
+    assert out[0]["alert"] == "safe_mode" and out[0]["notice"] == "safe_mode" and out[0]["also"] == []
+    # Two buttons in safe mode: the cure (an update) and leaving it, a button the page handles.
+    assert out[0]["actions"] == ["Updates", "leave-safe"]
+    assert out[1]["line"] == "Duplicate stream. The station makes no new attempt until you act."
     assert out[1]["action"] == "What to do" and out[1]["notice"] == "onocoy_stopped:0"
-    # An alert while everything streams: its text on top, and the dot turns amber.
-    assert out[2]["title"] == "Streaming" and out[2]["tone"] == "warn" and out[2]["alert"] == "link_loss"
-    assert out[2]["line"].startswith("Some data from the receiver was lost") and out[2]["action"] == "Diagnostics"
-    # The level alone (no alert to show) leaves the dot green.
-    assert out[3]["tone"] == "ok" and out[3]["line"] == "Onocoy is receiving corrections."
+    # Other alerts while everything streams: "Also:" lines with their own words; the title stays and so does its colour.
+    assert out[2]["title"] == "Streaming" and out[2]["tone"] == "ok" and out[2]["line"] == "Onocoy is receiving corrections."
+    assert out[2]["also"] == ["link_loss", "power_supply", "heap_fragmented"]
+    assert out[2]["alsoText"][0].startswith("Receiver data lost. Some data from the receiver was lost")
+    # The level alone (no alert to show) leaves the dot green and adds nothing.
+    assert out[3]["tone"] == "ok" and out[3]["line"] == "Onocoy is receiving corrections." and out[3]["also"] == []
     assert out[4]["line"] == "Onocoy is set up but turned off. Turn it on to start streaming." and out[4]["action"] == "Turn Onocoy on"
     assert out[5]["line"] == "Add a caster to start streaming." and out[5]["action"] == "Add a caster"
+
+
+def test_hero_quality_minimums_for_onocoy():
+    """Streaming to Onocoy, but a minimum this board can miss is missed: 4 bands, GLONASS, message 1230. Only while
+    the receiver delivers, and unknown values (an older firmware, never configured) flag nothing."""
+    out = heroes(status(receiver={"best_bands": 3}), status(receiver={"glonass": False}),
+                 status(receiver={"rtcm1230_supported": False}), status(receiver={"best_bands": 3, "glonass": False}),
+                 status(receiver={"rtcm1230_supported": None}),
+                 status(receiver={"glonass": None, "rtcm1230_supported": None}),
+                 status(receiver={"best_bands": 0}),
+                 status(receiver={"best_bands": 3}, alerts=[{"id": "bands", "source": "health"}]),
+                 status(receiver={"best_bands": 3}, casters=[caster(0, "Onocoy", "disabled", enabled=False),
+                                                              caster(1, "RTK2go", "streaming", onocoy_ready=False)]))
+    assert out[0]["line"] == "Onocoy gets 3 bands; its quality score needs 4 on one constellation." and out[0]["action"] == "Receiver"
+    assert out[1]["title"] == "No GLONASS for Onocoy" and out[1]["line"] == "Onocoy gets no GLONASS; its quality score needs it."
+    assert out[2]["title"] == "No GLONASS for Onocoy" and "message 1230" in out[2]["line"]
+    assert out[3]["title"] == "Too few bands for Onocoy" and "3 bands and no GLONASS" in out[3]["line"]
+    assert [o["key"] for o in out[4:7]] == ["streaming", "streaming", "streaming"]
+    # The bands alert is the line: not an "Also:" line too.
+    assert out[7]["key"] == "quality" and out[7]["alert"] == "bands" and out[7]["also"] == []
+    # Onocoy off: its quality does not matter.
+    assert out[8]["key"] == "streaming" and out[8]["line"] == "RTK2go is receiving corrections."
+
+
+def test_onocoy_today_verdict_from_one_rule():
+    """Missed while streak_ok is false; At risk while Onocoy does not stream now, more than 60 % of the offline time is
+    used, the data rate is under 98 % after 10 minutes connected, or a quality minimum is missed; On track otherwise.
+    Never "On track" while the top card says Onocoy is down or the receiver stalls."""
+    ono = lambda **kw: [caster(0, "Onocoy", **{"state": "streaming", **kw})]
+    cases = [
+        status(),
+        status(casters=ono(streak_ok=False, budget_left_s=0), availability={"protected_down_today_s": 500, "budget_left_s": 0}),
+        status(casters=ono(streak_ok=False, budget_s=0, budget_left_s=0), availability={"protected_down_today_s": 0, "budget_left_s": 0}),
+        status(casters=ono(state="backoff", reason="timeout")),
+        status(casters=ono(state="stopped", stop_reason="in_use")),
+        status(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "resync"}),
+        status(availability={"protected_down_today_s": 300, "budget_left_s": 173}),
+        status(casters=ono(data_rate_permille=970, connected_s=900)),
+        status(casters=ono(data_rate_permille=971, connected_s=34)),
+        status(receiver={"best_bands": 3}),
+        status(receiver={"glonass": False}, casters=ono() + [caster(1, "Bench", "auth_failed", reason="auth")]),
+        status(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False)]),
+        status(availability={"protected_down_today_s": 10, "budget_left_s": None}),
+    ]
+    out = run_ui([("onocoy", c) for c in cases])
+    assert out[0] == {**out[0], "verdict": "On track", "tone": "ok", "why": None, "left": 463}
+    assert out[1]["verdict"] == "Missed" and out[1]["tone"] == "bad" and out[1]["why"] == "Today's offline time is over the budget."
+    assert out[2]["verdict"] == "Missed" and "epochs were lost" in out[2]["why"]
+    assert out[3]["verdict"] == "At risk" and out[3]["why"] == "Offline time is counting now."
+    assert out[4]["verdict"] == "At risk" and out[4]["hero"] == "stopped"
+    assert out[5]["verdict"] == "At risk" and out[5]["hero"] == "rx_stopped"
+    assert out[6]["verdict"] == "At risk" and out[6]["why"] == "Most of today's offline time is used."
+    # The data rate shows only as the cause, and only after 10 minutes connected.
+    assert out[7]["verdict"] == "At risk" and out[7]["why"].startswith("Data rate 97.0 %")
+    assert out[8]["verdict"] == "On track" and out[8]["why"] is None
+    # The top card says the quality problem: the verdict does not repeat it.
+    assert out[9]["verdict"] == "At risk" and out[9]["hero"] == "quality" and out[9]["why"] is None
+    assert out[10]["verdict"] == "At risk" and out[10]["hero"] == "casters_down"
+    assert out[10]["why"] == "No GLONASS: Onocoy's quality score needs it."
+    # Onocoy not set up: no card (the top card has the setup button).
+    assert out[11] is None
+    # Without a trusted clock the offline time left is unknown; the verdict still holds.
+    assert out[12]["verdict"] == "On track" and out[12]["left"] is None
+
+
+def test_state_during_maintenance_restarts_and_one_caster_down():
+    """Receiver maintenance: the station says idle while the corrections keep coming, so Onocoy still streams and its
+    day stays on track. The restart plan shows while the receiver is fixed or looked for (full recovery only). A line
+    about one caster names it as its subject (its row on the page does not say why again)."""
+    maint = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600, "rtcm_age_ms": 300})
+    maint_quiet = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600, "rtcm_age_ms": 9000},
+                         casters=[caster(0, "Onocoy", "wait_data")])
+    hold = {"reboot_hold": ["admin"], "reboot_hold_left_s": 1578, "reboot_cap_wait_s": None, "reboot_cap_limit": None}
+    stall = status(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "link_restart", **hold})
+    stall_alerts_only = status(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "recovery_mode": "alerts_only", **hold})
+    one_down = status(casters=[caster(0, "Onocoy", "streaming"), caster(2, "Bench", "auth_failed", reason="auth")])
+    out = heroes(maint, maint_quiet, stall, stall_alerts_only, one_down, status())
+    assert out[0]["key"] == "maintenance" and out[0]["delivering"] is True and out[0]["ono"] is True
+    assert out[1]["delivering"] is False
+    assert out[2]["plan"] is not None and "restarts itself in 27\u00a0min at the latest" in out[2]["plan"]
+    assert out[3]["plan"] is None
+    assert out[4]["subject"] == 2 and out[5]["plan"] is None and out[5]["subject"] is None
+    days = run_ui([("onocoy", maint), ("onocoy", maint_quiet)])
+    assert days[0]["verdict"] == "On track" and days[1]["verdict"] == "At risk"
 
 
 def test_status_page_leaves_out_the_notice_the_top_card_says():
@@ -396,19 +575,40 @@ def test_status_page_leaves_out_the_notice_the_top_card_says():
                    update={"app_available": True, "app_version": "v0.4.0"})
     stopped = status(casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate")])
     settings = status(device={"settings_available": False}, alerts=[{"id": "settings_degraded", "source": "health"}])
-    # The hero says the casters are down: the settings notice stays on the Status page.
+    # Settings storage goes before the casters: the top card says it even while a caster is down.
     settings_down = status(device={"settings_available": False}, alerts=[{"id": "settings_degraded", "source": "health"}],
                            casters=[caster(0, "Onocoy", "backoff", reason="timeout")])
+    # A Wi-Fi trial is the top card's while nothing more important holds.
+    trial = status(network={"cred_trial": True, "cred_trial_left_s": 80, "pending_ssid": "Cabin"})
+    trial_stopped = status(network={"cred_trial": True, "cred_trial_left_s": 80, "pending_ssid": "Cabin"},
+                           casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate")])
     out = run_ui([("notices", [maint, ""]), ("notices", [maint, "casters"]), ("notices", [stopped, ""]),
                   ("notices", [stopped, "receiver"]), ("notices", [settings, ""]), ("notices", [settings, "diag"]),
-                  ("notices", [settings_down, ""])])
+                  ("notices", [settings_down, ""]), ("notices", [trial, ""]), ("notices", [trial_stopped, ""])])
     keys = [[k for k, _ in o] for o in out]
     assert keys[0] == ["update"], out[0]
     assert keys[1] == ["maintenance", "update"]
     assert keys[2] == [] and keys[3] == ["onocoy_stopped:0"]
     assert out[3][0][1] == "Onocoy stopped: duplicate stream"
-    assert keys[4] == [] and keys[5] == ["settings"] and keys[6] == ["settings"]
+    assert keys[4] == [] and keys[5] == ["settings"] and keys[6] == []
     assert out[0][0][1] == "Update available"
+    assert keys[7] == [] and keys[8] == ["wifi"]
+    (t,) = heroes(trial)
+    assert t["trial"] == "Cabin" and t["line"].startswith("If it gets no address there")
+
+
+def test_band_wording_never_promises_a_top_reward():
+    """4 bands is the most this receiver reaches (the fifth is Galileo E5 AltBOC, which the UM982 lacks): no page
+    calls it Onocoy's top band reward."""
+    for f in UI_JS.glob("*.js"):
+        assert "top band reward" not in f.read_text(), f.name
+    four = {"totals": {"tracked": 30, "cnr_dbhz": 44, "msm_age_ms": 100,
+                       "systems": [{"sys": "galileo", "bands": {"l1": 8, "l5": 8, "l6": 7, "l2": 8}}]}}
+    three = {"totals": {"tracked": 30, "cnr_dbhz": 44, "msm_age_ms": 100,
+                        "systems": [{"sys": "gps", "bands": {"l1": 8, "l2": 8, "l5": 3}}]}}
+    a, b = run_ui([("checks", four), ("checks", three)])
+    assert a["items"][2][2] == "4 bands on one constellation: the most this receiver can reach."
+    assert b["items"][2][2].startswith("Onocoy's quality score needs 4 bands on one constellation.")
 
 
 def test_password_mismatch_and_unknown_signal():

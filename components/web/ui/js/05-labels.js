@@ -80,13 +80,13 @@ const L = {
   halert: {
     power_supply: ['Low voltage', 'Low voltage restarted the station. Check the power adapter and cable.'],
     receiver_power: ['Receiver not answering', 'The receiver does not answer, even after a reset. Unplug the station for a few seconds.'],
-    bands: ['Few signal bands', 'Fewer than 4 bands on any constellation; Onocoy\'s top band reward needs 4.'],
+    bands: ['Few signal bands', 'Fewer than 4 bands on any constellation; Onocoy\'s quality score needs 4.'],
     profile_drift: ['Output differs from the profile', 'The receiver\'s messages or rates differ from its profile.'],
     heap_fragmented: ['Memory fragmented', 'Restart the station when convenient.'],
     safe_mode: ['Safe mode', 'Receiver and casters are off after repeated crashes.'],
     settings_degraded: ['Settings cannot be saved', 'Changes are not saved this boot. Restart the station; if that does not help, see Diagnostics.'],
     no_upstream: ['No internet', 'Wi-Fi works, but the internet cannot be reached. Check your router.'],
-    link_loss: ['Receiver data lost', 'Some data from the receiver was lost or damaged in the last 10 minutes. Diagnostics has the details.'],
+    link_loss: ['Receiver data lost', 'Some data from the receiver was lost or damaged in the last 10 minutes.'],
     power_lost: ['Power was lost', 'The station lost power 3 or more times in 24 hours. Check the power adapter, cable and connections.'],
     receiver_silent: ['Nothing from the receiver', 'The receiver sends nothing and does not answer. Unplug the station for a few seconds; ' +
       'if that does not help, check the receiver\'s power and cable.'],
