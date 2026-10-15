@@ -28,6 +28,16 @@
  * wait in the ring. printf and the other stdout calls still write to the
  * driver directly, one byte per driver call (the UART VFS), so a log line
  * can land inside their lines.
+ *
+ * With CONFIG_DIAG_CONSOLE_USB_MIRROR every write to the UART driver above
+ * (wire_write) is copied to the built-in USB Serial/JTAG as well, under the
+ * same mutex (diag_mirror_core.h). The copy goes to the USB driver's
+ * transmit buffer whole or not at all and never waits: its driver's write
+ * with no wait takes a mutex of its own that only a drain holds, and puts
+ * the bytes in a ring buffer only when all of them fit (usb_serial_jtag.c,
+ * usb_serial_jtag_write_bytes; ringbuf.c, xRingbufferSend). Without a host
+ * (no USB frames: usb_serial_jtag_is_connected) nothing is copied. The
+ * stdout calls above are not copied.
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -39,6 +49,7 @@
 #include "diag_console_core.h"
 #include "diag_internal.h"
 #include "diag_logring.h"
+#include "diag_mirror_core.h"
 
 #include "driver/uart.h"
 #include "driver/uart_vfs.h"
@@ -53,6 +64,9 @@
 #include "hal/cache_hal.h"
 #include "hal/cache_ll.h"
 #include "sdkconfig.h"
+#if CONFIG_DIAG_CONSOLE_USB_MIRROR
+#include "driver/usb_serial_jtag.h"
+#endif
 
 #define BANK_BYTES        ((size_t)CONFIG_DIAG_LOG_RING_KB * 1024u)
 #define READ_SLICE        (LOGRING_MAX_TEXT + 1u)   /* bytes copied per lock hold: one longest record */
@@ -65,6 +79,8 @@
 #define CONSOLE_RETRY_MS  10                        /* no room: about 115 bytes drain meanwhile */
 #define DRAIN_STEP_MS     5
 #define OTHER_WAIT_TRIES  50                        /* console text waits up to 0.5 s for room, then in the driver */
+#define USB_RX_BUF        128                       /* the USB driver needs more than its 64-byte endpoint; input there is not read */
+#define USB_DRAIN_MAX_MS  50                        /* a reading host takes the USB buffer in a few ms */
 
 _Static_assert(CONFIG_DIAG_LOG_LINE_MAX <= LOGRING_MAX_TEXT, "a log line must fit one ring record");
 _Static_assert(BANK_BYTES > sizeof(logring_hdr_t) + LOGRING_MAX_TEXT, "log ring too small");
@@ -159,6 +175,80 @@ static esp_err_t rings_init(void)
 
 /* ---- console ----------------------------------------------------------------------------- */
 
+#if CONFIG_DIAG_CONSOLE_USB_MIRROR
+/* The copy on the built-in USB (diag_mirror_core.h), under s_console_mux. */
+static bool s_usb;                  /* the USB driver is up: copy (set before the console starts) */
+static dmir_t s_mir;
+/* Scratch for one write with its line endings and a note: never more than
+ * the USB driver's buffer holds, or no write of that size could ever fit. */
+#define USB_MIR_BUF (DMIR_BUF_SIZE(DCON_BUF_SIZE) < (size_t)CONFIG_DIAG_CONSOLE_USB_TX_BUF \
+                         ? DMIR_BUF_SIZE(DCON_BUF_SIZE)                                    \
+                         : (size_t)CONFIG_DIAG_CONSOLE_USB_TX_BUF)
+EXT_RAM_BSS_ATTR static char s_mir_buf[USB_MIR_BUF];
+
+static bool usb_connected(void *ctx)
+{
+    (void)ctx;
+    return usb_serial_jtag_is_connected();
+}
+
+static bool usb_put(void *ctx, const char *s, size_t len)
+{
+    (void)ctx;
+    return usb_serial_jtag_write_bytes(s, len, 0) == (int)len;
+}
+
+static const dmir_port_t s_usb_port = {
+    .connected = usb_connected,
+    .put = usb_put,
+    .ctx = NULL,
+#if CONFIG_LIBC_STDOUT_LINE_ENDING_CRLF
+    .eol = DMIR_EOL_CRLF,
+#elif CONFIG_LIBC_STDOUT_LINE_ENDING_CR
+    .eol = DMIR_EOL_CR,
+#else
+    .eol = DMIR_EOL_LF,
+#endif
+};
+
+/* A console write, copied to the USB port (text before the line-ending rule). */
+static void usb_copy(const char *s, size_t len)
+{
+    if (!s_usb || len == 0) {
+        return;
+    }
+    uint32_t lost = s_mir.lost;
+    dmir_write(&s_mir, &s_usb_port, s, len);
+    if (s_mir.lost != lost) {
+        portENTER_CRITICAL_SAFE(&s_lock);
+        s_stats.usb_dropped = s_mir.lost;
+        s_stats.usb_dropped_bytes = s_mir.lost_bytes > UINT32_MAX ? UINT32_MAX : (uint32_t)s_mir.lost_bytes;
+        portEXIT_CRITICAL_SAFE(&s_lock);
+    }
+}
+
+/* The driver for the copy, before the console starts. */
+static esp_err_t usb_start(void)
+{
+    esp_err_t err = ESP_OK;
+    if (!usb_serial_jtag_is_driver_installed()) {
+        usb_serial_jtag_driver_config_t cfg = {
+            .tx_buffer_size = CONFIG_DIAG_CONSOLE_USB_TX_BUF,
+            .rx_buffer_size = USB_RX_BUF,
+        };
+        err = usb_serial_jtag_driver_install(&cfg);
+    }
+    if (err == ESP_OK) {
+        dmir_init(&s_mir, s_mir_buf, sizeof(s_mir_buf));
+        s_usb = true;
+        portENTER_CRITICAL(&s_lock);
+        s_stats.usb_mirror = true;
+        portEXIT_CRITICAL(&s_lock);
+    }
+    return err;
+}
+#endif /* CONFIG_DIAG_CONSOLE_USB_MIRROR */
+
 #if CONFIG_ESP_CONSOLE_UART
 static size_t newlines(const char *s, size_t len)
 {
@@ -181,9 +271,12 @@ static size_t wire_len(const char *s, size_t len)
 }
 
 /* Write with the console's line-ending rule; `cap` = size of the buffer behind s
- * (room to expand LF to CR LF in place). */
+ * (room to expand LF to CR LF in place). Under s_console_mux. */
 static void wire_write(char *s, size_t len, size_t cap)
 {
+#if CONFIG_DIAG_CONSOLE_USB_MIRROR
+    usb_copy(s, len);   /* first: the line endings below are expanded in s itself */
+#endif
 #if CONFIG_LIBC_STDOUT_LINE_ENDING_CRLF
     size_t nl = newlines(s, len);
     if (nl == 0) {
@@ -613,6 +706,9 @@ esp_err_t diag_log_init(void)
     }
 #if CONFIG_ESP_CONSOLE_UART
     esp_err_t cerr = ESP_OK;
+#if CONFIG_DIAG_CONSOLE_USB_MIRROR
+    esp_err_t uerr = ESP_ERR_INVALID_STATE;   /* the console did not start */
+#endif
     if (!uart_is_driver_installed(CONSOLE_PORT)) {
         /* Let the lines printed so far leave the FIFO before the driver takes over. */
         fflush(stdout);
@@ -643,6 +739,9 @@ esp_err_t diag_log_init(void)
         }
         s_con_task = writer ? t : NULL;
         s_con_ordered = writer;
+#if CONFIG_DIAG_CONSOLE_USB_MIRROR
+        uerr = usb_start();
+#endif
         /* printf and friends go through the driver too, so their bytes queue
          * behind the log lines handed over so far instead of racing them
          * into the FIFO (lines still waiting in the ring can come later). */
@@ -659,6 +758,14 @@ esp_err_t diag_log_init(void)
     } else if (internal_stack) {
         ESP_LOGW("diag", "console task stack in internal RAM: no room for it in PSRAM");
     }
+#if CONFIG_DIAG_CONSOLE_USB_MIRROR
+    if (uerr == ESP_OK) {
+        ESP_LOGI("diag", "console copied to the built-in USB (%s now)",
+                 usb_serial_jtag_is_connected() ? "a host is attached" : "no host");
+    } else {
+        ESP_LOGW("diag", "console not copied to the built-in USB: %s", esp_err_to_name(uerr));
+    }
+#endif
 #endif
     if (s_banks.prev_found) {
         ESP_LOGI("diag", "previous boot's log found: %u lines (readable once its image generation is checked)",
@@ -691,6 +798,16 @@ void diag_log_drain_console(uint32_t ms)
     if (used < budget) {
         (void)uart_wait_tx_done(CONSOLE_PORT, budget - used);
     }
+#if CONFIG_DIAG_CONSOLE_USB_MIRROR
+    /* Then the USB copy's buffer, briefly and only to a host that is there
+     * (one that does not read would hold it the whole time). */
+    used = xTaskGetTickCount() - t0;
+    if (s_usb && used < budget && usb_serial_jtag_is_connected()) {
+        TickType_t left = budget - used;
+        TickType_t cap = pdMS_TO_TICKS(USB_DRAIN_MAX_MS);
+        (void)usb_serial_jtag_wait_tx_done(left < cap ? left : cap);
+    }
+#endif
 #else
     (void)ms;
 #endif
@@ -815,4 +932,7 @@ void diag_log_stats(diag_log_stats_t *out)
     portENTER_CRITICAL(&s_lock);
     *out = s_stats;
     portEXIT_CRITICAL(&s_lock);
+#if CONFIG_DIAG_CONSOLE_USB_MIRROR
+    out->usb_connected = out->usb_mirror && usb_serial_jtag_is_connected();
+#endif
 }

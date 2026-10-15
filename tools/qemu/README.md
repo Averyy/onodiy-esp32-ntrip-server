@@ -263,13 +263,23 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    drained after the answer: the station's packets (`qemu-net.pcap`)
    acknowledge every byte of the request and the client's FIN (a server
    that stopped reading would leave its receive window shut, the upload
-   stalled in front of the answer); libslirp also resets that connection
-   right after the client's FIN, with exactly the station's RCV.NXT, while
-   the lingering close still holds the socket on it, in TIME_WAIT by then:
-   the TIME_WAIT hook (check 3) must leave such a connection to lwIP, and a
-   version of it that did not made the station abort here (`tcp_recved` on
-   the freed pcb), which the end checks catch (the check's line says
-   whether that reset came); `GET /nope` with a body gets the setup AP's captive redirect
+   stalled in front of the answer); libslirp has also reset that connection
+   right after the client's FIN, with exactly the station's RCV.NXT (every
+   run on the Mac before the socket let go at TIME_WAIT), while the
+   lingering close still read: the client's FIN puts the connection in
+   TIME_WAIT, and the socket lets go of it right there, inside lwIP's
+   handling of that FIN (`components/network/net_tw.c`), so the TIME_WAIT
+   hook (check 3) may end it on that reset; a version of the hook from
+   before the letting go ended it with the socket still on the pcb, and the
+   station aborted here (`tcp_recved` on the freed pcb), which the end
+   checks catch (the check's line says whether that reset came); 20 more
+   refused 4 KB bodies whose client closes right after the answer and the
+   station's FIN and connects again at once (its FIN reaches the station
+   while the lingering close still reads, with the next SYN right behind
+   it): each answered `404` with `Connection: close` and the station's FIN,
+   no crash or restart (a round slower than 5 s is named: a drain that
+   missed the end would hold the server task for its 2 s);
+   `GET /nope` with a body gets the setup AP's captive redirect
    (this build counts as the AP) with `Connection: close`; `GET
    /api/session` with a body gets `400 bad_request`; a request with
    `Connection: close`, a `GET / HTTP/1.0` and an HTTP/1.0 request with

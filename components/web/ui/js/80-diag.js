@@ -96,6 +96,8 @@ function logStats(l) {
     ['Overwritten in memory', fmt.num(l.ring_overwritten)],
     ['Cut to the line limit', fmt.num(l.cut)],
     ['Not sent to the serial console', fmt.num(l.console_dropped) + ' lines (' + fmt.bytes(l.console_dropped_bytes) + ')'],
+    l.usb_mirror ? ['Copy on the built-in USB', (l.usb_connected ? 'host attached' : 'no host') + ', '
+      + fmt.num(l.usb_dropped) + ' lines not sent (' + fmt.bytes(l.usb_dropped_bytes) + ')'] : null,
     ['Previous start', l.prev_boot_available ? fmt.num(l.prev_boot_lines) + ' lines readable' : 'not readable'],
   ]);
 }

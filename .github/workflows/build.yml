@@ -105,6 +105,13 @@ jobs:
             echo "::error::the station build has a bench-only option on (sdkconfig.bench / sdkconfig.hold belong to bench builds only)"
             exit 1
           fi
+          # Nor the console's copy on the built-in USB (on in sdkconfig.bench)
+          # or what it selects: the built-in USB kept running and the USB PHY
+          # powered while Wi-Fi runs, which can lower Wi-Fi performance.
+          if grep -E '^CONFIG_(DIAG_CONSOLE_USB_MIRROR|USJ_ENABLE_USB_SERIAL_JTAG|ESP_PHY_ENABLE_USB)=y' sdkconfig; then
+            echo "::error::the station build keeps the built-in USB or the USB PHY on (sdkconfig.defaults turns both off; the console's copy on the built-in USB is for bench builds)"
+            exit 1
+          fi
 
       - name: Upload firmware
         uses: actions/upload-artifact@v7
@@ -122,10 +129,11 @@ jobs:
             build/config/sdkconfig.json
             THIRD_PARTY_NOTICES.md
 
-  # The bench overlay (sdkconfig.bench: receiver flasher and bench console
-  # on) compiles code the station image leaves out. Built with the same
-  # Kconfig check and -Werror on our components; nothing is uploaded, and the
-  # release job does not depend on it (a bench build is never released).
+  # The bench overlay (sdkconfig.bench: receiver flasher, bench console and
+  # the console's copy on the built-in USB on) compiles code the station
+  # image leaves out. Built with the same Kconfig check and -Werror on our
+  # components; nothing is uploaded, and the release job does not depend on
+  # it (a bench build is never released).
   firmware-bench:
     name: Firmware, bench overlay (esp32s3)
     runs-on: ubuntu-24.04
@@ -151,9 +159,10 @@ jobs:
           fi
           # The overlay was really applied: the bench options are on (the
           # console, the flasher, the link's bench hooks, the held first
-          # receiver configuration, test-Onocoy caster slots).
+          # receiver configuration, test-Onocoy caster slots, the console's
+          # copy on the built-in USB).
           for opt in CONFIG_BENCH_CONSOLE CONFIG_UM98X_FLASH_ENABLE CONFIG_GNSS_LINK_BENCH_HOOKS \
-                     CONFIG_STATION_HOLD_FIRST_APPLY CONFIG_NTRIP_TEST_ONOCOY_SLOT; do
+                     CONFIG_STATION_HOLD_FIRST_APPLY CONFIG_NTRIP_TEST_ONOCOY_SLOT CONFIG_DIAG_CONSOLE_USB_MIRROR; do
             if ! grep -q "^$opt=y" build-bench/sdkconfig; then
               echo "::error::$opt is not on in build-bench/sdkconfig: the sdkconfig.bench overlay was not applied"
               exit 1

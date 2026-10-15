@@ -834,6 +834,13 @@ void web_linger_close(httpd_req_t *req)
      * when the block was next allocated). Leaving the FIN unread keeps that
      * sequence from starting: readable with nothing queued is the FIN (or an
      * error), and the session's close() then does a full close.
+     *
+     * When the client's FIN comes after ours, it puts the connection in
+     * TIME_WAIT (or CLOSING), where lwIP may free the pcb without telling
+     * this socket. So the socket lets go of the connection right there,
+     * inside lwIP's handling of that FIN (components/network/net_tw.c): the
+     * drain then reads what is queued and sees the end, and the close()
+     * after it touches no pcb.
      */
     (void)web_conn_drain(&(web_drain_io_t){ .readable = drain_readable, .queued = drain_queued,
                                             .drop = drain_drop, .now_ms = drain_now, .ctx = &fd },

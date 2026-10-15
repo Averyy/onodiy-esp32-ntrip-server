@@ -251,6 +251,28 @@ uint32_t net_tw_over_start(uint32_t now, uint32_t tw_ticks)
     return now - tw_ticks - 1u;
 }
 
+/* ---- a half-closed socket lets go at TIME_WAIT ------------------------------------------- */
+
+bool net_tw_watch(net_tcp_state_t st, bool owned)
+{
+    return owned && st == NET_TCP_FIN_WAIT;
+}
+
+bool net_tw_let_go(net_tcp_state_t st, bool fin, bool taken)
+{
+    return (st == NET_TCP_CLOSING || st == NET_TCP_TIME_WAIT) && (fin || !taken);
+}
+
+bool net_tw_drop_refused(net_tcp_state_t st, bool fin, bool taken)
+{
+    return st == NET_TCP_TIME_WAIT && !fin && !taken;
+}
+
+bool net_tw_let_go_now(net_tcp_state_t st, bool owned)
+{
+    return owned && st == NET_TCP_TIME_WAIT;
+}
+
 /* ---- cached scan list ----------------------------------------------------------------- */
 
 size_t net_scan_insert(net_scan_entry_t *list, size_t count, size_t cap, const net_scan_entry_t *e)

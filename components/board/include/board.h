@@ -35,9 +35,9 @@ typedef struct {
 } board_desc_t;
 
 /**
- * Validate the pin map (valid GPIOs, no clash with flash/PSRAM/console pins,
- * no duplicates), configure the button input, and put optional outputs (LED,
- * reset line) in a safe state.
+ * Validate the pin map (valid GPIOs, no clash with the flash/PSRAM, native
+ * USB or console pins, no duplicates), configure the button input, and put
+ * optional outputs (LED, reset line) in a safe state.
  *
  * A call after a successful one returns ESP_OK at once (an early boot step
  * may run it before the normal init).

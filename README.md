@@ -52,11 +52,36 @@ If you get the wrong one, unplug and turn the plug over.
 
 Our firmware's console is on UART0, so plug the `ESP32S3` port in the CH343P way
 round to see its log. Either side should flash the ESP32: esptool works over the
-built-in USB, and the CH343P side has the auto-reset pair. Sending the log over the
-built-in USB as well, so that either way round shows it and flashing resets the chip
-by itself on both, is planned. Until then the current build turns the built-in USB
-off while it runs (`CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=n`), so that side shows only the
-chip's ROM output, and to flash through it you hold **BOT** and press **RST** first.
+built-in USB, and the CH343P side has the auto-reset pair. The station build (and
+the `sdkconfig.hold` one) turns the built-in USB off while it runs
+(`CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=n`) and lets Wi-Fi power the USB PHY down
+(`CONFIG_ESP_PHY_ENABLE_USB=n`): the ESP-IDF documentation says a powered USB PHY can
+lower Wi-Fi performance. That side then shows only the chip's ROM output, and to flash
+through it you hold **BOT** and press **RST** first.
+
+Bench builds (`sdkconfig.bench`) copy the console to the built-in USB as well
+(`CONFIG_DIAG_CONSOLE_USB_MIRROR`, off by default), so either way round shows the
+log; the bench console reads its input on the CH343P side only. The built-in USB then
+keeps running, so esptool can reset the chip into download mode through it, as it
+does through the CH343P side's auto-reset pair (to be confirmed on the board), and the
+USB PHY stays powered while Wi-Fi runs, with or without a host on that side. How much
+Wi-Fi that costs on this board has not been measured; compare signal strength and
+throughput with and without the copy before turning it on for a station. The copy
+never holds the console up: with no host on the built-in USB nothing is sent there,
+and lines that a host that does not read has no room for are dropped and counted
+(`GET /api/health`, `log.usb_dropped`). It starts with the app's first step: the
+startup lines before that, and panic output, are not copied.
+
+Turning the copy off in a build directory that had it on leaves the built-in USB and
+the USB PHY on there: its `sdkconfig` keeps them at `y`. Set all three to n in it (or
+start a new build directory); the configure step warns when the USB PHY is on outside
+a bench build, or without the copy:
+
+```
+CONFIG_DIAG_CONSOLE_USB_MIRROR=n
+CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=n
+CONFIG_ESP_PHY_ENABLE_USB=n
+```
 
 **Cables and power.** A USB-C-to-C cable gives neither power nor data on either port:
 the board leaves out the USB-C CC resistors. Plug each port into a USB-A port instead,
@@ -120,7 +145,7 @@ the receiver, and opening the receiver's USB-C does not reset it either.
 | `tools/bench/` | Host-side bench tools for the board: port finder, captures of both serial ports, receiver queries, RTCM inspection, station API dumps, and the receiver boot menu check over its USB port (see its README) |
 | `tools/qemu/` | The firmware in Espressif's QEMU, no board needed: build and run script, smoke test (see its README) |
 | `sdkconfig.qemu` | QEMU-only configuration overlay used by `tools/qemu/run.sh`; never for a station |
-| `sdkconfig.bench` | Bench-unit configuration overlay: receiver firmware updates on, bench console on UART0, receiver byte capture (see Building); never released |
+| `sdkconfig.bench` | Bench-unit configuration overlay: receiver firmware updates on, bench console on UART0, receiver byte capture, console copied to the built-in USB (see Building); never released |
 | `reference/` | Hardware notes (board, antenna); private research is kept out of the repo |
 
 ## Building
@@ -196,7 +221,8 @@ Notes:
   on a bench unit: a package can be uploaded and checked against every rule, but
   nothing is sent to the receiver. A bench build turns them on together with a bench
   console on UART0 that runs the receiver tests one at a time and records every byte
-  (`help` lists the commands):
+  (`help` lists the commands), and copies the console to the built-in USB (see
+  [The two USB-C ports](#the-two-usb-c-ports) for its Wi-Fi cost):
 
   ```sh
   idf.py -B build-bench -D SDKCONFIG=build-bench/sdkconfig \

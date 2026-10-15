@@ -30,7 +30,7 @@ gitignored.
 | Port (silkscreen) | Bridge | USB ID | `ports.py` role | What it is |
 |---|---|---|---|---|
 | bottom edge (`ESP32S3`), one way round | CH343P | `1a86:55d3` | `esp32-console` | ESP32-S3 UART0 console, 115200; `idf.py flash` and bench work go here |
-| bottom edge (`ESP32S3`), plug turned over | none: the chip's built-in USB Serial/JTAG | `303a:1001` | `esp32-native-usb` | ESP32-S3 built-in USB: ROM output and esptool; no log from our firmware yet |
+| bottom edge (`ESP32S3`), plug turned over | none: the chip's built-in USB Serial/JTAG | `303a:1001` | `esp32-native-usb` | ESP32-S3 built-in USB: ROM output, esptool, and in bench builds a copy of our firmware's console (output only) |
 | top edge (no label) | CH340N | `1a86:7523` | `um982-com2` | UM982 **COM2**, 115200 by default |
 
 The `ESP32S3` port is orientation-dependent: which of the two devices the
@@ -39,11 +39,18 @@ the port "ESP32S3 USB&&UART"). The firmware's console and the bench console
 are on UART0, so bench work uses the CH343P orientation: if `ports.py`
 lists the port as `esp32-native-usb` (and the console as not found), unplug
 and turn the plug over. `--console auto` picks the CH343P by VID/PID only;
-in the other orientation name the port. Sending the log over the built-in
-USB as well, so that either
-orientation shows it, is a planned firmware change; until then the current
-build switches the built-in USB off while it runs, and flashing through it
-needs **BOT** held while pressing **RST**.
+in the other orientation name the port. A bench build (`sdkconfig.bench`)
+copies its console's output to the built-in USB too
+(`CONFIG_DIAG_CONSOLE_USB_MIRROR`, off by default), so a capture there shows
+the log, but the bench console reads its input on the CH343P side only. The
+copy keeps the USB PHY powered while Wi-Fi runs, which can lower Wi-Fi
+performance (not measured on this board yet). The station and hold builds
+leave it out and switch the built-in USB off while they run; flashing
+through it then needs **BOT** held while pressing **RST**. A build directory
+that had the copy on keeps the built-in USB and the USB PHY on after the
+copy is turned off: set `CONFIG_DIAG_CONSOLE_USB_MIRROR`,
+`CONFIG_USJ_ENABLE_USB_SERIAL_JTAG` and `CONFIG_ESP_PHY_ENABLE_USB` to `n` in
+its `sdkconfig`, or start a new one.
 
 Neither port works on a USB-C-to-C cable, not even for power (the board
 leaves out the USB-C CC resistors): plug both into USB-A ports, through a
