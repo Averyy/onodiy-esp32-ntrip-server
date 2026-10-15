@@ -103,6 +103,23 @@ if(NOT "${_release_version}" STREQUAL "" AND (CONFIG_NETWORK_QEMU_ETHERNET OR CO
                         "sdkconfig.defaults alone")
 endif()
 
+# The console's copy on the built-in USB (CONFIG_DIAG_CONSOLE_USB_MIRROR, off
+# by default, on in sdkconfig.bench) selects CONFIG_ESP_PHY_ENABLE_USB, which
+# keeps the USB PHY powered while Wi-Fi runs and can cost Wi-Fi performance.
+# Turned off, it leaves that on in the build directory's sdkconfig. Say so
+# when the PHY is on without the copy, or in a build that is not a bench
+# build (a station build carried over from a bench build directory).
+if(CONFIG_ESP_PHY_ENABLE_USB AND (NOT CONFIG_BENCH_CONSOLE OR NOT CONFIG_DIAG_CONSOLE_USB_MIRROR))
+    idf_build_get_property(_sdkconfig SDKCONFIG)
+    message(WARNING "The USB PHY stays powered while Wi-Fi runs (CONFIG_ESP_PHY_ENABLE_USB), which can lower "
+                    "Wi-Fi performance. Only the bench builds' copy of the console on the built-in USB needs it; "
+                    "here it is most likely left over from when this build directory had that copy on. To turn "
+                    "it off, set these to n in ${_sdkconfig} (or start a new build directory):\n"
+                    "  CONFIG_DIAG_CONSOLE_USB_MIRROR=n\n"
+                    "  CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=n\n"
+                    "  CONFIG_ESP_PHY_ENABLE_USB=n")
+endif()
+
 # Our components, by layer. A component may only depend on components of a
 # LOWER layer; peers talk through events. The configure step fails on a
 # same-layer or upward edge, so the graph stays acyclic as the implementation

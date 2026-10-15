@@ -30,7 +30,20 @@
 # behaves as an Onocoy slot at any host, so a local test caster on this
 # network sees the Onocoy retry profile and login guard without a DNS
 # override.
+#
+# And it copies the console to the built-in USB
+# (CONFIG_DIAG_CONSOLE_USB_MIRROR), so the ESP32S3 port shows the log with
+# the plug either way round. That keeps the USB PHY powered while Wi-Fi runs,
+# which the ESP-IDF help says can lower Wi-Fi performance (not measured on
+# the station board yet). Where Wi-Fi is weak, build without it: in a new
+# build directory, with an overlay after this one that says
+# CONFIG_DIAG_CONSOLE_USB_MIRROR=n; in one that had the copy on, with these
+# three in its sdkconfig (it keeps the other two on otherwise):
+#   CONFIG_DIAG_CONSOLE_USB_MIRROR=n
+#   CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=n
+#   CONFIG_ESP_PHY_ENABLE_USB=n
 
 CONFIG_BENCH_CONSOLE=y
 CONFIG_UM98X_FLASH_ENABLE=y
 CONFIG_STATION_HOLD_FIRST_APPLY=y
+CONFIG_DIAG_CONSOLE_USB_MIRROR=y

@@ -60,7 +60,7 @@
  *    inside a printf line, and printf output can overtake lines that wait
  *    in the ring. Before a planned restart the waiting lines and the buffer
  *    are given up to 300 ms to go out.
- *    With CONFIG_DIAG_CONSOLE_USB_MIRROR (the default) everything this
+ *    With CONFIG_DIAG_CONSOLE_USB_MIRROR (bench builds) everything this
  *    console writes (not printf output) is copied to the chip's built-in
  *    USB Serial/JTAG too, which the board's ESP32S3 USB-C port reaches with
  *    the plug the other way round. The copy never waits: a write goes to

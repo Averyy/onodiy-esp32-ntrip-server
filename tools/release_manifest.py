@@ -36,9 +36,11 @@ Checks, so a release the stations would refuse fails here instead:
     one of its keys; the manifest fits the build's size limit; and none of
     the bench-only options is on (the bench console, the receiver byte
     capture, the receiver link's bench hooks, the held first receiver
-    configuration, the test-Onocoy caster slot, and receiver flashing, which
-    stays off in releases until the receiver side has passed on hardware:
-    drop UM98X_FLASH_ENABLE from BENCH_ONLY then, on purpose).
+    configuration, the test-Onocoy caster slot, the console's copy on the
+    built-in USB, which keeps the USB PHY powered while Wi-Fi runs, and
+    receiver flashing, which stays off in releases until the receiver side
+    has passed on hardware: drop UM98X_FLASH_ENABLE from BENCH_ONLY then, on
+    purpose).
 
 Standard library only, plus the openssl command for signing.
 """
@@ -77,7 +79,8 @@ REPO_RE = re.compile(r"^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$")
 
 # Kconfig symbols (sdkconfig.json names, without CONFIG_) a release must not have on.
 BENCH_ONLY = ("BENCH_CONSOLE", "UM98X_FLASH_BYTE_CAPTURE", "UM98X_FLASH_ENABLE",
-              "GNSS_LINK_BENCH_HOOKS", "STATION_HOLD_FIRST_APPLY", "NTRIP_TEST_ONOCOY_SLOT")
+              "GNSS_LINK_BENCH_HOOKS", "STATION_HOLD_FIRST_APPLY", "NTRIP_TEST_ONOCOY_SLOT",
+              "DIAG_CONSOLE_USB_MIRROR")
 
 
 class Fail(Exception):

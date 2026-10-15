@@ -1934,7 +1934,7 @@ All admin only.
   "journal": {"available": true, "capacity": 4064, "oldest_seq": 1, "newest_seq": 77, "sector_cycles": 0,
               "written": 12, "queued": 0, "refused_kind": 0, "refused_budget": 0, "queue_full": 0, "io_errors": 0},
   "log": {"lines": 812, "ring_overwritten": 0, "cut": 0, "console_dropped": 0, "console_dropped_bytes": 0,
-          "prev_boot_available": true, "prev_boot_lines": 640, "usb_mirror": true, "usb_connected": false,
+          "prev_boot_available": true, "prev_boot_lines": 640, "usb_mirror": false, "usb_connected": false,
           "usb_dropped": 0, "usb_dropped_bytes": 0},
   "coredump": {"present": false, "size": 0, "task": "", "pc": null, "backtrace": []},
   "byte_capture_built": false
@@ -1955,7 +1955,8 @@ boot. `recovery_mode`, `reboot_recheck`, `reboot_hold`,
 never sent because the log ring overwrote them first; a burst that the
 console sends later, in order, is not a drop. `log.usb_mirror`: the console
 is also copied to the ESP32's built-in USB (the `ESP32S3` USB-C port with
-the plug turned over); `log.usb_connected`: a USB host is attached there now
+the plug turned over; a build with `CONFIG_DIAG_CONSOLE_USB_MIRROR`, which
+bench builds turn on); `log.usb_connected`: a USB host is attached there now
 (it may not have the port open); `log.usb_dropped` (and `_bytes`): lines not
 copied there although a host was attached, because it did not read and the
 USB buffer was full. With no host attached nothing is copied and nothing is

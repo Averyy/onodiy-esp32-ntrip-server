@@ -50,7 +50,7 @@ menu "Station: diagnostics"
 
     config DIAG_CONSOLE_USB_MIRROR
         bool "Copy the console to the built-in USB (USB Serial/JTAG)"
-        default y
+        default n
         depends on SOC_USB_SERIAL_JTAG_SUPPORTED && ESP_CONSOLE_UART
         select USJ_ENABLE_USB_SERIAL_JTAG
         select ESP_PHY_ENABLE_USB if SOC_WIFI_PHY_NEEDS_USB_WORKAROUND
@@ -73,12 +73,25 @@ menu "Station: diagnostics"
             does: the app's startup lines before it and panic output are not
             copied.
 
-            It keeps the USB PHY powered while Wi-Fi runs (it selects
-            ESP_PHY_ENABLE_USB and USJ_ENABLE_USB_SERIAL_JTAG), which the
-            ESP-IDF help says can lower Wi-Fi performance. Switched off, both
-            go back to off (sdkconfig.defaults) in a new build directory; an
-            existing sdkconfig keeps the values it has until they are set to
-            n there too.
+            Off by default; bench builds turn it on (sdkconfig.bench). It
+            keeps the USB PHY powered while Wi-Fi runs, with or without a
+            host on the port (it selects ESP_PHY_ENABLE_USB and
+            USJ_ENABLE_USB_SERIAL_JTAG), and the ESP-IDF help says that can
+            lower Wi-Fi performance. How much on the station board has not
+            been measured: compare the signal strength and throughput of one
+            board with and without it before turning it on for a station.
+
+            Turning it off in a build directory that had it on leaves the
+            other two on there: that sdkconfig still says
+            CONFIG_ESP_PHY_ENABLE_USB=y and
+            CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y. Set all three to n in it
+            (menuconfig, or edit the file):
+                CONFIG_DIAG_CONSOLE_USB_MIRROR=n
+                CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=n
+                CONFIG_ESP_PHY_ENABLE_USB=n
+            or start a new build directory, which takes them from
+            sdkconfig.defaults. The configure step warns when the USB PHY is
+            on outside a bench build, or without this option.
 
     config DIAG_CONSOLE_USB_TX_BUF
         int "Built-in USB transmit buffer (bytes, internal RAM)"
