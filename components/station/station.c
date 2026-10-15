@@ -140,6 +140,17 @@ _Static_assert(STN_LIVE_END_NONE == (int)STATION_LIVE_END_NONE && STN_LIVE_END_U
                "core live view end reasons mirror station_live_end_t");
 
 _Static_assert(STATION_SGT_OK == 0 && STATION_SGT_E_NOT_RUNNING > STATION_SGT_E_IDLE, "comparison errors");
+_Static_assert(STN_RXBOOT_KEPT == (int)DIAG_RX_BOOT_KEPT && STN_RXBOOT_RESTARTED == (int)DIAG_RX_BOOT_RESTARTED &&
+                   STN_RXBOOT_UNKNOWN == (int)DIAG_RX_BOOT_UNKNOWN && STN_RXBOOT_BY_NONE == (int)DIAG_RX_BOOT_BY_NONE &&
+                   STN_RXBOOT_BY_RESTART == (int)DIAG_RX_BOOT_BY_RESTART &&
+                   STN_RXBOOT_BY_UPTIME == (int)DIAG_RX_BOOT_BY_UPTIME &&
+                   STN_RXBOOT_BY_STREAM == (int)DIAG_RX_BOOT_BY_STREAM,
+               "power-on verdicts are journalled as the core names them");
+_Static_assert(STN_RXBOOT_BY_NONE == (int)STATION_RX_BOOT_BY_NONE &&
+                   STN_RXBOOT_BY_RESTART == (int)STATION_RX_BOOT_BY_RESTART &&
+                   STN_RXBOOT_BY_UPTIME == (int)STATION_RX_BOOT_BY_UPTIME &&
+                   STN_RXBOOT_BY_STREAM == (int)STATION_RX_BOOT_BY_STREAM,
+               "core evidence kinds mirror station_rx_boot_by_t");
 
 ESP_EVENT_DEFINE_BASE(STATION_EVENT);
 
@@ -199,8 +210,10 @@ static bool s_update_claimed;
 /* RAW lease taken by the early boot step (recovery actions build only). */
 static gnss_link_lease_t s_boot_lease;
 
-/* Receiver maintenance across an ESP32 software reset (never NVS; a power
- * cut ends it: the record is ignored after a power-on or brownout reset). */
+/* Receiver maintenance across an ESP32 reset that keeps the RTC memory
+ * (never NVS; a power cut that clears it ends it). On the ESP32-S3 the EN
+ * pin reads as power-on, so the record is honoured after a power-on or
+ * brownout reset too: one that survived says the memory kept its power. */
 static RTC_NOINIT_ATTR stn_maint_rtc_t s_maint_rtc;
 static volatile bool s_maint_end_req;    /* the user's "end now", for the station task */
 /* The first-apply hold for this boot only: due, but it could not be stored
@@ -215,6 +228,18 @@ static volatile bool s_autocfg_ram_off;
  * ESP32-only reset: the receiver keeps it, so the next boot turns it off.
  * Station task only (and station_init before it runs). */
 static RTC_NOINIT_ATTR stn_sky_rtc_t s_sky_rtc;
+
+/* A power-on boot: did the receiver keep running (stn_rxboot_judge)? The RX
+ * task notes the first restart evidence and the first data; the station
+ * task judges until there is a verdict, and keeps it. */
+static int64_t s_rxb_restart_us = INT64_MAX;     /* under s_lock (written by the RX task) */
+static int64_t s_rxb_data_us = INT64_MAX;        /* under s_lock (written by the RX task) */
+static uint8_t s_rxb_state;                      /* station_rx_boot_t, under s_lock */
+static uint8_t s_rxb_by;                         /* station_rx_boot_by_t, under s_lock */
+static bool s_rxb_judging;                       /* station task (set at init) */
+static int64_t s_rxb_uptime_at_ms = STN_NEVER;   /* station task */
+static uint32_t s_rxb_uptime_ms;                 /* station task */
+static bool s_rxb_clock_closed;                  /* station task: a job of ours may have restarted the receiver */
 
 /* Station task only. */
 static um98x_base_profile_t s_profile;
@@ -388,16 +413,17 @@ static void lockout_release(void)
     }
 }
 
-/* Maintenance that was on before an ESP32 software reset goes on with its
- * time left (station_init restores it); a power cut ends it, and so does an
- * open journal. */
+/* Maintenance that was on before an ESP32 reset goes on with its time left
+ * (station_init restores it) whenever its RTC record survived, whatever the
+ * reset class: on the ESP32-S3 the EN pin (the USB auto-reset, the RST
+ * button) reads as power-on while the receiver keeps running and may be
+ * mid-work, so hands off stays on; a record that survived says the ESP32's
+ * memory kept its power. A power cut that clears it ends maintenance, and
+ * so does an open journal. */
 static bool maint_restore_due(uint32_t *left, uint32_t *spent)
 {
     uint32_t stamp = 0;
-    lifecycle_boot_info_t boot;
-    lifecycle_get_boot_info(&boot);
-    bool power_lost = boot.reset_class == LIFECYCLE_RESET_POWER_ON || boot.reset_class == LIFECYCLE_RESET_BROWNOUT;
-    return !power_lost && !journal_open(s_journal_err) && stn_maint_rtc_read(&s_maint_rtc, &stamp, left, spent) &&
+    return !journal_open(s_journal_err) && stn_maint_rtc_read(&s_maint_rtc, &stamp, left, spent) &&
            lifecycle_rtc_stamp_ok(stamp);
 }
 
@@ -727,12 +753,23 @@ static void on_rtcm_frame(const uint8_t *frame, size_t len, uint16_t msg_type, i
     if (msg_type == 1005 || msg_type == 1006) {
         s_arp_frames++;
     }
+    if (s_rxb_data_us == INT64_MAX) {
+        s_rxb_data_us = arrival_us;   /* the first data of this boot (power-on verdict) */
+    }
     stn_obs_feed(&s_obs, msg_type, has_epoch, has_epoch ? msm.epoch_time : 0, t);
     portEXIT_CRITICAL(&s_lock);
 }
 
 static void on_text_line(const char *line, size_t len, void *ctx)
 {
+    /* The first NMEA sentence of this boot (power-on verdict). Only this
+     * task writes it: the unlocked check reads its own write. */
+    if (s_rxb_data_us == INT64_MAX && stn_line_is_nmea(line, len)) {
+        int64_t t = esp_timer_get_time();
+        portENTER_CRITICAL(&s_lock);
+        s_rxb_data_us = t;
+        portEXIT_CRITICAL(&s_lock);
+    }
     um98x_ctl_on_line(line, len, ctx);
     gnss_obs_feed_line(line, len);
     s_last_line_ms = now_ms32();
@@ -759,6 +796,12 @@ static void on_loader_prompt(void *ctx)
 static void on_receiver_restart(void *ctx)
 {
     (void)ctx;
+    int64_t t = esp_timer_get_time();
+    portENTER_CRITICAL(&s_lock);
+    if (s_rxb_restart_us == INT64_MAX) {
+        s_rxb_restart_us = t;   /* the first restart evidence of this boot (power-on verdict) */
+    }
+    portEXIT_CRITICAL(&s_lock);
     s_restart_pending = true;
     wake();
 }
@@ -1296,10 +1339,8 @@ static void job_apply(const stn_job_t *job, stn_result_t *r)
     } else if (err != ESP_OK && s_apply.signal_group_rejected) {
         sg_refused_fallback(r);
     }
-    if (err != ESP_OK && !r->nothing_sent && !r->sg_back) {
-        ESP_LOGE(TAG, "profile apply failed at \"%s\" (%s)%s: retried later", s_apply.failed_cmd, s_apply.reason,
-                 r->receiver_lost ? ", receiver lost" : "");
-    }
+    /* The failure is logged with what follows it once the core has
+     * decided (STN_NOTE_APPLY_FAILED). */
 }
 
 static void job_restore(stn_result_t *r)
@@ -1309,7 +1350,9 @@ static void job_restore(stn_result_t *r)
         return;
     }
     ESP_LOGW(TAG, "no RTCM after the failed apply: restoring the RTCM outputs only");
-    esp_err_t err = um98x_ctl_restore_output(s_lease, &s_profile, &s_apply);
+    /* s_apply still holds the failed apply's result: what the receiver
+     * refused there is left out, then the restore's own result replaces it. */
+    esp_err_t err = um98x_ctl_restore_output(s_lease, &s_profile, &s_apply, &s_apply);
     lease_drop();
     r->err = (err == ESP_OK) ? STN_OK : STN_E_FAIL;
 }
@@ -1937,9 +1980,19 @@ static void job_bench(stn_result_t *r)
 }
 #endif
 
+static void rxboot_tick(void);
+
 static void run_job(const stn_job_t *job, stn_result_t *r)
 {
     memset(r, 0, sizeof(*r));
+    if (s_rxb_judging && (job->kind == STN_JOB_APPLY || job->kind == STN_JOB_RECEIVER_RESET ||
+                          job->kind == STN_JOB_FLASH || job->kind == STN_JOB_BENCH ||
+                          job->kind == STN_JOB_LEAVE_LOADER)) {
+        /* This job may restart the receiver: a version log after a restart
+         * of ours tells nothing about the power. What came before counts. */
+        rxboot_tick();
+        s_rxb_clock_closed = true;
+    }
     switch (job->kind) {
     case STN_JOB_IDENTIFY:
         job_identify(job, r);
@@ -2038,6 +2091,7 @@ static void publish_status(const stn_in_t *in)
     o->identity_confirmed = core.identity_ok;
     o->alerts = stn_alerts(&core);
     o->profile_applied = core.profile_applied;
+    o->rtcm_differs = core.rtcm_differs;
     o->rtcm1230_supported = in->rtcm1230_ok;
     o->rtcm1230_known = rtcm1230_state() >= 0;
     o->config_failed = (core.alerts & STN_ALERT_CONFIG_FAILED) != 0;
@@ -2231,6 +2285,13 @@ static void handle_notes(const stn_note_t *n, unsigned count)
         case STN_NOTE_FLASH_CLOSE:
             flash_close(x->a != 0);
             break;
+        case STN_NOTE_APPLY_FAILED: {
+            char next[112];
+            (void)stn_apply_next_text(x->a > 0 ? (uint32_t)x->a : 0u, next, sizeof(next));
+            ESP_LOGE(TAG, "profile apply failed at \"%s\" (%s)%s: %s", s_apply.failed_cmd, s_apply.reason,
+                     x->b ? ", receiver lost" : "", next);
+            break;
+        }
         default:
             break;
         }
@@ -2374,9 +2435,102 @@ static void after_step(const stn_in_t *in)
     }
 }
 
+/* ---- after a power-on reset: did the receiver keep running? ------------------ */
+
+static int64_t us_to_ms(int64_t us)
+{
+    return us == INT64_MAX ? STN_NEVER : us / 1000;
+}
+
+/* What follows from the verdict (once per power-on boot). */
+static void rxboot_decided(stn_rxboot_t v, stn_rxboot_by_t by)
+{
+    uint8_t st = v == STN_RXBOOT_KEPT        ? STATION_RX_BOOT_KEPT
+                 : v == STN_RXBOOT_RESTARTED ? STATION_RX_BOOT_RESTARTED
+                                             : STATION_RX_BOOT_UNKNOWN;
+    portENTER_CRITICAL(&s_lock);
+    s_rxb_state = st;
+    s_rxb_by = (uint8_t)by;
+    esp_err_t jerr = s_journal_err;
+    um98x_flash_journal_t j = s_journal;
+    portEXIT_CRITICAL(&s_lock);
+    journal_push(DIAG_EV_RX_BOOT, (int32_t)v, (int32_t)by);
+
+    unsigned up_s = (unsigned)(s_rxb_uptime_ms / 1000u);
+    switch (v) {
+    case STN_RXBOOT_KEPT:
+        if (by == STN_RXBOOT_BY_UPTIME) {
+            ESP_LOGW(TAG, "power-on reset, but the receiver kept running (it has run for %u s, since before the "
+                          "ESP32 started): only the ESP32 was reset (its reset pin, such as the USB auto-reset); "
+                          "not a power loss",
+                     up_s);
+        } else {
+            ESP_LOGW(TAG, "power-on reset, but the receiver kept running (data at once, no restart banner): only "
+                          "the ESP32 was reset (its reset pin, such as the USB auto-reset); not a power loss");
+        }
+        ledger_note_power_kept();
+        break;
+    case STN_RXBOOT_RESTARTED:
+        if (by == STN_RXBOOT_BY_UPTIME) {
+            ESP_LOGW(TAG, "power-on reset: the receiver restarted too (it has run for %u s, less than the ESP32): "
+                          "the power was cut",
+                     up_s);
+        } else {
+            ESP_LOGW(TAG, "power-on reset: the receiver restarted too (its restart banner before any data): the "
+                          "power was cut");
+        }
+        break;
+    default:
+        ESP_LOGW(TAG, "power-on reset: nothing the receiver sent in %u s tells whether it kept running; not counted "
+                      "as a power loss",
+                 (unsigned)(STN_RXBOOT_WINDOW_MS / 1000));
+        break;
+    }
+
+    /* An open flash journal's boot plan took the power-on reset for a
+     * receiver restart (station_early_boot): say what the verdict means for
+     * it. Report-only builds log it; no build acts on the plan before it. */
+    if (jerr == ESP_OK && j.state != UM98X_JOURNAL_NEEDS_USER && v != STN_RXBOOT_UNKNOWN) {
+        const char *text = NULL;
+        (void)um98x_flash_journal_plan(jerr, &j, v == STN_RXBOOT_RESTARTED, &text);
+        ESP_LOGW(TAG, "receiver flash journal: by the receiver's word this was %s reset; that plan: %s",
+                 v == STN_RXBOOT_RESTARTED ? "a power-on" : "an ESP32-only", text);
+    }
+}
+
+/* Judge a power-on boot until there is a verdict (station task). */
+static void rxboot_tick(void)
+{
+    if (!s_rxb_judging) {
+        return;
+    }
+    int64_t now = now_ms();
+    if (s_rxb_uptime_at_ms == STN_NEVER && !s_rxb_clock_closed) {
+        um98x_ctl_stats_t st;
+        if (um98x_ctl_get_stats(&st) == ESP_OK && st.version_age_ms != UINT32_MAX && st.rx_uptime_ms != UINT32_MAX) {
+            s_rxb_uptime_at_ms = now - (int64_t)st.version_age_ms;
+            s_rxb_uptime_ms = st.rx_uptime_ms;
+        }
+    }
+    stn_rxboot_in_t in = { .now_ms = now, .uptime_at_ms = s_rxb_uptime_at_ms, .uptime_ms = s_rxb_uptime_ms };
+    portENTER_CRITICAL(&s_lock);
+    in.restart_ms = us_to_ms(s_rxb_restart_us);
+    in.data_ms = us_to_ms(s_rxb_data_us);
+    portEXIT_CRITICAL(&s_lock);
+    stn_rxboot_by_t by = STN_RXBOOT_BY_NONE;
+    stn_rxboot_t v = stn_rxboot_judge(&in, &by);
+    if (v == STN_RXBOOT_PENDING) {
+        return;
+    }
+    s_rxb_judging = false;
+    rxboot_decided(v, by);
+}
+
 /* Flags from other tasks, the ledger and the survey fallback's 1005 feed. */
 static void service(const stn_in_t *in)
 {
+    rxboot_tick();
+
     if (s_restart_pending) {
         s_restart_pending = false;
         ESP_LOGW(TAG, "the receiver restarted (its restart banner, its restarting answer or an unasked version log)");
@@ -2662,6 +2816,7 @@ static void flash_recovery_begin(void)
         const char *text = NULL;
         lifecycle_boot_info_t boot;
         lifecycle_get_boot_info(&boot);
+        /* See station_early_boot: "power" may be the reset pin on this chip. */
         bool power = boot.reset_class == LIFECYCLE_RESET_POWER_ON || boot.reset_class == LIFECYCLE_RESET_BROWNOUT;
         (void)um98x_flash_journal_plan(jerr, &j, power, &text);
         if (CONFIG_UM98X_FLASH_ENABLE && CONFIG_UM98X_FLASH_RECOVERY_ACTIONS) {
@@ -2759,11 +2914,24 @@ esp_err_t station_early_boot(void)
 
     lifecycle_boot_info_t boot;
     lifecycle_get_boot_info(&boot);
+    /* ASSUMPTION, wrong on this board: a power-on (or brownout) reset is
+     * taken as a receiver restart, and the race into the loader below has
+     * to start at once to catch its window. On the ESP32-S3 the EN pin (the
+     * USB serial chip's auto-reset that every flash and capture uses, the
+     * RST button) reads as power-on while the receiver keeps running (our
+     * bench), so after such a reset the receiver may still sit in its
+     * loader or in a transfer, and the race would send its stop key into
+     * that. Only the recovery actions act on this, and no build turns them
+     * on (CONFIG_UM98X_FLASH_RECOVERY_ACTIONS, report-only everywhere): they
+     * must check the receiver first (listen for its stream or its loader)
+     * before they can be turned on. The station judges afterwards whether
+     * the receiver kept running (rxboot_decided logs the plan that fits). */
     bool receiver_was_reset =
         boot.reset_class == LIFECYCLE_RESET_POWER_ON || boot.reset_class == LIFECYCLE_RESET_BROWNOUT;
     const char *text = NULL;
     s_recover_plan = um98x_flash_journal_plan(jerr, &s_journal, receiver_was_reset, &text);
-    ESP_LOGW(TAG, "receiver flash journal at boot (%s reset): %s", receiver_was_reset ? "power-on" : "ESP32-only", text);
+    ESP_LOGW(TAG, "receiver flash journal at boot (%s reset): %s",
+             receiver_was_reset ? "power-on class: power cut, or on this chip the reset pin" : "ESP32-only", text);
     if (jerr != ESP_OK || !um98x_flash_journal_needs_race(&s_journal, receiver_was_reset)) {
         return ESP_OK;   /* the rest of the recovery table runs in the station task */
     }
@@ -2849,18 +3017,29 @@ esp_err_t station_init(void)
     uint32_t spent = 0;
     lifecycle_boot_info_t boot;
     lifecycle_get_boot_info(&boot);
+    bool power_class = boot.reset_class == LIFECYCLE_RESET_POWER_ON || boot.reset_class == LIFECYCLE_RESET_BROWNOUT;
     bool restore = maint_restore_due(&left, &spent);
     if (!restore) {
         stn_maint_rtc_write(&s_maint_rtc, 0, 0, 0);
     }
     /* The live view's output after an ESP32-only reset: the receiver did not
-     * restart, so it may still send it (a flash session restarts it). */
+     * restart, so it may still send it (a flash session restarts it). A
+     * power-on reset may be the ESP32-S3's reset pin, with the receiver
+     * running on: a record that survived is honoured then too. If the
+     * receiver did restart, its banner clears it (stn_restart_seen), and an
+     * "off" it no longer needs changes nothing. */
     uint32_t sky_stamp = 0;
-    bool sky_restore = boot.reset_class != LIFECYCLE_RESET_POWER_ON && !journal_open(s_journal_err) &&
-                       stn_sky_rtc_read(&s_sky_rtc, &sky_stamp) && lifecycle_rtc_stamp_ok(sky_stamp);
+    bool sky_restore = !journal_open(s_journal_err) && stn_sky_rtc_read(&s_sky_rtc, &sky_stamp) &&
+                       lifecycle_rtc_stamp_ok(sky_stamp);
     if (!sky_restore) {
         stn_sky_rtc_write(&s_sky_rtc, 0, false);
     }
+    /* A power-on boot is judged by what the receiver sends (rxboot_tick). */
+    s_rxb_judging = boot.reset_class == LIFECYCLE_RESET_POWER_ON;
+    portENTER_CRITICAL(&s_lock);
+    s_rxb_state = s_rxb_judging ? STATION_RX_BOOT_PENDING : STATION_RX_BOOT_NONE;
+    s_rxb_by = STATION_RX_BOOT_BY_NONE;
+    portEXIT_CRITICAL(&s_lock);
 
     /* Before the station task starts: nothing has reached the receiver yet. */
     bool held = first_apply_hold_boot();
@@ -2888,7 +3067,17 @@ esp_err_t station_init(void)
             s_gate_on = true;
             ledger_set_maintenance(true);
         }
-        ESP_LOGW(TAG, "receiver maintenance continues after the reset: %u s left, listening only", (unsigned)left);
+        if (power_class) {
+            /* On the ESP32-S3 the EN pin reads as power-on; the record
+             * surviving says the ESP32 kept its memory, and the receiver may
+             * be mid-work: hands off stays on, whatever it sends. */
+            ESP_LOGW(TAG, "receiver maintenance continues after a %s reset (its record survived: the ESP32 kept its "
+                          "memory, e.g. a reset by its pin): %u s left, listening only",
+                     boot.reset_class == LIFECYCLE_RESET_POWER_ON ? "power-on" : "brownout", (unsigned)left);
+        } else {
+            ESP_LOGW(TAG, "receiver maintenance continues after the reset: %u s left, listening only",
+                     (unsigned)left);
+        }
     }
     s_inited = true;
     ESP_LOGI(TAG, "sinks wired, profile hash %08x, station ID %u, %s", (unsigned)um98x_profile_hash(&s_profile),
@@ -2959,6 +3148,8 @@ esp_err_t station_get_status(station_status_t *out)
         out->rx_maintenance = s_core.maint;
         out->maintenance_left_s = stn_maint_left_s(&s_core, lin.now_ms);
         out->maintenance_chosen_s = s_core.maint ? s_core.maint_chosen_s : 0;
+        out->rx_boot = s_rxb_state;
+        out->rx_boot_by = s_rxb_by;
     }
     jerr = s_journal_err;
     journal = s_journal;

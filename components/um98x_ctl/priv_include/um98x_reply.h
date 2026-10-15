@@ -37,10 +37,11 @@
  *   #ANT2GROUPA,...;<body>*hh|crc32       configures on the main (1) or the
  *                                         second (2) antenna input, either
  *                                         checksum: <group>,<n>,<sys>,<mask>...
- *                                         (um98x_bands.h). The header is not
- *                                         captured yet: the body is the text
- *                                         after the first ';', or after the
- *                                         log name when there is none
+ *                                         (um98x_bands.h). The body is the
+ *                                         text after the first ';', or after
+ *                                         the log name when there is none
+ *                                         (build 25164's form, read in a real
+ *                                         apply on 2026-10-14)
  *
  * Anything else (NMEA sentences, other logs) is OTHER: not for this layer.
  *
@@ -48,9 +49,9 @@
  * receiver echoes the command as it was sent).
  *
  * Status: reply formats PROVISIONAL, to be confirmed on hardware (the
- * base-mode log header, the dump item texts and the signal-group log's
- * header in particular). The acknowledgement and refusal lines, the banner
- * and the restarting answer are as UM982 build 25164 sends them. Public
+ * base-mode log header and the dump item texts in particular). The
+ * acknowledgement and refusal lines, the banner, the restarting answer and
+ * the signal-group log are as UM982 build 25164 sends them. Public
  * samples from a sibling receiver (test/fixtures/unicore) follow these
  * rules: the acknowledgement, error, dump and banner lines and a "#MODE,"
  * log with its 2-hex XOR including the lead character; the base-mode body

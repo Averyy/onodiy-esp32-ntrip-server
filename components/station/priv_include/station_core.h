@@ -97,7 +97,29 @@
  * requests stay queued). Exit (the user, or the time is up): the
  * stream-first path as at boot (IDLE, listen 3 s, identity, applied
  * check). The time left survives an ESP32 reset through the caller's RTC
- * record (stn_maint_restore; codec stn_maint_rtc_*), never a power cut.
+ * record (stn_maint_restore; codec stn_maint_rtc_*): every reset that keeps
+ * the ESP32's RTC memory, the power-on class included (on the ESP32-S3 the
+ * reset pin reads as power-on while the receiver, which may be mid-work,
+ * keeps running), never a power cut that clears it.
+ *
+ * Power-on reset (stn_rxboot_judge): the ESP32-S3 reports a reset by its
+ * EN pin (the USB serial chip's auto-reset that every flash uses, the RST
+ * button) as a power-on reset, and the receiver keeps running through it
+ * (our bench: no restart banner, the heartbeat on its other port without a
+ * gap). So a power-on boot counts as a power loss, and as a receiver
+ * restart, only on the receiver's word, judged from what it sent since the
+ * ESP32 started: its restart banner (or other restart evidence) before any
+ * data -> it restarted with the ESP32; a version log that tells its time
+ * since its restart (while it has no time) -> it restarted with the ESP32
+ * when that time started after the ESP32's, else it kept running; RTCM or
+ * NMEA within STN_RXBOOT_DATA_MS of the ESP32's start, before any restart
+ * evidence -> it kept running (a receiver that just got power needs longer
+ * to boot: about 4.4 s from a RESET to its banner, 1.6 s more to data). The
+ * earliest of these decides. Nothing within STN_RXBOOT_WINDOW_MS -> unknown
+ * (counted as neither). Listening is enough for each of them: the verdict
+ * also comes in receiver maintenance, where nothing is sent. PROVISIONAL,
+ * to be confirmed on hardware (the receiver's boot time after a real power
+ * cut was not measured).
  *
  * Live view (a time-boxed window the user opens; satellites first): while
  * it is open the station wants the receiver's satellite-in-view output on,
@@ -131,6 +153,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "station_obs.h"
@@ -404,6 +427,9 @@ typedef enum {
     STN_NOTE_SKY_OFF,        /**< as SKY_ON */
     STN_NOTE_SKY_LEFT_ON,    /**< turning it off failed STN_SKY_OFF_TRIES times: left on until the receiver restarts */
     STN_NOTE_FLASH_CLOSE,    /**< close the receiver-flash journal now: a = 1 the re-apply's check passed, 0 it did not (RECEIVER_ATTENTION raised) */
+    STN_NOTE_APPLY_FAILED,   /**< an apply that sent something failed (CONFIG_FAILED raised): a = the station's own retry
+                                  in s, 0 = none (automatic configuration off: only the user's apply), b = 1 the
+                                  receiver was lost (detection follows) */
 } stn_note_kind_t;
 
 typedef struct {
@@ -440,6 +466,15 @@ typedef struct {
     bool obs_on;               /**< windows are evaluated */
     int64_t check_ms;          /**< re-arm and check at this time (after restart evidence) */
     bool profile_applied;
+    /**
+     * The latest window saw RTCM that differs from the profile: RTCM flowed,
+     * but a checked message was missing or at the wrong rate. Never set by a
+     * window without any RTCM (no antenna, a silent receiver: a stall, which
+     * other alerts explain); cleared by a passing window, a window without
+     * RTCM, and whenever the windows start over (restart, detection, the
+     * stream-first path, a successful apply). Health's profile-drift alert.
+     */
+    bool rtcm_differs;
     uint8_t drift_windows;
     bool drift_blocked;
     uint16_t drift_msg;        /**< first message that failed the latest window (0 = none) */
@@ -749,6 +784,14 @@ unsigned stn_take_notes(stn_t *s, stn_note_t *out, unsigned cap);
 bool stn_surveying(const stn_t *s, int64_t now_ms);
 uint32_t stn_survey_left_s(const stn_t *s, int64_t now_ms);
 /**
+ * What follows a failed apply, in words for its log line: "the station
+ * tries again in 10 min" for retry_in_s > 0 (STN_NOTE_APPLY_FAILED's a),
+ * else that nothing retries it on its own. Pure.
+ * @return the length written (cut to cap - 1).
+ */
+size_t stn_apply_next_text(uint32_t retry_in_s, char *out, size_t cap);
+
+/**
  * The station retries a failed apply on its own (CONFIG_FAILED's backoff):
  * only with automatic configuration on (gnss/autocfg; off while the first
  * apply is held) and for a model it configures (or one not identified yet).
@@ -782,6 +825,45 @@ uint32_t stn_next_detect_in_s(const stn_t *s, int64_t now_ms);
 
 /** CONFIG_FAILED backoff: delay after the n-th failure in a row (n >= 1), ms. */
 int64_t stn_apply_backoff_ms(uint32_t failures);
+
+/* ---- power-on reset: did the receiver keep running? -------------------------- */
+
+#define STN_RXBOOT_WINDOW_MS 30000   /**< evidence counts this long after the ESP32's start */
+#define STN_RXBOOT_DATA_MS   3500    /**< RTCM or NMEA this soon after the ESP32's start: the receiver was running */
+#define STN_RXBOOT_MARGIN_MS 2000    /**< its clock started at least this much before the ESP32's: it kept running */
+
+typedef enum {
+    STN_RXBOOT_PENDING = 0,  /**< no evidence yet */
+    STN_RXBOOT_KEPT,         /**< the receiver kept running: only the ESP32 was reset (its reset pin) */
+    STN_RXBOOT_RESTARTED,    /**< the receiver restarted with the ESP32: the power was cut */
+    STN_RXBOOT_UNKNOWN,      /**< nothing told within STN_RXBOOT_WINDOW_MS */
+} stn_rxboot_t;
+
+typedef enum {
+    STN_RXBOOT_BY_NONE = 0,
+    STN_RXBOOT_BY_RESTART,   /**< its restart banner (or restarting answer, an unasked version log) before any data */
+    STN_RXBOOT_BY_UPTIME,    /**< its version log's time since its restart */
+    STN_RXBOOT_BY_STREAM,    /**< RTCM or NMEA at once */
+} stn_rxboot_by_t;
+
+/** What the receiver sent since the ESP32 started (all times: the ESP32's ms since its start). */
+typedef struct {
+    int64_t now_ms;
+    int64_t restart_ms;      /**< first unsolicited restart evidence (STN_NEVER = none) */
+    int64_t data_ms;         /**< first CRC-valid RTCM frame or checksum-valid NMEA sentence (STN_NEVER = none) */
+    int64_t uptime_at_ms;    /**< arrival of the first version log that told the receiver's time since its restart (STN_NEVER = none) */
+    uint32_t uptime_ms;      /**< that time */
+} stn_rxboot_in_t;
+
+/**
+ * The verdict for a power-on boot (see "Power-on reset" above). Final once it
+ * is not PENDING: the caller judges until then and keeps the first verdict.
+ * @param by out (optional): which evidence decided.
+ */
+stn_rxboot_t stn_rxboot_judge(const stn_rxboot_in_t *in, stn_rxboot_by_t *by);
+
+/** A checksum-valid text line that is an NMEA sentence ('$', five capitals, ','), not a command-layer line. */
+bool stn_line_is_nmea(const char *line, size_t len);
 
 /** Detection candidates: stored baud first, then the short list; full adds the rest; no duplicates. */
 unsigned stn_detect_candidates(uint32_t stored_baud, bool full, uint32_t *out, unsigned cap);

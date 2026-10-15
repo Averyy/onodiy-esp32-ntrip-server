@@ -61,7 +61,8 @@ typedef struct {
  * the 4-character radome code). Printable ASCII without '"', at most
  * UM98X_ANTENNA_STR_MAX characters; trailing spaces are dropped when the
  * profile is stored. The serial number and setup ID only matter with a
- * model.
+ * model. UM982 build 25164 stores the name with runs of spaces collapsed
+ * to one, so names are compared that way (um98x_antenna_str_same).
  */
 typedef struct {
     uint8_t signal_group_master;     /**< e.g. 3 */

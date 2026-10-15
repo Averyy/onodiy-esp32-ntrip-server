@@ -131,6 +131,8 @@ _Static_assert(HL_MODE_FULL == (int)HEALTH_RECOVERY_FULL && HL_MODE_NO_REBOOT ==
                "ladder modes are health_recovery_mode_t");
 _Static_assert(HM_RESET_POWER_ON == (int)LIFECYCLE_RESET_POWER_ON && HM_EV_BOOT == (int)DIAG_EV_BOOT,
                "power-lost alert reads lifecycle's boot records");
+_Static_assert(HM_EV_RX_BOOT == (int)DIAG_EV_RX_BOOT && HM_RXBOOT_RESTARTED == (int)DIAG_RX_BOOT_RESTARTED,
+               "power-lost alert reads the station's power-on verdicts");
 
 /* ---- shared state ----------------------------------------------------------- */
 
@@ -834,7 +836,10 @@ static void tick(void)
                      (obs.best_bands < 4 || obs.e6_lost);
     bool bands = hm_deb(&s_deb_bands, bands_raw, now, BANDS_ON_MS, BANDS_OFF_MS);
 
-    bool drift_raw = s_st.state == STATION_STATE_STREAMING && s_st.identity_confirmed && !s_st.profile_applied &&
+    /* Only RTCM that flows and differs: no RTCM at all (no antenna, a
+     * silent receiver) is a stall, which no_rtcm, receiver_silent or
+     * no_satellites explain. */
+    bool drift_raw = s_st.state == STATION_STATE_STREAMING && s_st.identity_confirmed && s_st.rtcm_differs &&
                      (s_st.alerts & (STATION_ALERT_UNSUPPORTED_MODEL | STATION_ALERT_CONFIG_FAILED)) == 0;
     bool drift = hm_deb(&s_deb_drift, drift_raw, now, DRIFT_ON_MS, DRIFT_OFF_MS);
 

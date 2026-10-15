@@ -681,12 +681,17 @@ static int diag_vprintf(const char *fmt, va_list ap)
         cut = true;
     }
 
+    /* The ring and the console get the same text, control characters
+     * replaced (the download must stay text); `lines` counts lines, not
+     * calls (one log line can take more than one call). */
+    size_t ended = logring_clean_text(line, len);
+
     uint32_t seq = 0;
     if (s_ring_ok) {
         portENTER_CRITICAL_SAFE(&s_lock);
         uint32_t lost = s_banks.ring.hdr->lost;
         seq = logring_append(&s_banks.ring, line, len);
-        s_stats.lines++;
+        s_stats.lines += (uint32_t)ended;
         s_stats.ring_overwritten += s_banks.ring.hdr->lost - lost;
         s_stats.cut += cut ? 1u : 0u;
         portEXIT_CRITICAL_SAFE(&s_lock);

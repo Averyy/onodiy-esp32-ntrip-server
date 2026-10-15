@@ -437,6 +437,28 @@ TEST_CASE("antenna fields: validation", "[um98x_profile]")
     TEST_ASSERT_EQUAL_size_t(20, um98x_antenna_str_len(IGS_NAME));   /* inner spaces kept */
 }
 
+TEST_CASE("antenna fields: names compare with runs of spaces read as one", "[um98x_profile]")
+{
+    /* The bench's exact strings: the profile's IGS form and what UM982
+     * build 25164 read back after storing it. */
+    TEST_ASSERT_TRUE(um98x_antenna_str_same("TRM59800.00     SCIS", "TRM59800.00 SCIS"));
+    TEST_ASSERT_TRUE(um98x_antenna_str_same("TRM59800.00 SCIS", "TRM59800.00     SCIS"));
+    TEST_ASSERT_TRUE(um98x_antenna_str_same("TRM59800.00     SCIS", "TRM59800.00     SCIS"));
+    TEST_ASSERT_TRUE(um98x_antenna_str_same("ADVNULLANTENNA", "ADVNULLANTENNA"));
+    TEST_ASSERT_TRUE(um98x_antenna_str_same("5000123", "5000123"));
+    /* Leading and trailing spaces do not count; an empty one equals "". */
+    TEST_ASSERT_TRUE(um98x_antenna_str_same("  TRM59800.00  SCIS  ", "TRM59800.00 SCIS"));
+    TEST_ASSERT_TRUE(um98x_antenna_str_same("", "   "));
+    TEST_ASSERT_TRUE(um98x_antenna_str_same(NULL, ""));
+    /* Spaces matter where they are: none is not one, and the letters must match. */
+    TEST_ASSERT_FALSE(um98x_antenna_str_same("TRM59800.00SCIS", "TRM59800.00 SCIS"));
+    TEST_ASSERT_FALSE(um98x_antenna_str_same("TRM59800.00     SCIS", "TRM59800.00     NONE"));
+    TEST_ASSERT_FALSE(um98x_antenna_str_same("TRM59800.00 SCIS", "TRM59800.00 SCI"));
+    TEST_ASSERT_FALSE(um98x_antenna_str_same("TRM59800.00", "TRM59800.00 SCIS"));
+    TEST_ASSERT_FALSE(um98x_antenna_str_same("", "ADVNULLANTENNA"));
+    TEST_ASSERT_FALSE(um98x_antenna_str_same("5000123", "5000124"));
+}
+
 TEST_CASE("antenna fields: blob round trip, trailing spaces dropped, older blobs", "[um98x_profile]")
 {
     um98x_base_profile_t a;

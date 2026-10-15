@@ -296,7 +296,9 @@ esp_err_t um98x_flash_journal_close(void);
  * brownout) and the session had reached the loader menu (menu item sent or
  * later, or any state after a transfer), including "needs user" with such a
  * phase or after a transfer. An ESP32-only reset never races: the receiver
- * did not reset.
+ * did not reset. receiver_was_reset is the caller's to know: on the
+ * ESP32-S3 the reset class does not tell it (its EN pin reads as power-on
+ * while the receiver keeps running), see station_early_boot.
  */
 bool um98x_flash_journal_needs_race(const um98x_flash_journal_t *j, bool receiver_was_reset);
 

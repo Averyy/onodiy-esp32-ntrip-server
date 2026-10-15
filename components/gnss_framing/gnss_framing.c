@@ -587,6 +587,82 @@ static bool store_field(gnss_versiona_t *v, unsigned idx, const char *s, size_t 
     }
 }
 
+static bool all_digits(const char *s, size_t n)
+{
+    if (n == 0 || n > 9) {
+        return false;   /* 9 digits fit in a uint32_t */
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool all_letters(const char *s, size_t n)
+{
+    if (n == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static uint32_t digits_value(const char *s, size_t n)
+{
+    uint32_t v = 0;
+    for (size_t i = 0; i < n; i++) {
+        v = v * 10u + (uint32_t)(s[i] - '0');
+    }
+    return v;
+}
+
+/* The header's clock: "<cpu idle>,<time reference>,<time status>,<week>,<ms>,..." */
+static void header_clock(const char *h, size_t n, gnss_versiona_t *v)
+{
+    const char *f[5];
+    size_t fl[5];
+    size_t pos = 0;
+    for (unsigned i = 0; i < 5; i++) {
+        if (pos > n) {
+            return;
+        }
+        const char *comma = memchr(h + pos, ',', n - pos);
+        size_t end = comma != NULL ? (size_t)(comma - h) : n;
+        f[i] = h + pos;
+        fl[i] = end - pos;
+        if (comma == NULL && i < 4) {
+            return;   /* fewer than five fields */
+        }
+        pos = end + 1u;
+    }
+    if (!all_digits(f[0], fl[0]) || !all_letters(f[1], fl[1]) || !all_letters(f[2], fl[2]) ||
+        !all_digits(f[3], fl[3]) || !all_digits(f[4], fl[4])) {
+        return;
+    }
+    v->hdr_clock = true;
+    v->hdr_time_unknown = fl[2] == 7 && strncmp(f[2], "UNKNOWN", 7) == 0;
+    v->hdr_week = digits_value(f[3], fl[3]);
+    v->hdr_ms = digits_value(f[4], fl[4]);
+}
+
+bool gnss_versiona_uptime_ms(const gnss_versiona_t *v, uint32_t *ms)
+{
+    if (v == NULL || !v->hdr_clock || !v->hdr_time_unknown || v->hdr_week > 1u) {
+        return false;
+    }
+    if (ms != NULL) {
+        *ms = v->hdr_ms;
+    }
+    return true;
+}
+
 bool gnss_versiona_parse(const char *line, size_t len, gnss_versiona_t *out)
 {
     static const char k_prefix[] = "#VERSIONA,";
@@ -645,6 +721,7 @@ bool gnss_versiona_parse(const char *line, size_t len, gnss_versiona_t *out)
         return false;
     }
     v.build = build_of(v.firmware);
+    header_clock(line + prefix_len, (size_t)(semi - line) - prefix_len, &v);
     *out = v;
     return true;
 }

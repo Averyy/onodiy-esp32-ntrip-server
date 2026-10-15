@@ -214,6 +214,19 @@ void ledger_note_prev_reboot(bool planned)
     }
 }
 
+void ledger_note_power_kept(void)
+{
+    if (!s_ready) {
+        return;
+    }
+    portENTER_CRITICAL(&s_lock);
+    bool changed = lc_power_kept(&s_core);
+    portEXIT_CRITICAL(&s_lock);
+    if (changed) {
+        ESP_LOGI(TAG, "the gap before this boot was a reset of the ESP32 alone, not power-off time");
+    }
+}
+
 void ledger_set_slot(size_t slot, bool enabled, bool protected_slot, bool streaming)
 {
     if (!s_ready || slot >= LEDGER_MAX_SLOTS) {

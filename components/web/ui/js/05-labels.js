@@ -91,7 +91,7 @@ const L = {
     settings_degraded: ['Settings unavailable', 'The settings storage is unusable this boot. Nothing is saved.'],
     no_upstream: ['No internet', 'Wi-Fi is connected but the internet cannot be reached.'],
     link_loss: ['Receiver data lost', 'Data from the receiver was lost or corrupted in the last 10 minutes.'],
-    power_lost: ['Power was lost', 'The station started from power-off 3 or more times within 24 hours. Check the power adapter, cable and connections.'],
+    power_lost: ['Power was lost', 'The station lost its power 3 or more times within 24 hours (each time the receiver restarted with it). Check the power adapter, cable and connections.'],
     receiver_silent: ['Nothing from the receiver', 'The station gets nothing usable from the receiver and no answer to its commands. ' +
       'Power-cycle the station; if that does not help, check the receiver\'s power and its cable.'],
     no_satellites: ['No satellites', 'The receiver answers but uses no satellites, so it sends no RTCM. Check that the antenna ' +
@@ -323,7 +323,8 @@ const J = {
   kind: { boot: 'Start', session: 'Previous session', reboot: 'Restart', ladder_step: 'Recovery step', app_update: 'App update',
     app_revert: 'App reverted', gnss_flash: 'Receiver update', safe_mode: 'Safe mode', wifi_disconnect: 'Wi-Fi disconnect',
     data_loss: 'Data loss', caster_down: 'Caster session ended', caster_up: 'Caster back', wifi_up: 'Wi-Fi back',
-    caster_stop: 'Caster stopped', rx_maintenance: 'Receiver maintenance', live_view: 'Live view', sg_test: 'Signal groups' },
+    caster_stop: 'Caster stopped', rx_maintenance: 'Receiver maintenance', live_view: 'Live view', sg_test: 'Signal groups',
+    rx_boot: 'Receiver at power-on' },
   resetClass: ['power on', 'planned', 'crash', 'brownout', 'other'],
   /* The same by C value, as the API names them (lifecycle_reset_class_t, lifecycle_reboot_reason_t). */
   resetClassKey: ['power_on', 'planned', 'crash', 'brownout', 'other'],
@@ -475,12 +476,28 @@ function restartPlanText(hl) {
   return intro + ' The station looks at it again after the next search.';
 }
 
+/** After a power-on start: whether the receiver kept running (health station.rx_boot). */
+function rxBootSentence(v) {
+  switch (v) {
+    case 'kept_running':
+      return 'The receiver kept running: only the ESP32 was reset (its reset pin, such as the USB auto-reset), not a power loss';
+    case 'restarted':
+      return 'The receiver restarted too: the power was cut';
+    case 'pending':
+      return 'Whether the receiver kept running is still being judged (within 30 seconds of the start)';
+    case 'unknown':
+      return 'Nothing the receiver sent told whether it kept running; not counted as a power loss';
+    default:
+      return '';
+  }
+}
+
 /** How a start came about, as a sentence (reset class, reset reason, planned reason). */
 function startSentence(cls, reason, planned) {
   const why = planned && planned !== 'none' ? lbl(L.plannedReason, planned) : '';
   switch (cls) {
     case 'power_on':
-      return 'Started after power-on';
+      return 'Started after power-on, or a reset by its pin (this chip reports both alike)';
     case 'planned':
       return 'Restarted on purpose' + (why ? ': ' + why : '');
     case 'crash':

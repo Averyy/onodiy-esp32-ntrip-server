@@ -665,7 +665,7 @@ oldest.
                "serial": "...", "pn": "...", "efuse_id": "...", "compile_date": "2025/04/30"},
   "responding": true, "restarting": false, "identity_confirmed": true,
   "alerts": [],
-  "profile_applied": true, "rtcm1230_supported": true,
+  "profile_applied": true, "rtcm_differs": false, "rtcm1230_supported": true,
   "config_failed": false, "config_retry_in_s": 0, "config_auto_retry": true, "reconfigure_refused": false,
   "detect_failures": 0,
   "link": {"baud": 115200, "mode": "stream", "rx_bytes": 123456789, "rx_age_ms": 12, "rtcm_age_ms": 180,
@@ -711,6 +711,7 @@ oldest.
 | `alerts` | station alerts only (`station_alert_t`): `unsupported_model`, `config_failed`, `position_mismatch`, `antenna_moved`, `receiver_attention`, `receiver_in_loader`, `no_receiver`, `signals_mismatch` (the signals the receiver reported for its group at the last configuration are not what the profile's group should give: `rx_bands.matches` false; cleared by a report that matches or by one that is not read) |
 | `restarting` | the receiver answered a command with its restarting notice (`The Board is resetting,do not response any command!`, no leading `$`) within the last 20 s and its restart banner has not come yet: it answers, it is not silent. An unasked restart (no signal-group change or RESET of the station's own) counts as restart evidence once, like the banner that ends it |
 | `config_failed`, `config_retry_in_s`, `config_auto_retry` | the last profile apply failed (`config_failed` alert). `config_auto_retry`: the station retries it on its own on its backoff (10 min, 30 min, 2 h, then every 6 h), which it does only with `autocfg` on and for a model it configures; `config_retry_in_s` is the time to that retry (0 when none is due, and always 0 when `config_auto_retry` is false). With `autocfg` off (the first-apply hold included) nothing is retried until the user applies again |
+| `rtcm_differs` | the latest observation window saw RTCM flowing that differs from the profile: a message it checks was missing or came at another rate while others arrived. Never set without any RTCM (no antenna, a silent receiver: `no_rtcm`, `receiver_silent` or `no_satellites` say why); cleared by a window that passes, a window without RTCM and whenever the station starts watching again (a receiver restart, detection, a successful apply). Health raises `profile_drift` after 90 s of it |
 | `rtcm1230_supported` | `gnss/rtcm1230_ok`: `true` the receiver accepted message 1230 at the last apply, `false` it refused it, `null` never applied (the key is not stored: "not applied yet") |
 | `link.mode` | `off`, `stream`, `command`, `raw` (`gnss_link`) |
 | `link.rx_bytes` | bytes received from the receiver since boot (0 = nothing arrived yet) |
@@ -718,13 +719,13 @@ oldest.
 | `link.hands_off` | the link refuses every write and lease (receiver maintenance) |
 | `recovery` | `gnss/recovery` as stored, `health_recovery_mode_t` (a stored value out of range reads as `full`, as health reads it) |
 | `first_apply_held` | `gnss/hold` is stored: the receiver's first configuration is held until the user applies. A build with `CONFIG_STATION_HOLD_FIRST_APPLY` (bench builds, the `sdkconfig.hold` overlay) writes it once at boot on a device whose profile was never applied and whose `gnss/autocfg` was never set, together with `gnss/autocfg` = 0 and `gnss/recovery` = 2 (`alerts_only`, if unset), before anything reaches the receiver; it stays in NVS whatever build runs later. While it is stored the station sends the receiver only queries (version, configuration dump, base mode) and a loader prompt met during detection gets no restart key (`receiver_in_loader`, listen-only; the user's receiver restart still works). The first successful apply erases it, and so does `PUT /api/gnss/profile` with `autocfg: true`; a factory reset erases it with the other user settings. When the hold is due but cannot be stored (settings unusable this boot, or the write failed), the station holds the first configuration for this boot only, as the batch would have stored it: `first_apply_held` true, `autocfg` false, nothing stored. A successful apply ends the hold (automatic configuration stays off for the boot); `autocfg: true` ends both. `GET /api/gnss/apply/preview` lists what the apply would send |
-| `profile.antenna_*` | the base antenna descriptor the receiver publishes in 1033: `antenna_model` the IGS antenna name with its radome (`""` = leave the receiver's own value, the default), `antenna_serial`, `antenna_setup_id` 0-255; serial and setup ID only matter with a model (stored cleared without one) |
-| `rx_settings` | what the receiver's configuration dump said at the last apply session this boot (`station_status_t.rx_settings`): `valid` false and every value unknown (`unknown` / `null`) after a reboot until the next apply. `b1cb2a`, `mmp` (`um98x_setting_t`): BeiDou B1C/B2a observations in RTCM, multipath mitigation; `mask_deg` the elevation mask (0.1°); `antenna` the descriptor the receiver holds (`null` = not read). `age_s` since the read-back, `read_unix` its time (`null` without a clock then). MMP and the mask are shown only, never sent (PROVISIONAL, to be confirmed on hardware) |
+| `profile.antenna_*` | the base antenna descriptor the receiver publishes in 1033: `antenna_model` the IGS antenna name with its radome (`""` = leave the receiver's own value, the default), `antenna_serial`, `antenna_setup_id` 0-255; serial and setup ID only matter with a model (stored cleared without one). UM982 build 25164 stores the name with every run of spaces collapsed to one: the IGS form `TRM59800.00     SCIS` (the name padded to 16 characters, then the radome) reads back as `TRM59800.00 SCIS` (our bench, 2026-10-14). The station therefore compares names (and serial numbers) with runs of spaces read as one and leading and trailing spaces dropped, so a receiver that holds the collapsed form is not sent the antenna again on every apply. The 1033 the receiver then sends may carry the collapsed name rather than the IGS padded form, which rovers and casters look up by; `rtcm1033.antenna` shows what it sends (to be checked with sky before a real antenna name goes to a caster) |
+| `rx_settings` | what the receiver's configuration dump said at the last apply session this boot (`station_status_t.rx_settings`): `valid` false and every value unknown (`unknown` / `null`) after a reboot until the next apply. `b1cb2a`, `mmp` (`um98x_setting_t`): BeiDou B1C/B2a observations in RTCM, multipath mitigation; `mask_deg` the elevation mask (0.1°); `antenna` the descriptor the receiver holds, as it reads it back (`null` = not read): when the session sent the antenna, the dump is read again right after that step, so this is the receiver's own form (collapsed spaces on build 25164), never the profile's text; `null` if that read failed. `age_s` since the read-back, `read_unix` its time (`null` without a clock then). MMP and the mask are shown only, never sent (PROVISIONAL, to be confirmed on hardware) |
 | `apply_steps` | outcome of the antenna and B1C/B2a steps of the last apply session (sent only when the read-back asked for them; a refusal does not fail the session): `sent`, `ok` (accepted), `reply` the receiver's refusal text or `"timeout"` (`null` unless refused). The UI words an antenna refusal "antenna model rejected: <reply>" |
 | `rtcm1033` | the latest CRC-valid 1033 the receiver published (`gnss_obs_get_1033`), strings as received; `{"valid": false, "bad_frames": n}` before the first that decoded; `bad_frames` counts 1033 frames that did not decode since boot |
 | `maintenance` | receiver maintenance (below): `left_s`, `chosen_s` 0 when off; `choices_s` the durations offered, `max_left_s` the most time left after extensions |
 | `rx_signal_group` | the signal group the receiver runs as its last configuration read-back this boot showed (`CONFIG SIGNALGROUP`; after a change, the new one); `null` before an apply session read it |
-| `rx_bands` | what the receiver's running signal group configures on its main antenna input, from the last apply session this boot: every session asks once, after its signal-group step (`ANT1GROUPA`, one-shot without a rate; it answers without sky). `state` (`um98x_bands_state_t`): `unknown` (not asked this boot, or no answer; `age_s` `null`), `ok`, `refused` (the receiver refused the query: a firmware without it; `reply` its text; never a failed apply), `unread` (an answer this firmware does not read). With `ok`: `group` as the receiver named it, `profile_master` the profile's main-antenna group it was compared with, `matches` (the report names that group and lists every signal it should configure; extra signals are fine) and `systems` per constellation (`gps`, `glonass`, `galileo`, `beidou`, `qzss`): `signals` configured, `bands` the frequency bands they cover (L1, L2, L5, L6 buckets, as `GET /api/gnss/signals` counts them), `missing` the signals the profile's group should give and the report lacks. What a group should give (main input, UM982 build 25164, our bench 2026-10-14; the manual's table): `4` GPS L1C/A L2C L2P L5, GLONASS G1 G2, Galileo E1 E5a E5b, BeiDou B1I B2I B3I, QZSS L1C/A L2C L5; `3` the same with Galileo E6 and QZSS L6, BeiDou B1I B3I B1C B2b; `7` the same as `4` with every BeiDou signal (B1C, B2a, B2b added); `5` no L5 at all. Other groups: only the number is compared. The log's header form is PROVISIONAL (the bench recorded the bodies only) |
+| `rx_bands` | what the receiver's running signal group configures on its main antenna input, from the last apply session this boot: every session asks once, after its signal-group step (`ANT1GROUPA`, one-shot without a rate; it answers without sky). `state` (`um98x_bands_state_t`): `unknown` (not asked this boot, or no answer; `age_s` `null`), `ok`, `refused` (the receiver refused the query: a firmware without it; `reply` its text; never a failed apply), `unread` (an answer this firmware does not read). With `ok`: `group` as the receiver named it, `profile_master` the profile's main-antenna group it was compared with, `matches` (the report names that group and lists every signal it should configure; extra signals are fine) and `systems` per constellation (`gps`, `glonass`, `galileo`, `beidou`, `qzss`): `signals` configured, `bands` the frequency bands they cover (L1, L2, L5, L6 buckets, as `GET /api/gnss/signals` counts them), `missing` the signals the profile's group should give and the report lacks. What a group should give (main input, UM982 build 25164, our bench 2026-10-14; the manual's table): `4` GPS L1C/A L2C L2P L5, GLONASS G1 G2, Galileo E1 E5a E5b, BeiDou B1I B2I B3I, QZSS L1C/A L2C L5; `3` the same with Galileo E6 and QZSS L6, BeiDou B1I B3I B1C B2b; `7` the same as `4` with every BeiDou signal (B1C, B2a, B2b added); `5` no L5 at all. Other groups: only the number is compared. The log's whole form (header and checksum) is confirmed on build 25164: the station read it in a real apply on 2026-10-14 (`state` `ok`, `group` 3, `matches` true) |
 | `signal_group_refused` | the receiver refused a signal group (any apply, the comparison's switches included): `{"master", "slave", "reply", "back_to"}` with the receiver's reply (UM982 build 25164: `PARSING FAILED GRAMMAR ERROR,` for every pair but `4 5`, `3 6`, `5 0` and `7 0`; `"signal group rejected"` when it acknowledged the pair but its read-back after the restart still showed another group) and the group the stored profile went back to (`{"master", "slave"}`: the group the session read back before the change, else the one of the last successful apply, `gnss/sg_ok`). The station re-applies that group at once; a refused group never raises `config_failed` and is never retried on the backoff. A plain refusal (a negative reply: nothing changed on the receiver and it did not restart) with such a group to go back to is not rolled back with `RESET`: the re-apply restores the outputs the session quieted, so the receiver is not restarted (nor its survey) for it. `back_to` `null`: neither was known, and the refusal is an ordinary failed apply (`config_failed`, rolled back with `RESET`). Kept until the next `PUT /api/gnss/profile` with a profile; `null` otherwise. The UI says "This receiver firmware does not accept signal group 7 0 (it answered "<reply>"). Build 25164 accepts only 4 5, 3 6, 5 0 and 7 0. It went back to 3 6 and was configured again." |
 | `profile.fixed` | `{lat_deg, lon_deg, height_m}` in `fixed` mode, else `null`; fields a mode does not use are ignored on input and come back cleared (`survey_in_s` 0 in `fixed` mode) |
 | `position` | locked or last surveyed (`station_status_t.position`); `source`: `none`, `survey`, `averaged`, `user`; `sigma_m` 0 = unknown |
@@ -820,7 +821,7 @@ write). Nothing is sent.
 
 | Field | Notes |
 |---|---|
-| `steps[].text` | the command as the session writes it (the plan builder's own text); `ANT1GROUPA` is the signal-group query after the signal-group step (`rx_bands`), sent in every session; `RTCM<msg> COM1 <period>` once per profile message, `CONFIG COM1 <baud>` only when the profile's baud is not the link's, `CONFIG BASEANTENNAMODEL ...` only with an antenna model, `GPGSV COM1 10` only with satellite-in-view output in the profile; a fixed position is sent as ECEF with 4 decimals |
+| `steps[].text` | the command as the session writes it (the plan builder's own text); `ANT1GROUPA` is the signal-group query after the signal-group step (`rx_bands`), sent in every session; `RTCM<msg> COM1 <period>` once per profile message, `CONFIG COM1 <baud>` only when the profile's baud is not the link's, `CONFIG BASEANTENNAMODEL ...` only with an antenna model, followed by the dump query `CONFIG` again (`if_differs`: only when the antenna was sent and accepted; the name as the receiver stores it, for `rx_settings.antenna`), `GPGSV COM1 10` only with satellite-in-view output in the profile; a fixed position is sent as ECEF with 4 decimals |
 | `steps[].kind` | `um98x_preview_kind_t`: `query` (reads the receiver), `write` (changes its running configuration) |
 | `steps[].when` | `um98x_preview_when_t`: `always`; `if_differs` (only when the read-back differs from the profile); `if_off` (only when the read-back shows the setting off) |
 | `steps[].saved` | the command saves to the receiver's stored configuration by itself: `CONFIG SIGNALGROUP` (the receiver saves it and restarts) and `SAVECONFIG` |
@@ -910,8 +911,15 @@ apply, `RESET`, flash, ladder step or live-view toggle), reception goes on
 and every CRC-valid RTCM frame still reaches the casters. The station
 reports `idle` meanwhile (`rx_maintenance` tells it apart); the ledger
 counts the time as planned. It ends by itself when its time is up, on "end
-now", or with a power cut (an ESP32 software reset keeps it with its time
-left); the end runs the station's stream-first check, as at boot. Entry and
+now", or with a power cut that clears the ESP32's memory. A reset that keeps
+that memory keeps it with its time left, the boot only listening: a
+software reset, and also a reset that reads as power-on, since on the
+ESP32-S3 the EN pin (the USB auto-reset that plugging in a cable or
+flashing can cause, the RST button) reads as power-on while the receiver
+keeps running and may be mid-work; a restart banner then does not end it
+either (the work may restart the receiver). Whether the ESP32-S3 keeps that
+memory through an EN reset is to be confirmed on the board. The end runs
+the station's stream-first check, as at boot. Entry and
 exit are journalled (`rx_maintenance`). Whether input on the link can
 disturb a receiver worked on through its other port is PROVISIONAL, to be
 confirmed on hardware.
@@ -963,8 +971,10 @@ for a model the station does not configure, and never when the profile's
 twice (about 7 s without an answer). An "on" without an answer may have
 taken: `sky` is `blocked` with `sky_why: "no_answer"`, and it is turned off
 when the window closes (extending sends it again). An ESP32-only reset
-while it may be on (reboot, app update, crash) is remembered in RTC memory:
-the next boot turns it off once the station streams. After a receiver
+while it may be on (reboot, app update, crash, and the reset pin, which
+reads as power-on on the ESP32-S3) is remembered in RTC memory: the next
+boot turns it off once the station streams (a receiver that restarted
+after all clears it with its banner). After a receiver
 reconfiguration, reset or restart the output is off (`sky_why:
 "reconfigured"`); opening or extending the view turns it on again. Everything else comes from the RTCM
 stream without any receiver traffic. Whether toggling the output
@@ -1949,7 +1959,8 @@ All admin only.
           "epochs_by_gap": 0, "publish_failures": 0, "consumers": 1, "capacity": 262144,
           "last_frame_age_ms": 180},
   "station": {"state": "streaming", "rtcm_excluded": 0, "detect_failures": 0, "detect_saw_bytes": false,
-              "lease_held": false, "since_lease_release_ms": null, "rx_maintenance": false},
+              "lease_held": false, "since_lease_release_ms": null, "rx_maintenance": false,
+              "rx_boot": "none", "rx_boot_by": "none"},
   "obs": {"epochs": 86400, "epoch_gaps": 0, "epoch_period_ms": 1000, "epoch_jumps": 0},
   "network": {"reconnects": 1, "connect_failures": 0, "offline_s": 0, "last_disconnect_reason": 8,
               "fallback_dns": false, "probe": "ok", "probe_age_s": 120, "assoc_no_ip_s": 0,
@@ -1985,12 +1996,45 @@ bench builds turn on); `log.usb_connected`: a USB host is attached there now
 copied there although a host was attached, because it did not read and the
 USB buffer was full. With no host attached nothing is copied and nothing is
 counted.
+`station.rx_boot`: after a power-on reset, whether the receiver kept
+running (`station_rx_boot_t`): `none` (not a power-on boot), `pending`
+(judged within 30 s of the start), `kept_running` (only the ESP32 was
+reset), `restarted` (the receiver restarted with it: the power was cut),
+`unknown` (nothing the receiver sent told). On the ESP32-S3 a reset by its
+EN pin (the USB serial chip's auto-reset that every flash and capture
+uses, the RST button) reads as `power_on` (`boot.reset_class`) while the
+receiver, on the same supply, keeps running; so the station asks the
+receiver's own evidence, listening only (`rx_boot_by`): `restart` its
+restart banner before any data (restarted); `uptime` its version log,
+whose header's millisecond field counts from its restart while it has no
+time (restarted if that is shorter than the ESP32's uptime, kept running if
+it began at least 2 s before the ESP32 started); `stream` RTCM or NMEA
+within 3.5 s of the start, before any restart evidence (kept running: a
+receiver that just got power needs longer). The earliest decides; it is
+journalled once (`rx_boot`). Only `restarted` counts toward the
+`power_lost` alert (three within 24 h), and a `kept_running` boot's gap is
+not power-off time in the availability ledger (when the verdict comes
+before the first trusted clock). PROVISIONAL, to be confirmed on hardware
+(a real power cut's timing was not measured).
+`link.framing` counts what the framer made of the receiver's bytes
+(`gnss_framing_stats_t`): `bytes_discarded` are bytes that became no RTCM
+frame and no checksum-valid line (line noise, a unit cut short by a baud
+switch, a reopen or the end of a lease, skipped binary logs); input dropped
+on purpose (the end of a lease, a resync) counts in `flushed_bytes`, the
+first 20 ms after a baud change in `baud_switch_bytes`. A boot that has to
+look for the receiver no longer adds to `bytes_discarded`: the detection
+probe waits up to 1 s for the version log that follows its acknowledgement
+before its lease ends, so that log is read whole (it gives the identity)
+instead of being cut.
 `link.open` and `link.open_failures`: the UART driver is installed, failed
 installs since boot ("receiver UART closed (reopening)" while `open` is
 false in a mode other than `off`); `link.hands_off`: receiver maintenance. `journal` and `log` are the event journal's and the log ring's
 counters (`diag_journal_info()`, `diag_log_stats()`; `journal.capacity` in
 records; `log.prev_boot_available` false and `log.prev_boot_lines` 0 when
 the previous boot's lines are not readable, see `GET /api/logs`).
+`log.lines` counts the lines logged this boot (as the text download has
+them); `log.ring_overwritten`, `log.cut` and `log.prev_boot_lines` count
+the ring's records, each a line or a part of one.
 Per-caster loss counters are in `/api/casters`. `boot_history` is the last
 16 boots, newest first (`prev_uptime_s` `null` = unknown). `boot` counts
 since power-on from RTC memory; state written before another app image ran
@@ -2133,7 +2177,11 @@ previous boot's or with an "older" label (checked against the image
 generation at boot). Both flags come
 from `diag_log_read_ex()`. `format=text`
 streams the whole ring as `text/plain` with
-`Content-Disposition: attachment; filename="log-<version>.txt"`.
+`Content-Disposition: attachment; filename="log-<version>.txt"`. The
+cursor counts the ring's records, not lines (a line can take more than one
+record). Control characters other than tab and the line end are stored as
+`?` (the Wi-Fi driver prints a NUL inside its country line), so the
+download is plain text.
 A `cursor` that is not a number answers `400 invalid_field` with
 `"field": "cursor"`.
 
@@ -2168,6 +2216,7 @@ by `kind` (integers; only a `wifi_disconnect` entry's `b` can be `null`):
 | `caster_stop` | slot (bits 0-7) \| stop reason (`ntrip_stop_t`, bits 8-15): the Onocoy login guard stopped the slot until the user acts (once per stop) | 0 |
 | `wifi_up` | connect attempts during the outage | outage s |
 | `rx_maintenance` | 1 entry, 0 exit | chosen duration s (entry), time spent s (exit) |
+| `rx_boot` | after a power-on reset, whether the receiver kept running (`diag_rx_boot_t`): 1 kept running (only the ESP32 was reset, its reset pin), 2 restarted with it (the power was cut), 3 unknown; written once per power-on boot, when the station knows (`station.rx_boot` in `/api/health`); only 2 counts toward `power_lost` | what told it (`diag_rx_boot_by_t`): 0 nothing, 1 its restart banner before any data, 2 its version log's time since its restart, 3 RTCM or NMEA at once |
 | `live_view` | event (bits 0-7: 1 opened, 2 extended, 3 closed, 4 satellite-in-view output on, 5 off) \| detail << 8 (closed: end reason; on/off: 0 accepted, 1 rejected, 2 no answer, 3 not sent) | opened: window s; extended: s left; closed: s open; on/off: ms the lease held RTCM back |
 | `sg_test` | signal groups: event (bits 0-7: 1 a comparison started, 2 it switched the receiver, 3 the receiver refused a signal group, in a comparison or any apply, 4 a comparison ended) \| master << 8 \| slave << 16 (started: the group measured first; switched: the group now running; refused: the refused group; ended: the group it ended on) | started: s per group; switched: the phase (0, 1); refused: `(master << 8) \| slave` of the group the profile went back to (-1 none); ended: the outcome (1 kept, 2 timed out, 3 cancelled, 4 rejected, 5 failed, 6 interrupted) |
 
@@ -2676,13 +2725,13 @@ after it). The journal's `a` and `b` carry these C values.
 | `network_ladder_why_t` | `none`, `upstream_ok`, `no_upstream`, `journal_open`, `interval`, `inhibited`, `ap_in_use`, `no_reboot_trigger`, `ap_overridden` |
 | `network_ladder_trigger_t` (bits) | `protected`, `assoc_no_ip`, `unreached` |
 | `gnss_link_mode_t` | `off`, `stream`, `command`, `raw` |
-| `lifecycle_reset_class_t` | `power_on`, `planned`, `crash`, `brownout`, `other` |
+| `lifecycle_reset_class_t` | `power_on` (on the ESP32-S3 also a reset by its EN pin: the USB auto-reset, the RST button), `planned`, `crash`, `brownout`, `other` |
 | `lifecycle_reboot_reason_t` | `none`, `user`, `factory_reset`, `admin_reset`, `app_update`, `app_revert` (a failed trial, also one the bootloader rolled back), `gnss_ladder`, `network_ladder`, `low_heap`, `safe_mode_retry`, `safe_mode_cleared`, `nvs_slot_switch`, `boot_failure`, `app_rollback` (the user's rollback) |
 | `esp_reset_reason_t` | `unknown`, `poweron`, `ext`, `sw`, `panic`, `int_wdt`, `task_wdt`, `wdt`, `deepsleep`, `brownout`, `sdio`, `usb`, `jtag`, `efuse`, `pwr_glitch`, `cpu_lockup` |
 | `ledger_clock_t` | `none`, `sntp`, `gnss` |
 | `gnss_sys_t` | `gps`, `glonass`, `galileo`, `sbas`, `qzss`, `beidou`, `navic` |
 | `gnss_band_t` | `l1`, `l2`, `l5`, `l6`, `e5ab` |
-| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21, `sg_test` = 22 |
+| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21, `sg_test` = 22, `rx_boot` = 23 |
 | `station_sgt_state_t` | `idle`, `switching`, `settling`, `measuring`, `deciding`, `restoring` |
 | `station_sgt_outcome_t` | (none: `null`), `kept`, `timed_out`, `cancelled`, `rejected`, `failed`, `interrupted` |
 | `station_sgt_res_status_t` | `pending`, `measuring`, `done`, `rejected` |

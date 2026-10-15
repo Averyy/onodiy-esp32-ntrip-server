@@ -4,6 +4,7 @@
  */
 #include "station_core.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* ---- small helpers -------------------------------------------------------- */
@@ -259,6 +260,7 @@ static void enter_detecting(stn_t *s, const stn_in_t *in)
     s->short_fails = 0;
     s->obs_on = false;
     s->profile_applied = false;
+    s->rtcm_differs = false;
     s->antenna_check = false;
     s->antenna_probe = false;
     take_base(s, in);
@@ -415,6 +417,7 @@ static void restart_handling(stn_t *s, const stn_in_t *in)
     s->verify_pending = false;
     s->drift_windows = 0;
     s->drift_blocked = false;
+    s->rtcm_differs = false;
     if (in->profile_survey) {
         um98x_survey_start(&s->survey, now, in->survey_s);   /* the receiver surveys again */
         s->mode_poll_ms = now + STN_MODE_POLL_MS;
@@ -450,6 +453,10 @@ static void judge_window(stn_t *s, const stn_in_t *in)
     if (verify && s->flash_close == 1) {
         flash_close_note(s, v == STN_OBS_PASS);   /* the post-update re-apply was checked */
     }
+
+    /* Drift needs RTCM that flows and differs; a window without any is a
+     * stall (no antenna, a silent receiver), which other alerts explain. */
+    s->rtcm_differs = (v == STN_OBS_DRIFT);
 
     switch (v) {
     case STN_OBS_PASS:
@@ -728,6 +735,7 @@ static void stream_first(stn_t *s, const stn_in_t *in, bool restarted)
     s->drift_windows = 0;
     s->drift_blocked = false;
     s->profile_applied = false;
+    s->rtcm_differs = false;
     s->mode_probe = false;
     s->mode_probe_done = false;
     s->antenna_check = false;
@@ -1029,6 +1037,7 @@ static void done_apply(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         s->static_ok = true;
         s->identify_ms = STN_NEVER;
         s->drift_blocked = false;
+        s->rtcm_differs = false;   /* the apply's own check window judges again */
         if (s->job.change == STN_CHANGE_LOCK) {
             s->lock_done = true;
             s->pos_check_ms = now + STN_POS_CHECK_MS;
@@ -1089,6 +1098,10 @@ static void done_apply(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     }
 
     raise_config_failed(s, now);
+    /* What follows, for the log: the station's own retry only with
+     * automatic configuration (else the user applies again). */
+    note(s, STN_NOTE_APPLY_FAILED, stn_config_auto_retry(s, in->autocfg) ? (int64_t)secs(s->apply_retry_ms - now) : 0,
+         r->receiver_lost ? 1 : 0);
     if (r->restarted && in->profile_survey) {
         survey_restarted(s, in);   /* the rollback's restart: the receiver surveys again */
     }
@@ -1488,6 +1501,82 @@ bool stn_surveying(const stn_t *s, int64_t now_ms)
 uint32_t stn_survey_left_s(const stn_t *s, int64_t now_ms)
 {
     return um98x_survey_window_left_s(&s->survey, now_ms);
+}
+
+/* ---- power-on reset: did the receiver keep running? -------------------------- */
+
+stn_rxboot_t stn_rxboot_judge(const stn_rxboot_in_t *in, stn_rxboot_by_t *by)
+{
+    stn_rxboot_t v = STN_RXBOOT_PENDING;
+    stn_rxboot_by_t how = STN_RXBOOT_BY_NONE;
+    int64_t at = STN_NEVER;   /* when the verdict so far was decided */
+
+    /* Its restart banner before any data: it restarted with the ESP32 (a
+     * restart after data came is a later one, the receiver's own). */
+    if (in->restart_ms != STN_NEVER && in->restart_ms <= STN_RXBOOT_WINDOW_MS &&
+        (in->data_ms == STN_NEVER || in->restart_ms <= in->data_ms)) {
+        v = STN_RXBOOT_RESTARTED;
+        how = STN_RXBOOT_BY_RESTART;
+        at = in->restart_ms;
+    }
+    /* Data at once, before any restart evidence: it was running. */
+    if (in->data_ms != STN_NEVER && in->data_ms <= STN_RXBOOT_DATA_MS &&
+        (in->restart_ms == STN_NEVER || in->data_ms < in->restart_ms) && in->data_ms < at) {
+        v = STN_RXBOOT_KEPT;
+        how = STN_RXBOOT_BY_STREAM;
+        at = in->data_ms;
+    }
+    /* Its own clock: when did it start, on the ESP32's time line? The
+     * receiver's word on itself wins a tie. */
+    if (in->uptime_at_ms != STN_NEVER && in->uptime_at_ms <= STN_RXBOOT_WINDOW_MS && in->uptime_at_ms <= at) {
+        int64_t started = in->uptime_at_ms - (int64_t)in->uptime_ms;
+        v = started < -(int64_t)STN_RXBOOT_MARGIN_MS ? STN_RXBOOT_KEPT : STN_RXBOOT_RESTARTED;
+        how = STN_RXBOOT_BY_UPTIME;
+        at = in->uptime_at_ms;
+    }
+    if (v == STN_RXBOOT_PENDING && in->now_ms >= STN_RXBOOT_WINDOW_MS) {
+        v = STN_RXBOOT_UNKNOWN;
+    }
+    if (by != NULL) {
+        *by = how;
+    }
+    return v;
+}
+
+bool stn_line_is_nmea(const char *line, size_t len)
+{
+    if (line == NULL || len < 7 || line[0] != '$' || line[6] != ',') {
+        return false;
+    }
+    for (size_t i = 1; i < 6; i++) {
+        if (line[i] < 'A' || line[i] > 'Z') {
+            return false;
+        }
+    }
+    return true;
+}
+
+size_t stn_apply_next_text(uint32_t retry_in_s, char *out, size_t cap)
+{
+    if (out == NULL || cap == 0) {
+        return 0;
+    }
+    int n;
+    if (retry_in_s == 0) {
+        n = snprintf(out, cap, "nothing retries it on its own (automatic configuration is off): apply it again from "
+                               "the receiver page");
+    } else if (retry_in_s < 120u) {
+        n = snprintf(out, cap, "the station tries again in %u s", (unsigned)retry_in_s);
+    } else if (retry_in_s < 7200u) {
+        n = snprintf(out, cap, "the station tries again in %u min", (unsigned)((retry_in_s + 30u) / 60u));
+    } else {
+        n = snprintf(out, cap, "the station tries again in %u h", (unsigned)((retry_in_s + 1800u) / 3600u));
+    }
+    if (n < 0) {
+        out[0] = '\0';
+        return 0;
+    }
+    return (size_t)n < cap ? (size_t)n : cap - 1u;
 }
 
 bool stn_config_auto_retry(const stn_t *s, bool autocfg)

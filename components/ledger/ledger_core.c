@@ -354,6 +354,16 @@ void lc_unplanned_boot(lc_t *c)
     c->boot_planned_mask = 0;   /* nothing accrued yet: the window never started */
 }
 
+bool lc_power_kept(lc_t *c)
+{
+    if (!c->gap_power_off || c->clock != LC_CLOCK_NONE) {
+        return false;
+    }
+    c->gap_power_off = false;
+    lc_unplanned_boot(c);
+    return true;
+}
+
 void lc_restore(lc_t *c, const lc_snapshot_t *snap, lc_reset_t reset)
 {
     bool power_cut = reset == LC_RESET_POWER_CUT;

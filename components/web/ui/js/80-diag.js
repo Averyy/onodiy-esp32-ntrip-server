@@ -164,6 +164,7 @@ function healthTab(box) {
       h('section', { class: 'card' },
         h('h2', null, 'This start', b.safe_mode ? badge('Safe mode', 'bad') : b.stable ? badge('Stable', 'ok') : null),
         h('p', null, startSentence(b.reset_class, b.reset_reason, b.prev_reboot_reason) + '.'),
+        rxBootSentence((hl.station || {}).rx_boot) ? h('p', null, rxBootSentence((hl.station || {}).rx_boot) + '.') : null,
         kv([
           ['Starts since power-on', fmt.num(b.boots_since_power_on)],
           ['Crashes counted', fmt.num(b.crashes)],
@@ -601,6 +602,12 @@ function journalDetail(e) {
       return 'IP address back after ' + fmt.dur(b) + ', ' + a + ' connect attempt' + (a === 1 ? '' : 's');
     case 'rx_maintenance':
       return a ? 'Started for ' + fmt.dur(b) : 'Ended after ' + fmt.dur(b);
+    case 'rx_boot': {
+      const how = ['', ' (its restart banner)', ' (its own time since its restart)', ' (data at once)'][b] || '';
+      if (a === 1) return 'The receiver kept running: only the ESP32 was reset' + how;
+      if (a === 2) return 'The receiver restarted too: the power was cut' + how;
+      return 'Not known whether the receiver kept running';
+    }
     case 'sg_test': {
       const ev = a & 0xff, grp = ((a >>> 8) & 0xff) + ' ' + ((a >>> 16) & 0xff);
       if (ev === 1) return 'Comparison started with ' + grp + ', ' + fmt.dur(b) + ' per group';

@@ -160,10 +160,15 @@
  * "no IP" from "IP but no upstream".
  *
  * Power lost: the journal's boot records are read (a bounded number per
- * tick); three or more power-on boots within 24 h raise
+ * tick); three or more power losses within 24 h raise
  * HEALTH_ALERT_POWER_LOST (DEGRADED), which clears 24 h after the last
- * power-on boot. A boot dated by no trusted clock counts as inside the
- * window. The running boot is dated from the trusted clock (now minus the
+ * one. A power loss is a power-on boot whose receiver restarted with it
+ * (the station's verdict record, DIAG_EV_RX_BOOT): on the ESP32-S3 its
+ * reset pin (the USB serial chip's auto-reset, the RST button) reads as
+ * power-on while the receiver keeps running, and such a boot is no power
+ * loss; nor is one whose verdict is unknown. A boot dated by no trusted
+ * clock counts as inside the window. The running boot is dated from the
+ * trusted clock (now minus the
  * uptime) once the reader has caught up with the journal, so the alert
  * clears even when the station writes no dated record for days; until it
  * has caught up the alert is not judged (no flash of it at start-up).
@@ -239,7 +244,8 @@ typedef enum {
     HEALTH_ALERT_SETTINGS_DEGRADED = 1u << 6, /**< NVS unusable this boot: nothing is saved */
     HEALTH_ALERT_NO_UPSTREAM       = 1u << 7, /**< Wi-Fi connected but no internet */
     HEALTH_ALERT_LINK_LOSS         = 1u << 8, /**< UART overflows or RTCM CRC errors in the last 10 min */
-    HEALTH_ALERT_POWER_LOST        = 1u << 9, /**< power was lost: >= 3 power-on boots within 24 h (clears 24 h after the last) */
+    HEALTH_ALERT_POWER_LOST        = 1u << 9, /**< power was lost: >= 3 power-on boots within 24 h whose receiver restarted
+                                                   with the ESP32 (clears 24 h after the last) */
     HEALTH_ALERT_RECEIVER_SILENT   = 1u << 10,/**< nothing usable from the receiver and no answer to commands (FAILED, or an
                                                    alerts-only stall): power-cycle the station */
     HEALTH_ALERT_NO_SATELLITES     = 1u << 11,/**< the receiver answers, sends no RTCM and uses no satellites: check the antenna */

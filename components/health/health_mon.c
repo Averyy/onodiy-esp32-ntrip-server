@@ -357,7 +357,12 @@ void hm_power_init(hm_power_t *p)
 void hm_power_feed(hm_power_t *p, uint16_t kind, int32_t a, int64_t unix_s, uint32_t uptime_s)
 {
     if (kind == HM_EV_BOOT) {
-        p->cur_power = (a == HM_RESET_POWER_ON);
+        /* A power-on boot waits for the receiver's word (see the header). */
+        p->cur_power = false;
+        p->cur_pending = (a == HM_RESET_POWER_ON);
+    } else if (kind == HM_EV_RX_BOOT && p->cur_pending) {
+        p->cur_pending = false;
+        p->cur_power = (a == HM_RXBOOT_RESTARTED);
         if (p->cur_power) {
             if (p->n == HM_POWER_BOOTS) {
                 memmove(&p->boot[0], &p->boot[1], (HM_POWER_BOOTS - 1u) * sizeof(p->boot[0]));

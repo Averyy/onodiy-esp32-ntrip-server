@@ -209,6 +209,20 @@ void logring_stamp(logring_t *r, uint32_t gen)
     seal(r);
 }
 
+size_t logring_clean_text(char *text, size_t len)
+{
+    size_t lines = 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)text[i];
+        if (c == '\n') {
+            lines++;
+        } else if (c < 0x20u && c != '\t') {
+            text[i] = '?';
+        }
+    }
+    return lines;
+}
+
 uint32_t logring_append(logring_t *r, const char *text, size_t len)
 {
     if (len == 0) {

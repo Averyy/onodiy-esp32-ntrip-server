@@ -292,6 +292,8 @@ hm_btn_event_t hm_button(hm_button_t *b, bool pressed, int64_t now_ms, uint32_t 
 #define HM_POWER_COUNT     3           /**< power-on boots within the window that raise the alert */
 #define HM_RESET_POWER_ON  0           /**< journal boot record `a` for a power-on reset (lifecycle_reset_class_t) */
 #define HM_EV_BOOT         1           /**< journal kind of the boot record (diag_event_t) */
+#define HM_EV_RX_BOOT      23          /**< journal kind of the station's power-on verdict (diag_event_t) */
+#define HM_RXBOOT_RESTARTED 2          /**< its `a` when the receiver restarted with the ESP32: the power was cut */
 
 typedef struct {
     int64_t t;                         /**< UTC start (s), 0 = not dated */
@@ -301,12 +303,21 @@ typedef struct {
 typedef struct {
     hm_pboot_t boot[HM_POWER_BOOTS];   /**< oldest first */
     uint8_t n;
-    bool cur_power;                    /**< the records being read belong to a power-on boot: boot[n - 1] */
+    bool cur_power;                    /**< the records being read belong to a power loss: boot[n - 1] */
+    bool cur_pending;                  /**< ... to a power-on boot whose verdict has not been read (not counted yet) */
 } hm_power_t;
 
 void hm_power_init(hm_power_t *p);
 
-/** Feed one journal record, in journal order (unix_s 0 = no trusted clock then). */
+/**
+ * Feed one journal record, in journal order (unix_s 0 = no trusted clock
+ * then). A power-on boot (its boot record) counts as a power loss only once
+ * the same boot's verdict record (HM_EV_RX_BOOT) says the receiver
+ * restarted with the ESP32: on the ESP32-S3 its reset pin (the USB serial
+ * chip's auto-reset, the RST button) reads as power-on while the receiver,
+ * on the same supply, keeps running. A verdict that it kept running, an
+ * unknown one, or none at all (records of older builds) count as nothing.
+ */
 void hm_power_feed(hm_power_t *p, uint16_t kind, int32_t a, int64_t unix_s, uint32_t uptime_s);
 
 /**

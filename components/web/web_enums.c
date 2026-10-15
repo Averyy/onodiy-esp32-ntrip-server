@@ -534,8 +534,9 @@ static const char *const s_diag_event[] = {
     [DIAG_EV_RX_MAINT] = "rx_maintenance",
     [DIAG_EV_LIVE_VIEW] = "live_view",
     [DIAG_EV_SG_TEST] = "sg_test",
+    [DIAG_EV_RX_BOOT] = "rx_boot",
 };
-_Static_assert(COUNT(s_diag_event) == (size_t)DIAG_EV_SG_TEST + 1u, "journal kinds added: update the table");
+_Static_assert(COUNT(s_diag_event) == (size_t)DIAG_EV_RX_BOOT + 1u, "journal kinds added: update the table");
 
 const char *web_diag_event_name(uint16_t kind)
 {
@@ -681,6 +682,33 @@ _Static_assert(COUNT(s_live_end) == (size_t)STATION_LIVE_END_FLASH + 1u, "live v
 const char *web_live_end_name(uint8_t v)
 {
     return pick(s_live_end, COUNT(s_live_end), (int)v);
+}
+
+static const char *const s_rx_boot[] = {
+    [STATION_RX_BOOT_NONE] = "none",
+    [STATION_RX_BOOT_PENDING] = "pending",
+    [STATION_RX_BOOT_KEPT] = "kept_running",
+    [STATION_RX_BOOT_RESTARTED] = "restarted",
+    [STATION_RX_BOOT_UNKNOWN] = "unknown",
+};
+_Static_assert(COUNT(s_rx_boot) == (size_t)STATION_RX_BOOT_UNKNOWN + 1u, "power-on verdicts moved: update the table");
+
+const char *web_rx_boot_name(uint8_t v)
+{
+    return pick(s_rx_boot, COUNT(s_rx_boot), (int)v);
+}
+
+static const char *const s_rx_boot_by[] = {
+    [STATION_RX_BOOT_BY_NONE] = "none",
+    [STATION_RX_BOOT_BY_RESTART] = "restart",
+    [STATION_RX_BOOT_BY_UPTIME] = "uptime",
+    [STATION_RX_BOOT_BY_STREAM] = "stream",
+};
+_Static_assert(COUNT(s_rx_boot_by) == (size_t)STATION_RX_BOOT_BY_STREAM + 1u, "power-on evidence moved: update the table");
+
+const char *web_rx_boot_by_name(uint8_t v)
+{
+    return pick(s_rx_boot_by, COUNT(s_rx_boot_by), (int)v);
 }
 
 /* ---- reverse lookups -------------------------------------------------------------- */

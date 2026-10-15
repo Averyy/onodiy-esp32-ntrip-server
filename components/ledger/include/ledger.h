@@ -144,6 +144,16 @@ esp_err_t ledger_init(bool (*rtc_stamp_ok)(uint32_t stamp), uint32_t rtc_stamp);
 void ledger_note_prev_reboot(bool planned);
 
 /**
+ * The station's verdict after a power-on reset: the receiver kept running,
+ * so the ESP32 alone was reset (on the ESP32-S3 its reset pin reads as
+ * power-on: the USB serial chip's auto-reset, the RST button). The gap
+ * before this boot is then not power-off time (and not planned). Only
+ * before the first trusted clock of the boot, which is when the gap is
+ * counted; later it stays as counted (a few seconds of power-off time).
+ */
+void ledger_note_power_kept(void);
+
+/**
  * A reboot begins (a lifecycle shutdown hook; main registers it first, so it
  * runs before the casters close): settle the books and store them now, so
  * the next boot counts the gap from here even in another app image that

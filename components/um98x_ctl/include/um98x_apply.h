@@ -67,6 +67,14 @@ typedef struct {
      *  RESET (0 = not known): kept as gnss/baud when the session fails */
     uint32_t answer_baud;
     bool rtcm1230_ok;           /**< RTCM1230 accepted (false if rejected or not in the profile) */
+    /**
+     * RTCM messages the receiver refused in this session (a negative reply,
+     * not a timeout), in the order sent. A restore of the outputs after a
+     * failed session leaves them out: sent again they would only be refused
+     * again (um98x_ctl_restore_output).
+     */
+    uint16_t rtcm_refused[UM98X_MAX_RTCM_MSGS];
+    uint8_t rtcm_refused_n;
     bool saved;                 /**< SAVECONFIG accepted: the receiver runs the profile */
     bool persisted;             /**< applied hash, firmware, 1230 result (and baud) written in one settings batch */
     bool rolled_back;           /**< RESET sent after a failure (the receiver goes back to its saved configuration) */
@@ -79,9 +87,11 @@ typedef struct {
     bool settings_read;
     /**
      * What the receiver runs as far as this session knows: the latest
-     * read-back, with the antenna descriptor and B1C/B2a as sent when the
-     * session saved them (a failed session's RESET brings back the read
-     * values).
+     * read-back; after a saved session that changed the antenna
+     * descriptor, the descriptor as the receiver read it back right after
+     * that step (its own form: build 25164 collapses runs of spaces;
+     * unknown if that read failed), and B1C/B2a on when the session turned
+     * it on (a failed session's RESET brings back the read values).
      */
     um98x_rx_settings_t settings;
     bool antenna_sent;          /**< the antenna descriptor was sent (the read-back differed or was unknown) */
@@ -105,8 +115,13 @@ typedef struct {
 /* ---- apply preview: what a session would send, for the user to confirm ------------- */
 
 #define UM98X_PREVIEW_TEXT_MAX UM98X_APPLY_CMD_MAX
-/** Most steps of a preview: the fixed head and tail plus one per RTCM message. */
-#define UM98X_PREVIEW_MAX      (UM98X_MAX_RTCM_MSGS + 13u)
+/**
+ * Most steps of a preview: one per RTCM message plus the rest (13 today:
+ * UNLOG COM1, VERSIONA, CONFIG, MODE, the signal group, ANT1GROUPA, the
+ * baud, the base mode, the antenna and the dump read after it, B1C/B2a,
+ * the satellite view, SAVECONFIG), with one to spare.
+ */
+#define UM98X_PREVIEW_MAX      (UM98X_MAX_RTCM_MSGS + 14u)
 
 /** um98x_preview_step_t.kind */
 typedef enum {

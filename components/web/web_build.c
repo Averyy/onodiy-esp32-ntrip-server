@@ -872,6 +872,7 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     wj_bool(w, "identity_confirmed", st->identity_confirmed);
     station_alerts(w, "alerts", st->alerts);
     wj_bool(w, "profile_applied", st->profile_applied);
+    wj_bool(w, "rtcm_differs", st->rtcm_differs);
     if (st->rtcm1230_known) {
         wj_bool(w, "rtcm1230_supported", st->rtcm1230_supported);
     } else {
@@ -2085,6 +2086,8 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
     wj_bool(w, "lease_held", st->lease_held);
     wj_u32_or_null(w, "since_lease_release_ms", st->since_lease_release_ms);
     wj_bool(w, "rx_maintenance", st->rx_maintenance);
+    wj_str(w, "rx_boot", web_rx_boot_name(st->rx_boot));
+    wj_str(w, "rx_boot_by", web_rx_boot_by_name(st->rx_boot_by));
     wj_obj_close(w);
 
     wj_obj_open(w, "obs");

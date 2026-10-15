@@ -435,6 +435,14 @@ TEST_CASE("plan: the antenna descriptor only with a model that the receiver does
     um98x_plan_build(&p, &rb, 115200, false, &plan);
     TEST_ASSERT_EQUAL_INT(-1, step_index(&plan, UM98X_STEP_ANTENNA));
 
+    /* As build 25164 stores it, runs of spaces collapsed (the bench's
+     * read-back, CONFIG BASEANTENNAMODEL "TRM59800.00 SCIS" ...): the same
+     * name, not sent again. */
+    antenna_readback(&rb, "TRM59800.00 SCIS", "5000112233", 3);
+    TEST_ASSERT_TRUE(um98x_antenna_matches(&p, &rb));
+    um98x_plan_build(&p, &rb, 115200, false, &plan);
+    TEST_ASSERT_EQUAL_INT(-1, step_index(&plan, UM98X_STEP_ANTENNA));
+
     /* Name, serial or setup ID different, or the read-back unknown: sent. */
     antenna_readback(&rb, "TRM59800.00     NONE", "5000112233", 3);
     um98x_plan_build(&p, &rb, 115200, false, &plan);
@@ -591,7 +599,7 @@ TEST_CASE("plan preview: fixed position, antenna model, satellite view, baud cha
     snprintf(want, sizeof(want),
              "wa- UNLOG COM1|qa- VERSIONA|qa- CONFIG|qa- MODE|wds CONFIG SIGNALGROUP 3 6|qa- ANT1GROUPA|"
              "wd- CONFIG COM1 460800|"
-             "wd- %s|wd- CONFIG BASEANTENNAMODEL \"TRM59800.00     SCIS\" \"5000123\" 2 USER|"
+             "wd- %s|wd- CONFIG BASEANTENNAMODEL \"TRM59800.00     SCIS\" \"5000123\" 2 USER|qd- CONFIG|"
              "wo- CONFIG RTCMB1CB2A ENABLE|wa- RTCM1005 COM1 1|wa- RTCM1033 COM1 1|wa- GPGSV COM1 10|was SAVECONFIG",
              mode);
     preview_text(s_prev, n, text, sizeof(text));

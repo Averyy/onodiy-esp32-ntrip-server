@@ -388,10 +388,50 @@ TEST_CASE("txn: a detection probe ends on any ack or the log, 2 sends", "[um98x_
     TEST_ASSERT_EQUAL_INT64(T0 + 2000, r.send_at[1]);
     TEST_ASSERT_EQUAL_INT64(T0 + 4000, r.t.done_ms);
 
+    /* A negative reply: a receiver is here, and no log follows. */
     rig_begin(&r, UM98X_TXN_PROBE, "VERSIONA", NULL, 0);
     run_until(&r, T0 + 10);
     ack(line, sizeof(line), "VERSIONA", "PARSING FAILD");
     TEST_ASSERT_TRUE(feed(&r, line));
+    TEST_ASSERT_EQUAL(UM98X_TXN_OK, r.t.status);
+}
+
+TEST_CASE("txn: an accepted probe waits for its version log, so the log is never cut", "[um98x_txn]")
+{
+    rig_t r;
+    char line[160];
+    /* The ack, then the log 20 ms later (as on build 25164): the probe ends
+     * on the log and carries the identity. */
+    rig_begin(&r, UM98X_TXN_PROBE, "VERSIONA", NULL, 0);
+    run_until(&r, T0 + 60);
+    ack(line, sizeof(line), "VERSIONA", "OK");
+    TEST_ASSERT_TRUE(feed(&r, line));
+    TEST_ASSERT_EQUAL(UM98X_TXN_PENDING, r.t.status);
+    TEST_ASSERT_TRUE(r.t.ack_seen);
+    run_until(&r, T0 + 80);
+    TEST_ASSERT_EQUAL(UM98X_TXN_PENDING, r.t.status);
+    TEST_ASSERT_TRUE(feed(&r, TV_VERSIONA_UM982));
+    TEST_ASSERT_EQUAL(UM98X_TXN_OK, r.t.status);
+    TEST_ASSERT_TRUE(r.t.version_valid);
+    TEST_ASSERT_EQUAL_STRING("UM982", r.t.version.model);
+    TEST_ASSERT_EQUAL_INT(1, r.sends);
+
+    /* Acknowledged without a log: found all the same, 1000 ms after the ack,
+     * and never sent again. */
+    rig_begin(&r, UM98X_TXN_PROBE, "VERSIONA", NULL, 0);
+    run_until(&r, T0 + 60);
+    TEST_ASSERT_TRUE(feed(&r, line));
+    TEST_ASSERT_EQUAL(UM98X_TXN_ACT_DONE, run_until(&r, T0 + 5000));
+    TEST_ASSERT_EQUAL(UM98X_TXN_OK, r.t.status);
+    TEST_ASSERT_FALSE(r.t.version_valid);
+    TEST_ASSERT_EQUAL_INT64(T0 + 60 + UM98X_PROBE_LOG_MS, r.t.done_ms);
+    TEST_ASSERT_EQUAL_INT(1, r.sends);
+
+    /* The restarting answer after the ack: no log will come. */
+    rig_begin(&r, UM98X_TXN_PROBE, "VERSIONA", NULL, 0);
+    run_until(&r, T0 + 60);
+    TEST_ASSERT_TRUE(feed(&r, line));
+    TEST_ASSERT_TRUE(feed(&r, TV_NOTICE));
     TEST_ASSERT_EQUAL(UM98X_TXN_OK, r.t.status);
 }
 

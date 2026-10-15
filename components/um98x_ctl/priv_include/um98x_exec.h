@@ -33,7 +33,9 @@
  * Detection (one pass over a candidate list): per baud, switch the host
  * baud, listen 1500 ms (at least one CRC-valid RTCM frame or two
  * checksum-valid text lines = found, nothing sent); otherwise probe with the
- * version query (an acknowledgement or a version log = found). A loader
+ * version query (an acknowledgement or a version log = found; the log that
+ * follows an accepting acknowledgement is waited for, so it gives the
+ * identity and is not cut when the caller releases its lease). A loader
  * prompt reported by the port stops the pass at once and nothing more is
  * sent. Bytes at any baud during the pass are reported (saw_bytes).
  *
@@ -168,6 +170,9 @@ typedef struct {
     int64_t last_resetting_ms;    /**< last restarting answer */
     int64_t notice_restart_ms;    /**< an unsolicited restart counted from a restarting answer, its banner not seen yet */
     int64_t last_restart_ms;      /**< last unsolicited restart evidence */
+    int64_t last_version_ms;      /**< last version log, whoever asked (UM98X_NONE_MS = none) */
+    uint32_t version_uptime_ms;   /**< the receiver's time since its restart from that log (gnss_versiona_uptime_ms),
+                                       UINT32_MAX = it did not tell (the receiver has a time) */
     um98x_chan_stats_t stats;
 } um98x_chan_t;
 
@@ -319,11 +324,16 @@ um98x_res_t um98x_exec_reset(um98x_exec_t *ex);
 
 /**
  * Last resort after a failed session: the profile's RTCM outputs only (no
- * base mode, no baud change, no save), normal reply handling.
- * @return OK if every non-optional message was accepted, else E_FAILED (r
- *         names the first failure). r->rtcm1230_ok as in an apply.
+ * base mode, no baud change, no save), normal reply handling. The messages
+ * in skip (the ones the failed session saw refused) are not sent: they
+ * would only be refused again. They stay listed in r->rtcm_refused, with
+ * any this restore sees refused.
+ * @return OK if every non-optional message sent was accepted, else E_FAILED
+ *         (r names the first failure). r->rtcm1230_ok as in an apply (false
+ *         when skipped).
  */
-um98x_res_t um98x_exec_restore_rtcm(um98x_exec_t *ex, const um98x_base_profile_t *p, um98x_apply_result_t *r);
+um98x_res_t um98x_exec_restore_rtcm(um98x_exec_t *ex, const um98x_base_profile_t *p, const uint16_t *skip,
+                                    size_t n_skip, um98x_apply_result_t *r);
 
 /**
  * Satellite-in-view output on (period_s, 1..60 s) or off, unsaved: a lone

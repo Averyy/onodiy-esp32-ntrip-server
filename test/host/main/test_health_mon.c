@@ -488,15 +488,74 @@ TEST_CASE("health mon: overall level is the worst of the ladder and degraded", "
 #define RESET_CRASH 2
 #define EV_OTHER 8         /* any record of a boot after its boot record */
 
-/* One boot: its boot record (no clock yet) and, `start` > 0, a later record
- * of the same boot with a trusted clock 100 s into it. */
-static void pboot(hm_power_t *p, int cls, int64_t start)
+#define RXBOOT_KEPT 1
+#define RXBOOT_UNKNOWN 3
+#define RXBOOT_NONE 0      /* no verdict record (a build before them) */
+
+/* One boot: its boot record (no clock yet), for a power-on boot the
+ * station's verdict `rx` 8 s in, and, `start` > 0, a later record of the
+ * same boot with a trusted clock 100 s into it. */
+static void pboot_rx(hm_power_t *p, int cls, int rx, int64_t start)
 {
     hm_power_feed(p, HM_EV_BOOT, cls, 0, 0);
     hm_power_feed(p, EV_OTHER, 0, 0, 5);
+    if (rx != RXBOOT_NONE) {
+        hm_power_feed(p, HM_EV_RX_BOOT, rx, 0, 8);
+    }
     if (start > 0) {
         hm_power_feed(p, EV_OTHER, 0, start + 100, 100);
     }
+}
+
+/* A boot as before the receiver's word counted: a power-on boot is one
+ * whose receiver restarted too (a power cut). */
+static void pboot(hm_power_t *p, int cls, int64_t start)
+{
+    pboot_rx(p, cls, cls == HM_RESET_POWER_ON ? HM_RXBOOT_RESTARTED : RXBOOT_NONE, start);
+}
+
+TEST_CASE("health mon: a power-on boot counts as power lost only when the receiver restarted with it", "[health_mon]")
+{
+    hm_power_t p;
+    /* The bench: a dozen EN resets (USB auto-reset, flashes) read as
+     * power-on, the receiver kept running through every one: no alert. */
+    hm_power_init(&p);
+    for (int i = 0; i < 12; i++) {
+        pboot_rx(&p, HM_RESET_POWER_ON, RXBOOT_KEPT, PT0 + i * 300);
+    }
+    TEST_ASSERT_EQUAL_UINT8(0, p.n);
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0 + PH));
+
+    /* Unknown, or no verdict at all (records from older builds): not counted either. */
+    hm_power_init(&p);
+    pboot_rx(&p, HM_RESET_POWER_ON, RXBOOT_UNKNOWN, PT0);
+    pboot_rx(&p, HM_RESET_POWER_ON, RXBOOT_NONE, PT0 + PH);
+    pboot_rx(&p, HM_RESET_POWER_ON, RXBOOT_NONE, PT0 + 2 * PH);
+    TEST_ASSERT_EQUAL_UINT8(0, p.n);
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0 + 3 * PH));
+
+    /* Three real power cuts among them: counted, dated by their own records. */
+    pboot_rx(&p, HM_RESET_POWER_ON, HM_RXBOOT_RESTARTED, PT0 + 3 * PH);
+    pboot_rx(&p, HM_RESET_POWER_ON, RXBOOT_KEPT, PT0 + 4 * PH);
+    pboot_rx(&p, HM_RESET_POWER_ON, HM_RXBOOT_RESTARTED, PT0 + 5 * PH);
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0 + 6 * PH));
+    pboot_rx(&p, HM_RESET_POWER_ON, HM_RXBOOT_RESTARTED, PT0 + 6 * PH);
+    TEST_ASSERT_EQUAL_UINT8(3, p.n);
+    TEST_ASSERT_EQUAL_INT64(PT0 + 6 * PH, p.boot[2].t);
+    TEST_ASSERT_TRUE(hm_power_alert(&p, PT0 + 6 * PH + 200));
+    TEST_ASSERT_FALSE(hm_power_alert(&p, PT0 + 6 * PH + PDAY));
+
+    /* A verdict only belongs to the boot it follows: one after another
+     * boot's record (a planned restart) is not read for it. */
+    hm_power_init(&p);
+    hm_power_feed(&p, HM_EV_BOOT, RESET_PLANNED, 0, 0);
+    hm_power_feed(&p, HM_EV_RX_BOOT, HM_RXBOOT_RESTARTED, 0, 8);
+    TEST_ASSERT_EQUAL_UINT8(0, p.n);
+    /* ... and only the first verdict of a boot counts. */
+    hm_power_feed(&p, HM_EV_BOOT, HM_RESET_POWER_ON, 0, 0);
+    hm_power_feed(&p, HM_EV_RX_BOOT, RXBOOT_KEPT, 0, 8);
+    hm_power_feed(&p, HM_EV_RX_BOOT, HM_RXBOOT_RESTARTED, 0, 9);
+    TEST_ASSERT_EQUAL_UINT8(0, p.n);
 }
 
 TEST_CASE("health mon: three power-on boots within 24 h raise power lost; it clears 24 h after the last", "[health_mon]")
@@ -634,6 +693,7 @@ TEST_CASE("health mon: a boot record with its own clock dates the boot; old boot
     hm_power_init(&p);
     for (int i = 0; i < 3; i++) {
         hm_power_feed(&p, HM_EV_BOOT, HM_RESET_POWER_ON, PT0 + i * PH + 2, 2);
+        hm_power_feed(&p, HM_EV_RX_BOOT, HM_RXBOOT_RESTARTED, PT0 + i * PH + 8, 8);
     }
     TEST_ASSERT_TRUE(hm_power_alert(&p, PT0 + 3 * PH));
     TEST_ASSERT_EQUAL_INT64(PT0 + PH, p.boot[1].t);

@@ -169,6 +169,10 @@ um98x_txn_action_t um98x_txn_poll(um98x_txn_t *t, int64_t now_ms, int64_t *wake_
             finish(t, UM98X_TXN_TIMEOUT, now_ms);
             return UM98X_TXN_ACT_DONE;
         }
+        if (t->kind == UM98X_TXN_PROBE && t->ack_seen) {
+            finish(t, UM98X_TXN_OK, now_ms);   /* acknowledged, its log did not follow: found all the same */
+            return UM98X_TXN_ACT_DONE;
+        }
         if (t->sends >= t->max_sends) {
             /* A version query that only drew negative replies says so. */
             finish(t, (!command_like(t) && t->rejects > 0) ? UM98X_TXN_REJECTED : UM98X_TXN_TIMEOUT, now_ms);
@@ -287,7 +291,13 @@ bool um98x_txn_on_line(um98x_txn_t *t, const char *line, size_t len, const um98x
             append_text(t, line, len);
         }
         if (t->kind == UM98X_TXN_PROBE) {
-            finish(t, UM98X_TXN_OK, now_ms);   /* any answer: a receiver is at this baud */
+            /* Any answer: a receiver is at this baud. An accepted query is
+             * followed by the version log: wait for it (see the header). */
+            if (l->ok) {
+                t->deadline_ms = now_ms + UM98X_PROBE_LOG_MS;
+            } else {
+                finish(t, UM98X_TXN_OK, now_ms);
+            }
         } else if (!l->ok) {
             on_reject(t, l, now_ms);
         } else if (t->kind == UM98X_TXN_COMMAND) {

@@ -865,7 +865,28 @@ TEST_CASE("health: retry, refused factory reset, journal and log counters", "[we
     TEST_ASSERT_TRUE(cJSON_IsFalse(at(at(root, "log"), "usb_connected")));
     TEST_ASSERT_EQUAL(3, at(at(root, "log"), "usb_dropped")->valueint);
     TEST_ASSERT_EQUAL(171, at(at(root, "log"), "usb_dropped_bytes")->valueint);
+    TEST_ASSERT_EQUAL_STRING("none", at(at(root, "station"), "rx_boot")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("none", at(at(root, "station"), "rx_boot_by")->valuestring);
     cJSON_Delete(root);
+
+    /* After a power-on reset: the receiver's word on it. */
+    st.rx_boot = STATION_RX_BOOT_KEPT;
+    st.rx_boot_by = STATION_RX_BOOT_BY_UPTIME;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_health(&w, &h);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_EQUAL_STRING("kept_running", at(at(root, "station"), "rx_boot")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("uptime", at(at(root, "station"), "rx_boot_by")->valuestring);
+    cJSON_Delete(root);
+    TEST_ASSERT_EQUAL_STRING("pending", web_rx_boot_name(STATION_RX_BOOT_PENDING));
+    TEST_ASSERT_EQUAL_STRING("restarted", web_rx_boot_name(STATION_RX_BOOT_RESTARTED));
+    TEST_ASSERT_EQUAL_STRING("unknown", web_rx_boot_name(STATION_RX_BOOT_UNKNOWN));
+    TEST_ASSERT_EQUAL_STRING("unknown", web_rx_boot_name(99));
+    TEST_ASSERT_EQUAL_STRING("restart", web_rx_boot_by_name(STATION_RX_BOOT_BY_RESTART));
+    TEST_ASSERT_EQUAL_STRING("stream", web_rx_boot_by_name(STATION_RX_BOOT_BY_STREAM));
+    st.rx_boot = STATION_RX_BOOT_NONE;
+    st.rx_boot_by = STATION_RX_BOOT_BY_NONE;
 
     hs.gnss_retry_in_s = 420;
     hs.factory_reset_refused_age_s = 30;

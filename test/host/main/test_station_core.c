@@ -240,6 +240,57 @@ TEST_CASE("station core: an observed set that differs at boot applies", "[statio
     TEST_ASSERT_EQUAL_UINT16(1097, w.s.drift_msg);
 }
 
+TEST_CASE("station core: RTCM that differs is drift; no RTCM at all never is", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    w.in.autocfg = false;   /* as on the bench: nothing is applied on its own */
+    /* The receiver answers (two lines) but sends no RTCM: no antenna. */
+    sim_start(&w);
+    w.in.text_lines = 2;
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_next(&w).kind);
+    identity_done(&w, true, true);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    for (int i = 0; i < 300; i++) {
+        TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_next(&w).kind);
+        TEST_ASSERT_FALSE(w.s.rtcm_differs);
+        sim_tick(&w);
+    }
+    TEST_ASSERT_FALSE(w.s.profile_applied);   /* not applied, but nothing differs either */
+
+    /* RTCM flows with a message missing: that differs. */
+    w.rtcm_on = true;
+    w.skip = 1097;
+    for (int i = 0; i < 70 && !w.s.rtcm_differs; i++) {
+        TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_next(&w).kind);
+        sim_tick(&w);
+    }
+    TEST_ASSERT_TRUE(w.s.rtcm_differs);
+    TEST_ASSERT_EQUAL_UINT16(1097, w.s.drift_msg);
+
+    /* The whole set again: the next window passes. */
+    w.skip = 0;
+    for (int i = 0; i < 70 && w.s.rtcm_differs; i++) {
+        TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_next(&w).kind);
+        sim_tick(&w);
+    }
+    TEST_ASSERT_FALSE(w.s.rtcm_differs);
+
+    /* RTCM stops: a stall, not drift. */
+    w.skip = 1097;
+    for (int i = 0; i < 70 && !w.s.rtcm_differs; i++) {
+        TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_next(&w).kind);
+        sim_tick(&w);
+    }
+    TEST_ASSERT_TRUE(w.s.rtcm_differs);
+    w.rtcm_on = false;
+    for (int i = 0; i < 70 && w.s.rtcm_differs; i++) {
+        TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_next(&w).kind);
+        sim_tick(&w);
+    }
+    TEST_ASSERT_FALSE(w.s.rtcm_differs);
+}
+
 TEST_CASE("station core: autocfg off raises nothing but sends nothing; the user's apply still runs", "[station]")
 {
     sim_t w;
@@ -541,6 +592,88 @@ TEST_CASE("station core: a failed apply raises CONFIG_FAILED and restores the RT
     TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
     TEST_ASSERT_FALSE(w.s.paused);
     TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+}
+
+/* The APPLY_FAILED note among the notes taken now (NULL if none). */
+static const stn_note_t *apply_failed_note(sim_t *w, stn_note_t *buf)
+{
+    unsigned c = stn_take_notes(&w->s, buf, STN_NOTES);
+    for (unsigned i = 0; i < c; i++) {
+        if (buf[i].kind == STN_NOTE_APPLY_FAILED) {
+            return &buf[i];
+        }
+    }
+    return NULL;
+}
+
+TEST_CASE("station core: a failed apply's log says what follows: the station's retry, or none", "[station]")
+{
+    stn_note_t buf[STN_NOTES];
+    char text[128];
+
+    /* Automatic configuration on: the station retries in 10 min. */
+    sim_t w;
+    sim_init(&w, false);
+    boot_to_failed_apply(&w, true);
+    const stn_note_t *n = apply_failed_note(&w, buf);
+    TEST_ASSERT_NOT_NULL(n);
+    TEST_ASSERT_EQUAL_INT32(600, n->a);
+    TEST_ASSERT_EQUAL_INT32(0, n->b);
+    stn_apply_next_text((uint32_t)n->a, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("the station tries again in 10 min", text);
+
+    /* Off (the bench's case, the user's apply failing on a refused type):
+     * no retry is pending, and the log must not promise one. */
+    sim_init(&w, false);
+    w.in.autocfg = false;
+    boot_streaming(&w, false);
+    stn_request_apply(&w.s);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, sim_next(&w).kind);
+    stn_result_t r = res(STN_E_FAIL);
+    r.answered = true;
+    sim_done(&w, &r);
+    TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+    TEST_ASSERT_FALSE(stn_config_auto_retry(&w.s, w.in.autocfg));
+    TEST_ASSERT_EQUAL_UINT32(0, stn_config_retry_in_s(&w.s, w.in.autocfg, w.in.now_ms));
+    n = apply_failed_note(&w, buf);
+    TEST_ASSERT_NOT_NULL(n);
+    TEST_ASSERT_EQUAL_INT32(0, n->a);
+    stn_apply_next_text((uint32_t)n->a, text, sizeof(text));
+    TEST_ASSERT_NULL(strstr(text, "later"));
+    TEST_ASSERT_NULL(strstr(text, "tries again"));
+    TEST_ASSERT_EQUAL_STRING("nothing retries it on its own (automatic configuration is off): apply it again from the "
+                             "receiver page",
+                             text);
+
+    /* A receiver lost in the session says so. */
+    sim_init(&w, false);
+    boot_streaming(&w, false);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, sim_next(&w).kind);
+    r = res(STN_E_NOT_FOUND);
+    r.receiver_lost = true;
+    sim_done(&w, &r);
+    n = apply_failed_note(&w, buf);
+    TEST_ASSERT_NOT_NULL(n);
+    TEST_ASSERT_EQUAL_INT32(1, n->b);
+
+    /* Nothing sent (no lease): no such note. */
+    sim_init(&w, false);
+    boot_streaming(&w, false);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, sim_next(&w).kind);
+    r = res(STN_E_STATE);
+    r.nothing_sent = true;
+    sim_done(&w, &r);
+    TEST_ASSERT_NULL(apply_failed_note(&w, buf));
+
+    /* The later steps of the backoff, in words. */
+    stn_apply_next_text(1800, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("the station tries again in 30 min", text);
+    stn_apply_next_text(7200, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("the station tries again in 2 h", text);
+    stn_apply_next_text(21600, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("the station tries again in 6 h", text);
+    TEST_ASSERT_EQUAL_size_t(4, stn_apply_next_text(600, text, 5));
+    TEST_ASSERT_EQUAL_STRING("the ", text);
 }
 
 TEST_CASE("station core: a refused signal group goes back without CONFIG_FAILED and is re-applied at once", "[station]")
@@ -2336,4 +2469,110 @@ TEST_CASE("station core: the signal report raises and clears its alert", "[stati
     stn_note_signals(&w.s, 0);
     stn_note_signals(&w.s, -1);  /* a firmware that does not report: unknown, no alert to stand on */
     TEST_ASSERT_FALSE(stn_alerts(&w.s) & STN_ALERT_SIGNALS_MISMATCH);
+}
+
+/* ---- power-on reset: did the receiver keep running? ------------------------------ */
+
+static stn_rxboot_in_t rxb(int64_t now, int64_t restart, int64_t data, int64_t uptime_at, uint32_t uptime)
+{
+    stn_rxboot_in_t in = { .now_ms = now, .restart_ms = restart, .data_ms = data, .uptime_at_ms = uptime_at,
+                           .uptime_ms = uptime };
+    return in;
+}
+
+TEST_CASE("station core: a power-on boot is a receiver restart only on the receiver's word", "[station]")
+{
+    stn_rxboot_by_t by;
+    stn_rxboot_in_t in;
+
+    /* Nothing yet: pending, then unknown once the window is over. */
+    in = rxb(1500, STN_NEVER, STN_NEVER, STN_NEVER, 0);
+    TEST_ASSERT_EQUAL(STN_RXBOOT_PENDING, stn_rxboot_judge(&in, &by));
+    TEST_ASSERT_EQUAL(STN_RXBOOT_BY_NONE, by);
+    in.now_ms = STN_RXBOOT_WINDOW_MS - 1;
+    TEST_ASSERT_EQUAL(STN_RXBOOT_PENDING, stn_rxboot_judge(&in, NULL));
+    in.now_ms = STN_RXBOOT_WINDOW_MS;
+    TEST_ASSERT_EQUAL(STN_RXBOOT_UNKNOWN, stn_rxboot_judge(&in, &by));
+    TEST_ASSERT_EQUAL(STN_RXBOOT_BY_NONE, by);
+
+    /* The bench's EN reset with sky: RTCM at once, no banner: kept running. */
+    in = rxb(2000, STN_NEVER, 1800, STN_NEVER, 0);
+    TEST_ASSERT_EQUAL(STN_RXBOOT_KEPT, stn_rxboot_judge(&in, &by));
+    TEST_ASSERT_EQUAL(STN_RXBOOT_BY_STREAM, by);
+
+    /* The bench's EN reset without sky (COM1 silent): the detection probe's
+     * version log says the receiver has run for 1014 s. */
+    in = rxb(6500, STN_NEVER, STN_NEVER, 6200, 1014000);
+    TEST_ASSERT_EQUAL(STN_RXBOOT_KEPT, stn_rxboot_judge(&in, &by));
+    TEST_ASSERT_EQUAL(STN_RXBOOT_BY_UPTIME, by);
+
+    /* A power cut: the receiver boots after the ESP32 and announces it. */
+    in = rxb(5200, 5000, STN_NEVER, STN_NEVER, 0);
+    TEST_ASSERT_EQUAL(STN_RXBOOT_RESTARTED, stn_rxboot_judge(&in, &by));
+    TEST_ASSERT_EQUAL(STN_RXBOOT_BY_RESTART, by);
+    in = rxb(7000, 5000, 6600, STN_NEVER, 0);   /* its GGA 1.6 s after the banner changes nothing */
+    TEST_ASSERT_EQUAL(STN_RXBOOT_RESTARTED, stn_rxboot_judge(&in, &by));
+    TEST_ASSERT_EQUAL(STN_RXBOOT_BY_RESTART, by);
+
+    /* A power cut whose banner was missed: its clock started after the ESP32's. */
+    in = rxb(9500, STN_NEVER, STN_NEVER, 9000, 2500);
+    TEST_ASSERT_EQUAL(STN_RXBOOT_RESTARTED, stn_rxboot_judge(&in, &by));
+    TEST_ASSERT_EQUAL(STN_RXBOOT_BY_UPTIME, by);
+    /* ... and the zeroed header right after its banner. */
+    in = rxb(9500, STN_NEVER, STN_NEVER, 9000, 0);
+    TEST_ASSERT_EQUAL(STN_RXBOOT_RESTARTED, stn_rxboot_judge(&in, NULL));
+    /* Its clock began before the ESP32's, but by less than the margin: not "kept". */
+    in = rxb(9500, STN_NEVER, STN_NEVER, 9000, 9000 + STN_RXBOOT_MARGIN_MS);
+    TEST_ASSERT_EQUAL(STN_RXBOOT_RESTARTED, stn_rxboot_judge(&in, NULL));
+    in.uptime_ms = 9000 + STN_RXBOOT_MARGIN_MS + 1;
+    TEST_ASSERT_EQUAL(STN_RXBOOT_KEPT, stn_rxboot_judge(&in, NULL));
+
+    /* A restart after data had come is a later one of its own (the user's
+     * RESET through its other port): the data at once decided. */
+    in = rxb(12000, 10000, 1800, STN_NEVER, 0);
+    TEST_ASSERT_EQUAL(STN_RXBOOT_KEPT, stn_rxboot_judge(&in, &by));
+    TEST_ASSERT_EQUAL(STN_RXBOOT_BY_STREAM, by);
+    /* ... and after its version log said it kept running. */
+    in = rxb(12000, 10000, STN_NEVER, 6200, 1014000);
+    TEST_ASSERT_EQUAL(STN_RXBOOT_KEPT, stn_rxboot_judge(&in, &by));
+    TEST_ASSERT_EQUAL(STN_RXBOOT_BY_UPTIME, by);
+
+    /* Data that came late (a slow start, or a receiver that booted fast and
+     * whose banner was missed) tells nothing: unknown. */
+    in = rxb(STN_RXBOOT_WINDOW_MS, STN_NEVER, STN_RXBOOT_DATA_MS + 1, STN_NEVER, 0);
+    TEST_ASSERT_EQUAL(STN_RXBOOT_UNKNOWN, stn_rxboot_judge(&in, NULL));
+    in.data_ms = STN_RXBOOT_DATA_MS;
+    TEST_ASSERT_EQUAL(STN_RXBOOT_KEPT, stn_rxboot_judge(&in, NULL));
+
+    /* Evidence after the window does not count. */
+    in = rxb(STN_RXBOOT_WINDOW_MS + 5000, STN_RXBOOT_WINDOW_MS + 1, STN_NEVER, STN_RXBOOT_WINDOW_MS + 2, 0);
+    TEST_ASSERT_EQUAL(STN_RXBOOT_UNKNOWN, stn_rxboot_judge(&in, NULL));
+
+    /* The earliest evidence decides: a version log before a banner ... */
+    in = rxb(9000, 8000, STN_NEVER, 6000, 600000);
+    TEST_ASSERT_EQUAL(STN_RXBOOT_KEPT, stn_rxboot_judge(&in, &by));
+    TEST_ASSERT_EQUAL(STN_RXBOOT_BY_UPTIME, by);
+    /* ... a banner before a version log; a tie goes to the receiver's clock. */
+    in = rxb(9000, 5000, STN_NEVER, 8000, 2000);
+    TEST_ASSERT_EQUAL(STN_RXBOOT_RESTARTED, stn_rxboot_judge(&in, &by));
+    TEST_ASSERT_EQUAL(STN_RXBOOT_BY_RESTART, by);
+    in = rxb(3000, STN_NEVER, 2000, 2000, 900000);
+    TEST_ASSERT_EQUAL(STN_RXBOOT_KEPT, stn_rxboot_judge(&in, &by));
+    TEST_ASSERT_EQUAL(STN_RXBOOT_BY_UPTIME, by);
+}
+
+TEST_CASE("station core: NMEA sentences tell data from command-layer lines", "[station]")
+{
+    static const char *const yes[] = { "$GPGGA,123519,4807.038,N*47", "$GNRMC,,V*00", "$GPGSV,1,1,00,,,,,*55" };
+    static const char *const no[] = { "$devicename,COM1*67", "$command,VERSIONA,response: OK*45",
+                                      "$CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP 3 6*01", "#VERSIONA,79,GPS;x*00",
+                                      "The Board is resetting,do not response any command!*39", "$GPGG", "$gpgga,1*00",
+                                      "" };
+    for (size_t i = 0; i < sizeof(yes) / sizeof(yes[0]); i++) {
+        TEST_ASSERT_TRUE_MESSAGE(stn_line_is_nmea(yes[i], strlen(yes[i])), yes[i]);
+    }
+    for (size_t i = 0; i < sizeof(no) / sizeof(no[0]); i++) {
+        TEST_ASSERT_FALSE_MESSAGE(stn_line_is_nmea(no[i], strlen(no[i])), no[i]);
+    }
+    TEST_ASSERT_FALSE(stn_line_is_nmea(NULL, 10));
 }

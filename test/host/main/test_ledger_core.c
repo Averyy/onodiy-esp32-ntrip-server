@@ -140,6 +140,44 @@ TEST_CASE("ledger: a power cut's gap is downtime and power-off time, a reset's o
     }
 }
 
+TEST_CASE("ledger: a power-on reset that left the receiver running is no power-off time", "[ledger]")
+{
+    /* On the ESP32-S3 the reset pin reads as power-on: the station's
+     * verdict comes before the first clock and turns the gap into a plain
+     * (unplanned) reset gap. */
+    lc_snapshot_t s = snap_base();
+    s.today.utc_day = DAY0;
+    s.alive_ms = at(DAY0, H(12));
+    s.expected_mask = 0x01;
+    s.protected_mask = 0x01;
+    s.planned = true;   /* receiver work at the reset: still never planned after a power-on class reset */
+    fresh(T0, 2000);
+    lc_restore(&c, &s, LC_RESET_POWER_CUT);
+    TEST_ASSERT_TRUE(lc_power_kept(&c));
+    TEST_ASSERT_FALSE(lc_power_kept(&c));   /* once */
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(12) + S(3)), LC_CLOCK_SNTP));
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.power_off_ms);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)S(3), c.today.down_ms[0]);   /* 1 s gap + 2 s since boot: downtime */
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.planned_ms[0]);
+
+    /* The verdict after the first clock: the gap stays as counted. */
+    s = snap_base();
+    s.today.utc_day = DAY0;
+    s.alive_ms = at(DAY0, H(12));
+    s.expected_mask = 0x01;
+    s.protected_mask = 0x01;
+    fresh(T0, 2000);
+    lc_restore(&c, &s, LC_RESET_POWER_CUT);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(12) + S(3)), LC_CLOCK_SNTP));
+    TEST_ASSERT_FALSE(lc_power_kept(&c));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)S(1), c.today.power_off_ms);
+
+    /* Not a power-on class reset: nothing to change. */
+    fresh(T0, 2000);
+    lc_restore(&c, &s, LC_RESET_SOFTWARE);
+    TEST_ASSERT_FALSE(lc_power_kept(&c));
+}
+
 TEST_CASE("ledger: a gap that spans midnight and planned work at the reset", "[ledger]")
 {
     lc_snapshot_t s = snap_base();

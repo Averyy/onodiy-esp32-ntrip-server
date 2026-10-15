@@ -87,8 +87,19 @@ bool um98x_profile_valid(const um98x_base_profile_t *p);
  */
 bool um98x_antenna_str_valid(const char *s, size_t cap);
 
-/** Length of s without its trailing spaces (the stored and compared form). */
+/** Length of s without its trailing spaces (the stored form). */
 size_t um98x_antenna_str_len(const char *s);
+
+/**
+ * Two antenna descriptors (or serial numbers) name the same thing: equal
+ * once leading and trailing spaces are dropped and every run of spaces
+ * inside reads as one space. UM982 build 25164 stores the descriptor with
+ * its runs of spaces collapsed ("TRM59800.00     SCIS", the IGS name padded
+ * to 16 characters before the radome, reads back as "TRM59800.00 SCIS"), so
+ * an exact comparison would never match and every apply would send the
+ * antenna again. NULL reads as "".
+ */
+bool um98x_antenna_str_same(const char *a, const char *b);
 
 /** Encode (unused fields cleared); returns the blob length, or 0 if cap is too small or p is invalid. */
 size_t um98x_profile_encode(const um98x_base_profile_t *p, uint8_t *buf, size_t cap);

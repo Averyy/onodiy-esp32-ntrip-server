@@ -36,9 +36,15 @@
  *    write every 1000 ms, until a version log arrives or until end_ms
  *    (restart evidence + 20 s).
  *  - PROBE: detection probe: the version query with a leading CR LF, done
- *    on any acknowledgement of it, on a version log or on the receiver's
+ *    on a version log, on a negative acknowledgement or on the receiver's
  *    restarting answer (a receiver is at this baud); 2 sends, 2000 ms
- *    each.
+ *    each. After an accepting acknowledgement the version log that follows
+ *    it has UM98X_PROBE_LOG_MS, then the probe is done all the same (OK:
+ *    the receiver answered). Waiting for it gives the caller the identity
+ *    and keeps the log line whole: the caller releases its lease right
+ *    after the probe, and a release drops the input still pending and
+ *    resets the framer, which cut the log that was arriving (every boot
+ *    that detected the receiver discarded those bytes, one version log).
  *  - GROUPS: the signal-group query (ANT1GROUPA, one-shot: no rate). Done
  *    on the main antenna's signal-group log; the ack comes first. After an
  *    accepting ack the log has 1000 ms, then the query ends as a timeout
@@ -85,6 +91,7 @@ extern "C" {
 #define UM98X_VERSION_RESTART_SPAN_MS   20000
 #define UM98X_PROBE_WINDOW_MS           2000
 #define UM98X_PROBE_SENDS               2
+#define UM98X_PROBE_LOG_MS              1000
 #define UM98X_GROUPS_SENDS              2
 #define UM98X_GROUPS_LOG_MS             1000
 #define UM98X_GROUPS_BODY_MAX           96

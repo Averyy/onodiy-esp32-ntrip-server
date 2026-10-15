@@ -188,12 +188,19 @@
  * reports STATION_STATE_IDLE meanwhile (listening only, as in a boot's
  * first seconds), which suspends health's GNSS ladder; rx_maintenance tells
  * the two apart (the UI's banner with the time left). Exit (the
- * user, or the time is up) runs the stream-first path as at boot. An ESP32
- * software reset keeps the state with its time left (RTC memory, never
- * NVS; the boot only listens until it ends); a power cut ends it. Entry and
- * exit are journalled. PROVISIONAL, to be confirmed on hardware (whether
- * input on the link can disturb the receiver while it is worked on through
- * its other port).
+ * user, or the time is up) runs the stream-first path as at boot. A reset
+ * that keeps the ESP32's RTC memory keeps the state with its time left
+ * (RTC memory, never NVS; the boot only listens until it ends): a software
+ * reset, and also a reset that reads as power-on or brownout, since on the
+ * ESP32-S3 the EN pin (the USB auto-reset, the RST button) reads as
+ * power-on while the receiver keeps running and may be mid-work; a record
+ * that survived says the ESP32's memory kept its power. Neither a restart
+ * banner nor the power-on verdict ends it then: the user may have
+ * restarted the receiver, or cycled its power, as part of the work. A
+ * power cut that clears the memory ends it. Entry and exit are journalled.
+ * PROVISIONAL, to be confirmed on hardware (whether input on the link can
+ * disturb the receiver while it is worked on through its other port, and
+ * whether the ESP32-S3 keeps its RTC memory through an EN reset).
  *
  * Live view (station_live_view_start; satellites first): a window the user
  * opens for CONFIG_STATION_LIVE_VIEW_MIN minutes (extendable up to
@@ -357,6 +364,37 @@ typedef enum {
     STATION_LIVE_END_FLASH,          /**< a receiver update began */
 } station_live_end_t;
 
+/**
+ * After a power-on reset: did the receiver keep running? On the ESP32-S3 a
+ * reset by the EN pin (the USB serial chip's auto-reset that every flash
+ * uses, the RST button) reads as power-on, and the receiver, on the same
+ * supply, keeps running through it. So a power-on boot counts as a power
+ * loss (health's power-lost alert) and as a receiver restart only on the
+ * receiver's word: its restart banner before any data, or a version log
+ * whose header tells it has run for less time than the ESP32 (while it has
+ * no time, the header's millisecond field counts from its restart) ->
+ * RESTARTED; RTCM or NMEA within 3.5 s of the ESP32's start, or a version
+ * log that tells it has run since before the ESP32 started -> KEPT; nothing
+ * of that within 30 s -> UNKNOWN (counted as neither). Listening is enough,
+ * so it is judged in receiver maintenance too. Journalled once
+ * (DIAG_EV_RX_BOOT). PROVISIONAL, to be confirmed on hardware.
+ */
+typedef enum {
+    STATION_RX_BOOT_NONE = 0,      /**< not a power-on boot: nothing to judge */
+    STATION_RX_BOOT_PENDING,       /**< a power-on boot, judged within 30 s */
+    STATION_RX_BOOT_KEPT,          /**< the receiver kept running: only the ESP32 was reset (its reset pin) */
+    STATION_RX_BOOT_RESTARTED,     /**< the receiver restarted with it: the power was cut */
+    STATION_RX_BOOT_UNKNOWN,       /**< nothing it sent told */
+} station_rx_boot_t;
+
+/** What told it (station_rx_boot_t). */
+typedef enum {
+    STATION_RX_BOOT_BY_NONE = 0,
+    STATION_RX_BOOT_BY_RESTART,    /**< its restart banner (or restarting answer, an unasked version log) before any data */
+    STATION_RX_BOOT_BY_UPTIME,     /**< its version log's time since its restart */
+    STATION_RX_BOOT_BY_STREAM,     /**< RTCM or NMEA at once */
+} station_rx_boot_by_t;
+
 /** How the last receiver update (or package check) ended. */
 typedef enum {
     STATION_FLASH_OUT_NONE = 0,       /**< none this boot */
@@ -406,6 +444,8 @@ typedef struct {
     bool identity_confirmed;         /**< receiver identity confirmed by this boot's version query */
     uint32_t alerts;                 /**< station_alert_t flags */
     bool profile_applied;            /**< receiver runs the stored profile */
+    bool rtcm_differs;               /**< the latest observation window saw RTCM flowing that differs from the profile
+                                          (a checked message missing or at the wrong rate); never without RTCM */
     bool rtcm1230_supported;         /**< gnss/rtcm1230_ok: the receiver accepted RTCM1230 at the last apply (required in the observed set only then) */
     bool rtcm1230_known;             /**< gnss/rtcm1230_ok is stored (false: never applied; rtcm1230_supported is then false and means "not applied yet") */
     bool config_failed;              /**< STATION_ALERT_CONFIG_FAILED is raised */
@@ -442,6 +482,10 @@ typedef struct {
     bool b1cb2a_sent;                /**< the last apply session turned BeiDou B1C/B2a in RTCM on */
     bool b1cb2a_ok;                  /**< ... and the receiver accepted it */
     char b1cb2a_reply[64];           /**< its rejection text or "timeout" */
+
+    /* After a power-on reset (read at the time of the call). */
+    uint8_t rx_boot;                 /**< station_rx_boot_t */
+    uint8_t rx_boot_by;              /**< station_rx_boot_by_t */
 
     /* Receiver maintenance (hands off). */
     bool rx_maintenance;             /**< on: nothing is sent to the receiver; health suspends its GNSS ladder */
