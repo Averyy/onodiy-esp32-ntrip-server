@@ -424,8 +424,8 @@ small { font-size: 0.85rem; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; min-width: 0; font-variant-numeric: tabular-nums; }
 .kv + .kv { margin-top: 0.5rem; }
-/* A short list in a wide card: the values stay near their labels. */
-.tight-kv .kv { grid-template-columns: minmax(7.5rem, 13rem) 1fr; }
+/* A short list in a wide card: the values stay near their labels (on a phone the labels keep to 40 %, as everywhere). */
+.tight-kv .kv { grid-template-columns: minmax(7.5rem, min(13rem, 40%)) minmax(0, 1fr); }
 /* Short labels (the Status page): as wide as the longest, the values beside them at every width. */
 .fit-kv .kv { grid-template-columns: max-content minmax(0, 1fr); column-gap: 1.5rem; }
 /* A list of figures or a choice under a line of text keeps the gap. */
@@ -883,6 +883,9 @@ table.counts tfoot th, table.counts tfoot td { border-top: 1px solid var(--borde
 
 .checks { display: grid; gap: 0.6rem; margin: 0; padding: 0; list-style: none; }
 .checks li { display: flex; align-items: flex-start; gap: 0.6rem; }
+/* One line each (the Signals card): the line centred on its mark. */
+.checks.lines { gap: 0.4rem; }
+.checks.lines li { align-items: center; }
 .checks .ic {
   display: inline-flex;
   flex: none;

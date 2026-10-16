@@ -131,13 +131,18 @@ const ctx = {
     const body = init.body ? JSON.parse(init.body) : null;
     sent.push({ path: p, method: init.method, body: body });
     const r = routes ? routes(init.method, p, body) : [200, { slot: 0, config: {} }];
+    if (r === 'abort') {   /* no answer before the page's timeout */
+      const e = new Error('aborted');
+      e.name = 'AbortError';
+      throw e;
+    }
     return { ok: r[0] < 300, status: r[0], headers: { get: () => 'application/json' }, json: async () => r[1] };
   },
 };
 vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { casterEditor, openCasterWarning, casterDetails, casterSummary, casterChip, stationState, adminDashboard,\n' +
-  '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard,\n' +
+  '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard, healthCard, chipCard, signalsHead, bandTable, kv,\n' +
   '  setStatus: s => { S.status = s; }, setSession: s => { S.session = s; } };\n})()',
   ctx);
 
@@ -272,10 +277,16 @@ async function journalClear(c) {
     for (let i = 0; i < 40; i++) await new Promise(r => setImmediate(r));
   };
   const recs = [1, 2].map(n => ({ seq: n, kind: 'boot', a: 0, b: 0, uptime_s: n, unix: null }));
+  let deleted = false;
+  /* c.after: the journal GET /api/health reports once the DELETE went (as before when not given). */
   routes = (m, p) => {
-    if (p === '/api/health') return [200, { journal: { available: true, oldest_seq: 1, newest_seq: 2 } }];
-    if (p.startsWith('/api/journal') && m === 'GET') return [200, { entries: recs, cursor: 2, more: false }];
-    if (p === '/api/journal' && m === 'DELETE') return c.answer;
+    const j = deleted && c.after ? c.after : { available: true, oldest_seq: 1, newest_seq: 2 };
+    if (p === '/api/health') return [200, { journal: j }];
+    if (p.startsWith('/api/journal') && m === 'GET') return [200, { entries: j.newest_seq ? recs : [], cursor: 2, more: false }];
+    if (p === '/api/journal' && m === 'DELETE') {
+      deleted = true;
+      return c.answer;
+    }
     return [200, {}];
   };
   sent.length = 0;
@@ -299,8 +310,53 @@ async function journalClear(c) {
   r.toasts = ids.toasts.kids.map(t => [t.textContent, t.className]);
   const err = [...card.el.walk()].find(e => e.attrs.role === 'alert' && e.className.indexOf('msg') === 0);
   r.error = err && !err.hidden ? err.textContent : null;
+  r.errorTone = err && !err.hidden ? err.className : null;
+  r.rowsBefore = [...visible(card.el)].filter(e => e.tagName === 'TR').length;
+  if (c.refresh) {
+    /* Then Refresh, with the journal as c.after says. */
+    deleted = true;
+    [...card.el.walk()].find(e => e.tagName === 'BUTTON' && e.textContent === 'Refresh').fire('click');
+    await settle();
+  }
+  /* What the list shows: its rows' count, or its one line. */
+  const lines = [...visible(card.el)].filter(e => e.tagName === 'P' || (e.className || '').indexOf('msg warn') === 0)
+    .map(e => e.textContent).filter(t => t);
+  r.rows = [...visible(card.el)].filter(e => e.tagName === 'TR').length;
+  r.lines = lines;
+  r.wipe = !wipe.hidden;
   routes = null;
   return r;
+}
+
+/* The Diagnostics Health card for (hl, status): the chip [text, class], the messages' titles and lines, the rows. */
+function healthView(c) {
+  const sec = ui.healthCard(c.hl, c.status);
+  const v = [...visible(sec)];
+  const chip = v.find(e => (e.className || '').indexOf('badge') === 0);
+  const msgs = v.filter(e => (e.className || '').indexOf('msg') === 0)
+    .map(m => [m.className, ...[...visible(m)].filter(e => e.tagName === 'STRONG' || (e.tagName === 'DIV' && e.className === 'small'))
+      .map(e => e.textContent)]);
+  const pairs = [];
+  for (const dl of v.filter(e => e.tagName === 'DL')) {
+    for (let i = 0; i + 1 < dl.kids.length; i += 2) pairs.push([dl.kids[i].textContent, dl.kids[i + 1].textContent]);
+  }
+  const buttons = v.filter(e => (e.tagName === 'A' || e.tagName === 'BUTTON') && (e.className || '').indexOf('btn') === 0)
+    .map(e => [e.textContent, e.attrs.href || e.attrs['data-act'] || null]);
+  return { chip: [chip.textContent, chip.className], msgs: msgs, rows: pairs, buttons: buttons,
+    none: v.some(e => e.tagName === 'P' && e.textContent === 'No alerts.') };
+}
+
+/* The Receiver page's Signals card for c.sig (GET /api/gnss/signals) while corrections come (c.live): its headline, the
+ * hints (tone, text), the words only assistive technology reads, and whether the band table shows. */
+function signalsView(c) {
+  const el = new El('div');
+  el.append(...ui.signalsHead(c.sig, c.live).filter(Boolean), ui.bandTable(c.sig.systems));
+  const v = [...visible(el)];
+  const big = v.find(e => e.className === 'big');
+  const checks = v.filter(e => e.tagName === 'LI' && e.parent && (e.parent.className || '').indexOf('checks') === 0);
+  const words = v.filter(e => e.className === 'sr-only').map(e => e.textContent);
+  return { big: big ? big.textContent : null, checks: checks.map(li => [li.className, li.textContent]), words: words,
+    table: v.some(e => e.tagName === 'TABLE'), lines: v.filter(e => e.tagName === 'UL').map(e => e.className) };
 }
 
 const out = [];
@@ -308,6 +364,60 @@ const out = [];
 for (const c of JSON.parse(casesJson)) {
   if (c.fn === 'journal_clear') {
     out.push(await journalClear(c));
+    continue;
+  }
+  if (c.fn === 'health') {
+    out.push(healthView(c));
+    continue;
+  }
+  if (c.fn === 'signals') {
+    out.push(signalsView(c));
+    continue;
+  }
+  if (c.fn === 'chip') {
+    const dl = [...ui.chipCard(c.sys, c.status, c.wifi, c.net).walk()].find(e => e.tagName === 'DL');
+    const pairs = [];
+    for (let i = 0; i + 1 < dl.kids.length; i += 2) pairs.push([dl.kids[i].textContent, dl.kids[i + 1].textContent]);
+    out.push(pairs);
+    continue;
+  }
+  if (c.fn === 'kv') {
+    /* Each value as its parts: text, and "|" where it may wrap (a <wbr>). */
+    const dl = ui.kv(c.rows);
+    const vals = [];
+    for (let i = 1; i < dl.kids.length; i += 2) {
+      vals.push(dl.kids[i].kids.map(k => (k instanceof Text ? k.data : k.tagName === 'WBR' ? '|' : k.textContent)).join(''));
+    }
+    out.push(vals);
+    continue;
+  }
+  if (c.fn === 'plain_port') {
+    /* The Onocoy card's "Use plain port" (TLS failing): clicked, the card rebuilt while the PUT waits, then after the
+     * answer (c.answer); what each build shows. */
+    const settle = async () => {
+      for (let i = 0; i < 40; i++) await new Promise(r => setImmediate(r));
+    };
+    sent.length = 0;
+    routes = (m, p, body) => (m === 'PUT' ? c.answer : [200, {}]);
+    const cfg = Object.assign({ slot: 0 }, c.cfg);
+    const st = { state: 'backoff', reason: 'tls', failures_by_class: { tls: 12 } };
+    const button = () => {
+      const root = new El('div');
+      root.append(...ui.casterSummary(cfg, st, { port: 2101 }).filter(Boolean));
+      return [...root.walk()].find(e => e.tagName === 'BUTTON' && e.textContent.indexOf('Use plain port') === 0) || null;
+    };
+    const build = () => {
+      const b = button();
+      return b ? [b.className, b.getAttribute('aria-disabled'), b.disabled] : null;
+    };
+    const b0 = button();
+    const before = build();
+    b0.fire('click');
+    const during = build();
+    await settle();
+    const after = build();
+    routes = null;
+    out.push({ before: before, during: during, after: after, puts: sent.filter(x => x.method === 'PUT').map(x => x.body) });
     continue;
   }
   if (c.fn === 'wizard_dup') {
@@ -344,8 +454,11 @@ for (const c of JSON.parse(casesJson)) {
     const cards = {};
     for (const sec of all.filter(e => e.tagName === 'SECTION' && e !== hero)) {
       const v = [...visible(sec)];
+      const bar = v.find(e => (e.className || '').indexOf('bar') === 0);
       cards[v.find(e => e.tagName === 'H2').textContent] = { rows: pairs(v),
-        lines: v.filter(e => e.className === 'cline').map(e => e.kids[0].textContent) };
+        lines: v.filter(e => e.className === 'cline').map(e => e.kids[0].textContent),
+        bar: bar ? { cls: bar.className, role: bar.attrs.role, label: bar.attrs['aria-label'], now: bar.attrs['aria-valuenow'],
+          text: bar.attrs['aria-valuetext'] || null, width: bar.kids[0].style.width } : null };
     }
     const plan = hv.find(e => e.tagName === 'P' && e.className === 'muted small');
     out.push({ head: hv.find(e => e.tagName === 'H2').textContent, line: hv.find(e => e.className === 'line').textContent,
@@ -731,8 +844,170 @@ def test_clear_journal_waits_for_the_erases_and_says_what_a_flash_error_left():
     assert r["toasts"] == [["Event journal cleared, but a flash error may bring some events back after a restart.",
                             "toast warn"]]
     assert r["reread"] and r["error"] is None
-    # Another clear runs, or an upload holds the station's worker: the usual busy line, nothing read again.
+    # Another clear waits or runs, or an upload holds the station's worker: said so, nothing read again.
     busy = {"error": {"code": "busy", "message": "busy", "field": None, "retry_in_s": None, "by": None}}
     r = journal_clear(409, busy)
     assert r["toasts"] == [] and not r["reread"]
-    assert r["error"] == "The station is busy with another job. Try again in a moment."
+    assert r["error"] == "Another clear or an upload is running. Try again when it ends."
+    # No usable journal (404): read again, the card says the partition is unusable and the button goes.
+    gone = {"error": {"code": "not_found", "message": "no journal", "field": None, "retry_in_s": None, "by": None}}
+    (r,) = run_editor([{"fn": "journal_clear", "answer": [404, gone], "after": {"available": False}}])
+    assert r["reread"] and r["error"] is None and r["toasts"] == [] and not r["wipe"]
+    assert r["lines"] == ["The journal partition is missing or unusable: events are not recorded."]
+    # No answer within the minute: the clear runs on in the station, so the page says to look again, and Refresh
+    # reads the journal from its start once it is cleared (not only what came after the records shown).
+    (r,) = run_editor([{"fn": "journal_clear", "answer": "abort", "refresh": True,
+                        "after": {"available": True, "oldest_seq": 0, "newest_seq": 0}}])
+    assert r["error"] == "No answer within a minute. Press Refresh in a moment to see whether it cleared."
+    assert r["errorTone"] == "msg warn" and r["toasts"] == [] and not r["reread"]
+    assert r["rows"] == 0 and "No events recorded." in r["lines"]
+    # The same Refresh with the journal as it was: the rows stay.
+    (r,) = run_editor([{"fn": "journal_clear", "answer": [409, busy], "refresh": True}])
+    assert r["rows"] == r["rowsBefore"] > 0 and "No events recorded." not in r["lines"]
+
+
+# ---- Status: Onocoy today's bar; Diagnostics: the Health card and Chip and Wi-Fi; Signals; long values; plain port ----
+
+def test_onocoy_today_bar_is_the_share_of_the_allowance_left():
+    """The bar under the offline time left fills with what is left of today's allowance, left / (left + offline
+    counted against it): nearly full on a clean day, partly full at risk, empty once missed. Its colour is the
+    verdict's; assistive technology reads it as a meter with the share left in words."""
+    ono = lambda **kw: [st_caster(0, "Onocoy", "streaming", **kw)]
+    cases = [st_status(availability={"protected_down_today_s": 10, "budget_left_s": 463}),
+             st_status(availability={"protected_down_today_s": 22, "budget_left_s": 451}),
+             st_status(availability={"protected_down_today_s": 300, "budget_left_s": 173}),
+             st_status(casters=ono(streak_ok=False, budget_left_s=0), availability={"protected_down_today_s": 500, "budget_left_s": 0}),
+             st_status(casters=ono(streak_ok=False, data_rate_permille=950), availability={"protected_down_today_s": 10,
+                                                                                         "budget_left_s": 200})]
+    out = run_editor([{"fn": "dashboard", "status": x, "admin": True} for x in cases])
+    bars = [o["cards"]["Onocoy today"]["bar"] for o in out]
+    assert bars[0] == {"cls": "bar ok", "role": "meter", "label": "Today's offline time left", "now": "97",
+                       "text": "97\u00a0% left", "width": "97.9%"}, bars[0]
+    # The screenshots' "On track, 7 min 31 s left": nearly full, not nearly empty.
+    assert bars[1]["width"] == "95.3%" and bars[1]["cls"] == "bar ok"
+    assert bars[2]["width"] == "36.6%" and bars[2]["cls"] == "bar warn" and bars[2]["text"] == "36\u00a0% left"
+    # Missed: empty and red, whatever offline time the budget still shows.
+    assert bars[3] == {**bars[3], "width": "0.0%", "cls": "bar bad", "now": "0", "text": "0\u00a0% left"}
+    assert bars[4]["width"] == "0.0%" and bars[4]["cls"] == "bar bad"
+
+
+def health_hl(**kw) -> dict:
+    hl = {"level": "ok", "last_step": "none", "recovery_mode": "full", "rtcm_gap_ms": 200, "link": {"open": True, "mode": "stream"}}
+    hl.update(kw)
+    return hl
+
+
+def test_health_card_takes_the_worse_of_the_alerts_and_the_status_page():
+    """The Health chip is the worse of the worst alert and the Status page's state. When the state is worse than
+    every alert (Onocoy stopped beside a fragmented heap) its title and line come first, above the alerts; an alert the
+    state says itself is not repeated. A closed receiver port never says "No receiver found" (its cable advice would
+    mislead)."""
+    heap = {"id": "heap_fragmented", "source": "health"}
+    norx = {"id": "no_receiver", "source": "station", "saw_bytes": False, "next_detect_in_s": 200}
+    stopped = st_status(casters=[st_caster(0, "Onocoy", "stopped", stop_reason="rejected")], health={"level": "degraded"},
+                        alerts=[heap])
+    closed = st_status(receiver={"state": "no_receiver", "uart_closed": True, "rtcm_age_ms": None, "next_detect_in_s": 200},
+                       casters=[st_caster(0, "Onocoy", "wait_data")], alerts=[norx])
+    missing = st_status(receiver={"state": "no_receiver", "rtcm_age_ms": None, "next_detect_in_s": 200},
+                        casters=[st_caster(0, "Onocoy", "wait_data")], alerts=[norx])
+    held = st_status(receiver={"first_apply_held": True}, alerts=[{"id": "rx_held", "source": "health"}])
+    maint = st_status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600})
+    out = run_editor([{"fn": "health", "hl": health_hl(level="degraded"), "status": stopped},
+                      {"fn": "health", "hl": health_hl(level="degraded", link={"open": False, "mode": "stream"}), "status": closed},
+                      {"fn": "health", "hl": health_hl(level="degraded"), "status": missing},
+                      {"fn": "health", "hl": health_hl(level="degraded"), "status": st_status(alerts=[heap])},
+                      {"fn": "health", "hl": health_hl(), "status": held},
+                      {"fn": "health", "hl": health_hl(), "status": st_status()},
+                      {"fn": "health", "hl": health_hl(), "status": maint}])
+    stop, port, norx_, frag, hold, calm, busy = out
+    assert stop["chip"] == ["Needs attention", "badge bad"]
+    assert [m[:2] for m in stop["msgs"]] == [["msg bad", "Onocoy stopped"], ["msg warn", "Memory fragmented"]], stop["msgs"]
+    # With the Status page's button (the page-wide notice that says the same is left out here).
+    assert stop["buttons"] == [["What to do", "#/casters"]]
+    assert port["chip"] == ["Needs attention", "badge bad"] and port["buttons"] == []
+    assert port["msgs"] == [["msg bad", "Receiver port closed", "The station cannot open its port to the receiver and keeps trying."]]
+    # Said once: no "Receiver port: Closed, reopening" row under the line that says it.
+    assert "Receiver port" not in dict(port["rows"])
+    assert "No receiver found" not in json.dumps(port) and "cable" not in json.dumps(port)
+    # No receiver with its port open: the alert says it once (with its search), not the state as well.
+    assert [m[1] for m in norx_["msgs"]] == ["No receiver found"] and norx_["chip"][1] == "badge bad"
+    # Streaming with a fragmented heap: the alert only, amber.
+    assert [m[:2] for m in frag["msgs"]] == [["msg warn", "Memory fragmented"]] and frag["chip"] == ["Needs attention", "badge warn"]
+    # The held receiver: the state (amber) says what the blue alert says, once.
+    assert [m[:2] for m in hold["msgs"]] == [["msg warn", "Receiver not configured yet"]] and hold["chip"][1] == "badge warn"
+    assert calm["chip"] == ["Healthy", "badge ok"] and calm["msgs"] == [] and calm["none"]
+    # Planned and passing: blue "Busy" with the state and its End now.
+    assert busy["chip"] == ["Busy", "badge info"] and [m[1] for m in busy["msgs"]] == ["Receiver maintenance"]
+    assert busy["buttons"] == [["End now", "end-maint"]]
+
+
+def test_chip_card_names_the_access_point_and_the_transmit_power():
+    """Chip and Wi-Fi: the network and signal in one row; the access point with its channel and the transmit power
+    in one row each, only while known and online (QEMU's link has neither)."""
+    status = st_status(network={"online": True, "ssid": "Home", "rssi": -60})
+    wifi = {"ssid": "Home", "online": True, "rssi": -60, "channel": 11, "bssid": "AA:BB:CC:DD:EE:FF", "tx_power_dbm": 19.5}
+    qemu = dict(wifi, channel=None, bssid=None, tx_power_dbm=None)
+    off = st_status(network={"online": False, "ssid": "Home", "offline_s": 30})
+    sys = {"chip": {"model": "ESP32-S3", "revision": "v0.2", "flash_mb": 16, "psram_mb": 8}, "idf": "v6.1", "mac": "11:22:33:44:55:66"}
+    full, bare, gone = run_editor([{"fn": "chip", "sys": sys, "status": status, "wifi": wifi, "net": {}},
+                                   {"fn": "chip", "sys": sys, "status": status, "wifi": qemu, "net": {}},
+                                   {"fn": "chip", "sys": sys, "status": off, "wifi": wifi, "net": {}}])
+    rows = dict(full)
+    assert [r[0] for r in full] == ["Chip", "ESP-IDF", "Wi-Fi", "Access point", "Transmit power", "MAC address"]
+    assert rows["Access point"] == "AA:BB:CC:DD:EE:FF \u00b7 channel 11" and rows["Transmit power"] == "19.5\u00a0dBm"
+    assert "channel" not in rows["Wi-Fi"]
+    assert [r[0] for r in bare] == [r[0] for r in gone] == ["Chip", "ESP-IDF", "Wi-Fi", "MAC address"]
+
+
+SIG = {"best_sys": "galileo", "best_bands": 4, "e6_lost": False, "epoch_age_ms": 420, "rtcm1230_supported": True,
+       "epochs": 900, "epoch_gaps": 0, "epoch_jumps": 0, "messages": [],
+       "systems": [{"sys": "gps", "satellites": 11, "bands": ["l1", "l2", "l5"], "cnr_dbhz": {"l1": 45, "l2": 41, "l5": 44}},
+                   {"sys": "glonass", "satellites": 9, "bands": ["l1", "l2"], "cnr_dbhz": {"l1": 45, "l2": 43}},
+                   {"sys": "galileo", "satellites": 11, "bands": ["l1", "l2", "l5", "l6"],
+                    "cnr_dbhz": {"l1": 41, "l2": 41, "l5": 41, "l6": 38}},
+                   {"sys": "beidou", "satellites": 9, "bands": ["l1", "l2", "l5", "l6"],
+                    "cnr_dbhz": {"l1": 45, "l2": 43, "l5": 41, "l6": 43}}]}
+
+
+def test_signals_card_says_the_bands_once():
+    """The Receiver page's Signals card: the best constellation and its bands in the headline only; the hints are one
+    line each and only what the headline does not say; the band table stays. Short of 4 bands, one line says what
+    Onocoy needs."""
+    three = {**SIG, "best_sys": "gps", "best_bands": 3,
+             "systems": [{**x, "bands": x["bands"][:3]} for x in SIG["systems"]]}
+    good, few, idle = run_editor([{"fn": "signals", "live": True, "sig": SIG}, {"fn": "signals", "live": True, "sig": three},
+                                  {"fn": "signals", "live": False, "sig": SIG}])
+    assert good["big"] == "Galileo \u00b7 4 bands" and good["table"] and good["lines"] == ["checks lines"]
+    assert good["checks"] == [["ok", "\u2713Good: 40 satellites tracked"], ["ok", "\u2713Good: Strong signals (42\u00a0dB\u2011Hz)"]], good
+    assert not any("band" in c[1] or "Galileo" in c[1] for c in good["checks"])
+    assert good["words"] == ["Good: ", "Good: "]
+    assert few["big"] == "GPS \u00b7 3 bands"
+    assert few["checks"][-1] == ["warn", "!Check: Onocoy needs 4 bands: signal group 3 6 adds Galileo E6"], few
+    # No corrections from the receiver: no verdicts, the headline and the table only.
+    assert idle["checks"] == [] and idle["big"] == "Galileo \u00b7 4 bands" and idle["table"]
+
+
+def test_long_values_wrap_at_their_separators():
+    """A long token in a label/value row wraps at its separators (a <wbr>, shown as "|"), never mid-word; short values
+    and words are left alone. On a phone the wide cards' labels keep to 40 % of the row, as everywhere else."""
+    (vals,) = run_editor([{"fn": "kv", "rows": [["Expected firmware", "R4.10Build26000"],
+                                                ["Access point", "AA:BB:CC:DD:EE:FF \u00b7 channel 11"],
+                                                ["Server", "servers.onocoy.com:2101"], ["Network", "Home"],
+                                                ["Signal", "-61 dBm"], ["Note", "Remove the stored password"]]}])
+    assert vals == ["R4.10|Build26000", "AA:|BB:|CC:|DD:|EE:|FF \u00b7 channel 11", "servers.|onocoy.|com:|2101", "Home", "-61 dBm",
+                    "Remove the stored password"]
+    css = (UI_JS.parent / "app.css").read_text()
+    assert ".tight-kv .kv { grid-template-columns: minmax(7.5rem, min(13rem, 40%)) minmax(0, 1fr); }" in css
+
+
+def test_use_plain_port_keeps_its_spinner_and_focus_across_the_refresh():
+    """The Onocoy card's "Use plain port" (TLS failing) is rebuilt every second: while its PUT waits the rebuilt
+    button still shows the spinner and stays focusable (aria-disabled, never disabled); once saved the panel goes;
+    refused, the button is back as it was."""
+    cfg = stored("servers.onocoy.com", "fast", name="Onocoy", tls=True, port=2121, mountpoint="MP0TEST1", username="u")
+    ok, bad = run_editor([{"fn": "plain_port", "cfg": {**cfg, "slot": 0}, "answer": [200, {"slot": 0, "config": {}}]},
+                          {"fn": "plain_port", "cfg": {**cfg, "slot": 1}, "answer": [500, internal("ESP_FAIL")]}])
+    assert ok["before"] == ["btn small", None, False]
+    assert ok["during"] == ["btn small busy", "true", False]
+    assert ok["after"] is None and ok["puts"] == [{"tls": False, "port": 2101}]
+    assert bad["during"] == ["btn small busy", "true", False] and bad["after"] == ["btn small", None, False]

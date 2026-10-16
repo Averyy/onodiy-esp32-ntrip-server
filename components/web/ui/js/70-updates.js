@@ -478,7 +478,8 @@ const updatesPart = {
         if (!info.allowed && info.why && info.why !== 'not_available_yet') notNow.push(h('li', null, a[2] + ': not now, ' + lbl(L.why, info.why) + '.'));
         return b;
       });
-      /* The chip and one sentence say the state; the evidence is folded (it stays open across the refresh). */
+      /* The chip and one sentence say the state; the evidence is folded (it stays open across the refresh). No firmware error code
+       * ("ESP_ERR_TIMEOUT"): Failure says it in words. */
       const was = sessionCard.querySelector('details.sess');
       const fail = [pr, rec].map(x => x && x.failure).find(x => x && x !== 'none');
       const detail = [
@@ -497,7 +498,6 @@ const updatesPart = {
             ' (' + fmt.num(pr.frames_sent) + ' sent)'] : null,
           ['Transfers / loader attempts', fmt.num(pr.transfers) + ' / ' + fmt.num(pr.entry_attempts)],
           ['Blocks resent', fmt.num(pr.retries)],
-          pr.last_err ? ['Last error', pr.last_err] : null,
         ]) : null,
         f.receiver_text ? h('pre', { class: 'log' }, f.receiver_text) : null];
       mount(sessionCard,

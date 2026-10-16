@@ -346,7 +346,9 @@ function qualityShort(q) {
 
 /**
  * Onocoy's day, while its slot counts (null otherwise): {verdict, tone, why,
- * left, down, allowed, known, used}. Missed while the station's streak_ok is
+ * left, down, allowed, known, used, share}. share: the part of today's
+ * allowance still left, left / (left + offline counted against it); 0 once
+ * missed. Missed while the station's streak_ok is
  * false. At risk while Onocoy does not stream now, more than 60 % of the
  * day's offline time is used, the current data rate is under 98 % after 10
  * minutes connected, or a quality minimum is missed. On track otherwise.
@@ -364,10 +366,13 @@ function onocoyDay(s, st) {
   const allowed = c.budget_s;
   const known = [left, down, allowed].every(v => v !== null && v !== undefined);
   const used = !known ? 0 : allowed > 0 ? Math.min(1, down / allowed) : 1;
-  const d = { verdict: 'On track', tone: 'ok', why: null, left: left, down: down, allowed: allowed, known: known, used: used };
+  const share = known && left > 0 ? left / (left + Math.max(0, down)) : 0;
+  const d = { verdict: 'On track', tone: 'ok', why: null, left: left, down: down, allowed: allowed, known: known, used: used,
+    share: share };
   if (c.streak_ok === false) {
     d.verdict = 'Missed';
     d.tone = 'bad';
+    d.share = 0;
     d.why = allowed === 0 ? 'Too many epochs were lost today to keep the streak.' : 'Today\'s offline time is over the budget.';
     return d;
   }

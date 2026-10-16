@@ -645,6 +645,14 @@ function casterDetail(st, opts) {
   return null;
 }
 
+/*
+ * Slots whose switch to the plain port runs ('busy') or is saved ('done'),
+ * kept across the card's rebuild every second: the button keeps its spinner
+ * and the keyboard focus (aria-disabled, not disabled) until the answer, and
+ * goes once saved.
+ */
+const PLAIN_SWITCH = {};
+
 function casterSummary(c, st, preset) {
   const ono = isOnocoySlot(c);
   const metrics = [];
@@ -674,27 +682,38 @@ function casterSummary(c, st, preset) {
     st.unreached_s ? h('div', { class: 'hintline' }, 'Caster not reached for ' + fmt.dur(st.unreached_s) +
       (st.reason && st.reason !== 'none' ? ': ' + lbl(L.fail, st.reason) : '') + '.') : null,
   ];
-  if (ono && c.tls && st.failures_by_class && st.failures_by_class.tls >= 10 && st.state !== 'streaming') {
+  if (!c.tls) delete PLAIN_SWITCH[c.slot];
+  if (ono && c.tls && PLAIN_SWITCH[c.slot] !== 'done' && st.failures_by_class && st.failures_by_class.tls >= 10 &&
+      st.state !== 'streaming') {
+    const waiting = PLAIN_SWITCH[c.slot] === 'busy';
     const sw = btn('Use plain port ' + preset.port, async () => {
+      if (PLAIN_SWITCH[c.slot]) return;
+      PLAIN_SWITCH[c.slot] = 'busy';
+      sw.classList.add('busy');
+      sw.setAttribute('aria-disabled', 'true');
       const body = { tls: false, port: preset.port };
+      let ok = false;
       try {
-        await busy(sw, () => saveCaster(c.slot, body));
+        await saveCaster(c.slot, body);
+        ok = true;
       } catch (e) {
         if (e instanceof ApiError && e.code === 'caster_policy' && e.body.reason === 'dup_stream_ack_required') {
           /* This slot needs the acknowledgement itself (it may have been given
            * on the other slot only): ask for it here. A dialog, since this
            * card is rebuilt every second. */
-          const ok = await dialog({ title: 'Duplicate-stream risk', ok: 'Save anyway', body: dupText(),
+          ok = await dialog({ title: 'Duplicate-stream risk', ok: 'Save anyway', body: dupText(),
             check: 'I understand the risk and want to stream to both.',
             onOk: () => saveCaster(c.slot, Object.assign({ dup_stream_ack: true }, body)) });
-          if (ok) toast('Switched to the plain port.', 'ok');
-          return;
+        } else {
+          showErr(e);
         }
-        showErr(e);
-        return;
       }
-      toast('Switched to the plain port.', 'ok');
-    }, 'small');
+      if (ok) PLAIN_SWITCH[c.slot] = 'done';
+      else delete PLAIN_SWITCH[c.slot];
+      sw.classList.remove('busy');
+      sw.removeAttribute('aria-disabled');
+      if (ok) toast('Switched to the plain port.', 'ok');
+    }, 'small' + (waiting ? ' busy' : ''), { 'aria-disabled': waiting ? 'true' : null });
     out.push(msg('warn', h('p', null, 'TLS to Onocoy failed ' + st.failures_by_class.tls + ' times. Onocoy documents uploads on the plain port only.'),
       h('div', { class: 'form-actions' }, sw)));
   }

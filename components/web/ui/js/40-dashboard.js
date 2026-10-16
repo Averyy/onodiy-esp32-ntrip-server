@@ -102,7 +102,7 @@ function utcResetTime() {
     .toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
-/* Onocoy's day: the verdict, the offline time left in large type with its bar, and two rows. */
+/* Onocoy's day: the verdict, the offline time left in large type with its bar (full on a clean day, empty once missed), and two rows. */
 function onocoyCard(s, st) {
   const d = onocoyDay(s, st);
   if (!d) return null;
@@ -112,7 +112,7 @@ function onocoyCard(s, st) {
     d.why ? h('p', { class: 'small t-' + d.tone }, d.why) : null,
     d.known ? [
       h('div', { class: 'big t-' + d.tone }, d.left > 0 ? fmt.dur(d.left) : '0' + NB + 's', ' ', h('small', null, 'offline time left')),
-      bar(d.used, d.tone, 'Share of today\'s offline time used'),
+      bar(d.share, d.tone, 'Today\'s offline time left', Math.floor(d.share * 100) + NB + '% left'),
       h('div', { class: 'muted small' }, 'Resets at ' + utcResetTime() + ' · Estimate')] :
       h('p', { class: 'muted' }, 'Shows once the station has the time (from GNSS or the internet).'),
     kv([['Online today', fmt.dur(c.today_online_s)], ['Offline today', fmt.dur(d.known ? d.down : c.today_offline_s)]]));

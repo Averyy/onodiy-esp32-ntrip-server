@@ -1587,7 +1587,8 @@ the station's Wi-Fi transmit power limit now (`esp_wifi_get_max_tx_power`,
 read in steps of 0.25 dBm); both refreshed with `rssi` every 5 s, and
 like `rssi` and `channel` `null` while not associated (and in the QEMU
 build, whose emulated link has no access point). Diagnostics for a weak
-link; only in this admin route, never in the public status.
+link (the UI's Diagnostics shows them under Chip and Wi-Fi, with the
+channel); only in this admin route, never in the public status.
 `last_disconnect_reason` is the numeric `wifi_err_reason_t`. `scan.results`
 are the cached ones (no radio activity; at most 24); `age_s` is `null`
 before the first scan. `mdns_host`, `assoc_no_ip_s`, `cred_*`,

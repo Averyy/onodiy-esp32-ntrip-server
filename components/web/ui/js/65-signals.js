@@ -2,8 +2,9 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Signals, on the Receiver page: one card with the best constellation, the
- * Good / Check / Problem hints, the frequency bands per constellation from
+ * Signals, on the Receiver page: one card with the best constellation and
+ * its bands, the Good / Check / Problem hints in one line each (only what
+ * that headline does not say), the frequency bands per constellation from
  * the MSM data (with the mean C/N0 from MSM4 to MSM7), the sky on request
  * (66-live.js) and, behind "Signal details", the epochs and the RTCM
  * messages seen against the profile. The public page shows the summary and
@@ -111,7 +112,12 @@ function signalsCard(sig) {
     bandTable(sig.systems), h('p', { class: 'muted small foot' }, BANDS_FOOT));
 }
 
-/* The antenna check's hints from GET /api/gnss/signals (C/N0: band means weighted by satellites), plus E6 lost, no GLONASS, 1230 refused. */
+/*
+ * The Signals card's hints from GET /api/gnss/signals, one line each (the
+ * antenna check's, C/N0: band means weighted by satellites), plus E6 lost,
+ * no GLONASS, 1230 refused. The bands only when short of 4: the headline
+ * says the best constellation and its bands.
+ */
 function signalChecks(sig) {
   const systems = sig.systems || [];
   let n = 0, sum = 0, w = 0;
@@ -130,12 +136,15 @@ function signalChecks(sig) {
   const r = receptionChecks({ totals: { tracked: n, cnr_dbhz: w ? Math.round(sum / w) : null, msm_age_ms: sig.epoch_age_ms, systems: sys } });
   if (r.waiting) return r;
   const gal = systems.find(s => s.sys === 'galileo');
-  if (sig.e6_lost) r.items.push(['bad', 'Galileo E6 lost', 'It was tracked before with this signal group.']);
-  else if (gal && sig.best_bands < 4 && (gal.bands || []).indexOf('l6') < 0) r.items[2][2] += ' Signal group 3 6 adds Galileo E6.';
-  if (!systems.some(s => s.sys === 'glonass')) r.items.push(['warn', 'No GLONASS', 'Onocoy\'s quality score needs it.']);
-  else if (sig.rtcm1230_supported === false) {
-    r.items.push(['warn', 'GLONASS biases refused', 'The receiver refused message 1230, so GLONASS does not count for Onocoy.']);
+  const bands = r.items.find(i => i[4] === 'bands');
+  if (bands[0] !== 'ok' && !sig.e6_lost && gal && (gal.bands || []).indexOf('l6') < 0) {
+    bands[3] = 'Onocoy needs 4 bands: signal group 3 6 adds Galileo E6';
   }
+  r.items = r.items.filter(i => i !== bands || i[0] !== 'ok');
+  const add = (tone, line) => r.items.push([tone, null, null, line, 'more']);
+  if (sig.e6_lost) add('bad', 'Galileo E6 lost: it was tracked before with this signal group');
+  if (!systems.some(s => s.sys === 'glonass')) add('warn', 'No GLONASS: Onocoy\'s quality score needs it');
+  else if (sig.rtcm1230_supported === false) add('warn', 'Message 1230 refused: GLONASS does not count for Onocoy');
   r.ok = r.items.every(i => i[0] === 'ok');
   return r;
 }
@@ -146,6 +155,12 @@ function signalsHeadline(sig) {
   if (age === null || age === undefined) return 'No signals yet';
   if (age >= 5000) return 'No signals for ' + fmt.dur(age / 1000);
   return sig.best_sys ? lbl(L.sys, sig.best_sys) + ' · ' + sig.best_bands + ' bands' : 'No signals yet';
+}
+
+/* The card's head: the headline and, while corrections come (live), the hints in one line each. */
+function signalsHead(sig, live) {
+  const checks = live && sig.epoch_age_ms < 5000 ? signalChecks(sig) : null;
+  return [h('div', { class: 'big' }, signalsHeadline(sig)), checks && !checks.waiting ? receptionList(checks, true) : null];
 }
 
 /**
@@ -190,8 +205,7 @@ function signalsSection(el) {
     if (collapsed) return;
     const systems = sig.systems || [];
     const live = delivering();
-    const checks = live && sig.epoch_age_ms < 5000 ? signalChecks(sig) : null;
-    patch(head, h('div', { class: 'big' }, signalsHeadline(sig)), checks && !checks.waiting ? receptionList(checks) : null);
+    patch(head, signalsHead(sig, live));
     patch(bands, systems.length ? [bandTable(systems), h('p', { class: 'muted small foot' }, BANDS_FOOT)] : h('p', { class: 'muted' },
       sig.epoch_age_ms === null || sig.epoch_age_ms === undefined ? 'No observations yet.' : 'No observations in the last 10 seconds.'));
     if (interacting(details)) return;

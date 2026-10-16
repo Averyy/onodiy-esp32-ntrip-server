@@ -63,7 +63,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '      facts: t.facts, delivering: t.delivering, ono: t.onoStreaming, quality: t.quality,\n' +
   '      subject: t.subject, plan: t.plan }; },\n' +
   '  onocoy: a => { const t = stationState(a, true), d = onocoyDay(a, t);\n' +
-  '    return d && { verdict: d.verdict, tone: d.tone, why: d.why, left: d.left, used: d.used, hero: t.key }; },\n' +
+  '    return d && { verdict: d.verdict, tone: d.tone, why: d.why, left: d.left, used: d.used, share: d.share, hero: t.key }; },\n' +
   '  checks: d => receptionChecks(d),\n' +
   '  notices: a => noticeItems(a[0], a[1]).map(i => [i.key, i.title]),\n' +
   '  noticeLines: a => noticeItems(a[0], a[1]).map(i => [i.key, i.tone, i.urgent, i.title + (i.text ? \'. \' + i.text : \'\'),\n' +
@@ -667,6 +667,9 @@ def test_onocoy_today_verdict_from_one_rule():
     ]
     out = run_ui([("onocoy", c) for c in cases])
     assert out[0] == {**out[0], "verdict": "On track", "tone": "ok", "why": None, "left": 463}
+    # The bar: what is left of today's allowance (463 of 473 s), empty once missed.
+    assert round(out[0]["share"], 4) == round(463 / 473, 4) and out[6]["share"] == 173 / 473
+    assert out[1]["share"] == 0 and out[2]["share"] == 0 and out[12]["share"] == 0
     assert out[1]["verdict"] == "Missed" and out[1]["tone"] == "bad" and out[1]["why"] == "Today's offline time is over the budget."
     assert out[2]["verdict"] == "Missed" and "epochs were lost" in out[2]["why"]
     assert out[3]["verdict"] == "At risk" and out[3]["why"] == "Offline time is counting now."
@@ -746,6 +749,8 @@ def test_band_wording_never_promises_a_top_reward():
     a, b = run_ui([("checks", four), ("checks", three)])
     assert a["items"][2][2] == "4 bands on one constellation: the most this receiver can reach."
     assert b["items"][2][2].startswith("Onocoy's quality score needs 4 bands on one constellation.")
+    # The same in one line (the Signals card): what Onocoy needs, no reward promised.
+    assert a["items"][2][3] == "4 bands on Galileo" and b["items"][2][3].startswith("Onocoy needs 4 bands")
 
 
 def test_password_mismatch_and_unknown_signal():
@@ -846,12 +851,13 @@ def test_signals_card_headline_and_hints():
     no_glo = {**SIG, "systems": [s for s in SIG["systems"] if s["sys"] != "glonass"]}
     refused = {**SIG, "rtcm1230_supported": False}
     good, bad3, e6, glo, r1230 = run_ui([("sigChecks", x) for x in (SIG, no_e6, lost, no_glo, refused)])
-    assert [i[0] for i in good["items"]] == ["ok", "ok", "ok"] and good["ok"] is True
-    assert good["items"][0][1] == "32 satellites tracked" and good["items"][2][1] == "Galileo: 4 bands"
-    assert bad3["items"][2][0] == "warn" and bad3["items"][2][2].endswith("Signal group 3 6 adds Galileo E6.")
-    assert e6["items"][-1] == ["bad", "Galileo E6 lost", "It was tracked before with this signal group."] and e6["ok"] is False
-    assert glo["items"][-1][:2] == ["warn", "No GLONASS"]
-    assert r1230["items"][-1][:2] == ["warn", "GLONASS biases refused"]
+    line = lambda r: [[i[0], i[3]] for i in r["items"]]
+    # One line each; the 4 bands are the headline's, not a hint as well.
+    assert line(good) == [["ok", "32 satellites tracked"], ["ok", "Strong signals (42\u00a0dB\u2011Hz)"]] and good["ok"] is True
+    assert line(bad3)[2] == ["warn", "Onocoy needs 4 bands: signal group 3 6 adds Galileo E6"] and bad3["ok"] is False
+    assert line(e6)[-1] == ["bad", "Galileo E6 lost: it was tracked before with this signal group"] and e6["ok"] is False
+    assert line(glo)[-1] == ["warn", "No GLONASS: Onocoy's quality score needs it"]
+    assert line(r1230)[-1] == ["warn", "Message 1230 refused: GLONASS does not count for Onocoy"]
 
 
 def test_position_message_waits_for_the_survey():
@@ -923,10 +929,11 @@ def test_profile_chip_and_maintenance_notice_everywhere_but_settings():
                     ("profileChip", {"state": "no_receiver", "profile_applied": False})])
     assert chips == [["Applying", "info"], ["Failed", "bad"], ["Applied", "ok"], ["Not applied", "warn"], ["Not applied", "warn"]]
     maint = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600})
-    out = run_ui([("notices", [maint, p]) for p in ("settings", "receiver", "receiver/settings", "receiver/live", "casters", "diag")])
-    # Settings has maintenance next to the receiver update, with End now: no notice that repeats it there. Every other
-    # page has it.
-    assert [[k for k, _ in o] for o in out] == [[]] + [["maintenance"]] * 5
+    out = run_ui([("notices", [maint, p]) for p in ("settings", "receiver", "receiver/settings", "receiver/live", "casters", "diag",
+                                                     "diag/history")])
+    # Settings has maintenance next to the receiver update, with End now: no notice that repeats it there; nor
+    # Diagnostics' Overview, whose Health card says it with End now. Every other page has it.
+    assert [[k for k, _ in o] for o in out] == [[]] + [["maintenance"]] * 4 + [[], ["maintenance"]]
 
 
 # ---- The system pages (90-system.js, 30-auth.js) ----
@@ -1029,7 +1036,7 @@ BUSY = status(device={"settings_available": False},
 
 
 def test_notices_one_line_one_button_worst_first():
-    (lines,) = run_ui([("noticeLines", [BUSY, "diag"])])
+    (lines,) = run_ui([("noticeLines", [BUSY, "diag/history"])])
     assert [ln[0] for ln in lines] == ["settings", "onocoy_stopped:0", "wifi", "maintenance", "held", "signal_test", "update"]
     assert [ln[1] for ln in lines] == ["bad", "bad", "warn", "info", "info", "info", "info"]
     # What needs the user now never folds away: settings storage, the stopped slot, maintenance.
@@ -1044,7 +1051,7 @@ def test_notices_one_line_one_button_worst_first():
 
 
 def test_notices_fold_after_two_but_never_the_urgent_ones():
-    folded, opened = run_ui([("fold", [BUSY, "diag", False]), ("fold", [BUSY, "diag", True])])
+    folded, opened = run_ui([("fold", [BUSY, "diag/history", False]), ("fold", [BUSY, "diag/history", True])])
     # The first two of the others (by tone), then "+2 more".
     assert folded == [["settings", "onocoy_stopped:0", "wifi", "maintenance", "held"], 2]
     assert opened == [["settings", "onocoy_stopped:0", "wifi", "maintenance", "held", "signal_test", "update"], 2]
@@ -1060,21 +1067,28 @@ def test_a_notice_hides_on_the_page_whose_card_says_it():
     uart = status(receiver={"state": "no_receiver", "uart_closed": True})
     journal = status(receiver={"journal": "waiting"})
     trial = status(network={"cred_trial": True, "cred_trial_left_s": 80, "pending_ssid": "Cabin"})
-    pages = ["casters", "receiver", "receiver/settings", "settings", "diag"]
+    pages = ["casters", "receiver", "receiver/settings", "settings", "diag", "diag/history"]
     cases = [(BUSY, p) for p in pages] + [(x, p) for x in (safe, uart, journal, trial) for p in ("", "settings", "receiver")]
     out = [[k for k, _ in o] for o in run_ui([("notices", list(c)) for c in cases])]
     every = {"settings", "onocoy_stopped:0", "wifi", "maintenance", "held", "signal_test", "update"}
+    # Diagnostics' Health card says the station's state (settings storage) above its alerts: its notice goes there,
+    # not on History.
     hidden = {"casters": {"onocoy_stopped:0"}, "receiver": {"held"}, "receiver/settings": {"signal_test"},
-              "settings": {"wifi", "update", "maintenance"}, "diag": set()}
-    for p, keys in zip(pages, out[:5]):
+              "settings": {"wifi", "update", "maintenance"}, "diag": {"settings"}, "diag/history": set()}
+    for p, keys in zip(pages, out[:6]):
         assert set(keys) == every - hidden[p], p
-    safe_k, uart_k, journal_k, trial_k = out[5:8], out[8:11], out[11:14], out[14:17]
+    safe_k, uart_k, journal_k, trial_k = out[6:9], out[9:12], out[12:15], out[15:18]
     # The Status page's top card says each of them; Settings has safe mode, the update session and the Wi-Fi trial;
     # the Receiver page's panel says the closed port.
     assert safe_k == [[], [], ["safe_mode"]]
     assert uart_k == [[], ["uart_closed"], []]
     assert journal_k == [[], [], ["journal"]]
     assert trial_k == [[], [], ["wifi"]]
+    # Diagnostics: the stopped Onocoy and the closed port are said by the Health card; History keeps their notices.
+    stopped = status(casters=[caster(0, "Onocoy", "stopped", stop_reason="rejected")],
+                     alerts=[{"id": "heap_fragmented", "source": "health"}])
+    diag = [[k for k, _ in o] for o in run_ui([("notices", [x, p]) for x in (stopped, uart) for p in ("diag", "diag/history")])]
+    assert diag == [[], ["onocoy_stopped:0"], [], ["uart_closed"]]
 
 
 
@@ -1086,12 +1100,19 @@ def test_health_chip_never_disagrees_with_the_status_page():
     rx = {"id": "no_receiver", "source": "station"}
     power = {"id": "power_supply", "source": "health"}
     held = {"id": "rx_held", "source": "health"}
+    heap = {"id": "heap_fragmented", "source": "health"}
     out = run_ui([("healthChip", ["ok", [], None]), ("healthChip", ["failed", [rx, power], None]),
                   ("healthChip", ["degraded", [power], None]), ("healthChip", ["degraded", [], {"tone": "warn"}]),
                   ("healthChip", ["degraded", [], {"tone": "ok"}]), ("healthChip", ["degraded", [held], None]),
-                  ("healthChip", ["recovering", [], None]), ("healthChip", ["degraded", [], {"tone": "info"}])])
+                  ("healthChip", ["recovering", [], None]), ("healthChip", ["degraded", [], {"tone": "info"}]),
+                  # The worse of the two: Onocoy stopped (red) beside a fragmented heap (amber) is red.
+                  ("healthChip", ["degraded", [heap], {"tone": "bad"}]), ("healthChip", ["ok", [], {"tone": "warn"}]),
+                  ("healthChip", ["degraded", [rx], {"tone": "warn"}]), ("healthChip", ["degraded", [held], {"tone": "warn"}]),
+                  ("healthChip", ["degraded", [heap], {"tone": "info"}])])
     assert out == [["Healthy", "ok"], ["Needs attention", "bad"], ["Needs attention", "warn"], ["Needs attention", "warn"],
-                   ["Healthy", "ok"], ["Needs attention", "info"], ["Recovering", "warn"], ["Busy", "info"]]
+                   ["Healthy", "ok"], ["Needs attention", "info"], ["Recovering", "warn"], ["Busy", "info"],
+                   ["Needs attention", "bad"], ["Needs attention", "warn"], ["Needs attention", "bad"],
+                   ["Needs attention", "warn"], ["Needs attention", "warn"]]
 
 
 def test_since_this_start_names_only_what_happened():
