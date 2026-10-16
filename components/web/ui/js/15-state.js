@@ -243,10 +243,12 @@ function stationState(s, admin) {
     if (ladder && (ladder.id === 'receiver_power' || ladder.id === 'receiver_silent')) {
       return pick('rx_stopped', 'Receiver stopped sending data', 'bad', alertText(ladder)[1], { alertId: ladder.id });
     }
-    /* The receiver answers but sends no corrections: the antenna, whatever the recovery does (doing: its line, while it runs). */
+    /* The receiver answers but sends no corrections: the antenna, whatever the recovery does (doing: its line, while it runs).
+     * "The receiver answers" only while receiver.responding says so (the Receiver page's row says the same). */
+    const answers = rcv.responding === false ? '' : 'The receiver answers. ';
     const antenna = (tone, doing) => (ladder.id === 'no_satellites' ?
       pick('no_satellites', 'Antenna sees no satellites', tone, ANTENNA_CHECK, { alertId: ladder.id, doing: doing }) :
-      pick('no_rtcm', 'Receiver sends no corrections', tone, 'The receiver answers. ' + ANTENNA_CHECK, { alertId: ladder.id, doing: doing }));
+      pick('no_rtcm', 'Receiver sends no corrections', tone, answers + ANTENNA_CHECK, { alertId: ladder.id, doing: doing }));
     if (state === 'recovering' || (state === 'streaming' && hl.level === 'recovering')) {
       /* No step in progress: between two (a session of the station's own cut the last one short). */
       const doing = admin ? recoveryDoing(hl) || (hl.step_phase === 'none' ? AGAIN_SHORTLY : null) : null;
