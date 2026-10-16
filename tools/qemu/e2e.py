@@ -45,7 +45,9 @@ What it does:
      falls on an epoch boundary (an epoch's last frame, then sticky copies
      and an epoch's first frame); nothing between frames, a partial frame
      only at the very end; receiver maintenance answers its start and
-     extension with the time it set, and GET /api/gnss agrees;
+     extension with the time it set, and GET /api/gnss agrees; a restart
+     during it (the replay paused across it) resumes it with its time left
+     (never more, at most 5 s less) and the station only listens;
   scenario "signal-test" (the replay answers as a scripted UM982,
   benchlib.um982_sim; with --scenario all it runs last, under 10 min):
   5. a fixed profile (the stream's own position) through PUT: the station
@@ -786,8 +788,48 @@ class E2E:
         gm = (g or {}).get("maintenance", {}) if isinstance(g, dict) else {}
         self.check(gm.get("on") is True and abs((gm.get("left_s") or 0) - (m.get("left_s") or 0)) <= 5,
                    f"GET /api/gnss maintenance agrees: {gm.get('on')}, left_s {gm.get('left_s')}")
+        self.maintenance_restart_check()
         status, d = self.api("DELETE", "/api/gnss/maintenance")
         self.check(status == 202, f"DELETE /api/gnss/maintenance: HTTP {status} {d}")
+
+    def maintenance_restart_check(self) -> None:
+        """A restart during receiver maintenance (an ESP32 software reset) resumes it from its RTC record with
+        the time left: never more than was left, and nothing lost but the restart's own time."""
+        def maint() -> dict:
+            status, g = self.api("GET", "/api/gnss")
+            return (g or {}).get("maintenance", {}) if status == 200 and isinstance(g, dict) else {}
+        before = maint()
+        t_ref = time.monotonic()
+        if not self.check(before.get("on") is True and (before.get("left_s") or 0) > 60,
+                          f"maintenance on before the restart: {before}"):
+            return
+        self.replay.pause()   # quiet across the restart (reboot_check says why)
+        time.sleep(2)
+        status, data = self.api("POST", "/api/system/reboot", {})
+        if not self.check(status == 202, f"POST /api/system/reboot during maintenance: HTTP {status} {data}"):
+            self.replay.resume()
+            return
+        self.planned_reboots += 1
+        time.sleep(5)
+        self.cookie = None
+        back = self.wait_http(self.args.timeout)
+        self.replay.resume()
+        if not self.check(back and self.login(first=False), "back after the restart during maintenance"):
+            return
+        after = maint()
+        want = before["left_s"] - (time.monotonic() - t_ref)
+        self.save("maintenance-after-restart.json", after)
+        self.check(after.get("on") is True and after.get("chosen_s") == before.get("chosen_s")
+                   and want - 5 <= (after.get("left_s") or 0) <= want + 1,
+                   f"maintenance resumed after the restart: {after.get('left_s')} s left of {after.get('chosen_s')} "
+                   f"(want {want:.0f}: never more, at most 5 s less)")
+        lines = [x for x in self.console_text().splitlines() if "maintenance continues after the reset" in x]
+        self.check(bool(lines) and "RTC record" in lines[-1],
+                   "console: " + (lines[-1].strip()[-150:] if lines else "no 'maintenance continues' line"))
+        status, st = self.api("GET", "/api/status")
+        rx = (st or {}).get("receiver", {}) if isinstance(st, dict) else {}
+        self.check(rx.get("rx_maintenance") is True and rx.get("state") == "idle",
+                   f"/api/status after the restart: rx_maintenance {rx.get('rx_maintenance')}, state {rx.get('state')!r}")
 
     def wait_record(self) -> tuple[bytes, bool]:
         """The first session's bytes once they span --observe seconds (or the time is up)."""

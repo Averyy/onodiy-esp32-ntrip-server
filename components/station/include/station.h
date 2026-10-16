@@ -188,19 +188,22 @@
  * reports STATION_STATE_IDLE meanwhile (listening only, as in a boot's
  * first seconds), which suspends health's GNSS ladder; rx_maintenance tells
  * the two apart (the UI's banner with the time left). Exit (the
- * user, or the time is up) runs the stream-first path as at boot. A reset
- * that keeps the ESP32's RTC memory keeps the state with its time left
- * (RTC memory, never NVS; the boot only listens until it ends): a software
- * reset, and also a reset that reads as power-on or brownout, since on the
- * ESP32-S3 the EN pin (the USB auto-reset, the RST button) reads as
- * power-on while the receiver keeps running and may be mid-work; a record
- * that survived says the ESP32's memory kept its power. Neither a restart
- * banner nor the power-on verdict ends it then: the user may have
- * restarted the receiver, or cycled its power, as part of the work. A
- * power cut that clears the memory ends it. Entry and exit are journalled.
+ * user, or the time is up) runs the stream-first path as at boot. An ESP32
+ * reset keeps the state with its time left, the boot only listening until
+ * it ends: a software reset, a crash or a watchdog from the RTC memory
+ * (exact), and a reset by the EN pin (on the ESP32-S3 the USB auto-reset
+ * and the RST button; it reads as power-on and powers the RTC memory down
+ * while the receiver keeps running and may be mid-work) from a copy in
+ * settings (gnss/maint: at entry, at each extension and every minute, with
+ * up to 70 s less time left). The time across the reset comes off; it never
+ * ends later than the time chosen (with the trusted clock, also when the
+ * ESP32 was held in reset), and ends at once when that time ran out
+ * meanwhile. A power-on reset that restarted the receiver too was a power
+ * cut: a maintenance resumed at that boot ends (not one the user extended
+ * since). Any other restart banner does not end it: the work may restart
+ * the receiver. A factory reset ends it. Entry and exit are journalled.
  * PROVISIONAL, to be confirmed on hardware (whether input on the link can
- * disturb the receiver while it is worked on through its other port, and
- * whether the ESP32-S3 keeps its RTC memory through an EN reset).
+ * disturb the receiver while it is worked on through its other port).
  *
  * Live view (station_live_view_start; satellites first): a window the user
  * opens for CONFIG_STATION_LIVE_VIEW_MIN minutes (extendable up to

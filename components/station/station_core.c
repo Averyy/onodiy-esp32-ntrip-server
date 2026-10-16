@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "settings_codec.h"
+
 /* ---- small helpers -------------------------------------------------------- */
 
 static const uint32_t k_short_list[] = { 115200, 460800, 921600, 230400 };
@@ -751,14 +753,16 @@ static void stream_first(stn_t *s, const stn_in_t *in, bool restarted)
     take_base(s, in);
 }
 
-/* Maintenance ends: the stream-first path, as at boot. */
-static void maint_exit(stn_t *s, const stn_in_t *in, bool expired)
+/* Maintenance ends (why: stn_maint_end_t): the stream-first path, as at boot. */
+static void maint_exit(stn_t *s, const stn_in_t *in, stn_maint_end_t why)
 {
-    note(s, STN_NOTE_MAINT_OFF, secs(in->now_ms - s->maint_start_ms), expired ? 1 : 0);
+    note(s, STN_NOTE_MAINT_OFF, secs(in->now_ms - s->maint_start_ms), (int32_t)why);
     bool restarted = s->maint_restart_seen;
     s->maint = false;
     s->maint_until_ms = STN_NEVER;
     s->maint_restart_seen = false;
+    s->maint_resumed = false;
+    s->maint_end_unix = 0;
     stream_first(s, in, restarted);
 }
 
@@ -838,7 +842,7 @@ stn_job_t stn_next(stn_t *s, const stn_in_t *in)
         if (in->now_ms < s->maint_until_ms) {
             return none;   /* hands off: nothing is sent, nothing is decided */
         }
-        maint_exit(s, in, true);
+        maint_exit(s, in, STN_MAINT_END_TIME);
     }
     if (s->state == STN_IDLE) {
         if (data_since_base(s, in)) {
@@ -1660,8 +1664,13 @@ int stn_maint_enter(stn_t *s, uint32_t dur_s, bool lease_held, int64_t now_ms)
         if (next > (int64_t)STN_MAINT_MAX_S * 1000) {
             next = (int64_t)STN_MAINT_MAX_S * 1000;
         }
+        int64_t was = s->maint_until_ms;
         s->maint_until_ms = now_ms + next;
         s->maint_chosen_s = secs(s->maint_until_ms - s->maint_start_ms);
+        if (s->maint_end_unix > 0 && s->maint_until_ms > was) {
+            s->maint_end_unix += (s->maint_until_ms - was) / 1000;   /* the end by the clock moves as much */
+        }
+        s->maint_resumed = false;   /* the user's own now: a power-cut verdict no longer ends it */
         return STN_MAINT_OK;
     }
     if (flash_state(s)) {
@@ -1689,6 +1698,8 @@ int stn_maint_enter(stn_t *s, uint32_t dur_s, bool lease_held, int64_t now_ms)
     s->maint_until_ms = now_ms + (int64_t)dur_s * 1000;
     s->maint_chosen_s = dur_s;
     s->maint_restart_seen = false;
+    s->maint_resumed = false;
+    s->maint_end_unix = 0;
     drop_stale_requests(s);   /* queued ladder steps and automatic re-applies */
     /* Listening only, as in the first seconds of a boot: the health
      * monitor's ladder stays suspended, no drift is judged. */
@@ -1704,23 +1715,8 @@ int stn_maint_end(stn_t *s, const stn_in_t *in)
     if (!s->maint) {
         return STN_MAINT_NOT_ON;
     }
-    maint_exit(s, in, false);
+    maint_exit(s, in, STN_MAINT_END_USER);
     return STN_MAINT_OK;
-}
-
-void stn_maint_restore(stn_t *s, uint32_t left_s, uint32_t spent_s, int64_t now_ms)
-{
-    if (left_s == 0) {
-        return;
-    }
-    if (left_s > STN_MAINT_MAX_S) {
-        left_s = STN_MAINT_MAX_S;
-    }
-    s->maint = true;
-    s->maint_start_ms = now_ms - (int64_t)spent_s * 1000;
-    s->maint_until_ms = now_ms + (int64_t)left_s * 1000;
-    s->maint_chosen_s = left_s + spent_s;
-    s->maint_restart_seen = false;
 }
 
 uint32_t stn_maint_left_s(const stn_t *s, int64_t now_ms)
@@ -1728,7 +1724,48 @@ uint32_t stn_maint_left_s(const stn_t *s, int64_t now_ms)
     return s->maint ? secs(s->maint_until_ms - now_ms) : 0;
 }
 
-#define MAINT_RTC_MAGIC 0x544E4D52u   /* "RMNT" */
+#define MAINT_STORE_SHORT_MS ((int64_t)STN_MAINT_STORE_SHORT_S * 1000)
+
+void stn_maint_record(const stn_t *s, int64_t now_ms, int64_t utc_now, bool store, stn_maint_rec_t *rec)
+{
+    memset(rec, 0, sizeof(*rec));
+    if (!s->maint) {
+        return;
+    }
+    int64_t exact = s->maint_until_ms - now_ms;
+    if (exact < 0) {
+        exact = 0;
+    }
+    int64_t left = store ? exact - MAINT_STORE_SHORT_MS : exact;
+    if (left < 0) {
+        left = 0;
+    }
+    if (left > (int64_t)STN_MAINT_MAX_S * 1000) {
+        left = (int64_t)STN_MAINT_MAX_S * 1000;
+    }
+    rec->on = true;
+    rec->left_ms = (uint32_t)left;
+    rec->chosen_s = s->maint_chosen_s;
+    /* The end by the clock: from the clock now, never past a resumed end
+     * that no clock has checked yet. */
+    rec->end_unix = s->maint_end_unix;
+    if (utc_now > 0 && (rec->end_unix <= 0 || utc_now + exact / 1000 < rec->end_unix)) {
+        rec->end_unix = utc_now + exact / 1000;
+    }
+}
+
+bool stn_maint_store_due(const stn_t *s, uint32_t saved_chosen_s, int64_t saved_ms, int64_t now_ms)
+{
+    if (!s->maint) {
+        return false;
+    }
+    if (saved_ms == STN_NEVER || saved_chosen_s != s->maint_chosen_s) {
+        return true;
+    }
+    return now_ms - saved_ms >= (int64_t)STN_MAINT_SAVE_S * 1000;
+}
+
+#define MAINT_RTC_MAGIC 0x324E4D52u   /* "RMN2" (the earlier layout was "RMNT") */
 
 /* CRC-32 (reflected 0xEDB88320) of n words, low byte first. */
 static uint32_t crc_words(const uint32_t *w, size_t n)
@@ -1748,32 +1785,165 @@ static uint32_t crc_words(const uint32_t *w, size_t n)
 /* The record's words before the CRC. */
 static uint32_t rtc_crc(const stn_maint_rtc_t *r)
 {
-    const uint32_t w[4] = { r->magic, r->stamp, r->left_s, r->spent_s };
-    return crc_words(w, 4);
+    const uint32_t w[9] = { r->magic,  r->stamp,  r->on,     r->left_ms, r->chosen_s,
+                            r->rtc_lo, r->rtc_hi, r->end_lo, r->end_hi };
+    return crc_words(w, 9);
 }
 
-void stn_maint_rtc_write(stn_maint_rtc_t *r, uint32_t stamp, uint32_t left_s, uint32_t spent_s)
+void stn_maint_rtc_write(stn_maint_rtc_t *r, const stn_maint_rec_t *rec)
 {
-    if (left_s == 0) {
-        memset(r, 0, sizeof(*r));
-        return;
-    }
     r->magic = MAINT_RTC_MAGIC;
-    r->stamp = stamp;
-    r->left_s = left_s;
-    r->spent_s = spent_s;
+    r->stamp = rec->stamp;
+    r->on = rec->on ? 1u : 0u;
+    r->left_ms = rec->on ? rec->left_ms : 0;
+    r->chosen_s = rec->on ? rec->chosen_s : 0;
+    r->rtc_lo = (uint32_t)rec->rtc_us;
+    r->rtc_hi = (uint32_t)(rec->rtc_us >> 32);
+    r->end_lo = (uint32_t)(uint64_t)rec->end_unix;
+    r->end_hi = (uint32_t)((uint64_t)rec->end_unix >> 32);
     r->crc = rtc_crc(r);
 }
 
-bool stn_maint_rtc_read(const stn_maint_rtc_t *r, uint32_t *stamp, uint32_t *left_s, uint32_t *spent_s)
+/* Time left within bounds and within the chosen duration. */
+static bool maint_fields_ok(uint32_t left_ms, uint32_t chosen_s)
 {
-    if (r->magic != MAINT_RTC_MAGIC || r->crc != rtc_crc(r) || r->left_s == 0 || r->left_s > STN_MAINT_MAX_S ||
-        r->spent_s > STN_MAINT_MAX_S * 16u) {
+    return left_ms <= STN_MAINT_MAX_S * 1000u && (uint64_t)left_ms <= (uint64_t)chosen_s * 1000u &&
+           chosen_s <= STN_MAINT_MAX_S * 64u;
+}
+
+bool stn_maint_rtc_read(const stn_maint_rtc_t *r, stn_maint_rec_t *rec)
+{
+    memset(rec, 0, sizeof(*rec));
+    if (r->magic != MAINT_RTC_MAGIC || r->crc != rtc_crc(r) || r->on > 1u ||
+        (r->on == 1u && !maint_fields_ok(r->left_ms, r->chosen_s))) {
         return false;
     }
-    *stamp = r->stamp;
-    *left_s = r->left_s;
-    *spent_s = r->spent_s;
+    rec->on = r->on == 1u;
+    rec->stamp = r->stamp;
+    rec->left_ms = r->left_ms;
+    rec->chosen_s = r->chosen_s;
+    rec->rtc_us = ((uint64_t)r->rtc_hi << 32) | r->rtc_lo;
+    rec->end_unix = (int64_t)(((uint64_t)r->end_hi << 32) | r->end_lo);
+    return true;
+}
+
+size_t stn_maint_store_encode(const stn_maint_rec_t *rec, uint8_t *buf, size_t cap)
+{
+    blob_writer_t w;
+    blob_writer_init(&w, buf, cap);
+    blob_put_u8(&w, STN_MAINT_STORE_VERSION);
+    blob_put_u32(&w, rec->stamp);
+    blob_put_u32(&w, rec->left_ms);
+    blob_put_u32(&w, rec->chosen_s);
+    blob_put_i64(&w, rec->end_unix);
+    return blob_writer_ok(&w) ? w.len : 0;
+}
+
+bool stn_maint_store_decode(stn_maint_rec_t *rec, const uint8_t *buf, size_t len)
+{
+    memset(rec, 0, sizeof(*rec));
+    if (buf == NULL || len < 1 || buf[0] < STN_MAINT_STORE_VERSION) {
+        return false;
+    }
+    blob_reader_t r;
+    blob_reader_init(&r, buf, len);
+    (void)blob_get_u8(&r);
+    uint32_t stamp = blob_get_u32(&r);
+    uint32_t left_ms = blob_get_u32(&r);
+    uint32_t chosen_s = blob_get_u32(&r);
+    int64_t end_unix = blob_get_i64(&r);
+    if (!blob_reader_ok(&r) || !maint_fields_ok(left_ms, chosen_s) || end_unix < 0) {
+        return false;
+    }
+    rec->on = true;
+    rec->stamp = stamp;
+    rec->left_ms = left_ms;
+    rec->chosen_s = chosen_s;
+    rec->end_unix = end_unix;
+    return true;
+}
+
+void stn_maint_boot(const stn_maint_boot_in_t *in, stn_maint_boot_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (in->blocked) {
+        return;
+    }
+    const stn_maint_rec_t *r;
+    uint8_t from;
+    int64_t elapsed_ms = in->uptime_ms > 0 ? in->uptime_ms : 0;   /* the least the reset took */
+    if (in->rtc_ok) {
+        if (!in->rtc.on) {
+            return;   /* it had ended: a stored copy left behind is stale */
+        }
+        r = &in->rtc;
+        from = STN_MAINT_FROM_RTC;
+        if (in->rtc_timer_kept && in->rtc_now_us >= in->rtc.rtc_us) {
+            uint64_t us = in->rtc_now_us - in->rtc.rtc_us;
+            elapsed_ms = us >= (uint64_t)INT64_MAX - 999u ? INT64_MAX : (int64_t)((us + 999u) / 1000u);
+            out->elapsed_known = true;
+        }
+    } else if (in->store_ok && in->store.on) {
+        r = &in->store;
+        from = STN_MAINT_FROM_STORE;
+    } else {
+        return;
+    }
+    out->chosen_s = r->chosen_s;
+    if (elapsed_ms >= (int64_t)r->left_ms) {
+        out->expired = true;   /* its time ran out across the reset */
+        return;
+    }
+    out->from = from;
+    out->left_ms = (uint32_t)((int64_t)r->left_ms - elapsed_ms);
+    out->end_unix = out->elapsed_known ? 0 : r->end_unix;
+}
+
+void stn_maint_restore(stn_t *s, const stn_maint_boot_t *b, int64_t now_ms)
+{
+    if (b->from == STN_MAINT_FROM_NONE || b->left_ms == 0) {
+        return;
+    }
+    int64_t left = b->left_ms;
+    if (left > (int64_t)STN_MAINT_MAX_S * 1000) {
+        left = (int64_t)STN_MAINT_MAX_S * 1000;
+    }
+    uint32_t chosen = b->chosen_s;
+    if ((int64_t)chosen * 1000 < left) {
+        chosen = secs(left);
+    }
+    s->maint = true;
+    s->maint_until_ms = now_ms + left;
+    s->maint_start_ms = s->maint_until_ms - (int64_t)chosen * 1000;   /* the time spent before counts */
+    s->maint_chosen_s = chosen;
+    s->maint_restart_seen = false;
+    s->maint_resumed = true;
+    s->maint_end_unix = b->end_unix > 0 ? b->end_unix : 0;
+}
+
+void stn_maint_clock(stn_t *s, int64_t utc_now, int64_t now_ms)
+{
+    if (!s->maint || s->maint_end_unix <= 0 || utc_now <= 0) {
+        return;
+    }
+    /* The clock counts whole seconds: one second off, so it never ends late. */
+    int64_t left = (s->maint_end_unix - utc_now - 1) * 1000;
+    s->maint_end_unix = 0;
+    if (left < 0) {
+        left = 0;   /* its time ran out while the ESP32 was off: ends at the next step */
+    }
+    if (now_ms + left < s->maint_until_ms) {
+        s->maint_until_ms = now_ms + left;
+        s->maint_start_ms = s->maint_until_ms - (int64_t)s->maint_chosen_s * 1000;
+    }
+}
+
+bool stn_maint_power_cut(stn_t *s, const stn_in_t *in)
+{
+    if (!s->maint || !s->maint_resumed) {
+        return false;
+    }
+    maint_exit(s, in, STN_MAINT_END_POWER);
     return true;
 }
 
