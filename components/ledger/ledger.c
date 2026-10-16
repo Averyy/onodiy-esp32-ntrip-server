@@ -37,7 +37,7 @@ _Static_assert((int)LEDGER_CLOCK_NONE == (int)LC_CLOCK_NONE && (int)LEDGER_CLOCK
 
 #define DAY_S          86400
 #define SHUTDOWN_WAIT_MS 300   /* of the shutdown budget, for a tick's writes to finish */
-#define TODAY_BLOB_MAX 160u    /* today with its mark and the online times: 154 bytes */
+#define TODAY_BLOB_MAX 160u    /* today with its mark, the online times and the lost epochs: 158 bytes (an older build reads 160) */
 #define HIST_BLOB_MAX  (3u + (size_t)CONFIG_LEDGER_HISTORY_DAYS * (4u + LC_SLOTS * 16u + 8u))
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -73,6 +73,7 @@ static void to_api(const lc_day_t *d, ledger_day_t *out)
     }
     out->power_off_s = d->power_off_ms / 1000u;
     out->rx_overflows = d->rx_overflows;
+    out->lost_epochs = d->lost_epochs;
 }
 
 /* How the previous session ended, as the reset tells: every reboot through
@@ -320,6 +321,17 @@ void ledger_count_overflow(void)
     uint32_t now = now_ms();
     portENTER_CRITICAL(&s_lock);
     lc_count_overflow(&s_core, now);
+    portEXIT_CRITICAL(&s_lock);
+}
+
+void ledger_count_lost_epochs(uint32_t n)
+{
+    if (!s_ready || n == 0) {
+        return;
+    }
+    uint32_t now = now_ms();
+    portENTER_CRITICAL(&s_lock);
+    lc_count_lost_epochs(&s_core, now, n);
     portEXIT_CRITICAL(&s_lock);
 }
 

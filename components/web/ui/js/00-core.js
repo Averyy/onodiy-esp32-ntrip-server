@@ -6,10 +6,10 @@
  * and a small event bus.
  *
  * The bundle (tools/ui_bundle.py) joins js/*.js in name order inside one
- * strict-mode function, so these names are shared by the later files and
- * nothing reaches the global object. The page is built from DOM nodes only:
- * text from the station (caster replies, SSIDs, log lines) is always set as
- * text, never parsed as HTML.
+ * strict-mode function (comments left out), so these names are shared by
+ * the later files and nothing reaches the global object. The page is built
+ * from DOM nodes only: text from the station (caster replies, SSIDs, log
+ * lines) is always set as text, never parsed as HTML.
  */
 
 const doc = document;
@@ -171,6 +171,28 @@ function card(title, ...kids) {
   return h('section', { class: 'card' }, title ? h('h2', null, title) : null, kids);
 }
 
+/**
+ * A card's title row: the h2 holds the title only and the status chips sit
+ * beside it at the right, so a chip never runs into the title (on screen, in
+ * copied text or for a screen reader).
+ */
+function cardHead(title, ...chips) {
+  return h('div', { class: 'card-head' }, h('h2', null, title), chips);
+}
+
+/** A setting and its button: the title in bold and one muted line at the left, the button at the right (a phone: under it). */
+function settingRow(title, text, button) {
+  return h('div', { class: 'setting-row' }, h('div', null, h('strong', null, title), h('span', null, text)), button);
+}
+
+/**
+ * A disclosure (details.more): its summary, then kids. open: the state to
+ * start in (a refresh that rebuilds it passes what the user left it at).
+ */
+function disclosure(summary, open, ...kids) {
+  return h('details', { class: 'more', open: !!open }, h('summary', null, summary), kids);
+}
+
 /** A card that is the whole page (log in, no answer, the wizard): its title is the page's one h1. */
 function pageCard(title, ...kids) {
   return h('section', { class: 'card' }, h('h1', null, title), kids);
@@ -200,6 +222,11 @@ function btn(label, onclick, kind, attrs) {
 
 function link(label, href, cls) {
   return h('a', { href: href, class: cls || null }, label);
+}
+
+/** A link to another site, in a new tab, marked as such ("Onocoy's FAQ ↗"). */
+function extLink(label, url) {
+  return h('a', { class: 'ext', href: url, target: '_blank', rel: 'noopener noreferrer' }, label + '\u00a0↗');
 }
 
 /** Labelled input with hint and error line. Returns {el, input, error(msg)}. */
@@ -294,20 +321,17 @@ function scrollBox(label, ...kids) {
 }
 
 /**
- * Table from header texts and rows of cells. opts.num: indexes of numeric
- * columns (right-aligned); opts.stack: on a phone (under 480 px) each row
- * becomes a list of "header: value" lines instead of a table that scrolls
- * sideways (every column stays readable); opts.label: what the table shows,
- * for assistive technology (default: its column headers).
+ * Table from header texts and rows of cells, one line per row at every
+ * width. opts.num: indexes of numeric columns (right-aligned); opts.cls:
+ * the table's class ('rows': no cell wraps); opts.label: what the table
+ * shows, for assistive technology (default: its column headers).
  */
 function table(head, rows, opts) {
   const numeric = (opts && opts.num) || [];
-  const stack = !!(opts && opts.stack);
-  return scrollBox((opts && opts.label) || head.join(', '), h('table', { class: stack ? 'stack-sm' : null },
+  return scrollBox((opts && opts.label) || head.join(', '), h('table', { class: (opts && opts.cls) || null },
     h('thead', null, h('tr', null, head.map((t, i) => h('th', { class: numeric.indexOf(i) >= 0 ? 'num' : null }, t)))),
     h('tbody', null, rows.map(r => h('tr', null, r.map((c, i) =>
-      h('td', { class: numeric.indexOf(i) >= 0 ? 'num' : null, 'data-label': stack ? head[i] : null },
-        c === null || c === undefined ? '–' : c)))))));
+      h('td', { class: numeric.indexOf(i) >= 0 ? 'num' : null }, c === null || c === undefined ? '–' : c)))))));
 }
 
 /* ---- Formatting -------------------------------------------------------- */
@@ -568,7 +592,7 @@ const ERR = {
   nothing_staged: 'No uploaded receiver package is waiting.',
   no_journal: 'There is no receiver update session.',
   no_coredump: 'There is no core dump.',
-  nothing_pending: 'No new Wi-Fi credentials are waiting (they were confirmed or discarded meanwhile).',
+  nothing_pending: 'No new Wi-Fi settings are waiting (they were confirmed or discarded meanwhile).',
   method_not_allowed: 'The station does not support this action.',
   busy: 'The station is busy with another job. Try again in a moment.',
   journal_open: 'A receiver update session is open. Finish or clear it first.',
@@ -595,7 +619,7 @@ const ERR = {
   admin_not_set: 'No admin password is set yet. Set one over the station\'s own Wi-Fi network.',
   receiver_maintenance: 'Receiver maintenance is on: nothing is sent to the receiver. End it first.',
   not_in_maintenance: 'Receiver maintenance is not on (it may have ended meanwhile).',
-  live_view_closed: 'The live view is not open (it may have closed meanwhile).',
+  live_view_closed: 'The sky view is not open (it may have closed meanwhile).',
   length_required: 'The upload needs a known size.',
   too_large: 'Too large for the station.',
   unsupported_media_type: 'The station refused the request type.',
@@ -609,14 +633,14 @@ const ERR = {
   not_available_yet: 'Receiver firmware updates are not enabled in this build yet.',
   checks_disabled: 'This build cannot check for updates. Uploading a file still works.',
   too_many_clients: 'Too many pages are open on the station.',
-  signal_test_running: 'A signal-group comparison is running: nothing else changes the receiver until it ends. Cancel it on the receiver page first.',
+  signal_test_running: 'A signal-group comparison is running. Wait for it to end, or stop it in Receiver settings.',
   signal_test_idle: 'No signal-group comparison is running (it may have ended meanwhile).',
   signal_test_not_deciding: 'The comparison is not waiting for your choice (not yet, or not any more).',
-  first_apply_held: 'The receiver is not configured yet. Review and configure it on the receiver page first.',
+  first_apply_held: 'The receiver is not configured yet. Confirm its configuration on the Receiver page first.',
   autocfg_off: 'The station does not configure the receiver (automatic configuration is off).',
   identity_unconfirmed: 'The receiver is not identified yet.',
   config_failed: 'The receiver\'s configuration failed. That needs fixing first.',
-  position_not_locked: 'The base position is not locked yet: every receiver restart would start a new survey.',
+  position_not_locked: 'Lock the base position first; until then every receiver restart starts a new survey.',
 };
 
 /* Request fields as the forms label them, for "<label>: <rule>" refusals. */
@@ -644,9 +668,9 @@ function fieldErrorText(e) {
 }
 
 const POLICY = {
-  second_onocoy: 'Another enabled slot already streams to Onocoy. Onocoy allows one stream per station.',
-  second_rtk2go: 'Another enabled slot already streams to RTK2go. Use one RTK2go slot per station.',
-  dup_stream_ack_required: 'Streaming to Onocoy and an open caster at the same time needs your acknowledgement.',
+  second_onocoy: 'Another caster here already streams to Onocoy, and Onocoy allows one stream per station.',
+  second_rtk2go: 'Another caster here already streams to RTK2go. Stream to RTK2go from one caster only.',
+  dup_stream_ack_required: 'Streaming to Onocoy and to RTK2go or Centipede at the same time needs your OK first.',
 };
 
 function errText(e) {
@@ -657,7 +681,7 @@ function errText(e) {
     t = 'The station is working with the receiver right now (configuring or checking it). Offer maintenance again when that ends.';
   }
   if (e.code === 'busy' && e.body.reason === 'live_view_output') {
-    t = 'The live view has the receiver\'s satellite positions turned on. The station turns them off first (the live view stays open ' +
+    t = 'The sky view has the receiver\'s satellite positions turned on. The station turns them off first (the sky view stays open ' +
       'without them): start maintenance again in a few seconds.';
   }
   if (e.code === 'invalid_field' && e.field) t = fieldErrorText(e);

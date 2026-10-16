@@ -2,35 +2,42 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * App shell: header, navigation, hash router (#/casters, #/diag/logs, ...),
- * page-wide notices (safe mode, receiver maintenance, receiver UART
- * reopening, new Wi-Fi credentials on trial or pending, a signal-group
- * comparison running or finished, receiver update waiting, update banner),
- * dialogs, the restart overlay and the colour theme.
+ * App shell: header, the four tabs, hash router (#/casters, #/diag/logs, ...;
+ * old addresses redirect), page-wide notices (one line each), dialogs, the
+ * restart overlay and the colour theme.
  *
- * A view is {title, admin, create(el, arg) -> {update(status)?, destroy()?,
- * dirty()?, reload()?}}. update() runs on every status change; reload() when
- * the settings changed elsewhere (unless dirty() says a form is being edited).
+ * A view is {title, admin, heading(arg)?, create(el, arg) -> {update(status)?,
+ * destroy()?, dirty()?, reload()?}}. update() runs on every status change;
+ * reload() when the settings changed elsewhere (unless dirty() says a form is
+ * being edited). heading(arg): [h1 text, shown] for a sub-page.
  */
 
 const Views = {};
-const NAV = [
-  ['', 'Status'],
-  ['casters', 'Casters'],
-  ['receiver', 'Receiver'],
-  ['signals', 'Signals'],
-  ['updates', 'Updates'],
-  ['diag', 'Diagnostics'],
-  ['system', 'System'],
-];
-/* Pages a visitor without a session may open when public status is on. */
-const PUBLIC_PAGES = ['', 'signals'];
+const NAV = [['', 'Status'], ['casters', 'Casters'], ['receiver', 'Receiver'], ['settings', 'Settings']];
+
+/*
+ * Old addresses (the seven tabs, Diagnostics' six parts) and where that
+ * content is now: #/signals/live opens #/receiver/live, the journal and the
+ * availability Diagnostics' History, its tasks and core dump its Overview.
+ */
+function movedTo(name, arg) {
+  if (name === 'dashboard') return '';
+  if (name === 'updates') return 'settings/' + (arg || 'updates');
+  if (name === 'diag') return { availability: 'diag/history', journal: 'diag/history', tasks: 'diag', coredump: 'diag' }[arg] || null;
+  const to = { signals: 'receiver', live: 'receiver/live', system: 'settings/wifi' }[name];
+  return to ? to + (arg ? '/' + arg : '') : null;
+}
+
+/* The tab a page belongs to: Diagnostics is reached from Settings. */
+const tabOf = name => (name === 'diag' ? 'settings' : name);
 
 const shell = {
   current: null,     /* {name, arg, view} */
   started: false,
   noticeKey: '',
   navKey: '',
+  title: '',
+  noticesOpen: false,
 };
 
 /* Where a page goes: inside <main>, after its heading (the page's h1, set by openView). */
@@ -65,7 +72,7 @@ function setBrand(name) {
 
 function renderTopActions() {
   const box = doc.getElementById('top-actions');
-  const themeBtn = h('button', { type: 'button', class: 'icon-btn', title: 'Light or dark', 'aria-label': 'Switch light or dark',
+  const themeBtn = h('button', { type: 'button', class: 'icon-btn', title: 'Light or dark', 'aria-label': 'Switch between light and dark',
     onclick: toggleTheme }, '◐');
   if (isAdmin()) {
     mount(box, themeBtn, h('button', { type: 'button', class: 'btn small ghost', onclick: logout }, 'Log out'));
@@ -119,19 +126,18 @@ function renderLive(state) {
 
 function renderNav() {
   const nav = doc.getElementById('tabs');
-  const name = shell.current ? shell.current.name : '';
-  const pages = isAdmin() ? NAV : NAV.filter(n => PUBLIC_PAGES.indexOf(n[0]) >= 0);
-  const st = S.status || {};
-  const upd = st.update || {};
+  const admin = isAdmin();
+  const name = shell.current ? tabOf(shell.current.name) : '';
+  const u = (S.status || {}).update || {};
+  const dot = !!(u.app_available || u.gnss_available || u.app_reverted_in_stage1);
+  /* The public view is one page: no tabs. */
+  nav.hidden = !admin;
   /* Rebuild only on a change, so a tap on a tab is never lost to a refresh. */
-  const key = [name, isAdmin(), !!(upd.app_available || upd.gnss_available || upd.app_reverted_in_stage1)].join('|');
+  const key = [name, admin, dot].join('|');
   if (key === shell.navKey && nav.firstChild) return;
   shell.navKey = key;
-  mount(nav, pages.map(n => {
-    const dot = n[0] === 'updates' && (upd.app_available || upd.gnss_available || upd.app_reverted_in_stage1);
-    return h('a', { href: '#/' + n[0], class: name === n[0] ? 'active' : null, 'aria-current': name === n[0] ? 'page' : null },
-      n[1], dot ? h('span', { class: 'dot', title: 'Update available' }) : null);
-  }));
+  mount(nav, admin ? NAV.map(n => h('a', { href: '#/' + n[0], class: name === n[0] ? 'active' : null, 'aria-current': name === n[0] ? 'page' : null },
+    n[1], dot && n[0] === 'settings' ? h('span', { class: 'dot', role: 'img', 'aria-label': 'update available' }) : null)) : null);
   navShowActive();
 }
 
@@ -150,10 +156,14 @@ function navShowActive() {
 }
 
 function navEdges() {
-  const nav = doc.getElementById('tabs');
-  const more = nav.scrollWidth - nav.clientWidth;
-  nav.classList.toggle('more-left', more > 2 && nav.scrollLeft > 2);
-  nav.classList.toggle('more-right', more > 2 && nav.scrollLeft < more - 2);
+  edgeFade(doc.getElementById('tabs'));
+}
+
+/* The tabs when they do not fit: a fade at each edge where more of them lie. */
+function edgeFade(el) {
+  const more = el.scrollWidth - el.clientWidth;
+  el.classList.toggle('more-left', more > 2 && el.scrollLeft > 2);
+  el.classList.toggle('more-right', more > 2 && el.scrollLeft < more - 2);
 }
 
 doc.getElementById('tabs').addEventListener('scroll', navEdges, { passive: true });
@@ -177,11 +187,16 @@ function parseHash() {
 function route() {
   if (!shell.started) return;
   let r = parseHash();
-  if (!Views[r.name === '' ? 'dashboard' : r.name]) r = { name: '', arg: '' };
-  if (!isAdmin() && PUBLIC_PAGES.indexOf(r.name) < 0) r = { name: '', arg: '' };
+  const to = movedTo(r.name, r.arg);
+  if (to !== null) {
+    history.replaceState(null, '', '#/' + to);
+    r = parseHash();
+  }
+  /* A visitor without a session sees the one public page. */
+  if (!Views[r.name || 'dashboard'] || (!isAdmin() && r.name)) r = { name: '', arg: '' };
   const cur = shell.current;
   if (cur && cur.name === r.name && cur.arg === r.arg) return;
-  if (cur && cur.view.dirty && cur.view.dirty() && !window.confirm('Leave this page? Changes that were not saved are lost.')) {
+  if (cur && cur.view.dirty && cur.view.dirty() && !window.confirm('Leave this page? Unsaved changes are lost.')) {
     history.replaceState(null, '', '#/' + cur.name + (cur.arg ? '/' + cur.arg : ''));
     return;
   }
@@ -197,9 +212,10 @@ function openView(name, arg) {
       console.error(e);
     }
   }
-  const def = Views[name === '' ? 'dashboard' : name];
-  const el = viewEl();
-  clear(el);
+  const def = Views[name || 'dashboard'];
+  /* Each visit draws into its own element: an answer that arrives after the page was left lands nowhere. */
+  const el = h('div', { class: 'page-root' });
+  mount(viewEl(), el);
   shell.current = { name: name, arg: arg, view: {} };
   try {
     shell.current.view = def.create(el, arg) || {};
@@ -207,14 +223,24 @@ function openView(name, arg) {
     console.error(e);
     mount(el, msg('bad', 'This page could not be shown: ' + e.message));
   }
-  const host = S.status && S.status.device ? S.status.device.hostname : '';
-  doc.title = def.title + (host ? ' · ' + host : '');
+  /* The page's one h1: read out only, or shown as the page's heading where the view has no title card. */
+  const t = (def.heading && def.heading(arg)) || [def.title, def.showTitle];
   const head = doc.getElementById('page-title');
-  head.textContent = def.title;
+  head.textContent = shell.title = t[0];
+  head.className = t[1] ? 'page-title' : 'sr-only';
   head.hidden = false;
+  setDocTitle();
   renderNav();
   renderNotices();
   window.scrollTo(0, 0);
+}
+
+/* The browser tab's title follows the Status page's top card on every page ("Not streaming · onocoydiy"). */
+function setDocTitle() {
+  const s = S.status;
+  const host = s && s.device ? s.device.hostname : '';
+  const t = (s ? stationState(s, isAdmin() && !s.public).head : shell.title) + (host ? ' · ' + host : '');
+  if (doc.title !== t) doc.title = t;
 }
 
 function startShell() {
@@ -238,6 +264,7 @@ function stopShell() {
   shell.started = false;
   shell.noticeKey = '';
   doc.getElementById('page-title').hidden = true;   /* bare pages carry their own heading */
+  doc.title = doc.getElementById('brand-name').textContent;
   doc.body.classList.add('bare');
   clear(doc.getElementById('tabs'));
   clear(doc.getElementById('notices'));
@@ -268,6 +295,7 @@ function refreshView() {
     press.pending = true;
     return;
   }
+  setDocTitle();
   renderNotices();
   renderNav();
   const v = shell.current && shell.current.view;
@@ -366,6 +394,102 @@ function trialLeftEl(net) {
   return h('span', { 'data-trial-left': '', role: 'timer' }, trialLeftText(net));
 }
 
+/* Minutes for a notice ("about 14 min"): whole minutes, rounded up. */
+const upMin = s => fmt.dur(Math.ceil(s / 60) * 60);
+
+/* The page a notice is on: the route's name, 'receiver/settings' for that page; '' is the Status page. */
+function pageKey() {
+  const c = shell.current;
+  return !c ? '' : c.name === 'receiver' && c.arg ? 'receiver/' + c.arg.split('/')[0] : c.name;
+}
+
+const TONE_ORDER = { bad: 0, warn: 1, info: 2 };
+
+/**
+ * The page-wide notices for a status on `page` (pageKey()), worst first:
+ * [{key, tone, title, text, actions, urgent, trial}], one line and one
+ * button each. urgent: it needs the user now and never folds away. A page
+ * whose own card says a thing leaves its notice out; the Status page the one
+ * its top card says (stationState().notice).
+ */
+function noticeItems(st, page) {
+  const items = [];
+  const add = (key, tone, title, text, actions, urgent, trial) => items.push({ key: key, tone: tone, title: title, text: text || '',
+    actions: actions || null, urgent: !!urgent, trial: !!trial });
+  const go = (label, href) => link(label, href, 'btn small');
+  const dev = st.device || {};
+  const sm = st.safe_mode || {};
+  const rcv = st.receiver || {};
+  const u = st.update || {};
+  const net = st.network || {};
+
+  if (dev.settings_available === false) add('settings', 'bad', 'Settings cannot be saved', 'Restart the station.', go('Restart', '#/settings/restart'), true);
+  if (st.health && st.health.factory_reset_refused) {
+    add('factory_reset', 'warn', 'Factory reset refused', 'Hold BOOT again after the receiver update.', go('Details', '#/diag'), true);
+  }
+  /* Settings has the safe-mode box itself, with "Leave safe mode". */
+  if (sm.active && page !== 'settings') add('safe_mode', 'bad', 'Safe mode', 'The receiver and casters are off.', go('Details', '#/settings/restart'), true);
+  /* Settings has maintenance next to the receiver update, with End now. */
+  if (rcv.rx_maintenance && page !== 'settings') {
+    add('maintenance', 'info', 'Receiver maintenance', rcv.maintenance_left_s ? 'Ends in about ' + upMin(rcv.maintenance_left_s) + '.' : '',
+      btn('End now', endMaintenance, 'small'), true);
+  }
+  if (rcv.first_apply_held && page !== 'receiver') add('held', 'info', 'Receiver not configured yet', '', go('Review and configure', '#/receiver'));
+  /* The Receiver page's own panel says it there. */
+  if (rcv.uart_closed && !sm.active && page !== 'receiver') {
+    add('uart_closed', 'bad', 'Receiver port closed', 'The station keeps trying.', go('Details', '#/diag'), true);
+  }
+  /* Settings shows a Wi-Fi trial and new settings waiting in its Wi-Fi card, with the buttons. */
+  const pend = net.pending_ssid || 'the new network';
+  if (page !== 'settings' && net.cred_trial) {
+    /* No button: the trial ends by itself, either way. The countdown ticks without a rebuild. */
+    add('wifi', 'info', 'Trying ' + pend, '', null, false, true);
+  } else if (page !== 'settings' && net.cred_pending) {
+    add('wifi', 'warn', net.cred_reverted_why === 'auth_failed' && net.cred_reverted ? pend + ' refused the new password' :
+      net.cred_reverted ? 'No address on ' + pend : 'New Wi-Fi settings for ' + pend + ' not confirmed yet', '', go('Wi-Fi', '#/settings/wifi'));
+  }
+  /* A signal-group comparison running or finished: [tone, title, text, button]; Receiver settings has its card. */
+  const sgn = page === 'receiver/settings' ? null : sgTestNotice(st);
+  if (sgn) add('signal_test', sgn[0], sgn[1], sgn[2], sgn[3]);
+  const j = rcv.journal;
+  const inLoader = (st.alerts || []).some(a => a.id === 'receiver_in_loader');
+  const session = j === 'waiting' || j === 'unreadable' || j === 'unknown';
+  /* Settings shows a waiting receiver update in its session card. */
+  if ((session && page !== 'settings') || (inLoader && !session)) {
+    add('journal', 'warn', 'Receiver update needs you', !session ? 'The receiver waits in its update loader.' :
+      j === 'unreadable' ? 'Its record is damaged.' : 'Keep the station powered.', go('Open', '#/settings/session'), true);
+  }
+  /* A slot the Onocoy login guard stopped tries nothing until the user acts; the Casters page shows it on its card. */
+  for (const c of page === 'casters' ? [] : st.casters || []) {
+    if (c.state === 'stopped') {
+      add('onocoy_stopped:' + c.slot, 'bad', (c.name || 'Onocoy') + ' stopped: ' + lbl(L.stop, c.stop_reason || 'none'), '',
+        go('What to do', '#/casters'), true);
+    }
+  }
+  if (page !== 'settings' && (u.app_available || u.gnss_available || u.app_reverted_in_stage1) && !bannerDismissed(u)) {
+    const parts = [];
+    if (u.app_available) parts.push('app ' + u.app_version);
+    if (u.gnss_available) parts.push('receiver build ' + u.gnss_build);
+    add('update', 'info', 'Update available', capFirst(parts.join(' and ')) + (parts.length ? '.' : '') +
+      (u.app_reverted_in_stage1 ? (parts.length ? ' ' : '') + u.app_reverted_version + ' was rolled back in its first minute.' : ''), [
+      btn('Later', () => {
+        laterKey = bannerKey(u);
+        store.set('later', laterKey);
+        shell.noticeKey = '';
+        renderNotices();
+      }, 'small ghost'),
+      go('Update', '#/settings/updates')]);
+  }
+  const covered = page === '' ? stationState(st, true).notice : null;
+  return items.filter(i => i.key !== covered).sort((a, b) => TONE_ORDER[a.tone] - TONE_ORDER[b.tone]);
+}
+
+/** The notices a page shows: every urgent one and the first two others; the rest only when open. {shown, more}. */
+function foldNotices(items, open) {
+  const folded = items.filter(i => !i.urgent).slice(2);
+  return { shown: open ? items : items.filter(i => folded.indexOf(i) < 0), more: folded.length };
+}
+
 function renderNotices() {
   const st = S.status;
   const box = doc.getElementById('notices');
@@ -374,168 +498,81 @@ function renderNotices() {
     shell.noticeKey = '';
     return;
   }
-  const items = [];
-  const dev = st.device || {};
-  const sm = st.safe_mode || {};
-  const rcv = st.receiver || {};
-  const u = st.update || {};
-  const alerts = (st.alerts || []).map(a => a.id);
-
-  if (dev.settings_available === false) {
-    items.push(['bad', 'Settings storage unavailable',
-      'The station could not use its settings storage this boot. It runs, but changes are not saved. Restarting may help; if not, see the diagnostics.', null]);
-  }
-  if (st.health && st.health.factory_reset_refused) {
-    items.push(['warn', 'Factory reset refused',
-      'Someone held the BOOT button for a factory reset while a receiver update was running, so the station refused it. ' +
-      'Hold the button again once the update has finished.', [link('Details', '#/diag', 'btn small')]]);
-  }
-  if (sm.active) {
-    items.push(['bad', 'Safe mode',
-      'The station restarted after ' + (sm.crashes || 'repeated') + ' crashes and is in safe mode: the receiver and the casters are off. ' +
-      'Wi-Fi, this page and updates still work.' + (sm.retry_in_s ? ' It tries normal operation again in ' + fmt.dur(Math.ceil(sm.retry_in_s / 60) * 60) + '.' : ''),
-      [link('Details', '#/system', 'btn small'), link('Updates', '#/updates', 'btn small')]]);
-  }
-  if (rcv.rx_maintenance) {
-    const left = rcv.maintenance_left_s ? ' It ends by itself in about ' + fmt.dur(Math.ceil(rcv.maintenance_left_s / 60) * 60) + '.' : '';
-    items.push(['warn', 'Receiver maintenance', 'Nothing is sent to the receiver while you work on it through its other port; ' +
-      'the casters still get its RTCM.' + left + ' ' + MAINT_SAVE_NOTE,
-    [btn('End now', endMaintenance, 'small'), link('Details', '#/receiver', 'btn small')]]);
-  }
-  if (rcv.first_apply_held && !(shell.current && shell.current.name === 'receiver')) {
-    items.push(['info', 'Receiver not configured yet', 'This build holds the receiver\'s first configuration until you confirm it: ' +
-      'so far the station has sent it only queries. See what it would send, then configure it.',
-    [link('Review and configure', '#/receiver', 'btn small')]]);
-  }
-  if (rcv.uart_closed && !sm.active) {
-    items.push(['bad', 'Receiver UART closed (reopening)', 'The station could not open its serial port to the receiver and keeps trying on its own. ' +
-      'Nothing arrives from the receiver meanwhile.', [link('Details', '#/diag', 'btn small')]]);
-  }
-  const net = st.network || {};
-  const pend = net.pending_ssid || 'the new network';
-  /* The System page shows the trial and pending credentials itself (its Wi-Fi card, with the buttons): no notice there. */
-  const onSystem = !!(shell.current && shell.current.name === 'system');
-  if (!onSystem && net.cred_trial) {
-    /* No buttons while a trial runs: it ends by itself, either way. The
-     * countdown (a fifth field: kept out of the key) ticks without a rebuild. */
-    items.push(['info', 'Trying the new credentials for ' + pend,
-      'Without an address there the station goes back to its previous network by itself.', null, 'trial']);
-  } else if (!onSystem && net.cred_pending) {
-    /* After a revert the network in use is the previous one: the same name means only the password changed. */
-    const what = net.ssid && net.pending_ssid === net.ssid ? 'the new password for ' + pend : 'the new credentials for ' + pend;
-    let title, text;
-    if (net.cred_reverted && net.cred_reverted_why === 'auth_failed') {
-      title = pend + ' refused the new password';
-      text = 'The station is back on its previous credentials' + (net.ssid ? ' (' + net.ssid + ')' : '') + '. Try them again, or discard them.';
-    } else if (net.cred_reverted) {
-      title = 'No address with ' + what;
-      text = 'The station is back on its previous network (' + (net.ssid || 'unknown') + '). Try them again, or discard them.';
-    } else {
-      title = 'Not confirmed yet: ' + what;
-      text = 'They become the station\'s once they get an address. Try them again, or discard them.';
-    }
-    items.push(['warn', title, text, [btn('Try again', retryPendingWifi, 'small'), btn('Discard', discardPendingWifi, 'small')]]);
-  }
-  /* A signal-group comparison running or finished (60-receiver.js). */
-  const sgn = sgTestNotice(S.status);
-  if (sgn) items.push(sgn);
-  const j = rcv.journal;
-  const inLoader = alerts.indexOf('receiver_in_loader') >= 0;
-  if (j === 'waiting' || j === 'unreadable' || j === 'unknown' || inLoader) {
-    let what;
-    if (inLoader && (!j || j === 'none')) {
-      what = 'The receiver waits at its loader prompt without an update session. Nothing is sent to it until you choose what to do.';
-    } else if (j === 'unknown') {
-      what = L.journal.unknown[1];
-    } else if (j === 'unreadable') {
-      what = 'A receiver update session left a record that cannot be read. Clear it to go on.';
-    } else {
-      what = 'A receiver update session stopped and waits for your decision.';
-    }
-    items.push(['warn', 'Receiver update needs you', what, [link('Open', '#/updates/session', 'btn small')]]);
-  }
-  /* A slot the Onocoy login guard stopped: nothing is tried until the user acts. The casters page shows the
-   * stop on the slot's card itself, with what to do and Try again: no notice there that points to it. */
-  const onCasters = shell.current && shell.current.name === 'casters';
-  for (const c of onCasters ? [] : st.casters || []) {
-    if (c.state === 'stopped') {
-      items.push(['bad', 'Onocoy stopped: ' + lbl(L.stop, c.stop_reason || 'none'),
-        (c.name || 'Slot ' + (c.slot + 1)) + ' makes no new attempt until you act. The casters page says why and what to do.',
-        [link('Details', '#/casters', 'btn small')]]);
-    }
-  }
-  const onUpdates = shell.current && shell.current.name === 'updates';
-  if (isAdmin() && !onUpdates && (u.app_available || u.gnss_available || u.app_reverted_in_stage1) && !bannerDismissed(u)) {
-    const parts = [];
-    if (u.app_available) parts.push('App ' + u.app_version);
-    if (u.gnss_available) parts.push('receiver build ' + u.gnss_build);
-    let text = parts.length ? parts.join(' and ') + ' available.' : '';
-    if (u.app_reverted_in_stage1) {
-      text += (text ? ' ' : '') + 'Update ' + u.app_reverted_version + ' was rolled back during its first minute (a crash or a power blip). Install it again?';
-    }
-    if (u.gnss_available && u.gnss_blocked_reason && u.gnss_blocked_reason !== 'none') {
-      text += ' Receiver update possible ' + (u.gnss_blocked_left_s ? 'in ' + fmt.dur(Math.ceil(u.gnss_blocked_left_s / 60) * 60) :
-        'once this clears: ' + lbl(L.gnssBlock, u.gnss_blocked_reason).toLowerCase()) + '.';
-    }
-    items.push(['info', 'Update available', text, [
-      link('Update', '#/updates', 'btn small primary'),
-      btn('Later', () => {
-        laterKey = bannerKey(u);
-        store.set('later', laterKey);
-        shell.noticeKey = '';
-        renderNotices();
-      }, 'small')]]);
-  }
-
-  const key = JSON.stringify(items.map(i => [i[0], i[1], i[2], i[4] || null]));
+  const items = noticeItems(st, pageKey());
+  const key = JSON.stringify([shell.noticesOpen, items.map(i => [i.key, i.tone, i.title, i.text])]);
   if (key === shell.noticeKey) {
     tickTrialLeft();
     return;
   }
   shell.noticeKey = key;
-  mount(box, items.map(i => h('div', { class: 'notice ' + i[0], role: i[0] === 'bad' ? 'alert' : 'status' },
-    h('div', { class: 'text' }, h('strong', null, i[1], i[4] === 'trial' ? [': ', trialLeftEl(net)] : null), i[2]),
-    i[3] ? h('div', { class: 'row' }, i[3]) : null)));
+  const net = st.network || {};
+  const f = foldNotices(items, shell.noticesOpen);
+  mount(box, f.shown.map(i => h('div', { class: 'notice ' + i.tone, role: i.tone === 'bad' ? 'alert' : 'status' },
+    h('div', { class: 'text' }, h('strong', null, i.title, i.trial ? [': ', trialLeftEl(net)] : null, i.text ? '.' : null),
+      i.text ? ' ' + i.text : null),
+    i.actions)),
+  f.more ? btn(shell.noticesOpen ? 'Show less' : '+' + f.more + ' more', () => {
+    shell.noticesOpen = !shell.noticesOpen;
+    renderNotices();
+    box.querySelector('.more-notices').focus();
+  }, 'small ghost more-notices') : null);
 }
 
 /* ---- Receiver maintenance and pending Wi-Fi credentials (notices, pages) ---- */
 
-/* What a configuration by the station saves along with its own settings (maintenance notice, dialogs, receiver page). */
-const MAINT_SAVE_NOTE = 'The station\'s next configuration of the receiver (a profile change, a re-apply after drift, a recovery step) ' +
-  'ends with SAVECONFIG, which also saves whatever you changed from the PC, for example output on COM2, MASK or MMP. ' +
-  'Undo what should not stay before you end maintenance.';
+/* Receiver maintenance in the owner's words (its start dialog in Settings). */
+const MAINT_WHAT = 'The station stops sending commands to the receiver while you use a PC tool on its USB port. Streaming continues.';
+/* What a configuration by the station saves along with its own settings (the start and end dialogs). */
+const MAINT_SAVE_NOTE = 'Changes you make from the PC are saved the next time the station configures the receiver.';
+/* The first configuration waits for the user; the receiver port does not open (the Status page's top card). */
+const HELD_TEXT = 'The station waits for your OK before it configures the receiver.';
+const UART_CLOSED_TEXT = 'The station cannot open its port to the receiver and keeps trying.';
+/* A receiver update that needs the user (receiver.journal). */
+const JOURNAL_LINE = {
+  waiting: 'A receiver update stopped and needs your decision.',
+  unreadable: 'A receiver update left a damaged record. Clear it to go on.',
+};
 
 async function endMaintenance(e) {
   const b = e && e.currentTarget;
   const ok = await dialog({ title: 'End receiver maintenance?', ok: 'End now',
-    body: [h('p', null, 'The station talks to the receiver again and checks it as at start-up. ' +
-      'Make sure nothing else is connected to the receiver\'s other port and working on it.'),
-    msg('warn', MAINT_SAVE_NOTE)] });
+    body: [h('p', null, 'The station starts sending commands to the receiver again. Close the PC tool first.'),
+      h('p', { class: 'muted small' }, MAINT_SAVE_NOTE)] });
   if (!ok) return false;
   const r = await act(b, () => api('DELETE', '/api/gnss/maintenance'));
-  if (r !== undefined) toast('Receiver maintenance ends. The station checks the receiver now.', 'ok');
+  if (r !== undefined) toast('Maintenance ended. The station checks the receiver now.', 'ok');
+  return r !== undefined;
+}
+
+/** "Leave safe mode" (the Status page's top card, Settings): asks, then restarts normally. */
+async function leaveSafeMode(b, err) {
+  const ok = await dialog({ title: 'Leave safe mode?', ok: 'Restart normally',
+    body: h('p', null, 'The station restarts normally. If the problem is still there, it can crash again and go back to safe mode.') });
+  if (!ok) return false;
+  const r = await act(b, () => api('POST', '/api/system/safe-mode/clear'), err);
+  if (r !== undefined) showRestarting();
   return r !== undefined;
 }
 
 async function retryPendingWifi(e) {
   const b = e && e.currentTarget;
-  const ok = await dialog({ title: 'Try the new Wi-Fi credentials again?', ok: 'Try again',
-    body: [h('p', null, 'The station leaves its current network and tries the new credentials for up to 90 seconds. ' +
-      'If they get no address, it comes back by itself.'),
-    h('p', { class: 'muted' }, 'This page may lose contact with the station meanwhile, and the casters reconnect afterwards.')] });
+  const ok = await dialog({ title: 'Try the new Wi-Fi settings again?', ok: 'Try again',
+    body: [h('p', null, 'The station leaves its current network and tries them for up to 90 seconds. ' +
+      'If it gets no address, it comes back by itself.'),
+    h('p', { class: 'muted' }, 'This page may lose the station meanwhile.')] });
   if (!ok) return false;
   const r = await act(b, () => api('POST', '/api/wifi/pending/retry'));
-  if (r !== undefined) toast('Trying the new Wi-Fi credentials…', 'ok');
+  if (r !== undefined) toast('Trying the new Wi-Fi settings…', 'ok');
   return r !== undefined;
 }
 
 async function discardPendingWifi(e) {
   const b = e && e.currentTarget;
-  const ok = await dialog({ title: 'Discard the new Wi-Fi credentials?', ok: 'Discard', okKind: 'danger solid',
-    body: h('p', null, 'The station keeps using its current network and forgets the new credentials.') });
+  const ok = await dialog({ title: 'Discard the new Wi-Fi settings?', ok: 'Discard', okKind: 'danger solid',
+    body: h('p', null, 'The station keeps its current network and forgets the new settings.') });
   if (!ok) return false;
   const r = await act(b, () => api('POST', '/api/wifi/pending/discard'));
-  if (r !== undefined) toast('New Wi-Fi credentials discarded.', 'ok');
+  if (r !== undefined) toast('New Wi-Fi settings discarded.', 'ok');
   return r !== undefined;
 }
 
@@ -660,15 +697,15 @@ function showRestarting(title, text) {
   if (cur) cur.view = {};
   const wasAdmin = isAdmin();
   const root = doc.getElementById('modal');
-  const status = h('p', { class: 'muted small' }, 'Waiting for the station…');
+  const status = h('p', { class: 'muted small' }, 'Waiting…');
   mount(root, h('div', { class: 'overlay', role: 'alert' },
-    h('div', { class: 'card' }, h('div', { class: 'spinner' }), h('h2', null, title || 'The station is restarting'),
-      h('p', null, text || 'This page reconnects by itself when the station is back. That usually takes less than a minute.'),
+    h('div', { class: 'card' }, h('div', { class: 'spinner' }), h('h2', null, title || 'Restarting'),
+      h('p', null, text || 'This page reconnects by itself when the station is back, usually within a minute.'),
       status)));
   const started = Date.now();
   rebootWatch = setInterval(async () => {
     const secs = Math.round((Date.now() - started) / 1000);
-    status.textContent = 'Waiting for the station… ' + fmt.dur(secs);
+    status.textContent = 'Waiting… ' + fmt.dur(secs);
     if (secs < 4) return;
     try {
       await api('GET', '/api/session', undefined, { timeout: 2500, quiet401: true });

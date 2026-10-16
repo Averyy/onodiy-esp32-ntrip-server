@@ -46,6 +46,9 @@ static void fixture(void)
     s->obs_valid = true;
     s->best_sys = GNSS_SYS_GALILEO;
     s->best_bands = 4;
+    s->glonass = true;
+    s->st.rtcm1230_known = true;
+    s->st.rtcm1230_supported = true;
     s->slots = 2;
     s->cfg_valid = true;
     s->cfg[0].enabled = true;
@@ -110,6 +113,8 @@ TEST_CASE("admin status maps sentinels, alerts and the protected slot", "[web_bu
     TEST_ASSERT_EQUAL_STRING("galileo", at(rx, "best_sys")->valuestring);
     TEST_ASSERT_EQUAL_STRING("none", at(rx, "journal")->valuestring);
     TEST_ASSERT_EQUAL_STRING("streaming", at(rx, "state")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(rx, "glonass")));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(rx, "rtcm1230_supported")));
     const cJSON *casters = at(root, "casters");
     TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(casters));
     const cJSON *c0 = cJSON_GetArrayItem(casters, 0);
@@ -140,6 +145,39 @@ TEST_CASE("admin status maps sentinels, alerts and the protected slot", "[web_bu
     TEST_ASSERT_NULL(strstr(s_out, "secretpw"));
     TEST_ASSERT_NULL(strstr(s_out, "secretuser"));
     TEST_ASSERT_NULL(strstr(s_out, "secretname"));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("status receiver: GLONASS and message 1230 for Onocoy's quality score, admin form only", "[web_build]")
+{
+    fixture();
+    /* Refused at the last apply; GLONASS still tracked. */
+    s_snap.st.rtcm1230_supported = false;
+    cJSON *root = build_status(false);
+    const cJSON *rx = at(root, "receiver");
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(rx, "glonass")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(rx, "rtcm1230_supported")));
+    cJSON_Delete(root);
+    /* Never applied: neither accepted nor refused. No GLONASS in the summary. */
+    s_snap.st.rtcm1230_known = false;
+    s_snap.glonass = false;
+    root = build_status(false);
+    rx = at(root, "receiver");
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(rx, "glonass")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(rx, "rtcm1230_supported")));
+    cJSON_Delete(root);
+    /* No summary yet: nothing tracked, whatever the last one said. */
+    s_snap.glonass = true;
+    s_snap.obs_valid = false;
+    root = build_status(false);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(at(root, "receiver"), "glonass")));
+    cJSON_Delete(root);
+    /* The public form keeps its two receiver fields. */
+    fixture();
+    root = build_status(true);
+    rx = at(root, "receiver");
+    TEST_ASSERT_NULL(cJSON_GetObjectItem(rx, "glonass"));
+    TEST_ASSERT_NULL(cJSON_GetObjectItem(rx, "rtcm1230_supported"));
     cJSON_Delete(root);
 }
 
@@ -648,6 +686,7 @@ TEST_CASE("availability days carry dates and per-slot arrays", "[web_build]")
     today.utc_day = 20736;
     today.down_s[0] = 4;
     today.up_s[0] = 36000;
+    today.lost_epochs = 12;
     ntrip_caster_cfg_t cfg[2];
     memset(cfg, 0, sizeof(cfg));
     strcpy(cfg[0].name, "Onocoy");
@@ -681,6 +720,9 @@ TEST_CASE("availability days carry dates and per-slot arrays", "[web_build]")
     TEST_ASSERT_EQUAL(36000, cJSON_GetArrayItem(at(at(root, "today"), "up_s"), 0)->valueint);
     TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(at(at(root, "today"), "up_s")));
     TEST_ASSERT_EQUAL(1, cJSON_GetArraySize(at(root, "history")));
+    /* Lost epochs: today only (a finished day does not keep them). */
+    TEST_ASSERT_EQUAL(12, at(at(root, "today"), "lost_epochs")->valueint);
+    TEST_ASSERT_NULL(cJSON_GetObjectItem(cJSON_GetArrayItem(at(root, "history"), 0), "lost_epochs"));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "protected"), "budget_left_s")));
     TEST_ASSERT_TRUE(cJSON_IsFalse(at(cJSON_GetArrayItem(at(root, "slots"), 1), "protected")));
     cJSON_Delete(root);

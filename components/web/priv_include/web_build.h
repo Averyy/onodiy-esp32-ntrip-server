@@ -123,7 +123,8 @@ typedef struct {
     bool uart_closed;              /**< gnss_link: the receiver UART is closed and being reopened (link opened once, link_open false) */
     gnss_sys_t best_sys;
     uint8_t best_bands;
-    bool obs_valid;                /**< best_sys / best_bands come from a summary */
+    bool glonass;                  /**< the summary has GLONASS signals (the last 10 s) */
+    bool obs_valid;                /**< best_sys / best_bands / glonass come from a summary */
     size_t slots;
     bool cfg_valid;                /**< configs loaded (not in safe mode) */
     ntrip_caster_cfg_t cfg[WEB_MAX_SLOTS];        /**< read without secrets */

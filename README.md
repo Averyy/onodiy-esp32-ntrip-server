@@ -355,14 +355,15 @@ Manifest format and rules: `components/fw_update/priv_include/manifest.h`.
    and counts down: its own network closes about 15 seconds later. Put the phone
    back on your Wi-Fi.
 4. Open **`http://onocoydiy.local/`** (or the address the page showed) and log in;
-   the setup continues there with the reception check, the Onocoy credentials and
-   any further casters.
+   the setup continues there with the antenna check and the Onocoy credentials.
+   The last screen shows whether Onocoy accepts the login and what to do next in
+   the Onocoy console. More casters can be added on the Casters page.
 
 On your network the station answers to its name over mDNS,
 `http://<station name>.local/` (`onocoydiy` unless you rename it; when another
 device already uses that name the station takes `onocoydiy-2` and the web page
 says so), and to its IP address, which your router's device list shows under the
-station name. The System page and the dashboard show both as links.
+station name. Settings shows both as links.
 
 ## Recovery (planned behaviour)
 

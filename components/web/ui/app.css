@@ -173,7 +173,7 @@ h2 { font-size: 1.05rem; }
 h3 { font-size: 0.95rem; }
 p { margin: 0 0 0.75rem; }
 ul { margin: 0 0 0.75rem; padding-left: 1.25rem; }
-code, .mono, pre { font-family: var(--mono); font-size: 0.875em; }
+code, pre { font-family: var(--mono); font-size: 0.875em; }
 small { font-size: 0.85rem; }
 
 /* ---- Header and navigation ------------------------------------------- */
@@ -224,7 +224,7 @@ small { font-size: 0.85rem; }
 .live.on::before { background: var(--ok); }
 .live.poll::before { background: var(--warn); }
 .live.down::before { background: var(--bad); }
-.top-actions { display: flex; gap: 0.25rem; }
+.top-actions { display: flex; gap: 0.25rem; white-space: nowrap; }
 
 .tabs {
   position: sticky;
@@ -276,7 +276,9 @@ small { font-size: 0.85rem; }
 .notices:not(:empty) { padding-top: 0.75rem; }
 .view { padding-top: 1rem; padding-bottom: 3rem; }
 .view:focus { outline: none; }
-.view-body > * + * { margin-top: 1rem; }
+.view-body > * + *, .page-root > * + * { margin-top: 1rem; }
+/* A page without a title card (Casters): its h1 as one line above the cards. */
+.page-title { margin: 0 0 0.75rem; font-size: 1.35rem; }
 
 .grid {
   display: grid;
@@ -287,9 +289,12 @@ small { font-size: 0.85rem; }
   /* dense: a card that fits an earlier gap takes it, so no cell stays empty beside a wide card */
   .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-flow: dense; }
   .grid .wide { grid-column: 1 / -1; }
-}
-@media (min-width: 1080px) {
-  .grid.g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  /* Status: a short card stays short beside a tall one (no blank card space) */
+  .grid.starts { align-items: start; }
+  /* Receiver settings: position over the management choice, the profile beside both */
+  .rxset { grid-template-rows: auto 1fr; align-items: start; }
+  .a-man { grid-area: 2 / 1; }
+  .a-prof { grid-area: 1 / 2 / 3; }
 }
 
 .card {
@@ -299,23 +304,28 @@ small { font-size: 0.85rem; }
   box-shadow: var(--shadow);
   padding: 1rem;
   min-width: 0;
+  scroll-margin-top: 7rem;   /* a section opened by its address (#/settings/wifi) clears the sticky header and tabs */
 }
 .card > * + * { margin-top: 0.75rem; }
-.card > h2 + * { margin-top: 0; }
-.card > h2 {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
-.card > h2 .badge { margin-left: auto; }
+.card > h2 + *, .card > .card-head + * { margin-top: 0; }
+/* Title and status chips (cardHead()): chips at the right on the title's first line; a long title wraps in its own column.
+ * .item-head: the same for a row in a card (name and lines under it, chip at the right). */
+.card-head, .item-head { display: flex; align-items: baseline; gap: 0.75rem; }
+.card-head { margin-bottom: 0.5rem; }
+.card-head > :first-child, .item-head > :first-child { flex: 1 1 auto; min-width: 0; margin: 0; }
+.card-head > * + *, .item-head > * + * { flex: none; }
+.card-head > .badge + .badge, .item-head > .badge + .badge { margin-left: -0.4rem; }
+/* Title and chips that do not fit one line (a phone, two chips): the chips move under the title, at the right. */
+.card-head { flex-wrap: wrap; justify-content: flex-end; row-gap: 0.35rem; }
+.card-head > :first-child { flex-basis: 8rem; }
 .card .foot { margin-top: 0.75rem; font-size: 0.9rem; }
 .section-title { margin: 1.5rem 0 0.5rem; color: var(--muted); font-size: 0.85rem; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; }
 
 .row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 .row.end { justify-content: flex-end; }
 .spread { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
-.stack > * + * { margin-top: 0.75rem; }
+/* Hidden children (shown later) do not count: the gap goes above every visible child but the first. */
+.stack > :where(:not([hidden])) ~ * { margin-top: 0.75rem; }
 .muted { color: var(--muted); }
 .small { font-size: 0.875rem; }
 .nowrap { white-space: nowrap; }
@@ -330,23 +340,28 @@ small { font-size: 0.85rem; }
 }
 .big small { font-size: 0.9rem; font-weight: 500; color: var(--muted); }
 
-.hero {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.75rem 1.25rem;
-}
+/*
+ * The Status page's top card: the title with its dot, one line, its button
+ * (two in safe mode), "Also:" lines and a row of labelled facts. On a phone
+ * one column; from 560 px the buttons sit at the right of the title and
+ * line, the "Also:" lines and the facts under both.
+ */
+.hero { display: grid; grid-template-columns: minmax(0, 1fr); row-gap: 0.35rem; }
+.card.hero > * { margin: 0; }
 .hero .state {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.6rem;
   font-size: 1.3rem;
   font-weight: 700;
+  line-height: 1.25;
 }
+/* The dot sits on the title's first line when a long title wraps. */
 .hero .state::before {
   content: "";
   width: 14px;
   height: 14px;
+  margin-top: calc(0.8125rem - 7px);
   border-radius: 50%;
   background: var(--off);
   flex: none;
@@ -354,7 +369,49 @@ small { font-size: 0.85rem; }
 .hero.ok .state::before { background: var(--ok); }
 .hero.warn .state::before { background: var(--warn); }
 .hero.bad .state::before { background: var(--bad); }
-.hero .facts { color: var(--muted); }
+.hero.info .state::before { background: var(--info); }
+.hero .hero-actions { display: flex; margin-top: 0.4rem; }
+/* Other named alerts: one line each, its mark, the words, Details at the right. */
+.also { display: grid; gap: 0.5rem; padding: 0.6rem 0 0; border-top: 1px solid var(--border); list-style: none; }
+.card.hero > .also { margin-top: 0.4rem; }
+.also li { display: flex; align-items: flex-start; gap: 0.6rem; font-size: 0.95rem; }
+.also li > :nth-child(2) { flex: 1 1 auto; min-width: 0; }
+.also .ic {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 50%;
+  background: var(--tone-soft);
+  color: var(--tone);
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+.also .btn { flex: none; align-self: center; }
+.hero .hero-actions .btn { width: 100%; }
+/* Small labelled facts in a row (the top card, the live view's totals). */
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.5rem;
+  margin: 0;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+.facts > div { display: flex; gap: 0.4rem; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.hero .facts { margin-top: 0.4rem; }
+@media (min-width: 560px) {
+  .hero { grid-template-columns: minmax(0, 1fr) auto; column-gap: 1.25rem; }
+  .hero > * { grid-column: 1; }
+  .card.hero > .hero-actions { grid-column: 2; grid-row: 1 / span 2; align-self: center; margin: 0; }
+  .hero .hero-actions .btn { width: auto; }
+  .hero .facts, .hero .also { grid-column: 1 / -1; }
+}
 
 /* ---- Key/value lists -------------------------------------------------- */
 
@@ -367,6 +424,12 @@ small { font-size: 0.85rem; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; min-width: 0; font-variant-numeric: tabular-nums; }
 .kv + .kv { margin-top: 0.5rem; }
+/* A short list in a wide card: the values stay near their labels. */
+.tight-kv .kv { grid-template-columns: minmax(7.5rem, 13rem) 1fr; }
+/* Short labels (the Status page): as wide as the longest, the values beside them at every width. */
+.fit-kv .kv { grid-template-columns: max-content minmax(0, 1fr); column-gap: 1.5rem; }
+/* A list of figures or a choice under a line of text keeps the gap. */
+.card > * + :is(.kv, .fieldset), .stack > .msg + .kv { margin-top: 0.75rem; }
 
 /* ---- Badges and messages ---------------------------------------------- */
 
@@ -407,20 +470,19 @@ small { font-size: 0.85rem; }
 }
 .msg > :last-child { margin-bottom: 0; }
 
+/* A notice: one line (the title in bold, a few words) and its button at the right, on a phone too. */
 .notice {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem 1rem;
-  padding: 0.75rem 1rem;
+  gap: 0.75rem;
+  padding: 0.5rem 0.5rem 0.5rem 0.85rem;
   border: 1px solid var(--tone, var(--border));
   border-radius: var(--radius);
   background: var(--tone-soft, var(--surface));
 }
-.notice + .notice { margin-top: 0.5rem; }
-.notice .text { flex: 1 1 16rem; }
-.notice .text strong { display: block; }
-.notice .row { flex: none; }
+.notice + .notice, .notices > .more-notices { margin-top: 0.5rem; }
+.notice .text { flex: 1 1 auto; min-width: 0; }
+.notice .btn { flex: none; }
 
 /* ---- Buttons ----------------------------------------------------------- */
 
@@ -478,14 +540,23 @@ small { font-size: 0.85rem; }
 /* ---- Forms ------------------------------------------------------------- */
 
 .field { display: block; }
-.field + .field, .field + .check, .check + .field, .check + .check, .fieldset + .field, .field + .fieldset { margin-top: 0.85rem; }
-/* A row of fields (.cols) between single fields keeps the same gap. */
-.cols + .field, .field + .cols, .cols + .check, .check + .cols { margin-top: 0.85rem; }
+/* One gap between fields, checkboxes, choice groups and rows of fields, hidden ones in between or not. */
+:is(.field, .check, .fieldset, .cols) ~ :is(.field, .check, .fieldset, .cols) { margin-top: 0.85rem; }
 .field > label:not(.check) { display: block; }
 .lbl { display: block; margin-bottom: 0.3rem; font-weight: 600; font-size: 0.95rem; }
-.hint { display: block; margin-top: 0.3rem; color: var(--muted); }
-.err { display: block; margin-top: 0.3rem; color: var(--bad); font-weight: 550; }
+/* Field help and errors: one size and gap under every kind of field. */
+.hint, .err { display: block; margin-top: 0.3rem; font-size: 0.875rem; line-height: 1.4; }
+.hint { color: var(--muted); font-weight: 400; }
+.err { color: var(--bad); font-weight: 550; }
 
+/*
+ * Text fields and selects: one box (height, border, font, text position);
+ * a select keeps the browser's arrow. menulist-button makes WebKit draw the
+ * box from these rules, but WebKit replaces a select's min-height, left
+ * padding (8 px) and radius (5 px): hence the fixed height, and padding-left
+ * plus text-indent, which start the text where an input's starts in Blink
+ * (4 px inner padding of its own), Gecko and WebKit alike.
+ */
 input[type="text"], input[type="password"], input[type="number"], input[type="search"], select, textarea {
   width: 100%;
   min-height: 44px;
@@ -497,10 +568,16 @@ input[type="text"], input[type="password"], input[type="number"], input[type="se
   font: inherit;
   font-size: 16px;
 }
+select {
+  -webkit-appearance: menulist-button;
+  appearance: menulist-button;
+  height: 44px;
+  padding-left: 4px;
+  text-indent: 3.2px;
+}
 textarea { min-height: 7rem; font-family: var(--mono); font-size: 0.85rem; }
 input.invalid, select.invalid, textarea.invalid { border-color: var(--bad); }
 input:disabled, select:disabled { opacity: 0.65; }
-input[type="file"] { max-width: 100%; font: inherit; }
 
 .check {
   display: flex;
@@ -509,7 +586,7 @@ input[type="file"] { max-width: 100%; font: inherit; }
   cursor: pointer;
 }
 .check input { width: 22px; height: 22px; margin: 0.1rem 0 0; flex: none; accent-color: var(--accent); }
-.check .hint { margin-top: 0.1rem; }
+.check .hint, .choice .opt .hint { margin-top: 0.15rem; }
 
 .fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .fieldset legend { padding: 0; margin-bottom: 0.3rem; font-weight: 600; font-size: 0.95rem; }
@@ -524,26 +601,87 @@ input[type="file"] { max-width: 100%; font: inherit; }
   border-radius: 10px;
   cursor: pointer;
 }
-.choice input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.choice input { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 .choice:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
 
-.cols { display: grid; grid-template-columns: 1fr; gap: 0.85rem; }
-.cols > .field + .field { margin-top: 0; }
+.cols { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.85rem; }
+.cols > :is(.field, .check, .fieldset, .cols) { margin-top: 0; }
+/* A button in a row of fields: level with their boxes. */
+.cols > .act { display: flex; align-items: flex-end; }
+.cols > .act .btn { width: 100%; }
 @media (min-width: 560px) {
   .cols.c2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cols.c3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .cols > .act .btn { width: auto; }
 }
 
-.form-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-top: 1rem;
+/*
+ * Actions, the same everywhere: on a phone full width, stacked, the main one
+ * (.primary or submit) on top under a .note (why one is off), a destructive
+ * one last; from 560 px up one line at the right, the main one at the right
+ * edge, the note at the left.
+ */
+.form-actions { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem; }
+.form-actions .btn { width: 100%; }
+.form-actions > .primary, .form-actions > [type="submit"] { order: -1; }
+.form-actions > .danger:not(.primary, [type="submit"]) { order: 1; }
+.form-actions > .note { order: -2; }
+.form-actions:not(:has(> :not([hidden]))) { display: none; }
+/* A field that belongs to the buttons (maintenance's duration): on top on a phone, at the left on a desktop. */
+.form-actions > .field { order: -3; margin: 0; }
+@media (min-width: 560px) {
+  .form-actions { flex-flow: row wrap; justify-content: flex-end; align-items: center; }
+  .form-actions .btn { width: auto; }
+  .form-actions > .primary, .form-actions > [type="submit"] { order: 1; }
+  .form-actions > .danger:not(.primary, [type="submit"]) { order: 0; }
+  .form-actions > .note { order: -1; margin-right: auto; }
+  .form-actions:has(> .field) { align-items: flex-end; }
+  .form-actions > .field { order: -2; flex: 0 1 15rem; margin-right: auto; }
 }
-/* A short note beside the buttons (why one is off), centred on their line. */
-.form-actions > .note { align-self: center; }
+
+/* A setting and its button (Restart or reset): the text at the left, the button at the right from 560 px; stacked on a phone. */
+.setting-row { display: flex; flex-direction: column; gap: 0.5rem; }
+.setting-row + .setting-row { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.setting-row > div { min-width: 0; }
+.setting-row strong { display: block; }
+.setting-row span { color: var(--muted); font-size: 0.9rem; }
+.setting-row > .btn { width: 100%; }
+.setting-row > .form-actions { margin-top: 0; }
+@media (min-width: 560px) {
+  .setting-row { flex-direction: row; align-items: center; justify-content: space-between; gap: 1rem; }
+  .setting-row > .btn { width: auto; flex: none; }
+  .setting-row > .form-actions { flex: none; }
+}
+/* A card's list of parts (Updates: app, receiver, maintenance, the files): a line between them. */
+.rows > :not([hidden]) ~ :not([hidden]) { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
+.rows > * > * + * { margin-top: 0.6rem; }
+/* Tools in a card's title row that act on its list (Refresh, a filter): at the right, under the title on a phone. */
+.card-head > .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+/* A short title and its tools on one line, also on a phone (Updates: the last check, Check now). */
+.card-head.fit > :first-child { flex-basis: auto; }
+.tools select { width: auto; }
+@media (max-width: 559px) {
+  .card-head > .tools.grow { flex: 1 1 100%; }
+  .tools.grow select { flex: 1 1 10rem; }
+}
 
 details.more { margin-top: 0.85rem; }
+/* A card that folds to its title row (Receiver settings: the comparison, the receiver's details). */
+details.fold > summary { display: flex; align-items: center; gap: 0.6rem; min-height: 32px; cursor: pointer; list-style: none; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '›'; flex: none; width: 1rem; color: var(--accent); font-size: 1.35rem; font-weight: 700; line-height: 1; transition: transform 0.15s; }
+details.fold[open] > summary::before { transform: rotate(90deg); }
+details.fold > summary > h2 { flex: 1 1 auto; margin: 0; }
+details.fold[open] > summary { margin-bottom: 0.75rem; }
+details.fold > :not(summary) + * { margin-top: 0.75rem; }
+/* A button that reads as a link ("Not sure? Compare two groups"). */
+.linkbtn { min-height: 24px; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; }
+.linkbtn:hover { text-decoration: underline; }
+/* A setting in one line with its Edit button at the right (Corrections, the antenna name). */
+.edit-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.edit-row > .btn { flex: none; }
+/* A list of disclosures (the counters): one under the other, close together. */
+.card > details.more + details.more, details.fold > details.more + details.more { margin-top: 0.2rem; }
 details.more > summary { cursor: pointer; color: var(--accent); font-weight: 600; padding: 0.3rem 0; }
 details.more[open] > summary { margin-bottom: 0.6rem; }
 
@@ -612,6 +750,30 @@ tbody tr:last-child td { border-bottom: 0; }
 .metrics { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin-top: 0.35rem; color: var(--muted); font-size: 0.9rem; }
 .metrics b { color: var(--text); font-weight: 600; }
 .hintline { margin-top: 0.35rem; color: var(--warn); font-size: 0.9rem; }
+.caster .form-actions { margin-top: 0.6rem; }
+/* The Status page's casters, one line each: name, state and share at the left, a button at the right. */
+.clines { display: grid; gap: 0.6rem; }
+.cline { display: flex; align-items: center; gap: 0.75rem; }
+.cline > :first-child { flex: 1 1 auto; min-width: 0; }
+.cline > .btn { flex: none; }
+.cline .name { font-weight: 650; }
+/* A link beside a card's title (cardHead): "Details". */
+.card-head > .head-link { font-size: 0.9rem; font-weight: 600; }
+.caster-live > * + * { margin-top: 0.35rem; }
+.caster-live > .msg { margin-top: 0.6rem; }
+/* A card that holds only a row of actions (the add card): no gap above it. */
+.card > .form-actions:first-child { margin-top: 0; }
+.card > p:last-child { margin-bottom: 0; }
+/* A caster's box: what it is, the steps before it works, its own guide. */
+.preset { padding: 0.75rem; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.preset p { margin: 0 0 0.4rem; }
+.steps-small { margin: 0 0 0.5rem; padding-left: 1.2rem; font-size: 0.9rem; }
+.steps-small li + li { margin-top: 0.25rem; }
+.preset .ext { display: inline-block; font-size: 0.9rem; font-weight: 600; }
+.ext { white-space: nowrap; }
+/* The editor below a list (setup), and the setup's last row of actions. */
+.subcard { padding-top: 1rem; border-top: 1px solid var(--border); }
+.form-actions.sep { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
 
 /* ---- Signals ----------------------------------------------------------- */
 
@@ -619,6 +781,13 @@ tbody tr:last-child td { border-bottom: 0; }
 .bands td.on { color: var(--ok); font-weight: 650; }
 .bands td.off { color: var(--muted); }
 .bands td small { display: block; color: var(--muted); font-weight: 500; }
+/* A phone: a tick and the figure per band (the column names the band; the cell's title the signals). */
+/* The sky beside the table: the names give way. */
+.sky-open .bands .wide-only { display: none; }
+@media (max-width: 719px) {
+  .bands .wide-only { display: none; }
+  .bands th, .bands td { padding-left: 0.3rem; padding-right: 0.3rem; }
+}
 .cnr-weak { color: var(--bad); }
 .cnr-ok { color: var(--warn); }
 .cnr-good { color: var(--ok); }
@@ -633,8 +802,6 @@ svg.sky { width: 100%; max-width: 420px; height: auto; display: block; margin: 0
 svg.sky .ring { fill: none; stroke: var(--border); stroke-width: 1; }
 svg.sky .axis { stroke: var(--border); stroke-width: 1; }
 svg.sky .lbl { fill: var(--muted); font-size: 11px; font-family: inherit; }
-svg.sky .prn { fill: var(--surface); font-size: 9px; font-weight: 700; }
-svg.sky .sat { stroke: var(--surface); stroke-width: 1.5; }
 .sys-gps { fill: var(--c-gps); background: var(--c-gps); }
 .sys-glonass { fill: var(--c-glonass); background: var(--c-glonass); }
 .sys-galileo { fill: var(--c-galileo); background: var(--c-galileo); }
@@ -648,10 +815,7 @@ svg.sky .sat { stroke: var(--surface); stroke-width: 1.5; }
 
 /* ---- Live view ---------------------------------------------------------- */
 
-.live-entry { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem 1.5rem; }
-.live-entry .text { flex: 1 1 18rem; }
-.live-entry .text > * + * { margin-top: 0.4rem; }
-.countdown { font-weight: 700; font-variant-numeric: tabular-nums; }
+.live-left { font-weight: 700; font-variant-numeric: tabular-nums; }
 .sr-only {
   position: absolute;
   width: 1px;
@@ -697,7 +861,18 @@ th .sort {
 }
 th .sort:hover { color: var(--text); }
 th[aria-sort] .sort { color: var(--text); }
-table.sats td, table.counts td { white-space: nowrap; }
+table.counts td { white-space: nowrap; }
+/* One line per row (the satellites, the RTCM messages): no stacked blocks on a phone; a long name ends in "…". */
+table.rows th, table.rows td { padding: 0.35rem 0.45rem; white-space: nowrap; }
+table.rows td.name { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; }
+table.rows i.dot { display: inline-block; width: 8px; height: 8px; margin-right: 0.35rem; border-radius: 50%; }
+@media (max-width: 559px) {
+  table.rows { font-size: 0.875rem; }
+  table.rows th, table.rows td, table.counts th, table.counts td, table.events th, table.events td { padding-left: 0.3rem; padding-right: 0.3rem; }
+  table.counts { font-size: 0.875rem; }
+  table.counts .wide-only { display: none; }
+}
+@media (min-width: 560px) { table.counts .phone-only { display: none; } }
 table.counts tfoot th, table.counts tfoot td { border-top: 1px solid var(--border); border-bottom: 0; font-weight: 650; }
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: 0.75rem; }
@@ -705,9 +880,6 @@ table.counts tfoot th, table.counts tfoot td { border-top: 1px solid var(--borde
 .tile .k { color: var(--muted); font-size: 0.85rem; }
 .tile .v { font-size: 1.6rem; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; }
 
-.bandbars { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr) auto; gap: 0.45rem 0.75rem; align-items: center; }
-.bandbars .bar { margin: 0; }
-.bandbars .band { font-weight: 600; }
 
 .checks { display: grid; gap: 0.6rem; margin: 0; padding: 0; list-style: none; }
 .checks li { display: flex; align-items: flex-start; gap: 0.6rem; }
@@ -735,6 +907,7 @@ table.counts tfoot th, table.counts tfoot td { border-top: 1px solid var(--borde
   border-radius: 10px;
   background: var(--surface-2);
 }
+.map-box { margin-top: 0.75rem; }
 .map .map-tiles { position: absolute; inset: 0; }
 .map img { position: absolute; display: block; max-width: none; user-select: none; }
 .map .pin {
@@ -764,12 +937,20 @@ table.counts tfoot th, table.counts tfoot td { border-top: 1px solid var(--borde
 
 .ant { font-family: var(--mono); white-space: pre; }
 input.ant { white-space: normal; }
-.fieldset.group { margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
+/* The profile's groups (Signals, Position, Corrections, Advanced): a line above each. */
+.pgroup { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.pgroup:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.pgroup > h3 { margin: 0; font-size: 1rem; }
+.pgroup > details.more:first-child { margin-top: 0; }
+/* A heading inside Details. */
+.sub { margin: 1rem 0 0.4rem; color: var(--muted); font-size: 0.9rem; font-weight: 650; }
+summary + .sub { margin-top: 0; }
 .choices.stacked { flex-direction: column; align-items: stretch; }
+.choices.grid2 { display: grid; }
+@media (min-width: 560px) { .choices.grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .choices.stacked .choice { align-items: flex-start; padding: 0.55rem 0.8rem; }
 .choices.stacked .choice input { margin-top: 0.15rem; }
 .choice .opt { display: block; font-weight: 600; }
-.choice .opt .hint { font-weight: 400; margin-top: 0.1rem; }
 
 /* ---- Logs -------------------------------------------------------------- */
 
@@ -784,15 +965,22 @@ pre.log {
   background: var(--surface-2);
   font-size: 0.78rem;
   line-height: 1.4;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
+/* One row per line, also on a phone: the time since the start, then the text, cut at the edge; a tap shows the whole line. */
+pre.log .ln { display: block; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+pre.log .ln.open { white-space: pre-wrap; overflow-wrap: anywhere; }
+pre.log .t { color: var(--muted); }
+/* In a card the log box keeps the card's gap above it (pre.log's own margin is 0). */
+.card > * + pre.log { margin-top: 0.75rem; }
 pre.log .e { color: var(--bad); }
 pre.log .w { color: var(--warn); }
-pre.log .gap { color: var(--muted); font-style: italic; }
+pre.log .gap { color: var(--muted); font-style: italic; cursor: auto; }
 
-.seg { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+/* Sub-tabs (Diagnostics: Overview, History, Logs): one row, also on a phone. */
+.seg { display: flex; gap: 0.35rem; }
 .seg a {
+  flex: none;
+  white-space: nowrap;
   padding: 0.45rem 0.8rem;
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -841,6 +1029,9 @@ pre.log .gap { color: var(--muted); font-style: italic; }
 .dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--border); }
 .dots i.done { background: var(--ok); }
 .dots i.now { background: var(--accent); }
+/* "Skip the rest of the setup": under the card, never among a form's buttons. */
+.wiz-skip { display: flex; justify-content: center; margin-top: 0.75rem; }
+.wiz-skip .btn { color: var(--muted); font-weight: 550; }
 
 /* ---- Modal, toasts, overlay -------------------------------------------- */
 
@@ -873,7 +1064,6 @@ pre.log .gap { color: var(--muted); font-style: italic; }
 }
 @media (min-width: 600px) { .dialog { border-radius: 16px; } }
 .dialog h2 { font-size: 1.15rem; }
-.dialog .form-actions { justify-content: flex-end; }
 
 .toasts {
   position: fixed;
@@ -942,37 +1132,40 @@ pre.log .gap { color: var(--muted); font-style: italic; }
 .skip:focus { top: 0.5rem; }
 
 /* Tabs that do not fit: a fade at the edge where more of them lie. */
-.tabs.more-right { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent); }
-.tabs.more-left { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 2.5rem), transparent); }
-.tabs.more-left.more-right { -webkit-mask-image: linear-gradient(to right, transparent, #000 2.5rem, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to right, transparent, #000 2.5rem, #000 calc(100% - 2.5rem), transparent); }
+.more-right { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent); }
+.more-left { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 2.5rem), transparent); }
+.more-left.more-right { -webkit-mask-image: linear-gradient(to right, transparent, #000 2.5rem, #000 calc(100% - 2.5rem), transparent); mask-image: linear-gradient(to right, transparent, #000 2.5rem, #000 calc(100% - 2.5rem), transparent); }
 
 /* Links at the foot of a card: a target of at least 24 px. */
 .foot a { display: inline-block; min-height: 24px; padding: 2px 0; line-height: 20px; }
 .foot.row a, .card .foot a + a { margin-right: 0.25rem; }
 
-/* The event journal: a heading row per start. */
-table.journal tr.sep th { padding-top: 0.9rem; color: var(--text); font-size: 0.9rem; white-space: normal; background: var(--surface-2); }
-
-/* Tables of key/value rows on a phone: each row a block of "header: value" lines (no inner scroller). */
-@media (max-width: 480px) {
-  table.stack-sm, table.stack-sm tbody, table.stack-sm tr, table.stack-sm td, table.stack-sm tr.sep th { display: block; width: 100%; }
-  table.stack-sm thead tr { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; }
-  table.stack-sm thead th { border: 0; padding: 0.2rem 0; }
-  table.stack-sm thead th:not(.sortable) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-  table.stack-sm tbody tr { padding: 0.45rem 0; border-bottom: 1px solid var(--border); }
-  table.stack-sm tbody tr:last-child { border-bottom: 0; }
-  table.stack-sm td {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: 0.75rem;
-    padding: 0.1rem 0;
-    border: 0;
-    text-align: right;
-    white-space: normal;
-  }
-  table.stack-sm td::before { content: attr(data-label); flex: none; max-width: 45%; color: var(--muted); font-size: 0.85rem; text-align: left; }
-  table.stack-sm td[data-label=""]::before, table.stack-sm td:not([data-label])::before { content: none; }
+/* The event list (the journal) and the recent starts: one row each, the time, then the event and its details; a heading row per start, a "×N" toggle on repeats. */
+td.when { width: 1%; white-space: nowrap; color: var(--muted); }
+table.events tr.sep th { padding-top: 0.8rem; color: var(--text); font-size: 0.95rem; font-weight: 650; white-space: normal; background: var(--surface-2); }
+table.events tr.sep .t { margin-right: 0.5rem; color: var(--muted); font-weight: 500; }
+table.events tr.rep-row td { background: var(--surface-2); font-size: 0.9rem; }
+table.events tr.rep-row td + td { padding-left: 1.25rem; }
+table.events tr.rep-row strong { font-weight: 500; }
+.rep {
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+.rep[aria-expanded="true"] { border-color: var(--accent); background: var(--accent-soft); }
+/* On a phone an event is one line, cut at the edge; a tap shows it whole. */
+@media (max-width: 559px) {
+  table.events { font-size: 0.875rem; }
+  table.events td + td { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  table.events tr.open td + td { white-space: normal; }
+  table.events tr.sep .t { display: block; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -988,7 +1181,7 @@ table.journal tr.sep th { padding-top: 0.9rem; color: var(--text); font-size: 0.
 .kv dd a { overflow-wrap: anywhere; }
 .howto { margin: 0.75rem 0; padding-left: 1.4rem; }
 .howto li { margin: 0.35rem 0; overflow-wrap: anywhere; }
-.countdown { margin: 0.75rem 0; padding: 0.6rem 0.8rem; border-radius: 8px; background: var(--info-soft); color: var(--text); }
+.countdown { margin: 0.75rem 0; padding: 0.6rem 0.8rem; border-radius: 8px; background: var(--info-soft); color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
 .countdown-n { font-variant-numeric: tabular-nums; }
 .copy-box { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.4rem; }
 .copy-field { flex: 1 1 14rem; min-width: 0; font-family: var(--mono); }

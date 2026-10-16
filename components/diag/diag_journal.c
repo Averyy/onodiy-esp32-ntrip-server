@@ -14,6 +14,11 @@
  * planned restart a shutdown handler writes out what is still queued, as far
  * as the sector being written has room (the restart never waits for an
  * erase).
+ *
+ * diag_journal_clear() empties the journal for the user: the queue is
+ * dropped and the core opens a new sector at once (so the next read already
+ * finds nothing), then erases the other sectors one per lock, so a reader or
+ * the writer waits for one sector erase at most.
  */
 #include <string.h>
 
@@ -63,6 +68,8 @@ static uint32_t s_queue_full;
 static dj_rate_t s_rate;
 static bool s_rate_ready;
 static volatile jstate_t s_state;
+static bool s_clearing;           /* a clear runs (s_qlock) */
+static volatile uint32_t s_clears; /* clears since boot (written under s_jmux) */
 
 /* Journal core and flash: s_jmux. */
 static SemaphoreHandle_t s_jmux;
@@ -228,6 +235,56 @@ esp_err_t diag_journal_read(uint32_t *cursor, diag_journal_entry_t *out, size_t 
     xSemaphoreGive(s_jmux);
     *count = n;
     return ESP_OK;
+}
+
+esp_err_t diag_journal_clear(void)
+{
+    if (s_state != J_READY) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    bool busy;
+    portENTER_CRITICAL(&s_qlock);
+    busy = s_clearing;
+    s_clearing = true;
+    portEXIT_CRITICAL(&s_qlock);
+    if (busy) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    xSemaphoreTake(s_jmux, portMAX_DELAY);
+    portENTER_CRITICAL(&s_qlock);
+    s_qcount = 0;   /* written before the clear: dropped with the rest */
+    portEXIT_CRITICAL(&s_qlock);
+    int r = dj_clear_start(&s_j);
+    if (r == DJ_OK) {
+        s_clears++;
+    }
+    uint32_t from = s_j.next_seq;
+    xSemaphoreGive(s_jmux);
+    bool failed = (r != DJ_OK);
+    int left = (r == DJ_OK) ? 1 : 0;
+    while (left != 0) {
+        xSemaphoreTake(s_jmux, portMAX_DELAY);
+        left = dj_clear_step(&s_j);
+        xSemaphoreGive(s_jmux);
+        if (left < 0) {
+            failed = true;   /* that sector is given up; the others go on */
+            left = 1;
+        }
+    }
+    portENTER_CRITICAL(&s_qlock);
+    s_clearing = false;
+    portEXIT_CRITICAL(&s_qlock);
+    if (failed) {
+        ESP_LOGW(TAG, "event journal cleared with flash errors");
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "event journal cleared; records go on from %u", (unsigned)from);
+    return ESP_OK;
+}
+
+uint32_t diag_journal_clear_count(void)
+{
+    return s_clears;
 }
 
 void diag_journal_info(diag_journal_info_t *out)

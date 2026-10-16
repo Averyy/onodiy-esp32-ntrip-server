@@ -58,7 +58,10 @@ What it does:
      /api/logs says level_max "info", and a cursor that is not a number is
      refused; PUT /api/wifi stores the credentials only in this build
      (applied and trial false) and GET /api/wifi agrees at once (no trial,
-     nothing pending);
+     nothing pending); DELETE /api/journal clears the event journal: GET
+     /api/journal from cursor 0 then holds only records numbered after the
+     newest one before it (the numbering goes on), GET /api/connections is
+     empty and complete;
   3. checks UART1 in both directions: the firmware's receiver detection
      queries (VERSIONA) arrive on the host side, and bytes the host sends
      (plain text no receiver would send: no '$', '#', RTCM preamble or loader
@@ -971,6 +974,7 @@ class Smoke:
         self.client_log_checks()
         self.log_level_checks()
         self.wifi_checks()
+        self.journal_clear_checks()
 
     def hold_checks(self) -> None:
         """After detection gave up (a ladder episode): the restart is held for first setup."""
@@ -1536,6 +1540,33 @@ class Smoke:
                    and w.get("pending_ssid") is None,
                    f"GET /api/wifi right after: cred_trial {w.get('cred_trial')}, cred_pending {w.get('cred_pending')}, "
                    f"pending_ssid {w.get('pending_ssid')!r}")
+
+    def journal_clear_checks(self) -> None:
+        """DELETE /api/journal: the records are gone at once and the numbering goes on (the station may journal
+        something of its own right after the clear, such as a ladder step: only numbers after the old newest)."""
+        def get(path: str) -> tuple[int, dict]:
+            status, _, body = request(self.http_port, "GET", path, cookie=self.cookie, timeout=30)
+            try:
+                return status, json.loads(body)
+            except ValueError:
+                return status, {}
+
+        _, hl = get("/api/health")
+        before = (hl.get("journal") or {}).get("newest_seq") or 0
+        status, _, body = request(self.http_port, "DELETE", "/api/journal", cookie=self.cookie, timeout=60)
+        try:
+            ok = json.loads(body).get("ok") is True
+        except (ValueError, AttributeError):
+            ok = False
+        self.check(status == 200 and ok, f"DELETE /api/journal: HTTP {status} {body[:40]!r}")
+        status, j = get("/api/journal?cursor=0")
+        seqs = [e.get("seq", 0) for e in j.get("entries") or []]
+        self.check(status == 200 and before > 0 and all(s > before for s in seqs),
+                   f"GET /api/journal after the clear: {len(seqs)} record(s), numbers {seqs[:3]} after {before}")
+        status, c = get("/api/connections")
+        self.check(status == 200 and c.get("entries") == [] and c.get("complete") is True,
+                   f"GET /api/connections after the clear: {len(c.get('entries') or [])} record(s), "
+                   f"complete {c.get('complete')}")
 
     def console_lines(self, start: int, needle: str) -> list[str]:
         return [line for line in self.log_text()[start:].splitlines() if needle in line]

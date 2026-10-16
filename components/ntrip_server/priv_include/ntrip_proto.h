@@ -927,9 +927,12 @@ uint16_t ntrip_graced_so_far_permille(uint32_t unplanned_offline_s, uint32_t ela
 
 /**
  * Inputs of the protected slot's day figures. The day's online and offline
- * seconds come from the availability ledger (kept across restarts); the
- * data rate is a ratio, taken from this boot's epochs sent today over this
- * boot's seconds online today (both start again at a restart).
+ * seconds and its lost epochs come from the availability ledger (kept across
+ * restarts). The data rate shown is a ratio, taken from this boot's epochs
+ * sent today over this boot's seconds connected today (both start again at
+ * a restart); the budget and the streak use the best rate the day can still
+ * reach instead (ntrip_best_rate_ppm), which one lost epoch early in a day
+ * barely moves.
  */
 typedef struct {
     bool counted;                /**< the protected slot is enabled and set up (Onocoy: mountpoint, username, password) */
@@ -937,6 +940,7 @@ typedef struct {
     uint32_t offline_s;          /**< today, expected but not streaming, planned included (the ledger) */
     uint32_t rate_online_s;      /**< this boot, today: seconds connected that epochs_sent_today covers */
     uint32_t epochs_sent_today;  /**< this boot, today */
+    uint32_t lost_epochs;        /**< today, every boot: epochs it should have sent while connected but did not (the ledger) */
     bool day_known;              /**< a trusted clock: today and the figures below are known */
     uint32_t unplanned_offline_s;/**< today's unplanned downtime (the availability ledger) */
     uint32_t elapsed_s;          /**< since 00:00 UTC or since the slot first became expected today */
@@ -948,10 +952,11 @@ typedef struct {
     bool so_far_valid;           /**< ... and the day is known: graced_so_far is known (else null) */
     uint16_t graced_uptime_permille;   /**< (online + grace) / day, capped at 1000 */
     uint16_t graced_so_far_permille;
-    uint16_t data_rate_permille;       /**< epochs sent / seconds online (1000 assumed until something was sent) */
-    uint32_t budget_s;                 /**< offline seconds the day allows at that rate (ntrip_offline_budget_s) */
+    uint16_t data_rate_permille;       /**< this boot: epochs sent / seconds connected (1000 assumed until something was sent) */
+    uint32_t best_rate_ppm;            /**< the best data rate the day can still reach, parts per million */
+    uint32_t budget_s;                 /**< offline seconds the day allows at that best rate (ntrip_offline_budget_ppm_s) */
     uint32_t budget_left_s;            /**< budget_s minus today's offline seconds, 0 once used up */
-    bool streak_ok;
+    bool streak_ok;                    /**< the best rate still qualifies and today's offline seconds are within budget_s */
 } ntrip_day_out_t;
 
 /** The protected slot's day figures, or none (valid false) for a slot that does not count. */
@@ -963,6 +968,25 @@ void ntrip_day_metrics(const ntrip_day_in_t *in, ntrip_day_out_t *out);
  * graced uptime u = (online + 300) / 86400. Rounded down; 0 below 980 per mille.
  */
 uint32_t ntrip_offline_budget_s(uint32_t data_rate_permille);
+
+/** The same for a data rate in parts per million (0 below 980000). */
+uint32_t ntrip_offline_budget_ppm_s(uint32_t data_rate_ppm);
+
+/**
+ * Epochs a session should have sent but did not: the seconds connected (one
+ * epoch a second, the rate Onocoy asks for) minus the epochs sent, 0 when
+ * the epochs keep up.
+ */
+uint32_t ntrip_lost_epochs(uint32_t connected_s, uint32_t epochs_sent);
+
+/**
+ * The best data rate a UTC day can still reach, in parts per million (rounded
+ * down): the epochs lost so far over every epoch the day can still expect,
+ * that is 1 - lost / (86400 - offline seconds so far), if the station stays
+ * online for the rest of the day and loses nothing more. 0 once the losses
+ * fill what is left of the day.
+ */
+uint32_t ntrip_best_rate_ppm(uint32_t lost_epochs, uint32_t offline_s);
 
 #ifdef __cplusplus
 }

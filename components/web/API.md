@@ -166,7 +166,7 @@ Applied to every request before any handler runs.
    that allows only the device's own origin (scripts, styles, images,
    connections including the WebSocket) and forbids framing, with one
    exception for images: `https://tile.openstreetmap.org`, the tiles of the
-   live view's optional station map (section 8). The page requests tiles
+   Receiver page's optional station map (section 8). The page requests tiles
    only after the user asks for the map; the tile images carry
    `referrerpolicy="origin"`, because the tile server's usage policy asks
    for a Referer (the page's origin, nothing more); everything else keeps
@@ -348,6 +348,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | PUT | `/api/diag/log-level` | adm | Runtime log level per tag | `diag_set_log_level` |
 | GET | `/api/logs` | adm | Log ring (this or previous boot) | `diag_log_read*` |
 | GET | `/api/journal` | adm | Event journal | `diag_journal_read` |
+| DELETE | `/api/journal` | adm | Clear the event journal | `diag_journal_clear` |
 | GET | `/api/connections` | adm | Connection history (casters, Wi-Fi) | `diag_journal_read`, ntrip_server |
 | GET, DELETE | `/api/coredump` | adm | Download / erase the core dump | `diag_coredump_*` |
 | POST | `/api/system/reboot` | adm | Reboot | lifecycle |
@@ -449,7 +450,8 @@ object as sections (section 7), so the UI keeps one model. Admin form:
   "receiver": {"state": "streaming", "model": "UM982", "firmware": "R4.10Build18975",
                "responding": true, "restarting": false, "identity_confirmed": true, "profile_applied": true,
                "position_locked": true, "surveying": false, "survey_window_left_s": 0,
-               "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "journal": "none",
+               "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "glonass": true,
+               "rtcm1230_supported": true, "journal": "none",
                "uart_closed": false, "rx_maintenance": false, "maintenance_left_s": 0, "maintenance_chosen_s": 0,
                "next_detect_in_s": null, "first_apply_held": false},
   "casters": [
@@ -487,9 +489,11 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `network.ladder_triggers` | network ladder triggers holding (`network_ladder_trigger_t`): `protected` (the protected caster down while RTCM is healthy), `assoc_no_ip` (associated 60 s without an IP), `unreached` (a slot not reaching its caster for 180 s) |
 | `network.cred_*`, `pending_ssid` | changed Wi-Fi credentials (section 11): `cred_trial` while they are tried (`cred_trial_left_s` until the station goes back), `cred_pending` with `pending_ssid` while they wait to be confirmed (`null` = none), `cred_reverted` when they did not work and the station is back on its previous credentials, `cred_reverted_why` why (`no_ip`: no address within the 90 s; `auth_failed`: the network refused the password; `null` unless reverted); `ssid` names the network in use, during a trial the one being tried |
 | `receiver.state` | `station_state_t`; `idle` during receiver maintenance (`rx_maintenance` tells the two apart) |
-| `receiver.uart_closed` | the receiver UART is closed and `gnss_link` reopens it on its own ("receiver UART closed (reopening)"; never in safe mode, where the link is not opened) |
+| `receiver.uart_closed` | the receiver UART is closed and `gnss_link` reopens it on its own (the UI's "Receiver port closed"; never in safe mode, where the link is not opened) |
 | `receiver.rx_maintenance` | receiver maintenance is on (section 8): nothing is sent to the receiver; `maintenance_left_s` until it ends by itself, `maintenance_chosen_s` the chosen duration with extensions (both 0 when off) |
 | `receiver.rtcm_age_ms` | since the last CRC-valid RTCM frame (`gnss_link`), `null` = never |
+| `receiver.glonass` | the receiver's stream carried GLONASS signals in the last 10 s (the signal summary of `GET /api/gnss/signals`; `false` before the first summary); admin form only |
+| `receiver.rtcm1230_supported` | as in `GET /api/gnss/signals`: the receiver accepted message 1230 (GLONASS biases) at the last configuration, `false` refused, `null` never configured. With `glonass` and `best_bands` it says whether the stream meets Onocoy's quality minimums (4 bands on one constellation, GLONASS with 1230) without polling the larger signals object; admin form only |
 | `receiver.restarting` | the receiver said it is restarting (it answered a command with `The Board is resetting,do not response any command!`) within the last 20 s and its restart banner has not come yet: it answers, it is not silent; admin form only (also in `GET /api/gnss`) |
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
 | `receiver.first_apply_held` | the receiver's first configuration waits for the user (`gnss/hold`, section 8): only queries reach the receiver until the user applies; admin form only |
@@ -715,7 +719,7 @@ oldest.
 | `rtcm1230_supported` | `gnss/rtcm1230_ok`: `true` the receiver accepted message 1230 at the last apply, `false` it refused it, `null` never applied (the key is not stored: "not applied yet") |
 | `link.mode` | `off`, `stream`, `command`, `raw` (`gnss_link`) |
 | `link.rx_bytes` | bytes received from the receiver since boot (0 = nothing arrived yet) |
-| `link.open`, `open_failures` | the UART driver is installed; failed installs since boot. `open: false` with a mode other than `off` = "receiver UART closed (reopening)": `gnss_link` reopens it on its own |
+| `link.open`, `open_failures` | the UART driver is installed; failed installs since boot. `open: false` with a mode other than `off` = the UI's "Receiver port closed": `gnss_link` reopens it on its own |
 | `link.hands_off` | the link refuses every write and lease (receiver maintenance) |
 | `recovery` | `gnss/recovery` as stored, `health_recovery_mode_t` (a stored value out of range reads as `full`, as health reads it) |
 | `first_apply_held` | `gnss/hold` is stored: the receiver's first configuration is held until the user applies. A build with `CONFIG_STATION_HOLD_FIRST_APPLY` (bench builds, the `sdkconfig.hold` overlay) writes it once at boot on a device whose profile was never applied and whose `gnss/autocfg` was never set, together with `gnss/autocfg` = 0 and `gnss/recovery` = 2 (`alerts_only`, if unset), before anything reaches the receiver; it stays in NVS whatever build runs later. While it is stored the station sends the receiver only queries (version, configuration dump, base mode) and a loader prompt met during detection gets no restart key (`receiver_in_loader`, listen-only; the user's receiver restart still works). The first successful apply erases it, and so does `PUT /api/gnss/profile` with `autocfg: true`; a factory reset erases it with the other user settings. When the hold is due but cannot be stored (settings unusable this boot, or the write failed), the station holds the first configuration for this boot only, as the batch would have stored it: `first_apply_held` true, `autocfg` false, nothing stored. A successful apply ends the hold (automatic configuration stays off for the boot); `autocfg: true` ends both. `GET /api/gnss/apply/preview` lists what the apply would send |
@@ -726,7 +730,7 @@ oldest.
 | `maintenance` | receiver maintenance (below): `left_s`, `chosen_s` 0 when off; `choices_s` the durations offered, `max_left_s` the most time left after extensions |
 | `rx_signal_group` | the signal group the receiver runs as its last configuration read-back this boot showed (`CONFIG SIGNALGROUP`; after a change, the new one); `null` before an apply session read it |
 | `rx_bands` | what the receiver's running signal group configures on its main antenna input, from the last apply session this boot: every session asks once, after its signal-group step (`ANT1GROUPA`, one-shot without a rate; it answers without sky). `state` (`um98x_bands_state_t`): `unknown` (not asked this boot, or no answer; `age_s` `null`), `ok`, `refused` (the receiver refused the query: a firmware without it; `reply` its text; never a failed apply), `unread` (an answer this firmware does not read). With `ok`: `group` as the receiver named it, `profile_master` the profile's main-antenna group it was compared with, `matches` (the report names that group and lists every signal it should configure; extra signals are fine) and `systems` per constellation (`gps`, `glonass`, `galileo`, `beidou`, `qzss`): `signals` configured, `bands` the frequency bands they cover (L1, L2, L5, L6 buckets, as `GET /api/gnss/signals` counts them), `missing` the signals the profile's group should give and the report lacks. What a group should give (main input, UM982 build 25164, our bench 2026-10-14; the manual's table): `4` GPS L1C/A L2C L2P L5, GLONASS G1 G2, Galileo E1 E5a E5b, BeiDou B1I B2I B3I, QZSS L1C/A L2C L5; `3` the same with Galileo E6 and QZSS L6, BeiDou B1I B3I B1C B2b; `7` the same as `4` with every BeiDou signal (B1C, B2a, B2b added); `5` no L5 at all. Other groups: only the number is compared. The log's whole form (header and checksum) is confirmed on build 25164: the station read it in a real apply on 2026-10-14 (`state` `ok`, `group` 3, `matches` true) |
-| `signal_group_refused` | the receiver refused a signal group (any apply, the comparison's switches included): `{"master", "slave", "reply", "back_to"}` with the receiver's reply (UM982 build 25164: `PARSING FAILED GRAMMAR ERROR,` for every pair but `4 5`, `3 6`, `5 0` and `7 0`; `"signal group rejected"` when it acknowledged the pair but its read-back after the restart still showed another group) and the group the stored profile went back to (`{"master", "slave"}`: the group the session read back before the change, else the one of the last successful apply, `gnss/sg_ok`). The station re-applies that group at once; a refused group never raises `config_failed` and is never retried on the backoff. A plain refusal (a negative reply: nothing changed on the receiver and it did not restart) with such a group to go back to is not rolled back with `RESET`: the re-apply restores the outputs the session quieted, so the receiver is not restarted (nor its survey) for it. `back_to` `null`: neither was known, and the refusal is an ordinary failed apply (`config_failed`, rolled back with `RESET`). Kept until the next `PUT /api/gnss/profile` with a profile; `null` otherwise. The UI says "This receiver firmware does not accept signal group 7 0 (it answered "<reply>"). Build 25164 accepts only 4 5, 3 6, 5 0 and 7 0. It went back to 3 6 and was configured again." |
+| `signal_group_refused` | the receiver refused a signal group (any apply, the comparison's switches included): `{"master", "slave", "reply", "back_to"}` with the receiver's reply (UM982 build 25164: `PARSING FAILED GRAMMAR ERROR,` for every pair but `4 5`, `3 6`, `5 0` and `7 0`; `"signal group rejected"` when it acknowledged the pair but its read-back after the restart still showed another group) and the group the stored profile went back to (`{"master", "slave"}`: the group the session read back before the change, else the one of the last successful apply, `gnss/sg_ok`). The station re-applies that group at once; a refused group never raises `config_failed` and is never retried on the backoff. A plain refusal (a negative reply: nothing changed on the receiver and it did not restart) with such a group to go back to is not rolled back with `RESET`: the re-apply restores the outputs the session quieted, so the receiver is not restarted (nor its survey) for it. `back_to` `null`: neither was known, and the refusal is an ordinary failed apply (`config_failed`, rolled back with `RESET`). Kept until the next `PUT /api/gnss/profile` with a profile; `null` otherwise. The UI says "The receiver refused signal group 7 1. It is back on 3 6 (Galileo E6) and configured again. Choose a group from the list and save." with "Receiver reply: <reply>" under it |
 | `profile.fixed` | `{lat_deg, lon_deg, height_m}` in `fixed` mode, else `null`; fields a mode does not use are ignored on input and come back cleared (`survey_in_s` 0 in `fixed` mode) |
 | `position` | locked or last surveyed (`station_status_t.position`); `source`: `none`, `survey`, `averaged`, `user`; `sigma_m` 0 = unknown |
 | `arp` | latest CRC-valid 1005/1006 (`gnss_obs_get_arp`), converted to WGS84; `offset_m` = 3-D distance to the locked position, `null` when not locked; `{"valid": false}` before the first frame |
@@ -751,6 +755,20 @@ reads it every tick, a step already running completes).
 `first_apply_held`): the station configures the receiver as usual from
 then on.
 
+The UI's Receiver settings show `autocfg` and `recovery` as one choice,
+"Receiver management": "The station" (`true`, `full`), "The station, but
+never restart itself" (`true`, `no_reboot`), "Me (alerts only)" (`false`,
+`alerts_only`); any other pair shows as "Custom" with the nearest choice
+offered. The Status page and Diagnostics name the choice the same way. A
+save sends only the members that change, one per request since they are
+stored one after the other: `recovery` first when `autocfg` goes off, else
+`autocfg` first, so a refusal halfway never leaves automatic recovery on
+for a receiver the station does not configure. The Position card ("Save
+position") and the Receiver profile card ("Save profile") each send the
+whole profile: their own fields over the profile as last read. Each button
+shows once its own card changed, so an edit in the other card stays on the
+page with its button.
+
 The profile is stored with `um98x_profile_encode()` (validated by
 `um98x_profile_valid()`, which has the last word) and, when it differs from
 the stored one, re-applied with `station_request_reconfigure()` (runs once
@@ -765,10 +783,9 @@ never reach a caster); ephemeris types (1019, 1020, 1042, 1045, 1046) need
 trailing spaces (the stored form) and must then be at most 31 printable
 ASCII characters without `"` (inner spaces stay: the IGS name pads the
 antenna type to 16 characters before the radome); `antenna_setup_id` 0-255.
-The UI's hint: enter the IGS antenna name with its radome only if the
-antenna has a published calibration; leave it empty to keep the receiver's
-value; to clear a model the receiver already holds, enter its null-antenna
-name (`ADVNULLANTENNA`).
+The UI's hint: only for an antenna in the IGS list, its name and radome as
+listed; empty keeps the receiver's value; `ADVNULLANTENNA` (the null-antenna
+name) clears a model the receiver already holds.
 
 `202 {"accepted": true, "saved": true, "apply": "queued"}`. `apply` is
 `queued`, `unchanged` (same profile, or only `autocfg` changed),
@@ -840,8 +857,8 @@ profile to `fixed` and reconfigures). `202 {"accepted": true}`. Errors:
 ### `DELETE /api/gnss/position/lock` (adm)
 
 Forget the locked position and survey again. The UI warns first: the
-reported antenna position moves, and casters that check it may re-validate
-the station. `202 {"accepted": true}`. Errors as for apply.
+position sent to casters changes, and Onocoy may validate the station
+again. `202 {"accepted": true}`. Errors as for apply.
 
 ### `GET /api/gnss/signals` (pub\*/adm)
 
@@ -900,8 +917,9 @@ when the statistics cannot be read.
 At most 64 satellites, from the receiver's satellite-in-view output of the
 last 30 s. `prn` is the satellite's PRN (GLONASS: its slot number).
 `available: false` with `reason`: `sat_view_off` (the profile's
-`sat_view_output` is off; the UI offers to turn it on) or `no_data` (it is
-on, but nothing arrived in the last 30 s).
+`sat_view_output` is off) or `no_data` (it is on, but nothing arrived in
+the last 30 s). The UI draws its sky from the live view (`GET
+/api/gnss/live`), not from this endpoint.
 
 ### Receiver maintenance
 
@@ -922,7 +940,9 @@ memory through an EN reset is to be confirmed on the board. The end runs
 the station's stream-first check, as at boot. Entry and
 exit are journalled (`rx_maintenance`). Whether input on the link can
 disturb a receiver worked on through its other port is PROVISIONAL, to be
-confirmed on hardware.
+confirmed on hardware. The UI starts it in Settings, next to the receiver
+update; while it is on, that row has Add 30 min and End now, and every
+other page a one-line notice with End now (the Status page's top card).
 
 While it is on, the receiver actions answer `409 receiver_maintenance`
 ("receiver maintenance: nothing is sent to the receiver"): apply, lock,
@@ -1004,17 +1024,18 @@ interrupts RTCM is PROVISIONAL, to be confirmed on hardware.
 |---|---|
 | `window` | `station_status_t.live`, computed at the time of the request (not as the station task last published it: a start or stop shows at once, also while a detection pass runs); `left_s`, `idle_left_s`, `open_s` 0 while closed. `sky` (`station_live_sky_t`): `off`, `pending` (wanted, waits for a free moment: `sky_why`), `on`, `on_profile` (the profile sends it permanently), `blocked` (not in this window: `sky_why`), `stopping`. `sky_why` (`station_live_why_t`). `last_end` (`station_live_end_t`) why the last window closed. `sky_reply` the receiver's reply to the last failed toggle (`null` = none) |
 | `receiver_state`, `rx_maintenance` | as in `/api/status`, for a page without the WebSocket (the setup wizard) |
-| `position` | the station's locked or last surveyed position (`null` coordinates with `source: "none"`), for the optional station map |
+| `position` | the station's locked or last surveyed position (`null` coordinates with `source: "none"`), as in `GET /api/gnss` |
 | `totals` | `gnss_obs_get_live` over every satellite, also those beyond the list: `satellites` listed, `tracked` in an MSM within the last 10 s, `signals` their signals, `with_pos` with azimuth and elevation, `dropped` beyond the list; `cnr_dbhz` mean over every satellite band (`null` = none); `bands` per band with tracked satellites (count, mean C/N0); `systems` per constellation with tracked satellites, their count per band (only bands with any). `null` when the observations cannot be read |
 | `satellites` | at most 96, by constellation and number. `prn` as in `/api/sky` (QZSS and SBAS by PRN, GLONASS by slot). `in_msm` and `msm_age_ms` (`null` = only the sky view knows it); `signal_ids` the MSM signal IDs; `cnr_dbhz` per band present: its best signal's C/N0 (`null` = no C/N0 in the MSM type). `el_deg`, `az_deg` (`null` until the satellite-in-view output reported it), `sky_cnr_dbhz` from that report, `pos_age_ms` its age |
 
-The UI shows satellites first: a sky plot (satellites with a position,
-coloured by C/N0, labelled), the per-satellite table, counts per
-constellation and band with per-band totals, the mean C/N0 per band and
-tiles (tracked satellites, signals, mean C/N0); then, last and optional, a
-station map: the position with a small OpenStreetMap tile mosaic, fetched
-only after the user asks for it, with the attribution and a plain link to
-open the position in an external map (offline: the coordinates only).
+The UI opens it from the Receiver page's Signals card ("Show the sky"):
+the time left with Extend and Close, the sky plot (satellites with a
+position, coloured by C/N0, labelled) beside the card's band table, and
+every satellite behind "Show all", one line each (best C/N0 and the C/N0
+per band). The station map sits in the Receiver card's Details: the
+position with a small OpenStreetMap tile mosaic, fetched only after the
+user asks for it, with the attribution and a plain link to open the
+position in an external map (offline: the coordinates only).
 
 #### `POST /api/gnss/live` (adm)
 
@@ -1039,9 +1060,9 @@ Close it now (the output is turned off at the next free moment).
 baud list after two failed short passes and always after 5 min). A pass
 that runs already counts. `202 {"accepted": true}`. Errors:
 `409 not_no_receiver` (any other state, receiver maintenance included),
-`409 safe_mode`. The UI's no-receiver card (the alert on the dashboard
-and on Diagnostics, Health; the setup wizard's reception step; Signals)
-offers it as "Check again".
+`409 safe_mode`. The UI offers it as "Check again" wherever it says no
+receiver was found (the Status page; Diagnostics, Overview; the setup
+wizard's antenna check; the Receiver page).
 
 ### Signal-group comparison
 
@@ -1261,9 +1282,9 @@ casters are public, so anyone can take the station's stream there and submit
 it to Onocoy as well, and Onocoy's FAQ says: "Please note that multiple
 submissions of the same streams, e.g. from free or public networks such as
 IGS or RTK2GO, even when done by separate users in the onocoy platform, will
-result in banning." The UI shows that above the slots. It blocks nothing
-(RTK2go slots stay off unless the user turns one on); saving such a pair
-still asks for `dup_stream_ack` (below).
+result in banning." The UI warns about it on the card of each open slot and
+in one line on the Status page, and links that FAQ. It blocks nothing (RTK2go slots stay off unless the user
+turns one on); saving such a pair still asks for `dup_stream_ack` (below).
 
 `GET /api/casters/{n}` returns one `{"slot", "config", "status"}` entry. In
 safe mode `config` is `null` (the slots were never loaded) and every status
@@ -1356,21 +1377,27 @@ other slots, and for the protected slot while it is disabled or not set up
 mislead. `graced_uptime_permille` is the share of the whole day covered so
 far (online today plus the 300 s grant, of 86400 s: what the day reaches
 if nothing more is sent); `data_rate_permille` = this start's epochs sent
-today over its seconds connected today (a ratio, so this start's part is
-an estimate for the day); `budget_s` the offline seconds the day allows at
-that data rate (473 at 100 %); `budget_left_s` = `budget_s` minus
-`today_offline_s`, 0 once used up; `graced_uptime_so_far_permille`
+today over its seconds connected today (a ratio of this start only, shown
+as the current data rate); `budget_s` the offline seconds the day allows at
+the best data rate it can still reach (473 at 100 %): 1 - lost / (86400 -
+`today_offline_s`), with lost the epochs the slot should have sent while
+connected (one a second) but did not, today, across restarts (the
+availability ledger keeps the count), so one epoch lost right after a
+start costs about nothing instead of the whole budget; `budget_left_s` =
+`budget_s` minus `today_offline_s`, 0 once used up; `graced_uptime_so_far_permille`
 = 1 - max(0, unplanned downtime today - 300 s) / time elapsed today, with
 the downtime as the availability ledger counts it (planned time left out)
 and the time counted from 00:00 UTC, or from when the slot was enabled and
 set up during this boot when that came later (`null` without a trusted
 clock); `data_rate_permille` is `null` until something was sent today;
-`streak_ok` whether today's offline time is still within the budget for
-that data rate (the UI never shows the day in red while it is true);
-`tls_*` are `null` without TLS; `max_lag_ms` is the slot's lag
-limit; `unreached_s` the current run of failures that never reached the
-caster (DNS failures, connects that timed out or failed locally; 0 = none;
-the UI says "caster not reached for N s"); `last_session_text` the newest
+`streak_ok` whether that best rate still reaches 98 % and today's offline
+time is still within `budget_s` (the UI shows "Missed" exactly while it
+is false);
+`tls_*` are `null` without TLS; `max_lag_ms` is the highest
+`lag_ms_now` seen since the start; `unreached_s` the current run of
+failures that never reached the caster (DNS failures, connects that timed
+out or failed locally; 0 = none; the UI says "caster not reached for N
+s"); `last_session_text` the newest
 line the caster sent during a session (nothing is expected there), with
 the password, the username and an Onocoy slot's mountpoint masked (`""` =
 none since the last save).
@@ -1683,11 +1710,12 @@ e.g. a fork that signs its releases) accepts only manifests signed with one
 of its keys and refuses unsigned ones (`signature_failed`). Manual uploads
 are not affected by any of this.
 
-**Banner** (`update` in `/api/status`, admin sessions only, on every page):
-shown when `app_available`, `gnss_available` or `app_reverted_in_stage1`.
-"App vX / receiver build Y available - Update / Later". "Later" is kept in
-the browser (`localStorage`, keyed by `app_version` and `gnss_build`) until
-a newer version appears; the server keeps no "later" state.
+**Banner** (`update` in `/api/status`, admin sessions only): while
+`app_available`, `gnss_available` or `app_reverted_in_stage1`, a dot on the
+Settings tab and a one-line notice on every other page, "Update available:
+app vX and receiver build Y. Later / Update". "Later" hides the notice, kept
+in the browser (`localStorage`, keyed by `app_version` and `gnss_build`)
+until a newer version appears; the server keeps no "later" state.
 
 | Field | Source |
 |---|---|
@@ -1796,8 +1824,9 @@ how it ended).
 the start step answers `not_available_yet`, the package is checked against
 every rule (progress job `gnss_check`), then released; nothing is sent to
 the receiver. `last_result` says `not_available_yet`; the UI shows
-"Receiver package downloaded and checked; receiver firmware updates are not
-enabled in this build yet. Nothing on the receiver changed."
+"Receiver package downloaded and verified. Receiver firmware updates are
+not enabled in this build yet. The station now checks the package against
+every rule; nothing is sent to the receiver."
 
 Errors (all before anything is downloaded): `409 not_offered` (the build
 changed or nothing is offered; dev builds are offered nothing), `409
@@ -2027,7 +2056,7 @@ probe waits up to 1 s for the version log that follows its acknowledgement
 before its lease ends, so that log is read whole (it gives the identity)
 instead of being cut.
 `link.open` and `link.open_failures`: the UART driver is installed, failed
-installs since boot ("receiver UART closed (reopening)" while `open` is
+installs since boot (the UI's "Receiver port closed" while `open` is
 false in a mode other than `off`); `link.hands_off`: receiver maintenance. `journal` and `log` are the event journal's and the log ring's
 counters (`diag_journal_info()`, `diag_log_stats()`; `journal.capacity` in
 records; `log.prev_boot_available` false and `log.prev_boot_lines` 0 when
@@ -2055,7 +2084,8 @@ offering the download.
                 "data_rate_permille": 1000, "graced_uptime_permille": 503, "streak_ok": true,
                 "graced_uptime_so_far_permille": 1000},
   "today": {"utc_day": 20736, "date": "2026-10-10", "down_s": [4, 0, 0, 0], "planned_s": [0, 0, 0, 0],
-            "reconnects": [1, 0, 0, 0], "up_s": [43196, 0, 0, 0], "power_off_s": 0, "rx_overflows": 0},
+            "reconnects": [1, 0, 0, 0], "up_s": [43196, 0, 0, 0], "power_off_s": 0, "rx_overflows": 0,
+            "lost_epochs": 0},
   "history": []
 }
 ```
@@ -2081,9 +2111,12 @@ then `""`). `protected`: the day of the Onocoy slot in use, which is the
 first enabled protected slot, else the first protected one (a disabled
 Onocoy slot left over in a lower slot never hides the enabled one;
 `null` without any protected slot): `down_today_s` its offline time
-today, `budget_s` the day's offline allowance at the current data rate,
-`budget_left_s` what is left of it, and the other figures as in the caster
-status (section 10). The budget is information only.
+today, `budget_s` the day's offline allowance at the best data rate the
+day can still reach, `budget_left_s` what is left of it, and the other
+figures as in the caster status (section 10). The budget is information
+only. `today.lost_epochs` (only in `today`: a finished day does not keep
+it) the protected slot's epochs lost while connected, across restarts:
+the losses that budget is figured from.
 
 In `protected`, `enabled` and `onocoy_ready` (the slot holds the console's
 mountpoint, username and password) are as in the caster status, and so is
@@ -2223,6 +2256,30 @@ by `kind` (integers; only a `wifi_disconnect` entry's `b` can be `null`):
 Enum numbers are the C values; the UI decodes them with the appendix
 tables.
 
+### `DELETE /api/journal`
+
+Empty body. Clears the event journal: `200 {"ok": true}` once every record
+written or queued before the request is gone. Later records go on with the
+next `seq` (never reused), so a client's cursor stays valid and simply
+finds nothing older. It erases each journal sector once (32 sectors of 4 KB;
+PROVISIONAL: a second or two, to be measured on hardware); a concurrent `GET /api/journal` or `/api/connections` waits for one
+sector erase at most and never sees part of the old records. Errors:
+`404 not_found` (no usable journal partition: `health.journal.available`
+false), `409 busy` (another clear runs), `500 internal` (a flash error:
+the records are gone from every read all the same; a sector that could not
+be erased brings its records back at the next boot, as does a power cut
+during the clear).
+
+What clearing resets: the journal's records (`GET /api/journal`), the
+connection history (`GET /api/connections`, empty and `complete`), the
+`power_lost` alert's count of power losses (it starts again from the
+records written after the clear, so the alert goes off), and
+`health.journal.oldest_seq` and `newest_seq` (0 until the next record).
+What it keeps: the start history (`health.boot_history`, settings
+`life/boots`), the availability ledger (`GET /api/availability`), the logs,
+the `seq` numbering, `health.journal.sector_cycles` (it counts the clear's
+erases too) and the journal counters since boot.
+
 ### `GET /api/connections`
 
 The connection history next to the ledger: the newest 64 records of
@@ -2352,22 +2409,29 @@ LAN).
 4. The phone is back on the home network: the user opens
    `http://<mdns_host>.local/`, logs in, and the wizard resumes at
    `setup_step`.
-5. Reception check, before any caster is enabled. The UI reads
+5. Antenna check, before any caster is enabled. The UI reads
    `GET /api/status` first: with no receiver found (alert `no_receiver`,
    section 6) or while the station looks for one it shows the no-receiver
    card (what to check, the next search; "Check again" is
    `POST /api/gnss/detect`) and opens nothing. Once the receiver streams,
    `POST /api/gnss/live` opens the live view and the UI polls
    `GET /api/gnss/live`, with plain pass/warn hints (satellites tracked,
-   mean C/N0, whether a constellation has 4 bands, the condition of
-   Onocoy's top band reward; guide values, PROVISIONAL, to be confirmed on
+   mean C/N0, whether a constellation has 4 bands, which Onocoy's quality
+   score needs and the most this receiver reaches (the fifth band is
+   Galileo E5 AltBOC, which it lacks); guide values, PROVISIONAL, to be confirmed on
    hardware) and "Continue anyway"; `DELETE /api/gnss/live` when the user
    goes on.
 6. Optional: the Onocoy slot, `PUT /api/casters/0` with `onocoy_preset`
-   (host `servers.onocoy.com` and port 2101, shown read-only) and what the
+   (host `servers.onocoy.com` and port 2101, shown, not editable) and what the
    Onocoy console gives: `mountpoint`, `username` and `password`
-   (section 10); then optional further casters.
-7. `POST /api/setup/done` (it also erases `setup_step`): the dashboard.
+   (section 10).
+7. The last screen (`setup_step` `casters`): the UI polls `GET /api/status`
+   and shows the Onocoy slot's state as it happens (connecting, a refused
+   login with `login_rejects` from `GET /api/casters`, streaming once
+   corrections flow), the next steps in the Onocoy console, and a link to
+   the Casters page for more casters.
+8. `POST /api/setup/done` (it also erases `setup_step`): the dashboard, or
+   the Casters page from that link.
 
 Every step posts the next one (`POST /api/setup/step`) before it shows it.
 Wi-Fi credentials can never be saved before an admin password exists
@@ -2376,10 +2440,9 @@ wizard shows the Wi-Fi step only while the page is on the station's own
 access point or the station has no working Wi-Fi. A wizard that starts
 (a reload, a new login) reads `GET /api/wifi` first: while the station
 has no working Wi-Fi (none stored, or not connected) it resumes at the
-Wi-Fi step whatever `setup_step` says. In the optional casters step,
-Continue waits while a caster being added is open in its editor (its own
-Save and Cancel decide; "Skip the rest" asks before it drops what was
-typed).
+Wi-Fi step whatever `setup_step` says. A stored `casters` step resumes at
+the last screen, which has no fields; the UI never stores another value for
+it.
 
 **Recovery.** BOOT held 10 s clears the admin password and opens the
 recovery AP for 15 min (open unless an AP password is set; longer while a
@@ -2635,12 +2698,12 @@ boot), and a journal in state `unknown` allows no receiver update action.
 **UI assets** (the files the UI provides): `ui/index.html`, `ui/app.css`,
 `ui/favicon.svg` and the scripts `ui/js/*.js`, which the build
 (`components/web/tools/ui_bundle.py`) joins in file-name order into one
-`app.js` inside a strict-mode function. The build checks the page, styles
-and scripts (structure, unique ids, and what the CSP of section 2 would
-block: no inline scripts or styles, no `on*` or `style` attributes, no
-other origins, no `eval`/`innerHTML`-style sinks), gzips every asset and
-fails when the compressed total exceeds the budget in
-`components/web/CMakeLists.txt` (150 KB). No other files are served.
+`app.js` inside a strict-mode function, without their comments. The build
+checks the page, styles and scripts (structure, unique ids, and what the
+CSP of section 2 would block: no inline scripts or styles, no `on*` or
+`style` attributes, no other origins, no `eval`/`innerHTML`-style sinks),
+gzips every asset and fails when the compressed total exceeds the budget
+in `components/web/CMakeLists.txt` (150 KB). No other files are served.
 
 ---
 

@@ -549,6 +549,23 @@ esp_err_t diag_journal_read(uint32_t *cursor, diag_journal_entry_t *out, size_t 
 void diag_journal_info(diag_journal_info_t *out);
 
 /**
+ * Clear the journal (the user's "Clear journal"): every record written or
+ * queued so far is gone at once; later records go on with the next sequence
+ * number (never reused), so a reader's cursor stays valid. Erases every
+ * sector once; blocks the caller for that (a reader or the writer waits for
+ * one sector erase at most). A reader that keeps state derived from the
+ * records (the power-lost alert) watches diag_journal_clear_count().
+ * @return ESP_OK; ESP_ERR_NOT_FOUND without a journal; ESP_ERR_INVALID_STATE
+ *         while another clear runs; ESP_FAIL after a flash error (the
+ *         records are gone from reads all the same; one that could not be
+ *         erased returns at the next boot).
+ */
+esp_err_t diag_journal_clear(void);
+
+/** Clears since boot: a change tells a reader that the records it read are gone. */
+uint32_t diag_journal_clear_count(void);
+
+/**
  * Trusted UTC now (seconds since 1970), from GNSS or SNTP. Journal records
  * carry it (extrapolated with the monotonic clock) from then on; before the
  * first call they carry 0. The availability ledger feeds it.

@@ -21,7 +21,7 @@ const L = {
   caster: {
     disabled: 'Off',
     wait_network: 'Waiting for the network',
-    wait_data: 'Waiting for RTCM',
+    wait_data: 'Waiting for the receiver',
     connecting: 'Connecting',
     streaming: 'Streaming',
     backoff: 'Waiting to retry',
@@ -53,25 +53,21 @@ const L = {
   stop: {
     none: '',
     rejected: ['login refused 3 times', 'Onocoy refused the login 3 times. Copy the mountpoint, username and password from the ' +
-      'Onocoy console again, then save the slot or press Try again. The station does not retry by itself, so Onocoy does not ' +
-      'start blocking logins from your internet connection.'],
-    login_blocked: ['logins blocked', 'Onocoy is blocking logins from this internet connection for a while (too many ' +
-      'unsuccessful logins). That also affects every other station on the same connection. Check the credentials, wait, ' +
-      'then press Try again.'],
-    in_use: ['credential in use', 'Onocoy says another stream already uses this credential: another device probably streams ' +
-      'with it. Stop that device or give this station its own credential, then press Try again.'],
-    kicked: ['sessions taken over', 'Onocoy kept ending this station\'s sessions soon after login: another device is probably ' +
-      'streaming with the same credential. The station stopped so the two do not keep knocking each other off. Stop the ' +
-      'other device or give this station its own credential, then press Try again.'],
-    duplicate: ['duplicate stream', 'Onocoy reports this stream as a duplicate of another stream. Check the Onocoy console ' +
+      'Onocoy console again, then save or press Try again. The station does not retry on its own: repeated failed logins can ' +
+      'make Onocoy block logins for a while.'],
+    login_blocked: ['logins blocked', 'Onocoy is blocking logins for a while after too many failed ones. Check the credentials, ' +
+      'wait, then press Try again.'],
+    in_use: ['credential in use', 'Onocoy says another stream already uses this credential. Stop the other device or give this ' +
+      'station its own credential, then press Try again.'],
+    kicked: ['sessions taken over', 'Onocoy kept ending this station\'s sessions soon after login: another device probably ' +
+      'streams with the same credential. Stop it or give this station its own credential, then press Try again.'],
+    duplicate: ['duplicate stream', 'Onocoy reports this stream as a duplicate of another one. Check the Onocoy console ' +
       'before you try again.'],
     banned: ['banned', 'Onocoy reports this credential or connection as banned. Check the Onocoy console.'],
   },
   backoff: { fast: 'Fast', standard: 'Standard', polite: 'Polite' },
   trust: { bundle: 'Built-in certificate bundle', custom_ca: 'My own CA certificate', insecure: 'Do not check (insecure)' },
   health: { ok: 'Healthy', degraded: 'Needs attention', recovering: 'Recovering', failed: 'Needs attention' },
-  /* The health level in a sentence (dashboard facts): never the raw level word. */
-  healthFact: { ok: 'healthy', degraded: 'needs attention', recovering: 'recovering', failed: 'needs attention' },
   step: {
     none: 'None',
     resync: 'Resync the stream',
@@ -82,44 +78,41 @@ const L = {
     reboot: 'Restart the station',
   },
   halert: {
-    power_supply: ['Power supply', 'The station restarted from low voltage since it was powered on. Check the power adapter and cable.'],
-    receiver_power: ['Receiver not answering', 'The receiver does not answer commands. Power-cycle the station.'],
-    bands: ['Few signal bands', 'Fewer than 4 frequency bands on the best constellation.'],
-    profile_drift: ['RTCM differs from the profile', 'The messages or rates in the stream differ from the receiver profile.'],
-    heap_fragmented: ['Memory fragmented', 'Free memory is fragmented. A restart clears it.'],
+    power_supply: ['Low voltage', 'Low voltage restarted the station. Check the power adapter and cable.'],
+    receiver_power: ['Receiver not answering', 'The receiver does not answer, even after a reset. Unplug the station for a few seconds.'],
+    bands: ['Few signal bands', 'Fewer than 4 bands on any constellation; Onocoy\'s quality score needs 4.'],
+    profile_drift: ['Output differs from the profile', 'The receiver\'s messages or rates differ from its profile.'],
+    heap_fragmented: ['Memory fragmented', 'Restart the station when convenient.'],
     safe_mode: ['Safe mode', 'Receiver and casters are off after repeated crashes.'],
-    settings_degraded: ['Settings unavailable', 'The settings storage is unusable this boot. Nothing is saved.'],
-    no_upstream: ['No internet', 'Wi-Fi is connected but the internet cannot be reached.'],
-    link_loss: ['Receiver data lost', 'Data from the receiver was lost or corrupted in the last 10 minutes.'],
-    power_lost: ['Power was lost', 'The station lost its power 3 or more times within 24 hours (each time the receiver restarted with it). Check the power adapter, cable and connections.'],
-    receiver_silent: ['Nothing from the receiver', 'The station gets nothing usable from the receiver and no answer to its commands. ' +
-      'Power-cycle the station; if that does not help, check the receiver\'s power and its cable.'],
-    no_satellites: ['No satellites', 'The receiver answers but uses no satellites, so it sends no RTCM. Check that the antenna ' +
-      'is connected to the socket marked M and has a clear view of the sky.'],
-    no_rtcm: ['Receiver answers, no RTCM', 'The receiver answers the station but sends no RTCM. Most often the antenna sees no ' +
-      'satellites: check that it is connected to the socket marked M and has a clear view of the sky.'],
-    rx_held: ['Waiting for you to configure the receiver', 'The station has not configured the receiver yet, so it sends no RTCM. ' +
-      'This is not a failure: confirm the configuration on the Receiver page when you are ready.'],
+    settings_degraded: ['Settings cannot be saved', 'Changes are not saved this boot. Restart the station; if that does not help, see Diagnostics.'],
+    no_upstream: ['No internet', 'Wi-Fi works, but the internet cannot be reached. Check your router.'],
+    link_loss: ['Receiver data lost', 'Some data from the receiver was lost or damaged in the last 10 minutes.'],
+    power_lost: ['Power was lost', 'The station lost power 3 or more times in 24 hours. Check the power adapter, cable and connections.'],
+    receiver_silent: ['Nothing from the receiver', 'The receiver sends nothing and does not answer. Unplug the station for a few seconds; ' +
+      'if that does not help, check the receiver\'s power and cable.'],
+    no_satellites: ['No satellites', 'The receiver sees no satellites. Check that the antenna is on the socket marked M and sees the open sky.'],
+    no_rtcm: ['No corrections from the receiver', 'The receiver answers but sends no corrections. Check that the antenna is on the socket ' +
+      'marked M and sees the open sky.'],
+    rx_held: ['Receiver not configured yet', 'Confirm its configuration on the Receiver page. Until then it sends no corrections.'],
   },
-  /* After a failed receiver configuration: the station's own retry (automatic configuration on), or only the user's. */
+  /* After a failed receiver configuration: the station's own retry (automatic configuration on), or only the user's (configFailedText). */
   configRetry: {
-    auto: 'The station retries it on its own.',
-    user: 'Automatic configuration is off, so the station does not retry it: configure the receiver again on the receiver page when ready.',
+    auto: 'The station tries again on its own.',
+    user: 'Automatic configuration is off, so the station does not retry. Press Apply again in Receiver settings.',
   },
   salert: {
-    unsupported_model: ['Receiver model not supported', 'The station forwards what the receiver sends but does not configure or update it.'],
-    config_failed: ['Receiver configuration failed', 'The last profile apply failed.'],
-    position_mismatch: ['Position mismatch', 'The position in the stream is more than 5 mm away from the locked position.'],
-    antenna_moved: ['Antenna moved?', 'The fixed base sends no RTCM after a receiver restart. If the antenna moved, survey again.'],
-    receiver_attention: ['Receiver needs attention', 'RTCM did not come back after a receiver update session ended.'],
-    receiver_in_loader: ['Receiver in its loader', 'The receiver waits at its loader prompt without an update session. The station only listens until you choose what to do.'],
+    unsupported_model: ['Receiver model not supported', 'The station streams what this receiver sends but does not configure or update it.'],
+    config_failed: ['Receiver configuration failed', ''],   /* the text depends on the retry: configFailedText() */
+    position_mismatch: ['Position mismatch', 'The streamed position is more than 5 mm from the locked one.'],
+    antenna_moved: ['Antenna moved?', 'The fixed base sends nothing since the receiver restarted. If the antenna moved, survey again.'],
+    receiver_attention: ['Receiver needs attention', 'Corrections did not come back after the receiver update.'],
+    receiver_in_loader: ['Receiver in its update loader', 'The station only listens until you choose what to do in Settings.'],
     no_receiver: ['No receiver found', ''],   /* the text depends on the alert: noReceiverText() */
-    signals_mismatch: ['Signals differ from the signal group', 'After the last configuration the receiver reported other ' +
-      'signals than the profile\'s signal group should give. See the receiver page.'],
+    signals_mismatch: ['Signals differ from the signal group', 'The receiver reports other signals than its signal group should give.'],
   },
   /* Why the station's own restart (to look for the receiver) is postponed now (health reboot_hold). */
   /* health.reboot_cap_limit: which limit of the restart cap sets its wait */
-  capLimit: { hour: 'at most one an hour', day: 'at most 3 in 24 hours' },
+  capLimit: { hour: 'at most one restart an hour', day: 'at most 3 restarts in 24 hours' },
   hold: {
     setup: 'first setup not finished',
     ap_client: 'someone is on the station\'s Wi-Fi',
@@ -133,12 +126,13 @@ const L = {
     brownout: 'after a power dip', sdio: 'over SDIO', usb: 'over USB', jtag: 'over JTAG', efuse: 'after an eFuse error',
     pwr_glitch: 'after a power glitch', cpu_lockup: 'after a CPU lockup',
   },
+  /* Why a restart was planned, as it follows "Restarted " (startSentence) or "Restart " (the journal). */
   plannedReason: {
-    none: '', user: 'you restarted it', factory_reset: 'a factory reset', admin_reset: 'a password reset with the BOOT button',
-    app_update: 'an app update', app_revert: 'a failed app update went back to the previous version',
-    gnss_ladder: 'it restarted to look for the receiver', network_ladder: 'Wi-Fi recovery', low_heap: 'memory ran low',
-    safe_mode_retry: 'it tried normal operation again after safe mode', safe_mode_cleared: 'you left safe mode',
-    nvs_slot_switch: 'a settings storage switch', boot_failure: 'a failed start', app_rollback: 'you went back to the previous version',
+    none: '', user: 'by you', factory_reset: 'for a factory reset', admin_reset: 'after a password reset with the BOOT button',
+    app_update: 'into an app update', app_revert: 'back to the previous version after a failed app update',
+    gnss_ladder: 'to look for the receiver', network_ladder: 'by Wi-Fi recovery', low_heap: 'because memory ran low',
+    safe_mode_retry: 'to try normal operation after safe mode', safe_mode_cleared: 'as you left safe mode',
+    nvs_slot_switch: 'for a settings storage switch', boot_failure: 'after a failed start', app_rollback: 'as you went back to the previous version',
   },
   upstream: { none: 'Not checked yet', ok: 'Reachable', no_ip: 'No IP address', dns_failed: 'DNS fails', no_upstream: 'Router only, no internet' },
   apReason: { setup: 'first setup', fallback: 'Wi-Fi unreachable', linger: 'closing soon', recovery: 'recovery (BOOT button)' },
@@ -228,24 +222,17 @@ const L = {
   linkMode: { off: 'Off', stream: 'Streaming', command: 'Command session', raw: 'Raw (update)' },
   baseMode: { survey_in: 'Survey-in', fixed: 'Fixed position' },
   posSource: { none: 'None', survey: 'Survey-in', averaged: 'Averaged', user: 'Entered by you' },
-  setting: { on: 'on', off: 'off', unknown: 'unknown' },
-  recovery: {
-    full: ['Full (may restart the station)', 'Every recovery step, up to restarting the station when that can help.'],
-    no_reboot: ['Never restart the station', 'Every step that acts on the receiver, but the station itself is never restarted for it.'],
-    alerts_only: ['Alerts only', 'Nothing is sent to the receiver and nothing restarts: a stall is only shown and recorded in the journal.'],
-  },
+  /* If corrections stop (gnss/recovery): the names of Receiver settings' choice (MANAGE), the same on every page. */
+  recovery: { full: 'The station', no_reboot: 'The station, but never restart itself', alerts_only: 'Me (alerts only)' },
   trigger: { protected: 'Onocoy caster down', assoc_no_ip: 'connected without an IP address', unreached: 'a caster not reached' },
-  liveSky: {
-    off: 'off', pending: 'waiting', on: 'on', on_profile: 'on (receiver profile)', blocked: 'not available', stopping: 'turning off',
-  },
   liveWhy: {
     none: '',
-    busy: 'the station is busy with the receiver; it turns on once that ends',
+    busy: 'the station is busy with the receiver',
     not_streaming: 'the receiver is not streaming',
-    maintenance: 'receiver maintenance: nothing is sent to the receiver',
-    autocfg_off: 'automatic configuration is off, so the station sends the receiver nothing',
+    maintenance: 'receiver maintenance is on',
+    autocfg_off: 'automatic configuration is off',
     unsupported: 'the station does not configure this receiver model',
-    reconfigured: 'the receiver was configured or restarted since; extend the view to turn it on again',
+    reconfigured: 'the receiver was configured or restarted; extend to turn them on again',
     rejected: 'the receiver refused the command',
     no_answer: 'the receiver did not answer',
     flash: 'a receiver update runs',
@@ -258,7 +245,7 @@ const L = {
   previewWhen: { always: 'always', if_differs: 'only if the receiver differs', if_off: 'only if it is off in the receiver' },
   /* Signal-group comparison (GET /api/gnss/signal-test). */
   sgtState: {
-    idle: 'Not running', switching: 'Switching', settling: 'Settling', measuring: 'Measuring', deciding: 'Waiting for your choice',
+    idle: '', switching: 'Switching', settling: 'Settling', measuring: 'Measuring', deciding: 'Waiting for your choice',
     restoring: 'Switching back',
   },
   sgtOutcome: {
@@ -275,25 +262,29 @@ const L = {
 /*
  * Signal groups offered by name (the receiver's CONFIG SIGNALGROUP pairs,
  * main and second antenna input): exactly the pairs UM982 build 25164
- * accepts, with the bands each gives on the main input (as that build
- * reported them). Other pairs are entered as numbers, for another firmware.
+ * accepts, with what each gives on the main input (as that build reported
+ * it): [pair, name, one line, short name]. Other pairs are entered as
+ * numbers, for another firmware.
  */
 const SG_CHOICES = [
-  ['3 6', '3 6 (recommended): Galileo E6', 'Four Galileo bands (E1, E5a, E5b, E6) and QZSS L6; BeiDou B1I, B1C, B2b and B3I ' +
-    '(no B2a)'],
-  ['7 0', '7 0: BeiDou B2a', 'Four BeiDou bands (every BeiDou signal, B2a included); Galileo E1, E5a, E5b (no E6); second ' +
-    'antenna input off; meant for base stations'],
-  ['4 5', '4 5: factory', 'The receiver\'s factory setting: at most three bands on any constellation'],
-  ['5 0', '5 0: no L5', 'Low-power set: GPS L1 and L2, Galileo E1 and E5b, no L5 at all; second antenna input off'],
+  ['3 6', 'Galileo E6', 'Four Galileo bands; no BeiDou B2a.', 'Galileo E6'],
+  ['7 0', 'BeiDou B2a', 'Four BeiDou bands; no Galileo E6; second antenna off.', 'BeiDou B2a'],
+  ['4 5', 'Factory setting', 'At most three bands on any constellation.', 'factory'],
+  ['5 0', 'No L5', 'Low power, no L5 signals; second antenna off.', 'no L5'],
 ];
-/* The pairs UM982 build 25164 accepts; it refuses every other pair. */
-const SG_KNOWN_PAIRS = '4 5, 3 6, 5 0 and 7 0';
+const SG_RECOMMENDED = '3 6';
 
-/** "3 6 (recommended)" for a known pair, else "M S". */
+/** "3 6 (Galileo E6)" for a named pair, else "M S". */
 function sgName(m, s) {
   const key = m + ' ' + s;
   const c = SG_CHOICES.find(x => x[0] === key);
-  return c ? c[1] : key;
+  return c ? key + ' (' + c[3] + ')' : key;
+}
+
+/** A receiver's firmware string, with " (build N)" only when the string does not hold the build already. */
+function fwText(fw, build) {
+  if (!fw) return DASH;
+  return build && String(fw).indexOf(String(build)) < 0 ? fw + ' (build ' + build + ')' : fw;
 }
 
 /* MSM signal IDs by name (public RTCM signal tables), per constellation. */
@@ -320,13 +311,11 @@ const MAINT_CHOICES = [[900, '15 minutes'], [1800, '30 minutes'], [3600, '1 hour
 
 /* Journal enumerations by C value (API.md appendix: position in C order). */
 const J = {
-  kind: { boot: 'Start', session: 'Previous session', reboot: 'Restart', ladder_step: 'Recovery step', app_update: 'App update',
-    app_revert: 'App reverted', gnss_flash: 'Receiver update', safe_mode: 'Safe mode', wifi_disconnect: 'Wi-Fi disconnect',
-    data_loss: 'Data loss', caster_down: 'Caster session ended', caster_up: 'Caster back', wifi_up: 'Wi-Fi back',
-    caster_stop: 'Caster stopped', rx_maintenance: 'Receiver maintenance', live_view: 'Live view', sg_test: 'Signal groups',
-    rx_boot: 'Receiver at power-on' },
-  resetClass: ['power on', 'planned', 'crash', 'brownout', 'other'],
-  /* The same by C value, as the API names them (lifecycle_reset_class_t, lifecycle_reboot_reason_t). */
+  /* The event list's names (a connection or a recovery step is named by connRow, by its recovery). */
+  kind: { boot: 'Start', session: 'Previous run', reboot: 'Restart', app_update: 'App update', app_revert: 'App rolled back',
+    gnss_flash: 'Receiver update', safe_mode: 'Safe mode', data_loss: 'Data lost', rx_maintenance: 'Receiver maintenance',
+    live_view: 'Sky view', sg_test: 'Signal groups', rx_boot: 'Receiver at power-on' },
+  /* By C value, as the API names them (lifecycle_reset_class_t, lifecycle_reboot_reason_t). */
   resetClassKey: ['power_on', 'planned', 'crash', 'brownout', 'other'],
   rebootKey: ['none', 'user', 'factory_reset', 'admin_reset', 'app_update', 'app_revert', 'gnss_ladder', 'network_ladder',
     'low_heap', 'safe_mode_retry', 'safe_mode_cleared', 'nvs_slot_switch', 'boot_failure', 'app_rollback'],
@@ -335,34 +324,38 @@ const J = {
     'app rollback'],
   resetReason: ['unknown', 'power on', 'reset pin', 'software', 'panic', 'interrupt watchdog', 'task watchdog', 'watchdog',
     'deep sleep', 'brownout', 'SDIO', 'USB', 'JTAG', 'eFuse', 'power glitch', 'CPU lockup'],
-  trial: ['none', 'confirming', 'verifying', 'watching'],
   ladder: ['receiver', 'network', 'caster'],
-  outcome: ['started', 'healthy again', 'failed or refused', 'abandoned', 'not run (recovery mode)', 'postponed'],
-  gnssRung: [null, 'resync', 'restart link', 'search baud rate', 're-apply profile', 'reset receiver',
-    'restarted the station to look for the receiver', 'power-cycle alert', 'waiting for the next search',
-    'restart postponed'],
+  /* A recovery step's outcome after its name (0: started, said by the name alone) */
+  outcome: ['', 'healthy again', 'failed', 'given up', 'skipped (your recovery choice)', 'postponed'],
+  gnssRung: [null, 'resyncing the data', 'reconnecting to the receiver', 'searching for the receiver', 'configuring the receiver again',
+    'restarting the receiver', 'restarted the station to look for the receiver', 'asked for a receiver power cycle',
+    'waiting for the next search', 'restart postponed'],
   /* Why a restart was postponed (ladder_step code 9, outcome 0: bits 16-23 of b; 0 = not recorded). */
   capWhy: ['', 'at most one an hour', 'at most 3 in 24 hours', 'another job holds restarts'],
   /* hold_mask bits of a postponed restart (ladder_step code 9, outcome 5). */
   holdBits: ['setup', 'ap_client', 'admin', 'power_on'],
-  netRung: [null, 'reconnect', 'renew DHCP and fallback DNS', 'restart Wi-Fi', 'restart station'],
+  netRung: [null, 'reconnecting', 'renewing the address', 'restarting the Wi-Fi', 'restarting the station'],
   netWhy: ['none', 'internet reachable', 'no internet', 'receiver update open', 'too soon', 'restart blocked', 'someone on the access point',
     'no restart for this cause', 'access point wait over'],
-  netTrigger: ['protected caster down', 'connected without an IP address', 'a caster not reached'],
+  netTrigger: ['Onocoy down', 'no IP address', 'a caster not reached'],
   fail: ['none', 'dns', 'connect', 'tls', 'timeout', 'remote_close', 'write_stall', 'keepalive', 'auth', 'mount_busy', 'config', 'banned',
     'login_blocked', 'in_use', 'replaced', 'local'],
   /* ntrip_stop_t (a caster_stop record's bits 8-15) */
   stop: ['none', 'rejected', 'login_blocked', 'in_use', 'kicked', 'duplicate', 'banned'],
   liveEv: [null, 'Opened', 'Extended', 'Closed', 'Satellite output on', 'Satellite output off'],
-  liveEnd: ['', 'stopped by you', 'time up', 'nobody watching', 'receiver update'],
-  liveCmd: ['accepted', 'rejected', 'no answer', 'not sent'],
+  liveEnd: ['', 'closed by you', 'time up', 'nobody watching', 'receiver update'],
+  /* A satellite output command's answer (0: accepted, said by nothing) */
+  liveCmd: ['', 'refused by the receiver', 'no answer from the receiver', 'not sent'],
   /* sg_test: the outcome in b of an end (station_sgt_outcome_t) */
   sgtOut: ['', 'kept', 'timed out', 'cancelled', 'rejected', 'failed', 'interrupted'],
   /* station_flash_outcome_t */
   flashOut: ['none', 'updated', 'the old firmware still runs', 'an unexpected build runs', 'not done (receiver unchanged)',
     'package refused', 'not started', 'waiting for a decision', 'package checked'],
-  loss: [null, 'UART FIFO overflows', 'UART buffer full', 'line errors', 'RTCM CRC errors', 'framer discarded bytes',
-    'hub publish failures', 'baud-switch bytes', 'UART events dropped'],
+  /* data_loss by counter id: [event, unit of the count] */
+  loss: [null, ['Receiver data lost', 'overflow', 'overflows'], ['Receiver data lost', 'full buffer', 'full buffers'],
+    ['Receiver link errors', 'error', 'errors'], ['Damaged corrections', 'message', 'messages'], ['Receiver data lost', 'byte', 'bytes'],
+    ['Corrections not passed on', 'message', 'messages'], ['Bytes dropped at a speed change', 'byte', 'bytes'],
+    ['Receiver data lost', 'missed event', 'missed events']],
 };
 
 const ESP_ERR = {
@@ -385,18 +378,24 @@ const WIFI_REASON = {
   210: 'network not found with a supported security mode', 211: 'network security too weak', 212: 'signal too weak',
 };
 
-function wifiReason(code) {
+/** A Wi-Fi reason in words; noCode: without the number (the setup's connect view). */
+function wifiReason(code, noCode) {
   if (code === null || code === undefined || code === 0) return DASH;
-  return WIFI_REASON[code] ? WIFI_REASON[code] + ' (' + code + ')' : 'reason ' + code;
+  if (!WIFI_REASON[code]) return 'reason ' + code;
+  return noCode ? WIFI_REASON[code] : WIFI_REASON[code] + ' (' + code + ')';
 }
 
-/** "Good", "Fair", "Weak" plus bars for an RSSI in dBm. */
-function rssiView(rssi) {
-  if (rssi === null || rssi === undefined) return DASH;
+/**
+ * "Good", "Fair", "Weak" plus bars for an RSSI in dBm; noDbm: the word only
+ * (the dashboard, the network list). A reading is -127 to -1 dBm: null and 0
+ * are unknown and show a dash.
+ */
+function rssiView(rssi, noDbm) {
+  if (rssi === null || rssi === undefined || rssi >= 0) return DASH;
   const n = rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : 1;
   const word = ['', 'Weak', 'Fair', 'Good', 'Excellent'][n];
   return h('span', { class: 'nowrap' }, h('span', { class: 'sig s' + n, 'aria-hidden': 'true' }, h('i'), h('i'), h('i'), h('i')),
-    ' ' + word + ' (' + rssi + ' dBm)');
+    ' ' + word + (noDbm ? '' : ' (' + rssi + ' dBm)'));
 }
 
 /** Tone for a station state. */
@@ -434,46 +433,71 @@ function inMinutes(s) {
 function noReceiverText(a) {
   const next = a.next_detect_in_s === null || a.next_detect_in_s === undefined ? '' :
     a.next_detect_in_s <= 0 ? ' Searching now.' : ' Next search in ' + inMinutes(a.next_detect_in_s) + '.';
-  if (a.saw_bytes) {
-    return 'Bytes arrive but nothing the station understands: check the wiring and the receiver\'s port speed.' + next;
-  }
-  return 'No receiver found: nothing arrives on the receiver port. Check the receiver\'s power and the cable from its COM1 ' +
-    'to the station (receiver TX to GPIO1, RX to GPIO2).' + next;
+  if (a.saw_bytes) return 'Data arrives, but the station cannot read it. Check the wiring and the receiver\'s port speed.' + next;
+  return 'Nothing arrives from the receiver. Check its power and the cable from its COM1 to the station ' +
+    '(receiver TX to GPIO1, RX to GPIO2).' + next;
+}
+
+/* The Status page's no-receiver line (the pins are in the Receiver page's panel). */
+function noReceiverLead(a) {
+  if (a.saw_bytes) return 'Data arrives, but the station cannot read it. Check the wiring and the receiver\'s port speed.';
+  return 'Nothing arrives from the receiver. Check its power and the COM1 cable.';
+}
+
+/* "next search in 23 s", or null. */
+function nextSearchText(a) {
+  const n = a.next_detect_in_s;
+  if (n === null || n === undefined) return null;
+  return n <= 0 ? 'searching now' : 'next search in ' + inMinutes(n);
+}
+
+/** The failed-configuration alert's text: when the station tries again, or that only the user does (alert or GET /api/gnss). */
+function configFailedText(autoRetry, retryInS) {
+  if (autoRetry === false) return L.configRetry.user;
+  return retryInS ? 'The station tries again in ' + inMinutes(retryInS) + '.' : L.configRetry.auto;
 }
 
 /**
- * The station's own restart to look for the receiver, in words (health:
+ * The station's own restart to look for the receiver (health:
  * recovery_mode, reboot_hold, reboot_hold_left_s, reboot_cap_wait_s,
- * reboot_cap_limit, reboot_recheck); null when nothing about it is pending
- * (the station reports these only while its receiver recovery runs) and in
- * every recovery mode but full recovery, where the station never restarts
- * itself for the receiver.
- * reboot_hold_left_s is when the last reason ends at the latest (the
- * presence limit, the end of the first hour); the setup hold has no limit,
- * so no deadline is named for it, but the restart cap still is. When a hold
- * and the cap both apply, the restart waits for the later of the two, so
- * that is the time named.
+ * reboot_cap_limit, reboot_recheck) as {k, t, why, limit}: k 'cap' (next
+ * possible in t), 'latest' (in t at the latest), 'later' (a hold with no
+ * end: the setup's), 'recheck'; null when nothing is pending (reported only
+ * while the receiver recovery runs) and in every mode but full recovery,
+ * where the station never restarts itself for the receiver. With a hold and
+ * the cap, the restart waits for the later of the two.
  */
-function restartPlanText(hl) {
+function restartPlan(hl) {
   if (!hl || hl.recovery_mode !== 'full') return null;
   const hold = hl.reboot_hold || [];
   const cap = hl.reboot_cap_wait_s;
   const hasCap = cap !== null && cap !== undefined;
-  const holdLeft = hold.indexOf('setup') >= 0 ? null : hl.reboot_hold_left_s;
-  const hasLeft = holdLeft !== null && holdLeft !== undefined;
+  const left = hold.indexOf('setup') >= 0 ? null : hl.reboot_hold_left_s;
+  const hasLeft = left !== null && left !== undefined;
   if (!hold.length && !hasCap && !hl.reboot_recheck) return null;
-  const intro = 'When nothing answers, the station restarts itself to look for the receiver, ' +
-    'at most once an hour and 3 times in 24 hours.';
-  const limit = hasCap ? (L.capLimit[hl.reboot_cap_limit] || 'the restart limit') : '';
-  if (hold.length) {
-    const reasons = ' Postponed: ' + hold.map(r => L.hold[r] || String(r).replace(/_/g, ' ')).join(', ');
-    if (hasCap && (!hasLeft || cap > holdLeft)) {
-      return intro + reasons + '; then ' + limit + ': next possible in ' + inMinutes(cap) + '.';
-    }
-    return intro + reasons + (hasLeft ? ' (at the latest in ' + inMinutes(holdLeft) + ')' : '') + '.';
-  }
-  if (hasCap) return intro + ' Next possible in ' + inMinutes(cap) + ' (' + limit + ').';
-  return intro + ' The station looks at it again after the next search.';
+  const why = hold.map(r => L.hold[r] || String(r).replace(/_/g, ' ')).join(', ');
+  if (hasCap && (!hold.length || !hasLeft || cap > left)) return { k: 'cap', t: inMinutes(cap), why: why, limit: hl.reboot_cap_limit };
+  if (hold.length) return { k: hasLeft ? 'latest' : 'later', t: hasLeft ? inMinutes(left) : '', why: why };
+  return { k: 'recheck', why: '' };
+}
+
+/** restartPlan() as a sentence (Diagnostics). */
+function restartPlanText(hl) {
+  const p = restartPlan(hl);
+  if (!p) return null;
+  const why = ' to get the receiver back.' + (p.why ? ' Postponed: ' + p.why + '.' : '');
+  if (p.k === 'cap') return 'The station restarts itself' + why + ' Next possible in ' + p.t + ' (' + (L.capLimit[p.limit] || 'the restart limit') + ').';
+  if (p.k === 'latest') return 'The station restarts itself in ' + p.t + ' at the latest' + why;
+  if (p.k === 'later') return 'The station restarts itself later' + why;
+  return 'The station decides after the next search whether to restart itself.';
+}
+
+/** restartPlan() in a few words, lower case, to follow the next search on one muted line (Status, Receiver). */
+function restartPlanShort(hl) {
+  const p = restartPlan(hl);
+  if (!p) return null;
+  return p.k === 'cap' ? 'station restart possible in ' + p.t : p.k === 'latest' ? 'station restart in ' + p.t + ' at the latest' :
+    p.k === 'later' ? 'station restart postponed (' + p.why + ')' : 'station may restart after the next search';
 }
 
 /** After a power-on start: whether the receiver kept running (health station.rx_boot). */
@@ -483,11 +507,7 @@ function rxBootSentence(v) {
       return 'The receiver kept running: only the ESP32 was reset (its reset pin, such as the USB auto-reset), not a power loss';
     case 'restarted':
       return 'The receiver restarted too: the power was cut';
-    case 'pending':
-      return 'Whether the receiver kept running is still being judged (within 30 seconds of the start)';
-    case 'unknown':
-      return 'Nothing the receiver sent told whether it kept running; not counted as a power loss';
-    default:
+    default:   /* still judged, or not known: nothing to say */
       return '';
   }
 }
@@ -497,14 +517,14 @@ function startSentence(cls, reason, planned) {
   const why = planned && planned !== 'none' ? lbl(L.plannedReason, planned) : '';
   switch (cls) {
     case 'power_on':
-      return 'Started after power-on, or a reset by its pin (this chip reports both alike)';
+      return 'Started after power-on or a reset by its pin';
     case 'planned':
-      return 'Restarted on purpose' + (why ? ': ' + why : '');
+      return 'Restarted ' + (why || 'on purpose');
     case 'crash':
-      return 'Restarted after a crash' + (reason ? ' (' + lbl(L.resetReason, reason).replace(/^(after|by|for|from|over) /, '') + ')' : '');
+      return 'Restarted after a crash' + (reason && reason !== 'panic' ? ' (' + lbl(L.resetReason, reason).replace(/^(after|by|for|from|over) /, '') + ')' : '');
     case 'brownout':
-      return 'Restarted after a power dip (the supply voltage fell too low)';
+      return 'Restarted after a power dip (low supply voltage)';
     default:
-      return 'Restarted' + (reason ? ' ' + lbl(L.resetReason, reason) : '') + (why ? ': ' + why : '');
+      return 'Restarted' + (reason ? ' ' + lbl(L.resetReason, reason) : '') + (why ? ', ' + why : '');
   }
 }

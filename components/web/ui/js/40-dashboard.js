@@ -2,299 +2,239 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Status dashboard: overall state, receiver and RTCM, the Onocoy day (UTC)
- * with the remaining offline budget, every caster, Wi-Fi, alerts. Built
- * from the status model on every update and patched into the page (no
- * inputs, and no element with a listener of its own: patch() replaces such
- * an element every time, which would take the keyboard focus with it), so
- * the links and buttons keep keyboard focus and text stays selectable
- * across the 1 s updates. The one button, "Check again" on the no-receiver
- * alert, carries data-act and the page's root handles its click
- * (detectClicks); patchDetect() keeps the keyboard focus on the alert when
- * that button goes. The live view entry is a link that starts the window.
- * Visitors without a session see the public form (names and states only).
+ * Status page: the top card (title, one line, its button, "Also:" lines,
+ * a few facts), Onocoy's day, three receiver rows and the other casters,
+ * all from stationState() (15-state.js), so no card contradicts another.
  *
- * Every "today" figure (online, offline, the offline budget) comes from the
- * availability ledger, which is kept across restarts.
+ * Patched into the page on every update with no element that has a
+ * listener of its own (patch() would replace it, and the focus with it):
+ * the buttons carry data-act and the page's root handles their clicks;
+ * patchDetect() keeps the focus when "Check again" goes. The title is
+ * announced when it changes. Visitors without a session see the top card,
+ * the casters by name and state, and the signals with the band table.
  */
-
-/* Onocoy's streak needs at least 99.8 % graced uptime per UTC day. */
-const STREAK_PERMILLE = 998;
 
 Views.dashboard = {
   title: 'Status',
   create(el) {
+    /* The public page's signals (GET /api/gnss/signals, open to visitors while public status is on). */
+    let sig = null;
+    const stopSig = isAdmin() ? null : poller(5000, async () => {
+      sig = await api('GET', '/api/gnss/signals');
+      render();
+    });
+    /* Open casters that stream while Onocoy does (GET /api/casters warnings): fetched when the turned-on casters change. */
+    let openSlots = [], openKey = '';
+    const loadOpen = async () => {
+      try {
+        const d = await api('GET', '/api/casters');
+        openSlots = openCasterSlots(d);
+      } catch (e) {
+        openSlots = [];
+      }
+      render();
+    };
+    /* el is this visit's own (openView): after the page is left, nothing draws into the next one. */
+    let gone = false;
     const render = () => {
       const s = S.status;
+      if (gone) return;
       if (!s) {
         patch(el, h('p', { class: 'loading' }, 'Waiting for the station…'));
         return;
       }
-      patchDetect(el, isAdmin() && !s.public ? adminDashboard(s) : publicDashboard(s));
+      const admin = isAdmin() && !s.public;
+      const st = stationState(s, admin);
+      if (admin) {
+        const on = enabledCasters(s);
+        const key = on.some(c => c.protected) && on.length > 1 ? on.map(c => c.slot + ':' + c.host).join('|') : '';
+        if (key !== openKey) {
+          openKey = key;
+          openSlots = [];
+          if (key) loadOpen();
+        }
+      }
+      patchDetect(el, admin ? adminDashboard(s, st, openSlots) : publicDashboard(s, st, sig));
     };
     detectClicks(el, render);
+    endMaintClicks(el, render);
+    leaveSafeClicks(el, render);
     render();
-    return { update: render };
+    return {
+      update: render,
+      destroy() {
+        gone = true;
+        if (stopSig) stopSig();
+      },
+    };
   },
 };
 
-function enabledCasters(s) {
-  return (s.casters || []).filter(c => c.enabled !== false && c.state !== 'disabled');
+/* The top card's buttons: links, or buttons the page's root handles (data-act). */
+function heroAction(a) {
+  if (a.act === 'detect') return detectButton(a.alert);
+  if (a.act) return h('button', { type: 'button', class: 'btn small', 'data-act': a.act }, a.label);
+  return link(a.label, a.href, a.primary ? 'btn primary' : 'btn small');
 }
 
-/** The overall state: {tone, head} (the hero card, and what the alerts card may say). */
-function heroState(s) {
-  const rcv = s.receiver || {};
-  const hl = s.health || {};
-  const on = enabledCasters(s);
-  const streaming = on.filter(c => c.state === 'streaming').length;
-  let tone = 'ok', head;
-  if (s.safe_mode && s.safe_mode.active) {
-    tone = 'bad';
-    head = 'Safe mode';
-  } else if (rcv.rx_maintenance) {
-    tone = 'warn';
-    head = 'Receiver maintenance';
-  } else if (rcv.state !== 'streaming') {
-    tone = rcv.state === 'no_receiver' ? 'bad' : 'warn';
-    head = lbl(L.station, rcv.state);
-  } else if (!on.length) {
-    tone = 'warn';
-    head = 'No caster enabled';
-  } else if (streaming === on.length) {
-    head = 'Streaming';
-  } else {
-    tone = streaming ? 'warn' : 'bad';
-    head = streaming ? 'Partly streaming' : 'Not streaming';
-  }
-  if (hl.level === 'failed') tone = 'bad';
-  else if (tone === 'ok' && hl.level && hl.level !== 'ok') tone = 'warn';
-  return { tone: tone, head: head, on: on, streaming: streaming };
+function heroCard(s, st) {
+  const acts = st.actions.map(heroAction).filter(Boolean);
+  /* The no-receiver plan line says whether a search runs: it takes the focus when "Check again" goes (patchDetect). */
+  const noRx = st.key === 'no_receiver';
+  const focusLine = on => (on ? { tabindex: '-1', 'data-detect-text': '' } : {});
+  const lead = st.trial ? ['Trying ' + st.trial + ': ', trialLeftEl(s.network || {}), '. ', st.lead] : st.lead;
+  return h('section', { class: 'card hero ' + st.tone },
+    h('h2', { class: 'state', 'aria-live': 'polite', 'aria-atomic': 'true' }, st.head),
+    h('p', Object.assign({ class: 'line' }, focusLine(noRx && !st.plan)), lead),
+    acts.length ? h('div', { class: 'hero-actions form-actions' }, acts) : null,
+    st.plan ? h('p', Object.assign({ class: 'muted small' }, focusLine(noRx)), st.plan) : null,
+    st.also.length ? h('ul', { class: 'also' }, st.also.map(a => h('li', { class: a.tone },
+      h('span', { class: 'ic', 'aria-hidden': 'true' }, a.tone === 'bad' ? '✕' : a.tone === 'info' ? 'i' : '!'),
+      h('span', null, h('strong', null, 'Also: ' + a.title + '.'), a.text ? ' ' + a.text : ''),
+      link('Details', a.href, 'btn small')))) : null,
+    st.facts.length ? h('dl', { class: 'facts' }, st.facts.map(f => h('div', null, h('dt', null, f[0]), h('dd', null, f[1])))) : null);
 }
 
-function heroCard(s) {
-  const hl = s.health || {};
-  const st = heroState(s);
-  const facts = [];
-  if (st.on.length) facts.push(st.streaming + ' of ' + st.on.length + ' casters streaming');
-  /* The health level in words, never the raw level ("failed", "degraded"). */
-  if (hl.level) facts.push(lbl(L.healthFact, hl.level));
-  if (hl.recovery_mode && hl.recovery_mode !== 'full') facts.push('receiver recovery: ' + lbl(L.recovery, hl.recovery_mode).toLowerCase());
-  if (s.uptime_s !== undefined) facts.push('up ' + fmt.dur(s.uptime_s));
-  return h('section', { class: 'card hero ' + st.tone }, h('div', { class: 'state' }, st.head), h('div', { class: 'facts' }, facts.join(' · ')));
+/* The next 00:00 UTC in local time ("8:00 PM"). */
+function utcResetTime() {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1))
+    .toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
-function receiverCard(s, admin) {
+/* Onocoy's day: the verdict, the offline time left in large type with its bar, and two rows. */
+function onocoyCard(s, st) {
+  const d = onocoyDay(s, st);
+  if (!d) return null;
+  const c = st.ono;
+  return h('section', { class: 'card fit-kv' },
+    cardHead('Onocoy today', badge(d.verdict, d.tone)),
+    d.why ? h('p', { class: 'small t-' + d.tone }, d.why) : null,
+    d.known ? [
+      h('div', { class: 'big t-' + d.tone }, d.left > 0 ? fmt.dur(d.left) : '0' + NB + 's', ' ', h('small', null, 'offline time left')),
+      bar(d.used, d.tone, 'Share of today\'s offline time used'),
+      h('div', { class: 'muted small' }, 'Resets at ' + utcResetTime() + ' · Estimate')] :
+      h('p', { class: 'muted' }, 'Shows once the station has the time (from GNSS or the internet).'),
+    kv([['Online today', fmt.dur(c.today_online_s)], ['Offline today', fmt.dur(d.known ? d.down : c.today_offline_s)]]));
+}
+
+/* "Locked", "Surveying, 11 min left"... (position_locked is the stored profile's base mode: it runs once the profile is applied).
+ * A survey needs data: while none arrives (delivering false) it is paused, not counting down. */
+function positionText(r, delivering) {
+  if (r.position_locked) return r.profile_applied ? 'Locked' : 'Fixed, not applied yet';
+  if (r.surveying && !delivering) return 'Surveying, paused';
+  if (r.surveying) return 'Surveying' + (r.survey_window_left_s ? ', ' + inMinutes(r.survey_window_left_s) + ' left' : '');
+  return 'Not locked';
+}
+
+const okMark = ok => h('span', { class: ok ? 't-ok' : 't-warn' }, ok ? '✓' : '✕');
+
+/* The band row: "4 bands on Galileo ✓ (the most this receiver can reach)"; a dash while the receiver does not deliver.
+ * told: the top card says what Onocoy needs. */
+function bandsView(r, q, told) {
+  if (!q.known) return DASH;
+  const ok = !q.fewBands;
+  const note = !ok ? (told ? null : 'Onocoy needs 4.') : /UM982/.test(r.model || '') ? 'The most this receiver can reach.' : null;
+  return [q.bands + ' bands' + (q.sys ? ' on ' + lbl(L.sys, q.sys) : ''), ' ', okMark(ok),
+    note ? h('div', { class: 'muted small' }, note) : null];
+}
+
+/* GLONASS: ticked only when it is tracked and the receiver accepted message 1230. */
+function glonassView(r, q) {
+  if (!q.known) return DASH;
+  if (q.noGlonass) return ['Not tracked ', okMark(false)];
+  if (q.refused1230) return ['Message 1230 refused ', okMark(false)];
+  return r.rtcm1230_supported === true ? ['Tracked ', okMark(true)] : 'Tracked';
+}
+
+/* Three receiver rows and a link to the page with the rest; without corrections only the position. */
+function receiverCard(s, st) {
   const r = s.receiver || {};
-  const rate = outputRate();
-  const rows = [
-    admin ? ['Receiver', r.model ? r.model + (r.firmware ? ' · ' + r.firmware : '') : DASH] : null,
-    admin ? ['Last RTCM', h('span', { class: 't-' + ageTone(r.rtcm_age_ms) }, r.rtcm_age_ms === null || r.rtcm_age_ms === undefined ? 'never' : fmt.ms(r.rtcm_age_ms) + ' ago')] : null,
-    admin ? ['Output', rate === null ? DASH : fmt.kbps(rate)] : null,
-    ['Best constellation', r.best_sys ? lbl(L.sys, r.best_sys) + ' · ' + r.best_bands + ' bands' : r.best_bands ? r.best_bands + ' bands' : DASH],
-  ];
-  if (admin) {
-    let base;
-    /* position_locked is the stored profile's base mode: the receiver runs it only once the profile is applied. */
-    if (r.position_locked) base = r.profile_applied ? 'Position locked' : 'Fixed position (not applied yet)';
-    else if (r.surveying) base = 'Surveying' + (r.survey_window_left_s ? ', ' + fmt.dur(r.survey_window_left_s) + ' left' : '');
-    else base = 'Not locked';
-    rows.push(['Base', base]);
-    rows.push(['Profile', r.profile_applied ? 'Applied' : h('span', { class: 't-warn' }, 'Not applied')]);
-    if (r.rx_maintenance) {
-      rows.push(['Maintenance', h('span', { class: 't-warn' }, 'On, ' + fmt.dur(Math.ceil((r.maintenance_left_s || 0) / 60) * 60) + ' left: nothing is sent to the receiver')]);
-    }
-    if (r.uart_closed && !(s.safe_mode && s.safe_mode.active)) rows.push(['Receiver link', h('span', { class: 't-bad' }, 'UART closed (reopening)')]);
-  }
-  const state = r.rx_maintenance ? badge('Maintenance', 'warn') : badge(lbl(L.station, r.state), stationTone(r.state));
-  /* The first configuration waits for the user (a build that holds it): only queries reach the receiver. */
-  const held = admin && r.first_apply_held ? badge('Held', 'info') : null;
-  return h('section', { class: 'card' },
-    h('h2', null, 'Receiver', state, held),
-    kv(rows),
-    admin ? h('div', { class: 'foot row' }, link('Live view', LIVE_START_HASH), link('Receiver and position', '#/receiver'), link('Signals', '#/signals')) :
-      h('div', { class: 'foot' }, link('Signals', '#/signals')));
+  const live = st.delivering;
+  return h('section', { class: 'card fit-kv' },
+    cardHead('Receiver', link('Details', '#/receiver', 'head-link')),
+    kv([live ? ['Bands', bandsView(r, st.quality, st.key === 'quality')] : null, live ? ['GLONASS', glonassView(r, st.quality)] : null,
+      ['Position', positionText(r, live)]]));
 }
 
-/* Where the Onocoy credentials are entered (the caster editor opens on the Onocoy slot). */
-const ONOCOY_SETUP_HASH = '#/casters/onocoy';
-
-/** The Onocoy slot (protected) of the status casters, or null. */
-function onocoySlot(s) {
-  return (s.casters || []).find(c => c.protected) || null;
+/** Today's online share: whole at 0 % and 100 %, else two decimals, rounded down (never "100.00" short of 100). */
+function onlineShare(on, off) {
+  const p = 100 * on / (on + off);
+  return (p === 0 || p === 100 ? String(p) : (Math.floor(p * 100) / 100).toFixed(2)) + NB + '%';
 }
 
-/** True when the Onocoy slot is enabled and has the console's mountpoint, username and password. */
-function onocoyCounting(c) {
-  return !!(c && c.enabled !== false && c.onocoy_ready);
-}
-
-/* In place of the day's figures while Onocoy is not set up (also fills the dashboard's grid cell). */
-function onocoySetupCard(c) {
-  const ready = c && c.onocoy_ready;
-  return h('section', { class: 'card' },
-    h('h2', null, 'Onocoy', badge(ready ? 'Off' : 'Not set up', '')),
-    h('p', null, ready ? 'The Onocoy slot is turned off: the station does not stream to Onocoy.' :
-      'Onocoy not set up. Onocoy rewards reference stations for their correction data; the station streams to it once ' +
-      'you enter the credentials from the Onocoy console.'),
-    h('div', { class: 'form-actions' }, link(ready ? 'Turn Onocoy on' : 'Add your Onocoy credentials', ONOCOY_SETUP_HASH, 'btn primary')),
-    h('p', { class: 'muted small foot' }, 'Today\'s figures (offline budget, graced uptime) show here once Onocoy streams.'));
-}
-
-/**
- * "Graced uptime so far" in words and tone: green when it meets 99.8 %, red
- * when it misses it and the streak is lost; below 99.8 % while the streak
- * still holds (early in the day, the budget not used up) neither: not red,
- * since the streak is the verdict, and not green, since it misses the
- * threshold it is measured against.
- */
-function soFarView(sofar, streakOk) {
-  if (sofar === null || sofar === undefined) return DASH;
-  const meets = sofar >= STREAK_PERMILLE;
-  const tone = meets ? 't-ok' : streakOk ? null : 't-bad';
-  const note = meets ? (streakOk === false ? '' : ' (streak on track)') : streakOk ? ' (below 99.8 %; the streak still holds)' : ' (below 99.8 %)';
-  return h('span', { class: tone }, fmt.permille(sofar) + note);
-}
-
-function budgetCard(c, avail) {
-  /* All from the availability ledger (kept across restarts): today's offline
-   * time, what is left of the day's budget, and the budget itself at the
-   * current data rate. Without a trusted clock the day is unknown. */
-  const left = avail && avail.budget_left_s !== undefined ? avail.budget_left_s : c.budget_left_s;
-  const down = avail && avail.protected_down_today_s !== undefined ? avail.protected_down_today_s : c.today_offline_s;
-  const allowed = c.budget_s;
-  const known = left !== null && left !== undefined && down !== null && down !== undefined &&
-    allowed !== null && allowed !== undefined;
-  const used = known && allowed > 0 ? Math.min(1, down / allowed) : known ? 1 : 0;
-  /* Never red while the streak holds: the budget is an estimate, the streak the verdict. */
-  const tone = !known ? '' : left <= 0 && !c.streak_ok ? 'bad' : used > 0.6 ? 'warn' : 'ok';
-  const mid = fmt.utcMidnight();
-  const over = known && down > allowed;
-  return h('section', { class: 'card' },
-    h('h2', null, 'Onocoy today', c.streak_ok === null || c.streak_ok === undefined ? null :
-      badge(c.streak_ok ? 'Streak on track' : 'Streak missed', c.streak_ok ? 'ok' : 'bad')),
-    !known ?
-      h('p', { class: 'muted' }, 'The offline budget needs a trusted clock (GNSS or internet time).') :
-      [h('div', { class: 'big ' + tone }, h('span', { class: 't-' + (tone || 'ok') }, left <= 0 ? '0\u00a0s' : fmt.dur(left))),
-        h('div', { class: 'muted small' }, 'offline budget left today'),
-        h('div', { class: tone }, bar(used, '', 'Share of today\'s offline budget used')),
-        h('div', { class: 'muted small' }, (over ? fmt.dur(down) + ' offline so far: over the day\'s budget of about ' + fmt.dur(allowed) +
-          ' by ' + fmt.dur(down - allowed) + '.' : fmt.dur(down) + ' offline so far of a budget of about ' + fmt.dur(allowed) + '.') +
-          ' Resets at 00:00 UTC (' + mid.local + ' here).')],
-    kv([
-      ['Online today', fmt.dur(c.today_online_s)],
-      ['Offline today', fmt.dur(c.today_offline_s)],
-      ['Graced uptime so far', soFarView(c.graced_uptime_so_far_permille, c.streak_ok)],
-      ['Data rate', c.data_rate_permille === null || c.data_rate_permille === undefined ? 'nothing sent yet today' : fmt.permille(c.data_rate_permille)],
-    ]),
-    h('p', { class: 'muted small foot' }, 'Our estimate of Onocoy\'s accounting for the current UTC day (it needs at least 99.8 % graced uptime). ' +
-      'Information only.'));
-}
-
-function casterLine(c, admin) {
-  const tone = casterTone(c.state);
-  const stopped = c.state === 'stopped';
-  /* Stopped by the Onocoy login guard: why, rather than the last failure's class. */
-  const reason = stopped && c.stop_reason && c.stop_reason !== 'none' ? 'Stopped: ' + lbl(L.stop, c.stop_reason) :
-    c.reason && c.reason !== 'none' ? lbl(L.fail, c.reason) : '';
-  const metrics = [];
-  if (admin) {
-    if (c.state === 'streaming') {
-      if (c.connected_s !== null && c.connected_s !== undefined) metrics.push(['Connected', fmt.dur(c.connected_s)]);
-      if (c.lag_ms_now !== null && c.lag_ms_now !== undefined) metrics.push(['Lag', fmt.ms(c.lag_ms_now)]);
-      const r = slotRate(c.slot, 10);
-      if (r !== null) metrics.push(['Rate', fmt.kbps(r)]);
-    } else if (c.state_age_s !== null && c.state_age_s !== undefined) {
-      metrics.push(['For', fmt.dur(c.state_age_s)]);
-    }
-    if (c.next_retry_s) metrics.push(['Retry in', fmt.dur(c.next_retry_s)]);
-    if (c.unreached_s) metrics.push(['Not reached for', fmt.dur(c.unreached_s)]);
-    const on = c.today_online_s || 0, off = c.today_offline_s || 0;
-    if (on + off > 0) metrics.push(['Today', (100 * on / (on + off)).toFixed(on === on + off ? 0 : 2) + ' % online']);
-    if (c.bytes_sent) metrics.push(['Sent', fmt.bytes(c.bytes_sent)]);
-  }
-  return h('div', { class: 'caster' },
-    h('div', { class: 'spread' },
-      h('span', null, h('span', { class: 'name' }, c.name || ('Slot ' + (c.slot + 1))),
-        admin && c.host ? h('span', { class: 'muted small' }, ' · ' + c.host) : null),
-      badge(lbl(L.caster, c.state), tone)),
-    reason && c.state !== 'streaming' ? h('div', { class: stopped ? 't-bad small' : 'muted small' }, reason) : null,
-    metrics.length ? h('div', { class: 'metrics' }, metrics.map(m => h('span', null, m[0] + ' ', h('b', null, m[1])))) : null,
-    admin && c.hint && !stopped ? h('div', { class: 'hintline' }, c.hint) : null,
-    admin && stopped ? h('div', { class: 'form-actions' }, link('What to do', '#/casters', 'btn small')) : null);
-}
-
-/* An Onocoy slot without its credentials: a call to set it up instead of a state. */
-function onocoyNotSetUp(c) {
-  return h('div', { class: 'caster' },
-    h('div', { class: 'spread' }, h('span', { class: 'name' }, c.name || 'Onocoy'), badge('Not set up', '')),
-    h('div', { class: 'muted small' }, 'Onocoy not set up.'),
-    h('div', { class: 'form-actions' }, link('Add your Onocoy credentials', ONOCOY_SETUP_HASH, 'btn primary small')));
-}
-
-/* A slot with no caster in it (no host, not enabled): not a caster, so not listed. */
-function emptySlot(c) {
-  return c.empty === true;
-}
-
-function castersCard(s, admin) {
-  const list = (s.casters || []).filter(c => !emptySlot(c) && (admin ? (c.enabled || c.host || c.state !== 'disabled') : true));
-  return h('section', { class: 'card' + (admin ? ' wide' : '') },
-    h('h2', null, 'Casters'),
-    list.length ? h('div', { class: 'caster-list' }, list.map(c => admin && c.protected && c.onocoy_ready === false ?
-      onocoyNotSetUp(c) : casterLine(c, admin))) :
-      h('p', { class: 'muted' }, 'No caster set up. ', admin ? link('Add one', '#/casters') : null),
-    admin ? h('div', { class: 'foot' }, link('Manage casters', '#/casters')) : null);
-}
-
-function networkCard(s) {
-  const n = s.network || {};
-  const stale = typeof n.probe_age_s === 'number' && n.probe_age_s > 600;
-  const rows = [
-    ['Wi-Fi', n.ssid ? n.ssid + (n.online ? '' : ' (not connected)') : 'Not set up'],
-    n.cred_trial ? ['New network', ['trying ' + (n.pending_ssid || '') + ', ', trialLeftEl(n)]] :
-      n.cred_pending ? ['New network', h('span', { class: 't-warn' }, (n.pending_ssid || '') + ' not confirmed' +
-        (n.cred_reverted ? (n.cred_reverted_why === 'auth_failed' ? ' (password refused; back on the previous network)' : ' (back on the previous network)') : ''))] : null,
-    !n.online && n.assoc_no_ip_s ? ['Connected without an address for', fmt.dur(n.assoc_no_ip_s)] : null,
-    ...(n.online ? stationAddressRows(n) : [['Offline for', fmt.dur(n.offline_s)]]),
-    n.online ? ['Signal', rssiView(n.rssi)] : null,
-    ['Internet', n.upstream === 'ok' ? h('span', { class: 't-ok' }, 'Reachable' + (stale ? ' (checked ' + fmt.dur(n.probe_age_s) + ' ago)' : '')) :
-      h('span', { class: n.upstream === 'none' ? 'muted' : 't-warn' }, lbl(L.upstream, n.upstream))],
-    n.ap_active ? ['Access point', 'On (' + (n.ap_reasons || []).map(r => lbl(L.apReason, r)).join(', ') + ')' +
-      (typeof n.ap_close_in_s === 'number' ? ', closes in ' + fmt.dur(n.ap_close_in_s) : '')] : null,
-  ];
-  return h('section', { class: 'card' },
-    h('h2', null, 'Network', badge(n.online ? 'Online' : 'Offline', n.online ? 'ok' : 'bad')),
-    kv(rows),
-    h('div', { class: 'foot' }, link('Wi-Fi settings', '#/system')));
-}
-
-function alertText(a) {
-  const table = a.source === 'station' ? L.salert : L.halert;
-  const t = table[a.id];
-  let title = t ? t[0] : a.id, text = t ? t[1] : '';
-  if (a.id === 'config_failed') {
-    text += ' ' + (a.auto_retry === false ? L.configRetry.user :
-      L.configRetry.auto + (a.retry_in_s ? ' Next try in ' + fmt.dur(a.retry_in_s) + '.' : ''));
-  }
-  if (a.source === 'station' && a.id === 'no_receiver') text = noReceiverText(a);
-  return [title, text];
-}
-
-function alertTone(a) {
-  if (a.id === 'rx_held') return 'info';   /* waiting for the user: not a fault */
-  return a.id === 'safe_mode' || a.id === 'receiver_power' || a.id === 'receiver_silent' || a.id === 'settings_degraded' ||
-    a.id === 'no_receiver' ? 'bad' : 'warn';
+/* Why a caster that is on does not stream, when the state's name does not say it: the station's hint or the last failure. */
+function casterWhy(c) {
+  if (c.state === 'stopped') return capFirst(lbl(L.stop, c.stop_reason || 'none')) + '. No new attempt until you act.';
+  if (c.state === 'wait_data') return null;
+  const fail = c.reason && c.reason !== 'none' ? lbl(L.fail, c.reason) : '';
+  const why = c.hint ? capFirst(c.hint) : fail !== lbl(L.caster, c.state) ? fail : '';
+  const next = c.next_retry_s ? 'Next try in ' + fmt.dur(c.next_retry_s) + '.' : '';
+  return [why ? why.replace(/\.?$/, '.') : '', next].filter(Boolean).join(' ') || null;
 }
 
 /*
- * "Check again" (POST /api/gnss/detect) on the no-receiver alert, on pages
- * rebuilt every refresh (the dashboard and the Health tab, both through
- * patchDetect()): a button without a listener of its own, so patch() keeps
- * it and the keyboard focus on it; the page's root handles its click
- * (detectClicks). After a request it reads "Searching…" for a few seconds,
- * until the station's own state says it searches; then the button goes,
- * and the keyboard focus moves to the alert's text, which says so.
+ * One caster in one line: name · state · today's share; why and a button
+ * when it does not stream, unless the top card names it (it says why).
+ */
+function casterRow(c, admin, subject) {
+  const off = !casterOn(c);
+  const tone = casterTone(c.state);
+  const share = admin && !off && (c.today_online_s || c.today_offline_s) ?
+    onlineShare(c.today_online_s || 0, c.today_offline_s || 0) + ' today' : null;
+  const trouble = admin && !off && c.state !== 'streaming' && c.slot !== subject;
+  const why = trouble ? casterWhy(c) : null;
+  return h('div', { class: 'cline' },
+    h('div', null,
+      h('span', { class: 'name' }, casterName(c)),
+      ' · ', h('span', { class: tone ? 't-' + tone : 'muted' }, lbl(L.caster, c.state)),
+      share ? h('span', { class: 'muted' }, ' · ' + share) : null,
+      why ? h('div', { class: 'muted small' }, why) : null),
+    trouble ? link(c.state === 'stopped' ? 'What to do' : 'Details', '#/casters', 'btn small') : null);
+}
+
+/*
+ * The casters besides Onocoy (the public form: every caster), one line
+ * each, only once one is set up; with the duplicate-stream line while an
+ * open caster streams together with Onocoy.
+ */
+function castersCard(s, st, admin, openSlots) {
+  const ono = admin ? onocoySlot(s) : null;
+  const list = (s.casters || []).filter(c => !emptySlot(c) && c !== ono);
+  if (!list.length) return null;
+  const open = (openSlots || []).map(n => list.find(c => c.slot === n)).filter(Boolean);
+  return h('section', { class: 'card' + (admin && st.ono ? ' wide' : '') },
+    h('h2', null, admin && ono && ono.onocoy_ready ? 'Other casters' : 'Casters'),
+    h('div', { class: 'clines' }, list.map(c => casterRow(c, admin, st.subject))),
+    open.length ? msg('warn', h('div', { class: 'cline' }, h('div', null,
+      h('strong', null, 'Onocoy and ' + andList(open.map(casterName)) + ' are both on.'),
+      ' A duplicate stream can get the Onocoy account banned.'), link('Details', '#/casters', 'btn small'))) : null);
+}
+
+/* Order: the top card; Onocoy's day beside the receiver; the other casters under both. */
+function adminDashboard(s, st, openSlots) {
+  const ono = onocoyCard(s, st);
+  const others = castersCard(s, st, true, openSlots);
+  const rx = receiverCard(s, st);
+  /* A lone receiver card takes the row (no empty cell beside it). */
+  if (!ono && !others) rx.classList.add('wide');
+  return [heroCard(s, st), h('div', { class: 'grid starts' }, ono, rx, others)];
+}
+
+/* The public page: the top card, the casters, and the signals while the receiver delivers them. */
+function publicDashboard(s, st, sig) {
+  const casters = castersCard(s, st, false, null);
+  const sigCard = st.delivering && sig && (sig.systems || []).length ? signalsCard(sig) : null;
+  if (casters) casters.classList.add('wide');
+  return [heroCard(s, st), h('div', { class: 'grid' }, casters, sigCard)];
+}
+
+/*
+ * "Check again" (POST /api/gnss/detect) on pages rebuilt every refresh
+ * (patchDetect()): no listener of its own, so patch() keeps it and the
+ * focus; the root handles its click (detectClicks). It reads "Searching…"
+ * until the station says it searches; then it goes, and the focus moves to
+ * the line that says so.
  */
 const DETECT = { askedAt: 0, busy: false };
 
@@ -304,8 +244,8 @@ function detectButton(a) {
   if (a.next_detect_in_s !== null && a.next_detect_in_s !== undefined && a.next_detect_in_s <= 0) return null;   /* searching now */
   /* aria-disabled, not disabled: a disabled button would drop the keyboard focus. */
   const waiting = detectWaiting();
-  return h('div', { class: 'form-actions' }, h('button', { type: 'button', class: 'btn small', 'data-act': 'detect',
-    'aria-disabled': waiting ? 'true' : null }, waiting ? 'Searching…' : 'Check again'));
+  return h('button', { type: 'button', class: 'btn small', 'data-act': 'detect', 'aria-disabled': waiting ? 'true' : null },
+    waiting ? 'Searching…' : 'Check again');
 }
 
 /**
@@ -347,10 +287,30 @@ function detectClicks(root, refresh) {
   });
 }
 
+/** Handle "End now" (receiver maintenance, data-act="end-maint") inside root; refresh() redraws the page. */
+function endMaintClicks(root, refresh) {
+  root.addEventListener('click', async e => {
+    const b = e.target && e.target.closest ? e.target.closest('[data-act="end-maint"]') : null;
+    if (!b || !root.contains(b)) return;
+    await endMaintenance({ currentTarget: b });
+    if (refresh && root.isConnected) refresh();
+  });
+}
+
+/** Handle "Leave safe mode" (data-act="leave-safe") inside root. */
+function leaveSafeClicks(root, refresh) {
+  root.addEventListener('click', async e => {
+    const b = e.target && e.target.closest ? e.target.closest('[data-act="leave-safe"]') : null;
+    if (!b || !root.contains(b)) return;
+    await leaveSafeMode(b);
+    if (refresh && root.isConnected) refresh();
+  });
+}
+
 /**
- * The alerts (station and health) as message boxes; the Health page shows
- * the same. opts.detect: the no-receiver alert offers "Check again" (the
- * page handles it with detectClicks).
+ * The alerts (station and health) as message boxes, as Diagnostics shows
+ * them. opts.detect: the no-receiver alert offers "Check again" (the page
+ * handles it with detectClicks).
  */
 function alertList(alerts, opts) {
   const detect = !!(opts && opts.detect);
@@ -360,63 +320,6 @@ function alertList(alerts, opts) {
     const check = noRx ? detectButton(a) : null;
     /* The text that says whether it searches takes the focus when "Check again" goes (patchDetect). */
     return msg(alertTone(a), h('strong', null, t[0]), t[1] ? h('div', { class: 'small', tabindex: noRx ? '-1' : null,
-      'data-detect-text': noRx ? '' : null }, t[1]) : null, check);
+      'data-detect-text': noRx ? '' : null }, t[1]) : null, check ? h('div', { class: 'form-actions' }, check) : null);
   }));
-}
-
-function alertsCard(s) {
-  const alerts = s.alerts || [];
-  const tone = heroState(s).tone;
-  const plan = restartPlanText(s.health);
-  return h('section', { class: 'card' },
-    h('h2', null, 'Alerts', alerts.length ? badge(String(alerts.length), alerts.some(a => alertTone(a) === 'bad') ? 'bad' : 'warn') :
-      badge('None', tone === 'ok' ? 'ok' : '')),
-    alerts.length ? alertList(alerts, { detect: true }) :
-      /* Never "nothing" while the state above says otherwise. */
-      h('p', { class: 'muted' }, tone === 'ok' ? 'Nothing needs attention.' : 'See the receiver card above.'),
-    s.health && s.health.last_step && s.health.last_step !== 'none' ?
-      h('p', { class: 'muted small foot' }, 'Last recovery step: ' + lbl(L.step, s.health.last_step) + '.') : null,
-    plan ? h('p', { class: 'small foot' }, plan) : null,
-    s.health && s.health.recovery_mode ? h('p', { class: 'muted small foot' }, 'Automatic receiver recovery: ' + lbl(L.recovery, s.health.recovery_mode).toLowerCase() +
-      (s.health.recovery_mode === 'alerts_only' ? ' (a stall is shown here, nothing is sent to the receiver).' : '.'), ' ',
-    link('Change', '#/receiver')) : null);
-}
-
-function deviceCard(s) {
-  const d = s.device || {};
-  return h('section', { class: 'card' },
-    h('h2', null, 'Station'),
-    kv([
-      ['Name', d.hostname],
-      ['Version', d.version ? [d.version, d.dev_build ? ' ' : null, d.dev_build ? badge('development build', 'plain') : null] : DASH],
-      ['Running for', fmt.dur(s.uptime_s)],
-      ['Time', d.time_unix ? fmt.time(d.time_unix) + ' (' + lbl(L.timeSource, d.time_source) + ')' : 'Not set yet'],
-    ]),
-    h('div', { class: 'foot' }, link('Diagnostics', '#/diag')));
-}
-
-function adminDashboard(s) {
-  const ono = onocoySlot(s);
-  return [
-    heroCard(s),
-    h('div', { class: 'grid' },
-      receiverCard(s, true),
-      onocoyCounting(ono) ? budgetCard(ono, s.availability) : onocoySetupCard(ono),
-      castersCard(s, true),
-      networkCard(s),
-      alertsCard(s),
-      deviceCard(s)),
-  ];
-}
-
-function publicDashboard(s) {
-  const hl = s.health || {};
-  return [
-    heroCard(s),
-    h('div', { class: 'grid' },
-      receiverCard(s, false),
-      castersCard(s, false),
-      h('section', { class: 'card' }, h('h2', null, 'Health', badge(lbl(L.health, hl.level), healthTone(hl.level))),
-        kv([['Running for', fmt.dur(s.uptime_s)]]))),
-  ];
 }

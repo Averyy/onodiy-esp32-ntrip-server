@@ -7,7 +7,10 @@
  *
  * Time. Accounting runs on the monotonic clock (`now_ms`, any u32 that wraps
  * freely); every call first accrues the time since the previous one with the
- * state that held during it. UTC comes from lc_set_utc(): GNSS time is taken
+ * state that held during it. A caller samples `now_ms` before it takes the
+ * lock, so another one may have accounted past it meanwhile: a `now_ms`
+ * behind the time accounted (by less than half the u32 range) adds nothing,
+ * and the time accounted never goes back. UTC comes from lc_set_utc(): GNSS time is taken
  * whenever it comes; SNTP only while no GNSS time arrived for
  * LC_GNSS_HOLD_MS (GNSS time first, SNTP as fallback). Times before
  * LC_UTC_FLOOR_S are never trusted. Between samples UTC advances with the
@@ -40,7 +43,12 @@
  *   - reconnects: entries into streaming after a period of expected
  *     downtime;
  *   - per day also power-off time (gaps between the last-alive mark and a
- *     boot after a power cut) and UART overflow events.
+ *     boot after a power cut) and UART overflow events;
+ *   - today only: the epochs the protected slot should have sent while
+ *     connected but did not (lost epochs, reported by the caster client as
+ *     they grow), so the day's data rate survives restarts. A finished day
+ *     does not keep them (the history blob has no room for them; an older
+ *     build reads it into a buffer of exactly its size).
  *
  * Planned reboots. A reboot the user asked for (restart, app update or
  * rollback, factory reset, leaving safe mode: the wrapper decides, from
@@ -144,6 +152,7 @@ typedef struct {
     uint32_t power_off_ms;
     uint32_t rx_overflows;
     uint32_t up_ms[LC_SLOTS];           /**< streamed with fresh RTCM (online) */
+    uint32_t lost_epochs;               /**< today only (0 in the history): the protected slot's epochs lost while connected */
 } lc_day_t;
 
 /** What must survive a reset. */
@@ -315,6 +324,13 @@ bool lc_set_gps_tow(lc_t *c, uint32_t now_ms, uint32_t tow_ms, uint32_t age_ms);
 /** Count one UART overflow event. */
 void lc_count_overflow(lc_t *c, uint32_t now_ms);
 
+/**
+ * Count `n` more epochs the protected slot should have sent while connected
+ * but did not, against today (pending without a clock; the first clock moves
+ * them to today, like the other event counts). Never into a history day.
+ */
+void lc_count_lost_epochs(lc_t *c, uint32_t now_ms, uint32_t n);
+
 /** UTC ms now, or -1 without a clock. */
 int64_t lc_unix_now(const lc_t *c, uint32_t now_ms);
 
@@ -358,7 +374,8 @@ void lc_mark_dirty(lc_t *c, bool today, bool hist);
 /**
  * Today's record with the slot masks, the flags and s->alive_ms: the UTC
  * mark (ms) this today runs up to, stored with it as one unit; each slot's
- * online time follows the mark (appended later).
+ * online time follows the mark, then today's lost epochs (both appended
+ * later; 158 bytes in all, within the 160 an older build reads).
  * @return bytes written, 0 if cap is too small.
  */
 size_t lc_encode_today(const lc_snapshot_t *s, uint8_t *buf, size_t cap);
@@ -367,8 +384,8 @@ size_t lc_encode_today(const lc_snapshot_t *s, uint8_t *buf, size_t cap);
  * Decode into s->today, s->expected_mask, s->protected_mask, s->planned,
  * s->reboot_planned (false in a blob written before it existed) and
  * s->alive_ms (the blob's own mark; 0 in a blob written before it existed,
- * whose mark is the alive key alone); online times 0 in a blob written
- * before they existed; other fields untouched.
+ * whose mark is the alive key alone); online times and lost epochs 0 in a
+ * blob written before they existed; other fields untouched.
  */
 bool lc_decode_today(const uint8_t *buf, size_t len, lc_snapshot_t *s);
 
@@ -415,7 +432,7 @@ size_t lc_hist_blob_max(size_t n);
 /* ---- RTC copy --------------------------------------------------------------------------- */
 
 #define LC_RTC_MAGIC   0x4C444752u   /* "RGDL" */
-#define LC_RTC_VERSION 4u   /* 2: the snapshot carries reboot_planned; 3: the stamp; 4: online times */
+#define LC_RTC_VERSION 5u   /* 2: the snapshot carries reboot_planned; 3: the stamp; 4: online times; 5: lost epochs */
 
 /**
  * The block kept in RTC memory. `stamp` is the image generation of the run

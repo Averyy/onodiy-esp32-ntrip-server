@@ -58,10 +58,11 @@ idf_component_register(
 
 # Browser UI (ui/): tools/ui_bundle.py checks the page, the scripts and the
 # styles (structure, and what the Content-Security-Policy would block), joins
-# ui/js/*.js into app.js, gzips every asset and writes the asset table
-# (priv_include/web_assets.h) as a C file into the build directory. Any check
-# failing, or the compressed UI growing past UI_GZ_BUDGET bytes, fails the
-# build. Adding a file under ui/js/ reconfigures (CONFIGURE_DEPENDS).
+# ui/js/*.js into app.js without their comments, gzips every asset and
+# writes the asset table (priv_include/web_assets.h) as a C file into the
+# build directory. Any check failing, or the compressed UI growing past
+# UI_GZ_BUDGET bytes, fails the build. Adding a file under ui/js/
+# reconfigures (CONFIGURE_DEPENDS).
 set(UI_GZ_BUDGET 153600)
 file(GLOB _ui_js CONFIGURE_DEPENDS "${COMPONENT_DIR}/ui/js/*.js")
 set(_ui_inputs
