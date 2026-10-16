@@ -343,6 +343,46 @@ def test_a_pause_while_a_late_last_frame_waits_drops_it_and_bursts_can_be_timed(
     assert srv.counts()["late_paused"] == 1 and srv.counts()["bursts_late"] == 1
 
 
+def test_a_hold_lets_the_burst_going_out_finish_its_late_frame_too_and_starts_no_other(tmp_path):
+    # As e2e.py holds the line from inside the epoch a restart comes in: that epoch's late last frame still
+    # goes out (the session waits for it before it closes), nothing after it until resume().
+    f = tmp_path / "four.rtcm3"
+    epochs = [[msm_frame(t, 1, 1000 * k, t != 1097, {(3, 2): 40.0}) for t in (1077, 1087, 1097)]
+              for k in (1, 2, 3, 4)]
+    f.write_bytes(b"".join(b"".join(e) for e in epochs))
+    s = load(f)
+    srv = ReplayServer(s, say=lambda m: None)
+    srv.set_last_frame_delay(0.5)
+    srv.start()
+    try:
+        with socket.create_connection((srv.host, srv.port)) as c:
+            got, _ = recv_exactly(c, len(b"".join(epochs[0][:2])))
+            t = srv.wait_burst_head(5.0)           # the second burst's head
+            assert t is not None
+            srv.hold()
+            rest = bytearray()
+            c.settimeout(0.3)
+            end = time.monotonic() + 1.6           # the third burst falls due meanwhile, the fourth after
+            while time.monotonic() < end:
+                try:
+                    data = c.recv(65536)
+                except socket.timeout:
+                    continue
+                if not data:
+                    break
+                rest += data
+            held = srv.counts()
+            srv.resume()
+            c.settimeout(5)
+            more, _ = recv_exactly(c, len(b"".join(epochs[3][:2])))
+    finally:
+        srv.stop()
+    # The first two bursts whole (the second's late frame after the hold), the third dropped.
+    assert got + bytes(rest) == b"".join(epochs[0]) + b"".join(epochs[1])
+    assert held["bursts_late"] == 2 and held["late_paused"] == 0 and held["bursts_paused"] >= 1
+    assert more == b"".join(epochs[3][:2])     # after resume() the schedule goes on
+
+
 def test_parse_hostport():
     assert parse_hostport("127.0.0.1:5600") == ("127.0.0.1", 5600)
     assert parse_hostport(":5600") == ("127.0.0.1", 5600)

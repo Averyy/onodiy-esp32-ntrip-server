@@ -677,13 +677,17 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
   with at least one close that waited for the end of the epoch it was
   sending (`ending the session after the epoch it was sending` on the
   console) and none that gave up on it (`closing inside an epoch`), and a
-  restart asked for 0.1 s after a burst began (the web server restarts 1 s
-  later, so the shutdown comes early in the next one) with the replay
-  streaming until that session has ended (then paused, a waiting late MSM
-  dropped too: the next boot must not see RTCM arrive across the restart,
-  see the UART1 section): the session the restart ends finishes its epoch
-  first (tried again, up to 3 restarts, when the request came late and the
-  shutdown found no epoch in flight). Before this a planned close (reboot,
+  restart asked for 0.25 s after a burst began (the web server restarts
+  1 s later, so the shutdown comes in the next one's MSM run, past its
+  station messages and before its late last MSM; at 0.1 s it could come
+  after the station messages alone, the session closed as between epochs
+  and the rest of the burst arrived across the restart) with the replay
+  holding from 1.5 s after that burst began (it finishes the one going out,
+  its late MSM too, and starts no other) and paused once that session has
+  ended (a waiting late MSM dropped too: the next boot must not see RTCM
+  arrive across the restart, see the UART1 section): the session the
+  restart ends finishes its epoch first (tried again, up to 3 restarts,
+  when the request came late and the shutdown found no epoch in flight). Before this a planned close (reboot,
   new settings, a restart by the health monitor) closed every session at
   once, and the last chunk a caster got ended inside an epoch whenever the
   close fell in the receiver's MSM burst; the restart in the comparison
