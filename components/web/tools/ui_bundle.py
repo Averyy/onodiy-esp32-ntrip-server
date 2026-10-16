@@ -8,7 +8,9 @@ The build runs this for every change under ui/ (components/web/CMakeLists.txt):
   ui/index.html, ui/app.css, ui/favicon.svg   served as they are
   ui/js/*.js                                  joined in file-name order into
                                               app.js, inside one strict-mode
-                                              function (no globals leak)
+                                              function (no globals leak),
+                                              without their comments (the
+                                              sources keep them)
 
 Each asset is gzip-compressed deterministically (no file name, mtime 0) and
 written into one C file holding the asset table declared in
@@ -184,8 +186,10 @@ _IDENT = re.compile(r"[A-Za-z0-9_$]*")
 _NUMBER = re.compile(r"(0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(\d[\d_]*)?\.?\d[\d_]*([eE][+-]?\d+)?n?)")
 
 
-def check_js(src, name):
-    """Return the identifiers seen; raise CheckError on a structural error."""
+def check_js(src, name, comments=None):
+    """Return the identifiers seen; raise CheckError on a structural error.
+
+    comments: a list that gets the (start, end) of every comment."""
     errors = []
     stack = []  # (opener, line); "${" marks an expression inside a template literal
     i, n, line = 0, len(src), 1
@@ -228,7 +232,10 @@ def check_js(src, name):
         nxt = src[i + 1] if i + 1 < n else ""
         if c == "/" and nxt == "/":
             j = src.find("\n", i)
-            i = n if j < 0 else j
+            j = n if j < 0 else j
+            if comments is not None:
+                comments.append((i, j))
+            i = j
             continue
         if c == "/" and nxt == "*":
             j = src.find("*/", i + 2)
@@ -236,6 +243,8 @@ def check_js(src, name):
                 err("unterminated comment")
                 break
             line += src.count("\n", i, j)
+            if comments is not None:
+                comments.append((i, j + 2))
             i = j + 2
             continue
         if c in "'\"":
@@ -348,6 +357,24 @@ def check_js(src, name):
     return idents
 
 
+def strip_comments(src, spans):
+    """src without the comments at spans (check_js): a comment alone on its
+    lines goes with them, one beside code becomes a space."""
+    out, at = [], 0
+    for a, b in spans:
+        start = src.rfind("\n", 0, a) + 1
+        end = src.find("\n", b)
+        end = len(src) if end < 0 else end
+        if not src[start:a].strip() and not src[b:end].strip():
+            out.append(src[at:start])
+            at = end + 1
+        else:
+            out.append(src[at:a] + " ")
+            at = b
+    out.append(src[at:])
+    return "".join(out)
+
+
 # --------------------------------------------------------------------------
 # CSS
 
@@ -433,8 +460,10 @@ def build(ui, max_gz):
     js_ok = True
     for f in js_files:
         text = f.read_text(encoding="utf-8")
+        spans = []
         try:
-            check_js(text, "js/" + f.name)
+            check_js(text, "js/" + f.name, spans)
+            text = strip_comments(text, spans)
         except CheckError as e:
             errors.append(str(e))
             js_ok = False

@@ -2692,12 +2692,12 @@ boot), and a journal in state `unknown` allows no receiver update action.
 **UI assets** (the files the UI provides): `ui/index.html`, `ui/app.css`,
 `ui/favicon.svg` and the scripts `ui/js/*.js`, which the build
 (`components/web/tools/ui_bundle.py`) joins in file-name order into one
-`app.js` inside a strict-mode function. The build checks the page, styles
-and scripts (structure, unique ids, and what the CSP of section 2 would
-block: no inline scripts or styles, no `on*` or `style` attributes, no
-other origins, no `eval`/`innerHTML`-style sinks), gzips every asset and
-fails when the compressed total exceeds the budget in
-`components/web/CMakeLists.txt` (150 KB). No other files are served.
+`app.js` inside a strict-mode function, without their comments. The build
+checks the page, styles and scripts (structure, unique ids, and what the
+CSP of section 2 would block: no inline scripts or styles, no `on*` or
+`style` attributes, no other origins, no `eval`/`innerHTML`-style sinks),
+gzips every asset and fails when the compressed total exceeds the budget
+in `components/web/CMakeLists.txt` (150 KB). No other files are served.
 
 ---
 

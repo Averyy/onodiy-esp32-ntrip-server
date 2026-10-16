@@ -6,10 +6,10 @@
  * and a small event bus.
  *
  * The bundle (tools/ui_bundle.py) joins js/*.js in name order inside one
- * strict-mode function, so these names are shared by the later files and
- * nothing reaches the global object. The page is built from DOM nodes only:
- * text from the station (caster replies, SSIDs, log lines) is always set as
- * text, never parsed as HTML.
+ * strict-mode function (comments left out), so these names are shared by
+ * the later files and nothing reaches the global object. The page is built
+ * from DOM nodes only: text from the station (caster replies, SSIDs, log
+ * lines) is always set as text, never parsed as HTML.
  */
 
 const doc = document;
