@@ -71,10 +71,12 @@ What it does:
      no-receiver episode that follows, the GNSS ladder's ESP32 restart is
      held for first setup (health.reboot_hold has "setup": no caster is
      enabled; the status names holds only during a ladder episode); with no
-     receiver (GET /api/gnss state "no_receiver") a signal-group comparison
-     is refused with 409 no_receiver and GET /api/gnss/signal-test stays
-     idle; then 400 refused requests (POST /api/nope with a body) whose
-     client ends its sending side right after the body: every one answered
+     receiver (GET /api/gnss state "no_receiver") GET /api/gnss and GET
+     /api/status both say it does not answer (responding false), a
+     signal-group comparison is refused with 409 no_receiver and GET
+     /api/gnss/signal-test stays idle; then 400 refused requests (POST
+     /api/nope with a body) whose client ends its sending side right after
+     the body: every one answered
      404 with "Connection: close", no crash, no restart (the drain must leave
      the client's FIN unread: the one before the fix took it, which let lwIP
      free the connection behind the socket), and 100 more refused by a route
@@ -1503,6 +1505,12 @@ class Smoke:
                 time.sleep(1)
             if not self.check(state == "no_receiver", f"GET /api/gnss: state {state!r} (no receiver attached)"):
                 return
+            # One rule for both: no receiver found, so neither says it answers.
+            gnss_resp = json.loads(body).get("responding")
+            status, _, body = request(self.http_port, "GET", "/api/status", cookie=self.cookie, timeout=30)
+            st_resp = (json.loads(body).get("receiver") or {}).get("responding") if status == 200 else None
+            self.check(gnss_resp is False and st_resp is False,
+                       f"no receiver: responding {gnss_resp!r} in GET /api/gnss, {st_resp!r} in GET /api/status")
             body_in = {"groups": [{"master": 3, "slave": 6}, {"master": 7, "slave": 0}], "phase_s": 1800}
             status, _, body = request(self.http_port, "POST", "/api/gnss/signal-test", body_in, cookie=self.cookie,
                                       timeout=30)

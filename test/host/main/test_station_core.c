@@ -970,6 +970,92 @@ TEST_CASE("station core: data between passes, or a found receiver, streams at on
     TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);   /* a silent factory receiver gets configured */
 }
 
+/* ---- whether the receiver answers ------------------------------------------------- */
+
+/* stn_responding with the last RTCM frame at rtcm_at and the last line at line_at (STN_NEVER: none this boot). */
+static bool answers_now(const sim_t *w, int64_t rtcm_at, int64_t line_at)
+{
+    uint32_t rtcm_age = rtcm_at == STN_NEVER ? UINT32_MAX : (uint32_t)(w->in.now_ms - rtcm_at);
+    return stn_responding(&w->s, w->in.now_ms, rtcm_age, line_at);
+}
+
+TEST_CASE("station core: the receiver answers: it streams, or a line came after its last RTCM frame", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    int64_t now = w.in.now_ms;
+    TEST_ASSERT_TRUE(answers_now(&w, now - 500, STN_NEVER));               /* it streams */
+    TEST_ASSERT_TRUE(answers_now(&w, now - STN_FRESH_MS, STN_NEVER));
+    TEST_ASSERT_FALSE(answers_now(&w, now - STN_FRESH_MS - 1, STN_NEVER));  /* RTCM stopped, nothing since */
+    /* Lines from before the last frame, or with it (the same output), are no answer after it. */
+    TEST_ASSERT_FALSE(answers_now(&w, now - 20000, now - 20500));
+    TEST_ASSERT_FALSE(answers_now(&w, now - 20000, now - 20000 + STN_ANSWER_SLACK_MS));
+    /* A line after it (a reply, its NMEA) is, however long ago, until something says otherwise. */
+    TEST_ASSERT_TRUE(answers_now(&w, now - 20000, now - 20000 + STN_ANSWER_SLACK_MS + 1));
+    TEST_ASSERT_TRUE(answers_now(&w, now - 3 * HOUR_MS, now - 2 * HOUR_MS));
+    /* No RTCM frame this boot: any line this boot. */
+    TEST_ASSERT_TRUE(answers_now(&w, STN_NEVER, now - HOUR_MS));
+    TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, STN_NEVER));
+}
+
+TEST_CASE("station core: a receiver that answers questions and sends nothing unasked answers steadily", "[station]")
+{
+    /* No antenna: no RTCM this boot, a reply only when the station asks
+     * (its base-mode read every 60 s while surveying, then nothing at all
+     * for an hour). Every second of that it answers: no flicker between
+     * two questions. */
+    sim_t w;
+    sim_init(&w, false);
+    boot_streaming(&w, true);
+    int64_t line = w.in.now_ms;   /* the identity query's reply */
+    for (int i = 0; i < 2 * 3600; i++) {
+        if (i < 720 && i % 60 == 59) {
+            line = w.in.now_ms;
+        }
+        TEST_ASSERT_TRUE_MESSAGE(answers_now(&w, STN_NEVER, line), "answers between two questions");
+        w.in.now_ms += 1000;
+    }
+}
+
+TEST_CASE("station core: a receiver not found does not answer, and earlier lines do not count after it", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    sim_start(&w);
+    int64_t line = w.in.now_ms;   /* something readable at boot, then nothing */
+    TEST_ASSERT_TRUE(answers_now(&w, STN_NEVER, line));
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, sim_until_job(&w, 5).kind);
+    fail_pass(&w, true);
+    TEST_ASSERT_EQUAL(STN_NO_RECEIVER, w.s.state);
+    TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, line));
+    TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, w.in.now_ms));   /* never while none is found */
+
+    /* Its lines again at the stored baud: streaming, and it answers; the old line still does not count. */
+    w.in.now_ms += 5000;
+    w.in.text_lines += 2;
+    (void)sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, line));
+    TEST_ASSERT_TRUE(answers_now(&w, STN_NEVER, w.in.now_ms - 1000));
+
+    /* A receiver update that left it at its loader is the same: no answer from before it. */
+    sim_init(&w, false);
+    boot_applied(&w);
+    int64_t before = w.in.now_ms - 1000;
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_NEW));
+    TEST_ASSERT_EQUAL(STN_JOB_FLASH, sim_next(&w).kind);
+    stn_result_t r = res(STN_OK);
+    r.flash_end = (uint8_t)STN_FLASH_END_NOTHING;
+    r.supported = true;
+    r.in_loader = true;
+    sim_done(&w, &r);
+    TEST_ASSERT_EQUAL(STN_NO_RECEIVER, w.s.state);
+    w.in.now_ms += 1000;
+    w.rtcm_on = false;
+    TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, before));
+}
+
 TEST_CASE("station core: the loader's restart key goes out once per boot", "[station]")
 {
     sim_t w;

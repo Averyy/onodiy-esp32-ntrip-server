@@ -317,6 +317,7 @@ void stn_init(stn_t *s, bool journal_open)
     s->last_resort_ms = STN_NEVER;
     s->episode_ms = STN_NEVER;
     s->detect_ms = STN_NEVER;
+    s->no_rx_ms = STN_NEVER;
     s->mode_poll_ms = STN_NEVER;
     s->lock_retry_ms = STN_NEVER;
     s->pos_check_ms = STN_NEVER;
@@ -993,6 +994,7 @@ static void done_detect(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     }
     drop_stale_requests(s);
     s->state = STN_NO_RECEIVER;
+    s->no_rx_ms = now;
     s->profile_applied = false;
     s->obs_on = false;
     s->detect_ms = now + ((now - s->episode_ms < STN_DETECT_FAST_SPAN_MS) ? STN_DETECT_FAST_MS : STN_DETECT_SLOW_MS);
@@ -1233,6 +1235,7 @@ static void done_flash(stn_t *s, const stn_result_t *r, const stn_in_t *in)
             s->paused = false;
             drop_stale_requests(s);
             s->state = STN_NO_RECEIVER;
+            s->no_rx_ms = now;
             s->profile_applied = false;
             s->obs_on = false;
             s->episode_ms = now;
@@ -1630,6 +1633,21 @@ uint32_t stn_next_detect_in_s(const stn_t *s, int64_t now_ms)
     }
     uint32_t left = secs(s->detect_ms - now_ms);
     return left == UINT32_MAX ? UINT32_MAX - 1u : left;
+}
+
+bool stn_responding(const stn_t *s, int64_t now_ms, uint32_t rtcm_age_ms, int64_t line_ms)
+{
+    if (s->state == STN_NO_RECEIVER) {
+        return false;
+    }
+    if (rtcm_age_ms <= STN_FRESH_MS) {
+        return true;   /* it streams */
+    }
+    if (line_ms == STN_NEVER || (s->no_rx_ms != STN_NEVER && line_ms <= s->no_rx_ms)) {
+        return false;
+    }
+    /* Its last line came after its last RTCM frame (none this boot: any line). */
+    return rtcm_age_ms == UINT32_MAX || line_ms - (now_ms - (int64_t)rtcm_age_ms) > STN_ANSWER_SLACK_MS;
 }
 
 /* ---- receiver maintenance --------------------------------------------------- */
