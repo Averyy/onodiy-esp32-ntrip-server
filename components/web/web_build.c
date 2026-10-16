@@ -2060,6 +2060,7 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
         wj_uint(w, "boot_no", r->boot_no);
         wj_u32_or_null(w, "prev_uptime_s", r->prev_uptime_s);
         wj_str(w, "version", r->version);
+        wj_unix(w, "start_unix", r->start_unix);
         wj_obj_close(w);
     }
     wj_arr_close(w);

@@ -143,6 +143,7 @@ vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { casterEditor, openCasterWarning, casterDetails, casterSummary, casterChip, stationState, adminDashboard,\n' +
   '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard, healthCard, chipCard, signalsHead, bandTable, kv,\n' +
+  '  startLines, foldRows,\n' +
   '  setStatus: s => { S.status = s; }, setSession: s => { S.session = s; } };\n})()',
   ctx);
 
@@ -408,11 +409,21 @@ for (const c of JSON.parse(casesJson)) {
     out.push(pairs);
     continue;
   }
-  if (c.fn === 'wifi_row') {
-    /* Chip and Wi-Fi's Wi-Fi value as its parts: text as it is, an element as [its class, its text]. */
-    const dl = [...ui.chipCard(c.sys, c.status, c.wifi, c.net).walk()].find(e => e.tagName === 'DL');
-    const i = dl.kids.findIndex(k => k.textContent === 'Wi-Fi');
-    out.push(dl.kids[i + 1].kids.map(k => (k instanceof Text ? k.data : [k.className, k.textContent])));
+  if (c.fn === 'starts') {
+    /* Diagnostics' earlier starts: per row its cells' text, then its hover text. today: the day of `now` in the page's zone. */
+    const day = new Date(c.now * 1000).toDateString();
+    out.push(ui.startLines(c.starts, day).map(tr => [...tr.kids.map(td => td.textContent), tr.getAttribute('title')]));
+    continue;
+  }
+  if (c.fn === 'fold') {
+    /* foldRows over `count` rows ("row 0", ...): the tbody's rows in order, the fold row as
+     * [its class, the cell's colspan, the disclosure's data-k, whether it is open, its summary]. */
+    const rows = [...Array(c.count).keys()].map(i => { const tr = new El('tr'); tr.append('row ' + i); return tr; });
+    out.push([ui.foldRows(rows, c.n, c.more, c.cols, c.open, c.k)].flat(2).map(tr => {
+      if (tr.className !== 'fold') return tr.textContent;
+      const td = tr.kids[0], d = td.kids[0];
+      return [tr.className, td.getAttribute('colspan'), d.getAttribute('data-k'), d.hasAttribute('open'), d.kids[0].textContent];
+    }));
     continue;
   }
   if (c.fn === 'kv') {
@@ -1041,8 +1052,8 @@ def test_onocoy_card_says_a_tls_failure_once():
 
 
 def test_chip_card_names_the_access_point_and_the_transmit_power():
-    """Chip and Wi-Fi: the network and signal in one row; the access point with its channel and the transmit power
-    in one row each, only while known and online (QEMU's link has neither)."""
+    """Chip and Wi-Fi: the network, its signal, the access point, its channel and the transmit power in a row each, so
+    no wrapped line starts with a dot on a phone; each only while known and online (QEMU's link has no access point)."""
     status = st_status(network={"online": True, "ssid": "Home", "rssi": -60})
     wifi = {"ssid": "Home", "online": True, "rssi": -60, "channel": 11, "bssid": "AA:BB:CC:DD:EE:FF", "tx_power_dbm": 19.5}
     qemu = dict(wifi, channel=None, bssid=None, tx_power_dbm=None)
@@ -1052,14 +1063,57 @@ def test_chip_card_names_the_access_point_and_the_transmit_power():
                                    {"fn": "chip", "sys": sys, "status": status, "wifi": qemu, "net": {}},
                                    {"fn": "chip", "sys": sys, "status": off, "wifi": wifi, "net": {}}])
     rows = dict(full)
-    assert [r[0] for r in full] == ["Chip", "ESP-IDF", "Wi-Fi", "Access point", "Transmit power", "MAC address"]
-    # A wrap between the parts starts the second line with the dot ("· channel 11"); "channel 11" stays whole.
-    assert rows["Access point"] == "AA:BB:CC:DD:EE:FF \u00b7\u00a0channel\u00a011" and rows["Transmit power"] == "19.5\u00a0dBm"
-    # The Wi-Fi row breaks only before the dot, which stays with the signal's bars ("Home" / "· Good (-60 dBm)").
-    (parts,) = run_editor([{"fn": "wifi_row", "sys": sys, "status": status, "wifi": wifi, "net": {}}])
-    assert parts == ["Home", " ", ["nowrap", "\u00b7\u00a0 Good (-60 dBm)"]]
-    assert "channel" not in rows["Wi-Fi"]
-    assert [r[0] for r in bare] == [r[0] for r in gone] == ["Chip", "ESP-IDF", "Wi-Fi", "MAC address"]
+    assert [r[0] for r in full] == ["Chip", "ESP-IDF", "Wi-Fi", "Signal", "Access point", "Channel", "Transmit power",
+                                    "MAC address"]
+    assert rows["Wi-Fi"] == "Home" and rows["Signal"] == " Good (-60 dBm)"
+    assert rows["Access point"] == "AA:BB:CC:DD:EE:FF" and rows["Channel"] == "11" and rows["Transmit power"] == "19.5\u00a0dBm"
+    assert not any("\u00b7" in v for _, v in full)
+    assert [r[0] for r in bare] == ["Chip", "ESP-IDF", "Wi-Fi", "Signal", "MAC address"]
+    assert gone == [r for r in gone if r[0] != "Signal"] and [r[0] for r in gone] == ["Chip", "ESP-IDF", "Wi-Fi", "MAC address"]
+    assert dict(gone)["Wi-Fi"] == "Home, offline for 30\u00a0s"
+
+
+def test_earlier_starts_say_when_what_and_which_version():
+    """Diagnostics' earlier starts, one line each: when it started (else how long it ran, else a dash), a word for the
+    kind of start and the version; the full sentence only on hover, never in every row. How long the newest ran is This
+    start's "Previous run", so never said again in its row; a start from another year says its year."""
+    now = 1760090000   # Oct 10, 2025
+    starts = [{"reset_class": "planned", "reset_reason": "sw", "planned_reason": "app_update", "boot_no": 2, "prev_uptime_s": 600,
+               "version": "v0.3.0", "start_unix": None},
+              {"reset_class": "power_on", "reset_reason": "poweron", "planned_reason": "none", "boot_no": 1, "prev_uptime_s": None,
+               "version": "v0.2.9", "start_unix": now - 3 * 86400},
+              {"reset_class": "crash", "reset_reason": "task_wdt", "planned_reason": "none", "boot_no": 2, "prev_uptime_s": 50,
+               "version": "v0.2.9", "start_unix": None},
+              {"reset_class": "power_on", "reset_reason": "poweron", "planned_reason": "none", "boot_no": 1, "prev_uptime_s": None,
+               "version": "v0.2.8"},
+              {"reset_class": "power_on", "reset_reason": "poweron", "planned_reason": "none", "boot_no": 1, "prev_uptime_s": None,
+               "version": "v0.2.7", "start_unix": now - 400 * 86400}]
+    (rows,) = run_editor([{"fn": "starts", "starts": starts, "now": now}])
+    # The newest, not dated: a dash (how long it ran is This start's "Previous run").
+    assert rows[0][:3] == ["\u2013", "Update", "v0.3.0"]
+    # Dated: its time, a short date as the event list has it, without this year.
+    assert rows[1][1:3] == ["Power-on", "v0.2.9"] and ":" in rows[1][0] and not rows[1][0].startswith("Ran")
+    assert "2025" not in rows[1][0]
+    # A power-on came after the crash (count 2, then 1): how long it ran is not known.
+    assert rows[2][:3] == ["\u2013", "Crash", "v0.2.9"]
+    # Not dated: how long it ran, the previous run of the start after it (their counts follow on: 1, then 2).
+    assert rows[3][:3] == ["Ran 50\u00a0s", "Power-on", "v0.2.8"]
+    # Over a year back (the history survives a factory reset): the year too, so it never reads as this year's.
+    assert "2024" in rows[4][0] and ":" in rows[4][0] and rows[4][1:3] == ["Power-on", "v0.2.7"]
+    assert rows[1][3] == "Started after power-on or a reset by its pin" and rows[2][3] == "Restarted after a crash (the task watchdog)"
+    assert not any("Started" in c or "Restarted" in c for r in rows for c in r[:3])
+
+
+def test_folded_rows_stay_in_their_table():
+    """Rows past the first few (Diagnostics' older starts, History's earlier days) come after a summary row of the same
+    table, spanning its columns, so they keep the columns of the rows above; nothing to fold when they all fit."""
+    fit, starts, days = run_editor([
+        {"fn": "fold", "count": 5, "n": 5, "more": "Older starts", "cols": 3, "open": False, "k": "starts"},
+        {"fn": "fold", "count": 7, "n": 5, "more": "Older starts", "cols": 3, "open": True, "k": "starts"},
+        {"fn": "fold", "count": 10, "n": 8, "more": "Earlier days", "cols": 2, "open": False, "k": None}])
+    assert fit == ["row %d" % i for i in range(5)]
+    assert starts == ["row %d" % i for i in range(5)] + [["fold", "3", "starts", True, "Older starts"], "row 5", "row 6"]
+    assert days == ["row %d" % i for i in range(8)] + [["fold", "2", None, False, "Earlier days"], "row 8", "row 9"]
 
 
 SIG = {"best_sys": "galileo", "best_bands": 4, "e6_lost": False, "epoch_age_ms": 420, "rtcm1230_supported": True,
@@ -1099,10 +1153,10 @@ def test_long_values_wrap_at_their_separators():
     """A long token in a label/value row wraps at its separators (a <wbr>, shown as "|"), never mid-word; short values
     and words are left alone. On a phone the wide cards' labels keep to 40 % of the row, as everywhere else."""
     (vals,) = run_editor([{"fn": "kv", "rows": [["Expected firmware", "R4.10Build26000"],
-                                                ["Access point", "AA:BB:CC:DD:EE:FF \u00b7 channel 11"],
+                                                ["Access point", "AA:BB:CC:DD:EE:FF"],
                                                 ["Server", "servers.onocoy.com:2101"], ["Network", "Home"],
                                                 ["Signal", "-61 dBm"], ["Note", "Remove the stored password"]]}])
-    assert vals == ["R4.10|Build26000", "AA:|BB:|CC:|DD:|EE:|FF \u00b7 channel 11", "servers.|onocoy.|com:|2101", "Home", "-61 dBm",
+    assert vals == ["R4.10|Build26000", "AA:|BB:|CC:|DD:|EE:|FF", "servers.|onocoy.|com:|2101", "Home", "-61 dBm",
                     "Remove the stored password"]
     css = (UI_JS.parent / "app.css").read_text()
     assert ".tight-kv .kv { grid-template-columns: minmax(7.5rem, min(13rem, 40%)) minmax(0, 1fr); }" in css

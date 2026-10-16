@@ -72,7 +72,9 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  pageKey: a => { shell.current = { name: a[0], arg: a[1], view: {} }; const k = pageKey(); shell.current = null; return k; },\n' +
   '  healthItems: a => { const st = stationState(a, true), r = healthItems(a.alerts || [], st);\n' +
   '    return { state: r.state ? st.key : null, alerts: r.alerts.map(x => x.id), notice: healthNotice(a) }; },\n' +
-  '  checkFailure: u => checkFailure(u), apRows: a => apRows(a[0], a[1]),\n' +
+  '  checkFailure: u => checkFailure(u),\n' +
+  '  wifiRows: a => wifiRows(a[0], a[1]).filter(Boolean).map(r => [r[0], typeof r[1] === \'string\' ? r[1] : null]),\n' +
+  '  startKind: a => startKind(a[0], a[1]), rxBoot: v => rxBootSentence(v),\n' +
   '  noticeLines: a => noticeItems(a[0], a[1]).map(i => [i.key, i.tone, i.urgent, i.title + (i.text ? \'. \' + i.text : \'\'),\n' +
   '    Array.isArray(i.actions) ? i.actions.length : i.actions ? 1 : 0]),\n' +
   '  fold: a => { const f = foldNotices(noticeItems(a[0], a[1]), a[2]); return [f.shown.map(i => i.key), f.more]; },\n' +
@@ -80,7 +82,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  pwProblem: a => adminPasswordProblem(a[0], a[1]), rssi: a => rssiView(a),\n' +
   '  sgName: a => sgName(a[0], a[1]), sgChoices: () => SG_CHOICES, recovery: () => L.recovery,\n' +
   '  recoveryLbl: k => lbl(L.recovery, k), fwText: a => fwText(a[0], a[1]), dist: m => fmtDist(m),\n' +
-  '  sgtBlock: g => sgtBlock(g), sgtLine: t => sgtLine(t), profileChip: g => profileChip(g),\n' +
+  '  sgtBlock: g => sgtBlock(g), sgtLine: t => sgtLine(t), profileChip: g => profileChip(g), saveLabel: a => saveLabel(a[0], a[1]),\n' +
   '  sgtNotice: st => { const n = sgTestNotice(st); return n && n.slice(0, 3); },\n' +
   '  rxChip: s => receiverChip(s), posLine: a => positionLine(a[0], a[1]), statusPos: a => positionText(a[0], a[1]),\n' +
   '  headline: sig => signalsHeadline(sig), sigChecks: a => signalChecks(a[0], a[1]), msgCheck: a => msgCheck(a[0], a[1], a[2]),\n' +
@@ -795,7 +797,8 @@ def test_receiver_management_one_choice_over_two_settings():
     for _, _, name, line in m.values():
         assert line.endswith(".") and len(line) <= 80 and not any(w in line for w in ("RTCM", "SAVECONFIG", "autocfg"))
     assert "restarting itself" in m["station"][3] and "never restarts" in m["no_restart"][3]
-    assert m["me"][3].startswith("Sends the receiver nothing")
+    # What the station does on its own: a profile the owner saves still reaches the receiver ("Save and apply").
+    assert m["me"][3].startswith("Configures nothing on its own") and "receiver nothing" not in m["me"][3]
     keys = run_ui([("manageKey", [a, r]) for a in (True, False) for r in ("full", "no_reboot", "alerts_only")])
     assert keys == ["station", "no_restart", None, None, None, "me"]
     custom = run_ui([("manageCustom", [True, "alerts_only"]), ("manageCustom", [False, "full"]),
@@ -941,12 +944,20 @@ def test_comparison_lines_short_and_in_hours():
 
 
 def test_profile_chip_and_maintenance_notice_everywhere_but_settings():
-    chips = run_ui([("profileChip", {"state": "configuring", "profile_applied": True}),
-                    ("profileChip", {"state": "streaming", "config_failed": True}),
-                    ("profileChip", {"state": "streaming", "profile_applied": True}),
-                    ("profileChip", {"state": "streaming", "profile_applied": True, "first_apply_held": True}),
-                    ("profileChip", {"state": "no_receiver", "profile_applied": False})])
+    chips = run_ui([("profileChip", {"state": "configuring", "autocfg": True, "profile_applied": True}),
+                    ("profileChip", {"state": "streaming", "autocfg": True, "config_failed": True}),
+                    ("profileChip", {"state": "streaming", "autocfg": True, "profile_applied": True}),
+                    ("profileChip", {"state": "streaming", "autocfg": True, "profile_applied": True, "first_apply_held": True}),
+                    ("profileChip", {"state": "no_receiver", "autocfg": True, "profile_applied": False})])
     assert chips == [["Applying", "info"], ["Failed", "bad"], ["Applied", "ok"], ["Not applied", "warn"], ["Not applied", "warn"]]
+    # The owner manages the receiver ("Me (alerts only)"): a grey chip that says what the Receiver page says, applied or
+    # not; amber only while the station manages it. Applying and a failure still show (a saved profile is sent once).
+    own = {"state": "streaming", "autocfg": False, "first_apply_held": False}
+    chips = run_ui([("profileChip", {**own, "profile_applied": False}), ("profileChip", {**own, "profile_applied": True}),
+                    ("profileChip", {**own, "state": "configuring"}), ("profileChip", {**own, "config_failed": True}),
+                    ("profileChip", {**own, "first_apply_held": True})])
+    assert chips == [["Managed by you", ""], ["Managed by you", ""], ["Applying", "info"], ["Failed", "bad"],
+                     ["Not applied", "warn"]]
     maint = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600})
     out = run_ui([("notices", [maint, p]) for p in ("settings", "receiver", "receiver/settings", "receiver/live", "casters", "diag",
                                                      "diag/history")])
@@ -954,6 +965,20 @@ def test_profile_chip_and_maintenance_notice_everywhere_but_settings():
     # Diagnostics' Overview, whose Health card says it with End now. Every other page has it.
     assert [[k for k, _ in o] for o in out] == [[]] + [["maintenance"]] * 4 + [[], ["maintenance"]]
 
+
+
+def test_save_buttons_say_they_apply_while_you_manage_the_receiver():
+    """Receiver settings' Save buttons (Position, Receiver profile): "Save and apply" while the owner manages the
+    receiver (automatic configuration off: Me, or the Custom combination), as a changed profile reaches the receiver all
+    the same; the card's own "Save position" / "Save profile" while the station manages it, and during the held first
+    configuration."""
+    station = {"autocfg": True, "recovery": "full", "first_apply_held": False}
+    me = {"autocfg": False, "recovery": "alerts_only", "first_apply_held": False}
+    custom = {"autocfg": False, "recovery": "full", "first_apply_held": False}
+    held = {"autocfg": False, "recovery": "alerts_only", "first_apply_held": True}
+    out = run_ui([("saveLabel", [g, w]) for g in (station, me, custom, held) for w in ("position", "profile")])
+    assert out == ["Save position", "Save profile", "Save and apply", "Save and apply", "Save and apply", "Save and apply",
+                   "Save position", "Save profile"]
 
 # ---- The system pages (90-system.js, 30-auth.js) ----
 
@@ -964,13 +989,19 @@ def test_system_wifi_chip_and_recovery_line():
     assert out[:4] == [["Not set up", "plain"], ["Online", "ok"], ["Connecting", "warn"], ["Offline", "bad"]]
     # One line under the admin password: what to do, no paragraph (the login page has the steps in full).
     assert out[4] == "Forgot it? Hold BOOT for 10 s, then join the station's own Wi-Fi and open http://192.168.4.1/."
-    # Diagnostics' access point row: a line that wraps between the two parts starts with the dot
-    # ("B4:FB:E4:2C:91:07" / "· channel 11"), never ends with it; "channel 11" stays whole. (The Wi-Fi row: the casters
-    # harness, which has a DOM.)
+    # Diagnostics' Wi-Fi: a row each, no value joined to the next with a dot (a wrapped line never starts with one). The
+    # signal's words are the casters harness's (it has a DOM).
     net = {"online": True, "ssid": "Home", "rssi": -61}
-    ap = {"ssid": "Home", "online": True, "rssi": -61, "bssid": "B4:FB:E4:2C:91:07", "channel": 11, "tx_power_dbm": 19.5}
-    (rows,) = run_ui([("apRows", [net, ap])])
-    assert rows[0] == ["Access point", "B4:FB:E4:2C:91:07 \u00b7\u00a0channel\u00a011"]
+    ap = {"ssid": "Home", "online": True, "rssi": -61, "bssid": "AA:BB:CC:DD:EE:FF", "channel": 11, "tx_power_dbm": 19.5}
+    rows, bare, off, unset, none = run_ui([("wifiRows", [net, ap]), ("wifiRows", [net, None]),
+                                           ("wifiRows", [{"online": False, "ssid": "Home", "offline_s": 90}, ap]),
+                                           ("wifiRows", [{"ssid": ""}, None]), ("wifiRows", [None, None])])
+    assert rows == [["Wi-Fi", "Home"], ["Signal", None], ["Access point", "AA:BB:CC:DD:EE:FF"], ["Channel", "11"],
+                    ["Transmit power", "19.5\u00a0dBm"]]
+    assert not any("\u00b7" in (r[1] or "") for r in rows)
+    assert bare == [["Wi-Fi", "Home"], ["Signal", None]]
+    assert off == [["Wi-Fi", "Home, offline for 1\u00a0min 30\u00a0s"]]
+    assert unset == [["Wi-Fi", "Not set up"]] and none == [["Wi-Fi", "\u2013"]]
 
 
 def test_own_wifi_chip_warns_only_while_it_is_open_to_anyone():
@@ -1202,6 +1233,18 @@ def test_since_this_start_names_only_what_happened():
     out = run_ui([("sinceStart", {"gnss_stalls": 0, "recoveries": 0, "caster_restarts": 0, "network_recoveries": 0}),
                   ("sinceStart", {"gnss_stalls": 2, "recoveries": 1, "caster_restarts": 0, "network_recoveries": 3})])
     assert out == ["No stalls or recoveries", "2 receiver stalls, 1 recovery step, 3 network recoveries"]
+
+
+def test_starts_in_a_word_and_the_receiver_at_power_on_in_a_few():
+    """Earlier starts: a short word per start, a planned one by why it was planned. This start: whether the receiver
+    kept running, in a few words (nothing about reset pins); nothing while not known."""
+    out = run_ui([("startKind", ["power_on", "none"]), ("startKind", ["crash", "none"]), ("startKind", ["brownout", "none"]),
+                  ("startKind", ["other", "none"]), ("startKind", ["planned", "app_update"]), ("startKind", ["planned", "user"]),
+                  ("startKind", ["planned", "gnss_ladder"]), ("startKind", ["planned", "something_new"]),
+                  ("rxBoot", "kept_running"), ("rxBoot", "restarted"), ("rxBoot", "pending"), ("rxBoot", "unknown")])
+    assert out[:8] == ["Power-on", "Crash", "Power dip", "Reset", "Update", "Restart", "Recovery", "Restart"]
+    assert out[8:] == ["The receiver kept running", "The power was cut", "", ""]
+    assert all(len(w) <= 14 for w in out[:8])
 
 
 def test_log_lines_and_event_times_fit_one_line():

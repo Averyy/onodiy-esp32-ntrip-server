@@ -254,6 +254,8 @@ typedef struct {
     uint32_t boot_no;                           /**< boots since power-on */
     uint32_t prev_uptime_s;                     /**< uptime of the session before it (s); UINT32_MAX = unknown */
     char version[32];                           /**< app version that booted */
+    uint32_t start_unix;                        /**< UTC second it started; 0 = not known (no trusted clock in that boot,
+                                                     or recorded by a build without start times) */
 } lifecycle_boot_record_t;
 
 /** Boots kept in the persisted history. */

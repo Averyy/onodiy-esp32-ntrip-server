@@ -909,7 +909,37 @@ TEST_CASE("health: retry, refused factory reset, journal and log counters", "[we
     TEST_ASSERT_EQUAL(171, at(at(root, "log"), "usb_dropped_bytes")->valueint);
     TEST_ASSERT_EQUAL_STRING("none", at(at(root, "station"), "rx_boot")->valuestring);
     TEST_ASSERT_EQUAL_STRING("none", at(at(root, "station"), "rx_boot_by")->valuestring);
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(root, "boot_history")));
     cJSON_Delete(root);
+
+    /* The start history: when each start began, null when the station had no trusted clock then. */
+    static lifecycle_boot_record_t starts[2];
+    memset(starts, 0, sizeof(starts));
+    starts[0].reset_class = LIFECYCLE_RESET_PLANNED;
+    starts[0].planned_reason = LIFECYCLE_REBOOT_APP_UPDATE;
+    starts[0].boot_no = 2;
+    starts[0].prev_uptime_s = 3600;
+    starts[0].start_unix = 1760000000;
+    strcpy(starts[0].version, "v0.3.0");
+    starts[1].reset_class = LIFECYCLE_RESET_POWER_ON;
+    starts[1].boot_no = 1;
+    starts[1].prev_uptime_s = UINT32_MAX;
+    strcpy(starts[1].version, "v0.2.9");
+    h.history = starts;
+    h.history_count = 2;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_health(&w, &h);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    const cJSON *bh = at(root, "boot_history");
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(bh));
+    TEST_ASSERT_EQUAL_DOUBLE(1760000000.0, at(cJSON_GetArrayItem(bh, 0), "start_unix")->valuedouble);
+    TEST_ASSERT_EQUAL_STRING("app_update", at(cJSON_GetArrayItem(bh, 0), "planned_reason")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(cJSON_GetArrayItem(bh, 1), "start_unix")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(cJSON_GetArrayItem(bh, 1), "prev_uptime_s")));
+    cJSON_Delete(root);
+    h.history = NULL;
+    h.history_count = 0;
 
     /* After a power-on reset: the receiver's word on it. */
     st.rx_boot = STATION_RX_BOOT_KEPT;
