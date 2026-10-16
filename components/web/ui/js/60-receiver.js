@@ -232,8 +232,7 @@ function receiverChip(s) {
 
 /** Who configures the receiver, the profile's state and the signal group it runs ("Applied · 3 6 (Galileo E6)"). */
 function configLine(g) {
-  const c = g.first_apply_held ? ['Waiting for your OK', 'warn'] :
-    !g.autocfg && g.state !== 'configuring' && !g.config_failed ? ['Managed by you', ''] : profileChip(g);
+  const c = g.first_apply_held ? ['Waiting for your OK', 'warn'] : profileChip(g);
   const sg = g.rx_signal_group ? sgName(g.rx_signal_group.master, g.rx_signal_group.slave) : '';
   return [h('span', { class: c[1] === 'bad' || c[1] === 'warn' ? 't-' + c[1] : null }, c[0]), sg ? ' · ' + sg : ''];
 }
@@ -550,10 +549,16 @@ function heldPanel(opts) {
 
 /* ---- Position and receiver profile ------------------------------------------------ */
 
-/** The profile's state for its chip: [text, tone]. */
+/* The user configures the receiver (automatic configuration off, not the held first configuration): a saved profile is sent once. */
+function manageOwn(g) {
+  return !g.autocfg && !g.first_apply_held;
+}
+
+/** The profile's state for its chip: [text, tone]; grey while the user manages the receiver (as the Receiver page says). */
 function profileChip(g) {
   if (g.state === 'configuring') return ['Applying', 'info'];
   if (g.config_failed) return ['Failed', 'bad'];
+  if (manageOwn(g)) return ['Managed by you', ''];
   if (g.profile_applied && !g.first_apply_held) return ['Applied', 'ok'];
   return ['Not applied', 'warn'];
 }
@@ -940,6 +945,8 @@ function receiverForms(g, latest, done, onCompare) {
     const c = positionChip(gg);
     posChip.className = 'badge ' + c[1];
     posChip.textContent = c[0];
+    const save = manageOwn(gg) ? 'Save and apply' : 'Save profile';
+    if (saveBtn.textContent !== save) saveBtn.textContent = save;
     patch(match, matchLine(gg));
     match.hidden = !match.textContent;
     patch(seeLine, castersSee(gg));

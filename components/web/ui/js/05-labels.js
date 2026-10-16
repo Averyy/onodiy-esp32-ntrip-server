@@ -128,6 +128,13 @@ const L = {
     brownout: 'after a power dip', sdio: 'over SDIO', usb: 'over USB', jtag: 'over JTAG', efuse: 'after an eFuse error',
     pwr_glitch: 'after a power glitch', cpu_lockup: 'after a CPU lockup',
   },
+  /* A start in a word (Diagnostics' earlier starts): by its reset class; a planned one by its reason (else "Restart"). */
+  startKind: { power_on: 'Power-on', crash: 'Crash', brownout: 'Power dip', other: 'Reset' },
+  plannedKind: {
+    app_update: 'Update', app_revert: 'Rollback', app_rollback: 'Rollback', factory_reset: 'Factory reset', admin_reset: 'Password reset',
+    gnss_ladder: 'Recovery', network_ladder: 'Wi-Fi recovery', low_heap: 'Low memory', safe_mode_retry: 'Left safe mode',
+    safe_mode_cleared: 'Left safe mode', boot_failure: 'Failed start',
+  },
   /* Why a restart was planned, as it follows "Restarted " (startSentence) or "Restart " (the journal). */
   plannedReason: {
     none: '', user: 'by you', factory_reset: 'for a factory reset', admin_reset: 'after a password reset with the BOOT button',
@@ -506,9 +513,9 @@ function restartPlanShort(hl) {
 function rxBootSentence(v) {
   switch (v) {
     case 'kept_running':
-      return 'The receiver kept running: only the ESP32 was reset (its reset pin, such as the USB auto-reset), not a power loss';
+      return 'The receiver kept running';
     case 'restarted':
-      return 'The receiver restarted too: the power was cut';
+      return 'The power was cut';
     default:   /* still judged, or not known: nothing to say */
       return '';
   }

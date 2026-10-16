@@ -765,10 +765,11 @@ save sends only the members that change, one per request since they are
 stored one after the other: `recovery` first when `autocfg` goes off, else
 `autocfg` first, so a refusal halfway never leaves automatic recovery on
 for a receiver the station does not configure. The Position card ("Save
-position") and the Receiver profile card ("Save profile") each send the
-whole profile: their own fields over the profile as last read. Each button
-shows once its own card changed, so an edit in the other card stays on the
-page with its button.
+position") and the Receiver profile card ("Save profile"; "Save and apply"
+while `autocfg` is off, as a changed profile is applied all the same) each
+send the whole profile: their own fields over the profile as last read.
+Each button shows once its own card changed, so an edit in the other card
+stays on the page with its button.
 
 The profile is stored with `um98x_profile_encode()` (validated by
 `um98x_profile_valid()`, which has the last word) and, when it differs from

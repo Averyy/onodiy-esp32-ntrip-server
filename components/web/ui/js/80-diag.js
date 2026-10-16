@@ -100,10 +100,28 @@ function logStats(l) {
   ]);
 }
 
-/* "Restart 3" (the third since a power-on), or "Power-on" for the first start after one. */
-function bootWhen(x) {
-  if (x.reset_class === 'power_on' || x.boot_no <= 1) return 'Power-on';
-  return 'Restart ' + (x.boot_no - 1);
+/* A start in a word ("Power-on", "Crash", "Update"): its reset class, a planned restart by its reason. */
+function startKind(cls, planned) {
+  return cls === 'planned' ? L.plannedKind[planned] || 'Restart' : L.startKind[cls] || 'Reset';
+}
+
+/*
+ * The earlier starts (health boot_history without this one), newest first,
+ * one line each: when it started (else how long it ran, else a dash), the
+ * kind and the version; its sentence on hover. A start ran for the previous
+ * run of the start after it (here, this start, for the newest) when their
+ * counts follow on (a power-on between them leaves it unknown). day: today
+ * (toDateString).
+ */
+function startLines(starts, here, day) {
+  return starts.map((x, i) => {
+    const next = i ? starts[i - 1] : here;
+    const ran = next && next.boot_no === x.boot_no + 1 && typeof next.prev_uptime_s === 'number' ? next.prev_uptime_s : null;
+    return h('tr', { title: startSentence(x.reset_class, x.reset_reason, x.planned_reason) },
+      h('td', { class: 'when' }, x.start_unix ? dayTime(x.start_unix, day) : ran === null ? DASH : 'Ran ' + fmt.dur(ran)),
+      h('td', null, startKind(x.reset_class, x.planned_reason)),
+      h('td', { class: 'name muted' }, x.version || ''));
+  });
 }
 
 /* "If corrections stop": the choice's name, or "Paused" while the station holds the recovery. */
@@ -157,31 +175,22 @@ function sinceStart(hl) {
   return parts.length ? capFirst(parts.join(', ')) : 'No stalls or recoveries';
 }
 
-/* Between two parts of a value: a line that wraps there starts with the dot ("AA:BB:CC:DD:EE:FF" / "· channel 11"). */
-const PART_SEP = ' ·' + NB;
-
 /*
- * The Wi-Fi in one line: network and signal in dBm ("Home · Good (-61
- * dBm)"; a wrap starts the second line with the dot, the signal's bars
- * kept with it). net: the status's network (its RSSI is the freshest); w:
- * GET /api/wifi, either may be missing.
+ * The Wi-Fi, a row each: the network, then while online the signal (the
+ * status's RSSI is the freshest), the access point, its channel and the
+ * transmit power, each only while known. net: the status's network; w: GET
+ * /api/wifi; either may be missing.
  */
-function wifiLine(net, w) {
-  if (!net && !w) return DASH;
+function wifiRows(net, w) {
   const n = net || w;
-  if (!n.ssid) return 'Not set up';
-  if (!n.online) return n.ssid + ', offline' + (n.offline_s ? ' for ' + fmt.dur(n.offline_s) : '');
-  const rssi = rssiKnown(n.rssi) ? n.rssi : w && w.rssi;
-  return [n.ssid, rssiKnown(rssi) ? [' ', h('span', { class: 'nowrap' }, '·' + NB, rssiView(rssi))] : null];
-}
-
-/* The access point and its channel ("AA:BB:CC:DD:EE:FF · channel 11") and the transmit power, from GET /api/wifi: rows only while
- * known and online (net: the status's network, the fresher). */
-function apRows(net, w) {
-  if (!w || (net && net.online === false)) return [];
-  const ap = [w.bssid, w.channel ? 'channel' + NB + w.channel : null].filter(Boolean).join(PART_SEP);
-  const tx = typeof w.tx_power_dbm === 'number' ? w.tx_power_dbm + NB + 'dBm' : null;
-  return [ap ? ['Access point', ap] : null, tx ? ['Transmit power', tx] : null];
+  if (!n) return [['Wi-Fi', DASH]];
+  if (!n.ssid) return [['Wi-Fi', 'Not set up']];
+  if (!n.online) return [['Wi-Fi', n.ssid + ', offline' + (n.offline_s ? ' for ' + fmt.dur(n.offline_s) : '')]];
+  const ap = w || {};
+  const rssi = rssiKnown(n.rssi) ? n.rssi : ap.rssi;
+  return [['Wi-Fi', n.ssid], rssiKnown(rssi) ? ['Signal', rssiView(rssi)] : null, ap.bssid ? ['Access point', ap.bssid] : null,
+    ap.channel ? ['Channel', String(ap.channel)] : null,
+    typeof ap.tx_power_dbm === 'number' ? ['Transmit power', ap.tx_power_dbm + NB + 'dBm'] : null];
 }
 
 /* An RSSI reading in dBm: -127 to -1. Anything else means unknown (null from the station; a raw 0, or -128 from earlier builds). */
@@ -264,8 +273,7 @@ function chipCard(sys, s, w, net) {
       sys ? ['Chip', [[chip.model, chip.revision].filter(Boolean).join(' '), chip.flash_mb ? chip.flash_mb + NB + 'MB flash' : null,
         chip.psram_mb ? chip.psram_mb + NB + 'MB PSRAM' : null].filter(Boolean).join(', ')] : null,
       sys ? ['ESP-IDF', sys.idf] : null,
-      ['Wi-Fi', wifiLine(s && s.network, w)],
-      ...apRows(s && s.network, w),
+      ...wifiRows(s && s.network, w),
       sys && sys.mac ? ['MAC address', sys.mac] : null,
       net.reconnects ? ['Wi-Fi drops', fmt.num(net.reconnects) + ' this start' +
         (net.last_disconnect_reason ? ', last: ' + wifiReason(net.last_disconnect_reason) : '')] : null,
@@ -298,11 +306,8 @@ function overviewTab(box) {
     /* The starts before this one: the history's first is this start (unless it could not be stored), which "This start" has. */
     const bh = hl.boot_history || [];
     const starts = bh[0] && bh[0].boot_no === b.boots_since_power_on && bh[0].reset_class === b.reset_class ? bh.slice(1) : bh;
-    /* One row per start: when, then how, how long the station ran before it and the version. */
-    const startRows = list => scrollBox('Earlier starts', h('table', null, h('tbody', null, list.map(x => h('tr', null,
-      h('td', { class: 'when' }, bootWhen(x)), h('td', null, startSentence(x.reset_class, x.reset_reason, x.planned_reason),
-        h('span', { class: 'muted' }, (x.prev_uptime_s === null || x.prev_uptime_s === undefined ? '' : ' · ran ' + fmt.dur(x.prev_uptime_s) +
-          ' before') + (x.version ? ' · ' + x.version : ''))))))));
+    const lines = startLines(starts, { boot_no: b.boots_since_power_on, prev_uptime_s: b.prev_session_uptime_s }, new Date().toDateString());
+    const startRows = rows => scrollBox('Earlier starts', h('table', { class: 'rows' }, h('tbody', null, rows)));
     patchDetect(box, h('div', { class: 'grid' },
       healthCard(hl, S.status),
       h('section', { class: 'card' },
@@ -329,7 +334,7 @@ function overviewTab(box) {
       chipCard(sys, S.status, wifi, net),
       h('section', { class: 'card' },
         h('h2', null, 'Earlier starts'),
-        starts.length ? [startRows(starts.slice(0, 5)), starts.length > 5 ? sect('starts', 'Older starts', startRows(starts.slice(5))) : null] :
+        lines.length ? [startRows(lines.slice(0, 5)), lines.length > 5 ? sect('starts', 'Older starts', startRows(lines.slice(5))) : null] :
           h('p', { class: 'muted' }, 'None recorded.')),
       h('section', { class: 'card wide tight-kv' },
         h('details', { class: 'fold', 'data-k': 'internals', open: opened.has('internals') },
