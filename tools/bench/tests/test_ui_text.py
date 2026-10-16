@@ -1370,3 +1370,61 @@ def test_a_day_of_the_last_30_in_words():
                       "30\u00a0min powered off", "1 receiver data overflow"]
     assert out[1] == ["1 reconnect"]
     assert out[2] == []
+
+
+# ---- The fixed-position check: the warning on the Status page, its words, and History ----
+
+FIXED_FAR = {"id": "fixed_far", "source": "station", "horizontal_m": 118, "vertical_m": 4, "distance_m": 118,
+             "height_only": False}
+ANTENNA_LINE = "The receiver answers. Check that the antenna is on the socket marked M and sees the open sky."
+
+
+def test_fixed_position_far_says_how_far_and_where_to_check():
+    out = heroes(
+        status(alerts=[FIXED_FAR]),
+        status(alerts=[{**FIXED_FAR, "horizontal_m": 3, "vertical_m": -82, "distance_m": 82, "height_only": True}]),
+        status(alerts=[{**FIXED_FAR, "horizontal_m": 2340, "distance_m": 2340}]),
+        status(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "auth_failed", reason="auth")],
+               alerts=[FIXED_FAR]),
+        status(receiver={"best_bands": 3}, alerts=[FIXED_FAR]))
+    # Streaming, but every correction carries a wrong position: the top card, amber, with where to fix it.
+    assert (out[0]["key"], out[0]["title"], out[0]["tone"]) == ("fixed_far", "Fixed position looks wrong", "warn")
+    assert out[0]["line"] == "The fixed position is 118\u00a0m from where the receiver is. Check it in Receiver settings."
+    assert out[0]["actions"] == ["Receiver settings"] and out[0]["alert"] == "fixed_far" and out[0]["also"] == []
+    assert out[1]["line"] == "The fixed height is 82\u00a0m below where the receiver is. Check it in Receiver settings."
+    assert out[2]["line"].startswith("The fixed position is 2.3\u00a0km from where the receiver is.")
+    # A caster down comes first; the warning is then an "Also:" line with the same words.
+    assert out[3]["key"] == "casters_down" and out[3]["also"] == ["fixed_far"]
+    assert out[3]["alsoText"] == ["Fixed position looks wrong. The fixed position is 118\u00a0m from where the receiver is. "
+                                  "Check it in Receiver settings."]
+    # Before the band count for Onocoy, which says nothing about the position.
+    assert out[4]["key"] == "fixed_far" and out[4]["also"] == []
+    # Visitors see no alerts.
+    assert heroes(status(alerts=[FIXED_FAR]), admin=False)[0]["key"] == "streaming"
+
+
+def test_no_corrections_from_a_fixed_position_far_enough_to_stop_them():
+    """A receiver whose own solution is 300 m or more from its fixed position sends no corrections: the position is the
+    reason, not the antenna (it computes a solution: it has sky). Nearer, the antenna line stays, the warning beside it."""
+    def stalled(dist):
+        return status(health={"level": "failed"}, casters=[caster(0, "Onocoy", "wait_data")],
+                      alerts=[{"id": "no_rtcm", "source": "health"},
+                              {**FIXED_FAR, "horizontal_m": dist, "distance_m": dist}])
+    far, near = heroes(stalled(420), stalled(120))
+    assert (far["key"], far["title"]) == ("no_rtcm", "Receiver sends no corrections")
+    assert far["line"] == "The fixed position is 420\u00a0m from where the receiver is. Check it in Receiver settings."
+    assert far["also"] == [] and far["actions"] == ["Receiver settings"]
+    assert near["key"] == "no_rtcm" and near["line"] == ANTENNA_LINE and near["also"] == ["fixed_far"]
+    assert near["actions"] == []
+
+
+def test_fixed_position_check_in_history():
+    out = run_ui([("journalDetail", {"kind": "fixed_check", "a": (4 << 8) | 1, "b": 118}),
+                  ("journalDetail", {"kind": "fixed_check", "a": (-82 << 8) | 1, "b": 3}),
+                  ("journalDetail", {"kind": "fixed_check", "a": (1 << 8) | 2, "b": 2}),
+                  ("journalDetail", {"kind": "fixed_check", "a": 3, "b": 0}),
+                  ("evFilter", None)])
+    # Short enough for a phone's row: how far off (the warning says which way).
+    assert out[:4] == ["118\u00a0m off", "Height 82\u00a0m off", "Within 50\u00a0m again", "Changed"]
+    receiver = [f for f in out[4] if f[0] == "receiver"][0]
+    assert "fixed_check" in receiver[2]

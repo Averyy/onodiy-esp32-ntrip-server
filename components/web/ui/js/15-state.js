@@ -40,6 +40,8 @@ const RECOVERY_DOING = {
 const AGAIN_SHORTLY = 'The station tries again shortly.';
 /* What to do when the receiver answers but sends no corrections (the hero's line; the alerts keep their fuller words). */
 const ANTENNA_CHECK = 'Check that the antenna is on the socket marked M and sees the open sky.';
+/* A fixed base this far from the receiver's own position gets no corrections from it (the receiver stops them). */
+const FIXED_STOPS_M = 300;
 /* Health alerts that say why the receiver sends nothing (the recovery's own evidence). */
 const LADDER_REASONS = ['receiver_power', 'receiver_silent', 'no_satellites', 'no_rtcm'];
 /* Where an "Also:" line's Details button goes. */
@@ -48,6 +50,7 @@ const ALERT_PAGE = {
   no_upstream: '#/settings/wifi', receiver_power: '#/diag', receiver_silent: '#/diag', safe_mode: '#/settings/restart',
   no_satellites: '#/receiver', no_rtcm: '#/receiver', bands: '#/receiver', no_receiver: '#/receiver',
   config_failed: '#/receiver', antenna_moved: '#/receiver', unsupported_model: '#/receiver', signals_mismatch: '#/receiver',
+  fixed_far: '#/receiver/settings',
   profile_drift: '#/receiver', position_mismatch: '#/receiver', rx_held: '#/receiver',
   receiver_attention: '#/settings/updates', receiver_in_loader: '#/settings/session',
 };
@@ -107,6 +110,7 @@ function alertText(a) {
   let title = t ? t[0] : a.id, text = t ? t[1] : '';
   if (a.id === 'config_failed') text = configFailedText(a.auto_retry, a.retry_in_s);
   if (a.source === 'station' && a.id === 'no_receiver') text = noReceiverText(a);
+  if (a.source === 'station' && a.id === 'fixed_far') text = fixedFarText(a);
   return [title, text];
 }
 
@@ -156,7 +160,8 @@ function qualityLead(q, name) {
  * the most important thing and what to do), actions (one; two in safe mode
  * and while settings cannot be saved:
  * {label, href, primary} links or {act, label} data-act buttons, so a
- * refresh keeps the focus), alertId (the alert the line says), notice (the
+ * refresh keeps the focus), alertId (the alert the line says), covers
+ * (other alerts the line says: not listed again), notice (the
  * notice it covers), diagLead (the line on Diagnostics when the lead points
  * there; null: the lead), subject (the caster slot the line names), named (the
  * line names the casters down), doing (what the receiver recovery does
@@ -172,10 +177,12 @@ function qualityLead(q, name) {
  * receiver; receiver stopped (red: it does not answer); the recovery runs
  * (amber: what it does now; once the receiver answered without sending
  * corrections, no satellites or no corrections with the antenna check, and
- * what it does in the plan line); no satellites; no corrections; Onocoy
- * stopped; maintenance; comparing signal groups; new Wi-Fi; receiver not
- * configured, looked for or configuring; Onocoy not set up; not or partly
- * streaming; too few bands or no GLONASS for Onocoy; streaming.
+ * what it does in the plan line); no satellites; no corrections (the fixed
+ * position instead of the antenna when it is far enough to stop them);
+ * Onocoy stopped; maintenance; comparing signal groups; new Wi-Fi; receiver
+ * not configured, looked for or configuring; Onocoy not set up; not or
+ * partly streaming; the fixed position far from the receiver's own; too
+ * few bands or no GLONASS for Onocoy; streaming.
  */
 function stationState(s, admin) {
   const rcv = s.receiver || {};
@@ -188,6 +195,7 @@ function stationState(s, admin) {
   const state = rxState(s);
   const sm = (admin && s.safe_mode) || {};
   const ladder = LADDER_REASONS.map(id => find(id, 'health')).filter(Boolean)[0] || null;
+  const fixedFar = find('fixed_far', 'station');
   /* During receiver maintenance the station says idle while the corrections keep coming. */
   const maintFlowing = !!rcv.rx_maintenance && typeof rcv.rtcm_age_ms === 'number' && rcv.rtcm_age_ms < 5000;
   const delivering = !sm.active && (state === 'streaming' || maintFlowing) && hl.level !== 'recovering' && !ladder;
@@ -197,7 +205,8 @@ function stationState(s, admin) {
   const quality = rxQuality(rcv, delivering);
   const go = (label, href, primary) => ({ label: label, href: href, primary: !!primary });
   const pick = (key, head, tone, lead, more) => Object.assign({ key: key, head: head, tone: tone, lead: lead, actions: [],
-    alertId: null, notice: null, trial: null, subject: null, named: false, search: null, diagLead: null, doing: null }, more || {});
+    alertId: null, covers: [], notice: null, trial: null, subject: null, named: false, search: null, diagLead: null, doing: null },
+  more || {});
 
   const decide = () => {
     if (sm.active) {
@@ -243,10 +252,14 @@ function stationState(s, admin) {
     if (ladder && (ladder.id === 'receiver_power' || ladder.id === 'receiver_silent')) {
       return pick('rx_stopped', 'Receiver stopped sending data', 'bad', alertText(ladder)[1], { alertId: ladder.id });
     }
-    /* The receiver answers but sends no corrections: the antenna, whatever the recovery does (doing: its line, while it runs). */
+    /* The receiver answers but sends no corrections: the antenna, whatever the recovery does (doing: its line, while it runs);
+     * a fixed position far enough from the receiver's own to stop its corrections is the reason instead. */
+    const stopsIt = fixedFar && fixedFar.distance_m >= FIXED_STOPS_M;
     const antenna = (tone, doing) => (ladder.id === 'no_satellites' ?
       pick('no_satellites', 'Antenna sees no satellites', tone, ANTENNA_CHECK, { alertId: ladder.id, doing: doing }) :
-      pick('no_rtcm', 'Receiver sends no corrections', tone, 'The receiver answers. ' + ANTENNA_CHECK, { alertId: ladder.id, doing: doing }));
+      pick('no_rtcm', 'Receiver sends no corrections', tone, stopsIt ? fixedFarText(fixedFar) : 'The receiver answers. ' + ANTENNA_CHECK,
+        stopsIt ? { alertId: ladder.id, doing: doing, covers: ['fixed_far'], actions: [go('Receiver settings', '#/receiver/settings')] } :
+          { alertId: ladder.id, doing: doing }));
     if (state === 'recovering' || (state === 'streaming' && hl.level === 'recovering')) {
       /* No step in progress: between two (a session of the station's own cut the last one short). */
       const doing = admin ? recoveryDoing(hl) || (hl.step_phase === 'none' ? AGAIN_SHORTLY : null) : null;
@@ -331,6 +344,11 @@ function stationState(s, admin) {
       more.named = down.length <= 2;
       return pick('casters_down', head, tone, lead, more);
     }
+    if (fixedFar) {
+      /* Streaming, but every correction carries a wrong position. */
+      return pick('fixed_far', L.salert.fixed_far[0], 'warn', fixedFarText(fixedFar),
+        { actions: [go('Receiver settings', '#/receiver/settings')], alertId: 'fixed_far' });
+    }
     if (onoStreaming && quality.any) {
       return pick('quality', quality.fewBands ? 'Too few bands for Onocoy' : 'No GLONASS for Onocoy', 'warn',
         qualityLead(quality, casterName(ono)), { actions: [go('Receiver', '#/receiver')],
@@ -344,7 +362,7 @@ function stationState(s, admin) {
   const r = decide();
   const order = { bad: 0, warn: 1, info: 2 };
   /* A closed port is why no receiver is found: its cable advice would mislead. */
-  r.also = alerts.filter(a => a.id !== r.alertId && !(r.key === 'uart_closed' && a.id === 'no_receiver'))
+  r.also = alerts.filter(a => a.id !== r.alertId && r.covers.indexOf(a.id) < 0 && !(r.key === 'uart_closed' && a.id === 'no_receiver'))
     .map(a => ({ id: a.id, title: alertText(a)[0], text: alertText(a)[1], tone: alertTone(a), href: ALERT_PAGE[a.id] || '#/diag' }))
     .sort((a, b) => (order[a.tone] || 0) - (order[b.tone] || 0));
   r.facts = [];
