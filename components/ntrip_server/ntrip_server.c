@@ -1198,13 +1198,13 @@ static void account(slot_t *s, uint32_t now)
     }
     /* The data rate's time base: only what the ledger counts as online, a
      * session past the caster's OK that streams fresh RTCM (not a session
-     * left open through a receiver stall or a pause, not the connect). */
+     * left open through a pause or a stale stream, not the connect), each
+     * pass by the state it began in, as the ledger counts it. */
     ntrip_rate_in_t rin = {
         .enabled = s->cfg.enabled && s_running,
         .session_open = s->open,
         .streaming = s->sm.state == NTRIP_SM_STREAMING,
         .rtcm_ok = ledger_rtcm_ok(),
-        .session_start_ms = s->sm.session_start_ms,
     };
     ntrip_rate_clock_tick(&s->rate, now, &rin);
     /* Since when the protected slot counts today: from 00:00 UTC when it
@@ -1563,10 +1563,16 @@ static void handle_commands(slot_t *s, uint32_t now)
     if (cmd & CMD_CONFIG) {
         char old_host[64];
         strlcpy(old_host, s->cfg.host, sizeof(old_host));
+        bool was_protected = s->cfg.protected_slot;
         if (s->open || s->fd >= 0 || s->tls != NULL) {
             end_planned(s, now, true);
         }
         copy_cfg(s);
+        if (s->cfg.protected_slot && !was_protected) {
+            /* Pointed at Onocoy now: the epochs it lost before, unprotected, are
+             * not the protected slot's, so they are never reported (publish). */
+            s->lost_reported = ntrip_lost_epochs((uint32_t)(s->rate.on_ms / 1000u), s->st.epochs_sent_today);
+        }
         if (strcmp(old_host, s->cfg.host) != 0) {
             s->cache_len = 0;
             s->cache_host[0] = '\0';

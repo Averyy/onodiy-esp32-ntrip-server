@@ -987,31 +987,37 @@ typedef struct {
     bool session_open;           /**< a session the caster accepted */
     bool streaming;              /**< the state machine is in STREAMING (not paused for receiver work) */
     bool rtcm_ok;                /**< fresh RTCM from the receiver, as the availability ledger has it */
-    uint32_t session_start_ms;   /**< when the caster accepted the session (ntrip_sm_t.session_start_ms) */
 } ntrip_rate_in_t;
 
 /**
  * The data rate's time base (ntrip_lost_epochs, data_rate_permille): the
  * time the availability ledger counts as online for the slot, and only that.
- * A session that stays open through a receiver stall (silent until the stall
- * limit) or through a pause for receiver work (the hub held) is offline in
- * the ledger; its silent seconds counted as lost epochs too would charge them
- * twice (ntrip_best_rate_ppm takes the offline seconds out of the day). The
- * connect before the caster's OK (the TLS gate, DNS, TCP, TLS, the reply) is
- * not online either, however long the call that made it blocked.
+ * The ledger learns of a change at the end of the slot task's pass, so it
+ * gives a pass the state the slot had when the pass began; so does this
+ * clock. A pass that blocks in a write and ends with the session closed (a
+ * write stall: 10 s or more) is online in the ledger, and its seconds are
+ * lost epochs here; the connect before the caster's OK (the TLS gate, DNS,
+ * TCP, TLS, the reply) is offline in both, however long it blocked. A
+ * session left open through a pause for receiver work (the hub held) is
+ * offline in the ledger. One left open through a receiver stall is online
+ * until the station sees the RTCM go stale (10 s after the last frame), so
+ * those first seconds are lost epochs; the rest of the stall is offline time,
+ * never lost epochs as well (ntrip_best_rate_ppm takes the offline seconds
+ * out of the day).
  */
 typedef struct {
     uint64_t on_ms;              /**< online time counted (the caller starts it again at a new day) */
     uint32_t last_ms;            /**< the previous tick */
+    bool online;                 /**< the slot was online at the previous tick */
 } ntrip_rate_clock_t;
 
-/** Start counting at `now_ms` (nothing counted yet). */
+/** Start counting at `now_ms` (nothing counted yet, the slot offline). */
 void ntrip_rate_clock_init(ntrip_rate_clock_t *c, uint32_t now_ms);
 
 /**
- * Count the time since the previous tick when the slot is online now: a
- * session the caster accepted, in STREAMING, enabled, with fresh RTCM. Of
- * that time only what follows the session's accept counts.
+ * Count the time since the previous tick when the slot was online at that
+ * tick, then note whether it is online now: a session the caster accepted,
+ * in STREAMING, enabled, with fresh RTCM.
  */
 void ntrip_rate_clock_tick(ntrip_rate_clock_t *c, uint32_t now_ms, const ntrip_rate_in_t *in);
 

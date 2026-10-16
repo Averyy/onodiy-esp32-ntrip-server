@@ -1380,8 +1380,10 @@ if nothing more is sent); `data_rate_permille` = this start's epochs sent
 today over its seconds online today (a ratio of this start only, shown
 as the current data rate; online as the availability ledger counts it:
 streaming with fresh RTCM from the receiver, from the caster's OK on, so
-a session left open through a receiver stall or a pause for receiver work
-is offline time, never lost epochs as well); `budget_s` the offline seconds the day allows at
+a session left open through a pause for receiver work is offline time,
+never lost epochs as well, and one left open through a receiver stall is
+online for its first 10 s, until the station sees the RTCM go stale (those
+seconds are lost epochs), and offline time after that); `budget_s` the offline seconds the day allows at
 the best data rate it can still reach (473 at 100 %): 1 - lost / (86400 -
 `today_offline_s`), with lost the epochs the slot should have sent while
 online (one a second) but did not, today, across restarts (the
