@@ -11,7 +11,10 @@ the caster choice and the fields as a user does (with the "change" events
 the page gets), submits the form and returns the body of the PUT it sends
 (fetch is stubbed; nothing is stored), or (inspect) what the editor shows
 where. Other cases build a caster card's parts (the duplicate-stream
-warning, the connection details). Skipped when Node.js is not installed.
+warning, the connection details), the Status page and the no-receiver
+panel, and run the setup's Onocoy step against scripted answers (events
+bubble up through the parents there). Skipped when Node.js is not
+installed.
 """
 
 from __future__ import annotations
@@ -48,16 +51,23 @@ class El extends Node {
     this.checked = false; this.selected = false; this.readOnly = false; this.v = '';
     this.classList = { add: noop, remove: noop, toggle: noop, contains: () => false };
   }
-  append(...kids) { for (const k of kids) this.kids.push(k instanceof Node ? k : new Text(String(k))); }
+  append(...kids) {
+    for (const k of kids) {
+      const n = k instanceof Node ? k : new Text(String(k));
+      n.parent = this;
+      this.kids.push(n);
+    }
+  }
   appendChild(k) { this.append(k); return k; }
   prepend(...kids) { this.kids.unshift(...kids.map(k => (k instanceof Node ? k : new Text(String(k))))); }
   replaceChildren(...kids) { this.kids = []; this.append(...kids); }
   remove() {}
   addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); }
   removeEventListener() {}
-  fire(type) {
+  /* bubble: the event goes up through the parents too, as an input or click event does in a page. */
+  fire(type, bubble) {
     const ev = { type, target: this, preventDefault: noop, stopPropagation: noop };
-    for (const fn of this.on[type] || []) fn(ev);
+    for (let e = this; e; e = bubble ? e.parent : null) for (const fn of e.on[type] || []) fn(ev);
   }
   setAttribute(k, v) { this.attrs[k] = String(v); }
   getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
@@ -86,28 +96,36 @@ class El extends Node {
 }
 
 const sent = [];
+/* routes(method, path, body) -> [status, json]: the station's answers for a case that needs them (else every
+ * request succeeds with an empty caster). ids: the page's elements by id, the same one every time. */
+let routes = null;
+const ids = {};
 const storage = { getItem: () => null, setItem: noop, removeItem: noop };
 const ctx = {
   Node,
-  document: { addEventListener: noop, getElementById: () => new El('div'), createElement: t => new El(t),
+  document: { addEventListener: noop, getElementById: id => ids[id] || (ids[id] = new El('div')), createElement: t => new El(t),
               createElementNS: (ns, t) => new El(t), createTextNode: t => new Text(t), querySelector: () => new El('div'),
               querySelectorAll: () => [], documentElement: new El('html'), body: new El('body'), hidden: false,
               visibilityState: 'visible' },
-  window: { addEventListener: noop, matchMedia: () => ({ matches: false, addEventListener: noop }), confirm: () => true },
+  window: { addEventListener: noop, matchMedia: () => ({ matches: false, addEventListener: noop }), confirm: () => true,
+            scrollTo: noop },
   addEventListener: noop, location: { pathname: '/', hash: '', reload: noop }, navigator: {},
   localStorage: storage, sessionStorage: storage,
   setTimeout: noop, clearTimeout: noop, setInterval: noop, clearInterval: noop,
   AbortController: globalThis.AbortController, TextEncoder: globalThis.TextEncoder, crypto: globalThis.crypto,
   console,
   fetch: async (p, init) => {
-    sent.push({ path: p, method: init.method, body: init.body ? JSON.parse(init.body) : null });
-    return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ slot: 0, config: {} }) };
+    const body = init.body ? JSON.parse(init.body) : null;
+    sent.push({ path: p, method: init.method, body: body });
+    const r = routes ? routes(init.method, p, body) : [200, { slot: 0, config: {} }];
+    return { ok: r[0] < 300, status: r[0], headers: { get: () => 'application/json' }, json: async () => r[1] };
   },
 };
 vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { casterEditor, openCasterWarning, casterDetails, casterSummary, casterChip, stationState, adminDashboard,\n' +
-  '  publicDashboard };\n})()', ctx);
+  '  publicDashboard, noReceiverPanel, startWizard, setStatus: s => { S.status = s; }, setSession: s => { S.session = s; } };\n})()',
+  ctx);
 
 /* The elements on screen: hidden ones and everything inside them left out. */
 function* visible(e) {
@@ -159,8 +177,63 @@ function controls(root) {
   };
 }
 
+/* The setup's Onocoy step while an open caster is on: save (refused: the duplicate-stream question), tick the box
+ * (the input event goes up to the form as in a page), then "Save anyway". What shows after each, and the PUTs. */
+async function wizardDup() {
+  const settle = async () => {
+    for (let i = 0; i < 30; i++) await new Promise(r => setImmediate(r));
+  };
+  routes = (m, p, body) => {
+    if (p === '/api/wifi') return [200, { configured: true, online: true, ssid: 'Home', ap: {} }];
+    if (p === '/api/system') return [200, { hostname: 'onocoydiy' }];
+    if (p === '/api/casters' && m === 'GET') {
+      return [200, { max_slots: 4, warnings: [], onocoy_preset: { host: 'servers.onocoy.com', port: 2101, tls_port: 2121, ntrip_version: 1 },
+        slots: [{ slot: 0, config: { host: 'servers.onocoy.com', port: 2101, enabled: false, name: 'Onocoy', mountpoint: '', username: '',
+          password_set: false, protected: true }, status: {} },
+        { slot: 1, config: { host: 'rtk2go.com', port: 2101, enabled: true, name: 'RTK2go', mountpoint: 'BASE1', password_set: true },
+          status: {} }] }];
+    }
+    if (p === '/api/casters/0' && m === 'PUT') {
+      return body.dup_stream_ack ? [200, { slot: 0, config: body }] :
+        [409, { error: { code: 'caster_policy', reason: 'dup_stream_ack_required', message: 'acknowledgement required' } }];
+    }
+    return [200, {}];
+  };
+  ui.setSession({ api: 1, authenticated: true, admin_set: true, setup_done: false, setup_step: 'onocoy', hostname: 'onocoydiy' });
+  ui.startWizard(false);
+  await settle();
+  const page = () => [...visible(ids['view-body'])];
+  const shows = t => page().some(e => e.kids.some(k => k instanceof Text && k.data === t));
+  const inputs = page().filter(e => e.tagName === 'INPUT');
+  const text = inputs.filter(e => e.attrs.maxlength === '47');
+  text[0].value = 'MP1';
+  text[1].value = 'user1';
+  inputs.find(e => e.attrs.type === 'password').value = 'secret123';
+  page().find(e => e.tagName === 'FORM').fire('submit');
+  await settle();
+  const r = { asked: shows('Duplicate-stream risk') };
+  const box = page().find(e => e.tagName === 'INPUT' && e.attrs.type === 'checkbox');
+  box.checked = true;
+  box.fire('input', true);
+  box.fire('change', true);
+  await settle();
+  r.kept = shows('Duplicate-stream risk');
+  const go = page().find(e => e.tagName === 'BUTTON' && e.textContent === 'Save anyway');
+  r.enabled = !!go && !go.disabled;
+  if (go) go.fire('click', true);
+  await settle();
+  r.puts = sent.filter(x => x.method === 'PUT' && x.path === '/api/casters/0').map(x => !!x.body.dup_stream_ack);
+  routes = null;
+  return r;
+}
+
 const out = [];
+(async () => {
 for (const c of JSON.parse(casesJson)) {
+  if (c.fn === 'wizard_dup') {
+    out.push(await wizardDup());
+    continue;
+  }
   if (c.fn === 'warning') {
     const w = ui.openCasterWarning(c.data, c.slot);
     out.push(w ? [...w.walk()].filter(e => e.tagName === 'STRONG').map(e => e.textContent).join('') : null);
@@ -195,14 +268,25 @@ for (const c of JSON.parse(casesJson)) {
       plan: plan ? plan.textContent : null, facts: pairs(hv), cards: cards });
     continue;
   }
+  if (c.fn === 'norx') {
+    /* The no-receiver panel (Receiver page, setup) for a status: its title, its line, whether "Check again" shows. */
+    const p = ui.noReceiverPanel();
+    p.update(c.status);
+    const v = [...visible(p.el)];
+    out.push([v.find(e => e.tagName === 'STRONG').textContent, v.find(e => e.tagName === 'DIV' && e.className === 'small').textContent,
+      v.some(e => e.tagName === 'BUTTON')]);
+    continue;
+  }
   if (c.fn === 'details') {
+    ui.setStatus(c.uptime === undefined ? null : { uptime_s: c.uptime });
     const kids = ui.casterDetails(c.st, c.reconnects === null ? undefined : c.reconnects).filter(Boolean);
     const all = kids.flatMap(k => [...k.walk()]);
     const pairs = [];
     for (const dl of all.filter(e => e.tagName === 'DL')) {
       for (let i = 0; i + 1 < dl.kids.length; i += 2) pairs.push([dl.kids[i].textContent, dl.kids[i + 1].textContent]);
     }
-    out.push({ rows: pairs, titles: all.filter(e => e.tagName === 'H3').map(e => e.textContent) });
+    out.push({ rows: pairs, titles: all.filter(e => e.tagName === 'H3').map(e => e.textContent),
+      notes: all.filter(e => e.tagName === 'P').map(e => e.textContent) });
     continue;
   }
   sent.length = 0;
@@ -226,6 +310,7 @@ for (const c of JSON.parse(casesJson)) {
   out.push(put ? put.body : { errors: f.errors(), more_open: !!f.more.open, title: f.title.textContent });
 }
 process.stdout.write(JSON.stringify(out));
+})();
 """
 
 
@@ -399,26 +484,28 @@ def test_connection_details_list_only_what_happened():
     quiet, rough, waiting = run_editor([
         details(QUIET, 2),
         details(dict(QUIET, state="backoff", login_rejects=1, kicked_sessions=1, data_rate_permille=974,
-                     last_session_text="ERROR - Bad Password", last_err="timed out",
+                     last_session_text="ERROR - Bad Password", last_err="ESP_FAIL",
                      failures_by_class=dict(QUIET["failures_by_class"], timeout=3, dns=1)), None),
         # Never reached anything this start: no reply, no address, no lag.
         details(dict(QUIET, state="wait_data", last_status_line="", last_status_code=0, resolved_ip=None, lag_ms_now=0,
                      max_lag_ms=0, bytes_sent_today=0), 0),
     ])
-    assert [r[0] for r in quiet["rows"]] == ["State since", "Last reply", "Epochs dropped today (since the last restart)",
-                                             "Lag now / highest", "Reconnects today", "Sent today (since the last restart)",
-                                             "Address"], quiet
+    assert [r[0] for r in quiet["rows"]] == ["State since", "Last reply", "Epochs dropped today",
+                                             "Lag now / highest", "Reconnects today", "Sent today", "Address"], quiet
     assert dict(quiet["rows"])["Reconnects today"] == "2" and quiet["titles"] == []
     labels = [r[0] for r in rough["rows"]]
-    assert labels[:12] == ["State since", "Last reply", "Caster said during a session", "Refused logins / login blocks",
-                           "Sessions taken over (score)", "Data rate", "Epochs dropped today (since the last restart)",
-                           "Last error", "Lag now / highest", "Reconnects today", "Sent today (since the last restart)",
-                           "Address"], labels
+    # The firmware's error code ("ESP_FAIL") is never a row: the causes below say it in words.
+    assert labels[:11] == ["State since", "Last reply", "Caster said during a session", "Refused logins / login blocks",
+                           "Sessions taken over (score)", "Data rate", "Epochs dropped today", "Lag now / highest",
+                           "Reconnects today", "Sent today", "Address"], labels
     assert rough["titles"] == ["Failures by cause"]
-    assert rough["rows"][12:] == [["DNS lookup failed", "1"], ["Timed out", "3"]], rough["rows"]
+    assert rough["rows"][11:] == [["DNS lookup failed", "1"], ["Timed out", "3"]], rough["rows"]
     assert dict(rough["rows"])["Reconnects today"] == "–"
-    assert [r[0] for r in waiting["rows"]] == ["State since", "Epochs dropped today (since the last restart)",
-                                               "Reconnects today", "Sent today (since the last restart)"], waiting
+    assert [r[0] for r in waiting["rows"]] == ["State since", "Epochs dropped today", "Reconnects today", "Sent today"], waiting
+    # The RAM counts start at a restart: one muted line says so, only when the station restarted today (UTC).
+    restarted, ran = run_editor([dict(details(QUIET, 2), uptime=1), dict(details(QUIET, 2), uptime=200 * 86400)])
+    assert restarted["notes"] == ["Dropped epochs and data sent count from the last restart."], restarted
+    assert ran["notes"] == [] and quiet["notes"] == []
 
 
 # ---- The caster cards' address line and chip; the Status page's receiver rows and caster lines ----
@@ -489,7 +576,33 @@ def test_status_page_says_each_fact_once():
     assert [r[0] for r in out[2]["cards"]["Receiver"]["rows"]] == ["Bands", "GLONASS", "Position"]
     assert out[2]["cards"]["Receiver"]["rows"][2] == ["Position", "Surveying, 5\u00a0min left"]
     assert out[3]["line"] == "Bench is not streaming: login refused. Next try in 50\u00a0s."
-    assert out[3]["cards"]["Other casters"]["lines"] == ["Bench \u00b7 0\u00a0% today"]
+    # The caster the top card names keeps its one-word state in its line (the top card says why and when).
+    assert out[3]["cards"]["Other casters"]["lines"] == ["Bench \u00b7 Login refused \u00b7 0\u00a0% today"]
     assert out[3]["facts"] == []
     assert out[4]["cards"]["Casters"]["lines"] == ["Onocoy \u00b7 Waiting for the receiver", "Bench \u00b7 Off"]
 
+
+def test_status_quality_said_once_and_closed_port_panel():
+    """While the top card says what Onocoy needs (too few bands), the Bands row keeps its mark without repeating it;
+    another top card leaves the row's note. A closed receiver port: the panel says so, without the cable advice and
+    without "Check again" (the station keeps reopening its port)."""
+    few = st_status(receiver={"best_bands": 3, "best_sys": "gps"})
+    few_down = st_status(receiver={"best_bands": 3, "best_sys": "gps"},
+                         casters=[st_caster(0, "Onocoy", "streaming"), st_caster(1, "Bench", "auth_failed", reason="auth")])
+    out = run_editor([{"fn": "dashboard", "status": x, "admin": True} for x in (few, few_down)] + [
+        {"fn": "norx", "status": {"receiver": {"state": "no_receiver", "uart_closed": True}, "alerts": []}},
+        {"fn": "norx", "status": {"receiver": {"state": "no_receiver", "next_detect_in_s": 90},
+                                  "alerts": [{"id": "no_receiver", "source": "station", "saw_bytes": False, "next_detect_in_s": 90}]}}])
+    assert out[0]["head"] == "Too few bands for Onocoy"
+    assert dict(out[0]["cards"]["Receiver"]["rows"])["Bands"] == "3 bands on GPS \u2715"
+    assert out[1]["head"] == "Partly streaming"
+    assert dict(out[1]["cards"]["Receiver"]["rows"])["Bands"] == "3 bands on GPS \u2715Onocoy needs 4."
+    assert out[2] == ["Receiver port closed", "The station cannot open its port to the receiver and keeps trying.", False]
+    assert out[3][0] == "No receiver found" and "cable" in out[3][1] and out[3][2] is True
+
+
+def test_setup_onocoy_step_sends_the_duplicate_stream_answer():
+    """The setup's Onocoy step while RTK2go is on: the station asks about the duplicate stream; ticking the box (its
+    input event reaches the form) keeps the question with "Save anyway" enabled, and that sends the answer."""
+    (r,) = run_editor([{"fn": "wizard_dup"}])
+    assert r == {"asked": True, "kept": True, "enabled": True, "puts": [False, True]}, r

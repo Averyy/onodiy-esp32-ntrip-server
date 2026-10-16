@@ -332,7 +332,7 @@ def test_event_journal_one_heading_per_start_and_repeats_folded():
     rows = [i for i in every if "head" not in i]
     # The restart record went into the heading; a recovery step is named after its recovery, the step is the detail.
     assert [r["ev"] for r in rows] == ["Wi-Fi dropped", "Receiver recovery"]
-    assert rows[1]["det"] == "restart link, started"
+    assert rows[1]["det"] == "reconnecting to the receiver"
     assert len(rows[1]["all"]) == 27 and "\u2013" in rows[1]["when"]
     assert rows[0]["det"] == "network not found (201), signal -70 dBm"
     text = json.dumps(every, ensure_ascii=False)
@@ -341,6 +341,37 @@ def test_event_journal_one_heading_per_start_and_repeats_folded():
     assert [("head" in i) for i in starts] == [True, True]
     assert casters == []
     assert [i["head"][1] for i in part if "head" in i] == ["Restarted by you (previous run 44\u00a0s)", "Start"]
+
+
+def test_event_journal_sky_sessions_and_plain_rows():
+    """A sky session (opened, satellite output on, extended, closed, output off) is one row: the time span and how long
+    it was open; three sessions in a row fold into one row with a toggle. A refused output command is said, an
+    accepted one and the corrections held back are not. Data loss, recovery steps and the network pass in words."""
+    t0 = 1760500000
+    sky = []
+    for k, (seq, t) in enumerate(((10, 0), (20, 40), (30, 80))):
+        sky += [jrec(seq, "live_view", 1, 600, 100 + t, t0 + t), jrec(seq + 1, "live_view", 4, 107, 101 + t, t0 + t + 1),
+                jrec(seq + 2, "live_view", 2, 1200, 105 + t, t0 + t + 5), jrec(seq + 3, "live_view", 3 | (1 << 8), 12, 112 + t, t0 + t + 12),
+                jrec(seq + 4, "live_view", 5 | ((1 if k == 2 else 0) << 8), 90, 113 + t, t0 + t + 13)]
+    first = [jrec(1, "boot", 0, 0, 1), jrec(2, "session", -1, 1, 1)]
+    other = [jrec(40, "ladder_step", 0, (1 << 8) | 8, 200, t0 + 200), jrec(41, "data_loss", 5, 453, 210, t0 + 210),
+             jrec(42, "ladder_step", 1, (1 << 16) | (0 << 8) | 0, 220, t0 + 220), jrec(43, "ladder_step", 0, (2 << 8) | 5, 230, t0 + 230),
+             jrec(44, "live_view", 3, 30, 240, t0 + 240)]
+    (items,) = run_ui([("journalItems", [first + sky + other, True, None])])
+    rows = [i for i in items if "head" not in i]
+    assert [(r["ev"], r["det"]) for r in rows] == [
+        ("Sky view", "closed after 30\u00a0s"),                      # a lone record of a session not loaded whole
+        ("Receiver recovery", "restarting the receiver: failed"),
+        ("Network recovery", "started: Onocoy down"),
+        ("Receiver data lost", "453 bytes"),
+        ("Receiver recovery", "healthy again"),
+        ("Sky view", "12\u00a0s, satellite output off: refused by the receiver"),
+        ("Sky view", "12\u00a0s"),
+    ], rows
+    # The two sessions without trouble are one row with a toggle, its time the span of both.
+    assert len(rows[6]["all"]) == 2 and "\u2013" in rows[6]["when"]
+    text = json.dumps(items, ensure_ascii=False)
+    assert "RTCM held" not in text and "accepted" not in text and "framer" not in text and "protected" not in text
 
 
 def test_event_filter_covers_every_journal_kind():
@@ -485,8 +516,8 @@ def test_hero_says_what_blocks_first_and_what_to_do():
     assert out[0]["title"] == "Onocoy not set up" and out[0]["tone"] == "warn", out[0]
     assert out[0]["line"] == "Add your Onocoy credentials to start streaming."
     assert out[0]["action"] == "Set up Onocoy" and out[0]["primary"] is True
-    # The recovery choice shows as a fact only when it is not the default.
-    assert out[0]["facts"] == [["If corrections stop", "Only tell me"]]
+    # The recovery choice shows as a fact only when it is not the default, by the name Receiver settings gives it.
+    assert out[0]["facts"] == [["If corrections stop", "Me (alerts only)"]]
 
     assert out[1]["title"] == "Receiver maintenance"
     assert out[1]["line"] == "The station sends the receiver no commands. Ends in about 14 min."
@@ -504,11 +535,27 @@ def test_hero_says_what_blocks_first_and_what_to_do():
     assert out[3]["ono"] is False and out[3]["delivering"] is False
 
     assert out[4]["title"] == "Receiver sends no corrections" and out[4]["alert"] == "no_rtcm", out[4]
+    # The choice is said once, in the fact row under the line (never again in the line itself).
     assert out[4]["line"] == ("The receiver answers but sends no corrections. Check that the antenna is on the socket marked M "
-                              "and sees the open sky. Automatic recovery is off (your choice).")
+                              "and sees the open sky.")
+    assert out[4]["facts"] == [["If corrections stop", "Me (alerts only)"]]
     assert out[5]["title"] == "Receiver stopped sending data" and out[5]["tone"] == "bad"
-    assert out[5]["line"].endswith("Automatic recovery is off (your choice).")
-    assert out[5]["facts"] == [["If corrections stop", "Only tell me"]]
+    assert "recovery" not in out[5]["line"] and "choice" not in out[5]["line"]
+    assert out[5]["facts"] == [["If corrections stop", "Me (alerts only)"]]
+
+
+def test_onocoy_is_the_protected_slot_in_use_and_a_closed_port_is_said_once():
+    """The Onocoy slot is the first protected slot that is on, else the first protected one (as the station counts
+    it): a disabled Onocoy slot left in a lower slot never hides the one that streams. A closed receiver port is the
+    cause of the missing receiver: the no-receiver alert's cable advice is not repeated under it."""
+    left_over = caster(0, "Onocoy", "disabled", onocoy_ready=False, budget_s=None, budget_left_s=None, streak_ok=None)
+    two = status(casters=[left_over, caster(1, "Onocoy", "streaming")])
+    uart = status(receiver={"state": "no_receiver", "uart_closed": True, "rtcm_age_ms": None}, alerts=[NO_RX])
+    a, b = heroes(two, uart)
+    assert (a["key"], a["title"], a["ono"]) == ("streaming", "Streaming", True), a
+    out = run_ui([("onocoy", two)])
+    assert out[0]["verdict"] == "On track"
+    assert b["key"] == "uart_closed" and b["also"] == [], b
 
 
 def test_hero_casters_down_one_two_three_and_all_good():
@@ -731,10 +778,11 @@ def test_receiver_management_one_choice_over_two_settings():
         "station": [True, "full", "The station (recommended)"],
         "no_restart": [True, "no_reboot", "The station, but never restart itself"],
         "me": [False, "alerts_only", "Me (alerts only)"]}
+    # One line each (at most about 80 characters: one line in the card on a desktop).
     for _, _, name, line in m.values():
-        assert line.endswith(".") and len(line) <= 140 and not any(w in line for w in ("RTCM", "SAVECONFIG", "autocfg"))
-    assert "restarts itself" in m["station"][3] and "never restarts" in m["no_restart"][3]
-    assert m["me"][3].startswith("The station sends the receiver nothing")
+        assert line.endswith(".") and len(line) <= 80 and not any(w in line for w in ("RTCM", "SAVECONFIG", "autocfg"))
+    assert "restarting itself" in m["station"][3] and "never restarts" in m["no_restart"][3]
+    assert m["me"][3].startswith("Sends the receiver nothing")
     keys = run_ui([("manageKey", [a, r]) for a in (True, False) for r in ("full", "no_reboot", "alerts_only")])
     assert keys == ["station", "no_restart", None, None, None, "me"]
     custom = run_ui([("manageCustom", [True, "alerts_only"]), ("manageCustom", [False, "full"]),
@@ -742,8 +790,9 @@ def test_receiver_management_one_choice_over_two_settings():
     assert custom[0] == ["The station configures the receiver but does nothing if corrections stop.", "station"]
     assert custom[1][1] == custom[2][1] == "me"
     assert custom[1][0].endswith("still resets it and may restart itself.") and custom[2][0].endswith("still resets it.")
-    # The Status page and Diagnostics name the recovery choice alone, without "(recommended)".
-    assert run_ui([("recoveryLbl", "full"), ("recoveryLbl", "alerts_only")]) == ["Fix it automatically", "Only tell me"]
+    # The Status page and Diagnostics name the recovery choice as Receiver settings does, without "(recommended)".
+    assert run_ui([("recoveryLbl", "full"), ("recoveryLbl", "no_reboot"), ("recoveryLbl", "alerts_only")]) == [
+        "The station", "The station, but never restart itself", "Me (alerts only)"]
 
 
 def test_receiver_chip_never_says_streaming_while_corrections_stopped():
@@ -888,8 +937,7 @@ def test_system_wifi_chip_and_recovery_line():
                   ("recoveryHint", None)])
     assert out[:4] == [["Not set up", "plain"], ["Online", "ok"], ["Connecting", "warn"], ["Offline", "bad"]]
     # One line under the admin password: what to do, no paragraph (the login page has the steps in full).
-    assert out[4] == ("Forgot it? Hold the BOOT button for 10 seconds, then join the station's own Wi-Fi and open "
-                      "http://192.168.4.1/.")
+    assert out[4] == "Forgot it? Hold BOOT for 10 s, then join the station's own Wi-Fi and open http://192.168.4.1/."
 
 
 def test_own_wifi_chip_warns_only_while_it_is_open_to_anyone():
@@ -936,15 +984,17 @@ def test_no_top_level_name_is_declared_twice():
 def test_four_tabs_and_old_addresses_land_on_the_new_pages():
     out = run_ui([("nav", None)] + [("moved", a) for a in (
         ["signals", ""], ["signals", "live"], ["signals", "live/start"], ["live", ""], ["system", ""], ["updates", ""],
-        ["updates", "session"], ["diag", "logs"], ["casters", "onocoy"], ["receiver", "settings"], ["settings", ""], ["", ""])]
+        ["updates", "session"], ["dashboard", ""], ["diag", "logs"], ["casters", "onocoy"], ["receiver", "settings"],
+        ["settings", ""], ["", ""])]
         + [("tab", n) for n in ("diag", "settings", "receiver", "casters", "")])
     assert out[0] == ["Status", "Casters", "Receiver", "Settings"]
-    assert out[1:8] == ["receiver", "receiver/live", "receiver/live/start", "receiver/live", "settings/wifi", "settings/updates",
-                        "settings/session"]
+    # The old Status address lands on "#/" (the Status tab marked), not on a page with no tab.
+    assert out[1:9] == ["receiver", "receiver/live", "receiver/live/start", "receiver/live", "settings/wifi", "settings/updates",
+                        "settings/session", ""]
     # Pages that exist stay where they are.
-    assert out[8:13] == [None] * 5
+    assert out[9:14] == [None] * 5
     # Diagnostics is reached from Settings: that tab is the one marked there.
-    assert out[13:] == ["settings", "settings", "receiver", "casters", ""]
+    assert out[14:] == ["settings", "settings", "receiver", "casters", ""]
 
 
 def test_diagnostics_three_parts_and_its_old_addresses():
@@ -1019,9 +1069,10 @@ def test_a_notice_hides_on_the_page_whose_card_says_it():
     for p, keys in zip(pages, out[:5]):
         assert set(keys) == every - hidden[p], p
     safe_k, uart_k, journal_k, trial_k = out[5:8], out[8:11], out[11:14], out[14:17]
-    # The Status page's top card says each of them; Settings has safe mode, the update session and the Wi-Fi trial.
+    # The Status page's top card says each of them; Settings has safe mode, the update session and the Wi-Fi trial;
+    # the Receiver page's panel says the closed port.
     assert safe_k == [[], [], ["safe_mode"]]
-    assert uart_k == [[], ["uart_closed"], ["uart_closed"]]
+    assert uart_k == [[], ["uart_closed"], []]
     assert journal_k == [[], [], ["journal"]]
     assert trial_k == [[], [], ["wifi"]]
 

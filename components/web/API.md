@@ -759,9 +759,12 @@ The UI's Receiver settings show `autocfg` and `recovery` as one choice,
 "Receiver management": "The station" (`true`, `full`), "The station, but
 never restart itself" (`true`, `no_reboot`), "Me (alerts only)" (`false`,
 `alerts_only`); any other pair shows as "Custom" with the nearest choice
-offered. A save sends only the members that change. The Position card and
-the Receiver profile card each send the whole profile: their own fields
-over the profile as last read.
+offered. The Status page and Diagnostics name the choice the same way. A
+save sends only the members that change. The Position card ("Save
+position") and the Receiver profile card ("Save profile") each send the
+whole profile: their own fields over the profile as last read. Each button
+shows once its own card changed, so an edit in the other card stays on the
+page with its button.
 
 The profile is stored with `um98x_profile_encode()` (validated by
 `um98x_profile_valid()`, which has the last word) and, when it differs from

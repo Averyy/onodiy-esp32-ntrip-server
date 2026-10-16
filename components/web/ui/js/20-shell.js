@@ -21,6 +21,7 @@ const NAV = [['', 'Status'], ['casters', 'Casters'], ['receiver', 'Receiver'], [
  * availability Diagnostics' History, its tasks and core dump its Overview.
  */
 function movedTo(name, arg) {
+  if (name === 'dashboard') return '';
   if (name === 'updates') return 'settings/' + (arg || 'updates');
   if (name === 'diag') return { availability: 'diag/history', journal: 'diag/history', tasks: 'diag', coredump: 'diag' }[arg] || null;
   const to = { signals: 'receiver', live: 'receiver/live', system: 'settings/wifi' }[name];
@@ -187,7 +188,7 @@ function route() {
   if (!shell.started) return;
   let r = parseHash();
   const to = movedTo(r.name, r.arg);
-  if (to) {
+  if (to !== null) {
     history.replaceState(null, '', '#/' + to);
     r = parseHash();
   }
@@ -212,8 +213,9 @@ function openView(name, arg) {
     }
   }
   const def = Views[name || 'dashboard'];
-  const el = viewEl();
-  clear(el);
+  /* Each visit draws into its own element: an answer that arrives after the page was left lands nowhere. */
+  const el = h('div', { class: 'page-root' });
+  mount(viewEl(), el);
   shell.current = { name: name, arg: arg, view: {} };
   try {
     shell.current.view = def.create(el, arg) || {};
@@ -433,7 +435,10 @@ function noticeItems(st, page) {
       btn('End now', endMaintenance, 'small'), true);
   }
   if (rcv.first_apply_held && page !== 'receiver') add('held', 'info', 'Receiver not configured yet', '', go('Review and configure', '#/receiver'));
-  if (rcv.uart_closed && !sm.active) add('uart_closed', 'bad', 'Receiver port closed', 'The station keeps trying.', go('Details', '#/diag'), true);
+  /* The Receiver page's own panel says it there. */
+  if (rcv.uart_closed && !sm.active && page !== 'receiver') {
+    add('uart_closed', 'bad', 'Receiver port closed', 'The station keeps trying.', go('Details', '#/diag'), true);
+  }
   /* Settings shows a Wi-Fi trial and new settings waiting in its Wi-Fi card, with the buttons. */
   const pend = net.pending_ssid || 'the new network';
   if (page !== 'settings' && net.cred_trial) {

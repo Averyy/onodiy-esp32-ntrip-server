@@ -45,8 +45,10 @@ const ALERT_PAGE = {
 /* Where the Onocoy credentials are entered (the caster editor opens on the Onocoy slot). */
 const ONOCOY_SETUP_HASH = '#/casters/onocoy';
 
+const casterOn = c => c.enabled !== false && c.state !== 'disabled';
+
 function enabledCasters(s) {
-  return (s.casters || []).filter(c => c.enabled !== false && c.state !== 'disabled');
+  return (s.casters || []).filter(casterOn);
 }
 
 /* A slot with no caster in it (no host, not enabled): not a caster, so not listed. */
@@ -54,9 +56,10 @@ function emptySlot(c) {
   return c.empty === true;
 }
 
-/** The Onocoy slot (protected) of the status casters, or null. */
+/** The Onocoy slot in use: the first protected slot that is on, else the first protected one (as the station counts it), or null. */
 function onocoySlot(s) {
-  return (s.casters || []).find(c => c.protected) || null;
+  const p = (s.casters || []).filter(c => c.protected);
+  return p.find(casterOn) || p[0] || null;
 }
 
 /** True when the Onocoy slot is enabled and has the console's mountpoint, username and password. */
@@ -169,7 +172,6 @@ function stationState(s, admin) {
   const ono = onocoyCounting(onoSlot) ? onoSlot : null;
   const onoStreaming = !!(ono && ono.state === 'streaming' && delivering);
   const quality = rxQuality(rcv, delivering);
-  const alertsOnly = hl.recovery_mode === 'alerts_only';
   const go = (label, href, primary) => ({ label: label, href: href, primary: !!primary });
   const pick = (key, head, tone, lead, more) => Object.assign({ key: key, head: head, tone: tone, lead: lead, actions: [],
     alertId: null, notice: null, trial: null, subject: null, named: false, search: null }, more || {});
@@ -214,8 +216,7 @@ function stationState(s, admin) {
         { actions: [{ act: 'detect', alert: a, label: 'Check again' }], alertId: nr ? 'no_receiver' : null, search: nextSearchText(a) });
     }
     if (ladder && (ladder.id === 'receiver_power' || ladder.id === 'receiver_silent')) {
-      return pick('rx_stopped', 'Receiver stopped sending data', 'bad',
-        alertText(ladder)[1] + (alertsOnly ? ' Automatic recovery is off (your choice).' : ''), { alertId: ladder.id });
+      return pick('rx_stopped', 'Receiver stopped sending data', 'bad', alertText(ladder)[1], { alertId: ladder.id });
     }
     if (state === 'recovering' || (state === 'streaming' && hl.level === 'recovering')) {
       const step = admin ? HERO_STEP[hl.last_step] : null;
@@ -225,8 +226,7 @@ function stationState(s, admin) {
       return pick('no_satellites', 'Antenna sees no satellites', 'bad', alertText(ladder)[1], { alertId: ladder.id });
     }
     if (ladder) {
-      return pick('no_rtcm', 'Receiver sends no corrections', 'bad', alertText(ladder)[1] +
-        (alertsOnly ? ' Automatic recovery is off (your choice).' : ''), { alertId: ladder.id });
+      return pick('no_rtcm', 'Receiver sends no corrections', 'bad', alertText(ladder)[1], { alertId: ladder.id });
     }
     const stopped = admin ? on.find(c => c.state === 'stopped') : null;
     if (stopped) {
@@ -317,7 +317,8 @@ function stationState(s, admin) {
 
   const r = decide();
   const order = { bad: 0, warn: 1, info: 2 };
-  r.also = alerts.filter(a => a.id !== r.alertId)
+  /* A closed port is why no receiver is found: its cable advice would mislead. */
+  r.also = alerts.filter(a => a.id !== r.alertId && !(r.key === 'uart_closed' && a.id === 'no_receiver'))
     .map(a => ({ id: a.id, title: alertText(a)[0], text: alertText(a)[1], tone: alertTone(a), href: ALERT_PAGE[a.id] || '#/diag' }))
     .sort((a, b) => (order[a.tone] || 0) - (order[b.tone] || 0));
   r.facts = [];

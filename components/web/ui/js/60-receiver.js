@@ -320,12 +320,12 @@ function receiverDetails(g) {
 
 /* ---- Receiver management ----------------------------------- */
 
-/* Receiver management: one choice over gnss/autocfg and gnss/recovery. [autocfg, recovery, name, what it does]. */
+/* Receiver management: one choice over gnss/autocfg and gnss/recovery. [autocfg, recovery, name (L.recovery's, as every
+ * page names it), what it does]. */
 const MANAGE = {
-  station: [true, 'full', 'The station (recommended)', 'Configures the receiver. If corrections stop, it reconnects, ' +
-    'reconfigures and resets the receiver, and as a last resort restarts itself.'],
-  no_restart: [true, 'no_reboot', 'The station, but never restart itself', 'The same, but the station itself never restarts.'],
-  me: [false, 'alerts_only', 'Me (alerts only)', 'The station sends the receiver nothing. If corrections stop, the Status page says so.'],
+  station: [true, 'full', L.recovery.full + ' (recommended)', 'Configures the receiver and fixes stalls, restarting itself as a last resort.'],
+  no_restart: [true, 'no_reboot', L.recovery.no_reboot, 'The same, but never restarts the station.'],
+  me: [false, 'alerts_only', L.recovery.alerts_only, 'Sends the receiver nothing; Status tells you when corrections stop.'],
 };
 
 /** The choice that is these two settings, or null (another combination: Custom). */
@@ -344,12 +344,13 @@ function manageCustom(autocfg, recovery) {
 function manageCtl() {
   const out = errBox();
   let stored = null, autocfg = true, recovery = 'full', held = false, fixKey = null;
-  const name = k => MANAGE[k][2].replace(' (recommended)', '');
+  const name = k => L.recovery[MANAGE[k][1]];
+  /* The restart limits, under the first choice while it is the one chosen. */
+  const plan = h('small', { class: 'hint' }, 'At most one restart an hour and 3 in 24 hours.');
   const choice = radios('Who looks after the receiver', 'manage', Object.keys(MANAGE).map(k => [k, h('span', { class: 'opt' },
-    h('span', null, MANAGE[k][2]), h('small', { class: 'hint' }, MANAGE[k][3]))]), null);
+    h('span', null, MANAGE[k][2]), h('small', { class: 'hint' }, MANAGE[k][3]), k === 'station' ? plan : null)]), null);
   choice.el.querySelector('.choices').classList.add('stacked');
   choice.el.querySelector('legend').classList.add('sr-only');
-  const plan = h('p', { class: 'muted small' }, 'The station restarts itself at most once an hour and 3 times in 24 hours.');
   const customText = h('span');
   const fixBtn = btn('', () => saveAs(fixKey, fixBtn), 'small');
   const custom = h('div', { class: 'msg warn', hidden: true }, h('strong', null, 'Custom: '), customText,
@@ -380,7 +381,7 @@ function manageCtl() {
   }
   return {
     nodes: [cardHead('Receiver management'), h('p', { class: 'muted small' }, 'Who configures the receiver, and what happens if corrections stop.'),
-      custom, choice.el, plan, out, h('div', { class: 'form-actions' }, save)],
+      custom, choice.el, out, h('div', { class: 'form-actions' }, save)],
     update(g) {
       held = !!g.first_apply_held;
       autocfg = !!g.autocfg;
@@ -658,7 +659,13 @@ function receiverForms(g, latest, done, onCompare) {
       posSync();
     }, 'small')) : null);
   const posErr = errBox();
-  const posSave = btn('Save', () => save('position', posSave, posErr), '', { hidden: true });
+  /* Each card saves its own part, its button shown once that part changed (the main one: the position's while shown). */
+  const posSave = btn('Save position', () => save('position', posSave, posErr), 'primary', { hidden: true });
+  const saveBtn = h('button', { type: 'submit', class: 'btn primary', hidden: true }, 'Save profile');
+  const saveSync = () => {
+    saveBtn.hidden = !profDirty;
+    saveBtn.classList.toggle('primary', posSave.hidden);
+  };
   const posChip = badge('', '');
   const match = h('p', { class: 'small' });
   const posSame = () => {
@@ -671,6 +678,7 @@ function receiverForms(g, latest, done, onCompare) {
     fixedBox.hidden = !fixed;
     F.survey_in_s.el.hidden = fixed;
     posSave.hidden = posSame();
+    saveSync();
   };
   mode.onchange(posSync);
   const position = [cardHead('Position', posChip), h('div', { class: 'stack', oninput: posSync },
@@ -732,6 +740,7 @@ function receiverForms(g, latest, done, onCompare) {
         row.remove();
         profDirty = true;
         sumUp();
+        saveSync();
       } }, '✕'));
     m.addEventListener('input', () => {
       nm.textContent = rtcmName(Number(m.value));
@@ -749,12 +758,14 @@ function receiverForms(g, latest, done, onCompare) {
         addRow('', 1).focus();
         profDirty = true;
         sumUp();
+        saveSync();
       }, 'small'),
       btn('Use Onocoy defaults', () => {
         clear(rows);
         for (const m of ONOCOY_RTCM) addRow(m, 1);
         profDirty = true;
         sumUp();
+        saveSync();
       }, 'small')));
   const antBox = h('div', { class: 'stack' }, F.antenna_model.el, h('div', { class: 'cols c2' }, F.antenna_serial.el, F.antenna_setup_id.el),
     h('p', { class: 'hint' }, 'Serial and setup ID are only sent with a model.'), seeLine);
@@ -880,13 +891,13 @@ function receiverForms(g, latest, done, onCompare) {
       posSync();
     } else {
       profDirty = false;
+      saveSync();
     }
     toast(APPLY[r.apply] || 'Saved.', r.apply === 'unsupported_model' ? 'warn' : 'ok');
     done();
   }
 
   const err = errBox();
-  const saveBtn = h('button', { type: 'submit', class: 'btn primary' }, 'Save profile');
   const applyBtn = btn('Apply again', async () => {
     const ok = await dialog({ title: 'Apply the profile again?', ok: 'Apply',
       body: h('p', null, 'The station configures the receiver again. Corrections pause for a few seconds.') });
@@ -894,10 +905,14 @@ function receiverForms(g, latest, done, onCompare) {
     const r = await act(applyBtn, () => api('POST', '/api/gnss/apply'), err);
     if (r !== undefined) toast('Applying the profile…', 'ok');
   });
+  /* Apply again under More options; beside Save while the last configuration failed. */
+  const applyRow = settingRow('Apply again', 'Sends the saved profile to the receiver once more.', applyBtn);
+  const actions = h('div', { class: 'form-actions' }, saveBtn);
   const antLine = h('span', null, 'Antenna name: ', p.antenna_model ? h('span', { class: 'ant' }, p.antenna_model) : 'the receiver\'s own');
   const profile = h('form', { class: 'stack', oninput: () => {
     profDirty = true;
     sumUp();
+    saveSync();
   }, onsubmit: e => {
     e.preventDefault();
     save('profile', saveBtn, err);
@@ -906,12 +921,15 @@ function receiverForms(g, latest, done, onCompare) {
   pgroup('Corrections', editRow(summary, msgBox), editRow(antLine, antBox)),
   h('section', { class: 'pgroup' }, disclosure('More options', !named, h('div', { class: 'stack' },
     h('div', { class: 'cols c2' }, F.station_id.el, F.com1_baud.el),
-    sgCustom.el, sgNumbers, satView.el))),
+    sgCustom.el, sgNumbers, satView.el, applyRow))),
   err,
-  h('div', { class: 'form-actions' }, h('span', { class: 'note muted small' }, 'Save profile applies your changes; ' +
-    'Apply again sends the saved profile once more.'), applyBtn, saveBtn));
+  actions);
 
   const update = gg => {
+    const failed = !!gg.config_failed;
+    applyRow.hidden = failed;
+    const home = failed ? actions : applyRow;
+    if (applyBtn.parentNode !== home) home.append(applyBtn);
     const c = positionChip(gg);
     posChip.className = 'badge ' + c[1];
     posChip.textContent = c[0];
@@ -1167,7 +1185,8 @@ Views.receiver = {
 function receiverPage(el, arg) {
   const settings = arg === 'settings';
   let g = null, t = null, forms = null, stop = null, held = null, heldLater = false, sigs = null, missing = null;
-  let wasRunning = false;
+  /* gone: the page was left (an answer that comes later starts nothing) */
+  let wasRunning = false, gone = false;
   /* -- The Receiver page -- */
   const heldCard = h('section', { class: 'card wide', hidden: true });
   const chip = badge('', '');
@@ -1181,11 +1200,11 @@ function receiverPage(el, arg) {
   const info = h('section', { class: 'card wide' }, cardHead('Receiver', chip), nr.el, top, details, posActions.out,
     h('div', { class: 'form-actions' }, posActions.buttons[0], link('Receiver settings', '#/receiver/settings', 'btn'), posActions.buttons[1]));
   /* -- Receiver settings -- */
-  const posCard = h('section', { class: 'card' });
+  const posCard = h('section', { class: 'card a-pos' });
   const profChip = badge('', '');
-  const profile = h('section', { class: 'card wide' });
+  const profile = h('section', { class: 'card a-prof' });
   const manage = manageCtl();
-  const manageCard = h('section', { class: 'card' }, manage.nodes);
+  const manageCard = h('section', { class: 'card a-man' }, manage.nodes);
   const sgt = sgTestCtl(() => refresh().catch(() => {}));
   const compare = foldCard('Compare two signal groups', sgt.badge, 'compare', sgt.nodes);
   const rdBody = h('div');
@@ -1249,7 +1268,9 @@ function receiverPage(el, arg) {
       heldCard.hidden = true;
       if (!g.first_apply_held) finishHeld(g).then(done => done && refresh(), () => {});
     }
-    missing = (g.state === 'no_receiver' || g.state === 'detecting') && !(g.maintenance || {}).on;
+    /* A closed port too: the panel says so (the page-wide notice leaves it to it). */
+    missing = (g.state === 'no_receiver' || g.state === 'detecting' || !!((S.status || {}).receiver || {}).uart_closed) &&
+      !(g.maintenance || {}).on;
     nr.el.hidden = !missing;
     chip.hidden = top.hidden = details.hidden = missing;
     if (missing) nr.update(S.status || { receiver: { state: g.state } });
@@ -1275,17 +1296,20 @@ function receiverPage(el, arg) {
   async function refresh() {
     g = await api('GET', '/api/gnss');
     await readTest();
-    fill();
+    if (!gone) fill();
   }
   async function load() {
     g = await api('GET', '/api/gnss');
     await readTest();
-    const grid = h('div', { class: 'grid' });
-    mount(el, grid);
+    if (gone) return;
+    const grid = h('div', { class: settings ? 'grid rxset' : 'grid' });
     if (settings) {
-      add(grid, [sgtNote, posCard, profile, manageCard, compare.el, rdFold.el]);
+      /* The comparison's note above the grid (its areas: position, management, profile beside both). */
+      mount(el, sgtNote, grid);
+      add(grid, [posCard, profile, manageCard, compare.el, rdFold.el]);
       buildForms();
     } else {
+      mount(el, grid);
       add(grid, [heldCard, info]);
       sigs = signalsSection(grid);
     }
@@ -1300,7 +1324,7 @@ function receiverPage(el, arg) {
   }
   mount(el, h('p', { class: 'loading' }, 'Loading the receiver…'));
   load().then(() => {
-    stop = poller(5000, refresh, true);
+    if (!gone) stop = poller(5000, refresh, true);
   }, e => mount(el, msg('bad', errText(e)), btn('Try again', () => openView('receiver', arg), 'primary')));
   return {
     update(st) {
@@ -1309,6 +1333,7 @@ function receiverPage(el, arg) {
       if (sigs) sigs.update(st);
     },
     destroy() {
+      gone = true;
       if (stop) stop();
       if (sigs) sigs.destroy();
     },

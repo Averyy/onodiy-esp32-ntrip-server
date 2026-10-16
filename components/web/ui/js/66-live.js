@@ -169,9 +169,11 @@ function liveCountsTable(t) {
   const bands = liveBands(t);
   const systems = t.systems || [];
   if (!systems.length) return h('p', { class: 'muted' }, 'No satellites tracked yet.');
+  /* Short headings on a phone: every column fits. */
+  const wide = (text, short) => [h('span', { class: 'wide-only' }, text), h('span', { class: 'phone-only' }, short)];
   return scrollBox('Satellites per constellation', h('table', { class: 'counts' },
-    h('thead', null, h('tr', null, h('th', null, 'Constellation'), h('th', { class: 'num' }, 'Satellites'),
-      bands.map(b => h('th', { class: 'num' }, BAND_HEAD[b])), h('th', { class: 'num' }, 'Bands'))),
+    h('thead', null, h('tr', null, h('th', null, wide('Constellation')), h('th', { class: 'num' }, wide('Satellites', 'Sats')),
+      bands.map(b => h('th', { class: 'num' }, b === 'e5ab' ? wide(BAND_HEAD[b], 'E5') : BAND_HEAD[b])), h('th', { class: 'num' }, 'Bands'))),
     h('tbody', null, systems.map(s => {
       const per = s.bands || {};
       const n = Object.keys(per).filter(b => per[b] > 0).length;
@@ -493,8 +495,10 @@ function noReceiverPanel() {
     const r = (last && last.receiver) || {};
     const a = ((last && last.alerts) || []).find(x => x.source === 'station' && x.id === 'no_receiver') ||
       { saw_bytes: false, next_detect_in_s: r.next_detect_in_s };
-    const searching = r.state === 'detecting' || r.state === 'idle' ||
-      (r.state === 'no_receiver' && (a.next_detect_in_s === 0 || Date.now() - askedAt < 4000));
+    /* A closed port (the station keeps reopening it): no search to ask for, no cable advice. */
+    const shut = !!r.uart_closed;
+    const searching = !shut && (r.state === 'detecting' || r.state === 'idle' ||
+      (r.state === 'no_receiver' && (a.next_detect_in_s === 0 || Date.now() - askedAt < 4000)));
     if (searching) {
       if (!searchSince) searchSince = Date.now();
       el.className = 'msg info';
@@ -504,9 +508,9 @@ function noReceiverPanel() {
     } else {
       searchSince = 0;
       el.className = 'msg bad';
-      title.textContent = 'No receiver found';
-      text.textContent = noReceiverText(a);
-      actions.hidden = false;
+      title.textContent = shut ? 'Receiver port closed' : 'No receiver found';
+      text.textContent = shut ? UART_CLOSED_TEXT : noReceiverText(a);
+      actions.hidden = shut;
     }
   }
   return {

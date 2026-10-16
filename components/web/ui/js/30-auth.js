@@ -22,8 +22,7 @@ function apSsidText() {
 
 /* Settings' one line under the admin password (the login page has the steps in full). */
 function recoveryHint() {
-  return 'Forgot it? Hold the BOOT button for 10 seconds, then join ' + (apSsidText() || 'the station\'s own Wi-Fi') +
-    ' and open http://192.168.4.1/.';
+  return 'Forgot it? Hold BOOT for 10 s, then join ' + (apSsidText() || 'the station\'s own Wi-Fi') + ' and open http://192.168.4.1/.';
 }
 
 /* Forgot the password: the two steps (the login's disclosure). */
@@ -752,7 +751,9 @@ async function startWizard(claim) {
     frame('onocoy', 'Connect to Onocoy',
       h('p', null, 'In the Onocoy console, open Reference Stations, NTRIP Credentials and pick or add this station\'s credential. ',
         extLink('Onocoy\'s guide', PRESET_INFO.onocoy.guide[1])),
-      h('form', { oninput: () => {
+      /* A change to the values asks again; ticking the panel's own box is its answer, not a change. */
+      h('form', { oninput: e => {
+        if (dupBox.contains(e.target)) return;
         clear(dupBox);
         submit.hidden = false;
       }, onsubmit: async e => {

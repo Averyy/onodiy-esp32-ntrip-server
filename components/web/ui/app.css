@@ -276,7 +276,7 @@ small { font-size: 0.85rem; }
 .notices:not(:empty) { padding-top: 0.75rem; }
 .view { padding-top: 1rem; padding-bottom: 3rem; }
 .view:focus { outline: none; }
-.view-body > * + * { margin-top: 1rem; }
+.view-body > * + *, .page-root > * + * { margin-top: 1rem; }
 /* A page without a title card (Casters): its h1 as one line above the cards. */
 .page-title { margin: 0 0 0.75rem; font-size: 1.35rem; }
 
@@ -291,6 +291,10 @@ small { font-size: 0.85rem; }
   .grid .wide { grid-column: 1 / -1; }
   /* Status: a short card stays short beside a tall one (no blank card space) */
   .grid.starts { align-items: start; }
+  /* Receiver settings: position over the management choice, the profile beside both */
+  .rxset { grid-template-rows: auto 1fr; align-items: start; }
+  .a-man { grid-area: 2 / 1; }
+  .a-prof { grid-area: 1 / 2 / 3; }
 }
 
 .card {
@@ -613,12 +617,14 @@ input:disabled, select:disabled { opacity: 0.65; }
 
 /*
  * Actions, the same everywhere: on a phone full width, stacked, the main one
- * (.primary or submit) on top under a .note (why one is off); from 560 px up
- * one line at the right, the main one at the right edge, the note at the left.
+ * (.primary or submit) on top under a .note (why one is off), a destructive
+ * one last; from 560 px up one line at the right, the main one at the right
+ * edge, the note at the left.
  */
 .form-actions { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem; }
 .form-actions .btn { width: 100%; }
 .form-actions > .primary, .form-actions > [type="submit"] { order: -1; }
+.form-actions > .danger:not(.primary, [type="submit"]) { order: 1; }
 .form-actions > .note { order: -2; }
 .form-actions:not(:has(> :not([hidden]))) { display: none; }
 /* A field that belongs to the buttons (maintenance's duration): on top on a phone, at the left on a desktop. */
@@ -627,6 +633,7 @@ input:disabled, select:disabled { opacity: 0.65; }
   .form-actions { flex-flow: row wrap; justify-content: flex-end; align-items: center; }
   .form-actions .btn { width: auto; }
   .form-actions > .primary, .form-actions > [type="submit"] { order: 1; }
+  .form-actions > .danger:not(.primary, [type="submit"]) { order: 0; }
   .form-actions > .note { order: -1; margin-right: auto; }
   .form-actions:has(> .field) { align-items: flex-end; }
   .form-actions > .field { order: -2; flex: 0 1 15rem; margin-right: auto; }
@@ -862,7 +869,10 @@ table.rows i.dot { display: inline-block; width: 8px; height: 8px; margin-right:
 @media (max-width: 559px) {
   table.rows { font-size: 0.875rem; }
   table.rows th, table.rows td, table.counts th, table.counts td, table.events th, table.events td { padding-left: 0.3rem; padding-right: 0.3rem; }
+  table.counts { font-size: 0.875rem; }
+  table.counts .wide-only { display: none; }
 }
+@media (min-width: 560px) { table.counts .phone-only { display: none; } }
 table.counts tfoot th, table.counts tfoot td { border-top: 1px solid var(--border); border-bottom: 0; font-weight: 650; }
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: 0.75rem; }

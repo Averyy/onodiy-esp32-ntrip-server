@@ -478,36 +478,41 @@ const updatesPart = {
         if (!info.allowed && info.why && info.why !== 'not_available_yet') notNow.push(h('li', null, a[2] + ': not now, ' + lbl(L.why, info.why) + '.'));
         return b;
       });
-      mount(sessionCard,
-        h('div', { class: 'card-head', id: 'session' }, h('h2', null, 'Receiver update session'), badge(lbl(L.journal, f.journal), f.journal === 'running' ? 'info' : 'warn')),
-        f.journal !== 'none' ? h('p', null, (L.journal[f.journal] || ['', ''])[1]) : null,
-        f.receiver_in_loader ? msg('warn', L.salert.receiver_in_loader[1]) : null,
+      /* The chip and one sentence say the state; the evidence is folded (it stays open across the refresh). */
+      const was = sessionCard.querySelector('details.sess');
+      const fail = [pr, rec].map(x => x && x.failure).find(x => x && x !== 'none');
+      const detail = [
         rec ? kv([
           ['Step', JOURNAL_STATE[rec.state] || rec.state],
           rec.phase && rec.phase !== rec.state ? ['Reached', JOURNAL_STATE[rec.phase] || rec.phase] : null,
           ['Package', fmt.bytes(rec.size) + ', SHA-256 ' + String(rec.sha256 || '').slice(0, 16) + '…'],
-          ['Expected firmware', rec.expected_fw],
           ['Before the update', [rec.pre_model, rec.pre_fw].filter(Boolean).join(' ')],
           ['Transfers / entry attempts', rec.transfers + ' / ' + rec.entry_attempts],
           ['Last acknowledged block', fmt.num(rec.last_acked_block)],
-          rec.failure && rec.failure !== 'none' ? ['Failure', lbl(L.flashFailure, rec.failure)] : null,
           ['Changed', fmt.time(rec.changed_unix)],
         ]) : null,
-        pr ? [h('h3', { class: 'section-title' }, 'Progress'),
-          pr.bytes_total ? bar(pr.bytes_sent / pr.bytes_total) : null,
-          kv([
-            ['Phase', lbl(L.flashPhase, pr.phase)],
-            pr.journal_state ? ['Recorded step', JOURNAL_STATE[pr.journal_state] || pr.journal_state] : null,
-            ['Sent', fmt.bytes(pr.bytes_sent) + ' of ' + fmt.bytes(pr.bytes_total)],
-            pr.frames_total ? ['Blocks acknowledged', fmt.num(pr.frames_acked) + ' of ' + fmt.num(pr.frames_total) +
-              ' (' + fmt.num(pr.frames_sent) + ' sent)'] : null,
-            ['Transfers / loader attempts', fmt.num(pr.transfers) + ' / ' + fmt.num(pr.entry_attempts)],
-            ['Blocks resent', fmt.num(pr.retries)],
-            pr.failure && pr.failure !== 'none' ? ['Failure', lbl(L.flashFailure, pr.failure)] : null,
-            pr.last_err ? ['Last error', pr.last_err] : null,
-          ])] : null,
+        pr ? kv([
+          pr.journal_state ? ['Recorded step', JOURNAL_STATE[pr.journal_state] || pr.journal_state] : null,
+          pr.frames_total ? ['Blocks acknowledged', fmt.num(pr.frames_acked) + ' of ' + fmt.num(pr.frames_total) +
+            ' (' + fmt.num(pr.frames_sent) + ' sent)'] : null,
+          ['Transfers / loader attempts', fmt.num(pr.transfers) + ' / ' + fmt.num(pr.entry_attempts)],
+          ['Blocks resent', fmt.num(pr.retries)],
+          pr.last_err ? ['Last error', pr.last_err] : null,
+        ]) : null,
+        f.receiver_text ? h('pre', { class: 'log' }, f.receiver_text) : null];
+      mount(sessionCard,
+        h('div', { class: 'card-head', id: 'session' }, h('h2', null, 'Receiver update session'), badge(lbl(L.journal, f.journal), f.journal === 'running' ? 'info' : 'warn')),
+        f.journal !== 'none' ? h('p', null, (L.journal[f.journal] || ['', ''])[1]) : null,
+        f.receiver_in_loader ? msg('warn', L.salert.receiver_in_loader[1]) : null,
+        rec || pr ? kv([
+          rec ? ['Expected firmware', rec.expected_fw] : null,
+          pr ? ['Phase', lbl(L.flashPhase, pr.phase)] : null,
+          pr ? ['Sent', fmt.bytes(pr.bytes_sent) + ' of ' + fmt.bytes(pr.bytes_total)] : null,
+          fail ? ['Failure', lbl(L.flashFailure, fail)] : null,
+        ]) : null,
+        pr && pr.bytes_total ? bar(pr.bytes_sent / pr.bytes_total) : null,
+        rec || pr || f.receiver_text ? h('details', { class: 'more sess', open: !!(was && was.open) }, h('summary', null, 'Details'), detail) : null,
         f.last && f.last.ended_unix && f.journal === 'none' ? msg(outcomeTone(f.last.outcome), outcomeText(f.last)) : null,
-        f.receiver_text ? h('details', { class: 'more' }, h('summary', null, 'Receiver output'), h('pre', { class: 'log' }, f.receiver_text)) : null,
         f.flash_available ? null : msg('', NOT_ENABLED + ' Retrying and restarting the receiver from here need a build with receiver flashing; clearing works.'),
         sessionErr,
         h('div', { class: 'form-actions' }, buttons.slice().reverse()),

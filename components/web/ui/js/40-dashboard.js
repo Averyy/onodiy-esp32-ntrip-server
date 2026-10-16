@@ -32,10 +32,13 @@ Views.dashboard = {
       } catch (e) {
         openSlots = [];
       }
-      if (el.isConnected) render();
+      render();
     };
+    /* el is this visit's own (openView): after the page is left, nothing draws into the next one. */
+    let gone = false;
     const render = () => {
       const s = S.status;
+      if (gone) return;
       if (!s) {
         patch(el, h('p', { class: 'loading' }, 'Waiting for the station…'));
         return;
@@ -60,6 +63,7 @@ Views.dashboard = {
     return {
       update: render,
       destroy() {
+        gone = true;
         if (stopSig) stopSig();
       },
     };
@@ -125,11 +129,12 @@ function positionText(r, delivering) {
 
 const okMark = ok => h('span', { class: ok ? 't-ok' : 't-warn' }, ok ? '✓' : '✕');
 
-/* The band row: "4 bands on Galileo ✓ (the most this receiver can reach)"; a dash while the receiver does not deliver. */
-function bandsView(r, q) {
+/* The band row: "4 bands on Galileo ✓ (the most this receiver can reach)"; a dash while the receiver does not deliver.
+ * told: the top card says what Onocoy needs. */
+function bandsView(r, q, told) {
   if (!q.known) return DASH;
   const ok = !q.fewBands;
-  const note = !ok ? 'Onocoy needs 4.' : /UM982/.test(r.model || '') ? 'The most this receiver can reach.' : null;
+  const note = !ok ? (told ? null : 'Onocoy needs 4.') : /UM982/.test(r.model || '') ? 'The most this receiver can reach.' : null;
   return [q.bands + ' bands' + (q.sys ? ' on ' + lbl(L.sys, q.sys) : ''), ' ', okMark(ok),
     note ? h('div', { class: 'muted small' }, note) : null];
 }
@@ -148,7 +153,7 @@ function receiverCard(s, st) {
   const live = st.delivering;
   return h('section', { class: 'card fit-kv' },
     cardHead('Receiver', link('Details', '#/receiver', 'head-link')),
-    kv([live ? ['Bands', bandsView(r, st.quality)] : null, live ? ['GLONASS', glonassView(r, st.quality)] : null,
+    kv([live ? ['Bands', bandsView(r, st.quality, st.key === 'quality')] : null, live ? ['GLONASS', glonassView(r, st.quality)] : null,
       ['Position', positionText(r, live)]]));
 }
 
@@ -170,20 +175,19 @@ function casterWhy(c) {
 
 /*
  * One caster in one line: name · state · today's share; why and a button
- * when it does not stream. The one the top card names: name and share only.
+ * when it does not stream, unless the top card names it (it says why).
  */
 function casterRow(c, admin, subject) {
-  const off = c.enabled === false || c.state === 'disabled';
+  const off = !casterOn(c);
   const tone = casterTone(c.state);
   const share = admin && !off && (c.today_online_s || c.today_offline_s) ?
     onlineShare(c.today_online_s || 0, c.today_offline_s || 0) + ' today' : null;
-  const named = admin && c.slot === subject;
-  const trouble = admin && !off && c.state !== 'streaming' && !named;
+  const trouble = admin && !off && c.state !== 'streaming' && c.slot !== subject;
   const why = trouble ? casterWhy(c) : null;
   return h('div', { class: 'cline' },
     h('div', null,
       h('span', { class: 'name' }, casterName(c)),
-      named ? null : [' · ', h('span', { class: tone ? 't-' + tone : 'muted' }, lbl(L.caster, c.state))],
+      ' · ', h('span', { class: tone ? 't-' + tone : 'muted' }, lbl(L.caster, c.state)),
       share ? h('span', { class: 'muted' }, ' · ' + share) : null,
       why ? h('div', { class: 'muted small' }, why) : null),
     trouble ? link(c.state === 'stopped' ? 'What to do' : 'Details', '#/casters', 'btn small') : null);

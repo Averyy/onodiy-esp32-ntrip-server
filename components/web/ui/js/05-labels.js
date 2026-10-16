@@ -222,8 +222,8 @@ const L = {
   linkMode: { off: 'Off', stream: 'Streaming', command: 'Command session', raw: 'Raw (update)' },
   baseMode: { survey_in: 'Survey-in', fixed: 'Fixed position' },
   posSource: { none: 'None', survey: 'Survey-in', averaged: 'Averaged', user: 'Entered by you' },
-  /* If corrections stop (gnss/recovery), for the Status page and Diagnostics; Receiver settings has the whole choice (MANAGE). */
-  recovery: { full: 'Fix it automatically', no_reboot: 'Fix it, but never restart the station', alerts_only: 'Only tell me' },
+  /* If corrections stop (gnss/recovery): the names of Receiver settings' choice (MANAGE), the same on every page. */
+  recovery: { full: 'The station', no_reboot: 'The station, but never restart itself', alerts_only: 'Me (alerts only)' },
   trigger: { protected: 'Onocoy caster down', assoc_no_ip: 'connected without an IP address', unreached: 'a caster not reached' },
   liveWhy: {
     none: '',
@@ -325,32 +325,37 @@ const J = {
   resetReason: ['unknown', 'power on', 'reset pin', 'software', 'panic', 'interrupt watchdog', 'task watchdog', 'watchdog',
     'deep sleep', 'brownout', 'SDIO', 'USB', 'JTAG', 'eFuse', 'power glitch', 'CPU lockup'],
   ladder: ['receiver', 'network', 'caster'],
-  outcome: ['started', 'healthy again', 'failed or refused', 'abandoned', 'not run (recovery mode)', 'postponed'],
-  gnssRung: [null, 'resync', 'restart link', 'search baud rate', 're-apply profile', 'reset receiver',
-    'restarted the station to look for the receiver', 'power-cycle alert', 'waiting for the next search',
-    'restart postponed'],
+  /* A recovery step's outcome after its name (0: started, said by the name alone) */
+  outcome: ['', 'healthy again', 'failed', 'given up', 'skipped (your recovery choice)', 'postponed'],
+  gnssRung: [null, 'resyncing the data', 'reconnecting to the receiver', 'searching for the receiver', 'configuring the receiver again',
+    'restarting the receiver', 'restarted the station to look for the receiver', 'asked for a receiver power cycle',
+    'waiting for the next search', 'restart postponed'],
   /* Why a restart was postponed (ladder_step code 9, outcome 0: bits 16-23 of b; 0 = not recorded). */
   capWhy: ['', 'at most one an hour', 'at most 3 in 24 hours', 'another job holds restarts'],
   /* hold_mask bits of a postponed restart (ladder_step code 9, outcome 5). */
   holdBits: ['setup', 'ap_client', 'admin', 'power_on'],
-  netRung: [null, 'reconnect', 'renew DHCP and fallback DNS', 'restart Wi-Fi', 'restart station'],
+  netRung: [null, 'reconnecting', 'renewing the address', 'restarting the Wi-Fi', 'restarting the station'],
   netWhy: ['none', 'internet reachable', 'no internet', 'receiver update open', 'too soon', 'restart blocked', 'someone on the access point',
     'no restart for this cause', 'access point wait over'],
-  netTrigger: ['protected caster down', 'connected without an IP address', 'a caster not reached'],
+  netTrigger: ['Onocoy down', 'no IP address', 'a caster not reached'],
   fail: ['none', 'dns', 'connect', 'tls', 'timeout', 'remote_close', 'write_stall', 'keepalive', 'auth', 'mount_busy', 'config', 'banned',
     'login_blocked', 'in_use', 'replaced', 'local'],
   /* ntrip_stop_t (a caster_stop record's bits 8-15) */
   stop: ['none', 'rejected', 'login_blocked', 'in_use', 'kicked', 'duplicate', 'banned'],
   liveEv: [null, 'Opened', 'Extended', 'Closed', 'Satellite output on', 'Satellite output off'],
-  liveEnd: ['', 'stopped by you', 'time up', 'nobody watching', 'receiver update'],
-  liveCmd: ['accepted', 'rejected', 'no answer', 'not sent'],
+  liveEnd: ['', 'closed by you', 'time up', 'nobody watching', 'receiver update'],
+  /* A satellite output command's answer (0: accepted, said by nothing) */
+  liveCmd: ['', 'refused by the receiver', 'no answer from the receiver', 'not sent'],
   /* sg_test: the outcome in b of an end (station_sgt_outcome_t) */
   sgtOut: ['', 'kept', 'timed out', 'cancelled', 'rejected', 'failed', 'interrupted'],
   /* station_flash_outcome_t */
   flashOut: ['none', 'updated', 'the old firmware still runs', 'an unexpected build runs', 'not done (receiver unchanged)',
     'package refused', 'not started', 'waiting for a decision', 'package checked'],
-  loss: [null, 'UART FIFO overflows', 'UART buffer full', 'line errors', 'RTCM CRC errors', 'framer discarded bytes',
-    'hub publish failures', 'baud-switch bytes', 'UART events dropped'],
+  /* data_loss by counter id: [event, unit of the count] */
+  loss: [null, ['Receiver data lost', 'overflow', 'overflows'], ['Receiver data lost', 'full buffer', 'full buffers'],
+    ['Receiver link errors', 'error', 'errors'], ['Damaged corrections', 'message', 'messages'], ['Receiver data lost', 'byte', 'bytes'],
+    ['Corrections not passed on', 'message', 'messages'], ['Bytes dropped at a speed change', 'byte', 'bytes'],
+    ['Receiver data lost', 'missed event', 'missed events']],
 };
 
 const ESP_ERR = {
@@ -502,11 +507,7 @@ function rxBootSentence(v) {
       return 'The receiver kept running: only the ESP32 was reset (its reset pin, such as the USB auto-reset), not a power loss';
     case 'restarted':
       return 'The receiver restarted too: the power was cut';
-    case 'pending':
-      return 'Whether the receiver kept running is still being judged (within 30 seconds of the start)';
-    case 'unknown':
-      return 'Nothing the receiver sent told whether it kept running; not counted as a power loss';
-    default:
+    default:   /* still judged, or not known: nothing to say */
       return '';
   }
 }

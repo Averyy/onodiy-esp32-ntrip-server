@@ -246,6 +246,7 @@ function overviewTab(box) {
             chip.psram_mb ? chip.psram_mb + NB + 'MB PSRAM' : null].filter(Boolean).join(', ')] : null,
           sys ? ['ESP-IDF', sys.idf] : null,
           ['Wi-Fi', wifiLine(s.network, wifi)],
+          sys && sys.mac ? ['MAC address', sys.mac] : null,
           net.reconnects ? ['Wi-Fi drops', fmt.num(net.reconnects) + ' this start' +
             (net.last_disconnect_reason ? ', last: ' + wifiReason(net.last_disconnect_reason) : '')] : null,
         ])),
@@ -360,7 +361,9 @@ function dayParts(d, i) {
 /* The last 30 days of the Onocoy slot (else the first), one line a day, today on top (GET /api/availability). */
 function monthCard(card, av) {
   const slots = av.slots || [];
-  const prot = slots.find(x => x.protected);
+  /* The slot the station counts (the status says which one is on). */
+  const ono = S.status ? onocoySlot(S.status) : null;
+  const prot = (ono && slots.find(x => x.slot === ono.slot)) || slots.find(x => x.protected);
   const i = prot ? slots.indexOf(prot) : 0;
   const p = av.protected || {};
   const counting = !!prot && p.onocoy_ready !== false && p.enabled !== false;
@@ -420,11 +423,12 @@ function collapse(rows) {
     if (last && !last.head && !r.head && last.k === r.k) {
       if (!last.all) {
         last.all = [Object.assign({}, last)];
-        last.newest = last.when;
+        last.newest = last.to || last.when;
       }
       last.all.push(r);
       last.id = 'r' + r.seq;
-      last.when = r.when !== last.newest ? timeRange(r.when, last.newest) : last.newest;
+      const from = r.from || r.when;
+      last.when = from !== last.newest ? timeRange(from, last.newest) : last.newest;
     } else {
       out.push(Object.assign({}, r));
     }
@@ -738,7 +742,7 @@ function journalDetail(e) {
       const outcome = (b >> 8) & 0xff, code = b & 0xff, why = (b >> 16) & 0xff;
       if (a === 1 && code === 0) {
         const trig = J.netTrigger.filter((t, i) => why & (1 << i));
-        return 'pass started' + (trig.length ? ' (' + trig.join(', ') + ')' : '');
+        return 'started' + (trig.length ? ': ' + trig.join(', ') : '');
       }
       /* The receiver ladder's own restart, in words: done, waiting, postponed (and why). */
       if (a === 0 && code === 9) {
@@ -747,16 +751,15 @@ function journalDetail(e) {
           const why9 = J.holdBits.filter((k, i) => mask & (1 << i)).map(k => L.hold[k]);
           return 'restart postponed: ' + (why9.length ? why9.join(', ') : 'held back');
         }
-        if (outcome === 4) return 'restart not taken (' + J.outcome[4] + ')';
+        if (outcome === 4) return 'restart ' + J.outcome[4];
         /* outcome 0: what blocked it (records from older builds carry none) */
         const capWhy = J.capWhy[(b >>> 16) & 0xff];
         return J.gnssRung[9] + (capWhy ? ': ' + capWhy : '');
       }
-      if (a === 0 && (code === 6 || code === 8) && outcome === 0) return J.gnssRung[code];
-      let step = 'step ' + code;
-      if (a === 0 && J.gnssRung[code]) step = J.gnssRung[code];
-      if (a === 1 && J.netRung[code]) step = J.netRung[code];
-      return step + ', ' + (J.outcome[outcome] || outcome) + (a === 1 && why ? ' (' + (J.netWhy[why] || why) + ')' : '');
+      if (outcome === 1) return J.outcome[1];
+      const step = (a === 0 ? J.gnssRung[code] : a === 1 ? J.netRung[code] : null) || 'step ' + code;
+      const out = J.outcome[outcome] === undefined ? outcome : J.outcome[outcome];
+      return step + (out !== '' ? ': ' + out : '') + (a === 1 && why ? ' (' + (J.netWhy[why] || why) + ')' : '');
     }
     case 'app_update':
       return a === 0 ? 'Installed; the station restarted into it' : 'Not installed: ' + espErr(a);
@@ -772,7 +775,7 @@ function journalDetail(e) {
     case 'safe_mode':
       return 'Episode ' + a;
     case 'data_loss':
-      return (a >= 16 ? slotName(a - 16) : J.loss[a] || 'counter ' + a) + ': +' + fmt.num(b);
+      return fmt.num(b) + (J.loss[a] ? ' ' + J.loss[a][b === 1 ? 1 : 2] : '');
     case 'rx_maintenance':
       return a ? 'Started for ' + fmt.dur(b) : 'Ended after ' + fmt.dur(b);
     case 'rx_boot': {
@@ -790,12 +793,12 @@ function journalDetail(e) {
       return 'event ' + ev + ', ' + grp;
     }
     case 'live_view': {
+      /* A record of a session not loaded whole (journalItems makes a whole session one row) */
       const ev = a & 0xff, detail = (a >> 8) & 0xff;
-      const what = J.liveEv[ev] || 'event ' + ev;
-      if (ev === 1) return 'Opened for ' + fmt.dur(b);
-      if (ev === 2) return 'Extended, ' + fmt.dur(b) + ' left';
-      if (ev === 3) return 'Closed after ' + fmt.dur(b) + (J.liveEnd[detail] ? ' (' + J.liveEnd[detail] + ')' : '');
-      return what + ': ' + (J.liveCmd[detail] || detail) + ', RTCM held ' + fmt.num(b) + ' ms';
+      if (ev === 1) return 'opened for ' + fmt.dur(b);
+      if (ev === 2) return 'extended, ' + fmt.dur(b) + ' left';
+      if (ev === 3) return 'closed after ' + fmt.dur(b) + (J.liveEnd[detail] ? ', ' + J.liveEnd[detail] : '');
+      return (J.liveEv[ev] || 'event ' + ev).toLowerCase() + (J.liveCmd[detail] ? ': ' + J.liveCmd[detail] : '');
     }
     default:
       return 'a = ' + a + ', b = ' + b;
@@ -873,22 +876,52 @@ function journalItems(entries, atStart, kinds) {
         down[key] = null;
       }
     }
+    /* A sky session (opened, extended, satellite output on, closed, output off) is one row, at its newest record. */
+    const skyOf = new Map();
+    let ses = null;
+    for (const e of es.filter(x => x.kind === 'live_view')) {
+      const ev = e.a & 0xff;
+      if (ev === 1) ses = [];
+      else if (!ses || (ses.closed && ev !== 5)) {
+        ses = null;
+        continue;
+      }
+      ses.push(e);
+      skyOf.set(e, ses);
+      if (ev === 3) ses.closed = true;
+      else if (ses.closed) ses = null;
+    }
     const day = g.offset !== null ? new Date(g.offset * 1000).toDateString() : '';
+    const whenOf = e => (e.time_unix ? dayTime(e.time_unix, day) : g.offset !== null ? 'about ' + dayTime(g.offset + e.uptime_s, day) :
+      fmt.dur(e.uptime_s) + ' after the start');
     const rows = [];
     for (let i = es.length - 1; i >= 0; i--) {
       const e = es[i];
       if (e === boot || e === sess || e === told || used.has(e) || (kinds && kinds.indexOf(e.kind) < 0)) continue;
-      const when = e.time_unix ? dayTime(e.time_unix, day) : g.offset !== null ? 'about ' + dayTime(g.offset + e.uptime_s, day) :
-        fmt.dur(e.uptime_s) + ' after the start';
+      const when = whenOf(e);
+      const sky = skyOf.get(e);
+      if (sky) {
+        if (e !== sky[sky.length - 1]) continue;
+        /* The time it was open, and what the receiver refused (an accepted command says nothing). */
+        const shut = sky.find(x => (x.a & 0xff) === 3);
+        const det = [shut ? fmt.dur(shut.b) : 'not closed'].concat(sky.filter(x => (x.a & 0xff) > 3 && J.liveCmd[(x.a >> 8) & 0xff])
+          .map(x => J.liveEv[x.a & 0xff].toLowerCase() + ': ' + J.liveCmd[(x.a >> 8) & 0xff])).join(', ');
+        const from = whenOf(sky[0]);
+        rows.push({ k: 'sky ' + det.replace(/^[^,]*/, ''), seq: e.seq, ev: J.kind.live_view, det: det, from: from, to: when,
+          when: from !== when ? timeRange(from, when) : when });
+        continue;
+      }
       if (isConn(e)) {
         const back = backOf.get(e);
         const c = connRow(connOf(e), back && connOf(back));
         rows.push({ k: [e.kind, connKey(e), !!back].join('|'), seq: e.seq, ev: c[0], det: c[1], tone: c[2], when: when });
       } else {
         /* A recovery step under its recovery's name ("Receiver recovery"); a start and an end (maintenance, the sky) never fold together. */
-        const sub = e.kind === 'ladder_step' || e.kind === 'rx_maintenance' ? e.a : e.kind === 'live_view' || e.kind === 'sg_test' ? e.a & 0xff : '';
+        const sub = e.kind === 'ladder_step' || e.kind === 'rx_maintenance' || e.kind === 'data_loss' ? e.a :
+          e.kind === 'live_view' || e.kind === 'sg_test' ? e.a & 0xff : '';
+        const loss = e.kind === 'data_loss' ? (J.loss[e.a] || [e.a >= 16 ? slotName(e.a - 16) + ' data lost' : null])[0] : null;
         rows.push({ k: e.kind + sub, seq: e.seq, ev: e.kind === 'ladder_step' ? capFirst(J.ladder[e.a] || 'ladder ' + e.a) + ' recovery' :
-          J.kind[e.kind] || words(e.kind), det: journalDetail(e), when: when });
+          loss || J.kind[e.kind] || words(e.kind), det: journalDetail(e), when: when });
       }
     }
     if (!kinds || kinds.indexOf('boot') >= 0 || rows.length) {

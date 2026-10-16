@@ -734,17 +734,23 @@ function casterDetails(st, reconnects) {
         ' (the third of either stops the caster)'] : null,
       st.kicked_sessions ? ['Sessions taken over (score)', Math.min(st.kicked_sessions, 3) + ' of 3'] : null,
       given(st.data_rate_permille) ? ['Data rate', fmt.permille(st.data_rate_permille)] : null,
-      /* Epoch counts live in RAM: today since the last restart. */
-      ['Epochs dropped today (since the last restart)', fmt.num(st.epochs_dropped_today)],
-      st.last_err ? ['Last error', st.last_err] : null,
+      ['Epochs dropped today', fmt.num(st.epochs_dropped_today)],
       st.state === 'streaming' || st.max_lag_ms ? ['Lag now / highest', fmt.ms(st.lag_ms_now) + ' / ' + fmt.ms(st.max_lag_ms)] : null,
       ['Reconnects today', given(reconnects) ? fmt.num(reconnects) : DASH],
-      given(st.bytes_sent_today) ? ['Sent today (since the last restart)', volText(st.bytes_sent_today)] : null,
+      given(st.bytes_sent_today) ? ['Sent today', volText(st.bytes_sent_today)] : null,
       st.resolved_ip ? ['Address', st.resolved_ip + (st.dns_cached_used ? ' (cached DNS used ' + st.dns_cached_used + '×)' : '')] : null,
     ]),
+    /* Those two live in RAM: after a restart today they count from it. */
+    restartedToday() ? h('p', { class: 'muted small foot' }, 'Dropped epochs and data sent count from the last restart.') : null,
     causes.length ? h('h3', { class: 'section-title' }, 'Failures by cause') : null,
     causes.length ? kv(causes) : null,
   ];
+}
+
+/* The station restarted since 00:00 UTC: its uptime is shorter than the UTC day so far. */
+function restartedToday() {
+  const up = S.status && S.status.uptime_s;
+  return typeof up === 'number' && up < (Date.now() / 1000) % 86400;
 }
 
 Views.casters = {
@@ -758,7 +764,7 @@ Views.casters = {
     const refs = {};    /* slot -> {badge, live, details} for in-place updates */
     const open = {};    /* slot -> details expanded */
     let addCard = null;
-    let stopPoll = null;
+    let stopPoll = null, gone = false;
     /* Today's reconnects per slot (GET /api/availability), read only while a card's connection details are open. */
     let reconnects = null;
 
@@ -833,7 +839,11 @@ Views.casters = {
       const chip = casterChip(st);
       r.badge.className = 'badge ' + chip[1];
       r.badge.textContent = chip[0];
+      /* Rebuilt every second: a focused button ("Try again") hands the focus to its successor. */
+      const a = doc.activeElement, had = r.live.contains(a) && a.textContent;
       mount(r.live, casterSummary(Object.assign({ slot: s.slot }, s.config), st, data.onocoy_preset || {}));
+      const next = had && Array.from(r.live.querySelectorAll('button')).find(b => b.textContent === had);
+      if (next) next.focus();
       if (open[s.slot]) mount(r.details, casterDetails(st, reconnects ? reconnects[s.slot] : undefined));
     }
 
@@ -937,6 +947,7 @@ Views.casters = {
 
     mount(el, h('p', { class: 'loading' }, 'Loading casters…'));
     load().then(() => {
+      if (gone) return;
       stopPoll = poller(5000, () => (editing === null ? load() : Promise.resolve()), true);
       if (arg === 'onocoy') {
         /* From "Add your Onocoy credentials": the Onocoy slot's editor (or a free slot's, in the add card). */
@@ -953,6 +964,7 @@ Views.casters = {
         for (const s of data.slots) if (s.slot !== editing) fill(s);
       },
       destroy() {
+        gone = true;
         if (stopPoll) stopPoll();
       },
       dirty: () => !!(editor && editor.dirty()),

@@ -51,8 +51,8 @@ function addressRows(net, prefix) {
   return stationAddressRows(net).map(r => [r[0] ? (prefix || '') + (names[r[0]] || r[0]) : '', r[1]]);
 }
 
-/* The Wi-Fi in a few rows; the counters behind it are in Diagnostics. mac: GET /api/system's. */
-function wifiStatus(w, mac) {
+/* The Wi-Fi in a few rows; the counters behind it and the MAC address are in Diagnostics. */
+function wifiStatus(w) {
   return kv([
     ['Network', w.configured ? w.ssid : 'Not set up'],
     w.credentials_unreadable ? ['Saved Wi-Fi settings', h('span', { class: 't-bad' }, 'Unreadable: choose the network again')] : null,
@@ -60,7 +60,6 @@ function wifiStatus(w, mac) {
     ...(w.online ? addressRows(w) : [['Offline for', fmt.dur(w.offline_s)]]),
     w.retry_in_s && !w.online ? ['Next attempt in', fmt.dur(w.retry_in_s)] : null,
     ['Internet', lbl(L.upstream, w.upstream)],
-    ['MAC address', mac],
   ]);
 }
 
@@ -99,7 +98,7 @@ const systemPart = {
       const chip = wifiChip(w);
       wifiBadge.className = 'badge ' + chip[1];
       wifiBadge.textContent = chip[0];
-      mount(wifiBody, wifiStatus(w, sys && sys.mac));
+      mount(wifiBody, wifiStatus(w));
       const ap = apChip(w.ap || {});
       apBadge.className = 'badge ' + ap[1];
       apBadge.textContent = ap[0];
@@ -332,10 +331,8 @@ const systemPart = {
     const deviceCard = h('section', { class: 'card', hidden: true });
     function renderDevice() {
       const name = textInput(sys.hostname, { maxlength: 32 });
-      const fName = field('Station name', name, 'Letters, digits and "-". Also its web address (name.local) and its name in your router.');
-      const pub = checkbox('Public status page', sys.public_status,
-        'Anyone on your network sees the station state, caster names and signals without logging in. Caster addresses and logins, ' +
-        'versions and the position stay hidden.');
+      const fName = field('Station name', name, 'Letters, digits and "-"; also its web address.');
+      const pub = checkbox('Public status page', sys.public_status, 'Anyone on your network sees the station state without logging in.');
       const err = errBox();
       const save = h('button', { type: 'submit', class: 'btn primary', hidden: true }, 'Save');
       /* The .local name answers only while the mDNS responder runs (mdns_host set). */
