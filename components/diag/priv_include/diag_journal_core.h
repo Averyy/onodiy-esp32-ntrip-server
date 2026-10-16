@@ -168,8 +168,9 @@ size_t dj_read(dj_t *j, uint32_t *cursor, dj_entry_t *out, size_t cap, bool *mor
  * the newest record) and drop every other sector from the index; they are
  * erased by dj_clear_step. A journal never written to (no sector opened)
  * has nothing to clear.
- * @return DJ_OK; DJ_ERR_IO when the new sector could not be opened (nothing
- *         else changed); DJ_ERR_STATE when not mounted.
+ * @return DJ_OK; DJ_ERR_IO when the new sector could not be opened (not
+ *         cleared: only that sector's records are gone, the oldest in a full
+ *         ring, as when the ring moves on); DJ_ERR_STATE when not mounted.
  */
 int dj_clear_start(dj_t *j);
 

@@ -45,6 +45,7 @@ static const char *TAG = "diag";
 #define WRITER_STACK  4096
 #define WRITER_PRIO   5
 #define FLUSH_WAIT_MS 100
+#define INFO_WAIT_MS  1000      /* longer than one sector erase, the longest the writer or a clear holds the journal */
 #define READ_CHUNK    16u
 
 typedef enum {
@@ -66,6 +67,9 @@ static volatile uint32_t s_clears; /* clears since boot (written under s_jmux) *
 /* Journal core and flash: s_jmux. */
 static SemaphoreHandle_t s_jmux;
 static dj_t s_j;
+/* The core's counts as diag_journal_info last read them (s_qlock): what it
+ * gives while the journal is held longer than it waits. */
+static diag_journal_info_t s_info;
 static const esp_partition_t *s_part;
 static TaskHandle_t s_writer;
 
@@ -278,29 +282,49 @@ uint32_t diag_journal_clear_count(void)
     return s_clears;
 }
 
+/* With s_jmux held: the core's counts. */
+static void core_counts(diag_journal_info_t *c)
+{
+    c->available = true;
+    c->capacity = dj_capacity(&s_j);
+    c->oldest_seq = dj_oldest_seq(&s_j);
+    c->newest_seq = (c->oldest_seq != 0) ? s_j.next_seq - 1u : 0;
+    c->sector_cycles = (s_j.sectors != 0) ? s_j.top_sector_seq / s_j.sectors : 0;
+    c->written = s_j.written;
+    c->io_errors = s_j.io_errors;
+}
+
+/*
+ * Available whenever the journal is: a clear or the writer holds it for one
+ * sector erase at a time, which it waits for; held longer than that (a
+ * failing flash), the counts are those of the previous read.
+ */
 void diag_journal_info(diag_journal_info_t *out)
 {
     if (out == NULL) {
         return;
     }
     memset(out, 0, sizeof(*out));
+    if (s_state == J_READY) {
+        diag_journal_info_t c = { 0 };
+        bool fresh = xSemaphoreTake(s_jmux, pdMS_TO_TICKS(INFO_WAIT_MS)) == pdTRUE;
+        if (fresh) {
+            core_counts(&c);
+            xSemaphoreGive(s_jmux);
+        }
+        portENTER_CRITICAL(&s_qlock);
+        if (fresh) {
+            s_info = c;
+        }
+        *out = s_info;
+        portEXIT_CRITICAL(&s_qlock);
+    }
     portENTER_CRITICAL(&s_qlock);
     out->queued = s_q.count;
     out->queue_full = s_queue_full;
     out->refused_kind = s_rate.refused_kind;
     out->refused_budget = s_rate.refused_budget;
     portEXIT_CRITICAL(&s_qlock);
-    if (s_state != J_READY || xSemaphoreTake(s_jmux, pdMS_TO_TICKS(100)) != pdTRUE) {
-        return;
-    }
-    out->available = true;
-    out->capacity = dj_capacity(&s_j);
-    out->oldest_seq = dj_oldest_seq(&s_j);
-    out->newest_seq = (out->oldest_seq != 0) ? s_j.next_seq - 1u : 0;
-    out->sector_cycles = (s_j.sectors != 0) ? s_j.top_sector_seq / s_j.sectors : 0;
-    out->written = s_j.written;
-    out->io_errors = s_j.io_errors;
-    xSemaphoreGive(s_jmux);
 }
 
 esp_err_t diag_journal_init(void)
@@ -333,6 +357,9 @@ esp_err_t diag_journal_init(void)
         ESP_LOGE(TAG, "event journal unavailable (%s)", s_part == NULL ? "no journal partition" : "mount failed");
         return ESP_ERR_NOT_FOUND;
     }
+    xSemaphoreTake(s_jmux, portMAX_DELAY);
+    core_counts(&s_info);   /* read before diag_journal_info can */
+    xSemaphoreGive(s_jmux);
     s_state = J_READY;
     uint32_t oldest = dj_oldest_seq(&s_j);
     if (oldest != 0) {

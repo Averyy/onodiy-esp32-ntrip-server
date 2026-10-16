@@ -552,6 +552,36 @@ TEST_CASE("journal clear: a start that fails clears nothing and keeps the queued
     read_check(&s_j, 1, 303);
 }
 
+TEST_CASE("journal clear: a start that fails on a full ring loses only the sector the ring drops next", "[diag][journal]")
+{
+    nor_reset(4);
+    mount(&s_j);
+    for (int i = 1; i <= 600; i++) {
+        TEST_ASSERT_EQUAL_INT(DJ_OK, append(&s_j, 1, i));
+    }
+    /* Full: the next sector to open holds the oldest 127 records. */
+    uint32_t oldest = dj_oldest_seq(&s_j);
+    TEST_ASSERT_TRUE(oldest > 1u);
+    read_check(&s_j, oldest, 600u - oldest + 1u);
+    s_nor.cut_at = s_nor.ops + 1u;   /* the erase of the sector the clear opens first fails */
+    TEST_ASSERT_EQUAL_INT(DJ_ERR_IO, dj_clear_start(&s_j));
+    s_nor.dead = false;
+    s_nor.cut_at = 0;
+    /* Not cleared: the rest stays, only that sector's records are gone, as
+     * when the ring moves on (its cells hold no defined contents now). */
+    TEST_ASSERT_EQUAL_UINT32(oldest + 127u, dj_oldest_seq(&s_j));
+    read_check(&s_j, oldest + 127u, 600u - oldest - 126u);
+    /* The records go on with their numbers; opening that sector again erases it. */
+    for (int i = 601; i <= 800; i++) {
+        TEST_ASSERT_EQUAL_INT(DJ_OK, append(&s_j, 1, i));
+    }
+    uint32_t now_oldest = dj_oldest_seq(&s_j);
+    read_check(&s_j, now_oldest, 800u - now_oldest + 1u);
+    mount(&s_j);
+    TEST_ASSERT_EQUAL_UINT32(now_oldest, dj_oldest_seq(&s_j));
+    read_check(&s_j, now_oldest, 800u - now_oldest + 1u);
+}
+
 TEST_CASE("journal clear: one that starts takes the records queued before it, not those queued since", "[diag][journal]")
 {
     nor_reset(4);

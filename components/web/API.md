@@ -2280,13 +2280,16 @@ PROVISIONAL: a second or two, to be measured on hardware, longer on a worn
 flash). The clear runs on the server's worker task (like the uploads and
 the file downloads), so other requests and the WebSocket's status pushes
 go on meanwhile; a concurrent `GET /api/journal` or `/api/connections`
-waits for one sector erase at most and never sees part of the old records.
+waits for one sector erase at most and never sees part of the old records,
+and `GET /api/health` keeps `journal.available` true (held longer than a
+second, its counts are those of the previous request).
 Errors: `404 not_found` (no usable journal partition:
 `health.journal.available` false), `409 busy` (another clear is waiting
 or runs, or an upload is being received: it holds the worker), `500
 internal` (a flash error; `message` says which: `ESP_FAIL` the clear could
-not start, the sector it opens first could not be erased or written:
-nothing was cleared, the records stay; `ESP_ERR_NOT_FINISHED` a later
+not start, the sector it opens first could not be erased or written: not
+cleared, the records stay, except in a full journal the oldest sector's
+(127 records), which the ring was about to drop anyway; `ESP_ERR_NOT_FINISHED` a later
 erase failed: the records are gone from every read all the same; a sector
 that could not be erased brings its records back at the next boot, as
 does a power cut during the clear).
