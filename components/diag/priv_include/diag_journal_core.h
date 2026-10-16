@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: MIT
  *
  * Event journal on a raw flash partition (pure logic, no IDF or RTOS
- * includes, host-testable). Flash access goes through callbacks; locking,
- * the write queue and the writer task are diag_journal.c's.
+ * includes, host-testable), with the RAM queue of records waiting to be
+ * written (dj_queue_*). Flash access goes through callbacks; locking and the
+ * writer task are diag_journal.c's.
  *
  * Flash format (version 1; all fields little-endian):
  *
@@ -186,6 +187,39 @@ uint32_t dj_oldest_seq(const dj_t *j);
 
 /** Records the ring can hold. */
 uint32_t dj_capacity(const dj_t *j);
+
+/* ---- write queue ------------------------------------------------------------------ */
+
+#define DJ_QUEUE_LEN 64u
+
+/**
+ * Records waiting in RAM for the writer, oldest first (seq is assigned when
+ * written). The caller locks it: appends come from any task or an ISR.
+ */
+typedef struct {
+    dj_entry_t rec[DJ_QUEUE_LEN];
+    uint32_t head;
+    uint32_t count;
+} dj_queue_t;
+
+/** Empty the queue. */
+void dj_queue_reset(dj_queue_t *q);
+
+/** Queue one record at the end. @return false when full (nothing queued). */
+bool dj_queue_push(dj_queue_t *q, const dj_entry_t *e);
+
+/** Take the oldest record. @return false when empty. */
+bool dj_queue_pop(dj_queue_t *q, dj_entry_t *out);
+
+/**
+ * The queue's part of the user's clear, once dj_clear_start returned
+ * `start_result`: the `queued` oldest records (those that waited when the
+ * clear began, counted while the writer was kept from the queue) were
+ * written before it, so they go with the rest when the start succeeded. A
+ * start that failed cleared nothing: they stay queued and are written as
+ * usual. Records queued since the count stay either way.
+ */
+void dj_queue_clear_started(dj_queue_t *q, uint32_t queued, int start_result);
 
 /* ---- rate limits ------------------------------------------------------------------ */
 

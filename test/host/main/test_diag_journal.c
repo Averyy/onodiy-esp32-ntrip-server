@@ -480,6 +480,111 @@ TEST_CASE("journal clear: a power cut at any point leaves a ring that numbers on
     }
 }
 
+static dj_queue_t s_q;
+
+static void queue(dj_queue_t *q, int32_t a)
+{
+    dj_entry_t e = { .uptime_s = (uint32_t)a, .unix_s = 1760000000 + a, .kind = 1, .a = a, .b = -a };
+    TEST_ASSERT_TRUE(dj_queue_push(q, &e));
+}
+
+/* The writer: everything queued goes to the journal, oldest first. */
+static uint32_t write_queued(dj_t *j, dj_queue_t *q)
+{
+    uint32_t n = 0;
+    dj_entry_t e;
+    while (dj_queue_pop(q, &e)) {
+        TEST_ASSERT_EQUAL_INT(DJ_OK, dj_append(j, &e));
+        n++;
+    }
+    return n;
+}
+
+TEST_CASE("journal queue: oldest first, full at its length, round the ring", "[diag][journal]")
+{
+    dj_queue_reset(&s_q);
+    dj_entry_t e;
+    TEST_ASSERT_FALSE(dj_queue_pop(&s_q, &e));
+    for (int round = 0; round < 3; round++) {
+        for (uint32_t i = 0; i < DJ_QUEUE_LEN; i++) {
+            queue(&s_q, (int32_t)(round * 1000 + (int)i));
+        }
+        dj_entry_t extra = { .a = -1 };
+        TEST_ASSERT_FALSE(dj_queue_push(&s_q, &extra));   /* full: refused, nothing overwritten */
+        TEST_ASSERT_EQUAL_UINT32(DJ_QUEUE_LEN, s_q.count);
+        for (uint32_t i = 0; i < DJ_QUEUE_LEN - 5u; i++) {
+            TEST_ASSERT_TRUE(dj_queue_pop(&s_q, &e));
+            TEST_ASSERT_EQUAL_INT32(round * 1000 + (int)i, e.a);
+        }
+        for (uint32_t i = DJ_QUEUE_LEN - 5u; i < DJ_QUEUE_LEN; i++) {
+            TEST_ASSERT_TRUE(dj_queue_pop(&s_q, &e));
+            TEST_ASSERT_EQUAL_INT32(round * 1000 + (int)i, e.a);
+        }
+        TEST_ASSERT_FALSE(dj_queue_pop(&s_q, &e));
+        queue(&s_q, 7);   /* the head moves on: the next round wraps */
+        TEST_ASSERT_TRUE(dj_queue_pop(&s_q, &e));
+    }
+}
+
+TEST_CASE("journal clear: a start that fails clears nothing and keeps the queued records", "[diag][journal]")
+{
+    nor_reset(4);
+    mount(&s_j);
+    for (int i = 1; i <= 300; i++) {
+        TEST_ASSERT_EQUAL_INT(DJ_OK, append(&s_j, 1, i));
+    }
+    dj_queue_reset(&s_q);
+    for (int i = 301; i <= 303; i++) {
+        queue(&s_q, i);   /* written before the clear, still waiting for the writer */
+    }
+    uint32_t queued = s_q.count;
+    s_nor.cut_at = s_nor.ops + 1u;   /* the erase of the sector the clear opens first fails */
+    int r = dj_clear_start(&s_j);
+    TEST_ASSERT_EQUAL_INT(DJ_ERR_IO, r);
+    dj_queue_clear_started(&s_q, queued, r);
+    /* Nothing was cleared: the records stay, the queued ones are written as usual. */
+    TEST_ASSERT_EQUAL_UINT32(3, s_q.count);
+    s_nor.dead = false;
+    s_nor.cut_at = 0;
+    TEST_ASSERT_EQUAL_UINT32(3, write_queued(&s_j, &s_q));
+    read_check(&s_j, 1, 303);
+    mount(&s_j);
+    read_check(&s_j, 1, 303);
+}
+
+TEST_CASE("journal clear: one that starts takes the records queued before it, not those queued since", "[diag][journal]")
+{
+    nor_reset(4);
+    mount(&s_j);
+    for (int i = 1; i <= 300; i++) {
+        TEST_ASSERT_EQUAL_INT(DJ_OK, append(&s_j, 1, i));
+    }
+    dj_queue_reset(&s_q);
+    for (int i = 0; i < (int)DJ_QUEUE_LEN - 2; i++) {
+        queue(&s_q, 1000 + i);   /* round the ring: the head is not at 0 */
+    }
+    write_queued(&s_j, &s_q);
+    for (int i = 301; i <= 303; i++) {
+        queue(&s_q, 2000 + i);
+    }
+    uint32_t queued = s_q.count;
+    int r = dj_clear_start(&s_j);
+    TEST_ASSERT_EQUAL_INT(DJ_OK, r);
+    queue(&s_q, 1);   /* appended while the clear started: after it */
+    queue(&s_q, 2);
+    dj_queue_clear_started(&s_q, queued, r);
+    TEST_ASSERT_EQUAL_UINT32(2, s_q.count);
+    while (dj_clear_step(&s_j) != 0) {
+    }
+    TEST_ASSERT_EQUAL_UINT32(2, write_queued(&s_j, &s_q));
+    static dj_entry_t out[8];
+    uint32_t cur = 0;
+    TEST_ASSERT_EQUAL_size_t(2, dj_read(&s_j, &cur, out, 8, NULL));
+    TEST_ASSERT_EQUAL_INT32(1, out[0].a);
+    TEST_ASSERT_EQUAL_INT32(2, out[1].a);
+    TEST_ASSERT_EQUAL_UINT32(300 + DJ_QUEUE_LEN - 2u + 1u, out[0].seq);   /* numbering goes on */
+}
+
 TEST_CASE("journal rate limit: per kind, exempt kinds, across the clock wrap", "[diag][journal]")
 {
     dj_rate_t r;
