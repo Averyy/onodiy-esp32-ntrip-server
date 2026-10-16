@@ -92,6 +92,8 @@ typedef struct {
     bool notices;                /* commands sent while it restarts get the restarting answer */
     int groups;                  /* signal-group query: 0 the bench body for its group, 1 refused (no such
                                     command), 2 acknowledged without a log */
+    const char *basepos;         /* BASEPOSA: the body of its log (NULL: refused, no such command) */
+    const char *sppnav;          /* SPPNAVA: likewise */
 
     /* records */
     sim_rx_t rx[MAX_RX];
@@ -284,6 +286,13 @@ static void receive(sim_t *s, const char *cmd)
             snprintf(log, sizeof(log), "ANT1GROUPA,COM1,0,0.0,FINE,0,0.000,0,0,0;%s", body);
             emit_checked(s, '#', log, 50);
         }
+    } else if ((strcmp(up, "BASEPOSA") == 0 && s->basepos != NULL) || (strcmp(up, "SPPNAVA") == 0 && s->sppnav != NULL)) {
+        bool base = up[0] == 'B';
+        char log[LINE_MAX_];
+        reply(s, cmd, "OK", 30);
+        snprintf(log, sizeof(log), "%s,COM1,0,0.0,FINE,0,0.000,0,0,0;%s", base ? "BASEPOSA" : "SPPNAVA",
+                 base ? s->basepos : s->sppnav);
+        emit_checked(s, '#', log, 50);
     } else if (sscanf(up, "RTCM%u COM1 %u", &a, &b) == 2) {
         if (a == 1230 && !s->r1230) {
             reply(s, cmd, "PARSING FAILED NO MATCHING FUNC  RTCM1230", 30);
@@ -2037,4 +2046,36 @@ TEST_CASE("exec: every session asks once what the group configures, after the si
     TEST_ASSERT_FALSE(r.bands_asked);
     TEST_ASSERT_EQUAL_UINT8(UM98X_BANDS_UNKNOWN, r.bands.state);
     TEST_ASSERT_EQUAL_INT(0, count(s, "ANT1GROUPA"));
+}
+
+TEST_CASE("exec: the receiver's own position: either log, refused, or a log not read", "[um98x_exec]")
+{
+    static const char body[] = "SOL_COMPUTED,SINGLE,45.1000000,-75.2000000,80.000,-34.000,WGS84,1.200,1.100,2.300,"
+                               "\"0\",0.000,0.000,40,32";
+    sim_t *s = sim_init();
+    configured(s);
+    s->basepos = body;
+    um98x_own_fix_t f;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_own_fix(&s->ex, UM98X_CMD_BASEPOS, &f));
+    TEST_ASSERT_TRUE(f.computed);
+    TEST_ASSERT_EQUAL_UINT8(UM98X_OWN_POS_SINGLE, f.pos_type);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 45.1, f.lat_deg);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, -34.0, f.separation_m);
+    TEST_ASSERT_EQUAL_UINT8(32, f.sats_used);
+    TEST_ASSERT_TRUE(um98x_own_fix_usable(&f));
+    TEST_ASSERT_EQUAL_INT(1, count(s, "BASEPOSA"));
+
+    /* No such command: refused at once, not resent. */
+    TEST_ASSERT_EQUAL(UM98X_E_REJECTED, um98x_exec_own_fix(&s->ex, UM98X_CMD_SPPNAV, &f));
+    TEST_ASSERT_EQUAL_INT(1, count(s, "SPPNAVA"));
+    TEST_ASSERT_FALSE(f.computed);
+
+    /* A log whose body this firmware does not read. */
+    s->sppnav = "SOL_COMPUTED,SINGLE,45.1";
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_own_fix(&s->ex, UM98X_CMD_SPPNAV, &f));
+    TEST_ASSERT_EQUAL_INT(2, count(s, "SPPNAVA"));
+
+    /* Only the two position logs. */
+    TEST_ASSERT_EQUAL(UM98X_E_ARG, um98x_exec_own_fix(&s->ex, "BESTNAVA", &f));
+    TEST_ASSERT_EQUAL_INT(0, count(s, "BESTNAVA"));
 }

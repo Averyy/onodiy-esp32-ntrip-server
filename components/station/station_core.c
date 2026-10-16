@@ -282,6 +282,115 @@ static stn_job_t make_job(stn_job_kind_t kind)
     return j;
 }
 
+/* ---- fixed-position check (see the header; the rule is um98x_fixcheck.h) ---- */
+
+/* Metres for a note, rounded half away from zero, clamped. */
+static int32_t round_m(double m)
+{
+    if (!(m < 2.0e9)) {
+        return m > 0.0 ? INT32_MAX : 0;   /* NaN as 0 */
+    }
+    if (!(m > -2.0e9)) {
+        return INT32_MIN;
+    }
+    return (int32_t)(m < 0.0 ? m - 0.5 : m + 0.5);
+}
+
+/* A new check STN_FIX_FIRST_MS from now (the receiver may need a fix first);
+ * the verdict stays until that check decides. */
+static void fix_rearm(stn_t *s, int64_t now)
+{
+    if (!s->fix_on) {
+        return;
+    }
+    s->fix_due_ms = now + STN_FIX_FIRST_MS;
+    s->fix_running = false;
+    s->fix_sppnav = false;
+}
+
+/* No check any more: verdict, alert and schedule go (noted when the alert
+ * stood and the fixed position changed or went). */
+static void fix_drop(stn_t *s, bool changed)
+{
+    if ((s->alerts & STN_ALERT_FIXED_FAR) != 0) {
+        s->alerts &= ~STN_ALERT_FIXED_FAR;
+        if (changed) {
+            note(s, STN_NOTE_FIXED_CHANGED, 0, 0);
+        }
+    }
+    s->fix_on = false;
+    s->fix_due_ms = STN_NEVER;
+    s->fix_running = false;
+    s->fix_tries = 0;
+    s->fix_sppnav = false;
+    s->fix_usable_seen = false;
+    s->fix_end = STN_FIX_END_NONE;
+    s->fix_sample_ms = STN_NEVER;
+    um98x_fixchk_init(&s->fix);
+}
+
+/* Every step: the fixed position the caller passes (none for a survey profile). */
+static void fix_track(stn_t *s, const stn_in_t *in)
+{
+    if (!in->fixed_valid || (s->identity_ok && !s->supported)) {
+        if (s->fix_on) {
+            fix_drop(s, !in->fixed_valid);
+        }
+        return;
+    }
+    if (s->fix_on && (in->fixed_llh[0] != s->fix_ref[0] || in->fixed_llh[1] != s->fix_ref[1] ||
+                      in->fixed_llh[2] != s->fix_ref[2])) {
+        fix_drop(s, true);
+    }
+    if (!s->fix_on) {
+        s->fix_on = true;
+        memcpy(s->fix_ref, in->fixed_llh, sizeof(s->fix_ref));
+        fix_rearm(s, in->now_ms);
+    }
+}
+
+/* The next query when one is due (STREAMING with nothing more urgent). */
+static bool fix_job(stn_t *s, const stn_in_t *in, stn_job_t *out)
+{
+    if (!s->fix_on || !s->identity_ok || !s->supported || s->fix_due_ms == STN_NEVER || in->now_ms < s->fix_due_ms) {
+        return false;
+    }
+    if (!s->fix_running) {
+        s->fix_running = true;
+        s->fix_tries = 0;
+        s->fix_usable_seen = false;
+        um98x_fixchk_restart(&s->fix);
+    }
+    *out = make_job(STN_JOB_OWN_FIX);
+    out->sppnav = s->fix_sppnav;
+    return true;
+}
+
+static void fix_finish(stn_t *s, int64_t now, stn_fix_end_t end)
+{
+    s->fix_running = false;
+    s->fix_end = (uint8_t)end;
+    s->fix_due_ms = now + STN_FIX_RECHECK_MS;
+}
+
+/* A decision: the alert follows it, noted when it changes. */
+static void fix_decided(stn_t *s, uint8_t verdict)
+{
+    bool was = (s->alerts & STN_ALERT_FIXED_FAR) != 0;
+    const um98x_fix_offset_t *o = &s->fix.shown;
+    if (verdict == UM98X_FIX_FAR) {
+        s->alerts |= STN_ALERT_FIXED_FAR;
+        if (!was) {
+            note(s, STN_NOTE_FIXED_FAR, round_m(o->horizontal_m), round_m(o->up_m));
+        }
+    } else {
+        s->alerts &= ~STN_ALERT_FIXED_FAR;
+        if (was) {
+            note(s, STN_NOTE_FIXED_NEAR, round_m(o->horizontal_m), round_m(o->up_m));
+        }
+    }
+}
+
 static stn_job_t start_apply(stn_t *s, stn_why_t why, stn_change_t change, bool force)
 {
     s->apply_wanted = false;
@@ -328,6 +437,9 @@ void stn_init(stn_t *s, bool journal_open)
     s->flash_close_ms = STN_NEVER;
     s->flash_rtcm_ms = STN_NEVER;
     s->rtcm_change_ms = STN_NEVER;
+    s->fix_due_ms = STN_NEVER;
+    s->fix_sample_ms = STN_NEVER;
+    um98x_fixchk_init(&s->fix);
 }
 
 /* The time of the latest valid RTCM frame, as far as the samples show it. */
@@ -426,6 +538,7 @@ static void restart_handling(stn_t *s, const stn_in_t *in)
     } else {
         s->antenna_check = true;
     }
+    fix_rearm(s, now);   /* the receiver computes its solution afresh */
 }
 
 /* Window verdict: applied check, post-apply check or drift watch. */
@@ -630,6 +743,10 @@ static stn_job_t next_streaming(stn_t *s, const stn_in_t *in)
     if (s->apply_wanted) {
         return start_apply(s, (stn_why_t)s->apply_why, (stn_change_t)s->apply_change, s->apply_force);
     }
+    stn_job_t fix;
+    if (fix_job(s, in, &fix)) {
+        return fix;
+    }
     return none;
 }
 
@@ -832,6 +949,7 @@ stn_job_t stn_next(stn_t *s, const stn_in_t *in)
     if (s->job_busy || !s->started) {
         return none;
     }
+    fix_track(s, in);
     live_tick(s, in);
     flash_close_tick(s, in);
     if (s->maint) {
@@ -1058,6 +1176,7 @@ static void done_apply(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         }
         s->paused = false;
         s->last_resort = false;
+        fix_rearm(s, now);   /* the profile may be new, the receiver restarted */
         enter_streaming(s, in, ENTER_VERIFY);
         if (s->job.why == STN_WHY_FLASH && s->flash_close == 2) {
             s->flash_rtcm_ms = now + STN_FLASH_RTCM_MS;   /* the abort path: RTCM must come back */
@@ -1187,6 +1306,54 @@ static void done_position(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     }
 }
 
+static void done_own_fix(stn_t *s, const stn_result_t *r, const stn_in_t *in)
+{
+    int64_t now = in->now_ms;
+    if (!s->fix_on || !s->fix_running) {
+        return;   /* dropped or re-armed meanwhile: the answer belongs to no check */
+    }
+    switch (r->err) {
+    case STN_E_STATE:
+        s->fix_due_ms = now + STN_FIX_BUSY_MS;   /* nothing was sent: not a try */
+        return;
+    case STN_E_FAIL:
+        if (!s->job.sppnav) {
+            s->fix_sppnav = true;   /* no base-position log on this firmware: the single-point one */
+            s->fix_due_ms = now + STN_FIX_BUSY_MS;
+            return;
+        }
+        fix_finish(s, now, STN_FIX_END_REFUSED);
+        return;
+    case STN_OK: {
+        if (!s->job.sppnav && r->own.pos_type == UM98X_OWN_POS_FIXED) {
+            s->fix_sppnav = true;   /* it only echoes the set position: ask the single-point log */
+        }
+        um98x_fix_offset_t o;
+        if (um98x_fix_offset(s->fix_ref[0], s->fix_ref[1], s->fix_ref[2], &r->own, &o)) {
+            s->fix_usable_seen = true;
+            s->fix_sample_ms = now;
+            uint8_t v = um98x_fixchk_feed(&s->fix, &o);
+            if (v != UM98X_FIX_NONE) {
+                fix_decided(s, v);
+                fix_finish(s, now, STN_FIX_END_NONE);
+                return;
+            }
+        }
+        break;
+    }
+    default:
+        break;   /* no log, or one this firmware does not read */
+    }
+    if (++s->fix_tries >= STN_FIX_TRIES) {
+        fix_finish(s, now, s->fix_usable_seen ? STN_FIX_END_UNDECIDED : STN_FIX_END_NO_SOLUTION);
+        return;
+    }
+    if (!s->fix_sppnav && !s->fix_usable_seen && s->fix_tries >= STN_FIX_BASEPOS_TRIES) {
+        s->fix_sppnav = true;   /* nothing usable from the base-position log: the single-point one */
+    }
+    s->fix_due_ms = now + STN_FIX_PERIOD_MS;
+}
+
 static void done_flash(stn_t *s, const stn_result_t *r, const stn_in_t *in)
 {
     int64_t now = in->now_ms;
@@ -1298,6 +1465,9 @@ void stn_done(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         s->paused = false;
         sky_receiver_changed(s);
         stream_first(s, in, true);   /* the receiver may have been reset: look again, as at boot */
+        break;
+    case STN_JOB_OWN_FIX:
+        done_own_fix(s, r, in);
         break;
     case STN_JOB_PKG_CHECK:
     default:
@@ -1615,6 +1785,37 @@ uint32_t stn_alerts(const stn_t *s)
         a |= STN_ALERT_NO_RECEIVER;
     }
     return a;
+}
+
+void stn_fix_status(const stn_t *s, int64_t now_ms, stn_fix_status_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->checked_age_s = UINT32_MAX;
+    if (!s->fix_on) {
+        out->state = STN_FIX_OFF;
+        return;
+    }
+    if (s->fix_sample_ms != STN_NEVER) {
+        int64_t age = (now_ms - s->fix_sample_ms) / 1000;
+        out->checked_age_s = age < 0 ? 0 : (age >= (int64_t)UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)age);
+    }
+    switch (s->fix.verdict) {
+    case UM98X_FIX_FAR:
+        out->state = STN_FIX_FAR;
+        out->offset = s->fix.shown;
+        out->height_only = um98x_fix_height_only(&s->fix.shown);
+        break;
+    case UM98X_FIX_NEAR:
+        out->state = STN_FIX_NEAR;
+        out->offset = s->fix.shown;
+        break;
+    default:
+        /* No verdict: how the last check ended, while the next one runs too. */
+        out->state = s->fix_end == STN_FIX_END_NO_SOLUTION ? STN_FIX_NO_SOLUTION
+                     : s->fix_end == STN_FIX_END_REFUSED   ? STN_FIX_REFUSED
+                                                           : STN_FIX_CHECKING;
+        break;
+    }
 }
 
 uint32_t stn_next_detect_in_s(const stn_t *s, int64_t now_ms)

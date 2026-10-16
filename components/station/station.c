@@ -104,8 +104,13 @@ _Static_assert(STN_ALERT_UNSUPPORTED_MODEL == (uint32_t)STATION_ALERT_UNSUPPORTE
                    STN_ALERT_RECEIVER_ATTENTION == (uint32_t)STATION_ALERT_RECEIVER_ATTENTION &&
                    STN_ALERT_RECEIVER_IN_LOADER == (uint32_t)STATION_ALERT_RECEIVER_IN_LOADER &&
                    STN_ALERT_NO_RECEIVER == (uint32_t)STATION_ALERT_NO_RECEIVER &&
-                   STN_ALERT_SIGNALS_MISMATCH == (uint32_t)STATION_ALERT_SIGNALS_MISMATCH,
+                   STN_ALERT_SIGNALS_MISMATCH == (uint32_t)STATION_ALERT_SIGNALS_MISMATCH &&
+                   STN_ALERT_FIXED_FAR == (uint32_t)STATION_ALERT_FIXED_FAR,
                "core alerts mirror station_alert_t");
+_Static_assert(STN_FIX_OFF == (int)STATION_FIX_OFF && STN_FIX_CHECKING == (int)STATION_FIX_CHECKING &&
+                   STN_FIX_NEAR == (int)STATION_FIX_NEAR && STN_FIX_FAR == (int)STATION_FIX_FAR &&
+                   STN_FIX_NO_SOLUTION == (int)STATION_FIX_NO_SOLUTION && STN_FIX_REFUSED == (int)STATION_FIX_REFUSED,
+               "core fixed-position check states mirror station_fix_state_t");
 _Static_assert(STN_REC_RESYNC == (int)STATION_RECOVER_RESYNC &&
                    STN_REC_LINK_RESTART == (int)STATION_RECOVER_LINK_RESTART &&
                    STN_REC_RESCAN == (int)STATION_RECOVER_RESCAN &&
@@ -1396,6 +1401,32 @@ static void job_check_position(stn_result_t *r)
     }
 }
 
+/* The fixed-position check's query: the receiver's own position, one line,
+ * without a lease (nothing is held back). */
+static void job_own_fix(const stn_job_t *job, stn_result_t *r)
+{
+    esp_err_t err = um98x_ctl_query_own_fix(NULL, job->sppnav, &r->own);
+    switch (err) {
+    case ESP_OK:
+        r->err = STN_OK;
+        ESP_LOGD(TAG, "own position (%s): %s type %u, %u satellites, sd %.1f/%.1f/%.1f m",
+                 job->sppnav ? UM98X_CMD_SPPNAV : UM98X_CMD_BASEPOS, r->own.computed ? "computed" : "not computed",
+                 (unsigned)r->own.pos_type, (unsigned)r->own.sats_used, r->own.sd_lat_m, r->own.sd_lon_m,
+                 r->own.sd_hgt_m);
+        break;
+    case ESP_ERR_NOT_SUPPORTED:
+        r->err = STN_E_FAIL;
+        ESP_LOGI(TAG, "the receiver refused %s", job->sppnav ? UM98X_CMD_SPPNAV : UM98X_CMD_BASEPOS);
+        break;
+    case ESP_ERR_INVALID_STATE:
+        r->err = STN_E_STATE;
+        break;
+    default:
+        r->err = STN_E_TIMEOUT;   /* no log, one not read, or the command layer busy */
+        break;
+    }
+}
+
 /* Satellite-in-view output for the live view: one command under a short
  * COMMAND lease (RTCM is held back meanwhile; the casters are paused). */
 static void job_sky(const stn_job_t *job, stn_result_t *r)
@@ -2036,6 +2067,9 @@ static void run_job(const stn_job_t *job, stn_result_t *r)
     case STN_JOB_PKG_CHECK:
         job_pkg_check(r);
         break;
+    case STN_JOB_OWN_FIX:
+        job_own_fix(job, r);
+        break;
     default:
         r->err = STN_E_STATE;
         break;
@@ -2059,6 +2093,12 @@ static void fill_in(stn_in_t *in)
     in->survey_s = s_profile.survey_in_s;
     in->rtcm1230_ok = rtcm1230_supported();
     in->profile_sky = s_profile.sat_view_output;
+    in->fixed_valid = (s_profile.base_mode == UM98X_BASE_FIXED);
+    if (in->fixed_valid) {
+        in->fixed_llh[0] = s_profile.fixed_lat_deg;
+        in->fixed_llh[1] = s_profile.fixed_lon_deg;
+        in->fixed_llh[2] = s_profile.fixed_height_m;
+    }
     portENTER_CRITICAL(&s_lock);
     s_obs_snap = s_obs;
     s_in_profile_sky = in->profile_sky;
@@ -2147,6 +2187,15 @@ static void publish_status(const stn_in_t *in)
     xSemaphoreTake(s_sgt_mx, portMAX_DELAY);
     sgt_brief(&s_sgt, in->now_ms, &o->sg_test);
     xSemaphoreGive(s_sgt_mx);
+
+    stn_fix_status_t fx;
+    stn_fix_status(&core, in->now_ms, &fx);
+    o->fix_state = fx.state;
+    o->fix_horizontal_m = fx.offset.horizontal_m;
+    o->fix_up_m = fx.offset.up_m;
+    o->fix_distance_m = fx.offset.distance_m;
+    o->fix_height_only = fx.height_only;
+    o->fix_checked_age_s = fx.checked_age_s;
 
     o->first_apply_held = core.first_apply_held;
     o->rx_maintenance = core.maint;
@@ -2284,6 +2333,21 @@ static void handle_notes(const stn_note_t *n, unsigned count)
             break;
         case STN_NOTE_FLASH_CLOSE:
             flash_close(x->a != 0);
+            break;
+        case STN_NOTE_FIXED_FAR:
+            ESP_LOGW(TAG, "the fixed position is %d m from the receiver's own solution horizontally and %+d m in "
+                          "height: check it (streaming goes on)",
+                     (int)x->a, (int)x->b);
+            journal_push(DIAG_EV_FIXED_POS, diag_fixed_a(DIAG_FIXED_FAR, x->b), x->a);
+            break;
+        case STN_NOTE_FIXED_NEAR:
+            ESP_LOGI(TAG, "the fixed position is within the limits again (%d m horizontally, %+d m in height)",
+                     (int)x->a, (int)x->b);
+            journal_push(DIAG_EV_FIXED_POS, diag_fixed_a(DIAG_FIXED_NEAR, x->b), x->a);
+            break;
+        case STN_NOTE_FIXED_CHANGED:
+            ESP_LOGI(TAG, "fixed position changed: its warning is cleared until it is checked again");
+            journal_push(DIAG_EV_FIXED_POS, diag_fixed_a(DIAG_FIXED_CHANGED, 0), 0);
             break;
         case STN_NOTE_APPLY_FAILED: {
             char next[112];

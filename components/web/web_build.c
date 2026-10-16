@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "um98x_bands.h"
+#include "um98x_fixcheck.h"
 #include "um98x_profile.h"
 #include "web_enums.h"
 #include "web_parse.h"
@@ -167,6 +168,15 @@ static void receiver_info(wj_t *w, const char *key, const um98x_info_t *r)
         wj_str_or_null(w, "compile_date", r->compile_date);
     }
     wj_obj_close(w);
+}
+
+/* The fixed-position check's distances (the medians that decided), in whole metres. */
+static void fix_distances(wj_t *w, const station_status_t *st)
+{
+    wj_double(w, "horizontal_m", st->fix_horizontal_m, 0);
+    wj_double(w, "vertical_m", st->fix_up_m, 0);
+    wj_double(w, "distance_m", st->fix_distance_m, 0);
+    wj_bool(w, "height_only", st->fix_height_only);
 }
 
 static void station_alerts(wj_t *w, const char *key, uint32_t alerts)
@@ -552,6 +562,8 @@ static void sec_alerts(wj_t *w, const web_status_snap_t *s)
                 } else if (bit == STATION_ALERT_NO_RECEIVER) {
                     wj_bool(w, "saw_bytes", s->st.detect_saw_bytes);
                     wj_u32_or_null(w, "next_detect_in_s", s->st.next_detect_in_s);
+                } else if (bit == STATION_ALERT_FIXED_FAR) {
+                    fix_distances(w, &s->st);
                 }
                 wj_obj_close(w);
             }
@@ -962,6 +974,20 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     wj_obj_open(w, "survey");
     wj_bool(w, "active", st->surveying);
     wj_uint(w, "window_left_s", st->survey_window_left_s);
+    wj_obj_close(w);
+
+    wj_obj_open(w, "fixed_check");
+    wj_str(w, "state", web_fix_state_name(st->fix_state));
+    if (st->fix_state == STATION_FIX_NEAR || st->fix_state == STATION_FIX_FAR) {
+        fix_distances(w, st);
+    } else {
+        wj_null(w, "horizontal_m");
+        wj_null(w, "vertical_m");
+        wj_null(w, "distance_m");
+        wj_bool(w, "height_only", false);
+    }
+    wj_u32_or_null(w, "checked_age_s", st->fix_checked_age_s);
+    wj_uint(w, "limit_m", (uint32_t)UM98X_FIX_LIMIT_M);
     wj_obj_close(w);
 
     wj_obj_open(w, "arp");

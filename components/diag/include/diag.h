@@ -241,7 +241,32 @@ typedef enum {
      * (health's power-lost alert).
      */
     DIAG_EV_RX_BOOT = 23,
+    /**
+     * The fixed-position check (the fixed base position against the
+     * receiver's own solution): a = diag_fixed_a(event, height), b = the
+     * horizontal distance in m (0 for DIAG_FIXED_CHANGED). The height is the
+     * fixed height minus the receiver's, in m (bits 8-31, signed).
+     */
+    DIAG_EV_FIXED_POS = 24,
 } diag_event_t;
+
+/** DIAG_EV_FIXED_POS events (low byte of `a`). */
+typedef enum {
+    DIAG_FIXED_FAR = 1,          /**< more than 50 m off (horizontally or in height): the station's warning is raised */
+    DIAG_FIXED_NEAR = 2,         /**< within the limits again: the warning cleared */
+    DIAG_FIXED_CHANGED = 3,      /**< the fixed position changed (or the profile surveys now) while the warning stood: cleared */
+} diag_fixed_ev_t;
+
+/** `a` of DIAG_EV_FIXED_POS: the event in bits 0-7, the height difference (m, clamped to +-8 388 607) in bits 8-31. */
+static inline int32_t diag_fixed_a(diag_fixed_ev_t ev, int32_t up_m)
+{
+    if (up_m > 8388607) {
+        up_m = 8388607;
+    } else if (up_m < -8388607) {
+        up_m = -8388607;
+    }
+    return (int32_t)(((uint32_t)up_m << 8) | ((uint32_t)ev & 0xFFu));
+}
 
 /** DIAG_EV_RX_BOOT `a`. */
 typedef enum {

@@ -52,6 +52,10 @@
  *    read). A negative reply is final at once (a firmware without the
  *    query refuses every send alike). No ack: 2 sends, 3000 ms each, 1000
  *    ms apart. Never fatal to a session.
+ *  - OWNPOS: an own-position query (BASEPOSA or SPPNAVA, one-shot: no
+ *    rate; um98x_fixcheck.h), done on that position log; otherwise as
+ *    GROUPS (the log has 1000 ms after an accepting ack, a negative reply is
+ *    final at once, no ack: 2 sends, 3000 ms each, 1000 ms apart).
  *
  * The receiver's restarting answer ("The Board is resetting,...") carries
  * no echo: it answers whatever was sent while the receiver restarts. It is
@@ -95,6 +99,7 @@ extern "C" {
 #define UM98X_GROUPS_SENDS              2
 #define UM98X_GROUPS_LOG_MS             1000
 #define UM98X_GROUPS_BODY_MAX           96
+#define UM98X_OWN_BODY_MAX              256
 
 #define UM98X_NEVER INT64_MAX
 
@@ -106,6 +111,7 @@ typedef enum {
     UM98X_TXN_VERSION_RESTART,
     UM98X_TXN_PROBE,
     UM98X_TXN_GROUPS,
+    UM98X_TXN_OWNPOS,
 } um98x_txn_kind_t;
 
 typedef enum {
@@ -145,6 +151,7 @@ typedef struct {
     um98x_config_readback_t config; /**< CONFIG: parsed items */
     char mode_body[UM98X_MODE_BODY_MAX]; /**< MODE: log body */
     char groups_body[UM98X_GROUPS_BODY_MAX]; /**< GROUPS: log body (cut to fit) */
+    char own_body[UM98X_OWN_BODY_MAX];       /**< OWNPOS: log body (cut to fit) */
     gnss_versiona_t version;    /**< VERSION, VERSION_RESTART, PROBE: parsed log */
     bool version_valid;
     char *text;                 /**< optional: reply line(s), '\n'-separated */

@@ -741,3 +741,43 @@ def test_responder_signal_group_bodies_are_the_bench_ones():
         group = tuple(int(n) for n in x["group"].split())
         fixture.setdefault(group, ["", ""])[0 if x["query"] == "ANT1GROUPA" else 1] = x["body"]
     assert {g: tuple(b) for g, b in fixture.items()} == unicore.GROUP_BODIES
+
+
+def test_responder_reports_its_own_position_or_none():
+    """BASEPOSA and SPPNAVA (one-shot): its own single-point solution where its antenna is, height above sea level and
+    separation adding up to the ellipsoidal height; no solution without a position (no sky)."""
+    clk = FakeClock()
+    r = Um982Responder(clock=clk, own=(45.4, -75.7, 100.0), separation=-34.0)
+    r.feed(b"BASEPOSA\r\nSPPNAVA\r\n")
+    clk.t += 0.2
+    out = lines_of(r.due())
+    assert unicore.ack_line("BASEPOSA") in out and unicore.ack_line("SPPNAVA") in out
+    logs = [x for x in out if x.startswith("#")]
+    assert [x.split(",", 1)[0] for x in logs] == ["#BASEPOSA", "#SPPNAVA"]
+    assert all(check_text(x) == "crc32" for x in logs)
+    b = unicore.parse_bestnav(logs[0])
+    assert b["sol_status"] == "SOL_COMPUTED" and b["pos_type"] == "SINGLE" and b["sats_used"] >= 6
+    assert b["lat_deg"] == pytest.approx(45.4) and b["lon_deg"] == pytest.approx(-75.7)
+    assert b["height_msl_m"] + b["undulation_m"] == pytest.approx(100.0)
+    assert b["undulation_m"] == pytest.approx(-34.0)
+
+    r = Um982Responder(clock=clk)
+    r.feed(b"SPPNAVA\r\n")
+    clk.t += 0.2
+    b = unicore.parse_bestnav([x for x in lines_of(r.due()) if x.startswith("#")][0])
+    assert b["sol_status"] == "INSUFFICIENT_OBS" and b["pos_type"] == "NONE"
+
+
+def test_cli_respond_position_options():
+    out = subprocess.run([sys.executable, "rtcm_replay.py", "--help"], cwd=BENCH, capture_output=True, text=True)
+    assert "--respond-position" in out.stdout and "--respond-geoid" in out.stdout
+    out = subprocess.run([sys.executable, "rtcm_replay.py", "--listen", "127.0.0.1:0", str(LAX), "--respond-position",
+                          "45.4,-75.7,100"], cwd=BENCH, capture_output=True, text=True)
+    assert out.returncode == 2 and "need --respond" in out.stderr
+    for bad in ("45.4,-75.7", "95,0,0", "a,b,c"):
+        out = subprocess.run([sys.executable, "rtcm_replay.py", "--listen", "127.0.0.1:0", str(LAX), "--respond",
+                              "--respond-position", bad], cwd=BENCH, capture_output=True, text=True)
+        assert out.returncode == 2 and "--respond-position" in out.stderr, bad
+    out = subprocess.run([sys.executable, "rtcm_replay.py", "--listen", "127.0.0.1:0", str(LAX), "--respond",
+                          "--respond-geoid", "200"], cwd=BENCH, capture_output=True, text=True)
+    assert out.returncode == 2 and "--respond-geoid" in out.stderr

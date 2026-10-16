@@ -126,6 +126,7 @@
 #include "gnss_framing.h"
 #include "gnss_types.h"
 #include "um98x_apply.h"
+#include "um98x_fixcheck.h"
 #include "um98x_plan.h"
 #include "um98x_reply.h"
 #include "um98x_txn.h"
@@ -281,6 +282,16 @@ um98x_res_t um98x_exec_query_mode(um98x_exec_t *ex, char *body, size_t cap);
  * @return OK only for a parsed report.
  */
 um98x_res_t um98x_exec_groups(um98x_exec_t *ex, um98x_bands_t *out, char *reason, size_t cap);
+
+/**
+ * Own-position query (cmd: UM98X_CMD_BASEPOS or UM98X_CMD_SPPNAV, one-shot;
+ * um98x_fixcheck.h): out gets the parsed solution (usable or not).
+ * @return OK (a log that parsed), E_REJECTED (the receiver refused the
+ *         query), E_FAILED (a log this firmware does not read), E_TIMEOUT (no
+ *         log; also when the receiver acknowledged and sent none), E_LINK,
+ *         E_ARG (another command).
+ */
+um98x_res_t um98x_exec_own_fix(um98x_exec_t *ex, const char *cmd, um98x_own_fix_t *out);
 
 typedef struct {
     uint32_t baud;              /**< where the receiver answered */

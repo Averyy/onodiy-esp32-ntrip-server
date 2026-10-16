@@ -129,6 +129,14 @@
  * that sends no RTCM after a receiver restart while it still reports a fixed
  * base raises STATION_ALERT_ANTENNA_MOVED; it is never re-surveyed on its own.
  *
+ * Fixed-position check: with a fixed profile (typed in or locked), the
+ * receiver's own single-point solution is asked without a lease (one
+ * line, nothing paused; um98x_fixcheck.h): 60 s after streaming began, a
+ * receiver restart or an apply, then every 20 s until three solutions
+ * agree, again every hour. More than 50 m off horizontally or vertically
+ * raises STATION_ALERT_FIXED_FAR and journals it; within the limits again
+ * (40 m) clears it. Streaming is never held back for it.
+ *
  * Receiver settings read back: every apply session reads the receiver's
  * configuration dump; the station keeps (in RAM, with the time of the
  * read-back) what it said about BeiDou B1C/B2a in RTCM, multipath
@@ -160,9 +168,9 @@
  * gnss/autocfg was never set gets gnss/autocfg = 0, gnss/recovery = 2
  * (alerts only, unless set) and gnss/hold = 1 in one settings batch. While
  * gnss/hold is present (any build: it is kept in NVS) the station sends
- * only queries (identity, settings, base mode) and a loader prompt seen
- * during detection gets no restart key (RECEIVER_IN_LOADER, listen-only;
- * the user's receiver restart still works). The first successful apply
+ * only queries (identity, settings, base mode, own position) and a loader
+ * prompt seen during detection gets no restart key (RECEIVER_IN_LOADER,
+ * listen-only; the user's receiver restart still works). The first successful apply
  * erases it, and so does turning gnss/autocfg on (the web API, then
  * station_first_apply_hold_refresh()); a factory reset erases it with the
  * other user settings. station_status_t.first_apply_held reports it. A hold
@@ -298,7 +306,19 @@ typedef enum {
     STATION_ALERT_NO_RECEIVER        = 1u << 6, /**< no receiver found (state NO_RECEIVER; not with RECEIVER_IN_LOADER or in maintenance): next_detect_in_s says when the next search runs */
     STATION_ALERT_SIGNALS_MISMATCH   = 1u << 7, /**< the signals the receiver reports for its signal group are not what the profile's group
                                                      should configure (rx_bands, um98x_bands.h); set and cleared by each apply session's report */
+    STATION_ALERT_FIXED_FAR          = 1u << 8, /**< the fixed position is more than 50 m (horizontally or vertically) from the receiver's own
+                                                     solution (fix_* in the status); never holds streaming back */
 } station_alert_t;
+
+/** The fixed-position check (station_status_t.fix_state). */
+typedef enum {
+    STATION_FIX_OFF = 0,         /**< no check: the profile surveys, or not a model the station configures */
+    STATION_FIX_CHECKING,        /**< no verdict yet */
+    STATION_FIX_NEAR,            /**< within the limits */
+    STATION_FIX_FAR,             /**< beyond them: STATION_ALERT_FIXED_FAR */
+    STATION_FIX_NO_SOLUTION,     /**< no verdict: the last check got no usable solution (no sky, or none reported) */
+    STATION_FIX_REFUSED,         /**< no verdict: the receiver refused both position logs */
+} station_fix_state_t;
 
 /**
  * What the user confirmed for a receiver update (download or upload): the
@@ -526,6 +546,14 @@ typedef struct {
     station_sg_t sg_back;
     char sg_refused_reply[64];       /**< the receiver's reply ("signal group rejected" when its read-back kept another group) */
     station_sgt_brief_t sg_test;     /**< the signal-group comparison, in short */
+
+    /* The fixed-position check: the fixed profile's position against the receiver's own solution. */
+    uint8_t fix_state;               /**< station_fix_state_t */
+    double fix_horizontal_m;         /**< NEAR, FAR: horizontal distance (the medians that decided) */
+    double fix_up_m;                 /**< NEAR, FAR: fixed height minus the receiver's (> 0: the fixed position is above) */
+    double fix_distance_m;           /**< NEAR, FAR: 3-D distance */
+    bool fix_height_only;            /**< FAR by the height alone */
+    uint32_t fix_checked_age_s;      /**< since the latest usable solution, UINT32_MAX = none */
 } station_status_t;
 
 /**

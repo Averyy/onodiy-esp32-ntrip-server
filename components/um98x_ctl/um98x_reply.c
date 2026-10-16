@@ -13,6 +13,8 @@
 #define MODE_PREFIX    "#MODE"
 #define GROUPS1_PREFIX "#ANT1GROUPA,"
 #define GROUPS2_PREFIX "#ANT2GROUPA,"
+#define BASEPOS_PREFIX "#BASEPOSA,"
+#define SPPNAV_PREFIX  "#SPPNAVA,"
 #define RESPONSE_SEP   ",response: "
 
 #define PLEN(s) (sizeof(s) - 1u)
@@ -228,6 +230,21 @@ static void classify_groups(const char *line, size_t len, uint8_t ant, um98x_lin
     out->text_len = (size_t)(line + star - out->text);
 }
 
+/* An own-position log: the body after the first ';', else after the log name (as the signal-group log). */
+static void classify_ownpos(const char *line, size_t len, size_t name, uint8_t which, um98x_line_t *out)
+{
+    size_t star = hash_checked(line, len);
+    if (star == 0 || star < name) {
+        out->kind = UM98X_LINE_BAD;
+        return;
+    }
+    const char *semi = memchr(line + name, ';', star - name);
+    out->kind = UM98X_LINE_OWNPOS;
+    out->own_log = which;
+    out->text = semi != NULL ? semi + 1 : line + name;
+    out->text_len = (size_t)(line + star - out->text);
+}
+
 /* "The Board is resetting,...*hh": the XOR of everything before '*'. */
 static void classify_resetting(const char *line, size_t len, um98x_line_t *out)
 {
@@ -287,6 +304,10 @@ void um98x_line_classify(const char *line, size_t len, um98x_line_t *out)
             classify_groups(line, len, 1, out);
         } else if (prefix_ci(line, len, GROUPS2_PREFIX)) {
             classify_groups(line, len, 2, out);
+        } else if (prefix_ci(line, len, BASEPOS_PREFIX)) {
+            classify_ownpos(line, len, PLEN(BASEPOS_PREFIX), UM98X_OWN_LOG_BASEPOS, out);
+        } else if (prefix_ci(line, len, SPPNAV_PREFIX)) {
+            classify_ownpos(line, len, PLEN(SPPNAV_PREFIX), UM98X_OWN_LOG_SPPNAV, out);
         }
         return;
     }
@@ -533,7 +554,8 @@ bool um98x_stream_query_allowed(const char *cmd)
     }
     size_t n = strlen(cmd);
     trim(&cmd, &n);
-    return same_ci(cmd, n, "VERSIONA", 8) || same_ci(cmd, n, "MODE", 4);
+    return same_ci(cmd, n, "VERSIONA", 8) || same_ci(cmd, n, "MODE", 4) || same_ci(cmd, n, "BASEPOSA", 8) ||
+           same_ci(cmd, n, "SPPNAVA", 7);
 }
 
 bool um98x_cmd_allowed(um98x_link_mode_t mode, bool have_lease, const char *cmd)

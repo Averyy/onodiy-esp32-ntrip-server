@@ -42,6 +42,11 @@
  *                                         the log name when there is none
  *                                         (build 25164's form, read in a real
  *                                         apply on 2026-10-14)
+ *   #BASEPOSA,...;<body>*hh|crc32         the receiver's own position (base
+ *   #SPPNAVA,...;<body>*hh|crc32          position as a fixed base, or its
+ *                                         single-point solution), either
+ *                                         checksum; the body as for the
+ *                                         signal-group log (um98x_fixcheck.h)
  *
  * Anything else (NMEA sentences, other logs) is OTHER: not for this layer.
  *
@@ -89,20 +94,28 @@ typedef enum {
     UM98X_LINE_BAD,         /**< has a command-layer prefix but a wrong checksum or form */
     UM98X_LINE_RESETTING,   /**< the receiver restarts: it answered a command with its restarting notice */
     UM98X_LINE_GROUPS,      /**< signal-group log: the signals the running group configures (ant: 1 or 2) */
+    UM98X_LINE_OWNPOS,      /**< the receiver's own position log (own_log: which one) */
 } um98x_line_kind_t;
+
+/** Which own-position log a UM98X_LINE_OWNPOS line is. */
+typedef enum {
+    UM98X_OWN_LOG_BASEPOS = 1,   /**< #BASEPOSA: the base's position as a fixed base */
+    UM98X_OWN_LOG_SPPNAV = 2,    /**< #SPPNAVA: the single-point solution */
+} um98x_own_log_t;
 
 /** A classified line. Pointers point into the line and live only as long as it. */
 typedef struct {
     um98x_line_kind_t kind;
     const char *echo;       /**< ACK: echoed command */
     size_t echo_len;
-    const char *text;       /**< ACK: response text; CONFIG: item text; MODE, GROUPS: body; BANNER: port */
+    const char *text;       /**< ACK: response text; CONFIG: item text; MODE, GROUPS, OWNPOS: body; BANNER: port */
     size_t text_len;
     bool ok;                /**< ACK: the response starts with "OK" */
     const char *item;       /**< CONFIG: item name */
     size_t item_len;
     gnss_versiona_t version;/**< VERSION: parsed body */
     uint8_t ant;            /**< GROUPS: 1 the main antenna input, 2 the second */
+    uint8_t own_log;        /**< OWNPOS: um98x_own_log_t */
 } um98x_line_t;
 
 /** What the receiver's configuration dump said about the items the apply needs. */
@@ -152,8 +165,10 @@ void um98x_config_item(um98x_config_readback_t *rb, const char *item, size_t ite
 
 /**
  * True if cmd may be sent without a COMMAND lease while streaming: exactly
- * "VERSIONA" or "MODE" (case-insensitive, surrounding CR/LF/spaces ignored).
- * Everything else, the configuration dump "CONFIG" included, needs a lease.
+ * "VERSIONA", "MODE", "BASEPOSA" or "SPPNAVA" (case-insensitive,
+ * surrounding CR/LF/spaces ignored): read-only queries whose answer is one
+ * line (the position logs one-shot, without a rate). Everything else, the
+ * configuration dump "CONFIG" included, needs a lease.
  */
 bool um98x_stream_query_allowed(const char *cmd);
 
