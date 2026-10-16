@@ -866,6 +866,18 @@ static uint8_t why_of(const hl_t *l, const hl_in_t *in, bool fresh)
     return HL_WHY_SILENT;
 }
 
+/* The receiver answers by the ladder's evidence: the reason says so, or,
+ * where none is given (a suspension, a stall not declared again yet), it
+ * answered after its last RTCM frame. Not in NO_RECEIVER or while 6a runs. */
+static bool answers_now(const hl_t *l, const hl_in_t *in, uint8_t why)
+{
+    if (why == HL_WHY_NO_RTCM || why == HL_WHY_NO_SKY || why == HL_WHY_HELD) {
+        return true;
+    }
+    return why == HL_WHY_NONE && in != NULL && l->phase != HL_PH_REBOOTING && !l->hold_no_rx &&
+           in->stn_state != HL_STN_NO_RECEIVER && answered_since_rtcm(l, in);
+}
+
 void hl_get_status(const hl_t *l, const hl_in_t *in, hl_status_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -916,4 +928,5 @@ void hl_get_status(const hl_t *l, const hl_in_t *in, hl_status_t *out)
     out->reboot_recheck = l->blocked_6a && l->mode == HL_MODE_FULL;
     out->episode = l->phase != HL_PH_IDLE || l->idx != 0 || l->no_rx || l->power_alert;
     out->why = why_of(l, in, fresh);
+    out->restart_possible = out->episode && !fresh && !answers_now(l, in, out->why);
 }

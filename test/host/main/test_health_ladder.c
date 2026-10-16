@@ -2313,3 +2313,65 @@ TEST_CASE("ladder: alerts only chosen while a step's grace runs: only watched, s
     TEST_ASSERT_TRUE(find_rec(&w, 4, HL_OUT_HEALTHY, 0) >= 0);
     TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_OK, st_of(&w).level);
 }
+
+TEST_CASE("ladder: no restart is pending while the receiver answers, and again once a step gets no answer", "[health_ladder]")
+{
+    /* A silent receiver: pending from the stall on. */
+    sim_t w;
+    sim_init(&w);
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    TEST_ASSERT_TRUE(st_of(&w).restart_possible);
+
+    /* No receiver found: pending (the station's own alert says why). */
+    sim_t n;
+    held_in_no_receiver(&n, HL_HOLD_ADMIN);
+    TEST_ASSERT_TRUE(st_of(&n).restart_possible);
+
+    /* No antenna: it answers, no RTCM this boot, and the receiver reset is
+     * answered too: never pending, through steps 1-5, the station's own
+     * session after the reset (the ladder suspended), 7 and the retry
+     * passes (which ask it again with the rescan). */
+    sim_init(&w);
+    w.in.answers = 40;
+    w.answers_during = 5;
+    w.apply_after = 5;
+    w.in.reboot_hold = HL_HOLD_ADMIN;
+    unsigned in_episode = 0;
+    while (w.now < T0 + 35 * MIN) {
+        sim_step(&w);
+        hl_status_t s = st_of(&w);
+        if (s.episode) {
+            in_episode++;
+            TEST_ASSERT_FALSE_MESSAGE(s.restart_possible, "no restart pending for a receiver that answers");
+        }
+    }
+    TEST_ASSERT_TRUE(in_episode > 30 * 60);
+    TEST_ASSERT_TRUE(count_rec(&w, HL_CODE_RECEIVER_RESET, HL_OUT_ABANDONED) >= 1);   /* the session cut it short */
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, st_of(&w).phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, st_of(&w).why);
+    TEST_ASSERT_TRUE(count_req(&w, 3) >= 2);   /* the retry passes ran */
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    TEST_ASSERT_EQUAL_INT(-1, find_rec(&w, HL_CODE_REBOOT_BLOCKED, HL_OUT_HELD, 0));
+
+    /* The same receiver, but nothing answers the reset and no byte comes:
+     * the byte rule's restart (held by the admin page here). Not pending
+     * before that, pending from then on. */
+    sim_init(&w);
+    w.in.answers = 40;
+    w.answers_during = 4;
+    w.in.reboot_hold = HL_HOLD_ADMIN;
+    bool early = false;
+    while (find_rec(&w, HL_CODE_REBOOT_BLOCKED, HL_OUT_HELD, 0) < 0 && w.now < T0 + 20 * MIN) {
+        sim_step(&w);
+        hl_status_t s = st_of(&w);
+        early = early || (s.episode && s.restart_possible && w.nrec > 0 &&
+                          find_rec(&w, HL_CODE_RECEIVER_RESET, HL_OUT_FAILED, 0) < 0);
+    }
+    TEST_ASSERT_FALSE_MESSAGE(early, "a restart said pending before the reset went unanswered");
+    TEST_ASSERT_TRUE(find_rec(&w, HL_CODE_REBOOT_BLOCKED, HL_OUT_HELD, 0) >= 0);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_SILENT, s.why);
+    TEST_ASSERT_TRUE(s.restart_possible);
+}

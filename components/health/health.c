@@ -937,7 +937,7 @@ static void tick(void)
     o.recovery_mode = (health_recovery_mode_t)mode;
     o.gnss_reboot_recheck = ls.reboot_recheck;
     hm_hold_view_t hv;
-    hm_hold_view(ls.episode, restarts, in->reboot_hold, hold_left, in->reboot_allowed, cap_wait, &hv);
+    hm_hold_view(ls.restart_possible, restarts, in->reboot_hold, hold_left, in->reboot_allowed, cap_wait, &hv);
     o.gnss_reboot_hold = hv.hold;
     o.gnss_reboot_hold_left_s = hv.hold_left_s;
     o.gnss_reboot_cap_wait_s = hv.cap_wait_s;

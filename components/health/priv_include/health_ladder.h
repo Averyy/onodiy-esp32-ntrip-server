@@ -146,6 +146,17 @@
  * is the likely cause, and the hint comes with the recovery, not after it.
  * The level stays RECOVERING then.
  *
+ * Restart pending (hl_status_t.restart_possible; what the status says of
+ * the restart hold and the reboot cap): an episode without RTCM, unless the
+ * receiver answers by this evidence: `why` is NO_RTCM, NO_SKY or HELD, or,
+ * where no reason is given (a suspension such as the station's own session,
+ * a stall not declared again yet), it answered after its last RTCM frame
+ * (never in NO_RECEIVER or while 6a runs). 6a needs a step whose window saw
+ * no byte at all, and a receiver that answers gets 7 with its reason after
+ * step 5 instead, so a restart comes only if it stops answering; the status
+ * says so once the evidence changes (a rescan that finds nothing, a RESET
+ * with no answer).
+ *
  * The receiver answers but sends no RTCM (amends the byte rule and the
  * retry pass; 6b is "bytes but no answers"):
  *  - after step 5, a receiver that answered (replies from the RESET's start:
@@ -420,6 +431,7 @@ typedef struct {
     uint8_t mode;                 /**< hl_mode_t the ladder last decided with */
     bool reboot_recheck;          /**< NO_RECEIVER: a blocked 6a waits to be looked at again */
     bool episode;                 /**< a stall or NO_RECEIVER episode is in progress (the ladder has not reset since) */
+    bool restart_possible;        /**< ... and an ESP32 restart (6a) can come of it now (see "Restart pending") */
     uint8_t why;                  /**< hl_why_t: why the receiver path is down (see above) */
     uint8_t doing;                /**< step in progress: 1-5, 6 = reboot, 0 = none (see above) */
     bool waiting;                 /**< ... the station ran it and waits for RTCM in its grace */
