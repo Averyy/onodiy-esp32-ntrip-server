@@ -760,7 +760,10 @@ The UI's Receiver settings show `autocfg` and `recovery` as one choice,
 never restart itself" (`true`, `no_reboot`), "Me (alerts only)" (`false`,
 `alerts_only`); any other pair shows as "Custom" with the nearest choice
 offered. The Status page and Diagnostics name the choice the same way. A
-save sends only the members that change. The Position card ("Save
+save sends only the members that change, one per request since they are
+stored one after the other: `recovery` first when `autocfg` goes off, else
+`autocfg` first, so a refusal halfway never leaves automatic recovery on
+for a receiver the station does not configure. The Position card ("Save
 position") and the Receiver profile card ("Save profile") each send the
 whole profile: their own fields over the profile as last read. Each button
 shows once its own card changed, so an edit in the other card stays on the

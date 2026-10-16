@@ -88,7 +88,16 @@ class El extends Node {
   focus() {}
   blur() {}
   scrollIntoView() {}
-  querySelector() { return null; }
+  /* A plain ".class" or "tag" finds the first such element inside; any other selector finds nothing. */
+  querySelector(sel) {
+    const cls = /^\.([\w-]+)$/.exec(sel), tag = /^([a-z]+)$/.exec(sel);
+    for (const e of this.walk()) {
+      if (e === this) continue;
+      if (cls && (' ' + e.className + ' ').indexOf(' ' + cls[1] + ' ') >= 0) return e;
+      if (tag && e.tagName === tag[1].toUpperCase()) return e;
+    }
+    return null;
+  }
   querySelectorAll() { return []; }
   closest() { return null; }
   contains(x) { for (const e of this.walk()) if (e === x) return true; return false; }
@@ -124,7 +133,7 @@ const ctx = {
 vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { casterEditor, openCasterWarning, casterDetails, casterSummary, casterChip, stationState, adminDashboard,\n' +
-  '  publicDashboard, noReceiverPanel, startWizard, setStatus: s => { S.status = s; }, setSession: s => { S.session = s; } };\n})()',
+  '  publicDashboard, noReceiverPanel, startWizard, manageCtl, setStatus: s => { S.status = s; }, setSession: s => { S.session = s; } };\n})()',
   ctx);
 
 /* The elements on screen: hidden ones and everything inside them left out. */
@@ -227,11 +236,38 @@ async function wizardDup() {
   return r;
 }
 
+/* Receiver management from (autocfg, recovery) to the choice `to`: the PUT bodies in the order sent; fail: the
+ * member whose request the station refuses (500). */
+async function manageSave(c) {
+  const settle = async () => {
+    for (let i = 0; i < 30; i++) await new Promise(r => setImmediate(r));
+  };
+  sent.length = 0;
+  routes = (m, p, body) => (c.fail && c.fail in body ? [500, { error: { code: 'internal', message: 'flash' } }] :
+    [202, { accepted: true, saved: true, apply: 'unchanged' }]);
+  const m = ui.manageCtl();
+  m.update({ autocfg: c.autocfg, recovery: c.recovery, first_apply_held: false });
+  const root = new El('div');
+  root.append(...m.nodes);
+  const all = [...root.walk()];
+  const radios = all.filter(e => e.tagName === 'INPUT' && e.attrs.name === 'manage');
+  for (const r of radios) r.checked = r.value === c.to;
+  radios.find(r => r.value === c.to).fire('change');
+  all.find(e => e.tagName === 'BUTTON' && e.textContent === 'Save').fire('click');
+  await settle();
+  routes = null;
+  return sent.filter(x => x.method === 'PUT').map(x => x.body);
+}
+
 const out = [];
 (async () => {
 for (const c of JSON.parse(casesJson)) {
   if (c.fn === 'wizard_dup') {
     out.push(await wizardDup());
+    continue;
+  }
+  if (c.fn === 'manage') {
+    out.push(await manageSave(c));
     continue;
   }
   if (c.fn === 'warning') {
@@ -606,3 +642,20 @@ def test_setup_onocoy_step_sends_the_duplicate_stream_answer():
     input event reaches the form) keeps the question with "Save anyway" enabled, and that sends the answer."""
     (r,) = run_editor([{"fn": "wizard_dup"}])
     assert r == {"asked": True, "kept": True, "enabled": True, "puts": [False, True]}, r
+
+
+def test_receiver_management_saves_its_two_settings_in_a_safe_order():
+    """The station stores automatic configuration and the recovery one after the other, so the choice sends one per
+    request: the recovery first when automatic configuration goes off, else automatic configuration first. A refusal
+    halfway never leaves automatic recovery on for a receiver the station does not configure."""
+    out = run_editor([{"fn": "manage", "autocfg": True, "recovery": "full", "to": "me"},
+                      {"fn": "manage", "autocfg": False, "recovery": "alerts_only", "to": "station"},
+                      {"fn": "manage", "autocfg": True, "recovery": "full", "to": "no_restart"},
+                      {"fn": "manage", "autocfg": True, "recovery": "full", "to": "me", "fail": "autocfg"},
+                      {"fn": "manage", "autocfg": False, "recovery": "alerts_only", "to": "station", "fail": "recovery"}])
+    assert out[0] == [{"recovery": "alerts_only"}, {"autocfg": False}]
+    assert out[1] == [{"autocfg": True}, {"recovery": "full"}]
+    assert out[2] == [{"recovery": "no_reboot"}]
+    # Refused halfway: the recovery is already off (to "me"), automatic configuration already on (to "station").
+    assert out[3] == [{"recovery": "alerts_only"}, {"autocfg": False}]
+    assert out[4] == [{"autocfg": True}, {"recovery": "full"}]

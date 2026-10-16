@@ -370,7 +370,14 @@ function manageCtl() {
     /* Automatic configuration on ends a held first configuration: the station configures the receiver at once. */
     if (body.autocfg && held && !(await dialog({ title: 'Configure the receiver now?', ok: 'Configure',
       body: h('p', null, 'The station configures the receiver with the profile. Corrections pause for a few seconds.') }))) return;
-    if (Object.keys(body).length && (await act(b, () => api('PUT', '/api/gnss/profile', body), out)) === undefined) return;
+    /* One setting a request, in the order that never leaves automatic recovery on for a receiver the station does not
+     * configure (the station stores them one after the other): recovery first when automatic configuration goes off,
+     * else automatic configuration first. A refusal halfway leaves a safe pair (Custom says which). */
+    const parts = ['autocfg', 'recovery'].filter(m => m in body).map(m => ({ [m]: body[m] }));
+    if (body.autocfg === false) parts.reverse();
+    for (const part of parts) {
+      if ((await act(b, () => api('PUT', '/api/gnss/profile', part), out)) === undefined) return;
+    }
     autocfg = MANAGE[k][0];
     recovery = MANAGE[k][1];
     stored = k;
