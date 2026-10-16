@@ -336,9 +336,10 @@ const J = {
   ladder: ['receiver', 'network', 'caster'],
   /* A recovery step's outcome after its name (0: started, said by the name alone) */
   outcome: ['', 'healthy again', 'failed', 'given up', 'skipped (your recovery choice)', 'postponed'],
-  gnssRung: [null, 'resyncing the data', 'reconnecting to the receiver', 'searching for the receiver', 'configuring the receiver again',
-    'restarting the receiver', 'restarted the station to look for the receiver', 'asked for a receiver power cycle',
-    'waiting for the next search', 'restart postponed'],
+  /* A receiver recovery step in the words the Status page uses while it runs (RECOVERY_DOING). */
+  gnssRung: [null, 'resyncing the receiver\'s data', 'reopening the link to the receiver', 'searching for the receiver',
+    're-sending the receiver\'s settings', 'restarting the receiver', 'restarted the station to look for the receiver',
+    'asked for a receiver power cycle', 'waiting for the next search', 'restart postponed'],
   /* Why a restart was postponed (ladder_step code 9, outcome 0: bits 16-23 of b; 0 = not recorded). */
   capWhy: ['', 'at most one an hour', 'at most 3 in 24 hours', 'another job holds restarts'],
   /* hold_mask bits of a postponed restart (ladder_step code 9, outcome 5). */

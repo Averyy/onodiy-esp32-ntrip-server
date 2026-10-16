@@ -26,11 +26,20 @@ const HERO_STATE_LINE = {
   flash_recovery: 'A receiver update was interrupted. Keep the station powered while it finishes.',
   no_receiver: 'Nothing arrives from the receiver.',
 };
-/* The receiver recovery's last step, in "The station is fixing it: ..." (health.last_step). */
-const HERO_STEP = {
-  resync: 'resyncing the data', link_restart: 'reconnecting to the receiver', rescan: 'searching for the receiver',
-  reconfigure: 'configuring the receiver again', receiver_reset: 'restarting the receiver', reboot: 'restarting the station',
+/* What the receiver recovery does now (health.step): [while it runs, once it ran and waits (health.step_phase)]. */
+const RECOVERY_DOING = {
+  resync: ['The station is resyncing the receiver\'s data.', 'The station resynced the receiver\'s data and waits for corrections.'],
+  link_restart: ['The station is reopening the link to the receiver.', 'The station reopened the link and waits for corrections.'],
+  rescan: ['The station is searching for the receiver.', 'The station found the receiver and waits for corrections.'],
+  reconfigure: ['The station is re-sending the receiver\'s settings.',
+    'The station re-sent the receiver\'s settings and waits for corrections.'],
+  receiver_reset: ['The station is restarting the receiver.', 'The station restarted the receiver and waits for corrections.'],
+  reboot: ['The station is restarting itself.', 'The station is restarting itself.'],
 };
+/* The recovery between two steps (health.step_phase none while health.level is recovering). */
+const AGAIN_SHORTLY = 'The station tries again shortly.';
+/* What to do when the receiver answers but sends no corrections (the hero's line; the alerts keep their fuller words). */
+const ANTENNA_CHECK = 'Check that the antenna is on the socket marked M and sees the open sky.';
 /* Health alerts that say why the receiver sends nothing (the recovery's own evidence). */
 const LADDER_REASONS = ['receiver_power', 'receiver_silent', 'no_satellites', 'no_rtcm'];
 /* Where an "Also:" line's Details button goes. */
@@ -107,6 +116,13 @@ function alertTone(a) {
     a.id === 'no_receiver' ? 'bad' : 'warn';
 }
 
+/** The receiver recovery's step in progress as a sentence (health.step, health.step_phase), or null when none runs. */
+function recoveryDoing(hl) {
+  const t = RECOVERY_DOING[hl.step];
+  if (!t || (hl.step_phase !== 'running' && hl.step_phase !== 'waiting')) return null;
+  return t[hl.step_phase === 'waiting' ? 1 : 0];
+}
+
 /**
  * Onocoy's quality minimums this board can miss (4 bands on one
  * constellation, GLONASS, message 1230 accepted), from the status, and only
@@ -143,18 +159,23 @@ function qualityLead(q, name) {
  * refresh keeps the focus), alertId (the alert the line says), notice (the
  * notice it covers), diagLead (the line on Diagnostics when the lead points
  * there; null: the lead), subject (the caster slot the line names), named (the
- * line names the casters down), plan (next search and restart, one short
- * line), trial (the Wi-Fi on trial), also (other alerts), facts (the caster
- * count unless the line names them; the recovery choice when not the
- * default), delivering, quality (rxQuality()), ono (the Onocoy slot while
- * it counts), onoStreaming (with corrections behind it)}.
+ * line names the casters down), doing (what the receiver recovery does
+ * now, when the line says something else), plan (doing, then the next
+ * search and restart: one short line), trial (the Wi-Fi on trial), also
+ * (other alerts), facts (the caster count unless the line names them; the
+ * recovery choice when not the default), delivering, quality (rxQuality()),
+ * ono (the Onocoy slot while it counts), onoStreaming (with corrections
+ * behind it)}.
  *
  * Order: safe mode; receiver update needs you; settings storage; updating
  * the receiver; receiver port closed (it explains a missing receiver); no
- * receiver; receiver stopped; no satellites; no corrections; Onocoy stopped;
- * maintenance; comparing signal groups; new Wi-Fi; receiver not configured,
- * looked for or configuring; Onocoy not set up; not or partly streaming;
- * too few bands or no GLONASS for Onocoy; streaming.
+ * receiver; receiver stopped (red: it does not answer); the recovery runs
+ * (amber: what it does now; once the receiver answered without sending
+ * corrections, no satellites or no corrections with the antenna check, and
+ * what it does in the plan line); no satellites; no corrections; Onocoy
+ * stopped; maintenance; comparing signal groups; new Wi-Fi; receiver not
+ * configured, looked for or configuring; Onocoy not set up; not or partly
+ * streaming; too few bands or no GLONASS for Onocoy; streaming.
  */
 function stationState(s, admin) {
   const rcv = s.receiver || {};
@@ -176,7 +197,7 @@ function stationState(s, admin) {
   const quality = rxQuality(rcv, delivering);
   const go = (label, href, primary) => ({ label: label, href: href, primary: !!primary });
   const pick = (key, head, tone, lead, more) => Object.assign({ key: key, head: head, tone: tone, lead: lead, actions: [],
-    alertId: null, notice: null, trial: null, subject: null, named: false, search: null, diagLead: null }, more || {});
+    alertId: null, notice: null, trial: null, subject: null, named: false, search: null, diagLead: null, doing: null }, more || {});
 
   const decide = () => {
     if (sm.active) {
@@ -222,16 +243,17 @@ function stationState(s, admin) {
     if (ladder && (ladder.id === 'receiver_power' || ladder.id === 'receiver_silent')) {
       return pick('rx_stopped', 'Receiver stopped sending data', 'bad', alertText(ladder)[1], { alertId: ladder.id });
     }
+    /* The receiver answers but sends no corrections: the antenna, whatever the recovery does (doing: its line, while it runs). */
+    const antenna = (tone, doing) => (ladder.id === 'no_satellites' ?
+      pick('no_satellites', 'Antenna sees no satellites', tone, ANTENNA_CHECK, { alertId: ladder.id, doing: doing }) :
+      pick('no_rtcm', 'Receiver sends no corrections', tone, 'The receiver answers. ' + ANTENNA_CHECK, { alertId: ladder.id, doing: doing }));
     if (state === 'recovering' || (state === 'streaming' && hl.level === 'recovering')) {
-      const step = admin ? HERO_STEP[hl.last_step] : null;
-      return pick('rx_stopped', 'Receiver stopped sending data', 'warn', 'The station is fixing it' + (step ? ': ' + step : '') + '.');
+      /* No step in progress: between two (a session of the station's own cut the last one short). */
+      const doing = admin ? recoveryDoing(hl) || (hl.step_phase === 'none' ? AGAIN_SHORTLY : null) : null;
+      if (ladder) return antenna('warn', doing || AGAIN_SHORTLY);
+      return pick('rx_stopped', 'Receiver stopped sending data', 'warn', doing || 'The station is fixing it.');
     }
-    if (ladder && ladder.id === 'no_satellites') {
-      return pick('no_satellites', 'Antenna sees no satellites', 'bad', alertText(ladder)[1], { alertId: ladder.id });
-    }
-    if (ladder) {
-      return pick('no_rtcm', 'Receiver sends no corrections', 'bad', alertText(ladder)[1], { alertId: ladder.id });
-    }
+    if (ladder) return antenna('bad', null);
     const stopped = admin ? on.find(c => c.state === 'stopped') : null;
     if (stopped) {
       return pick('stopped', casterName(stopped) + ' stopped', 'bad', capFirst(lbl(L.stop, stopped.stop_reason || 'none')) +
@@ -333,7 +355,9 @@ function stationState(s, admin) {
   if (admin && hl.recovery_mode && hl.recovery_mode !== 'full') r.facts.push(['If corrections stop', lbl(L.recovery, hl.recovery_mode)]);
   const plan = admin && ['rx_stopped', 'no_receiver', 'no_satellites', 'no_rtcm'].indexOf(r.key) >= 0 ?
     [r.search, restartPlanShort(hl)].filter(Boolean) : [];
-  r.plan = plan.length ? capFirst(plan.join(' · ')) : null;
+  const later = plan.length ? capFirst(plan.join(' · ')) : null;
+  /* What the recovery does now, when the line says something else, before the next search and restart. */
+  r.plan = r.doing ? r.doing + (later ? ' ' + later + '.' : '') : later;
   r.delivering = delivering;
   r.quality = quality;
   r.ono = ono;

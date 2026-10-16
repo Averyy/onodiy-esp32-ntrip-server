@@ -224,11 +224,23 @@ function healthNotice(s) {
 }
 
 /*
+ * The Health card's line under the state and the alerts: what the receiver
+ * recovery does now when the state's line does not say it (st.doing), then
+ * the restart plan while no corrections come (as on the Status page); null
+ * when there is neither.
+ */
+function healthPlanText(hl, st) {
+  const fixing = !st || !st.delivering;
+  return [st && st.doing, fixing && restartPlanText(hl)].filter(Boolean).join(' ') || null;
+}
+
+/*
  * The Health card from GET /api/health and the status s (its alerts are
  * the Status page's): the chip, the state with the Status page's button
- * (its notice is left out here) and the alerts (healthItems), the restart
- * plan while no corrections come, the rows. The page handles the data-act
- * buttons (Check again, End now, Leave safe mode).
+ * (its notice is left out here) and the alerts (healthItems), the line
+ * (healthPlanText), the rows (the last recovery step only while none is in
+ * progress: the state's line or the card's says that one). The page
+ * handles the data-act buttons (Check again, End now, Leave safe mode).
  */
 function healthCard(hl, s) {
   const port = hl.link || {};
@@ -236,9 +248,10 @@ function healthCard(hl, s) {
   const st = s ? stationState(s, true) : null;
   const hi = healthItems(alerts, st);
   const hc = healthChip(hl.level, hi.alerts, st);
-  /* The restart plan and the next attempt only while no corrections come (as on the Status page). */
+  /* The next attempt only while no corrections come (as on the Status page). */
   const fixing = !st || !st.delivering;
-  const plan = fixing && restartPlanText(hl);
+  const stepNow = hl.step_phase === 'running' || hl.step_phase === 'waiting';
+  const plan = healthPlanText(hl, st);
   return h('section', { class: 'card' },
     cardHead('Health', badge(hc[0], hc[1])),
     hi.state ? msg(st.tone, h('strong', null, st.head), st.lead ? h('div', { class: 'small' }, stateLead(s, st, st.diagLead)) : null,
@@ -250,7 +263,7 @@ function healthCard(hl, s) {
       /* The port's row only while the state above does not say it. */
       port.open === false && port.mode !== 'off' && !(hi.state && st.key === 'uart_closed') ?
         ['Receiver port', h('span', { class: 't-bad' }, 'Closed, reopening')] : null,
-      ['Last recovery step', lbl(L.step, hl.last_step)],
+      stepNow ? null : ['Last recovery step', lbl(L.step, hl.last_step)],
       ['Since the last RTCM', hl.rtcm_gap_ms === null || hl.rtcm_gap_ms === undefined ? 'never received' : fmt.ms(hl.rtcm_gap_ms)],
       fixing && hl.gnss_retry_in_s ? ['Next recovery attempt in', fmt.dur(hl.gnss_retry_in_s)] : null,
       hl.inhibited_by ? ['Restarts held back by', hl.inhibited_by] : null,
