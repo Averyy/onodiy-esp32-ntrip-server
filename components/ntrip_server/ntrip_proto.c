@@ -2280,9 +2280,27 @@ void ntrip_day_metrics(const ntrip_day_in_t *in, ntrip_day_out_t *out)
     }
 }
 
-uint32_t ntrip_lost_epochs(uint32_t connected_s, uint32_t epochs_sent)
+uint32_t ntrip_lost_epochs(uint32_t online_s, uint32_t epochs_sent)
 {
-    return connected_s > epochs_sent ? connected_s - epochs_sent : 0;
+    return online_s > epochs_sent ? online_s - epochs_sent : 0;
+}
+
+void ntrip_rate_clock_init(ntrip_rate_clock_t *c, uint32_t now_ms)
+{
+    c->on_ms = 0;
+    c->last_ms = now_ms;
+}
+
+void ntrip_rate_clock_tick(ntrip_rate_clock_t *c, uint32_t now_ms, const ntrip_rate_in_t *in)
+{
+    uint32_t dt = now_ms - c->last_ms;
+    c->last_ms = now_ms;
+    if (!in->enabled || !in->session_open || !in->streaming || !in->rtcm_ok) {
+        return;
+    }
+    /* A session accepted since the previous tick: the connect before it is not online. */
+    uint32_t since_accept = now_ms - in->session_start_ms;
+    c->on_ms += since_accept < dt ? since_accept : dt;
 }
 
 uint32_t ntrip_best_rate_ppm(uint32_t lost_epochs, uint32_t offline_s)

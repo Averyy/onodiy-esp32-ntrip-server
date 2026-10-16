@@ -277,8 +277,8 @@ typedef struct {
     uint16_t graced_uptime_permille; /**< protected slot: min(1, (online today + grant) / 86400), the share of the
                                      whole day covered so far */
     bool streak_ok;             /**< protected slot: today's offline time is within the day's budget */
-    uint16_t data_rate_permille;/**< protected slot: epochs sent / epochs expected while connected today in this
-                                     boot (estimate) */
+    uint16_t data_rate_permille;/**< protected slot: epochs sent / epochs expected while online today in this
+                                     boot (online as the ledger counts it; estimate) */
     bool data_rate_valid;       /**< ... and something was sent today (else the rate is unknown) */
     uint32_t budget_s;          /**< protected slot: offline seconds the day allows at that data rate (estimate) */
     uint32_t budget_left_s;     /**< protected slot: budget_s minus today's offline seconds, 0 once used up */

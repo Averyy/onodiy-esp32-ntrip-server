@@ -929,18 +929,18 @@ uint16_t ntrip_graced_so_far_permille(uint32_t unplanned_offline_s, uint32_t ela
  * Inputs of the protected slot's day figures. The day's online and offline
  * seconds and its lost epochs come from the availability ledger (kept across
  * restarts). The data rate shown is a ratio, taken from this boot's epochs
- * sent today over this boot's seconds connected today (both start again at
- * a restart); the budget and the streak use the best rate the day can still
- * reach instead (ntrip_best_rate_ppm), which one lost epoch early in a day
- * barely moves.
+ * sent today over this boot's seconds online today (ntrip_rate_clock_t; both
+ * start again at a restart); the budget and the streak use the best rate the
+ * day can still reach instead (ntrip_best_rate_ppm), which one lost epoch
+ * early in a day barely moves.
  */
 typedef struct {
     bool counted;                /**< the protected slot is enabled and set up (Onocoy: mountpoint, username, password) */
     uint32_t online_s;           /**< today, streaming (the ledger) */
     uint32_t offline_s;          /**< today, expected but not streaming, planned included (the ledger) */
-    uint32_t rate_online_s;      /**< this boot, today: seconds connected that epochs_sent_today covers */
+    uint32_t rate_online_s;      /**< this boot, today: seconds online (ntrip_rate_clock_t) that epochs_sent_today covers */
     uint32_t epochs_sent_today;  /**< this boot, today */
-    uint32_t lost_epochs;        /**< today, every boot: epochs it should have sent while connected but did not (the ledger) */
+    uint32_t lost_epochs;        /**< today, every boot: epochs it should have sent while online but did not (the ledger) */
     bool day_known;              /**< a trusted clock: today and the figures below are known */
     uint32_t unplanned_offline_s;/**< today's unplanned downtime (the availability ledger) */
     uint32_t elapsed_s;          /**< since 00:00 UTC or since the slot first became expected today */
@@ -952,7 +952,7 @@ typedef struct {
     bool so_far_valid;           /**< ... and the day is known: graced_so_far is known (else null) */
     uint16_t graced_uptime_permille;   /**< (online + grace) / day, capped at 1000 */
     uint16_t graced_so_far_permille;
-    uint16_t data_rate_permille;       /**< this boot: epochs sent / seconds connected (1000 assumed until something was sent) */
+    uint16_t data_rate_permille;       /**< this boot: epochs sent / seconds online (1000 assumed until something was sent) */
     uint32_t best_rate_ppm;            /**< the best data rate the day can still reach, parts per million */
     uint32_t budget_s;                 /**< offline seconds the day allows at that best rate (ntrip_offline_budget_ppm_s) */
     uint32_t budget_left_s;            /**< budget_s minus today's offline seconds, 0 once used up */
@@ -973,11 +973,47 @@ uint32_t ntrip_offline_budget_s(uint32_t data_rate_permille);
 uint32_t ntrip_offline_budget_ppm_s(uint32_t data_rate_ppm);
 
 /**
- * Epochs a session should have sent but did not: the seconds connected (one
- * epoch a second, the rate Onocoy asks for) minus the epochs sent, 0 when
- * the epochs keep up.
+ * Epochs a session should have sent but did not: the seconds online (one
+ * epoch a second, the rate Onocoy asks for; ntrip_rate_clock_t) minus the
+ * epochs sent, 0 when the epochs keep up.
  */
-uint32_t ntrip_lost_epochs(uint32_t connected_s, uint32_t epochs_sent);
+uint32_t ntrip_lost_epochs(uint32_t online_s, uint32_t epochs_sent);
+
+/**
+ * The slot as the data rate's time base sees it (ntrip_rate_clock_tick).
+ */
+typedef struct {
+    bool enabled;                /**< the slot is enabled and the caster client runs */
+    bool session_open;           /**< a session the caster accepted */
+    bool streaming;              /**< the state machine is in STREAMING (not paused for receiver work) */
+    bool rtcm_ok;                /**< fresh RTCM from the receiver, as the availability ledger has it */
+    uint32_t session_start_ms;   /**< when the caster accepted the session (ntrip_sm_t.session_start_ms) */
+} ntrip_rate_in_t;
+
+/**
+ * The data rate's time base (ntrip_lost_epochs, data_rate_permille): the
+ * time the availability ledger counts as online for the slot, and only that.
+ * A session that stays open through a receiver stall (silent until the stall
+ * limit) or through a pause for receiver work (the hub held) is offline in
+ * the ledger; its silent seconds counted as lost epochs too would charge them
+ * twice (ntrip_best_rate_ppm takes the offline seconds out of the day). The
+ * connect before the caster's OK (the TLS gate, DNS, TCP, TLS, the reply) is
+ * not online either, however long the call that made it blocked.
+ */
+typedef struct {
+    uint64_t on_ms;              /**< online time counted (the caller starts it again at a new day) */
+    uint32_t last_ms;            /**< the previous tick */
+} ntrip_rate_clock_t;
+
+/** Start counting at `now_ms` (nothing counted yet). */
+void ntrip_rate_clock_init(ntrip_rate_clock_t *c, uint32_t now_ms);
+
+/**
+ * Count the time since the previous tick when the slot is online now: a
+ * session the caster accepted, in STREAMING, enabled, with fresh RTCM. Of
+ * that time only what follows the session's accept counts.
+ */
+void ntrip_rate_clock_tick(ntrip_rate_clock_t *c, uint32_t now_ms, const ntrip_rate_in_t *in);
 
 /**
  * The best data rate a UTC day can still reach, in parts per million (rounded

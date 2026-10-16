@@ -45,7 +45,7 @@
  *   - per day also power-off time (gaps between the last-alive mark and a
  *     boot after a power cut) and UART overflow events;
  *   - today only: the epochs the protected slot should have sent while
- *     connected but did not (lost epochs, reported by the caster client as
+ *     online but did not (lost epochs, reported by the caster client as
  *     they grow), so the day's data rate survives restarts. A finished day
  *     does not keep them (the history blob has no room for them; an older
  *     build reads it into a buffer of exactly its size).
@@ -152,7 +152,7 @@ typedef struct {
     uint32_t power_off_ms;
     uint32_t rx_overflows;
     uint32_t up_ms[LC_SLOTS];           /**< streamed with fresh RTCM (online) */
-    uint32_t lost_epochs;               /**< today only (0 in the history): the protected slot's epochs lost while connected */
+    uint32_t lost_epochs;               /**< today only (0 in the history): the protected slot's epochs lost while online */
 } lc_day_t;
 
 /** What must survive a reset. */

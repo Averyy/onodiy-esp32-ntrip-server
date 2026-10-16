@@ -252,10 +252,9 @@ typedef struct {
     uint32_t low_heap_until_ms;
     bool low_heap_wait;
     int32_t day;
-    uint64_t on_ms;              /* this boot, today: connected (the data rate's time base; the day's figures are the ledger's) */
+    ntrip_rate_clock_t rate;     /* this boot, today: online as the ledger counts it (the data rate's time base; the day's figures are the ledger's) */
     uint32_t lost_reported;      /* this boot, today: the protected slot's lost epochs handed to the ledger */
     uint64_t dropped_epochs_base;
-    uint32_t last_acct_ms;
     uint32_t last_pub_ms;
     uint32_t max_lag_seen;
     bool ledger_known;
@@ -1184,13 +1183,11 @@ static void ledger_report(slot_t *s)
 
 static void account(slot_t *s, uint32_t now)
 {
-    uint32_t dt = now - s->last_acct_ms;
-    s->last_acct_ms = now;
     int32_t day = utc_day();
     if (day >= 0 && day != s->day) {
         if (s->day >= 0) {
             /* new UTC day; until the first trusted clock everything counts as today */
-            s->on_ms = 0;
+            s->rate.on_ms = 0;
             s->lost_reported = 0;
             s->st.epochs_sent_today = 0;
             s->st.bytes_sent_today = 0;
@@ -1199,9 +1196,17 @@ static void account(slot_t *s, uint32_t now)
         }
         s->day = day;
     }
-    if (s->cfg.enabled && s_running && s->open) {
-        s->on_ms += dt;
-    }
+    /* The data rate's time base: only what the ledger counts as online, a
+     * session past the caster's OK that streams fresh RTCM (not a session
+     * left open through a receiver stall or a pause, not the connect). */
+    ntrip_rate_in_t rin = {
+        .enabled = s->cfg.enabled && s_running,
+        .session_open = s->open,
+        .streaming = s->sm.state == NTRIP_SM_STREAMING,
+        .rtcm_ok = ledger_rtcm_ok(),
+        .session_start_ms = s->sm.session_start_ms,
+    };
+    ntrip_rate_clock_tick(&s->rate, now, &rin);
     /* Since when the protected slot counts today: from 00:00 UTC when it
      * counted already (or at this boot's first look: the ledger has the
      * downtime before it), else from the moment it was enabled and set up. */
@@ -1237,12 +1242,12 @@ static void publish(slot_t *s, uint32_t now, bool force)
     if (!s->open) {
         st->connected_since = 0;
     }
-    /* The protected slot's epochs lost while connected this boot (one a
-     * second expected), handed to the ledger as the count grows, so the day
-     * keeps them across restarts. Never taken back: a count that shrinks
-     * again (epochs that caught up) leaves what was reported. */
+    /* The protected slot's epochs lost while online this boot (one a second
+     * expected), handed to the ledger as the count grows, so the day keeps
+     * them across restarts. Never taken back: a count that shrinks again
+     * (epochs that caught up) leaves what was reported. */
     if (s->cfg.protected_slot) {
-        uint32_t lost = ntrip_lost_epochs((uint32_t)(s->on_ms / 1000u), st->epochs_sent_today);
+        uint32_t lost = ntrip_lost_epochs((uint32_t)(s->rate.on_ms / 1000u), st->epochs_sent_today);
         if (lost > s->lost_reported) {
             ledger_count_lost_epochs(lost - s->lost_reported);
             s->lost_reported = lost;
@@ -1284,7 +1289,7 @@ static void publish(slot_t *s, uint32_t now, bool force)
         .counted = have_ld && s->cfg.protected_slot && s->cfg.enabled && ntrip_server_onocoy_ready(&s->cfg),
         .online_s = st->today_online_s,
         .offline_s = st->today_offline_s,
-        .rate_online_s = (uint32_t)(s->on_ms / 1000u),
+        .rate_online_s = (uint32_t)(s->rate.on_ms / 1000u),
         .epochs_sent_today = st->epochs_sent_today,
         .lost_epochs = have_ld ? ld.lost_epochs : s->lost_reported,
     };
@@ -1976,7 +1981,7 @@ static void slot_task(void *arg)
     ntrip_sm_init(&s->sm, &sc, cred_hash_of(&s->cfg), now);
     s->prev_state = (uint8_t)s->sm.state;
     s->state_since_ms = now;
-    s->last_acct_ms = now;
+    ntrip_rate_clock_init(&s->rate, now);
     ntrip_hist_init(&s->hist);
     restore_backoff(s, now);
 

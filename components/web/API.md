@@ -1377,11 +1377,14 @@ other slots, and for the protected slot while it is disabled or not set up
 mislead. `graced_uptime_permille` is the share of the whole day covered so
 far (online today plus the 300 s grant, of 86400 s: what the day reaches
 if nothing more is sent); `data_rate_permille` = this start's epochs sent
-today over its seconds connected today (a ratio of this start only, shown
-as the current data rate); `budget_s` the offline seconds the day allows at
+today over its seconds online today (a ratio of this start only, shown
+as the current data rate; online as the availability ledger counts it:
+streaming with fresh RTCM from the receiver, from the caster's OK on, so
+a session left open through a receiver stall or a pause for receiver work
+is offline time, never lost epochs as well); `budget_s` the offline seconds the day allows at
 the best data rate it can still reach (473 at 100 %): 1 - lost / (86400 -
 `today_offline_s`), with lost the epochs the slot should have sent while
-connected (one a second) but did not, today, across restarts (the
+online (one a second) but did not, today, across restarts (the
 availability ledger keeps the count), so one epoch lost right after a
 start costs about nothing instead of the whole budget; `budget_left_s` =
 `budget_s` minus `today_offline_s`, 0 once used up; `graced_uptime_so_far_permille`
@@ -2115,7 +2118,7 @@ today, `budget_s` the day's offline allowance at the best data rate the
 day can still reach, `budget_left_s` what is left of it, and the other
 figures as in the caster status (section 10). The budget is information
 only. `today.lost_epochs` (only in `today`: a finished day does not keep
-it) the protected slot's epochs lost while connected, across restarts:
+it) the protected slot's epochs lost while online, across restarts:
 the losses that budget is figured from.
 
 In `protected`, `enabled` and `onocoy_ready` (the slot holds the console's

@@ -1572,12 +1572,18 @@ TEST_CASE("ntrip Onocoy day figures: the budget and the streak use the best rate
     TEST_ASSERT_EQUAL_UINT32(453, out.budget_left_s);
     TEST_ASSERT_TRUE(out.streak_ok);
 
-    /* The stall the screenshots showed: 26 epochs lost in 101 s connected, 26 s offline. */
-    in = (ntrip_day_in_t){ .counted = true, .online_s = 75, .offline_s = 26, .rate_online_s = 101,
-                           .epochs_sent_today = 75, .lost_epochs = 26 };
+    /* The stall the screenshots showed: 101 s connected, of them 26 s of a
+     * receiver stall with the session left open. The ledger counts those 26 s
+     * as offline, and the data rate's time base leaves them out too
+     * (ntrip_rate_clock_t): 75 s online, 75 epochs, nothing lost. Once they
+     * were 26 lost epochs as well, a rate of 742 and the budget charged twice. */
+    in = (ntrip_day_in_t){ .counted = true, .online_s = 75, .offline_s = 26, .rate_online_s = 75,
+                           .epochs_sent_today = 75, .lost_epochs = 0 };
     ntrip_day_metrics(&in, &out);
-    TEST_ASSERT_EQUAL_UINT16(742, out.data_rate_permille);
-    TEST_ASSERT_EQUAL_UINT32(471, out.budget_s);
+    TEST_ASSERT_EQUAL_UINT16(1000, out.data_rate_permille);
+    TEST_ASSERT_EQUAL_UINT32(1000000, out.best_rate_ppm);
+    TEST_ASSERT_EQUAL_UINT32(473, out.budget_s);
+    TEST_ASSERT_EQUAL_UINT32(473 - 26, out.budget_left_s);
     TEST_ASSERT_TRUE(out.streak_ok);
 
     /* Losses from earlier boots count (the ledger keeps them): 86 lost cost about 8 s. */
@@ -1602,6 +1608,90 @@ TEST_CASE("ntrip Onocoy day figures: the budget and the streak use the best rate
     TEST_ASSERT_EQUAL_UINT32(976851, out.best_rate_ppm);
     TEST_ASSERT_EQUAL_UINT32(0, out.budget_s);
     TEST_ASSERT_FALSE(out.streak_ok);
+}
+
+/* The slot task's passes: one tick every `step_ms` over [*t, *t + span_ms) in state `in`. */
+static void rate_run(ntrip_rate_clock_t *c, uint32_t *t, uint32_t span_ms, uint32_t step_ms, const ntrip_rate_in_t *in)
+{
+    for (uint32_t end = *t + span_ms; *t != end;) {
+        *t += step_ms;
+        ntrip_rate_clock_tick(c, *t, in);
+    }
+}
+
+TEST_CASE("ntrip data rate time base: a session left open through a stall or a pause is not online", "[ntrip]")
+{
+    ntrip_rate_clock_t c;
+    uint32_t t = 1000;
+    ntrip_rate_clock_init(&c, t);
+    ntrip_rate_in_t on = { .enabled = true, .session_open = true, .streaming = true, .rtcm_ok = true,
+                           .session_start_ms = t };
+
+    /* 75 s streaming with fresh RTCM: all of it online. */
+    rate_run(&c, &t, 75000, 100, &on);
+    TEST_ASSERT_EQUAL_UINT64(75000, c.on_ms);
+
+    /* The receiver stalls for 26 s; the session stays open (up to the stall
+     * limit) in STREAMING. The ledger counts this as offline once the station
+     * reports the RTCM stale, and so does the rate: no lost epochs for it. */
+    ntrip_rate_in_t stall = on;
+    stall.rtcm_ok = false;
+    rate_run(&c, &t, 26000, 100, &stall);
+    TEST_ASSERT_EQUAL_UINT64(75000, c.on_ms);
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_lost_epochs((uint32_t)(c.on_ms / 1000u), 75));
+
+    /* A pause for receiver work with the hub held: the session stays open,
+     * the state machine says PAUSED (the ledger: down, planned). */
+    ntrip_rate_in_t paused = on;
+    paused.streaming = false;
+    rate_run(&c, &t, 40000, 100, &paused);
+    TEST_ASSERT_EQUAL_UINT64(75000, c.on_ms);
+
+    /* Disabled, or the caster client stopped: not online either. */
+    ntrip_rate_in_t off = on;
+    off.enabled = false;
+    rate_run(&c, &t, 5000, 100, &off);
+    TEST_ASSERT_EQUAL_UINT64(75000, c.on_ms);
+
+    /* Streaming fresh RTCM again: counted again, at the pass that sees it. */
+    rate_run(&c, &t, 10000, 100, &on);
+    TEST_ASSERT_EQUAL_UINT64(85000, c.on_ms);
+    /* Epochs that stop while it is online are lost epochs: 3 s without any. */
+    TEST_ASSERT_EQUAL_UINT32(3, ntrip_lost_epochs((uint32_t)(c.on_ms / 1000u), 82));
+}
+
+TEST_CASE("ntrip data rate time base: the connect before the caster's OK is not online", "[ntrip]")
+{
+    ntrip_rate_clock_t c;
+    uint32_t t = 50000;
+    ntrip_rate_clock_init(&c, t);
+    ntrip_rate_in_t idle = { .enabled = true };
+    rate_run(&c, &t, 2000, 200, &idle);
+    TEST_ASSERT_EQUAL_UINT64(0, c.on_ms);
+
+    /* One pass blocks 6.1 s in the connect (the TLS gate, DNS, TCP, TLS, the
+     * reply); the caster accepts at 6 s and the pass ends 100 ms later, in
+     * STREAMING: only those 100 ms count, not the whole pass. */
+    uint32_t accept = t + 6000;
+    ntrip_rate_in_t on = { .enabled = true, .session_open = true, .streaming = true, .rtcm_ok = true,
+                           .session_start_ms = accept };
+    t += 6100;
+    ntrip_rate_clock_tick(&c, t, &on);
+    TEST_ASSERT_EQUAL_UINT64(100, c.on_ms);
+    rate_run(&c, &t, 30000, 100, &on);
+    TEST_ASSERT_EQUAL_UINT64(30100, c.on_ms);
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_lost_epochs((uint32_t)(c.on_ms / 1000u), 30));
+
+    /* A session open for long, across the wrap of the millisecond clock: every pass counts whole. */
+    ntrip_rate_clock_init(&c, 0xFFFFFF00u);
+    on.session_start_ms = 0xF0000000u;
+    ntrip_rate_clock_tick(&c, 0x00000100u, &on);
+    TEST_ASSERT_EQUAL_UINT64(0x200, c.on_ms);
+    /* A session accepted after the previous pass, just before the wrap. */
+    ntrip_rate_clock_init(&c, 0xFFFFF000u);
+    on.session_start_ms = 0xFFFFFF00u;
+    ntrip_rate_clock_tick(&c, 0x00000100u, &on);
+    TEST_ASSERT_EQUAL_UINT64(0x200, c.on_ms);
 }
 
 TEST_CASE("ntrip Onocoy day figures: graced uptime so far", "[ntrip]")

@@ -274,6 +274,17 @@ void ledger_set_rtcm_ok(bool ok)
     portEXIT_CRITICAL(&s_lock);
 }
 
+bool ledger_rtcm_ok(void)
+{
+    if (!s_ready) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_lock);
+    bool ok = s_core.rtcm_ok;
+    portEXIT_CRITICAL(&s_lock);
+    return ok;
+}
+
 void ledger_set_utc(int64_t unix_s, ledger_clock_t source)
 {
     if (!s_ready) {
