@@ -1247,6 +1247,12 @@ def test_starts_in_a_word_and_the_receiver_at_power_on_in_a_few():
     assert all(len(w) <= 14 for w in out[:8])
 
 
+def test_the_receiver_at_power_on_event_in_a_few_words():
+    """History's 'Receiver at power-on' row: what happened, without how the station judged it."""
+    out = run_ui([("journalDetail", {"kind": "rx_boot", "a": a, "b": b}) for a, b in ((1, 1), (2, 3), (0, 0))])
+    assert out == ["Kept running", "Restarted too: the power was cut", "Not known"]
+
+
 def test_log_lines_and_event_times_fit_one_line():
     out = run_ui([("logParts", "I (122407) gnss_link: host baud 460800 -> 115200"), ("logParts", "E (3723000) ntrip: x"),
                   ("logParts", "ets Jun  8 2016 00:22:57"), ("timeRange", ["9:40 AM", "9:42 AM"]),

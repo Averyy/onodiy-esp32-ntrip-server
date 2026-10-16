@@ -874,12 +874,8 @@ function journalDetail(e) {
       return fmt.num(b) + (J.loss[a] ? ' ' + J.loss[a][b === 1 ? 1 : 2] : '');
     case 'rx_maintenance':
       return a ? 'Started for ' + fmt.dur(b) : 'Ended after ' + fmt.dur(b);
-    case 'rx_boot': {
-      const how = ['', ' (its restart banner)', ' (its own time since its restart)', ' (data at once)'][b] || '';
-      if (a === 1) return 'The receiver kept running: only the ESP32 was reset' + how;
-      if (a === 2) return 'The receiver restarted too: the power was cut' + how;
-      return 'Not known whether the receiver kept running';
-    }
+    case 'rx_boot':
+      return a === 1 ? 'Kept running' : a === 2 ? 'Restarted too: the power was cut' : 'Not known';
     case 'sg_test': {
       const ev = a & 0xff, grp = ((a >>> 8) & 0xff) + ' ' + ((a >>> 16) & 0xff);
       if (ev === 1) return 'Comparison started with ' + grp + ', ' + fmt.dur(b) + ' per group';
