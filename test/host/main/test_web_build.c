@@ -1101,6 +1101,55 @@ TEST_CASE("wifi: mDNS name, the AP's countdown and why credentials were reverted
     cJSON_Delete(root);
 }
 
+TEST_CASE("wifi: the access point's BSSID and the transmit power while associated", "[web_build]")
+{
+    static network_status_t n;
+    memset(&n, 0, sizeof(n));
+    n.sta_configured = true;
+    n.ap_close_in_s = UINT32_MAX;
+    n.associated = true;
+    n.rssi = -78;
+    n.channel = 11;
+    n.bssid_known = true;
+    const uint8_t bssid[6] = { 0x0a, 0x1b, 0x2e, 0x3d, 0x4f, 0x5c };
+    memcpy(n.bssid, bssid, sizeof(bssid));
+    n.tx_power_known = true;
+    n.tx_power_qdbm = 78;   /* 19.5 dBm */
+    cJSON *root = build_wifi(&n);
+    TEST_ASSERT_EQUAL(-78, at(root, "rssi")->valueint);
+    TEST_ASSERT_EQUAL(11, at(root, "channel")->valueint);
+    TEST_ASSERT_EQUAL_STRING("0A:1B:2E:3D:4F:5C", at(root, "bssid")->valuestring);
+    TEST_ASSERT_EQUAL_DOUBLE(19.5, at(root, "tx_power_dbm")->valuedouble);
+    cJSON_Delete(root);
+
+    n.tx_power_qdbm = 34;   /* quarter steps: 8.5 dBm */
+    root = build_wifi(&n);
+    TEST_ASSERT_EQUAL_DOUBLE(8.5, at(root, "tx_power_dbm")->valuedouble);
+    cJSON_Delete(root);
+    n.tx_power_qdbm = 81;
+    root = build_wifi(&n);
+    TEST_ASSERT_EQUAL_DOUBLE(20.25, at(root, "tx_power_dbm")->valuedouble);
+    cJSON_Delete(root);
+
+    /* Not read yet in this association: unknown. */
+    n.bssid_known = false;
+    n.tx_power_known = false;
+    root = build_wifi(&n);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "bssid")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "tx_power_dbm")));
+    cJSON_Delete(root);
+
+    /* Not associated: null like the RSSI, whatever was read before. */
+    n.bssid_known = true;
+    n.tx_power_known = true;
+    n.associated = false;
+    root = build_wifi(&n);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "rssi")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "bssid")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "tx_power_dbm")));
+    cJSON_Delete(root);
+}
+
 TEST_CASE("status: network carries the mDNS name and the AP's countdown, admin form only", "[web_build]")
 {
     fixture();
@@ -1128,8 +1177,17 @@ TEST_CASE("status: network carries the mDNS name and the AP's countdown, admin f
     root = build_status(false);
     TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "network"), "ap_close_in_s")));
     cJSON_Delete(root);
+    /* The access point and the transmit power are for GET /api/wifi only (admin), never in the public form. */
+    s_snap.net.associated = true;
+    s_snap.net.bssid_known = true;
+    s_snap.net.tx_power_known = true;
+    s_snap.net.tx_power_qdbm = 80;
     root = build_status(true);
     TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(root, "network"));
+    char *text = cJSON_PrintUnformatted(root);
+    TEST_ASSERT_NULL(strstr(text, "bssid"));
+    TEST_ASSERT_NULL(strstr(text, "tx_power"));
+    cJSON_free(text);
     cJSON_Delete(root);
 }
 

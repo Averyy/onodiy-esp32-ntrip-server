@@ -1567,6 +1567,7 @@ removes it. The slot reconnects. `200` with the slot entry. Errors:
   "mdns_host": "onocoydiy",
   "configured": true, "credentials_unreadable": false, "ssid": "Home",
   "online": true, "associated": true, "ip": "192.168.1.50", "rssi": -60, "channel": 6,
+  "bssid": "AA:BB:CC:DD:EE:FF", "tx_power_dbm": 19.5,
   "time_synced": true, "upstream": "ok", "probe_age_s": 120,
   "reconnects": 1, "connect_failures": 0, "offline_s": 0, "retry_in_s": 0,
   "last_disconnect_reason": 8, "fallback_dns": false, "assoc_no_ip_s": 0,
@@ -1580,6 +1581,13 @@ removes it. The slot reconnects. `200` with the slot entry. Errors:
 }
 ```
 
+`bssid` is the access point the station is associated with (one of
+several that may serve the SSID: a mesh or a repeater), `tx_power_dbm`
+the station's Wi-Fi transmit power limit now (`esp_wifi_get_max_tx_power`,
+read in steps of 0.25 dBm); both refreshed with `rssi` every 5 s, and
+like `rssi` and `channel` `null` while not associated (and in the QEMU
+build, whose emulated link has no access point). Diagnostics for a weak
+link; only in this admin route, never in the public status.
 `last_disconnect_reason` is the numeric `wifi_err_reason_t`. `scan.results`
 are the cached ones (no radio activity; at most 24); `age_s` is `null`
 before the first scan. `mdns_host`, `assoc_no_ip_s`, `cred_*`,

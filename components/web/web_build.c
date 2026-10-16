@@ -1696,6 +1696,17 @@ void web_build_wifi(wj_t *w, const web_wifi_snap_t *s)
         wj_null(w, "rssi");
         wj_null(w, "channel");
     }
+    char bssid[18] = "";
+    if (n->associated && n->bssid_known) {
+        snprintf(bssid, sizeof(bssid), "%02X:%02X:%02X:%02X:%02X:%02X", n->bssid[0], n->bssid[1], n->bssid[2],
+                 n->bssid[3], n->bssid[4], n->bssid[5]);
+    }
+    wj_str_or_null(w, "bssid", bssid);
+    if (n->associated && n->tx_power_known) {
+        wj_double(w, "tx_power_dbm", (double)n->tx_power_qdbm / 4.0, 2);
+    } else {
+        wj_null(w, "tx_power_dbm");
+    }
     wj_bool(w, "time_synced", n->time_synced);
     wj_str(w, "upstream", web_probe_name(n->probe));
     wj_u32_or_null(w, "probe_age_s", n->probe_age_s);

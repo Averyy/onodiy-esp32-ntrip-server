@@ -254,6 +254,10 @@ typedef struct {
     char ip[16];
     int8_t rssi;
     uint8_t channel;
+    bool bssid_known;              /**< bssid holds the access point of this association */
+    uint8_t bssid[6];              /**< the access point the station is associated with (several may serve one SSID) */
+    bool tx_power_known;           /**< tx_power_qdbm was read during this association */
+    int8_t tx_power_qdbm;          /**< the station's Wi-Fi transmit power limit now (esp_wifi_get_max_tx_power), 0.25 dBm units */
     uint32_t reconnects;           /**< station links re-established after a drop, since boot */
     uint32_t connect_failures;     /**< connect attempts that ended without a link, since boot */
     uint32_t offline_s;            /**< seconds offline in the current outage, 0 if online */
