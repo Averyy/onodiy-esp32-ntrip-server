@@ -20,7 +20,8 @@
  * records queued before the clear are dropped with the rest, then it erases
  * the other sectors one per lock, so a reader or the writer waits for one
  * sector erase at most. A clear that cannot open its sector clears nothing:
- * the queue stays too. It blocks its caller for every erase.
+ * the queue stays too. It blocks its caller for every erase (the web server
+ * runs it on its worker task).
  */
 #include <string.h>
 

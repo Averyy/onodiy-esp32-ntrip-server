@@ -1012,9 +1012,20 @@ function eventCard() {
       body: [h('p', null, 'Every recorded event is deleted. The start history, the last 30 days and the logs are kept.'),
         h('p', { class: 'muted' }, 'The power-loss alert forgets earlier power cuts.')] });
     if (!ok) return;
-    const r = await act(wipe, () => api('DELETE', '/api/journal'), err);
-    if (r === undefined) return;
-    toast('Event journal cleared.', 'ok');
+    err.hidden = true;
+    let done = 'Event journal cleared.', tone = 'ok';
+    try {
+      /* Every sector is erased: seconds on a slow flash. */
+      await busy(wipe, () => api('DELETE', '/api/journal', undefined, { timeout: 60000 }));
+    } catch (e) {
+      /* 500: ESP_FAIL cleared nothing; ESP_ERR_NOT_FINISHED cleared, but a sector not erased returns at a restart. */
+      const m = e instanceof ApiError && e.status === 500 ? e.message : '';
+      if (m === 'ESP_FAIL') return say(err, 'Nothing was cleared: the journal flash could not be written.');
+      if (m !== 'ESP_ERR_NOT_FINISHED') return showErr(e, err);
+      done = 'Event journal cleared, but a flash error may bring some events back after a restart.';
+      tone = 'warn';
+    }
+    toast(done, tone);
     shown = EV_PAGE;
     open.clear();
     act(null, start, err);

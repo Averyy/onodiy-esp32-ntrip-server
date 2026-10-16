@@ -2122,20 +2122,11 @@ static esp_err_t h_journal(web_req_t *r)
     return web_resp_end(&resp);
 }
 
-/* Clear the journal: what reads it (the connection history, the power-lost alert) starts over with it. */
+/* Clear the journal: what reads it (the connection history, the power-lost
+ * alert) starts over with it. The erases take seconds: on the worker. */
 static esp_err_t h_journal_delete(web_req_t *r)
 {
-    esp_err_t err = diag_journal_clear();
-    if (err == ESP_ERR_NOT_FOUND) {
-        return web_send_err(r->req, WEB_ERR_NOT_FOUND);
-    }
-    if (err == ESP_ERR_INVALID_STATE) {
-        return web_send_err(r->req, WEB_ERR_BUSY);
-    }
-    if (err != ESP_OK) {
-        return web_send_internal(r->req, err);
-    }
-    return ok(r->req);
+    return web_clear_journal(r);
 }
 
 /*

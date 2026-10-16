@@ -13,7 +13,8 @@ the page gets), submits the form and returns the body of the PUT it sends
 where. Other cases build a caster card's parts (the duplicate-stream
 warning, the connection details), the Status page and the no-receiver
 panel, and run the setup's Onocoy step against scripted answers (events
-bubble up through the parents there). Skipped when Node.js is not
+bubble up through the parents there) and Diagnostics' "Clear journal"
+against the station's answers to it. Skipped when Node.js is not
 installed.
 """
 
@@ -105,6 +106,7 @@ class El extends Node {
 }
 
 const sent = [];
+const timers = [];   /* the delays asked of setTimeout (never run) */
 /* routes(method, path, body) -> [status, json]: the station's answers for a case that needs them (else every
  * request succeeds with an empty caster). ids: the page's elements by id, the same one every time. */
 let routes = null;
@@ -112,15 +114,17 @@ const ids = {};
 const storage = { getItem: () => null, setItem: noop, removeItem: noop };
 const ctx = {
   Node,
-  document: { addEventListener: noop, getElementById: id => ids[id] || (ids[id] = new El('div')), createElement: t => new El(t),
+  document: { addEventListener: noop, removeEventListener: noop,
+              getElementById: id => ids[id] || (ids[id] = new El('div')), createElement: t => new El(t),
               createElementNS: (ns, t) => new El(t), createTextNode: t => new Text(t), querySelector: () => new El('div'),
               querySelectorAll: () => [], documentElement: new El('html'), body: new El('body'), hidden: false,
               visibilityState: 'visible' },
-  window: { addEventListener: noop, matchMedia: () => ({ matches: false, addEventListener: noop }), confirm: () => true,
+  window: { addEventListener: noop, removeEventListener: noop,
+            matchMedia: () => ({ matches: false, addEventListener: noop }), confirm: () => true,
             scrollTo: noop },
   addEventListener: noop, location: { pathname: '/', hash: '', reload: noop }, navigator: {},
   localStorage: storage, sessionStorage: storage,
-  setTimeout: noop, clearTimeout: noop, setInterval: noop, clearInterval: noop,
+  setTimeout: (fn, ms) => { timers.push(ms); return 0; }, clearTimeout: noop, setInterval: noop, clearInterval: noop,
   AbortController: globalThis.AbortController, TextEncoder: globalThis.TextEncoder, crypto: globalThis.crypto,
   console,
   fetch: async (p, init) => {
@@ -133,7 +137,8 @@ const ctx = {
 vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { casterEditor, openCasterWarning, casterDetails, casterSummary, casterChip, stationState, adminDashboard,\n' +
-  '  publicDashboard, noReceiverPanel, startWizard, manageCtl, setStatus: s => { S.status = s; }, setSession: s => { S.session = s; } };\n})()',
+  '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard,\n' +
+  '  setStatus: s => { S.status = s; }, setSession: s => { S.session = s; } };\n})()',
   ctx);
 
 /* The elements on screen: hidden ones and everything inside them left out. */
@@ -259,9 +264,52 @@ async function manageSave(c) {
   return sent.filter(x => x.method === 'PUT').map(x => x.body);
 }
 
+/* Diagnostics' event card with two records: "Clear journal…", confirmed, answered with c.answer ([status, body]).
+ * What it then shows: the toast (text, tone), the card's error line, whether it read the journal again, and
+ * the time the DELETE may take before the page gives up on it. */
+async function journalClear(c) {
+  const settle = async () => {
+    for (let i = 0; i < 40; i++) await new Promise(r => setImmediate(r));
+  };
+  const recs = [1, 2].map(n => ({ seq: n, kind: 'boot', a: 0, b: 0, uptime_s: n, unix: null }));
+  routes = (m, p) => {
+    if (p === '/api/health') return [200, { journal: { available: true, oldest_seq: 1, newest_seq: 2 } }];
+    if (p.startsWith('/api/journal') && m === 'GET') return [200, { entries: recs, cursor: 2, more: false }];
+    if (p === '/api/journal' && m === 'DELETE') return c.answer;
+    return [200, {}];
+  };
+  sent.length = 0;
+  ids.toasts = new El('div');
+  ids.modal = new El('div');
+  const card = ui.eventCard();
+  await settle();
+  const wipe = [...card.el.walk()].find(e => e.tagName === 'BUTTON' && e.textContent === 'Clear journal…');
+  const r = { shown: !!wipe && !wipe.hidden };
+  wipe.fire('click');
+  await settle();
+  const form = [...ids.modal.walk()].find(e => e.tagName === 'FORM');
+  const before = sent.length;
+  timers.length = 0;
+  form.fire('submit');
+  await settle();
+  const after = sent.slice(before);
+  r.deletes = after.filter(x => x.method === 'DELETE' && x.path === '/api/journal').length;
+  r.timeout = Math.max(0, ...timers);
+  r.reread = after.some(x => x.method === 'GET' && x.path === '/api/health');
+  r.toasts = ids.toasts.kids.map(t => [t.textContent, t.className]);
+  const err = [...card.el.walk()].find(e => e.attrs.role === 'alert' && e.className.indexOf('msg') === 0);
+  r.error = err && !err.hidden ? err.textContent : null;
+  routes = null;
+  return r;
+}
+
 const out = [];
 (async () => {
 for (const c of JSON.parse(casesJson)) {
+  if (c.fn === 'journal_clear') {
+    out.push(await journalClear(c));
+    continue;
+  }
   if (c.fn === 'wizard_dup') {
     out.push(await wizardDup());
     continue;
@@ -659,3 +707,32 @@ def test_receiver_management_saves_its_two_settings_in_a_safe_order():
     # Refused halfway: the recovery is already off (to "me"), automatic configuration already on (to "station").
     assert out[3] == [{"recovery": "alerts_only"}, {"autocfg": False}]
     assert out[4] == [{"autocfg": True}, {"recovery": "full"}]
+
+
+def journal_clear(status: int, body: dict) -> dict:
+    return run_editor([{"fn": "journal_clear", "answer": [status, body]}])[0]
+
+
+def internal(message: str) -> dict:
+    return {"error": {"code": "internal", "message": message, "field": None, "retry_in_s": None, "by": None}}
+
+
+def test_clear_journal_waits_for_the_erases_and_says_what_a_flash_error_left():
+    # Cleared: the toast, the list read again; the request may take a minute (every sector is erased).
+    r = journal_clear(200, {"ok": True})
+    assert r["shown"] and r["deletes"] == 1 and r["timeout"] == 60000
+    assert r["toasts"] == [["Event journal cleared.", "toast ok"]] and r["reread"] and r["error"] is None
+    # The clear could not start: nothing was cleared, the list stays as it is.
+    r = journal_clear(500, internal("ESP_FAIL"))
+    assert r["toasts"] == [] and not r["reread"]
+    assert r["error"] == "Nothing was cleared: the journal flash could not be written."
+    # Cleared, but a sector could not be erased: its events may come back at the next start.
+    r = journal_clear(500, internal("ESP_ERR_NOT_FINISHED"))
+    assert r["toasts"] == [["Event journal cleared, but a flash error may bring some events back after a restart.",
+                            "toast warn"]]
+    assert r["reread"] and r["error"] is None
+    # Another clear runs, or an upload holds the station's worker: the usual busy line, nothing read again.
+    busy = {"error": {"code": "busy", "message": "busy", "field": None, "retry_in_s": None, "by": None}}
+    r = journal_clear(409, busy)
+    assert r["toasts"] == [] and not r["reread"]
+    assert r["error"] == "The station is busy with another job. Try again in a moment."
