@@ -137,10 +137,12 @@ function qualityLead(q, name) {
 /**
  * The station's state from a status (admin false: the public form, states
  * only): {key, head, tone ('ok', 'info', 'warn', 'bad'), lead (one sentence:
- * the most important thing and what to do), actions (one; two in safe mode:
+ * the most important thing and what to do), actions (one; two in safe mode
+ * and while settings cannot be saved:
  * {label, href, primary} links or {act, label} data-act buttons, so a
  * refresh keeps the focus), alertId (the alert the line says), notice (the
- * notice it covers), subject (the caster slot the line names), named (the
+ * notice it covers), diagLead (the line on Diagnostics when the lead points
+ * there; null: the lead), subject (the caster slot the line names), named (the
  * line names the casters down), plan (next search and restart, one short
  * line), trial (the Wi-Fi on trial), also (other alerts), facts (the caster
  * count unless the line names them; the recovery choice when not the
@@ -174,7 +176,7 @@ function stationState(s, admin) {
   const quality = rxQuality(rcv, delivering);
   const go = (label, href, primary) => ({ label: label, href: href, primary: !!primary });
   const pick = (key, head, tone, lead, more) => Object.assign({ key: key, head: head, tone: tone, lead: lead, actions: [],
-    alertId: null, notice: null, trial: null, subject: null, named: false, search: null }, more || {});
+    alertId: null, notice: null, trial: null, subject: null, named: false, search: null, diagLead: null }, more || {});
 
   const decide = () => {
     if (sm.active) {
@@ -197,7 +199,9 @@ function stationState(s, admin) {
       if ((s.device && s.device.settings_available === false) || find('settings_degraded')) {
         return pick('settings', 'Settings cannot be saved', 'bad', 'The station runs, but changes are not saved this boot. ' +
           'Restart it; if that does not help, see Diagnostics.',
-        { actions: [go('Diagnostics', '#/diag')], alertId: find('settings_degraded') ? 'settings_degraded' : null, notice: 'settings' });
+        { actions: [go('Restart', '#/settings/restart'), go('Diagnostics', '#/diag')],
+          alertId: find('settings_degraded') ? 'settings_degraded' : null, notice: 'settings',
+          diagLead: 'The station runs, but changes are not saved this boot. Restart it.' });
       }
     }
     if (state === 'flashing' || state === 'flash_recovery' || (admin && rcv.journal === 'running')) {

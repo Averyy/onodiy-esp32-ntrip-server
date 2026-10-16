@@ -346,11 +346,12 @@ function healthView(c) {
     none: v.some(e => e.tagName === 'P' && e.textContent === 'No alerts.') };
 }
 
-/* The Receiver page's Signals card for c.sig (GET /api/gnss/signals) while corrections come (c.live): its headline, the
+/* The Receiver page's Signals card for c.sig (GET /api/gnss/signals) while corrections come (c.live), with c.master the
+ * main antenna's signal group the receiver runs (GET /api/gnss; null while unknown): its headline, the
  * hints (tone, text), the words only assistive technology reads, and whether the band table shows. */
 function signalsView(c) {
   const el = new El('div');
-  el.append(...ui.signalsHead(c.sig, c.live).filter(Boolean), ui.bandTable(c.sig.systems));
+  el.append(...ui.signalsHead(c.sig, c.live, c.master === undefined ? null : c.master).filter(Boolean), ui.bandTable(c.sig.systems));
   const v = [...visible(el)];
   const big = v.find(e => e.className === 'big');
   const checks = v.filter(e => e.tagName === 'LI' && e.parent && (e.parent.className || '').indexOf('checks') === 0);
@@ -379,6 +380,13 @@ for (const c of JSON.parse(casesJson)) {
     const pairs = [];
     for (let i = 0; i + 1 < dl.kids.length; i += 2) pairs.push([dl.kids[i].textContent, dl.kids[i + 1].textContent]);
     out.push(pairs);
+    continue;
+  }
+  if (c.fn === 'wifi_row') {
+    /* Chip and Wi-Fi's Wi-Fi value as its parts: text as it is, an element as [its class, its text]. */
+    const dl = [...ui.chipCard(c.sys, c.status, c.wifi, c.net).walk()].find(e => e.tagName === 'DL');
+    const i = dl.kids.findIndex(k => k.textContent === 'Wi-Fi');
+    out.push(dl.kids[i + 1].kids.map(k => (k instanceof Text ? k.data : [k.className, k.textContent])));
     continue;
   }
   if (c.fn === 'kv') {
@@ -418,6 +426,13 @@ for (const c of JSON.parse(casesJson)) {
     const after = build();
     routes = null;
     out.push({ before: before, during: during, after: after, puts: sent.filter(x => x.method === 'PUT').map(x => x.body) });
+    continue;
+  }
+  if (c.fn === 'card_lines') {
+    /* An Onocoy card's lines under its address for a caster status c.st (TLS on): each line's text, the boxes too. */
+    const cfg = Object.assign({ slot: 0 }, c.cfg);
+    const parts = ui.casterSummary(cfg, c.st, { port: 2101 }).filter(Boolean).slice(1);
+    out.push(parts.filter(p => (p.className || '').indexOf('metrics') < 0).map(p => p.textContent));
     continue;
   }
   if (c.fn === 'wizard_dup') {
@@ -767,7 +782,8 @@ def test_status_page_says_each_fact_once():
                      [{"fn": "dashboard", "status": public, "admin": False}])
     assert out[0]["line"] == "Nothing arrives from the receiver. Check its power and the COM1 cable."
     assert out[0]["plan"] == "Next search in 23\u00a0s \u00b7 station restart in 27\u00a0min at the latest"
-    assert out[0]["cards"]["Receiver"]["rows"] == [["Position", "Surveying, paused"]]
+    # No receiver found: no Receiver card (the top card says it; a position would be a stale fact).
+    assert "Receiver" not in out[0]["cards"] and "Onocoy today" in out[0]["cards"]
     assert out[1]["head"] == "Receiver stopped sending data"
     assert out[1]["cards"]["Receiver"]["rows"] == [["Position", "Surveying, paused"]]
     assert [r[0] for r in out[2]["cards"]["Receiver"]["rows"]] == ["Bands", "GLONASS", "Position"]
@@ -835,10 +851,11 @@ def test_clear_journal_waits_for_the_erases_and_says_what_a_flash_error_left():
     r = journal_clear(200, {"ok": True})
     assert r["shown"] and r["deletes"] == 1 and r["timeout"] == 60000
     assert r["toasts"] == [["Event journal cleared.", "toast ok"]] and r["reread"] and r["error"] is None
-    # The clear could not start: nothing was cleared, the list stays as it is.
+    # The clear could not start: not cleared (a full journal may lose its oldest sector, as when it moves on), the
+    # list stays as it is.
     r = journal_clear(500, internal("ESP_FAIL"))
     assert r["toasts"] == [] and not r["reread"]
-    assert r["error"] == "Nothing was cleared: the journal flash could not be written."
+    assert r["error"] == "Not cleared: the journal flash could not be written."
     # Cleared, but a sector could not be erased: its events may come back at the next start.
     r = journal_clear(500, internal("ESP_ERR_NOT_FINISHED"))
     assert r["toasts"] == [["Event journal cleared, but a flash error may bring some events back after a restart.",
@@ -941,6 +958,54 @@ def test_health_card_takes_the_worse_of_the_alerts_and_the_status_page():
     assert busy["buttons"] == [["End now", "end-maint"]]
 
 
+def test_health_card_says_the_state_beside_an_alert_of_its_colour():
+    """The Status page's state goes above the alerts while it is at least as bad as each of them. A stall (amber)
+    beside the profile alert (amber): both, as the Status page says them. Safe mode: the state's line with when it
+    tries again and its two buttons, its own alert not again. Settings storage: Restart, and no pointer to
+    Diagnostics on Diagnostics. A Wi-Fi trial: the network and the time left, as the Status page says."""
+    drift = {"id": "profile_drift", "source": "health"}
+    stall = st_status(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "link_restart"},
+                      alerts=[drift])
+    safe = st_status(safe_mode={"active": True, "crashes": 3, "retry_in_s": 2690}, receiver={"state": "idle"},
+                     casters=[st_caster(0, "Onocoy", "disabled")], alerts=[{"id": "safe_mode", "source": "health"}])
+    settings = st_status(device={"hostname": "onocoydiy", "settings_available": False},
+                         alerts=[{"id": "settings_degraded", "source": "health"}])
+    trial = st_status(network={"online": True, "cred_trial": True, "cred_trial_left_s": 80, "pending_ssid": "Cabin"})
+    out = run_editor([{"fn": "health", "hl": health_hl(level="recovering", last_step="link_restart"), "status": stall},
+                      {"fn": "health", "hl": health_hl(level="failed"), "status": safe},
+                      {"fn": "health", "hl": health_hl(level="failed"), "status": settings},
+                      {"fn": "health", "hl": health_hl(), "status": trial}])
+    stall_, safe_, settings_, trial_ = out
+    assert stall_["chip"][1] == "badge warn"
+    assert [m[:2] for m in stall_["msgs"]] == [["msg warn", "Receiver stopped sending data"],
+                                              ["msg warn", "Output differs from the profile"]], stall_["msgs"]
+    assert safe_["chip"][1] == "badge bad"
+    assert safe_["msgs"] == [["msg bad", "Safe mode", "The receiver and casters are off after 3 crashes. The station tries "
+                              "normal operation again in 45\u00a0min."]], safe_["msgs"]
+    assert safe_["buttons"] == [["Updates", "#/settings/updates"], ["Leave safe mode", "leave-safe"]]
+    assert settings_["msgs"] == [["msg bad", "Settings cannot be saved",
+                                  "The station runs, but changes are not saved this boot. Restart it."]], settings_["msgs"]
+    assert settings_["buttons"] == [["Restart", "#/settings/restart"]]
+    assert trial_["msgs"] == [["msg info", "Trying new Wi-Fi", "Trying Cabin: 1\u00a0min 20\u00a0s left. If it gets no address "
+                               "there, the station goes back to the previous network by itself."]], trial_["msgs"]
+
+
+def test_onocoy_card_says_a_tls_failure_once():
+    """TLS to Onocoy failing again and again: the box with the count and the plain port says it, not a line above it
+    as well (the last failure, or the station's hint that says the same). Fewer failures: the line alone."""
+    cfg = stored("servers.onocoy.com", "fast", name="Onocoy", tls=True, port=2121, mountpoint="MP0TEST1", username="u")
+    st = {"state": "backoff", "reason": "tls", "failures_by_class": {"tls": 12}, "state_age_s": 30, "next_retry_s": 20}
+    box = "TLS to Onocoy failed 12 times. Onocoy documents uploads on the plain port only.Use plain port 2101"
+    out = run_editor([{"fn": "card_lines", "cfg": cfg, "st": st},
+                      {"fn": "card_lines", "cfg": cfg, "st": {**st, "hint": "TLS keeps failing; plain port 2101 is an option"}},
+                      {"fn": "card_lines", "cfg": cfg, "st": {**st, "reason": "timeout"}},
+                      {"fn": "card_lines", "cfg": cfg, "st": {**st, "failures_by_class": {"tls": 3}}}])
+    assert out[0] == [box] and out[1] == [box]
+    # Another cause last time: that line stays.
+    assert out[2] == ["Timed out", box]
+    assert out[3] == ["TLS failed"]
+
+
 def test_chip_card_names_the_access_point_and_the_transmit_power():
     """Chip and Wi-Fi: the network and signal in one row; the access point with its channel and the transmit power
     in one row each, only while known and online (QEMU's link has neither)."""
@@ -954,7 +1019,11 @@ def test_chip_card_names_the_access_point_and_the_transmit_power():
                                    {"fn": "chip", "sys": sys, "status": off, "wifi": wifi, "net": {}}])
     rows = dict(full)
     assert [r[0] for r in full] == ["Chip", "ESP-IDF", "Wi-Fi", "Access point", "Transmit power", "MAC address"]
-    assert rows["Access point"] == "AA:BB:CC:DD:EE:FF \u00b7 channel 11" and rows["Transmit power"] == "19.5\u00a0dBm"
+    # A wrap between the parts starts the second line with the dot ("· channel 11"); "channel 11" stays whole.
+    assert rows["Access point"] == "AA:BB:CC:DD:EE:FF \u00b7\u00a0channel\u00a011" and rows["Transmit power"] == "19.5\u00a0dBm"
+    # The Wi-Fi row breaks only before the dot, which stays with the signal's bars ("Home" / "· Good (-60 dBm)").
+    (parts,) = run_editor([{"fn": "wifi_row", "sys": sys, "status": status, "wifi": wifi, "net": {}}])
+    assert parts == ["Home", " ", ["nowrap", "\u00b7\u00a0 Good (-60 dBm)"]]
     assert "channel" not in rows["Wi-Fi"]
     assert [r[0] for r in bare] == [r[0] for r in gone] == ["Chip", "ESP-IDF", "Wi-Fi", "MAC address"]
 
@@ -975,8 +1044,9 @@ def test_signals_card_says_the_bands_once():
     Onocoy needs."""
     three = {**SIG, "best_sys": "gps", "best_bands": 3,
              "systems": [{**x, "bands": x["bands"][:3]} for x in SIG["systems"]]}
-    good, few, idle = run_editor([{"fn": "signals", "live": True, "sig": SIG}, {"fn": "signals", "live": True, "sig": three},
-                                  {"fn": "signals", "live": False, "sig": SIG}])
+    good, few, idle = run_editor([{"fn": "signals", "live": True, "sig": SIG, "master": 7},
+                                  {"fn": "signals", "live": True, "sig": three, "master": 7},
+                                  {"fn": "signals", "live": False, "sig": SIG, "master": 7}])
     assert good["big"] == "Galileo \u00b7 4 bands" and good["table"] and good["lines"] == ["checks lines"]
     assert good["checks"] == [["ok", "\u2713Good: 40 satellites tracked"], ["ok", "\u2713Good: Strong signals (42\u00a0dB\u2011Hz)"]], good
     assert not any("band" in c[1] or "Galileo" in c[1] for c in good["checks"])
@@ -985,6 +1055,10 @@ def test_signals_card_says_the_bands_once():
     assert few["checks"][-1] == ["warn", "!Check: Onocoy needs 4 bands: signal group 3 6 adds Galileo E6"], few
     # No corrections from the receiver: no verdicts, the headline and the table only.
     assert idle["checks"] == [] and idle["big"] == "Galileo \u00b7 4 bands" and idle["table"]
+    # Group 3 6 applied (the Receiver card above says so) and still no Galileo E6: the antenna, not that group again.
+    (applied,) = run_editor([{"fn": "signals", "live": True, "sig": three, "master": 3}])
+    assert applied["checks"][-1] == ["warn", "!Check: Onocoy needs 4 bands: Galileo E6 is not tracked, check the antenna covers L6"]
+    assert not any("3 6" in c[1] for c in applied["checks"])
 
 
 def test_long_values_wrap_at_their_separators():

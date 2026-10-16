@@ -453,6 +453,7 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
         wj_bool(w, "identity_confirmed", st->identity_confirmed);
         wj_bool(w, "profile_applied", st->profile_applied);
         wj_bool(w, "position_locked", st->position_locked);
+        wj_bool(w, "position_known", st->position.source != UM98X_POS_NONE);
         wj_bool(w, "surveying", st->surveying);
         wj_uint(w, "survey_window_left_s", st->survey_window_left_s);
         wj_u32_or_null(w, "rtcm_age_ms", s->rtcm_age_ms);

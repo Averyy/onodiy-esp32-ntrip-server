@@ -116,9 +116,11 @@ function signalsCard(sig) {
  * The Signals card's hints from GET /api/gnss/signals, one line each (the
  * antenna check's, C/N0: band means weighted by satellites), plus E6 lost,
  * no GLONASS, 1230 refused. The bands only when short of 4: the headline
- * says the best constellation and its bands.
+ * says the best constellation and its bands. master: the main antenna's
+ * signal group the receiver runs (GET /api/gnss), null while unknown; with
+ * Galileo short of E6 it says whether 3 6 would add it or runs already.
  */
-function signalChecks(sig) {
+function signalChecks(sig, master) {
   const systems = sig.systems || [];
   let n = 0, sum = 0, w = 0;
   const sys = systems.map(s => {
@@ -137,8 +139,10 @@ function signalChecks(sig) {
   if (r.waiting) return r;
   const gal = systems.find(s => s.sys === 'galileo');
   const bands = r.items.find(i => i[4] === 'bands');
-  if (bands[0] !== 'ok' && !sig.e6_lost && gal && (gal.bands || []).indexOf('l6') < 0) {
-    bands[3] = 'Onocoy needs 4 bands: signal group 3 6 adds Galileo E6';
+  const known = master !== null && master !== undefined;
+  if (bands[0] !== 'ok' && known && !sig.e6_lost && gal && (gal.bands || []).indexOf('l6') < 0) {
+    bands[3] = master === 3 ? 'Onocoy needs 4 bands: Galileo E6 is not tracked, check the antenna covers L6' :
+      'Onocoy needs 4 bands: signal group 3 6 adds Galileo E6';
   }
   r.items = r.items.filter(i => i !== bands || i[0] !== 'ok');
   const add = (tone, line) => r.items.push([tone, null, null, line, 'more']);
@@ -157,9 +161,9 @@ function signalsHeadline(sig) {
   return sig.best_sys ? lbl(L.sys, sig.best_sys) + ' · ' + sig.best_bands + ' bands' : 'No signals yet';
 }
 
-/* The card's head: the headline and, while corrections come (live), the hints in one line each. */
-function signalsHead(sig, live) {
-  const checks = live && sig.epoch_age_ms < 5000 ? signalChecks(sig) : null;
+/* The card's head: the headline and, while corrections come (live), the hints in one line each (master: signalChecks). */
+function signalsHead(sig, live, master) {
+  const checks = live && sig.epoch_age_ms < 5000 ? signalChecks(sig, master) : null;
   return [h('div', { class: 'big' }, signalsHeadline(sig)), checks && !checks.waiting ? receptionList(checks, true) : null];
 }
 
@@ -205,9 +209,11 @@ function signalsSection(el) {
     if (collapsed) return;
     const systems = sig.systems || [];
     const live = delivering();
-    patch(head, signalsHead(sig, live));
-    patch(bands, systems.length ? [bandTable(systems), h('p', { class: 'muted small foot' }, BANDS_FOOT)] : h('p', { class: 'muted' },
-      sig.epoch_age_ms === null || sig.epoch_age_ms === undefined ? 'No observations yet.' : 'No observations in the last 10 seconds.'));
+    /* The group the receiver runs, else the profile's (the hint on Galileo E6 depends on it). */
+    const sg = g && (g.rx_signal_group ? g.rx_signal_group.master : (g.profile || {}).signal_group_master);
+    patch(head, signalsHead(sig, live, sg === undefined ? null : sg));
+    /* No observations: the headline says so ("No signals for 1 min"), the table goes. */
+    patch(bands, systems.length ? [bandTable(systems), h('p', { class: 'muted small foot' }, BANDS_FOOT)] : null);
     if (interacting(details)) return;
     patch(body, kv([
       ['Last epoch', sig.epoch_age_ms === null || sig.epoch_age_ms === undefined ? 'Never' : fmt.ms(sig.epoch_age_ms) + ' ago'],

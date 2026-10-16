@@ -48,8 +48,9 @@ const ctx = {
 };
 vm.createContext(ctx);
 /* refusalText: what the UI says for an error answer {status, error: {code, ...}} (errText on an ApiError). */
+/* healthCardShown: Diagnostics' Health card is on its page (the notices' cases unless one says otherwise). */
 const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
-  '\nreturn { restartPlanText, restartPlanShort, onocoyNow: a => onocoyNow(a[0], a[1]), onocoyElsewhereText, connRow, journalDetail, presetInfo: () => ({ PRESETS, PRESET_INFO }),\n' +
+  '\nhealthCardShown = true;\nreturn { restartPlanText, restartPlanShort, onocoyNow: a => onocoyNow(a[0], a[1]), onocoyElsewhereText, connRow, journalDetail, presetInfo: () => ({ PRESETS, PRESET_INFO }),\n' +
   '  journalItems: a => { S.status = a[3] || null; return journalItems(a[0], a[1], a[2]); }, evFilter: () => EV_FILTER,\n' +
   '  healthChip: a => healthChip(a[0], a[1], a[2]), sinceStart: hl => sinceStart(hl), logParts: l => logParts(l),\n' +
   '  timeRange: a => timeRange(a[0], a[1]), diagTabs: () => DIAG_TABS.map(t => t[1]), dayParts: a => dayParts(a[0], a[1]),\n' +
@@ -66,6 +67,12 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '    return d && { verdict: d.verdict, tone: d.tone, why: d.why, left: d.left, used: d.used, share: d.share, hero: t.key }; },\n' +
   '  checks: d => receptionChecks(d),\n' +
   '  notices: a => noticeItems(a[0], a[1]).map(i => [i.key, i.title]),\n' +
+  '  noticesNoCard: a => { healthCardShown = false; const r = noticeItems(a[0], a[1]).map(i => i.key); healthCardShown = true;\n' +
+  '    return r; },\n' +
+  '  pageKey: a => { shell.current = { name: a[0], arg: a[1], view: {} }; const k = pageKey(); shell.current = null; return k; },\n' +
+  '  healthItems: a => { const st = stationState(a, true), r = healthItems(a.alerts || [], st);\n' +
+  '    return { state: r.state ? st.key : null, alerts: r.alerts.map(x => x.id), notice: healthNotice(a) }; },\n' +
+  '  checkFailure: u => checkFailure(u), apRows: a => apRows(a[0], a[1]),\n' +
   '  noticeLines: a => noticeItems(a[0], a[1]).map(i => [i.key, i.tone, i.urgent, i.title + (i.text ? \'. \' + i.text : \'\'),\n' +
   '    Array.isArray(i.actions) ? i.actions.length : i.actions ? 1 : 0]),\n' +
   '  fold: a => { const f = foldNotices(noticeItems(a[0], a[1]), a[2]); return [f.shown.map(i => i.key), f.more]; },\n' +
@@ -76,7 +83,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  sgtBlock: g => sgtBlock(g), sgtLine: t => sgtLine(t), profileChip: g => profileChip(g),\n' +
   '  sgtNotice: st => { const n = sgTestNotice(st); return n && n.slice(0, 3); },\n' +
   '  rxChip: s => receiverChip(s), posLine: a => positionLine(a[0], a[1]), statusPos: a => positionText(a[0], a[1]),\n' +
-  '  headline: sig => signalsHeadline(sig), sigChecks: sig => signalChecks(sig), msgCheck: a => msgCheck(a[0], a[1], a[2]),\n' +
+  '  headline: sig => signalsHeadline(sig), sigChecks: a => signalChecks(a[0], a[1]), msgCheck: a => msgCheck(a[0], a[1], a[2]),\n' +
   '  manage: () => MANAGE, manageKey: a => manageKey(a[0], a[1]), manageCustom: a => manageCustom(a[0], a[1]),\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
@@ -730,7 +737,8 @@ def test_status_page_leaves_out_the_notice_the_top_card_says():
     assert keys[1] == ["maintenance", "update"]
     assert keys[2] == [] and keys[3] == ["onocoy_stopped:0"]
     assert out[3][0][1] == "Onocoy stopped: duplicate stream"
-    assert keys[4] == [] and keys[5] == ["settings"] and keys[6] == []
+    # Diagnostics' Health card says it too (above its alert, with Restart): no notice there either.
+    assert keys[4] == [] and keys[5] == [] and keys[6] == []
     assert out[0][0][1] == "Update available"
     assert keys[7] == [] and keys[8] == ["wifi"]
     (t,) = heroes(trial)
@@ -823,11 +831,17 @@ def test_survey_pauses_without_data_on_both_pages():
     out = run_ui([("posLine", [surveying, True]), ("posLine", [surveying, False]), ("posLine", [locked, False]),
                   ("posLine", [typed, True]), ("posLine", [{"position": {"source": "none"}}, True]),
                   ("statusPos", [{"surveying": True, "survey_window_left_s": 660}, True]),
-                  ("statusPos", [{"surveying": True, "survey_window_left_s": 660}, False])])
+                  ("statusPos", [{"surveying": True, "survey_window_left_s": 660}, False]),
+                  ("statusPos", [{"surveying": False, "position_known": False}, True]),
+                  ("statusPos", [{"surveying": False, "position_known": True}, True]),
+                  ("statusPos", [{"surveying": False}, True])])
     assert out[0] == "Surveying, about 11\u00a0min left. Then lock it."
     assert out[1] == "Surveying, paused while no corrections arrive."
     assert out[2].startswith("Locked.") and out[3].startswith("Fixed (typed in).") and out[4] == "No position yet."
     assert out[5] == "Surveying, 11\u00a0min left" and out[6] == "Surveying, paused"
+    # After a survey that found nothing the Status page says what the Receiver page says; "Not locked" only for a
+    # position the station has (or from a firmware that does not say).
+    assert out[7] == "No position yet" and out[8] == "Not locked" and out[9] == "Not locked"
 
 
 SIG = {"best_sys": "galileo", "best_bands": 4, "e6_lost": False, "epoch_age_ms": 420, "rtcm1230_supported": True,
@@ -850,11 +864,16 @@ def test_signals_card_headline_and_hints():
     lost = {**SIG, "e6_lost": True}
     no_glo = {**SIG, "systems": [s for s in SIG["systems"] if s["sys"] != "glonass"]}
     refused = {**SIG, "rtcm1230_supported": False}
-    good, bad3, e6, glo, r1230 = run_ui([("sigChecks", x) for x in (SIG, no_e6, lost, no_glo, refused)])
+    good, bad3, e6, glo, r1230 = run_ui([("sigChecks", [x, 7]) for x in (SIG, no_e6, lost, no_glo, refused)])
     line = lambda r: [[i[0], i[3]] for i in r["items"]]
     # One line each; the 4 bands are the headline's, not a hint as well.
     assert line(good) == [["ok", "32 satellites tracked"], ["ok", "Strong signals (42\u00a0dB\u2011Hz)"]] and good["ok"] is True
     assert line(bad3)[2] == ["warn", "Onocoy needs 4 bands: signal group 3 6 adds Galileo E6"] and bad3["ok"] is False
+    # Galileo short of E6 with 3 6 already applied: not that group again, the antenna. The group not read yet: the
+    # plain line.
+    applied, unknown = run_ui([("sigChecks", [no_e6, 3]), ("sigChecks", [no_e6, None])])
+    assert line(applied)[2] == ["warn", "Onocoy needs 4 bands: Galileo E6 is not tracked, check the antenna covers L6"]
+    assert line(unknown)[2] == ["warn", "Onocoy needs 4 bands: change the signal group in Receiver settings"]
     assert line(e6)[-1] == ["bad", "Galileo E6 lost: it was tracked before with this signal group"] and e6["ok"] is False
     assert line(glo)[-1] == ["warn", "No GLONASS: Onocoy's quality score needs it"]
     assert line(r1230)[-1] == ["warn", "Message 1230 refused: GLONASS does not count for Onocoy"]
@@ -945,6 +964,13 @@ def test_system_wifi_chip_and_recovery_line():
     assert out[:4] == [["Not set up", "plain"], ["Online", "ok"], ["Connecting", "warn"], ["Offline", "bad"]]
     # One line under the admin password: what to do, no paragraph (the login page has the steps in full).
     assert out[4] == "Forgot it? Hold BOOT for 10 s, then join the station's own Wi-Fi and open http://192.168.4.1/."
+    # Diagnostics' access point row: a line that wraps between the two parts starts with the dot
+    # ("B4:FB:E4:2C:91:07" / "· channel 11"), never ends with it; "channel 11" stays whole. (The Wi-Fi row: the casters
+    # harness, which has a DOM.)
+    net = {"online": True, "ssid": "Home", "rssi": -61}
+    ap = {"ssid": "Home", "online": True, "rssi": -61, "bssid": "B4:FB:E4:2C:91:07", "channel": 11, "tx_power_dbm": 19.5}
+    (rows,) = run_ui([("apRows", [net, ap])])
+    assert rows[0] == ["Access point", "B4:FB:E4:2C:91:07 \u00b7\u00a0channel\u00a011"]
 
 
 def test_own_wifi_chip_warns_only_while_it_is_open_to_anyone():
@@ -958,6 +984,16 @@ def test_own_wifi_chip_warns_only_while_it_is_open_to_anyone():
 def test_update_check_age_in_whole_units():
     out = run_ui([("ago", s) for s in (30, 600, 5400, 7 * 3600, 3 * 86400)])
     assert out == ["just now", "10\u00a0min ago", "2\u00a0h ago", "7\u00a0h ago", "3\u00a0days ago"]
+
+
+def test_update_check_failure_says_the_status_once_and_no_error_code():
+    """A failed check in one sentence with the HTTP status once; the firmware's error code stays in the log."""
+    u = {"last_check_result": "no_release", "release_repo": "Averyy/onocoydiy-esp-um982", "last_http_status": 404,
+         "last_result": {"job": "check", "message": "ESP_ERR_INVALID_RESPONSE"}, "next_check_in_s": 3600}
+    (f,) = run_ui([("checkFailure", u)])
+    assert f == {"tone": "warn", "text": "No release found at github.com/Averyy/onocoydiy-esp-um982 (HTTP 404). The repository "
+                 "may be private or have no releases yet."}
+    assert "ESP_ERR" not in json.dumps(f) and json.dumps(f).count("404") == 1
 
 
 def test_receiver_maintenance_starts_in_one_place():
@@ -1089,6 +1125,26 @@ def test_a_notice_hides_on_the_page_whose_card_says_it():
                      alerts=[{"id": "heap_fragmented", "source": "health"}])
     diag = [[k for k, _ in o] for o in run_ui([("notices", [x, p]) for x in (stopped, uart) for p in ("diag", "diag/history")])]
     assert diag == [[], ["onocoy_stopped:0"], [], ["uart_closed"]]
+    # Safe mode with its alert: the Health card says the state (the same red as the alert), so its notice goes there.
+    # A warn state beside a warn alert: the card says the state, nothing to cover.
+    safe_alert = status(safe_mode={"active": True, "crashes": 3, "retry_in_s": 2690}, receiver={"state": "idle"},
+                        casters=[caster(0, "Onocoy", "disabled")], alerts=[{"id": "safe_mode", "source": "health"}])
+    (k,) = run_ui([("notices", [safe_alert, "diag"])])
+    assert [x for x, _ in k] == []
+    # Until the Health card is on the page (loading, or its first request failed) the notice stays.
+    no_card = run_ui([("noticesNoCard", [x, "diag"]) for x in (stopped, safe_alert, BUSY)])
+    assert no_card == [["onocoy_stopped:0"], ["safe_mode"], ["settings", "onocoy_stopped:0", "wifi", "maintenance", "held",
+                                                             "signal_test", "update"]]
+
+
+def test_the_page_a_notice_is_on():
+    """An address the page itself opens is that page for the notices: #/diag/foo the Overview, #/receiver/live the
+    Receiver page; History, Logs and Receiver settings are pages of their own."""
+    out = run_ui([("pageKey", a) for a in (["diag", ""], ["diag", "foo"], ["diag", "history"], ["diag", "logs/x"],
+                                           ["receiver", ""], ["receiver", "live"], ["receiver", "live/start"],
+                                           ["receiver", "settings"], ["casters", "onocoy"], ["", ""])])
+    assert out == ["diag", "diag", "diag/history", "diag/logs", "receiver", "receiver", "receiver", "receiver/settings",
+                   "casters", ""]
 
 
 
@@ -1113,6 +1169,33 @@ def test_health_chip_never_disagrees_with_the_status_page():
                    ["Healthy", "ok"], ["Needs attention", "info"], ["Recovering", "warn"], ["Busy", "info"],
                    ["Needs attention", "bad"], ["Needs attention", "warn"], ["Needs attention", "bad"],
                    ["Needs attention", "warn"], ["Needs attention", "warn"]]
+
+
+def test_health_card_says_the_state_at_least_as_bad_as_every_alert():
+    """The Status page's state goes above the alerts while it is at least as bad as each of them: a stall (amber)
+    beside the profile alert (amber) keeps both; safe mode (red) takes its own alert's place and covers its notice;
+    Partly streaming beside a fragmented heap keeps both. No receiver found leaves it to its alert (Diagnostics'
+    fuller words, with the search)."""
+    drift = {"id": "profile_drift", "source": "health"}
+    heap = {"id": "heap_fragmented", "source": "health"}
+    stall = status(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "link_restart"},
+                   alerts=[drift])
+    safe = status(safe_mode={"active": True, "crashes": 3, "retry_in_s": 2690}, receiver={"state": "idle"},
+                  casters=[caster(0, "Onocoy", "disabled")], alerts=[{"id": "safe_mode", "source": "health"}])
+    partly = status(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "auth_failed", reason="auth")],
+                    alerts=[heap])
+    no_rx = status(receiver={"state": "no_receiver", "rtcm_age_ms": None}, alerts=[NO_RX],
+                   casters=[caster(0, "Onocoy", "wait_data")])
+    out = run_ui([("healthItems", x) for x in (stall, safe, partly, no_rx, status(alerts=[heap]))])
+    assert out[0] == {"state": "rx_stopped", "alerts": ["profile_drift"], "notice": None}
+    assert out[1] == {"state": "safe_mode", "alerts": [], "notice": "safe_mode"}
+    assert out[2] == {"state": "casters_down", "alerts": ["heap_fragmented"], "notice": None}
+    assert out[3] == {"state": None, "alerts": ["no_receiver"], "notice": None}
+    # Streaming (green) never goes above an alert.
+    assert out[4] == {"state": None, "alerts": ["heap_fragmented"], "notice": None}
+    # Safe mode and its retry are the Health card's line: This start says neither again.
+    js = (UI_JS / "80-diag.js").read_text()
+    assert "'Normal retry in'" not in js and "badge('Safe mode'" not in js
 
 
 def test_since_this_start_names_only_what_happened():

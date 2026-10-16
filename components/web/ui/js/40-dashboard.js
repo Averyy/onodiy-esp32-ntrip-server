@@ -77,15 +77,20 @@ function heroAction(a) {
   return link(a.label, a.href, a.primary ? 'btn primary' : 'btn small');
 }
 
+/* The state's line (lead: another wording of it); a Wi-Fi trial names the network and counts down (tickTrialLeft). */
+function stateLead(s, st, lead) {
+  lead = lead || st.lead;
+  return st.trial ? ['Trying ' + st.trial + ': ', trialLeftEl(s.network || {}), '. ', lead] : lead;
+}
+
 function heroCard(s, st) {
   const acts = st.actions.map(heroAction).filter(Boolean);
   /* The no-receiver plan line says whether a search runs: it takes the focus when "Check again" goes (patchDetect). */
   const noRx = st.key === 'no_receiver';
   const focusLine = on => (on ? { tabindex: '-1', 'data-detect-text': '' } : {});
-  const lead = st.trial ? ['Trying ' + st.trial + ': ', trialLeftEl(s.network || {}), '. ', st.lead] : st.lead;
   return h('section', { class: 'card hero ' + st.tone },
     h('h2', { class: 'state', 'aria-live': 'polite', 'aria-atomic': 'true' }, st.head),
-    h('p', Object.assign({ class: 'line' }, focusLine(noRx && !st.plan)), lead),
+    h('p', Object.assign({ class: 'line' }, focusLine(noRx && !st.plan)), stateLead(s, st)),
     acts.length ? h('div', { class: 'hero-actions form-actions' }, acts) : null,
     st.plan ? h('p', Object.assign({ class: 'muted small' }, focusLine(noRx)), st.plan) : null,
     st.also.length ? h('ul', { class: 'also' }, st.also.map(a => h('li', { class: a.tone },
@@ -119,12 +124,13 @@ function onocoyCard(s, st) {
 }
 
 /* "Locked", "Surveying, 11 min left"... (position_locked is the stored profile's base mode: it runs once the profile is applied).
- * A survey needs data: while none arrives (delivering false) it is paused, not counting down. */
+ * A survey needs data: while none arrives (delivering false) it is paused, not counting down. "Not locked" only for a position
+ * the station has (position_known; an older firmware without it: as before). */
 function positionText(r, delivering) {
   if (r.position_locked) return r.profile_applied ? 'Locked' : 'Fixed, not applied yet';
   if (r.surveying && !delivering) return 'Surveying, paused';
   if (r.surveying) return 'Surveying' + (r.survey_window_left_s ? ', ' + inMinutes(r.survey_window_left_s) + ' left' : '');
-  return 'Not locked';
+  return r.position_known === false ? 'No position yet' : 'Not locked';
 }
 
 const okMark = ok => h('span', { class: ok ? 't-ok' : 't-warn' }, ok ? '✓' : '✕');
@@ -147,8 +153,10 @@ function glonassView(r, q) {
   return r.rtcm1230_supported === true ? ['Tracked ', okMark(true)] : 'Tracked';
 }
 
-/* Three receiver rows and a link to the page with the rest; without corrections only the position. */
+/* Three receiver rows and a link to the page with the rest; without corrections only the position; no card while no receiver is
+ * found or its port is closed (the top card says it, and a position would be a stale fact). */
 function receiverCard(s, st) {
+  if (st.key === 'no_receiver' || st.key === 'uart_closed') return null;
   const r = s.receiver || {};
   const live = st.delivering;
   return h('section', { class: 'card fit-kv' },
@@ -216,8 +224,11 @@ function adminDashboard(s, st, openSlots) {
   const ono = onocoyCard(s, st);
   const others = castersCard(s, st, true, openSlots);
   const rx = receiverCard(s, st);
-  /* A lone receiver card takes the row (no empty cell beside it). */
-  if (!ono && !others) rx.classList.add('wide');
+  /* A card with none beside it takes the row (no empty cell): Onocoy's day pairs with the receiver, the receiver with the other
+   * casters when Onocoy's day is not shown (with it they take a row of their own). */
+  const lone = !ono && !(rx && others) ? rx || others : null;
+  if (lone) lone.classList.add('wide');
+  if (ono && !rx) ono.classList.add('wide');
   return [heroCard(s, st), h('div', { class: 'grid starts' }, ono, rx, others)];
 }
 

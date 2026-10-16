@@ -449,7 +449,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
               "cred_reverted": false, "cred_reverted_why": null},
   "receiver": {"state": "streaming", "model": "UM982", "firmware": "R4.10Build18975",
                "responding": true, "restarting": false, "identity_confirmed": true, "profile_applied": true,
-               "position_locked": true, "surveying": false, "survey_window_left_s": 0,
+               "position_locked": true, "position_known": true, "surveying": false, "survey_window_left_s": 0,
                "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "glonass": true,
                "rtcm1230_supported": true, "journal": "none",
                "uart_closed": false, "rx_maintenance": false, "maintenance_left_s": 0, "maintenance_chosen_s": 0,
@@ -491,6 +491,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.state` | `station_state_t`; `idle` during receiver maintenance (`rx_maintenance` tells the two apart) |
 | `receiver.uart_closed` | the receiver UART is closed and `gnss_link` reopens it on its own (the UI's "Receiver port closed"; never in safe mode, where the link is not opened) |
 | `receiver.rx_maintenance` | receiver maintenance is on (section 8): nothing is sent to the receiver; `maintenance_left_s` until it ends by itself, `maintenance_chosen_s` the chosen duration with extensions (both 0 when off) |
+| `receiver.position_known` | the station has a base position, locked or surveyed so far (`position.source` in `GET /api/gnss` is not `none`); admin form only |
 | `receiver.rtcm_age_ms` | since the last CRC-valid RTCM frame (`gnss_link`), `null` = never |
 | `receiver.glonass` | the receiver's stream carried GLONASS signals in the last 10 s (the signal summary of `GET /api/gnss/signals`; `false` before the first summary); admin form only |
 | `receiver.rtcm1230_supported` | as in `GET /api/gnss/signals`: the receiver accepted message 1230 (GLONASS biases) at the last configuration, `false` refused, `null` never configured. With `glonass` and `best_bands` it says whether the stream meets Onocoy's quality minimums (4 bands on one constellation, GLONASS with 1230) without polling the larger signals object; admin form only |

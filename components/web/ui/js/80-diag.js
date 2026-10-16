@@ -132,14 +132,19 @@ function healthChip(level, alerts, st) {
 
 /*
  * The Health card's messages: the alerts, and above them the Status page's
- * state (its title and line) while it is worse than every alert (an alert
- * it says itself then goes). A closed port leaves out the no-receiver alert
- * (its cable advice would mislead), as the Status page does.
+ * state (its title and line) while it is at least as bad as every alert (an
+ * alert it says itself then goes). A state that only restates an alert of
+ * its colour and stands for no page notice (no receiver found) leaves it to
+ * the alert, whose words here are the fuller ones. A closed port leaves out
+ * the no-receiver alert (its cable advice would mislead), as the Status page
+ * does.
  */
 function healthItems(alerts, st) {
   let list = alerts.filter(a => !(st && st.key === 'uart_closed' && a.id === 'no_receiver'));
   const worst = Math.min(9, ...list.map(a => toneRank(alertTone(a))));
-  const state = !!st && toneRank(st.tone) <= 2 && toneRank(st.tone) < worst;
+  const own = st && st.alertId ? list.find(a => a.id === st.alertId) : null;
+  const restates = !!own && !st.notice && toneRank(alertTone(own)) === toneRank(st.tone);
+  const state = !!st && toneRank(st.tone) <= 2 && toneRank(st.tone) <= worst && !restates;
   if (state) list = list.filter(a => a.id !== st.alertId);
   return { alerts: list, state: state };
 }
@@ -152,10 +157,14 @@ function sinceStart(hl) {
   return parts.length ? capFirst(parts.join(', ')) : 'No stalls or recoveries';
 }
 
+/* Between two parts of a value: a line that wraps there starts with the dot ("AA:BB:CC:DD:EE:FF" / "· channel 11"). */
+const PART_SEP = ' ·' + NB;
+
 /*
  * The Wi-Fi in one line: network and signal in dBm ("Home · Good (-61
- * dBm)"). net: the status's network (its RSSI is the freshest); w: GET
- * /api/wifi, either may be missing.
+ * dBm)"; a wrap starts the second line with the dot, the signal's bars
+ * kept with it). net: the status's network (its RSSI is the freshest); w:
+ * GET /api/wifi, either may be missing.
  */
 function wifiLine(net, w) {
   if (!net && !w) return DASH;
@@ -163,14 +172,14 @@ function wifiLine(net, w) {
   if (!n.ssid) return 'Not set up';
   if (!n.online) return n.ssid + ', offline' + (n.offline_s ? ' for ' + fmt.dur(n.offline_s) : '');
   const rssi = rssiKnown(n.rssi) ? n.rssi : w && w.rssi;
-  return [n.ssid, rssiKnown(rssi) ? [' · ', rssiView(rssi)] : null];
+  return [n.ssid, rssiKnown(rssi) ? [' ', h('span', { class: 'nowrap' }, '·' + NB, rssiView(rssi))] : null];
 }
 
 /* The access point and its channel ("AA:BB:CC:DD:EE:FF · channel 11") and the transmit power, from GET /api/wifi: rows only while
  * known and online (net: the status's network, the fresher). */
 function apRows(net, w) {
   if (!w || (net && net.online === false)) return [];
-  const ap = [w.bssid, w.channel ? 'channel ' + w.channel : null].filter(Boolean).join(' · ');
+  const ap = [w.bssid, w.channel ? 'channel' + NB + w.channel : null].filter(Boolean).join(PART_SEP);
   const tx = typeof w.tx_power_dbm === 'number' ? w.tx_power_dbm + NB + 'dBm' : null;
   return [ap ? ['Access point', ap] : null, tx ? ['Transmit power', tx] : null];
 }
@@ -196,6 +205,9 @@ function stateActions(st) {
   return acts.length ? h('div', { class: 'form-actions' }, acts) : null;
 }
 
+/* The Overview's Health card is on the page: from its first render until the Overview goes (noticeItems). */
+let healthCardShown = false;
+
 /* The notice the Health card says itself (the state above its alerts), which Diagnostics' Overview leaves out. */
 function healthNotice(s) {
   const st = stationState(s, true);
@@ -220,7 +232,7 @@ function healthCard(hl, s) {
   const plan = fixing && restartPlanText(hl);
   return h('section', { class: 'card' },
     cardHead('Health', badge(hc[0], hc[1])),
-    hi.state ? msg(st.tone, h('strong', null, st.head), st.lead ? h('div', { class: 'small' }, st.lead) : null,
+    hi.state ? msg(st.tone, h('strong', null, st.head), st.lead ? h('div', { class: 'small' }, stateLead(s, st, st.diagLead)) : null,
       stateActions(st)) : null,
     hi.alerts.length ? alertList(hi.alerts, { detect: true }) : hi.state ? null : h('p', { class: 'muted' }, 'No alerts.'),
     plan ? h('p', { class: 'small' }, plan) : null,
@@ -261,13 +273,15 @@ function chipCard(sys, s, w, net) {
 }
 
 /*
- * Patched in place every 5 s (patchDetect; the buttons act through
- * data-act), so the focus, a selection and the open sections survive. The
- * tasks are read every 2 s while their section is open.
+ * Patched in place with each GET /api/health (every 5 s) and each status
+ * (patchDetect; the buttons act through data-act), so the focus, a
+ * selection and the open sections survive. The tasks are read every 2 s
+ * while their section is open.
  */
 function overviewTab(box) {
-  let lastHl = null, sys = null, wifi = null, tasks = null, stopTasks = null;
+  let lastHl = null, sys = null, wifi = null, tasks = null, stopTasks = null, gone = false;
   const render = hl => {
+    if (gone) return;   /* an answer that came after the page was left */
     lastHl = hl;
     const b = hl.boot || {};
     const heap = hl.heap || {};
@@ -292,7 +306,8 @@ function overviewTab(box) {
     patchDetect(box, h('div', { class: 'grid' },
       healthCard(hl, S.status),
       h('section', { class: 'card' },
-        cardHead('This start', b.safe_mode ? badge('Safe mode', 'bad') : b.stable ? badge('Stable', 'ok') : null),
+        /* Safe mode, and when it tries normal operation again, are the Health card's (the Status page's state). */
+        cardHead('This start', b.stable && !b.safe_mode ? badge('Stable', 'ok') : null),
         h('p', null, startSentence(b.reset_class, b.reset_reason, b.prev_reboot_reason) + '.'),
         rxBoot ? h('p', { class: 'muted small' }, rxBoot + '.') : null,
         kv([
@@ -303,7 +318,6 @@ function overviewTab(box) {
           ['Crashes counted', fmt.num(b.crashes)],
           ['Brownouts since power-on', fmt.num(b.brownouts_since_power_on)],
           ['Previous run', fmt.dur(b.prev_session_uptime_s)],
-          b.safe_mode ? ['Normal retry in', fmt.dur(b.safe_mode_retry_in_s)] : null,
         ]),
         /* A crash's copy of the memory: it can hold passwords, so the download asks first. */
         cd.present ? msg('warn', h('strong', null, 'Core dump stored'),
@@ -344,7 +358,12 @@ function overviewTab(box) {
           sect('journal', 'Event journal', journalStats(hl.journal)),
           sect('log', 'Log', logStats(hl.log)),
           sect('tasks', 'Tasks', tasks ? tasksTable(tasks) : h('p', { class: 'muted' }, 'Loading…'))))));
+    if (!healthCardShown) {
+      healthCardShown = true;
+      renderNotices();   /* the notice the card says now goes */
+    }
   };
+  /* Also on every status (Views.diag.update): the Health card follows it as the notices do. */
   const again = () => {
     if (lastHl) render(lastHl);
   };
@@ -400,7 +419,10 @@ function overviewTab(box) {
   });
   const stopHl = pollInto(box, 5000, '/api/health', render);
   return {
+    update: again,
     stop() {
+      gone = true;
+      healthCardShown = false;
       stopHl();
       stopWifi();
       if (stopTasks) stopTasks();
@@ -1088,9 +1110,10 @@ function eventCard() {
       await busy(wipe, () => api('DELETE', '/api/journal', undefined, { timeout: 60000 }));
     } catch (e) {
       const ae = e instanceof ApiError ? e : null;
-      /* 500: ESP_FAIL cleared nothing; ESP_ERR_NOT_FINISHED cleared, but a sector not erased returns at a restart. */
+      /* 500: ESP_FAIL did not clear (a full journal may lose its oldest sector, as when it moves on); ESP_ERR_NOT_FINISHED
+       * cleared, but a sector not erased returns at a restart. */
       const m = ae && ae.status === 500 ? e.message : '';
-      if (m === 'ESP_FAIL') return say(err, 'Nothing was cleared: the journal flash could not be written.');
+      if (m === 'ESP_FAIL') return say(err, 'Not cleared: the journal flash could not be written.');
       /* 404: no usable journal; reading it again shows that. 409: a clear waits or runs, or an upload holds the station's worker. */
       if (ae && ae.status === 404) return act(null, start, err);
       if (ae && ae.code === 'busy') return say(err, 'Another clear or an upload is running. Try again when it ends.');
@@ -1149,6 +1172,9 @@ Views.diag = {
         'aria-current': t[0] === tab ? 'page' : null }, t[1]))), box);
     const sub = DIAG_PAGES[tab](box);
     return {
+      update() {
+        if (sub && sub.update) sub.update();
+      },
       destroy() {
         if (sub && sub.stop) sub.stop();
       },
