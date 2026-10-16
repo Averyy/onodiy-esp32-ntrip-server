@@ -1252,6 +1252,31 @@ TEST_CASE("ledger: today's lost epochs add up, go with today and start again at 
     TEST_ASSERT_EQUAL_UINT32(0, c.hist[0].lost_epochs);
 }
 
+TEST_CASE("ledger: a call whose time was sampled before another call's accounts nothing", "[ledger]")
+{
+    /* Each caller reads the monotonic clock before it takes the lock: one
+     * that read it 1 ms before another took the lock first arrives with a
+     * time behind the one accounted. It must not count the wrapped ~49.7
+     * days (a jump of 50 days that would fill the history). */
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, at(DAY0, H(10)), LC_CLOCK_SNTP);
+    lc_set_rtcm_ok(&c, T0, true);
+    lc_set_slot(&c, T0, 0, true, true, true);
+    lc_tick(&c, T0 + 61000u);                                    /* across the wrap */
+    int64_t unix_before = c.unix_ms;
+    lc_count_lost_epochs(&c, T0 + 60999u, 1);
+    lc_set_slot(&c, T0 + 60998u, 0, true, true, false);
+    TEST_ASSERT_EQUAL_INT32(DAY0, c.today.utc_day);
+    TEST_ASSERT_EQUAL_INT64(unix_before, c.unix_ms);
+    TEST_ASSERT_EQUAL_UINT32(0, (uint32_t)c.hist_n);
+    TEST_ASSERT_EQUAL_UINT32(1, c.today.lost_epochs);
+    TEST_ASSERT_EQUAL_INT64(unix_before, lc_unix_now(&c, T0 + 60999u));
+    /* Time goes on from the latest time accounted, the slot down from now on. */
+    lc_tick(&c, T0 + 71000u);
+    TEST_ASSERT_EQUAL_INT64(unix_before + 10000, c.unix_ms);
+    TEST_ASSERT_EQUAL_UINT32(10000, c.today.down_ms[0]);
+}
+
 TEST_CASE("ledger: lost epochs before the first clock go to today with it", "[ledger]")
 {
     fresh(T0, 0);

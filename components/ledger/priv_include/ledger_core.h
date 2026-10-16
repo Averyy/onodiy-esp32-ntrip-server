@@ -7,7 +7,10 @@
  *
  * Time. Accounting runs on the monotonic clock (`now_ms`, any u32 that wraps
  * freely); every call first accrues the time since the previous one with the
- * state that held during it. UTC comes from lc_set_utc(): GNSS time is taken
+ * state that held during it. A caller samples `now_ms` before it takes the
+ * lock, so another one may have accounted past it meanwhile: a `now_ms`
+ * behind the time accounted (by less than half the u32 range) adds nothing,
+ * and the time accounted never goes back. UTC comes from lc_set_utc(): GNSS time is taken
  * whenever it comes; SNTP only while no GNSS time arrived for
  * LC_GNSS_HOLD_MS (GNSS time first, SNTP as fallback). Times before
  * LC_UTC_FLOOR_S are never trusted. Between samples UTC advances with the

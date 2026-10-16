@@ -229,9 +229,23 @@ static void accrue(lc_t *c, uint64_t ms)
     }
 }
 
+/*
+ * Milliseconds from `then_ms` to `now_ms` on the wrapping clock; 0 when
+ * `now_ms` is earlier (sampled before another call took the lock and
+ * accounted past it): never the wrapped ~49.7 days.
+ */
+static uint32_t since(uint32_t now_ms, uint32_t then_ms)
+{
+    uint32_t d = now_ms - then_ms;
+    return (d > UINT32_MAX / 2u) ? 0u : d;
+}
+
 static void advance(lc_t *c, uint32_t now_ms)
 {
-    uint32_t d = now_ms - c->last_ms;
+    uint32_t d = since(now_ms, c->last_ms);
+    if (d == 0) {
+        return;   /* no time passed, or a late sample: last_ms never goes back */
+    }
     c->last_ms = now_ms;
     accrue(c, d);
 }
@@ -495,7 +509,7 @@ bool lc_set_utc(lc_t *c, uint32_t now_ms, int64_t unix_ms, lc_clock_t source)
         return false;
     }
     advance(c, now_ms);
-    if (source == LC_CLOCK_SNTP && c->gnss_seen && (uint32_t)(now_ms - c->gnss_at_ms) < LC_GNSS_HOLD_MS) {
+    if (source == LC_CLOCK_SNTP && c->gnss_seen && since(now_ms, c->gnss_at_ms) < LC_GNSS_HOLD_MS) {
         return false;
     }
     if (source == LC_CLOCK_GNSS) {
@@ -573,7 +587,7 @@ int64_t lc_unix_now(const lc_t *c, uint32_t now_ms)
     if (c->clock == LC_CLOCK_NONE) {
         return -1;
     }
-    return c->unix_ms + (int64_t)(uint32_t)(now_ms - c->last_ms);
+    return c->unix_ms + (int64_t)since(now_ms, c->last_ms);
 }
 
 void lc_today(const lc_t *c, lc_day_t *out)
@@ -627,7 +641,7 @@ bool lc_persist_due(lc_t *c, uint32_t now_ms, uint32_t interval_ms, int64_t *ali
         }
         *alive_ms = c->alive_ms;
     } else {
-        if (!c->rolled && c->alive_saved && (uint32_t)(now_ms - c->alive_saved_ms) < interval_ms) {
+        if (!c->rolled && c->alive_saved && since(now_ms, c->alive_saved_ms) < interval_ms) {
             return false;
         }
         c->alive_saved = true;
