@@ -1710,11 +1710,17 @@ void web_build_wifi(wj_t *w, const web_wifi_snap_t *s)
     } else {
         wj_null(w, "tx_power_dbm");
     }
+    if (n->associated && n->ap_steering >= 0) {
+        wj_bool(w, "ap_steering", n->ap_steering > 0);
+    } else {
+        wj_null(w, "ap_steering");
+    }
     wj_bool(w, "time_synced", n->time_synced);
     wj_str(w, "upstream", web_probe_name(n->probe));
     wj_u32_or_null(w, "probe_age_s", n->probe_age_s);
     wj_uint(w, "reconnects", n->reconnects);
     wj_uint(w, "connect_failures", n->connect_failures);
+    wj_uint(w, "roams", n->roams);
     wj_uint(w, "offline_s", n->offline_s);
     wj_uint(w, "retry_in_s", n->retry_in_s);
     if (n->last_disconnect_reason != 0) {

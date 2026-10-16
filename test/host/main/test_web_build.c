@@ -777,6 +777,14 @@ TEST_CASE("journal names cover the connection-history and receiver kinds; the ga
     TEST_ASSERT_EQUAL(13, DIAG_EV_WIFI_UP);
     TEST_ASSERT_EQUAL(20, DIAG_EV_RX_MAINT);
     TEST_ASSERT_EQUAL(21, DIAG_EV_LIVE_VIEW);
+    TEST_ASSERT_EQUAL(24, DIAG_EV_WIFI_ROAM);
+}
+
+TEST_CASE("journal: a move between access points is wifi_roam, the kinds after it unknown", "[web_build]")
+{
+    TEST_ASSERT_EQUAL_STRING("wifi_roam", web_diag_event_name(DIAG_EV_WIFI_ROAM));
+    TEST_ASSERT_EQUAL_STRING("rx_boot", web_diag_event_name(DIAG_EV_RX_BOOT));
+    TEST_ASSERT_EQUAL_STRING("unknown", web_diag_event_name(DIAG_EV_WIFI_ROAM + 1));
 }
 
 TEST_CASE("the power-lost alert and the new network ladder reasons have API names", "[web_build]")
@@ -1177,6 +1185,36 @@ TEST_CASE("wifi: the access point's BSSID and the transmit power while associate
     TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "rssi")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "bssid")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "tx_power_dbm")));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("wifi: moves between access points and whether the access point can ask for one", "[web_build]")
+{
+    static network_status_t n;
+    memset(&n, 0, sizeof(n));
+    n.sta_configured = true;
+    n.ap_close_in_s = UINT32_MAX;
+    n.associated = true;
+    n.roams = 3;
+    n.ap_steering = 1;
+    cJSON *root = build_wifi(&n);
+    TEST_ASSERT_EQUAL(3, at(root, "roams")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "ap_steering")));
+    cJSON_Delete(root);
+    n.ap_steering = 0;
+    root = build_wifi(&n);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "ap_steering")));
+    cJSON_Delete(root);
+    /* Not read yet (or roaming off), and not associated: unknown. */
+    n.ap_steering = -1;
+    root = build_wifi(&n);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "ap_steering")));
+    cJSON_Delete(root);
+    n.ap_steering = 1;
+    n.associated = false;
+    root = build_wifi(&n);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "ap_steering")));
+    TEST_ASSERT_EQUAL(3, at(root, "roams")->valueint);
     cJSON_Delete(root);
 }
 
