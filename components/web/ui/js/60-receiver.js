@@ -324,7 +324,7 @@ function receiverDetails(g) {
 const MANAGE = {
   station: [true, 'full', L.recovery.full + ' (recommended)', 'Configures the receiver and fixes stalls, restarting itself as a last resort.'],
   no_restart: [true, 'no_reboot', L.recovery.no_reboot, 'The same, but never restarts the station.'],
-  me: [false, 'alerts_only', L.recovery.alerts_only, 'Sends the receiver nothing; Status tells you when corrections stop.'],
+  me: [false, 'alerts_only', L.recovery.alerts_only, 'Configures nothing on its own; Status says when corrections stop.'],
 };
 
 /** The choice that is these two settings, or null (another combination: Custom). */
@@ -552,6 +552,11 @@ function heldPanel(opts) {
 /* The user configures the receiver (automatic configuration off, not the held first configuration): a saved profile is sent once. */
 function manageOwn(g) {
   return !g.autocfg && !g.first_apply_held;
+}
+
+/* A card's Save button: "Save and apply" while the user manages the receiver, as a changed profile reaches it all the same. */
+function saveLabel(g, what) {
+  return manageOwn(g) ? 'Save and apply' : 'Save ' + what;
 }
 
 /** The profile's state for its chip: [text, tone]; grey while the user manages the receiver (as the Receiver page says). */
@@ -945,8 +950,10 @@ function receiverForms(g, latest, done, onCompare) {
     const c = positionChip(gg);
     posChip.className = 'badge ' + c[1];
     posChip.textContent = c[0];
-    const save = manageOwn(gg) ? 'Save and apply' : 'Save profile';
-    if (saveBtn.textContent !== save) saveBtn.textContent = save;
+    for (const [b, what] of [[posSave, 'position'], [saveBtn, 'profile']]) {
+      const t = saveLabel(gg, what);
+      if (b.textContent !== t) b.textContent = t;
+    }
     patch(match, matchLine(gg));
     match.hidden = !match.textContent;
     patch(seeLine, castersSee(gg));

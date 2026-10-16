@@ -82,7 +82,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  pwProblem: a => adminPasswordProblem(a[0], a[1]), rssi: a => rssiView(a),\n' +
   '  sgName: a => sgName(a[0], a[1]), sgChoices: () => SG_CHOICES, recovery: () => L.recovery,\n' +
   '  recoveryLbl: k => lbl(L.recovery, k), fwText: a => fwText(a[0], a[1]), dist: m => fmtDist(m),\n' +
-  '  sgtBlock: g => sgtBlock(g), sgtLine: t => sgtLine(t), profileChip: g => profileChip(g),\n' +
+  '  sgtBlock: g => sgtBlock(g), sgtLine: t => sgtLine(t), profileChip: g => profileChip(g), saveLabel: a => saveLabel(a[0], a[1]),\n' +
   '  sgtNotice: st => { const n = sgTestNotice(st); return n && n.slice(0, 3); },\n' +
   '  rxChip: s => receiverChip(s), posLine: a => positionLine(a[0], a[1]), statusPos: a => positionText(a[0], a[1]),\n' +
   '  headline: sig => signalsHeadline(sig), sigChecks: a => signalChecks(a[0], a[1]), msgCheck: a => msgCheck(a[0], a[1], a[2]),\n' +
@@ -797,7 +797,8 @@ def test_receiver_management_one_choice_over_two_settings():
     for _, _, name, line in m.values():
         assert line.endswith(".") and len(line) <= 80 and not any(w in line for w in ("RTCM", "SAVECONFIG", "autocfg"))
     assert "restarting itself" in m["station"][3] and "never restarts" in m["no_restart"][3]
-    assert m["me"][3].startswith("Sends the receiver nothing")
+    # What the station does on its own: a profile the owner saves still reaches the receiver ("Save and apply").
+    assert m["me"][3].startswith("Configures nothing on its own") and "receiver nothing" not in m["me"][3]
     keys = run_ui([("manageKey", [a, r]) for a in (True, False) for r in ("full", "no_reboot", "alerts_only")])
     assert keys == ["station", "no_restart", None, None, None, "me"]
     custom = run_ui([("manageCustom", [True, "alerts_only"]), ("manageCustom", [False, "full"]),
@@ -964,6 +965,20 @@ def test_profile_chip_and_maintenance_notice_everywhere_but_settings():
     # Diagnostics' Overview, whose Health card says it with End now. Every other page has it.
     assert [[k for k, _ in o] for o in out] == [[]] + [["maintenance"]] * 4 + [[], ["maintenance"]]
 
+
+
+def test_save_buttons_say_they_apply_while_you_manage_the_receiver():
+    """Receiver settings' Save buttons (Position, Receiver profile): "Save and apply" while the owner manages the
+    receiver (automatic configuration off: Me, or the Custom combination), as a changed profile reaches the receiver all
+    the same; the card's own "Save position" / "Save profile" while the station manages it, and during the held first
+    configuration."""
+    station = {"autocfg": True, "recovery": "full", "first_apply_held": False}
+    me = {"autocfg": False, "recovery": "alerts_only", "first_apply_held": False}
+    custom = {"autocfg": False, "recovery": "full", "first_apply_held": False}
+    held = {"autocfg": False, "recovery": "alerts_only", "first_apply_held": True}
+    out = run_ui([("saveLabel", [g, w]) for g in (station, me, custom, held) for w in ("position", "profile")])
+    assert out == ["Save position", "Save profile", "Save and apply", "Save and apply", "Save and apply", "Save and apply",
+                   "Save position", "Save profile"]
 
 # ---- The system pages (90-system.js, 30-auth.js) ----
 

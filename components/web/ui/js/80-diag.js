@@ -109,13 +109,13 @@ function startKind(cls, planned) {
  * The earlier starts (health boot_history without this one), newest first,
  * one line each: when it started (else how long it ran, else a dash), the
  * kind and the version; its sentence on hover. A start ran for the previous
- * run of the start after it (here, this start, for the newest) when their
- * counts follow on (a power-on between them leaves it unknown). day: today
- * (toDateString).
+ * run of the start after it when their counts follow on (a power-on between
+ * them leaves it unknown); the newest's is This start's "Previous run", so
+ * not here. day: today (toDateString).
  */
-function startLines(starts, here, day) {
+function startLines(starts, day) {
   return starts.map((x, i) => {
-    const next = i ? starts[i - 1] : here;
+    const next = starts[i - 1];
     const ran = next && next.boot_no === x.boot_no + 1 && typeof next.prev_uptime_s === 'number' ? next.prev_uptime_s : null;
     return h('tr', { title: startSentence(x.reset_class, x.reset_reason, x.planned_reason) },
       h('td', { class: 'when' }, x.start_unix ? dayTime(x.start_unix, day) : ran === null ? DASH : 'Ran ' + fmt.dur(ran)),
@@ -306,8 +306,7 @@ function overviewTab(box) {
     /* The starts before this one: the history's first is this start (unless it could not be stored), which "This start" has. */
     const bh = hl.boot_history || [];
     const starts = bh[0] && bh[0].boot_no === b.boots_since_power_on && bh[0].reset_class === b.reset_class ? bh.slice(1) : bh;
-    const lines = startLines(starts, { boot_no: b.boots_since_power_on, prev_uptime_s: b.prev_session_uptime_s }, new Date().toDateString());
-    const startRows = rows => scrollBox('Earlier starts', h('table', { class: 'rows' }, h('tbody', null, rows)));
+    const lines = startLines(starts, new Date().toDateString());
     patchDetect(box, h('div', { class: 'grid' },
       healthCard(hl, S.status),
       h('section', { class: 'card' },
@@ -334,8 +333,8 @@ function overviewTab(box) {
       chipCard(sys, S.status, wifi, net),
       h('section', { class: 'card' },
         h('h2', null, 'Earlier starts'),
-        lines.length ? [startRows(lines.slice(0, 5)), lines.length > 5 ? sect('starts', 'Older starts', startRows(lines.slice(5))) : null] :
-          h('p', { class: 'muted' }, 'None recorded.')),
+        lines.length ? scrollBox('Earlier starts', h('table', { class: 'rows' },
+          h('tbody', null, foldRows(lines, 5, 'Older starts', 3, opened.has('starts'), 'starts')))) : h('p', { class: 'muted' }, 'None recorded.')),
       h('section', { class: 'card wide tight-kv' },
         h('details', { class: 'fold', 'data-k': 'internals', open: opened.has('internals') },
           h('summary', null, h('h2', null, 'Firmware internals')),
@@ -471,13 +470,12 @@ function monthCard(card, av) {
       h('span', { class: 'muted' }, today ? 'No downtime so far' : 'No downtime')));
   };
   const rows = (day ? [row(day, true)] : []).concat((av.history || []).map(d => row(d, false)));
-  const tbl = list => scrollBox('Last 30 days', h('table', null, h('tbody', null, list)));
   /* Today and the week before; the rest folded (it stays open across the refresh). */
   const was = card.querySelector('details');
   mount(card, h('h2', null, 'Last 30 days'),
     av.clock === 'none' ? msg('warn', 'No trusted clock yet, so the station cannot count days.') : null,
-    rows.length ? tbl(rows.slice(0, 8)) : h('p', { class: 'muted' }, 'Nothing recorded yet.'),
-    rows.length > 8 ? disclosure('Earlier days', was && was.open, tbl(rows.slice(8))) : null,
+    rows.length ? scrollBox('Last 30 days', h('table', null, h('tbody', null, foldRows(rows, 8, 'Earlier days', 2, was && was.open)))) :
+      h('p', { class: 'muted' }, 'Nothing recorded yet.'),
     h('p', { class: 'muted small foot' }, (prot ? 'Onocoy' : 'Caster 1') + ', per UTC day. Planned: receiver setup, updates and restarts you asked for.' +
       (counting ? ' Red: more offline time than the streak allows.' : '')));
 }
@@ -490,11 +488,17 @@ function clockTime(unix) {
   return new Date(unix * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
-/* A record's time: the clock time on `day` (a Date's toDateString), else a short date and time ("Oct 15, 9:41 AM"). */
+/*
+ * A record's time: the clock time on `day` (a Date's toDateString), else a
+ * short date and time ("Oct 15, 9:41 AM"), with the year when it is not
+ * day's ("Oct 20, 2025, 3:00 PM").
+ */
 function dayTime(unix, day) {
-  const d = new Date(unix * 1000);
-  return d.toDateString() === day ? clockTime(unix) :
-    d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const d = new Date(unix * 1000), ds = d.toDateString();
+  if (ds === day) return clockTime(unix);
+  const o = { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+  if (ds.slice(-4) !== day.slice(-4)) o.year = 'numeric';
+  return d.toLocaleString(undefined, o);
 }
 
 /* "9:40–9:42 AM" from "9:40 AM" and "9:42 AM" (an ending they share once); just the newest when that gets long. */

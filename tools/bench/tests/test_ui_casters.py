@@ -143,7 +143,7 @@ vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { casterEditor, openCasterWarning, casterDetails, casterSummary, casterChip, stationState, adminDashboard,\n' +
   '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard, healthCard, chipCard, signalsHead, bandTable, kv,\n' +
-  '  startLines,\n' +
+  '  startLines, foldRows,\n' +
   '  setStatus: s => { S.status = s; }, setSession: s => { S.session = s; } };\n})()',
   ctx);
 
@@ -412,7 +412,18 @@ for (const c of JSON.parse(casesJson)) {
   if (c.fn === 'starts') {
     /* Diagnostics' earlier starts: per row its cells' text, then its hover text. today: the day of `now` in the page's zone. */
     const day = new Date(c.now * 1000).toDateString();
-    out.push(ui.startLines(c.starts, c.here, day).map(tr => [...tr.kids.map(td => td.textContent), tr.getAttribute('title')]));
+    out.push(ui.startLines(c.starts, day).map(tr => [...tr.kids.map(td => td.textContent), tr.getAttribute('title')]));
+    continue;
+  }
+  if (c.fn === 'fold') {
+    /* foldRows over `count` rows ("row 0", ...): the tbody's rows in order, the fold row as
+     * [its class, the cell's colspan, the disclosure's data-k, whether it is open, its summary]. */
+    const rows = [...Array(c.count).keys()].map(i => { const tr = new El('tr'); tr.append('row ' + i); return tr; });
+    out.push([ui.foldRows(rows, c.n, c.more, c.cols, c.open, c.k)].flat(2).map(tr => {
+      if (tr.className !== 'fold') return tr.textContent;
+      const td = tr.kids[0], d = td.kids[0];
+      return [tr.className, td.getAttribute('colspan'), d.getAttribute('data-k'), d.hasAttribute('open'), d.kids[0].textContent];
+    }));
     continue;
   }
   if (c.fn === 'kv') {
@@ -1064,9 +1075,9 @@ def test_chip_card_names_the_access_point_and_the_transmit_power():
 
 def test_earlier_starts_say_when_what_and_which_version():
     """Diagnostics' earlier starts, one line each: when it started (else how long it ran, else a dash), a word for the
-    kind of start and the version; the full sentence only on hover, never in every row."""
-    now = 1760090000
-    here = {"boot_no": 3, "prev_uptime_s": 7200}   # this start: the third since power-on, after a 2 h run
+    kind of start and the version; the full sentence only on hover, never in every row. How long the newest ran is This
+    start's "Previous run", so never said again in its row; a start from another year says its year."""
+    now = 1760090000   # Oct 10, 2025
     starts = [{"reset_class": "planned", "reset_reason": "sw", "planned_reason": "app_update", "boot_no": 2, "prev_uptime_s": 600,
                "version": "v0.3.0", "start_unix": None},
               {"reset_class": "power_on", "reset_reason": "poweron", "planned_reason": "none", "boot_no": 1, "prev_uptime_s": None,
@@ -1074,17 +1085,35 @@ def test_earlier_starts_say_when_what_and_which_version():
               {"reset_class": "crash", "reset_reason": "task_wdt", "planned_reason": "none", "boot_no": 2, "prev_uptime_s": 50,
                "version": "v0.2.9", "start_unix": None},
               {"reset_class": "power_on", "reset_reason": "poweron", "planned_reason": "none", "boot_no": 1, "prev_uptime_s": None,
-               "version": "v0.2.8"}]
-    (rows,) = run_editor([{"fn": "starts", "starts": starts, "here": here, "now": now}])
-    # Not dated: how long it ran, the previous run of the start after it (their counts follow on: 2, then 3).
-    assert rows[0][:3] == ["Ran 2\u00a0h", "Update", "v0.3.0"]
-    # Dated: its time, a short date as the event list has it.
+               "version": "v0.2.8"},
+              {"reset_class": "power_on", "reset_reason": "poweron", "planned_reason": "none", "boot_no": 1, "prev_uptime_s": None,
+               "version": "v0.2.7", "start_unix": now - 400 * 86400}]
+    (rows,) = run_editor([{"fn": "starts", "starts": starts, "now": now}])
+    # The newest, not dated: a dash (how long it ran is This start's "Previous run").
+    assert rows[0][:3] == ["\u2013", "Update", "v0.3.0"]
+    # Dated: its time, a short date as the event list has it, without this year.
     assert rows[1][1:3] == ["Power-on", "v0.2.9"] and ":" in rows[1][0] and not rows[1][0].startswith("Ran")
+    assert "2025" not in rows[1][0]
     # A power-on came after the crash (count 2, then 1): how long it ran is not known.
     assert rows[2][:3] == ["\u2013", "Crash", "v0.2.9"]
+    # Not dated: how long it ran, the previous run of the start after it (their counts follow on: 1, then 2).
     assert rows[3][:3] == ["Ran 50\u00a0s", "Power-on", "v0.2.8"]
+    # Over a year back (the history survives a factory reset): the year too, so it never reads as this year's.
+    assert "2024" in rows[4][0] and ":" in rows[4][0] and rows[4][1:3] == ["Power-on", "v0.2.7"]
     assert rows[1][3] == "Started after power-on or a reset by its pin" and rows[2][3] == "Restarted after a crash (the task watchdog)"
     assert not any("Started" in c or "Restarted" in c for r in rows for c in r[:3])
+
+
+def test_folded_rows_stay_in_their_table():
+    """Rows past the first few (Diagnostics' older starts, History's earlier days) come after a summary row of the same
+    table, spanning its columns, so they keep the columns of the rows above; nothing to fold when they all fit."""
+    fit, starts, days = run_editor([
+        {"fn": "fold", "count": 5, "n": 5, "more": "Older starts", "cols": 3, "open": False, "k": "starts"},
+        {"fn": "fold", "count": 7, "n": 5, "more": "Older starts", "cols": 3, "open": True, "k": "starts"},
+        {"fn": "fold", "count": 10, "n": 8, "more": "Earlier days", "cols": 2, "open": False, "k": None}])
+    assert fit == ["row %d" % i for i in range(5)]
+    assert starts == ["row %d" % i for i in range(5)] + [["fold", "3", "starts", True, "Older starts"], "row 5", "row 6"]
+    assert days == ["row %d" % i for i in range(8)] + [["fold", "2", None, False, "Earlier days"], "row 8", "row 9"]
 
 
 SIG = {"best_sys": "galileo", "best_bands": 4, "e6_lost": False, "epoch_age_ms": 420, "rtcm1230_supported": True,

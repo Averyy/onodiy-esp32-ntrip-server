@@ -360,6 +360,18 @@ function table(head, rows, opts) {
       h('td', { class: numeric.indexOf(i) >= 0 ? 'num' : null }, c === null || c === undefined ? '–' : c)))))));
 }
 
+/**
+ * A tbody's rows (tr) with those past the first n behind a summary row
+ * (`more`) of the same table, so they keep its columns; they show while it
+ * is open (app.css, tr.fold). cols: the table's columns; open: the fold's
+ * state (a refresh passes what the user left it at); k: its data-k.
+ */
+function foldRows(rows, n, more, cols, open, k) {
+  if (rows.length <= n) return rows;
+  return [rows.slice(0, n), h('tr', { class: 'fold' }, h('td', { colspan: cols },
+    h('details', { class: 'more', 'data-k': k || null, open: !!open }, h('summary', null, more)))), rows.slice(n)];
+}
+
 /* ---- Formatting -------------------------------------------------------- */
 
 const DASH = '–';
