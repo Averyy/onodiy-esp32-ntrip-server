@@ -16,16 +16,31 @@ bool boot_history_decode(const uint8_t *buf, size_t len, boot_history_entry_t *o
         return false;
     }
     size_t n = blob_get_u8(&r);
-    for (size_t i = 0; i < n && *count < max && blob_reader_ok(&r); i++) {
-        boot_history_entry_t *e = &out[*count];
+    /* Every entry is read, the ones past max too: the start times follow the last one. */
+    size_t whole = 0;
+    boot_history_entry_t spare;
+    for (size_t i = 0; i < n && blob_reader_ok(&r); i++) {
+        boot_history_entry_t *e = (*count < max) ? &out[*count] : &spare;
         e->cls = blob_get_u8(&r);
         e->raw = blob_get_u8(&r);
         e->reboot_reason = blob_get_u16(&r);
         e->boot_no = blob_get_u32(&r);
         e->prev_uptime_s = blob_get_u32(&r);
         blob_get_str(&r, e->version, sizeof(e->version));
+        e->start_unix = 0;
         if (blob_reader_ok(&r)) {
-            (*count)++;
+            whole++;
+            if (e != &spare) {
+                (*count)++;
+            }
+        }
+    }
+    if (whole == n && blob_reader_remaining(&r) >= 4 * n) {
+        for (size_t i = 0; i < n; i++) {
+            uint32_t t = blob_get_u32(&r);
+            if (i < *count) {
+                out[i].start_unix = t;
+            }
         }
     }
     return true;
@@ -47,6 +62,13 @@ size_t boot_history_encode(const boot_history_entry_t *entries, size_t count, ui
         blob_put_u32(&w, entries[i].boot_no);
         blob_put_u32(&w, entries[i].prev_uptime_s);
         blob_put_str(&w, entries[i].version);
+    }
+    /* The start times only while every v1 reader still holds the blob (long versions leave no room). */
+    size_t room = (cap < BOOT_HISTORY_BLOB_MAX) ? cap : BOOT_HISTORY_BLOB_MAX;
+    if (blob_writer_ok(&w) && w.len + 4 * count <= room) {
+        for (size_t i = 0; i < count; i++) {
+            blob_put_u32(&w, entries[i].start_unix);
+        }
     }
     return blob_writer_ok(&w) ? w.len : 0;
 }

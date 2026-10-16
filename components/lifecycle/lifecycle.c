@@ -13,6 +13,7 @@
 #include "diag.h"
 #include "esp_app_desc.h"
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
@@ -73,6 +74,9 @@ static bool s_retry_requested;      /* service task only */
 static uint32_t s_last_beat_s;      /* service task only */
 static bool s_app_trial;            /* under s_lock */
 static lifecycle_update_t s_update; /* under s_lock: holder of the update slot */
+/* Under s_lock: this boot heads life/boots (record_boot), and its start time is stored or was tried once. */
+static bool s_hist_head;
+static bool s_hist_dated;
 
 /* Shutdown hooks run once per boot. If they overrun the budget, a one-shot
  * timer restarts anyway, well before the task watchdog of a subscribed caller
@@ -352,9 +356,13 @@ static esp_err_t reboot_now(lifecycle_reboot_reason_t reason, bool force, uint32
 
 /* ---- service task ------------------------------------------------------------------ */
 
+static void date_boot(void);
+
 static void service_poll(void)
 {
     uint32_t now = uptime_s();
+
+    date_boot();
 
     if (now - s_last_beat_s >= HEARTBEAT_S) {
         s_last_beat_s = now;
@@ -489,6 +497,15 @@ void lifecycle_early_boot(void)
     }
 }
 
+/* The UTC second this boot started, by the trusted clock (diag_utc_now, fed
+ * by the availability ledger); 0 while there is none. */
+static uint32_t boot_start_unix(void)
+{
+    int64_t utc = diag_utc_now();
+    int64_t start = utc - esp_timer_get_time() / 1000000;
+    return (utc > 0 && start > 0 && start <= (int64_t)UINT32_MAX) ? (uint32_t)start : 0;
+}
+
 /* Prepend this boot to life/boots. A history this app cannot read (a newer
  * layout, after a rollback) is left untouched: "life" survives factory reset
  * and a rolled-back app deletes nothing. */
@@ -522,12 +539,64 @@ static esp_err_t record_boot(void)
     now->boot_no = s_info.boots_since_power_on;
     now->prev_uptime_s = s_info.prev_session_uptime_s;
     strlcpy(now->version, esp_app_get_description()->version, sizeof(now->version));
+    now->start_unix = boot_start_unix();   /* usually 0: no trusted clock this early (date_boot adds it) */
 
     len = boot_history_encode(entries, count + 1, buf, sizeof(buf));
     if (len == 0) {
         return ESP_ERR_INVALID_SIZE;
     }
-    return settings_set_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_HISTORY, buf, len);
+    err = settings_set_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_HISTORY, buf, len);
+    if (err == ESP_OK) {
+        taskENTER_CRITICAL(&s_lock);
+        s_hist_head = true;
+        s_hist_dated = (now->start_unix != 0);
+        taskEXIT_CRITICAL(&s_lock);
+    }
+    return err;
+}
+
+/* Store when this boot started in its entry, once a trusted clock is known
+ * (service task, one write a boot). Only an entry this boot recorded is
+ * changed; a failed write is not tried again. */
+static void date_boot(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    bool want = s_hist_head && !s_hist_dated;
+    taskEXIT_CRITICAL(&s_lock);
+    uint32_t start = want ? boot_start_unix() : 0;
+    if (start == 0) {
+        return;
+    }
+    taskENTER_CRITICAL(&s_lock);
+    s_hist_dated = true;
+    taskEXIT_CRITICAL(&s_lock);
+    /* Off the service task's stack, in internal RAM (NVS writes it with the flash cache off). */
+    typedef struct {
+        uint8_t buf[BOOT_HISTORY_BLOB_MAX];
+        boot_history_entry_t entries[BOOT_HISTORY_LEN];
+    } scratch_t;
+    scratch_t *s = heap_caps_malloc(sizeof(*s), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (s == NULL) {
+        ESP_LOGW(TAG, "boot history: no memory to store this start's time");
+        return;
+    }
+    size_t len = sizeof(s->buf);
+    size_t n = 0;
+    esp_err_t err = settings_get_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_HISTORY, s->buf, &len);
+    if (err == ESP_OK && !boot_history_decode(s->buf, len, s->entries, BOOT_HISTORY_LEN, &n)) {
+        err = ESP_ERR_INVALID_VERSION;
+    }
+    boot_history_entry_t *e = &s->entries[0];
+    if (err == ESP_OK && n > 0 && e->start_unix == 0 && e->boot_no == s_info.boots_since_power_on &&
+        e->cls == (uint8_t)s_info.reset_class) {
+        e->start_unix = start;
+        len = boot_history_encode(s->entries, n, s->buf, sizeof(s->buf));
+        err = (len == 0) ? ESP_ERR_INVALID_SIZE : settings_set_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_HISTORY, s->buf, len);
+    }
+    free(s);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "boot history: this start's time not stored (%s)", esp_err_to_name(err));
+    }
 }
 
 _Static_assert(LIFECYCLE_BOOT_HISTORY_LEN == BOOT_HISTORY_LEN, "boot history length differs from its codec");
@@ -572,6 +641,7 @@ esp_err_t lifecycle_get_boot_history(lifecycle_boot_record_t *out, size_t *count
             r->boot_no = e->boot_no;
             r->prev_uptime_s = e->prev_uptime_s;
             strlcpy(r->version, e->version, sizeof(r->version));
+            r->start_unix = e->start_unix;
             *count = i + 1;
         }
     }

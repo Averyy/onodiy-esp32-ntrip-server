@@ -1990,7 +1990,7 @@ All admin only.
            "boots_since_power_on": 3, "crashes": 0, "brownouts_since_power_on": 0,
            "safe_mode": false, "safe_mode_retry_in_s": null, "stable": true, "prev_session_uptime_s": 3600},
   "boot_history": [{"reset_class": "planned", "reset_reason": "sw", "planned_reason": "app_update",
-                    "boot_no": 3, "prev_uptime_s": 3600, "version": "v0.3.0"}],
+                    "boot_no": 3, "prev_uptime_s": 3600, "version": "v0.3.0", "start_unix": 1760086400}],
   "link": {"mode": "stream", "baud": 115200, "rx_bytes": 0, "tx_bytes": 0,
            "hw_fifo_overflows": 0, "rx_buffer_full": 0, "rx_events_dropped": 0, "line_errors": 0,
            "baud_switch_bytes": 0, "rtcm_held": 0, "flushed_bytes": 0,
@@ -2080,7 +2080,11 @@ the previous boot's lines are not readable, see `GET /api/logs`).
 them); `log.ring_overwritten`, `log.cut` and `log.prev_boot_lines` count
 the ring's records, each a line or a part of one.
 Per-caster loss counters are in `/api/casters`. `boot_history` is the last
-16 boots, newest first (`prev_uptime_s` `null` = unknown). `boot` counts
+16 boots, newest first (`prev_uptime_s` `null` = unknown). `start_unix`:
+when that boot started (UTC s), stored once it has a trusted clock; `null`
+when it never had one, for a boot recorded by an older build, and when long
+version names leave no room in `life/boots` (it keeps its old maximum size).
+`boot` counts
 since power-on from RTC memory; state written before another app image ran
 (an update or a rollback, then back) is not used, so the counters start over
 as after a power cut, and a reboot into another image that the bootloader
