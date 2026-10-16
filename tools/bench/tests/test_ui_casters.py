@@ -328,6 +328,28 @@ async function journalClear(c) {
   return r;
 }
 
+/* Diagnostics' event card, its filter changed while the first read still runs: the journal reads it sends. */
+async function eventFilterEarly() {
+  const settle = async () => {
+    for (let i = 0; i < 40; i++) await new Promise(r => setImmediate(r));
+  };
+  const recs = [1, 2].map(n => ({ seq: n, kind: 'boot', a: 0, b: 0, uptime_s: n, unix: null }));
+  routes = (m, p) => {
+    if (p === '/api/health') return [200, { journal: { available: true, oldest_seq: 1, newest_seq: 2 } }];
+    if (p.startsWith('/api/journal')) return [200, { entries: recs, cursor: 2, more: false }];
+    return [200, {}];
+  };
+  sent.length = 0;
+  const card = ui.eventCard();
+  const sel = [...card.el.walk()].find(e => e.tagName === 'SELECT');
+  sel.value = sel.options[1].v;
+  sel.fire('change');
+  await settle();
+  routes = null;
+  return { reads: sent.filter(x => x.path.startsWith('/api/journal')).map(x => x.path),
+    rows: [...visible(card.el)].filter(e => e.tagName === 'TR').length };
+}
+
 /* The Diagnostics Health card for (hl, status): the chip [text, class], the messages' titles and lines, the rows. */
 function healthView(c) {
   const sec = ui.healthCard(c.hl, c.status);
@@ -365,6 +387,10 @@ const out = [];
 for (const c of JSON.parse(casesJson)) {
   if (c.fn === 'journal_clear') {
     out.push(await journalClear(c));
+    continue;
+  }
+  if (c.fn === 'event_filter_early') {
+    out.push(await eventFilterEarly());
     continue;
   }
   if (c.fn === 'health') {
@@ -881,6 +907,14 @@ def test_clear_journal_waits_for_the_erases_and_says_what_a_flash_error_left():
     # The same Refresh with the journal as it was: the rows stay.
     (r,) = run_editor([{"fn": "journal_clear", "answer": [409, busy], "refresh": True}])
     assert r["rows"] == r["rowsBefore"] > 0 and "No events recorded." not in r["lines"]
+
+
+def test_event_filter_changed_while_the_journal_loads():
+    """A filter picked before the first read has answered pages from nothing: no read with a cursor that is not a
+    number (the station refuses it), and the list comes when the first read does."""
+    (r,) = run_editor([{"fn": "event_filter_early"}])
+    assert r["reads"] and all(p.split("cursor=")[1].isdigit() for p in r["reads"]), r
+    assert r["rows"] > 0
 
 
 # ---- Status: Onocoy today's bar; Diagnostics: the Health card and Chip and Wi-Fi; Signals; long values; plain port ----

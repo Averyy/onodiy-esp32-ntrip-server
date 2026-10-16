@@ -1048,9 +1048,9 @@ function eventCard() {
     }
     return { r: r, added: added };
   }
-  /* Older records until a page of rows shows (or the journal's start). */
+  /* Older records until a page of rows shows (or the journal's start); none while the first read still runs (start() pages on from it). */
   async function fill() {
-    for (let i = 0; i < 64 && !atStart && items().length < shown; i++) {
+    for (let i = 0; i < 64 && recs.size && !atStart && items().length < shown; i++) {
       const lo = Math.min(...keys());
       const c = await read(Math.max(0, lo - 65));
       if (!c.added || Math.min(...keys()) <= oldest) atStart = true;
