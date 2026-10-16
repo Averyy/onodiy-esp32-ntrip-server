@@ -624,8 +624,8 @@ function connRow(e, back) {
   }
 }
 
-/* The journal's connection records (casters and Wi-Fi); key: the caster's slot, or the Wi-Fi. */
-const isConn = e => /^(caster|wifi)_/.test(e.kind);
+/* The journal's connection records (casters and Wi-Fi drops and returns; a move between access points is a row of its own); key: the caster's slot, or the Wi-Fi. */
+const isConn = e => /^(caster|wifi)_/.test(e.kind) && e.kind !== 'wifi_roam';
 const connKey = e => (e.kind.indexOf('wifi') === 0 ? 'w' : 'c' + (e.a & 0xff));
 
 /* A connection record of the journal as GET /api/connections has it (what connRow reads). */
@@ -889,6 +889,15 @@ function journalDetail(e) {
       return a ? 'Started for ' + fmt.dur(b) : 'Ended after ' + fmt.dur(b);
     case 'rx_boot':
       return a === 1 ? 'Kept running' : a === 2 ? 'Restarted too: the power was cut' : 'Not known';
+    case 'wifi_roam': {
+      /* a: channels before and after, who moved it, stayed on the same one; b: signals before and after, seconds offline. */
+      const ch0 = a & 0xff, ch1 = (a >>> 8) & 0xff, r0 = (b << 24) >> 24, r1 = (b << 16) >> 24;
+      const off = fmt.dur((b >>> 16) & 0x7fff) + ' offline';
+      if ((a >>> 24) & 1) return 'no stronger access point after all, ' + off;
+      return [((a >>> 16) & 0xff) === 1 ? "at the access point's request" : 'to a stronger access point',
+        ch0 && ch1 ? 'channel ' + (ch0 === ch1 ? ch1 : ch0 + ' to ' + ch1) : null,
+        rssiKnown(r0) && rssiKnown(r1) ? 'signal ' + r0 + ' to ' + r1 + ' dBm' : null, off].filter(Boolean).join(', ');
+    }
     case 'sg_test': {
       const ev = a & 0xff, grp = ((a >>> 8) & 0xff) + ' ' + ((a >>> 16) & 0xff);
       if (ev === 1) return 'Comparison started with ' + grp + ', ' + fmt.dur(b) + ' per group';
@@ -937,7 +946,7 @@ const EV_FILTER = [
   ['starts', 'Starts and restarts', ['boot', 'session', 'reboot', 'safe_mode', 'rx_boot']],
   ['recovery', 'Recovery', ['ladder_step']],
   ['casters', 'Casters', ['caster_down', 'caster_up', 'caster_stop']],
-  ['wifi', 'Wi-Fi', ['wifi_disconnect', 'wifi_up']],
+  ['wifi', 'Wi-Fi', ['wifi_disconnect', 'wifi_up', 'wifi_roam']],
   ['updates', 'Updates', ['app_update', 'app_revert', 'gnss_flash']],
   ['receiver', 'Receiver', ['rx_maintenance', 'live_view', 'sg_test']],
   ['loss', 'Data loss', ['data_loss']],
@@ -1023,10 +1032,12 @@ function journalItems(entries, atStart, kinds) {
       } else {
         /* A recovery step under its recovery's name ("Receiver recovery"); a start and an end (maintenance, the sky) never fold together. */
         const sub = e.kind === 'ladder_step' || e.kind === 'rx_maintenance' || e.kind === 'data_loss' ? e.a :
-          e.kind === 'live_view' || e.kind === 'sg_test' ? e.a & 0xff : '';
+          e.kind === 'live_view' || e.kind === 'sg_test' ? e.a & 0xff : e.kind === 'wifi_roam' ? e.a >>> 16 : '';
         const loss = e.kind === 'data_loss' ? (J.loss[e.a] || [e.a >= 16 ? slotName(e.a - 16) + ' data lost' : null])[0] : null;
+        /* A move whose reconnect found no stronger access point stayed: a reconnect, not a move. */
+        const stayed = e.kind === 'wifi_roam' && (e.a >>> 24) & 1 ? 'Wi-Fi reconnected' : null;
         rows.push({ k: e.kind + sub, seq: e.seq, ev: e.kind === 'ladder_step' ? capFirst(J.ladder[e.a] || 'ladder ' + e.a) + ' recovery' :
-          loss || J.kind[e.kind] || words(e.kind), det: journalDetail(e), when: when });
+          loss || stayed || J.kind[e.kind] || words(e.kind), det: journalDetail(e), when: when });
       }
     }
     if (!kinds || kinds.indexOf('boot') >= 0 || rows.length) {
