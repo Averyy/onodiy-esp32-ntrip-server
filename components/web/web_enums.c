@@ -96,6 +96,18 @@ const char *web_health_step_name(health_step_t v)
     return pick(s_health_step, COUNT(s_health_step), (int)v);
 }
 
+static const char *const s_health_step_phase[] = {
+    [HEALTH_STEP_PHASE_NONE] = "none",
+    [HEALTH_STEP_PHASE_RUNNING] = "running",
+    [HEALTH_STEP_PHASE_WAITING] = "waiting",
+};
+_Static_assert(COUNT(s_health_step_phase) == (size_t)HEALTH_STEP_PHASE_WAITING + 1u, "step phases moved: update the table");
+
+const char *web_health_step_phase_name(health_step_phase_t v)
+{
+    return pick(s_health_step_phase, COUNT(s_health_step_phase), (int)v);
+}
+
 static const char *const s_health_alert[] = {
     "power_supply", "receiver_power", "bands", "profile_drift", "heap_fragmented",
     "safe_mode", "settings_degraded", "no_upstream", "link_loss", "power_lost",

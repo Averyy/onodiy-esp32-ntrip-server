@@ -968,18 +968,18 @@ TEST_CASE("ladder: a configuration session during a grace abandons the step, whi
 
 TEST_CASE("ladder: a step abandoned twice in an episode counts as failed", "[health_ladder]")
 {
-    /* The receiver answers but sends no RTCM. About 60 s after each
-     * receiver reset the station runs an apply of its own (its check after
-     * the restart), which suspends the ladder inside step 5's grace. Step 5
-     * runs again once; abandoned a second time it counts as failed and the
-     * byte rule raises the power-cycle alert. */
+    /* The receiver sends garbage, no RTCM and no answer. About 60 s after
+     * each receiver reset the station runs an apply of its own (its check
+     * after the restart), which suspends the ladder inside step 5's grace.
+     * Step 5 runs again once; abandoned a second time it counts as failed
+     * and the byte rule raises the power-cycle alert. */
     sim_t w;
     sim_init(&w);
     w.apply_after = 5;
     w.rtcm = true;
     sim_run(&w, 20 * SEC);
     w.rtcm = false;
-    w.lines = true;
+    w.bytes = true;
     for (int64_t t = 0; t < 30 * MIN && !w.l.power_alert; t += SEC) {
         sim_step(&w);
     }
@@ -1008,6 +1008,57 @@ TEST_CASE("ladder: a step abandoned twice in an episode counts as failed", "[hea
     sim_run(&w, 2 * MIN);
     TEST_ASSERT_EQUAL_UINT8(0, w.l.abandoned);
     TEST_ASSERT_FALSE(w.l.power_alert);
+}
+
+TEST_CASE("ladder: a reset abandoned twice on a receiver that answers: 7 with the reason, no restart", "[health_ladder]")
+{
+    /* Text lines (TEXT_ONLY), no RTCM: as after a failed step 5, no
+     * power-cycle advice, and no reset on every retry pass. */
+    sim_t w;
+    sim_init(&w);
+    w.apply_after = 5;
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    for (int64_t t = 0; t < 30 * MIN && w.l.phase != HL_PH_FAILED; t += SEC) {
+        sim_step(&w);
+    }
+    TEST_ASSERT_EQUAL_UINT32(2, w.nreq_step[5]);
+    TEST_ASSERT_EQUAL_UINT32(2, count_rec(&w, 5, HL_OUT_ABANDONED));
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+    TEST_ASSERT_FALSE(s.power_alert);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+    TEST_ASSERT_EQUAL_INT(-1, find_rec(&w, HL_CODE_POWER_ALERT, HL_OUT_STARTED, 0));
+    sim_run(&w, 3 * HOUR);
+    TEST_ASSERT_EQUAL_UINT32(2, w.nreq_step[5]);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+
+    /* Nothing unasked (NO_BYTES), but the reset's banner and replies (the
+     * board with no antenna), full recovery and nothing holding a restart
+     * back: no ESP32 restart for a receiver that answers. */
+    sim_init(&w);
+    w.apply_after = 5;
+    w.in.answers = 40;
+    w.answers_during = 5;
+    for (int64_t t = 0; t < 30 * MIN && w.l.phase != HL_PH_FAILED; t += SEC) {
+        sim_step(&w);
+        if (w.nreq_step[5] == 1 && w.in.stn_state == HL_STN_STREAMING && w.running == 0 && w.apply_end == NEVER &&
+            w.l.phase == HL_PH_IDLE && w.l.abandoned != 0) {
+            /* Between the abandoned reset and its second run: still recovering, with the reason. */
+            s = st_of(&w);
+            TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+            TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+            TEST_ASSERT_EQUAL_UINT8(0, s.doing);
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(2, w.nreq_step[5]);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+    TEST_ASSERT_EQUAL_INT(-1, find_rec(&w, HL_CODE_REBOOT, HL_OUT_STARTED, 0));
 }
 
 TEST_CASE("ladder: a rescan abandoned twice goes on to reconfigure", "[health_ladder]")
@@ -2049,5 +2100,216 @@ TEST_CASE("ladder: a held first configuration with a receiver that answers is no
     w.rtcm = true;
     sim_run(&w, 10 * SEC);
     TEST_ASSERT_EQUAL_UINT8(HL_WHY_NONE, st_of(&w).why);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_OK, st_of(&w).level);
+}
+
+/* ---- what the recovery does now; the receiver that answers without RTCM ---------------------- */
+
+TEST_CASE("ladder: the step in progress and where it is", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    stream_then_silence(&w);   /* NO_BYTES: 1, 2, 3 (found), 4, 5, then 6a */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+    TEST_ASSERT_EQUAL_UINT8(1, s.doing);
+    TEST_ASSERT_FALSE(s.waiting);   /* requested: the station runs it */
+    sim_step(&w);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(1, s.doing);
+    TEST_ASSERT_TRUE(s.waiting);    /* it ran: its grace */
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NONE, s.why);   /* nothing answered since the last frame */
+
+    /* The rescan runs 45 s: running all along, then waiting. */
+    while (find_rec(&w, 3, HL_OUT_STARTED, 0) < 0 && w.now < T0 + 5 * MIN) {
+        sim_step(&w);
+    }
+    sim_run(&w, 30 * SEC);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(3, s.doing);
+    TEST_ASSERT_FALSE(s.waiting);
+    sim_run(&w, 20 * SEC);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(3, s.doing);
+    TEST_ASSERT_TRUE(s.waiting);
+
+    /* 6a: the restart is what it does; then FAILED: nothing in progress. */
+    while (w.reboots == 0 && w.now < T0 + 20 * MIN) {
+        sim_step(&w);
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+    TEST_ASSERT_EQUAL_UINT8(HL_CODE_REBOOT, s.doing);
+    sim_run(&w, 2 * MIN);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(0, s.doing);
+    TEST_ASSERT_FALSE(s.waiting);
+
+    /* Alerts only: a step only journalled is nothing in progress. */
+    sim_init(&w);
+    w.in.recovery_mode = HL_MODE_ALERTS;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, s.level);
+    TEST_ASSERT_EQUAL_UINT8(0, s.doing);
+}
+
+TEST_CASE("ladder: a receiver that answers but never streamed: the reason at once, step 4 not held by the survey", "[health_ladder]")
+{
+    /* No antenna: the station's boot session got answers (counted before
+     * the ladder's first sample) and opened the survey window; nothing
+     * comes unasked and no RTCM frame ever. */
+    sim_t w;
+    sim_init(&w);
+    w.in.answers = 40;
+    w.in.surveying = true;
+    w.in.recovery_mode = HL_MODE_NO_REBOOT;
+    w.answers_during = 4;   /* the reconfigure's session gets replies */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    TEST_ASSERT_EQUAL_UINT8(1, w.rec[0].code);   /* NO_BYTES: the ladder starts at 1 */
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+    TEST_ASSERT_EQUAL_UINT8(1, s.doing);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);   /* the antenna hint with the first step, not after the ladder */
+
+    /* Its own position sentence says no satellites: that reason instead. */
+    w.in.no_sky = true;
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_SKY, st_of(&w).why);
+    w.in.no_sky = false;
+
+    /* Step 4: the plain 90 s grace although the survey window stays open. */
+    while (find_rec(&w, 4, HL_OUT_STARTED, 0) < 0 && w.now < T0 + 10 * MIN) {
+        sim_step(&w);
+    }
+    int i4 = find_rec(&w, 4, HL_OUT_STARTED, 0);
+    TEST_ASSERT_TRUE(i4 >= 0);
+    int64_t t4 = w.rec[i4].at;
+    sim_run(&w, 40 * SEC);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(4, s.doing);
+    TEST_ASSERT_TRUE(s.waiting);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+    while (find_rec(&w, 4, HL_OUT_FAILED, 0) < 0 && w.now < t4 + 10 * MIN) {
+        sim_step(&w);
+    }
+    int f4 = find_rec(&w, 4, HL_OUT_FAILED, 0);
+    TEST_ASSERT_TRUE_MESSAGE(f4 >= 0, "step 4 judged inside the survey window");
+    TEST_ASSERT_TRUE(w.in.surveying);
+    TEST_ASSERT_TRUE(w.rec[f4].at - t4 <= (int64_t)w.dur[4] + HL_GRACE_RECONFIGURE_MS + 2 * SEC);
+    TEST_ASSERT_EQUAL_UINT(1, count_req(&w, 5));   /* then the receiver reset, as for any receiver that answers */
+
+    /* The same receiver with RTCM held back while surveying (the option): no stall inside the window at all. */
+    sim_init(&w);
+    w.in.answers = 40;
+    w.in.surveying = true;
+    w.in.survey_holds_rtcm = true;
+    sim_run(&w, 15 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+}
+
+TEST_CASE("ladder: after a stall the reason waits for an answer since the last frame; step 4 waits for the survey", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.in.answers = 40;          /* it answered at boot */
+    w.in.surveying = true;
+    w.rtcm = true;
+    sim_run(&w, 60 * SEC);
+    w.rtcm = false;             /* then nothing: it may be gone */
+    w.answers_during = 3;       /* the rescan asks it, and it answers */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NONE, s.why);   /* its answers came before the last frame */
+    while (find_rec(&w, 3, HL_OUT_STARTED, 0) < 0 && w.now < T0 + 5 * MIN) {
+        sim_step(&w);
+    }
+    sim_run(&w, 5 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, st_of(&w).why);   /* it answered the rescan */
+
+    /* It streamed this boot: step 4 keeps waiting while the survey window is open. */
+    while (find_rec(&w, 4, HL_OUT_STARTED, 0) < 0 && w.now < T0 + 10 * MIN) {
+        sim_step(&w);
+    }
+    TEST_ASSERT_TRUE(find_rec(&w, 4, HL_OUT_STARTED, 0) >= 0);
+    sim_run(&w, 8 * MIN);
+    TEST_ASSERT_EQUAL_INT(-1, find_rec(&w, 4, HL_OUT_FAILED, 0));
+    TEST_ASSERT_EQUAL_UINT8(4, st_of(&w).doing);
+    w.in.surveying = false;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_TRUE(find_rec(&w, 4, HL_OUT_FAILED, 0) >= 0);
+}
+
+TEST_CASE("ladder: alerts only chosen while a step's grace runs: only watched, still judged", "[health_ladder]")
+{
+    sim_t w;
+    sim_init(&w);
+    w.in.surveying = true;      /* the grace of step 4 lasts (it streamed this boot) */
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;             /* TEXT_ONLY: step 4 */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    TEST_ASSERT_EQUAL_UINT8(4, w.rec[0].code);
+
+    /* The user chooses alerts only while the station runs it: it completes, and is said so. */
+    sim_run(&w, 5 * SEC);
+    w.in.recovery_mode = HL_MODE_ALERTS;
+    sim_step(&w);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_RUN, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+    TEST_ASSERT_EQUAL_UINT8(4, s.doing);
+    TEST_ASSERT_FALSE(s.waiting);
+
+    /* Once it ran, its grace is only watched: no step in progress, the stall reported with its reason. */
+    sim_run(&w, 30 * SEC);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_GRACE, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, s.level);
+    TEST_ASSERT_EQUAL_UINT8(0, s.doing);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+
+    /* Back to full inside that grace: the station's step is in progress again. */
+    w.in.recovery_mode = HL_MODE_FULL;
+    sim_step(&w);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+    TEST_ASSERT_EQUAL_UINT8(4, s.doing);
+    TEST_ASSERT_TRUE(s.waiting);
+
+    /* Alerts only again; the window ends: the step that ran is judged, the next one only journalled. */
+    w.in.recovery_mode = HL_MODE_ALERTS;
+    sim_run(&w, 2 * MIN);
+    unsigned nreq = w.nreq;
+    TEST_ASSERT_EQUAL_INT(-1, find_rec(&w, 4, HL_OUT_FAILED, 0));
+    w.in.surveying = false;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_TRUE(find_rec(&w, 4, HL_OUT_FAILED, 0) >= 0);
+    TEST_ASSERT_TRUE(find_rec(&w, 5, HL_OUT_NOT_RUN, 0) >= 0);
+    TEST_ASSERT_EQUAL_UINT32(nreq, w.nreq);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, s.level);
+    TEST_ASSERT_EQUAL_UINT8(0, s.doing);
+
+    /* RTCM back during a watched grace: the step that ran gets its result. */
+    sim_init(&w);
+    w.in.surveying = true;
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    sim_run(&w, 30 * SEC);
+    w.in.recovery_mode = HL_MODE_ALERTS;
+    sim_run(&w, 10 * SEC);
+    w.rtcm = true;
+    sim_run(&w, 2 * SEC);
+    TEST_ASSERT_TRUE(find_rec(&w, 4, HL_OUT_HEALTHY, 0) >= 0);
     TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_OK, st_of(&w).level);
 }

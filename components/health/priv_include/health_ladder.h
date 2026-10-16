@@ -25,6 +25,8 @@
  *   2     LINK_RESTART                     15 s
  *   3     RESCAN                           30 s; found -> 4, not found -> byte rule
  *   4     RECONFIGURE                      90 s, longer while the survey window is open
+ *                                          (not for a receiver that answers and sent
+ *                                          no RTCM frame this boot: 90 s)
  *   5     RECEIVER_RESET                   120 s, then the byte rule
  *   6a    ESP32 reboot (cap, no reboot inhibit, no hold), else blocked or
  *         held -> 7
@@ -50,7 +52,13 @@
  * timer restarts from there. An abandoned step runs again, once per
  * episode: a step that ran and is abandoned a second time before the ladder
  * resets counts as failed, and the ladder goes on past it (after step 5,
- * the byte rule on the stall class).
+ * the rule of its failure for a receiver that answered since the RESET
+ * went out: 7 with its reason; otherwise the byte rule on the stall class).
+ * Between steps (IDLE after an abandoned step, or before a stall is
+ * declared again, while no RTCM comes and nothing but a lease suspends the
+ * ladder) the status stays RECOVERING (DEGRADED in ALERTS mode) with its
+ * reason, so the antenna hint does not drop out while the station's own
+ * sessions run.
  * Station NO_RECEIVER: the station's slow detection schedule replaces the
  * ladder's retries. On entering it the byte rule runs once per episode on
  * the station's report for its whole detection pass, then the ladder holds
@@ -89,7 +97,30 @@
  *            alert. In 7 the retry pass journals the step it would enter
  *            every 10 min and sends nothing. The level is DEGRADED before 7
  *            and FAILED at 7. Leaving this mode while stalled starts a fresh
- *            pass at the class entry step.
+ *            pass at the class entry step. A step the station runs when
+ *            the user chooses this mode completes; once it has run, its
+ *            grace is only watched like a journalled step's (level
+ *            DEGRADED, the reason shown, no step in progress): nothing is
+ *            sent after it, so the status never says the station is still
+ *            fixing the stall.
+ *
+ * Step in progress (hl_status_t.doing, .waiting; what the UI says the
+ * station does now): the step that is due or that the station runs
+ * (waiting false), or the step whose grace runs after the station ran it
+ * (waiting true); REBOOT while 6a is requested; none in IDLE, in 7, for a
+ * step that was only journalled and for a grace in ALERTS mode.
+ *
+ * Step 4 and the survey window: its grace is held while the survey window
+ * is open, so a reconfigure that restarted a running survey is not judged
+ * (and followed by a receiver reset, which would restart it again) before
+ * the survey had its time. Not for a receiver that answers and has sent no
+ * RTCM frame at all this boot: this boot's own configuration opened the
+ * window, nothing has streamed that a reset could interrupt, and a survey
+ * makes no progress without satellites, so waiting out the window (up to
+ * survey_in_s + 120 s) would only hold back the verdict. Its grace is the
+ * plain 90 s. A receiver that holds RTCM back while surveying is
+ * CONFIG_HEALTH_SURVEY_HOLDS_RTCM's case: no stall is declared inside the
+ * window at all.
  *
  * Why the receiver path is down (hl_status_t.why, the reason health's
  * alerts carry, so a FAILED level is never shown without one):
@@ -107,8 +138,13 @@
  *             come only when asked, so their age is the evidence; a text
  *             output that stopped is silence).
  *   SILENT    nothing usable and no answer.
- * Only while the ladder is in 7 or (ALERTS mode) in a journalled step's
- * grace, never in NO_RECEIVER (the station's own alert says that).
+ * While the ladder is in 7 or (ALERTS mode) in a journalled or only
+ * watched step's grace, never in NO_RECEIVER (the station's own alert says
+ * that). NO_RTCM and NO_SKY also while a step is in progress (above), as
+ * soon as the receiver answered after its last RTCM frame (text lines or
+ * replies; with no RTCM frame this boot, any answer this boot): the antenna
+ * is the likely cause, and the hint comes with the recovery, not after it.
+ * The level stays RECOVERING then.
  *
  * The receiver answers but sends no RTCM (amends the byte rule and the
  * retry pass; 6b is "bytes but no answers"):
@@ -385,6 +421,8 @@ typedef struct {
     bool reboot_recheck;          /**< NO_RECEIVER: a blocked 6a waits to be looked at again */
     bool episode;                 /**< a stall or NO_RECEIVER episode is in progress (the ladder has not reset since) */
     uint8_t why;                  /**< hl_why_t: why the receiver path is down (see above) */
+    uint8_t doing;                /**< step in progress: 1-5, 6 = reboot, 0 = none (see above) */
+    bool waiting;                 /**< ... the station ran it and waits for RTCM in its grace */
 } hl_status_t;
 
 /** Fresh ladder; the stall timer starts at now_ms. */

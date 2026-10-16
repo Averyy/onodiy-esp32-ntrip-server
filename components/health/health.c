@@ -921,6 +921,10 @@ static void tick(void)
     o.level = (health_level_t)hm_level(ls.level, degraded);
     o.alerts = alerts;
     o.last_step = (health_step_t)ls.last_step;
+    o.gnss_step = (health_step_t)ls.doing;
+    o.gnss_step_phase = ls.doing == 0 ? HEALTH_STEP_PHASE_NONE
+                        : ls.waiting  ? HEALTH_STEP_PHASE_WAITING
+                                      : HEALTH_STEP_PHASE_RUNNING;
     o.gnss_ladder_suspended = ls.suspended;
     o.uptime_s = (uint64_t)(esp_timer_get_time() / 1000000);
     o.gnss_stalls = ls.stalls;

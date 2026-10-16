@@ -463,7 +463,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
      "onocoy_ready": true, "bytes_sent": 74000000, "lag_ms_now": 40, "next_retry_s": 0, "unreached_s": 0, "hint": "",
      "stop_reason": "none"}
   ],
-  "health": {"level": "degraded", "last_step": "none", "ladder_suspended": false,
+  "health": {"level": "degraded", "last_step": "none", "step": "none", "step_phase": "none", "ladder_suspended": false,
              "factory_reset_refused": false, "recovery_mode": "full", "reboot_recheck": false,
              "reboot_hold": [], "reboot_hold_left_s": null, "reboot_cap_wait_s": null, "reboot_cap_limit": null},
   "alerts": [{"id": "link_loss", "source": "health"}],
@@ -503,7 +503,8 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `casters[]` | every slot; the full status is in `/api/casters`. `empty`: the slot has no host and is not enabled (never set up, or removed); its `name` is then `""` whatever the stored name is. In safe mode (configs not loaded) no slot is empty and every `name` is `null`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with the console's mountpoint, username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none); `stop_reason` why the Onocoy login guard stopped the slot (`ntrip_stop_t`; `none` unless `state` is `stopped`, section 10) |
 | `alerts[]` | health's alerts (`source: "health"`, `health_alert_t`) and the station's (`source: "station"`, `station_alert_t`). A `failed` health level always comes with the alert that says why (below); `config_failed` carries `retry_in_s` and `auto_retry` (as `config_retry_in_s` and `config_auto_retry` in `GET /api/gnss`); `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`) |
 | `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without an enabled protected slot that is set up (`onocoy_ready`), or without a trusted clock. Information only, never a gate |
-| health alerts that say why there is no RTCM | set from the GNSS ladder's evidence while it is in its last step (`failed`), or while a stall is only reported (`alerts_only`, `degraded`): `receiver_power` (bytes but no answer after the receiver reset: power-cycle the station), `receiver_silent` (nothing usable from the receiver and no answer to commands: power-cycle the station), `no_satellites` (the receiver answers, and its own position sentence says no fix with no satellites used: check that the antenna is on the socket marked M and sees the sky), `no_rtcm` (the receiver answers, by text lines or replies to the station, but sends no RTCM: most often the antenna), `rx_held` (the first configuration is held, `first_apply_held`, and the receiver answers: no RTCM is expected yet; level `degraded`, never `failed`, and the ladder declares no stall for it). None of them while the station finds no receiver: its own `no_receiver` alert says that. With `no_satellites` or `no_rtcm` the ladder does not reset the receiver again on its 10-min retry pass (a silent receiver gets the link restart and the rescan only) |
+| health alerts that say why there is no RTCM | set from the GNSS ladder's evidence while it is in its last step (`failed`), or while a stall is only reported (`alerts_only`, `degraded`; also the grace of a step the station ran before the user chose `alerts_only`); `no_satellites` and `no_rtcm` also while the recovery runs (`recovering`: a step in progress, or between two of its steps while a session of the station's own held it up), as soon as the receiver answered after its last RTCM frame (with none this boot: answered at all), so the antenna hint comes with the recovery: `receiver_power` (bytes but no answer after the receiver reset: power-cycle the station), `receiver_silent` (nothing usable from the receiver and no answer to commands: power-cycle the station), `no_satellites` (the receiver answers, and its own position sentence says no fix with no satellites used: check that the antenna is on the socket marked M and sees the sky), `no_rtcm` (the receiver answers, by text lines or replies to the station, but sends no RTCM: most often the antenna), `rx_held` (the first configuration is held, `first_apply_held`, and the receiver answers: no RTCM is expected yet; level `degraded`, never `failed`, and the ladder declares no stall for it). None of them while the station finds no receiver: its own `no_receiver` alert says that. With `no_satellites` or `no_rtcm` the ladder does not reset the receiver again on its 10-min retry pass (a silent receiver gets the link restart and the rescan only) |
+| `health.step`, `health.step_phase` | what the GNSS recovery does now (`health_step_t`, `health_step_phase_t`): `step` is the step that is due or that the station runs (`step_phase` `running`), or the one it ran and whose grace runs, the station waiting for RTCM (`waiting`); `reboot` while the station restarts itself for the receiver. `none` (both) outside a step, in the ladder's last step (`failed`), and in `alerts_only`, where nothing is fixed (a step the station ran before the user chose it is only watched: `none`, level `degraded`). `last_step` keeps the last step started; admin form only |
 | `health.factory_reset_refused` | a BOOT-button factory reset was refused within the last 10 min because a receiver update was running (the UI shows a notice); admin form only |
 | `health.recovery_mode` | automatic receiver recovery in effect (`gnss/recovery`, `health_recovery_mode_t`): `full`, `no_reboot` (everything but the ESP32 reboot), `alerts_only` (nothing is sent to the receiver: a stall is only reported and journalled, level `degraded`, `failed` once the ladder gives up); admin form only |
 | `health.reboot_recheck` | no receiver found and an ESP32 reboot was blocked or held: it is looked at again after the next detection pass, when the reboot cap allows and nothing holds it; admin form only |
@@ -1980,7 +1981,7 @@ All admin only.
 
 ```json
 {
-  "level": "ok", "alerts": [], "last_step": "none", "ladder_suspended": false,
+  "level": "ok", "alerts": [], "last_step": "none", "step": "none", "step_phase": "none", "ladder_suspended": false,
   "uptime_s": 86400, "gnss_stalls": 0, "recoveries": 0, "caster_restarts": 0,
   "network_recoveries": 0, "rtcm_gap_ms": 230, "gnss_retry_in_s": null,
   "factory_reset_refused_age_s": null, "admin_resets": 0, "recovery_mode": "full", "reboot_recheck": false,
@@ -2030,7 +2031,7 @@ the time until the receiver recovery's next retry pass (`null` = none
 scheduled). `factory_reset_refused_age_s` is the time since a BOOT-button
 factory reset was refused because a receiver update was running (`null` =
 not this boot); `admin_resets` counts BOOT-button password resets this
-boot. `recovery_mode`, `reboot_recheck`, `reboot_hold`,
+boot. `step`, `step_phase`, `recovery_mode`, `reboot_recheck`, `reboot_hold`,
 `reboot_hold_left_s`, `reboot_cap_wait_s` and `reboot_cap_limit` as in `/api/status`.
 `log.console_dropped` (and `_bytes`) count only lines the serial console
 never sent because the log ring overwrote them first; a burst that the
@@ -2787,6 +2788,7 @@ after it). The journal's `a` and `b` carry these C values.
 | `station_alert_t` | `unsupported_model`, `config_failed`, `position_mismatch`, `antenna_moved`, `receiver_attention`, `receiver_in_loader`, `no_receiver`, `signals_mismatch` |
 | `health_level_t` | `ok`, `degraded`, `recovering`, `failed` |
 | `health_step_t` | `none`, `resync`, `link_restart`, `rescan`, `reconfigure`, `receiver_reset`, `reboot` |
+| `health_step_phase_t` | `none`, `running`, `waiting` |
 | `health_alert_t` | `power_supply`, `receiver_power`, `bands`, `profile_drift`, `heap_fragmented`, `safe_mode`, `settings_degraded`, `no_upstream`, `link_loss`, `power_lost`, `receiver_silent`, `no_satellites`, `no_rtcm`, `rx_held` |
 | `health_recovery_mode_t` | `full`, `no_reboot`, `alerts_only` |
 | `ntrip_state_t` | `disabled`, `wait_network`, `wait_data`, `connecting`, `streaming`, `backoff`, `auth_failed`, `paused`, `config_error`, `banned`, `stopped` |

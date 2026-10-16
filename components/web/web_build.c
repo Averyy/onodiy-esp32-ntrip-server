@@ -513,6 +513,8 @@ static void sec_health(wj_t *w, const web_status_snap_t *s, bool pub)
     wj_str(w, "level", web_health_level_name(s->health.level));
     if (!pub) {
         wj_str(w, "last_step", web_health_step_name(s->health.last_step));
+        wj_str(w, "step", web_health_step_name(s->health.gnss_step));
+        wj_str(w, "step_phase", web_health_step_phase_name(s->health.gnss_step_phase));
         wj_bool(w, "ladder_suspended", s->health.gnss_ladder_suspended);
         /* A bool (not the age), so the section only changes when it flips. */
         wj_bool(w, "factory_reset_refused", s->health.factory_reset_refused_age_s < WEB_FACTORY_REFUSED_SHOW_S);
@@ -2002,6 +2004,8 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
     }
     wj_arr_close(w);
     wj_str(w, "last_step", web_health_step_name(hs->last_step));
+    wj_str(w, "step", web_health_step_name(hs->gnss_step));
+    wj_str(w, "step_phase", web_health_step_phase_name(hs->gnss_step_phase));
     wj_bool(w, "ladder_suspended", hs->gnss_ladder_suspended);
     wj_uint(w, "uptime_s", h->uptime_s);
     wj_uint(w, "gnss_stalls", hs->gnss_stalls);
