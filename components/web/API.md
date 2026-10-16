@@ -449,7 +449,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
               "cred_reverted": false, "cred_reverted_why": null},
   "receiver": {"state": "streaming", "model": "UM982", "firmware": "R4.10Build18975",
                "responding": true, "restarting": false, "identity_confirmed": true, "profile_applied": true,
-               "position_locked": true, "surveying": false, "survey_window_left_s": 0,
+               "position_locked": true, "position_known": true, "surveying": false, "survey_window_left_s": 0,
                "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "glonass": true,
                "rtcm1230_supported": true, "journal": "none",
                "uart_closed": false, "rx_maintenance": false, "maintenance_left_s": 0, "maintenance_chosen_s": 0,
@@ -491,6 +491,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.state` | `station_state_t`; `idle` during receiver maintenance (`rx_maintenance` tells the two apart) |
 | `receiver.uart_closed` | the receiver UART is closed and `gnss_link` reopens it on its own (the UI's "Receiver port closed"; never in safe mode, where the link is not opened) |
 | `receiver.rx_maintenance` | receiver maintenance is on (section 8): nothing is sent to the receiver; `maintenance_left_s` until it ends by itself, `maintenance_chosen_s` the chosen duration with extensions (both 0 when off) |
+| `receiver.position_known` | the station has a base position, locked or surveyed so far (`position.source` in `GET /api/gnss` is not `none`); admin form only |
 | `receiver.rtcm_age_ms` | since the last CRC-valid RTCM frame (`gnss_link`), `null` = never |
 | `receiver.glonass` | the receiver's stream carried GLONASS signals in the last 10 s (the signal summary of `GET /api/gnss/signals`; `false` before the first summary); admin form only |
 | `receiver.rtcm1230_supported` | as in `GET /api/gnss/signals`: the receiver accepted message 1230 (GLONASS biases) at the last configuration, `false` refused, `null` never configured. With `glonass` and `best_bands` it says whether the stream meets Onocoy's quality minimums (4 bands on one constellation, GLONASS with 1230) without polling the larger signals object; admin form only |
@@ -1377,11 +1378,16 @@ other slots, and for the protected slot while it is disabled or not set up
 mislead. `graced_uptime_permille` is the share of the whole day covered so
 far (online today plus the 300 s grant, of 86400 s: what the day reaches
 if nothing more is sent); `data_rate_permille` = this start's epochs sent
-today over its seconds connected today (a ratio of this start only, shown
-as the current data rate); `budget_s` the offline seconds the day allows at
+today over its seconds online today (a ratio of this start only, shown
+as the current data rate; online as the availability ledger counts it:
+streaming with fresh RTCM from the receiver, from the caster's OK on, so
+a session left open through a pause for receiver work is offline time,
+never lost epochs as well, and one left open through a receiver stall is
+online for its first 10 s, until the station sees the RTCM go stale (those
+seconds are lost epochs), and offline time after that); `budget_s` the offline seconds the day allows at
 the best data rate it can still reach (473 at 100 %): 1 - lost / (86400 -
 `today_offline_s`), with lost the epochs the slot should have sent while
-connected (one a second) but did not, today, across restarts (the
+online (one a second) but did not, today, across restarts (the
 availability ledger keeps the count), so one epoch lost right after a
 start costs about nothing instead of the whole budget; `budget_left_s` =
 `budget_s` minus `today_offline_s`, 0 once used up; `graced_uptime_so_far_permille`
@@ -1564,6 +1570,7 @@ removes it. The slot reconnects. `200` with the slot entry. Errors:
   "mdns_host": "onocoydiy",
   "configured": true, "credentials_unreadable": false, "ssid": "Home",
   "online": true, "associated": true, "ip": "192.168.1.50", "rssi": -60, "channel": 6,
+  "bssid": "AA:BB:CC:DD:EE:FF", "tx_power_dbm": 19.5,
   "time_synced": true, "upstream": "ok", "probe_age_s": 120,
   "reconnects": 1, "connect_failures": 0, "offline_s": 0, "retry_in_s": 0,
   "last_disconnect_reason": 8, "fallback_dns": false, "assoc_no_ip_s": 0,
@@ -1577,6 +1584,14 @@ removes it. The slot reconnects. `200` with the slot entry. Errors:
 }
 ```
 
+`bssid` is the access point the station is associated with (one of
+several that may serve the SSID: a mesh or a repeater), `tx_power_dbm`
+the station's Wi-Fi transmit power limit now (`esp_wifi_get_max_tx_power`,
+read in steps of 0.25 dBm); both refreshed with `rssi` every 5 s, and
+like `rssi` and `channel` `null` while not associated (and in the QEMU
+build, whose emulated link has no access point). Diagnostics for a weak
+link (the UI's Diagnostics shows them under Chip and Wi-Fi, with the
+channel); only in this admin route, never in the public status.
 `last_disconnect_reason` is the numeric `wifi_err_reason_t`. `scan.results`
 are the cached ones (no radio activity; at most 24); `age_s` is `null`
 before the first scan. `mdns_host`, `assoc_no_ip_s`, `cred_*`,
@@ -2115,7 +2130,7 @@ today, `budget_s` the day's offline allowance at the best data rate the
 day can still reach, `budget_left_s` what is left of it, and the other
 figures as in the caster status (section 10). The budget is information
 only. `today.lost_epochs` (only in `today`: a finished day does not keep
-it) the protected slot's epochs lost while connected, across restarts:
+it) the protected slot's epochs lost while online, across restarts:
 the losses that budget is figured from.
 
 In `protected`, `enabled` and `onocoy_ready` (the slot holds the console's
@@ -2262,13 +2277,23 @@ Empty body. Clears the event journal: `200 {"ok": true}` once every record
 written or queued before the request is gone. Later records go on with the
 next `seq` (never reused), so a client's cursor stays valid and simply
 finds nothing older. It erases each journal sector once (32 sectors of 4 KB;
-PROVISIONAL: a second or two, to be measured on hardware); a concurrent `GET /api/journal` or `/api/connections` waits for one
-sector erase at most and never sees part of the old records. Errors:
-`404 not_found` (no usable journal partition: `health.journal.available`
-false), `409 busy` (another clear runs), `500 internal` (a flash error:
-the records are gone from every read all the same; a sector that could not
-be erased brings its records back at the next boot, as does a power cut
-during the clear).
+PROVISIONAL: a second or two, to be measured on hardware, longer on a worn
+flash). The clear runs on the server's worker task (like the uploads and
+the file downloads), so other requests and the WebSocket's status pushes
+go on meanwhile; a concurrent `GET /api/journal` or `/api/connections`
+waits for one sector erase at most and never sees part of the old records,
+and `GET /api/health` keeps `journal.available` true (held longer than a
+second, its counts are those of the previous request).
+Errors: `404 not_found` (no usable journal partition:
+`health.journal.available` false), `409 busy` (another clear is waiting
+or runs, or an upload is being received: it holds the worker), `500
+internal` (a flash error; `message` says which: `ESP_FAIL` the clear could
+not start, the sector it opens first could not be erased or written: not
+cleared, the records stay, except in a full journal the oldest sector's
+(127 records), which the ring was about to drop anyway; `ESP_ERR_NOT_FINISHED` a later
+erase failed: the records are gone from every read all the same; a sector
+that could not be erased brings its records back at the next boot, as
+does a power cut during the clear).
 
 What clearing resets: the journal's records (`GET /api/journal`), the
 connection history (`GET /api/connections`, empty and `complete`), the

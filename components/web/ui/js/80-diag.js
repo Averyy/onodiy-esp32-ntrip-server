@@ -4,9 +4,10 @@
  *
  * Diagnostics (#/diag, not a tab: reached from Settings) in three parts:
  * Overview (health and alerts, this start with its core dump, earlier
- * starts, the chip and the Wi-Fi signal, the firmware's raw counters
- * folded), History (the last 30 days, then one event list read from the
- * journal) and Logs (this start and the previous one, the log level).
+ * starts, the chip, the Wi-Fi signal and access point, the firmware's raw
+ * counters folded), History (the last 30 days, then one event list read
+ * from the journal) and Logs (this start and the previous one, the log
+ * level).
  */
 
 const DIAG_TABS = [['', 'Overview'], ['history', 'History'], ['logs', 'Logs']];
@@ -111,19 +112,41 @@ function recoveryNow(hl) {
   return hl.recovery_mode ? lbl(L.recovery, hl.recovery_mode) : DASH;
 }
 
+const toneRank = t => (t in TONE_ORDER ? TONE_ORDER[t] : 9);
+
 /**
- * The Health card's chip, [text, tone]: the worst alert's colour; with no
- * alert named (a caster down makes the station "degraded" without one) the
- * Status page's own (st: stationState), so the two pages never disagree.
+ * The Health card's chip, [text, tone]: the worse of the worst alert's
+ * colour and the Status page's own (st: stationState), so the two pages
+ * never disagree (a caster down or stopped names no alert of its own).
  */
 function healthChip(level, alerts, st) {
-  const rank = t => (t in TONE_ORDER ? TONE_ORDER[t] : 9);
-  let tone = alerts.map(alertTone).sort((a, b) => rank(a) - rank(b))[0] || '';
-  if (!alerts.length && level !== 'ok') tone = st ? st.tone : healthTone(level);
-  if (rank(tone) > 2) return ['Healthy', 'ok'];
-  /* Blue: something planned or passing (looking for the receiver, maintenance), as on the Status page. */
-  if (!alerts.length && tone === 'info') return ['Busy', 'info'];
+  const worst = alerts.map(alertTone).sort((a, b) => toneRank(a) - toneRank(b))[0] || '';
+  let tone = worst;
+  if (st && toneRank(st.tone) < toneRank(tone)) tone = st.tone;
+  if (!st && !alerts.length && level !== 'ok') tone = healthTone(level);
+  if (toneRank(tone) > 2) return ['Healthy', 'ok'];
+  /* Blue from the state alone: something planned or passing (looking for the receiver, maintenance), as on the Status page. */
+  if (tone === 'info' && toneRank(worst) > 2) return ['Busy', 'info'];
   return [level === 'ok' ? 'Needs attention' : lbl(L.health, level), tone];
+}
+
+/*
+ * The Health card's messages: the alerts, and above them the Status page's
+ * state (its title and line) while it is at least as bad as every alert (an
+ * alert it says itself then goes). A state that only restates an alert of
+ * its colour and stands for no page notice (no receiver found) leaves it to
+ * the alert, whose words here are the fuller ones. A closed port leaves out
+ * the no-receiver alert (its cable advice would mislead), as the Status page
+ * does.
+ */
+function healthItems(alerts, st) {
+  let list = alerts.filter(a => !(st && st.key === 'uart_closed' && a.id === 'no_receiver'));
+  const worst = Math.min(9, ...list.map(a => toneRank(alertTone(a))));
+  const own = st && st.alertId ? list.find(a => a.id === st.alertId) : null;
+  const restates = !!own && !st.notice && toneRank(alertTone(own)) === toneRank(st.tone);
+  const state = !!st && toneRank(st.tone) <= 2 && toneRank(st.tone) <= worst && !restates;
+  if (state) list = list.filter(a => a.id !== st.alertId);
+  return { alerts: list, state: state };
 }
 
 /* What went wrong since this start, only what happened: "2 receiver stalls, 1 recovery step". */
@@ -134,10 +157,14 @@ function sinceStart(hl) {
   return parts.length ? capFirst(parts.join(', ')) : 'No stalls or recoveries';
 }
 
+/* Between two parts of a value: a line that wraps there starts with the dot ("AA:BB:CC:DD:EE:FF" / "· channel 11"). */
+const PART_SEP = ' ·' + NB;
+
 /*
- * The Wi-Fi in one line: network, signal in dBm, channel ("Home · Good
- * (-61 dBm) · channel 6"). net: the status's network (its RSSI is the
- * freshest); w: GET /api/wifi (the channel), either may be missing.
+ * The Wi-Fi in one line: network and signal in dBm ("Home · Good (-61
+ * dBm)"; a wrap starts the second line with the dot, the signal's bars
+ * kept with it). net: the status's network (its RSSI is the freshest); w:
+ * GET /api/wifi, either may be missing.
  */
 function wifiLine(net, w) {
   if (!net && !w) return DASH;
@@ -145,7 +172,16 @@ function wifiLine(net, w) {
   if (!n.ssid) return 'Not set up';
   if (!n.online) return n.ssid + ', offline' + (n.offline_s ? ' for ' + fmt.dur(n.offline_s) : '');
   const rssi = rssiKnown(n.rssi) ? n.rssi : w && w.rssi;
-  return [n.ssid, rssiKnown(rssi) ? [' · ', rssiView(rssi)] : null, w && w.channel ? ' · channel ' + w.channel : null];
+  return [n.ssid, rssiKnown(rssi) ? [' ', h('span', { class: 'nowrap' }, '·' + NB, rssiView(rssi))] : null];
+}
+
+/* The access point and its channel ("AA:BB:CC:DD:EE:FF · channel 11") and the transmit power, from GET /api/wifi: rows only while
+ * known and online (net: the status's network, the fresher). */
+function apRows(net, w) {
+  if (!w || (net && net.online === false)) return [];
+  const ap = [w.bssid, w.channel ? 'channel' + NB + w.channel : null].filter(Boolean).join(PART_SEP);
+  const tx = typeof w.tx_power_dbm === 'number' ? w.tx_power_dbm + NB + 'dBm' : null;
+  return [ap ? ['Access point', ap] : null, tx ? ['Transmit power', tx] : null];
 }
 
 /* An RSSI reading in dBm: -127 to -1. Anything else means unknown (null from the station; a raw 0, or -128 from earlier builds). */
@@ -162,30 +198,100 @@ function tasksTable(r) {
       h('span', { class: t.stack_free_min < 512 ? 't-bad' : null }, fmt.bytes(t.stack_free_min))]), { num: [1, 2, 3, 4], label: 'Tasks', cls: 'rows' })];
 }
 
+/* The Status page's buttons for the state, small, without the one to this page. */
+function stateActions(st) {
+  const acts = st.actions.filter(a => a.href !== '#/diag')
+    .map(a => (a.act ? heroAction(a) : link(a.label, a.href, 'btn small'))).filter(Boolean);
+  return acts.length ? h('div', { class: 'form-actions' }, acts) : null;
+}
+
+/* The Overview's Health card is on the page: from its first render until the Overview goes (noticeItems). */
+let healthCardShown = false;
+
+/* The notice the Health card says itself (the state above its alerts), which Diagnostics' Overview leaves out. */
+function healthNotice(s) {
+  const st = stationState(s, true);
+  return healthItems(Array.isArray(s.alerts) ? s.alerts : [], st).state ? st.notice : null;
+}
+
 /*
- * Patched in place every 5 s (patchDetect; the buttons act through
- * data-act), so the focus, a selection and the open sections survive. The
- * tasks are read every 2 s while their section is open.
+ * The Health card from GET /api/health and the status s (its alerts are
+ * the Status page's): the chip, the state with the Status page's button
+ * (its notice is left out here) and the alerts (healthItems), the restart
+ * plan while no corrections come, the rows. The page handles the data-act
+ * buttons (Check again, End now, Leave safe mode).
+ */
+function healthCard(hl, s) {
+  const port = hl.link || {};
+  const alerts = s && Array.isArray(s.alerts) ? s.alerts : (hl.alerts || []).map(a => ({ id: a, source: 'health' }));
+  const st = s ? stationState(s, true) : null;
+  const hi = healthItems(alerts, st);
+  const hc = healthChip(hl.level, hi.alerts, st);
+  /* The restart plan and the next attempt only while no corrections come (as on the Status page). */
+  const fixing = !st || !st.delivering;
+  const plan = fixing && restartPlanText(hl);
+  return h('section', { class: 'card' },
+    cardHead('Health', badge(hc[0], hc[1])),
+    hi.state ? msg(st.tone, h('strong', null, st.head), st.lead ? h('div', { class: 'small' }, stateLead(s, st, st.diagLead)) : null,
+      stateActions(st)) : null,
+    hi.alerts.length ? alertList(hi.alerts, { detect: true }) : hi.state ? null : h('p', { class: 'muted' }, 'No alerts.'),
+    plan ? h('p', { class: 'small' }, plan) : null,
+    kv([
+      ['If corrections stop', recoveryNow(hl)],
+      /* The port's row only while the state above does not say it. */
+      port.open === false && port.mode !== 'off' && !(hi.state && st.key === 'uart_closed') ?
+        ['Receiver port', h('span', { class: 't-bad' }, 'Closed, reopening')] : null,
+      ['Last recovery step', lbl(L.step, hl.last_step)],
+      ['Since the last RTCM', hl.rtcm_gap_ms === null || hl.rtcm_gap_ms === undefined ? 'never received' : fmt.ms(hl.rtcm_gap_ms)],
+      fixing && hl.gnss_retry_in_s ? ['Next recovery attempt in', fmt.dur(hl.gnss_retry_in_s)] : null,
+      hl.inhibited_by ? ['Restarts held back by', hl.inhibited_by] : null,
+      hl.update_slot && hl.update_slot !== 'none' ? ['Update running', hl.update_slot === 'app' ? 'an app update' : 'a receiver update'] : null,
+      hl.factory_reset_refused_age_s !== null && hl.factory_reset_refused_age_s !== undefined ?
+        ['BOOT-button factory reset', h('span', { class: 't-warn' }, 'refused ' + fmt.dur(hl.factory_reset_refused_age_s) +
+          ' ago (a receiver update was running)')] : null,
+      hl.admin_resets ? ['BOOT-button password resets', fmt.num(hl.admin_resets)] : null,
+      ['Since this start', sinceStart(hl)],
+    ]));
+}
+
+/* Chip and Wi-Fi: sys (GET /api/system), the status s, w (GET /api/wifi) and net (health's network), any of them may be missing. */
+function chipCard(sys, s, w, net) {
+  const chip = (sys && sys.chip) || {};
+  net = net || {};
+  return h('section', { class: 'card' },
+    h('h2', null, 'Chip and Wi-Fi'),
+    kv([
+      sys ? ['Chip', [[chip.model, chip.revision].filter(Boolean).join(' '), chip.flash_mb ? chip.flash_mb + NB + 'MB flash' : null,
+        chip.psram_mb ? chip.psram_mb + NB + 'MB PSRAM' : null].filter(Boolean).join(', ')] : null,
+      sys ? ['ESP-IDF', sys.idf] : null,
+      ['Wi-Fi', wifiLine(s && s.network, w)],
+      ...apRows(s && s.network, w),
+      sys && sys.mac ? ['MAC address', sys.mac] : null,
+      net.reconnects ? ['Wi-Fi drops', fmt.num(net.reconnects) + ' this start' +
+        (net.last_disconnect_reason ? ', last: ' + wifiReason(net.last_disconnect_reason) : '')] : null,
+    ]));
+}
+
+/*
+ * Patched in place with each GET /api/health (every 5 s) and each status
+ * (patchDetect; the buttons act through data-act), so the focus, a
+ * selection and the open sections survive. The tasks are read every 2 s
+ * while their section is open.
  */
 function overviewTab(box) {
-  let lastHl = null, sys = null, wifi = null, tasks = null, stopTasks = null;
+  let lastHl = null, sys = null, wifi = null, tasks = null, stopTasks = null, gone = false;
   const render = hl => {
+    if (gone) return;   /* an answer that came after the page was left */
     lastHl = hl;
-    const chip = (sys && sys.chip) || {};
     const b = hl.boot || {};
     const heap = hl.heap || {};
     const link = hl.link || {};
     const net = hl.network || {};
     const cd = hl.coredump || {};
-    /* The same alerts as the Status page (the station's and health's). */
-    const s = S.status || {};
-    const alerts = Array.isArray(s.alerts) ? s.alerts : (hl.alerts || []).map(a => ({ id: a, source: 'health' }));
-    const st = S.status ? stationState(s, true) : null;
-    const hc = healthChip(hl.level, alerts, st);
-    /* The restart plan and the next attempt only while no corrections come (as on the Status page). */
-    const fixing = !st || !st.delivering;
-    const plan = fixing && restartPlanText(hl);
-    const dev = s.device || {};
+    const dev = (S.status || {}).device || {};
+    /* A closed port is why the station finds no receiver: its state row says the port, not "No receiver found". */
+    const station = link.open === false && link.mode !== 'off' && (hl.station || {}).state === 'no_receiver' ?
+      Object.assign({}, hl.station, { state: 'uart_closed' }) : hl.station;
     const opened = new Set(Array.from(box.querySelectorAll('details[data-k]')).filter(d => d.open).map(d => d.getAttribute('data-k')));
     const sect = (k, title, ...kids) => h('details', { class: 'more', 'data-k': k, open: opened.has(k) }, h('summary', null, title), kids);
     const rxBoot = rxBootSentence((hl.station || {}).rx_boot);
@@ -198,28 +304,10 @@ function overviewTab(box) {
         h('span', { class: 'muted' }, (x.prev_uptime_s === null || x.prev_uptime_s === undefined ? '' : ' · ran ' + fmt.dur(x.prev_uptime_s) +
           ' before') + (x.version ? ' · ' + x.version : ''))))))));
     patchDetect(box, h('div', { class: 'grid' },
+      healthCard(hl, S.status),
       h('section', { class: 'card' },
-        cardHead('Health', badge(hc[0], hc[1])),
-        alerts.length ? alertList(alerts, { detect: true }) :
-          hc[1] !== 'ok' && st ? msg(st.tone, h('strong', null, st.head), st.lead ? h('div', { class: 'small' }, st.lead) : null) :
-            h('p', { class: 'muted' }, 'No alerts.'),
-        plan ? h('p', { class: 'small' }, plan) : null,
-        kv([
-          ['If corrections stop', recoveryNow(hl)],
-          link.open === false && link.mode !== 'off' ? ['Receiver port', h('span', { class: 't-bad' }, 'Closed, reopening')] : null,
-          ['Last recovery step', lbl(L.step, hl.last_step)],
-          ['Since the last RTCM', hl.rtcm_gap_ms === null || hl.rtcm_gap_ms === undefined ? 'never received' : fmt.ms(hl.rtcm_gap_ms)],
-          fixing && hl.gnss_retry_in_s ? ['Next recovery attempt in', fmt.dur(hl.gnss_retry_in_s)] : null,
-          hl.inhibited_by ? ['Restarts held back by', hl.inhibited_by] : null,
-          hl.update_slot && hl.update_slot !== 'none' ? ['Update running', hl.update_slot === 'app' ? 'an app update' : 'a receiver update'] : null,
-          hl.factory_reset_refused_age_s !== null && hl.factory_reset_refused_age_s !== undefined ?
-            ['BOOT-button factory reset', h('span', { class: 't-warn' }, 'refused ' + fmt.dur(hl.factory_reset_refused_age_s) +
-              ' ago (a receiver update was running)')] : null,
-          hl.admin_resets ? ['BOOT-button password resets', fmt.num(hl.admin_resets)] : null,
-          ['Since this start', sinceStart(hl)],
-        ])),
-      h('section', { class: 'card' },
-        cardHead('This start', b.safe_mode ? badge('Safe mode', 'bad') : b.stable ? badge('Stable', 'ok') : null),
+        /* Safe mode, and when it tries normal operation again, are the Health card's (the Status page's state). */
+        cardHead('This start', b.stable && !b.safe_mode ? badge('Stable', 'ok') : null),
         h('p', null, startSentence(b.reset_class, b.reset_reason, b.prev_reboot_reason) + '.'),
         rxBoot ? h('p', { class: 'muted small' }, rxBoot + '.') : null,
         kv([
@@ -230,7 +318,6 @@ function overviewTab(box) {
           ['Crashes counted', fmt.num(b.crashes)],
           ['Brownouts since power-on', fmt.num(b.brownouts_since_power_on)],
           ['Previous run', fmt.dur(b.prev_session_uptime_s)],
-          b.safe_mode ? ['Normal retry in', fmt.dur(b.safe_mode_retry_in_s)] : null,
         ]),
         /* A crash's copy of the memory: it can hold passwords, so the download asks first. */
         cd.present ? msg('warn', h('strong', null, 'Core dump stored'),
@@ -239,17 +326,7 @@ function overviewTab(box) {
             ['Backtrace', (cd.backtrace || []).length ? h('code', null, cd.backtrace.join(' ')) : DASH]]),
           h('div', { class: 'form-actions' }, h('button', { type: 'button', class: 'btn danger', 'data-act': 'cd-erase' }, 'Erase'),
             h('button', { type: 'button', class: 'btn primary', 'data-act': 'cd-dl' }, 'Download'))) : null),
-      h('section', { class: 'card' },
-        h('h2', null, 'Chip and Wi-Fi'),
-        kv([
-          sys ? ['Chip', [[chip.model, chip.revision].filter(Boolean).join(' '), chip.flash_mb ? chip.flash_mb + NB + 'MB flash' : null,
-            chip.psram_mb ? chip.psram_mb + NB + 'MB PSRAM' : null].filter(Boolean).join(', ')] : null,
-          sys ? ['ESP-IDF', sys.idf] : null,
-          ['Wi-Fi', wifiLine(s.network, wifi)],
-          sys && sys.mac ? ['MAC address', sys.mac] : null,
-          net.reconnects ? ['Wi-Fi drops', fmt.num(net.reconnects) + ' this start' +
-            (net.last_disconnect_reason ? ', last: ' + wifiReason(net.last_disconnect_reason) : '')] : null,
-        ])),
+      chipCard(sys, S.status, wifi, net),
       h('section', { class: 'card' },
         h('h2', null, 'Earlier starts'),
         starts.length ? [startRows(starts.slice(0, 5)), starts.length > 5 ? sect('starts', 'Older starts', startRows(starts.slice(5))) : null] :
@@ -268,7 +345,7 @@ function overviewTab(box) {
           sect('link', 'Receiver link', autoKv(link)),
           sect('framing', 'Framing', autoKv(link.framing)),
           sect('hub', 'RTCM hub', autoKv(hl.hub)),
-          sect('station', 'Station', autoKv(hl.station)),
+          sect('station', 'Station', autoKv(station)),
           sect('obs', 'Observations', autoKv(hl.obs)),
           sect('net', 'Network', autoKv(net)),
           net.ladder ? sect('ladder', 'Network recovery', kv([
@@ -281,11 +358,18 @@ function overviewTab(box) {
           sect('journal', 'Event journal', journalStats(hl.journal)),
           sect('log', 'Log', logStats(hl.log)),
           sect('tasks', 'Tasks', tasks ? tasksTable(tasks) : h('p', { class: 'muted' }, 'Loading…'))))));
+    if (!healthCardShown) {
+      healthCardShown = true;
+      renderNotices();   /* the notice the card says now goes */
+    }
   };
+  /* Also on every status (Views.diag.update): the Health card follows it as the notices do. */
   const again = () => {
     if (lastHl) render(lastHl);
   };
   detectClicks(box, again);
+  endMaintClicks(box, again);
+  leaveSafeClicks(box, again);
   /* The tasks only while both folds are open. */
   const tasksOn = () => {
     const f = box.querySelector('details[data-k="internals"]'), t = box.querySelector('details[data-k="tasks"]');
@@ -324,7 +408,7 @@ function overviewTab(box) {
     toast('Core dump erased.', 'ok');
     api('GET', '/api/health').then(render, () => {});
   });
-  /* The chip and the build, once (GET /api/system); the Wi-Fi channel every 15 s. */
+  /* The chip and the build, once (GET /api/system); the access point, its channel and the transmit power every 15 s. */
   api('GET', '/api/system').then(v => {
     sys = v;
     again();
@@ -335,7 +419,10 @@ function overviewTab(box) {
   });
   const stopHl = pollInto(box, 5000, '/api/health', render);
   return {
+    update: again,
     stop() {
+      gone = true;
+      healthCardShown = false;
       stopHl();
       stopWifi();
       if (stopTasks) stopTasks();
@@ -939,7 +1026,8 @@ function journalItems(entries, atStart, kinds) {
  * The event list (the journal), newest first. It reads the newest 64
  * records (from health.journal.newest_seq), then 64 at a time backwards
  * until it has a page of rows (or the journal's start); "Show older" adds a
- * page the same way, Refresh reads what came since. No record is read twice.
+ * page the same way, Refresh reads what came since (all of it again after a
+ * clear). No record is read twice.
  */
 function eventCard() {
   const recs = new Map();   /* seq -> record */
@@ -960,9 +1048,9 @@ function eventCard() {
     }
     return { r: r, added: added };
   }
-  /* Older records until a page of rows shows (or the journal's start). */
+  /* Older records until a page of rows shows (or the journal's start); none while the first read still runs (start() pages on from it). */
   async function fill() {
-    for (let i = 0; i < 64 && !atStart && items().length < shown; i++) {
+    for (let i = 0; i < 64 && recs.size && !atStart && items().length < shown; i++) {
       const lo = Math.min(...keys());
       const c = await read(Math.max(0, lo - 65));
       if (!c.added || Math.min(...keys()) <= oldest) atStart = true;
@@ -984,6 +1072,9 @@ function eventCard() {
   }
   async function refresh() {
     if (!recs.size) return start();
+    /* Cleared meanwhile (here or on another page): every record shown is gone, so read it from the start. */
+    const j = (await api('GET', '/api/health')).journal || {};
+    if (!j.available || !j.newest_seq || j.oldest_seq > Math.max(...keys())) return start();
     let cursor = Math.max(...keys());
     for (let i = 0; i < 64; i++) {
       const c = await read(cursor);
@@ -1012,9 +1103,29 @@ function eventCard() {
       body: [h('p', null, 'Every recorded event is deleted. The start history, the last 30 days and the logs are kept.'),
         h('p', { class: 'muted' }, 'The power-loss alert forgets earlier power cuts.')] });
     if (!ok) return;
-    const r = await act(wipe, () => api('DELETE', '/api/journal'), err);
-    if (r === undefined) return;
-    toast('Event journal cleared.', 'ok');
+    err.hidden = true;
+    let done = 'Event journal cleared.', tone = 'ok';
+    try {
+      /* Every sector is erased: seconds on a slow flash. */
+      await busy(wipe, () => api('DELETE', '/api/journal', undefined, { timeout: 60000 }));
+    } catch (e) {
+      const ae = e instanceof ApiError ? e : null;
+      /* 500: ESP_FAIL did not clear (a full journal may lose its oldest sector, as when it moves on); ESP_ERR_NOT_FINISHED
+       * cleared, but a sector not erased returns at a restart. */
+      const m = ae && ae.status === 500 ? e.message : '';
+      if (m === 'ESP_FAIL') return say(err, 'Not cleared: the journal flash could not be written.');
+      /* 404: no usable journal; reading it again shows that. 409: a clear waits or runs, or an upload holds the station's worker. */
+      if (ae && ae.status === 404) return act(null, start, err);
+      if (ae && ae.code === 'busy') return say(err, 'Another clear or an upload is running. Try again when it ends.');
+      /* No answer in time: the clear runs on in the station (Refresh reads the journal again once it is cleared). */
+      if (ae && ae.code === 'timeout') {
+        return say(err, 'No answer within a minute. Press Refresh in a moment to see whether it cleared.', 'warn');
+      }
+      if (m !== 'ESP_ERR_NOT_FINISHED') return showErr(e, err);
+      done = 'Event journal cleared, but a flash error may bring some events back after a restart.';
+      tone = 'warn';
+    }
+    toast(done, tone);
     shown = EV_PAGE;
     open.clear();
     act(null, start, err);
@@ -1061,6 +1172,9 @@ Views.diag = {
         'aria-current': t[0] === tab ? 'page' : null }, t[1]))), box);
     const sub = DIAG_PAGES[tab](box);
     return {
+      update() {
+        if (sub && sub.update) sub.update();
+      },
       destroy() {
         if (sub && sub.stop) sub.stop();
       },

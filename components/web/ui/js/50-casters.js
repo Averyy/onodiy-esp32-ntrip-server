@@ -625,7 +625,9 @@ function stopPanel(c, st) {
  * (opts.stopped: the page shows that in its stop panel instead), the login
  * guard's count or the station's hint (not while waiting for data: the chip
  * says so), else the last failure (opts.unreached: the page says that in its
- * not-reached line). null when there is nothing to add.
+ * not-reached line; opts.tls: the card's plain-port box says the TLS
+ * failures, so neither a TLS hint nor a TLS failure here). null when there
+ * is nothing to add.
  */
 function casterDetail(st, opts) {
   opts = opts || {};
@@ -635,15 +637,24 @@ function casterDetail(st, opts) {
   }
   const waiting = st.state !== 'streaming';
   const refused = waiting && st.login_rejects > 0 ? 'Onocoy refused the login (' + st.login_rejects + ' of 3)' : '';
-  const text = (st.state === 'wait_data' ? '' : st.hint) || refused;
+  const hint = st.state === 'wait_data' || (opts.tls && /^TLS\b/.test(st.hint || '')) ? '' : st.hint;
+  const text = hint || refused;
   if (text) return h('div', { class: 'hintline' }, capFirst(text));
   /* The last failure, unless the chip says the same ("Login refused"). */
-  const fail = waiting && st.reason && st.reason !== 'none' ? lbl(L.fail, st.reason) : '';
+  const fail = waiting && st.reason && st.reason !== 'none' && !(opts.tls && st.reason === 'tls') ? lbl(L.fail, st.reason) : '';
   if (fail && fail !== lbl(L.caster, st.state) && !(opts.unreached && st.unreached_s)) {
     return h('div', { class: 't-' + (casterTone(st.state) || 'warn') + ' small' }, fail);
   }
   return null;
 }
+
+/*
+ * Slots whose switch to the plain port runs ('busy') or is saved ('done'),
+ * kept across the card's rebuild every second: the button keeps its spinner
+ * and the keyboard focus (aria-disabled, not disabled) until the answer, and
+ * goes once saved.
+ */
+const PLAIN_SWITCH = {};
 
 function casterSummary(c, st, preset) {
   const ono = isOnocoySlot(c);
@@ -661,12 +672,16 @@ function casterSummary(c, st, preset) {
   if (on + off > 0) metrics.push(['Today online', fmt.dur(on)]);
   if (off) metrics.push(['Today offline', fmt.dur(off)]);
   const avg = c.backoff_profile === 'polite' && st.state === 'streaming' ? slotRate(c.slot, 60) : null;
+  if (!c.tls) delete PLAIN_SWITCH[c.slot];
+  /* TLS to Onocoy keeps failing: one box says it, with the count and the switch to the plain port. */
+  const plain = ono && c.tls && PLAIN_SWITCH[c.slot] !== 'done' && st.failures_by_class && st.failures_by_class.tls >= 10 &&
+    st.state !== 'streaming';
   const out = [
     /* Where it streams: host and mountpoint (the protocol details are in the editor); a test slot says so here. */
     h('div', { class: 'muted small' }, c.host + (c.mountpoint ? '/' + c.mountpoint : '') +
       (c.test_onocoy ? ' · Test Onocoy slot (bench build)' : '')),
     st.state === 'stopped' ? stopPanel(c, st) : null,
-    casterDetail(st, { unreached: true }),
+    casterDetail(st, { unreached: true, tls: plain }),
     metrics.length ? h('div', { class: 'metrics' }, metrics.map(m => h('span', null, m[0] + ' ', h('b', null, m[1])))) : null,
     /* Public casters ban fast streams: a warning only when this one gets close. */
     avg !== null && avg > 28000 ? h('div', { class: 'small t-warn' }, 'Average over 60 s: ' + fmt.kbps(avg) +
@@ -674,27 +689,36 @@ function casterSummary(c, st, preset) {
     st.unreached_s ? h('div', { class: 'hintline' }, 'Caster not reached for ' + fmt.dur(st.unreached_s) +
       (st.reason && st.reason !== 'none' ? ': ' + lbl(L.fail, st.reason) : '') + '.') : null,
   ];
-  if (ono && c.tls && st.failures_by_class && st.failures_by_class.tls >= 10 && st.state !== 'streaming') {
+  if (plain) {
+    const waiting = PLAIN_SWITCH[c.slot] === 'busy';
     const sw = btn('Use plain port ' + preset.port, async () => {
+      if (PLAIN_SWITCH[c.slot]) return;
+      PLAIN_SWITCH[c.slot] = 'busy';
+      sw.classList.add('busy');
+      sw.setAttribute('aria-disabled', 'true');
       const body = { tls: false, port: preset.port };
+      let ok = false;
       try {
-        await busy(sw, () => saveCaster(c.slot, body));
+        await saveCaster(c.slot, body);
+        ok = true;
       } catch (e) {
         if (e instanceof ApiError && e.code === 'caster_policy' && e.body.reason === 'dup_stream_ack_required') {
           /* This slot needs the acknowledgement itself (it may have been given
            * on the other slot only): ask for it here. A dialog, since this
            * card is rebuilt every second. */
-          const ok = await dialog({ title: 'Duplicate-stream risk', ok: 'Save anyway', body: dupText(),
+          ok = await dialog({ title: 'Duplicate-stream risk', ok: 'Save anyway', body: dupText(),
             check: 'I understand the risk and want to stream to both.',
             onOk: () => saveCaster(c.slot, Object.assign({ dup_stream_ack: true }, body)) });
-          if (ok) toast('Switched to the plain port.', 'ok');
-          return;
+        } else {
+          showErr(e);
         }
-        showErr(e);
-        return;
       }
-      toast('Switched to the plain port.', 'ok');
-    }, 'small');
+      if (ok) PLAIN_SWITCH[c.slot] = 'done';
+      else delete PLAIN_SWITCH[c.slot];
+      sw.classList.remove('busy');
+      sw.removeAttribute('aria-disabled');
+      if (ok) toast('Switched to the plain port.', 'ok');
+    }, 'small' + (waiting ? ' busy' : ''), { 'aria-disabled': waiting ? 'true' : null });
     out.push(msg('warn', h('p', null, 'TLS to Onocoy failed ' + st.failures_by_class.tls + ' times. Onocoy documents uploads on the plain port only.'),
       h('div', { class: 'form-actions' }, sw)));
   }

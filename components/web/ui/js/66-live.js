@@ -533,25 +533,35 @@ const RX_CHECK = { satsGood: 20, satsFair: 10, cnrGood: 40, cnrFair: 35, bands: 
 /* The constellations Onocoy rewards: QZSS and NavIC never count as the best (as GET /api/gnss/signals best_sys). */
 const REWARDED = ['gps', 'glonass', 'galileo', 'beidou'];
 
-/** Pass/warn hints from the live data: {waiting} or {items: [[tone, title, text]], ok}. */
+/**
+ * Pass/warn hints from the live data: {waiting} or {items: [[tone, title,
+ * text, line, id]], ok}. title and text: the setup's two lines; line: the
+ * same in one line (the Signals card); id: 'sats', 'cnr' or 'bands'.
+ */
 function receptionChecks(d) {
   const t = d && d.totals;
   if (!t || (!t.tracked && (t.msm_age_ms === null || t.msm_age_ms === undefined))) return { waiting: true };
   const items = [];
+  const sats = t.tracked + ' satellites tracked';
   if (t.tracked >= RX_CHECK.satsGood) {
-    items.push(['ok', t.tracked + ' satellites tracked', 'A good view of the sky.']);
+    items.push(['ok', sats, 'A good view of the sky.', sats, 'sats']);
   } else if (t.tracked >= RX_CHECK.satsFair) {
-    items.push(['warn', t.tracked + ' satellites tracked', 'Fewer than an open sky gives. Trees, walls or a roof edge may hide part of the sky.']);
+    items.push(['warn', sats, 'Fewer than an open sky gives. Trees, walls or a roof edge may hide part of the sky.',
+      sats + ': check that nothing hides the sky', 'sats']);
   } else {
-    items.push(['bad', t.tracked + ' satellites tracked', 'Very few. Check that the antenna sees the open sky and that its cable is connected.']);
+    items.push(['bad', sats, 'Very few. Check that the antenna sees the open sky and that its cable is connected.',
+      sats + ': check the antenna\'s view and cable', 'sats']);
   }
   const c = t.cnr_dbhz;
+  const db = c ? ' (' + c + NB + 'dB\u2011Hz)' : '';
   if (c && c >= RX_CHECK.cnrGood) {
-    items.push(['ok', 'Mean signal strength ' + c + NB + 'dB\u2011Hz', 'Strong signals.']);
+    items.push(['ok', 'Mean signal strength ' + c + NB + 'dB\u2011Hz', 'Strong signals.', 'Strong signals' + db, 'cnr']);
   } else if (c && c >= RX_CHECK.cnrFair) {
-    items.push(['warn', 'Mean signal strength ' + c + NB + 'dB\u2011Hz', 'Fair. Check the antenna cable and its connectors, and keep metal and walls away from the antenna.']);
+    items.push(['warn', 'Mean signal strength ' + c + NB + 'dB\u2011Hz', 'Fair. Check the antenna cable and its connectors, and keep metal and walls away from the antenna.',
+      'Fair signals' + db + ': check the antenna cable', 'cnr']);
   } else {
-    items.push(['bad', 'Mean signal strength ' + (c ? c + NB + 'dB\u2011Hz' : 'unknown'), 'Weak. Check the antenna, its cable and its connectors.']);
+    items.push(['bad', 'Mean signal strength ' + (c ? c + NB + 'dB\u2011Hz' : 'unknown'), 'Weak. Check the antenna, its cable and its connectors.',
+      (c ? 'Weak signals' + db : 'Signal strength unknown') + ': check the antenna and its cable', 'cnr']);
   }
   let best = null, bestN = 0;
   for (const s of t.systems || []) {
@@ -562,11 +572,12 @@ function receptionChecks(d) {
     }
   }
   if (bestN >= RX_CHECK.bands) {
-    items.push(['ok', lbl(L.sys, best) + ': ' + bestN + ' bands', '4 bands on one constellation: the most this receiver can reach.']);
+    items.push(['ok', lbl(L.sys, best) + ': ' + bestN + ' bands', '4 bands on one constellation: the most this receiver can reach.',
+      bestN + ' bands on ' + lbl(L.sys, best), 'bands']);
   } else {
     items.push(['warn', best ? 'Best: ' + lbl(L.sys, best) + ' with ' + bestN + (bestN === 1 ? ' band' : ' bands') : 'No bands yet',
       'Onocoy\'s quality score needs 4 bands on one constellation. The signal group in Receiver settings sets them; ' +
-      'right after a start this can take a minute.']);
+      'right after a start this can take a minute.', 'Onocoy needs 4 bands: change the signal group in Receiver settings', 'bands']);
   }
   return { items: items, ok: items.every(i => i[0] === 'ok') };
 }
@@ -574,8 +585,10 @@ function receptionChecks(d) {
 const CHECK_ICON = { ok: '✓', warn: '!', bad: '✕' };
 const CHECK_WORD = { ok: 'Good', warn: 'Check', bad: 'Problem' };
 
-function receptionList(r) {
-  return h('ul', { class: 'checks' }, r.items.map(i => h('li', { class: i[0] },
+/* The hints as a list; oneLine: each in one line (the item's line; its tone word only for assistive technology). */
+function receptionList(r, oneLine) {
+  return h('ul', { class: 'checks' + (oneLine ? ' lines' : '') }, r.items.map(i => h('li', { class: i[0] },
     h('span', { class: 'ic', 'aria-hidden': 'true' }, CHECK_ICON[i[0]]),
-    h('span', null, h('strong', null, CHECK_WORD[i[0]] + ': ' + i[1]), h('div', { class: 'muted small' }, i[2])))));
+    oneLine ? h('span', null, h('span', { class: 'sr-only' }, CHECK_WORD[i[0]] + ': '), i[3]) :
+      h('span', null, h('strong', null, CHECK_WORD[i[0]] + ': ' + i[1]), h('div', { class: 'muted small' }, i[2])))));
 }

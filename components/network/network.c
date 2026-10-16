@@ -1026,6 +1026,8 @@ static void wifi_stop(void)
     s_ap_reasons = 0;   /* the AP stops with Wi-Fi: the policy brings it back if still wanted */
     taskENTER_CRITICAL(&s_lock);
     s_st.associated = false;
+    s_st.bssid_known = false;
+    s_st.tx_power_known = false;
     s_st.ap_reasons = 0;
     s_st.ap_close_in_s = UINT32_MAX;
     taskEXIT_CRITICAL(&s_lock);
@@ -1557,6 +1559,8 @@ static void handle_disconnected(uint8_t reason, int8_t rssi)
     s_trial_assoc = false;   /* only the next association can confirm trial credentials */
     taskENTER_CRITICAL(&s_lock);
     s_st.associated = false;
+    s_st.bssid_known = false;
+    s_st.tx_power_known = false;
     s_st.last_disconnect_reason = reason;
     taskEXIT_CRITICAL(&s_lock);
     ip_lost();   /* IDF's default handler has already cleared the address */
@@ -1977,17 +1981,26 @@ static void handle_msg(const net_msg_t *m)
         }
         s_had_link = true;
         wifi_ap_record_t ap;
+        int8_t power = 0;
 #if CONFIG_NETWORK_QEMU_ETHERNET
         memset(&ap, 0, sizeof(ap));
         bool have = false;   /* no access point behind the emulated link */
+        bool have_power = false;
 #else
         bool have = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
+        bool have_power = have && esp_wifi_get_max_tx_power(&power) == ESP_OK;
 #endif
         taskENTER_CRITICAL(&s_lock);
         s_st.associated = true;
+        s_st.bssid_known = have;
+        s_st.tx_power_known = have_power;
         if (have) {
             s_st.rssi = ap.rssi;
             s_st.channel = ap.primary;
+            memcpy(s_st.bssid, ap.bssid, sizeof(s_st.bssid));
+        }
+        if (have_power) {
+            s_st.tx_power_qdbm = power;
         }
         taskEXIT_CRITICAL(&s_lock);
         break;
@@ -2196,9 +2209,17 @@ static void housekeeping(void)
 #if !CONFIG_NETWORK_QEMU_ETHERNET   /* the emulated link has no signal to read */
         wifi_ap_record_t ap;
         if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+            int8_t power = 0;
+            bool have_power = esp_wifi_get_max_tx_power(&power) == ESP_OK;
             taskENTER_CRITICAL(&s_lock);
             s_st.rssi = ap.rssi;
             s_st.channel = ap.primary;
+            s_st.bssid_known = true;
+            memcpy(s_st.bssid, ap.bssid, sizeof(s_st.bssid));
+            if (have_power) {
+                s_st.tx_power_known = true;
+                s_st.tx_power_qdbm = power;
+            }
             taskEXIT_CRITICAL(&s_lock);
         }
 #endif

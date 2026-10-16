@@ -431,6 +431,47 @@ uint32_t dj_capacity(const dj_t *j)
     return j->sectors * DJ_RECS_PER_SECTOR;
 }
 
+/* ---- write queue -------------------------------------------------------------------- */
+
+void dj_queue_reset(dj_queue_t *q)
+{
+    q->head = 0;
+    q->count = 0;
+}
+
+bool dj_queue_push(dj_queue_t *q, const dj_entry_t *e)
+{
+    if (q->count >= DJ_QUEUE_LEN) {
+        return false;
+    }
+    q->rec[(q->head + q->count) % DJ_QUEUE_LEN] = *e;
+    q->count++;
+    return true;
+}
+
+bool dj_queue_pop(dj_queue_t *q, dj_entry_t *out)
+{
+    if (q->count == 0) {
+        return false;
+    }
+    *out = q->rec[q->head];
+    q->head = (q->head + 1u) % DJ_QUEUE_LEN;
+    q->count--;
+    return true;
+}
+
+void dj_queue_clear_started(dj_queue_t *q, uint32_t queued, int start_result)
+{
+    if (start_result != DJ_OK) {
+        return;   /* nothing was cleared: what waits is written as usual */
+    }
+    if (queued > q->count) {
+        queued = q->count;
+    }
+    q->head = (q->head + queued) % DJ_QUEUE_LEN;
+    q->count -= queued;
+}
+
 /* ---- rate limits -------------------------------------------------------------------- */
 
 void dj_rate_init(dj_rate_t *r, uint32_t min_interval_ms, uint32_t per_hour, uint32_t exempt_mask)

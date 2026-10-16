@@ -445,6 +445,13 @@ esp_err_t web_download_frame_times(web_req_t *r);
 /** An upload is being received or refused (one at a time). */
 bool web_upload_busy(void);
 
+/**
+ * DELETE /api/journal: diag_journal_clear() on the worker, which answers;
+ * 409 busy at once while a clear is queued or runs, or an upload holds the
+ * worker.
+ */
+esp_err_t web_clear_journal(web_req_t *r);
+
 /** Uploaded receiver package waiting for confirmation (matches the staged one). */
 bool web_staged_get(um98x_flash_pkg_facts_t *facts, uint32_t *expires_in_s);
 /** Forget it (released, confirmed or replaced). */

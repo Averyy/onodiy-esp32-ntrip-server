@@ -58,7 +58,8 @@ What it does:
      /api/logs says level_max "info", and a cursor that is not a number is
      refused; PUT /api/wifi stores the credentials only in this build
      (applied and trial false) and GET /api/wifi agrees at once (no trial,
-     nothing pending); DELETE /api/journal clears the event journal: GET
+     nothing pending) and has no access point to name (bssid and
+     tx_power_dbm present, null: the emulated link); DELETE /api/journal clears the event journal: GET
      /api/journal from cursor 0 then holds only records numbered after the
      newest one before it (the numbering goes on), GET /api/connections is
      empty and complete;
@@ -1540,6 +1541,11 @@ class Smoke:
                    and w.get("pending_ssid") is None,
                    f"GET /api/wifi right after: cred_trial {w.get('cred_trial')}, cred_pending {w.get('cred_pending')}, "
                    f"pending_ssid {w.get('pending_ssid')!r}")
+        # The access point and the transmit power: in the answer, null without an access point (emulated Ethernet).
+        self.check(status == 200 and "bssid" in w and "tx_power_dbm" in w and w["bssid"] is None
+                   and w["tx_power_dbm"] is None,
+                   f"GET /api/wifi: bssid {w.get('bssid', 'missing')!r}, "
+                   f"tx_power_dbm {w.get('tx_power_dbm', 'missing')!r} (null in this build)")
 
     def journal_clear_checks(self) -> None:
         """DELETE /api/journal: the records are gone at once and the numbering goes on (the station may journal

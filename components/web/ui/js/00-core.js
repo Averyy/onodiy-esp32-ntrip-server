@@ -198,12 +198,37 @@ function pageCard(title, ...kids) {
   return h('section', { class: 'card' }, h('h1', null, title), kids);
 }
 
-/** Definition list from [label, value] rows; rows that are null are skipped. */
+/* Where a long token may wrap: after a separator inside it, after a dot before a letter, before a capital that starts a word. */
+const BREAK_AT = /[/_:=,@-](?=[^\s/_:=,@.-])|\.(?=[A-Za-z])|[a-z0-9](?=[A-Z][a-z])/g;
+
+/**
+ * A value's text with break opportunities in its long tokens, so a narrow
+ * column wraps "R4.10Build26000" as "R4.10" / "Build26000" and a host at
+ * its dots, never mid-word (strings only; arrays item by item).
+ */
+function breakable(v) {
+  if (Array.isArray(v)) return v.map(breakable);
+  if (typeof v !== 'string' || !/\S{13,}/.test(v)) return v;
+  const out = [];
+  let last = 0, m;
+  BREAK_AT.lastIndex = 0;
+  while ((m = BREAK_AT.exec(v))) {
+    const end = m.index + 1;
+    if (/[a-z0-9]/.test(m[0]) || (m.index > 0 && /\S/.test(v[m.index - 1]))) {
+      out.push(v.slice(last, end), h('wbr'));
+      last = end;
+    }
+  }
+  out.push(v.slice(last));
+  return out;
+}
+
+/** Definition list from [label, value] rows; rows that are null are skipped. Long tokens wrap at their separators (breakable). */
 function kv(rows) {
   const dl = h('dl', { class: 'kv' });
   for (const r of rows) {
     if (!r) continue;
-    dl.append(h('dt', null, r[0]), h('dd', null, r[1] === null || r[1] === undefined || r[1] === '' ? '–' : r[1]));
+    dl.append(h('dt', null, r[0]), h('dd', null, r[1] === null || r[1] === undefined || r[1] === '' ? '–' : breakable(r[1])));
   }
   return dl;
 }
@@ -304,11 +329,12 @@ function radios(legend, name, options, value) {
   };
 }
 
-/** A bar for a fraction; label names it for assistive technology. */
-function bar(fraction, tone, label) {
+/** A bar for a fraction; label names it for assistive technology; meter: the value in words for a gauge (role meter). */
+function bar(fraction, tone, label, meter) {
   const f = Math.max(0, Math.min(1, fraction || 0));
-  return h('div', { class: 'bar ' + (tone || ''), role: 'progressbar', 'aria-label': label || 'Progress', 'aria-valuemin': 0,
-    'aria-valuemax': 100, 'aria-valuenow': Math.round(f * 100) }, h('span', { style: { width: (f * 100).toFixed(1) + '%' } }));
+  return h('div', { class: 'bar ' + (tone || ''), role: meter ? 'meter' : 'progressbar', 'aria-label': label || 'Progress',
+    'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': (meter ? Math.floor : Math.round)(f * 100),
+    'aria-valuetext': meter || null }, h('span', { style: { width: (f * 100).toFixed(1) + '%' } }));
 }
 
 /**

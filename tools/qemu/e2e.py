@@ -159,6 +159,17 @@ RESUMED_LINE = "ntrip: resumed"
 # A planned close (new settings, a restart) that waited for the end of the epoch the session was sending, and
 # one that gave up on it (ntrip_server.c drain_step).
 DRAINED_LINE = "ending the session after the epoch it was sending"
+# The restart inside an epoch (restart_in_epoch): the request goes out this long after a burst began, so the
+# shutdown (1 s after the request, REBOOT_DELAY_MS) comes this long plus the request's own time into the next
+# burst: past its station messages and the MSMs the emulated UART paces in about 0.3 s, before the late last
+# MSM (LATE_LAST_S). Earlier (0.1 s) it could come after the station messages alone: no MSM run open yet, the
+# session closed at once as between epochs, and the rest of the burst still arriving across the restart hung
+# the next boot (tools/qemu/README.md, UART1 section).
+RESTART_AFTER_HEAD_S = 0.25
+# ... and the replay holds (no new burst; the one going out finishes, its late MSM too) from this long after
+# that burst began: once the next burst, the one the shutdown comes in, is out, and before the one after it,
+# so nothing arrives across the restart however late the shutdown comes.
+RESTART_HOLD_AFTER_HEAD_S = 1.5
 CUT_CLOSE_LINE = "closing inside an epoch"
 STOP_REASONS = ["none", "rejected", "login_blocked", "in_use", "kicked", "duplicate", "banned"]
 
@@ -1277,12 +1288,14 @@ class E2E:
     def restart_in_epoch(self, late_last_s: float, attempts: int = 3) -> None:
         """A restart that comes inside an epoch while the receiver streams: the session it ends finishes that
         epoch first (its record is judged in step 6). The web server restarts 1 s after the request
-        (REBOOT_DELAY_MS), so the request goes out 0.1 s after a burst began: the shutdown comes early in the
-        next burst, whose last MSM is `late_last_s` late. The replayed receiver stops as soon as that session
-        has ended: this QEMU hangs the next boot when RTCM arrives across a restart (tools/qemu/README.md,
-        UART1 section), and the restart comes about 0.2 s after the casters close (the network's shutdown
-        hook); a late last MSM still waiting then is dropped too. A shutdown that found no epoch in flight
-        (the request was slow) proves nothing: tried again, up to `attempts` restarts."""
+        (REBOOT_DELAY_MS), so the request goes out RESTART_AFTER_HEAD_S after a burst began: the shutdown
+        comes inside the next burst's MSM run, whose last MSM is `late_last_s` late. This QEMU hangs the next
+        boot when RTCM arrives across a restart (tools/qemu/README.md, UART1 section), and the restart comes
+        about 0.2 s after the casters close (the network's shutdown hook): the replay starts no burst after
+        the one the shutdown comes in (a hold from RESTART_HOLD_AFTER_HEAD_S, that burst's late MSM still
+        goes out) and stops as soon as that session has ended (a late last MSM still waiting then is dropped
+        too). A shutdown that found no epoch in flight (the request was slow) proves nothing: tried again, up
+        to `attempts` restarts."""
         if self.caster is None:
             return
         for k in range(attempts):
@@ -1294,16 +1307,19 @@ class E2E:
             n = live[0]["n"]
             at = len(self.console_text())
             self.replay.set_last_frame_delay(late_last_s)
-            h = self.replay.wait_burst_head(5.0)
-            time.sleep(max(0.0, (h or time.monotonic()) + 0.1 - time.monotonic()))
+            h = self.replay.wait_burst_head(5.0) or time.monotonic()
+            time.sleep(max(0.0, h + RESTART_AFTER_HEAD_S - time.monotonic()))
             status, _ = self.api("POST", "/api/system/reboot", {})
             if not self.check(status == 202, f"POST /api/system/reboot inside an epoch: HTTP {status}"):
                 self.replay.set_last_frame_delay(0)
                 return
             self.planned_reboots += 1
+            hold_at = h + RESTART_HOLD_AFTER_HEAD_S
             deadline = time.monotonic() + 10
             ended = None
             while time.monotonic() < deadline and ended is None:
+                if time.monotonic() >= hold_at:
+                    self.replay.hold()   # once; later calls do nothing
                 ended = next((c for c in self.sources() if c["n"] == n and c.get("end_mono") is not None), None)
                 time.sleep(0.01)
             self.replay.pause()

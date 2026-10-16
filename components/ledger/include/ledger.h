@@ -118,7 +118,7 @@ typedef struct {
     uint32_t power_off_s;                     /**< power-cut gaps added at boot */
     uint32_t rx_overflows;                    /**< UART/driver overflow events */
     uint32_t up_s[LEDGER_MAX_SLOTS];          /**< seconds a slot streamed with fresh RTCM (online) */
-    uint32_t lost_epochs;                     /**< today only (0 in the history): the protected slot's epochs lost while connected */
+    uint32_t lost_epochs;                     /**< today only (0 in the history): the protected slot's epochs lost while online */
 } ledger_day_t;
 
 /**
@@ -191,6 +191,13 @@ void ledger_set_maintenance(bool on);
 void ledger_set_rtcm_ok(bool ok);
 
 /**
+ * The station's last report of fresh RTCM (ledger_set_rtcm_ok; false before
+ * the first one): with a slot that streams, what the ledger counts as online.
+ * The caster client's data rate counts the same time (ntrip_server).
+ */
+bool ledger_rtcm_ok(void);
+
+/**
  * Feed a UTC time and its source; GNSS beats SNTP. Times before 2026 are
  * ignored. The first one of a boot settles the time since the previous
  * session's last-alive mark and the unattributed seconds.
@@ -210,7 +217,8 @@ void ledger_count_overflow(void);
 
 /**
  * Count `n` more epochs the protected (Onocoy) slot should have sent while
- * connected but did not (ntrip_server, as its count for this boot grows).
+ * online as this ledger counts it (streaming, fresh RTCM) but did not
+ * (ntrip_server, as its count for this boot grows).
  * Kept for today across restarts with the other counters, so the day's data
  * rate does not start again at every boot; a finished day does not keep it.
  */

@@ -397,10 +397,19 @@ function trialLeftEl(net) {
 /* Minutes for a notice ("about 14 min"): whole minutes, rounded up. */
 const upMin = s => fmt.dur(Math.ceil(s / 60) * 60);
 
-/* The page a notice is on: the route's name, 'receiver/settings' for that page; '' is the Status page. */
+/*
+ * The page a notice is on: the route's name, 'receiver/settings',
+ * 'diag/history' and 'diag/logs' for those pages; '' is the Status page.
+ * Any other address under them opens the page itself (#/receiver/live the
+ * Receiver page, #/diag/foo the Overview), and is that page here too.
+ */
 function pageKey() {
   const c = shell.current;
-  return !c ? '' : c.name === 'receiver' && c.arg ? 'receiver/' + c.arg.split('/')[0] : c.name;
+  if (!c) return '';
+  const sub = (c.arg || '').split('/')[0];
+  if (c.name === 'receiver') return sub === 'settings' ? 'receiver/settings' : 'receiver';
+  if (c.name === 'diag') return sub && DIAG_PAGES[sub] ? 'diag/' + sub : 'diag';
+  return c.name;
 }
 
 const TONE_ORDER = { bad: 0, warn: 1, info: 2 };
@@ -410,7 +419,9 @@ const TONE_ORDER = { bad: 0, warn: 1, info: 2 };
  * [{key, tone, title, text, actions, urgent, trial}], one line and one
  * button each. urgent: it needs the user now and never folds away. A page
  * whose own card says a thing leaves its notice out; the Status page the one
- * its top card says (stationState().notice).
+ * its top card says (stationState().notice), Diagnostics the one its Health
+ * card says (healthNotice()), only while that card is on the page
+ * (healthCardShown: not while it loads or its first request failed).
  */
 function noticeItems(st, page) {
   const items = [];
@@ -480,7 +491,7 @@ function noticeItems(st, page) {
       }, 'small ghost'),
       go('Update', '#/settings/updates')]);
   }
-  const covered = page === '' ? stationState(st, true).notice : null;
+  const covered = page === '' ? stationState(st, true).notice : page === 'diag' && healthCardShown ? healthNotice(st) : null;
   return items.filter(i => i.key !== covered).sort((a, b) => TONE_ORDER[a.tone] - TONE_ORDER[b.tone]);
 }
 

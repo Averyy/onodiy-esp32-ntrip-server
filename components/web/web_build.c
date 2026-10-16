@@ -453,6 +453,7 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
         wj_bool(w, "identity_confirmed", st->identity_confirmed);
         wj_bool(w, "profile_applied", st->profile_applied);
         wj_bool(w, "position_locked", st->position_locked);
+        wj_bool(w, "position_known", st->position.source != UM98X_POS_NONE);
         wj_bool(w, "surveying", st->surveying);
         wj_uint(w, "survey_window_left_s", st->survey_window_left_s);
         wj_u32_or_null(w, "rtcm_age_ms", s->rtcm_age_ms);
@@ -1695,6 +1696,17 @@ void web_build_wifi(wj_t *w, const web_wifi_snap_t *s)
     } else {
         wj_null(w, "rssi");
         wj_null(w, "channel");
+    }
+    char bssid[18] = "";
+    if (n->associated && n->bssid_known) {
+        snprintf(bssid, sizeof(bssid), "%02X:%02X:%02X:%02X:%02X:%02X", n->bssid[0], n->bssid[1], n->bssid[2],
+                 n->bssid[3], n->bssid[4], n->bssid[5]);
+    }
+    wj_str_or_null(w, "bssid", bssid);
+    if (n->associated && n->tx_power_known) {
+        wj_double(w, "tx_power_dbm", (double)n->tx_power_qdbm / 4.0, 2);
+    } else {
+        wj_null(w, "tx_power_dbm");
     }
     wj_bool(w, "time_synced", n->time_synced);
     wj_str(w, "upstream", web_probe_name(n->probe));

@@ -15,10 +15,13 @@
  * as the sector being written has room (the restart never waits for an
  * erase).
  *
- * diag_journal_clear() empties the journal for the user: the queue is
- * dropped and the core opens a new sector at once (so the next read already
- * finds nothing), then erases the other sectors one per lock, so a reader or
- * the writer waits for one sector erase at most.
+ * diag_journal_clear() empties the journal for the user: the core opens a
+ * new sector at once (so the next read already finds nothing) and the
+ * records queued before the clear are dropped with the rest, then it erases
+ * the other sectors one per lock, so a reader or the writer waits for one
+ * sector erase at most. A clear that cannot open its sector clears nothing:
+ * the queue stays too. It blocks its caller for every erase (the web server
+ * runs it on its worker task).
  */
 #include <string.h>
 
@@ -39,19 +42,11 @@ static const char *TAG = "diag";
 #define PART_TYPE     ((esp_partition_type_t)0x40)
 #define PART_SUBTYPE  ((esp_partition_subtype_t)0x01)
 #define PART_LABEL    "journal"
-#define QUEUE_LEN     64u
 #define WRITER_STACK  4096
 #define WRITER_PRIO   5
 #define FLUSH_WAIT_MS 100
+#define INFO_WAIT_MS  1000      /* longer than one sector erase, the longest the writer or a clear holds the journal */
 #define READ_CHUNK    16u
-
-typedef struct {
-    uint32_t uptime_s;
-    int64_t unix_s;
-    uint16_t kind;
-    int32_t a;
-    int32_t b;
-} qrec_t;
 
 typedef enum {
     J_PENDING = 0,      /* before diag_init: appends wait in the queue */
@@ -61,9 +56,7 @@ typedef enum {
 
 /* Queue and rate limits: s_qlock. */
 static portMUX_TYPE s_qlock = portMUX_INITIALIZER_UNLOCKED;
-static qrec_t s_queue[QUEUE_LEN];
-static uint32_t s_qhead;
-static uint32_t s_qcount;
+static dj_queue_t s_q;
 static uint32_t s_queue_full;
 static dj_rate_t s_rate;
 static bool s_rate_ready;
@@ -74,6 +67,9 @@ static volatile uint32_t s_clears; /* clears since boot (written under s_jmux) *
 /* Journal core and flash: s_jmux. */
 static SemaphoreHandle_t s_jmux;
 static dj_t s_j;
+/* The core's counts as diag_journal_info last read them (s_qlock): what it
+ * gives while the journal is held longer than it waits. */
+static diag_journal_info_t s_info;
 static const esp_partition_t *s_part;
 static TaskHandle_t s_writer;
 
@@ -96,16 +92,10 @@ static int fl_erase(void *ctx, uint32_t off, size_t len)
 
 /* ---- queue -------------------------------------------------------------------------------- */
 
-static bool pop(qrec_t *out)
+static bool pop(dj_entry_t *out)
 {
-    bool got = false;
     portENTER_CRITICAL(&s_qlock);
-    if (s_qcount > 0) {
-        *out = s_queue[s_qhead];
-        s_qhead = (s_qhead + 1u) % QUEUE_LEN;
-        s_qcount--;
-        got = true;
-    }
+    bool got = dj_queue_pop(&s_q, out);
     portEXIT_CRITICAL(&s_qlock);
     return got;
 }
@@ -114,15 +104,8 @@ static bool pop(qrec_t *out)
  * be opened (the restart path: no erase, a millisecond per record at most). */
 static void drain_locked(bool may_erase)
 {
-    qrec_t r;
-    while ((may_erase || !dj_needs_open(&s_j)) && pop(&r)) {
-        dj_entry_t e = {
-            .uptime_s = r.uptime_s,
-            .unix_s = r.unix_s,
-            .kind = r.kind,
-            .a = r.a,
-            .b = r.b,
-        };
+    dj_entry_t e;
+    while ((may_erase || !dj_needs_open(&s_j)) && pop(&e)) {
         /* A failure is counted by the core (io_errors); the record is gone. */
         (void)dj_append(&s_j, &e);
     }
@@ -159,7 +142,7 @@ esp_err_t diag_journal_append(diag_event_t kind, int32_t a, int32_t b)
         return ESP_ERR_NOT_FOUND;
     }
     int64_t now_us = esp_timer_get_time();
-    qrec_t r = {
+    dj_entry_t r = {
         .uptime_s = (uint32_t)(now_us / 1000000),
         .unix_s = diag_utc_now(),
         .kind = (uint16_t)kind,
@@ -173,14 +156,13 @@ esp_err_t diag_journal_append(diag_event_t kind, int32_t a, int32_t b)
                      (1u << DIAG_EV_LADDER_STEP) | (1u << DIAG_EV_GNSS_FLASH) | (1u << DIAG_EV_RX_BOOT));
         s_rate_ready = true;
     }
-    if (s_qcount >= QUEUE_LEN) {
+    if (s_q.count >= DJ_QUEUE_LEN) {
         s_queue_full++;
         err = ESP_ERR_NO_MEM;
     } else if (dj_rate_check(&s_rate, (uint16_t)kind, (uint32_t)(now_us / 1000)) != DJ_RATE_OK) {
         err = ESP_ERR_INVALID_STATE;
     } else {
-        s_queue[(s_qhead + s_qcount) % QUEUE_LEN] = r;
-        s_qcount++;
+        (void)dj_queue_push(&s_q, &r);
     }
     portEXIT_CRITICAL_SAFE(&s_qlock);
     if (err == ESP_OK && s_writer != NULL) {
@@ -251,17 +233,30 @@ esp_err_t diag_journal_clear(void)
         return ESP_ERR_INVALID_STATE;
     }
     xSemaphoreTake(s_jmux, portMAX_DELAY);
+    /* What waits in the queue now was written before the clear. With
+     * s_jmux held the writer cannot take any of it; appends may add more,
+     * which stay whatever happens. */
     portENTER_CRITICAL(&s_qlock);
-    s_qcount = 0;   /* written before the clear: dropped with the rest */
+    uint32_t queued = s_q.count;
     portEXIT_CRITICAL(&s_qlock);
     int r = dj_clear_start(&s_j);
+    portENTER_CRITICAL(&s_qlock);
+    dj_queue_clear_started(&s_q, queued, r);   /* dropped only if the clear started */
+    portEXIT_CRITICAL(&s_qlock);
     if (r == DJ_OK) {
         s_clears++;
     }
     uint32_t from = s_j.next_seq;
     xSemaphoreGive(s_jmux);
-    bool failed = (r != DJ_OK);
-    int left = (r == DJ_OK) ? 1 : 0;
+    if (r != DJ_OK) {
+        portENTER_CRITICAL(&s_qlock);
+        s_clearing = false;
+        portEXIT_CRITICAL(&s_qlock);
+        ESP_LOGW(TAG, "event journal not cleared: its next sector could not be opened");
+        return ESP_FAIL;
+    }
+    bool failed = false;
+    int left = 1;
     while (left != 0) {
         xSemaphoreTake(s_jmux, portMAX_DELAY);
         left = dj_clear_step(&s_j);
@@ -276,7 +271,7 @@ esp_err_t diag_journal_clear(void)
     portEXIT_CRITICAL(&s_qlock);
     if (failed) {
         ESP_LOGW(TAG, "event journal cleared with flash errors");
-        return ESP_FAIL;
+        return ESP_ERR_NOT_FINISHED;
     }
     ESP_LOGI(TAG, "event journal cleared; records go on from %u", (unsigned)from);
     return ESP_OK;
@@ -287,29 +282,49 @@ uint32_t diag_journal_clear_count(void)
     return s_clears;
 }
 
+/* With s_jmux held: the core's counts. */
+static void core_counts(diag_journal_info_t *c)
+{
+    c->available = true;
+    c->capacity = dj_capacity(&s_j);
+    c->oldest_seq = dj_oldest_seq(&s_j);
+    c->newest_seq = (c->oldest_seq != 0) ? s_j.next_seq - 1u : 0;
+    c->sector_cycles = (s_j.sectors != 0) ? s_j.top_sector_seq / s_j.sectors : 0;
+    c->written = s_j.written;
+    c->io_errors = s_j.io_errors;
+}
+
+/*
+ * Available whenever the journal is: a clear or the writer holds it for one
+ * sector erase at a time, which it waits for; held longer than that (a
+ * failing flash), the counts are those of the previous read.
+ */
 void diag_journal_info(diag_journal_info_t *out)
 {
     if (out == NULL) {
         return;
     }
     memset(out, 0, sizeof(*out));
+    if (s_state == J_READY) {
+        diag_journal_info_t c = { 0 };
+        bool fresh = xSemaphoreTake(s_jmux, pdMS_TO_TICKS(INFO_WAIT_MS)) == pdTRUE;
+        if (fresh) {
+            core_counts(&c);
+            xSemaphoreGive(s_jmux);
+        }
+        portENTER_CRITICAL(&s_qlock);
+        if (fresh) {
+            s_info = c;
+        }
+        *out = s_info;
+        portEXIT_CRITICAL(&s_qlock);
+    }
     portENTER_CRITICAL(&s_qlock);
-    out->queued = s_qcount;
+    out->queued = s_q.count;
     out->queue_full = s_queue_full;
     out->refused_kind = s_rate.refused_kind;
     out->refused_budget = s_rate.refused_budget;
     portEXIT_CRITICAL(&s_qlock);
-    if (s_state != J_READY || xSemaphoreTake(s_jmux, pdMS_TO_TICKS(100)) != pdTRUE) {
-        return;
-    }
-    out->available = true;
-    out->capacity = dj_capacity(&s_j);
-    out->oldest_seq = dj_oldest_seq(&s_j);
-    out->newest_seq = (out->oldest_seq != 0) ? s_j.next_seq - 1u : 0;
-    out->sector_cycles = (s_j.sectors != 0) ? s_j.top_sector_seq / s_j.sectors : 0;
-    out->written = s_j.written;
-    out->io_errors = s_j.io_errors;
-    xSemaphoreGive(s_jmux);
 }
 
 esp_err_t diag_journal_init(void)
@@ -337,11 +352,14 @@ esp_err_t diag_journal_init(void)
     if (r != DJ_OK) {
         s_state = J_UNAVAILABLE;
         portENTER_CRITICAL(&s_qlock);
-        s_qcount = 0;
+        dj_queue_reset(&s_q);
         portEXIT_CRITICAL(&s_qlock);
         ESP_LOGE(TAG, "event journal unavailable (%s)", s_part == NULL ? "no journal partition" : "mount failed");
         return ESP_ERR_NOT_FOUND;
     }
+    xSemaphoreTake(s_jmux, portMAX_DELAY);
+    core_counts(&s_info);   /* read before diag_journal_info can */
+    xSemaphoreGive(s_jmux);
     s_state = J_READY;
     uint32_t oldest = dj_oldest_seq(&s_j);
     if (oldest != 0) {

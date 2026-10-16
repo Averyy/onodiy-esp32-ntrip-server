@@ -13,8 +13,9 @@ back (the firmware's receiver queries) is logged.
 In process (tools/qemu/e2e.py), set_last_frame_delay() sends each burst's
 last frame a set time after the rest of it: an epoch whose last MSM comes
 late, as a stalled line or reader makes it look to the station; a pause
-that begins while such a frame waits drops it too. wait_burst_head() waits
-for the next burst to start going out (to time a request inside an epoch).
+that begins while such a frame waits drops it too, a hold (hold()) lets it
+go out and starts no burst after it. wait_burst_head() waits for the next
+burst to start going out (to time a request inside an epoch).
 
 Made for the firmware in QEMU: start the replay first, then
 `tools/qemu/run.sh --uart1 connect:PORT`, so the firmware hears the stream
@@ -121,6 +122,7 @@ class ReplayServer:
         self.received = bytearray()  # everything clients sent (kept for in-process checks)
         self.connected = threading.Event()
         self.paused = threading.Event()
+        self.held = threading.Event()   # hold(): no new burst, the one going out finishes
         self.thread = threading.Thread(target=self._serve, name="replay", daemon=True)
 
     # -- logging ----------------------------------------------------------------
@@ -162,12 +164,22 @@ class ReplayServer:
             self.paused.set()
             self._log("paused: bursts that fall due are dropped until resumed")
 
+    def hold(self) -> None:
+        """Start no new burst until resume(), like a receiver that goes quiet after the epoch it is sending:
+        the burst going out finishes, its late last frame too (set_last_frame_delay); bursts that fall due
+        meanwhile are dropped as by pause() (counted in bursts_paused), and so are the responder's replies."""
+        if not self.held.is_set():
+            self.held.set()
+            self._log("held: the burst going out finishes, bursts that fall due are dropped until resumed")
+
     def resume(self) -> None:
-        if self.paused.is_set():
+        """Send again after pause() or hold()."""
+        if self.paused.is_set() or self.held.is_set():
             self.paused.clear()
+            self.held.clear()
             with self.lock:
                 n = self.bursts_paused
-            self._log(f"resumed ({n} burst{'' if n == 1 else 's'} dropped while paused, in total)")
+            self._log(f"resumed ({n} burst{'' if n == 1 else 's'} dropped while paused or held, in total)")
 
     def set_last_frame_delay(self, seconds: float) -> None:
         """Send each burst's last frame `seconds` after the rest of it (0: at once again): an epoch whose last
@@ -252,7 +264,7 @@ class ReplayServer:
                     loop_no, loop_counts, loop_start = k, [0, 0, 0], time.monotonic()
                 if self._wait_until(t0 + t, gone, conn):
                     break
-                if self.paused.is_set():
+                if self.paused.is_set() or self.held.is_set():
                     with self.lock:
                         self.bursts_paused += 1
                     continue
@@ -343,8 +355,8 @@ class ReplayServer:
         data = resp.due()
         if not data:
             return
-        if self.paused.is_set():
-            self._log(f"paused: {len(data)} reply bytes dropped", echo=False)   # a quiet wire, as for the RTCM
+        if self.paused.is_set() or self.held.is_set():
+            self._log(f"quiet: {len(data)} reply bytes dropped", echo=False)   # a quiet wire, as for the RTCM
             return
         with self.send_lock:
             conn.sendall(data)

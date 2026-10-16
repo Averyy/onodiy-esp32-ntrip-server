@@ -17,6 +17,8 @@ const L = {
     flash_recovery: 'Recovering a receiver update',
     recovering: 'Recovering',
     no_receiver: 'No receiver found',
+    /* Not a state of the station's: what Diagnostics says for no_receiver while the receiver port is closed. */
+    uart_closed: 'Receiver port closed',
   },
   caster: {
     disabled: 'Off',

@@ -545,20 +545,30 @@ esp_err_t diag_journal_append(diag_event_t kind, int32_t a, int32_t b);
  */
 esp_err_t diag_journal_read(uint32_t *cursor, diag_journal_entry_t *out, size_t *count);
 
-/** Journal state and counters. */
+/**
+ * Journal state and counters. `available` is false only without a usable
+ * journal. It waits while a clear or the writer holds the journal (one
+ * sector erase at a time); held longer than a second, the core's counts are
+ * those of the previous call.
+ */
 void diag_journal_info(diag_journal_info_t *out);
 
 /**
  * Clear the journal (the user's "Clear journal"): every record written or
  * queued so far is gone at once; later records go on with the next sequence
  * number (never reused), so a reader's cursor stays valid. Erases every
- * sector once; blocks the caller for that (a reader or the writer waits for
- * one sector erase at most). A reader that keeps state derived from the
+ * sector once; blocks the caller for that, up to seconds (a reader or the
+ * writer waits for one sector erase at most), so never call it on a task
+ * that must keep answering. A reader that keeps state derived from the
  * records (the power-lost alert) watches diag_journal_clear_count().
  * @return ESP_OK; ESP_ERR_NOT_FOUND without a journal; ESP_ERR_INVALID_STATE
- *         while another clear runs; ESP_FAIL after a flash error (the
- *         records are gone from reads all the same; one that could not be
- *         erased returns at the next boot).
+ *         while another clear runs; ESP_FAIL when the clear could not start
+ *         (the sector it opens first could not be erased or written): not
+ *         cleared, the records written or queued stay, except in a full ring
+ *         the oldest sector's, which the ring was about to drop anyway;
+ *         ESP_ERR_NOT_FINISHED after a later flash error (the records are
+ *         gone from reads all the same; one that could not be erased returns
+ *         at the next boot).
  */
 esp_err_t diag_journal_clear(void);
 

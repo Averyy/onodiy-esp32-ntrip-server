@@ -3,9 +3,10 @@
  * SPDX-License-Identifier: MIT
  *
  * Worker task: request bodies and downloads that take long (app image and
- * receiver package uploads, the core dump, the whole log as a file) run
- * here as async requests, so the server keeps answering and pushing status
- * meanwhile. Its stack is in internal RAM because uploads write flash.
+ * receiver package uploads, the core dump, the whole log as a file) and the
+ * event journal's clear (a flash erase per sector) run here as async
+ * requests, so the server keeps answering and pushing status meanwhile. Its
+ * stack is in internal RAM because uploads write flash.
  *
  * Uploads stream in 4 KB pieces straight to flash; nothing is buffered
  * whole. A refused upload is still read to its end before the error goes
@@ -61,6 +62,7 @@ typedef enum {
     JOB_FRAME_TIMES,
     JOB_RELEASE_EXPIRED,
     JOB_SAFE_MODE_CLEAR,
+    JOB_JOURNAL_CLEAR,
 } job_kind_t;
 
 typedef struct {
@@ -77,6 +79,7 @@ typedef struct {
 static QueueHandle_t s_jobs;
 static TaskHandle_t s_task;
 static atomic_bool s_busy;               /* an upload is being received or refused */
+static atomic_bool s_journal_clear;      /* a journal clear is queued or runs */
 static atomic_int s_pending_resp;
 static esp_timer_handle_t s_expiry;
 
@@ -632,6 +635,23 @@ static void send_frame_times(httpd_req_t *req)
 #endif
 }
 
+/* DELETE /api/journal: the clear erases every journal sector (seconds on a
+ * slow flash), so it runs here, the answer as it was on the server task. */
+static void clear_journal(httpd_req_t *req)
+{
+    esp_err_t err = diag_journal_clear();
+    atomic_store(&s_journal_clear, false);   /* before the answer: a client may clear again at once */
+    if (err == ESP_ERR_NOT_FOUND) {
+        web_send_err(req, WEB_ERR_NOT_FOUND);
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        web_send_err(req, WEB_ERR_BUSY);
+    } else if (err != ESP_OK) {
+        web_send_internal(req, err);
+    } else {
+        web_send_json_literal(req, 200, "{\"ok\":true}");
+    }
+}
+
 /* ---- task ---------------------------------------------------------------------------------------------- */
 
 static void worker(void *arg)
@@ -669,6 +689,9 @@ static void worker(void *arg)
             break;
         case JOB_RELEASE_EXPIRED:
             release_expired();
+            break;
+        case JOB_JOURNAL_CLEAR:
+            clear_journal(job.req);
             break;
         case JOB_SAFE_MODE_CLEAR: {
             vTaskDelay(pdMS_TO_TICKS(SAFE_MODE_DELAY_MS));
@@ -878,6 +901,21 @@ esp_err_t web_download_log_text(web_req_t *r, bool prev_boot)
 {
     job_t job = { .kind = JOB_LOG_TEXT, .flag = prev_boot };
     if (!queue_async(r->req, &job)) {
+        return web_send_err(r->req, WEB_ERR_BUSY);
+    }
+    return ESP_OK;
+}
+
+esp_err_t web_clear_journal(web_req_t *r)
+{
+    /* One at a time; and not behind an upload, which holds the worker for
+     * as long as the client takes to send it. */
+    if (web_upload_busy() || atomic_exchange(&s_journal_clear, true)) {
+        return web_send_err(r->req, WEB_ERR_BUSY);
+    }
+    job_t job = { .kind = JOB_JOURNAL_CLEAR };
+    if (!queue_async(r->req, &job)) {
+        atomic_store(&s_journal_clear, false);
         return web_send_err(r->req, WEB_ERR_BUSY);
     }
     return ESP_OK;

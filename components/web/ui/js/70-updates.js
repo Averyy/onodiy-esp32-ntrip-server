@@ -154,7 +154,7 @@ function receiverSteps(state, upload, checkOnly) {
 
 /* ---- The last update check, in words ---- */
 
-/** {tone, text, detail} for a failed check (GET /api/update), or null when it went well (or none ran). */
+/** {tone, text} for a failed check (GET /api/update), or null when it went well (or none ran). The firmware's error code is in the log. */
 function checkFailure(u) {
   const r = u.last_check_result;
   if (!r || r === 'ok') return null;
@@ -182,9 +182,7 @@ function checkFailure(u) {
     default:
       text = 'The update check failed (' + r + ').';
   }
-  const lr = u.last_result;
-  const detail = lr && lr.job === 'check' && lr.message ? 'Details: ' + lr.message + (u.last_http_status ? ', HTTP ' + u.last_http_status : '') : null;
-  return { tone: 'warn', text: text, detail: detail };
+  return { tone: 'warn', text: text };
 }
 
 /** "2 h ago": the age of an update check in whole minutes, hours or days. */
@@ -310,7 +308,7 @@ const updatesPart = {
       head.classList.add('fit');
       mount(headBox, head,
         u.checks_enabled ? null : h('p', { class: 'muted small' }, ERR.checks_disabled),
-        fail && u.state !== 'checking' ? msg(fail.tone, fail.text, fail.detail ? h('div', { class: 'small muted' }, fail.detail) : null) : null,
+        fail && u.state !== 'checking' ? msg(fail.tone, fail.text) : null,
         P.check.el);
     }
 
@@ -478,7 +476,8 @@ const updatesPart = {
         if (!info.allowed && info.why && info.why !== 'not_available_yet') notNow.push(h('li', null, a[2] + ': not now, ' + lbl(L.why, info.why) + '.'));
         return b;
       });
-      /* The chip and one sentence say the state; the evidence is folded (it stays open across the refresh). */
+      /* The chip and one sentence say the state; the evidence is folded (it stays open across the refresh). No firmware error code
+       * ("ESP_ERR_TIMEOUT"): Failure says it in words. */
       const was = sessionCard.querySelector('details.sess');
       const fail = [pr, rec].map(x => x && x.failure).find(x => x && x !== 'none');
       const detail = [
@@ -497,7 +496,6 @@ const updatesPart = {
             ' (' + fmt.num(pr.frames_sent) + ' sent)'] : null,
           ['Transfers / loader attempts', fmt.num(pr.transfers) + ' / ' + fmt.num(pr.entry_attempts)],
           ['Blocks resent', fmt.num(pr.retries)],
-          pr.last_err ? ['Last error', pr.last_err] : null,
         ]) : null,
         f.receiver_text ? h('pre', { class: 'log' }, f.receiver_text) : null];
       mount(sessionCard,

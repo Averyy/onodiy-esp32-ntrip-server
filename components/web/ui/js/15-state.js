@@ -137,10 +137,12 @@ function qualityLead(q, name) {
 /**
  * The station's state from a status (admin false: the public form, states
  * only): {key, head, tone ('ok', 'info', 'warn', 'bad'), lead (one sentence:
- * the most important thing and what to do), actions (one; two in safe mode:
+ * the most important thing and what to do), actions (one; two in safe mode
+ * and while settings cannot be saved:
  * {label, href, primary} links or {act, label} data-act buttons, so a
  * refresh keeps the focus), alertId (the alert the line says), notice (the
- * notice it covers), subject (the caster slot the line names), named (the
+ * notice it covers), diagLead (the line on Diagnostics when the lead points
+ * there; null: the lead), subject (the caster slot the line names), named (the
  * line names the casters down), plan (next search and restart, one short
  * line), trial (the Wi-Fi on trial), also (other alerts), facts (the caster
  * count unless the line names them; the recovery choice when not the
@@ -174,7 +176,7 @@ function stationState(s, admin) {
   const quality = rxQuality(rcv, delivering);
   const go = (label, href, primary) => ({ label: label, href: href, primary: !!primary });
   const pick = (key, head, tone, lead, more) => Object.assign({ key: key, head: head, tone: tone, lead: lead, actions: [],
-    alertId: null, notice: null, trial: null, subject: null, named: false, search: null }, more || {});
+    alertId: null, notice: null, trial: null, subject: null, named: false, search: null, diagLead: null }, more || {});
 
   const decide = () => {
     if (sm.active) {
@@ -197,7 +199,9 @@ function stationState(s, admin) {
       if ((s.device && s.device.settings_available === false) || find('settings_degraded')) {
         return pick('settings', 'Settings cannot be saved', 'bad', 'The station runs, but changes are not saved this boot. ' +
           'Restart it; if that does not help, see Diagnostics.',
-        { actions: [go('Diagnostics', '#/diag')], alertId: find('settings_degraded') ? 'settings_degraded' : null, notice: 'settings' });
+        { actions: [go('Restart', '#/settings/restart'), go('Diagnostics', '#/diag')],
+          alertId: find('settings_degraded') ? 'settings_degraded' : null, notice: 'settings',
+          diagLead: 'The station runs, but changes are not saved this boot. Restart it.' });
       }
     }
     if (state === 'flashing' || state === 'flash_recovery' || (admin && rcv.journal === 'running')) {
@@ -346,7 +350,9 @@ function qualityShort(q) {
 
 /**
  * Onocoy's day, while its slot counts (null otherwise): {verdict, tone, why,
- * left, down, allowed, known, used}. Missed while the station's streak_ok is
+ * left, down, allowed, known, used, share}. share: the part of today's
+ * allowance still left, left / (left + offline counted against it); 0 once
+ * missed. Missed while the station's streak_ok is
  * false. At risk while Onocoy does not stream now, more than 60 % of the
  * day's offline time is used, the current data rate is under 98 % after 10
  * minutes connected, or a quality minimum is missed. On track otherwise.
@@ -364,10 +370,13 @@ function onocoyDay(s, st) {
   const allowed = c.budget_s;
   const known = [left, down, allowed].every(v => v !== null && v !== undefined);
   const used = !known ? 0 : allowed > 0 ? Math.min(1, down / allowed) : 1;
-  const d = { verdict: 'On track', tone: 'ok', why: null, left: left, down: down, allowed: allowed, known: known, used: used };
+  const share = known && left > 0 ? left / (left + Math.max(0, down)) : 0;
+  const d = { verdict: 'On track', tone: 'ok', why: null, left: left, down: down, allowed: allowed, known: known, used: used,
+    share: share };
   if (c.streak_ok === false) {
     d.verdict = 'Missed';
     d.tone = 'bad';
+    d.share = 0;
     d.why = allowed === 0 ? 'Too many epochs were lost today to keep the streak.' : 'Today\'s offline time is over the budget.';
     return d;
   }
