@@ -93,7 +93,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  stepSaid: a => { const st = stationState(a[1], true); return stepSaid(a[0], st, healthItems(a[1].alerts || [], st).state); },\n' +
   '  nextAttempt: a => nextAttemptRow(a[0], stationState(a[1], true)),\n' +
   '  posWords: a => positionWords(a[0], a[1], a[2]), posChip: g => positionChip(g), fixPending: a => fixPendingText(a[0], a[1], a[2]),\n' +
-  '  arpCopy: g => arpCopyable(g),\n' +
+  '  arpCopy: g => arpCopyable(g), recoveryNow: hl => recoveryNow(hl),\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
 process.stdout.write(JSON.stringify(out));
@@ -349,12 +349,13 @@ def test_event_list_names_moves_between_access_points():
                                    ("journalItems", [recs, True, ["wifi_disconnect", "wifi_up", "wifi_roam"]]),
                                    ("journalItems", [recs, True, ["caster_down", "caster_up", "caster_stop"]])])
     rows = [(r["ev"], r["det"]) for r in every if "head" not in r]
+    # The time offline first: a phone cuts the end of the row off.
     assert rows == [
         ("Wi-Fi dropped", "back after 6\u00a0s, left the network (8), signal -70 dBm"),
-        ("Wi-Fi moved", "to a stronger access point, channel 11 to 1, 2\u00a0s offline"),
-        ("Wi-Fi reconnected", "no stronger access point after all, 5\u00a0s offline"),
-        ("Wi-Fi moved", "to a stronger access point, channel 6, signal -75 to -58 dBm, 4\u00a0s offline"),
-        ("Wi-Fi moved", "at the access point's request, channel 1 to 6, signal -78 to -52 dBm, 3\u00a0s offline"),
+        ("Wi-Fi moved", "2\u00a0s offline, to a stronger access point, channel 11 to 1"),
+        ("Wi-Fi reconnected", "5\u00a0s offline, no stronger access point after all"),
+        ("Wi-Fi moved", "4\u00a0s offline, to a stronger access point, channel 6, signal -75 to -58 dBm"),
+        ("Wi-Fi moved", "3\u00a0s offline, at the access point's request, channel 1 to 6, signal -78 to -52 dBm"),
     ], rows
     assert [(r["ev"], r["det"]) for r in wifi if "head" not in r] == rows
     assert casters == []
@@ -367,8 +368,9 @@ def test_event_list_names_moves_between_access_points():
 
 
 def test_event_list_says_a_move_kept_the_connections():
-    """A move that kept the address says so instead of a time offline (nothing was offline); a move asked for on the
-    bench console says "on request"."""
+    """A move that kept the address says so first, instead of a time offline (nothing was offline), so a phone's row
+    shows it; one that stayed on the same access point is no reconnect (nothing dropped); a move asked for on the bench
+    console says "on request"."""
     recs = [jrec(1, "wifi_roam", roam_a(1, 6, 1, kept=True), roam_b(-78, -52, 1), 100),
             jrec(2, "wifi_roam", roam_a(6, 6, 2, True, True), roam_b(-74, -73, 2), 4000),
             jrec(3, "wifi_roam", roam_a(6, 11, 3, kept=True), roam_b(-60, -55, 2), 9000),
@@ -377,11 +379,11 @@ def test_event_list_says_a_move_kept_the_connections():
     (items,) = run_ui([("journalItems", [recs, True, None])])
     rows = [(r["ev"], r["det"]) for r in items if "head" not in r]
     assert rows == [
-        ("Wi-Fi moved", "on request, channel 11 to 1, signal -56 to -50 dBm, 9\u00a0s offline"),
-        ("Wi-Fi reconnected", "on request, the same access point, connections kept"),
-        ("Wi-Fi moved", "on request, channel 6 to 11, signal -60 to -55 dBm, connections kept"),
-        ("Wi-Fi reconnected", "no stronger access point after all, connections kept"),
-        ("Wi-Fi moved", "at the access point's request, channel 1 to 6, signal -78 to -52 dBm, connections kept"),
+        ("Wi-Fi moved", "9\u00a0s offline, on request, channel 11 to 1, signal -56 to -50 dBm"),
+        ("Wi-Fi stayed", "connections kept, on request, the same access point"),
+        ("Wi-Fi moved", "connections kept, on request, channel 6 to 11, signal -60 to -55 dBm"),
+        ("Wi-Fi stayed", "connections kept, no stronger access point after all"),
+        ("Wi-Fi moved", "connections kept, at the access point's request, channel 1 to 6, signal -78 to -52 dBm"),
     ], rows
 
 
@@ -1188,7 +1190,8 @@ def test_system_wifi_chip_and_recovery_line():
     # Diagnostics' Wi-Fi: a row each, no value joined to the next with a dot (a wrapped line never starts with one). The
     # signal's words are the casters harness's (it has a DOM).
     net = {"online": True, "ssid": "Home", "rssi": -61}
-    ap = {"ssid": "Home", "online": True, "rssi": -61, "bssid": "AA:BB:CC:DD:EE:FF", "channel": 11, "tx_power_dbm": 19.5}
+    ap = {"ssid": "Home", "online": True, "rssi": -61, "bssid": "AA:BB:CC:DD:EE:FF", "channel": 11, "tx_power_dbm": 19.5,
+          "ap_steering": None}
     rows, bare, off, unset, none = run_ui([("wifiRows", [net, ap]), ("wifiRows", [net, None]),
                                            ("wifiRows", [{"online": False, "ssid": "Home", "offline_s": 90}, ap]),
                                            ("wifiRows", [{"ssid": ""}, None]), ("wifiRows", [None, None])])
@@ -1209,8 +1212,11 @@ def test_diagnostics_wifi_says_moves_and_whether_the_access_point_steers():
     yes, no, unknown = run_ui([("wifiRows", [net, {**ap, "ap_steering": v}]) for v in (True, False, None)])
     assert yes[-1] == ["Access point can steer", "Yes"] and no[-1] == ["Access point can steer", "No"]
     assert unknown[-1] == ["Access point can steer", "Unknown"]
-    (qemu,) = run_ui([("wifiRows", [net, {**ap, "bssid": None, "ap_steering": None}])])
+    # No access point (QEMU), or a build that never reads it (GET /api/wifi leaves ap_steering out): no row, never a
+    # lasting "Unknown".
+    qemu, never = run_ui([("wifiRows", [net, {**ap, "bssid": None, "ap_steering": None}]), ("wifiRows", [net, ap])])
     assert all(r[0] != "Access point can steer" for r in qemu)
+    assert never[-1] == ["Channel", "11"] and all(r[0] != "Access point can steer" for r in never)
     moved, none, drops, nothing = run_ui([
         ("linkCounts", [{"reconnects": 0}, {**ap, "roams": 2}]),
         ("linkCounts", [{"reconnects": 0}, {**ap, "roams": 0}]),
@@ -1507,9 +1513,9 @@ def test_starts_in_a_word_and_the_receiver_at_power_on_in_a_few():
                   ("rxBoot", ["kept_running", "brownout"]), ("rxBoot", ["restarted", "brownout"]),
                   ("rxBoot", ["pending", "brownout"])])
     assert out[:8] == ["Power-on", "Crash", "Power dip", "Reset", "Update", "Restart", "Recovery", "Restart"]
-    assert out[8:12] == ["The receiver kept running", "The power was cut", "", ""]
+    assert out[8:12] == ["The receiver kept running", "The power was lost", "", ""]
     # After a power dip (a brownout start) the receiver is judged too: it kept running, or the dip restarted it as well.
-    assert out[12:] == ["The receiver kept running", "The power was cut", "The receiver kept running",
+    assert out[12:] == ["The receiver kept running", "The power was lost", "The receiver kept running",
                         "The receiver restarted too", ""]
     assert all(len(w) <= 14 for w in out[:8])
 
@@ -1519,6 +1525,26 @@ def test_the_receiver_at_the_start_event_in_a_few_words():
     judged it; a receiver that restarted too lost the power as well, whichever start it was."""
     out = run_ui([("journalDetail", {"kind": "rx_boot", "a": a, "b": b}) for a, b in ((1, 1), (2, 3), (0, 0))])
     assert out == ["Kept running", "Restarted too: the power was lost", "Not known"]
+    # One fact, one word: Overview's "This start" after a power-on says it as History does.
+    (overview,) = run_ui([("rxBoot", ["restarted", "power_on"])])
+    assert overview == "The power was lost" and out[1].endswith(overview.lower())
+
+
+def test_a_paused_recovery_says_what_it_waits_for():
+    """Diagnostics' "If corrections stop" while the recovery waits: what for, so a frozen countdown under it makes sense
+    and it is plain that it goes on by itself; the recovery mode otherwise."""
+    def hl(**st):
+        return {"ladder_suspended": True, "recovery_mode": "full", "station": {"state": "streaming", "lease_held": False,
+                                                                              "since_lease_release_ms": None, **st}}
+    out = run_ui([("recoveryNow", hl(state="configuring", lease_held=True)),
+                  ("recoveryNow", hl(lease_held=True)), ("recoveryNow", hl(since_lease_release_ms=4000)),
+                  ("recoveryNow", hl(state="idle", rx_maintenance=True)), ("recoveryNow", hl(state="detecting")),
+                  ("recoveryNow", hl(state="flashing")), ("recoveryNow", hl(state="idle")),
+                  ("recoveryNow", hl(since_lease_release_ms=60000)),
+                  ("recoveryNow", {**hl(), "ladder_suspended": False})])
+    assert out == ["Paused while the receiver is configured"] * 3 + [
+        "Paused (receiver maintenance)", "Paused while the station looks for the receiver",
+        "Paused during the receiver update", "Paused", "Paused", "The station"], out
 
 
 def test_log_lines_and_event_times_fit_one_line():
@@ -1680,7 +1706,7 @@ def test_fixed_position_check_in_history():
                   ("evFilter", None)])
     # Short enough for a phone's row: how far off (the warning says which way); cleared, whichever warning it was.
     assert out[:5] == ["118\u00a0m off", "Height 82\u00a0m off", "Looks right again", "Changed",
-                       "Sea-level height, 34\u00a0m off"]
+                       "Sea level, 34\u00a0m off"]
     receiver = [f for f in out[5] if f[0] == "receiver"][0]
     assert "fixed_check" in receiver[2]
 

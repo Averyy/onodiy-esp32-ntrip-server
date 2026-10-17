@@ -559,7 +559,7 @@ function rxBootSentence(v, cls) {
     case 'kept_running':
       return 'The receiver kept running';
     case 'restarted':
-      return cls === 'brownout' ? 'The receiver restarted too' : 'The power was cut';
+      return cls === 'brownout' ? 'The receiver restarted too' : 'The power was lost';
     default:   /* still judged, or not known: nothing to say */
       return '';
   }

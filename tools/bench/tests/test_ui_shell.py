@@ -159,6 +159,17 @@ def test_a_page_left_before_the_events_settled_is_not_touched():
     assert out == [{"reloads": {}, "toasts": [], "delays": [300]}] * 2
 
 
+def test_a_change_after_the_page_was_left_reloads_the_new_page():
+    """A second, separate change that comes inside the window after a move to another page: that page may have read
+    its data before it, so it reloads once (the old page still never does). A form being edited there is warned."""
+    out = run_shell([
+        {"steps": [changed(), "leave", changed(), "settle"]},
+        {"dirty": True, "steps": [changed(), "leave", changed(), "settle"]},
+    ])
+    assert out[0] == {"reloads": {"receiver": 1}, "toasts": [], "delays": [300]}
+    assert out[1] == {"reloads": {}, "toasts": [WARNING], "delays": [300]}
+
+
 def test_pages_outside_the_app_and_pages_without_reload_ignore_it():
     """The login and the setup (the shell not started) and a page that has nothing to reload (the Status page
     follows the status stream)."""

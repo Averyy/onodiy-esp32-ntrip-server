@@ -333,21 +333,23 @@ setInterval(() => {
  * a form is being edited, says that someone else changed the settings (this
  * tab's own save it knows already). One change can come as a few events in a
  * row (a batch, then a key erased): they wait SETTINGS_SETTLE_MS for each
- * other and count once, one reload, one warning, for the page they came on.
+ * other and count once, one reload, one warning, for the page the last one
+ * came on (a page opened meanwhile may have read its data before it: at
+ * most one reload more).
  */
 const SETTINGS_SETTLE_MS = 300;
 const settingsWait = { timer: null, page: null, other: false };
 
 function settingsChanged(m) {
   if (!(m.client && m.client === CLIENT_ID)) settingsWait.other = true;
-  if (settingsWait.timer) return;
   settingsWait.page = shell.current;
+  if (settingsWait.timer) return;
   settingsWait.timer = setTimeout(() => {
     const page = settingsWait.page, other = settingsWait.other;
     settingsWait.timer = null;
     settingsWait.page = null;
     settingsWait.other = false;
-    /* Another page since: it read its data when it opened. */
+    /* Another page since the last event: it read its data when it opened. */
     if (!shell.started || !page || page !== shell.current) return;
     const v = page.view;
     if (!v.reload) return;

@@ -333,7 +333,8 @@ function receiverDetails(g) {
       ['Firmware date', r.compile_date],
       /* responding: it streams, or it answered since its corrections stopped (a reply, its NMEA). */
       ['Answers', g.restarting ? h('span', { class: 't-warn' }, 'Restarting, back in about 10 s') : fmt.yesno(g.responding)],
-      ['Identity confirmed', fmt.yesno(g.identity_confirmed)],
+      /* Not checked during maintenance (the card says so): no "No" that reads as a failed check. */
+      ['Identity confirmed', gnssUnchecked(g) ? DASH : fmt.yesno(g.identity_confirmed)],
       ['Last data', link.rx_bytes === 0 ? 'Nothing yet' : age(link.rx_age_ms)],
       link.open === false && link.mode !== 'off' ? ['Receiver port', h('span', { class: 't-bad' }, 'Closed, reopening' +
         (link.open_failures ? ' (' + link.open_failures + ' failed tries)' : ''))] : null,

@@ -126,8 +126,20 @@ function startLines(starts, day) {
 
 /* "If corrections stop": the choice's name, or "Paused" while the station holds the recovery. */
 function recoveryNow(hl) {
-  if (hl.ladder_suspended) return 'Paused' + ((hl.station || {}).rx_maintenance ? ' (receiver maintenance)' : '');
+  if (hl.ladder_suspended) return pausedText(hl.station || {});
   return hl.recovery_mode ? lbl(L.recovery, hl.recovery_mode) : DASH;
+}
+
+/* The recovery waits, and for what (GET /api/health station): it goes on by itself after it. A session of the station's
+ * own (an apply, a short exchange under its lease, the seconds after it) is the receiver being configured. */
+function pausedText(s) {
+  if (s.rx_maintenance) return 'Paused (receiver maintenance)';
+  if (s.state === 'flashing' || s.state === 'flash_recovery') return 'Paused during the receiver update';
+  if (s.state === 'detecting') return 'Paused while the station looks for the receiver';
+  if (s.state === 'configuring' || s.lease_held || (typeof s.since_lease_release_ms === 'number' && s.since_lease_release_ms < 10000)) {
+    return 'Paused while the receiver is configured';
+  }
+  return 'Paused';
 }
 
 const toneRank = t => (t in TONE_ORDER ? TONE_ORDER[t] : 9);
@@ -185,8 +197,9 @@ function sinceStart(hl) {
  * status's RSSI is the freshest), the access point, its channel and the
  * transmit power, each only while known, and with the access point whether
  * it can ask the station to move (802.11v; "Unknown" until it is read a few
- * seconds into the association). net: the status's network; w: GET
- * /api/wifi; either may be missing.
+ * seconds into the association; no row in a build that never reads it,
+ * where GET /api/wifi leaves ap_steering out). net: the status's network;
+ * w: GET /api/wifi; either may be missing.
  */
 function wifiRows(net, w) {
   const n = net || w;
@@ -198,7 +211,7 @@ function wifiRows(net, w) {
   return [['Wi-Fi', n.ssid], rssiKnown(rssi) ? ['Signal', rssiView(rssi)] : null, ap.bssid ? ['Access point', ap.bssid] : null,
     ap.channel ? ['Channel', String(ap.channel)] : null,
     typeof ap.tx_power_dbm === 'number' ? ['Transmit power', ap.tx_power_dbm + NB + 'dBm'] : null,
-    ap.bssid ? ['Access point can steer', typeof ap.ap_steering === 'boolean' ? fmt.yesno(ap.ap_steering) : 'Unknown'] : null];
+    ap.bssid && 'ap_steering' in ap ? ['Access point can steer', typeof ap.ap_steering === 'boolean' ? fmt.yesno(ap.ap_steering) : 'Unknown'] : null];
 }
 
 /* An RSSI reading in dBm: -127 to -1. Anything else means unknown (null from the station; a raw 0, or -128 from earlier builds). */
@@ -917,11 +930,12 @@ function journalDetail(e) {
       /* a: channels before and after, who moved it, stayed on the same one, kept the address; b: signals before and
        * after, seconds offline (with the address kept: without a link, not said). */
       const ch0 = a & 0xff, ch1 = (a >>> 8) & 0xff, r0 = (b << 24) >> 24, r1 = (b << 16) >> 24, by = (a >>> 16) & 0xff;
+      /* What the owner looks for first (a phone cuts the rest off): whether the connections were kept. */
       const off = (a >>> 25) & 1 ? 'connections kept' : fmt.dur((b >>> 16) & 0x7fff) + ' offline';
-      if ((a >>> 24) & 1) return (by === 3 ? 'on request, the same access point, ' : 'no stronger access point after all, ') + off;
-      return [by === 1 ? "at the access point's request" : by === 3 ? 'on request' : 'to a stronger access point',
+      if ((a >>> 24) & 1) return off + (by === 3 ? ', on request, the same access point' : ', no stronger access point after all');
+      return [off, by === 1 ? "at the access point's request" : by === 3 ? 'on request' : 'to a stronger access point',
         ch0 && ch1 ? 'channel ' + (ch0 === ch1 ? ch1 : ch0 + ' to ' + ch1) : null,
-        rssiKnown(r0) && rssiKnown(r1) ? 'signal ' + r0 + ' to ' + r1 + ' dBm' : null, off].filter(Boolean).join(', ');
+        rssiKnown(r0) && rssiKnown(r1) ? 'signal ' + r0 + ' to ' + r1 + ' dBm' : null].filter(Boolean).join(', ');
     }
     case 'sg_test': {
       const ev = a & 0xff, grp = ((a >>> 8) & 0xff) + ' ' + ((a >>> 16) & 0xff);
@@ -937,7 +951,7 @@ function journalDetail(e) {
       if (ev === 1) return (b <= 50 ? 'Height ' + metresText(up) : metresText(Math.hypot(b, up))) + ' off';
       if (ev === 2) return 'Looks right again';
       if (ev === 3) return 'Changed';
-      if (ev === 4) return 'Sea-level height, ' + metresText(up) + ' off';
+      if (ev === 4) return 'Sea level, ' + metresText(up) + ' off';
       return 'event ' + ev;
     }
     case 'live_view': {
@@ -1069,8 +1083,9 @@ function journalItems(entries, atStart, kinds) {
           e.kind === 'live_view' || e.kind === 'sg_test' || e.kind === 'fixed_check' ? e.a & 0xff :
           e.kind === 'wifi_roam' ? e.a >>> 16 : '';
         const loss = e.kind === 'data_loss' ? (J.loss[e.a] || [e.a >= 16 ? slotName(e.a - 16) + ' data lost' : null])[0] : null;
-        /* A move whose reconnect found no stronger access point stayed: a reconnect, not a move. */
-        const stayed = e.kind === 'wifi_roam' && (e.a >>> 24) & 1 ? 'Wi-Fi reconnected' : null;
+        /* A move whose reconnect found no stronger access point stayed: no move; a reconnect, unless the connections
+         * were kept (nothing dropped). */
+        const stayed = e.kind === 'wifi_roam' && (e.a >>> 24) & 1 ? ((e.a >>> 25) & 1 ? 'Wi-Fi stayed' : 'Wi-Fi reconnected') : null;
         rows.push({ k: e.kind + sub, seq: e.seq, ev: e.kind === 'ladder_step' ? capFirst(J.ladder[e.a] || 'ladder ' + e.a) + ' recovery' :
           loss || stayed || J.kind[e.kind] || words(e.kind), det: journalDetail(e), when: when });
       }

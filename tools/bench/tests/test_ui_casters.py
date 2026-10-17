@@ -143,7 +143,7 @@ vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { casterEditor, openCasterWarning, casterDetails, casterSummary, casterChip, stationState, adminDashboard,\n' +
   '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard, healthCard, chipCard, signalsHead, bandTable, kv,\n' +
-  '  startLines, foldRows,\n' +
+  '  startLines, foldRows, receiverDetails,\n' +
   '  setStatus: s => { S.status = s; }, setSession: s => { S.session = s; } };\n})()',
   ctx);
 
@@ -524,6 +524,16 @@ for (const c of JSON.parse(casesJson)) {
     const v = [...visible(p.el)];
     out.push([v.find(e => e.tagName === 'STRONG').textContent, v.find(e => e.tagName === 'DIV' && e.className === 'small').textContent,
       v.some(e => e.tagName === 'BUTTON')]);
+    continue;
+  }
+  if (c.fn === 'rx_details') {
+    /* The Receiver card's Details: every row as [label, text]. */
+    const all = ui.receiverDetails(c.g).filter(Boolean).flatMap(k => [...k.walk()]);
+    const pairs = [];
+    for (const dl of all.filter(e => e.tagName === 'DL')) {
+      for (let i = 0; i + 1 < dl.kids.length; i += 2) pairs.push([dl.kids[i].textContent, dl.kids[i + 1].textContent]);
+    }
+    out.push(pairs);
     continue;
   }
   if (c.fn === 'details') {
@@ -1059,7 +1069,8 @@ def test_chip_card_names_the_access_point_and_the_transmit_power():
     status = st_status(network={"online": True, "ssid": "Home", "rssi": -60})
     wifi = {"ssid": "Home", "online": True, "rssi": -60, "channel": 11, "bssid": "AA:BB:CC:DD:EE:FF", "tx_power_dbm": 19.5,
             "ap_steering": True, "roams": 2}
-    qemu = dict(wifi, channel=None, bssid=None, tx_power_dbm=None, ap_steering=None, roams=0)
+    qemu = dict(wifi, channel=None, bssid=None, tx_power_dbm=None, roams=0)
+    del qemu["ap_steering"]   # never read in that build: left out
     off = st_status(network={"online": False, "ssid": "Home", "offline_s": 30})
     sys = {"chip": {"model": "ESP32-S3", "revision": "v0.2", "flash_mb": 16, "psram_mb": 8}, "idf": "v6.1", "mac": "11:22:33:44:55:66"}
     full, bare, gone = run_editor([{"fn": "chip", "sys": sys, "status": status, "wifi": wifi, "net": {}},
@@ -1178,3 +1189,18 @@ def test_use_plain_port_keeps_its_spinner_and_focus_across_the_refresh():
     assert ok["during"] == ["btn small busy", "true", False]
     assert ok["after"] is None and ok["puts"] == [{"tls": False, "port": 2101}]
     assert bad["during"] == ["btn small busy", "true", False] and bad["after"] == ["btn small", None, False]
+
+
+def test_receiver_details_say_nothing_was_checked_in_a_maintenance_with_nothing_kept():
+    """A maintenance resumed with nothing kept of the receiver: the card says once that it is not checked, so the
+    identity row reads as unchecked (a dash, like the fixed-position row), not a "No" that reads as a failed check.
+    Outside maintenance, or with the identity kept, the row says Yes or No as before."""
+    g = {"state": "idle", "maintenance": {"on": True}, "identity_confirmed": False, "responding": True,
+         "receiver": {"valid": False}, "link": {"mode": "stream", "baud": 115200, "rx_bytes": 100, "rx_age_ms": 200},
+         "position": {"source": "none"}, "arp": {"valid": False}}
+    unchecked, kept, plain = run_editor([{"fn": "rx_details", "g": g},
+                                         {"fn": "rx_details", "g": {**g, "identity_confirmed": True}},
+                                         {"fn": "rx_details", "g": {**g, "maintenance": {"on": False}}}])
+    assert dict(unchecked)["Identity confirmed"] == "\u2013" and dict(unchecked)["Answers"] == "Yes"
+    assert dict(kept)["Identity confirmed"] == "Yes"
+    assert dict(plain)["Identity confirmed"] == "No"
