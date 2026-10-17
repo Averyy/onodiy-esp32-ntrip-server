@@ -831,6 +831,13 @@ Views.ntrip = {
         btn('Add a server', () => edit(free[0]), free.length === data.slots.length ? 'primary' : ''))];
     }
 
+    /* The add card beside an odd server out on a wide screen; the whole row after an even count or with its editor open. */
+    function fillAdd() {
+      const n = data.slots.filter(s => !isFree(s)).length;
+      addCard.classList.toggle('wide', n % 2 === 0 || freeSlots().some(x => x.slot === editing));
+      mount(addCard, addBody());
+    }
+
     /* Refresh the live parts of a card without touching its switch and buttons. */
     function fill(s) {
       const r = refs[s.slot];
@@ -896,7 +903,7 @@ Views.ntrip = {
         return;
       }
       if (isFree(s)) {
-        if (addCard) mount(addCard, addBody());
+        if (addCard) fillAdd();
       } else {
         /* Its editor takes the whole row. */
         cards[n].classList.toggle('wide', editing === n);
@@ -909,8 +916,8 @@ Views.ntrip = {
      * says "Not loaded", and there is no add card. */
     function render() {
       for (const k of Object.keys(cards)) delete cards[k];
-      addCard = safeMode() ? null : h('section', { class: 'card wide' });
-      if (addCard) mount(addCard, addBody());
+      addCard = safeMode() ? null : h('section', { class: 'card' });
+      if (addCard) fillAdd();
       mount(el, h('div', { class: 'grid' }, data.slots.filter(s => !isFree(s)).map(s =>
         (cards[s.slot] = h('section', { class: editing === s.slot ? 'card wide' : 'card' }, cardBody(s)))), addCard));
     }
