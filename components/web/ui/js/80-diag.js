@@ -183,7 +183,9 @@ function sinceStart(hl) {
 /*
  * The Wi-Fi, a row each: the network, then while online the signal (the
  * status's RSSI is the freshest), the access point, its channel and the
- * transmit power, each only while known. net: the status's network; w: GET
+ * transmit power, each only while known, and with the access point whether
+ * it can ask the station to move (802.11v; "Unknown" until it is read a few
+ * seconds into the association). net: the status's network; w: GET
  * /api/wifi; either may be missing.
  */
 function wifiRows(net, w) {
@@ -195,7 +197,8 @@ function wifiRows(net, w) {
   const rssi = rssiKnown(n.rssi) ? n.rssi : ap.rssi;
   return [['Wi-Fi', n.ssid], rssiKnown(rssi) ? ['Signal', rssiView(rssi)] : null, ap.bssid ? ['Access point', ap.bssid] : null,
     ap.channel ? ['Channel', String(ap.channel)] : null,
-    typeof ap.tx_power_dbm === 'number' ? ['Transmit power', ap.tx_power_dbm + NB + 'dBm'] : null];
+    typeof ap.tx_power_dbm === 'number' ? ['Transmit power', ap.tx_power_dbm + NB + 'dBm'] : null,
+    ap.bssid ? ['Access point can steer', typeof ap.ap_steering === 'boolean' ? fmt.yesno(ap.ap_steering) : 'Unknown'] : null];
 }
 
 /* An RSSI reading in dBm: -127 to -1. Anything else means unknown (null from the station; a raw 0, or -128 from earlier builds). */
@@ -303,9 +306,15 @@ function chipCard(sys, s, w, net) {
       sys ? ['ESP-IDF', sys.idf] : null,
       ...wifiRows(s && s.network, w),
       sys && sys.mac ? ['MAC address', sys.mac] : null,
-      net.reconnects ? ['Wi-Fi drops', fmt.num(net.reconnects) + ' this start' +
-        (net.last_disconnect_reason ? ', last: ' + wifiReason(net.last_disconnect_reason) : '')] : null,
+      ...linkCounts(net, w),
     ]));
+}
+
+/* This start's drops (health's network) and moves to another access point (GET /api/wifi, may be missing), each once it happened. */
+function linkCounts(net, w) {
+  return [net.reconnects ? ['Wi-Fi drops', fmt.num(net.reconnects) + ' this start' +
+    (net.last_disconnect_reason ? ', last: ' + wifiReason(net.last_disconnect_reason) : '')] : null,
+  w && w.roams ? ['Moves to another access point', fmt.num(w.roams) + ' this start'] : null];
 }
 
 /*
@@ -905,11 +914,12 @@ function journalDetail(e) {
     case 'rx_boot':
       return a === 1 ? 'Kept running' : a === 2 ? 'Restarted too: the power was lost' : 'Not known';
     case 'wifi_roam': {
-      /* a: channels before and after, who moved it, stayed on the same one; b: signals before and after, seconds offline. */
-      const ch0 = a & 0xff, ch1 = (a >>> 8) & 0xff, r0 = (b << 24) >> 24, r1 = (b << 16) >> 24;
-      const off = fmt.dur((b >>> 16) & 0x7fff) + ' offline';
-      if ((a >>> 24) & 1) return 'no stronger access point after all, ' + off;
-      return [((a >>> 16) & 0xff) === 1 ? "at the access point's request" : 'to a stronger access point',
+      /* a: channels before and after, who moved it, stayed on the same one, kept the address; b: signals before and
+       * after, seconds offline (with the address kept: without a link, not said). */
+      const ch0 = a & 0xff, ch1 = (a >>> 8) & 0xff, r0 = (b << 24) >> 24, r1 = (b << 16) >> 24, by = (a >>> 16) & 0xff;
+      const off = (a >>> 25) & 1 ? 'connections kept' : fmt.dur((b >>> 16) & 0x7fff) + ' offline';
+      if ((a >>> 24) & 1) return (by === 3 ? 'on request, the same access point, ' : 'no stronger access point after all, ') + off;
+      return [by === 1 ? "at the access point's request" : by === 3 ? 'on request' : 'to a stronger access point',
         ch0 && ch1 ? 'channel ' + (ch0 === ch1 ? ch1 : ch0 + ' to ' + ch1) : null,
         rssiKnown(r0) && rssiKnown(r1) ? 'signal ' + r0 + ' to ' + r1 + ' dBm' : null, off].filter(Boolean).join(', ');
     }

@@ -30,9 +30,13 @@
  * Network state: with ESP-IDF's default station handlers a Wi-Fi disconnect
  * takes the interface down at once: the address is cleared and lwIP aborts
  * every TCP session bound to it (IP_EVENT_STA_LOST_IP only follows later,
- * when the lost-IP timer runs out). So the network counts as up only from
- * IP_EVENT_STA_GOT_IP, and as down from the disconnect (or a station stop,
- * or LOST_IP) on; sessions then close as "no network", never as failures.
+ * when the lost-IP timer runs out). A move to another access point of the
+ * network keeps the interface up with its address instead (the network
+ * component), and the sessions with it. So the network counts as up only
+ * from IP_EVENT_STA_GOT_IP, and as down from the moment the station's
+ * interface goes down (IP_EVENT_NETIF_DOWN, never at a move that keeps it),
+ * a station stop or LOST_IP on; sessions then close as "no network", never
+ * as failures.
  * Association alone is not enough: until DHCP has an address a connect
  * fails with "no route" and would be counted. The flag is also checked
  * against the interface itself (address and up state), so a session that
@@ -467,13 +471,19 @@ static void on_net_event(void *arg, esp_event_base_t base, int32_t id, void *dat
 {
     (void)arg;
     if (base == WIFI_EVENT) {
-        if (id == WIFI_EVENT_STA_DISCONNECTED || id == WIFI_EVENT_STA_STOP) {
-            /* The default handler clears the address now and lwIP aborts
-             * the sessions bound to it: they close as "no network". */
-            s_net_up = false;
+        if (id == WIFI_EVENT_STA_STOP) {
+            s_net_up = false;   /* the interface goes with Wi-Fi: the sessions close as "no network" */
         }
     } else if (base == IP_EVENT) {
-        if (id == IP_EVENT_STA_GOT_IP) {
+        if (id == IP_EVENT_NETIF_DOWN) {
+            /* The address is gone and lwIP aborted the sessions bound to
+             * it (a disconnect that was not a move keeping the address):
+             * they close as "no network". */
+            const ip_event_netif_status_t *e = (const ip_event_netif_status_t *)data;
+            if (e != NULL && e->esp_netif == sta_netif()) {
+                s_net_up = false;
+            }
+        } else if (id == IP_EVENT_STA_GOT_IP) {
             const ip_event_got_ip_t *e = (const ip_event_got_ip_t *)data;
             if (!s_net_up || (e != NULL && e->ip_changed)) {
                 s_net_gen++;   /* a socket from before this address is dead (the same lease reports no change) */
@@ -2110,7 +2120,7 @@ esp_err_t ntrip_server_init(void)
         err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP, on_net_event, NULL);
     }
     if (err == ESP_OK) {
-        err = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, on_net_event, NULL);
+        err = esp_event_handler_register(IP_EVENT, IP_EVENT_NETIF_DOWN, on_net_event, NULL);
     }
     if (err == ESP_OK) {
         err = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_STOP, on_net_event, NULL);

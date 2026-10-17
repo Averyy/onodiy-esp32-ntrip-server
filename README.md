@@ -381,7 +381,8 @@ station name. Settings shows both as links.
 - **Mesh Wi-Fi** (several access points under one name): the station moves to another
   node when the mesh asks it to, and by itself (at most once every 30 minutes) when its
   signal is weak and another node is clearly stronger; never during a firmware update.
-  Each move briefly drops the caster connections and shows in Diagnostics > History.
+  A move that takes only a few seconds keeps the station's address and the caster
+  connections; a slower one drops them briefly. Each move shows in Diagnostics > History.
 - **Factory reset:** hold **BOOT** for 20 s. Wi-Fi, admin password, casters and
   receiver profile are erased; the station restarts in setup mode. Refused while a
   receiver firmware update is running.

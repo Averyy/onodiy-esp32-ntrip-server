@@ -95,8 +95,11 @@ menu "Station: network"
             transition requests, so the network can steer it to a better
             node, and while its own signal is weak it looks for a clearly
             stronger access point of the network and reconnects to it.
-            Every move drops the caster sessions for a few seconds, so moves
-            are rare: none during a firmware update or a receiver flash,
+            A move keeps the station's address and the caster sessions when
+            the station is associated again within a few seconds (as with
+            ESP-IDF's ESP_WIFI_ROAMING_IP_RENEW_SKIP, without its roaming
+            app); otherwise they drop for a few seconds. Moves are rare:
+            none during a firmware update or a receiver flash,
             none while the station's own access point is up or changed
             credentials are on trial, at most one the network asks for per
             5 min (unless it disconnects the station anyway) and one of the

@@ -74,6 +74,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '    return { state: r.state ? st.key : null, alerts: r.alerts.map(x => x.id), notice: healthNotice(a) }; },\n' +
   '  checkFailure: u => checkFailure(u),\n' +
   '  wifiRows: a => wifiRows(a[0], a[1]).filter(Boolean).map(r => [r[0], typeof r[1] === \'string\' ? r[1] : null]),\n' +
+  '  linkCounts: a => linkCounts(a[0], a[1]).filter(Boolean),\n' +
   '  startKind: a => startKind(a[0], a[1]), rxBoot: v => (Array.isArray(v) ? rxBootSentence(v[0], v[1]) : rxBootSentence(v)),\n' +
   '  noticeLines: a => noticeItems(a[0], a[1]).map(i => [i.key, i.tone, i.urgent, i.title + (i.text ? \'. \' + i.text : \'\'),\n' +
   '    Array.isArray(i.actions) ? i.actions.length : i.actions ? 1 : 0]),\n' +
@@ -327,8 +328,8 @@ def jrec(seq: int, kind: str, a: int = 0, b: int = 0, up: int = 1, t: int | None
     return {"seq": seq, "time_unix": t, "uptime_s": up, "kind": kind, "a": a, "b": b}
 
 
-def roam_a(ch0: int, ch1: int, by: int, same: bool = False) -> int:
-    return ch0 | (ch1 << 8) | (by << 16) | ((1 << 24) if same else 0)
+def roam_a(ch0: int, ch1: int, by: int, same: bool = False, kept: bool = False) -> int:
+    return ch0 | (ch1 << 8) | (by << 16) | ((1 << 24) if same else 0) | ((1 << 25) if kept else 0)
 
 
 def roam_b(r0: int, r1: int, secs: int) -> int:
@@ -363,6 +364,25 @@ def test_event_list_names_moves_between_access_points():
                                         jrec(2, "wifi_roam", roam_a(6, 1, 1), roam_b(-80, -50, 2), 900)], True, None])])[0]
     rows = [r for r in folded if "head" not in r]
     assert len(rows) == 1 and len(rows[0]["all"]) == 2
+
+
+def test_event_list_says_a_move_kept_the_connections():
+    """A move that kept the address says so instead of a time offline (nothing was offline); a move asked for on the
+    bench console says "on request"."""
+    recs = [jrec(1, "wifi_roam", roam_a(1, 6, 1, kept=True), roam_b(-78, -52, 1), 100),
+            jrec(2, "wifi_roam", roam_a(6, 6, 2, True, True), roam_b(-74, -73, 2), 4000),
+            jrec(3, "wifi_roam", roam_a(6, 11, 3, kept=True), roam_b(-60, -55, 2), 9000),
+            jrec(4, "wifi_roam", roam_a(11, 11, 3, True, True), roam_b(-55, -56, 2), 15000),
+            jrec(5, "wifi_roam", roam_a(11, 1, 3), roam_b(-56, -50, 9), 20000)]
+    (items,) = run_ui([("journalItems", [recs, True, None])])
+    rows = [(r["ev"], r["det"]) for r in items if "head" not in r]
+    assert rows == [
+        ("Wi-Fi moved", "on request, channel 11 to 1, signal -56 to -50 dBm, 9\u00a0s offline"),
+        ("Wi-Fi reconnected", "on request, the same access point, connections kept"),
+        ("Wi-Fi moved", "on request, channel 6 to 11, signal -60 to -55 dBm, connections kept"),
+        ("Wi-Fi reconnected", "no stronger access point after all, connections kept"),
+        ("Wi-Fi moved", "at the access point's request, channel 1 to 6, signal -78 to -52 dBm, connections kept"),
+    ], rows
 
 
 def test_event_journal_one_heading_per_start_and_repeats_folded():
@@ -1173,11 +1193,33 @@ def test_system_wifi_chip_and_recovery_line():
                                            ("wifiRows", [{"online": False, "ssid": "Home", "offline_s": 90}, ap]),
                                            ("wifiRows", [{"ssid": ""}, None]), ("wifiRows", [None, None])])
     assert rows == [["Wi-Fi", "Home"], ["Signal", None], ["Access point", "AA:BB:CC:DD:EE:FF"], ["Channel", "11"],
-                    ["Transmit power", "19.5\u00a0dBm"]]
+                    ["Transmit power", "19.5\u00a0dBm"], ["Access point can steer", "Unknown"]]
     assert not any("\u00b7" in (r[1] or "") for r in rows)
     assert bare == [["Wi-Fi", "Home"], ["Signal", None]]
     assert off == [["Wi-Fi", "Home, offline for 1\u00a0min 30\u00a0s"]]
     assert unset == [["Wi-Fi", "Not set up"]] and none == [["Wi-Fi", "\u2013"]]
+
+
+def test_diagnostics_wifi_says_moves_and_whether_the_access_point_steers():
+    """Diagnostics' Wi-Fi: whether the access point can ask the station to move, in plain words while online with an
+    access point (Unknown until it is read; none without one, as in QEMU), and the moves to another access point this
+    start once there was one, beside the drops."""
+    net = {"online": True, "ssid": "Home", "rssi": -61}
+    ap = {"ssid": "Home", "online": True, "rssi": -61, "bssid": "AA:BB:CC:DD:EE:FF", "channel": 11}
+    yes, no, unknown = run_ui([("wifiRows", [net, {**ap, "ap_steering": v}]) for v in (True, False, None)])
+    assert yes[-1] == ["Access point can steer", "Yes"] and no[-1] == ["Access point can steer", "No"]
+    assert unknown[-1] == ["Access point can steer", "Unknown"]
+    (qemu,) = run_ui([("wifiRows", [net, {**ap, "bssid": None, "ap_steering": None}])])
+    assert all(r[0] != "Access point can steer" for r in qemu)
+    moved, none, drops, nothing = run_ui([
+        ("linkCounts", [{"reconnects": 0}, {**ap, "roams": 2}]),
+        ("linkCounts", [{"reconnects": 0}, {**ap, "roams": 0}]),
+        ("linkCounts", [{"reconnects": 1, "last_disconnect_reason": 8}, {**ap, "roams": 1}]),
+        ("linkCounts", [{}, None])])
+    assert moved == [["Moves to another access point", "2 this start"]]
+    assert none == [] and nothing == []
+    assert drops[0][0] == "Wi-Fi drops" and drops[0][1].startswith("1 this start, last: ")
+    assert drops[1] == ["Moves to another access point", "1 this start"]
 
 
 def test_own_wifi_chip_warns_only_while_it_is_open_to_anyone():

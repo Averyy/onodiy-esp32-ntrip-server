@@ -471,6 +471,21 @@ ftimes dump             the whole recording as CSV, ending with "BENCH ftimes du
   refusals: receiver maintenance, an open update journal, another receiver
   job).
 
+### A move to another access point on the bench console
+
+`wifimove` makes the station's own move at once (bench builds): it
+reconnects and its connect joins the strongest access point of the network,
+as after two roaming scans found a clearly stronger one, under the same
+holds (refused during an update, while the station's own access point is
+up or new credentials are on trial). The command watches the move to its
+end and prints one line, for example
+`BENCH PASS wifimove: channel 6 -> 11, -71 -> -52 dBm, associated again after 2310 ms, address 192.168.1.50 kept (online throughout)`;
+FAIL when the station went offline or its address changed. With one access
+point the station joins the same one again, which exercises the same path.
+The caster sessions stay open across a PASS (the Casters page shows no
+reconnect, and Diagnostics > History a "Wi-Fi moved" or "Wi-Fi reconnected"
+row ending in "connections kept").
+
 ### Reading the bench console's replies
 
 Every reply line (`BENCH ...`, `help`, the usage lines), the flasher's byte

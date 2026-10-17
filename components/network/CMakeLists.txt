@@ -45,3 +45,17 @@ if(CONFIG_ESP_WIFI_WNM_SUPPORT)
     target_link_libraries(${COMPONENT_LIB} INTERFACE
         "-Wl,--wrap=ieee802_11_rx_wnm_action" "-u __wrap_ieee802_11_rx_wnm_action")
 endif()
+
+# Keeping the address across a move (network.c, net_roam.h "Keeping the
+# address across a move"): ESP-IDF's default station handlers
+# (esp_wifi/src/wifi_default.c) take the interface down at every disconnect
+# through esp_netif_action_disconnected and bring it up at every association
+# through esp_netif_action_connected (both in esp_netif). Both are wrapped:
+# the wrappers leave the interface alone for a move that keeps its address
+# and pass every other call (other interfaces, other events) to the
+# original. A later ESP-IDF that renames them fails the link.
+if(CONFIG_NETWORK_ROAM)
+    target_link_libraries(${COMPONENT_LIB} INTERFACE
+        "-Wl,--wrap=esp_netif_action_disconnected" "-u __wrap_esp_netif_action_disconnected"
+        "-Wl,--wrap=esp_netif_action_connected" "-u __wrap_esp_netif_action_connected")
+endif()

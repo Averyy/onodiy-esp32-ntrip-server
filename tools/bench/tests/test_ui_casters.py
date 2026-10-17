@@ -1052,11 +1052,14 @@ def test_onocoy_card_says_a_tls_failure_once():
 
 
 def test_chip_card_names_the_access_point_and_the_transmit_power():
-    """Chip and Wi-Fi: the network, its signal, the access point, its channel and the transmit power in a row each, so
-    no wrapped line starts with a dot on a phone; each only while known and online (QEMU's link has no access point)."""
+    """Chip and Wi-Fi: the network, its signal, the access point, its channel, the transmit power and whether the access
+    point can steer the station in a row each, so no wrapped line starts with a dot on a phone; each only while known
+    and online (QEMU's link has no access point). The moves to another access point this start, like the drops,
+    whatever the link does now."""
     status = st_status(network={"online": True, "ssid": "Home", "rssi": -60})
-    wifi = {"ssid": "Home", "online": True, "rssi": -60, "channel": 11, "bssid": "AA:BB:CC:DD:EE:FF", "tx_power_dbm": 19.5}
-    qemu = dict(wifi, channel=None, bssid=None, tx_power_dbm=None)
+    wifi = {"ssid": "Home", "online": True, "rssi": -60, "channel": 11, "bssid": "AA:BB:CC:DD:EE:FF", "tx_power_dbm": 19.5,
+            "ap_steering": True, "roams": 2}
+    qemu = dict(wifi, channel=None, bssid=None, tx_power_dbm=None, ap_steering=None, roams=0)
     off = st_status(network={"online": False, "ssid": "Home", "offline_s": 30})
     sys = {"chip": {"model": "ESP32-S3", "revision": "v0.2", "flash_mb": 16, "psram_mb": 8}, "idf": "v6.1", "mac": "11:22:33:44:55:66"}
     full, bare, gone = run_editor([{"fn": "chip", "sys": sys, "status": status, "wifi": wifi, "net": {}},
@@ -1064,12 +1067,14 @@ def test_chip_card_names_the_access_point_and_the_transmit_power():
                                    {"fn": "chip", "sys": sys, "status": off, "wifi": wifi, "net": {}}])
     rows = dict(full)
     assert [r[0] for r in full] == ["Chip", "ESP-IDF", "Wi-Fi", "Signal", "Access point", "Channel", "Transmit power",
-                                    "MAC address"]
+                                    "Access point can steer", "MAC address", "Moves to another access point"]
     assert rows["Wi-Fi"] == "Home" and rows["Signal"] == " Good (-60 dBm)"
     assert rows["Access point"] == "AA:BB:CC:DD:EE:FF" and rows["Channel"] == "11" and rows["Transmit power"] == "19.5\u00a0dBm"
+    assert rows["Access point can steer"] == "Yes" and rows["Moves to another access point"] == "2 this start"
     assert not any("\u00b7" in v for _, v in full)
     assert [r[0] for r in bare] == ["Chip", "ESP-IDF", "Wi-Fi", "Signal", "MAC address"]
-    assert gone == [r for r in gone if r[0] != "Signal"] and [r[0] for r in gone] == ["Chip", "ESP-IDF", "Wi-Fi", "MAC address"]
+    assert gone == [r for r in gone if r[0] != "Signal"] and [r[0] for r in gone] == ["Chip", "ESP-IDF", "Wi-Fi", "MAC address",
+                                                                                    "Moves to another access point"]
     assert dict(gone)["Wi-Fi"] == "Home, offline for 30\u00a0s"
 
 
