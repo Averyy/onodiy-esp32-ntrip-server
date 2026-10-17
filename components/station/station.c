@@ -736,6 +736,17 @@ static bool store_profile(const um98x_base_profile_t *p, const um98x_base_positi
     return true;
 }
 
+/* The station stored a profile of its own (a lock, a re-survey, a signal
+ * group): one that differs from the profile stored before (its hash) is not
+ * what the receiver acknowledged, as for the user's save, until an apply of
+ * it works. Never under s_lock. */
+static void own_profile_stored(uint32_t hash_before)
+{
+    if (um98x_profile_hash(&s_profile) != hash_before) {
+        station_profile_changed();
+    }
+}
+
 /* The stored profile with another signal group (the base position stays as stored). */
 static bool store_profile_group(station_sg_t g)
 {
@@ -745,6 +756,7 @@ static bool store_profile_group(station_sg_t g)
     if (settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_PROFILE, buf, &blen) == ESP_OK) {
         (void)um98x_profile_decode(buf, blen, &p);
     }
+    uint32_t before = um98x_profile_hash(&p);
     p.signal_group_master = g.master;
     p.signal_group_slave = g.slave;
     size_t len = um98x_profile_encode(&p, buf, sizeof(buf));
@@ -755,6 +767,7 @@ static bool store_profile_group(station_sg_t g)
         return false;
     }
     s_profile = p;
+    own_profile_stored(before);
     return true;
 }
 
@@ -1320,6 +1333,7 @@ static const char *why_name(uint8_t why)
 static void job_apply(const stn_job_t *job, stn_result_t *r)
 {
     load_profile();
+    uint32_t before = um98x_profile_hash(&s_profile);
     if (job->change == STN_CHANGE_LOCK) {
         um98x_base_profile_t next;
         um98x_base_position_t pos;
@@ -1336,6 +1350,7 @@ static void job_apply(const stn_job_t *job, stn_result_t *r)
             return;
         }
         s_profile = next;
+        own_profile_stored(before);
         ESP_LOGI(TAG, "position locked (survey result): applying it as a fixed base");
     } else if (job->change == STN_CHANGE_RESURVEY) {
         um98x_base_profile_t next;
@@ -1346,6 +1361,7 @@ static void job_apply(const stn_job_t *job, stn_result_t *r)
             return;
         }
         s_profile = next;
+        own_profile_stored(before);
         ESP_LOGI(TAG, "locked position forgotten: surveying again (%u s)", (unsigned)s_profile.survey_in_s);
     }
 

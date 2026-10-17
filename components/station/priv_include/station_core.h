@@ -759,10 +759,12 @@ bool stn_sg_fallback(uint8_t refused_m, uint8_t refused_s, bool before_known, ui
                      bool ok_known, uint16_t ok_pair, uint8_t *out_m, uint8_t *out_s);
 
 /**
- * The user stored a different profile: what the receiver acknowledged, and
+ * A different profile was stored, by the user or by the station itself (a
+ * lock, a re-survey, a signal group): what the receiver acknowledged, and
  * the applied check, were about the one before (static_ok and
- * profile_applied false until it is applied; the user's save queues that
- * apply, stn_request_apply).
+ * profile_applied false until an apply of it works; the user's save queues
+ * that apply, stn_request_apply, the station's own change is applied by the
+ * job that stored it or right after).
  */
 void stn_profile_changed(stn_t *s);
 

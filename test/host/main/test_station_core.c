@@ -2827,6 +2827,69 @@ TEST_CASE("station core: a survey without data outlasts its window and is locked
     TEST_ASSERT_EQUAL(STN_CHANGE_LOCK, j.change);
 }
 
+/* Run up to max_s seconds until an apply is handed out, answering every other job (an identity: the stored profile is
+ * not the acknowledged one); STN_JOB_NONE when none comes. */
+static stn_job_t until_apply_answered(sim_t *w, int max_s)
+{
+    for (int i = 0; i <= max_s; i++) {
+        stn_job_t j = sim_next(w);
+        if (j.kind == STN_JOB_APPLY) {
+            return j;
+        }
+        if (j.kind == STN_JOB_IDENTIFY) {
+            w->in.text_lines++;
+            identity_done(w, true, false);
+        } else if (j.kind != STN_JOB_NONE) {
+            w->in.text_lines++;
+            sim_done(w, &(stn_result_t){ .err = STN_OK });
+        }
+        sim_tick(w);
+    }
+    stn_job_t none;
+    memset(&none, 0, sizeof(none));
+    return none;
+}
+
+TEST_CASE("station core: a profile the station stores itself is not acknowledged until an apply of it works", "[station]")
+{
+    /* The lock stores the fixed profile before its session takes the lease
+     * (station.c then calls stn_profile_changed). What the receiver
+     * acknowledged is still the survey profile, whatever the apply does. */
+    sim_t w;
+    sim_init(&w, false);
+    boot_surveying(&w);
+    TEST_ASSERT_TRUE(stn_profile_acknowledged(&w.s));
+    stn_request_lock(&w.s);
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_CHANGE_LOCK, j.change);
+    stn_profile_changed(&w.s);   /* the job stored the locked profile */
+    w.in.profile_survey = false;
+    w.skip_station = false;
+    stn_result_t r = res(STN_E_STATE);
+    r.nothing_sent = true;   /* no lease: nothing reached the receiver */
+    sim_done(&w, &r);
+    TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+    TEST_ASSERT_FALSE(stn_profile_acknowledged(&w.s));
+    TEST_ASSERT_FALSE(w.s.profile_applied);
+
+    /* The retry's session runs and is rolled back (the receiver restarted): still not acknowledged. */
+    j = until_apply_answered(&w, 11 * 60);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_WHY_RETRY, j.why);
+    sim_done(&w, &(stn_result_t){ .err = STN_E_FAIL, .restarted = true, .answered = true });
+    TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+    TEST_ASSERT_FALSE(stn_profile_acknowledged(&w.s));
+
+    /* The next retry works: acknowledged. */
+    j = until_apply_answered(&w, 31 * 60);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_FALSE(stn_profile_acknowledged(&w.s));
+    sim_done(&w, &(stn_result_t){ .err = STN_OK, .answered = true });
+    TEST_ASSERT_FALSE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+    TEST_ASSERT_TRUE(stn_profile_acknowledged(&w.s));
+}
+
 /* ---- live view ---------------------------------------------------------------- */
 
 #define LIVE_MS (10 * MIN_MS)

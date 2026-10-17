@@ -896,7 +896,9 @@ void station_profile_saved(void);
  * The user stored a profile that differs from the one before: the
  * receiver's acknowledgement and the applied check were of that one
  * (profile_acknowledged and profile_applied false until the new one is
- * applied; also what a maintenance resumed after a reset knew of it).
+ * applied; also what a maintenance resumed after a reset knew of it). The
+ * station does the same for a profile it stores itself (a lock, a
+ * re-survey, a signal group), also when the apply that follows fails.
  */
 void station_profile_changed(void);
 
