@@ -178,6 +178,10 @@ RESTART_AFTER_HEAD_S = 0.25
 # so nothing arrives across the restart however late the shutdown comes.
 RESTART_HOLD_AFTER_HEAD_S = 1.5
 CUT_CLOSE_LINE = "closing inside an epoch"
+# The station task has ended receiver maintenance (station.c handle_notes, before it publishes the status that
+# follows): DELETE /api/gnss/maintenance is accepted before that, so /api/gnss can still show the receiver as
+# it was before maintenance, identified, though the station then listens first and asks it again.
+MAINT_ENDED_LINE = "station: receiver maintenance ended"
 STOP_REASONS = ["none", "rejected", "login_blocked", "in_use", "kicked", "duplicate", "banned"]
 
 
@@ -1467,8 +1471,11 @@ class E2E:
         code = (data or {}).get("error", {}).get("code") if isinstance(data, dict) else None
         self.check(status == 200 and status2 == 409 and code == "receiver_maintenance",
                    f"comparison refused in receiver maintenance: HTTP {status2} {code}")
+        at = len(self.console_text())
         self.api("DELETE", "/api/gnss/maintenance")
-        if not self.check(self.receiver_ready((3, 6), 120) is not None, "streaming again after maintenance"):
+        ended = self.poll(lambda: MAINT_ENDED_LINE in self.console_text()[at:], 30, every=0.5)
+        if not self.check(ended is not None and self.receiver_ready((3, 6), 120) is not None,
+                          "streaming again after maintenance (ended on the console, identified again)"):
             return
 
         # 3. 7 0 refused by the receiver: rejected, back on 3 6, no config_failed.
