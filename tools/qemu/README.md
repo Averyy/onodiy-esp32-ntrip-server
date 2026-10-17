@@ -390,7 +390,17 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    RCV.NXT), as a Linux client does, and the station takes the next SYN,
    libslirp's first resend, 5.5 to 6 s after the first: one bare ACK and
    nothing else before the SYN-ACK, that reset in the pcap, the SYN-ACK to
-   the client's second SYN, and the answer within 12 s of the connect. lwIP
+   the client's second SYN, and the request's time taken apart in the
+   pcap. The resend must come 5.4 to 6.5 s after the first SYN: that wait
+   is libslirp's retransmission timer, not the station (a new
+   connection's first timeout is 6 s, `tcp_newtcpcb`, counted down in
+   500 ms ticks; libslirp's `tcp_input` answers the station's bare ACK in
+   `SYN_SENT` with a reset and leaves the SYN to that timer). The
+   station's own part, its bare ACK, its SYN-ACK and the request to its
+   FIN, must stay under 5 s, as any request's. In the captures of two
+   earlier runs it was 6 ms and 0.10 s of answers 5.97 s and 6.08 s after
+   the connect (the resends 5.96 and 5.97 s after the first SYN; probes on
+   other connections meanwhile answered in 0.01 and 0.10 s). lwIP
    alone ignores that reset (RFC 1337's fix against TIME-WAIT
    assassination, an Informational RFC); RFC 9293 section 3.10.7.4 ends
    TIME_WAIT on it, as Linux does by default, and so does the firmware's
@@ -456,7 +466,10 @@ still held in TIME_WAIT (check 3: the client's reset ends it, so such an
 answer is late by one libslirp resend, about 6 s, and a half-closing
 request answered after 5 s or more is named with its port in the check's
 line). The next one, if any, leaves this evidence. The last lines of the
-run say how many requests were watched.
+run say how many requests were watched and how many of them nothing
+explains: a check that takes a watched request's time apart in its
+packets (check 3's client back inside TIME_WAIT) writes that split to
+the log, and that request is listed as explained.
 
 QEMU always stops with it: on a normal end, Ctrl-C, SIGTERM or SIGHUP the
 script stops QEMU on the way out, and `run.sh` gets `--seconds` (observe or

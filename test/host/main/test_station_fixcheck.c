@@ -230,6 +230,99 @@ TEST_CASE("station fixcheck: the height alone, 80 m off, raises it too", "[stati
     TEST_ASSERT_EQUAL_INT32(80, n[0].b);
 }
 
+TEST_CASE("station fixcheck: a fixed height typed as height above sea level, 34 m off, raises the warning with its own note",
+          "[station_fixcheck]")
+{
+    /* The receiver where the fixed position says; the fixed height is its height above sea level (the geoid 34 m below
+     * the ellipsoid there), not its ellipsoidal height: inside the 50 m limit. */
+    world_t w;
+    world_init(&w, true);
+    w.in.fixed_llh[2] = FIX_H + 34.0;
+    boot(&w, true);
+    stn_result_t here = answer(0.0, 0.0);   /* at FIX_H: 34 m below the fixed height, its sea-level height 134 m */
+    for (int i = 0; i < 2; i++) {
+        query(&w, 120, &here);
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, stn_alerts(&w.s) & STN_ALERT_FIXED_FAR);
+    query(&w, 120, &here);
+    TEST_ASSERT_TRUE((stn_alerts(&w.s) & STN_ALERT_FIXED_FAR) != 0);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);   /* streaming goes on */
+    stn_fix_status_t st;
+    stn_fix_status(&w.s, w.in.now_ms, &st);
+    TEST_ASSERT_EQUAL_UINT8(STN_FIX_FAR, st.state);
+    TEST_ASSERT_TRUE(st.sea_level);
+    TEST_ASSERT_TRUE(st.height_only);   /* the warning names the height */
+    TEST_ASSERT_DOUBLE_WITHIN(0.1, 34.0, st.offset.up_m);
+    TEST_ASSERT_DOUBLE_WITHIN(0.1, 0.0, st.offset.up_msl_m);
+    stn_note_t n[STN_NOTES];
+    TEST_ASSERT_EQUAL_UINT(1, notes(&w, n));
+    TEST_ASSERT_EQUAL_UINT8(STN_NOTE_FIXED_SEA_LEVEL, n[0].kind);
+    TEST_ASSERT_EQUAL_INT32(0, n[0].a);
+    TEST_ASSERT_EQUAL_INT32(34, n[0].b);
+
+    /* An hour later the same: nothing new to note. */
+    query(&w, 2 * 3600, &here);
+    query(&w, 120, &here);
+    query(&w, 120, &here);
+    TEST_ASSERT_TRUE((stn_alerts(&w.s) & STN_ALERT_FIXED_FAR) != 0);
+    TEST_ASSERT_EQUAL_UINT(0, notes(&w, n));
+
+    /* The user enters the height above the ellipsoid: dropped at once, then checked near. */
+    w.in.fixed_llh[2] = FIX_H;
+    (void)stn_next(&w.s, &w.in);
+    TEST_ASSERT_EQUAL_UINT32(0, stn_alerts(&w.s) & STN_ALERT_FIXED_FAR);
+    TEST_ASSERT_EQUAL_UINT(1, notes(&w, n));
+    TEST_ASSERT_EQUAL_UINT8(STN_NOTE_FIXED_CHANGED, n[0].kind);
+    stn_result_t at = answer(0.0, 0.0);
+    for (int i = 0; i < 3; i++) {
+        query(&w, 120, &at);
+    }
+    stn_fix_status(&w.s, w.in.now_ms, &st);
+    TEST_ASSERT_EQUAL_UINT8(STN_FIX_NEAR, st.state);
+    TEST_ASSERT_FALSE(st.sea_level);
+    TEST_ASSERT_EQUAL_UINT32(0, stn_alerts(&w.s) & STN_ALERT_FIXED_FAR);
+}
+
+TEST_CASE("station fixcheck: the right height 34 m from the sea-level one raises nothing; a reason that changes is noted",
+          "[station_fixcheck]")
+{
+    world_t w;
+    world_init(&w, true);
+    boot(&w, true);
+    stn_result_t here = answer(0.0, 0.0);
+    for (int i = 0; i < 3; i++) {
+        query(&w, 120, &here);
+    }
+    stn_fix_status_t st;
+    stn_fix_status(&w.s, w.in.now_ms, &st);
+    TEST_ASSERT_EQUAL_UINT8(STN_FIX_NEAR, st.state);
+    TEST_ASSERT_FALSE(st.sea_level);
+    stn_note_t n[STN_NOTES];
+    TEST_ASSERT_EQUAL_UINT(0, notes(&w, n));
+
+    /* A sea-level height, then (an hour later) the receiver's own solution 120 m away: the reason changes, noted. */
+    world_init(&w, true);
+    w.in.fixed_llh[2] = FIX_H + 34.0;
+    boot(&w, true);
+    stn_result_t sea = answer(0.0, 0.0);
+    for (int i = 0; i < 3; i++) {
+        query(&w, 120, &sea);
+    }
+    TEST_ASSERT_EQUAL_UINT(1, notes(&w, n));
+    TEST_ASSERT_EQUAL_UINT8(STN_NOTE_FIXED_SEA_LEVEL, n[0].kind);
+    stn_result_t away = answer(120.0, 0.0);
+    query(&w, 2 * 3600, &away);
+    query(&w, 120, &away);
+    query(&w, 120, &away);
+    stn_fix_status(&w.s, w.in.now_ms, &st);
+    TEST_ASSERT_EQUAL_UINT8(STN_FIX_FAR, st.state);
+    TEST_ASSERT_FALSE(st.sea_level);
+    TEST_ASSERT_TRUE((stn_alerts(&w.s) & STN_ALERT_FIXED_FAR) != 0);
+    TEST_ASSERT_EQUAL_UINT(1, notes(&w, n));
+    TEST_ASSERT_EQUAL_UINT8(STN_NOTE_FIXED_FAR, n[0].kind);
+    TEST_ASSERT_EQUAL_INT32(120, n[0].a);
+}
+
 TEST_CASE("station fixcheck: a position within the limits raises nothing; fixed later, the warning clears with a note",
           "[station_fixcheck]")
 {

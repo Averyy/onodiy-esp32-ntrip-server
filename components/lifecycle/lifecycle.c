@@ -545,7 +545,7 @@ static esp_err_t record_boot(void)
     if (len == 0) {
         return ESP_ERR_INVALID_SIZE;
     }
-    err = settings_set_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_HISTORY, buf, len);
+    err = settings_set_state_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_HISTORY, buf, len);
     if (err == ESP_OK) {
         taskENTER_CRITICAL(&s_lock);
         s_hist_head = true;
@@ -591,7 +591,8 @@ static void date_boot(void)
         e->cls == (uint8_t)s_info.reset_class) {
         e->start_unix = start;
         len = boot_history_encode(s->entries, n, s->buf, sizeof(s->buf));
-        err = (len == 0) ? ESP_ERR_INVALID_SIZE : settings_set_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_HISTORY, s->buf, len);
+        err = (len == 0) ? ESP_ERR_INVALID_SIZE
+                         : settings_set_state_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_HISTORY, s->buf, len);
     }
     free(s);
     if (err != ESP_OK) {
@@ -708,7 +709,7 @@ static void check_generation(void)
         uint8_t buf[BOOT_GEN_BLOB_MAX];
         size_t len = boot_gen_encode(g.current, image, buf, sizeof(buf));
         esp_err_t err = (len == 0) ? ESP_ERR_INVALID_SIZE
-                                   : settings_set_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_GEN, buf, len);
+                                   : settings_set_state_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_GEN, buf, len);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "image generation not stored (%s): this run keeps the previous one", esp_err_to_name(err));
             boot_gen_store_failed(&g);

@@ -18,6 +18,10 @@
  * (`heapfrag`) and the ladder's link restart on demand (`linkrestart`).
  * Same refusals as the receiver commands (maintenance, an open journal,
  * another receiver session or job).
+ *
+ * Wi-Fi: the station's own move to the strongest access point of its
+ * network now (`wifimove`), watched until it is over: PASS when the address
+ * and the connections were kept.
  */
 #include "bench.h"
 
@@ -285,7 +289,7 @@ static int cmd_race_arm(int argc, char **argv)
         say("BENCH REFUSED: receiver maintenance is on (end it first)\n");
         return 1;
     }
-    esp_err_t err = settings_set_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BENCH_RACE, 1);
+    esp_err_t err = settings_set_state_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BENCH_RACE, 1);
     say("BENCH %s\n", err == ESP_OK ? "armed for the next boot only: power-cycle the board now (the result prints "
                                          "at boot and with race_result)"
                                        : esp_err_to_name(err));
@@ -996,6 +1000,76 @@ static int cmd_linkrestart(int argc, char **argv)
     return b.link_open ? 0 : 1;
 }
 
+/* ---- Wi-Fi: a move to another access point -------------------------------------------- */
+
+#define MOVE_START_MS 3000u    /* the move shows (the association ends) within this long, or it was refused */
+#define MOVE_MAX_MS   40000u   /* the move is over (the address on the new link, or DHCP's answer) within this long */
+
+/*
+ * The station's own move now (network_move_now), watched until it is over:
+ * PASS when the station stayed online throughout with the same address (the
+ * address and the connections kept), FAIL when it went offline or the move
+ * did not end. Nothing is sent to the receiver.
+ */
+static int cmd_wifimove(int argc, char **argv)
+{
+    (void)argv;
+    if (argc != 1) {
+        say("usage: wifimove   (the station's own move to the strongest access point of its network now)\n");
+        return 1;
+    }
+    static network_status_t a;
+    static network_status_t st;
+    if (network_get_status(&a) != ESP_OK || !a.online || !a.associated) {
+        say("BENCH REFUSED wifimove: not online\n");
+        return 1;
+    }
+    esp_err_t err = network_move_now();
+    if (err != ESP_OK) {
+        say("BENCH REFUSED wifimove: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    int64_t t0 = esp_timer_get_time();
+    bool left = false;
+    bool offline = false;
+    bool changed = false;
+    uint32_t back_ms = 0;
+    uint32_t ms = 0;
+    while (ms < MOVE_MAX_MS) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
+        if (network_get_status(&st) != ESP_OK) {
+            continue;
+        }
+        offline |= !st.online;
+        changed |= st.online && strcmp(st.ip, a.ip) != 0;
+        if (!st.associated) {
+            left = true;
+        } else if (left && back_ms == 0) {
+            back_ms = ms;
+        }
+        if (!left && ms >= MOVE_START_MS) {
+            say("BENCH REFUSED wifimove: the station did not move (see the log for why)\n");
+            return 1;
+        }
+        if (left && st.associated && st.online && !st.moving) {
+            break;
+        }
+    }
+    if (ms >= MOVE_MAX_MS) {
+        say("BENCH FAIL wifimove: not over after %u s (see the log)\n", (unsigned)(MOVE_MAX_MS / 1000));
+        return 1;
+    }
+    bool kept = !offline && !changed;
+    say("BENCH %s wifimove: channel %u -> %u, %d -> %d dBm, associated again after %u ms, address %s%s%s\n",
+        kept ? "PASS" : "FAIL", a.channel, st.channel, a.rssi, st.rssi, (unsigned)back_ms, a.ip,
+        kept      ? " kept (online throughout)"
+        : changed ? " changed to "
+                  : " lost for a while (offline)",
+        changed ? st.ip : "");
+    return kept ? 0 : 1;
+}
+
 /* ---- console check: log lines from another task ---------------------------------------- */
 
 #define FLOOD_PRIO  3      /* above the command line's task: its lines come while a reply is printed */
@@ -1109,7 +1183,7 @@ esp_err_t bench_boot_early(void)
         return ESP_OK;
     }
     /* One-shot: cleared before it runs, so a crash in it cannot repeat it. */
-    esp_err_t err = settings_erase_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BENCH_RACE);
+    esp_err_t err = settings_erase_state_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BENCH_RACE);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "stop key from boot not run: the one-shot flag could not be cleared (%s)", esp_err_to_name(err));
         return err;
@@ -1285,6 +1359,8 @@ esp_err_t bench_start(void)
                     " | heapfrag free",
         cmd_heapfrag);
     reg("linkrestart", "The ladder's link restart now (nothing sent to the receiver): linkrestart", cmd_linkrestart);
+    reg("wifimove", "The station's own move to the strongest access point of its network now, watched: wifimove",
+        cmd_wifimove);
     reg("logflood", "Log lines from another task in the background, to check that replies stay whole: logflood "
                     "<seconds 1-120> [ms between lines 1-1000]",
         cmd_logflood);

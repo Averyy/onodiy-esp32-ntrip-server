@@ -263,7 +263,7 @@ static void run_check(void)
                          (unsigned)m.gnss_count);
             }
             if (strcmp(etag, g_fw.etag_saved) != 0) {
-                if (settings_set_str(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_ETAG, etag) == ESP_OK) {
+                if (settings_set_state_str(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_ETAG, etag) == ESP_OK) {
                     strlcpy(g_fw.etag_saved, etag, sizeof(g_fw.etag_saved));
                 }
             }
@@ -329,7 +329,7 @@ static void run_check(void)
     }
     fw_unlock();
     if (result == FW_CHECK_OK && trusted &&
-        settings_set_i64(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_LAST_CHECK, now) != ESP_OK) {
+        settings_set_state_i64(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_LAST_CHECK, now) != ESP_OK) {
         ESP_LOGW(TAG, "time of the update check not stored");
     }
     if (result == FW_CHECK_OK) {

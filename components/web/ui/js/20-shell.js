@@ -328,19 +328,43 @@ setInterval(() => {
   tickTrialLeft();
 }, 1000);
 
+/*
+ * The station's settings_changed: the open page reloads its data, or, while
+ * a form is being edited, says that someone else changed the settings (this
+ * tab's own save it knows already). One change can come as a few events in a
+ * row (a batch, then a key erased): they wait SETTINGS_SETTLE_MS for each
+ * other and count once, one reload, one warning, for the page the last one
+ * came on (a page opened meanwhile may have read its data before it: at
+ * most one reload more).
+ */
+const SETTINGS_SETTLE_MS = 300;
+const settingsWait = { timer: null, page: null, other: false };
+
+function settingsChanged(m) {
+  if (!(m.client && m.client === CLIENT_ID)) settingsWait.other = true;
+  settingsWait.page = shell.current;
+  if (settingsWait.timer) return;
+  settingsWait.timer = setTimeout(() => {
+    const page = settingsWait.page, other = settingsWait.other;
+    settingsWait.timer = null;
+    settingsWait.page = null;
+    settingsWait.other = false;
+    /* Another page since the last event: it read its data when it opened. */
+    if (!shell.started || !page || page !== shell.current) return;
+    const v = page.view;
+    if (!v.reload) return;
+    if (v.dirty && v.dirty()) {
+      if (other) toast('Settings were changed elsewhere. Reload this page to see them.', 'warn');
+    } else {
+      v.reload();
+    }
+  }, SETTINGS_SETTLE_MS);
+}
+
 bus.on('event', m => {
   if (!shell.started) return;
   if (m.event === 'settings_changed') {
-    const v = shell.current && shell.current.view;
-    const own = !!m.client && m.client === CLIENT_ID;
-    if (v && v.reload) {
-      /* This tab's own save: the page knows already; a form being edited stays as it is. */
-      if (v.dirty && v.dirty()) {
-        if (!own) toast('Settings were changed elsewhere. Reload this page to see them.', 'warn');
-      } else {
-        v.reload();
-      }
-    }
+    settingsChanged(m);
   } else if (m.event === 'network' && m.what === 'offline') {
     toast('The station lost its Wi-Fi connection.', 'warn');
   } else if (m.event === 'receiver_restarted') {

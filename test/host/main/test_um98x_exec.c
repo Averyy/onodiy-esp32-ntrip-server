@@ -92,6 +92,7 @@ typedef struct {
     bool notices;                /* commands sent while it restarts get the restarting answer */
     int groups;                  /* signal-group query: 0 the bench body for its group, 1 refused (no such
                                     command), 2 acknowledged without a log */
+    int64_t groups_log_ms;       /* its log this long after the acknowledgement (0: 20 ms) */
     const char *basepos;         /* BASEPOSA: the body of its log (NULL: refused, no such command) */
     const char *sppnav;          /* SPPNAVA: likewise */
 
@@ -284,7 +285,7 @@ static void receive(sim_t *s, const char *cmd)
             char log[LINE_MAX_];
             const char *body = s->sg_m < 8 && k_body[s->sg_m] != NULL ? k_body[s->sg_m] : "0,0";
             snprintf(log, sizeof(log), "ANT1GROUPA,COM1,0,0.0,FINE,0,0.000,0,0,0;%s", body);
-            emit_checked(s, '#', log, 50);
+            emit_checked(s, '#', log, s->groups_log_ms > 0 ? 30 + s->groups_log_ms : 50);
         }
     } else if ((strcmp(up, "BASEPOSA") == 0 && s->basepos != NULL) || (strcmp(up, "SPPNAVA") == 0 && s->sppnav != NULL)) {
         bool base = up[0] == 'B';
@@ -1412,6 +1413,58 @@ TEST_CASE("exec: restart evidence: banners and version logs nobody asked for", "
     TEST_ASSERT_EQUAL_INT64(before, s->ch.last_answer_ms);
 }
 
+TEST_CASE("exec: replies to the station's commands are told from what the receiver sends unasked", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    um98x_line_t l;
+    /* An acknowledgement nothing waits for (a late one), and the restarting
+     * answer: replies (only commands get these on this port). */
+    char ack[96];
+    char tmp[80];
+    int n = snprintf(tmp, sizeof(tmp), "$command,MODE,response: OK");
+    snprintf(ack, sizeof(ack), "%s*%02X", tmp, um98x_xor8(tmp, (size_t)n));
+    um98x_line_classify(ack, strlen(ack), &l);
+    TEST_ASSERT_EQUAL(UM98X_LINE_ACK, l.kind);
+    TEST_ASSERT_TRUE(um98x_chan_dispatch(&s->ch, ack, strlen(ack), &l, s->now) & UM98X_CHAN_REPLY);
+    um98x_line_classify(TV_NOTICE, strlen(TV_NOTICE), &l);
+    TEST_ASSERT_TRUE(um98x_chan_dispatch(&s->ch, TV_NOTICE, strlen(TV_NOTICE), &l, s->now) & UM98X_CHAN_REPLY);
+
+    /* A version log: a reply within 10 s of our own query, the receiver's own
+     * restart news after that. */
+    um98x_line_classify(TV_VERSIONA_UM982, strlen(TV_VERSIONA_UM982), &l);
+    s->ch.last_version_write_ms = s->now - 500;
+    TEST_ASSERT_TRUE(um98x_chan_dispatch(&s->ch, TV_VERSIONA_UM982, strlen(TV_VERSIONA_UM982), &l, s->now) &
+                     UM98X_CHAN_REPLY);
+    s->ch.last_version_write_ms = s->now - UM98X_UNSOLICITED_VERSION_MS - 1;
+    unsigned ev = um98x_chan_dispatch(&s->ch, TV_VERSIONA_UM982, strlen(TV_VERSIONA_UM982), &l, s->now + 30000);
+    TEST_ASSERT_TRUE(ev & UM98X_CHAN_RESTART);
+    TEST_ASSERT_FALSE(ev & UM98X_CHAN_REPLY);
+
+    /* A banner: a reply to our own restart, unasked otherwise. */
+    um98x_line_classify(TV_BANNER, strlen(TV_BANNER), &l);
+    s->ch.expect_restart = true;
+    TEST_ASSERT_TRUE(um98x_chan_dispatch(&s->ch, TV_BANNER, strlen(TV_BANNER), &l, s->now + 40000) & UM98X_CHAN_REPLY);
+    s->ch.expect_restart = false;
+    TEST_ASSERT_FALSE(um98x_chan_dispatch(&s->ch, TV_BANNER, strlen(TV_BANNER), &l, s->now + 80000) &
+                      UM98X_CHAN_REPLY);
+
+    /* NMEA (the satellite-in-view output) and broken lines: unasked. */
+    static const char nmea[] = "$GPGGA,000000.00,,,,,0,00,99.99,,,,,,*48";
+    um98x_line_classify(nmea, strlen(nmea), &l);
+    TEST_ASSERT_FALSE(um98x_chan_dispatch(&s->ch, nmea, strlen(nmea), &l, s->now) & UM98X_CHAN_REPLY);
+    static const char broken[] = "$command,unlog,response: OK*22";
+    um98x_line_classify(broken, strlen(broken), &l);
+    TEST_ASSERT_FALSE(um98x_chan_dispatch(&s->ch, broken, strlen(broken), &l, s->now) & UM98X_CHAN_REPLY);
+
+    /* The answer to a query in flight. */
+    char body[UM98X_MODE_BODY_MAX];
+    configured(s);
+    s->events = 0;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_query_mode(&s->ex, body, sizeof(body)));
+    TEST_ASSERT_EQUAL_STRING("MODE BASE 1234 TIME 600 0", body);
+    TEST_ASSERT_TRUE(s->events & UM98X_CHAN_REPLY);
+}
+
 TEST_CASE("exec: caller commands: queries complete on their data", "[um98x_exec]")
 {
     sim_t *s = sim_init();
@@ -2027,7 +2080,7 @@ TEST_CASE("exec: every session asks once what the group configures, after the si
     TEST_ASSERT_EQUAL_STRING(SIM_REFUSAL, r.bands_reply);
     TEST_ASSERT_EQUAL_INT(1, count(s, "ANT1GROUPA"));   /* a refusal is final at once */
 
-    /* Accepted, but no log this firmware reads: unread after a second, not resent. */
+    /* Accepted, but no log this firmware reads: unread after the wait, not resent. */
     s = sim_init();
     configured(s);
     s->groups = 2;
@@ -2036,7 +2089,18 @@ TEST_CASE("exec: every session asks once what the group configures, after the si
     TEST_ASSERT_TRUE(r.saved);
     TEST_ASSERT_EQUAL_UINT8(UM98X_BANDS_UNREAD, r.bands.state);
     TEST_ASSERT_EQUAL_INT(1, count(s, "ANT1GROUPA"));
-    TEST_ASSERT_LESS_THAN_INT64(10000, s->now - t0);
+    TEST_ASSERT_LESS_THAN_INT64(12000, s->now - t0);
+
+    /* Its log a second and a half after the acknowledgement (the receiver's
+     * next cycle; a 1000 ms wait missed one on the board): read. */
+    s = sim_init();
+    configured(s);
+    s->groups_log_ms = 1500;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_EQUAL_UINT8(UM98X_BANDS_OK, r.bands.state);
+    TEST_ASSERT_EQUAL_UINT8(3, r.bands.group);
+    TEST_ASSERT_EQUAL_STRING("", r.bands_reply);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "ANT1GROUPA"));
 
     /* A session that fails before the query never asked it. */
     s = sim_init();

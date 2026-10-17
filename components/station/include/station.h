@@ -134,8 +134,11 @@
  * line, nothing paused; um98x_fixcheck.h): 60 s after streaming began, a
  * receiver restart or an apply, then every 20 s until three solutions
  * agree, again every hour. More than 50 m off horizontally or vertically
- * raises STATION_ALERT_FIXED_FAR and journals it; within the limits again
- * (40 m) clears it. Streaming is never held back for it.
+ * raises STATION_ALERT_FIXED_FAR and journals it, and so does a fixed height
+ * that is the receiver's height above sea level instead of its ellipsoidal
+ * height (more than 10 m off, within 5 m of the sea-level height:
+ * fix_sea_level); within the limits again (40 m, and not that height)
+ * clears it. Streaming is never held back for it.
  *
  * Receiver settings read back: every apply session reads the receiver's
  * configuration dump; the station keeps (in RAM, with the time of the
@@ -198,18 +201,28 @@
  * the two apart (the UI's banner with the time left). Exit (the
  * user, or the time is up) runs the stream-first path as at boot. An ESP32
  * reset keeps the state with its time left, the boot only listening until
- * it ends: a software reset, a crash or a watchdog from the RTC memory
- * (exact), and a reset by the EN pin (on the ESP32-S3 the USB auto-reset
+ * it ends: a software reset, a crash, a watchdog or a brownout from the
+ * RTC memory (exact), and a reset by the EN pin (on the ESP32-S3 the USB auto-reset
  * and the RST button; it reads as power-on and powers the RTC memory down
  * while the receiver keeps running and may be mid-work) from a copy in
  * settings (gnss/maint: at entry, at each extension and every minute, with
  * up to 70 s less time left). The time across the reset comes off; it never
  * ends later than the time chosen (with the trusted clock, also when the
  * ESP32 was held in reset), and ends at once when that time ran out
- * meanwhile. A power-on reset that restarted the receiver too was a power
- * cut: a maintenance resumed at that boot ends (not one the user extended
- * since). Any other restart banner does not end it: the work may restart
- * the receiver. A factory reset ends it. Entry and exit are journalled.
+ * meanwhile. A power-on or brownout reset that restarted the receiver too
+ * lost the power for both: a maintenance resumed at that boot ends (not one
+ * the user extended since). Any other restart banner does not end it: the
+ * work may restart the receiver. A factory reset ends it. Entry and exit
+ * are journalled. Nothing is checked during maintenance, so the status
+ * keeps what the station knew of the receiver at entry; the copy in
+ * settings carries it too, and a maintenance resumed after a reset reports
+ * it until it ends: the receiver's identity (identity_confirmed included)
+ * and the signal group it runs (rx_sg), and for the same profile
+ * profile_applied, the fixed-position verdict and the alerts; the survey
+ * window runs on (surveying, survey_window_left_s, and after maintenance
+ * the station goes on with it). The rest of what an apply session read back
+ * (rx_settings, rx_bands) stays this boot's, unknown until the next
+ * configuration, as after any reset.
  * PROVISIONAL, to be confirmed on hardware (whether input on the link can
  * disturb the receiver while it is worked on through its other port).
  *
@@ -310,7 +323,8 @@ typedef enum {
     STATION_ALERT_SIGNALS_MISMATCH   = 1u << 7, /**< the signals the receiver reports for its signal group are not what the profile's group
                                                      should configure (rx_bands, um98x_bands.h); set and cleared by each apply session's report */
     STATION_ALERT_FIXED_FAR          = 1u << 8, /**< the fixed position is more than 50 m (horizontally or vertically) from the receiver's own
-                                                     solution (fix_* in the status); never holds streaming back */
+                                                     solution, or its height is the receiver's height above sea level (fix_* in the
+                                                     status); never holds streaming back */
 } station_alert_t;
 
 /** The fixed-position check (station_status_t.fix_state). */
@@ -318,7 +332,7 @@ typedef enum {
     STATION_FIX_OFF = 0,         /**< no check: the profile surveys, or not a model the station configures */
     STATION_FIX_CHECKING,        /**< no verdict yet */
     STATION_FIX_NEAR,            /**< within the limits */
-    STATION_FIX_FAR,             /**< beyond them: STATION_ALERT_FIXED_FAR */
+    STATION_FIX_FAR,             /**< beyond them, or a sea-level height (fix_sea_level): STATION_ALERT_FIXED_FAR */
     STATION_FIX_NO_SOLUTION,     /**< no verdict: the last check got no usable solution (no sky, or none reported) */
     STATION_FIX_REFUSED,         /**< no verdict: the receiver refused both position logs */
 } station_fix_state_t;
@@ -388,25 +402,30 @@ typedef enum {
 } station_live_end_t;
 
 /**
- * After a power-on reset: did the receiver keep running? On the ESP32-S3 a
- * reset by the EN pin (the USB serial chip's auto-reset that every flash
- * uses, the RST button) reads as power-on, and the receiver, on the same
- * supply, keeps running through it. So a power-on boot counts as a power
- * loss (health's power-lost alert) and as a receiver restart only on the
- * receiver's word: its restart banner before any data, or a version log
- * whose header tells it has run for less time than the ESP32 (while it has
- * no time, the header's millisecond field counts from its restart) ->
- * RESTARTED; RTCM or NMEA within 3.5 s of the ESP32's start, or a version
- * log that tells it has run since before the ESP32 started -> KEPT; nothing
- * of that within 30 s -> UNKNOWN (counted as neither). Listening is enough,
- * so it is judged in receiver maintenance too. Journalled once
- * (DIAG_EV_RX_BOOT). PROVISIONAL, to be confirmed on hardware.
+ * After a power-on or brownout reset: did the receiver keep running? On the
+ * ESP32-S3 a reset by the EN pin (the USB serial chip's auto-reset that
+ * every flash uses, the RST button) reads as power-on, and the receiver, on
+ * the same supply, keeps running through it; a brownout says only that the
+ * ESP32's own 3.3 V rail dipped (on our board each half has a regulator of
+ * its own on the shared USB 5 V, inferred from the board: a dip of that
+ * input takes both down, the ESP32's own load peaks only its own). So a
+ * power-on boot counts as a power loss (health's power-lost alert; a
+ * brownout has health's power-supply alert), and either as a receiver
+ * restart, only on the receiver's word: its restart banner before any data,
+ * or a version log whose header tells it has run for less time than the
+ * ESP32 (while it has no time, the header's millisecond field counts from
+ * its restart) -> RESTARTED; RTCM or NMEA within 3.5 s of the ESP32's
+ * start, or a version log that tells it has run since before the ESP32
+ * started -> KEPT; nothing of that within 30 s -> UNKNOWN (counted as
+ * neither). Listening is enough, so it is judged in receiver maintenance
+ * too. Journalled once (DIAG_EV_RX_BOOT). PROVISIONAL, to be confirmed on
+ * hardware.
  */
 typedef enum {
-    STATION_RX_BOOT_NONE = 0,      /**< not a power-on boot: nothing to judge */
-    STATION_RX_BOOT_PENDING,       /**< a power-on boot, judged within 30 s */
-    STATION_RX_BOOT_KEPT,          /**< the receiver kept running: only the ESP32 was reset (its reset pin) */
-    STATION_RX_BOOT_RESTARTED,     /**< the receiver restarted with it: the power was cut */
+    STATION_RX_BOOT_NONE = 0,      /**< not a power-on or brownout boot: nothing to judge */
+    STATION_RX_BOOT_PENDING,       /**< a power-on or brownout boot, judged within 30 s */
+    STATION_RX_BOOT_KEPT,          /**< the receiver kept running: only the ESP32 was reset (its reset pin, or its own power dip) */
+    STATION_RX_BOOT_RESTARTED,     /**< the receiver restarted with it: the power was cut (or dipped) for both */
     STATION_RX_BOOT_UNKNOWN,       /**< nothing it sent told */
 } station_rx_boot_t;
 
@@ -464,11 +483,13 @@ typedef struct {
     station_state_t state;
     um98x_info_t receiver;           /**< live, or last persisted when unresponsive */
     bool receiver_responding;        /**< the receiver answers (read at the time of the call): it streams (valid RTCM within
-                                          10 s), or it sent a checksum-valid line (a reply, a log, NMEA) after its last RTCM
-                                          frame (none this boot: a line within the last 90 s); never while no receiver is
-                                          found. A receiver that never streamed and sends nothing unasked is asked once a
-                                          minute, so one that answers when asked stays answering and one that hung does not */
-    bool identity_confirmed;         /**< receiver identity confirmed by this boot's version query */
+                                          10 s), or it sent a checksum-valid line (a reply, a log, NMEA) within the last 90 s
+                                          and after its last RTCM frame (any, with none this boot); never while no receiver
+                                          is found. A receiver that sends no RTCM and nothing unasked is asked once a
+                                          minute, so one that answers when asked stays answering and one that hung or was
+                                          unplugged does not */
+    bool identity_confirmed;         /**< receiver identity confirmed by this boot's version query (in a maintenance resumed
+                                          after a reset: as before the reset, see above) */
     uint32_t alerts;                 /**< station_alert_t flags */
     bool profile_applied;            /**< receiver runs the stored profile */
     bool rtcm_differs;               /**< the latest observation window saw RTCM flowing that differs from the profile
@@ -510,7 +531,7 @@ typedef struct {
     bool b1cb2a_ok;                  /**< ... and the receiver accepted it */
     char b1cb2a_reply[64];           /**< its rejection text or "timeout" */
 
-    /* After a power-on reset (read at the time of the call). */
+    /* After a power-on or brownout reset (read at the time of the call). */
     uint8_t rx_boot;                 /**< station_rx_boot_t */
     uint8_t rx_boot_by;              /**< station_rx_boot_by_t */
 
@@ -537,6 +558,9 @@ typedef struct {
     uint32_t rx_answer_age_ms;       /**< since the last of them, UINT32_MAX = never: "the receiver answers" */
     uint32_t rx_line_age_ms;         /**< since the last checksum-valid text line of any kind (replies, logs, NMEA),
                                           UINT32_MAX = none this boot (receiver_responding's evidence) */
+    uint32_t rx_unasked_line_age_ms; /**< since the last checksum-valid text line that was no reply to the station's own
+                                          commands (NMEA and other output, the receiver's own restart news; um98x_ctl_on_line),
+                                          UINT32_MAX = none this boot: health's stall class, which asking must not change */
 
     /* What the running signal group configures (the last apply session's query this boot). */
     um98x_bands_t rx_bands;          /**< state UNKNOWN until a session asked (um98x_bands.h) */
@@ -561,7 +585,8 @@ typedef struct {
     double fix_horizontal_m;         /**< NEAR, FAR: horizontal distance (the medians that decided) */
     double fix_up_m;                 /**< NEAR, FAR: fixed height minus the receiver's (> 0: the fixed position is above) */
     double fix_distance_m;           /**< NEAR, FAR: 3-D distance */
-    bool fix_height_only;            /**< FAR by the height alone */
+    bool fix_height_only;            /**< FAR by the height alone (always with fix_sea_level) */
+    bool fix_sea_level;              /**< FAR: the fixed height is the receiver's height above sea level, not its ellipsoidal height */
     uint32_t fix_checked_age_s;      /**< since the latest usable solution, UINT32_MAX = none */
 } station_status_t;
 

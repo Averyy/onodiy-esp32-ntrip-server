@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "settings_codec.h"
+#include "um98x_profile.h"
 
 /* ---- small helpers -------------------------------------------------------- */
 
@@ -375,15 +376,17 @@ static void fix_finish(stn_t *s, int64_t now, stn_fix_end_t end)
     s->fix_due_ms = now + STN_FIX_RECHECK_MS;
 }
 
-/* A decision: the alert follows it, noted when it changes. */
-static void fix_decided(stn_t *s, uint8_t verdict)
+/* A decision (before: the verdict that stood): the alert follows it, noted
+ * when the warning or its reason changes. */
+static void fix_decided(stn_t *s, uint8_t before, uint8_t verdict)
 {
     bool was = (s->alerts & STN_ALERT_FIXED_FAR) != 0;
     const um98x_fix_offset_t *o = &s->fix.shown;
-    if (verdict == UM98X_FIX_FAR) {
+    if (verdict == UM98X_FIX_FAR || verdict == UM98X_FIX_SEA_LEVEL) {
         s->alerts |= STN_ALERT_FIXED_FAR;
-        if (!was) {
-            note(s, STN_NOTE_FIXED_FAR, round_m(o->horizontal_m), round_m(o->up_m));
+        if (!was || verdict != before) {
+            note(s, verdict == UM98X_FIX_SEA_LEVEL ? STN_NOTE_FIXED_SEA_LEVEL : STN_NOTE_FIXED_FAR,
+                 round_m(o->horizontal_m), round_m(o->up_m));
         }
     } else {
         s->alerts &= ~STN_ALERT_FIXED_FAR;
@@ -461,19 +464,33 @@ static void track_rtcm(stn_t *s, const stn_in_t *in)
     }
 }
 
-/* The question to a receiver that sent no RTCM frame this boot (see the
- * header): no line for STN_ASK_MS, and none asked for as long. */
-static bool ask_due(const stn_t *s, const stn_in_t *in)
-{
-    int64_t now = in->now_ms;
-    return in->rtcm_frames == 0 && (s->line_change_ms == STN_NEVER || now - s->line_change_ms >= STN_ASK_MS) &&
-           (s->ask_ms == STN_NEVER || now - s->ask_ms >= STN_ASK_MS);
-}
-
 /* A valid RTCM frame arrived in the last STN_RTCM_QUIET_MS. */
 static bool rtcm_flowing(const stn_t *s, int64_t now)
 {
     return s->rtcm_change_ms != STN_NEVER && now - s->rtcm_change_ms < STN_RTCM_QUIET_MS;
+}
+
+/* `at` (STN_NEVER = never) came after the last RTCM frame as the samples
+ * show it (any time with none this boot). */
+static bool since_rtcm(const stn_t *s, int64_t at)
+{
+    return at != STN_NEVER && (s->rtcm_change_ms == STN_NEVER || at > s->rtcm_change_ms);
+}
+
+/* The question to a receiver that sends no RTCM (none this boot, or none
+ * for STN_RTCM_QUIET_MS; see the header): at once when nothing came since
+ * its last RTCM frame, then while no line comes for STN_ASK_MS, at most
+ * once every STN_ASK_MS. */
+static bool ask_due(const stn_t *s, const stn_in_t *in)
+{
+    int64_t now = in->now_ms;
+    if (rtcm_flowing(s, now)) {
+        return false;
+    }
+    if (since_rtcm(s, s->line_change_ms) && now - s->line_change_ms < STN_ASK_MS) {
+        return false;   /* it sent a line since: it answers */
+    }
+    return !since_rtcm(s, s->ask_ms) || now - s->ask_ms >= STN_ASK_MS;
 }
 
 void stn_start(stn_t *s, const stn_in_t *in)
@@ -603,13 +620,26 @@ static void judge_window(stn_t *s, const stn_in_t *in)
             s->antenna_check = false;
             s->antenna_probe = true;   /* a fixed base that sends nothing: moved antenna? */
             s->profile_applied = false;
+            s->check_pending = check;  /* judged by a window with RTCM (below) */
         } else if (verify) {
             s->profile_applied = false;
             s->drift_blocked = true;
         } else if (check) {
             s->profile_applied = false;
-            if (auto_apply_allowed(s, in)) {
+            if (s->static_ok && !in->ladder_alerts_only) {
+                /* The receiver acknowledged this profile on this firmware
+                 * (the applied state): a window without RTCM says nothing
+                 * about what it runs, and a re-apply could not be checked
+                 * without RTCM. The check waits for a window with RTCM; the
+                 * stall is the health ladder's (its reconfigure step). */
+                s->check_pending = true;
+            } else if (auto_apply_allowed(s, in)) {
+                /* Never acknowledged; or acknowledged, but the ladder only
+                 * alerts and re-applies nothing: once, as its step would
+                 * (the next window checks the apply, without repeating it). */
                 want_apply(s, STN_WHY_CHECK, STN_CHANGE_NONE, false);
+            } else if (s->static_ok) {
+                s->check_pending = true;   /* nothing applies: the check still waits for RTCM */
             }
         }
         /* Otherwise a stall: the health ladder's business, not drift. */
@@ -1358,9 +1388,10 @@ static void done_own_fix(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         if (um98x_fix_offset(s->fix_ref[0], s->fix_ref[1], s->fix_ref[2], &r->own, &o)) {
             s->fix_usable_seen = true;
             s->fix_sample_ms = now;
+            uint8_t before = s->fix.verdict;
             uint8_t v = um98x_fixchk_feed(&s->fix, &o);
             if (v != UM98X_FIX_NONE) {
-                fix_decided(s, v);
+                fix_decided(s, before, v);
                 fix_finish(s, now, STN_FIX_END_NONE);
                 return;
             }
@@ -1741,6 +1772,25 @@ stn_rxboot_t stn_rxboot_judge(const stn_rxboot_in_t *in, stn_rxboot_by_t *by)
     return v;
 }
 
+bool stn_rxboot_judged(stn_rxboot_reset_t reset)
+{
+    return reset == STN_RXBOOT_RESET_POWER_ON || reset == STN_RXBOOT_RESET_BROWNOUT;
+}
+
+void stn_rxboot_follow(stn_rxboot_reset_t reset, stn_rxboot_t verdict, stn_rxboot_follow_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!stn_rxboot_judged(reset)) {
+        return;
+    }
+    /* The receiver restarted with the ESP32: the power went for both, a cut
+     * or a dip deep enough for the receiver too. */
+    out->maint_ends = verdict == STN_RXBOOT_RESTARTED;
+    /* It kept running: after a power-on reset that was the EN pin, no power
+     * loss at all; after a brownout the ESP32's own supply did dip. */
+    out->power_kept = verdict == STN_RXBOOT_KEPT && reset == STN_RXBOOT_RESET_POWER_ON;
+}
+
 bool stn_line_is_nmea(const char *line, size_t len)
 {
     if (line == NULL || len < 7 || line[0] != '$' || line[6] != ',') {
@@ -1833,6 +1883,12 @@ void stn_fix_status(const stn_t *s, int64_t now_ms, stn_fix_status_t *out)
         out->offset = s->fix.shown;
         out->height_only = um98x_fix_height_only(&s->fix.shown);
         break;
+    case UM98X_FIX_SEA_LEVEL:
+        out->state = STN_FIX_FAR;
+        out->offset = s->fix.shown;
+        out->height_only = true;   /* the horizontal distance is within the limit */
+        out->sea_level = true;
+        break;
     case UM98X_FIX_NEAR:
         out->state = STN_FIX_NEAR;
         out->offset = s->fix.shown;
@@ -1872,11 +1928,11 @@ bool stn_responding(const stn_t *s, int64_t now_ms, uint32_t rtcm_age_ms, int64_
     if (line_ms == STN_NEVER || (s->no_rx_ms != STN_NEVER && line_ms <= s->no_rx_ms)) {
         return false;
     }
-    if (rtcm_age_ms == UINT32_MAX) {
-        return now_ms - line_ms <= STN_ANSWER_FRESH_MS;   /* asked every STN_ASK_MS: its answer is this fresh */
+    if (now_ms - line_ms > STN_ANSWER_FRESH_MS) {
+        return false;   /* asked every STN_ASK_MS while it sends no RTCM: an answer is this fresh */
     }
-    /* Its last line came after its last RTCM frame. */
-    return line_ms - (now_ms - (int64_t)rtcm_age_ms) > STN_ANSWER_SLACK_MS;
+    /* With RTCM this boot: its last line came after its last RTCM frame. */
+    return rtcm_age_ms == UINT32_MAX || line_ms - (now_ms - (int64_t)rtcm_age_ms) > STN_ANSWER_SLACK_MS;
 }
 
 /* ---- receiver maintenance --------------------------------------------------- */
@@ -2070,7 +2126,88 @@ bool stn_maint_rtc_read(const stn_maint_rtc_t *r, stn_maint_rec_t *rec)
     return true;
 }
 
-size_t stn_maint_store_encode(const stn_maint_rec_t *rec, uint8_t *buf, size_t cap)
+/* What the station knew, in the stored copy (version 2): its flag bits. */
+#define KNOWN_IDENTIFIED   (1u << 0)
+#define KNOWN_CONFIRMED    (1u << 1)
+#define KNOWN_APPLIED      (1u << 2)
+#define KNOWN_HEIGHT_ONLY  (1u << 3)
+#define KNOWN_SURVEY       (1u << 4)
+#define KNOWN_COMPLETE     (1u << 5)
+#define KNOWN_LOCK_DONE    (1u << 6)
+#define KNOWN_SG           (1u << 7)
+/* ... and in its second flag byte, the last one. */
+#define KNOWN_SEA_LEVEL    (1u << 0)
+
+static void known_put(blob_writer_t *w, const stn_maint_known_t *k)
+{
+    uint8_t f = (uint8_t)((k->receiver.valid ? KNOWN_IDENTIFIED : 0u) | (k->identity_confirmed ? KNOWN_CONFIRMED : 0u) |
+                          (k->profile_applied ? KNOWN_APPLIED : 0u) | (k->fix_height_only ? KNOWN_HEIGHT_ONLY : 0u) |
+                          (k->survey_active ? KNOWN_SURVEY : 0u) | (k->survey_complete ? KNOWN_COMPLETE : 0u) |
+                          (k->lock_done ? KNOWN_LOCK_DONE : 0u) | (k->sg_valid ? KNOWN_SG : 0u));
+    blob_put_u32(w, k->profile_hash);
+    blob_put_u8(w, f);
+    blob_put_str(w, k->receiver.valid ? k->receiver.model : "");
+    blob_put_str(w, k->receiver.valid ? k->receiver.firmware : "");
+    blob_put_u32(w, k->receiver.valid ? k->receiver.build : 0u);
+    blob_put_str(w, k->receiver.valid ? k->receiver.serial : "");
+    blob_put_str(w, k->receiver.valid ? k->receiver.pn : "");
+    blob_put_str(w, k->receiver.valid ? k->receiver.efuse_id : "");
+    blob_put_str(w, k->receiver.valid ? k->receiver.compile_date : "");
+    blob_put_u32(w, k->alerts & ~STN_ALERT_NO_RECEIVER);
+    blob_put_u8(w, k->fix_state);
+    blob_put_f32(w, k->fix_horizontal_m);
+    blob_put_f32(w, k->fix_up_m);
+    blob_put_f32(w, k->fix_distance_m);
+    blob_put_u32(w, k->survey_s);
+    blob_put_u32(w, (uint32_t)k->survey_end_rel_ms);
+    blob_put_u8(w, k->sg_valid ? k->sg_master : 0u);
+    blob_put_u8(w, k->sg_valid ? k->sg_slave : 0u);
+    blob_put_u8(w, k->fix_sea_level ? KNOWN_SEA_LEVEL : 0u);
+}
+
+/* False (k untouched) for a part that does not read or does not make sense. */
+static bool known_get(blob_reader_t *r, stn_maint_known_t *k)
+{
+    stn_maint_known_t n;
+    memset(&n, 0, sizeof(n));
+    n.profile_hash = blob_get_u32(r);
+    uint8_t f = blob_get_u8(r);
+    blob_get_str(r, n.receiver.model, sizeof(n.receiver.model));
+    blob_get_str(r, n.receiver.firmware, sizeof(n.receiver.firmware));
+    n.receiver.build = blob_get_u32(r);
+    blob_get_str(r, n.receiver.serial, sizeof(n.receiver.serial));
+    blob_get_str(r, n.receiver.pn, sizeof(n.receiver.pn));
+    blob_get_str(r, n.receiver.efuse_id, sizeof(n.receiver.efuse_id));
+    blob_get_str(r, n.receiver.compile_date, sizeof(n.receiver.compile_date));
+    n.alerts = blob_get_u32(r) & ~STN_ALERT_NO_RECEIVER;
+    n.fix_state = blob_get_u8(r);
+    n.fix_horizontal_m = blob_get_f32(r);
+    n.fix_up_m = blob_get_f32(r);
+    n.fix_distance_m = blob_get_f32(r);
+    n.survey_s = blob_get_u32(r);
+    n.survey_end_rel_ms = (int32_t)blob_get_u32(r);
+    n.sg_master = blob_get_u8(r);
+    n.sg_slave = blob_get_u8(r);
+    uint8_t f2 = blob_get_u8(r);
+    if (!blob_reader_ok(r) || n.fix_state > STN_FIX_REFUSED || n.survey_s > UM98X_SURVEY_MAX_S ||
+        ((f & KNOWN_IDENTIFIED) != 0 && n.receiver.model[0] == '\0')) {
+        return false;
+    }
+    n.valid = true;
+    n.receiver.valid = (f & KNOWN_IDENTIFIED) != 0;
+    n.identity_confirmed = (f & KNOWN_CONFIRMED) != 0;
+    n.profile_applied = (f & KNOWN_APPLIED) != 0;
+    n.fix_height_only = (f & KNOWN_HEIGHT_ONLY) != 0;
+    n.survey_active = (f & KNOWN_SURVEY) != 0;
+    n.survey_complete = (f & KNOWN_COMPLETE) != 0;
+    n.lock_done = (f & KNOWN_LOCK_DONE) != 0;
+    n.sg_valid = (f & KNOWN_SG) != 0;
+    n.fix_sea_level = (f2 & KNOWN_SEA_LEVEL) != 0 && n.fix_state == STN_FIX_FAR;
+    *k = n;
+    return true;
+}
+
+size_t stn_maint_store_encode(const stn_maint_rec_t *rec, const stn_maint_known_t *known, uint8_t *buf, size_t cap)
 {
     blob_writer_t w;
     blob_writer_init(&w, buf, cap);
@@ -2079,15 +2216,24 @@ size_t stn_maint_store_encode(const stn_maint_rec_t *rec, uint8_t *buf, size_t c
     blob_put_u32(&w, rec->left_ms);
     blob_put_u32(&w, rec->chosen_s);
     blob_put_i64(&w, rec->end_unix);
+    bool have = known != NULL && known->valid;
+    blob_put_u8(&w, have ? 1u : 0u);
+    if (have) {
+        known_put(&w, known);
+    }
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
-bool stn_maint_store_decode(stn_maint_rec_t *rec, const uint8_t *buf, size_t len)
+bool stn_maint_store_decode(stn_maint_rec_t *rec, stn_maint_known_t *known, const uint8_t *buf, size_t len)
 {
     memset(rec, 0, sizeof(*rec));
-    if (buf == NULL || len < 1 || buf[0] < STN_MAINT_STORE_VERSION) {
+    if (known != NULL) {
+        memset(known, 0, sizeof(*known));
+    }
+    if (buf == NULL || len < 1 || buf[0] < 1u) {
         return false;
     }
+    uint8_t version = buf[0];
     blob_reader_t r;
     blob_reader_init(&r, buf, len);
     (void)blob_get_u8(&r);
@@ -2103,7 +2249,30 @@ bool stn_maint_store_decode(stn_maint_rec_t *rec, const uint8_t *buf, size_t len
     rec->left_ms = left_ms;
     rec->chosen_s = chosen_s;
     rec->end_unix = end_unix;
+    /* What the station knew: best effort, the time left stands without it. */
+    if (known != NULL && version >= 2u && blob_reader_remaining(&r) > 0 && blob_get_u8(&r) == 1u) {
+        (void)known_get(&r, known);
+    }
     return true;
+}
+
+void stn_maint_known_survey(const stn_t *s, stn_maint_known_t *known)
+{
+    known->survey_active = false;
+    known->survey_complete = false;
+    known->lock_done = false;
+    known->survey_s = 0;
+    known->survey_end_rel_ms = 0;
+    if (!s->maint || !s->survey.active) {
+        return;
+    }
+    int64_t end = s->survey.start_ms + ((int64_t)s->survey.survey_s + UM98X_SURVEY_GRACE_S) * 1000;
+    int64_t rel = end - s->maint_until_ms;
+    known->survey_active = true;
+    known->survey_complete = s->survey.complete;
+    known->lock_done = s->lock_done;
+    known->survey_s = s->survey.survey_s;
+    known->survey_end_rel_ms = rel < INT32_MIN ? INT32_MIN : (rel > INT32_MAX ? INT32_MAX : (int32_t)rel);
 }
 
 void stn_maint_boot(const stn_maint_boot_in_t *in, stn_maint_boot_t *out)
@@ -2140,6 +2309,8 @@ void stn_maint_boot(const stn_maint_boot_in_t *in, stn_maint_boot_t *out)
     out->from = from;
     out->left_ms = (uint32_t)((int64_t)r->left_ms - elapsed_ms);
     out->end_unix = out->elapsed_known ? 0 : r->end_unix;
+    /* The stored copy is written whichever record gives the time. */
+    out->known = in->store_ok && in->store.on && in->store_known;
 }
 
 void stn_maint_restore(stn_t *s, const stn_maint_boot_t *b, int64_t now_ms)
@@ -2164,6 +2335,22 @@ void stn_maint_restore(stn_t *s, const stn_maint_boot_t *b, int64_t now_ms)
     s->maint_end_unix = b->end_unix > 0 ? b->end_unix : 0;
 }
 
+void stn_maint_restore_survey(stn_t *s, const stn_maint_known_t *known)
+{
+    if (known == NULL || !known->valid || !known->survey_active || !s->maint || !s->maint_resumed) {
+        return;
+    }
+    int64_t end = s->maint_until_ms + known->survey_end_rel_ms;
+    memset(&s->survey, 0, sizeof(s->survey));
+    s->survey.active = true;
+    s->survey.complete = known->survey_complete;
+    s->survey.survey_s = known->survey_s;
+    s->survey.start_ms = end - ((int64_t)known->survey_s + UM98X_SURVEY_GRACE_S) * 1000;
+    s->lock_done = known->lock_done;
+    s->lock_retry_ms = STN_NEVER;
+    s->mode_poll_ms = STN_NEVER;
+}
+
 void stn_maint_clock(stn_t *s, int64_t utc_now, int64_t now_ms)
 {
     if (!s->maint || s->maint_end_unix <= 0 || utc_now <= 0) {
@@ -2176,8 +2363,14 @@ void stn_maint_clock(stn_t *s, int64_t utc_now, int64_t now_ms)
         left = 0;   /* its time ran out while the ESP32 was off: ends at the next step */
     }
     if (now_ms + left < s->maint_until_ms) {
+        int64_t cut = s->maint_until_ms - (now_ms + left);
         s->maint_until_ms = now_ms + left;
         s->maint_start_ms = s->maint_until_ms - (int64_t)s->maint_chosen_s * 1000;
+        /* A survey window restored with it (none starts during maintenance):
+         * the receiver surveyed on while the ESP32 was held in reset. */
+        if (s->survey.active) {
+            s->survey.start_ms -= cut;
+        }
     }
 }
 

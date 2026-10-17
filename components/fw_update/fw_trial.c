@@ -35,7 +35,8 @@ void fw_trial_save_rec(const fw_trial_rec_t *rec)
 {
     uint8_t buf[FW_TRIAL_REC_MAX_BLOB];
     size_t n = fw_trial_rec_encode(rec, buf, sizeof(buf));
-    esp_err_t err = (n == 0) ? ESP_ERR_INVALID_SIZE : settings_set_blob(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_TRIAL, buf, n);
+    esp_err_t err =
+        (n == 0) ? ESP_ERR_INVALID_SIZE : settings_set_state_blob(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_TRIAL, buf, n);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "trial record not stored: %s", esp_err_to_name(err));
     }
@@ -46,7 +47,7 @@ void fw_trial_save_bad(const fw_bad_versions_t *bad)
     uint8_t buf[FW_BAD_VER_MAX_BLOB];
     size_t n = fw_bad_encode(bad, buf, sizeof(buf));
     esp_err_t err =
-        (n == 0) ? ESP_ERR_INVALID_SIZE : settings_set_blob(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_BAD_VER, buf, n);
+        (n == 0) ? ESP_ERR_INVALID_SIZE : settings_set_state_blob(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_BAD_VER, buf, n);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "rolled-back list not stored: %s", esp_err_to_name(err));
     }

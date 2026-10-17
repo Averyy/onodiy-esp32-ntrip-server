@@ -60,8 +60,8 @@ What it does:
      (applied and trial false) and GET /api/wifi agrees at once (no trial,
      nothing pending) and has no access point to name (bssid and
      tx_power_dbm present, null: the emulated link), no moves between
-     access points (roams 0, ap_steering null: roaming is off without a
-     radio); DELETE /api/journal clears the event journal: GET
+     access points (roams 0, and no ap_steering at all: roaming is off
+     without a radio, so the build never reads it); DELETE /api/journal clears the event journal: GET
      /api/journal from cursor 0 then holds only records numbered after the
      newest one before it (the numbering goes on), GET /api/connections is
      empty and complete;
@@ -90,8 +90,11 @@ What it does:
      over about 15 s fails; and a client back on its port 1 s after such a
      close, inside that TIME_WAIT, gets one bare ACK, answers it with a
      reset carrying the station's RCV.NXT, and its next SYN (libslirp's
-     first resend, 5.5 to 6 s later) is taken: the reset ended the
-     TIME_WAIT (components/network/net_tw.c), answer within 12 s;
+     first resend, 5.5 to 6 s later: libslirp's own retransmission
+     timer) is taken: the reset ended the TIME_WAIT
+     (components/network/net_tw.c); the pcap takes the request's time
+     apart, and the station's own part (its bare ACK, its SYN-ACK, the
+     request to its FIN) must be under 5 s, as any request's;
   4. keeps watching until --observe seconds after the start (at least 45),
      checks that the web server still answers (GET /, and GET /api/status
      with the session), then stops QEMU and fails on a panic (Guru
@@ -131,7 +134,11 @@ probes on other connections, the QEMU threads' CPU time and the console
 lines meanwhile written to slow-requests.log (no retry, no longer timeout:
 the next one shows why), each line naming the request's client port, and
 every Ethernet frame goes to qemu-net.pcap (run.sh --pcap), where QEMU's
-network keeps that port: its packets are the ones to and from it.
+network keeps that port: its packets are the ones to and from it. A check
+that takes such a request's time apart in its packets (the port reuse
+check inside TIME_WAIT: about 6 s, all but milliseconds of it libslirp's
+SYN resend) says so in the log, and the run's last lines count it apart
+from the slow requests nothing explains.
 
 Everything lands in --out: the console log, the UART1 capture (raw bytes and
 a timestamped log of both directions), the HTTP answers, qemu-net.pcap,
@@ -202,10 +209,17 @@ HALFCLOSE_BUDGET_S = 200   # what they, the drain checks and the port reuse chec
 REUSE_AFTER_S = 15.0
 # port_reuse_reset_check comes back this soon instead, inside that TIME_WAIT: the station turns the first SYN
 # away, libslirp's reset to that ends the TIME_WAIT (components/network/net_tw.c), and libslirp's first resend
-# of the SYN, 5.5 to 6 s after it, is taken. Its next resend would come 12 s after that one, so an answer
-# within REUSE_RESET_LIMIT_S of the connect came on the first resend.
+# of the SYN is taken. That resend waits for libslirp's retransmission timer, not for the station: a new
+# connection's first timeout is 6 s (tcp_newtcpcb: ((TCPTV_SRTTBASE >> 2) + (TCPTV_SRTTDFLT << 2)) >> 1 = 12
+# ticks of PR_SLOWHZ, 2 a second), counted down in 500 ms ticks, so 5.5 to 6 s after the first SYN, and the
+# reset libslirp sends to the station's bare ACK does not cut it short (tcp_input, SYN_SENT: an unacceptable
+# ACK goes to dropwithreset, the SYN stays on that timer). The check takes the request's time apart in the
+# pcap: the resend must come RESEND_MIN_S to RESEND_MAX_S after the first SYN (QEMU's main loop may run the
+# tick late), and the station's own part (its bare ACK, its SYN-ACK, the request to its FIN) must stay under
+# SLOW_S, as any request's must.
 REUSE_EARLY_S = 1.0
-REUSE_RESET_LIMIT_S = 12.0
+RESEND_MIN_S = 5.4
+RESEND_MAX_S = 6.5
 # A request still unanswered after this long is watched: probes on other connections, the QEMU threads'
 # CPU time and the console lines meanwhile go to slow-requests.log in the output directory. port_reuse_check
 # also wants its second exchange over within it: a SYN the station turns away costs 5.5 s or more here.
@@ -344,11 +358,18 @@ class Segment(NamedTuple):
     ack: int
 
 
-def tcp_segments(pcap: Path, peer_port: int) -> list[tuple[bool, Segment]]:
+class Packet(NamedTuple):
+    """One TCP segment of a connection in the pcap, with when QEMU passed it (the pcap's clock, seconds)."""
+    t: float
+    from_guest: bool
+    seg: Segment
+    payload: int    # bytes of data in it
+
+
+def tcp_packets(pcap: Path, peer_port: int) -> list[Packet]:
     """Every TCP segment between the station's port 80 and `peer_port` in a run.sh --pcap file (Ethernet frames,
-    IPv4), both ways, in the order QEMU passed them: (True when the station sent it, the segment). QEMU's
-    user-mode network forwards a host connection with the client's own port, so `peer_port` is the host
-    socket's local port."""
+    IPv4), both ways, in the order QEMU passed them. QEMU's user-mode network forwards a host connection with
+    the client's own port, so `peer_port` is the host socket's local port."""
     try:
         d = pcap.read_bytes()
     except OSError:
@@ -359,6 +380,7 @@ def tcp_segments(pcap: Path, peer_port: int) -> list[tuple[bool, Segment]]:
     off = 24
     guest = bytes(int(x) for x in GUEST_IP.split("."))
     while off + 16 <= len(d):
+        t = int.from_bytes(d[off:off + 4], "little") + int.from_bytes(d[off + 4:off + 8], "little") / 1e6
         incl = int.from_bytes(d[off + 8:off + 12], "little")
         pkt = d[off + 16:off + 16 + incl]
         off += 16 + incl
@@ -376,8 +398,15 @@ def tcp_segments(pcap: Path, peer_port: int) -> list[tuple[bool, Segment]]:
             from_guest = False
         else:
             continue
-        out.append((from_guest, Segment(tcp[13], int.from_bytes(tcp[4:8], "big"), int.from_bytes(tcp[8:12], "big"))))
+        payload = int.from_bytes(ip[2:4], "big") - ihl - (tcp[12] >> 4) * 4
+        out.append(Packet(t, from_guest, Segment(tcp[13], int.from_bytes(tcp[4:8], "big"),
+                                                 int.from_bytes(tcp[8:12], "big")), max(0, payload)))
     return out
+
+
+def tcp_segments(pcap: Path, peer_port: int) -> list[tuple[bool, Segment]]:
+    """tcp_packets without the times: (True when the station sent it, the segment)."""
+    return [(p.from_guest, p.seg) for p in tcp_packets(pcap, peer_port)]
 
 
 def tcp_from_guest(pcap: Path, peer_port: int) -> list[Segment]:
@@ -426,6 +455,36 @@ def syns_until_taken(segments: list[tuple[bool, Segment]]) -> int | None:
     return None
 
 
+class ReconnectTime(NamedTuple):
+    """Where the time of a connection whose first SYN the station turned away went, from its packets
+    (reconnect_time). resend: from the client's first SYN to the SYN the station took (the client's own timer:
+    libslirp's here); station: the station's own part, its answer to the turned-away SYN, its SYN-ACK to the
+    SYN it took and the request to the end of its answer (its FIN)."""
+    resend: float
+    station: float
+    turned: float    # the station's answer to the first SYN
+    synack: float    # its SYN-ACK to the SYN it took
+    answer: float    # from the request to the end of its answer
+
+
+def reconnect_time(packets: list[Packet]) -> ReconnectTime | None:
+    """ReconnectTime for one connection's packets (tcp_packets after the connection before it), None without
+    a turned-away SYN, a SYN-ACK, a request or the station's FIN after it."""
+    syns = [p for p in packets if not p.from_guest and p.seg.flags & (TCP_SYN | TCP_ACK) == TCP_SYN]
+    synack = next((p for p in packets if p.from_guest and p.seg.flags & TCP_SYN), None)
+    if not syns or synack is None or syns[0].t >= synack.t:
+        return None
+    turned = next((p for p in packets if p.from_guest and syns[0].t <= p.t < synack.t), None)
+    taken = [p for p in syns if p.t <= synack.t][-1]
+    request = next((p for p in packets if not p.from_guest and p.payload > 0 and p.t >= synack.t), None)
+    fin = next((p for p in packets if p.from_guest and p.seg.flags & TCP_FIN and request and p.t >= request.t),
+               None)
+    if turned is None or taken is syns[0] or request is None or fin is None:
+        return None
+    parts = (turned.t - syns[0].t, synack.t - taken.t, fin.t - request.t)
+    return ReconnectTime(taken.t - syns[0].t, sum(parts), *parts)
+
+
 class ReusePair(NamedTuple):
     """Smoke.reuse_pair: two connections from one local port, the station closing each first."""
     first: Answer
@@ -437,6 +496,8 @@ class ReusePair(NamedTuple):
     later: list[int]                    # the second connection's SYN-ACK ISNs
     resent: int                         # SYN-ACKs sent again (same ISN)
     second: list[tuple[bool, Segment]]  # every segment both ways after the first connection's
+    packets: list[Packet] = []          # the same with their times
+    watched: Watched | None = None      # the second exchange's request, as the watch on slow requests saw it
 
 
 def synack_isns(segments: list[Segment]) -> list[int]:
@@ -519,6 +580,7 @@ class SlowWatch:
         self.t0 = t0
         self.lock = threading.Lock()
         self.count = 0
+        self.explained: list[str] = []
 
     def _write(self, text: str) -> None:
         with self.lock, open(self.path, "a", encoding="utf-8") as f:
@@ -588,6 +650,13 @@ class SlowWatch:
         if w["watching"]:
             w["thread"].join(timeout=10)
 
+    def explain(self, what: str, why: str) -> None:
+        """A watched request whose time its own packets account for (a check measured them): the log says how,
+        and the run's last lines count it apart from the ones nothing explains."""
+        with self.lock:
+            self.explained.append(f"{what}: {why}")
+        self._write(f"{what}: {why}")
+
 
 _slow_watch: SlowWatch | None = None
 
@@ -601,6 +670,11 @@ def watch_requests(out: Path, console: Path, run_log: Path, port: int, t0: float
 def slow_requests() -> int:
     """Requests that took SLOW_S or longer so far (each one in slow-requests.log)."""
     return _slow_watch.count if _slow_watch is not None else 0
+
+
+def slow_explained() -> list[str]:
+    """Those of them a check explained from their packets (SlowWatch.explain), each with its reason."""
+    return list(_slow_watch.explained) if _slow_watch is not None else []
 
 
 class Watched:
@@ -621,6 +695,16 @@ class Watched:
                 self.w["what"] += f" (client port {sock.getsockname()[1]})"
             except OSError:
                 pass
+
+    @property
+    def slow(self) -> bool:
+        """It went SLOW_S without its answer and was watched (a line in slow-requests.log)."""
+        return self.w is not None and self.w["watching"]
+
+    def explain(self, why: str) -> None:
+        """Its time, accounted for by its packets: SlowWatch.explain (only when it was watched as slow)."""
+        if self.slow and _slow_watch is not None:
+            _slow_watch.explain(self.w["what"], why)
 
     def __enter__(self) -> Watched:
         return self
@@ -1362,8 +1446,9 @@ class Smoke:
         port = self.http_port
         req = f"GET /api/session HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n".encode()
 
-        def exchange(local: int, timeout: float) -> tuple[int, Answer, float | None, float]:
-            """(local port, answer, when the station's FIN came, seconds from the connect to the answer's end)"""
+        def exchange(local: int, timeout: float) -> tuple[int, Answer, float | None, float, Watched]:
+            """(local port, answer, when the station's FIN came, seconds from the connect to the answer's end,
+            the request as watched)"""
             with socket.socket() as c:
                 c.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 c.bind(("127.0.0.1", local))
@@ -1378,8 +1463,8 @@ class Smoke:
                     a = rd.read(timeout)
                     took = time.monotonic() - t0
                     w.outcome = answer_text(a)
-                return bound, a, rd.wait_close(5.0) if a.complete else None, took
-        local, first, closed, _ = exchange(0, ANSWER_TIMEOUT_S)
+                return bound, a, rd.wait_close(5.0) if a.complete else None, took, w
+        local, first, closed, _, _ = exchange(0, ANSWER_TIMEOUT_S)
         settle = min(1.0, after_s)
         time.sleep(settle)   # the station's last segments of it
         both = tcp_segments(self.out / "qemu-net.pcap", local)
@@ -1388,14 +1473,16 @@ class Smoke:
         first_close = guest_closed_first(segs, len(req))
         before = synack_isns(segs)   # the first connection's (every SYN-ACK of it is in by now)
         time.sleep(max(0.0, after_s - settle))
-        _, again, _, took = exchange(local, ANSWER_TIMEOUT_S)
+        _, again, _, took, watched = exchange(local, ANSWER_TIMEOUT_S)
         time.sleep(1.0)
-        both = tcp_segments(self.out / "qemu-net.pcap", local)
+        packets = tcp_packets(self.out / "qemu-net.pcap", local)
+        both = [(x.from_guest, x.seg) for x in packets]
         segs = [s for from_guest, s in both if from_guest]
         isns = synack_isns(segs)
         return ReusePair(first=first, closed=closed, first_close=first_close, before=before, again=again,
                          took=took, later=[i for i in isns if i not in before],
-                         resent=sum(1 for x in segs if x.flags & TCP_SYN) - len(isns), second=both[seen:])
+                         resent=sum(1 for x in segs if x.flags & TCP_SYN) - len(isns), second=both[seen:],
+                         packets=packets[seen:], watched=watched)
 
     @staticmethod
     def reuse_text(r: ReusePair, after_s: float) -> str:
@@ -1457,11 +1544,18 @@ class Smoke:
         sequence number is exactly RCV.NXT (RFC 5961's check) and no socket holds the connection any more (the
         first connection here is closed whole), before the station reads its next segment. So here: one
         bare ACK and nothing else before the SYN-ACK (refused_syns), libslirp's reset with exactly the bare
-        ACK's acknowledgment number, the SYN-ACK to the client's second SYN (libslirp's first resend, 5.5 to 6 s
-        after the first: syns_until_taken), one SYN-ACK for each of the two connections, and the answer within
-        REUSE_RESET_LIMIT_S of the connect. Without the hook the second SYN still falls inside the 10 s
-        TIME_WAIT and gets a bare ACK too, and the third, about 18 s after the connect, is taken. A Linux client
-        (5.10 and later) sends its next SYN a few milliseconds after its reset, not 5.5 s."""
+        ACK's acknowledgment number, the SYN-ACK to the client's second SYN (libslirp's first resend:
+        syns_until_taken), one SYN-ACK for each of the two connections, and the request's time taken apart in
+        the pcap (reconnect_time): libslirp's resend RESEND_MIN_S to RESEND_MAX_S after the first SYN, which is
+        its own retransmission timer (6 s in 500 ms ticks; the reset it sent does not cut it short), and the
+        station's own part under SLOW_S, as for any request. So the answer comes about 6 s after the connect, all
+        but a few milliseconds of it libslirp's wait: the watch on slow requests counts that request as
+        explained, with the split. Without the hook the second SYN still falls inside the 10 s TIME_WAIT and
+        gets a bare ACK too, and the third, about 18 s after the connect, is taken. A Linux client (5.10 and
+        later) sends its next SYN a few milliseconds after its reset, not 5.5 s. The station could take the
+        first SYN itself (RFC 9293 section 3.6.1 lets a TIME-WAIT reopen for a SYN above RCV.NXT, as Linux
+        does); upstream lwIP does not, and a segment that matches a TIME_WAIT pcb never reaches the listener
+        (tcp_in.c: the hook or tcp_timewait_input, then the segment is freed)."""
         try:
             r = self.reuse_pair(REUSE_EARLY_S)
         except OSError as e:
@@ -1480,11 +1574,26 @@ class Smoke:
         else:
             seqs = "" if exact else "; its sequence numbers " + ", ".join(str(x.seq) for x in resets[:3])
             reset_text = f"the client's reset {'with' if exact else 'NOT with'} the station's RCV.NXT ({rcv_nxt}{seqs})"
+        t = reconnect_time(r.packets)
+        timed = (t is not None and RESEND_MIN_S <= t.resend <= RESEND_MAX_S and t.station < SLOW_S
+                 and r.took < t.resend + SLOW_S)
+        if t is None:
+            time_text = "its time not in the pcap (no turned-away SYN, SYN-ACK, request or FIN of the station)"
+        else:
+            time_text = (f"{t.resend:.2f} s of it libslirp's resend of the SYN (must be {RESEND_MIN_S} to "
+                         f"{RESEND_MAX_S} s: its retransmission timer), the station's own {t.station:.3f} s (must be "
+                         f"under {SLOW_S:.0f} s: the bare ACK {t.turned * 1000:.1f} ms after the first SYN, the "
+                         f"SYN-ACK {t.synack * 1000:.1f} ms after the resend, the request to its FIN "
+                         f"{t.answer * 1000:.0f} ms)")
+        if timed and r.watched is not None:
+            # Only a split that holds: a station that took its time stays a slow request nothing explains.
+            r.watched.explain(f"{r.took:.2f} s, {t.resend:.2f} s of it libslirp's SYN resend after the station "
+                              f"turned the first SYN away in TIME_WAIT (port_reuse_reset_check); the station's own "
+                              f"time {t.station:.3f} s")
         self.check(r.first.status == 200 and r.closed is not None and r.first_close is True
                    and r.again.status == 200 and r.again.complete and len(r.before) == 1 and len(r.later) == 1
-                   and len(refused) == 1 and len(bare) == 1 and exact and syns == 2
-                   and r.took < REUSE_RESET_LIMIT_S,
-                   self.reuse_text(r, REUSE_EARLY_S) + f" (must be under {REUSE_RESET_LIMIT_S:.0f} s); the "
+                   and len(refused) == 1 and len(bare) == 1 and exact and syns == 2 and timed,
+                   self.reuse_text(r, REUSE_EARLY_S) + f": {time_text}; the "
                    f"station's answers to its SYN before a SYN-ACK: {len(bare)} bare ACK(s), "
                    f"{len(refused) - len(bare)} reset(s) (must be 1 bare ACK: it held the first connection in "
                    f"TIME_WAIT); {reset_text}; the SYN-ACK answered the client's SYN number "
@@ -1556,10 +1665,11 @@ class Smoke:
                    and w["tx_power_dbm"] is None,
                    f"GET /api/wifi: bssid {w.get('bssid', 'missing')!r}, "
                    f"tx_power_dbm {w.get('tx_power_dbm', 'missing')!r} (null in this build)")
-        # Roaming: off in this build (no radio), so no moves and the access point's 802.11v support unknown.
-        self.check(status == 200 and w.get("roams") == 0 and "ap_steering" in w and w["ap_steering"] is None,
+        # Roaming: off in this build (no radio), so no moves, and the access point's 802.11v support is never read:
+        # left out (null would say "not read yet").
+        self.check(status == 200 and w.get("roams") == 0 and "ap_steering" not in w,
                    f"GET /api/wifi: roams {w.get('roams', 'missing')!r}, "
-                   f"ap_steering {w.get('ap_steering', 'missing')!r} (0 and null in this build)")
+                   f"ap_steering {w.get('ap_steering', 'missing')!r} (0 and missing in this build)")
 
     def journal_clear_checks(self) -> None:
         """DELETE /api/journal: the records are gone at once and the numbering goes on (the station may journal
@@ -1813,8 +1923,12 @@ class Smoke:
         finally:
             self.stop()
         if slow_requests():
-            print(f"     {slow_requests()} request(s) took {SLOW_S:.0f} s or more: watched in "
-                  f"{self.out / 'slow-requests.log'} (packets in qemu-net.pcap)", flush=True)
+            told = slow_explained()
+            print(f"     {slow_requests()} request(s) took {SLOW_S:.0f} s or more, {slow_requests() - len(told)} "
+                  f"of them not explained: watched in {self.out / 'slow-requests.log'} (packets in qemu-net.pcap)",
+                  flush=True)
+            for why in told:
+                print(f"     explained by its packets: {why}", flush=True)
         failed = [t for ok, t in self.results if not ok]
         summary = "\n".join(("PASS " if ok else "FAIL ") + t for ok, t in self.results)
         (self.out / "summary.txt").write_text(summary + "\n", encoding="utf-8")

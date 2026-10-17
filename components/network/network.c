@@ -46,6 +46,21 @@
  * that never touch the setup page's list. A move that reaches an address is
  * journalled as DIAG_EV_WIFI_ROAM, instead of a drop and the return after it.
  *
+ * A move keeps the station's address and its TCP sessions when it can
+ * (net_roam.h, "Keeping the address across a move"): ESP-IDF's default
+ * station handlers would take the interface down at the disconnect, so the
+ * two interface actions they call are wrapped at link time (CMakeLists.txt)
+ * and leave the interface up for the disconnect of a move and the
+ * association after it, as ESP-IDF's own handlers do for its roaming app
+ * (ESP_WIFI_ROAMING_IP_RENEW_SKIP). on_sta_link, registered after those
+ * handlers, tells the net task what was decided. Back on a link, DHCP is
+ * asked to confirm the address (the link down and up in lwIP, as on another
+ * network), the mDNS responder starts again on the interface, and the move
+ * completes with DHCP's answer. A move that fails, takes longer than
+ * NET_HOLD_AWAY_S or loses its address takes the interface down after all,
+ * as an ordinary disconnect does at once: every session closes and the
+ * casters reconnect.
+ *
  * QEMU development build (CONFIG_NETWORK_QEMU_ETHERNET, sdkconfig.qemu):
  * Wi-Fi is never initialised or started. The emulated OpenCores Ethernet
  * port is created as the station interface instead (its key and IP events),
@@ -80,6 +95,8 @@
 #include "freertos/task.h"
 #include "ledger.h"
 #include "lifecycle.h"
+#include "lwip/dhcp.h"
+#include "lwip/prot/dhcp.h"
 #include "lwip/netdb.h"
 #include "lwip/netif.h"
 #include "lwip/sockets.h"
@@ -138,6 +155,12 @@ _Static_assert(WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT == NET_REASON_4WAY_HANDSHAKE_T
                    WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD == NET_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD,
                "disconnect reasons of the credential trial match the core");
 _Static_assert(sizeof(((network_status_t *)0)->mdns_host) == 33, "mDNS host label as in the API");
+#if CONFIG_NETWORK_ROAM
+_Static_assert(WIFI_REASON_ROAMING == NET_REASON_ROAMING, "the supplicant's move keeps the address (net_hold_t)");
+#if CONFIG_ESP_WIFI_ROAMING_IP_RENEW_SKIP
+#error "ESP_WIFI_ROAMING_IP_RENEW_SKIP would keep the address behind the station's back: network.c keeps it itself"
+#endif
+#endif
 
 /* Tasks and queue. */
 #define NET_TASK_STACK    5120    /* settings writes when trial credentials are confirmed */
@@ -201,12 +224,14 @@ typedef enum {
     MSG_RECOVER,
     MSG_AP_REQUEST,
     MSG_GOT_IP6,        /* reason: 0 station, 1 access point */
+    MSG_MOVE_NOW,       /* the station's own move at once (network_move_now) */
 } msg_type_t;
 
 typedef struct {
     uint8_t type;
     uint8_t reason;     /* disconnect reason, recovery action */
     int8_t rssi;
+    uint8_t held;       /* MSG_STA_CONNECTED, MSG_STA_DISCONNECTED: the interface kept its address (net_hold_t) */
 } net_msg_t;
 
 typedef enum {
@@ -232,6 +257,13 @@ static volatile bool s_ap_clients_queued;   /* one MSG_AP_CLIENTS at most in the
 
 /* Readers' snapshot; everything below "under s_lock" is shared with API callers. */
 static network_status_t s_st;               /* under s_lock */
+/* ap_steering until it is read: a few seconds into each association, in a
+ * build that reads it at all (roaming and 802.11v support on). */
+#if CONFIG_NETWORK_ROAM && CONFIG_ESP_WIFI_WNM_SUPPORT
+#define STEER_UNREAD (-1)
+#else
+#define STEER_UNREAD NETWORK_AP_STEERING_NEVER
+#endif
 static int64_t s_probe_at_us;               /* under s_lock: when the last probe finished */
 static bool s_probe_valid;                  /* under s_lock */
 static bool s_probe_running;                /* under s_lock */
@@ -363,12 +395,24 @@ static uint8_t s_move_bssid[6];             /* that access point (never journall
 static uint8_t s_move_ch_from;
 static int8_t s_move_rssi_from;
 static bool s_move_assoc;                   /* associated on the way */
+static uint32_t s_move_assoc_s;             /* when */
 static uint8_t s_move_ch_to;
 static int8_t s_move_rssi_to;
 static bool s_move_same;                    /* the association is with the access point it left */
 static bool s_move_rec_pending;             /* a DIAG_EV_WIFI_ROAM record waits for the journal */
 static int32_t s_move_rec_a;
 static int32_t s_move_rec_b;
+/* Keeping the address across a move (net_hold_t). s_hold_mux serialises
+ * s_hold with what is done to the station interface for it: the wrapped
+ * netif actions on the event task, the outcomes on the net task. */
+static SemaphoreHandle_t s_hold_mux;
+static net_hold_t s_hold;                   /* under s_hold_mux */
+typedef enum { VERDICT_NONE = 0, VERDICT_PASSED, VERDICT_HELD } verdict_t;
+static volatile uint8_t s_disc_verdict;     /* the wrapped disconnected action's decision, for on_sta_link */
+static volatile uint8_t s_conn_verdict;     /* the wrapped connected action's decision, for on_sta_link */
+static bool s_hold_on;                      /* net task: a hold it was told about runs (its log lines) */
+static bool s_lease_ok;                     /* net task: enough of the DHCP lease left (lease_refresh) */
+static uint32_t s_lease_ip;                 /* net task: the address read with it */
 #endif
 
 /* mDNS: the responder renamed itself after a conflict (set by its callback,
@@ -408,15 +452,20 @@ static void post_event(network_event_t id)
     (void)esp_event_post(NETWORK_EVENT, id, NULL, 0, EVENT_POST_TICKS);
 }
 
-static void send_msg(uint8_t type, uint8_t reason, int8_t rssi)
+static void send_msg_held(uint8_t type, uint8_t reason, int8_t rssi, bool held)
 {
-    net_msg_t m = { .type = type, .reason = reason, .rssi = rssi };
+    net_msg_t m = { .type = type, .reason = reason, .rssi = rssi, .held = held ? 1 : 0 };
     if (s_queue == NULL || xQueueSend(s_queue, &m, 0) != pdTRUE) {
         s_queue_overflow = true;   /* the net task resyncs from the driver */
         if (type == MSG_AP_CLIENTS) {
             __atomic_store_n(&s_ap_clients_queued, false, __ATOMIC_SEQ_CST);   /* the resync counts the clients */
         }
     }
+}
+
+static void send_msg(uint8_t type, uint8_t reason, int8_t rssi)
+{
+    send_msg_held(type, reason, rssi, false);
 }
 
 static void set_status_str(char *dst, size_t size, const char *src)
@@ -480,14 +529,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     case WIFI_EVENT_STA_STOP:
         send_msg(MSG_STA_STOP, 0, 0);
         break;
-    case WIFI_EVENT_STA_CONNECTED:
-        send_msg(MSG_STA_CONNECTED, 0, 0);
-        break;
-    case WIFI_EVENT_STA_DISCONNECTED: {
-        const wifi_event_sta_disconnected_t *d = data;
-        send_msg(MSG_STA_DISCONNECTED, d ? d->reason : 0, d ? d->rssi : 0);
-        break;
-    }
+    /* WIFI_EVENT_STA_CONNECTED and _DISCONNECTED: on_sta_link. */
     case WIFI_EVENT_AP_START:
         send_msg(MSG_AP_START, 0, 0);
         break;
@@ -509,6 +551,91 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         break;
     }
 }
+
+/*
+ * The station's association and its end. Registered for these two events
+ * after ESP-IDF's default station handlers (esp_netif_create_default_wifi_sta
+ * registers them), so it runs after them in the same dispatch (the handlers
+ * of one event run in the order they were registered) and passes on what
+ * the wrapped interface actions decided for this event: the interface kept
+ * its address across a move (net_hold_t). No decision (roaming off, or the
+ * default handler did not act) is an ordinary link change.
+ */
+static void on_sta_link(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+#if CONFIG_NETWORK_ROAM
+    volatile uint8_t *verdict = id == WIFI_EVENT_STA_CONNECTED ? &s_conn_verdict : &s_disc_verdict;
+    bool held = __atomic_exchange_n(verdict, (uint8_t)VERDICT_NONE, __ATOMIC_SEQ_CST) == VERDICT_HELD;
+#else
+    const bool held = false;
+#endif
+    if (id == WIFI_EVENT_STA_CONNECTED) {
+        send_msg_held(MSG_STA_CONNECTED, 0, 0, held);
+    } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *d = data;
+        send_msg_held(MSG_STA_DISCONNECTED, d ? (uint8_t)d->reason : 0, d ? d->rssi : 0, held);
+    }
+}
+
+#if CONFIG_NETWORK_ROAM
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+void __real_esp_netif_action_disconnected(void *esp_netif, esp_event_base_t base, int32_t event_id, void *data);
+void __real_esp_netif_action_connected(void *esp_netif, esp_event_base_t base, int32_t event_id, void *data);
+void __wrap_esp_netif_action_disconnected(void *esp_netif, esp_event_base_t base, int32_t event_id, void *data);
+void __wrap_esp_netif_action_connected(void *esp_netif, esp_event_base_t base, int32_t event_id, void *data);
+
+/* The station's own interface, from one of its default handlers (anything else passes straight through). */
+static bool sta_action(void *esp_netif, esp_event_base_t base, int32_t event_id, int32_t want)
+{
+    return s_hold_mux != NULL && esp_netif != NULL && esp_netif == s_sta && base == WIFI_EVENT && event_id == want;
+}
+
+/*
+ * ESP-IDF's default station handlers call these two actions at every
+ * disconnect and association (wrapped at link time, CMakeLists.txt). A
+ * disconnect the hold keeps leaves the interface up with its address and
+ * its sessions, and the association after it skips the connected action
+ * (the interface is up already), as ESP-IDF's own handlers do for its
+ * roaming app with ESP_WIFI_ROAMING_IP_RENEW_SKIP. Everything else goes to
+ * the original. Default event loop task.
+ */
+void __wrap_esp_netif_action_disconnected(void *esp_netif, esp_event_base_t base, int32_t event_id, void *data)
+{
+    if (!sta_action(esp_netif, base, event_id, WIFI_EVENT_STA_DISCONNECTED)) {
+        __real_esp_netif_action_disconnected(esp_netif, base, event_id, data);
+        return;
+    }
+    const wifi_event_sta_disconnected_t *d = data;
+    xSemaphoreTake(s_hold_mux, portMAX_DELAY);
+    bool keep = net_hold_disconnect(&s_hold, d != NULL ? d->reason : 0, now_ms());
+    if (!keep) {
+        __real_esp_netif_action_disconnected(esp_netif, base, event_id, data);
+    }
+    xSemaphoreGive(s_hold_mux);
+    __atomic_store_n(&s_disc_verdict, (uint8_t)(keep ? VERDICT_HELD : VERDICT_PASSED), __ATOMIC_SEQ_CST);
+}
+
+void __wrap_esp_netif_action_connected(void *esp_netif, esp_event_base_t base, int32_t event_id, void *data)
+{
+    if (!sta_action(esp_netif, base, event_id, WIFI_EVENT_STA_CONNECTED)) {
+        __real_esp_netif_action_connected(esp_netif, base, event_id, data);
+        return;
+    }
+    xSemaphoreTake(s_hold_mux, portMAX_DELAY);
+    bool held = net_hold_connected(&s_hold, now_ms());
+    if (!held) {
+        __real_esp_netif_action_connected(esp_netif, base, event_id, data);
+    }
+    xSemaphoreGive(s_hold_mux);
+    __atomic_store_n(&s_conn_verdict, (uint8_t)(held ? VERDICT_HELD : VERDICT_PASSED), __ATOMIC_SEQ_CST);
+}
+#endif
 
 static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -934,6 +1061,10 @@ static void probe_kick(void)
 
 /* ---- station ------------------------------------------------------------------------- */
 
+#if CONFIG_NETWORK_ROAM
+static void hold_cut(const char *why);
+#endif
+
 /* A scan runs (the user's or a roaming one): esp_wifi_connect() would fail. */
 static bool scanning(void)
 {
@@ -1078,6 +1209,9 @@ static esp_err_t wifi_start(void)
 
 static void wifi_stop(void)
 {
+#if CONFIG_NETWORK_ROAM
+    hold_cut("Wi-Fi stops");
+#endif
     s_sta_state = STA_IDLE;
     set_wifi_sta_on(false);
     taskENTER_CRITICAL(&s_lock);
@@ -1102,7 +1236,7 @@ static void wifi_stop(void)
     taskENTER_CRITICAL(&s_lock);
     s_st.associated = false;
     s_st.bssid_known = false;
-    s_st.ap_steering = -1;
+    s_st.ap_steering = STEER_UNREAD;
     s_st.tx_power_known = false;
     s_st.ap_reasons = 0;
     s_st.ap_close_in_s = UINT32_MAX;
@@ -1156,6 +1290,9 @@ static void apply_credentials(void)
 #if CONFIG_NETWORK_QEMU_ETHERNET
     ESP_LOGW(TAG, "QEMU: Wi-Fi credentials for \"%s\" kept, the emulated Ethernet stays in use", s_ssid);
     return;
+#endif
+#if CONFIG_NETWORK_ROAM
+    hold_cut("new Wi-Fi credentials");
 #endif
     s_attempt = 0;
     net_drop_log_reset(&s_drop);
@@ -1654,36 +1791,49 @@ static void move_associated(bool have, const wifi_ap_record_t *ap)
         return;
     }
     s_move_assoc = true;
+    s_move_assoc_s = now_s();
     s_move_ch_to = have ? ap->primary : 0;
     s_move_rssi_to = have ? ap->rssi : 0;
     s_move_same = have && s_move_from_known && memcmp(ap->bssid, s_move_bssid, sizeof(s_move_bssid)) == 0;
 }
 
-/* The address on the new link: the move is complete. Its record stands for
- * the gap, so no DIAG_EV_WIFI_UP follows it. */
-static void move_done(void)
+static const char *move_by_text(uint8_t by)
+{
+    return by == NET_ROAM_BY_AP ? "at the access point's request"
+           : by == NET_ROAM_BY_REQUEST ? "on request"
+                                       : "with a stronger signal";
+}
+
+/*
+ * The move is complete: the address on the new link, or with the address
+ * kept (net_hold_t) DHCP's answer there (or the end of the wait for it).
+ * Its record stands for the gap, so no DIAG_EV_WIFI_UP follows it. Kept:
+ * the seconds are those without a link, as nothing was without an address.
+ */
+static void move_done(bool kept)
 {
     if (!s_move_on || !s_move_assoc) {
         return;
     }
-    uint32_t secs = now_s() - s_move_start_s;
+    uint32_t secs = (kept ? s_move_assoc_s : now_s()) - s_move_start_s;
     s_move_on = false;
     s_outage = false;
-    s_move_rec_a = net_roam_rec_a(s_move_ch_from, s_move_ch_to, (net_roam_by_t)s_move_by, s_move_same);
+    s_move_rec_a = net_roam_rec_a(s_move_ch_from, s_move_ch_to, (net_roam_by_t)s_move_by, s_move_same, kept);
     s_move_rec_b = net_roam_rec_b(s_move_rssi_from, s_move_rssi_to, secs);
     s_move_rec_pending = true;
     flush_move_record();
+    const char *gap = kept ? "without a link, the address and the connections kept" : "without an address";
     if (s_move_same) {
-        ESP_LOGW(TAG, "back on the same access point after all (channel %u, %d dBm), %u s without an address",
-                 s_move_ch_to, s_move_rssi_to, (unsigned)secs);
+        ESP_LOGW(TAG, "back on the same access point after all (channel %u, %d dBm), %u s %s", s_move_ch_to,
+                 s_move_rssi_to, (unsigned)secs, gap);
         return;
     }
     taskENTER_CRITICAL(&s_lock);
     s_st.roams++;
     taskEXIT_CRITICAL(&s_lock);
-    ESP_LOGI(TAG, "moved to another access point %s: channel %u, %d dBm -> channel %u, %d dBm, %u s without an address",
-             s_move_by == NET_ROAM_BY_AP ? "at the access point's request" : "with a stronger signal", s_move_ch_from,
-             s_move_rssi_from, s_move_ch_to, s_move_rssi_to, (unsigned)secs);
+    ESP_LOGI(TAG, "moved to another access point %s: channel %u, %d dBm -> channel %u, %d dBm, %u s %s",
+             move_by_text(s_move_by), s_move_ch_from, s_move_rssi_from, s_move_ch_to, s_move_rssi_to, (unsigned)secs,
+             gap);
 }
 
 /* The user's scan of every network (the setup page's list). */
@@ -1790,8 +1940,251 @@ static void roam_scan_done(void)
     }
 }
 
+/* ---- keeping the address across a move (net_hold_t) ---- */
+
+_Static_assert(NET_HOLD_LEASE_MIN_S == 60u, "hold_closed_why names the lease minimum");
+
+/* What lwIP's DHCP client holds for the station (lwIP context, through esp_netif_tcpip_exec). */
+typedef struct {
+    uint32_t ip;         /* the interface's address as lwIP holds it (0 = none) */
+    bool bound;          /* DHCP bound */
+    bool leased;         /* bound or renewing: not past the rebind time */
+    uint32_t left_s;     /* lease time left */
+} dhcp_view_t;
+
+static esp_err_t dhcp_view_read(void *ctx)
+{
+    dhcp_view_t *v = ctx;
+    memset(v, 0, sizeof(*v));
+    struct netif *lw = esp_netif_get_netif_impl(s_sta);
+    if (lw == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    v->ip = ip4_addr_get_u32(netif_ip4_addr(lw));
+    const struct dhcp *d = netif_dhcp_data(lw);
+    if (d != NULL) {
+        v->bound = d->state == DHCP_STATE_BOUND;
+        v->leased = v->bound || d->state == DHCP_STATE_RENEWING;
+        if (d->t0_timeout > d->lease_used) {
+            uint64_t left = (uint64_t)(d->t0_timeout - d->lease_used) * DHCP_COARSE_TIMER_SECS;
+            v->left_s = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
+        }
+    }
+    return ESP_OK;
+}
+
+/* The lease and the address the gate opens with: at each new address and every RSSI_INTERVAL_S while associated. */
+static void lease_refresh(void)
+{
+    dhcp_view_t v;
+    bool ok = s_has_ip && esp_netif_tcpip_exec(dhcp_view_read, &v) == ESP_OK;
+    s_lease_ok = ok && net_hold_lease_ok(v.leased, v.left_s);
+    s_lease_ip = ok ? v.ip : 0;
+}
+
+/* Why a move would not keep the address now; NULL: it would. */
+static const char *hold_closed_why(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    bool queued = s_new_pending;
+    taskEXIT_CRITICAL(&s_lock);
+    if (s_trial.on || queued) {
+        return "new Wi-Fi credentials are on trial";
+    }
+    if (s_leaving) {
+        return "a restart is under way";
+    }
+    if (!s_has_ip || !s_associated || !s_wifi_started) {
+        return "no address";
+    }
+    if (!s_lease_ok) {
+        return "less than 1 min of the DHCP lease left";
+    }
+    return NULL;
+}
+
+/* Every pass: whether a move may keep the address now (the gate the wrapped actions read). */
+static void hold_gate(void)
+{
+    bool open = hold_closed_why() == NULL;
+    xSemaphoreTake(s_hold_mux, portMAX_DELAY);
+    net_hold_gate(&s_hold, open, s_lease_ip);
+    xSemaphoreGive(s_hold_mux);
+}
+
+/* Right before the station's own disconnect: that disconnect keeps the address (with the gate open). */
+static void hold_arm(void)
+{
+    const char *why = hold_closed_why();
+    bool armed = false;
+    if (why == NULL) {
+        xSemaphoreTake(s_hold_mux, portMAX_DELAY);
+        net_hold_gate(&s_hold, true, s_lease_ip);
+        armed = net_hold_arm(&s_hold, now_ms());
+        xSemaphoreGive(s_hold_mux);
+    }
+    if (!armed) {
+        ESP_LOGI(TAG, "this move does not keep the address: %s", why != NULL ? why : "the previous move is not over");
+    }
+}
+
+/* A disconnect that kept the address (MSG_STA_DISCONNECTED). */
+static void hold_note_kept(void)
+{
+    s_hold_on = true;
+    char ip[16];
+    taskENTER_CRITICAL(&s_lock);
+    strlcpy(ip, s_st.ip, sizeof(ip));
+    taskEXIT_CRITICAL(&s_lock);
+    ESP_LOGI(TAG, "keeping the address %s and the connections while the station moves (up to %u s without a link)", ip,
+             (unsigned)NET_HOLD_AWAY_S);
+}
+
+/* lwIP context: the link down and up again, as on another network: the DHCP
+ * client asks to keep its address (INIT-REBOOT, the address stays in use
+ * meanwhile) and the multicast memberships are reported again. */
+static esp_err_t relink(void *ctx)
+{
+    struct netif *lw = esp_netif_get_netif_impl((esp_netif_t *)ctx);
+    if (lw == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    netif_set_link_down(lw);
+    netif_set_link_up(lw);
+    return ESP_OK;
+}
+
+/* The association after a kept disconnect (MSG_STA_CONNECTED): DHCP confirms the address on the new link. */
+static void hold_back(uint8_t channel)
+{
+    esp_err_t err = esp_netif_tcpip_exec(relink, s_sta);
+    if (err == ESP_OK) {
+        xSemaphoreTake(s_hold_mux, portMAX_DELAY);
+        net_hold_verify(&s_hold, now_ms());
+        xSemaphoreGive(s_hold_mux);
+    }
+    /* The responder stopped on this interface at the disconnect and would start again only with a new address. */
+    if (s_mdns_on) {
+        esp_err_t e = mdns_netif_action(s_sta, MDNS_EVENT_ENABLE_IP4 | MDNS_EVENT_ENABLE_IP6);
+        if (e != ESP_OK) {
+            ESP_LOGW(TAG, "mDNS not restarted on the new access point (%s): reached by its IP address",
+                     esp_err_to_name(e));
+        }
+    }
+    char ip[16];
+    taskENTER_CRITICAL(&s_lock);
+    strlcpy(ip, s_st.ip, sizeof(ip));
+    taskEXIT_CRITICAL(&s_lock);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "associated again (channel %u): asking the DHCP server to confirm %s", channel, ip);
+    } else {
+        ESP_LOGW(TAG, "associated again (channel %u): %s not checked with the DHCP server (%s)", channel, ip,
+                 esp_err_to_name(err));
+    }
+}
+
+static void ip_text(uint32_t ip, char *out, size_t cap)
+{
+    esp_ip4_addr_t a = { .addr = ip };
+    snprintf(out, cap, IPSTR, IP2STR(&a));
+}
+
+/* Every pass while a hold runs: its outcome. The interface is changed under s_hold_mux, the rest after it. */
+static void hold_tick(void)
+{
+    xSemaphoreTake(s_hold_mux, portMAX_DELAY);
+    uint8_t state = s_hold.state;
+    xSemaphoreGive(s_hold_mux);
+    if (state == NET_HOLD_IDLE) {
+        hold_gate();
+        return;
+    }
+    dhcp_view_t v = { 0 };
+    bool read = state == NET_HOLD_BACK && esp_netif_tcpip_exec(dhcp_view_read, &v) == ESP_OK;
+    xSemaphoreTake(s_hold_mux, portMAX_DELAY);
+    uint32_t kept = s_hold.kept_ip;
+    net_hold_out_t out = net_hold_check(&s_hold, read && v.bound, read ? v.ip : kept, now_ms());
+    if (out == NET_HOLD_EXPIRED || out == NET_HOLD_LOST) {
+        /* As the default handler would have at the disconnect: the address goes, lwIP aborts the sessions. */
+        __real_esp_netif_action_disconnected(s_sta, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, NULL);
+    }
+    if (out == NET_HOLD_LOST) {
+        /* Associated: up again with a fresh DHCP lease, as at an ordinary association. */
+        __real_esp_netif_action_connected(s_sta, WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, NULL);
+    }
+    xSemaphoreGive(s_hold_mux);
+    char was[16];
+    char now[16];
+    ip_text(kept, was, sizeof(was));
+    ip_text(v.ip, now, sizeof(now));
+    switch (out) {
+    case NET_HOLD_EXPIRED:
+        s_hold_on = false;
+        ESP_LOGW(TAG, "no access point within %u s: the address is given up, the connections close",
+                 (unsigned)NET_HOLD_AWAY_S);
+        ip_lost();
+        break;
+    case NET_HOLD_LOST:
+        s_hold_on = false;
+        ESP_LOGW(TAG, "the DHCP server does not keep %s on the new access point (%s): the connections close, a new "
+                      "address follows",
+                 was, v.ip != 0 ? now : "no address");
+        ip_lost();
+        break;
+    case NET_HOLD_UNCONFIRMED:
+    case NET_HOLD_CONFIRMED:
+        if (out == NET_HOLD_UNCONFIRMED) {
+            ESP_LOGW(TAG, "no answer from the DHCP server in %u s: %s is kept for the rest of its lease",
+                     (unsigned)NET_HOLD_VERIFY_S, was);
+        }
+        s_hold_on = false;
+        move_done(true);
+        lease_refresh();
+        break;
+    default:
+        break;
+    }
+}
+
+/*
+ * Something else ends a hold (new credentials, a recovery step, Wi-Fi
+ * stopping, lost events): the interface as the default handlers would have
+ * left it: down, and up again with a fresh DHCP lease while associated.
+ */
+static void hold_cut(const char *why)
+{
+    xSemaphoreTake(s_hold_mux, portMAX_DELAY);
+    bool running = s_hold.state != NET_HOLD_IDLE;
+    if (!running) {
+        (void)net_hold_end(&s_hold);   /* none runs: the gate closes and an arming goes */
+    }
+    xSemaphoreGive(s_hold_mux);
+    if (!running) {
+        return;
+    }
+    /* Read before s_hold_mux is taken: the Wi-Fi task may be waiting for the event task, which may wait for it.
+     * Should the link change in between, its event follows and the interface follows it (the hold is over). */
+    wifi_ap_record_t ap;
+    bool linked = s_wifi_started && esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+    xSemaphoreTake(s_hold_mux, portMAX_DELAY);
+    net_hold_state_t was = net_hold_end(&s_hold);
+    if (was != NET_HOLD_IDLE) {
+        __real_esp_netif_action_disconnected(s_sta, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, NULL);
+        if (linked) {
+            __real_esp_netif_action_connected(s_sta, WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, NULL);
+        }
+    }
+    xSemaphoreGive(s_hold_mux);
+    if (was == NET_HOLD_IDLE) {
+        return;
+    }
+    s_hold_on = false;
+    ESP_LOGW(TAG, "the move to another access point is cut short (%s): the address is given up", why);
+    ip_lost();
+}
+
 /* The station's own move: a deliberate reconnect, whose connect scan joins the strongest access point. */
-static void roam_go(void)
+static void own_move(net_roam_by_t by)
 {
     uint8_t bssid[6];
     taskENTER_CRITICAL(&s_lock);
@@ -1800,11 +2193,34 @@ static void roam_go(void)
     uint8_t channel = s_st.channel;
     int8_t rssi = s_st.rssi;
     taskEXIT_CRITICAL(&s_lock);
-    move_begin(NET_ROAM_BY_STATION, known, bssid, channel, rssi);
-    ESP_LOGW(TAG, "moving to a stronger access point: %d dBm on channel %u found twice, %d dBm here (channel %u)",
-             s_roam.cand.rssi, s_roam.cand.channel, net_roam_avg_dbm(&s_roam), channel);
+    move_begin(by, known, bssid, channel, rssi);
+    if (by == NET_ROAM_BY_REQUEST) {
+        ESP_LOGW(TAG, "moving on request: reconnecting to the strongest access point of the network (%d dBm here, "
+                      "channel %u)",
+                 rssi, channel);
+    } else {
+        ESP_LOGW(TAG, "moving to a stronger access point: %d dBm on channel %u found twice, %d dBm here (channel %u)",
+                 s_roam.cand.rssi, s_roam.cand.channel, net_roam_avg_dbm(&s_roam), channel);
+    }
     s_attempt = 0;
+    hold_arm();
     disconnect_then_connect();
+}
+
+/* network_move_now: the station's own move at once, under the same holds as any move. */
+static void move_now(void)
+{
+    roam_hold_t h = roam_hold();
+    const char *why = h != ROAM_HOLD_NONE                              ? roam_hold_text(h)
+                      : s_move_on                                       ? "a move is under way"
+                      : (!s_has_ip || s_sta_state != STA_CONNECTED)    ? "not online"
+                                                                        : NULL;
+    if (why != NULL) {
+        ESP_LOGW(TAG, "move on request refused: %s", why);
+        return;
+    }
+    net_roam_moved(&s_roam, now_s());
+    own_move(NET_ROAM_BY_REQUEST);
 }
 
 /* Once a second: the gate for the access point's requests, then the station's own check. */
@@ -1826,7 +2242,7 @@ static void roam_tick(uint32_t now)
         roam_scan_start(now);
         break;
     case NET_ROAM_GO:
-        roam_go();
+        own_move(NET_ROAM_BY_STATION);
         break;
     default:
         break;
@@ -1945,7 +2361,8 @@ static void handle_scan_done(void)
 
 static void trial_revert(network_cred_revert_t why);
 
-static void handle_disconnected(uint8_t reason, int8_t rssi)
+/* held: the interface kept its address and sessions (a move, net_hold_t). */
+static void handle_disconnected(uint8_t reason, int8_t rssi, bool held)
 {
     bool was_linked = s_associated;
     s_associated = false;
@@ -1961,27 +2378,49 @@ static void handle_disconnected(uint8_t reason, int8_t rssi)
     memcpy(from_bssid, s_st.bssid, sizeof(from_bssid));
     uint8_t from_channel = s_st.channel;
     int8_t from_rssi = s_st.rssi;
-    s_st.ap_steering = -1;
+    s_st.ap_steering = STEER_UNREAD;
 #endif
     s_st.associated = false;
     s_st.bssid_known = false;
     s_st.tx_power_known = false;
     s_st.last_disconnect_reason = reason;
     taskEXIT_CRITICAL(&s_lock);
-    ip_lost();   /* IDF's default handler has already cleared the address */
+    if (!held) {
+        ip_lost();   /* IDF's default handler has already cleared the address */
+    }
+#if CONFIG_NETWORK_ROAM
+    /* A move that kept the address failed: this disconnect was not kept, so the interface went down with it. */
+    bool hold_failed = !held && s_hold_on;
+    s_hold_on = false;
+#endif
 
     if (s_leaving) {
         /* Our own Wi-Fi stop on the way to a planned restart: the journal's
          * restart record covers it, and nothing reconnects any more. */
+#if CONFIG_NETWORK_ROAM
+        if (held) {
+            hold_cut("a restart is under way");
+        }
+#endif
         s_sta_state = STA_IDLE;
         return;
     }
 
     if (s_sta_state == STA_DISCONNECTING) {
+#if CONFIG_NETWORK_ROAM
+        if (held) {
+            hold_note_kept();   /* the station's own move */
+        }
+#endif
         connect_now();   /* deliberate: no backoff */
         return;
     }
     if (s_sta_state == STA_IDLE || !s_sta_configured) {
+#if CONFIG_NETWORK_ROAM
+        if (held) {
+            hold_cut("the station stops");
+        }
+#endif
         return;          /* stopping, restarting or unconfigured */
     }
 #if CONFIG_NETWORK_ROAM
@@ -1996,13 +2435,23 @@ static void handle_disconnected(uint8_t reason, int8_t rssi)
             ESP_LOGI(TAG, "moving to another access point at the access point's request (from channel %u, %d dBm)",
                      s_move_ch_from, s_move_rssi_from);
         }
+        if (held) {
+            hold_note_kept();
+        }
         s_sta_state = STA_CONNECTING;
         s_deadline_us = esp_timer_get_time() + (int64_t)CONNECT_WATCHDOG_MS * 1000;
         return;
     }
+    if (held) {
+        hold_cut("not a move");   /* only a move's disconnect is kept: never expected */
+    }
+    if (hold_failed && !s_move_on) {
+        ESP_LOGW(TAG, "the move to another access point failed (reason %u): the address is given up", reason);
+    }
     if (s_move_on) {
         /* The move did not reach an address: an outage from here on, recorded like any other. */
-        ESP_LOGW(TAG, "the move to another access point did not complete (reason %u): connecting again", reason);
+        ESP_LOGW(TAG, "the move to another access point did not complete (reason %u): connecting again%s", reason,
+                 hold_failed ? ", the address is given up" : "");
         bool by_ap = s_move_by == NET_ROAM_BY_AP;
         s_move_on = false;
         if (by_ap) {
@@ -2175,8 +2624,9 @@ static void handle_got_ip(void)
     s_attempt = 0;
 #if CONFIG_NETWORK_ROAM
     if (!was) {
-        move_done();   /* a move's own record instead of the return after an outage */
+        move_done(false);   /* a move's own record instead of the return after an outage */
     }
+    lease_refresh();   /* a new lease: how long a move may keep it */
 #endif
     if (s_outage && !was) {
         /* The address is back (not the first one of this boot). */
@@ -2231,6 +2681,9 @@ static void do_recovery(network_recovery_t action)
         ESP_LOGW(TAG, "recovery %d skipped: station not running", (int)action);
         return;
     }
+#if CONFIG_NETWORK_ROAM
+    hold_cut("a network recovery step");
+#endif
     switch (action) {
     case NETWORK_RECOVER_RECONNECT:
         ESP_LOGW(TAG, "recovery: reconnect");
@@ -2400,9 +2853,14 @@ static void handle_msg(const net_msg_t *m)
         set_wifi_sta_on(false);
         break;
     case MSG_STA_CONNECTED: {
+        /* held: the association after a move that kept the address (net_hold_t); the interface stayed up with
+         * its addresses, IPv6 link-local included, so no new one is made (its duplicate check would hold it back). */
+        bool held = m->held != 0;
         s_associated = true;
         s_sta_state = STA_CONNECTED;
-        ip6_link_up(s_sta, "station");
+        if (!held) {
+            ip6_link_up(s_sta, "station");
+        }
         if (!s_has_ip) {
             s_noip_since_s = now_s();
         }
@@ -2454,10 +2912,15 @@ static void handle_msg(const net_msg_t *m)
             s_st.tx_power_qdbm = power;
         }
         taskEXIT_CRITICAL(&s_lock);
+#if CONFIG_NETWORK_ROAM
+        if (held) {
+            hold_back(have ? ap.primary : 0);
+        }
+#endif
         break;
     }
     case MSG_STA_DISCONNECTED:
-        handle_disconnected(m->reason, m->rssi);
+        handle_disconnected(m->reason, m->rssi, m->held != 0);
         break;
     case MSG_GOT_IP:
         handle_got_ip();
@@ -2509,6 +2972,11 @@ static void handle_msg(const net_msg_t *m)
     case MSG_GOT_IP6:
         ip6_note(m->reason);
         break;
+    case MSG_MOVE_NOW:
+#if CONFIG_NETWORK_ROAM
+        move_now();
+#endif
+        break;
     case MSG_AP_REQUEST:
         s_recovery = true;
         s_recovery_start_s = now_s();
@@ -2525,6 +2993,9 @@ static void resync(void)
 {
     s_queue_overflow = false;
     ESP_LOGW(TAG, "event queue overflow: resyncing");
+#if CONFIG_NETWORK_ROAM
+    hold_cut("events were lost");   /* the interface follows the link again; what follows reads the driver */
+#endif
 #if CONFIG_NETWORK_QEMU_ETHERNET
     bool linked = s_eth_link;
 #else
@@ -2534,7 +3005,7 @@ static void resync(void)
     esp_netif_ip_info_t info = { 0 };
     bool ip = linked && esp_netif_get_ip_info(s_sta, &info) == ESP_OK && info.ip.addr != 0;
     if (!linked && s_associated) {
-        handle_disconnected(0, 0);
+        handle_disconnected(0, 0, false);
     } else if (linked && !s_associated) {
         s_associated = true;
         s_sta_state = STA_CONNECTED;
@@ -2670,6 +3141,9 @@ static void housekeeping(void)
     default:
         break;
     }
+#if CONFIG_NETWORK_ROAM
+    hold_tick();   /* every pass: a move that keeps the address waits seconds, not ticks */
+#endif
 
     uint32_t now = now_s();
     if (now == s_last_tick_s) {
@@ -2688,6 +3162,7 @@ static void housekeeping(void)
             bool have_power = esp_wifi_get_max_tx_power(&power) == ESP_OK;
 #if CONFIG_NETWORK_ROAM
             net_roam_rssi(&s_roam, ap.rssi);
+            lease_refresh();
             /* Once per association, a few seconds in (the supplicant has the
              * access point's capabilities by then): whether it offers 802.11v
              * BSS transition management, and so whether its requests can come. */
@@ -2741,6 +3216,9 @@ static void housekeeping(void)
     s_st.offline_s = (s_sta_configured && !s_has_ip) ? now - s_offline_since_s : 0;
     s_st.assoc_no_ip_s = (s_associated && !s_has_ip) ? now - s_noip_since_s : 0;
     s_st.retry_in_s = retry_in;
+#if CONFIG_NETWORK_ROAM
+    s_st.moving = s_move_on;
+#endif
     s_trial_pub = s_trial;
     publish_cred_locked();
     taskEXIT_CRITICAL(&s_lock);
@@ -2842,7 +3320,7 @@ esp_err_t network_init(void)
     taskENTER_CRITICAL(&s_lock);
     s_st.probe_age_s = UINT32_MAX;
     s_st.ap_close_in_s = UINT32_MAX;
-    s_st.ap_steering = -1;
+    s_st.ap_steering = STEER_UNREAD;
     taskEXIT_CRITICAL(&s_lock);
 #if CONFIG_NETWORK_ROAM
     const net_roam_cfg_t roam_cfg = {
@@ -2851,6 +3329,11 @@ esp_err_t network_init(void)
         .min_interval_s = CONFIG_NETWORK_ROAM_MIN_INTERVAL_S,
     };
     net_roam_init(&s_roam, &roam_cfg);
+    net_hold_init(&s_hold);
+    s_hold_mux = xSemaphoreCreateMutex();
+    if (s_hold_mux == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
 #endif
 
     s_queue = xQueueCreate(NET_QUEUE_LEN, sizeof(net_msg_t));
@@ -2900,6 +3383,13 @@ esp_err_t network_init(void)
     mdns_setup();
 
     err = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event, NULL, NULL);
+    /* After the default station handlers (registered with the station interface above): see on_sta_link. */
+    if (err == ESP_OK) {
+        err = esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, on_sta_link, NULL, NULL);
+    }
+    if (err == ESP_OK) {
+        err = esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, on_sta_link, NULL, NULL);
+    }
     if (err == ESP_OK) {
         err = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_ip_event, NULL, NULL);
     }
@@ -3195,6 +3685,22 @@ esp_err_t network_request_recovery(network_recovery_t action)
     }
     net_msg_t m = { .type = MSG_RECOVER, .reason = (uint8_t)action };
     return xQueueSend(s_queue, &m, 0) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+esp_err_t network_move_now(void)
+{
+#if CONFIG_NETWORK_ROAM
+    taskENTER_CRITICAL(&s_lock);
+    bool ok = s_inited && s_st.online && s_st.associated;
+    taskEXIT_CRITICAL(&s_lock);
+    if (!ok) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    net_msg_t m = { .type = MSG_MOVE_NOW };
+    return xQueueSend(s_queue, &m, 0) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
 
 esp_err_t network_probe_upstream(uint32_t timeout_ms)

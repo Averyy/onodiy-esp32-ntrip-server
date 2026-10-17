@@ -74,7 +74,8 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '    return { state: r.state ? st.key : null, alerts: r.alerts.map(x => x.id), notice: healthNotice(a) }; },\n' +
   '  checkFailure: u => checkFailure(u),\n' +
   '  wifiRows: a => wifiRows(a[0], a[1]).filter(Boolean).map(r => [r[0], typeof r[1] === \'string\' ? r[1] : null]),\n' +
-  '  startKind: a => startKind(a[0], a[1]), rxBoot: v => rxBootSentence(v),\n' +
+  '  linkCounts: a => linkCounts(a[0], a[1]).filter(Boolean),\n' +
+  '  startKind: a => startKind(a[0], a[1]), rxBoot: v => (Array.isArray(v) ? rxBootSentence(v[0], v[1]) : rxBootSentence(v)),\n' +
   '  noticeLines: a => noticeItems(a[0], a[1]).map(i => [i.key, i.tone, i.urgent, i.title + (i.text ? \'. \' + i.text : \'\'),\n' +
   '    Array.isArray(i.actions) ? i.actions.length : i.actions ? 1 : 0]),\n' +
   '  fold: a => { const f = foldNotices(noticeItems(a[0], a[1]), a[2]); return [f.shown.map(i => i.key), f.more]; },\n' +
@@ -91,7 +92,8 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  rxAlerts: a => (a[0].alerts || []).filter(rxAlertShown(stationState(a[1], true), false)),\n' +
   '  stepSaid: a => { const st = stationState(a[1], true); return stepSaid(a[0], st, healthItems(a[1].alerts || [], st).state); },\n' +
   '  nextAttempt: a => nextAttemptRow(a[0], stationState(a[1], true)),\n' +
-  '  posWords: a => positionWords(a[0], a[1], a[2]),\n' +
+  '  posWords: a => positionWords(a[0], a[1], a[2]), posChip: g => positionChip(g), fixPending: a => fixPendingText(a[0], a[1], a[2]),\n' +
+  '  arpCopy: g => arpCopyable(g), recoveryNow: hl => recoveryNow(hl),\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
 process.stdout.write(JSON.stringify(out));
@@ -326,8 +328,8 @@ def jrec(seq: int, kind: str, a: int = 0, b: int = 0, up: int = 1, t: int | None
     return {"seq": seq, "time_unix": t, "uptime_s": up, "kind": kind, "a": a, "b": b}
 
 
-def roam_a(ch0: int, ch1: int, by: int, same: bool = False) -> int:
-    return ch0 | (ch1 << 8) | (by << 16) | ((1 << 24) if same else 0)
+def roam_a(ch0: int, ch1: int, by: int, same: bool = False, kept: bool = False) -> int:
+    return ch0 | (ch1 << 8) | (by << 16) | ((1 << 24) if same else 0) | ((1 << 25) if kept else 0)
 
 
 def roam_b(r0: int, r1: int, secs: int) -> int:
@@ -347,12 +349,13 @@ def test_event_list_names_moves_between_access_points():
                                    ("journalItems", [recs, True, ["wifi_disconnect", "wifi_up", "wifi_roam"]]),
                                    ("journalItems", [recs, True, ["caster_down", "caster_up", "caster_stop"]])])
     rows = [(r["ev"], r["det"]) for r in every if "head" not in r]
+    # The time offline first: a phone cuts the end of the row off.
     assert rows == [
         ("Wi-Fi dropped", "back after 6\u00a0s, left the network (8), signal -70 dBm"),
-        ("Wi-Fi moved", "to a stronger access point, channel 11 to 1, 2\u00a0s offline"),
-        ("Wi-Fi reconnected", "no stronger access point after all, 5\u00a0s offline"),
-        ("Wi-Fi moved", "to a stronger access point, channel 6, signal -75 to -58 dBm, 4\u00a0s offline"),
-        ("Wi-Fi moved", "at the access point's request, channel 1 to 6, signal -78 to -52 dBm, 3\u00a0s offline"),
+        ("Wi-Fi moved", "2\u00a0s offline, to a stronger access point, channel 11 to 1"),
+        ("Wi-Fi reconnected", "5\u00a0s offline, no stronger access point after all"),
+        ("Wi-Fi moved", "4\u00a0s offline, to a stronger access point, channel 6, signal -75 to -58 dBm"),
+        ("Wi-Fi moved", "3\u00a0s offline, at the access point's request, channel 1 to 6, signal -78 to -52 dBm"),
     ], rows
     assert [(r["ev"], r["det"]) for r in wifi if "head" not in r] == rows
     assert casters == []
@@ -362,6 +365,26 @@ def test_event_list_names_moves_between_access_points():
                                         jrec(2, "wifi_roam", roam_a(6, 1, 1), roam_b(-80, -50, 2), 900)], True, None])])[0]
     rows = [r for r in folded if "head" not in r]
     assert len(rows) == 1 and len(rows[0]["all"]) == 2
+
+
+def test_event_list_says_a_move_kept_the_connections():
+    """A move that kept the address says so first, instead of a time offline (nothing was offline), so a phone's row
+    shows it; one that stayed on the same access point is no reconnect (nothing dropped); a move asked for on the bench
+    console says "on request"."""
+    recs = [jrec(1, "wifi_roam", roam_a(1, 6, 1, kept=True), roam_b(-78, -52, 1), 100),
+            jrec(2, "wifi_roam", roam_a(6, 6, 2, True, True), roam_b(-74, -73, 2), 4000),
+            jrec(3, "wifi_roam", roam_a(6, 11, 3, kept=True), roam_b(-60, -55, 2), 9000),
+            jrec(4, "wifi_roam", roam_a(11, 11, 3, True, True), roam_b(-55, -56, 2), 15000),
+            jrec(5, "wifi_roam", roam_a(11, 1, 3), roam_b(-56, -50, 9), 20000)]
+    (items,) = run_ui([("journalItems", [recs, True, None])])
+    rows = [(r["ev"], r["det"]) for r in items if "head" not in r]
+    assert rows == [
+        ("Wi-Fi moved", "9\u00a0s offline, on request, channel 11 to 1, signal -56 to -50 dBm"),
+        ("Wi-Fi stayed", "connections kept, on request, the same access point"),
+        ("Wi-Fi moved", "connections kept, on request, channel 6 to 11, signal -60 to -55 dBm"),
+        ("Wi-Fi stayed", "connections kept, no stronger access point after all"),
+        ("Wi-Fi moved", "connections kept, at the access point's request, channel 1 to 6, signal -78 to -52 dBm"),
+    ], rows
 
 
 def test_event_journal_one_heading_per_start_and_repeats_folded():
@@ -1167,16 +1190,42 @@ def test_system_wifi_chip_and_recovery_line():
     # Diagnostics' Wi-Fi: a row each, no value joined to the next with a dot (a wrapped line never starts with one). The
     # signal's words are the casters harness's (it has a DOM).
     net = {"online": True, "ssid": "Home", "rssi": -61}
-    ap = {"ssid": "Home", "online": True, "rssi": -61, "bssid": "AA:BB:CC:DD:EE:FF", "channel": 11, "tx_power_dbm": 19.5}
+    ap = {"ssid": "Home", "online": True, "rssi": -61, "bssid": "AA:BB:CC:DD:EE:FF", "channel": 11, "tx_power_dbm": 19.5,
+          "ap_steering": None}
     rows, bare, off, unset, none = run_ui([("wifiRows", [net, ap]), ("wifiRows", [net, None]),
                                            ("wifiRows", [{"online": False, "ssid": "Home", "offline_s": 90}, ap]),
                                            ("wifiRows", [{"ssid": ""}, None]), ("wifiRows", [None, None])])
     assert rows == [["Wi-Fi", "Home"], ["Signal", None], ["Access point", "AA:BB:CC:DD:EE:FF"], ["Channel", "11"],
-                    ["Transmit power", "19.5\u00a0dBm"]]
+                    ["Transmit power", "19.5\u00a0dBm"], ["Access point can steer", "Unknown"]]
     assert not any("\u00b7" in (r[1] or "") for r in rows)
     assert bare == [["Wi-Fi", "Home"], ["Signal", None]]
     assert off == [["Wi-Fi", "Home, offline for 1\u00a0min 30\u00a0s"]]
     assert unset == [["Wi-Fi", "Not set up"]] and none == [["Wi-Fi", "\u2013"]]
+
+
+def test_diagnostics_wifi_says_moves_and_whether_the_access_point_steers():
+    """Diagnostics' Wi-Fi: whether the access point can ask the station to move, in plain words while online with an
+    access point (Unknown until it is read; none without one, as in QEMU), and the moves to another access point this
+    start once there was one, beside the drops."""
+    net = {"online": True, "ssid": "Home", "rssi": -61}
+    ap = {"ssid": "Home", "online": True, "rssi": -61, "bssid": "AA:BB:CC:DD:EE:FF", "channel": 11}
+    yes, no, unknown = run_ui([("wifiRows", [net, {**ap, "ap_steering": v}]) for v in (True, False, None)])
+    assert yes[-1] == ["Access point can steer", "Yes"] and no[-1] == ["Access point can steer", "No"]
+    assert unknown[-1] == ["Access point can steer", "Unknown"]
+    # No access point (QEMU), or a build that never reads it (GET /api/wifi leaves ap_steering out): no row, never a
+    # lasting "Unknown".
+    qemu, never = run_ui([("wifiRows", [net, {**ap, "bssid": None, "ap_steering": None}]), ("wifiRows", [net, ap])])
+    assert all(r[0] != "Access point can steer" for r in qemu)
+    assert never[-1] == ["Channel", "11"] and all(r[0] != "Access point can steer" for r in never)
+    moved, none, drops, nothing = run_ui([
+        ("linkCounts", [{"reconnects": 0}, {**ap, "roams": 2}]),
+        ("linkCounts", [{"reconnects": 0}, {**ap, "roams": 0}]),
+        ("linkCounts", [{"reconnects": 1, "last_disconnect_reason": 8}, {**ap, "roams": 1}]),
+        ("linkCounts", [{}, None])])
+    assert moved == [["Moves to another access point", "2 this start"]]
+    assert none == [] and nothing == []
+    assert drops[0][0] == "Wi-Fi drops" and drops[0][1].startswith("1 this start, last: ")
+    assert drops[1] == ["Moves to another access point", "1 this start"]
 
 
 def test_own_wifi_chip_warns_only_while_it_is_open_to_anyone():
@@ -1200,6 +1249,49 @@ def test_update_check_failure_says_the_status_once_and_no_error_code():
     assert f == {"tone": "warn", "text": "No release found at github.com/Averyy/onocoydiy-esp-um982 (HTTP 404). The repository "
                  "may be private or have no releases yet."}
     assert "ESP_ERR" not in json.dumps(f) and json.dumps(f).count("404") == 1
+
+
+def test_receiver_unchecked_during_maintenance_says_so():
+    """Maintenance that went on across a station restart with nothing kept of what the station knew: no identity this
+    boot, and none before maintenance ends. The rows say the receiver is not checked, never "not yet" or "not applied";
+    with the identity known (kept, or no restart) they read as before. A check without a verdict in maintenance is not
+    "being checked": nothing is."""
+    unchecked = {"state": "idle", "maintenance": {"on": True}, "identity_confirmed": False, "autocfg": True,
+                 "profile_applied": False, "position": {"locked": False, "source": "none"}, "survey": {"active": False},
+                 "profile": {"base_mode": "survey_in", "fixed": None}}
+    known = {**unchecked, "identity_confirmed": True}
+    locked = {**unchecked, "position": {"locked": True, "source": "survey"}, "profile": {"base_mode": "fixed", "fixed": {}}}
+    surveying = {**unchecked, "survey": {"active": True, "window_left_s": 600}}
+    out = run_ui([("posLine", [unchecked, True]), ("posLine", [known, True]), ("posLine", [locked, True]),
+                  ("posLine", [surveying, True]),
+                  ("profileChip", unchecked), ("profileChip", known), ("profileChip", {**unchecked, "autocfg": False}),
+                  ("posChip", unchecked), ("posChip", known), ("posChip", surveying)])
+    # The Receiver card says it once, in a line of its own: the position row goes (None) unless the station knows it.
+    assert out == [None, "No position yet.", "Locked. If the antenna moves, survey again.",
+                   "Surveying, about 10\u00a0min left. Then lock it.",
+                   ["Not checked", ""], ["Not applied", "warn"], ["Managed by you", ""],
+                   ["Not checked", ""], ["Not locked", ""], ["Surveying", "info"]]
+    r = {"rx_maintenance": True, "identity_confirmed": False, "profile_applied": False, "position_locked": False,
+         "position_known": False, "surveying": False}
+    out = run_ui([("statusPos", [r, True]), ("statusPos", [{**r, "position_known": True}, True]),
+                  ("statusPos", [{**r, "position_locked": True}, True]),
+                  ("statusPos", [{**r, "identity_confirmed": True}, True]),
+                  ("statusPos", [{**r, "identity_confirmed": True, "position_locked": True}, True]),
+                  ("statusPos", [{**r, "surveying": True, "survey_window_left_s": 300}, True]),
+                  ("statusPos", [{**r, "rx_maintenance": False}, True])])
+    assert out == ["Not checked during maintenance", "Not checked during maintenance", "Locked", "No position yet",
+                   "Fixed, not applied yet", "Surveying, 5\u00a0min left", "No position yet"]
+    out = run_ui([("fixPending", ["checking", True, False]), ("fixPending", ["checking", False, False]),
+                  ("fixPending", ["checking", True, True]), ("fixPending", ["no_solution", True, False]),
+                  ("fixPending", ["refused", True, False])])
+    assert out == ["Not checked during maintenance", "Being checked", "\u2013", "Not reported yet", "Not reported by this firmware"]
+    # The Receiver card: one line instead of model, configuration and position rows that would each repeat it; the
+    # Settings receiver row says it beside maintenance.
+    rx = (UI_JS / "60-receiver.js").read_text()
+    assert "unchecked ? h('p', { class: 'muted' }, NOT_CHECKED + '.') : null" in rx
+    assert "(unchecked ? null : ['Model', h('span', { class: 'muted' }, 'Not identified yet')])" in rx
+    upd = (UI_JS / "70-updates.js").read_text()
+    assert "rx_maintenance ? NOT_CHECKED + '.' : 'Its firmware shows once the station finds it.'" in upd
 
 
 def test_receiver_maintenance_starts_in_one_place():
@@ -1416,16 +1508,43 @@ def test_starts_in_a_word_and_the_receiver_at_power_on_in_a_few():
     out = run_ui([("startKind", ["power_on", "none"]), ("startKind", ["crash", "none"]), ("startKind", ["brownout", "none"]),
                   ("startKind", ["other", "none"]), ("startKind", ["planned", "app_update"]), ("startKind", ["planned", "user"]),
                   ("startKind", ["planned", "gnss_ladder"]), ("startKind", ["planned", "something_new"]),
-                  ("rxBoot", "kept_running"), ("rxBoot", "restarted"), ("rxBoot", "pending"), ("rxBoot", "unknown")])
+                  ("rxBoot", "kept_running"), ("rxBoot", "restarted"), ("rxBoot", "pending"), ("rxBoot", "unknown"),
+                  ("rxBoot", ["kept_running", "power_on"]), ("rxBoot", ["restarted", "power_on"]),
+                  ("rxBoot", ["kept_running", "brownout"]), ("rxBoot", ["restarted", "brownout"]),
+                  ("rxBoot", ["pending", "brownout"])])
     assert out[:8] == ["Power-on", "Crash", "Power dip", "Reset", "Update", "Restart", "Recovery", "Restart"]
-    assert out[8:] == ["The receiver kept running", "The power was cut", "", ""]
+    assert out[8:12] == ["The receiver kept running", "The power was lost", "", ""]
+    # After a power dip (a brownout start) the receiver is judged too: it kept running, or the dip restarted it as well.
+    assert out[12:] == ["The receiver kept running", "The power was lost", "The receiver kept running",
+                        "The receiver restarted too", ""]
     assert all(len(w) <= 14 for w in out[:8])
 
 
-def test_the_receiver_at_power_on_event_in_a_few_words():
-    """History's 'Receiver at power-on' row: what happened, without how the station judged it."""
+def test_the_receiver_at_the_start_event_in_a_few_words():
+    """History's 'Receiver at the start' row (after a power-on or a power dip): what happened, without how the station
+    judged it; a receiver that restarted too lost the power as well, whichever start it was."""
     out = run_ui([("journalDetail", {"kind": "rx_boot", "a": a, "b": b}) for a, b in ((1, 1), (2, 3), (0, 0))])
-    assert out == ["Kept running", "Restarted too: the power was cut", "Not known"]
+    assert out == ["Kept running", "Restarted too: the power was lost", "Not known"]
+    # One fact, one word: Overview's "This start" after a power-on says it as History does.
+    (overview,) = run_ui([("rxBoot", ["restarted", "power_on"])])
+    assert overview == "The power was lost" and out[1].endswith(overview.lower())
+
+
+def test_a_paused_recovery_says_what_it_waits_for():
+    """Diagnostics' "If corrections stop" while the recovery waits: what for, so a frozen countdown under it makes sense
+    and it is plain that it goes on by itself; the recovery mode otherwise."""
+    def hl(**st):
+        return {"ladder_suspended": True, "recovery_mode": "full", "station": {"state": "streaming", "lease_held": False,
+                                                                              "since_lease_release_ms": None, **st}}
+    out = run_ui([("recoveryNow", hl(state="configuring", lease_held=True)),
+                  ("recoveryNow", hl(lease_held=True)), ("recoveryNow", hl(since_lease_release_ms=4000)),
+                  ("recoveryNow", hl(state="idle", rx_maintenance=True)), ("recoveryNow", hl(state="detecting")),
+                  ("recoveryNow", hl(state="flashing")), ("recoveryNow", hl(state="idle")),
+                  ("recoveryNow", hl(since_lease_release_ms=60000)),
+                  ("recoveryNow", {**hl(), "ladder_suspended": False})])
+    assert out == ["Paused while the receiver is configured"] * 3 + [
+        "Paused (receiver maintenance)", "Paused while the station looks for the receiver",
+        "Paused during the receiver update", "Paused", "Paused", "The station"], out
 
 
 def test_log_lines_and_event_times_fit_one_line():
@@ -1536,6 +1655,23 @@ def test_fixed_position_far_never_beside_a_green_chip_or_a_bare_mark():
     assert words == [["Locked, ", "looks wrong"], ["Locked", None]]
 
 
+def test_a_session_of_the_stations_own_keeps_the_recovery_line():
+    """The station configures the receiver (an apply of its own) while the recovery waits after a step: the Status
+    page keeps the recovery's amber card and its line (health keeps the level and the reason meanwhile), never the red
+    one of a recovery that gave up."""
+    hl = {"level": "recovering", "last_step": "receiver_reset", "step": "receiver_reset", "step_phase": "waiting",
+          "recovery_mode": "no_reboot", "ladder_suspended": True}
+    no_rtcm = [{"id": "no_rtcm", "source": "health"}]
+    wait_data = [caster(0, "Onocoy", "wait_data")]
+    during = status(receiver={"state": "configuring", "rtcm_age_ms": None, "responding": True}, health=hl,
+                    alerts=no_rtcm, casters=wait_data)
+    before = status(receiver={"state": "streaming", "rtcm_age_ms": None, "responding": True},
+                    health={**hl, "ladder_suspended": False}, alerts=no_rtcm, casters=wait_data)
+    out = heroes(before, during)
+    assert [(h["key"], h["tone"], h["plan"]) for h in out] == [
+        ("no_rtcm", "warn", "The station restarted the receiver and waits for corrections.")] * 2, out
+
+
 def test_health_card_rows_say_the_step_and_the_next_attempt_only_where_they_hold():
     """The last recovery step's row goes only while the card says the step in progress (the line under it, or the
     recovery's own state line); with another state on top (no receiver found while the rescan's wait runs, the port
@@ -1566,8 +1702,44 @@ def test_fixed_position_check_in_history():
                   ("journalDetail", {"kind": "fixed_check", "a": (-82 << 8) | 1, "b": 3}),
                   ("journalDetail", {"kind": "fixed_check", "a": (1 << 8) | 2, "b": 2}),
                   ("journalDetail", {"kind": "fixed_check", "a": 3, "b": 0}),
+                  ("journalDetail", {"kind": "fixed_check", "a": (34 << 8) | 4, "b": 2}),
                   ("evFilter", None)])
-    # Short enough for a phone's row: how far off (the warning says which way).
-    assert out[:4] == ["118\u00a0m off", "Height 82\u00a0m off", "Within 50\u00a0m again", "Changed"]
-    receiver = [f for f in out[4] if f[0] == "receiver"][0]
+    # Short enough for a phone's row: how far off (the warning says which way); cleared, whichever warning it was.
+    assert out[:5] == ["118\u00a0m off", "Height 82\u00a0m off", "Looks right again", "Changed",
+                       "Sea level, 34\u00a0m off"]
+    receiver = [f for f in out[5] if f[0] == "receiver"][0]
     assert "fixed_check" in receiver[2]
+
+
+SEA_LEVEL = {"id": "fixed_far", "source": "station", "horizontal_m": 2, "vertical_m": 34, "distance_m": 34,
+             "height_only": True, "sea_level": True}
+
+
+def test_fixed_height_typed_as_height_above_sea_level_says_so_and_what_to_enter():
+    """A sea-level height is the same warning (amber, Receiver settings) in its own words: what it looks like and the height
+    the field wants, without the metres (the Receiver page's Details row has them)."""
+    out = heroes(status(alerts=[SEA_LEVEL]),
+                 status(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "auth_failed", reason="auth")],
+                        alerts=[SEA_LEVEL]))
+    assert (out[0]["key"], out[0]["title"], out[0]["tone"]) == ("fixed_far", "Fixed position looks wrong", "warn")
+    assert out[0]["line"] == ("The fixed height looks like a height above sea level. "
+                              "Enter the height above the ellipsoid in Receiver settings.")
+    assert out[0]["actions"] == ["Receiver settings"] and out[0]["alert"] == "fixed_far"
+    assert out[1]["key"] == "casters_down" and out[1]["alsoText"] == [
+        "Fixed position looks wrong. The fixed height looks like a height above sea level. "
+        "Enter the height above the ellipsoid in Receiver settings."]
+    chips = run_ui([("rxChip", status(alerts=[SEA_LEVEL]))])
+    assert chips == [["Position looks wrong", "warn"]]
+
+
+def test_use_the_current_position_only_when_it_copies_another_position():
+    """A fixed base sends the position it was given in every 1005: copying that repairs nothing, so the button is there only
+    for a 1005 that is not the locked position (a survey's, or the receiver's own while someone else configures it)."""
+    arp = {"valid": True, "lat_deg": 45.1, "lon_deg": -75.1, "height_m": 85.1}
+    out = run_ui([("arpCopy", {"position": {"locked": True}, "arp": {**arp, "offset_m": 0.0021}}),
+                  ("arpCopy", {"position": {"locked": True}, "arp": {**arp, "offset_m": 0.0}}),
+                  ("arpCopy", {"position": {"locked": False}, "arp": {**arp, "offset_m": None}}),
+                  ("arpCopy", {"position": {"locked": True}, "arp": {**arp, "offset_m": 3.2}}),
+                  ("arpCopy", {"position": {"locked": False}, "arp": {"valid": False}}),
+                  ("arpCopy", {})])
+    assert out == [False, False, True, True, False, False]

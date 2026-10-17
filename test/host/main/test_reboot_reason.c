@@ -79,3 +79,20 @@ TEST_CASE("reboots that start another app image", "[lifecycle]")
     TEST_ASSERT_FALSE(lifecycle_reboot_switches_image(LIFECYCLE_REBOOT_SAFE_MODE_CLEARED));
     TEST_ASSERT_FALSE(lifecycle_reboot_switches_image(LIFECYCLE_REBOOT_BOOT_FAILURE));
 }
+
+TEST_CASE("the RTC timer runs on across a restart, a crash, a watchdog and a brownout, not across power-on",
+          "[lifecycle]")
+{
+    /* The digital system was reset, not the RTC domain: a brownout ends in IDF's software system reset (or the
+     * detector's own system-level reset), so a maintenance resumed after it takes off the exact time across it. */
+    static const esp_reset_reason_t kept[] = { ESP_RST_SW, ESP_RST_PANIC, ESP_RST_INT_WDT, ESP_RST_TASK_WDT,
+                                               ESP_RST_BROWNOUT };
+    static const esp_reset_reason_t not_known[] = { ESP_RST_UNKNOWN, ESP_RST_POWERON, ESP_RST_EXT, ESP_RST_WDT,
+                                                    ESP_RST_DEEPSLEEP, ESP_RST_SDIO };
+    for (size_t i = 0; i < sizeof(kept) / sizeof(kept[0]); i++) {
+        TEST_ASSERT_TRUE(lifecycle_reset_keeps_rtc_timer(kept[i]));
+    }
+    for (size_t i = 0; i < sizeof(not_known) / sizeof(not_known[0]); i++) {
+        TEST_ASSERT_FALSE(lifecycle_reset_keeps_rtc_timer(not_known[i]));
+    }
+}

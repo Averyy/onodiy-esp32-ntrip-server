@@ -305,8 +305,18 @@ def _epoch_step(prev: dict[str, tuple[float, float]], cur: dict[str, tuple[float
     return None
 
 
+NO_RTCM = "none"   # load()'s name for a receiver that sends no RTCM at all
+
+
+def no_rtcm() -> Schedule:
+    """No RTCM at all: one empty burst (the receiver without an antenna; its answers come from a responder)."""
+    return Schedule("capture", "no RTCM", [Burst(0.0, b"", [])], 1.0)
+
+
 def load(path: str | Path) -> Schedule:
-    """A capture (directory, or a .bin with its .idx beside it) or a plain RTCM file."""
+    """A capture (directory, or a .bin with its .idx beside it), a plain RTCM file, or NO_RTCM ("none")."""
+    if str(path) == NO_RTCM:
+        return no_rtcm()
     p = Path(path)
     if p.is_dir():
         return load_capture(p)

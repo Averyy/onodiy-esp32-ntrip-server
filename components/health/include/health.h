@@ -19,9 +19,11 @@
  * RTCM). Valid RTCM with the profile's messages missing is profile drift,
  * not a stall.
  *
- * GNSS ladder (entry step by class: NO_BYTES 1, GARBAGE 3, TEXT_ONLY 4; each
- * rung only if the previous one did not bring RTCM back within its grace;
- * the grace counts from the end of the step):
+ * GNSS ladder (entry step by class: NO_BYTES 1, GARBAGE 3, TEXT_ONLY 4,
+ * classed from what the receiver sends unasked: its replies to the
+ * station's own commands are no part of it; each rung only if the previous
+ * one did not bring RTCM back within its grace; the grace counts from the
+ * end of the step):
  *   1. resync framer / flush input (station_request_recovery)     grace 5 s
  *   2. restart the UART link at the stored baud (driver kept)       15 s
  *   3. UART break + full baud rescan                                30 s from the end of the scan
@@ -43,9 +45,10 @@
  *   7. FAILED: every 10 min re-classify and enter at max(2, class entry
  *      step); 6a stays subject to the cap. Never a reboot loop.
  * The receiver answers but sends no RTCM (replies to the station's
- * commands, its restart banner, text lines): after step 5 (failed, or
- * abandoned twice to the station's own sessions) that is neither 6b ("needs
- * a power cycle") nor 6a but FAILED with the reason; step 5 is skipped
+ * commands, its restart banner, text lines): after step 5 (failed,
+ * abandoned twice, or right after a step 5 that brought RTCM back only
+ * briefly) that is neither 6b ("needs a power cycle") nor 6a but FAILED
+ * with the reason; step 5 is skipped
  * when the receiver's own position sentence says it uses no satellites;
  * and the retry pass then runs no step 4 or 5 again (a silent receiver gets
  * steps 2 and 3, whose rescan asks it again). While the first
@@ -53,10 +56,10 @@
  * stalled at all: it was never set to send RTCM.
  * Every FAILED level carries its reason as an alert (and an alerts-only
  * stall's DEGRADED level too; a RECOVERING level, which also covers the
- * gap between two steps, carries NO_RTCM or NO_SATELLITES as soon as the
- * receiver answered after its last RTCM frame, or within the last 90 s
- * when it sent none this boot, so the antenna hint comes with the
- * recovery; the station asks such a receiver once a minute):
+ * gap between two steps and the station's own sessions meanwhile, carries
+ * NO_RTCM or NO_SATELLITES as soon as the receiver answered after its last
+ * RTCM frame within the last 90 s, so the antenna hint comes with the
+ * recovery; the station asks a receiver that sends no RTCM once a minute):
  * RECEIVER_POWER (6b), RECEIVER_SILENT
  * (nothing usable, no answer; power-cycle the station), NO_SATELLITES (it
  * answers and uses no satellites: the antenna), NO_RTCM (it answers but
@@ -79,8 +82,10 @@
  * it surveys) no stall is declared and no grace runs out while the station's
  * survey window is open.
  *
- * Suspension (the ladder neither starts nor advances, its timers stop, a
- * step in progress is abandoned and runs again later): station DETECTING,
+ * Suspension (the ladder neither starts nor advances, its timers stop; a
+ * step the station ran waits through the station's own sessions with the
+ * grace it had left, any other suspension abandons a step in progress and
+ * it runs again later): station DETECTING,
  * CONFIGURING, FLASHING or FLASH_RECOVERY (and IDLE: not running yet); a
  * receiver flash journal open in any state, including waiting for the user,
  * and a journal whose state is unknown because the settings are

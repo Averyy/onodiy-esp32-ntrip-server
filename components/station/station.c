@@ -199,6 +199,7 @@ static bool s_journal_clearing;
 static volatile bool s_prompt_seen;
 static volatile bool s_restart_pending;
 static int64_t s_line_ms = STN_NEVER;   /* the last checksum-valid text line (now_ms); under s_lock */
+static int64_t s_unasked_ms = STN_NEVER; /* ... the last one that was no reply to our own commands; under s_lock */
 static volatile bool s_journal_cleared;
 
 static TaskHandle_t s_task;
@@ -228,7 +229,16 @@ static uint32_t s_maint_saved_chosen;          /* its chosen duration (an extens
 static bool s_maint_stored;                    /* a stored copy may exist: erased when maintenance is off */
 static int64_t s_maint_store_retry_ms = STN_NEVER;
 static volatile bool s_maint_end_req;    /* the user's "end now", for the station task */
-static volatile bool s_maint_power_cut;  /* the power-on verdict: the receiver restarted too */
+static volatile bool s_maint_power_cut;  /* the power-on or brownout verdict: the receiver restarted too */
+/* What the station knew of the receiver before a reset during maintenance
+ * (the stored copy's): reported while that maintenance goes on, nothing
+ * being checked meanwhile, so the pages show what they showed before the
+ * reset (publish_status). Station task only; s_known_alerts (the alerts it
+ * adds, 0 without) under s_lock, for station_get_status. */
+static stn_maint_known_t s_known;
+static bool s_known_on;
+static uint32_t s_known_alerts;
+static stn_t s_known_core;   /* sync_maintenance's snapshot of the core (station task; too large for its stack) */
 static volatile bool s_factory_reset;    /* the settings were erased for a factory reset: no record from here on */
 /* The first-apply hold for this boot only: due, but it could not be stored
  * (settings unusable, or the write failed). Set at init, with automatic
@@ -243,17 +253,27 @@ static volatile bool s_autocfg_ram_off;
  * Station task only (and station_init before it runs). */
 static RTC_NOINIT_ATTR stn_sky_rtc_t s_sky_rtc;
 
-/* A power-on boot: did the receiver keep running (stn_rxboot_judge)? The RX
- * task notes the first restart evidence and the first data; the station
- * task judges until there is a verdict, and keeps it. */
+/* A power-on or brownout boot: did the receiver keep running
+ * (stn_rxboot_judge)? The RX task notes the first restart evidence and the
+ * first data; the station task judges until there is a verdict, and keeps
+ * it. */
 static int64_t s_rxb_restart_us = INT64_MAX;     /* under s_lock (written by the RX task) */
 static int64_t s_rxb_data_us = INT64_MAX;        /* under s_lock (written by the RX task) */
 static uint8_t s_rxb_state;                      /* station_rx_boot_t, under s_lock */
 static uint8_t s_rxb_by;                         /* station_rx_boot_by_t, under s_lock */
 static bool s_rxb_judging;                       /* station task (set at init) */
+static stn_rxboot_reset_t s_rxb_reset;           /* station task (set at init): the reset judged */
 static int64_t s_rxb_uptime_at_ms = STN_NEVER;   /* station task */
 static uint32_t s_rxb_uptime_ms;                 /* station task */
 static bool s_rxb_clock_closed;                  /* station task: a job of ours may have restarted the receiver */
+
+/* The reset as the receiver's verdict sees it (lifecycle's class). */
+static stn_rxboot_reset_t rxboot_reset(lifecycle_reset_class_t cls)
+{
+    return cls == LIFECYCLE_RESET_POWER_ON  ? STN_RXBOOT_RESET_POWER_ON
+           : cls == LIFECYCLE_RESET_BROWNOUT ? STN_RXBOOT_RESET_BROWNOUT
+                                             : STN_RXBOOT_RESET_OTHER;
+}
 
 /* Station task only. */
 static um98x_base_profile_t s_profile;
@@ -436,38 +456,37 @@ static void on_factory_reset(void *arg, esp_event_base_t base, int32_t id, void 
     wake();
 }
 
-/* The resets after which the RTC timer has run on: the CPUs were reset,
- * not the chip (esp_rtc_get_time_us keeps counting across them). */
-static bool rtc_timer_kept(esp_reset_reason_t r)
-{
-    return r == ESP_RST_SW || r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT;
-}
-
 /* Does maintenance that was on before this boot's reset go on, and for how
  * long (stn_maint_boot)? From the RTC record when it survived, else from
  * the stored copy (the EN pin's reset, which reads as power-on, loses the
  * RTC memory while the receiver keeps running and may be mid-work). Never
  * with an open journal or after a factory reset. `found`: a stored copy
- * exists (erased unless maintenance goes on). */
-static void maint_boot_decide(stn_maint_boot_t *out, bool *found)
+ * exists (erased unless maintenance goes on). `known`: what the station
+ * knew of the receiver, from the stored copy (valid with out->known). */
+static void maint_boot_decide(stn_maint_boot_t *out, bool *found, stn_maint_known_t *known)
 {
     lifecycle_boot_info_t boot;
     lifecycle_get_boot_info(&boot);
+    memset(known, 0, sizeof(*known));
     stn_maint_boot_in_t in;
     memset(&in, 0, sizeof(in));
     in.blocked = journal_open(s_journal_err) || (boot.reset_class == LIFECYCLE_RESET_PLANNED &&
                                                  boot.prev_reboot_reason == LIFECYCLE_REBOOT_FACTORY_RESET);
     in.rtc_ok = stn_maint_rtc_read(&s_maint_rtc, &in.rtc) && lifecycle_rtc_stamp_ok(in.rtc.stamp);
-    in.rtc_timer_kept = rtc_timer_kept(boot.reset_reason);
+    in.rtc_timer_kept = lifecycle_reset_keeps_rtc_timer(boot.reset_reason);   /* a brownout too: its exact time */
     in.rtc_now_us = esp_rtc_get_time_us();
     uint8_t buf[STN_MAINT_STORE_MAX];
     size_t len = sizeof(buf);
     esp_err_t err = settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MAINT, buf, &len);
     *found = settings_is_available() && err != ESP_ERR_NVS_NOT_FOUND;
-    in.store_ok = err == ESP_OK && stn_maint_store_decode(&in.store, buf, len) &&
+    in.store_ok = err == ESP_OK && stn_maint_store_decode(&in.store, known, buf, len) &&
                   lifecycle_rtc_stamp_ok(in.store.stamp);
+    in.store_known = in.store_ok && known->valid;
     in.uptime_ms = now_ms();
     stn_maint_boot(&in, out);
+    if (!out->known) {
+        known->valid = false;
+    }
 }
 
 static bool app_update_running(void)
@@ -485,6 +504,14 @@ static bool autocfg_enabled(void)
         v = 1;
     }
     return v != 0;
+}
+
+/* gnss/recovery = 2: the health ladder only alerts and re-applies nothing (its
+ * reconfigure step sends nothing); any other or no value: it does. */
+static bool ladder_alerts_only(void)
+{
+    uint8_t v = 0;
+    return settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RECOVERY, &v) == ESP_OK && v == 2;
 }
 
 /* gnss/rtcm1230_ok: 1 accepted, 0 refused at the last apply, -1 never applied (not stored). */
@@ -621,7 +648,7 @@ static void persist_baud(uint32_t baud)
     if (baud == 0 || stored_baud() == baud) {
         return;
     }
-    esp_err_t err = settings_set_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BAUD, baud);
+    esp_err_t err = settings_set_state_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BAUD, baud);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "gnss/baud not saved: %s", esp_err_to_name(err));
     }
@@ -813,11 +840,14 @@ static void on_text_line(const char *line, size_t len, void *ctx)
         s_rxb_data_us = t;
         portEXIT_CRITICAL(&s_lock);
     }
-    um98x_ctl_on_line(line, len, ctx);
+    bool reply = um98x_ctl_on_line(line, len, ctx);
     gnss_obs_feed_line(line, len);
     int64_t at = now_ms();
     portENTER_CRITICAL(&s_lock);
     s_line_ms = at;
+    if (!reply) {
+        s_unasked_ms = at;
+    }
     portEXIT_CRITICAL(&s_lock);
 }
 
@@ -1478,9 +1508,10 @@ static void job_own_fix(const stn_job_t *job, stn_result_t *r)
     }
 }
 
-/* The question to a receiver that never streamed this boot: the version
- * query without a lease, only so that its answer (a line like any other)
- * keeps "the receiver answers" fresh. Logged when the outcome changes. */
+/* The question to a receiver that sends no RTCM (none this boot, or its RTCM
+ * stopped): the version query without a lease, only so that its answer (a
+ * line like any other) keeps "the receiver answers" fresh. Logged when the
+ * outcome changes. */
 static void job_ask(stn_result_t *r)
 {
     static int s_last_ok = -1;
@@ -1494,7 +1525,7 @@ static void job_ask(stn_result_t *r)
     r->err = ok ? STN_OK : STN_E_TIMEOUT;
     if (ok != s_last_ok) {
         if (ok) {
-            ESP_LOGI(TAG, "the receiver answers when asked (no RTCM this boot)");
+            ESP_LOGI(TAG, "the receiver answers when asked (no RTCM)");
         } else {
             ESP_LOGW(TAG, "no answer to the station's question (%s)", esp_err_to_name(err));
         }
@@ -1908,8 +1939,8 @@ static void flash_close(bool reapply_ok)
     }
     /* The identity the receiver reported is the stored one from now on. */
     if (s_after.valid && settings_is_available()) {
-        (void)settings_set_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MODEL, s_after.model);
-        (void)settings_set_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FW, s_after.firmware);
+        (void)settings_set_state_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MODEL, s_after.model);
+        (void)settings_set_state_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FW, s_after.firmware);
         load_stored_identity();
     }
     portENTER_CRITICAL(&s_lock);
@@ -2166,6 +2197,7 @@ static void fill_in(stn_in_t *in)
         in->text_lines = st.framing.text_lines;
     }
     in->autocfg = autocfg_enabled();
+    in->ladder_alerts_only = ladder_alerts_only();
     in->model_known = model_known();
     in->profile_survey = (s_profile.base_mode == UM98X_BASE_SURVEY_IN);
     in->survey_s = s_profile.survey_in_s;
@@ -2190,6 +2222,76 @@ static const char *state_name(station_state_t st)
     static const char *const k[] = { "idle", "detecting", "configuring", "streaming",
                                      "flashing", "flash recovery", "recovering", "no receiver" };
     return (unsigned)st < sizeof(k) / sizeof(k[0]) ? k[st] : "?";
+}
+
+/* A maintenance resumed after a reset: what the station knew before it, as
+ * a maintenance without a reset still shows it (nothing is checked
+ * meanwhile): the identity and the signal group it runs unless the
+ * receiver told them again, and for the same profile its configuration
+ * state, the fixed-position verdict and the alerts. @return the alerts it
+ * adds (station_get_status adds them too). */
+static uint32_t known_overlay(station_status_t *o)
+{
+    const stn_maint_known_t *k = &s_known;
+    if (!o->receiver.valid && k->receiver.valid) {
+        o->receiver = k->receiver;
+    }
+    o->identity_confirmed = o->identity_confirmed || k->identity_confirmed;
+    if (!o->rx_sg_valid && k->sg_valid) {
+        o->rx_sg_valid = true;
+        o->rx_sg = (station_sg_t){ .master = k->sg_master, .slave = k->sg_slave };
+    }
+    if (k->profile_hash != um98x_profile_hash(&s_profile)) {
+        return 0;   /* the profile changed since: whether it runs, and its check, are not known */
+    }
+    o->profile_applied = o->profile_applied || k->profile_applied;
+    o->alerts |= k->alerts;
+    o->config_failed = (o->alerts & STATION_ALERT_CONFIG_FAILED) != 0;
+    o->fix_state = k->fix_state;
+    o->fix_horizontal_m = k->fix_horizontal_m;
+    o->fix_up_m = k->fix_up_m;
+    o->fix_distance_m = k->fix_distance_m;
+    o->fix_height_only = k->fix_height_only;
+    o->fix_sea_level = k->fix_sea_level;
+    o->fix_checked_age_s = UINT32_MAX;   /* not this boot */
+    return k->alerts;
+}
+
+/* What the station knows of the receiver now, for maintenance's stored copy
+ * (station task, core: a snapshot): during a resumed maintenance what it knew
+ * before the reset, else from the core and the command layer. */
+static void known_now(const stn_t *core, int64_t now, stn_maint_known_t *k)
+{
+    um98x_info_t live;
+    bool have_live = um98x_ctl_get_info(&live) == ESP_OK;
+    if (s_known_on) {
+        *k = s_known;
+        if (have_live) {
+            k->receiver = live;
+        }
+    } else {
+        memset(k, 0, sizeof(*k));
+        k->valid = true;
+        k->profile_hash = um98x_profile_hash(&s_profile);
+        if (have_live) {
+            k->receiver = live;
+        }
+        k->identity_confirmed = core->identity_ok;
+        k->sg_valid = s_rx_sg_valid;
+        k->sg_master = s_rx_sg.master;
+        k->sg_slave = s_rx_sg.slave;
+        k->profile_applied = core->profile_applied;
+        k->alerts = core->alerts;
+        stn_fix_status_t fx;
+        stn_fix_status(core, now, &fx);
+        k->fix_state = fx.state;
+        k->fix_horizontal_m = (float)fx.offset.horizontal_m;
+        k->fix_up_m = (float)fx.offset.up_m;
+        k->fix_distance_m = (float)fx.offset.distance_m;
+        k->fix_height_only = fx.height_only;
+        k->fix_sea_level = fx.sea_level;
+    }
+    stn_maint_known_survey(core, k);
 }
 
 static void publish_status(const stn_in_t *in)
@@ -2272,6 +2374,7 @@ static void publish_status(const stn_in_t *in)
     o->fix_up_m = fx.offset.up_m;
     o->fix_distance_m = fx.offset.distance_m;
     o->fix_height_only = fx.height_only;
+    o->fix_sea_level = fx.sea_level;
     o->fix_checked_age_s = fx.checked_age_s;
 
     o->first_apply_held = core.first_apply_held;
@@ -2294,9 +2397,17 @@ static void publish_status(const stn_in_t *in)
         memcpy(o->live.sky_reply, s_sky_reply, sizeof(o->live.sky_reply));
     }
 
+    uint32_t known_alerts = 0;
+    if (!core.maint) {
+        s_known_on = false;   /* ended: the stream-first path checks the receiver as at boot */
+    } else if (s_known_on) {
+        known_alerts = known_overlay(o);
+    }
+
     portENTER_CRITICAL(&s_lock);
     s_status = *o;
     s_status_valid = true;
+    s_known_alerts = known_alerts;
     portEXIT_CRITICAL(&s_lock);
 }
 
@@ -2382,8 +2493,10 @@ static void handle_notes(const stn_note_t *n, unsigned count)
         case STN_NOTE_MAINT_OFF:
             ESP_LOGW(TAG, "receiver maintenance ended (%s) after %d s: listening first, as at boot",
                      x->b == STN_MAINT_END_TIME    ? "time up"
-                     : x->b == STN_MAINT_END_POWER ? "the power was cut: the receiver restarted with the ESP32"
-                                                   : "by the user",
+                     : x->b == STN_MAINT_END_POWER
+                         ? (s_rxb_reset == STN_RXBOOT_RESET_BROWNOUT ? "the power dipped: the receiver restarted with the ESP32"
+                                                                     : "the power was cut: the receiver restarted with the ESP32")
+                         : "by the user",
                      (int)x->a);
             journal_push(DIAG_EV_RX_MAINT, 0, x->a);
             break;
@@ -2420,6 +2533,12 @@ static void handle_notes(const stn_note_t *n, unsigned count)
                      (int)x->a, (int)x->b);
             journal_push(DIAG_EV_FIXED_POS, diag_fixed_a(DIAG_FIXED_FAR, x->b), x->a);
             break;
+        case STN_NOTE_FIXED_SEA_LEVEL:
+            ESP_LOGW(TAG, "the fixed height is %+d m from the receiver's own and looks like a height above sea level: "
+                          "enter the height above the ellipsoid (streaming goes on)",
+                     (int)x->b);
+            journal_push(DIAG_EV_FIXED_POS, diag_fixed_a(DIAG_FIXED_SEA_LEVEL, x->b), x->a);
+            break;
         case STN_NOTE_FIXED_NEAR:
             ESP_LOGI(TAG, "the fixed position is within the limits again (%d m horizontally, %+d m in height)",
                      (int)x->a, (int)x->b);
@@ -2448,7 +2567,8 @@ static void handle_notes(const stn_note_t *n, unsigned count)
  * again after a while. Nothing after a factory reset. */
 #define MAINT_STORE_RETRY_MS 10000
 
-static void sync_maint_store(bool on, bool due, const stn_maint_rec_t *rec, int64_t now)
+static void sync_maint_store(bool on, bool due, const stn_maint_rec_t *rec, const stn_maint_known_t *known,
+                             int64_t now)
 {
     if (s_maint_store_retry_ms != STN_NEVER && now < s_maint_store_retry_ms) {
         return;
@@ -2456,7 +2576,7 @@ static void sync_maint_store(bool on, bool due, const stn_maint_rec_t *rec, int6
     s_maint_store_retry_ms = STN_NEVER;
     if (on && due && !s_factory_reset) {
         uint8_t buf[STN_MAINT_STORE_MAX];
-        size_t len = stn_maint_store_encode(rec, buf, sizeof(buf));
+        size_t len = stn_maint_store_encode(rec, known, buf, sizeof(buf));
         esp_err_t err = len > 0 ? settings_set_state_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MAINT, buf, len)
                                 : ESP_ERR_INVALID_SIZE;
         if (err == ESP_OK) {
@@ -2506,7 +2626,15 @@ static void sync_maintenance(const stn_in_t *in)
     stn_maint_record(&s_core, in->now_ms, utc, false, &rec);
     due = stn_maint_store_due(&s_core, s_maint_saved_chosen, s_maint_saved_ms, in->now_ms);
     stn_maint_record(&s_core, in->now_ms, utc, true, &store);
+    if (on && due) {
+        s_known_core = s_core;   /* for what the station knows of the receiver, read below */
+    }
     portEXIT_CRITICAL(&s_lock);
+    stn_maint_known_t known;
+    known.valid = false;
+    if (on && due) {
+        known_now(&s_known_core, in->now_ms, &known);
+    }
     gnss_link_stats_t ls;
     bool gate = (gnss_link_get_stats(&ls) == ESP_OK) ? ls.hands_off : s_gate_on;
     if (on != gate) {
@@ -2532,7 +2660,7 @@ static void sync_maintenance(const stn_in_t *in)
         stn_maint_rtc_write(&s_maint_rtc, &rec);
     }
     store.stamp = stamp;
-    sync_maint_store(on, due, &store, in->now_ms);
+    sync_maint_store(on, due, &store, &known, in->now_ms);
 }
 
 /* The casters pause for receiver work between two epochs, never inside one.
@@ -2656,41 +2784,48 @@ static void rxboot_decided(stn_rxboot_t v, stn_rxboot_by_t by)
     portEXIT_CRITICAL(&s_lock);
     journal_push(DIAG_EV_RX_BOOT, (int32_t)v, (int32_t)by);
 
+    stn_rxboot_follow_t f;
+    stn_rxboot_follow(s_rxb_reset, v, &f);
+    bool brownout = s_rxb_reset == STN_RXBOOT_RESET_BROWNOUT;
+    const char *reset = brownout ? "brownout reset" : "power-on reset";
     unsigned up_s = (unsigned)(s_rxb_uptime_ms / 1000u);
     switch (v) {
     case STN_RXBOOT_KEPT:
         if (by == STN_RXBOOT_BY_UPTIME) {
-            ESP_LOGW(TAG, "power-on reset, but the receiver kept running (it has run for %u s, since before the "
-                          "ESP32 started): only the ESP32 was reset (its reset pin, such as the USB auto-reset); "
-                          "not a power loss",
-                     up_s);
+            ESP_LOGW(TAG, "%s, but the receiver kept running (it has run for %u s, since before the ESP32 started): %s",
+                     reset, up_s,
+                     brownout ? "only the ESP32's supply dipped"
+                              : "only the ESP32 was reset (its reset pin, such as the USB auto-reset); not a power loss");
         } else {
-            ESP_LOGW(TAG, "power-on reset, but the receiver kept running (data at once, no restart banner): only "
-                          "the ESP32 was reset (its reset pin, such as the USB auto-reset); not a power loss");
+            ESP_LOGW(TAG, "%s, but the receiver kept running (data at once, no restart banner): %s", reset,
+                     brownout ? "only the ESP32's supply dipped"
+                              : "only the ESP32 was reset (its reset pin, such as the USB auto-reset); not a power loss");
         }
-        ledger_note_power_kept();
         break;
     case STN_RXBOOT_RESTARTED:
-        s_maint_power_cut = true;   /* a maintenance resumed at this boot ends (service) */
         if (by == STN_RXBOOT_BY_UPTIME) {
-            ESP_LOGW(TAG, "power-on reset: the receiver restarted too (it has run for %u s, less than the ESP32): "
-                          "the power was cut",
-                     up_s);
+            ESP_LOGW(TAG, "%s: the receiver restarted too (it has run for %u s, less than the ESP32): the power %s",
+                     reset, up_s, brownout ? "dipped for both" : "was cut");
         } else {
-            ESP_LOGW(TAG, "power-on reset: the receiver restarted too (its restart banner before any data): the "
-                          "power was cut");
+            ESP_LOGW(TAG, "%s: the receiver restarted too (its restart banner before any data): the power %s", reset,
+                     brownout ? "dipped for both" : "was cut");
         }
         break;
     default:
-        ESP_LOGW(TAG, "power-on reset: nothing the receiver sent in %u s tells whether it kept running; not counted "
-                      "as a power loss",
-                 (unsigned)(STN_RXBOOT_WINDOW_MS / 1000));
+        ESP_LOGW(TAG, "%s: nothing the receiver sent in %u s tells whether it kept running%s", reset,
+                 (unsigned)(STN_RXBOOT_WINDOW_MS / 1000), brownout ? "" : "; not counted as a power loss");
         break;
     }
+    if (f.power_kept) {
+        ledger_note_power_kept();
+    }
+    if (f.maint_ends) {
+        s_maint_power_cut = true;   /* a maintenance resumed at this boot ends (service) */
+    }
 
-    /* An open flash journal's boot plan took the power-on reset for a
-     * receiver restart (station_early_boot): say what the verdict means for
-     * it. Report-only builds log it; no build acts on the plan before it. */
+    /* An open flash journal's boot plan took the power-on or brownout reset
+     * for a receiver restart (station_early_boot): say what the verdict means
+     * for it. Report-only builds log it; no build acts on the plan before it. */
     if (jerr == ESP_OK && j.state != UM98X_JOURNAL_NEEDS_USER && v != STN_RXBOOT_UNKNOWN) {
         const char *text = NULL;
         (void)um98x_flash_journal_plan(jerr, &j, v == STN_RXBOOT_RESTARTED, &text);
@@ -2699,7 +2834,7 @@ static void rxboot_decided(stn_rxboot_t v, stn_rxboot_by_t by)
     }
 }
 
-/* Judge a power-on boot until there is a verdict (station task). */
+/* Judge a power-on or brownout boot until there is a verdict (station task). */
 static void rxboot_tick(void)
 {
     if (!s_rxb_judging) {
@@ -2826,7 +2961,7 @@ static esp_err_t sg_record_store(int64_t now)
 {
     size_t len = sgt_encode(&s_sgt, now, s_sgt_rec, sizeof(s_sgt_rec));
     esp_err_t err = len == 0 ? ESP_ERR_INVALID_SIZE
-                             : settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST, s_sgt_rec, len);
+                             : settings_set_state_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST, s_sgt_rec, len);
     if (err == ESP_OK) {
         sgt_saved(&s_sgt, now);
     }
@@ -2872,7 +3007,7 @@ static void sg_test_load(void)
     uint8_t state = s_sgt.state;
     xSemaphoreGive(s_sgt_mx);
     if (bad) {
-        esp_err_t e = settings_erase_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST);
+        esp_err_t e = settings_erase_state_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST);
         ESP_LOGW(TAG, "signal-group comparison: its record could not be read (%s): ended as interrupted%s",
                  esp_err_to_name(err), e == ESP_OK ? "" : " (record not erased)");
     } else if (running) {
@@ -3257,8 +3392,9 @@ esp_err_t station_init(void)
     lifecycle_boot_info_t boot;
     lifecycle_get_boot_info(&boot);
     stn_maint_boot_t mb;
+    stn_maint_known_t known;
     bool maint_found = false;
-    maint_boot_decide(&mb, &maint_found);
+    maint_boot_decide(&mb, &maint_found, &known);
     bool restore = mb.from != STN_MAINT_FROM_NONE;
     if (!restore) {
         /* "Ended" at once: a reset before the first step resumes nothing either. */
@@ -3286,8 +3422,10 @@ esp_err_t station_init(void)
     if (!sky_restore) {
         stn_sky_rtc_write(&s_sky_rtc, 0, false);
     }
-    /* A power-on boot is judged by what the receiver sends (rxboot_tick). */
-    s_rxb_judging = boot.reset_class == LIFECYCLE_RESET_POWER_ON;
+    /* A power-on or brownout boot is judged by what the receiver sends
+     * (rxboot_tick; station_core.h "Power-on reset"). */
+    s_rxb_reset = rxboot_reset(boot.reset_class);
+    s_rxb_judging = stn_rxboot_judged(s_rxb_reset);
     portENTER_CRITICAL(&s_lock);
     s_rxb_state = s_rxb_judging ? STATION_RX_BOOT_PENDING : STATION_RX_BOOT_NONE;
     s_rxb_by = STATION_RX_BOOT_BY_NONE;
@@ -3303,6 +3441,9 @@ esp_err_t station_init(void)
     s_core.live_max_ms = (uint32_t)CONFIG_STATION_LIVE_VIEW_MAX_MIN * 60000u;
     if (restore) {
         stn_maint_restore(&s_core, &mb, now_ms());
+        if (mb.known) {
+            stn_maint_restore_survey(&s_core, &known);
+        }
     }
     if (sky_restore) {
         stn_sky_restore(&s_core);
@@ -3319,6 +3460,9 @@ esp_err_t station_init(void)
             s_gate_on = true;
             ledger_set_maintenance(true);
         }
+        /* What the station knew before the reset, shown until it ends. */
+        s_known = known;
+        s_known_on = mb.known;
         unsigned left = (unsigned)(mb.left_ms / 1000u);
         if (mb.from == STN_MAINT_FROM_RTC) {
             ESP_LOGW(TAG, "receiver maintenance continues after the reset: %u s left of %u (RTC record, %s), "
@@ -3330,9 +3474,22 @@ esp_err_t station_init(void)
                           "the RTC memory was lost, as by the EN pin), listening only%s",
                      left, (unsigned)mb.chosen_s, mb.end_unix > 0 ? "; checked by the clock once it is set" : "");
         }
-        if (boot.reset_class == LIFECYCLE_RESET_POWER_ON) {
+        if (mb.known) {
+            ESP_LOGI(TAG, "what the station knew of the receiver before the reset (%s%s) is reported until maintenance "
+                          "ends",
+                     known.receiver.valid ? known.receiver.firmware : "not identified",
+                     known.survey_active ? ", its survey window" : "");
+        } else {
+            ESP_LOGW(TAG, "nothing stored of what the station knew of the receiver: it reads as not checked until "
+                          "maintenance ends");
+        }
+        stn_rxboot_reset_t rk = rxboot_reset(boot.reset_class);
+        if (rk == STN_RXBOOT_RESET_POWER_ON) {
             ESP_LOGW(TAG, "power-on reset during receiver maintenance: it ends if the receiver restarted too (a "
                           "power cut), and goes on if it kept running (the ESP32's EN pin)");
+        } else if (rk == STN_RXBOOT_RESET_BROWNOUT) {
+            ESP_LOGW(TAG, "brownout reset during receiver maintenance: it ends if the receiver restarted too (the dip "
+                          "reached it), and goes on if it kept running (only the ESP32's supply dipped)");
         }
     } else if (mb.expired) {
         ESP_LOGW(TAG, "receiver maintenance was on before the reset, but its time ran out meanwhile");
@@ -3360,6 +3517,13 @@ esp_err_t station_start(void)
     s_task = t;
     s_started = true;
     return ESP_OK;
+}
+
+/* Milliseconds from `then` to `now`, clamped below UINT32_MAX (which means "never"). */
+static uint32_t age_of(int64_t now, int64_t then)
+{
+    int64_t age = now - then;
+    return age < 0 ? 0u : age >= (int64_t)UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)age;
 }
 
 esp_err_t station_get_status(station_status_t *out)
@@ -3401,7 +3565,7 @@ esp_err_t station_get_status(station_status_t *out)
         if (lv.why != STN_SKY_WHY_REJECTED && lv.why != STN_SKY_WHY_NO_ANSWER) {
             out->live.sky_reply[0] = '\0';
         }
-        out->alerts = stn_alerts(&s_core);
+        out->alerts = stn_alerts(&s_core) | (s_core.maint ? s_known_alerts : 0u);
         out->next_detect_in_s = stn_next_detect_in_s(&s_core, lin.now_ms);
         out->first_apply_held = s_core.first_apply_held;
         /* Maintenance as the user's start or extension left it, not as the
@@ -3414,6 +3578,7 @@ esp_err_t station_get_status(station_status_t *out)
         out->receiver_responding = stn_responding(&s_core, lin.now_ms, rtcm_age, s_line_ms);
     }
     int64_t line_ms = s_line_ms;
+    int64_t unasked_ms = s_unasked_ms;
     jerr = s_journal_err;
     journal = s_journal;
     read = s_journal_read;
@@ -3447,12 +3612,9 @@ esp_err_t station_get_status(station_status_t *out)
     }
     out->rtcm_excluded = excluded;
     out->autocfg_off_this_boot = s_autocfg_ram_off;
-    if (line_ms == STN_NEVER) {
-        out->rx_line_age_ms = UINT32_MAX;
-    } else {
-        int64_t age = now_ms() - line_ms;
-        out->rx_line_age_ms = age < 0 ? 0u : age >= (int64_t)UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)age;
-    }
+    int64_t now = now_ms();
+    out->rx_line_age_ms = line_ms == STN_NEVER ? UINT32_MAX : age_of(now, line_ms);
+    out->rx_unasked_line_age_ms = unasked_ms == STN_NEVER ? UINT32_MAX : age_of(now, unasked_ms);
     if (!have) {
         out->sg_test.phase = -1;   /* no comparison without the station */
         out->sg_test.left_s = UINT32_MAX;
@@ -3993,8 +4155,9 @@ esp_err_t station_bench_boot_race(uint32_t max_ms, station_bench_res_t *out)
      * on the receiver over its other port, e.g. a PC flashing it): no stop
      * key and no "6" may reach the receiver then. */
     stn_maint_boot_t mb;
+    stn_maint_known_t known;
     bool found = false;
-    maint_boot_decide(&mb, &found);
+    maint_boot_decide(&mb, &found, &known);
     if (mb.from != STN_MAINT_FROM_NONE) {
         snprintf(out->line, sizeof(out->line),
                  "REFUSED: receiver maintenance was on before this reset and goes on (%u s left); nothing sent",

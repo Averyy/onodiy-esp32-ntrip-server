@@ -71,6 +71,7 @@ extern "C" {
 typedef enum {
     NET_ROAM_BY_AP = 1,          /**< the access point asked (BSS transition request) */
     NET_ROAM_BY_STATION = 2,     /**< the station found a clearly stronger access point */
+    NET_ROAM_BY_REQUEST = 3,     /**< the station's own move, asked for (the bench console's wifimove) */
 } net_roam_by_t;
 
 typedef struct {
@@ -158,12 +159,116 @@ bool net_roam_btm_pass(bool open, uint8_t request_mode);
  * DIAG_EV_WIFI_ROAM fields. a: bits 0-7 the channel before, 8-15 after,
  * 16-23 who started it (net_roam_by_t), bit 24 the station stayed on the
  * same access point (an own move whose connect found no stronger one after
- * all). b: bits 0-7 the RSSI before, 8-15 after (as int8_t; 0 = unknown),
- * 16-30 seconds from the start of the move to the address on the new link
- * (capped at 32767).
+ * all), bit 25 the address and the connections were kept (net_hold_t). b:
+ * bits 0-7 the RSSI before, 8-15 after (as int8_t; 0 = unknown), 16-30
+ * seconds from the start of the move to the address on the new link, or
+ * with the address kept to the new association (capped at 32767).
  */
-int32_t net_roam_rec_a(uint8_t ch_from, uint8_t ch_to, net_roam_by_t by, bool same);
+int32_t net_roam_rec_a(uint8_t ch_from, uint8_t ch_to, net_roam_by_t by, bool same, bool kept);
 int32_t net_roam_rec_b(int8_t rssi_from, int8_t rssi_to, uint32_t secs);
+
+/*
+ * ---- Keeping the address across a move ---------------------------------------------
+ *
+ * ESP-IDF's default station handlers take the interface down at every
+ * disconnect (esp_netif_action_disconnected): the address is cleared and
+ * lwIP aborts every TCP session bound to it, so each move would end every
+ * caster session. ESP-IDF's own roaming app avoids that with
+ * ESP_WIFI_ROAMING_IP_RENEW_SKIP: its default handlers then leave the
+ * interface alone at a disconnect with reason ROAMING and skip the
+ * interface's connected action at the association that follows. The station
+ * does the same without that app: network.c wraps the two actions the
+ * default handlers call (esp_netif_action_disconnected,
+ * esp_netif_action_connected) and asks this core.
+ *
+ * Kept: a disconnect with reason ROAMING (the supplicant moving the station
+ * where the access point asked), or the disconnect of the station's own move
+ * (armed right before it, used within NET_HOLD_ARM_MS), and only while the
+ * gate is open: the station has its address with at least
+ * NET_HOLD_LEASE_MIN_S of its DHCP lease left, and no changed credentials
+ * are on trial or about to be applied (network.c). Every disconnect closes
+ * the gate and uses up the arming; the net task opens it again.
+ *
+ *  AWAY: the interface stays up with its address, the station is not
+ *        associated. The next association is held too (the connected action
+ *        is skipped: the interface is up already) -> BACK. Not associated
+ *        within NET_HOLD_AWAY_S: EXPIRED (network.c takes the interface down
+ *        as the default handler would have at the disconnect).
+ *  BACK: associated again. network.c asks DHCP to confirm the address on
+ *        the new link (lwIP's INIT-REBOOT, as at a link-up: net_hold_verify)
+ *        and reports what DHCP holds: bound with the same address:
+ *        CONFIRMED; the address changed or went (a NAK): LOST (network.c
+ *        takes the interface down and up: a fresh lease, the sessions
+ *        reconnect); no answer within NET_HOLD_VERIFY_S: UNCONFIRMED (kept
+ *        for the rest of its lease, as RFC 2131 allows a client that hears
+ *        neither an ACK nor a NAK after a move).
+ *  Any disconnect during AWAY or BACK ends the hold (the move failed): that
+ *  one is not kept, so the interface goes down then.
+ *
+ * Times are milliseconds of an injected clock, compared as (uint32_t)(now - then).
+ */
+#define NET_REASON_ROAMING 207u      /**< wifi_err_reason_t WIFI_REASON_ROAMING: the supplicant moves the station */
+#define NET_HOLD_ARM_MS 3000u        /**< the station's own move: its disconnect within this long after arming */
+#define NET_HOLD_AWAY_S 8u           /**< the new association within this long, else the address is given up */
+#define NET_HOLD_VERIFY_S 10u        /**< DHCP's answer on the new link within this long, else kept unconfirmed */
+#define NET_HOLD_LEASE_MIN_S 60u     /**< at least this much of the DHCP lease left to keep the address */
+
+typedef enum {
+    NET_HOLD_IDLE = 0,
+    NET_HOLD_AWAY,               /**< kept: the interface up with its address, no association */
+    NET_HOLD_BACK,               /**< associated again: DHCP confirms the address */
+} net_hold_state_t;
+
+typedef struct {
+    bool open;                   /**< the gate: a move may keep the address now */
+    uint32_t ip;                 /**< the address the gate was opened with (as lwIP holds it) */
+    bool armed;                  /**< the station's own move: keep its disconnect */
+    uint32_t armed_ms;
+    uint8_t state;               /**< net_hold_state_t */
+    uint32_t state_ms;           /**< when AWAY or BACK began */
+    uint32_t kept_ip;            /**< AWAY, BACK: the address kept */
+    uint32_t away_ms;            /**< BACK: how long the station was without a link */
+    bool verifying;              /**< BACK: DHCP was asked (net_hold_verify) */
+    uint32_t verify_ms;
+} net_hold_t;
+
+typedef enum {
+    NET_HOLD_WAIT = 0,           /**< nothing to do now (also: no hold) */
+    NET_HOLD_EXPIRED,            /**< AWAY too long: take the interface down; the hold is over */
+    NET_HOLD_CONFIRMED,          /**< BACK: DHCP confirmed the address; the hold is over, kept */
+    NET_HOLD_UNCONFIRMED,        /**< BACK: no answer in NET_HOLD_VERIFY_S; the hold is over, kept */
+    NET_HOLD_LOST,               /**< BACK: the address changed or went: take the interface down and up; over */
+} net_hold_out_t;
+
+void net_hold_init(net_hold_t *h);
+
+/** Enough of the DHCP lease left: `bound` (bound or renewing, not past the rebind time) and `left_s`. */
+bool net_hold_lease_ok(bool bound, uint32_t left_s);
+
+/** Net task, every pass: whether a move may keep address `ip` now (0 = none: closed). Closed also disarms. */
+void net_hold_gate(net_hold_t *h, bool open, uint32_t ip);
+
+/** Net task, right before the station's own disconnect: keep it. False (not armed) while the gate is closed. */
+bool net_hold_arm(net_hold_t *h, uint32_t now_ms);
+
+/** A station disconnect (`reason`: wifi_err_reason_t): true = keep the interface up with its address. */
+bool net_hold_disconnect(net_hold_t *h, uint16_t reason, uint32_t now_ms);
+
+/** A station association: true = held (the interface is up with its address: skip the connected action). */
+bool net_hold_connected(net_hold_t *h, uint32_t now_ms);
+
+/** Net task: DHCP was asked to confirm the address on the new link (BACK only). */
+void net_hold_verify(net_hold_t *h, uint32_t now_ms);
+
+/**
+ * Net task, every pass while a hold runs: `dhcp_bound` DHCP is bound now,
+ * `ip_now` the interface's address now (0 = none). The outcome, see
+ * net_hold_out_t; every outcome but NET_HOLD_WAIT ends the hold.
+ */
+net_hold_out_t net_hold_check(net_hold_t *h, bool dhcp_bound, uint32_t ip_now, uint32_t now_ms);
+
+/** Something else ends a hold (new credentials, a recovery, Wi-Fi stopping): the state it ended in. */
+net_hold_state_t net_hold_end(net_hold_t *h);
 
 #ifdef __cplusplus
 }

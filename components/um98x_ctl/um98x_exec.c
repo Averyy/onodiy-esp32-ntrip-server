@@ -133,7 +133,7 @@ unsigned um98x_chan_dispatch(um98x_chan_t *ch, const char *line, size_t len, con
     if (consumed) {
         ch->stats.matched++;
         ch->last_reply_ms = now_ms;
-        ev |= UM98X_CHAN_WAKE;
+        ev |= UM98X_CHAN_WAKE | UM98X_CHAN_REPLY;
     }
 
     if (l->kind == UM98X_LINE_BANNER) {
@@ -148,8 +148,9 @@ unsigned um98x_chan_dispatch(um98x_chan_t *ch, const char *line, size_t len, con
                 ch->stats.restarts++;
                 ev |= UM98X_CHAN_RESTART;
             }
+            return ev;   /* the receiver restarted by itself: nobody asked */
         }
-        return ev;
+        return ev | UM98X_CHAN_REPLY;   /* the restart of ours */
     }
     if (l->kind == UM98X_LINE_RESETTING) {
         /* The receiver restarts: it answered a command sent meanwhile. Ours
@@ -158,7 +159,7 @@ unsigned um98x_chan_dispatch(um98x_chan_t *ch, const char *line, size_t len, con
          * counted once however many commands it answers so. */
         ch->stats.resetting++;
         ch->last_resetting_ms = now_ms;
-        ev |= UM98X_CHAN_WAKE;
+        ev |= UM98X_CHAN_WAKE | UM98X_CHAN_REPLY;   /* it answers a command of ours */
         bool ours = ch->expect_restart || (consumed && ch->txn.restart_ends);
         if (!ours && !notice_restart_open(ch, now_ms)) {
             ch->stats.restarts++;
@@ -181,7 +182,7 @@ unsigned um98x_chan_dispatch(um98x_chan_t *ch, const char *line, size_t len, con
         return ev | UM98X_CHAN_RESTART;
     }
     ch->stats.unmatched++;
-    return ev;
+    return ev | UM98X_CHAN_REPLY;   /* a late or stray reply: only commands get these on this port */
 }
 
 /* ---- transactions ------------------------------------------------------- */

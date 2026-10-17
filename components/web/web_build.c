@@ -177,6 +177,7 @@ static void fix_distances(wj_t *w, const station_status_t *st)
     wj_double(w, "vertical_m", st->fix_up_m, 0);
     wj_double(w, "distance_m", st->fix_distance_m, 0);
     wj_bool(w, "height_only", st->fix_height_only);
+    wj_bool(w, "sea_level", st->fix_sea_level);
 }
 
 static void station_alerts(wj_t *w, const char *key, uint32_t alerts)
@@ -985,6 +986,7 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
         wj_null(w, "vertical_m");
         wj_null(w, "distance_m");
         wj_bool(w, "height_only", false);
+        wj_bool(w, "sea_level", false);
     }
     wj_u32_or_null(w, "checked_age_s", st->fix_checked_age_s);
     wj_uint(w, "limit_m", (uint32_t)UM98X_FIX_LIMIT_M);
@@ -1736,7 +1738,9 @@ void web_build_wifi(wj_t *w, const web_wifi_snap_t *s)
     } else {
         wj_null(w, "tx_power_dbm");
     }
-    if (n->associated && n->ap_steering >= 0) {
+    if (n->ap_steering == NETWORK_AP_STEERING_NEVER) {
+        /* left out: this build never reads it (null would read as "not yet") */
+    } else if (n->associated && n->ap_steering >= 0) {
         wj_bool(w, "ap_steering", n->ap_steering > 0);
     } else {
         wj_null(w, "ap_steering");

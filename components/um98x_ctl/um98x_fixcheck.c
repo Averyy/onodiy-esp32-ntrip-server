@@ -177,6 +177,8 @@ bool um98x_fix_offset(double fixed_lat_deg, double fixed_lon_deg, double fixed_h
     out->horizontal_m = sqrt(east * east + north * north);
     out->up_m = fixed_height_m - (f->msl_height_m + f->separation_m);
     out->distance_m = sqrt(out->horizontal_m * out->horizontal_m + out->up_m * out->up_m);
+    out->up_msl_m = fixed_height_m - f->msl_height_m;
+    out->sd_hgt_m = f->sd_hgt_m;
     return true;
 }
 
@@ -188,6 +190,24 @@ bool um98x_fix_beyond(const um98x_fix_offset_t *o, double limit_m)
 bool um98x_fix_height_only(const um98x_fix_offset_t *o)
 {
     return o != NULL && o->horizontal_m <= UM98X_FIX_LIMIT_M && fabs(o->up_m) > UM98X_FIX_LIMIT_M;
+}
+
+bool um98x_fix_sea_level(const um98x_fix_offset_t *o, bool held)
+{
+    if (o == NULL) {
+        return false;
+    }
+    double band = held ? UM98X_FIX_SEA_HOLD_BAND_M : UM98X_FIX_SEA_BAND_M;
+    double floor_m = held ? UM98X_FIX_SEA_HOLD_FLOOR_M : UM98X_FIX_SEA_FLOOR_M;
+    if (!held) {
+        /* An unsure solution's error alone can put a right height there. */
+        double unsure_m = UM98X_FIX_SEA_SD_K * o->sd_hgt_m;
+        if (!(unsure_m <= floor_m)) {
+            floor_m = unsure_m;   /* NaN too: never raised */
+        }
+    }
+    /* Every comparison is false for NaN. */
+    return o->horizontal_m <= UM98X_FIX_LIMIT_M && fabs(o->up_msl_m) <= band && fabs(o->up_m) > floor_m;
 }
 
 void um98x_fixchk_init(um98x_fixchk_t *c)
@@ -227,8 +247,9 @@ uint8_t um98x_fixchk_feed(um98x_fixchk_t *c, const um98x_fix_offset_t *o)
     if (c->n < UM98X_FIX_SAMPLES) {
         return UM98X_FIX_NONE;
     }
-    /* Once far, near needs the clear limit: no flapping around the limit. */
-    double near_limit = c->verdict == UM98X_FIX_FAR ? UM98X_FIX_CLEAR_M : UM98X_FIX_LIMIT_M;
+    /* Once a warning stands, near needs the clear limit: no flapping around the limit. */
+    bool warned = c->verdict == UM98X_FIX_FAR || c->verdict == UM98X_FIX_SEA_LEVEL;
+    double near_limit = warned ? UM98X_FIX_CLEAR_M : UM98X_FIX_LIMIT_M;
     unsigned far = 0;
     unsigned near = 0;
     for (unsigned i = 0; i < UM98X_FIX_SAMPLES; i++) {
@@ -242,9 +263,17 @@ uint8_t um98x_fixchk_feed(um98x_fixchk_t *c, const um98x_fix_offset_t *o)
     if (v == UM98X_FIX_NONE) {
         return UM98X_FIX_NONE;
     }
+    um98x_fix_offset_t m;
+    m.horizontal_m = median3(c->run[0].horizontal_m, c->run[1].horizontal_m, c->run[2].horizontal_m);
+    m.up_m = median3(c->run[0].up_m, c->run[1].up_m, c->run[2].up_m);
+    m.distance_m = sqrt(m.horizontal_m * m.horizontal_m + m.up_m * m.up_m);
+    m.up_msl_m = median3(c->run[0].up_msl_m, c->run[1].up_msl_m, c->run[2].up_msl_m);
+    m.sd_hgt_m = median3(c->run[0].sd_hgt_m, c->run[1].sd_hgt_m, c->run[2].sd_hgt_m);
+    /* Far or near, the height alone may be the receiver's height above sea level. */
+    if (um98x_fix_sea_level(&m, c->verdict == UM98X_FIX_SEA_LEVEL)) {
+        v = UM98X_FIX_SEA_LEVEL;
+    }
     c->verdict = v;
-    c->shown.horizontal_m = median3(c->run[0].horizontal_m, c->run[1].horizontal_m, c->run[2].horizontal_m);
-    c->shown.up_m = median3(c->run[0].up_m, c->run[1].up_m, c->run[2].up_m);
-    c->shown.distance_m = sqrt(c->shown.horizontal_m * c->shown.horizontal_m + c->shown.up_m * c->shown.up_m);
+    c->shown = m;
     return v;
 }

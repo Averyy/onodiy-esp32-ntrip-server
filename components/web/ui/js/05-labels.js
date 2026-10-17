@@ -324,7 +324,7 @@ const J = {
   /* The event list's names (a connection or a recovery step is named by connRow, by its recovery). */
   kind: { boot: 'Start', session: 'Previous run', reboot: 'Restart', app_update: 'App update', app_revert: 'App rolled back',
     gnss_flash: 'Receiver update', safe_mode: 'Safe mode', data_loss: 'Data lost', rx_maintenance: 'Receiver maintenance',
-    live_view: 'Sky view', sg_test: 'Signal groups', rx_boot: 'Receiver at power-on', fixed_check: 'Fixed position',
+    live_view: 'Sky view', sg_test: 'Signal groups', rx_boot: 'Receiver at the start', fixed_check: 'Fixed position',
     wifi_roam: 'Wi-Fi moved' },
   /* By C value, as the API names them (lifecycle_reset_class_t, lifecycle_reboot_reason_t). */
   resetClassKey: ['power_on', 'planned', 'crash', 'brownout', 'other'],
@@ -472,23 +472,36 @@ function metresText(m) {
 /*
  * Where the fixed position is against the receiver's own, in one sentence
  * (the fixed_far alert, or GET /api/gnss fixed_check: horizontal_m,
- * vertical_m (fixed minus the receiver's), distance_m, height_only).
+ * vertical_m (fixed minus the receiver's), distance_m, height_only,
+ * sea_level: the fixed height is the receiver's height above sea level).
  */
 function fixedFarSentence(a) {
+  if (a.sea_level) return 'The fixed height looks like a height above sea level.';
   if (a.height_only) {
     return 'The fixed height is ' + metresText(a.vertical_m) + (a.vertical_m > 0 ? ' above' : ' below') + ' where the receiver is.';
   }
   return 'The fixed position is ' + metresText(a.distance_m) + ' from where the receiver is.';
 }
 
-/* The fixed_far warning: how far, and what to do. */
+/* The fixed_far warning: how far, and what to do (where; a sea-level height: the height the field wants). */
 function fixedFarText(a) {
-  return fixedFarSentence(a) + ' Check it in Receiver settings.';
+  return fixedFarSentence(a) + (a.sea_level ? ' Enter the height above the ellipsoid in Receiver settings.' :
+    ' Check it in Receiver settings.');
 }
 
 /* The same when it is why no corrections come (the receiver stops them this far off): the cause in the sentence. */
 function fixedStopsText(a) {
   return fixedFarSentence(a).replace(/\.$/, ', which stops them.') + ' Check it in Receiver settings.';
+}
+
+/* During receiver maintenance the station sends the receiver nothing, so what it has not checked stays unchecked until the end
+ * (a maintenance that went on across a station restart with nothing kept of what the station knew: no identity this boot). */
+const NOT_CHECKED = 'Not checked during maintenance';
+const NOT_CHECKED_CHIP = 'Not checked';   /* a chip, on a page whose notice says maintenance */
+
+/** The station has not checked the receiver and will not before maintenance ends (maint: it is on; confirmed: identity_confirmed). */
+function rxUnchecked(maint, confirmed) {
+  return !!maint && !confirmed;
 }
 
 /** The failed-configuration alert's text: when the station tries again, or that only the user does (alert or GET /api/gnss). */
@@ -540,13 +553,13 @@ function restartPlanShort(hl) {
     p.k === 'later' ? 'station restart postponed (' + p.why + ')' : 'station may restart after the next search';
 }
 
-/** After a power-on start: whether the receiver kept running (health station.rx_boot). */
-function rxBootSentence(v) {
+/** After a power-on start or a power dip (cls: boot.reset_class): whether the receiver kept running (health station.rx_boot). */
+function rxBootSentence(v, cls) {
   switch (v) {
     case 'kept_running':
       return 'The receiver kept running';
     case 'restarted':
-      return 'The power was cut';
+      return cls === 'brownout' ? 'The receiver restarted too' : 'The power was lost';
     default:   /* still judged, or not known: nothing to say */
       return '';
   }

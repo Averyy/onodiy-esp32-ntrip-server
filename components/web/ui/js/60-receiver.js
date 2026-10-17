@@ -240,6 +240,11 @@ function configLine(g) {
   return [h('span', { class: c[1] === 'bad' || c[1] === 'warn' ? 't-' + c[1] : null }, c[0]), sg ? ' · ' + sg : ''];
 }
 
+/* The receiver unchecked during maintenance (GET /api/gnss; rxUnchecked). */
+function gnssUnchecked(g) {
+  return rxUnchecked((g.maintenance || {}).on, g.identity_confirmed);
+}
+
 /** The base position in one line: its state and what to do (delivering: corrections arrive, so a survey runs). */
 function positionLine(g, delivering) {
   const pos = g.position || {};
@@ -252,6 +257,7 @@ function positionLine(g, delivering) {
     if (!delivering) return 'Surveying, paused while no corrections arrive.';
     return sv.window_left_s ? 'Surveying, about ' + inMinutes(sv.window_left_s) + ' left. Then lock it.' : 'Surveying. Lock it when it ends.';
   }
+  if (gnssUnchecked(g)) return null;   /* the card's line says it (receiverTop) */
   return have ? 'Not locked. Lock it so it stays the same after restarts.' : 'No position yet.';
 }
 
@@ -263,19 +269,24 @@ function rxAlertShown(st, missing) {
 }
 
 /** The card under its title: the problem in a line, the alerts (rxAlertShown), then model, configuration and position
- * (st: stationState). */
+ * (st: stationState). With the receiver unchecked during maintenance (gnssUnchecked) one line says so, in place of the
+ * rows that would only repeat it. */
 function receiverTop(g, st) {
   const r = g.receiver || {};
   const missing = bandsMissingMsg(g);
+  const unchecked = gnssUnchecked(g);
+  const pos = positionLine(g, !st || st.delivering);
   return [
     st && RX_PROBLEM.indexOf(st.key) >= 0 ? msg(st.tone, st.lead, st.plan ? h('div', { class: 'muted small' }, st.plan) : null) : null,
     sgRefusedMsg(g),
     missing,
     alertMsgs(g, rxAlertShown(st, !!missing)),
+    unchecked ? h('p', { class: 'muted' }, NOT_CHECKED + '.') : null,
     kv([
-      ['Model', r.valid === false ? h('span', { class: 'muted' }, 'Not identified yet') : [r.model || DASH, ' · ', fwText(r.firmware, r.build)]],
-      ['Configuration', configLine(g)],
-      ['Position', positionLine(g, !st || st.delivering)],
+      r.valid === false ? (unchecked ? null : ['Model', h('span', { class: 'muted' }, 'Not identified yet')]) :
+        ['Model', [r.model || DASH, ' · ', fwText(r.firmware, r.build)]],
+      unchecked && profileChip(g)[0] === NOT_CHECKED_CHIP ? null : ['Configuration', configLine(g)],
+      pos ? ['Position', pos] : null,
     ]),
   ];
 }
@@ -290,8 +301,17 @@ function fixedCheckRow(g) {
       (c.vertical_m > 0 ? ' above it' : ' below it') : metresText(c.distance_m) + ' from the fixed position')];
   }
   if (c.state === 'ok') return [label, 'Within ' + (c.limit_m || 50) + NB + 'm of the fixed position'];
-  return [label, h('span', { class: 'muted' }, c.state === 'refused' ? 'Not reported by this firmware' :
-    c.state === 'no_solution' ? 'Not reported yet' : 'Being checked')];
+  const pending = fixPendingText(c.state, (g.maintenance || {}).on, gnssUnchecked(g));
+  return [label, pending === DASH ? DASH : h('span', { class: 'muted' }, pending)];
+}
+
+/** A fixed-position check without a verdict in words (maint: receiver maintenance is on, when nothing is checked;
+ * unchecked: the card already says the receiver is not checked). */
+function fixPendingText(state, maint, unchecked) {
+  if (state === 'refused') return 'Not reported by this firmware';
+  if (state === 'no_solution') return 'Not reported yet';
+  if (unchecked) return DASH;
+  return maint ? NOT_CHECKED : 'Being checked';
 }
 
 /** Behind the card's Details: the link and identity, then the position and the one in the stream (the map follows). */
@@ -313,7 +333,8 @@ function receiverDetails(g) {
       ['Firmware date', r.compile_date],
       /* responding: it streams, or it answered since its corrections stopped (a reply, its NMEA). */
       ['Answers', g.restarting ? h('span', { class: 't-warn' }, 'Restarting, back in about 10 s') : fmt.yesno(g.responding)],
-      ['Identity confirmed', fmt.yesno(g.identity_confirmed)],
+      /* Not checked during maintenance (the card says so): no "No" that reads as a failed check. */
+      ['Identity confirmed', gnssUnchecked(g) ? DASH : fmt.yesno(g.identity_confirmed)],
       ['Last data', link.rx_bytes === 0 ? 'Nothing yet' : age(link.rx_age_ms)],
       link.open === false && link.mode !== 'off' ? ['Receiver port', h('span', { class: 't-bad' }, 'Closed, reopening' +
         (link.open_failures ? ' (' + link.open_failures + ' failed tries)' : ''))] : null,
@@ -592,6 +613,7 @@ function profileChip(g) {
   if (g.config_failed) return ['Failed', 'bad'];
   if (manageOwn(g)) return ['Managed by you', ''];
   if (g.profile_applied && !g.first_apply_held) return ['Applied', 'ok'];
+  if (gnssUnchecked(g)) return [NOT_CHECKED_CHIP, ''];
   return ['Not applied', 'warn'];
 }
 
@@ -610,19 +632,31 @@ function positionChip(g) {
   if (pos.locked && pos.source && pos.source !== 'none') return ['Locked', 'ok'];
   if (prof.base_mode === 'fixed' && prof.fixed) return ['Fixed (typed in)', 'info'];
   if ((g.survey || {}).active) return ['Surveying', 'info'];
+  if (gnssUnchecked(g)) return [NOT_CHECKED_CHIP, ''];
   return ['Not locked', ''];
 }
 
 /** Whether the position casters get (1005) matches the locked one, in a line ('' while not locked); first whether the fixed
- * position is where the receiver is. */
+ * position is where the receiver is, and what fixes it. */
 function matchLine(g) {
   const arp = g.arp || {};
   const fc = g.fixed_check || {};
-  if (fc.state === 'far') return h('span', { class: 't-warn' }, fixedFarSentence(fc) + ' Check the numbers, or use Survey-in.');
+  if (fc.state === 'far') {
+    return h('span', { class: 't-warn' }, fixedFarSentence(fc) + (fc.sea_level ? ' Enter the height above the ellipsoid.' :
+      ' Check the numbers, or use Survey-in.'));
+  }
   if (!(g.position || {}).locked) return '';
   if (!arp.valid || arp.offset_m === null || arp.offset_m === undefined) return h('span', { class: 'muted' }, '1005 not received yet.');
   return arp.offset_m > 0.005 ? h('span', { class: 't-warn' }, '1005 is ' + fmtDist(arp.offset_m) + ' from the locked position.') :
     h('span', { class: 't-ok' }, '1005 matches the locked position.');
+}
+
+/** Whether "Use the current position" has a position to copy: a 1005 that is not the locked position (a fixed base sends
+ * the position it was given, so copying that would repair nothing; while surveying it is the survey's). */
+function arpCopyable(g) {
+  const arp = g.arp || {};
+  const pos = g.position || {};
+  return !!arp.valid && !(pos.locked && typeof arp.offset_m === 'number' && arp.offset_m <= 0.005);
 }
 
 /** A group of the profile form: its title, then kids. */
@@ -697,15 +731,18 @@ function receiverForms(g, latest, done, onCompare) {
     antenna_setup_id: field('Antenna setup ID', antSetup),
   };
 
-  /* Position: only the chosen mode's fields. */
+  /* Position: only the chosen mode's fields. The 1005 to copy (the latest one), only when it is not the position already
+   * set (arpCopyable). */
+  const useArp = h('div', null, btn('Use the current position', () => {
+    const arp = latest().arp || {};
+    if (!arp.valid) return;
+    lat.value = arp.lat_deg.toFixed(9);
+    lon.value = arp.lon_deg.toFixed(9);
+    hgt.value = arp.height_m.toFixed(4);
+    posSync();
+  }, 'small'));
   const fixedBox = h('div', { class: 'stack' }, h('div', { class: 'cols c3' }, F.lat_deg.el, F.lon_deg.el, F.height_m.el),
-    h('p', { class: 'hint' }, 'ITRF coordinates of the antenna\'s exact spot, for example from a PPP service.'),
-    g.arp && g.arp.valid ? h('div', null, btn('Use the current position', () => {
-      lat.value = g.arp.lat_deg.toFixed(9);
-      lon.value = g.arp.lon_deg.toFixed(9);
-      hgt.value = g.arp.height_m.toFixed(4);
-      posSync();
-    }, 'small')) : null);
+    h('p', { class: 'hint' }, 'ITRF coordinates of the antenna\'s exact spot, for example from a PPP service.'), useArp);
   const posErr = errBox();
   /* Each card saves its own part, its button shown once that part changed (the main one: the position's while shown). */
   const posSave = btn('Save position', () => save('position', posSave, posErr), 'primary', { hidden: true });
@@ -987,6 +1024,7 @@ function receiverForms(g, latest, done, onCompare) {
     }
     patch(match, matchLine(gg));
     match.hidden = !match.textContent;
+    useArp.hidden = !arpCopyable(gg);
     patch(seeLine, castersSee(gg));
     seeLine.hidden = !seeLine.textContent;
   };

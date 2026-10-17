@@ -90,8 +90,8 @@
  *    results are exempt too: one per session the user started, and the
  *    station writes it before it closes the session's own record, so a
  *    refused one would leave no trace of how the update ended. So is the
- *    power-on verdict (DIAG_EV_RX_BOOT): one per power-on boot, and the
- *    power-lost alert counts a boot only with it.
+ *    power-on verdict (DIAG_EV_RX_BOOT): one per power-on or brownout
+ *    boot, and the power-lost alert counts a power-on boot only with it.
  *    Records carry the uptime and, once a trusted clock is known
  *    (diag_set_utc, fed by the availability ledger), the UTC time.
  *    The journal is a timeline, not the boot history: the last 16 boots are
@@ -253,9 +253,12 @@ typedef enum {
      * address there (network.h, "Moving between access points"):
      * a = channel before (bits 0-7) | channel after (8-15) | who started it
      * (16-23: 1 the access point asked, 2 the station found a clearly
-     * stronger one) | bit 24 the reconnect found no stronger one after all
-     * and stayed; b = RSSI before (bits 0-7) | after (8-15), each an int8_t
-     * in dBm with 0 = unknown | seconds without an address (16-30).
+     * stronger one, 3 the station's own move asked for on the bench
+     * console) | bit 24 the reconnect found no stronger one after all and
+     * stayed | bit 25 the address and the connections were kept; b = RSSI
+     * before (bits 0-7) | after (8-15), each an int8_t in dBm with 0 =
+     * unknown | seconds without an address, or with bit 25 without a link
+     * (16-30).
      */
     DIAG_EV_WIFI_ROAM = 25,
 } diag_event_t;
@@ -265,6 +268,7 @@ typedef enum {
     DIAG_FIXED_FAR = 1,          /**< more than 50 m off (horizontally or in height): the station's warning is raised */
     DIAG_FIXED_NEAR = 2,         /**< within the limits again: the warning cleared */
     DIAG_FIXED_CHANGED = 3,      /**< the fixed position changed (or the profile surveys now) while the warning stood: cleared */
+    DIAG_FIXED_SEA_LEVEL = 4,    /**< the fixed height is the receiver's height above sea level, not its ellipsoidal height: the warning is raised */
 } diag_fixed_ev_t;
 
 /** `a` of DIAG_EV_FIXED_POS: the event in bits 0-7, the height difference (m, clamped to +-8 388 607) in bits 8-31. */
@@ -280,8 +284,8 @@ static inline int32_t diag_fixed_a(diag_fixed_ev_t ev, int32_t up_m)
 
 /** DIAG_EV_RX_BOOT `a`. */
 typedef enum {
-    DIAG_RX_BOOT_KEPT = 1,       /**< the receiver kept running: only the ESP32 was reset (its reset pin) */
-    DIAG_RX_BOOT_RESTARTED = 2,  /**< the receiver restarted with the ESP32: the power was cut */
+    DIAG_RX_BOOT_KEPT = 1,       /**< the receiver kept running: only the ESP32 was reset (its reset pin, or its own power dip) */
+    DIAG_RX_BOOT_RESTARTED = 2,  /**< the receiver restarted with the ESP32: the power was cut (or dipped) for both */
     DIAG_RX_BOOT_UNKNOWN = 3,    /**< nothing the receiver sent told within 30 s */
 } diag_rx_boot_t;
 

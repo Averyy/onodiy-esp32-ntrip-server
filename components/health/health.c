@@ -782,8 +782,9 @@ static void tick(void)
     in->now_ms = now;
     in->stall_ms = STALL_MS;
     in->rtcm_age_ms = s_link_stats.last_rtcm_age_ms;
-    in->rx_age_ms = s_link_stats.last_rx_age_ms;
     in->rx_bytes = s_link_stats.rx_bytes;
+    in->discarded = s_link_stats.framing.bytes_discarded;
+    in->framer_in = s_link_stats.framing.bytes_in;
     in->text_lines = s_link_stats.framing.text_lines;
     in->stn_state = (uint8_t)s_st.state;
     in->rec_enters = enters;
@@ -811,6 +812,8 @@ static void tick(void)
     /* Exact times, read with the station's status: the same evidence as its receiver_responding. */
     in->line_age_ms = s_st.rx_line_age_ms;
     in->answer_age_ms = s_st.rx_answer_age_ms;
+    /* The stall class from what it sends unasked: asking it never changes how a stall is judged. */
+    in->unasked_line_age_ms = s_st.rx_unasked_line_age_ms;
     in->rx_held = s_st.first_apply_held;
     gnss_obs_fix_t fix;
     in->no_sky = gnss_obs_get_fix(&fix) == ESP_OK && fix.age_ms <= STALL_MS && fix.quality == 0 && fix.satellites == 0;

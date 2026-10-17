@@ -253,8 +253,11 @@ TEST_CASE("roaming: the times survive the clock wrap", "[net_roam]")
 
 TEST_CASE("roaming: journal fields pack channels, who, the same access point, signals and seconds", "[net_roam]")
 {
-    TEST_ASSERT_EQUAL_HEX32(0x00010601u, (uint32_t)net_roam_rec_a(1, 6, NET_ROAM_BY_AP, false));
-    TEST_ASSERT_EQUAL_HEX32(0x01020B0Bu, (uint32_t)net_roam_rec_a(11, 11, NET_ROAM_BY_STATION, true));
+    TEST_ASSERT_EQUAL_HEX32(0x00010601u, (uint32_t)net_roam_rec_a(1, 6, NET_ROAM_BY_AP, false, false));
+    TEST_ASSERT_EQUAL_HEX32(0x01020B0Bu, (uint32_t)net_roam_rec_a(11, 11, NET_ROAM_BY_STATION, true, false));
+    /* Bit 25: the address and the connections were kept. */
+    TEST_ASSERT_EQUAL_HEX32(0x02010B06u, (uint32_t)net_roam_rec_a(6, 11, NET_ROAM_BY_AP, false, true));
+    TEST_ASSERT_EQUAL_HEX32(0x03030101u, (uint32_t)net_roam_rec_a(1, 1, NET_ROAM_BY_REQUEST, true, true));
     int32_t b = net_roam_rec_b(-78, -52, 4);
     TEST_ASSERT_EQUAL_INT8(-78, (int8_t)(b & 0xFF));
     TEST_ASSERT_EQUAL_INT8(-52, (int8_t)((b >> 8) & 0xFF));
@@ -264,4 +267,212 @@ TEST_CASE("roaming: journal fields pack channels, who, the same access point, si
     TEST_ASSERT_EQUAL_INT32(0, b & 0xFFFF);
     TEST_ASSERT_EQUAL_INT32(32767, b >> 16);
     TEST_ASSERT_TRUE(b > 0);
+}
+
+/* ---- keeping the address across a move ------------------------------------------------- */
+
+#define IP_A 0x3201A8C0u   /* 192.168.1.50 as lwIP holds it */
+#define IP_B 0x1405A8C0u   /* 192.168.5.20 */
+#define REASON_LEAVE 8u    /* the station's own esp_wifi_disconnect() */
+#define REASON_BEACON 200u /* beacon timeout: an ordinary drop */
+
+/* A hold with its gate open for IP_A. */
+static void hold_open(net_hold_t *h)
+{
+    net_hold_init(h);
+    net_hold_gate(h, true, IP_A);
+}
+
+TEST_CASE("keeping the address: a disconnect the supplicant reports as roaming is kept only with the gate open",
+          "[net_roam]")
+{
+    net_hold_t h;
+    /* Gate closed (credentials on trial, too little lease, no address): the interface goes down as always. */
+    net_hold_init(&h);
+    net_hold_gate(&h, false, IP_A);
+    TEST_ASSERT_FALSE(net_hold_disconnect(&h, NET_REASON_ROAMING, 1000));
+    TEST_ASSERT_EQUAL(NET_HOLD_IDLE, h.state);
+    /* Open, but without an address: closed. */
+    net_hold_gate(&h, true, 0);
+    TEST_ASSERT_FALSE(h.open);
+    TEST_ASSERT_FALSE(net_hold_disconnect(&h, NET_REASON_ROAMING, 1000));
+    /* Open with an address: kept. */
+    hold_open(&h);
+    TEST_ASSERT_TRUE(net_hold_disconnect(&h, NET_REASON_ROAMING, 1000));
+    TEST_ASSERT_EQUAL(NET_HOLD_AWAY, h.state);
+    TEST_ASSERT_EQUAL_HEX32(IP_A, h.kept_ip);
+    /* An ordinary drop with the gate open is not a move: not kept. */
+    hold_open(&h);
+    TEST_ASSERT_FALSE(net_hold_disconnect(&h, REASON_BEACON, 1000));
+    hold_open(&h);
+    TEST_ASSERT_FALSE(net_hold_disconnect(&h, REASON_LEAVE, 1000));   /* a deliberate disconnect that was not armed */
+    TEST_ASSERT_EQUAL(NET_HOLD_IDLE, h.state);
+}
+
+TEST_CASE("keeping the address: the station's own move is armed right before its disconnect, once, briefly",
+          "[net_roam]")
+{
+    net_hold_t h;
+    /* Armed: its disconnect is kept whatever the reason. */
+    hold_open(&h);
+    TEST_ASSERT_TRUE(net_hold_arm(&h, 5000));
+    TEST_ASSERT_TRUE(net_hold_disconnect(&h, REASON_LEAVE, 5000 + NET_HOLD_ARM_MS));
+    TEST_ASSERT_EQUAL(NET_HOLD_AWAY, h.state);
+    /* Not within NET_HOLD_ARM_MS: an unrelated drop later is not kept. */
+    hold_open(&h);
+    TEST_ASSERT_TRUE(net_hold_arm(&h, 5000));
+    TEST_ASSERT_FALSE(net_hold_disconnect(&h, REASON_LEAVE, 5000 + NET_HOLD_ARM_MS + 1u));
+    /* The arming is used up by the first disconnect, kept or not. */
+    hold_open(&h);
+    TEST_ASSERT_TRUE(net_hold_arm(&h, 5000));
+    TEST_ASSERT_TRUE(net_hold_disconnect(&h, REASON_LEAVE, 5100));
+    TEST_ASSERT_FALSE(h.armed);
+    /* Closed gate: nothing armed, and closing the gate disarms. */
+    net_hold_init(&h);
+    TEST_ASSERT_FALSE(net_hold_arm(&h, 5000));
+    TEST_ASSERT_FALSE(net_hold_disconnect(&h, REASON_LEAVE, 5100));
+    hold_open(&h);
+    TEST_ASSERT_TRUE(net_hold_arm(&h, 5000));
+    net_hold_gate(&h, false, IP_A);   /* e.g. changed credentials queued meanwhile */
+    TEST_ASSERT_FALSE(net_hold_disconnect(&h, REASON_LEAVE, 5100));
+    /* Not while a hold runs. */
+    hold_open(&h);
+    TEST_ASSERT_TRUE(net_hold_disconnect(&h, NET_REASON_ROAMING, 5000));
+    net_hold_gate(&h, true, IP_A);
+    TEST_ASSERT_FALSE(net_hold_arm(&h, 5100));
+}
+
+TEST_CASE("keeping the address: every disconnect closes the gate until the net task opens it again", "[net_roam]")
+{
+    net_hold_t h;
+    hold_open(&h);
+    TEST_ASSERT_FALSE(net_hold_disconnect(&h, REASON_BEACON, 1000));
+    TEST_ASSERT_FALSE(h.open);
+    /* A roaming disconnect right after, before the gate was opened again (no association, no address): not kept. */
+    TEST_ASSERT_FALSE(net_hold_disconnect(&h, NET_REASON_ROAMING, 1100));
+    /* A kept one closes it too: the next disconnect ends the hold instead of starting another. */
+    hold_open(&h);
+    TEST_ASSERT_TRUE(net_hold_disconnect(&h, NET_REASON_ROAMING, 2000));
+    TEST_ASSERT_FALSE(h.open);
+}
+
+TEST_CASE("keeping the address: the new association within NET_HOLD_AWAY_S is held, later the address is given up",
+          "[net_roam]")
+{
+    net_hold_t h;
+    hold_open(&h);
+    TEST_ASSERT_TRUE(net_hold_disconnect(&h, NET_REASON_ROAMING, 10000));
+    TEST_ASSERT_EQUAL(NET_HOLD_WAIT, net_hold_check(&h, false, IP_A, 10000 + NET_HOLD_AWAY_S * 1000u - 1u));
+    TEST_ASSERT_TRUE(net_hold_connected(&h, 10000 + NET_HOLD_AWAY_S * 1000u - 1u));
+    TEST_ASSERT_EQUAL(NET_HOLD_BACK, h.state);
+    TEST_ASSERT_EQUAL_UINT32(NET_HOLD_AWAY_S * 1000u - 1u, h.away_ms);
+    /* Too long without a link: given up; the association that comes later is an ordinary one. */
+    hold_open(&h);
+    TEST_ASSERT_TRUE(net_hold_disconnect(&h, NET_REASON_ROAMING, 10000));
+    TEST_ASSERT_EQUAL(NET_HOLD_EXPIRED, net_hold_check(&h, false, IP_A, 10000 + NET_HOLD_AWAY_S * 1000u));
+    TEST_ASSERT_EQUAL(NET_HOLD_IDLE, h.state);
+    TEST_ASSERT_EQUAL(NET_HOLD_WAIT, net_hold_check(&h, false, IP_A, 30000));
+    TEST_ASSERT_FALSE(net_hold_connected(&h, 30000));
+    /* Without a hold an association is never held. */
+    net_hold_init(&h);
+    TEST_ASSERT_FALSE(net_hold_connected(&h, 1000));
+}
+
+/* A hold back on a new link at t (kept at t - 1500 ms). */
+static void hold_back(net_hold_t *h, uint32_t t)
+{
+    hold_open(h);
+    TEST_ASSERT_TRUE(net_hold_disconnect(h, NET_REASON_ROAMING, t - 1500u));
+    TEST_ASSERT_TRUE(net_hold_connected(h, t));
+}
+
+TEST_CASE("keeping the address: DHCP on the new link confirms it, changes it, or does not answer", "[net_roam]")
+{
+    net_hold_t h;
+    /* Until DHCP was asked its state is the one from before the move: a bound state confirms nothing. */
+    hold_back(&h, 20000);
+    TEST_ASSERT_EQUAL(NET_HOLD_WAIT, net_hold_check(&h, true, IP_A, 20100));
+    net_hold_verify(&h, 20200);
+    TEST_ASSERT_EQUAL(NET_HOLD_WAIT, net_hold_check(&h, false, IP_A, 21000));   /* asking (INIT-REBOOT) */
+    TEST_ASSERT_EQUAL(NET_HOLD_CONFIRMED, net_hold_check(&h, true, IP_A, 21200));
+    TEST_ASSERT_EQUAL(NET_HOLD_IDLE, h.state);
+    /* A NAK clears the address; another network hands out another one: the address is lost. */
+    hold_back(&h, 20000);
+    net_hold_verify(&h, 20000);
+    TEST_ASSERT_EQUAL(NET_HOLD_LOST, net_hold_check(&h, false, 0, 20500));
+    hold_back(&h, 20000);
+    net_hold_verify(&h, 20000);
+    TEST_ASSERT_EQUAL(NET_HOLD_LOST, net_hold_check(&h, true, IP_B, 24000));
+    /* Lost even before DHCP was asked. */
+    hold_back(&h, 20000);
+    TEST_ASSERT_EQUAL(NET_HOLD_LOST, net_hold_check(&h, true, 0, 20100));
+    /* No answer: kept, unconfirmed, NET_HOLD_VERIFY_S after asking. */
+    hold_back(&h, 20000);
+    net_hold_verify(&h, 20300);
+    TEST_ASSERT_EQUAL(NET_HOLD_WAIT, net_hold_check(&h, false, IP_A, 20300 + NET_HOLD_VERIFY_S * 1000u - 1u));
+    TEST_ASSERT_EQUAL(NET_HOLD_UNCONFIRMED, net_hold_check(&h, false, IP_A, 20300 + NET_HOLD_VERIFY_S * 1000u));
+    /* Never asked (the request could not be made): the same wait from the association. */
+    hold_back(&h, 20000);
+    TEST_ASSERT_EQUAL(NET_HOLD_UNCONFIRMED, net_hold_check(&h, true, IP_A, 20000 + NET_HOLD_VERIFY_S * 1000u));
+    /* Asking is only for a hold back on a link. */
+    hold_open(&h);
+    net_hold_verify(&h, 1000);
+    TEST_ASSERT_FALSE(h.verifying);
+}
+
+TEST_CASE("keeping the address: a disconnect during the move ends the hold and is not kept", "[net_roam]")
+{
+    net_hold_t h;
+    /* The connect to the new access point failed. */
+    hold_open(&h);
+    TEST_ASSERT_TRUE(net_hold_disconnect(&h, NET_REASON_ROAMING, 1000));
+    TEST_ASSERT_FALSE(net_hold_disconnect(&h, 15u, 2000));
+    TEST_ASSERT_EQUAL(NET_HOLD_IDLE, h.state);
+    TEST_ASSERT_FALSE(net_hold_connected(&h, 2500));
+    /* The new link dropped while DHCP was asked, even with reason roaming and the gate opened again. */
+    hold_back(&h, 5000);
+    net_hold_verify(&h, 5000);
+    net_hold_gate(&h, true, IP_A);
+    TEST_ASSERT_FALSE(net_hold_disconnect(&h, NET_REASON_ROAMING, 6000));
+    TEST_ASSERT_EQUAL(NET_HOLD_IDLE, h.state);
+    TEST_ASSERT_FALSE(h.verifying);
+}
+
+TEST_CASE("keeping the address: cut short by something else, and the lease it needs", "[net_roam]")
+{
+    net_hold_t h;
+    hold_open(&h);
+    TEST_ASSERT_EQUAL(NET_HOLD_IDLE, net_hold_end(&h));
+    TEST_ASSERT_FALSE(h.open);
+    hold_open(&h);
+    TEST_ASSERT_TRUE(net_hold_disconnect(&h, NET_REASON_ROAMING, 1000));
+    TEST_ASSERT_EQUAL(NET_HOLD_AWAY, net_hold_end(&h));
+    TEST_ASSERT_EQUAL(NET_HOLD_IDLE, h.state);
+    TEST_ASSERT_FALSE(net_hold_connected(&h, 1200));   /* the association after it is an ordinary one */
+    hold_back(&h, 3000);
+    TEST_ASSERT_EQUAL(NET_HOLD_BACK, net_hold_end(&h));
+    TEST_ASSERT_EQUAL(NET_HOLD_WAIT, net_hold_check(&h, true, IP_A, 4000));
+    hold_open(&h);
+    TEST_ASSERT_TRUE(net_hold_arm(&h, 1000));
+    (void)net_hold_end(&h);
+    TEST_ASSERT_FALSE(net_hold_disconnect(&h, REASON_LEAVE, 1100));
+    /* At least a minute of the lease left, bound or renewing (not past the rebind time). */
+    TEST_ASSERT_TRUE(net_hold_lease_ok(true, NET_HOLD_LEASE_MIN_S));
+    TEST_ASSERT_FALSE(net_hold_lease_ok(true, NET_HOLD_LEASE_MIN_S - 1u));
+    TEST_ASSERT_FALSE(net_hold_lease_ok(false, 86400));
+}
+
+TEST_CASE("keeping the address: its times survive the clock wrap", "[net_roam]")
+{
+    net_hold_t h;
+    uint32_t t0 = UINT32_MAX - 1000u;
+    hold_open(&h);
+    TEST_ASSERT_TRUE(net_hold_arm(&h, t0));
+    TEST_ASSERT_TRUE(net_hold_disconnect(&h, REASON_LEAVE, t0 + 2000u));   /* across the wrap, within the arming */
+    TEST_ASSERT_EQUAL(NET_HOLD_WAIT, net_hold_check(&h, false, IP_A, t0 + 2000u + NET_HOLD_AWAY_S * 1000u - 1u));
+    TEST_ASSERT_EQUAL(NET_HOLD_EXPIRED, net_hold_check(&h, false, IP_A, t0 + 2000u + NET_HOLD_AWAY_S * 1000u));
+    hold_back(&h, t0);
+    net_hold_verify(&h, t0 + 500u);
+    TEST_ASSERT_EQUAL(NET_HOLD_WAIT, net_hold_check(&h, false, IP_A, t0 + 2000u));
+    TEST_ASSERT_EQUAL(NET_HOLD_UNCONFIRMED, net_hold_check(&h, false, IP_A, t0 + 500u + NET_HOLD_VERIFY_S * 1000u));
 }

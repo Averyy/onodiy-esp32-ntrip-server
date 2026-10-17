@@ -676,7 +676,7 @@ static esp_err_t h_gnss_profile(web_req_t *r)
         }
         if (autocfg && read_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD, 0) != 0) {
             /* The user lets the station configure the receiver: the first-apply hold ends. */
-            err = settings_erase_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD);
+            err = settings_erase_state_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD);
             if (err != ESP_OK) {
                 return web_send_internal(r->req, err);
             }

@@ -76,25 +76,32 @@ static bool answers_never_streamed(const hl_in_t *in)
     return in->rtcm_age_ms == UINT32_MAX && (in->answers != 0 || in->text_lines != 0);
 }
 
-/* The receiver answers now (see the header): it answered after its last
- * RTCM frame, more than HL_ANSWER_SLACK_MS after it (a line that close may
- * be that output's own); with no RTCM frame this boot, within
- * HL_ANSWER_FRESH_MS (the station asks such a receiver every minute). The
- * times are exact, as the station's own rule reads them. */
-static bool answered_since_rtcm(const hl_t *l, const hl_in_t *in)
+/* `at` came after the last RTCM frame, more than HL_ANSWER_SLACK_MS after
+ * it (a line that close may be that output's own); any time with no RTCM
+ * frame this boot. */
+static bool after_rtcm(const hl_in_t *in, int64_t at)
 {
-    if (in->rtcm_age_ms == UINT32_MAX) {
-        return answered_within(l, in, HL_ANSWER_FRESH_MS);
+    if (at == HL_NEVER) {
+        return false;
     }
-    int64_t seen = l->line_ms > l->answer_ms ? l->line_ms : l->answer_ms;
-    return seen != HL_NEVER && seen - (in->now_ms - (int64_t)in->rtcm_age_ms) > HL_ANSWER_SLACK_MS;
+    return in->rtcm_age_ms == UINT32_MAX || at - (in->now_ms - (int64_t)in->rtcm_age_ms) > HL_ANSWER_SLACK_MS;
 }
 
-/* The episode's "it answers" (ep_alive) still holds now: a receiver that
- * sent no RTCM frame this boot answers only while its last answer is fresh. */
+/* The receiver answers now (see the header): its last line or reply came
+ * after its last RTCM frame and is at most HL_ANSWER_FRESH_MS old (the
+ * station asks a receiver that sends no RTCM every minute). The times are
+ * exact, as the station's own rule reads them. */
+static bool answered_since_rtcm(const hl_t *l, const hl_in_t *in)
+{
+    int64_t seen = l->line_ms > l->answer_ms ? l->line_ms : l->answer_ms;
+    return seen != HL_NEVER && in->now_ms - seen <= HL_ANSWER_FRESH_MS && after_rtcm(in, seen);
+}
+
+/* The episode's "it answers" (ep_alive) still holds now: only while the
+ * receiver answers by that rule. */
 static bool still_answers(const hl_t *l, const hl_in_t *in)
 {
-    return l->ep_alive && (in->rtcm_age_ms != UINT32_MAX || answered_within(l, in, HL_ANSWER_FRESH_MS));
+    return l->ep_alive && answered_since_rtcm(l, in);
 }
 
 /* Wall time of an event `age_ms` before now, HL_NEVER for UINT32_MAX. */
@@ -116,13 +123,24 @@ static bool step_in_progress(const hl_t *l)
     return (l->phase == HL_PH_WANT || l->phase == HL_PH_RUN || l->phase == HL_PH_GRACE) && !watched_grace(l);
 }
 
+/* A suspension made of the station's own sessions only: its apply
+ * (CONFIGURING), a lease or a job that is not the ladder's step, and the
+ * grace after their release. */
+static bool sessions_only(uint8_t s, const hl_in_t *in)
+{
+    if (s == 0 || (s & (uint8_t) ~(HL_SUSP_STATION | HL_SUSP_LEASE | HL_SUSP_POST_LEASE)) != 0) {
+        return false;
+    }
+    return (s & HL_SUSP_STATION) == 0 || in->stn_state == HL_STN_CONFIGURING;
+}
+
 /* Between two steps of an episode: IDLE after an abandoned step, or after
  * a step whose RTCM stopped again, while no RTCM comes; suspended at most
- * by a lease (the station's own states say what it does). */
+ * by the station's own sessions. */
 static bool between_steps(const hl_t *l, const hl_in_t *in)
 {
     return l->phase == HL_PH_IDLE && (l->idx != 0 || l->abandoned != 0) && !l->held_wait && !rtcm_fresh(in) &&
-           (l->susp & (uint8_t) ~(HL_SUSP_LEASE | HL_SUSP_POST_LEASE)) == 0 && in->stn_state != HL_STN_NO_RECEIVER;
+           (l->susp == 0 || sessions_only(l->susp, in)) && in->stn_state != HL_STN_NO_RECEIVER;
 }
 
 /* The first configuration is held and the receiver answers: no RTCM is
@@ -194,15 +212,18 @@ static bool stalled(const hl_t *l, const hl_in_t *in)
     return in->now_ms - l->stall_ref_ms > (int64_t)in->stall_ms;
 }
 
+/* From what the receiver sends unasked (see the header): its replies to the
+ * station's own commands are no part of it. */
 hl_class_t hl_classify(const hl_t *l, const hl_in_t *in)
 {
-    if (in->rx_age_ms == UINT32_MAX || in->rx_age_ms > in->stall_ms) {
-        return HL_CLASS_NO_BYTES;
-    }
-    if (l->line_ms != HL_NEVER && in->now_ms - l->line_ms <= (int64_t)in->stall_ms) {
+    if (l->unasked_ms != HL_NEVER && in->now_ms - l->unasked_ms <= 2 * (int64_t)in->stall_ms &&
+        after_rtcm(in, l->unasked_ms)) {
         return HL_CLASS_TEXT_ONLY;
     }
-    return HL_CLASS_GARBAGE;
+    if (l->garbage_ms != HL_NEVER && in->now_ms - l->garbage_ms <= (int64_t)in->stall_ms) {
+        return HL_CLASS_GARBAGE;
+    }
+    return HL_CLASS_NO_BYTES;
 }
 
 uint8_t hl_entry_step(hl_class_t c)
@@ -323,10 +344,16 @@ static void refused(hl_t *l, const hl_in_t *in)
     l->step = HL_CODE_RECEIVER_RESET;
 }
 
-/* ALERTS mode: the step is only journalled; its grace runs as if it had. */
+/* ALERTS mode: the step is only journalled (once per episode: one that
+ * comes due again after a suspension is not journalled again); its grace
+ * runs as if it had. */
 static void dry_start(hl_t *l)
 {
-    journal(l, l->step, HL_OUT_NOT_RUN);
+    uint8_t bit = (uint8_t)(1u << l->step);
+    if ((l->dry_logged & bit) == 0) {
+        l->dry_logged |= bit;
+        journal(l, l->step, HL_OUT_NOT_RUN);
+    }
     l->dry = true;
     l->phase = HL_PH_GRACE;
     l->grace_start = l->active_ms;
@@ -387,13 +414,21 @@ static void escalate(hl_t *l, const hl_in_t *in, hl_class_t c)
     uint8_t next = l->idx == 0 ? hl_entry_step(c) : max_u8((uint8_t)(l->idx + 1), hl_entry_step(c));
     bool twice = l->abandoned_twice;
     l->abandoned_twice = false;
+    if (l->no_rtcm && next >= HL_CODE_RECONFIGURE) {
+        /* The retry pass of a receiver that answers without RTCM: steps 4
+         * and 5 were tried (a class that turned TEXT_ONLY on the way). */
+        enter_failed(l, in);
+        return;
+    }
     if (next > HL_LAST_STEP) {
-        /* Right after step 5 was abandoned a second time (it counts as
-         * failed): the same rule as its failure, so a receiver that
-         * answered since the RESET went out gets neither the power-cycle
-         * advice nor an ESP32 restart. A stall after a step 5 that
-         * succeeded is an ordinary one: the byte rule on its class. */
-        if (twice && l->idx == HL_CODE_RECEIVER_RESET && step_answered(l, in)) {
+        /* After step 5, the rule of its failure: right after it was
+         * abandoned a second time (it counts as failed), a receiver that
+         * answered since the RESET went out; in a stall right after a step
+         * 5 that brought RTCM back, a receiver that answers now. Neither
+         * gets the power-cycle advice nor an ESP32 restart; one that sends
+         * nothing gets the byte rule on its class. */
+        bool answered = twice ? step_answered(l, in) : answered_since_rtcm(l, in);
+        if (l->idx == HL_CODE_RECEIVER_RESET && answered) {
             l->ep_alive = true;
             enter_failed(l, in);
             return;
@@ -468,12 +503,12 @@ static void step_healthy(hl_t *l)
     l->abandoned_twice = false;
 }
 
-/* A suspension began: a step in progress is abandoned and tried again later.
- * A step that ran and is abandoned a second time in the same episode counts
- * as failed instead: the ladder goes on past it once the suspension ends.
- * The station can start a session of its own as a result of a step (its
- * applied check after a receiver reset, for one), so without this bound the
- * same step could be abandoned and re-run for as long as the fault lasts. */
+/* A suspension other than the station's own sessions began (keep_step()
+ * keeps a step through those): a step in progress is abandoned and tried
+ * again later. A step that ran and is abandoned a second time in the same
+ * episode counts as failed instead: the ladder goes on past it once the
+ * suspension ends, so the same step is never abandoned and re-run for as
+ * long as the fault lasts. */
 static void abandon(hl_t *l)
 {
     bool repeat = false;
@@ -518,6 +553,7 @@ static void ladder_reset(hl_t *l)
     l->abandoned_twice = false;
     l->blocked_6a = false;
     l->dry = false;
+    l->dry_logged = 0;
     l->ep_alive = false;
     l->no_rtcm = false;
     l->held_wait = false;
@@ -544,23 +580,24 @@ static void track_health(hl_t *l, const hl_in_t *in)
 
 /* ---- phases -------------------------------------------------------------- */
 
-static void run_phase(hl_t *l, const hl_in_t *in)
+/* The station has run the requested step (or must have, unseen). */
+static bool run_ended(hl_t *l, const hl_in_t *in)
 {
     if (in->stn_state == HL_STN_RECOVERING && !l->seen_running) {
         l->seen_running = true;
         l->seen_ms = in->now_ms;
     }
     bool started = l->seen_running || in->rec_enters != l->enters0;
-    bool ended;
     if (started) {
-        ended = in->stn_state != HL_STN_RECOVERING ||
-                (l->seen_ms != HL_NEVER && in->now_ms - l->seen_ms >= HL_RUN_CAP_MS);
-    } else {
-        ended = in->now_ms - l->req_ms >= HL_PICKUP_TIMEOUT_MS;   /* ran between two samples, events lost */
+        return in->stn_state != HL_STN_RECOVERING ||
+               (l->seen_ms != HL_NEVER && in->now_ms - l->seen_ms >= HL_RUN_CAP_MS);
     }
-    if (!ended) {
-        return;
-    }
+    return in->now_ms - l->req_ms >= HL_PICKUP_TIMEOUT_MS;   /* ran between two samples, events lost */
+}
+
+/* The step ran: its grace begins. */
+static void end_run(hl_t *l, const hl_in_t *in)
+{
     l->own_to_ms = in->now_ms;
     l->grace_start = l->active_ms;
     l->phase = HL_PH_GRACE;
@@ -579,6 +616,27 @@ static void run_phase(hl_t *l, const hl_in_t *in)
         l->win_bytes0 = in->rx_bytes;
         l->win_from_ms = in->now_ms;
     }
+}
+
+static void run_phase(hl_t *l, const hl_in_t *in)
+{
+    if (run_ended(l, in)) {
+        end_run(l, in);
+    }
+}
+
+/* The station's own session suspends the ladder: a step whose action is
+ * done keeps its evidence, and its grace waits (the ladder clock stops)
+ * instead of being abandoned and run again. A step that only ran until now
+ * (the station went from the ladder's job straight into a session of its
+ * own) enters its grace first. A grace in ALERTS mode (a step only
+ * journalled) waits the same way. */
+static bool keep_step(hl_t *l, const hl_in_t *in)
+{
+    if (l->phase == HL_PH_RUN && run_ended(l, in)) {
+        end_run(l, in);
+    }
+    return l->phase == HL_PH_GRACE;
 }
 
 static void grace_phase(hl_t *l, const hl_in_t *in)
@@ -733,6 +791,7 @@ static void leave_alerts(hl_t *l, const hl_in_t *in)
         return;
     }
     l->dry = false;
+    l->dry_logged = 0;
     l->phase = HL_PH_IDLE;
     l->idx = 0;
     l->step = 0;
@@ -757,6 +816,8 @@ void hl_init(hl_t *l, const hl_ops_t *ops, int64_t now_ms)
     l->stall_ref_ms = now_ms;
     l->line_ms = HL_NEVER;
     l->answer_ms = HL_NEVER;
+    l->unasked_ms = HL_NEVER;
+    l->garbage_ms = HL_NEVER;
     l->win_from_ms = HL_NEVER;
     l->req_ms = HL_NEVER;
     l->seen_ms = HL_NEVER;
@@ -783,6 +844,8 @@ void hl_tick(hl_t *l, const hl_in_t *in)
         l->lines_valid = true;
         l->lines_last = in->text_lines;
         l->answers_last = in->answers;
+        l->discarded_last = in->discarded;
+        l->framer_in_last = in->framer_in;
     } else {
         if (in->text_lines != l->lines_last) {
             l->lines_last = in->text_lines;
@@ -792,9 +855,20 @@ void hl_tick(hl_t *l, const hl_in_t *in)
             l->answers_last = in->answers;
             l->ep_alive = true;
         }
+        if (in->discarded != l->discarded_last) {
+            /* Not a counter that went back (a new framer), nor a frame a
+             * framer reset dropped with no new byte (the receiver stopped
+             * in it: see the header). */
+            if (in->discarded > l->discarded_last && in->framer_in > l->framer_in_last) {
+                l->garbage_ms = now;
+            }
+            l->discarded_last = in->discarded;
+        }
+        l->framer_in_last = in->framer_in;
     }
     l->line_ms = at_of(now, in->line_age_ms);
     l->answer_ms = at_of(now, in->answer_age_ms);
+    l->unasked_ms = at_of(now, in->unasked_line_age_ms);
 
     if (l->phase == HL_PH_REBOOTING) {
         if (now - l->reboot_ms >= HL_REBOOT_WAIT_MS) {
@@ -807,7 +881,9 @@ void hl_tick(hl_t *l, const hl_in_t *in)
     uint8_t s = suspension(l, in);
     l->susp = s;
     if (s != 0) {
-        abandon(l);
+        if (!(sessions_only(s, in) && keep_step(l, in))) {
+            abandon(l);
+        }
         l->was_suspended = true;
         return;
     }
