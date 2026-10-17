@@ -97,10 +97,10 @@ const L = {
     no_rtcm: ['Receiver sends no corrections', 'Check that the antenna is on the socket marked M and sees the open sky.'],
     rx_held: ['Receiver not configured yet', 'Confirm its configuration on the Receiver page. Until then it sends no corrections.'],
   },
-  /* After a failed receiver configuration: the station's own retry (automatic configuration on), or only the user's (configFailedText). */
+  /* After a failed receiver configuration: the station's own retry (automatic setup), or only the user's (configFailedText). */
   configRetry: {
     auto: 'The station tries again on its own.',
-    user: 'Automatic configuration is off, so the station does not retry. Press Apply again in Receiver settings.',
+    user: 'Automatic setup is off, so nothing retries it. Press Apply again in Receiver settings.',
   },
   salert: {
     unsupported_model: ['Receiver model not supported', 'The station streams what this receiver sends but does not configure or update it.'],
@@ -232,17 +232,17 @@ const L = {
   linkMode: { off: 'Off', stream: 'Streaming', command: 'Command session', raw: 'Raw (update)' },
   baseMode: { survey_in: 'Survey-in', fixed: 'Fixed position' },
   posSource: { none: 'None', survey: 'Survey-in', averaged: 'Averaged', user: 'Entered by you' },
-  /* Receiver management's choice (gnss/recovery) as Receiver settings names it (MANAGE), in the owner's words ("Me"). */
-  recovery: { full: 'The station', no_reboot: 'The station, but never restart itself', alerts_only: 'Me (alerts only)' },
-  /* The same choice where the station tells it (the Status page's top card, Logs' Health card): "You", not "Me". */
-  manage: { full: 'The station', no_reboot: 'The station, no restarts', alerts_only: 'You (alerts only)' },
+  /* Receiver setup (gnss/recovery) as Receiver settings names it (MANAGE): its two options, the first without the restart. */
+  recovery: { full: 'Automatic', no_reboot: 'Automatic, no station restarts', alerts_only: 'Manual' },
+  /* The same words where another page tells it (Logs' Health card). */
+  manage: { full: 'Automatic', no_reboot: 'Automatic, no station restarts', alerts_only: 'Manual' },
   trigger: { protected: 'Onocoy caster down', assoc_no_ip: 'connected without an IP address', unreached: 'a caster not reached' },
   liveWhy: {
     none: '',
     busy: 'the station is busy with the receiver',
     not_streaming: 'the receiver is not streaming',
     maintenance: 'receiver maintenance is on',
-    autocfg_off: 'automatic configuration is off',
+    autocfg_off: 'receiver setup is manual',
     unsupported: 'the station does not configure this receiver model',
     reconfigured: 'the receiver was configured or restarted; extend to turn them on again',
     rejected: 'the receiver refused the command',

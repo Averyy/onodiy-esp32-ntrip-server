@@ -113,8 +113,8 @@ def run_ui(cases: list[tuple[str, object]]) -> list:
     return json.loads(res.stdout)
 
 
-# Receiver management "Me (alerts only)" as the Status page's top card says it: a fact with a Change link to its card.
-ME_FACT = [["Receiver management", "You (alerts only)", "#/receiver/settings/manage"]]
+# Receiver setup "Manual" as the Status page's top card says it: a fact with a Change link to its card.
+ME_FACT = [["Receiver management", "Manual", "#/receiver/settings/manage"]]
 
 # The hold-overlay station whose replay stopped: the ladder's episode with the admin page open.
 HOLD = {"reboot_hold": ["admin"], "reboot_hold_left_s": 1578, "reboot_cap_wait_s": None,
@@ -1002,33 +1002,23 @@ def test_signal_groups_short_and_plain():
         assert not any(m in line for m in ("25164", "build", "2026")), pair
 
 
-def test_receiver_management_one_choice_over_two_settings():
-    """Receiver settings: one choice for automatic configuration and what happens if corrections stop. Each option one
-    concrete line; any other combination is Custom, says what it does and offers the option nearest to it."""
+def test_receiver_setup_one_choice_over_two_settings():
+    """Receiver settings' Receiver setup: Automatic (with the station's restart, or without it: the box under it) or
+    Manual, one choice over automatic setup and what happens if corrections stop; any other combination is Custom, says
+    what it does and offers the option nearest to it. Every page names the choice alike."""
     (m,) = run_ui([("manage", None)])
-    assert {k: v[:3] for k, v in m.items()} == {
-        "station": [True, "full", "The station (recommended)"],
-        "no_restart": [True, "no_reboot", "The station, but never restart itself"],
-        "me": [False, "alerts_only", "Me (alerts only)"]}
-    # One line each (at most about 80 characters: one line in the card on a desktop).
-    for _, _, name, line in m.values():
-        assert line.endswith(".") and len(line) <= 80 and not any(w in line for w in ("RTCM", "SAVECONFIG", "autocfg"))
-    assert "restarting itself" in m["station"][3] and "never restarts" in m["no_restart"][3]
-    # What the station does on its own: a profile the owner saves still reaches the receiver ("Save and apply").
-    assert m["me"][3].startswith("Configures nothing on its own") and "receiver nothing" not in m["me"][3]
+    assert m == {"auto": [True, "full"], "no_restart": [True, "no_reboot"], "manual": [False, "alerts_only"]}
     keys = run_ui([("manageKey", [a, r]) for a in (True, False) for r in ("full", "no_reboot", "alerts_only")])
-    assert keys == ["station", "no_restart", None, None, None, "me"]
+    assert keys == ["auto", "no_restart", None, None, None, "manual"]
     custom = run_ui([("manageCustom", [True, "alerts_only"]), ("manageCustom", [False, "full"]),
                      ("manageCustom", [False, "no_reboot"])])
-    assert custom[0] == ["The station configures the receiver but does nothing if corrections stop.", "station"]
-    assert custom[1][1] == custom[2][1] == "me"
-    assert custom[1][0].endswith("still resets it and may restart itself.") and custom[2][0].endswith("still resets it.")
-    # Receiver settings' choice in the owner's words; the Status page and Logs say it from the station's side, under the
-    # setting's name ("Receiver management"): "You", never "Me", and short.
-    assert run_ui([("recoveryLbl", "full"), ("recoveryLbl", "no_reboot"), ("recoveryLbl", "alerts_only")]) == [
-        "The station", "The station, but never restart itself", "Me (alerts only)"]
-    assert run_ui([("manageLbl", "full"), ("manageLbl", "no_reboot"), ("manageLbl", "alerts_only")]) == [
-        "The station", "The station, no restarts", "You (alerts only)"]
+    assert custom[0] == ["The receiver is set up automatically, but nothing is done if corrections stop.", "auto"]
+    assert custom[1][1] == custom[2][1] == "manual"
+    assert custom[1][0].endswith("reconnected and restarted, and the station may restart.")
+    assert custom[2][0].endswith("reconnected and restarted.")
+    names = ["Automatic", "Automatic, no station restarts", "Manual"]
+    assert run_ui([("recoveryLbl", k) for k in ("full", "no_reboot", "alerts_only")]) == names
+    assert run_ui([("manageLbl", k) for k in ("full", "no_reboot", "alerts_only")]) == names
 
 
 def test_receiver_chip_never_says_streaming_while_corrections_stopped():
@@ -1141,7 +1131,7 @@ def test_comparison_says_why_it_cannot_start_in_the_stations_order():
                   ("sgtBlock", {**ok, "state": "no_receiver", "position": {"locked": False}}),
                   ("sgtBlock", {**ok, "position": {"locked": False}}),
                   ("sgtBlock", ok)])
-    assert out == ["Configure the receiver first.", "Needs automatic configuration on.", "Not during receiver maintenance.",
+    assert out == ["Configure the receiver first.", "Needs automatic receiver setup.", "Not during receiver maintenance.",
                    "Needs a connected receiver.", "Lock the base position first.", ""]
 
 
@@ -1173,13 +1163,13 @@ def test_profile_chip_and_maintenance_notice_everywhere_but_settings():
                     ("profileChip", {"state": "streaming", "autocfg": True, "profile_applied": True, "first_apply_held": True}),
                     ("profileChip", {"state": "no_receiver", "autocfg": True, "profile_applied": False})])
     assert chips == [["Applying", "info"], ["Failed", "bad"], ["Applied", "ok"], ["Not applied", "warn"], ["Not applied", "warn"]]
-    # The owner manages the receiver ("Me (alerts only)"): a grey chip that says what the Receiver page says, applied or
-    # not; amber only while the station manages it. Applying and a failure still show (a saved profile is sent once).
+    # Manual receiver setup: a grey chip that says so, applied or not; amber only with automatic setup. Applying and a
+    # failure still show (a saved profile is sent once).
     own = {"state": "streaming", "autocfg": False, "first_apply_held": False}
     chips = run_ui([("profileChip", {**own, "profile_applied": False}), ("profileChip", {**own, "profile_applied": True}),
                     ("profileChip", {**own, "state": "configuring"}), ("profileChip", {**own, "config_failed": True}),
                     ("profileChip", {**own, "first_apply_held": True})])
-    assert chips == [["Managed by you", ""], ["Managed by you", ""], ["Applying", "info"], ["Failed", "bad"],
+    assert chips == [["Manual setup", ""], ["Manual setup", ""], ["Applying", "info"], ["Failed", "bad"],
                      ["Not applied", "warn"]]
     maint = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600})
     out = run_ui([("notices", [maint, p]) for p in ("settings", "receiver", "receiver/settings", "receiver/live", "casters", "logs",
@@ -1241,10 +1231,9 @@ def test_a_paused_survey_reads_paused_on_its_chip():
 
 
 def test_save_buttons_say_they_apply_while_you_manage_the_receiver():
-    """Receiver settings' Save buttons (Position, Receiver profile): "Save and apply" while the owner manages the
-    receiver (automatic configuration off: Me, or the Custom combination), as a changed profile reaches the receiver all
-    the same; the card's own "Save position" / "Save profile" while the station manages it, and during the held first
-    configuration."""
+    """Receiver settings' Save buttons (Position, Receiver profile): "Save and apply" with manual receiver setup
+    (automatic setup off: Manual, or the Custom combination), as a changed profile reaches the receiver all the same; the
+    card's own "Save position" / "Save profile" with automatic setup, and during the held first configuration."""
     station = {"autocfg": True, "recovery": "full", "first_apply_held": False}
     me = {"autocfg": False, "recovery": "alerts_only", "first_apply_held": False}
     custom = {"autocfg": False, "recovery": "full", "first_apply_held": False}
@@ -1376,7 +1365,7 @@ def test_receiver_unchecked_during_maintenance_says_so():
     # The Receiver card says it once, in a line of its own: the position row goes (None) unless the station knows it.
     assert out == [None, "No position yet.", "Locked. If the antenna moves, survey again.",
                    "Surveying, about 10\u00a0min left. Then lock it.",
-                   ["Not checked", ""], ["Not applied", "warn"], ["Managed by you", ""],
+                   ["Not checked", ""], ["Not applied", "warn"], ["Manual setup", ""],
                    ["Not checked", ""], ["Not locked", ""], ["Surveying", "info"]]
     r = {"rx_maintenance": True, "identity_confirmed": False, "profile_applied": False, "position_locked": False,
          "position_known": False, "surveying": False}
@@ -1473,7 +1462,7 @@ def test_header_says_the_station_state_in_a_word_in_the_top_cards_colour():
         (dict(health={"level": "failed"}, alerts=[{"id": "no_satellites", "source": "health"}], casters=wait),
          ("no_satellites", "bad", "Not streaming")),
         (dict(health=recovering, alerts=[{"id": "no_rtcm", "source": "health"}], casters=wait), ("no_rtcm", "warn", "Recovering")),
-        # The owner's board without its antenna, receiver management "Me (alerts only)".
+        # The owner's board without its antenna, receiver setup "Manual".
         (dict(health={"level": "degraded", "recovery_mode": "alerts_only"}, alerts=[{"id": "no_rtcm", "source": "health"}],
               casters=wait), ("no_rtcm", "bad", "Not streaming")),
         (dict(casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate")]), ("stopped", "bad", "Caster stopped")),
@@ -1537,7 +1526,7 @@ def test_every_link_in_the_ui_goes_to_a_page_that_exists():
     """No button, link or notice points at an old address (it would only redirect) or a part a page does not have."""
     pages = {"": None, "casters": None, "receiver": {"settings", "live"}, "settings": {"updates", "session", "wifi", "restart"},
              "logs": {"history", "console"}}
-    # The places a part is opened at (#/receiver/settings/manage: the Receiver management card).
+    # The places a part is opened at (#/receiver/settings/manage: the Receiver setup card).
     places = {("receiver", "settings"): {"manage"}, ("receiver", "live"): {"start"}}
     bad = []
     for f in sorted(UI_JS.glob("*.js")):
@@ -1752,8 +1741,8 @@ def test_a_paused_recovery_says_what_it_waits_for():
     # Otherwise the choice, as the Status page names it.
     assert out == ["Paused while the receiver is configured"] * 3 + [
         "Paused (receiver maintenance)", "Paused while the station looks for the receiver",
-        "Paused during the receiver update", "Paused", "Paused", "The station", "The station, no restarts",
-        "You (alerts only)"], out
+        "Paused during the receiver update", "Paused", "Paused", "Automatic", "Automatic, no station restarts",
+        "Manual"], out
 
 
 def test_log_lines_and_event_times_fit_one_line():
