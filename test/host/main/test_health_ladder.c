@@ -2002,10 +2002,27 @@ TEST_CASE("ladder: alerts only journals each would-be step once and sends nothin
     TEST_ASSERT_TRUE(w.rec[1].at - w.rec[0].at >= 5 * SEC);
     TEST_ASSERT_TRUE(w.rec[2].at - w.rec[1].at >= 15 * SEC);
     TEST_ASSERT_TRUE(w.rec[3].at - w.rec[2].at >= 30 * SEC);
-    /* the FAILED retry pass journals the step it would enter, every 10 min, and sends nothing */
-    sim_run(&w, 21 * MIN);
-    TEST_ASSERT_EQUAL_UINT32(3, count_rec(&w, 2, HL_OUT_NOT_RUN));
+    /* The FAILED retry pass (every 10 min) sends nothing, and journals nothing while the step it would enter was
+     * journalled in this episode already (the board's night: one record per pass, 32 in 5 hours). */
+    sim_run(&w, 5 * 60 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(1, count_rec(&w, 2, HL_OUT_NOT_RUN));
+    TEST_ASSERT_EQUAL_UINT32(4, w.nrec);
     TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, st_of(&w).phase);
+    /* A pass that would enter a step new to this episode says so, once: the receiver sends text now (step 4). */
+    w.lines = true;
+    sim_run(&w, 25 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(1, count_rec(&w, 4, HL_OUT_NOT_RUN));
+    TEST_ASSERT_EQUAL_UINT32(5, w.nrec);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+    /* Healthy for a minute ends the episode; the next stall journals its steps again. */
+    w.lines = false;
+    w.rtcm = true;
+    sim_run(&w, 2 * MIN);
+    TEST_ASSERT_TRUE(find_rec(&w, 8, HL_OUT_HEALTHY, 0) >= 0);
+    w.rtcm = false;
+    sim_run(&w, 2 * MIN);
+    TEST_ASSERT_EQUAL_UINT32(2, count_rec(&w, 2, HL_OUT_NOT_RUN));
 
     /* GARBAGE: 3, then 7 */
     alerts_only_run(&w, true, false);

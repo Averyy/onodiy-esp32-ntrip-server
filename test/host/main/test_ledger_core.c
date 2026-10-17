@@ -160,22 +160,85 @@ TEST_CASE("ledger: a power-on reset that left the receiver running is no power-o
     TEST_ASSERT_EQUAL_UINT32((uint32_t)S(3), c.today.down_ms[0]);   /* 1 s gap + 2 s since boot: downtime */
     TEST_ASSERT_EQUAL_UINT32(0, c.today.planned_ms[0]);
 
-    /* The verdict after the first clock: the gap stays as counted. */
+    /* The verdict after the first clock (SNTP came first): the gap's
+     * power-off time is taken back, its downtime stays, nothing turns
+     * planned, and power-off time from an earlier boot stays. */
     s = snap_base();
     s.today.utc_day = DAY0;
+    s.today.power_off_ms = (uint32_t)M(5);
     s.alive_ms = at(DAY0, H(12));
     s.expected_mask = 0x01;
     s.protected_mask = 0x01;
+    s.planned = true;
     fresh(T0, 2000);
     lc_restore(&c, &s, LC_RESET_POWER_CUT);
-    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(12) + S(3)), LC_CLOCK_SNTP));
-    TEST_ASSERT_FALSE(lc_power_kept(&c));
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)S(1), c.today.power_off_ms);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(12) + S(13) + 2000), LC_CLOCK_SNTP));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(M(5) + S(13)), c.today.power_off_ms);
+    lc_tick(&c, T0 + 20000u);
+    int64_t mark_ms = 0;
+    bool today = false;
+    bool hist = false;
+    TEST_ASSERT_TRUE(lc_persist_due(&c, T0 + 20000u, 60000u, &mark_ms, &today, &hist));   /* stored with the gap */
+    TEST_ASSERT_FALSE(lc_persist_due(&c, T0 + 21000u, 60000u, &mark_ms, &today, &hist));
+    TEST_ASSERT_TRUE(lc_power_kept(&c));
+    TEST_ASSERT_FALSE(lc_power_kept(&c));   /* once */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)M(5), c.today.power_off_ms);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(S(13) + 22000), c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.planned_ms[0]);
+    TEST_ASSERT_FALSE(c.prev_reboot_planned);
+    /* Stored again at once, not a persist interval later: the next press of the reset pin may come sooner. */
+    TEST_ASSERT_TRUE(lc_persist_due(&c, T0 + 21000u, 60000u, &mark_ms, &today, &hist));
+    TEST_ASSERT_TRUE(today);
+    TEST_ASSERT_FALSE(lc_persist_due(&c, T0 + 22000u, 60000u, &mark_ms, &today, &hist));
 
     /* Not a power-on class reset: nothing to change. */
     fresh(T0, 2000);
     lc_restore(&c, &s, LC_RESET_SOFTWARE);
     TEST_ASSERT_FALSE(lc_power_kept(&c));
+}
+
+TEST_CASE("ledger: a reset-pin gap counted over midnight is no power-off time once the verdict comes", "[ledger]")
+{
+    /* The gap ran from 23:00 into the next day and was counted on both
+     * days; UTC midnight passes once more before the verdict (today moves
+     * into the history). */
+    lc_snapshot_t s = snap_base();
+    s.today.utc_day = DAY0 - 1;
+    s.alive_ms = at(DAY0 - 1, H(23));
+    s.expected_mask = 0x01;
+    s.protected_mask = 0x01;
+    fresh(T0, 0);
+    lc_restore(&c, &s, LC_RESET_POWER_CUT);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(24) - S(10)), LC_CLOCK_SNTP));
+    TEST_ASSERT_EQUAL_INT32(DAY0, c.today.utc_day);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(H(24) - S(10)), c.today.power_off_ms);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)H(1), c.hist[0].power_off_ms);
+    lc_tick(&c, T0 + 20000u);                                    /* past midnight */
+    TEST_ASSERT_EQUAL_INT32(DAY0 + 1, c.today.utc_day);
+    TEST_ASSERT_TRUE(lc_power_kept(&c));
+    TEST_ASSERT_EQUAL_INT32(DAY0, c.hist[0].utc_day);
+    TEST_ASSERT_EQUAL_UINT32(0, c.hist[0].power_off_ms);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(H(24) - S(10) + 10000), c.hist[0].down_ms[0]);
+    TEST_ASSERT_EQUAL_INT32(DAY0 - 1, c.hist[1].utc_day);
+    TEST_ASSERT_EQUAL_UINT32(0, c.hist[1].power_off_ms);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)H(1), c.hist[1].down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.power_off_ms);
+    TEST_ASSERT_TRUE(c.hist_dirty);
+
+    /* A gap capped at the history: only the days kept carried it. */
+    s = snap_base();
+    s.today.utc_day = DAY0 - 100;
+    s.alive_ms = at(DAY0 - 100, H(12));
+    s.expected_mask = 0x01;
+    fresh(T0, 0);
+    lc_restore(&c, &s, LC_RESET_POWER_CUT);
+    lc_set_utc(&c, T0, at(DAY0, H(6)), LC_CLOCK_SNTP);
+    TEST_ASSERT_TRUE(lc_power_kept(&c));
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.power_off_ms);
+    for (size_t i = 0; i < c.hist_n; i++) {
+        TEST_ASSERT_EQUAL_UINT32(0, c.hist[i].power_off_ms);
+        TEST_ASSERT_EQUAL_UINT32((uint32_t)LC_DAY_MS, c.hist[i].down_ms[0]);
+    }
 }
 
 TEST_CASE("ledger: a gap that spans midnight and planned work at the reset", "[ledger]")

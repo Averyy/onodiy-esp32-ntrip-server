@@ -344,16 +344,23 @@ static void refused(hl_t *l, const hl_in_t *in)
     l->step = HL_CODE_RECEIVER_RESET;
 }
 
-/* ALERTS mode: the step is only journalled (once per episode: one that
- * comes due again after a suspension is not journalled again); its grace
- * runs as if it had. */
-static void dry_start(hl_t *l)
+/* ALERTS mode: step `step` would start; journalled once per episode (one
+ * that comes due again, after a suspension or in a retry pass, tells the
+ * owner nothing new). */
+static void dry_journal(hl_t *l, uint8_t step)
 {
-    uint8_t bit = (uint8_t)(1u << l->step);
+    uint8_t bit = (uint8_t)(1u << step);
     if ((l->dry_logged & bit) == 0) {
         l->dry_logged |= bit;
-        journal(l, l->step, HL_OUT_NOT_RUN);
+        journal(l, step, HL_OUT_NOT_RUN);
     }
+}
+
+/* ALERTS mode: the step is only journalled (dry_journal); its grace runs as
+ * if it had. */
+static void dry_start(hl_t *l)
+{
+    dry_journal(l, l->step);
     l->dry = true;
     l->phase = HL_PH_GRACE;
     l->grace_start = l->active_ms;
@@ -689,7 +696,7 @@ static void failed_phase(hl_t *l, const hl_in_t *in)
     l->retry_at = l->active_ms + HL_FAILED_RETRY_MS;
     uint8_t step = max_u8(HL_CODE_LINK_RESTART, hl_entry_step(c));
     if (mode_of(in) == HL_MODE_ALERTS) {
-        journal(l, step, HL_OUT_NOT_RUN);   /* the pass it would start; nothing is sent */
+        dry_journal(l, step);   /* the pass it would start, if that is new; nothing is sent */
         return;
     }
     want(l, in, step);

@@ -43,7 +43,8 @@
  *   - reconnects: entries into streaming after a period of expected
  *     downtime;
  *   - per day also power-off time (gaps between the last-alive mark and a
- *     boot after a power cut) and UART overflow events;
+ *     boot after a power cut; taken back once the station learns that the
+ *     receiver kept running, lc_power_kept) and UART overflow events;
  *   - today only: the epochs the protected slot should have sent while
  *     online but did not (lost epochs, reported by the caster client as
  *     they grow), so the day's data rate survives restarts. A finished day
@@ -207,6 +208,8 @@ typedef struct {
     bool alive_valid;
     int64_t alive_ms;
     bool gap_power_off;
+    int64_t gap_off_start_ms;           /**< the power-off gap first_clock counted: its start (UTC ms) ... */
+    uint64_t gap_off_ms;                /**< ... and its length (0 = none counted) */
     bool prev_planned;                  /**< planned receiver work was going on at its end */
     bool prev_reboot_planned;           /**< it ended in a reboot the user asked for */
     bool prev_unplanned;                /**< it is known not to have (crash, reset pin, lifecycle's record) */
@@ -215,6 +218,7 @@ typedef struct {
     bool today_dirty;
     bool hist_dirty;
     bool rolled;                        /**< a finished day moved into the history: store it now */
+    bool store_now;                     /**< a counted gap was taken back (lc_power_kept): store it before another reset */
     bool alive_saved;
     uint32_t alive_saved_ms;
     int64_t today_mark_ms;              /**< mark today was last handed out to be stored with (0 = not yet) */
@@ -269,8 +273,10 @@ void lc_unplanned_boot(lc_t *c);
  * A power-on reset whose receiver kept running (the station's verdict): on
  * the ESP32-S3 the reset pin reads as power-on, so the gap was the reset
  * pin's, not a power cut: it stops counting as power-off time (unplanned all
- * the same, lc_unplanned_boot). Only while the gap has not been accrued
- * (no clock yet this boot); afterwards it stays as counted.
+ * the same, lc_unplanned_boot). Before the first clock of the boot the gap
+ * is then counted without it; after it (the clock came first) the gap's
+ * power-off time comes off the days it went to (those still kept), and the
+ * gap stays downtime as counted.
  * @return true if the gap changed.
  */
 bool lc_power_kept(lc_t *c);
@@ -349,7 +355,10 @@ void lc_snapshot(const lc_t *c, lc_snapshot_t *out);
 /**
  * Time to store the last-alive mark (with a clock, every `interval_ms`, and
  * at once when a finished day moved into the history: the RTC copy holds
- * only today, so until the history is stored a reset would lose that day).
+ * only today, so until the history is stored a reset would lose that day;
+ * also at once after lc_power_kept took back a counted gap: the reset pin
+ * that caused it powers the RTC copy down, and the next press may come
+ * within the interval).
  * `interval_ms` 0 stores now (a reboot); without a clock that is the mark
  * the session was restored with (today has not grown since: this boot's
  * time is pending, kept only in the RTC copy, and a restore from NVS counts

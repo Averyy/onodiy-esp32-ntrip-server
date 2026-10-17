@@ -129,8 +129,10 @@
  *            station's own sessions like a step that ran; where the byte
  *            rule would run (after step 3
  *            or 5) the ladder goes to 7, with no 6b and no power-cycle
- *            alert. In 7 the retry pass journals the step it would enter
- *            every 10 min and sends nothing. The level is DEGRADED before 7
+ *            alert. In 7 the retry pass (every 10 min) sends nothing and
+ *            journals the step it would enter only when that step was not
+ *            journalled in this episode yet: a pass that repeats one tells
+ *            nothing new. The level is DEGRADED before 7
  *            and FAILED at 7. Leaving this mode while stalled starts a fresh
  *            pass at the class entry step. A step the station runs when
  *            the user chooses this mode completes; once it has run, its
@@ -471,7 +473,8 @@ typedef struct {
     /* user recovery mode */
     uint8_t mode;                 /**< hl_mode_t of the last decision */
     bool dry;                     /**< the step in its grace was only journalled (ALERTS mode) */
-    uint8_t dry_logged;           /**< bit n: step n was journalled as not run in this episode */
+    uint8_t dry_logged;           /**< bit n: step n was journalled as not run in this episode (a step only journalled, or
+                                       a FAILED retry pass in ALERTS mode) */
 
     /* REBOOTING */
     int64_t reboot_ms;

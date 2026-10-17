@@ -123,15 +123,18 @@ function onocoyCard(s, st) {
     kv([['Online today', fmt.dur(c.today_online_s)], ['Offline today', fmt.dur(d.known ? d.down : c.today_offline_s)]]));
 }
 
-/* "Locked", "Surveying, 11 min left"... (position_locked is the stored profile's base mode: it runs once the profile is applied).
- * A survey needs data: while none arrives (delivering false) it is paused, not counting down. "Not locked" only for a position
- * the station has (position_known; an older firmware without it: as before). In maintenance with the receiver unchecked
- * (rxUnchecked) the station knows neither whether the profile runs nor whether it surveys: it says so. */
+/* "Locked", "Surveying, 11 min left"... (position_locked is the stored profile's base mode: it runs once the receiver took the
+ * profile: checked against its RTCM, or acknowledged and not checked yet without RTCM).
+ * A survey needs data: while none arrives (delivering false) it is paused, not counting down, also once the station's window
+ * ended (survey_unfinished: the receiver has not finished it). "Not locked" only for a position the station has
+ * (position_known; an older firmware without it: as before). In maintenance with the receiver unchecked (rxUnchecked) the
+ * station knows neither whether the profile runs nor whether it surveys: it says so. */
 function positionText(r, delivering) {
   const unchecked = rxUnchecked(r.rx_maintenance, r.identity_confirmed);
-  if (r.position_locked) return r.profile_applied || unchecked ? 'Locked' : 'Fixed, not applied yet';
-  if (r.surveying && !delivering) return 'Surveying, paused';
-  if (r.surveying) return 'Surveying' + (r.survey_window_left_s ? ', ' + inMinutes(r.survey_window_left_s) + ' left' : '');
+  const surveying = r.surveying || r.survey_unfinished;
+  if (r.position_locked) return r.profile_applied || r.profile_acknowledged || unchecked ? 'Locked' : 'Fixed, not applied yet';
+  if (surveying && !delivering) return 'Surveying, paused';
+  if (surveying) return 'Surveying' + (r.survey_window_left_s ? ', ' + inMinutes(r.survey_window_left_s) + ' left' : '');
   if (unchecked) return NOT_CHECKED;
   return r.position_known === false ? 'No position yet' : 'Not locked';
 }

@@ -236,6 +236,7 @@ static volatile bool s_maint_power_cut;  /* the power-on or brownout verdict: th
  * reset (publish_status). Station task only; s_known_alerts (the alerts it
  * adds, 0 without) under s_lock, for station_get_status. */
 static stn_maint_known_t s_known;
+static volatile bool s_known_profile_gone;     /* the user stored another profile this boot: s_known is not about it */
 static bool s_known_on;
 static uint32_t s_known_alerts;
 static stn_t s_known_core;   /* sync_maintenance's snapshot of the core (station task; too large for its stack) */
@@ -735,6 +736,17 @@ static bool store_profile(const um98x_base_profile_t *p, const um98x_base_positi
     return true;
 }
 
+/* The station stored a profile of its own (a lock, a re-survey, a signal
+ * group): one that differs from the profile stored before (its hash) is not
+ * what the receiver acknowledged, as for the user's save, until an apply of
+ * it works. Never under s_lock. */
+static void own_profile_stored(uint32_t hash_before)
+{
+    if (um98x_profile_hash(&s_profile) != hash_before) {
+        station_profile_changed();
+    }
+}
+
 /* The stored profile with another signal group (the base position stays as stored). */
 static bool store_profile_group(station_sg_t g)
 {
@@ -744,6 +756,7 @@ static bool store_profile_group(station_sg_t g)
     if (settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_PROFILE, buf, &blen) == ESP_OK) {
         (void)um98x_profile_decode(buf, blen, &p);
     }
+    uint32_t before = um98x_profile_hash(&p);
     p.signal_group_master = g.master;
     p.signal_group_slave = g.slave;
     size_t len = um98x_profile_encode(&p, buf, sizeof(buf));
@@ -754,6 +767,7 @@ static bool store_profile_group(station_sg_t g)
         return false;
     }
     s_profile = p;
+    own_profile_stored(before);
     return true;
 }
 
@@ -1319,6 +1333,7 @@ static const char *why_name(uint8_t why)
 static void job_apply(const stn_job_t *job, stn_result_t *r)
 {
     load_profile();
+    uint32_t before = um98x_profile_hash(&s_profile);
     if (job->change == STN_CHANGE_LOCK) {
         um98x_base_profile_t next;
         um98x_base_position_t pos;
@@ -1335,6 +1350,7 @@ static void job_apply(const stn_job_t *job, stn_result_t *r)
             return;
         }
         s_profile = next;
+        own_profile_stored(before);
         ESP_LOGI(TAG, "position locked (survey result): applying it as a fixed base");
     } else if (job->change == STN_CHANGE_RESURVEY) {
         um98x_base_profile_t next;
@@ -1345,6 +1361,7 @@ static void job_apply(const stn_job_t *job, stn_result_t *r)
             return;
         }
         s_profile = next;
+        own_profile_stored(before);
         ESP_LOGI(TAG, "locked position forgotten: surveying again (%u s)", (unsigned)s_profile.survey_in_s);
     }
 
@@ -2241,10 +2258,11 @@ static uint32_t known_overlay(station_status_t *o)
         o->rx_sg_valid = true;
         o->rx_sg = (station_sg_t){ .master = k->sg_master, .slave = k->sg_slave };
     }
-    if (k->profile_hash != um98x_profile_hash(&s_profile)) {
+    if (s_known_profile_gone || k->profile_hash != um98x_profile_hash(&s_profile)) {
         return 0;   /* the profile changed since: whether it runs, and its check, are not known */
     }
     o->profile_applied = o->profile_applied || k->profile_applied;
+    o->profile_acknowledged = o->profile_acknowledged || k->profile_acknowledged;
     o->alerts |= k->alerts;
     o->config_failed = (o->alerts & STATION_ALERT_CONFIG_FAILED) != 0;
     o->fix_state = k->fix_state;
@@ -2281,6 +2299,7 @@ static void known_now(const stn_t *core, int64_t now, stn_maint_known_t *k)
         k->sg_master = s_rx_sg.master;
         k->sg_slave = s_rx_sg.slave;
         k->profile_applied = core->profile_applied;
+        k->profile_acknowledged = stn_profile_acknowledged(core);
         k->alerts = core->alerts;
         stn_fix_status_t fx;
         stn_fix_status(core, now, &fx);
@@ -2310,6 +2329,7 @@ static void publish_status(const stn_in_t *in)
     o->identity_confirmed = core.identity_ok;
     o->alerts = stn_alerts(&core);
     o->profile_applied = core.profile_applied;
+    o->profile_acknowledged = stn_profile_acknowledged(&core);
     o->rtcm_differs = core.rtcm_differs;
     o->rtcm1230_supported = in->rtcm1230_ok;
     o->rtcm1230_known = rtcm1230_state() >= 0;
@@ -2330,6 +2350,7 @@ static void publish_status(const stn_in_t *in)
     }
     o->surveying = stn_surveying(&core, in->now_ms);
     o->survey_window_left_s = stn_survey_left_s(&core, in->now_ms);
+    o->survey_unfinished = stn_survey_unfinished(&core, in->now_ms);
     o->lease_held = s_lease != NULL || s_hold_lease != NULL || s_boot_lease != NULL;
     o->detect_failures = core.detect_failures;
     o->detect_saw_bytes = core.detect_saw_bytes;
@@ -3833,6 +3854,15 @@ void station_profile_saved(void)
     s_sg_back_valid = false;
     s_sg_refused_reply[0] = '\0';
     portEXIT_CRITICAL(&s_lock);
+}
+
+void station_profile_changed(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    stn_profile_changed(&s_core);
+    s_known_profile_gone = true;
+    portEXIT_CRITICAL(&s_lock);
+    wake();   /* the status says so at once */
 }
 
 esp_err_t station_request_reconfigure(void)

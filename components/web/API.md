@@ -449,8 +449,8 @@ object as sections (section 7), so the UI keeps one model. Admin form:
               "cred_reverted": false, "cred_reverted_why": null},
   "receiver": {"state": "streaming", "model": "UM982", "firmware": "R4.10Build18975",
                "responding": true, "restarting": false, "identity_confirmed": true, "profile_applied": true,
-               "position_locked": true, "position_known": true, "surveying": false, "survey_window_left_s": 0,
-               "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "glonass": true,
+               "profile_acknowledged": true, "position_locked": true, "position_known": true, "surveying": false, "survey_window_left_s": 0,
+               "survey_unfinished": false, "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "glonass": true,
                "rtcm1230_supported": true, "journal": "none",
                "uart_closed": false, "rx_maintenance": false, "maintenance_left_s": 0, "maintenance_chosen_s": 0,
                "next_detect_in_s": null, "first_apply_held": false},
@@ -492,6 +492,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.uart_closed` | the receiver UART is closed and `gnss_link` reopens it on its own (the UI's "Receiver port closed"; never in safe mode, where the link is not opened) |
 | `receiver.rx_maintenance` | receiver maintenance is on (section 8): nothing is sent to the receiver; `maintenance_left_s` until it ends by itself, `maintenance_chosen_s` the chosen duration with extensions (both 0 when off) |
 | `receiver.position_known` | the station has a base position, locked or surveyed so far (`position.source` in `GET /api/gnss` is not `none`); admin form only |
+| `receiver.surveying`, `survey_window_left_s`, `survey_unfinished` | as `survey.active`, `survey.window_left_s` and `survey.unfinished` in `GET /api/gnss`; admin form only |
 | `receiver.rtcm_age_ms` | since the last CRC-valid RTCM frame (`gnss_link`), `null` = never |
 | `receiver.glonass` | the receiver's stream carried GLONASS signals in the last 10 s (the signal summary of `GET /api/gnss/signals`; `false` before the first summary); admin form only |
 | `receiver.rtcm1230_supported` | as in `GET /api/gnss/signals`: the receiver accepted message 1230 (GLONASS biases) at the last configuration, `false` refused, `null` never configured. With `glonass` and `best_bands` it says whether the stream meets Onocoy's quality minimums (4 bands on one constellation, GLONASS with 1230) without polling the larger signals object; admin form only |
@@ -682,7 +683,7 @@ oldest.
                "serial": "...", "pn": "...", "efuse_id": "...", "compile_date": "2025/04/30"},
   "responding": true, "restarting": false, "identity_confirmed": true,
   "alerts": [],
-  "profile_applied": true, "rtcm_differs": false, "rtcm1230_supported": true,
+  "profile_applied": true, "profile_acknowledged": true, "rtcm_differs": false, "rtcm1230_supported": true,
   "config_failed": false, "config_retry_in_s": 0, "config_auto_retry": true, "reconfigure_refused": false,
   "detect_failures": 0,
   "link": {"baud": 115200, "mode": "stream", "rx_bytes": 123456789, "rx_age_ms": 12, "rtcm_age_ms": 180,
@@ -716,7 +717,7 @@ oldest.
   "signal_group_refused": null,
   "position": {"locked": true, "source": "survey", "lat_deg": 45.123456789, "lon_deg": -75.123456789,
                "height_m": 85.1234, "sigma_m": 0.0, "locked_unix": 1759000000},
-  "survey": {"active": false, "window_left_s": 0},
+  "survey": {"active": false, "window_left_s": 0, "unfinished": false},
   "fixed_check": {"state": "ok", "horizontal_m": 2, "vertical_m": -3, "distance_m": 4, "height_only": false,
                   "sea_level": false, "checked_age_s": 1200, "limit_m": 50},
   "arp": {"valid": true, "station_id": 1234, "ecef_m": [918129.1234, -4346071.2345, 4561977.3456],
@@ -733,6 +734,7 @@ oldest.
 | `config_failed`, `config_retry_in_s`, `config_auto_retry` | the last profile apply failed (`config_failed` alert). `config_auto_retry`: the station retries it on its own on its backoff (10 min, 30 min, 2 h, then every 6 h), which it does only with `autocfg` on and for a model it configures; `config_retry_in_s` is the time to that retry (0 when none is due, and always 0 when `config_auto_retry` is false). With `autocfg` off (the first-apply hold included) nothing is retried until the user applies again |
 | `rtcm_differs` | the latest observation window saw RTCM flowing that differs from the profile: a message it checks was missing or came at another rate while others arrived. Never set without any RTCM (no antenna, a silent receiver: `no_rtcm`, `receiver_silent` or `no_satellites` say why); cleared by a window that passes, a window without RTCM and whenever the station starts watching again (a receiver restart, detection, a successful apply). Health raises `profile_drift` after 90 s of it |
 | `profile_applied` | the applied check passed: the receiver acknowledged this profile on this firmware at its last apply (the stored applied state) and an observation window saw the profile's RTCM. A receiver whose applied state differs is configured at once (`autocfg` on). Without any RTCM (no antenna, a silent receiver) it stays `false` and the check waits for the first window with RTCM; nothing is re-applied for a window without RTCM, which could not show whether a re-apply worked (the stall is the recovery's, whose reconfigure step re-applies once under the user's recovery mode) |
+| `profile_acknowledged` | the receiver acknowledged this profile on the firmware it runs at its last apply: the stored applied state matches (the profile's hash, the firmware, the message 1230 answer stored), confirmed by this boot's version query or by an apply that worked since. `profile_applied` adds the check against the stream, so `true` with `profile_applied` `false` means applied but not checked yet (no RTCM: no antenna; or the first window still runs). `false` while the identity is not confirmed, while the station looks for the receiver or updates it, for a model the station does not configure, and from a saved profile that differs until it is applied (the user's, or the station's own for a lock, a re-survey or a signal-group switch, also when that apply fails). Also in `GET /api/status` (`receiver.profile_acknowledged`) |
 | `rtcm1230_supported` | `gnss/rtcm1230_ok`: `true` the receiver accepted message 1230 at the last apply, `false` it refused it, `null` never applied (the key is not stored: "not applied yet") |
 | `link.mode` | `off`, `stream`, `command`, `raw` (`gnss_link`) |
 | `link.rx_bytes` | bytes received from the receiver since boot (0 = nothing arrived yet) |
@@ -750,6 +752,7 @@ oldest.
 | `signal_group_refused` | the receiver refused a signal group (any apply, the comparison's switches included): `{"master", "slave", "reply", "back_to"}` with the receiver's reply (UM982 build 25164: `PARSING FAILED GRAMMAR ERROR,` for every pair but `4 5`, `3 6`, `5 0` and `7 0`; `"signal group rejected"` when it acknowledged the pair but its read-back after the restart still showed another group) and the group the stored profile went back to (`{"master", "slave"}`: the group the session read back before the change, else the one of the last successful apply, `gnss/sg_ok`). The station re-applies that group at once; a refused group never raises `config_failed` and is never retried on the backoff. A plain refusal (a negative reply: nothing changed on the receiver and it did not restart) with such a group to go back to is not rolled back with `RESET`: the re-apply restores the outputs the session quieted, so the receiver is not restarted (nor its survey) for it. `back_to` `null`: neither was known, and the refusal is an ordinary failed apply (`config_failed`, rolled back with `RESET`). Kept until the next `PUT /api/gnss/profile` with a profile; `null` otherwise. The UI says "The receiver refused signal group 7 1. It is back on 3 6 (Galileo E6) and configured again. Choose a group from the list and save." with "Receiver reply: <reply>" under it |
 | `profile.fixed` | `{lat_deg, lon_deg, height_m}` in `fixed` mode, else `null`; fields a mode does not use are ignored on input and come back cleared (`survey_in_s` 0 in `fixed` mode) |
 | `position` | locked or last surveyed (`station_status_t.position`); `source`: `none`, `survey`, `averaged`, `user`; `sigma_m` 0 = unknown |
+| `survey` | `active`: inside the survey window, the survey's length plus 120 s from its start (the receiver acknowledged the base mode, restarted, or was found surveying at boot); `window_left_s` until it ends (0 outside). The window times the station's base-mode read-back (every 60 s), the station messages (1005/1006/1033) the observed set may miss, and the survey rule of the recovery (`GET /api/health`). `unfinished`: the survey started and has not finished (the read-back no longer reports a survey, or its time is up and 60 consecutive 1005 frames lie within 1 mm): the receiver may still be surveying, inside the window and after it, since a survey makes no progress without satellites (no antenna). The station locks it once it finishes. The UI says "Surveying, paused while no corrections arrive." for an unfinished survey without corrections |
 | `arp` | latest CRC-valid 1005/1006 (`gnss_obs_get_arp`), converted to WGS84; `offset_m` = 3-D distance to the locked position, `null` when not locked; `{"valid": false}` before the first frame |
 | `fixed_check` | is the fixed position (typed in or locked) where the receiver is? A fixed base sends the position it was given in every 1005, so the stream cannot tell; the receiver's own single-point solution can. With a fixed profile and a model the station configures, the station asks it without a lease (`BASEPOSA`, the base's position as a fixed base, or `SPPNAVA` when the receiver refuses that, only echoes the set position or gives nothing usable three times; one-shot, one line, the casters never wait): 60 s after streaming began, a receiver restart or an apply, then every 20 s until three usable solutions (computed, single-point, at least 6 satellites, standard deviations at most 5 m horizontally and 10 m in height) agree, at most 15 tries; again every hour. `state` (`station_fix_state_t`): `none` (the profile surveys, or not a model the station configures), `checking` (no verdict yet), `ok` (within 50 m horizontally and vertically, and not a sea-level height), `far` (the position looks wrong: beyond the limit in all three, or `sea_level`: the `fixed_far` alert, journalled; it clears once three solutions are within 40 m, or at once when the fixed position changes; streaming is never held back), `no_solution` (no verdict: the last check got no usable solution, for example without sky), `refused` (no verdict: the receiver refused both logs). With `ok` and `far`: `horizontal_m`, `vertical_m` (the fixed height minus the receiver's ellipsoidal height, its height above sea level plus the geoid separation it reports: > 0 the fixed position is above) and `distance_m` (3-D), the medians of the three solutions that decided (else `null`); `height_only` with `far`: only the height is wrong (beyond the limit, or `sea_level`). `sea_level` with `far`: the fixed height is the receiver's height above sea level, not its ellipsoidal height, a common mistake that is under 50 m off in most places: the medians put the fixed height within 5 m of the receiver's height above sea level (as it prints it, so the separation's sign plays no part) and more than 10 m from its ellipsoidal height, and more than four times the height deviation the solutions report (their median), with the horizontal distance within the limit. 5 m is twice the receiver's vertical RMS (three solutions 20 s apart share most of their error, so their median scatters about as much as one); 10 m is four times that RMS and the largest height deviation a counted solution may report, and where the separation is about 10 m or less the two heights are too close to tell apart (only the 50 m limit applies). The solutions' own deviation keeps a right height that a poor sky puts 10 to 20 m off from reading as a sea-level height where the separation is about that: a solution that reports 8 m needs the fixed height more than 32 m off. Once raised it holds within 10 m of the sea-level height and beyond 5 m from the ellipsoidal one, so an hourly check does not flip it. The UI says "The fixed height looks like a height above sea level. Enter the height above the ellipsoid." `checked_age_s` since the latest usable solution (`null` = none this boot); `limit_m` the limit (50). The receiver's single-point accuracy is 1.5 m horizontal and 2.5 m vertical (RMS), so 50 m is far beyond its own scatter and well inside the about 300 m at which a receiver stops its corrections (`antenna_moved`). PROVISIONAL, to be confirmed on hardware: that `BASEPOSA` reports the receiver's own solution while it works as a fixed base |
 
@@ -975,9 +978,9 @@ one without a reset does: in `GET /api/status` and `GET /api/gnss` the
 receiver's identity (`model`, `firmware`, `receiver`, `identity_confirmed`;
 the receiver's own word wins if it repeats it) and the signal group it runs
 (`rx_signal_group`), and when the profile is
-still the one it was about, `profile_applied`, `fixed_check` and the
+still the one it was about, `profile_applied`, `profile_acknowledged`, `fixed_check` and the
 station's alerts (`config_failed` with them); `surveying`,
-`survey_window_left_s` and `survey` run on with the survey window, its end
+`survey_window_left_s`, `survey_unfinished` and `survey` run on with the survey window, its end
 as far from maintenance's end as before (so the reset's time comes off both
 alike), and after maintenance the station goes on with that window instead
 of starting a new one. The rest of what an apply session read back
@@ -2130,8 +2133,9 @@ receiver that just got power needs longer). The earliest decides; it is
 journalled once (`rx_boot`). Only a power-on boot's `restarted` counts
 toward the `power_lost` alert (three within 24 h; a brownout raises
 `power_supply`), and only a power-on boot's `kept_running` makes its gap no
-power-off time in the availability ledger (when the verdict comes before
-the first trusted clock; a brownout is the ESP32's own power dip whatever
+power-off time in the availability ledger (`power_off_s`; a gap counted
+before the verdict, after the first trusted clock, has it taken back; the
+gap stays offline time; a brownout is the ESP32's own power dip whatever
 the receiver did). A `restarted` verdict ends a receiver maintenance resumed
 at that boot. PROVISIONAL, to be confirmed on hardware (a real power cut's
 timing was not measured).
@@ -2185,7 +2189,9 @@ offering the download.
 ```
 
 Per-slot arrays have `max_slots` entries. `history` holds up to 30 past days
-in the `today` shape, newest first. `up_s` counts seconds a slot streamed
+in the `today` shape, newest first. `power_off_s`: gaps before a boot after
+a power cut (not one whose receiver kept running: the ESP32's reset pin,
+`station.rx_boot`). `up_s` counts seconds a slot streamed
 with fresh RTCM behind it (online; 0 for days stored by a build that did
 not count it); `down_s` seconds it should have streamed but did not;
 `planned_s` the planned part of it: casters

@@ -758,6 +758,27 @@ void stn_request_apply_why(stn_t *s, uint8_t why);
 bool stn_sg_fallback(uint8_t refused_m, uint8_t refused_s, bool before_known, uint8_t before_m, uint8_t before_s,
                      bool ok_known, uint16_t ok_pair, uint8_t *out_m, uint8_t *out_s);
 
+/**
+ * A different profile was stored, by the user or by the station itself (a
+ * lock, a re-survey, a signal group): what the receiver acknowledged, and
+ * the applied check, were about the one before (static_ok and
+ * profile_applied false until an apply of it works; the user's save queues
+ * that apply, stn_request_apply, the station's own change is applied by the
+ * job that stored it or right after).
+ */
+void stn_profile_changed(stn_t *s);
+
+/**
+ * The receiver acknowledged the stored profile on the firmware it runs (the
+ * static part of the applied check: the stored applied hash and firmware
+ * match, this boot's identity confirmed it or an apply worked since); not
+ * while the station looks for the receiver (DETECTING, NO_RECEIVER) or
+ * updates it (FLASHING, FLASH_RECOVERY). It says nothing of the output:
+ * profile_applied adds that a window saw the profile's RTCM (a receiver
+ * without an antenna sends none).
+ */
+bool stn_profile_acknowledged(const stn_t *s);
+
 /** Lock the current position (user). */
 void stn_request_lock(stn_t *s);
 
@@ -924,6 +945,7 @@ typedef struct {
     uint8_t sg_master;
     uint8_t sg_slave;
     bool profile_applied;
+    bool profile_acknowledged;   /**< stn_profile_acknowledged */
     uint32_t alerts;             /**< the alerts that stood (STN_ALERT_*; NO_RECEIVER, which is derived, left out) */
     uint8_t fix_state;           /**< stn_fix_state_t: the fixed-position check */
     float fix_horizontal_m;      /**< NEAR, FAR: the medians that decided */
@@ -1086,6 +1108,15 @@ unsigned stn_take_notes(stn_t *s, stn_note_t *out, unsigned cap);
 
 bool stn_surveying(const stn_t *s, int64_t now_ms);
 uint32_t stn_survey_left_s(const stn_t *s, int64_t now_ms);
+/**
+ * A survey started and has not finished (by the base-mode read-back, or by
+ * its time with a steady 1005): the receiver may still be surveying. True
+ * inside the window (stn_surveying) and after it: a survey makes no
+ * progress without satellites, so one without data outlasts the window,
+ * which only times the station's mode poll, the station-message exemption
+ * and health's survey rule. The lock follows once it finishes.
+ */
+bool stn_survey_unfinished(const stn_t *s, int64_t now_ms);
 /**
  * What follows a failed apply, in words for its log line: "the station
  * tries again in 10 min" for retry_in_s > 0 (STN_NOTE_APPLY_FAILED's a),

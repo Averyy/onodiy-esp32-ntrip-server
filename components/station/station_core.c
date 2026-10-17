@@ -1627,6 +1627,21 @@ void stn_request_resurvey(stn_t *s)
     want_apply(s, STN_WHY_RESURVEY, STN_CHANGE_RESURVEY, true);
 }
 
+void stn_profile_changed(stn_t *s)
+{
+    s->static_ok = false;
+    s->profile_applied = false;
+}
+
+bool stn_profile_acknowledged(const stn_t *s)
+{
+    /* Not while the station looks for the receiver or updates it: what is
+     * there then is not known to hold anything. */
+    bool present = s->state != STN_DETECTING && s->state != STN_NO_RECEIVER && s->state != STN_FLASHING &&
+                   s->state != STN_FLASH_RECOVERY;
+    return present && s->identity_ok && s->supported && s->static_ok;
+}
+
 bool stn_reconfigure_refused(const stn_t *s, bool autocfg)
 {
     return !autocfg || config_failed(s);
@@ -1730,6 +1745,11 @@ bool stn_surveying(const stn_t *s, int64_t now_ms)
 uint32_t stn_survey_left_s(const stn_t *s, int64_t now_ms)
 {
     return um98x_survey_window_left_s(&s->survey, now_ms);
+}
+
+bool stn_survey_unfinished(const stn_t *s, int64_t now_ms)
+{
+    return s->survey.active && !um98x_survey_done(&s->survey, now_ms);
 }
 
 /* ---- power-on reset: did the receiver keep running? -------------------------- */
@@ -2135,8 +2155,10 @@ bool stn_maint_rtc_read(const stn_maint_rtc_t *r, stn_maint_rec_t *rec)
 #define KNOWN_COMPLETE     (1u << 5)
 #define KNOWN_LOCK_DONE    (1u << 6)
 #define KNOWN_SG           (1u << 7)
-/* ... and in its second flag byte, the last one. */
+/* ... and in its second flag byte, the last one (a copy written before a
+ * bit existed reads it as 0). */
 #define KNOWN_SEA_LEVEL    (1u << 0)
+#define KNOWN_ACKNOWLEDGED (1u << 1)
 
 static void known_put(blob_writer_t *w, const stn_maint_known_t *k)
 {
@@ -2162,7 +2184,8 @@ static void known_put(blob_writer_t *w, const stn_maint_known_t *k)
     blob_put_u32(w, (uint32_t)k->survey_end_rel_ms);
     blob_put_u8(w, k->sg_valid ? k->sg_master : 0u);
     blob_put_u8(w, k->sg_valid ? k->sg_slave : 0u);
-    blob_put_u8(w, k->fix_sea_level ? KNOWN_SEA_LEVEL : 0u);
+    blob_put_u8(w, (uint8_t)((k->fix_sea_level ? KNOWN_SEA_LEVEL : 0u) |
+                             (k->profile_acknowledged ? KNOWN_ACKNOWLEDGED : 0u)));
 }
 
 /* False (k untouched) for a part that does not read or does not make sense. */
@@ -2203,6 +2226,7 @@ static bool known_get(blob_reader_t *r, stn_maint_known_t *k)
     n.lock_done = (f & KNOWN_LOCK_DONE) != 0;
     n.sg_valid = (f & KNOWN_SG) != 0;
     n.fix_sea_level = (f2 & KNOWN_SEA_LEVEL) != 0 && n.fix_state == STN_FIX_FAR;
+    n.profile_acknowledged = (f2 & KNOWN_ACKNOWLEDGED) != 0;
     *k = n;
     return true;
 }

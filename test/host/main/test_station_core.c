@@ -743,6 +743,79 @@ TEST_CASE("station core: no RTCM from a receiver that acknowledged the profile: 
     TEST_ASSERT_EQUAL(STN_WHY_CHECK, j.why);
 }
 
+TEST_CASE("station core: a profile the receiver acknowledged reads so without RTCM; a saved one that differs does not",
+          "[station]")
+{
+    /* The board without an antenna: the recovery's reconfigure applied the
+     * profile and the receiver acknowledged it; no window can check it. */
+    sim_t w;
+    sim_init(&w, false);
+    boot_lines_only(&w);
+    TEST_ASSERT_FALSE(stn_profile_acknowledged(&w.s));   /* not identified yet */
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
+    w.in.text_lines++;
+    identity_done(&w, true, false);   /* never acknowledged this profile */
+    TEST_ASSERT_FALSE(stn_profile_acknowledged(&w.s));
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    w.in.text_lines += 8;
+    sim_done(&w, &(stn_result_t){ .err = STN_OK, .answered = true });
+    TEST_ASSERT_TRUE(stn_profile_acknowledged(&w.s));
+    TEST_ASSERT_EQUAL_UINT(0, noant_run(&w, 10 * 60, NULL));
+    TEST_ASSERT_TRUE(stn_profile_acknowledged(&w.s));
+    TEST_ASSERT_FALSE(w.s.profile_applied);              /* not checked: no RTCM */
+
+    /* The user saves a profile that differs: not what the receiver acknowledged. The save's own apply runs. */
+    stn_profile_changed(&w.s);
+    TEST_ASSERT_FALSE(stn_profile_acknowledged(&w.s));
+    TEST_ASSERT_FALSE(w.s.profile_applied);
+    stn_request_apply(&w.s);
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_WHY_USER, j.why);
+    sim_done(&w, &(stn_result_t){ .err = STN_OK, .answered = true });
+    TEST_ASSERT_TRUE(stn_profile_acknowledged(&w.s));
+
+    /* Saved while nothing could apply it (maintenance refuses the request): the next check without RTCM applies it,
+     * where it waited for RTCM for the profile the receiver acknowledged. */
+    stn_restart_seen(&w.s);
+    TEST_ASSERT_EQUAL_UINT(0, noant_run(&w, 5 * 60, NULL));
+    TEST_ASSERT_TRUE(w.s.check_pending);
+    stn_profile_changed(&w.s);
+    TEST_ASSERT_EQUAL_UINT(1, noant_run(&w, 2 * 60, NULL));
+    TEST_ASSERT_TRUE(stn_profile_acknowledged(&w.s));
+
+    /* RTCM with the whole set: applied, and still acknowledged. */
+    w.rtcm_on = true;
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job_asked(&w, 70, NULL).kind);
+    TEST_ASSERT_TRUE(w.s.profile_applied);
+    TEST_ASSERT_TRUE(stn_profile_acknowledged(&w.s));
+
+    /* The receiver lost (a rescan finds nothing): not known to hold anything, until it is found and identified. */
+    w.rtcm_on = false;
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_recovery(&w.s, STN_REC_RESCAN, true));
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, sim_next(&w).kind);
+    sim_done(&w, &(stn_result_t){ .err = STN_E_NOT_FOUND });
+    TEST_ASSERT_EQUAL(STN_NO_RECEIVER, w.s.state);
+    TEST_ASSERT_FALSE(stn_profile_acknowledged(&w.s));
+    stn_result_t found = res(STN_OK);
+    found.identity = true;
+    found.supported = true;
+    found.static_ok = true;
+    stn_job_t d = sim_until_job(&w, 60);
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, d.kind);
+    sim_done(&w, &found);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    TEST_ASSERT_TRUE(stn_profile_acknowledged(&w.s));
+
+    /* A model the station does not configure is never acknowledged. */
+    sim_init(&w, false);
+    boot_lines_only(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
+    identity_done(&w, false, true);
+    TEST_ASSERT_FALSE(stn_profile_acknowledged(&w.s));
+}
+
 TEST_CASE("station core: no RTCM from an acknowledged profile with the recovery on alerts only: one apply per check",
           "[station]")
 {
@@ -2052,6 +2125,7 @@ static stn_maint_known_t known_far(void)
     k.sg_master = 3;
     k.sg_slave = 6;
     k.profile_applied = true;
+    k.profile_acknowledged = true;
     k.alerts = STN_ALERT_FIXED_FAR | STN_ALERT_SIGNALS_MISMATCH;
     k.fix_state = STN_FIX_FAR;
     k.fix_horizontal_m = 1112.0f;
@@ -2094,6 +2168,7 @@ TEST_CASE("station core: the stored copy carries what the station knew of the re
     TEST_ASSERT_EQUAL_UINT8(3, g.sg_master);
     TEST_ASSERT_EQUAL_UINT8(6, g.sg_slave);
     TEST_ASSERT_TRUE(g.profile_applied);
+    TEST_ASSERT_TRUE(g.profile_acknowledged);
     TEST_ASSERT_EQUAL_HEX32(STN_ALERT_FIXED_FAR | STN_ALERT_SIGNALS_MISMATCH, g.alerts);
     TEST_ASSERT_EQUAL_UINT8(STN_FIX_FAR, g.fix_state);
     TEST_ASSERT_EQUAL_FLOAT(1112.0f, g.fix_horizontal_m);
@@ -2106,11 +2181,28 @@ TEST_CASE("station core: the stored copy carries what the station knew of the re
     TEST_ASSERT_EQUAL_UINT32(600, g.survey_s);
     TEST_ASSERT_EQUAL_INT32(-1170000, g.survey_end_rel_ms);
 
-    /* Nothing identified: no strings. */
+    /* Nothing identified: no strings; acknowledged but not checked against the stream (no antenna). */
     stn_maint_known_t n = known_far();
     memset(&n.receiver, 0, sizeof(n.receiver));
     n.identity_confirmed = false;
     n.sg_valid = false;
+    n.profile_applied = false;
+    n.fix_state = STN_FIX_NEAR;
+    len = stn_maint_store_encode(&rec, &n, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(stn_maint_store_decode(&got, &g, buf, len));
+    TEST_ASSERT_TRUE(g.valid);
+    TEST_ASSERT_FALSE(g.profile_applied);
+    TEST_ASSERT_TRUE(g.profile_acknowledged);
+    TEST_ASSERT_FALSE(g.fix_sea_level);
+    n.profile_acknowledged = false;
+    n.fix_state = STN_FIX_FAR;
+    n.fix_sea_level = true;
+    len = stn_maint_store_encode(&rec, &n, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(stn_maint_store_decode(&got, &g, buf, len));
+    TEST_ASSERT_FALSE(g.profile_acknowledged);
+    TEST_ASSERT_TRUE(g.fix_sea_level);   /* the other bit of its byte */
+    n.profile_acknowledged = true;
+    n.fix_sea_level = false;
     len = stn_maint_store_encode(&rec, &n, buf, sizeof(buf));
     TEST_ASSERT_TRUE(stn_maint_store_decode(&got, &g, buf, len));
     TEST_ASSERT_TRUE(g.valid);
@@ -2694,6 +2786,108 @@ TEST_CASE("station core: by the clock, a survey window restored with maintenance
     /* Once only. */
     stn_maint_clock(&w.s, end - 1500, w.in.now_ms);
     TEST_ASSERT_EQUAL_UINT32(99, stn_survey_left_s(&w.s, w.in.now_ms));
+}
+
+TEST_CASE("station core: a survey without data outlasts its window and is locked once it finishes", "[station]")
+{
+    /* The antenna goes right after the survey started: the receiver keeps
+     * its survey-in, which makes no progress without satellites. */
+    sim_t w;
+    sim_init(&w, false);
+    boot_surveying(&w);
+    TEST_ASSERT_TRUE(stn_survey_unfinished(&w.s, w.in.now_ms));
+    w.rtcm_on = false;
+    TEST_ASSERT_EQUAL_UINT(0, noant_run(&w, 15 * 60, NULL));
+    TEST_ASSERT_FALSE(stn_surveying(&w.s, w.in.now_ms));   /* the station's window ended */
+    TEST_ASSERT_EQUAL_UINT32(0, stn_survey_left_s(&w.s, w.in.now_ms));
+    TEST_ASSERT_TRUE(stn_survey_unfinished(&w.s, w.in.now_ms));   /* the survey did not */
+    TEST_ASSERT_EQUAL_UINT(0, noant_run(&w, 60 * 60, NULL));
+    TEST_ASSERT_TRUE(stn_survey_unfinished(&w.s, w.in.now_ms));
+
+    /* Data again, with a 1005 that stays put: finished (its time is up and the position steady), then locked. */
+    w.rtcm_on = true;
+    w.skip_station = false;
+    const int64_t arp[3] = { 9181291234LL, -43460712345LL, 45619773456LL };
+    stn_job_t j;
+    memset(&j, 0, sizeof(j));
+    unsigned frames = 0;
+    while (j.kind == STN_JOB_NONE && frames < UM98X_SURVEY_STABLE_FRAMES + 5) {
+        TEST_ASSERT_TRUE(stn_survey_unfinished(&w.s, w.in.now_ms));
+        stn_on_arp(&w.s, arp);
+        frames++;
+        j = sim_next(&w);
+        if (j.kind == STN_JOB_NONE) {
+            sim_tick(&w);
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT(UM98X_SURVEY_STABLE_FRAMES, frames);
+    TEST_ASSERT_FALSE(stn_survey_unfinished(&w.s, w.in.now_ms));
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_WHY_LOCK, j.why);
+    TEST_ASSERT_EQUAL(STN_CHANGE_LOCK, j.change);
+}
+
+/* Run up to max_s seconds until an apply is handed out, answering every other job (an identity: the stored profile is
+ * not the acknowledged one); STN_JOB_NONE when none comes. */
+static stn_job_t until_apply_answered(sim_t *w, int max_s)
+{
+    for (int i = 0; i <= max_s; i++) {
+        stn_job_t j = sim_next(w);
+        if (j.kind == STN_JOB_APPLY) {
+            return j;
+        }
+        if (j.kind == STN_JOB_IDENTIFY) {
+            w->in.text_lines++;
+            identity_done(w, true, false);
+        } else if (j.kind != STN_JOB_NONE) {
+            w->in.text_lines++;
+            sim_done(w, &(stn_result_t){ .err = STN_OK });
+        }
+        sim_tick(w);
+    }
+    stn_job_t none;
+    memset(&none, 0, sizeof(none));
+    return none;
+}
+
+TEST_CASE("station core: a profile the station stores itself is not acknowledged until an apply of it works", "[station]")
+{
+    /* The lock stores the fixed profile before its session takes the lease
+     * (station.c then calls stn_profile_changed). What the receiver
+     * acknowledged is still the survey profile, whatever the apply does. */
+    sim_t w;
+    sim_init(&w, false);
+    boot_surveying(&w);
+    TEST_ASSERT_TRUE(stn_profile_acknowledged(&w.s));
+    stn_request_lock(&w.s);
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_CHANGE_LOCK, j.change);
+    stn_profile_changed(&w.s);   /* the job stored the locked profile */
+    w.in.profile_survey = false;
+    w.skip_station = false;
+    stn_result_t r = res(STN_E_STATE);
+    r.nothing_sent = true;   /* no lease: nothing reached the receiver */
+    sim_done(&w, &r);
+    TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+    TEST_ASSERT_FALSE(stn_profile_acknowledged(&w.s));
+    TEST_ASSERT_FALSE(w.s.profile_applied);
+
+    /* The retry's session runs and is rolled back (the receiver restarted): still not acknowledged. */
+    j = until_apply_answered(&w, 11 * 60);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_WHY_RETRY, j.why);
+    sim_done(&w, &(stn_result_t){ .err = STN_E_FAIL, .restarted = true, .answered = true });
+    TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+    TEST_ASSERT_FALSE(stn_profile_acknowledged(&w.s));
+
+    /* The next retry works: acknowledged. */
+    j = until_apply_answered(&w, 31 * 60);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_FALSE(stn_profile_acknowledged(&w.s));
+    sim_done(&w, &(stn_result_t){ .err = STN_OK, .answered = true });
+    TEST_ASSERT_FALSE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
+    TEST_ASSERT_TRUE(stn_profile_acknowledged(&w.s));
 }
 
 /* ---- live view ---------------------------------------------------------------- */
