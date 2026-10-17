@@ -73,7 +73,12 @@ What it does:
      every caster record of the scenario passes the strict epoch check
      above, and a session that ended (closed during a pause, for new
      settings, or by a restart) ends on a whole epoch, as does the part of
-     the first session before the configuration's pause;
+     the first session before the configuration's pause; one check per
+     span of the scenario (since its start, since the restart in the
+     comparison, since each save, since the restart inside an epoch) over
+     its sessions' records, so the number of checks is the same in every
+     run (the first session and the one after the last restart stream two
+     epochs before they are judged);
   scenario "onocoy-guard" (firmware with test-Onocoy slots; SKIP otherwise;
   with --scenario all it runs before "stream"):
   5. slot 0 as a test-Onocoy slot (test_onocoy) against a second fake caster
@@ -230,6 +235,14 @@ def with_station(schedule: Schedule, station: list[bytes], types) -> Schedule:
         frames = with_station_messages(b.frames, station, types) if b"".join(b.frames) == b.data else list(b.frames)
         bursts.append(Burst(b.t, b"".join(frames), frames, dict(b.epoch_s)))
     return Schedule(schedule.kind, schedule.source, bursts, schedule.period)
+
+
+def carries_epoch(data: bytes) -> bool:
+    """The record (or the part of one) holds a frame that is no sticky type:
+    it carried an epoch, not only a session start's sticky copies."""
+    split = StreamSplitter()
+    return any(it.kind == "rtcm" and frame_type(it.data) not in STICKY_TYPES
+               for it in split.feed(data) + split.flush())
 
 
 def split_at_station(data: bytes, station: list[bytes]) -> tuple[bytes, bytes]:
@@ -530,6 +543,8 @@ class E2E:
         self.http_port = smoke.free_port()
         self.planned_reboots = 0
         self.slot1_body: dict | None = None   # slot 1's settings as PUT (saved again for planned closes)
+        # The signal-test scenario's caster sessions by what opened them: (first connection, what), in order.
+        self.sgt_spans: list[tuple[int, str]] = []
         self.t0 = time.monotonic()
         self.events = open(self.out / "e2e.log", "w", encoding="utf-8")
 
@@ -1216,7 +1231,11 @@ class E2E:
             status, _ = self.api("PUT", "/api/casters/1", body)
             self.check(status == 200, f"PUT /api/casters/1 (slot 1 for the signal-test records): HTTP {status}")
         s = self.poll(lambda: (lambda x: x if x.get("state") == "streaming" else None)(self.slot(1)["status"]), 90)
-        self.check(s is not None, "slot 1 streaming before the comparison")
+        # This session runs through the first configuration, and step 6 judges its part before the receiver's own
+        # station messages (the fixture as recorded). It may have only just begun (after the stream scenario's
+        # maintenance): two epochs of it first, so that part is there to judge in every run.
+        self.check(s is not None and self.two_more_epochs("before the comparison"),
+                   "slot 1 streaming before the comparison, two more epochs sent")
 
     def receiver_ready(self, group: tuple[int, int], timeout: float) -> dict | None:
         """Configured as the profile says, identified, locked, streaming, on `group`."""
@@ -1314,6 +1333,7 @@ class E2E:
             if status != 200:
                 self.note(f"save {i + 1}: PUT /api/casters/1: HTTP {status} {data}")
                 break
+            self.sgt_spans.append((last + 1, f"since save {i + 1}"))
             if not self.streams_again(last, 60):
                 self.note(f"save {i + 1}: slot 1 did not stream again within 60 s")
                 break
@@ -1337,14 +1357,25 @@ class E2E:
         the one the shutdown comes in (a hold from RESTART_HOLD_AFTER_HEAD_S, that burst's late MSM still
         goes out) and stops as soon as that session has ended (a late last MSM still waiting then is dropped
         too). A shutdown that found no epoch in flight (the request was slow) proves nothing: tried again, up
-        to `attempts` restarts."""
+        to `attempts` restarts: a later try's steps are only noted when they pass (the first try's are
+        checks), and the sessions the earlier tries ended are judged with those since the last save (step 6),
+        so the number of checks does not depend on the tries. The session after the restart streams two epochs
+        before this returns: step 6 judges it too, however soon the scenario ends."""
         if self.caster is None:
             return
+        k = 0
+
+        def step(ok: bool, text: str) -> bool:
+            if k == 0 or not ok:
+                return self.check(ok, text)
+            self.note(text)
+            return True
+
         for k in range(attempts):
             if not self.two_more_epochs(f"restart {k + 1}"):
                 return
             live = [c for c in self.sources() if c.get("end_mono") is None]
-            if not self.check(len(live) == 1, f"restart {k + 1}: one live caster session before it ({len(live)})"):
+            if not step(len(live) == 1, f"restart {k + 1}: one live caster session before it ({len(live)})"):
                 return
             n = live[0]["n"]
             at = len(self.console_text())
@@ -1352,7 +1383,7 @@ class E2E:
             h = self.replay.wait_burst_head(5.0) or time.monotonic()
             time.sleep(max(0.0, h + RESTART_AFTER_HEAD_S - time.monotonic()))
             status, _ = self.api("POST", "/api/system/reboot", {})
-            if not self.check(status == 202, f"POST /api/system/reboot inside an epoch: HTTP {status}"):
+            if not step(status == 202, f"POST /api/system/reboot inside an epoch: HTTP {status}"):
                 self.replay.set_last_frame_delay(0)
                 return
             self.planned_reboots += 1
@@ -1370,7 +1401,7 @@ class E2E:
             self.cookie = None
             back = self.wait_http(self.args.timeout)
             self.replay.resume()
-            if not self.check(back and self.login(first=False), f"back after restart {k + 1} (inside an epoch)"):
+            if not step(back and self.login(first=False), f"back after restart {k + 1} (inside an epoch)"):
                 return
             shutdown = self.console_text()[at:].split(smoke.BOOT_MARK)[0]
             drained = DRAINED_LINE in shutdown
@@ -1382,6 +1413,9 @@ class E2E:
             if drained:
                 self.check(True, f"restart {k + 1} came inside an epoch: the session finished it, then closed "
                                  f"(connection {n}; its record is checked below)")
+                self.sgt_spans.append((n + 1, "since the restart inside an epoch"))
+                self.check(self.streams_again(n, 90) and self.two_more_epochs(f"after restart {k + 1}"),
+                           f"slot 1 streaming again after restart {k + 1}, two epochs sent")
                 return
             self.note(f"restart {k + 1}: no epoch in flight when the casters closed (the request came late); "
                       f"trying again")
@@ -1394,6 +1428,7 @@ class E2E:
             return
         self.stream_slot()
         first_conn = max((c["n"] for c in self.caster.all_connections()), default=0)
+        self.sgt_spans = [(max(first_conn, 1), "since the scenario's start")]
         resp = Um982Responder(group=(4, 5), restart_s=3.0)
         self.replay.set_responder(resp)
         self.responder = resp
@@ -1475,6 +1510,8 @@ class E2E:
             return
         measured = t["results"][0]["measured_s"]
         self.say(f"restart while measuring ({measured} s measured)")
+        last = max((c["n"] for c in self.sources()), default=0)
+        self.sgt_spans.append((last + 1, "since the restart in the comparison"))
         self.replay.pause()
         time.sleep(2)
         status, _ = self.api("POST", "/api/system/reboot", {})
@@ -1553,21 +1590,32 @@ class E2E:
                    f"the receiver sends the station messages the profile asks for: "
                    f"{sorted(rtcm.msg_type(rtcm.payload_of(f)) for f in station)}")
         # The session that streamed when the scenario began runs through the first configuration (a pause
-        # keeps the session): the part before the receiver's own station messages is the fixture as recorded.
+        # keeps the session, unless it reaches the idle limit and the station closes it): the part before the
+        # receiver's own station messages is the fixture as recorded. One check per span of the scenario (since its
+        # start, since the restart in the comparison, since each save, since the restart inside an epoch) over the
+        # records of its sessions: how many sessions a span has (a pause that reached the idle limit ends one,
+        # the restart may take more tries) does not change the checks, and each span has carried epochs by now.
         conns = [c for c in self.caster.all_connections() if c["n"] >= max(first_conn, 1) and c["role"] == "source"]
         checked = 0
+        spans = sorted(self.sgt_spans)
+        judged: list[list[tuple[bool, str]]] = [[] for _ in spans]
         for c in conns:
             ended = c.get("end_mono") is not None   # read before the record: an ended record is complete
             path = self.out / "caster" / f"record-{c['n']:03d}.rtcm3"
             data = path.read_bytes() if path.exists() else b""
             before, after = split_at_station(data, station)
+            span = max(i for i, (first, _) in enumerate(spans) if first <= c["n"])
             for part, sched, what, whole in ((before, self.schedule, "as recorded", ended or bool(after)),
                                              (after, configured, "configured", ended)):
-                if len(part) < 2000:
+                if not carries_epoch(part):
                     continue   # a session (or the part of one) that carried no epoch
                 ok, detail, _sec = check_record(part, sched, whole_tail=whole)
-                self.check(ok, f"signal-test caster record {c['n']} ({what}): {detail}")
+                judged[span].append((ok, f"record {c['n']} ({what}): {detail}"))
                 checked += 1
+        for (_, what), parts in zip(spans, judged):
+            self.check(bool(parts) and all(ok for ok, _ in parts),
+                       f"signal-test caster records {what}: "
+                       + ("; ".join(text + ("" if ok else " (FAILED)") for ok, text in parts) or "none carried an epoch"))
         self.check(checked >= 1, f"{checked} caster record(s) of the signal-test scenario checked")
         # Holds the station had to force (no epoch boundary within its 1 s wait) and the long ones it noted.
         for line in self.console_text().splitlines():

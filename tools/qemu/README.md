@@ -717,7 +717,15 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
   whole epoch: their
   last frame that is no station message is its epoch's last, with nothing
   cut after it (the next epoch's station messages may follow: a caster can
-  send them before the pause, and they never belong to an MSM run). Before
+  send them before the pause, and they never belong to an MSM run). The
+  records are judged in one check per span of the scenario (since its
+  start, since the restart in the comparison, since each save, since the
+  restart inside an epoch), whatever number of sessions a span had (a
+  pause that reaches the idle limit ends one, the restart may take more
+  tries), and the first session and the one after the last restart stream
+  two epochs before they are judged: the number of checks is the same in
+  every run (it varied with how many epochs those two sessions had sent
+  when the scenario looked). Before
   the hub's hold point (`rtcm_hub_hold`, see `components/rtcm_hub`) a
   record could end `1005, 1033, 1230, 1077` with the rest of that epoch
   never sent: the station paused by a timer while RTCM kept arriving until
