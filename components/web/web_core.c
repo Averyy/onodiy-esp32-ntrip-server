@@ -572,6 +572,7 @@ int web_sess_create(web_sessions_t *t, const uint8_t key[WEB_SESSION_KEY_LEN], b
     if (remember && now_unix > 0) {
         s->end_unix = now_unix + WEB_SESSION_REMEMBER_S;
     }
+    web_sess_mark(t, now_unix, now_s);
     return idx;
 }
 
@@ -655,13 +656,33 @@ bool web_sess_alive(const web_sessions_t *t, int idx, uint32_t gen)
     return idx >= 0 && (size_t)idx < WEB_SESSIONS_MAX && t->s[idx].used && t->s[idx].gen == gen;
 }
 
-uint32_t web_sess_clock(web_sessions_t *t, uint32_t now_s, int64_t now_unix, bool *stamped)
+void web_sess_mark(web_sessions_t *t, int64_t unix_s, uint32_t now_s)
+{
+    if (unix_s > 0 && unix_s > web_sess_mark_now(t, now_s, 0)) {
+        t->mark_unix = unix_s;
+        t->mark_s = now_s;
+    }
+}
+
+int64_t web_sess_mark_now(const web_sessions_t *t, uint32_t now_s, int64_t now_unix)
+{
+    int64_t carried = t->mark_unix > 0 ? t->mark_unix + (int64_t)(uint32_t)(now_s - t->mark_s) : 0;
+    return now_unix > carried ? now_unix : carried;
+}
+
+bool web_sess_mark_due(int64_t stored_mark, int64_t mark_now)
+{
+    return mark_now > 0 && mark_now - stored_mark >= (int64_t)WEB_SESS_MARK_EVERY_S;
+}
+
+uint32_t web_sess_clock(web_sessions_t *t, uint32_t now_s, int64_t now_unix, bool *changed)
 {
     uint32_t mask = 0;
-    *stamped = false;
+    *changed = false;
     if (now_unix <= 0) {
         return 0;
     }
+    web_sess_mark(t, now_unix, now_s);
     for (size_t i = 0; i < WEB_SESSIONS_MAX; i++) {
         web_session_t *s = &t->s[i];
         if (!s->used || !s->remember) {
@@ -670,19 +691,24 @@ uint32_t web_sess_clock(web_sessions_t *t, uint32_t now_s, int64_t now_unix, boo
         uint32_t left = web_sess_left_s(t, (int)i, now_s);
         if (s->end_unix == 0) {
             s->end_unix = now_unix + left;
-            *stamped = true;
+            *changed = true;
         } else if (s->end_unix <= now_unix) {
             web_sess_end(t, (int)i);
             mask |= 1u << i;
-        } else if (s->end_unix - now_unix < (int64_t)left) {
+            continue;
+        } else if (s->end_unix - now_unix > (int64_t)WEB_SESSION_REMEMBER_S) {
+            s->end_unix = now_unix + WEB_SESSION_REMEMBER_S;   /* the clock went back, or was ahead at the login */
+            *changed = true;
+        }
+        if (s->end_unix - now_unix < (int64_t)left) {
             s->created_s = now_s - (WEB_SESSION_REMEMBER_S - (uint32_t)(s->end_unix - now_unix));
         }
     }
     return mask;
 }
 
-size_t web_sess_store_encode(const web_sessions_t *t, const uint8_t bind[WEB_SESS_BIND_LEN], uint8_t *buf, size_t cap,
-                             size_t *count)
+size_t web_sess_store_encode(const web_sessions_t *t, const uint8_t bind[WEB_SESS_BIND_LEN], int64_t mark_unix,
+                             uint8_t *buf, size_t cap, size_t *count)
 {
     size_t n = 0;
     for (size_t i = 0; i < WEB_SESSIONS_MAX; i++) {
@@ -695,6 +721,7 @@ size_t web_sess_store_encode(const web_sessions_t *t, const uint8_t bind[WEB_SES
     for (size_t i = 0; i < WEB_SESS_BIND_LEN; i++) {
         blob_put_u8(&w, bind[i]);
     }
+    blob_put_i64(&w, mark_unix);
     blob_put_u8(&w, (uint8_t)n);
     for (size_t i = 0; i < WEB_SESSIONS_MAX; i++) {
         const web_session_t *s = &t->s[i];
@@ -709,7 +736,7 @@ size_t web_sess_store_encode(const web_sessions_t *t, const uint8_t bind[WEB_SES
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
-bool web_sess_store_decode(const uint8_t *buf, size_t len, uint8_t bind[WEB_SESS_BIND_LEN],
+bool web_sess_store_decode(const uint8_t *buf, size_t len, uint8_t bind[WEB_SESS_BIND_LEN], int64_t *mark_unix,
                            web_sess_rec_t out[WEB_SESSIONS_MAX], size_t *count)
 {
     if (buf == NULL) {
@@ -721,6 +748,7 @@ bool web_sess_store_decode(const uint8_t *buf, size_t len, uint8_t bind[WEB_SESS
     for (size_t i = 0; i < WEB_SESS_BIND_LEN; i++) {
         bind[i] = blob_get_u8(&r);
     }
+    int64_t mark = blob_get_i64(&r);
     uint8_t n = blob_get_u8(&r);
     if (!blob_reader_ok(&r) || version != WEB_SESS_STORE_VERSION || n > WEB_SESSIONS_MAX) {
         return false;
@@ -734,30 +762,31 @@ bool web_sess_store_decode(const uint8_t *buf, size_t len, uint8_t bind[WEB_SESS
     if (!blob_reader_ok(&r) || blob_reader_remaining(&r) != 0) {
         return false;
     }
+    *mark_unix = mark;
     *count = n;
     return true;
 }
 
 int web_sess_restore(web_sessions_t *t, const web_sess_rec_t *rec, uint32_t now_s, int64_t now_unix)
 {
-    if (rec->end_unix <= 0) {
+    int64_t from = web_sess_mark_now(t, now_s, now_unix);
+    int64_t end = rec->end_unix;
+    if (now_unix > 0 && end - now_unix > (int64_t)WEB_SESSION_REMEMBER_S) {
+        end = now_unix + WEB_SESSION_REMEMBER_S;
+    }
+    if (end <= 0 || end <= from) {
         return -1;
     }
     uint32_t left = WEB_SESSION_REMEMBER_S;
-    if (now_unix > 0) {
-        if (rec->end_unix <= now_unix) {
-            return -1;
-        }
-        if (rec->end_unix - now_unix < (int64_t)left) {
-            left = (uint32_t)(rec->end_unix - now_unix);
-        }
+    if (from > 0 && end - from < (int64_t)left) {
+        left = (uint32_t)(end - from);
     }
     int idx = free_slot(t, now_s);
     if (idx < 0) {
         return -1;
     }
     web_session_t *s = take(t, idx, rec->key, true, now_s - (WEB_SESSION_REMEMBER_S - left), now_s);
-    s->end_unix = rec->end_unix;
+    s->end_unix = end;
     return idx;
 }
 

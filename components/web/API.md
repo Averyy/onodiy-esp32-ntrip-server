@@ -231,21 +231,34 @@ Passwords are 8-64 bytes of UTF-8 without control characters.
   `web/sessions` (device state: no `settings_changed` event; erased by a
   factory reset) as the SHA-256 of its token with its end in UTC, under the
   salt of the admin password it belongs to (a record of another password is
-  never read back). `web/sessions` is written only at a login, a logout, a
-  purge of ended sessions and a password change (or any other end of every
-  session), and once when the clock is first set while a remembered session
-  made without it is open; never per request.
+  never read back), together with the mark (below). `web/sessions` is
+  written only at a login, a logout, a purge of ended sessions, a password
+  change (or any other end of every session) and when the clock gives a
+  session its end or cuts one back; besides, at most once a day while a
+  session is stored, to refresh the mark. Never per request. (A record from
+  the first layout, v1, without a mark, is not read back: login again.)
 - The 30 days are counted by the uptime clock and, once the trusted clock
   (GNSS or SNTP) is set, by UTC as well; whichever end comes first counts.
   A login with the clock set stores its UTC end at once. A login made
   before the clock is set gets its UTC end (now + the time left) when the
   clock is first set; until then it is not stored, so a restart before that
-  ends it. At boot a stored session whose UTC end has passed by the clock
-  is dropped; while the clock is not set yet it is taken back with the
-  full lifetime (the station cannot know how long it was off), and as soon
-  as the clock is set, any whose end has passed ends and is purged. An end
-  more than 30 days ahead of the clock (the clock went back) counts as 30
-  days.
+  ends it.
+- An end is never more than 30 days ahead of the trusted clock: one that is
+  (a login while the clock was ahead, a clock put back since) is cut back to
+  the clock + 30 days, and stored so.
+- The mark is the latest UTC the sessions may assume: the highest trusted
+  time seen, carried forward by the uptime clock while the station runs
+  (the true time is no earlier), stored with every write of `web/sessions`
+  and at most once a day. A trusted clock behind the mark (it was put back)
+  moves nothing back and gives no session more time.
+- At boot a stored session is taken back only if its end is past the mark
+  and past the trusted clock (when it is set), for the time from the later
+  of the two to its end, at most 30 days. One that ended while the station
+  was off, or before the mark, is dropped. Without a clock the time the
+  station was off cannot be known: a session gets only what is left after
+  the mark, and as soon as the clock is set, any whose end has passed ends
+  and is purged. A station that never learns the date still counts the
+  time it runs (the mark is stored at least daily).
 - `DELETE /api/session` ends the session (and its stored record). Changing
   the password ends every other session; the current one stays (remembered
   if it was, stored under the new password). When `sys/admin_hash` changes
