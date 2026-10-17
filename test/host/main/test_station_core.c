@@ -2108,9 +2108,47 @@ TEST_CASE("station core: the stored copy carries what the station knew of the re
     TEST_ASSERT_TRUE(stn_maint_store_decode(&got, &g, nomodel, alen));
     TEST_ASSERT_FALSE(g.valid);
     len = stn_maint_store_encode(&rec, &k, buf, sizeof(buf));
-    buf[len - 2 - 4 - 4 - 4 * 3 - 1] = 9;   /* the fixed-check state */
+    buf[len - 1 - 2 - 4 - 4 - 4 * 3 - 1] = 9;   /* the fixed-check state */
     TEST_ASSERT_TRUE(stn_maint_store_decode(&got, &g, buf, len));
     TEST_ASSERT_FALSE(g.valid);
+}
+
+TEST_CASE("station core: the stored copy keeps a fixed-position warning's sea-level reason, only with a far verdict",
+          "[station]")
+{
+    const stn_maint_rec_t rec = { .on = true, .stamp = 9, .left_ms = 600000, .chosen_s = 1800, .end_unix = 0 };
+    stn_maint_known_t k = known_far();
+    k.fix_horizontal_m = 0.4f;
+    k.fix_up_m = 34.0f;
+    k.fix_distance_m = 34.0f;
+    k.fix_height_only = true;
+    k.fix_sea_level = true;
+    uint8_t buf[STN_MAINT_STORE_MAX];
+    size_t len = stn_maint_store_encode(&rec, &k, buf, sizeof(buf));
+    stn_maint_rec_t got;
+    stn_maint_known_t g;
+    TEST_ASSERT_TRUE(stn_maint_store_decode(&got, &g, buf, len));
+    TEST_ASSERT_TRUE(g.valid);
+    TEST_ASSERT_EQUAL_UINT8(STN_FIX_FAR, g.fix_state);
+    TEST_ASSERT_TRUE(g.fix_height_only);
+    TEST_ASSERT_TRUE(g.fix_sea_level);
+    TEST_ASSERT_EQUAL_FLOAT(34.0f, g.fix_up_m);
+
+    /* A far verdict for the distance: no sea-level reason. */
+    k.fix_sea_level = false;
+    len = stn_maint_store_encode(&rec, &k, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(stn_maint_store_decode(&got, &g, buf, len));
+    TEST_ASSERT_TRUE(g.valid);
+    TEST_ASSERT_FALSE(g.fix_sea_level);
+
+    /* The reason without a far verdict means nothing: dropped. */
+    k.fix_sea_level = true;
+    k.fix_state = STN_FIX_NEAR;
+    len = stn_maint_store_encode(&rec, &k, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(stn_maint_store_decode(&got, &g, buf, len));
+    TEST_ASSERT_TRUE(g.valid);
+    TEST_ASSERT_EQUAL_UINT8(STN_FIX_NEAR, g.fix_state);
+    TEST_ASSERT_FALSE(g.fix_sea_level);
 }
 
 TEST_CASE("station core: a resumed maintenance shows what the station knew only from a stored copy of its own",

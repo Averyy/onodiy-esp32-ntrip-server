@@ -921,6 +921,7 @@ typedef struct {
     float fix_up_m;
     float fix_distance_m;
     bool fix_height_only;
+    bool fix_sea_level;          /**< FAR: the fixed height is the receiver's height above sea level */
     /* The survey window (stn_maint_known_survey, stn_maint_restore_survey). */
     bool survey_active;          /**< a survey window was started */
     bool survey_complete;

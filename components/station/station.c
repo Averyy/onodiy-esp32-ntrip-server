@@ -2250,6 +2250,7 @@ static uint32_t known_overlay(station_status_t *o)
     o->fix_up_m = k->fix_up_m;
     o->fix_distance_m = k->fix_distance_m;
     o->fix_height_only = k->fix_height_only;
+    o->fix_sea_level = k->fix_sea_level;
     o->fix_checked_age_s = UINT32_MAX;   /* not this boot */
     return k->alerts;
 }
@@ -2286,6 +2287,7 @@ static void known_now(const stn_t *core, int64_t now, stn_maint_known_t *k)
         k->fix_up_m = (float)fx.offset.up_m;
         k->fix_distance_m = (float)fx.offset.distance_m;
         k->fix_height_only = fx.height_only;
+        k->fix_sea_level = fx.sea_level;
     }
     stn_maint_known_survey(core, k);
 }
