@@ -236,6 +236,7 @@ static volatile bool s_maint_power_cut;  /* the power-on or brownout verdict: th
  * reset (publish_status). Station task only; s_known_alerts (the alerts it
  * adds, 0 without) under s_lock, for station_get_status. */
 static stn_maint_known_t s_known;
+static volatile bool s_known_profile_gone;     /* the user stored another profile this boot: s_known is not about it */
 static bool s_known_on;
 static uint32_t s_known_alerts;
 static stn_t s_known_core;   /* sync_maintenance's snapshot of the core (station task; too large for its stack) */
@@ -2241,10 +2242,11 @@ static uint32_t known_overlay(station_status_t *o)
         o->rx_sg_valid = true;
         o->rx_sg = (station_sg_t){ .master = k->sg_master, .slave = k->sg_slave };
     }
-    if (k->profile_hash != um98x_profile_hash(&s_profile)) {
+    if (s_known_profile_gone || k->profile_hash != um98x_profile_hash(&s_profile)) {
         return 0;   /* the profile changed since: whether it runs, and its check, are not known */
     }
     o->profile_applied = o->profile_applied || k->profile_applied;
+    o->profile_acknowledged = o->profile_acknowledged || k->profile_acknowledged;
     o->alerts |= k->alerts;
     o->config_failed = (o->alerts & STATION_ALERT_CONFIG_FAILED) != 0;
     o->fix_state = k->fix_state;
@@ -2281,6 +2283,7 @@ static void known_now(const stn_t *core, int64_t now, stn_maint_known_t *k)
         k->sg_master = s_rx_sg.master;
         k->sg_slave = s_rx_sg.slave;
         k->profile_applied = core->profile_applied;
+        k->profile_acknowledged = stn_profile_acknowledged(core);
         k->alerts = core->alerts;
         stn_fix_status_t fx;
         stn_fix_status(core, now, &fx);
@@ -2310,6 +2313,7 @@ static void publish_status(const stn_in_t *in)
     o->identity_confirmed = core.identity_ok;
     o->alerts = stn_alerts(&core);
     o->profile_applied = core.profile_applied;
+    o->profile_acknowledged = stn_profile_acknowledged(&core);
     o->rtcm_differs = core.rtcm_differs;
     o->rtcm1230_supported = in->rtcm1230_ok;
     o->rtcm1230_known = rtcm1230_state() >= 0;
@@ -3833,6 +3837,15 @@ void station_profile_saved(void)
     s_sg_back_valid = false;
     s_sg_refused_reply[0] = '\0';
     portEXIT_CRITICAL(&s_lock);
+}
+
+void station_profile_changed(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    stn_profile_changed(&s_core);
+    s_known_profile_gone = true;
+    portEXIT_CRITICAL(&s_lock);
+    wake();   /* the status says so at once */
 }
 
 esp_err_t station_request_reconfigure(void)

@@ -449,7 +449,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
               "cred_reverted": false, "cred_reverted_why": null},
   "receiver": {"state": "streaming", "model": "UM982", "firmware": "R4.10Build18975",
                "responding": true, "restarting": false, "identity_confirmed": true, "profile_applied": true,
-               "position_locked": true, "position_known": true, "surveying": false, "survey_window_left_s": 0,
+               "profile_acknowledged": true, "position_locked": true, "position_known": true, "surveying": false, "survey_window_left_s": 0,
                "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "glonass": true,
                "rtcm1230_supported": true, "journal": "none",
                "uart_closed": false, "rx_maintenance": false, "maintenance_left_s": 0, "maintenance_chosen_s": 0,
@@ -682,7 +682,7 @@ oldest.
                "serial": "...", "pn": "...", "efuse_id": "...", "compile_date": "2025/04/30"},
   "responding": true, "restarting": false, "identity_confirmed": true,
   "alerts": [],
-  "profile_applied": true, "rtcm_differs": false, "rtcm1230_supported": true,
+  "profile_applied": true, "profile_acknowledged": true, "rtcm_differs": false, "rtcm1230_supported": true,
   "config_failed": false, "config_retry_in_s": 0, "config_auto_retry": true, "reconfigure_refused": false,
   "detect_failures": 0,
   "link": {"baud": 115200, "mode": "stream", "rx_bytes": 123456789, "rx_age_ms": 12, "rtcm_age_ms": 180,
@@ -733,6 +733,7 @@ oldest.
 | `config_failed`, `config_retry_in_s`, `config_auto_retry` | the last profile apply failed (`config_failed` alert). `config_auto_retry`: the station retries it on its own on its backoff (10 min, 30 min, 2 h, then every 6 h), which it does only with `autocfg` on and for a model it configures; `config_retry_in_s` is the time to that retry (0 when none is due, and always 0 when `config_auto_retry` is false). With `autocfg` off (the first-apply hold included) nothing is retried until the user applies again |
 | `rtcm_differs` | the latest observation window saw RTCM flowing that differs from the profile: a message it checks was missing or came at another rate while others arrived. Never set without any RTCM (no antenna, a silent receiver: `no_rtcm`, `receiver_silent` or `no_satellites` say why); cleared by a window that passes, a window without RTCM and whenever the station starts watching again (a receiver restart, detection, a successful apply). Health raises `profile_drift` after 90 s of it |
 | `profile_applied` | the applied check passed: the receiver acknowledged this profile on this firmware at its last apply (the stored applied state) and an observation window saw the profile's RTCM. A receiver whose applied state differs is configured at once (`autocfg` on). Without any RTCM (no antenna, a silent receiver) it stays `false` and the check waits for the first window with RTCM; nothing is re-applied for a window without RTCM, which could not show whether a re-apply worked (the stall is the recovery's, whose reconfigure step re-applies once under the user's recovery mode) |
+| `profile_acknowledged` | the receiver acknowledged this profile on the firmware it runs at its last apply: the stored applied state matches (the profile's hash, the firmware, the message 1230 answer stored), confirmed by this boot's version query or by an apply that worked since. `profile_applied` adds the check against the stream, so `true` with `profile_applied` `false` means applied but not checked yet (no RTCM: no antenna; or the first window still runs). `false` while the identity is not confirmed, while the station looks for the receiver or updates it, for a model the station does not configure, and from a saved profile that differs until it is applied. Also in `GET /api/status` (`receiver.profile_acknowledged`) |
 | `rtcm1230_supported` | `gnss/rtcm1230_ok`: `true` the receiver accepted message 1230 at the last apply, `false` it refused it, `null` never applied (the key is not stored: "not applied yet") |
 | `link.mode` | `off`, `stream`, `command`, `raw` (`gnss_link`) |
 | `link.rx_bytes` | bytes received from the receiver since boot (0 = nothing arrived yet) |
@@ -975,7 +976,7 @@ one without a reset does: in `GET /api/status` and `GET /api/gnss` the
 receiver's identity (`model`, `firmware`, `receiver`, `identity_confirmed`;
 the receiver's own word wins if it repeats it) and the signal group it runs
 (`rx_signal_group`), and when the profile is
-still the one it was about, `profile_applied`, `fixed_check` and the
+still the one it was about, `profile_applied`, `profile_acknowledged`, `fixed_check` and the
 station's alerts (`config_failed` with them); `surveying`,
 `survey_window_left_s` and `survey` run on with the survey window, its end
 as far from maintenance's end as before (so the reset's time comes off both

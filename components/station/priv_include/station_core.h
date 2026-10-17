@@ -758,6 +758,25 @@ void stn_request_apply_why(stn_t *s, uint8_t why);
 bool stn_sg_fallback(uint8_t refused_m, uint8_t refused_s, bool before_known, uint8_t before_m, uint8_t before_s,
                      bool ok_known, uint16_t ok_pair, uint8_t *out_m, uint8_t *out_s);
 
+/**
+ * The user stored a different profile: what the receiver acknowledged, and
+ * the applied check, were about the one before (static_ok and
+ * profile_applied false until it is applied; the user's save queues that
+ * apply, stn_request_apply).
+ */
+void stn_profile_changed(stn_t *s);
+
+/**
+ * The receiver acknowledged the stored profile on the firmware it runs (the
+ * static part of the applied check: the stored applied hash and firmware
+ * match, this boot's identity confirmed it or an apply worked since); not
+ * while the station looks for the receiver (DETECTING, NO_RECEIVER) or
+ * updates it (FLASHING, FLASH_RECOVERY). It says nothing of the output:
+ * profile_applied adds that a window saw the profile's RTCM (a receiver
+ * without an antenna sends none).
+ */
+bool stn_profile_acknowledged(const stn_t *s);
+
 /** Lock the current position (user). */
 void stn_request_lock(stn_t *s);
 
@@ -924,6 +943,7 @@ typedef struct {
     uint8_t sg_master;
     uint8_t sg_slave;
     bool profile_applied;
+    bool profile_acknowledged;   /**< stn_profile_acknowledged */
     uint32_t alerts;             /**< the alerts that stood (STN_ALERT_*; NO_RECEIVER, which is derived, left out) */
     uint8_t fix_state;           /**< stn_fix_state_t: the fixed-position check */
     float fix_horizontal_m;      /**< NEAR, FAR: the medians that decided */

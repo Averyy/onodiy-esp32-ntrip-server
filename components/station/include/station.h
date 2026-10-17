@@ -218,7 +218,8 @@
  * settings carries it too, and a maintenance resumed after a reset reports
  * it until it ends: the receiver's identity (identity_confirmed included)
  * and the signal group it runs (rx_sg), and for the same profile
- * profile_applied, the fixed-position verdict and the alerts; the survey
+ * profile_applied and profile_acknowledged, the fixed-position verdict and
+ * the alerts; the survey
  * window runs on (surveying, survey_window_left_s, and after maintenance
  * the station goes on with it). The rest of what an apply session read back
  * (rx_settings, rx_bands) stays this boot's, unknown until the next
@@ -491,7 +492,12 @@ typedef struct {
     bool identity_confirmed;         /**< receiver identity confirmed by this boot's version query (in a maintenance resumed
                                           after a reset: as before the reset, see above) */
     uint32_t alerts;                 /**< station_alert_t flags */
-    bool profile_applied;            /**< receiver runs the stored profile */
+    bool profile_applied;            /**< receiver runs the stored profile: it acknowledged it (profile_acknowledged) and an
+                                          observation window saw the profile's RTCM */
+    bool profile_acknowledged;       /**< the receiver acknowledged the stored profile on the firmware it runs at its last
+                                          apply (the stored applied state matches; this boot's identity confirmed it, or an
+                                          apply worked since; not while the station looks for it or updates it); not yet
+                                          checked against its RTCM while profile_applied is false */
     bool rtcm_differs;               /**< the latest observation window saw RTCM flowing that differs from the profile
                                           (a checked message missing or at the wrong rate); never without RTCM */
     bool rtcm1230_supported;         /**< gnss/rtcm1230_ok: the receiver accepted RTCM1230 at the last apply (required in the observed set only then) */
@@ -882,6 +888,14 @@ bool station_sg_test_running(void);
 
 /** The user saved a profile: a signal-group refusal shown until now is cleared. */
 void station_profile_saved(void);
+
+/**
+ * The user stored a profile that differs from the one before: the
+ * receiver's acknowledgement and the applied check were of that one
+ * (profile_acknowledged and profile_applied false until the new one is
+ * applied; also what a maintenance resumed after a reset knew of it).
+ */
+void station_profile_changed(void);
 
 #ifdef __cplusplus
 }

@@ -667,6 +667,7 @@ static esp_err_t h_gnss_profile(web_req_t *r)
             if (err != ESP_OK) {
                 return web_send_internal(r->req, err);
             }
+            station_profile_changed();   /* what the receiver acknowledged was the profile before */
         }
     }
     if (have_autocfg) {

@@ -463,6 +463,7 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
         wj_bool(w, "restarting", st->receiver_restarting);
         wj_bool(w, "identity_confirmed", st->identity_confirmed);
         wj_bool(w, "profile_applied", st->profile_applied);
+        wj_bool(w, "profile_acknowledged", st->profile_acknowledged);
         wj_bool(w, "position_locked", st->position_locked);
         wj_bool(w, "position_known", st->position.source != UM98X_POS_NONE);
         wj_bool(w, "surveying", st->surveying);
@@ -898,6 +899,7 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     wj_bool(w, "identity_confirmed", st->identity_confirmed);
     station_alerts(w, "alerts", st->alerts);
     wj_bool(w, "profile_applied", st->profile_applied);
+    wj_bool(w, "profile_acknowledged", st->profile_acknowledged);
     wj_bool(w, "rtcm_differs", st->rtcm_differs);
     if (st->rtcm1230_known) {
         wj_bool(w, "rtcm1230_supported", st->rtcm1230_supported);
