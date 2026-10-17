@@ -781,3 +781,79 @@ def test_cli_respond_position_options():
     out = subprocess.run([sys.executable, "rtcm_replay.py", "--listen", "127.0.0.1:0", str(LAX), "--respond",
                           "--respond-geoid", "200"], cwd=BENCH, capture_output=True, text=True)
     assert out.returncode == 2 and "--respond-geoid" in out.stderr
+
+
+def test_responder_sends_a_line_nobody_asked_for_every_n_seconds():
+    """The satellite-in-view output without an antenna: one sentence listing no satellites every `text_every_s`,
+    none while it restarts, none piled up after a gap; an NMEA sentence by its checksum (not a command reply)."""
+    clk = FakeClock()
+    r = Um982Responder(clock=clk, text_every_s=10.0, restart_s=3.0)
+    clk.t += 9.9
+    assert r.due() == b""
+    clk.t += 0.1
+    out = lines_of(r.due())
+    assert out == ["$GPGSV,1,1,00*79"] and check_text(out[0]) == "nmea"
+    assert unicore.ACK.match(out[0]) is None
+    clk.t += 9.95
+    assert r.due() == b""
+    clk.t += 0.05
+    assert lines_of(r.due()) == ["$GPGSV,1,1,00*79"]
+    # A RESET at 21 s: quiet until its banner at 24 s; the sentence of 30 s comes.
+    clk.t += 1.0
+    r.feed(b"RESET\r\n")
+    clk.t += 0.1
+    assert [x for x in lines_of(r.due()) if x.startswith("$GPGSV")] == []
+    clk.t += 8.9
+    assert "$GPGSV,1,1,00*79" in lines_of(r.due())
+    # Nobody read it for 55 s: one sentence, not five.
+    clk.t += 55.0
+    assert lines_of(r.due()) == ["$GPGSV,1,1,00*79"]
+    assert r.texts == 4
+    # Without the option: never.
+    q = Um982Responder(clock=clk)
+    clk.t += 100.0
+    assert q.due() == b""
+
+
+def test_no_rtcm_input_and_the_unasked_line_over_the_wire(tmp_path):
+    """The input "none": no RTCM at all, the responder answers and sends its unasked sentence on its period."""
+    s = load("none")
+    assert s.frames == 0 and s.size == 0
+    resp = Um982Responder(text_every_s=0.2)
+    srv = ReplayServer(s, run_dir=tmp_path, say=lambda m: None, responder=resp).start()
+    try:
+        with socket.create_connection((srv.host, srv.port)) as c:
+            c.settimeout(0.1)
+            got = bytearray()
+            end = time.monotonic() + 1.1
+            asked = False
+            while time.monotonic() < end:
+                if not asked and time.monotonic() > end - 0.6:
+                    c.sendall(b"\r\nVERSIONA\r\n")
+                    asked = True
+                try:
+                    got.extend(c.recv(65536))
+                except socket.timeout:
+                    pass
+            sp = StreamSplitter()
+            items = sp.feed(bytes(got)) + sp.flush()
+            texts = [it.text for it in items if it.kind == "text"]
+            assert [it for it in items if it.kind.startswith("rtcm")] == []
+            assert 4 <= texts.count("$GPGSV,1,1,00*79") <= 6
+            assert unicore.ack_line("VERSIONA") in texts
+    finally:
+        srv.stop()
+
+
+def test_cli_text_every_and_no_rtcm_options():
+    run = lambda *a: subprocess.run([sys.executable, "rtcm_replay.py", "--listen", "127.0.0.1:0", *a], cwd=BENCH,
+                                    capture_output=True, text=True)
+    assert "--respond-text-every" in subprocess.run([sys.executable, "rtcm_replay.py", "--help"], cwd=BENCH,
+                                                    capture_output=True, text=True).stdout
+    out = run(str(LAX), "--respond-text-every", "10")
+    assert out.returncode == 2 and "need --respond" in out.stderr
+    for bad in ("0", "-5", "3601"):
+        out = run(str(LAX), "--respond", "--respond-text-every", bad)
+        assert out.returncode == 2 and "--respond-text-every must be" in out.stderr
+    out = run("none")
+    assert out.returncode == 2 and "needs --respond" in out.stderr

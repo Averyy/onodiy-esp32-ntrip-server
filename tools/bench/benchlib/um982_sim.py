@@ -35,6 +35,11 @@ switches its signal group:
                               base mode runs
   anything else               `PARSING FAILED NO MATCHING FUNC  <word>`
 
+With `text_every_s` it also sends a line nobody asked for every that many
+seconds: a satellite-in-view sentence listing no satellites
+(`$GPGSV,1,1,00*79`), as the receiver's GPGSV output reads without an
+antenna (none while it restarts; an UNLOG COM1 does not stop it here).
+
 A restart withholds the RTCM output for `restart_s`, answers every command
 meanwhile with `The Board is resetting,do not response any command!*39`
 (build 25164 answered a command 0.4 s into a restart so; later in a restart
@@ -63,6 +68,7 @@ import threading
 import time
 
 from .rtcm import BitWriter, build_frame, llh_to_ecef, msg_type, payload_of
+from .stream import xor_checksum
 from .unicore import (
     GROUP_BODIES, GROUP_REFUSAL, ack_line, banner_line, config_line, groups_line, mode_line, own_position_body,
     own_position_line, refusal_text, restarting_line, version_line,
@@ -73,6 +79,7 @@ ACK_DELAY_S = 0.03
 DATA_DELAY_S = 0.06
 STATION_TYPES = (1005, 1006, 1033, 1230)
 RECEIVER_SERIAL = "SYNTH00000001"   # the serial number in the version log (unicore.version_line)
+NO_SKY_GSV = f"$GPGSV,1,1,00*{xor_checksum('GPGSV,1,1,00'):02X}"   # satellites in view: none (NMEA checksum; `text_every_s`)
 
 
 # ---------------------------------------------------------------------------
@@ -128,8 +135,11 @@ class Um982Responder:
     def __init__(self, group: tuple[int, int] = (4, 5), firmware: str = "R4.10Build25164",
                  reject: tuple[tuple[int, int], ...] | list = (), restart_s: float = 3.0, model: str = "UM982",
                  baud: int = 115200, clock=time.monotonic, own: tuple[float, float, float] | None = None,
-                 separation: float = 0.0):
+                 separation: float = 0.0, text_every_s: float | None = None):
         self.clock = clock
+        self.text_every_s = float(text_every_s) if text_every_s else None   # an unasked line this often
+        self.next_text = clock() + self.text_every_s if self.text_every_s else 0.0
+        self.texts = 0
         self.own = tuple(own) if own is not None else None   # where the antenna is: latitude, longitude, ellipsoidal height
         self.separation = float(separation)
         self.model = model
@@ -179,6 +189,13 @@ class Um982Responder:
         if self.banner_pending and now >= self.restart_until:
             self.banner_pending = False
             self.outbox.append((now, (banner_line("COM1") + "\r\n").encode()))
+        if self.text_every_s and now >= self.next_text:
+            if now >= self.restart_until:
+                self.outbox.append((now, (NO_SKY_GSV + "\r\n").encode()))
+                self.texts += 1
+            # The next one on its own period (none piled up after a pause).
+            while self.next_text <= now:
+                self.next_text += self.text_every_s
 
     def restarting(self, now: float | None = None) -> bool:
         with self.lock:
