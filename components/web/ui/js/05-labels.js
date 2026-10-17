@@ -92,9 +92,9 @@ const L = {
     power_lost: ['Power was lost', 'The station lost power 3 or more times in 24 hours. Check the power adapter, cable and connections.'],
     receiver_silent: ['Nothing from the receiver', 'The receiver sends nothing and does not answer. Unplug the station for a few seconds; ' +
       'if that does not help, check the receiver\'s power and cable.'],
-    no_satellites: ['No satellites', 'The receiver sees no satellites. Check that the antenna is on the socket marked M and sees the open sky.'],
-    no_rtcm: ['No corrections from the receiver', 'The receiver answers but sends no corrections. Check that the antenna is on the socket ' +
-      'marked M and sees the open sky.'],
+    /* The Status page's words (alertText adds "The receiver answers." to no_rtcm while receiver.responding says so). */
+    no_satellites: ['Antenna sees no satellites', 'Check that the antenna is on the socket marked M and sees the open sky.'],
+    no_rtcm: ['Receiver sends no corrections', 'Check that the antenna is on the socket marked M and sees the open sky.'],
     rx_held: ['Receiver not configured yet', 'Confirm its configuration on the Receiver page. Until then it sends no corrections.'],
   },
   /* After a failed receiver configuration: the station's own retry (automatic configuration on), or only the user's (configFailedText). */
@@ -484,6 +484,11 @@ function fixedFarSentence(a) {
 /* The fixed_far warning: how far, and what to do. */
 function fixedFarText(a) {
   return fixedFarSentence(a) + ' Check it in Receiver settings.';
+}
+
+/* The same when it is why no corrections come (the receiver stops them this far off): the cause in the sentence. */
+function fixedStopsText(a) {
+  return fixedFarSentence(a).replace(/\.$/, ', which stops them.') + ' Check it in Receiver settings.';
 }
 
 /** The failed-configuration alert's text: when the station tries again, or that only the user does (alert or GET /api/gnss). */

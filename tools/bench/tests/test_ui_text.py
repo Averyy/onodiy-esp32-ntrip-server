@@ -88,6 +88,10 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  headline: sig => signalsHeadline(sig), sigChecks: a => signalChecks(a[0], a[1]), msgCheck: a => msgCheck(a[0], a[1], a[2]),\n' +
   '  manage: () => MANAGE, manageKey: a => manageKey(a[0], a[1]), manageCustom: a => manageCustom(a[0], a[1]),\n' +
   '  doing: hl => recoveryDoing(hl), healthPlan: a => healthPlanText(a[0], stationState(a[1], true)),\n' +
+  '  rxAlerts: a => (a[0].alerts || []).filter(rxAlertShown(stationState(a[1], true), false)),\n' +
+  '  stepSaid: a => { const st = stationState(a[1], true); return stepSaid(a[0], st, healthItems(a[1].alerts || [], st).state); },\n' +
+  '  nextAttempt: a => nextAttemptRow(a[0], stationState(a[1], true)),\n' +
+  '  posWords: a => positionWords(a[0], a[1], a[2]),\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
 process.stdout.write(JSON.stringify(out));
@@ -602,10 +606,11 @@ def test_hero_says_what_blocks_first_and_what_to_do():
 
 def test_recovery_says_what_it_does_now():
     """The receiver recovery's line names the step in progress and where it is (health.step, health.step_phase):
-    "searching for the receiver" only while the search runs, never in the wait after it. A receiver that answers
-    without sending corrections gets the antenna check at once, in amber while the recovery still works on it, with
-    what it does in the plan line (on Diagnostics too, under the alert that says it); red once it no longer acts (alerts
-    only, or after the last step). Visitors see no step."""
+    "searching for the receiver" only while the search runs, never in the wait after it, and never for a receiver that
+    answers (the rescan checks the link to it). A receiver that answers without sending corrections gets the antenna
+    check at once, in amber while the recovery still works on it, with what it does in the plan line (on Diagnostics
+    too, in the same words, under the state's line); red once it no longer acts (alerts only, or after the last step).
+    Nothing says it tries again shortly while the station holds the recovery. Visitors see no step."""
     steps = ["resync", "link_restart", "rescan", "reconfigure", "receiver_reset", "reboot"]
     doing = run_ui([("doing", {"step": k, "step_phase": p}) for k in steps for p in ("running", "waiting")] +
                    [("doing", {"step": "reconfigure", "step_phase": "none"}), ("doing", {"step": "none", "step_phase": "none"}),
@@ -673,10 +678,42 @@ def test_recovery_says_what_it_does_now():
     pub = heroes(antenna, admin=False)[0]
     assert (pub["key"], pub["line"], pub["plan"]) == ("rx_stopped", "The station is fixing it.", None)
 
-    # Diagnostics: the alert says the antenna (amber, its fuller words), the card's line what the recovery does.
-    items = run_ui([("healthItems", antenna), ("healthItems", found)])
-    assert items[0] == {"state": None, "alerts": ["no_rtcm"], "notice": None}
+    # Diagnostics: the Status page's state and words (never the alert's other title beside them), the card's line what
+    # the recovery does; the same once it has failed (red), and with the receiver not answering now.
+    failed = status(receiver={"rtcm_age_ms": None}, health={"level": "failed", "last_step": "receiver_reset"}, alerts=no_rtcm,
+                    casters=wait_data)
+    quiet_rec = status(receiver={"rtcm_age_ms": None, "responding": False}, health=hl("reconfigure", "waiting"),
+                       alerts=no_rtcm, casters=wait_data)
+    items = run_ui([("healthItems", antenna), ("healthItems", found), ("healthItems", failed), ("healthItems", quiet_rec),
+                    ("healthItems", no_sky)])
+    assert items[0] == {"state": "no_rtcm", "alerts": [], "notice": None}
     assert items[1] == {"state": "rx_stopped", "alerts": [], "notice": None}
+    assert items[2] == {"state": "no_rtcm", "alerts": [], "notice": None}
+    assert items[3] == {"state": "no_rtcm", "alerts": [], "notice": None}
+    assert items[4] == {"state": "no_satellites", "alerts": [], "notice": None}
+    assert heroes(quiet_rec)[0]["line"] == "Check that the antenna is on the socket marked M and sees the open sky."
+    # The alert says it in the same words where another state comes first ("Also:"), and "answers" only while it does.
+    journal = {"receiver": {"journal": "waiting", "rtcm_age_ms": None}, "alerts": no_rtcm, "casters": wait_data}
+    also = heroes(status(**journal), status(**{**journal, "receiver": {"journal": "waiting", "rtcm_age_ms": None,
+                                                                        "responding": False}}))
+    assert also[0]["alsoText"] == ["Receiver sends no corrections. The receiver answers. Check that the antenna is on the "
+                                   "socket marked M and sees the open sky."], also[0]
+    assert also[1]["alsoText"] == ["Receiver sends no corrections. Check that the antenna is on the socket marked M and sees "
+                                   "the open sky."], also[1]
+
+    # The rescan for a receiver that answers checks the link; for one that does not, it searches.
+    rescan = status(receiver={"rtcm_age_ms": None}, health=hl("rescan", "running"), alerts=no_rtcm, casters=wait_data)
+    r = heroes(rescan, search)
+    assert r[0]["plan"] == "The station is checking the link to the receiver." and "searching" not in r[0]["plan"]
+    assert r[1]["line"] == "The station is searching for the receiver."
+    # Between two steps while the station holds the recovery (its own session, the grace after it): nothing promised.
+    held = status(receiver={"rtcm_age_ms": None}, health={**hl("none", "none"), "ladder_suspended": True}, alerts=no_rtcm,
+                  casters=wait_data)
+    held_silent = status(receiver={"rtcm_age_ms": 30000}, health={**hl("none", "none"), "ladder_suspended": True})
+    h2 = heroes(held, held_silent)
+    assert (h2[0]["key"], h2[0]["tone"], h2[0]["plan"]) == ("no_rtcm", "warn", None), h2[0]
+    assert h2[1]["line"] == "The station is fixing it." and "shortly" not in (h2[1]["plan"] or "")
+    assert run_ui([("healthPlan", [held["health"], held])]) == [None]
     plans = run_ui([("healthPlan", [antenna["health"], antenna]), ("healthPlan", [found["health"], found]),
                     ("healthPlan", [antenna_full["health"], antenna_full]), ("healthPlan", [watched["health"], watched]),
                     ("healthPlan", [silent_full["health"], silent_full])])
@@ -1466,10 +1503,62 @@ def test_no_corrections_from_a_fixed_position_far_enough_to_stop_them():
                               {**FIXED_FAR, "horizontal_m": dist, "distance_m": dist}])
     far, near = heroes(stalled(420), stalled(120))
     assert (far["key"], far["title"]) == ("no_rtcm", "Receiver sends no corrections")
-    assert far["line"] == "The fixed position is 420\u00a0m from where the receiver is. Check it in Receiver settings."
+    # One sentence that says the position is why.
+    assert far["line"] == ("The fixed position is 420\u00a0m from where the receiver is, which stops them. "
+                           "Check it in Receiver settings.")
     assert far["also"] == [] and far["actions"] == ["Receiver settings"]
     assert near["key"] == "no_rtcm" and near["line"] == ANTENNA_LINE and near["also"] == ["fixed_far"]
     assert near["actions"] == []
+    # Diagnostics and the Receiver card say it once too: the state, without the warning again under it (failed or while
+    # the recovery runs), and the warning beside the antenna line when it is nearer.
+    recovering = stalled(1400)
+    recovering["health"] = {"level": "recovering", "last_step": "receiver_reset", "step": "receiver_reset",
+                            "step_phase": "waiting", "recovery_mode": "full"}
+    items = run_ui([("healthItems", stalled(2340)), ("healthItems", recovering), ("healthItems", stalled(120))])
+    assert items[0] == {"state": "no_rtcm", "alerts": [], "notice": None}
+    assert items[1] == {"state": "no_rtcm", "alerts": [], "notice": None}
+    assert items[2] == {"state": "no_rtcm", "alerts": ["fixed_far"], "notice": None}
+    gnss = {"alerts": ["fixed_far", "config_failed"]}
+    rx = run_ui([("rxAlerts", [gnss, stalled(2340)]), ("rxAlerts", [gnss, stalled(120)]), ("rxAlerts", [gnss, status()])])
+    assert rx == [["config_failed"], ["fixed_far", "config_failed"], ["fixed_far", "config_failed"]]
+
+
+def test_fixed_position_far_never_beside_a_green_chip_or_a_bare_mark():
+    """While corrections flow with the fixed position far off, the Receiver card's chip is amber like the Status page's
+    top card, and the Status page's position row says it in words."""
+    chips = run_ui([("rxChip", status(alerts=[FIXED_FAR])),
+                    ("rxChip", status(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "auth_failed",
+                                                                                         reason="auth")], alerts=[FIXED_FAR])),
+                    ("rxChip", status())])
+    assert chips == [["Position looks wrong", "warn"], ["Position looks wrong", "warn"], ["Streaming", "ok"]]
+    words = run_ui([("posWords", [{"position_locked": True, "profile_applied": True}, True, True]),
+                    ("posWords", [{"position_locked": True, "profile_applied": True}, True, False])])
+    assert words == [["Locked, ", "looks wrong"], ["Locked", None]]
+
+
+def test_health_card_rows_say_the_step_and_the_next_attempt_only_where_they_hold():
+    """The last recovery step's row goes only while the card says the step in progress (the line under it, or the
+    recovery's own state line); with another state on top (no receiver found while the rescan's wait runs, the port
+    closed during a link restart) the row stays. No next attempt in alerts only: its pass sends nothing."""
+    hl = lambda step, phase, **kw: {"level": "recovering", "last_step": step, "step": step, "step_phase": phase,
+                                     "recovery_mode": "full", **kw}
+    wait_data = [caster(0, "Onocoy", "wait_data")]
+    norx = status(receiver={"state": "no_receiver", "rtcm_age_ms": None, "next_detect_in_s": 240}, alerts=[NO_RX],
+                  health=hl("rescan", "waiting"), casters=wait_data)
+    uart = status(receiver={"state": "no_receiver", "uart_closed": True, "rtcm_age_ms": None}, alerts=[NO_RX],
+                  health=hl("link_restart", "running"), casters=wait_data)
+    antenna = status(receiver={"rtcm_age_ms": None}, health=hl("reconfigure", "waiting"),
+                     alerts=[{"id": "no_rtcm", "source": "health"}], casters=wait_data)
+    silent = status(receiver={"rtcm_age_ms": 30000}, health=hl("rescan", "running"), casters=wait_data)
+    said = run_ui([("stepSaid", [x["health"], x]) for x in (norx, uart, antenna, silent)])
+    assert said == [False, False, True, True]
+    alerts_only = status(receiver={"rtcm_age_ms": None}, alerts=[{"id": "no_rtcm", "source": "health"}], casters=wait_data,
+                         health={"level": "failed", "last_step": "reconfigure", "recovery_mode": "alerts_only"})
+    full = status(receiver={"rtcm_age_ms": None}, alerts=[{"id": "no_rtcm", "source": "health"}], casters=wait_data,
+                  health={"level": "failed", "last_step": "receiver_reset", "recovery_mode": "full"})
+    rows = run_ui([("nextAttempt", [{**alerts_only["health"], "gnss_retry_in_s": 472}, alerts_only]),
+                   ("nextAttempt", [{**full["health"], "gnss_retry_in_s": 472}, full])])
+    assert rows[0] is None and rows[1][0] == "Next recovery attempt in"
 
 
 def test_fixed_position_check_in_history():

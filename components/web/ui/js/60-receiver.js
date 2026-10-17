@@ -218,7 +218,8 @@ const RX_CHIP = {
 /* The conditions the Receiver card explains in a line under its title (what happens, what to do). */
 const RX_PROBLEM = ['uart_closed', 'rx_stopped', 'no_satellites', 'no_rtcm'];
 
-/* The Receiver card's chip [text, tone]: the Status page's condition and colour (never "Streaming" while corrections stop). */
+/* The Receiver card's chip [text, tone]: the Status page's condition and colour (never "Streaming" while corrections stop,
+ * nor beside the fixed-position warning). */
 function receiverChip(s) {
   const st = stationState(s, true);
   const r = s.receiver || {};
@@ -227,6 +228,7 @@ function receiverChip(s) {
   if (r.rx_maintenance) return ['Maintenance', 'info'];
   if (r.signal_test && SGT_RUNNING.indexOf(r.signal_test.state) >= 0) return ['Comparing groups', 'info'];
   if (r.first_apply_held) return ['Not configured yet', 'warn'];
+  if (st.delivering && (s.alerts || []).some(a => a.id === 'fixed_far')) return ['Position looks wrong', 'warn'];
   if (st.delivering) return ['Streaming', 'ok'];
   return [HERO_TITLE[r.state] || lbl(L.station, r.state), r.state === 'no_receiver' ? 'bad' : 'info'];
 }
@@ -253,7 +255,15 @@ function positionLine(g, delivering) {
   return have ? 'Not locked. Lock it so it stays the same after restarts.' : 'No position yet.';
 }
 
-/** The card under its title: the problem in a line, the alerts, then model, configuration and position (st: stationState). */
+/* Whether the Receiver card lists a station alert (g.alerts' ids): not no_receiver, not the signals one beside the bands
+ * message (missing), and not one the problem line says (st.covers). */
+function rxAlertShown(st, missing) {
+  const problem = !!st && RX_PROBLEM.indexOf(st.key) >= 0;
+  return a => a !== 'no_receiver' && !(a === 'signals_mismatch' && missing) && !(problem && st.covers.indexOf(a) >= 0);
+}
+
+/** The card under its title: the problem in a line, the alerts (rxAlertShown), then model, configuration and position
+ * (st: stationState). */
 function receiverTop(g, st) {
   const r = g.receiver || {};
   const missing = bandsMissingMsg(g);
@@ -261,7 +271,7 @@ function receiverTop(g, st) {
     st && RX_PROBLEM.indexOf(st.key) >= 0 ? msg(st.tone, st.lead, st.plan ? h('div', { class: 'muted small' }, st.plan) : null) : null,
     sgRefusedMsg(g),
     missing,
-    alertMsgs(g, a => a !== 'no_receiver' && !(a === 'signals_mismatch' && missing)),
+    alertMsgs(g, rxAlertShown(st, !!missing)),
     kv([
       ['Model', r.valid === false ? h('span', { class: 'muted' }, 'Not identified yet') : [r.model || DASH, ' · ', fwText(r.firmware, r.build)]],
       ['Configuration', configLine(g)],

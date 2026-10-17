@@ -150,20 +150,25 @@ function healthChip(level, alerts, st) {
 
 /*
  * The Health card's messages: the alerts, and above them the Status page's
- * state (its title and line) while it is at least as bad as every alert (an
- * alert it says itself then goes). A state that only restates an alert of
- * its colour and stands for no page notice (no receiver found) leaves it to
- * the alert, whose words here are the fuller ones. A closed port leaves out
- * the no-receiver alert (its cable advice would mislead), as the Status page
- * does.
+ * state (its title and line) while it is at least as bad as every alert (the
+ * alerts it says itself then go: its own and those its line covers). A state
+ * that only restates an alert of its colour and stands for no page notice
+ * (no receiver found) leaves it to the alert, whose words here are the
+ * fuller ones; never the recovery's reasons (no corrections, no satellites,
+ * the receiver stopped), whose words are the Status page's, nor a line that
+ * says another alert instead (covers: the fixed position that stops the
+ * corrections). So both pages say it in the same words. A closed port leaves
+ * out the no-receiver alert (its cable advice would mislead), as the Status
+ * page does.
  */
 function healthItems(alerts, st) {
   let list = alerts.filter(a => !(st && st.key === 'uart_closed' && a.id === 'no_receiver'));
   const worst = Math.min(9, ...list.map(a => toneRank(alertTone(a))));
   const own = st && st.alertId ? list.find(a => a.id === st.alertId) : null;
-  const restates = !!own && !st.notice && toneRank(alertTone(own)) === toneRank(st.tone);
+  const restates = !!own && !st.notice && !st.covers.length && LADDER_REASONS.indexOf(own.id) < 0 &&
+    toneRank(alertTone(own)) === toneRank(st.tone);
   const state = !!st && toneRank(st.tone) <= 2 && toneRank(st.tone) <= worst && !restates;
-  if (state) list = list.filter(a => a.id !== st.alertId);
+  if (state) list = list.filter(a => a.id !== st.alertId && st.covers.indexOf(a.id) < 0);
   return { alerts: list, state: state };
 }
 
@@ -234,13 +239,26 @@ function healthPlanText(hl, st) {
   return [st && st.doing, fixing && restartPlanText(hl)].filter(Boolean).join(' ') || null;
 }
 
+/* The next recovery attempt as a row, or null: only while no corrections come (as on the Status page), and only where the
+ * station makes one (alerts only sends nothing). */
+function nextAttemptRow(hl, st) {
+  const fixing = !st || !st.delivering;
+  return fixing && hl.gnss_retry_in_s && hl.recovery_mode !== 'alerts_only' ? ['Next recovery attempt in', fmt.dur(hl.gnss_retry_in_s)] : null;
+}
+
+/* The step in progress is said on the card: by the line under it (st.doing), or by the state's own line (the recovery's). */
+function stepSaid(hl, st, shown) {
+  if (hl.step_phase !== 'running' && hl.step_phase !== 'waiting') return false;
+  return !!st && (!!st.doing || (shown && st.key === 'rx_stopped' && st.tone === 'warn' && !!recoveryDoing(hl)));
+}
+
 /*
  * The Health card from GET /api/health and the status s (its alerts are
  * the Status page's): the chip, the state with the Status page's button
  * (its notice is left out here) and the alerts (healthItems), the line
- * (healthPlanText), the rows (the last recovery step only while none is in
- * progress: the state's line or the card's says that one). The page
- * handles the data-act buttons (Check again, End now, Leave safe mode).
+ * (healthPlanText), the rows (the last recovery step unless the card says
+ * the step in progress: stepSaid). The page handles the data-act buttons
+ * (Check again, End now, Leave safe mode).
  */
 function healthCard(hl, s) {
   const port = hl.link || {};
@@ -248,9 +266,6 @@ function healthCard(hl, s) {
   const st = s ? stationState(s, true) : null;
   const hi = healthItems(alerts, st);
   const hc = healthChip(hl.level, hi.alerts, st);
-  /* The next attempt only while no corrections come (as on the Status page). */
-  const fixing = !st || !st.delivering;
-  const stepNow = hl.step_phase === 'running' || hl.step_phase === 'waiting';
   const plan = healthPlanText(hl, st);
   return h('section', { class: 'card' },
     cardHead('Health', badge(hc[0], hc[1])),
@@ -263,9 +278,9 @@ function healthCard(hl, s) {
       /* The port's row only while the state above does not say it. */
       port.open === false && port.mode !== 'off' && !(hi.state && st.key === 'uart_closed') ?
         ['Receiver port', h('span', { class: 't-bad' }, 'Closed, reopening')] : null,
-      stepNow ? null : ['Last recovery step', lbl(L.step, hl.last_step)],
+      stepSaid(hl, st, hi.state) ? null : ['Last recovery step', lbl(L.step, hl.last_step)],
       ['Since the last RTCM', hl.rtcm_gap_ms === null || hl.rtcm_gap_ms === undefined ? 'never received' : fmt.ms(hl.rtcm_gap_ms)],
-      fixing && hl.gnss_retry_in_s ? ['Next recovery attempt in', fmt.dur(hl.gnss_retry_in_s)] : null,
+      nextAttemptRow(hl, st),
       hl.inhibited_by ? ['Restarts held back by', hl.inhibited_by] : null,
       hl.update_slot && hl.update_slot !== 'none' ? ['Update running', hl.update_slot === 'app' ? 'an app update' : 'a receiver update'] : null,
       hl.factory_reset_refused_age_s !== null && hl.factory_reset_refused_age_s !== undefined ?
