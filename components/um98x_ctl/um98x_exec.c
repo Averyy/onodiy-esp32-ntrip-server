@@ -579,6 +579,23 @@ static void txn_reason(um98x_exec_t *ex, um98x_txn_status_t st, char *out, size_
     }
 }
 
+um98x_res_t um98x_exec_own_fix(um98x_exec_t *ex, const char *cmd, um98x_own_fix_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (cmd == NULL || (!word_is(cmd, UM98X_CMD_BASEPOS) && !word_is(cmd, UM98X_CMD_SPPNAV))) {
+        return UM98X_E_ARG;
+    }
+    um98x_txn_status_t st = um98x_exec_txn(ex, UM98X_TXN_OWNPOS, cmd, NULL);
+    if (st != UM98X_TXN_OK) {
+        return um98x_res_from_txn(st);
+    }
+    char body[UM98X_OWN_BODY_MAX];
+    lock(ex);
+    copy_str(body, sizeof(body), ex->ch->txn.own_body);
+    unlock(ex);
+    return um98x_own_fix_parse(body, strlen(body), out) ? UM98X_OK : UM98X_E_FAILED;
+}
+
 um98x_res_t um98x_exec_groups(um98x_exec_t *ex, um98x_bands_t *out, char *reason, size_t cap)
 {
     memset(out, 0, sizeof(*out));

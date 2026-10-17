@@ -20,7 +20,7 @@ which report state and change nothing:
   OBSVMA       one epoch of raw observations, one entry per tracked signal, once
 `send` also accepts these read-only one-shots without --write:
   BESTNAVXYZA BESTSATA GPGGA GPGSA GPRMC GPGST AGCA RTKSTATUSA SATSINFOA
-  SATELLITEA BASEPOSA BASEINFOA RECTIMEA JAMSTATUSA RTCMSTATUSA
+  SATELLITEA BASEPOSA SPPNAVA BASEINFOA RECTIMEA JAMSTATUSA RTCMSTATUSA
 A receiver that is restarting answers "The Board is resetting,do not
 response any command!" instead of an acknowledgement: the tool reports
 "receiver restarting" and does not resend.

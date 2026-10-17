@@ -93,6 +93,8 @@ const char *web_live_why_name(uint8_t v);
 const char *web_live_end_name(uint8_t v);
 /** station_rx_boot_t: "none", "pending", "kept_running", "restarted", "unknown". */
 const char *web_rx_boot_name(uint8_t v);
+/** station_fix_state_t: none, checking, ok, far, no_solution, refused. */
+const char *web_fix_state_name(uint8_t v);
 /** station_rx_boot_by_t: "none", "restart", "uptime", "stream". */
 const char *web_rx_boot_by_name(uint8_t v);
 

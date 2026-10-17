@@ -58,10 +58,11 @@ const char *web_station_state_name(station_state_t v)
 
 static const char *const s_station_alert[] = {
     "unsupported_model", "config_failed", "position_mismatch", "antenna_moved", "receiver_attention",
-    "receiver_in_loader", "no_receiver", "signals_mismatch",
+    "receiver_in_loader", "no_receiver", "signals_mismatch", "fixed_far",
 };
 _Static_assert(STATION_ALERT_UNSUPPORTED_MODEL == 1u << 0 && STATION_ALERT_RECEIVER_IN_LOADER == 1u << 5 &&
-                   STATION_ALERT_NO_RECEIVER == 1u << 6 && STATION_ALERT_SIGNALS_MISMATCH == 1u << 7,
+                   STATION_ALERT_NO_RECEIVER == 1u << 6 && STATION_ALERT_SIGNALS_MISMATCH == 1u << 7 &&
+                   STATION_ALERT_FIXED_FAR == 1u << 8,
                "station alert bits moved: update the name table");
 
 const char *web_station_alert_name(uint32_t bit)
@@ -547,8 +548,9 @@ static const char *const s_diag_event[] = {
     [DIAG_EV_LIVE_VIEW] = "live_view",
     [DIAG_EV_SG_TEST] = "sg_test",
     [DIAG_EV_RX_BOOT] = "rx_boot",
+    [DIAG_EV_FIXED_POS] = "fixed_check",
 };
-_Static_assert(COUNT(s_diag_event) == (size_t)DIAG_EV_RX_BOOT + 1u, "journal kinds added: update the table");
+_Static_assert(COUNT(s_diag_event) == (size_t)DIAG_EV_FIXED_POS + 1u, "journal kinds added: update the table");
 
 const char *web_diag_event_name(uint16_t kind)
 {
@@ -704,6 +706,21 @@ static const char *const s_rx_boot[] = {
     [STATION_RX_BOOT_UNKNOWN] = "unknown",
 };
 _Static_assert(COUNT(s_rx_boot) == (size_t)STATION_RX_BOOT_UNKNOWN + 1u, "power-on verdicts moved: update the table");
+
+static const char *const s_fix_state[] = {
+    [STATION_FIX_OFF] = "none",
+    [STATION_FIX_CHECKING] = "checking",
+    [STATION_FIX_NEAR] = "ok",
+    [STATION_FIX_FAR] = "far",
+    [STATION_FIX_NO_SOLUTION] = "no_solution",
+    [STATION_FIX_REFUSED] = "refused",
+};
+_Static_assert(COUNT(s_fix_state) == (size_t)STATION_FIX_REFUSED + 1u, "fixed-position check states moved: update the table");
+
+const char *web_fix_state_name(uint8_t v)
+{
+    return pick(s_fix_state, COUNT(s_fix_state), (int)v);
+}
 
 const char *web_rx_boot_name(uint8_t v)
 {

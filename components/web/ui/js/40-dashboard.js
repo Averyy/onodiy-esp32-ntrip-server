@@ -162,7 +162,7 @@ function receiverCard(s, st) {
   return h('section', { class: 'card fit-kv' },
     cardHead('Receiver', link('Details', '#/receiver', 'head-link')),
     kv([live ? ['Bands', bandsView(r, st.quality, st.key === 'quality')] : null, live ? ['GLONASS', glonassView(r, st.quality)] : null,
-      ['Position', positionText(r, live)]]));
+      ['Position', (s.alerts || []).some(a => a.id === 'fixed_far') ? [positionText(r, live), ' ', okMark(false)] : positionText(r, live)]]));
 }
 
 /** Today's online share: whole at 0 % and 100 %, else two decimals, rounded down (never "100.00" short of 100). */

@@ -169,8 +169,26 @@
  * listen-only, as when the boot's one key was used. The user's receiver
  * restart and the user's apply still run.
  *
+ * Fixed-position check (um98x_fixcheck.h; the caller passes the fixed
+ * profile's position in stn_in_t): is the fixed position where the
+ * receiver is? While STREAMING with a fixed profile and a model we
+ * configure, the receiver's own position is asked without a lease
+ * (STN_JOB_OWN_FIX: BASEPOSA, or SPPNAVA once the receiver refused that,
+ * echoed the set position or gave nothing usable STN_FIX_BASEPOS_TRIES
+ * times; one line, nothing paused, nothing configured), first STN_FIX_FIRST_MS
+ * after the check is armed (the profile became fixed or changed, a
+ * receiver restart, a successful apply), then every STN_FIX_PERIOD_MS
+ * until three usable solutions decide, or STN_FIX_TRIES queries did not;
+ * the next check runs STN_FIX_RECHECK_MS later. A far verdict raises
+ * STN_ALERT_FIXED_FAR (streaming goes on: the user decides), a near one
+ * clears it; both are noted when they change it. A change of the fixed
+ * position, or a survey profile, drops the verdict and the alert at once
+ * (noted when the alert stood). Never in maintenance (no job at all).
+ *
  * Notes (stn_note_t) tell the caller what to journal: maintenance entry
- * and exit, live view opened, extended, closed, output turned on or off.
+ * and exit, live view opened, extended, closed, output turned on or off,
+ * the fixed-position warning raised, cleared, or dropped for a new
+ * position.
  *
  * Timings PROVISIONAL, to be confirmed on hardware.
  */
@@ -182,6 +200,7 @@
 
 #include "station_obs.h"
 #include "um98x_base.h"
+#include "um98x_fixcheck.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -211,6 +230,12 @@ extern "C" {
 #define STN_SKY_RETRY_MS       60000         /**< a failed "output off" is tried again after this */
 #define STN_SKY_OFF_TRIES      3             /**< then it is left on until the receiver restarts */
 #define STN_NOTES              8             /**< notes kept for the caller between two steps */
+#define STN_FIX_FIRST_MS       60000         /**< fixed-position check: first query after it was armed (a fix after a restart: under 30 s) */
+#define STN_FIX_PERIOD_MS      20000         /**< ... between the queries of one check */
+#define STN_FIX_TRIES          15            /**< ... queries without a decision before the check gives up */
+#define STN_FIX_BASEPOS_TRIES  3             /**< ... base-position answers without a usable solution, then the single-point log */
+#define STN_FIX_RECHECK_MS     3600000       /**< ... the next check after one ended */
+#define STN_FIX_BUSY_MS        5000          /**< ... nothing was sent (the command layer was busy) or the other log is asked: again after this */
 
 /** Same values as station_state_t. */
 typedef enum {
@@ -233,6 +258,7 @@ typedef enum {
 #define STN_ALERT_RECEIVER_IN_LOADER (1u << 5)
 #define STN_ALERT_NO_RECEIVER        (1u << 6)   /**< derived (stn_alerts): never stored in `alerts` */
 #define STN_ALERT_SIGNALS_MISMATCH   (1u << 7)   /**< the receiver's signal report differs from the profile's group (stn_note_signals) */
+#define STN_ALERT_FIXED_FAR          (1u << 8)   /**< the fixed position is far from the receiver's own solution (the check above) */
 
 /** Same values as station_recovery_t (mildest first). */
 typedef enum {
@@ -260,6 +286,7 @@ typedef enum {
     STN_JOB_FLASH,           /**< RAW lease: a receiver update session, a user action on a waiting one, or boot-time recovery (flash_kind) */
     STN_JOB_BENCH,           /**< RAW lease: one bench console operation (bench builds) */
     STN_JOB_PKG_CHECK,       /**< no lease: check the staged package against every rule, send nothing */
+    STN_JOB_OWN_FIX,         /**< no lease: the receiver's own position, one line (BASEPOSA, or SPPNAVA with sppnav) */
 } stn_job_kind_t;
 
 /** What a STN_JOB_FLASH does. */
@@ -323,6 +350,7 @@ typedef struct {
     uint8_t mode_why;        /**< MODE: stn_mode_why_t */
     bool sky_on;             /**< SKY: turn the output on (else off) */
     uint8_t flash_kind;      /**< FLASH: stn_flash_kind_t */
+    bool sppnav;             /**< OWN_FIX: ask the single-point log (the base-position log was refused or gave nothing usable) */
 } stn_job_t;
 
 /** Job outcome codes (the caller maps its errors). */
@@ -371,6 +399,10 @@ typedef struct {
     uint8_t flash_end;       /**< stn_flash_end_t */
     bool loader_key_sent;    /**< the identification sent the loader's restart key (the boot's one) */
     bool in_loader;          /**< ... and the application did not come back */
+    /* OWN_FIX: err STN_OK (a log that parsed: own), STN_E_FAIL (the receiver
+     * refused the query), STN_E_TIMEOUT (no log, or one not read),
+     * STN_E_STATE (nothing sent) */
+    um98x_own_fix_t own;
 } stn_result_t;
 
 /** Inputs sampled by the caller for each stn_next() / stn_done(). */
@@ -385,6 +417,8 @@ typedef struct {
     bool rtcm1230_ok;        /**< gnss/rtcm1230_ok */
     bool profile_sky;        /**< the profile sends satellite-in-view output permanently */
     const stn_obs_t *obs;    /**< snapshot of the observed-set tracker (may be NULL) */
+    bool fixed_valid;        /**< the profile is fixed: fixed_llh is its position (the fixed-position check runs) */
+    double fixed_llh[3];     /**< latitude, longitude (degrees), ellipsoidal height (m) */
 } stn_in_t;
 
 /** Why maintenance (or its end) was refused. */
@@ -463,6 +497,10 @@ typedef enum {
     STN_NOTE_APPLY_FAILED,   /**< an apply that sent something failed (CONFIG_FAILED raised): a = the station's own retry
                                   in s, 0 = none (automatic configuration off: only the user's apply), b = 1 the
                                   receiver was lost (detection follows) */
+    STN_NOTE_FIXED_FAR,      /**< STN_ALERT_FIXED_FAR raised: a = horizontal distance (m), b = fixed height minus the
+                                  receiver's (m), both rounded (the medians that decided) */
+    STN_NOTE_FIXED_NEAR,     /**< it cleared: within the limits again (a, b as FIXED_FAR) */
+    STN_NOTE_FIXED_CHANGED,  /**< it cleared: the fixed position changed (or the profile surveys now); checked again */
 } stn_note_kind_t;
 
 typedef struct {
@@ -591,6 +629,18 @@ typedef struct {
     uint8_t flash_close;       /**< 0 none, 1 after the re-apply's window, 2 after RTCM within STN_FLASH_RTCM_MS */
     int64_t flash_close_ms;    /**< the journal closes by then whatever happens */
     int64_t flash_rtcm_ms;     /**< close kind 2: RTCM is required by then */
+
+    /* fixed-position check */
+    bool fix_on;               /**< a fixed profile is checked (armed) */
+    double fix_ref[3];         /**< the fixed position the check and its verdict are about */
+    int64_t fix_due_ms;        /**< next query (STN_NEVER = none) */
+    bool fix_running;          /**< a check runs */
+    uint8_t fix_tries;         /**< queries of the running check */
+    bool fix_sppnav;           /**< the base-position log was refused or gave nothing usable: the single-point log is asked */
+    bool fix_usable_seen;      /**< the running check got a usable solution */
+    uint8_t fix_end;           /**< how the last check ended without a decision (stn_fix_end_t) */
+    int64_t fix_sample_ms;     /**< the latest usable solution (STN_NEVER = none) */
+    um98x_fixchk_t fix;        /**< the verdict and the running check's samples */
 
     /* the job handed out by stn_next() */
     stn_job_t job;
@@ -946,6 +996,33 @@ uint32_t stn_alerts(const stn_t *s);
  * clears it, an alert needs a report to stand on).
  */
 void stn_note_signals(stn_t *s, int verdict);
+
+/** How a fixed-position check ended without a decision. */
+typedef enum {
+    STN_FIX_END_NONE = 0,    /**< none ended yet, or the last one decided */
+    STN_FIX_END_NO_SOLUTION, /**< no usable solution (no sky, or none reported in this mode) */
+    STN_FIX_END_UNDECIDED,   /**< usable solutions that did not agree */
+    STN_FIX_END_REFUSED,     /**< the receiver refused both logs */
+} stn_fix_end_t;
+
+/** The fixed-position check for the status. */
+typedef enum {
+    STN_FIX_OFF = 0,         /**< no check: the profile surveys, or not a model we configure */
+    STN_FIX_CHECKING,        /**< no verdict yet (a check runs or is due; also after an undecided one) */
+    STN_FIX_NEAR,            /**< within the limits */
+    STN_FIX_FAR,             /**< beyond them: STN_ALERT_FIXED_FAR */
+    STN_FIX_NO_SOLUTION,     /**< no verdict: the last check got no usable solution */
+    STN_FIX_REFUSED,         /**< no verdict: the receiver refused both logs */
+} stn_fix_state_t;
+
+typedef struct {
+    uint8_t state;           /**< stn_fix_state_t */
+    um98x_fix_offset_t offset; /**< NEAR, FAR: the medians that decided */
+    bool height_only;        /**< FAR by the height alone (um98x_fix_height_only) */
+    uint32_t checked_age_s;  /**< since the latest usable solution, UINT32_MAX = none */
+} stn_fix_status_t;
+
+void stn_fix_status(const stn_t *s, int64_t now_ms, stn_fix_status_t *out);
 
 /**
  * NO_RECEIVER or DETECTING: seconds until the next detection pass (0 = due

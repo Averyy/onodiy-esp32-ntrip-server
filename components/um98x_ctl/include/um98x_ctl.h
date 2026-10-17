@@ -27,10 +27,11 @@
  *
  * Who may send what:
  *  - With a COMMAND lease (station supervisor only): anything.
- *  - With lease == NULL while streaming: exactly two read-only queries,
- *    VERSIONA (identity) and MODE (base mode and its parameters = status).
- *    There is no position query: the position comes from the 1005 stream.
- *    The configuration dump CONFIG needs a COMMAND lease (several KB of text
+ *  - With lease == NULL while streaming: four read-only queries, VERSIONA
+ *    (identity), MODE (base mode and its parameters = status), and the
+ *    one-shot own-position logs BASEPOSA and SPPNAVA (the fixed-position
+ *    check, um98x_fixcheck.h; one line each). The base position itself comes
+ *    from the 1005 stream. The configuration dump CONFIG needs a COMMAND lease (several KB of text
  *    between epochs). um98x_ctl_command() rejects everything else without a
  *    lease with ESP_ERR_INVALID_STATE, so this layer never reconfigures the
  *    receiver behind the supervisor's back. Raw writes through
@@ -114,6 +115,7 @@
 #include "gnss_types.h"
 #include "um98x_apply.h"
 #include "um98x_base.h"
+#include "um98x_fixcheck.h"
 #include "um98x_profile.h"
 
 #ifdef __cplusplus
@@ -207,6 +209,17 @@ bool um98x_ctl_model_supported(const um98x_info_t *info);
 esp_err_t um98x_ctl_query_mode(gnss_link_lease_t lease, char *body, size_t len);
 
 /**
+ * The receiver's own position (lease == NULL while streaming, or COMMAND):
+ * BASEPOSA, or SPPNAVA with sppnav, one-shot (um98x_fixcheck.h). out gets
+ * the parsed solution, usable or not (um98x_own_fix_usable).
+ * @return ESP_OK (a log that parsed), ESP_ERR_NOT_SUPPORTED (the receiver
+ *         refused the query), ESP_ERR_INVALID_RESPONSE (a log this firmware
+ *         does not read), ESP_ERR_TIMEOUT (no log), ESP_ERR_INVALID_STATE
+ *         (link or lease: nothing sent, or a link error).
+ */
+esp_err_t um98x_ctl_query_own_fix(gnss_link_lease_t lease, bool sppnav, um98x_own_fix_t *out);
+
+/**
  * Send one command and wait for its acknowledgement or data (rules above).
  *
  * @param lease      COMMAND lease, or NULL for VERSIONA / MODE while streaming.
@@ -217,8 +230,8 @@ esp_err_t um98x_ctl_query_mode(gnss_link_lease_t lease, char *body, size_t len);
  *                   SAVECONFIG 5000 ms); ignored for VERSIONA.
  * @return ESP_OK on positive ack (or complete data), ESP_FAIL on a negative
  *         reply, ESP_ERR_TIMEOUT, ESP_ERR_INVALID_ARG for an unusable command,
- *         ESP_ERR_INVALID_STATE for anything but VERSIONA or MODE without a
- *         lease (and for a link error).
+ *         ESP_ERR_INVALID_STATE for anything but the read-only queries above
+ *         without a lease (and for a link error).
  */
 esp_err_t um98x_ctl_command(gnss_link_lease_t lease, const char *cmd, char *reply, size_t reply_len,
                             uint32_t timeout_ms);

@@ -553,6 +553,33 @@ esp_err_t um98x_ctl_query_mode(gnss_link_lease_t lease, char *body, size_t len)
     return to_esp_err(res);
 }
 
+esp_err_t um98x_ctl_query_own_fix(gnss_link_lease_t lease, bool sppnav, um98x_own_fix_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    const char *cmd = sppnav ? UM98X_CMD_SPPNAV : UM98X_CMD_BASEPOS;
+    esp_err_t err = call_begin(lease, cmd);
+    if (err != ESP_OK) {
+        return err;
+    }
+    call_t c;
+    call_setup(&c, lease);
+    um98x_res_t res = um98x_exec_own_fix(&c.ex, cmd, out);
+    call_end();
+    switch (res) {
+    case UM98X_OK:
+        return ESP_OK;
+    case UM98X_E_REJECTED:
+        return ESP_ERR_NOT_SUPPORTED;
+    case UM98X_E_FAILED:
+        return ESP_ERR_INVALID_RESPONSE;
+    default:
+        return to_esp_err(res);
+    }
+}
+
 esp_err_t um98x_ctl_command(gnss_link_lease_t lease, const char *cmd, char *reply, size_t reply_len,
                             uint32_t timeout_ms)
 {

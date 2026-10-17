@@ -897,6 +897,14 @@ function journalDetail(e) {
       if (ev === 4) return 'Comparison ended (' + (J.sgtOut[b] || b) + ') on ' + grp;
       return 'event ' + ev + ', ' + grp;
     }
+    case 'fixed_check': {
+      /* a: the event, then the fixed height minus the receiver's (m); b: the horizontal distance (m) */
+      const ev = a & 0xff, up = a >> 8;
+      if (ev === 1) return (b <= 50 ? 'Height ' + metresText(up) : metresText(Math.hypot(b, up))) + ' off';
+      if (ev === 2) return 'Within 50' + NB + 'm again';
+      if (ev === 3) return 'Changed';
+      return 'event ' + ev;
+    }
     case 'live_view': {
       /* A record of a session not loaded whole (journalItems makes a whole session one row) */
       const ev = a & 0xff, detail = (a >> 8) & 0xff;
@@ -939,7 +947,7 @@ const EV_FILTER = [
   ['casters', 'Casters', ['caster_down', 'caster_up', 'caster_stop']],
   ['wifi', 'Wi-Fi', ['wifi_disconnect', 'wifi_up']],
   ['updates', 'Updates', ['app_update', 'app_revert', 'gnss_flash']],
-  ['receiver', 'Receiver', ['rx_maintenance', 'live_view', 'sg_test']],
+  ['receiver', 'Receiver', ['rx_maintenance', 'live_view', 'sg_test', 'fixed_check']],
   ['loss', 'Data loss', ['data_loss']],
 ];
 
@@ -1023,7 +1031,7 @@ function journalItems(entries, atStart, kinds) {
       } else {
         /* A recovery step under its recovery's name ("Receiver recovery"); a start and an end (maintenance, the sky) never fold together. */
         const sub = e.kind === 'ladder_step' || e.kind === 'rx_maintenance' || e.kind === 'data_loss' ? e.a :
-          e.kind === 'live_view' || e.kind === 'sg_test' ? e.a & 0xff : '';
+          e.kind === 'live_view' || e.kind === 'sg_test' || e.kind === 'fixed_check' ? e.a & 0xff : '';
         const loss = e.kind === 'data_loss' ? (J.loss[e.a] || [e.a >= 16 ? slotName(e.a - 16) + ' data lost' : null])[0] : null;
         rows.push({ k: e.kind + sub, seq: e.seq, ev: e.kind === 'ladder_step' ? capFirst(J.ladder[e.a] || 'ladder ' + e.a) + ' recovery' :
           loss || J.kind[e.kind] || words(e.kind), det: journalDetail(e), when: when });
