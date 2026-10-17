@@ -130,7 +130,11 @@
  * ladder resets) the status shows the reasons holding now
  * (gnss_reboot_hold), when the last of them ends at the latest and the
  * reboot cap's wait; outside one nothing is pending and it shows none of
- * them (an admin page open on a healthy station postpones nothing).
+ * them (an admin page open on a healthy station postpones nothing). Nor
+ * while the receiver answers (the no_rtcm or no_satellites reason): the
+ * ladder restarts the ESP32 only for a receiver that sent nothing in the
+ * failed step's window (after the receiver reset: no answer to it), so no
+ * restart is pending until the evidence says it stopped answering.
  *
  * User recovery mode (gnss/recovery, read every tick; a step already running
  * completes): full (default); no ESP32 reboot (6a is journalled as not run,
@@ -318,9 +322,9 @@ typedef struct {
     uint32_t admin_resets;           /**< BOOT-button admin password resets this boot; the web also forgets a password it holds only in RAM (settings unavailable) and ends every session */
     health_recovery_mode_t recovery_mode; /**< in effect (gnss/recovery; a stored value out of range reads as FULL) */
     bool gnss_reboot_recheck;        /**< NO_RECEIVER: a blocked ESP32 reboot waits for the cap and the next detection pass */
-    uint8_t gnss_reboot_hold;        /**< health_reboot_hold_t reasons that postpone the ladder's ESP32 restart now (0 = none; always 0 outside a ladder episode) */
+    uint8_t gnss_reboot_hold;        /**< health_reboot_hold_t reasons that postpone the ladder's ESP32 restart now (0 = none; always 0 outside a ladder episode and while the receiver answers) */
     uint32_t gnss_reboot_hold_left_s;/**< until every reason holding now has ended at the latest (the presence limit of ap_client and admin, the end of the power-on grace); UINT32_MAX = no hold, or setup holds (no time limit) */
-    uint32_t gnss_reboot_cap_wait_s; /**< until the reboot cap allows a ladder restart; UINT32_MAX = allowed now, or outside a ladder episode */
+    uint32_t gnss_reboot_cap_wait_s; /**< until the reboot cap allows a ladder restart; UINT32_MAX = allowed now, outside a ladder episode, or while the receiver answers */
     health_cap_limit_t gnss_reboot_cap_limit; /**< the cap's limit that sets gnss_reboot_cap_wait_s (the later one when both hold); NONE when that is UINT32_MAX */
 } health_status_t;
 

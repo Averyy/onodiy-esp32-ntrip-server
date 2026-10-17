@@ -463,7 +463,10 @@ typedef struct {
 typedef struct {
     station_state_t state;
     um98x_info_t receiver;           /**< live, or last persisted when unresponsive */
-    bool receiver_responding;
+    bool receiver_responding;        /**< the receiver answers (read at the time of the call): it streams (valid RTCM within
+                                          10 s), or it sent a checksum-valid line (a reply, a log, NMEA) after its last RTCM
+                                          frame (none this boot: any line); never while no receiver is found. A receiver that
+                                          answers when asked and sends nothing unasked stays answering between questions */
     bool identity_confirmed;         /**< receiver identity confirmed by this boot's version query */
     uint32_t alerts;                 /**< station_alert_t flags */
     bool profile_applied;            /**< receiver runs the stored profile */

@@ -209,6 +209,8 @@ extern "C" {
 #define STN_LISTEN_MS          3000      /**< stream-first listen at boot */
 #define STN_IDENTITY_RETRY_MS  600000    /**< unconfirmed identity: query again */
 #define STN_RTCM_QUIET_MS      3000      /**< no valid RTCM frame this long: nothing flows (the leased identity query) */
+#define STN_FRESH_MS           10000     /**< "the receiver streams": a valid RTCM frame (or line) this recently */
+#define STN_ANSWER_SLACK_MS    1000      /**< a line this soon after the last RTCM frame may be that output's own: no answer after it */
 #define STN_RESTART_CHECK_MS   30000     /**< applied check after restart evidence */
 #define STN_LAST_RESORT_MS     10000     /**< after a failed apply: wait this long for RTCM */
 #define STN_DETECT_FAST_MS     30000     /**< pass interval in the first part of an episode */
@@ -570,6 +572,8 @@ typedef struct {
     uint32_t detect_failures;
     uint32_t detect_passes;    /**< detection passes completed since boot, found or not (health re-checks a blocked reboot on a newer pass) */
     bool detect_saw_bytes;
+    int64_t no_rx_ms;          /**< the station last found no receiver: a pass that found none, or the receiver left at its
+                                    loader (STN_NEVER = not this boot); a line from before it is no answer now */
     bool loader_key_sent;      /**< the loader's restart key went out this boot */
     bool first_apply_held;     /**< gnss/hold: the first receiver configuration waits for the user (no loader key) */
     bool listen_only;
@@ -1029,6 +1033,24 @@ void stn_fix_status(const stn_t *s, int64_t now_ms, stn_fix_status_t *out);
  * now or running). UINT32_MAX in every other state.
  */
 uint32_t stn_next_detect_in_s(const stn_t *s, int64_t now_ms);
+
+/**
+ * Whether the receiver answers (station_status_t.receiver_responding): it
+ * streams (a CRC-valid RTCM frame within STN_FRESH_MS), or it sent a
+ * checksum-valid text line (a reply, a log or an NMEA sentence) after its
+ * last RTCM frame, more than STN_ANSWER_SLACK_MS after it; with no RTCM
+ * frame this boot, any line this boot. Never in NO_RECEIVER, and a line
+ * from before the station last found no receiver (no_rx_ms) does not count.
+ *
+ * So a receiver that answers when asked and sends nothing unasked (no
+ * antenna, no output configured) keeps answering between the station's
+ * questions, however far apart they are; one whose RTCM stopped answers
+ * again once it sends a line (a question's answer, its NMEA). The same
+ * evidence as the health ladder's "answered after its last RTCM frame".
+ * @param rtcm_age_ms since the last CRC-valid RTCM frame, UINT32_MAX = none this boot
+ * @param line_ms     when the last checksum-valid line arrived (now_ms's clock), STN_NEVER = none this boot
+ */
+bool stn_responding(const stn_t *s, int64_t now_ms, uint32_t rtcm_age_ms, int64_t line_ms);
 
 /** CONFIG_FAILED backoff: delay after the n-th failure in a row (n >= 1), ms. */
 int64_t stn_apply_backoff_ms(uint32_t failures);

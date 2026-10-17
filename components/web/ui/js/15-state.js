@@ -253,11 +253,13 @@ function stationState(s, admin) {
       return pick('rx_stopped', 'Receiver stopped sending data', 'bad', alertText(ladder)[1], { alertId: ladder.id });
     }
     /* The receiver answers but sends no corrections: the antenna, whatever the recovery does (doing: its line, while it runs);
-     * a fixed position far enough from the receiver's own to stop its corrections is the reason instead. */
+     * a fixed position far enough from the receiver's own to stop its corrections is the reason instead.
+     * "The receiver answers" only while receiver.responding says so (the Receiver page's row says the same). */
     const stopsIt = fixedFar && fixedFar.distance_m >= FIXED_STOPS_M;
+    const answers = rcv.responding === false ? '' : 'The receiver answers. ';
     const antenna = (tone, doing) => (ladder.id === 'no_satellites' ?
       pick('no_satellites', 'Antenna sees no satellites', tone, ANTENNA_CHECK, { alertId: ladder.id, doing: doing }) :
-      pick('no_rtcm', 'Receiver sends no corrections', tone, stopsIt ? fixedFarText(fixedFar) : 'The receiver answers. ' + ANTENNA_CHECK,
+      pick('no_rtcm', 'Receiver sends no corrections', tone, stopsIt ? fixedFarText(fixedFar) : answers + ANTENNA_CHECK,
         stopsIt ? { alertId: ladder.id, doing: doing, covers: ['fixed_far'], actions: [go('Receiver settings', '#/receiver/settings')] } :
           { alertId: ladder.id, doing: doing }));
     if (state === 'recovering' || (state === 'streaming' && hl.level === 'recovering')) {

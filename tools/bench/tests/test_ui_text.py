@@ -593,15 +593,18 @@ def test_recovery_says_what_it_does_now():
     no_sky = status(receiver={"rtcm_age_ms": None}, health=hl("reconfigure", "running"),
                     alerts=[{"id": "no_satellites", "source": "health"}], casters=wait_data)
     hold = {"reboot_hold": ["admin"], "reboot_hold_left_s": 1578, "reboot_cap_wait_s": None, "reboot_cap_limit": None}
-    antenna_full = status(receiver={"rtcm_age_ms": None}, health=hl("receiver_reset", "running", recovery_mode="full", **hold),
+    # Full recovery: no restart is pending while the receiver answers (health reports no hold then), only for a silent one.
+    antenna_full = status(receiver={"rtcm_age_ms": None}, health=hl("receiver_reset", "running", recovery_mode="full"),
                           alerts=no_rtcm, casters=wait_data)
+    silent_full = status(receiver={"rtcm_age_ms": 30000}, health=hl("rescan", "running", recovery_mode="full", **hold),
+                         casters=wait_data)
     # Alerts only chosen during the wait: nothing in progress, the stall reported.
     watched = status(receiver={"rtcm_age_ms": None}, casters=wait_data, alerts=no_rtcm,
                      health={"level": "degraded", "last_step": "reconfigure", "step": "none", "step_phase": "none",
                              "recovery_mode": "alerts_only"})
     # Between two steps (a step given up while the station ran a session of its own): still amber, nothing named.
     between = status(receiver={"rtcm_age_ms": None}, health=hl("none", "none"), alerts=no_rtcm, casters=wait_data)
-    out = heroes(search, found, antenna, no_sky, antenna_full, watched, between)
+    out = heroes(search, found, antenna, no_sky, antenna_full, watched, between, silent_full)
     assert (out[0]["key"], out[0]["tone"], out[0]["line"]) == ("rx_stopped", "warn", "The station is searching for the receiver.")
     assert out[1]["line"] == "The station found the receiver and waits for corrections." and out[1]["plan"] is None
     assert (out[2]["key"], out[2]["title"], out[2]["tone"]) == ("no_rtcm", "Receiver sends no corrections", "warn"), out[2]
@@ -611,12 +614,23 @@ def test_recovery_says_what_it_does_now():
     assert (out[3]["key"], out[3]["title"], out[3]["tone"]) == ("no_satellites", "Antenna sees no satellites", "warn")
     assert out[3]["line"] == "Check that the antenna is on the socket marked M and sees the open sky."
     assert out[3]["plan"] == "The station is re-sending the receiver's settings."
-    assert out[4]["plan"] == "The station is restarting the receiver. Station restart in 27\u00a0min at the latest."
+    assert out[4]["plan"] == "The station is restarting the receiver."
+    assert (out[7]["key"], out[7]["line"]) == ("rx_stopped", "The station is searching for the receiver.")
+    assert out[7]["plan"] == "Station restart in 27\u00a0min at the latest"
     assert (out[5]["key"], out[5]["tone"], out[5]["plan"]) == ("no_rtcm", "bad", None)
     assert out[5]["facts"] == [["If corrections stop", "Me (alerts only)"]]
     assert (out[6]["key"], out[6]["tone"], out[6]["plan"]) == ("no_rtcm", "warn", "The station tries again shortly.")
     silent_between = status(receiver={"rtcm_age_ms": 30000}, health=hl("none", "none"))
     assert heroes(silent_between)[0]["line"] == "The station tries again shortly."
+    # "The receiver answers" only while receiver.responding says so (the Receiver page's "Answers" row).
+    quiet = status(receiver={"rtcm_age_ms": None, "responding": False}, casters=wait_data, alerts=no_rtcm,
+                   health={"level": "failed", "last_step": "receiver_reset", "step": "none", "step_phase": "none",
+                           "recovery_mode": "alerts_only"})
+    answering = status(receiver={"rtcm_age_ms": None, "responding": True}, casters=wait_data, alerts=no_rtcm,
+                       health=hl("reconfigure", "waiting"))
+    lines = [h["line"] for h in heroes(quiet, answering)]
+    assert lines == ["Check that the antenna is on the socket marked M and sees the open sky.",
+                     "The receiver answers. Check that the antenna is on the socket marked M and sees the open sky."], lines
     # Visitors: the state, no step and no alert.
     pub = heroes(antenna, admin=False)[0]
     assert (pub["key"], pub["line"], pub["plan"]) == ("rx_stopped", "The station is fixing it.", None)
@@ -626,12 +640,14 @@ def test_recovery_says_what_it_does_now():
     assert items[0] == {"state": None, "alerts": ["no_rtcm"], "notice": None}
     assert items[1] == {"state": "rx_stopped", "alerts": [], "notice": None}
     plans = run_ui([("healthPlan", [antenna["health"], antenna]), ("healthPlan", [found["health"], found]),
-                    ("healthPlan", [antenna_full["health"], antenna_full]), ("healthPlan", [watched["health"], watched])])
+                    ("healthPlan", [antenna_full["health"], antenna_full]), ("healthPlan", [watched["health"], watched]),
+                    ("healthPlan", [silent_full["health"], silent_full])])
     assert plans[0] == "The station re-sent the receiver's settings and waits for corrections."
     # The state's own line says it there: not twice.
     assert plans[1] is None
-    assert plans[2].startswith("The station is restarting the receiver. The station restarts itself in 27")
+    assert plans[2] == "The station is restarting the receiver."
     assert plans[3] is None
+    assert plans[4].startswith("The station restarts itself in 27")
     chips = run_ui([("healthChip", ["recovering", [{"id": "no_rtcm", "source": "health"}], {"tone": "warn"}]),
                     ("healthChip", ["degraded", [{"id": "no_rtcm", "source": "health"}], {"tone": "bad"}])])
     assert chips == [["Recovering", "warn"], ["Needs attention", "bad"]]

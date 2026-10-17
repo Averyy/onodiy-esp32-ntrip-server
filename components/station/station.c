@@ -81,7 +81,6 @@ _Static_assert(STATION_BENCH_LISTEN == (int)UM98X_BENCH_LISTEN && STATION_BENCH_
 #define NOTIFY_IDX       0       /* the station task waits on nothing else */
 #define LOOP_WAIT_MS     1000    /* longest sleep between two decisions (and watchdog feeds) */
 #define LEASE_WAIT_MS    1000
-#define FRESH_MS         10000   /* "the receiver streams": valid RTCM or a valid line this recently */
 #define BREAK_MS         100     /* UART break before a rescan. PROVISIONAL, to be confirmed on hardware */
 #define LISTEN_MS        1500    /* listen-only scan: per baud. PROVISIONAL, to be confirmed on hardware */
 #define LISTEN_POLL_MS   100
@@ -199,8 +198,7 @@ static bool s_journal_clearing;
 /* RX task -> station task (single writer each). */
 static volatile bool s_prompt_seen;
 static volatile bool s_restart_pending;
-static volatile uint32_t s_last_line_ms;
-static volatile bool s_line_seen;
+static int64_t s_line_ms = STN_NEVER;   /* the last checksum-valid text line (now_ms); under s_lock */
 static volatile bool s_journal_cleared;
 
 static TaskHandle_t s_task;
@@ -352,11 +350,6 @@ static void hold_take(void);
 static int64_t now_ms(void)
 {
     return esp_timer_get_time() / 1000;
-}
-
-static uint32_t now_ms32(void)
-{
-    return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
 static void wake(void)
@@ -822,8 +815,10 @@ static void on_text_line(const char *line, size_t len, void *ctx)
     }
     um98x_ctl_on_line(line, len, ctx);
     gnss_obs_feed_line(line, len);
-    s_last_line_ms = now_ms32();
-    s_line_seen = true;
+    int64_t at = now_ms();
+    portENTER_CRITICAL(&s_lock);
+    s_line_ms = at;
+    portEXIT_CRITICAL(&s_lock);
 }
 
 static void on_framer_reset(void *ctx)
@@ -897,13 +892,24 @@ static void lease_drop(void)
     release_lease(&s_lease, "job");
 }
 
-static bool receiver_fresh(void)
+static uint32_t rtcm_age_ms(void)
 {
     gnss_link_stats_t st;
-    if (gnss_link_get_stats(&st) == ESP_OK && st.last_rtcm_age_ms <= FRESH_MS) {
+    return gnss_link_get_stats(&st) == ESP_OK ? st.last_rtcm_age_ms : UINT32_MAX;
+}
+
+/* The receiver streams now: valid RTCM or a valid line within STN_FRESH_MS
+ * (a receiver update starts only then). */
+static bool receiver_streams(void)
+{
+    if (rtcm_age_ms() <= STN_FRESH_MS) {
         return true;
     }
-    return s_line_seen && (uint32_t)(now_ms32() - s_last_line_ms) <= FRESH_MS;
+    int64_t now = now_ms();
+    portENTER_CRITICAL(&s_lock);
+    int64_t line = s_line_ms;
+    portEXIT_CRITICAL(&s_lock);
+    return line != STN_NEVER && now - line <= STN_FRESH_MS;
 }
 
 /* ---- jobs ------------------------------------------------------------------ */
@@ -2172,7 +2178,6 @@ static void publish_status(const stn_in_t *in)
     if (um98x_ctl_get_info(&o->receiver) != ESP_OK) {
         o->receiver = s_stored_info;   /* last persisted; valid stays false */
     }
-    o->receiver_responding = receiver_fresh();
     o->identity_confirmed = core.identity_ok;
     o->alerts = stn_alerts(&core);
     o->profile_applied = core.profile_applied;
@@ -2776,7 +2781,7 @@ static void service(const stn_in_t *in)
 
     gnss_link_stats_t st;
     bool ok = gnss_link_get_stats(&st) == ESP_OK && st.mode == GNSS_LINK_MODE_STREAM &&
-              st.last_rtcm_age_ms <= FRESH_MS;
+              st.last_rtcm_age_ms <= STN_FRESH_MS;
     if (ok != s_rtcm_ok) {
         s_rtcm_ok = ok;
         ledger_set_rtcm_ok(ok);
@@ -3343,6 +3348,8 @@ esp_err_t station_get_status(station_status_t *out)
     bool running;
     int64_t released;
     uint64_t excluded;
+    /* Whether the receiver answers: at read time, one rule for every reader. */
+    uint32_t rtcm_age = s_inited ? rtcm_age_ms() : UINT32_MAX;
     portENTER_CRITICAL(&s_lock);
     have = s_status_valid;
     if (have) {
@@ -3377,6 +3384,7 @@ esp_err_t station_get_status(station_status_t *out)
         out->maintenance_chosen_s = s_core.maint ? s_core.maint_chosen_s : 0;
         out->rx_boot = s_rxb_state;
         out->rx_boot_by = s_rxb_by;
+        out->receiver_responding = stn_responding(&s_core, lin.now_ms, rtcm_age, s_line_ms);
     }
     jerr = s_journal_err;
     journal = s_journal;
@@ -3667,7 +3675,7 @@ esp_err_t station_request_flash(const station_flash_request_t *req)
         return ESP_ERR_NOT_SUPPORTED;   /* the caller may check the package instead */
     }
     if (!s_inited || !s_started || journal_open(jerr) || lifecycle_app_trial_active() || app_update_running() ||
-        lifecycle_in_safe_mode() || state != STATION_STATE_STREAMING || !receiver_fresh() || !supported ||
+        lifecycle_in_safe_mode() || state != STATION_STATE_STREAMING || !receiver_streams() || !supported ||
         maint_on()) {
         return ESP_ERR_INVALID_STATE;
     }
