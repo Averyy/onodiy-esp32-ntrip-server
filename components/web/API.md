@@ -450,7 +450,8 @@ object as sections (section 7), so the UI keeps one model. Admin form:
   "receiver": {"state": "streaming", "model": "UM982", "firmware": "R4.10Build18975",
                "responding": true, "restarting": false, "identity_confirmed": true, "profile_applied": true,
                "profile_acknowledged": true, "position_locked": true, "position_known": true, "surveying": false, "survey_window_left_s": 0,
-               "survey_unfinished": false, "rtcm_age_ms": 180, "best_sys": "galileo", "best_bands": 4, "glonass": true,
+               "survey_unfinished": false, "rtcm_age_ms": 180, "satellites": 28, "best_sys": "galileo", "best_bands": 4,
+               "glonass": true,
                "rtcm1230_supported": true, "journal": "none",
                "uart_closed": false, "rx_maintenance": false, "maintenance_left_s": 0, "maintenance_chosen_s": 0,
                "next_detect_in_s": null, "first_apply_held": false},
@@ -480,7 +481,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | Field | Notes |
 |---|---|
 | `device.time_source` | `ledger_clock_source()`: `gnss`, `sntp` or `none` (then `time_unix` is `null`) |
-| `safe_mode` | `lifecycle_get_boot_info()`: `retry_in_s` until the automatic normal-boot retry |
+| `safe_mode` | `lifecycle_get_boot_info()`: `retry_in_s` until the automatic normal-boot retry; the public form has `active` only |
 | `network.upstream` | last probe: `none`, `ok`, `no_ip`, `dns_failed`, `no_upstream` |
 | `network.probe_age_s` | since that probe, in whole minutes (so the section changes at most once a minute; `/api/wifi` has the exact age); `null` = never |
 | `network.mdns_host` | as in `GET /api/session`: the station answers `http://<mdns_host>.local/` on the home network and on its own access point; `null` while the responder does not run |
@@ -494,6 +495,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.position_known` | the station has a base position, locked or surveyed so far (`position.source` in `GET /api/gnss` is not `none`); admin form only |
 | `receiver.surveying`, `survey_window_left_s`, `survey_unfinished` | as `survey.active`, `survey.window_left_s` and `survey.unfinished` in `GET /api/gnss`; admin form only |
 | `receiver.rtcm_age_ms` | since the last CRC-valid RTCM frame (`gnss_link`), `null` = never |
+| `receiver.satellites` | the satellites in the corrections: the latest MSM epoch's, summed over the constellations seen in the last 10 s (the sum of `systems[].satellites` in `GET /api/gnss/signals`); `null` while no MSM arrived in 10 s or before the first summary; admin form only |
 | `receiver.glonass` | the receiver's stream carried GLONASS signals in the last 10 s (the signal summary of `GET /api/gnss/signals`; `false` before the first summary); admin form only |
 | `receiver.rtcm1230_supported` | as in `GET /api/gnss/signals`: the receiver accepted message 1230 (GLONASS biases) at the last configuration, `false` refused, `null` never configured. With `glonass` and `best_bands` it says whether the stream meets Onocoy's quality minimums (4 bands on one constellation, GLONASS with 1230) without polling the larger signals object; admin form only |
 | `receiver.responding` | the receiver answers: it streams (a CRC-valid RTCM frame within the last 10 s), or it sent a checksum-valid line (a reply to a command, a log, an NMEA sentence) within the last 90 s and after its last RTCM frame, more than 1 s after it (any line, with none this boot); `false` while the station finds no receiver (`no_receiver`), and a line from before a detection pass that found nothing does not count. A receiver that sends no RTCM (none this boot, or none for 3 s) is asked (a version query without a lease, nothing paused, nothing configured; never in receiver maintenance): at once when nothing came since its last RTCM frame, then whenever no line came for 60 s. So one that answers when asked and sends nothing unasked (no antenna, no output configured, its RTCM stopped) stays `true`, and one that hung or was unplugged turns `false` 90 s after its last answer, in `alerts_only` too. Read at the time of the request, by the same rule as `responding` in `GET /api/gnss`, so the two agree; the same evidence as health's "answered after its last RTCM frame" (`no_rtcm`). Admin form only |
@@ -524,14 +526,17 @@ Public form (no session, public status on):
 ```json
 {"api": 1, "public": true, "uptime_s": 86400,
  "device": {"hostname": "onocoydiy"},
+ "safe_mode": {"active": false},
  "receiver": {"state": "streaming", "best_bands": 4},
  "casters": [{"slot": 0, "name": "Onocoy", "state": "streaming"}],
  "health": {"level": "ok"}}
 ```
 
 The public form lists only slots that are not empty, without the `empty`
-field. A slot that becomes empty leaves it: public WebSocket clients get a
-full status then, since a delta can only add or replace slots.
+field, and no slots while the caster configs are not loaded (safe mode), so
+a visitor sees safe mode (`safe_mode.active`) rather than nameless casters
+that are off. A slot that becomes empty leaves it: public WebSocket clients
+get a full status then, since a delta can only add or replace slots.
 
 ---
 

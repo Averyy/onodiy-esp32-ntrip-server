@@ -125,6 +125,8 @@ typedef struct {
     uint8_t best_bands;
     bool glonass;                  /**< the summary has GLONASS signals (the last 10 s) */
     bool obs_valid;                /**< best_sys / best_bands / glonass come from a summary */
+    uint16_t satellites;           /**< web_obs_satellites(): in the corrections, over the constellations present */
+    bool sats_known;               /**< satellites counts (a constellation present in the last 10 s) */
     size_t slots;
     bool cfg_valid;                /**< configs loaded (not in safe mode) */
     ntrip_caster_cfg_t cfg[WEB_MAX_SLOTS];        /**< read without secrets */
@@ -152,7 +154,14 @@ typedef enum {
 /** Name of a section ("device"); "casters" is handled per slot. */
 const char *web_section_name(web_section_t sec);
 
-/** True if the section is part of the public form. */
+/**
+ * The satellites in the corrections: the latest MSM epoch's, summed over the
+ * constellations present in the summary's window (the sum of `satellites` in
+ * GET /api/gnss/signals). False, with *out 0, while none is present.
+ */
+bool web_obs_satellites(const gnss_obs_summary_t *o, uint16_t *out);
+
+/** True if the section is part of the public form (safe_mode there: `active` only). */
 bool web_section_public(web_section_t sec);
 
 /** The whole status object (admin or public form). */
@@ -170,7 +179,8 @@ bool web_caster_slot_empty(const ntrip_caster_cfg_t *c);
 /**
  * One caster summary as an array element. An empty slot
  * (web_caster_slot_empty) has the name "" and "empty": true in the admin
- * form, and nothing at all in the public form.
+ * form, and nothing at all in the public form. The public form has no slot
+ * either while the configs are not loaded (safe mode: nothing to name).
  */
 void web_build_caster_summary(wj_t *w, const web_status_snap_t *s, size_t slot, bool pub);
 
