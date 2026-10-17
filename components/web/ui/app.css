@@ -219,27 +219,39 @@ small { font-size: 0.85rem; }
 }
 .brand img { width: 28px; height: 28px; flex: none; }
 .brand span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.live {
+/* The station's state (renderLive): the top card's dot and a word, a link to the Status page; grey while unknown. */
+.live { display: flex; margin-left: auto; }
+.live a {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 0.8rem;
+  gap: 0.4rem;
+  min-height: 36px;
+  padding: 0 0.3rem;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
   white-space: nowrap;
 }
-.live::before {
+.live a:hover { background: var(--surface-2); }
+.live a::before {
   content: "";
-  width: 8px;
-  height: 8px;
+  flex: none;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
-  background: var(--off);
+  background: var(--tone, var(--off));
 }
-.live:empty::before { display: none; }
+.live .age { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
 .live .age:empty { display: none; }
-.live.on::before { background: var(--ok); }
-.live.poll::before { background: var(--warn); }
-.live.down::before { background: var(--bad); }
+/* A phone: the brand, the state (its longest word too), the theme and Log out on one line at 390 px. */
+@media (max-width: 420px) {
+  .top { gap: 0.25rem; }
+  .live a { gap: 0.3rem; padding: 0; font-size: 0.8rem; }
+  .top-actions .icon-btn { min-width: 36px; }
+  .top-actions .btn.small { padding-left: 0.5rem; padding-right: 0.5rem; }
+}
 .top-actions { display: flex; gap: 0.25rem; white-space: nowrap; }
 
 .tabs {
@@ -268,6 +280,8 @@ small { font-size: 0.85rem; }
   white-space: nowrap;
 }
 .tabs a.active { color: var(--text); border-bottom-color: var(--accent); }
+/* The five tabs fit a 390 px phone; a narrower screen scrolls them (the fades say so). */
+@media (max-width: 420px) { .tabs a { padding-left: 0.5rem; padding-right: 0.5rem; } }
 .tabs a .dot {
   display: inline-block;
   width: 7px;
@@ -420,7 +434,10 @@ small { font-size: 0.85rem; }
 .facts > div { display: flex; gap: 0.4rem; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.facts dd a { margin-left: 0.6rem; font-weight: 400; }   /* "Change": where the fact is set */
 .hero .facts { margin-top: 0.4rem; }
+/* A fact too long for one line puts its value under its label (never both squeezed into two narrow columns). */
+.hero .facts > div { flex-wrap: wrap; row-gap: 0; }
 @media (min-width: 560px) {
   .hero { grid-template-columns: minmax(0, 1fr) auto; column-gap: 1.25rem; }
   .hero > * { grid-column: 1; }
@@ -1003,7 +1020,7 @@ pre.log .e { color: var(--bad); }
 pre.log .w { color: var(--warn); }
 pre.log .gap { color: var(--muted); font-style: italic; cursor: auto; }
 
-/* Sub-tabs (Diagnostics: Overview, History, Logs): one row, also on a phone. */
+/* Sub-tabs (Logs: Overview, History, Console): one row, also on a phone. */
 .seg { display: flex; gap: 0.35rem; }
 .seg a {
   flex: none;

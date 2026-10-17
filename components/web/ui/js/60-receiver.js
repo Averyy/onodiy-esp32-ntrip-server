@@ -1294,7 +1294,7 @@ function foldCard(title, chip, id, ...kids) {
 Views.receiver = {
   title: 'Receiver',
   admin: true,
-  heading: arg => (arg === 'settings' ? ['Receiver settings', true] : null),
+  heading: arg => (/^settings(\/|$)/.test(arg) ? ['Receiver settings', true] : null),
   create(el, arg) {
     return receiverPage(el, arg || '');
   },
@@ -1303,10 +1303,11 @@ Views.receiver = {
 /**
  * The Receiver page (#/receiver; #/receiver/live shows the sky when it is
  * open, #/receiver/live/start opens it), or with arg "settings" the
- * Receiver settings page; both read GET /api/gnss every 5 s.
+ * Receiver settings page (#/receiver/settings/manage: at its Receiver
+ * management card); both read GET /api/gnss every 5 s.
  */
 function receiverPage(el, arg) {
-  const settings = arg === 'settings';
+  const settings = /^settings(\/|$)/.test(arg);
   let g = null, t = null, forms = null, stop = null, held = null, heldLater = false, sigs = null, missing = null;
   /* gone: the page was left (an answer that comes later starts nothing) */
   let wasRunning = false, gone = false;
@@ -1327,7 +1328,7 @@ function receiverPage(el, arg) {
   const profChip = badge('', '');
   const profile = h('section', { class: 'card a-prof' });
   const manage = manageCtl();
-  const manageCard = h('section', { class: 'card a-man' }, manage.nodes);
+  const manageCard = h('section', { class: 'card a-man', id: 'manage', tabindex: '-1' }, manage.nodes);
   const sgt = sgTestCtl(() => refresh().catch(() => {}));
   const compare = foldCard('Compare two signal groups', sgt.badge, 'compare', sgt.nodes);
   const rdBody = h('div');
@@ -1437,6 +1438,11 @@ function receiverPage(el, arg) {
       sigs = signalsSection(grid);
     }
     fill();
+    /* Receiver settings asked for at its management card (the Status page's "Change"). */
+    if (arg === 'settings/manage') {
+      manageCard.scrollIntoView({ block: 'start' });
+      manageCard.focus({ preventScroll: true });
+    }
     /* An address that asks for the sky: open it (live/start) or show it when it is open (live); then the page's own address. */
     if (/^live/.test(arg)) {
       if (arg === 'live/start') sigs.sky.start();

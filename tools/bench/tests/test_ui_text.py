@@ -48,12 +48,12 @@ const ctx = {
 };
 vm.createContext(ctx);
 /* refusalText: what the UI says for an error answer {status, error: {code, ...}} (errText on an ApiError). */
-/* healthCardShown: Diagnostics' Health card is on its page (the notices' cases unless one says otherwise). */
+/* healthCardShown: Logs' Health card is on its page (the notices' cases unless one says otherwise). */
 const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nhealthCardShown = true;\nreturn { restartPlanText, restartPlanShort, onocoyNow: a => onocoyNow(a[0], a[1]), onocoyElsewhereText, connRow, journalDetail, presetInfo: () => ({ PRESETS, PRESET_INFO }),\n' +
   '  journalItems: a => { S.status = a[3] || null; return journalItems(a[0], a[1], a[2]); }, evFilter: () => EV_FILTER,\n' +
   '  healthChip: a => healthChip(a[0], a[1], a[2]), sinceStart: hl => sinceStart(hl), logParts: l => logParts(l),\n' +
-  '  timeRange: a => timeRange(a[0], a[1]), diagTabs: () => DIAG_TABS.map(t => t[1]), dayParts: a => dayParts(a[0], a[1]),\n' +
+  '  timeRange: a => timeRange(a[0], a[1]), logsTabs: () => LOGS_TABS.map(t => t[1]), dayParts: a => dayParts(a[0], a[1]),\n' +
   '  wifiChip: w => wifiChip(w), apChip: ap => apChip(ap), recoveryHint: () => recoveryHint(),\n' +
   '  ago: s => checkedAgo(Date.now() / 1000 - s),\n' +
   '  onlineShare: a => onlineShare(a[0], a[1]),\n' +
@@ -79,10 +79,12 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  noticeLines: a => noticeItems(a[0], a[1]).map(i => [i.key, i.tone, i.urgent, i.title + (i.text ? \'. \' + i.text : \'\'),\n' +
   '    Array.isArray(i.actions) ? i.actions.length : i.actions ? 1 : 0]),\n' +
   '  fold: a => { const f = foldNotices(noticeItems(a[0], a[1]), a[2]); return [f.shown.map(i => i.key), f.more]; },\n' +
-  '  moved: a => movedTo(a[0], a[1]), tab: n => tabOf(n), nav: () => NAV.map(n => n[1]),\n' +
+  '  moved: a => movedTo(a[0], a[1]), nav: () => NAV.map(n => n[1]),\n' +
+  '  word: a => { const t = stationState(a[0], a[1]); return [t.key, t.tone, stateWord(t), t.head]; },\n' +
+  '  stateWordKeys: () => Object.keys(STATE_WORD),\n' +
   '  pwProblem: a => adminPasswordProblem(a[0], a[1]), rssi: a => rssiView(a),\n' +
   '  sgName: a => sgName(a[0], a[1]), sgChoices: () => SG_CHOICES, recovery: () => L.recovery,\n' +
-  '  recoveryLbl: k => lbl(L.recovery, k), fwText: a => fwText(a[0], a[1]), dist: m => fmtDist(m),\n' +
+  '  recoveryLbl: k => lbl(L.recovery, k), manageLbl: k => lbl(L.manage, k), fwText: a => fwText(a[0], a[1]), dist: m => fmtDist(m),\n' +
   '  sgtBlock: g => sgtBlock(g), sgtLine: t => sgtLine(t), profileChip: g => profileChip(g), saveLabel: a => saveLabel(a[0], a[1]),\n' +
   '  sgtNotice: st => { const n = sgTestNotice(st); return n && n.slice(0, 3); },\n' +
   '  rxChip: s => receiverChip(s), posLine: a => positionLine(a[0], a[1]), statusPos: a => positionText(a[0], a[1]),\n' +
@@ -110,6 +112,9 @@ def run_ui(cases: list[tuple[str, object]]) -> list:
     assert res.returncode == 0, res.stderr
     return json.loads(res.stdout)
 
+
+# Receiver management "Me (alerts only)" as the Status page's top card says it: a fact with a Change link to its card.
+ME_FACT = [["Receiver management", "You (alerts only)", "#/receiver/settings/manage"]]
 
 # The hold-overlay station whose replay stopped: the ladder's episode with the admin page open.
 HOLD = {"reboot_hold": ["admin"], "reboot_hold_left_s": 1578, "reboot_cap_wait_s": None,
@@ -147,7 +152,7 @@ def test_restart_plan_cap_and_recheck_in_full_recovery_only():
 
 def test_restart_plan_in_a_few_words_for_the_status_page():
     """The Status and Receiver pages' short form of the restart plan: the same cases as the full sentence, in a few
-    words, and nothing whenever the full sentence says nothing (Diagnostics keeps that one)."""
+    words, and nothing whenever the full sentence says nothing (Logs keeps that one)."""
     base = {"recovery_mode": "full", "reboot_hold": [], "reboot_hold_left_s": None, "reboot_cap_wait_s": None,
             "reboot_cap_limit": None, "reboot_recheck": False}
     out = run_ui([
@@ -599,8 +604,9 @@ def test_hero_says_what_blocks_first_and_what_to_do():
     assert out[0]["title"] == "Onocoy not set up" and out[0]["tone"] == "warn", out[0]
     assert out[0]["line"] == "Add your Onocoy credentials to start streaming."
     assert out[0]["action"] == "Set up Onocoy" and out[0]["primary"] is True
-    # The recovery choice shows as a fact only when it is not the default, by the name Receiver settings gives it.
-    assert out[0]["facts"] == [["If corrections stop", "Me (alerts only)"]]
+    # Receiver management shows as a fact only when it is not the default, by the name of the setting, the choice said
+    # from the station's side ("You", where the setting's own choice says "Me"), with a link to its card.
+    assert out[0]["facts"] == ME_FACT
 
     assert out[1]["title"] == "Receiver maintenance"
     assert out[1]["line"] == "The station sends the receiver no commands. Ends in about 14 min."
@@ -622,17 +628,17 @@ def test_hero_says_what_blocks_first_and_what_to_do():
     # corrections come, the line what that means and what to do.
     assert out[4]["line"] == "The receiver answers. Check that the antenna is on the socket marked M and sees the open sky."
     assert out[4]["tone"] == "bad" and out[4]["plan"] is None
-    assert out[4]["facts"] == [["If corrections stop", "Me (alerts only)"]]
+    assert out[4]["facts"] == ME_FACT
     assert out[5]["title"] == "Receiver stopped sending data" and out[5]["tone"] == "bad"
     assert "recovery" not in out[5]["line"] and "choice" not in out[5]["line"]
-    assert out[5]["facts"] == [["If corrections stop", "Me (alerts only)"]]
+    assert out[5]["facts"] == ME_FACT
 
 
 def test_recovery_says_what_it_does_now():
     """The receiver recovery's line names the step in progress and where it is (health.step, health.step_phase):
     "searching for the receiver" only while the search runs, never in the wait after it, and never for a receiver that
     answers (the rescan checks the link to it). A receiver that answers without sending corrections gets the antenna
-    check at once, in amber while the recovery still works on it, with what it does in the plan line (on Diagnostics
+    check at once, in amber while the recovery still works on it, with what it does in the plan line (on Logs
     too, in the same words, under the state's line); red once it no longer acts (alerts only, or after the last step).
     Nothing says it tries again shortly while the station holds the recovery. Visitors see no step."""
     steps = ["resync", "link_restart", "rescan", "reconfigure", "receiver_reset", "reboot"]
@@ -685,7 +691,7 @@ def test_recovery_says_what_it_does_now():
     assert (out[7]["key"], out[7]["line"]) == ("rx_stopped", "The station is searching for the receiver.")
     assert out[7]["plan"] == "Station restart in 27\u00a0min at the latest"
     assert (out[5]["key"], out[5]["tone"], out[5]["plan"]) == ("no_rtcm", "bad", None)
-    assert out[5]["facts"] == [["If corrections stop", "Me (alerts only)"]]
+    assert out[5]["facts"] == ME_FACT
     assert (out[6]["key"], out[6]["tone"], out[6]["plan"]) == ("no_rtcm", "warn", "The station tries again shortly.")
     silent_between = status(receiver={"rtcm_age_ms": 30000}, health=hl("none", "none"))
     assert heroes(silent_between)[0]["line"] == "The station tries again shortly."
@@ -702,7 +708,7 @@ def test_recovery_says_what_it_does_now():
     pub = heroes(antenna, admin=False)[0]
     assert (pub["key"], pub["line"], pub["plan"]) == ("rx_stopped", "The station is fixing it.", None)
 
-    # Diagnostics: the Status page's state and words (never the alert's other title beside them), the card's line what
+    # Logs: the Status page's state and words (never the alert's other title beside them), the card's line what
     # the recovery does; the same once it has failed (red), and with the receiver not answering now.
     failed = status(receiver={"rtcm_age_ms": None}, health={"level": "failed", "last_step": "receiver_reset"}, alerts=no_rtcm,
                     casters=wait_data)
@@ -931,14 +937,14 @@ def test_status_page_leaves_out_the_notice_the_top_card_says():
     trial_stopped = status(network={"cred_trial": True, "cred_trial_left_s": 80, "pending_ssid": "Cabin"},
                            casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate")])
     out = run_ui([("notices", [maint, ""]), ("notices", [maint, "casters"]), ("notices", [stopped, ""]),
-                  ("notices", [stopped, "receiver"]), ("notices", [settings, ""]), ("notices", [settings, "diag"]),
+                  ("notices", [stopped, "receiver"]), ("notices", [settings, ""]), ("notices", [settings, "logs"]),
                   ("notices", [settings_down, ""]), ("notices", [trial, ""]), ("notices", [trial_stopped, ""])])
     keys = [[k for k, _ in o] for o in out]
     assert keys[0] == ["update"], out[0]
     assert keys[1] == ["maintenance", "update"]
     assert keys[2] == [] and keys[3] == ["onocoy_stopped:0"]
     assert out[3][0][1] == "Onocoy stopped: duplicate stream"
-    # Diagnostics' Health card says it too (above its alert, with Restart): no notice there either.
+    # Logs' Health card says it too (above its alert, with Restart): no notice there either.
     assert keys[4] == [] and keys[5] == [] and keys[6] == []
     assert out[0][0][1] == "Update available"
     assert keys[7] == [] and keys[8] == ["wifi"]
@@ -1005,9 +1011,12 @@ def test_receiver_management_one_choice_over_two_settings():
     assert custom[0] == ["The station configures the receiver but does nothing if corrections stop.", "station"]
     assert custom[1][1] == custom[2][1] == "me"
     assert custom[1][0].endswith("still resets it and may restart itself.") and custom[2][0].endswith("still resets it.")
-    # The Status page and Diagnostics name the recovery choice as Receiver settings does, without "(recommended)".
+    # Receiver settings' choice in the owner's words; the Status page and Logs say it from the station's side, under the
+    # setting's name ("Receiver management"): "You", never "Me", and short.
     assert run_ui([("recoveryLbl", "full"), ("recoveryLbl", "no_reboot"), ("recoveryLbl", "alerts_only")]) == [
         "The station", "The station, but never restart itself", "Me (alerts only)"]
+    assert run_ui([("manageLbl", "full"), ("manageLbl", "no_reboot"), ("manageLbl", "alerts_only")]) == [
+        "The station", "The station, no restarts", "You (alerts only)"]
 
 
 def test_receiver_chip_never_says_streaming_while_corrections_stopped():
@@ -1158,10 +1167,10 @@ def test_profile_chip_and_maintenance_notice_everywhere_but_settings():
     assert chips == [["Managed by you", ""], ["Managed by you", ""], ["Applying", "info"], ["Failed", "bad"],
                      ["Not applied", "warn"]]
     maint = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600})
-    out = run_ui([("notices", [maint, p]) for p in ("settings", "receiver", "receiver/settings", "receiver/live", "casters", "diag",
-                                                     "diag/history")])
+    out = run_ui([("notices", [maint, p]) for p in ("settings", "receiver", "receiver/settings", "receiver/live", "casters", "logs",
+                                                     "logs/history")])
     # Settings has maintenance next to the receiver update, with End now: no notice that repeats it there; nor
-    # Diagnostics' Overview, whose Health card says it with End now. Every other page has it.
+    # Logs' Overview, whose Health card says it with End now. Every other page has it.
     assert [[k for k, _ in o] for o in out] == [[]] + [["maintenance"]] * 4 + [[], ["maintenance"]]
 
 
@@ -1238,7 +1247,7 @@ def test_system_wifi_chip_and_recovery_line():
     assert out[:4] == [["Not set up", "plain"], ["Online", "ok"], ["Connecting", "warn"], ["Offline", "bad"]]
     # One line under the admin password: what to do, no paragraph (the login page has the steps in full).
     assert out[4] == "Forgot it? Hold BOOT for 10 s, then join the station's own Wi-Fi and open http://192.168.4.1/."
-    # Diagnostics' Wi-Fi: a row each, no value joined to the next with a dot (a wrapped line never starts with one). The
+    # Logs' Wi-Fi: a row each, no value joined to the next with a dot (a wrapped line never starts with one). The
     # signal's words are the casters harness's (it has a DOM).
     net = {"online": True, "ssid": "Home", "rssi": -61}
     ap = {"ssid": "Home", "online": True, "rssi": -61, "bssid": "AA:BB:CC:DD:EE:FF", "channel": 11, "tx_power_dbm": 19.5,
@@ -1254,8 +1263,8 @@ def test_system_wifi_chip_and_recovery_line():
     assert unset == [["Wi-Fi", "Not set up"]] and none == [["Wi-Fi", "\u2013"]]
 
 
-def test_diagnostics_wifi_says_moves_and_whether_the_access_point_steers():
-    """Diagnostics' Wi-Fi: whether the access point can ask the station to move, in plain words while online with an
+def test_logs_wifi_says_moves_and_whether_the_access_point_steers():
+    """Logs' Wi-Fi: whether the access point can ask the station to move, in plain words while online with an
     access point (Unknown until it is read; none without one, as in QEMU), and the moves to another access point this
     start once there was one, beside the drops."""
     net = {"online": True, "ssid": "Home", "rssi": -61}
@@ -1403,43 +1412,124 @@ def test_no_top_level_name_is_declared_twice():
     assert dup == [], dup
 
 
-# ---- The shell: four tabs, old addresses, notices (20-shell.js) ----
+# ---- The shell: five tabs, old addresses, notices (20-shell.js) ----
 
-def test_four_tabs_and_old_addresses_land_on_the_new_pages():
+def test_five_tabs_and_old_addresses_land_on_the_new_pages():
     out = run_ui([("nav", None)] + [("moved", a) for a in (
         ["signals", ""], ["signals", "live"], ["signals", "live/start"], ["live", ""], ["system", ""], ["updates", ""],
-        ["updates", "session"], ["dashboard", ""], ["diag", "logs"], ["casters", "onocoy"], ["receiver", "settings"],
-        ["settings", ""], ["", ""])]
-        + [("tab", n) for n in ("diag", "settings", "receiver", "casters", "")])
-    assert out[0] == ["Status", "Casters", "Receiver", "Settings"]
+        ["updates", "session"], ["dashboard", ""], ["casters", "onocoy"], ["receiver", "settings"], ["settings", ""],
+        ["logs", ""], ["logs", "console"], ["", ""])])
+    # Logs is a tab of its own, between the receiver and the settings.
+    assert out[0] == ["Status", "Casters", "Receiver", "Logs", "Settings"]
     # The old Status address lands on "#/" (the Status tab marked), not on a page with no tab.
     assert out[1:9] == ["receiver", "receiver/live", "receiver/live/start", "receiver/live", "settings/wifi", "settings/updates",
                         "settings/session", ""]
     # Pages that exist stay where they are.
-    assert out[9:14] == [None] * 5
-    # Diagnostics is reached from Settings: that tab is the one marked there.
-    assert out[14:] == ["settings", "settings", "receiver", "casters", ""]
+    assert out[9:] == [None] * 6
 
 
-def test_diagnostics_three_parts_and_its_old_addresses():
-    """Overview, History and Logs; the six old parts land where their content is now."""
-    out = run_ui([("diagTabs", None)] + [("moved", ["diag", a]) for a in
-                                         ("", "history", "logs", "availability", "journal", "tasks", "coredump")])
-    assert out[0] == ["Overview", "History", "Logs"]
-    assert out[1:] == [None, None, None, "diag/history", "diag/history", "diag", "diag"]
+def test_header_says_the_station_state_in_a_word_in_the_top_cards_colour():
+    """The header's indicator reads the Status page's state (stationState, the public form for a visitor): every key
+    it decides has its word, chosen for it (none falls back to the long title, none is left for a key that is gone),
+    in the top card's colour, short enough for a phone's header. "Streaming" only green, "Not streaming" only red,
+    amber words for what needs a look, plain words for what is under way: the header never contradicts the page."""
+    src = (UI_JS / "15-state.js").read_text()
+    # pick('key', ...), and the antenna's reasons (pick(ladder.id, ...): no satellites, no corrections).
+    keys = set(re.findall(r"pick\('([a-z_]+)'", src)) | {"no_satellites", "no_rtcm"}
+    (mapped,) = run_ui([("stateWordKeys", None)])
+    assert set(mapped) == keys
+    recovering = {"level": "recovering", "last_step": "reconfigure", "step": "reconfigure", "step_phase": "running"}
+    wait = [caster(0, "Onocoy", "wait_data")]
+    cases = [
+        (dict(safe_mode={"active": True, "crashes": 3}, receiver={"state": "idle"}, casters=[caster(0, "Onocoy", "disabled")]),
+         ("safe_mode", "bad", "Safe mode")),
+        (dict(receiver={"journal": "waiting"}), ("journal", "warn", "Needs you")),
+        (dict(device={"settings_available": False}), ("settings", "bad", "Settings error")),
+        (dict(receiver={"state": "flashing", "journal": "running"}), ("updating", "info", "Updating")),
+        (dict(receiver={"state": "flash_recovery"}), ("updating", "warn", "Updating")),
+        (dict(receiver={"state": "no_receiver", "uart_closed": True}, alerts=[NO_RX]), ("uart_closed", "bad", "Port closed")),
+        (dict(receiver={"state": "no_receiver", "rtcm_age_ms": None}, alerts=[NO_RX]), ("no_receiver", "bad", "No receiver")),
+        (dict(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "link_restart"}),
+         ("rx_stopped", "warn", "Recovering")),
+        (dict(health={"level": "failed"}, alerts=[{"id": "receiver_silent", "source": "health"}], casters=wait),
+         ("rx_stopped", "bad", "Not streaming")),
+        (dict(health=recovering, alerts=[{"id": "no_satellites", "source": "health"}], casters=wait),
+         ("no_satellites", "warn", "Recovering")),
+        (dict(health={"level": "failed"}, alerts=[{"id": "no_satellites", "source": "health"}], casters=wait),
+         ("no_satellites", "bad", "Not streaming")),
+        (dict(health=recovering, alerts=[{"id": "no_rtcm", "source": "health"}], casters=wait), ("no_rtcm", "warn", "Recovering")),
+        # The owner's board without its antenna, receiver management "Me (alerts only)".
+        (dict(health={"level": "degraded", "recovery_mode": "alerts_only"}, alerts=[{"id": "no_rtcm", "source": "health"}],
+              casters=wait), ("no_rtcm", "bad", "Not streaming")),
+        (dict(casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate")]), ("stopped", "bad", "Caster stopped")),
+        (dict(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 830}), ("maintenance", "info", "Maintenance")),
+        (dict(receiver={"state": "configuring", "signal_test": {"state": "measuring", "phase": 0, "left_s": 600,
+                                                               "group": {"master": 3, "slave": 6}}}),
+         ("signal_test", "info", "Comparing")),
+        (dict(receiver={"signal_test": {"state": "deciding", "decide_left_s": 3600, "group": {"master": 3, "slave": 6}}}),
+         ("signal_test", "warn", "Needs you")),
+        (dict(network={"cred_trial": True, "cred_trial_left_s": 80, "pending_ssid": "Cabin"}), ("wifi_trial", "info", "Trying Wi-Fi")),
+        (dict(receiver={"first_apply_held": True}), ("held", "warn", "Needs you")),
+        (dict(receiver={"state": "idle"}, casters=wait), ("receiver", "info", "Starting up")),
+        (dict(receiver={"state": "detecting"}, casters=wait), ("receiver", "info", "Searching")),
+        (dict(receiver={"state": "configuring"}, casters=wait), ("receiver", "info", "Configuring")),
+        (dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "backoff")]),
+         ("onocoy_setup", "warn", "Not set up")),
+        (dict(casters=[caster(0, "Onocoy", "disabled")]), ("no_caster", "warn", "No caster")),
+        (dict(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "auth_failed", reason="auth")]),
+         ("casters_down", "warn", "Partly streaming")),
+        (dict(casters=[caster(0, "Onocoy", "backoff", reason="refused")]), ("casters_down", "bad", "Not streaming")),
+        (dict(alerts=[{"id": "fixed_far", "source": "station", "distance_m": 40, "height_m": 2}]),
+         ("fixed_far", "warn", "Wrong position")),
+        (dict(receiver={"best_bands": 3}), ("quality", "warn", "Few bands")),
+        (dict(receiver={"glonass": False}), ("quality", "warn", "No GLONASS")),
+        (dict(receiver={"rtcm1230_supported": False}), ("quality", "warn", "No GLONASS")),
+        (dict(), ("streaming", "ok", "Streaming")),
+    ]
+    out = run_ui([("word", [status(**c), True]) for c, _ in cases])
+    for (_, want), got in zip(cases, out):
+        assert tuple(got[:3]) == want, (want, got)
+    # Every key the state decides is said by one of these, and the header never says a long title.
+    assert {g[0] for g in out} == keys
+    for key, tone, word, head in out:
+        assert len(word) <= 16, (key, word)
+        assert (word == "Streaming") == (tone == "ok"), (key, tone, word)
+        assert word != "Not streaming" or tone == "bad", (key, tone, word)
+    # A visitor without a session: the public form's state, in the same words.
+    public = [status(public=True), status(public=True, casters=[]),
+              status(public=True, receiver={"state": "no_receiver", "rtcm_age_ms": None})]
+    assert [g[:3] for g in run_ui([("word", [x, False]) for x in public])] == [
+        ["streaming", "ok", "Streaming"], ["no_caster", "warn", "No caster"], ["no_receiver", "bad", "No receiver"]]
+
+
+def test_logs_three_parts_and_the_old_diagnostics_addresses():
+    """Overview, History and Console (the page is Logs: its live log cannot be "Logs" too); every address of
+    Diagnostics and its parts lands where that content is now, so a bookmark keeps working."""
+    out = run_ui([("logsTabs", None)] + [("moved", ["diag", a]) for a in
+                                         ("", "history", "logs", "availability", "journal", "tasks", "coredump", "foo",
+                                          "history/x")])
+    assert out[0] == ["Overview", "History", "Console"]
+    assert out[1:] == ["logs", "logs/history", "logs/console", "logs/history", "logs/history", "logs", "logs", "logs",
+                       "logs/history"]
 
 
 def test_every_link_in_the_ui_goes_to_a_page_that_exists():
-    """No button, link or notice points at an address of the seven tabs (it would only redirect)."""
+    """No button, link or notice points at an old address (it would only redirect) or a part a page does not have."""
     pages = {"": None, "casters": None, "receiver": {"settings", "live"}, "settings": {"updates", "session", "wifi", "restart"},
-             "diag": {"history", "logs"}}
+             "logs": {"history", "console"}}
+    # The places a part is opened at (#/receiver/settings/manage: the Receiver management card).
+    places = {("receiver", "settings"): {"manage"}, ("receiver", "live"): {"start"}}
     bad = []
     for f in sorted(UI_JS.glob("*.js")):
-        for m in re.finditer(r"'#/([a-z]*)(?:/([a-z]+))?[a-z/]*'", f.read_text()):
-            name, sub = m.group(1), m.group(2)
-            if name not in pages or (sub and pages[name] is not None and sub not in pages[name]):
+        for m in re.finditer(r"'#/([a-z]*)(?:/([a-z]+))?(?:/([a-z]+))?[a-z/]*'", f.read_text()):
+            name, sub, at = m.group(1), m.group(2), m.group(3)
+            if name not in pages or (sub and pages[name] is not None and sub not in pages[name]) or \
+                    (at and at not in places.get((name, sub), set())):
                 bad.append(f"{f.name}: {m.group(0)}")
     assert bad == []
+    # Receiver settings opened at that card: its page, the card a focus target with that id.
+    rx = (UI_JS / "60-receiver.js").read_text()
+    assert "id: 'manage', tabindex: '-1'" in rx and "arg === 'settings/manage'" in rx
 
 
 # Every notice at once: a slot stopped by the login guard, settings storage gone, maintenance, new Wi-Fi settings
@@ -1453,7 +1543,7 @@ BUSY = status(device={"settings_available": False},
 
 
 def test_notices_one_line_one_button_worst_first():
-    (lines,) = run_ui([("noticeLines", [BUSY, "diag/history"])])
+    (lines,) = run_ui([("noticeLines", [BUSY, "logs/history"])])
     assert [ln[0] for ln in lines] == ["settings", "onocoy_stopped:0", "wifi", "maintenance", "held", "signal_test", "update"]
     assert [ln[1] for ln in lines] == ["bad", "bad", "warn", "info", "info", "info", "info"]
     # What needs the user now never folds away: settings storage, the stopped slot, maintenance.
@@ -1468,7 +1558,7 @@ def test_notices_one_line_one_button_worst_first():
 
 
 def test_notices_fold_after_two_but_never_the_urgent_ones():
-    folded, opened = run_ui([("fold", [BUSY, "diag/history", False]), ("fold", [BUSY, "diag/history", True])])
+    folded, opened = run_ui([("fold", [BUSY, "logs/history", False]), ("fold", [BUSY, "logs/history", True])])
     # The first two of the others (by tone), then "+2 more".
     assert folded == [["settings", "onocoy_stopped:0", "wifi", "maintenance", "held"], 2]
     assert opened == [["settings", "onocoy_stopped:0", "wifi", "maintenance", "held", "signal_test", "update"], 2]
@@ -1484,14 +1574,14 @@ def test_a_notice_hides_on_the_page_whose_card_says_it():
     uart = status(receiver={"state": "no_receiver", "uart_closed": True})
     journal = status(receiver={"journal": "waiting"})
     trial = status(network={"cred_trial": True, "cred_trial_left_s": 80, "pending_ssid": "Cabin"})
-    pages = ["casters", "receiver", "receiver/settings", "settings", "diag", "diag/history"]
+    pages = ["casters", "receiver", "receiver/settings", "settings", "logs", "logs/history"]
     cases = [(BUSY, p) for p in pages] + [(x, p) for x in (safe, uart, journal, trial) for p in ("", "settings", "receiver")]
     out = [[k for k, _ in o] for o in run_ui([("notices", list(c)) for c in cases])]
     every = {"settings", "onocoy_stopped:0", "wifi", "maintenance", "held", "signal_test", "update"}
-    # Diagnostics' Health card says the station's state (settings storage) above its alerts: its notice goes there,
+    # Logs' Health card says the station's state (settings storage) above its alerts: its notice goes there,
     # not on History.
     hidden = {"casters": {"onocoy_stopped:0"}, "receiver": {"held"}, "receiver/settings": {"signal_test"},
-              "settings": {"wifi", "update", "maintenance"}, "diag": {"settings"}, "diag/history": set()}
+              "settings": {"wifi", "update", "maintenance"}, "logs": {"settings"}, "logs/history": set()}
     for p, keys in zip(pages, out[:6]):
         assert set(keys) == every - hidden[p], p
     safe_k, uart_k, journal_k, trial_k = out[6:9], out[9:12], out[12:15], out[15:18]
@@ -1501,39 +1591,41 @@ def test_a_notice_hides_on_the_page_whose_card_says_it():
     assert uart_k == [[], ["uart_closed"], []]
     assert journal_k == [[], [], ["journal"]]
     assert trial_k == [[], [], ["wifi"]]
-    # Diagnostics: the stopped Onocoy and the closed port are said by the Health card; History keeps their notices.
+    # Logs: the stopped Onocoy and the closed port are said by the Health card; History keeps their notices.
     stopped = status(casters=[caster(0, "Onocoy", "stopped", stop_reason="rejected")],
                      alerts=[{"id": "heap_fragmented", "source": "health"}])
-    diag = [[k for k, _ in o] for o in run_ui([("notices", [x, p]) for x in (stopped, uart) for p in ("diag", "diag/history")])]
+    diag = [[k for k, _ in o] for o in run_ui([("notices", [x, p]) for x in (stopped, uart) for p in ("logs", "logs/history")])]
     assert diag == [[], ["onocoy_stopped:0"], [], ["uart_closed"]]
     # Safe mode with its alert: the Health card says the state (the same red as the alert), so its notice goes there.
     # A warn state beside a warn alert: the card says the state, nothing to cover.
     safe_alert = status(safe_mode={"active": True, "crashes": 3, "retry_in_s": 2690}, receiver={"state": "idle"},
                         casters=[caster(0, "Onocoy", "disabled")], alerts=[{"id": "safe_mode", "source": "health"}])
-    (k,) = run_ui([("notices", [safe_alert, "diag"])])
+    (k,) = run_ui([("notices", [safe_alert, "logs"])])
     assert [x for x, _ in k] == []
     # Until the Health card is on the page (loading, or its first request failed) the notice stays.
-    no_card = run_ui([("noticesNoCard", [x, "diag"]) for x in (stopped, safe_alert, BUSY)])
+    no_card = run_ui([("noticesNoCard", [x, "logs"]) for x in (stopped, safe_alert, BUSY)])
     assert no_card == [["onocoy_stopped:0"], ["safe_mode"], ["settings", "onocoy_stopped:0", "wifi", "maintenance", "held",
                                                              "signal_test", "update"]]
 
 
 def test_the_page_a_notice_is_on():
-    """An address the page itself opens is that page for the notices: #/diag/foo the Overview, #/receiver/live the
-    Receiver page; History, Logs and Receiver settings are pages of their own."""
-    out = run_ui([("pageKey", a) for a in (["diag", ""], ["diag", "foo"], ["diag", "history"], ["diag", "logs/x"],
+    """An address the page itself opens is that page for the notices: #/logs/foo the Overview, #/receiver/live the
+    Receiver page, #/receiver/settings/manage Receiver settings; History, Console and Receiver settings are pages of
+    their own."""
+    out = run_ui([("pageKey", a) for a in (["logs", ""], ["logs", "foo"], ["logs", "history"], ["logs", "console/x"],
                                            ["receiver", ""], ["receiver", "live"], ["receiver", "live/start"],
-                                           ["receiver", "settings"], ["casters", "onocoy"], ["", ""])])
-    assert out == ["diag", "diag", "diag/history", "diag/logs", "receiver", "receiver", "receiver", "receiver/settings",
-                   "casters", ""]
+                                           ["receiver", "settings"], ["receiver", "settings/manage"], ["casters", "onocoy"],
+                                           ["", ""])])
+    assert out == ["logs", "logs", "logs/history", "logs/console", "receiver", "receiver", "receiver", "receiver/settings",
+                   "receiver/settings", "casters", ""]
 
 
 
-# ---- Diagnostics (80-diag.js) ----
+# ---- Logs (80-diag.js) ----
 
 def test_health_chip_never_disagrees_with_the_status_page():
     """The chip's colour comes from the alerts; with none named (a caster down makes the station "degraded"), from
-    the Status page's own state, so Diagnostics never shows amber beside a green Status page or the other way."""
+    the Status page's own state, so Logs never shows amber beside a green Status page or the other way."""
     rx = {"id": "no_receiver", "source": "station"}
     power = {"id": "power_supply", "source": "health"}
     held = {"id": "rx_held", "source": "health"}
@@ -1555,7 +1647,7 @@ def test_health_chip_never_disagrees_with_the_status_page():
 def test_health_card_says_the_state_at_least_as_bad_as_every_alert():
     """The Status page's state goes above the alerts while it is at least as bad as each of them: a stall (amber)
     beside the profile alert (amber) keeps both; safe mode (red) takes its own alert's place and covers its notice;
-    Partly streaming beside a fragmented heap keeps both. No receiver found leaves it to its alert (Diagnostics'
+    Partly streaming beside a fragmented heap keeps both. No receiver found leaves it to its alert (Logs'
     fuller words, with the search)."""
     drift = {"id": "profile_drift", "source": "health"}
     heap = {"id": "heap_fragmented", "source": "health"}
@@ -1614,8 +1706,8 @@ def test_the_receiver_at_the_start_event_in_a_few_words():
 
 
 def test_a_paused_recovery_says_what_it_waits_for():
-    """Diagnostics' "If corrections stop" while the recovery waits: what for, so a frozen countdown under it makes sense
-    and it is plain that it goes on by itself; the recovery mode otherwise."""
+    """Logs' "Receiver management" while the recovery waits: what for, so a frozen countdown under it makes sense
+    and it is plain that it goes on by itself; the choice otherwise."""
     def hl(**st):
         return {"ladder_suspended": True, "recovery_mode": "full", "station": {"state": "streaming", "lease_held": False,
                                                                               "since_lease_release_ms": None, **st}}
@@ -1624,10 +1716,14 @@ def test_a_paused_recovery_says_what_it_waits_for():
                   ("recoveryNow", hl(state="idle", rx_maintenance=True)), ("recoveryNow", hl(state="detecting")),
                   ("recoveryNow", hl(state="flashing")), ("recoveryNow", hl(state="idle")),
                   ("recoveryNow", hl(since_lease_release_ms=60000)),
-                  ("recoveryNow", {**hl(), "ladder_suspended": False})])
+                  ("recoveryNow", {**hl(), "ladder_suspended": False}),
+                  ("recoveryNow", {**hl(), "ladder_suspended": False, "recovery_mode": "no_reboot"}),
+                  ("recoveryNow", {**hl(), "ladder_suspended": False, "recovery_mode": "alerts_only"})])
+    # Otherwise the choice, as the Status page names it.
     assert out == ["Paused while the receiver is configured"] * 3 + [
         "Paused (receiver maintenance)", "Paused while the station looks for the receiver",
-        "Paused during the receiver update", "Paused", "Paused", "The station"], out
+        "Paused during the receiver update", "Paused", "Paused", "The station", "The station, no restarts",
+        "You (alerts only)"], out
 
 
 def test_log_lines_and_event_times_fit_one_line():
@@ -1641,7 +1737,7 @@ def test_log_lines_and_event_times_fit_one_line():
     assert out[5] == "Oct 15, 12:03 AM"   # too long for the time column: the newest only
 
 
-def test_diagnostics_lists_are_one_line_rows():
+def test_logs_lists_are_one_line_rows():
     """No stacked blocks on a phone: the log, the event list, the starts and the tasks keep one row per item."""
     js = (UI_JS / "80-diag.js").read_text()
     assert "stack: true" not in js and "stack-sm" not in js
@@ -1711,7 +1807,7 @@ def test_no_corrections_from_a_fixed_position_far_enough_to_stop_them():
     assert far["also"] == [] and far["actions"] == ["Receiver settings"]
     assert near["key"] == "no_rtcm" and near["line"] == ANTENNA_LINE and near["also"] == ["fixed_far"]
     assert near["actions"] == []
-    # Diagnostics and the Receiver card say it once too: the state, without the warning again under it (failed or while
+    # Logs and the Receiver card say it once too: the state, without the warning again under it (failed or while
     # the recovery runs), and the warning beside the antenna line when it is nearer.
     recovering = stalled(1400)
     recovering["health"] = {"level": "recovering", "last_step": "receiver_reset", "step": "receiver_reset",

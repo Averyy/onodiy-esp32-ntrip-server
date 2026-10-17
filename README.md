@@ -382,7 +382,7 @@ station name. Settings shows both as links.
   node when the mesh asks it to, and by itself (at most once every 30 minutes) when its
   signal is weak and another node is clearly stronger; never during a firmware update.
   A move that takes only a few seconds keeps the station's address and the caster
-  connections; a slower one drops them briefly. Each move shows in Diagnostics > History.
+  connections; a slower one drops them briefly. Each move shows in Logs > History.
 - **Factory reset:** hold **BOOT** for 20 s. Wi-Fi, admin password, casters and
   receiver profile are erased; the station restarts in setup mode. Refused while a
   receiver firmware update is running.

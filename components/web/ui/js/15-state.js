@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: MIT
  *
  * The station's state, decided in one place (stationState): the Status
- * page's cards, the public view, the tab's title, the notices and the
- * setup's last screen (onocoyNow) all read it, so they never disagree.
+ * page's cards, the public view, the header's indicator (stateWord), the
+ * tab's title, the notices and the setup's last screen (onocoyNow) all read
+ * it, so they never disagree.
  *
  * The first condition that applies wins; its colour comes from it alone (a
  * bare health level never changes it), and other alerts follow as "Also:"
@@ -12,7 +13,7 @@
  * red: broken.
  */
 
-/* The top card's title while the receiver does not stream (L.station keeps the longer words for Diagnostics). */
+/* The top card's title while the receiver does not stream (L.station keeps the longer words for Logs). */
 const HERO_TITLE = {
   idle: 'Starting up', detecting: 'Looking for the receiver', configuring: 'Configuring the receiver',
   flashing: 'Updating the receiver', flash_recovery: 'Finishing a receiver update', no_receiver: 'No receiver found',
@@ -46,8 +47,8 @@ const FIXED_STOPS_M = 300;
 const LADDER_REASONS = ['receiver_power', 'receiver_silent', 'no_satellites', 'no_rtcm'];
 /* Where an "Also:" line's Details button goes. */
 const ALERT_PAGE = {
-  settings_degraded: '#/diag', link_loss: '#/diag', power_supply: '#/diag', power_lost: '#/diag', heap_fragmented: '#/diag',
-  no_upstream: '#/settings/wifi', receiver_power: '#/diag', receiver_silent: '#/diag', safe_mode: '#/settings/restart',
+  settings_degraded: '#/logs', link_loss: '#/logs', power_supply: '#/logs', power_lost: '#/logs', heap_fragmented: '#/logs',
+  no_upstream: '#/settings/wifi', receiver_power: '#/logs', receiver_silent: '#/logs', safe_mode: '#/settings/restart',
   no_satellites: '#/receiver', no_rtcm: '#/receiver', bands: '#/receiver', no_receiver: '#/receiver',
   config_failed: '#/receiver', antenna_moved: '#/receiver', unsupported_model: '#/receiver', signals_mismatch: '#/receiver',
   fixed_far: '#/receiver/settings',
@@ -56,6 +57,8 @@ const ALERT_PAGE = {
 };
 /* Where the Onocoy credentials are entered (the caster editor opens on the Onocoy slot). */
 const ONOCOY_SETUP_HASH = '#/casters/onocoy';
+/* Receiver settings opened at its Receiver management card. */
+const MANAGE_HASH = '#/receiver/settings/manage';
 
 const casterOn = c => c.enabled !== false && c.state !== 'disabled';
 
@@ -170,13 +173,14 @@ function qualityLead(q, name) {
  * {label, href, primary} links or {act, label} data-act buttons, so a
  * refresh keeps the focus), alertId (the alert the line says), covers
  * (other alerts the line says: not listed again), notice (the
- * notice it covers), diagLead (the line on Diagnostics when the lead points
+ * notice it covers), diagLead (the line on Logs when the lead points
  * there; null: the lead), subject (the caster slot the line names), named (the
  * line names the casters down), doing (what the receiver recovery does
  * now, when the line says something else), plan (doing, then the next
  * search and restart: one short line), trial (the Wi-Fi on trial), also
- * (other alerts), facts (the caster count unless the line names them; the
- * recovery choice when not the default), delivering, quality (rxQuality()),
+ * (other alerts), facts ([label, value, href of a Change link]: the caster
+ * count unless the line names them; Receiver management when not the
+ * default), delivering, quality (rxQuality()),
  * ono (the Onocoy slot while it counts), onoStreaming (with corrections
  * behind it)}.
  *
@@ -213,7 +217,8 @@ function stationState(s, admin) {
   const quality = rxQuality(rcv, delivering);
   const go = (label, href, primary) => ({ label: label, href: href, primary: !!primary });
   const pick = (key, head, tone, lead, more) => Object.assign({ key: key, head: head, tone: tone, lead: lead, actions: [],
-    alertId: null, covers: [], notice: null, trial: null, subject: null, named: false, search: null, diagLead: null, doing: null },
+    alertId: null, covers: [], notice: null, trial: null, subject: null, named: false, search: null, diagLead: null, doing: null,
+    rx: null },
   more || {});
 
   const decide = () => {
@@ -236,8 +241,8 @@ function stationState(s, admin) {
       }
       if ((s.device && s.device.settings_available === false) || find('settings_degraded')) {
         return pick('settings', 'Settings cannot be saved', 'bad', 'The station runs, but changes are not saved this boot. ' +
-          'Restart it; if that does not help, see Diagnostics.',
-        { actions: [go('Restart', '#/settings/restart'), go('Diagnostics', '#/diag')],
+          'Restart it; if that does not help, see Logs.',
+        { actions: [go('Restart', '#/settings/restart'), go('Logs', '#/logs')],
           alertId: find('settings_degraded') ? 'settings_degraded' : null, notice: 'settings',
           diagLead: 'The station runs, but changes are not saved this boot. Restart it.' });
       }
@@ -248,7 +253,7 @@ function stationState(s, admin) {
         { actions: admin ? [go('Open', '#/settings/session')] : [] });
     }
     if (admin && rcv.uart_closed) {
-      return pick('uart_closed', 'Receiver port closed', 'bad', UART_CLOSED_TEXT, { actions: [go('Details', '#/diag')], notice: 'uart_closed' });
+      return pick('uart_closed', 'Receiver port closed', 'bad', UART_CLOSED_TEXT, { actions: [go('Details', '#/logs')], notice: 'uart_closed' });
     }
     const nr = find('no_receiver', 'station');
     if (nr || state === 'no_receiver') {
@@ -273,7 +278,7 @@ function stationState(s, admin) {
       return pick(ladder.id, t[0], tone, t[1], { alertId: ladder.id, doing: doing });
     };
     if (state === 'recovering' || ((state === 'streaming' || state === 'configuring') && hl.level === 'recovering')) {
-      /* No step in progress: between two; nothing while the station holds the recovery (Diagnostics says "Paused").
+      /* No step in progress: between two; nothing while the station holds the recovery (Logs says "Paused").
        * A session of the station's own (configuring) leaves the recovery's line as it was: the step waits for it. */
       const again = hl.ladder_suspended ? null : AGAIN_SHORTLY;
       const doing = admin ? recoveryDoing(hl, !!ladder) || (hl.step_phase === 'none' ? again : null) : null;
@@ -312,7 +317,7 @@ function stationState(s, admin) {
         { actions: [go('Review and configure', '#/receiver')], alertId: 'rx_held', notice: 'held' });
     }
     if (state !== 'streaming') {
-      return pick('receiver', HERO_TITLE[state] || lbl(L.station, state), 'info', HERO_STATE_LINE[state] || '');
+      return pick('receiver', HERO_TITLE[state] || lbl(L.station, state), 'info', HERO_STATE_LINE[state] || '', { rx: state });
     }
     if (onoSlot && onoSlot.onocoy_ready === false) {
       return pick('onocoy_setup', 'Onocoy not set up', 'warn', on.length ? 'Add your Onocoy credentials to stream to Onocoy too.' :
@@ -377,14 +382,14 @@ function stationState(s, admin) {
   const order = { bad: 0, warn: 1, info: 2 };
   /* A closed port is why no receiver is found: its cable advice would mislead. */
   r.also = alerts.filter(a => a.id !== r.alertId && r.covers.indexOf(a.id) < 0 && !(r.key === 'uart_closed' && a.id === 'no_receiver'))
-    .map(a => ({ id: a.id, title: alertText(a, rcv)[0], text: alertText(a, rcv)[1], tone: alertTone(a), href: ALERT_PAGE[a.id] || '#/diag' }))
+    .map(a => ({ id: a.id, title: alertText(a, rcv)[0], text: alertText(a, rcv)[1], tone: alertTone(a), href: ALERT_PAGE[a.id] || '#/logs' }))
     .sort((a, b) => (order[a.tone] || 0) - (order[b.tone] || 0));
   r.facts = [];
   /* The count adds nothing to a line that names the casters. */
   if (on.length > 1 && r.key !== 'streaming' && r.subject === null && !r.named) {
     r.facts.push(['Casters', streaming.length + ' of ' + on.length + ' streaming']);
   }
-  if (admin && hl.recovery_mode && hl.recovery_mode !== 'full') r.facts.push(['If corrections stop', lbl(L.recovery, hl.recovery_mode)]);
+  if (admin && hl.recovery_mode && hl.recovery_mode !== 'full') r.facts.push(['Receiver management', lbl(L.manage, hl.recovery_mode), MANAGE_HASH]);
   const plan = admin && ['rx_stopped', 'no_receiver', 'no_satellites', 'no_rtcm'].indexOf(r.key) >= 0 ?
     [r.search, restartPlanShort(hl)].filter(Boolean) : [];
   const later = plan.length ? capFirst(plan.join(' · ')) : null;
@@ -395,6 +400,32 @@ function stationState(s, admin) {
   r.ono = ono;
   r.onoStreaming = onoStreaming;
   return r;
+}
+
+/*
+ * The header's indicator in a word or two for each state of stationState()
+ * (its key), in the top card's colour; the title (head) says it in full.
+ * A word for each colour where a state has more than one: red once the
+ * recovery is done with it or a caster is down, amber while the recovery
+ * still works on it or some casters stream; the receiver's own states
+ * (stationState's rx) by RX_WORD; Onocoy's quality by what it misses.
+ */
+const STATE_WORD = {
+  safe_mode: 'Safe mode', journal: 'Needs you', settings: 'Settings error', updating: 'Updating', uart_closed: 'Port closed',
+  no_receiver: 'No receiver', rx_stopped: { bad: 'Not streaming', warn: 'Recovering' },
+  no_satellites: { bad: 'Not streaming', warn: 'Recovering' }, no_rtcm: { bad: 'Not streaming', warn: 'Recovering' },
+  stopped: 'Caster stopped', maintenance: 'Maintenance', signal_test: { warn: 'Needs you', info: 'Comparing' },
+  wifi_trial: 'Trying Wi-Fi', held: 'Needs you', receiver: null, onocoy_setup: 'Not set up', no_caster: 'No caster',
+  casters_down: { bad: 'Not streaming', warn: 'Partly streaming' }, fixed_far: 'Wrong position', quality: null,
+  streaming: 'Streaming',
+};
+const RX_WORD = { idle: 'Starting up', detecting: 'Searching', configuring: 'Configuring' };
+
+/** The header's word for a stationState() (STATE_WORD); its head for a state without one. */
+function stateWord(st) {
+  const w = st.key === 'receiver' ? RX_WORD[st.rx] || 'Starting up' :
+    st.key === 'quality' ? (st.quality.fewBands ? 'Few bands' : 'No GLONASS') : STATE_WORD[st.key];
+  return (w && typeof w === 'object' ? w[st.tone] : w) || st.head;
 }
 
 /* One line on a quality problem for the Onocoy verdict. */

@@ -780,7 +780,10 @@ The UI's Receiver settings show `autocfg` and `recovery` as one choice,
 "Receiver management": "The station" (`true`, `full`), "The station, but
 never restart itself" (`true`, `no_reboot`), "Me (alerts only)" (`false`,
 `alerts_only`); any other pair shows as "Custom" with the nearest choice
-offered. The Status page and Diagnostics name the choice the same way. A
+offered. The Status page (with a Change link to that card) and Logs show it
+as "Receiver management" from the station's side: "The station", "The
+station, no restarts", "You (alerts only)" (Logs: "Paused" while the
+station holds the recovery). A
 save sends only the members that change, one per request since they are
 stored one after the other: `recovery` first when `autocfg` goes off, else
 `autocfg` first, so a refusal halfway never leaves automatic recovery on
@@ -1114,7 +1117,7 @@ baud list after two failed short passes and always after 5 min). A pass
 that runs already counts. `202 {"accepted": true}`. Errors:
 `409 not_no_receiver` (any other state, receiver maintenance included),
 `409 safe_mode`. The UI offers it as "Check again" wherever it says no
-receiver was found (the Status page; Diagnostics, Overview; the setup
+receiver was found (the Status page; Logs, Overview; the setup
 wizard's antenna check; the Receiver page).
 
 ### Signal-group comparison
@@ -1642,7 +1645,7 @@ the station's Wi-Fi transmit power limit now (`esp_wifi_get_max_tx_power`,
 read in steps of 0.25 dBm); both refreshed with `rssi` every 5 s, and
 like `rssi` and `channel` `null` while not associated (and in the QEMU
 build, whose emulated link has no access point). Diagnostics for a weak
-link (the UI's Diagnostics shows them under Chip and Wi-Fi, with the
+link (the UI's Logs page shows them under Chip and Wi-Fi, with the
 channel); only in this admin route, never in the public status.
 `ap_steering`: the access point takes part in 802.11v BSS transition
 management, so it can ask the station to move to another access point of
@@ -1658,7 +1661,7 @@ reconnect that stayed on the same access point, not counted here), and
 none counts in `reconnects` (links re-established after a drop). A move
 that is associated again within a few seconds keeps `online`, `ip` and
 every TCP session (`associated` is `false` meanwhile); the UI's
-Diagnostics shows `roams` and `ap_steering` under Chip and Wi-Fi.
+Logs page shows `roams` and `ap_steering` under Chip and Wi-Fi.
 `last_disconnect_reason` is the numeric `wifi_err_reason_t`. `scan.results`
 are the cached ones (no radio activity; at most 24); `age_s` is `null`
 before the first scan. `mdns_host`, `assoc_no_ip_s`, `cred_*`,

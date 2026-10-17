@@ -17,7 +17,7 @@ const L = {
     flash_recovery: 'Recovering a receiver update',
     recovering: 'Recovering',
     no_receiver: 'No receiver found',
-    /* Not a state of the station's: what Diagnostics says for no_receiver while the receiver port is closed. */
+    /* Not a state of the station's: what Logs says for no_receiver while the receiver port is closed. */
     uart_closed: 'Receiver port closed',
   },
   caster: {
@@ -86,7 +86,7 @@ const L = {
     profile_drift: ['Output differs from the profile', 'The receiver\'s messages or rates differ from its profile.'],
     heap_fragmented: ['Memory fragmented', 'Restart the station when convenient.'],
     safe_mode: ['Safe mode', 'Receiver and casters are off after repeated crashes.'],
-    settings_degraded: ['Settings cannot be saved', 'Changes are not saved this boot. Restart the station; if that does not help, see Diagnostics.'],
+    settings_degraded: ['Settings cannot be saved', 'Changes are not saved this boot. Restart the station; if that does not help, see Logs.'],
     no_upstream: ['No internet', 'Wi-Fi works, but the internet cannot be reached. Check your router.'],
     link_loss: ['Receiver data lost', 'Some data from the receiver was lost or damaged in the last 10 minutes.'],
     power_lost: ['Power was lost', 'The station lost power 3 or more times in 24 hours. Check the power adapter, cable and connections.'],
@@ -129,7 +129,7 @@ const L = {
     brownout: 'after a power dip', sdio: 'over SDIO', usb: 'over USB', jtag: 'over JTAG', efuse: 'after an eFuse error',
     pwr_glitch: 'after a power glitch', cpu_lockup: 'after a CPU lockup',
   },
-  /* A start in a word (Diagnostics' earlier starts): by its reset class; a planned one by its reason (else "Restart"). */
+  /* A start in a word (Logs' earlier starts): by its reset class; a planned one by its reason (else "Restart"). */
   startKind: { power_on: 'Power-on', crash: 'Crash', brownout: 'Power dip', other: 'Reset' },
   plannedKind: {
     app_update: 'Update', app_revert: 'Rollback', app_rollback: 'Rollback', factory_reset: 'Factory reset', admin_reset: 'Password reset',
@@ -232,8 +232,10 @@ const L = {
   linkMode: { off: 'Off', stream: 'Streaming', command: 'Command session', raw: 'Raw (update)' },
   baseMode: { survey_in: 'Survey-in', fixed: 'Fixed position' },
   posSource: { none: 'None', survey: 'Survey-in', averaged: 'Averaged', user: 'Entered by you' },
-  /* If corrections stop (gnss/recovery): the names of Receiver settings' choice (MANAGE), the same on every page. */
+  /* Receiver management's choice (gnss/recovery) as Receiver settings names it (MANAGE), in the owner's words ("Me"). */
   recovery: { full: 'The station', no_reboot: 'The station, but never restart itself', alerts_only: 'Me (alerts only)' },
+  /* The same choice where the station tells it (the Status page's top card, Logs' Health card): "You", not "Me". */
+  manage: { full: 'The station', no_reboot: 'The station, no restarts', alerts_only: 'You (alerts only)' },
   trigger: { protected: 'Onocoy caster down', assoc_no_ip: 'connected without an IP address', unreached: 'a caster not reached' },
   liveWhy: {
     none: '',
@@ -534,7 +536,7 @@ function restartPlan(hl) {
   return { k: 'recheck', why: '' };
 }
 
-/** restartPlan() as a sentence (Diagnostics). */
+/** restartPlan() as a sentence (Logs). */
 function restartPlanText(hl) {
   const p = restartPlan(hl);
   if (!p) return null;

@@ -5,9 +5,8 @@
  * Settings (#/settings), one card each: Wi-Fi (the station's own Wi-Fi, its
  * access point, folded in it), Updates (70-updates.js, with receiver
  * maintenance), the station's name and public status, the admin password
- * (its form behind a button), restart, safe mode and factory reset, and the
- * way to Diagnostics. #/settings/wifi, /updates, /session and /restart open
- * it at that card.
+ * (its form behind a button), restart, safe mode and factory reset.
+ * #/settings/wifi, /updates, /session and /restart open it at that card.
  */
 
 function hostnameProblem(v) {
@@ -51,7 +50,7 @@ function addressRows(net, prefix) {
   return stationAddressRows(net).map(r => [r[0] ? (prefix || '') + (names[r[0]] || r[0]) : '', r[1]]);
 }
 
-/* The Wi-Fi in a few rows; the counters behind it and the MAC address are in Diagnostics. */
+/* The Wi-Fi in a few rows; the counters behind it and the MAC address are in Logs. */
 function wifiStatus(w) {
   return kv([
     ['Network', w.configured ? w.ssid : 'Not set up'],
@@ -512,8 +511,7 @@ Views.settings = {
   create(el, arg) {
     const s = systemPart.create(arg), u = updatesPart.create(arg);
     const c = Object.assign({}, s.cards, u.cards);
-    mount(el, h('div', { class: 'grid' }, c.wifi, c.updates, c.session, c.station, c.password, c.restart,
-      h('p', { class: 'wide' }, link('Diagnostics', '#/diag'), h('span', { class: 'muted' }, ': health, history and logs.'))));
+    mount(el, h('div', { class: 'grid' }, c.wifi, c.updates, c.session, c.station, c.password, c.restart));
     /* Opened at a card (#/settings/restart): once both parts are in, so the place does not move. */
     Promise.all([u.ready, s.ready]).then(() => {
       const at = c[arg];

@@ -97,7 +97,8 @@ function heroCard(s, st) {
       h('span', { class: 'ic', 'aria-hidden': 'true' }, a.tone === 'bad' ? '✕' : a.tone === 'info' ? 'i' : '!'),
       h('span', null, h('strong', null, 'Also: ' + a.title + '.'), a.text ? ' ' + a.text : ''),
       link('Details', a.href, 'btn small')))) : null,
-    st.facts.length ? h('dl', { class: 'facts' }, st.facts.map(f => h('div', null, h('dt', null, f[0]), h('dd', null, f[1])))) : null);
+    st.facts.length ? h('dl', { class: 'facts' }, st.facts.map(f => h('div', null, h('dt', null, f[0]),
+      h('dd', null, f[1], f[2] ? h('a', { href: f[2], 'aria-label': 'Change ' + f[0].toLowerCase() }, 'Change') : null)))) : null);
 }
 
 /* The next 00:00 UTC in local time ("8:00 PM"). */
@@ -337,7 +338,7 @@ function leaveSafeClicks(root, refresh) {
 }
 
 /**
- * The alerts (station and health) as message boxes, as Diagnostics shows
+ * The alerts (station and health) as message boxes, as Logs' Overview shows
  * them. opts.detect: the no-receiver alert offers "Check again" (the page
  * handles it with detectClicks).
  */
