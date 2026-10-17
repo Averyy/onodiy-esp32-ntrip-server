@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "settings_codec.h"
+#include "um98x_profile.h"
 
 /* ---- small helpers -------------------------------------------------------- */
 
@@ -1741,6 +1742,25 @@ stn_rxboot_t stn_rxboot_judge(const stn_rxboot_in_t *in, stn_rxboot_by_t *by)
     return v;
 }
 
+bool stn_rxboot_judged(stn_rxboot_reset_t reset)
+{
+    return reset == STN_RXBOOT_RESET_POWER_ON || reset == STN_RXBOOT_RESET_BROWNOUT;
+}
+
+void stn_rxboot_follow(stn_rxboot_reset_t reset, stn_rxboot_t verdict, stn_rxboot_follow_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!stn_rxboot_judged(reset)) {
+        return;
+    }
+    /* The receiver restarted with the ESP32: the power went for both, a cut
+     * or a dip deep enough for the receiver too. */
+    out->maint_ends = verdict == STN_RXBOOT_RESTARTED;
+    /* It kept running: after a power-on reset that was the EN pin, no power
+     * loss at all; after a brownout the ESP32's own supply did dip. */
+    out->power_kept = verdict == STN_RXBOOT_KEPT && reset == STN_RXBOOT_RESET_POWER_ON;
+}
+
 bool stn_line_is_nmea(const char *line, size_t len)
 {
     if (line == NULL || len < 7 || line[0] != '$' || line[6] != ',') {
@@ -2070,7 +2090,83 @@ bool stn_maint_rtc_read(const stn_maint_rtc_t *r, stn_maint_rec_t *rec)
     return true;
 }
 
-size_t stn_maint_store_encode(const stn_maint_rec_t *rec, uint8_t *buf, size_t cap)
+/* What the station knew, in the stored copy (version 2): its flag bits. */
+#define KNOWN_IDENTIFIED   (1u << 0)
+#define KNOWN_CONFIRMED    (1u << 1)
+#define KNOWN_APPLIED      (1u << 2)
+#define KNOWN_HEIGHT_ONLY  (1u << 3)
+#define KNOWN_SURVEY       (1u << 4)
+#define KNOWN_COMPLETE     (1u << 5)
+#define KNOWN_LOCK_DONE    (1u << 6)
+#define KNOWN_SG           (1u << 7)
+
+static void known_put(blob_writer_t *w, const stn_maint_known_t *k)
+{
+    uint8_t f = (uint8_t)((k->receiver.valid ? KNOWN_IDENTIFIED : 0u) | (k->identity_confirmed ? KNOWN_CONFIRMED : 0u) |
+                          (k->profile_applied ? KNOWN_APPLIED : 0u) | (k->fix_height_only ? KNOWN_HEIGHT_ONLY : 0u) |
+                          (k->survey_active ? KNOWN_SURVEY : 0u) | (k->survey_complete ? KNOWN_COMPLETE : 0u) |
+                          (k->lock_done ? KNOWN_LOCK_DONE : 0u) | (k->sg_valid ? KNOWN_SG : 0u));
+    blob_put_u32(w, k->profile_hash);
+    blob_put_u8(w, f);
+    blob_put_str(w, k->receiver.valid ? k->receiver.model : "");
+    blob_put_str(w, k->receiver.valid ? k->receiver.firmware : "");
+    blob_put_u32(w, k->receiver.valid ? k->receiver.build : 0u);
+    blob_put_str(w, k->receiver.valid ? k->receiver.serial : "");
+    blob_put_str(w, k->receiver.valid ? k->receiver.pn : "");
+    blob_put_str(w, k->receiver.valid ? k->receiver.efuse_id : "");
+    blob_put_str(w, k->receiver.valid ? k->receiver.compile_date : "");
+    blob_put_u32(w, k->alerts & ~STN_ALERT_NO_RECEIVER);
+    blob_put_u8(w, k->fix_state);
+    blob_put_f32(w, k->fix_horizontal_m);
+    blob_put_f32(w, k->fix_up_m);
+    blob_put_f32(w, k->fix_distance_m);
+    blob_put_u32(w, k->survey_s);
+    blob_put_u32(w, (uint32_t)k->survey_end_rel_ms);
+    blob_put_u8(w, k->sg_valid ? k->sg_master : 0u);
+    blob_put_u8(w, k->sg_valid ? k->sg_slave : 0u);
+}
+
+/* False (k untouched) for a part that does not read or does not make sense. */
+static bool known_get(blob_reader_t *r, stn_maint_known_t *k)
+{
+    stn_maint_known_t n;
+    memset(&n, 0, sizeof(n));
+    n.profile_hash = blob_get_u32(r);
+    uint8_t f = blob_get_u8(r);
+    blob_get_str(r, n.receiver.model, sizeof(n.receiver.model));
+    blob_get_str(r, n.receiver.firmware, sizeof(n.receiver.firmware));
+    n.receiver.build = blob_get_u32(r);
+    blob_get_str(r, n.receiver.serial, sizeof(n.receiver.serial));
+    blob_get_str(r, n.receiver.pn, sizeof(n.receiver.pn));
+    blob_get_str(r, n.receiver.efuse_id, sizeof(n.receiver.efuse_id));
+    blob_get_str(r, n.receiver.compile_date, sizeof(n.receiver.compile_date));
+    n.alerts = blob_get_u32(r) & ~STN_ALERT_NO_RECEIVER;
+    n.fix_state = blob_get_u8(r);
+    n.fix_horizontal_m = blob_get_f32(r);
+    n.fix_up_m = blob_get_f32(r);
+    n.fix_distance_m = blob_get_f32(r);
+    n.survey_s = blob_get_u32(r);
+    n.survey_end_rel_ms = (int32_t)blob_get_u32(r);
+    n.sg_master = blob_get_u8(r);
+    n.sg_slave = blob_get_u8(r);
+    if (!blob_reader_ok(r) || n.fix_state > STN_FIX_REFUSED || n.survey_s > UM98X_SURVEY_MAX_S ||
+        ((f & KNOWN_IDENTIFIED) != 0 && n.receiver.model[0] == '\0')) {
+        return false;
+    }
+    n.valid = true;
+    n.receiver.valid = (f & KNOWN_IDENTIFIED) != 0;
+    n.identity_confirmed = (f & KNOWN_CONFIRMED) != 0;
+    n.profile_applied = (f & KNOWN_APPLIED) != 0;
+    n.fix_height_only = (f & KNOWN_HEIGHT_ONLY) != 0;
+    n.survey_active = (f & KNOWN_SURVEY) != 0;
+    n.survey_complete = (f & KNOWN_COMPLETE) != 0;
+    n.lock_done = (f & KNOWN_LOCK_DONE) != 0;
+    n.sg_valid = (f & KNOWN_SG) != 0;
+    *k = n;
+    return true;
+}
+
+size_t stn_maint_store_encode(const stn_maint_rec_t *rec, const stn_maint_known_t *known, uint8_t *buf, size_t cap)
 {
     blob_writer_t w;
     blob_writer_init(&w, buf, cap);
@@ -2079,15 +2175,24 @@ size_t stn_maint_store_encode(const stn_maint_rec_t *rec, uint8_t *buf, size_t c
     blob_put_u32(&w, rec->left_ms);
     blob_put_u32(&w, rec->chosen_s);
     blob_put_i64(&w, rec->end_unix);
+    bool have = known != NULL && known->valid;
+    blob_put_u8(&w, have ? 1u : 0u);
+    if (have) {
+        known_put(&w, known);
+    }
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
-bool stn_maint_store_decode(stn_maint_rec_t *rec, const uint8_t *buf, size_t len)
+bool stn_maint_store_decode(stn_maint_rec_t *rec, stn_maint_known_t *known, const uint8_t *buf, size_t len)
 {
     memset(rec, 0, sizeof(*rec));
-    if (buf == NULL || len < 1 || buf[0] < STN_MAINT_STORE_VERSION) {
+    if (known != NULL) {
+        memset(known, 0, sizeof(*known));
+    }
+    if (buf == NULL || len < 1 || buf[0] < 1u) {
         return false;
     }
+    uint8_t version = buf[0];
     blob_reader_t r;
     blob_reader_init(&r, buf, len);
     (void)blob_get_u8(&r);
@@ -2103,7 +2208,30 @@ bool stn_maint_store_decode(stn_maint_rec_t *rec, const uint8_t *buf, size_t len
     rec->left_ms = left_ms;
     rec->chosen_s = chosen_s;
     rec->end_unix = end_unix;
+    /* What the station knew: best effort, the time left stands without it. */
+    if (known != NULL && version >= 2u && blob_reader_remaining(&r) > 0 && blob_get_u8(&r) == 1u) {
+        (void)known_get(&r, known);
+    }
     return true;
+}
+
+void stn_maint_known_survey(const stn_t *s, stn_maint_known_t *known)
+{
+    known->survey_active = false;
+    known->survey_complete = false;
+    known->lock_done = false;
+    known->survey_s = 0;
+    known->survey_end_rel_ms = 0;
+    if (!s->maint || !s->survey.active) {
+        return;
+    }
+    int64_t end = s->survey.start_ms + ((int64_t)s->survey.survey_s + UM98X_SURVEY_GRACE_S) * 1000;
+    int64_t rel = end - s->maint_until_ms;
+    known->survey_active = true;
+    known->survey_complete = s->survey.complete;
+    known->lock_done = s->lock_done;
+    known->survey_s = s->survey.survey_s;
+    known->survey_end_rel_ms = rel < INT32_MIN ? INT32_MIN : (rel > INT32_MAX ? INT32_MAX : (int32_t)rel);
 }
 
 void stn_maint_boot(const stn_maint_boot_in_t *in, stn_maint_boot_t *out)
@@ -2140,6 +2268,8 @@ void stn_maint_boot(const stn_maint_boot_in_t *in, stn_maint_boot_t *out)
     out->from = from;
     out->left_ms = (uint32_t)((int64_t)r->left_ms - elapsed_ms);
     out->end_unix = out->elapsed_known ? 0 : r->end_unix;
+    /* The stored copy is written whichever record gives the time. */
+    out->known = in->store_ok && in->store.on && in->store_known;
 }
 
 void stn_maint_restore(stn_t *s, const stn_maint_boot_t *b, int64_t now_ms)
@@ -2164,6 +2294,22 @@ void stn_maint_restore(stn_t *s, const stn_maint_boot_t *b, int64_t now_ms)
     s->maint_end_unix = b->end_unix > 0 ? b->end_unix : 0;
 }
 
+void stn_maint_restore_survey(stn_t *s, const stn_maint_known_t *known)
+{
+    if (known == NULL || !known->valid || !known->survey_active || !s->maint || !s->maint_resumed) {
+        return;
+    }
+    int64_t end = s->maint_until_ms + known->survey_end_rel_ms;
+    memset(&s->survey, 0, sizeof(s->survey));
+    s->survey.active = true;
+    s->survey.complete = known->survey_complete;
+    s->survey.survey_s = known->survey_s;
+    s->survey.start_ms = end - ((int64_t)known->survey_s + UM98X_SURVEY_GRACE_S) * 1000;
+    s->lock_done = known->lock_done;
+    s->lock_retry_ms = STN_NEVER;
+    s->mode_poll_ms = STN_NEVER;
+}
+
 void stn_maint_clock(stn_t *s, int64_t utc_now, int64_t now_ms)
 {
     if (!s->maint || s->maint_end_unix <= 0 || utc_now <= 0) {
@@ -2176,8 +2322,14 @@ void stn_maint_clock(stn_t *s, int64_t utc_now, int64_t now_ms)
         left = 0;   /* its time ran out while the ESP32 was off: ends at the next step */
     }
     if (now_ms + left < s->maint_until_ms) {
+        int64_t cut = s->maint_until_ms - (now_ms + left);
         s->maint_until_ms = now_ms + left;
         s->maint_start_ms = s->maint_until_ms - (int64_t)s->maint_chosen_s * 1000;
+        /* A survey window restored with it (none starts during maintenance):
+         * the receiver surveyed on while the ESP32 was held in reset. */
+        if (s->survey.active) {
+            s->survey.start_ms -= cut;
+        }
     }
 }
 

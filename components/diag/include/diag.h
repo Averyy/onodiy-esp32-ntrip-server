@@ -90,8 +90,8 @@
  *    results are exempt too: one per session the user started, and the
  *    station writes it before it closes the session's own record, so a
  *    refused one would leave no trace of how the update ended. So is the
- *    power-on verdict (DIAG_EV_RX_BOOT): one per power-on boot, and the
- *    power-lost alert counts a boot only with it.
+ *    power-on verdict (DIAG_EV_RX_BOOT): one per power-on or brownout
+ *    boot, and the power-lost alert counts a power-on boot only with it.
  *    Records carry the uptime and, once a trusted clock is known
  *    (diag_set_utc, fed by the availability ledger), the UTC time.
  *    The journal is a timeline, not the boot history: the last 16 boots are
@@ -280,8 +280,8 @@ static inline int32_t diag_fixed_a(diag_fixed_ev_t ev, int32_t up_m)
 
 /** DIAG_EV_RX_BOOT `a`. */
 typedef enum {
-    DIAG_RX_BOOT_KEPT = 1,       /**< the receiver kept running: only the ESP32 was reset (its reset pin) */
-    DIAG_RX_BOOT_RESTARTED = 2,  /**< the receiver restarted with the ESP32: the power was cut */
+    DIAG_RX_BOOT_KEPT = 1,       /**< the receiver kept running: only the ESP32 was reset (its reset pin, or its own power dip) */
+    DIAG_RX_BOOT_RESTARTED = 2,  /**< the receiver restarted with the ESP32: the power was cut (or dipped) for both */
     DIAG_RX_BOOT_UNKNOWN = 3,    /**< nothing the receiver sent told within 30 s */
 } diag_rx_boot_t;
 

@@ -121,10 +121,23 @@
  * trusted clock, by that clock once there is one (stn_maint_clock). So
  * resumed maintenance never ends later than the time chosen (apart from
  * the time the ESP32 was held in reset while no clock tells it), and ends
- * at once when that time ran out meanwhile. A power-on boot whose receiver
- * restarted too (stn_rxboot_judge: RESTARTED) was a power cut: a
- * maintenance resumed at that boot and not extended since ends then
- * (stn_maint_power_cut). Kept, or unknown: it goes on.
+ * at once when that time ran out meanwhile. A power-on or brownout boot
+ * whose receiver restarted too (stn_rxboot_judge: RESTARTED) lost the power
+ * for both: a maintenance resumed at that boot and not extended since ends
+ * then (stn_maint_power_cut, stn_rxboot_follow). Kept, or unknown: it goes
+ * on.
+ *
+ * What the station knew of the receiver (stn_maint_known_t) goes into the
+ * stored copy too (version 2): its identity and the signal group it runs,
+ * the profile applied, the survey window, the fixed-position verdict, the
+ * alerts. Nothing is checked during maintenance, so that is what a
+ * maintenance without a reset still shows; a resumed one shows it until it
+ * ends (stn_maint_boot_t.known): the
+ * survey window goes back into the core (stn_maint_restore_survey; its end
+ * kept relative to maintenance's own end, so the copy's age and the time
+ * across the reset come off both alike), the rest is the caller's to report.
+ * Then the stream-first path checks the receiver as at boot. The copy is
+ * written whichever record gives the time, so it serves both.
  *
  * Power-on reset (stn_rxboot_judge): the ESP32-S3 reports a reset by its
  * EN pin (the USB serial chip's auto-reset that every flash uses, the RST
@@ -141,7 +154,14 @@
  * to boot: about 4.4 s from a RESET to its banner, 1.6 s more to data). The
  * earliest of these decides. Nothing within STN_RXBOOT_WINDOW_MS -> unknown
  * (counted as neither). Listening is enough for each of them: the verdict
- * also comes in receiver maintenance, where nothing is sent. PROVISIONAL,
+ * also comes in receiver maintenance, where nothing is sent. A brownout
+ * boot is judged the same way (stn_rxboot_judged): the ESP32's detector
+ * watches its own 3.3 V rail, and on our board each half has a regulator
+ * of its own on the shared USB 5 V (two LDOs, one per half: inferred from
+ * the board, not measured), so a dip of the 5 V input takes both down while
+ * one the ESP32's own load causes (Wi-Fi transmit peaks through its
+ * regulator) leaves the receiver running; the reset says only that the
+ * ESP32's rail dipped, the receiver's word says the rest. PROVISIONAL,
  * to be confirmed on hardware (the receiver's boot time after a real power
  * cut was not measured).
  *
@@ -864,18 +884,59 @@ void stn_maint_rtc_write(stn_maint_rtc_t *r, const stn_maint_rec_t *rec);
 /** Read the RTC record: false for a damaged or foreign one (random memory after a power cut). */
 bool stn_maint_rtc_read(const stn_maint_rtc_t *r, stn_maint_rec_t *rec);
 
-#define STN_MAINT_STORE_VERSION 1u
-#define STN_MAINT_STORE_MAX     32u   /**< buffer for the stored copy */
+/**
+ * What the station knew of the receiver when it wrote maintenance's stored
+ * copy ("Maintenance across an ESP32 reset"): during maintenance nothing is
+ * checked, so it stays what it was at entry (or at the resume).
+ */
+typedef struct {
+    bool valid;                  /**< false: nothing known (a copy of version 1, or an unreadable part) */
+    uint32_t profile_hash;       /**< the profile it is about (um98x_profile_hash): applied, verdict and alerts hold for it only */
+    um98x_info_t receiver;       /**< the receiver's identity (receiver.valid: identified) */
+    bool identity_confirmed;     /**< confirmed by a version query */
+    bool sg_valid;               /**< an apply session's read-back named the signal group the receiver runs */
+    uint8_t sg_master;
+    uint8_t sg_slave;
+    bool profile_applied;
+    uint32_t alerts;             /**< the alerts that stood (STN_ALERT_*; NO_RECEIVER, which is derived, left out) */
+    uint8_t fix_state;           /**< stn_fix_state_t: the fixed-position check */
+    float fix_horizontal_m;      /**< NEAR, FAR: the medians that decided */
+    float fix_up_m;
+    float fix_distance_m;
+    bool fix_height_only;
+    /* The survey window (stn_maint_known_survey, stn_maint_restore_survey). */
+    bool survey_active;          /**< a survey window was started */
+    bool survey_complete;
+    bool lock_done;              /**< its automatic lock was made (or given up) */
+    uint32_t survey_s;
+    int32_t survey_end_rel_ms;   /**< the window's end minus maintenance's end (the same before and after the reset) */
+} stn_maint_known_t;
+
+#define STN_MAINT_STORE_VERSION 2u
+#define STN_MAINT_STORE_MAX     256u  /**< buffer for the stored copy */
 
 /**
  * The stored copy (settings_codec: u8 version, u32 stamp, u32 left_ms, u32
- * chosen_s, i64 end_unix; newer writers may append). Only "on" is stored:
- * the copy is erased when maintenance ends. @return length, 0 if cap is short.
+ * chosen_s, i64 end_unix; version 2 adds u8 1 and what the station knew, or
+ * u8 0 without it; newer writers may append). Only "on" is stored: the copy
+ * is erased when maintenance ends. known may be NULL (nothing known).
+ * @return length, 0 if cap is short.
  */
-size_t stn_maint_store_encode(const stn_maint_rec_t *rec, uint8_t *buf, size_t cap);
+size_t stn_maint_store_encode(const stn_maint_rec_t *rec, const stn_maint_known_t *known, uint8_t *buf, size_t cap);
 
-/** Read the stored copy: false for an unreadable one. */
-bool stn_maint_store_decode(stn_maint_rec_t *rec, const uint8_t *buf, size_t len);
+/**
+ * Read the stored copy: false for an unreadable one. known (optional) gets
+ * what the station knew, valid false for a copy without it (version 1) or
+ * with an unreadable one (the time left still counts: hands off comes
+ * first).
+ */
+bool stn_maint_store_decode(stn_maint_rec_t *rec, stn_maint_known_t *known, const uint8_t *buf, size_t len);
+
+/**
+ * The survey window into known (its other fields are the caller's), while
+ * maintenance is on; survey_active false otherwise.
+ */
+void stn_maint_known_survey(const stn_t *s, stn_maint_known_t *known);
 
 /** Where a boot's maintenance resumes from. */
 typedef enum {
@@ -893,6 +954,7 @@ typedef struct {
     uint64_t rtc_now_us;     /**< the RTC timer now */
     bool store_ok;           /**< the stored copy is intact and from the run right before this boot */
     stn_maint_rec_t store;
+    bool store_known;        /**< ... and it carried what the station knew (stn_maint_known_t valid) */
     int64_t uptime_ms;       /**< this boot's run time so far: the least the reset took */
 } stn_maint_boot_in_t;
 
@@ -901,6 +963,8 @@ typedef struct {
     uint8_t from;            /**< stn_maint_from_t */
     bool expired;            /**< it was on, but its time ran out across the reset */
     bool elapsed_known;      /**< the time across the reset is known (the RTC timer) */
+    bool known;              /**< from != NONE and the stored copy (of this maintenance: "on") carried what the station knew:
+                                  the caller shows it until maintenance ends, stn_maint_restore_survey takes the survey */
     uint32_t left_ms;        /**< from != NONE: time left now */
     uint32_t chosen_s;       /**< from != NONE or expired: the chosen duration, extensions added */
     int64_t end_unix;        /**< from != NONE: to check by the trusted clock (0 = no need, or none known) */
@@ -917,17 +981,30 @@ void stn_maint_boot(const stn_maint_boot_in_t *in, stn_maint_boot_t *out);
 void stn_maint_restore(stn_t *s, const stn_maint_boot_t *b, int64_t now_ms);
 
 /**
+ * The survey window the station had before the reset, back into the core
+ * after stn_maint_restore (b->known): its end as far before or after
+ * maintenance's end as it was, so it runs on as in a maintenance without a
+ * reset, and after maintenance the station goes on with it (the boot
+ * read-back of the base mode then finds it open and starts no new one).
+ * Nothing without a resumed maintenance, or when no survey window was
+ * started.
+ */
+void stn_maint_restore_survey(stn_t *s, const stn_maint_known_t *known);
+
+/**
  * The trusted clock (UTC s, 0 = none yet) against a resumed maintenance's
  * end by the clock (maint_end_unix): it never ends later than that, and when
  * that end has passed it ends at the next step (its time was up). Applied
- * once, at the first trusted clock.
+ * once, at the first trusted clock. A survey window restored with it moves
+ * as much (the receiver surveyed on while the ESP32 was held in reset).
  */
 void stn_maint_clock(stn_t *s, int64_t utc_now, int64_t now_ms);
 
 /**
- * A power-on boot's verdict: the receiver restarted with the ESP32 (the power
- * was cut). A maintenance resumed at this boot and not extended since ends
- * (STN_MAINT_END_POWER; the stream-first path, as at boot).
+ * A power-on or brownout boot's verdict: the receiver restarted with the
+ * ESP32 (the power was lost for both; stn_rxboot_follow). A maintenance
+ * resumed at this boot and not extended since ends (STN_MAINT_END_POWER;
+ * the stream-first path, as at boot).
  * @return true if it ended.
  */
 bool stn_maint_power_cut(stn_t *s, const stn_in_t *in);
@@ -1073,7 +1150,7 @@ bool stn_responding(const stn_t *s, int64_t now_ms, uint32_t rtcm_age_ms, int64_
 /** CONFIG_FAILED backoff: delay after the n-th failure in a row (n >= 1), ms. */
 int64_t stn_apply_backoff_ms(uint32_t failures);
 
-/* ---- power-on reset: did the receiver keep running? -------------------------- */
+/* ---- power-on or brownout reset: did the receiver keep running? ------------- */
 
 #define STN_RXBOOT_WINDOW_MS 30000   /**< evidence counts this long after the ESP32's start */
 #define STN_RXBOOT_DATA_MS   3500    /**< RTCM or NMEA this soon after the ESP32's start: the receiver was running */
@@ -1081,8 +1158,8 @@ int64_t stn_apply_backoff_ms(uint32_t failures);
 
 typedef enum {
     STN_RXBOOT_PENDING = 0,  /**< no evidence yet */
-    STN_RXBOOT_KEPT,         /**< the receiver kept running: only the ESP32 was reset (its reset pin) */
-    STN_RXBOOT_RESTARTED,    /**< the receiver restarted with the ESP32: the power was cut */
+    STN_RXBOOT_KEPT,         /**< the receiver kept running: only the ESP32 was reset (its reset pin, or its own power dip) */
+    STN_RXBOOT_RESTARTED,    /**< the receiver restarted with the ESP32: the power was cut (or dipped) for both */
     STN_RXBOOT_UNKNOWN,      /**< nothing told within STN_RXBOOT_WINDOW_MS */
 } stn_rxboot_t;
 
@@ -1103,11 +1180,32 @@ typedef struct {
 } stn_rxboot_in_t;
 
 /**
- * The verdict for a power-on boot (see "Power-on reset" above). Final once it
- * is not PENDING: the caller judges until then and keeps the first verdict.
+ * The verdict for a power-on or brownout boot (see "Power-on reset" above).
+ * Final once it is not PENDING: the caller judges until then and keeps the
+ * first verdict.
  * @param by out (optional): which evidence decided.
  */
 stn_rxboot_t stn_rxboot_judge(const stn_rxboot_in_t *in, stn_rxboot_by_t *by);
+
+/** The reset this boot follows, as far as the receiver's verdict goes. */
+typedef enum {
+    STN_RXBOOT_RESET_OTHER = 0,  /**< software, crash, watchdog...: the supply was not touched, nothing to judge */
+    STN_RXBOOT_RESET_POWER_ON,   /**< power-on class: a power cut, or on the ESP32-S3 its EN pin */
+    STN_RXBOOT_RESET_BROWNOUT,   /**< the ESP32's own rail dipped below its brownout level */
+} stn_rxboot_reset_t;
+
+/** Whether such a boot waits for the receiver's word (power-on and brownout). */
+bool stn_rxboot_judged(stn_rxboot_reset_t reset);
+
+/** What a verdict leads to. */
+typedef struct {
+    bool maint_ends;   /**< the receiver restarted with the ESP32, so the power was lost for both: a maintenance resumed at
+                            this boot ends (stn_maint_power_cut) */
+    bool power_kept;   /**< the gap before this boot was no power-off time (the ledger): a power-on boot whose receiver kept
+                            running was the EN pin's; a brownout is the ESP32's own power dip whatever the receiver did */
+} stn_rxboot_follow_t;
+
+void stn_rxboot_follow(stn_rxboot_reset_t reset, stn_rxboot_t verdict, stn_rxboot_follow_t *out);
 
 /** A checksum-valid text line that is an NMEA sentence ('$', five capitals, ','), not a command-layer line. */
 bool stn_line_is_nmea(const char *line, size_t len);
