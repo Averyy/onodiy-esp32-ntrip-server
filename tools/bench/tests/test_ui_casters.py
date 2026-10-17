@@ -14,8 +14,10 @@ where. Other cases build a caster card's parts (the duplicate-stream
 warning, the connection details), the Status page and the no-receiver
 panel, and run the setup's Onocoy step against scripted answers (events
 bubble up through the parents there) and Diagnostics' "Clear journal"
-against the station's answers to it. Skipped when Node.js is not
-installed.
+against the station's answers to it. The Receiver pages are built whole
+against scripted answers (patch() works on this DOM too: children know
+their parent and siblings, and a node appended elsewhere moves). Skipped
+when Node.js is not installed.
 """
 
 from __future__ import annotations
@@ -39,9 +41,23 @@ const files = fs.readdirSync(dir).filter(f => f.endsWith('.js') && f !== '99-mai
 const src = files.map(f => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n');
 const noop = () => {};
 
-class Node {}
+class Node {
+  get parentNode() { return this.parent || null; }
+  get nextSibling() {
+    const k = this.parent ? this.parent.kids : [];
+    const i = k.indexOf(this);
+    return i >= 0 && i + 1 < k.length ? k[i + 1] : null;
+  }
+  remove() {
+    if (this.parent) this.parent.kids = this.parent.kids.filter(k => k !== this);
+    this.parent = null;
+  }
+}
 class Text extends Node {
   constructor(t) { super(); this.nodeType = 3; this.data = t; }
+  get nodeName() { return '#text'; }
+  get nodeValue() { return this.data; }
+  set nodeValue(v) { this.data = String(v); }
   get textContent() { return this.data; }
 }
 class El extends Node {
@@ -55,14 +71,36 @@ class El extends Node {
   append(...kids) {
     for (const k of kids) {
       const n = k instanceof Node ? k : new Text(String(k));
+      if (n.parent) n.remove();
       n.parent = this;
       this.kids.push(n);
     }
   }
   appendChild(k) { this.append(k); return k; }
-  prepend(...kids) { this.kids.unshift(...kids.map(k => (k instanceof Node ? k : new Text(String(k))))); }
+  prepend(...kids) {
+    const nodes = kids.map(k => (k instanceof Node ? k : new Text(String(k))));
+    for (const n of nodes) {
+      if (n.parent) n.remove();
+      n.parent = this;
+    }
+    this.kids.unshift(...nodes);
+  }
   replaceChildren(...kids) { this.kids = []; this.append(...kids); }
-  remove() {}
+  replaceChild(n, old) {
+    if (n.parent) n.remove();
+    const i = this.kids.indexOf(old);
+    n.parent = this;
+    if (i < 0) this.kids.push(n);
+    else {
+      this.kids[i] = n;
+      old.parent = null;
+    }
+    return old;
+  }
+  get nodeName() { return this.tagName; }
+  get firstChild() { return this.kids[0] || null; }
+  get children() { return this.kids.filter(k => k instanceof El); }
+  get attributes() { return Object.keys(this.attrs).map(name => ({ name: name, value: this.attrs[name] })); }
   addEventListener(type, fn) { (this.on[type] = this.on[type] || []).push(fn); }
   removeEventListener() {}
   /* bubble: the event goes up through the parents too, as an input or click event does in a page. */
@@ -75,7 +113,10 @@ class El extends Node {
   removeAttribute(k) { delete this.attrs[k]; }
   hasAttribute(k) { return k in this.attrs; }
   get textContent() { return this.kids.map(c => c.textContent).join(''); }
-  set textContent(t) { this.kids = t === '' || t === null || t === undefined ? [] : [new Text(String(t))]; }
+  set textContent(t) {
+    this.kids = t === '' || t === null || t === undefined ? [] : [new Text(String(t))];
+    for (const k of this.kids) k.parent = this;
+  }
   get options() { return this.kids.filter(c => c.tagName === 'OPTION'); }
   get value() {
     if (this.tagName !== 'SELECT') return this.v;
@@ -117,12 +158,13 @@ const ctx = {
   document: { addEventListener: noop, removeEventListener: noop,
               getElementById: id => ids[id] || (ids[id] = new El('div')), createElement: t => new El(t),
               createElementNS: (ns, t) => new El(t), createTextNode: t => new Text(t), querySelector: () => new El('div'),
+              createDocumentFragment: () => new El('#fragment'),
               querySelectorAll: () => [], documentElement: new El('html'), body: new El('body'), hidden: false,
               visibilityState: 'visible' },
   window: { addEventListener: noop, removeEventListener: noop,
             matchMedia: () => ({ matches: false, addEventListener: noop }), confirm: () => true,
             scrollTo: noop },
-  addEventListener: noop, location: { pathname: '/', hash: '', reload: noop }, navigator: {},
+  addEventListener: noop, location: { pathname: '/', hash: '', reload: noop }, navigator: {}, history: { replaceState: noop },
   localStorage: storage, sessionStorage: storage,
   setTimeout: (fn, ms) => { timers.push(ms); return 0; }, clearTimeout: noop, setInterval: noop, clearInterval: noop,
   AbortController: globalThis.AbortController, TextEncoder: globalThis.TextEncoder, crypto: globalThis.crypto,
@@ -143,7 +185,7 @@ vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { casterEditor, openCasterWarning, casterDetails, casterSummary, casterChip, stationState, adminDashboard,\n' +
   '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard, healthCard, chipCard, signalsHead, bandTable, kv,\n' +
-  '  startLines, foldRows, receiverDetails,\n' +
+  '  startLines, foldRows, diagReceiverCard, receiverPage,\n' +
   '  setStatus: s => { S.status = s; }, setSession: s => { S.session = s; } };\n})()',
   ctx);
 
@@ -369,6 +411,62 @@ function healthView(c) {
     none: v.some(e => e.tagName === 'P' && e.textContent === 'No alerts.') };
 }
 
+/* What a page shows (el): the cards' titles, the <details> anywhere in it, the small headings, the field names, the
+ * buttons, the label/value rows, the paragraphs, the table rows (their cells' text) and the numbered list's items. */
+function pageParts(el) {
+  const v = [...visible(el)];
+  const pairs = [];
+  for (const dl of v.filter(e => e.tagName === 'DL')) {
+    for (let i = 0; i + 1 < dl.kids.length; i += 2) pairs.push([dl.kids[i].textContent, dl.kids[i + 1].textContent]);
+  }
+  const card = e => e.tagName === 'SECTION' && (' ' + e.className + ' ').indexOf(' card ') >= 0;
+  return {
+    details: [...el.walk()].filter(e => e.tagName === 'DETAILS').length,
+    cards: v.filter(card).map(c => (([...visible(c)].find(e => e.tagName === 'H2') || {}).textContent || null)),
+    subs: v.filter(e => e.tagName === 'H3').map(e => e.textContent),
+    fields: v.filter(e => e.tagName === 'SPAN' && e.className === 'lbl').map(e => e.textContent),
+    buttons: v.filter(e => e.tagName === 'BUTTON' || (e.tagName === 'A' && (e.className || '').indexOf('btn') === 0)).map(e => e.textContent),
+    rows: pairs,
+    lines: v.filter(e => e.tagName === 'P').map(e => e.textContent),
+    trs: v.filter(e => e.tagName === 'TR').map(tr => tr.kids.map(k => k.textContent).join(' | ')),
+    lis: v.filter(e => e.tagName === 'LI' && e.parent.tagName === 'OL').length,
+  };
+}
+
+/* A Receiver page (c.arg: '' the page, 'settings' Receiver settings, 'live' the page with the sky as it is) for the
+ * status c.status and the station's answers: c.gnss (GET /api/gnss), c.sig (its signals), c.test (the comparison),
+ * c.live (the live view), c.preview (the held configuration's commands). What it shows (pageParts); with c.confirm,
+ * also what the held configuration's dialog shows once "Configure the receiver now" is pressed. */
+async function receiverPageView(c) {
+  const settle = async () => {
+    for (let i = 0; i < 60; i++) await new Promise(r => setImmediate(r));
+  };
+  routes = (m, p) => {
+    const path = p.split('?')[0];
+    if (path === '/api/gnss') return [200, c.gnss];
+    if (path === '/api/gnss/signals') return [200, c.sig];
+    if (path === '/api/gnss/signal-test') return [200, c.test || { state: 'idle', groups: null, results: null, outcome: null }];
+    if (path === '/api/gnss/live') return [200, c.live || { window: { open: false, last_end: 'none' } }];
+    if (path === '/api/gnss/apply/preview') return [200, c.preview || { steps: [] }];
+    return [200, {}];
+  };
+  ui.setStatus(c.status);
+  ids.modal = new El('div');
+  const el = new El('div');
+  const view = ui.receiverPage(el, c.arg);
+  await settle();
+  const r = pageParts(el);
+  if (c.confirm) {
+    [...visible(el)].find(e => e.tagName === 'BUTTON' && e.textContent === 'Configure the receiver now').fire('click');
+    await settle();
+    r.dialog = pageParts(ids.modal);
+  }
+  view.destroy();
+  routes = null;
+  ui.setStatus(null);
+  return r;
+}
+
 /* The Receiver page's Signals card for c.sig (GET /api/gnss/signals) while corrections come (c.live), with c.master the
  * main antenna's signal group the receiver runs (GET /api/gnss; null while unknown): its headline, the
  * hints (tone, text), the words only assistive technology reads, and whether the band table shows. */
@@ -400,6 +498,10 @@ for (const c of JSON.parse(casesJson)) {
   }
   if (c.fn === 'signals') {
     out.push(signalsView(c));
+    continue;
+  }
+  if (c.fn === 'rx_page') {
+    out.push(await receiverPageView(c));
     continue;
   }
   if (c.fn === 'chip') {
@@ -527,8 +629,8 @@ for (const c of JSON.parse(casesJson)) {
     continue;
   }
   if (c.fn === 'rx_details') {
-    /* The Receiver card's Details: every row as [label, text]. */
-    const all = ui.receiverDetails(c.g).filter(Boolean).flatMap(k => [...k.walk()]);
+    /* Diagnostics' Receiver card: every row as [label, text]. */
+    const all = [...ui.diagReceiverCard(c.g).walk()];
     const pairs = [];
     for (const dl of all.filter(e => e.tagName === 'DL')) {
       for (let i = 0; i + 1 < dl.kids.length; i += 2) pairs.push([dl.kids[i].textContent, dl.kids[i + 1].textContent]);
@@ -1191,16 +1293,178 @@ def test_use_plain_port_keeps_its_spinner_and_focus_across_the_refresh():
     assert bad["during"] == ["btn small busy", "true", False] and bad["after"] == ["btn small", None, False]
 
 
+# A maintenance resumed with nothing kept of the receiver (GET /api/gnss).
+MAINT_G = {"state": "idle", "maintenance": {"on": True}, "identity_confirmed": False, "responding": True,
+           "receiver": {"valid": False}, "link": {"mode": "stream", "baud": 115200, "rx_bytes": 100, "rx_age_ms": 200},
+           "position": {"source": "none"}, "arp": {"valid": False}}
+
+
 def test_receiver_details_say_nothing_was_checked_in_a_maintenance_with_nothing_kept():
-    """A maintenance resumed with nothing kept of the receiver: the card says once that it is not checked, so the
+    """Diagnostics' Receiver card in a maintenance resumed with nothing kept of the receiver: it is not checked, so the
     identity row reads as unchecked (a dash, like the fixed-position row), not a "No" that reads as a failed check.
     Outside maintenance, or with the identity kept, the row says Yes or No as before."""
-    g = {"state": "idle", "maintenance": {"on": True}, "identity_confirmed": False, "responding": True,
-         "receiver": {"valid": False}, "link": {"mode": "stream", "baud": 115200, "rx_bytes": 100, "rx_age_ms": 200},
-         "position": {"source": "none"}, "arp": {"valid": False}}
+    g = MAINT_G
     unchecked, kept, plain = run_editor([{"fn": "rx_details", "g": g},
                                          {"fn": "rx_details", "g": {**g, "identity_confirmed": True}},
                                          {"fn": "rx_details", "g": {**g, "maintenance": {"on": False}}}])
     assert dict(unchecked)["Identity confirmed"] == "\u2013" and dict(unchecked)["Answers"] == "Yes"
     assert dict(kept)["Identity confirmed"] == "Yes"
     assert dict(plain)["Identity confirmed"] == "No"
+
+
+# ---- The Receiver pages: everything shown, no fold-outs ----
+
+RX = {"valid": True, "model": "UM982", "firmware": "R4.10Build25164", "build": 25164, "serial": "TEST0001", "pn": "PN-TEST",
+      "efuse_id": "EFUSE-TEST", "compile_date": "2025/06/13"}
+# GET /api/gnss of a streaming station whose surveyed position is locked (a fixed base at it), as API.md shows it.
+GNSS = {"state": "streaming", "receiver": RX, "responding": True, "restarting": False, "identity_confirmed": True, "alerts": [],
+        "profile_applied": True, "profile_acknowledged": True, "rtcm_differs": False, "rtcm1230_supported": True,
+        "config_failed": False, "config_retry_in_s": 0, "config_auto_retry": True, "detect_failures": 0,
+        "link": {"baud": 115200, "mode": "stream", "rx_bytes": 1000, "rx_age_ms": 12, "rtcm_age_ms": 180, "open": True},
+        "autocfg": True, "recovery": "full", "first_apply_held": False,
+        "profile": {"signal_group_master": 3, "signal_group_slave": 6, "base_mode": "fixed", "survey_in_s": 0,
+                    "fixed": {"lat_deg": 45.1, "lon_deg": -75.1, "height_m": 85.1}, "station_id": 1234, "com1_baud": 115200,
+                    "rtcm": [{"msg": 1005, "period_s": 1}, {"msg": 1077, "period_s": 1}], "sat_view_output": False,
+                    "antenna_model": "", "antenna_serial": "", "antenna_setup_id": 0},
+        "rx_settings": {"valid": True, "age_s": 3600, "read_unix": None, "b1cb2a": "on", "mmp": "off", "mask_deg": 10.0,
+                        "antenna": {"model": "", "serial": "", "setup_id": 0}},
+        "apply_steps": {"antenna": {"sent": False, "ok": False, "reply": None},
+                        "b1cb2a": {"sent": True, "ok": True, "reply": None}},
+        "rtcm1033": {"valid": True, "station_id": 1234, "antenna": "", "setup_id": 0, "antenna_serial": "",
+                     "receiver_type": "UM982", "receiver_fw": "R4.10Build25164", "receiver_serial": "TEST0001",
+                     "age_ms": 400, "bad_frames": 0},
+        "maintenance": {"on": False}, "rx_signal_group": {"master": 3, "slave": 6}, "rx_bands": {"state": "unknown"},
+        "signal_group_refused": None,
+        "position": {"locked": True, "source": "survey", "lat_deg": 45.1, "lon_deg": -75.1, "height_m": 85.1,
+                     "sigma_m": 0.012, "locked_unix": 1759000000},
+        "survey": {"active": False, "window_left_s": 0, "unfinished": False}, "fixed_check": {"state": "none"},
+        "arp": {"valid": True, "station_id": 1234, "lat_deg": 45.1, "lon_deg": -75.1, "height_m": 85.1, "age_ms": 800,
+                "offset_m": 0.002}}
+SIG_MSGS = {**SIG, "messages": [{"msg": 1005, "count": 900, "frames": 900, "period_ms": 1000, "age_ms": 400, "expected_period_s": 1},
+                                {"msg": 1077, "count": 900, "frames": 900, "period_ms": 1000, "age_ms": 400, "expected_period_s": 1}]}
+# The receiver answers but sends nothing (no antenna): no corrections, the survey paused, no messages seen.
+NOANT_ST = st_status(receiver={"rtcm_age_ms": None, "best_sys": None, "best_bands": 0, "responding": True},
+                     health={"level": "failed", "recovery_mode": "alerts_only"}, alerts=[{"id": "no_rtcm", "source": "health"}],
+                     casters=[st_caster(0, "Onocoy", "wait_data")])
+NOANT_G = {**GNSS, "autocfg": False, "recovery": "alerts_only", "profile_applied": False,
+           "profile": {**GNSS["profile"], "base_mode": "survey_in", "survey_in_s": 600, "fixed": None},
+           "position": {"locked": False, "source": "none"}, "survey": {"active": False, "window_left_s": 0, "unfinished": True},
+           "arp": {"valid": False}, "rtcm1033": {"valid": False, "bad_frames": 0}}
+NOANT_SIG = {**SIG, "best_sys": None, "best_bands": 0, "epoch_age_ms": None, "systems": [],
+             "messages": [{**m, "count": 0, "frames": 0, "period_ms": None, "age_ms": None} for m in SIG_MSGS["messages"]]}
+
+
+def sgt_result(m: int, s: int, status: str, best: str, systems: list) -> dict:
+    return {"group": {"master": m, "slave": s}, "status": status, "measured_s": 1800 if status == "done" else 640,
+            "samples": 180, "epoch_gaps": 0, "best_sys": best, "best_bands": 4, "systems": systems}
+
+
+GAL = {"sys": "galileo", "satellites": 10.9, "bands": ["l1", "l2", "l5", "l6"],
+       "per_band": [{"band": b, "satellites": 10.9, "cnr_dbhz": c, "signal_ids": [2]} for b, c in
+                    (("l1", 44.6), ("l2", 42.8), ("l5", 44.7), ("l6", 41.2))]}
+BDS = {"sys": "beidou", "satellites": 11.8, "bands": ["l1", "l2", "l5", "l6"],
+       "per_band": [{"band": b, "satellites": 11.8, "cnr_dbhz": 43.0, "signal_ids": [2]} for b in ("l1", "l2", "l5", "l6")]}
+SGT_RUN = {"state": "measuring", "groups": [{"master": 3, "slave": 6}, {"master": 7, "slave": 0}],
+           "before": {"master": 3, "slave": 6}, "phase": 1, "phase_s": 1800, "settle_s": 60, "left_s": 1160,
+           "decide_left_s": None, "running_group": {"master": 7, "slave": 0},
+           "results": [sgt_result(3, 6, "done", "galileo", [GAL]), sgt_result(7, 0, "measuring", "beidou", [BDS])],
+           "outcome": None, "kept": None, "reason": "", "ended_unix": None}
+SGT_DONE = {**SGT_RUN, "state": "deciding", "phase": None, "left_s": None, "decide_left_s": 84000,
+            "results": [sgt_result(3, 6, "done", "galileo", [GAL]), sgt_result(7, 0, "done", "beidou", [BDS])]}
+LIVE = {"window": {"open": True, "left_s": 540, "max_min": 60, "default_min": 10, "sky": "on", "sky_why": "none", "last_end": "none"},
+        "totals": {"satellites": 2, "tracked": 2, "with_pos": 2, "dropped": 0, "cnr_dbhz": 43, "msm_age_ms": 400,
+                   "bands": {"l1": {"satellites": 2, "cnr_dbhz": 44}}, "systems": []},
+        "satellites": [{"sys": "gps", "prn": 12, "cnr_dbhz": {"l1": 44}, "el_deg": 45, "az_deg": 210},
+                       {"sys": "galileo", "prn": 5, "cnr_dbhz": {"l1": 41}, "el_deg": 30, "az_deg": 90}]}
+PREVIEW = {"steps": [{"text": "VERSIONA", "kind": "query", "when": "always", "saved": False},
+                     {"text": "CONFIG SIGNALGROUP 3 6", "kind": "write", "when": "if_differs", "saved": True},
+                     {"text": "SAVECONFIG", "kind": "write", "when": "always", "saved": True}], "saveconfig": True}
+
+
+def rx_page(arg: str, status: dict, gnss: dict, sig: dict, **kw) -> dict:
+    return {"fn": "rx_page", "arg": arg, "status": status, "gnss": gnss, "sig": sig, **kw}
+
+
+def test_receiver_pages_show_everything_without_fold_outs():
+    """The Receiver page, its live address and Receiver settings, built whole in the states the other tests build
+    (streaming with a locked position and four bands, no antenna, a maintenance resumed with nothing kept, the held
+    first configuration, no receiver, a comparison running and one waiting for a choice): no <details> anywhere, nor in the held
+    configuration's dialog. What the folds held is in plain view where it matters: the position in its own card,
+    the messages in the Receiver card (once any arrived), every satellite while the sky is open, the profile's
+    advanced settings, the comparison's form while idle (only why while a start would be refused) and its results
+    (each band's C/N0 inline) while it runs."""
+    maint_st = st_status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600})
+    norx_st = st_status(receiver={"state": "no_receiver", "rtcm_age_ms": None},
+                        alerts=[{"id": "no_receiver", "source": "station", "saw_bytes": False, "next_detect_in_s": 90}])
+    held_g = {**GNSS, "first_apply_held": True, "autocfg": False, "profile_applied": False, "profile_acknowledged": False}
+    run_st = st_status(receiver={"signal_test": {"state": "measuring", "phase": 1, "left_s": 1160}})
+    done_st = st_status(receiver={"signal_test": {"state": "deciding", "decide_left_s": 84000}})
+    cases = {
+        "stream": rx_page("", st_status(), GNSS, SIG_MSGS),
+        "live": rx_page("live", st_status(), GNSS, SIG_MSGS, live=LIVE),
+        "noant": rx_page("", NOANT_ST, NOANT_G, NOANT_SIG),
+        "maint": rx_page("", maint_st, {**GNSS, **MAINT_G, "profile": NOANT_G["profile"], "survey": {"active": False}}, NOANT_SIG),
+        "norx": rx_page("", norx_st, {**GNSS, "state": "no_receiver"}, NOANT_SIG),
+        "held": rx_page("", st_status(), held_g, SIG_MSGS, preview=PREVIEW, confirm=True),
+        "settings": rx_page("settings", st_status(), GNSS, SIG_MSGS),
+        "settings_noant": rx_page("settings", NOANT_ST, NOANT_G, NOANT_SIG),
+        "running": rx_page("settings", run_st, GNSS, SIG_MSGS, test=SGT_RUN),
+        "deciding": rx_page("settings", done_st, GNSS, SIG_MSGS, test=SGT_DONE),
+    }
+    out = dict(zip(cases, run_editor(list(cases.values()))))
+    assert {k: v["details"] for k, v in out.items()} == {k: 0 for k in cases}
+    assert out["held"]["dialog"]["details"] == 0
+
+    stream = out["stream"]
+    assert stream["cards"] == ["Receiver", "Position", "Signals"]
+    rows = dict(stream["rows"])
+    assert rows["Model"] == "UM982 \u00b7 R4.10Build25164" and rows["Source"] == "Survey-in"
+    assert rows["Latitude"].startswith("45.1") and rows["Sent to casters"] == "This position"
+    assert "Locked. If the antenna moves, survey again." in stream["lines"]
+    assert "Messages" in stream["subs"] and any(r.startswith("1005 Station position") for r in stream["trs"])
+    assert "Survey again" in stream["buttons"] and "Receiver settings" in stream["buttons"]
+    # Diagnostics' rows, not here.
+    assert not {"Link", "Part number", "Chip ID", "Answers", "Identity confirmed", "Epochs"} & set(rows)
+
+    # The sky as it is: every satellite listed under the table, nothing to open first.
+    live = out["live"]
+    assert any(r.startswith("G12") for r in live["trs"]) and any(r.startswith("E05") for r in live["trs"])
+    assert not any("Show all" in b for b in live["buttons"])
+
+    # Nothing known about the position but its line: a row of the Receiver card, no card of its own.
+    noant = out["noant"]
+    assert noant["cards"] == ["Receiver", "Signals"]
+    assert dict(noant["rows"])["Position"] == "Surveying, paused while no corrections arrive."
+    # No message ever arrived: the card's line says so, no table of "Never".
+    assert "Messages" not in noant["subs"] and not any(r.startswith("1005") for r in noant["trs"])
+
+    # Not checked during maintenance and no position: the Receiver card alone says so.
+    assert out["maint"]["cards"] == ["Receiver", "Signals"]
+    # No receiver: its panel, no position (a stale fact), no messages and no signals.
+    norx = out["norx"]
+    assert norx["cards"] == ["Receiver"] and "Check again" in norx["buttons"] and "Messages" not in norx["subs"]
+    assert not norx["rows"]
+
+    held = out["held"]
+    assert held["cards"][0] == "Receiver not configured yet" and "Commands it will send" in held["subs"] and held["lis"] == 3
+    assert "3 commands, 2 of which change the receiver." in held["dialog"]["lines"]
+
+    settings = out["settings"]
+    assert settings["cards"] == ["Position", "Receiver profile", "Receiver management", "Compare two signal groups"]
+    assert settings["subs"] == ["Signals", "Corrections", "Advanced"]
+    assert {"Station ID", "Receiver link speed (COM1)", "Group A", "Group B", "Time per group"} <= set(settings["fields"])
+    assert "Start comparison" in settings["buttons"] and "Apply again" in settings["buttons"]
+    assert any(t.startswith("Tries two signal groups") for t in settings["lines"])
+    # A start the station would refuse: why, beside Start, without the form.
+    blocked = out["settings_noant"]
+    assert "Group A" not in blocked["fields"] and "Start comparison" in blocked["buttons"]
+
+    running = out["running"]
+    assert "Group A" not in running["fields"] and not any(t.startswith("Tries two") for t in running["lines"])
+    # Each band's C/N0 inline; on a phone a cell wraps only between its parts, each ending with its dot.
+    assert ("Galileo | 10.9 satellites\u00a0\u00b7 4 bandsL1 44.6\u00a0\u00b7 L2 42.8\u00a0\u00b7 L5 44.7\u00a0\u00b7 L6 41.2 | "
+            "\u2013") in running["trs"]
+    assert "Figures: mean C/N0 per band, in dB-Hz." in running["lines"] and "Stop" in running["buttons"]
+    deciding = out["deciding"]
+    assert {"Keep 3 6 (Galileo E6)", "Keep 7 0 (BeiDou B2a)"} <= set(deciding["buttons"])
+

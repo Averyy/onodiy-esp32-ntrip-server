@@ -3,15 +3,15 @@
  * SPDX-License-Identifier: MIT
  *
  * Receiver page (#/receiver): the receiver (state, model, configuration,
- * the base position with Lock or Survey again, problems as messages; the
- * link, identity and position behind Details), then the signals
+ * problems as messages, the messages it sends), its base position (where,
+ * the checks, the map on request, Lock or Survey again), then the signals
  * (65-signals.js) with the sky on request (66-live.js).
  * Receiver settings (#/receiver/settings): the base position, the receiver
- * profile (signals, corrections, antenna, more options), receiver
- * management (who configures the receiver and what happens if corrections
- * stop), then folded: the comparison of two signal groups and what the
- * receiver read back and publishes. Receiver maintenance (hands off) is in
- * Settings, next to the receiver update (70-updates.js).
+ * profile (signals, corrections, advanced), receiver management (who
+ * configures the receiver and what happens if corrections stop) and the
+ * comparison of two signal groups. What the receiver read back and what it
+ * publishes are on Diagnostics (80-diag.js). Receiver maintenance (hands
+ * off) is in Settings, next to the receiver update (70-updates.js).
  * Field rules mirror PUT /api/gnss/profile; the station's own validation
  * has the last word.
  */
@@ -46,18 +46,6 @@ function fmtDist(m) {
   if (a < 1) return (a * 100).toFixed(1) + NB + 'cm';
   if (a < 1000) return a.toFixed(a < 10 ? 2 : 1) + NB + 'm';
   return (a / 1000).toFixed(1) + NB + 'km';
-}
-
-/** Whether a disclosure in el is open (a rebuild keeps what the user left it at). */
-function isOpen(el, cls) {
-  return !!el.querySelector('details.' + cls + '[open]');
-}
-
-/** A disclosure with a class of its own (isOpen() finds it again). */
-function moreAs(cls, summary, open, ...kids) {
-  const d = disclosure(summary, open, kids);
-  d.classList.add(cls);
-  return d;
 }
 
 /**
@@ -102,62 +90,8 @@ function positionActions(done) {
   };
 }
 
-/** When the settings were read back: "at 9:06", an older read with its date, or its age. */
-function readWhen(rs) {
-  if (rs.read_unix) {
-    const d = new Date(rs.read_unix * 1000);
-    return Date.now() - d.getTime() < 20 * 3600000 ?
-      'at ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : 'on ' + fmt.time(rs.read_unix);
-  }
-  return rs.age_s !== null && rs.age_s !== undefined ? fmt.dur(rs.age_s) + ' ago' : '';
-}
-
-const SETTING = { on: 'On', off: 'Off', unknown: 'Unknown' };
-
-/* The receiver's settings as read back at the last configuration, and the antenna and B1C/B2a steps of it. */
-function readBack(g) {
-  const rs = g.rx_settings || {};
-  const steps = g.apply_steps || {};
-  const a = steps.antenna || {}, b = steps.b1cb2a || {};
-  const ant = rs.antenna;
-  const sent = [
-    a.sent ? ['Antenna name sent', a.ok ? h('span', { class: 't-ok' }, 'accepted') :
-      h('span', { class: 't-bad' }, 'antenna model rejected: ' + (a.reply || 'no reason given'))] : null,
-    b.sent ? ['B1C/B2a turned on', b.ok ? h('span', { class: 't-ok' }, 'accepted') :
-      h('span', { class: 't-bad' }, 'rejected: ' + (b.reply || 'no reason given'))] : null,
-  ];
-  return [
-    h('h3', { class: 'sub' }, 'Read from the receiver' + (rs.valid && readWhen(rs) ? ' ' + readWhen(rs) : '')),
-    rs.valid ? kv([
-      ['BeiDou B1C/B2a output', lbl(SETTING, rs.b1cb2a || 'unknown')],
-      ['Multipath mitigation', lbl(SETTING, rs.mmp || 'unknown')],
-      ['Elevation mask', rs.mask_deg === null || rs.mask_deg === undefined ? 'Unknown' : Number(rs.mask_deg).toFixed(1) + '°'],
-      ['Antenna model in the receiver', ant ? [ant.model ? h('span', { class: 'ant' }, ant.model) : h('span', { class: 'muted' }, 'none'),
-        ant.serial ? ' · serial ' + ant.serial : '', ' · setup ID ' + ant.setup_id] : 'Unknown'],
-      ...sent,
-    ]) : [h('p', { class: 'muted small' }, 'Read at each configuration; unknown until the next one.'), sent.some(Boolean) ? kv(sent) : null],
-  ];
-}
-
 /* Constellation names of the signal report (GET /api/gnss rx_bands). */
 const BAND_SYS = { gps: 'GPS', glonass: 'GLONASS', galileo: 'Galileo', beidou: 'BeiDou', qzss: 'QZSS' };
-
-/**
- * What the running signal group configures on the main antenna input, from
- * the last configuration (rx_bands), short: bands per constellation, the
- * signals on hover.
- */
-function bandsRow(g) {
-  const b = g.rx_bands || {};
-  const muted = t => ['Bands configured', h('span', { class: 'muted' }, t)];
-  if (b.state === 'refused') return muted('Not reported by this firmware');
-  if (b.state === 'unread') return muted('Unknown');
-  if (b.state !== 'ok') return muted('Known after the next configuration');
-  const list = [];
-  (b.systems || []).filter(x => (x.signals || []).length).forEach((x, i) => list.push(i ? ' · ' : '',
-    h('span', { title: (BAND_SYS[x.sys] || x.sys) + ': ' + x.signals.join(', ') }, (BAND_SYS[x.sys] || x.sys) + ' ' + x.bands)));
-  return ['Bands configured', list];
-}
 
 /* The signals the profile's group should give and the report lacks, or null. */
 function bandsMissingMsg(g) {
@@ -177,25 +111,6 @@ function sgRefusedMsg(g) {
     h('div', { class: 'small' }, (r.back_to ? 'It is back on ' + sgName(r.back_to.master, r.back_to.slave) + ' and configured again.' :
       'Its previous group is unknown, so the configuration failed.') + ' Choose a group from the list and save.'),
     r.reply && r.reply !== 'signal group rejected' ? h('div', { class: 'small muted' }, 'Receiver reply: ' + r.reply) : null);
-}
-
-/* What the receiver publishes in its antenna and receiver descriptor (RTCM 1033), as received. */
-function rtcm1033Rows(g) {
-  const d = g.rtcm1033 || {};
-  return [
-    h('h3', { class: 'sub' }, 'What casters see (RTCM 1033)'),
-    d.valid ? kv([
-      ['Station ID', String(d.station_id)],
-      ['Antenna', d.antenna ? h('span', { class: 'ant' }, d.antenna) : h('span', { class: 'muted' }, 'none')],
-      ['Antenna setup ID', String(d.setup_id)],
-      ['Antenna serial', d.antenna_serial || DASH],
-      ['Receiver type', d.receiver_type || DASH],
-      ['Receiver firmware', d.receiver_fw || DASH],
-      ['Receiver serial', d.receiver_serial || DASH],
-      ['Received', d.age_ms === null || d.age_ms === undefined ? DASH : fmt.ms(d.age_ms) + ' ago'],
-      d.bad_frames ? ['Unreadable messages', h('span', { class: 't-warn' }, fmt.num(d.bad_frames))] : null,
-    ]) : h('p', { class: 'muted small' }, 'Not received yet.' + (d.bad_frames ? ' Unreadable messages: ' + fmt.num(d.bad_frames) + '.' : '')),
-  ];
 }
 
 /** Station alerts as messages (bold title, one line); only: the ids to show. */
@@ -287,14 +202,13 @@ function rxAlertShown(st, missing) {
   return a => a !== 'no_receiver' && !(a === 'signals_mismatch' && missing) && !(problem && st.covers.indexOf(a) >= 0);
 }
 
-/** The card under its title: the problem in a line, the alerts (rxAlertShown), then model, configuration and position
- * (st: stationState). With the receiver unchecked during maintenance (gnssUnchecked) one line says so, in place of the
- * rows that would only repeat it. */
-function receiverTop(g, st) {
+/** The card under its title: the problem in a line, the alerts (rxAlertShown), then model, configuration and pos (the
+ * position's line while its own card has nothing more to show; st: stationState). With the receiver unchecked during
+ * maintenance (gnssUnchecked) one line says so, in place of the rows that would only repeat it. */
+function receiverTop(g, st, pos) {
   const r = g.receiver || {};
   const missing = bandsMissingMsg(g);
   const unchecked = gnssUnchecked(g);
-  const pos = positionLine(g, !st || st.delivering);
   return [
     st && RX_PROBLEM.indexOf(st.key) >= 0 ? msg(st.tone, st.lead, st.plan ? h('div', { class: 'muted small' }, st.plan) : null) : null,
     sgRefusedMsg(g),
@@ -333,55 +247,38 @@ function fixPendingText(state, maint, unchecked) {
   return maint ? NOT_CHECKED : 'Being checked';
 }
 
-/** Behind the card's Details: the link and identity, then the position and the one in the stream (the map follows). */
-function receiverDetails(g) {
-  const r = g.receiver || {};
-  const link = g.link || {};
+/** What casters get (the receiver's 1005) against the locked position, as a row: the same or how far from it; not received
+ * yet; null while not locked (a survey sends the position it is at, the rows above). */
+function streamRow(g) {
+  const arp = g.arp || {};
+  const label = 'Sent to casters';
+  if (!arp.valid) return [label, h('span', { class: 'muted' }, 'Not received yet')];
+  if (typeof arp.offset_m !== 'number') return null;
+  return [label, arp.offset_m > 0.005 ? h('span', { class: 't-warn' }, fmtDist(arp.offset_m) + ' from this position') : 'This position'];
+}
+
+/**
+ * The Position card's rows under its line (positionLine): where, how
+ * precise, since when and from what, the receiver's own position against a
+ * fixed one and what casters get. Without a position yet, the one the
+ * receiver sends (a survey's). Null when neither is known.
+ */
+function positionRows(g) {
   const pos = g.position || {};
   const arp = g.arp || {};
-  const age = v => (v === null || v === undefined ? 'Never' : fmt.ms(v) + ' ago');
-  const baud = link.baud ? ' at ' + link.baud + NB + 'baud' : '';
-  return [
-    kv([
-      /* Until the receiver streams, the station listens on the link (and searches between): no "Streaming" claim. */
-      ['Link', g.state === 'streaming' ? lbl(L.linkMode, link.mode) + baud : 'Listening' + baud],
-      ['Last corrections', h('span', { class: 't-' + ageTone(link.rtcm_age_ms) }, age(link.rtcm_age_ms))],
-      ['Serial number', r.serial],
-      ['Part number', r.pn],
-      ['Chip ID', r.efuse_id],
-      ['Firmware date', r.compile_date],
-      /* responding: it streams, or it answered since its corrections stopped (a reply, its NMEA). */
-      ['Answers', g.restarting ? h('span', { class: 't-warn' }, 'Restarting, back in about 10 s') : fmt.yesno(g.responding)],
-      /* Not checked during maintenance (the card says so): no "No" that reads as a failed check. */
-      ['Identity confirmed', gnssUnchecked(g) ? DASH : fmt.yesno(g.identity_confirmed)],
-      ['Last data', link.rx_bytes === 0 ? 'Nothing yet' : age(link.rx_age_ms)],
-      link.open === false && link.mode !== 'off' ? ['Receiver port', h('span', { class: 't-bad' }, 'Closed, reopening' +
-        (link.open_failures ? ' (' + link.open_failures + ' failed tries)' : ''))] : null,
-      g.detect_failures ? ['Detection failures', fmt.num(g.detect_failures)] : null,
-      ['GLONASS biases (1230)', g.rtcm1230_supported === null || g.rtcm1230_supported === undefined ? 'Not configured yet' :
-        g.rtcm1230_supported ? 'Accepted' : h('span', { class: 't-warn' }, 'Refused by the receiver')],
-      bandsRow(g),
-    ]),
-    h('h3', { class: 'sub' }, 'Position'),
-    pos.source && pos.source !== 'none' ? kv([
-      ['Latitude', fmt.deg(pos.lat_deg)],
-      ['Longitude', fmt.deg(pos.lon_deg)],
-      ['Height (ellipsoid)', fmt.m(pos.height_m)],
-      pos.sigma_m ? ['Accuracy (σ)', fmtDist(pos.sigma_m)] : null,
-      pos.locked_unix ? ['Locked on', fmt.time(pos.locked_unix)] : null,
-      ['Source', lbl(L.posSource, pos.source)],
-      fixedCheckRow(g),
-    ]) : h('p', { class: 'muted small' }, 'No position yet.'),
-    h('h3', { class: 'sub' }, 'Position in the stream'),
-    arp.valid ? kv([
-      ['Latitude', fmt.deg(arp.lat_deg)],
-      ['Longitude', fmt.deg(arp.lon_deg)],
-      ['Height (ellipsoid)', fmt.m(arp.height_m)],
-      ['Station ID', arp.station_id],
-      ['Received', fmt.ms(arp.age_ms) + ' ago'],
-      arp.offset_m === null || arp.offset_m === undefined ? null : ['Distance to the locked position', fmtDist(arp.offset_m)],
-    ]) : h('p', { class: 'muted small' }, 'Not received yet.'),
-  ];
+  const have = pos.source && pos.source !== 'none';
+  const at = have ? pos : arp.valid ? arp : null;
+  if (!at) return null;
+  return kv([
+    ['Latitude', fmt.deg(at.lat_deg)],
+    ['Longitude', fmt.deg(at.lon_deg)],
+    ['Height (ellipsoid)', fmt.m(at.height_m)],
+    have && pos.sigma_m ? ['Accuracy (σ)', fmtDist(pos.sigma_m)] : null,
+    have && pos.locked_unix ? ['Locked on', fmt.time(pos.locked_unix)] : null,
+    ['Source', have ? lbl(L.posSource, pos.source) : 'Sent to casters, not locked'],
+    fixedCheckRow(g),
+    have ? streamRow(g) : null,
+  ]);
 }
 
 /* ---- Receiver management ----------------------------------- */
@@ -480,13 +377,21 @@ function manageCtl() {
 /* The user's "keep it configured" choice, kept until the first configuration has worked (this browser). */
 const HELD_AUTO_KEY = 'heldAuto';
 
-/** What the station would send, from GET /api/gnss/apply/preview, as a numbered list. */
+/** What the station would send, from GET /api/gnss/apply/preview, as a numbered list: one short line a command ("CONFIG
+ * SIGNALGROUP 3 6 · writes, if different, saved"), in columns where the card is wide enough. */
 function previewList(d) {
   const steps = (d && d.steps) || [];
   if (!steps.length) return h('p', { class: 'muted' }, 'Nothing to list (no valid profile).');
-  return h('ol', { class: 'stack small' }, steps.map(s => h('li', null, h('code', null, s.text), ' ',
-    h('span', { class: 'muted' }, [lbl(L.previewKind, s.kind), lbl(L.previewWhen, s.when),
-      s.saved ? 'saved in the receiver' : null].filter(Boolean).join(' · ')))));
+  return h('ol', { class: 'cmds small' }, steps.map(s => h('li', null, h('code', null, s.text),
+    h('span', { class: 'muted' }, ' · ' + [lbl(L.previewKind, s.kind), lbl(L.previewWhen, s.when), s.saved ? 'saved' : null]
+      .filter(Boolean).join(', ')))));
+}
+
+/** The same in one line for the confirmation ("17 commands, 10 of which change the receiver."), or null. */
+function previewSummary(d) {
+  const steps = (d && d.steps) || [];
+  if (!steps.length) return null;
+  return steps.length + ' commands, ' + steps.filter(s => s.kind === 'write').length + ' of which change the receiver.';
 }
 
 /**
@@ -510,7 +415,7 @@ async function finishHeld(g) {
 /**
  * The receiver's first configuration, held until the user confirms it (a
  * build that holds it): the choice of automatic configuration afterwards,
- * what would be sent (behind a disclosure), "Configure the receiver now" and
+ * the commands it would send, "Configure the receiver now" and
  * "Not now". The Receiver page and the setup wizard show it alike, so its
  * words name no place on either. opts.onLater: "Not now"; opts.onApplied:
  * the apply was accepted. Returns {el, load()}.
@@ -518,7 +423,6 @@ async function finishHeld(g) {
 function heldPanel(opts) {
   const err = errBox();
   const status = h('div', { hidden: true });
-  const listSummary = h('summary', null, 'Commands it will send');
   const list = h('div', null, h('p', { class: 'muted small' }, 'Reading the commands…'));
   const auto = checkbox('Afterwards, keep it configured and fix problems automatically (recommended)', true,
     'Turns on automatic configuration and automatic recovery once this has worked.');
@@ -528,7 +432,6 @@ function heldPanel(opts) {
     try {
       preview = await api('GET', '/api/gnss/apply/preview');
       mount(list, previewList(preview));
-      listSummary.textContent = 'Commands it will send (' + ((preview && preview.steps) || []).length + ')';
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) return;
       mount(list, msg('warn', 'The list could not be read: ' + errText(e)));
@@ -581,7 +484,7 @@ function heldPanel(opts) {
     if (!preview) await load();
     const ok = await dialog({ title: 'Configure the receiver now?', ok: 'Configure',
       body: [h('p', null, 'The station configures the receiver and saves the settings in it. Corrections pause for a few seconds.'),
-        disclosure('Show the commands', false, previewList(preview)),
+        previewSummary(preview) ? h('p', null, previewSummary(preview)) : null,
         h('p', { class: 'muted small' }, auto.input.checked ? 'Afterwards, automatic configuration and recovery turn on.' :
           'Afterwards, the station changes nothing on the receiver by itself.')] });
     if (!ok) return;
@@ -607,7 +510,7 @@ function heldPanel(opts) {
       cardHead('Receiver not configured yet', badge('Waiting for you', 'info')),
       h('p', null, 'So far the station has only read the receiver. Confirm to configure it with the receiver profile.'),
       auto.el,
-      h('details', { class: 'more' }, listSummary, list),
+      h('section', null, h('h3', { class: 'sub' }, 'Commands it will send'), list),
       status, err,
       h('div', { class: 'form-actions' }, laterBtn, confirmBtn)),
     load: load,
@@ -678,6 +581,14 @@ function matchLine(g) {
     h('span', { class: 't-ok' }, '1005 matches the locked position.');
 }
 
+/** The antenna and B1C/B2a steps the receiver refused at the last configuration (GET /api/gnss apply_steps), as messages
+ * (Diagnostics lists both steps either way). */
+function stepsRefused(g) {
+  const s = g.apply_steps || {};
+  const no = (x, what) => (x && x.sent && !x.ok ? msg('warn', what + ': ' + (x.reply || 'no reason given') + '.') : null);
+  return [no(s.antenna, 'Antenna model rejected'), no(s.b1cb2a, 'BeiDou B1C/B2a output rejected')];
+}
+
 /** Whether "Use the current position" has a position to copy: a 1005 that is not the locked position (a fixed base sends
  * the position it was given, so copying that would repair nothing; while surveying it is the survey's). */
 function arpCopyable(g) {
@@ -724,7 +635,7 @@ function receiverForms(g, latest, done, onCompare) {
   /* -- Profile -- */
   const sgm = numInput(p.signal_group_master, { inputmode: 'numeric', maxlength: 3 });
   const sgs = numInput(p.signal_group_slave, { inputmode: 'numeric', maxlength: 3 });
-  /* Named choices; other pairs (a newer receiver firmware) as numbers under More options. */
+  /* Named choices; other pairs (a newer receiver firmware) as numbers under Advanced. */
   const sgKey = p.signal_group_master + ' ' + p.signal_group_slave;
   const named = SG_CHOICES.some(c => c[0] === sgKey);
   const sgChoice = radios('Signal group', 'sgroup', SG_CHOICES.map(c => [c[0], h('span', { class: 'opt' },
@@ -889,7 +800,7 @@ function receiverForms(g, latest, done, onCompare) {
   const antBox = h('div', { class: 'stack' }, F.antenna_model.el, h('div', { class: 'cols c2' }, F.antenna_serial.el, F.antenna_setup_id.el),
     h('p', { class: 'hint' }, 'Serial and setup ID are only sent with a model.'), seeLine);
 
-  /* Field checks; a field in a closed part (Edit, More options) opens it first. */
+  /* Field checks; a field behind its Edit button opens first. */
   const int = (s, lo, hi) => {
     const n = Number(String(s).trim());
     return String(s).trim() !== '' && Number.isInteger(n) && n >= lo && n <= hi ? n : null;
@@ -909,7 +820,6 @@ function receiverForms(g, latest, done, onCompare) {
       ok() {
         if (!bad) return true;
         for (let n = bad; n; n = n.parentElement) {
-          if (n.tagName === 'DETAILS') n.open = true;
           if (n.classList && n.classList.contains('edit-box')) n.hidden = false;
         }
         if (bad.focus) bad.focus();
@@ -1024,10 +934,11 @@ function receiverForms(g, latest, done, onCompare) {
     const r = await act(applyBtn, () => api('POST', '/api/gnss/apply'), err);
     if (r !== undefined) toast('Applying the profile…', 'ok');
   });
-  /* Apply again under More options; beside Save while the last configuration failed. */
+  /* Apply again under Advanced; beside Save while the last configuration failed. */
   const applyRow = settingRow('Apply again', 'Sends the saved profile to the receiver once more.', applyBtn);
   const actions = h('div', { class: 'form-actions' }, saveBtn);
   const antLine = h('span', null, 'Antenna name: ', p.antenna_model ? h('span', { class: 'ant' }, p.antenna_model) : 'the receiver\'s own');
+  const refused = h('div', { class: 'stack', hidden: true });
   const profile = h('form', { class: 'stack', oninput: () => {
     profDirty = true;
     sumUp();
@@ -1037,10 +948,8 @@ function receiverForms(g, latest, done, onCompare) {
     save('profile', saveBtn, err);
   } },
   pgroup('Signals', sgChoice.el, h('button', { type: 'button', class: 'linkbtn', onclick: onCompare }, 'Not sure? Compare two groups')),
-  pgroup('Corrections', editRow(summary, msgBox), editRow(antLine, antBox)),
-  h('section', { class: 'pgroup' }, disclosure('More options', !named, h('div', { class: 'stack' },
-    h('div', { class: 'cols c2' }, F.station_id.el, F.com1_baud.el),
-    sgCustom.el, sgNumbers, satView.el, applyRow))),
+  pgroup('Corrections', editRow(summary, msgBox), editRow(antLine, antBox), refused),
+  pgroup('Advanced', h('div', { class: 'cols c2' }, F.station_id.el, F.com1_baud.el), sgCustom.el, sgNumbers, satView.el, applyRow),
   err,
   actions);
 
@@ -1059,6 +968,8 @@ function receiverForms(g, latest, done, onCompare) {
     useArp.hidden = !arpCopyable(gg);
     patch(seeLine, castersSee(gg));
     seeLine.hidden = !seeLine.textContent;
+    patch(refused, stepsRefused(gg));
+    refused.hidden = !refused.firstChild;
   };
   update(g);
   return { position: position, profile: profile, update: update, status: () => chipSync(latest()),
@@ -1114,41 +1025,39 @@ function sgPairLabel(g) {
   return g ? sgName(g.master, g.slave) : DASH;
 }
 
-/* One group's results side by side with the other's: per constellation; per band behind a disclosure. */
-function sgtResults(t, open) {
+/* Both groups side by side: how long each was measured, its best constellation, then per constellation the satellites and
+ * bands, with each band's mean C/N0 in a line under them (its signals on hover). On a phone a cell wraps only between
+ * its parts ("10.8 satellites ·", "L1 44.6 ·"), never inside one, so no line starts with a dot. */
+function sgtResults(t) {
   const res = t.results || [];
   if (res.length !== 2) return null;
   const sysOrder = ['gps', 'glonass', 'galileo', 'qzss', 'beidou', 'navic'];
-  const bandOrder = ['l1', 'l2', 'l5', 'l6', 'e5ab'];
   const sysOf = (r, sys) => (r.systems || []).find(x => x.sys === sys);
   const present = sysOrder.filter(sys => res.some(r => sysOf(r, sys)));
+  const parts = list => list.filter(Boolean).map((x, i, all) => i < all.length - 1 ?
+    [h('span', { class: 'nowrap' }, x, NB + '·'), ' '] : h('span', { class: 'nowrap' }, x));
   const head = ['', sgPairLabel(res[0].group), sgPairLabel(res[1].group)];
-  const rows = [];
-  const bandRows = [];
-  rows.push(['Measured', ...res.map(r => r.status === 'rejected' ? h('span', { class: 't-bad' }, lbl(L.sgtResult, r.status)) :
-    fmt.dur(r.measured_s) + ' (' + fmt.num(r.samples) + ' samples' + (r.epoch_gaps ? ', ' + fmt.num(r.epoch_gaps) + ' epochs missing' : '') + ')' +
-    (r.status === 'measuring' ? ', measuring' : ''))]);
-  rows.push(['Best constellation', ...res.map(r => r.best_sys ?
-    h('b', { class: r.best_bands >= 4 ? 't-ok' : 't-warn' }, lbl(L.sys, r.best_sys) + ': ' + r.best_bands + ' bands (' +
-      ((sysOf(r, r.best_sys) || {}).bands || []).map(b => BAND_HEAD[b] || b).join(', ') + ')') : DASH)]);
+  const rows = [
+    ['Measured', ...res.map(r => r.status === 'rejected' ? h('span', { class: 't-bad' }, lbl(L.sgtResult, r.status)) :
+      parts([fmt.dur(r.measured_s), r.status === 'measuring' ? 'measuring' : null,
+        r.epoch_gaps ? fmt.num(r.epoch_gaps) + ' epochs missing' : null]))],
+    ['Best', ...res.map(r => r.best_sys ? h('b', { class: r.best_bands >= 4 ? 't-ok' : 't-warn' },
+      parts([lbl(L.sys, r.best_sys), r.best_bands + ' bands'])) : DASH)],
+  ];
   for (const sys of present) {
     rows.push([h('b', null, lbl(L.sys, sys)), ...res.map(r => {
       const x = sysOf(r, sys);
-      return x ? x.satellites.toFixed(1) + ' satellites · ' + (x.bands || []).length + ' band' + ((x.bands || []).length === 1 ? '' : 's') : DASH;
+      if (!x) return DASH;
+      const n = (x.bands || []).length;
+      const per = BAND_ORDER.map(b => (x.per_band || []).find(pb => pb.band === b)).filter(Boolean);
+      return [parts([x.satellites.toFixed(1) + ' satellites', n + (n === 1 ? ' band' : ' bands')]),
+        per.length ? h('small', null, parts(per.map(pb => [h('span', { title: sigNames(sys, pb.signal_ids) || null },
+          BAND_HEAD[pb.band] || pb.band), pb.cnr_dbhz === null || pb.cnr_dbhz === undefined ? '' :
+          [' ', h('span', { class: cnrClass(pb.cnr_dbhz) }, pb.cnr_dbhz.toFixed(1))]]))) : null];
     })]);
-    for (const band of bandOrder) {
-      if (!res.some(r => (sysOf(r, sys) || {}).per_band && sysOf(r, sys).per_band.some(p => p.band === band))) continue;
-      bandRows.push([lbl(L.sys, sys) + ' ' + (BAND_HEAD[band] || band), ...res.map(r => {
-        const pb = ((sysOf(r, sys) || {}).per_band || []).find(p => p.band === band);
-        if (!pb) return DASH;
-        return [pb.satellites.toFixed(1) + ' sats', pb.cnr_dbhz === null || pb.cnr_dbhz === undefined ? '' :
-          h('span', { class: cnrClass(pb.cnr_dbhz) }, ' · ' + pb.cnr_dbhz.toFixed(1) + ' dB-Hz'),
-        h('small', { class: 'hint' }, sigNames(sys, pb.signal_ids))];
-      })]);
-    }
   }
-  return h('div', { class: 'stack' }, table(head, rows, { label: 'Signal-group comparison results' }),
-    bandRows.length ? moreAs('sgt-bands', 'Per band', open, table(head, bandRows, { label: 'Results per band' })) : null);
+  return h('div', null, table(head, rows, { label: 'Signal-group comparison results', cls: 'cmp' }),
+    h('p', { class: 'muted small foot' }, 'Figures: mean C/N0 per band, in dB-Hz.'));
 }
 
 /** Why the station would refuse a start now (its own order), or '' (GET /api/gnss). The station still decides. */
@@ -1201,11 +1110,15 @@ function sgTestCtl(done) {
       done();
     }
   });
-  /* Why a start would be refused now (no receiver, held, automatic configuration off, not locked): Start waits. */
+  /* The two groups, the time and Start in one row on a wide screen. While a start would be refused (no receiver, held,
+   * automatic configuration off, not locked) only why, beside Start that waits. */
   const why = h('span', { class: 'note muted small', id: 'sgt-why', hidden: true });
-  const form = h('div', { class: 'stack' },
-    h('div', { class: 'cols c3' }, field('Group A', selA).el, field('Group B', selB).el, field('Time per group', minutes).el),
-    h('div', { class: 'form-actions' }, why, startBtn));
+  const act = h('div', { class: 'act' }, startBtn);
+  const fields = h('div', { class: 'cols sgt-form' }, field('Group A', selA).el, field('Group B', selB).el,
+    field('Time per group', minutes).el, act);
+  const blocked = h('div', { class: 'form-actions', hidden: true }, why);
+  const form = h('div', { class: 'stack' }, fields, blocked);
+  const intro = h('p', { class: 'muted small' }, 'Tries two signal groups one after the other on this antenna, so you can keep the better one.');
   const keepA = btn('Keep A', async () => keep(0, keepA), 'primary');
   const keepB = btn('Keep B', async () => keep(1, keepB), 'primary');
   async function keep(i, b) {
@@ -1228,21 +1141,23 @@ function sgTestCtl(done) {
   const badgeEl = badge('', '');
   return {
     badge: badgeEl,
-    nodes: [
-      h('p', { class: 'muted small' }, 'Tries two signal groups one after the other on this antenna, so you can keep the better one.'),
-      status, results, form, out, h('div', { class: 'form-actions' }, stopBtn, keepA, keepB)],
+    nodes: [intro, status, results, form, out, h('div', { class: 'form-actions' }, stopBtn, keepA, keepB)],
     update(t, g) {
       if (!t) return;
       const running = SGT_RUNNING.indexOf(t.state) >= 0;
       badgeEl.className = 'badge ' + (t.state === 'deciding' ? 'warn' : 'info');
       badgeEl.textContent = lbl(L.sgtState, t.state);
       badgeEl.hidden = !running;
-      form.hidden = running;
+      /* Idle: what it does and the start; running or deciding: its progress and results. */
+      intro.hidden = form.hidden = running;
       const block = running ? '' : sgtBlock(g);
       /* A start in flight keeps its own disabled state (busy() gives it back when the answer is in). */
       if (!startBtn.classList.contains('busy')) startBtn.disabled = !!block;
       why.textContent = block;
-      why.hidden = !block;
+      why.hidden = blocked.hidden = !block;
+      fields.hidden = !!block;
+      const home = block ? blocked : act;
+      if (startBtn.parentNode !== home) home.append(startBtn);
       if (block) startBtn.setAttribute('aria-describedby', why.id);
       else startBtn.removeAttribute('aria-describedby');
       if (!running && !defaultsSet && g && g.profile) {
@@ -1272,23 +1187,18 @@ function sgTestCtl(done) {
       const rk = JSON.stringify(t.results || null);
       if (rk !== resultsKey) {
         resultsKey = rk;
-        mount(results, t.results ? sgtResults(t, isOpen(results, 'sgt-bands')) : null);
+        /* Patched: a keyboard focus on the table's box stays across the refresh. */
+        patch(results, t.results ? sgtResults(t) : null);
       }
     },
   };
 }
 
-/** The receiver page's own note while a comparison runs or waits for a choice: [title, line] or null. */
+/** Receiver settings' own note while a comparison runs or waits for a choice: its title, or null. Only the way to the
+ * comparison's card at the page's end (that card says how far it is). */
 function sgtPageNote(t) {
   if (!t || SGT_RUNNING.indexOf(t.state) < 0) return null;
-  if (t.state === 'deciding') return ['Choose a signal group', 'Both groups are measured.'];
-  return ['Comparing signal groups', sgtLine(t)];
-}
-
-/** A card that folds to its title row, chip beside it (Compare two signal groups, Receiver details): {el, details}. */
-function foldCard(title, chip, id, ...kids) {
-  const d = h('details', { class: 'fold' }, h('summary', null, h('h2', null, title), chip), kids);
-  return { el: h('section', { class: 'card wide', id: id, tabindex: id ? '-1' : null }, d), details: d };
+  return t.state === 'deciding' ? 'Choose a signal group' : 'Comparing signal groups';
 }
 
 Views.receiver = {
@@ -1309,19 +1219,26 @@ function receiverPage(el, arg) {
   const settings = arg === 'settings';
   let g = null, t = null, forms = null, stop = null, held = null, heldLater = false, sigs = null, missing = null;
   /* gone: the page was left (an answer that comes later starts nothing) */
-  let wasRunning = false, gone = false;
-  /* -- The Receiver page -- */
+  let gone = false;
+  /* -- The Receiver page: the receiver beside its position, the signals under both -- */
   const heldCard = h('section', { class: 'card wide', hidden: true });
   const chip = badge('', '');
   /* No receiver, or the station looking for it: the same panel as in the setup. */
   const nr = noReceiverPanel();
   const top = h('div', { class: 'stack fit-kv' });
+  /* The messages it sends (65-signals.js fills them). */
+  const msgs = h('div', { class: 'stack', hidden: true });
+  const info = h('section', { class: 'card' }, cardHead('Receiver', chip), nr.el, top, msgs,
+    h('div', { class: 'form-actions' }, link('Receiver settings', '#/receiver/settings', 'btn')));
   const posActions = positionActions(() => refresh());
-  const detBody = h('div');
+  const posLine = h('p', { hidden: true });
+  const posRows = h('div');
   const map = mapBox();
-  const details = moreAs('rx-details', 'Details', false, detBody, map.el);
-  const info = h('section', { class: 'card wide' }, cardHead('Receiver', chip), nr.el, top, details, posActions.out,
-    h('div', { class: 'form-actions' }, posActions.buttons[0], link('Receiver settings', '#/receiver/settings', 'btn'), posActions.buttons[1]));
+  const where = h('section', { class: 'card' }, h('h2', null, 'Position'), posLine, posRows, map.el, posActions.out,
+    h('div', { class: 'form-actions' }, posActions.buttons));
+  /* Nothing known about the position but its line (no coordinates, so no map, and nothing to do): the line is a row of
+   * the Receiver card, which then spans the page (as without a receiver). */
+  const posAlone = () => !posRows.firstChild && map.el.hidden && posActions.buttons.every(b => b.hidden);
   /* -- Receiver settings -- */
   const posCard = h('section', { class: 'card a-pos' });
   const profChip = badge('', '');
@@ -1329,26 +1246,31 @@ function receiverPage(el, arg) {
   const manage = manageCtl();
   const manageCard = h('section', { class: 'card a-man' }, manage.nodes);
   const sgt = sgTestCtl(() => refresh().catch(() => {}));
-  const compare = foldCard('Compare two signal groups', sgt.badge, 'compare', sgt.nodes);
-  const rdBody = h('div');
-  const rdFold = foldCard('Receiver details', null, null, rdBody);
+  const compare = h('section', { class: 'card wide', id: 'compare', tabindex: '-1' }, cardHead('Compare two signal groups', sgt.badge),
+    sgt.nodes);
   const openCompare = () => {
-    compare.details.open = true;
-    compare.el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    compare.el.focus({ preventScroll: true });
+    compare.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    compare.focus({ preventScroll: true });
   };
-  const noteTitle = h('strong'), noteLine = h('span');
+  const noteTitle = h('strong');
   const sgtNote = h('div', { class: 'notice info wide', hidden: true },
-    h('div', { class: 'text' }, noteTitle, ' ', noteLine), btn('Go to the comparison', openCompare, 'small'));
+    h('div', { class: 'text' }, noteTitle), btn('Go to the comparison', openCompare, 'small'));
 
-  /* The chip and the line under the title follow the status (every second), the rest GET /api/gnss. */
+  /* The chip, the lines under the title and the position's line follow the status (every second), the rest GET /api/gnss. */
   const status = () => {
     if (settings || !g || missing) return;
     const s = S.status;
+    const st = s ? stationState(s, true) : null;
     const c = s ? receiverChip(s) : [lbl(L.station, g.state), stationTone(g.state)];
     chip.className = 'badge ' + c[1];
     chip.textContent = c[0];
-    patch(top, receiverTop(g, s ? stationState(s, true) : null));
+    const line = positionLine(g, !st || st.delivering);
+    const alone = posAlone();
+    patch(top, receiverTop(g, st, alone ? line : null));
+    patch(posLine, alone ? null : line);
+    posLine.hidden = alone || !line;
+    where.hidden = alone;
+    info.classList.toggle('wide', alone);
   };
 
   const fill = () => {
@@ -1357,8 +1279,7 @@ function receiverPage(el, arg) {
       sgtNote.hidden = !note;
       if (note) {
         sgtNote.className = 'notice wide ' + (t.state === 'deciding' ? 'warn' : 'info');
-        noteTitle.textContent = note[0];
-        noteLine.textContent = note[1];
+        noteTitle.textContent = note;
       }
       const c = profileChip(g);
       profChip.className = 'badge ' + c[1];
@@ -1366,11 +1287,6 @@ function receiverPage(el, arg) {
       if (forms) forms.update(g);
       manage.update(g);
       sgt.update(t, g);
-      /* A comparison that starts opens its card. */
-      const running = !!t && SGT_RUNNING.indexOf(t.state) >= 0;
-      if (running && !wasRunning) compare.details.open = true;
-      wasRunning = running;
-      if (!interacting(rdFold.el)) patch(rdBody, readBack(g), rtcm1033Rows(g));
       return;
     }
     /* The held first configuration first, until it is made (or put off for this visit). */
@@ -1395,14 +1311,18 @@ function receiverPage(el, arg) {
     missing = (g.state === 'no_receiver' || g.state === 'detecting' || !!((S.status || {}).receiver || {}).uart_closed) &&
       !(g.maintenance || {}).on;
     nr.el.hidden = !missing;
-    chip.hidden = top.hidden = details.hidden = missing;
+    chip.hidden = top.hidden = missing;
+    sigs.messagesOff(missing);
     if (missing) nr.update(S.status || { receiver: { state: g.state } });
-    status();
     posActions.update(g);
-    if (missing) for (const b of posActions.buttons) b.hidden = true;
-    /* A rebuild waits while the user reads or selects in the Details. */
-    if (!interacting(details)) patch(detBody, receiverDetails(g));
+    patch(posRows, positionRows(g));
     map.update(g.position);
+    status();
+    /* No receiver: the panel says it, the position is a stale fact. */
+    if (missing) {
+      where.hidden = true;
+      info.classList.add('wide');
+    }
     sigs.gnss(g);
   };
   const buildForms = () => {
@@ -1429,12 +1349,12 @@ function receiverPage(el, arg) {
     if (settings) {
       /* The comparison's note above the grid (its areas: position, management, profile beside both). */
       mount(el, sgtNote, grid);
-      add(grid, [posCard, profile, manageCard, compare.el, rdFold.el]);
+      add(grid, [posCard, profile, manageCard, compare]);
       buildForms();
     } else {
       mount(el, grid);
-      add(grid, [heldCard, info]);
-      sigs = signalsSection(grid);
+      add(grid, [heldCard, info, where]);
+      sigs = signalsSection(grid, msgs);
     }
     fill();
     /* An address that asks for the sky: open it (live/start) or show it when it is open (live); then the page's own address. */

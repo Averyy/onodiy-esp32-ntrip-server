@@ -5,10 +5,10 @@
  * Signals, on the Receiver page: one card with the best constellation and
  * its bands, the Good / Check / Problem hints in one line each (only what
  * that headline does not say), the frequency bands per constellation from
- * the MSM data (with the mean C/N0 from MSM4 to MSM7), the sky on request
- * (66-live.js) and, behind "Signal details", the epochs and the RTCM
- * messages seen against the profile. The public page shows the summary and
- * the band table (signalsCard).
+ * the MSM data (with the mean C/N0 from MSM4 to MSM7) and the sky on
+ * request (66-live.js); in the Receiver card, the RTCM messages seen against
+ * the profile. The public page shows the summary and the band table
+ * (signalsCard).
  */
 
 const BAND_ORDER = ['l1', 'l2', 'l5', 'l6', 'e5ab'];
@@ -170,20 +170,24 @@ function signalsHead(sig, live, master) {
 /**
  * The Receiver page's Signals card in el: the best constellation, the hints
  * (while the receiver delivers), the band table with the sky beside it once
- * shown, "Signal details". Hidden without a receiver (the Receiver card says
- * so). Returns {update(status), gnss(g), destroy(), sky}.
+ * shown (every satellite under the table). Hidden without a receiver (the
+ * Receiver card says so). msgs: the Receiver card's box for the messages
+ * the receiver sends, shown once any arrived (until then the card's line
+ * says that none do) and not while messagesOff(true). Returns
+ * {update(status), gnss(g), messagesOff(off), destroy(), sky}.
  */
-function signalsSection(el) {
+function signalsSection(el, msgs) {
   const sky = skySection();
   const head = h('div', { class: 'stack' }, h('p', { class: 'loading' }, 'Loading signals…'));
   const bands = h('div');
-  const body = h('div');
-  const details = moreAs('sig-details', 'Signal details', false, body);
   const card = h('section', { class: 'card wide' }, h('h2', null, 'Signals'), head, sky.head,
-    h('div', { class: 'sky-wrap' }, sky.plot, bands),
-    h('div', { class: 'form-actions' }, sky.note, sky.button), sky.el, details);
+    h('div', { class: 'sky-wrap' }, sky.plot, h('div', { class: 'stack' }, bands, sky.list)),
+    h('div', { class: 'form-actions' }, sky.note, sky.button), sky.el);
   el.append(card);
-  let collapsed = false, g = null;
+  let collapsed = false, g = null, msgsOff = false;
+  const msgsSync = () => {
+    msgs.hidden = collapsed || msgsOff || !msgs.firstChild;
+  };
   /* Verdicts (hints, red messages) only while corrections come from the receiver. */
   const delivering = () => !!(S.status && stationState(S.status, true).delivering);
   /* No receiver, or the station looking for it: the card hides. */
@@ -194,6 +198,7 @@ function signalsSection(el) {
     if (c === collapsed) return;
     collapsed = c;
     card.hidden = c;
+    msgsSync();
     if (c) sky.hide();
   }
   receiverState(S.status);
@@ -214,15 +219,10 @@ function signalsSection(el) {
     patch(head, signalsHead(sig, live, sg === undefined ? null : sg));
     /* No observations: the headline says so ("No signals for 1 min"), the table goes. */
     patch(bands, systems.length ? [bandTable(systems), h('p', { class: 'muted small foot' }, BANDS_FOOT)] : null);
-    if (interacting(details)) return;
-    patch(body, kv([
-      ['Last epoch', sig.epoch_age_ms === null || sig.epoch_age_ms === undefined ? 'Never' : fmt.ms(sig.epoch_age_ms) + ' ago'],
-      ['Epochs', fmt.num(sig.epochs)],
-      ['Missing epochs', sig.epoch_gaps === null || sig.epoch_gaps === undefined ? 'Not counted (no observation messages in the profile)' :
-        fmt.num(sig.epoch_gaps)],
-      ['Outages or time jumps', fmt.num(sig.epoch_jumps || 0)],
-    ]), h('h3', { class: 'sub' }, 'Messages'),
-    sig.messages ? messagesView(sig.messages, live, !!(g && (g.survey || {}).active)) : h('p', { class: 'muted' }, 'No message statistics.'));
+    /* The epoch counters are on Diagnostics (Firmware internals, Observations). */
+    const seen = (sig.messages || []).some(m => m.count);
+    patch(msgs, seen ? [h('h3', { class: 'sub' }, 'Messages'), messagesView(sig.messages, live, !!(g && (g.survey || {}).active))] : null);
+    msgsSync();
   }
 
   const stop = poller(2000, loadSignals);
@@ -233,6 +233,10 @@ function signalsSection(el) {
     gnss(gg) {
       g = gg;
       sky.block(g.autocfg ? '' : 'Not available while you manage the receiver yourself (Receiver settings).');
+    },
+    messagesOff(off) {
+      msgsOff = off;
+      msgsSync();
     },
     destroy() {
       stop();

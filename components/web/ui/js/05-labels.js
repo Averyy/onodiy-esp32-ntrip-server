@@ -251,8 +251,9 @@ const L = {
   liveEnd: {
     none: '', user: 'you stopped it', expired: 'its time was up', idle: 'no page showed it for a while', flash: 'a receiver update began',
   },
-  previewKind: { query: 'reads only', write: 'changes the receiver' },
-  previewWhen: { always: 'always', if_differs: 'only if the receiver differs', if_off: 'only if it is off in the receiver' },
+  /* A command of the held configuration, in a word or two after it (always: nothing to add). */
+  previewKind: { query: 'reads', write: 'writes' },
+  previewWhen: { always: '', if_differs: 'if different', if_off: 'if off' },
   /* Signal-group comparison (GET /api/gnss/signal-test). */
   sgtState: {
     idle: '', switching: 'Switching', settling: 'Settling', measuring: 'Measuring', deciding: 'Waiting for your choice',
@@ -427,12 +428,6 @@ function casterTone(state) {
 
 function healthTone(level) {
   return { ok: 'ok', degraded: 'warn', recovering: 'warn', failed: 'bad' }[level] || '';
-}
-
-/** Tone for an RTCM age in ms (Onocoy wants each epoch within a second). */
-function ageTone(ms) {
-  if (ms === null || ms === undefined) return 'bad';
-  return ms < 1500 ? 'ok' : ms < 5000 ? 'warn' : 'bad';
 }
 
 /* Minutes for a sentence ("4 min"; under a minute in seconds). */

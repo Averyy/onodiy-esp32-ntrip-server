@@ -200,7 +200,7 @@ function liveTiles(t) {
     tile('In the sky plot', fmt.num(t.with_pos)));
 }
 
-/* ---- Station map (on request, in the Receiver card's Details) ---------------------------- */
+/* ---- Station map (on request, in the Receiver page's Position card) ---------------------- */
 
 const MAP_ZOOM = 16, MAP_TILE = 256, MAP_W = 512, MAP_H = 320;
 const MAP_HOST = 'https://tile.openstreetmap.org/';
@@ -308,10 +308,12 @@ function skyOutputText(w) {
 
 /**
  * The sky section: head (time left, Close, Extend) above plot, which sits
- * beside the band table; button ("Show the sky") and note (why it is off or
- * closed) in the card's action row; el (errors, "Show all") under it.
- * Returns {button, note, head, plot, el, start(), resume(), block(text), hide(), destroy()}:
- * hide() folds it and stops asking (the station closes an unwatched window).
+ * beside the band table; list (every satellite, in a box of its own height)
+ * under that table; button ("Show the sky") and note (why it is off or
+ * closed) in the card's action row; el (errors, the note on pauses) under
+ * it. Returns {button, note, head, plot, list, el, start(), resume(),
+ * block(text), hide(), destroy()}: hide() closes it here and stops asking
+ * (the station closes an unwatched window).
  */
 function skySection() {
   let stopPoll = null, gone = false, open = false, deadline = 0, postAt = 0, closeIgnored = false, blocked = '', closedWhy = '';
@@ -342,16 +344,10 @@ function skySection() {
   const skyNote = h('p', { class: 'muted small' });
   const plot = h('div', { class: 'sky-pane', hidden: true }, plotBox, cnrLegend(), h('p', { class: 'muted small' }, SYS_KEY), skyNote);
   const rows = satRows();
-  const allSum = h('summary', null, 'Show all satellites');
-  const all = h('details', { class: 'more' }, allSum, rows.el);
+  const list = h('div', { class: 'sat-list', hidden: true }, rows.el);
   const head = h('div', { class: 'stack', hidden: true }, h('div', { class: 'form-actions' }, state, closeBtn, extendBtn), skyLine, conn);
-  const box = h('div', { class: 'stack', hidden: true }, all,
-    h('p', { class: 'muted small' }, 'Turning satellite positions on and off pauses corrections for a moment. ' +
-      'The sky closes by itself when time is up or no page shows it.'));
-  let lastData = null;
-  all.addEventListener('toggle', () => {
-    if (all.open && lastData) rows.update(lastData);
-  });
+  const box = h('p', { class: 'muted small', hidden: true }, 'Turning satellite positions on and off pauses corrections for a moment. ' +
+    'The sky closes by itself when time is up or no page shows it.');
 
   const posted = () => {
     postAt = Date.now();
@@ -384,7 +380,7 @@ function skySection() {
     const was = open;
     open = !!w.open;
     if (was !== open) announce.textContent = open ? 'Sky open.' : 'Sky closed.';
-    head.hidden = box.hidden = plot.hidden = !open;
+    head.hidden = box.hidden = plot.hidden = list.hidden = !open;
     showBtn.hidden = open;
     if (!open) {
       endPoll();
@@ -409,14 +405,12 @@ function skySection() {
       return;
     }
     const sats = d.satellites || [];
-    lastData = d;
     patch(plotBox, liveSkyPlot(sats));
     const placed = sats.filter(hasSkyPos).length;
     skyNote.textContent = placed ? placed + ' of ' + sats.length + ' satellites shown.' :
       w.sky === 'on' || w.sky === 'on_profile' ? 'Waiting for the first satellite positions from the receiver.' :
         'No satellite positions yet: see the line above.';
-    allSum.textContent = 'Show all ' + sats.length + ' satellites';
-    if (all.open) rows.update(d);
+    rows.update(d);
   }
 
   async function fetchLive() {
@@ -448,6 +442,7 @@ function skySection() {
     head: head,
     el: h('div', null, announce, err, box),
     plot: plot,
+    list: list,
     start: () => start(showBtn),
     /* The window as it is (an address that asks for the sky): shown when it is open. */
     resume: () => fetchLive(),
@@ -458,7 +453,7 @@ function skySection() {
     hide() {
       endPoll();
       open = false;
-      head.hidden = box.hidden = plot.hidden = true;
+      head.hidden = box.hidden = plot.hidden = list.hidden = true;
       showBtn.hidden = false;
       syncNote();
     },
