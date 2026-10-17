@@ -1372,7 +1372,8 @@ class E2E:
             return True
 
         for k in range(attempts):
-            if not self.two_more_epochs(f"restart {k + 1}"):
+            if not step(self.two_more_epochs(f"restart {k + 1}"),
+                        f"restart {k + 1}: slot 1 sent two more epochs before it"):
                 return
             live = [c for c in self.sources() if c.get("end_mono") is None]
             if not step(len(live) == 1, f"restart {k + 1}: one live caster session before it ({len(live)})"):
