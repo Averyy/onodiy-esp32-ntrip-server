@@ -94,7 +94,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  rxAlerts: a => (a[0].alerts || []).filter(rxAlertShown(stationState(a[1], true), false)),\n' +
   '  stepSaid: a => { const st = stationState(a[1], true); return stepSaid(a[0], st, healthItems(a[1].alerts || [], st).state); },\n' +
   '  nextAttempt: a => nextAttemptRow(a[0], stationState(a[1], true)),\n' +
-  '  posWords: a => positionWords(a[0], a[1], a[2]), posChip: a => (Array.isArray(a) ? positionChip(a[0], a[1]) : positionChip(a)),\n' +
+  '  posChip: a => (Array.isArray(a) ? positionChip(a[0], a[1]) : positionChip(a)),\n' +
   '  fixPending: a => fixPendingText(a[0], a[1], a[2]), configWords: a => configWords(a[0], a[1]), profileTaken: g => profileTaken(g),\n' +
   '  arpCopy: g => arpCopyable(g), recoveryNow: hl => recoveryNow(hl),\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
@@ -538,7 +538,7 @@ def test_state_every_condition_in_order():
                                                                               "group": {"master": 3, "slave": 6}}}),
         "wifi_trial": dict(network={"cred_trial": True, "cred_trial_left_s": 80, "pending_ssid": "Cabin"}),
         "receiver": dict(receiver={"state": "configuring"}, casters=[caster(0, "Onocoy", "wait_data")]),
-        "onocoy_setup": dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "backoff")]),
+        "onocoy_setup": dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "streaming")]),
         "casters_down": dict(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "auth_failed", reason="auth")],
                              receiver={"best_bands": 3}),
         "quality": dict(receiver={"best_bands": 3}),
@@ -789,8 +789,9 @@ def test_hero_casters_down_one_two_three_and_all_good():
     assert out[0]["facts"] == [] and out[0]["subject"] == 1
     assert out[1]["title"] == "Not streaming" and out[1]["tone"] == "bad"
     assert out[1]["line"] == "Onocoy and Bench are not streaming." and out[1]["facts"] == []
+    # Three down: the line counts them; the Status page's Casters card lists each, so no fact counts them again.
     assert out[2]["line"] == "3 casters are not streaming."
-    assert out[2]["facts"] == [["Casters", "0 of 3 streaming"]]
+    assert out[2]["facts"] == []
     assert out[3] == {**out[3], "title": "Streaming", "tone": "ok", "line": "Onocoy is receiving corrections.", "action": None}
     # One caster turned on: no "1 of 1" fact.
     assert out[3]["facts"] == []
@@ -835,6 +836,14 @@ def test_hero_safe_mode_stop_and_alerts_while_streaming():
     assert out[3]["tone"] == "ok" and out[3]["line"] == "Onocoy is receiving corrections." and out[3]["also"] == []
     assert out[4]["line"] == "Onocoy is set up but turned off. Turn it on to start streaming." and out[4]["action"] == "Turn Onocoy on"
     assert out[5]["line"] == "Add a caster to start streaming." and out[5]["action"] == "Add a caster"
+    # The public form says safe mode by its one flag (no crashes, no retry, no button); an older one without it: as before.
+    pub = {"api": 1, "public": True, "uptime_s": 60, "device": {"hostname": "onocoydiy"}, "safe_mode": {"active": True},
+           "receiver": {"state": "idle", "best_bands": 0}, "casters": [], "health": {"level": "failed"}}
+    older = {k: v for k, v in pub.items() if k != "safe_mode"}
+    p_safe, p_old = heroes(pub, older, admin=False)
+    assert p_safe == {**p_safe, "key": "safe_mode", "title": "Safe mode", "tone": "bad", "line": "The receiver and casters are off.",
+                      "actions": []}
+    assert p_old["key"] == "receiver" and p_old["title"] == "Starting up"
 
 
 def test_hero_quality_minimums_for_onocoy():
@@ -884,7 +893,8 @@ def test_onocoy_today_verdict_from_one_rule():
     # The bar: what is left of today's allowance (463 of 473 s), empty once missed.
     assert round(out[0]["share"], 4) == round(463 / 473, 4) and out[6]["share"] == 173 / 473
     assert out[1]["share"] == 0 and out[2]["share"] == 0 and out[12]["share"] == 0
-    assert out[1]["verdict"] == "Missed" and out[1]["tone"] == "bad" and out[1]["why"] == "Today's offline time is over the budget."
+    # Missed is amber like At risk: never weaker than it, never redder than the top card.
+    assert out[1]["verdict"] == "Missed" and out[1]["tone"] == "warn" and out[1]["why"] == "Today's offline time is over the budget."
     assert out[2]["verdict"] == "Missed" and "epochs were lost" in out[2]["why"]
     assert out[3]["verdict"] == "At risk" and out[3]["why"] == "Offline time is counting now."
     assert out[4]["verdict"] == "At risk" and out[4]["hero"] == "stopped"
@@ -908,7 +918,8 @@ def test_state_during_maintenance_restarts_and_one_caster_down():
     day stays on track. The restart plan shows while the receiver is fixed or looked for (full recovery only). A line
     about one caster names it as its subject (its row on the page does not say why again)."""
     maint = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600, "rtcm_age_ms": 300})
-    maint_quiet = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600, "rtcm_age_ms": 9000},
+    # Quiet past the station's 10 s: nothing arrives any more.
+    maint_quiet = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600, "rtcm_age_ms": 12000},
                          casters=[caster(0, "Onocoy", "wait_data")])
     hold = {"reboot_hold": ["admin"], "reboot_hold_left_s": 1578, "reboot_cap_wait_s": None, "reboot_cap_limit": None}
     stall = status(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "link_restart", **hold})
@@ -940,13 +951,14 @@ def test_status_page_leaves_out_the_notice_the_top_card_says():
                   ("notices", [stopped, "receiver"]), ("notices", [settings, ""]), ("notices", [settings, "logs"]),
                   ("notices", [settings_down, ""]), ("notices", [trial, ""]), ("notices", [trial_stopped, ""])])
     keys = [[k for k, _ in o] for o in out]
-    assert keys[0] == ["update"], out[0]
+    # The Status page's Station card says the update: no notice there; another page keeps it.
+    assert keys[0] == [], out[0]
     assert keys[1] == ["maintenance", "update"]
     assert keys[2] == [] and keys[3] == ["onocoy_stopped:0"]
     assert out[3][0][1] == "Onocoy stopped: duplicate stream"
     # Logs' Health card says it too (above its alert, with Restart): no notice there either.
     assert keys[4] == [] and keys[5] == [] and keys[6] == []
-    assert out[0][0][1] == "Update available"
+    assert out[1][1][1] == "Update available"
     assert keys[7] == [] and keys[8] == ["wifi"]
     (t,) = heroes(trial)
     assert t["trial"] == "Cabin" and t["line"].startswith("If it gets no address there")
@@ -1476,8 +1488,13 @@ def test_header_says_the_station_state_in_a_word_in_the_top_cards_colour():
         (dict(receiver={"state": "idle"}, casters=wait), ("receiver", "info", "Starting up")),
         (dict(receiver={"state": "detecting"}, casters=wait), ("receiver", "info", "Searching")),
         (dict(receiver={"state": "configuring"}, casters=wait), ("receiver", "info", "Configuring")),
-        (dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "backoff")]),
+        (dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "streaming")]),
          ("onocoy_setup", "warn", "Not set up")),
+        (dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "connecting")]),
+         ("onocoy_setup", "warn", "Not set up")),
+        # Nothing streams and the caster that is on fails: that first (Onocoy's setup waits on the Status page's card).
+        (dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "backoff")]),
+         ("casters_down", "bad", "Not streaming")),
         (dict(casters=[caster(0, "Onocoy", "disabled")]), ("no_caster", "warn", "No caster")),
         (dict(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "auth_failed", reason="auth")]),
          ("casters_down", "warn", "Partly streaming")),
@@ -1587,6 +1604,16 @@ def test_a_notice_hides_on_the_page_whose_card_says_it():
               "settings": {"wifi", "update", "maintenance"}, "logs": {"settings"}, "logs/history": set()}
     for p, keys in zip(pages, out[:6]):
         assert set(keys) == every - hidden[p], p
+    # The Status page: the one its top card says (settings storage here), the update (its Station card says it) and every
+    # stopped caster (the top card names each, as its subject or in an "Also:" line).
+    ((status_keys,),) = [[[k for k, _ in o] for o in run_ui([("notices", [BUSY, ""])])]]
+    assert set(status_keys) == every - {"settings", "update", "onocoy_stopped:0"}, status_keys
+    two = status(casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate"),
+                          caster(1, "Bench", "stopped", stop_reason="rejected")])
+    two_k = [[k for k, _ in o] for o in run_ui([("notices", [two, p]) for p in ("", "receiver", "casters")])]
+    assert two_k == [[], ["onocoy_stopped:0", "onocoy_stopped:1"], []]
+    (two_hero,) = heroes(two)
+    assert two_hero["key"] == "stopped" and two_hero["also"] == ["caster:1"]
     safe_k, uart_k, journal_k, trial_k = out[6:9], out[9:12], out[12:15], out[15:18]
     # The Status page's top card says each of them; Settings has safe mode, the update session and the Wi-Fi trial;
     # the Receiver page's panel says the closed port.
@@ -1826,15 +1853,15 @@ def test_no_corrections_from_a_fixed_position_far_enough_to_stop_them():
 
 def test_fixed_position_far_never_beside_a_green_chip_or_a_bare_mark():
     """While corrections flow with the fixed position far off, the Receiver card's chip is amber like the Status page's
-    top card, and the Status page's position row says it in words."""
+    top card, which says it (its title, its line or an "Also:" line); the Status page's position row does not."""
     chips = run_ui([("rxChip", status(alerts=[FIXED_FAR])),
                     ("rxChip", status(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "auth_failed",
                                                                                          reason="auth")], alerts=[FIXED_FAR])),
                     ("rxChip", status())])
     assert chips == [["Position looks wrong", "warn"], ["Position looks wrong", "warn"], ["Streaming", "ok"]]
-    words = run_ui([("posWords", [{"position_locked": True, "profile_applied": True}, True, True]),
-                    ("posWords", [{"position_locked": True, "profile_applied": True}, True, False])])
-    assert words == [["Locked, ", "looks wrong"], ["Locked", None]]
+    # The Status page's position row says "Locked" whatever the check says: the top card says the position looks wrong.
+    words = run_ui([("statusPos", [{"position_locked": True, "profile_applied": True}, True])])
+    assert words == ["Locked"]
 
 
 def test_a_session_of_the_stations_own_keeps_the_recovery_line():

@@ -2,28 +2,35 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Status page: the top card (title, one line, its button, "Also:" lines,
- * a few facts), Onocoy's day, three receiver rows and the other casters,
- * all from stationState() (15-state.js), so no card contradicts another.
+ * Status page: a summary that is always whole. The top card (title, one
+ * line, its buttons, "Also:" lines, a few facts), then four cards in the
+ * same places whatever the state: Onocoy today, Receiver, Casters,
+ * Station. Each card says its few facts once and has one link out, in its
+ * head, to the page that manages them; nothing is edited here. All of it
+ * from stationState() (15-state.js), so no card contradicts another.
  *
  * Patched into the page on every update with no element that has a
  * listener of its own (patch() would replace it, and the focus with it):
  * the buttons carry data-act and the page's root handles their clicks;
  * patchDetect() keeps the focus when "Check again" goes. The title is
  * announced when it changes. Visitors without a session see the top card,
- * the casters by name and state, and the signals with the band table.
+ * the casters by name and state (while the form lists any), and the
+ * signals with the band table. The root is .status-page: without contact
+ * every colour on it goes grey (app.css, body.no-contact).
  */
 
 Views.dashboard = {
   title: 'Status',
   create(el) {
+    el.classList.add('status-page');
     /* The public page's signals (GET /api/gnss/signals, open to visitors while public status is on). */
     let sig = null;
     const stopSig = isAdmin() ? null : poller(5000, async () => {
       sig = await api('GET', '/api/gnss/signals');
       render();
     });
-    /* Open casters that stream while Onocoy does (GET /api/casters warnings): fetched when the turned-on casters change. */
+    /* Open casters that stream while Onocoy does (GET /api/casters warnings): fetched when the turned-on casters change; the
+     * top card says it in an "Also:" line. */
     let openSlots = [], openKey = '';
     const loadOpen = async () => {
       try {
@@ -83,8 +90,10 @@ function stateLead(s, st, lead) {
   return st.trial ? ['Trying ' + st.trial + ': ', trialLeftEl(s.network || {}), '. ', lead] : lead;
 }
 
-function heroCard(s, st) {
-  const acts = st.actions.map(heroAction).filter(Boolean);
+/* links: the pages the cards' links open; a button named after one of them (page) is left out, the card's link says it. */
+function heroCard(s, st, also, links) {
+  const acts = st.actions.filter(a => !(a.page && (links || []).indexOf(a.href) >= 0)).map(heroAction).filter(Boolean);
+  also = also || st.also;
   /* The no-receiver plan line says whether a search runs: it takes the focus when "Check again" goes (patchDetect). */
   const noRx = st.key === 'no_receiver';
   const focusLine = on => (on ? { tabindex: '-1', 'data-detect-text': '' } : {});
@@ -93,13 +102,35 @@ function heroCard(s, st) {
     h('p', Object.assign({ class: 'line' }, focusLine(noRx && !st.plan)), stateLead(s, st)),
     acts.length ? h('div', { class: 'hero-actions form-actions' }, acts) : null,
     st.plan ? h('p', Object.assign({ class: 'muted small' }, focusLine(noRx)), st.plan) : null,
-    st.also.length ? h('ul', { class: 'also' }, st.also.map(a => h('li', { class: a.tone },
+    also.length ? h('ul', { class: 'also' }, also.map(a => h('li', { class: a.tone },
       h('span', { class: 'ic', 'aria-hidden': 'true' }, a.tone === 'bad' ? '✕' : a.tone === 'info' ? 'i' : '!'),
       h('span', null, h('strong', null, 'Also: ' + a.title + '.'), a.text ? ' ' + a.text : ''),
       link('Details', a.href, 'btn small')))) : null,
     st.facts.length ? h('dl', { class: 'facts' }, st.facts.map(f => h('div', null, h('dt', null, f[0]),
       h('dd', null, f[1], f[2] ? h('a', { href: f[2], 'aria-label': 'Change ' + f[0].toLowerCase() }, 'Change') : null)))) : null);
 }
+
+/* The top card's "Also:" lines with the duplicate stream (open casters on beside Onocoy: GET /api/casters), in tone order. */
+function heroAlso(s, st, openSlots) {
+  const open = (openSlots || []).map(n => (s.casters || []).find(c => c.slot === n && !emptySlot(c))).filter(Boolean);
+  if (!open.length) return st.also;
+  return st.also.concat([{ id: 'dup_stream', title: 'Onocoy and ' + andList(open.map(casterName)) + ' are both on',
+    text: 'A duplicate stream can get the Onocoy account banned.', tone: 'warn', href: '#/casters' }])
+    .sort((a, b) => (TONE_ORDER[a.tone] || 0) - (TONE_ORDER[b.tone] || 0));
+}
+
+/*
+ * A card's one link, in its head: want ({label, name, href}) where it
+ * applies, else manage; manage too when the top card's button already goes
+ * there. name: the link's accessible name, starting with its visible word.
+ */
+function headLink(st, want, manage) {
+  const l = !want || st.actions.some(a => a.href === want.href) ? manage : want;
+  return h('a', { href: l.href, class: 'head-link', 'aria-label': l.name }, l.label);
+}
+
+/* A card's one muted line when it has nothing of its own to say. */
+const mutedLine = text => h('p', { class: 'muted' }, text);
 
 /* The next 00:00 UTC in local time ("8:00 PM"). */
 function utcResetTime() {
@@ -108,20 +139,41 @@ function utcResetTime() {
     .toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
-/* Onocoy's day: the verdict, the offline time left in large type with its bar (full on a clean day, empty once missed), and two rows. */
+/*
+ * Onocoy's day while it counts: the verdict, the offline time left in large
+ * type with its bar (full on a clean day), and two rows; once missed the
+ * verdict, one line with the reset and the rows. Otherwise one muted line
+ * on when the card shows, with the link that sets Onocoy up or turns it on
+ * (Manage when the top card's button does).
+ */
 function onocoyCard(s, st) {
-  const d = onocoyDay(s, st);
-  if (!d) return null;
+  const slot = onocoySlot(s);
+  const manage = { label: 'Manage', name: 'Manage Onocoy', href: '#/casters' };
+  const card = (chip, want, ...kids) => h('section', { class: 'card fit-kv' },
+    cardHead('Onocoy today', chip, headLink(st, want, manage)), kids);
+  const d = st.key === 'safe_mode' ? null : onocoyDay(s, st);
+  if (!d) {
+    if (st.key === 'safe_mode') return card(null, null, mutedLine('Shows after safe mode.'));
+    if (!slot || !slot.onocoy_ready) {
+      return card(null, { label: 'Set up', name: 'Set up Onocoy', href: ONOCOY_SETUP_HASH }, mutedLine('Shows once Onocoy is set up.'));
+    }
+    return card(null, { label: 'Turn on', name: 'Turn on Onocoy', href: ONOCOY_SETUP_HASH }, mutedLine('Shows while Onocoy is on.'));
+  }
   const c = st.ono;
-  return h('section', { class: 'card fit-kv' },
-    cardHead('Onocoy today', badge(d.verdict, d.tone)),
+  const rows = kv([['Online today', fmt.dur(c.today_online_s)], ['Offline today', fmt.dur(d.known ? d.down : c.today_offline_s)]]);
+  if (d.verdict === 'Missed') {
+    const at = utcResetTime();   /* "8:00 PM", or "8:00 p.m." in a locale that ends it with a period */
+    return card(badge(d.verdict, d.tone), null,
+      h('p', { class: 'small t-' + d.tone }, d.why + ' Resets at ' + at + (/\.$/.test(at) ? '' : '.')), rows);
+  }
+  return card(badge(d.verdict, d.tone), null,
     d.why ? h('p', { class: 'small t-' + d.tone }, d.why) : null,
     d.known ? [
       h('div', { class: 'big t-' + d.tone }, d.left > 0 ? fmt.dur(d.left) : '0' + NB + 's', ' ', h('small', null, 'offline time left')),
       bar(d.share, d.tone, 'Today\'s offline time left', Math.floor(d.share * 100) + NB + '% left'),
       h('div', { class: 'muted small' }, 'Resets at ' + utcResetTime() + ' · Estimate')] :
       h('p', { class: 'muted' }, 'Shows once the station has the time (from GNSS or the internet).'),
-    kv([['Online today', fmt.dur(c.today_online_s)], ['Offline today', fmt.dur(d.known ? d.down : c.today_offline_s)]]));
+    rows);
 }
 
 /* "Locked", "Surveying, 11 min left"... (position_locked is the stored profile's base mode: it runs once the receiver took the
@@ -140,48 +192,84 @@ function positionText(r, delivering) {
   return r.position_known === false ? 'No position yet' : 'Not locked';
 }
 
-const okMark = ok => h('span', { class: ok ? 't-ok' : 't-warn' }, ok ? '✓' : '✕');
-
-/* The Status page's position row as [text, amber words or null]: positionText, and in words when the fixed position is far
- * from the receiver's own (a bare mark beside "Locked" would read as a failed lock). */
-function positionWords(r, delivering, far) {
-  const t = positionText(r, delivering);
-  return far ? [t + ', ', 'looks wrong'] : [t, null];
+/*
+ * The quality facts about Onocoy the page says elsewhere ('bands', 'glonass',
+ * 'g1230'): the top card's line (key quality), Onocoy's verdict line (day.why)
+ * and the bands "Also:" line. The Bands row says only the rest.
+ */
+function qualitySaid(st, day) {
+  const q = st.quality;
+  const said = [];
+  const first = q.fewBands ? 'bands' : q.noGlonass ? 'glonass' : 'g1230';
+  if (st.key === 'quality') {
+    said.push(first);
+    if (q.fewBands && q.noGlonass) said.push('glonass');
+  }
+  if (day && day.why && day.why === qualityShort(q)) said.push(first);
+  if (st.also.some(a => a.id === 'bands')) said.push('bands');
+  return said;
 }
 
-function positionView(r, delivering, far) {
-  const w = positionWords(r, delivering, far);
-  return w[1] ? [w[0], h('span', { class: 't-warn' }, w[1])] : w[0];
-}
-
-/* The band row: "4 bands on Galileo ✓ (the most this receiver can reach)"; a dash while the receiver does not deliver.
- * told: the top card says what Onocoy needs. */
-function bandsView(r, q, told) {
+/*
+ * The Bands row: "4 on Galileo" ("4 bands" without a constellation); a dash
+ * until the receiver delivers. While Onocoy counts, what its quality score
+ * misses, in amber, unless the page says it already (qualitySaid): too few
+ * bands mark the count, with a muted "Onocoy needs 4".
+ */
+function bandsView(st, day) {
+  const q = st.quality;
   if (!q.known) return DASH;
-  const ok = !q.fewBands;
-  const note = !ok ? (told ? null : 'Onocoy needs 4.') : /UM982/.test(r.model || '') ? 'The most this receiver can reach.' : null;
-  return [q.bands + ' bands' + (q.sys ? ' on ' + lbl(L.sys, q.sys) : ''), ' ', okMark(ok),
-    note ? h('div', { class: 'muted small' }, note) : null];
+  const count = q.sys ? q.bands + ' on ' + lbl(L.sys, q.sys) : q.bands + ' bands';
+  if (!st.ono) return count;
+  const said = qualitySaid(st, day);
+  const tell = k => said.indexOf(k) < 0;
+  return [q.fewBands ? h('span', { class: 't-warn' }, count + NB + '✕') : count,
+    q.fewBands && tell('bands') ? h('span', { class: 'muted' }, ' · Onocoy needs 4') : null,
+    q.noGlonass && tell('glonass') ? h('span', { class: 't-warn' }, ' · no GLONASS') : null,
+    q.refused1230 && tell('g1230') ? h('span', { class: 't-warn' }, ' · GLONASS does not count') : null];
 }
 
-/* GLONASS: ticked only when it is tracked and the receiver accepted message 1230. */
-function glonassView(r, q) {
-  if (!q.known) return DASH;
-  if (q.noGlonass) return ['Not tracked ', okMark(false)];
-  if (q.refused1230) return ['Message 1230 refused ', okMark(false)];
-  return r.rtcm1230_supported === true ? ['Tracked ', okMark(true)] : 'Tracked';
+/* The corrections from the receiver: arriving (st.arriving: by the station's own freshness), none this boot, or none for how long. */
+function correctionsText(age, arriving) {
+  if (arriving) return 'Arriving';
+  return typeof age === 'number' ? 'None for ' + fmt.dur(age / 1000) : 'None yet';
 }
 
-/* Three receiver rows and a link to the page with the rest; without corrections only the position; no card while no receiver is
- * found or its port is closed (the top card says it, and a position would be a stale fact). */
-function receiverCard(s, st) {
-  if (st.key === 'no_receiver' || st.key === 'uart_closed') return null;
+/* States in which the receiver's rows mean nothing (the top card says why): every row a dash. */
+const RX_DASH_KEYS = ['safe_mode', 'journal', 'updating', 'uart_closed', 'no_receiver'];
+/* The receiver's own states in which they mean nothing, whatever the top card says first (settings that cannot be saved). */
+const RX_DASH_STATES = ['idle', 'detecting', 'no_receiver', 'flashing', 'flash_recovery'];
+
+/* The receiver's rows mean nothing: a state the top card explains, or the receiver missing, updating or behind a closed port. */
+function rxDashed(s, st) {
   const r = s.receiver || {};
-  const live = st.delivering;
+  return RX_DASH_KEYS.indexOf(st.key) >= 0 || !!r.uart_closed || r.journal === 'running' ||
+    (RX_DASH_STATES.indexOf(rxState(s)) >= 0 && !r.rx_maintenance) ||
+    (s.alerts || []).some(a => a.id === 'no_receiver' && a.source === 'station');
+}
+
+/*
+ * Four rows, always in this order: Satellites, Bands, Corrections, Position.
+ * The two counts only while the receiver delivers and the corrections arrive
+ * (st.quality.known, st.arriving: the station's 10 s), so they never disagree
+ * with each other or sit beside no corrections. No colour but
+ * Onocoy's quality needs (bandsView) and a fixed position the station finds
+ * far from the receiver's own (amber, as the top card or its "Also:" line
+ * says it): never green beside a red top card.
+ */
+function receiverCard(s, st) {
+  const r = s.receiver || {};
+  const dash = rxDashed(s, st);
+  const q = st.quality;
+  const live = !dash && q.known && st.arriving;
+  const pos = dash ? DASH : positionText(r, st.delivering);
+  const far = !dash && r.position_locked && (s.alerts || []).some(a => a.id === 'fixed_far' && a.source === 'station');
   return h('section', { class: 'card fit-kv' },
-    cardHead('Receiver', link('Details', '#/receiver', 'head-link')),
-    kv([live ? ['Bands', bandsView(r, st.quality, st.key === 'quality')] : null, live ? ['GLONASS', glonassView(r, st.quality)] : null,
-      ['Position', positionView(r, live, (s.alerts || []).some(a => a.id === 'fixed_far'))]]));
+    cardHead('Receiver', headLink(st, null, { label: 'Manage', name: 'Manage the receiver', href: '#/receiver' })),
+    kv([['Satellites', live && typeof r.satellites === 'number' ? fmt.num(r.satellites) : DASH],
+      ['Bands', live ? bandsView(st, onocoyDay(s, st)) : DASH],
+      ['Corrections', dash ? DASH : correctionsText(r.rtcm_age_ms, st.arriving)],
+      ['Position', pos === NOT_CHECKED ? NOT_CHECKED_CHIP : far ? h('span', { class: 't-warn' }, 'Fixed, check it') : pos]]));
 }
 
 /** Today's online share: whole at 0 % and 100 %, else two decimals, rounded down (never "100.00" short of 100). */
@@ -190,73 +278,102 @@ function onlineShare(on, off) {
   return (p === 0 || p === 100 ? String(p) : (Math.floor(p * 100) / 100).toFixed(2)) + NB + '%';
 }
 
-/* Why a caster that is on does not stream, when the state's name does not say it: the station's hint or the last failure. */
-function casterWhy(c) {
-  if (c.state === 'stopped') return capFirst(lbl(L.stop, c.stop_reason || 'none')) + '. No new attempt until you act.';
-  if (c.state === 'wait_data') return null;
-  const fail = c.reason && c.reason !== 'none' ? lbl(L.fail, c.reason) : '';
-  const why = c.hint ? capFirst(c.hint) : fail !== lbl(L.caster, c.state) ? fail : '';
-  const next = c.next_retry_s ? 'Next try in ' + fmt.dur(c.next_retry_s) + '.' : '';
-  return [why ? why.replace(/\.?$/, '.') : '', next].filter(Boolean).join(' ') || null;
-}
-
 /*
- * One caster in one line: name · state · today's share; why and a button
- * when it does not stream, unless the top card names it (it says why).
+ * One caster in one line: name · state · today's share (admin, a caster
+ * that is on, not Onocoy while its own card shows its day). No why and no
+ * button: the top card says why (its line or an "Also:" line). The state of
+ * a caster the top card's line names (st.named) in neutral words, not a
+ * second coloured statement. Each separator stays with the part after it.
  */
-function casterRow(c, admin, subject) {
-  const off = !casterOn(c);
-  const tone = casterTone(c.state);
-  const share = admin && !off && (c.today_online_s || c.today_offline_s) ?
+function casterRow(c, admin, st) {
+  const tone = (st.named || []).indexOf(c.slot) >= 0 ? '' : casterTone(c.state);
+  const share = admin && casterOn(c) && !(st.ono && st.ono.slot === c.slot) && (c.today_online_s || c.today_offline_s) ?
     onlineShare(c.today_online_s || 0, c.today_offline_s || 0) + ' today' : null;
-  const trouble = admin && !off && c.state !== 'streaming' && c.slot !== subject;
-  const why = trouble ? casterWhy(c) : null;
   return h('div', { class: 'cline' },
     h('div', null,
-      h('span', { class: 'name' }, casterName(c)),
-      ' · ', h('span', { class: tone ? 't-' + tone : 'muted' }, lbl(L.caster, c.state)),
-      share ? h('span', { class: 'muted' }, ' · ' + share) : null,
-      why ? h('div', { class: 'muted small' }, why) : null),
-    trouble ? link(c.state === 'stopped' ? 'What to do' : 'Details', '#/casters', 'btn small') : null);
+      h('span', { class: 'name' }, breakable(casterName(c))),
+      ' ', h('span', { class: 'nowrap' }, '· ', h('span', { class: tone ? 't-' + tone : 'muted' }, lbl(L.caster, c.state))),
+      share ? [' ', h('span', { class: 'muted nowrap' }, '· ' + share)] : null));
 }
 
 /*
- * The casters besides Onocoy (the public form: every caster), one line
- * each, only once one is set up; with the duplicate-stream line while an
- * open caster streams together with Onocoy.
+ * The casters, one line each: for the admin every one set up, Onocoy first
+ * while it counts and left out otherwise (its own card says it); "No other
+ * casters." beside an Onocoy that is set up, else "No casters yet.", with a
+ * link to add one; in safe mode when it shows. The public form: every caster
+ * it lists, no link (no tabs there); no card when it lists none (safe mode,
+ * none set up: the top card says it).
  */
-function castersCard(s, st, admin, openSlots) {
+function castersCard(s, st, admin) {
   const ono = admin ? onocoySlot(s) : null;
-  const list = (s.casters || []).filter(c => !emptySlot(c) && c !== ono);
-  if (!list.length) return null;
-  const open = (openSlots || []).map(n => list.find(c => c.slot === n)).filter(Boolean);
-  return h('section', { class: 'card' + (admin && st.ono ? ' wide' : '') },
-    h('h2', null, admin && ono && ono.onocoy_ready ? 'Other casters' : 'Casters'),
-    h('div', { class: 'clines' }, list.map(c => casterRow(c, admin, st.subject))),
-    open.length ? msg('warn', h('div', { class: 'cline' }, h('div', null,
-      h('strong', null, 'Onocoy and ' + andList(open.map(casterName)) + ' are both on.'),
-      ' A duplicate stream can get the Onocoy account banned.'), link('Details', '#/casters', 'btn small'))) : null);
+  const counting = admin && st.ono ? st.ono.slot : -1;
+  const list = (s.casters || []).filter(c => !emptySlot(c) && (c !== ono || c.slot === counting))
+    .sort((a, b) => (b.slot === counting) - (a.slot === counting) || a.slot - b.slot);
+  const safe = st.key === 'safe_mode';
+  if (!admin && (safe || !list.length)) return null;
+  const add = !safe && !list.length ? { label: 'Add', name: 'Add a caster', href: '#/casters' } : null;
+  const none = safe ? 'Shows after safe mode.' : ono && ono.onocoy_ready !== false ? 'No other casters.' : 'No casters yet.';
+  const body = list.length && !safe ? h('div', { class: 'clines' }, list.map(c => casterRow(c, admin, st))) : mutedLine(none);
+  return h('section', { class: admin ? 'card' : 'card wide' },
+    admin ? cardHead('Casters', headLink(st, add, { label: 'Manage', name: 'Manage casters', href: '#/casters' })) : h('h2', null, 'Casters'),
+    body);
 }
 
-/* Order: the top card; Onocoy's day beside the receiver; the other casters under both. */
+/* Parts joined by " · ", each separator kept with the part after it: a narrow screen breaks before a separator, never after. */
+function dotted(parts) {
+  return parts.map((p, i) => (i ? [' ', h('span', { class: 'nowrap' }, '· ', p)] : p));
+}
+
+/* The Wi-Fi row: the network and its signal in a word (Logs' Overview has the figure); during a trial the signal only (the
+ * top card names the network). */
+function wifiView(n) {
+  if (!n.ssid) return 'Not set up';
+  const known = typeof n.rssi === 'number' && n.rssi < 0;
+  if (n.cred_trial) return known ? rssiView(n.rssi, true) : DASH;
+  if (!n.online) return dotted([n.ssid, known ? 'no address yet' : 'Offline']);
+  return known ? dotted([n.ssid, rssiView(n.rssi, true)]) : n.ssid;
+}
+
+/*
+ * The Firmware row, in the Updates page's words (renderApp): the version
+ * running, then what is offered ("v0.4.0 available", a receiver update) or
+ * rolled back in its first minute; "up to date" only when the latest release
+ * is the one running (never on a development build, whose version says
+ * "+dev"). {parts, update}: update when the Updates page has something to do.
+ */
+function firmwareWords(dev, u) {
+  const parts = [dev.version || DASH];
+  const app = u.app_available && u.app_version && !(u.app_reverted_in_stage1 && u.app_reverted_version === u.app_version);
+  const back = !app && u.app_reverted_in_stage1 && u.app_reverted_version;
+  if (app) parts.push(u.app_version + ' available');
+  if (back) parts.push(u.app_reverted_version + ' rolled back');
+  if (u.gnss_available) parts.push(app ? 'receiver update' : 'receiver update available');
+  const update = !!(app || back || u.gnss_available);
+  if (!update && !dev.dev_build && u.app_version && u.app_version === dev.version) parts.push('up to date');
+  return { parts: parts, update: update };
+}
+
+/* The station itself: its Wi-Fi, how long it runs, its firmware; Update while the Updates page has something. */
+function stationCard(s, st) {
+  const fw = firmwareWords(s.device || {}, s.update || {});
+  return h('section', { class: 'card fit-kv' },
+    cardHead('Station', headLink(st, fw.update ? { label: 'Update', name: 'Update the firmware', href: '#/settings/updates' } : null,
+      { label: 'Manage', name: 'Manage station settings', href: '#/settings' })),
+    kv([['Wi-Fi', wifiView(s.network || {})], ['Running for', fmt.dur(s.uptime_s)], ['Firmware', dotted(fw.parts)]]));
+}
+
+/* The top card, then four cards in reading order: Onocoy today and the receiver, the casters and the station. */
 function adminDashboard(s, st, openSlots) {
-  const ono = onocoyCard(s, st);
-  const others = castersCard(s, st, true, openSlots);
-  const rx = receiverCard(s, st);
-  /* A card with none beside it takes the row (no empty cell): Onocoy's day pairs with the receiver, the receiver with the other
-   * casters when Onocoy's day is not shown (with it they take a row of their own). */
-  const lone = !ono && !(rx && others) ? rx || others : null;
-  if (lone) lone.classList.add('wide');
-  if (ono && !rx) ono.classList.add('wide');
-  return [heroCard(s, st), h('div', { class: 'grid starts' }, ono, rx, others)];
+  const cards = [onocoyCard(s, st), receiverCard(s, st), castersCard(s, st, true), stationCard(s, st)];
+  const links = cards.map(c => c.querySelector('.head-link')).filter(Boolean).map(a => a.getAttribute('href'));
+  return [heroCard(s, st, heroAlso(s, st, openSlots), links), h('div', { class: 'grid' }, cards)];
 }
 
-/* The public page: the top card, the casters, and the signals while the receiver delivers them. */
+/* The public page: the top card, the casters while the form lists any, and the signals while the receiver delivers them. */
 function publicDashboard(s, st, sig) {
-  const casters = castersCard(s, st, false, null);
   const sigCard = st.delivering && sig && (sig.systems || []).length ? signalsCard(sig) : null;
-  if (casters) casters.classList.add('wide');
-  return [heroCard(s, st), h('div', { class: 'grid' }, casters, sigCard)];
+  const cards = [castersCard(s, st, false), sigCard].filter(Boolean);
+  return [heroCard(s, st), cards.length ? h('div', { class: 'grid' }, cards) : null];
 }
 
 /*

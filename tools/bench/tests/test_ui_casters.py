@@ -23,6 +23,7 @@ when Node.js is not installed.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -183,7 +184,7 @@ const ctx = {
 };
 vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
-  '\nreturn { casterEditor, openCasterWarning, casterDetails, casterSummary, casterChip, stationState, adminDashboard,\n' +
+  '\nreturn { casterEditor, openCasterWarning, casterDetails, casterSummary, casterChip, stationState, adminDashboard, heroAlso,\n' +
   '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard, healthCard, chipCard, signalsHead, bandTable, kv,\n' +
   '  startLines, foldRows, diagReceiverCard, receiverPage, renderLive,\n' +
   '  setStatus: s => { S.status = s; }, setSession: s => { S.session = s; },\n' +
@@ -608,8 +609,12 @@ for (const c of JSON.parse(casesJson)) {
     continue;
   }
   if (c.fn === 'dashboard') {
-    /* The Status page as built from a status: the top card's title, line and short line, its facts, and per card
-     * (by title) the label/value rows and the one-line casters. */
+    /* The Status page as built from a status: the top card's title, line and short line, its "Also:" lines ([id, title,
+     * text, tone]), its facts; the grid's class and its cards in order; per card (by title) the label/value rows, the
+     * one-line casters, the bar, the chip [text, class], its links [text, href, accessible name] (head: in its title row),
+     * its paragraphs, the large figure, the coloured parts [class, text], the parts kept on one line, the buttons and
+     * whether it is wide. The top card's buttons as shown [text, href], the caster slots its line names, and every class
+     * on the page that gives a colour (a tone, a tone's text, a C/N0 class). */
     const st = ui.stationState(c.status, c.admin);
     const kids = (c.admin ? ui.adminDashboard(c.status, st, c.open || []) : ui.publicDashboard(c.status, st, null)).filter(Boolean);
     const all = kids.flatMap(k => [...visible(k)]);
@@ -619,22 +624,52 @@ for (const c of JSON.parse(casesJson)) {
       for (let i = 0; i + 1 < kids.length; i += 2) r.push([kids[i].textContent, kids[i + 1].textContent]);
       return r;
     });
+    const cls = e => ' ' + (e.className || '') + ' ';
     const hero = all.find(e => e.tagName === 'SECTION' && e.className.indexOf('hero') >= 0);
     const hv = [...visible(hero)];
-    const cards = {};
+    const grid = kids.find(k => k !== hero);
+    const cards = {}, order = [];
     for (const sec of all.filter(e => e.tagName === 'SECTION' && e !== hero)) {
       const v = [...visible(sec)];
       const bar = v.find(e => (e.className || '').indexOf('bar') === 0);
-      cards[v.find(e => e.tagName === 'H2').textContent] = { rows: pairs(v),
+      const head = v.find(e => e.className === 'card-head');
+      const chip = v.find(e => cls(e).indexOf(' badge ') >= 0);
+      const big = v.find(e => cls(e).indexOf(' big ') >= 0);
+      const title = v.find(e => e.tagName === 'H2').textContent;
+      order.push(title);
+      cards[title] = { rows: pairs(v),
         lines: v.filter(e => e.className === 'cline').map(e => e.kids[0].textContent),
+        /* Each line's state word's class (t-ok, t-warn, t-bad; muted): in the part after the name, with its separator. */
+        lineTones: v.filter(e => e.className === 'cline').map(e => e.kids[0].kids[2].kids[1].className),
+        /* Each line's name as its parts: text, and "|" where it may wrap (a <wbr>). */
+        names: v.filter(e => e.className === 'cline').map(e => e.kids[0].kids[0].kids.map(k => (k instanceof Text ? k.data :
+          k.tagName === 'WBR' ? '|' : k.textContent)).join('')),
         bar: bar ? { cls: bar.className, role: bar.attrs.role, label: bar.attrs['aria-label'], now: bar.attrs['aria-valuenow'],
-          text: bar.attrs['aria-valuetext'] || null, width: bar.kids[0].style.width } : null };
+          text: bar.attrs['aria-valuetext'] || null, width: bar.kids[0].style.width } : null,
+        chip: chip ? [chip.textContent, chip.className] : null,
+        links: v.filter(e => e.tagName === 'A').map(e => [e.textContent, e.getAttribute('href'), e.getAttribute('aria-label'),
+          !!head && head.contains(e)]),
+        notes: v.filter(e => e.tagName === 'P').map(e => [e.textContent, e.className]),
+        big: big ? [big.textContent, big.className] : null,
+        tones: v.filter(e => / t-(ok|warn|bad) /.test(cls(e))).map(e => [/ t-(ok|warn|bad) /.exec(cls(e))[1], e.textContent]),
+        nowrap: v.filter(e => cls(e).indexOf(' nowrap ') >= 0).map(e => e.textContent),
+        buttons: v.filter(e => e.tagName === 'BUTTON' || (e.tagName === 'A' && cls(e).indexOf(' btn ') >= 0)).length,
+        wide: cls(sec).indexOf(' wide ') >= 0,
+        text: sec.textContent };
     }
     const plan = hv.find(e => e.tagName === 'P' && e.className === 'muted small');
     const factLinks = hv.filter(e => e.tagName === 'A' && e.parent && e.parent.tagName === 'DD')
       .map(e => [e.textContent, e.getAttribute('href'), e.getAttribute('aria-label')]);
+    const also = (c.admin ? ui.heroAlso(c.status, st, c.open || []) : st.also).map(a => [a.id, a.title, a.text, a.tone]);
+    const heroActs = hv.find(e => cls(e).indexOf(' hero-actions ') >= 0);
+    const toneClasses = [...new Set(all.flatMap(e => (e.className || '').split(/\s+/))
+      .filter(k => /^(t-)?(ok|warn|bad|info)$|^cnr-/.test(k)))].sort();
     out.push({ head: hv.find(e => e.tagName === 'H2').textContent, line: hv.find(e => e.className === 'line').textContent,
-      plan: plan ? plan.textContent : null, facts: pairs(hv), factLinks: factLinks, cards: cards });
+      plan: plan ? plan.textContent : null, facts: pairs(hv), factLinks: factLinks, cards: cards, order: order,
+      grid: grid ? grid.className : null, also: also, key: st.key, tone: st.tone, subject: st.subject,
+      actions: st.actions.map(a => [a.label, a.href || null]), named: st.named,
+      heroButtons: heroActs ? heroActs.kids.map(e => [e.textContent, e.getAttribute('href')]) : [], toneClasses: toneClasses,
+      heroAlsoShown: hv.filter(e => e.tagName === 'LI').map(e => [e.className, e.kids[1].textContent]) });
     continue;
   }
   if (c.fn === 'header') {
@@ -935,11 +970,19 @@ def st_caster(slot: int, name: str, state: str, **kw) -> dict:
     """A caster of GET /api/status (Onocoy set up and counting)."""
     c = {"slot": slot, "name": name, "empty": False, "enabled": state != "disabled", "protected": name == "Onocoy",
          "host": name.lower() + ".example", "state": state, "reason": "none", "next_retry_s": 0, "stop_reason": "none",
-         "onocoy_ready": name == "Onocoy", "today_online_s": 600, "today_offline_s": 0}
+         "onocoy_ready": name == "Onocoy", "today_online_s": 600, "today_offline_s": 0, "hint": ""}
     if name == "Onocoy":
         c.update({"streak_ok": True, "budget_s": 473, "budget_left_s": 463, "data_rate_permille": 1000, "connected_s": 600})
     c.update(kw)
     return c
+
+
+def over(s: dict, **kw) -> dict:
+    """s with each section's fields overridden (a dict merges into the section, anything else replaces it)."""
+    s = json.loads(json.dumps(s))
+    for k, v in kw.items():
+        s[k] = {**s[k], **v} if isinstance(v, dict) and isinstance(s.get(k), dict) else v
+    return s
 
 
 def st_status(**kw) -> dict:
@@ -951,62 +994,457 @@ def st_status(**kw) -> dict:
          "casters": [st_caster(0, "Onocoy", "streaming")],
          "health": {"level": "ok", "last_step": "none", "recovery_mode": "full"},
          "alerts": [], "availability": {"protected_down_today_s": 0, "budget_left_s": 463}}
-    for k, v in kw.items():
-        s[k] = {**s[k], **v} if isinstance(v, dict) and isinstance(s.get(k), dict) else v
-    return s
+    return over(s, **kw)
+
+
+# ---- The Status page: the always-full dashboard ----
+
+RTK2GO = dict(today_online_s=43190, today_offline_s=9)
+# Onocoy and RTK2go set up and streaming; Wi-Fi "Home" at -61 dBm; v0.3.0, up to date; 28 satellites, locked.
+BASE = st_status(uptime_s=86400, device={"version": "v0.3.0", "dev_build": False},
+                 network={"online": True, "ssid": "Home", "rssi": -61, "upstream": "ok", "cred_trial": False},
+                 receiver={"satellites": 28, "position_locked": True, "profile_applied": True, "profile_acknowledged": True,
+                           "position_known": True, "surveying": False, "survey_unfinished": False, "survey_window_left_s": 0,
+                           "identity_confirmed": True, "rx_maintenance": False, "uart_closed": False},
+                 casters=[st_caster(0, "Onocoy", "streaming"), st_caster(1, "RTK2go", "streaming", **RTK2GO)],
+                 update={"app_available": False, "app_version": "v0.3.0", "app_reverted_version": "",
+                         "app_reverted_in_stage1": False, "gnss_available": False})
+NO_DAY = {k: None for k in ("streak_ok", "budget_s", "budget_left_s", "data_rate_permille")}
+ONO_SETUP = st_caster(0, "Onocoy", "disabled", enabled=False, onocoy_ready=False, today_online_s=0, **NO_DAY)
+ONO_OFF = st_caster(0, "Onocoy", "disabled", enabled=False, today_online_s=0, **NO_DAY)
+RTK = st_caster(1, "RTK2go", "streaming", **RTK2GO)
+FEW = {"best_bands": 3, "best_sys": "gps"}
+NO_RTCM = {"rtcm_age_ms": None, "satellites": None, "best_bands": 0, "best_sys": None, "glonass": False,
+           "position_locked": False, "surveying": True, "survey_unfinished": True}
+WAITING = [st_caster(0, "Onocoy", "wait_data"), st_caster(1, "RTK2go", "wait_data", **RTK2GO)]
+SAFE_SLOT = {"name": None, "enabled": False, "protected": False, "onocoy_ready": False, "state": "disabled"}
+
+# Every state of the page (admin), by name.
+MATRIX = {
+    "healthy": BASE,
+    "quality": over(BASE, receiver=FEW, alerts=[{"id": "bands", "source": "health"}]),
+    "quality_down": over(BASE, receiver=FEW, casters=[st_caster(0, "Onocoy", "streaming"),
+                                                      st_caster(1, "RTK2go", "auth_failed", reason="auth", next_retry_s=30)]),
+    "quality_down_alert": over(BASE, receiver=FEW, alerts=[{"id": "bands", "source": "health"}],
+                               casters=[st_caster(0, "Onocoy", "streaming"), st_caster(1, "RTK2go", "auth_failed", reason="auth")]),
+    "noglonass": over(BASE, receiver={"glonass": False}, casters=[st_caster(0, "Onocoy", "backoff", reason="timeout",
+                                                                            next_retry_s=20), RTK]),
+    "stall": over(BASE, receiver={"rtcm_age_ms": 6000}, health={"level": "recovering", "last_step": "link_restart"},
+                  casters=WAITING),
+    "noant": over(BASE, receiver=NO_RTCM, health={"level": "degraded", "recovery_mode": "alerts_only"},
+                  alerts=[{"id": "no_rtcm", "source": "health"}], casters=WAITING),
+    "norx": over(BASE, receiver={"state": "no_receiver", "responding": False, "next_detect_in_s": 23, "rtcm_age_ms": None},
+                 alerts=[{"id": "no_receiver", "source": "station", "saw_bytes": False, "next_detect_in_s": 23}], casters=WAITING),
+    "uart": over(BASE, receiver={"state": "detecting", "uart_closed": True, "rtcm_age_ms": None}, casters=WAITING),
+    "journal": over(BASE, receiver={"journal": "waiting", "state": "idle"}, casters=WAITING),
+    "updating": over(BASE, receiver={"state": "flashing", "rtcm_age_ms": None}, casters=WAITING),
+    "maint": over(BASE, receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 1500}),
+    "maint_unchecked": over(BASE, receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 1500,
+                                            "identity_confirmed": False, "position_locked": False}),
+    "held": over(BASE, receiver={"first_apply_held": True, "rtcm_age_ms": None, "best_bands": 0, "position_locked": False,
+                                 "position_known": False}, casters=WAITING),
+    "starting": over(BASE, receiver={"state": "idle", "rtcm_age_ms": None}, casters=WAITING),
+    "configuring": over(BASE, receiver={"state": "configuring"}, casters=WAITING),
+    "survey": over(BASE, receiver={"position_locked": False, "surveying": True, "survey_window_left_s": 300}),
+    "fixed_far": over(BASE, alerts=[{"id": "fixed_far", "source": "station", "horizontal_m": 120, "vertical_m": 3,
+                                     "distance_m": 120, "height_only": False, "sea_level": False}]),
+    "setup": over(BASE, casters=[ONO_SETUP, RTK], availability={"budget_left_s": None}),
+    "refused": over(BASE, casters=[ONO_SETUP, st_caster(1, "RTK2go", "auth_failed", reason="auth", next_retry_s=240, **RTK2GO)],
+                    availability={"budget_left_s": None}),
+    "setup_rx": over(BASE, casters=[ONO_SETUP, st_caster(1, "RTK2go", "wait_data", **RTK2GO)], receiver=NO_RTCM,
+                     alerts=[{"id": "no_rtcm", "source": "health"}], availability={"budget_left_s": None}),
+    "onooff": over(BASE, casters=[ONO_OFF, RTK], availability={"budget_left_s": None}),
+    "onooff_none": over(BASE, casters=[ONO_OFF, {"slot": 1, "name": "", "empty": True, "enabled": False, "state": "disabled"}],
+                        availability={"budget_left_s": None}),
+    "missed": over(BASE, casters=[st_caster(0, "Onocoy", "streaming", streak_ok=False, budget_left_s=0), RTK],
+                   availability={"protected_down_today_s": 600, "budget_left_s": 0}),
+    "stopped": over(BASE, casters=[st_caster(0, "Onocoy", "stopped", stop_reason="in_use"), RTK]),
+    "stopped_banned": over(BASE, casters=[st_caster(0, "Onocoy", "stopped", stop_reason="in_use"),
+                                          st_caster(1, "RTK2go", "banned", reason="banned", next_retry_s=3600, **RTK2GO)]),
+    "partly": over(BASE, casters=[st_caster(0, "Onocoy", "streaming"),
+                                  st_caster(1, "RTK2go", "auth_failed", reason="auth", next_retry_s=50, today_online_s=0,
+                                            today_offline_s=20)]),
+    "trial": over(BASE, network={"cred_trial": True, "cred_trial_left_s": 80, "pending_ssid": "Cabin", "ssid": "Cabin",
+                                 "rssi": -58}),
+    "nonet": over(BASE, network={"upstream": "no_upstream"}, alerts=[{"id": "no_upstream", "source": "health"}],
+                  casters=[st_caster(0, "Onocoy", "backoff", reason="dns", next_retry_s=20),
+                           st_caster(1, "RTK2go", "backoff", reason="dns", next_retry_s=40, **RTK2GO)]),
+    "settings": over(BASE, device={"settings_available": False}, alerts=[{"id": "settings_degraded", "source": "health"}],
+                     casters=[st_caster(0, "Onocoy", "streaming"), st_caster(1, "RTK2go", "config_error", reason="config")]),
+    "safe": over(BASE, safe_mode={"active": True, "crashes": 3, "retry_in_s": 2690}, receiver={"state": "idle", "rtcm_age_ms": None},
+                 casters=[{**st_caster(0, "Onocoy", "disabled"), **SAFE_SLOT, **NO_DAY},
+                          {**st_caster(1, "RTK2go", "disabled"), **SAFE_SLOT}],
+                 alerts=[{"id": "safe_mode", "source": "health"}], availability={"budget_left_s": None}),
+    "update": over(BASE, update={"app_available": True, "app_version": "v0.4.0", "gnss_available": True, "gnss_build": 19152}),
+    "rollback": over(BASE, update={"app_available": True, "app_version": "v0.4.0", "app_reverted_version": "v0.4.0",
+                                   "app_reverted_in_stage1": True}),
+    "devbuild": over(BASE, device={"version": "eb17ae3+dev", "dev_build": True}),
+    "noclock": over(BASE, casters=[st_caster(0, "Onocoy", "streaming", budget_left_s=None), RTK],
+                    availability={"budget_left_s": None}),
+    "nocasters": over(BASE, casters=[{"slot": 0, "name": "", "empty": True, "enabled": False, "protected": False,
+                                      "onocoy_ready": False, "state": "disabled"},
+                                     {"slot": 1, "name": "", "empty": True, "enabled": False, "state": "disabled"}],
+                      availability={"budget_left_s": None}),
+    # The first seconds of a gap in the corrections: the station still calls the receiver streaming (up to 10 s).
+    "rtcm7": over(BASE, receiver={"rtcm_age_ms": 7000}),
+    # Settings cannot be saved (said first) while the receiver is missing or updating.
+    "settings_norx": over(BASE, device={"settings_available": False}, receiver={"state": "no_receiver", "rtcm_age_ms": None},
+                          alerts=[{"id": "settings_degraded", "source": "health"},
+                                  {"id": "no_receiver", "source": "station", "saw_bytes": False, "next_detect_in_s": 23}],
+                          casters=WAITING),
+    "settings_flash": over(BASE, device={"settings_available": False}, receiver={"state": "flashing", "rtcm_age_ms": None},
+                           alerts=[{"id": "settings_degraded", "source": "health"}], casters=WAITING),
+    # No Onocoy slot, every caster turned off.
+    "alloff": over(BASE, casters=[st_caster(0, "RTK2go", "disabled", onocoy_ready=False, **RTK2GO),
+                                  st_caster(1, "Bench", "disabled")], availability={"budget_left_s": None}),
+    # Onocoy not set up, RTK2go streaming, Bench refused.
+    "setup_too": over(BASE, casters=[ONO_SETUP, RTK, st_caster(2, "Bench", "auth_failed", reason="auth", next_retry_s=90)],
+                      availability={"budget_left_s": None}),
+}
+CARDS = ["Onocoy today", "Receiver", "Casters", "Station"]
+
+
+def dashboards(*statuses, admin: bool = True, open_slots: list | None = None) -> list[dict]:
+    return run_editor([{"fn": "dashboard", "status": s, "admin": admin, "open": open_slots or []} for s in statuses])
+
+
+def matrix() -> dict[str, dict]:
+    return dict(zip(MATRIX, dashboards(*MATRIX.values())))
+
+
+def rx_rows(o: dict) -> list[str]:
+    return [v for _, v in o["cards"]["Receiver"]["rows"]]
+
+
+def test_status_page_always_has_four_cards():
+    """Whatever the state the admin sees the same four cards in the same places (never a card missing, never one
+    taking the row): Onocoy today and Receiver, then Casters and Station. Each has one link, in its head, whose name
+    starts with its visible word, and no button: the top card has the page's buttons."""
+    for name, o in matrix().items():
+        assert o["order"] == CARDS, name
+        assert o["grid"] == "grid", name
+        for title in CARDS:
+            card = o["cards"][title]
+            assert not card["wide"], (name, title)
+            assert card["buttons"] == 0, (name, title)
+            assert len(card["links"]) == 1 and card["links"][0][3] is True, (name, title, card["links"])
+            text, _, aria, _ = card["links"][0]
+            assert aria.startswith(text), (name, title, card["links"])
+        assert o["cards"]["Receiver"]["links"][0][:3] == ["Manage", "#/receiver", "Manage the receiver"]
+
+
+def test_receiver_rows_in_every_state():
+    """The Receiver card's four rows, in every state: dashes while the receiver's figures mean nothing; the two counts
+    only while it delivers (so they never sit beside no corrections); the corrections' age; the position in a word."""
+    out = matrix()
+    for name, o in out.items():
+        assert [r[0] for r in o["cards"]["Receiver"]["rows"]] == ["Satellites", "Bands", "Corrections", "Position"], name
+    assert rx_rows(out["healthy"]) == ["28", "4 on Galileo", "Arriving", "Locked"]
+    assert rx_rows(out["noant"]) == ["–", "–", "None yet", "Surveying, paused"]
+    for name in ("norx", "uart", "safe", "journal", "updating", "starting"):
+        assert rx_rows(out[name]) == ["–"] * 4, name
+    # Settings cannot be saved, said first: a missing or updating receiver still dashes every row.
+    for name in ("settings_norx", "settings_flash"):
+        assert out[name]["key"] == "settings" and rx_rows(out[name]) == ["–"] * 4, name
+    # A gap shorter than the station's 10 s: the receiver still streams, the corrections still count as arriving, as
+    # the top card says (one freshness rule for the row and the counts).
+    assert out["rtcm7"]["key"] == "streaming" and rx_rows(out["rtcm7"]) == ["28", "4 on Galileo", "Arriving", "Locked"]
+    (gap,) = dashboards(over(BASE, receiver={"rtcm_age_ms": 12000, "state": "recovering"}, health={"level": "recovering"},
+                             casters=WAITING))
+    assert rx_rows(gap)[:3] == ["–", "–", "None for 12\u00a0s"]
+    assert rx_rows(out["maint"]) == ["28", "4 on Galileo", "Arriving", "Locked"]
+    assert rx_rows(out["maint_unchecked"]) == ["28", "4 on Galileo", "Arriving", "Not checked"]
+    assert rx_rows(out["survey"]) == ["28", "4 on Galileo", "Arriving", "Surveying, 5 min left"]
+    # The top card says the fixed position looks wrong: the row agrees in amber, without its sentence.
+    assert out["fixed_far"]["head"] == "Fixed position looks wrong" and rx_rows(out["fixed_far"])[3] == "Fixed, check it"
+    assert out["fixed_far"]["cards"]["Receiver"]["tones"] == [["warn", "Fixed, check it"]]
+    # A stall: the fixture still has satellites, but nothing arrives.
+    assert rx_rows(out["stall"])[:3] == ["–", "–", "None for 6 s"]
+    assert rx_rows(out["configuring"])[:3] == ["–", "–", "Arriving"]
+    assert rx_rows(out["held"])[:3] == ["–", "–", "None yet"]
+    # An older firmware without the count: a dash.
+    rx = dict(BASE["receiver"])
+    del rx["satellites"]
+    (old,) = dashboards({**BASE, "receiver": rx})
+    assert rx_rows(old) == ["–", "4 on Galileo", "Arriving", "Locked"]
+
+
+def test_bands_row_says_onocoys_need_once():
+    """The Bands row marks too few bands while Onocoy counts, and says what Onocoy needs only when nothing else on the
+    page says it (the top card's line, Onocoy's verdict line, the bands "Also:" line); without Onocoy it is plain."""
+    few = MATRIX["quality"]
+    few_no_alert = over(BASE, receiver=FEW)
+    refused = over(BASE, receiver={"rtcm1230_supported": False})
+    why_says = MATRIX["quality_down"]
+    why_other = over(BASE, receiver=FEW, casters=[st_caster(0, "Onocoy", "backoff", reason="timeout"), RTK])
+    no_gl = MATRIX["noglonass"]
+    off = over(BASE, receiver=FEW, casters=[ONO_OFF, RTK])
+    alert = MATRIX["quality_down_alert"]
+    out = dashboards(few, few_no_alert, refused, why_says, why_other, no_gl, off, alert)
+    bands = [dict(o["cards"]["Receiver"]["rows"])["Bands"] for o in out]
+    tones = [o["cards"]["Receiver"]["tones"] for o in out]
+    assert out[0]["head"] == "Too few bands for Onocoy" and bands[0] == "3 on GPS ✕" and tones[0] == [["warn", bands[0]]]
+    assert bands[1] == "3 on GPS ✕"
+    assert out[2]["key"] == "quality" and bands[2] == "4 on Galileo" and tones[2] == []
+    # Onocoy's verdict line says it (another state on top).
+    assert out[3]["key"] == "casters_down" and out[3]["cards"]["Onocoy today"]["notes"][0][0].startswith("Only 3 bands")
+    assert bands[3] == "3 on GPS ✕"
+    assert out[4]["cards"]["Onocoy today"]["notes"][0][0] == "Offline time is counting now."
+    assert bands[4] == "3 on GPS ✕ · Onocoy needs 4"
+    assert bands[5] == "4 on Galileo · no GLONASS" and tones[5] == [["warn", " · no GLONASS"]]
+    assert out[6]["key"] == "streaming" and bands[6] == "3 on GPS" and tones[6] == []
+    # The bands "Also:" line says it: neither the row nor Onocoy's verdict line again (At risk stays).
+    assert "bands" in [a[0] for a in out[7]["also"]] and bands[7] == "3 on GPS ✕"
+    assert out[7]["cards"]["Onocoy today"]["chip"] == ["At risk", "badge warn"]
+    assert not any(n[0].startswith("Only 3 bands") for n in out[7]["cards"]["Onocoy today"]["notes"])
+
+
+def test_casters_card_lists_counting_onocoy_first():
+    """One line per caster set up: Onocoy first while it counts (no share: its own card has its day), left out when it
+    is not set up or turned off; today's share for the others that are on. "No other casters." beside an Onocoy that is
+    set up, else "No casters yet.", with Add (Manage when the top card's button adds one); when it shows in safe mode.
+    The public form: names and states, no share, no link, and no card while it lists none."""
+    swapped = over(BASE, casters=[st_caster(0, "RTK2go", "streaming", protected=False, onocoy_ready=False, **RTK2GO),
+                                  st_caster(2, "Onocoy", "streaming"),
+                                  st_caster(1, "Spare", "disabled", today_online_s=50)])
+    no_slots = over(BASE, casters=[])
+    public = {"api": 1, "public": True, "device": {"hostname": "onocoydiy"}, "safe_mode": {"active": False},
+              "receiver": {"state": "streaming", "best_bands": 4},
+              "casters": [{"slot": 0, "name": "Onocoy", "state": "streaming"}, {"slot": 1, "name": "Bench", "state": "disabled"}],
+              "health": {"level": "ok"}}
+    public_safe = {"api": 1, "public": True, "device": {"hostname": "onocoydiy"}, "safe_mode": {"active": True},
+                   "receiver": {"state": "idle", "best_bands": 0}, "casters": [], "health": {"level": "failed"}}
+    names = ["healthy", "setup", "onooff", "onooff_none", "nocasters", "safe", "partly"]
+    out = dashboards(*[MATRIX[n] for n in names], swapped, no_slots)
+    pub = dashboards(public, public_safe, {**public, "casters": []}, admin=False)
+    cas = {n: o["cards"]["Casters"] for n, o in zip(names + ["swapped", "no_slots"], out)}
+    assert cas["healthy"]["lines"] == ["Onocoy · Streaming", "RTK2go · Streaming · 99.97 % today"]
+    # Each separator stays with the part after it: a phone breaks before a separator, never after it.
+    assert [" ".join(p.split()) for p in cas["healthy"]["nowrap"]] == ["· Streaming", "· Streaming", "· 99.97 % today"]
+    assert cas["swapped"]["lines"] == ["Onocoy · Streaming", "RTK2go · Streaming · 99.97 % today",
+                                       "Spare · Off"]
+    assert cas["setup"]["lines"] == cas["onooff"]["lines"] == ["RTK2go · Streaming · 99.97 % today"]
+    assert cas["partly"]["lines"][1] == "RTK2go · Login refused · 0 % today"
+    assert cas["onooff_none"]["lines"] == [] and cas["onooff_none"]["notes"] == [["No other casters.", "muted"]]
+    for n in ("nocasters", "no_slots"):
+        assert cas[n]["lines"] == [] and cas[n]["notes"] == [["No casters yet.", "muted"]], n
+    (unset,) = dashboards(over(BASE, casters=[ONO_SETUP], availability={"budget_left_s": None}))
+    assert unset["cards"]["Casters"]["notes"] == [["No casters yet.", "muted"]]
+    assert cas["onooff_none"]["links"][0][:3] == ["Add", "#/casters", "Add a caster"]
+    # No Onocoy slot either: the top card's button adds a caster, so the card's link is Manage.
+    assert out[4]["actions"] == [["Add a caster", "#/casters"]] and cas["nocasters"]["links"][0][0] == "Manage"
+    # The top card's button adds a caster: the card's link is Manage.
+    assert out[-1]["actions"] == [["Add a caster", "#/casters"]] and cas["no_slots"]["links"][0][:3] == [
+        "Manage", "#/casters", "Manage casters"]
+    assert cas["healthy"]["links"][0][:3] == ["Manage", "#/casters", "Manage casters"]
+    assert cas["safe"]["lines"] == [] and cas["safe"]["notes"] == [["Shows after safe mode.", "muted"]]
+    assert pub[0]["cards"]["Casters"]["lines"] == ["Onocoy · Streaming", "Bench · Off"]
+    assert pub[0]["cards"]["Casters"]["links"] == [] and pub[0]["cards"]["Casters"]["wide"]
+    assert pub[1]["head"] == "Safe mode" and pub[1]["line"] == "The receiver and casters are off."
+    # Nothing listed (safe mode, none set up): no card; the top card says it.
+    assert pub[1]["cards"] == {} and pub[1]["grid"] is None
+    assert pub[2]["cards"] == {} and pub[2]["line"] == "The station is not streaming to any caster."
+
+
+def test_station_card_rows():
+    """Wi-Fi, how long the station runs and its firmware, in a few words; Update while the Updates page has something
+    to do, unless the top card's button goes there."""
+    net = lambda **kw: over(BASE, network=kw)
+    upd = lambda **kw: over(BASE, update=kw)
+    cases = [BASE, net(ssid=None, online=False, rssi=None), net(online=False, rssi=-70), net(online=False, rssi=None),
+             net(rssi=None), MATRIX["trial"],
+             upd(app_available=True, app_version="v0.4.0"), upd(gnss_available=True, gnss_build=19152),
+             MATRIX["update"], MATRIX["rollback"],
+             upd(app_available=True, app_version="v0.4.0", app_reverted_version="v0.4.0", app_reverted_in_stage1=True,
+                 gnss_available=True),
+             MATRIX["devbuild"], upd(app_version="v0.4.0"), upd(app_version=None), MATRIX["safe"],
+             over(BASE, update={"app_available": True, "app_version": "v0.4.0"}, safe_mode={"active": True, "crashes": 3},
+                  receiver={"state": "idle"})]
+    out = dashboards(*cases)
+    rows = [dict(o["cards"]["Station"]["rows"]) for o in out]
+    links = [o["cards"]["Station"]["links"][0][:3] for o in out]
+    wifi = [" ".join(r["Wi-Fi"].split()) for r in rows[:6]]
+    # The signal in a word (Logs' Overview has the figure), kept on one line with its separator.
+    assert wifi == ["Home · Good", "Not set up", "Home · no address yet", "Home · Offline", "Home", "Good"]
+    assert [" ".join(t.split()) for t in out[0]["cards"]["Station"]["nowrap"]] == ["· Good", "Good", "· up to date"]
+    # The firmware's parts too: a phone breaks before a separator.
+    assert [" ".join(t.split()) for t in out[8]["cards"]["Station"]["nowrap"]][-2:] == ["· v0.4.0 available", "· receiver update"]
+    assert rows[0]["Running for"] == "1 d"
+    fw = [r["Firmware"] for r in rows[6:15]]
+    assert rows[0]["Firmware"] == "v0.3.0 · up to date" and links[0] == ["Manage", "#/settings", "Manage station settings"]
+    assert fw == ["v0.3.0 · v0.4.0 available", "v0.3.0 · receiver update available",
+                  "v0.3.0 · v0.4.0 available · receiver update", "v0.3.0 · v0.4.0 rolled back",
+                  "v0.3.0 · v0.4.0 rolled back · receiver update available",
+                  "eb17ae3+dev", "v0.3.0", "v0.3.0", "v0.3.0 \u00b7 up to date"]
+    assert all(lk == ["Update", "#/settings/updates", "Update the firmware"] for lk in links[6:11]), links
+    assert links[11:15] == [["Manage", "#/settings", "Manage station settings"]] * 4
+    # Safe mode: the top card's Updates button goes there already.
+    assert out[15]["actions"][0] == ["Updates", "#/settings/updates"] and links[15][0] == "Manage"
+    assert all(o["cards"]["Station"]["tones"] == [] for o in out)
+
+
+def test_onocoy_today_forms():
+    """Onocoy's day while it counts; otherwise one muted line on when the card shows (never a lone dash), with the link
+    that sets Onocoy up or turns it on, Manage when the top card's button does that; in safe mode when it shows. Missed
+    is amber, says it once: the chip, one line with the reset, the two rows (no figure, no bar), never red."""
+    names = ["healthy", "setup", "onooff_none", "setup_rx", "onooff", "safe", "noclock", "missed", "nocasters", "refused",
+             "alloff"]
+    out = dict(zip(names, dashboards(*[MATRIX[n] for n in names])))
+    ono = {n: o["cards"]["Onocoy today"] for n, o in out.items()}
+    assert ono["healthy"]["chip"] == ["On track", "badge ok"] and ono["healthy"]["big"][0].startswith("7 min 43 s")
+    assert [r[0] for r in ono["healthy"]["rows"]] == ["Online today", "Offline today"]
+    assert ono["healthy"]["links"][0][:3] == ["Manage", "#/casters", "Manage Onocoy"]
+    for o in ono.values():
+        assert all(n[0] not in ("", "–") for n in o["notes"]), o["notes"]
+    shows = {n: o["notes"] for n, o in ono.items() if o["chip"] is None}
+    assert shows == {"setup": [["Shows once Onocoy is set up.", "muted"]], "onooff_none": [["Shows while Onocoy is on.", "muted"]],
+                     "setup_rx": [["Shows once Onocoy is set up.", "muted"]], "onooff": [["Shows while Onocoy is on.", "muted"]],
+                     "safe": [["Shows after safe mode.", "muted"]], "nocasters": [["Shows once Onocoy is set up.", "muted"]],
+                     "refused": [["Shows once Onocoy is set up.", "muted"]], "alloff": [["Shows once Onocoy is set up.", "muted"]]}
+    assert all(ono[n]["rows"] == [] for n in shows)
+    # The top card's button sets Onocoy up or turns it on: the card's link is Manage.
+    assert out["setup"]["key"] == "onocoy_setup" and out["onooff_none"]["key"] == "no_caster"
+    for n in ("setup", "onooff_none", "safe"):
+        assert ono[n]["links"][0][:3] == ["Manage", "#/casters", "Manage Onocoy"], n
+    assert out["setup_rx"]["key"] == "no_rtcm"
+    for n in ("setup_rx", "nocasters", "refused", "alloff"):
+        assert ono[n]["links"][0][:3] == ["Set up", "#/casters/onocoy", "Set up Onocoy"], n
+    assert out["onooff"]["key"] == "streaming"
+    assert ono["onooff"]["links"][0][:3] == ["Turn on", "#/casters/onocoy", "Turn on Onocoy"]
+    assert ono["noclock"]["chip"] == ["On track", "badge ok"] and ono["noclock"]["big"] is None and ono["noclock"]["bar"] is None
+    assert ono["noclock"]["notes"] == [["Shows once the station has the time (from GNSS or the internet).", "muted"]]
+    assert [r[0] for r in ono["noclock"]["rows"]] == ["Online today", "Offline today"]
+    m = ono["missed"]
+    assert m["chip"] == ["Missed", "badge warn"] and len(m["notes"]) == 1 and m["notes"][0][1] == "small t-warn"
+    assert re.fullmatch(r"Today's offline time is over the budget\. Resets at \d{1,2}:\d\d\s?([AP]M|[ap]\.m)\.", m["notes"][0][0]), m["notes"]
+    assert m["big"] is None and m["bar"] is None and [r[0] for r in m["rows"]] == ["Online today", "Offline today"]
+    assert m["tones"] == [["warn", m["notes"][0][0]]]
+    # Missed with time still on the budget: no figure either.
+    (still,) = dashboards(over(BASE, casters=[st_caster(0, "Onocoy", "streaming", streak_ok=False, budget_left_s=200), RTK],
+                               availability={"protected_down_today_s": 10, "budget_left_s": 200}))
+    assert still["cards"]["Onocoy today"]["big"] is None and still["cards"]["Onocoy today"]["bar"] is None
+
+
+def test_card_colours_never_contradict_the_top_card():
+    """No card is greener than the top card about the same thing: Receiver and Station are never green, the Receiver
+    is amber only for Onocoy's quality needs and a fixed position the station finds far off; a caster's line is red or
+    amber only for a caster the top card counts or lists in an "Also:" line, or for a wait under a top card that is not
+    green, and neutral for one its line names (no second coloured statement); Onocoy's chip is green On track or amber
+    At risk or Missed, never red, and never green while Onocoy does not stream."""
+    for name, o in matrix().items():
+        s = MATRIX[name]
+        assert o["cards"]["Station"]["tones"] == [] and o["cards"]["Station"]["chip"] is None, name
+        rx = o["cards"]["Receiver"]["tones"]
+        assert all(t == "warn" for t, _ in rx), (name, rx)
+        far = [t for t in rx if t[1] == "Fixed, check it"]
+        assert not far or any(a["id"] == "fixed_far" for a in s["alerts"]), (name, rx)
+        assert len(far) == len(rx) or o["cards"]["Onocoy today"]["chip"] is not None, (name, rx)
+        chip = o["cards"]["Onocoy today"]["chip"]
+        if chip:
+            assert chip in (["On track", "badge ok"], ["At risk", "badge warn"], ["Missed", "badge warn"]), (name, chip)
+            ono = next(c for c in s["casters"] if c.get("protected"))
+            if chip[0] == "On track":
+                assert ono["state"] == "streaming" and o["key"] not in ("rx_stopped", "no_rtcm", "no_satellites"), name
+        also = {a[0] for a in o["also"]}
+        by_name = {c["name"]: c for c in s["casters"] if not c.get("empty")}
+        for line, cls in zip(o["cards"]["Casters"]["lines"], o["cards"]["Casters"]["lineTones"]):
+            c = by_name[line.split(" · ")[0]]
+            if c["slot"] in o["named"]:
+                assert cls == "muted", (name, line, cls)
+            if cls not in ("t-warn", "t-bad"):
+                continue
+            named = o["key"] == "casters_down" or c["slot"] == o["subject"] or "caster:%d" % c["slot"] in also
+            waiting = c["state"] in ("wait_data", "wait_network", "connecting") and o["tone"] != "ok"
+            assert named or waiting, (name, line, cls)
+        if o["tone"] == "ok":
+            assert all(c["state"] == "streaming" for c in s["casters"] if c.get("enabled") and c["state"] != "disabled"), name
 
 
 def test_status_page_says_each_fact_once():
-    """No receiver: one plain line on top, the next search and the restart in one short line, and no band or GLONASS
-    rows (nothing to say) while the survey reads paused. A caster the top card names shows its name and today's share
-    only, with no count of streaming casters beside it. The public page waits for the receiver in plain words."""
-    hold = {"reboot_hold": ["admin"], "reboot_hold_left_s": 1578}
-    no_rx = st_status(receiver={"state": "no_receiver", "rtcm_age_ms": None},
-                      alerts=[{"id": "no_receiver", "source": "station", "saw_bytes": False, "next_detect_in_s": 23}],
-                      health={"level": "recovering", "last_step": "rescan", **hold},
-                      casters=[st_caster(0, "Onocoy", "wait_data")])
-    stall = st_status(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "link_restart"})
-    partly = st_status(casters=[st_caster(0, "Onocoy", "streaming"),
-                                st_caster(1, "Bench", "auth_failed", reason="auth", next_retry_s=50, today_online_s=0,
-                                          today_offline_s=20)])
-    public = {"api": 1, "public": True, "device": {"hostname": "onocoydiy"}, "receiver": {"state": "no_receiver"},
-              "casters": [{"slot": 0, "name": "Onocoy", "state": "wait_data"}, {"slot": 1, "name": "Bench", "state": "disabled",
-                                                                               "enabled": False}],
-              "health": {"level": "recovering"}}
-    out = run_editor([{"fn": "dashboard", "status": x, "admin": True} for x in (no_rx, stall, st_status(), partly)] +
-                     [{"fn": "dashboard", "status": public, "admin": False}])
-    assert out[0]["line"] == "Nothing arrives from the receiver. Check its power and the COM1 cable."
-    assert out[0]["plan"] == "Next search in 23\u00a0s \u00b7 station restart in 27\u00a0min at the latest"
-    # No receiver found: no Receiver card (the top card says it; a position would be a stale fact).
-    assert "Receiver" not in out[0]["cards"] and "Onocoy today" in out[0]["cards"]
-    assert out[1]["head"] == "Receiver stopped sending data"
-    assert out[1]["cards"]["Receiver"]["rows"] == [["Position", "Surveying, paused"]]
-    assert [r[0] for r in out[2]["cards"]["Receiver"]["rows"]] == ["Bands", "GLONASS", "Position"]
-    assert out[2]["cards"]["Receiver"]["rows"][2] == ["Position", "Surveying, 5\u00a0min left"]
-    assert out[3]["line"] == "Bench is not streaming: login refused. Next try in 50\u00a0s."
-    # The caster the top card names keeps its one-word state in its line (the top card says why and when).
-    assert out[3]["cards"]["Other casters"]["lines"] == ["Bench \u00b7 Login refused \u00b7 0\u00a0% today"]
-    assert out[3]["facts"] == []
-    assert out[4]["cards"]["Casters"]["lines"] == ["Onocoy \u00b7 Waiting for the receiver", "Bench \u00b7 Off"]
+    """Each fact once: no top-card title or line inside a card, and no three words of a card in the top card's title,
+    line or "Also:" lines; no caster count among the facts (the Casters card lists them); the duplicate stream an
+    "Also:" line; Onocoy not set up or off said once (the Onocoy card's line says when it shows, not that)."""
+    out = matrix()
+    norm = lambda t: re.sub(r"[^a-z0-9 ]", "", t.lower().replace(" ", " ").replace("·", " ")).split()
+    for name, o in out.items():
+        top = " " + " ".join(norm(" ".join([o["head"], o["line"]] + [a[1] + " " + a[2] for a in o["also"]]))) + " "
+        for title, card in o["cards"].items():
+            # A one-word title ("Streaming") is a caster's state word too; longer ones are never in a card.
+            assert len(norm(o["head"])) < 2 or o["head"] not in card["text"], (name, title)
+            assert not o["line"] or o["line"] not in card["text"], (name, title)
+            # A caster line's state word is the top card's sentence in a word ("Waiting for the receiver" beside "The station
+            # is listening for the receiver"): its name and share count, not the word.
+            lines = [p for ln in card["lines"] for i, p in enumerate(ln.split(" \u00b7 ")) if i != 1]
+            atoms = [v for r in card["rows"] for v in r] + lines + [n[0] for n in card["notes"]]
+            atoms += [card["big"][0]] if card["big"] else []
+            for atom in atoms:
+                w = norm(atom)
+                for i in range(len(w) - 2):
+                    assert " " + " ".join(w[i:i + 3]) + " " not in top, (name, title, atom)
+        assert all(f[0] != "Casters" for f in o["facts"]), name
+        # Onocoy off or not set up: said at most once, by the top card, never by a Casters line; the Onocoy card says
+        # when it shows, in every such state.
+        if name in ("setup", "refused", "setup_rx", "onooff", "onooff_none", "nocasters", "alloff", "setup_too"):
+            ono = o["cards"]["Onocoy today"]["notes"]
+            shows = [n[0] for n in ono if n[0] in ("Shows once Onocoy is set up.", "Shows while Onocoy is on.")]
+            said = [t for t in [o["head"], o["line"]] + [n[0] for c in o["cards"].values() for n in c["notes"]] +
+                    o["cards"]["Casters"]["lines"]
+                    if t not in shows and "Onocoy" in t and
+                    re.search(r"not set up|turned off|\bOff\b|Onocoy is set up|Onocoy is on|Onocoy on", t)]
+            assert len(said) <= 1 and len(shows) == 1 and ono == [[shows[0], "muted"]], (name, said, ono)
+            assert not any("Onocoy" in ln for ln in o["cards"]["Casters"]["lines"]), name
+    (dup,) = dashboards(BASE, open_slots=[1])
+    assert dup["also"] == [["dup_stream", "Onocoy and RTK2go are both on", "A duplicate stream can get the Onocoy account banned.",
+                            "warn"]]
+    assert dup["heroAlsoShown"] == [["warn", "Also: Onocoy and RTK2go are both on. A duplicate stream can get the Onocoy "
+                                             "account banned."]]
+    assert "duplicate" not in dup["cards"]["Casters"]["text"].lower()
+    # Three casters down: the line counts them, no fact counts them again (the Casters card lists each).
+    (three,) = dashboards(over(BASE, casters=[st_caster(0, "Onocoy", "connecting"), st_caster(1, "RTK2go", "backoff", reason="dns"),
+                                              st_caster(2, "Bench", "wait_network")]))
+    assert three["line"] == "3 casters are not streaming." and three["facts"] == []
 
 
-def test_status_quality_said_once_and_closed_port_panel():
-    """While the top card says what Onocoy needs (too few bands), the Bands row keeps its mark without repeating it;
-    another top card leaves the row's note. A closed receiver port: the panel says so, without the cable advice and
-    without "Check again" (the station keeps reopening its port)."""
-    few = st_status(receiver={"best_bands": 3, "best_sys": "gps"})
-    few_down = st_status(receiver={"best_bands": 3, "best_sys": "gps"},
-                         casters=[st_caster(0, "Onocoy", "streaming"), st_caster(1, "Bench", "auth_failed", reason="auth")])
-    out = run_editor([{"fn": "dashboard", "status": x, "admin": True} for x in (few, few_down)] + [
+def test_top_card_names_every_failing_caster():
+    """A caster on that a retry or the user must clear, which the top card's line does not name: an "Also:" line with
+    why and the next try (the Casters card shows its word only). Not for a retry the no-internet alert explains, a
+    wait, or while the line names or counts the casters down. Onocoy not set up while the casters that are on all
+    fail: the failure is the top card (red, naming the caster and why), and the Onocoy card offers the setup."""
+    backoff_nonet = over(BASE, alerts=[{"id": "no_upstream", "source": "health"}], receiver={"rtcm_age_ms": 30000},
+                         health={"level": "recovering", "last_step": "link_restart"},
+                         casters=[st_caster(0, "Onocoy", "wait_data"), st_caster(1, "RTK2go", "backoff", reason="dns")])
+    waits = over(BASE, receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "link_restart"},
+                 casters=[st_caster(0, "Onocoy", "wait_data"), st_caster(1, "RTK2go", "wait_network")])
+    refused, banned, partly, settings, too = dashboards(MATRIX["refused"], MATRIX["stopped_banned"], MATRIX["partly"],
+                                                        MATRIX["settings"], MATRIX["setup_too"])
+    nonet, wait = dashboards(backoff_nonet, waits)
+    assert (refused["key"], refused["head"], refused["tone"]) == ("casters_down", "Not streaming", "bad")
+    assert refused["line"] == "RTK2go is not streaming: login refused. Next try in 4\xa0min." and refused["subject"] == 1
+    assert not any(a[0].startswith("caster:") for a in refused["also"]) and refused["heroButtons"] == []
+    # The line names RTK2go: its row's word is neutral, not a second red statement.
+    assert refused["cards"]["Casters"]["lineTones"] == ["muted"] and refused["cards"]["Casters"]["tones"] == []
+    assert refused["cards"]["Onocoy today"]["links"][0][:2] == ["Set up", "#/casters/onocoy"]
+    # Something streams: Onocoy not set up stays on top, "too" is true, and the refused caster gets its "Also:" line.
+    assert too["key"] == "onocoy_setup" and too["line"].endswith(" to stream to Onocoy too.")
+    assert ["caster:2", "Bench not streaming", "Next try in 1\xa0min 30\xa0s.", "bad"] in too["also"]
+    assert too["cards"]["Casters"]["tones"] == [["ok", "Streaming"], ["bad", "Login refused"]]
+    assert banned["key"] == "stopped" and [a[0] for a in banned["also"]] == ["caster:1"]
+    assert banned["also"][0][3] == "bad"
+    assert settings["key"] == "settings" and "caster:1" in [a[0] for a in settings["also"]]
+    assert not any(a[0].startswith("caster:") for a in nonet["also"]), nonet["also"]
+    assert not any(a[0].startswith("caster:") for a in wait["also"]), wait["also"]
+    assert partly["key"] == "casters_down" and not any(a[0].startswith("caster:") for a in partly["also"])
+
+
+def test_closed_port_panel_says_so_without_cable_advice():
+    """A closed receiver port: the panel says so, without the cable advice and without "Check again" (the station
+    keeps reopening its port)."""
+    out = run_editor([
         {"fn": "norx", "status": {"receiver": {"state": "no_receiver", "uart_closed": True}, "alerts": []}},
         {"fn": "norx", "status": {"receiver": {"state": "no_receiver", "next_detect_in_s": 90},
                                   "alerts": [{"id": "no_receiver", "source": "station", "saw_bytes": False, "next_detect_in_s": 90}]}}])
-    assert out[0]["head"] == "Too few bands for Onocoy"
-    assert dict(out[0]["cards"]["Receiver"]["rows"])["Bands"] == "3 bands on GPS \u2715"
-    assert out[1]["head"] == "Partly streaming"
-    assert dict(out[1]["cards"]["Receiver"]["rows"])["Bands"] == "3 bands on GPS \u2715Onocoy needs 4."
-    assert out[2] == ["Receiver port closed", "The station cannot open its port to the receiver and keeps trying.", False]
-    assert out[3][0] == "No receiver found" and "cable" in out[3][1] and out[3][2] is True
+    assert out[0] == ["Receiver port closed", "The station cannot open its port to the receiver and keeps trying.", False]
+    assert out[1][0] == "No receiver found" and "cable" in out[1][1] and out[1][2] is True
 
 
 def test_status_page_names_receiver_management_with_a_way_to_change_it():
@@ -1067,6 +1505,48 @@ def test_header_shows_the_station_state_and_says_when_contact_is_lost():
     assert [o[9] for o in out[11:]] == [True, True, False, True]
     assert out[11][1] == out[12][1] == out[14][1] == "" and out[11][3] == ""
     assert out[13][1] == "No contact" and out[13][3] == "9\u00a0s" and out[13][11]
+
+
+def test_no_contact_greys_every_colour_on_the_status_page():
+    """Without contact (body.no-contact) the Status page shows the last state it had, so none of its colours may still
+    claim it: its root is .status-page, and one rule turns every colour class the page draws (in every state, the
+    admin's and a visitor's) to the grey of the header's dot: the tones (chips, bars, "Also:" marks, through --tone),
+    the tone words and figures, the signals' ticks and C/N0."""
+    css = re.sub(r"/\*.*?\*/", "", (UI_JS.parent / "app.css").read_text(), flags=re.S)
+    rules = re.findall(r"(body\.no-contact \.status-page[^{]*)\{([^}]*)\}", css)
+    covered = {c for sel, _ in rules for c in re.findall(r"\.([\w-]+)", sel)} - {"no-contact", "status-page"}
+    decl = " ".join(d for _, d in rules)
+    assert "--tone: var(--off)" in decl and "--tone-soft: var(--off-soft)" in decl and "color: var(--off)" in decl
+    assert {"ok", "warn", "bad", "info", "t-ok", "t-warn", "t-bad", "cnr-weak", "cnr-ok", "cnr-good", "on"} <= covered
+    assert ".status-page .bands td.on" in " ".join(sel for sel, _ in rules)
+    assert "el.classList.add('status-page');" in (UI_JS / "40-dashboard.js").read_text()
+    public = {"api": 1, "public": True, "device": {"hostname": "onocoydiy"}, "safe_mode": {"active": False},
+              "receiver": {"state": "streaming", "best_bands": 4},
+              "casters": [{"slot": 0, "name": "Onocoy", "state": "streaming"}, {"slot": 1, "name": "Bench", "state": "backoff"}],
+              "health": {"level": "ok"}}
+    drawn = {k for o in list(matrix().values()) + dashboards(public, admin=False) for k in o["toneClasses"]}
+    assert {"ok", "warn", "bad", "t-ok", "t-warn", "t-bad"} <= drawn
+    assert drawn <= covered, drawn - covered
+
+
+def test_top_card_buttons_never_repeat_a_cards_link():
+    """A top-card button named after a page (Receiver, Casters) goes where a card's link in its head goes already: the
+    page leaves it out. Real actions stay (Set up Onocoy, What to do, Check again, End now, Leave safe mode)."""
+    out = matrix()
+    for name, o in out.items():
+        heads = {lk[1] for c in o["cards"].values() for lk in c["links"] if lk[3]}
+        for label, href in o["heroButtons"]:
+            assert not (label in ("Receiver", "Casters") and href in heads), (name, label, href)
+    for name in ("quality", "partly", "nonet", "alloff", "refused"):
+        assert out[name]["heroButtons"] == [], (name, out[name]["actions"], out[name]["heroButtons"])
+    assert out["quality"]["actions"] == [["Receiver", "#/receiver"]]   # Logs' Overview keeps it (no cards there)
+    assert out["setup"]["heroButtons"] == [["Set up Onocoy", "#/casters/onocoy"]]
+    assert out["stopped"]["heroButtons"] == [["What to do", "#/casters"]]
+    assert out["norx"]["heroButtons"] == [["Check again", None]]
+    assert out["maint"]["heroButtons"] == [["End now", None]]
+    assert out["safe"]["heroButtons"] == [["Updates", "#/settings/updates"], ["Leave safe mode", None]]
+    assert out["onooff_none"]["heroButtons"] == [["Turn Onocoy on", "#/casters/onocoy"]]
+    assert out["nocasters"]["heroButtons"] == [["Add a caster", "#/casters"]]
 def test_setup_onocoy_step_sends_the_duplicate_stream_answer():
     """The setup's Onocoy step while RTK2go is on: the station asks about the duplicate stream; ticking the box (its
     input event reaches the form) keeps the question with "Save anyway" enabled, and that sends the answer."""
@@ -1164,9 +1644,8 @@ def test_onocoy_today_bar_is_the_share_of_the_allowance_left():
     # The screenshots' "On track, 7 min 31 s left": nearly full, not nearly empty.
     assert bars[1]["width"] == "95.3%" and bars[1]["cls"] == "bar ok"
     assert bars[2]["width"] == "36.6%" and bars[2]["cls"] == "bar warn" and bars[2]["text"] == "36\u00a0% left"
-    # Missed: empty and red, whatever offline time the budget still shows.
-    assert bars[3] == {**bars[3], "width": "0.0%", "cls": "bar bad", "now": "0", "text": "0\u00a0% left"}
-    assert bars[4]["width"] == "0.0%" and bars[4]["cls"] == "bar bad"
+    # Missed: no bar (the verdict and its line say it), whatever offline time the budget still shows.
+    assert bars[3] is None and bars[4] is None
 
 
 def health_hl(**kw) -> dict:
@@ -1382,6 +1861,17 @@ def test_long_values_wrap_at_their_separators():
                     "Remove the stored password"]
     css = (UI_JS.parent / "app.css").read_text()
     assert ".tight-kv .kv { grid-template-columns: minmax(7.5rem, min(13rem, 40%)) minmax(0, 1fr); }" in css
+    # The Status page: a caster's name wraps at its separators; a long value without any (a 32-character network name)
+    # wraps anywhere rather than widen its card.
+    long = over(BASE, network={"ssid": "HomeNetworkWithAVeryLongName2024"},
+                casters=[st_caster(0, "Onocoy", "streaming"),
+                         st_caster(1, "MyVeryLongCasterName-Backup_Two", "streaming"),
+                         st_caster(2, "", "streaming", host="caster.example-ntrip-service.org")])
+    (o,) = dashboards(long)
+    assert o["cards"]["Casters"]["names"] == ["Onocoy", "My|Very|Long|Caster|Name-|Backup_|Two", "caster.|example-|ntrip-|service.|org"]
+    assert dict(o["cards"]["Station"]["rows"])["Wi-Fi"].startswith("HomeNetworkWithAVeryLongName2024 \u00b7 ")
+    assert ".fit-kv .kv dd { overflow-wrap: anywhere; }" in css
+    assert ".cline .name { font-weight: 650; overflow-wrap: anywhere; }" in css
 
 
 def test_use_plain_port_keeps_its_spinner_and_focus_across_the_refresh():

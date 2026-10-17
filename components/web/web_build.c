@@ -277,7 +277,21 @@ const char *web_section_name(web_section_t sec)
 
 bool web_section_public(web_section_t sec)
 {
-    return sec == WEB_SEC_DEVICE || sec == WEB_SEC_RECEIVER || sec == WEB_SEC_HEALTH;
+    return sec == WEB_SEC_DEVICE || sec == WEB_SEC_SAFE_MODE || sec == WEB_SEC_RECEIVER || sec == WEB_SEC_HEALTH;
+}
+
+bool web_obs_satellites(const gnss_obs_summary_t *o, uint16_t *out)
+{
+    uint16_t n = 0;
+    bool any = false;
+    for (int i = 0; i < GNSS_SYS_COUNT; i++) {
+        if (o->sys[i].present) {
+            n = (uint16_t)(n + o->sys[i].satellites);
+            any = true;
+        }
+    }
+    *out = n;
+    return any;
 }
 
 /* Index of the enabled protected slot that is set up (Onocoy: mountpoint, username, password), -1 if none. */
@@ -357,10 +371,15 @@ static void sec_device(wj_t *w, const web_status_snap_t *s, bool pub)
     wj_obj_close(w);
 }
 
-static void sec_safe_mode(wj_t *w, const web_status_snap_t *s)
+/* The public form says only whether the station runs in safe mode (the crashes and the retry are the admin's). */
+static void sec_safe_mode(wj_t *w, const web_status_snap_t *s, bool pub)
 {
     wj_obj_open(w, "safe_mode");
     wj_bool(w, "active", s->boot.safe_mode);
+    if (pub) {
+        wj_obj_close(w);
+        return;
+    }
     if (s->boot.safe_mode) {
         uint32_t at = s->boot.safe_mode_retry_s;
         wj_uint(w, "retry_in_s", at > s->uptime_s ? at - s->uptime_s : 0);
@@ -470,6 +489,11 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
         wj_uint(w, "survey_window_left_s", st->survey_window_left_s);
         wj_bool(w, "survey_unfinished", st->survey_unfinished);
         wj_u32_or_null(w, "rtcm_age_ms", s->rtcm_age_ms);
+        if (s->obs_valid && s->sats_known) {
+            wj_uint(w, "satellites", s->satellites);
+        } else {
+            wj_null(w, "satellites");
+        }
         wj_str(w, "best_sys", have_best ? web_sys_name(s->best_sys) : NULL);
     }
     wj_uint(w, "best_bands", s->obs_valid ? s->best_bands : 0);
@@ -617,7 +641,7 @@ void web_build_section(wj_t *w, const web_status_snap_t *s, web_section_t sec, b
         sec_device(w, s, pub);
         break;
     case WEB_SEC_SAFE_MODE:
-        sec_safe_mode(w, s);
+        sec_safe_mode(w, s, pub);
         break;
     case WEB_SEC_NETWORK:
         sec_network(w, s);
@@ -656,8 +680,8 @@ void web_build_caster_summary(wj_t *w, const web_status_snap_t *s, size_t slot, 
     const ntrip_caster_status_t *t = &s->cst[slot];
     bool prot = c != NULL && c->protected_slot;
     bool empty = web_caster_slot_empty(c);
-    if (pub && empty) {
-        return;   /* the public form lists configured slots only */
+    if (pub && (empty || !s->cfg_valid)) {
+        return;   /* the public form lists configured slots only (none while the configs are not loaded: safe mode) */
     }
     wj_obj_open(w, NULL);
     wj_uint(w, "slot", slot);

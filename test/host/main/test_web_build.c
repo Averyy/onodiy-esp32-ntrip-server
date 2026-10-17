@@ -181,6 +181,111 @@ TEST_CASE("status receiver: GLONASS and message 1230 for Onocoy's quality score,
     cJSON_Delete(root);
 }
 
+TEST_CASE("status receiver: the satellites in the corrections, admin form only", "[web_build]")
+{
+    gnss_obs_summary_t o;
+    memset(&o, 0, sizeof(o));
+    uint16_t n = 99;
+    /* Nothing present (no MSM in the window, or a constellation that left it): unknown. */
+    o.sys[GNSS_SYS_GPS].satellites = 11;   /* the last epoch's count of a constellation no longer present */
+    TEST_ASSERT_FALSE(web_obs_satellites(&o, &n));
+    TEST_ASSERT_EQUAL_UINT16(0, n);
+    /* The constellations present, summed (past 255: the masks allow it). */
+    o.sys[GNSS_SYS_GPS].present = true;
+    o.sys[GNSS_SYS_GALILEO].present = true;
+    o.sys[GNSS_SYS_GALILEO].satellites = 9;
+    o.sys[GNSS_SYS_BEIDOU].satellites = 12;   /* not present: left out */
+    TEST_ASSERT_TRUE(web_obs_satellites(&o, &n));
+    TEST_ASSERT_EQUAL_UINT16(20, n);
+    for (int i = 0; i < GNSS_SYS_COUNT; i++) {
+        o.sys[i].present = true;
+        o.sys[i].satellites = 64;
+    }
+    TEST_ASSERT_TRUE(web_obs_satellites(&o, &n));
+    TEST_ASSERT_EQUAL_UINT16(64 * GNSS_SYS_COUNT, n);
+
+    fixture();
+    s_snap.satellites = 28;
+    s_snap.sats_known = true;
+    cJSON *root = build_status(false);
+    TEST_ASSERT_EQUAL(28, at(at(root, "receiver"), "satellites")->valueint);
+    cJSON_Delete(root);
+    /* None present, or no summary at all: null. */
+    s_snap.sats_known = false;
+    root = build_status(false);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "receiver"), "satellites")));
+    cJSON_Delete(root);
+    s_snap.sats_known = true;
+    s_snap.obs_valid = false;
+    root = build_status(false);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "receiver"), "satellites")));
+    cJSON_Delete(root);
+    /* The public form has no count. */
+    s_snap.obs_valid = true;
+    root = build_status(true);
+    TEST_ASSERT_NULL(cJSON_GetObjectItem(at(root, "receiver"), "satellites"));
+    cJSON_Delete(root);
+    /* The receiver section still fits the WebSocket's section buffer (1024 bytes) at its longest. */
+    memset(s_snap.st.receiver.model, 'M', sizeof(s_snap.st.receiver.model) - 1);
+    memset(s_snap.st.receiver.firmware, 'F', sizeof(s_snap.st.receiver.firmware) - 1);
+    s_snap.satellites = 65535;
+    s_snap.rtcm_age_ms = 4000000000u;
+    s_snap.st.survey_window_left_s = 4000000000u;
+    s_snap.st.next_detect_in_s = 4000000000u;
+    s_snap.st.sg_test.state = STATION_SGT_MEASURING;
+    s_snap.st.sg_test.phase = 1;
+    s_snap.st.sg_test.have_running = true;
+    s_snap.st.sg_test.left_s = 4000000000u;
+    s_snap.st.sg_test.decide_left_s = 4000000000u;
+    char frag[1024];
+    wj_t w;
+    wj_init_members(&w, frag, sizeof(frag));
+    web_build_section(&w, &s_snap, WEB_SEC_RECEIVER, false);
+    TEST_ASSERT_TRUE_MESSAGE(wj_ok(&w), frag);
+}
+
+TEST_CASE("public status in safe mode: safe mode said, no caster listed; the admin form keeps every slot", "[web_build]")
+{
+    fixture();
+    s_snap.boot.safe_mode = true;
+    s_snap.boot.crashes = 3;
+    s_snap.boot.safe_mode_retry_s = s_snap.uptime_s + 2690;
+    s_snap.cfg_valid = false;   /* safe mode: the caster configs are not loaded */
+    cJSON *root = build_status(true);
+    const cJSON *sm = at(root, "safe_mode");
+    TEST_ASSERT_EQUAL(1, cJSON_GetArraySize(sm));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(sm, "active")));
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(root, "casters")));
+    cJSON_Delete(root);
+    char frag[256];
+    wj_t w;
+    for (size_t slot = 0; slot < s_snap.slots; slot++) {
+        wj_init_elements(&w, frag, sizeof(frag));
+        web_build_caster_summary(&w, &s_snap, slot, true);
+        TEST_ASSERT_EQUAL_STRING("", wj_text(&w));
+    }
+    wj_init_members(&w, frag, sizeof(frag));
+    web_build_section(&w, &s_snap, WEB_SEC_SAFE_MODE, true);
+    TEST_ASSERT_EQUAL_STRING("\"safe_mode\":{\"active\":true}", wj_text(&w));
+    /* The admin form: every slot, nameless, and the crashes with the retry. */
+    root = build_status(false);
+    const cJSON *casters = at(root, "casters");
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(casters));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(cJSON_GetArrayItem(casters, 0), "name")));
+    sm = at(root, "safe_mode");
+    TEST_ASSERT_EQUAL(3, at(sm, "crashes")->valueint);
+    TEST_ASSERT_EQUAL(2690, at(sm, "retry_in_s")->valueint);
+    cJSON_Delete(root);
+    wj_init_elements(&w, frag, sizeof(frag));
+    web_build_caster_summary(&w, &s_snap, 1, false);
+    TEST_ASSERT_TRUE(strlen(wj_text(&w)) > 0);
+    /* Out of safe mode the public form lists the configured slots again. */
+    s_snap.cfg_valid = true;
+    wj_init_elements(&w, frag, sizeof(frag));
+    web_build_caster_summary(&w, &s_snap, 1, true);
+    TEST_ASSERT_EQUAL_STRING("{\"slot\":1,\"name\":\"Spare\",\"state\":\"disabled\"}", wj_text(&w));
+}
+
 TEST_CASE("public status leaves out hosts, addresses, SSID and versions", "[web_build]")
 {
     fixture();
@@ -189,8 +294,11 @@ TEST_CASE("public status leaves out hosts, addresses, SSID and versions", "[web_
     TEST_ASSERT_NULL(cJSON_GetObjectItem(root, "network"));
     TEST_ASSERT_NULL(cJSON_GetObjectItem(root, "update"));
     TEST_ASSERT_NULL(cJSON_GetObjectItem(root, "alerts"));
-    TEST_ASSERT_NULL(cJSON_GetObjectItem(root, "safe_mode"));
     TEST_ASSERT_NULL(cJSON_GetObjectItem(root, "availability"));
+    /* Safe mode: whether it runs, nothing more (the crashes and the retry are the admin's). */
+    const cJSON *sm = at(root, "safe_mode");
+    TEST_ASSERT_EQUAL(1, cJSON_GetArraySize(sm));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(sm, "active")));
     const cJSON *dev = at(root, "device");
     TEST_ASSERT_EQUAL(1, cJSON_GetArraySize(dev));
     TEST_ASSERT_EQUAL_STRING("onocoydiy", at(dev, "hostname")->valuestring);
@@ -202,7 +310,7 @@ TEST_CASE("public status leaves out hosts, addresses, SSID and versions", "[web_
     TEST_ASSERT_EQUAL_STRING("Onocoy", at(c0, "name")->valuestring);
     TEST_ASSERT_EQUAL(1, cJSON_GetArraySize(at(root, "health")));
     static const char *const never[] = { "servers.onocoy.com", "rtk2go", "192.168", "Home", "v0.3.0", "secret",
-                                         "UM982", "45.12" };
+                                         "UM982", "45.12", "satellites", "crashes" };
     for (size_t i = 0; i < sizeof(never) / sizeof(never[0]); i++) {
         TEST_ASSERT_NULL_MESSAGE(strstr(s_out, never[i]), never[i]);
     }

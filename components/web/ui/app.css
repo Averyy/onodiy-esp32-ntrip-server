@@ -287,9 +287,12 @@ body { --top-pad: max(0.5rem, env(safe-area-inset-top)); --top-h: calc(var(--top
   white-space: nowrap;
 }
 .tabs a.active { color: var(--text); border-bottom-color: var(--accent); }
-/* The five tabs fit a 390 px phone; a narrower screen scrolls them (the fades say so). */
+/* The five tabs fit a 360 px phone; a narrower screen scrolls them (the fades say so). */
 @media (max-width: 420px) { .tabs a { padding-left: 0.5rem; padding-right: 0.5rem; } }
-@media (max-width: 380px) { .tabs a { padding-left: 0.45rem; padding-right: 0.45rem; } }
+@media (max-width: 380px) {
+  .tabs { gap: 0; }
+  .tabs a { padding-left: 0.4rem; padding-right: 0.4rem; }
+}
 .tabs a .dot {
   display: inline-block;
   width: 7px;
@@ -327,8 +330,6 @@ body { --top-pad: max(0.5rem, env(safe-area-inset-top)); --top-h: calc(var(--top
   /* dense: a card that fits an earlier gap takes it, so no cell stays empty beside a wide card */
   .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-flow: dense; }
   .grid .wide { grid-column: 1 / -1; }
-  /* Status: a short card stays short beside a tall one (no blank card space) */
-  .grid.starts { align-items: start; }
   /* Receiver settings: position over the management choice, the profile beside both */
   .rxset { grid-template-rows: auto 1fr; align-items: start; }
   .a-man { grid-area: 2 / 1; }
@@ -469,8 +470,10 @@ body.no-contact .hero .state::before { background: var(--off); }
 .kv + .kv { margin-top: 0.5rem; }
 /* A short list in a wide card: the values stay near their labels (on a phone the labels keep to 40 %, as everywhere). */
 .tight-kv .kv { grid-template-columns: minmax(7.5rem, min(13rem, 40%)) minmax(0, 1fr); }
-/* Short labels (the Status page): as wide as the longest, the values beside them at every width. */
+/* Short labels (the Status page): as wide as the longest, the values beside them at every width; a long value with no
+ * break in it (a 32-character network name) wraps rather than widening the card. */
 .fit-kv .kv { grid-template-columns: max-content minmax(0, 1fr); column-gap: 1.5rem; }
+.fit-kv .kv dd { overflow-wrap: anywhere; }
 /* A list of figures or a choice under a line of text keeps the gap. */
 .card > * + :is(.kv, .fieldset), .stack > .msg + .kv { margin-top: 0.75rem; }
 
@@ -504,6 +507,11 @@ body.no-contact .hero .state::before { background: var(--off); }
 .t-ok { color: var(--ok); }
 .t-warn { color: var(--warn); }
 .t-bad { color: var(--bad); }
+/* No contact (renderLive): every colour on the Status page is the last state it had, so all of it goes grey like the
+ * header's dot and the top card's (chips, words, figures, bars, "Also:" marks, the signals' ticks and C/N0). */
+body.no-contact .status-page :is(.ok, .warn, .bad, .info) { --tone: var(--off); --tone-soft: var(--off-soft); }
+body.no-contact .status-page :is(.t-ok, .t-warn, .t-bad, .cnr-weak, .cnr-ok, .cnr-good),
+body.no-contact .status-page .bands td.on { color: var(--off); }
 
 .msg {
   padding: 0.65rem 0.8rem;
@@ -798,13 +806,12 @@ tbody tr:last-child td { border-bottom: 0; }
 .metrics b { color: var(--text); font-weight: 600; }
 .hintline { margin-top: 0.35rem; color: var(--warn); font-size: 0.9rem; }
 .caster .form-actions { margin-top: 0.6rem; }
-/* The Status page's casters, one line each: name, state and share at the left, a button at the right. */
+/* The Status page's casters, one line each: name, state and share. */
 .clines { display: grid; gap: 0.6rem; }
 .cline { display: flex; align-items: center; gap: 0.75rem; }
 .cline > :first-child { flex: 1 1 auto; min-width: 0; }
-.cline > .btn { flex: none; }
-.cline .name { font-weight: 650; }
-/* A link beside a card's title (cardHead): "Details". */
+.cline .name { font-weight: 650; overflow-wrap: anywhere; }
+/* A link beside a card's title (cardHead): the Status cards' "Manage". */
 .card-head > .head-link { font-size: 0.9rem; font-weight: 600; }
 .caster-live > * + * { margin-top: 0.35rem; }
 .caster-live > .msg { margin-top: 0.6rem; }

@@ -475,9 +475,11 @@ const TONE_ORDER = { bad: 0, warn: 1, info: 2 };
  * [{key, tone, title, text, actions, urgent, trial}], one line and one
  * button each. urgent: it needs the user now and never folds away. A page
  * whose own card says a thing leaves its notice out; the Status page the one
- * its top card says (stationState().notice), Logs' Overview the one its Health
- * card says (healthNotice()), only while that card is on the page
- * (healthCardShown: not while it loads or its first request failed).
+ * its top card says (stationState().notice), the update (its Station card
+ * says it) and every stopped caster (the top card names each, as its subject
+ * or in an "Also:" line); Logs' Overview the one its Health card says
+ * (healthNotice()), only while that card is on the page (healthCardShown:
+ * not while it loads or its first request failed).
  */
 function noticeItems(st, page) {
   const items = [];
@@ -548,7 +550,8 @@ function noticeItems(st, page) {
       go('Update', '#/settings/updates')]);
   }
   const covered = page === '' ? stationState(st, true).notice : page === 'logs' && healthCardShown ? healthNotice(st) : null;
-  return items.filter(i => i.key !== covered).sort((a, b) => TONE_ORDER[a.tone] - TONE_ORDER[b.tone]);
+  const statusSays = i => page === '' && (i.key === 'update' || i.key.indexOf('onocoy_stopped:') === 0);
+  return items.filter(i => i.key !== covered && !statusSays(i)).sort((a, b) => TONE_ORDER[a.tone] - TONE_ORDER[b.tone]);
 }
 
 /** The notices a page shows: every urgent one and the first two others; the rest only when open. {shown, more}. */
