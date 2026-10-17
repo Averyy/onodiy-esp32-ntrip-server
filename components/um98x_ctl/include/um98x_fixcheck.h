@@ -59,9 +59,10 @@
  * height off by the separation, which is under 50 m in most places, so the
  * limit alone misses it. The receiver prints its own height above sea
  * level, so the mistake shows directly: the fixed height is about that
- * height (within 5 m) while it is more than 10 m from the receiver's
- * ellipsoidal height, and the horizontal distance is within the limit (the
- * height alone is wrong). Reading the sea-level height as printed, not the
+ * height (within 5 m) while it is more than 10 m (and four of the
+ * solutions' own height deviations) from the receiver's ellipsoidal
+ * height, and the horizontal distance is within the limit (the height
+ * alone is wrong). Reading the sea-level height as printed, not the
  * sum, leaves the separation's sign out of it.
  *   5 m: twice the receiver's 2.5 m vertical RMS. The decision takes the
  *   medians of three solutions 20 s apart: one stray solution cannot move
@@ -71,11 +72,17 @@
  *   difference between the receiver's geoid model and the one behind the
  *   typed height comes on top; a wider band would take more of the other
  *   wrong heights for this one.
- *   10 m: four times the vertical RMS, and the largest height deviation a
- *   counted solution may report: a right height reads that far off only
- *   with a solution that is itself unsure. Where the separation is about
- *   10 m or less, a typed sea-level height is too close to the right one
- *   to tell them apart: nothing is said there (the 50 m limit still holds).
+ *   10 m, or four times the height deviation the solutions report (their
+ *   median) where that is more. 10 m is four times the vertical RMS and
+ *   the largest height deviation a counted solution may report. A right
+ *   height reads that far off only with an unsure solution (a poor sky's
+ *   10 to 20 m); where the separation is about that error, the right
+ *   height would read as a sea-level height and the advice would break
+ *   it. With the solutions' own deviation it takes an error beyond four of
+ *   them: a solution that reports 8 m needs the fixed height more than
+ *   32 m off. Where the separation is about 10 m or less, a typed
+ *   sea-level height is too close to the right one to tell them apart:
+ *   nothing is said there (the 50 m limit still holds).
  * Once raised, it holds while the medians stay within 10 m of the
  * receiver's sea-level height and more than 5 m from its ellipsoidal
  * height (each 2 RMS looser), so an hourly check does not flip it on the
@@ -108,7 +115,8 @@ extern "C" {
 #define UM98X_FIX_MIN_SATS     6u      /**< satellites used, at least */
 #define UM98X_FIX_MAX_SEP_M    150.0   /**< plausible geoid separation (the geoid stays within about 110 m of the ellipsoid) */
 #define UM98X_FIX_SEA_BAND_M   5.0     /**< a sea-level height: the fixed height within this of the receiver's sea-level height */
-#define UM98X_FIX_SEA_FLOOR_M  10.0    /**< ... and more than this from its ellipsoidal height */
+#define UM98X_FIX_SEA_FLOOR_M  10.0    /**< ... and more than this from its ellipsoidal height, */
+#define UM98X_FIX_SEA_SD_K     4.0     /**< ... and more than this many of the height deviations the solutions report */
 #define UM98X_FIX_SEA_HOLD_BAND_M  10.0   /**< once raised: it holds within this of the sea-level height */
 #define UM98X_FIX_SEA_HOLD_FLOOR_M 5.0    /**< ... and beyond this from the ellipsoidal height */
 
@@ -158,6 +166,7 @@ typedef struct {
     double up_m;               /**< fixed height minus the receiver's: > 0 the fixed position is above it */
     double distance_m;         /**< 3-D */
     double up_msl_m;           /**< fixed height minus the receiver's height above sea level (as printed) */
+    double sd_hgt_m;           /**< the solution's own height standard deviation (a run's median in shown) */
 } um98x_fix_offset_t;
 
 /**
@@ -176,8 +185,10 @@ bool um98x_fix_height_only(const um98x_fix_offset_t *o);
 
 /**
  * The fixed height is the receiver's height above sea level, not its
- * ellipsoidal height (see above); held: a sea-level verdict stands (the
- * looser hold band and floor).
+ * ellipsoidal height (see above): within the band of that height, and
+ * beyond the floor and four of the solution's height deviations from its
+ * ellipsoidal height. held: a sea-level verdict stands (the looser hold
+ * band and floor).
  */
 bool um98x_fix_sea_level(const um98x_fix_offset_t *o, bool held);
 
