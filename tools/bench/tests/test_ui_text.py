@@ -15,6 +15,7 @@ import json
 import re
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -53,7 +54,8 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nhealthCardShown = true;\nreturn { restartPlanText, restartPlanShort, onocoyNow: a => onocoyNow(a[0], a[1]), onocoyElsewhereText, connRow, journalDetail, presetInfo: () => ({ PRESETS, PRESET_INFO }),\n' +
   '  journalItems: a => { S.status = a[3] || null; return journalItems(a[0], a[1], a[2]); }, evFilter: () => EV_FILTER,\n' +
   '  healthChip: a => healthChip(a[0], a[1], a[2]), sinceStart: hl => sinceStart(hl), logParts: l => logParts(l),\n' +
-  '  timeRange: a => timeRange(a[0], a[1]), logsTabs: () => LOGS_TABS.map(t => t[1]), dayParts: a => dayParts(a[0], a[1]),\n' +
+  '  timeRange: a => timeRange(a[0], a[1]), whenParts: a => whenParts(a[0], a[1], a[2], a[3]),\n' +
+  '  logsTabs: () => LOGS_TABS.map(t => t[1]), dayParts: a => dayParts(a[0], a[1]),\n' +
   '  wifiChip: w => wifiChip(w), apChip: ap => apChip(ap), recoveryHint: () => recoveryHint(),\n' +
   '  ago: s => checkedAgo(Date.now() / 1000 - s),\n' +
   '  onlineShare: a => onlineShare(a[0], a[1]),\n' +
@@ -288,8 +290,8 @@ def test_unknown_rssi_never_shows_dbm():
     for text in det[:3]:
         assert "dBm" not in text and "signal" not in text
         assert "201" in text  # the reason stays
-    assert "signal -67 dBm" in det[3]
-    assert "signal -127 dBm" in det[4] and "signal -1 dBm" in det[5]
+    assert "signal \u221267\u00a0dBm" in det[3]
+    assert "signal \u2212127\u00a0dBm" in det[4] and "signal \u22121\u00a0dBm" in det[5]
 
 
 def test_connection_row_rssi():
@@ -301,7 +303,7 @@ def test_connection_row_rssi():
         ("connRow", {**row, "rssi": -128}),
     ])
     assert unknown[:2] == ["Wi-Fi dropped", "left the network (8)"]
-    assert known[1] == "left the network (8), signal -60 dBm"
+    assert known[1] == "left the network (8), signal \u221260\u00a0dBm"
     assert "dBm" not in zero[1] and "dBm" not in old[1]
 
 
@@ -320,7 +322,7 @@ def test_event_list_pairs_a_drop_with_its_return_and_folds_repeats():
     rows = [i for i in every if "head" not in i]
     assert [r["ev"] for r in rows] == ["Onocoy disconnected", "Wi-Fi dropped", "Onocoy disconnected", "Onocoy stopped"]
     assert rows[0]["det"] == "after 1\u00a0min online, timed out" and rows[0]["tone"] == "warn"
-    assert rows[1]["det"] == "back after 40\u00a0s, authentication failed (wrong password?) (202), signal -67 dBm"
+    assert rows[1]["det"] == "back after 40\u00a0s, authentication failed (wrong password?) (202), signal \u221267\u00a0dBm"
     assert rows[2]["det"] == "back after 20\u00a0s, closed by the caster, 2 failed attempts"
     assert len(rows[2]["all"]) == 3 and rows[2]["id"] == "r10"
     assert rows[3]["det"] == "duplicate stream, no new attempt until you act" and rows[3]["tone"] == "bad"
@@ -357,11 +359,11 @@ def test_event_list_names_moves_between_access_points():
     rows = [(r["ev"], r["det"]) for r in every if "head" not in r]
     # The time offline first: a phone cuts the end of the row off.
     assert rows == [
-        ("Wi-Fi dropped", "back after 6\u00a0s, left the network (8), signal -70 dBm"),
+        ("Wi-Fi dropped", "back after 6\u00a0s, left the network (8), signal \u221270\u00a0dBm"),
         ("Wi-Fi moved", "2\u00a0s offline, to a stronger access point, channel 11 to 1"),
         ("Wi-Fi reconnected", "5\u00a0s offline, no stronger access point after all"),
-        ("Wi-Fi moved", "4\u00a0s offline, to a stronger access point, channel 6, signal -75 to -58 dBm"),
-        ("Wi-Fi moved", "3\u00a0s offline, at the access point's request, channel 1 to 6, signal -78 to -52 dBm"),
+        ("Wi-Fi moved", "4\u00a0s offline, to a stronger access point, channel 6, signal \u221275 to \u221258\u00a0dBm"),
+        ("Wi-Fi moved", "3\u00a0s offline, at the access point's request, channel 1 to 6, signal \u221278 to \u221252\u00a0dBm"),
     ], rows
     assert [(r["ev"], r["det"]) for r in wifi if "head" not in r] == rows
     assert casters == []
@@ -385,11 +387,11 @@ def test_event_list_says_a_move_kept_the_connections():
     (items,) = run_ui([("journalItems", [recs, True, None])])
     rows = [(r["ev"], r["det"]) for r in items if "head" not in r]
     assert rows == [
-        ("Wi-Fi moved", "9\u00a0s offline, on request, channel 11 to 1, signal -56 to -50 dBm"),
+        ("Wi-Fi moved", "9\u00a0s offline, on request, channel 11 to 1, signal \u221256 to \u221250\u00a0dBm"),
         ("Wi-Fi stayed", "connections kept, on request, the same access point"),
-        ("Wi-Fi moved", "connections kept, on request, channel 6 to 11, signal -60 to -55 dBm"),
+        ("Wi-Fi moved", "connections kept, on request, channel 6 to 11, signal \u221260 to \u221255\u00a0dBm"),
         ("Wi-Fi stayed", "connections kept, no stronger access point after all"),
-        ("Wi-Fi moved", "connections kept, at the access point's request, channel 1 to 6, signal -78 to -52 dBm"),
+        ("Wi-Fi moved", "connections kept, at the access point's request, channel 1 to 6, signal \u221278 to \u221252\u00a0dBm"),
     ], rows
 
 
@@ -414,8 +416,8 @@ def test_event_journal_one_heading_per_start_and_repeats_folded():
     # The restart record went into the heading; a recovery step is named after its recovery, the step is the detail.
     assert [r["ev"] for r in rows] == ["Wi-Fi dropped", "Receiver recovery"]
     assert rows[1]["det"] == "reopening the link to the receiver"
-    assert len(rows[1]["all"]) == 27 and "\u2013" in rows[1]["when"]
-    assert rows[0]["det"] == "network not found (201), signal -70 dBm"
+    assert len(rows[1]["all"]) == 27 and "\u2013" in rows[1]["when"][1]
+    assert rows[0]["det"] == "network not found (201), signal \u221270\u00a0dBm"
     text = json.dumps(every, ensure_ascii=False)
     assert "≈" not in text and "#" not in text and "slot" not in text.lower()
     # Starts only: the two headings; casters only: nothing; the oldest start not loaded yet is a plain "Start".
@@ -450,7 +452,7 @@ def test_event_journal_sky_sessions_and_plain_rows():
         ("Sky view", "12\u00a0s"),
     ], rows
     # The two sessions without trouble are one row with a toggle, its time the span of both.
-    assert len(rows[6]["all"]) == 2 and "\u2013" in rows[6]["when"]
+    assert len(rows[6]["all"]) == 2 and "\u2013" in rows[6]["when"][1]
     text = json.dumps(items, ensure_ascii=False)
     assert "RTCM held" not in text and "accepted" not in text and "framer" not in text and "protected" not in text
 
@@ -1295,8 +1297,7 @@ def test_logs_wifi_says_moves_and_whether_the_access_point_steers():
 def test_own_wifi_chip_warns_only_while_it_is_open_to_anyone():
     out = run_ui([("apChip", {"active": False}), ("apChip", {"active": False, "password_set": True}),
                   ("apChip", {"active": True, "password_set": True}), ("apChip", {"active": True})])
-    # Folded in the Wi-Fi card: its chip is all a closed fold shows, so an open access point without a password says
-    # so there.
+    # The setup hotspot's chip in the Network card: an open hotspot without a password says so beside its title.
     assert out == [["Off", ""], ["Off", ""], ["On", "info"], ["On, no password", "warn"]]
 
 
@@ -1748,22 +1749,54 @@ def test_a_paused_recovery_says_what_it_waits_for():
 def test_log_lines_and_event_times_fit_one_line():
     out = run_ui([("logParts", "I (122407) gnss_link: host baud 460800 -> 115200"), ("logParts", "E (3723000) ntrip: x"),
                   ("logParts", "ets Jun  8 2016 00:22:57"), ("timeRange", ["9:40 AM", "9:42 AM"]),
-                  ("timeRange", ["9:40 AM", "9:42 AM"]), ("timeRange", ["Oct 14, 11:58 PM", "Oct 15, 12:03 AM"])])
+                  ("timeRange", ["9:40 AM", "9:42 AM"]), ("timeRange", ["11:58 PM", "12:03 AM"])])
     assert out[0] == ["0:02:02", "I", "gnss_link: host baud 460800 -> 115200"]
     assert out[1] == ["1:02:03", "E", "ntrip: x"]
     assert out[2] is None   # shown as it is
     assert out[3] == "9:40–9:42 AM" and out[4] == "9:40–9:42 AM"
-    assert out[5] == "Oct 15, 12:03 AM"   # too long for the time column: the newest only
+    # Over midnight: both times whole (the When cell names both dates beside them).
+    assert out[5] == "11:58 PM–12:03 AM"
+
+
+def test_every_event_time_says_its_date_the_same_way():
+    """Every When cell says the date, then the time, alike in every row (no row with the time only): a run of records
+    one date and a time range, one over midnight both dates and both times; the year only when it is not this year's;
+    a time worked out from the uptime says "about". The page's own locale words the dates, so they are compared with
+    each other here."""
+    def at(*a):
+        return int(datetime(*a).timestamp())
+    t, late, early = at(2026, 10, 14, 9, 41), at(2026, 10, 14, 23, 58), at(2026, 10, 15, 0, 3)
+    one, run, night, est, old, day = run_ui([("whenParts", [t, t, False, 2026]), ("whenParts", [t, t + 120, False, 2026]),
+                                            ("whenParts", [late, early, False, 2026]), ("whenParts", [t, t, True, 2026]),
+                                            ("whenParts", [t, t, False, 2027]), ("whenParts", [early, early, False, 2026])])
+    assert one[0] and "\u2013" not in one[0] and "\u2013" not in one[1] and "2026" not in one[0]
+    assert run[0] == one[0] and run[1].count("\u2013") == 1 and run[1].endswith(one[1][-2:])
+    # Over midnight: both days (as one range) and both times.
+    assert night[0].count("\u2013") == 1 and night[0] != one[0] and night[0].startswith(one[0][:3]) and day[0] != one[0]
+    assert night[1].count("\u2013") == 1 and night[1].endswith(day[1])
+    assert est == [one[0], "about " + one[1]]
+    assert "2026" in old[0] and old[1] == one[1]
+    # The event list: every row and every heading has its date, in the same form.
+    first = [jrec(1, "boot", 0, 0, 1), jrec(2, "session", -1, 1, 1), jrec(3, "wifi_up", 1, 6, 8),
+             jrec(4, "ladder_step", 0, 2, 600, t), jrec(5, "ladder_step", 0, 2, 660, t + 60),
+             jrec(6, "wifi_disconnect", 8, -70, 700, t + 100)]
+    (items,) = run_ui([("journalItems", [first, True, None])])
+    assert [i["head"][0][0] for i in items if "head" in i] == [one[0]]
+    rows = [i for i in items if "head" not in i]
+    assert all(r["when"][0] == one[0] for r in rows), rows
+    assert rows[-1]["when"][1].startswith("about ")
 
 
 def test_logs_lists_are_one_line_rows():
-    """No stacked blocks on a phone: the log, the event list, the starts and the tasks keep one row per item."""
+    """No stacked blocks on a phone: the log, the event list, the starts and the tasks keep one row per item. The When
+    column has one width, so the text after it starts at the same place in every row."""
     js = (UI_JS / "80-diag.js").read_text()
     assert "stack: true" not in js and "stack-sm" not in js
     css = (UI_JS.parent / "app.css").read_text()
     assert "stack-sm" not in css and "table.events, table.events tbody" not in css
     assert "pre.log .ln { display: block; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }" in css
-    assert "td.when { width: 1%; white-space: nowrap;" in css
+    assert "table.fixed { table-layout: fixed; }" in css and "table.fixed .when { width: 17rem; }" in css
+    assert ".when .d, .when .tm, .when .nw { white-space: nowrap; }" in css
     assert ("table.events td + td { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }"
             in css)
 

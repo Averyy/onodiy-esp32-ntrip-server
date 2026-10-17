@@ -108,24 +108,25 @@ function startKind(cls, planned) {
 
 /*
  * The earlier starts (health boot_history without this one), newest first,
- * one line each: when it started (else how long it ran, else a dash), the
- * kind and the version; its sentence on hover. A start ran for the previous
- * run of the start after it when their counts follow on (a power-on between
- * them leaves it unknown); the newest's is This start's "Previous run", so
- * not here. day: today (toDateString).
+ * one line each: when it started (whenParts; else how long it ran, else a
+ * dash), the kind and the version; its sentence on hover. A start ran for
+ * the previous run of the start after it when their counts follow on (a
+ * power-on between them leaves it unknown); the newest's is This start's
+ * "Previous run", so not here. day: today (toDateString).
  */
 function startLines(starts, day) {
+  const year = Number(day.slice(-4));
   return starts.map((x, i) => {
     const next = starts[i - 1];
     const ran = next && next.boot_no === x.boot_no + 1 && typeof next.prev_uptime_s === 'number' ? next.prev_uptime_s : null;
     return h('tr', { title: startSentence(x.reset_class, x.reset_reason, x.planned_reason) },
-      h('td', { class: 'when' }, x.start_unix ? dayTime(x.start_unix, day) : ran === null ? DASH : 'Ran ' + fmt.dur(ran)),
-      h('td', null, startKind(x.reset_class, x.planned_reason)),
+      whenCell(x.start_unix ? whenParts(x.start_unix, x.start_unix, false, year) : ['', ran === null ? DASH : 'Ran ' + fmt.dur(ran)]),
+      h('td', { class: 'kind' }, startKind(x.reset_class, x.planned_reason)),
       h('td', { class: 'name muted' }, x.version || ''));
   });
 }
 
-/* "Receiver management": the choice, as the Status page names it, or "Paused" while the station holds the recovery. */
+/* "Receiver setup": the choice, as the Status page names it, or "Paused" while the station holds the recovery. */
 function recoveryNow(hl) {
   if (hl.ladder_suspended) return pausedText(hl.station || {});
   return hl.recovery_mode ? lbl(L.manage, hl.recovery_mode) : DASH;
@@ -188,7 +189,7 @@ function healthItems(alerts, st) {
 /* What went wrong since this start, only what happened: "2 receiver stalls, 1 recovery step". */
 function sinceStart(hl) {
   const parts = [[hl.gnss_stalls, 'receiver stall', 'receiver stalls'], [hl.recoveries, 'recovery step', 'recovery steps'],
-    [hl.caster_restarts, 'caster restart', 'caster restarts'], [hl.network_recoveries, 'network recovery', 'network recoveries']]
+    [hl.caster_restarts, 'server restart', 'server restarts'], [hl.network_recoveries, 'network recovery', 'network recoveries']]
     .filter(p => p[0] > 0).map(p => plural(p[0], p[1], p[2]));
   return parts.length ? capFirst(parts.join(', ')) : 'No stalls or recoveries';
 }
@@ -291,7 +292,7 @@ function healthCard(hl, s) {
     hi.alerts.length ? alertList(hi.alerts, { detect: true }) : hi.state ? null : h('p', { class: 'muted' }, 'No alerts.'),
     plan ? h('p', { class: 'small' }, plan) : null,
     kv([
-      ['Receiver management', recoveryNow(hl)],
+      ['Receiver setup', recoveryNow(hl)],
       /* The port's row only while the state above does not say it. */
       port.open === false && port.mode !== 'off' && !(hi.state && st.key === 'uart_closed') ?
         ['Receiver port', h('span', { class: 't-bad' }, 'Closed, reopening')] : null,
@@ -398,7 +399,7 @@ function descriptorRows(d, r, ant) {
 /**
  * The Receiver card (GET /api/gnss, may be missing): who the receiver is and
  * whether it answers, what it read back at the last configuration with the
- * steps it took or refused, and what casters get from it (the station's own
+ * steps it took or refused, and what servers get from it (the station's own
  * messages: its position and its descriptor, RTCM 1033, whose receiver and
  * antenna fields show only where they cannot be checked against the parts
  * before or differ: descriptorRows). While the first configuration is held,
@@ -443,7 +444,7 @@ function diagReceiverCard(g, preview) {
         g.rtcm1230_supported ? 'Accepted' : h('span', { class: 't-warn' }, 'Refused by the receiver')],
       bandsRow(g),
     ])),
-    part('What casters get', kv([
+    part('What servers get', kv([
       ['Station ID', d.valid ? String(d.station_id) : arp.valid ? String(arp.station_id) : DASH],
       ['Position (1005)', arp.valid ? 'Received ' + ago(arp.age_ms) : h('span', { class: 'muted' }, 'Not received yet')],
       ['Descriptor (1033)', d.valid ? 'Received ' + ago(d.age_ms) + (desc.matches ? ', matches the receiver' : '') :
@@ -508,7 +509,7 @@ function overviewTab(box) {
       chipCard(sys, S.status, wifi, net),
       h('section', { class: 'card' },
         h('h2', null, 'Earlier starts'),
-        lines.length ? scrollBox('Earlier starts', h('table', { class: 'rows' },
+        lines.length ? scrollBox('Earlier starts', h('table', { class: 'rows starts fixed' },
           h('tbody', null, foldRows(lines, 5, 'Older starts', 3, opened.has('starts'), 'starts')))) : h('p', { class: 'muted' }, 'None recorded.')),
       diagReceiverCard(gnss, preview),
       h('section', { class: 'card wide tight-kv' },
@@ -570,7 +571,7 @@ function overviewTab(box) {
     if (!b || !box.contains(b)) return;
     if (b.getAttribute('data-act') === 'cd-dl') {
       const ok = await dialog({ title: 'Download the core dump?', ok: 'Download',
-        body: [h('p', null, 'It is a copy of the station\'s memory at the crash and can contain your Wi-Fi and caster passwords. ' +
+        body: [h('p', null, 'It is a copy of the station\'s memory at the crash and can contain your Wi-Fi and server passwords. ' +
           'Share it only with people you trust.'),
         h('p', { class: 'muted' }, 'Decode it with idf.py coredump-info and the ELF file of the same version.')],
         check: 'I understand it may contain passwords.' });
@@ -657,9 +658,9 @@ function monthCard(card, av) {
   const was = card.querySelector('details');
   mount(card, h('h2', null, 'Last 30 days'),
     av.clock === 'none' ? msg('warn', 'No trusted clock yet, so the station cannot count days.') : null,
-    rows.length ? scrollBox('Last 30 days', h('table', null, h('tbody', null, foldRows(rows, 8, 'Earlier days', 2, was && was.open)))) :
+    rows.length ? scrollBox('Last 30 days', h('table', { class: 'fixed days' }, h('tbody', null, foldRows(rows, 8, 'Earlier days', 2, was && was.open)))) :
       h('p', { class: 'muted' }, 'Nothing recorded yet.'),
-    h('p', { class: 'muted small foot' }, (prot ? 'Onocoy' : 'Caster 1') + ', per UTC day. Planned: receiver setup, updates and restarts you asked for.' +
+    h('p', { class: 'muted small foot' }, (prot ? 'Onocoy' : 'Server 1') + ', per UTC day. Planned: receiver setup, updates and restarts you asked for.' +
       (counting ? ' Red: more offline time than the streak allows.' : '')));
 }
 
@@ -671,43 +672,64 @@ function clockTime(unix) {
   return new Date(unix * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
-/*
- * A record's time: the clock time on `day` (a Date's toDateString), else a
- * short date and time ("Oct 15, 9:41 AM"), with the year when it is not
- * day's ("Oct 20, 2025, 3:00 PM").
- */
-function dayTime(unix, day) {
-  const d = new Date(unix * 1000), ds = d.toDateString();
-  if (ds === day) return clockTime(unix);
-  const o = { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
-  if (ds.slice(-4) !== day.slice(-4)) o.year = 'numeric';
-  return d.toLocaleString(undefined, o);
-}
-
-/* "9:40–9:42 AM" from "9:40 AM" and "9:42 AM" (an ending they share once); just the newest when that gets long. */
+/* "9:40–9:42 AM" from "9:40 AM" and "9:42 AM" (an ending they share once). */
 function timeRange(a, b) {
   const m = /\s\D+$/.exec(b);
   if (m && a.slice(-m[0].length) === m[0]) a = a.slice(0, -m[0].length);
-  return a.length + b.length < 22 ? a + '–' + b : b;
+  return a + '–' + b;
+}
+
+/*
+ * When a record happened (t0 = t1), or a run of them from t0 to t1 (unix
+ * seconds), as every When cell says it: [date, time], "Oct 15" and "9:41
+ * AM", a run "9:40–9:42 AM", one over midnight "Oct 14–15" and "11:58 PM–
+ * 12:03 AM"; the year when it is not `year` ("Oct 20, 2025"). est: a time
+ * worked out from the uptime ("about 9:41 AM").
+ */
+function whenParts(t0, t1, est, year) {
+  const a = new Date(t0 * 1000), b = new Date(t1 * 1000);
+  const o = { month: 'short', day: 'numeric' };
+  if (a.getFullYear() !== year || b.getFullYear() !== year) o.year = 'numeric';
+  const f = new Intl.DateTimeFormat(undefined, o);
+  /* Two days as one range ("Oct 14–15", "Sep 30–Oct 1"), the dash without the spaces some browsers put around it. */
+  const date = a.toDateString() === b.toDateString() ? f.format(b) : f.formatRange ?
+    f.formatRange(a, b).replace(/\s*–\s*/, '–') : f.format(a) + '–' + f.format(b);
+  const x = clockTime(t0), y = clockTime(t1);
+  return [date, (est ? 'about ' : '') + (x === y ? y : timeRange(x, y))];
+}
+
+/* A range's two ends, each kept whole (the first with its dash), so a narrow column wraps it only between them. */
+function rangeEnds(t) {
+  const i = t.indexOf('–');
+  return (i > 0 && i < t.length - 1 ? [t.slice(0, i + 1), t.slice(i + 1)] : [t]).map(x => h('span', { class: 'nw' }, x));
+}
+
+/*
+ * A When cell (td, or th with tag): the date, then the time (whenParts; an
+ * empty date leaves the time alone), in a column of one width (app.css), on
+ * a phone the date over the time; "about" and a range's ends wrap apart.
+ */
+function whenCell(w, tag) {
+  const est = w[1].indexOf('about ') === 0;
+  return h(tag || 'td', { class: 'when' }, w[0] ? [h('span', { class: 'd' }, rangeEnds(w[0])), h('span', { class: 'j' }, ', ')] : null,
+    h('span', { class: 'tm' }, est ? [h('span', { class: 'nw' }, 'about'), ' '] : null, rangeEnds(est ? w[1].slice(6) : w[1])));
 }
 
 /*
  * Consecutive rows with the same key k become one: the newest, its `all`
- * holding every one (newest first) and its time the span they cover.
+ * holding every one (newest first) and its time (t0 to t1) the span they
+ * cover, estimated when any of theirs is.
  */
 function collapse(rows) {
   const out = [];
   for (const r of rows) {
     const last = out[out.length - 1];
     if (last && !last.head && !r.head && last.k === r.k) {
-      if (!last.all) {
-        last.all = [Object.assign({}, last)];
-        last.newest = last.to || last.when;
-      }
+      if (!last.all) last.all = [Object.assign({}, last)];
       last.all.push(r);
       last.id = 'r' + r.seq;
-      const from = r.from || r.when;
-      last.when = from !== last.newest ? timeRange(from, last.newest) : last.newest;
+      last.t0 = r.t0;
+      last.est = last.est || r.est;
     } else {
       out.push(Object.assign({}, r));
     }
@@ -716,29 +738,31 @@ function collapse(rows) {
 }
 
 /*
- * Newest first: heading rows {head: [time, text]} and event rows {when, ev,
- * det, tone, seq, all (a collapsed repeat: its "×N" toggle), id}, one line
- * each, also on a phone: the time, then the event and its details. open:
- * ids of the repeats shown in full (the toggles carry data-rep; the page
- * handles their clicks).
+ * Newest first: heading rows {head: [when or null, text]} and event rows
+ * {when, ev, det, tone, seq, all (a collapsed repeat: its "×N" toggle), id}
+ * (when: whenParts), one line each, also on a phone: the time, then the
+ * event and its details, which start at the same place in every row (the
+ * When column has one width). open: ids of the repeats shown in full (the
+ * toggles carry data-rep; the page handles their clicks).
  */
 function eventTable(label, rows, open) {
   const tr = [];
   const row = (r, sub) => h('tr', { class: sub ? 'rep-row' : null, title: r.seq ? '#' + r.seq : null },
-    h('td', { class: 'when' }, r.when),
+    whenCell(r.when),
     h('td', null, h('strong', { class: r.tone ? 't-' + r.tone : null }, r.ev), !sub && r.all ? h('button', { type: 'button', class: 'rep',
       'data-rep': r.id, 'aria-expanded': open.has(r.id) ? 'true' : 'false', 'aria-label': (open.has(r.id) ? 'Hide' : 'Show') + ' all ' + r.all.length },
     '×' + r.all.length) : null, ' ', r.det));
   for (const r of rows) {
     if (r.head) {
-      tr.push(h('tr', { class: 'sep' }, h('th', { colspan: '2', scope: 'rowgroup' }, r.head[0] ? h('span', { class: 't' }, r.head[0]) : null, r.head[1])));
+      tr.push(h('tr', { class: 'sep' }, r.head[0] ? whenCell(r.head[0], 'th') : h('th', { class: 'when' }),
+        h('th', { scope: 'rowgroup' }, r.head[1])));
       continue;
     }
     tr.push(row(r));
     if (r.all && open.has(r.id)) for (const x of r.all) tr.push(row(x, true));
   }
-  return scrollBox(label, h('table', { class: 'events' },
-    h('thead', null, h('tr', null, h('th', null, 'When'), h('th', null, 'Event'))),
+  return scrollBox(label, h('table', { class: 'events fixed' },
+    h('thead', null, h('tr', null, h('th', { class: 'when' }, 'When'), h('th', null, 'Event'))),
     h('tbody', null, tr)));
 }
 
@@ -756,15 +780,15 @@ function repeatClicks(root, open, redraw) {
   });
 }
 
-/* A caster slot by its name now (the status), else its number. */
+/* A server slot by its name now (the status), else its number. */
 function slotName(i, name) {
   const c = ((S.status && S.status.casters) || []).find(x => x.slot === i);
-  return name || (c && c.name) || 'Caster ' + (i + 1);
+  return name || (c && c.name) || 'Server ' + (i + 1);
 }
 
-/* ", signal -67 dBm", or nothing when the RSSI is unknown. */
+/* ", signal −67 dBm", or nothing when the RSSI is unknown. */
 function rssiSuffix(v) {
-  return rssiKnown(v) ? ', signal ' + v + ' dBm' : '';
+  return rssiKnown(v) ? ', signal ' + dbmText(v) : '';
 }
 
 /*
@@ -1068,7 +1092,7 @@ function journalDetail(e) {
       if ((a >>> 24) & 1) return off + (by === 3 ? ', on request, the same access point' : ', no stronger access point after all');
       return [off, by === 1 ? "at the access point's request" : by === 3 ? 'on request' : 'to a stronger access point',
         ch0 && ch1 ? 'channel ' + (ch0 === ch1 ? ch1 : ch0 + ' to ' + ch1) : null,
-        rssiKnown(r0) && rssiKnown(r1) ? 'signal ' + r0 + ' to ' + r1 + ' dBm' : null].filter(Boolean).join(', ');
+        rssiKnown(r0) && rssiKnown(r1) ? 'signal ' + String(r0).replace('-', '\u2212') + ' to ' + dbmText(r1) : null].filter(Boolean).join(', ');
     }
     case 'sg_test': {
       const ev = a & 0xff, grp = ((a >>> 8) & 0xff) + ' ' + ((a >>> 16) & 0xff);
@@ -1126,7 +1150,7 @@ const EV_FILTER = [
   ['all', 'All events', null],
   ['starts', 'Starts and restarts', ['boot', 'session', 'reboot', 'safe_mode', 'rx_boot']],
   ['recovery', 'Recovery', ['ladder_step']],
-  ['casters', 'Casters', ['caster_down', 'caster_up', 'caster_stop']],
+  ['casters', 'NTRIP', ['caster_down', 'caster_up', 'caster_stop']],
   ['wifi', 'Wi-Fi', ['wifi_disconnect', 'wifi_up', 'wifi_roam']],
   ['updates', 'Updates', ['app_update', 'app_revert', 'gnss_flash']],
   ['receiver', 'Receiver', ['rx_maintenance', 'live_view', 'sg_test', 'fixed_check']],
@@ -1148,6 +1172,7 @@ const RESET_KEYS = Object.keys(L.resetReason);
 function journalItems(entries, atStart, kinds) {
   const groups = journalByBoot(entries);
   const items = [];
+  const year = new Date().getFullYear();
   for (let gi = groups.length - 1; gi >= 0; gi--) {
     const g = groups[gi], es = g.entries;
     const boot = es[0].kind === 'boot' ? es[0] : null;
@@ -1186,14 +1211,14 @@ function journalItems(entries, atStart, kinds) {
       if (ev === 3) ses.closed = true;
       else if (ses.closed) ses = null;
     }
-    const day = g.offset !== null ? new Date(g.offset * 1000).toDateString() : '';
-    const whenOf = e => (e.time_unix ? dayTime(e.time_unix, day) : g.offset !== null ? 'about ' + dayTime(g.offset + e.uptime_s, day) :
-      fmt.dur(e.uptime_s) + ' after the start');
+    /* A record's time: its own, else the one the start's first dated record implies (estimated), else none (null). */
+    const timeOf = e => (e.time_unix ? e.time_unix : g.offset !== null ? g.offset + e.uptime_s : null);
+    const at = e => ({ t0: timeOf(e), t1: timeOf(e), est: !e.time_unix && g.offset !== null, up: e.uptime_s });
     const rows = [];
     for (let i = es.length - 1; i >= 0; i--) {
       const e = es[i];
       if (e === boot || e === sess || e === told || used.has(e) || (kinds && kinds.indexOf(e.kind) < 0)) continue;
-      const when = whenOf(e);
+      const when = at(e);
       const sky = skyOf.get(e);
       if (sky) {
         if (e !== sky[sky.length - 1]) continue;
@@ -1201,15 +1226,15 @@ function journalItems(entries, atStart, kinds) {
         const shut = sky.find(x => (x.a & 0xff) === 3);
         const det = [shut ? fmt.dur(shut.b) : 'not closed'].concat(sky.filter(x => (x.a & 0xff) > 3 && J.liveCmd[(x.a >> 8) & 0xff])
           .map(x => J.liveEv[x.a & 0xff].toLowerCase() + ': ' + J.liveCmd[(x.a >> 8) & 0xff])).join(', ');
-        const from = whenOf(sky[0]);
-        rows.push({ k: 'sky ' + det.replace(/^[^,]*/, ''), seq: e.seq, ev: J.kind.live_view, det: det, from: from, to: when,
-          when: from !== when ? timeRange(from, when) : when });
+        const from = at(sky[0]);
+        rows.push(Object.assign(when, { k: 'sky ' + det.replace(/^[^,]*/, ''), seq: e.seq, ev: J.kind.live_view, det: det,
+          t0: from.t0, est: when.est || from.est }));
         continue;
       }
       if (isConn(e)) {
         const back = backOf.get(e);
         const c = connRow(connOf(e), back && connOf(back));
-        rows.push({ k: [e.kind, connKey(e), !!back].join('|'), seq: e.seq, ev: c[0], det: c[1], tone: c[2], when: when });
+        rows.push(Object.assign(when, { k: [e.kind, connKey(e), !!back].join('|'), seq: e.seq, ev: c[0], det: c[1], tone: c[2] }));
       } else {
         /* A recovery step under its recovery's name ("Receiver recovery"); a start and an end (maintenance, the sky) never fold together. */
         const sub = e.kind === 'ladder_step' || e.kind === 'rx_maintenance' || e.kind === 'data_loss' ? e.a :
@@ -1219,17 +1244,25 @@ function journalItems(entries, atStart, kinds) {
         /* A move whose reconnect found no stronger access point stayed: no move; a reconnect, unless the connections
          * were kept (nothing dropped). */
         const stayed = e.kind === 'wifi_roam' && (e.a >>> 24) & 1 ? ((e.a >>> 25) & 1 ? 'Wi-Fi stayed' : 'Wi-Fi reconnected') : null;
-        rows.push({ k: e.kind + sub, seq: e.seq, ev: e.kind === 'ladder_step' ? capFirst(J.ladder[e.a] || 'ladder ' + e.a) + ' recovery' :
-          loss || stayed || J.kind[e.kind] || words(e.kind), det: journalDetail(e), when: when });
+        rows.push(Object.assign(when, { k: e.kind + sub, seq: e.seq, ev: e.kind === 'ladder_step' ? capFirst(J.ladder[e.a] || 'ladder ' + e.a) +
+          ' recovery' : loss || stayed || J.kind[e.kind] || words(e.kind), det: journalDetail(e) }));
       }
     }
     if (!kinds || kinds.indexOf('boot') >= 0 || rows.length) {
       let text = boot ? startSentence(J.resetClassKey[boot.a], sess ? RESET_KEYS[sess.b] : null, J.rebootKey[boot.b]) :
         gi === 0 && !atStart ? 'Start' : 'Start (its first records are gone)';
       if (sess && sess.a >= 0) text += ' (previous run ' + fmt.dur(sess.a) + ')';
-      items.push({ head: [g.offset !== null ? fmt.time(g.offset) : '', g.offset !== null ? text : text + ', time not known yet'] });
+      /* When it started: its boot record's time, else (its first records gone) the start the others imply. */
+      const t = boot ? timeOf(boot) : g.offset;
+      items.push({ head: [t !== null ? whenParts(t, t, !(boot && boot.time_unix), year) : null,
+        g.offset !== null ? text : text + ', time not known yet'] });
     }
-    for (const r of collapse(rows)) items.push(r);
+    for (const r of collapse(rows)) {
+      items.push(r);
+      for (const x of [r].concat(r.all || [])) {
+        x.when = x.t1 !== null ? whenParts(x.t0, x.t1, x.est, year) : ['', fmt.dur(x.up) + ' after the start'];
+      }
+    }
   }
   return items;
 }

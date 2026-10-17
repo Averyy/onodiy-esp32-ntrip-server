@@ -26,6 +26,7 @@ import json
 import re
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -187,6 +188,7 @@ const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { casterEditor, openCasterWarning, casterDetails, casterSummary, casterChip, stationState, adminDashboard, heroAlso,\n' +
   '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard, healthCard, chipCard, signalsHead, bandTable, kv,\n' +
   '  startLines, foldRows, diagReceiverCard, receiverPage, renderLive,\n' +
+  '  settingsPage: (el, arg) => Views.settings.create(el, arg),\n' +
   '  setStatus: s => { S.status = s; }, setSession: s => { S.session = s; },\n' +
   '  setLive: (age, started, page) => { S.statusAt = age === null ? 0 : Date.now() - age * 1000; shell.started = started;\n' +
   '    shell.current = page === null ? null : { name: page, arg: \'\', view: {} }; } };\n})()',
@@ -492,6 +494,61 @@ async function receiverPageView(c) {
   return r;
 }
 
+/* Settings for the status c.status and the station's answers: c.wifi (GET /api/wifi), c.update (GET /api/update), c.flash
+ * (GET /api/gnss/flash), c.staged (GET /api/upload/gnss). What it shows (pageParts); with c.click, also what it shows once
+ * the first button of that name is pressed. */
+async function settingsPageView(c) {
+  const settle = async () => {
+    for (let i = 0; i < 60; i++) await new Promise(r => setImmediate(r));
+  };
+  routes = (m, p) => {
+    const path = p.split('?')[0];
+    if (path === '/api/wifi') return [200, c.wifi];
+    if (path === '/api/system') return [200, { hostname: 'onocoydiy', hostname_active: 'onocoydiy', public_status: false }];
+    if (path === '/api/update') return [200, c.update];
+    if (path === '/api/gnss/flash') return [200, c.flash || { journal: 'none', flash_available: false }];
+    if (path === '/api/upload/gnss') return [200, c.staged || { staged: null }];
+    return [200, {}];
+  };
+  ui.setStatus(c.status);
+  ui.setSession({ api: 1, authenticated: true, admin_set: true, setup_done: true, ap_ssid: 'onocoydiy-1A2B' });
+  const el = new El('div');
+  const view = ui.settingsPage(el, '');
+  await settle();
+  const r = pageParts(el);
+  if (c.click) {
+    [...visible(el)].find(e => e.tagName === 'BUTTON' && e.textContent === c.click).fire('click');
+    r.after = pageParts(el);
+  }
+  view.destroy();
+  routes = null;
+  ui.setStatus(null);
+  return r;
+}
+
+/* Logs' event list for the journal c.recs: its table's class, and per row the When cell [tag, class, date, time] and the
+ * other cells' text. */
+async function eventRows(c) {
+  const settle = async () => {
+    for (let i = 0; i < 40; i++) await new Promise(r => setImmediate(r));
+  };
+  routes = (m, p) => {
+    if (p === '/api/health') return [200, { journal: { available: true, oldest_seq: 1, newest_seq: c.recs.length } }];
+    if (p.startsWith('/api/journal')) return [200, { entries: c.recs, cursor: c.recs.length, more: false }];
+    return [200, {}];
+  };
+  const card = ui.eventCard();
+  await settle();
+  routes = null;
+  const table = [...card.el.walk()].find(e => e.tagName === 'TABLE');
+  const part = (td, cls) => {
+    const x = [...td.walk()].find(e => e.className === cls);
+    return x ? x.textContent : null;
+  };
+  return { cls: table.className, rows: [...table.walk()].filter(e => e.tagName === 'TR').map(tr => [tr.kids[0].tagName,
+    tr.kids[0].className, part(tr.kids[0], 'd'), part(tr.kids[0], 'tm'), tr.kids.slice(1).map(k => k.textContent).join(' | ')]) };
+}
+
 /* The Receiver page's Signals card for c.sig (GET /api/gnss/signals) while corrections come (c.live), with c.master the
  * main antenna's signal group the receiver runs (GET /api/gnss; null while unknown): its headline, the
  * hints (tone, text), the words only assistive technology reads, and whether the band table shows. */
@@ -527,6 +584,14 @@ for (const c of JSON.parse(casesJson)) {
   }
   if (c.fn === 'rx_page') {
     out.push(await receiverPageView(c));
+    continue;
+  }
+  if (c.fn === 'settings_page') {
+    out.push(await settingsPageView(c));
+    continue;
+  }
+  if (c.fn === 'event_rows') {
+    out.push(await eventRows(c));
     continue;
   }
   if (c.fn === 'chip') {
@@ -1773,7 +1838,7 @@ def test_chip_card_names_the_access_point_and_the_transmit_power():
     rows = dict(full)
     assert [r[0] for r in full] == ["Chip", "ESP-IDF", "Wi-Fi", "Signal", "Access point", "Channel", "Transmit power",
                                     "Access point can steer", "MAC address", "Moves to another access point"]
-    assert rows["Wi-Fi"] == "Home" and rows["Signal"] == " Good (-60 dBm)"
+    assert rows["Wi-Fi"] == "Home" and rows["Signal"] == " Good (\u221260\u00a0dBm)"
     assert rows["Access point"] == "AA:BB:CC:DD:EE:FF" and rows["Channel"] == "11" and rows["Transmit power"] == "19.5\u00a0dBm"
     assert rows["Access point can steer"] == "Yes" and rows["Moves to another access point"] == "2 this start"
     assert not any("\u00b7" in v for _, v in full)
@@ -1825,6 +1890,80 @@ def test_folded_rows_stay_in_their_table():
     assert starts == ["row %d" % i for i in range(5)] + [["fold", "3", "starts", True, "Older starts"], "row 5", "row 6"]
     assert days == ["row %d" % i for i in range(8)] + [["fold", "2", None, False, "Earlier days"], "row 8", "row 9"]
 
+
+
+def test_event_list_says_every_rows_date_in_a_column_of_one_width():
+    """Logs' event list: the When column has one width (a fixed table layout), so the text after it starts at the same
+    place in every row; each start's heading has its time in that column too, and every row says the date the same way
+    (an estimated time with "about")."""
+    t0 = int(datetime(2026, 10, 17, 13, 36).timestamp())
+    recs = [{"seq": 1, "kind": "boot", "a": 0, "b": 0, "uptime_s": 1, "time_unix": None},
+            {"seq": 2, "kind": "session", "a": -1, "b": 1, "uptime_s": 1, "time_unix": None},
+            {"seq": 3, "kind": "rx_boot", "a": 1, "b": 1, "uptime_s": 30, "time_unix": None},
+            {"seq": 4, "kind": "wifi_disconnect", "a": 8, "b": -70, "uptime_s": 60, "time_unix": t0},
+            {"seq": 5, "kind": "wifi_up", "a": 1, "b": 6, "uptime_s": 66, "time_unix": t0 + 6}]
+    (r,) = run_editor([{"fn": "event_rows", "recs": recs}])
+    assert r["cls"].split() == ["events", "fixed"]
+    head, start, drop, rx = r["rows"]
+    assert head == ["TH", "when", None, None, "Event"]
+    assert start[:2] == ["TH", "when"] and start[3].startswith("about ")
+    assert start[4] == "Started after power-on or a reset by its pin"
+    assert drop[:3] == ["TD", "when", start[2]] and not drop[3].startswith("about") and drop[4].startswith("Wi-Fi dropped")
+    assert rx[:3] == ["TD", "when", start[2]] and rx[3].startswith("about ") and rx[4] == "Receiver at the start Kept running"
+
+
+SET_WIFI = {"configured": True, "online": True, "associated": True, "ssid": "Home", "ip": "192.168.1.50", "rssi": -82,
+            "upstream": "ok", "mdns_host": "onocoydiy",
+            "ap": {"active": False, "ssid": "onocoydiy-1A2B", "reasons": [], "clients": 0, "password_set": True}}
+SET_UPDATE = {"state": "idle", "checks_enabled": True, "last_check_unix": None, "last_check_result": "ok",
+              "app": {"running": "v0.3.0", "latest": "v0.3.0", "available": False, "rollback_available": True,
+                      "rolled_back": [], "trial": {"stage": "none"}},
+              "gnss": {"model": "UM982", "running": "R4.10Build18975", "running_build": 18975, "latest": "R4.10Build18975",
+                       "available": False, "blocked": "none", "flash_available": False}}
+SET_FLASH = {"journal": "waiting",
+             "record": {"state": "needs_user", "phase": "transferring", "sha256": "9ac25d1d359e5815b132", "size": 3027628,
+                        "expected_fw": "R4.10Build19152", "pre_model": "UM982", "pre_fw": "R4.10Build18975", "transfers": 1,
+                        "entry_attempts": 1, "last_acked_block": 1984, "failure": "transport", "changed_unix": 1760000000},
+             "progress": {"phase": "needs_user", "bytes_sent": 2031616, "bytes_total": 3027628, "retries": 3, "transfers": 1,
+                          "failure": "transport", "frames_acked": 1984, "frames_total": 2957, "frames_sent": 1990,
+                          "entry_attempts": 1},
+             "receiver_in_loader": False, "receiver_text": "Ready.",
+             "actions": {"retry": {"allowed": True}, "restart_receiver": {"allowed": True}, "clear": {"allowed": True}},
+             "last": None, "flash_available": True}
+
+
+def test_settings_is_network_updates_and_the_danger_zone_without_fold_outs():
+    """Settings: Network (the Wi-Fi with its signal in words and dBm, Change network, the station's name and public status
+    page, the setup hotspot with its name, password and its own password button), Updates (then Install manually: both
+    files, the receiver from a PC and going back) and the Danger zone (restart, the admin password with the BOOT-button
+    way back, factory reset). No fold-outs anywhere: the hotspot's password field comes with its button, the update
+    session's record shows whole."""
+    on = {**SET_WIFI, "online": False, "rssi": None, "offline_s": 420,
+          "ap": {**SET_WIFI["ap"], "active": True, "reasons": ["fallback"], "clients": 1, "password_set": False}}
+    off, hot, sess = run_editor([
+        {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI, "update": SET_UPDATE, "click": "Change password"},
+        {"fn": "settings_page", "status": st_status(), "wifi": on, "update": SET_UPDATE, "click": "Set a password"},
+        {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI, "update": SET_UPDATE, "flash": SET_FLASH}])
+    assert off["cards"] == ["Network", "Updates", "Danger zone"] and off["details"] == 0
+    assert off["subs"] == ["Setup hotspot", "Install manually"]
+    rows = dict(off["rows"])
+    assert rows["Wi-Fi"] == "Home" and rows["Signal"] == " Weak (\u221282\u00a0dBm)"
+    assert rows["Network name"] == "onocoydiy-1A2B" and rows["Password"] == "Set"
+    assert off["buttons"] == ["Change network", "Change password", "Check now", "Choose file", "Choose file", "Start", "Go back…",
+                              "Restart", "Change password", "Factory reset…"]
+    assert off["lines"] == ["Opens for first setup, when the station cannot reach your Wi-Fi, and after BOOT is held."]
+    # The hotspot's password: its field and buttons once its button is pressed (the admin password's stays as it is).
+    assert off["after"]["fields"] == ["Station name", "New password"]
+    assert off["after"]["buttons"][:4] == ["Change network", "Cancel", "Remove password", "Set password"]
+    assert off["after"]["buttons"][-2] == "Change password"
+    # Offline, the hotspot open without a password: no signal row (no word without its dBm), nothing to remove.
+    assert "Signal" not in dict(hot["rows"]) and dict(hot["rows"])["Password"] == "None: anyone nearby can join"
+    assert "Set a password" in hot["buttons"] and "Remove password" not in hot["after"]["buttons"]
+    # The update session: what it recorded, shown whole, and the receiver's own text under its title.
+    assert sess["cards"] == ["Network", "Updates", "Receiver update session", "Danger zone"] and sess["details"] == 0
+    assert sess["subs"][-1] == "What the receiver sent"
+    srows = dict(sess["rows"])
+    assert srows["Package"].startswith("2.9") and srows["Transfers / loader attempts"] == "1 / 1" and srows["Blocks resent"] == "3"
 
 SIG = {"best_sys": "galileo", "best_bands": 4, "e6_lost": False, "epoch_age_ms": 420, "rtcm1230_supported": True,
        "epochs": 900, "epoch_gaps": 0, "epoch_jumps": 0, "messages": [],
