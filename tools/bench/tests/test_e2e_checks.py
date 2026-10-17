@@ -280,3 +280,19 @@ def test_a_record_that_ended_at_a_pause_must_end_on_a_whole_epoch(lax):
     assert ok and "1 gap" in detail, detail
     ok, detail, _ = e2e.check_record(resumed + b"".join(epochs[17][:5]), sched, whole_tail=True)
     assert not ok and "ends inside an epoch" in detail, detail
+
+
+def test_a_part_carries_an_epoch_only_with_a_frame_that_is_no_sticky_copy(lax):
+    # The signal-test scenario judges a caster record, or the part of one, only once it carried an epoch:
+    # sticky copies alone (a session the station ended right after its start) are none, one epoch is.
+    from benchlib.um982_sim import arp_frame, glo_bias_frame
+    own = [arp_frame(1005, 0, (-2503389.9916, -4660267.5866, 3551298.6913)), glo_bias_frame(0)]
+    epoch = forwarded(lax, loops=1, start_epoch=4)[:6]
+    assert all(e2e.frame_type(f) not in e2e.STICKY_TYPES for f in epoch)
+    assert not e2e.carries_epoch(b"")
+    assert not e2e.carries_epoch(b"".join(own))
+    assert not e2e.carries_epoch(b"".join(own) + epoch[0][:9])   # an MSM cut at the end: not yet
+    assert e2e.carries_epoch(b"".join(own) + epoch[0])
+    assert e2e.carries_epoch(b"".join(epoch))
+    ok, detail, _ = e2e.check_record(b"".join(epoch), lax, whole_tail=True)   # one epoch, as recorded
+    assert ok, detail

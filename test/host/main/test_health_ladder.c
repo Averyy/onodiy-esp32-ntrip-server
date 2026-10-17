@@ -2685,9 +2685,8 @@ TEST_CASE("ladder: no restart is pending while the receiver answers, and again o
     TEST_ASSERT_TRUE(st_of(&w).restart_possible);
 
     /* No receiver found: pending (the station's own alert says why). */
-    sim_t n;
-    held_in_no_receiver(&n, HL_HOLD_ADMIN);
-    TEST_ASSERT_TRUE(st_of(&n).restart_possible);
+    held_in_no_receiver(&w, HL_HOLD_ADMIN);
+    TEST_ASSERT_TRUE(st_of(&w).restart_possible);
 
     /* No antenna: it answers, no RTCM this boot, and the receiver reset is
      * answered too: never pending, through steps 1-5, the station's own
