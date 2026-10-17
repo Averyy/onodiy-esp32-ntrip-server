@@ -12,12 +12,20 @@
 /* Station ID used for the default profile in these tests. */
 #define TEST_STATION_ID 1234u
 
-/* um98x_profile_hash() of um98x_profile_default(TEST_STATION_ID); see "profile hash format is frozen". */
-#define DEFAULT_PROFILE_HASH 0x139710D8u
+/* um98x_profile_hash() of the default profile before 1137 joined its list
+ * (TEST_STATION_ID); see "profile hash format is frozen". */
+#define OLD_DEFAULT_PROFILE_HASH 0x139710D8u
+/* um98x_profile_hash() of um98x_profile_default(TEST_STATION_ID), 1137 included. */
+#define DEFAULT_PROFILE_HASH 0x4D4127DFu
+
+/* The default message set before 1137 joined it. */
+static const uint16_t k_old_set[] = { 1005, 1033, 1077, 1087, 1097, 1117, 1127, 1230 };
+#define OLD_SET_N (sizeof(k_old_set) / sizeof(k_old_set[0]))
 
 TEST_CASE("default profile is the Onocoy set and valid", "[um98x_profile]")
 {
-    static const uint16_t expected[] = { 1005, 1033, 1077, 1087, 1097, 1117, 1127, 1230 };
+    /* Onocoy's guide: 1005, 1033, 1077, 1087, 1097, 1117, 1127, 1137 and 1230, at 1 Hz (1005 too). */
+    static const uint16_t expected[] = { 1005, 1033, 1077, 1087, 1097, 1117, 1127, 1137, 1230 };
     um98x_base_profile_t p;
     um98x_profile_default(&p, TEST_STATION_ID);
     TEST_ASSERT_TRUE(um98x_profile_valid(&p));
@@ -32,7 +40,6 @@ TEST_CASE("default profile is the Onocoy set and valid", "[um98x_profile]")
     for (size_t i = 0; i < p.rtcm_count; i++) {
         TEST_ASSERT_EQUAL_UINT16(expected[i], p.rtcm[i].msg);
         TEST_ASSERT_EQUAL_UINT16(1, p.rtcm[i].period_s);    /* every message at 1 Hz */
-        TEST_ASSERT_NOT_EQUAL(1137, p.rtcm[i].msg);          /* no NavIC on the UM982 */
     }
 
     /* The station ID keeps 12 bits. */
@@ -179,13 +186,159 @@ TEST_CASE("profile hash and blob ignore fields the mode does not use", "[um98x_p
     TEST_ASSERT_NOT_EQUAL(um98x_profile_hash(&a), um98x_profile_hash(&b));
 }
 
+/* The default profile with the old message set. */
+static void old_default(um98x_base_profile_t *p)
+{
+    um98x_profile_default(p, TEST_STATION_ID);
+    p->rtcm_count = (uint8_t)OLD_SET_N;
+    for (size_t i = 0; i < OLD_SET_N; i++) {
+        p->rtcm[i].msg = k_old_set[i];
+        p->rtcm[i].period_s = 1;
+    }
+}
+
 TEST_CASE("profile hash format is frozen", "[um98x_profile]")
 {
     /* gnss/applied_hash on every deployed station holds values like this one.
-     * If this changes, every station reconfigures its receiver once. */
+     * If the format changes, every station reconfigures its receiver once. */
     um98x_base_profile_t p;
+    old_default(&p);
+    TEST_ASSERT_EQUAL_HEX32(OLD_DEFAULT_PROFILE_HASH, um98x_profile_hash(&p));
+    /* The default's list gained 1137: a new hash (stations without a stored
+     * profile, or with the old default set, reconfigure once for it). */
     um98x_profile_default(&p, TEST_STATION_ID);
     TEST_ASSERT_EQUAL_HEX32(DEFAULT_PROFILE_HASH, um98x_profile_hash(&p));
+}
+
+/* p encoded, then cut to what a firmware from before the message-set byte wrote. */
+static size_t encode_before_set_byte(const um98x_base_profile_t *p, uint8_t *buf, size_t cap)
+{
+    size_t len = um98x_profile_encode(p, buf, cap);
+    TEST_ASSERT_TRUE(len > 1);
+    TEST_ASSERT_EQUAL_UINT8(2, buf[len - 1]);   /* the set this firmware writes */
+    return len - 1;
+}
+
+static void assert_default_list(const um98x_base_profile_t *p)
+{
+    um98x_base_profile_t d;
+    um98x_profile_default(&d, TEST_STATION_ID);
+    TEST_ASSERT_EQUAL_UINT8(d.rtcm_count, p->rtcm_count);
+    TEST_ASSERT_EQUAL_MEMORY(d.rtcm, p->rtcm, sizeof(d.rtcm[0]) * d.rtcm_count);
+}
+
+TEST_CASE("profile: the old default set saved before 1137 reads as today's default", "[um98x_profile]")
+{
+    um98x_base_profile_t a;
+    um98x_base_profile_t b;
+    uint8_t buf[UM98X_PROFILE_BLOB_MAX];
+    bool up = false;
+
+    /* Saved by an earlier firmware: upgraded, everything else as stored. */
+    old_default(&a);
+    a.survey_in_s = 900;
+    size_t len = encode_before_set_byte(&a, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
+    TEST_ASSERT_TRUE(up);
+    assert_default_list(&b);
+    TEST_ASSERT_EQUAL_UINT16(900, b.survey_in_s);
+    um98x_base_profile_t d;
+    um98x_profile_default(&d, TEST_STATION_ID);
+    d.survey_in_s = 900;
+    TEST_ASSERT_EQUAL_HEX32(um98x_profile_hash(&d), um98x_profile_hash(&b));
+    TEST_ASSERT_NOT_EQUAL(um98x_profile_hash(&a), um98x_profile_hash(&b));   /* not what was applied: applied once */
+    /* The plain decode reads it the same way. */
+    TEST_ASSERT_TRUE(um98x_profile_decode(buf, len, &b));
+    assert_default_list(&b);
+
+    /* The same set in another order (the UI calls it the Onocoy set too), a
+     * fixed base, a blob from before the antenna fields: upgraded. */
+    old_default(&a);
+    a.base_mode = UM98X_BASE_FIXED;
+    a.fixed_lat_deg = 43.6532;
+    a.fixed_lon_deg = -79.3832;
+    a.fixed_height_m = 112.5;
+    for (size_t i = 0; i < OLD_SET_N; i++) {
+        a.rtcm[i].msg = k_old_set[OLD_SET_N - 1 - i];
+    }
+    len = encode_before_set_byte(&a, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len - 3, &b, &up));   /* two empty strings and the setup ID */
+    TEST_ASSERT_TRUE(up);
+    assert_default_list(&b);
+    TEST_ASSERT_EQUAL(UM98X_BASE_FIXED, b.base_mode);
+    TEST_ASSERT_TRUE(b.fixed_height_m == 112.5);
+
+    /* Stored again (any save), it carries the set byte and decodes as is. */
+    len = um98x_profile_encode(&b, buf, sizeof(buf));
+    um98x_base_profile_t c;
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &c, &up));
+    TEST_ASSERT_FALSE(up);
+    assert_default_list(&c);
+}
+
+TEST_CASE("profile: any other list, or the old set chosen since, stays as stored", "[um98x_profile]")
+{
+    um98x_base_profile_t a;
+    um98x_base_profile_t b;
+    uint8_t buf[UM98X_PROFILE_BLOB_MAX];
+    bool up = true;
+
+    /* The old set saved by this firmware (the user removed 1137 on purpose). */
+    old_default(&a);
+    size_t len = um98x_profile_encode(&a, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
+    TEST_ASSERT_FALSE(up);
+    TEST_ASSERT_EQUAL_UINT8(OLD_SET_N, b.rtcm_count);
+    TEST_ASSERT_EQUAL_MEMORY(a.rtcm, b.rtcm, sizeof(a.rtcm[0]) * OLD_SET_N);
+
+    /* Saved by an earlier firmware, but not exactly the old set. */
+    old_default(&a);
+    a.rtcm[0].period_s = 30;                     /* 1005 every 30 s */
+    len = encode_before_set_byte(&a, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
+    TEST_ASSERT_FALSE(up);
+    TEST_ASSERT_EQUAL_MEMORY(a.rtcm, b.rtcm, sizeof(a.rtcm[0]) * OLD_SET_N);
+
+    old_default(&a);
+    a.rtcm_count--;                               /* without 1230 */
+    len = encode_before_set_byte(&a, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
+    TEST_ASSERT_FALSE(up);
+    TEST_ASSERT_EQUAL_UINT8(OLD_SET_N - 1, b.rtcm_count);
+
+    old_default(&a);
+    a.rtcm[a.rtcm_count].msg = 1019;              /* one more */
+    a.rtcm[a.rtcm_count].period_s = 1;
+    a.rtcm_count++;
+    len = encode_before_set_byte(&a, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
+    TEST_ASSERT_FALSE(up);
+    TEST_ASSERT_EQUAL_UINT8(OLD_SET_N + 1, b.rtcm_count);
+
+    old_default(&a);
+    a.rtcm[1].msg = 1005;                         /* 1005 twice, no 1033 */
+    len = encode_before_set_byte(&a, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
+    TEST_ASSERT_FALSE(up);
+    TEST_ASSERT_EQUAL_UINT16(1005, b.rtcm[1].msg);
+
+    old_default(&a);
+    a.rtcm_count = 0;                             /* no messages */
+    len = encode_before_set_byte(&a, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
+    TEST_ASSERT_FALSE(up);
+    TEST_ASSERT_EQUAL_UINT8(0, b.rtcm_count);
+
+    /* A set byte this firmware does not know (a newer one wrote it): as stored. */
+    old_default(&a);
+    len = um98x_profile_encode(&a, buf, sizeof(buf));
+    buf[len - 1] = 7;
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
+    TEST_ASSERT_FALSE(up);
+    TEST_ASSERT_EQUAL_UINT8(OLD_SET_N, b.rtcm_count);
+
+    /* The out flag is optional. */
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, NULL));
 }
 
 TEST_CASE("profile decode rejects foreign or damaged blobs", "[um98x_profile]")
@@ -196,7 +349,7 @@ TEST_CASE("profile decode rejects foreign or damaged blobs", "[um98x_profile]")
     uint8_t buf[UM98X_PROFILE_BLOB_MAX];
     size_t len = um98x_profile_encode(&p, buf, sizeof(buf));
 
-    TEST_ASSERT_FALSE(um98x_profile_decode(buf, len - 1, &out));   /* truncated */
+    TEST_ASSERT_FALSE(um98x_profile_decode(buf, len - 2, &out));   /* truncated inside the antenna fields */
     buf[0] = 99;                                                   /* unknown layout */
     TEST_ASSERT_FALSE(um98x_profile_decode(buf, len, &out));
     TEST_ASSERT_FALSE(um98x_profile_decode(NULL, 0, &out));
@@ -505,7 +658,7 @@ TEST_CASE("antenna fields: blob round trip, trailing spaces dropped, older blobs
      * RTCM list) decodes with an empty antenna. */
     um98x_profile_default(&a, TEST_STATION_ID);
     len = um98x_profile_encode(&a, buf, sizeof(buf));
-    TEST_ASSERT_TRUE(um98x_profile_decode(buf, len - 3, &b));   /* two empty strings and the setup ID */
+    TEST_ASSERT_TRUE(um98x_profile_decode(buf, len - 4, &b));   /* two empty strings, the setup ID, the set byte */
     TEST_ASSERT_EQUAL_STRING("", b.antenna_model);
     TEST_ASSERT_EQUAL_UINT32(um98x_profile_hash(&a), um98x_profile_hash(&b));
 }

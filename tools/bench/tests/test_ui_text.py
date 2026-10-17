@@ -1102,6 +1102,22 @@ def test_position_message_waits_for_the_survey():
     assert out == ["waits", "missing", "", "missing", ""]
 
 
+def test_regional_messages_without_satellites_are_not_red():
+    """QZSS and NavIC flow only near their area (NavIC around India): a profile row for 1117 or 1137 that never arrives,
+    or stopped, says so in grey, never red. A global constellation's row still goes red."""
+    navic = {"msg": 1137, "count": 0, "age_ms": None, "expected_period_s": 1}
+    qzss_gone = {"msg": 1117, "count": 40, "age_ms": 60000, "expected_period_s": 1}
+    navic_ok = {"msg": 1137, "count": 900, "age_ms": 400, "expected_period_s": 1}
+    gps = {"msg": 1077, "count": 0, "age_ms": None, "expected_period_s": 1}
+    out = run_ui([("msgCheck", [navic, True, False]), ("msgCheck", [qzss_gone, True, True]),
+                  ("msgCheck", [navic_ok, True, False]), ("msgCheck", [gps, True, False])])
+    assert out == ["none", "none", "", "missing"]
+    text = (UI_JS / "65-signals.js").read_text()
+    assert "'None in view'" in text
+    assert "const ONOCOY_RTCM = [1005, 1033, 1077, 1087, 1097, 1117, 1127, 1137, 1230];" in (
+        UI_JS / "60-receiver.js").read_text()
+
+
 def test_message_and_satellite_lists_are_one_line_rows():
     """No stacked blocks for the RTCM messages and the satellites on a phone: a table row each. The satellites keep one
     line; a message's name wraps in its half-width card rather than ending in "…"."""

@@ -19,6 +19,16 @@
  * with an empty antenna) and to the hash serialisation only when a model is
  * set, so a profile without one keeps the hash it had before they existed.
  *
+ * After them comes the default message set the blob was written under (set 2
+ * since 1137 joined the default). A blob without it (set 1) whose list is
+ * exactly the old default set (1005, 1033, 1077, 1087, 1097, 1117, 1127 and
+ * 1230, each once, in any order, every one every 1 s) decodes with today's
+ * default list: it was the default when it was saved, so the station and the
+ * UI show and apply Onocoy's list instead of a "custom" one. Any other list,
+ * and any blob written since (the old set chosen again on purpose), decodes
+ * as stored. Nothing is written for it: the next save stores the new list
+ * with the byte, and an image rolled back to still reads the old list.
+ *
  * The profile hash (gnss/applied_hash) covers only what reaches the receiver,
  * in its own fixed serialisation without the blob version byte: padding,
  * compiler changes or a new blob layout never make an applied profile look
@@ -52,10 +62,14 @@ extern "C" {
 /**
  * Onocoy default profile: signal group 3/6 (adds Galileo E6 on the UM982),
  * survey-in 600 s, COM1 at 115200, RTCM 1005, 1033, MSM7
- * 1077/1087/1097/1117/1127 and 1230, all every 1 s (no 1137: the UM982 has
- * no NavIC signals). Satellite-in-view sentences are off by default (an open
- * owner decision; the signal view comes from MSM data, and the sky view
- * needs the user to turn them on until then).
+ * 1077/1087/1097/1117/1127/1137 and 1230, all every 1 s: the list Onocoy's
+ * station connection guide asks for (1005 at 1 s too, which it allows).
+ * 1137 (NavIC) and 1230 may be refused by a receiver firmware without them;
+ * the apply tolerates that (um98x_rtcm_optional). NavIC and QZSS are
+ * regional: outside their area no MSM of theirs arrives, which the station
+ * never holds against the profile. Satellite-in-view sentences are off by
+ * default (an open owner decision; the signal view comes from MSM data, and
+ * the sky view needs the user to turn them on until then).
  *
  * The 600 s survey assumes the receiver keeps sending MSM observations
  * while it surveys; PROVISIONAL, to be confirmed on hardware (if it holds
@@ -104,8 +118,14 @@ bool um98x_antenna_str_same(const char *a, const char *b);
 /** Encode (unused fields cleared); returns the blob length, or 0 if cap is too small or p is invalid. */
 size_t um98x_profile_encode(const um98x_base_profile_t *p, uint8_t *buf, size_t cap);
 
-/** Decode a blob written by any version of um98x_profile_encode(); false if unusable. */
+/**
+ * Decode a blob written by any version of um98x_profile_encode(), the old
+ * default message set read as today's (see above); false if unusable.
+ */
 bool um98x_profile_decode(const uint8_t *buf, size_t len, um98x_base_profile_t *out);
+
+/** um98x_profile_decode(); *rtcm_upgraded (may be NULL) says the old default set was read as today's. */
+bool um98x_profile_decode_ex(const uint8_t *buf, size_t len, um98x_base_profile_t *out, bool *rtcm_upgraded);
 
 /** Stable hash of what the profile configures ("already applied" check); 0 if invalid. */
 uint32_t um98x_profile_hash(const um98x_base_profile_t *p);

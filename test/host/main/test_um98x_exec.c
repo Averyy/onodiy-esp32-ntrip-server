@@ -60,6 +60,7 @@ typedef struct {
     char mode[100], saved_mode[100];
     bool output, saved_output;
     bool r1230;
+    bool r1137;          /* NavIC MSM7: false = a firmware without NavIC refuses it */
     const char *version;
     int64_t busy_until;
     int64_t restart_ms;
@@ -297,6 +298,8 @@ static void receive(sim_t *s, const char *cmd)
     } else if (sscanf(up, "RTCM%u COM1 %u", &a, &b) == 2) {
         if (a == 1230 && !s->r1230) {
             reply(s, cmd, "PARSING FAILED NO MATCHING FUNC  RTCM1230", 30);
+        } else if (a == 1137 && !s->r1137) {
+            reply(s, cmd, "PARSING FAILED NO MATCHING FUNC  RTCM1137", 30);
         } else {
             s->output = true;
             reply(s, cmd, "OK", 30);
@@ -483,6 +486,7 @@ static sim_t *sim_init(void)
     strcpy(s->saved_mode, s->mode);
     s->output = s->saved_output = true;
     s->r1230 = true;
+    s->r1137 = true;
     s->b1c = s->saved_b1c = 'E';   /* the factory value per public dumps */
     s->version = TV_VERSIONA_UM982;
     s->restart_ms = 3000;
@@ -608,7 +612,7 @@ TEST_CASE("exec: apply on a factory receiver: signal group first, restart, then 
     TEST_ASSERT_EQUAL_INT(1, count(s, "CONFIG SIGNALGROUP"));
     TEST_ASSERT_EQUAL_INT(0, count(s, "CONFIG COM1"));
     TEST_ASSERT_EQUAL_INT(0, count(s, "RESET"));
-    TEST_ASSERT_EQUAL_INT(8, count(s, "RTCM"));
+    TEST_ASSERT_EQUAL_INT(p.rtcm_count, count(s, "RTCM"));   /* each profile message once */
     for (int i = 0; i < s->nrx; i++) {
         TEST_ASSERT_NULL(strstr(s->rx[i].cmd, "COM2"));
         TEST_ASSERT_NULL(strstr(s->rx[i].cmd, "COM3"));
@@ -733,6 +737,53 @@ TEST_CASE("exec: a receiver that rejects 1230 is configured without it", "[um98x
     TEST_ASSERT_TRUE(r.saved);
     TEST_ASSERT_FALSE(r.rtcm1230_ok);
     TEST_ASSERT_EQUAL_INT(2, count(s, "RTCM1230"));   /* one resend after the first refusal */
+    TEST_ASSERT_EQUAL_STRING("", r.failed_cmd);
+}
+
+TEST_CASE("exec: a receiver that refuses 1137 (no NavIC) is configured without it", "[um98x_exec]")
+{
+    /* Onocoy's list has NavIC MSM7; a firmware without NavIC refuses it.
+     * The rest is applied and saved, nothing is rolled back. */
+    sim_t *s = sim_init();
+    configured(s);
+    s->r1137 = false;
+    um98x_base_profile_t p;
+    default_profile(&p);
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.saved);
+    TEST_ASSERT_FALSE(r.rolled_back);
+    TEST_ASSERT_TRUE(r.rtcm1230_ok);                     /* 1230's answer is its own */
+    TEST_ASSERT_EQUAL_UINT8(1, r.rtcm_refused_n);
+    TEST_ASSERT_EQUAL_UINT16(1137, r.rtcm_refused[0]);
+    TEST_ASSERT_EQUAL_INT(2, count(s, "RTCM1137"));      /* one resend after the first refusal */
+    TEST_ASSERT_EQUAL_INT(1, count(s, "RTCM1230"));      /* the messages after it still go out */
+    TEST_ASSERT_EQUAL_INT(1, count(s, "SAVECONFIG"));
+    TEST_ASSERT_EQUAL_STRING("", r.failed_cmd);
+
+    /* Both optional messages refused: still applied. */
+    s = sim_init();
+    configured(s);
+    s->r1137 = false;
+    s->r1230 = false;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.saved);
+    TEST_ASSERT_FALSE(r.rtcm1230_ok);
+    TEST_ASSERT_EQUAL_UINT8(2, r.rtcm_refused_n);
+    TEST_ASSERT_EQUAL_UINT16(1137, r.rtcm_refused[0]);
+    TEST_ASSERT_EQUAL_UINT16(1230, r.rtcm_refused[1]);
+
+    /* The output restore: a refused 1137 fails nothing either. */
+    s = sim_init();
+    configured(s);
+    s->r1137 = false;
+    s->output = false;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_restore_rtcm(&s->ex, &p, NULL, 0, &r));
+    TEST_ASSERT_TRUE(s->output);
+    TEST_ASSERT_EQUAL_UINT8(1, r.rtcm_refused_n);
+    TEST_ASSERT_EQUAL_UINT16(1137, r.rtcm_refused[0]);
     TEST_ASSERT_EQUAL_STRING("", r.failed_cmd);
 }
 
@@ -1646,7 +1697,7 @@ TEST_CASE("exec: a rejected B1C/B2a command is recorded and the session goes on"
     TEST_ASSERT_EQUAL_INT(2, count(s, "CONFIG RTCMB1CB2A ENABLE"));   /* one resend after the refusal */
     TEST_ASSERT_EQUAL_STRING("", r.failed_cmd);
     TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_OFF, r.settings.b1cb2a);   /* still off */
-    TEST_ASSERT_EQUAL_INT(8, count(s, "RTCM"));
+    TEST_ASSERT_EQUAL_INT(p.rtcm_count, count(s, "RTCM"));   /* each profile message once */
 }
 
 TEST_CASE("exec: a restart while B1C/B2a is in flight fails the session", "[um98x_exec]")

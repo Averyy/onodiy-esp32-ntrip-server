@@ -63,11 +63,34 @@ TEST_CASE("plan: nothing differs -> RTCM outputs and one save only", "[um98x_pla
     TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, 115200, false, &plan));
     plan_text(&p, &plan, text, sizeof(text));
     TEST_ASSERT_EQUAL_STRING("RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
-                             "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1230 COM1 1|SAVECONFIG",
+                             "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|RTCM1230 COM1 1|SAVECONFIG",
                              text);
     for (size_t i = 0; i < plan.count; i++) {
-        bool optional = plan.step[i].kind == UM98X_STEP_RTCM && plan.step[i].msg == 1230;
+        bool optional = plan.step[i].kind == UM98X_STEP_RTCM && (plan.step[i].msg == 1230 || plan.step[i].msg == 1137);
         TEST_ASSERT_EQUAL(!optional, plan.step[i].fatal);
+    }
+}
+
+TEST_CASE("plan: optional messages are 1230 and the NavIC MSMs, nothing else", "[um98x_plan]")
+{
+    /* A receiver firmware without them refuses them; the rest of the profile still applies. */
+    TEST_ASSERT_TRUE(um98x_rtcm_optional(1230));
+    for (uint16_t m = 1131; m <= 1137; m++) {
+        TEST_ASSERT_TRUE(um98x_rtcm_optional(m));
+    }
+    static const uint16_t fatal[] = { 1005, 1006, 1033, 1077, 1087, 1097, 1117, 1127, 1130, 1138, 1019, 1229, 1231 };
+    for (size_t i = 0; i < sizeof(fatal) / sizeof(fatal[0]); i++) {
+        TEST_ASSERT_FALSE(um98x_rtcm_optional(fatal[i]));
+    }
+
+    /* The restore plan marks them the same way. */
+    um98x_base_profile_t p;
+    um98x_plan_t plan;
+    survey_profile(&p);
+    TEST_ASSERT_TRUE(um98x_plan_rtcm_only(&p, &plan));
+    TEST_ASSERT_EQUAL_UINT8(p.rtcm_count, plan.count);
+    for (size_t i = 0; i < plan.count; i++) {
+        TEST_ASSERT_EQUAL(!um98x_rtcm_optional(plan.step[i].msg), plan.step[i].fatal);
     }
 }
 
@@ -85,7 +108,7 @@ TEST_CASE("plan: signal group first, then baud, base mode, outputs, save", "[um9
     plan_text(&p, &plan, text, sizeof(text));
     TEST_ASSERT_EQUAL_STRING("CONFIG SIGNALGROUP 3 6|CONFIG COM1 460800|MODE BASE 1234 TIME 600 0|"
                              "RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
-                             "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1230 COM1 1|GPGSV COM1 10|SAVECONFIG",
+                             "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|RTCM1230 COM1 1|GPGSV COM1 10|SAVECONFIG",
                              text);
     TEST_ASSERT_FALSE(plan.step[plan.count - 2].fatal);   /* satellite view is optional */
 
@@ -425,7 +448,7 @@ TEST_CASE("plan: the antenna descriptor only with a model that the receiver does
     TEST_ASSERT_EQUAL_STRING("MODE BASE 1234 TIME 600 0|"
                              "CONFIG BASEANTENNAMODEL \"TRM59800.00     SCIS\" \"5000112233\" 3 USER|"
                              "RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
-                             "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1230 COM1 1|SAVECONFIG",
+                             "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|RTCM1230 COM1 1|SAVECONFIG",
                              text);
     TEST_ASSERT_FALSE(plan.step[step_index(&plan, UM98X_STEP_ANTENNA)].fatal);
 
@@ -487,8 +510,8 @@ TEST_CASE("plan: B1C/B2a in RTCM is turned on only when it reads back off", "[um
     um98x_plan_build(&p, &rb, 115200, false, &plan);
     plan_text(&p, &plan, text, sizeof(text));
     TEST_ASSERT_EQUAL_STRING("CONFIG RTCMB1CB2A ENABLE|RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|"
-                             "RTCM1087 COM1 1|RTCM1097 COM1 1|RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1230 COM1 1|"
-                             "SAVECONFIG",
+                             "RTCM1087 COM1 1|RTCM1097 COM1 1|RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|"
+                             "RTCM1230 COM1 1|SAVECONFIG",
                              text);
     TEST_ASSERT_FALSE(plan.step[0].fatal);
 
@@ -567,10 +590,11 @@ TEST_CASE("plan preview: the default profile's exact list", "[um98x_plan]")
                              "wds CONFIG SIGNALGROUP 3 6|qa- ANT1GROUPA|wd- MODE BASE 1234 TIME 600 0|"
                              "wo- CONFIG RTCMB1CB2A ENABLE|"
                              "wa- RTCM1005 COM1 1|wa- RTCM1033 COM1 1|wa- RTCM1077 COM1 1|wa- RTCM1087 COM1 1|"
-                             "wa- RTCM1097 COM1 1|wa- RTCM1117 COM1 1|wa- RTCM1127 COM1 1|wa- RTCM1230 COM1 1|"
+                             "wa- RTCM1097 COM1 1|wa- RTCM1117 COM1 1|wa- RTCM1127 COM1 1|wa- RTCM1137 COM1 1|"
+                             "wa- RTCM1230 COM1 1|"
                              "was SAVECONFIG",
                              text);
-    TEST_ASSERT_EQUAL_size_t(17, n);
+    TEST_ASSERT_EQUAL_size_t(18, n);
 
     /* Not for an invalid profile; a short buffer never holds a cut list's SAVECONFIG out of place. */
     p.survey_in_s = 0;

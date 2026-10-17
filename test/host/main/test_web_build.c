@@ -351,6 +351,27 @@ TEST_CASE("budget comes from the protected slot, the ledger, or nowhere", "[web_
     TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, web_budget_left_s(&s_snap));
 }
 
+TEST_CASE("onocoy_preset: servers.onocoy.com:2101, NTRIP 2.0, the fast pace", "[web_build]")
+{
+    ntrip_caster_cfg_t preset;
+    ntrip_server_onocoy_defaults(&preset);
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    wj_obj_open(&w, NULL);
+    web_build_onocoy_preset(&w, &preset, 2121);
+    wj_obj_close(&w);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL(root);
+    const cJSON *p = at(root, "onocoy_preset");
+    TEST_ASSERT_EQUAL_STRING("servers.onocoy.com", at(p, "host")->valuestring);
+    TEST_ASSERT_EQUAL(2101, at(p, "port")->valueint);
+    TEST_ASSERT_EQUAL(2121, at(p, "tls_port")->valueint);
+    TEST_ASSERT_EQUAL(2, at(p, "ntrip_version")->valueint);
+    TEST_ASSERT_EQUAL_STRING("fast", at(p, "backoff_profile")->valuestring);
+    cJSON_Delete(root);
+}
+
 TEST_CASE("caster config never carries the password", "[web_build]")
 {
     fixture();

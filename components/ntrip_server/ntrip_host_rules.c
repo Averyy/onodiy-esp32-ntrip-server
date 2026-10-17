@@ -85,7 +85,7 @@ void ntrip_server_onocoy_defaults(ntrip_caster_cfg_t *out)
     strlcpy(out->name, "Onocoy", sizeof(out->name));
     strlcpy(out->host, "servers.onocoy.com", sizeof(out->host));
     out->port = 2101;
-    out->proto = NTRIP_PROTO_V1;
+    out->proto = NTRIP_PROTO_V2;   /* Onocoy's guide: POST /<mountpoint>, Basic <username>:<password> */
     out->tls = false;
     out->trust_mode = NTRIP_TRUST_BUNDLE;
     out->backoff_profile = NTRIP_BACKOFF_FAST;
@@ -95,6 +95,21 @@ bool ntrip_server_onocoy_ready(const ntrip_caster_cfg_t *cfg)
 {
     return cfg != NULL && ntrip_slot_is_onocoy(cfg) && cfg->mountpoint[0] != '\0' && cfg->username[0] != '\0' &&
            (cfg->password_set || cfg->password[0] != '\0');
+}
+
+bool ntrip_server_onocoy_blank_proto(ntrip_caster_cfg_t *cfg)
+{
+    if (cfg == NULL || !ntrip_slot_is_onocoy(cfg) || cfg->mountpoint[0] != '\0' || cfg->username[0] != '\0' ||
+        cfg->password[0] != '\0' || cfg->password_set) {
+        return false;   /* not Onocoy, or holds a credential: set up, or streaming in the older layout */
+    }
+    ntrip_caster_cfg_t preset;
+    ntrip_server_onocoy_defaults(&preset);
+    if (cfg->proto == preset.proto) {
+        return false;
+    }
+    cfg->proto = preset.proto;
+    return true;
 }
 
 bool ntrip_server_apply_host_rules(ntrip_caster_cfg_t *cfg, const ntrip_backoff_profile_t *requested)

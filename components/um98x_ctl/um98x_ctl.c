@@ -646,6 +646,14 @@ esp_err_t um98x_ctl_apply_profile(gnss_link_lease_t lease, const um98x_base_prof
                  result->signal_group_sent ? "set" : "kept", result->mode_sent ? "sent" : "kept",
                  (unsigned)result->baud, result->baud_changed ? " changed" : "",
                  result->rtcm1230_ok ? "on" : "rejected");
+        /* A success refused only optional messages (um98x_rtcm_optional): this
+         * firmware lacks them. 1230 has its own word in the line above. */
+        for (uint8_t i = 0; i < result->rtcm_refused_n && i < UM98X_MAX_RTCM_MSGS; i++) {
+            if (result->rtcm_refused[i] != UM98X_RTCM_GLO_BIASES) {
+                ESP_LOGW(TAG, "RTCM%u refused by this receiver firmware: applied without it",
+                         (unsigned)result->rtcm_refused[i]);
+            }
+        }
     } else {
         ESP_LOGW(TAG, "profile apply failed at \"%s\": %s%s", result->failed_cmd, result->reason,
                  result->rolled_back ? (result->rollback_answered ? " (rolled back)" : " (rolled back, no answer)")
