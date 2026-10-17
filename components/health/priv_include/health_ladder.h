@@ -12,11 +12,21 @@
  * held by a lease: the receiver's output is what counts). A stall is
  * declared when there was none for longer than the threshold, measured from
  * the later of the last frame and the end of the last suspension. The stall
- * is classed from the last threshold's worth of input when it is declared
- * and again before each step:
- *   NO_BYTES   nothing at all                          -> entry step 1
- *   GARBAGE    bytes, no valid frame or text line      -> entry step 3
- *   TEXT_ONLY  checksum-valid text lines, no RTCM      -> entry step 4
+ * is classed from what the receiver sends unasked when it is declared and
+ * again before each step:
+ *   TEXT_ONLY  checksum-valid text lines nobody asked for, after the last
+ *              RTCM frame (more than HL_ANSWER_SLACK_MS after it), the
+ *              latest within twice the threshold   -> entry step 4
+ *   GARBAGE    else bytes the framer discarded within the threshold
+ *                                                  -> entry step 3
+ *   NO_BYTES   else                                -> entry step 1
+ * The receiver's replies to the station's own commands (its once-a-minute
+ * question, a version or position query, a session's acknowledgements and
+ * logs) are no part of the class: they come because the station asked, so
+ * asking never changes how a stall is judged. They are answers (below). A
+ * line output every 10 s (the satellite-in-view sentences) is TEXT_ONLY at
+ * every tick: twice the threshold covers its period; text that stopped
+ * with the RTCM (a link that died) is not.
  * Later steps never go back: the next step is max(last step + 1, class
  * entry).
  *
@@ -36,32 +46,46 @@
  *         station refuses RECONFIGURE.
  * Byte rule: no byte at all in the failed step's window (step 3: the scan
  * and its grace, also the station's own byte report for the pass; step 5:
- * its grace) -> 6a; any bytes -> 6b.
+ * its grace) -> 6a; any bytes -> 6b. A receiver that answered is judged
+ * before it (below), so a reply never reaches the byte rule.
  * A refused step 4 (the station sends nothing while gnss/autocfg = 0 or
  * after a failed apply) fails at once and the ladder goes on to step 5.
  * Success = healthy at any time during a step's grace. The ladder resets
  * (step index 0, power-cycle alert cleared) after 60 s of continuous health;
  * a shorter healthy spell keeps the index, so a flapping link escalates.
  *
- * Suspension (no step starts or advances, the ladder's timers stop, a step
- * in progress is abandoned): the station DETECTING, CONFIGURING, FLASHING,
- * FLASH_RECOVERY or IDLE (not running yet); a receiver flash journal open in
- * any state or of unknown state; safe mode; a lease, or a station recovery
- * job, that is not the ladder's own step; and the post-lease grace after any
- * release that was not the ladder's own. When a suspension ends the stall
- * timer restarts from there. An abandoned step runs again, once per
- * episode: a step that ran and is abandoned a second time before the ladder
- * resets counts as failed, and the ladder goes on past it (after step 5,
- * the rule of its failure for a receiver that answered since the RESET
- * went out: 7 with its reason; otherwise the byte rule on the stall class).
- * Only right after that second abandonment: a re-run that succeeded, or
- * RTCM back meanwhile, makes a later stall an ordinary one (after step 5:
- * the byte rule on its class).
+ * Suspension (no step starts or advances, the ladder's timers stop): the
+ * station DETECTING, CONFIGURING, FLASHING, FLASH_RECOVERY or IDLE (not
+ * running yet); a receiver flash journal open in any state or of unknown
+ * state; safe mode; a lease, or a station recovery job, that is not the
+ * ladder's own step; and the post-lease grace after any release that was
+ * not the ladder's own. When a suspension ends the stall timer restarts
+ * from there.
+ * The station's own sessions (CONFIGURING, a lease or a job that is not the
+ * ladder's step, the grace after their release) never cut short a step the
+ * station has run: the step's evidence is in (the rescan found the
+ * receiver, the RESET went out and was answered), so its grace waits for
+ * the end of the session, with the time it had left, and the step is judged
+ * as usual; it is never abandoned and run again for it. A step that only
+ * ran until now enters its grace first (the station may start a session
+ * right after the ladder's job, between two ticks). Their replies count as
+ * answers like any other. Only a step that is due and not taken yet starts
+ * over after them (nothing ran).
+ * Every other suspension abandons a step in progress (the receiver lost, a
+ * receiver update, maintenance: what the step found no longer holds). An
+ * abandoned step runs again, once per episode: a step that ran and is
+ * abandoned a second time before the ladder resets counts as failed, and
+ * the ladder goes on past it (after step 5, the rule of its failure for a
+ * receiver that answered since the RESET went out: 7 with its reason;
+ * otherwise the byte rule on the stall class). Only right after that
+ * second abandonment: a re-run that succeeded, or RTCM back meanwhile, makes
+ * a later stall an ordinary one.
  * Between steps (IDLE after an abandoned step, or before a stall is
- * declared again, while no RTCM comes and nothing but a lease suspends the
- * ladder) the status stays RECOVERING (DEGRADED in ALERTS mode) with its
- * reason, so the antenna hint does not drop out while the station's own
- * sessions run.
+ * declared again, while no RTCM comes and nothing but the station's own
+ * sessions suspend the ladder) the status stays RECOVERING (DEGRADED in
+ * ALERTS mode) with its reason, as it does while a step's grace waits for a
+ * session: the level and the antenna hint never drop out while the
+ * station's own sessions run.
  * Station NO_RECEIVER: the station's slow detection schedule replaces the
  * ladder's retries. On entering it the byte rule runs once per episode on
  * the station's report for its whole detection pass, then the ladder holds
@@ -94,8 +118,11 @@
  *            steps 1-5 and 6b unchanged;
  *   ALERTS   nothing is requested and nothing rebooted. Stalls are still
  *            declared and classed; each step the full ladder would start is
- *            journalled once (outcome NOT_RUN) when it would start and its
- *            grace still runs; where the byte rule would run (after step 3
+ *            journalled once per episode (outcome NOT_RUN) when it would
+ *            start (one that comes due again after a suspension is not
+ *            journalled again) and its grace still runs, waiting for the
+ *            station's own sessions like a step that ran; where the byte
+ *            rule would run (after step 3
  *            or 5) the ladder goes to 7, with no 6b and no power-cycle
  *            alert. In 7 the retry pass journals the step it would enter
  *            every 10 min and sends nothing. The level is DEGRADED before 7
@@ -139,23 +166,24 @@
  *             replies in this episode, text lines when it began, or replies
  *             to the station within HL_ALIVE_MS before it began (replies
  *             come only when asked, so their age is the evidence; a text
- *             output that stopped is silence). A receiver that sent no RTCM
- *             frame this boot answers only while its last line or reply is
- *             at most HL_ANSWER_FRESH_MS old: the station asks such a
- *             receiver once a minute while nothing comes, so one that
- *             answers when asked stays fresh, and one that hung after
- *             answering at boot does not answer for ever.
+ *             output that stopped is silence), and it answers now: its last
+ *             line or reply came after its last RTCM frame (more than
+ *             HL_ANSWER_SLACK_MS after it) and is at most
+ *             HL_ANSWER_FRESH_MS old. The station asks a receiver that
+ *             sends no RTCM once a minute while nothing comes (also one
+ *             whose RTCM stopped), so one that answers when asked stays
+ *             fresh, and one that hung or was unplugged does not answer
+ *             for ever.
  *   SILENT    nothing usable and no answer.
  * While the ladder is in 7 or (ALERTS mode) in a journalled or only
  * watched step's grace, never in NO_RECEIVER (the station's own alert says
  * that). NO_RTCM and NO_SKY also while a step is in progress (above), as
- * soon as the receiver answered after its last RTCM frame, more than
- * HL_ANSWER_SLACK_MS after it (text lines or replies; with no RTCM frame
- * this boot, within HL_ANSWER_FRESH_MS): the antenna is the likely cause,
- * and the hint comes with the recovery, not after it. The level stays
- * RECOVERING then. Line and reply times are exact (hl_in_t.line_age_ms,
- * answer_age_ms), so this is the same evidence, by the same rule, as the
- * station's "the receiver answers" (receiver_responding).
+ * soon as the receiver answers by that rule (text lines or replies): the
+ * antenna is the likely cause, and the hint comes with the recovery, not
+ * after it. The level stays RECOVERING then. Line and reply times are exact
+ * (hl_in_t.line_age_ms, answer_age_ms), so this is the same evidence, by
+ * the same rule, as the station's "the receiver answers"
+ * (receiver_responding).
  *
  * Restart pending (hl_status_t.restart_possible; what the status says of
  * the restart hold and the reboot cap): an episode without RTCM, unless the
@@ -166,20 +194,24 @@
  * no byte at all, and a receiver that answers gets 7 with its reason after
  * step 5 instead, so a restart comes only if it stops answering; the status
  * says so once the evidence changes (a rescan that finds nothing, a RESET
- * with no answer, or, with no RTCM frame this boot, no answer for
- * HL_ANSWER_FRESH_MS).
+ * with no answer, or no answer for HL_ANSWER_FRESH_MS).
  *
  * The receiver answers but sends no RTCM (amends the byte rule and the
  * retry pass; 6b is "bytes but no answers"):
  *  - after step 5, a receiver that answered (replies from the RESET's start:
  *    its banner, its version log; text lines in the step's grace) goes to 7
  *    with NO_RTCM (or NO_SKY), not to 6b: a power cycle is not the advice;
+ *  - the same for a stall right after a step 5 that brought RTCM back (the
+ *    ladder has not reset yet): a receiver that answers now (above) goes to
+ *    7 with its reason; one that sends nothing gets the byte rule on its
+ *    class, as before;
  *  - step 5 is not taken while the receiver answers and says it uses no
  *    satellites (no_sky): a reset cannot bring satellites; straight to 7;
  *  - in 7 after either, the retry pass does not run steps 4 and 5 again: a
  *    TEXT_ONLY stall holds 7, and a silent one goes up to step 3 only (its
- *    rescan asks the receiver again); found there, back to 7. A rescan that
- *    finds nothing ends that (the byte rule as usual).
+ *    rescan asks the receiver again); found there, or a class that turns
+ *    TEXT_ONLY on the way, back to 7. A rescan that finds nothing ends that
+ *    (the byte rule as usual).
  *
  * Timings are PROVISIONAL, to be confirmed on hardware.
  */
@@ -206,7 +238,8 @@ extern "C" {
 #define HL_MAX_TICK_MS            5000       /**< longest tick gap credited to the ladder clock */
 #define HL_ALIVE_MS               600000     /**< replies this recent when a stall begins: the receiver is alive */
 #define HL_ANSWER_SLACK_MS        1000       /**< a line this soon after the last RTCM frame may be that output's own: no answer after it */
-#define HL_ANSWER_FRESH_MS        90000      /**< no RTCM frame this boot: a line or reply this recent is an answer (the station asks every 60 s) */
+#define HL_ANSWER_FRESH_MS        90000      /**< a line or reply this recent (after the last RTCM frame) is an answer: the station asks
+                                                  a receiver that sends no RTCM every 60 s */
 
 #define HL_NEVER INT64_MIN
 
@@ -336,8 +369,8 @@ typedef struct {
     int64_t now_ms;
     uint32_t stall_ms;            /**< healthy = an RTCM frame within this */
     uint32_t rtcm_age_ms;         /**< since the last CRC-valid RTCM frame, UINT32_MAX = never */
-    uint32_t rx_age_ms;           /**< since any byte, UINT32_MAX = never */
     uint64_t rx_bytes;            /**< link bytes received (monotonic) */
+    uint64_t discarded;           /**< bytes the framer discarded: in no frame and no line (monotonic; the class's garbage) */
     uint64_t text_lines;          /**< checksum-valid text lines (monotonic) */
     uint8_t stn_state;            /**< hl_stn_state_t, sampled after the transition counters */
     uint32_t rec_enters;          /**< station transitions into RECOVERING (monotonic) */
@@ -362,6 +395,8 @@ typedef struct {
     uint32_t line_age_ms;         /**< since the last checksum-valid text line of any kind (replies included), exact;
                                        UINT32_MAX = none this boot */
     uint32_t answer_age_ms;       /**< since the last of `answers`, exact; UINT32_MAX = none this boot */
+    uint32_t unasked_line_age_ms; /**< since the last checksum-valid text line that was no reply to the station's own
+                                       commands (the class's text lines), exact; UINT32_MAX = none this boot */
     bool no_sky;                  /**< the receiver's own position sentence within the stall threshold: no fix, no satellites */
     bool rx_held;                 /**< the first configuration is held: the receiver was never set to send RTCM */
 } hl_in_t;
@@ -389,6 +424,9 @@ typedef struct {
     int64_t line_ms;              /**< wall time of the last line (HL_NEVER = none this boot) */
     uint64_t answers_last;
     int64_t answer_ms;            /**< wall time of the last reply (HL_NEVER = none this boot) */
+    int64_t unasked_ms;           /**< wall time of the last unasked line (HL_NEVER = none this boot) */
+    uint64_t discarded_last;
+    int64_t garbage_ms;           /**< the tick that saw the framer discard bytes last (HL_NEVER = none) */
 
     /* the receiver answers but sends no RTCM */
     bool ep_alive;                /**< it answers: in this episode, or (replies) within HL_ALIVE_MS before it began */
@@ -426,6 +464,7 @@ typedef struct {
     /* user recovery mode */
     uint8_t mode;                 /**< hl_mode_t of the last decision */
     bool dry;                     /**< the step in its grace was only journalled (ALERTS mode) */
+    uint8_t dry_logged;           /**< bit n: step n was journalled as not run in this episode */
 
     /* REBOOTING */
     int64_t reboot_ms;

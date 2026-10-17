@@ -23,7 +23,14 @@
  *     firmware == gnss/applied_fw, gnss/applied_hash == the profile's hash
  *     (both checked by the caller, STN result static_ok) and the observed
  *     set over one window (station_obs.h). All true: nothing is sent. Any
- *     false and gnss/autocfg = 1 and no CONFIG_FAILED: apply. An unsupported
+ *     false and gnss/autocfg = 1 and no CONFIG_FAILED: apply. The observed
+ *     set needs RTCM: a window without any leaves the check pending, judged
+ *     by the first window with RTCM, while the static part holds (the
+ *     receiver acknowledged this profile on this firmware at its last
+ *     apply): a re-apply could not be checked without RTCM, and does not
+ *     help a receiver without an antenna; such a stall is the health
+ *     ladder's (its reconfigure step, under the user's recovery mode). With
+ *     the static part false the apply runs at once. An unsupported
  *     model: stream only (alert). Later windows watch for drift: two failed
  *     windows in a row while RTCM flows re-apply (same conditions), unless
  *     the previous apply's own check already failed (re-applying would not
@@ -169,13 +176,20 @@
  * listen-only, as when the boot's one key was used. The user's receiver
  * restart and the user's apply still run.
  *
- * A receiver that sent no RTCM frame this boot (no antenna, no output
- * configured) may answer only when asked. While STREAMING with no line for
- * STN_ASK_MS, the station asks it (STN_JOB_ASK: the version query without a
- * lease, one line, nothing paused, nothing configured; at most once every
- * STN_ASK_MS, after every other job), so its answers stay fresh and one that
- * hung stops counting as answering (stn_responding). Never in maintenance
- * (no job at all), never once RTCM flowed this boot.
+ * A receiver that sends no RTCM (none this boot, or none for
+ * STN_RTCM_QUIET_MS: no antenna, no output configured, its RTCM stopped)
+ * may answer only when asked. While STREAMING the station asks it
+ * (STN_JOB_ASK: the version query without a lease, one line, nothing
+ * paused, nothing configured; after every other job): at once when no line
+ * came since its last RTCM frame, then whenever no line came for
+ * STN_ASK_MS, at most once every STN_ASK_MS; so its answers stay fresh and
+ * one that hung or was unplugged stops counting as answering
+ * (stn_responding). A receiver whose RTCM stops is asked within seconds,
+ * before health declares the stall, so the ladder's first look already
+ * knows whether it answers.
+ * Never in maintenance (no job at all), never while RTCM flows. The replies
+ * are the station's own evidence: health keeps them out of its stall class
+ * (station_status_t.rx_unasked_line_age_ms).
  *
  * Fixed-position check (um98x_fixcheck.h; the caller passes the fixed
  * profile's position in stn_in_t): is the fixed position where the
@@ -219,9 +233,9 @@ extern "C" {
 #define STN_RTCM_QUIET_MS      3000      /**< no valid RTCM frame this long: nothing flows (the leased identity query) */
 #define STN_FRESH_MS           10000     /**< "the receiver streams": a valid RTCM frame (or line) this recently */
 #define STN_ANSWER_SLACK_MS    1000      /**< a line this soon after the last RTCM frame may be that output's own: no answer after it */
-#define STN_ASK_MS             60000     /**< no RTCM frame this boot and no line this long: the receiver is asked (STN_JOB_ASK) */
-#define STN_ANSWER_FRESH_MS    90000     /**< no RTCM frame this boot: a line this recent is an answer (asked every STN_ASK_MS,
-                                              plus a busy station's delay and the query's timeout) */
+#define STN_ASK_MS             60000     /**< no RTCM flowing and no line this long: the receiver is asked (STN_JOB_ASK) */
+#define STN_ANSWER_FRESH_MS    90000     /**< no RTCM flowing: a line this recent (after the last RTCM frame) is an answer
+                                              (asked every STN_ASK_MS, plus a busy station's delay and the query's timeout) */
 #define STN_RESTART_CHECK_MS   30000     /**< applied check after restart evidence */
 #define STN_LAST_RESORT_MS     10000     /**< after a failed apply: wait this long for RTCM */
 #define STN_DETECT_FAST_MS     30000     /**< pass interval in the first part of an episode */
@@ -1052,19 +1066,18 @@ uint32_t stn_next_detect_in_s(const stn_t *s, int64_t now_ms);
 /**
  * Whether the receiver answers (station_status_t.receiver_responding): it
  * streams (a CRC-valid RTCM frame within STN_FRESH_MS), or it sent a
- * checksum-valid text line (a reply, a log or an NMEA sentence) after its
- * last RTCM frame, more than STN_ANSWER_SLACK_MS after it; with no RTCM
- * frame this boot, a line within STN_ANSWER_FRESH_MS. Never in NO_RECEIVER,
- * and a line from before the station last found no receiver (no_rx_ms)
- * does not count.
+ * checksum-valid text line (a reply, a log or an NMEA sentence) within
+ * STN_ANSWER_FRESH_MS and after its last RTCM frame, more than
+ * STN_ANSWER_SLACK_MS after it (any line, with no RTCM frame this boot).
+ * Never in NO_RECEIVER, and a line from before the station last found no
+ * receiver (no_rx_ms) does not count.
  *
  * So a receiver that answers when asked and sends nothing unasked (no
- * antenna, no output configured) keeps answering: the station asks it every
- * STN_ASK_MS (STN_JOB_ASK); one that hung after answering at boot stops
- * answering once its last answer is that old. One whose RTCM stopped
- * answers again once it sends a line (a question's answer, its NMEA). The
- * same evidence, by the same rule, as the health ladder's "answered after
- * its last RTCM frame".
+ * antenna, no output configured, its RTCM stopped) keeps answering: the
+ * station asks it every STN_ASK_MS (STN_JOB_ASK); one that hung or was
+ * unplugged stops answering once its last answer is that old. The same
+ * evidence, by the same rule, as the health ladder's "answered after its
+ * last RTCM frame".
  * @param rtcm_age_ms since the last CRC-valid RTCM frame, UINT32_MAX = none this boot
  * @param line_ms     when the last checksum-valid line arrived (now_ms's clock), STN_NEVER = none this boot
  */

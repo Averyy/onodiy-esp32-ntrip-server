@@ -9,10 +9,13 @@
  * its lease releases the way station.c and its events do. The clock starts
  * near the 32-bit millisecond wrap. Lines and replies are timed at the tick
  * that counts them (or at the time a test gives), and the ladder gets their
- * exact ages, as health reads them with the station's status. A receiver
- * that answers when asked answers the station's leased steps, its own
- * applies, and the question the station asks once a minute while nothing
- * comes from a receiver that sent no RTCM frame this boot.
+ * exact ages, as health reads them with the station's status. Text lines
+ * (`lines`) are the receiver's own output, garbage (`bytes`) is what the
+ * framer discards; replies (`answers`) are lines too, but no part of the
+ * stall class. A receiver that answers when asked answers the station's
+ * leased steps, its own applies, and the question the station asks once a
+ * minute while nothing comes from a receiver that sends no RTCM (none this
+ * boot, or none for 3 s).
  */
 #include <stdint.h>
 #include <string.h>
@@ -47,7 +50,8 @@ typedef struct {
     uint8_t silence_after;      /* this finished step silences the receiver */
     uint8_t answers_during;     /* the receiver answers the station's commands while this step runs */
     bool asked;                 /* it answers whenever the station asks (no antenna): leased steps, applies, the question */
-    int64_t last_line;          /* when the last text line came (NEVER = none) */
+    int64_t last_line;          /* when the last text line came, replies included (NEVER = none) */
+    int64_t last_unasked;       /* when the last line of its own output came (NEVER = none) */
     int64_t last_answer;        /* when the last reply came (NEVER = none) */
     uint64_t lines_seen, answers_seen;
     int64_t line_at;            /* a test's time for the next line counted (NEVER: the tick's) */
@@ -67,6 +71,8 @@ typedef struct {
     bool lease;
     int64_t release_at;
     uint8_t apply_after;        /* this finished step makes the station run an apply of its own */
+    uint8_t apply_state;        /* the state it runs in (CONFIGURING under its lease); another one (IDLE, no lease:
+                                   receiver maintenance) models a suspension that is not a session of the station's own */
     int64_t apply_at;           /* when it starts (NEVER = none scheduled) */
     int64_t apply_end;
 
@@ -161,7 +167,9 @@ static void sim_init(sim_t *w)
     w->release_at = NEVER;
     w->apply_at = NEVER;
     w->apply_end = NEVER;
+    w->apply_state = HL_STN_CONFIGURING;
     w->last_line = NEVER;
+    w->last_unasked = NEVER;
     w->last_answer = NEVER;
     w->line_at = NEVER;
     w->asked_at = NEVER;
@@ -196,18 +204,22 @@ static bool cap_allows(const sim_t *w)
 
 static void sim_station(sim_t *w)
 {
-    /* The station's own apply (CONFIGURING under its lease). */
+    /* The station's own apply (CONFIGURING under its lease), or the other
+     * suspension a test chose. */
+    uint8_t ast = w->apply_state;
     if (w->apply_at != NEVER && w->running == 0 && w->now >= w->apply_at &&
         w->in.stn_state == HL_STN_STREAMING) {
         w->apply_at = NEVER;
-        w->in.stn_state = HL_STN_CONFIGURING;
-        w->lease = true;
+        w->in.stn_state = ast;
+        w->lease = ast == HL_STN_CONFIGURING;
     }
-    if (w->in.stn_state == HL_STN_CONFIGURING && w->apply_end != NEVER && w->now >= w->apply_end) {
+    if (w->in.stn_state == ast && w->apply_end != NEVER && w->now >= w->apply_end) {
         w->apply_end = NEVER;
         w->in.stn_state = HL_STN_STREAMING;
-        w->lease = false;
-        w->release_at = w->now;
+        if (w->lease) {
+            w->lease = false;
+            w->release_at = w->now;
+        }
     }
     if (w->pending != 0 && w->running == 0 && w->in.stn_state == HL_STN_STREAMING) {
         w->running = w->pending;
@@ -256,6 +268,9 @@ static void sim_world(sim_t *w)
         w->last_rx = w->now;
         w->in.rx_bytes += 120;
     }
+    if (w->bytes) {
+        w->in.discarded += 120;   /* garbage: in no frame and no line */
+    }
     if (w->lines) {
         w->in.text_lines++;
     }
@@ -265,11 +280,16 @@ static void sim_world(sim_t *w)
     if (w->asked && ((w->running >= 3) || w->in.stn_state == HL_STN_CONFIGURING)) {
         w->in.answers++;   /* a session asks it */
     }
-    /* The station's question to a receiver that sent no RTCM frame this
-     * boot: streaming, nothing running, no line or reply for a minute. */
+    /* The station's question to a receiver that sends no RTCM (none this
+     * boot, or none for 3 s): streaming, nothing running; at once when no
+     * line or reply came since its last RTCM frame, then while none comes
+     * for a minute, at most once a minute. */
     int64_t heard = w->last_line > w->last_answer ? w->last_line : w->last_answer;
-    if (w->last_rtcm == NEVER && w->in.stn_state == HL_STN_STREAMING && w->running == 0 && !w->lease &&
-        (heard == NEVER || w->now - heard >= 60 * SEC) && (w->asked_at == NEVER || w->now - w->asked_at >= 60 * SEC)) {
+    bool flowing = w->last_rtcm != NEVER && w->now - w->last_rtcm < 3 * SEC;
+    bool heard_since = heard != NEVER && (w->last_rtcm == NEVER || heard > w->last_rtcm);
+    bool asked_since = w->asked_at != NEVER && (w->last_rtcm == NEVER || w->asked_at > w->last_rtcm);
+    if (!flowing && w->in.stn_state == HL_STN_STREAMING && w->running == 0 && !w->lease &&
+        !(heard_since && w->now - heard < 60 * SEC) && !(asked_since && w->now - w->asked_at < 60 * SEC)) {
         w->questions++;
         w->asked_at = w->now;
         if (w->asked) {
@@ -292,6 +312,7 @@ static void sim_fill(sim_t *w)
     if (w->in.text_lines != w->lines_seen) {
         w->lines_seen = w->in.text_lines;
         w->last_line = w->line_at != NEVER ? w->line_at : w->now;
+        w->last_unasked = w->last_line;   /* its own output (replies count in `answers` only) */
         w->line_at = NEVER;
     }
     if (w->in.answers != w->answers_seen) {
@@ -304,9 +325,9 @@ static void sim_fill(sim_t *w)
     w->in.now_ms = w->now;
     w->in.stall_ms = 10 * SEC;
     w->in.rtcm_age_ms = age(w->now, w->last_rtcm);
-    w->in.rx_age_ms = age(w->now, w->last_rx);
     w->in.line_age_ms = age(w->now, w->last_line);
     w->in.answer_age_ms = age(w->now, w->last_answer);
+    w->in.unasked_line_age_ms = age(w->now, w->last_unasked);
     w->in.lease_held = w->lease;
     w->in.since_release_ms = age(w->now, w->release_at);
     if (w->cap_model) {
@@ -718,8 +739,12 @@ TEST_CASE("ladder: success, 60 s of health resets, a shorter spell escalates", "
     TEST_ASSERT_EQUAL_UINT8(1, w.rec[4].code);
 }
 
-TEST_CASE("ladder: a re-stall after a successful step 5 goes to the byte rule", "[health_ladder]")
+TEST_CASE("ladder: a re-stall right after a successful step 5: answers -> 7 with the reason, nothing -> the byte rule", "[health_ladder]")
 {
+    /* Text lines keep coming after the RTCM stops again (within the 60 s
+     * that reset the ladder): the receiver answers. As after a failed step
+     * 5: the last step with its reason, no power-cycle advice (the byte
+     * rule gave it before: lines are bytes). */
     sim_t w;
     sim_init(&w);
     w.rtcm = true;
@@ -732,10 +757,63 @@ TEST_CASE("ladder: a re-stall after a successful step 5 goes to the byte rule", 
     TEST_ASSERT_EQUAL_UINT8(5, w.rec[2].code);
     TEST_ASSERT_EQUAL_UINT8(HL_OUT_HEALTHY, w.rec[2].outcome);
     sim_run(&w, 20 * SEC);
-    w.rtcm = false;      /* text lines keep coming: bytes -> 6b */
+    w.rtcm = false;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 4, MIN));
+    TEST_ASSERT_EQUAL_UINT8(HL_CODE_FAILED, w.rec[3].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_STARTED, w.rec[3].outcome);
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_FALSE(s.power_alert);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_FAILED, s.level);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+    TEST_ASSERT_EQUAL_INT(-1, find_rec(&w, HL_CODE_POWER_ALERT, HL_OUT_STARTED, 0));
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+    /* ... and its retry pass does not reset it again. */
+    sim_run(&w, 30 * MIN);
+    TEST_ASSERT_EQUAL_UINT(1, w.nreq_step[5]);
+
+    /* A receiver that answers the station's question (nothing unasked): the
+     * station asks within seconds of the RTCM stopping, so its answer is
+     * there when the stall is declared. */
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.asked = true;
+    w.in.reconfigure_refused = true;
+    w.answers_during = 3;   /* the rescan finds it */
+    w.fix_step = 5;
+    while (find_rec(&w, 5, HL_OUT_HEALTHY, 0) < 0 && w.now < T0 + 10 * MIN) {
+        sim_step(&w);
+    }
+    TEST_ASSERT_TRUE(find_rec(&w, 5, HL_OUT_HEALTHY, 0) >= 0);
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    unsigned q = w.questions;
+    sim_run(&w, 30 * SEC);
+    TEST_ASSERT_TRUE(w.questions > q);
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+    TEST_ASSERT_FALSE(s.power_alert);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
+
+    /* Garbage only (bytes, no answer): the byte rule as before, 6b. */
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    w.in.reconfigure_refused = true;
+    w.fix_step = 5;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 3, 3 * MIN));
+    sim_run(&w, 20 * SEC);
+    w.lines = false;
+    w.bytes = true;
+    w.rtcm = false;
     TEST_ASSERT_TRUE(sim_until_rec(&w, 5, MIN));
-    TEST_ASSERT_EQUAL_UINT8(7, w.rec[3].code);
-    TEST_ASSERT_EQUAL_UINT8(8, w.rec[4].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_CODE_POWER_ALERT, w.rec[3].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_CODE_FAILED, w.rec[4].code);
+    TEST_ASSERT_TRUE(st_of(&w).power_alert);
 }
 
 TEST_CASE("ladder: FAILED retries every 10 min at max(2, class entry)", "[health_ladder]")
@@ -985,7 +1063,7 @@ TEST_CASE("ladder: a station job that is not the ladder's suspends it", "[health
     TEST_ASSERT_TRUE((st_of(&w).susp & HL_SUSP_LEASE) != 0);
 }
 
-TEST_CASE("ladder: a configuration session during a grace abandons the step, which runs again", "[health_ladder]")
+TEST_CASE("ladder: a session of the station's own during a grace: the step waits, keeps its reason, is not run again", "[health_ladder]")
 {
     sim_t w;
     sim_init(&w);
@@ -994,32 +1072,130 @@ TEST_CASE("ladder: a configuration session during a grace abandons the step, whi
     w.rtcm = false;
     w.lines = true;
     TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));   /* step 4 started */
-    sim_run(&w, 30 * SEC);                         /* run 20 s, then in grace */
-    w.in.stn_state = HL_STN_CONFIGURING;
+    sim_run(&w, 30 * SEC);                         /* run 20 s, then 10 s of its grace */
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_GRACE, w.l.phase);
+    w.in.stn_state = HL_STN_CONFIGURING;           /* the station's own apply */
     w.lease = true;
-    sim_run(&w, 30 * SEC);
-    TEST_ASSERT_EQUAL_UINT8(4, w.rec[1].code);
-    TEST_ASSERT_EQUAL_UINT8(HL_OUT_ABANDONED, w.rec[1].outcome);
-    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, st_of(&w).level);
+    for (int i = 0; i < 30; i++) {
+        sim_step(&w);
+        hl_status_t s = st_of(&w);
+        TEST_ASSERT_TRUE(s.suspended);
+        TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+        TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+        TEST_ASSERT_EQUAL_UINT8(4, s.doing);
+        TEST_ASSERT_TRUE(s.waiting);
+    }
     w.in.stn_state = HL_STN_STREAMING;
     w.lease = false;
     w.release_at = w.now;
-    TEST_ASSERT_TRUE(sim_until_rec(&w, 3, MIN));
-    TEST_ASSERT_EQUAL_UINT8(4, w.rec[2].code);
-    TEST_ASSERT_EQUAL_UINT8(HL_OUT_STARTED, w.rec[2].outcome);
-    TEST_ASSERT_TRUE(w.rec[2].at - w.release_at > 10 * SEC);
+    for (int i = 0; i < 10; i++) {                 /* the grace after the release */
+        sim_step(&w);
+        hl_status_t s = st_of(&w);
+        TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+        TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+    }
+    /* Its grace goes on with the 80 s it had left: it fails then, and the
+     * ladder goes on to step 5. Never abandoned, never run again. */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 3, 2 * MIN));
+    static const uint8_t want[][2] = { { 4, HL_OUT_STARTED }, { 4, HL_OUT_FAILED }, { 5, HL_OUT_STARTED } };
+    expect_recs(&w, want, 3);
+    int64_t active = w.rec[1].at - w.rec[0].at - 40 * SEC;   /* less the session and its release grace */
+    TEST_ASSERT_TRUE(active >= 20 * SEC + 90 * SEC && active <= 20 * SEC + 93 * SEC);
+    TEST_ASSERT_EQUAL_UINT(1, w.nreq_step[4]);
+    TEST_ASSERT_EQUAL_UINT(0, count_rec(&w, 4, HL_OUT_ABANDONED));
+
+    /* RTCM back while the station's session runs: the step that ran succeeds. */
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    sim_run(&w, 30 * SEC);
+    w.in.stn_state = HL_STN_CONFIGURING;
+    w.lease = true;
+    sim_run(&w, 3 * SEC);
+    w.rtcm = true;
+    sim_run(&w, 2 * SEC);
+    w.in.stn_state = HL_STN_STREAMING;
+    w.lease = false;
+    w.release_at = w.now;
+    sim_run(&w, 12 * SEC);
+    TEST_ASSERT_TRUE(find_rec(&w, 4, HL_OUT_HEALTHY, 0) >= 0);
+    TEST_ASSERT_EQUAL_UINT(0, count_rec(&w, 4, HL_OUT_ABANDONED));
+
+    /* The station goes from the ladder's job straight into a session of its
+     * own, between two ticks: the step ran, its grace waits the same way. */
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.bytes = true;   /* GARBAGE: step 3 */
+    w.dur[3] = 5 * SEC;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    TEST_ASSERT_EQUAL_UINT8(3, w.rec[0].code);
+    while (w.running != 3 || w.now < w.run_end) {
+        sim_step(&w);
+    }
+    /* One tick by hand: the station ends the job and starts its own session
+     * before the ladder's next sample. */
+    sim_station(&w);
+    TEST_ASSERT_EQUAL_UINT8(0, w.running);
+    w.in.stn_state = HL_STN_CONFIGURING;
+    w.lease = true;
+    sim_world(&w);
+    sim_fill(&w);
+    hl_tick(&w.l, &w.in);
+    w.now += SEC;
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_GRACE, w.l.phase);
+    sim_run(&w, 5 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_GRACE, w.l.phase);
+    w.in.stn_state = HL_STN_STREAMING;
+    w.lease = false;
+    w.release_at = w.now;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 3, 2 * MIN));
+    static const uint8_t want3[][2] = { { 3, HL_OUT_STARTED }, { 3, HL_OUT_FAILED }, { 4, HL_OUT_STARTED } };
+    expect_recs(&w, want3, 3);
+    TEST_ASSERT_EQUAL_UINT(1, w.nreq_step[3]);
+}
+
+TEST_CASE("ladder: the station's check after each reset: one reset, never abandoned", "[health_ladder]")
+{
+    /* About 60 s after each receiver reset the station may run a session of
+     * its own (an apply), inside step 5's grace. The reset's evidence is in:
+     * the grace waits for the session and the step is judged once (garbage,
+     * no answer: the power-cycle alert after its grace). */
+    sim_t w;
+    sim_init(&w);
+    w.apply_after = 5;
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.bytes = true;
+    for (int64_t t = 0; t < 30 * MIN && !w.l.power_alert; t += SEC) {
+        sim_step(&w);
+    }
+    TEST_ASSERT_TRUE(w.l.power_alert);
+    TEST_ASSERT_EQUAL_UINT32(1, w.nreq_step[5]);
+    TEST_ASSERT_EQUAL_UINT32(0, count_rec(&w, 5, HL_OUT_ABANDONED));
+    int f = find_rec(&w, 5, HL_OUT_FAILED, 0);
+    int st = find_rec(&w, 5, HL_OUT_STARTED, 0);
+    TEST_ASSERT_TRUE(f > st && st >= 0);
+    /* its 120 s grace, plus the 3 s it ran, plus the session (20 s) and its release grace (10 s) */
+    TEST_ASSERT_TRUE(w.rec[f].at - w.rec[st].at >= 153 * SEC && w.rec[f].at - w.rec[st].at <= 156 * SEC);
 }
 
 TEST_CASE("ladder: a step abandoned twice in an episode counts as failed", "[health_ladder]")
 {
     /* The receiver sends garbage, no RTCM and no answer. About 60 s after
-     * each receiver reset the station runs an apply of its own (its check
-     * after the restart), which suspends the ladder inside step 5's grace.
-     * Step 5 runs again once; abandoned a second time it counts as failed
-     * and the byte rule raises the power-cycle alert. */
+     * each receiver reset something that is not a session of the station's
+     * own suspends the ladder inside step 5's grace (here receiver
+     * maintenance). Step 5 runs again once; abandoned a second time it
+     * counts as failed and the byte rule raises the power-cycle alert. */
     sim_t w;
     sim_init(&w);
     w.apply_after = 5;
+    w.apply_state = HL_STN_IDLE;
     w.rtcm = true;
     sim_run(&w, 20 * SEC);
     w.rtcm = false;
@@ -1061,6 +1237,7 @@ TEST_CASE("ladder: a reset abandoned twice on a receiver that answers: 7 with th
     sim_t w;
     sim_init(&w);
     w.apply_after = 5;
+    w.apply_state = HL_STN_IDLE;
     w.rtcm = true;
     sim_run(&w, 20 * SEC);
     w.rtcm = false;
@@ -1081,9 +1258,12 @@ TEST_CASE("ladder: a reset abandoned twice on a receiver that answers: 7 with th
 
     /* Nothing unasked (NO_BYTES), but the reset's banner and replies (the
      * board with no antenna), full recovery and nothing holding a restart
-     * back: no ESP32 restart for a receiver that answers. */
+     * back: no ESP32 restart for a receiver that answers. Abandoned (not by
+     * a session of the station's own), it is still recovering between the
+     * reset and its second run, with the reason. */
     sim_init(&w);
     w.apply_after = 5;
+    w.apply_state = HL_STN_IDLE;
     w.in.answers = 40;
     w.answers_during = 5;
     w.asked = true;   /* it answers whenever asked, the station's question once a minute too */
@@ -1091,7 +1271,6 @@ TEST_CASE("ladder: a reset abandoned twice on a receiver that answers: 7 with th
         sim_step(&w);
         if (w.nreq_step[5] == 1 && w.in.stn_state == HL_STN_STREAMING && w.running == 0 && w.apply_end == NEVER &&
             w.l.phase == HL_PH_IDLE && w.l.abandoned != 0) {
-            /* Between the abandoned reset and its second run: still recovering, with the reason. */
             s = st_of(&w);
             TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
             TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
@@ -1104,15 +1283,44 @@ TEST_CASE("ladder: a reset abandoned twice on a receiver that answers: 7 with th
     TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
     TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
     TEST_ASSERT_EQUAL_INT(-1, find_rec(&w, HL_CODE_REBOOT, HL_OUT_STARTED, 0));
+
+    /* The board's case: the station's own apply 60 s after the reset (its
+     * check after the restart). One reset, never abandoned, the level and the
+     * reason the whole time, then 7 with the reason. */
+    sim_init(&w);
+    w.apply_after = 5;
+    w.in.answers = 40;
+    w.answers_during = 5;
+    w.asked = true;
+    bool in_session = false;
+    while (w.now < T0 + 30 * MIN && w.l.phase != HL_PH_FAILED) {
+        sim_step(&w);
+        s = st_of(&w);
+        if (w.nreq_step[5] == 1 && s.suspended) {
+            in_session = true;
+            TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+            TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+            TEST_ASSERT_EQUAL_UINT8(5, s.doing);
+        }
+    }
+    TEST_ASSERT_TRUE(in_session);
+    TEST_ASSERT_EQUAL_UINT32(1, w.nreq_step[5]);
+    TEST_ASSERT_EQUAL_UINT32(0, count_rec(&w, 5, HL_OUT_ABANDONED));
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+    TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
 }
 
 TEST_CASE("ladder: a rescan abandoned twice goes on to reconfigure", "[health_ladder]")
 {
     /* Garbage on the line: entry step 3. Each rescan's grace is cut short
-     * by a station apply; the second time the ladder goes on to step 4. */
+     * by a suspension that is not a session of the station's own; the
+     * second time the ladder goes on to step 4. */
     sim_t w;
     sim_init(&w);
     w.apply_after = 3;
+    w.apply_state = HL_STN_IDLE;
     w.rtcm = true;
     sim_run(&w, 20 * SEC);
     w.rtcm = false;
@@ -1982,11 +2190,11 @@ TEST_CASE("ladder: a receiver that sends text after the reset gets no power-cycl
     /* Then it goes silent: the retry pass asks it again (steps 2 and 3),
      * finds it, and goes back to 7 without steps 4 and 5. */
     w.lines = false;
-    unsigned n4 = count_req(&w, 4), n5 = count_req(&w, 5);
+    unsigned n4 = w.nreq_step[4], n5 = count_req(&w, 5);
     sim_run(&w, 12 * MIN);
     TEST_ASSERT_EQUAL_UINT(1, count_req(&w, 2));
-    TEST_ASSERT_EQUAL_UINT(1, count_req(&w, 3));
-    TEST_ASSERT_EQUAL_UINT(n4, count_req(&w, 4));
+    TEST_ASSERT_EQUAL_UINT(1, w.nreq_step[3]);
+    TEST_ASSERT_EQUAL_UINT(n4, w.nreq_step[4]);
     TEST_ASSERT_EQUAL_UINT(n5, count_req(&w, 5));
     TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, st_of(&w).phase);
 
@@ -2006,6 +2214,7 @@ TEST_CASE("ladder: replies after the receiver reset count as answers", "[health_
     sim_init(&w);
     stream_then_silence(&w);
     w.answers_during = 5;
+    w.asked = true;   /* and the station's question, once a minute */
     TEST_ASSERT_TRUE(sim_until_rec(&w, 11, 20 * MIN));
     static const uint8_t want[][2] = {
         { 1, 0 }, { 1, 2 }, { 2, 0 }, { 2, 2 }, { 3, 0 }, { 3, 2 }, { 4, 0 }, { 4, 2 }, { 5, 0 }, { 5, 2 }, { 8, 0 },
@@ -2018,9 +2227,9 @@ TEST_CASE("ladder: replies after the receiver reset count as answers", "[health_
 
     /* The retry pass: 2 and 3 again (the rescan finds it), never 4 or 5. */
     sim_run(&w, 25 * MIN);
-    TEST_ASSERT_EQUAL_UINT(1, count_req(&w, 4));
+    TEST_ASSERT_EQUAL_UINT(1, w.nreq_step[4]);
     TEST_ASSERT_EQUAL_UINT(1, count_req(&w, 5));
-    TEST_ASSERT_GREATER_OR_EQUAL_UINT(2, count_req(&w, 3));
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT(2, w.nreq_step[3]);
 
     /* The rescan finds nothing any more: the byte rule as usual (no bytes: 6a). */
     w.rescan_finds = false;
@@ -2086,7 +2295,8 @@ TEST_CASE("ladder: alerts-only mode and NO_RECEIVER carry their reason", "[healt
     TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, s.level);
     TEST_ASSERT_EQUAL_UINT8(HL_WHY_SILENT, s.why);
 
-    /* It answered the station a minute before the RTCM stopped: alive. */
+    /* Its RTCM stopped, and it answers the station's question (asked within
+     * seconds, then once a minute while nothing comes): alive. */
     sim_init(&w);
     w.in.recovery_mode = HL_MODE_ALERTS;
     w.rtcm = true;
@@ -2094,8 +2304,28 @@ TEST_CASE("ladder: alerts-only mode and NO_RECEIVER carry their reason", "[healt
     w.in.answers++;
     sim_run(&w, 60 * SEC);
     w.rtcm = false;
+    w.asked = true;
     sim_run(&w, 15 * MIN);
     TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, st_of(&w).why);
+    TEST_ASSERT_TRUE(w.questions >= 14);
+
+    /* Then it is unplugged: nothing answers the questions any more. Silent
+     * within HL_ANSWER_FRESH_MS of its last answer, about 2 minutes at most. */
+    w.asked = false;
+    int64_t last = w.last_answer;
+    int64_t silent_at = NEVER;
+    while (w.now < last + 5 * MIN) {
+        sim_step(&w);
+        hl_status_t q = st_of(&w);
+        if (q.why == HL_WHY_SILENT && silent_at == NEVER) {
+            silent_at = w.now - SEC;
+        }
+        if (silent_at != NEVER) {
+            TEST_ASSERT_EQUAL_UINT8(HL_WHY_SILENT, q.why);
+        }
+    }
+    TEST_ASSERT_TRUE(silent_at != NEVER);
+    TEST_ASSERT_TRUE(silent_at - last > HL_ANSWER_FRESH_MS - SEC && silent_at - last <= HL_ANSWER_FRESH_MS + SEC);
 
     /* NO_RECEIVER: the station's own alert says it; no reason here. */
     sim_init(&w);
@@ -2376,8 +2606,8 @@ TEST_CASE("ladder: no restart is pending while the receiver answers, and again o
 
     /* No antenna: it answers, no RTCM this boot, and the receiver reset is
      * answered too: never pending, through steps 1-5, the station's own
-     * session after the reset (the ladder suspended), 7 and the retry
-     * passes (which ask it again with the rescan). */
+     * session after the reset (the reset's grace waits for it), 7 and the
+     * retry passes (which ask it again with the rescan). */
     sim_init(&w);
     w.in.answers = 40;
     w.answers_during = 5;
@@ -2394,10 +2624,11 @@ TEST_CASE("ladder: no restart is pending while the receiver answers, and again o
         }
     }
     TEST_ASSERT_TRUE(in_episode > 30 * 60);
-    TEST_ASSERT_TRUE(count_rec(&w, HL_CODE_RECEIVER_RESET, HL_OUT_ABANDONED) >= 1);   /* the session cut it short */
+    TEST_ASSERT_EQUAL_UINT(0, count_rec(&w, HL_CODE_RECEIVER_RESET, HL_OUT_ABANDONED));   /* the session paused it */
+    TEST_ASSERT_EQUAL_UINT(1, count_req(&w, 5));
     TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, st_of(&w).phase);
     TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, st_of(&w).why);
-    TEST_ASSERT_TRUE(count_req(&w, 3) >= 2);   /* the retry passes ran */
+    TEST_ASSERT_TRUE(w.nreq_step[3] >= 2);   /* the retry passes ran */
     TEST_ASSERT_EQUAL_UINT32(0, w.reboots);
     TEST_ASSERT_EQUAL_INT(-1, find_rec(&w, HL_CODE_REBOOT_BLOCKED, HL_OUT_HELD, 0));
 
@@ -2433,13 +2664,16 @@ TEST_CASE("ladder: no restart is pending while the receiver answers, and again o
 
 TEST_CASE("ladder: a stall after a reset that succeeded on its second run: the byte rule, the restart for silence", "[health_ladder]")
 {
-    /* The receiver answers the reset. The station's check after the first
-     * reset cuts it short; its second run brings RTCM back; 20 s later the
-     * receiver goes completely silent. That stall is an ordinary one after
-     * step 5: the byte rule, and no byte at all is the ESP32 restart. */
+    /* The receiver answers the reset. A suspension after the first reset
+     * (not a session of the station's own: those leave a step's grace
+     * alone) cuts it short; its second run brings RTCM back; 20 s later the
+     * receiver goes completely silent. That stall right after step 5: it
+     * does not answer now, so the byte rule, and no byte at all is the
+     * ESP32 restart. */
     sim_t w;
     sim_init(&w);
     w.apply_after = 5;
+    w.apply_state = HL_STN_IDLE;
     w.answers_during = 5;
     w.rtcm = true;
     sim_run(&w, 20 * SEC);
@@ -2470,6 +2704,7 @@ TEST_CASE("ladder: a stall after a reset that succeeded on its second run: the b
      * not 7 with an antenna reason). */
     sim_init(&w);
     w.apply_after = 5;
+    w.apply_state = HL_STN_IDLE;
     w.answers_during = 5;
     w.rtcm = true;
     sim_run(&w, 20 * SEC);
@@ -2485,7 +2720,7 @@ TEST_CASE("ladder: a stall after a reset that succeeded on its second run: the b
     w.apply_after = 0;
     w.apply_at = NEVER;
     w.lines = false;
-    w.rtcm = true;   /* back while the station's session still runs */
+    w.rtcm = true;   /* back while the suspension still runs */
     sim_run(&w, 40 * SEC);
     w.rtcm = false;
     w.bytes = true;
@@ -2614,4 +2849,194 @@ TEST_CASE("ladder: a receiver that never streamed answers only while its answers
     }
     TEST_ASSERT_TRUE(in_episode > 2 * 3600);
     TEST_ASSERT_TRUE(w.questions >= 150);
+}
+
+
+
+/* ---- the station's own sessions; the class from what the receiver sends unasked ---- */
+
+TEST_CASE("ladder: alerts only: a step only journalled is journalled once, whatever cuts its grace", "[health_ladder]")
+{
+    /* A session of the station's own in the grace of a journalled step: the
+     * grace waits for it; the step is not journalled again. */
+    sim_t w;
+    sim_init(&w);
+    w.in.recovery_mode = HL_MODE_ALERTS;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    TEST_ASSERT_EQUAL_UINT8(1, w.rec[0].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_NOT_RUN, w.rec[0].outcome);
+    sim_run(&w, 2 * SEC);
+    w.in.stn_state = HL_STN_CONFIGURING;
+    w.lease = true;
+    sim_run(&w, 10 * SEC);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, st_of(&w).level);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_SILENT, st_of(&w).why);
+    w.in.stn_state = HL_STN_STREAMING;
+    w.lease = false;
+    w.release_at = w.now;
+    sim_run(&w, 5 * MIN);
+    TEST_ASSERT_EQUAL_UINT(1, count_rec(&w, 1, HL_OUT_NOT_RUN));
+    TEST_ASSERT_EQUAL_UINT(1, count_rec(&w, 2, HL_OUT_NOT_RUN));
+    TEST_ASSERT_EQUAL_UINT(1, count_rec(&w, 3, HL_OUT_NOT_RUN));
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, w.l.phase);
+
+    /* Something else suspends it there (receiver maintenance): the step comes
+     * due again after it, its grace runs again, and it is not journalled
+     * again. */
+    sim_init(&w);
+    w.in.recovery_mode = HL_MODE_ALERTS;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    sim_run(&w, 2 * SEC);
+    w.in.stn_state = HL_STN_IDLE;
+    sim_run(&w, 10 * SEC);
+    w.in.stn_state = HL_STN_STREAMING;
+    sim_run(&w, 5 * MIN);
+    TEST_ASSERT_EQUAL_UINT(1, count_rec(&w, 1, HL_OUT_NOT_RUN));
+    TEST_ASSERT_EQUAL_UINT(1, count_rec(&w, 2, HL_OUT_NOT_RUN));
+    TEST_ASSERT_EQUAL_UINT(1, count_rec(&w, 3, HL_OUT_NOT_RUN));
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, w.l.phase);
+    TEST_ASSERT_EQUAL_UINT32(0, w.nreq);
+}
+
+TEST_CASE("ladder: between two steps, a session of the station's own keeps the level and the reason", "[health_ladder]")
+{
+    /* Step 1 brings RTCM back for 5 s; then nothing again, and the
+     * station's own apply starts before the stall is declared again:
+     * between steps. The level and the antenna reason stay (they dropped
+     * out before: an empty alerts list for the whole session). */
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.asked = true;   /* it answers the station */
+    w.fix_step = 1;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 2, MIN));
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_HEALTHY, w.rec[1].outcome);
+    sim_run(&w, 5 * SEC);
+    w.rtcm = false;
+    w.fix_step = 0;
+    sim_run(&w, 5 * SEC);   /* it answers the question asked once the RTCM stopped */
+    w.in.stn_state = HL_STN_CONFIGURING;
+    w.lease = true;
+    hl_status_t s;
+    unsigned checked = 0;
+    for (int i = 0; i < 15; i++) {
+        sim_step(&w);
+        s = st_of(&w);
+        TEST_ASSERT_TRUE(s.suspended);
+        if (w.in.rtcm_age_ms > w.in.stall_ms) {
+            checked++;
+            TEST_ASSERT_EQUAL_UINT8(HL_PH_IDLE, s.phase);
+            TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+            TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+        }
+    }
+    TEST_ASSERT_TRUE(checked >= 8);
+    w.in.stn_state = HL_STN_STREAMING;
+    w.lease = false;
+    w.release_at = w.now;
+    for (int i = 0; i < 10; i++) {
+        sim_step(&w);
+        s = st_of(&w);
+        TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_RECOVERING, s.level);
+        TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, s.why);
+    }
+}
+
+TEST_CASE("ladder: replies to the station's questions never change the stall class", "[health_ladder]")
+{
+    /* A receiver that answers only when asked: NO_BYTES at every tick, however
+     * the questions fall (each answer was TEXT_ONLY for the next 10 s before),
+     * and the same entry step whenever the stall is declared. */
+    for (int phase = 0; phase < 60; phase += 7) {
+        sim_t w;
+        sim_init(&w);
+        w.asked = true;
+        sim_run(&w, (int64_t)phase * SEC);
+        w.rtcm = true;
+        sim_run(&w, 20 * SEC);
+        w.rtcm = false;
+        while (w.nreq == 0 && w.now < T0 + 5 * MIN) {
+            sim_step(&w);
+            TEST_ASSERT_EQUAL_INT(HL_CLASS_NO_BYTES, hl_classify(&w.l, &w.in));
+        }
+        TEST_ASSERT_EQUAL_UINT8(1, w.req[0]);
+        TEST_ASSERT_TRUE(w.questions >= 1);
+        for (int i = 0; i < 30 * 60; i++) {
+            sim_step(&w);
+            TEST_ASSERT_EQUAL_INT(HL_CLASS_NO_BYTES, hl_classify(&w.l, &w.in));
+        }
+    }
+}
+
+TEST_CASE("ladder: a line every 10 s and no RTCM: TEXT_ONLY at every tick; text that stopped with the RTCM is not", "[health_ladder]")
+{
+    /* The satellite-in-view sentences every 10 s (a little early or late),
+     * nothing else: the class never flickers, the ladder takes one path. */
+    sim_t w;
+    sim_init(&w);
+    int64_t next = w.now + 4300;
+    unsigned n = 0;
+    hl_status_t s;
+    while (w.now < T0 + 2 * HOUR) {
+        if (w.now >= next) {
+            w.in.text_lines++;
+            w.line_at = next;
+            n++;
+            next += 10 * SEC + ((n % 3) == 0 ? 90 : (n % 3) == 1 ? -80 : 40);
+        }
+        sim_step(&w);
+        if (w.now > T0 + 20 * SEC) {
+            TEST_ASSERT_EQUAL_INT_MESSAGE(HL_CLASS_TEXT_ONLY, hl_classify(&w.l, &w.in), "the class flickered");
+            s = st_of(&w);
+            TEST_ASSERT_TRUE(s.episode);
+            TEST_ASSERT_EQUAL_UINT8_MESSAGE(HL_WHY_NO_RTCM, s.why, "the reason flickered");
+        }
+    }
+    static const uint8_t want[][2] = { { 4, 0 }, { 4, 2 }, { 5, 0 }, { 5, 2 }, { 8, 0 } };
+    expect_recs(&w, want, 5);
+    TEST_ASSERT_EQUAL_UINT(1, w.nreq_step[4]);
+    TEST_ASSERT_EQUAL_UINT(1, w.nreq_step[5]);
+    TEST_ASSERT_EQUAL_UINT32(2, w.nreq);   /* no retry pass reaches steps 4-5 again */
+
+    /* NMEA and RTCM stop together (the link died): no line after the last
+     * frame, so NO_BYTES (entry step 1), not TEXT_ONLY. */
+    sim_init(&w);
+    w.rtcm = true;
+    w.lines = true;
+    sim_run(&w, 30 * SEC);
+    w.rtcm = false;
+    w.lines = false;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    TEST_ASSERT_EQUAL_UINT8(1, w.rec[0].code);
+}
+
+TEST_CASE("ladder: in 7 for a receiver that answers, a retry pass never reaches steps 4-5 again", "[health_ladder]")
+{
+    /* Text lines, no RTCM: 4, 5, 7. Then silent at the retry pass (2, then 3),
+     * and the lines come back while step 2's grace runs: the class turns
+     * TEXT_ONLY on the way, and the ladder goes back to 7. */
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    w.dur[2] = 5 * SEC;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 5, 20 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, w.l.phase);
+    w.lines = false;
+    while (w.nreq_step[2] == 0 && w.now < T0 + 30 * MIN) {
+        sim_step(&w);
+    }
+    TEST_ASSERT_EQUAL_UINT(1, w.nreq_step[2]);
+    w.lines = true;
+    sim_run(&w, 2 * MIN);
+    TEST_ASSERT_EQUAL_UINT(1, w.nreq_step[4]);
+    TEST_ASSERT_EQUAL_UINT(1, w.nreq_step[5]);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, w.l.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_NO_RTCM, st_of(&w).why);
 }

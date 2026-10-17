@@ -1536,6 +1536,23 @@ def test_fixed_position_far_never_beside_a_green_chip_or_a_bare_mark():
     assert words == [["Locked, ", "looks wrong"], ["Locked", None]]
 
 
+def test_a_session_of_the_stations_own_keeps_the_recovery_line():
+    """The station configures the receiver (an apply of its own) while the recovery waits after a step: the Status
+    page keeps the recovery's amber card and its line (health keeps the level and the reason meanwhile), never the red
+    one of a recovery that gave up."""
+    hl = {"level": "recovering", "last_step": "receiver_reset", "step": "receiver_reset", "step_phase": "waiting",
+          "recovery_mode": "no_reboot", "ladder_suspended": True}
+    no_rtcm = [{"id": "no_rtcm", "source": "health"}]
+    wait_data = [caster(0, "Onocoy", "wait_data")]
+    during = status(receiver={"state": "configuring", "rtcm_age_ms": None, "responding": True}, health=hl,
+                    alerts=no_rtcm, casters=wait_data)
+    before = status(receiver={"state": "streaming", "rtcm_age_ms": None, "responding": True},
+                    health={**hl, "ladder_suspended": False}, alerts=no_rtcm, casters=wait_data)
+    out = heroes(before, during)
+    assert [(h["key"], h["tone"], h["plan"]) for h in out] == [
+        ("no_rtcm", "warn", "The station restarted the receiver and waits for corrections.")] * 2, out
+
+
 def test_health_card_rows_say_the_step_and_the_next_attempt_only_where_they_hold():
     """The last recovery step's row goes only while the card says the step in progress (the line under it, or the
     recovery's own state line); with another state on top (no receiver found while the rescan's wait runs, the port

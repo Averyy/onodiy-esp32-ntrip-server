@@ -239,16 +239,26 @@ TEST_CASE("fixcheck: a position query is done on its own log, once, and a refusa
     TEST_ASSERT_EQUAL(UM98X_TXN_OK, t.status);
     TEST_ASSERT_EQUAL_STRING(body, t.own_body);
 
-    /* Acknowledged and no log within a second: done, not resent. */
+    /* Acknowledged and no log within UM98X_GROUPS_LOG_MS: done, not resent. */
     um98x_txn_begin(&t, UM98X_TXN_OWNPOS, UM98X_CMD_BASEPOS, 0, NULL, 0);
     TEST_ASSERT_EQUAL(UM98X_TXN_ACT_SEND, um98x_txn_poll(&t, 0, &wake));
     um98x_txn_sent(&t, 10, true);
     ack_line(ack, sizeof(ack), "BASEPOSA", "OK");
     TEST_ASSERT_TRUE(offer(&t, ack, 40));
     TEST_ASSERT_EQUAL(UM98X_TXN_ACT_WAIT, um98x_txn_poll(&t, 500, &wake));
-    TEST_ASSERT_EQUAL(UM98X_TXN_ACT_DONE, um98x_txn_poll(&t, 1040, &wake));
+    TEST_ASSERT_EQUAL(UM98X_TXN_ACT_WAIT, um98x_txn_poll(&t, 40 + UM98X_GROUPS_LOG_MS - 1, &wake));
+    TEST_ASSERT_EQUAL(UM98X_TXN_ACT_DONE, um98x_txn_poll(&t, 40 + UM98X_GROUPS_LOG_MS, &wake));
     TEST_ASSERT_EQUAL(UM98X_TXN_TIMEOUT, t.status);
     TEST_ASSERT_EQUAL_UINT8(1, t.sends);
+
+    /* Its log 1.5 s after the acknowledgement: still its answer. */
+    um98x_txn_begin(&t, UM98X_TXN_OWNPOS, UM98X_CMD_BASEPOS, 0, NULL, 0);
+    TEST_ASSERT_EQUAL(UM98X_TXN_ACT_SEND, um98x_txn_poll(&t, 0, &wake));
+    um98x_txn_sent(&t, 10, true);
+    TEST_ASSERT_TRUE(offer(&t, ack, 40));
+    TEST_ASSERT_EQUAL(UM98X_TXN_ACT_WAIT, um98x_txn_poll(&t, 1540, &wake));
+    TEST_ASSERT_TRUE(offer(&t, base, 1540));
+    TEST_ASSERT_EQUAL(UM98X_TXN_OK, t.status);
 
     /* A firmware without the log refuses it: final at once. */
     um98x_txn_begin(&t, UM98X_TXN_OWNPOS, UM98X_CMD_BASEPOS, 0, NULL, 0);
