@@ -408,6 +408,121 @@ TEST_CASE("fixcheck: the ellipsoidal height is the height above sea level plus t
     TEST_ASSERT_TRUE(um98x_fix_height_only(&o));
 }
 
+/* ---- a height above sea level typed in ------------------------------------------------- */
+
+/* The fixed height typed in where the receiver is: its own solution there, the fixed height being its height above
+ * sea level (the separation sep printed with it) plus err_m, the receiver's own vertical error. */
+static um98x_fix_offset_t typed_sea_level(double north_m, double sep, double err_m)
+{
+    um98x_own_fix_t f = own_at(north_m, 0, err_m, sep);
+    um98x_fix_offset_t o;
+    TEST_ASSERT_TRUE(um98x_fix_offset(FIX_LAT, FIX_LON, FIX_H - sep, &f, &o));
+    return o;
+}
+
+/* That height read as a sea-level height (held: a sea-level verdict stands)? */
+static bool sea_at(double sep, double err_m, bool held)
+{
+    um98x_fix_offset_t o = typed_sea_level(0, sep, err_m);
+    return um98x_fix_sea_level(&o, held);
+}
+
+TEST_CASE("fixcheck: a fixed height typed as height above sea level reads as one, 34 m inside the limit",
+          "[um98x_fixcheck]")
+{
+    /* Where the geoid is 34 m below the ellipsoid: the fixed height 34 m above the receiver's, its sea-level height. */
+    um98x_fix_offset_t o = typed_sea_level(0, GEOID, 0);
+    TEST_ASSERT_DOUBLE_WITHIN(0.01, 34.0, o.up_m);
+    TEST_ASSERT_DOUBLE_WITHIN(0.01, 0.0, o.up_msl_m);
+    TEST_ASSERT_FALSE(um98x_fix_beyond(&o, UM98X_FIX_LIMIT_M));   /* the 50 m limit alone misses it */
+    TEST_ASSERT_TRUE(um98x_fix_sea_level(&o, false));
+
+    /* The right height there is not. */
+    um98x_own_fix_t f = own_at(0, 0, 0, GEOID);
+    o = offset_of(&f);
+    TEST_ASSERT_DOUBLE_WITHIN(0.01, -34.0, o.up_msl_m);
+    TEST_ASSERT_FALSE(um98x_fix_sea_level(&o, false));
+    TEST_ASSERT_FALSE(um98x_fix_sea_level(&o, true));
+
+    /* The receiver's own vertical error moves it: within 5 m it still reads as the sea-level height. */
+    TEST_ASSERT_TRUE(sea_at(GEOID, 4.9, false));
+    TEST_ASSERT_TRUE(sea_at(GEOID, -4.9, false));
+    TEST_ASSERT_FALSE(sea_at(GEOID, 5.1, false));
+    TEST_ASSERT_FALSE(sea_at(GEOID, -5.1, false));
+
+    /* Where the geoid lies above the ellipsoid, the other way round; beyond the limit too (by the height alone). */
+    o = typed_sea_level(0, 28.0, 0);
+    TEST_ASSERT_DOUBLE_WITHIN(0.01, -28.0, o.up_m);
+    TEST_ASSERT_TRUE(um98x_fix_sea_level(&o, false));
+    o = typed_sea_level(0, 62.0, 0);
+    TEST_ASSERT_TRUE(um98x_fix_height_only(&o));
+    TEST_ASSERT_TRUE(um98x_fix_sea_level(&o, false));
+
+    /* With the horizontal position beyond the limit too, the 50 m rule speaks, not this one. */
+    o = typed_sea_level(120.0, GEOID, 0);
+    TEST_ASSERT_TRUE(um98x_fix_beyond(&o, UM98X_FIX_LIMIT_M));
+    TEST_ASSERT_FALSE(um98x_fix_sea_level(&o, false));
+    o = typed_sea_level(45.0, GEOID, 0);   /* within it: still */
+    TEST_ASSERT_TRUE(um98x_fix_sea_level(&o, false));
+}
+
+TEST_CASE("fixcheck: a separation under about 10 m is too small to tell a sea-level height from the right one",
+          "[um98x_fixcheck]")
+{
+    TEST_ASSERT_FALSE(sea_at(-9.0, 0, false));    /* 9 m: inside the receiver's own scatter */
+    TEST_ASSERT_FALSE(sea_at(-10.0, 0, false));   /* the floor itself: not beyond it */
+    TEST_ASSERT_TRUE(sea_at(-12.0, 0, false));
+    TEST_ASSERT_TRUE(sea_at(12.0, 0, false));
+    /* A right height that reads 11 m low where the geoid is 12 m below the ellipsoid: 1 m from the sea-level height. That
+     * is the floor's price: such a solution is unsure itself (beyond four times the receiver's RMS). */
+    um98x_own_fix_t f = own_at(0, 0, -11.0, -12.0);
+    um98x_fix_offset_t o = offset_of(&f);
+    TEST_ASSERT_TRUE(um98x_fix_sea_level(&o, false));
+    f = own_at(0, 0, -9.5, -12.0);   /* 9.5 m: within the floor */
+    o = offset_of(&f);
+    TEST_ASSERT_FALSE(um98x_fix_sea_level(&o, false));
+}
+
+TEST_CASE("fixcheck: the sea-level reading takes the height above sea level as printed, whatever the separation's sign",
+          "[um98x_fixcheck]")
+{
+    /* The same place and solution, the separation printed with the other sign: the ellipsoidal height (the sum) moves
+     * by twice the separation, the sea-level height does not, and the mistake still reads as one. */
+    um98x_own_fix_t f = own_at(0, 0, 0, GEOID);
+    um98x_own_fix_t g = f;
+    g.separation_m = -f.separation_m;
+    um98x_fix_offset_t o;
+    TEST_ASSERT_TRUE(um98x_fix_offset(FIX_LAT, FIX_LON, f.msl_height_m, &g, &o));
+    TEST_ASSERT_DOUBLE_WITHIN(0.01, 0.0, o.up_msl_m);
+    TEST_ASSERT_DOUBLE_WITHIN(0.01, -34.0, o.up_m);
+    TEST_ASSERT_TRUE(um98x_fix_sea_level(&o, false));
+
+    /* Not a number: never. */
+    o.up_msl_m = NAN;
+    TEST_ASSERT_FALSE(um98x_fix_sea_level(&o, false));
+    TEST_ASSERT_FALSE(um98x_fix_sea_level(&o, true));
+    TEST_ASSERT_FALSE(um98x_fix_sea_level(NULL, true));
+}
+
+TEST_CASE("fixcheck: once raised, a sea-level height holds within 10 m of it and beyond 5 m from the right one",
+          "[um98x_fixcheck]")
+{
+    /* 8 m from the sea-level height: not raised from nothing, held once raised. */
+    TEST_ASSERT_FALSE(sea_at(GEOID, 8.0, false));
+    TEST_ASSERT_TRUE(sea_at(GEOID, 8.0, true));
+    TEST_ASSERT_TRUE(sea_at(GEOID, -9.9, true));
+    TEST_ASSERT_FALSE(sea_at(GEOID, 10.1, true));
+    um98x_fix_offset_t o;
+    /* Where the geoid is 12 m below the ellipsoid and the receiver reads 5 m high, 7 m off: within the floor that
+     * raises it, beyond the one that holds it. */
+    o = typed_sea_level(0, -12.0, 5.0);
+    TEST_ASSERT_DOUBLE_WITHIN(0.01, 7.0, o.up_m);
+    TEST_ASSERT_FALSE(um98x_fix_sea_level(&o, false));
+    TEST_ASSERT_TRUE(um98x_fix_sea_level(&o, true));
+    o = typed_sea_level(0, -12.0, 7.5);   /* 4.5 m off: the right height, as far as the receiver can tell */
+    TEST_ASSERT_FALSE(um98x_fix_sea_level(&o, true));
+}
+
 /* Little-endian fields of a binary log body. */
 static double le_f64(const uint8_t *p)
 {
@@ -495,10 +610,18 @@ TEST_CASE("fixcheck: a real UM981's single-point solution matches its ECEF solut
 
 /* ---- the verdict -------------------------------------------------------------------- */
 
+/* A sample of a run: the horizontal distance, the height against the receiver's ellipsoidal height and against its
+ * height above sea level (sep: the separation, so the latter is up + sep). */
+static um98x_fix_offset_t off_sep(double h, double up, double sep)
+{
+    um98x_fix_offset_t o = { .horizontal_m = h, .up_m = up, .distance_m = sqrt(h * h + up * up), .up_msl_m = up + sep };
+    return o;
+}
+
+/* The same where the geoid is 34 m below the ellipsoid. */
 static um98x_fix_offset_t off(double h, double up)
 {
-    um98x_fix_offset_t o = { .horizontal_m = h, .up_m = up, .distance_m = sqrt(h * h + up * up) };
-    return o;
+    return off_sep(h, up, GEOID);
 }
 
 TEST_CASE("fixcheck: three solutions in a row decide, the medians are shown", "[um98x_fixcheck]")
@@ -573,4 +696,95 @@ TEST_CASE("fixcheck: a far verdict clears only within 40 m, and a new run keeps 
         (void)um98x_fixchk_feed(&c, &mid);
     }
     TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_NEAR, c.verdict);
+}
+
+TEST_CASE("fixcheck: three solutions near a sea-level height decide it, one stray solution does not move it",
+          "[um98x_fixcheck]")
+{
+    um98x_fixchk_t c;
+    um98x_fixchk_init(&c);
+    um98x_fix_offset_t a = off_sep(3.0, 35.5, GEOID), b = off_sep(2.0, 33.0, GEOID), stray = off_sep(4.0, 12.0, GEOID);
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_NONE, um98x_fixchk_feed(&c, &a));
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_NONE, um98x_fixchk_feed(&c, &stray));
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_SEA_LEVEL, um98x_fixchk_feed(&c, &b));
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_SEA_LEVEL, c.verdict);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 33.0, c.shown.up_m);   /* the medians */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, -1.0, c.shown.up_msl_m);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 3.0, c.shown.horizontal_m);
+
+    /* The same run with the right height: near, as before. */
+    um98x_fixchk_init(&c);
+    um98x_fix_offset_t ok = off_sep(3.0, 1.5, GEOID);
+    for (int i = 0; i < 2; i++) {
+        TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_NONE, um98x_fixchk_feed(&c, &ok));
+    }
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_NEAR, um98x_fixchk_feed(&c, &ok));
+
+    /* Beyond the limit by the height alone and a sea-level height (the geoid 62 m above the ellipsoid): that, not far. */
+    um98x_fixchk_init(&c);
+    um98x_fix_offset_t hi = off_sep(2.0, -61.0, 62.0);
+    for (int i = 0; i < 2; i++) {
+        TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_NONE, um98x_fixchk_feed(&c, &hi));
+    }
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_SEA_LEVEL, um98x_fixchk_feed(&c, &hi));
+
+    /* Far horizontally as well: far. */
+    um98x_fixchk_init(&c);
+    um98x_fix_offset_t both = off_sep(120.0, 34.0, GEOID);
+    for (int i = 0; i < 2; i++) {
+        TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_NONE, um98x_fixchk_feed(&c, &both));
+    }
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_FAR, um98x_fixchk_feed(&c, &both));
+}
+
+TEST_CASE("fixcheck: a sea-level verdict holds on the receiver's scatter and clears with the right height",
+          "[um98x_fixcheck]")
+{
+    um98x_fixchk_t c;
+    um98x_fixchk_init(&c);
+    um98x_fix_offset_t sea = off_sep(2.0, 34.0, GEOID);
+    for (int i = 0; i < 3; i++) {
+        (void)um98x_fixchk_feed(&c, &sea);
+    }
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_SEA_LEVEL, c.verdict);
+
+    /* An hour later the receiver reads 7 m lower: 7 m from the sea-level height, beyond the band that raises it but
+     * within the one that holds it. */
+    um98x_fixchk_restart(&c);
+    um98x_fix_offset_t low = off_sep(2.0, 27.0, GEOID);
+    for (int i = 0; i < 2; i++) {
+        TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_NONE, um98x_fixchk_feed(&c, &low));
+    }
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_SEA_LEVEL, um98x_fixchk_feed(&c, &low));
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 27.0, c.shown.up_m);
+
+    /* 42 m: neither near (40 m once a warning stands) nor far: decides nothing, the warning stays. */
+    um98x_fix_offset_t mid = off_sep(2.0, 42.0, GEOID);
+    for (int i = 0; i < 4; i++) {
+        TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_NONE, um98x_fixchk_feed(&c, &mid));
+    }
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_SEA_LEVEL, c.verdict);
+
+    /* The right height: near clears it. */
+    um98x_fix_offset_t ok = off_sep(2.0, -1.0, GEOID);
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_NONE, um98x_fixchk_feed(&c, &ok));
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_NONE, um98x_fixchk_feed(&c, &ok));
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_NEAR, um98x_fixchk_feed(&c, &ok));
+
+    /* From near, 27 m (7 m from the sea-level height) stays near: the band that raises it is 5 m. */
+    for (int i = 0; i < 3; i++) {
+        (void)um98x_fixchk_feed(&c, &low);
+    }
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_NEAR, c.verdict);
+
+    /* Sea level, then the horizontal position far off (another site's coordinates): far. */
+    um98x_fixchk_init(&c);
+    for (int i = 0; i < 3; i++) {
+        (void)um98x_fixchk_feed(&c, &sea);
+    }
+    um98x_fix_offset_t away = off_sep(150.0, 34.0, GEOID);
+    for (int i = 0; i < 3; i++) {
+        (void)um98x_fixchk_feed(&c, &away);
+    }
+    TEST_ASSERT_EQUAL_UINT8(UM98X_FIX_FAR, c.verdict);
 }

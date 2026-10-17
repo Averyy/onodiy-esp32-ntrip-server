@@ -187,9 +187,10 @@
  * after the check is armed (the profile became fixed or changed, a
  * receiver restart, a successful apply), then every STN_FIX_PERIOD_MS
  * until three usable solutions decide, or STN_FIX_TRIES queries did not;
- * the next check runs STN_FIX_RECHECK_MS later. A far verdict raises
+ * the next check runs STN_FIX_RECHECK_MS later. A far verdict, or a fixed
+ * height that is the receiver's height above sea level, raises
  * STN_ALERT_FIXED_FAR (streaming goes on: the user decides), a near one
- * clears it; both are noted when they change it. A change of the fixed
+ * clears it; each is noted when it changes the warning. A change of the fixed
  * position, or a survey profile, drops the verdict and the alert at once
  * (noted when the alert stood). Never in maintenance (no job at all).
  *
@@ -515,6 +516,8 @@ typedef enum {
                                   receiver's (m), both rounded (the medians that decided) */
     STN_NOTE_FIXED_NEAR,     /**< it cleared: within the limits again (a, b as FIXED_FAR) */
     STN_NOTE_FIXED_CHANGED,  /**< it cleared: the fixed position changed (or the profile surveys now); checked again */
+    STN_NOTE_FIXED_SEA_LEVEL, /**< STN_ALERT_FIXED_FAR raised (or kept) because the fixed height is the receiver's height
+                                   above sea level (a, b as FIXED_FAR) */
 } stn_note_kind_t;
 
 typedef struct {
@@ -1029,7 +1032,7 @@ typedef enum {
     STN_FIX_OFF = 0,         /**< no check: the profile surveys, or not a model we configure */
     STN_FIX_CHECKING,        /**< no verdict yet (a check runs or is due; also after an undecided one) */
     STN_FIX_NEAR,            /**< within the limits */
-    STN_FIX_FAR,             /**< beyond them: STN_ALERT_FIXED_FAR */
+    STN_FIX_FAR,             /**< beyond them, or a sea-level height (sea_level): STN_ALERT_FIXED_FAR */
     STN_FIX_NO_SOLUTION,     /**< no verdict: the last check got no usable solution */
     STN_FIX_REFUSED,         /**< no verdict: the receiver refused both logs */
 } stn_fix_state_t;
@@ -1037,7 +1040,8 @@ typedef enum {
 typedef struct {
     uint8_t state;           /**< stn_fix_state_t */
     um98x_fix_offset_t offset; /**< NEAR, FAR: the medians that decided */
-    bool height_only;        /**< FAR by the height alone (um98x_fix_height_only) */
+    bool height_only;        /**< FAR by the height alone (um98x_fix_height_only; always with sea_level) */
+    bool sea_level;          /**< FAR: the fixed height is the receiver's height above sea level (um98x_fix_sea_level) */
     uint32_t checked_age_s;  /**< since the latest usable solution, UINT32_MAX = none */
 } stn_fix_status_t;
 

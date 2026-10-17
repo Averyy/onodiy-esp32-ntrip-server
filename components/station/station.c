@@ -2272,6 +2272,7 @@ static void publish_status(const stn_in_t *in)
     o->fix_up_m = fx.offset.up_m;
     o->fix_distance_m = fx.offset.distance_m;
     o->fix_height_only = fx.height_only;
+    o->fix_sea_level = fx.sea_level;
     o->fix_checked_age_s = fx.checked_age_s;
 
     o->first_apply_held = core.first_apply_held;
@@ -2419,6 +2420,12 @@ static void handle_notes(const stn_note_t *n, unsigned count)
                           "height: check it (streaming goes on)",
                      (int)x->a, (int)x->b);
             journal_push(DIAG_EV_FIXED_POS, diag_fixed_a(DIAG_FIXED_FAR, x->b), x->a);
+            break;
+        case STN_NOTE_FIXED_SEA_LEVEL:
+            ESP_LOGW(TAG, "the fixed height is %+d m from the receiver's own and looks like a height above sea level: "
+                          "enter the height above the ellipsoid (streaming goes on)",
+                     (int)x->b);
+            journal_push(DIAG_EV_FIXED_POS, diag_fixed_a(DIAG_FIXED_SEA_LEVEL, x->b), x->a);
             break;
         case STN_NOTE_FIXED_NEAR:
             ESP_LOGI(TAG, "the fixed position is within the limits again (%d m horizontally, %+d m in height)",

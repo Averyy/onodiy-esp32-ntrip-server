@@ -2315,3 +2315,50 @@ TEST_CASE("casters: Onocoy and an open caster at once is a warning, nothing more
     TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(root, "warnings")));
     cJSON_Delete(root);
 }
+
+TEST_CASE("fixed-position warning: a height above sea level says so in the alert and in fixed_check", "[web_build]")
+{
+    fixture();
+    station_status_t *st = &s_snap.st;
+    st->alerts = STATION_ALERT_FIXED_FAR;
+    st->fix_state = STATION_FIX_FAR;
+    st->fix_horizontal_m = 2.4;
+    st->fix_up_m = 34.2;
+    st->fix_distance_m = 34.3;
+    st->fix_height_only = true;
+    st->fix_sea_level = true;
+    st->fix_checked_age_s = 30;
+    cJSON *root = build_status(false);
+    const cJSON *alerts = at(root, "alerts");
+    const cJSON *a = NULL;
+    for (int i = 0; i < cJSON_GetArraySize(alerts); i++) {
+        if (strcmp(at(cJSON_GetArrayItem(alerts, i), "id")->valuestring, "fixed_far") == 0) {
+            a = cJSON_GetArrayItem(alerts, i);
+        }
+    }
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_EQUAL(34, at(a, "vertical_m")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(a, "height_only")));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(a, "sea_level")));
+    cJSON_Delete(root);
+    root = build_gnss_json(st);
+    const cJSON *c = at(root, "fixed_check");
+    TEST_ASSERT_EQUAL_STRING("far", at(c, "state")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(c, "sea_level")));
+    TEST_ASSERT_EQUAL(2, at(c, "horizontal_m")->valueint);
+    cJSON_Delete(root);
+
+    /* Far by distance, and no verdict: false. */
+    st->fix_sea_level = false;
+    st->fix_height_only = false;
+    root = build_gnss_json(st);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(at(root, "fixed_check"), "sea_level")));
+    cJSON_Delete(root);
+    st->alerts = 0;
+    st->fix_state = STATION_FIX_CHECKING;
+    root = build_gnss_json(st);
+    c = at(root, "fixed_check");
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(c, "sea_level")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(c, "vertical_m")));
+    cJSON_Delete(root);
+}

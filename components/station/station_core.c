@@ -375,15 +375,17 @@ static void fix_finish(stn_t *s, int64_t now, stn_fix_end_t end)
     s->fix_due_ms = now + STN_FIX_RECHECK_MS;
 }
 
-/* A decision: the alert follows it, noted when it changes. */
-static void fix_decided(stn_t *s, uint8_t verdict)
+/* A decision (before: the verdict that stood): the alert follows it, noted
+ * when the warning or its reason changes. */
+static void fix_decided(stn_t *s, uint8_t before, uint8_t verdict)
 {
     bool was = (s->alerts & STN_ALERT_FIXED_FAR) != 0;
     const um98x_fix_offset_t *o = &s->fix.shown;
-    if (verdict == UM98X_FIX_FAR) {
+    if (verdict == UM98X_FIX_FAR || verdict == UM98X_FIX_SEA_LEVEL) {
         s->alerts |= STN_ALERT_FIXED_FAR;
-        if (!was) {
-            note(s, STN_NOTE_FIXED_FAR, round_m(o->horizontal_m), round_m(o->up_m));
+        if (!was || verdict != before) {
+            note(s, verdict == UM98X_FIX_SEA_LEVEL ? STN_NOTE_FIXED_SEA_LEVEL : STN_NOTE_FIXED_FAR,
+                 round_m(o->horizontal_m), round_m(o->up_m));
         }
     } else {
         s->alerts &= ~STN_ALERT_FIXED_FAR;
@@ -1358,9 +1360,10 @@ static void done_own_fix(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         if (um98x_fix_offset(s->fix_ref[0], s->fix_ref[1], s->fix_ref[2], &r->own, &o)) {
             s->fix_usable_seen = true;
             s->fix_sample_ms = now;
+            uint8_t before = s->fix.verdict;
             uint8_t v = um98x_fixchk_feed(&s->fix, &o);
             if (v != UM98X_FIX_NONE) {
-                fix_decided(s, v);
+                fix_decided(s, before, v);
                 fix_finish(s, now, STN_FIX_END_NONE);
                 return;
             }
@@ -1832,6 +1835,12 @@ void stn_fix_status(const stn_t *s, int64_t now_ms, stn_fix_status_t *out)
         out->state = STN_FIX_FAR;
         out->offset = s->fix.shown;
         out->height_only = um98x_fix_height_only(&s->fix.shown);
+        break;
+    case UM98X_FIX_SEA_LEVEL:
+        out->state = STN_FIX_FAR;
+        out->offset = s->fix.shown;
+        out->height_only = true;   /* the horizontal distance is within the limit */
+        out->sea_level = true;
         break;
     case UM98X_FIX_NEAR:
         out->state = STN_FIX_NEAR;

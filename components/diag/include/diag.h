@@ -265,6 +265,7 @@ typedef enum {
     DIAG_FIXED_FAR = 1,          /**< more than 50 m off (horizontally or in height): the station's warning is raised */
     DIAG_FIXED_NEAR = 2,         /**< within the limits again: the warning cleared */
     DIAG_FIXED_CHANGED = 3,      /**< the fixed position changed (or the profile surveys now) while the warning stood: cleared */
+    DIAG_FIXED_SEA_LEVEL = 4,    /**< the fixed height is the receiver's height above sea level, not its ellipsoidal height: the warning is raised */
 } diag_fixed_ev_t;
 
 /** `a` of DIAG_EV_FIXED_POS: the event in bits 0-7, the height difference (m, clamped to +-8 388 607) in bits 8-31. */

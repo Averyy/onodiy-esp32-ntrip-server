@@ -134,8 +134,11 @@
  * line, nothing paused; um98x_fixcheck.h): 60 s after streaming began, a
  * receiver restart or an apply, then every 20 s until three solutions
  * agree, again every hour. More than 50 m off horizontally or vertically
- * raises STATION_ALERT_FIXED_FAR and journals it; within the limits again
- * (40 m) clears it. Streaming is never held back for it.
+ * raises STATION_ALERT_FIXED_FAR and journals it, and so does a fixed height
+ * that is the receiver's height above sea level instead of its ellipsoidal
+ * height (more than 10 m off, within 5 m of the sea-level height:
+ * fix_sea_level); within the limits again (40 m, and not that height)
+ * clears it. Streaming is never held back for it.
  *
  * Receiver settings read back: every apply session reads the receiver's
  * configuration dump; the station keeps (in RAM, with the time of the
@@ -310,7 +313,8 @@ typedef enum {
     STATION_ALERT_SIGNALS_MISMATCH   = 1u << 7, /**< the signals the receiver reports for its signal group are not what the profile's group
                                                      should configure (rx_bands, um98x_bands.h); set and cleared by each apply session's report */
     STATION_ALERT_FIXED_FAR          = 1u << 8, /**< the fixed position is more than 50 m (horizontally or vertically) from the receiver's own
-                                                     solution (fix_* in the status); never holds streaming back */
+                                                     solution, or its height is the receiver's height above sea level (fix_* in the
+                                                     status); never holds streaming back */
 } station_alert_t;
 
 /** The fixed-position check (station_status_t.fix_state). */
@@ -318,7 +322,7 @@ typedef enum {
     STATION_FIX_OFF = 0,         /**< no check: the profile surveys, or not a model the station configures */
     STATION_FIX_CHECKING,        /**< no verdict yet */
     STATION_FIX_NEAR,            /**< within the limits */
-    STATION_FIX_FAR,             /**< beyond them: STATION_ALERT_FIXED_FAR */
+    STATION_FIX_FAR,             /**< beyond them, or a sea-level height (fix_sea_level): STATION_ALERT_FIXED_FAR */
     STATION_FIX_NO_SOLUTION,     /**< no verdict: the last check got no usable solution (no sky, or none reported) */
     STATION_FIX_REFUSED,         /**< no verdict: the receiver refused both position logs */
 } station_fix_state_t;
@@ -561,7 +565,8 @@ typedef struct {
     double fix_horizontal_m;         /**< NEAR, FAR: horizontal distance (the medians that decided) */
     double fix_up_m;                 /**< NEAR, FAR: fixed height minus the receiver's (> 0: the fixed position is above) */
     double fix_distance_m;           /**< NEAR, FAR: 3-D distance */
-    bool fix_height_only;            /**< FAR by the height alone */
+    bool fix_height_only;            /**< FAR by the height alone (always with fix_sea_level) */
+    bool fix_sea_level;              /**< FAR: the fixed height is the receiver's height above sea level, not its ellipsoidal height */
     uint32_t fix_checked_age_s;      /**< since the latest usable solution, UINT32_MAX = none */
 } station_status_t;
 
