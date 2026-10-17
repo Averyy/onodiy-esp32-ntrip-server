@@ -372,7 +372,10 @@ const systemPart = {
             fName.error(problem);
             return;
           }
-          const r = await act(save, () => api('PUT', '/api/system', { hostname: v, public_status: pub.input.checked }), err);
+          /* The name only when it changed: storing the one shown would pin today's default for good. */
+          const body = { public_status: pub.input.checked };
+          if (v !== sys.hostname) body.hostname = v;
+          const r = await act(save, () => api('PUT', '/api/system', body), err);
           if (r === undefined) return;
           devDirty = false;
           sys = r;
