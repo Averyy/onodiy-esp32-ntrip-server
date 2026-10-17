@@ -804,9 +804,10 @@ tbody tr:last-child td { border-bottom: 0; }
 /* A phone: a tick and the figure per band (the column names the band; the cell's title the signals). */
 /* The sky beside the table: the names give way. */
 .sky-open .bands .wide-only { display: none; }
+/* A phone: the table fits a 390 px screen (seven columns). */
 @media (max-width: 719px) {
   .bands .wide-only { display: none; }
-  .bands th, .bands td { padding-left: 0.3rem; padding-right: 0.3rem; }
+  .bands th, .bands td { padding-left: 0.25rem; padding-right: 0.25rem; }
 }
 .cnr-weak { color: var(--bad); }
 .cnr-ok { color: var(--warn); }
@@ -818,9 +819,12 @@ tbody tr:last-child td { border-bottom: 0; }
 .sky-wrap { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
 .sky-wrap > * { flex: 1 1 26rem; min-width: 0; }
 .sky-wrap > :first-child { flex-basis: 17.5rem; max-width: 420px; margin: 0 auto; }
-/* Every satellite under the band table: a box of its own height, its sort buttons in view while it scrolls. */
-.sat-list .scroll { max-height: 26rem; overflow-y: auto; }
-.sat-list thead th { position: sticky; top: 0; z-index: 1; background: var(--surface); }
+/* Every satellite under the band table: from 560 px a box of its own height, its sort buttons in view while it scrolls;
+ * on a phone the page alone scrolls. */
+@media (min-width: 560px) {
+  .sat-list .scroll { max-height: 26rem; overflow-y: auto; }
+  .sat-list thead th { position: sticky; top: 0; z-index: 1; background: var(--surface); }
+}
 svg.sky { width: 100%; max-width: 420px; height: auto; display: block; margin: 0 auto; }
 svg.sky .ring { fill: none; stroke: var(--edge); stroke-width: 1; }
 svg.sky .axis { stroke: var(--edge); stroke-width: 1; }
@@ -888,6 +892,8 @@ table.counts td { white-space: nowrap; }
 /* One line per row (the satellites, the RTCM messages): no stacked blocks on a phone; a long name ends in "…". */
 table.rows th, table.rows td { padding: 0.35rem 0.45rem; white-space: nowrap; }
 table.rows td.name { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The receiver's messages sit in a half-width card: their names wrap rather than end in "…". */
+table.rows.msgs td.name { white-space: normal; overflow: visible; }
 table.rows i.dot { display: inline-block; width: 8px; height: 8px; margin-right: 0.35rem; border-radius: 50%; }
 @media (max-width: 559px) {
   table.rows, table.cmp { font-size: 0.875rem; }

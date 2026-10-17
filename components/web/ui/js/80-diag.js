@@ -361,13 +361,49 @@ function bandsRow(g) {
   return ['Bands configured', list];
 }
 
+/* Two names as the station compares them: runs of spaces as one, the ends trimmed. */
+const sameText = (a, b) => String(a || '').replace(/\s+/g, ' ').trim() === String(b || '').replace(/\s+/g, ' ').trim();
+
+/**
+ * What the descriptor (RTCM 1033, d) says of the receiver and its antenna,
+ * against the identity (r) and the antenna read back (ant, null: not read)
+ * above it: {rows, matches}. Where every field that can be compared is the
+ * same, only those that cannot be are rows and matches is true; once one
+ * differs, every field is a row, those that differ in amber.
+ */
+function descriptorRows(d, r, ant) {
+  const known = r.valid !== false;
+  /* The type names the model, maybe with its maker ("UNICORE UM982"). */
+  const typeHas = m => String(d.receiver_type || '').toUpperCase().indexOf(String(m).toUpperCase()) >= 0;
+  /* [label, value, null: cannot be compared / true: the same / false: differs] */
+  const f = [
+    ['Receiver type', d.receiver_type, known && r.model ? typeHas(r.model) : null],
+    ['Receiver firmware', d.receiver_fw, known && r.firmware ? sameText(d.receiver_fw, r.firmware) : null],
+    ['Receiver serial', d.receiver_serial, known && r.serial ? sameText(d.receiver_serial, r.serial) : null],
+    ['Antenna', d.antenna, ant ? sameText(d.antenna, ant.model) : null],
+    ['Antenna serial', d.antenna_serial, ant ? sameText(d.antenna_serial, ant.serial) : null],
+    ['Antenna setup ID', String(d.setup_id), ant ? Number(d.setup_id) === Number(ant.setup_id) : null],
+  ];
+  const differs = f.some(x => x[2] === false);
+  /* The antenna's name as the receiver keeps it (spaces shown); no name is "none", any other empty field a dash. */
+  const value = x => (x[0] === 'Antenna' ? (x[1] ? h('span', { class: 'ant' }, x[1]) : h('span', { class: 'muted' }, 'none')) : x[1] || DASH);
+  return {
+    matches: !differs && f.some(x => x[2] === true),
+    rows: f.filter(x => differs || x[2] === null).map(x => [x[0], x[2] === false ? h('span', { class: 't-warn' }, value(x), ' (differs)') :
+      value(x)]),
+  };
+}
+
 /**
  * The Receiver card (GET /api/gnss, may be missing): who the receiver is and
  * whether it answers, what it read back at the last configuration with the
  * steps it took or refused, and what casters get from it (the station's own
- * messages: its position and its descriptor, RTCM 1033).
+ * messages: its position and its descriptor, RTCM 1033, whose receiver and
+ * antenna fields show only where they cannot be checked against the parts
+ * before or differ: descriptorRows). While the first configuration is held,
+ * the commands it would send (preview: GET /api/gnss/apply/preview).
  */
-function diagReceiverCard(g) {
+function diagReceiverCard(g, preview) {
   if (!g) return null;
   const r = g.receiver || {};
   const rs = g.rx_settings || {};
@@ -380,6 +416,7 @@ function diagReceiverCard(g) {
     h('span', { class: 't-warn' }, 'Rejected: ' + (x.reply || 'no reason given'))] : null);
   const part = (title, ...kids) => h('div', null, h('h3', { class: 'sub' }, title), kids);
   const when = rs.valid ? readWhen(rs) : '';
+  const desc = d.valid ? descriptorRows(d, r, rs.valid ? ant : null) : { rows: [], matches: false };
   return h('section', { class: 'card wide tight-kv' }, h('h2', null, 'Receiver'), h('div', { class: 'parts' },
     part('Identity', kv([
       ['Model', r.valid === false ? h('span', { class: 'muted' }, 'Not identified yet') : [r.model || DASH, ' · ', fwText(r.firmware, r.build)]],
@@ -408,15 +445,13 @@ function diagReceiverCard(g) {
     part('What casters get', kv([
       ['Station ID', d.valid ? String(d.station_id) : arp.valid ? String(arp.station_id) : DASH],
       ['Position (1005)', arp.valid ? 'Received ' + ago(arp.age_ms) : h('span', { class: 'muted' }, 'Not received yet')],
-      ['Descriptor (1033)', d.valid ? 'Received ' + ago(d.age_ms) : h('span', { class: 'muted' }, 'Not received yet')],
-      d.valid ? ['Antenna', d.antenna ? h('span', { class: 'ant' }, d.antenna) : h('span', { class: 'muted' }, 'none')] : null,
-      d.valid ? ['Antenna setup ID', String(d.setup_id)] : null,
-      d.valid ? ['Antenna serial', d.antenna_serial || DASH] : null,
-      d.valid ? ['Receiver type', d.receiver_type || DASH] : null,
-      d.valid ? ['Receiver firmware', d.receiver_fw || DASH] : null,
-      d.valid ? ['Receiver serial', d.receiver_serial || DASH] : null,
+      ['Descriptor (1033)', d.valid ? 'Received ' + ago(d.age_ms) + (desc.matches ? ', matches the receiver' : '') :
+        h('span', { class: 'muted' }, 'Not received yet')],
+      ...desc.rows,
       d.bad_frames ? ['Unreadable 1033 messages', h('span', { class: 't-warn' }, fmt.num(d.bad_frames))] : null,
-    ]))));
+    ]))),
+    g.first_apply_held ? h('div', null, h('h3', { class: 'sub' }, 'Commands the first configuration sends'),
+      preview ? previewList(preview) : h('p', { class: 'muted small' }, 'Reading the commands…')) : null);
 }
 
 /*
@@ -426,7 +461,7 @@ function diagReceiverCard(g) {
  * while their section is open.
  */
 function overviewTab(box) {
-  let lastHl = null, sys = null, wifi = null, gnss = null, tasks = null, stopTasks = null, gone = false;
+  let lastHl = null, sys = null, wifi = null, gnss = null, preview = null, tasks = null, stopTasks = null, gone = false;
   const render = hl => {
     if (gone) return;   /* an answer that came after the page was left */
     lastHl = hl;
@@ -474,7 +509,7 @@ function overviewTab(box) {
         h('h2', null, 'Earlier starts'),
         lines.length ? scrollBox('Earlier starts', h('table', { class: 'rows' },
           h('tbody', null, foldRows(lines, 5, 'Older starts', 3, opened.has('starts'), 'starts')))) : h('p', { class: 'muted' }, 'None recorded.')),
-      diagReceiverCard(gnss),
+      diagReceiverCard(gnss, preview),
       h('section', { class: 'card wide tight-kv' },
         h('details', { class: 'fold', 'data-k': 'internals', open: opened.has('internals') },
           h('summary', null, h('h2', null, 'Firmware internals')),
@@ -561,9 +596,10 @@ function overviewTab(box) {
     wifi = await api('GET', '/api/wifi');
     again();
   });
-  /* The receiver (its Receiver card) every 10 s. */
+  /* The receiver (its Receiver card) every 10 s; while its first configuration is held, also what that would send. */
   const stopGnss = poller(10000, async () => {
     gnss = await api('GET', '/api/gnss');
+    preview = gnss && gnss.first_apply_held ? await api('GET', '/api/gnss/apply/preview').catch(() => null) : null;
     again();
   });
   const stopHl = pollInto(box, 5000, '/api/health', render);

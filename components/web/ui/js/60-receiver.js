@@ -275,7 +275,8 @@ function positionRows(g) {
     ['Height (ellipsoid)', fmt.m(at.height_m)],
     have && pos.sigma_m ? ['Accuracy (σ)', fmtDist(pos.sigma_m)] : null,
     have && pos.locked_unix ? ['Locked on', fmt.time(pos.locked_unix)] : null,
-    ['Source', have ? lbl(L.posSource, pos.source) : 'Sent to casters, not locked'],
+    /* Without a position of the station's own: the survey's so far, or what the receiver sends (a base position it kept). */
+    ['Source', have ? lbl(L.posSource, pos.source) : surveyRuns(g) ? 'Survey-in (running)' : 'Sent by the receiver'],
     fixedCheckRow(g),
     have ? streamRow(g) : null,
   ]);
@@ -377,8 +378,9 @@ function manageCtl() {
 /* The user's "keep it configured" choice, kept until the first configuration has worked (this browser). */
 const HELD_AUTO_KEY = 'heldAuto';
 
-/** What the station would send, from GET /api/gnss/apply/preview, as a numbered list: one short line a command ("CONFIG
- * SIGNALGROUP 3 6 · writes, if different, saved"), in columns where the card is wide enough. */
+/** What the station would send, from GET /api/gnss/apply/preview, as a numbered list for Diagnostics (the Receiver page and
+ * the setup say it in one line: previewSummary): one short line a command ("CONFIG SIGNALGROUP 3 6 · writes, if different,
+ * saved"), in columns where the card is wide enough. */
 function previewList(d) {
   const steps = (d && d.steps) || [];
   if (!steps.length) return h('p', { class: 'muted' }, 'Nothing to list (no valid profile).');
@@ -387,11 +389,14 @@ function previewList(d) {
       .filter(Boolean).join(', ')))));
 }
 
-/** The same in one line for the confirmation ("17 commands, 10 of which change the receiver."), or null. */
+/** The same in one line ("17 commands; up to 13 change the receiver."), or null. A write sent only when the receiver
+ * differs or has the setting off (when: if_differs, if_off) may change nothing, so with any such the count is "up to". */
 function previewSummary(d) {
   const steps = (d && d.steps) || [];
   if (!steps.length) return null;
-  return steps.length + ' commands, ' + steps.filter(s => s.kind === 'write').length + ' of which change the receiver.';
+  const writes = steps.filter(s => s.kind === 'write');
+  const maybe = writes.some(s => s.when && s.when !== 'always');
+  return steps.length + ' commands; ' + (maybe ? 'up to ' : '') + writes.length + ' change the receiver.';
 }
 
 /**
@@ -414,16 +419,16 @@ async function finishHeld(g) {
 
 /**
  * The receiver's first configuration, held until the user confirms it (a
- * build that holds it): the choice of automatic configuration afterwards,
- * the commands it would send, "Configure the receiver now" and
- * "Not now". The Receiver page and the setup wizard show it alike, so its
+ * build that holds it): how many commands it would send (Diagnostics lists
+ * them), the choice of automatic configuration afterwards, "Configure the
+ * receiver now" and "Not now". The Receiver page and the setup wizard show it alike, so its
  * words name no place on either. opts.onLater: "Not now"; opts.onApplied:
  * the apply was accepted. Returns {el, load()}.
  */
 function heldPanel(opts) {
   const err = errBox();
   const status = h('div', { hidden: true });
-  const list = h('div', null, h('p', { class: 'muted small' }, 'Reading the commands…'));
+  const sum = h('p', { class: 'muted small' }, 'Reading the commands…');
   const auto = checkbox('Afterwards, keep it configured and fix problems automatically (recommended)', true,
     'Turns on automatic configuration and automatic recovery once this has worked.');
   let preview = null;
@@ -431,10 +436,12 @@ function heldPanel(opts) {
   const load = async () => {
     try {
       preview = await api('GET', '/api/gnss/apply/preview');
-      mount(list, previewList(preview));
+      sum.className = 'muted small';
+      sum.textContent = previewSummary(preview) || 'Nothing to send (no valid profile).';
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) return;
-      mount(list, msg('warn', 'The list could not be read: ' + errText(e)));
+      sum.className = 'small t-warn';
+      sum.textContent = 'The commands could not be read: ' + errText(e);
     }
   };
   const show = (tone, text) => {
@@ -481,10 +488,9 @@ function heldPanel(opts) {
     watching = false;
   };
   const confirmBtn = btn('Configure the receiver now', async () => {
-    if (!preview) await load();
+    if (!preview) await load();   /* the card's line says how many commands (not said again here) */
     const ok = await dialog({ title: 'Configure the receiver now?', ok: 'Configure',
       body: [h('p', null, 'The station configures the receiver and saves the settings in it. Corrections pause for a few seconds.'),
-        previewSummary(preview) ? h('p', null, previewSummary(preview)) : null,
         h('p', { class: 'muted small' }, auto.input.checked ? 'Afterwards, automatic configuration and recovery turn on.' :
           'Afterwards, the station changes nothing on the receiver by itself.')] });
     if (!ok) return;
@@ -509,9 +515,7 @@ function heldPanel(opts) {
     el: h('div', { class: 'stack' },
       cardHead('Receiver not configured yet', badge('Waiting for you', 'info')),
       h('p', null, 'So far the station has only read the receiver. Confirm to configure it with the receiver profile.'),
-      auto.el,
-      h('section', null, h('h3', { class: 'sub' }, 'Commands it will send'), list),
-      status, err,
+      sum, auto.el, status, err,
       h('div', { class: 'form-actions' }, laterBtn, confirmBtn)),
     load: load,
   };
@@ -1026,8 +1030,9 @@ function sgPairLabel(g) {
 }
 
 /* Both groups side by side: how long each was measured, its best constellation, then per constellation the satellites and
- * bands, with each band's mean C/N0 in a line under them (its signals on hover). On a phone a cell wraps only between
- * its parts ("10.8 satellites ·", "L1 44.6 ·"), never inside one, so no line starts with a dot. */
+ * bands, with each band's mean C/N0 and its mean satellites in a line under them ("L5 44.1 (9.6)"; the band table above
+ * names the signals). On a phone a cell wraps only between its parts ("10.8 satellites ·", "L1 44.6 (10.8) ·"), never
+ * inside one, so no line starts with a dot. */
 function sgtResults(t) {
   const res = t.results || [];
   if (res.length !== 2) return null;
@@ -1051,13 +1056,13 @@ function sgtResults(t) {
       const n = (x.bands || []).length;
       const per = BAND_ORDER.map(b => (x.per_band || []).find(pb => pb.band === b)).filter(Boolean);
       return [parts([x.satellites.toFixed(1) + ' satellites', n + (n === 1 ? ' band' : ' bands')]),
-        per.length ? h('small', null, parts(per.map(pb => [h('span', { title: sigNames(sys, pb.signal_ids) || null },
-          BAND_HEAD[pb.band] || pb.band), pb.cnr_dbhz === null || pb.cnr_dbhz === undefined ? '' :
-          [' ', h('span', { class: cnrClass(pb.cnr_dbhz) }, pb.cnr_dbhz.toFixed(1))]]))) : null];
+        per.length ? h('small', null, parts(per.map(pb => [BAND_HEAD[pb.band] || pb.band,
+          pb.cnr_dbhz === null || pb.cnr_dbhz === undefined ? '' : [' ', h('span', { class: cnrClass(pb.cnr_dbhz) }, pb.cnr_dbhz.toFixed(1))],
+          typeof pb.satellites === 'number' ? ' (' + pb.satellites.toFixed(1) + ')' : '']))) : null];
     })]);
   }
   return h('div', null, table(head, rows, { label: 'Signal-group comparison results', cls: 'cmp' }),
-    h('p', { class: 'muted small foot' }, 'Figures: mean C/N0 per band, in dB-Hz.'));
+    h('p', { class: 'muted small foot' }, 'Per band: mean C/N0 in dB-Hz; in brackets, mean satellites.'));
 }
 
 /** Why the station would refuse a start now (its own order), or '' (GET /api/gnss). The station still decides. */

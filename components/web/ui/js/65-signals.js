@@ -73,7 +73,8 @@ function msgCheck(m, colour, surveying) {
   return colour ? 'missing' : '';
 }
 
-/* The profile's messages in one line each (number and name, every, last seen); the others in one line under them. */
+/* The profile's messages, a row each (number and name, wrapping in a narrow card; every; last seen); the others in one line
+ * under them. */
 function messagesView(list, colour, surveying) {
   const mine = list.filter(m => m.expected_period_s !== null && m.expected_period_s !== undefined);
   const extra = list.filter(m => (m.expected_period_s === null || m.expected_period_s === undefined) && m.count);
@@ -87,13 +88,13 @@ function messagesView(list, colour, surveying) {
     const seen = m.period_ms ? periodText(m.period_ms) : DASH;
     const bad = missing ? 't-bad' : null;
     return h('tr', null,
-      h('td', { class: 'name', title: rtcmName(m.msg) || null }, h('b', { class: bad }, String(m.msg)), h('span', { class: bad }, ' ' + (rtcmName(m.msg) || ''))),
+      h('td', { class: 'name' }, h('b', { class: bad }, String(m.msg)), h('span', { class: bad }, ' ' + (rtcmName(m.msg) || ''))),
       waits ? h('td', { class: 'num muted', colspan: 2 }, 'Waits for the survey') : [
         h('td', { class: 'num' }, seen, m.period_ms && seen !== expected + NB + 's' ? h('span', { class: 'muted' }, ' (' + expected + NB + 's)') : null),
         h('td', { class: 'num' + (bad ? ' t-bad' : '') }, neverSeen(m) ? 'Never' : fmt.ms(m.age_ms) + NB + 'ago')]);
   });
   return [
-    rows.length ? scrollBox('Messages', h('table', { class: 'rows' },
+    rows.length ? scrollBox('Messages', h('table', { class: 'rows msgs' },
       h('thead', null, h('tr', null, h('th', null, 'Message'), h('th', { class: 'num' }, 'Every'), h('th', { class: 'num' }, 'Last seen'))),
       h('tbody', null, rows))) : h('p', { class: 'muted' }, 'No messages in the profile.'),
     red ? h('p', { class: 'small' }, h('span', { class: 't-bad' }, 'Red:'), ' in the profile but not arriving.') : null,

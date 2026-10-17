@@ -144,7 +144,8 @@ function satRows() {
         bands.map(b => h('td', { class: 'num' }, c[b] ? h('span', { class: cnrClass(c[b]) }, String(c[b])) : b in c ? '✓' : DASH)));
     }));
     const t = d.totals || {};
-    note.textContent = (t.dropped ? t.dropped + ' more not listed. ' : '') + 'C/N0 in dB-Hz; ✓ = tracked, no C/N0 value.';
+    /* The band table's note above says the unit. */
+    note.textContent = (t.dropped ? t.dropped + ' more not listed. ' : '') + '✓ = tracked, no C/N0 value.';
   }
 
   return {

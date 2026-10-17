@@ -430,6 +430,9 @@ function pageParts(el) {
     lines: v.filter(e => e.tagName === 'P').map(e => e.textContent),
     trs: v.filter(e => e.tagName === 'TR').map(tr => tr.kids.map(k => k.textContent).join(' | ')),
     lis: v.filter(e => e.tagName === 'LI' && e.parent.tagName === 'OL').length,
+    msgs: v.filter(e => (e.className || '').indexOf('msg ') === 0).map(m => [m.className.slice(4), m.textContent]),
+    /* Amber text (the position casters get, a value that differs). */
+    warn: v.filter(e => (' ' + e.className + ' ').indexOf(' t-warn ') >= 0).map(e => e.textContent),
   };
 }
 
@@ -460,6 +463,16 @@ async function receiverPageView(c) {
     [...visible(el)].find(e => e.tagName === 'BUTTON' && e.textContent === 'Configure the receiver now').fire('click');
     await settle();
     r.dialog = pageParts(ids.modal);
+  }
+  if (c.test2) {
+    /* The comparison's next answer (c.test2) and a refresh: is its results box the same element (a focus on it stays), and
+     * what does it show now. */
+    const box = () => [...visible(el)].find(e => e.attrs && e.attrs['aria-label'] === 'Signal-group comparison results');
+    const before = box();
+    c.test = c.test2;
+    view.reload();
+    await settle();
+    r.again = { same: !!before && box() === before, trs: pageParts(el).trs };
   }
   view.destroy();
   routes = null;
@@ -629,13 +642,15 @@ for (const c of JSON.parse(casesJson)) {
     continue;
   }
   if (c.fn === 'rx_details') {
-    /* Diagnostics' Receiver card: every row as [label, text]. */
-    const all = [...ui.diagReceiverCard(c.g).walk()];
+    /* Diagnostics' Receiver card (c.preview: the held configuration's commands): every row as [label, text]; with c.full
+     * what pageParts says of it. */
+    const card = ui.diagReceiverCard(c.g, c.preview || null);
+    const all = [...card.walk()];
     const pairs = [];
     for (const dl of all.filter(e => e.tagName === 'DL')) {
       for (let i = 0; i + 1 < dl.kids.length; i += 2) pairs.push([dl.kids[i].textContent, dl.kids[i + 1].textContent]);
     }
-    out.push(pairs);
+    out.push(c.full ? pageParts(card) : pairs);
     continue;
   }
   if (c.fn === 'details') {
@@ -1360,8 +1375,8 @@ def sgt_result(m: int, s: int, status: str, best: str, systems: list) -> dict:
 
 
 GAL = {"sys": "galileo", "satellites": 10.9, "bands": ["l1", "l2", "l5", "l6"],
-       "per_band": [{"band": b, "satellites": 10.9, "cnr_dbhz": c, "signal_ids": [2]} for b, c in
-                    (("l1", 44.6), ("l2", 42.8), ("l5", 44.7), ("l6", 41.2))]}
+       "per_band": [{"band": b, "satellites": n, "cnr_dbhz": c, "signal_ids": [2]} for b, c, n in
+                    (("l1", 44.6, 10.9), ("l2", 42.8, 10.9), ("l5", 44.7, 9.6), ("l6", 41.2, 8.25))]}
 BDS = {"sys": "beidou", "satellites": 11.8, "bands": ["l1", "l2", "l5", "l6"],
        "per_band": [{"band": b, "satellites": 11.8, "cnr_dbhz": 43.0, "signal_ids": [2]} for b in ("l1", "l2", "l5", "l6")]}
 SGT_RUN = {"state": "measuring", "groups": [{"master": 3, "slave": 6}, {"master": 7, "slave": 0}],
@@ -1369,6 +1384,9 @@ SGT_RUN = {"state": "measuring", "groups": [{"master": 3, "slave": 6}, {"master"
            "decide_left_s": None, "running_group": {"master": 7, "slave": 0},
            "results": [sgt_result(3, 6, "done", "galileo", [GAL]), sgt_result(7, 0, "measuring", "beidou", [BDS])],
            "outcome": None, "kept": None, "reason": "", "ended_unix": None}
+# A minute later: Galileo's L1 a little stronger in the second group's figures.
+SGT_RUN2 = {**SGT_RUN, "left_s": 1100, "results": [sgt_result(3, 6, "done", "galileo", [{**GAL, "per_band": [
+    {**GAL["per_band"][0], "cnr_dbhz": 45.0}, *GAL["per_band"][1:]]}]), sgt_result(7, 0, "measuring", "beidou", [BDS])]}
 SGT_DONE = {**SGT_RUN, "state": "deciding", "phase": None, "left_s": None, "decide_left_s": 84000,
             "results": [sgt_result(3, 6, "done", "galileo", [GAL]), sgt_result(7, 0, "done", "beidou", [BDS])]}
 LIVE = {"window": {"open": True, "left_s": 540, "max_min": 60, "default_min": 10, "sky": "on", "sky_why": "none", "last_end": "none"},
@@ -1408,7 +1426,7 @@ def test_receiver_pages_show_everything_without_fold_outs():
         "held": rx_page("", st_status(), held_g, SIG_MSGS, preview=PREVIEW, confirm=True),
         "settings": rx_page("settings", st_status(), GNSS, SIG_MSGS),
         "settings_noant": rx_page("settings", NOANT_ST, NOANT_G, NOANT_SIG),
-        "running": rx_page("settings", run_st, GNSS, SIG_MSGS, test=SGT_RUN),
+        "running": rx_page("settings", run_st, GNSS, SIG_MSGS, test=SGT_RUN, test2=SGT_RUN2),
         "deciding": rx_page("settings", done_st, GNSS, SIG_MSGS, test=SGT_DONE),
     }
     out = dict(zip(cases, run_editor(list(cases.values()))))
@@ -1445,9 +1463,12 @@ def test_receiver_pages_show_everything_without_fold_outs():
     assert norx["cards"] == ["Receiver"] and "Check again" in norx["buttons"] and "Messages" not in norx["subs"]
     assert not norx["rows"]
 
+    # The held configuration's commands in one line (Diagnostics lists them); a write sent only if the receiver differs
+    # may change nothing, so "up to".
     held = out["held"]
-    assert held["cards"][0] == "Receiver not configured yet" and "Commands it will send" in held["subs"] and held["lis"] == 3
-    assert "3 commands, 2 of which change the receiver." in held["dialog"]["lines"]
+    assert held["cards"][0] == "Receiver not configured yet" and held["lis"] == 0 and "Commands it will send" not in held["subs"]
+    assert "3 commands; up to 2 change the receiver." in held["lines"]
+    assert not any("commands" in t for t in held["dialog"]["lines"])
 
     settings = out["settings"]
     assert settings["cards"] == ["Position", "Receiver profile", "Receiver management", "Compare two signal groups"]
@@ -1461,10 +1482,73 @@ def test_receiver_pages_show_everything_without_fold_outs():
 
     running = out["running"]
     assert "Group A" not in running["fields"] and not any(t.startswith("Tries two") for t in running["lines"])
-    # Each band's C/N0 inline; on a phone a cell wraps only between its parts, each ending with its dot.
-    assert ("Galileo | 10.9 satellites\u00a0\u00b7 4 bandsL1 44.6\u00a0\u00b7 L2 42.8\u00a0\u00b7 L5 44.7\u00a0\u00b7 L6 41.2 | "
-            "\u2013") in running["trs"]
-    assert "Figures: mean C/N0 per band, in dB-Hz." in running["lines"] and "Stop" in running["buttons"]
+    # Each band's C/N0 and its satellites inline; on a phone a cell wraps only between its parts, each ending with its dot.
+    assert ("Galileo | 10.9 satellites\u00a0\u00b7 4 bandsL1 44.6 (10.9)\u00a0\u00b7 L2 42.8 (10.9)\u00a0\u00b7 "
+            "L5 44.7 (9.6)\u00a0\u00b7 L6 41.2 (8.3) | \u2013") in running["trs"]
+    assert "Per band: mean C/N0 in dB-Hz; in brackets, mean satellites." in running["lines"] and "Stop" in running["buttons"]
+    # Its next answer patches the same results box (a keyboard focus on it stays) with the new figures.
+    assert running["again"]["same"]
+    assert any(r.startswith("Galileo | 10.9 satellites") and "L1 45.0 (10.9)" in r for r in running["again"]["trs"])
     deciding = out["deciding"]
     assert {"Keep 3 6 (Galileo E6)", "Keep 7 0 (BeiDou B2a)"} <= set(deciding["buttons"])
+
+
+def test_receiver_pages_say_refusals_the_survey_and_a_stream_off_the_position():
+    """What the folds held, in states the whole-page test does not build: the antenna and B1C/B2a steps the receiver
+    refused, as messages under Corrections; while a survey runs, the position the receiver sends in the Position card
+    with its source in a word and Lock offered; a locked position whose stream lies away from it, in amber."""
+    refused_g = {**GNSS, "profile": {**GNSS["profile"], "antenna_model": "TESTANT1"},
+                 "apply_steps": {"antenna": {"sent": True, "ok": False, "reply": "PARSING FAILED"},
+                                 "b1cb2a": {"sent": True, "ok": False, "reply": None}}}
+    survey_st = st_status(receiver={"position_locked": False, "surveying": True, "survey_window_left_s": 300})
+    survey_g = {**GNSS, "profile": {**GNSS["profile"], "base_mode": "survey_in", "survey_in_s": 600, "fixed": None},
+                "position": {"locked": False, "source": "none"},
+                "survey": {"active": True, "window_left_s": 300, "unfinished": False},
+                "arp": {"valid": True, "station_id": 1234, "lat_deg": 45.2, "lon_deg": -75.2, "height_m": 86.2, "age_ms": 700,
+                        "offset_m": None}}
+    offset_g = {**GNSS, "arp": {**GNSS["arp"], "offset_m": 1.32}}
+    refused, survey, offset = run_editor([rx_page("settings", st_status(), refused_g, SIG_MSGS),
+                                          rx_page("", survey_st, survey_g, SIG_MSGS),
+                                          rx_page("", st_status(), offset_g, SIG_MSGS)])
+    assert ["warn", "Antenna model rejected: PARSING FAILED."] in refused["msgs"]
+    assert ["warn", "BeiDou B1C/B2a output rejected: no reason given."] in refused["msgs"]
+
+    rows = dict(survey["rows"])
+    assert survey["cards"] == ["Receiver", "Position", "Signals"]
+    assert rows["Latitude"].startswith("45.2") and rows["Source"] == "Survey-in (running)"
+    assert "Sent to casters" not in rows and "Locked on" not in rows
+    assert "Lock this position" in survey["buttons"] and "Survey again" not in survey["buttons"]
+    assert any(t.startswith("Surveying, about 5") for t in survey["lines"])
+
+    assert dict(offset["rows"])["Sent to casters"] == "1.32\u00a0m from this position"
+    assert "1.32\u00a0m from this position" in offset["warn"]
+
+
+def test_diagnostics_receiver_card_says_the_descriptor_once():
+    """Diagnostics' Receiver card: the descriptor casters get (1033) names the receiver and its antenna; where that is
+    what the identity and the read-back above say, one row says it matches instead of repeating them. A field that
+    differs shows every field, that one in amber; one that cannot be checked (nothing read back since the start) shows
+    as it is. While the first configuration is held, the card lists the commands it would send."""
+    differ = {**GNSS, "rtcm1033": {**GNSS["rtcm1033"], "antenna": "TESTANT1", "receiver_serial": "TEST0002"}}
+    unread = {**GNSS, "rx_settings": {"valid": False}}
+    held = {**GNSS, "first_apply_held": True}
+    same, other, nothing_read, commands = run_editor([
+        {"fn": "rx_details", "g": GNSS, "full": True}, {"fn": "rx_details", "g": differ, "full": True},
+        {"fn": "rx_details", "g": unread, "full": True}, {"fn": "rx_details", "g": held, "preview": PREVIEW, "full": True}])
+    rows = dict(same["rows"])
+    assert rows["Descriptor (1033)"] == "Received 400\u00a0ms ago, matches the receiver"
+    assert not {"Receiver serial", "Receiver type", "Receiver firmware", "Antenna", "Antenna serial", "Antenna setup ID"} & set(rows)
+    assert rows["Serial number"] == "TEST0001" and "Commands the first configuration sends" not in same["subs"]
+
+    rows = dict(other["rows"])
+    assert rows["Descriptor (1033)"] == "Received 400\u00a0ms ago"
+    assert rows["Receiver serial"] == "TEST0002 (differs)" and rows["Antenna"] == "TESTANT1 (differs)"
+    assert rows["Receiver type"] == "UM982" and rows["Antenna setup ID"] == "0"
+    assert other["warn"] == ["TEST0002 (differs)", "TESTANT1 (differs)"]
+
+    rows = dict(nothing_read["rows"])
+    assert rows["Descriptor (1033)"] == "Received 400\u00a0ms ago, matches the receiver"
+    assert rows["Antenna"] == "none" and rows["Antenna setup ID"] == "0" and "Receiver serial" not in rows
+
+    assert "Commands the first configuration sends" in commands["subs"] and commands["lis"] == 3
 
