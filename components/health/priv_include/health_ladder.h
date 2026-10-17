@@ -17,8 +17,8 @@
  *   TEXT_ONLY  checksum-valid text lines nobody asked for, after the last
  *              RTCM frame (more than HL_ANSWER_SLACK_MS after it), the
  *              latest within twice the threshold   -> entry step 4
- *   GARBAGE    else bytes the framer discarded within the threshold
- *                                                  -> entry step 3
+ *   GARBAGE    else bytes the framer discarded as they arrived, within
+ *              the threshold                       -> entry step 3
  *   NO_BYTES   else                                -> entry step 1
  * The receiver's replies to the station's own commands (its once-a-minute
  * question, a version or position query, a session's acknowledgements and
@@ -26,7 +26,12 @@
  * asking never changes how a stall is judged. They are answers (below). A
  * line output every 10 s (the satellite-in-view sentences) is TEXT_ONLY at
  * every tick: twice the threshold covers its period; text that stopped
- * with the RTCM (a link that died) is not.
+ * with the RTCM (a link that died) is not. A discard counts only in a tick
+ * whose bytes reached the framer: a frame the receiver stopped in the
+ * middle of (hung, unplugged, its power lost) is dropped by the next
+ * framer reset, the ladder's own resync among them, and those bytes came
+ * before the stall, no sign of garbage (they would turn step 1's NO_BYTES
+ * into GARBAGE and skip step 2, or the byte rule's 6a into 6b).
  * Later steps never go back: the next step is max(last step + 1, class
  * entry).
  *
@@ -371,6 +376,7 @@ typedef struct {
     uint32_t rtcm_age_ms;         /**< since the last CRC-valid RTCM frame, UINT32_MAX = never */
     uint64_t rx_bytes;            /**< link bytes received (monotonic) */
     uint64_t discarded;           /**< bytes the framer discarded: in no frame and no line (monotonic; the class's garbage) */
+    uint64_t framer_in;           /**< bytes fed to the framer (monotonic): a discard is garbage only with new ones */
     uint64_t text_lines;          /**< checksum-valid text lines (monotonic) */
     uint8_t stn_state;            /**< hl_stn_state_t, sampled after the transition counters */
     uint32_t rec_enters;          /**< station transitions into RECOVERING (monotonic) */
@@ -426,7 +432,8 @@ typedef struct {
     int64_t answer_ms;            /**< wall time of the last reply (HL_NEVER = none this boot) */
     int64_t unasked_ms;           /**< wall time of the last unasked line (HL_NEVER = none this boot) */
     uint64_t discarded_last;
-    int64_t garbage_ms;           /**< the tick that saw the framer discard bytes last (HL_NEVER = none) */
+    uint64_t framer_in_last;
+    int64_t garbage_ms;           /**< the tick that saw the framer discard arriving bytes last (HL_NEVER = none) */
 
     /* the receiver answers but sends no RTCM */
     bool ep_alive;                /**< it answers: in this episode, or (replies) within HL_ALIVE_MS before it began */

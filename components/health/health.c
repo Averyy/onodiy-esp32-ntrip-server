@@ -784,6 +784,7 @@ static void tick(void)
     in->rtcm_age_ms = s_link_stats.last_rtcm_age_ms;
     in->rx_bytes = s_link_stats.rx_bytes;
     in->discarded = s_link_stats.framing.bytes_discarded;
+    in->framer_in = s_link_stats.framing.bytes_in;
     in->text_lines = s_link_stats.framing.text_lines;
     in->stn_state = (uint8_t)s_st.state;
     in->rec_enters = enters;

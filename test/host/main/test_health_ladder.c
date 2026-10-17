@@ -11,7 +11,9 @@
  * that counts them (or at the time a test gives), and the ladder gets their
  * exact ages, as health reads them with the station's status. Text lines
  * (`lines`) are the receiver's own output, garbage (`bytes`) is what the
- * framer discards; replies (`answers`) are lines too, but no part of the
+ * framer discards as it arrives (a frame the receiver stopped in the middle
+ * of is dropped by a framer reset, with no new byte: `reset_drop`); replies
+ * (`answers`) are lines too, but no part of the
  * stall class. A receiver that answers when asked answers the station's
  * leased steps, its own applies, and the question the station asks once a
  * minute while nothing comes from a receiver that sends no RTCM (none this
@@ -48,6 +50,8 @@ typedef struct {
     int64_t last_rtcm;
     int64_t last_rx;
     uint8_t silence_after;      /* this finished step silences the receiver */
+    uint32_t reset_drop;        /* bytes of a frame the receiver stopped in, dropped by the next resync or link restart
+                                   (steps 1 and 2 reset the framer) */
     uint8_t answers_during;     /* the receiver answers the station's commands while this step runs */
     bool asked;                 /* it answers whenever the station asks (no antenna): leased steps, applies, the question */
     int64_t last_line;          /* when the last text line came, replies included (NEVER = none) */
@@ -252,6 +256,10 @@ static void sim_station(sim_t *w)
             w->lines = false;
             w->bytes = false;
         }
+        if (st <= 2 && w->reset_drop != 0) {
+            w->in.discarded += w->reset_drop;   /* the framer reset drops the frame: no byte arrives */
+            w->reset_drop = 0;
+        }
         if (st == w->apply_after) {
             w->apply_at = w->now + 60 * SEC;
             w->apply_end = w->apply_at + 20 * SEC;
@@ -267,6 +275,7 @@ static void sim_world(sim_t *w)
     if (w->rtcm || w->lines || w->bytes) {
         w->last_rx = w->now;
         w->in.rx_bytes += 120;
+        w->in.framer_in += 120;
     }
     if (w->bytes) {
         w->in.discarded += 120;   /* garbage: in no frame and no line */
@@ -511,6 +520,65 @@ TEST_CASE("ladder: a silent receiver runs 1, 2, 3 and the byte rule reboots the 
     TEST_ASSERT_EQUAL_UINT32(4, s.recoveries);   /* 1, 2, 3 and the reboot */
     TEST_ASSERT_EQUAL_UINT32(1, s.stalls);
     TEST_ASSERT_FALSE(s.power_alert);
+}
+
+TEST_CASE("ladder: a frame the receiver stopped in, dropped by step 1's resync, is no garbage: step 2 runs",
+          "[health_ladder]")
+{
+    /* The receiver hangs in the middle of a frame and sends nothing more. Step 1's resync resets the framer, which
+     * drops the frame's 412 bytes: they came before the stall, so the class stays NO_BYTES and the link restart is
+     * not skipped. */
+    sim_t w;
+    sim_init(&w);
+    w.rescan_finds = false;
+    w.reset_drop = 412;
+    stream_then_silence(&w);
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 7, 10 * MIN));
+    static const uint8_t want[][2] = {
+        { 1, HL_OUT_STARTED }, { 1, HL_OUT_FAILED }, { 2, HL_OUT_STARTED }, { 2, HL_OUT_FAILED },
+        { 3, HL_OUT_STARTED }, { 3, HL_OUT_FAILED }, { 6, HL_OUT_STARTED },
+    };
+    expect_recs(&w, want, 7);
+    TEST_ASSERT_EQUAL_UINT64(412, w.in.discarded);
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);   /* the byte rule: nothing came (6a) */
+    TEST_ASSERT_FALSE(st_of(&w).power_alert);
+
+    /* Garbage that arrives is still garbage: entry at step 3. */
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.bytes = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 1, MIN));
+    TEST_ASSERT_EQUAL_UINT8(3, w.rec[0].code);
+}
+
+TEST_CASE("ladder: a re-stall after step 5 with a dropped frame and no new byte: the byte rule's restart",
+          "[health_ladder]")
+{
+    /* Step 5 brought the RTCM back; within the 60 s that reset the ladder the receiver stops in the middle of a frame
+     * and goes silent, and a framer reset (a session's lease) drops the frame a few seconds later. Nothing arrived:
+     * the byte rule restarts the ESP32 (6a), it does not advise a power cycle (6b). */
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    w.in.reconfigure_refused = true;   /* 4 refused -> 5 */
+    w.fix_step = 5;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 3, 3 * MIN));
+    TEST_ASSERT_EQUAL_UINT8(5, w.rec[2].code);
+    TEST_ASSERT_EQUAL_UINT8(HL_OUT_HEALTHY, w.rec[2].outcome);
+    w.lines = false;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    sim_run(&w, 4 * SEC);
+    w.in.discarded += 412;   /* the framer reset's drop: no byte fed */
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 4, MIN));
+    TEST_ASSERT_EQUAL_UINT8(HL_CODE_REBOOT, w.rec[3].code);
+    TEST_ASSERT_EQUAL_UINT32(1, w.reboots);
+    TEST_ASSERT_FALSE(st_of(&w).power_alert);
 }
 
 TEST_CASE("ladder: the reboot cap blocks 6a: FAILED without the alert, held in NO_RECEIVER", "[health_ladder]")

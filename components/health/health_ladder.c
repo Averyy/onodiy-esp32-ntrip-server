@@ -845,6 +845,7 @@ void hl_tick(hl_t *l, const hl_in_t *in)
         l->lines_last = in->text_lines;
         l->answers_last = in->answers;
         l->discarded_last = in->discarded;
+        l->framer_in_last = in->framer_in;
     } else {
         if (in->text_lines != l->lines_last) {
             l->lines_last = in->text_lines;
@@ -855,11 +856,15 @@ void hl_tick(hl_t *l, const hl_in_t *in)
             l->ep_alive = true;
         }
         if (in->discarded != l->discarded_last) {
-            if (in->discarded > l->discarded_last) {
-                l->garbage_ms = now;   /* a counter that went back (a new framer) is no garbage */
+            /* Not a counter that went back (a new framer), nor a frame a
+             * framer reset dropped with no new byte (the receiver stopped
+             * in it: see the header). */
+            if (in->discarded > l->discarded_last && in->framer_in > l->framer_in_last) {
+                l->garbage_ms = now;
             }
             l->discarded_last = in->discarded;
         }
+        l->framer_in_last = in->framer_in;
     }
     l->line_ms = at_of(now, in->line_age_ms);
     l->answer_ms = at_of(now, in->answer_age_ms);
