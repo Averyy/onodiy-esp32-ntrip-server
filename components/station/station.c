@@ -1478,6 +1478,30 @@ static void job_own_fix(const stn_job_t *job, stn_result_t *r)
     }
 }
 
+/* The question to a receiver that never streamed this boot: the version
+ * query without a lease, only so that its answer (a line like any other)
+ * keeps "the receiver answers" fresh. Logged when the outcome changes. */
+static void job_ask(stn_result_t *r)
+{
+    static int s_last_ok = -1;
+    esp_err_t err = um98x_ctl_query_version(NULL, false, NULL);
+    if (err == ESP_ERR_INVALID_STATE) {
+        r->err = STN_E_STATE;   /* not allowed in the link's mode now: nothing was sent */
+        return;
+    }
+    /* A refusal, or an acknowledgement without the log, is an answer too. */
+    int ok = err == ESP_OK || err == ESP_FAIL || err == ESP_ERR_INVALID_RESPONSE;
+    r->err = ok ? STN_OK : STN_E_TIMEOUT;
+    if (ok != s_last_ok) {
+        if (ok) {
+            ESP_LOGI(TAG, "the receiver answers when asked (no RTCM this boot)");
+        } else {
+            ESP_LOGW(TAG, "no answer to the station's question (%s)", esp_err_to_name(err));
+        }
+        s_last_ok = ok;
+    }
+}
+
 /* Satellite-in-view output for the live view: one command under a short
  * COMMAND lease (RTCM is held back meanwhile; the casters are paused). */
 static void job_sky(const stn_job_t *job, stn_result_t *r)
@@ -2120,6 +2144,9 @@ static void run_job(const stn_job_t *job, stn_result_t *r)
         break;
     case STN_JOB_OWN_FIX:
         job_own_fix(job, r);
+        break;
+    case STN_JOB_ASK:
+        job_ask(r);
         break;
     default:
         r->err = STN_E_STATE;
@@ -3386,6 +3413,7 @@ esp_err_t station_get_status(station_status_t *out)
         out->rx_boot_by = s_rxb_by;
         out->receiver_responding = stn_responding(&s_core, lin.now_ms, rtcm_age, s_line_ms);
     }
+    int64_t line_ms = s_line_ms;
     jerr = s_journal_err;
     journal = s_journal;
     read = s_journal_read;
@@ -3419,6 +3447,12 @@ esp_err_t station_get_status(station_status_t *out)
     }
     out->rtcm_excluded = excluded;
     out->autocfg_off_this_boot = s_autocfg_ram_off;
+    if (line_ms == STN_NEVER) {
+        out->rx_line_age_ms = UINT32_MAX;
+    } else {
+        int64_t age = now_ms() - line_ms;
+        out->rx_line_age_ms = age < 0 ? 0u : age >= (int64_t)UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)age;
+    }
     if (!have) {
         out->sg_test.phase = -1;   /* no comparison without the station */
         out->sg_test.left_s = UINT32_MAX;

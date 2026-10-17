@@ -465,8 +465,9 @@ typedef struct {
     um98x_info_t receiver;           /**< live, or last persisted when unresponsive */
     bool receiver_responding;        /**< the receiver answers (read at the time of the call): it streams (valid RTCM within
                                           10 s), or it sent a checksum-valid line (a reply, a log, NMEA) after its last RTCM
-                                          frame (none this boot: any line); never while no receiver is found. A receiver that
-                                          answers when asked and sends nothing unasked stays answering between questions */
+                                          frame (none this boot: a line within the last 90 s); never while no receiver is
+                                          found. A receiver that never streamed and sends nothing unasked is asked once a
+                                          minute, so one that answers when asked stays answering and one that hung does not */
     bool identity_confirmed;         /**< receiver identity confirmed by this boot's version query */
     uint32_t alerts;                 /**< station_alert_t flags */
     bool profile_applied;            /**< receiver runs the stored profile */
@@ -534,6 +535,8 @@ typedef struct {
     bool receiver_restarting;        /**< it answered "The Board is resetting" within 20 s and its restart banner has not come yet */
     uint64_t rx_answers;             /**< checksum-valid command-layer lines since boot (acks, logs, banners, restarting answers) */
     uint32_t rx_answer_age_ms;       /**< since the last of them, UINT32_MAX = never: "the receiver answers" */
+    uint32_t rx_line_age_ms;         /**< since the last checksum-valid text line of any kind (replies, logs, NMEA),
+                                          UINT32_MAX = none this boot (receiver_responding's evidence) */
 
     /* What the running signal group configures (the last apply session's query this boot). */
     um98x_bands_t rx_bands;          /**< state UNKNOWN until a session asked (um98x_bands.h) */

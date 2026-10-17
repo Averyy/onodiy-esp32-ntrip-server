@@ -109,6 +109,37 @@ static void sim_done(sim_t *w, const stn_result_t *r)
     sim_rearm(w);
 }
 
+/* The question to a receiver that never streamed (STN_JOB_ASK), answered:
+ * its reply is a line like any other. */
+static void ask_answered(sim_t *w)
+{
+    w->in.text_lines++;
+    stn_result_t r;
+    memset(&r, 0, sizeof(r));
+    r.err = STN_OK;
+    sim_done(w, &r);
+}
+
+/* As sim_until_job, the station's questions answered on the way (counted in *asks when given). */
+static stn_job_t sim_until_job_asked(sim_t *w, int max_s, unsigned *asks)
+{
+    for (int i = 0; i <= max_s; i++) {
+        stn_job_t j = sim_next(w);
+        if (j.kind == STN_JOB_ASK) {
+            if (asks != NULL) {
+                (*asks)++;
+            }
+            ask_answered(w);
+        } else if (j.kind != STN_JOB_NONE) {
+            return j;
+        }
+        sim_tick(w);
+    }
+    stn_job_t none;
+    memset(&none, 0, sizeof(none));
+    return none;
+}
+
 static stn_result_t res(stn_err_t err)
 {
     stn_result_t r;
@@ -251,16 +282,25 @@ TEST_CASE("station core: RTCM that differs is drift; no RTCM at all never is", "
     TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_next(&w).kind);
     identity_done(&w, true, true);
     TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    unsigned asks = 0;
     for (int i = 0; i < 300; i++) {
-        TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_next(&w).kind);
+        stn_job_t j = sim_next(&w);
+        if (j.kind == STN_JOB_ASK) {
+            asks++;   /* the station's question: it answers when asked */
+            ask_answered(&w);
+        } else {
+            TEST_ASSERT_EQUAL(STN_JOB_NONE, j.kind);
+        }
         TEST_ASSERT_FALSE(w.s.rtcm_differs);
         sim_tick(&w);
     }
+    TEST_ASSERT_EQUAL_UINT(4, asks);
     TEST_ASSERT_FALSE(w.s.profile_applied);   /* not applied, but nothing differs either */
 
-    /* RTCM flows with a message missing: that differs. */
+    /* RTCM flows with a message missing: that differs (and no question once it flowed). */
     w.rtcm_on = true;
     w.skip = 1097;
+    sim_tick(&w);
     for (int i = 0; i < 70 && !w.s.rtcm_differs; i++) {
         TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_next(&w).kind);
         sim_tick(&w);
@@ -373,7 +413,7 @@ TEST_CASE("station core: with no model ever stored and nothing flowing, one leas
     unsigned leased = 0;
     unsigned queries = 0;
     for (int k = 0; k < 6; k++) {
-        j = sim_until_job(&w, 700);
+        j = sim_until_job_asked(&w, 700, NULL);
         TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
         leased += j.leased ? 1u : 0u;
         queries++;
@@ -486,7 +526,7 @@ TEST_CASE("station core: a stored model is never queried with a lease", "[statio
             boot_lines_only(&w);
         }
         for (int k = 0; k < 4; k++) {
-            stn_job_t j = sim_until_job(&w, 700);
+            stn_job_t j = sim_until_job_asked(&w, 700, NULL);
             TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
             TEST_ASSERT_FALSE(j.leased);
             TEST_ASSERT_FALSE(w.s.paused);
@@ -994,27 +1034,103 @@ TEST_CASE("station core: the receiver answers: it streams, or a line came after 
     /* A line after it (a reply, its NMEA) is, however long ago, until something says otherwise. */
     TEST_ASSERT_TRUE(answers_now(&w, now - 20000, now - 20000 + STN_ANSWER_SLACK_MS + 1));
     TEST_ASSERT_TRUE(answers_now(&w, now - 3 * HOUR_MS, now - 2 * HOUR_MS));
-    /* No RTCM frame this boot: any line this boot. */
-    TEST_ASSERT_TRUE(answers_now(&w, STN_NEVER, now - HOUR_MS));
+    /* No RTCM frame this boot: a line within STN_ANSWER_FRESH_MS (the station asks every STN_ASK_MS). */
+    TEST_ASSERT_TRUE(answers_now(&w, STN_NEVER, now - STN_ANSWER_FRESH_MS));
+    TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, now - STN_ANSWER_FRESH_MS - 1));
+    TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, now - HOUR_MS));
     TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, STN_NEVER));
 }
 
 TEST_CASE("station core: a receiver that answers questions and sends nothing unasked answers steadily", "[station]")
 {
-    /* No antenna: no RTCM this boot, a reply only when the station asks
-     * (its base-mode read every 60 s while surveying, then nothing at all
-     * for an hour). Every second of that it answers: no flicker between
-     * two questions. */
+    /* No antenna: no RTCM this boot, a reply only when asked. The station
+     * asks once a minute while no line comes (STN_JOB_ASK, after its other
+     * jobs): every second of two hours it answers, no flicker between two
+     * questions. */
     sim_t w;
     sim_init(&w, false);
-    boot_streaming(&w, true);
-    int64_t line = w.in.now_ms;   /* the identity query's reply */
+    w.in.autocfg = false;   /* nothing applied: only the questions */
+    boot_lines_only(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
+    w.in.text_lines++;   /* its reply */
+    identity_done(&w, true, true);
+    int64_t line = w.in.now_ms;
+    unsigned asks = 0;
     for (int i = 0; i < 2 * 3600; i++) {
-        if (i < 720 && i % 60 == 59) {
+        stn_job_t j = sim_next(&w);
+        if (j.kind == STN_JOB_ASK) {
+            asks++;
+            TEST_ASSERT_TRUE(w.in.now_ms - line >= STN_ASK_MS);
+            ask_answered(&w);
             line = w.in.now_ms;
+        } else if (j.kind != STN_JOB_NONE) {
+            identity_done(&w, true, true);
         }
         TEST_ASSERT_TRUE_MESSAGE(answers_now(&w, STN_NEVER, line), "answers between two questions");
-        w.in.now_ms += 1000;
+        sim_tick(&w);
+    }
+    TEST_ASSERT_TRUE(asks >= 115 && asks <= 120);
+
+    /* It hangs: the questions go on, unanswered, and it stops answering
+     * once its last answer is STN_ANSWER_FRESH_MS old. */
+    int64_t last = line;
+    unsigned unanswered = 0;
+    for (int i = 0; i < 10 * 60; i++) {
+        stn_job_t j = sim_next(&w);
+        if (j.kind == STN_JOB_ASK) {
+            unanswered++;
+            sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+        } else if (j.kind != STN_JOB_NONE) {
+            sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+        }
+        TEST_ASSERT_EQUAL(w.in.now_ms - last <= STN_ANSWER_FRESH_MS, answers_now(&w, STN_NEVER, last));
+        sim_tick(&w);
+    }
+    TEST_ASSERT_TRUE(unanswered >= 9 && unanswered <= 10);
+}
+
+TEST_CASE("station core: the question only to a receiver that never streamed and sends nothing", "[station]")
+{
+    /* A receiver that sends a line every second (NMEA, no RTCM): never asked. */
+    sim_t w;
+    sim_init(&w, false);
+    w.in.autocfg = false;
+    boot_lines_only(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
+    identity_done(&w, true, true);
+    for (int i = 0; i < 600; i++) {
+        stn_job_t j = sim_next(&w);
+        TEST_ASSERT_NOT_EQUAL(STN_JOB_ASK, j.kind);
+        if (j.kind != STN_JOB_NONE) {
+            identity_done(&w, true, true);
+        }
+        w.in.text_lines++;
+        sim_tick(&w);
+    }
+
+    /* RTCM flowed this boot, then stopped: never asked (the recovery asks it). */
+    sim_init(&w, false);
+    boot_applied(&w);
+    w.rtcm_on = false;
+    for (int i = 0; i < 600; i++) {
+        stn_job_t j = sim_next(&w);
+        TEST_ASSERT_NOT_EQUAL(STN_JOB_ASK, j.kind);
+        if (j.kind != STN_JOB_NONE) {
+            sim_done(&w, &(stn_result_t){ .err = STN_OK });
+        }
+        sim_tick(&w);
+    }
+
+    /* In receiver maintenance: nothing at all, the question neither. */
+    sim_init(&w, false);
+    w.in.autocfg = false;
+    boot_lines_only(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
+    identity_done(&w, true, true);
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 900, false, w.in.now_ms));
+    for (int i = 0; i < 800; i++) {
+        TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_next(&w).kind);
+        sim_tick(&w);
     }
 }
 

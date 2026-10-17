@@ -442,16 +442,32 @@ void stn_init(stn_t *s, bool journal_open)
     s->rtcm_change_ms = STN_NEVER;
     s->fix_due_ms = STN_NEVER;
     s->fix_sample_ms = STN_NEVER;
+    s->line_change_ms = STN_NEVER;
+    s->ask_ms = STN_NEVER;
     um98x_fixchk_init(&s->fix);
 }
 
-/* The time of the latest valid RTCM frame, as far as the samples show it. */
+/* The time of the latest valid RTCM frame, and of the latest text line, as
+ * far as the samples show them. */
 static void track_rtcm(stn_t *s, const stn_in_t *in)
 {
     if (in->rtcm_frames != s->rtcm_seen) {
         s->rtcm_seen = in->rtcm_frames;
         s->rtcm_change_ms = in->now_ms;
     }
+    if (in->text_lines != s->lines_seen) {
+        s->lines_seen = in->text_lines;
+        s->line_change_ms = in->now_ms;
+    }
+}
+
+/* The question to a receiver that sent no RTCM frame this boot (see the
+ * header): no line for STN_ASK_MS, and none asked for as long. */
+static bool ask_due(const stn_t *s, const stn_in_t *in)
+{
+    int64_t now = in->now_ms;
+    return in->rtcm_frames == 0 && (s->line_change_ms == STN_NEVER || now - s->line_change_ms >= STN_ASK_MS) &&
+           (s->ask_ms == STN_NEVER || now - s->ask_ms >= STN_ASK_MS);
 }
 
 /* A valid RTCM frame arrived in the last STN_RTCM_QUIET_MS. */
@@ -749,6 +765,10 @@ static stn_job_t next_streaming(stn_t *s, const stn_in_t *in)
     stn_job_t fix;
     if (fix_job(s, in, &fix)) {
         return fix;
+    }
+    if (ask_due(s, in)) {
+        s->ask_ms = now;
+        return make_job(STN_JOB_ASK);
     }
     return none;
 }
@@ -1476,6 +1496,7 @@ void stn_done(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     case STN_JOB_OWN_FIX:
         done_own_fix(s, r, in);
         break;
+    case STN_JOB_ASK:   /* its answer is a line like any other (stn_responding) */
     case STN_JOB_PKG_CHECK:
     default:
         break;
@@ -1851,8 +1872,11 @@ bool stn_responding(const stn_t *s, int64_t now_ms, uint32_t rtcm_age_ms, int64_
     if (line_ms == STN_NEVER || (s->no_rx_ms != STN_NEVER && line_ms <= s->no_rx_ms)) {
         return false;
     }
-    /* Its last line came after its last RTCM frame (none this boot: any line). */
-    return rtcm_age_ms == UINT32_MAX || line_ms - (now_ms - (int64_t)rtcm_age_ms) > STN_ANSWER_SLACK_MS;
+    if (rtcm_age_ms == UINT32_MAX) {
+        return now_ms - line_ms <= STN_ANSWER_FRESH_MS;   /* asked every STN_ASK_MS: its answer is this fresh */
+    }
+    /* Its last line came after its last RTCM frame. */
+    return line_ms - (now_ms - (int64_t)rtcm_age_ms) > STN_ANSWER_SLACK_MS;
 }
 
 /* ---- receiver maintenance --------------------------------------------------- */
