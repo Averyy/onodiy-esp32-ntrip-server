@@ -636,15 +636,26 @@ function positionChip(g) {
 }
 
 /** Whether the position casters get (1005) matches the locked one, in a line ('' while not locked); first whether the fixed
- * position is where the receiver is. */
+ * position is where the receiver is, and what fixes it. */
 function matchLine(g) {
   const arp = g.arp || {};
   const fc = g.fixed_check || {};
-  if (fc.state === 'far') return h('span', { class: 't-warn' }, fixedFarSentence(fc) + ' Check the numbers, or use Survey-in.');
+  if (fc.state === 'far') {
+    return h('span', { class: 't-warn' }, fixedFarSentence(fc) + (fc.sea_level ? ' Enter the height above the ellipsoid.' :
+      ' Check the numbers, or use Survey-in.'));
+  }
   if (!(g.position || {}).locked) return '';
   if (!arp.valid || arp.offset_m === null || arp.offset_m === undefined) return h('span', { class: 'muted' }, '1005 not received yet.');
   return arp.offset_m > 0.005 ? h('span', { class: 't-warn' }, '1005 is ' + fmtDist(arp.offset_m) + ' from the locked position.') :
     h('span', { class: 't-ok' }, '1005 matches the locked position.');
+}
+
+/** Whether "Use the current position" has a position to copy: a 1005 that is not the locked position (a fixed base sends
+ * the position it was given, so copying that would repair nothing; while surveying it is the survey's). */
+function arpCopyable(g) {
+  const arp = g.arp || {};
+  const pos = g.position || {};
+  return !!arp.valid && !(pos.locked && typeof arp.offset_m === 'number' && arp.offset_m <= 0.005);
 }
 
 /** A group of the profile form: its title, then kids. */
@@ -719,15 +730,18 @@ function receiverForms(g, latest, done, onCompare) {
     antenna_setup_id: field('Antenna setup ID', antSetup),
   };
 
-  /* Position: only the chosen mode's fields. */
+  /* Position: only the chosen mode's fields. The 1005 to copy (the latest one), only when it is not the position already
+   * set (arpCopyable). */
+  const useArp = h('div', null, btn('Use the current position', () => {
+    const arp = latest().arp || {};
+    if (!arp.valid) return;
+    lat.value = arp.lat_deg.toFixed(9);
+    lon.value = arp.lon_deg.toFixed(9);
+    hgt.value = arp.height_m.toFixed(4);
+    posSync();
+  }, 'small'));
   const fixedBox = h('div', { class: 'stack' }, h('div', { class: 'cols c3' }, F.lat_deg.el, F.lon_deg.el, F.height_m.el),
-    h('p', { class: 'hint' }, 'ITRF coordinates of the antenna\'s exact spot, for example from a PPP service.'),
-    g.arp && g.arp.valid ? h('div', null, btn('Use the current position', () => {
-      lat.value = g.arp.lat_deg.toFixed(9);
-      lon.value = g.arp.lon_deg.toFixed(9);
-      hgt.value = g.arp.height_m.toFixed(4);
-      posSync();
-    }, 'small')) : null);
+    h('p', { class: 'hint' }, 'ITRF coordinates of the antenna\'s exact spot, for example from a PPP service.'), useArp);
   const posErr = errBox();
   /* Each card saves its own part, its button shown once that part changed (the main one: the position's while shown). */
   const posSave = btn('Save position', () => save('position', posSave, posErr), 'primary', { hidden: true });
@@ -1009,6 +1023,7 @@ function receiverForms(g, latest, done, onCompare) {
     }
     patch(match, matchLine(gg));
     match.hidden = !match.textContent;
+    useArp.hidden = !arpCopyable(gg);
     patch(seeLine, castersSee(gg));
     seeLine.hidden = !seeLine.textContent;
   };

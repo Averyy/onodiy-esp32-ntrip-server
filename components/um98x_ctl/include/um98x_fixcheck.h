@@ -54,12 +54,41 @@
  * the separation. PROVISIONAL, to be confirmed on hardware: that BASEPOSA
  * reports the receiver's own solution while it works as a fixed base.
  *
+ * Height above sea level typed in (um98x_fix_sea_level): a common mistake,
+ * since maps and survey marks give that height. It puts the fixed
+ * height off by the separation, which is under 50 m in most places, so the
+ * limit alone misses it. The receiver prints its own height above sea
+ * level, so the mistake shows directly: the fixed height is about that
+ * height (within 5 m) while it is more than 10 m from the receiver's
+ * ellipsoidal height, and the horizontal distance is within the limit (the
+ * height alone is wrong). Reading the sea-level height as printed, not the
+ * sum, leaves the separation's sign out of it.
+ *   5 m: twice the receiver's 2.5 m vertical RMS. The decision takes the
+ *   medians of three solutions 20 s apart: one stray solution cannot move
+ *   them, but solutions that close share most of their error (the
+ *   atmosphere and multipath change slowly), so the median scatters about
+ *   as much as one solution, and 2 RMS covers about 95 % of them. The
+ *   difference between the receiver's geoid model and the one behind the
+ *   typed height comes on top; a wider band would take more of the other
+ *   wrong heights for this one.
+ *   10 m: four times the vertical RMS, and the largest height deviation a
+ *   counted solution may report: a right height reads that far off only
+ *   with a solution that is itself unsure. Where the separation is about
+ *   10 m or less, a typed sea-level height is too close to the right one
+ *   to tell them apart: nothing is said there (the 50 m limit still holds).
+ * Once raised, it holds while the medians stay within 10 m of the
+ * receiver's sea-level height and more than 5 m from its ellipsoidal
+ * height (each 2 RMS looser), so an hourly check does not flip it on the
+ * receiver's scatter; it clears with a run outside that, or at once when
+ * the fixed position changes.
+ *
  * Verdict (um98x_fixchk_feed): three usable samples in a row that agree.
  * Far: the horizontal or the vertical distance beyond its limit in all
- * three. Near: both within in all three; once far was decided, both within
- * 40 m (no flapping around the limit). Samples that disagree decide
- * nothing. The distances reported are the medians of the three, per
- * component.
+ * three. Near: both within in all three; once a warning was decided (far
+ * or sea level), both within 40 m (no flapping around the limit). Samples
+ * that disagree decide nothing. The distances reported are the medians of
+ * the three, per component. A run that decided far or near is a sea-level
+ * height instead when its medians say so (above).
  */
 #pragma once
 
@@ -78,6 +107,10 @@ extern "C" {
 #define UM98X_FIX_MAX_SD_V_M   10.0    /**< height standard deviation cap */
 #define UM98X_FIX_MIN_SATS     6u      /**< satellites used, at least */
 #define UM98X_FIX_MAX_SEP_M    150.0   /**< plausible geoid separation (the geoid stays within about 110 m of the ellipsoid) */
+#define UM98X_FIX_SEA_BAND_M   5.0     /**< a sea-level height: the fixed height within this of the receiver's sea-level height */
+#define UM98X_FIX_SEA_FLOOR_M  10.0    /**< ... and more than this from its ellipsoidal height */
+#define UM98X_FIX_SEA_HOLD_BAND_M  10.0   /**< once raised: it holds within this of the sea-level height */
+#define UM98X_FIX_SEA_HOLD_FLOOR_M 5.0    /**< ... and beyond this from the ellipsoidal height */
 
 /** The receiver's position logs. */
 #define UM98X_CMD_BASEPOS "BASEPOSA"
@@ -124,6 +157,7 @@ typedef struct {
     double horizontal_m;       /**< >= 0 */
     double up_m;               /**< fixed height minus the receiver's: > 0 the fixed position is above it */
     double distance_m;         /**< 3-D */
+    double up_msl_m;           /**< fixed height minus the receiver's height above sea level (as printed) */
 } um98x_fix_offset_t;
 
 /**
@@ -140,10 +174,18 @@ bool um98x_fix_beyond(const um98x_fix_offset_t *o, double limit_m);
 /** Off by its height alone: the horizontal distance within UM98X_FIX_LIMIT_M (the warning names the height). */
 bool um98x_fix_height_only(const um98x_fix_offset_t *o);
 
+/**
+ * The fixed height is the receiver's height above sea level, not its
+ * ellipsoidal height (see above); held: a sea-level verdict stands (the
+ * looser hold band and floor).
+ */
+bool um98x_fix_sea_level(const um98x_fix_offset_t *o, bool held);
+
 typedef enum {
     UM98X_FIX_NONE = 0,        /**< no verdict */
     UM98X_FIX_NEAR,            /**< within the limits */
     UM98X_FIX_FAR,             /**< beyond them */
+    UM98X_FIX_SEA_LEVEL,       /**< the fixed height is a height above sea level (um98x_fix_sea_level) */
 } um98x_fix_verdict_t;
 
 typedef struct {

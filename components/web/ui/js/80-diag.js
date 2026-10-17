@@ -925,8 +925,9 @@ function journalDetail(e) {
       /* a: the event, then the fixed height minus the receiver's (m); b: the horizontal distance (m) */
       const ev = a & 0xff, up = a >> 8;
       if (ev === 1) return (b <= 50 ? 'Height ' + metresText(up) : metresText(Math.hypot(b, up))) + ' off';
-      if (ev === 2) return 'Within 50' + NB + 'm again';
+      if (ev === 2) return 'Looks right again';
       if (ev === 3) return 'Changed';
+      if (ev === 4) return 'Sea-level height, ' + metresText(up) + ' off';
       return 'event ' + ev;
     }
     case 'live_view': {

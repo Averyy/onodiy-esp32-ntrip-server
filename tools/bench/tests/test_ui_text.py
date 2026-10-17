@@ -92,6 +92,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  stepSaid: a => { const st = stationState(a[1], true); return stepSaid(a[0], st, healthItems(a[1].alerts || [], st).state); },\n' +
   '  nextAttempt: a => nextAttemptRow(a[0], stationState(a[1], true)),\n' +
   '  posWords: a => positionWords(a[0], a[1], a[2]), posChip: g => positionChip(g), fixPending: a => fixPendingText(a[0], a[1], a[2]),\n' +
+  '  arpCopy: g => arpCopyable(g),\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
 process.stdout.write(JSON.stringify(out));
@@ -1633,8 +1634,44 @@ def test_fixed_position_check_in_history():
                   ("journalDetail", {"kind": "fixed_check", "a": (-82 << 8) | 1, "b": 3}),
                   ("journalDetail", {"kind": "fixed_check", "a": (1 << 8) | 2, "b": 2}),
                   ("journalDetail", {"kind": "fixed_check", "a": 3, "b": 0}),
+                  ("journalDetail", {"kind": "fixed_check", "a": (34 << 8) | 4, "b": 2}),
                   ("evFilter", None)])
-    # Short enough for a phone's row: how far off (the warning says which way).
-    assert out[:4] == ["118\u00a0m off", "Height 82\u00a0m off", "Within 50\u00a0m again", "Changed"]
-    receiver = [f for f in out[4] if f[0] == "receiver"][0]
+    # Short enough for a phone's row: how far off (the warning says which way); cleared, whichever warning it was.
+    assert out[:5] == ["118\u00a0m off", "Height 82\u00a0m off", "Looks right again", "Changed",
+                       "Sea-level height, 34\u00a0m off"]
+    receiver = [f for f in out[5] if f[0] == "receiver"][0]
     assert "fixed_check" in receiver[2]
+
+
+SEA_LEVEL = {"id": "fixed_far", "source": "station", "horizontal_m": 2, "vertical_m": 34, "distance_m": 34,
+             "height_only": True, "sea_level": True}
+
+
+def test_fixed_height_typed_as_height_above_sea_level_says_so_and_what_to_enter():
+    """A sea-level height is the same warning (amber, Receiver settings) in its own words: what it looks like and the height
+    the field wants, without the metres (the Receiver page's Details row has them)."""
+    out = heroes(status(alerts=[SEA_LEVEL]),
+                 status(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "auth_failed", reason="auth")],
+                        alerts=[SEA_LEVEL]))
+    assert (out[0]["key"], out[0]["title"], out[0]["tone"]) == ("fixed_far", "Fixed position looks wrong", "warn")
+    assert out[0]["line"] == ("The fixed height looks like a height above sea level. "
+                              "Enter the height above the ellipsoid in Receiver settings.")
+    assert out[0]["actions"] == ["Receiver settings"] and out[0]["alert"] == "fixed_far"
+    assert out[1]["key"] == "casters_down" and out[1]["alsoText"] == [
+        "Fixed position looks wrong. The fixed height looks like a height above sea level. "
+        "Enter the height above the ellipsoid in Receiver settings."]
+    chips = run_ui([("rxChip", status(alerts=[SEA_LEVEL]))])
+    assert chips == [["Position looks wrong", "warn"]]
+
+
+def test_use_the_current_position_only_when_it_copies_another_position():
+    """A fixed base sends the position it was given in every 1005: copying that repairs nothing, so the button is there only
+    for a 1005 that is not the locked position (a survey's, or the receiver's own while someone else configures it)."""
+    arp = {"valid": True, "lat_deg": 45.1, "lon_deg": -75.1, "height_m": 85.1}
+    out = run_ui([("arpCopy", {"position": {"locked": True}, "arp": {**arp, "offset_m": 0.0021}}),
+                  ("arpCopy", {"position": {"locked": True}, "arp": {**arp, "offset_m": 0.0}}),
+                  ("arpCopy", {"position": {"locked": False}, "arp": {**arp, "offset_m": None}}),
+                  ("arpCopy", {"position": {"locked": True}, "arp": {**arp, "offset_m": 3.2}}),
+                  ("arpCopy", {"position": {"locked": False}, "arp": {"valid": False}}),
+                  ("arpCopy", {})])
+    assert out == [False, False, True, True, False, False]
