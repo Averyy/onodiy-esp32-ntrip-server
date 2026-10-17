@@ -782,13 +782,14 @@ reads it every tick, a step already running completes).
 then on.
 
 The UI's Receiver settings show `autocfg` and `recovery` as one choice,
-"Receiver management": "The station" (`true`, `full`), "The station, but
-never restart itself" (`true`, `no_reboot`), "Me (alerts only)" (`false`,
-`alerts_only`); any other pair shows as "Custom" with the nearest choice
-offered. The Status page (with a Change link to that card) and Logs show it
-as "Receiver management" from the station's side: "The station", "The
-station, no restarts", "You (alerts only)" (Logs: "Paused" while the
-station holds the recovery). A
+"Receiver setup": "Automatic" (`true`, `full`; its box "Also restart the
+station if that doesn't help" cleared: `true`, `no_reboot`, named
+"Automatic, no station restarts") or "Manual" (`false`, `alerts_only`);
+any other pair shows as "Custom" with the nearest choice offered. Other
+pages name it the same way (Logs: "Paused" while the station holds the
+recovery). With `autocfg` off (outside the first-apply hold) Receiver
+settings shows no signal-group comparison, unless one runs or waits for a
+choice. A
 save sends only the members that change, one per request since they are
 stored one after the other: `recovery` first when `autocfg` goes off, else
 `autocfg` first, so a refusal halfway never leaves automatic recovery on

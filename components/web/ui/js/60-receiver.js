@@ -7,10 +7,11 @@
  * the checks, the map on request, Lock or Survey again), then the signals
  * (65-signals.js) with the sky on request (66-live.js).
  * Receiver settings (#/receiver/settings): the base position, the receiver
- * profile (signals, corrections, advanced), receiver management (who
- * configures the receiver and what happens if corrections stop) and the
- * comparison of two signal groups. What the receiver read back and what it
- * publishes are on Logs (80-diag.js). Receiver maintenance (hands
+ * profile (signals, correction messages, antenna model, advanced), receiver
+ * setup (automatic or manual: how the receiver gets its settings and what
+ * happens if corrections stop) and the comparison of two signal groups (not
+ * with manual setup, which cannot start one). What the receiver read back
+ * and what it publishes are on Logs (80-diag.js). Receiver maintenance (hands
  * off) is in Settings, next to the receiver update (70-updates.js).
  * Field rules mirror PUT /api/gnss/profile; the station's own validation
  * has the last word.
@@ -29,12 +30,14 @@ const RTCM_NAMES = {
 const EPHEMERIS_MSGS = [1019, 1020, 1042, 1045, 1046];
 const ONOCOY_RTCM = [1005, 1033, 1077, 1087, 1097, 1117, 1127, 1230];
 const BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+/* The profile's default link speed (um98x_profile.h). */
+const DEFAULT_BAUD = 115200;
 const IGS_ANTENNAS = 'https://files.igs.org/pub/station/general/rcvr_ant.tab';
 const ONOCOY_INSTALL = 'https://docs.onocoy.com/documentation/3.-become-a-miner/2.-install-your-station';
 
 function rtcmName(n) {
   if (RTCM_NAMES[n]) return RTCM_NAMES[n];
-  if (n >= 1101 && n <= 1107) return 'SBAS observations (not sent to casters)';
+  if (n >= 1101 && n <= 1107) return 'SBAS observations (not sent to servers)';
   return '';
 }
 
@@ -69,7 +72,7 @@ function positionActions(done) {
   const resurveyBtn = btn('Survey again', async () => {
     const ok = await dialog({ title: 'Survey the position again?', ok: 'Survey again', okKind: 'danger solid',
       body: [h('p', null, 'The station forgets the locked position and the receiver surveys again.'),
-        msg('warn', 'The position sent to casters changes. Onocoy may validate the station again.')],
+        msg('warn', 'The position sent to servers changes. Onocoy may validate the station again.')],
       check: 'I understand that the position changes.' });
     if (!ok) return;
     const r = await act(resurveyBtn, () => api('DELETE', '/api/gnss/position/lock'), out);
@@ -251,7 +254,7 @@ function fixPendingText(state, maint, unchecked) {
  * yet; null while not locked (a survey sends the position it is at, the rows above). */
 function streamRow(g) {
   const arp = g.arp || {};
-  const label = 'Sent to casters';
+  const label = 'Sent to servers';
   if (!arp.valid) return [label, h('span', { class: 'muted' }, 'Not received yet')];
   if (typeof arp.offset_m !== 'number') return null;
   return [label, arp.offset_m > 0.005 ? h('span', { class: 't-warn' }, fmtDist(arp.offset_m) + ' from this position') : 'This position'];
@@ -282,15 +285,11 @@ function positionRows(g) {
   ]);
 }
 
-/* ---- Receiver management ----------------------------------- */
+/* ---- Receiver setup ----------------------------------------------------- */
 
-/* Receiver management: one choice over gnss/autocfg and gnss/recovery. [autocfg, recovery, name (L.recovery's, as every
- * page names it), what it does]. */
-const MANAGE = {
-  station: [true, 'full', L.recovery.full + ' (recommended)', 'Configures the receiver and fixes stalls, restarting itself as a last resort.'],
-  no_restart: [true, 'no_reboot', L.recovery.no_reboot, 'The same, but never restarts the station.'],
-  me: [false, 'alerts_only', L.recovery.alerts_only, 'Configures nothing on its own; Status says when corrections stop.'],
-};
+/* Receiver setup: Automatic (with or without the station's restart) or Manual, one choice over gnss/autocfg and
+ * gnss/recovery: [autocfg, recovery]; each named as L.recovery names it (Logs too). */
+const MANAGE = { auto: [true, 'full'], no_restart: [true, 'no_reboot'], manual: [false, 'alerts_only'] };
 
 /** The choice that is these two settings, or null (another combination: Custom). */
 function manageKey(autocfg, recovery) {
@@ -299,44 +298,65 @@ function manageKey(autocfg, recovery) {
 
 /** Another combination: what it does, and the choice nearest to it [text, key]. */
 function manageCustom(autocfg, recovery) {
-  if (autocfg) return ['The station configures the receiver but does nothing if corrections stop.', 'station'];
-  return ['You configure the receiver, but if corrections stop the station still resets it' +
-    (recovery === 'no_reboot' ? '.' : ' and may restart itself.'), 'me'];
+  if (autocfg) return ['The receiver is set up automatically, but nothing is done if corrections stop.', 'auto'];
+  return ['You set up the receiver, but if corrections stop it is still reconnected and restarted' +
+    (recovery === 'no_reboot' ? '.' : ', and the station may restart.'), 'manual'];
 }
 
-/** Receiver management. Returns {nodes, update(g), dirty()}. */
-function manageCtl() {
+/**
+ * Receiver setup: Automatic (recommended), with "Also restart the station"
+ * under it while it is chosen, or Manual. onSaved: the settings changed (the
+ * page reads them again). Returns {nodes, update(g), dirty()}.
+ */
+function manageCtl(onSaved) {
   const out = errBox();
   let stored = null, autocfg = true, recovery = 'full', held = false, fixKey = null;
   const name = k => L.recovery[MANAGE[k][1]];
-  /* The restart limits, under the first choice while it is the one chosen. */
-  const plan = h('small', { class: 'hint' }, 'At most one restart an hour and 3 in 24 hours.');
-  const choice = radios('Who looks after the receiver', 'manage', Object.keys(MANAGE).map(k => [k, h('span', { class: 'opt' },
-    h('span', null, MANAGE[k][2]), h('small', { class: 'hint' }, MANAGE[k][3]), k === 'station' ? plan : null)]), null);
-  choice.el.querySelector('.choices').classList.add('stacked');
+  const restart = checkbox('Also restart the station if that doesn\'t help', true,
+    'Only if the receiver stops answering; at most once an hour and 3 times in 24 hours.');
+  restart.el.classList.add('sub-check');
+  const choice = radios('Receiver setup', 'manage', [
+    ['auto', h('span', { class: 'opt' }, h('span', null, name('auto') + ' (recommended)'), h('small', { class: 'hint' },
+      'Sets up the receiver with the profile on this page and keeps it so. If corrections stop, it reconnects, sends the ' +
+      'setup again, then restarts the receiver.'))],
+    ['manual', h('span', { class: 'opt' }, h('span', null, name('manual')), h('small', { class: 'hint' },
+      'You set up the receiver yourself (e.g. from a PC); its settings never change on their own. A profile you save here ' +
+      'is sent once. Status alerts you if corrections stop.'))]], null);
+  const box = choice.el.querySelector('.choices');
+  box.classList.add('stacked');
   choice.el.querySelector('legend').classList.add('sr-only');
+  /* The restart box right under Automatic (Manual moves after it). */
+  box.append(restart.el, box.children[1]);
   const customText = h('span');
   const fixBtn = btn('', () => saveAs(fixKey, fixBtn), 'small');
   const custom = h('div', { class: 'msg warn', hidden: true }, h('strong', null, 'Custom: '), customText,
     h('div', { class: 'form-actions' }, fixBtn));
-  const save = btn('Save', () => saveAs(choice.value(), save), 'primary');
-  const dirty = () => choice.value() !== null && choice.value() !== stored;
+  /* The choice on the card: Automatic with or without the restart, Manual, or null (nothing chosen: Custom). */
+  const key = () => (choice.value() === 'auto' ? (restart.input.checked ? 'auto' : 'no_restart') : choice.value());
+  const save = btn('Save', () => saveAs(key(), save), 'primary');
+  const dirty = () => key() !== null && key() !== stored;
   const sync = () => {
     save.hidden = !dirty();
-    plan.hidden = choice.value() !== 'station';
+    restart.el.hidden = choice.value() !== 'auto';
   };
   choice.onchange(sync);
+  restart.input.addEventListener('change', sync);
+  /* The card as the settings are (k: their choice, null for Custom). */
+  const show = k => {
+    choice.set(k === 'no_restart' ? 'auto' : k);
+    restart.input.checked = k ? k !== 'no_restart' : recovery !== 'no_reboot';
+  };
   async function saveAs(k, b) {
     if (!k) return;
     const body = {};
     if (MANAGE[k][0] !== autocfg) body.autocfg = MANAGE[k][0];
     if (MANAGE[k][1] !== recovery) body.recovery = MANAGE[k][1];
-    /* Automatic configuration on ends a held first configuration: the station configures the receiver at once. */
+    /* Automatic setup ends a held first configuration: the receiver is configured at once. */
     if (body.autocfg && held && !(await dialog({ title: 'Configure the receiver now?', ok: 'Configure',
-      body: h('p', null, 'The station configures the receiver with the profile. Corrections pause for a few seconds.') }))) return;
+      body: h('p', null, 'Automatic setup sends the profile to the receiver now. Corrections pause for a few seconds.') }))) return;
     /* One setting a request, in the order that never leaves automatic recovery on for a receiver the station does not
-     * configure (the station stores them one after the other): recovery first when automatic configuration goes off,
-     * else automatic configuration first. A refusal halfway leaves a safe pair (Custom says which). */
+     * configure (the station stores them one after the other): recovery first when automatic setup goes off, else
+     * automatic setup first. A refusal halfway leaves a safe pair (Custom says which). */
     const parts = ['autocfg', 'recovery'].filter(m => m in body).map(m => ({ [m]: body[m] }));
     if (body.autocfg === false) parts.reverse();
     for (const part of parts) {
@@ -345,21 +365,22 @@ function manageCtl() {
     autocfg = MANAGE[k][0];
     recovery = MANAGE[k][1];
     stored = k;
-    choice.set(k);
+    show(k);
     custom.hidden = true;
     sync();
     toast('Saved: ' + name(k) + '.', 'ok');
+    if (onSaved) onSaved();
   }
   return {
-    nodes: [cardHead('Receiver management'), h('p', { class: 'muted small' }, 'Who configures the receiver, and what happens if corrections stop.'),
-      custom, choice.el, out, h('div', { class: 'form-actions' }, save)],
+    nodes: [cardHead('Receiver setup'), h('p', { class: 'muted small' }, 'How the receiver gets its settings, and what happens if ' +
+      'corrections stop.'), custom, choice.el, out, h('div', { class: 'form-actions' }, save)],
     update(g) {
       held = !!g.first_apply_held;
       autocfg = !!g.autocfg;
       recovery = g.recovery || 'full';
       const was = dirty();
       stored = manageKey(autocfg, recovery);
-      if (!was) choice.set(stored);
+      if (!was) show(stored);
       const c = stored ? null : manageCustom(autocfg, recovery);
       custom.hidden = !c;
       if (c) {
@@ -401,7 +422,7 @@ function previewSummary(d) {
 
 /**
  * The first configuration worked (the receiver took it: profileTaken): turn
- * automatic configuration and full recovery on when the user ticked it with
+ * automatic setup (with the station's restart) on when the user ticked it with
  * the confirmation. g: GET /api/gnss. Resolves true when it did.
  */
 async function finishHeld(g) {
@@ -413,14 +434,14 @@ async function finishHeld(g) {
     store.set(HELD_AUTO_KEY, true);   /* tried again on the next look */
     throw e;
   }
-  toast('The receiver is configured. Automatic configuration and recovery are on.', 'ok');
+  toast('The receiver is configured. Automatic setup is on.', 'ok');
   return true;
 }
 
 /**
  * The receiver's first configuration, held until the user confirms it (a
  * build that holds it): how many commands it would send (Logs lists
- * them), the choice of automatic configuration afterwards, "Configure the
+ * them), the choice of automatic setup afterwards, "Configure the
  * receiver now" and "Not now". The Receiver page and the setup wizard show it alike, so its
  * words name no place on either. opts.onLater: "Not now"; opts.onApplied:
  * the apply was accepted. Returns {el, load()}.
@@ -430,7 +451,7 @@ function heldPanel(opts) {
   const status = h('div', { hidden: true });
   const sum = h('p', { class: 'muted small' }, 'Reading the commands…');
   const auto = checkbox('Afterwards, keep it configured and fix problems automatically (recommended)', true,
-    'Turns on automatic configuration and automatic recovery once this has worked.');
+    'Turns on automatic receiver setup once this has worked.');
   let preview = null;
   let watching = false;
   const load = async () => {
@@ -467,17 +488,17 @@ function heldPanel(opts) {
         continue;
       }
       if (profileTaken(g) && !g.first_apply_held) {
-        show('ok', 'The receiver is configured.' + (store.get(HELD_AUTO_KEY, null) ? ' Turning automatic configuration on…' : ''));
+        show('ok', 'The receiver is configured.' + (store.get(HELD_AUTO_KEY, null) ? ' Turning automatic setup on…' : ''));
         try {
           await finishHeld(g);
         } catch (e) {
-          show('warn', 'The receiver is configured, but automatic configuration was not turned on: ' + errText(e));
+          show('warn', 'The receiver is configured, but automatic setup was not turned on: ' + errText(e));
         }
         break;
       }
       if (g.state === 'configuring') seen = true;
       if (g.config_failed && (!failedBefore || (seen && g.state !== 'configuring'))) {
-        /* Held: automatic configuration is off, so nothing retries it but this button. */
+        /* Held: automatic setup is off, so nothing retries it but this button. */
         show('bad', 'The configuration failed and the station does not retry on its own. The Receiver page says why; ' +
           'then press Configure the receiver now.');
         break;
@@ -491,8 +512,8 @@ function heldPanel(opts) {
     if (!preview) await load();   /* the card's line says how many commands (not said again here) */
     const ok = await dialog({ title: 'Configure the receiver now?', ok: 'Configure',
       body: [h('p', null, 'The station configures the receiver and saves the settings in it. Corrections pause for a few seconds.'),
-        h('p', { class: 'muted small' }, auto.input.checked ? 'Afterwards, automatic configuration and recovery turn on.' :
-          'Afterwards, the station changes nothing on the receiver by itself.')] });
+        h('p', { class: 'muted small' }, auto.input.checked ? 'Afterwards, automatic setup turns on.' :
+          'Afterwards, nothing changes on the receiver on its own (manual setup).')] });
     if (!ok) return;
     let failedBefore = false;
     try {
@@ -523,12 +544,12 @@ function heldPanel(opts) {
 
 /* ---- Position and receiver profile ------------------------------------------------ */
 
-/* The user configures the receiver (automatic configuration off, not the held first configuration): a saved profile is sent once. */
+/* Manual receiver setup (automatic setup off, not the held first configuration): a saved profile is sent once. */
 function manageOwn(g) {
   return !g.autocfg && !g.first_apply_held;
 }
 
-/* A card's Save button: "Save and apply" while the user manages the receiver, as a changed profile reaches it all the same. */
+/* A card's Save button: "Save and apply" with manual setup, as a changed profile reaches the receiver all the same. */
 function saveLabel(g, what) {
   return manageOwn(g) ? 'Save and apply' : 'Save ' + what;
 }
@@ -539,22 +560,22 @@ function profileTaken(g) {
   return !!g.profile_applied || (!!g.profile_acknowledged && !g.rtcm_differs);
 }
 
-/** The profile's state for its chip: [text, tone]; grey while the user manages the receiver (as the Receiver page says), and
+/** The profile's state for its chip: [text, tone]; grey with manual setup (as the Receiver page says), and
  * while the receiver took it but no window checked it yet. Amber only when the receiver does not hold it. */
 function profileChip(g) {
   if (g.state === 'configuring') return ['Applying', 'info'];
   if (g.config_failed) return ['Failed', 'bad'];
-  if (manageOwn(g)) return ['Managed by you', ''];
+  if (manageOwn(g)) return ['Manual setup', ''];
   if (profileTaken(g) && !g.first_apply_held) return [APPLIED, g.profile_applied ? 'ok' : ''];
   if (gnssUnchecked(g)) return [NOT_CHECKED_CHIP, ''];
   return ['Not applied', 'warn'];
 }
 
-/** "Casters see now: ..." under the antenna fields (GET /api/gnss rtcm1033), or ''. */
+/** "Servers see now: ..." under the antenna model (GET /api/gnss rtcm1033), or ''. */
 function castersSee(g) {
   const d = g.rtcm1033 || {};
   if (!d.valid) return '';
-  return d.antenna ? ['Casters see now: ', h('span', { class: 'ant' }, d.antenna)] : 'Casters see now: no antenna name.';
+  return d.antenna ? ['Servers see now: ', h('span', { class: 'ant' }, d.antenna)] : 'Servers see now: no antenna name.';
 }
 
 /** The base position's chip in Receiver settings: [text, tone] (delivering false: no corrections arrive, so a survey is
@@ -601,16 +622,18 @@ function arpCopyable(g) {
   return !!arp.valid && !(pos.locked && typeof arp.offset_m === 'number' && arp.offset_m <= 0.005);
 }
 
-/** A group of the profile form: its title, then kids. */
-function pgroup(title, ...kids) {
-  return h('section', { class: 'pgroup stack' }, h('h3', null, title), kids);
+/** A group of the profile form: its title (with chip at its right, when given), then kids. */
+function pgroup(title, chip, ...kids) {
+  return h('section', { class: 'pgroup stack' }, chip ? h('div', { class: 'card-head' }, h('h3', null, title), chip) : h('h3', null, title),
+    kids);
 }
 
-/** A line with an Edit button at its right that shows box under it (and hides it again). */
-function editRow(line, box) {
+/** A line with an Edit button at its right that shows box under it (and hides it again; onToggle(open) after each). */
+function editRow(line, box, onToggle) {
   const b = btn('Edit', () => {
     box.hidden = !box.hidden;
     b.setAttribute('aria-expanded', String(!box.hidden));
+    if (onToggle) onToggle(!box.hidden);
   }, 'small', { 'aria-expanded': 'false' });
   box.classList.add('edit-box');
   box.hidden = true;
@@ -625,7 +648,7 @@ function editRow(line, box) {
  */
 function receiverForms(g, latest, done, onCompare) {
   const p = Object.assign({ signal_group_master: 3, signal_group_slave: 6, base_mode: 'survey_in', survey_in_s: 600, fixed: null,
-    station_id: 0, com1_baud: 115200, rtcm: [], sat_view_output: false }, g.profile || {});
+    station_id: 0, com1_baud: DEFAULT_BAUD, rtcm: [], sat_view_output: false }, g.profile || {});
   let profDirty = false;
 
   /* -- Position -- */
@@ -647,15 +670,16 @@ function receiverForms(g, latest, done, onCompare) {
   named ? sgKey : null);
   sgChoice.el.querySelector('.choices').classList.add('stacked', 'grid2');
   sgChoice.el.querySelector('legend').classList.add('sr-only');
-  const sgCustom = checkbox('Use other signal group numbers', !named, 'For receiver firmware with more groups. A pair the receiver refuses is undone.');
+  const sgCustom = checkbox('Use other signal group numbers', !named, 'Off by default. Only for receiver firmware with groups not ' +
+    'listed above; a pair the receiver refuses is undone.');
   const sid = numInput(p.station_id, { inputmode: 'numeric', maxlength: 4 });
-  const baud = selectInput(BAUDS.map(b => [b, b + ' baud']), p.com1_baud);
-  const satView = checkbox('Satellite positions output', p.sat_view_output,
-    'Keeps satellite positions on all the time, so showing the sky never pauses corrections.');
+  const baud = selectInput(BAUDS.map(b => [b, b + ' baud' + (b === DEFAULT_BAUD ? ' (default)' : '')]), p.com1_baud);
+  const satView = checkbox('Satellite positions output', p.sat_view_output, 'Off by default: the sky view turns them on while ' +
+    'open, pausing corrections for a moment. On: always sent, so the sky never pauses corrections and works with manual setup.');
   const antModel = textInput(p.antenna_model || '', { maxlength: 64, class: 'ant' });
   const antSerial = textInput(p.antenna_serial || '', { maxlength: 64 });
   const antSetup = numInput(p.antenna_setup_id || 0, { inputmode: 'numeric', maxlength: 3 });
-  const seeLine = h('p', { class: 'muted small' });
+  const seeLine = h('span');
 
   const F = {
     survey_in_s: field('Survey-in time (seconds)', survey),
@@ -664,8 +688,9 @@ function receiverForms(g, latest, done, onCompare) {
     height_m: field('Height above the ellipsoid (m)', hgt),
     signal_group_master: field('Main antenna', sgm),
     signal_group_slave: field('Second antenna', sgs, '0 turns it off.'),
-    station_id: field('Station ID', sid, 'Goes into every message.'),
-    com1_baud: field('Receiver link speed (COM1)', baud, 'Ephemeris messages need 460800 baud or more.'),
+    station_id: field('Station ID', sid, 'In every message. The default comes from this device\'s MAC; change it only if a ' +
+      'server asks for a number.'),
+    com1_baud: field('Receiver link speed (COM1)', baud, 'Enough for the Onocoy set. Ephemeris messages need 460800 or more.'),
     rtcm: { el: h('div'), input: null, error: null },
     antenna_model: field('Antenna model (IGS name)', antModel, ['Only for an antenna in the IGS list: name and radome as listed. ' +
       'Empty keeps the receiver\'s value; ADVNULLANTENNA clears it. ', extLink('IGS antenna list', IGS_ANTENNAS)]),
@@ -748,27 +773,36 @@ function receiverForms(g, latest, done, onCompare) {
   });
   sgSync();
 
-  /* Corrections: the messages in one line, kept up to date while rows change; the rows behind Edit. */
+  /* Correction messages: how many, whether they are the Onocoy set (the chip: recommended, or custom) and each by number
+   * and name (how often unless every second), kept up to date while rows change; the rows behind Edit, the list hidden
+   * while they show. */
   const rows = h('div', { class: 'msgrows' });
   const rtcmErr = h('small', { class: 'err', hidden: true });
   const summary = h('span');
+  const setChip = badge('', '');
+  const msgList = h('ul', { class: 'msglist small' });
   F.rtcm.error = t => {
     rtcmErr.textContent = t || '';
     rtcmErr.hidden = !t;
   };
   const sumUp = () => {
-    const list = Array.from(rows.children, r => Array.from(r.querySelectorAll('input'), i => Number(i.value.trim())));
+    const list = Array.from(rows.children, r => [Number(r.children[0].value.trim()), Number(r.children[1].value.trim())]);
     const n = list.length;
     const each = list.every(x => x[1] === 1);
-    if (!n) summary.textContent = 'No messages: the receiver sends no corrections.';
-    else if (n === ONOCOY_RTCM.length && each && ONOCOY_RTCM.every(m => list.some(x => x[0] === m))) {
-      summary.textContent = 'Onocoy defaults: ' + n + ' messages, each every second.';
-    } else summary.textContent = n + (n === 1 ? ' message' : ' messages') + (each ? ', each every second' : '') + ' (custom).';
+    const onocoy = n === ONOCOY_RTCM.length && each && ONOCOY_RTCM.every(m => list.some(x => x[0] === m));
+    const c = !n ? ['None', 'warn'] : onocoy ? ['Recommended', 'ok'] : ['Custom', ''];
+    setChip.textContent = c[0];
+    setChip.className = 'badge ' + c[1];
+    summary.textContent = !n ? 'No messages: the receiver sends no corrections.' : (onocoy ? 'The Onocoy set: ' : '') +
+      n + (n === 1 ? ' message' : ' messages') + (!each ? '.' : n === 1 ? ', every second.' : ', each every second.');
+    patch(msgList, list.filter(x => x[0]).map(x => h('li', null, h('b', null, String(x[0])), ' ' + rtcmName(x[0]),
+      x[1] !== 1 ? ' · every ' + x[1] + NB + 's' : '')));
   };
   function addRow(msgNo, period) {
     const m = numInput(msgNo, { inputmode: 'numeric', maxlength: 4, 'aria-label': 'Message number' });
     const per = numInput(period || 1, { inputmode: 'numeric', maxlength: 4, 'aria-label': 'Every (seconds)' });
     const nm = h('span', { class: 'muted' }, rtcmName(Number(msgNo)));
+    /* The inputs first: sumUp reads them by place. */
     const row = h('div', { class: 'msgrow' }, m, per, nm, h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Remove message',
       onclick: () => {
         row.remove();
@@ -794,7 +828,7 @@ function receiverForms(g, latest, done, onCompare) {
         sumUp();
         saveSync();
       }, 'small'),
-      btn('Use Onocoy defaults', () => {
+      btn('Use the Onocoy set', () => {
         clear(rows);
         for (const m of ONOCOY_RTCM) addRow(m, 1);
         profDirty = true;
@@ -802,7 +836,7 @@ function receiverForms(g, latest, done, onCompare) {
         saveSync();
       }, 'small')));
   const antBox = h('div', { class: 'stack' }, F.antenna_model.el, h('div', { class: 'cols c2' }, F.antenna_serial.el, F.antenna_setup_id.el),
-    h('p', { class: 'hint' }, 'Serial and setup ID are only sent with a model.'), seeLine);
+    h('p', { class: 'hint' }, 'Serial and setup ID are only sent with a model.'));
 
   /* Field checks; a field behind its Edit button opens first. */
   const int = (s, lo, hi) => {
@@ -886,7 +920,7 @@ function receiverForms(g, latest, done, onCompare) {
         break;
       }
       if (m >= 1101 && m <= 1107) {
-        c.fail('rtcm', 'Messages 1101 to 1107 never reach a caster; remove them.');
+        c.fail('rtcm', 'Messages 1101 to 1107 never reach a server; remove them.');
         break;
       }
       if (seen[m]) {
@@ -906,8 +940,8 @@ function receiverForms(g, latest, done, onCompare) {
   const APPLY = {
     queued: 'Saved. The station configures the receiver now.',
     unchanged: 'Saved. Nothing changes on the receiver.',
-    safe_mode: 'Saved. Applied after safe mode ends (with automatic configuration on).',
-    maintenance: 'Saved. Applied after receiver maintenance ends (with automatic configuration on).',
+    safe_mode: 'Saved. Applied after safe mode ends (with automatic setup).',
+    maintenance: 'Saved. Applied after receiver maintenance ends (with automatic setup).',
     unsupported_model: 'Saved, but the station does not configure this receiver model.',
     not_running: 'Saved. Applied once the station can talk to the receiver.',
   };
@@ -939,10 +973,15 @@ function receiverForms(g, latest, done, onCompare) {
     if (r !== undefined) toast('Applying the profile…', 'ok');
   });
   /* Apply again under Advanced; beside Save while the last configuration failed. */
-  const applyRow = settingRow('Apply again', 'Sends the saved profile to the receiver once more.', applyBtn);
+  const applyRow = settingRow('Apply again', 'Sends the saved profile to the receiver again, e.g. after it was changed from a PC.',
+    applyBtn);
   const actions = h('div', { class: 'form-actions' }, saveBtn);
-  const antLine = h('span', null, 'Antenna name: ', p.antenna_model ? h('span', { class: 'ant' }, p.antenna_model) : 'the receiver\'s own');
-  const refused = h('div', { class: 'stack', hidden: true });
+  const antLine = p.antenna_model ? h('span', { class: 'ant' }, p.antenna_model) :
+    h('span', null, 'Not set (recommended unless your antenna is in the IGS list)');
+  /* The antenna step's refusal under the antenna, the B1C/B2a step's under the messages (stepsRefused). */
+  const refused = [h('div', { class: 'stack', hidden: true }), h('div', { class: 'stack', hidden: true })];
+  /* Hidden while there is no comparison to go to (manual setup). */
+  const cmpLink = h('button', { type: 'button', class: 'linkbtn', onclick: onCompare }, 'Not sure? Compare two groups');
   const profile = h('form', { class: 'stack', oninput: () => {
     profDirty = true;
     sumUp();
@@ -951,9 +990,13 @@ function receiverForms(g, latest, done, onCompare) {
     e.preventDefault();
     save('profile', saveBtn, err);
   } },
-  pgroup('Signals', sgChoice.el, h('button', { type: 'button', class: 'linkbtn', onclick: onCompare }, 'Not sure? Compare two groups')),
-  pgroup('Corrections', editRow(summary, msgBox), editRow(antLine, antBox), refused),
-  pgroup('Advanced', h('div', { class: 'cols c2' }, F.station_id.el, F.com1_baud.el), sgCustom.el, sgNumbers, satView.el, applyRow),
+  pgroup('Signals', null, sgChoice.el, cmpLink),
+  pgroup('Correction messages', setChip, editRow(summary, msgBox, open => {
+    msgList.hidden = open;
+  }), msgList, refused[1]),
+  pgroup('Antenna model', null, editRow(antLine, antBox), h('p', { class: 'muted small' }, 'Goes to servers in message 1033. ', seeLine),
+    refused[0]),
+  pgroup('Advanced', null, h('div', { class: 'cols c2' }, F.station_id.el, F.com1_baud.el), sgCustom.el, sgNumbers, satView.el, applyRow),
   err,
   actions);
 
@@ -971,13 +1014,16 @@ function receiverForms(g, latest, done, onCompare) {
     match.hidden = !match.textContent;
     useArp.hidden = !arpCopyable(gg);
     patch(seeLine, castersSee(gg));
-    seeLine.hidden = !seeLine.textContent;
-    patch(refused, stepsRefused(gg));
-    refused.hidden = !refused.firstChild;
+    stepsRefused(gg).forEach((m, i) => {
+      patch(refused[i], m);
+      refused[i].hidden = !m;
+    });
   };
   update(g);
   return { position: position, profile: profile, update: update, status: () => chipSync(latest()),
-    dirty: () => profDirty || !posSame() };
+    dirty: () => profDirty || !posSame(), compare: shown => {
+      cmpLink.hidden = !shown;
+    } };
 }
 
 /* ---- Signal-group comparison --------------------------------------------- */
@@ -1065,21 +1111,30 @@ function sgtResults(t) {
     h('p', { class: 'muted small foot' }, 'Per band: mean C/N0 in dB-Hz; in brackets, mean satellites.'));
 }
 
-/** Why the station would refuse a start now (its own order), or '' (GET /api/gnss). The station still decides. */
+/** Why the station would refuse a start now (its own order), or '' (GET /api/gnss). The station still decides. With manual
+ * setup the card shows no start at all (sgtShown). */
 function sgtBlock(g) {
   if (!g) return '';
   if (g.first_apply_held) return 'Configure the receiver first.';
-  if (!g.autocfg) return 'Needs automatic configuration on.';
+  if (!g.autocfg) return 'Needs automatic receiver setup.';
   if ((g.maintenance || {}).on) return 'Not during receiver maintenance.';
   if (g.state === 'no_receiver' || g.state === 'detecting') return 'Needs a connected receiver.';
   if (!(g.position || {}).locked) return 'Lock the base position first.';
   return '';
 }
 
+/** Whether Receiver settings shows the comparison's card (g: GET /api/gnss, t: GET /api/gnss/signal-test, st: the status):
+ * not with manual setup, which cannot start one, unless one still runs or waits for a choice, or a notice elsewhere points
+ * to how one ended (sgTestNotice). */
+function sgtShown(g, t, st) {
+  return !manageOwn(g) || (!!t && SGT_RUNNING.indexOf(t.state) >= 0) || !!sgTestNotice(st);
+}
+
 /**
  * "Compare two signal groups": the start form (two groups, time per group,
  * a confirmation), the progress, the results side by side, keep and stop.
- * Built once per view; update(t, g) shows GET /api/gnss/signal-test.
+ * Built once per view; update(t, g) shows GET /api/gnss/signal-test (with
+ * manual setup no start form: only how it runs or ended, sgtShown).
  * nodes: the card's body; badge: its chip while it runs.
  */
 function sgTestCtl(done) {
@@ -1116,7 +1171,7 @@ function sgTestCtl(done) {
     }
   });
   /* The two groups, the time and Start in one row on a wide screen. While a start would be refused (no receiver, held,
-   * automatic configuration off, not locked) only why, beside Start that waits. */
+   * not locked) only why, beside Start that waits. */
   const why = h('span', { class: 'note muted small', id: 'sgt-why', hidden: true });
   const act = h('div', { class: 'act' }, startBtn);
   const fields = h('div', { class: 'cols sgt-form' }, field('Group A', selA).el, field('Group B', selB).el,
@@ -1154,7 +1209,7 @@ function sgTestCtl(done) {
       badgeEl.textContent = lbl(L.sgtState, t.state);
       badgeEl.hidden = !running;
       /* Idle: what it does and the start; running or deciding: its progress and results. */
-      intro.hidden = form.hidden = running;
+      intro.hidden = form.hidden = running || (!!g && manageOwn(g));
       const block = running ? '' : sgtBlock(g);
       /* A start in flight keeps its own disabled state (busy() gives it back when the answer is in). */
       if (!startBtn.classList.contains('busy')) startBtn.disabled = !!block;
@@ -1219,7 +1274,7 @@ Views.receiver = {
  * The Receiver page (#/receiver; #/receiver/live shows the sky when it is
  * open, #/receiver/live/start opens it), or with arg "settings" the
  * Receiver settings page (#/receiver/settings/manage: at its Receiver
- * management card); both read GET /api/gnss every 5 s.
+ * setup card); both read GET /api/gnss every 5 s.
  */
 function receiverPage(el, arg) {
   const settings = /^settings(\/|$)/.test(arg);
@@ -1249,7 +1304,8 @@ function receiverPage(el, arg) {
   const posCard = h('section', { class: 'card a-pos' });
   const profChip = badge('', '');
   const profile = h('section', { class: 'card a-prof' });
-  const manage = manageCtl();
+  /* A changed setup changes what the page offers (the comparison, the Save buttons' words): read at once. */
+  const manage = manageCtl(() => refresh().catch(() => {}));
   const manageCard = h('section', { class: 'card a-man', id: 'manage', tabindex: '-1' }, manage.nodes);
   const sgt = sgTestCtl(() => refresh().catch(() => {}));
   const compare = h('section', { class: 'card wide', id: 'compare', tabindex: '-1' }, cardHead('Compare two signal groups', sgt.badge),
@@ -1290,7 +1346,12 @@ function receiverPage(el, arg) {
       const c = profileChip(g);
       profChip.className = 'badge ' + c[1];
       profChip.textContent = c[0];
-      if (forms) forms.update(g);
+      /* No card with nothing to do in it, and no way to one (the Signals group's link). */
+      compare.hidden = !sgtShown(g, t, S.status);
+      if (forms) {
+        forms.update(g);
+        forms.compare(!compare.hidden);
+      }
       manage.update(g);
       sgt.update(t, g);
       return;
@@ -1333,6 +1394,7 @@ function receiverPage(el, arg) {
   };
   const buildForms = () => {
     forms = receiverForms(g, () => g, refresh, openCompare);
+    forms.compare(!compare.hidden);
     mount(posCard, forms.position);
     mount(profile, cardHead('Receiver profile', profChip), forms.profile);
   };
@@ -1353,7 +1415,7 @@ function receiverPage(el, arg) {
     if (gone) return;
     const grid = h('div', { class: settings ? 'grid rxset' : 'grid' });
     if (settings) {
-      /* The comparison's note above the grid (its areas: position, management, profile beside both). */
+      /* The comparison's note above the grid (its areas: position, receiver setup, profile beside both). */
       mount(el, sgtNote, grid);
       add(grid, [posCard, profile, manageCard, compare]);
       buildForms();
@@ -1363,7 +1425,7 @@ function receiverPage(el, arg) {
       sigs = signalsSection(grid, msgs);
     }
     fill();
-    /* Receiver settings asked for at its management card (the Status page's "Change"). */
+    /* Receiver settings asked for at its Receiver setup card (a "Change" link elsewhere). */
     if (arg === 'settings/manage') {
       manageCard.scrollIntoView({ block: 'start' });
       manageCard.focus({ preventScroll: true });

@@ -230,10 +230,13 @@ function signalsSection(el, msgs) {
   return {
     sky: sky,
     update: receiverState,
-    /* GET /api/gnss: the survey (1005 waits for it) and whether the sky can open (it needs automatic configuration). */
+    /* GET /api/gnss: the survey (1005 waits for it) and whether the sky can show satellites: automatic setup turns their
+     * output on while it is open; with manual setup only the profile's satellite positions output gives them (a held first
+     * configuration sent neither). */
     gnss(gg) {
       g = gg;
-      sky.block(g.autocfg ? '' : 'Not available while you manage the receiver yourself (Receiver settings).');
+      sky.block(g.first_apply_held ? 'Configure the receiver first.' : g.autocfg || (g.profile || {}).sat_view_output ? '' :
+        'Manual setup: turn on Satellite positions output in Receiver settings.');
     },
     messagesOff(off) {
       msgsOff = off;

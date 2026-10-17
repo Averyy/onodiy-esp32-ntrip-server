@@ -292,8 +292,8 @@ async function wizardDup() {
   return r;
 }
 
-/* Receiver management from (autocfg, recovery) to the choice `to`: the PUT bodies in the order sent; fail: the
- * member whose request the station refuses (500). */
+/* Receiver setup from (autocfg, recovery) to the choice `to` (auto, no_restart: Automatic with its restart box
+ * cleared, manual): the PUT bodies in the order sent; fail: the member whose request the station refuses (500). */
 async function manageSave(c) {
   const settle = async () => {
     for (let i = 0; i < 30; i++) await new Promise(r => setImmediate(r));
@@ -307,8 +307,12 @@ async function manageSave(c) {
   root.append(...m.nodes);
   const all = [...root.walk()];
   const radios = all.filter(e => e.tagName === 'INPUT' && e.attrs.name === 'manage');
-  for (const r of radios) r.checked = r.value === c.to;
-  radios.find(r => r.value === c.to).fire('change');
+  const pick = c.to === 'no_restart' ? 'auto' : c.to;
+  for (const r of radios) r.checked = r.value === pick;
+  radios.find(r => r.value === pick).fire('change');
+  const restart = all.find(e => e.tagName === 'INPUT' && e.attrs.type === 'checkbox');
+  restart.checked = c.to !== 'no_restart';
+  restart.fire('change');
   all.find(e => e.tagName === 'BUTTON' && e.textContent === 'Save').fire('click');
   await settle();
   routes = null;
@@ -433,6 +437,11 @@ function pageParts(el) {
     lines: v.filter(e => e.tagName === 'P').map(e => e.textContent),
     trs: v.filter(e => e.tagName === 'TR').map(tr => tr.kids.map(k => k.textContent).join(' | ')),
     lis: v.filter(e => e.tagName === 'LI' && e.parent.tagName === 'OL').length,
+    /* The checkboxes by their label; the notes beside a button (why it waits); the correction messages' list. */
+    checks: v.filter(e => e.tagName === 'LABEL' && e.className === 'check').map(e => e.kids[1].kids[0].textContent),
+    notes: v.filter(e => e.tagName === 'SPAN' && (e.className || '').indexOf('note') === 0).map(e => e.textContent),
+    msgList: v.filter(e => e.tagName === 'LI' && e.parent.tagName === 'UL' && e.parent.className.indexOf('msglist') >= 0)
+      .map(e => e.textContent),
     msgs: v.filter(e => (e.className || '').indexOf('msg ') === 0).map(m => [m.className.slice(4), m.textContent]),
     /* Amber text (the position casters get, a value that differs). */
     warn: v.filter(e => (' ' + e.className + ' ').indexOf(' t-warn ') >= 0).map(e => e.textContent),
@@ -1455,9 +1464,9 @@ def test_status_page_names_receiver_management_with_a_way_to_change_it():
     out = run_editor([{"fn": "dashboard", "status": x, "admin": True}
                       for x in (me, st_status(health={"level": "ok", "recovery_mode": "no_reboot"}), st_status())])
     assert out[0]["head"] == "Receiver sends no corrections"
-    assert out[0]["facts"] == [["Receiver management", "You (alerts only)Change"]]
+    assert out[0]["facts"] == [["Receiver management", "ManualChange"]]
     assert out[0]["factLinks"] == [["Change", "#/receiver/settings/manage", "Change receiver management"]]
-    assert out[1]["facts"] == [["Receiver management", "The station, no restartsChange"]]
+    assert out[1]["facts"] == [["Receiver management", "Automatic, no station restartsChange"]]
     # The default (the station, restarts allowed) is not said.
     assert out[2]["facts"] == [] and out[2]["factLinks"] == []
 
@@ -1554,19 +1563,19 @@ def test_setup_onocoy_step_sends_the_duplicate_stream_answer():
     assert r == {"asked": True, "kept": True, "enabled": True, "puts": [False, True]}, r
 
 
-def test_receiver_management_saves_its_two_settings_in_a_safe_order():
-    """The station stores automatic configuration and the recovery one after the other, so the choice sends one per
-    request: the recovery first when automatic configuration goes off, else automatic configuration first. A refusal
-    halfway never leaves automatic recovery on for a receiver the station does not configure."""
-    out = run_editor([{"fn": "manage", "autocfg": True, "recovery": "full", "to": "me"},
-                      {"fn": "manage", "autocfg": False, "recovery": "alerts_only", "to": "station"},
+def test_receiver_setup_saves_its_two_settings_in_a_safe_order():
+    """The station stores automatic setup and the recovery one after the other, so the choice sends one per request: the
+    recovery first when automatic setup goes off, else automatic setup first. A refusal halfway never leaves automatic
+    recovery on for a receiver the station does not configure. Automatic without its restart box is no_reboot."""
+    out = run_editor([{"fn": "manage", "autocfg": True, "recovery": "full", "to": "manual"},
+                      {"fn": "manage", "autocfg": False, "recovery": "alerts_only", "to": "auto"},
                       {"fn": "manage", "autocfg": True, "recovery": "full", "to": "no_restart"},
-                      {"fn": "manage", "autocfg": True, "recovery": "full", "to": "me", "fail": "autocfg"},
-                      {"fn": "manage", "autocfg": False, "recovery": "alerts_only", "to": "station", "fail": "recovery"}])
+                      {"fn": "manage", "autocfg": True, "recovery": "full", "to": "manual", "fail": "autocfg"},
+                      {"fn": "manage", "autocfg": False, "recovery": "alerts_only", "to": "auto", "fail": "recovery"}])
     assert out[0] == [{"recovery": "alerts_only"}, {"autocfg": False}]
     assert out[1] == [{"autocfg": True}, {"recovery": "full"}]
     assert out[2] == [{"recovery": "no_reboot"}]
-    # Refused halfway: the recovery is already off (to "me"), automatic configuration already on (to "station").
+    # Refused halfway: the recovery is already off (to Manual), automatic setup already on (to Automatic).
     assert out[3] == [{"recovery": "alerts_only"}, {"autocfg": False}]
     assert out[4] == [{"autocfg": True}, {"recovery": "full"}]
 
@@ -1988,8 +1997,9 @@ def test_receiver_pages_show_everything_without_fold_outs():
     first configuration, no receiver, a comparison running and one waiting for a choice): no <details> anywhere, nor in the held
     configuration's dialog. What the folds held is in plain view where it matters: the position in its own card,
     the messages in the Receiver card (once any arrived), every satellite while the sky is open, the profile's
-    advanced settings, the comparison's form while idle (only why while a start would be refused) and its results
-    (each band's C/N0 inline) while it runs."""
+    correction messages and advanced settings, the comparison's form while idle (only why while a start would be
+    refused) and its results (each band's C/N0 inline) while it runs. With manual receiver setup no comparison card, nor
+    the link to it, unless one still runs."""
     maint_st = st_status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600})
     norx_st = st_status(receiver={"state": "no_receiver", "rtcm_age_ms": None},
                         alerts=[{"id": "no_receiver", "source": "station", "saw_bytes": False, "next_detect_in_s": 90}])
@@ -2005,6 +2015,11 @@ def test_receiver_pages_show_everything_without_fold_outs():
         "held": rx_page("", st_status(), held_g, SIG_MSGS, preview=PREVIEW, confirm=True),
         "settings": rx_page("settings", st_status(), GNSS, SIG_MSGS),
         "settings_noant": rx_page("settings", NOANT_ST, NOANT_G, NOANT_SIG),
+        "noant_satview": rx_page("", NOANT_ST, {**NOANT_G, "profile": {**NOANT_G["profile"], "sat_view_output": True}}, NOANT_SIG),
+        "no_restart": rx_page("settings", st_status(), {**GNSS, "recovery": "no_reboot"}, SIG_MSGS),
+        "settings_unlocked": rx_page("settings", st_status(), {**GNSS, "position": {"locked": False, "source": "none"}}, SIG_MSGS),
+        "manual_running": rx_page("settings", run_st, {**GNSS, "autocfg": False, "recovery": "alerts_only"}, SIG_MSGS,
+                                  test=SGT_RUN),
         "running": rx_page("settings", run_st, GNSS, SIG_MSGS, test=SGT_RUN, test2=SGT_RUN2),
         "deciding": rx_page("settings", done_st, GNSS, SIG_MSGS, test=SGT_DONE),
     }
@@ -2016,7 +2031,7 @@ def test_receiver_pages_show_everything_without_fold_outs():
     assert stream["cards"] == ["Receiver", "Position", "Signals"]
     rows = dict(stream["rows"])
     assert rows["Model"] == "UM982 \u00b7 R4.10Build25164" and rows["Source"] == "Survey-in"
-    assert rows["Latitude"].startswith("45.1") and rows["Sent to casters"] == "This position"
+    assert rows["Latitude"].startswith("45.1") and rows["Sent to servers"] == "This position"
     assert "Locked. If the antenna moves, survey again." in stream["lines"]
     assert "Messages" in stream["subs"] and any(r.startswith("1005 Station position") for r in stream["trs"])
     assert "Survey again" in stream["buttons"] and "Receiver settings" in stream["buttons"]
@@ -2032,6 +2047,9 @@ def test_receiver_pages_show_everything_without_fold_outs():
     noant = out["noant"]
     assert noant["cards"] == ["Receiver", "Signals"]
     assert dict(noant["rows"])["Position"] == "Surveying, paused while no corrections arrive."
+    # Manual setup: the sky needs the profile's satellite positions output, and says so beside its button.
+    assert noant["notes"] == ["Manual setup: turn on Satellite positions output in Receiver settings."]
+    assert out["noant_satview"]["notes"] == [] and out["stream"]["notes"] == []
     # No message ever arrived: the card's line says so, no table of "Never".
     assert "Messages" not in noant["subs"] and not any(r.startswith("1005") for r in noant["trs"])
 
@@ -2050,14 +2068,30 @@ def test_receiver_pages_show_everything_without_fold_outs():
     assert not any("commands" in t for t in held["dialog"]["lines"])
 
     settings = out["settings"]
-    assert settings["cards"] == ["Position", "Receiver profile", "Receiver management", "Compare two signal groups"]
-    assert settings["subs"] == ["Signals", "Corrections", "Advanced"]
+    assert settings["cards"] == ["Position", "Receiver profile", "Receiver setup", "Compare two signal groups"]
+    assert settings["subs"] == ["Signals", "Correction messages", "Antenna model", "Advanced"]
     assert {"Station ID", "Receiver link speed (COM1)", "Group A", "Group B", "Time per group"} <= set(settings["fields"])
     assert "Start comparison" in settings["buttons"] and "Apply again" in settings["buttons"]
+    assert "Not sure? Compare two groups" in settings["buttons"]
     assert any(t.startswith("Tries two signal groups") for t in settings["lines"])
+    # The messages listed without opening anything; the editor behind Edit.
+    assert settings["msgList"] == ["1005 Station position", "1077 GPS observations (MSM7)"]
+    assert "Message" not in settings["fields"] and "Antenna model (IGS name)" not in settings["fields"]
     # A start the station would refuse: why, beside Start, without the form.
-    blocked = out["settings_noant"]
+    blocked = out["settings_unlocked"]
     assert "Group A" not in blocked["fields"] and "Start comparison" in blocked["buttons"]
+    # Automatic setup: its restart box under it, ticked for full recovery (no_reboot: the same box cleared).
+    restart = "Also restart the station if that doesn't help"
+    assert restart in settings["checks"] and restart in out["no_restart"]["checks"]
+    # Manual setup cannot start one: no card and no link to it; nor the restart box.
+    manual = out["settings_noant"]
+    assert restart not in manual["checks"]
+    assert manual["cards"] == ["Position", "Receiver profile", "Receiver setup"]
+    assert "Not sure? Compare two groups" not in manual["buttons"] and "Start comparison" not in manual["buttons"]
+    # One that still runs stays, without a start form, with the way to it.
+    still = out["manual_running"]
+    assert still["cards"][-1] == "Compare two signal groups" and "Stop" in still["buttons"]
+    assert "Not sure? Compare two groups" in still["buttons"] and "Group A" not in still["fields"]
 
     running = out["running"]
     assert "Group A" not in running["fields"] and not any(t.startswith("Tries two") for t in running["lines"])
@@ -2095,11 +2129,11 @@ def test_receiver_pages_say_refusals_the_survey_and_a_stream_off_the_position():
     rows = dict(survey["rows"])
     assert survey["cards"] == ["Receiver", "Position", "Signals"]
     assert rows["Latitude"].startswith("45.2") and rows["Source"] == "Survey-in (running)"
-    assert "Sent to casters" not in rows and "Locked on" not in rows
+    assert "Sent to servers" not in rows and "Locked on" not in rows
     assert "Lock this position" in survey["buttons"] and "Survey again" not in survey["buttons"]
     assert any(t.startswith("Surveying, about 5") for t in survey["lines"])
 
-    assert dict(offset["rows"])["Sent to casters"] == "1.32\u00a0m from this position"
+    assert dict(offset["rows"])["Sent to servers"] == "1.32\u00a0m from this position"
     assert "1.32\u00a0m from this position" in offset["warn"]
 
 
