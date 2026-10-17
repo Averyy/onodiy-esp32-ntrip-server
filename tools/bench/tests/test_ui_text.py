@@ -322,6 +322,44 @@ def jrec(seq: int, kind: str, a: int = 0, b: int = 0, up: int = 1, t: int | None
     return {"seq": seq, "time_unix": t, "uptime_s": up, "kind": kind, "a": a, "b": b}
 
 
+def roam_a(ch0: int, ch1: int, by: int, same: bool = False) -> int:
+    return ch0 | (ch1 << 8) | (by << 16) | ((1 << 24) if same else 0)
+
+
+def roam_b(r0: int, r1: int, secs: int) -> int:
+    return (r0 & 0xFF) | ((r1 & 0xFF) << 8) | (secs << 16)
+
+
+def test_event_list_names_moves_between_access_points():
+    """A move to another access point of the network is one row of its own (never paired with a drop): who moved
+    it, the channels and signals before and after, the time offline; an own reconnect that stayed is a reconnect.
+    The Wi-Fi filter keeps them, the casters filter does not; no access point address anywhere."""
+    recs = [jrec(1, "wifi_roam", roam_a(1, 6, 1), roam_b(-78, -52, 3), 100),
+            jrec(2, "wifi_roam", roam_a(6, 6, 2), roam_b(-75, -58, 4), 4000),
+            jrec(3, "wifi_roam", roam_a(6, 6, 2, True), roam_b(-74, -73, 5), 9000),
+            jrec(4, "wifi_roam", roam_a(11, 1, 2), roam_b(0, 0, 2), 15000),
+            jrec(5, "wifi_disconnect", 8, -70, 16000), jrec(6, "wifi_up", 1, 6, 16006)]
+    every, wifi, casters = run_ui([("journalItems", [recs, True, None]),
+                                   ("journalItems", [recs, True, ["wifi_disconnect", "wifi_up", "wifi_roam"]]),
+                                   ("journalItems", [recs, True, ["caster_down", "caster_up", "caster_stop"]])])
+    rows = [(r["ev"], r["det"]) for r in every if "head" not in r]
+    assert rows == [
+        ("Wi-Fi dropped", "back after 6\u00a0s, left the network (8), signal -70 dBm"),
+        ("Wi-Fi moved", "to a stronger access point, channel 11 to 1, 2\u00a0s offline"),
+        ("Wi-Fi reconnected", "no stronger access point after all, 5\u00a0s offline"),
+        ("Wi-Fi moved", "to a stronger access point, channel 6, signal -75 to -58 dBm, 4\u00a0s offline"),
+        ("Wi-Fi moved", "at the access point's request, channel 1 to 6, signal -78 to -52 dBm, 3\u00a0s offline"),
+    ], rows
+    assert [(r["ev"], r["det"]) for r in wifi if "head" not in r] == rows
+    assert casters == []
+    assert not re.search(r"[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}", json.dumps(every))
+    # Two moves of the same kind in a row are one row with a toggle; a move and a stayed reconnect are not.
+    folded = run_ui([("journalItems", [[jrec(1, "wifi_roam", roam_a(1, 6, 1), roam_b(-78, -52, 3), 100),
+                                        jrec(2, "wifi_roam", roam_a(6, 1, 1), roam_b(-80, -50, 2), 900)], True, None])])[0]
+    rows = [r for r in folded if "head" not in r]
+    assert len(rows) == 1 and len(rows[0]["all"]) == 2
+
+
 def test_event_journal_one_heading_per_start_and_repeats_folded():
     """A start is one heading (its boot and session records, and the restart record that announced it, folded in),
     its other records newest first, 27 recovery steps in a row one row with a toggle; no "#seq" or "≈" in the text."""

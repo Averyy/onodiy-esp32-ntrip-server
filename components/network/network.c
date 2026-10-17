@@ -33,6 +33,19 @@
  * dual-stack client to wait out its AAAA timeout, and the web server (a
  * dual-stack socket) answers on it.
  *
+ * Moving between access points (CONFIG_NETWORK_ROAM; the decisions are in
+ * net_roam.c): the station configuration turns on 802.11k and 802.11v
+ * (rm_enabled, btm_enabled), so ESP-IDF's supplicant answers an access
+ * point's BSS transition request and moves the station by itself. Its
+ * request handler is wrapped at link time (CMakeLists.txt) and drops a
+ * request while a move must not happen. Such a move reaches the net task as
+ * a disconnect with reason WIFI_REASON_ROAMING, after which the driver
+ * connects by itself: the net task waits as for its own connect instead of
+ * scheduling one. The station's own move is a deliberate reconnect (the
+ * connect scan joins the strongest access point), after scans for its SSID
+ * that never touch the setup page's list. A move that reaches an address is
+ * journalled as DIAG_EV_WIFI_ROAM, instead of a drop and the return after it.
+ *
  * QEMU development build (CONFIG_NETWORK_QEMU_ETHERNET, sdkconfig.qemu):
  * Wi-Fi is never initialised or started. The emulated OpenCores Ethernet
  * port is created as the station interface instead (its key and IP events),
@@ -73,8 +86,13 @@
 #include "mdns.h"
 #include "net_core.h"
 #include "net_ladder.h"
+#include "net_roam.h"
 #include "sdkconfig.h"
 #include "settings.h"
+
+#if CONFIG_NETWORK_ROAM && CONFIG_ESP_WIFI_WNM_SUPPORT
+#include "esp_wnm.h"
+#endif
 
 #if CONFIG_NETWORK_QEMU_ETHERNET
 #if !CONFIG_ETH_USE_OPENETH
@@ -141,6 +159,12 @@ _Static_assert(sizeof(((network_status_t *)0)->mdns_host) == 33, "mDNS host labe
 #define DISCONNECT_WAIT_MS   3000    /* deliberate disconnect: connect anyway if no event came */
 #define CONNECT_WATCHDOG_MS  60000   /* a connect attempt with no event at all counts as failed */
 #define SCAN_WATCHDOG_MS     20000   /* a scan without SCAN_DONE is abandoned (it would block connects) */
+#define ROAM_SCAN_MAX_MS     60      /* a roaming scan's longest wait on a channel (only the station's network answers) */
+#define ROAM_SCAN_HOME_MS    60      /* and its time back on the station's channel between two channels */
+#define ROAM_SCAN_KEEP       8       /* access points of the network a roaming scan hands on (the strongest) */
+#define ROAM_GAP_TEXT        "5 min" /* NET_ROAM_BTM_GAP_S in words (logs) */
+#define ROAM_STEER_READ_S    3       /* the access point's 802.11v support is read this long into an association */
+_Static_assert(NET_ROAM_BTM_GAP_S == 300u, "ROAM_GAP_TEXT names the gap");
 #define RSSI_INTERVAL_S      5
 #define CHECK_INTERVAL_S     30      /* fallback DNS and SNTP server re-check */
 #define PROBE_CONNECT_MS     5000
@@ -314,6 +338,38 @@ static uint8_t s_ladder_note;               /* last journalled skip/withhold: (r
 /* A planned restart is under way (lifecycle shutdown hook): our own Wi-Fi
  * stop on the way down is not a link loss. */
 static volatile bool s_leaving;
+
+#if CONFIG_NETWORK_ROAM
+/* Moving between access points (net_roam.c decides; net task unless noted). */
+typedef enum {
+    ROAM_HOLD_NONE = 0,
+    ROAM_HOLD_UPDATE,       /* an update holds the update slot or a restart lock (checked live too) */
+    ROAM_HOLD_AP,           /* the station's own access point is up: a move would take its channel along */
+    ROAM_HOLD_TRIAL,        /* changed credentials are on trial or about to be applied */
+    ROAM_HOLD_GAP,          /* the last move is less than NET_ROAM_BTM_GAP_S ago */
+} roam_hold_t;
+static net_roam_t s_roam;
+static volatile uint8_t s_btm_hold;         /* roam_hold_t for the access point's requests: net task writes, Wi-Fi task reads */
+static bool s_roam_scanning;                /* under s_lock: a roaming scan runs */
+static int64_t s_roam_scan_started_us;      /* under s_lock */
+static bool s_user_scan_queued;             /* under s_lock: a user's scan starts once the roaming scan is done */
+static bool s_steer_read;                   /* ap_steering read for this association */
+/* A move under way: from its start to the address on the new link. */
+static bool s_move_on;
+static uint8_t s_move_by;                   /* net_roam_by_t */
+static uint32_t s_move_start_s;
+static bool s_move_from_known;              /* the access point it left is known */
+static uint8_t s_move_bssid[6];             /* that access point (never journalled or logged) */
+static uint8_t s_move_ch_from;
+static int8_t s_move_rssi_from;
+static bool s_move_assoc;                   /* associated on the way */
+static uint8_t s_move_ch_to;
+static int8_t s_move_rssi_to;
+static bool s_move_same;                    /* the association is with the access point it left */
+static bool s_move_rec_pending;             /* a DIAG_EV_WIFI_ROAM record waits for the journal */
+static int32_t s_move_rec_a;
+static int32_t s_move_rec_b;
+#endif
 
 /* mDNS: the responder renamed itself after a conflict (set by its callback,
  * logged by the net task), and the name the net task logged last. */
@@ -878,10 +934,14 @@ static void probe_kick(void)
 
 /* ---- station ------------------------------------------------------------------------- */
 
+/* A scan runs (the user's or a roaming one): esp_wifi_connect() would fail. */
 static bool scanning(void)
 {
     taskENTER_CRITICAL(&s_lock);
     bool s = s_scanning;
+#if CONFIG_NETWORK_ROAM
+    s = s || s_roam_scanning;
+#endif
     taskEXIT_CRITICAL(&s_lock);
     return s;
 }
@@ -905,6 +965,12 @@ static void build_sta_config(wifi_config_t *c)
     c->sta.threshold.rssi = -127;
     c->sta.failure_retry_cnt = 2;   /* then try the next access point of the same network */
     c->sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+#if CONFIG_NETWORK_ROAM && CONFIG_ESP_WIFI_RRM_SUPPORT
+    c->sta.rm_enabled = 1;    /* 802.11k: the access point may ask for radio measurements (a mesh picks nodes by them) */
+#endif
+#if CONFIG_NETWORK_ROAM && CONFIG_ESP_WIFI_WNM_SUPPORT
+    c->sta.btm_enabled = 1;   /* 802.11v: the access point may ask the station to move (filtered: moving between access points) */
+#endif
 }
 
 /* The station lost its address (link down, DHCP restart, Wi-Fi restart, IP lost). */
@@ -1016,6 +1082,10 @@ static void wifi_stop(void)
     set_wifi_sta_on(false);
     taskENTER_CRITICAL(&s_lock);
     s_scanning = false;   /* a stop ends any scan */
+#if CONFIG_NETWORK_ROAM
+    s_roam_scanning = false;
+    s_user_scan_queued = false;
+#endif
     taskEXIT_CRITICAL(&s_lock);
     esp_err_t err = esp_wifi_stop();
     if (err != ESP_OK) {
@@ -1023,10 +1093,16 @@ static void wifi_stop(void)
     }
     s_wifi_started = false;
     s_associated = false;
+#if CONFIG_NETWORK_ROAM
+    net_roam_disassociated(&s_roam);
+    s_move_on = false;   /* a move cut short by the stop: an outage like any other */
+    s_steer_read = false;
+#endif
     s_ap_reasons = 0;   /* the AP stops with Wi-Fi: the policy brings it back if still wanted */
     taskENTER_CRITICAL(&s_lock);
     s_st.associated = false;
     s_st.bssid_known = false;
+    s_st.ap_steering = -1;
     s_st.tx_power_known = false;
     s_st.ap_reasons = 0;
     s_st.ap_close_in_s = UINT32_MAX;
@@ -1350,6 +1426,20 @@ static void flush_drop_record(void)
     }
 }
 
+#if CONFIG_NETWORK_ROAM
+/* DIAG_EV_WIFI_ROAM: kept until the journal takes it, like the others. */
+static void flush_move_record(void)
+{
+    if (!s_move_rec_pending) {
+        return;
+    }
+    esp_err_t err = diag_journal_append(DIAG_EV_WIFI_ROAM, s_move_rec_a, s_move_rec_b);
+    if (err != ESP_ERR_INVALID_STATE) {
+        s_move_rec_pending = false;
+    }
+}
+#endif
+
 /* ---- mDNS -------------------------------------------------------------------------------- */
 
 /* The name in use: the stored sys/hostname, else the build's default. */
@@ -1507,6 +1597,297 @@ static void on_shutdown(lifecycle_reboot_reason_t reason, uint32_t deadline_ms, 
     mdns_goodbye(deadline_ms);
 }
 
+/* ---- moving between access points ------------------------------------------------------ */
+
+#if CONFIG_NETWORK_ROAM
+/* What keeps any move from happening now (the access point's requests and
+ * the station's own moves; the latter also wait for an established link with
+ * an address, net_roam_tick's `held`). */
+static roam_hold_t roam_hold(void)
+{
+    if (lifecycle_update_active() != LIFECYCLE_UPDATE_NONE || lifecycle_reboot_inhibited(NULL)) {
+        return ROAM_HOLD_UPDATE;
+    }
+    if (ap_is_up()) {
+        return ROAM_HOLD_AP;
+    }
+    taskENTER_CRITICAL(&s_lock);
+    bool queued = s_new_pending;
+    taskEXIT_CRITICAL(&s_lock);
+    return (s_trial.on || queued) ? ROAM_HOLD_TRIAL : ROAM_HOLD_NONE;
+}
+
+static const char *roam_hold_text(roam_hold_t h)
+{
+    switch (h) {
+    case ROAM_HOLD_UPDATE:
+        return "an update runs";
+    case ROAM_HOLD_AP:
+        return "the station's own access point is up";
+    case ROAM_HOLD_TRIAL:
+        return "new Wi-Fi credentials are on trial";
+    case ROAM_HOLD_GAP:
+        return "the station moved less than " ROAM_GAP_TEXT " ago";
+    default:
+        return "";
+    }
+}
+
+/* The start of a move, with the access point it leaves (its BSSID stays in RAM, for the "same one" check only). */
+static void move_begin(net_roam_by_t by, bool known, const uint8_t bssid[6], uint8_t channel, int8_t rssi)
+{
+    s_move_on = true;
+    s_move_by = (uint8_t)by;
+    s_move_start_s = now_s();
+    s_move_from_known = known;
+    memcpy(s_move_bssid, bssid, sizeof(s_move_bssid));
+    s_move_ch_from = channel;
+    s_move_rssi_from = rssi;
+    s_move_assoc = false;
+    s_move_same = false;
+}
+
+/* The association a move led to (MSG_STA_CONNECTED). */
+static void move_associated(bool have, const wifi_ap_record_t *ap)
+{
+    if (!s_move_on) {
+        return;
+    }
+    s_move_assoc = true;
+    s_move_ch_to = have ? ap->primary : 0;
+    s_move_rssi_to = have ? ap->rssi : 0;
+    s_move_same = have && s_move_from_known && memcmp(ap->bssid, s_move_bssid, sizeof(s_move_bssid)) == 0;
+}
+
+/* The address on the new link: the move is complete. Its record stands for
+ * the gap, so no DIAG_EV_WIFI_UP follows it. */
+static void move_done(void)
+{
+    if (!s_move_on || !s_move_assoc) {
+        return;
+    }
+    uint32_t secs = now_s() - s_move_start_s;
+    s_move_on = false;
+    s_outage = false;
+    s_move_rec_a = net_roam_rec_a(s_move_ch_from, s_move_ch_to, (net_roam_by_t)s_move_by, s_move_same);
+    s_move_rec_b = net_roam_rec_b(s_move_rssi_from, s_move_rssi_to, secs);
+    s_move_rec_pending = true;
+    flush_move_record();
+    if (s_move_same) {
+        ESP_LOGW(TAG, "back on the same access point after all (channel %u, %d dBm), %u s without an address",
+                 s_move_ch_to, s_move_rssi_to, (unsigned)secs);
+        return;
+    }
+    taskENTER_CRITICAL(&s_lock);
+    s_st.roams++;
+    taskEXIT_CRITICAL(&s_lock);
+    ESP_LOGI(TAG, "moved to another access point %s: channel %u, %d dBm -> channel %u, %d dBm, %u s without an address",
+             s_move_by == NET_ROAM_BY_AP ? "at the access point's request" : "with a stronger signal", s_move_ch_from,
+             s_move_rssi_from, s_move_ch_to, s_move_rssi_to, (unsigned)secs);
+}
+
+/* The user's scan of every network (the setup page's list). */
+static esp_err_t user_scan_driver_start(void)
+{
+    wifi_scan_config_t sc = { .show_hidden = false, .scan_type = WIFI_SCAN_TYPE_ACTIVE };
+    return esp_wifi_scan_start(&sc, false);
+}
+
+/* The roaming scan is over (read, failed or abandoned): a user's scan that waited for it starts now. */
+static void roam_scan_end(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    s_roam_scanning = false;
+    bool user = s_user_scan_queued;
+    s_user_scan_queued = false;
+    if (user) {
+        s_scan_started_us = esp_timer_get_time();
+    }
+    taskEXIT_CRITICAL(&s_lock);
+    if (user && user_scan_driver_start() != ESP_OK) {
+        taskENTER_CRITICAL(&s_lock);
+        s_scanning = false;
+        taskEXIT_CRITICAL(&s_lock);
+        ESP_LOGW(TAG, "scan did not start: the list stays as it was");
+        post_event(NETWORK_EVENT_SCAN_DONE);   /* the page stops waiting */
+    }
+}
+
+/* A scan for the station's own SSID only, short on each channel: the setup page's list is not touched. */
+static void roam_scan_start(uint32_t now)
+{
+    static uint8_t ssid[33];   /* the driver reads it after the call returned */
+    taskENTER_CRITICAL(&s_lock);
+    bool busy = s_scanning || s_roam_scanning;
+    if (!busy) {
+        s_roam_scanning = true;
+        s_roam_scan_started_us = esp_timer_get_time();
+    }
+    taskEXIT_CRITICAL(&s_lock);
+    if (busy) {
+        net_roam_scan_failed(&s_roam, now);
+        return;
+    }
+    memset(ssid, 0, sizeof(ssid));
+    memcpy(ssid, s_ssid, strnlen(s_ssid, sizeof(ssid) - 1));
+    wifi_scan_config_t sc = {
+        .ssid = ssid,
+        .show_hidden = false,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time = { .active = { .min = 0, .max = ROAM_SCAN_MAX_MS } },
+        .home_chan_dwell_time = ROAM_SCAN_HOME_MS,
+    };
+    esp_err_t err = esp_wifi_scan_start(&sc, false);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "roaming scan: %s (tried again in %u s)", esp_err_to_name(err), (unsigned)NET_ROAM_RETRY_S);
+        roam_scan_end();
+        net_roam_scan_failed(&s_roam, now);
+    }
+}
+
+/* SCAN_DONE of a roaming scan: the network's access points (its SSID, the security the station uses). */
+static void roam_scan_done(void)
+{
+    net_roam_bss_t found[ROAM_SCAN_KEEP];
+    size_t n = 0;
+    size_t len = strnlen(s_ssid, 32);
+    bool want_secured = s_pass[0] != '\0';
+    wifi_ap_record_t rec;
+    while (esp_wifi_scan_get_ap_record(&rec) == ESP_OK) {
+        bool secured = rec.authmode != WIFI_AUTH_OPEN && rec.authmode != WIFI_AUTH_WEP && rec.authmode != WIFI_AUTH_OWE;
+        if (strnlen((const char *)rec.ssid, sizeof(rec.ssid)) != len || memcmp(rec.ssid, s_ssid, len) != 0 ||
+            secured != want_secured) {
+            continue;
+        }
+        net_roam_bss_t e = { .rssi = rec.rssi, .channel = rec.primary };
+        memcpy(e.bssid, rec.bssid, sizeof(e.bssid));
+        size_t at = n;
+        if (n < ROAM_SCAN_KEEP) {
+            n++;
+        } else {
+            at = 0;   /* full: the weakest gives way to a stronger one */
+            for (size_t i = 1; i < n; i++) {
+                if (found[i].rssi < found[at].rssi) {
+                    at = i;
+                }
+            }
+            if (found[at].rssi >= e.rssi) {
+                continue;
+            }
+        }
+        found[at] = e;
+    }
+    (void)esp_wifi_clear_ap_list();
+    roam_scan_end();
+    net_roam_scan_done(&s_roam, found, n, now_s());
+    if (s_roam.hits > 0) {
+        ESP_LOGI(TAG, "roaming scan: a stronger access point, %d dBm on channel %u (%d dBm here), found %u of %u times",
+                 s_roam.cand.rssi, s_roam.cand.channel, net_roam_avg_dbm(&s_roam), s_roam.hits,
+                 (unsigned)NET_ROAM_HITS);
+    } else {
+        ESP_LOGI(TAG, "roaming scan: %u access point(s) of the network, none clearly stronger than here (%d dBm)",
+                 (unsigned)n, net_roam_avg_dbm(&s_roam));
+    }
+}
+
+/* The station's own move: a deliberate reconnect, whose connect scan joins the strongest access point. */
+static void roam_go(void)
+{
+    uint8_t bssid[6];
+    taskENTER_CRITICAL(&s_lock);
+    bool known = s_st.bssid_known;
+    memcpy(bssid, s_st.bssid, sizeof(bssid));
+    uint8_t channel = s_st.channel;
+    int8_t rssi = s_st.rssi;
+    taskEXIT_CRITICAL(&s_lock);
+    move_begin(NET_ROAM_BY_STATION, known, bssid, channel, rssi);
+    ESP_LOGW(TAG, "moving to a stronger access point: %d dBm on channel %u found twice, %d dBm here (channel %u)",
+             s_roam.cand.rssi, s_roam.cand.channel, net_roam_avg_dbm(&s_roam), channel);
+    s_attempt = 0;
+    disconnect_then_connect();
+}
+
+/* Once a second: the gate for the access point's requests, then the station's own check. */
+static void roam_tick(uint32_t now)
+{
+    roam_hold_t h = roam_hold();
+    roam_hold_t gate = (h == ROAM_HOLD_NONE && !net_roam_btm_open(&s_roam, false, now)) ? ROAM_HOLD_GAP : h;
+    __atomic_store_n(&s_btm_hold, (uint8_t)gate, __ATOMIC_RELAXED);
+    taskENTER_CRITICAL(&s_lock);
+    bool user_scan = s_scanning;
+    bool ladder = s_st.ladder_active;
+    taskEXIT_CRITICAL(&s_lock);
+    if (user_scan) {
+        return;   /* no roaming scan beside the user's */
+    }
+    bool held = h != ROAM_HOLD_NONE || s_leaving || ladder || s_move_on || !s_has_ip || s_sta_state != STA_CONNECTED;
+    switch (net_roam_tick(&s_roam, held, now)) {
+    case NET_ROAM_SCAN:
+        roam_scan_start(now);
+        break;
+    case NET_ROAM_GO:
+        roam_go();
+        break;
+    default:
+        break;
+    }
+}
+
+/* The station's own configuration again (no access point named), after a move the supplicant pointed at one failed. */
+static void restore_sta_config(void)
+{
+    wifi_config_t cfg;
+    build_sta_config(&cfg);
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    memset(&cfg, 0, sizeof(cfg));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "station config: %s", esp_err_to_name(err));
+    }
+}
+#endif /* CONFIG_NETWORK_ROAM */
+
+#if CONFIG_ESP_WIFI_WNM_SUPPORT
+#define WNM_ACTION_BSS_TM_REQUEST 7   /* IEEE 802.11 WNM action: BSS transition management request */
+
+struct wpa_supplicant;
+void __real_ieee802_11_rx_wnm_action(struct wpa_supplicant *wpa_s, uint8_t *sender, uint8_t *payload, size_t len);
+void __wrap_ieee802_11_rx_wnm_action(struct wpa_supplicant *wpa_s, uint8_t *sender, uint8_t *payload, size_t len);
+
+/*
+ * The supplicant's handler of the access point's 802.11v action frames,
+ * wrapped at link time (CMakeLists.txt); it runs on the Wi-Fi driver's task.
+ * payload: the action, then for a BSS transition request its dialog token
+ * and request mode. A request the gate keeps out never reaches the
+ * supplicant: no answer, no scan, no move. An update is checked here too, so
+ * one that starts between two ticks of the net task is covered at once.
+ * Without CONFIG_NETWORK_ROAM the station does not take such requests
+ * (btm_enabled is off) and this only passes frames on.
+ */
+void __wrap_ieee802_11_rx_wnm_action(struct wpa_supplicant *wpa_s, uint8_t *sender, uint8_t *payload, size_t len)
+{
+#if CONFIG_NETWORK_ROAM
+    if (payload != NULL && len >= 3 && payload[0] == WNM_ACTION_BSS_TM_REQUEST) {
+        uint8_t mode = payload[2];
+        const char *why = NULL;
+        if (lifecycle_update_active() != LIFECYCLE_UPDATE_NONE) {
+            why = roam_hold_text(ROAM_HOLD_UPDATE);
+        } else if (!lifecycle_reboot_inhibited(&why)) {
+            roam_hold_t h = (roam_hold_t)__atomic_load_n(&s_btm_hold, __ATOMIC_RELAXED);
+            why = h != ROAM_HOLD_NONE ? roam_hold_text(h) : NULL;
+        }
+        if (!net_roam_btm_pass(why == NULL, mode)) {
+            ESP_LOGW(TAG, "the access point asks the station to move to another one (request mode 0x%02x): ignored, %s",
+                     mode, why);
+            return;
+        }
+        ESP_LOGI(TAG, "the access point asks the station to move to another one (request mode 0x%02x)%s", mode,
+                 why != NULL ? ": taken, it disconnects the station anyway" : "");
+    }
+#endif
+    __real_ieee802_11_rx_wnm_action(wpa_s, sender, payload, len);
+}
+#endif /* CONFIG_ESP_WIFI_WNM_SUPPORT */
+
 /* ---- message handling ---------------------------------------------------------------- */
 
 static void start_scan_internal(void)
@@ -1529,7 +1910,19 @@ static void start_scan_internal(void)
 
 static void handle_scan_done(void)
 {
-    if (!scanning()) {
+    taskENTER_CRITICAL(&s_lock);
+    bool user = s_scanning;
+#if CONFIG_NETWORK_ROAM
+    bool roam = s_roam_scanning;
+#endif
+    taskEXIT_CRITICAL(&s_lock);
+#if CONFIG_NETWORK_ROAM
+    if (roam) {
+        roam_scan_done();
+        return;
+    }
+#endif
+    if (!user) {
         (void)esp_wifi_clear_ap_list();   /* not a scan of ours: keep the cache */
         return;
     }
@@ -1557,7 +1950,19 @@ static void handle_disconnected(uint8_t reason, int8_t rssi)
     bool was_linked = s_associated;
     s_associated = false;
     s_trial_assoc = false;   /* only the next association can confirm trial credentials */
+#if CONFIG_NETWORK_ROAM
+    uint8_t from_bssid[6];   /* the link that ended: where a move the access point asked for starts */
+    net_roam_disassociated(&s_roam);
+    s_steer_read = false;
+#endif
     taskENTER_CRITICAL(&s_lock);
+#if CONFIG_NETWORK_ROAM
+    bool from_known = s_st.bssid_known;
+    memcpy(from_bssid, s_st.bssid, sizeof(from_bssid));
+    uint8_t from_channel = s_st.channel;
+    int8_t from_rssi = s_st.rssi;
+    s_st.ap_steering = -1;
+#endif
     s_st.associated = false;
     s_st.bssid_known = false;
     s_st.tx_power_known = false;
@@ -1579,6 +1984,32 @@ static void handle_disconnected(uint8_t reason, int8_t rssi)
     if (s_sta_state == STA_IDLE || !s_sta_configured) {
         return;          /* stopping, restarting or unconfigured */
     }
+#if CONFIG_NETWORK_ROAM
+    if (reason == WIFI_REASON_ROAMING) {
+        /* The supplicant moves the station to the access point the access
+         * point named (802.11v): the driver connects by itself, and the net
+         * task waits for it as for its own connect. */
+        if (!s_move_on) {
+            move_begin(NET_ROAM_BY_AP, from_known && was_linked, from_bssid, was_linked ? from_channel : 0,
+                       net_rssi_known(rssi) ? rssi : (was_linked ? from_rssi : 0));
+            net_roam_moved(&s_roam, now_s());
+            ESP_LOGI(TAG, "moving to another access point at the access point's request (from channel %u, %d dBm)",
+                     s_move_ch_from, s_move_rssi_from);
+        }
+        s_sta_state = STA_CONNECTING;
+        s_deadline_us = esp_timer_get_time() + (int64_t)CONNECT_WATCHDOG_MS * 1000;
+        return;
+    }
+    if (s_move_on) {
+        /* The move did not reach an address: an outage from here on, recorded like any other. */
+        ESP_LOGW(TAG, "the move to another access point did not complete (reason %u): connecting again", reason);
+        bool by_ap = s_move_by == NET_ROAM_BY_AP;
+        s_move_on = false;
+        if (by_ap) {
+            restore_sta_config();   /* the supplicant named one access point: any of the network again */
+        }
+    }
+#endif
     if (!was_linked) {
         taskENTER_CRITICAL(&s_lock);
         s_st.connect_failures++;
@@ -1742,6 +2173,11 @@ static void handle_got_ip(void)
     s_has_ip = true;
     s_ip_since_s = now_s();
     s_attempt = 0;
+#if CONFIG_NETWORK_ROAM
+    if (!was) {
+        move_done();   /* a move's own record instead of the return after an outage */
+    }
+#endif
     if (s_outage && !was) {
         /* The address is back (not the first one of this boot). */
         s_outage = false;
@@ -1974,7 +2410,11 @@ static void handle_msg(const net_msg_t *m)
             s_trial_assoc = true;   /* a link the trial credentials made */
             net_cred_trial_associated(&s_trial);
         }
-        if (s_had_link) {
+        bool moving = false;   /* a move between access points is no drop to count */
+#if CONFIG_NETWORK_ROAM
+        moving = s_move_on;
+#endif
+        if (s_had_link && !moving) {
             taskENTER_CRITICAL(&s_lock);
             s_st.reconnects++;
             taskEXIT_CRITICAL(&s_lock);
@@ -1989,6 +2429,17 @@ static void handle_msg(const net_msg_t *m)
 #else
         bool have = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
         bool have_power = have && esp_wifi_get_max_tx_power(&power) == ESP_OK;
+#endif
+#if CONFIG_NETWORK_ROAM
+        if (!have) {
+            memset(ap.bssid, 0, sizeof(ap.bssid));   /* no access point known: never the "same one" */
+        }
+        net_roam_associated(&s_roam, ap.bssid, now_s());
+        if (have) {
+            net_roam_rssi(&s_roam, ap.rssi);
+        }
+        s_steer_read = false;
+        move_associated(have, &ap);
 #endif
         taskENTER_CRITICAL(&s_lock);
         s_st.associated = true;
@@ -2088,6 +2539,9 @@ static void resync(void)
         s_associated = true;
         s_sta_state = STA_CONNECTED;
         ip6_link_up(s_sta, "station");   /* its link-up message was lost */
+#if CONFIG_NETWORK_ROAM
+        net_roam_associated(&s_roam, ap.bssid, now_s());
+#endif
         taskENTER_CRITICAL(&s_lock);
         s_st.associated = true;
         taskEXIT_CRITICAL(&s_lock);
@@ -2168,6 +2622,18 @@ static void housekeeping(void)
         (void)esp_wifi_scan_stop();
         (void)esp_wifi_clear_ap_list();
     }
+#if CONFIG_NETWORK_ROAM
+    taskENTER_CRITICAL(&s_lock);
+    bool roam_stuck = s_roam_scanning && now_us - s_roam_scan_started_us > (int64_t)SCAN_WATCHDOG_MS * 1000;
+    taskEXIT_CRITICAL(&s_lock);
+    if (roam_stuck) {
+        ESP_LOGW(TAG, "roaming scan did not finish: abandoned");
+        (void)esp_wifi_scan_stop();
+        (void)esp_wifi_clear_ap_list();
+        roam_scan_end();
+        net_roam_scan_failed(&s_roam, now_s());
+    }
+#endif
 
     if (s_started && s_sta_configured && !ap_is_up() && wifi_start_due()) {
         /* Wi-Fi did not start (a failed start or restart): nothing else would try again. */
@@ -2189,6 +2655,15 @@ static void housekeeping(void)
     case STA_CONNECTING:
         if (now_us >= s_deadline_us) {
             ESP_LOGW(TAG, "connect attempt timed out");
+#if CONFIG_NETWORK_ROAM
+            if (s_move_on) {
+                bool by_ap = s_move_by == NET_ROAM_BY_AP;
+                s_move_on = false;   /* an outage from here on */
+                if (by_ap) {
+                    restore_sta_config();
+                }
+            }
+#endif
             schedule_retry();
         }
         break;
@@ -2211,6 +2686,19 @@ static void housekeeping(void)
         if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
             int8_t power = 0;
             bool have_power = esp_wifi_get_max_tx_power(&power) == ESP_OK;
+#if CONFIG_NETWORK_ROAM
+            net_roam_rssi(&s_roam, ap.rssi);
+            /* Once per association, a few seconds in (the supplicant has the
+             * access point's capabilities by then): whether it offers 802.11v
+             * BSS transition management, and so whether its requests can come. */
+            int8_t steer = -1;
+            if (!s_steer_read && (uint32_t)(now - s_roam.assoc_s) >= ROAM_STEER_READ_S) {
+                s_steer_read = true;
+#if CONFIG_ESP_WIFI_WNM_SUPPORT
+                steer = esp_wnm_is_btm_supported_connection() ? 1 : 0;
+#endif
+            }
+#endif
             taskENTER_CRITICAL(&s_lock);
             s_st.rssi = ap.rssi;
             s_st.channel = ap.primary;
@@ -2220,10 +2708,19 @@ static void housekeeping(void)
                 s_st.tx_power_known = true;
                 s_st.tx_power_qdbm = power;
             }
+#if CONFIG_NETWORK_ROAM
+            if (steer >= 0) {
+                s_st.ap_steering = steer;
+            }
+#endif
             taskEXIT_CRITICAL(&s_lock);
         }
 #endif
     }
+#if CONFIG_NETWORK_ROAM
+    roam_tick(now);
+    flush_move_record();
+#endif
     if (now - s_last_check_s >= CHECK_INTERVAL_S) {
         s_last_check_s = now;
         ensure_fallback_dns();
@@ -2345,7 +2842,16 @@ esp_err_t network_init(void)
     taskENTER_CRITICAL(&s_lock);
     s_st.probe_age_s = UINT32_MAX;
     s_st.ap_close_in_s = UINT32_MAX;
+    s_st.ap_steering = -1;
     taskEXIT_CRITICAL(&s_lock);
+#if CONFIG_NETWORK_ROAM
+    const net_roam_cfg_t roam_cfg = {
+        .weak_dbm = CONFIG_NETWORK_ROAM_WEAK_DBM,
+        .gain_db = CONFIG_NETWORK_ROAM_MIN_GAIN_DB,
+        .min_interval_s = CONFIG_NETWORK_ROAM_MIN_INTERVAL_S,
+    };
+    net_roam_init(&s_roam, &roam_cfg);
+#endif
 
     s_queue = xQueueCreate(NET_QUEUE_LEN, sizeof(net_msg_t));
     s_start_done = xSemaphoreCreateBinary();
@@ -2617,13 +3123,22 @@ esp_err_t network_scan_start(void)
     }
     taskENTER_CRITICAL(&s_lock);
     bool ok = s_wifi_sta_on && !s_scanning;
+    bool queued = false;
     if (ok) {
         s_scanning = true;
         s_scan_started_us = esp_timer_get_time();
+#if CONFIG_NETWORK_ROAM
+        /* A roaming scan runs (a second or two): this one starts when it is done. */
+        queued = s_roam_scanning;
+        s_user_scan_queued = queued;
+#endif
     }
     taskEXIT_CRITICAL(&s_lock);
     if (!ok) {
         return ESP_ERR_INVALID_STATE;
+    }
+    if (queued) {
+        return ESP_OK;
     }
     wifi_scan_config_t sc = { .show_hidden = false, .scan_type = WIFI_SCAN_TYPE_ACTIVE };
     esp_err_t err = esp_wifi_scan_start(&sc, false);

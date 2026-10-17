@@ -248,6 +248,16 @@ typedef enum {
      * fixed height minus the receiver's, in m (bits 8-31, signed).
      */
     DIAG_EV_FIXED_POS = 24,
+    /**
+     * The station moved to another access point of its network and got its
+     * address there (network.h, "Moving between access points"):
+     * a = channel before (bits 0-7) | channel after (8-15) | who started it
+     * (16-23: 1 the access point asked, 2 the station found a clearly
+     * stronger one) | bit 24 the reconnect found no stronger one after all
+     * and stayed; b = RSSI before (bits 0-7) | after (8-15), each an int8_t
+     * in dBm with 0 = unknown | seconds without an address (16-30).
+     */
+    DIAG_EV_WIFI_ROAM = 25,
 } diag_event_t;
 
 /** DIAG_EV_FIXED_POS events (low byte of `a`). */

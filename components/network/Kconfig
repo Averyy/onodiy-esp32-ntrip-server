@@ -84,6 +84,58 @@ menu "Station: network"
         range 1 65535
         default 443
 
+    config NETWORK_ROAM
+        bool "Move between the access points of one network (mesh)"
+        depends on !NETWORK_QEMU_ETHERNET
+        default y
+        help
+            For a network of several access points under one name (a mesh,
+            or a router with repeaters). The station tells its access point
+            that it takes 802.11k radio measurement and 802.11v BSS
+            transition requests, so the network can steer it to a better
+            node, and while its own signal is weak it looks for a clearly
+            stronger access point of the network and reconnects to it.
+            Every move drops the caster sessions for a few seconds, so moves
+            are rare: none during a firmware update or a receiver flash,
+            none while the station's own access point is up or changed
+            credentials are on trial, at most one the network asks for per
+            5 min (unless it disconnects the station anyway) and one of the
+            station's own per NETWORK_ROAM_MIN_INTERVAL_S. A strong signal
+            never makes the station scan. Each move goes to the event
+            journal. Off: the station joins the strongest access point when
+            it connects and stays there until the link drops.
+            The 802.11k/v support itself is ESP_WIFI_11KV_SUPPORT (on in
+            sdkconfig.defaults).
+
+    config NETWORK_ROAM_WEAK_DBM
+        int "Weak signal for the station's own check (dBm)"
+        depends on NETWORK_ROAM
+        range -90 -50
+        default -70
+        help
+            The station looks for a stronger access point only while its
+            signal, averaged over about 20 s, has been at or below this for
+            a minute.
+
+    config NETWORK_ROAM_MIN_GAIN_DB
+        int "How much stronger another access point must be (dB)"
+        depends on NETWORK_ROAM
+        range 6 30
+        default 12
+        help
+            An access point of the same network at least this much stronger
+            than the current one, in two scans 30 s apart, makes the station
+            reconnect (the connect joins the strongest access point).
+
+    config NETWORK_ROAM_MIN_INTERVAL_S
+        int "Shortest time between two of the station's own moves (s)"
+        depends on NETWORK_ROAM
+        range 300 86400
+        default 1800
+        help
+            Counted from the previous move of either kind, so a move the
+            access point asked for also stands for at least this long.
+
     config NETWORK_QEMU_ETHERNET
         bool "QEMU development build: emulated Ethernet instead of Wi-Fi"
         depends on ETH_USE_OPENETH

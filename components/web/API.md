@@ -1586,9 +1586,9 @@ removes it. The slot reconnects. `200` with the slot entry. Errors:
   "mdns_host": "onocoydiy",
   "configured": true, "credentials_unreadable": false, "ssid": "Home",
   "online": true, "associated": true, "ip": "192.168.1.50", "rssi": -60, "channel": 6,
-  "bssid": "AA:BB:CC:DD:EE:FF", "tx_power_dbm": 19.5,
+  "bssid": "AA:BB:CC:DD:EE:FF", "tx_power_dbm": 19.5, "ap_steering": true,
   "time_synced": true, "upstream": "ok", "probe_age_s": 120,
-  "reconnects": 1, "connect_failures": 0, "offline_s": 0, "retry_in_s": 0,
+  "reconnects": 1, "connect_failures": 0, "roams": 0, "offline_s": 0, "retry_in_s": 0,
   "last_disconnect_reason": 8, "fallback_dns": false, "assoc_no_ip_s": 0,
   "cred_trial": false, "cred_trial_left_s": 0, "cred_pending": false, "pending_ssid": null,
   "cred_reverted": false, "cred_reverted_why": null,
@@ -1608,6 +1608,16 @@ like `rssi` and `channel` `null` while not associated (and in the QEMU
 build, whose emulated link has no access point). Diagnostics for a weak
 link (the UI's Diagnostics shows them under Chip and Wi-Fi, with the
 channel); only in this admin route, never in the public status.
+`ap_steering`: the access point takes part in 802.11v BSS transition
+management, so it can ask the station to move to another access point of
+the network (a mesh steering it); read once, a few seconds into each
+association; `null` before that, while not associated, and with roaming
+off (`CONFIG_NETWORK_ROAM`) or in the QEMU build. `roams`: moves to another
+access point of the network since boot, the ones the access point asked
+for and the station's own (to a clearly stronger access point while its
+signal is weak); each is a `wifi_roam` journal entry (so is an own
+reconnect that stayed on the same access point, not counted here), and
+none counts in `reconnects` (links re-established after a drop).
 `last_disconnect_reason` is the numeric `wifi_err_reason_t`. `scan.results`
 are the cached ones (no radio activity; at most 24); `age_s` is `null`
 before the first scan. `mdns_host`, `assoc_no_ip_s`, `cred_*`,
@@ -1695,6 +1705,8 @@ station goes back to its current credentials). `200 {"ok": true}`;
 
 Empty body. `202 {"accepted": true}`; `scan_done` event when finished. A
 scan while connected stalls the casters for seconds: the UI warns first.
+One asked for during the station's own short scan for its network
+(roaming, `GET /api/wifi` `roams`) starts right after that one.
 Errors: `409 busy` (a scan runs, or the station is connecting),
 `429 rate_limited` (one scan per 15 s).
 
@@ -2283,6 +2295,7 @@ by `kind` (integers; only a `wifi_disconnect` entry's `b` can be `null`):
 | `caster_up` | slot (bits 0-7) \| failed attempts since the previous session (bits 16-30) | outage s |
 | `caster_stop` | slot (bits 0-7) \| stop reason (`ntrip_stop_t`, bits 8-15): the Onocoy login guard stopped the slot until the user acts (once per stop) | 0 |
 | `wifi_up` | connect attempts during the outage | outage s |
+| `wifi_roam` | the station moved to another access point of its network and got its address there (no `wifi_disconnect` or `wifi_up` for it): channel before (bits 0-7) \| channel after (bits 8-15) \| who started it (bits 16-23: 1 the access point asked, 2 the station found a clearly stronger one) \| bit 24: its reconnect found no stronger one after all and it stayed (a channel of 0 = unknown) | RSSI before (bits 0-7) \| after (bits 8-15), each a signed byte in dBm, 0 = unknown \| seconds without an address (bits 16-30) |
 | `rx_maintenance` | 1 entry, 0 exit | chosen duration s (entry), time spent s (exit) |
 | `rx_boot` | after a power-on reset, whether the receiver kept running (`diag_rx_boot_t`): 1 kept running (only the ESP32 was reset, its reset pin), 2 restarted with it (the power was cut), 3 unknown; written once per power-on boot, when the station knows (`station.rx_boot` in `/api/health`); only 2 counts toward `power_lost` | what told it (`diag_rx_boot_by_t`): 0 nothing, 1 its restart banner before any data, 2 its version log's time since its restart, 3 RTCM or NMEA at once |
 | `live_view` | event (bits 0-7: 1 opened, 2 extended, 3 closed, 4 satellite-in-view output on, 5 off) \| detail << 8 (closed: end reason; on/off: 0 accepted, 1 rejected, 2 no answer, 3 not sent) | opened: window s; extended: s left; closed: s open; on/off: ms the lease held RTCM back |
@@ -2842,7 +2855,7 @@ after it). The journal's `a` and `b` carry these C values.
 | `ledger_clock_t` | `none`, `sntp`, `gnss` |
 | `gnss_sys_t` | `gps`, `glonass`, `galileo`, `sbas`, `qzss`, `beidou`, `navic` |
 | `gnss_band_t` | `l1`, `l2`, `l5`, `l6`, `e5ab` |
-| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21, `sg_test` = 22, `rx_boot` = 23, `fixed_check` = 24 |
+| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21, `sg_test` = 22, `rx_boot` = 23, `fixed_check` = 24, `wifi_roam` = 25 |
 | `station_sgt_state_t` | `idle`, `switching`, `settling`, `measuring`, `deciding`, `restoring` |
 | `station_sgt_outcome_t` | (none: `null`), `kept`, `timed_out`, `cancelled`, `rejected`, `failed`, `interrupted` |
 | `station_sgt_res_status_t` | `pending`, `measuring`, `done`, `rejected` |
