@@ -1506,6 +1506,33 @@ TEST_CASE("receiver: message 1230 is null until it was ever applied", "[web_buil
     cJSON_Delete(root);
 }
 
+TEST_CASE("receiver: a survey unfinished after its window says so in both views, admin form only", "[web_build]")
+{
+    fixture();
+    station_status_t *st = &s_snap.st;
+    st->surveying = false;   /* the station's window ended */
+    st->survey_window_left_s = 0;
+    st->survey_unfinished = true;   /* no data: the survey did not */
+    cJSON *root = build_gnss_json(st);
+    const cJSON *sv = at(root, "survey");
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(sv, "active")));
+    TEST_ASSERT_EQUAL(0, at(sv, "window_left_s")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(sv, "unfinished")));
+    cJSON_Delete(root);
+    root = build_status(false);
+    const cJSON *rx = at(root, "receiver");
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(rx, "surveying")));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(rx, "survey_unfinished")));
+    cJSON_Delete(root);
+    root = build_status(true);
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(at(root, "receiver"), "survey_unfinished"));
+    cJSON_Delete(root);
+    st->survey_unfinished = false;
+    root = build_gnss_json(st);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(at(root, "survey"), "unfinished")));
+    cJSON_Delete(root);
+}
+
 TEST_CASE("GET /api/update: a failed check says why, when, and the app slot's size", "[web_build]")
 {
     fixture();

@@ -2334,6 +2334,7 @@ static void publish_status(const stn_in_t *in)
     }
     o->surveying = stn_surveying(&core, in->now_ms);
     o->survey_window_left_s = stn_survey_left_s(&core, in->now_ms);
+    o->survey_unfinished = stn_survey_unfinished(&core, in->now_ms);
     o->lease_held = s_lease != NULL || s_hold_lease != NULL || s_boot_lease != NULL;
     o->detect_failures = core.detect_failures;
     o->detect_saw_bytes = core.detect_saw_bytes;

@@ -1107,6 +1107,15 @@ unsigned stn_take_notes(stn_t *s, stn_note_t *out, unsigned cap);
 bool stn_surveying(const stn_t *s, int64_t now_ms);
 uint32_t stn_survey_left_s(const stn_t *s, int64_t now_ms);
 /**
+ * A survey started and has not finished (by the base-mode read-back, or by
+ * its time with a steady 1005): the receiver may still be surveying. True
+ * inside the window (stn_surveying) and after it: a survey makes no
+ * progress without satellites, so one without data outlasts the window,
+ * which only times the station's mode poll, the station-message exemption
+ * and health's survey rule. The lock follows once it finishes.
+ */
+bool stn_survey_unfinished(const stn_t *s, int64_t now_ms);
+/**
  * What follows a failed apply, in words for its log line: "the station
  * tries again in 10 min" for retry_in_s > 0 (STN_NOTE_APPLY_FAILED's a),
  * else that nothing retries it on its own. Pure.

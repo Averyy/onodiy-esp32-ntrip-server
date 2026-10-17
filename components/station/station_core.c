@@ -1747,6 +1747,11 @@ uint32_t stn_survey_left_s(const stn_t *s, int64_t now_ms)
     return um98x_survey_window_left_s(&s->survey, now_ms);
 }
 
+bool stn_survey_unfinished(const stn_t *s, int64_t now_ms)
+{
+    return s->survey.active && !um98x_survey_done(&s->survey, now_ms);
+}
+
 /* ---- power-on reset: did the receiver keep running? -------------------------- */
 
 stn_rxboot_t stn_rxboot_judge(const stn_rxboot_in_t *in, stn_rxboot_by_t *by)

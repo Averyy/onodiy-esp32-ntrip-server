@@ -2788,6 +2788,45 @@ TEST_CASE("station core: by the clock, a survey window restored with maintenance
     TEST_ASSERT_EQUAL_UINT32(99, stn_survey_left_s(&w.s, w.in.now_ms));
 }
 
+TEST_CASE("station core: a survey without data outlasts its window and is locked once it finishes", "[station]")
+{
+    /* The antenna goes right after the survey started: the receiver keeps
+     * its survey-in, which makes no progress without satellites. */
+    sim_t w;
+    sim_init(&w, false);
+    boot_surveying(&w);
+    TEST_ASSERT_TRUE(stn_survey_unfinished(&w.s, w.in.now_ms));
+    w.rtcm_on = false;
+    TEST_ASSERT_EQUAL_UINT(0, noant_run(&w, 15 * 60, NULL));
+    TEST_ASSERT_FALSE(stn_surveying(&w.s, w.in.now_ms));   /* the station's window ended */
+    TEST_ASSERT_EQUAL_UINT32(0, stn_survey_left_s(&w.s, w.in.now_ms));
+    TEST_ASSERT_TRUE(stn_survey_unfinished(&w.s, w.in.now_ms));   /* the survey did not */
+    TEST_ASSERT_EQUAL_UINT(0, noant_run(&w, 60 * 60, NULL));
+    TEST_ASSERT_TRUE(stn_survey_unfinished(&w.s, w.in.now_ms));
+
+    /* Data again, with a 1005 that stays put: finished (its time is up and the position steady), then locked. */
+    w.rtcm_on = true;
+    w.skip_station = false;
+    const int64_t arp[3] = { 9181291234LL, -43460712345LL, 45619773456LL };
+    stn_job_t j;
+    memset(&j, 0, sizeof(j));
+    unsigned frames = 0;
+    while (j.kind == STN_JOB_NONE && frames < UM98X_SURVEY_STABLE_FRAMES + 5) {
+        TEST_ASSERT_TRUE(stn_survey_unfinished(&w.s, w.in.now_ms));
+        stn_on_arp(&w.s, arp);
+        frames++;
+        j = sim_next(&w);
+        if (j.kind == STN_JOB_NONE) {
+            sim_tick(&w);
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT(UM98X_SURVEY_STABLE_FRAMES, frames);
+    TEST_ASSERT_FALSE(stn_survey_unfinished(&w.s, w.in.now_ms));
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_WHY_LOCK, j.why);
+    TEST_ASSERT_EQUAL(STN_CHANGE_LOCK, j.change);
+}
+
 /* ---- live view ---------------------------------------------------------------- */
 
 #define LIVE_MS (10 * MIN_MS)

@@ -220,8 +220,9 @@
  * and the signal group it runs (rx_sg), and for the same profile
  * profile_applied and profile_acknowledged, the fixed-position verdict and
  * the alerts; the survey
- * window runs on (surveying, survey_window_left_s, and after maintenance
- * the station goes on with it). The rest of what an apply session read back
+ * window runs on (surveying, survey_window_left_s, survey_unfinished, and
+ * after maintenance the station goes on with it). The rest of what an
+ * apply session read back
  * (rx_settings, rx_bands) stays this boot's, unknown until the next
  * configuration, as after any reset.
  * PROVISIONAL, to be confirmed on hardware (whether input on the link can
@@ -511,6 +512,8 @@ typedef struct {
     um98x_base_position_t position;  /**< locked or last surveyed position */
     bool surveying;                  /**< inside the survey window */
     uint32_t survey_window_left_s;   /**< until the survey window ends (0 when not surveying) */
+    bool survey_unfinished;          /**< a survey started and has not finished: the receiver may still survey (true while
+                                          surveying, and after the window: a survey makes no progress without satellites) */
     bool lease_held;                 /**< a COMMAND or RAW lease is held now (read live from the link, also while a job runs) */
     uint32_t since_lease_release_ms; /**< since the last lease release (UINT32_MAX = none this boot) */
     bool flash_journal_open;         /**< open, or present but unreadable; valid in safe mode too */
