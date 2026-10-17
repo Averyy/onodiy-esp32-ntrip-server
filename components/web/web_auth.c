@@ -4,10 +4,18 @@
  *
  * Admin password, sessions and login throttling. Server task only (see
  * web_internal.h), so nothing here takes a lock.
+ *
+ * Remembered sessions (web_core.h) are kept in settings web/sessions as the
+ * SHA-256 of their token with their end in UTC, bound to the admin
+ * password's salt. The record is rewritten only when that set changes: a
+ * login, a logout, a purge of ended sessions, a password change (or any
+ * other end of every session), and once when the clock is first set while a
+ * remembered session made without it is open. Never per request.
  */
 #include <stdio.h>
 #include <string.h>
 
+#include "diag.h"
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -64,6 +72,8 @@ static bool load(void)
     return changed;
 }
 
+static void restore_sessions(void);
+
 void web_auth_init(void)
 {
     web_sess_init(&s_sess);
@@ -78,6 +88,7 @@ void web_auth_init(void)
     } else if (s_state == WEB_ADMIN_NONE) {
         ESP_LOGI(TAG, "no admin password yet: set it over the setup Wi-Fi");
     }
+    restore_sessions();
 }
 
 web_admin_state_t web_auth_admin_state(void)
@@ -107,6 +118,80 @@ void web_auth_admin_reset(void)
 /* ---- sessions -------------------------------------------------------------------------------- */
 
 static char s_cookie[1024];   /* server task only */
+/* settings web/sessions as last read or written (s_kept_len 0 = nothing stored), and the record a store compares. */
+static uint8_t s_kept[WEB_SESS_STORE_MAX_LEN];
+static size_t s_kept_len;
+static bool s_kept_unknown;   /* something unreadable is stored: the next store replaces it */
+static uint8_t s_next[WEB_SESS_STORE_MAX_LEN];
+static web_sess_rec_t s_recs[WEB_SESSIONS_MAX];
+
+/* Keep settings web/sessions in step with the remembered sessions; written only when they changed. Without a stored
+ * password (none, unreadable, or held only in RAM) nothing may stay stored. */
+static void store_sessions(void)
+{
+    if (!settings_is_available()) {
+        return;
+    }
+    size_t n = 0;
+    size_t len = 0;
+    if (s_state == WEB_ADMIN_SET && !s_ram_only) {
+        len = web_sess_store_encode(&s_sess, s_rec.salt, s_next, sizeof(s_next), &n);
+    }
+    if (n == 0) {
+        len = 0;
+    }
+    if (!s_kept_unknown && len == s_kept_len && memcmp(s_next, s_kept, len) == 0) {
+        return;
+    }
+    esp_err_t err = len > 0 ? settings_set_state_blob(SETTINGS_NS_WEB, SETTINGS_KEY_WEB_SESSIONS, s_next, len)
+                            : settings_erase_state_key(SETTINGS_NS_WEB, SETTINGS_KEY_WEB_SESSIONS);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "remembered logins not stored: %s", esp_err_to_name(err));
+        return;   /* the next change tries again */
+    }
+    memcpy(s_kept, s_next, len);
+    s_kept_len = len;
+    s_kept_unknown = false;
+}
+
+/* At boot: the remembered sessions of the stored password whose end has not passed (web_sess_restore); the rest of
+ * the record goes. */
+static void restore_sessions(void)
+{
+    s_kept_len = 0;
+    s_kept_unknown = false;
+    if (!settings_is_available()) {
+        return;
+    }
+    size_t len = sizeof(s_kept);
+    esp_err_t err = settings_get_blob(SETTINGS_NS_WEB, SETTINGS_KEY_WEB_SESSIONS, s_kept, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return;
+    }
+    unsigned back = 0;
+    uint8_t bind[WEB_SESS_BIND_LEN];
+    size_t n = 0;
+    if (err != ESP_OK) {
+        s_kept_unknown = true;
+    } else {
+        s_kept_len = len;
+        if (s_state == WEB_ADMIN_SET && web_sess_store_decode(s_kept, len, bind, s_recs, &n) &&
+            web_ct_equal(bind, s_rec.salt, sizeof(bind))) {
+            int64_t utc = diag_utc_now();
+            for (size_t i = 0; i < n; i++) {
+                back += web_sess_restore(&s_sess, &s_recs[i], web_now_s(), utc) >= 0;
+            }
+        }
+    }
+    ESP_LOGI(TAG, "remembered logins: %u of %u back", back, (unsigned)n);
+    store_sessions();
+}
+
+/* A session's key: the SHA-256 of its cookie's token. */
+static bool token_key(const uint8_t token[16], uint8_t key[WEB_SESSION_KEY_LEN])
+{
+    return web_sha256(token, 16, key);
+}
 
 int web_auth_session(httpd_req_t *req, bool touch)
 {
@@ -127,7 +212,13 @@ int web_auth_session(httpd_req_t *req, bool touch)
         sscanf(&hex[2 * i], "%2x", &v);
         token[i] = (uint8_t)v;
     }
-    int idx = web_sess_find(&s_sess, token, web_now_s());
+    uint8_t key[WEB_SESSION_KEY_LEN];
+    bool ok = token_key(token, key);
+    memset(token, 0, sizeof(token));
+    if (!ok) {
+        return -1;
+    }
+    int idx = web_sess_find(&s_sess, key, web_now_s());
     if (idx >= 0 && touch) {
         web_sess_touch(&s_sess, idx, web_now_s());
     }
@@ -157,18 +248,29 @@ void web_auth_session_touch(int idx)
     web_sess_touch(&s_sess, idx, web_now_s());
 }
 
-int web_auth_start_session(httpd_req_t *req, char cookie_buf[96])
+int web_auth_start_session(httpd_req_t *req, bool remember, char cookie_buf[96])
 {
     uint8_t token[16];
+    uint8_t key[WEB_SESSION_KEY_LEN];
     esp_fill_random(token, sizeof(token));
-    int idx = web_sess_create(&s_sess, token, web_now_s());
+    if (!token_key(token, key)) {
+        memset(token, 0, sizeof(token));
+        return -1;
+    }
+    int idx = web_sess_create(&s_sess, key, remember, web_now_s(), diag_utc_now());
     /* A slot taken from the least recently used session: its clients go. */
     web_ws_close_sessions(1u << idx);
     char hex[33];
     web_hex16(token, hex);
     memset(token, 0, sizeof(token));
-    snprintf(cookie_buf, 96, "sid=%s; HttpOnly; SameSite=Strict; Path=/", hex);
+    if (remember) {
+        snprintf(cookie_buf, 96, "sid=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=%u", hex,
+                 (unsigned)WEB_SESSION_REMEMBER_S);
+    } else {
+        snprintf(cookie_buf, 96, "sid=%s; HttpOnly; SameSite=Strict; Path=/", hex);
+    }
     httpd_resp_set_hdr(req, "Set-Cookie", cookie_buf);
+    store_sessions();
     return idx;
 }
 
@@ -177,6 +279,7 @@ void web_auth_logout(httpd_req_t *req, int idx)
     if (idx >= 0) {
         web_sess_end(&s_sess, idx);
         web_ws_close_sessions(1u << idx);
+        store_sessions();
     }
     httpd_resp_set_hdr(req, "Set-Cookie", "sid=; Max-Age=0; Path=/");
 }
@@ -186,6 +289,7 @@ void web_auth_end_session(int idx)
     if (idx >= 0 && (size_t)idx < WEB_SESSIONS_MAX) {
         web_sess_end(&s_sess, idx);
         web_ws_close_sessions(1u << idx);
+        store_sessions();
     }
 }
 
@@ -195,13 +299,24 @@ void web_auth_end_sessions(int keep)
     if (mask != 0) {
         web_ws_close_sessions(mask);
     }
+    /* Also with nothing ended: after a password change the kept session is stored under the new salt. */
+    store_sessions();
 }
 
 void web_auth_expire(void)
 {
-    uint32_t mask = web_sess_expire(&s_sess, web_now_s());
+    uint32_t now = web_now_s();
+    uint32_t mask = web_sess_expire(&s_sess, now);
+    bool stamped = false;
+    int64_t utc = diag_utc_now();
+    if (utc > 0) {
+        mask |= web_sess_clock(&s_sess, now, utc, &stamped);
+    }
     if (mask != 0) {
         web_ws_close_sessions(mask);
+    }
+    if (mask != 0 || stamped) {
+        store_sessions();
     }
 }
 

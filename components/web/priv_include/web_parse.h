@@ -55,6 +55,9 @@ cJSON *web_parse_body(const char *body, size_t len, web_bad_t *bad);
 /** {"password": "..."}: a string (its rules are checked by the caller, which words the error). */
 bool web_parse_password(const cJSON *root, const char *key, const char **out, web_bad_t *bad);
 
+/** POST /api/session: {"password", "remember"} (remember optional, default false). */
+bool web_parse_login(const cJSON *root, const char **pw, bool *remember, web_bad_t *bad);
+
 /** {"confirm": true}. */
 bool web_parse_confirm(const cJSON *root, web_bad_t *bad);
 

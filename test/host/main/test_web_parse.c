@@ -61,6 +61,31 @@ TEST_CASE("bodies: JSON objects only, empty means {}", "[web_parse]")
     cJSON_Delete(root);
 }
 
+TEST_CASE("login: the password, and remember only as a boolean", "[web_parse]")
+{
+    web_bad_t b = { 0 };
+    const char *pw = NULL;
+    bool remember = true;
+    cJSON *root = body("{\"password\":\"hunter22x\"}");
+    TEST_ASSERT_TRUE(web_parse_login(root, &pw, &remember, &b));
+    TEST_ASSERT_EQUAL_STRING("hunter22x", pw);
+    TEST_ASSERT_FALSE(remember);
+    cJSON_Delete(root);
+    root = body("{\"password\":\"hunter22x\",\"remember\":true}");
+    TEST_ASSERT_TRUE(web_parse_login(root, &pw, &remember, &b));
+    TEST_ASSERT_TRUE(remember);
+    cJSON_Delete(root);
+    root = body("{\"password\":\"hunter22x\",\"remember\":1}");
+    TEST_ASSERT_FALSE(web_parse_login(root, &pw, &remember, &b));
+    TEST_ASSERT_EQUAL(WEB_ERR_INVALID_FIELD, b.err);
+    TEST_ASSERT_EQUAL_STRING("remember", b.field);
+    cJSON_Delete(root);
+    root = body("{\"remember\":true}");
+    TEST_ASSERT_FALSE(web_parse_login(root, &pw, &remember, &b));
+    TEST_ASSERT_EQUAL_STRING("password", b.field);
+    cJSON_Delete(root);
+}
+
 /* ---- profile ---------------------------------------------------------------------------- */
 
 static um98x_base_profile_t stored_profile(void)

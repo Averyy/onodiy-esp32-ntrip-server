@@ -11,7 +11,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "diag.h"
 #include "esp_app_desc.h"
@@ -172,7 +171,7 @@ void web_snap_status(web_status_snap_t *s)
     strlcpy(s->hostname, web_hostname_active(), sizeof(s->hostname));
     strlcpy(s->version, esp_app_get_description()->version, sizeof(s->version));
     s->clock = ledger_clock_source();
-    s->time_unix = s->clock != LEDGER_CLOCK_NONE ? (int64_t)time(NULL) : 0;
+    s->time_unix = s->clock != LEDGER_CLOCK_NONE ? diag_utc_now() : 0;   /* the trusted clock (GNSS sets no system time) */
     s->settings_available = settings_ok();
     lifecycle_get_boot_info(&s->boot);
     if (network_get_status(&s->net) != ESP_OK) {
@@ -411,7 +410,8 @@ static esp_err_t h_session_post(web_req_t *r)
     }
     web_bad_t b = { 0 };
     const char *pw = NULL;
-    if (!web_parse_password(r->body, "password", &pw, &b)) {
+    bool remember = false;
+    if (!web_parse_login(r->body, &pw, &remember, &b)) {
         return bad(r->req, &b);
     }
     if (!web_auth_check(r->req, r->on_ap, pw)) {
@@ -421,9 +421,15 @@ static esp_err_t h_session_post(web_req_t *r)
         web_auth_end_session(r->sess);   /* a fresh login replaces the one this browser had */
     }
     char cookie[96];
-    (void)web_auth_start_session(r->req, cookie);
-    char body[64];
-    snprintf(body, sizeof(body), "{\"authenticated\":true,\"idle_timeout_s\":%u}", (unsigned)WEB_SESSION_IDLE_S);
+    if (web_auth_start_session(r->req, remember, cookie) < 0) {
+        return web_send_internal(r->req, ESP_FAIL);
+    }
+    if (remember) {
+        return web_send_json_literal(r->req, 200, "{\"authenticated\":true,\"idle_timeout_s\":null,\"remembered\":true}");
+    }
+    char body[80];
+    snprintf(body, sizeof(body), "{\"authenticated\":true,\"idle_timeout_s\":%u,\"remembered\":false}",
+             (unsigned)WEB_SESSION_IDLE_S);
     return web_send_json_literal(r->req, 200, body);
 }
 
@@ -456,8 +462,11 @@ static esp_err_t h_setup_admin(web_req_t *r)
         return web_send_internal(r->req, err);
     }
     ESP_LOGW(TAG, "admin password set over the setup Wi-Fi%s", persisted ? "" : " (this boot only)");
+    /* Never remembered: its cookie belongs to the setup network's address, which closes after the setup. */
     char cookie[96];
-    (void)web_auth_start_session(r->req, cookie);
+    if (web_auth_start_session(r->req, false, cookie) < 0) {
+        return web_send_internal(r->req, ESP_FAIL);
+    }
     return web_send_json_literal(r->req, 200, persisted ? "{\"authenticated\":true,\"persisted\":true}"
                                                         : "{\"authenticated\":true,\"persisted\":false}");
 }
@@ -595,7 +604,7 @@ static esp_err_t store_profile(const um98x_base_profile_t *p, const um98x_base_p
             .lon_deg = p->fixed_lon_deg,
             .height_m = p->fixed_height_m,
             .sigma_m = 0.0f,
-            .locked_unix = (time(NULL) > 1700000000) ? (int64_t)time(NULL) : 0,
+            .locked_unix = diag_utc_now(),   /* 0 before the trusted clock */
         };
         plen = um98x_position_encode(&pos, pblob, sizeof(pblob));
         if (plen == 0) {

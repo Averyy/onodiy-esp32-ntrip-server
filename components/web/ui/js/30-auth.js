@@ -2,35 +2,36 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Start-up decisions (GET /api/session), log in, the public status view and
- * the first-run setup wizard.
+ * Start-up decisions (GET /api/session), the login, the public status view
+ * and the first-run setup wizard.
  *
- * Wizard: the admin password (over the station's own access point), Wi-Fi
- * (the setup network closes once the station has joined; the phone logs in
- * again at http://<name>.local/), the antenna check, Onocoy, and a last
- * screen with Onocoy's live state and the next steps in its console. The
- * station keeps the next step (POST /api/setup/step: wifi, reception,
+ * Wizard: the admin password (over the station's own access point, the
+ * setup hotspot), Wi-Fi (the hotspot closes once the station has joined;
+ * the phone logs in again at http://<name>.local/), the antenna check,
+ * Onocoy, and a last screen with Onocoy's live state and the next steps in
+ * its console. The station keeps the next step (POST /api/setup/step: wifi, reception,
  * onocoy, casters = the last screen), so a reload or a login resumes there,
  * never past Wi-Fi while the station has none; the rest stays in memory
  * (captive-portal browsers may not keep storage).
  */
 
-/* The station's own network, as the session names it. */
+/* The setup hotspot (the station's own access point), as the session names it. */
 function apSsidText() {
   return (S.session && S.session.ap_ssid) || '';
 }
 
-/* Settings' one line under the admin password (the login page has the steps in full). */
+/* Settings' one line under the admin password (the login's Forgot password has the steps in full). */
 function recoveryHint() {
-  return 'Forgot it? Hold BOOT for 10 s, then join ' + (apSsidText() || 'the station\'s own Wi-Fi') + ' and open http://192.168.4.1/.';
+  const ap = apSsidText();
+  return 'Forgot it? Hold BOOT for 10 s, then join the setup hotspot' + (ap ? ' ' + ap : '') + ' and open http://192.168.4.1/.';
 }
 
-/* Forgot the password: the two steps (the login's disclosure). */
+/* Forgot the password: the two steps (the login's Forgot password dialog). */
 function recoverySteps() {
   const ap = apSsidText();
   return h('ol', { class: 'howto' },
     h('li', null, 'Hold the BOOT button on the station for 10 seconds. This clears the password.'),
-    h('li', null, 'Within 15 minutes, join ', ap ? ['the Wi-Fi network ', h('strong', null, ap)] : 'the station\'s own Wi-Fi network', ', open ',
+    h('li', null, 'Within 15 minutes, join the setup hotspot', ap ? [' ', h('strong', null, ap)] : null, ', open ',
       h('strong', null, 'http://192.168.4.1/'), ' and set a new password.'));
 }
 
@@ -108,11 +109,11 @@ async function startPublic() {
 function showNoAdmin() {
   const ap = apSsidText();
   bare(h('div', { class: 'narrow' }, pageCard('Set up this station',
-    h('p', null, 'This station has no admin password yet. Set it over the station\'s own Wi-Fi:'),
+    h('p', null, 'This station has no admin password yet. Set it over the setup hotspot:'),
     h('ol', { class: 'howto' },
-      h('li', null, ap ? ['Join the Wi-Fi network ', h('strong', null, ap), '.'] : 'Join the Wi-Fi network whose name starts with onocoydiy-.'),
+      h('li', null, ap ? ['Join the setup hotspot ', h('strong', null, ap), '.'] : 'Join the setup hotspot (its name starts with onocoydiy-).'),
       h('li', null, 'Open ', h('strong', null, 'http://192.168.4.1/'), '.')),
-    h('p', { class: 'muted small' }, 'Network not there? Hold the BOOT button for 10 seconds; it opens for 15 minutes.'),
+    h('p', { class: 'muted small' }, 'Hotspot not there? Hold the BOOT button for 10 seconds; it opens for 15 minutes.'),
     h('div', { class: 'form-actions' }, btn('Check again', boot, 'primary')))));
 }
 
@@ -126,9 +127,16 @@ function restartNote() {
   } catch (e) {
     at = 0;
   }
-  return at && Date.now() - at < 600000 ? 'The station restarted. Log in again.' : null;
+  return at && Date.now() - at < 600000 ? 'The station restarted. Login again.' : null;
 }
 
+/*
+ * The login: the panel in the middle of the screen (app.css .login), the
+ * password, "Remember me" (on by default: 30 days on this browser, kept
+ * across restarts; off: a session that ends with the browser or after 30
+ * min idle) and one line with Forgot password at the left (a dialog with the
+ * steps) and Login at the right.
+ */
 function showLogin(note) {
   live.stop();
   S.publicView = false;
@@ -136,8 +144,9 @@ function showLogin(note) {
   note = note || restarted;
   const pw = pwInput({ autocomplete: 'current-password', id: 'login-pw' });
   const F = field('Admin password', pw);
+  const remember = checkbox('Remember me', true);
   const err = errBox();
-  const submit = h('button', { type: 'submit', class: 'btn primary' }, 'Log in');
+  const submit = h('button', { type: 'submit', class: 'btn primary' }, 'Login');
   let lockUntil = 0;
   const tickLock = () => {
     const left = Math.ceil((lockUntil - Date.now()) / 1000);
@@ -147,11 +156,13 @@ function showLogin(note) {
       setTimeout(tickLock, 1000);
     } else {
       submit.disabled = false;
-      submit.textContent = 'Log in';
+      submit.textContent = 'Login';
     }
   };
+  const forgot = h('button', { type: 'button', class: 'linkbtn', onclick: () => dialog({ title: 'Forgot password', body: recoverySteps(),
+    ok: false, cancel: 'Close' }) }, 'Forgot password');
   const pub = S.session && S.session.public_status ?
-    h('button', { type: 'button', class: 'btn', onclick: startPublic }, 'View status without logging in') : null;
+    h('div', { class: 'form-actions' }, h('button', { type: 'button', class: 'btn', onclick: startPublic }, 'View status without login')) : null;
   const form = h('form', { onsubmit: async e => {
     e.preventDefault();
     if (!pw.value) {
@@ -161,7 +172,7 @@ function showLogin(note) {
     err.hidden = true;
     F.error(null);
     try {
-      await busy(submit, () => api('POST', '/api/session', { password: pw.value }, { quiet401: true }));
+      await busy(submit, () => api('POST', '/api/session', { password: pw.value, remember: remember.input.checked }, { quiet401: true }));
     } catch (ex) {
       pw.select();
       /* A refused password or too many attempts: under the field (the button counts the wait down). */
@@ -181,10 +192,9 @@ function showLogin(note) {
     pw.value = '';
     boot();
   } },
-  F.el, err,
-  h('div', { class: 'form-actions' }, pub, submit));
-  bare(h('div', { class: 'narrow' }, pageCard('Log in', note ? msg('info', note) : null, form,
-    h('details', { class: 'more' }, h('summary', null, 'Forgot the password?'), recoverySteps()))));
+  F.el, remember.el, err,
+  h('div', { class: 'login-actions' }, forgot, submit));
+  bare(h('div', { class: 'narrow login' }, pageCard('Login', note ? msg('info', note) : null, form, pub)));
   pw.focus();
 }
 
@@ -286,7 +296,7 @@ function wifiPicker(wifi, opts) {
   async function scan() {
     if (opts.warnScan && current && current.online) {
       const ok = await dialog({ title: 'Scan for networks?', ok: 'Scan',
-        body: h('p', null, 'Casters pause for a few seconds while the station scans.') });
+        body: h('p', null, 'Streaming pauses for a few seconds while the station scans.') });
       if (!ok) return;
     }
     await act(scanBtn, async () => {
@@ -357,7 +367,7 @@ async function startWizard(claim) {
   live.stop();
   const sess = S.session || {};
   const W = { casters: null, wifi: null, system: null, joined: null };
-  /* The claim (over the setup network): every step. Logged in: Wi-Fi only
+  /* The claim (over the setup network): every step. After a login: Wi-Fi only
    * while the phone is on the station's own network or the station has no
    * working Wi-Fi; the rest happens on the home network. */
   let steps = ['password', 'wifi', 'reception', 'onocoy', 'casters'];
@@ -412,7 +422,7 @@ async function startWizard(claim) {
     if (await saveStep(following)) go(following);
   }
 
-  /* The last step is done: setup_done, then the app at `hash` (the Status page, or Casters to add one). */
+  /* The last step is done: setup_done, then the app at `hash` (the Status page, or NTRIP to add a server). */
   async function finish(step, hash) {
     try {
       await setupDone();
@@ -712,20 +722,21 @@ async function startWizard(claim) {
     pw.focus();
   }
 
-  /* Onocoy: the server as text, the console's three values, one line on sharing, the duplicate-stream question. */
+  /* Onocoy: the server as text, a mountpoint name (any; the station's name to start with), the console's username and
+   * the password chosen there, one line on sharing, the duplicate-stream question. */
   function stepOnocoy() {
     const data = W.casters;
     const preset = data.onocoy_preset || { host: 'servers.onocoy.com', port: 2101, ntrip_version: 1, backoff_profile: 'fast' };
     const slots = data.slots || [];
     if (slots.length && slots[0].config === null) {
-      frame('onocoy', 'Connect to Onocoy', msg('warn', 'Casters cannot be set up in safe mode. Continue, and set up Onocoy later on the Casters page.'),
+      frame('onocoy', 'Connect to Onocoy', msg('warn', 'NTRIP servers cannot be set up in safe mode. Continue, and set up Onocoy later on the NTRIP page.'),
         h('div', { class: 'form-actions' }, btn('Continue', () => next('onocoy'), 'primary')));
       return;
     }
     let slot = slots.find(s => s.config && isOnocoySlot(s.config));
     if (!slot) slot = slots.find(s => s.config && !s.config.host && !s.config.enabled);
     if (!slot) {
-      frame('onocoy', 'Connect to Onocoy', msg('warn', 'Every caster slot is in use. Set up Onocoy later on the Casters page.'),
+      frame('onocoy', 'Connect to Onocoy', msg('warn', 'No free server slot. Set up Onocoy later on the NTRIP page.'),
         h('div', { class: 'form-actions' }, btn('Continue', () => next('onocoy'), 'primary')));
       return;
     }
@@ -733,12 +744,16 @@ async function startWizard(claim) {
     const ono = isOnocoySlot(cfg);
     /* A slot stored in the older layout (no username) holds the old credential in `mountpoint`: start empty. */
     const current = ono && cfg.username;
-    /* What the Onocoy console shows, in its words and order: the server (fixed, a line of text), mountpoint,
-     * username, password. A test Onocoy slot (bench and QEMU builds) keeps its own host and port. */
-    const mpI = textInput(current ? cfg.mountpoint : '', { maxlength: 47 });
+    /* In the console's words: the server (fixed, a line of text), mountpoint, username, password. The console makes
+     * the username and the user picks the password there; the mountpoint is any name (Onocoy shows it only in its
+     * dashboard), the station's name unless one is stored. A test Onocoy slot (bench and QEMU builds) keeps its own
+     * host and port. */
+    const name = String((W.system && W.system.hostname) || (S.session && S.session.hostname) || '').replace(/[^A-Za-z0-9._-]/g, '').slice(0, 47);
+    const mpI = textInput(current && cfg.mountpoint ? cfg.mountpoint : name, { maxlength: 47 });
     const userI = textInput(current ? cfg.username : '', { maxlength: 47 });
     const pw = pwInput({ maxlength: 63, placeholder: ono && cfg.password_set ? 'Saved (leave empty to keep)' : '' });
-    const F = { mountpoint: field('Mountpoint', mpI), username: field('Username', userI), password: field('Password', pw) };
+    const F = { mountpoint: field('Mountpoint', mpI, 'Any name; shows only in your Onocoy dashboard.'), username: field('Username', userI),
+      password: field('Password', pw) };
     /* Onocoy's password rule, checked softly: a note while the typed password breaks it, saving still allowed. */
     const pwNote = h('p', { class: 'small t-warn', role: 'status', hidden: true });
     pw.addEventListener('input', () => {
@@ -749,8 +764,8 @@ async function startWizard(claim) {
     const dupBox = h('div');
     const submit = h('button', { type: 'submit', class: 'btn primary' }, 'Save and continue');
     frame('onocoy', 'Connect to Onocoy',
-      h('p', null, 'In the Onocoy console, open Reference Stations, NTRIP Credentials and pick or add this station\'s credential. ',
-        extLink('Onocoy\'s guide', PRESET_INFO.onocoy.guide[1])),
+      h('p', null, 'In the Onocoy console, open Reference Stations, NTRIP Credentials and pick or add this station\'s credential. ' +
+        'Enter its username and the password you chose. ', extLink('Onocoy\'s guide', PRESET_INFO.onocoy.guide[1])),
       /* A change to the values asks again; ticking the panel's own box is its answer, not a change. */
       h('form', { oninput: e => {
         if (dupBox.contains(e.target)) return;
@@ -798,12 +813,12 @@ async function startWizard(claim) {
       h('p', { class: 'small t-warn' }, 'Never use a credential another device is streaming with.'),
       dupBox, err, h('div', { class: 'form-actions' }, btn('Skip for now', () => next('onocoy')), submit)),
       skipAll());
-    mpI.focus();
+    (mpI.value ? userI : mpI).focus();
   }
 
   /*
    * The last screen (stored step "casters"): Onocoy's state as it happens
-   * (onocoyNow), the next steps in the Onocoy console, a link to Casters and
+   * (onocoyNow), the next steps in the Onocoy console, a link to NTRIP and
    * "Go to Status"; both mark the setup done. GET /api/casters only when
    * Onocoy's state changes (the count of refused logins).
    */
@@ -811,10 +826,10 @@ async function startWizard(claim) {
     const row = h('ul', { class: 'checks', 'aria-live': 'polite' });
     const nextBox = h('div', null, h('h2', { class: 'sub' }, 'Next, in the Onocoy console'),
       h('ol', { class: 'howto' }, ONOCOY_NEXT.map(t => h('li', null, t))), extLink('Onocoy\'s guide', ONOCOY_REWARDS_GUIDE));
-    const add = h('a', { href: '#/casters', onclick: e => {
+    const add = h('a', { href: '#/ntrip', onclick: e => {
       e.preventDefault();
-      finish('casters', '#/casters');
-    } }, 'Add RTK2go or another caster');
+      finish('casters', '#/ntrip');
+    } }, 'Add RTK2go or another server');
     const goStatus = btn('Go to Status', e => busy(e.currentTarget, () => finish('casters', '#/')), 'primary');
     frame('casters', 'Setup done', row, nextBox, h('p', null, add), h('div', { class: 'form-actions' }, goStatus));
     const icon = { ok: '✓', warn: '!', bad: '✕', info: '…' };
@@ -881,8 +896,8 @@ async function startWizard(claim) {
     /* Without a name that answers: the address, which the next screen shows once the station has joined. */
     frame('wifi', 'Connect to Wi-Fi',
       h('p', null, 'Pick the network the station uses to reach the internet.'),
-      onAp ? h('p', null, 'Once the station has joined it, this setup network closes. Then connect this phone to the same Wi-Fi, open ',
-        url ? h('strong', null, url) : 'the address the next screen shows', ' and log in to continue.') :
+      onAp ? h('p', null, 'Once the station has joined it, the setup hotspot closes. Then connect this phone to the same Wi-Fi, open ',
+        url ? h('strong', null, url) : 'the address the next screen shows', ' and login to continue.') :
         h('p', null, 'The station switches to the network you pick, and this page loses it. Then ',
           url ? ['open ', h('strong', null, url), ' on that network'] : ['find ', h('strong', null, routerName()),
             ' in your router\'s device list and open its address'], ' to continue.'),
@@ -939,9 +954,9 @@ async function startWizard(claim) {
       stop();
       go(following);
     };
-    const apName = w => (w && w.ap && w.ap.ssid) || s.ap_ssid || 'the setup network';
+    const apName = w => (w && w.ap && w.ap.ssid) || s.ap_ssid || 'the setup hotspot';
 
-    /* 1 join, 2 open, 3 log in: as text while the phone is still on the setup network, as links once it is closed. */
+    /* 1 join, 2 open, 3 login: as text while the phone is still on the setup network, as links once it is closed. */
     function howTo(net, links) {
       const name = stationNameUrl(net), ip = stationIpUrl(net);
       const ref = u => (links ? h('a', { href: u }, u) : h('strong', null, u));
@@ -950,7 +965,7 @@ async function startWizard(claim) {
       return h('ol', { class: 'howto' },
         h('li', null, 'Connect this phone to ', h('strong', null, joined.ssid), '.'),
         h('li', null, open),
-        h('li', null, 'Log in with the admin password; the setup continues with ' + (WIZ_NEXT[following] || 'the next step') + '.'));
+        h('li', null, 'Login with the admin password; the setup continues with ' + (WIZ_NEXT[following] || 'the next step') + '.'));
     }
 
     function copyRow(net) {
@@ -962,7 +977,7 @@ async function startWizard(claim) {
 
     function closedView() {
       stop();
-      show('closed', msg('info', h('strong', null, 'The setup network is closed.'), ' This phone goes back to its own Wi-Fi by itself, or join it now.'),
+      show('closed', msg('info', h('strong', null, 'The setup hotspot is closed.'), ' This phone goes back to its usual Wi-Fi by itself, or join it now.'),
         howTo(okNet, true), copyRow(okNet),
         joined.persisted ? null : msg('warn', 'Settings cannot be saved right now: the station forgets this network when it restarts.'));
     }
@@ -997,7 +1012,7 @@ async function startWizard(claim) {
           leftEl = h('strong', { class: 'countdown-n' }, String(ap.close_in_s));
           show('countdown', msg('ok', h('strong', null, 'Connected to ' + joined.ssid + '.')),
             kv(stationAddressRows(w)),
-            h('p', { class: 'countdown', role: 'status' }, 'The setup network ', h('strong', null, apName(w)), ' closes in ', leftEl, ' s.'),
+            h('p', { class: 'countdown', role: 'status' }, 'The setup hotspot ', h('strong', null, apName(w)), ' closes in ', leftEl, ' s.'),
             howTo(w, false), copyRow(w),
             joined.persisted ? null : msg('warn', 'Settings cannot be saved right now: the station forgets this network when it restarts.'));
           clearInterval(ticker);
@@ -1053,7 +1068,7 @@ async function startWizard(claim) {
           joined.since = Date.now();
           setTitle('Joining ' + joined.ssid);
           show('relost', msg('warn', h('strong', null, 'The station lost ' + joined.ssid + ' again.'),
-            ' Its setup network (' + apName(w) + ') stays open while it reconnects; stay on it.'), h('div', { class: 'spinner' }));
+            ' Its setup hotspot (' + apName(w) + ') stays open while it reconnects; stay on it.'), h('div', { class: 'spinner' }));
         } else if (fails >= 2) {
           closedView();
         }
@@ -1109,17 +1124,17 @@ async function startWizard(claim) {
       if (fails >= 3) {
         const name = localUrl(lastNet || W.wifi);
         const ap = apName(W.wifi);
-        show('lost', msg('info', h('strong', null, 'This phone left the setup network'),
+        show('lost', msg('info', h('strong', null, 'This phone left the setup hotspot'),
           h('div', null, 'That is normal once the station has joined ' + joined.ssid + '.')),
         h('ol', { class: 'howto' },
           h('li', null, 'Connect this phone to ', h('strong', null, joined.ssid), '.'),
           name ? h('li', null, 'Open ', h('a', { href: name }, name), ', or find the station in your router\'s device list as ', h('strong', null, host),
             ' and open its address.') :
             h('li', null, 'Find the station in your router\'s device list as ', h('strong', null, host), ' and open its address.'),
-          h('li', null, 'Log in with the admin password; the setup continues with ' + (WIZ_NEXT[following] || 'the next step') + '.')),
+          h('li', null, 'Login with the admin password; the setup continues with ' + (WIZ_NEXT[following] || 'the next step') + '.')),
         h('p', { class: 'muted small' }, 'If the station could not join, ' + ap + ' comes back within a minute: join it and open http://192.168.4.1/.'),
         h('p', { class: 'muted small' }, 'On a guest network your phone cannot reach the station. Hold its BOOT button for 10 seconds to open ' +
-          'its own network again (this also clears the admin password), then pick another network.'),
+          'the setup hotspot again (this also clears the admin password), then pick another network.'),
         h('div', { class: 'spinner' }));
       } else if (w && secs > 40 && !w.cred_trial && (w.connect_failures > 0 || w.last_disconnect_reason)) {
         if (shown.indexOf('failing:') !== 0) {

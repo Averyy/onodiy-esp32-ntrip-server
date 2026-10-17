@@ -125,7 +125,7 @@ function slotRate(slot, window) {
  * every 12 to 18 s. Only live.stop() starts the delay over without a stable
  * connection, and every caller of stop() leaves this page for another one
  * (the login, the setup wizard, the restart overlay): start() again follows
- * a user's action (logging in, "View the status") or a page load, never a
+ * a user's action (a login, "View the status") or a page load, never a
  * refusal. After a refusal the page asks GET /api/session once: a lost
  * session shows the login, a public view whose public status was turned off
  * shows the login page and stops (no more handshakes or polls).
@@ -275,7 +275,7 @@ const live = {
     } else if (!isAdmin() && S.publicView && !s.public_status) {
       this.stop();
       S.session = s;
-      showLogin('Public status was turned off. Log in to see the station.');
+      showLogin('Public status was turned off. Login to see the station.');
     }
   },
 

@@ -1469,8 +1469,7 @@ def test_header_shows_the_station_state_and_says_when_contact_is_lost():
     visitor sees the public form's. Without a status for 6 s: "No contact", grey, and the running count beside the word,
     outside its live region and hidden from screen readers, and the page is marked so (the Status page's top card goes
     grey too); "Connecting…" before the first. A second render keeps the elements (the live region announces a change
-    once). On the Status page, whose top card says the state, it is hidden and says nothing, but for "No contact". Nothing
-    before the app runs (log in, setup)."""
+    once). It shows on the Status page too. Nothing before the app runs (login, setup)."""
     me = st_status(health={"level": "degraded", "recovery_mode": "alerts_only"},
                    alerts=[{"id": "no_rtcm", "source": "health"}], casters=[st_caster(0, "Onocoy", "wait_data")])
     public = {"api": 1, "public": True, "device": {"hostname": "onocoydiy"}, "receiver": {"state": "detecting"},
@@ -1501,10 +1500,8 @@ def test_header_shows_the_station_state_and_says_when_contact_is_lost():
     assert out[5] == ["", "Connecting…", "status", "", "true", "Connecting to the station", "Connecting to the station", "#/",
                       True, *shown]
     assert out[6] is None
-    # The Status page (the admin's and a visitor's): hidden and silent while in contact; "No contact" shows.
-    assert [o[9] for o in out[11:]] == [True, True, False, True]
-    assert out[11][1] == out[12][1] == out[14][1] == "" and out[11][3] == ""
-    assert out[13][1] == "No contact" and out[13][3] == "9\u00a0s" and out[13][11]
+    # The Status page (the admin's and a visitor's): the same as on every other page.
+    assert out[11:] == [out[0], out[2], out[3], out[5]]
 
 
 def test_no_contact_greys_every_colour_on_the_status_page():

@@ -167,6 +167,18 @@ bool web_parse_password(const cJSON *root, const char *key, const char **out, we
     return true;
 }
 
+bool web_parse_login(const cJSON *root, const char **pw, bool *remember, web_bad_t *bad)
+{
+    if (!web_parse_password(root, "password", pw, bad)) {
+        return false;
+    }
+    *remember = false;
+    if (get_bool(root, "remember", remember) == M_BAD) {
+        return invalid(bad, "remember");
+    }
+    return true;
+}
+
 bool web_parse_confirm(const cJSON *root, web_bad_t *bad)
 {
     bool confirm = false;
