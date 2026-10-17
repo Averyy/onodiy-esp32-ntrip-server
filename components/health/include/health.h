@@ -149,7 +149,8 @@
  * full ladder would start is journalled once with outcome "not run" and its
  * grace still runs, and where the byte rule would run the ladder goes to 7,
  * with no power-cycle alert; level DEGRADED before 7, FAILED at 7; the
- * FAILED retry pass journals the step it would enter every 10 min). A step
+ * FAILED retry pass, every 10 min, journals the step it would enter only
+ * when that step was not journalled in the episode yet). A step
  * the station ran before the switch to "alerts only" keeps its grace, only
  * watched like a journalled step's: no step in progress, level DEGRADED with
  * the reason, so the status never says the station still fixes it. Leaving
