@@ -237,11 +237,12 @@ function receiverChip(s) {
 const APPLIED = 'Applied';
 
 /** The profile's state in the Configuration row: [text, tone], the chip's, where a profile the receiver took but no window
- * checked yet says when it is checked (delivering: corrections arrive). */
+ * checked yet says when it is checked (delivering: corrections arrive; nothing is checked during maintenance). */
 function configWords(g, delivering) {
   const c = g.first_apply_held ? ['Waiting for your OK', 'warn'] : profileChip(g);
-  if (c[0] === APPLIED && !g.profile_applied) return [APPLIED + (delivering ? ', being checked' : ', checked once corrections flow'), c[1]];
-  return c;
+  if (c[0] !== APPLIED || g.profile_applied) return c;
+  const when = (g.maintenance || {}).on ? ', checked after maintenance' : delivering ? ', being checked' : ', checked once corrections flow';
+  return [APPLIED + when, c[1]];
 }
 
 /** Who configures the receiver, the profile's state and the signal group it runs ("Applied · 3 6 (Galileo E6)"). */
@@ -256,6 +257,13 @@ function gnssUnchecked(g) {
   return rxUnchecked((g.maintenance || {}).on, g.identity_confirmed);
 }
 
+/* A survey the receiver may still run: inside the station's window, or unfinished after it (without data it makes no
+ * progress). */
+function surveyRuns(g) {
+  const sv = g.survey || {};
+  return !!(sv.active || sv.unfinished);
+}
+
 /** The base position in one line: its state and what to do (delivering: corrections arrive, so a survey runs). */
 function positionLine(g, delivering) {
   const pos = g.position || {};
@@ -264,7 +272,7 @@ function positionLine(g, delivering) {
   const have = pos.source && pos.source !== 'none';
   if (prof.base_mode === 'fixed' && prof.fixed && !(pos.locked && have)) return 'Fixed (typed in). Sent at the next configuration.';
   if (pos.locked) return 'Locked. If the antenna moves, survey again.';
-  if (sv.active) {
+  if (surveyRuns(g)) {
     if (!delivering) return 'Surveying, paused while no corrections arrive.';
     return sv.window_left_s ? 'Surveying, about ' + inMinutes(sv.window_left_s) + ' left. Then lock it.' : 'Surveying. Lock it when it ends.';
   }
@@ -650,7 +658,7 @@ function positionChip(g, delivering) {
   if ((g.fixed_check || {}).state === 'far') return ['Looks wrong', 'warn'];
   if (pos.locked && pos.source && pos.source !== 'none') return ['Locked', 'ok'];
   if (prof.base_mode === 'fixed' && prof.fixed) return ['Fixed (typed in)', 'info'];
-  if ((g.survey || {}).active) return delivering === false ? ['Paused', ''] : ['Surveying', 'info'];
+  if (surveyRuns(g)) return delivering === false ? ['Paused', ''] : ['Surveying', 'info'];
   if (gnssUnchecked(g)) return [NOT_CHECKED_CHIP, ''];
   return ['Not locked', ''];
 }

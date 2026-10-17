@@ -1302,6 +1302,38 @@ def test_update_check_failure_says_the_status_once_and_no_error_code():
     assert "ESP_ERR" not in json.dumps(f) and json.dumps(f).count("404") == 1
 
 
+def test_a_survey_without_data_stays_paused_after_its_window():
+    """The station's survey window ends while no data arrives, but the receiver's survey has not moved: both pages and
+    Receiver settings' chip still say it is paused, never "No position yet" or "Not locked". With corrections back it
+    reads as surveying until it finishes; once it finished without a lock, as before."""
+    after = {"position": {"locked": False, "source": "none"}, "profile": {"base_mode": "survey_in", "fixed": None},
+             "survey": {"active": False, "window_left_s": 0, "unfinished": True}, "maintenance": {"on": False},
+             "identity_confirmed": True}
+    done = {**after, "survey": {"active": False, "window_left_s": 0, "unfinished": False}}
+    rx = {"rx_maintenance": False, "identity_confirmed": True, "position_locked": False, "position_known": False,
+          "surveying": False, "survey_window_left_s": 0, "survey_unfinished": True}
+    out = run_ui([("posLine", [after, False]), ("posLine", [after, True]), ("posLine", [done, False]),
+                  ("posChip", [after, False]), ("posChip", [after, True]), ("posChip", [done, False]),
+                  ("statusPos", [rx, False]), ("statusPos", [rx, True]),
+                  ("statusPos", [{**rx, "survey_unfinished": False}, False]),
+                  ("statusPos", [{**rx, "survey_unfinished": False, "position_known": True}, True])])
+    assert out == ["Surveying, paused while no corrections arrive.", "Surveying. Lock it when it ends.", "No position yet.",
+                   ["Paused", ""], ["Surveying", "info"], ["Not locked", ""],
+                   "Surveying, paused", "Surveying", "No position yet", "Not locked"]
+
+
+def test_nothing_is_being_checked_during_maintenance():
+    """In receiver maintenance with corrections flowing the station checks nothing: an acknowledged profile that no
+    window checked yet says it is checked after maintenance, not "being checked"."""
+    g = {"state": "idle", "autocfg": True, "first_apply_held": False, "identity_confirmed": True,
+         "maintenance": {"on": True}, "profile_applied": False, "profile_acknowledged": True, "rtcm_differs": False}
+    out = run_ui([("configWords", [g, True]), ("configWords", [g, False]), ("profileChip", g),
+                  ("configWords", [{**g, "profile_applied": True}, True]),
+                  ("configWords", [{**g, "maintenance": {"on": False}}, True])])
+    assert out == [["Applied, checked after maintenance", ""], ["Applied, checked after maintenance", ""], ["Applied", ""],
+                   ["Applied", "ok"], ["Applied, being checked", ""]]
+
+
 def test_receiver_unchecked_during_maintenance_says_so():
     """Maintenance that went on across a station restart with nothing kept of what the station knew: no identity this
     boot, and none before maintenance ends. The rows say the receiver is not checked, never "not yet" or "not applied";
