@@ -408,7 +408,8 @@ const updatesPart = {
       mount(gnssBox,
         settingRow('Receiver ' + (g.running ? fwText(g.running, g.running_build) : ''),
           g.available ? fwText(g.latest, g.latest_build) + ' is available.' + (g.flash_available ? '' : ' This build can only download and check it.') :
-            !g.running ? 'Its firmware shows once the station finds it.' : g.latest ? 'Up to date.' : 'No release information yet.', upd),
+            !g.running ? (((S.status || {}).receiver || {}).rx_maintenance ? NOT_CHECKED + '.' : 'Its firmware shows once the station finds it.') :
+            g.latest ? 'Up to date.' : 'No release information yet.', upd),
         blocked && g.available ? msg('warn', 'Not possible right now: ' + lbl(L.gnssBlock, g.blocked).toLowerCase() +
           (g.blocked_left_s ? ' (about ' + fmt.dur(g.blocked_left_s) + ' left).' : '.')) : null,
         rflow ? receiverSteps(rflow.state, rflow.upload, !g.flash_available) : null,
@@ -435,7 +436,10 @@ const updatesPart = {
       maintLeft.textContent = on && r.maintenance_left_s ? ' Ends in about ' + upMin(r.maintenance_left_s) + '.' : '';
       const key = on ? 'on' + mainShown : 'off';
       if (key === maintKey) return;
+      const was = maintKey;
       maintKey = key;
+      /* The receiver row says when its firmware is not checked during maintenance. */
+      if (was !== null && u && (was === 'off') !== (key === 'off')) renderGnss();
       if (on) {
         const more = btn('Add 30 min', async () => {
           const x = await act(more, () => api('POST', '/api/gnss/maintenance', { duration_s: 1800 }), maintErr);

@@ -959,13 +959,35 @@ copy in settings, stored at the start, at each extension and every minute:
 up to 70 s less time left then). The time across the reset comes off: it
 never ends later than the time chosen (with the trusted clock, also when
 the ESP32 was held in reset for a while) and ends at once when that time
-ran out meanwhile. A power-on reset during which the receiver restarted too
-(`station.rx_boot` `restarted` in `GET /api/health`) was a power cut:
-maintenance resumed at that boot ends then, unless the user extended it
-since; `kept_running` or `unknown` leave it on. Any other restart banner
-does not end it (the work may restart the receiver). The end runs the
-station's stream-first check, as at boot. Entry and exit are journalled
+ran out meanwhile. A power-on or brownout reset during which the receiver
+restarted too (`station.rx_boot` `restarted` in `GET /api/health`) lost the
+power for both: maintenance resumed at that boot ends then, unless the user
+extended it since; `kept_running` or `unknown` leave it on (a brownout keeps
+the RTC memory: it resumes from there). Any other restart banner does not
+end it (the work may restart the receiver). The end runs the station's
+stream-first check, as at boot. Entry and exit are journalled
 (`rx_maintenance`; an exit also when its time ran out across a reset).
+
+Nothing is checked during maintenance, so the receiver's fields keep what
+the station knew at entry. The copy in settings carries that too, and a
+maintenance resumed after a reset (either way) reports it until it ends, as
+one without a reset does: in `GET /api/status` and `GET /api/gnss` the
+receiver's identity (`model`, `firmware`, `receiver`, `identity_confirmed`;
+the receiver's own word wins if it repeats it) and the signal group it runs
+(`rx_signal_group`), and when the profile is
+still the one it was about, `profile_applied`, `fixed_check` and the
+station's alerts (`config_failed` with them); `surveying`,
+`survey_window_left_s` and `survey` run on with the survey window, its end
+as far from maintenance's end as before (so the reset's time comes off both
+alike), and after maintenance the station goes on with that window instead
+of starting a new one. The rest of what an apply session read back
+(`rx_settings`, `rx_bands`, `apply_steps`) stays this boot's: unknown until
+the next configuration, as after any reset. Without that knowledge (a
+copy from an older firmware, settings unusable) `identity_confirmed` is
+false during maintenance and the UI reads such rows as "Not checked during
+maintenance" instead of "not yet" (the station will not look before the
+end); a fixed-position check without a verdict reads so in any
+maintenance.
 Whether input on the link can disturb a receiver worked on through its
 other port is PROVISIONAL, to be confirmed on hardware. The UI starts it in
 Settings, next to the receiver update; while it is on, that row has Add 30
@@ -2080,26 +2102,34 @@ bench builds turn on); `log.usb_connected`: a USB host is attached there now
 copied there although a host was attached, because it did not read and the
 USB buffer was full. With no host attached nothing is copied and nothing is
 counted.
-`station.rx_boot`: after a power-on reset, whether the receiver kept
-running (`station_rx_boot_t`): `none` (not a power-on boot), `pending`
+`station.rx_boot`: after a power-on or brownout reset, whether the
+receiver kept running (`station_rx_boot_t`): `none` (neither), `pending`
 (judged within 30 s of the start), `kept_running` (only the ESP32 was
-reset), `restarted` (the receiver restarted with it: the power was cut),
-`unknown` (nothing the receiver sent told). On the ESP32-S3 a reset by its
-EN pin (the USB serial chip's auto-reset that every flash and capture
-uses, the RST button) reads as `power_on` (`boot.reset_class`) while the
-receiver, on the same supply, keeps running; so the station asks the
-receiver's own evidence, listening only (`rx_boot_by`): `restart` its
+reset, or only its supply dipped), `restarted` (the receiver restarted with
+it: the power was cut, or dipped for both), `unknown` (nothing the receiver
+sent told). On the ESP32-S3 a reset by its EN pin (the USB serial chip's
+auto-reset that every flash and capture uses, the RST button) reads as
+`power_on` (`boot.reset_class`) while the receiver, on the same supply,
+keeps running; a `brownout` says only that the ESP32's own 3.3 V rail
+dipped below its detector's level (about 2.44 V): on our board each half
+has a regulator of its own on the shared USB 5 V (inferred from the board),
+so a dip of that input takes both down while one the ESP32's own load
+causes (Wi-Fi transmit peaks) leaves the receiver running. So the station
+asks the receiver's own evidence, listening only (`rx_boot_by`): `restart` its
 restart banner before any data (restarted); `uptime` its version log,
 whose header's millisecond field counts from its restart while it has no
 time (restarted if that is shorter than the ESP32's uptime, kept running if
 it began at least 2 s before the ESP32 started); `stream` RTCM or NMEA
 within 3.5 s of the start, before any restart evidence (kept running: a
 receiver that just got power needs longer). The earliest decides; it is
-journalled once (`rx_boot`). Only `restarted` counts toward the
-`power_lost` alert (three within 24 h), and a `kept_running` boot's gap is
-not power-off time in the availability ledger (when the verdict comes
-before the first trusted clock). PROVISIONAL, to be confirmed on hardware
-(a real power cut's timing was not measured).
+journalled once (`rx_boot`). Only a power-on boot's `restarted` counts
+toward the `power_lost` alert (three within 24 h; a brownout raises
+`power_supply`), and only a power-on boot's `kept_running` makes its gap no
+power-off time in the availability ledger (when the verdict comes before
+the first trusted clock; a brownout is the ESP32's own power dip whatever
+the receiver did). A `restarted` verdict ends a receiver maintenance resumed
+at that boot. PROVISIONAL, to be confirmed on hardware (a real power cut's
+timing was not measured).
 `link.framing` counts what the framer made of the receiver's bytes
 (`gnss_framing_stats_t`): `bytes_discarded` are bytes that became no RTCM
 frame and no checksum-valid line (line noise, a unit cut short by a baud
@@ -2309,7 +2339,7 @@ by `kind` (integers; only a `wifi_disconnect` entry's `b` can be `null`):
 | `wifi_up` | connect attempts during the outage | outage s |
 | `wifi_roam` | the station moved to another access point of its network and got its address there (no `wifi_disconnect` or `wifi_up` for it): channel before (bits 0-7) \| channel after (bits 8-15) \| who started it (bits 16-23: 1 the access point asked, 2 the station found a clearly stronger one) \| bit 24: its reconnect found no stronger one after all and it stayed (a channel of 0 = unknown) | RSSI before (bits 0-7) \| after (bits 8-15), each a signed byte in dBm, 0 = unknown \| seconds without an address (bits 16-30) |
 | `rx_maintenance` | 1 entry, 0 exit | chosen duration s (entry), time spent s (exit) |
-| `rx_boot` | after a power-on reset, whether the receiver kept running (`diag_rx_boot_t`): 1 kept running (only the ESP32 was reset, its reset pin), 2 restarted with it (the power was cut), 3 unknown; written once per power-on boot, when the station knows (`station.rx_boot` in `/api/health`); only 2 counts toward `power_lost` | what told it (`diag_rx_boot_by_t`): 0 nothing, 1 its restart banner before any data, 2 its version log's time since its restart, 3 RTCM or NMEA at once |
+| `rx_boot` | after a power-on or brownout reset, whether the receiver kept running (`diag_rx_boot_t`): 1 kept running (only the ESP32 was reset, its reset pin, or only its supply dipped), 2 restarted with it (the power was cut, or dipped for both), 3 unknown; written once per power-on or brownout boot, when the station knows (`station.rx_boot` in `/api/health`); only a power-on boot's 2 counts toward `power_lost` | what told it (`diag_rx_boot_by_t`): 0 nothing, 1 its restart banner before any data, 2 its version log's time since its restart, 3 RTCM or NMEA at once |
 | `live_view` | event (bits 0-7: 1 opened, 2 extended, 3 closed, 4 satellite-in-view output on, 5 off) \| detail << 8 (closed: end reason; on/off: 0 accepted, 1 rejected, 2 no answer, 3 not sent) | opened: window s; extended: s left; closed: s open; on/off: ms the lease held RTCM back |
 | `sg_test` | signal groups: event (bits 0-7: 1 a comparison started, 2 it switched the receiver, 3 the receiver refused a signal group, in a comparison or any apply, 4 a comparison ended) \| master << 8 \| slave << 16 (started: the group measured first; switched: the group now running; refused: the refused group; ended: the group it ended on) | started: s per group; switched: the phase (0, 1); refused: `(master << 8) \| slave` of the group the profile went back to (-1 none); ended: the outcome (1 kept, 2 timed out, 3 cancelled, 4 rejected, 5 failed, 6 interrupted) |
 | `fixed_check` | the fixed-position check: event (bits 0-7: 1 the fixed position is more than 50 m from the receiver's own solution, horizontally or in height: the `fixed_far` alert raised; 2 within the limits again: cleared; 3 the fixed position changed, or the profile surveys now, while it stood: cleared) \| the fixed height minus the receiver's in m << 8 (signed, bits 8-31) | the horizontal distance in m (0 for event 3) |

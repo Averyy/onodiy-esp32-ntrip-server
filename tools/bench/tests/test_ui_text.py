@@ -74,7 +74,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '    return { state: r.state ? st.key : null, alerts: r.alerts.map(x => x.id), notice: healthNotice(a) }; },\n' +
   '  checkFailure: u => checkFailure(u),\n' +
   '  wifiRows: a => wifiRows(a[0], a[1]).filter(Boolean).map(r => [r[0], typeof r[1] === \'string\' ? r[1] : null]),\n' +
-  '  startKind: a => startKind(a[0], a[1]), rxBoot: v => rxBootSentence(v),\n' +
+  '  startKind: a => startKind(a[0], a[1]), rxBoot: v => (Array.isArray(v) ? rxBootSentence(v[0], v[1]) : rxBootSentence(v)),\n' +
   '  noticeLines: a => noticeItems(a[0], a[1]).map(i => [i.key, i.tone, i.urgent, i.title + (i.text ? \'. \' + i.text : \'\'),\n' +
   '    Array.isArray(i.actions) ? i.actions.length : i.actions ? 1 : 0]),\n' +
   '  fold: a => { const f = foldNotices(noticeItems(a[0], a[1]), a[2]); return [f.shown.map(i => i.key), f.more]; },\n' +
@@ -91,7 +91,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  rxAlerts: a => (a[0].alerts || []).filter(rxAlertShown(stationState(a[1], true), false)),\n' +
   '  stepSaid: a => { const st = stationState(a[1], true); return stepSaid(a[0], st, healthItems(a[1].alerts || [], st).state); },\n' +
   '  nextAttempt: a => nextAttemptRow(a[0], stationState(a[1], true)),\n' +
-  '  posWords: a => positionWords(a[0], a[1], a[2]),\n' +
+  '  posWords: a => positionWords(a[0], a[1], a[2]), posChip: g => positionChip(g), fixPending: a => fixPendingText(a[0], a[1], a[2]),\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
 process.stdout.write(JSON.stringify(out));
@@ -1202,6 +1202,49 @@ def test_update_check_failure_says_the_status_once_and_no_error_code():
     assert "ESP_ERR" not in json.dumps(f) and json.dumps(f).count("404") == 1
 
 
+def test_receiver_unchecked_during_maintenance_says_so():
+    """Maintenance that went on across a station restart with nothing kept of what the station knew: no identity this
+    boot, and none before maintenance ends. The rows say the receiver is not checked, never "not yet" or "not applied";
+    with the identity known (kept, or no restart) they read as before. A check without a verdict in maintenance is not
+    "being checked": nothing is."""
+    unchecked = {"state": "idle", "maintenance": {"on": True}, "identity_confirmed": False, "autocfg": True,
+                 "profile_applied": False, "position": {"locked": False, "source": "none"}, "survey": {"active": False},
+                 "profile": {"base_mode": "survey_in", "fixed": None}}
+    known = {**unchecked, "identity_confirmed": True}
+    locked = {**unchecked, "position": {"locked": True, "source": "survey"}, "profile": {"base_mode": "fixed", "fixed": {}}}
+    surveying = {**unchecked, "survey": {"active": True, "window_left_s": 600}}
+    out = run_ui([("posLine", [unchecked, True]), ("posLine", [known, True]), ("posLine", [locked, True]),
+                  ("posLine", [surveying, True]),
+                  ("profileChip", unchecked), ("profileChip", known), ("profileChip", {**unchecked, "autocfg": False}),
+                  ("posChip", unchecked), ("posChip", known), ("posChip", surveying)])
+    # The Receiver card says it once, in a line of its own: the position row goes (None) unless the station knows it.
+    assert out == [None, "No position yet.", "Locked. If the antenna moves, survey again.",
+                   "Surveying, about 10\u00a0min left. Then lock it.",
+                   ["Not checked", ""], ["Not applied", "warn"], ["Managed by you", ""],
+                   ["Not checked", ""], ["Not locked", ""], ["Surveying", "info"]]
+    r = {"rx_maintenance": True, "identity_confirmed": False, "profile_applied": False, "position_locked": False,
+         "position_known": False, "surveying": False}
+    out = run_ui([("statusPos", [r, True]), ("statusPos", [{**r, "position_known": True}, True]),
+                  ("statusPos", [{**r, "position_locked": True}, True]),
+                  ("statusPos", [{**r, "identity_confirmed": True}, True]),
+                  ("statusPos", [{**r, "identity_confirmed": True, "position_locked": True}, True]),
+                  ("statusPos", [{**r, "surveying": True, "survey_window_left_s": 300}, True]),
+                  ("statusPos", [{**r, "rx_maintenance": False}, True])])
+    assert out == ["Not checked during maintenance", "Not checked during maintenance", "Locked", "No position yet",
+                   "Fixed, not applied yet", "Surveying, 5\u00a0min left", "No position yet"]
+    out = run_ui([("fixPending", ["checking", True, False]), ("fixPending", ["checking", False, False]),
+                  ("fixPending", ["checking", True, True]), ("fixPending", ["no_solution", True, False]),
+                  ("fixPending", ["refused", True, False])])
+    assert out == ["Not checked during maintenance", "Being checked", "\u2013", "Not reported yet", "Not reported by this firmware"]
+    # The Receiver card: one line instead of model, configuration and position rows that would each repeat it; the
+    # Settings receiver row says it beside maintenance.
+    rx = (UI_JS / "60-receiver.js").read_text()
+    assert "unchecked ? h('p', { class: 'muted' }, NOT_CHECKED + '.') : null" in rx
+    assert "(unchecked ? null : ['Model', h('span', { class: 'muted' }, 'Not identified yet')])" in rx
+    upd = (UI_JS / "70-updates.js").read_text()
+    assert "rx_maintenance ? NOT_CHECKED + '.' : 'Its firmware shows once the station finds it.'" in upd
+
+
 def test_receiver_maintenance_starts_in_one_place():
     """Settings' Updates card, next to the receiver update, is the one place that starts it (the notices and the
     Status page end it); Receiver settings has no maintenance card any more."""
@@ -1416,16 +1459,23 @@ def test_starts_in_a_word_and_the_receiver_at_power_on_in_a_few():
     out = run_ui([("startKind", ["power_on", "none"]), ("startKind", ["crash", "none"]), ("startKind", ["brownout", "none"]),
                   ("startKind", ["other", "none"]), ("startKind", ["planned", "app_update"]), ("startKind", ["planned", "user"]),
                   ("startKind", ["planned", "gnss_ladder"]), ("startKind", ["planned", "something_new"]),
-                  ("rxBoot", "kept_running"), ("rxBoot", "restarted"), ("rxBoot", "pending"), ("rxBoot", "unknown")])
+                  ("rxBoot", "kept_running"), ("rxBoot", "restarted"), ("rxBoot", "pending"), ("rxBoot", "unknown"),
+                  ("rxBoot", ["kept_running", "power_on"]), ("rxBoot", ["restarted", "power_on"]),
+                  ("rxBoot", ["kept_running", "brownout"]), ("rxBoot", ["restarted", "brownout"]),
+                  ("rxBoot", ["pending", "brownout"])])
     assert out[:8] == ["Power-on", "Crash", "Power dip", "Reset", "Update", "Restart", "Recovery", "Restart"]
-    assert out[8:] == ["The receiver kept running", "The power was cut", "", ""]
+    assert out[8:12] == ["The receiver kept running", "The power was cut", "", ""]
+    # After a power dip (a brownout start) the receiver is judged too: it kept running, or the dip restarted it as well.
+    assert out[12:] == ["The receiver kept running", "The power was cut", "The receiver kept running",
+                        "The receiver restarted too", ""]
     assert all(len(w) <= 14 for w in out[:8])
 
 
-def test_the_receiver_at_power_on_event_in_a_few_words():
-    """History's 'Receiver at power-on' row: what happened, without how the station judged it."""
+def test_the_receiver_at_the_start_event_in_a_few_words():
+    """History's 'Receiver at the start' row (after a power-on or a power dip): what happened, without how the station
+    judged it; a receiver that restarted too lost the power as well, whichever start it was."""
     out = run_ui([("journalDetail", {"kind": "rx_boot", "a": a, "b": b}) for a, b in ((1, 1), (2, 3), (0, 0))])
-    assert out == ["Kept running", "Restarted too: the power was cut", "Not known"]
+    assert out == ["Kept running", "Restarted too: the power was lost", "Not known"]
 
 
 def test_log_lines_and_event_times_fit_one_line():

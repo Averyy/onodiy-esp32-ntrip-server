@@ -240,6 +240,11 @@ function configLine(g) {
   return [h('span', { class: c[1] === 'bad' || c[1] === 'warn' ? 't-' + c[1] : null }, c[0]), sg ? ' · ' + sg : ''];
 }
 
+/* The receiver unchecked during maintenance (GET /api/gnss; rxUnchecked). */
+function gnssUnchecked(g) {
+  return rxUnchecked((g.maintenance || {}).on, g.identity_confirmed);
+}
+
 /** The base position in one line: its state and what to do (delivering: corrections arrive, so a survey runs). */
 function positionLine(g, delivering) {
   const pos = g.position || {};
@@ -252,6 +257,7 @@ function positionLine(g, delivering) {
     if (!delivering) return 'Surveying, paused while no corrections arrive.';
     return sv.window_left_s ? 'Surveying, about ' + inMinutes(sv.window_left_s) + ' left. Then lock it.' : 'Surveying. Lock it when it ends.';
   }
+  if (gnssUnchecked(g)) return null;   /* the card's line says it (receiverTop) */
   return have ? 'Not locked. Lock it so it stays the same after restarts.' : 'No position yet.';
 }
 
@@ -263,19 +269,24 @@ function rxAlertShown(st, missing) {
 }
 
 /** The card under its title: the problem in a line, the alerts (rxAlertShown), then model, configuration and position
- * (st: stationState). */
+ * (st: stationState). With the receiver unchecked during maintenance (gnssUnchecked) one line says so, in place of the
+ * rows that would only repeat it. */
 function receiverTop(g, st) {
   const r = g.receiver || {};
   const missing = bandsMissingMsg(g);
+  const unchecked = gnssUnchecked(g);
+  const pos = positionLine(g, !st || st.delivering);
   return [
     st && RX_PROBLEM.indexOf(st.key) >= 0 ? msg(st.tone, st.lead, st.plan ? h('div', { class: 'muted small' }, st.plan) : null) : null,
     sgRefusedMsg(g),
     missing,
     alertMsgs(g, rxAlertShown(st, !!missing)),
+    unchecked ? h('p', { class: 'muted' }, NOT_CHECKED + '.') : null,
     kv([
-      ['Model', r.valid === false ? h('span', { class: 'muted' }, 'Not identified yet') : [r.model || DASH, ' · ', fwText(r.firmware, r.build)]],
-      ['Configuration', configLine(g)],
-      ['Position', positionLine(g, !st || st.delivering)],
+      r.valid === false ? (unchecked ? null : ['Model', h('span', { class: 'muted' }, 'Not identified yet')]) :
+        ['Model', [r.model || DASH, ' · ', fwText(r.firmware, r.build)]],
+      unchecked && profileChip(g)[0] === NOT_CHECKED_CHIP ? null : ['Configuration', configLine(g)],
+      pos ? ['Position', pos] : null,
     ]),
   ];
 }
@@ -290,8 +301,17 @@ function fixedCheckRow(g) {
       (c.vertical_m > 0 ? ' above it' : ' below it') : metresText(c.distance_m) + ' from the fixed position')];
   }
   if (c.state === 'ok') return [label, 'Within ' + (c.limit_m || 50) + NB + 'm of the fixed position'];
-  return [label, h('span', { class: 'muted' }, c.state === 'refused' ? 'Not reported by this firmware' :
-    c.state === 'no_solution' ? 'Not reported yet' : 'Being checked')];
+  const pending = fixPendingText(c.state, (g.maintenance || {}).on, gnssUnchecked(g));
+  return [label, pending === DASH ? DASH : h('span', { class: 'muted' }, pending)];
+}
+
+/** A fixed-position check without a verdict in words (maint: receiver maintenance is on, when nothing is checked;
+ * unchecked: the card already says the receiver is not checked). */
+function fixPendingText(state, maint, unchecked) {
+  if (state === 'refused') return 'Not reported by this firmware';
+  if (state === 'no_solution') return 'Not reported yet';
+  if (unchecked) return DASH;
+  return maint ? NOT_CHECKED : 'Being checked';
 }
 
 /** Behind the card's Details: the link and identity, then the position and the one in the stream (the map follows). */
@@ -592,6 +612,7 @@ function profileChip(g) {
   if (g.config_failed) return ['Failed', 'bad'];
   if (manageOwn(g)) return ['Managed by you', ''];
   if (g.profile_applied && !g.first_apply_held) return ['Applied', 'ok'];
+  if (gnssUnchecked(g)) return [NOT_CHECKED_CHIP, ''];
   return ['Not applied', 'warn'];
 }
 
@@ -610,6 +631,7 @@ function positionChip(g) {
   if (pos.locked && pos.source && pos.source !== 'none') return ['Locked', 'ok'];
   if (prof.base_mode === 'fixed' && prof.fixed) return ['Fixed (typed in)', 'info'];
   if ((g.survey || {}).active) return ['Surveying', 'info'];
+  if (gnssUnchecked(g)) return [NOT_CHECKED_CHIP, ''];
   return ['Not locked', ''];
 }
 

@@ -330,7 +330,7 @@ function overviewTab(box) {
       Object.assign({}, hl.station, { state: 'uart_closed' }) : hl.station;
     const opened = new Set(Array.from(box.querySelectorAll('details[data-k]')).filter(d => d.open).map(d => d.getAttribute('data-k')));
     const sect = (k, title, ...kids) => h('details', { class: 'more', 'data-k': k, open: opened.has(k) }, h('summary', null, title), kids);
-    const rxBoot = rxBootSentence((hl.station || {}).rx_boot);
+    const rxBoot = rxBootSentence((hl.station || {}).rx_boot, b.reset_class);
     /* The starts before this one: the history's first is this start (unless it could not be stored), which "This start" has. */
     const bh = hl.boot_history || [];
     const starts = bh[0] && bh[0].boot_no === b.boots_since_power_on && bh[0].reset_class === b.reset_class ? bh.slice(1) : bh;
@@ -903,7 +903,7 @@ function journalDetail(e) {
     case 'rx_maintenance':
       return a ? 'Started for ' + fmt.dur(b) : 'Ended after ' + fmt.dur(b);
     case 'rx_boot':
-      return a === 1 ? 'Kept running' : a === 2 ? 'Restarted too: the power was cut' : 'Not known';
+      return a === 1 ? 'Kept running' : a === 2 ? 'Restarted too: the power was lost' : 'Not known';
     case 'wifi_roam': {
       /* a: channels before and after, who moved it, stayed on the same one; b: signals before and after, seconds offline. */
       const ch0 = a & 0xff, ch1 = (a >>> 8) & 0xff, r0 = (b << 24) >> 24, r1 = (b << 16) >> 24;
