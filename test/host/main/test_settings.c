@@ -9,6 +9,8 @@
 #include <string.h>
 
 #include "esp_event.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_private/partition_linux.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -152,6 +154,7 @@ TEST_CASE("factory reset keeps exactly the device state", "[settings]")
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_APPLIED, 0x1234));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_APPLIED_FW, "R4.10Build18975"));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RTCM1230_OK, 1));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MAINT, blob, sizeof(blob)));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_str(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_REPO, "owner/name"));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_str(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_ETAG, "\"etag\""));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_i64(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_LAST_CHECK, 1791590400));
@@ -264,5 +267,53 @@ TEST_CASE("settings: the recovery mode is a user setting a factory reset takes b
     TEST_ASSERT_TRUE(strlen(SETTINGS_KEY_WIFI_PEND_SSID) <= 15 && strlen(SETTINGS_KEY_WIFI_PEND_PASS) <= 15);
     TEST_ASSERT_EQUAL(ESP_OK, settings_factory_reset());
     TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RECOVERY, &v));
+    nvs_down();
+}
+
+static volatile int s_changed;
+
+static void count_changed(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    (void)data;
+    if (id == SETTINGS_EVENT_CHANGED) {
+        s_changed++;
+    }
+}
+
+/* Events go through the default loop's task: wait for it to post them. */
+static int changed_after(int before)
+{
+    for (int i = 0; i < 50 && s_changed == before; i++) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+    return s_changed;
+}
+
+TEST_CASE("settings: device state stored on a schedule posts no change event", "[settings]")
+{
+    nvs_up();
+    TEST_ASSERT_EQUAL(ESP_OK, settings_init());
+    TEST_ASSERT_EQUAL(ESP_OK, esp_event_handler_register(SETTINGS_EVENT, SETTINGS_EVENT_CHANGED, count_changed, NULL));
+    const uint8_t rec[21] = { 1, 2, 3 };
+    int n = changed_after(s_changed);   /* settings_init's own writes settle */
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MAINT, rec, sizeof(rec)));
+    uint8_t buf[32];
+    size_t len = sizeof(buf);
+    TEST_ASSERT_EQUAL(ESP_OK, settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MAINT, buf, &len));
+    TEST_ASSERT_EQUAL_size_t(sizeof(rec), len);
+    TEST_ASSERT_EQUAL_MEMORY(rec, buf, sizeof(rec));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_erase_state_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MAINT));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_erase_state_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MAINT));   /* absent: fine */
+    len = sizeof(buf);
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MAINT, buf, &len));
+    vTaskDelay(pdMS_TO_TICKS(100));
+    TEST_ASSERT_EQUAL_INT(n, s_changed);
+    /* A setting still announces itself. */
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_AUTOCFG, 1));
+    TEST_ASSERT_EQUAL_INT(n + 1, changed_after(n));
+    TEST_ASSERT_EQUAL(ESP_OK, esp_event_handler_unregister(SETTINGS_EVENT, SETTINGS_EVENT_CHANGED, count_changed));
     nvs_down();
 }

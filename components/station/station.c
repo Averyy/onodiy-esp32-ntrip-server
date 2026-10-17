@@ -29,6 +29,7 @@
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_rtc_time.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -210,12 +211,22 @@ static bool s_update_claimed;
 /* RAW lease taken by the early boot step (recovery actions build only). */
 static gnss_link_lease_t s_boot_lease;
 
-/* Receiver maintenance across an ESP32 reset that keeps the RTC memory
- * (never NVS; a power cut that clears it ends it). On the ESP32-S3 the EN
- * pin reads as power-on, so the record is honoured after a power-on or
- * brownout reset too: one that survived says the memory kept its power. */
+/* Receiver maintenance across an ESP32 reset (station_core.h, "Maintenance
+ * across an ESP32 reset"): the RTC record, rewritten every step (exact, no
+ * flash; lost by the EN pin and by a power cut), and the stored copy in
+ * settings (gnss/maint: at entry, at each extension and every
+ * STN_MAINT_SAVE_S, erased when it ends). About 240 small writes for 4 h of
+ * maintenance, next to the ledger's one a minute around the clock: no wear
+ * concern for the 112 KB NVS partition. Station task only, apart from the
+ * flags. */
 static RTC_NOINIT_ATTR stn_maint_rtc_t s_maint_rtc;
+static int64_t s_maint_saved_ms = STN_NEVER;   /* the stored copy's last write (STN_NEVER: none this boot) */
+static uint32_t s_maint_saved_chosen;          /* its chosen duration (an extension saves at once) */
+static bool s_maint_stored;                    /* a stored copy may exist: erased when maintenance is off */
+static int64_t s_maint_store_retry_ms = STN_NEVER;
 static volatile bool s_maint_end_req;    /* the user's "end now", for the station task */
+static volatile bool s_maint_power_cut;  /* the power-on verdict: the receiver restarted too */
+static volatile bool s_factory_reset;    /* the settings were erased for a factory reset: no record from here on */
 /* The first-apply hold for this boot only: due, but it could not be stored
  * (settings unusable, or the write failed). Set at init, with automatic
  * configuration off for this boot (what the batch would have stored). A
@@ -413,18 +424,52 @@ static void lockout_release(void)
     }
 }
 
-/* Maintenance that was on before an ESP32 reset goes on with its time left
- * (station_init restores it) whenever its RTC record survived, whatever the
- * reset class: on the ESP32-S3 the EN pin (the USB auto-reset, the RST
- * button) reads as power-on while the receiver keeps running and may be
- * mid-work, so hands off stays on; a record that survived says the ESP32's
- * memory kept its power. A power cut that clears it ends maintenance, and
- * so does an open journal. */
-static bool maint_restore_due(uint32_t *left, uint32_t *spent)
+/* A factory reset erased the settings (the reboot follows): receiver
+ * maintenance keeps no record from here on, so the next boot resumes none. */
+static bool s_factory_hooked;
+
+static void on_factory_reset(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
-    uint32_t stamp = 0;
-    return !journal_open(s_journal_err) && stn_maint_rtc_read(&s_maint_rtc, &stamp, left, spent) &&
-           lifecycle_rtc_stamp_ok(stamp);
+    (void)arg;
+    (void)base;
+    (void)id;
+    (void)data;
+    s_factory_reset = true;
+    wake();
+}
+
+/* The resets after which the RTC timer has run on: the CPUs were reset,
+ * not the chip (esp_rtc_get_time_us keeps counting across them). */
+static bool rtc_timer_kept(esp_reset_reason_t r)
+{
+    return r == ESP_RST_SW || r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT;
+}
+
+/* Does maintenance that was on before this boot's reset go on, and for how
+ * long (stn_maint_boot)? From the RTC record when it survived, else from
+ * the stored copy (the EN pin's reset, which reads as power-on, loses the
+ * RTC memory while the receiver keeps running and may be mid-work). Never
+ * with an open journal or after a factory reset. `found`: a stored copy
+ * exists (erased unless maintenance goes on). */
+static void maint_boot_decide(stn_maint_boot_t *out, bool *found)
+{
+    lifecycle_boot_info_t boot;
+    lifecycle_get_boot_info(&boot);
+    stn_maint_boot_in_t in;
+    memset(&in, 0, sizeof(in));
+    in.blocked = journal_open(s_journal_err) || (boot.reset_class == LIFECYCLE_RESET_PLANNED &&
+                                                 boot.prev_reboot_reason == LIFECYCLE_REBOOT_FACTORY_RESET);
+    in.rtc_ok = stn_maint_rtc_read(&s_maint_rtc, &in.rtc) && lifecycle_rtc_stamp_ok(in.rtc.stamp);
+    in.rtc_timer_kept = rtc_timer_kept(boot.reset_reason);
+    in.rtc_now_us = esp_rtc_get_time_us();
+    uint8_t buf[STN_MAINT_STORE_MAX];
+    size_t len = sizeof(buf);
+    esp_err_t err = settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MAINT, buf, &len);
+    *found = settings_is_available() && err != ESP_ERR_NVS_NOT_FOUND;
+    in.store_ok = err == ESP_OK && stn_maint_store_decode(&in.store, buf, len) &&
+                  lifecycle_rtc_stamp_ok(in.store.stamp);
+    in.uptime_ms = now_ms();
+    stn_maint_boot(&in, out);
 }
 
 static bool app_update_running(void)
@@ -2255,7 +2300,10 @@ static void handle_notes(const stn_note_t *n, unsigned count)
             break;
         case STN_NOTE_MAINT_OFF:
             ESP_LOGW(TAG, "receiver maintenance ended (%s) after %d s: listening first, as at boot",
-                     x->b ? "time up" : "by the user", (int)x->a);
+                     x->b == STN_MAINT_END_TIME    ? "time up"
+                     : x->b == STN_MAINT_END_POWER ? "the power was cut: the receiver restarted with the ESP32"
+                                                   : "by the user",
+                     (int)x->a);
             journal_push(DIAG_EV_RX_MAINT, 0, x->a);
             break;
         case STN_NOTE_LIVE_OPENED:
@@ -2298,19 +2346,70 @@ static void handle_notes(const stn_note_t *n, unsigned count)
     }
 }
 
-/* Maintenance: the link's gate, the ledger and the RTC record follow the
- * core. The gate is compared with the link's own state, not with what this
- * task last set: station_maintenance_start sets it from the API task, and an
- * "end now" handled before this ran would otherwise leave it set. */
+/* The stored copy follows the core: written when due (stn_maint_store_due),
+ * erased once maintenance is off. A write that fails takes the old copy
+ * away (past its period it could resume more than is left); both are tried
+ * again after a while. Nothing after a factory reset. */
+#define MAINT_STORE_RETRY_MS 10000
+
+static void sync_maint_store(bool on, bool due, const stn_maint_rec_t *rec, int64_t now)
+{
+    if (s_maint_store_retry_ms != STN_NEVER && now < s_maint_store_retry_ms) {
+        return;
+    }
+    s_maint_store_retry_ms = STN_NEVER;
+    if (on && due && !s_factory_reset) {
+        uint8_t buf[STN_MAINT_STORE_MAX];
+        size_t len = stn_maint_store_encode(rec, buf, sizeof(buf));
+        esp_err_t err = len > 0 ? settings_set_state_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MAINT, buf, len)
+                                : ESP_ERR_INVALID_SIZE;
+        if (err == ESP_OK) {
+            s_maint_stored = true;
+            s_maint_saved_ms = now;
+            s_maint_saved_chosen = rec->chosen_s;
+            return;
+        }
+        esp_err_t erase = settings_erase_state_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MAINT);
+        if (erase == ESP_OK) {
+            s_maint_stored = false;
+        }
+        s_maint_saved_ms = STN_NEVER;
+        s_maint_store_retry_ms = now + MAINT_STORE_RETRY_MS;
+        ESP_LOGW(TAG, "receiver maintenance not stored (%s; old copy %s): only a reset that keeps the RTC memory "
+                      "keeps it",
+                 esp_err_to_name(err), erase == ESP_OK ? "removed" : esp_err_to_name(erase));
+        return;
+    }
+    if ((!on || s_factory_reset) && s_maint_stored) {
+        esp_err_t err = settings_erase_state_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MAINT);
+        if (err == ESP_OK) {
+            s_maint_stored = false;
+            s_maint_saved_ms = STN_NEVER;
+        } else {
+            s_maint_store_retry_ms = now + MAINT_STORE_RETRY_MS;
+            ESP_LOGW(TAG, "receiver maintenance's stored copy not removed (%s): tried again shortly",
+                     esp_err_to_name(err));
+        }
+    }
+}
+
+/* Maintenance: the link's gate, the ledger, the RTC record and the stored
+ * copy follow the core. The gate is compared with the link's own state, not
+ * with what this task last set: station_maintenance_start sets it from the
+ * API task, and an "end now" handled before this ran would otherwise leave
+ * it set. */
 static void sync_maintenance(const stn_in_t *in)
 {
     bool on;
-    uint32_t left;
-    int64_t start;
+    bool due;
+    stn_maint_rec_t rec;
+    stn_maint_rec_t store;
+    int64_t utc = diag_utc_now();
     portENTER_CRITICAL(&s_lock);
     on = s_core.maint;
-    left = stn_maint_left_s(&s_core, in->now_ms);
-    start = s_core.maint_start_ms;
+    stn_maint_record(&s_core, in->now_ms, utc, false, &rec);
+    due = stn_maint_store_due(&s_core, s_maint_saved_chosen, s_maint_saved_ms, in->now_ms);
+    stn_maint_record(&s_core, in->now_ms, utc, true, &store);
     portEXIT_CRITICAL(&s_lock);
     gnss_link_stats_t ls;
     bool gate = (gnss_link_get_stats(&ls) == ESP_OK) ? ls.hands_off : s_gate_on;
@@ -2326,13 +2425,18 @@ static void sync_maintenance(const stn_in_t *in)
         s_gate_on = on;
         ledger_set_maintenance(on);
     }
-    if (on) {
-        int64_t spent = (in->now_ms - start) / 1000;
-        stn_maint_rtc_write(&s_maint_rtc, lifecycle_rtc_stamp(), left > 0 ? left : 1,
-                            spent < 0 ? 0 : (uint32_t)spent);
-    } else if (s_maint_rtc.magic != 0) {
-        stn_maint_rtc_write(&s_maint_rtc, 0, 0, 0);
+    uint32_t stamp = lifecycle_rtc_stamp();
+    if (s_factory_reset) {
+        memset(&rec, 0, sizeof(rec));   /* "ended": the boot after the reset resumes nothing */
     }
+    stn_maint_rec_t cur;
+    if (rec.on || !stn_maint_rtc_read(&s_maint_rtc, &cur) || cur.on || cur.stamp != stamp) {
+        rec.stamp = stamp;
+        rec.rtc_us = esp_rtc_get_time_us();
+        stn_maint_rtc_write(&s_maint_rtc, &rec);
+    }
+    store.stamp = stamp;
+    sync_maint_store(on, due, &store, in->now_ms);
 }
 
 /* The casters pause for receiver work between two epochs, never inside one.
@@ -2471,6 +2575,7 @@ static void rxboot_decided(stn_rxboot_t v, stn_rxboot_by_t by)
         ledger_note_power_kept();
         break;
     case STN_RXBOOT_RESTARTED:
+        s_maint_power_cut = true;   /* a maintenance resumed at this boot ends (service) */
         if (by == STN_RXBOOT_BY_UPTIME) {
             ESP_LOGW(TAG, "power-on reset: the receiver restarted too (it has run for %u s, less than the ESP32): "
                           "the power was cut",
@@ -2526,6 +2631,31 @@ static void rxboot_tick(void)
     rxboot_decided(v, by);
 }
 
+/* A maintenance resumed with its end by the clock, once the clock is set:
+ * the ESP32 may have been off (or held in reset) for a while. */
+static void maint_clock(const stn_in_t *in)
+{
+    int64_t utc = diag_utc_now();
+    if (utc <= 0) {
+        return;
+    }
+    bool checked;
+    int64_t was;
+    int64_t until;
+    portENTER_CRITICAL(&s_lock);
+    checked = s_core.maint && s_core.maint_end_unix > 0;
+    was = s_core.maint_until_ms;
+    stn_maint_clock(&s_core, utc, in->now_ms);
+    until = s_core.maint_until_ms;
+    portEXIT_CRITICAL(&s_lock);
+    if (checked && until < was) {
+        int64_t left = until - in->now_ms;
+        ESP_LOGW(TAG, "receiver maintenance by the clock: %u s left, %u s less than counted (the ESP32 was off or held "
+                      "in reset meanwhile)",
+                 (unsigned)(left > 0 ? left / 1000 : 0), (unsigned)((was - until) / 1000));
+    }
+}
+
 /* Flags from other tasks, the ledger and the survey fallback's 1005 feed. */
 static void service(const stn_in_t *in)
 {
@@ -2549,6 +2679,13 @@ static void service(const stn_in_t *in)
         (void)stn_maint_end(&s_core, in);
         portEXIT_CRITICAL(&s_lock);
     }
+    if (s_maint_power_cut) {
+        s_maint_power_cut = false;
+        portENTER_CRITICAL(&s_lock);
+        (void)stn_maint_power_cut(&s_core, in);
+        portEXIT_CRITICAL(&s_lock);
+    }
+    maint_clock(in);
 
     if (s_journal_cleared) {
         s_journal_cleared = false;
@@ -3002,6 +3139,14 @@ esp_err_t station_init(void)
     if (lifecycle_register_shutdown_hook(sg_test_on_shutdown, NULL) != ESP_OK) {
         ESP_LOGW(TAG, "comparison record: no shutdown hook (it is stored on its own schedule only)");
     }
+    if (!s_factory_hooked) {
+        err = esp_event_handler_register(SETTINGS_EVENT, SETTINGS_EVENT_FACTORY_RESET, on_factory_reset, NULL);
+        s_factory_hooked = err == ESP_OK;
+        if (err != ESP_OK) {
+            /* The boot after the reset still resumes nothing (its reboot reason). */
+            ESP_LOGW(TAG, "factory reset event not registered: %s", esp_err_to_name(err));
+        }
+    }
 
     if (!s_journal_read) {
         read_journal();
@@ -3013,14 +3158,25 @@ esp_err_t station_init(void)
             ESP_LOGW(TAG, "staged receiver package not released: %s", esp_err_to_name(rel));
         }
     }
-    uint32_t left = 0;
-    uint32_t spent = 0;
     lifecycle_boot_info_t boot;
     lifecycle_get_boot_info(&boot);
-    bool power_class = boot.reset_class == LIFECYCLE_RESET_POWER_ON || boot.reset_class == LIFECYCLE_RESET_BROWNOUT;
-    bool restore = maint_restore_due(&left, &spent);
+    stn_maint_boot_t mb;
+    bool maint_found = false;
+    maint_boot_decide(&mb, &maint_found);
+    bool restore = mb.from != STN_MAINT_FROM_NONE;
     if (!restore) {
-        stn_maint_rtc_write(&s_maint_rtc, 0, 0, 0);
+        /* "Ended" at once: a reset before the first step resumes nothing either. */
+        stn_maint_rec_t off;
+        memset(&off, 0, sizeof(off));
+        off.stamp = lifecycle_rtc_stamp();
+        stn_maint_rtc_write(&s_maint_rtc, &off);
+    }
+    /* A stored copy is rewritten at the first step when maintenance goes on;
+     * one that does not go on goes now (else at the first step). */
+    s_maint_stored = maint_found;
+    s_maint_saved_ms = STN_NEVER;
+    if (!restore && maint_found && settings_erase_state_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MAINT) == ESP_OK) {
+        s_maint_stored = false;
     }
     /* The live view's output after an ESP32-only reset: the receiver did not
      * restart, so it may still send it (a flash session restarts it). A
@@ -3050,7 +3206,7 @@ esp_err_t station_init(void)
     s_core.live_idle_ms = (uint32_t)CONFIG_STATION_LIVE_VIEW_IDLE_S * 1000u;
     s_core.live_max_ms = (uint32_t)CONFIG_STATION_LIVE_VIEW_MAX_MIN * 60000u;
     if (restore) {
-        stn_maint_restore(&s_core, left, spent, now_ms());
+        stn_maint_restore(&s_core, &mb, now_ms());
     }
     if (sky_restore) {
         stn_sky_restore(&s_core);
@@ -3067,17 +3223,24 @@ esp_err_t station_init(void)
             s_gate_on = true;
             ledger_set_maintenance(true);
         }
-        if (power_class) {
-            /* On the ESP32-S3 the EN pin reads as power-on; the record
-             * surviving says the ESP32 kept its memory, and the receiver may
-             * be mid-work: hands off stays on, whatever it sends. */
-            ESP_LOGW(TAG, "receiver maintenance continues after a %s reset (its record survived: the ESP32 kept its "
-                          "memory, e.g. a reset by its pin): %u s left, listening only",
-                     boot.reset_class == LIFECYCLE_RESET_POWER_ON ? "power-on" : "brownout", (unsigned)left);
+        unsigned left = (unsigned)(mb.left_ms / 1000u);
+        if (mb.from == STN_MAINT_FROM_RTC) {
+            ESP_LOGW(TAG, "receiver maintenance continues after the reset: %u s left of %u (RTC record, %s), "
+                          "listening only",
+                     left, (unsigned)mb.chosen_s,
+                     mb.elapsed_known ? "the time across the reset taken off" : "this boot's time taken off");
         } else {
-            ESP_LOGW(TAG, "receiver maintenance continues after the reset: %u s left, listening only",
-                     (unsigned)left);
+            ESP_LOGW(TAG, "receiver maintenance continues after the reset: at most %u s left of %u (stored copy: "
+                          "the RTC memory was lost, as by the EN pin), listening only%s",
+                     left, (unsigned)mb.chosen_s, mb.end_unix > 0 ? "; checked by the clock once it is set" : "");
         }
+        if (boot.reset_class == LIFECYCLE_RESET_POWER_ON) {
+            ESP_LOGW(TAG, "power-on reset during receiver maintenance: it ends if the receiver restarted too (a "
+                          "power cut), and goes on if it kept running (the ESP32's EN pin)");
+        }
+    } else if (mb.expired) {
+        ESP_LOGW(TAG, "receiver maintenance was on before the reset, but its time ran out meanwhile");
+        journal_push(DIAG_EV_RX_MAINT, 0, (int32_t)(mb.chosen_s > INT32_MAX ? INT32_MAX : mb.chosen_s));
     }
     s_inited = true;
     ESP_LOGI(TAG, "sinks wired, profile hash %08x, station ID %u, %s", (unsigned)um98x_profile_hash(&s_profile),
@@ -3719,16 +3882,17 @@ esp_err_t station_bench_boot_race(uint32_t max_ms, station_bench_res_t *out)
         snprintf(out->line, sizeof(out->line), "REFUSED: a receiver update journal is open");
         return ESP_ERR_INVALID_STATE;
     }
-    /* The race runs at the next boot of any kind. After an ESP32 software
-     * reset during receiver maintenance, that maintenance goes on (the user
-     * works on the receiver over its other port, e.g. a PC flashing it):
-     * no stop key and no "6" may reach the receiver then. */
-    uint32_t left = 0;
-    uint32_t spent = 0;
-    if (maint_restore_due(&left, &spent)) {
+    /* The race runs at the next boot of any kind. After an ESP32 reset
+     * during receiver maintenance, that maintenance goes on (the user works
+     * on the receiver over its other port, e.g. a PC flashing it): no stop
+     * key and no "6" may reach the receiver then. */
+    stn_maint_boot_t mb;
+    bool found = false;
+    maint_boot_decide(&mb, &found);
+    if (mb.from != STN_MAINT_FROM_NONE) {
         snprintf(out->line, sizeof(out->line),
                  "REFUSED: receiver maintenance was on before this reset and goes on (%u s left); nothing sent",
-                 (unsigned)left);
+                 (unsigned)(mb.left_ms / 1000u));
         return ESP_ERR_INVALID_STATE;
     }
     esp_err_t err = board_init();

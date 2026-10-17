@@ -96,11 +96,35 @@
  * steps and automatic re-applies are dropped at entry (the user's own
  * requests stay queued). Exit (the user, or the time is up): the
  * stream-first path as at boot (IDLE, listen 3 s, identity, applied
- * check). The time left survives an ESP32 reset through the caller's RTC
- * record (stn_maint_restore; codec stn_maint_rtc_*): every reset that keeps
- * the ESP32's RTC memory, the power-on class included (on the ESP32-S3 the
- * reset pin reads as power-on while the receiver, which may be mid-work,
- * keeps running), never a power cut that clears it.
+ * check).
+ *
+ * Maintenance across an ESP32 reset (stn_maint_boot, stn_maint_restore):
+ * the caller keeps two records of it. Its RTC record (stn_maint_rtc_*),
+ * written every step, is exact and costs no flash, but only a reset that
+ * keeps the ESP32's RTC memory keeps it: a software reset, a crash or a
+ * watchdog. A reset by the EN pin (on the ESP32-S3 the USB serial chip's
+ * auto-reset and the RST button; it reads as power-on) powers the chip's
+ * RTC domain down and loses it, while the receiver, which may be mid-work,
+ * keeps running. So the caller also stores a copy in settings
+ * (stn_maint_store_*): at entry, at every extension and every
+ * STN_MAINT_SAVE_S, with the time left STN_MAINT_STORE_SHORT_S short of
+ * what it was, so a reset before the next save never resumes more than was
+ * left; erased when maintenance ends. Flash wear: about 240 small writes
+ * for 4 h of maintenance, next to the ledger's one a minute around the
+ * clock. A boot resumes from the RTC record when it
+ * is intact and from the run right before this boot (an "ended" RTC record
+ * makes a stored copy stale), else from the stored copy, never when a
+ * receiver flash journal is open or the previous boot ended in a factory
+ * reset. The time across the reset is taken off: by the RTC timer when it
+ * ran on (a software, crash or task/interrupt watchdog reset), else at
+ * least this boot's run time, and, when the record carried the end by the
+ * trusted clock, by that clock once there is one (stn_maint_clock). So
+ * resumed maintenance never ends later than the time chosen (apart from
+ * the time the ESP32 was held in reset while no clock tells it), and ends
+ * at once when that time ran out meanwhile. A power-on boot whose receiver
+ * restarted too (stn_rxboot_judge: RESTARTED) was a power cut: a
+ * maintenance resumed at that boot and not extended since ends then
+ * (stn_maint_power_cut). Kept, or unknown: it goes on.
  *
  * Power-on reset (stn_rxboot_judge): the ESP32-S3 reports a reset by its
  * EN pin (the USB serial chip's auto-reset that every flash uses, the RST
@@ -179,6 +203,8 @@ extern "C" {
 
 #define STN_MAINT_DEFAULT_S    (30u * 60u)   /**< receiver maintenance: default duration */
 #define STN_MAINT_MAX_S        (4u * 3600u)  /**< longest choice, and the most time left after an extension */
+#define STN_MAINT_SAVE_S       60u           /**< the stored copy's period */
+#define STN_MAINT_STORE_SHORT_S (STN_MAINT_SAVE_S + 10u) /**< its time left is this much short: until the next save (which may come a little late), plus the reset and the boot before this boot's uptime counts */
 #define STN_LIVE_DEFAULT_MS    (10 * 60000)  /**< live view window (the caller passes its own) */
 #define STN_LIVE_MAX_MS        (60 * 60000)  /**< longest window, extensions included */
 #define STN_LIVE_IDLE_MS       120000        /**< closes when no admin client asked for it this long */
@@ -372,6 +398,13 @@ typedef enum {
     STN_MAINT_SKY_OUTPUT = 6, /**< the live view's satellite-in-view output may be on: turned off first, offer again */
 } stn_maint_why_t;
 
+/** Why maintenance ended (STN_NOTE_MAINT_OFF's b). */
+typedef enum {
+    STN_MAINT_END_USER = 0,  /**< the user's "end now" */
+    STN_MAINT_END_TIME,      /**< its time was up (also when it ran out while the ESP32 was off, by the clock) */
+    STN_MAINT_END_POWER,     /**< resumed after a power-on reset that also restarted the receiver: a power cut */
+} stn_maint_end_t;
+
 /** Why a live view window closed. */
 typedef enum {
     STN_LIVE_END_NONE = 0,
@@ -419,7 +452,7 @@ typedef struct {
 /** What the caller journals (and logs). */
 typedef enum {
     STN_NOTE_MAINT_ON = 1,   /**< a = chosen duration (s) */
-    STN_NOTE_MAINT_OFF,      /**< a = time spent (s), b = 1 the time was up, 0 the user ended it */
+    STN_NOTE_MAINT_OFF,      /**< a = time spent (s), b = stn_maint_end_t */
     STN_NOTE_LIVE_OPENED,    /**< a = window length (s) */
     STN_NOTE_LIVE_EXTENDED,  /**< a = time left (s) */
     STN_NOTE_LIVE_CLOSED,    /**< a = time open (s), b = stn_live_end_t */
@@ -529,6 +562,8 @@ typedef struct {
     int64_t maint_until_ms;
     uint32_t maint_chosen_s;   /**< chosen duration (extensions added; for the status) */
     bool maint_restart_seen;   /**< restart evidence while it was on (noted, nothing done) */
+    bool maint_resumed;        /**< resumed after an ESP32 reset and not extended since (stn_maint_power_cut) */
+    int64_t maint_end_unix;    /**< resumed: its end by the trusted clock (UTC s), checked once there is a clock; 0 = none */
 
     /* live view */
     uint32_t live_idle_ms;     /**< closes after this long without stn_live_touch (STN_LIVE_IDLE_MS) */
@@ -713,25 +748,120 @@ int stn_maint_enter(stn_t *s, uint32_t dur_s, bool lease_held, int64_t now_ms);
 /** The user's "end now". @return STN_MAINT_OK or STN_MAINT_NOT_ON. */
 int stn_maint_end(stn_t *s, const stn_in_t *in);
 
-/** Back in maintenance after an ESP32 reset (the caller's RTC record): left_s remain, spent_s were spent before the reset. */
-void stn_maint_restore(stn_t *s, uint32_t left_s, uint32_t spent_s, int64_t now_ms);
-
 uint32_t stn_maint_left_s(const stn_t *s, int64_t now_ms);
 
-/** The caller's RTC record of the maintenance state (magic, image stamp, time left, CRC). */
+/** What a maintenance record says (the caller's RTC record, or its stored copy). */
+typedef struct {
+    bool on;                 /**< false: maintenance ended (RTC record only: a stored copy left behind is stale) */
+    uint32_t stamp;          /**< lifecycle's image-generation stamp of the run that wrote it */
+    uint32_t left_ms;        /**< time left when written (the stored copy: at most, STN_MAINT_STORE_SHORT_S short) */
+    uint32_t chosen_s;       /**< chosen duration, extensions added */
+    uint64_t rtc_us;         /**< the RTC timer when written (RTC record only) */
+    int64_t end_unix;        /**< its end by the trusted clock (UTC s); 0 = no clock when written */
+} stn_maint_rec_t;
+
+/**
+ * The record of the state now (the caller adds stamp and rtc_us). `utc_now`:
+ * the trusted clock (UTC s), 0 = none. `store`: for the stored copy, whose
+ * time left is STN_MAINT_STORE_SHORT_S short (never below 0), so a reset
+ * before the next save never resumes more than was left.
+ */
+void stn_maint_record(const stn_t *s, int64_t now_ms, int64_t utc_now, bool store, stn_maint_rec_t *rec);
+
+/**
+ * When the caller stores the copy again: maintenance on and nothing stored
+ * yet (`saved_ms` STN_NEVER), the chosen duration changed (an extension),
+ * or STN_MAINT_SAVE_S passed since the last save.
+ */
+bool stn_maint_store_due(const stn_t *s, uint32_t saved_chosen_s, int64_t saved_ms, int64_t now_ms);
+
+/** The caller's RTC record of the maintenance state (magic, the record's fields, CRC). */
 typedef struct {
     uint32_t magic;
-    uint32_t stamp;          /**< the image generation stamp that wrote it */
-    uint32_t left_s;
-    uint32_t spent_s;        /**< time spent in maintenance before the record was written */
+    uint32_t stamp;
+    uint32_t on;
+    uint32_t left_ms;
+    uint32_t chosen_s;
+    uint32_t rtc_lo;
+    uint32_t rtc_hi;
+    uint32_t end_lo;
+    uint32_t end_hi;
     uint32_t crc;
 } stn_maint_rtc_t;
 
-/** Write the record (left_s 0 clears it). */
-void stn_maint_rtc_write(stn_maint_rtc_t *r, uint32_t stamp, uint32_t left_s, uint32_t spent_s);
+/** Write the RTC record. */
+void stn_maint_rtc_write(stn_maint_rtc_t *r, const stn_maint_rec_t *rec);
 
-/** Read the record: false for a cleared, damaged or foreign one, or one with nothing left. */
-bool stn_maint_rtc_read(const stn_maint_rtc_t *r, uint32_t *stamp, uint32_t *left_s, uint32_t *spent_s);
+/** Read the RTC record: false for a damaged or foreign one (random memory after a power cut). */
+bool stn_maint_rtc_read(const stn_maint_rtc_t *r, stn_maint_rec_t *rec);
+
+#define STN_MAINT_STORE_VERSION 1u
+#define STN_MAINT_STORE_MAX     32u   /**< buffer for the stored copy */
+
+/**
+ * The stored copy (settings_codec: u8 version, u32 stamp, u32 left_ms, u32
+ * chosen_s, i64 end_unix; newer writers may append). Only "on" is stored:
+ * the copy is erased when maintenance ends. @return length, 0 if cap is short.
+ */
+size_t stn_maint_store_encode(const stn_maint_rec_t *rec, uint8_t *buf, size_t cap);
+
+/** Read the stored copy: false for an unreadable one. */
+bool stn_maint_store_decode(stn_maint_rec_t *rec, const uint8_t *buf, size_t len);
+
+/** Where a boot's maintenance resumes from. */
+typedef enum {
+    STN_MAINT_FROM_NONE = 0,  /**< it does not */
+    STN_MAINT_FROM_RTC,       /**< the RTC record */
+    STN_MAINT_FROM_STORE,     /**< the stored copy (the RTC memory was lost: the EN pin, or the power was cut) */
+} stn_maint_from_t;
+
+/** What a boot knows (stn_maint_boot). */
+typedef struct {
+    bool blocked;            /**< nothing resumes: a receiver flash journal is open, or the previous boot ended in a factory reset */
+    bool rtc_ok;             /**< the RTC record is intact and from the run right before this boot */
+    stn_maint_rec_t rtc;
+    bool rtc_timer_kept;     /**< the RTC timer ran on through the reset (software, crash, task or interrupt watchdog) */
+    uint64_t rtc_now_us;     /**< the RTC timer now */
+    bool store_ok;           /**< the stored copy is intact and from the run right before this boot */
+    stn_maint_rec_t store;
+    int64_t uptime_ms;       /**< this boot's run time so far: the least the reset took */
+} stn_maint_boot_in_t;
+
+/** A boot's decision (stn_maint_boot). */
+typedef struct {
+    uint8_t from;            /**< stn_maint_from_t */
+    bool expired;            /**< it was on, but its time ran out across the reset */
+    bool elapsed_known;      /**< the time across the reset is known (the RTC timer) */
+    uint32_t left_ms;        /**< from != NONE: time left now */
+    uint32_t chosen_s;       /**< from != NONE or expired: the chosen duration, extensions added */
+    int64_t end_unix;        /**< from != NONE: to check by the trusted clock (0 = no need, or none known) */
+} stn_maint_boot_t;
+
+/**
+ * Does maintenance resume at this boot, and with how much time left (see
+ * "Maintenance across an ESP32 reset")? Never more than the record had left
+ * less the time across the reset; nothing left resumes nothing.
+ */
+void stn_maint_boot(const stn_maint_boot_in_t *in, stn_maint_boot_t *out);
+
+/** Back in maintenance after an ESP32 reset (stn_maint_boot's decision; nothing when from is NONE). */
+void stn_maint_restore(stn_t *s, const stn_maint_boot_t *b, int64_t now_ms);
+
+/**
+ * The trusted clock (UTC s, 0 = none yet) against a resumed maintenance's
+ * end by the clock (maint_end_unix): it never ends later than that, and when
+ * that end has passed it ends at the next step (its time was up). Applied
+ * once, at the first trusted clock.
+ */
+void stn_maint_clock(stn_t *s, int64_t utc_now, int64_t now_ms);
+
+/**
+ * A power-on boot's verdict: the receiver restarted with the ESP32 (the power
+ * was cut). A maintenance resumed at this boot and not extended since ends
+ * (STN_MAINT_END_POWER; the stream-first path, as at boot).
+ * @return true if it ended.
+ */
+bool stn_maint_power_cut(stn_t *s, const stn_in_t *in);
 
 /**
  * The caller's RTC record of "the satellite-in-view output may be on because

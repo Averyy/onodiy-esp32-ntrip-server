@@ -933,20 +933,28 @@ apply, `RESET`, flash, ladder step or live-view toggle), reception goes on
 and every CRC-valid RTCM frame still reaches the casters. The station
 reports `idle` meanwhile (`rx_maintenance` tells it apart); the ledger
 counts the time as planned. It ends by itself when its time is up, on "end
-now", or with a power cut that clears the ESP32's memory. A reset that keeps
-that memory keeps it with its time left, the boot only listening: a
-software reset, and also a reset that reads as power-on, since on the
-ESP32-S3 the EN pin (the USB auto-reset that plugging in a cable or
-flashing can cause, the RST button) reads as power-on while the receiver
-keeps running and may be mid-work; a restart banner then does not end it
-either (the work may restart the receiver). Whether the ESP32-S3 keeps that
-memory through an EN reset is to be confirmed on the board. The end runs
-the station's stream-first check, as at boot. Entry and
-exit are journalled (`rx_maintenance`). Whether input on the link can
-disturb a receiver worked on through its other port is PROVISIONAL, to be
-confirmed on hardware. The UI starts it in Settings, next to the receiver
-update; while it is on, that row has Add 30 min and End now, and every
-other page a one-line notice with End now (the Status page's top card).
+now", with a power cut or a factory reset. Any other ESP32 reset keeps it
+with its time left, the boot only listening: a software restart, a crash or
+a watchdog (kept in the ESP32's RTC memory, exact), and a reset by the
+ESP32's EN pin (the USB auto-reset that opening the ESP32's port or
+flashing can cause, the RST button), which reads as power-on and loses the
+RTC memory while the receiver keeps running and may be mid-work (kept as a
+copy in settings, stored at the start, at each extension and every minute:
+up to 70 s less time left then). The time across the reset comes off: it
+never ends later than the time chosen (with the trusted clock, also when
+the ESP32 was held in reset for a while) and ends at once when that time
+ran out meanwhile. A power-on reset during which the receiver restarted too
+(`station.rx_boot` `restarted` in `GET /api/health`) was a power cut:
+maintenance resumed at that boot ends then, unless the user extended it
+since; `kept_running` or `unknown` leave it on. Any other restart banner
+does not end it (the work may restart the receiver). The end runs the
+station's stream-first check, as at boot. Entry and exit are journalled
+(`rx_maintenance`; an exit also when its time ran out across a reset).
+Whether input on the link can disturb a receiver worked on through its
+other port is PROVISIONAL, to be confirmed on hardware. The UI starts it in
+Settings, next to the receiver update; while it is on, that row has Add 30
+min and End now, and every other page a one-line notice with End now (the
+Status page's top card).
 
 While it is on, the receiver actions answer `409 receiver_maintenance`
 ("receiver maintenance: nothing is sent to the receiver"): apply, lock,
