@@ -218,6 +218,7 @@ typedef struct {
     bool today_dirty;
     bool hist_dirty;
     bool rolled;                        /**< a finished day moved into the history: store it now */
+    bool store_now;                     /**< a counted gap was taken back (lc_power_kept): store it before another reset */
     bool alive_saved;
     uint32_t alive_saved_ms;
     int64_t today_mark_ms;              /**< mark today was last handed out to be stored with (0 = not yet) */
@@ -354,7 +355,10 @@ void lc_snapshot(const lc_t *c, lc_snapshot_t *out);
 /**
  * Time to store the last-alive mark (with a clock, every `interval_ms`, and
  * at once when a finished day moved into the history: the RTC copy holds
- * only today, so until the history is stored a reset would lose that day).
+ * only today, so until the history is stored a reset would lose that day;
+ * also at once after lc_power_kept took back a counted gap: the reset pin
+ * that caused it powers the RTC copy down, and the next press may come
+ * within the interval).
  * `interval_ms` 0 stores now (a reboot); without a clock that is the mark
  * the session was restored with (today has not grown since: this boot's
  * time is pending, kept only in the RTC copy, and a restore from NVS counts

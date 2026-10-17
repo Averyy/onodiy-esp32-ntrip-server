@@ -175,14 +175,21 @@ TEST_CASE("ledger: a power-on reset that left the receiver running is no power-o
     TEST_ASSERT_TRUE(lc_set_utc(&c, T0, at(DAY0, H(12) + S(13) + 2000), LC_CLOCK_SNTP));
     TEST_ASSERT_EQUAL_UINT32((uint32_t)(M(5) + S(13)), c.today.power_off_ms);
     lc_tick(&c, T0 + 20000u);
-    c.today_dirty = false;
+    int64_t mark_ms = 0;
+    bool today = false;
+    bool hist = false;
+    TEST_ASSERT_TRUE(lc_persist_due(&c, T0 + 20000u, 60000u, &mark_ms, &today, &hist));   /* stored with the gap */
+    TEST_ASSERT_FALSE(lc_persist_due(&c, T0 + 21000u, 60000u, &mark_ms, &today, &hist));
     TEST_ASSERT_TRUE(lc_power_kept(&c));
     TEST_ASSERT_FALSE(lc_power_kept(&c));   /* once */
     TEST_ASSERT_EQUAL_UINT32((uint32_t)M(5), c.today.power_off_ms);
     TEST_ASSERT_EQUAL_UINT32((uint32_t)(S(13) + 22000), c.today.down_ms[0]);
     TEST_ASSERT_EQUAL_UINT32(0, c.today.planned_ms[0]);
-    TEST_ASSERT_TRUE(c.today_dirty);         /* stored again */
     TEST_ASSERT_FALSE(c.prev_reboot_planned);
+    /* Stored again at once, not a persist interval later: the next press of the reset pin may come sooner. */
+    TEST_ASSERT_TRUE(lc_persist_due(&c, T0 + 21000u, 60000u, &mark_ms, &today, &hist));
+    TEST_ASSERT_TRUE(today);
+    TEST_ASSERT_FALSE(lc_persist_due(&c, T0 + 22000u, 60000u, &mark_ms, &today, &hist));
 
     /* Not a power-on class reset: nothing to change. */
     fresh(T0, 2000);

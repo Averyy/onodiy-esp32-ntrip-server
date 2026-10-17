@@ -414,6 +414,7 @@ bool lc_power_kept(lc_t *c)
         if (r != NULL) {
             r->power_off_ms = r->power_off_ms > piece ? r->power_off_ms - (uint32_t)piece : 0u;
             mark(c, r);
+            c->store_now = true;   /* stored before another press of the reset pin */
         }
         t += (int64_t)piece;
         left -= piece;
@@ -678,7 +679,7 @@ bool lc_persist_due(lc_t *c, uint32_t now_ms, uint32_t interval_ms, int64_t *ali
         }
         *alive_ms = c->alive_ms;
     } else {
-        if (!c->rolled && c->alive_saved && since(now_ms, c->alive_saved_ms) < interval_ms) {
+        if (!c->rolled && !c->store_now && c->alive_saved && since(now_ms, c->alive_saved_ms) < interval_ms) {
             return false;
         }
         c->alive_saved = true;
@@ -693,6 +694,7 @@ bool lc_persist_due(lc_t *c, uint32_t now_ms, uint32_t interval_ms, int64_t *ali
         }
     }
     c->rolled = false;
+    c->store_now = false;
     *today = c->today_dirty;
     *hist = c->hist_dirty;
     if (*today) {
