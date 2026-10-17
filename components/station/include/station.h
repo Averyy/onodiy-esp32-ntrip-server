@@ -201,8 +201,8 @@
  * the two apart (the UI's banner with the time left). Exit (the
  * user, or the time is up) runs the stream-first path as at boot. An ESP32
  * reset keeps the state with its time left, the boot only listening until
- * it ends: a software reset, a crash or a watchdog from the RTC memory
- * (exact), and a reset by the EN pin (on the ESP32-S3 the USB auto-reset
+ * it ends: a software reset, a crash, a watchdog or a brownout from the
+ * RTC memory (exact), and a reset by the EN pin (on the ESP32-S3 the USB auto-reset
  * and the RST button; it reads as power-on and powers the RTC memory down
  * while the receiver keeps running and may be mid-work) from a copy in
  * settings (gnss/maint: at entry, at each extension and every minute, with

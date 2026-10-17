@@ -626,7 +626,7 @@ static void judge_window(stn_t *s, const stn_in_t *in)
             s->drift_blocked = true;
         } else if (check) {
             s->profile_applied = false;
-            if (s->static_ok) {
+            if (s->static_ok && !in->ladder_alerts_only) {
                 /* The receiver acknowledged this profile on this firmware
                  * (the applied state): a window without RTCM says nothing
                  * about what it runs, and a re-apply could not be checked
@@ -634,7 +634,12 @@ static void judge_window(stn_t *s, const stn_in_t *in)
                  * stall is the health ladder's (its reconfigure step). */
                 s->check_pending = true;
             } else if (auto_apply_allowed(s, in)) {
-                want_apply(s, STN_WHY_CHECK, STN_CHANGE_NONE, false);   /* never acknowledged */
+                /* Never acknowledged; or acknowledged, but the ladder only
+                 * alerts and re-applies nothing: once, as its step would
+                 * (the next window checks the apply, without repeating it). */
+                want_apply(s, STN_WHY_CHECK, STN_CHANGE_NONE, false);
+            } else if (s->static_ok) {
+                s->check_pending = true;   /* nothing applies: the check still waits for RTCM */
             }
         }
         /* Otherwise a stall: the health ladder's business, not drift. */

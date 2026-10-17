@@ -963,7 +963,7 @@ ran out meanwhile. A power-on or brownout reset during which the receiver
 restarted too (`station.rx_boot` `restarted` in `GET /api/health`) lost the
 power for both: maintenance resumed at that boot ends then, unless the user
 extended it since; `kept_running` or `unknown` leave it on (a brownout keeps
-the RTC memory: it resumes from there). Any other restart banner does not
+the RTC memory and its timer: it resumes from there, exact). Any other restart banner does not
 end it (the work may restart the receiver). The end runs the station's
 stream-first check, as at boot. Entry and exit are journalled
 (`rx_maintenance`; an exit also when its time ran out across a reset).

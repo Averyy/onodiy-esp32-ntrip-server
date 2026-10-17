@@ -29,8 +29,15 @@
  *     receiver acknowledged this profile on this firmware at its last
  *     apply): a re-apply could not be checked without RTCM, and does not
  *     help a receiver without an antenna; such a stall is the health
- *     ladder's (its reconfigure step, under the user's recovery mode). With
- *     the static part false the apply runs at once. An unsupported
+ *     ladder's (its reconfigure step, under the user's recovery mode).
+ *     With the recovery set to alerts only (in.ladder_alerts_only) the
+ *     ladder re-applies nothing, so the check does, once: a receiver that
+ *     lost its configuration (a factory reset over its other port, a
+ *     restart without the saved one) would otherwise stay unconfigured.
+ *     The window after it is the apply's own check, which a window without
+ *     RTCM does not repeat: one apply per check (a start, a receiver
+ *     restart, the end of maintenance). With the static part false the
+ *     apply runs at once. An unsupported
  *     model: stream only (alert). Later windows watch for drift: two failed
  *     windows in a row while RTCM flows re-apply (same conditions), unless
  *     the previous apply's own check already failed (re-applying would not
@@ -108,8 +115,8 @@
  * Maintenance across an ESP32 reset (stn_maint_boot, stn_maint_restore):
  * the caller keeps two records of it. Its RTC record (stn_maint_rtc_*),
  * written every step, is exact and costs no flash, but only a reset that
- * keeps the ESP32's RTC memory keeps it: a software reset, a crash or a
- * watchdog. A reset by the EN pin (on the ESP32-S3 the USB serial chip's
+ * keeps the ESP32's RTC memory keeps it: a software reset, a crash, a
+ * watchdog or a brownout. A reset by the EN pin (on the ESP32-S3 the USB serial chip's
  * auto-reset and the RST button; it reads as power-on) powers the chip's
  * RTC domain down and loses it, while the receiver, which may be mid-work,
  * keeps running. So the caller also stores a copy in settings
@@ -123,7 +130,8 @@
  * makes a stored copy stale), else from the stored copy, never when a
  * receiver flash journal is open or the previous boot ended in a factory
  * reset. The time across the reset is taken off: by the RTC timer when it
- * ran on (a software, crash or task/interrupt watchdog reset), else at
+ * ran on (a software, crash, task/interrupt watchdog or brownout reset:
+ * lifecycle_reset_keeps_rtc_timer), else at
  * least this boot's run time, and, when the record carried the end by the
  * trusted clock, by that clock once there is one (stn_maint_clock). So
  * resumed maintenance never ends later than the time chosen (apart from
@@ -460,6 +468,7 @@ typedef struct {
     uint64_t rtcm_frames;    /**< framer: CRC-valid RTCM frames (published or held) */
     uint64_t text_lines;     /**< framer: checksum-valid text lines */
     bool autocfg;            /**< gnss/autocfg */
+    bool ladder_alerts_only; /**< gnss/recovery = 2: the health ladder only alerts, its reconfigure step sends nothing */
     bool model_known;        /**< a model was stored (gnss/model) at some point */
     bool profile_survey;     /**< the profile surveys (else fixed) */
     uint32_t survey_s;       /**< the profile's survey length */
@@ -968,7 +977,7 @@ typedef struct {
     bool blocked;            /**< nothing resumes: a receiver flash journal is open, or the previous boot ended in a factory reset */
     bool rtc_ok;             /**< the RTC record is intact and from the run right before this boot */
     stn_maint_rec_t rtc;
-    bool rtc_timer_kept;     /**< the RTC timer ran on through the reset (software, crash, task or interrupt watchdog) */
+    bool rtc_timer_kept;     /**< the RTC timer ran on through the reset (lifecycle_reset_keeps_rtc_timer: software, crash, watchdog, brownout) */
     uint64_t rtc_now_us;     /**< the RTC timer now */
     bool store_ok;           /**< the stored copy is intact and from the run right before this boot */
     stn_maint_rec_t store;

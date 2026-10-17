@@ -456,13 +456,6 @@ static void on_factory_reset(void *arg, esp_event_base_t base, int32_t id, void 
     wake();
 }
 
-/* The resets after which the RTC timer has run on: the CPUs were reset,
- * not the chip (esp_rtc_get_time_us keeps counting across them). */
-static bool rtc_timer_kept(esp_reset_reason_t r)
-{
-    return r == ESP_RST_SW || r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT;
-}
-
 /* Does maintenance that was on before this boot's reset go on, and for how
  * long (stn_maint_boot)? From the RTC record when it survived, else from
  * the stored copy (the EN pin's reset, which reads as power-on, loses the
@@ -480,7 +473,7 @@ static void maint_boot_decide(stn_maint_boot_t *out, bool *found, stn_maint_know
     in.blocked = journal_open(s_journal_err) || (boot.reset_class == LIFECYCLE_RESET_PLANNED &&
                                                  boot.prev_reboot_reason == LIFECYCLE_REBOOT_FACTORY_RESET);
     in.rtc_ok = stn_maint_rtc_read(&s_maint_rtc, &in.rtc) && lifecycle_rtc_stamp_ok(in.rtc.stamp);
-    in.rtc_timer_kept = rtc_timer_kept(boot.reset_reason);
+    in.rtc_timer_kept = lifecycle_reset_keeps_rtc_timer(boot.reset_reason);   /* a brownout too: its exact time */
     in.rtc_now_us = esp_rtc_get_time_us();
     uint8_t buf[STN_MAINT_STORE_MAX];
     size_t len = sizeof(buf);
@@ -511,6 +504,14 @@ static bool autocfg_enabled(void)
         v = 1;
     }
     return v != 0;
+}
+
+/* gnss/recovery = 2: the health ladder only alerts and re-applies nothing (its
+ * reconfigure step sends nothing); any other or no value: it does. */
+static bool ladder_alerts_only(void)
+{
+    uint8_t v = 0;
+    return settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RECOVERY, &v) == ESP_OK && v == 2;
 }
 
 /* gnss/rtcm1230_ok: 1 accepted, 0 refused at the last apply, -1 never applied (not stored). */
@@ -2196,6 +2197,7 @@ static void fill_in(stn_in_t *in)
         in->text_lines = st.framing.text_lines;
     }
     in->autocfg = autocfg_enabled();
+    in->ladder_alerts_only = ladder_alerts_only();
     in->model_known = model_known();
     in->profile_survey = (s_profile.base_mode == UM98X_BASE_SURVEY_IN);
     in->survey_s = s_profile.survey_in_s;

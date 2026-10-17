@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: MIT
  *
  * Which reboot reasons are planned downtime or start another app image,
- * and how the previous session ended (pure logic, no RTOS calls,
- * host-testable). The reasons and why each is or is not planned are listed
+ * how the previous session ended, and which resets keep the RTC timer
+ * running (pure logic, no RTOS calls, host-testable). The reasons and why each is or is not planned are listed
  * at lifecycle_reboot_user_planned() in lifecycle.h.
  */
 #include "lifecycle.h"
@@ -57,5 +57,19 @@ lifecycle_prev_end_t lifecycle_prev_session_end(lifecycle_reset_class_t cls, lif
     case LIFECYCLE_RESET_OTHER:
     default:
         return LIFECYCLE_PREV_UNKNOWN;
+    }
+}
+
+bool lifecycle_reset_keeps_rtc_timer(esp_reset_reason_t reason)
+{
+    switch (reason) {
+    case ESP_RST_SW:
+    case ESP_RST_PANIC:
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_BROWNOUT:
+        return true;
+    default:
+        return false;
     }
 }

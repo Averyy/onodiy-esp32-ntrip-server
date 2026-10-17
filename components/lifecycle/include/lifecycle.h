@@ -190,6 +190,16 @@ lifecycle_prev_end_t lifecycle_prev_session_end(lifecycle_reset_class_t cls, lif
  */
 bool lifecycle_reboot_switches_image(lifecycle_reboot_reason_t reason);
 
+/**
+ * The RTC timer ran on across this reset (esp_rtc_get_time_us() kept
+ * counting): the CPUs and the digital system were reset, not the chip's RTC
+ * domain. A software restart, a panic, the interrupt and task watchdogs,
+ * and a brownout: IDF's brownout interrupt ends in a software system reset,
+ * and without the interrupt the detector resets the system level too.
+ * Power-on (also the EN pin) and every other reason: not known to. Pure.
+ */
+bool lifecycle_reset_keeps_rtc_timer(esp_reset_reason_t reason);
+
 /** This boot, as accounted by lifecycle_early_boot(). */
 typedef struct {
     esp_reset_reason_t reset_reason;           /**< raw IDF reason */

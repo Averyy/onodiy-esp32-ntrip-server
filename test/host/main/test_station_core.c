@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "lifecycle.h"
 #include "station_core.h"
 #include "unity.h"
 
@@ -740,6 +741,47 @@ TEST_CASE("station core: no RTCM from a receiver that acknowledged the profile: 
     j = sim_next(&w);
     TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
     TEST_ASSERT_EQUAL(STN_WHY_CHECK, j.why);
+}
+
+TEST_CASE("station core: no RTCM from an acknowledged profile with the recovery on alerts only: one apply per check",
+          "[station]")
+{
+    /* The ladder only alerts and re-applies nothing, so the check does, once: a receiver that lost its configuration
+     * (a factory reset over its other port) would stay unconfigured. The window after the apply is its own check,
+     * which a window without RTCM does not repeat. */
+    sim_t w;
+    sim_init(&w, false);
+    w.in.ladder_alerts_only = true;
+    boot_lines_only(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
+    w.in.text_lines++;
+    identity_done(&w, true, true);   /* the applied state matches */
+    TEST_ASSERT_EQUAL_UINT(1, noant_run(&w, 10 * 60, NULL));
+    TEST_ASSERT_FALSE(w.s.check_pending);
+    TEST_ASSERT_FALSE(w.s.apply_wanted);
+    TEST_ASSERT_FALSE(w.s.profile_applied);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+
+    /* A receiver restart (its banner): a new check, one apply again. */
+    stn_restart_seen(&w.s);
+    TEST_ASSERT_EQUAL_UINT(1, noant_run(&w, 10 * 60, NULL));
+
+    /* The configuration back after it, RTCM flows: nothing more. */
+    stn_restart_seen(&w.s);
+    w.rtcm_on = true;
+    TEST_ASSERT_EQUAL_UINT(0, noant_run(&w, 5 * 60, NULL));
+    TEST_ASSERT_TRUE(w.s.profile_applied);
+
+    /* Without automatic configuration nothing applies: the check waits for RTCM. */
+    sim_init(&w, false);
+    w.in.ladder_alerts_only = true;
+    w.in.autocfg = false;
+    boot_lines_only(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
+    w.in.text_lines++;
+    identity_done(&w, true, true);
+    TEST_ASSERT_EQUAL_UINT(0, noant_run(&w, 10 * 60, NULL));
+    TEST_ASSERT_TRUE(w.s.check_pending);
 }
 
 TEST_CASE("station core: a receiver whose RTCM stopped is asked at once, then once a minute while nothing comes", "[station]")
@@ -2266,12 +2308,13 @@ TEST_CASE("station core: a boot resumes maintenance from the RTC record, else fr
                                     .end_unix = 1791590400 };
     stn_maint_boot_t b;
 
-    /* A software reset, a crash or a watchdog: the RTC timer tells the time
-     * across it exactly; the stored copy is not needed. */
+    /* A software reset, a crash, a watchdog or a brownout (its interrupt
+     * ends in a software system reset): the RTC timer tells the time across
+     * it exactly; the stored copy is not needed. */
     stn_maint_boot_in_t in = boot_in();
     in.rtc_ok = true;
     in.rtc = rtc;
-    in.rtc_timer_kept = true;
+    in.rtc_timer_kept = lifecycle_reset_keeps_rtc_timer(ESP_RST_BROWNOUT);
     in.rtc_now_us = rtc.rtc_us + 4200000ull;
     in.store_ok = true;
     in.store = store;
