@@ -60,8 +60,8 @@ What it does:
      (applied and trial false) and GET /api/wifi agrees at once (no trial,
      nothing pending) and has no access point to name (bssid and
      tx_power_dbm present, null: the emulated link), no moves between
-     access points (roams 0, ap_steering null: roaming is off without a
-     radio); DELETE /api/journal clears the event journal: GET
+     access points (roams 0, and no ap_steering at all: roaming is off
+     without a radio, so the build never reads it); DELETE /api/journal clears the event journal: GET
      /api/journal from cursor 0 then holds only records numbered after the
      newest one before it (the numbering goes on), GET /api/connections is
      empty and complete;
@@ -1665,10 +1665,11 @@ class Smoke:
                    and w["tx_power_dbm"] is None,
                    f"GET /api/wifi: bssid {w.get('bssid', 'missing')!r}, "
                    f"tx_power_dbm {w.get('tx_power_dbm', 'missing')!r} (null in this build)")
-        # Roaming: off in this build (no radio), so no moves and the access point's 802.11v support unknown.
-        self.check(status == 200 and w.get("roams") == 0 and "ap_steering" in w and w["ap_steering"] is None,
+        # Roaming: off in this build (no radio), so no moves, and the access point's 802.11v support is never read:
+        # left out (null would say "not read yet").
+        self.check(status == 200 and w.get("roams") == 0 and "ap_steering" not in w,
                    f"GET /api/wifi: roams {w.get('roams', 'missing')!r}, "
-                   f"ap_steering {w.get('ap_steering', 'missing')!r} (0 and null in this build)")
+                   f"ap_steering {w.get('ap_steering', 'missing')!r} (0 and missing in this build)")
 
     def journal_clear_checks(self) -> None:
         """DELETE /api/journal: the records are gone at once and the numbering goes on (the station may journal

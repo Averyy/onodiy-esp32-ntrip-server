@@ -257,6 +257,13 @@ static volatile bool s_ap_clients_queued;   /* one MSG_AP_CLIENTS at most in the
 
 /* Readers' snapshot; everything below "under s_lock" is shared with API callers. */
 static network_status_t s_st;               /* under s_lock */
+/* ap_steering until it is read: a few seconds into each association, in a
+ * build that reads it at all (roaming and 802.11v support on). */
+#if CONFIG_NETWORK_ROAM && CONFIG_ESP_WIFI_WNM_SUPPORT
+#define STEER_UNREAD (-1)
+#else
+#define STEER_UNREAD NETWORK_AP_STEERING_NEVER
+#endif
 static int64_t s_probe_at_us;               /* under s_lock: when the last probe finished */
 static bool s_probe_valid;                  /* under s_lock */
 static bool s_probe_running;                /* under s_lock */
@@ -1229,7 +1236,7 @@ static void wifi_stop(void)
     taskENTER_CRITICAL(&s_lock);
     s_st.associated = false;
     s_st.bssid_known = false;
-    s_st.ap_steering = -1;
+    s_st.ap_steering = STEER_UNREAD;
     s_st.tx_power_known = false;
     s_st.ap_reasons = 0;
     s_st.ap_close_in_s = UINT32_MAX;
@@ -2371,7 +2378,7 @@ static void handle_disconnected(uint8_t reason, int8_t rssi, bool held)
     memcpy(from_bssid, s_st.bssid, sizeof(from_bssid));
     uint8_t from_channel = s_st.channel;
     int8_t from_rssi = s_st.rssi;
-    s_st.ap_steering = -1;
+    s_st.ap_steering = STEER_UNREAD;
 #endif
     s_st.associated = false;
     s_st.bssid_known = false;
@@ -3313,7 +3320,7 @@ esp_err_t network_init(void)
     taskENTER_CRITICAL(&s_lock);
     s_st.probe_age_s = UINT32_MAX;
     s_st.ap_close_in_s = UINT32_MAX;
-    s_st.ap_steering = -1;
+    s_st.ap_steering = STEER_UNREAD;
     taskEXIT_CRITICAL(&s_lock);
 #if CONFIG_NETWORK_ROAM
     const net_roam_cfg_t roam_cfg = {

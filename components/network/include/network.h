@@ -261,6 +261,9 @@ typedef enum {
     NETWORK_LADDER_TRIG_UNREACHED  = 1u << 2, /**< S: a slot's failures have not reached its caster for 180 s */
 } network_ladder_trigger_t;
 
+/** network_status_t.ap_steering in a build that never reads it (roaming or 802.11v support off): not "not read yet". */
+#define NETWORK_AP_STEERING_NEVER (-2)
+
 /** Snapshot for status pages and health. */
 typedef struct {
     bool sta_configured;
@@ -289,7 +292,7 @@ typedef struct {
     int8_t tx_power_qdbm;          /**< the station's Wi-Fi transmit power limit now (esp_wifi_get_max_tx_power), 0.25 dBm units */
     uint32_t reconnects;           /**< station links re-established after a drop, since boot (moves between access points not counted) */
     uint32_t roams;                /**< moves to another access point of the network, since boot (CONFIG_NETWORK_ROAM) */
-    int8_t ap_steering;            /**< the access point takes part in 802.11v BSS transition management (it can ask the station to move): 1 yes, 0 no, -1 not known (not associated yet, or roaming off) */
+    int8_t ap_steering;            /**< the access point takes part in 802.11v BSS transition management (it can ask the station to move): 1 yes, 0 no, -1 not read yet (not associated, or the first seconds of the association), NETWORK_AP_STEERING_NEVER in a build that never reads it (CONFIG_NETWORK_ROAM or CONFIG_ESP_WIFI_WNM_SUPPORT off) */
     bool moving;                   /**< a move to another access point is under way: from its start to the address on the new link, or with the address kept to DHCP's answer there (refreshed once a second) */
     uint32_t connect_failures;     /**< connect attempts that ended without a link, since boot */
     uint32_t offline_s;            /**< seconds offline in the current outage, 0 if online */

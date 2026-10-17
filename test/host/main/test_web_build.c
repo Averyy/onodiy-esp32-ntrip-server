@@ -1206,7 +1206,7 @@ TEST_CASE("wifi: moves between access points and whether the access point can as
     root = build_wifi(&n);
     TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "ap_steering")));
     cJSON_Delete(root);
-    /* Not read yet (or roaming off), and not associated: unknown. */
+    /* Not read yet, and not associated: unknown. */
     n.ap_steering = -1;
     root = build_wifi(&n);
     TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "ap_steering")));
@@ -1216,6 +1216,13 @@ TEST_CASE("wifi: moves between access points and whether the access point can as
     root = build_wifi(&n);
     TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "ap_steering")));
     TEST_ASSERT_EQUAL(3, at(root, "roams")->valueint);
+    cJSON_Delete(root);
+    /* A build that never reads it (roaming or 802.11v support off): left out, not "not read yet". */
+    n.ap_steering = NETWORK_AP_STEERING_NEVER;
+    n.associated = true;
+    root = build_wifi(&n);
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(root, "ap_steering"));
+    TEST_ASSERT_NOT_NULL(cJSON_GetObjectItemCaseSensitive(root, "roams"));
     cJSON_Delete(root);
 }
 

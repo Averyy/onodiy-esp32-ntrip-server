@@ -1738,7 +1738,9 @@ void web_build_wifi(wj_t *w, const web_wifi_snap_t *s)
     } else {
         wj_null(w, "tx_power_dbm");
     }
-    if (n->associated && n->ap_steering >= 0) {
+    if (n->ap_steering == NETWORK_AP_STEERING_NEVER) {
+        /* left out: this build never reads it (null would read as "not yet") */
+    } else if (n->associated && n->ap_steering >= 0) {
         wj_bool(w, "ap_steering", n->ap_steering > 0);
     } else {
         wj_null(w, "ap_steering");

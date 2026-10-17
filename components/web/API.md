@@ -1644,8 +1644,10 @@ channel); only in this admin route, never in the public status.
 `ap_steering`: the access point takes part in 802.11v BSS transition
 management, so it can ask the station to move to another access point of
 the network (a mesh steering it); read once, a few seconds into each
-association; `null` before that, while not associated, and with roaming
-off (`CONFIG_NETWORK_ROAM`) or in the QEMU build. `roams`: moves to another
+association; `null` before that and while not associated. Left out in a
+build that never reads it (roaming, `CONFIG_NETWORK_ROAM`, or 802.11v
+support, `CONFIG_ESP_WIFI_WNM_SUPPORT`, off; the QEMU build): the UI then
+shows no row for it. `roams`: moves to another
 access point of the network since boot, the ones the access point asked
 for and the station's own (to a clearly stronger access point while its
 signal is weak); each is a `wifi_roam` journal entry (so is an own
