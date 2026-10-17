@@ -54,6 +54,9 @@
  * resets counts as failed, and the ladder goes on past it (after step 5,
  * the rule of its failure for a receiver that answered since the RESET
  * went out: 7 with its reason; otherwise the byte rule on the stall class).
+ * Only right after that second abandonment: a re-run that succeeded, or
+ * RTCM back meanwhile, makes a later stall an ordinary one (after step 5:
+ * the byte rule on its class).
  * Between steps (IDLE after an abandoned step, or before a stall is
  * declared again, while no RTCM comes and nothing but a lease suspends the
  * ladder) the status stays RECOVERING (DEGRADED in ALERTS mode) with its
@@ -136,15 +139,23 @@
  *             replies in this episode, text lines when it began, or replies
  *             to the station within HL_ALIVE_MS before it began (replies
  *             come only when asked, so their age is the evidence; a text
- *             output that stopped is silence).
+ *             output that stopped is silence). A receiver that sent no RTCM
+ *             frame this boot answers only while its last line or reply is
+ *             at most HL_ANSWER_FRESH_MS old: the station asks such a
+ *             receiver once a minute while nothing comes, so one that
+ *             answers when asked stays fresh, and one that hung after
+ *             answering at boot does not answer for ever.
  *   SILENT    nothing usable and no answer.
  * While the ladder is in 7 or (ALERTS mode) in a journalled or only
  * watched step's grace, never in NO_RECEIVER (the station's own alert says
  * that). NO_RTCM and NO_SKY also while a step is in progress (above), as
- * soon as the receiver answered after its last RTCM frame (text lines or
- * replies; with no RTCM frame this boot, any answer this boot): the antenna
- * is the likely cause, and the hint comes with the recovery, not after it.
- * The level stays RECOVERING then.
+ * soon as the receiver answered after its last RTCM frame, more than
+ * HL_ANSWER_SLACK_MS after it (text lines or replies; with no RTCM frame
+ * this boot, within HL_ANSWER_FRESH_MS): the antenna is the likely cause,
+ * and the hint comes with the recovery, not after it. The level stays
+ * RECOVERING then. Line and reply times are exact (hl_in_t.line_age_ms,
+ * answer_age_ms), so this is the same evidence, by the same rule, as the
+ * station's "the receiver answers" (receiver_responding).
  *
  * Restart pending (hl_status_t.restart_possible; what the status says of
  * the restart hold and the reboot cap): an episode without RTCM, unless the
@@ -155,7 +166,8 @@
  * no byte at all, and a receiver that answers gets 7 with its reason after
  * step 5 instead, so a restart comes only if it stops answering; the status
  * says so once the evidence changes (a rescan that finds nothing, a RESET
- * with no answer).
+ * with no answer, or, with no RTCM frame this boot, no answer for
+ * HL_ANSWER_FRESH_MS).
  *
  * The receiver answers but sends no RTCM (amends the byte rule and the
  * retry pass; 6b is "bytes but no answers"):
@@ -193,6 +205,8 @@ extern "C" {
 #define HL_REBOOT_WAIT_MS         60000      /**< reboot requested and still alive: count as FAILED */
 #define HL_MAX_TICK_MS            5000       /**< longest tick gap credited to the ladder clock */
 #define HL_ALIVE_MS               600000     /**< replies this recent when a stall begins: the receiver is alive */
+#define HL_ANSWER_SLACK_MS        1000       /**< a line this soon after the last RTCM frame may be that output's own: no answer after it */
+#define HL_ANSWER_FRESH_MS        90000      /**< no RTCM frame this boot: a line or reply this recent is an answer (the station asks every 60 s) */
 
 #define HL_NEVER INT64_MIN
 
@@ -345,6 +359,9 @@ typedef struct {
     uint8_t reboot_hold;          /**< HL_HOLD_* reasons that hold 6a back now (0 = none) */
     uint64_t answers;             /**< the receiver's checksum-valid replies to the command layer (acks, logs, banners,
                                        restarting answers; monotonic) */
+    uint32_t line_age_ms;         /**< since the last checksum-valid text line of any kind (replies included), exact;
+                                       UINT32_MAX = none this boot */
+    uint32_t answer_age_ms;       /**< since the last of `answers`, exact; UINT32_MAX = none this boot */
     bool no_sky;                  /**< the receiver's own position sentence within the stall threshold: no fix, no satellites */
     bool rx_held;                 /**< the first configuration is held: the receiver was never set to send RTCM */
 } hl_in_t;
@@ -356,6 +373,8 @@ typedef struct {
     uint8_t step;                 /**< step wanted, running or in its grace */
     uint8_t last_step;            /**< last action started (1-5, 6 = reboot), 0 = none */
     uint8_t abandoned;            /**< bit n: step n ran and was abandoned in this episode */
+    bool abandoned_twice;         /**< the last step was abandoned a second time and counts as failed (until a step
+                                       starts, a step succeeds or RTCM comes back) */
     bool power_alert;
 
     int64_t last_now;
@@ -364,12 +383,12 @@ typedef struct {
     bool was_suspended;
     uint8_t susp;                 /**< reasons of the last tick */
 
-    /* text-line liveness (sampled) */
+    /* text-line liveness: new ones counted from the samples, their times from the ages (exact) */
     bool lines_valid;
     uint64_t lines_last;
-    int64_t line_ms;              /**< wall time a new line was last seen (HL_NEVER = never) */
+    int64_t line_ms;              /**< wall time of the last line (HL_NEVER = none this boot) */
     uint64_t answers_last;
-    int64_t answer_ms;            /**< wall time a new reply was last seen (HL_NEVER = never) */
+    int64_t answer_ms;            /**< wall time of the last reply (HL_NEVER = none this boot) */
 
     /* the receiver answers but sends no RTCM */
     bool ep_alive;                /**< it answers: in this episode, or (replies) within HL_ALIVE_MS before it began */
@@ -427,7 +446,8 @@ typedef struct {
     bool power_alert;
     uint32_t stalls;
     uint32_t recoveries;
-    uint32_t retry_in_s;          /**< FAILED: until the next retry pass (0 = none scheduled) */
+    uint32_t retry_in_s;          /**< FAILED: until the next retry pass (0 = none scheduled; also in ALERTS mode, whose pass
+                                       only journals) */
     uint8_t mode;                 /**< hl_mode_t the ladder last decided with */
     bool reboot_recheck;          /**< NO_RECEIVER: a blocked 6a waits to be looked at again */
     bool episode;                 /**< a stall or NO_RECEIVER episode is in progress (the ladder has not reset since) */

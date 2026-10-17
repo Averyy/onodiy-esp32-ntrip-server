@@ -808,6 +808,9 @@ static void tick(void)
     in->reboot_inhibited = lifecycle_reboot_inhibited(NULL);
     in->detect_passes = s_st.detect_passes;
     in->answers = s_st.rx_answers;
+    /* Exact times, read with the station's status: the same evidence as its receiver_responding. */
+    in->line_age_ms = s_st.rx_line_age_ms;
+    in->answer_age_ms = s_st.rx_answer_age_ms;
     in->rx_held = s_st.first_apply_held;
     gnss_obs_fix_t fix;
     in->no_sky = gnss_obs_get_fix(&fix) == ESP_OK && fix.age_ms <= STALL_MS && fix.quality == 0 && fix.satellites == 0;

@@ -54,8 +54,9 @@
  * Every FAILED level carries its reason as an alert (and an alerts-only
  * stall's DEGRADED level too; a RECOVERING level, which also covers the
  * gap between two steps, carries NO_RTCM or NO_SATELLITES as soon as the
- * receiver answered after its last RTCM frame, or answered at all this
- * boot when it sent none, so the antenna hint comes with the recovery):
+ * receiver answered after its last RTCM frame, or within the last 90 s
+ * when it sent none this boot, so the antenna hint comes with the
+ * recovery; the station asks such a receiver once a minute):
  * RECEIVER_POWER (6b), RECEIVER_SILENT
  * (nothing usable, no answer; power-cycle the station), NO_SATELLITES (it
  * answers and uses no satellites: the antenna), NO_RTCM (it answers but
@@ -317,7 +318,8 @@ typedef struct {
     uint32_t heap_internal_min;      /**< low-water mark since boot */
     uint32_t heap_internal_largest;  /**< largest free internal block (fragmentation) */
     uint32_t heap_psram_free;
-    uint32_t gnss_retry_in_s;        /**< FAILED: until the next retry pass (0 = none scheduled, e.g. while the station's own detection schedule runs) */
+    uint32_t gnss_retry_in_s;        /**< FAILED: until the next retry pass (0 = none scheduled, e.g. while the station's own detection schedule runs,
+                                          or in alerts only, whose pass sends nothing) */
     uint32_t factory_reset_refused_age_s; /**< since a BOOT-button factory reset was refused because a receiver update was running (UINT32_MAX = not this boot) */
     uint32_t admin_resets;           /**< BOOT-button admin password resets this boot; the web also forgets a password it holds only in RAM (settings unavailable) and ends every session */
     health_recovery_mode_t recovery_mode; /**< in effect (gnss/recovery; a stored value out of range reads as FULL) */

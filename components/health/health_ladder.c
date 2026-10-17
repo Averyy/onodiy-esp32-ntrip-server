@@ -10,7 +10,6 @@
 #include <string.h>
 
 #define HL_LAST_STEP 5u
-#define HL_TICK_SLACK_MS 1000   /* one tick: what a sampled answer time can be off by */
 
 static int64_t grace_ms(uint8_t step)
 {
@@ -77,16 +76,31 @@ static bool answers_never_streamed(const hl_in_t *in)
     return in->rtcm_age_ms == UINT32_MAX && (in->answers != 0 || in->text_lines != 0);
 }
 
-/* The receiver answered after its last RTCM frame (with none this boot: at
- * all). The samples time an answer only to the tick, so one seen on the
- * tick of the last frame does not count. */
+/* The receiver answers now (see the header): it answered after its last
+ * RTCM frame, more than HL_ANSWER_SLACK_MS after it (a line that close may
+ * be that output's own); with no RTCM frame this boot, within
+ * HL_ANSWER_FRESH_MS (the station asks such a receiver every minute). The
+ * times are exact, as the station's own rule reads them. */
 static bool answered_since_rtcm(const hl_t *l, const hl_in_t *in)
 {
     if (in->rtcm_age_ms == UINT32_MAX) {
-        return answers_never_streamed(in);
+        return answered_within(l, in, HL_ANSWER_FRESH_MS);
     }
     int64_t seen = l->line_ms > l->answer_ms ? l->line_ms : l->answer_ms;
-    return seen != HL_NEVER && seen - (in->now_ms - (int64_t)in->rtcm_age_ms) > HL_TICK_SLACK_MS;
+    return seen != HL_NEVER && seen - (in->now_ms - (int64_t)in->rtcm_age_ms) > HL_ANSWER_SLACK_MS;
+}
+
+/* The episode's "it answers" (ep_alive) still holds now: a receiver that
+ * sent no RTCM frame this boot answers only while its last answer is fresh. */
+static bool still_answers(const hl_t *l, const hl_in_t *in)
+{
+    return l->ep_alive && (in->rtcm_age_ms != UINT32_MAX || answered_within(l, in, HL_ANSWER_FRESH_MS));
+}
+
+/* Wall time of an event `age_ms` before now, HL_NEVER for UINT32_MAX. */
+static int64_t at_of(int64_t now, uint32_t age_ms)
+{
+    return age_ms == UINT32_MAX ? HL_NEVER : now - (int64_t)age_ms;
 }
 
 /* A grace the station no longer acts on: the step was only journalled
@@ -280,6 +294,7 @@ static void byte_rule(hl_t *l, const hl_in_t *in, bool bytes)
 static void start_run(hl_t *l, const hl_in_t *in)
 {
     journal(l, l->step, HL_OUT_STARTED);
+    l->abandoned_twice = false;
     l->recoveries++;
     l->last_step = l->step;
     l->phase = HL_PH_RUN;
@@ -370,12 +385,15 @@ static bool step_answered(const hl_t *l, const hl_in_t *in)
 static void escalate(hl_t *l, const hl_in_t *in, hl_class_t c)
 {
     uint8_t next = l->idx == 0 ? hl_entry_step(c) : max_u8((uint8_t)(l->idx + 1), hl_entry_step(c));
+    bool twice = l->abandoned_twice;
+    l->abandoned_twice = false;
     if (next > HL_LAST_STEP) {
-        /* Step 5 abandoned twice (it counts as failed): the same rule as
-         * its failure, so a receiver that answered since the RESET went
-         * out gets neither the power-cycle advice nor an ESP32 restart. */
-        if (l->idx == HL_CODE_RECEIVER_RESET && (l->abandoned & (1u << HL_CODE_RECEIVER_RESET)) != 0 &&
-            step_answered(l, in)) {
+        /* Right after step 5 was abandoned a second time (it counts as
+         * failed): the same rule as its failure, so a receiver that
+         * answered since the RESET went out gets neither the power-cycle
+         * advice nor an ESP32 restart. A stall after a step 5 that
+         * succeeded is an ordinary one: the byte rule on its class. */
+        if (twice && l->idx == HL_CODE_RECEIVER_RESET && step_answered(l, in)) {
             l->ep_alive = true;
             enter_failed(l, in);
             return;
@@ -447,6 +465,7 @@ static void step_healthy(hl_t *l)
     l->phase = HL_PH_IDLE;
     l->healthy = true;
     l->healthy_since = l->active_ms;
+    l->abandoned_twice = false;
 }
 
 /* A suspension began: a step in progress is abandoned and tried again later.
@@ -473,6 +492,7 @@ static void abandon(hl_t *l)
         }
     }
     if (l->phase == HL_PH_WANT || l->phase == HL_PH_RUN || l->phase == HL_PH_GRACE) {
+        l->abandoned_twice = repeat;
         if (repeat) {
             l->idx = l->step;
         } else {
@@ -495,6 +515,7 @@ static void ladder_reset(hl_t *l)
     l->power_alert = false;
     l->hold_no_rx = false;
     l->abandoned = 0;
+    l->abandoned_twice = false;
     l->blocked_6a = false;
     l->dry = false;
     l->ep_alive = false;
@@ -509,6 +530,7 @@ static void track_health(hl_t *l, const hl_in_t *in)
         l->healthy = false;
         return;
     }
+    l->abandoned_twice = false;   /* RTCM came back: a later stall is a new one */
     if (!l->healthy) {
         l->healthy = true;
         l->healthy_since = l->active_ms;
@@ -715,6 +737,7 @@ static void leave_alerts(hl_t *l, const hl_in_t *in)
     l->idx = 0;
     l->step = 0;
     l->abandoned = 0;
+    l->abandoned_twice = false;
     l->hold_no_rx = false;
     if (stalled(l, in)) {
         escalate(l, in, hl_classify(l, in));
@@ -753,7 +776,9 @@ void hl_tick(hl_t *l, const hl_in_t *in)
     }
     l->last_now = now;
 
-    /* Text-line and reply liveness, sampled. */
+    /* Text-line and reply liveness: new ones counted from the samples,
+     * their times exact (a tick-sampled time would be up to a tick late,
+     * and count a line just after the last RTCM frame as an answer). */
     if (!l->lines_valid) {
         l->lines_valid = true;
         l->lines_last = in->text_lines;
@@ -761,15 +786,15 @@ void hl_tick(hl_t *l, const hl_in_t *in)
     } else {
         if (in->text_lines != l->lines_last) {
             l->lines_last = in->text_lines;
-            l->line_ms = now;
             l->ep_alive = true;
         }
         if (in->answers != l->answers_last) {
             l->answers_last = in->answers;
-            l->answer_ms = now;
             l->ep_alive = true;
         }
     }
+    l->line_ms = at_of(now, in->line_age_ms);
+    l->answer_ms = at_of(now, in->answer_age_ms);
 
     if (l->phase == HL_PH_REBOOTING) {
         if (now - l->reboot_ms >= HL_REBOOT_WAIT_MS) {
@@ -860,7 +885,7 @@ static uint8_t why_of(const hl_t *l, const hl_in_t *in, bool fresh)
         }
         return in->no_sky ? HL_WHY_NO_SKY : HL_WHY_NO_RTCM;
     }
-    if (l->ep_alive) {
+    if (still_answers(l, in)) {
         return in->no_sky ? HL_WHY_NO_SKY : HL_WHY_NO_RTCM;
     }
     return HL_WHY_SILENT;
@@ -903,7 +928,7 @@ void hl_get_status(const hl_t *l, const hl_in_t *in, hl_status_t *out)
     case HL_PH_FAILED:
         out->level = fresh ? HL_LEVEL_DEGRADED : HL_LEVEL_FAILED;
         out->rung = l->power_alert ? HL_CODE_POWER_ALERT : HL_CODE_FAILED;
-        if (!l->hold_no_rx) {
+        if (!l->hold_no_rx && l->mode != HL_MODE_ALERTS) {   /* ALERTS: the pass only journals, nothing is attempted */
             int64_t left = l->retry_at - l->active_ms;
             out->retry_in_s = left <= 0 ? 0 : (uint32_t)((left + 999) / 1000);
         }
