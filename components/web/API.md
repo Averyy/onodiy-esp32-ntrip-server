@@ -619,7 +619,9 @@ per tab, `[A-Za-z0-9_-]`, at most 32 characters; the UI sends it with every
 request that is not a `GET`) of the request during which, or within 2 s
 after which, the settings changed; `null` when no such request was running.
 A page that finds its own id ignores the event as a warning (it made the
-change) and only reloads its data when no form is being edited.
+change) and only reloads its data when no form is being edited. One change
+can come as a few events in a row (a batch, then a key erased): the UI
+waits 300 ms for the rest and reloads, or warns, once.
 
 **Progress jobs** (`job`, `phase`; `pct` or `bytes`/`total` where known):
 
