@@ -606,12 +606,22 @@ advisory: reload that page's data), `receiver_restarted`, `rebooting`
 (`reason`; sent from `LIFECYCLE_EVENT_PRE_REBOOT`, then the server closes
 with `1012`).
 
+`settings_changed` comes only when a setting changed: one a person set
+(any page, the API, the BOOT button's password reset) or one the station
+changed itself (the receiver profile at a position lock or a signal-group
+switch, the held first configuration's settings). Device state the station
+stores on its own (the availability ledger every minute, boot history, the
+detected receiver, the applied state, update checks, journals, backoffs)
+sends none: it is in the status stream and the pages' own reads.
+
 `settings_changed.client` is the `X-Client-Id` request header (a random id
 per tab, `[A-Za-z0-9_-]`, at most 32 characters; the UI sends it with every
 request that is not a `GET`) of the request during which, or within 2 s
 after which, the settings changed; `null` when no such request was running.
 A page that finds its own id ignores the event as a warning (it made the
-change) and only reloads its data when no form is being edited.
+change) and only reloads its data when no form is being edited. One change
+can come as a few events in a row (a batch, then a key erased): the UI
+waits 300 ms for the rest and reloads, or warns, once.
 
 **Progress jobs** (`job`, `phase`; `pct` or `bytes`/`total` where known):
 

@@ -158,7 +158,8 @@ static esp_err_t finish_write(nvs_handle_t h, esp_err_t err, const char *ns, con
         nvs_close(h);                                                                  \
         return err;                                                                    \
     }                                                                                  \
-    esp_err_t settings_set_##suffix(const char *ns, const char *key, type value)       \
+    static esp_err_t set_##suffix##_as(const char *ns, const char *key, type value,    \
+                                       bool notify)                                    \
     {                                                                                  \
         if (key == NULL) {                                                             \
             return ESP_ERR_INVALID_ARG;                                                \
@@ -168,7 +169,15 @@ static esp_err_t finish_write(nvs_handle_t h, esp_err_t err, const char *ns, con
         if (err != ESP_OK) {                                                           \
             return err;                                                                \
         }                                                                              \
-        return finish_write(h, nvs_set_##suffix(h, key, value), ns, key);              \
+        return finish_write_as(h, nvs_set_##suffix(h, key, value), ns, key, notify);   \
+    }                                                                                  \
+    esp_err_t settings_set_##suffix(const char *ns, const char *key, type value)       \
+    {                                                                                  \
+        return set_##suffix##_as(ns, key, value, true);                                \
+    }                                                                                  \
+    esp_err_t settings_set_state_##suffix(const char *ns, const char *key, type value) \
+    {                                                                                  \
+        return set_##suffix##_as(ns, key, value, false);                               \
     }
 
 SETTINGS_SCALAR_ACCESSORS(u8, uint8_t)
@@ -196,7 +205,7 @@ esp_err_t settings_get_str(const char *ns, const char *key, char *out, size_t ou
     return err;
 }
 
-esp_err_t settings_set_str(const char *ns, const char *key, const char *value)
+static esp_err_t set_str_as(const char *ns, const char *key, const char *value, bool notify)
 {
     if (key == NULL || value == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -206,7 +215,17 @@ esp_err_t settings_set_str(const char *ns, const char *key, const char *value)
     if (err != ESP_OK) {
         return err;
     }
-    return finish_write(h, nvs_set_str(h, key, value), ns, key);
+    return finish_write_as(h, nvs_set_str(h, key, value), ns, key, notify);
+}
+
+esp_err_t settings_set_str(const char *ns, const char *key, const char *value)
+{
+    return set_str_as(ns, key, value, true);
+}
+
+esp_err_t settings_set_state_str(const char *ns, const char *key, const char *value)
+{
+    return set_str_as(ns, key, value, false);
 }
 
 esp_err_t settings_get_blob(const char *ns, const char *key, void *out, size_t *len)
@@ -362,14 +381,24 @@ esp_err_t settings_batch_set_blob(settings_batch_t b, const char *key, const voi
     return batch_result(b, nvs_set_blob(b->h, key, data, len));
 }
 
-esp_err_t settings_batch_commit(settings_batch_t b)
+static esp_err_t batch_commit_as(settings_batch_t b, bool notify)
 {
     if (b == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    esp_err_t err = finish_write(b->h, b->first_err, b->ns, NULL);
+    esp_err_t err = finish_write_as(b->h, b->first_err, b->ns, NULL, notify);
     free(b);
     return err;
+}
+
+esp_err_t settings_batch_commit(settings_batch_t b)
+{
+    return batch_commit_as(b, true);
+}
+
+esp_err_t settings_batch_commit_state(settings_batch_t b)
+{
+    return batch_commit_as(b, false);
 }
 
 void settings_batch_abort(settings_batch_t b)

@@ -233,7 +233,7 @@ static void put_str_if_changed(const char *key, const char *value)
     if (settings_get_str(SETTINGS_NS_GNSS, key, cur, sizeof(cur)) == ESP_OK && strcmp(cur, value) == 0) {
         return;
     }
-    esp_err_t err = settings_set_str(SETTINGS_NS_GNSS, key, value);
+    esp_err_t err = settings_set_state_str(SETTINGS_NS_GNSS, key, value);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "gnss/%s not saved: %s", key, esp_err_to_name(err));
     }
@@ -264,7 +264,7 @@ static void persist_baud(uint32_t baud)
     if (baud == 0 || stored_baud() == baud) {
         return;
     }
-    esp_err_t err = settings_set_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BAUD, baud);
+    esp_err_t err = settings_set_state_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BAUD, baud);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "gnss/baud not saved: %s", esp_err_to_name(err));
     }
@@ -300,7 +300,7 @@ static bool persist_applied(const um98x_base_profile_t *p, const um98x_apply_res
         ESP_LOGW(TAG, "applied state not saved: %s", esp_err_to_name(err));
         return false;
     }
-    err = settings_batch_commit(b);
+    err = settings_batch_commit_state(b);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "applied state not saved: %s", esp_err_to_name(err));
         return false;
@@ -308,7 +308,7 @@ static bool persist_applied(const um98x_base_profile_t *p, const um98x_apply_res
     /* The first configuration the user held back has now been made. */
     uint8_t held = 0;
     if (settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD, &held) == ESP_OK) {
-        err = settings_erase_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD);
+        err = settings_erase_state_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "gnss/hold not erased: %s", esp_err_to_name(err));
         }

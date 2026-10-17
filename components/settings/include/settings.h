@@ -14,6 +14,14 @@
  * (e.g. ntrip_server_set_config), never by reacting to the event. Events can
  * be dropped when the event queue is full.
  *
+ * Only settings post it: what a person set (from any page, the API or the
+ * BOOT button) and what the station changes in them itself (the receiver
+ * profile at a position lock, for one). Every open page reloads its data on it.
+ * Device state the station stores on its own (counters, history, detected
+ * receiver facts, timers, journals: the keys settings_schema.h marks
+ * "device state") goes through the settings_set_state_* writers, which post
+ * nothing; pages read it from the status stream or their own polls.
+ *
  * Thread safety: all functions may be called from any task (NVS is internally
  * locked). Do not call from a task whose stack is in PSRAM: NVS writes can
  * disable the flash cache.
@@ -97,12 +105,18 @@ esp_err_t settings_set_blob(const char *ns, const char *key, const void *data, s
 esp_err_t settings_erase_key(const char *ns, const char *key);
 
 /**
- * Device state that is stored on a schedule, not a setting anyone changes
- * (receiver maintenance's stored copy, every minute while it is on): as
- * settings_set_blob and settings_erase_key, but without
- * SETTINGS_EVENT_CHANGED. Pages reload their data on that event (and warn
- * about changes made elsewhere while a form is being edited).
+ * Device state, not a setting anyone changes (the keys settings_schema.h
+ * marks "device state": the ledger every minute, boot history, the detected
+ * receiver, the receiver maintenance copy, ...): as settings_set_* and
+ * settings_erase_key, but without SETTINGS_EVENT_CHANGED. Pages reload their
+ * data on that event (and warn about changes made elsewhere while a form is
+ * being edited), so a write the station makes on its own must not post it.
  */
+esp_err_t settings_set_state_str(const char *ns, const char *key, const char *value);
+esp_err_t settings_set_state_u8(const char *ns, const char *key, uint8_t value);
+esp_err_t settings_set_state_u16(const char *ns, const char *key, uint16_t value);
+esp_err_t settings_set_state_u32(const char *ns, const char *key, uint32_t value);
+esp_err_t settings_set_state_i64(const char *ns, const char *key, int64_t value);
 esp_err_t settings_set_state_blob(const char *ns, const char *key, const void *data, size_t len);
 esp_err_t settings_erase_state_key(const char *ns, const char *key);
 
@@ -124,6 +138,8 @@ esp_err_t settings_batch_set_u32(settings_batch_t b, const char *key, uint32_t v
 esp_err_t settings_batch_set_blob(settings_batch_t b, const char *key, const void *data, size_t len);
 /** Commit, close and post one event. Returns the first error of the batch. */
 esp_err_t settings_batch_commit(settings_batch_t b);
+/** As settings_batch_commit, without the event: a batch of device state only. */
+esp_err_t settings_batch_commit_state(settings_batch_t b);
 /** Close without posting an event (writes already made stay written). NULL is ignored. */
 void settings_batch_abort(settings_batch_t b);
 

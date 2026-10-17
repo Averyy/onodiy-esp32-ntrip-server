@@ -285,7 +285,7 @@ static int cmd_race_arm(int argc, char **argv)
         say("BENCH REFUSED: receiver maintenance is on (end it first)\n");
         return 1;
     }
-    esp_err_t err = settings_set_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BENCH_RACE, 1);
+    esp_err_t err = settings_set_state_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BENCH_RACE, 1);
     say("BENCH %s\n", err == ESP_OK ? "armed for the next boot only: power-cycle the board now (the result prints "
                                          "at boot and with race_result)"
                                        : esp_err_to_name(err));
@@ -1109,7 +1109,7 @@ esp_err_t bench_boot_early(void)
         return ESP_OK;
     }
     /* One-shot: cleared before it runs, so a crash in it cannot repeat it. */
-    esp_err_t err = settings_erase_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BENCH_RACE);
+    esp_err_t err = settings_erase_state_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BENCH_RACE);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "stop key from boot not run: the one-shot flag could not be cleared (%s)", esp_err_to_name(err));
         return err;

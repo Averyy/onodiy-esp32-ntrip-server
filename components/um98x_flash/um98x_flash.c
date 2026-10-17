@@ -920,12 +920,12 @@ esp_err_t um98x_flash_journal_put(const um98x_flash_journal_t *j)
     if (len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    return settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FLASH_JOB, buf, len);
+    return settings_set_state_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FLASH_JOB, buf, len);
 }
 
 esp_err_t um98x_flash_journal_close(void)
 {
-    esp_err_t err = settings_erase_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FLASH_JOB);
+    esp_err_t err = settings_erase_state_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FLASH_JOB);
     return (err == ESP_ERR_NVS_NOT_FOUND) ? ESP_OK : err;
 }
 

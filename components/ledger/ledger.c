@@ -106,7 +106,7 @@ static void consume_flags(lc_snapshot_t *stored, bool stored_ok)
     stored->planned = false;
     uint8_t buf[TODAY_BLOB_MAX];
     size_t len = lc_encode_today(stored, buf, sizeof(buf));   /* with the blob's own mark, as stored */
-    if (len == 0 || settings_set_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_TODAY, buf, len) != ESP_OK) {
+    if (len == 0 || settings_set_state_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_TODAY, buf, len) != ESP_OK) {
         ESP_LOGW(TAG, "stored planned-downtime flags not cleared (settings unavailable?)");
     }
 }
@@ -383,8 +383,9 @@ static void step(uint32_t interval_ms)
     }
     /* History before today: a day rolled into the history must not vanish
      * from both if only one write goes through. */
-    bool hist_ok = !store_hist || (hist_len > 0 && settings_set_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_HIST,
-                                                                     s_hist_blob, hist_len) == ESP_OK);
+    bool hist_ok = !store_hist ||
+                   (hist_len > 0 && settings_set_state_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_HIST, s_hist_blob,
+                                                            hist_len) == ESP_OK);
     bool today_ok = !store_today;
     bool alive_ok = true;
     if (store_today) {
@@ -396,18 +397,18 @@ static void step(uint32_t interval_ms)
             uint8_t buf[TODAY_BLOB_MAX];
             size_t len = lc_encode_today(&snap, buf, sizeof(buf));
             today_ok = len > 0 &&
-                       settings_set_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_TODAY, buf, len) == ESP_OK;
+                       settings_set_state_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_TODAY, buf, len) == ESP_OK;
         }
         /* Only after the clock went back (a correction, or a previous
          * session's clock that ran ahead): a restore takes the later mark,
          * so the alive key must not stay ahead of this one. */
         if (today_ok && s_alive_key_s > alive_ms / 1000 &&
-            settings_set_i64(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_ALIVE, alive_ms / 1000) == ESP_OK) {
+            settings_set_state_i64(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_ALIVE, alive_ms / 1000) == ESP_OK) {
             s_alive_key_s = alive_ms / 1000;
         }
     } else {
         /* Today unchanged since it was stored: it is exact up to here. */
-        alive_ok = settings_set_i64(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_ALIVE, alive_ms / 1000) == ESP_OK;
+        alive_ok = settings_set_state_i64(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_ALIVE, alive_ms / 1000) == ESP_OK;
         if (alive_ok) {
             s_alive_key_s = alive_ms / 1000;
         }
