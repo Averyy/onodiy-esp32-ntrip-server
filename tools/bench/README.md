@@ -594,8 +594,9 @@ uv run rtcm_replay.py --listen 127.0.0.1:5600 ../../test/fixtures/rtcm/centipede
 - `BASEPOSA` and `SPPNAVA` (the receiver's own position, one-shot; the
   firmware's fixed-position check) get an `OK` and a single-point solution
   at `--respond-position LAT,LON,H` (ellipsoidal height), with the geoid
-  separation `--respond-geoid M` (default 0); without a position, a log
-  with no solution (no sky).
+  separation `--respond-geoid M` (default 0) and the height standard
+  deviation `--respond-sd M` (default 2.1; a poor sky's solution reports
+  more); without a position, a log with no solution (no sky).
 - A signal-group change or `RESET` restarts it: for `--respond-restart`
   seconds (default 3; a real build 25164 takes 8.0-9.2 s to its banner) no
   RTCM goes out and every command is answered with `The Board is

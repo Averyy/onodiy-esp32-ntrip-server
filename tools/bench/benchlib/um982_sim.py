@@ -30,7 +30,8 @@ switches its signal group:
   BASEPOSA, SPPNAVA           OK and the position log: the receiver's own
                               single-point solution at `own` (latitude,
                               longitude, ellipsoidal height; the geoid
-                              `separation` apart from sea level), or no
+                              `separation` apart from sea level; `sd_hgt`
+                              the height deviation it reports), or no
                               solution without `own` (no sky); whatever
                               base mode runs
   anything else               `PARSING FAILED NO MATCHING FUNC  <word>`
@@ -135,13 +136,14 @@ class Um982Responder:
     def __init__(self, group: tuple[int, int] = (4, 5), firmware: str = "R4.10Build25164",
                  reject: tuple[tuple[int, int], ...] | list = (), restart_s: float = 3.0, model: str = "UM982",
                  baud: int = 115200, clock=time.monotonic, own: tuple[float, float, float] | None = None,
-                 separation: float = 0.0, text_every_s: float | None = None):
+                 separation: float = 0.0, text_every_s: float | None = None, sd_hgt: float = 2.1):
         self.clock = clock
         self.text_every_s = float(text_every_s) if text_every_s else None   # an unasked line this often
         self.next_text = clock() + self.text_every_s if self.text_every_s else 0.0
         self.texts = 0
         self.own = tuple(own) if own is not None else None   # where the antenna is: latitude, longitude, ellipsoidal height
         self.separation = float(separation)
+        self.sd_hgt = float(sd_hgt)   # the height standard deviation it reports with that solution
         self.model = model
         self.firmware = firmware
         self.reject = {tuple(int(x) for x in g) for g in reject}
@@ -362,7 +364,8 @@ class Um982Responder:
         elif up in ("BASEPOSA", "SPPNAVA"):
             self._ack(cmd, now)
             own = self.own
-            body = own_position_body(None) if own is None else own_position_body(own[0], own[1], own[2], self.separation)
+            body = (own_position_body(None) if own is None else
+                    own_position_body(own[0], own[1], own[2], self.separation, sd_m=(1.1, 0.9, self.sd_hgt)))
             self._say(now, DATA_DELAY_S, own_position_line(up, body))
         elif words[:2] == ["MODE", "BASE"]:
             self.mode = up
