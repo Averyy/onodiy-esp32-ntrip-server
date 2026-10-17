@@ -92,7 +92,8 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  rxAlerts: a => (a[0].alerts || []).filter(rxAlertShown(stationState(a[1], true), false)),\n' +
   '  stepSaid: a => { const st = stationState(a[1], true); return stepSaid(a[0], st, healthItems(a[1].alerts || [], st).state); },\n' +
   '  nextAttempt: a => nextAttemptRow(a[0], stationState(a[1], true)),\n' +
-  '  posWords: a => positionWords(a[0], a[1], a[2]), posChip: g => positionChip(g), fixPending: a => fixPendingText(a[0], a[1], a[2]),\n' +
+  '  posWords: a => positionWords(a[0], a[1], a[2]), posChip: a => (Array.isArray(a) ? positionChip(a[0], a[1]) : positionChip(a)),\n' +
+  '  fixPending: a => fixPendingText(a[0], a[1], a[2]), configWords: a => configWords(a[0], a[1]), profileTaken: g => profileTaken(g),\n' +
   '  arpCopy: g => arpCopyable(g), recoveryNow: hl => recoveryNow(hl),\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
@@ -1163,6 +1164,56 @@ def test_profile_chip_and_maintenance_notice_everywhere_but_settings():
     # Diagnostics' Overview, whose Health card says it with End now. Every other page has it.
     assert [[k for k, _ in o] for o in out] == [[]] + [["maintenance"]] * 4 + [[], ["maintenance"]]
 
+
+
+def test_a_profile_the_receiver_acknowledged_reads_applied_not_checked():
+    """The board without an antenna: the recovery applied the profile and the receiver acknowledged it, but no window with
+    RTCM checked it. Receiver settings' chip says "Applied" in grey (green once checked) and the Receiver card says when it
+    is checked; amber "Not applied" only when the receiver does not hold the profile (never acknowledged, the RTCM that
+    flows differs, or an older firmware that does not say)."""
+    board = {"state": "streaming", "autocfg": True, "first_apply_held": False, "identity_confirmed": True,
+             "maintenance": {"on": False}, "profile_applied": False, "profile_acknowledged": True, "rtcm_differs": False}
+    checked = {**board, "profile_applied": True}
+    never = {**board, "profile_acknowledged": False}
+    differs = {**board, "rtcm_differs": True}
+    older = {k: v for k, v in board.items() if k != "profile_acknowledged"}
+    held = {**never, "first_apply_held": True, "autocfg": False}
+    out = run_ui([("profileChip", board), ("profileChip", checked), ("profileChip", never), ("profileChip", differs),
+                  ("profileChip", older), ("profileChip", {**board, "state": "configuring"}),
+                  ("configWords", [board, False]), ("configWords", [board, True]), ("configWords", [checked, False]),
+                  ("configWords", [never, False]), ("configWords", [held, False]),
+                  ("profileTaken", board), ("profileTaken", checked), ("profileTaken", never), ("profileTaken", differs)])
+    assert out == [["Applied", ""], ["Applied", "ok"], ["Not applied", "warn"], ["Not applied", "warn"],
+                   ["Not applied", "warn"], ["Applying", "info"],
+                   ["Applied, checked once corrections flow", ""], ["Applied, being checked", ""], ["Applied", "ok"],
+                   ["Not applied", "warn"], ["Waiting for your OK", "warn"],
+                   True, True, False, False]
+    # The Status page's position row: a fixed position the receiver acknowledged is locked, checked or not.
+    r = {"rx_maintenance": False, "identity_confirmed": True, "position_locked": True, "position_known": True,
+         "surveying": False, "profile_applied": False}
+    out = run_ui([("statusPos", [{**r, "profile_acknowledged": True}, False]), ("statusPos", [r, False]),
+                  ("statusPos", [{**r, "profile_applied": True}, True])])
+    assert out == ["Locked", "Fixed, not applied yet", "Locked"]
+    # The Receiver card passes whether corrections arrive; the held first configuration's watch and its follow-up take a
+    # profile the receiver acknowledged as configured.
+    rx = (UI_JS / "60-receiver.js").read_text()
+    assert "['Configuration', configLine(g, !st || st.delivering)]" in rx
+    assert "if (profileTaken(g) && !g.first_apply_held) {" in rx
+    assert "g.first_apply_held || !profileTaken(g) || g.autocfg) return false;" in rx
+
+
+def test_a_paused_survey_reads_paused_on_its_chip():
+    """Receiver settings' Position chip agrees with the Receiver page: a survey while no corrections arrive is paused,
+    in grey, not a blue "Surveying"; it follows the status like the page's line."""
+    sv = {"position": {"locked": False, "source": "survey"}, "profile": {"base_mode": "survey_in", "fixed": None},
+          "survey": {"active": True, "window_left_s": 600}, "maintenance": {"on": False}, "identity_confirmed": True}
+    out = run_ui([("posChip", [sv, False]), ("posChip", [sv, True]), ("posChip", sv), ("posLine", [sv, False]),
+                  ("posChip", [{**sv, "position": {"locked": True, "source": "survey"}}, False])])
+    assert out == [["Paused", ""], ["Surveying", "info"], ["Surveying", "info"],
+                   "Surveying, paused while no corrections arrive.", ["Locked", "ok"]]
+    rx = (UI_JS / "60-receiver.js").read_text()
+    assert "const c = positionChip(gg, !st || st.delivering);" in rx
+    assert "if (forms && g) forms.status();" in rx
 
 
 def test_save_buttons_say_they_apply_while_you_manage_the_receiver():

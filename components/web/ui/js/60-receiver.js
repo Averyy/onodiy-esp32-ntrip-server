@@ -233,9 +233,20 @@ function receiverChip(s) {
   return [HERO_TITLE[r.state] || lbl(L.station, r.state), r.state === 'no_receiver' ? 'bad' : 'info'];
 }
 
-/** Who configures the receiver, the profile's state and the signal group it runs ("Applied · 3 6 (Galileo E6)"). */
-function configLine(g) {
+/* The profile chip's word for a profile the receiver holds (profileChip). */
+const APPLIED = 'Applied';
+
+/** The profile's state in the Configuration row: [text, tone], the chip's, where a profile the receiver took but no window
+ * checked yet says when it is checked (delivering: corrections arrive). */
+function configWords(g, delivering) {
   const c = g.first_apply_held ? ['Waiting for your OK', 'warn'] : profileChip(g);
+  if (c[0] === APPLIED && !g.profile_applied) return [APPLIED + (delivering ? ', being checked' : ', checked once corrections flow'), c[1]];
+  return c;
+}
+
+/** Who configures the receiver, the profile's state and the signal group it runs ("Applied · 3 6 (Galileo E6)"). */
+function configLine(g, delivering) {
+  const c = configWords(g, delivering);
   const sg = g.rx_signal_group ? sgName(g.rx_signal_group.master, g.rx_signal_group.slave) : '';
   return [h('span', { class: c[1] === 'bad' || c[1] === 'warn' ? 't-' + c[1] : null }, c[0]), sg ? ' · ' + sg : ''];
 }
@@ -285,7 +296,7 @@ function receiverTop(g, st) {
     kv([
       r.valid === false ? (unchecked ? null : ['Model', h('span', { class: 'muted' }, 'Not identified yet')]) :
         ['Model', [r.model || DASH, ' · ', fwText(r.firmware, r.build)]],
-      unchecked && profileChip(g)[0] === NOT_CHECKED_CHIP ? null : ['Configuration', configLine(g)],
+      unchecked && profileChip(g)[0] === NOT_CHECKED_CHIP ? null : ['Configuration', configLine(g, !st || st.delivering)],
       pos ? ['Position', pos] : null,
     ]),
   ];
@@ -471,12 +482,12 @@ function previewList(d) {
 }
 
 /**
- * The first configuration worked: turn automatic configuration and full
- * recovery on when the user ticked it with the confirmation. g: GET
- * /api/gnss. Resolves true when it did.
+ * The first configuration worked (the receiver took it: profileTaken): turn
+ * automatic configuration and full recovery on when the user ticked it with
+ * the confirmation. g: GET /api/gnss. Resolves true when it did.
  */
 async function finishHeld(g) {
-  if (!store.get(HELD_AUTO_KEY, null) || !g || g.first_apply_held || !g.profile_applied || g.autocfg) return false;
+  if (!store.get(HELD_AUTO_KEY, null) || !g || g.first_apply_held || !profileTaken(g) || g.autocfg) return false;
   store.set(HELD_AUTO_KEY, null);
   try {
     await api('PUT', '/api/gnss/profile', { autocfg: true, recovery: 'full' });
@@ -537,7 +548,7 @@ function heldPanel(opts) {
         if (e instanceof ApiError && e.status === 401) break;
         continue;
       }
-      if (g.profile_applied && !g.first_apply_held) {
+      if (profileTaken(g) && !g.first_apply_held) {
         show('ok', 'The receiver is configured.' + (store.get(HELD_AUTO_KEY, null) ? ' Turning automatic configuration on…' : ''));
         try {
           await finishHeld(g);
@@ -607,12 +618,19 @@ function saveLabel(g, what) {
   return manageOwn(g) ? 'Save and apply' : 'Save ' + what;
 }
 
-/** The profile's state for its chip: [text, tone]; grey while the user manages the receiver (as the Receiver page says). */
+/** The receiver holds the stored profile: checked against its RTCM (profile_applied), or acknowledged at its last apply and
+ * not checked yet (profile_acknowledged: no RTCM, a receiver without an antenna), unless the RTCM that flows differs. */
+function profileTaken(g) {
+  return !!g.profile_applied || (!!g.profile_acknowledged && !g.rtcm_differs);
+}
+
+/** The profile's state for its chip: [text, tone]; grey while the user manages the receiver (as the Receiver page says), and
+ * while the receiver took it but no window checked it yet. Amber only when the receiver does not hold it. */
 function profileChip(g) {
   if (g.state === 'configuring') return ['Applying', 'info'];
   if (g.config_failed) return ['Failed', 'bad'];
   if (manageOwn(g)) return ['Managed by you', ''];
-  if (g.profile_applied && !g.first_apply_held) return ['Applied', 'ok'];
+  if (profileTaken(g) && !g.first_apply_held) return [APPLIED, g.profile_applied ? 'ok' : ''];
   if (gnssUnchecked(g)) return [NOT_CHECKED_CHIP, ''];
   return ['Not applied', 'warn'];
 }
@@ -624,14 +642,15 @@ function castersSee(g) {
   return d.antenna ? ['Casters see now: ', h('span', { class: 'ant' }, d.antenna)] : 'Casters see now: no antenna name.';
 }
 
-/** The base position's chip in Receiver settings: [text, tone]. */
-function positionChip(g) {
+/** The base position's chip in Receiver settings: [text, tone] (delivering false: no corrections arrive, so a survey is
+ * paused, as the Receiver page says). */
+function positionChip(g, delivering) {
   const pos = g.position || {};
   const prof = g.profile || {};
   if ((g.fixed_check || {}).state === 'far') return ['Looks wrong', 'warn'];
   if (pos.locked && pos.source && pos.source !== 'none') return ['Locked', 'ok'];
   if (prof.base_mode === 'fixed' && prof.fixed) return ['Fixed (typed in)', 'info'];
-  if ((g.survey || {}).active) return ['Surveying', 'info'];
+  if ((g.survey || {}).active) return delivering === false ? ['Paused', ''] : ['Surveying', 'info'];
   if (gnssUnchecked(g)) return [NOT_CHECKED_CHIP, ''];
   return ['Not locked', ''];
 }
@@ -752,6 +771,13 @@ function receiverForms(g, latest, done, onCompare) {
     saveBtn.classList.toggle('primary', posSave.hidden);
   };
   const posChip = badge('', '');
+  /* Follows the status too (corrections arriving or not), as the Receiver page's position line does. */
+  const chipSync = gg => {
+    const st = S.status ? stationState(S.status, true) : null;
+    const c = positionChip(gg, !st || st.delivering);
+    if (posChip.textContent !== c[0]) posChip.textContent = c[0];
+    posChip.className = 'badge ' + c[1];
+  };
   const match = h('p', { class: 'small' });
   const posSame = () => {
     if (mode.value() !== p.base_mode) return false;
@@ -1015,9 +1041,7 @@ function receiverForms(g, latest, done, onCompare) {
     applyRow.hidden = failed;
     const home = failed ? actions : applyRow;
     if (applyBtn.parentNode !== home) home.append(applyBtn);
-    const c = positionChip(gg);
-    posChip.className = 'badge ' + c[1];
-    posChip.textContent = c[0];
+    chipSync(gg);
     for (const [b, what] of [[posSave, 'position'], [saveBtn, 'profile']]) {
       const t = saveLabel(gg, what);
       if (b.textContent !== t) b.textContent = t;
@@ -1029,7 +1053,8 @@ function receiverForms(g, latest, done, onCompare) {
     seeLine.hidden = !seeLine.textContent;
   };
   update(g);
-  return { position: position, profile: profile, update: update, dirty: () => profDirty || !posSame() };
+  return { position: position, profile: profile, update: update, status: () => chipSync(latest()),
+    dirty: () => profDirty || !posSame() };
 }
 
 /* ---- Signal-group comparison --------------------------------------------- */
@@ -1421,6 +1446,7 @@ function receiverPage(el, arg) {
       if (missing) nr.update(st);
       status();
       if (sigs) sigs.update(st);
+      if (forms && g) forms.status();
     },
     destroy() {
       gone = true;

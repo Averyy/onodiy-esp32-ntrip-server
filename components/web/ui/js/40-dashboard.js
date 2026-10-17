@@ -123,13 +123,14 @@ function onocoyCard(s, st) {
     kv([['Online today', fmt.dur(c.today_online_s)], ['Offline today', fmt.dur(d.known ? d.down : c.today_offline_s)]]));
 }
 
-/* "Locked", "Surveying, 11 min left"... (position_locked is the stored profile's base mode: it runs once the profile is applied).
+/* "Locked", "Surveying, 11 min left"... (position_locked is the stored profile's base mode: it runs once the receiver took the
+ * profile: checked against its RTCM, or acknowledged and not checked yet without RTCM).
  * A survey needs data: while none arrives (delivering false) it is paused, not counting down. "Not locked" only for a position
  * the station has (position_known; an older firmware without it: as before). In maintenance with the receiver unchecked
  * (rxUnchecked) the station knows neither whether the profile runs nor whether it surveys: it says so. */
 function positionText(r, delivering) {
   const unchecked = rxUnchecked(r.rx_maintenance, r.identity_confirmed);
-  if (r.position_locked) return r.profile_applied || unchecked ? 'Locked' : 'Fixed, not applied yet';
+  if (r.position_locked) return r.profile_applied || r.profile_acknowledged || unchecked ? 'Locked' : 'Fixed, not applied yet';
   if (r.surveying && !delivering) return 'Surveying, paused';
   if (r.surveying) return 'Surveying' + (r.survey_window_left_s ? ', ' + inMinutes(r.survey_window_left_s) + ' left' : '');
   if (unchecked) return NOT_CHECKED;
