@@ -100,6 +100,7 @@ extern "C" {
 /* ---- "web" ------------------------------------------------------------------ */
 #define SETTINGS_NS_WEB             "web"
 #define SETTINGS_KEY_WEB_PUBLIC     "public_status" /**< u8: minimal status readable without login */
+#define SETTINGS_KEY_WEB_SESSIONS   "sessions"    /**< blob, device state: remembered logins (web_core.h web_sess_store_*, versioned: the admin password's salt they belong to, then per session the SHA-256 of its token and its end in UTC; never a token); written at a login, a logout, a purge of ended ones and a password change, never per request; erased by factory reset */
 
 #ifdef __cplusplus
 }

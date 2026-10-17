@@ -185,7 +185,7 @@ function settingRow(title, text, button) {
   return h('div', { class: 'setting-row' }, h('div', null, h('strong', null, title), h('span', null, text)), button);
 }
 
-/** A card that is the whole page (log in, no answer, the wizard): its title is the page's one h1. */
+/** A card that is the whole page (login, no answer, the wizard): its title is the page's one h1. */
 function pageCard(title, ...kids) {
   return h('section', { class: 'card' }, h('h1', null, title), kids);
 }
@@ -288,7 +288,7 @@ function selectInput(options, value, attrs) {
   return s;
 }
 
-/** Checkbox row. Returns {el, input}. */
+/** Checkbox row: the box centred on the label's first line, the hint under the label's text (app.css .check). Returns {el, input}. */
 function checkbox(label, checked, hint, attrs) {
   const input = h('input', Object.assign({ type: 'checkbox', checked: !!checked }, attrs || {}));
   const el = h('label', { class: 'check' }, input,
@@ -614,10 +614,10 @@ const ERR = {
   bad_request: 'The station refused the request.',
   invalid_image: 'This file is not a valid firmware image for this chip.',
   size_mismatch: 'The upload ended early. Try again.',
-  unauthorized: 'Your session ended. Log in again.',
+  unauthorized: 'Your session ended. Login again.',
   forbidden: 'The station refused the request from this page.',
   wrong_password: 'Wrong password.',
-  not_on_setup_ap: 'The first admin password can only be set over the station\'s own Wi-Fi network.',
+  not_on_setup_ap: 'The first admin password can only be set over the setup hotspot.',
   not_found: 'Not found.',
   nothing_staged: 'No uploaded receiver package is waiting.',
   no_journal: 'There is no receiver update session.',
@@ -640,13 +640,13 @@ const ERR = {
   reboot_inhibited: 'A restart is blocked right now',
   settings_unavailable: 'The settings storage is unavailable this boot, so nothing can be saved.',
   no_position_yet: 'There is no surveyed position yet.',
-  caster_policy: 'This caster setup is not allowed.',
+  caster_policy: 'This server setup is not allowed.',
   slot_disabled: 'The slot is not enabled.',
   sha256_mismatch: 'The SHA-256 does not match the uploaded package.',
   downgrade: 'That build is older than the receiver\'s current firmware.',
   no_rollback_image: 'There is no previous app version to go back to.',
   admin_already_set: 'An admin password is already set.',
-  admin_not_set: 'No admin password is set yet. Set one over the station\'s own Wi-Fi network.',
+  admin_not_set: 'No admin password is set yet. Set one over the setup hotspot.',
   receiver_maintenance: 'Receiver maintenance is on: nothing is sent to the receiver. End it first.',
   not_in_maintenance: 'Receiver maintenance is not on (it may have ended meanwhile).',
   live_view_closed: 'The sky view is not open (it may have closed meanwhile).',
@@ -667,7 +667,7 @@ const ERR = {
   signal_test_idle: 'No signal-group comparison is running (it may have ended meanwhile).',
   signal_test_not_deciding: 'The comparison is not waiting for your choice (not yet, or not any more).',
   first_apply_held: 'The receiver is not configured yet. Confirm its configuration on the Receiver page first.',
-  autocfg_off: 'The station does not configure the receiver (automatic configuration is off).',
+  autocfg_off: 'The station does not configure the receiver (receiver setup is Manual).',
   identity_unconfirmed: 'The receiver is not identified yet.',
   config_failed: 'The receiver\'s configuration failed. That needs fixing first.',
   position_not_locked: 'Lock the base position first; until then every receiver restart starts a new survey.',
@@ -698,8 +698,8 @@ function fieldErrorText(e) {
 }
 
 const POLICY = {
-  second_onocoy: 'Another caster here already streams to Onocoy, and Onocoy allows one stream per station.',
-  second_rtk2go: 'Another caster here already streams to RTK2go. Stream to RTK2go from one caster only.',
+  second_onocoy: 'Another server here already streams to Onocoy, and Onocoy allows one stream per station.',
+  second_rtk2go: 'Another server here already streams to RTK2go. Stream to RTK2go from one server only.',
   dup_stream_ack_required: 'Streaming to Onocoy and to RTK2go or Centipede at the same time needs your OK first.',
 };
 

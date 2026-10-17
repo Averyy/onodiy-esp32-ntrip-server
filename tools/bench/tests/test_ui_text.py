@@ -1252,7 +1252,7 @@ def test_system_wifi_chip_and_recovery_line():
                   ("recoveryHint", None)])
     assert out[:4] == [["Not set up", "plain"], ["Online", "ok"], ["Connecting", "warn"], ["Offline", "bad"]]
     # One line under the admin password: what to do, no paragraph (the login page has the steps in full).
-    assert out[4] == "Forgot it? Hold BOOT for 10 s, then join the station's own Wi-Fi and open http://192.168.4.1/."
+    assert out[4] == "Forgot it? Hold BOOT for 10 s, then join the setup hotspot and open http://192.168.4.1/."
     # Logs' Wi-Fi: a row each, no value joined to the next with a dot (a wrapped line never starts with one). The
     # signal's words are the casters harness's (it has a DOM).
     net = {"online": True, "ssid": "Home", "rssi": -61}
@@ -1422,15 +1422,15 @@ def test_no_top_level_name_is_declared_twice():
 def test_five_tabs_and_old_addresses_land_on_the_new_pages():
     out = run_ui([("nav", None)] + [("moved", a) for a in (
         ["signals", ""], ["signals", "live"], ["signals", "live/start"], ["live", ""], ["system", ""], ["updates", ""],
-        ["updates", "session"], ["dashboard", ""], ["casters", "onocoy"], ["receiver", "settings"], ["settings", ""],
-        ["logs", ""], ["logs", "console"], ["", ""])])
-    # Logs is a tab of its own, between the receiver and the settings.
-    assert out[0] == ["Status", "Casters", "Receiver", "Logs", "Settings"]
+        ["updates", "session"], ["dashboard", ""], ["casters", ""], ["casters", "onocoy"], ["ntrip", "onocoy"],
+        ["receiver", "settings"], ["settings", ""], ["logs", ""], ["logs", "console"], ["", ""])])
+    # Logs is a tab of its own, between the receiver and the settings; Casters is NTRIP.
+    assert out[0] == ["Status", "NTRIP", "Receiver", "Logs", "Settings"]
     # The old Status address lands on "#/" (the Status tab marked), not on a page with no tab.
-    assert out[1:9] == ["receiver", "receiver/live", "receiver/live/start", "receiver/live", "settings/wifi", "settings/updates",
-                        "settings/session", ""]
+    assert out[1:11] == ["receiver", "receiver/live", "receiver/live/start", "receiver/live", "settings/wifi", "settings/updates",
+                         "settings/session", "", "ntrip", "ntrip/onocoy"]
     # Pages that exist stay where they are.
-    assert out[9:] == [None] * 6
+    assert out[11:] == [None] * 6
 
 
 def test_header_says_the_station_state_in_a_word_in_the_top_cards_colour():
@@ -1525,8 +1525,8 @@ def test_logs_three_parts_and_the_old_diagnostics_addresses():
 
 def test_every_link_in_the_ui_goes_to_a_page_that_exists():
     """No button, link or notice points at an old address (it would only redirect) or a part a page does not have."""
-    pages = {"": None, "casters": None, "receiver": {"settings", "live"}, "settings": {"updates", "session", "wifi", "restart"},
-             "logs": {"history", "console"}}
+    pages = {"": None, "ntrip": None, "casters": None, "receiver": {"settings", "live"},
+             "settings": {"updates", "session", "wifi", "restart"}, "logs": {"history", "console"}}
     # The places a part is opened at (#/receiver/settings/manage: the Receiver setup card).
     places = {("receiver", "settings"): {"manage"}, ("receiver", "live"): {"start"}}
     bad = []
@@ -1584,13 +1584,13 @@ def test_a_notice_hides_on_the_page_whose_card_says_it():
     uart = status(receiver={"state": "no_receiver", "uart_closed": True})
     journal = status(receiver={"journal": "waiting"})
     trial = status(network={"cred_trial": True, "cred_trial_left_s": 80, "pending_ssid": "Cabin"})
-    pages = ["casters", "receiver", "receiver/settings", "settings", "logs", "logs/history"]
+    pages = ["ntrip", "receiver", "receiver/settings", "settings", "logs", "logs/history"]
     cases = [(BUSY, p) for p in pages] + [(x, p) for x in (safe, uart, journal, trial) for p in ("", "settings", "receiver")]
     out = [[k for k, _ in o] for o in run_ui([("notices", list(c)) for c in cases])]
     every = {"settings", "onocoy_stopped:0", "wifi", "maintenance", "held", "signal_test", "update"}
     # Logs' Health card says the station's state (settings storage) above its alerts: its notice goes there,
     # not on History.
-    hidden = {"casters": {"onocoy_stopped:0"}, "receiver": {"held"}, "receiver/settings": {"signal_test"},
+    hidden = {"ntrip": {"onocoy_stopped:0"}, "receiver": {"held"}, "receiver/settings": {"signal_test"},
               "settings": {"wifi", "update", "maintenance"}, "logs": {"settings"}, "logs/history": set()}
     for p, keys in zip(pages, out[:6]):
         assert set(keys) == every - hidden[p], p
@@ -1600,7 +1600,7 @@ def test_a_notice_hides_on_the_page_whose_card_says_it():
     assert set(status_keys) == every - {"settings", "update", "onocoy_stopped:0"}, status_keys
     two = status(casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate"),
                           caster(1, "Bench", "stopped", stop_reason="rejected")])
-    two_k = [[k for k, _ in o] for o in run_ui([("notices", [two, p]) for p in ("", "receiver", "casters")])]
+    two_k = [[k for k, _ in o] for o in run_ui([("notices", [two, p]) for p in ("", "receiver", "ntrip")])]
     assert two_k == [[], ["onocoy_stopped:0", "onocoy_stopped:1"], []]
     (two_hero,) = heroes(two)
     assert two_hero["key"] == "stopped" and two_hero["also"] == ["caster:1"]

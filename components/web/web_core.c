@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "settings_codec.h"
 #include "web_json.h"
 
 /* ---- errors -------------------------------------------------------------------------- */
@@ -508,43 +509,73 @@ void web_sess_init(web_sessions_t *t)
 
 static bool expired(const web_session_t *s, uint32_t now_s)
 {
-    return (uint32_t)(now_s - s->last_s) >= WEB_SESSION_IDLE_S || (uint32_t)(now_s - s->created_s) >= WEB_SESSION_LIFE_S;
+    uint32_t life = now_s - s->created_s;
+    if (s->remember) {
+        return life >= WEB_SESSION_REMEMBER_S;
+    }
+    return (uint32_t)(now_s - s->last_s) >= WEB_SESSION_IDLE_S || life >= WEB_SESSION_LIFE_S;
 }
 
-int web_sess_create(web_sessions_t *t, const uint8_t token[16], uint32_t now_s)
+/* The least recently used session (the longest time since its last request) among the remembered ones or the others. */
+static int least_recent(const web_sessions_t *t, bool remember, uint32_t now_s)
 {
     int idx = -1;
+    uint32_t oldest = 0;
+    for (size_t i = 0; i < WEB_SESSIONS_MAX; i++) {
+        uint32_t age = now_s - t->s[i].last_s;
+        if (t->s[i].remember == remember && (idx < 0 || age > oldest)) {
+            oldest = age;
+            idx = (int)i;
+        }
+    }
+    return idx;
+}
+
+static int free_slot(const web_sessions_t *t, uint32_t now_s)
+{
     for (size_t i = 0; i < WEB_SESSIONS_MAX; i++) {
         if (!t->s[i].used || expired(&t->s[i], now_s)) {
-            idx = (int)i;
-            break;
+            return (int)i;
         }
     }
-    if (idx < 0) {
-        /* Least recently used: the longest time since its last request. */
-        uint32_t oldest = 0;
-        for (size_t i = 0; i < WEB_SESSIONS_MAX; i++) {
-            uint32_t age = now_s - t->s[i].last_s;
-            if (idx < 0 || age > oldest) {
-                oldest = age;
-                idx = (int)i;
-            }
-        }
-    }
+    return -1;
+}
+
+static web_session_t *take(web_sessions_t *t, int idx, const uint8_t key[WEB_SESSION_KEY_LEN], bool remember,
+                           uint32_t created_s, uint32_t now_s)
+{
     web_session_t *s = &t->s[idx];
     memset(s, 0, sizeof(*s));
     s->used = true;
-    memcpy(s->token, token, sizeof(s->token));
-    s->created_s = now_s;
+    s->remember = remember;
+    memcpy(s->key, key, sizeof(s->key));
+    s->created_s = created_s;
     s->last_s = now_s;
     s->gen = t->next_gen++;
     if (t->next_gen == 0) {
         t->next_gen = 1;
     }
+    return s;
+}
+
+int web_sess_create(web_sessions_t *t, const uint8_t key[WEB_SESSION_KEY_LEN], bool remember, uint32_t now_s,
+                    int64_t now_unix)
+{
+    int idx = free_slot(t, now_s);
+    if (idx < 0) {
+        idx = least_recent(t, false, now_s);
+    }
+    if (idx < 0) {
+        idx = least_recent(t, true, now_s);
+    }
+    web_session_t *s = take(t, idx, key, remember, now_s, now_s);
+    if (remember && now_unix > 0) {
+        s->end_unix = now_unix + WEB_SESSION_REMEMBER_S;
+    }
     return idx;
 }
 
-int web_sess_find(web_sessions_t *t, const uint8_t token[16], uint32_t now_s)
+int web_sess_find(web_sessions_t *t, const uint8_t key[WEB_SESSION_KEY_LEN], uint32_t now_s)
 {
     int found = -1;
     for (size_t i = 0; i < WEB_SESSIONS_MAX; i++) {
@@ -553,18 +584,14 @@ int web_sess_find(web_sessions_t *t, const uint8_t token[16], uint32_t now_s)
             continue;
         }
         uint8_t diff = 0;
-        for (size_t k = 0; k < sizeof(s->token); k++) {
-            diff |= (uint8_t)(s->token[k] ^ token[k]);
+        for (size_t k = 0; k < sizeof(s->key); k++) {
+            diff |= (uint8_t)(s->key[k] ^ key[k]);
         }
         if (diff == 0) {
             found = (int)i;
         }
     }
-    if (found >= 0 && expired(&t->s[found], now_s)) {
-        web_sess_end(t, found);
-        return -1;
-    }
-    return found;
+    return found >= 0 && expired(&t->s[found], now_s) ? -1 : found;
 }
 
 void web_sess_touch(web_sessions_t *t, int idx, uint32_t now_s)
@@ -580,8 +607,11 @@ uint32_t web_sess_left_s(const web_sessions_t *t, int idx, uint32_t now_s)
         return 0;
     }
     const web_session_t *s = &t->s[idx];
-    uint32_t idle = now_s - s->last_s;
     uint32_t life = now_s - s->created_s;
+    if (s->remember) {
+        return life >= WEB_SESSION_REMEMBER_S ? 0 : WEB_SESSION_REMEMBER_S - life;
+    }
+    uint32_t idle = now_s - s->last_s;
     uint32_t idle_left = idle >= WEB_SESSION_IDLE_S ? 0 : WEB_SESSION_IDLE_S - idle;
     uint32_t life_left = life >= WEB_SESSION_LIFE_S ? 0 : WEB_SESSION_LIFE_S - life;
     return idle_left < life_left ? idle_left : life_left;
@@ -623,6 +653,112 @@ uint32_t web_sess_expire(web_sessions_t *t, uint32_t now_s)
 bool web_sess_alive(const web_sessions_t *t, int idx, uint32_t gen)
 {
     return idx >= 0 && (size_t)idx < WEB_SESSIONS_MAX && t->s[idx].used && t->s[idx].gen == gen;
+}
+
+uint32_t web_sess_clock(web_sessions_t *t, uint32_t now_s, int64_t now_unix, bool *stamped)
+{
+    uint32_t mask = 0;
+    *stamped = false;
+    if (now_unix <= 0) {
+        return 0;
+    }
+    for (size_t i = 0; i < WEB_SESSIONS_MAX; i++) {
+        web_session_t *s = &t->s[i];
+        if (!s->used || !s->remember) {
+            continue;
+        }
+        uint32_t left = web_sess_left_s(t, (int)i, now_s);
+        if (s->end_unix == 0) {
+            s->end_unix = now_unix + left;
+            *stamped = true;
+        } else if (s->end_unix <= now_unix) {
+            web_sess_end(t, (int)i);
+            mask |= 1u << i;
+        } else if (s->end_unix - now_unix < (int64_t)left) {
+            s->created_s = now_s - (WEB_SESSION_REMEMBER_S - (uint32_t)(s->end_unix - now_unix));
+        }
+    }
+    return mask;
+}
+
+size_t web_sess_store_encode(const web_sessions_t *t, const uint8_t bind[WEB_SESS_BIND_LEN], uint8_t *buf, size_t cap,
+                             size_t *count)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < WEB_SESSIONS_MAX; i++) {
+        n += t->s[i].used && t->s[i].remember && t->s[i].end_unix > 0;
+    }
+    *count = n;
+    blob_writer_t w;
+    blob_writer_init(&w, buf, cap);
+    blob_put_u8(&w, WEB_SESS_STORE_VERSION);
+    for (size_t i = 0; i < WEB_SESS_BIND_LEN; i++) {
+        blob_put_u8(&w, bind[i]);
+    }
+    blob_put_u8(&w, (uint8_t)n);
+    for (size_t i = 0; i < WEB_SESSIONS_MAX; i++) {
+        const web_session_t *s = &t->s[i];
+        if (!s->used || !s->remember || s->end_unix <= 0) {
+            continue;
+        }
+        for (size_t k = 0; k < WEB_SESSION_KEY_LEN; k++) {
+            blob_put_u8(&w, s->key[k]);
+        }
+        blob_put_i64(&w, s->end_unix);
+    }
+    return blob_writer_ok(&w) ? w.len : 0;
+}
+
+bool web_sess_store_decode(const uint8_t *buf, size_t len, uint8_t bind[WEB_SESS_BIND_LEN],
+                           web_sess_rec_t out[WEB_SESSIONS_MAX], size_t *count)
+{
+    if (buf == NULL) {
+        return false;
+    }
+    blob_reader_t r;
+    blob_reader_init(&r, buf, len);
+    uint8_t version = blob_get_u8(&r);
+    for (size_t i = 0; i < WEB_SESS_BIND_LEN; i++) {
+        bind[i] = blob_get_u8(&r);
+    }
+    uint8_t n = blob_get_u8(&r);
+    if (!blob_reader_ok(&r) || version != WEB_SESS_STORE_VERSION || n > WEB_SESSIONS_MAX) {
+        return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        for (size_t k = 0; k < WEB_SESSION_KEY_LEN; k++) {
+            out[i].key[k] = blob_get_u8(&r);
+        }
+        out[i].end_unix = blob_get_i64(&r);
+    }
+    if (!blob_reader_ok(&r) || blob_reader_remaining(&r) != 0) {
+        return false;
+    }
+    *count = n;
+    return true;
+}
+
+int web_sess_restore(web_sessions_t *t, const web_sess_rec_t *rec, uint32_t now_s, int64_t now_unix)
+{
+    if (rec->end_unix <= 0) {
+        return -1;
+    }
+    uint32_t left = WEB_SESSION_REMEMBER_S;
+    if (now_unix > 0) {
+        if (rec->end_unix <= now_unix) {
+            return -1;
+        }
+        if (rec->end_unix - now_unix < (int64_t)left) {
+            left = (uint32_t)(rec->end_unix - now_unix);
+        }
+    }
+    int idx = free_slot(t, now_s);
+    if (idx < 0) {
+        return -1;
+    }
+    web_session_t *s = take(t, idx, rec->key, true, now_s - (WEB_SESSION_REMEMBER_S - left), now_s);
+    s->end_unix = rec->end_unix;
+    return idx;
 }
 
 /* ---- login throttling -------------------------------------------------------------------- */

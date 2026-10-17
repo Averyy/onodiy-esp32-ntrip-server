@@ -48,6 +48,19 @@ bool web_pbkdf2_sha256(const uint8_t *pw, size_t pw_len, const uint8_t *salt, si
     return ok;
 }
 
+bool web_sha256(const uint8_t *data, size_t len, uint8_t out[WEB_PW_HASH_LEN])
+{
+    size_t n = 0;
+    if (data == NULL || out == NULL || psa_crypto_init() != PSA_SUCCESS ||
+        psa_hash_compute(PSA_ALG_SHA_256, data, len, out, WEB_PW_HASH_LEN, &n) != PSA_SUCCESS || n != WEB_PW_HASH_LEN) {
+        if (out != NULL) {
+            memset(out, 0, WEB_PW_HASH_LEN);
+        }
+        return false;
+    }
+    return true;
+}
+
 bool web_pw_make(const char *pw, const uint8_t salt[WEB_PW_SALT_LEN], uint32_t iterations, web_pw_record_t *out)
 {
     if (pw == NULL || out == NULL || iterations < WEB_PW_MIN_ITER || iterations > WEB_PW_MAX_ITER) {

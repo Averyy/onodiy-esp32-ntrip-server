@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * App shell: header (with the station's state), the five tabs, hash router
- * (#/casters, #/logs/console, ...; old addresses redirect), page-wide
+ * (#/ntrip, #/logs/console, ...; old addresses redirect), page-wide
  * notices (one line each), dialogs, the restart overlay and the colour theme.
  *
  * A view is {title, admin, heading(arg)?, create(el, arg) -> {update(status)?,
@@ -13,14 +13,20 @@
  */
 
 const Views = {};
-const NAV = [['', 'Status'], ['casters', 'Casters'], ['receiver', 'Receiver'], ['logs', 'Logs'], ['settings', 'Settings']];
+const NAV = [['', 'Status'], ['ntrip', 'NTRIP'], ['receiver', 'Receiver'], ['logs', 'Logs'], ['settings', 'Settings']];
+/* The view that draws an address whose name is not its key. */
+const VIEW_KEY = { '': 'dashboard', ntrip: 'casters' };
+
+function viewOf(name) {
+  return Views[VIEW_KEY[name] || name];
+}
 
 /*
  * Old addresses (the seven tabs, Diagnostics and its parts) and where that
- * content is now: #/signals/live opens #/receiver/live; Diagnostics is Logs,
- * its History (and the journal and availability before it) Logs' History,
- * its Logs Logs' Console, its tasks and core dump (and anything else) the
- * Overview.
+ * content is now: #/signals/live opens #/receiver/live; Casters is NTRIP
+ * (#/casters/onocoy: #/ntrip/onocoy); Diagnostics is Logs, its History (and
+ * the journal and availability before it) Logs' History, its Logs Logs'
+ * Console, its tasks and core dump (and anything else) the Overview.
  */
 function movedTo(name, arg) {
   if (name === 'dashboard') return '';
@@ -28,7 +34,7 @@ function movedTo(name, arg) {
   if (name === 'diag') {
     return 'logs' + ({ history: '/history', availability: '/history', journal: '/history', logs: '/console' }[(arg || '').split('/')[0]] || '');
   }
-  const to = { signals: 'receiver', live: 'receiver/live', system: 'settings/wifi' }[name];
+  const to = { signals: 'receiver', live: 'receiver/live', system: 'settings/wifi', casters: 'ntrip' }[name];
   return to ? to + (arg ? '/' + arg : '') : null;
 }
 
@@ -76,9 +82,9 @@ function renderTopActions() {
   const themeBtn = h('button', { type: 'button', class: 'icon-btn', title: 'Light or dark', 'aria-label': 'Switch between light and dark',
     onclick: toggleTheme }, '◐');
   if (isAdmin()) {
-    mount(box, themeBtn, h('button', { type: 'button', class: 'btn small ghost', onclick: logout }, 'Log out'));
+    mount(box, themeBtn, h('button', { type: 'button', class: 'btn small ghost', onclick: logout }, 'Logout'));
   } else if (S.publicView) {
-    mount(box, themeBtn, h('button', { type: 'button', class: 'btn small', onclick: () => showLogin() }, 'Log in'));
+    mount(box, themeBtn, h('button', { type: 'button', class: 'btn small', onclick: () => showLogin() }, 'Login'));
   } else {
     mount(box, themeBtn);
   }
@@ -99,10 +105,9 @@ function contactAge(s) {
  * and a word (stateWord); its title on hover and in its name, which starts
  * with the word; a tap opens the Status page. Without a status for CONTACT_S
  * it says "No contact" and counts the time (contactAge; the whole time on
- * hover), grey (the station's state is not known), and "Connecting…" before
- * the first. On the Status page, whose top card says the state in full, it
- * shows only "No contact" (that card cannot know it; its dot goes grey too,
- * body.no-contact), so nothing is said or announced twice. The word is a
+ * hover), grey (the station's state is not known; the Status page's colours
+ * go grey too, body.no-contact), and "Connecting…" before the first. It
+ * shows on every page, the Status page too. The word is a
  * polite live region, so a screen reader hears it once when it changes; the
  * running count sits beside it, outside the region (and hidden from
  * assistive technology), or it would be read out every second. The tooltip
@@ -135,7 +140,6 @@ function renderLive() {
     title = st.head;
   }
   doc.body.classList.toggle('no-contact', lost);
-  const quiet = !lost && !!shell.current && shell.current.name === '';
   let a = el.querySelector('a');
   if (!a) {
     a = h('a', { href: '#/' }, h('span', { class: 'in' }, h('span', { class: 'word', role: 'status' }),
@@ -143,8 +147,6 @@ function renderLive() {
     mount(el, a);
   }
   const box = a.querySelector('.in'), word = a.querySelector('.word'), ageEl = a.querySelector('.age');
-  el.hidden = quiet;
-  if (quiet) text = count = '';   /* the region says the next word it shows */
   const name = count ? 'No contact with the station' :
     title.toLowerCase().indexOf(text.replace(/…$/, '').toLowerCase()) === 0 ? title : text + ': ' + title;
   a.className = tone;
@@ -223,7 +225,7 @@ function route() {
     r = parseHash();
   }
   /* A visitor without a session sees the one public page. */
-  if (!Views[r.name || 'dashboard'] || (!isAdmin() && r.name)) r = { name: '', arg: '' };
+  if (!viewOf(r.name) || (!isAdmin() && r.name)) r = { name: '', arg: '' };
   const cur = shell.current;
   if (cur && cur.name === r.name && cur.arg === r.arg) return;
   if (cur && cur.view.dirty && cur.view.dirty() && !window.confirm('Leave this page? Unsaved changes are lost.')) {
@@ -242,7 +244,8 @@ function openView(name, arg) {
       console.error(e);
     }
   }
-  const def = Views[name || 'dashboard'];
+  if (name === 'casters') name = 'ntrip';   /* a page that opens itself by its view key ("Try again") */
+  const def = viewOf(name);
   /* Each visit draws into its own element: an answer that arrives after the page was left lands nowhere. */
   const el = h('div', { class: 'page-root' });
   mount(viewEl(), el);
@@ -260,7 +263,6 @@ function openView(name, arg) {
   head.className = t[1] ? 'page-title' : 'sr-only';
   head.hidden = false;
   setDocTitle();
-  renderLive();
   renderNav();
   renderNotices();
   window.scrollTo(0, 0);
@@ -497,7 +499,7 @@ function noticeItems(st, page) {
     add('factory_reset', 'warn', 'Factory reset refused', 'Hold BOOT again after the receiver update.', go('Details', '#/logs'), true);
   }
   /* Settings has the safe-mode box itself, with "Leave safe mode". */
-  if (sm.active && page !== 'settings') add('safe_mode', 'bad', 'Safe mode', 'The receiver and casters are off.', go('Details', '#/settings/restart'), true);
+  if (sm.active && page !== 'settings') add('safe_mode', 'bad', 'Safe mode', 'The receiver and NTRIP servers are off.', go('Details', '#/settings/restart'), true);
   /* Settings has maintenance next to the receiver update, with End now. */
   if (rcv.rx_maintenance && page !== 'settings') {
     add('maintenance', 'info', 'Receiver maintenance', rcv.maintenance_left_s ? 'Ends in about ' + upMin(rcv.maintenance_left_s) + '.' : '',
@@ -528,11 +530,11 @@ function noticeItems(st, page) {
     add('journal', 'warn', 'Receiver update needs you', !session ? 'The receiver waits in its update loader.' :
       j === 'unreadable' ? 'Its record is damaged.' : 'Keep the station powered.', go('Open', '#/settings/session'), true);
   }
-  /* A slot the Onocoy login guard stopped tries nothing until the user acts; the Casters page shows it on its card. */
-  for (const c of page === 'casters' ? [] : st.casters || []) {
+  /* A slot the Onocoy login guard stopped tries nothing until the user acts; the NTRIP page shows it on its card. */
+  for (const c of page === 'ntrip' ? [] : st.casters || []) {
     if (c.state === 'stopped') {
       add('onocoy_stopped:' + c.slot, 'bad', (c.name || 'Onocoy') + ' stopped: ' + lbl(L.stop, c.stop_reason || 'none'), '',
-        go('What to do', '#/casters'), true);
+        go('What to do', '#/ntrip'), true);
     }
   }
   if (page !== 'settings' && (u.app_available || u.gnss_available || u.app_reverted_in_stage1) && !bannerDismissed(u)) {
@@ -651,21 +653,23 @@ async function discardPendingWifi(e) {
 let openDialogClose = null;   /* close(result) of the dialog that is open */
 
 /**
- * Modal dialog. opts: title, body (nodes), ok (label), okKind ('primary' or
- * 'danger solid'), cancel (label, false = none), check (label of a box that
- * must be ticked), typed (word that must be typed), onOk (async; throwing
- * keeps the dialog open and shows the error). Resolves true on OK.
+ * Modal dialog. opts: title, body (nodes), ok (label, false = none: a dialog
+ * that only says something, closed with the cancel button), okKind
+ * ('primary' or 'danger solid'), cancel (label, false = none), check (label
+ * of a box that must be ticked), typed (word that must be typed), onOk
+ * (async; throwing keeps the dialog open and shows the error). Resolves true
+ * on OK.
  */
 function dialog(opts) {
   return new Promise(resolve => {
     const root = doc.getElementById('modal');
     const prevFocus = doc.activeElement;
     const err = errBox();
-    const okBtn = h('button', { type: 'submit', class: 'btn ' + (opts.okKind || 'primary') }, opts.ok || 'OK');
+    const okBtn = opts.ok === false ? null : h('button', { type: 'submit', class: 'btn ' + (opts.okKind || 'primary') }, opts.ok || 'OK');
     const chk = opts.check ? checkbox(opts.check, false) : null;
     const typed = opts.typed ? textInput('', { 'aria-label': 'Type ' + opts.typed + ' to confirm' }) : null;
     const update = () => {
-      okBtn.disabled = (chk && !chk.input.checked) || (typed && typed.value.trim() !== opts.typed);
+      if (okBtn) okBtn.disabled = (chk && !chk.input.checked) || (typed && typed.value.trim() !== opts.typed);
     };
     /* Modal for real: the page behind it is inert (no focus, no clicks, out
      * of the accessibility tree) and Tab wraps inside the dialog. */
@@ -713,7 +717,7 @@ function dialog(opts) {
     const form = h('form', { class: 'dialog', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'dlg-title',
       onsubmit: async e => {
         e.preventDefault();
-        if (okBtn.disabled) return;
+        if (!okBtn || okBtn.disabled) return;
         if (opts.onOk) {
           const ok = await act(okBtn, opts.onOk, err);
           if (ok === undefined && !err.hidden) return;
@@ -726,7 +730,7 @@ function dialog(opts) {
       typed ? field('Type ' + opts.typed + ' to confirm', typed).el : null,
       err),
     h('div', { class: 'form-actions' },
-      opts.cancel === false ? null : btn(opts.cancel || 'Cancel', () => close(false), 'ghost'),
+      opts.cancel === false ? null : btn(opts.cancel || 'Cancel', () => close(false), okBtn ? 'ghost' : ''),
       okBtn));
     if (chk) chk.input.addEventListener('change', update);
     if (typed) typed.addEventListener('input', update);
@@ -739,7 +743,7 @@ function dialog(opts) {
     setInert(true);
     doc.addEventListener('keydown', onKey);
     window.addEventListener('hashchange', onHash);
-    (typed || chk && chk.input || okBtn).focus();
+    (typed || chk && chk.input || okBtn || form.querySelector('.form-actions .btn')).focus();
   });
 }
 
@@ -755,7 +759,7 @@ function showRestarting(title, text) {
   if (rebootWatch) return;
   live.stop();
   /* The page behind stops polling: its requests would only draw 401s once
-   * the station is back (sessions do not survive a restart). */
+   * the station is back (a session not remembered ends with a restart). */
   const cur = shell.current;
   if (cur && cur.view && cur.view.destroy) {
     try {
@@ -799,7 +803,7 @@ bus.on('rebooting', () => {
   if (shell.started || S.publicView) showRestarting();
 });
 
-/* ---- Log in / out ------------------------------------------------------ */
+/* ---- Login / logout ---------------------------------------------------- */
 
 async function logout() {
   try {
@@ -816,5 +820,5 @@ bus.on('unauthorized', () => {
   if (!S.session || !S.session.authenticated) return;
   live.stop();
   S.session = Object.assign({}, S.session, { authenticated: false });
-  showLogin('Your session ended. Log in again.');
+  showLogin('Your session ended. Login again.');
 });

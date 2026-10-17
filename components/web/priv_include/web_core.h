@@ -186,16 +186,36 @@ bool web_query_value(const char *query, const char *key, char *out, size_t out_s
 
 /* ---- sessions ------------------------------------------------------------------------- */
 
-#define WEB_SESSIONS_MAX     4u
-#define WEB_SESSION_IDLE_S   1800u          /**< idle timeout, extended by every authenticated request */
-#define WEB_SESSION_LIFE_S   86400u         /**< absolute lifetime */
+/*
+ * A session is found by the SHA-256 of its cookie's token (its key): the
+ * token itself is never kept, in RAM or in the settings.
+ *
+ * A remembered session ("Remember me") lasts WEB_SESSION_REMEMBER_S from its
+ * login without an idle timeout and is kept in the settings, so it survives
+ * a restart and a firmware update. The table counts its time by the
+ * monotonic clock; its end in UTC (end_unix) is known once the trusted clock
+ * (GNSS or SNTP) is: set at a login with the clock, otherwise stamped (now +
+ * time left) the first time the clock is seen. Only stamped sessions are
+ * stored. A stored session read back at boot (web_sess_restore) gets the
+ * time its UTC end leaves; while the clock is not set yet it is accepted
+ * with the full lifetime, and web_sess_clock() ends it as soon as the clock
+ * shows its end has passed (a station counts the time it was off only once
+ * it knows the date). Whichever end comes first counts.
+ */
+#define WEB_SESSIONS_MAX        8u
+#define WEB_SESSION_IDLE_S      1800u          /**< idle timeout, extended by every authenticated request */
+#define WEB_SESSION_LIFE_S      86400u         /**< absolute lifetime */
+#define WEB_SESSION_REMEMBER_S  2592000u       /**< a remembered session's lifetime (30 days from its login), no idle timeout */
+#define WEB_SESSION_KEY_LEN     32u            /**< SHA-256 of the token */
 
 typedef struct {
     bool used;
-    uint8_t token[16];
+    bool remember;
+    uint8_t key[WEB_SESSION_KEY_LEN];
     uint32_t created_s;
     uint32_t last_s;
     uint32_t gen;          /**< changes every time the slot gets a new session (links WebSocket clients) */
+    int64_t end_unix;      /**< remembered: its end in UTC, 0 = not known yet (the clock was not set) */
 } web_session_t;
 
 typedef struct {
@@ -205,16 +225,24 @@ typedef struct {
 
 void web_sess_init(web_sessions_t *t);
 
-/** New session with this token; a full table ends the least recently used one. @return its index. */
-int web_sess_create(web_sessions_t *t, const uint8_t token[16], uint32_t now_s);
+/**
+ * New session with this key; a full table ends the least recently used
+ * session that is not remembered (a remembered one only when every session
+ * is). now_unix: trusted UTC, 0 = not set. @return its index.
+ */
+int web_sess_create(web_sessions_t *t, const uint8_t key[WEB_SESSION_KEY_LEN], bool remember, uint32_t now_s,
+                    int64_t now_unix);
 
-/** Index of the live session with this token (an expired one is ended here), -1 if none. Constant-time compare. */
-int web_sess_find(web_sessions_t *t, const uint8_t token[16], uint32_t now_s);
+/**
+ * Index of the live session with this key, -1 if none. An expired one counts as none; web_sess_expire() ends it
+ * (and reports it, so a remembered one leaves the settings too). Constant-time compare.
+ */
+int web_sess_find(web_sessions_t *t, const uint8_t key[WEB_SESSION_KEY_LEN], uint32_t now_s);
 
-/** Extend the idle timeout. */
+/** Extend the idle timeout (a remembered session has none: it only counts as used). */
 void web_sess_touch(web_sessions_t *t, int idx, uint32_t now_s);
 
-/** Seconds until the session ends (idle or absolute, whichever comes first). */
+/** Seconds until the session ends (idle or absolute, whichever comes first; remembered: its lifetime). */
 uint32_t web_sess_left_s(const web_sessions_t *t, int idx, uint32_t now_s);
 
 /** End one session. */
@@ -228,6 +256,46 @@ uint32_t web_sess_expire(web_sessions_t *t, uint32_t now_s);
 
 /** True while index idx holds the session generation `gen`. */
 bool web_sess_alive(const web_sessions_t *t, int idx, uint32_t gen);
+
+/**
+ * The trusted clock is set (now_unix > 0): remembered sessions without a
+ * UTC end get one (now + time left; *stamped = true), those whose UTC end
+ * has passed end, and a UTC end sooner than the monotonic one shortens it.
+ * @return bit mask of the ended indexes.
+ */
+uint32_t web_sess_clock(web_sessions_t *t, uint32_t now_s, int64_t now_unix, bool *stamped);
+
+/* Stored remembered sessions (settings web/sessions), v1 (settings_codec.h):
+ *   u8 version (1), salt[16] of the admin password they belong to, u8 count,
+ *   count x {key[32], i64 end_unix}.
+ * A new password has a new salt, so sessions of an older one are never read
+ * back, whichever way the password changed. */
+#define WEB_SESS_STORE_VERSION  1u
+#define WEB_SESS_BIND_LEN       16u
+#define WEB_SESS_STORE_MAX_LEN  (1u + WEB_SESS_BIND_LEN + 1u + WEB_SESSIONS_MAX * (WEB_SESSION_KEY_LEN + 8u))
+
+typedef struct {
+    uint8_t key[WEB_SESSION_KEY_LEN];
+    int64_t end_unix;
+} web_sess_rec_t;
+
+/**
+ * Encode the remembered sessions that have a UTC end. @return the length
+ * (0 if cap is too small); *count = how many (0 = nothing to store).
+ */
+size_t web_sess_store_encode(const web_sessions_t *t, const uint8_t bind[WEB_SESS_BIND_LEN], uint8_t *buf, size_t cap,
+                             size_t *count);
+
+/** Decode a v1 record (at most WEB_SESSIONS_MAX sessions); false for any other layout. */
+bool web_sess_store_decode(const uint8_t *buf, size_t len, uint8_t bind[WEB_SESS_BIND_LEN],
+                           web_sess_rec_t out[WEB_SESSIONS_MAX], size_t *count);
+
+/**
+ * Take a stored session back at boot: the time its UTC end leaves (at most
+ * the lifetime), the full lifetime while the clock is not set (now_unix 0).
+ * @return its index, or -1 (its end passed, no UTC end, the table is full).
+ */
+int web_sess_restore(web_sessions_t *t, const web_sess_rec_t *rec, uint32_t now_s, int64_t now_unix);
 
 /* ---- login throttling ------------------------------------------------------------------- */
 

@@ -4,7 +4,7 @@
  *
  * Admin password hash (no RTOS or driver includes, host-testable):
  * PBKDF2-HMAC-SHA256 through PSA key derivation, the stored record and a
- * constant-time check.
+ * constant-time check; SHA-256 of a session token.
  *
  * Record sys/admin_hash, v1 (settings_codec.h, little-endian):
  *   u8 version (1), u32 iterations, salt[16], PBKDF2-HMAC-SHA256[32].
@@ -40,6 +40,9 @@ typedef struct {
  */
 bool web_pbkdf2_sha256(const uint8_t *pw, size_t pw_len, const uint8_t *salt, size_t salt_len, uint32_t iterations,
                        uint8_t out[WEB_PW_HASH_LEN]);
+
+/** SHA-256 through PSA (a session's key: the digest of its token). @return false if PSA refuses. */
+bool web_sha256(const uint8_t *data, size_t len, uint8_t out[WEB_PW_HASH_LEN]);
 
 /** Make a record for a password with the given salt and cost. */
 bool web_pw_make(const char *pw, const uint8_t salt[WEB_PW_SALT_LEN], uint32_t iterations, web_pw_record_t *out);

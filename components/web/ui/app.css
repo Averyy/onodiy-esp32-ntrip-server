@@ -217,16 +217,17 @@ body { --top-pad: max(0.5rem, env(safe-area-inset-top)); --top-h: calc(var(--top
   align-items: center;
   gap: 0.5rem;
   min-width: 0;
-  margin-right: auto;   /* the state and the buttons at the right, also while the state is hidden (Status page) */
+  margin-right: auto;   /* the state and the buttons at the right */
   color: var(--text);
   font-weight: 650;
   text-decoration: none;
 }
 .brand img { width: 28px; height: 28px; flex: none; }
-.brand span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The station's state (renderLive): the top card's dot and a word, a link to the Status page; grey while unknown. Its
- * tooltip is on the inner box (.in), which also draws the dot. */
-.live { display: flex; }
+/* A long station name gives way to the state and the buttons: cut with an ellipsis. */
+.brand span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The station's state (renderLive), on every page: the top card's dot and a word, a link to the Status page; grey while
+ * unknown. Its tooltip is on the inner box (.in), which also draws the dot. */
+.live { display: flex; flex: none; }
 .live a {
   display: inline-flex;
   align-items: center;
@@ -251,15 +252,18 @@ body { --top-pad: max(0.5rem, env(safe-area-inset-top)); --top-h: calc(var(--top
 }
 .live .age { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
 .live .age:empty { display: none; }
-/* A phone: the brand, the state (its longest word too), the theme and Log out on one line at 390 px. */
+/* A phone: the brand, the state (its longest word too), the theme and Logout on one line at 360 px; the time without
+ * contact under "No contact", so the name keeps its room (a long one gives way first). */
 @media (max-width: 420px) {
   .top { gap: 0.25rem; }
   .live a { padding: 0; font-size: 0.8rem; }
-  .live .in { gap: 0.3rem; }
+  .live .in { display: inline-grid; grid-template-columns: auto auto; column-gap: 0.3rem; line-height: 1.15; }
+  .live .in::before { grid-row: 1 / 3; }
+  .live .age { grid-column: 2; font-size: 0.75rem; }
   .top-actions .icon-btn { min-width: 36px; }
   .top-actions .btn.small { padding-left: 0.5rem; padding-right: 0.5rem; }
 }
-.top-actions { display: flex; gap: 0.25rem; white-space: nowrap; }
+.top-actions { display: flex; flex: none; gap: 0.25rem; white-space: nowrap; }
 
 .tabs {
   position: sticky;
@@ -278,7 +282,7 @@ body { --top-pad: max(0.5rem, env(safe-area-inset-top)); --top-h: calc(var(--top
 .tabs::-webkit-scrollbar { display: none; }
 .tabs a {
   flex: none;
-  padding: 0.7rem 0.6rem 0.6rem;
+  padding: 0.7rem 1rem 0.6rem;
   border-bottom: 3px solid transparent;
   color: var(--muted);
   font-weight: 550;
@@ -287,12 +291,13 @@ body { --top-pad: max(0.5rem, env(safe-area-inset-top)); --top-h: calc(var(--top
   white-space: nowrap;
 }
 .tabs a.active { color: var(--text); border-bottom-color: var(--accent); }
-/* The five tabs fit a 360 px phone; a narrower screen scrolls them (the fades say so). */
-@media (max-width: 420px) { .tabs a { padding-left: 0.5rem; padding-right: 0.5rem; } }
-@media (max-width: 380px) {
+/* The five tabs fit a 360 px phone, a few px to spare at every width; a narrower screen scrolls them (the fades say so). */
+@media (max-width: 480px) { .tabs a { padding-left: 0.75rem; padding-right: 0.75rem; } }
+@media (max-width: 420px) {
   .tabs { gap: 0; }
-  .tabs a { padding-left: 0.4rem; padding-right: 0.4rem; }
+  .tabs a { padding-left: 0.65rem; padding-right: 0.65rem; }
 }
+@media (max-width: 380px) { .tabs a { padding-left: 0.5rem; padding-right: 0.5rem; } }
 .tabs a .dot {
   display: inline-block;
   width: 7px;
@@ -633,13 +638,17 @@ input.invalid, select.invalid, textarea.invalid { border-color: var(--bad); }
 :root[data-theme="dark"] ::placeholder { color: var(--muted); }
 input:disabled, select:disabled { opacity: 0.65; }
 
+/* A checkbox and its label: the box centred on the label's first line (one line is 1.45em of the label's size, the
+ * box's em too), the label and its hint in one column beside it, whatever box an engine draws. */
 .check {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.6rem;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: start;
+  column-gap: 0.6rem;
+  line-height: 1.45;
   cursor: pointer;
 }
-.check input { width: 22px; height: 22px; margin: 0.1rem 0 0; flex: none; accent-color: var(--accent); }
+.check input { width: 22px; height: 22px; margin: calc((1.45em - 22px) / 2) 0 0; font-size: inherit; accent-color: var(--accent); }
 .check .hint, .choice .opt .hint { margin-top: 0.15rem; }
 
 .fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
@@ -1129,6 +1138,27 @@ pre.log.short { min-height: 0; max-height: 16rem; }
 
 .bare .tabs { display: none; }
 .narrow { max-width: 34rem; margin: 0 auto; }
+/* The login: its panel in the middle of the screen, at the top of a screen too short for it. Its box fills the screen
+ * under the header and the view's padding (1rem over it, 3rem under); the padding under it evens out the header. */
+.login {
+  max-width: 26rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: calc(100vh - var(--top-h) - 4rem);
+  min-height: calc(100dvh - var(--top-h) - 4rem);
+  padding-bottom: calc(var(--top-h) - 2rem);
+}
+@media (min-width: 720px) {
+  .login {
+    min-height: calc(100vh - var(--top-h) - 4.25rem);
+    min-height: calc(100dvh - var(--top-h) - 4.25rem);
+    padding-bottom: calc(var(--top-h) - 1.75rem);
+  }
+}
+/* Forgot password at the left, Login at the right, on one line on a phone too. */
+.login-actions { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 1rem; }
+.login-actions .linkbtn { min-height: 44px; }
 .wiz-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; color: var(--muted); font-size: 0.9rem; }
 .dots { display: flex; gap: 0.35rem; }
 .dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--edge); }

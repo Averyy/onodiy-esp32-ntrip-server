@@ -36,6 +36,18 @@ TEST_CASE("PBKDF2-HMAC-SHA256 through PSA matches the published vectors", "[web_
     }
 }
 
+TEST_CASE("SHA-256 through PSA matches the published vectors", "[web_pw]")
+{
+    uint8_t want[32];
+    uint8_t got[32];
+    hex32("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", want);
+    TEST_ASSERT_TRUE(web_sha256((const uint8_t *)"abc", 3, got));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(want, got, 32);
+    hex32("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", want);
+    TEST_ASSERT_TRUE(web_sha256((const uint8_t *)"", 0, got));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(want, got, 32);
+}
+
 TEST_CASE("password record: make, check, encode, decode", "[web_pw]")
 {
     uint8_t salt[WEB_PW_SALT_LEN];

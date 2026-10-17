@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Avery L.
 # SPDX-License-Identifier: MIT
-"""The app shell's handling of the station's WebSocket events (components/web/ui/js/20-shell.js), run in Node.
+"""The app shell's handling of the station's WebSocket events and its addresses (components/web/ui/js/20-shell.js),
+run in Node.
 
 The UI's modules are loaded the way the bundle joins them (every js/*.js but
 the start-up in 99-main.js, in file-name order, inside one function), with a
@@ -8,6 +9,7 @@ document that answers every lookup. Timers are kept, not run: a case says when
 the ones due so far fire ("settle"). Each case opens a page with reload() and
 dirty() (a form being edited or not), sends it events as the WebSocket hands
 them on, and reports how often the page reloaded and which toasts showed.
+A routes case reports where each address lands and which view draws it.
 Skipped when Node.js is not installed.
 """
 
@@ -52,9 +54,20 @@ const ctx = {
 vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nconst toasts = [];\ntoast = (text, tone) => toasts.push(text + " (" + tone + ")");\n' +
-  'return { shell, bus, toasts, own: () => CLIENT_ID };\n})()', ctx);
+  'return { shell, bus, toasts, own: () => CLIENT_ID, movedTo, viewOf, Views, NAV };\n})()', ctx);
 
-const out = JSON.parse(casesJson).map(c => {
+const parsed = JSON.parse(casesJson);
+if (parsed.routes) {
+  /* Where each address lands (movedTo) and which view draws it (viewOf: its key in Views, null = none). */
+  const keyOf = v => Object.keys(ui.Views).find(k => ui.Views[k] === v) || null;
+  process.stdout.write(JSON.stringify({ nav: ui.NAV, routes: parsed.routes.map(r => {
+    const to = ui.movedTo(r[0], r[1]);
+    const name = (to === null ? r[0] : to.split('/')[0]);
+    return [to, keyOf(ui.viewOf(name))];
+  }) }));
+  process.exit(0);
+}
+const out = parsed.map(c => {
   timers = [];
   ui.toasts.length = 0;
   const reloads = {};
@@ -180,3 +193,23 @@ def test_pages_outside_the_app_and_pages_without_reload_ignore_it():
     ])
     assert [o["reloads"] for o in out] == [{}, {}, {}]
     assert [o["toasts"] for o in out] == [[], [], []]
+
+
+def run_routes(routes: list[list[str]]) -> dict:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed")
+    res = subprocess.run([node, "-e", HARNESS, str(UI_JS), json.dumps({"routes": routes})], capture_output=True, text=True,
+                         timeout=60)
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+def test_the_ntrip_tab_and_the_old_casters_addresses():
+    """The tab is "NTRIP" at #/ntrip, drawn by the casters view; #/casters and its parts land on #/ntrip and its parts
+    (a bookmark, or a link not switched yet), and every tab's address has a view."""
+    out = run_routes([["ntrip", ""], ["ntrip", "onocoy"], ["casters", ""], ["casters", "onocoy"], ["", ""], ["receiver", ""],
+                      ["logs", ""], ["settings", ""]])
+    assert out["nav"][1] == ["ntrip", "NTRIP"]
+    assert out["routes"] == [[None, "casters"], [None, "casters"], ["ntrip", "casters"], ["ntrip/onocoy", "casters"],
+                             [None, "dashboard"], [None, "receiver"], [None, "logs"], [None, "settings"]]

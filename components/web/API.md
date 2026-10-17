@@ -177,7 +177,7 @@ UI assets are pre-compressed, embedded in the image and served with
 covers the compressed assets, so a development build whose version string
 does not change still gets a fresh UI) and `Cache-Control:
 no-cache` (`304` on a matching `If-None-Match`). The UI routes with the URL
-fragment (`/#/casters`), so the server serves only `/`, `/index.html` and the
+fragment (`/#/ntrip`), so the server serves only `/`, `/index.html` and the
 fixed asset names; other paths outside `/api/` and `/ws` get `404` (on the
 AP interface: the captive redirect). `HEAD` on the page and the assets
 answers as `GET` does (status, `ETag`, `Content-Type`, `Content-Encoding`,
@@ -215,19 +215,46 @@ Passwords are 8-64 bytes of UTF-8 without control characters.
 **Sessions.**
 - `POST /api/session` with the password sets the cookie
   `sid=<32 hex>; HttpOnly; SameSite=Strict; Path=/` (128 random bits; no
-  `Secure`: plain HTTP; no `Max-Age`: a browser-session cookie).
-- Sessions live in RAM only: a reboot logs everyone out. At most 4; a fifth
-  login ends the least recently used one.
-- Idle timeout 30 min, extended by every authenticated HTTP request and
+  `Secure`: plain HTTP; no `Max-Age`: a browser-session cookie). With
+  `"remember": true` ("Remember me" on the login page, on by default) the
+  cookie also has `Max-Age=2592000` (30 days).
+- The station keeps only the SHA-256 of a session's token, never the token.
+  At most 8 sessions; a ninth login ends the least recently used session
+  that is not remembered (a remembered one only when all 8 are).
+- A session that is not remembered lives in RAM only (a reboot ends it):
+  idle timeout 30 min, extended by every authenticated HTTP request and
   every message a WebSocket client sends (the UI pings only while its tab is
-  visible, so a forgotten tab does not stay logged in). Absolute lifetime
+  visible, so a forgotten tab does not stay logged in); absolute lifetime
   24 h.
-- `DELETE /api/session` ends the session. Changing the password ends every
-  other session. When `sys/admin_hash` changes or disappears behind the
-  web's back (BOOT-button admin reset, factory reset; seen through
-  `SETTINGS_EVENT`), every session ends. A BOOT-button admin reset also
-  clears a password that lives only in RAM because the settings are
-  unavailable (seen through `health_status_t.admin_resets`).
+- A remembered session lasts 30 days from its login, without an idle
+  timeout, and survives restarts and firmware updates: it is stored in
+  `web/sessions` (device state: no `settings_changed` event; erased by a
+  factory reset) as the SHA-256 of its token with its end in UTC, under the
+  salt of the admin password it belongs to (a record of another password is
+  never read back). `web/sessions` is written only at a login, a logout, a
+  purge of ended sessions and a password change (or any other end of every
+  session), and once when the clock is first set while a remembered session
+  made without it is open; never per request.
+- The 30 days are counted by the uptime clock and, once the trusted clock
+  (GNSS or SNTP) is set, by UTC as well; whichever end comes first counts.
+  A login with the clock set stores its UTC end at once. A login made
+  before the clock is set gets its UTC end (now + the time left) when the
+  clock is first set; until then it is not stored, so a restart before that
+  ends it. At boot a stored session whose UTC end has passed by the clock
+  is dropped; while the clock is not set yet it is taken back with the
+  full lifetime (the station cannot know how long it was off), and as soon
+  as the clock is set, any whose end has passed ends and is purged. An end
+  more than 30 days ahead of the clock (the clock went back) counts as 30
+  days.
+- `DELETE /api/session` ends the session (and its stored record). Changing
+  the password ends every other session; the current one stays (remembered
+  if it was, stored under the new password). When `sys/admin_hash` changes
+  or disappears behind the web's back (BOOT-button admin reset, factory
+  reset; seen through `SETTINGS_EVENT`), every session ends and
+  `web/sessions` is erased. A BOOT-button admin reset also clears a password
+  that lives only in RAM because the settings are unavailable (seen through
+  `health_status_t.admin_resets`). A password held only in RAM, or none,
+  stores no session.
 - An ended session's WebSocket is closed with code `4001`.
 
 **Login throttling** (per client, RAM): a client is its IPv4 address (also
@@ -288,9 +315,9 @@ status is on, **adm** = admin session, **claim** = section 3.
 | Method | Path | Access | Purpose | Backend |
 |---|---|---|---|---|
 | GET | `/api/session` | pub | Auth state, setup flags | web, settings |
-| POST | `/api/session` | pub | Log in | web (PSA) |
-| DELETE | `/api/session` | adm | Log out | web |
-| POST | `/api/setup/admin` | claim | Set the first admin password, log in | web, settings |
+| POST | `/api/session` | pub | Login | web (PSA), settings `web/sessions` |
+| DELETE | `/api/session` | adm | Logout | web, settings `web/sessions` |
+| POST | `/api/setup/admin` | claim | Set the first admin password, login | web, settings |
 | POST | `/api/setup/done` | adm | Mark first setup finished | settings `sys/setup_done` |
 | POST | `/api/setup/step` | adm | Keep the setup wizard's next step | settings `sys/setup_step` |
 | PUT | `/api/admin-password` | adm | Change the password | web, settings |
@@ -370,7 +397,8 @@ status is on, **adm** = admin session, **claim** = section 3.
 ```
 
 `claim_allowed` = no admin password stored and this request came over the
-AP. `idle_left_s` is `null` without a session. The UI starts here: claim
+AP. `idle_left_s`: seconds until the session ends (a remembered one: the
+rest of its 30 days); `null` without a session. The UI starts here: claim
 form, login form, setup wizard or dashboard.
 
 | Field | Notes |
@@ -385,8 +413,12 @@ carry them anyway.
 
 ### `POST /api/session` (pub)
 
-Request `{"password": "..."}`. `200 {"authenticated": true, "idle_timeout_s": 1800}`
-plus `Set-Cookie`. Errors: `403 wrong_password`, `429 rate_limited`,
+Request `{"password": "...", "remember": true}` (`remember` optional,
+default `false`; section 3). `200 {"authenticated": true, "idle_timeout_s": 1800,
+"remembered": false}`, or `{"authenticated": true, "idle_timeout_s": null,
+"remembered": true}` (no idle timeout), plus `Set-Cookie`. Errors:
+`400 invalid_field` (`password`, `remember` not a boolean),
+`403 wrong_password`, `429 rate_limited`,
 `409 admin_not_set` (no password yet: claim over the AP),
 `409 settings_unavailable` (a stored password could not be read: recover
 with the BOOT button).
@@ -398,8 +430,10 @@ with the BOOT button).
 ### `POST /api/setup/admin` (claim)
 
 Request `{"password": "..."}`. `200 {"authenticated": true, "persisted": true}`
-plus `Set-Cookie`. Errors: `400 invalid_field` (`password`),
-`409 admin_already_set`, `403 not_on_setup_ap`.
+plus `Set-Cookie`. The session it starts is never remembered: its cookie
+belongs to the setup network's address, which closes after the setup.
+Errors: `400 invalid_field` (`password`), `409 admin_already_set`,
+`403 not_on_setup_ap`.
 
 ### `POST /api/setup/done` (adm)
 
