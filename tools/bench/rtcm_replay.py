@@ -30,11 +30,13 @@ configuration it sends, and signal-group changes (accepted for 4 5, 3 6,
 5 0 and 7 0, less any --respond-reject; a change or RESET withholds the RTCM
 for --respond-restart seconds, 3 by default, a real UM982 build 25164 about
 9, answering any command meanwhile with the receiver's "The Board is
-resetting" line, then the restart banner). The RTCM output follows it: off
-after UNLOG COM1 until an RTCMxxxx command, off while it restarts. Bursts
-that fall due meanwhile are dropped, never sent late. The station messages
-it was told to send (1005/1006 of a fixed base, 1033, 1230) are its own: they
-open each epoch, the recording's own of those types left out.
+resetting" line, then the restart banner), and its own position in
+BASEPOSA and SPPNAVA (--respond-position; no solution without it). The RTCM
+output follows it: off after UNLOG COM1 until an RTCMxxxx command, off while
+it restarts. Bursts that fall due meanwhile are dropped, never sent late.
+The station messages it was told to send (1005/1006 of a fixed base, 1033,
+1230) are its own: they open each epoch, the recording's own of those types
+left out.
 
 Writes to a new run directory (see --log-dir):
   from-firmware.bin   every byte the client sent, in order
@@ -434,6 +436,11 @@ def main() -> int:
     ap.add_argument("--respond-restart", type=float, default=None, metavar="S",
                     help="seconds the responder takes to restart after a signal-group change or RESET (default 3; "
                          "UM982 build 25164 takes 8.0-9.2 s to its banner)")
+    ap.add_argument("--respond-position", default=None, metavar="LAT,LON,H",
+                    help="where the responder's antenna is (degrees, ellipsoidal height in m): its own solution "
+                         "in BASEPOSA / SPPNAVA (default: no solution)")
+    ap.add_argument("--respond-geoid", type=float, default=0.0, metavar="M",
+                    help="the geoid separation the responder reports with that solution (default 0)")
     add_log_args(ap)
     args = ap.parse_args()
     if args.speed <= 0:
@@ -449,13 +456,26 @@ def main() -> int:
         restart_s = 3.0 if args.respond_restart is None else args.respond_restart
         if not 0 < restart_s <= 60:
             ap.error("--respond-restart must be more than 0 and at most 60 s")
+        own = None
+        if args.respond_position is not None:
+            try:
+                own = tuple(float(x) for x in args.respond_position.split(","))
+            except ValueError:
+                own = ()
+            if len(own) != 3 or not (-90 <= own[0] <= 90 and -180 <= own[1] <= 180):
+                ap.error("--respond-position: latitude,longitude,height (degrees, degrees, m)")
+        if not -150 <= args.respond_geoid <= 150:
+            ap.error("--respond-geoid must be within 150 m")
         try:
             responder = Um982Responder(group=parse_group(args.respond_group),
-                                       reject=[parse_group(g) for g in args.respond_reject], restart_s=restart_s)
+                                       reject=[parse_group(g) for g in args.respond_reject], restart_s=restart_s,
+                                       own=own, separation=args.respond_geoid)
         except ValueError as e:
             ap.error(f"--respond-group/--respond-reject: {e}")
-    elif args.respond_reject or args.respond_group != "4,5" or args.respond_restart is not None:
-        ap.error("--respond-group, --respond-reject and --respond-restart need --respond")
+    elif (args.respond_reject or args.respond_group != "4,5" or args.respond_restart is not None
+          or args.respond_position is not None or args.respond_geoid != 0.0):
+        ap.error("--respond-group, --respond-reject, --respond-restart, --respond-position and --respond-geoid "
+                 "need --respond")
     try:
         schedule = load(args.input)
     except (OSError, ValueError) as e:

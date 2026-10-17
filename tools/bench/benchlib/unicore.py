@@ -57,7 +57,8 @@ READ_ONLY = {
     "RTKSTATUSA": "RTK status (once)",
     "SATSINFOA": "satellite information (once)",
     "SATELLITEA": "visible satellites (once)",
-    "BASEPOSA": "base station position (once)",
+    "BASEPOSA": "base station position (once): the receiver's own solution while it works as a fixed base",
+    "SPPNAVA": "single-point (pseudorange) position solution (once)",
     "BASEINFOA": "base station information (once)",
     "RECTIMEA": "receiver time (once)",
     "JAMSTATUSA": "jamming detection (once)",
@@ -713,6 +714,24 @@ def groups_line(body: str, ant: int = 1) -> str:
     """A signal-group log with `body` (CRC-32 over the bytes after the `#`).
     The header is made up: the bench recorded only the bodies."""
     text = f"ANT{ant}GROUPA,COM1,0,0.0,FINE,0,0.000,0,0,0;{body}"
+    return f"#{text}*{crc32_unicore(text.encode('latin-1')):08x}"
+
+
+def own_position_body(lat_deg: float | None, lon_deg: float = 0.0, height_m: float = 0.0, separation_m: float = 0.0,
+                      sd_m: tuple[float, float, float] = (1.1, 0.9, 2.1), sats: tuple[int, int] = (38, 31)) -> str:
+    """The body of BASEPOSA / SPPNAVA (the BESTNAV layout): a single-point solution at an ellipsoidal height, its height
+    above sea level printed as height_m - separation_m beside the separation; lat_deg None: no solution yet."""
+    if lat_deg is None:
+        return ('INSUFFICIENT_OBS,NONE,0.00000000000,0.00000000000,0.0000,0.0000,WGS84,0.0000,0.0000,0.0000,"0",'
+                '0.000,0.000,0,0,0,0,0,00,00,00,INSUFFICIENT_OBS,NONE,0.000,0.000,0.0000,0.000000,0.0000,0.0000,0.0000')
+    return (f'SOL_COMPUTED,SINGLE,{lat_deg:.11f},{lon_deg:.11f},{height_m - separation_m:.4f},{separation_m:.4f},WGS84,'
+            f'{sd_m[0]:.4f},{sd_m[1]:.4f},{sd_m[2]:.4f},"0",0.000,0.000,{sats[0]},{sats[1]},0,0,0,00,00,00,'
+            'SOL_COMPUTED,DOPPLER_VELOCITY,0.000,0.000,0.0040,12.500000,0.0050,0.0200,0.0100')
+
+
+def own_position_line(name: str, body: str) -> str:
+    """A position log (BASEPOSA, SPPNAVA) with `body`; the header is made up (CRC-32 over the bytes after the `#`)."""
+    text = f"{name},COM1,0,0.0,FINE,2380,0.000,0,0,18;{body}"
     return f"#{text}*{crc32_unicore(text.encode('latin-1')):08x}"
 
 

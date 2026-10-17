@@ -96,6 +96,16 @@ esp_err_t settings_set_blob(const char *ns, const char *key, const void *data, s
 /** Remove one key (no error if absent). */
 esp_err_t settings_erase_key(const char *ns, const char *key);
 
+/**
+ * Device state that is stored on a schedule, not a setting anyone changes
+ * (receiver maintenance's stored copy, every minute while it is on): as
+ * settings_set_blob and settings_erase_key, but without
+ * SETTINGS_EVENT_CHANGED. Pages reload their data on that event (and warn
+ * about changes made elsewhere while a form is being edited).
+ */
+esp_err_t settings_set_state_blob(const char *ns, const char *key, const void *data, size_t len);
+esp_err_t settings_erase_state_key(const char *ns, const char *key);
+
 /** Remove every key in one namespace. */
 esp_err_t settings_erase_namespace(const char *ns);
 

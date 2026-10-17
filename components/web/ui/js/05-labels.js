@@ -92,9 +92,9 @@ const L = {
     power_lost: ['Power was lost', 'The station lost power 3 or more times in 24 hours. Check the power adapter, cable and connections.'],
     receiver_silent: ['Nothing from the receiver', 'The receiver sends nothing and does not answer. Unplug the station for a few seconds; ' +
       'if that does not help, check the receiver\'s power and cable.'],
-    no_satellites: ['No satellites', 'The receiver sees no satellites. Check that the antenna is on the socket marked M and sees the open sky.'],
-    no_rtcm: ['No corrections from the receiver', 'The receiver answers but sends no corrections. Check that the antenna is on the socket ' +
-      'marked M and sees the open sky.'],
+    /* The Status page's words (alertText adds "The receiver answers." to no_rtcm while receiver.responding says so). */
+    no_satellites: ['Antenna sees no satellites', 'Check that the antenna is on the socket marked M and sees the open sky.'],
+    no_rtcm: ['Receiver sends no corrections', 'Check that the antenna is on the socket marked M and sees the open sky.'],
     rx_held: ['Receiver not configured yet', 'Confirm its configuration on the Receiver page. Until then it sends no corrections.'],
   },
   /* After a failed receiver configuration: the station's own retry (automatic configuration on), or only the user's (configFailedText). */
@@ -111,6 +111,7 @@ const L = {
     receiver_in_loader: ['Receiver in its update loader', 'The station only listens until you choose what to do in Settings.'],
     no_receiver: ['No receiver found', ''],   /* the text depends on the alert: noReceiverText() */
     signals_mismatch: ['Signals differ from the signal group', 'The receiver reports other signals than its signal group should give.'],
+    fixed_far: ['Fixed position looks wrong', ''],   /* the text says how far: fixedFarText() */
   },
   /* Why the station's own restart (to look for the receiver) is postponed now (health reboot_hold). */
   /* health.reboot_cap_limit: which limit of the restart cap sets its wait */
@@ -323,7 +324,8 @@ const J = {
   /* The event list's names (a connection or a recovery step is named by connRow, by its recovery). */
   kind: { boot: 'Start', session: 'Previous run', reboot: 'Restart', app_update: 'App update', app_revert: 'App rolled back',
     gnss_flash: 'Receiver update', safe_mode: 'Safe mode', data_loss: 'Data lost', rx_maintenance: 'Receiver maintenance',
-    live_view: 'Sky view', sg_test: 'Signal groups', rx_boot: 'Receiver at power-on' },
+    live_view: 'Sky view', sg_test: 'Signal groups', rx_boot: 'Receiver at power-on', fixed_check: 'Fixed position',
+    wifi_roam: 'Wi-Fi moved' },
   /* By C value, as the API names them (lifecycle_reset_class_t, lifecycle_reboot_reason_t). */
   resetClassKey: ['power_on', 'planned', 'crash', 'brownout', 'other'],
   rebootKey: ['none', 'user', 'factory_reset', 'admin_reset', 'app_update', 'app_revert', 'gnss_ladder', 'network_ladder',
@@ -336,9 +338,10 @@ const J = {
   ladder: ['receiver', 'network', 'caster'],
   /* A recovery step's outcome after its name (0: started, said by the name alone) */
   outcome: ['', 'healthy again', 'failed', 'given up', 'skipped (your recovery choice)', 'postponed'],
-  gnssRung: [null, 'resyncing the data', 'reconnecting to the receiver', 'searching for the receiver', 'configuring the receiver again',
-    'restarting the receiver', 'restarted the station to look for the receiver', 'asked for a receiver power cycle',
-    'waiting for the next search', 'restart postponed'],
+  /* A receiver recovery step in the words the Status page uses while it runs (RECOVERY_DOING). */
+  gnssRung: [null, 'resyncing the receiver\'s data', 'reopening the link to the receiver', 'searching for the receiver',
+    're-sending the receiver\'s settings', 'restarting the receiver', 'restarted the station to look for the receiver',
+    'asked for a receiver power cycle', 'waiting for the next search', 'restart postponed'],
   /* Why a restart was postponed (ladder_step code 9, outcome 0: bits 16-23 of b; 0 = not recorded). */
   capWhy: ['', 'at most one an hour', 'at most 3 in 24 hours', 'another job holds restarts'],
   /* hold_mask bits of a postponed restart (ladder_step code 9, outcome 5). */
@@ -458,6 +461,34 @@ function nextSearchText(a) {
   const n = a.next_detect_in_s;
   if (n === null || n === undefined) return null;
   return n <= 0 ? 'searching now' : 'next search in ' + inMinutes(n);
+}
+
+/* Metres in words for a warning: whole metres, km from 1 km on. */
+function metresText(m) {
+  const a = Math.abs(m || 0);
+  return a < 1000 ? Math.round(a) + NB + 'm' : (a / 1000).toFixed(1) + NB + 'km';
+}
+
+/*
+ * Where the fixed position is against the receiver's own, in one sentence
+ * (the fixed_far alert, or GET /api/gnss fixed_check: horizontal_m,
+ * vertical_m (fixed minus the receiver's), distance_m, height_only).
+ */
+function fixedFarSentence(a) {
+  if (a.height_only) {
+    return 'The fixed height is ' + metresText(a.vertical_m) + (a.vertical_m > 0 ? ' above' : ' below') + ' where the receiver is.';
+  }
+  return 'The fixed position is ' + metresText(a.distance_m) + ' from where the receiver is.';
+}
+
+/* The fixed_far warning: how far, and what to do. */
+function fixedFarText(a) {
+  return fixedFarSentence(a) + ' Check it in Receiver settings.';
+}
+
+/* The same when it is why no corrections come (the receiver stops them this far off): the cause in the sentence. */
+function fixedStopsText(a) {
+  return fixedFarSentence(a).replace(/\.$/, ', which stops them.') + ' Check it in Receiver settings.';
 }
 
 /** The failed-configuration alert's text: when the station tries again, or that only the user does (alert or GET /api/gnss). */

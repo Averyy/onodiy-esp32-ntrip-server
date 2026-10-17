@@ -69,6 +69,62 @@ static bool answered_within(const hl_t *l, const hl_in_t *in, int64_t ms)
            (l->answer_ms != HL_NEVER && in->now_ms - l->answer_ms <= ms);
 }
 
+/* The receiver answered this boot (text lines or replies) and has sent no
+ * RTCM frame at all. */
+static bool answers_never_streamed(const hl_in_t *in)
+{
+    return in->rtcm_age_ms == UINT32_MAX && (in->answers != 0 || in->text_lines != 0);
+}
+
+/* The receiver answers now (see the header): it answered after its last
+ * RTCM frame, more than HL_ANSWER_SLACK_MS after it (a line that close may
+ * be that output's own); with no RTCM frame this boot, within
+ * HL_ANSWER_FRESH_MS (the station asks such a receiver every minute). The
+ * times are exact, as the station's own rule reads them. */
+static bool answered_since_rtcm(const hl_t *l, const hl_in_t *in)
+{
+    if (in->rtcm_age_ms == UINT32_MAX) {
+        return answered_within(l, in, HL_ANSWER_FRESH_MS);
+    }
+    int64_t seen = l->line_ms > l->answer_ms ? l->line_ms : l->answer_ms;
+    return seen != HL_NEVER && seen - (in->now_ms - (int64_t)in->rtcm_age_ms) > HL_ANSWER_SLACK_MS;
+}
+
+/* The episode's "it answers" (ep_alive) still holds now: a receiver that
+ * sent no RTCM frame this boot answers only while its last answer is fresh. */
+static bool still_answers(const hl_t *l, const hl_in_t *in)
+{
+    return l->ep_alive && (in->rtcm_age_ms != UINT32_MAX || answered_within(l, in, HL_ANSWER_FRESH_MS));
+}
+
+/* Wall time of an event `age_ms` before now, HL_NEVER for UINT32_MAX. */
+static int64_t at_of(int64_t now, uint32_t age_ms)
+{
+    return age_ms == UINT32_MAX ? HL_NEVER : now - (int64_t)age_ms;
+}
+
+/* A grace the station no longer acts on: the step was only journalled
+ * (ALERTS mode), or the user chose ALERTS after the station ran it. */
+static bool watched_grace(const hl_t *l)
+{
+    return l->phase == HL_PH_GRACE && (l->dry || l->mode == HL_MODE_ALERTS);
+}
+
+/* A step is due, runs, or the station ran it and waits for RTCM. */
+static bool step_in_progress(const hl_t *l)
+{
+    return (l->phase == HL_PH_WANT || l->phase == HL_PH_RUN || l->phase == HL_PH_GRACE) && !watched_grace(l);
+}
+
+/* Between two steps of an episode: IDLE after an abandoned step, or after
+ * a step whose RTCM stopped again, while no RTCM comes; suspended at most
+ * by a lease (the station's own states say what it does). */
+static bool between_steps(const hl_t *l, const hl_in_t *in)
+{
+    return l->phase == HL_PH_IDLE && (l->idx != 0 || l->abandoned != 0) && !l->held_wait && !rtcm_fresh(in) &&
+           (l->susp & (uint8_t) ~(HL_SUSP_LEASE | HL_SUSP_POST_LEASE)) == 0 && in->stn_state != HL_STN_NO_RECEIVER;
+}
+
 /* The first configuration is held and the receiver answers: no RTCM is
  * expected yet, so there is no stall to recover from. */
 static bool held_explains(const hl_t *l, const hl_in_t *in)
@@ -238,6 +294,7 @@ static void byte_rule(hl_t *l, const hl_in_t *in, bool bytes)
 static void start_run(hl_t *l, const hl_in_t *in)
 {
     journal(l, l->step, HL_OUT_STARTED);
+    l->abandoned_twice = false;
     l->recoveries++;
     l->last_step = l->step;
     l->phase = HL_PH_RUN;
@@ -317,10 +374,30 @@ static void want(hl_t *l, const hl_in_t *in, uint8_t step)
 }
 
 /* Continue after the step index `idx` with the stall classed as `c`. */
+/* Replies since the last step went out (step 5: the RESET's banner, its
+ * version log) or text lines in its window (step 5: its grace): the
+ * receiver answers, it is not a power-cycle or a no-receiver case. */
+static bool step_answered(const hl_t *l, const hl_in_t *in)
+{
+    return in->answers != l->win_answers0 || (l->line_ms != HL_NEVER && l->line_ms >= l->win_from_ms);
+}
+
 static void escalate(hl_t *l, const hl_in_t *in, hl_class_t c)
 {
     uint8_t next = l->idx == 0 ? hl_entry_step(c) : max_u8((uint8_t)(l->idx + 1), hl_entry_step(c));
+    bool twice = l->abandoned_twice;
+    l->abandoned_twice = false;
     if (next > HL_LAST_STEP) {
+        /* Right after step 5 was abandoned a second time (it counts as
+         * failed): the same rule as its failure, so a receiver that
+         * answered since the RESET went out gets neither the power-cycle
+         * advice nor an ESP32 restart. A stall after a step 5 that
+         * succeeded is an ordinary one: the byte rule on its class. */
+        if (twice && l->idx == HL_CODE_RECEIVER_RESET && step_answered(l, in)) {
+            l->ep_alive = true;
+            enter_failed(l, in);
+            return;
+        }
         byte_rule(l, in, c != HL_CLASS_NO_BYTES);
         return;
     }
@@ -348,10 +425,7 @@ static void step_failed(hl_t *l, const hl_in_t *in)
         want(l, in, HL_CODE_RECEIVER_RESET);
         break;
     case HL_CODE_RECEIVER_RESET: {
-        /* Replies since the RESET went out (its banner, its version log) or
-         * text lines in its grace: the receiver answers, it is not a
-         * power-cycle case. */
-        bool answered = in->answers != l->win_answers0 || (l->line_ms != HL_NEVER && l->line_ms >= l->win_from_ms);
+        bool answered = step_answered(l, in);
         l->ep_alive = answered;
         if (answered) {
             enter_failed(l, in);
@@ -391,6 +465,7 @@ static void step_healthy(hl_t *l)
     l->phase = HL_PH_IDLE;
     l->healthy = true;
     l->healthy_since = l->active_ms;
+    l->abandoned_twice = false;
 }
 
 /* A suspension began: a step in progress is abandoned and tried again later.
@@ -417,6 +492,7 @@ static void abandon(hl_t *l)
         }
     }
     if (l->phase == HL_PH_WANT || l->phase == HL_PH_RUN || l->phase == HL_PH_GRACE) {
+        l->abandoned_twice = repeat;
         if (repeat) {
             l->idx = l->step;
         } else {
@@ -439,6 +515,7 @@ static void ladder_reset(hl_t *l)
     l->power_alert = false;
     l->hold_no_rx = false;
     l->abandoned = 0;
+    l->abandoned_twice = false;
     l->blocked_6a = false;
     l->dry = false;
     l->ep_alive = false;
@@ -453,6 +530,7 @@ static void track_health(hl_t *l, const hl_in_t *in)
         l->healthy = false;
         return;
     }
+    l->abandoned_twice = false;   /* RTCM came back: a later stall is a new one */
     if (!l->healthy) {
         l->healthy = true;
         l->healthy_since = l->active_ms;
@@ -512,7 +590,10 @@ static void grace_phase(hl_t *l, const hl_in_t *in)
         step_healthy(l);
         return;
     }
-    bool hold = survey_hold(in) || (l->step == HL_CODE_RECONFIGURE && in->surveying);
+    /* Step 4 waits out the survey window, except for a receiver that
+     * answers and never streamed this boot (see the header). */
+    bool hold = survey_hold(in) ||
+                (l->step == HL_CODE_RECONFIGURE && in->surveying && !answers_never_streamed(in));
     if (l->active_ms - l->grace_start >= grace_ms(l->step) && !hold) {
         if (l->dry) {
             dry_failed(l, in);
@@ -656,6 +737,7 @@ static void leave_alerts(hl_t *l, const hl_in_t *in)
     l->idx = 0;
     l->step = 0;
     l->abandoned = 0;
+    l->abandoned_twice = false;
     l->hold_no_rx = false;
     if (stalled(l, in)) {
         escalate(l, in, hl_classify(l, in));
@@ -694,7 +776,9 @@ void hl_tick(hl_t *l, const hl_in_t *in)
     }
     l->last_now = now;
 
-    /* Text-line and reply liveness, sampled. */
+    /* Text-line and reply liveness: new ones counted from the samples,
+     * their times exact (a tick-sampled time would be up to a tick late,
+     * and count a line just after the last RTCM frame as an answer). */
     if (!l->lines_valid) {
         l->lines_valid = true;
         l->lines_last = in->text_lines;
@@ -702,15 +786,15 @@ void hl_tick(hl_t *l, const hl_in_t *in)
     } else {
         if (in->text_lines != l->lines_last) {
             l->lines_last = in->text_lines;
-            l->line_ms = now;
             l->ep_alive = true;
         }
         if (in->answers != l->answers_last) {
             l->answers_last = in->answers;
-            l->answer_ms = now;
             l->ep_alive = true;
         }
     }
+    l->line_ms = at_of(now, in->line_age_ms);
+    l->answer_ms = at_of(now, in->answer_age_ms);
 
     if (l->phase == HL_PH_REBOOTING) {
         if (now - l->reboot_ms >= HL_REBOOT_WAIT_MS) {
@@ -780,8 +864,12 @@ static uint8_t why_of(const hl_t *l, const hl_in_t *in, bool fresh)
     if (l->held_wait) {
         return HL_WHY_HELD;
     }
-    if (l->phase != HL_PH_FAILED && !(l->dry && l->phase == HL_PH_GRACE)) {
-        return HL_WHY_NONE;   /* healthy, recovering, or not declared yet */
+    /* Between steps: as while one runs (ALERTS mode: as while one is watched). */
+    bool between = between_steps(l, in);
+    bool watched = watched_grace(l) || (between && l->mode == HL_MODE_ALERTS);
+    bool fixing = step_in_progress(l) || (between && l->mode != HL_MODE_ALERTS);
+    if (l->phase != HL_PH_FAILED && !watched && !fixing) {
+        return HL_WHY_NONE;   /* healthy, rebooting, or not declared yet */
     }
     if (l->power_alert) {
         return HL_WHY_NO_ANSWER;
@@ -789,10 +877,30 @@ static uint8_t why_of(const hl_t *l, const hl_in_t *in, bool fresh)
     if (l->hold_no_rx || in->stn_state == HL_STN_NO_RECEIVER) {
         return HL_WHY_NONE;   /* the station's no-receiver alert says it */
     }
-    if (l->ep_alive) {
+    if (fixing) {
+        /* While the station works on it: only the antenna hint, and only
+         * once the receiver answered since its last RTCM frame. */
+        if (!answered_since_rtcm(l, in)) {
+            return HL_WHY_NONE;
+        }
+        return in->no_sky ? HL_WHY_NO_SKY : HL_WHY_NO_RTCM;
+    }
+    if (still_answers(l, in)) {
         return in->no_sky ? HL_WHY_NO_SKY : HL_WHY_NO_RTCM;
     }
     return HL_WHY_SILENT;
+}
+
+/* The receiver answers by the ladder's evidence: the reason says so, or,
+ * where none is given (a suspension, a stall not declared again yet), it
+ * answered after its last RTCM frame. Not in NO_RECEIVER or while 6a runs. */
+static bool answers_now(const hl_t *l, const hl_in_t *in, uint8_t why)
+{
+    if (why == HL_WHY_NO_RTCM || why == HL_WHY_NO_SKY || why == HL_WHY_HELD) {
+        return true;
+    }
+    return why == HL_WHY_NONE && in != NULL && l->phase != HL_PH_REBOOTING && !l->hold_no_rx &&
+           in->stn_state != HL_STN_NO_RECEIVER && answered_since_rtcm(l, in);
 }
 
 void hl_get_status(const hl_t *l, const hl_in_t *in, hl_status_t *out)
@@ -803,25 +911,35 @@ void hl_get_status(const hl_t *l, const hl_in_t *in, hl_status_t *out)
     case HL_PH_WANT:
     case HL_PH_RUN:
     case HL_PH_GRACE:
-        /* ALERTS mode: nothing recovers, the stall is only reported */
-        out->level = l->dry ? HL_LEVEL_DEGRADED : HL_LEVEL_RECOVERING;
         out->rung = l->step;
+        if (watched_grace(l)) {
+            out->level = HL_LEVEL_DEGRADED;   /* ALERTS mode: nothing recovers, the stall is only reported */
+        } else {
+            out->level = HL_LEVEL_RECOVERING;
+            out->doing = l->step;
+            out->waiting = l->phase == HL_PH_GRACE;
+        }
         break;
     case HL_PH_REBOOTING:
         out->level = HL_LEVEL_RECOVERING;
         out->rung = HL_CODE_REBOOT;
+        out->doing = HL_CODE_REBOOT;
         break;
     case HL_PH_FAILED:
         out->level = fresh ? HL_LEVEL_DEGRADED : HL_LEVEL_FAILED;
         out->rung = l->power_alert ? HL_CODE_POWER_ALERT : HL_CODE_FAILED;
-        if (!l->hold_no_rx) {
+        if (!l->hold_no_rx && l->mode != HL_MODE_ALERTS) {   /* ALERTS: the pass only journals, nothing is attempted */
             int64_t left = l->retry_at - l->active_ms;
             out->retry_in_s = left <= 0 ? 0 : (uint32_t)((left + 999) / 1000);
         }
         break;
     case HL_PH_IDLE:
     default:
-        out->level = fresh ? HL_LEVEL_OK : HL_LEVEL_DEGRADED;
+        if (in != NULL && between_steps(l, in)) {
+            out->level = l->mode == HL_MODE_ALERTS ? HL_LEVEL_DEGRADED : HL_LEVEL_RECOVERING;
+        } else {
+            out->level = fresh ? HL_LEVEL_OK : HL_LEVEL_DEGRADED;
+        }
         break;
     }
     out->phase = (uint8_t)l->phase;
@@ -835,4 +953,5 @@ void hl_get_status(const hl_t *l, const hl_in_t *in, hl_status_t *out)
     out->reboot_recheck = l->blocked_6a && l->mode == HL_MODE_FULL;
     out->episode = l->phase != HL_PH_IDLE || l->idx != 0 || l->no_rx || l->power_alert;
     out->why = why_of(l, in, fresh);
+    out->restart_possible = out->episode && !fresh && !answers_now(l, in, out->why);
 }

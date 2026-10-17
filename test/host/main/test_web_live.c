@@ -423,6 +423,10 @@ TEST_CASE("live view, recovery and read-back enum names", "[web_live]")
     TEST_ASSERT_EQUAL_STRING("full", web_recovery_mode_name(HEALTH_RECOVERY_FULL));
     TEST_ASSERT_EQUAL_STRING("no_reboot", web_recovery_mode_name(HEALTH_RECOVERY_NO_REBOOT));
     TEST_ASSERT_EQUAL_STRING("alerts_only", web_recovery_mode_name(HEALTH_RECOVERY_ALERTS));
+    TEST_ASSERT_EQUAL_STRING("none", web_health_step_phase_name(HEALTH_STEP_PHASE_NONE));
+    TEST_ASSERT_EQUAL_STRING("running", web_health_step_phase_name(HEALTH_STEP_PHASE_RUNNING));
+    TEST_ASSERT_EQUAL_STRING("waiting", web_health_step_phase_name(HEALTH_STEP_PHASE_WAITING));
+    TEST_ASSERT_EQUAL_STRING("unknown", web_health_step_phase_name(HEALTH_STEP_PHASE_WAITING + 1));
     TEST_ASSERT_EQUAL_STRING("unknown", web_setting_name(UM98X_SETTING_UNKNOWN));
     TEST_ASSERT_EQUAL_STRING("on", web_setting_name(UM98X_SETTING_ON));
     TEST_ASSERT_EQUAL_STRING("off", web_setting_name(UM98X_SETTING_OFF));
@@ -460,10 +464,13 @@ TEST_CASE("status: credentials on trial or pending, maintenance, UART and recove
     s.st.maintenance_left_s = 1500;
     s.st.maintenance_chosen_s = 1800;
     s.uart_closed = true;
-    s.health.level = HEALTH_DEGRADED;
+    s.health.level = HEALTH_RECOVERING;
     s.health.recovery_mode = HEALTH_RECOVERY_NO_REBOOT;
     s.health.gnss_reboot_recheck = true;
     s.health.factory_reset_refused_age_s = UINT32_MAX;
+    s.health.last_step = HEALTH_STEP_RECONFIGURE;
+    s.health.gnss_step = HEALTH_STEP_RECONFIGURE;
+    s.health.gnss_step_phase = HEALTH_STEP_PHASE_WAITING;
     s.slots = 1;
     s.cfg_valid = true;
     s.cst[0].unreached_s = 185;
@@ -491,6 +498,9 @@ TEST_CASE("status: credentials on trial or pending, maintenance, UART and recove
     const cJSON *hl = at(root, "health");
     TEST_ASSERT_EQUAL_STRING("no_reboot", at(hl, "recovery_mode")->valuestring);
     TEST_ASSERT_TRUE(cJSON_IsTrue(at(hl, "reboot_recheck")));
+    /* What the recovery does now: the step and where it is. */
+    TEST_ASSERT_EQUAL_STRING("reconfigure", at(hl, "step")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("waiting", at(hl, "step_phase")->valuestring);
     TEST_ASSERT_EQUAL(185, at(cJSON_GetArrayItem(at(root, "casters"), 0), "unreached_s")->valueint);
     cJSON_Delete(root);
 
@@ -510,7 +520,7 @@ TEST_CASE("status: credentials on trial or pending, maintenance, UART and recove
     web_build_status(&w, &s, true);
     TEST_ASSERT_TRUE(wj_ok(&w));
     static const char *const never[] = { "NewNet", "rx_maintenance", "uart_closed", "recovery_mode", "unreached_s",
-                                         "pending_ssid", "reboot_recheck" };
+                                         "pending_ssid", "reboot_recheck", "step" };
     for (size_t i = 0; i < sizeof(never) / sizeof(never[0]); i++) {
         TEST_ASSERT_NULL_MESSAGE(strstr(s_out, never[i]), never[i]);
     }
@@ -557,6 +567,8 @@ TEST_CASE("Wi-Fi and health carry the pending credentials, triggers, recovery mo
     memset(&hs, 0, sizeof(hs));
     hs.recovery_mode = HEALTH_RECOVERY_ALERTS;
     hs.gnss_reboot_recheck = true;
+    hs.gnss_step = HEALTH_STEP_RESCAN;
+    hs.gnss_step_phase = HEALTH_STEP_PHASE_RUNNING;
     memset(&link, 0, sizeof(link));
     link.mode = GNSS_LINK_MODE_STREAM;
     link.link_open = false;
@@ -571,6 +583,8 @@ TEST_CASE("Wi-Fi and health carry the pending credentials, triggers, recovery mo
     root = parse_out();
     TEST_ASSERT_EQUAL_STRING("alerts_only", at(root, "recovery_mode")->valuestring);
     TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "reboot_recheck")));
+    TEST_ASSERT_EQUAL_STRING("rescan", at(root, "step")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("running", at(root, "step_phase")->valuestring);
     const cJSON *l = at(root, "link");
     TEST_ASSERT_TRUE(cJSON_IsFalse(at(l, "open")));
     TEST_ASSERT_EQUAL(3, at(l, "open_failures")->valueint);
@@ -701,6 +715,8 @@ TEST_CASE("status sections with the new fields still fit the WebSocket's section
     s.net.cred_reverted = true;
     s.health.level = HEALTH_RECOVERING;
     s.health.last_step = HEALTH_STEP_RECEIVER_RESET;
+    s.health.gnss_step = HEALTH_STEP_RECEIVER_RESET;
+    s.health.gnss_step_phase = HEALTH_STEP_PHASE_RUNNING;
     s.health.recovery_mode = HEALTH_RECOVERY_NO_REBOOT;
     s.health.gnss_reboot_recheck = true;
     s.health.factory_reset_refused_age_s = 1;

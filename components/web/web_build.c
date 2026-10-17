@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "um98x_bands.h"
+#include "um98x_fixcheck.h"
 #include "um98x_profile.h"
 #include "web_enums.h"
 #include "web_parse.h"
@@ -167,6 +168,15 @@ static void receiver_info(wj_t *w, const char *key, const um98x_info_t *r)
         wj_str_or_null(w, "compile_date", r->compile_date);
     }
     wj_obj_close(w);
+}
+
+/* The fixed-position check's distances (the medians that decided), in whole metres. */
+static void fix_distances(wj_t *w, const station_status_t *st)
+{
+    wj_double(w, "horizontal_m", st->fix_horizontal_m, 0);
+    wj_double(w, "vertical_m", st->fix_up_m, 0);
+    wj_double(w, "distance_m", st->fix_distance_m, 0);
+    wj_bool(w, "height_only", st->fix_height_only);
 }
 
 static void station_alerts(wj_t *w, const char *key, uint32_t alerts)
@@ -513,6 +523,8 @@ static void sec_health(wj_t *w, const web_status_snap_t *s, bool pub)
     wj_str(w, "level", web_health_level_name(s->health.level));
     if (!pub) {
         wj_str(w, "last_step", web_health_step_name(s->health.last_step));
+        wj_str(w, "step", web_health_step_name(s->health.gnss_step));
+        wj_str(w, "step_phase", web_health_step_phase_name(s->health.gnss_step_phase));
         wj_bool(w, "ladder_suspended", s->health.gnss_ladder_suspended);
         /* A bool (not the age), so the section only changes when it flips. */
         wj_bool(w, "factory_reset_refused", s->health.factory_reset_refused_age_s < WEB_FACTORY_REFUSED_SHOW_S);
@@ -550,6 +562,8 @@ static void sec_alerts(wj_t *w, const web_status_snap_t *s)
                 } else if (bit == STATION_ALERT_NO_RECEIVER) {
                     wj_bool(w, "saw_bytes", s->st.detect_saw_bytes);
                     wj_u32_or_null(w, "next_detect_in_s", s->st.next_detect_in_s);
+                } else if (bit == STATION_ALERT_FIXED_FAR) {
+                    fix_distances(w, &s->st);
                 }
                 wj_obj_close(w);
             }
@@ -960,6 +974,20 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     wj_obj_open(w, "survey");
     wj_bool(w, "active", st->surveying);
     wj_uint(w, "window_left_s", st->survey_window_left_s);
+    wj_obj_close(w);
+
+    wj_obj_open(w, "fixed_check");
+    wj_str(w, "state", web_fix_state_name(st->fix_state));
+    if (st->fix_state == STATION_FIX_NEAR || st->fix_state == STATION_FIX_FAR) {
+        fix_distances(w, st);
+    } else {
+        wj_null(w, "horizontal_m");
+        wj_null(w, "vertical_m");
+        wj_null(w, "distance_m");
+        wj_bool(w, "height_only", false);
+    }
+    wj_u32_or_null(w, "checked_age_s", st->fix_checked_age_s);
+    wj_uint(w, "limit_m", (uint32_t)UM98X_FIX_LIMIT_M);
     wj_obj_close(w);
 
     wj_obj_open(w, "arp");
@@ -1708,11 +1736,17 @@ void web_build_wifi(wj_t *w, const web_wifi_snap_t *s)
     } else {
         wj_null(w, "tx_power_dbm");
     }
+    if (n->associated && n->ap_steering >= 0) {
+        wj_bool(w, "ap_steering", n->ap_steering > 0);
+    } else {
+        wj_null(w, "ap_steering");
+    }
     wj_bool(w, "time_synced", n->time_synced);
     wj_str(w, "upstream", web_probe_name(n->probe));
     wj_u32_or_null(w, "probe_age_s", n->probe_age_s);
     wj_uint(w, "reconnects", n->reconnects);
     wj_uint(w, "connect_failures", n->connect_failures);
+    wj_uint(w, "roams", n->roams);
     wj_uint(w, "offline_s", n->offline_s);
     wj_uint(w, "retry_in_s", n->retry_in_s);
     if (n->last_disconnect_reason != 0) {
@@ -2002,6 +2036,8 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
     }
     wj_arr_close(w);
     wj_str(w, "last_step", web_health_step_name(hs->last_step));
+    wj_str(w, "step", web_health_step_name(hs->gnss_step));
+    wj_str(w, "step_phase", web_health_step_phase_name(hs->gnss_step_phase));
     wj_bool(w, "ladder_suspended", hs->gnss_ladder_suspended);
     wj_uint(w, "uptime_s", h->uptime_s);
     wj_uint(w, "gnss_stalls", hs->gnss_stalls);

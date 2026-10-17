@@ -343,7 +343,7 @@ TEST_CASE("reply: the base antenna descriptor reads back, or unknown", "[um98x_r
     }
 }
 
-TEST_CASE("reply: only VERSIONA and MODE are allowed without a lease", "[um98x_reply]")
+TEST_CASE("reply: only the read-only queries are allowed without a lease", "[um98x_reply]")
 {
     TEST_ASSERT_TRUE(um98x_stream_query_allowed("VERSIONA"));
     TEST_ASSERT_TRUE(um98x_stream_query_allowed("versiona"));
@@ -360,7 +360,7 @@ TEST_CASE("reply: only VERSIONA and MODE are allowed without a lease", "[um98x_r
 
 TEST_CASE("reply: allow-list per link mode", "[um98x_reply]")
 {
-    /* Streaming, no lease: the two read-only queries only. */
+    /* Streaming, no lease: the read-only queries only. */
     TEST_ASSERT_TRUE(um98x_cmd_allowed(UM98X_LINK_STREAM, false, "VERSIONA"));
     TEST_ASSERT_TRUE(um98x_cmd_allowed(UM98X_LINK_STREAM, false, "MODE"));
     TEST_ASSERT_FALSE(um98x_cmd_allowed(UM98X_LINK_STREAM, false, "CONFIG"));

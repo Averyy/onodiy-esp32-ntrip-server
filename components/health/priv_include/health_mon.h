@@ -408,9 +408,11 @@ typedef struct {
 
 /**
  * The restart hold and the reboot cap as the status shows them: only while
- * the GNSS ladder is in an episode (a stall or NO_RECEIVER, until it
- * resets) and the recovery mode includes the ESP32 restart (`restarts`:
- * full recovery), where a restart may be pending. Outside one, and in the
+ * the GNSS ladder is in an episode that can still end in an ESP32 restart
+ * (`episode`: a stall or NO_RECEIVER, until it resets, and the receiver
+ * does not answer by the ladder's evidence: hl_status_t.restart_possible)
+ * and the recovery mode includes the ESP32 restart (`restarts`: full
+ * recovery), where a restart may be pending. Outside one, and in the
  * modes without the restart (no ESP32 restart, alerts only: their episodes
  * declare stalls but never restart), nothing is pending, whatever holds (an
  * admin page in use on a healthy station is no reason to say a restart is

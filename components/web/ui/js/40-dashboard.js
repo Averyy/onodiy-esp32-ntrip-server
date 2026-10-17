@@ -135,6 +135,18 @@ function positionText(r, delivering) {
 
 const okMark = ok => h('span', { class: ok ? 't-ok' : 't-warn' }, ok ? '✓' : '✕');
 
+/* The Status page's position row as [text, amber words or null]: positionText, and in words when the fixed position is far
+ * from the receiver's own (a bare mark beside "Locked" would read as a failed lock). */
+function positionWords(r, delivering, far) {
+  const t = positionText(r, delivering);
+  return far ? [t + ', ', 'looks wrong'] : [t, null];
+}
+
+function positionView(r, delivering, far) {
+  const w = positionWords(r, delivering, far);
+  return w[1] ? [w[0], h('span', { class: 't-warn' }, w[1])] : w[0];
+}
+
 /* The band row: "4 bands on Galileo ✓ (the most this receiver can reach)"; a dash while the receiver does not deliver.
  * told: the top card says what Onocoy needs. */
 function bandsView(r, q, told) {
@@ -162,7 +174,7 @@ function receiverCard(s, st) {
   return h('section', { class: 'card fit-kv' },
     cardHead('Receiver', link('Details', '#/receiver', 'head-link')),
     kv([live ? ['Bands', bandsView(r, st.quality, st.key === 'quality')] : null, live ? ['GLONASS', glonassView(r, st.quality)] : null,
-      ['Position', positionText(r, live)]]));
+      ['Position', positionView(r, live, (s.alerts || []).some(a => a.id === 'fixed_far'))]]));
 }
 
 /** Today's online share: whole at 0 % and 100 %, else two decimals, rounded down (never "100.00" short of 100). */

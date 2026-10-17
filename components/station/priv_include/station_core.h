@@ -96,11 +96,35 @@
  * steps and automatic re-applies are dropped at entry (the user's own
  * requests stay queued). Exit (the user, or the time is up): the
  * stream-first path as at boot (IDLE, listen 3 s, identity, applied
- * check). The time left survives an ESP32 reset through the caller's RTC
- * record (stn_maint_restore; codec stn_maint_rtc_*): every reset that keeps
- * the ESP32's RTC memory, the power-on class included (on the ESP32-S3 the
- * reset pin reads as power-on while the receiver, which may be mid-work,
- * keeps running), never a power cut that clears it.
+ * check).
+ *
+ * Maintenance across an ESP32 reset (stn_maint_boot, stn_maint_restore):
+ * the caller keeps two records of it. Its RTC record (stn_maint_rtc_*),
+ * written every step, is exact and costs no flash, but only a reset that
+ * keeps the ESP32's RTC memory keeps it: a software reset, a crash or a
+ * watchdog. A reset by the EN pin (on the ESP32-S3 the USB serial chip's
+ * auto-reset and the RST button; it reads as power-on) powers the chip's
+ * RTC domain down and loses it, while the receiver, which may be mid-work,
+ * keeps running. So the caller also stores a copy in settings
+ * (stn_maint_store_*): at entry, at every extension and every
+ * STN_MAINT_SAVE_S, with the time left STN_MAINT_STORE_SHORT_S short of
+ * what it was, so a reset before the next save never resumes more than was
+ * left; erased when maintenance ends. Flash wear: about 240 small writes
+ * for 4 h of maintenance, next to the ledger's one a minute around the
+ * clock. A boot resumes from the RTC record when it
+ * is intact and from the run right before this boot (an "ended" RTC record
+ * makes a stored copy stale), else from the stored copy, never when a
+ * receiver flash journal is open or the previous boot ended in a factory
+ * reset. The time across the reset is taken off: by the RTC timer when it
+ * ran on (a software, crash or task/interrupt watchdog reset), else at
+ * least this boot's run time, and, when the record carried the end by the
+ * trusted clock, by that clock once there is one (stn_maint_clock). So
+ * resumed maintenance never ends later than the time chosen (apart from
+ * the time the ESP32 was held in reset while no clock tells it), and ends
+ * at once when that time ran out meanwhile. A power-on boot whose receiver
+ * restarted too (stn_rxboot_judge: RESTARTED) was a power cut: a
+ * maintenance resumed at that boot and not extended since ends then
+ * (stn_maint_power_cut). Kept, or unknown: it goes on.
  *
  * Power-on reset (stn_rxboot_judge): the ESP32-S3 reports a reset by its
  * EN pin (the USB serial chip's auto-reset that every flash uses, the RST
@@ -145,8 +169,34 @@
  * listen-only, as when the boot's one key was used. The user's receiver
  * restart and the user's apply still run.
  *
+ * A receiver that sent no RTCM frame this boot (no antenna, no output
+ * configured) may answer only when asked. While STREAMING with no line for
+ * STN_ASK_MS, the station asks it (STN_JOB_ASK: the version query without a
+ * lease, one line, nothing paused, nothing configured; at most once every
+ * STN_ASK_MS, after every other job), so its answers stay fresh and one that
+ * hung stops counting as answering (stn_responding). Never in maintenance
+ * (no job at all), never once RTCM flowed this boot.
+ *
+ * Fixed-position check (um98x_fixcheck.h; the caller passes the fixed
+ * profile's position in stn_in_t): is the fixed position where the
+ * receiver is? While STREAMING with a fixed profile and a model we
+ * configure, the receiver's own position is asked without a lease
+ * (STN_JOB_OWN_FIX: BASEPOSA, or SPPNAVA once the receiver refused that,
+ * echoed the set position or gave nothing usable STN_FIX_BASEPOS_TRIES
+ * times; one line, nothing paused, nothing configured), first STN_FIX_FIRST_MS
+ * after the check is armed (the profile became fixed or changed, a
+ * receiver restart, a successful apply), then every STN_FIX_PERIOD_MS
+ * until three usable solutions decide, or STN_FIX_TRIES queries did not;
+ * the next check runs STN_FIX_RECHECK_MS later. A far verdict raises
+ * STN_ALERT_FIXED_FAR (streaming goes on: the user decides), a near one
+ * clears it; both are noted when they change it. A change of the fixed
+ * position, or a survey profile, drops the verdict and the alert at once
+ * (noted when the alert stood). Never in maintenance (no job at all).
+ *
  * Notes (stn_note_t) tell the caller what to journal: maintenance entry
- * and exit, live view opened, extended, closed, output turned on or off.
+ * and exit, live view opened, extended, closed, output turned on or off,
+ * the fixed-position warning raised, cleared, or dropped for a new
+ * position.
  *
  * Timings PROVISIONAL, to be confirmed on hardware.
  */
@@ -158,6 +208,7 @@
 
 #include "station_obs.h"
 #include "um98x_base.h"
+#include "um98x_fixcheck.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -166,6 +217,11 @@ extern "C" {
 #define STN_LISTEN_MS          3000      /**< stream-first listen at boot */
 #define STN_IDENTITY_RETRY_MS  600000    /**< unconfirmed identity: query again */
 #define STN_RTCM_QUIET_MS      3000      /**< no valid RTCM frame this long: nothing flows (the leased identity query) */
+#define STN_FRESH_MS           10000     /**< "the receiver streams": a valid RTCM frame (or line) this recently */
+#define STN_ANSWER_SLACK_MS    1000      /**< a line this soon after the last RTCM frame may be that output's own: no answer after it */
+#define STN_ASK_MS             60000     /**< no RTCM frame this boot and no line this long: the receiver is asked (STN_JOB_ASK) */
+#define STN_ANSWER_FRESH_MS    90000     /**< no RTCM frame this boot: a line this recent is an answer (asked every STN_ASK_MS,
+                                              plus a busy station's delay and the query's timeout) */
 #define STN_RESTART_CHECK_MS   30000     /**< applied check after restart evidence */
 #define STN_LAST_RESORT_MS     10000     /**< after a failed apply: wait this long for RTCM */
 #define STN_DETECT_FAST_MS     30000     /**< pass interval in the first part of an episode */
@@ -179,12 +235,20 @@ extern "C" {
 
 #define STN_MAINT_DEFAULT_S    (30u * 60u)   /**< receiver maintenance: default duration */
 #define STN_MAINT_MAX_S        (4u * 3600u)  /**< longest choice, and the most time left after an extension */
+#define STN_MAINT_SAVE_S       60u           /**< the stored copy's period */
+#define STN_MAINT_STORE_SHORT_S (STN_MAINT_SAVE_S + 10u) /**< its time left is this much short: until the next save (which may come a little late), plus the reset and the boot before this boot's uptime counts */
 #define STN_LIVE_DEFAULT_MS    (10 * 60000)  /**< live view window (the caller passes its own) */
 #define STN_LIVE_MAX_MS        (60 * 60000)  /**< longest window, extensions included */
 #define STN_LIVE_IDLE_MS       120000        /**< closes when no admin client asked for it this long */
 #define STN_SKY_RETRY_MS       60000         /**< a failed "output off" is tried again after this */
 #define STN_SKY_OFF_TRIES      3             /**< then it is left on until the receiver restarts */
 #define STN_NOTES              8             /**< notes kept for the caller between two steps */
+#define STN_FIX_FIRST_MS       60000         /**< fixed-position check: first query after it was armed (a fix after a restart: under 30 s) */
+#define STN_FIX_PERIOD_MS      20000         /**< ... between the queries of one check */
+#define STN_FIX_TRIES          15            /**< ... queries without a decision before the check gives up */
+#define STN_FIX_BASEPOS_TRIES  3             /**< ... base-position answers without a usable solution, then the single-point log */
+#define STN_FIX_RECHECK_MS     3600000       /**< ... the next check after one ended */
+#define STN_FIX_BUSY_MS        5000          /**< ... nothing was sent (the command layer was busy) or the other log is asked: again after this */
 
 /** Same values as station_state_t. */
 typedef enum {
@@ -207,6 +271,7 @@ typedef enum {
 #define STN_ALERT_RECEIVER_IN_LOADER (1u << 5)
 #define STN_ALERT_NO_RECEIVER        (1u << 6)   /**< derived (stn_alerts): never stored in `alerts` */
 #define STN_ALERT_SIGNALS_MISMATCH   (1u << 7)   /**< the receiver's signal report differs from the profile's group (stn_note_signals) */
+#define STN_ALERT_FIXED_FAR          (1u << 8)   /**< the fixed position is far from the receiver's own solution (the check above) */
 
 /** Same values as station_recovery_t (mildest first). */
 typedef enum {
@@ -234,6 +299,8 @@ typedef enum {
     STN_JOB_FLASH,           /**< RAW lease: a receiver update session, a user action on a waiting one, or boot-time recovery (flash_kind) */
     STN_JOB_BENCH,           /**< RAW lease: one bench console operation (bench builds) */
     STN_JOB_PKG_CHECK,       /**< no lease: check the staged package against every rule, send nothing */
+    STN_JOB_OWN_FIX,         /**< no lease: the receiver's own position, one line (BASEPOSA, or SPPNAVA with sppnav) */
+    STN_JOB_ASK,             /**< no lease: the version query to a receiver that never streamed, only to see that it answers */
 } stn_job_kind_t;
 
 /** What a STN_JOB_FLASH does. */
@@ -297,6 +364,7 @@ typedef struct {
     uint8_t mode_why;        /**< MODE: stn_mode_why_t */
     bool sky_on;             /**< SKY: turn the output on (else off) */
     uint8_t flash_kind;      /**< FLASH: stn_flash_kind_t */
+    bool sppnav;             /**< OWN_FIX: ask the single-point log (the base-position log was refused or gave nothing usable) */
 } stn_job_t;
 
 /** Job outcome codes (the caller maps its errors). */
@@ -345,6 +413,10 @@ typedef struct {
     uint8_t flash_end;       /**< stn_flash_end_t */
     bool loader_key_sent;    /**< the identification sent the loader's restart key (the boot's one) */
     bool in_loader;          /**< ... and the application did not come back */
+    /* OWN_FIX: err STN_OK (a log that parsed: own), STN_E_FAIL (the receiver
+     * refused the query), STN_E_TIMEOUT (no log, or one not read),
+     * STN_E_STATE (nothing sent) */
+    um98x_own_fix_t own;
 } stn_result_t;
 
 /** Inputs sampled by the caller for each stn_next() / stn_done(). */
@@ -359,6 +431,8 @@ typedef struct {
     bool rtcm1230_ok;        /**< gnss/rtcm1230_ok */
     bool profile_sky;        /**< the profile sends satellite-in-view output permanently */
     const stn_obs_t *obs;    /**< snapshot of the observed-set tracker (may be NULL) */
+    bool fixed_valid;        /**< the profile is fixed: fixed_llh is its position (the fixed-position check runs) */
+    double fixed_llh[3];     /**< latitude, longitude (degrees), ellipsoidal height (m) */
 } stn_in_t;
 
 /** Why maintenance (or its end) was refused. */
@@ -371,6 +445,13 @@ typedef enum {
     /* 5 is the caller's own "not running" */
     STN_MAINT_SKY_OUTPUT = 6, /**< the live view's satellite-in-view output may be on: turned off first, offer again */
 } stn_maint_why_t;
+
+/** Why maintenance ended (STN_NOTE_MAINT_OFF's b). */
+typedef enum {
+    STN_MAINT_END_USER = 0,  /**< the user's "end now" */
+    STN_MAINT_END_TIME,      /**< its time was up (also when it ran out while the ESP32 was off, by the clock) */
+    STN_MAINT_END_POWER,     /**< resumed after a power-on reset that also restarted the receiver: a power cut */
+} stn_maint_end_t;
 
 /** Why a live view window closed. */
 typedef enum {
@@ -419,7 +500,7 @@ typedef struct {
 /** What the caller journals (and logs). */
 typedef enum {
     STN_NOTE_MAINT_ON = 1,   /**< a = chosen duration (s) */
-    STN_NOTE_MAINT_OFF,      /**< a = time spent (s), b = 1 the time was up, 0 the user ended it */
+    STN_NOTE_MAINT_OFF,      /**< a = time spent (s), b = stn_maint_end_t */
     STN_NOTE_LIVE_OPENED,    /**< a = window length (s) */
     STN_NOTE_LIVE_EXTENDED,  /**< a = time left (s) */
     STN_NOTE_LIVE_CLOSED,    /**< a = time open (s), b = stn_live_end_t */
@@ -430,6 +511,10 @@ typedef enum {
     STN_NOTE_APPLY_FAILED,   /**< an apply that sent something failed (CONFIG_FAILED raised): a = the station's own retry
                                   in s, 0 = none (automatic configuration off: only the user's apply), b = 1 the
                                   receiver was lost (detection follows) */
+    STN_NOTE_FIXED_FAR,      /**< STN_ALERT_FIXED_FAR raised: a = horizontal distance (m), b = fixed height minus the
+                                  receiver's (m), both rounded (the medians that decided) */
+    STN_NOTE_FIXED_NEAR,     /**< it cleared: within the limits again (a, b as FIXED_FAR) */
+    STN_NOTE_FIXED_CHANGED,  /**< it cleared: the fixed position changed (or the profile surveys now); checked again */
 } stn_note_kind_t;
 
 typedef struct {
@@ -456,6 +541,9 @@ typedef struct {
     bool identify_leased;      /**< the next query takes a COMMAND lease */
     uint64_t rtcm_seen;        /**< in->rtcm_frames as last seen */
     int64_t rtcm_change_ms;    /**< when it last changed (STN_NEVER = never) */
+    uint64_t lines_seen;       /**< in->text_lines as last seen */
+    int64_t line_change_ms;    /**< when it last changed (STN_NEVER = never) */
+    int64_t ask_ms;            /**< the last STN_JOB_ASK (STN_NEVER = none) */
     int64_t identify_ms;       /**< next query (STN_NEVER = none) */
     bool identify_restart;
 
@@ -499,6 +587,8 @@ typedef struct {
     uint32_t detect_failures;
     uint32_t detect_passes;    /**< detection passes completed since boot, found or not (health re-checks a blocked reboot on a newer pass) */
     bool detect_saw_bytes;
+    int64_t no_rx_ms;          /**< the station last found no receiver: a pass that found none, or the receiver left at its
+                                    loader (STN_NEVER = not this boot); a line from before it is no answer now */
     bool loader_key_sent;      /**< the loader's restart key went out this boot */
     bool first_apply_held;     /**< gnss/hold: the first receiver configuration waits for the user (no loader key) */
     bool listen_only;
@@ -529,6 +619,8 @@ typedef struct {
     int64_t maint_until_ms;
     uint32_t maint_chosen_s;   /**< chosen duration (extensions added; for the status) */
     bool maint_restart_seen;   /**< restart evidence while it was on (noted, nothing done) */
+    bool maint_resumed;        /**< resumed after an ESP32 reset and not extended since (stn_maint_power_cut) */
+    int64_t maint_end_unix;    /**< resumed: its end by the trusted clock (UTC s), checked once there is a clock; 0 = none */
 
     /* live view */
     uint32_t live_idle_ms;     /**< closes after this long without stn_live_touch (STN_LIVE_IDLE_MS) */
@@ -556,6 +648,18 @@ typedef struct {
     uint8_t flash_close;       /**< 0 none, 1 after the re-apply's window, 2 after RTCM within STN_FLASH_RTCM_MS */
     int64_t flash_close_ms;    /**< the journal closes by then whatever happens */
     int64_t flash_rtcm_ms;     /**< close kind 2: RTCM is required by then */
+
+    /* fixed-position check */
+    bool fix_on;               /**< a fixed profile is checked (armed) */
+    double fix_ref[3];         /**< the fixed position the check and its verdict are about */
+    int64_t fix_due_ms;        /**< next query (STN_NEVER = none) */
+    bool fix_running;          /**< a check runs */
+    uint8_t fix_tries;         /**< queries of the running check */
+    bool fix_sppnav;           /**< the base-position log was refused or gave nothing usable: the single-point log is asked */
+    bool fix_usable_seen;      /**< the running check got a usable solution */
+    uint8_t fix_end;           /**< how the last check ended without a decision (stn_fix_end_t) */
+    int64_t fix_sample_ms;     /**< the latest usable solution (STN_NEVER = none) */
+    um98x_fixchk_t fix;        /**< the verdict and the running check's samples */
 
     /* the job handed out by stn_next() */
     stn_job_t job;
@@ -713,25 +817,120 @@ int stn_maint_enter(stn_t *s, uint32_t dur_s, bool lease_held, int64_t now_ms);
 /** The user's "end now". @return STN_MAINT_OK or STN_MAINT_NOT_ON. */
 int stn_maint_end(stn_t *s, const stn_in_t *in);
 
-/** Back in maintenance after an ESP32 reset (the caller's RTC record): left_s remain, spent_s were spent before the reset. */
-void stn_maint_restore(stn_t *s, uint32_t left_s, uint32_t spent_s, int64_t now_ms);
-
 uint32_t stn_maint_left_s(const stn_t *s, int64_t now_ms);
 
-/** The caller's RTC record of the maintenance state (magic, image stamp, time left, CRC). */
+/** What a maintenance record says (the caller's RTC record, or its stored copy). */
+typedef struct {
+    bool on;                 /**< false: maintenance ended (RTC record only: a stored copy left behind is stale) */
+    uint32_t stamp;          /**< lifecycle's image-generation stamp of the run that wrote it */
+    uint32_t left_ms;        /**< time left when written (the stored copy: at most, STN_MAINT_STORE_SHORT_S short) */
+    uint32_t chosen_s;       /**< chosen duration, extensions added */
+    uint64_t rtc_us;         /**< the RTC timer when written (RTC record only) */
+    int64_t end_unix;        /**< its end by the trusted clock (UTC s); 0 = no clock when written */
+} stn_maint_rec_t;
+
+/**
+ * The record of the state now (the caller adds stamp and rtc_us). `utc_now`:
+ * the trusted clock (UTC s), 0 = none. `store`: for the stored copy, whose
+ * time left is STN_MAINT_STORE_SHORT_S short (never below 0), so a reset
+ * before the next save never resumes more than was left.
+ */
+void stn_maint_record(const stn_t *s, int64_t now_ms, int64_t utc_now, bool store, stn_maint_rec_t *rec);
+
+/**
+ * When the caller stores the copy again: maintenance on and nothing stored
+ * yet (`saved_ms` STN_NEVER), the chosen duration changed (an extension),
+ * or STN_MAINT_SAVE_S passed since the last save.
+ */
+bool stn_maint_store_due(const stn_t *s, uint32_t saved_chosen_s, int64_t saved_ms, int64_t now_ms);
+
+/** The caller's RTC record of the maintenance state (magic, the record's fields, CRC). */
 typedef struct {
     uint32_t magic;
-    uint32_t stamp;          /**< the image generation stamp that wrote it */
-    uint32_t left_s;
-    uint32_t spent_s;        /**< time spent in maintenance before the record was written */
+    uint32_t stamp;
+    uint32_t on;
+    uint32_t left_ms;
+    uint32_t chosen_s;
+    uint32_t rtc_lo;
+    uint32_t rtc_hi;
+    uint32_t end_lo;
+    uint32_t end_hi;
     uint32_t crc;
 } stn_maint_rtc_t;
 
-/** Write the record (left_s 0 clears it). */
-void stn_maint_rtc_write(stn_maint_rtc_t *r, uint32_t stamp, uint32_t left_s, uint32_t spent_s);
+/** Write the RTC record. */
+void stn_maint_rtc_write(stn_maint_rtc_t *r, const stn_maint_rec_t *rec);
 
-/** Read the record: false for a cleared, damaged or foreign one, or one with nothing left. */
-bool stn_maint_rtc_read(const stn_maint_rtc_t *r, uint32_t *stamp, uint32_t *left_s, uint32_t *spent_s);
+/** Read the RTC record: false for a damaged or foreign one (random memory after a power cut). */
+bool stn_maint_rtc_read(const stn_maint_rtc_t *r, stn_maint_rec_t *rec);
+
+#define STN_MAINT_STORE_VERSION 1u
+#define STN_MAINT_STORE_MAX     32u   /**< buffer for the stored copy */
+
+/**
+ * The stored copy (settings_codec: u8 version, u32 stamp, u32 left_ms, u32
+ * chosen_s, i64 end_unix; newer writers may append). Only "on" is stored:
+ * the copy is erased when maintenance ends. @return length, 0 if cap is short.
+ */
+size_t stn_maint_store_encode(const stn_maint_rec_t *rec, uint8_t *buf, size_t cap);
+
+/** Read the stored copy: false for an unreadable one. */
+bool stn_maint_store_decode(stn_maint_rec_t *rec, const uint8_t *buf, size_t len);
+
+/** Where a boot's maintenance resumes from. */
+typedef enum {
+    STN_MAINT_FROM_NONE = 0,  /**< it does not */
+    STN_MAINT_FROM_RTC,       /**< the RTC record */
+    STN_MAINT_FROM_STORE,     /**< the stored copy (the RTC memory was lost: the EN pin, or the power was cut) */
+} stn_maint_from_t;
+
+/** What a boot knows (stn_maint_boot). */
+typedef struct {
+    bool blocked;            /**< nothing resumes: a receiver flash journal is open, or the previous boot ended in a factory reset */
+    bool rtc_ok;             /**< the RTC record is intact and from the run right before this boot */
+    stn_maint_rec_t rtc;
+    bool rtc_timer_kept;     /**< the RTC timer ran on through the reset (software, crash, task or interrupt watchdog) */
+    uint64_t rtc_now_us;     /**< the RTC timer now */
+    bool store_ok;           /**< the stored copy is intact and from the run right before this boot */
+    stn_maint_rec_t store;
+    int64_t uptime_ms;       /**< this boot's run time so far: the least the reset took */
+} stn_maint_boot_in_t;
+
+/** A boot's decision (stn_maint_boot). */
+typedef struct {
+    uint8_t from;            /**< stn_maint_from_t */
+    bool expired;            /**< it was on, but its time ran out across the reset */
+    bool elapsed_known;      /**< the time across the reset is known (the RTC timer) */
+    uint32_t left_ms;        /**< from != NONE: time left now */
+    uint32_t chosen_s;       /**< from != NONE or expired: the chosen duration, extensions added */
+    int64_t end_unix;        /**< from != NONE: to check by the trusted clock (0 = no need, or none known) */
+} stn_maint_boot_t;
+
+/**
+ * Does maintenance resume at this boot, and with how much time left (see
+ * "Maintenance across an ESP32 reset")? Never more than the record had left
+ * less the time across the reset; nothing left resumes nothing.
+ */
+void stn_maint_boot(const stn_maint_boot_in_t *in, stn_maint_boot_t *out);
+
+/** Back in maintenance after an ESP32 reset (stn_maint_boot's decision; nothing when from is NONE). */
+void stn_maint_restore(stn_t *s, const stn_maint_boot_t *b, int64_t now_ms);
+
+/**
+ * The trusted clock (UTC s, 0 = none yet) against a resumed maintenance's
+ * end by the clock (maint_end_unix): it never ends later than that, and when
+ * that end has passed it ends at the next step (its time was up). Applied
+ * once, at the first trusted clock.
+ */
+void stn_maint_clock(stn_t *s, int64_t utc_now, int64_t now_ms);
+
+/**
+ * A power-on boot's verdict: the receiver restarted with the ESP32 (the power
+ * was cut). A maintenance resumed at this boot and not extended since ends
+ * (STN_MAINT_END_POWER; the stream-first path, as at boot).
+ * @return true if it ended.
+ */
+bool stn_maint_power_cut(stn_t *s, const stn_in_t *in);
 
 /**
  * The caller's RTC record of "the satellite-in-view output may be on because
@@ -817,11 +1016,59 @@ uint32_t stn_alerts(const stn_t *s);
  */
 void stn_note_signals(stn_t *s, int verdict);
 
+/** How a fixed-position check ended without a decision. */
+typedef enum {
+    STN_FIX_END_NONE = 0,    /**< none ended yet, or the last one decided */
+    STN_FIX_END_NO_SOLUTION, /**< no usable solution (no sky, or none reported in this mode) */
+    STN_FIX_END_UNDECIDED,   /**< usable solutions that did not agree */
+    STN_FIX_END_REFUSED,     /**< the receiver refused both logs */
+} stn_fix_end_t;
+
+/** The fixed-position check for the status. */
+typedef enum {
+    STN_FIX_OFF = 0,         /**< no check: the profile surveys, or not a model we configure */
+    STN_FIX_CHECKING,        /**< no verdict yet (a check runs or is due; also after an undecided one) */
+    STN_FIX_NEAR,            /**< within the limits */
+    STN_FIX_FAR,             /**< beyond them: STN_ALERT_FIXED_FAR */
+    STN_FIX_NO_SOLUTION,     /**< no verdict: the last check got no usable solution */
+    STN_FIX_REFUSED,         /**< no verdict: the receiver refused both logs */
+} stn_fix_state_t;
+
+typedef struct {
+    uint8_t state;           /**< stn_fix_state_t */
+    um98x_fix_offset_t offset; /**< NEAR, FAR: the medians that decided */
+    bool height_only;        /**< FAR by the height alone (um98x_fix_height_only) */
+    uint32_t checked_age_s;  /**< since the latest usable solution, UINT32_MAX = none */
+} stn_fix_status_t;
+
+void stn_fix_status(const stn_t *s, int64_t now_ms, stn_fix_status_t *out);
+
 /**
  * NO_RECEIVER or DETECTING: seconds until the next detection pass (0 = due
  * now or running). UINT32_MAX in every other state.
  */
 uint32_t stn_next_detect_in_s(const stn_t *s, int64_t now_ms);
+
+/**
+ * Whether the receiver answers (station_status_t.receiver_responding): it
+ * streams (a CRC-valid RTCM frame within STN_FRESH_MS), or it sent a
+ * checksum-valid text line (a reply, a log or an NMEA sentence) after its
+ * last RTCM frame, more than STN_ANSWER_SLACK_MS after it; with no RTCM
+ * frame this boot, a line within STN_ANSWER_FRESH_MS. Never in NO_RECEIVER,
+ * and a line from before the station last found no receiver (no_rx_ms)
+ * does not count.
+ *
+ * So a receiver that answers when asked and sends nothing unasked (no
+ * antenna, no output configured) keeps answering: the station asks it every
+ * STN_ASK_MS (STN_JOB_ASK); one that hung after answering at boot stops
+ * answering once its last answer is that old. One whose RTCM stopped
+ * answers again once it sends a line (a question's answer, its NMEA). The
+ * same evidence, by the same rule, as the health ladder's "answered after
+ * its last RTCM frame".
+ * @param rtcm_age_ms since the last CRC-valid RTCM frame, UINT32_MAX = none this boot
+ * @param line_ms     when the last checksum-valid line arrived (now_ms's clock), STN_NEVER = none this boot
+ */
+bool stn_responding(const stn_t *s, int64_t now_ms, uint32_t rtcm_age_ms, int64_t line_ms);
 
 /** CONFIG_FAILED backoff: delay after the n-th failure in a row (n >= 1), ms. */
 int64_t stn_apply_backoff_ms(uint32_t failures);

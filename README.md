@@ -378,6 +378,10 @@ station name. Settings shows both as links.
   back online. While the Onocoy stream is down for a network reason on the station's
   side, it reconnects, renews its address and restarts Wi-Fi by itself, and reboots
   for it at most once every 6 hours (never during a receiver firmware update).
+- **Mesh Wi-Fi** (several access points under one name): the station moves to another
+  node when the mesh asks it to, and by itself (at most once every 30 minutes) when its
+  signal is weak and another node is clearly stronger; never during a firmware update.
+  Each move briefly drops the caster connections and shows in Diagnostics > History.
 - **Factory reset:** hold **BOOT** for 20 s. Wi-Fi, admin password, casters and
   receiver profile are erased; the station restarts in setup mode. Refused while a
   receiver firmware update is running.

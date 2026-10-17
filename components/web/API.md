@@ -463,7 +463,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
      "onocoy_ready": true, "bytes_sent": 74000000, "lag_ms_now": 40, "next_retry_s": 0, "unreached_s": 0, "hint": "",
      "stop_reason": "none"}
   ],
-  "health": {"level": "degraded", "last_step": "none", "ladder_suspended": false,
+  "health": {"level": "degraded", "last_step": "none", "step": "none", "step_phase": "none", "ladder_suspended": false,
              "factory_reset_refused": false, "recovery_mode": "full", "reboot_recheck": false,
              "reboot_hold": [], "reboot_hold_left_s": null, "reboot_cap_wait_s": null, "reboot_cap_limit": null},
   "alerts": [{"id": "link_loss", "source": "health"}],
@@ -495,21 +495,23 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.rtcm_age_ms` | since the last CRC-valid RTCM frame (`gnss_link`), `null` = never |
 | `receiver.glonass` | the receiver's stream carried GLONASS signals in the last 10 s (the signal summary of `GET /api/gnss/signals`; `false` before the first summary); admin form only |
 | `receiver.rtcm1230_supported` | as in `GET /api/gnss/signals`: the receiver accepted message 1230 (GLONASS biases) at the last configuration, `false` refused, `null` never configured. With `glonass` and `best_bands` it says whether the stream meets Onocoy's quality minimums (4 bands on one constellation, GLONASS with 1230) without polling the larger signals object; admin form only |
+| `receiver.responding` | the receiver answers: it streams (a CRC-valid RTCM frame within the last 10 s), or it sent a checksum-valid line (a reply to a command, a log, an NMEA sentence) after its last RTCM frame, more than 1 s after it (with none this boot: a line within the last 90 s); `false` while the station finds no receiver (`no_receiver`), and a line from before a detection pass that found nothing does not count. A receiver that sent no RTCM this boot and no line for 60 s is asked (a version query without a lease, nothing paused, nothing configured; never in receiver maintenance), so one that answers when asked and sends nothing unasked (no antenna, no output configured) stays `true`, and one that hung after answering at boot turns `false` 90 s after its last answer. One whose RTCM stopped is `false` until it sends a line again (the recovery's rescan asks it). Read at the time of the request, by the same rule as `responding` in `GET /api/gnss`, so the two agree; the same evidence as health's "answered after its last RTCM frame" (`no_rtcm`). Admin form only |
 | `receiver.restarting` | the receiver said it is restarting (it answered a command with `The Board is resetting,do not response any command!`) within the last 20 s and its restart banner has not come yet: it answers, it is not silent; admin form only (also in `GET /api/gnss`) |
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
 | `receiver.first_apply_held` | the receiver's first configuration waits for the user (`gnss/hold`, section 8): only queries reach the receiver until the user applies; admin form only |
 | `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
 | `receiver.signal_test` | the signal-group comparison (section 8) in short: `null` when none runs and none ended in the last 24 h of this boot; else `{"state", "phase", "group", "left_s", "decide_left_s", "outcome"}`: `state` as in `GET /api/gnss/signal-test`, `phase` 0 or 1 while switching, settling or measuring (else `null`), `group` the group being switched to, measured or (deciding) running, or the one restored to (`{"master", "slave"}`, else `null`), `left_s` the time left in the phase rounded up to 10 s, `decide_left_s` the time left to choose rounded up to a minute (`null` outside those states; rounded so the section changes rarely), `outcome` once decided (`null` while running). Admin form only |
 | `casters[]` | every slot; the full status is in `/api/casters`. `empty`: the slot has no host and is not enabled (never set up, or removed); its `name` is then `""` whatever the stored name is. In safe mode (configs not loaded) no slot is empty and every `name` is `null`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with the console's mountpoint, username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none); `stop_reason` why the Onocoy login guard stopped the slot (`ntrip_stop_t`; `none` unless `state` is `stopped`, section 10) |
-| `alerts[]` | health's alerts (`source: "health"`, `health_alert_t`) and the station's (`source: "station"`, `station_alert_t`). A `failed` health level always comes with the alert that says why (below); `config_failed` carries `retry_in_s` and `auto_retry` (as `config_retry_in_s` and `config_auto_retry` in `GET /api/gnss`); `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`) |
+| `alerts[]` | health's alerts (`source: "health"`, `health_alert_t`) and the station's (`source: "station"`, `station_alert_t`). A `failed` health level always comes with the alert that says why (below); `config_failed` carries `retry_in_s` and `auto_retry` (as `config_retry_in_s` and `config_auto_retry` in `GET /api/gnss`); `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`); `fixed_far` (the fixed base position is more than 50 m from the receiver's own solution, horizontally or in height: section 8, `fixed_check`) carries `horizontal_m`, `vertical_m`, `distance_m` and `height_only` as `fixed_check` does, in whole metres |
 | `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without an enabled protected slot that is set up (`onocoy_ready`), or without a trusted clock. Information only, never a gate |
-| health alerts that say why there is no RTCM | set from the GNSS ladder's evidence while it is in its last step (`failed`), or while a stall is only reported (`alerts_only`, `degraded`): `receiver_power` (bytes but no answer after the receiver reset: power-cycle the station), `receiver_silent` (nothing usable from the receiver and no answer to commands: power-cycle the station), `no_satellites` (the receiver answers, and its own position sentence says no fix with no satellites used: check that the antenna is on the socket marked M and sees the sky), `no_rtcm` (the receiver answers, by text lines or replies to the station, but sends no RTCM: most often the antenna), `rx_held` (the first configuration is held, `first_apply_held`, and the receiver answers: no RTCM is expected yet; level `degraded`, never `failed`, and the ladder declares no stall for it). None of them while the station finds no receiver: its own `no_receiver` alert says that. With `no_satellites` or `no_rtcm` the ladder does not reset the receiver again on its 10-min retry pass (a silent receiver gets the link restart and the rescan only) |
+| health alerts that say why there is no RTCM | set from the GNSS ladder's evidence while it is in its last step (`failed`), or while a stall is only reported (`alerts_only`, `degraded`; also the grace of a step the station ran before the user chose `alerts_only`); `no_satellites` and `no_rtcm` also while the recovery runs (`recovering`: a step in progress, or between two of its steps while a session of the station's own held it up), as soon as the receiver answered after its last RTCM frame (with none this boot: within the last 90 s, as `receiver.responding` reads it), so the antenna hint comes with the recovery: `receiver_power` (bytes but no answer after the receiver reset: power-cycle the station), `receiver_silent` (nothing usable from the receiver and no answer to commands: power-cycle the station), `no_satellites` (the receiver answers, and its own position sentence says no fix with no satellites used: check that the antenna is on the socket marked M and sees the sky), `no_rtcm` (the receiver answers, by text lines or replies to the station, but sends no RTCM: most often the antenna; with no RTCM this boot only while its last answer is at most 90 s old: older, it is `receiver_silent` in the last step and in `alerts_only`, and no reason while a step runs), `rx_held` (the first configuration is held, `first_apply_held`, and the receiver answers: no RTCM is expected yet; level `degraded`, never `failed`, and the ladder declares no stall for it). None of them while the station finds no receiver: its own `no_receiver` alert says that. With `no_satellites` or `no_rtcm` the ladder does not reset the receiver again on its 10-min retry pass (a silent receiver gets the link restart and the rescan only) |
+| `health.step`, `health.step_phase` | what the GNSS recovery does now (`health_step_t`, `health_step_phase_t`): `step` is the step that is due or that the station runs (`step_phase` `running`), or the one it ran and whose grace runs, the station waiting for RTCM (`waiting`); `reboot` while the station restarts itself for the receiver. `none` (both) outside a step, in the ladder's last step (`failed`), and in `alerts_only`, where nothing is fixed (a step the station ran before the user chose it is only watched: `none`, level `degraded`). `last_step` keeps the last step started; admin form only |
 | `health.factory_reset_refused` | a BOOT-button factory reset was refused within the last 10 min because a receiver update was running (the UI shows a notice); admin form only |
 | `health.recovery_mode` | automatic receiver recovery in effect (`gnss/recovery`, `health_recovery_mode_t`): `full`, `no_reboot` (everything but the ESP32 reboot), `alerts_only` (nothing is sent to the receiver: a stall is only reported and journalled, level `degraded`, `failed` once the ladder gives up); admin form only |
 | `health.reboot_recheck` | no receiver found and an ESP32 reboot was blocked or held: it is looked at again after the next detection pass, when the reboot cap allows and nothing holds it; admin form only |
-| `health.reboot_hold` | why the GNSS ladder's ESP32 restart is postponed right now (`[]` = nothing): `setup` (first setup not finished and no caster enabled; no time limit), `ap_client` (someone is connected to the station's access point), `admin` (an admin session made a request or sent a WebSocket ping in the last 5 min), `power_on` (the first 60 min of station time since power-on while nothing valid was heard from the receiver in this boot). Reported only during a ladder episode (a stall or no receiver, until the ladder resets) in full recovery (`recovery_mode` `full`), where a restart may be pending: `[]` otherwise, whatever holds (`no_reboot` and `alerts_only` never restart the ESP32 for the receiver). A held restart is never queued: it is journalled once (section 14) and looked at again later, like one the cap blocks; admin form only |
+| `health.reboot_hold` | why the GNSS ladder's ESP32 restart is postponed right now (`[]` = nothing): `setup` (first setup not finished and no caster enabled; no time limit), `ap_client` (someone is connected to the station's access point), `admin` (an admin session made a request or sent a WebSocket ping in the last 5 min), `power_on` (the first 60 min of station time since power-on while nothing valid was heard from the receiver in this boot). Reported only during a ladder episode (a stall or no receiver, until the ladder resets) in full recovery (`recovery_mode` `full`), where a restart may be pending: `[]` otherwise, whatever holds (`no_reboot` and `alerts_only` never restart the ESP32 for the receiver). Not while the receiver answers either (the `no_rtcm` or `no_satellites` alert): the ladder restarts the ESP32 only for a receiver that sent nothing at all in the failed step's window (after the receiver reset: no answer to it), so nothing is pending until the evidence says it stopped answering (a rescan that finds nothing, a reset with no answer, or, with no RTCM this boot, no answer for 90 s). A held restart is never queued: it is journalled once (section 14) and looked at again later, like one the cap blocks; admin form only |
 | `health.reboot_hold_left_s` | seconds until every reason in `reboot_hold` has ended at the latest (`ap_client` and `admin`: the 30 min limit on both together per ladder episode; `power_on`: the end of its 60 min), so a restart still needed then runs, unless the reboot cap still holds then: the restart waits for the later of `reboot_hold_left_s` and `reboot_cap_wait_s`; `null` when nothing holds or `setup` holds (no time limit; the cap may still apply after it) |
-| `health.reboot_cap_wait_s` | seconds until the reboot cap (60 min apart, at most 3 in 24 h) allows a ladder restart; `null` when it allows one now, outside a ladder episode, and when `recovery_mode` is not `full` |
+| `health.reboot_cap_wait_s` | seconds until the reboot cap (60 min apart, at most 3 in 24 h) allows a ladder restart; `null` when it allows one now, outside a ladder episode, while the receiver answers (as `reboot_hold`), and when `recovery_mode` is not `full` |
 | `health.reboot_cap_limit` | which limit of the cap sets `reboot_cap_wait_s`: `hour` (the last ladder restart was less than 60 min ago) or `day` (3 in the last 24 h); the later one when both hold; `null` when `reboot_cap_wait_s` is `null` |
 | `update` | the banner (section 12); admin form only |
 
@@ -705,6 +707,8 @@ oldest.
   "position": {"locked": true, "source": "survey", "lat_deg": 45.123456789, "lon_deg": -75.123456789,
                "height_m": 85.1234, "sigma_m": 0.0, "locked_unix": 1759000000},
   "survey": {"active": false, "window_left_s": 0},
+  "fixed_check": {"state": "ok", "horizontal_m": 2, "vertical_m": -3, "distance_m": 4, "height_only": false,
+                  "checked_age_s": 1200, "limit_m": 50},
   "arp": {"valid": true, "station_id": 1234, "ecef_m": [918129.1234, -4346071.2345, 4561977.3456],
           "lat_deg": 45.123456789, "lon_deg": -75.123456789, "height_m": 85.1251,
           "age_ms": 800, "offset_m": 0.0021}
@@ -713,7 +717,8 @@ oldest.
 
 | Field | Notes |
 |---|---|
-| `alerts` | station alerts only (`station_alert_t`): `unsupported_model`, `config_failed`, `position_mismatch`, `antenna_moved`, `receiver_attention`, `receiver_in_loader`, `no_receiver`, `signals_mismatch` (the signals the receiver reported for its group at the last configuration are not what the profile's group should give: `rx_bands.matches` false; cleared by a report that matches or by one that is not read) |
+| `alerts` | station alerts only (`station_alert_t`): `unsupported_model`, `config_failed`, `position_mismatch`, `antenna_moved`, `receiver_attention`, `receiver_in_loader`, `no_receiver`, `signals_mismatch` (the signals the receiver reported for its group at the last configuration are not what the profile's group should give: `rx_bands.matches` false; cleared by a report that matches or by one that is not read), `fixed_far` (`fixed_check.state` `far`) |
+| `responding` | the receiver answers, as `receiver.responding` in `GET /api/status` (one rule, read at the time of the request): it streams, or it sent a checksum-valid line after its last RTCM frame (with none this boot: a line within the last 90 s; the station asks such a receiver once a minute while nothing comes); never while no receiver is found |
 | `restarting` | the receiver answered a command with its restarting notice (`The Board is resetting,do not response any command!`, no leading `$`) within the last 20 s and its restart banner has not come yet: it answers, it is not silent. An unasked restart (no signal-group change or RESET of the station's own) counts as restart evidence once, like the banner that ends it |
 | `config_failed`, `config_retry_in_s`, `config_auto_retry` | the last profile apply failed (`config_failed` alert). `config_auto_retry`: the station retries it on its own on its backoff (10 min, 30 min, 2 h, then every 6 h), which it does only with `autocfg` on and for a model it configures; `config_retry_in_s` is the time to that retry (0 when none is due, and always 0 when `config_auto_retry` is false). With `autocfg` off (the first-apply hold included) nothing is retried until the user applies again |
 | `rtcm_differs` | the latest observation window saw RTCM flowing that differs from the profile: a message it checks was missing or came at another rate while others arrived. Never set without any RTCM (no antenna, a silent receiver: `no_rtcm`, `receiver_silent` or `no_satellites` say why); cleared by a window that passes, a window without RTCM and whenever the station starts watching again (a receiver restart, detection, a successful apply). Health raises `profile_drift` after 90 s of it |
@@ -723,7 +728,7 @@ oldest.
 | `link.open`, `open_failures` | the UART driver is installed; failed installs since boot. `open: false` with a mode other than `off` = the UI's "Receiver port closed": `gnss_link` reopens it on its own |
 | `link.hands_off` | the link refuses every write and lease (receiver maintenance) |
 | `recovery` | `gnss/recovery` as stored, `health_recovery_mode_t` (a stored value out of range reads as `full`, as health reads it) |
-| `first_apply_held` | `gnss/hold` is stored: the receiver's first configuration is held until the user applies. A build with `CONFIG_STATION_HOLD_FIRST_APPLY` (bench builds, the `sdkconfig.hold` overlay) writes it once at boot on a device whose profile was never applied and whose `gnss/autocfg` was never set, together with `gnss/autocfg` = 0 and `gnss/recovery` = 2 (`alerts_only`, if unset), before anything reaches the receiver; it stays in NVS whatever build runs later. While it is stored the station sends the receiver only queries (version, configuration dump, base mode) and a loader prompt met during detection gets no restart key (`receiver_in_loader`, listen-only; the user's receiver restart still works). The first successful apply erases it, and so does `PUT /api/gnss/profile` with `autocfg: true`; a factory reset erases it with the other user settings. When the hold is due but cannot be stored (settings unusable this boot, or the write failed), the station holds the first configuration for this boot only, as the batch would have stored it: `first_apply_held` true, `autocfg` false, nothing stored. A successful apply ends the hold (automatic configuration stays off for the boot); `autocfg: true` ends both. `GET /api/gnss/apply/preview` lists what the apply would send |
+| `first_apply_held` | `gnss/hold` is stored: the receiver's first configuration is held until the user applies. A build with `CONFIG_STATION_HOLD_FIRST_APPLY` (bench builds, the `sdkconfig.hold` overlay) writes it once at boot on a device whose profile was never applied and whose `gnss/autocfg` was never set, together with `gnss/autocfg` = 0 and `gnss/recovery` = 2 (`alerts_only`, if unset), before anything reaches the receiver; it stays in NVS whatever build runs later. While it is stored the station sends the receiver only queries (version, configuration dump, base mode, its own position) and a loader prompt met during detection gets no restart key (`receiver_in_loader`, listen-only; the user's receiver restart still works). The first successful apply erases it, and so does `PUT /api/gnss/profile` with `autocfg: true`; a factory reset erases it with the other user settings. When the hold is due but cannot be stored (settings unusable this boot, or the write failed), the station holds the first configuration for this boot only, as the batch would have stored it: `first_apply_held` true, `autocfg` false, nothing stored. A successful apply ends the hold (automatic configuration stays off for the boot); `autocfg: true` ends both. `GET /api/gnss/apply/preview` lists what the apply would send |
 | `profile.antenna_*` | the base antenna descriptor the receiver publishes in 1033: `antenna_model` the IGS antenna name with its radome (`""` = leave the receiver's own value, the default), `antenna_serial`, `antenna_setup_id` 0-255; serial and setup ID only matter with a model (stored cleared without one). UM982 build 25164 stores the name with every run of spaces collapsed to one: the IGS form `TRM59800.00     SCIS` (the name padded to 16 characters, then the radome) reads back as `TRM59800.00 SCIS` (our bench, 2026-10-14). The station therefore compares names (and serial numbers) with runs of spaces read as one and leading and trailing spaces dropped, so a receiver that holds the collapsed form is not sent the antenna again on every apply. The 1033 the receiver then sends may carry the collapsed name rather than the IGS padded form, which rovers and casters look up by; `rtcm1033.antenna` shows what it sends (to be checked with sky before a real antenna name goes to a caster) |
 | `rx_settings` | what the receiver's configuration dump said at the last apply session this boot (`station_status_t.rx_settings`): `valid` false and every value unknown (`unknown` / `null`) after a reboot until the next apply. `b1cb2a`, `mmp` (`um98x_setting_t`): BeiDou B1C/B2a observations in RTCM, multipath mitigation; `mask_deg` the elevation mask (0.1°); `antenna` the descriptor the receiver holds, as it reads it back (`null` = not read): when the session sent the antenna, the dump is read again right after that step, so this is the receiver's own form (collapsed spaces on build 25164), never the profile's text; `null` if that read failed. `age_s` since the read-back, `read_unix` its time (`null` without a clock then). MMP and the mask are shown only, never sent (PROVISIONAL, to be confirmed on hardware) |
 | `apply_steps` | outcome of the antenna and B1C/B2a steps of the last apply session (sent only when the read-back asked for them; a refusal does not fail the session): `sent`, `ok` (accepted), `reply` the receiver's refusal text or `"timeout"` (`null` unless refused). The UI words an antenna refusal "antenna model rejected: <reply>" |
@@ -735,6 +740,7 @@ oldest.
 | `profile.fixed` | `{lat_deg, lon_deg, height_m}` in `fixed` mode, else `null`; fields a mode does not use are ignored on input and come back cleared (`survey_in_s` 0 in `fixed` mode) |
 | `position` | locked or last surveyed (`station_status_t.position`); `source`: `none`, `survey`, `averaged`, `user`; `sigma_m` 0 = unknown |
 | `arp` | latest CRC-valid 1005/1006 (`gnss_obs_get_arp`), converted to WGS84; `offset_m` = 3-D distance to the locked position, `null` when not locked; `{"valid": false}` before the first frame |
+| `fixed_check` | is the fixed position (typed in or locked) where the receiver is? A fixed base sends the position it was given in every 1005, so the stream cannot tell; the receiver's own single-point solution can. With a fixed profile and a model the station configures, the station asks it without a lease (`BASEPOSA`, the base's position as a fixed base, or `SPPNAVA` when the receiver refuses that, only echoes the set position or gives nothing usable three times; one-shot, one line, the casters never wait): 60 s after streaming began, a receiver restart or an apply, then every 20 s until three usable solutions (computed, single-point, at least 6 satellites, standard deviations at most 5 m horizontally and 10 m in height) agree, at most 15 tries; again every hour. `state` (`station_fix_state_t`): `none` (the profile surveys, or not a model the station configures), `checking` (no verdict yet), `ok` (within 50 m horizontally and vertically), `far` (beyond, in all three: the `fixed_far` alert, journalled; it clears once three solutions are within 40 m, or at once when the fixed position changes; streaming is never held back), `no_solution` (no verdict: the last check got no usable solution, for example without sky), `refused` (no verdict: the receiver refused both logs). With `ok` and `far`: `horizontal_m`, `vertical_m` (the fixed height minus the receiver's ellipsoidal height, its height above sea level plus the geoid separation it reports: > 0 the fixed position is above) and `distance_m` (3-D), the medians of the three solutions that decided (else `null`); `height_only` with `far`: only the height is beyond the limit. `checked_age_s` since the latest usable solution (`null` = none this boot); `limit_m` the limit (50). The receiver's single-point accuracy is 1.5 m horizontal and 2.5 m vertical (RMS), so 50 m is far beyond its own scatter and well inside the about 300 m at which a receiver stops its corrections (`antenna_moved`). PROVISIONAL, to be confirmed on hardware: that `BASEPOSA` reports the receiver's own solution while it works as a fixed base |
 
 ### `PUT /api/gnss/profile` (adm)
 
@@ -932,20 +938,28 @@ apply, `RESET`, flash, ladder step or live-view toggle), reception goes on
 and every CRC-valid RTCM frame still reaches the casters. The station
 reports `idle` meanwhile (`rx_maintenance` tells it apart); the ledger
 counts the time as planned. It ends by itself when its time is up, on "end
-now", or with a power cut that clears the ESP32's memory. A reset that keeps
-that memory keeps it with its time left, the boot only listening: a
-software reset, and also a reset that reads as power-on, since on the
-ESP32-S3 the EN pin (the USB auto-reset that plugging in a cable or
-flashing can cause, the RST button) reads as power-on while the receiver
-keeps running and may be mid-work; a restart banner then does not end it
-either (the work may restart the receiver). Whether the ESP32-S3 keeps that
-memory through an EN reset is to be confirmed on the board. The end runs
-the station's stream-first check, as at boot. Entry and
-exit are journalled (`rx_maintenance`). Whether input on the link can
-disturb a receiver worked on through its other port is PROVISIONAL, to be
-confirmed on hardware. The UI starts it in Settings, next to the receiver
-update; while it is on, that row has Add 30 min and End now, and every
-other page a one-line notice with End now (the Status page's top card).
+now", with a power cut or a factory reset. Any other ESP32 reset keeps it
+with its time left, the boot only listening: a software restart, a crash or
+a watchdog (kept in the ESP32's RTC memory, exact), and a reset by the
+ESP32's EN pin (the USB auto-reset that opening the ESP32's port or
+flashing can cause, the RST button), which reads as power-on and loses the
+RTC memory while the receiver keeps running and may be mid-work (kept as a
+copy in settings, stored at the start, at each extension and every minute:
+up to 70 s less time left then). The time across the reset comes off: it
+never ends later than the time chosen (with the trusted clock, also when
+the ESP32 was held in reset for a while) and ends at once when that time
+ran out meanwhile. A power-on reset during which the receiver restarted too
+(`station.rx_boot` `restarted` in `GET /api/health`) was a power cut:
+maintenance resumed at that boot ends then, unless the user extended it
+since; `kept_running` or `unknown` leave it on. Any other restart banner
+does not end it (the work may restart the receiver). The end runs the
+station's stream-first check, as at boot. Entry and exit are journalled
+(`rx_maintenance`; an exit also when its time ran out across a reset).
+Whether input on the link can disturb a receiver worked on through its
+other port is PROVISIONAL, to be confirmed on hardware. The UI starts it in
+Settings, next to the receiver update; while it is on, that row has Add 30
+min and End now, and every other page a one-line notice with End now (the
+Status page's top card).
 
 While it is on, the receiver actions answer `409 receiver_maintenance`
 ("receiver maintenance: nothing is sent to the receiver"): apply, lock,
@@ -1572,9 +1586,9 @@ removes it. The slot reconnects. `200` with the slot entry. Errors:
   "mdns_host": "onocoydiy",
   "configured": true, "credentials_unreadable": false, "ssid": "Home",
   "online": true, "associated": true, "ip": "192.168.1.50", "rssi": -60, "channel": 6,
-  "bssid": "AA:BB:CC:DD:EE:FF", "tx_power_dbm": 19.5,
+  "bssid": "AA:BB:CC:DD:EE:FF", "tx_power_dbm": 19.5, "ap_steering": true,
   "time_synced": true, "upstream": "ok", "probe_age_s": 120,
-  "reconnects": 1, "connect_failures": 0, "offline_s": 0, "retry_in_s": 0,
+  "reconnects": 1, "connect_failures": 0, "roams": 0, "offline_s": 0, "retry_in_s": 0,
   "last_disconnect_reason": 8, "fallback_dns": false, "assoc_no_ip_s": 0,
   "cred_trial": false, "cred_trial_left_s": 0, "cred_pending": false, "pending_ssid": null,
   "cred_reverted": false, "cred_reverted_why": null,
@@ -1594,6 +1608,16 @@ like `rssi` and `channel` `null` while not associated (and in the QEMU
 build, whose emulated link has no access point). Diagnostics for a weak
 link (the UI's Diagnostics shows them under Chip and Wi-Fi, with the
 channel); only in this admin route, never in the public status.
+`ap_steering`: the access point takes part in 802.11v BSS transition
+management, so it can ask the station to move to another access point of
+the network (a mesh steering it); read once, a few seconds into each
+association; `null` before that, while not associated, and with roaming
+off (`CONFIG_NETWORK_ROAM`) or in the QEMU build. `roams`: moves to another
+access point of the network since boot, the ones the access point asked
+for and the station's own (to a clearly stronger access point while its
+signal is weak); each is a `wifi_roam` journal entry (so is an own
+reconnect that stayed on the same access point, not counted here), and
+none counts in `reconnects` (links re-established after a drop).
 `last_disconnect_reason` is the numeric `wifi_err_reason_t`. `scan.results`
 are the cached ones (no radio activity; at most 24); `age_s` is `null`
 before the first scan. `mdns_host`, `assoc_no_ip_s`, `cred_*`,
@@ -1681,6 +1705,8 @@ station goes back to its current credentials). `200 {"ok": true}`;
 
 Empty body. `202 {"accepted": true}`; `scan_done` event when finished. A
 scan while connected stalls the casters for seconds: the UI warns first.
+One asked for during the station's own short scan for its network
+(roaming, `GET /api/wifi` `roams`) starts right after that one.
 Errors: `409 busy` (a scan runs, or the station is connecting),
 `429 rate_limited` (one scan per 15 s).
 
@@ -1980,7 +2006,7 @@ All admin only.
 
 ```json
 {
-  "level": "ok", "alerts": [], "last_step": "none", "ladder_suspended": false,
+  "level": "ok", "alerts": [], "last_step": "none", "step": "none", "step_phase": "none", "ladder_suspended": false,
   "uptime_s": 86400, "gnss_stalls": 0, "recoveries": 0, "caster_restarts": 0,
   "network_recoveries": 0, "rtcm_gap_ms": 230, "gnss_retry_in_s": null,
   "factory_reset_refused_age_s": null, "admin_resets": 0, "recovery_mode": "full", "reboot_recheck": false,
@@ -2027,10 +2053,11 @@ All admin only.
 `alerts` are health's alerts with the names of `GET /api/status` (the
 reasons for no RTCM among them). `rtcm_gap_ms` is the time since the last RTCM frame. `gnss_retry_in_s` is
 the time until the receiver recovery's next retry pass (`null` = none
-scheduled). `factory_reset_refused_age_s` is the time since a BOOT-button
+scheduled; also with `recovery_mode` `alerts_only`, where the pass sends
+nothing). `factory_reset_refused_age_s` is the time since a BOOT-button
 factory reset was refused because a receiver update was running (`null` =
 not this boot); `admin_resets` counts BOOT-button password resets this
-boot. `recovery_mode`, `reboot_recheck`, `reboot_hold`,
+boot. `step`, `step_phase`, `recovery_mode`, `reboot_recheck`, `reboot_hold`,
 `reboot_hold_left_s`, `reboot_cap_wait_s` and `reboot_cap_limit` as in `/api/status`.
 `log.console_dropped` (and `_bytes`) count only lines the serial console
 never sent because the log ring overwrote them first; a burst that the
@@ -2269,10 +2296,12 @@ by `kind` (integers; only a `wifi_disconnect` entry's `b` can be `null`):
 | `caster_up` | slot (bits 0-7) \| failed attempts since the previous session (bits 16-30) | outage s |
 | `caster_stop` | slot (bits 0-7) \| stop reason (`ntrip_stop_t`, bits 8-15): the Onocoy login guard stopped the slot until the user acts (once per stop) | 0 |
 | `wifi_up` | connect attempts during the outage | outage s |
+| `wifi_roam` | the station moved to another access point of its network and got its address there (no `wifi_disconnect` or `wifi_up` for it): channel before (bits 0-7) \| channel after (bits 8-15) \| who started it (bits 16-23: 1 the access point asked, 2 the station found a clearly stronger one) \| bit 24: its reconnect found no stronger one after all and it stayed (a channel of 0 = unknown) | RSSI before (bits 0-7) \| after (bits 8-15), each a signed byte in dBm, 0 = unknown \| seconds without an address (bits 16-30) |
 | `rx_maintenance` | 1 entry, 0 exit | chosen duration s (entry), time spent s (exit) |
 | `rx_boot` | after a power-on reset, whether the receiver kept running (`diag_rx_boot_t`): 1 kept running (only the ESP32 was reset, its reset pin), 2 restarted with it (the power was cut), 3 unknown; written once per power-on boot, when the station knows (`station.rx_boot` in `/api/health`); only 2 counts toward `power_lost` | what told it (`diag_rx_boot_by_t`): 0 nothing, 1 its restart banner before any data, 2 its version log's time since its restart, 3 RTCM or NMEA at once |
 | `live_view` | event (bits 0-7: 1 opened, 2 extended, 3 closed, 4 satellite-in-view output on, 5 off) \| detail << 8 (closed: end reason; on/off: 0 accepted, 1 rejected, 2 no answer, 3 not sent) | opened: window s; extended: s left; closed: s open; on/off: ms the lease held RTCM back |
 | `sg_test` | signal groups: event (bits 0-7: 1 a comparison started, 2 it switched the receiver, 3 the receiver refused a signal group, in a comparison or any apply, 4 a comparison ended) \| master << 8 \| slave << 16 (started: the group measured first; switched: the group now running; refused: the refused group; ended: the group it ended on) | started: s per group; switched: the phase (0, 1); refused: `(master << 8) \| slave` of the group the profile went back to (-1 none); ended: the outcome (1 kept, 2 timed out, 3 cancelled, 4 rejected, 5 failed, 6 interrupted) |
+| `fixed_check` | the fixed-position check: event (bits 0-7: 1 the fixed position is more than 50 m from the receiver's own solution, horizontally or in height: the `fixed_far` alert raised; 2 within the limits again: cleared; 3 the fixed position changed, or the profile surveys now, while it stood: cleared) \| the fixed height minus the receiver's in m << 8 (signed, bits 8-31) | the horizontal distance in m (0 for event 3) |
 
 Enum numbers are the C values; the UI decodes them with the appendix
 tables.
@@ -2784,9 +2813,11 @@ after it). The journal's `a` and `b` carry these C values.
 | Enum (C) | API strings |
 |---|---|
 | `station_state_t` | `idle`, `detecting`, `configuring`, `streaming`, `flashing`, `flash_recovery`, `recovering`, `no_receiver` |
-| `station_alert_t` | `unsupported_model`, `config_failed`, `position_mismatch`, `antenna_moved`, `receiver_attention`, `receiver_in_loader`, `no_receiver`, `signals_mismatch` |
+| `station_alert_t` | `unsupported_model`, `config_failed`, `position_mismatch`, `antenna_moved`, `receiver_attention`, `receiver_in_loader`, `no_receiver`, `signals_mismatch`, `fixed_far` |
+| `station_fix_state_t` | `none`, `checking`, `ok`, `far`, `no_solution`, `refused` |
 | `health_level_t` | `ok`, `degraded`, `recovering`, `failed` |
 | `health_step_t` | `none`, `resync`, `link_restart`, `rescan`, `reconfigure`, `receiver_reset`, `reboot` |
+| `health_step_phase_t` | `none`, `running`, `waiting` |
 | `health_alert_t` | `power_supply`, `receiver_power`, `bands`, `profile_drift`, `heap_fragmented`, `safe_mode`, `settings_degraded`, `no_upstream`, `link_loss`, `power_lost`, `receiver_silent`, `no_satellites`, `no_rtcm`, `rx_held` |
 | `health_recovery_mode_t` | `full`, `no_reboot`, `alerts_only` |
 | `ntrip_state_t` | `disabled`, `wait_network`, `wait_data`, `connecting`, `streaming`, `backoff`, `auth_failed`, `paused`, `config_error`, `banned`, `stopped` |
@@ -2825,7 +2856,7 @@ after it). The journal's `a` and `b` carry these C values.
 | `ledger_clock_t` | `none`, `sntp`, `gnss` |
 | `gnss_sys_t` | `gps`, `glonass`, `galileo`, `sbas`, `qzss`, `beidou`, `navic` |
 | `gnss_band_t` | `l1`, `l2`, `l5`, `l6`, `e5ab` |
-| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21, `sg_test` = 22, `rx_boot` = 23 |
+| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21, `sg_test` = 22, `rx_boot` = 23, `fixed_check` = 24, `wifi_roam` = 25 |
 | `station_sgt_state_t` | `idle`, `switching`, `settling`, `measuring`, `deciding`, `restoring` |
 | `station_sgt_outcome_t` | (none: `null`), `kept`, `timed_out`, `cancelled`, `rejected`, `failed`, `interrupted` |
 | `station_sgt_res_status_t` | `pending`, `measuring`, `done`, `rejected` |

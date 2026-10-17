@@ -202,7 +202,8 @@ function rtcm1033Rows(g) {
 function alertMsgs(g, only) {
   return (g.alerts || []).filter(only).map(a => {
     const t = L.salert[a] || [a, ''];
-    const text = a === 'config_failed' ? configFailedText(g.config_auto_retry, g.config_retry_in_s) : t[1];
+    const text = a === 'config_failed' ? configFailedText(g.config_auto_retry, g.config_retry_in_s) :
+      a === 'fixed_far' ? fixedFarText(g.fixed_check || {}) : t[1];
     return msg('warn', h('strong', null, t[0]), text ? h('div', { class: 'small' }, text) : null);
   });
 }
@@ -217,7 +218,8 @@ const RX_CHIP = {
 /* The conditions the Receiver card explains in a line under its title (what happens, what to do). */
 const RX_PROBLEM = ['uart_closed', 'rx_stopped', 'no_satellites', 'no_rtcm'];
 
-/* The Receiver card's chip [text, tone]: the Status page's condition and colour (never "Streaming" while corrections stop). */
+/* The Receiver card's chip [text, tone]: the Status page's condition and colour (never "Streaming" while corrections stop,
+ * nor beside the fixed-position warning). */
 function receiverChip(s) {
   const st = stationState(s, true);
   const r = s.receiver || {};
@@ -226,6 +228,7 @@ function receiverChip(s) {
   if (r.rx_maintenance) return ['Maintenance', 'info'];
   if (r.signal_test && SGT_RUNNING.indexOf(r.signal_test.state) >= 0) return ['Comparing groups', 'info'];
   if (r.first_apply_held) return ['Not configured yet', 'warn'];
+  if (st.delivering && (s.alerts || []).some(a => a.id === 'fixed_far')) return ['Position looks wrong', 'warn'];
   if (st.delivering) return ['Streaming', 'ok'];
   return [HERO_TITLE[r.state] || lbl(L.station, r.state), r.state === 'no_receiver' ? 'bad' : 'info'];
 }
@@ -252,7 +255,15 @@ function positionLine(g, delivering) {
   return have ? 'Not locked. Lock it so it stays the same after restarts.' : 'No position yet.';
 }
 
-/** The card under its title: the problem in a line, the alerts, then model, configuration and position (st: stationState). */
+/* Whether the Receiver card lists a station alert (g.alerts' ids): not no_receiver, not the signals one beside the bands
+ * message (missing), and not one the problem line says (st.covers). */
+function rxAlertShown(st, missing) {
+  const problem = !!st && RX_PROBLEM.indexOf(st.key) >= 0;
+  return a => a !== 'no_receiver' && !(a === 'signals_mismatch' && missing) && !(problem && st.covers.indexOf(a) >= 0);
+}
+
+/** The card under its title: the problem in a line, the alerts (rxAlertShown), then model, configuration and position
+ * (st: stationState). */
 function receiverTop(g, st) {
   const r = g.receiver || {};
   const missing = bandsMissingMsg(g);
@@ -260,13 +271,27 @@ function receiverTop(g, st) {
     st && RX_PROBLEM.indexOf(st.key) >= 0 ? msg(st.tone, st.lead, st.plan ? h('div', { class: 'muted small' }, st.plan) : null) : null,
     sgRefusedMsg(g),
     missing,
-    alertMsgs(g, a => a !== 'no_receiver' && !(a === 'signals_mismatch' && missing)),
+    alertMsgs(g, rxAlertShown(st, !!missing)),
     kv([
       ['Model', r.valid === false ? h('span', { class: 'muted' }, 'Not identified yet') : [r.model || DASH, ' · ', fwText(r.firmware, r.build)]],
       ['Configuration', configLine(g)],
       ['Position', positionLine(g, !st || st.delivering)],
     ]),
   ];
+}
+
+/** The receiver's own position against the fixed one (GET /api/gnss fixed_check) as a row, or null without a fixed position. */
+function fixedCheckRow(g) {
+  const c = g.fixed_check || {};
+  if (!c.state || c.state === 'none') return null;
+  const label = 'Receiver\'s own position';
+  if (c.state === 'far') {
+    return [label, h('span', { class: 't-warn' }, c.height_only ? 'Fixed height ' + metresText(c.vertical_m) +
+      (c.vertical_m > 0 ? ' above it' : ' below it') : metresText(c.distance_m) + ' from the fixed position')];
+  }
+  if (c.state === 'ok') return [label, 'Within ' + (c.limit_m || 50) + NB + 'm of the fixed position'];
+  return [label, h('span', { class: 'muted' }, c.state === 'refused' ? 'Not reported by this firmware' :
+    c.state === 'no_solution' ? 'Not reported yet' : 'Being checked')];
 }
 
 /** Behind the card's Details: the link and identity, then the position and the one in the stream (the map follows). */
@@ -286,7 +311,8 @@ function receiverDetails(g) {
       ['Part number', r.pn],
       ['Chip ID', r.efuse_id],
       ['Firmware date', r.compile_date],
-      ['Answers commands', g.restarting ? h('span', { class: 't-warn' }, 'Restarting, back in about 10 s') : fmt.yesno(g.responding)],
+      /* responding: it streams, or it answered since its corrections stopped (a reply, its NMEA). */
+      ['Answers', g.restarting ? h('span', { class: 't-warn' }, 'Restarting, back in about 10 s') : fmt.yesno(g.responding)],
       ['Identity confirmed', fmt.yesno(g.identity_confirmed)],
       ['Last data', link.rx_bytes === 0 ? 'Nothing yet' : age(link.rx_age_ms)],
       link.open === false && link.mode !== 'off' ? ['Receiver port', h('span', { class: 't-bad' }, 'Closed, reopening' +
@@ -304,6 +330,7 @@ function receiverDetails(g) {
       pos.sigma_m ? ['Accuracy (σ)', fmtDist(pos.sigma_m)] : null,
       pos.locked_unix ? ['Locked on', fmt.time(pos.locked_unix)] : null,
       ['Source', lbl(L.posSource, pos.source)],
+      fixedCheckRow(g),
     ]) : h('p', { class: 'muted small' }, 'No position yet.'),
     h('h3', { class: 'sub' }, 'Position in the stream'),
     arp.valid ? kv([
@@ -579,15 +606,19 @@ function castersSee(g) {
 function positionChip(g) {
   const pos = g.position || {};
   const prof = g.profile || {};
+  if ((g.fixed_check || {}).state === 'far') return ['Looks wrong', 'warn'];
   if (pos.locked && pos.source && pos.source !== 'none') return ['Locked', 'ok'];
   if (prof.base_mode === 'fixed' && prof.fixed) return ['Fixed (typed in)', 'info'];
   if ((g.survey || {}).active) return ['Surveying', 'info'];
   return ['Not locked', ''];
 }
 
-/** Whether the position casters get (1005) matches the locked one, in a line ('' while not locked). */
+/** Whether the position casters get (1005) matches the locked one, in a line ('' while not locked); first whether the fixed
+ * position is where the receiver is. */
 function matchLine(g) {
   const arp = g.arp || {};
+  const fc = g.fixed_check || {};
+  if (fc.state === 'far') return h('span', { class: 't-warn' }, fixedFarSentence(fc) + ' Check the numbers, or use Survey-in.');
   if (!(g.position || {}).locked) return '';
   if (!arp.valid || arp.offset_m === null || arp.offset_m === undefined) return h('span', { class: 'muted' }, '1005 not received yet.');
   return arp.offset_m > 0.005 ? h('span', { class: 't-warn' }, '1005 is ' + fmtDist(arp.offset_m) + ' from the locked position.') :

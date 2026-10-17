@@ -150,20 +150,25 @@ function healthChip(level, alerts, st) {
 
 /*
  * The Health card's messages: the alerts, and above them the Status page's
- * state (its title and line) while it is at least as bad as every alert (an
- * alert it says itself then goes). A state that only restates an alert of
- * its colour and stands for no page notice (no receiver found) leaves it to
- * the alert, whose words here are the fuller ones. A closed port leaves out
- * the no-receiver alert (its cable advice would mislead), as the Status page
- * does.
+ * state (its title and line) while it is at least as bad as every alert (the
+ * alerts it says itself then go: its own and those its line covers). A state
+ * that only restates an alert of its colour and stands for no page notice
+ * (no receiver found) leaves it to the alert, whose words here are the
+ * fuller ones; never the recovery's reasons (no corrections, no satellites,
+ * the receiver stopped), whose words are the Status page's, nor a line that
+ * says another alert instead (covers: the fixed position that stops the
+ * corrections). So both pages say it in the same words. A closed port leaves
+ * out the no-receiver alert (its cable advice would mislead), as the Status
+ * page does.
  */
 function healthItems(alerts, st) {
   let list = alerts.filter(a => !(st && st.key === 'uart_closed' && a.id === 'no_receiver'));
   const worst = Math.min(9, ...list.map(a => toneRank(alertTone(a))));
   const own = st && st.alertId ? list.find(a => a.id === st.alertId) : null;
-  const restates = !!own && !st.notice && toneRank(alertTone(own)) === toneRank(st.tone);
+  const restates = !!own && !st.notice && !st.covers.length && LADDER_REASONS.indexOf(own.id) < 0 &&
+    toneRank(alertTone(own)) === toneRank(st.tone);
   const state = !!st && toneRank(st.tone) <= 2 && toneRank(st.tone) <= worst && !restates;
-  if (state) list = list.filter(a => a.id !== st.alertId);
+  if (state) list = list.filter(a => a.id !== st.alertId && st.covers.indexOf(a.id) < 0);
   return { alerts: list, state: state };
 }
 
@@ -224,11 +229,36 @@ function healthNotice(s) {
 }
 
 /*
+ * The Health card's line under the state and the alerts: what the receiver
+ * recovery does now when the state's line does not say it (st.doing), then
+ * the restart plan while no corrections come (as on the Status page); null
+ * when there is neither.
+ */
+function healthPlanText(hl, st) {
+  const fixing = !st || !st.delivering;
+  return [st && st.doing, fixing && restartPlanText(hl)].filter(Boolean).join(' ') || null;
+}
+
+/* The next recovery attempt as a row, or null: only while no corrections come (as on the Status page), and only where the
+ * station makes one (alerts only sends nothing). */
+function nextAttemptRow(hl, st) {
+  const fixing = !st || !st.delivering;
+  return fixing && hl.gnss_retry_in_s && hl.recovery_mode !== 'alerts_only' ? ['Next recovery attempt in', fmt.dur(hl.gnss_retry_in_s)] : null;
+}
+
+/* The step in progress is said on the card: by the line under it (st.doing), or by the state's own line (the recovery's). */
+function stepSaid(hl, st, shown) {
+  if (hl.step_phase !== 'running' && hl.step_phase !== 'waiting') return false;
+  return !!st && (!!st.doing || (shown && st.key === 'rx_stopped' && st.tone === 'warn' && !!recoveryDoing(hl)));
+}
+
+/*
  * The Health card from GET /api/health and the status s (its alerts are
  * the Status page's): the chip, the state with the Status page's button
- * (its notice is left out here) and the alerts (healthItems), the restart
- * plan while no corrections come, the rows. The page handles the data-act
- * buttons (Check again, End now, Leave safe mode).
+ * (its notice is left out here) and the alerts (healthItems), the line
+ * (healthPlanText), the rows (the last recovery step unless the card says
+ * the step in progress: stepSaid). The page handles the data-act buttons
+ * (Check again, End now, Leave safe mode).
  */
 function healthCard(hl, s) {
   const port = hl.link || {};
@@ -236,9 +266,7 @@ function healthCard(hl, s) {
   const st = s ? stationState(s, true) : null;
   const hi = healthItems(alerts, st);
   const hc = healthChip(hl.level, hi.alerts, st);
-  /* The restart plan and the next attempt only while no corrections come (as on the Status page). */
-  const fixing = !st || !st.delivering;
-  const plan = fixing && restartPlanText(hl);
+  const plan = healthPlanText(hl, st);
   return h('section', { class: 'card' },
     cardHead('Health', badge(hc[0], hc[1])),
     hi.state ? msg(st.tone, h('strong', null, st.head), st.lead ? h('div', { class: 'small' }, stateLead(s, st, st.diagLead)) : null,
@@ -250,9 +278,9 @@ function healthCard(hl, s) {
       /* The port's row only while the state above does not say it. */
       port.open === false && port.mode !== 'off' && !(hi.state && st.key === 'uart_closed') ?
         ['Receiver port', h('span', { class: 't-bad' }, 'Closed, reopening')] : null,
-      ['Last recovery step', lbl(L.step, hl.last_step)],
+      stepSaid(hl, st, hi.state) ? null : ['Last recovery step', lbl(L.step, hl.last_step)],
       ['Since the last RTCM', hl.rtcm_gap_ms === null || hl.rtcm_gap_ms === undefined ? 'never received' : fmt.ms(hl.rtcm_gap_ms)],
-      fixing && hl.gnss_retry_in_s ? ['Next recovery attempt in', fmt.dur(hl.gnss_retry_in_s)] : null,
+      nextAttemptRow(hl, st),
       hl.inhibited_by ? ['Restarts held back by', hl.inhibited_by] : null,
       hl.update_slot && hl.update_slot !== 'none' ? ['Update running', hl.update_slot === 'app' ? 'an app update' : 'a receiver update'] : null,
       hl.factory_reset_refused_age_s !== null && hl.factory_reset_refused_age_s !== undefined ?
@@ -611,8 +639,8 @@ function connRow(e, back) {
   }
 }
 
-/* The journal's connection records (casters and Wi-Fi); key: the caster's slot, or the Wi-Fi. */
-const isConn = e => /^(caster|wifi)_/.test(e.kind);
+/* The journal's connection records (casters and Wi-Fi drops and returns; a move between access points is a row of its own); key: the caster's slot, or the Wi-Fi. */
+const isConn = e => /^(caster|wifi)_/.test(e.kind) && e.kind !== 'wifi_roam';
 const connKey = e => (e.kind.indexOf('wifi') === 0 ? 'w' : 'c' + (e.a & 0xff));
 
 /* A connection record of the journal as GET /api/connections has it (what connRow reads). */
@@ -876,6 +904,15 @@ function journalDetail(e) {
       return a ? 'Started for ' + fmt.dur(b) : 'Ended after ' + fmt.dur(b);
     case 'rx_boot':
       return a === 1 ? 'Kept running' : a === 2 ? 'Restarted too: the power was cut' : 'Not known';
+    case 'wifi_roam': {
+      /* a: channels before and after, who moved it, stayed on the same one; b: signals before and after, seconds offline. */
+      const ch0 = a & 0xff, ch1 = (a >>> 8) & 0xff, r0 = (b << 24) >> 24, r1 = (b << 16) >> 24;
+      const off = fmt.dur((b >>> 16) & 0x7fff) + ' offline';
+      if ((a >>> 24) & 1) return 'no stronger access point after all, ' + off;
+      return [((a >>> 16) & 0xff) === 1 ? "at the access point's request" : 'to a stronger access point',
+        ch0 && ch1 ? 'channel ' + (ch0 === ch1 ? ch1 : ch0 + ' to ' + ch1) : null,
+        rssiKnown(r0) && rssiKnown(r1) ? 'signal ' + r0 + ' to ' + r1 + ' dBm' : null, off].filter(Boolean).join(', ');
+    }
     case 'sg_test': {
       const ev = a & 0xff, grp = ((a >>> 8) & 0xff) + ' ' + ((a >>> 16) & 0xff);
       if (ev === 1) return 'Comparison started with ' + grp + ', ' + fmt.dur(b) + ' per group';
@@ -883,6 +920,14 @@ function journalDetail(e) {
       if (ev === 3) return 'The receiver refused signal group ' + grp + (b >= 0 ? '; back to ' + ((b >>> 8) & 0xff) + ' ' + (b & 0xff) : '');
       if (ev === 4) return 'Comparison ended (' + (J.sgtOut[b] || b) + ') on ' + grp;
       return 'event ' + ev + ', ' + grp;
+    }
+    case 'fixed_check': {
+      /* a: the event, then the fixed height minus the receiver's (m); b: the horizontal distance (m) */
+      const ev = a & 0xff, up = a >> 8;
+      if (ev === 1) return (b <= 50 ? 'Height ' + metresText(up) : metresText(Math.hypot(b, up))) + ' off';
+      if (ev === 2) return 'Within 50' + NB + 'm again';
+      if (ev === 3) return 'Changed';
+      return 'event ' + ev;
     }
     case 'live_view': {
       /* A record of a session not loaded whole (journalItems makes a whole session one row) */
@@ -924,9 +969,9 @@ const EV_FILTER = [
   ['starts', 'Starts and restarts', ['boot', 'session', 'reboot', 'safe_mode', 'rx_boot']],
   ['recovery', 'Recovery', ['ladder_step']],
   ['casters', 'Casters', ['caster_down', 'caster_up', 'caster_stop']],
-  ['wifi', 'Wi-Fi', ['wifi_disconnect', 'wifi_up']],
+  ['wifi', 'Wi-Fi', ['wifi_disconnect', 'wifi_up', 'wifi_roam']],
   ['updates', 'Updates', ['app_update', 'app_revert', 'gnss_flash']],
-  ['receiver', 'Receiver', ['rx_maintenance', 'live_view', 'sg_test']],
+  ['receiver', 'Receiver', ['rx_maintenance', 'live_view', 'sg_test', 'fixed_check']],
   ['loss', 'Data loss', ['data_loss']],
 ];
 
@@ -1010,10 +1055,13 @@ function journalItems(entries, atStart, kinds) {
       } else {
         /* A recovery step under its recovery's name ("Receiver recovery"); a start and an end (maintenance, the sky) never fold together. */
         const sub = e.kind === 'ladder_step' || e.kind === 'rx_maintenance' || e.kind === 'data_loss' ? e.a :
-          e.kind === 'live_view' || e.kind === 'sg_test' ? e.a & 0xff : '';
+          e.kind === 'live_view' || e.kind === 'sg_test' || e.kind === 'fixed_check' ? e.a & 0xff :
+          e.kind === 'wifi_roam' ? e.a >>> 16 : '';
         const loss = e.kind === 'data_loss' ? (J.loss[e.a] || [e.a >= 16 ? slotName(e.a - 16) + ' data lost' : null])[0] : null;
+        /* A move whose reconnect found no stronger access point stayed: a reconnect, not a move. */
+        const stayed = e.kind === 'wifi_roam' && (e.a >>> 24) & 1 ? 'Wi-Fi reconnected' : null;
         rows.push({ k: e.kind + sub, seq: e.seq, ev: e.kind === 'ladder_step' ? capFirst(J.ladder[e.a] || 'ladder ' + e.a) + ' recovery' :
-          loss || J.kind[e.kind] || words(e.kind), det: journalDetail(e), when: when });
+          loss || stayed || J.kind[e.kind] || words(e.kind), det: journalDetail(e), when: when });
       }
     }
     if (!kinds || kinds.indexOf('boot') >= 0 || rows.length) {

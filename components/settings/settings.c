@@ -126,16 +126,21 @@ static esp_err_t open_ns(const char *ns, nvs_open_mode_t mode, nvs_handle_t *h)
     return nvs_open(ns, mode, h);
 }
 
-static esp_err_t finish_write(nvs_handle_t h, esp_err_t err, const char *ns, const char *key)
+static esp_err_t finish_write_as(nvs_handle_t h, esp_err_t err, const char *ns, const char *key, bool notify)
 {
     if (err == ESP_OK) {
         err = nvs_commit(h);
     }
     nvs_close(h);
-    if (err == ESP_OK) {
+    if (err == ESP_OK && notify) {
         notify_changed(ns, key);
     }
     return err;
+}
+
+static esp_err_t finish_write(nvs_handle_t h, esp_err_t err, const char *ns, const char *key)
+{
+    return finish_write_as(h, err, ns, key, true);
 }
 
 #define SETTINGS_SCALAR_ACCESSORS(suffix, type)                                        \
@@ -219,7 +224,14 @@ esp_err_t settings_get_blob(const char *ns, const char *key, void *out, size_t *
     return err;
 }
 
+static esp_err_t set_blob_as(const char *ns, const char *key, const void *data, size_t len, bool notify);
+
 esp_err_t settings_set_blob(const char *ns, const char *key, const void *data, size_t len)
+{
+    return set_blob_as(ns, key, data, len, true);
+}
+
+static esp_err_t set_blob_as(const char *ns, const char *key, const void *data, size_t len, bool notify)
 {
     if (key == NULL || (data == NULL && len != 0)) {
         return ESP_ERR_INVALID_ARG;
@@ -229,10 +241,10 @@ esp_err_t settings_set_blob(const char *ns, const char *key, const void *data, s
     if (err != ESP_OK) {
         return err;
     }
-    return finish_write(h, nvs_set_blob(h, key, data, len), ns, key);
+    return finish_write_as(h, nvs_set_blob(h, key, data, len), ns, key, notify);
 }
 
-esp_err_t settings_erase_key(const char *ns, const char *key)
+static esp_err_t erase_key_as(const char *ns, const char *key, bool notify)
 {
     if (key == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -246,7 +258,22 @@ esp_err_t settings_erase_key(const char *ns, const char *key)
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         err = ESP_OK;
     }
-    return finish_write(h, err, ns, key);
+    return finish_write_as(h, err, ns, key, notify);
+}
+
+esp_err_t settings_erase_key(const char *ns, const char *key)
+{
+    return erase_key_as(ns, key, true);
+}
+
+esp_err_t settings_set_state_blob(const char *ns, const char *key, const void *data, size_t len)
+{
+    return set_blob_as(ns, key, data, len, false);
+}
+
+esp_err_t settings_erase_state_key(const char *ns, const char *key)
+{
+    return erase_key_as(ns, key, false);
 }
 
 esp_err_t settings_erase_namespace(const char *ns)

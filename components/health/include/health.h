@@ -25,9 +25,12 @@
  *   1. resync framer / flush input (station_request_recovery)     grace 5 s
  *   2. restart the UART link at the stored baud (driver kept)       15 s
  *   3. UART break + full baud rescan                                30 s from the end of the scan
- *   4. re-apply the receiver profile                                90 s; during the survey
- *                                                                   window missing 1005/1033
- *                                                                   never enters this step
+ *   4. re-apply the receiver profile                                90 s, longer while the survey
+ *                                                                   window is open (not for a
+ *                                                                   receiver that answers and sent
+ *                                                                   no RTCM this boot); during the
+ *                                                                   window missing 1005/1033 never
+ *                                                                   enters this step
  *   5. reset the receiver (command; no reset line on this board)    120 s
  *   After a failed step 3 (no receiver found) or step 5, the byte rule
  *   decides: no byte at all in that step's window -> 6a; any bytes -> 6b.
@@ -40,15 +43,21 @@
  *   7. FAILED: every 10 min re-classify and enter at max(2, class entry
  *      step); 6a stays subject to the cap. Never a reboot loop.
  * The receiver answers but sends no RTCM (replies to the station's
- * commands, its restart banner, text lines): after step 5 that is not 6b
- * ("needs a power cycle") but FAILED with the reason; step 5 is skipped
+ * commands, its restart banner, text lines): after step 5 (failed, or
+ * abandoned twice to the station's own sessions) that is neither 6b ("needs
+ * a power cycle") nor 6a but FAILED with the reason; step 5 is skipped
  * when the receiver's own position sentence says it uses no satellites;
  * and the retry pass then runs no step 4 or 5 again (a silent receiver gets
  * steps 2 and 3, whose rescan asks it again). While the first
  * configuration is held (the hold builds), a receiver that answers is not
  * stalled at all: it was never set to send RTCM.
  * Every FAILED level carries its reason as an alert (and an alerts-only
- * stall's DEGRADED level too): RECEIVER_POWER (6b), RECEIVER_SILENT
+ * stall's DEGRADED level too; a RECOVERING level, which also covers the
+ * gap between two steps, carries NO_RTCM or NO_SATELLITES as soon as the
+ * receiver answered after its last RTCM frame, or within the last 90 s
+ * when it sent none this boot, so the antenna hint comes with the
+ * recovery; the station asks such a receiver once a minute):
+ * RECEIVER_POWER (6b), RECEIVER_SILENT
  * (nothing usable, no answer; power-cycle the station), NO_SATELLITES (it
  * answers and uses no satellites: the antenna), NO_RTCM (it answers but
  * sends no RTCM) and RX_HELD (the held first configuration: DEGRADED,
@@ -122,7 +131,11 @@
  * ladder resets) the status shows the reasons holding now
  * (gnss_reboot_hold), when the last of them ends at the latest and the
  * reboot cap's wait; outside one nothing is pending and it shows none of
- * them (an admin page open on a healthy station postpones nothing).
+ * them (an admin page open on a healthy station postpones nothing). Nor
+ * while the receiver answers (the no_rtcm or no_satellites reason): the
+ * ladder restarts the ESP32 only for a receiver that sent nothing in the
+ * failed step's window (after the receiver reset: no answer to it), so no
+ * restart is pending until the evidence says it stopped answering.
  *
  * User recovery mode (gnss/recovery, read every tick; a step already running
  * completes): full (default); no ESP32 reboot (6a is journalled as not run,
@@ -131,7 +144,10 @@
  * full ladder would start is journalled once with outcome "not run" and its
  * grace still runs, and where the byte rule would run the ladder goes to 7,
  * with no power-cycle alert; level DEGRADED before 7, FAILED at 7; the
- * FAILED retry pass journals the step it would enter every 10 min). Leaving
+ * FAILED retry pass journals the step it would enter every 10 min). A step
+ * the station ran before the switch to "alerts only" keeps its grace, only
+ * watched like a journalled step's: no step in progress, level DEGRADED with
+ * the reason, so the status never says the station still fixes it. Leaving
  * "alerts only" while stalled starts a fresh pass at the class entry step.
  * The network ladder, the station's detection schedule and its apply rules
  * are not affected.
@@ -233,6 +249,13 @@ typedef enum {
     HEALTH_STEP_REBOOT,
 } health_step_t;
 
+/** Where the step in progress is (health_status_t.gnss_step_phase). */
+typedef enum {
+    HEALTH_STEP_PHASE_NONE = 0,      /**< no step in progress */
+    HEALTH_STEP_PHASE_RUNNING,       /**< due, or the station runs it */
+    HEALTH_STEP_PHASE_WAITING,       /**< the station ran it and waits for RTCM (its grace) */
+} health_step_phase_t;
+
 /** Persistent alerts shown in the UI (bit flags). */
 typedef enum {
     HEALTH_ALERT_POWER_SUPPLY      = 1u << 0, /**< brownout resets since power-on */
@@ -280,6 +303,10 @@ typedef struct {
     health_level_t level;
     uint32_t alerts;                 /**< health_alert_t flags */
     health_step_t last_step;         /**< last ladder action started (1-5, or REBOOT for 6a) */
+    health_step_t gnss_step;         /**< what the GNSS ladder does now: the step due, running or in its grace (REBOOT
+                                          while 6a is requested); NONE outside a step, in FAILED and for a step only
+                                          watched in alerts-only mode */
+    health_step_phase_t gnss_step_phase; /**< where gnss_step is (NONE with it) */
     bool gnss_ladder_suspended;      /**< see the suspension rules: detecting, configuring, flashing, open or unknown flash journal, safe mode, leases and 10 s after */
     uint64_t uptime_s;
     uint32_t gnss_stalls;            /**< stall declarations since boot */
@@ -291,14 +318,15 @@ typedef struct {
     uint32_t heap_internal_min;      /**< low-water mark since boot */
     uint32_t heap_internal_largest;  /**< largest free internal block (fragmentation) */
     uint32_t heap_psram_free;
-    uint32_t gnss_retry_in_s;        /**< FAILED: until the next retry pass (0 = none scheduled, e.g. while the station's own detection schedule runs) */
+    uint32_t gnss_retry_in_s;        /**< FAILED: until the next retry pass (0 = none scheduled, e.g. while the station's own detection schedule runs,
+                                          or in alerts only, whose pass sends nothing) */
     uint32_t factory_reset_refused_age_s; /**< since a BOOT-button factory reset was refused because a receiver update was running (UINT32_MAX = not this boot) */
     uint32_t admin_resets;           /**< BOOT-button admin password resets this boot; the web also forgets a password it holds only in RAM (settings unavailable) and ends every session */
     health_recovery_mode_t recovery_mode; /**< in effect (gnss/recovery; a stored value out of range reads as FULL) */
     bool gnss_reboot_recheck;        /**< NO_RECEIVER: a blocked ESP32 reboot waits for the cap and the next detection pass */
-    uint8_t gnss_reboot_hold;        /**< health_reboot_hold_t reasons that postpone the ladder's ESP32 restart now (0 = none; always 0 outside a ladder episode) */
+    uint8_t gnss_reboot_hold;        /**< health_reboot_hold_t reasons that postpone the ladder's ESP32 restart now (0 = none; always 0 outside a ladder episode and while the receiver answers) */
     uint32_t gnss_reboot_hold_left_s;/**< until every reason holding now has ended at the latest (the presence limit of ap_client and admin, the end of the power-on grace); UINT32_MAX = no hold, or setup holds (no time limit) */
-    uint32_t gnss_reboot_cap_wait_s; /**< until the reboot cap allows a ladder restart; UINT32_MAX = allowed now, or outside a ladder episode */
+    uint32_t gnss_reboot_cap_wait_s; /**< until the reboot cap allows a ladder restart; UINT32_MAX = allowed now, outside a ladder episode, or while the receiver answers */
     health_cap_limit_t gnss_reboot_cap_limit; /**< the cap's limit that sets gnss_reboot_cap_wait_s (the later one when both hold); NONE when that is UINT32_MAX */
 } health_status_t;
 

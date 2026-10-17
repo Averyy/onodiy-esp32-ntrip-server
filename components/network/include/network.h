@@ -146,6 +146,29 @@
  * after losing it (not the first IP of a boot): a = connect attempts during
  * the outage, b = outage in seconds.
  *
+ * Moving between access points (CONFIG_NETWORK_ROAM, on by default; the
+ * rules in priv_include/net_roam.h): the station takes 802.11k radio
+ * measurement and 802.11v BSS transition requests, so a mesh can steer it
+ * to another node of the same network. ESP-IDF's supplicant carries such a
+ * move out; the station drops a request (no answer) during a firmware
+ * update or a receiver flash (the update slot or a restart lock held), while
+ * its own AP is up, while changed credentials are on trial and within 5 min
+ * of the previous move, unless the access point disconnects it anyway.
+ * While its own signal is weak (averaged at or below
+ * CONFIG_NETWORK_ROAM_WEAK_DBM for a minute) the station scans for its SSID
+ * (every 10 min once another access point of it was seen in this
+ * association, else every 6 h; never with a strong signal) and reconnects
+ * when an access point CONFIG_NETWORK_ROAM_MIN_GAIN_DB stronger shows in two
+ * scans 30 s apart, at most once per CONFIG_NETWORK_ROAM_MIN_INTERVAL_S
+ * after the previous move of either kind, under the same holds and never
+ * while the network ladder runs. A move drops the address and every caster
+ * session like a short outage (a few seconds). One that reaches an address
+ * is journalled as DIAG_EV_WIFI_ROAM (channels, RSSI before and after, who
+ * started it, seconds without an address; no access point address) instead
+ * of a drop and the return after it; one that does not is an outage like
+ * any other. A user's scan asked for during a roaming scan starts right
+ * after it.
+ *
  * Wi-Fi credentials live in the settings component; the Wi-Fi driver's own
  * NVS storage is disabled (single source of truth).
  *
@@ -258,7 +281,9 @@ typedef struct {
     uint8_t bssid[6];              /**< the access point the station is associated with (several may serve one SSID) */
     bool tx_power_known;           /**< tx_power_qdbm was read during this association */
     int8_t tx_power_qdbm;          /**< the station's Wi-Fi transmit power limit now (esp_wifi_get_max_tx_power), 0.25 dBm units */
-    uint32_t reconnects;           /**< station links re-established after a drop, since boot */
+    uint32_t reconnects;           /**< station links re-established after a drop, since boot (moves between access points not counted) */
+    uint32_t roams;                /**< moves to another access point of the network, since boot (CONFIG_NETWORK_ROAM) */
+    int8_t ap_steering;            /**< the access point takes part in 802.11v BSS transition management (it can ask the station to move): 1 yes, 0 no, -1 not known (not associated yet, or roaming off) */
     uint32_t connect_failures;     /**< connect attempts that ended without a link, since boot */
     uint32_t offline_s;            /**< seconds offline in the current outage, 0 if online */
     uint32_t retry_in_s;           /**< seconds to the next connect attempt (0 = connecting or connected) */

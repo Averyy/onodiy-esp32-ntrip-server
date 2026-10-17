@@ -609,7 +609,11 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
   missing station message fails the check); nothing between frames, a cut frame
   only at the very end; receiver maintenance answers its start and
   extension with the time it set (900 s, then 1800 s left), and
-  `GET /api/gnss` agrees. With
+  `GET /api/gnss` agrees; a restart during it (`POST /api/system/reboot`,
+  the replay paused across it) resumes it from its RTC record with its
+  time left (never more than was left, at most 5 s less: the RTC timer
+  runs on through a software restart in this QEMU too), the console says
+  so and the station only listens (`idle`, `rx_maintenance`). With
   `--caster docker` the record is what a `GET /BENCH` client receives from
   the BKG caster (`tools/bench/docker/bkg-caster`, built on first use);
   bytes in front of its first frame are allowed there, because that caster

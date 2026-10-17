@@ -109,6 +109,37 @@ static void sim_done(sim_t *w, const stn_result_t *r)
     sim_rearm(w);
 }
 
+/* The question to a receiver that never streamed (STN_JOB_ASK), answered:
+ * its reply is a line like any other. */
+static void ask_answered(sim_t *w)
+{
+    w->in.text_lines++;
+    stn_result_t r;
+    memset(&r, 0, sizeof(r));
+    r.err = STN_OK;
+    sim_done(w, &r);
+}
+
+/* As sim_until_job, the station's questions answered on the way (counted in *asks when given). */
+static stn_job_t sim_until_job_asked(sim_t *w, int max_s, unsigned *asks)
+{
+    for (int i = 0; i <= max_s; i++) {
+        stn_job_t j = sim_next(w);
+        if (j.kind == STN_JOB_ASK) {
+            if (asks != NULL) {
+                (*asks)++;
+            }
+            ask_answered(w);
+        } else if (j.kind != STN_JOB_NONE) {
+            return j;
+        }
+        sim_tick(w);
+    }
+    stn_job_t none;
+    memset(&none, 0, sizeof(none));
+    return none;
+}
+
 static stn_result_t res(stn_err_t err)
 {
     stn_result_t r;
@@ -251,16 +282,25 @@ TEST_CASE("station core: RTCM that differs is drift; no RTCM at all never is", "
     TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_next(&w).kind);
     identity_done(&w, true, true);
     TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    unsigned asks = 0;
     for (int i = 0; i < 300; i++) {
-        TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_next(&w).kind);
+        stn_job_t j = sim_next(&w);
+        if (j.kind == STN_JOB_ASK) {
+            asks++;   /* the station's question: it answers when asked */
+            ask_answered(&w);
+        } else {
+            TEST_ASSERT_EQUAL(STN_JOB_NONE, j.kind);
+        }
         TEST_ASSERT_FALSE(w.s.rtcm_differs);
         sim_tick(&w);
     }
+    TEST_ASSERT_EQUAL_UINT(4, asks);
     TEST_ASSERT_FALSE(w.s.profile_applied);   /* not applied, but nothing differs either */
 
-    /* RTCM flows with a message missing: that differs. */
+    /* RTCM flows with a message missing: that differs (and no question once it flowed). */
     w.rtcm_on = true;
     w.skip = 1097;
+    sim_tick(&w);
     for (int i = 0; i < 70 && !w.s.rtcm_differs; i++) {
         TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_next(&w).kind);
         sim_tick(&w);
@@ -373,7 +413,7 @@ TEST_CASE("station core: with no model ever stored and nothing flowing, one leas
     unsigned leased = 0;
     unsigned queries = 0;
     for (int k = 0; k < 6; k++) {
-        j = sim_until_job(&w, 700);
+        j = sim_until_job_asked(&w, 700, NULL);
         TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
         leased += j.leased ? 1u : 0u;
         queries++;
@@ -486,7 +526,7 @@ TEST_CASE("station core: a stored model is never queried with a lease", "[statio
             boot_lines_only(&w);
         }
         for (int k = 0; k < 4; k++) {
-            stn_job_t j = sim_until_job(&w, 700);
+            stn_job_t j = sim_until_job_asked(&w, 700, NULL);
             TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
             TEST_ASSERT_FALSE(j.leased);
             TEST_ASSERT_FALSE(w.s.paused);
@@ -968,6 +1008,168 @@ TEST_CASE("station core: data between passes, or a found receiver, streams at on
     TEST_ASSERT_TRUE(w.s.identity_ok);
     j = sim_next(&w);
     TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);   /* a silent factory receiver gets configured */
+}
+
+/* ---- whether the receiver answers ------------------------------------------------- */
+
+/* stn_responding with the last RTCM frame at rtcm_at and the last line at line_at (STN_NEVER: none this boot). */
+static bool answers_now(const sim_t *w, int64_t rtcm_at, int64_t line_at)
+{
+    uint32_t rtcm_age = rtcm_at == STN_NEVER ? UINT32_MAX : (uint32_t)(w->in.now_ms - rtcm_at);
+    return stn_responding(&w->s, w->in.now_ms, rtcm_age, line_at);
+}
+
+TEST_CASE("station core: the receiver answers: it streams, or a line came after its last RTCM frame", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    int64_t now = w.in.now_ms;
+    TEST_ASSERT_TRUE(answers_now(&w, now - 500, STN_NEVER));               /* it streams */
+    TEST_ASSERT_TRUE(answers_now(&w, now - STN_FRESH_MS, STN_NEVER));
+    TEST_ASSERT_FALSE(answers_now(&w, now - STN_FRESH_MS - 1, STN_NEVER));  /* RTCM stopped, nothing since */
+    /* Lines from before the last frame, or with it (the same output), are no answer after it. */
+    TEST_ASSERT_FALSE(answers_now(&w, now - 20000, now - 20500));
+    TEST_ASSERT_FALSE(answers_now(&w, now - 20000, now - 20000 + STN_ANSWER_SLACK_MS));
+    /* A line after it (a reply, its NMEA) is, however long ago, until something says otherwise. */
+    TEST_ASSERT_TRUE(answers_now(&w, now - 20000, now - 20000 + STN_ANSWER_SLACK_MS + 1));
+    TEST_ASSERT_TRUE(answers_now(&w, now - 3 * HOUR_MS, now - 2 * HOUR_MS));
+    /* No RTCM frame this boot: a line within STN_ANSWER_FRESH_MS (the station asks every STN_ASK_MS). */
+    TEST_ASSERT_TRUE(answers_now(&w, STN_NEVER, now - STN_ANSWER_FRESH_MS));
+    TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, now - STN_ANSWER_FRESH_MS - 1));
+    TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, now - HOUR_MS));
+    TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, STN_NEVER));
+}
+
+TEST_CASE("station core: a receiver that answers questions and sends nothing unasked answers steadily", "[station]")
+{
+    /* No antenna: no RTCM this boot, a reply only when asked. The station
+     * asks once a minute while no line comes (STN_JOB_ASK, after its other
+     * jobs): every second of two hours it answers, no flicker between two
+     * questions. */
+    sim_t w;
+    sim_init(&w, false);
+    w.in.autocfg = false;   /* nothing applied: only the questions */
+    boot_lines_only(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
+    w.in.text_lines++;   /* its reply */
+    identity_done(&w, true, true);
+    int64_t line = w.in.now_ms;
+    unsigned asks = 0;
+    for (int i = 0; i < 2 * 3600; i++) {
+        stn_job_t j = sim_next(&w);
+        if (j.kind == STN_JOB_ASK) {
+            asks++;
+            TEST_ASSERT_TRUE(w.in.now_ms - line >= STN_ASK_MS);
+            ask_answered(&w);
+            line = w.in.now_ms;
+        } else if (j.kind != STN_JOB_NONE) {
+            identity_done(&w, true, true);
+        }
+        TEST_ASSERT_TRUE_MESSAGE(answers_now(&w, STN_NEVER, line), "answers between two questions");
+        sim_tick(&w);
+    }
+    TEST_ASSERT_TRUE(asks >= 115 && asks <= 120);
+
+    /* It hangs: the questions go on, unanswered, and it stops answering
+     * once its last answer is STN_ANSWER_FRESH_MS old. */
+    int64_t last = line;
+    unsigned unanswered = 0;
+    for (int i = 0; i < 10 * 60; i++) {
+        stn_job_t j = sim_next(&w);
+        if (j.kind == STN_JOB_ASK) {
+            unanswered++;
+            sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+        } else if (j.kind != STN_JOB_NONE) {
+            sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+        }
+        TEST_ASSERT_EQUAL(w.in.now_ms - last <= STN_ANSWER_FRESH_MS, answers_now(&w, STN_NEVER, last));
+        sim_tick(&w);
+    }
+    TEST_ASSERT_TRUE(unanswered >= 9 && unanswered <= 10);
+}
+
+TEST_CASE("station core: the question only to a receiver that never streamed and sends nothing", "[station]")
+{
+    /* A receiver that sends a line every second (NMEA, no RTCM): never asked. */
+    sim_t w;
+    sim_init(&w, false);
+    w.in.autocfg = false;
+    boot_lines_only(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
+    identity_done(&w, true, true);
+    for (int i = 0; i < 600; i++) {
+        stn_job_t j = sim_next(&w);
+        TEST_ASSERT_NOT_EQUAL(STN_JOB_ASK, j.kind);
+        if (j.kind != STN_JOB_NONE) {
+            identity_done(&w, true, true);
+        }
+        w.in.text_lines++;
+        sim_tick(&w);
+    }
+
+    /* RTCM flowed this boot, then stopped: never asked (the recovery asks it). */
+    sim_init(&w, false);
+    boot_applied(&w);
+    w.rtcm_on = false;
+    for (int i = 0; i < 600; i++) {
+        stn_job_t j = sim_next(&w);
+        TEST_ASSERT_NOT_EQUAL(STN_JOB_ASK, j.kind);
+        if (j.kind != STN_JOB_NONE) {
+            sim_done(&w, &(stn_result_t){ .err = STN_OK });
+        }
+        sim_tick(&w);
+    }
+
+    /* In receiver maintenance: nothing at all, the question neither. */
+    sim_init(&w, false);
+    w.in.autocfg = false;
+    boot_lines_only(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
+    identity_done(&w, true, true);
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 900, false, w.in.now_ms));
+    for (int i = 0; i < 800; i++) {
+        TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_next(&w).kind);
+        sim_tick(&w);
+    }
+}
+
+TEST_CASE("station core: a receiver not found does not answer, and earlier lines do not count after it", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    sim_start(&w);
+    int64_t line = w.in.now_ms;   /* something readable at boot, then nothing */
+    TEST_ASSERT_TRUE(answers_now(&w, STN_NEVER, line));
+    TEST_ASSERT_EQUAL(STN_JOB_DETECT, sim_until_job(&w, 5).kind);
+    fail_pass(&w, true);
+    TEST_ASSERT_EQUAL(STN_NO_RECEIVER, w.s.state);
+    TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, line));
+    TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, w.in.now_ms));   /* never while none is found */
+
+    /* Its lines again at the stored baud: streaming, and it answers; the old line still does not count. */
+    w.in.now_ms += 5000;
+    w.in.text_lines += 2;
+    (void)sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, line));
+    TEST_ASSERT_TRUE(answers_now(&w, STN_NEVER, w.in.now_ms - 1000));
+
+    /* A receiver update that left it at its loader is the same: no answer from before it. */
+    sim_init(&w, false);
+    boot_applied(&w);
+    int64_t before = w.in.now_ms - 1000;
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, STN_FLASH_NEW));
+    TEST_ASSERT_EQUAL(STN_JOB_FLASH, sim_next(&w).kind);
+    stn_result_t r = res(STN_OK);
+    r.flash_end = (uint8_t)STN_FLASH_END_NOTHING;
+    r.supported = true;
+    r.in_loader = true;
+    sim_done(&w, &r);
+    TEST_ASSERT_EQUAL(STN_NO_RECEIVER, w.s.state);
+    w.in.now_ms += 1000;
+    w.rtcm_on = false;
+    TEST_ASSERT_FALSE(answers_now(&w, STN_NEVER, before));
 }
 
 TEST_CASE("station core: the loader's restart key goes out once per boot", "[station]")
@@ -1501,43 +1703,371 @@ TEST_CASE("station core: maintenance ends at the user's word; a silent receiver 
     TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 890).kind);
 }
 
-TEST_CASE("station core: maintenance survives an ESP32 reset through its RTC record", "[station]")
+TEST_CASE("station core: maintenance records: the RTC record and the stored copy, damaged ones refused", "[station]")
 {
+    stn_maint_rec_t rec = { .on = true, .stamp = 0xA5u, .left_ms = 600000, .chosen_s = 900,
+                            .rtc_us = 0x123456789ull, .end_unix = 1791590400 };
     stn_maint_rtc_t r;
-    uint32_t stamp;
-    uint32_t left;
-    uint32_t spent;
-    stn_maint_rtc_write(&r, 0xA5u, 600, 300);
-    TEST_ASSERT_TRUE(stn_maint_rtc_read(&r, &stamp, &left, &spent));
-    TEST_ASSERT_EQUAL_HEX32(0xA5u, stamp);
-    TEST_ASSERT_EQUAL_UINT32(600, left);
-    TEST_ASSERT_EQUAL_UINT32(300, spent);
+    stn_maint_rec_t got;
+    stn_maint_rtc_write(&r, &rec);
+    TEST_ASSERT_TRUE(stn_maint_rtc_read(&r, &got));
+    TEST_ASSERT_TRUE(got.on);
+    TEST_ASSERT_EQUAL_HEX32(0xA5u, got.stamp);
+    TEST_ASSERT_EQUAL_UINT32(600000, got.left_ms);
+    TEST_ASSERT_EQUAL_UINT32(900, got.chosen_s);
+    TEST_ASSERT_TRUE(got.rtc_us == 0x123456789ull);
+    TEST_ASSERT_TRUE(got.end_unix == 1791590400);
     stn_maint_rtc_t bad = r;
-    bad.left_s = 601;   /* damaged */
-    TEST_ASSERT_FALSE(stn_maint_rtc_read(&bad, &stamp, &left, &spent));
+    bad.left_ms = 600001;   /* damaged */
+    TEST_ASSERT_FALSE(stn_maint_rtc_read(&bad, &got));
     bad = r;
     bad.magic ^= 1u;
-    TEST_ASSERT_FALSE(stn_maint_rtc_read(&bad, &stamp, &left, &spent));
-    stn_maint_rtc_write(&r, 0xA5u, 0, 0);   /* cleared */
-    TEST_ASSERT_FALSE(stn_maint_rtc_read(&r, &stamp, &left, &spent));
+    TEST_ASSERT_FALSE(stn_maint_rtc_read(&bad, &got));
     memset(&r, 0xFF, sizeof(r));             /* random memory after a power cut */
-    TEST_ASSERT_FALSE(stn_maint_rtc_read(&r, &stamp, &left, &spent));
+    TEST_ASSERT_FALSE(stn_maint_rtc_read(&r, &got));
+    memset(&r, 0, sizeof(r));
+    TEST_ASSERT_FALSE(stn_maint_rtc_read(&r, &got));
+    /* More left than chosen, or more than the longest choice: not ours. */
+    stn_maint_rec_t odd = rec;
+    odd.left_ms = 901000;
+    stn_maint_rtc_write(&r, &odd);
+    TEST_ASSERT_FALSE(stn_maint_rtc_read(&r, &got));
+    odd = rec;
+    odd.left_ms = STN_MAINT_MAX_S * 1000u + 1u;
+    odd.chosen_s = STN_MAINT_MAX_S * 2u;
+    stn_maint_rtc_write(&r, &odd);
+    TEST_ASSERT_FALSE(stn_maint_rtc_read(&r, &got));
+    /* "Ended" is a record too (a stored copy left behind is then stale). */
+    stn_maint_rec_t off = { .on = false, .stamp = 7 };
+    stn_maint_rtc_write(&r, &off);
+    TEST_ASSERT_TRUE(stn_maint_rtc_read(&r, &got));
+    TEST_ASSERT_FALSE(got.on);
+    TEST_ASSERT_EQUAL_HEX32(7, got.stamp);
 
-    /* The boot only listens until the time left is up. */
+    /* The stored copy: versioned, little-endian, newer writers may append. */
+    uint8_t buf[STN_MAINT_STORE_MAX + 8];
+    size_t len = stn_maint_store_encode(&rec, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_size_t(21, len);
+    TEST_ASSERT_EQUAL_UINT8(STN_MAINT_STORE_VERSION, buf[0]);
+    TEST_ASSERT_EQUAL_UINT8(0xA5, buf[1]);
+    TEST_ASSERT_TRUE(stn_maint_store_decode(&got, buf, len));
+    TEST_ASSERT_TRUE(got.on);
+    TEST_ASSERT_EQUAL_HEX32(0xA5u, got.stamp);
+    TEST_ASSERT_EQUAL_UINT32(600000, got.left_ms);
+    TEST_ASSERT_EQUAL_UINT32(900, got.chosen_s);
+    TEST_ASSERT_TRUE(got.end_unix == 1791590400);
+    TEST_ASSERT_TRUE(got.rtc_us == 0);   /* RTC record only */
+    TEST_ASSERT_EQUAL_size_t(0, stn_maint_store_encode(&rec, buf, 20));
+    TEST_ASSERT_FALSE(stn_maint_store_decode(&got, buf, len - 1));
+    TEST_ASSERT_FALSE(stn_maint_store_decode(&got, buf, 0));
+    TEST_ASSERT_FALSE(stn_maint_store_decode(&got, NULL, len));
+    buf[len] = 0x55;   /* a newer writer's field */
+    buf[0] = STN_MAINT_STORE_VERSION + 1;
+    TEST_ASSERT_TRUE(stn_maint_store_decode(&got, buf, len + 1));
+    buf[0] = 0;
+    TEST_ASSERT_FALSE(stn_maint_store_decode(&got, buf, len));
+    stn_maint_rec_t none = rec;
+    none.left_ms = 0;   /* written in its last minute: read, with nothing left */
+    len = stn_maint_store_encode(&none, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(stn_maint_store_decode(&got, buf, len));
+    TEST_ASSERT_EQUAL_UINT32(0, got.left_ms);
+}
+
+TEST_CASE("station core: the stored copy is due at entry, at an extension and every minute, and holds less than is left",
+          "[station]")
+{
     sim_t w;
     sim_init(&w, false);
-    stn_maint_restore(&w.s, 600, 300, w.in.now_ms);
+    boot_applied(&w);
+    stn_maint_rec_t rec;
+    TEST_ASSERT_FALSE(stn_maint_store_due(&w.s, 0, STN_NEVER, w.in.now_ms));   /* off: nothing to store */
+    stn_maint_record(&w.s, w.in.now_ms, 0, false, &rec);
+    TEST_ASSERT_FALSE(rec.on);
+
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 900, false, w.in.now_ms));
+    TEST_ASSERT_TRUE(stn_maint_store_due(&w.s, 0, STN_NEVER, w.in.now_ms));
+    const int64_t utc = 1791590400;
+    stn_maint_record(&w.s, w.in.now_ms, utc, false, &rec);   /* the RTC record: exact */
+    TEST_ASSERT_TRUE(rec.on);
+    TEST_ASSERT_EQUAL_UINT32(900000, rec.left_ms);
+    TEST_ASSERT_EQUAL_UINT32(900, rec.chosen_s);
+    TEST_ASSERT_TRUE(rec.end_unix == utc + 900);
+    stn_maint_record(&w.s, w.in.now_ms, 0, true, &rec);      /* the stored copy, no clock */
+    TEST_ASSERT_EQUAL_UINT32(900000 - STN_MAINT_STORE_SHORT_S * 1000, rec.left_ms);
+    TEST_ASSERT_TRUE(rec.end_unix == 0);
+
+    /* Saved now: due again after STN_MAINT_SAVE_S, and a reset at any moment
+     * until a save that comes a few seconds late never finds more than is
+     * left. */
+    int64_t saved = w.in.now_ms;
+    stn_maint_rec_t stored;
+    stn_maint_record(&w.s, w.in.now_ms, 0, true, &stored);
+    for (int i = 0; i < (int)STN_MAINT_STORE_SHORT_S; i++) {
+        TEST_ASSERT_EQUAL(i >= (int)STN_MAINT_SAVE_S, stn_maint_store_due(&w.s, 900, saved, w.in.now_ms));
+        TEST_ASSERT_TRUE((int64_t)stored.left_ms <= w.s.maint_until_ms - w.in.now_ms);
+        sim_tick(&w);
+    }
+    /* An extension is stored at once. */
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 900, false, w.in.now_ms));
+    TEST_ASSERT_TRUE(stn_maint_store_due(&w.s, 900, w.in.now_ms, w.in.now_ms));
+    /* Near its end the copy holds nothing: a reset then ends it. */
+    w.s.maint_until_ms = w.in.now_ms + (int64_t)STN_MAINT_STORE_SHORT_S * 1000 - 1000;
+    stn_maint_record(&w.s, w.in.now_ms, 0, true, &rec);
+    TEST_ASSERT_TRUE(rec.on);
+    TEST_ASSERT_EQUAL_UINT32(0, rec.left_ms);
+}
+
+static stn_maint_boot_in_t boot_in(void)
+{
+    stn_maint_boot_in_t in;
+    memset(&in, 0, sizeof(in));
+    in.uptime_ms = 1500;
+    return in;
+}
+
+TEST_CASE("station core: a boot resumes maintenance from the RTC record, else from the stored copy, less the reset's "
+          "time",
+          "[station]")
+{
+    const stn_maint_rec_t rtc = { .on = true, .stamp = 3, .left_ms = 600000, .chosen_s = 900,
+                                  .rtc_us = 1000000000ull, .end_unix = 1791590400 };
+    const stn_maint_rec_t store = { .on = true, .stamp = 3, .left_ms = 535000, .chosen_s = 900,
+                                    .end_unix = 1791590400 };
+    stn_maint_boot_t b;
+
+    /* A software reset, a crash or a watchdog: the RTC timer tells the time
+     * across it exactly; the stored copy is not needed. */
+    stn_maint_boot_in_t in = boot_in();
+    in.rtc_ok = true;
+    in.rtc = rtc;
+    in.rtc_timer_kept = true;
+    in.rtc_now_us = rtc.rtc_us + 4200000ull;
+    in.store_ok = true;
+    in.store = store;
+    stn_maint_boot(&in, &b);
+    TEST_ASSERT_EQUAL(STN_MAINT_FROM_RTC, b.from);
+    TEST_ASSERT_TRUE(b.elapsed_known);
+    TEST_ASSERT_EQUAL_UINT32(600000 - 4200, b.left_ms);
+    TEST_ASSERT_EQUAL_UINT32(900, b.chosen_s);
+    TEST_ASSERT_TRUE(b.end_unix == 0);   /* no clock check needed */
+    TEST_ASSERT_FALSE(b.expired);
+
+    /* The RTC memory kept, the timer not (power-on class), or a timer that
+     * went back: at least this boot's run time comes off, and the clock
+     * checks the rest. */
+    in.rtc_timer_kept = false;
+    stn_maint_boot(&in, &b);
+    TEST_ASSERT_EQUAL(STN_MAINT_FROM_RTC, b.from);
+    TEST_ASSERT_FALSE(b.elapsed_known);
+    TEST_ASSERT_EQUAL_UINT32(600000 - 1500, b.left_ms);
+    TEST_ASSERT_TRUE(b.end_unix == 1791590400);
+    in.rtc_timer_kept = true;
+    in.rtc_now_us = 2000000ull;
+    stn_maint_boot(&in, &b);
+    TEST_ASSERT_FALSE(b.elapsed_known);
+    TEST_ASSERT_EQUAL_UINT32(600000 - 1500, b.left_ms);
+
+    /* Its time ran out across the reset. */
+    in.rtc_now_us = rtc.rtc_us + 600000000ull;
+    stn_maint_boot(&in, &b);
+    TEST_ASSERT_EQUAL(STN_MAINT_FROM_NONE, b.from);
+    TEST_ASSERT_TRUE(b.expired);
+    TEST_ASSERT_EQUAL_UINT32(900, b.chosen_s);
+
+    /* The RTC record says it had ended: a stored copy left behind is stale. */
+    in = boot_in();
+    in.rtc_ok = true;
+    in.rtc.on = false;
+    in.store_ok = true;
+    in.store = store;
+    stn_maint_boot(&in, &b);
+    TEST_ASSERT_EQUAL(STN_MAINT_FROM_NONE, b.from);
+    TEST_ASSERT_FALSE(b.expired);
+
+    /* The EN pin (or a power cut) lost the RTC memory: the stored copy, less
+     * this boot's run time; the clock checks the rest. */
+    in = boot_in();
+    in.store_ok = true;
+    in.store = store;
+    stn_maint_boot(&in, &b);
+    TEST_ASSERT_EQUAL(STN_MAINT_FROM_STORE, b.from);
+    TEST_ASSERT_FALSE(b.elapsed_known);
+    TEST_ASSERT_EQUAL_UINT32(535000 - 1500, b.left_ms);
+    TEST_ASSERT_EQUAL_UINT32(900, b.chosen_s);
+    TEST_ASSERT_TRUE(b.end_unix == 1791590400);
+    in.store.left_ms = 1000;   /* stored in its last minute */
+    stn_maint_boot(&in, &b);
+    TEST_ASSERT_EQUAL(STN_MAINT_FROM_NONE, b.from);
+    TEST_ASSERT_TRUE(b.expired);
+
+    /* An open receiver flash journal, or the factory reset before this boot:
+     * nothing resumes. */
+    in = boot_in();
+    in.rtc_ok = true;
+    in.rtc = rtc;
+    in.store_ok = true;
+    in.store = store;
+    in.blocked = true;
+    stn_maint_boot(&in, &b);
+    TEST_ASSERT_EQUAL(STN_MAINT_FROM_NONE, b.from);
+    TEST_ASSERT_FALSE(b.expired);
+
+    /* Nothing at all. */
+    in = boot_in();
+    stn_maint_boot(&in, &b);
+    TEST_ASSERT_EQUAL(STN_MAINT_FROM_NONE, b.from);
+    TEST_ASSERT_FALSE(b.expired);
+}
+
+/* Resume as station_init does: from a decision with this much left. */
+static void resume(sim_t *w, uint8_t from, uint32_t left_ms, uint32_t chosen_s, int64_t end_unix)
+{
+    stn_maint_boot_t b;
+    memset(&b, 0, sizeof(b));
+    b.from = from;
+    b.left_ms = left_ms;
+    b.chosen_s = chosen_s;
+    b.end_unix = end_unix;
+    stn_maint_restore(&w->s, &b, w->in.now_ms);
+}
+
+TEST_CASE("station core: resumed maintenance only listens until its time left is up", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    resume(&w, STN_MAINT_FROM_RTC, 600000, 900, 0);
     TEST_ASSERT_TRUE(w.s.maint);
+    TEST_ASSERT_TRUE(w.s.maint_resumed);
     TEST_ASSERT_EQUAL_UINT32(900, w.s.maint_chosen_s);
+    TEST_ASSERT_EQUAL_UINT32(600, stn_maint_left_s(&w.s, w.in.now_ms));
     w.rtcm_on = true;
     sim_start(&w);
+    stn_restart_seen(&w.s);   /* the user's work restarted the receiver: noted, nothing done */
     TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 590).kind);
     TEST_ASSERT_EQUAL(STN_IDLE, w.s.state);
     stn_job_t j = sim_until_job(&w, 20);
     TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
     stn_note_t n;
     TEST_ASSERT_TRUE(has_note(&w, STN_NOTE_MAINT_OFF, &n));
+    TEST_ASSERT_EQUAL_INT32(STN_MAINT_END_TIME, n.b);
     TEST_ASSERT_INT32_WITHIN(3, 900, n.a);   /* the time before the reset counts */
+    TEST_ASSERT_FALSE(w.s.maint_resumed);
+
+    /* Nothing left: nothing resumes. */
+    sim_t z;
+    sim_init(&z, false);
+    resume(&z, STN_MAINT_FROM_STORE, 0, 900, 0);
+    TEST_ASSERT_FALSE(z.s.maint);
+    resume(&z, STN_MAINT_FROM_NONE, 60000, 900, 0);
+    TEST_ASSERT_FALSE(z.s.maint);
+}
+
+TEST_CASE("station core: by the clock, resumed maintenance never ends later than chosen", "[station]")
+{
+    const int64_t end = 1791590400;
+    sim_t w;
+    sim_init(&w, false);
+    w.rtcm_on = true;
+    resume(&w, STN_MAINT_FROM_STORE, 300000, 900, end);
+    sim_start(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 10).kind);
+    /* No clock yet: nothing changes. */
+    stn_maint_clock(&w.s, 0, w.in.now_ms);
+    TEST_ASSERT_UINT32_WITHIN(1, 290, stn_maint_left_s(&w.s, w.in.now_ms));
+    /* The clock says 100 s are left (the ESP32 was held in reset): never
+     * later than that (a second less: the clock counts whole seconds), and
+     * the time spent grows by as much. */
+    stn_maint_clock(&w.s, end - 100, w.in.now_ms);
+    TEST_ASSERT_EQUAL_UINT32(99, stn_maint_left_s(&w.s, w.in.now_ms));
+    TEST_ASSERT_EQUAL_UINT32(900, w.s.maint_chosen_s);
+    TEST_ASSERT_TRUE(w.s.maint_end_unix == 0);   /* once */
+    stn_maint_clock(&w.s, end - 50, w.in.now_ms);
+    TEST_ASSERT_EQUAL_UINT32(99, stn_maint_left_s(&w.s, w.in.now_ms));
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 94).kind);
+    stn_job_t j = sim_until_job(&w, 10);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+    stn_note_t n;
+    TEST_ASSERT_TRUE(has_note(&w, STN_NOTE_MAINT_OFF, &n));
+    TEST_ASSERT_EQUAL_INT32(STN_MAINT_END_TIME, n.b);
+    TEST_ASSERT_INT32_WITHIN(2, 900, n.a);
+
+    /* The clock never adds time. */
+    sim_t m;
+    sim_init(&m, false);
+    resume(&m, STN_MAINT_FROM_STORE, 300000, 900, end);
+    stn_maint_clock(&m.s, end - 1000, m.in.now_ms);
+    TEST_ASSERT_EQUAL_UINT32(300, stn_maint_left_s(&m.s, m.in.now_ms));
+
+    /* Its end passed while the ESP32 was off: it ends at the next step. */
+    sim_t x;
+    sim_init(&x, false);
+    x.rtcm_on = true;
+    resume(&x, STN_MAINT_FROM_STORE, 300000, 900, end);
+    sim_start(&x);
+    stn_maint_clock(&x.s, end + 5, x.in.now_ms);
+    TEST_ASSERT_EQUAL_UINT32(0, stn_maint_left_s(&x.s, x.in.now_ms));
+    (void)sim_next(&x);
+    TEST_ASSERT_FALSE(x.s.maint);
+    TEST_ASSERT_TRUE(has_note(&x, STN_NOTE_MAINT_OFF, &n));
+    TEST_ASSERT_EQUAL_INT32(STN_MAINT_END_TIME, n.b);
+
+    /* An extension moves the end by the clock as much as the time left. */
+    sim_t e;
+    sim_init(&e, false);
+    resume(&e, STN_MAINT_FROM_STORE, 300000, 900, end);
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&e.s, 900, false, e.in.now_ms));
+    TEST_ASSERT_EQUAL_UINT32(1200, stn_maint_left_s(&e.s, e.in.now_ms));
+    TEST_ASSERT_TRUE(e.s.maint_end_unix == end + 900);
+    stn_maint_clock(&e.s, end - 100, e.in.now_ms);
+    TEST_ASSERT_EQUAL_UINT32(999, stn_maint_left_s(&e.s, e.in.now_ms));
+
+    /* A record written before the clock checked the resumed end carries it on. */
+    sim_t c;
+    sim_init(&c, false);
+    resume(&c, STN_MAINT_FROM_STORE, 300000, 900, end);
+    stn_maint_rec_t rec;
+    stn_maint_record(&c.s, c.in.now_ms, 0, true, &rec);
+    TEST_ASSERT_TRUE(rec.end_unix == end);
+    stn_maint_record(&c.s, c.in.now_ms, end - 100, true, &rec);   /* a clock, not checked yet: never later */
+    TEST_ASSERT_TRUE(rec.end_unix == end);
+    stn_maint_record(&c.s, c.in.now_ms, end - 1000, true, &rec);  /* the counted time ends first */
+    TEST_ASSERT_TRUE(rec.end_unix == end - 700);
+}
+
+TEST_CASE("station core: a power cut ends resumed maintenance, not one the user started or extended", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    w.rtcm_on = true;
+    resume(&w, STN_MAINT_FROM_STORE, 1200000, 1800, 0);
+    sim_start(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 20).kind);
+    TEST_ASSERT_TRUE(stn_maint_power_cut(&w.s, &w.in));
+    TEST_ASSERT_FALSE(w.s.maint);
+    stn_note_t n;
+    TEST_ASSERT_TRUE(has_note(&w, STN_NOTE_MAINT_OFF, &n));
+    TEST_ASSERT_EQUAL_INT32(STN_MAINT_END_POWER, n.b);
+    TEST_ASSERT_INT32_WITHIN(2, 600 + 20, n.a);
+    /* The stream-first path, as at boot. */
+    TEST_ASSERT_EQUAL(STN_IDLE, w.s.state);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, sim_until_job(&w, 5).kind);
+    TEST_ASSERT_FALSE(stn_maint_power_cut(&w.s, &w.in));   /* nothing on */
+
+    /* Started by the user this boot: a power-on verdict says nothing about it. */
+    sim_t u;
+    sim_init(&u, false);
+    boot_applied(&u);
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&u.s, 900, false, u.in.now_ms));
+    TEST_ASSERT_FALSE(stn_maint_power_cut(&u.s, &u.in));
+    TEST_ASSERT_TRUE(u.s.maint);
+
+    /* Resumed, then extended by the user: theirs now. */
+    sim_t x;
+    sim_init(&x, false);
+    resume(&x, STN_MAINT_FROM_RTC, 600000, 900, 0);
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&x.s, 900, false, x.in.now_ms));
+    TEST_ASSERT_FALSE(stn_maint_power_cut(&x.s, &x.in));
+    TEST_ASSERT_TRUE(x.s.maint);
 }
 
 /* ---- live view ---------------------------------------------------------------- */

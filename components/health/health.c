@@ -808,6 +808,9 @@ static void tick(void)
     in->reboot_inhibited = lifecycle_reboot_inhibited(NULL);
     in->detect_passes = s_st.detect_passes;
     in->answers = s_st.rx_answers;
+    /* Exact times, read with the station's status: the same evidence as its receiver_responding. */
+    in->line_age_ms = s_st.rx_line_age_ms;
+    in->answer_age_ms = s_st.rx_answer_age_ms;
     in->rx_held = s_st.first_apply_held;
     gnss_obs_fix_t fix;
     in->no_sky = gnss_obs_get_fix(&fix) == ESP_OK && fix.age_ms <= STALL_MS && fix.quality == 0 && fix.satellites == 0;
@@ -921,6 +924,10 @@ static void tick(void)
     o.level = (health_level_t)hm_level(ls.level, degraded);
     o.alerts = alerts;
     o.last_step = (health_step_t)ls.last_step;
+    o.gnss_step = (health_step_t)ls.doing;
+    o.gnss_step_phase = ls.doing == 0 ? HEALTH_STEP_PHASE_NONE
+                        : ls.waiting  ? HEALTH_STEP_PHASE_WAITING
+                                      : HEALTH_STEP_PHASE_RUNNING;
     o.gnss_ladder_suspended = ls.suspended;
     o.uptime_s = (uint64_t)(esp_timer_get_time() / 1000000);
     o.gnss_stalls = ls.stalls;
@@ -933,7 +940,7 @@ static void tick(void)
     o.recovery_mode = (health_recovery_mode_t)mode;
     o.gnss_reboot_recheck = ls.reboot_recheck;
     hm_hold_view_t hv;
-    hm_hold_view(ls.episode, restarts, in->reboot_hold, hold_left, in->reboot_allowed, cap_wait, &hv);
+    hm_hold_view(ls.restart_possible, restarts, in->reboot_hold, hold_left, in->reboot_allowed, cap_wait, &hv);
     o.gnss_reboot_hold = hv.hold;
     o.gnss_reboot_hold_left_s = hv.hold_left_s;
     o.gnss_reboot_cap_wait_s = hv.cap_wait_s;

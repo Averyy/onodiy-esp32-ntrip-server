@@ -27,6 +27,12 @@ switches its signal group:
   ANT1GROUPA, ANT2GROUPA      OK and the signal-group log: the body build
                               25164 gave for the running group (main and
                               second antenna input) in a made-up header
+  BASEPOSA, SPPNAVA           OK and the position log: the receiver's own
+                              single-point solution at `own` (latitude,
+                              longitude, ellipsoidal height; the geoid
+                              `separation` apart from sea level), or no
+                              solution without `own` (no sky); whatever
+                              base mode runs
   anything else               `PARSING FAILED NO MATCHING FUNC  <word>`
 
 A restart withholds the RTCM output for `restart_s`, answers every command
@@ -58,8 +64,8 @@ import time
 
 from .rtcm import BitWriter, build_frame, llh_to_ecef, msg_type, payload_of
 from .unicore import (
-    GROUP_BODIES, GROUP_REFUSAL, ack_line, banner_line, config_line, groups_line, mode_line, refusal_text,
-    restarting_line, version_line,
+    GROUP_BODIES, GROUP_REFUSAL, ack_line, banner_line, config_line, groups_line, mode_line, own_position_body,
+    own_position_line, refusal_text, restarting_line, version_line,
 )
 
 ACCEPTED_GROUPS = ((4, 5), (3, 6), (5, 0), (7, 0))
@@ -121,8 +127,11 @@ class Um982Responder:
 
     def __init__(self, group: tuple[int, int] = (4, 5), firmware: str = "R4.10Build25164",
                  reject: tuple[tuple[int, int], ...] | list = (), restart_s: float = 3.0, model: str = "UM982",
-                 baud: int = 115200, clock=time.monotonic):
+                 baud: int = 115200, clock=time.monotonic, own: tuple[float, float, float] | None = None,
+                 separation: float = 0.0):
         self.clock = clock
+        self.own = tuple(own) if own is not None else None   # where the antenna is: latitude, longitude, ellipsoidal height
+        self.separation = float(separation)
         self.model = model
         self.firmware = firmware
         self.reject = {tuple(int(x) for x in g) for g in reject}
@@ -333,6 +342,11 @@ class Um982Responder:
             bodies = GROUP_BODIES.get(self.group)
             if bodies is not None:
                 self._say(now, DATA_DELAY_S, groups_line(bodies[ant - 1], ant))
+        elif up in ("BASEPOSA", "SPPNAVA"):
+            self._ack(cmd, now)
+            own = self.own
+            body = own_position_body(None) if own is None else own_position_body(own[0], own[1], own[2], self.separation)
+            self._say(now, DATA_DELAY_S, own_position_line(up, body))
         elif words[:2] == ["MODE", "BASE"]:
             self.mode = up
             self._ack(cmd, now)

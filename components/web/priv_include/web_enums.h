@@ -36,6 +36,7 @@ const char *web_station_state_name(station_state_t v);
 const char *web_station_alert_name(uint32_t bit);
 const char *web_health_level_name(health_level_t v);
 const char *web_health_step_name(health_step_t v);
+const char *web_health_step_phase_name(health_step_phase_t v);
 /** Name of one health_alert_t bit (NULL for an unknown bit). */
 const char *web_health_alert_name(uint32_t bit);
 const char *web_ntrip_state_name(ntrip_state_t v);
@@ -92,6 +93,8 @@ const char *web_live_why_name(uint8_t v);
 const char *web_live_end_name(uint8_t v);
 /** station_rx_boot_t: "none", "pending", "kept_running", "restarted", "unknown". */
 const char *web_rx_boot_name(uint8_t v);
+/** station_fix_state_t: none, checking, ok, far, no_solution, refused. */
+const char *web_fix_state_name(uint8_t v);
 /** station_rx_boot_by_t: "none", "restart", "uptime", "stream". */
 const char *web_rx_boot_by_name(uint8_t v);
 

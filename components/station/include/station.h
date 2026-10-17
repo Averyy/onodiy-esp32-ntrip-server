@@ -129,6 +129,14 @@
  * that sends no RTCM after a receiver restart while it still reports a fixed
  * base raises STATION_ALERT_ANTENNA_MOVED; it is never re-surveyed on its own.
  *
+ * Fixed-position check: with a fixed profile (typed in or locked), the
+ * receiver's own single-point solution is asked without a lease (one
+ * line, nothing paused; um98x_fixcheck.h): 60 s after streaming began, a
+ * receiver restart or an apply, then every 20 s until three solutions
+ * agree, again every hour. More than 50 m off horizontally or vertically
+ * raises STATION_ALERT_FIXED_FAR and journals it; within the limits again
+ * (40 m) clears it. Streaming is never held back for it.
+ *
  * Receiver settings read back: every apply session reads the receiver's
  * configuration dump; the station keeps (in RAM, with the time of the
  * read-back) what it said about BeiDou B1C/B2a in RTCM, multipath
@@ -160,9 +168,9 @@
  * gnss/autocfg was never set gets gnss/autocfg = 0, gnss/recovery = 2
  * (alerts only, unless set) and gnss/hold = 1 in one settings batch. While
  * gnss/hold is present (any build: it is kept in NVS) the station sends
- * only queries (identity, settings, base mode) and a loader prompt seen
- * during detection gets no restart key (RECEIVER_IN_LOADER, listen-only;
- * the user's receiver restart still works). The first successful apply
+ * only queries (identity, settings, base mode, own position) and a loader
+ * prompt seen during detection gets no restart key (RECEIVER_IN_LOADER,
+ * listen-only; the user's receiver restart still works). The first successful apply
  * erases it, and so does turning gnss/autocfg on (the web API, then
  * station_first_apply_hold_refresh()); a factory reset erases it with the
  * other user settings. station_status_t.first_apply_held reports it. A hold
@@ -188,19 +196,22 @@
  * reports STATION_STATE_IDLE meanwhile (listening only, as in a boot's
  * first seconds), which suspends health's GNSS ladder; rx_maintenance tells
  * the two apart (the UI's banner with the time left). Exit (the
- * user, or the time is up) runs the stream-first path as at boot. A reset
- * that keeps the ESP32's RTC memory keeps the state with its time left
- * (RTC memory, never NVS; the boot only listens until it ends): a software
- * reset, and also a reset that reads as power-on or brownout, since on the
- * ESP32-S3 the EN pin (the USB auto-reset, the RST button) reads as
- * power-on while the receiver keeps running and may be mid-work; a record
- * that survived says the ESP32's memory kept its power. Neither a restart
- * banner nor the power-on verdict ends it then: the user may have
- * restarted the receiver, or cycled its power, as part of the work. A
- * power cut that clears the memory ends it. Entry and exit are journalled.
+ * user, or the time is up) runs the stream-first path as at boot. An ESP32
+ * reset keeps the state with its time left, the boot only listening until
+ * it ends: a software reset, a crash or a watchdog from the RTC memory
+ * (exact), and a reset by the EN pin (on the ESP32-S3 the USB auto-reset
+ * and the RST button; it reads as power-on and powers the RTC memory down
+ * while the receiver keeps running and may be mid-work) from a copy in
+ * settings (gnss/maint: at entry, at each extension and every minute, with
+ * up to 70 s less time left). The time across the reset comes off; it never
+ * ends later than the time chosen (with the trusted clock, also when the
+ * ESP32 was held in reset), and ends at once when that time ran out
+ * meanwhile. A power-on reset that restarted the receiver too was a power
+ * cut: a maintenance resumed at that boot ends (not one the user extended
+ * since). Any other restart banner does not end it: the work may restart
+ * the receiver. A factory reset ends it. Entry and exit are journalled.
  * PROVISIONAL, to be confirmed on hardware (whether input on the link can
- * disturb the receiver while it is worked on through its other port, and
- * whether the ESP32-S3 keeps its RTC memory through an EN reset).
+ * disturb the receiver while it is worked on through its other port).
  *
  * Live view (station_live_view_start; satellites first): a window the user
  * opens for CONFIG_STATION_LIVE_VIEW_MIN minutes (extendable up to
@@ -298,7 +309,19 @@ typedef enum {
     STATION_ALERT_NO_RECEIVER        = 1u << 6, /**< no receiver found (state NO_RECEIVER; not with RECEIVER_IN_LOADER or in maintenance): next_detect_in_s says when the next search runs */
     STATION_ALERT_SIGNALS_MISMATCH   = 1u << 7, /**< the signals the receiver reports for its signal group are not what the profile's group
                                                      should configure (rx_bands, um98x_bands.h); set and cleared by each apply session's report */
+    STATION_ALERT_FIXED_FAR          = 1u << 8, /**< the fixed position is more than 50 m (horizontally or vertically) from the receiver's own
+                                                     solution (fix_* in the status); never holds streaming back */
 } station_alert_t;
+
+/** The fixed-position check (station_status_t.fix_state). */
+typedef enum {
+    STATION_FIX_OFF = 0,         /**< no check: the profile surveys, or not a model the station configures */
+    STATION_FIX_CHECKING,        /**< no verdict yet */
+    STATION_FIX_NEAR,            /**< within the limits */
+    STATION_FIX_FAR,             /**< beyond them: STATION_ALERT_FIXED_FAR */
+    STATION_FIX_NO_SOLUTION,     /**< no verdict: the last check got no usable solution (no sky, or none reported) */
+    STATION_FIX_REFUSED,         /**< no verdict: the receiver refused both position logs */
+} station_fix_state_t;
 
 /**
  * What the user confirmed for a receiver update (download or upload): the
@@ -440,7 +463,11 @@ typedef struct {
 typedef struct {
     station_state_t state;
     um98x_info_t receiver;           /**< live, or last persisted when unresponsive */
-    bool receiver_responding;
+    bool receiver_responding;        /**< the receiver answers (read at the time of the call): it streams (valid RTCM within
+                                          10 s), or it sent a checksum-valid line (a reply, a log, NMEA) after its last RTCM
+                                          frame (none this boot: a line within the last 90 s); never while no receiver is
+                                          found. A receiver that never streamed and sends nothing unasked is asked once a
+                                          minute, so one that answers when asked stays answering and one that hung does not */
     bool identity_confirmed;         /**< receiver identity confirmed by this boot's version query */
     uint32_t alerts;                 /**< station_alert_t flags */
     bool profile_applied;            /**< receiver runs the stored profile */
@@ -508,6 +535,8 @@ typedef struct {
     bool receiver_restarting;        /**< it answered "The Board is resetting" within 20 s and its restart banner has not come yet */
     uint64_t rx_answers;             /**< checksum-valid command-layer lines since boot (acks, logs, banners, restarting answers) */
     uint32_t rx_answer_age_ms;       /**< since the last of them, UINT32_MAX = never: "the receiver answers" */
+    uint32_t rx_line_age_ms;         /**< since the last checksum-valid text line of any kind (replies, logs, NMEA),
+                                          UINT32_MAX = none this boot (receiver_responding's evidence) */
 
     /* What the running signal group configures (the last apply session's query this boot). */
     um98x_bands_t rx_bands;          /**< state UNKNOWN until a session asked (um98x_bands.h) */
@@ -526,6 +555,14 @@ typedef struct {
     station_sg_t sg_back;
     char sg_refused_reply[64];       /**< the receiver's reply ("signal group rejected" when its read-back kept another group) */
     station_sgt_brief_t sg_test;     /**< the signal-group comparison, in short */
+
+    /* The fixed-position check: the fixed profile's position against the receiver's own solution. */
+    uint8_t fix_state;               /**< station_fix_state_t */
+    double fix_horizontal_m;         /**< NEAR, FAR: horizontal distance (the medians that decided) */
+    double fix_up_m;                 /**< NEAR, FAR: fixed height minus the receiver's (> 0: the fixed position is above) */
+    double fix_distance_m;           /**< NEAR, FAR: 3-D distance */
+    bool fix_height_only;            /**< FAR by the height alone */
+    uint32_t fix_checked_age_s;      /**< since the latest usable solution, UINT32_MAX = none */
 } station_status_t;
 
 /**

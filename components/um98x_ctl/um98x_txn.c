@@ -92,6 +92,7 @@ void um98x_txn_begin(um98x_txn_t *t, um98x_txn_kind_t kind, const char *cmd, int
         t->max_sends = UM98X_PROBE_SENDS;
         break;
     case UM98X_TXN_GROUPS:
+    case UM98X_TXN_OWNPOS:
         t->timeout_ms = UM98X_ACK_TIMEOUT_MS;
         t->max_sends = UM98X_GROUPS_SENDS;
         break;
@@ -130,10 +131,27 @@ bool um98x_txn_leading_crlf(const um98x_txn_t *t)
     return t->kind == UM98X_TXN_VERSION || t->kind == UM98X_TXN_VERSION_RESTART || t->kind == UM98X_TXN_PROBE;
 }
 
+/* A one-shot log query: done on its log, which follows the ack. */
+static bool log_query(const um98x_txn_t *t)
+{
+    return t->kind == UM98X_TXN_GROUPS || t->kind == UM98X_TXN_OWNPOS;
+}
+
 static bool command_like(const um98x_txn_t *t)
 {
-    return t->kind == UM98X_TXN_COMMAND || t->kind == UM98X_TXN_MODE || t->kind == UM98X_TXN_CONFIG ||
-           t->kind == UM98X_TXN_GROUPS;
+    return t->kind == UM98X_TXN_COMMAND || t->kind == UM98X_TXN_MODE || t->kind == UM98X_TXN_CONFIG || log_query(t);
+}
+
+/* The position log an OWNPOS query asks for (by its command), 0 for anything else. */
+static uint8_t own_log_of(const char *cmd)
+{
+    if (um98x_echo_matches("BASEPOSA", 8, cmd)) {
+        return UM98X_OWN_LOG_BASEPOS;
+    }
+    if (um98x_echo_matches("SPPNAVA", 7, cmd)) {
+        return UM98X_OWN_LOG_SPPNAV;
+    }
+    return 0;
 }
 
 um98x_txn_action_t um98x_txn_poll(um98x_txn_t *t, int64_t now_ms, int64_t *wake_ms)
@@ -163,7 +181,7 @@ um98x_txn_action_t um98x_txn_poll(um98x_txn_t *t, int64_t now_ms, int64_t *wake_
          * the expiry itself, not from when this poll noticed it. */
         int64_t expired = t->deadline_ms;
         t->deadline_ms = UM98X_NEVER;
-        if (t->kind == UM98X_TXN_GROUPS && t->ack_seen) {
+        if (log_query(t) && t->ack_seen) {
             /* Accepted, but no log this firmware reads: asking again
              * would only get the same. */
             finish(t, UM98X_TXN_TIMEOUT, now_ms);
@@ -255,7 +273,7 @@ static void on_reject(um98x_txn_t *t, const um98x_line_t *l, int64_t now_ms)
     if (t->rejects < UINT8_MAX) {
         t->rejects++;
     }
-    if (t->kind == UM98X_TXN_GROUPS) {
+    if (log_query(t)) {
         finish(t, UM98X_TXN_REJECTED, now_ms);   /* a firmware without the query: every send alike */
         return;
     }
@@ -302,7 +320,7 @@ bool um98x_txn_on_line(um98x_txn_t *t, const char *line, size_t len, const um98x
             on_reject(t, l, now_ms);
         } else if (t->kind == UM98X_TXN_COMMAND) {
             finish(t, UM98X_TXN_OK, now_ms);
-        } else if (t->kind == UM98X_TXN_GROUPS) {
+        } else if (log_query(t)) {
             t->deadline_ms = now_ms + UM98X_GROUPS_LOG_MS;   /* the log follows the ack */
         } else if (t->kind == UM98X_TXN_CONFIG && t->ack_ms == UM98X_NEVER) {
             t->ack_ms = now_ms;
@@ -364,6 +382,19 @@ bool um98x_txn_on_line(um98x_txn_t *t, const char *line, size_t len, const um98x
             size_t n = l->text_len < sizeof(t->groups_body) - 1u ? l->text_len : sizeof(t->groups_body) - 1u;
             memcpy(t->groups_body, l->text, n);
             t->groups_body[n] = '\0';
+        }
+        append_text(t, line, len);
+        finish(t, UM98X_TXN_OK, now_ms);
+        return true;
+
+    case UM98X_LINE_OWNPOS:
+        if (t->kind != UM98X_TXN_OWNPOS || l->own_log != own_log_of(t->cmd)) {
+            return false;
+        }
+        {
+            size_t n = l->text_len < sizeof(t->own_body) - 1u ? l->text_len : sizeof(t->own_body) - 1u;
+            memcpy(t->own_body, l->text, n);
+            t->own_body[n] = '\0';
         }
         append_text(t, line, len);
         finish(t, UM98X_TXN_OK, now_ms);
