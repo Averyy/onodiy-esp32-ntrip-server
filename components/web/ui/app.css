@@ -287,9 +287,12 @@ body { --top-pad: max(0.5rem, env(safe-area-inset-top)); --top-h: calc(var(--top
   white-space: nowrap;
 }
 .tabs a.active { color: var(--text); border-bottom-color: var(--accent); }
-/* The five tabs fit a 390 px phone; a narrower screen scrolls them (the fades say so). */
+/* The five tabs fit a 360 px phone; a narrower screen scrolls them (the fades say so). */
 @media (max-width: 420px) { .tabs a { padding-left: 0.5rem; padding-right: 0.5rem; } }
-@media (max-width: 380px) { .tabs a { padding-left: 0.45rem; padding-right: 0.45rem; } }
+@media (max-width: 380px) {
+  .tabs { gap: 0; }
+  .tabs a { padding-left: 0.4rem; padding-right: 0.4rem; }
+}
 .tabs a .dot {
   display: inline-block;
   width: 7px;
@@ -504,6 +507,11 @@ body.no-contact .hero .state::before { background: var(--off); }
 .t-ok { color: var(--ok); }
 .t-warn { color: var(--warn); }
 .t-bad { color: var(--bad); }
+/* No contact (renderLive): every colour on the Status page is the last state it had, so all of it goes grey like the
+ * header's dot and the top card's (chips, words, figures, bars, "Also:" marks, the signals' ticks and C/N0). */
+body.no-contact .status-page :is(.ok, .warn, .bad, .info) { --tone: var(--off); --tone-soft: var(--off-soft); }
+body.no-contact .status-page :is(.t-ok, .t-warn, .t-bad, .cnr-weak, .cnr-ok, .cnr-good),
+body.no-contact .status-page .bands td.on { color: var(--off); }
 
 .msg {
   padding: 0.65rem 0.8rem;
@@ -802,7 +810,6 @@ tbody tr:last-child td { border-bottom: 0; }
 .clines { display: grid; gap: 0.6rem; }
 .cline { display: flex; align-items: center; gap: 0.75rem; }
 .cline > :first-child { flex: 1 1 auto; min-width: 0; }
-.cline > .btn { flex: none; }
 .cline .name { font-weight: 650; overflow-wrap: anywhere; }
 /* A link beside a card's title (cardHead): the Status cards' "Manage". */
 .card-head > .head-link { font-size: 0.9rem; font-weight: 600; }

@@ -61,6 +61,8 @@ const ONOCOY_SETUP_HASH = '#/casters/onocoy';
 const MANAGE_HASH = '#/receiver/settings/manage';
 /* A caster's states that keep it from streaming until a retry or the user: its colour stays amber or red meanwhile. */
 const CASTER_FAULT = ['backoff', 'auth_failed', 'config_error', 'banned', 'stopped'];
+/* Corrections this fresh (ms) arrive, as the station counts them (it calls the receiver streaming while they do). */
+const RTCM_FRESH_MS = 10000;
 
 const casterOn = c => c.enabled !== false && c.state !== 'disabled';
 
@@ -183,17 +185,21 @@ function qualityLead(q, name) {
  * the most important thing and what to do), actions (one; two in safe mode
  * and while settings cannot be saved:
  * {label, href, primary} links or {act, label} data-act buttons, so a
- * refresh keeps the focus), alertId (the alert the line says), covers
+ * refresh keeps the focus; page: a link named after the page it opens),
+ * alertId (the alert the line says), covers
  * (other alerts the line says: not listed again), notice (the
  * notice it covers), diagLead (the line on Logs when the lead points
- * there; null: the lead), subject (the caster slot the line names), doing
+ * there; null: the lead), subject (the caster slot the line names), named
+ * (every caster slot the line names with its state), doing
  * (what the receiver recovery does now, when the line says something
  * else), plan (doing, then the next
  * search and restart: one short line), trial (the Wi-Fi on trial), also
  * (other alerts, and each caster on that a retry or the user must clear,
  * unless the line names it or counts the casters down), facts ([label,
  * value, href of a Change link]: Receiver management when not the
- * default), delivering, quality (rxQuality()),
+ * default), delivering, arriving (corrections arrive: as fresh as the
+ * station's own rule, RTCM_FRESH_MS, and nothing says the receiver stopped),
+ * quality (rxQuality()),
  * ono (the Onocoy slot while it counts), onoStreaming (with corrections
  * behind it)}.
  *
@@ -205,9 +211,10 @@ function qualityLead(q, name) {
  * what it does in the plan line); no satellites; no corrections (the fixed
  * position instead of the antenna when it is far enough to stop them);
  * Onocoy stopped; maintenance; comparing signal groups; new Wi-Fi; receiver
- * not configured, looked for or configuring; Onocoy not set up; not or
- * partly streaming; the fixed position far from the receiver's own; too
- * few bands or no GLONASS for Onocoy; streaming.
+ * not configured, looked for or configuring; Onocoy not set up (unless the
+ * casters that are on stream nothing and one fails); not or partly
+ * streaming; the fixed position far from the receiver's own; too few bands
+ * or no GLONASS for Onocoy; streaming.
  */
 function stationState(s, admin) {
   const rcv = s.receiver || {};
@@ -221,16 +228,20 @@ function stationState(s, admin) {
   const sm = s.safe_mode || {};
   const ladder = LADDER_REASONS.map(id => find(id, 'health')).filter(Boolean)[0] || null;
   const fixedFar = find('fixed_far', 'station');
+  const fresh = typeof rcv.rtcm_age_ms === 'number' && rcv.rtcm_age_ms <= RTCM_FRESH_MS;
   /* During receiver maintenance the station says idle while the corrections keep coming. */
-  const maintFlowing = !!rcv.rx_maintenance && typeof rcv.rtcm_age_ms === 'number' && rcv.rtcm_age_ms < 5000;
+  const maintFlowing = !!rcv.rx_maintenance && fresh;
   const delivering = !sm.active && (state === 'streaming' || maintFlowing) && hl.level !== 'recovering' && !ladder;
+  const arriving = fresh && !sm.active && hl.level !== 'recovering' && !ladder;
   const onoSlot = admin ? onocoySlot(s) : null;
   const ono = onocoyCounting(onoSlot) ? onoSlot : null;
   const onoStreaming = !!(ono && ono.state === 'streaming' && delivering);
   const quality = rxQuality(rcv, delivering);
   const go = (label, href, primary) => ({ label: label, href: href, primary: !!primary });
+  /* A link named after the page it opens (the Status page leaves it out where a card's link opens that page). */
+  const page = (label, href, primary) => Object.assign(go(label, href, primary), { page: true });
   const pick = (key, head, tone, lead, more) => Object.assign({ key: key, head: head, tone: tone, lead: lead, actions: [],
-    alertId: null, covers: [], notice: null, trial: null, subject: null, search: null, diagLead: null, doing: null,
+    alertId: null, covers: [], notice: null, trial: null, subject: null, named: [], search: null, diagLead: null, doing: null,
     rx: null },
   more || {});
 
@@ -304,7 +315,8 @@ function stationState(s, admin) {
     if (stopped) {
       return pick('stopped', casterName(stopped) + ' stopped', 'bad', capFirst(lbl(L.stop, stopped.stop_reason || 'none')) +
         '. The station makes no new attempt until you act.',
-      { actions: [go('What to do', '#/casters')], notice: 'onocoy_stopped:' + stopped.slot, subject: stopped.slot });
+      { actions: [go('What to do', '#/casters')], notice: 'onocoy_stopped:' + stopped.slot, subject: stopped.slot,
+        named: [stopped.slot] });
     }
     if (admin && rcv.rx_maintenance) {
       return pick('maintenance', 'Receiver maintenance', 'info', 'The station sends the receiver no commands.' +
@@ -333,8 +345,10 @@ function stationState(s, admin) {
     if (state !== 'streaming') {
       return pick('receiver', HERO_TITLE[state] || lbl(L.station, state), 'info', HERO_STATE_LINE[state] || '', { rx: state });
     }
-    if (onoSlot && onoSlot.onocoy_ready === false) {
-      return pick('onocoy_setup', 'Onocoy not set up', 'warn', on.length ? 'Add your Onocoy credentials to stream to Onocoy too.' :
+    /* Onocoy not set up, unless the casters that are on stream nothing and one of them fails: that is said first. */
+    const failing = !streaming.length && down.some(c => CASTER_FAULT.indexOf(c.state) >= 0);
+    if (onoSlot && onoSlot.onocoy_ready === false && !failing) {
+      return pick('onocoy_setup', 'Onocoy not set up', 'warn', streaming.length ? 'Add your Onocoy credentials to stream to Onocoy too.' :
         'Add your Onocoy credentials to start streaming.', { actions: [go('Set up Onocoy', ONOCOY_SETUP_HASH, true)] });
     }
     if (!on.length) {
@@ -345,7 +359,7 @@ function stationState(s, admin) {
       }
       if ((s.casters || []).some(c => !emptySlot(c))) {
         return pick('no_caster', 'No caster turned on', 'warn', 'Every caster is turned off. Turn one on to start streaming.',
-          { actions: [go('Casters', '#/casters', true)] });
+          { actions: [page('Casters', '#/casters', true)] });
       }
       return pick('no_caster', 'No caster turned on', 'warn', 'Add a caster to start streaming.',
         { actions: [go('Add a caster', '#/casters', true)] });
@@ -353,7 +367,7 @@ function stationState(s, admin) {
     if (down.length) {
       const head = streaming.length ? 'Partly streaming' : 'Not streaming';
       const tone = streaming.length ? 'warn' : 'bad';
-      const more = admin ? { actions: [go('Casters', '#/casters')] } : {};
+      const more = admin ? { actions: [page('Casters', '#/casters')] } : {};
       const noNet = find('no_upstream');
       if (noNet) return pick('casters_down', head, tone, alertText(noNet)[1], Object.assign(more, { alertId: 'no_upstream' }));
       if (down.every(c => c.state === 'wait_data')) {
@@ -361,7 +375,7 @@ function stationState(s, admin) {
         for (const [id, label, href] of [['antenna_moved', 'Receiver', '#/receiver'], ['receiver_attention', 'Updates', '#/settings/updates'],
           ['config_failed', 'Receiver', '#/receiver']]) {
           const a = find(id, 'station');
-          if (a) return pick('casters_down', head, tone, alertText(a)[1], { actions: [go(label, href)], alertId: id });
+          if (a) return pick('casters_down', head, tone, alertText(a)[1], { actions: [page(label, href)], alertId: id });
         }
         return pick('casters_down', head, tone, 'Waiting for corrections from the receiver.', more);
       }
@@ -371,8 +385,10 @@ function stationState(s, admin) {
         lead = casterName(c) + ' is not streaming' + (admin ? ': ' + downReason(c) : '') + '.' +
           (admin && c.next_retry_s ? ' Next try in ' + fmt.dur(c.next_retry_s) + '.' : '');
         more.subject = c.slot;
+        more.named = [c.slot];
       } else {
         lead = (down.length === 2 ? andList(down.map(casterName)) : down.length + ' casters') + ' are not streaming.';
+        more.named = down.length === 2 ? down.map(c => c.slot) : [];
       }
       return pick('casters_down', head, tone, lead, more);
     }
@@ -383,12 +399,12 @@ function stationState(s, admin) {
     }
     if (onoStreaming && quality.any) {
       return pick('quality', quality.fewBands ? 'Too few bands for Onocoy' : 'No GLONASS for Onocoy', 'warn',
-        qualityLead(quality, casterName(ono)), { actions: [go('Receiver', '#/receiver')],
+        qualityLead(quality, casterName(ono)), { actions: [page('Receiver', '#/receiver')],
           alertId: quality.fewBands && find('bands') ? 'bands' : null });
     }
     const names = on.map(casterName);
     return pick('streaming', 'Streaming', 'ok', (names.length > 3 ? names.length + ' casters' : andList(names)) +
-      (names.length > 1 ? ' are' : ' is') + ' receiving corrections.');
+      (names.length > 1 ? ' are' : ' is') + ' receiving corrections.', { named: names.length > 3 ? [] : on.map(c => c.slot) });
   };
 
   const r = decide();
@@ -416,6 +432,7 @@ function stationState(s, admin) {
   /* What the recovery does now, when the line says something else, before the next search and restart. */
   r.plan = r.doing ? r.doing + (later ? ' ' + later + '.' : '') : later;
   r.delivering = delivering;
+  r.arriving = arriving;
   r.quality = quality;
   r.ono = ono;
   r.onoStreaming = onoStreaming;

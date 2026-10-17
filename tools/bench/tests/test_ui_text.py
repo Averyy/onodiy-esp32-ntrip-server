@@ -538,7 +538,7 @@ def test_state_every_condition_in_order():
                                                                               "group": {"master": 3, "slave": 6}}}),
         "wifi_trial": dict(network={"cred_trial": True, "cred_trial_left_s": 80, "pending_ssid": "Cabin"}),
         "receiver": dict(receiver={"state": "configuring"}, casters=[caster(0, "Onocoy", "wait_data")]),
-        "onocoy_setup": dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "backoff")]),
+        "onocoy_setup": dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "streaming")]),
         "casters_down": dict(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "auth_failed", reason="auth")],
                              receiver={"best_bands": 3}),
         "quality": dict(receiver={"best_bands": 3}),
@@ -918,7 +918,8 @@ def test_state_during_maintenance_restarts_and_one_caster_down():
     day stays on track. The restart plan shows while the receiver is fixed or looked for (full recovery only). A line
     about one caster names it as its subject (its row on the page does not say why again)."""
     maint = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600, "rtcm_age_ms": 300})
-    maint_quiet = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600, "rtcm_age_ms": 9000},
+    # Quiet past the station's 10 s: nothing arrives any more.
+    maint_quiet = status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600, "rtcm_age_ms": 12000},
                          casters=[caster(0, "Onocoy", "wait_data")])
     hold = {"reboot_hold": ["admin"], "reboot_hold_left_s": 1578, "reboot_cap_wait_s": None, "reboot_cap_limit": None}
     stall = status(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "link_restart", **hold})
@@ -1487,8 +1488,13 @@ def test_header_says_the_station_state_in_a_word_in_the_top_cards_colour():
         (dict(receiver={"state": "idle"}, casters=wait), ("receiver", "info", "Starting up")),
         (dict(receiver={"state": "detecting"}, casters=wait), ("receiver", "info", "Searching")),
         (dict(receiver={"state": "configuring"}, casters=wait), ("receiver", "info", "Configuring")),
-        (dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "backoff")]),
+        (dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "streaming")]),
          ("onocoy_setup", "warn", "Not set up")),
+        (dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "connecting")]),
+         ("onocoy_setup", "warn", "Not set up")),
+        # Nothing streams and the caster that is on fails: that first (Onocoy's setup waits on the Status page's card).
+        (dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "backoff")]),
+         ("casters_down", "bad", "Not streaming")),
         (dict(casters=[caster(0, "Onocoy", "disabled")]), ("no_caster", "warn", "No caster")),
         (dict(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "auth_failed", reason="auth")]),
          ("casters_down", "warn", "Partly streaming")),
