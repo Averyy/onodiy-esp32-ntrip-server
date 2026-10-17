@@ -1344,7 +1344,7 @@ it to Onocoy as well, and Onocoy's FAQ says: "Please note that multiple
 submissions of the same streams, e.g. from free or public networks such as
 IGS or RTK2GO, even when done by separate users in the onocoy platform, will
 result in banning." The UI warns about it on the card of each open slot and
-in one line on the Status page, and links that FAQ. It blocks nothing (RTK2go slots stay off unless the user
+in an "Also:" line of the Status page's top card, and links that FAQ. It blocks nothing (RTK2go slots stay off unless the user
 turns one on); saving such a pair still asks for `dup_stream_ack` (below).
 
 `GET /api/casters/{n}` returns one `{"slot", "config", "status"}` entry. In
