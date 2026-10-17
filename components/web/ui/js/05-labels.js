@@ -472,18 +472,21 @@ function metresText(m) {
 /*
  * Where the fixed position is against the receiver's own, in one sentence
  * (the fixed_far alert, or GET /api/gnss fixed_check: horizontal_m,
- * vertical_m (fixed minus the receiver's), distance_m, height_only).
+ * vertical_m (fixed minus the receiver's), distance_m, height_only,
+ * sea_level: the fixed height is the receiver's height above sea level).
  */
 function fixedFarSentence(a) {
+  if (a.sea_level) return 'The fixed height looks like a height above sea level.';
   if (a.height_only) {
     return 'The fixed height is ' + metresText(a.vertical_m) + (a.vertical_m > 0 ? ' above' : ' below') + ' where the receiver is.';
   }
   return 'The fixed position is ' + metresText(a.distance_m) + ' from where the receiver is.';
 }
 
-/* The fixed_far warning: how far, and what to do. */
+/* The fixed_far warning: how far, and what to do (where; a sea-level height: the height the field wants). */
 function fixedFarText(a) {
-  return fixedFarSentence(a) + ' Check it in Receiver settings.';
+  return fixedFarSentence(a) + (a.sea_level ? ' Enter the height above the ellipsoid in Receiver settings.' :
+    ' Check it in Receiver settings.');
 }
 
 /* The same when it is why no corrections come (the receiver stops them this far off): the cause in the sentence. */
