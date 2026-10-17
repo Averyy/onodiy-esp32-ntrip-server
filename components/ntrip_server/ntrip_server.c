@@ -1388,7 +1388,7 @@ static void persist_backoff(slot_t *s, uint32_t now)
     size_t len = ntrip_backoff_rec_encode(&rec, buf, sizeof(buf));
     char ns[16];
     slot_ns(s->idx, ns, sizeof(ns));
-    esp_err_t err = len > 0 ? settings_set_blob(ns, SETTINGS_KEY_CST_BACKOFF, buf, len) : ESP_ERR_INVALID_SIZE;
+    esp_err_t err = len > 0 ? settings_set_state_blob(ns, SETTINGS_KEY_CST_BACKOFF, buf, len) : ESP_ERR_INVALID_SIZE;
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "cst%u: backoff state not saved: %s", (unsigned)s->idx, esp_err_to_name(err));
     }

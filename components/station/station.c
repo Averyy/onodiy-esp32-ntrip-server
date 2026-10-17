@@ -621,7 +621,7 @@ static void persist_baud(uint32_t baud)
     if (baud == 0 || stored_baud() == baud) {
         return;
     }
-    esp_err_t err = settings_set_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BAUD, baud);
+    esp_err_t err = settings_set_state_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BAUD, baud);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "gnss/baud not saved: %s", esp_err_to_name(err));
     }
@@ -1908,8 +1908,8 @@ static void flash_close(bool reapply_ok)
     }
     /* The identity the receiver reported is the stored one from now on. */
     if (s_after.valid && settings_is_available()) {
-        (void)settings_set_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MODEL, s_after.model);
-        (void)settings_set_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FW, s_after.firmware);
+        (void)settings_set_state_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MODEL, s_after.model);
+        (void)settings_set_state_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FW, s_after.firmware);
         load_stored_identity();
     }
     portENTER_CRITICAL(&s_lock);
@@ -2826,7 +2826,7 @@ static esp_err_t sg_record_store(int64_t now)
 {
     size_t len = sgt_encode(&s_sgt, now, s_sgt_rec, sizeof(s_sgt_rec));
     esp_err_t err = len == 0 ? ESP_ERR_INVALID_SIZE
-                             : settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST, s_sgt_rec, len);
+                             : settings_set_state_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST, s_sgt_rec, len);
     if (err == ESP_OK) {
         sgt_saved(&s_sgt, now);
     }
@@ -2872,7 +2872,7 @@ static void sg_test_load(void)
     uint8_t state = s_sgt.state;
     xSemaphoreGive(s_sgt_mx);
     if (bad) {
-        esp_err_t e = settings_erase_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST);
+        esp_err_t e = settings_erase_state_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_TEST);
         ESP_LOGW(TAG, "signal-group comparison: its record could not be read (%s): ended as interrupted%s",
                  esp_err_to_name(err), e == ESP_OK ? "" : " (record not erased)");
     } else if (running) {

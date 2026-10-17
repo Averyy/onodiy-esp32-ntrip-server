@@ -317,3 +317,71 @@ TEST_CASE("settings: device state stored on a schedule posts no change event", "
     TEST_ASSERT_EQUAL(ESP_OK, esp_event_handler_unregister(SETTINGS_EVENT, SETTINGS_EVENT_CHANGED, count_changed));
     nvs_down();
 }
+
+TEST_CASE("settings: every device-state writer stores without a change event; settings still announce themselves",
+          "[settings]")
+{
+    nvs_up();
+    TEST_ASSERT_EQUAL(ESP_OK, settings_init());
+    TEST_ASSERT_EQUAL(ESP_OK, esp_event_handler_register(SETTINGS_EVENT, SETTINGS_EVENT_CHANGED, count_changed, NULL));
+    int n = changed_after(s_changed);   /* settings_init's own writes settle */
+
+    /* What the station stores on its own: the ledger every minute, the boot history, the receiver it found, the
+     * applied state, the update check. */
+    const uint8_t today[12] = { 9, 8, 7 };
+    TEST_ASSERT_EQUAL(ESP_OK,
+                      settings_set_state_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_TODAY, today, sizeof(today)));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_i64(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_ALIVE, 1791590460));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MODEL, "UM982"));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BAUD, 460800));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_u16(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_OK, 0x0306));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD, 1));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_erase_state_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD));
+    settings_batch_t b = NULL;
+    TEST_ASSERT_EQUAL(ESP_OK, settings_batch_begin(SETTINGS_NS_GNSS, &b));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_batch_set_u32(b, SETTINGS_KEY_GNSS_APPLIED, 0xCAFE));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_batch_set_str(b, SETTINGS_KEY_GNSS_APPLIED_FW, "R4.10Build18975"));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_batch_commit_state(b));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, settings_batch_commit_state(NULL));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, settings_set_state_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FW, NULL));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, settings_set_state_u32(SETTINGS_NS_GNSS, NULL, 1));
+    vTaskDelay(pdMS_TO_TICKS(100));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(n, s_changed, "device state posted a change event");
+
+    /* Stored as written. */
+    uint8_t buf[16];
+    size_t len = sizeof(buf);
+    TEST_ASSERT_EQUAL(ESP_OK, settings_get_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_TODAY, buf, &len));
+    TEST_ASSERT_EQUAL_size_t(sizeof(today), len);
+    TEST_ASSERT_EQUAL_MEMORY(today, buf, sizeof(today));
+    int64_t alive = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, settings_get_i64(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_ALIVE, &alive));
+    TEST_ASSERT_EQUAL_INT64(1791590460, alive);
+    char model[16];
+    TEST_ASSERT_EQUAL(ESP_OK, settings_get_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MODEL, model, sizeof(model)));
+    TEST_ASSERT_EQUAL_STRING("UM982", model);
+    uint32_t u32 = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, settings_get_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BAUD, &u32));
+    TEST_ASSERT_EQUAL_UINT32(460800, u32);
+    TEST_ASSERT_EQUAL(ESP_OK, settings_get_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_APPLIED, &u32));
+    TEST_ASSERT_EQUAL_UINT32(0xCAFE, u32);
+    uint16_t u16 = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, settings_get_u16(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_OK, &u16));
+    TEST_ASSERT_EQUAL_UINT16(0x0306, u16);
+    uint8_t u8 = 0;
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_HOLD, &u8));
+
+    /* A setting, by any writer, still posts one event per write or batch. */
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_str(SETTINGS_NS_SYS, SETTINGS_KEY_HOSTNAME, "station"));
+    TEST_ASSERT_EQUAL_INT(n + 1, changed_after(n));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RECOVERY, 1));
+    TEST_ASSERT_EQUAL_INT(n + 2, changed_after(n + 1));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_batch_begin(SETTINGS_NS_GNSS, &b));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_batch_set_blob(b, SETTINGS_KEY_GNSS_PROFILE, today, sizeof(today)));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_batch_commit(b));
+    TEST_ASSERT_EQUAL_INT(n + 3, changed_after(n + 2));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_erase_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BASE_POS));
+    TEST_ASSERT_EQUAL_INT(n + 4, changed_after(n + 3));
+    TEST_ASSERT_EQUAL(ESP_OK, esp_event_handler_unregister(SETTINGS_EVENT, SETTINGS_EVENT_CHANGED, count_changed));
+    nvs_down();
+}
