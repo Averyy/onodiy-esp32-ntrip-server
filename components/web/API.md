@@ -1617,7 +1617,10 @@ access point of the network since boot, the ones the access point asked
 for and the station's own (to a clearly stronger access point while its
 signal is weak); each is a `wifi_roam` journal entry (so is an own
 reconnect that stayed on the same access point, not counted here), and
-none counts in `reconnects` (links re-established after a drop).
+none counts in `reconnects` (links re-established after a drop). A move
+that is associated again within a few seconds keeps `online`, `ip` and
+every TCP session (`associated` is `false` meanwhile); the UI's
+Diagnostics shows `roams` and `ap_steering` under Chip and Wi-Fi.
 `last_disconnect_reason` is the numeric `wifi_err_reason_t`. `scan.results`
 are the cached ones (no radio activity; at most 24); `age_s` is `null`
 before the first scan. `mdns_host`, `assoc_no_ip_s`, `cred_*`,
@@ -2296,7 +2299,7 @@ by `kind` (integers; only a `wifi_disconnect` entry's `b` can be `null`):
 | `caster_up` | slot (bits 0-7) \| failed attempts since the previous session (bits 16-30) | outage s |
 | `caster_stop` | slot (bits 0-7) \| stop reason (`ntrip_stop_t`, bits 8-15): the Onocoy login guard stopped the slot until the user acts (once per stop) | 0 |
 | `wifi_up` | connect attempts during the outage | outage s |
-| `wifi_roam` | the station moved to another access point of its network and got its address there (no `wifi_disconnect` or `wifi_up` for it): channel before (bits 0-7) \| channel after (bits 8-15) \| who started it (bits 16-23: 1 the access point asked, 2 the station found a clearly stronger one) \| bit 24: its reconnect found no stronger one after all and it stayed (a channel of 0 = unknown) | RSSI before (bits 0-7) \| after (bits 8-15), each a signed byte in dBm, 0 = unknown \| seconds without an address (bits 16-30) |
+| `wifi_roam` | the station moved to another access point of its network and got its address there (no `wifi_disconnect` or `wifi_up` for it): channel before (bits 0-7) \| channel after (bits 8-15) \| who started it (bits 16-23: 1 the access point asked, 2 the station found a clearly stronger one, 3 asked for on the bench console) \| bit 24: its reconnect found no stronger one after all and it stayed \| bit 25: the address and the connections were kept (a channel of 0 = unknown) | RSSI before (bits 0-7) \| after (bits 8-15), each a signed byte in dBm, 0 = unknown \| seconds without an address, with bit 25 without a link (bits 16-30) |
 | `rx_maintenance` | 1 entry, 0 exit | chosen duration s (entry), time spent s (exit) |
 | `rx_boot` | after a power-on reset, whether the receiver kept running (`diag_rx_boot_t`): 1 kept running (only the ESP32 was reset, its reset pin), 2 restarted with it (the power was cut), 3 unknown; written once per power-on boot, when the station knows (`station.rx_boot` in `/api/health`); only 2 counts toward `power_lost` | what told it (`diag_rx_boot_by_t`): 0 nothing, 1 its restart banner before any data, 2 its version log's time since its restart, 3 RTCM or NMEA at once |
 | `live_view` | event (bits 0-7: 1 opened, 2 extended, 3 closed, 4 satellite-in-view output on, 5 off) \| detail << 8 (closed: end reason; on/off: 0 accepted, 1 rejected, 2 no answer, 3 not sent) | opened: window s; extended: s left; closed: s open; on/off: ms the lease held RTCM back |

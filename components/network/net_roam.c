@@ -165,9 +165,10 @@ bool net_roam_btm_pass(bool open, uint8_t request_mode)
            (request_mode & (NET_BTM_DISASSOC_IMMINENT | NET_BTM_BSS_TERMINATION | NET_BTM_ESS_DISASSOC_IMMINENT)) != 0;
 }
 
-int32_t net_roam_rec_a(uint8_t ch_from, uint8_t ch_to, net_roam_by_t by, bool same)
+int32_t net_roam_rec_a(uint8_t ch_from, uint8_t ch_to, net_roam_by_t by, bool same, bool kept)
 {
-    uint32_t a = (uint32_t)ch_from | ((uint32_t)ch_to << 8) | (((uint32_t)by & 0xFFu) << 16) | (same ? 1u << 24 : 0u);
+    uint32_t a = (uint32_t)ch_from | ((uint32_t)ch_to << 8) | (((uint32_t)by & 0xFFu) << 16) | (same ? 1u << 24 : 0u) |
+                 (kept ? 1u << 25 : 0u);
     return (int32_t)a;
 }
 
@@ -177,4 +178,108 @@ int32_t net_roam_rec_b(int8_t rssi_from, int8_t rssi_to, uint32_t secs)
     uint8_t to = net_rssi_known(rssi_to) ? (uint8_t)rssi_to : 0u;
     uint32_t s = secs > 32767u ? 32767u : secs;
     return (int32_t)((uint32_t)from | ((uint32_t)to << 8) | (s << 16));
+}
+
+/* ---- keeping the address across a move ------------------------------------------------ */
+
+void net_hold_init(net_hold_t *h)
+{
+    memset(h, 0, sizeof(*h));
+}
+
+bool net_hold_lease_ok(bool bound, uint32_t left_s)
+{
+    return bound && left_s >= NET_HOLD_LEASE_MIN_S;
+}
+
+void net_hold_gate(net_hold_t *h, bool open, uint32_t ip)
+{
+    h->open = open && ip != 0;
+    h->ip = h->open ? ip : 0;
+    if (!h->open) {
+        h->armed = false;
+    }
+}
+
+bool net_hold_arm(net_hold_t *h, uint32_t now_ms)
+{
+    h->armed = h->open && h->state == NET_HOLD_IDLE;
+    h->armed_ms = now_ms;
+    return h->armed;
+}
+
+bool net_hold_disconnect(net_hold_t *h, uint16_t reason, uint32_t now_ms)
+{
+    bool armed = h->armed && (uint32_t)(now_ms - h->armed_ms) <= NET_HOLD_ARM_MS;
+    bool keep = h->state == NET_HOLD_IDLE && h->open && (armed || reason == NET_REASON_ROAMING);
+    uint32_t ip = h->ip;
+    /* Whatever happens to this one, the next is kept only once the net task opens the gate (or arms) again. */
+    h->open = false;
+    h->ip = 0;
+    h->armed = false;
+    h->verifying = false;
+    if (keep) {
+        h->state = NET_HOLD_AWAY;
+        h->state_ms = now_ms;
+        h->kept_ip = ip;
+    } else {
+        h->state = NET_HOLD_IDLE;   /* a hold running ends here: the move failed */
+    }
+    return keep;
+}
+
+bool net_hold_connected(net_hold_t *h, uint32_t now_ms)
+{
+    if (h->state == NET_HOLD_AWAY) {
+        h->away_ms = now_ms - h->state_ms;
+        h->state = NET_HOLD_BACK;
+        h->state_ms = now_ms;
+        h->verifying = false;
+        return true;
+    }
+    return h->state == NET_HOLD_BACK;   /* still held: the interface is up with its address */
+}
+
+void net_hold_verify(net_hold_t *h, uint32_t now_ms)
+{
+    if (h->state == NET_HOLD_BACK) {
+        h->verifying = true;
+        h->verify_ms = now_ms;
+    }
+}
+
+net_hold_out_t net_hold_check(net_hold_t *h, bool dhcp_bound, uint32_t ip_now, uint32_t now_ms)
+{
+    net_hold_out_t out = NET_HOLD_WAIT;
+    if (h->state == NET_HOLD_AWAY) {
+        if ((uint32_t)(now_ms - h->state_ms) >= NET_HOLD_AWAY_S * 1000u) {
+            out = NET_HOLD_EXPIRED;
+        }
+    } else if (h->state == NET_HOLD_BACK) {
+        /* Until DHCP was asked, its state is the one from before the move: only the address counts. */
+        uint32_t from = h->verifying ? h->verify_ms : h->state_ms;
+        if (ip_now != h->kept_ip) {
+            out = NET_HOLD_LOST;
+        } else if (h->verifying && dhcp_bound) {
+            out = NET_HOLD_CONFIRMED;
+        } else if ((uint32_t)(now_ms - from) >= NET_HOLD_VERIFY_S * 1000u) {
+            out = NET_HOLD_UNCONFIRMED;
+        }
+    }
+    if (out != NET_HOLD_WAIT) {
+        h->state = NET_HOLD_IDLE;
+        h->verifying = false;
+    }
+    return out;
+}
+
+net_hold_state_t net_hold_end(net_hold_t *h)
+{
+    net_hold_state_t was = (net_hold_state_t)h->state;
+    h->state = NET_HOLD_IDLE;
+    h->verifying = false;
+    h->armed = false;
+    h->open = false;
+    h->ip = 0;
+    return was;
 }

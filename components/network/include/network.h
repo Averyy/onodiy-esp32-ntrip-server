@@ -161,13 +161,19 @@
  * when an access point CONFIG_NETWORK_ROAM_MIN_GAIN_DB stronger shows in two
  * scans 30 s apart, at most once per CONFIG_NETWORK_ROAM_MIN_INTERVAL_S
  * after the previous move of either kind, under the same holds and never
- * while the network ladder runs. A move drops the address and every caster
- * session like a short outage (a few seconds). One that reaches an address
- * is journalled as DIAG_EV_WIFI_ROAM (channels, RSSI before and after, who
- * started it, seconds without an address; no access point address) instead
- * of a drop and the return after it; one that does not is an outage like
- * any other. A user's scan asked for during a roaming scan starts right
- * after it.
+ * while the network ladder runs. A move keeps the station's address and
+ * every TCP session (the casters' too) when the station is associated again
+ * within a few seconds and DHCP does not take the address back there (the
+ * interface stays up meanwhile; the DHCP server is asked to confirm the
+ * address on the new link); not during a credential trial, nor with less
+ * than a minute of the DHCP lease left. Otherwise, and for every other
+ * disconnect, the address goes and the sessions close like in a short
+ * outage. A move that reaches an address is journalled as DIAG_EV_WIFI_ROAM
+ * (channels, RSSI before and after, who started it, whether the address was
+ * kept, seconds without it or without a link; no access point address)
+ * instead of a drop and the return after it; one that does not is an outage
+ * like any other. A user's scan asked for during a roaming scan starts
+ * right after it.
  *
  * Wi-Fi credentials live in the settings component; the Wi-Fi driver's own
  * NVS storage is disabled (single source of truth).
@@ -284,6 +290,7 @@ typedef struct {
     uint32_t reconnects;           /**< station links re-established after a drop, since boot (moves between access points not counted) */
     uint32_t roams;                /**< moves to another access point of the network, since boot (CONFIG_NETWORK_ROAM) */
     int8_t ap_steering;            /**< the access point takes part in 802.11v BSS transition management (it can ask the station to move): 1 yes, 0 no, -1 not known (not associated yet, or roaming off) */
+    bool moving;                   /**< a move to another access point is under way: from its start to the address on the new link, or with the address kept to DHCP's answer there (refreshed once a second) */
     uint32_t connect_failures;     /**< connect attempts that ended without a link, since boot */
     uint32_t offline_s;            /**< seconds offline in the current outage, 0 if online */
     uint32_t retry_in_s;           /**< seconds to the next connect attempt (0 = connecting or connected) */
@@ -411,6 +418,19 @@ esp_err_t network_start_setup_ap(bool recovery);
  *         credentials, ESP_ERR_INVALID_ARG for an unknown action.
  */
 esp_err_t network_request_recovery(network_recovery_t action);
+
+/**
+ * The station's own move to another access point at once (the bench
+ * console's wifimove): a reconnect whose connect scan joins the strongest
+ * access point of the network, keeping the address when it can, as after
+ * two roaming scans found a clearly stronger one. Under the same holds as
+ * any move (an update, the station's own access point, credentials on
+ * trial); the net task logs a refusal. Returns at once (the network task
+ * carries it out; `moving` in the status follows it).
+ * @return ESP_ERR_NOT_SUPPORTED without CONFIG_NETWORK_ROAM,
+ *         ESP_ERR_INVALID_STATE before network_start() or while not online.
+ */
+esp_err_t network_move_now(void);
 
 /**
  * Probe the internet: a name lookup of CONFIG_NETWORK_PROBE_HOST plus a TCP
