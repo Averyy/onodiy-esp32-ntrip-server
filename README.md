@@ -357,7 +357,7 @@ Manifest format and rules: `components/fw_update/priv_include/manifest.h`.
 4. Open **`http://onocoydiy.local/`** (or the address the page showed) and log in;
    the setup continues there with the antenna check and the Onocoy credentials.
    The last screen shows whether Onocoy accepts the login and what to do next in
-   the Onocoy console. More casters can be added on the Casters page.
+   the Onocoy console. More servers can be added on the NTRIP page.
 
 On your network the station answers to its name over mDNS,
 `http://<station name>.local/` (`onocoydiy` unless you rename it; when another

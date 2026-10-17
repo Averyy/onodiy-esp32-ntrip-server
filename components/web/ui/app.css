@@ -693,7 +693,7 @@ input:disabled, select:disabled { opacity: 0.65; }
   .form-actions > .field { order: -2; flex: 0 1 15rem; margin-right: auto; }
 }
 
-/* A setting and its button (Restart or reset): the text at the left, the button at the right from 560 px; stacked on a phone. */
+/* A setting and its button (the Danger zone): the text at the left, the button at the right from 560 px; stacked on a phone. */
 .setting-row { display: flex; flex-direction: column; gap: 0.5rem; }
 .setting-row + .setting-row { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
 .setting-row > div { min-width: 0; }
@@ -706,9 +706,11 @@ input:disabled, select:disabled { opacity: 0.65; }
   .setting-row > .btn { width: auto; flex: none; }
   .setting-row > .form-actions { flex: none; }
 }
-/* A card's list of parts (Updates: app, receiver, maintenance, the files): a line between them. */
+/* A card's list of parts (Updates: app, receiver, Install manually; the Danger zone): a line between them. */
 .rows > :not([hidden]) ~ :not([hidden]) { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
 .rows > * > * + * { margin-top: 0.6rem; }
+/* A titled list as a part (Updates: Install manually): the title is the part's first line. */
+.rows > * > .sub:first-child { margin-top: 0; }
 /* Tools in a card's title row that act on its list (Refresh, a filter): at the right, under the title on a phone. */
 .card-head > .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 /* A short title and its tools on one line, also on a phone (Updates: the last check, Check now). */
@@ -827,6 +829,9 @@ tbody tr:last-child td { border-bottom: 0; }
 .ext { white-space: nowrap; }
 /* The editor below a list (setup), and the setup's last row of actions. */
 .subcard { padding-top: 1rem; border-top: 1px solid var(--border); }
+/* A part of a card (Settings: the station's name, the setup hotspot, an uploaded package): the card's gap between its pieces. */
+.sect > * + * { margin-top: 0.75rem; }
+.sect > .card-head + * { margin-top: 0; }
 .form-actions.sep { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
 
 /* ---- Signals ----------------------------------------------------------- */
@@ -1065,6 +1070,8 @@ pre.log .t { color: var(--muted); }
 pre.log .e { color: var(--bad); }
 pre.log .w { color: var(--warn); }
 pre.log .gap { color: var(--muted); font-style: italic; cursor: auto; }
+/* The receiver's text in the update session's card: as tall as it needs, up to 16rem. */
+pre.log.short { min-height: 0; max-height: 16rem; }
 
 /* Sub-tabs (Logs: Overview, History, Console): one row, also on a phone. */
 .seg { display: flex; gap: 0.35rem; }
@@ -1232,9 +1239,28 @@ pre.log .gap { color: var(--muted); font-style: italic; cursor: auto; }
 .foot.row a, .card .foot a + a { margin-right: 0.25rem; }
 
 /* The event list (the journal) and the recent starts: one row each, the time, then the event and its details; a heading row per start, a "×N" toggle on repeats. */
-td.when { width: 1%; white-space: nowrap; color: var(--muted); }
+/*
+ * The When column (the events, the last 30 days, the earlier starts): one width, from its longest usual text, so what
+ * follows it starts at the same place in every row, the heading rows too; the date, then the time, each kept whole (a
+ * longer one goes under the date); on a phone always the date over the time.
+ */
+.when { color: var(--muted); }
+table.fixed { table-layout: fixed; }
+table.fixed .when { width: 17rem; }
+.when .d, .when .tm, .when .nw { white-space: nowrap; }
+/* The earlier starts, in a half-width card: the kind in a column of one width too; the date over the time until the card
+ * is wide enough for both on one line. */
+table.starts .when { width: 8rem; white-space: normal; }
+table.starts .kind { width: 8.5rem; }
+table.starts td.name { width: auto; }
+table.starts .when :is(.d, .tm) { display: block; }
+table.starts .when .j { display: none; }
+@media (min-width: 1000px) {
+  table.starts .when { width: 12.5rem; }
+  table.starts .when :is(.d, .tm, .j) { display: inline; }
+}
 table.events tr.sep th { padding-top: 0.8rem; color: var(--text); font-size: 0.95rem; font-weight: 650; white-space: normal; background: var(--surface-2); }
-table.events tr.sep .t { margin-right: 0.5rem; color: var(--muted); font-weight: 500; }
+table.events tr.sep th.when { color: var(--muted); font-size: inherit; font-weight: 500; }
 table.events tr.rep-row td { background: var(--surface-2); font-size: 0.9rem; }
 table.events tr.rep-row td + td { padding-left: 1.25rem; }
 table.events tr.rep-row strong { font-weight: 500; }
@@ -1251,12 +1277,17 @@ table.events tr.rep-row strong { font-weight: 500; }
   cursor: pointer;
 }
 .rep[aria-expanded="true"] { border-color: var(--accent); background: var(--accent-soft); }
-/* On a phone an event is one line, cut at the edge; a tap shows it whole. */
+/* On a phone an event is one line, cut at the edge; a tap shows it whole. Its time: the date over the time, a long time
+ * wrapped after "about" or its dash. */
 @media (max-width: 559px) {
   table.events { font-size: 0.875rem; }
   table.events td + td { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   table.events tr.open td + td { white-space: normal; }
-  table.events tr.sep .t { display: block; }
+  table.days { font-size: 0.875rem; }
+  table.fixed .when, table.starts .when { width: 7.25rem; }
+  table.starts .kind { width: 7rem; }
+  .when .d, .when .tm { display: block; white-space: normal; }
+  .when .j { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

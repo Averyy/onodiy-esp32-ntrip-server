@@ -118,7 +118,7 @@ const L = {
   capLimit: { hour: 'at most one restart an hour', day: 'at most 3 restarts in 24 hours' },
   hold: {
     setup: 'first setup not finished',
-    ap_client: 'someone is on the station\'s Wi-Fi',
+    ap_client: 'someone is on the setup hotspot',
     admin: 'you are using this page',
     power_on: 'less than an hour since power-on',
   },
@@ -225,8 +225,8 @@ const L = {
   probe: { none: 'Not checked', ok: 'OK', no_ip: 'No IP', dns_failed: 'DNS failed', no_upstream: 'No internet' },
   ladderWhy: {
     none: '', upstream_ok: 'internet reachable', no_upstream: 'no internet', journal_open: 'receiver update open',
-    interval: 'too soon', inhibited: 'restart blocked', ap_in_use: 'someone is on the access point',
-    no_reboot_trigger: 'no restart for this cause', ap_overridden: 'access point wait over',
+    interval: 'too soon', inhibited: 'restart blocked', ap_in_use: 'someone is on the setup hotspot',
+    no_reboot_trigger: 'no restart for this cause', ap_overridden: 'setup hotspot wait over',
   },
   sys: { gps: 'GPS', glonass: 'GLONASS', galileo: 'Galileo', sbas: 'SBAS', qzss: 'QZSS', beidou: 'BeiDou', navic: 'NavIC' },
   linkMode: { off: 'Off', stream: 'Streaming', command: 'Command session', raw: 'Raw (update)' },
@@ -236,7 +236,7 @@ const L = {
   recovery: { full: 'The station', no_reboot: 'The station, but never restart itself', alerts_only: 'Me (alerts only)' },
   /* The same choice where the station tells it (the Status page's top card, Logs' Health card): "You", not "Me". */
   manage: { full: 'The station', no_reboot: 'The station, no restarts', alerts_only: 'You (alerts only)' },
-  trigger: { protected: 'Onocoy caster down', assoc_no_ip: 'connected without an IP address', unreached: 'a caster not reached' },
+  trigger: { protected: 'Onocoy server down', assoc_no_ip: 'connected without an IP address', unreached: 'a server not reached' },
   liveWhy: {
     none: '',
     busy: 'the station is busy with the receiver',
@@ -319,7 +319,7 @@ const J = {
     'app rollback'],
   resetReason: ['unknown', 'power on', 'reset pin', 'software', 'panic', 'interrupt watchdog', 'task watchdog', 'watchdog',
     'deep sleep', 'brownout', 'SDIO', 'USB', 'JTAG', 'eFuse', 'power glitch', 'CPU lockup'],
-  ladder: ['receiver', 'network', 'caster'],
+  ladder: ['receiver', 'network', 'server'],
   /* A recovery step's outcome after its name (0: started, said by the name alone) */
   outcome: ['', 'healthy again', 'failed', 'given up', 'skipped (your recovery choice)', 'postponed'],
   /* A receiver recovery step in the words the Status page uses while it runs (RECOVERY_DOING). */
@@ -331,9 +331,9 @@ const J = {
   /* hold_mask bits of a postponed restart (ladder_step code 9, outcome 5). */
   holdBits: ['setup', 'ap_client', 'admin', 'power_on'],
   netRung: [null, 'reconnecting', 'renewing the address', 'restarting the Wi-Fi', 'restarting the station'],
-  netWhy: ['none', 'internet reachable', 'no internet', 'receiver update open', 'too soon', 'restart blocked', 'someone on the access point',
-    'no restart for this cause', 'access point wait over'],
-  netTrigger: ['Onocoy down', 'no IP address', 'a caster not reached'],
+  netWhy: ['none', 'internet reachable', 'no internet', 'receiver update open', 'too soon', 'restart blocked', 'someone on the setup hotspot',
+    'no restart for this cause', 'setup hotspot wait over'],
+  netTrigger: ['Onocoy down', 'no IP address', 'a server not reached'],
   fail: ['none', 'dns', 'connect', 'tls', 'timeout', 'remote_close', 'write_stall', 'keepalive', 'auth', 'mount_busy', 'config', 'banned',
     'login_blocked', 'in_use', 'replaced', 'local'],
   /* ntrip_stop_t (a caster_stop record's bits 8-15) */
@@ -391,7 +391,12 @@ function rssiView(rssi, noDbm) {
   const n = rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : 1;
   const word = ['', 'Weak', 'Fair', 'Good', 'Excellent'][n];
   return h('span', { class: 'nowrap' }, h('span', { class: 'sig s' + n, 'aria-hidden': 'true' }, h('i'), h('i'), h('i'), h('i')),
-    ' ' + word + (noDbm ? '' : ' (' + rssi + ' dBm)'));
+    ' ' + word + (noDbm ? '' : ' (' + dbmText(rssi) + ')'));
+}
+
+/** A signal in dBm with a true minus sign: "−82 dBm". */
+function dbmText(v) {
+  return String(v).replace('-', '\u2212') + NB + 'dBm';
 }
 
 /** Tone for a station state. */
