@@ -381,9 +381,9 @@ body { --top-pad: max(0.5rem, env(safe-area-inset-top)); --top-h: calc(var(--top
 
 /*
  * The Status page's top card: the title with its dot, one line, its button
- * (two in safe mode), "Also:" lines and a row of labelled facts. On a phone
- * one column; from 560 px the buttons sit at the right of the title and
- * line, the "Also:" lines and the facts under both.
+ * (two in safe mode) and "Also:" lines. On a phone one column; from 560 px
+ * the buttons sit at the right of the title and line, the "Also:" lines
+ * under both.
  */
 .hero { display: grid; grid-template-columns: minmax(0, 1fr); row-gap: 0.35rem; }
 .card.hero > * { margin: 0; }
@@ -432,29 +432,12 @@ body.no-contact .hero .state::before { background: var(--off); }
 }
 .also .btn { flex: none; align-self: center; }
 .hero .hero-actions .btn { width: 100%; }
-/* Small labelled facts in a row (the top card, the live view's totals). */
-.facts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem 1.5rem;
-  margin: 0;
-  padding-top: 0.6rem;
-  border-top: 1px solid var(--border);
-  font-size: 0.9rem;
-}
-.facts > div { display: flex; gap: 0.4rem; }
-.facts dt { color: var(--muted); }
-.facts dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
-.facts dd a { margin-left: 0.6rem; font-weight: 400; }   /* "Change": where the fact is set */
-.hero .facts { margin-top: 0.4rem; }
-/* A fact too long for one line puts its value under its label (never both squeezed into two narrow columns). */
-.hero .facts > div { flex-wrap: wrap; row-gap: 0; }
 @media (min-width: 560px) {
   .hero { grid-template-columns: minmax(0, 1fr) auto; column-gap: 1.25rem; }
   .hero > * { grid-column: 1; }
   .card.hero > .hero-actions { grid-column: 2; grid-row: 1 / span 2; align-self: center; margin: 0; }
   .hero .hero-actions .btn { width: auto; }
-  .hero .facts, .hero .also { grid-column: 1 / -1; }
+  .hero .also { grid-column: 1 / -1; }
 }
 
 /* ---- Key/value lists -------------------------------------------------- */
@@ -792,38 +775,58 @@ tbody tr:last-child td { border-bottom: 0; }
 .steps li.now { color: var(--text); border-color: var(--accent); font-weight: 650; }
 .steps li.na { color: var(--warn); border-color: var(--warn); }
 
-/* ---- Casters ------------------------------------------------------------ */
+/* ---- NTRIP servers ------------------------------------------------------ */
 
-.caster-list { display: grid; gap: 0.75rem; }
-.caster {
-  padding: 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface-2);
-}
-.caster .name { font-weight: 650; }
-.metrics { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin-top: 0.35rem; color: var(--muted); font-size: 0.9rem; }
-.metrics b { color: var(--text); font-weight: 600; }
 .hintline { margin-top: 0.35rem; color: var(--warn); font-size: 0.9rem; }
-.caster .form-actions { margin-top: 0.6rem; }
-/* The Status page's casters, one line each: name, state and share. */
+/* A server card: its name with its on/off switch at the right, its state line. */
+.card-head.switch-head { align-items: center; }
+.cstate { font-weight: 600; }
+.switch {
+  position: relative;
+  flex: none;
+  width: 46px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--edge);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: transform 0.15s;
+}
+.switch[aria-checked="true"] { background: var(--accent); }
+.switch[aria-checked="true"]::after { transform: translateX(18px); }
+.switch[aria-busy="true"] { opacity: 0.6; cursor: progress; }
+.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* A value in a row of fields that is not edited there (a preset's host and port, the TLS box): level with the inputs. */
+.fixed-value { display: flex; align-items: center; min-height: 44px; font-weight: 600; overflow-wrap: anywhere; }
+/* The Status page's NTRIP servers, one line each: name, state and share. */
 .clines { display: grid; gap: 0.6rem; }
 .cline { display: flex; align-items: center; gap: 0.75rem; }
 .cline > :first-child { flex: 1 1 auto; min-width: 0; }
 .cline .name { font-weight: 650; overflow-wrap: anywhere; }
 /* A link beside a card's title (cardHead): the Status cards' "Manage". */
 .card-head > .head-link { font-size: 0.9rem; font-weight: 600; }
+/* The Station card's Wi-Fi row on one line: a long network name ends in an ellipsis, the signal stays whole. */
+.wifi-line { display: flex; min-width: 0; }
+.wifi-line > .ssid { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wifi-line > .nowrap { flex: none; padding-left: 0.3em; }
 .caster-live > * + * { margin-top: 0.35rem; }
 .caster-live > .msg { margin-top: 0.6rem; }
 /* A card that holds only a row of actions (the add card): no gap above it. */
 .card > .form-actions:first-child { margin-top: 0; }
 .card > p:last-child { margin-bottom: 0; }
-/* A caster's box: what it is, the steps before it works, its own guide. */
-.preset { padding: 0.75rem; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
-.preset p { margin: 0 0 0.4rem; }
-.steps-small { margin: 0 0 0.5rem; padding-left: 1.2rem; font-size: 0.9rem; }
-.steps-small li + li { margin-top: 0.25rem; }
-.preset .ext { display: inline-block; font-size: 0.9rem; font-weight: 600; }
 .ext { white-space: nowrap; }
 /* The editor below a list (setup), and the setup's last row of actions. */
 .subcard { padding-top: 1rem; border-top: 1px solid var(--border); }

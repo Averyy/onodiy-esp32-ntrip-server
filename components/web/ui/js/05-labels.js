@@ -39,13 +39,13 @@ const L = {
     connect: 'Could not connect',
     tls: 'TLS failed',
     timeout: 'Timed out',
-    remote_close: 'Closed by the caster',
+    remote_close: 'Closed by the server',
     write_stall: 'Sending stalled',
     keepalive: 'Connection went silent',
     auth: 'Login refused',
     mount_busy: 'Mountpoint in use',
     config: 'Configuration problem',
-    banned: 'Banned by the caster',
+    banned: 'Banned by the server',
     login_blocked: 'Onocoy is blocking logins',
     in_use: 'Credential in use elsewhere',
     replaced: 'Taken over by another session',
@@ -54,7 +54,7 @@ const L = {
   /* Why the Onocoy login guard stopped a slot: [short reason, what to do]. */
   stop: {
     none: '',
-    rejected: ['login refused 3 times', 'Onocoy refused the login 3 times. Copy the mountpoint, username and password from the ' +
+    rejected: ['login refused 3 times', 'Onocoy refused the login 3 times. Copy the username and password from the ' +
       'Onocoy console again, then save or press Try again. The station does not retry on its own: repeated failed logins can ' +
       'make Onocoy block logins for a while.'],
     login_blocked: ['logins blocked', 'Onocoy is blocking logins for a while after too many failed ones. Check the credentials, ' +
@@ -85,7 +85,7 @@ const L = {
     bands: ['Few signal bands', 'Fewer than 4 bands on any constellation; Onocoy\'s quality score needs 4.'],
     profile_drift: ['Output differs from the profile', 'The receiver\'s messages or rates differ from its profile.'],
     heap_fragmented: ['Memory fragmented', 'Restart the station when convenient.'],
-    safe_mode: ['Safe mode', 'Receiver and casters are off after repeated crashes.'],
+    safe_mode: ['Safe mode', 'Receiver and NTRIP servers are off after repeated crashes.'],
     settings_degraded: ['Settings cannot be saved', 'Changes are not saved this boot. Restart the station; if that does not help, see Logs.'],
     no_upstream: ['No internet', 'Wi-Fi works, but the internet cannot be reached. Check your router.'],
     link_loss: ['Receiver data lost', 'Some data from the receiver was lost or damaged in the last 10 minutes.'],

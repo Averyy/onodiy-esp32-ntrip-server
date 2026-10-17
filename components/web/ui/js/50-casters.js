@@ -2,23 +2,26 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Casters: one card per caster (live state, folded connection details),
- * one card to add a caster while slots are free, and the caster editor (the
- * setup's Onocoy step uses its Onocoy rules).
+ * NTRIP: one card per server (its name, Edit and an on/off switch that
+ * saves at once, its state and traffic in one line, what it said when it
+ * refuses or drops the station), one card to add a server while slots are free,
+ * and the editor (the setup's Onocoy step uses its Onocoy rules). The code
+ * keeps the API's word for a server: caster.
  *
- * Editor rules mirror the server's (PUT /api/casters/{n}), which has the
+ * Editor rules mirror the station's (PUT /api/casters/{n}), which has the
  * last word; byte limits count UTF-8 bytes. Passwords are write-only: an
  * empty field keeps the stored one while the host stays. Onocoy and an open
- * caster at once need the user's acknowledgement (409 caster_policy /
- * dup_stream_ack_required); while both stream, the open caster's card
+ * server at once need the user's acknowledgement (409 caster_policy /
+ * dup_stream_ack_required); while both stream, the open server's card
  * carries a standing warning (GET /api/casters warnings) that blocks nothing.
  *
- * Every caster choice shows the same box (PRESET_INFO: what it is, what to
- * do, its guide), folded once the caster is set up; the rest waits under
- * "More options". Onocoy asks for what its console gives (the server as
- * text, mountpoint, username, password); a slot the login guard stopped
- * shows why and a "Try again" that warns first. A test Onocoy slot (bench
- * and QEMU builds) counts as Onocoy at its own host.
+ * The form asks only what the chosen server needs (one line of help with
+ * its guide, PRESET_INFO): for Onocoy the console's username and password
+ * and a mountpoint that is any name (the station's proposed); a slot the
+ * login guard stopped shows why and a "Try again" that warns first. A test
+ * Onocoy slot (bench and QEMU builds) counts as Onocoy at its own host. A
+ * save keeps whether the server is on; its card's switch turns it off and
+ * on.
  *
  * One Onocoy slot per station: a new slot starts on RTK2go while another
  * slot has an Onocoy host, and says so once Onocoy is chosen; the Onocoy
@@ -32,70 +35,41 @@ const PRESETS = [
   { id: 'centipede', label: 'Centipede', host: 'crtk.net', port: 2101, ntrip_version: 1, backoff_profile: 'standard' },
   { id: 'emlid', label: 'Emlid Caster', host: 'caster.emlid.com', port: 2101, ntrip_version: 1, backoff_profile: 'standard' },
   { id: 'rtkdirect', label: 'RTKDirect', host: 'ntrip.rtkdirect.com', port: 2101, ntrip_version: 2, backoff_profile: 'standard' },
-  { id: 'custom', label: 'Other caster' },
+  { id: 'custom', label: 'Other server' },
 ];
 
 /*
- * Per caster: what it is, what the user must do before it works (1 to 4
- * steps) and its own guide for the rest. Each claim comes from that
- * caster's documentation; where it is vague, the box says less.
+ * Per server: one line on what to enter, from that server's documentation,
+ * and its own guide for the rest (Other server: none).
  */
 const PRESET_INFO = {
   onocoy: {
-    what: 'Rewards reference stations for their correction data.',
-    steps: ['In the Onocoy console, open Reference Stations, NTRIP Credentials and pick or add this station\'s credential.',
-      'Copy its mountpoint, username and password into the fields below.',
-      'Never use a credential another device is streaming with: the two knock each other off.',
-      'The station earns rewards once Onocoy has validated it, which can take 24 to 36 hours.'],
+    help: 'The Onocoy console gives the username and password, under NTRIP Credentials.',
     guide: ['Onocoy\'s guide', 'https://docs.onocoy.com/documentation/3.-become-a-miner/3.-connect-your-station-to-onocoy'],
   },
   rtk2go: {
-    what: 'A free public caster: anyone can use the streams sent to it.',
-    steps: ['Reserve a mountpoint on rtk2go.com and reply once to the confirmation email.',
-      'Enter the mountpoint and password from your reservation.',
-      'Until RTK2go confirms, use the temporary password from the reservation page; it works with NTRIP 1.0 only.',
-      'Stream to RTK2go from one base per internet connection only: more can get the connection banned.'],
+    help: 'The mountpoint and password of your reservation. One base per internet connection.',
     guide: ['RTK2go\'s reservation page', 'http://rtk2go.com/base-station-reservation/'],
   },
   centipede: {
-    what: 'A free community network of RTK bases: anyone can use its streams.',
-    steps: ['Pick a mountpoint of a few capital letters that no other base uses (the guide links the list).',
-      'Password: Centipede\'s shared password, see its guide.',
-      'First set a precisely measured position as the fixed base position in Receiver settings; the guide shows how to measure it.',
-      'Then declare the base to Centipede by email, as the guide explains.'],
+    help: 'A mountpoint of capital letters no other base uses; the password is Centipede\'s shared one.',
     guide: ['Centipede\'s guide', 'https://docs.centipede-rtk.org/connect-base/'],
   },
   emlid: {
-    what: 'Emlid\'s free cloud caster: passes your base\'s corrections to your own rovers.',
-    steps: ['Sign up at caster.emlid.com and add a mount point.',
-      'Turn the mount point on with its toggle.',
-      'Copy the base\'s mount point and password into the fields below.'],
+    help: 'The mount point and password Emlid Caster shows for your base.',
     guide: ['Emlid\'s guide', 'https://docs.emlid.com/emlid-caster/base-connection-to-mount-point/'],
   },
   rtkdirect: {
-    what: 'A network that rewards base stations for their correction data.',
-    steps: ['Create an account at cloud.rtkdirect.com and connect a new hotspot.',
-      'Copy the login, password and mount point it shows; the login goes in Username.'],
+    help: 'The login (as the username), password and mount point of your hotspot.',
     guide: ['RTKDirect\'s site', 'https://cloud.rtkdirect.com/'],
   },
-  custom: {
-    what: 'Any other NTRIP caster.',
-    steps: ['Enter the host, port, mountpoint and password your caster gives you for a base.'],
-    guide: null,
-  },
+  custom: { help: 'Enter what your server gives you for a base.', guide: null },
 };
 
-/** The caster's box: what it is, the steps, its guide (fills `box`, or a new one). */
-function presetBox(id, box) {
+/** The server's help line and its guide (fills `el`, or a new line). */
+function presetHelp(id, el) {
   const p = PRESET_INFO[id] || PRESET_INFO.custom;
-  return mount(box || h('div', { class: 'preset' }), h('p', null, p.what),
-    h('ol', { class: 'steps-small' }, p.steps.map(s => h('li', null, s))),
-    p.guide ? extLink(p.guide[0], p.guide[1]) : null);
-}
-
-/** The summary of a set-up caster's folded box ("How to set up Onocoy"). */
-function presetFoldText(id) {
-  return 'How to set up ' + ((PRESETS.find(x => x.id === id) || {}).label || 'this caster');
+  return mount(el || h('p', { class: 'muted small' }), p.help, p.guide ? [' ', extLink(p.guide[0], p.guide[1])] : null);
 }
 
 /** Onocoy's fixed server, as a line of text ("Server: servers.onocoy.com:2101"), not as inputs that look editable. */
@@ -119,21 +93,21 @@ function dupText() {
   return h('p', null, DUP_TEXT + ' ', extLink('Onocoy\'s FAQ', ONOCOY_FAQ));
 }
 
-/** The open slots the duplicate-stream warning names (GET /api/casters warnings: Onocoy and an open caster both on). */
+/** The open slots the duplicate-stream warning names (GET /api/casters warnings: Onocoy and an open server both on). */
 function openCasterSlots(d) {
   const w = ((d && d.warnings) || []).find(x => x.id === 'onocoy_open_caster');
   return w ? (w.open_slots || []).slice() : [];
 }
 
 /**
- * The standing warning on the card of an open caster that streams while
+ * The standing warning on the card of an open server that streams while
  * Onocoy does (slot in openCasterSlots(d)), or null. Blocks nothing.
  */
 function openCasterWarning(d, slot) {
   if (openCasterSlots(d).indexOf(slot) < 0) return null;
   const cfg = ((d.slots || []).find(x => x.slot === slot) || {}).config || {};
   const kind = presetOf(cfg.host);
-  const other = kind === 'rtk2go' ? 'RTK2go' : kind === 'centipede' ? 'Centipede' : cfg.name || 'this caster';
+  const other = kind === 'rtk2go' ? 'RTK2go' : kind === 'centipede' ? 'Centipede' : cfg.name || 'this server';
   return msg('warn', h('strong', null, 'Onocoy and ' + other + ' are both on'), dupText(),
     h('p', { class: 'small' }, 'Both keep streaming. Turn one off to avoid the risk.'));
 }
@@ -172,12 +146,6 @@ async function retryCaster(slot) {
   return ok;
 }
 
-/** Bytes as decimal megabytes ("140.2 MB"). */
-function volText(b) {
-  if (b === null || b === undefined || isNaN(b)) return DASH;
-  return (b / 1e6).toFixed(1) + NB + 'MB';
-}
-
 /** A station sentence ("waiting for the receiver…") as a line of its own. */
 function capFirst(t) {
   t = String(t || '');
@@ -214,7 +182,7 @@ const DNS_OR_IP = /^(?=.{1,63}$)[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z
 /* Mountpoint and username as the station takes them (NTRIP 1.0 sends the Onocoy username as the mountpoint). */
 const MOUNT_RE = /^[A-Za-z0-9._-]{1,47}$/;
 
-/** True when an Onocoy slot has what the console gives: mountpoint, username and a password. */
+/** True when an Onocoy slot is set up: a mountpoint (a name of the owner's), the console's username and a password. */
 function onocoyReady(cfg) {
   return !!(cfg && isOnocoySlot(cfg) && cfg.mountpoint && cfg.username && cfg.password_set);
 }
@@ -226,7 +194,7 @@ function onocoyReady(cfg) {
 function onocoyProblems(v, on, pwStored) {
   const out = {};
   if (v.mountpoint ? !MOUNT_RE.test(v.mountpoint) : on) {
-    out.mountpoint = v.mountpoint ? 'Letters, digits, ".", "_" and "-" only, at most 47.' : 'Enter the mountpoint from the Onocoy console.';
+    out.mountpoint = v.mountpoint ? 'Letters, digits, ".", "_" and "-" only, at most 47.' : 'Enter any name, such as the station\'s.';
   }
   if (v.username ? !MOUNT_RE.test(v.username) : on) {
     out.username = v.username ? 'Letters, digits, ".", "_" and "-" only, at most 47.' : 'Enter the username from the Onocoy console.';
@@ -248,83 +216,114 @@ function ruleText(e) {
 function onocoyElsewhereText(o) {
   if (!o.ready) return 'Onocoy is already in your list but not set up yet. Open it to add your credentials.';
   if (!o.enabled) return 'Onocoy is already set up here and turned off. Open it to turn it on.';
-  return 'Another caster here already streams to Onocoy, and Onocoy allows one stream per station.';
+  return 'Another server here already streams to Onocoy, and Onocoy allows one stream per station.';
+}
+
+/*
+ * The retry paces Other server offers, as the station runs them (ntrip_proto.c: k_transient, k_auth,
+ * NTRIP_POLITE_HOURLY_AFTER; every wait ±20 %): [the choice with its waits after a failed or dropped connection, its
+ * waits after a refused login]. A preset's pace is its own (Onocoy: the station's fast one; RTK2go: polite).
+ */
+const PACE = {
+  standard: [lbl(L.backoff, 'standard') + ' (2 s to 1 min)', 'Refused logins: 1, 5, 15, then 30 min.'],
+  polite: [lbl(L.backoff, 'polite') + ' (10 s to 5 min)',
+    'Refused logins: 5, 15, 30, then 60 min; after 20 failed connections in a row, one try an hour.'],
+};
+
+/** The mountpoint the editor proposes for Onocoy: the station's name as the field takes it (Onocoy shows it only to you). */
+function onocoyMountName(hostname) {
+  return String(hostname || '').replace(/[^A-Za-z0-9._-]/g, '').slice(0, 47);
+}
+
+/** "host:port" (or a host alone: port 2101) as {host, port}; port NaN when what follows the colon is not a port. */
+function splitHostPort(text) {
+  const t = String(text || '').trim();
+  const i = t.lastIndexOf(':');
+  if (i < 0) return { host: t, port: 2101 };
+  const p = t.slice(i + 1).trim();
+  return { host: t.slice(0, i).trim(), port: /^\d{1,5}$/.test(p) ? Number(p) : NaN };
 }
 
 /**
- * Caster editor. entry = {slot, config}. opts: preset (onocoy_preset),
- * hostname, hideOnocoy (no Onocoy choice), onocoyElsewhere ({slot, ready,
- * enabled} of another Onocoy slot), openSlot(n), onSaved(entry), onCancel().
- * Returns {el, dirty()}. Layout: heading, caster, its box, what that caster
- * needs, "Stream to this caster", then "More options"; place() moves the
- * fields when the choice changes.
+ * NTRIP server editor. entry = {slot, config}. opts: preset (onocoy_preset),
+ * hostname (the Onocoy mountpoint it proposes), hideOnocoy (no Onocoy
+ * choice), onocoyElsewhere ({slot, ready, enabled} of another Onocoy slot),
+ * openSlot(n), onSaved(entry), onCancel(). Returns {el, dirty()}.
+ *
+ * Only what the chosen server needs: its type with one line of help, then
+ * host and port (a preset's as text), mountpoint, username (Onocoy and
+ * NTRIP 2.0) and password, two columns from 560 px; Other server adds one
+ * row: NTRIP version, TLS and the retry pace. A preset's other settings are
+ * its own: the stored ones while it stays chosen, the preset's once chosen
+ * (Onocoy's NTRIP version from the station's onocoy_preset). The name
+ * follows the server (the preset's, or the host); a save keeps whether the
+ * server is on, but a new server and an Onocoy slot that gets set up are
+ * saved turned on.
  */
 function casterEditor(entry, opts) {
   const slot = entry.slot;
   const cfg = Object.assign({ enabled: false, name: '', host: '', port: 2101, ntrip_version: 1, tls: false, trust: 'bundle',
     ca_pem_set: false, mountpoint: '', username: '', password_set: false, label: '', v2_raw_body: false,
     backoff_profile: 'standard', dup_stream_ack: false }, entry.config || {});
+  /* Onocoy's server and NTRIP version as the station gives them (onocoy_preset); 1.0 only from a station that gives none. */
   const preset = Object.assign({ host: 'servers.onocoy.com', port: 2101, tls_port: 2121, ntrip_version: 1 }, opts.preset || {});
   const isNew = !cfg.host;
   /* A test Onocoy slot (bench and QEMU builds) counts as Onocoy at its own host and port. */
   const testSlot = !!cfg.test_onocoy;
   const elsewhere = opts.onocoyElsewhere || null;
   let kind = isNew ? (opts.hideOnocoy || elsewhere ? 'rtk2go' : 'onocoy') : isOnocoySlot(cfg) ? 'onocoy' : presetOf(cfg.host);
-  let dirty = false;
-  /* An Onocoy slot without its credentials yet: setting it up means using it. */
-  const noCreds = isOnocoySlot(cfg) && !onocoyReady(cfg);
-  /* The stored caster is set up (Onocoy: the console's three values; others: a stored password): its box folds away
-   * while it stays the chosen caster. */
   const storedKind = kind;
-  const setUp = !isNew && (isOnocoySlot(cfg) ? onocoyReady(cfg) : !!cfg.password_set);
+  let dirty = false;
+  /* An Onocoy slot that is not set up yet: setting it up means using it. */
+  const noCreds = isOnocoySlot(cfg) && !onocoyReady(cfg);
+  const on = isNew || noCreds || !!cfg.enabled;
   const labelOf = id => (PRESETS.find(x => x.id === id) || {}).label || '';
+  /* A preset's host and port: the stored ones until another server is chosen. */
+  let fixedHost = cfg.host, fixedPort = cfg.port;
 
   const choices = PRESETS.filter(p => !(p.id === 'onocoy' && opts.hideOnocoy && kind !== 'onocoy'));
   const presetSel = selectInput(choices.map(p => [p.id, p.label]), kind);
-  const enabled = checkbox('Stream to this caster', isNew || noCreds ? true : cfg.enabled);
-  const name = textInput(cfg.name, { maxlength: 23 });
-  const host = textInput(cfg.host, { maxlength: 63, inputmode: 'url' });
-  const port = numInput(cfg.port, { inputmode: 'numeric', maxlength: 5 });
-  const version = radios('NTRIP version', 'ntripv' + slot, [[1, 'NTRIP 1.0'], [2, 'NTRIP 2.0']], cfg.ntrip_version);
-  const versionNote = h('small', { class: 'hint' });
-  version.el.append(versionNote);
-  const tls = checkbox('Use TLS (encrypted connection)', cfg.tls);
+  const hostPort = textInput(kind === 'custom' ? cfg.host + ':' + cfg.port : '', { maxlength: 69, inputmode: 'url',
+    placeholder: 'host:port' });
+  /* Not set up yet: Onocoy's NTRIP version from the station (2.0 sends the mountpoint the owner chose). */
+  const version = selectInput([[1, 'NTRIP 1.0'], [2, 'NTRIP 2.0']], noCreds ? preset.ntrip_version : cfg.ntrip_version);
+  const tls = checkbox('Encrypted', cfg.tls);
   const trust = selectInput([['bundle', L.trust.bundle], ['custom_ca', L.trust.custom_ca], ['insecure', L.trust.insecure]], cfg.trust);
-  /* An Onocoy slot stored in the older layout (no username) holds the old credential in `mountpoint`, not the
-   * console's mountpoint: start empty, as the wizard does. */
+  /* An Onocoy slot stored in the older layout (no username) holds the old credential in `mountpoint`, not a name of
+   * the owner's: it starts with the proposed name, as an empty one does. */
   const oldLayout = isOnocoySlot(cfg) && !cfg.username;
+  const mountName = onocoyMountName(opts.hostname);
   const mp = textInput(oldLayout ? '' : cfg.mountpoint, { maxlength: 47 });
   const user = textInput(cfg.username, { maxlength: 47 });
   const pw = pwInput({ maxlength: 63, placeholder: cfg.password_set ? 'Stored (leave empty to keep)' : '' });
-  const clearPw = checkbox('Remove the stored password', false);
-  const backoff = selectInput([['standard', 'Standard'], ['polite', 'Polite (slower retries)']], cfg.backoff_profile === 'polite' ? 'polite' : 'standard');
-  /* The retry pace across caster switches. presetPace: a preset set the pace shown (in this editor, or RTK2go's fixed
-   * polite of a stored RTK2go slot), not the owner. ownPace: the owner's pace to go back to: the stored one where the
-   * owner sets it (Other caster, Centipede, Emlid, RTKDirect), or what they picked here; else standard. */
+  const backoff = selectInput([['standard', PACE.standard[0]], ['polite', PACE.polite[0]]], cfg.backoff_profile === 'polite' ? 'polite' : 'standard');
+  /* The retry pace across server switches. presetPace: a preset set the pace (in this editor, or RTK2go's fixed
+   * polite of a stored RTK2go slot), not the owner. ownPace: the owner's pace to go back to on Other server: the
+   * stored one where the owner set it (Other server, or a preset kept from before), or what they picked here; else
+   * standard. */
   let presetPace = !isNew && kind === 'rtk2go';
   let ownPace = !isNew && kind !== 'rtk2go' && kind !== 'onocoy' ? backoff.value : 'standard';
-  const raw = checkbox('Send NTRIP 2.0 data without chunked encoding', cfg.v2_raw_body, 'Only if your caster asks for it.');
-  /* TLS on a preset shows under More options only while it is (or was, in this editor) on: the presets use the plain port. */
-  let tlsSeen = !!cfg.tls;
 
   const F = {
-    name: field('Name', name, 'Shown only on this station\'s pages.'),
-    host: field('Host', host),
-    port: field('Port', port),
-    mountpoint: field('Mountpoint', mp),
+    host: field('Host and port', hostPort),
+    mountpoint: field('Mountpoint', mp, 'Any name; shows only in your Onocoy dashboard.'),
     username: field('Username', user),
     password: field('Password', pw),
+    ntrip_version: field('NTRIP version', version),
     trust: field('Certificate check', trust),
-    backoff_profile: field('Retry pace', backoff, 'Polite waits longer between attempts. Some casters ban fast retries.'),
+    backoff_profile: field('Retry pace', backoff, PACE.standard[1]),
   };
+  F.port = F.host;   /* a refused port is the same field's */
+  const mpHint = F.mountpoint.el.querySelector('.hint');
+  const paceHint = F.backoff_profile.el.querySelector('.hint');
+  /* A preset's host and port: text where Other server has its field. */
+  const fixedText = h('div', { class: 'fixed-value' });
+  const fixedField = h('div', { class: 'field' }, h('span', { class: 'lbl' }, 'Host and port'), fixedText);
+  /* TLS, and its certificate check while it is on. */
+  const tlsField = h('div', { class: 'field' }, h('span', { class: 'lbl' }, 'TLS'), h('div', { class: 'fixed-value' }, tls.el),
+    F.trust.el);
   const title = h('h2');
-  /* The box open, or folded under "How to set up <caster>" (the stored caster, set up). */
-  const info = h('div', { class: 'preset' });
-  const foldBox = h('div', { class: 'preset' });
-  const foldSum = h('summary');
-  const infoFold = h('details', { class: 'more' }, foldSum, foldBox);
-  let infoKind = '';
-  const server = h('p', { class: 'muted small' });
+  const help = h('p', { class: 'muted small' });
   /* A note while the typed password breaks Onocoy's console rule (saving stays possible). */
   const pwNote = h('p', { class: 'small t-warn', role: 'status', hidden: true });
   const showPwNote = () => {
@@ -335,16 +334,11 @@ function casterEditor(entry, opts) {
   const elsewhereNote = elsewhere ? h('div', { class: 'msg info', role: 'note' }, h('p', null, onocoyElsewhereText(elsewhere)),
     opts.openSlot ? h('div', { class: 'form-actions' }, btn('Open Onocoy', () => opts.openSlot(elsewhere.slot), 'small')) : null) : null;
   const testNote = testSlot ? h('p', { class: 'small' }, badge('Test Onocoy slot (bench build)', 'warn'),
-    ' Counts as Onocoy at this host, for a local test caster.') : null;
-  const tlsNote = h('small', { class: 'hint' });
-  const forcedPace = h('p', { class: 'muted small' });
+    ' Counts as Onocoy at this host, for a local test server.') : null;
+  /* Other server's own settings, in one row under the four fields (TLS's certificate check under it). */
+  const own = h('div', { class: 'cols c3' }, F.ntrip_version.el, tlsField, F.backoff_profile.el);
   const caBox = h('div', { class: 'stack' });
-  const tlsBox = h('div', { class: 'field' }, tls.el, tlsNote);
-  const hostRow = h('div', { class: 'cols c2' }, F.host.el, F.port.el);
-  const casterField = field('Caster', presetSel).el;
-  const moreBody = h('div', { class: 'stack' });
-  const more = h('details', { class: 'more' }, h('summary', null, 'More options'), moreBody);
-  const ackNote = cfg.dup_stream_ack ? h('p', { class: 'muted small' }, 'You accepted the duplicate-stream risk for this caster.') : null;
+  const ackNote = cfg.dup_stream_ack ? h('p', { class: 'muted small' }, 'You accepted the duplicate-stream risk for this server.') : null;
   const err = errBox();
   const dupBox = h('div');
   const saveBtn = h('button', { type: 'submit', class: 'btn primary' }, 'Save');
@@ -356,7 +350,7 @@ function casterEditor(entry, opts) {
   const caErr = errBox();
   let caSet = cfg.ca_pem_set;
   const showCa = () => {
-    caState.textContent = caSet ? 'A CA certificate is stored for this caster.' : 'No CA certificate stored yet.';
+    caState.textContent = caSet ? 'A CA certificate is stored for this server.' : 'No CA certificate stored yet.';
   };
   const storeCa = btn('Store certificate', () => {
     const text = pem.value.trim();
@@ -370,7 +364,7 @@ function casterEditor(entry, opts) {
       caSet = !!(r && r.config && r.config.ca_pem_set);
       pem.value = '';
       showCa();
-      toast('Certificate stored. The caster reconnects.', 'ok');
+      toast('Certificate stored. The station reconnects.', 'ok');
     }, caErr);
   }, 'small');
   const removeCa = btn('Remove', () => act(removeCa, async () => {
@@ -379,11 +373,11 @@ function casterEditor(entry, opts) {
     showCa();
   }, caErr), 'small danger');
   showCa();
-  add(caBox, [field('CA certificate (PEM)', pem, 'The certificate of the authority that signed the caster\'s certificate.').el,
+  add(caBox, [field('CA certificate (PEM)', pem, 'The certificate of the authority that signed the server\'s certificate.').el,
     h('div', { class: 'row' }, storeCa, removeCa, caState), caErr]);
 
   const onocoy = () => kind === 'onocoy';
-  const v2 = () => version.value() === '2';
+  const v2 = () => version.value === '2';
 
   const form = h('form', { class: 'stack', onsubmit: e => {
     e.preventDefault();
@@ -391,57 +385,24 @@ function casterEditor(entry, opts) {
   }, oninput: () => {
     dirty = true;
   } });
-
-  /* Where the fields sit for the chosen caster: rebuilt only when that changes (moving a field drops its focus). */
-  let placed = '';
-  function place() {
-    const group = kind === 'custom' ? 'custom' : kind === 'rtk2go' ? 'rtk2go' : 'preset';
-    if (group === placed) return;
-    placed = group;
-    const custom = group === 'custom';
-    const tlsEls = [tlsBox, F.trust.el, caBox];
-    /* Onocoy already elsewhere: that comes first, before how to set up a new one. */
-    mount(form, h('div', { class: 'card-head' }, title), casterField, elsewhereNote, info, infoFold, testNote,
-      custom ? hostRow : server, F.mountpoint.el, F.username.el, F.password.el, pwNote,
-      custom || group === 'rtk2go' ? version.el : null, custom ? tlsEls : null,
-      enabled.el, more, ackNote, dupBox, err, actions);
-    mount(moreBody, F.name.el, custom ? null : hostRow, group === 'preset' ? version.el : null, custom ? null : tlsEls,
-      F.backoff_profile.el, forcedPace, raw.el, clearPw.el);
-  }
+  /* Onocoy already elsewhere: that comes first, before how to set up a new one. */
+  mount(form, h('div', { class: 'card-head' }, title), h('div', { class: 'cols c2' }, field('NTRIP server', presetSel).el), help,
+    elsewhereNote, testNote,
+    h('div', { class: 'cols c2' }, F.host.el, fixedField, F.mountpoint.el, F.username.el, F.password.el), pwNote,
+    own, caBox, ackNote, dupBox, err, actions);
 
   function sync() {
-    place();
-    const ono = onocoy();
-    if (infoKind !== kind) {
-      infoKind = kind;
-      const folded = setUp && kind === storedKind;
-      presetBox(kind, folded ? foldBox : info);
-      foldSum.textContent = presetFoldText(kind);
-      info.hidden = folded;
-      infoFold.hidden = !folded;
-    }
-    /* Onocoy's host and port are fixed: one line of text, as the console shows them (a test slot: its own). */
-    hostRow.hidden = ono;
-    server.hidden = !ono;
-    if (ono) serverLine(server, testSlot ? cfg.host : preset.host, testSlot ? cfg.port : tls.input.checked ? preset.tls_port : preset.port);
-    F.name.el.hidden = ono;
+    const ono = onocoy(), custom = kind === 'custom';
+    presetHelp(kind, help);
+    F.host.el.hidden = !custom;
+    fixedField.hidden = custom;
+    fixedText.textContent = fixedHost + ':' + fixedPort;
+    mpHint.hidden = !ono;
     F.username.el.hidden = !ono && !v2();
-    /* The reservation (RTK2go) or the caster (Other caster) decides the version. */
-    versionNote.textContent = kind === 'rtk2go' ? 'Use the version of your reservation: Rev1 is 1.0, Rev2 is 2.0.' :
-      kind === 'custom' ? 'Use the version your caster asks for.' : ono ? 'Onocoy takes both.' : '';
-    versionNote.hidden = !versionNote.textContent;
-    tlsBox.hidden = kind !== 'custom' && !tlsSeen && !tls.input.checked;
-    F.trust.el.hidden = !tls.input.checked || ono;
-    caBox.hidden = !(tls.input.checked && !ono && trust.value === 'custom_ca');
-    tlsNote.textContent = !tls.input.checked ? (kind === 'custom' ? 'Only if your caster offers it.' : '') :
-      ono ? 'Uses port ' + preset.tls_port + '.' : trust.value === 'insecure' ? 'The caster\'s certificate is not checked.' : '';
-    tlsNote.hidden = !tlsNote.textContent;
-    /* Onocoy's pace is the station's own (fast): nothing to show. RTK2go's is fixed: one line says so. */
-    F.backoff_profile.el.hidden = ono || kind === 'rtk2go';
-    forcedPace.hidden = kind !== 'rtk2go';
-    forcedPace.textContent = kind === 'rtk2go' ? 'Retry pace: ' + lbl(L.backoff, 'polite') + ' (fixed for RTK2go).' : '';
-    raw.el.hidden = !v2() || ono;
-    clearPw.el.hidden = !cfg.password_set;
+    own.hidden = !custom;
+    paceHint.textContent = PACE[backoff.value === 'polite' ? 'polite' : 'standard'][1];
+    F.trust.el.hidden = !custom || !tls.input.checked;
+    caBox.hidden = F.trust.el.hidden || trust.value !== 'custom_ca';
     /* Where Onocoy is, while Onocoy is the choice. */
     if (elsewhereNote) elsewhereNote.hidden = !ono;
     showPwNote();
@@ -451,8 +412,7 @@ function casterEditor(entry, opts) {
     const prev = kind;
     kind = presetSel.value;
     const p = PRESETS.find(x => x.id === kind) || {};
-    const prevLabel = labelOf(prev);
-    /* A preset with a pace of its own sets it. One without (Other caster; Onocoy, whose pace the save fixes) never
+    /* A preset with a pace of its own sets it. One without (Other server; Onocoy, whose pace the save fixes) never
      * keeps a pace a preset set (RTK2go's polite): back to the owner's. A pace the owner set stays. */
     if (p.backoff_profile === 'polite' || p.backoff_profile === 'standard') {
       backoff.value = p.backoff_profile;
@@ -461,27 +421,28 @@ function casterEditor(entry, opts) {
       backoff.value = ownPace;
       presetPace = false;
     }
-    if (!name.value || name.value === prevLabel) name.value = kind === 'custom' ? '' : p.label;
     if (kind === 'onocoy') {
-      host.value = testSlot ? cfg.host : preset.host;
-      port.value = String(testSlot ? cfg.port : tls.input.checked ? preset.tls_port : preset.port);
-      version.set(preset.ntrip_version || 1);
+      fixedHost = testSlot ? cfg.host : preset.host;
+      fixedPort = testSlot ? cfg.port : preset.port;
+      version.value = String(preset.ntrip_version);
+      tls.input.checked = false;
     } else if (p.host) {
-      host.value = p.host;
-      port.value = String(p.port);
-      version.set(p.ntrip_version);
+      fixedHost = p.host;
+      fixedPort = p.port;
+      version.value = String(p.ntrip_version);
       tls.input.checked = false;
     } else if (prev !== 'custom') {
-      host.value = '';
-      port.value = '2101';
+      hostPort.value = '';
     }
-    tlsSeen = tls.input.checked;
+    /* The proposed Onocoy mountpoint goes with Onocoy; an empty one is proposed. */
+    if (prev === 'onocoy' && mp.value === mountName) mp.value = '';
+    if (kind === 'onocoy' && !mp.value) mp.value = mountName;
     sync();
   }
 
   presetSel.addEventListener('change', () => {
     dirty = true;
-    /* A duplicate-stream question was about the caster chosen before. */
+    /* A duplicate-stream question was about the server chosen before. */
     clear(dupBox);
     saveBtn.hidden = false;
     applyPreset();
@@ -489,27 +450,19 @@ function casterEditor(entry, opts) {
   backoff.addEventListener('change', () => {
     ownPace = backoff.value;
     presetPace = false;
-  });
-  tls.input.addEventListener('change', () => {
-    if (onocoy() && !testSlot) port.value = String(tls.input.checked ? preset.tls_port : preset.port);
     sync();
   });
+  tls.input.addEventListener('change', sync);
   trust.addEventListener('change', sync);
-  version.onchange(sync);
-
-  /* A field under More options opens it before it takes the focus. */
-  const focusField = input => {
-    if (moreBody.contains(input)) more.open = true;
-    input.focus();
-  };
+  version.addEventListener('change', sync);
 
   function collect() {
     for (const k of Object.keys(F)) F[k].error(null);
-    const ono = onocoy();
+    const ono = onocoy(), custom = kind === 'custom';
     const v = v2();
-    const on = enabled.input.checked;
-    const hostVal = ono ? (testSlot ? cfg.host : preset.host) : host.value.trim();
-    const portVal = ono ? (testSlot ? cfg.port : tls.input.checked ? preset.tls_port : preset.port) : Number(port.value);
+    const typed = splitHostPort(hostPort.value);
+    const hostVal = custom ? typed.host : fixedHost;
+    const portVal = custom ? typed.port : fixedPort;
     const hostChanged = hostVal.toLowerCase() !== String(cfg.host || '').toLowerCase();
     let bad = null;
     const fail = (k, text) => {
@@ -517,15 +470,13 @@ function casterEditor(entry, opts) {
       if (!bad) bad = F[k].input;
     };
     /* Byte limits: the station stores UTF-8, so accents and symbols take more than one byte. */
-    if (!ono && hasControl(name.value)) fail('name', 'No control characters.');
-    else if (!ono && utf8Len(name.value) > 23) fail('name', 'Too long: use a shorter name.');
-    if (!hostVal && on) fail('host', 'Enter the caster\'s host name.');
+    if (!hostVal && on) fail('host', 'Enter the server\'s host name and port, as host:port.');
     else if (hostVal && !DNS_OR_IP.test(hostVal)) fail('host', 'A host name or an IPv4 address, at most 63 characters.');
-    if (!(Number.isInteger(portVal) && portVal >= 1 && portVal <= 65535)) fail('port', 'A port from 1 to 65535.');
+    else if (hostVal && !(Number.isInteger(portVal) && portVal >= 1 && portVal <= 65535)) fail('host', 'After the colon, a port from 1 to 65535.');
     const mpVal = mp.value.trim();
     const userVal = ono ? user.value.trim() : user.value;
     const pwVal = pw.value;
-    const keepsPw = cfg.password_set && !hostChanged && !clearPw.input.checked;
+    const keepsPw = cfg.password_set && !hostChanged;
     if (ono) {
       const pr = onocoyProblems({ mountpoint: mpVal, username: userVal, password: pwVal }, on, keepsPw);
       for (const k of Object.keys(pr)) fail(k, pr[k]);
@@ -549,15 +500,16 @@ function casterEditor(entry, opts) {
         'The host changed: enter the password for the new host.' : 'Enter the password.');
     }
     if (bad) {
-      focusField(bad);
+      bad.focus();
       return null;
     }
-    /* No host and not enabled: the slot is empty again, and an empty slot has no name (not the preset's). */
+    /* No host and not enabled: the slot is empty again, and an empty slot has no name. The name follows the server:
+     * the stored one while it stays (Other server: and its host), else the preset's or the host. */
     const emptied = !hostVal && !on;
+    const keepName = cfg.name && kind === storedKind && !(custom && hostChanged);
     const body = {
       enabled: on,
-      name: emptied ? '' : ono ? (cfg.name && isOnocoySlot(cfg) ? cfg.name : 'Onocoy') :
-        name.value.trim() || (kind === 'custom' ? hostVal.slice(0, 23) : labelOf(kind)),
+      name: emptied ? '' : keepName ? cfg.name : ono ? 'Onocoy' : custom ? hostVal.slice(0, 23) : labelOf(kind),
       host: hostVal,
       port: portVal,
       ntrip_version: v ? 2 : 1,
@@ -565,12 +517,10 @@ function casterEditor(entry, opts) {
       mountpoint: mpVal,
       backoff_profile: ono ? 'fast' : kind === 'rtk2go' ? 'polite' : backoff.value,
     };
-    if (tls.input.checked) body.trust = ono ? 'bundle' : trust.value;
+    if (tls.input.checked) body.trust = custom ? trust.value : cfg.trust;
     if (ono || v) body.username = userVal;
-    if (v && !ono) body.v2_raw_body = raw.input.checked;
     if (pwVal) body.password = pwVal;
-    else if (clearPw.input.checked) body.clear_password = true;
-    if (testSlot) body.test_onocoy = ono;   /* switched to another caster: no longer a test Onocoy slot */
+    if (testSlot) body.test_onocoy = ono;   /* switched to another server: no longer a test Onocoy slot */
     return body;
   }
 
@@ -585,7 +535,7 @@ function casterEditor(entry, opts) {
       pw.value = '';
       clear(dupBox);
       saveBtn.hidden = false;
-      toast('Saved. The caster reconnects with the new settings.', 'ok');
+      toast(on ? 'Saved. The station connects with the new settings.' : 'Saved.', 'ok');
       if (opts.onSaved) opts.onSaved(r);
     } catch (e) {
       if (e instanceof ApiError && e.code === 'caster_policy' && e.body.reason === 'dup_stream_ack_required') {
@@ -597,34 +547,37 @@ function casterEditor(entry, opts) {
       }
       if (e instanceof ApiError && e.code === 'invalid_field' && F[e.field] && !F[e.field].el.hidden) {
         F[e.field].error(ruleText(e));
-        focusField(F[e.field].input);
+        F[e.field].input.focus();
         return;
       }
       showErr(e, err);
     }
   }
 
-  title.textContent = isNew ? 'New caster' : 'Edit ' + (cfg.name || labelOf(kind) || 'slot ' + (slot + 1));
+  title.textContent = isNew ? 'New server' : 'Edit ' + (cfg.name || labelOf(kind) || 'slot ' + (slot + 1));
   if (isNew) applyPreset();
-  else sync();
+  else {
+    if (kind === 'onocoy' && !mp.value) mp.value = mountName;
+    sync();
+  }
   return { el: form, dirty: () => dirty };
 }
 
-/* ---- Caster page ---------------------------------------------------------- */
+/* ---- NTRIP page ----------------------------------------------------------- */
 
 /** A stopped slot: why, what to do, and the retry. */
 function stopPanel(c, st) {
   const why = L.stop[st.stop_reason];
-  const text = Array.isArray(why) ? why[1] : 'The station stopped this caster and makes no attempt until you act.';
+  const text = Array.isArray(why) ? why[1] : 'The station stopped this server and makes no attempt until you act.';
   return msg('bad', h('strong', null, 'Stopped: ' + lbl(L.stop, st.stop_reason)), h('p', null, text),
     h('div', { class: 'form-actions' }, btn('Try again', () => retryCaster(c.slot), 'small primary')));
 }
 
 /**
- * A caster's one detail line (the chip says the state): why it stopped
+ * A server's one detail line (its state line says the state): why it stopped
  * (opts.stopped: the page shows that in its stop panel instead), the login
- * guard's count or the station's hint (not while waiting for data: the chip
- * says so), else the last failure (opts.unreached: the page says that in its
+ * guard's count or the station's hint (not while waiting for data: the state
+ * line says so), else the last failure (opts.unreached: the page says that in its
  * not-reached line; opts.tls: the card's plain-port box says the TLS
  * failures, so neither a TLS hint nor a TLS failure here). null when there
  * is nothing to add.
@@ -640,12 +593,36 @@ function casterDetail(st, opts) {
   const hint = st.state === 'wait_data' || (opts.tls && /^TLS\b/.test(st.hint || '')) ? '' : st.hint;
   const text = hint || refused;
   if (text) return h('div', { class: 'hintline' }, capFirst(text));
-  /* The last failure, unless the chip says the same ("Login refused"). */
+  /* The last failure, unless the state line says the same ("Login refused"). */
   const fail = waiting && st.reason && st.reason !== 'none' && !(opts.tls && st.reason === 'tls') ? lbl(L.fail, st.reason) : '';
   if (fail && fail !== lbl(L.caster, st.state) && !(opts.unreached && st.unreached_s)) {
     return h('div', { class: 't-' + (casterTone(st.state) || 'warn') + ' small' }, fail);
   }
   return null;
+}
+
+/*
+ * What a server said or did when it refuses or drops the station, each row
+ * only when there is something to say (none while all is well): its last
+ * reply when that was no OK, a line it sent during a session, the login
+ * guard's blocks and taken-over sessions (the third of either stops an
+ * Onocoy slot) and, while it does not stream, the failures by cause since the
+ * station started (noTls: not TLS, which the card's plain-port box counts).
+ * The state, the stop, a refused login and "not reached" are in the card's
+ * lines already; the Onocoy day is on the Status page.
+ */
+function casterEvidence(st, noTls) {
+  const fb = st.state === 'streaming' ? {} : st.failures_by_class || {};
+  const causes = Object.keys(fb).filter(k => fb[k] > 0 && !(noTls && k === 'tls')).map(k => lbl(L.fail, k) + ' (' + fmt.num(fb[k]) + ')');
+  const code = st.last_status_code;
+  const rows = [
+    st.last_status_line && !(code >= 200 && code < 300) ? ['Last reply', st.last_status_line] : null,
+    st.last_session_text ? ['Server said', st.last_session_text] : null,
+    st.login_blocks ? ['Login blocks', fmt.num(st.login_blocks) + ' of 3'] : null,
+    st.kicked_sessions ? ['Sessions taken over', Math.min(st.kicked_sessions, 3) + ' of 3'] : null,
+    causes.length ? ['Failures', causes.join(', ')] : null,
+  ].filter(Boolean);
+  return rows.length ? kv(rows) : null;
 }
 
 /*
@@ -656,38 +633,49 @@ function casterDetail(st, opts) {
  */
 const PLAIN_SWITCH = {};
 
+/*
+ * A server's line under its name: its state in a word, in its colour, and
+ * what goes with it: while it streams, for how long, its rate (the last
+ * 10 s) and what it sent since the station started; while it waits, its
+ * next try. Each separator stays with the part after it.
+ */
+function casterLine(c, st) {
+  if (!c.enabled) return h('div', { class: 'cstate muted' }, lbl(L.caster, 'disabled'));
+  const tone = casterTone(st.state);
+  const parts = [];
+  if (st.state === 'streaming') {
+    const r = slotRate(c.slot, 10);
+    if (r !== null) parts.push(fmt.kbps(r));
+    if (st.bytes_sent) parts.push(fmt.bytes(st.bytes_sent) + ' sent');
+  } else if (st.next_retry_s) {
+    parts.push('next try in ' + fmt.dur(st.next_retry_s));
+  }
+  return h('div', { class: 'cstate' },
+    h('span', { class: tone ? 't-' + tone : 'muted' }, lbl(L.caster, st.state) +
+      (st.state === 'streaming' && st.connected_s ? ' for ' + fmt.dur(st.connected_s) : '')),
+    parts.map(t => [' ', h('span', { class: 'nowrap muted' }, '· ' + t)]));
+}
+
 function casterSummary(c, st, preset) {
   const ono = isOnocoySlot(c);
-  const metrics = [];
-  if (st.state === 'streaming') {
-    metrics.push(['Connected', fmt.dur(st.connected_s)]);
-    metrics.push(['Lag', fmt.ms(st.lag_ms_now)]);
-    const r = slotRate(c.slot, 10);
-    if (r !== null) metrics.push(['Rate', fmt.kbps(r)]);
-  } else if (c.enabled) {
-    metrics.push(['For', fmt.dur(st.state_age_s)]);
-    if (st.next_retry_s) metrics.push(['Retry in', fmt.dur(st.next_retry_s)]);
-  }
-  const on = st.today_online_s || 0, off = st.today_offline_s || 0;
-  if (on + off > 0) metrics.push(['Today online', fmt.dur(on)]);
-  if (off) metrics.push(['Today offline', fmt.dur(off)]);
   const avg = c.backoff_profile === 'polite' && st.state === 'streaming' ? slotRate(c.slot, 60) : null;
   if (!c.tls) delete PLAIN_SWITCH[c.slot];
   /* TLS to Onocoy keeps failing: one box says it, with the count and the switch to the plain port. */
   const plain = ono && c.tls && PLAIN_SWITCH[c.slot] !== 'done' && st.failures_by_class && st.failures_by_class.tls >= 10 &&
     st.state !== 'streaming';
   const out = [
-    /* Where it streams: host and mountpoint (the protocol details are in the editor); a test slot says so here. */
-    h('div', { class: 'muted small' }, c.host + (c.mountpoint ? '/' + c.mountpoint : '') +
+    casterLine(c, st),
+    /* Where it streams: host, port and mountpoint; a test slot says so here. */
+    h('div', { class: 'muted small' }, c.host + ':' + c.port + (c.mountpoint ? '/' + c.mountpoint : '') +
       (c.test_onocoy ? ' · Test Onocoy slot (bench build)' : '')),
     st.state === 'stopped' ? stopPanel(c, st) : null,
     casterDetail(st, { unreached: true, tls: plain }),
-    metrics.length ? h('div', { class: 'metrics' }, metrics.map(m => h('span', null, m[0] + ' ', h('b', null, m[1])))) : null,
-    /* Public casters ban fast streams: a warning only when this one gets close. */
+    /* Public servers ban fast streams: a warning only when this one gets close. */
     avg !== null && avg > 28000 ? h('div', { class: 'small t-warn' }, 'Average over 60 s: ' + fmt.kbps(avg) +
-      '. That is close to the limits of public casters; consider MSM4 messages instead of MSM7.') : null,
-    st.unreached_s ? h('div', { class: 'hintline' }, 'Caster not reached for ' + fmt.dur(st.unreached_s) +
+      '. That is close to the limits of public servers; consider MSM4 messages instead of MSM7.') : null,
+    st.unreached_s ? h('div', { class: 'hintline' }, 'Server not reached for ' + fmt.dur(st.unreached_s) +
       (st.reason && st.reason !== 'none' ? ': ' + lbl(L.fail, st.reason) : '') + '.') : null,
+    casterEvidence(st, plain),
   ];
   if (plain) {
     const waiting = PLAIN_SWITCH[c.slot] === 'busy';
@@ -725,79 +713,68 @@ function casterSummary(c, st, preset) {
   return out;
 }
 
-/** A caster card's one chip: its state, or "Needs you" while the card shows the stopped panel (which says why). */
-function casterChip(st) {
-  return st.state === 'stopped' ? ['Needs you', 'bad'] : [lbl(L.caster, st.state), casterTone(st.state)];
-}
-
-/** When something began, from its age in seconds: "9:41 AM" today, else date and time. */
-function sinceText(ageS) {
-  const unix = Date.now() / 1000 - ageS;
-  return new Date(unix * 1000).toDateString() === new Date().toDateString() ? clockTime(unix) : fmt.time(unix);
+/**
+ * An on/off switch (role switch, named by label) that saves at once:
+ * onChange(on) resolves true once saved, else it flips back. While it saves
+ * it says so (aria-busy) and ignores clicks, keeping the keyboard focus.
+ */
+function onOffSwitch(on, label, onChange) {
+  const b = h('button', { type: 'button', class: 'switch', role: 'switch', 'aria-checked': on ? 'true' : 'false', 'aria-label': label });
+  b.addEventListener('click', async () => {
+    if (b.getAttribute('aria-busy') === 'true') return;
+    const next = b.getAttribute('aria-checked') !== 'true';
+    b.setAttribute('aria-checked', String(next));
+    b.setAttribute('aria-busy', 'true');
+    const ok = await onChange(next);
+    b.removeAttribute('aria-busy');
+    if (!ok) b.setAttribute('aria-checked', String(!next));
+  });
+  return b;
 }
 
 /**
- * Connection details: the evidence when a caster refuses or drops the
- * station, at most 12 rows, each only when it has something to say (the
- * ones that count trouble only when there is some), then the failures by
- * cause that happened (none: no list). The state, the stop reason and "not
- * reached" are on the card already; the Onocoy day is on the Status page.
- * reconnects: today's from the availability ledger (GET /api/availability),
- * undefined while not read.
+ * Turn a server off or on (its card's switch): PUT with `enabled` only (the
+ * rest stays as stored). On next to Onocoy, an open server needs the
+ * duplicate-stream acknowledgement, as a save does: a dialog asks for it.
+ * The slot's entry as the station stored it, or null when nothing changed.
  */
-function casterDetails(st, reconnects) {
-  const fb = st.failures_by_class || {};
-  const causes = Object.keys(fb).filter(k => fb[k] > 0).map(k => [lbl(L.fail, k), fmt.num(fb[k])]);
-  const given = v => v !== null && v !== undefined;
-  return [
-    kv([
-      ['State since', given(st.state_age_s) ? sinceText(st.state_age_s) : DASH],
-      st.last_status_line ? ['Last reply', st.last_status_line + (st.last_status_code ? ' (' + st.last_status_code + ')' : '')] : null,
-      st.last_session_text ? ['Caster said during a session', st.last_session_text] : null,
-      st.login_rejects || st.login_blocks ? ['Refused logins / login blocks', fmt.num(st.login_rejects) + ' / ' + fmt.num(st.login_blocks) +
-        ' (the third of either stops the caster)'] : null,
-      st.kicked_sessions ? ['Sessions taken over (score)', Math.min(st.kicked_sessions, 3) + ' of 3'] : null,
-      given(st.data_rate_permille) ? ['Data rate', fmt.permille(st.data_rate_permille)] : null,
-      ['Epochs dropped today', fmt.num(st.epochs_dropped_today)],
-      st.state === 'streaming' || st.max_lag_ms ? ['Lag now / highest', fmt.ms(st.lag_ms_now) + ' / ' + fmt.ms(st.max_lag_ms)] : null,
-      ['Reconnects today', given(reconnects) ? fmt.num(reconnects) : DASH],
-      given(st.bytes_sent_today) ? ['Sent today', volText(st.bytes_sent_today)] : null,
-      st.resolved_ip ? ['Address', st.resolved_ip + (st.dns_cached_used ? ' (cached DNS used ' + st.dns_cached_used + '×)' : '')] : null,
-    ]),
-    /* Those two live in RAM: after a restart today they count from it. */
-    restartedToday() ? h('p', { class: 'muted small foot' }, 'Dropped epochs and data sent count from the last restart.') : null,
-    causes.length ? h('h3', { class: 'section-title' }, 'Failures by cause') : null,
-    causes.length ? kv(causes) : null,
-  ];
+async function turnCaster(c, on) {
+  const put = body => saveCaster(c.slot, body);
+  let saved = null;
+  try {
+    saved = await put({ enabled: on });
+  } catch (e) {
+    if (!(on && e instanceof ApiError && e.code === 'caster_policy' && e.body.reason === 'dup_stream_ack_required')) {
+      showErr(e);
+      return null;
+    }
+    const ok = await dialog({ title: 'Duplicate-stream risk', ok: 'Turn on anyway', body: dupText(),
+      check: 'I understand the risk and want to stream to both.',
+      onOk: async () => (saved = await put({ enabled: true, dup_stream_ack: true })) });
+    if (!ok) return null;
+  }
+  toast((c.name || 'The server') + (on ? ' is turned on.' : ' is turned off.'), 'ok');
+  return saved;
 }
 
-/* The station restarted since 00:00 UTC: its uptime is shorter than the UTC day so far. */
-function restartedToday() {
-  const up = S.status && S.status.uptime_s;
-  return typeof up === 'number' && up < (Date.now() / 1000) % 86400;
-}
-
-Views.casters = {
-  title: 'Casters',
+Views.ntrip = {
+  title: 'NTRIP',
   showTitle: true,
   admin: true,
   create(el, arg) {
     let data = null;
     let editing = null, editor = null;
-    const cards = {};   /* slot -> card element (casters only; a free slot's editor opens in the add card) */
-    const refs = {};    /* slot -> {badge, live, details} for in-place updates */
-    const open = {};    /* slot -> details expanded */
+    const cards = {};   /* slot -> card element (servers only; a free slot's editor opens in the add card) */
+    const refs = {};    /* slot -> {badge, live} for in-place updates */
     let addCard = null;
     let stopPoll = null, gone = false;
-    /* Today's reconnects per slot (GET /api/availability), read only while a card's connection details are open. */
-    let reconnects = null;
 
     const liveOf = slot => {
       const l = S.status && S.status.casters ? S.status.casters.find(c => c.slot === slot) : null;
       return l || {};
     };
     const statusOf = s => Object.assign({}, s.status || {}, liveOf(s.slot));
-    /* A free slot: no caster in it (no host, not enabled). Safe mode loads no config: every slot keeps its card. */
+    /* A free slot: no server in it (no host, not enabled). Safe mode loads no config: every slot keeps its card. */
     const isFree = s => !!s.config && !s.config.host && !s.config.enabled;
     const freeSlots = () => data.slots.filter(isFree);
     const safeMode = () => data.slots.length > 0 && data.slots.every(s => s.config === null);
@@ -813,75 +790,61 @@ Views.casters = {
       }
       if (isOnocoySlot(c) && !onocoyReady(c)) {
         return [cardHead(c.name || 'Onocoy', badge('Not set up', '')),
-          h('p', null, 'Add the mountpoint, username and password from the Onocoy console to start streaming.'),
-          st.state === 'streaming' ? msg('info', 'It streams with credentials stored by an earlier version. Enter the three values ' +
-            'from the Onocoy console to finish the setup.') : null,
-          /* The main button, unless another caster's editor (and its Save) is open. */
+          h('p', null, 'Add the username and password from the Onocoy console to start streaming.'),
+          st.state === 'streaming' ? msg('info', 'It streams with credentials stored by an earlier version. Enter the username ' +
+            'and password from the Onocoy console to finish the setup.') : null,
+          /* The main button, unless another server's editor (and its Save) is open. */
           h('div', { class: 'form-actions' }, btn('Add your Onocoy credentials', () => edit(s), editing === null ? 'primary' : ''))];
       }
-      const r = {
-        badge: badge(...casterChip(st)),
-        live: h('div', { class: 'caster-live' }),
-        details: h('div'),
-      };
+      const r = { live: h('div', { class: 'caster-live fit-kv' }) };
       refs[s.slot] = r;
       fill(s);
-      const det = h('details', { class: 'more', open: !!open[s.slot] }, h('summary', null, 'Connection details'), r.details);
-      det.addEventListener('toggle', () => {
-        open[s.slot] = det.open;
-        if (!det.open) return;
-        const now = () => data.slots.find(x => x.slot === s.slot);
-        if (now()) fill(now());
-        if (!reconnects) loadReconnects().then(() => now() && fill(now()));
+      const name = c.name || 'Slot ' + (s.slot + 1);
+      const sw = onOffSwitch(!!c.enabled, 'Stream to ' + name, async on => {
+        const saved = await turnCaster(c, on);
+        if (!saved) return false;
+        if (gone) return true;
+        data.slots = data.slots.map(x => (x.slot === saved.slot ? saved : x));
+        renderSlot(s.slot);
+        /* The keyboard focus stays on the switch, rebuilt with its card. */
+        const next = cards[s.slot] && cards[s.slot].querySelector('.switch');
+        if (next) next.focus();
+        load().catch(() => {});
+        return true;
       });
       return [
-        cardHead(c.name || 'Slot ' + (s.slot + 1), c.enabled ? r.badge : badge('Off', '')),
+        h('div', { class: 'card-head switch-head' }, h('h2', null, name),
+          btn('Edit', () => edit(s), 'small', { 'aria-label': 'Edit ' + name }), sw),
         r.live,
-        /* Onocoy and this open caster both stream: the risk, on this caster's own card. */
+        /* Onocoy and this open server both stream: the risk, on this server's own card. */
         openCasterWarning(data, s.slot),
-        /* A caster that is off has nothing to show there. */
-        c.enabled ? det : null,
-        h('div', { class: 'form-actions' }, btn('Edit', () => edit(s))),
       ];
     }
 
-    /* The card after the casters: how many slots are free and "Add a caster" (its editor opens in place). The main
-     * button only while there is no caster yet: otherwise a caster's own action (or an editor's Save) is the one. */
+    /* The card after the servers: how many slots are free and "Add a server" (its editor opens in place). The main
+     * button only while there is no server yet: otherwise a server's own action (or an editor's Save) is the one. */
     function addBody() {
       const free = freeSlots();
       if (editor && free.some(x => x.slot === editing)) return [editor.el];
-      if (!free.length) return [h('p', { class: 'muted' }, 'All ' + data.max_slots + ' slots are in use. Edit a caster to replace it.')];
+      if (!free.length) return [h('p', { class: 'muted' }, 'All ' + data.max_slots + ' slots are in use. Edit a server to replace it.')];
       return [h('div', { class: 'form-actions' }, h('span', { class: 'note muted' }, free.length + ' of ' + data.max_slots + ' slots free.'),
-        btn('Add a caster', () => edit(free[0]), free.length === data.slots.length ? 'primary' : ''))];
+        btn('Add a server', () => edit(free[0]), free.length === data.slots.length ? 'primary' : ''))];
     }
 
-    /* Refresh the live parts of a card without touching its buttons. */
+    /* Refresh the live parts of a card without touching its switch and buttons. */
     function fill(s) {
       const r = refs[s.slot];
       if (!r) return;
       const st = statusOf(s);
-      const chip = casterChip(st);
-      r.badge.className = 'badge ' + chip[1];
-      r.badge.textContent = chip[0];
       /* Rebuilt every second: a focused button ("Try again") hands the focus to its successor. */
       const a = doc.activeElement, had = r.live.contains(a) && a.textContent;
       mount(r.live, casterSummary(Object.assign({ slot: s.slot }, s.config), st, data.onocoy_preset || {}));
       const next = had && Array.from(r.live.querySelectorAll('button')).find(b => b.textContent === had);
       if (next) next.focus();
-      if (open[s.slot]) mount(r.details, casterDetails(st, reconnects ? reconnects[s.slot] : undefined));
-    }
-
-    async function loadReconnects() {
-      try {
-        const a = await api('GET', '/api/availability');
-        reconnects = (a && a.today && a.today.reconnects) || null;
-      } catch (e) {
-        /* the row shows a dash, or the last figures read */
-      }
     }
 
     function edit(s) {
-      if (editor && editor.dirty() && !window.confirm('Discard the changes to the other caster?')) return;
+      if (editor && editor.dirty() && !window.confirm('Discard the changes to the other server?')) return;
       const prev = editing;
       editing = s.slot;
       /* Another slot with an Onocoy host (the enabled one first): this one starts elsewhere and says where Onocoy is. */
@@ -935,23 +898,25 @@ Views.casters = {
       if (isFree(s)) {
         if (addCard) mount(addCard, addBody());
       } else {
+        /* Its editor takes the whole row. */
+        cards[n].classList.toggle('wide', editing === n);
         mount(cards[n], cardBody(s));
       }
     }
 
-    /* The page's heading (the view's title) says "Casters"; then one card per caster and the add card. Safe mode:
-     * the page-wide notice says it, each card says "Not loaded", and there is no add card. */
+    /* The page's heading (the view's title) says "NTRIP"; then one card per server, two side by side on a wide
+     * screen (an editor takes the whole row), and the add card. Safe mode: the page-wide notice says it, each card
+     * says "Not loaded", and there is no add card. */
     function render() {
       for (const k of Object.keys(cards)) delete cards[k];
-      addCard = safeMode() ? null : h('section', { class: 'card' });
+      addCard = safeMode() ? null : h('section', { class: 'card wide' });
       if (addCard) mount(addCard, addBody());
-      mount(el, data.slots.filter(s => !isFree(s)).map(s => (cards[s.slot] = h('section', { class: 'card' }, cardBody(s)))),
-        addCard);
+      mount(el, h('div', { class: 'grid' }, data.slots.filter(s => !isFree(s)).map(s =>
+        (cards[s.slot] = h('section', { class: editing === s.slot ? 'card wide' : 'card' }, cardBody(s)))), addCard));
     }
 
     async function load() {
       const d = await api('GET', '/api/casters');
-      if (Object.keys(open).some(k => open[k])) await loadReconnects();
       const old = data;
       data = d;
       if (!old || old.slots.length !== d.slots.length) {
@@ -969,18 +934,26 @@ Views.casters = {
       }
     }
 
-    mount(el, h('p', { class: 'loading' }, 'Loading casters…'));
+    mount(el, h('p', { class: 'loading' }, 'Loading servers…'));
     load().then(() => {
       if (gone) return;
       stopPoll = poller(5000, () => (editing === null ? load() : Promise.resolve()), true);
       if (arg === 'onocoy') {
-        /* From "Add your Onocoy credentials": the Onocoy slot's editor (or a free slot's, in the add card). */
-        history.replaceState(null, '', '#/casters');
+        /* From Status or the setup ("Set up", "Turn on"): Onocoy set up and off shows its card, the focus on its switch;
+         * else its editor (or a free slot's, in the add card). */
+        history.replaceState(null, '', '#/ntrip');
         if (shell.current) shell.current.arg = '';
         const target = data.slots.find(x => x.config && isOnocoySlot(x.config)) || freeSlots()[0];
-        if (target) edit(target);
+        const off = target && target.config.enabled === false && onocoyReady(target.config) && cards[target.slot];
+        if (off) {
+          off.scrollIntoView({ block: 'start', behavior: 'smooth' });
+          const b = off.querySelector('.switch');
+          if (b) b.focus();
+        } else if (target) {
+          edit(target);
+        }
       }
-    }, e => mount(el, msg('bad', errText(e)), btn('Try again', () => openView('casters', ''), 'primary')));
+    }, e => mount(el, msg('bad', errText(e)), btn('Try again', () => openView('ntrip', ''), 'primary')));
 
     return {
       update() {
@@ -998,3 +971,5 @@ Views.casters = {
     };
   },
 };
+/* The page's old address (#/casters) opens it as well, until the shell sends that address to #/ntrip. */
+Views.casters = Views.ntrip;
