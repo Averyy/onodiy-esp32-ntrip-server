@@ -272,9 +272,9 @@ function stationState(s, admin) {
       }
       return pick(ladder.id, t[0], tone, t[1], { alertId: ladder.id, doing: doing });
     };
-    if (state === 'recovering' || (state === 'streaming' && hl.level === 'recovering')) {
-      /* No step in progress: between two (a session of the station's own cut the last one short); nothing while the
-       * station holds the recovery (Diagnostics says "Paused"). */
+    if (state === 'recovering' || ((state === 'streaming' || state === 'configuring') && hl.level === 'recovering')) {
+      /* No step in progress: between two; nothing while the station holds the recovery (Diagnostics says "Paused").
+       * A session of the station's own (configuring) leaves the recovery's line as it was: the step waits for it. */
       const again = hl.ladder_suspended ? null : AGAIN_SHORTLY;
       const doing = admin ? recoveryDoing(hl, !!ladder) || (hl.step_phase === 'none' ? again : null) : null;
       if (ladder) return antenna('warn', doing || again);
