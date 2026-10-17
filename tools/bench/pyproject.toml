@@ -1,5 +1,5 @@
 [project]
-name = "onocoydiy-bench"
+name = "onodiy-bench"
 version = "0.1.0"
 description = "Host-side bench tools for the UM982 + ESP32-S3 station: port finder, capture, receiver queries, RTCM inspection, station API dumps"
 readme = "README.md"

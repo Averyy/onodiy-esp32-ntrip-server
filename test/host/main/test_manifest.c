@@ -24,23 +24,23 @@
 #include "psa/crypto.h"
 #include "unity.h"
 
-static const char FIXTURE_KEY_TEXT[] = "04:e3:28:91:89:2c:a3:19:c1:6a:f3:4a:3f:da:4c:\n"
-                                       "    dc:13:7a:45:59:1d:50:e5:a8:b3:a3:ef:72:c3:f1:\n"
-                                       "    31:05:48:60:0f:0b:11:78:36:78:91:fc:f9:ed:9d:\n"
-                                       "    6a:0c:9e:4a:d2:53:09:81:f5:cd:83:e4:81:6f:86:\n"
-                                       "    d9:1d:8d:46:af";
+static const char FIXTURE_KEY_TEXT[] = "04:a9:b3:28:5a:0c:0f:8f:cb:09:fa:93:ac:2a:86:\n"
+                                       "    6b:b3:cb:25:a7:b9:da:cb:e7:a0:72:2a:48:fb:ba:\n"
+                                       "    d6:a6:89:4d:eb:b3:5f:7f:af:6e:52:24:4c:80:c5:\n"
+                                       "    4a:35:2c:fe:a1:31:2a:f1:dd:c7:ab:40:50:24:09:\n"
+                                       "    01:9f:43:ae:52";
 
 /* payload.json (with its trailing newline), base64 */
 static const char FIXTURE_PAYLOAD_B64[] =
-    "eyJzY2hlbWEiOjEsInZlcnNpb24iOiJ2MC4zLjAiLCJhcHAiOnsiYXNzZXQiOiJvbm9jb3lkaXktZXNwLXVtOTgyLmJpbiIsInNpemUiOjEy"
-    "MzQ1NjcsInNoYTI1NiI6IjAwMTEyMjMzNDQ1NTY2Nzc4ODk5YWFiYmNjZGRlZWZmMDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmYi"
-    "fSwiZ25zcyI6W3sibW9kZWwiOiJVTTk4MiIsInZlcnNpb24iOiJSNC4xMEJ1aWxkMTg5NzUiLCJidWlsZCI6MTg5NzUsImFzc2V0IjoiVU05"
-    "ODJfUjQuMTBCdWlsZDE4OTc1LnBrZyIsInNpemUiOjMwMjc2MjgsInNoYTI1NiI6IjlhYzI1ZDFkMzU5ZTU4MTViMTMyOTFmNjE0MDVmYWVm"
-    "NTNkNzFlMzA2YTYwMjE4NDU0NmIzMjU4NGIzNWVjNzEifV19Cg==";
+    "eyJzY2hlbWEiOjEsInZlcnNpb24iOiJ2MC4zLjAiLCJhcHAiOnsiYXNzZXQiOiJvbm9kaXktZXNwMzItbnRyaXAtc2VydmVyLmJpbiIsInNp"
+    "emUiOjEyMzQ1NjcsInNoYTI1NiI6IjAwMTEyMjMzNDQ1NTY2Nzc4ODk5YWFiYmNjZGRlZWZmMDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2Nk"
+    "ZGVlZmYifSwiZ25zcyI6W3sibW9kZWwiOiJVTTk4MiIsInZlcnNpb24iOiJSNC4xMEJ1aWxkMTg5NzUiLCJidWlsZCI6MTg5NzUsImFzc2V0"
+    "IjoiVU05ODJfUjQuMTBCdWlsZDE4OTc1LnBrZyIsInNpemUiOjMwMjc2MjgsInNoYTI1NiI6IjlhYzI1ZDFkMzU5ZTU4MTViMTMyOTFmNjE0"
+    "MDVmYWVmNTNkNzFlMzA2YTYwMjE4NDU0NmIzMjU4NGIzNWVjNzEifV19Cg==";
 
 /* payload.sig (DER), base64 */
 static const char FIXTURE_SIG_B64[] =
-    "MEYCIQC1o6Tgb/AFZcz3l//DXO0XUgurg8ygnMj0MVGbGIInlQIhAJKTNP9Yep3zu1YYoSHcnqAWhX79TGIRx+5wgdHikiQK";
+    "MEUCIHLUb6DV21GUeCV2zm5GUstk4Gu3FYlcT7vE1ba+XXl/AiEA9JWFZLhrs5eEp4XpKaIlxEs6DtpSSa3pbdD4AaH1VS8=";
 
 static char *make_envelope(const char *payload_b64, const char *sig_b64)
 {
@@ -140,8 +140,8 @@ TEST_CASE("manifest keys parse from openssl's text output and plain hex", "[mani
     fw_manifest_key_t k;
     TEST_ASSERT_TRUE(fw_manifest_key_from_hex(FIXTURE_KEY_TEXT, &k));
     TEST_ASSERT_EQUAL_HEX8(0x04, k.point[0]);
-    TEST_ASSERT_EQUAL_HEX8(0xe3, k.point[1]);
-    TEST_ASSERT_EQUAL_HEX8(0xaf, k.point[64]);
+    TEST_ASSERT_EQUAL_HEX8(0xa9, k.point[1]);
+    TEST_ASSERT_EQUAL_HEX8(0x52, k.point[64]);
 
     char plain[131];
     for (size_t i = 0; i < 65; i++) {
@@ -172,7 +172,7 @@ TEST_CASE("manifest signed with openssl verifies and parses", "[manifest]")
     TEST_ASSERT_EQUAL(FW_MANIFEST_OK, verify_str(env, &key, 1, &m, &idx));
     TEST_ASSERT_EQUAL_INT(0, idx);
     TEST_ASSERT_EQUAL_STRING("v0.3.0", m.version);
-    TEST_ASSERT_EQUAL_STRING("onocoydiy-esp-um982.bin", m.app.asset);
+    TEST_ASSERT_EQUAL_STRING("onodiy-esp32-ntrip-server.bin", m.app.asset);
     TEST_ASSERT_EQUAL_UINT32(1234567, m.app.size);
     TEST_ASSERT_EQUAL_HEX8(0x00, m.app.sha256[0]);
     TEST_ASSERT_EQUAL_HEX8(0xff, m.app.sha256[31]);
@@ -502,7 +502,8 @@ TEST_CASE("manifest content: receiver entries and their limit", "[manifest]")
 
 TEST_CASE("manifest asset names are plain file names", "[manifest]")
 {
-    static const char *const good[] = { "onocoydiy-esp-um982.bin", "UM982_R4.10Build18975.pkg", "manifest.json", "a" };
+    static const char *const good[] = { "onodiy-esp32-ntrip-server.bin", "UM982_R4.10Build18975.pkg", "manifest.json",
+                                        "a" };
     for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
         TEST_ASSERT_TRUE_MESSAGE(fw_manifest_asset_name_ok(good[i]), good[i]);
     }
@@ -516,7 +517,7 @@ TEST_CASE("manifest asset names are plain file names", "[manifest]")
 
 /* tools/release_manifest.py without a signing key (plain) */
 static const char TOOL_PLAIN[] =
-    "{\n  \"schema\": 1,\n  \"version\": \"v0.3.0\",\n  \"app\": {\n    \"asset\": \"onocoydiy-esp-um982.bin"
+    "{\n  \"schema\": 1,\n  \"version\": \"v0.3.0\",\n  \"app\": {\n    \"asset\": \"onodiy-esp32-ntrip-server.bin"
     "\",\n    \"size\": 1438240,\n    \"sha256\": \"6e64cf26bd6e0148cf909905b8a6f6d2a34ac7f3f4e7d9b413a28a9b4"
     "4d776aa\"\n  },\n  \"gnss\": [\n    {\n      \"model\": \"UM982\",\n      \"version\": \"R4.10Build18975"
     "\",\n      \"build\": 18975,\n      \"asset\": \"UM982_R4.10Build18975.pkg\",\n      \"size\": 3027628,"
@@ -525,22 +526,22 @@ static const char TOOL_PLAIN[] =
 /* the same release signed with --sign-key (a throwaway key, private half not kept) */
 static const char TOOL_SIGNED[] =
     "{\n  \"payload\": \"ewogICJzY2hlbWEiOiAxLAogICJ2ZXJzaW9uIjogInYwLjMuMCIsCiAgImFwcCI6IHsKICAgICJhc3NldCI6"
-    "ICJvbm9jb3lkaXktZXNwLXVtOTgyLmJpbiIsCiAgICAic2l6ZSI6IDE0MzgyNDAsCiAgICAic2hhMjU2IjogIjZlNjRjZjI2YmQ2ZTAx"
-    "NDhjZjkwOTkwNWI4YTZmNmQyYTM0YWM3ZjNmNGU3ZDliNDEzYTI4YTliNDRkNzc2YWEiCiAgfSwKICAiZ25zcyI6IFsKICAgIHsKICAg"
-    "ICAgIm1vZGVsIjogIlVNOTgyIiwKICAgICAgInZlcnNpb24iOiAiUjQuMTBCdWlsZDE4OTc1IiwKICAgICAgImJ1aWxkIjogMTg5NzUs"
-    "CiAgICAgICJhc3NldCI6ICJVTTk4Ml9SNC4xMEJ1aWxkMTg5NzUucGtnIiwKICAgICAgInNpemUiOiAzMDI3NjI4LAogICAgICAic2hh"
-    "MjU2IjogIjlhYzI1ZDFkMzU5ZTU4MTViMTMyOTFmNjE0MDVmYWVmNTNkNzFlMzA2YTYwMjE4NDU0NmIzMjU4NGIzNWVjNzEiCiAgICB9"
-    "CiAgXQp9Cg==\",\n  \"signature\": \"MEQCIDHw5/NvbzYawlHb8Jq0ij/+TTxIEIJ7NjltFyznaA0/AiBtwq1uPmjj3rNr3EpH"
-    "YV0q8r+Oy1h4i1Cutlz18Aj18w==\"\n}\n";
+    "ICJvbm9kaXktZXNwMzItbnRyaXAtc2VydmVyLmJpbiIsCiAgICAic2l6ZSI6IDE0MzgyNDAsCiAgICAic2hhMjU2IjogIjZlNjRjZjI2"
+    "YmQ2ZTAxNDhjZjkwOTkwNWI4YTZmNmQyYTM0YWM3ZjNmNGU3ZDliNDEzYTI4YTliNDRkNzc2YWEiCiAgfSwKICAiZ25zcyI6IFsKICAg"
+    "IHsKICAgICAgIm1vZGVsIjogIlVNOTgyIiwKICAgICAgInZlcnNpb24iOiAiUjQuMTBCdWlsZDE4OTc1IiwKICAgICAgImJ1aWxkIjog"
+    "MTg5NzUsCiAgICAgICJhc3NldCI6ICJVTTk4Ml9SNC4xMEJ1aWxkMTg5NzUucGtnIiwKICAgICAgInNpemUiOiAzMDI3NjI4LAogICAg"
+    "ICAic2hhMjU2IjogIjlhYzI1ZDFkMzU5ZTU4MTViMTMyOTFmNjE0MDVmYWVmNTNkNzFlMzA2YTYwMjE4NDU0NmIzMjU4NGIzNWVjNzEi"
+    "CiAgICB9CiAgXQp9Cg==\",\n  \"signature\": \"MEQCIHPp+crWxaCQ16t4hmbvMxZyATovFi/1aJcHz0fNs6qWAiBboMBSKyGo"
+    "4yfk8kIgIjDrEHoCPK22xSnzZ0ql3/uUbQ==\"\n}\n";
 
-static const char TOOL_KEY_TEXT[] = "04:22:bc:33:ff:33:29:33:dd:39:8b:23:bf:11:75:17:9c:21:35:aa:ff:ae:e5:fd:37:fc:a8"
-                                    ":d1:d8:2e:e5:bb:56:30:08:1a:b6:0b:70:c2:35:d2:5a:32:4c:aa:29:e2:48:58:50:00:84"
-                                    ":e6:88:cc:05:20:a2:44:8b:3c:99:11:26";
+static const char TOOL_KEY_TEXT[] = "04:2e:85:7e:38:7e:34:8e:28:af:0b:5c:9c:64:b8:62:91:bb:44:da:be:f4:2f:ca:5d:45:c4"
+                                    ":0a:b3:9d:d2:63:c3:dd:c1:09:d4:8c:0c:62:db:08:fc:93:c1:54:f6:cd:87:b6:83:13:fe:a4"
+                                    ":36:b9:ad:77:de:87:3b:c5:f5:98:82";
 
 static void assert_tool_release(const fw_manifest_t *m)
 {
     TEST_ASSERT_EQUAL_STRING("v0.3.0", m->version);
-    TEST_ASSERT_EQUAL_STRING("onocoydiy-esp-um982.bin", m->app.asset);
+    TEST_ASSERT_EQUAL_STRING("onodiy-esp32-ntrip-server.bin", m->app.asset);
     TEST_ASSERT_EQUAL_UINT32(1438240, m->app.size);
     TEST_ASSERT_EQUAL_HEX8(0x6e, m->app.sha256[0]);
     TEST_ASSERT_EQUAL_HEX8(0xaa, m->app.sha256[31]);

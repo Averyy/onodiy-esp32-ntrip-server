@@ -4,7 +4,7 @@ menu "Station: firmware updates"
 
     config FW_UPDATE_GITHUB_REPO
         string "GitHub repository serving releases (owner/name)"
-        default "Averyy/onocoydiy-esp-um982"
+        default "Averyy/onodiy-esp32-ntrip-server"
         help
             Releases of this repository carry the app image, the receiver
             package and a manifest. The repository must be public: devices

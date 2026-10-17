@@ -128,7 +128,7 @@ Applied to every request before any handler runs.
 3. **CSRF.** `POST` and `PUT` need `Content-Type: application/json` (a
    `charset` parameter is allowed), also when the body is empty. Uploads
    need `Content-Type: application/octet-stream` plus the header
-   `X-Requested-With: onocoydiy`. Anything else: `415`. `DELETE` needs no
+   `X-Requested-With: onodiy`. Anything else: `415`. `DELETE` needs no
    body: a cross-site page cannot send a `DELETE` without a CORS preflight,
    which this server never grants. There is no CORS: no `Access-Control-*`
    header is ever sent, and `OPTIONS` gets `405`.
@@ -405,7 +405,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 {"api": 1, "authenticated": true, "admin_set": true, "setup_done": false,
  "claim_allowed": false, "on_setup_ap": false, "public_status": false,
  "settings_available": true, "idle_left_s": 1740,
- "hostname": "onocoydiy", "mdns_host": "onocoydiy", "ap_ssid": "onocoydiy-1A2B",
+ "hostname": "onodiy", "mdns_host": "onodiy", "ap_ssid": "onodiy-1A2B",
  "setup_step": "reception"}
 ```
 
@@ -418,7 +418,7 @@ form, login form, setup wizard or dashboard.
 |---|---|
 | `hostname` | the station name in use (status `device.hostname`); the login page shows it |
 | `mdns_host` | the host label the mDNS responder answers, without `.local`: the hostname, or `<hostname>-2` (then `-3`, ...) after the responder renamed itself because another device answered the name; `null` while the responder does not run (and from the goodbye before a planned restart on). The renamed label is never stored: the next boot probes the hostname again. The web page's `_http._tcp` service carries the same label as its instance name and follows a rename; IPv6 (AAAA) queries for the name are answered too (section 16) |
-| `ap_ssid` | the station's own access point name (`onocoydiy-XXXX`), `null` before Wi-Fi is set up |
+| `ap_ssid` | the station's own access point name (`onodiy-XXXX`), `null` before Wi-Fi is set up |
 | `setup_step` | the setup wizard's next step as the station keeps it (`POST /api/setup/step`): `wifi`, `reception`, `onocoy`, `casters`; `null` without a session, once setup is done, or when none is stored |
 
 The names are no new disclosure: DHCP, mDNS and the access point's beacon
@@ -485,12 +485,12 @@ object as sections (section 7), so the UI keeps one model. Admin form:
   "api": 1,
   "public": false,
   "uptime_s": 86400,
-  "device": {"hostname": "onocoydiy", "version": "v0.3.0", "dev_build": false,
+  "device": {"hostname": "onodiy", "version": "v0.3.0", "dev_build": false,
              "time_unix": 1760090000, "time_source": "gnss", "settings_available": true},
   "safe_mode": {"active": false, "retry_in_s": null, "crashes": 0},
   "network": {"online": true, "ssid": "Home", "ip": "192.168.1.50", "rssi": -61,
               "upstream": "ok", "probe_age_s": 120, "offline_s": 0, "ap_active": false, "ap_reasons": [],
-              "ap_close_in_s": null, "mdns_host": "onocoydiy",
+              "ap_close_in_s": null, "mdns_host": "onodiy",
               "assoc_no_ip_s": 0, "ladder_triggers": [],
               "cred_trial": false, "cred_trial_left_s": 0, "cred_pending": false, "pending_ssid": null,
               "cred_reverted": false, "cred_reverted_why": null},
@@ -572,7 +572,7 @@ Public form (no session, public status on):
 
 ```json
 {"api": 1, "public": true, "uptime_s": 86400,
- "device": {"hostname": "onocoydiy"},
+ "device": {"hostname": "onodiy"},
  "safe_mode": {"active": false},
  "receiver": {"state": "streaming", "best_bands": 4},
  "casters": [{"slot": 0, "name": "Onocoy", "state": "streaming"}],
@@ -1472,7 +1472,7 @@ record has no layout byte, the credential username in `mountpoint`) is loaded
 with an empty `username`, whatever its record held: a slot switched to
 Onocoy in place kept the username of the caster it was before, which meant
 nothing for Onocoy. It keeps working with the old mapping (1.0:
-`mountpoint` as the mountpoint; 2.0: `label` or `onocoydiy` as the
+`mountpoint` as the mountpoint; 2.0: `label` or `onodiy` as the
 mountpoint, `mountpoint` as the Basic-auth user) but is not set up
 (`onocoy_ready` false); its next save while enabled needs the username, and
 any save stores it in the current layout.
@@ -1703,7 +1703,7 @@ removes it. The slot reconnects. `200` with the slot entry. Errors:
 
 ```json
 {
-  "mdns_host": "onocoydiy",
+  "mdns_host": "onodiy",
   "configured": true, "credentials_unreadable": false, "ssid": "Home",
   "online": true, "associated": true, "ip": "192.168.1.50", "rssi": -60, "channel": 6,
   "bssid": "AA:BB:CC:DD:EE:FF", "tx_power_dbm": 19.5, "ap_steering": true,
@@ -1713,7 +1713,7 @@ removes it. The slot reconnects. `200` with the slot entry. Errors:
   "cred_trial": false, "cred_trial_left_s": 0, "cred_pending": false, "pending_ssid": null,
   "cred_reverted": false, "cred_reverted_why": null,
   "ladder": {"active": false, "rung": 0, "withheld": "none", "triggers": [], "actions": 0},
-  "ap": {"active": false, "ssid": "onocoydiy-1A2B", "reasons": [], "clients": 0,
+  "ap": {"active": false, "ssid": "onodiy-1A2B", "reasons": [], "clients": 0,
          "recovery_left_s": 0, "close_in_s": null, "password_set": false},
   "scan": {"running": false, "age_s": 30,
            "results": [{"ssid": "Home", "rssi": -55, "channel": 6, "secured": true}]}
@@ -1838,9 +1838,9 @@ Errors: `409 busy` (a scan runs, or the station is connecting),
 ### `GET /api/system` (adm)
 
 ```json
-{"hostname": "onocoydiy", "hostname_active": "onocoydiy", "public_status": false,
+{"hostname": "onodiy", "hostname_active": "onodiy", "public_status": false,
  "setup_done": true, "settings_available": true,
- "version": "v0.3.0", "project": "onocoydiy-esp-um982", "idf": "v6.1", "mac": "AA:BB:CC:DD:EE:FF",
+ "version": "v0.3.0", "project": "onodiy-esp32-ntrip-server", "idf": "v6.1", "mac": "AA:BB:CC:DD:EE:FF",
  "chip": {"model": "esp32s3", "revision": "v0.2", "flash_mb": 16, "psram_mb": 8}}
 ```
 
@@ -1899,7 +1899,7 @@ until a newer version appears; the server keeps no "later" state.
 ```json
 {
   "state": "idle", "progress_pct": 0, "checks_enabled": true,
-  "release_repo": "Averyy/onocoydiy-esp-um982", "signed_manifests": false, "last_check_unix": 1760080000,
+  "release_repo": "Averyy/onodiy-esp32-ntrip-server", "signed_manifests": false, "last_check_unix": 1760080000,
   "last_attempt_unix": 1760080000, "last_check_result": "ok", "last_http_status": 200, "next_check_in_s": 86100,
   "app_max_bytes": 4194304, "pkg_max_bytes": 6287360,
   "running_elf_sha256": "3f2a...64 hex...",
@@ -2015,7 +2015,7 @@ busy`, `409 journal_open`.
 ## 13. Uploads
 
 Raw bodies: `Content-Type: application/octet-stream`,
-`X-Requested-With: onocoydiy`, `Content-Length` required (`411`; no chunked
+`X-Requested-With: onodiy`, `Content-Length` required (`411`; no chunked
 uploads). One upload at a time (`409 busy`). The body is streamed in 4 KB
 pieces straight to flash; nothing is buffered whole. A client that
 disconnects aborts the upload (the slot or package area stays empty).
@@ -2024,7 +2024,7 @@ disconnects aborts the upload (the slot or package area stays empty).
 
 Size at most the inactive app slot (4 MB), else `413` before any write.
 The first 4 KB are checked before the slot is opened: the image's app
-description must name this project (`onocoydiy-esp-um982`), else
+description must name this project (`onodiy-esp32-ntrip-server`), else
 `422 not_this_project` (the query `?any_project=1` overrides it after a
 warning), and its version must not be one rolled back on this station
 (`app.rolled_back` of `GET /api/update`), else `409
@@ -2045,7 +2045,7 @@ watch, so receiver updates are not held back for the watch's day: during
 that stage `gnss_blocked_left_s` (section 12) counts the confirmation
 alone (at most a minute).
 
-`200 {"sha256": "...", "size": 1234567, "version": "v0.4.0+dev", "project": "onocoydiy-esp-um982", "reboot": true}`;
+`200 {"sha256": "...", "size": 1234567, "version": "v0.4.0+dev", "project": "onodiy-esp32-ntrip-server", "reboot": true}`;
 the device reboots into the image about a second after the response and
 runs the trial. Errors: `400 invalid_image` (not a valid app for this chip),
 `400 size_mismatch` (fewer bytes than announced), `409
@@ -2559,7 +2559,7 @@ the session, but nothing may rely on `localStorage` surviving.
 
 **Reaching the station.** On the home network the station answers
 `http://<name>.local/` (mDNS; `mdns_host` in `GET /api/session`, usually
-the station name `onocoydiy`, `onocoydiy-2` when another device holds that
+the station name `onodiy`, `onodiy-2` when another device holds that
 name) and `http://<ip>/` (the address the router gave it; also in the
 router's device list under the station name). On its own access point the
 page is at `http://192.168.4.1/`, and the `.local` name answers there too.
@@ -2579,11 +2579,11 @@ browsers drop the entry at once. The pinned mDNS component does not
 withdraw the service's SRV and TXT records or the old host name's A/AAAA
 records: they expire from caches within their 120 s TTL, and until then a
 client using the old name reaches the station and gets `421 bad_host`.
-The QEMU development build answers as `onocoydiy-qemu` (its own host name:
+The QEMU development build answers as `onodiy-qemu` (its own host name:
 QEMU's user-mode network carries its announcements onto the developer's
 LAN).
 
-**First setup** (unconfigured station, open AP `onocoydiy-XXXX`):
+**First setup** (unconfigured station, open AP `onodiy-XXXX`):
 1. `GET /api/session`: `admin_set: false`, `claim_allowed: true`.
 2. `POST /api/setup/admin`: the admin password; the response logs in.
 3. Wi-Fi: `POST /api/setup/step` `{"step": "reception"}` (the step the

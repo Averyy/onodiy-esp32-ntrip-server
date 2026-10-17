@@ -20,11 +20,11 @@ What it does:
      (POST /api/setup/admin; the QEMU build treats requests as coming over
      the setup AP) and reads GET /api/status with that session: valid JSON,
      API version 1, the station online over the emulated Ethernet; GET
-     /api/session names the station "onocoydiy-qemu" (the QEMU build's own
+     /api/session names the station "onodiy-qemu" (the QEMU build's own
      host name, so it never answers a real station's name on the LAN) and
-     its mDNS name "onocoydiy-qemu", and a request with
-     "Host: onocoydiy-qemu.local" (also fully qualified,
-     "onocoydiy-qemu.local.") passes the Host check;
+     its mDNS name "onodiy-qemu", and a request with
+     "Host: onodiy-qemu.local" (also fully qualified,
+     "onodiy-qemu.local.") passes the Host check;
      HTTP connection handling: a request with a body that no route takes
      gets its real answer (405, 404, the captive redirect) with
      "Connection: close" instead of 413, a body on a route that takes none
@@ -170,7 +170,7 @@ RUN_SH = ROOT / "tools" / "qemu" / "run.sh"
 FATAL = ["Guru Meditation", "abort()", "***ERROR*** A stack overflow", "assert failed:", "Backtrace:", "task_wdt:"]
 BACKSTOP_MARGIN_S = 60  # run.sh stops QEMU this long after the latest point the checks need it
 BOOT_MARK = "ESP-ROM:"
-HOSTNAME = "onocoydiy-qemu"                # sdkconfig.qemu CONFIG_LWIP_LOCAL_HOSTNAME
+HOSTNAME = "onodiy-qemu"                   # sdkconfig.qemu CONFIG_LWIP_LOCAL_HOSTNAME
 QEMU_PEER = "10.0.2.2"                     # how the guest sees this computer (QEMU user-mode network)
 IP6_LINE = re.compile(r"network: IPv6 link-local (fe80:[0-9a-f:]+) on station")
 IP6_OTHER = "is not link-local"            # network.c: an IPv6 address other than link-local (never expected)

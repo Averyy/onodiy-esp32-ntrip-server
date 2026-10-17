@@ -448,7 +448,7 @@ TEST_CASE("status: credentials on trial or pending, maintenance, UART and recove
 {
     static web_status_snap_t s;
     memset(&s, 0, sizeof(s));
-    strcpy(s.hostname, "onocoydiy");
+    strcpy(s.hostname, "onodiy");
     s.rtcm_age_ms = UINT32_MAX;
     s.net.sta_configured = true;
     strcpy(s.net.ssid, "Home");

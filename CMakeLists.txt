@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Avery L.
 # SPDX-License-Identifier: MIT
 #
-# Top-level ESP-IDF project for the onocoydiy-esp-um982 station firmware.
+# Top-level ESP-IDF project for the onodiy-esp32-ntrip-server station firmware.
 # Build from the repository root:  idf.py set-target esp32s3 && idf.py build
 
 cmake_minimum_required(VERSION 3.22)
@@ -92,7 +92,7 @@ endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-project(onocoydiy-esp-um982)
+project(onodiy-esp32-ntrip-server)
 
 # The QEMU development build (sdkconfig.qemu, tools/qemu/run.sh) cannot run on
 # a station: its network is an emulated Ethernet MAC that no chip has. It is

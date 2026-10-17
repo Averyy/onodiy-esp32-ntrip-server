@@ -165,12 +165,12 @@ TEST_CASE("Onocoy preset: NTRIP 2.0 to the chosen mountpoint, as Onocoy's guide 
     ntrip_wire_names(ntrip_slot_is_onocoy(&c), c.proto == NTRIP_PROTO_V2, c.mountpoint, c.username, c.label, &w);
     char buf[NTRIP_REQUEST_MAX];
     size_t n = ntrip_build_v2_request(buf, sizeof(buf), c.host, c.port, c.tls, w.mount, w.user, c.password,
-                                      "NTRIP onocoydiy-esp-um982/1.0.0", c.v2_raw_body);
+                                      "NTRIP onodiy/1.0.0", c.v2_raw_body);
     /* base64("gen.user7:picked-pw") */
     const char *want = "POST /Roof1 HTTP/1.1\r\n"
                        "Host: servers.onocoy.com:2101\r\n"
                        "Ntrip-Version: Ntrip/2.0\r\n"
-                       "User-Agent: NTRIP onocoydiy-esp-um982/1.0.0\r\n"
+                       "User-Agent: NTRIP onodiy/1.0.0\r\n"
                        "Authorization: Basic Z2VuLnVzZXI3OnBpY2tlZC1wdw==\r\n"
                        "Connection: close\r\n"
                        "Transfer-Encoding: chunked\r\n"
@@ -181,10 +181,10 @@ TEST_CASE("Onocoy preset: NTRIP 2.0 to the chosen mountpoint, as Onocoy's guide 
     /* 1.0 stays the fallback: SOURCE <password> /<username>, the mountpoint not sent. */
     c.proto = NTRIP_PROTO_V1;
     ntrip_wire_names(ntrip_slot_is_onocoy(&c), false, c.mountpoint, c.username, c.label, &w);
-    n = ntrip_build_v1_request(buf, sizeof(buf), c.password, w.mount, "NTRIP onocoydiy-esp-um982/1.0.0");
+    n = ntrip_build_v1_request(buf, sizeof(buf), c.password, w.mount, "NTRIP onodiy/1.0.0");
     TEST_ASSERT_TRUE(n > 0);
     TEST_ASSERT_EQUAL_STRING("SOURCE picked-pw /gen.user7\r\n"
-                             "Source-Agent: NTRIP onocoydiy-esp-um982/1.0.0\r\n\r\n",
+                             "Source-Agent: NTRIP onodiy/1.0.0\r\n\r\n",
                              buf);
 }
 

@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 RUN_SH = Path(__file__).resolve().parents[1] / "docker" / "bkg-caster" / "run.sh"
-IMAGE = "onocoydiy-bench-bkg-caster"
+IMAGE = "onodiy-bench-bkg-caster"
 LAN_WARNING = "reachable from your LAN: use the throwaway test passwords only"
 
 
@@ -29,7 +29,7 @@ def run(*args: str) -> subprocess.CompletedProcess:
 def test_default_publishes_on_localhost_only():
     r = run("--print")
     assert r.returncode == 0, r.stderr
-    assert r.stdout == f"docker run --rm --name onocoydiy-bench-bkg-caster -p 127.0.0.1:2101:2101 {IMAGE}\n"
+    assert r.stdout == f"docker run --rm --name onodiy-bench-bkg-caster -p 127.0.0.1:2101:2101 {IMAGE}\n"
     assert " -p 127.0.0.1:2101:2101 " in r.stdout and "0.0.0.0" not in r.stdout
     assert LAN_WARNING not in r.stderr
 
@@ -50,7 +50,7 @@ def test_port_and_detach_reach_the_command():
 def test_stop_prints_the_removal_without_a_warning():
     r = run("--print", "--stop", "--lan")
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "docker rm -f onocoydiy-bench-bkg-caster\n"
+    assert r.stdout == "docker rm -f onodiy-bench-bkg-caster\n"
     assert LAN_WARNING not in r.stderr
 
 

@@ -111,7 +111,7 @@ function showNoAdmin() {
   bare(h('div', { class: 'narrow' }, pageCard('Set up this station',
     h('p', null, 'This station has no admin password yet. Set it over the setup hotspot:'),
     h('ol', { class: 'howto' },
-      h('li', null, ap ? ['Join the setup hotspot ', h('strong', null, ap), '.'] : 'Join the setup hotspot (its name starts with onocoydiy-).'),
+      h('li', null, ap ? ['Join the setup hotspot ', h('strong', null, ap), '.'] : 'Join the setup hotspot (its name starts with onodiy-).'),
       h('li', null, 'Open ', h('strong', null, 'http://192.168.4.1/'), '.')),
     h('p', { class: 'muted small' }, 'Hotspot not there? Hold the BOOT button for 10 seconds; it opens for 15 minutes.'),
     h('div', { class: 'form-actions' }, btn('Check again', boot, 'primary')))));
@@ -441,7 +441,7 @@ async function startWizard(claim) {
         W.system = await api('GET', '/api/system');
         setBrand(W.system.hostname);
       } catch (e) {
-        W.system = { hostname: (S.session && S.session.hostname) || 'onocoydiy' };
+        W.system = { hostname: (S.session && S.session.hostname) || 'onodiy' };
       }
     }
     W.casters = await api('GET', '/api/casters');
@@ -880,7 +880,7 @@ async function startWizard(claim) {
 
   /* The DHCP name, as the router's device list shows the station. */
   function routerName() {
-    return (W.system && W.system.hostname) || (S.session && S.session.hostname) || 'onocoydiy';
+    return (W.system && W.system.hostname) || (S.session && S.session.hostname) || 'onodiy';
   }
 
   function stepWifi() {
@@ -934,7 +934,7 @@ async function startWizard(claim) {
     const following = joined.following || after('wifi') || 'reception';
     const s = S.session || {};
     const onAp = !!s.on_setup_ap;
-    const host = (W.system && W.system.hostname) || s.hostname || 'onocoydiy';
+    const host = (W.system && W.system.hostname) || s.hostname || 'onodiy';
     const status = h('div', { class: 'stack' });
     frame('connect', 'Joining ' + joined.ssid, status);
     let fails = 0, stopped = false, shown = '', okNet = null, closeAt = 0, okSince = 0, ticker = 0;

@@ -16,16 +16,16 @@
 # If a later mdns release renames one of these objects, the size check
 # (_heap_start, idf.py size-components) shows it.
 
-[scheme:onocoydiy_ext_bss]
+[scheme:onodiy_ext_bss]
 entries:
     bss -> extern_ram
     common -> extern_ram
 
-[mapping:onocoydiy_mdns_ext_bss]
+[mapping:onodiy_mdns_ext_bss]
 archive: libespressif__mdns.a
 entries:
     if SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
-        mdns_send (onocoydiy_ext_bss)
-        mdns_receive (onocoydiy_ext_bss)
-        mdns_utils (onocoydiy_ext_bss)
-        mdns_pcb (onocoydiy_ext_bss)
+        mdns_send (onodiy_ext_bss)
+        mdns_receive (onodiy_ext_bss)
+        mdns_utils (onodiy_ext_bss)
+        mdns_pcb (onodiy_ext_bss)

@@ -41,12 +41,12 @@ CONFIG_ETH_OPENETH_DMA_RX_BUFFER_NUM=16
 
 # A name of its own. QEMU's user-mode network (slirp) carries the guest's
 # multicast mDNS out of the developer's machine onto its LAN, where a real
-# station may answer onocoydiy.local: under the station's default name the
+# station may answer onodiy.local: under the station's default name the
 # emulated one would announce itself there too and could take the name
 # from the station (or be renamed by it). Running slirp with restrict=on
 # would keep the packets in, but it also cuts the guest's outbound update
 # check and needs a guestfwd per local caster port.
-CONFIG_LWIP_LOCAL_HOSTNAME="onocoydiy-qemu"
+CONFIG_LWIP_LOCAL_HOSTNAME="onodiy-qemu"
 
 # Software crypto: with the SHA accelerator model, certificate signatures
 # fail to verify (TLS to GitHub fails, PSA error -149); with SHA in software

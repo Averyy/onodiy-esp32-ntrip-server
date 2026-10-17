@@ -252,7 +252,7 @@ async function wizardDup() {
   };
   routes = (m, p, body) => {
     if (p === '/api/wifi') return [200, { configured: true, online: true, ssid: 'Home', ap: {} }];
-    if (p === '/api/system') return [200, { hostname: 'onocoydiy' }];
+    if (p === '/api/system') return [200, { hostname: 'onodiy' }];
     if (p === '/api/casters' && m === 'GET') {
       return [200, { max_slots: 4, warnings: [], onocoy_preset: { host: 'servers.onocoy.com', port: 2101, tls_port: 2121, ntrip_version: 1 },
         slots: [{ slot: 0, config: { host: 'servers.onocoy.com', port: 2101, enabled: false, name: 'Onocoy', mountpoint: '', username: '',
@@ -266,7 +266,7 @@ async function wizardDup() {
     }
     return [200, {}];
   };
-  ui.setSession({ api: 1, authenticated: true, admin_set: true, setup_done: false, setup_step: 'onocoy', hostname: 'onocoydiy' });
+  ui.setSession({ api: 1, authenticated: true, admin_set: true, setup_done: false, setup_step: 'onocoy', hostname: 'onodiy' });
   ui.startWizard(false);
   await settle();
   const page = () => [...visible(ids['view-body'])];
@@ -504,14 +504,14 @@ async function settingsPageView(c) {
   routes = (m, p) => {
     const path = p.split('?')[0];
     if (path === '/api/wifi') return [200, c.wifi];
-    if (path === '/api/system') return [200, { hostname: 'onocoydiy', hostname_active: 'onocoydiy', public_status: false }];
+    if (path === '/api/system') return [200, { hostname: 'onodiy', hostname_active: 'onodiy', public_status: false }];
     if (path === '/api/update') return [200, c.update];
     if (path === '/api/gnss/flash') return [200, c.flash || { journal: 'none', flash_available: false }];
     if (path === '/api/upload/gnss') return [200, c.staged || { staged: null }];
     return [200, {}];
   };
   ui.setStatus(c.status);
-  ui.setSession({ api: 1, authenticated: true, admin_set: true, setup_done: true, ap_ssid: 'onocoydiy-1A2B' });
+  ui.setSession({ api: 1, authenticated: true, admin_set: true, setup_done: true, ap_ssid: 'onodiy-1A2B' });
   const el = new El('div');
   const view = ui.settingsPage(el, '');
   await settle();
@@ -1017,8 +1017,8 @@ def test_onocoy_asks_for_its_username_and_password_and_a_name():
     NTRIP version, no TLS, no retry pace, no fold-out. A test slot shows its own server."""
     out = run_editor([
         case(0, ONOCOY_SET_UP, [], inspect=True),
-        case(0, None, [], {"hostname": "onocoy diy!"}, inspect=True),
-        case(1, None, [("caster", "onocoy")], dict(ONOCOY_NOT_SET_UP_ELSEWHERE, hostname="onocoydiy"), inspect=True),
+        case(0, None, [], {"hostname": "ono diy!"}, inspect=True),
+        case(1, None, [("caster", "onocoy")], dict(ONOCOY_NOT_SET_UP_ELSEWHERE, hostname="onodiy"), inspect=True),
         case(0, dict(ONOCOY_SET_UP, tls=True, port=2121), [], inspect=True),
         case(0, stored("10.0.2.2", "fast", name="Onocoy", port=2111, mountpoint="MP0TEST1", username="user0test",
                        test_onocoy=True), [], inspect=True),
@@ -1033,7 +1033,7 @@ def test_onocoy_asks_for_its_username_and_password_and_a_name():
     assert edit["fixed"] == new["fixed"] == switched["fixed"] == "servers.onocoy.com:2101"
     assert tls["fixed"] == "servers.onocoy.com:2121" and test["fixed"] == "10.0.2.2:2111"
     assert edit["values"][:2] == ["MP0TEST1", "user0test"]
-    assert new["values"][:2] == ["onocoydiy", ""] and switched["values"][:2] == ["onocoydiy", ""]
+    assert new["values"][:2] == ["onodiy", ""] and switched["values"][:2] == ["onodiy", ""]
 
 
 def test_onocoy_takes_the_stations_ntrip_version_until_set_up():
@@ -1045,13 +1045,13 @@ def test_onocoy_takes_the_stations_ntrip_version_until_set_up():
                      password_set=False, ntrip_version=1)
     creds = [("username", "user0test"), ("password", "secret123")]
     out = run_editor([
-        case(0, None, creds, {"preset": v2, "hostname": "onocoydiy"}),
-        case(0, pending, creds, {"preset": v2, "hostname": "onocoydiy"}),
+        case(0, None, creds, {"preset": v2, "hostname": "onodiy"}),
+        case(0, pending, creds, {"preset": v2, "hostname": "onodiy"}),
         case(0, dict(ONOCOY_SET_UP, ntrip_version=1), [], {"preset": v2}),
         case(1, None, [("caster", "onocoy")] + creds, dict(ONOCOY_NOT_SET_UP_ELSEWHERE, preset=v2, hostname="base-7")),
     ])
     assert [b["ntrip_version"] for b in out] == [2, 2, 1, 2], out
-    assert [b["mountpoint"] for b in out] == ["onocoydiy", "onocoydiy", "MP0TEST1", "base-7"], out
+    assert [b["mountpoint"] for b in out] == ["onodiy", "onodiy", "MP0TEST1", "base-7"], out
     assert out[0]["enabled"] is True and out[0]["host"] == "servers.onocoy.com" and out[0]["backoff_profile"] == "fast"
 
 
@@ -1234,7 +1234,7 @@ def over(s: dict, **kw) -> dict:
 
 
 def st_status(**kw) -> dict:
-    s = {"api": 1, "public": False, "device": {"hostname": "onocoydiy", "settings_available": True},
+    s = {"api": 1, "public": False, "device": {"hostname": "onodiy", "settings_available": True},
          "safe_mode": {"active": False}, "network": {"online": True},
          "receiver": {"state": "streaming", "model": "UM982", "rtcm_age_ms": 180, "journal": "none", "best_sys": "galileo",
                       "best_bands": 4, "glonass": True, "rtcm1230_supported": True, "position_locked": False,
@@ -1456,11 +1456,11 @@ def test_casters_card_lists_counting_onocoy_first():
                                   st_caster(2, "Onocoy", "streaming"),
                                   st_caster(1, "Spare", "disabled", today_online_s=50)])
     no_slots = over(BASE, casters=[])
-    public = {"api": 1, "public": True, "device": {"hostname": "onocoydiy"}, "safe_mode": {"active": False},
+    public = {"api": 1, "public": True, "device": {"hostname": "onodiy"}, "safe_mode": {"active": False},
               "receiver": {"state": "streaming", "best_bands": 4},
               "casters": [{"slot": 0, "name": "Onocoy", "state": "streaming"}, {"slot": 1, "name": "Bench", "state": "disabled"}],
               "health": {"level": "ok"}}
-    public_safe = {"api": 1, "public": True, "device": {"hostname": "onocoydiy"}, "safe_mode": {"active": True},
+    public_safe = {"api": 1, "public": True, "device": {"hostname": "onodiy"}, "safe_mode": {"active": True},
                    "receiver": {"state": "idle", "best_bands": 0}, "casters": [], "health": {"level": "failed"}}
     names = ["healthy", "setup", "onooff", "onooff_none", "nocasters", "safe", "partly"]
     out = dashboards(*[MATRIX[n] for n in names], swapped, no_slots)
@@ -1721,7 +1721,7 @@ def test_header_shows_the_station_state_and_says_when_contact_is_lost():
     once). It shows on the Status page too. Nothing before the app runs (login, setup)."""
     me = st_status(health={"level": "degraded", "recovery_mode": "alerts_only"},
                    alerts=[{"id": "no_rtcm", "source": "health"}], casters=[st_caster(0, "Onocoy", "wait_data")])
-    public = {"api": 1, "public": True, "device": {"hostname": "onocoydiy"}, "receiver": {"state": "detecting"},
+    public = {"api": 1, "public": True, "device": {"hostname": "onodiy"}, "receiver": {"state": "detecting"},
               "casters": [{"slot": 0, "name": "Onocoy", "state": "wait_data"}], "health": {"level": "ok"}}
     out = run_editor([{"fn": "header", "status": me, "age": 1, "admin": True},
                       {"fn": "header", "status": st_status(), "age": 0, "admin": True},
@@ -1766,7 +1766,7 @@ def test_no_contact_greys_every_colour_on_the_status_page():
     assert {"ok", "warn", "bad", "info", "t-ok", "t-warn", "t-bad", "cnr-weak", "cnr-ok", "cnr-good", "on"} <= covered
     assert ".status-page .bands td.on" in " ".join(sel for sel, _ in rules)
     assert "el.classList.add('status-page');" in (UI_JS / "40-dashboard.js").read_text()
-    public = {"api": 1, "public": True, "device": {"hostname": "onocoydiy"}, "safe_mode": {"active": False},
+    public = {"api": 1, "public": True, "device": {"hostname": "onodiy"}, "safe_mode": {"active": False},
               "receiver": {"state": "streaming", "best_bands": 4},
               "casters": [{"slot": 0, "name": "Onocoy", "state": "streaming"}, {"slot": 1, "name": "Bench", "state": "backoff"}],
               "health": {"level": "ok"}}
@@ -1954,7 +1954,7 @@ def test_health_card_says_the_state_beside_an_alert_of_its_colour():
                       alerts=[drift])
     safe = st_status(safe_mode={"active": True, "crashes": 3, "retry_in_s": 2690}, receiver={"state": "idle"},
                      casters=[st_caster(0, "Onocoy", "disabled")], alerts=[{"id": "safe_mode", "source": "health"}])
-    settings = st_status(device={"hostname": "onocoydiy", "settings_available": False},
+    settings = st_status(device={"hostname": "onodiy", "settings_available": False},
                          alerts=[{"id": "settings_degraded", "source": "health"}])
     trial = st_status(network={"online": True, "cred_trial": True, "cred_trial_left_s": 80, "pending_ssid": "Cabin"})
     out = run_editor([{"fn": "health", "hl": health_hl(level="recovering", last_step="link_restart"), "status": stall},
@@ -2086,8 +2086,8 @@ def test_event_list_says_every_rows_date_in_a_column_of_one_width():
 
 
 SET_WIFI = {"configured": True, "online": True, "associated": True, "ssid": "Home", "ip": "192.168.1.50", "rssi": -82,
-            "upstream": "ok", "mdns_host": "onocoydiy",
-            "ap": {"active": False, "ssid": "onocoydiy-1A2B", "reasons": [], "clients": 0, "password_set": True}}
+            "upstream": "ok", "mdns_host": "onodiy",
+            "ap": {"active": False, "ssid": "onodiy-1A2B", "reasons": [], "clients": 0, "password_set": True}}
 SET_UPDATE = {"state": "idle", "checks_enabled": True, "last_check_unix": None, "last_check_result": "ok",
               "app": {"running": "v0.3.0", "latest": "v0.3.0", "available": False, "rollback_available": True,
                       "rolled_back": [], "trial": {"stage": "none"}},
@@ -2121,7 +2121,7 @@ def test_settings_is_network_updates_and_the_danger_zone_without_fold_outs():
     assert off["subs"] == ["Setup hotspot", "Install manually"]
     rows = dict(off["rows"])
     assert rows["Wi-Fi"] == "Home" and rows["Signal"] == " Weak (\u221282\u00a0dBm)"
-    assert rows["Network name"] == "onocoydiy-1A2B" and rows["Password"] == "Set"
+    assert rows["Network name"] == "onodiy-1A2B" and rows["Password"] == "Set"
     assert off["buttons"] == ["Change network", "Change password", "Check now", "Choose file", "Choose file", "Start", "Go back…",
                               "Restart", "Change password", "Factory reset…"]
     assert off["lines"] == ["Opens for first setup, when the station cannot reach your Wi-Fi, and after BOOT is held."]

@@ -251,7 +251,7 @@ const systemPart = {
           if (secs > 5) {
             /* The .local name only while the station's mDNS responder runs (it answers nothing otherwise). */
             const name = stationNameUrl(wifi);
-            const dhcp = (sys && sys.hostname_active) || 'onocoydiy';
+            const dhcp = (sys && sys.hostname_active) || 'onodiy';
             const where = name ? [h('a', { href: name }, name), ', or find ' + dhcp + ' in that router\'s device list.'] :
               'find ' + dhcp + ' in that router\'s device list.';
             if (trial && wifi && wifi.cred_trial) {

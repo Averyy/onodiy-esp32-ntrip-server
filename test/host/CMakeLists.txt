@@ -8,7 +8,7 @@
 #   cd test/host
 #   idf.py --preview set-target linux
 #   idf.py build
-#   ./build/onocoydiy_host_tests.elf   # exit status 0 = all passed, 1 = a test failed
+#   ./build/onodiy_host_tests.elf   # exit status 0 = all passed, 1 = a test failed
 #
 # CI builds and runs them on Linux (gcc, glibc); tools/ci/host_tests_linux.sh
 # does the same locally in CI's container.
@@ -38,7 +38,7 @@ set(CMAKE_POLICY_DEFAULT_CMP0156 NEW)
 set(CMAKE_POLICY_DEFAULT_CMP0179 NEW)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 set(COMPONENTS main)
-project(onocoydiy_host_tests)
+project(onodiy_host_tests)
 
 # hal has the linker keep its assertion handler (-u __assert_func, at HAL
 # assertion level 2). Mach-O names C functions with a leading underscore, so

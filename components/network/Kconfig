@@ -4,7 +4,7 @@ menu "Station: network"
 
     config NETWORK_AP_SSID_PREFIX
         string "Setup AP SSID prefix"
-        default "onocoydiy-"
+        default "onodiy-"
         help
             The setup access point is named <prefix><last 4 hex digits of MAC>.
 

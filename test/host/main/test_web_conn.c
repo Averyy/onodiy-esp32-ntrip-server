@@ -251,7 +251,7 @@ static void feed_split(web_scan_t *s, const char *text, size_t step)
 
 TEST_CASE("web conn: the request line tells HTTP/1.0 from HTTP/1.1, split anywhere", "[web_conn]")
 {
-    static const char req10[] = "GET / HTTP/1.0\r\nHost: onocoydiy.local\r\n\r\n";
+    static const char req10[] = "GET / HTTP/1.0\r\nHost: onodiy.local\r\n\r\n";
     static const char req11[] = "GET /api/status HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n";
     for (size_t step = 1; step <= sizeof(req10); step++) {
         web_scan_t s;

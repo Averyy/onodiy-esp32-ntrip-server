@@ -7,7 +7,7 @@ daily update check.
 The release workflow (.github/workflows/build.yml) runs this on a tag build:
 
   python3 tools/release_manifest.py --version v0.3.0 \\
-      --app onocoydiy-esp-um982.bin --gnss firmware/um982/UM982_R4.10Build18975.pkg \\
+      --app onodiy-esp32-ntrip-server.bin --gnss firmware/um982/UM982_R4.10Build18975.pkg \\
       --sdkconfig-json sdkconfig.json --repo owner/name --out manifest.json \\
       [--sign-key key.pem] [--move-to owner/new-name]
 
@@ -56,7 +56,7 @@ import subprocess
 import sys
 import tempfile
 
-PROJECT = "onocoydiy-esp-um982"
+PROJECT = "onodiy-esp32-ntrip-server"
 SCHEMA = 1
 MAX_GNSS = 4  # FW_MANIFEST_MAX_GNSS
 UINT32_MAX = 0xFFFFFFFF

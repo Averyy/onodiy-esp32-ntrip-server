@@ -98,17 +98,17 @@ remove multicast filter for IPv6` when mDNS stops before a planned restart)
 and `QEMU development build: emulated Ethernet instead of Wi-Fi, no setup
 AP`. The mDNS responder
 runs as on a station, on the emulated Ethernet port, under the overlay's own
-host name: `network: mDNS: answering as onocoydiy-qemu.local (web page as
-service onocoydiy-qemu)`. QEMU's user-mode network sends the guest's
+host name: `network: mDNS: answering as onodiy-qemu.local (web page as
+service onodiy-qemu)`. QEMU's user-mode network sends the guest's
 multicast announcements out of this computer onto its LAN, so under the
-station's default name an emulated station would announce `onocoydiy.local`
+station's default name an emulated station would announce `onodiy.local`
 beside a real one and could take the name from it; `sdkconfig.qemu` sets
-`CONFIG_LWIP_LOCAL_HOSTNAME="onocoydiy-qemu"` to keep them apart. (Running
+`CONFIG_LWIP_LOCAL_HOSTNAME="onodiy-qemu"` to keep them apart. (Running
 the user-mode network with `restrict=on` would keep the packets in, but it
 also cuts the station's outbound update check and needs a `guestfwd` for
 every local caster port.) Queries do not come back in, so the name cannot
 be looked up from this computer, but a request with
-`Host: onocoydiy-qemu.local` passes the Host check like on a board. The
+`Host: onodiy-qemu.local` passes the Host check like on a board. The
 emulated port also gets its IPv6 link-local address (`network: IPv6
 link-local fe80::... on station`), as a station's interfaces do, and no
 other: QEMU's user-mode network answers the guest's router solicitation
@@ -255,7 +255,7 @@ and reports PASS or FAIL for each of these (exit status 1 if any failed):
    `GET /api/status` with that session is valid JSON, API version 1, the
    station online over the emulated Ethernet, `health.reboot_hold` with
    `setup`; `GET /api/session` has `hostname` and `mdns_host`
-   `onocoydiy-qemu`, a request with `Host: onocoydiy-qemu.local` gets 200
+   `onodiy-qemu`, a request with `Host: onodiy-qemu.local` gets 200
    and one with `Host: evil.local` does not;
    HTTP connection handling: `POST /api/status` with `{}` gets `405` and
    `POST /api/nope` with a body `404`, both with `Connection: close` (not

@@ -52,7 +52,7 @@ from benchlib.ntrip import Dechunker, basic_auth
 from benchlib.replay import EpochGrouper, read_idx
 from benchlib.stream import StreamSplitter
 
-AGENT = "NTRIP onocoydiy-ntrip-timing/1.0"
+AGENT = "NTRIP onodiy-ntrip-timing/1.0"
 GPS_EPOCH_UNIX = 315964800  # 1980-01-06 00:00:00 UTC
 GPS_UTC_S = 18  # leap seconds, as the station's ledger uses
 GPS_WEEK_S = 604800.0

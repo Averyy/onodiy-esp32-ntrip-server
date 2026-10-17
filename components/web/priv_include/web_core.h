@@ -156,7 +156,7 @@ typedef struct {
  * one of the device's names: the station's IP, the AP's IP, the hostname
  * alone or with one of WEB_HOST_SUFFIXES (the DHCP name), or
  * <mdns_host>.local (the name the mDNS responder answers, which can differ
- * from the hostname after a name conflict: "onocoydiy-2"). Names compare
+ * from the hostname after a name conflict: "onodiy-2"). Names compare
  * without case and may carry one trailing dot (the fully qualified form a
  * DNS-SD browser opens); IP addresses may not. A bracketed IPv6 literal, an
  * empty host or a malformed port is refused.

@@ -18,7 +18,7 @@ TEST_CASE("ntrip v1 request bytes", "[ntrip]")
     char agent[NTRIP_AGENT_MAX];
     TEST_ASSERT_NOT_EQUAL(0, ntrip_build_agent("v0.3.0", agent, sizeof(agent)));
     size_t n = ntrip_build_v1_request(buf, sizeof(buf), "hunter2", "a1b2c3d4", agent);
-    const char *want = "SOURCE hunter2 /a1b2c3d4\r\nSource-Agent: NTRIP onocoydiy-esp-um982/0.3.0\r\n\r\n";
+    const char *want = "SOURCE hunter2 /a1b2c3d4\r\nSource-Agent: NTRIP onodiy/0.3.0\r\n\r\n";
     TEST_ASSERT_EQUAL_size_t(strlen(want), n);
     TEST_ASSERT_EQUAL_STRING(want, buf);
     /* exactly three tokens, no version suffix, no Ntrip-Version header */
@@ -41,13 +41,13 @@ TEST_CASE("ntrip v1 request bytes", "[ntrip]")
 TEST_CASE("ntrip v2 request bytes with Basic auth and chunked body", "[ntrip]")
 {
     char buf[NTRIP_REQUEST_MAX];
-    const char *agent = "NTRIP onocoydiy-esp-um982/0.3.0";
+    const char *agent = "NTRIP onodiy/0.3.0";
     size_t n = ntrip_build_v2_request(buf, sizeof(buf), "caster.example.com", 2101, false, "MOUNT1", "alice",
                                       "s3cret", agent, false);
     const char *want = "POST /MOUNT1 HTTP/1.1\r\n"
                        "Host: caster.example.com:2101\r\n"
                        "Ntrip-Version: Ntrip/2.0\r\n"
-                       "User-Agent: NTRIP onocoydiy-esp-um982/0.3.0\r\n"
+                       "User-Agent: NTRIP onodiy/0.3.0\r\n"
                        "Authorization: Basic YWxpY2U6czNjcmV0\r\n"
                        "Connection: close\r\n"
                        "Transfer-Encoding: chunked\r\n"
@@ -113,13 +113,13 @@ TEST_CASE("ntrip agent string and Onocoy wire names", "[ntrip]")
 {
     char a[NTRIP_AGENT_MAX];
     ntrip_build_agent("v0.3.0", a, sizeof(a));
-    TEST_ASSERT_EQUAL_STRING("NTRIP onocoydiy-esp-um982/0.3.0", a);
+    TEST_ASSERT_EQUAL_STRING("NTRIP onodiy/0.3.0", a);
     ntrip_build_agent("v0.3.0-4-g47fc47b-dirty+dev", a, sizeof(a));
-    TEST_ASSERT_EQUAL_STRING("NTRIP onocoydiy-esp-um982/0.3.0-4-g47fc47b-dirty+dev", a);
+    TEST_ASSERT_EQUAL_STRING("NTRIP onodiy/0.3.0-4-g47fc47b-dirty+dev", a);
     ntrip_build_agent("", a, sizeof(a));
-    TEST_ASSERT_EQUAL_STRING("NTRIP onocoydiy-esp-um982/unknown", a);
+    TEST_ASSERT_EQUAL_STRING("NTRIP onodiy/unknown", a);
     ntrip_build_agent("a b\r", a, sizeof(a));
-    TEST_ASSERT_EQUAL_STRING("NTRIP onocoydiy-esp-um982/a_b_", a);
+    TEST_ASSERT_EQUAL_STRING("NTRIP onodiy/a_b_", a);
     TEST_ASSERT_EQUAL_size_t(0, ntrip_build_agent("1.0", a, 10));
 
     ntrip_wire_names_t w;
@@ -129,7 +129,7 @@ TEST_CASE("ntrip agent string and Onocoy wire names", "[ntrip]")
     TEST_ASSERT_EQUAL_STRING("Roof1", w.mount);
     TEST_ASSERT_EQUAL_STRING("credUser", w.user);
     ntrip_wire_names(ntrip_host_is_onocoy("servers.onocoy.com"), true, "credUser", "", "", &w);
-    TEST_ASSERT_EQUAL_STRING("onocoydiy", w.mount);
+    TEST_ASSERT_EQUAL_STRING("onodiy", w.mount);
     ntrip_wire_names(ntrip_host_is_onocoy("caster.example.com"), true, "MOUNT", "bob", "Roof1", &w);
     TEST_ASSERT_EQUAL_STRING("MOUNT", w.mount);
     TEST_ASSERT_EQUAL_STRING("bob", w.user);
@@ -1455,13 +1455,13 @@ TEST_CASE("ntrip Onocoy wire names: the console's mountpoint, username and passw
     TEST_ASSERT_EQUAL_STRING("", w.user);
 
     char buf[NTRIP_REQUEST_MAX];
-    size_t n = ntrip_build_v1_request(buf, sizeof(buf), "s3cret", w.mount, "NTRIP onocoydiy-esp-um982/0.3.0");
+    size_t n = ntrip_build_v1_request(buf, sizeof(buf), "s3cret", w.mount, "NTRIP onodiy/0.3.0");
     TEST_ASSERT_TRUE(n > 0);
-    TEST_ASSERT_EQUAL_STRING("SOURCE s3cret /user.7\r\nSource-Agent: NTRIP onocoydiy-esp-um982/0.3.0\r\n\r\n", buf);
+    TEST_ASSERT_EQUAL_STRING("SOURCE s3cret /user.7\r\nSource-Agent: NTRIP onodiy/0.3.0\r\n\r\n", buf);
 
     ntrip_wire_names(ntrip_host_is_onocoy("servers.onocoy.com"), true, "MP_42", "user.7", "", &w);
     n = ntrip_build_v2_request(buf, sizeof(buf), "servers.onocoy.com", 2101, false, w.mount, w.user, "s3cret",
-                               "NTRIP onocoydiy-esp-um982/0.3.0", false);
+                               "NTRIP onodiy/0.3.0", false);
     TEST_ASSERT_TRUE(n > 0);
     TEST_ASSERT_NOT_NULL(strstr(buf, "POST /MP_42 HTTP/1.1\r\n"));
     /* base64("user.7:s3cret") */
@@ -1478,7 +1478,7 @@ TEST_CASE("ntrip Onocoy wire names: a slot stored before the username field keep
     TEST_ASSERT_EQUAL_STRING("Roof1", w.mount);
     TEST_ASSERT_EQUAL_STRING("credUser", w.user);
     ntrip_wire_names(ntrip_host_is_onocoy("servers.onocoy.com"), true, "credUser", "", "", &w);
-    TEST_ASSERT_EQUAL_STRING("onocoydiy", w.mount);
+    TEST_ASSERT_EQUAL_STRING("onodiy", w.mount);
     TEST_ASSERT_EQUAL_STRING("credUser", w.user);
     /* Other casters: as stored, whatever the username. */
     ntrip_wire_names(ntrip_host_is_onocoy("rtk2go.com"), false, "MOUNT", "bob", "", &w);
@@ -2985,8 +2985,8 @@ TEST_CASE("ntrip a test Onocoy slot uses Onocoy's fields, wire names and the one
     ntrip_wire_names_t w;
     ntrip_wire_names(true, false, "TESTMOUNT", "testuser01", "", &w);
     char buf[NTRIP_REQUEST_MAX];
-    TEST_ASSERT_TRUE(ntrip_build_v1_request(buf, sizeof(buf), "fakepass123", w.mount, "NTRIP onocoydiy-esp-um982/0.3.0") > 0);
-    TEST_ASSERT_EQUAL_STRING("SOURCE fakepass123 /testuser01\r\nSource-Agent: NTRIP onocoydiy-esp-um982/0.3.0\r\n\r\n",
+    TEST_ASSERT_TRUE(ntrip_build_v1_request(buf, sizeof(buf), "fakepass123", w.mount, "NTRIP onodiy/0.3.0") > 0);
+    TEST_ASSERT_EQUAL_STRING("SOURCE fakepass123 /testuser01\r\nSource-Agent: NTRIP onodiy/0.3.0\r\n\r\n",
                              buf);
     ntrip_wire_names(false, false, "TESTMOUNT", "testuser01", "", &w);
     TEST_ASSERT_EQUAL_STRING("TESTMOUNT", w.mount);

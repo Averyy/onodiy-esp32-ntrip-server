@@ -943,7 +943,7 @@ static esp_err_t api_handle(httpd_req_t *req, web_req_t *rp)
                     : web_send_err(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE);
     }
     if (rt->body == WEB_BODY_UPLOAD && (!header_is(req, "Content-Type", "application/octet-stream", true) ||
-                                         !header_is(req, "X-Requested-With", "onocoydiy", false))) {
+                                         !header_is(req, "X-Requested-With", "onodiy", false))) {
         return web_refuse_and_close(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE);
     }
     size_t max_body = rt->max_body != 0 ? rt->max_body : WEB_JSON_MAX;

@@ -128,7 +128,7 @@ CONFIG_LWIP_MAX_SOCKETS=24
 # gets the same priority, so 24 open connections would refuse the next web
 # client or OTA download.
 CONFIG_LWIP_MAX_ACTIVE_TCP=24
-CONFIG_LWIP_LOCAL_HOSTNAME="onocoydiy"
+CONFIG_LWIP_LOCAL_HOSTNAME="onodiy"
 # DNS fallback server used when DHCP leaves no working one (needs
 # LWIP_DNS_MAX_SERVERS >= 3, the default). Compile-time, not a user setting.
 CONFIG_LWIP_FALLBACK_DNS_SERVER_SUPPORT=y

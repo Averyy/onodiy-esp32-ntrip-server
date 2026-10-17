@@ -14,9 +14,9 @@
 TEST_CASE("release hosts: GitHub and its release asset CDN only", "[release_url]")
 {
     static const char *const good[] = {
-        "https://github.com/Averyy/onocoydiy-esp-um982/releases/latest/download/manifest.json",
+        "https://github.com/Averyy/onodiy-esp32-ntrip-server/releases/latest/download/manifest.json",
         /* as the HTTP client prints it */
-        "https://github.com:443/Averyy/onocoydiy-esp-um982/releases/download/v1.0.0/fw.bin",
+        "https://github.com:443/Averyy/onodiy-esp32-ntrip-server/releases/download/v1.0.0/fw.bin",
         "https://GitHub.COM/a/b",
         "HTTPS://github.com/a/b",
         "https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sp=r&sig=x",
@@ -83,7 +83,7 @@ TEST_CASE("release hosts: exact names, case-insensitive", "[release_url]")
 TEST_CASE("release repository names", "[release_url]")
 {
     static const char *const good[] = {
-        "Averyy/onocoydiy-esp-um982", "a/b", "a-b/c.d_e", "x/.github", "x/a..b",
+        "Averyy/onodiy-esp32-ntrip-server", "a/b", "a-b/c.d_e", "x/.github", "x/a..b",
     };
     for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
         TEST_ASSERT_TRUE_MESSAGE(fw_release_repo_ok(good[i]), good[i]);
@@ -116,12 +116,12 @@ TEST_CASE("release repository names", "[release_url]")
 TEST_CASE("release URLs are built from valid parts only, on github.com", "[release_url]")
 {
     char url[256];
-    TEST_ASSERT_TRUE(fw_release_latest_url(url, sizeof(url), "Averyy/onocoydiy-esp-um982", "manifest.json"));
-    TEST_ASSERT_EQUAL_STRING("https://github.com/Averyy/onocoydiy-esp-um982/releases/latest/download/manifest.json",
-                             url);
+    TEST_ASSERT_TRUE(fw_release_latest_url(url, sizeof(url), "Averyy/onodiy-esp32-ntrip-server", "manifest.json"));
+    TEST_ASSERT_EQUAL_STRING(
+        "https://github.com/Averyy/onodiy-esp32-ntrip-server/releases/latest/download/manifest.json", url);
     TEST_ASSERT_TRUE(fw_release_url_ok(url));
-    TEST_ASSERT_TRUE(fw_release_asset_url(url, sizeof(url), "a/b", "v1.2.3-rc.1", "onocoydiy-esp-um982.bin"));
-    TEST_ASSERT_EQUAL_STRING("https://github.com/a/b/releases/download/v1.2.3-rc.1/onocoydiy-esp-um982.bin", url);
+    TEST_ASSERT_TRUE(fw_release_asset_url(url, sizeof(url), "a/b", "v1.2.3-rc.1", "onodiy-esp32-ntrip-server.bin"));
+    TEST_ASSERT_EQUAL_STRING("https://github.com/a/b/releases/download/v1.2.3-rc.1/onodiy-esp32-ntrip-server.bin", url);
     TEST_ASSERT_TRUE(fw_release_url_ok(url));
 
     TEST_ASSERT_FALSE(fw_release_latest_url(url, sizeof(url), "a/b/c", "manifest.json"));
@@ -139,13 +139,13 @@ TEST_CASE("release URLs are built from valid parts only, on github.com", "[relea
 
 TEST_CASE("release hops: github.com only within the repository's releases", "[release_url]")
 {
-    static const char *const repo = "Averyy/onocoydiy-esp-um982";
+    static const char *const repo = "Averyy/onodiy-esp32-ntrip-server";
     static const char *const good[] = {
         /* the first request and GitHub's "latest" redirect, as the HTTP client prints them */
-        "https://github.com:443/Averyy/onocoydiy-esp-um982/releases/latest/download/manifest.json",
-        "https://github.com:443/Averyy/onocoydiy-esp-um982/releases/download/v1.0.0/manifest.json",
-        "https://github.com/averyy/ONOCOYDIY-esp-um982/releases/download/v1.0.0/onocoydiy-esp-um982.bin",
-        "https://github.com/Averyy/onocoydiy-esp-um982/releases/download/v1.0.0-rc.1/fw.bin?x=1",
+        "https://github.com:443/Averyy/onodiy-esp32-ntrip-server/releases/latest/download/manifest.json",
+        "https://github.com:443/Averyy/onodiy-esp32-ntrip-server/releases/download/v1.0.0/manifest.json",
+        "https://github.com/averyy/ONODIY-esp32-ntrip-server/releases/download/v1.0.0/onodiy-esp32-ntrip-server.bin",
+        "https://github.com/Averyy/onodiy-esp32-ntrip-server/releases/download/v1.0.0-rc.1/fw.bin?x=1",
         /* the asset CDN: host only */
         "https://release-assets.githubusercontent.com:443/github-production-release-asset/1/2",
         "https://objects.githubusercontent.com/github-production-release-asset-2e65be/1/2",
@@ -155,32 +155,32 @@ TEST_CASE("release hops: github.com only within the repository's releases", "[re
     }
     static const char *const bad[] = {
         NULL,
-        "http://github.com/Averyy/onocoydiy-esp-um982/releases/latest/download/manifest.json",
-        "https://user@github.com/Averyy/onocoydiy-esp-um982/releases/latest/download/manifest.json",
-        "https://evil.example/Averyy/onocoydiy-esp-um982/releases/download/v1.0.0/fw.bin",
+        "http://github.com/Averyy/onodiy-esp32-ntrip-server/releases/latest/download/manifest.json",
+        "https://user@github.com/Averyy/onodiy-esp32-ntrip-server/releases/latest/download/manifest.json",
+        "https://evil.example/Averyy/onodiy-esp32-ntrip-server/releases/download/v1.0.0/fw.bin",
         /* a renamed or transferred repository: GitHub redirects to the new name */
-        "https://github.com:443/NewName/onocoydiy-esp-um982/releases/latest/download/manifest.json",
-        "https://github.com:443/Averyy/onocoydiy-esp-um982-old/releases/latest/download/manifest.json",
-        "https://github.com:443/Averyy/onocoydiy-esp-um98/releases/latest/download/manifest.json",
-        "https://github.com:443/Averyy/onocoydiy-esp-um982",
-        "https://github.com:443/Averyy/onocoydiy-esp-um982/",
-        "https://github.com:443/Averyy/onocoydiy-esp-um982/releases",
-        "https://github.com:443/Averyy/onocoydiy-esp-um982/archive/v1.0.0.zip",
-        "https://github.com:443/Averyy/onocoydiy-esp-um982/raw/main/fw.bin",
-        "https://github.com:443//Averyy/onocoydiy-esp-um982/releases/download/v1.0.0/fw.bin",
+        "https://github.com:443/NewName/onodiy-esp32-ntrip-server/releases/latest/download/manifest.json",
+        "https://github.com:443/Averyy/onodiy-esp32-ntrip-server-old/releases/latest/download/manifest.json",
+        "https://github.com:443/Averyy/onodiy-esp32-ntrip-serve/releases/latest/download/manifest.json",
+        "https://github.com:443/Averyy/onodiy-esp32-ntrip-server",
+        "https://github.com:443/Averyy/onodiy-esp32-ntrip-server/",
+        "https://github.com:443/Averyy/onodiy-esp32-ntrip-server/releases",
+        "https://github.com:443/Averyy/onodiy-esp32-ntrip-server/archive/v1.0.0.zip",
+        "https://github.com:443/Averyy/onodiy-esp32-ntrip-server/raw/main/fw.bin",
+        "https://github.com:443//Averyy/onodiy-esp32-ntrip-server/releases/download/v1.0.0/fw.bin",
         "https://github.com:443",
         "https://github.com",
         /* dot segments and percent-encoding could leave the repository */
-        "https://github.com/Averyy/onocoydiy-esp-um982/releases/../../../Evil/x/releases/download/v1/fw.bin",
-        "https://github.com/Averyy/onocoydiy-esp-um982/releases/./download/v1/fw.bin",
-        "https://github.com/Averyy/onocoydiy-esp-um982/releases/%2e%2e/x",
-        "https://github.com/Averyy/onocoydiy-esp-um982/releases/download\\..\\x",
+        "https://github.com/Averyy/onodiy-esp32-ntrip-server/releases/../../../Evil/x/releases/download/v1/fw.bin",
+        "https://github.com/Averyy/onodiy-esp32-ntrip-server/releases/./download/v1/fw.bin",
+        "https://github.com/Averyy/onodiy-esp32-ntrip-server/releases/%2e%2e/x",
+        "https://github.com/Averyy/onodiy-esp32-ntrip-server/releases/download\\..\\x",
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         TEST_ASSERT_FALSE_MESSAGE(fw_release_hop_ok(bad[i], repo), bad[i] != NULL ? bad[i] : "(null)");
     }
     /* Without a valid repository nothing on github.com passes. */
-    const char *latest = "https://github.com/Averyy/onocoydiy-esp-um982/releases/latest/download/manifest.json";
+    const char *latest = "https://github.com/Averyy/onodiy-esp32-ntrip-server/releases/latest/download/manifest.json";
     TEST_ASSERT_FALSE(fw_release_hop_ok(latest, NULL));
     TEST_ASSERT_FALSE(fw_release_hop_ok(latest, ""));
     TEST_ASSERT_FALSE(fw_release_hop_ok(latest, "Averyy"));
@@ -194,7 +194,7 @@ TEST_CASE("release hops: github.com only within the repository's releases", "[re
     char url[256];
     TEST_ASSERT_TRUE(fw_release_latest_url(url, sizeof(url), repo, "manifest.json"));
     TEST_ASSERT_TRUE(fw_release_hop_ok(url, repo));
-    TEST_ASSERT_TRUE(fw_release_asset_url(url, sizeof(url), repo, "v1.2.3", "onocoydiy-esp-um982.bin"));
+    TEST_ASSERT_TRUE(fw_release_asset_url(url, sizeof(url), repo, "v1.2.3", "onodiy-esp32-ntrip-server.bin"));
     TEST_ASSERT_TRUE(fw_release_hop_ok(url, repo));
     TEST_ASSERT_FALSE(fw_release_hop_ok(url, "Averyy/other"));
 
