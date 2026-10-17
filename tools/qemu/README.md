@@ -579,6 +579,7 @@ the firmware, out to a caster on this computer.
 tools/qemu/run.sh --build-only
 uv run tools/qemu/e2e.py                       # every scenario; logs in build-qemu/e2e/
 uv run tools/qemu/e2e.py --scenario stream --caster docker
+uv run tools/qemu/e2e.py --scenario stream --ntrip-version 2   # slot 1 over NTRIP 2.0
 uv run tools/qemu/e2e.py --scenario signal-test
 ```
 
@@ -594,13 +595,19 @@ epoch per second) into UART1 from the first boot (`--uart1 connect:PORT`), so th
 station finds a streaming receiver by listening, sets the admin password
 and, as soon as the station streams, configures slot 1: `Bench`, host
 `10.0.2.2`, the caster's port, NTRIP 1.0, mountpoint `BENCH`, a made-up
-password, the standard profile. Until the `signal-test` scenario nothing
-answers the station's receiver queries: its identity query goes unanswered
+password, the standard profile. With `--ntrip-version 2` (the fake caster
+only: the BKG image speaks NTRIP 1.0 only) slot 1 uses NTRIP 2.0 with a
+made-up username: a POST with Basic auth and a chunked body, which the fake
+caster answers with `HTTP/1.1 200 OK` and records through the chunk
+framing, so every record check below then also covers that framing.
+Until the `signal-test` scenario nothing answers the station's receiver
+queries: its identity query goes unanswered
 and, while RTCM flows, never takes the line (the casters are never paused
 for it). PASS or FAIL for each of these (exit status 1 if any failed):
 
 - scenario `stream`: slot 1 streaming within 60 s (`ICY 200 OK` from the
-  fake caster, `OK` from the BKG caster with `--caster docker`) and never
+  fake caster, `HTTP/1.1 200 OK` with `--ntrip-version 2`, `OK` from the
+  BKG caster with `--caster docker`) and never
   `paused` while the scenario runs, with no `COMMAND lease taken by
   identify` on the console; `/api/gnss/signals` lists the fixture's
   constellations with their bands, as computed from the fixture with

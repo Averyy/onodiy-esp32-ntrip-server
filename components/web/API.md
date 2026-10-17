@@ -551,7 +551,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.first_apply_held` | the receiver's first configuration waits for the user (`gnss/hold`, section 8): only queries reach the receiver until the user applies; admin form only |
 | `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
 | `receiver.signal_test` | the signal-group comparison (section 8) in short: `null` when none runs and none ended in the last 24 h of this boot; else `{"state", "phase", "group", "left_s", "decide_left_s", "outcome"}`: `state` as in `GET /api/gnss/signal-test`, `phase` 0 or 1 while switching, settling or measuring (else `null`), `group` the group being switched to, measured or (deciding) running, or the one restored to (`{"master", "slave"}`, else `null`), `left_s` the time left in the phase rounded up to 10 s, `decide_left_s` the time left to choose rounded up to a minute (`null` outside those states; rounded so the section changes rarely), `outcome` once decided (`null` while running). Admin form only |
-| `casters[]` | every slot; the full status is in `/api/casters`. `empty`: the slot has no host and is not enabled (never set up, or removed); its `name` is then `""` whatever the stored name is. In safe mode (configs not loaded) no slot is empty and every `name` is `null`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with the console's mountpoint, username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none); `stop_reason` why the Onocoy login guard stopped the slot (`ntrip_stop_t`; `none` unless `state` is `stopped`, section 10) |
+| `casters[]` | every slot; the full status is in `/api/casters`. `empty`: the slot has no host and is not enabled (never set up, or removed); its `name` is then `""` whatever the stored name is. In safe mode (configs not loaded) no slot is empty and every `name` is `null`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with a mountpoint and the console's username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none); `stop_reason` why the Onocoy login guard stopped the slot (`ntrip_stop_t`; `none` unless `state` is `stopped`, section 10) |
 | `alerts[]` | health's alerts (`source: "health"`, `health_alert_t`) and the station's (`source: "station"`, `station_alert_t`). A `failed` health level always comes with the alert that says why (below); `config_failed` carries `retry_in_s` and `auto_retry` (as `config_retry_in_s` and `config_auto_retry` in `GET /api/gnss`); `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`); `fixed_far` (the fixed base position looks wrong: more than 50 m from the receiver's own solution, horizontally or in height, or its height is the receiver's height above sea level: section 8, `fixed_check`) carries `horizontal_m`, `vertical_m`, `distance_m`, `height_only` and `sea_level` as `fixed_check` does, in whole metres |
 | `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without an enabled protected slot that is set up (`onocoy_ready`), or without a trusted clock. Information only, never a gate |
 | health alerts that say why there is no RTCM | set from the GNSS ladder's evidence while it is in its last step (`failed`), or while a stall is only reported (`alerts_only`, `degraded`; also the grace of a step the station ran before the user chose `alerts_only`); `no_satellites` and `no_rtcm` also while the recovery runs (`recovering`: a step in progress, a step whose grace waits while a session of the station's own runs, or between two of its steps), as soon as the receiver answered after its last RTCM frame within the last 90 s (as `receiver.responding` reads it), so the antenna hint comes with the recovery; a session of the station's own (an apply, the applied check's, one after a receiver restart) never drops the level or the reason meanwhile: `receiver_power` (bytes but no answer after the receiver reset: power-cycle the station), `receiver_silent` (nothing usable from the receiver and no answer to commands: power-cycle the station), `no_satellites` (the receiver answers, and its own position sentence says no fix with no satellites used: check that the antenna is on the socket marked M and sees the sky), `no_rtcm` (the receiver answers, by text lines or replies to the station, but sends no RTCM: most often the antenna; only while its last answer is at most 90 s old: older, it is `receiver_silent` in the last step and in `alerts_only`, and no reason while a step runs), `rx_held` (the first configuration is held, `first_apply_held`, and the receiver answers: no RTCM is expected yet; level `degraded`, never `failed`, and the ladder declares no stall for it). None of them while the station finds no receiver: its own `no_receiver` alert says that. With `no_satellites` or `no_rtcm` the ladder does not reset the receiver again on its 10-min retry pass (a silent receiver gets the link restart and the rescan only); the same after a receiver reset that brought RTCM back only briefly (the stall within 60 s of it) when the receiver answers |
@@ -784,7 +784,7 @@ oldest.
 | `responding` | the receiver answers, as `receiver.responding` in `GET /api/status` (one rule, read at the time of the request): it streams, or it sent a checksum-valid line within the last 90 s and after its last RTCM frame (the station asks a receiver that sends no RTCM once a minute while nothing comes); never while no receiver is found |
 | `restarting` | the receiver answered a command with its restarting notice (`The Board is resetting,do not response any command!`, no leading `$`) within the last 20 s and its restart banner has not come yet: it answers, it is not silent. An unasked restart (no signal-group change or RESET of the station's own) counts as restart evidence once, like the banner that ends it |
 | `config_failed`, `config_retry_in_s`, `config_auto_retry` | the last profile apply failed (`config_failed` alert). `config_auto_retry`: the station retries it on its own on its backoff (10 min, 30 min, 2 h, then every 6 h), which it does only with `autocfg` on and for a model it configures; `config_retry_in_s` is the time to that retry (0 when none is due, and always 0 when `config_auto_retry` is false). With `autocfg` off (the first-apply hold included) nothing is retried until the user applies again |
-| `rtcm_differs` | the latest observation window saw RTCM flowing that differs from the profile: a message it checks was missing or came at another rate while others arrived. Never set without any RTCM (no antenna, a silent receiver: `no_rtcm`, `receiver_silent` or `no_satellites` say why); cleared by a window that passes, a window without RTCM and whenever the station starts watching again (a receiver restart, detection, a successful apply). Health raises `profile_drift` after 90 s of it |
+| `rtcm_differs` | the latest observation window saw RTCM flowing that differs from the profile: a message it checks was missing or came at another rate while others arrived. QZSS and NavIC MSMs (regional: none arrive away from their area) are checked only when they arrive, and 1230 only when the receiver accepted it. Never set without any RTCM (no antenna, a silent receiver: `no_rtcm`, `receiver_silent` or `no_satellites` say why); cleared by a window that passes, a window without RTCM and whenever the station starts watching again (a receiver restart, detection, a successful apply). Health raises `profile_drift` after 90 s of it |
 | `profile_applied` | the applied check passed: the receiver acknowledged this profile on this firmware at its last apply (the stored applied state) and an observation window saw the profile's RTCM. A receiver whose applied state differs is configured at once (`autocfg` on). Without any RTCM (no antenna, a silent receiver) it stays `false` and the check waits for the first window with RTCM; nothing is re-applied for a window without RTCM, which could not show whether a re-apply worked (the stall is the recovery's, whose reconfigure step re-applies once under the user's recovery mode) |
 | `profile_acknowledged` | the receiver acknowledged this profile on the firmware it runs at its last apply: the stored applied state matches (the profile's hash, the firmware, the message 1230 answer stored), confirmed by this boot's version query or by an apply that worked since. `profile_applied` adds the check against the stream, so `true` with `profile_applied` `false` means applied but not checked yet (no RTCM: no antenna; or the first window still runs). `false` while the identity is not confirmed, while the station looks for the receiver or updates it, for a model the station does not configure, and from a saved profile that differs until it is applied (the user's, or the station's own for a lock, a re-survey or a signal-group switch, also when that apply fails). Also in `GET /api/status` (`receiver.profile_acknowledged`) |
 | `rtcm1230_supported` | `gnss/rtcm1230_ok`: `true` the receiver accepted message 1230 at the last apply, `false` it refused it, `null` never applied (the key is not stored: "not applied yet") |
@@ -865,6 +865,23 @@ antenna type to 16 characters before the radome); `antenna_setup_id` 0-255.
 The UI's hint: only for an antenna in the IGS list, its name and radome as
 listed; empty keeps the receiver's value; `ADVNULLANTENNA` (the null-antenna
 name) clears a model the receiver already holds.
+
+The default profile (`um98x_profile_default()`, used while none is stored)
+carries the list Onocoy's connection guide asks for: 1005, 1033, MSM7 1077,
+1087, 1097, 1117, 1127, 1137 and 1230, each every second (the UI's "Onocoy
+set"). A stored profile whose list is exactly the earlier default (the same
+without 1137, each once and every second, in any order) and that was saved
+before 1137 joined it reads as today's list wherever it is read (`GET
+/api/gnss`, the apply, a signal-group switch), with nothing written: its
+hash then differs from the applied one, so with `autocfg` on the receiver is
+configured with it once, as after a save. A list saved since, the earlier
+set included, stays as saved. An apply tolerates the receiver refusing 1230
+or a NavIC MSM (1131-1137, refused by a firmware without NavIC): the rest is
+applied and saved as usual, and the station logs the refusal
+(`rtcm1230_supported` keeps 1230's answer); any other refused message fails
+the apply. QZSS and NavIC MSMs that never arrive are not drift
+(`rtcm_differs`), and the UI's message list shows them as "None in view",
+not red.
 
 `202 {"accepted": true, "saved": true, "apply": "queued"}`. `apply` is
 `queued`, `unchanged` (same profile, or only `autocfg` changed),
@@ -1373,7 +1390,7 @@ Slots `0` to `max_slots - 1` (`CONFIG_NTRIP_MAX_CASTERS`).
 ```json
 {
   "max_slots": 4,
-  "onocoy_preset": {"host": "servers.onocoy.com", "port": 2101, "tls_port": 2121, "ntrip_version": 1,
+  "onocoy_preset": {"host": "servers.onocoy.com", "port": 2101, "tls_port": 2121, "ntrip_version": 2,
                     "backoff_profile": "fast"},
   "slots": [{"slot": 0, "config": {}, "status": {}}],
   "warnings": [{"id": "onocoy_open_caster", "onocoy_slots": [0], "open_slots": [1], "rtk2go": true}]
@@ -1410,8 +1427,8 @@ never shows.
 
 ```json
 {"enabled": true, "name": "Onocoy", "host": "servers.onocoy.com", "port": 2101,
- "ntrip_version": 1, "tls": false, "trust": "bundle", "ca_pem_set": false,
- "mountpoint": "<console mountpoint>", "username": "<console username>", "password_set": true,
+ "ntrip_version": 2, "tls": false, "trust": "bundle", "ca_pem_set": false,
+ "mountpoint": "<any name>", "username": "<console username>", "password_set": true,
  "label": "", "v2_raw_body": false, "backoff_profile": "fast", "protected": true,
  "dup_stream_ack": false, "test_onocoy": false}
 ```
@@ -1432,14 +1449,25 @@ wire names, `onocoy_ready`, the one-Onocoy rules (`second_onocoy`,
 `dup_stream_ack_required`) and the login guard below. So a local test caster
 (the Mac at `10.0.2.2` from QEMU, a PC on the bench) sees what Onocoy would.
 
-**Onocoy slots** hold exactly what the Onocoy console shows for a
-station's NTRIP credentials, and the UI asks for those in the console's
-words and order: host `servers.onocoy.com` and port 2101 (shown read-only),
-`mountpoint`, `username`, `password`. On the wire
-(`ntrip_wire_names()`): NTRIP 2.0 posts to `/<mountpoint>` with Basic
-`<username>:<password>`; NTRIP 1.0 (the default) sends
-`SOURCE <password> /<username>`, as Onocoy tells sources that speak only
-1.0 to do. A slot stored in the older layout (an Onocoy slot whose stored
+**Onocoy slots** hold what Onocoy's connection guide asks a source for:
+host `servers.onocoy.com` and port 2101 (shown read-only), a `mountpoint`
+of the user's choosing (any name, alphanumeric in the guide's words: Onocoy
+shows it in the dashboard only, never publicly), and the NTRIP credential
+made in the Onocoy console (Reference Stations, NTRIP Credentials): its
+`username`, generated by the console, and the `password` the user picked
+there. On the wire (`ntrip_wire_names()`): NTRIP 2.0 (the default,
+`onocoy_preset`) posts to `/<mountpoint>` with Basic
+`<username>:<password>`; NTRIP 1.0, the fallback, sends `SOURCE <password>
+/<username>`, as Onocoy tells sources that speak only 1.0 to do (the
+username as the mountpoint, an empty user; the chosen mountpoint is then
+not sent). A slot keeps the version it was saved with. An Onocoy slot that
+holds no credential at all (no `mountpoint`, `username` or password: never
+set up, such as the factory slot stored while 1.0 was the default) reads as
+`ntrip_version` 2 when the station loads it
+(`ntrip_server_onocoy_blank_proto()`; stored at its next save), so setting
+it up uses 2.0 unless the body asks for 1.
+
+A slot stored in the older layout (an Onocoy slot whose stored
 record has no layout byte, the credential username in `mountpoint`) is loaded
 with an empty `username`, whatever its record held: a slot switched to
 Onocoy in place kept the username of the caster it was before, which meant
@@ -1613,7 +1641,7 @@ no control characters anywhere; lengths in UTF-8 bytes: `name` <= 23,
 a password (1.0) and a username (2.0). Onocoy slots: `username`
 `[A-Za-z0-9._-]` (1.0 sends it as the mountpoint), `password` 1-63
 characters without spaces in either version; an enabled Onocoy slot needs
-`mountpoint`, `username` and a password.
+`mountpoint`, `username` and a password, whichever version.
 
 **RTK2go mountpoints**, checked when a slot is saved with an `rtk2go.com`
 host that is new (no stored host, or another one) or with a changed
@@ -2274,8 +2302,8 @@ only. `today.lost_epochs` (only in `today`: a finished day does not keep
 it) the protected slot's epochs lost while online, across restarts:
 the losses that budget is figured from.
 
-In `protected`, `enabled` and `onocoy_ready` (the slot holds the console's
-mountpoint, username and password) are as in the caster status, and so is
+In `protected`, `enabled` and `onocoy_ready` (the slot holds a mountpoint
+and the console's username and password) are as in the caster status, and so is
 `graced_uptime_so_far_permille`. Every figure but `down_today_s` is `null`
 while the slot is off or not set up, or while the day's figures are not
 known yet.
@@ -2590,10 +2618,10 @@ LAN).
    hardware) and "Continue anyway"; `DELETE /api/gnss/live` when the user
    goes on.
 6. Optional: the Onocoy slot, `PUT /api/casters/0` with `onocoy_preset`
-   (host `servers.onocoy.com` and port 2101, shown, not editable) and what the
-   Onocoy console gives (`username` and `password`), plus a `mountpoint`
-   that is any name (prefilled with the station name; Onocoy shows it
-   only in the owner's dashboard) (section 10).
+   (host `servers.onocoy.com`, port 2101 and NTRIP 2.0; host and port shown,
+   not editable), a `mountpoint` of the user's choosing (prefilled with the station name) and the credential
+   made in the Onocoy console: its generated `username` and the `password`
+   picked there (section 10).
 7. The last screen (`setup_step` `casters`): the UI polls `GET /api/status`
    and shows the Onocoy slot's state as it happens (connecting, a refused
    login with `login_rejects` from `GET /api/casters`, streaming once

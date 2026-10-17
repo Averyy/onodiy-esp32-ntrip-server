@@ -414,7 +414,8 @@ UNLOG COM2 as soon as you are done):
 
 ```sh
 uv run um982.py send --write "RTCM1005 COM2 1" "RTCM1033 COM2 1" "RTCM1077 COM2 1" \
-    "RTCM1087 COM2 1" "RTCM1097 COM2 1" "RTCM1117 COM2 1" "RTCM1127 COM2 1" "RTCM1230 COM2 1"
+    "RTCM1087 COM2 1" "RTCM1097 COM2 1" "RTCM1117 COM2 1" "RTCM1127 COM2 1" "RTCM1137 COM2 1" \
+    "RTCM1230 COM2 1"
 uv run rtcm_inspect.py --port auto --seconds 120
 uv run um982.py send --write "UNLOG COM2"
 ```

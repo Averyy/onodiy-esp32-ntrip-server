@@ -52,10 +52,15 @@ static void add(um98x_plan_t *out, um98x_step_kind_t kind, bool fatal, uint16_t 
     }
 }
 
+bool um98x_rtcm_optional(uint16_t msg)
+{
+    return msg == UM98X_RTCM_GLO_BIASES || (msg >= 1131u && msg <= 1137u);
+}
+
 static void add_rtcm(const um98x_base_profile_t *p, um98x_plan_t *out)
 {
     for (size_t i = 0; i < p->rtcm_count; i++) {
-        add(out, UM98X_STEP_RTCM, p->rtcm[i].msg != UM98X_RTCM_OPTIONAL, p->rtcm[i].msg, p->rtcm[i].period_s);
+        add(out, UM98X_STEP_RTCM, !um98x_rtcm_optional(p->rtcm[i].msg), p->rtcm[i].msg, p->rtcm[i].period_s);
     }
 }
 

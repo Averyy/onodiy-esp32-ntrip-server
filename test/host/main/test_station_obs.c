@@ -9,6 +9,7 @@
 
 #include "gnss_rtcm3.h"
 #include "station_obs.h"
+#include "um98x_profile.h"
 #include "unity.h"
 
 /* Clock near the 32-bit millisecond wrap, to show nothing depends on it. */
@@ -223,4 +224,51 @@ TEST_CASE("observed set: slow station messages stretch the window; unchecked typ
     /* Extra messages the profile does not list are not drift. */
     feed(&o, 1074, T0 + 60100);
     TEST_ASSERT_EQUAL(STN_OBS_PASS, stn_obs_eval(&o, &k_opts, T0 + 60200, NULL));
+}
+
+TEST_CASE("observed set: the default profile with NavIC 1137 silent passes", "[station]")
+{
+    /* Onocoy's list has NavIC MSM7, which flows only around India (and not
+     * at all from a receiver firmware that refused it); QZSS only in East
+     * Asia and Oceania. Neither arriving is never drift, and with 1230
+     * refused at the apply its absence is not either. */
+    um98x_base_profile_t p;
+    um98x_profile_default(&p, 1234);
+    bool has_1137 = false;
+    for (uint8_t i = 0; i < p.rtcm_count; i++) {
+        has_1137 = has_1137 || p.rtcm[i].msg == 1137;
+    }
+    TEST_ASSERT_TRUE(has_1137);
+    static const uint16_t global_only[] = { 1005, 1033, 1077, 1087, 1097, 1127, 1230 };
+    stn_obs_t o;
+    stn_obs_arm(&o, p.rtcm, p.rtcm_count, T0);
+    int64_t end = run(&o, T0, 30, global_only, 7, 0);
+    uint16_t bad = 1;
+    TEST_ASSERT_EQUAL(STN_OBS_PASS, stn_obs_eval(&o, &k_opts, end, &bad));
+    TEST_ASSERT_EQUAL_UINT16(0, bad);
+
+    /* 1230 refused as well (rtcm1230_ok false): still a pass without it. */
+    stn_obs_opts_t no1230 = { .rtcm1230_ok = false, .surveying = false };
+    stn_obs_arm(&o, p.rtcm, p.rtcm_count, T0);
+    end = run(&o, T0, 30, global_only, 7, 1230);
+    TEST_ASSERT_EQUAL(STN_OBS_PASS, stn_obs_eval(&o, &no1230, end, NULL));
+
+    /* Around India: NavIC at its rate passes, faster than it is drift. */
+    static const uint16_t with_navic[] = { 1005, 1033, 1077, 1087, 1097, 1127, 1137, 1230 };
+    stn_obs_arm(&o, p.rtcm, p.rtcm_count, T0);
+    end = run(&o, T0, 30, with_navic, 8, 0);
+    TEST_ASSERT_EQUAL(STN_OBS_PASS, stn_obs_eval(&o, &k_opts, end, NULL));
+    stn_obs_arm(&o, p.rtcm, p.rtcm_count, T0);
+    for (int sec = 0; sec < 30; sec++) {
+        feed_second(&o, T0 + sec * 1000, with_navic, 8, 0);
+        feed(&o, 1137, T0 + sec * 1000 + 500);
+    }
+    TEST_ASSERT_EQUAL(STN_OBS_DRIFT, stn_obs_eval(&o, &k_opts, T0 + 30000, &bad));
+    TEST_ASSERT_EQUAL_UINT16(1137, bad);
+
+    /* A global constellation missing is still drift with the new list. */
+    stn_obs_arm(&o, p.rtcm, p.rtcm_count, T0);
+    end = run(&o, T0, 30, global_only, 7, 1087);
+    TEST_ASSERT_EQUAL(STN_OBS_DRIFT, stn_obs_eval(&o, &k_opts, end, &bad));
+    TEST_ASSERT_EQUAL_UINT16(1087, bad);
 }

@@ -359,6 +359,15 @@ Manifest format and rules: `components/fw_update/priv_include/manifest.h`.
    The last screen shows whether Onocoy accepts the login and what to do next in
    the Onocoy console. More servers can be added on the NTRIP page.
 
+For the Onocoy step, add an NTRIP credential in the Onocoy console (Reference
+Stations, NTRIP Credentials): you choose its password and the console generates
+the username. The station asks for those two and a mountpoint, which can be any
+name (Onocoy shows it on your dashboard only), and connects to
+`servers.onocoy.com:2101` with NTRIP 2.0, as
+[Onocoy's guide](https://docs.onocoy.com/documentation/3.-become-a-miner/3.-connect-your-station-to-onocoy)
+describes. The receiver sends the messages that guide lists: 1005, 1033, MSM7
+1077, 1087, 1097, 1117, 1127, 1137 and 1230, every second.
+
 On your network the station answers to its name over mDNS,
 `http://<station name>.local/` (`onocoydiy` unless you rename it; when another
 device already uses that name the station takes `onocoydiy-2` and the web page

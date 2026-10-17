@@ -28,7 +28,7 @@ const RTCM_NAMES = {
   1230: 'GLONASS biases',
 };
 const EPHEMERIS_MSGS = [1019, 1020, 1042, 1045, 1046];
-const ONOCOY_RTCM = [1005, 1033, 1077, 1087, 1097, 1117, 1127, 1230];
+const ONOCOY_RTCM = [1005, 1033, 1077, 1087, 1097, 1117, 1127, 1137, 1230];
 const BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 /* The profile's default link speed (um98x_profile.h). */
 const DEFAULT_BAUD = 115200;

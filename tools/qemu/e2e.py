@@ -8,7 +8,7 @@
 """QEMU end to end: recorded RTCM through the firmware to a caster on this machine.
 
     uv run tools/qemu/e2e.py [--out DIR] [--scenario stream|onocoy-guard|signal-test|all] [--long]
-                             [--caster fake|docker] [--fixture PATH] [--observe S]
+                             [--caster fake|docker] [--ntrip-version 1|2] [--fixture PATH] [--observe S]
 
 Needs the ESP-IDF environment and a QEMU build (tools/qemu/run.sh
 --build-only), like smoke.py. Standard library only: the bench tools it
@@ -26,9 +26,13 @@ What it does:
      records what it relays), boots the image headless, sets the admin
      password and, as soon as the station streams, configures slot 1:
      {name "Bench", host 10.0.2.2, the caster's port, NTRIP 1.0, mountpoint
-     BENCH, a made-up password, standard profile, enabled};
+     BENCH, a made-up password, standard profile, enabled}; with
+     --ntrip-version 2 (fake caster only: the BKG image speaks 1.0 only)
+     NTRIP 2.0 with a made-up username, which the fake caster answers with
+     "HTTP/1.1 200 OK" and records through the chunk framing;
   scenario "stream":
-  3. slot 1 streaming within 60 s ("ICY 200 OK"; "OK" from the BKG caster)
+  3. slot 1 streaming within 60 s ("ICY 200 OK"; "HTTP/1.1 200 OK" over
+     NTRIP 2.0; "OK" from the BKG caster)
      and never `paused` (the replay answers no query, and the station never
      takes the receiver line for its identity query while RTCM flows: no
      "COMMAND lease taken by identify" on the console);
@@ -140,13 +144,14 @@ from benchlib import rtcm
 from benchlib.replay import Burst, EpochGrouper, Schedule, load, msm_of
 from benchlib.stream import StreamSplitter
 from benchlib.um982_sim import Um982Responder, with_station_messages
-from fake_caster import FakeCaster
+from fake_caster import Entry, FakeCaster
 from rtcm_replay import ReplayServer
 
 DEFAULT_FIXTURE = ROOT / "test" / "fixtures" / "rtcm" / "centipede_LAX_30ep.rtcm3"
 HOST_FROM_GUEST = "10.0.2.2"  # QEMU user networking: the host's 127.0.0.1
 STREAM_MOUNT = "BENCH"
 STREAM_PASSWORD = "bench-pass-1"
+STREAM_USER = "bench-user"   # NTRIP 2.0 Basic-auth user (--ntrip-version 2)
 DOCKER_SOURCE_PASSWORD = "bench-src"  # tools/bench/docker/bkg-caster/ntripcaster.conf
 DOCKER_IMAGE = os.environ.get("BKG_CASTER_IMAGE", "onocoydiy-bench-bkg-caster")
 GUARD_MOUNT = "TESTMOUNT"
@@ -708,6 +713,24 @@ class E2E:
 
     # -- scenario: stream -------------------------------------------------------
 
+    def stream_row(self) -> str:
+        """The fake caster's row that accepts slot 1 (1.0: ICY 200 OK, 2.0: HTTP 200)."""
+        return "http_200" if self.args.ntrip_version == 2 else "icy_ok"
+
+    def stream_caster(self) -> FakeCaster:
+        """The local fake caster slot 1 streams to (2.0: answers with HTTP 200, records through the chunks)."""
+        seq = [Entry(self.stream_row())]
+        return FakeCaster(0, sequence=seq, mount=STREAM_MOUNT, password=STREAM_PASSWORD, record=True,
+                          run_dir=self.out / "caster", say=self.say).start()
+
+    def stream_body(self, port: int, password: str) -> dict:
+        """Slot 1's settings for the stream target (NTRIP 2.0 adds the Basic-auth user)."""
+        body = {"name": "Bench", "host": HOST_FROM_GUEST, "port": port, "ntrip_version": self.args.ntrip_version,
+                "mountpoint": STREAM_MOUNT, "password": password, "backoff_profile": "standard", "enabled": True}
+        if self.args.ntrip_version == 2:
+            body["username"] = STREAM_USER
+        return body
+
     def console_text(self) -> str:
         return self.console.read_text(encoding="utf-8", errors="replace") if self.console.exists() else ""
 
@@ -730,11 +753,10 @@ class E2E:
             port, password, want_line = self.docker.port, DOCKER_SOURCE_PASSWORD, "OK"
             self.note(f"stream target: BKG caster container {self.docker.name} on 127.0.0.1:{port}")
         else:
-            self.caster = FakeCaster(0, mount=STREAM_MOUNT, password=STREAM_PASSWORD, record=True,
-                                     run_dir=self.out / "caster", say=self.say).start()
-            port, password, want_line = self.caster.port, STREAM_PASSWORD, "ICY 200 OK"
-        body = {"name": "Bench", "host": HOST_FROM_GUEST, "port": port, "ntrip_version": 1,
-                "mountpoint": STREAM_MOUNT, "password": password, "backoff_profile": "standard", "enabled": True}
+            self.caster = self.stream_caster()
+            port, password = self.caster.port, STREAM_PASSWORD
+            want_line = "HTTP/1.1 200 OK" if self.args.ntrip_version == 2 else "ICY 200 OK"
+        body = self.stream_body(port, password)
         self.slot1_body = body
         status, data = self.api("PUT", "/api/casters/1", body)
         self.save("put-caster-1.json", data)
@@ -864,7 +886,7 @@ class E2E:
         while time.monotonic() < deadline:
             if n is None:
                 n = next((c["n"] for c in self.caster.all_connections()
-                          if c["role"] == "source" and c["row"] == "icy_ok"), None)
+                          if c["role"] == "source" and c["row"] == self.stream_row()), None)
             rec = self.caster.record_of(n) if n is not None else None
             if rec and rec.first_t and time.time() - rec.first_t >= need:
                 break
@@ -1226,11 +1248,8 @@ class E2E:
     def stream_slot(self) -> None:
         """Slot 1 streaming to the local fake caster (the stream scenario's, or set up here)."""
         if self.caster is None and self.docker is None:
-            self.caster = FakeCaster(0, mount=STREAM_MOUNT, password=STREAM_PASSWORD, record=True,
-                                     run_dir=self.out / "caster", say=self.say).start()
-            body = {"name": "Bench", "host": HOST_FROM_GUEST, "port": self.caster.port, "ntrip_version": 1,
-                    "mountpoint": STREAM_MOUNT, "password": STREAM_PASSWORD, "backoff_profile": "standard",
-                    "enabled": True}
+            self.caster = self.stream_caster()
+            body = self.stream_body(self.caster.port, STREAM_PASSWORD)
             self.slot1_body = body
             status, _ = self.api("PUT", "/api/casters/1", body)
             self.check(status == 200, f"PUT /api/casters/1 (slot 1 for the signal-test records): HTTP {status}")
@@ -1299,7 +1318,7 @@ class E2E:
     def streams_again(self, after_n: int, timeout: float) -> bool:
         """Slot 1 streams on a caster session newer than connection `after_n`."""
         def again():
-            new = [c for c in self.sources() if c["n"] > after_n and c["row"] == "icy_ok"]
+            new = [c for c in self.sources() if c["n"] > after_n and c["row"] == self.stream_row()]
             return new and self.slot(1)["status"].get("state") == "streaming"
         return self.poll(again, timeout, every=0.5) is not None
 
@@ -1702,6 +1721,8 @@ def main() -> int:
                     help="also the 5-minute wait after a rejected login and the whole in-use retry ladder")
     ap.add_argument("--caster", choices=("fake", "docker"), default="fake",
                     help="stream target: the fake caster (default) or the BKG caster in Docker")
+    ap.add_argument("--ntrip-version", type=int, choices=(1, 2), default=1,
+                    help="slot 1's NTRIP version (2: POST with Basic auth and a chunked body; fake caster only)")
     ap.add_argument("--fixture", default=str(DEFAULT_FIXTURE), help="RTCM file or capture run to replay")
     ap.add_argument("--observe", type=int, default=75,
                     help=f"seconds of caster record to collect and check (at least {MIN_RECORD_S:.0f})")
@@ -1709,6 +1730,8 @@ def main() -> int:
     args = ap.parse_args()
     if args.observe < MIN_RECORD_S:
         ap.error(f"--observe must be at least {MIN_RECORD_S:.0f}")
+    if args.ntrip_version == 2 and args.caster == "docker":
+        ap.error("--ntrip-version 2 needs the fake caster: the BKG caster image speaks NTRIP 1.0 only")
     if not os.environ.get("IDF_PATH"):
         print("e2e.py: run . $IDF_PATH/export.sh first (tools/qemu/run.sh needs it)", file=sys.stderr)
         return 2

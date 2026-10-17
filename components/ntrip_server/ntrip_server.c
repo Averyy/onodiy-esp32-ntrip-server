@@ -426,6 +426,10 @@ static esp_err_t load_slot(size_t slot, ntrip_caster_cfg_t *out)
     memset(buf, 0, sizeof(buf));
     if (err != ESP_OK) {
         slot_defaults(slot, out);
+    } else if (ntrip_server_onocoy_blank_proto(out)) {
+        /* Stored before 2.0 became the default, never given credentials:
+         * set up over 2.0 like a new slot (in RAM; the next save stores it). */
+        ESP_LOGI(TAG, "slot %u: Onocoy slot without credentials: NTRIP 2.0, the default", (unsigned)slot);
     }
     return err;
 }

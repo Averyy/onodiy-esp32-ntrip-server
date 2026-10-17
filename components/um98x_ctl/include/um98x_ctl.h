@@ -263,7 +263,8 @@ esp_err_t um98x_ctl_command(gnss_link_lease_t lease, const char *cmd, char *repl
  * only when the profile has one and the read-back differs or is unknown;
  * BeiDou B1C/B2a in RTCM turned on only when the read-back shows it off
  * (both not fatal: rejections are recorded in the result); the RTCM
- * messages in profile order (a rejected 1230 is not fatal); the
+ * messages in profile order (a rejected 1230 or NavIC MSM is not fatal:
+ * um98x_rtcm_optional; every refusal is listed in result->rtcm_refused); the
  * satellite-view sentence if enabled; one SAVECONFIG. The elevation mask
  * and multipath mitigation are read back and reported, never sent.
  *
@@ -310,7 +311,8 @@ size_t um98x_ctl_apply_preview(const um98x_base_profile_t *profile, uint32_t lin
  * (optional): the failed session's result; the RTCM messages the receiver
  * refused there (failed->rtcm_refused) are left out, since they would only
  * be refused again. result may be the same object as failed.
- * @return ESP_OK if every message sent except 1230 was accepted, else ESP_FAIL.
+ * @return ESP_OK if every message sent except the optional ones (1230, NavIC
+ *         MSMs) was accepted, else ESP_FAIL.
  */
 esp_err_t um98x_ctl_restore_output(gnss_link_lease_t lease, const um98x_base_profile_t *profile,
                                    const um98x_apply_result_t *failed, um98x_apply_result_t *result);

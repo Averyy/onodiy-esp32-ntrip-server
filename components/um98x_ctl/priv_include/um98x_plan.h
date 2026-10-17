@@ -24,7 +24,7 @@
  *      BeiDou B1C/B2a in RTCM turned off; unknown = not sent (non-fatal).
  *      Not a profile field: B1C/B2a is always wanted
  *   6. RTCM<msg> COM1 <period>               every profile message, in
- *      profile order (1230 non-fatal: some builds reject it)
+ *      profile order (the optional ones non-fatal: um98x_rtcm_optional)
  *   7. GPGSV COM1 10                         only with satellite-view output
  *                                            (non-fatal)
  *   8. SAVECONFIG                            the only save of the session
@@ -72,8 +72,17 @@ extern "C" {
 /** The only receiver model this layer configures (exact match). */
 #define UM98X_SUPPORTED_MODEL "UM982"
 
-/** Message whose rejection is not fatal (unsupported on some builds). */
-#define UM98X_RTCM_OPTIONAL 1230u
+/** GLONASS code-phase biases: optional, its answer stored (gnss/rtcm1230_ok). */
+#define UM98X_RTCM_GLO_BIASES 1230u
+
+/**
+ * RTCM messages whose refusal is not fatal: a receiver firmware without them
+ * refuses them, and the rest of the profile is applied all the same (the
+ * refusal is listed in um98x_apply_result_t.rtcm_refused). 1230 (GLONASS
+ * biases, refused by some builds) and the NavIC MSMs 1131-1137 (in Onocoy's
+ * list; refused by a firmware without NavIC). Every other message is fatal.
+ */
+bool um98x_rtcm_optional(uint16_t msg);
 
 #define UM98X_DETECT_MAX 8u
 

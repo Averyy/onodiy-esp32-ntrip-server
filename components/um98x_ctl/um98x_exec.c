@@ -1100,7 +1100,7 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
         default: { /* RTCM outputs and the satellite view */
             um98x_txn_status_t tst;
             res = step(s, UM98X_TXN_COMMAND, cmd, false, st->fatal, &tst);
-            if (st->kind == UM98X_STEP_RTCM && st->msg == UM98X_RTCM_OPTIONAL) {
+            if (st->kind == UM98X_STEP_RTCM && st->msg == UM98X_RTCM_GLO_BIASES) {
                 s->r->rtcm1230_ok = (res == UM98X_OK);
             }
             if (st->kind == UM98X_STEP_RTCM && tst == UM98X_TXN_REJECTED) {
@@ -1249,7 +1249,7 @@ um98x_res_t um98x_exec_restore_rtcm(um98x_exec_t *ex, const um98x_base_profile_t
         }
         um98x_txn_status_t tst;
         um98x_res_t res = step(&s, UM98X_TXN_COMMAND, cmd, false, st->fatal, &tst);
-        if (st->msg == UM98X_RTCM_OPTIONAL) {
+        if (st->msg == UM98X_RTCM_GLO_BIASES) {
             r->rtcm1230_ok = (res == UM98X_OK);
         }
         if (tst == UM98X_TXN_REJECTED) {

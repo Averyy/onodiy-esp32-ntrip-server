@@ -65,11 +65,17 @@ const rtcmShort = n => (rtcmName(n) || '').replace(/ \(.*\)$/, '');
 
 const neverSeen = m => m.age_ms === null || m.age_ms === undefined;
 
-/** A profile message's row state: 'missing' (red), 'waits' (the position, while surveying) or '' (as it should be). */
+/* QZSS and NavIC observations: regional, so none arrive away from their area (the station never counts that against the
+ * profile either). */
+const regionalMsm = n => (n >= 1111 && n <= 1117) || (n >= 1131 && n <= 1137);
+
+/** A profile message's row state: 'missing' (red), 'waits' (the position, while surveying), 'none' (a regional system
+ * with nothing arriving) or '' (as it should be). */
 function msgCheck(m, colour, surveying) {
   const late = !m.count || (!neverSeen(m) && m.age_ms > m.expected_period_s * 3000 + 2000);
   if (!late) return '';
   if (surveying && (m.msg === 1005 || m.msg === 1006)) return 'waits';
+  if (regionalMsm(m.msg)) return 'none';
   return colour ? 'missing' : '';
 }
 
@@ -83,13 +89,14 @@ function messagesView(list, colour, surveying) {
     const expected = m.expected_period_s;
     const st = msgCheck(m, colour, surveying);
     const waits = st === 'waits';
+    const none = st === 'none';
     const missing = st === 'missing';
     red = red || missing;
     const seen = m.period_ms ? periodText(m.period_ms) : DASH;
     const bad = missing ? 't-bad' : null;
     return h('tr', null,
       h('td', { class: 'name' }, h('b', { class: bad }, String(m.msg)), h('span', { class: bad }, ' ' + (rtcmName(m.msg) || ''))),
-      waits ? h('td', { class: 'num muted', colspan: 2 }, 'Waits for the survey') : [
+      waits || none ? h('td', { class: 'num muted', colspan: 2 }, waits ? 'Waits for the survey' : 'None in view') : [
         h('td', { class: 'num' }, seen, m.period_ms && seen !== expected + NB + 's' ? h('span', { class: 'muted' }, ' (' + expected + NB + 's)') : null),
         h('td', { class: 'num' + (bad ? ' t-bad' : '') }, neverSeen(m) ? 'Never' : fmt.ms(m.age_ms) + NB + 'ago')]);
   });

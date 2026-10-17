@@ -12,6 +12,12 @@
 #define PROFILE_BLOB_VERSION  1
 #define POSITION_BLOB_VERSION 1
 
+/* The default message set a profile blob was written under: a byte appended
+ * after the antenna fields (an older reader stops ahead of it). A blob
+ * without it was written under set 1. */
+#define PROFILE_RTCM_SET_OLD 1u   /* 1005 1033 1077 1087 1097 1117 1127 1230, all every 1 s */
+#define PROFILE_RTCM_SET     2u   /* set 1 with 1137 (Onocoy's list), written by encode */
+
 /* Format of um98x_profile_hash(), frozen separately from the blob layout
  * once released: changing it makes every station's gnss/applied_hash
  * mismatch, so each one reconfigures its receiver once (and an unlocked
@@ -142,18 +148,45 @@ bool um98x_antenna_str_same(const char *a, const char *b)
     }
 }
 
+/* Onocoy's message list (its station connection guide): station messages and
+ * MSM7 for every constellation, all at 1 Hz, in the order they are
+ * configured. */
+static const um98x_rtcm_out_t k_onocoy_set[] = {
+    { 1005, 1 }, { 1033, 1 },
+    { 1077, 1 }, { 1087, 1 }, { 1097, 1 }, { 1117, 1 }, { 1127, 1 }, { 1137, 1 },
+    { 1230, 1 },
+};
+_Static_assert(sizeof(k_onocoy_set) / sizeof(k_onocoy_set[0]) <= UM98X_MAX_RTCM_MSGS,
+               "default RTCM set exceeds UM98X_MAX_RTCM_MSGS");
+
+/* The default set before 1137 was added (PROFILE_RTCM_SET_OLD). */
+static const uint16_t k_old_set[] = { 1005, 1033, 1077, 1087, 1097, 1117, 1127, 1230 };
+
+/* The list is the old default set: the same messages (in any order, as the
+ * UI compares them), each once, every one every 1 s. */
+static bool is_old_default_set(const um98x_base_profile_t *p)
+{
+    const size_t n = sizeof(k_old_set) / sizeof(k_old_set[0]);
+    if (p->rtcm_count != n) {
+        return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (p->rtcm[i].period_s != 1) {
+            return false;
+        }
+        size_t hits = 0;
+        for (size_t k = 0; k < n; k++) {
+            hits += p->rtcm[k].msg == k_old_set[i] ? 1u : 0u;
+        }
+        if (hits != 1) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void um98x_profile_default(um98x_base_profile_t *out, uint16_t station_id)
 {
-    /* Station messages and MSM7 for every constellation the receiver
-     * tracks, all at 1 Hz, in the order they are configured. */
-    static const um98x_rtcm_out_t onocoy_set[] = {
-        { 1005, 1 }, { 1033, 1 },
-        { 1077, 1 }, { 1087, 1 }, { 1097, 1 }, { 1117, 1 }, { 1127, 1 },
-        { 1230, 1 },
-    };
-    _Static_assert(sizeof(onocoy_set) / sizeof(onocoy_set[0]) <= UM98X_MAX_RTCM_MSGS,
-                   "default RTCM set exceeds UM98X_MAX_RTCM_MSGS");
-
     memset(out, 0, sizeof(*out));
     out->signal_group_master = 3;
     out->signal_group_slave = 6;
@@ -161,8 +194,8 @@ void um98x_profile_default(um98x_base_profile_t *out, uint16_t station_id)
     out->survey_in_s = UM98X_DEFAULT_SURVEY_S;
     out->station_id = (uint16_t)(station_id & UM98X_STATION_ID_MAX);
     out->com1_baud = UM98X_DEFAULT_COM1_BAUD;
-    out->rtcm_count = (uint8_t)(sizeof(onocoy_set) / sizeof(onocoy_set[0]));
-    memcpy(out->rtcm, onocoy_set, sizeof(onocoy_set));
+    out->rtcm_count = (uint8_t)(sizeof(k_onocoy_set) / sizeof(k_onocoy_set[0]));
+    memcpy(out->rtcm, k_onocoy_set, sizeof(k_onocoy_set));
     out->sat_view_output = false;   /* default not decided yet: send nothing extra */
     /* antenna: empty, so the receiver keeps its own descriptor */
 }
@@ -247,11 +280,21 @@ size_t um98x_profile_encode(const um98x_base_profile_t *profile, uint8_t *buf, s
     blob_put_str(&w, p->antenna_model);
     blob_put_str(&w, p->antenna_serial);
     blob_put_u8(&w, p->antenna_setup_id);
+    /* Appended after them: whatever list this holds is the one wanted. */
+    blob_put_u8(&w, PROFILE_RTCM_SET);
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
 bool um98x_profile_decode(const uint8_t *buf, size_t len, um98x_base_profile_t *out)
 {
+    return um98x_profile_decode_ex(buf, len, out, NULL);
+}
+
+bool um98x_profile_decode_ex(const uint8_t *buf, size_t len, um98x_base_profile_t *out, bool *rtcm_upgraded)
+{
+    if (rtcm_upgraded != NULL) {
+        *rtcm_upgraded = false;
+    }
     blob_reader_t r;
     blob_reader_init(&r, buf, len);
     if (blob_get_u8(&r) != PROFILE_BLOB_VERSION) {
@@ -282,10 +325,25 @@ bool um98x_profile_decode(const uint8_t *buf, size_t len, um98x_base_profile_t *
         blob_get_str(&r, p.antenna_serial, sizeof(p.antenna_serial));
         p.antenna_setup_id = blob_get_u8(&r);
     }
+    uint8_t set = PROFILE_RTCM_SET_OLD;
+    if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
+        set = blob_get_u8(&r);
+    }
     if (!blob_reader_ok(&r) || !um98x_profile_valid(&p)) {
         return false;
     }
+    bool upgraded = false;
+    if (set == PROFILE_RTCM_SET_OLD && is_old_default_set(&p)) {
+        /* Written while the old set was the default, and still that set:
+         * the default it stood for is Onocoy's list now. */
+        p.rtcm_count = (uint8_t)(sizeof(k_onocoy_set) / sizeof(k_onocoy_set[0]));
+        memcpy(p.rtcm, k_onocoy_set, sizeof(k_onocoy_set));
+        upgraded = true;
+    }
     canonical(&p, out);
+    if (rtcm_upgraded != NULL) {
+        *rtcm_upgraded = upgraded;
+    }
     return true;
 }
 

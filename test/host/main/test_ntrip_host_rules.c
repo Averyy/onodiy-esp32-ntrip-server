@@ -4,6 +4,7 @@
  */
 #include <string.h>
 
+#include "ntrip_proto.h"
 #include "ntrip_server.h"
 #include "unity.h"
 
@@ -135,4 +136,119 @@ TEST_CASE("caster host rules: RTK2go names checked when saved with a new host or
     /* Other casters, and an empty name (the field rules ask for it): no RTK2go rule. */
     TEST_ASSERT_EQUAL(NTRIP_RTK2GO_OK, ntrip_server_rtk2go_check("", "", "caster.example.org", "A.b"));
     TEST_ASSERT_EQUAL(NTRIP_RTK2GO_OK, ntrip_server_rtk2go_check("", "", "rtk2go.com", ""));
+}
+
+TEST_CASE("Onocoy preset: NTRIP 2.0 to the chosen mountpoint, as Onocoy's guide asks", "[ntrip]")
+{
+    ntrip_caster_cfg_t c;
+    ntrip_server_onocoy_defaults(&c);
+    TEST_ASSERT_EQUAL_STRING("servers.onocoy.com", c.host);
+    TEST_ASSERT_EQUAL_UINT16(2101, c.port);
+    TEST_ASSERT_EQUAL(NTRIP_PROTO_V2, c.proto);
+    TEST_ASSERT_FALSE(c.tls);
+    TEST_ASSERT_FALSE(c.enabled);
+    TEST_ASSERT_FALSE(ntrip_server_onocoy_ready(&c));   /* no credentials yet */
+
+    /* Set up with any mountpoint and the console's credential: the request
+     * posts to that mountpoint with Basic <username>:<password>, chunked. */
+    c.enabled = true;
+    strcpy(c.mountpoint, "Roof1");
+    strcpy(c.username, "gen.user7");
+    strcpy(c.password, "picked-pw");
+    TEST_ASSERT_TRUE(ntrip_server_onocoy_ready(&c));
+    ntrip_fields_t f = {
+        .host = c.host, .port = c.port, .mountpoint = c.mountpoint, .username = c.username, .password = c.password,
+        .label = c.label, .v2 = c.proto == NTRIP_PROTO_V2, .enabled = c.enabled, .onocoy = ntrip_slot_is_onocoy(&c),
+    };
+    TEST_ASSERT_EQUAL(NTRIP_FIELDS_OK, ntrip_validate_fields(&f));
+    ntrip_wire_names_t w;
+    ntrip_wire_names(ntrip_slot_is_onocoy(&c), c.proto == NTRIP_PROTO_V2, c.mountpoint, c.username, c.label, &w);
+    char buf[NTRIP_REQUEST_MAX];
+    size_t n = ntrip_build_v2_request(buf, sizeof(buf), c.host, c.port, c.tls, w.mount, w.user, c.password,
+                                      "NTRIP onocoydiy-esp-um982/1.0.0", c.v2_raw_body);
+    /* base64("gen.user7:picked-pw") */
+    const char *want = "POST /Roof1 HTTP/1.1\r\n"
+                       "Host: servers.onocoy.com:2101\r\n"
+                       "Ntrip-Version: Ntrip/2.0\r\n"
+                       "User-Agent: NTRIP onocoydiy-esp-um982/1.0.0\r\n"
+                       "Authorization: Basic Z2VuLnVzZXI3OnBpY2tlZC1wdw==\r\n"
+                       "Connection: close\r\n"
+                       "Transfer-Encoding: chunked\r\n"
+                       "\r\n";
+    TEST_ASSERT_EQUAL_size_t(strlen(want), n);
+    TEST_ASSERT_EQUAL_STRING(want, buf);
+
+    /* 1.0 stays the fallback: SOURCE <password> /<username>, the mountpoint not sent. */
+    c.proto = NTRIP_PROTO_V1;
+    ntrip_wire_names(ntrip_slot_is_onocoy(&c), false, c.mountpoint, c.username, c.label, &w);
+    n = ntrip_build_v1_request(buf, sizeof(buf), c.password, w.mount, "NTRIP onocoydiy-esp-um982/1.0.0");
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_EQUAL_STRING("SOURCE picked-pw /gen.user7\r\n"
+                             "Source-Agent: NTRIP onocoydiy-esp-um982/1.0.0\r\n\r\n",
+                             buf);
+}
+
+TEST_CASE("Onocoy slot without credentials takes the preset's version; any credential keeps it", "[ntrip]")
+{
+    /* The factory slot as an earlier firmware stored it: 1.0, nothing entered. */
+    ntrip_caster_cfg_t c;
+    ntrip_server_onocoy_defaults(&c);
+    c.proto = NTRIP_PROTO_V1;
+    TEST_ASSERT_TRUE(ntrip_server_onocoy_blank_proto(&c));
+    TEST_ASSERT_EQUAL(NTRIP_PROTO_V2, c.proto);
+    TEST_ASSERT_FALSE(ntrip_server_onocoy_blank_proto(&c));   /* already the default */
+    TEST_ASSERT_FALSE(ntrip_server_onocoy_blank_proto(NULL));
+
+    /* Set up over 1.0 (the user's choice, working): never changed. */
+    ntrip_server_onocoy_defaults(&c);
+    c.enabled = true;
+    c.proto = NTRIP_PROTO_V1;
+    strcpy(c.mountpoint, "Roof1");
+    strcpy(c.username, "gen.user7");
+    c.password_set = true;
+    TEST_ASSERT_FALSE(ntrip_server_onocoy_blank_proto(&c));
+    TEST_ASSERT_EQUAL(NTRIP_PROTO_V1, c.proto);
+
+    /* The older layout (credential username in mountpoint, no username):
+     * not set up, but it streams: never changed. */
+    ntrip_server_onocoy_defaults(&c);
+    c.enabled = true;
+    c.proto = NTRIP_PROTO_V1;
+    strcpy(c.mountpoint, "credUser");
+    strcpy(c.password, "pw");
+    TEST_ASSERT_FALSE(ntrip_server_onocoy_ready(&c));
+    TEST_ASSERT_FALSE(ntrip_server_onocoy_blank_proto(&c));
+    TEST_ASSERT_EQUAL(NTRIP_PROTO_V1, c.proto);
+
+    /* Any one credential is enough to keep the stored version. */
+    ntrip_server_onocoy_defaults(&c);
+    c.proto = NTRIP_PROTO_V1;
+    strcpy(c.username, "gen.user7");
+    TEST_ASSERT_FALSE(ntrip_server_onocoy_blank_proto(&c));
+    ntrip_server_onocoy_defaults(&c);
+    c.proto = NTRIP_PROTO_V1;
+    c.password_set = true;
+    TEST_ASSERT_FALSE(ntrip_server_onocoy_blank_proto(&c));
+    ntrip_server_onocoy_defaults(&c);
+    c.proto = NTRIP_PROTO_V1;
+    strcpy(c.mountpoint, "Roof1");
+    TEST_ASSERT_FALSE(ntrip_server_onocoy_blank_proto(&c));
+    TEST_ASSERT_EQUAL(NTRIP_PROTO_V1, c.proto);
+
+    /* Other casters keep theirs. */
+    c = slot("rtk2go.com", NTRIP_BACKOFF_POLITE, false);
+    c.proto = NTRIP_PROTO_V1;
+    TEST_ASSERT_FALSE(ntrip_server_onocoy_blank_proto(&c));
+    TEST_ASSERT_EQUAL(NTRIP_PROTO_V1, c.proto);
+
+    /* A test Onocoy slot counts as Onocoy only where the build allows it. */
+    c = slot("10.0.2.2", NTRIP_BACKOFF_FAST, true);
+    c.proto = NTRIP_PROTO_V1;
+    c.test_onocoy = true;
+    ntrip_test_onocoy_set_allowed(false);
+    TEST_ASSERT_FALSE(ntrip_server_onocoy_blank_proto(&c));
+    ntrip_test_onocoy_set_allowed(true);
+    TEST_ASSERT_TRUE(ntrip_server_onocoy_blank_proto(&c));
+    TEST_ASSERT_EQUAL(NTRIP_PROTO_V2, c.proto);
+    ntrip_test_onocoy_set_allowed(false);
 }

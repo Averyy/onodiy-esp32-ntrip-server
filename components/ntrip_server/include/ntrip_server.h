@@ -130,20 +130,24 @@
  * the rest up to that point before it idles, and after the release the hub
  * starts it over at a whole epoch (sticky copies first).
  *
- * Logging: request lines carry the password (NTRIP 1.0) and the Onocoy
- * mountpoint is the credential username, so requests and replies are only
- * ever logged redacted (host and slot name; never mountpoint, user or
- * password).
+ * Logging: request lines carry the password (NTRIP 1.0) and an Onocoy
+ * slot's 1.0 mountpoint is the credential username, so requests and replies
+ * are only ever logged redacted (host and slot name; never mountpoint, user
+ * or password).
  *
- * Onocoy: servers.onocoy.com:2101, NTRIP 1.0 by default; the slot holds
- * what the Onocoy console gives (mountpoint, username, password). NTRIP 2.0
- * posts to /<mountpoint> with Basic <username>:<password>; NTRIP 1.0 sends
- * "SOURCE <password> /<username>" (Onocoy's instruction for 1.0-only
- * sources). A slot stored in the older layout (the credential username in
- * `mountpoint`; its stored record says so, and a username a previous
- * caster left in it is dropped on load) keeps working with the old
- * mapping, but does not count as set up (ntrip_server_onocoy_ready) until
- * the console's values are saved.
+ * Onocoy: servers.onocoy.com:2101, NTRIP 2.0 by default (Onocoy's guide);
+ * the slot holds the console's credential (username and password) and the
+ * mountpoint the user chose (any name: it only labels the station in the
+ * Onocoy dashboard). NTRIP 2.0 posts to /<mountpoint> with Basic
+ * <username>:<password>; NTRIP 1.0, the fallback, sends "SOURCE <password>
+ * /<username>" (Onocoy's instruction for 1.0-only sources; the mountpoint is
+ * then not sent). An Onocoy slot without any credential takes the default
+ * version when loaded (ntrip_server_onocoy_blank_proto); a set-up slot keeps
+ * the version it was saved with. A slot stored in the older layout (the
+ * credential username in `mountpoint`; its stored record says so, and a
+ * username a previous caster left in it is dropped on load) keeps working
+ * with the old mapping and its version, but does not count as set up
+ * (ntrip_server_onocoy_ready) until the console's values are saved.
  *
  * Safe mode skips ntrip_server_init() and _start(): no slot runs. Then
  * ntrip_server_get_status() still works (every slot DISABLED) and
@@ -400,8 +404,24 @@ esp_err_t ntrip_server_retry_slot(size_t slot);
  */
 esp_err_t ntrip_server_set_paused(bool paused);
 
-/** Fill a slot config with the Onocoy endpoint (credentials left empty, protected, fast backoff). */
+/**
+ * Fill a slot config with the Onocoy endpoint: servers.onocoy.com:2101,
+ * NTRIP 2.0 (Onocoy's guide for 2.0 sources), credentials left empty,
+ * protected, fast backoff. Also the API's onocoy_preset.
+ */
 void ntrip_server_onocoy_defaults(ntrip_caster_cfg_t *out);
+
+/**
+ * An Onocoy slot that holds no credential at all (no mountpoint, username
+ * or password: never set up, like the factory slot) takes the preset's NTRIP
+ * version, so a slot stored while 1.0 was the default is set up over 2.0
+ * like a new one. A slot with any credential is never changed: one that is
+ * set up, and one in the older layout that still streams (not set up by
+ * ntrip_server_onocoy_ready, but working). The caster component applies it
+ * to every slot it loads (in RAM; the next save stores it). Pure.
+ * @return true if the version changed.
+ */
+bool ntrip_server_onocoy_blank_proto(ntrip_caster_cfg_t *cfg);
 
 /**
  * An Onocoy slot that is set up: a slot that counts as Onocoy
