@@ -119,9 +119,9 @@ jobs:
           name: firmware-${{ github.sha }}
           if-no-files-found: error
           path: |
-            build/onocoydiy-esp-um982.bin
-            build/onocoydiy-esp-um982.elf
-            build/onocoydiy-esp-um982.map
+            build/onodiy-esp32-ntrip-server.bin
+            build/onodiy-esp32-ntrip-server.elf
+            build/onodiy-esp32-ntrip-server.map
             build/bootloader/bootloader.bin
             build/partition_table/partition-table.bin
             build/ota_data_initial.bin
@@ -189,7 +189,7 @@ jobs:
             echo "::error::test/host/sdkconfig.defaults sets a symbol this IDF version does not know or ignores"
             exit 1
           fi
-          ./build/onocoydiy_host_tests.elf
+          ./build/onodiy_host_tests.elf
 
   bench-tools:
     name: Bench tools (pytest)
@@ -387,7 +387,7 @@ jobs:
           fi
           mkdir -p release
           python3 tools/release_manifest.py --version "$TAG" \
-            --app artifact/build/onocoydiy-esp-um982.bin \
+            --app artifact/build/onodiy-esp32-ntrip-server.bin \
             --gnss firmware/um982/*.pkg \
             --sdkconfig-json artifact/build/config/sdkconfig.json \
             --repo "$GITHUB_REPOSITORY" \
@@ -407,7 +407,7 @@ jobs:
           settings=$(jq -r '.flash_settings | "--flash-mode \(.flash_mode) --flash-size \(.flash_size) --flash-freq \(.flash_freq)"' \
             "$a/flasher_args.json")
           stable='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
-          upload="install onocoydiy-esp-um982.bin with a file upload in the web UI."
+          upload="install onodiy-esp32-ntrip-server.bin with a file upload in the web UI."
           pre=()
           latest=(--latest=false)
           if [[ "$TAG" =~ $stable ]]; then
@@ -440,7 +440,7 @@ jobs:
           } > "$RUNNER_TEMP/notes.md"
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$TAG" \
             --notes-file "$RUNNER_TEMP/notes.md" --generate-notes ${pre[@]+"${pre[@]}"} \
-            "$a/onocoydiy-esp-um982.bin" firmware/um982/*.pkg release/manifest.json \
+            "$a/onodiy-esp32-ntrip-server.bin" firmware/um982/*.pkg release/manifest.json \
             "$a/bootloader/bootloader.bin" "$a/partition_table/partition-table.bin" "$a/ota_data_initial.bin" \
             artifact/THIRD_PARTY_NOTICES.md
           # Always explicit: without it GitHub makes any newly published
@@ -503,7 +503,7 @@ jobs:
           }
           base="https://github.com/$GITHUB_REPOSITORY/releases"
           check "$base/download/$TAG/manifest.json"
-          check "$base/download/$TAG/onocoydiy-esp-um982.bin"
+          check "$base/download/$TAG/onodiy-esp32-ntrip-server.bin"
           for pkg in firmware/um982/*.pkg; do
             check "$base/download/$TAG/$(basename "$pkg")"
           done

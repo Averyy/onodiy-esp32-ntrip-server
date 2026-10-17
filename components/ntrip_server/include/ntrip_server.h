@@ -238,7 +238,7 @@ typedef struct {
     bool ca_pem_set;               /**< output only: a custom CA PEM is stored for this slot */
     ntrip_backoff_profile_t backoff_profile; /**< presets set it (Onocoy: fast) */
     char label[48];                /**< [A-Za-z0-9]; only an Onocoy slot stored in the older layout uses it
-                                        (its NTRIP 2.0 mountpoint, "onocoydiy" when empty) */
+                                        (its NTRIP 2.0 mountpoint, "onodiy" when empty) */
     bool v2_raw_body;              /**< NTRIP 2.0 quirk: send the body unchunked */
     bool dup_stream_ack;           /**< user acknowledged streaming the same data to Onocoy and an open caster */
     bool test_onocoy;              /**< bench and QEMU builds only: the slot counts as Onocoy whatever its host

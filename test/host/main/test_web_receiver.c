@@ -151,7 +151,7 @@ static web_status_snap_t s_snap;
 TEST_CASE("receiver web: first_apply_held in the status receiver section, admin form only", "[web_receiver]")
 {
     memset(&s_snap, 0, sizeof(s_snap));
-    strcpy(s_snap.hostname, "onocoydiy");
+    strcpy(s_snap.hostname, "onodiy");
     strcpy(s_snap.version, "v0.3.0");
     s_snap.settings_available = true;
     s_snap.st.state = STATION_STATE_STREAMING;

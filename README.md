@@ -1,4 +1,4 @@
-# onocoydiy-esp-um982
+# onodiy (onodiy-esp32-ntrip-server)
 
 Open-source ESP-IDF firmware for the **Unicore UM982 + ESP32-S3** dev board (~C$200)
 that turns it into a plug-and-play **Onocoy reference station**: multi-caster NTRIP
@@ -6,6 +6,8 @@ output, automatic UM982 configuration, on-device GNSS firmware updates (no Windo
 tooling), and firmware updates for both chips from GitHub Releases: the station checks
 once a day and shows a banner; nothing is downloaded or installed until you confirm.
 All code is original and MIT-licensed.
+
+onodiy is an independent project, not affiliated with or endorsed by Onocoy.
 
 > Early development. The firmware scaffold builds (component structure, settings, boot
 > accounting and safe mode, partition layout, CI, host unit tests), but most subsystems
@@ -165,7 +167,7 @@ Host unit tests (Linux or macOS, no hardware needed):
 cd test/host
 idf.py --preview set-target linux
 idf.py build
-./build/onocoydiy_host_tests.elf
+./build/onodiy_host_tests.elf
 ```
 
 CI runs both for pushes to `main`, release tags and pull requests
@@ -268,7 +270,7 @@ git push origin v0.3.0
 CI builds the tag as release `v0.3.0` (`-DRELEASE_VERSION`), runs the host tests, then
 creates the GitHub Release with:
 
-- `onocoydiy-esp-um982.bin`, the app image stations install;
+- `onodiy-esp32-ntrip-server.bin`, the app image stations install;
 - the receiver package(s) from [`firmware/um982/`](firmware/um982/) (checked against
   its `SHA256SUMS`);
 - `manifest.json`, written by [`tools/release_manifest.py`](tools/release_manifest.py):
@@ -293,8 +295,8 @@ a token. A release is trusted because of where it comes from:
   the dates of every certificate in its chain checked against the station's clock (no
   update transfer starts before the clock is set);
 - it goes only to the releases of the repository set at build time
-  (`CONFIG_FW_UPDATE_GITHUB_REPO`, `Averyy/onocoydiy-esp-um982` by default). Every
-  redirect must stay on GitHub's release hosts (`github.com`,
+  (`CONFIG_FW_UPDATE_GITHUB_REPO`, `Averyy/onodiy-esp32-ntrip-server` by default).
+  Every redirect must stay on GitHub's release hosts (`github.com`,
   `release-assets.githubusercontent.com`, `objects.githubusercontent.com`), over https,
   without user info, and on `github.com` inside that repository's `/releases/`, or the
   download stops before it connects;
@@ -348,13 +350,13 @@ Manifest format and rules: `components/fw_update/priv_include/manifest.h`.
 ## First setup and reaching the station
 
 1. Power the station. With no Wi-Fi set up it opens its own network,
-   `onocoydiy-XXXX` (the last four hex digits of its MAC address). Join it with a
+   `onodiy-XXXX` (the last four hex digits of its MAC address). Join it with a
    phone; the setup page opens by itself (or open `http://192.168.4.1/`).
 2. Choose the admin password, then the Wi-Fi network the station should use.
 3. Once the station has joined that network, the page shows its name and address
    and counts down: its own network closes about 15 seconds later. Put the phone
    back on your Wi-Fi.
-4. Open **`http://onocoydiy.local/`** (or the address the page showed) and log in;
+4. Open **`http://onodiy.local/`** (or the address the page showed) and log in;
    the setup continues there with the antenna check and the Onocoy credentials.
    The last screen shows whether Onocoy accepts the login and what to do next in
    the Onocoy console. More servers can be added on the NTRIP page.
@@ -369,8 +371,8 @@ describes. The receiver sends the messages that guide lists: 1005, 1033, MSM7
 1077, 1087, 1097, 1117, 1127, 1137 and 1230, every second.
 
 On your network the station answers to its name over mDNS,
-`http://<station name>.local/` (`onocoydiy` unless you rename it; when another
-device already uses that name the station takes `onocoydiy-2` and the web page
+`http://<station name>.local/` (`onodiy` unless you rename it; when another
+device already uses that name the station takes `onodiy-2` and the web page
 says so), and to its IP address, which your router's device list shows under the
 station name. Settings shows both as links.
 
@@ -378,7 +380,7 @@ station name. Settings shows both as links.
 
 - **Forgot the admin password:** hold the **BOOT** button (printed `BOT`, next to the
   `ESP32S3` USB-C) for 10 s while the station
-  is running. The password is cleared and the setup Wi-Fi network (`onocoydiy-XXXX`)
+  is running. The password is cleared and the setup Wi-Fi network (`onodiy-XXXX`)
   comes up for 15 minutes (longer while you stay connected to it) so you can set a new
   one. Casters and settings are kept.
 - **Wi-Fi gone:** the station never gives up; it keeps retrying (every 30 s at most)

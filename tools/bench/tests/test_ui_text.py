@@ -488,7 +488,7 @@ def caster(slot: int, name: str, state: str, **kw) -> dict:
 def status(**kw) -> dict:
     """An admin GET /api/status: the receiver streams 4 bands with GLONASS, Onocoy streams, nothing is wrong."""
     s = {"api": 1, "public": False, "uptime_s": 23520,
-         "device": {"hostname": "onocoydiy", "settings_available": True},
+         "device": {"hostname": "onodiy", "settings_available": True},
          "safe_mode": {"active": False, "retry_in_s": None, "crashes": 0},
          "network": {"online": True, "ssid": "Home"},
          "receiver": {"state": "streaming", "model": "UM982", "rtcm_age_ms": 180, "journal": "none", "uart_closed": False,
@@ -789,10 +789,10 @@ def test_hero_casters_down_one_two_three_and_all_good():
     assert out[5]["line"] == "Waiting for corrections from the receiver."
     assert out[6]["line"] == "Bench is not streaming: DNS lookup failed."
     # The public form: states only, no reason, no button.
-    pub = heroes({"api": 1, "public": True, "uptime_s": 60, "device": {"hostname": "onocoydiy"},
+    pub = heroes({"api": 1, "public": True, "uptime_s": 60, "device": {"hostname": "onodiy"},
                   "receiver": {"state": "streaming", "best_bands": 4},
                   "casters": [{"slot": 0, "name": "Onocoy", "state": "streaming"}, {"slot": 1, "name": "Bench", "state": "backoff"}],
-                  "health": {"level": "ok"}}, {"api": 1, "public": True, "uptime_s": 60, "device": {"hostname": "onocoydiy"},
+                  "health": {"level": "ok"}}, {"api": 1, "public": True, "uptime_s": 60, "device": {"hostname": "onodiy"},
                   "receiver": {"state": "no_receiver", "best_bands": 0}, "casters": [{"slot": 0, "name": "Onocoy", "state": "wait_data"}],
                   "health": {"level": "recovering"}}, admin=False)
     assert pub[0]["line"] == "Bench is not streaming." and pub[0]["action"] is None and pub[0]["title"] == "Partly streaming"
@@ -825,7 +825,7 @@ def test_hero_safe_mode_stop_and_alerts_while_streaming():
     assert out[4]["line"] == "Onocoy is set up but turned off. Turn it on to start streaming." and out[4]["action"] == "Turn Onocoy on"
     assert out[5]["line"] == "Add a server to start streaming." and out[5]["action"] == "Add a server"
     # The public form says safe mode by its one flag (no crashes, no retry, no button); an older one without it: as before.
-    pub = {"api": 1, "public": True, "uptime_s": 60, "device": {"hostname": "onocoydiy"}, "safe_mode": {"active": True},
+    pub = {"api": 1, "public": True, "uptime_s": 60, "device": {"hostname": "onodiy"}, "safe_mode": {"active": True},
            "receiver": {"state": "idle", "best_bands": 0}, "casters": [], "health": {"level": "failed"}}
     older = {k: v for k, v in pub.items() if k != "safe_mode"}
     p_safe, p_old = heroes(pub, older, admin=False)
@@ -1310,10 +1310,10 @@ def test_update_check_age_in_whole_units():
 
 def test_update_check_failure_says_the_status_once_and_no_error_code():
     """A failed check in one sentence with the HTTP status once; the firmware's error code stays in the log."""
-    u = {"last_check_result": "no_release", "release_repo": "Averyy/onocoydiy-esp-um982", "last_http_status": 404,
+    u = {"last_check_result": "no_release", "release_repo": "Averyy/onodiy-esp32-ntrip-server", "last_http_status": 404,
          "last_result": {"job": "check", "message": "ESP_ERR_INVALID_RESPONSE"}, "next_check_in_s": 3600}
     (f,) = run_ui([("checkFailure", u)])
-    assert f == {"tone": "warn", "text": "No release found at github.com/Averyy/onocoydiy-esp-um982 (HTTP 404). The repository "
+    assert f == {"tone": "warn", "text": "No release found at github.com/Averyy/onodiy-esp32-ntrip-server (HTTP 404). The repository "
                  "may be private or have no releases yet."}
     assert "ESP_ERR" not in json.dumps(f) and json.dumps(f).count("404") == 1
 

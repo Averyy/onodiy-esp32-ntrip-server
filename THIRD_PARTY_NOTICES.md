@@ -1,10 +1,10 @@
 # Third-party notices
 
 The source code in this repository is original and MIT-licensed (see
-[`LICENSE`](LICENSE)). The firmware image built from it (`onocoydiy-esp-um982.bin`,
-and the bootloader and partition table that come with it) also contains code
-from the projects below, linked in from ESP-IDF v6.1 and the ESP Component
-Registry. Their licenses apply to those parts of the image. This file ships with
+[`LICENSE`](LICENSE)). The firmware image built from it
+(`onodiy-esp32-ntrip-server.bin`, and the bootloader and partition table that come
+with it) also contains code from the projects below, linked in from ESP-IDF v6.1
+and the ESP Component Registry. Their licenses apply to those parts of the image. This file ships with
 every build artifact and release.
 
 | Component | Used for | License | Copyright |

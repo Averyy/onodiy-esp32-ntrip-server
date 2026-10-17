@@ -125,7 +125,7 @@ port is `um982-com2`.
 
 ```sh
 uv run capture.py --auto
-uv run capture.py --console auto --reset-esp32 --elf ../../build/onocoydiy-esp-um982.elf
+uv run capture.py --console auto --reset-esp32 --elf ../../build/onodiy-esp32-ntrip-server.elf
 uv run capture.py --receiver auto --duration 3600 --label survey
 ```
 
@@ -342,7 +342,7 @@ when any check is FAIL, so it can gate a script.
 ### `station.py`: our firmware over Wi-Fi
 
 ```sh
-export STATION_HOST=192.168.1.50     # or onocoydiy.local, or 192.168.4.1 on the setup AP
+export STATION_HOST=192.168.1.50     # or onodiy.local, or 192.168.4.1 on the setup AP
 export STATION_PASSWORD=...          # else it asks
 uv run station.py                    # = dump
 uv run station.py watch --logs
@@ -390,7 +390,7 @@ never written to the logs.
 3. **Capture both ports from the first boot line:**
    ```sh
    cd tools/bench
-   uv run capture.py --auto --reset-esp32 --elf ../../build/onocoydiy-esp-um982.elf --label first-boot
+   uv run capture.py --auto --reset-esp32 --elf ../../build/onodiy-esp32-ntrip-server.elf --label first-boot
    ```
 4. **See what the station gets:** join the station's setup AP or its
    Wi-Fi, then `uv run station.py watch --logs` while it configures the
@@ -706,7 +706,7 @@ commit, the way that project's README describes, with our own configuration
 Optional: nothing else needs it.
 
 ```sh
-docker/bkg-caster/build.sh                       # image onocoydiy-bench-bkg-caster
+docker/bkg-caster/build.sh                       # image onodiy-bench-bkg-caster
 docker/bkg-caster/run.sh --port 2101             # on 127.0.0.1:2101; Ctrl-C stops it
 docker/bkg-caster/run.sh --lan --detach          # on 0.0.0.0:2101, in the background
 docker/bkg-caster/run.sh --lan --print           # the docker command only; nothing runs

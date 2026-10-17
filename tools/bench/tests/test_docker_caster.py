@@ -25,7 +25,7 @@ from builders import msm_frame
 pytestmark = pytest.mark.docker
 
 HERE = Path(__file__).resolve().parents[1] / "docker" / "bkg-caster"
-IMAGE = os.environ.get("BKG_CASTER_IMAGE", "onocoydiy-bench-bkg-caster")
+IMAGE = os.environ.get("BKG_CASTER_IMAGE", "onodiy-bench-bkg-caster")
 SOURCE_PW = "bench-src"
 
 
@@ -60,7 +60,7 @@ def caster():
     r = subprocess.run([str(HERE / "build.sh"), "-q"], capture_output=True, text=True, timeout=1200)
     assert r.returncode == 0, r.stdout + r.stderr
     port = free_port()
-    name = f"onocoydiy-bench-bkg-test-{uuid.uuid4().hex[:8]}"
+    name = f"onodiy-bench-bkg-test-{uuid.uuid4().hex[:8]}"
     r = subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{port}:2101", IMAGE],
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr

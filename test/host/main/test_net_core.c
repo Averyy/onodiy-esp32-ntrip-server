@@ -233,7 +233,7 @@ TEST_CASE("network credential and hostname validation", "[net_core]")
     p[64] = '\0';
     TEST_ASSERT_FALSE(net_ap_password_valid(p));          /* no raw PSK for the AP */
 
-    TEST_ASSERT_TRUE(net_hostname_valid("onocoydiy"));
+    TEST_ASSERT_TRUE(net_hostname_valid("onodiy"));
     TEST_ASSERT_TRUE(net_hostname_valid("base-01"));
     TEST_ASSERT_FALSE(net_hostname_valid(""));
     TEST_ASSERT_FALSE(net_hostname_valid("-base"));
@@ -261,8 +261,8 @@ TEST_CASE("network setup AP name: prefix plus the last MAC bytes", "[net_core]")
 {
     const uint8_t mac[6] = { 0x24, 0x6F, 0x28, 0x11, 0x3A, 0x7F };
     char out[33];
-    TEST_ASSERT_EQUAL_size_t(14, net_ap_ssid("onocoydiy-", mac, out, sizeof(out)));
-    TEST_ASSERT_EQUAL_STRING("onocoydiy-3A7F", out);
+    TEST_ASSERT_EQUAL_size_t(11, net_ap_ssid("onodiy-", mac, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("onodiy-3A7F", out);
 
     TEST_ASSERT_EQUAL_size_t(4, net_ap_ssid(NULL, mac, out, sizeof(out)));
     TEST_ASSERT_EQUAL_STRING("3A7F", out);
@@ -273,7 +273,7 @@ TEST_CASE("network setup AP name: prefix plus the last MAC bytes", "[net_core]")
 
     /* A small buffer: digits first, prefix as far as it fits. */
     char small[8];
-    TEST_ASSERT_EQUAL_size_t(7, net_ap_ssid("onocoydiy-", mac, small, sizeof(small)));
+    TEST_ASSERT_EQUAL_size_t(7, net_ap_ssid("onodiy-", mac, small, sizeof(small)));
     TEST_ASSERT_EQUAL_STRING("ono3A7F", small);
     TEST_ASSERT_EQUAL_size_t(0, net_ap_ssid("x", mac, small, 4));
 }

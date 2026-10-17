@@ -153,7 +153,7 @@ STREAM_MOUNT = "BENCH"
 STREAM_PASSWORD = "bench-pass-1"
 STREAM_USER = "bench-user"   # NTRIP 2.0 Basic-auth user (--ntrip-version 2)
 DOCKER_SOURCE_PASSWORD = "bench-src"  # tools/bench/docker/bkg-caster/ntripcaster.conf
-DOCKER_IMAGE = os.environ.get("BKG_CASTER_IMAGE", "onocoydiy-bench-bkg-caster")
+DOCKER_IMAGE = os.environ.get("BKG_CASTER_IMAGE", "onodiy-bench-bkg-caster")
 GUARD_MOUNT = "TESTMOUNT"
 GUARD_USER = "testuser01"
 GUARD_PASSWORD = "fakepass123"
@@ -459,7 +459,7 @@ class DockerCaster:
     def __init__(self, out: Path, say):
         self.out = out
         self.say = say
-        self.name = f"onocoydiy-e2e-bkg-{uuid.uuid4().hex[:8]}"
+        self.name = f"onodiy-e2e-bkg-{uuid.uuid4().hex[:8]}"
         self.port = smoke.free_port()
         self.stop_event = threading.Event()
         self.data = bytearray()
@@ -486,7 +486,7 @@ class DockerCaster:
         while not self.stop_event.is_set():
             try:
                 with socket.create_connection(("127.0.0.1", self.port), timeout=5) as s:
-                    s.sendall(f"GET /{STREAM_MOUNT} HTTP/1.0\r\nUser-Agent: NTRIP onocoydiy-e2e/1.0\r\n\r\n".encode())
+                    s.sendall(f"GET /{STREAM_MOUNT} HTTP/1.0\r\nUser-Agent: NTRIP onodiy-e2e/1.0\r\n\r\n".encode())
                     head = b""
                     while b"\r\n" not in head and len(head) < 4096:
                         d = s.recv(1)

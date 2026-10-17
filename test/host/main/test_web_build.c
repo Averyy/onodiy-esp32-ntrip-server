@@ -20,7 +20,7 @@ static void fixture(void)
     web_status_snap_t *s = &s_snap;
     memset(s, 0, sizeof(*s));
     s->uptime_s = 86400;
-    strcpy(s->hostname, "onocoydiy");
+    strcpy(s->hostname, "onodiy");
     strcpy(s->version, "v0.3.0");
     s->time_unix = 1760090000;
     s->clock = LEDGER_CLOCK_GNSS;
@@ -301,7 +301,7 @@ TEST_CASE("public status leaves out hosts, addresses, SSID and versions", "[web_
     TEST_ASSERT_TRUE(cJSON_IsFalse(at(sm, "active")));
     const cJSON *dev = at(root, "device");
     TEST_ASSERT_EQUAL(1, cJSON_GetArraySize(dev));
-    TEST_ASSERT_EQUAL_STRING("onocoydiy", at(dev, "hostname")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("onodiy", at(dev, "hostname")->valuestring);
     const cJSON *rx = at(root, "receiver");
     TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(rx));
     TEST_ASSERT_EQUAL(4, at(rx, "best_bands")->valueint);
@@ -678,14 +678,14 @@ TEST_CASE("GET /api/update lists every version rolled back here, newest first", 
     TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "signed_manifests")));
     cJSON_Delete(root);
 
-    u.release_repo = "Averyy/onocoydiy-esp-um982";
+    u.release_repo = "Averyy/onodiy-esp32-ntrip-server";
     u.signed_manifests = true;
     u.checks_enabled = true;
     wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
     web_build_update(&w, &u);
     root = cJSON_Parse(s_out);
     TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
-    TEST_ASSERT_EQUAL_STRING("Averyy/onocoydiy-esp-um982", at(root, "release_repo")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("Averyy/onodiy-esp32-ntrip-server", at(root, "release_repo")->valuestring);
     TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "signed_manifests")));
     TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "checks_enabled")));
     cJSON_Delete(root);
@@ -1154,16 +1154,16 @@ TEST_CASE("session: names and the stored setup step", "[web_build]")
 {
     web_session_snap_t s = {
         .authenticated = true, .admin_set = true, .setup_done = false, .claim_allowed = false, .on_setup_ap = false,
-        .public_status = false, .settings_available = true, .idle_left_s = 1740, .hostname = "onocoydiy",
-        .mdns_host = "onocoydiy-2", .ap_ssid = "onocoydiy-1A2B", .setup_step = 3,
+        .public_status = false, .settings_available = true, .idle_left_s = 1740, .hostname = "onodiy",
+        .mdns_host = "onodiy-2", .ap_ssid = "onodiy-1A2B", .setup_step = 3,
     };
     cJSON *root = build_session(&s);
     TEST_ASSERT_EQUAL(1, at(root, "api")->valueint);
     TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "authenticated")));
     TEST_ASSERT_EQUAL(1740, at(root, "idle_left_s")->valueint);
-    TEST_ASSERT_EQUAL_STRING("onocoydiy", at(root, "hostname")->valuestring);
-    TEST_ASSERT_EQUAL_STRING("onocoydiy-2", at(root, "mdns_host")->valuestring);
-    TEST_ASSERT_EQUAL_STRING("onocoydiy-1A2B", at(root, "ap_ssid")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("onodiy", at(root, "hostname")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("onodiy-2", at(root, "mdns_host")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("onodiy-1A2B", at(root, "ap_ssid")->valuestring);
     TEST_ASSERT_EQUAL_STRING("onocoy", at(root, "setup_step")->valuestring);
     cJSON_Delete(root);
 
@@ -1193,12 +1193,12 @@ TEST_CASE("session: without a session no step, the names stay; mDNS off is null"
 {
     web_session_snap_t s = {
         .authenticated = false, .admin_set = true, .setup_done = false, .settings_available = true,
-        .hostname = "onocoydiy", .mdns_host = "", .ap_ssid = "", .setup_step = 3, .idle_left_s = 99,
+        .hostname = "onodiy", .mdns_host = "", .ap_ssid = "", .setup_step = 3, .idle_left_s = 99,
     };
     cJSON *root = build_session(&s);
     TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "idle_left_s")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "setup_step")));
-    TEST_ASSERT_EQUAL_STRING("onocoydiy", at(root, "hostname")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("onodiy", at(root, "hostname")->valuestring);
     TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "mdns_host")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "ap_ssid")));
     TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "claim_allowed")));
@@ -1225,11 +1225,11 @@ TEST_CASE("wifi: mDNS name, the AP's countdown and why credentials were reverted
     n.online = true;
     strcpy(n.ssid, "Home");
     strcpy(n.ip, "192.168.1.50");
-    strcpy(n.ap_ssid, "onocoydiy-1A2B");
-    strcpy(n.mdns_host, "onocoydiy");
+    strcpy(n.ap_ssid, "onodiy-1A2B");
+    strcpy(n.mdns_host, "onodiy");
     n.ap_close_in_s = UINT32_MAX;
     cJSON *root = build_wifi(&n);
-    TEST_ASSERT_EQUAL_STRING("onocoydiy", at(root, "mdns_host")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("onodiy", at(root, "mdns_host")->valuestring);
     TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "ap"), "close_in_s")));   /* AP down */
     TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "cred_reverted_why")));
     cJSON_Delete(root);
@@ -1358,13 +1358,13 @@ TEST_CASE("wifi: moves between access points and whether the access point can as
 TEST_CASE("status: network carries the mDNS name and the AP's countdown, admin form only", "[web_build]")
 {
     fixture();
-    strcpy(s_snap.net.mdns_host, "onocoydiy");
+    strcpy(s_snap.net.mdns_host, "onodiy");
     s_snap.net.setup_ap_active = true;
     s_snap.net.ap_reasons = NETWORK_AP_LINGER;
     s_snap.net.ap_close_in_s = 9;
     cJSON *root = build_status(false);
     const cJSON *net = at(root, "network");
-    TEST_ASSERT_EQUAL_STRING("onocoydiy", at(net, "mdns_host")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("onodiy", at(net, "mdns_host")->valuestring);
     TEST_ASSERT_EQUAL(9, at(net, "ap_close_in_s")->valueint);
     TEST_ASSERT_EQUAL_STRING("192.168.1.50", at(net, "ip")->valuestring);
     TEST_ASSERT_TRUE(cJSON_IsNull(at(net, "cred_reverted_why")));

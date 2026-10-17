@@ -383,7 +383,7 @@ void ntrip_wire_names(bool onocoy, bool v2, const char *mountpoint, const char *
     }
     /* The older layout (ntrip_cfg_blob.h): the credential username lives in `mountpoint`. */
     if (v2) {
-        out->mount = empty(label) ? "onocoydiy" : label;
+        out->mount = empty(label) ? "onodiy" : label;
         out->user = mountpoint;
     } else {
         out->user = "";

@@ -54,7 +54,7 @@ extern "C" {
 
 /* ---- Protocol limits and timeouts ----------------------------------------- */
 
-#define NTRIP_AGENT_PRODUCT       "onocoydiy-esp-um982"
+#define NTRIP_AGENT_PRODUCT       "onodiy"
 #define NTRIP_AGENT_MAX           80u     /**< "NTRIP " + product + "/" + version */
 #define NTRIP_REQUEST_MAX         640u    /**< largest v2 request with maximum field lengths */
 
@@ -274,7 +274,7 @@ void ntrip_secure_zero(void *p, size_t len);
 size_t ntrip_base64(const uint8_t *in, size_t len, char *out, size_t cap);
 
 /**
- * Agent string "NTRIP onocoydiy-esp-um982/<version>": a leading 'v' is
+ * Agent string "NTRIP onodiy/<version>": a leading 'v' is
  * dropped and anything but printable non-space ASCII becomes '_'.
  */
 size_t ntrip_build_agent(const char *app_version, char *out, size_t cap);
@@ -289,7 +289,7 @@ size_t ntrip_build_agent(const char *app_version, char *out, size_t cap);
  * layout (Onocoy host, the credential username in `mountpoint`; loaded with
  * an empty username whatever its record held, ntrip_cfg_blob.h) keeps the
  * old mapping: 1.0 sends `mountpoint` as the mountpoint; 2.0 sends the
- * dashboard label (or "onocoydiy") as the mountpoint and `mountpoint` as the
+ * dashboard label (or "onodiy") as the mountpoint and `mountpoint` as the
  * Basic-auth user.
  */
 typedef struct {

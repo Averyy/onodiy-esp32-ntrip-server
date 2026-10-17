@@ -10,7 +10,7 @@
  *
  *   { "schema": 1,
  *     "version": "v0.3.0",
- *     "app":  { "asset": "onocoydiy-esp-um982.bin", "size": 1234567, "sha256": "<64 hex>" },
+ *     "app":  { "asset": "onodiy-esp32-ntrip-server.bin", "size": 1234567, "sha256": "<64 hex>" },
  *     "gnss": [ { "model": "UM982", "version": "R4.10Build18975", "build": 18975,
  *                 "asset": "UM982_R4.10Build18975.pkg", "size": 3027628, "sha256": "<64 hex>" } ] }
  *

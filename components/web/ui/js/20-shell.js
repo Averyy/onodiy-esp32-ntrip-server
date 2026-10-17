@@ -267,7 +267,7 @@ function openView(name, arg) {
   window.scrollTo(0, 0);
 }
 
-/* The browser tab's title follows the Status page's top card on every page ("Not streaming · onocoydiy"). */
+/* The browser tab's title follows the Status page's top card on every page ("Not streaming · onodiy"). */
 function setDocTitle() {
   const s = S.status;
   const host = s && s.device ? s.device.hostname : '';

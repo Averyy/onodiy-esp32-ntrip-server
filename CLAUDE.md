@@ -1,4 +1,4 @@
-# onocoydiy-esp-um982
+# onodiy-esp32-ntrip-server
 
 Open source ESP-IDF firmware for UM982 + ESP32-S3 Onocoy reference station.
 

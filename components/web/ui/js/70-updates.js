@@ -549,7 +549,7 @@ const updatesPart = {
         say(appUploadErr, 'This file is not an app image for the station (it does not start like one). Choose the .bin file of a release or of your own build.');
         return;
       }
-      if (img.project !== 'onocoydiy-esp-um982' && !o.anyProject) {
+      if (img.project !== 'onodiy-esp32-ntrip-server' && !o.anyProject) {
         /* The same warning the station's own refusal (not_this_project) leads to: a fork under another
          * project name is installable after it. */
         if (await anotherProject(img.project)) uploadApp(file, Object.assign({}, o, { anyProject: true }));

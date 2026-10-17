@@ -13,7 +13,7 @@ usage() {
 Usage: tools/bench/docker/bkg-caster/run.sh [--port N] [--name NAME] [--lan] [--print] [--detach | --stop]
 
   --port N     host port (default 2101)
-  --name NAME  container name (default onocoydiy-bench-bkg-caster)
+  --name NAME  container name (default onodiy-bench-bkg-caster)
   --lan        publish on 0.0.0.0 (every interface) instead of 127.0.0.1, so a
                station board on your LAN reaches it; so does everyone else on
                the LAN: use the throwaway test passwords only
@@ -26,8 +26,8 @@ EOF
 }
 
 port=2101
-name=onocoydiy-bench-bkg-caster
-image=${BKG_CASTER_IMAGE:-onocoydiy-bench-bkg-caster}
+name=onodiy-bench-bkg-caster
+image=${BKG_CASTER_IMAGE:-onodiy-bench-bkg-caster}
 mode=foreground
 bind=127.0.0.1
 print=0

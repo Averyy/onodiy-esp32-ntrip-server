@@ -578,7 +578,7 @@ function upload(path, file, onProgress, headers) {
     const x = new XMLHttpRequest();
     x.open('POST', path);
     x.setRequestHeader('Content-Type', 'application/octet-stream');
-    x.setRequestHeader('X-Requested-With', 'onocoydiy');
+    x.setRequestHeader('X-Requested-With', 'onodiy');
     x.setRequestHeader('X-Client-Id', CLIENT_ID);
     for (const k of Object.keys(headers || {})) x.setRequestHeader(k, headers[k]);
     x.upload.onprogress = e => {

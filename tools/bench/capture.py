@@ -26,7 +26,7 @@ force).
 
 Examples:
   uv run capture.py --auto
-  uv run capture.py --console /dev/cu.usbmodem1101 --reset-esp32 --elf ../../build/onocoydiy-esp-um982.elf
+  uv run capture.py --console /dev/cu.usbmodem1101 --reset-esp32 --elf ../../build/onodiy-esp32-ntrip-server.elf
   uv run capture.py --receiver /dev/cu.usbserial-1120 --duration 600 --label survey
   uv run rtcm_inspect.py bench-logs/<run dir>     # inspect a capture afterwards
 """
@@ -340,7 +340,7 @@ def main() -> int:
     ap.add_argument("--rotate-mb", type=float, default=100, help="start a new file part at this size (default 100)")
     ap.add_argument("--reset-esp32", action="store_true",
                     help="pulse the ESP32 EN line through RTS after opening the console (no bytes sent) to capture a boot")
-    ap.add_argument("--elf", help="app ELF (e.g. build/onocoydiy-esp-um982.elf) to decode console backtraces with addr2line")
+    ap.add_argument("--elf", help="app ELF (e.g. build/onodiy-esp32-ntrip-server.elf) to decode console backtraces with addr2line")
     ap.add_argument("--console-raw", action="store_true", help="also keep the raw console bytes (console-NNNN.bin)")
     ap.add_argument("--quiet", action="store_true", help="do not echo console lines")
     ap.add_argument("--show", choices=("none", "text", "all"), default="text",

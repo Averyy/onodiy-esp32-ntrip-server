@@ -53,7 +53,7 @@ extern "C" {
 #define WEB_MAP_TILE_ORIGIN "https://tile.openstreetmap.org"
 
 /** This project, as the app description of an image names it. */
-#define WEB_PROJECT_NAME "onocoydiy-esp-um982"
+#define WEB_PROJECT_NAME "onodiy-esp32-ntrip-server"
 
 /** Largest JSON request body; the CA certificate route takes more. */
 #define WEB_JSON_MAX       2048u

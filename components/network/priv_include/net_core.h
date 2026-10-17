@@ -67,7 +67,7 @@ bool net_hostname_valid(const char *name);
 
 /**
  * Setup-AP SSID: `prefix` followed by the last two MAC bytes as four
- * upper-case hex digits ("onocoydiy-" + "3A7F"). The prefix is cut so the
+ * upper-case hex digits ("onodiy-" + "3A7F"). The prefix is cut so the
  * whole name fits the 32-byte SSID limit and the digits always survive.
  * @return length written (excluding the terminator), 0 if out is too small
  *         for the digits.

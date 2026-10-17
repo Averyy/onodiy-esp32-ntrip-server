@@ -125,7 +125,7 @@ static esp_err_t attach_bundle(void *conf)
 static void client_config(esp_http_client_config_t *cfg, const char *url, hdr_ctx_t *ctx)
 {
     if (s_user_agent[0] == '\0') {
-        snprintf(s_user_agent, sizeof(s_user_agent), "onocoydiy-esp-um982/%s", esp_app_get_description()->version);
+        snprintf(s_user_agent, sizeof(s_user_agent), "onodiy/%s", esp_app_get_description()->version);
     }
     memset(cfg, 0, sizeof(*cfg));   /* skip_cert_common_name_check stays false */
     cfg->url = url;

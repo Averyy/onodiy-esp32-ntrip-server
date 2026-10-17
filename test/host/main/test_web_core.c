@@ -44,28 +44,28 @@ TEST_CASE("every error code has a name, a status and a message", "[web_core]")
 /* ---- request checks -------------------------------------------------------------------------- */
 
 static const web_host_names_t s_names = {
-    .sta_ip = "192.168.1.50", .ap_ip = "192.168.4.1", .hostname = "onocoydiy", .mdns_host = "onocoydiy",
+    .sta_ip = "192.168.1.50", .ap_ip = "192.168.4.1", .hostname = "onodiy", .mdns_host = "onodiy",
 };
 
 TEST_CASE("Host check accepts only the device's names", "[web_core]")
 {
     static const char *const good[] = {
-        "192.168.1.50", "192.168.1.50:80", "192.168.4.1", "onocoydiy", "ONOCOYDIY", "onocoydiy.local",
-        "OnocoyDIY.Local:8080", "onocoydiy.lan", "onocoydiy.home", "onocoydiy.home.arpa", "onocoydiy.localdomain",
-        "onocoydiy.internal", " onocoydiy ",
+        "192.168.1.50", "192.168.1.50:80", "192.168.4.1", "onodiy", "ONODIY", "onodiy.local",
+        "OnoDIY.Local:8080", "onodiy.lan", "onodiy.home", "onodiy.home.arpa", "onodiy.localdomain",
+        "onodiy.internal", " onodiy ",
         /* the fully qualified forms (a trailing dot), as a DNS-SD target or a typed FQDN gives them */
-        "onocoydiy.local.", "onocoydiy.local.:80", "onocoydiy.", "onocoydiy.lan.",
+        "onodiy.local.", "onodiy.local.:80", "onodiy.", "onodiy.lan.",
     };
     for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
         TEST_ASSERT_TRUE_MESSAGE(web_host_allowed(good[i], &s_names), good[i]);
     }
     static const char *const bad[] = {
-        "", "evil.com", "onocoydiy.evil.com", "onocoydiy.local.evil.com", "xonocoydiy", "onocoydiyx.local",
-        "192.168.1.5", "192.168.1.500", "[::1]", "[::1]:80", "onocoydiy:", "onocoydiy:80:80", "onocoydiy:abc",
-        "onocoydiy:123456", "onocoydiy..", ".", ".:80", "onocoydiy.local..", "192.168.1.50.",
-        "connectivitycheck.gstatic.com", "onocoydiy/x",
+        "", "evil.com", "onodiy.evil.com", "onodiy.local.evil.com", "xonodiy", "onodiyx.local",
+        "192.168.1.5", "192.168.1.500", "[::1]", "[::1]:80", "onodiy:", "onodiy:80:80", "onodiy:abc",
+        "onodiy:123456", "onodiy..", ".", ".:80", "onodiy.local..", "192.168.1.50.",
+        "connectivitycheck.gstatic.com", "onodiy/x",
         /* a publicly delegated zone: whoever controls it could rebind the name */
-        "onocoydiy.fritz.box",
+        "onodiy.fritz.box",
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         TEST_ASSERT_FALSE_MESSAGE(web_host_allowed(bad[i], &s_names), bad[i]);
@@ -80,33 +80,33 @@ TEST_CASE("Host check accepts only the device's names", "[web_core]")
 
 TEST_CASE("Host check: <mdns_host>.local follows the name the responder answers", "[web_core]")
 {
-    web_host_names_t n = { .sta_ip = "192.168.1.50", .ap_ip = "192.168.4.1", .hostname = "onocoydiy",
-                           .mdns_host = "onocoydiy" };
-    TEST_ASSERT_TRUE(web_host_allowed("onocoydiy.local", &n));
-    TEST_ASSERT_TRUE(web_host_allowed("ONOCOYDIY.LOCAL:80", &n));
-    TEST_ASSERT_FALSE(web_host_allowed("onocoydiy-2.local", &n));
+    web_host_names_t n = { .sta_ip = "192.168.1.50", .ap_ip = "192.168.4.1", .hostname = "onodiy",
+                           .mdns_host = "onodiy" };
+    TEST_ASSERT_TRUE(web_host_allowed("onodiy.local", &n));
+    TEST_ASSERT_TRUE(web_host_allowed("ONODIY.LOCAL:80", &n));
+    TEST_ASSERT_FALSE(web_host_allowed("onodiy-2.local", &n));
     TEST_ASSERT_FALSE(web_host_allowed("evil.local", &n));
-    TEST_ASSERT_TRUE(web_host_allowed("onocoydiy.local.", &n));    /* the _http._tcp service's SRV target */
-    TEST_ASSERT_FALSE(web_host_allowed("x.onocoydiy.local", &n));
+    TEST_ASSERT_TRUE(web_host_allowed("onodiy.local.", &n));    /* the _http._tcp service's SRV target */
+    TEST_ASSERT_FALSE(web_host_allowed("x.onodiy.local", &n));
     TEST_ASSERT_FALSE(web_host_allowed("evil.local.", &n));
 
-    /* After a name conflict the responder answers onocoydiy-2.local: that
+    /* After a name conflict the responder answers onodiy-2.local: that
      * name passes; the DHCP name and its search domains stay as they were. */
-    n.mdns_host = "onocoydiy-2";
-    TEST_ASSERT_TRUE(web_host_allowed("onocoydiy-2.local", &n));
-    TEST_ASSERT_TRUE(web_host_allowed("Onocoydiy-2.Local:8080", &n));
-    TEST_ASSERT_FALSE(web_host_allowed("onocoydiy-2", &n));
-    TEST_ASSERT_FALSE(web_host_allowed("onocoydiy-2.lan", &n));
-    TEST_ASSERT_FALSE(web_host_allowed("onocoydiy.local", &n));   /* another device answers that name */
-    TEST_ASSERT_TRUE(web_host_allowed("onocoydiy", &n));
-    TEST_ASSERT_TRUE(web_host_allowed("onocoydiy.lan", &n));
+    n.mdns_host = "onodiy-2";
+    TEST_ASSERT_TRUE(web_host_allowed("onodiy-2.local", &n));
+    TEST_ASSERT_TRUE(web_host_allowed("Onodiy-2.Local:8080", &n));
+    TEST_ASSERT_FALSE(web_host_allowed("onodiy-2", &n));
+    TEST_ASSERT_FALSE(web_host_allowed("onodiy-2.lan", &n));
+    TEST_ASSERT_FALSE(web_host_allowed("onodiy.local", &n));   /* another device answers that name */
+    TEST_ASSERT_TRUE(web_host_allowed("onodiy", &n));
+    TEST_ASSERT_TRUE(web_host_allowed("onodiy.lan", &n));
     TEST_ASSERT_FALSE(web_host_allowed("evil.local", &n));
 
     /* mDNS not running: only the IPs and the DHCP name forms. */
-    static const char *const no_mdns_good[] = { "192.168.1.50", "192.168.4.1", "onocoydiy", "onocoydiy.lan",
-                                                "onocoydiy.home", "onocoydiy.home.arpa", "onocoydiy.localdomain",
-                                                "onocoydiy.internal" };
-    static const char *const no_mdns_bad[] = { "onocoydiy.local", "onocoydiy-2.local", "evil.local", ".local" };
+    static const char *const no_mdns_good[] = { "192.168.1.50", "192.168.4.1", "onodiy", "onodiy.lan",
+                                                "onodiy.home", "onodiy.home.arpa", "onodiy.localdomain",
+                                                "onodiy.internal" };
+    static const char *const no_mdns_bad[] = { "onodiy.local", "onodiy-2.local", "evil.local", ".local" };
     const char *const off[] = { "", NULL };
     for (size_t k = 0; k < 2; k++) {
         n.mdns_host = off[k];
@@ -122,8 +122,8 @@ TEST_CASE("Host check: <mdns_host>.local follows the name the responder answers"
 TEST_CASE("Origin must be http and equal the Host", "[web_core]")
 {
     TEST_ASSERT_TRUE(web_origin_ok("http://192.168.1.50", "192.168.1.50"));
-    TEST_ASSERT_TRUE(web_origin_ok("HTTP://Onocoydiy.local", "onocoydiy.local"));
-    TEST_ASSERT_TRUE(web_origin_ok("http://onocoydiy:8080/", "onocoydiy:8080"));
+    TEST_ASSERT_TRUE(web_origin_ok("HTTP://Onodiy.local", "onodiy.local"));
+    TEST_ASSERT_TRUE(web_origin_ok("http://onodiy:8080/", "onodiy:8080"));
     TEST_ASSERT_FALSE(web_origin_ok("https://192.168.1.50", "192.168.1.50"));
     TEST_ASSERT_FALSE(web_origin_ok("http://evil.com", "192.168.1.50"));
     TEST_ASSERT_FALSE(web_origin_ok("http://192.168.1.50:81", "192.168.1.50"));
@@ -800,15 +800,16 @@ TEST_CASE("app upload check reads the image header and app description", "[web_c
 {
     uint8_t img[256];
     web_image_info_t info;
-    fake_image(img, sizeof(img), 9, "onocoydiy-esp-um982", "v0.4.0+dev");
-    TEST_ASSERT_EQUAL(WEB_IMAGE_OK, web_image_check(img, sizeof(img), 9, "onocoydiy-esp-um982", &info));
+    fake_image(img, sizeof(img), 9, "onodiy-esp32-ntrip-server", "v0.4.0+dev");
+    TEST_ASSERT_EQUAL(WEB_IMAGE_OK, web_image_check(img, sizeof(img), 9, "onodiy-esp32-ntrip-server", &info));
     TEST_ASSERT_EQUAL_STRING("v0.4.0+dev", info.version);
-    TEST_ASSERT_EQUAL_STRING("onocoydiy-esp-um982", info.project);
-    TEST_ASSERT_EQUAL(WEB_IMAGE_NOT_APP, web_image_check(img, sizeof(img), 5, "onocoydiy-esp-um982", &info));
-    TEST_ASSERT_EQUAL(WEB_IMAGE_NOT_APP, web_image_check(img, 40, 9, "onocoydiy-esp-um982", &info));
+    TEST_ASSERT_EQUAL_STRING("onodiy-esp32-ntrip-server", info.project);
+    TEST_ASSERT_EQUAL(WEB_IMAGE_NOT_APP, web_image_check(img, sizeof(img), 5, "onodiy-esp32-ntrip-server", &info));
+    TEST_ASSERT_EQUAL(WEB_IMAGE_NOT_APP, web_image_check(img, 40, 9, "onodiy-esp32-ntrip-server", &info));
 
     fake_image(img, sizeof(img), 9, "some-other-app", "1.0");
-    TEST_ASSERT_EQUAL(WEB_IMAGE_OTHER_PROJECT, web_image_check(img, sizeof(img), 9, "onocoydiy-esp-um982", &info));
+    TEST_ASSERT_EQUAL(WEB_IMAGE_OTHER_PROJECT,
+                      web_image_check(img, sizeof(img), 9, "onodiy-esp32-ntrip-server", &info));
     TEST_ASSERT_EQUAL(WEB_IMAGE_OK, web_image_check(img, sizeof(img), 9, NULL, &info));   /* ?any_project=1 */
 
     /* A 32-character project name has no terminator in the description. */
@@ -856,16 +857,17 @@ TEST_CASE("app upload check reads the app's ELF SHA-256 from the description", "
 {
     uint8_t img[256];
     web_image_info_t info;
-    fake_image(img, sizeof(img), 9, "onocoydiy-esp-um982", "v0.4.0");
+    fake_image(img, sizeof(img), 9, "onodiy-esp32-ntrip-server", "v0.4.0");
     for (int i = 0; i < 32; i++) {
         img[WEB_IMAGE_DESC_OFS + WEB_DESC_ELF_SHA_OFS + i] = (uint8_t)(0xA0 + i);
     }
-    TEST_ASSERT_EQUAL(WEB_IMAGE_OK, web_image_check(img, sizeof(img), 9, "onocoydiy-esp-um982", &info));
+    TEST_ASSERT_EQUAL(WEB_IMAGE_OK, web_image_check(img, sizeof(img), 9, "onodiy-esp32-ntrip-server", &info));
     TEST_ASSERT_TRUE(info.has_elf_sha);
     TEST_ASSERT_EQUAL_HEX8(0xA0, info.elf_sha256[0]);
     TEST_ASSERT_EQUAL_HEX8(0xBF, info.elf_sha256[31]);
     /* A head that stops before the digest: the rest is still checked, the digest unknown. */
-    TEST_ASSERT_EQUAL(WEB_IMAGE_OK, web_image_check(img, WEB_IMAGE_HEAD_SHA - 1, 9, "onocoydiy-esp-um982", &info));
+    TEST_ASSERT_EQUAL(WEB_IMAGE_OK,
+                      web_image_check(img, WEB_IMAGE_HEAD_SHA - 1, 9, "onodiy-esp32-ntrip-server", &info));
     TEST_ASSERT_FALSE(info.has_elf_sha);
 }
 
@@ -1027,12 +1029,12 @@ TEST_CASE("on the AP: its IPv4 address, v4-mapped too, and its link-local addres
     TEST_ASSERT_FALSE(web_addr_on_ap(&a, 0, NULL));
     TEST_ASSERT_FALSE(web_addr_on_ap(NULL, ap, k_ap_ll));
     /* A literal IPv6 Host stays refused: only names and the IPv4 addresses pass. */
-    web_host_names_t names = { .sta_ip = "192.168.1.50", .ap_ip = "192.168.4.1", .hostname = "onocoydiy",
-                               .mdns_host = "onocoydiy" };
+    web_host_names_t names = { .sta_ip = "192.168.1.50", .ap_ip = "192.168.4.1", .hostname = "onodiy",
+                               .mdns_host = "onodiy" };
     TEST_ASSERT_FALSE(web_host_allowed("[fe80::3685:18ff:fe0a:2b3d]", &names));
     TEST_ASSERT_FALSE(web_host_allowed("[fe80::3685:18ff:fe0a:2b3d]:80", &names));
     TEST_ASSERT_FALSE(web_host_allowed("fe80::3685:18ff:fe0a:2b3d", &names));
-    TEST_ASSERT_TRUE(web_host_allowed("onocoydiy.local", &names));
+    TEST_ASSERT_TRUE(web_host_allowed("onodiy.local", &names));
 }
 
 TEST_CASE("address text: IPv4, v4-mapped as IPv4, IPv6 compressed", "[web_core]")
