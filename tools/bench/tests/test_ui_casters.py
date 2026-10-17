@@ -185,7 +185,7 @@ const ctx = {
 };
 vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
-  '\nreturn { casterEditor, openCasterWarning, casterDetails, casterSummary, casterChip, stationState, adminDashboard, heroAlso,\n' +
+  '\nreturn { casterEditor, openCasterWarning, casterEvidence, casterSummary, turnCaster, onOffSwitch, stationState, adminDashboard, heroAlso,\n' +
   '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard, healthCard, chipCard, signalsHead, bandTable, kv,\n' +
   '  startLines, foldRows, diagReceiverCard, receiverPage, renderLive,\n' +
   '  settingsPage: (el, arg) => Views.settings.create(el, arg),\n' +
@@ -201,28 +201,29 @@ function* visible(e) {
   for (const c of e.kids) if (c instanceof El) yield* visible(c);
 }
 
-/* What the editor shows: its heading, the field names in the main part and under "More options", Onocoy's server
- * line, the box (open, or folded under its summary) and whether a retry pace shows. */
+/* What the editor shows: its heading, the field names in order, a preset's host and port (text), the help line, the
+ * hints, the text fields' values in order (host:port, mountpoint, username: those shown), how many fold-outs it
+ * has (shown or not), whether a retry pace shows, the pace choices and the hints and lines that say waits. */
 function inspect(root) {
   const vis = [...visible(root)];
   const text = e => e.textContent;
-  const details = vis.filter(e => e.tagName === 'DETAILS');
-  const more = details.find(e => text(e.kids[0]) === 'More options');
-  const folds = details.filter(e => e !== more);
-  const inside = els => new Set(els.flatMap(e => [...visible(e)]));
-  const inMore = inside(more ? [more] : []), inFold = inside(folds);
   const names = els => els.filter(e => e.tagName === 'LEGEND' || (e.tagName === 'SPAN' && e.className === 'lbl') ||
     (e.tagName === 'LABEL' && e.className === 'check')).map(e => (e.tagName === 'LABEL' ? text(e.kids[1].kids[0]) : text(e)));
-  const main = vis.filter(e => !inMore.has(e) && !inFold.has(e));
-  const server = main.find(e => e.tagName === 'P' && text(e).startsWith('Server: '));
+  /* A preset's host and port, as text where Other server has its field. */
+  const fixed = vis.find(e => e.className === 'fixed-value' && !e.kids.some(k => k.tagName === 'LABEL'));
+  const help = vis.find(e => e.tagName === 'P' && e.className === 'muted small');
+  const pace = vis.find(e => e.tagName === 'SELECT' && e.options.some(o => o.v === 'polite'));
   return {
     title: text(vis.find(e => e.tagName === 'H2')),
-    main: names(main),
-    more: names([...inMore]),
-    server: server ? text(server) : null,
-    box: main.some(e => e.tagName === 'DIV' && e.className === 'preset'),
-    folded: folds.map(e => text(e.kids[0])),
+    fields: names(vis),
+    fixed: fixed ? text(fixed) : null,
+    help: help ? text(help) : null,
+    hints: vis.filter(e => e.tagName === 'SMALL' && e.className === 'hint').map(text),
+    values: vis.filter(e => e.tagName === 'INPUT' && e.attrs.maxlength && e.attrs.type !== 'password').map(e => e.value),
+    details: [...root.walk()].filter(e => e.tagName === 'DETAILS').length,
     pace: vis.some(e => e.kids.some(k => k instanceof Text && k.data.indexOf('Retry pace') >= 0)),
+    paces: pace ? pace.options.map(text) : null,
+    waits: vis.filter(e => /\d\u00a0(s|min)\b/.test(text(e)) && (e.tagName === 'SMALL' || e.tagName === 'P')).map(text),
   };
 }
 
@@ -236,9 +237,8 @@ function controls(root) {
     pace: sel.find(s => opts(s).includes('polite')),
     host: all.find(e => e.tagName === 'INPUT' && e.attrs.inputmode === 'url'),
     mountpoint: all.find(e => e.tagName === 'INPUT' && e.attrs.maxlength === '47'),
+    username: all.filter(e => e.tagName === 'INPUT' && e.attrs.maxlength === '47')[1],
     password: all.find(e => e.tagName === 'INPUT' && e.attrs.type === 'password'),
-    name: all.find(e => e.tagName === 'INPUT' && e.attrs.maxlength === '23'),
-    more: all.find(e => e.tagName === 'DETAILS' && e.kids[0].textContent === 'More options'),
     title: all.find(e => e.tagName === 'H2'),
     errors: () => all.filter(e => e.tagName === 'SMALL' && e.className === 'err' && !e.hidden).map(e => e.textContent),
   };
@@ -660,8 +660,8 @@ for (const c of JSON.parse(casesJson)) {
   if (c.fn === 'card_lines') {
     /* An Onocoy card's lines under its address for a caster status c.st (TLS on): each line's text, the boxes too. */
     const cfg = Object.assign({ slot: 0 }, c.cfg);
-    const parts = ui.casterSummary(cfg, c.st, { port: 2101 }).filter(Boolean).slice(1);
-    out.push(parts.filter(p => (p.className || '').indexOf('metrics') < 0).map(p => p.textContent));
+    const parts = ui.casterSummary(cfg, c.st, { port: 2101 }).filter(Boolean).slice(2);
+    out.push(parts.map(p => p.textContent));
     continue;
   }
   if (c.fn === 'wizard_dup') {
@@ -678,8 +678,9 @@ for (const c of JSON.parse(casesJson)) {
     continue;
   }
   if (c.fn === 'card') {
+    /* A card's state line (its words, and the class of its state word) and its address line. */
     const parts = ui.casterSummary(Object.assign({ slot: 0 }, c.cfg), c.st, { port: 2101 }).filter(Boolean);
-    out.push({ address: parts[0].textContent, chip: ui.casterChip(c.st) });
+    out.push({ line: parts[0].textContent, tone: parts[0].kids[0].className, address: parts[1].textContent });
     continue;
   }
   if (c.fn === 'dashboard') {
@@ -793,37 +794,80 @@ for (const c of JSON.parse(casesJson)) {
     out.push(c.full ? pageParts(card) : pairs);
     continue;
   }
-  if (c.fn === 'details') {
-    ui.setStatus(c.uptime === undefined ? null : { uptime_s: c.uptime });
-    const kids = ui.casterDetails(c.st, c.reconnects === null ? undefined : c.reconnects).filter(Boolean);
-    const all = kids.flatMap(k => [...k.walk()]);
-    const pairs = [];
-    for (const dl of all.filter(e => e.tagName === 'DL')) {
-      for (let i = 0; i + 1 < dl.kids.length; i += 2) pairs.push([dl.kids[i].textContent, dl.kids[i + 1].textContent]);
+  if (c.fn === 'turn') {
+    /* A card's Turn off or Turn on (turnCaster) against the station's answers to its PUTs (c.answers, in order): the PUT
+     * bodies, whether the duplicate-stream dialog asked (then ticked and confirmed, or cancelled: c.confirm), what it
+     * returned and the toasts. */
+    const settle = async () => {
+      for (let i = 0; i < 40; i++) await new Promise(r => setImmediate(r));
+    };
+    sent.length = 0;
+    const answers = c.answers.slice();
+    routes = m => (m === 'PUT' ? answers.shift() : [200, {}]);
+    ids.modal = new El('div');
+    ids.toasts = new El('div');
+    const done = ui.turnCaster({ slot: 1, name: 'RTK2go', enabled: !c.on }, c.on, null);
+    await settle();
+    const dlg = () => [...visible(ids.modal)];
+    const asked = dlg().some(e => e.tagName === 'H2' && e.textContent === 'Duplicate-stream risk');
+    if (asked && c.confirm) {
+      const box = dlg().find(e => e.tagName === 'INPUT' && e.attrs.type === 'checkbox');
+      box.checked = true;
+      box.fire('change');
+      dlg().find(e => e.tagName === 'FORM').fire('submit');
+    } else if (asked) {
+      dlg().find(e => e.tagName === 'BUTTON' && e.textContent === 'Cancel').fire('click');
     }
-    out.push({ rows: pairs, titles: all.filter(e => e.tagName === 'H3').map(e => e.textContent),
-      notes: all.filter(e => e.tagName === 'P').map(e => e.textContent) });
+    await settle();
+    const saved = await done;
+    routes = null;
+    out.push({ puts: sent.filter(x => x.method === 'PUT').map(x => x.body), asked: asked, saved: saved,
+      toasts: ids.toasts.kids.map(t => t.textContent) });
+    continue;
+  }
+  if (c.fn === 'switch') {
+    /* An on/off switch clicked twice, its save answering c.answers (true: saved) in turn: [aria-checked, aria-busy]
+     * after each answer, and what onChange was asked. */
+    const settle = async () => {
+      for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r));
+    };
+    const asked = [], states = [], answers = c.answers.slice();
+    const sw = ui.onOffSwitch(c.on, 'Stream to RTK2go', async on => {
+      asked.push(on);
+      return answers.shift();
+    });
+    for (let i = 0; i < c.answers.length; i++) {
+      sw.fire('click');
+      await settle();
+      states.push([sw.getAttribute('aria-checked'), sw.getAttribute('aria-busy')]);
+    }
+    out.push({ role: sw.getAttribute('role'), name: sw.getAttribute('aria-label'), asked: asked, states: states });
+    continue;
+  }
+  if (c.fn === 'evidence') {
+    /* A server card's rows of what it said or did: [label, text] each, [] when there are none. */
+    const dl = ui.casterEvidence(c.st);
+    const pairs = [];
+    for (let i = 0; dl && i + 1 < dl.kids.length; i += 2) pairs.push([dl.kids[i].textContent, dl.kids[i + 1].textContent]);
+    out.push(pairs);
     continue;
   }
   sent.length = 0;
   const ed = ui.casterEditor({ slot: c.slot, config: c.config }, Object.assign({ preset: {} }, c.opts || {}));
-  const f = controls(ed.el);
+  /* Found again at each step: a change of server places the fields that server has. */
   for (const [what, v] of c.steps) {
-    if (what === 'caster' || what === 'pace') {
-      f[what].value = v;
-      f[what].fire('change');
-    } else {
-      f[what].value = v;
-      f[what].fire('input');
-    }
+    const f = controls(ed.el);
+    f[what].value = v;
+    f[what].fire(what === 'caster' || what === 'pace' ? 'change' : 'input');
   }
+  const f = controls(ed.el);
   if (c.inspect) {
     out.push(inspect(ed.el));
     continue;
   }
   ed.el.fire('submit');
   const put = sent.find(s => s.method === 'PUT');
-  out.push(put ? put.body : { errors: f.errors(), more_open: !!f.more.open, title: f.title.textContent });
+  out.push(put ? put.body : { errors: f.errors(), title: f.title.textContent });
 }
 process.stdout.write(JSON.stringify(out));
 })();
@@ -861,27 +905,25 @@ def case(slot: int, config: dict | None, steps: list, opts: dict | None = None, 
 
 
 def test_other_caster_keeps_the_pace_the_owner_chose():
-    """A preset whose pace the owner sets (Centipede, Emlid, RTKDirect show it under More options) set nothing in
-    this editor: switching to Other caster keeps the owner's pace, stored or picked here."""
+    """A preset whose pace the owner set before (Centipede, Emlid, RTKDirect) set nothing in this editor: switching to
+    Other server keeps the owner's pace, stored or picked there."""
     out = run_editor([
-        # The stored Centipede slot on Polite, switched to Other caster.
+        # The stored Centipede slot on Polite, switched to Other server.
         case(2, stored("crtk.net", "polite"), [("caster", "custom")] + OTHER),
         # The same with Emlid and RTKDirect.
         case(2, stored("caster.emlid.com", "polite"), [("caster", "custom")] + OTHER),
         case(2, stored("ntrip.rtkdirect.com", "polite", ntrip_version=2, username="me"), [("caster", "custom")] + OTHER),
-        # A new slot: Centipede, Polite picked under More options, then Other caster.
-        case(1, None, [("caster", "centipede"), ("pace", "polite"), ("caster", "custom")] + OTHER, ONOCOY_ELSEWHERE),
-        # The stored Emlid slot on Polite through RTK2go (which fixes polite) to Other: the stored pace comes back.
-        case(2, stored("caster.emlid.com", "polite"), [("caster", "rtk2go"), ("caster", "custom")] + OTHER),
-        # Polite picked on Other, then a preset with its own pace, then Other again: the owner's pace comes back.
+        # A new slot: Other server with Polite picked, Centipede, then Other server again.
         case(1, None, [("caster", "custom"), ("pace", "polite"), ("caster", "centipede"), ("caster", "custom")] + OTHER,
              ONOCOY_ELSEWHERE),
+        # The stored Emlid slot on Polite through RTK2go (which fixes polite) to Other: the stored pace comes back.
+        case(2, stored("caster.emlid.com", "polite"), [("caster", "rtk2go"), ("caster", "custom")] + OTHER),
     ])
-    assert [b.get("backoff_profile") for b in out] == ["polite"] * 6, out
+    assert [b.get("backoff_profile") for b in out] == ["polite"] * 5, out
 
 
 def test_other_caster_drops_the_pace_a_preset_set():
-    """RTK2go's polite (set by the preset, or fixed for a stored RTK2go slot) is not kept on Other caster: back to the
+    """RTK2go's polite (set by the preset, or fixed for a stored RTK2go slot) is not kept on Other server: back to the
     slot's stored pace where the owner set it, else standard."""
     out = run_editor([
         case(1, None, [("caster", "custom")] + OTHER, ONOCOY_ELSEWHERE),
@@ -907,17 +949,59 @@ def test_presets_with_a_pace_and_unchanged_slots():
     assert [b.get("backoff_profile") for b in out] == ["polite", "standard", "standard", "polite", "polite"], out
 
 
-def test_a_refused_field_under_more_options_opens_it():
-    """Name, host and port of a preset wait under "More options": a field refused there opens it first, so the
-    error is on screen; one in the main part leaves it closed. A new caster's heading is "New caster", whichever
-    caster is chosen."""
+def test_host_and_port_are_one_field_for_other_server():
+    """Other server takes its host and port in one field ("host:port"; a host alone uses 2101) and says what is wrong
+    with either under it; a stored server shows both in it. A new server's heading is "New server"."""
     out = run_editor([
-        case(1, None, [("caster", "centipede"), ("name", "N" * 30)] + NEW, ONOCOY_ELSEWHERE),
+        case(1, None, [("caster", "custom"), ("host", "caster.example.org:2105"), ("mountpoint", "MINE01"),
+                       ("password", "secret")], ONOCOY_ELSEWHERE),
+        case(1, None, [("caster", "custom"), ("host", "caster.example.org"), ("mountpoint", "MINE01"),
+                       ("password", "secret")], ONOCOY_ELSEWHERE),
+        case(1, None, [("caster", "custom"), ("host", "bad host:2101")] + NEW, ONOCOY_ELSEWHERE),
+        case(1, None, [("caster", "custom"), ("host", "caster.example.org:99999")] + NEW, ONOCOY_ELSEWHERE),
         case(1, None, [("caster", "centipede"), ("password", "secret")], ONOCOY_ELSEWHERE),
+        case(2, stored("my.caster.net", "standard", port=2102), [], inspect=True),
     ])
-    assert out[0]["errors"] == ["Too long: use a shorter name."] and out[0]["more_open"] is True, out[0]
-    assert out[1]["errors"] == ["Enter the mountpoint."] and out[1]["more_open"] is False, out[1]
-    assert out[0]["title"] == out[1]["title"] == "New caster"
+    assert (out[0]["host"], out[0]["port"]) == ("caster.example.org", 2105)
+    assert (out[1]["host"], out[1]["port"]) == ("caster.example.org", 2101)
+    assert out[2]["errors"] == ["A host name or an IPv4 address, at most 63 characters."], out[2]
+    assert out[3]["errors"] == ["After the colon, a port from 1 to 65535."], out[3]
+    assert out[4]["errors"] == ["Enter the mountpoint."], out[4]
+    assert out[2]["title"] == out[4]["title"] == "New server"
+    assert out[5]["values"][0] == "my.caster.net:2102" and out[5]["fixed"] is None
+
+
+def test_the_name_follows_the_server():
+    """No name field: a server is named after its preset, or its host for Other server; a stored name stays while the
+    server (and Other server's host) does."""
+    out = run_editor([
+        case(1, None, [("caster", "custom")] + OTHER, ONOCOY_ELSEWHERE),
+        case(1, None, NEW, ONOCOY_ELSEWHERE),
+        case(2, stored("my.caster.net", "standard", name="Cabin"), [("mountpoint", "CABIN2")]),
+        case(2, stored("my.caster.net", "standard", name="Cabin"), [("host", "other.example.org:2101"), ("password", "x1")]),
+        case(2, stored("my.caster.net", "standard", name="Cabin"), [("caster", "rtk2go")] + NEW),
+        case(0, ONOCOY_SET_UP, [("password", "secret123")]),
+    ])
+    assert [b["name"] for b in out] == ["caster.example.org", "RTK2go", "Cabin", "other.example.org", "RTK2go", "Onocoy"]
+    # Nothing the form no longer shows is sent: no chunked-encoding choice, no removal of the stored password.
+    assert not any("v2_raw_body" in b or "clear_password" in b for b in out), out
+
+
+def test_a_save_keeps_whether_the_server_is_on():
+    """The form has no on/off box: a save keeps the stored value (the card's switch turns a server off and on), a new
+    server is saved turned on, and an Onocoy slot that gets set up is turned on too (setting it up means using it), so
+    it needs its username and password. A server that stays off needs nothing it would need to stream."""
+    pending = stored("servers.onocoy.com", "fast", name="Onocoy", enabled=False, mountpoint="", username="",
+                     password_set=False)
+    out = run_editor([
+        case(1, None, NEW, ONOCOY_ELSEWHERE),
+        case(2, stored("crtk.net", "standard", enabled=False), [("mountpoint", "BASE02")]),
+        case(2, stored("crtk.net", "standard"), [("mountpoint", "BASE02")]),
+        case(0, pending, [("mountpoint", "MP0TEST1"), ("password", "secret123")]),
+        case(2, stored("my.caster.net", "standard", enabled=False, password_set=False, mountpoint=""), []),
+    ])
+    assert [b.get("enabled") for b in out] == [True, False, True, None, False], out
+    assert out[3]["errors"] == ["Enter the username from the Onocoy console."], out[3]
 
 
 ONOCOY_SET_UP = stored("servers.onocoy.com", "fast", name="Onocoy", mountpoint="MP0TEST1", username="user0test")
@@ -925,48 +1009,133 @@ ONOCOY_SET_UP = stored("servers.onocoy.com", "fast", name="Onocoy", mountpoint="
 ONOCOY_NOT_SET_UP_ELSEWHERE = {"onocoyElsewhere": {"slot": 0, "ready": False, "enabled": False}}
 
 
-def test_onocoy_editor_shows_the_server_as_a_line_and_little_else():
-    """Onocoy asks for what its console gives: the server as one line of text (no inputs that look editable),
-    mountpoint, username, password. No retry pace; the NTRIP version and removing the stored password wait under
-    "More options" (TLS only while it is on). A test slot shows its own server."""
+def test_onocoy_asks_for_its_username_and_password_and_a_name():
+    """Onocoy's form: its server as text (no input that looks editable), a mountpoint that is any name (the station's,
+    as the field takes it, proposed when there is none), the console's username and password. Nothing else: no
+    NTRIP version, no TLS, no retry pace, no fold-out. A test slot shows its own server."""
     out = run_editor([
         case(0, ONOCOY_SET_UP, [], inspect=True),
-        case(0, None, [], inspect=True),
-        case(1, None, [("caster", "onocoy")], ONOCOY_NOT_SET_UP_ELSEWHERE, inspect=True),
+        case(0, None, [], {"hostname": "onocoy diy!"}, inspect=True),
+        case(1, None, [("caster", "onocoy")], dict(ONOCOY_NOT_SET_UP_ELSEWHERE, hostname="onocoydiy"), inspect=True),
         case(0, dict(ONOCOY_SET_UP, tls=True, port=2121), [], inspect=True),
         case(0, stored("10.0.2.2", "fast", name="Onocoy", port=2111, mountpoint="MP0TEST1", username="user0test",
                        test_onocoy=True), [], inspect=True),
     ])
     edit, new, switched, tls, test = out
-    assert edit["title"] == "Edit Onocoy" and new["title"] == switched["title"] == "New caster"
+    assert edit["title"] == "Edit Onocoy" and new["title"] == switched["title"] == "New server"
     for o in out:
-        assert o["main"] == ["Caster", "Mountpoint", "Username", "Password", "Stream to this caster"], o
-        assert o["pace"] is False, o
-        assert "Host" not in o["more"] and "Port" not in o["more"] and "Name" not in o["more"], o
-    assert edit["server"] == new["server"] == switched["server"] == "Server: servers.onocoy.com:2101"
-    assert tls["server"] == "Server: servers.onocoy.com:2121" and test["server"] == "Server: 10.0.2.2:2111"
-    assert edit["more"] == ["NTRIP version", "Remove the stored password"], edit
-    assert new["more"] == switched["more"] == ["NTRIP version"], new
-    assert tls["more"] == ["NTRIP version", "Use TLS (encrypted connection)", "Remove the stored password"], tls
+        assert o["fields"] == ["NTRIP server", "Host and port", "Mountpoint", "Username", "Password"], o
+        assert o["pace"] is False and o["details"] == 0 and o["waits"] == [], o
+        assert o["hints"] == ["Any name; shows only in your Onocoy dashboard."], o
+        assert o["help"] == "The Onocoy console gives the username and password, under NTRIP Credentials. Onocoy's guide ↗", o
+    assert edit["fixed"] == new["fixed"] == switched["fixed"] == "servers.onocoy.com:2101"
+    assert tls["fixed"] == "servers.onocoy.com:2121" and test["fixed"] == "10.0.2.2:2111"
+    assert edit["values"][:2] == ["MP0TEST1", "user0test"]
+    assert new["values"][:2] == ["onocoydiy", ""] and switched["values"][:2] == ["onocoydiy", ""]
 
 
-def test_the_box_folds_once_the_caster_is_set_up():
-    """A new caster, or one without its credentials, shows its box open; a stored caster that is set up shows it
-    folded under "How to set up <caster>", until another caster is chosen."""
+def test_onocoy_takes_the_stations_ntrip_version_until_set_up():
+    """No NTRIP version on Onocoy's form: a new Onocoy slot, or one not set up yet, takes the station's (onocoy_preset:
+    with 2.0 the chosen mountpoint reaches the dashboard); a slot that is set up keeps its own. The proposed mountpoint
+    is saved like a typed one, and with the username and password that is all Onocoy needs."""
+    v2 = {"host": "servers.onocoy.com", "port": 2101, "tls_port": 2121, "ntrip_version": 2}
+    pending = stored("servers.onocoy.com", "fast", name="Onocoy", enabled=False, mountpoint="", username="",
+                     password_set=False, ntrip_version=1)
+    creds = [("username", "user0test"), ("password", "secret123")]
+    out = run_editor([
+        case(0, None, creds, {"preset": v2, "hostname": "onocoydiy"}),
+        case(0, pending, creds, {"preset": v2, "hostname": "onocoydiy"}),
+        case(0, dict(ONOCOY_SET_UP, ntrip_version=1), [], {"preset": v2}),
+        case(1, None, [("caster", "onocoy")] + creds, dict(ONOCOY_NOT_SET_UP_ELSEWHERE, preset=v2, hostname="base-7")),
+    ])
+    assert [b["ntrip_version"] for b in out] == [2, 2, 1, 2], out
+    assert [b["mountpoint"] for b in out] == ["onocoydiy", "onocoydiy", "MP0TEST1", "base-7"], out
+    assert out[0]["enabled"] is True and out[0]["host"] == "servers.onocoy.com" and out[0]["backoff_profile"] == "fast"
+
+
+def test_presets_ask_only_for_what_they_use():
+    """A preset asks for its mountpoint, its password and a username only where it uses one (NTRIP 2.0), with its host
+    and port as text; its other settings are its own: the stored ones while it stays chosen, the preset's once chosen.
+    Other server alone adds one row: NTRIP version, TLS (the certificate check once it is on) and the retry pace with
+    its waits, as the station runs them (ntrip_proto.c). No fold-out anywhere."""
+    out = run_editor([
+        case(1, None, [], ONOCOY_ELSEWHERE, inspect=True),
+        case(2, stored("crtk.net", "standard", ntrip_version=2, username="me"), [], inspect=True),
+        case(2, stored("caster.emlid.com", "standard", tls=True, trust="custom_ca"), [], inspect=True),
+        case(2, stored("caster.emlid.com", "standard", tls=True, trust="custom_ca"), []),
+        case(2, stored("caster.emlid.com", "standard", tls=True, trust="custom_ca"), [("caster", "rtkdirect")] + NEW + [
+            ("username", "me")]),
+        case(1, None, [("caster", "custom")], ONOCOY_ELSEWHERE, inspect=True),
+        case(1, None, [("caster", "custom"), ("pace", "polite")], ONOCOY_ELSEWHERE, inspect=True),
+        case(2, stored("my.caster.net", "standard", tls=True), [], inspect=True),
+    ])
+    rtk2go, centipede, emlid, emlid_saved, rtkdirect, custom, polite, custom_tls = out
+    for o in (rtk2go, centipede, emlid, custom, polite, custom_tls):
+        assert o["details"] == 0, o
+    assert rtk2go["fields"] == ["NTRIP server", "Host and port", "Mountpoint", "Password"] and rtk2go["pace"] is False
+    assert rtk2go["fixed"] == "rtk2go.com:2101"
+    assert rtk2go["help"] == "The mountpoint and password of your reservation. One base per internet connection. " \
+                             "RTK2go's reservation page ↗"
+    assert centipede["fields"] == ["NTRIP server", "Host and port", "Mountpoint", "Username", "Password"], centipede
+    assert emlid["fields"] == ["NTRIP server", "Host and port", "Mountpoint", "Password"], emlid
+    # Kept as stored while it stays Emlid; RTKDirect chosen: its own (NTRIP 2.0, no TLS, its port).
+    assert (emlid_saved["tls"], emlid_saved["trust"], emlid_saved["ntrip_version"]) == (True, "custom_ca", 1), emlid_saved
+    assert (rtkdirect["host"], rtkdirect["tls"], rtkdirect["ntrip_version"], rtkdirect["username"]) == (
+        "ntrip.rtkdirect.com", False, 2, "me"), rtkdirect
+    assert custom["fields"] == ["NTRIP server", "Host and port", "Mountpoint", "Password", "NTRIP version", "TLS",
+                                "Encrypted", "Retry pace"], custom
+    assert custom["help"] == "Enter what your server gives you for a base."
+    assert custom["paces"] == ["Standard (2 s to 1 min)", "Polite (10 s to 5 min)"]
+    assert custom["waits"] == ["Refused logins: 1, 5, 15, then 30 min."], custom["waits"]
+    assert polite["waits"] == ["Refused logins: 5, 15, 30, then 60 min; after 20 failed connections in a row, one try an "
+                               "hour."], polite["waits"]
+    assert custom_tls["fields"][-4:] == ["TLS", "Encrypted", "Certificate check", "Retry pace"], custom_tls
+
+
+def test_every_server_has_one_help_line():
+    """Every server type shows one line of help with its own guide (Other server: none), whether it is set up or not."""
     out = run_editor([
         case(0, None, [], inspect=True),
         case(0, ONOCOY_SET_UP, [], inspect=True),
-        case(0, dict(ONOCOY_SET_UP, username="", password_set=False), [], inspect=True),
         case(1, stored("rtk2go.com", "polite", name="RTK2go"), [], inspect=True),
         case(1, stored("rtk2go.com", "polite", name="RTK2go"), [("caster", "centipede")], inspect=True),
-        case(1, stored("rtk2go.com", "polite", name="RTK2go"), [("caster", "centipede"), ("caster", "rtk2go")], inspect=True),
-        case(1, stored("rtk2go.com", "polite", name="RTK2go", password_set=False), [], inspect=True),
+        case(1, stored("rtk2go.com", "polite", name="RTK2go"), [("caster", "emlid")], inspect=True),
+        case(1, stored("rtk2go.com", "polite", name="RTK2go"), [("caster", "rtkdirect")], inspect=True),
     ])
-    assert [(o["box"], o["folded"]) for o in out] == [
-        (True, []), (False, ["How to set up Onocoy"]), (True, []), (False, ["How to set up RTK2go"]), (True, []),
-        (False, ["How to set up RTK2go"]), (True, [])], out
-    # Other casters keep their server fields; RTK2go's fixed pace is one line under More options.
-    assert out[4]["server"] is None and "Host" in out[4]["more"] and out[3]["pace"] is True
+    guides = ["Onocoy's guide", "Onocoy's guide", "RTK2go's reservation page", "Centipede's guide", "Emlid's guide",
+              "RTKDirect's site"]
+    for o, g in zip(out, guides):
+        assert o["help"].endswith(" " + g + " ↗") and o["help"].count(".") >= 1, o["help"]
+
+
+def test_turn_off_and_on_from_the_card():
+    """A card's switch sends `enabled` alone (the rest stays as stored). Turning an open server on next to Onocoy asks
+    about the duplicate stream in a dialog: confirmed, the same request with the acknowledgement; cancelled, nothing
+    more."""
+    dup = [409, {"error": {"code": "caster_policy", "reason": "dup_stream_ack_required", "message": "acknowledgement required"}}]
+    ok = [200, {"slot": 1, "config": {"enabled": True}, "status": {}}]
+    off, on, confirmed, cancelled = run_editor([
+        {"fn": "turn", "on": False, "answers": [ok]},
+        {"fn": "turn", "on": True, "answers": [ok]},
+        {"fn": "turn", "on": True, "answers": [dup, ok], "confirm": True},
+        {"fn": "turn", "on": True, "answers": [dup], "confirm": False},
+    ])
+    assert off["puts"] == [{"enabled": False}] and not off["asked"] and off["saved"]
+    assert off["toasts"] == ["RTK2go is turned off."]
+    assert on["puts"] == [{"enabled": True}] and on["toasts"] == ["RTK2go is turned on."]
+    assert confirmed["asked"] and confirmed["puts"] == [{"enabled": True}, {"enabled": True, "dup_stream_ack": True}]
+    assert confirmed["saved"] and confirmed["toasts"] == ["RTK2go is turned on."]
+    assert cancelled["asked"] and cancelled["puts"] == [{"enabled": True}] and cancelled["saved"] is None
+    assert cancelled["toasts"] == []
+
+
+def test_the_switch_flips_back_when_not_saved():
+    """The card's on/off switch (role switch, named for the server) shows the new state at once and goes back when
+    the save fails or is cancelled."""
+    (r,) = run_editor([{"fn": "switch", "on": True, "answers": [False, True, True]}])
+    assert r["role"] == "switch" and r["name"] == "Stream to RTK2go"
+    assert r["asked"] == [False, False, True]
+    assert r["states"] == [["true", None], ["false", None], ["true", None]]
 
 
 def test_duplicate_stream_warning_sits_on_the_open_casters_card():
@@ -981,8 +1150,8 @@ def test_duplicate_stream_warning_sits_on_the_open_casters_card():
     assert out[4:] == [None] * 4
 
 
-def details(st: dict, reconnects: int | None = None) -> dict:
-    return {"fn": "details", "st": st, "reconnects": reconnects}
+def evidence(st: dict) -> dict:
+    return {"fn": "evidence", "st": st}
 
 
 QUIET = {"state": "streaming", "state_age_s": 600, "last_status_line": "ICY 200 OK", "last_status_code": 200,
@@ -994,50 +1163,51 @@ QUIET = {"state": "streaming", "state_age_s": 600, "last_status_line": "ICY 200 
                                               "replaced", "local")}}
 
 
-def test_connection_details_list_only_what_happened():
-    """Connection details: at most 12 rows, each only when it has something to say (the ones that count trouble only
-    when there is some), and the failures by cause only for causes that happened (no table of zeros)."""
-    quiet, rough, waiting = run_editor([
-        details(QUIET, 2),
-        details(dict(QUIET, state="backoff", login_rejects=1, kicked_sessions=1, data_rate_permille=974,
-                     last_session_text="ERROR - Bad Password", last_err="ESP_FAIL",
-                     failures_by_class=dict(QUIET["failures_by_class"], timeout=3, dns=1)), None),
-        # Never reached anything this start: no reply, no address, no lag.
-        details(dict(QUIET, state="wait_data", last_status_line="", last_status_code=0, resolved_ip=None, lag_ms_now=0,
-                     max_lag_ms=0, bytes_sent_today=0), 0),
+def test_server_cards_say_what_went_wrong_and_nothing_else():
+    """A server's card shows what it said or did when it refuses or drops the station, on the card itself (no fold):
+    each row only when it has something to say, so a server that streams well shows none, not even its old failures.
+    The trivia of the old connection details (state since, lag, reconnects, the address, the data rate the Status page
+    judges) is gone."""
+    quiet, full, refused, rate, past = run_editor([
+        evidence(QUIET),
+        evidence(dict(QUIET, state="backoff", login_rejects=1, login_blocks=1, kicked_sessions=4, data_rate_permille=974,
+                      last_status_line="HTTP/1.1 401 Unauthorized", last_status_code=401,
+                      last_session_text="ERROR - Bad Password", last_err="ESP_FAIL",
+                      failures_by_class=dict(QUIET["failures_by_class"], timeout=3, dns=1))),
+        # NTRIP 1.0's refusal has no status code.
+        evidence(dict(QUIET, state="auth_failed", last_status_line="ERROR - Bad Password", last_status_code=0)),
+        evidence(dict(QUIET, data_rate_permille=974)),
+        evidence(dict(QUIET, failures_by_class=dict(QUIET["failures_by_class"], timeout=3))),
     ])
-    assert [r[0] for r in quiet["rows"]] == ["State since", "Last reply", "Epochs dropped today",
-                                             "Lag now / highest", "Reconnects today", "Sent today", "Address"], quiet
-    assert dict(quiet["rows"])["Reconnects today"] == "2" and quiet["titles"] == []
-    labels = [r[0] for r in rough["rows"]]
-    # The firmware's error code ("ESP_FAIL") is never a row: the causes below say it in words.
-    assert labels[:11] == ["State since", "Last reply", "Caster said during a session", "Refused logins / login blocks",
-                           "Sessions taken over (score)", "Data rate", "Epochs dropped today", "Lag now / highest",
-                           "Reconnects today", "Sent today", "Address"], labels
-    assert rough["titles"] == ["Failures by cause"]
-    assert rough["rows"][11:] == [["DNS lookup failed", "1"], ["Timed out", "3"]], rough["rows"]
-    assert dict(rough["rows"])["Reconnects today"] == "–"
-    assert [r[0] for r in waiting["rows"]] == ["State since", "Epochs dropped today", "Reconnects today", "Sent today"], waiting
-    # The RAM counts start at a restart: one muted line says so, only when the station restarted today (UTC).
-    restarted, ran = run_editor([dict(details(QUIET, 2), uptime=1), dict(details(QUIET, 2), uptime=200 * 86400)])
-    assert restarted["notes"] == ["Dropped epochs and data sent count from the last restart."], restarted
-    assert ran["notes"] == [] and quiet["notes"] == []
+    assert quiet == [] and rate == [] and past == []
+    # The firmware's error code ("ESP_FAIL") is never a row: the causes say it in words.
+    assert full == [["Last reply", "HTTP/1.1 401 Unauthorized"], ["Server said", "ERROR - Bad Password"],
+                    ["Login blocks", "1 of 3"], ["Sessions taken over", "3 of 3"],
+                    ["Failures", "DNS lookup failed (1), Timed out (3)"]], full
+    assert refused == [["Last reply", "ERROR - Bad Password"]]
 
 
-# ---- The caster cards' address line and chip; the Status page's receiver rows and caster lines ----
+# ---- The server cards' state and address lines; the Status page's receiver rows and server lines ----
 
-def test_caster_card_shows_host_and_mountpoint_and_one_chip():
-    """The card's line says where it streams (host and mountpoint), not the protocol; a test slot says so in that
-    line, not in a second chip; a stopped slot's chip says "Needs you" (its panel says why)."""
+def test_server_card_says_its_state_traffic_and_address_in_two_lines():
+    """Under its name and switch, a card says its state in a word in its colour with what goes with it (streaming:
+    for how long, the rate and what it sent; waiting: the next try; off: just that), then where it streams (host,
+    port and mountpoint, not the protocol); a test slot says so in that line."""
     out = run_editor([
-        {"fn": "card", "cfg": stored("rtk2go.com", "polite", ntrip_version=2, tls=True), "st": {"state": "streaming"}},
+        {"fn": "card", "cfg": stored("rtk2go.com", "polite", ntrip_version=2, tls=True),
+         "st": {"state": "streaming", "connected_s": 7200, "bytes_sent": 140200000}},
         {"fn": "card", "cfg": stored("10.0.2.2", "fast", port=2111, mountpoint="MP0TEST1", test_onocoy=True),
          "st": {"state": "stopped", "stop_reason": "rejected"}},
         {"fn": "card", "cfg": stored("servers.onocoy.com", "fast", mountpoint=""), "st": {"state": "wait_data"}},
+        {"fn": "card", "cfg": stored("my.caster.net", "standard"), "st": {"state": "auth_failed", "next_retry_s": 240}},
+        {"fn": "card", "cfg": stored("my.caster.net", "standard", enabled=False), "st": {"state": "disabled"}},
     ])
-    assert out[0] == {"address": "rtk2go.com/MINE01", "chip": ["Streaming", "ok"]}
-    assert out[1] == {"address": "10.0.2.2/MP0TEST1 \u00b7 Test Onocoy slot (bench build)", "chip": ["Needs you", "bad"]}
-    assert out[2] == {"address": "servers.onocoy.com", "chip": ["Waiting for the receiver", "warn"]}
+    assert out[0] == {"line": "Streaming for 2 h · 133.7 MB sent", "tone": "t-ok", "address": "rtk2go.com:2101/MINE01"}
+    assert out[1] == {"line": "Stopped: needs you", "tone": "t-bad",
+                      "address": "10.0.2.2:2111/MP0TEST1 · Test Onocoy slot (bench build)"}
+    assert out[2] == {"line": "Waiting for the receiver", "tone": "t-warn", "address": "servers.onocoy.com:2101"}
+    assert out[3]["line"] == "Login refused · next try in 4 min" and out[3]["tone"] == "t-bad"
+    assert out[4]["line"] == "Off"
 
 
 def st_caster(slot: int, name: str, state: str, **kw) -> dict:
@@ -1175,7 +1345,7 @@ MATRIX = {
     "setup_too": over(BASE, casters=[ONO_SETUP, RTK, st_caster(2, "Bench", "auth_failed", reason="auth", next_retry_s=90)],
                       availability={"budget_left_s": None}),
 }
-CARDS = ["Onocoy today", "Receiver", "Casters", "Station"]
+CARDS = ["Receiver", "Station", "Onocoy", "NTRIP"]
 
 
 def dashboards(*statuses, admin: bool = True, open_slots: list | None = None) -> list[dict]:
@@ -1192,7 +1362,7 @@ def rx_rows(o: dict) -> list[str]:
 
 def test_status_page_always_has_four_cards():
     """Whatever the state the admin sees the same four cards in the same places (never a card missing, never one
-    taking the row): Onocoy today and Receiver, then Casters and Station. Each has one link, in its head, whose name
+    taking the row): Receiver and Station, then Onocoy and NTRIP. Each has one link, in its head, whose name
     starts with its visible word, and no button: the top card has the page's buttons."""
     for name, o in matrix().items():
         assert o["order"] == CARDS, name
@@ -1261,22 +1431,22 @@ def test_bands_row_says_onocoys_need_once():
     assert bands[1] == "3 on GPS ✕"
     assert out[2]["key"] == "quality" and bands[2] == "4 on Galileo" and tones[2] == []
     # Onocoy's verdict line says it (another state on top).
-    assert out[3]["key"] == "casters_down" and out[3]["cards"]["Onocoy today"]["notes"][0][0].startswith("Only 3 bands")
+    assert out[3]["key"] == "casters_down" and out[3]["cards"]["Onocoy"]["notes"][0][0].startswith("Only 3 bands")
     assert bands[3] == "3 on GPS ✕"
-    assert out[4]["cards"]["Onocoy today"]["notes"][0][0] == "Offline time is counting now."
+    assert out[4]["cards"]["Onocoy"]["notes"][0][0] == "Offline time is counting now."
     assert bands[4] == "3 on GPS ✕ · Onocoy needs 4"
     assert bands[5] == "4 on Galileo · no GLONASS" and tones[5] == [["warn", " · no GLONASS"]]
     assert out[6]["key"] == "streaming" and bands[6] == "3 on GPS" and tones[6] == []
     # The bands "Also:" line says it: neither the row nor Onocoy's verdict line again (At risk stays).
     assert "bands" in [a[0] for a in out[7]["also"]] and bands[7] == "3 on GPS ✕"
-    assert out[7]["cards"]["Onocoy today"]["chip"] == ["At risk", "badge warn"]
-    assert not any(n[0].startswith("Only 3 bands") for n in out[7]["cards"]["Onocoy today"]["notes"])
+    assert out[7]["cards"]["Onocoy"]["chip"] == ["At risk", "badge warn"]
+    assert not any(n[0].startswith("Only 3 bands") for n in out[7]["cards"]["Onocoy"]["notes"])
 
 
 def test_casters_card_lists_counting_onocoy_first():
     """One line per caster set up: Onocoy first while it counts (no share: its own card has its day), left out when it
-    is not set up or turned off; today's share for the others that are on. "No other casters." beside an Onocoy that is
-    set up, else "No casters yet.", with Add (Manage when the top card's button adds one); when it shows in safe mode.
+    is not set up or turned off; today's share for the others that are on. "No other servers." beside an Onocoy that is
+    set up, else "No servers yet.", with Add (Manage when the top card's button adds one); when it shows in safe mode.
     The public form: names and states, no share, no link, and no card while it lists none."""
     swapped = over(BASE, casters=[st_caster(0, "RTK2go", "streaming", protected=False, onocoy_ready=False, **RTK2GO),
                                   st_caster(2, "Onocoy", "streaming"),
@@ -1291,7 +1461,7 @@ def test_casters_card_lists_counting_onocoy_first():
     names = ["healthy", "setup", "onooff", "onooff_none", "nocasters", "safe", "partly"]
     out = dashboards(*[MATRIX[n] for n in names], swapped, no_slots)
     pub = dashboards(public, public_safe, {**public, "casters": []}, admin=False)
-    cas = {n: o["cards"]["Casters"] for n, o in zip(names + ["swapped", "no_slots"], out)}
+    cas = {n: o["cards"]["NTRIP"] for n, o in zip(names + ["swapped", "no_slots"], out)}
     assert cas["healthy"]["lines"] == ["Onocoy · Streaming", "RTK2go · Streaming · 99.97 % today"]
     # Each separator stays with the part after it: a phone breaks before a separator, never after it.
     assert [" ".join(p.split()) for p in cas["healthy"]["nowrap"]] == ["· Streaming", "· Streaming", "· 99.97 % today"]
@@ -1299,25 +1469,25 @@ def test_casters_card_lists_counting_onocoy_first():
                                        "Spare · Off"]
     assert cas["setup"]["lines"] == cas["onooff"]["lines"] == ["RTK2go · Streaming · 99.97 % today"]
     assert cas["partly"]["lines"][1] == "RTK2go · Login refused · 0 % today"
-    assert cas["onooff_none"]["lines"] == [] and cas["onooff_none"]["notes"] == [["No other casters.", "muted"]]
+    assert cas["onooff_none"]["lines"] == [] and cas["onooff_none"]["notes"] == [["No other servers.", "muted"]]
     for n in ("nocasters", "no_slots"):
-        assert cas[n]["lines"] == [] and cas[n]["notes"] == [["No casters yet.", "muted"]], n
+        assert cas[n]["lines"] == [] and cas[n]["notes"] == [["No servers yet.", "muted"]], n
     (unset,) = dashboards(over(BASE, casters=[ONO_SETUP], availability={"budget_left_s": None}))
-    assert unset["cards"]["Casters"]["notes"] == [["No casters yet.", "muted"]]
-    assert cas["onooff_none"]["links"][0][:3] == ["Add", "#/casters", "Add a caster"]
+    assert unset["cards"]["NTRIP"]["notes"] == [["No servers yet.", "muted"]]
+    assert cas["onooff_none"]["links"][0][:3] == ["Add", "#/ntrip", "Add a server"]
     # No Onocoy slot either: the top card's button adds a caster, so the card's link is Manage.
-    assert out[4]["actions"] == [["Add a caster", "#/casters"]] and cas["nocasters"]["links"][0][0] == "Manage"
+    assert out[4]["actions"] == [["Add a server", "#/ntrip"]] and cas["nocasters"]["links"][0][0] == "Manage"
     # The top card's button adds a caster: the card's link is Manage.
-    assert out[-1]["actions"] == [["Add a caster", "#/casters"]] and cas["no_slots"]["links"][0][:3] == [
-        "Manage", "#/casters", "Manage casters"]
-    assert cas["healthy"]["links"][0][:3] == ["Manage", "#/casters", "Manage casters"]
+    assert out[-1]["actions"] == [["Add a server", "#/ntrip"]] and cas["no_slots"]["links"][0][:3] == [
+        "Manage", "#/ntrip", "Manage NTRIP servers"]
+    assert cas["healthy"]["links"][0][:3] == ["Manage", "#/ntrip", "Manage NTRIP servers"]
     assert cas["safe"]["lines"] == [] and cas["safe"]["notes"] == [["Shows after safe mode.", "muted"]]
-    assert pub[0]["cards"]["Casters"]["lines"] == ["Onocoy · Streaming", "Bench · Off"]
-    assert pub[0]["cards"]["Casters"]["links"] == [] and pub[0]["cards"]["Casters"]["wide"]
-    assert pub[1]["head"] == "Safe mode" and pub[1]["line"] == "The receiver and casters are off."
+    assert pub[0]["cards"]["NTRIP"]["lines"] == ["Onocoy · Streaming", "Bench · Off"]
+    assert pub[0]["cards"]["NTRIP"]["links"] == [] and pub[0]["cards"]["NTRIP"]["wide"]
+    assert pub[1]["head"] == "Safe mode" and pub[1]["line"] == "The receiver and NTRIP servers are off."
     # Nothing listed (safe mode, none set up): no card; the top card says it.
     assert pub[1]["cards"] == {} and pub[1]["grid"] is None
-    assert pub[2]["cards"] == {} and pub[2]["line"] == "The station is not streaming to any caster."
+    assert pub[2]["cards"] == {} and pub[2]["line"] == "The station is not streaming to any NTRIP server."
 
 
 def test_station_card_rows():
@@ -1338,9 +1508,12 @@ def test_station_card_rows():
     rows = [dict(o["cards"]["Station"]["rows"]) for o in out]
     links = [o["cards"]["Station"]["links"][0][:3] for o in out]
     wifi = [" ".join(r["Wi-Fi"].split()) for r in rows[:6]]
-    # The signal in a word (Logs' Overview has the figure), kept on one line with its separator.
-    assert wifi == ["Home · Good", "Not set up", "Home · no address yet", "Home · Offline", "Home", "Good"]
-    assert [" ".join(t.split()) for t in out[0]["cards"]["Station"]["nowrap"]] == ["· Good", "Good", "· up to date"]
+    # The signal in a word with its figure (a word alone means little), kept with its separator; never a bare word
+    # without a reading. The network's name ends in an ellipsis where the line would wrap (app.css .wifi-line).
+    assert wifi == ["Home · Good (\u221261 dBm)", "Not set up", "Home · no address yet", "Home · Offline", "Home",
+                    "Good (\u221258 dBm)"]
+    assert [" ".join(t.split()) for t in out[0]["cards"]["Station"]["nowrap"]] == ["· Good (\u221261 dBm)", "Good (\u221261 dBm)",
+                                                                                  "· up to date"]
     # The firmware's parts too: a phone breaks before a separator.
     assert [" ".join(t.split()) for t in out[8]["cards"]["Station"]["nowrap"]][-2:] == ["· v0.4.0 available", "· receiver update"]
     assert rows[0]["Running for"] == "1 d"
@@ -1364,10 +1537,10 @@ def test_onocoy_today_forms():
     names = ["healthy", "setup", "onooff_none", "setup_rx", "onooff", "safe", "noclock", "missed", "nocasters", "refused",
              "alloff"]
     out = dict(zip(names, dashboards(*[MATRIX[n] for n in names])))
-    ono = {n: o["cards"]["Onocoy today"] for n, o in out.items()}
+    ono = {n: o["cards"]["Onocoy"] for n, o in out.items()}
     assert ono["healthy"]["chip"] == ["On track", "badge ok"] and ono["healthy"]["big"][0].startswith("7 min 43 s")
     assert [r[0] for r in ono["healthy"]["rows"]] == ["Online today", "Offline today"]
-    assert ono["healthy"]["links"][0][:3] == ["Manage", "#/casters", "Manage Onocoy"]
+    assert ono["healthy"]["links"][0][:3] == ["Manage", "#/ntrip", "Manage Onocoy"]
     for o in ono.values():
         assert all(n[0] not in ("", "–") for n in o["notes"]), o["notes"]
     shows = {n: o["notes"] for n, o in ono.items() if o["chip"] is None}
@@ -1379,12 +1552,12 @@ def test_onocoy_today_forms():
     # The top card's button sets Onocoy up or turns it on: the card's link is Manage.
     assert out["setup"]["key"] == "onocoy_setup" and out["onooff_none"]["key"] == "no_caster"
     for n in ("setup", "onooff_none", "safe"):
-        assert ono[n]["links"][0][:3] == ["Manage", "#/casters", "Manage Onocoy"], n
+        assert ono[n]["links"][0][:3] == ["Manage", "#/ntrip", "Manage Onocoy"], n
     assert out["setup_rx"]["key"] == "no_rtcm"
     for n in ("setup_rx", "nocasters", "refused", "alloff"):
-        assert ono[n]["links"][0][:3] == ["Set up", "#/casters/onocoy", "Set up Onocoy"], n
+        assert ono[n]["links"][0][:3] == ["Set up", "#/ntrip/onocoy", "Set up Onocoy"], n
     assert out["onooff"]["key"] == "streaming"
-    assert ono["onooff"]["links"][0][:3] == ["Turn on", "#/casters/onocoy", "Turn on Onocoy"]
+    assert ono["onooff"]["links"][0][:3] == ["Turn on", "#/ntrip/onocoy", "Turn on Onocoy"]
     assert ono["noclock"]["chip"] == ["On track", "badge ok"] and ono["noclock"]["big"] is None and ono["noclock"]["bar"] is None
     assert ono["noclock"]["notes"] == [["Shows once the station has the time (from GNSS or the internet).", "muted"]]
     assert [r[0] for r in ono["noclock"]["rows"]] == ["Online today", "Offline today"]
@@ -1396,7 +1569,7 @@ def test_onocoy_today_forms():
     # Missed with time still on the budget: no figure either.
     (still,) = dashboards(over(BASE, casters=[st_caster(0, "Onocoy", "streaming", streak_ok=False, budget_left_s=200), RTK],
                                availability={"protected_down_today_s": 10, "budget_left_s": 200}))
-    assert still["cards"]["Onocoy today"]["big"] is None and still["cards"]["Onocoy today"]["bar"] is None
+    assert still["cards"]["Onocoy"]["big"] is None and still["cards"]["Onocoy"]["bar"] is None
 
 
 def test_card_colours_never_contradict_the_top_card():
@@ -1412,8 +1585,8 @@ def test_card_colours_never_contradict_the_top_card():
         assert all(t == "warn" for t, _ in rx), (name, rx)
         far = [t for t in rx if t[1] == "Fixed, check it"]
         assert not far or any(a["id"] == "fixed_far" for a in s["alerts"]), (name, rx)
-        assert len(far) == len(rx) or o["cards"]["Onocoy today"]["chip"] is not None, (name, rx)
-        chip = o["cards"]["Onocoy today"]["chip"]
+        assert len(far) == len(rx) or o["cards"]["Onocoy"]["chip"] is not None, (name, rx)
+        chip = o["cards"]["Onocoy"]["chip"]
         if chip:
             assert chip in (["On track", "badge ok"], ["At risk", "badge warn"], ["Missed", "badge warn"]), (name, chip)
             ono = next(c for c in s["casters"] if c.get("protected"))
@@ -1421,7 +1594,7 @@ def test_card_colours_never_contradict_the_top_card():
                 assert ono["state"] == "streaming" and o["key"] not in ("rx_stopped", "no_rtcm", "no_satellites"), name
         also = {a[0] for a in o["also"]}
         by_name = {c["name"]: c for c in s["casters"] if not c.get("empty")}
-        for line, cls in zip(o["cards"]["Casters"]["lines"], o["cards"]["Casters"]["lineTones"]):
+        for line, cls in zip(o["cards"]["NTRIP"]["lines"], o["cards"]["NTRIP"]["lineTones"]):
             c = by_name[line.split(" · ")[0]]
             if c["slot"] in o["named"]:
                 assert cls == "muted", (name, line, cls)
@@ -1436,7 +1609,7 @@ def test_card_colours_never_contradict_the_top_card():
 
 def test_status_page_says_each_fact_once():
     """Each fact once: no top-card title or line inside a card, and no three words of a card in the top card's title,
-    line or "Also:" lines; no caster count among the facts (the Casters card lists them); the duplicate stream an
+    line or "Also:" lines; no facts under the top card at all (the NTRIP card lists the servers); the duplicate stream an
     "Also:" line; Onocoy not set up or off said once (the Onocoy card's line says when it shows, not that)."""
     out = matrix()
     norm = lambda t: re.sub(r"[^a-z0-9 ]", "", t.lower().replace(" ", " ").replace("·", " ")).split()
@@ -1455,33 +1628,33 @@ def test_status_page_says_each_fact_once():
                 w = norm(atom)
                 for i in range(len(w) - 2):
                     assert " " + " ".join(w[i:i + 3]) + " " not in top, (name, title, atom)
-        assert all(f[0] != "Casters" for f in o["facts"]), name
-        # Onocoy off or not set up: said at most once, by the top card, never by a Casters line; the Onocoy card says
+        assert o["facts"] == [], name
+        # Onocoy off or not set up: said at most once, by the top card, never by an NTRIP line; the Onocoy card says
         # when it shows, in every such state.
         if name in ("setup", "refused", "setup_rx", "onooff", "onooff_none", "nocasters", "alloff", "setup_too"):
-            ono = o["cards"]["Onocoy today"]["notes"]
+            ono = o["cards"]["Onocoy"]["notes"]
             shows = [n[0] for n in ono if n[0] in ("Shows once Onocoy is set up.", "Shows while Onocoy is on.")]
             said = [t for t in [o["head"], o["line"]] + [n[0] for c in o["cards"].values() for n in c["notes"]] +
-                    o["cards"]["Casters"]["lines"]
+                    o["cards"]["NTRIP"]["lines"]
                     if t not in shows and "Onocoy" in t and
                     re.search(r"not set up|turned off|\bOff\b|Onocoy is set up|Onocoy is on|Onocoy on", t)]
             assert len(said) <= 1 and len(shows) == 1 and ono == [[shows[0], "muted"]], (name, said, ono)
-            assert not any("Onocoy" in ln for ln in o["cards"]["Casters"]["lines"]), name
+            assert not any("Onocoy" in ln for ln in o["cards"]["NTRIP"]["lines"]), name
     (dup,) = dashboards(BASE, open_slots=[1])
     assert dup["also"] == [["dup_stream", "Onocoy and RTK2go are both on", "A duplicate stream can get the Onocoy account banned.",
                             "warn"]]
     assert dup["heroAlsoShown"] == [["warn", "Also: Onocoy and RTK2go are both on. A duplicate stream can get the Onocoy "
                                              "account banned."]]
-    assert "duplicate" not in dup["cards"]["Casters"]["text"].lower()
-    # Three casters down: the line counts them, no fact counts them again (the Casters card lists each).
+    assert "duplicate" not in dup["cards"]["NTRIP"]["text"].lower()
+    # Three servers down: the line counts them, no fact counts them again (the NTRIP card lists each).
     (three,) = dashboards(over(BASE, casters=[st_caster(0, "Onocoy", "connecting"), st_caster(1, "RTK2go", "backoff", reason="dns"),
                                               st_caster(2, "Bench", "wait_network")]))
-    assert three["line"] == "3 casters are not streaming." and three["facts"] == []
+    assert three["line"] == "3 servers are not streaming." and three["facts"] == []
 
 
 def test_top_card_names_every_failing_caster():
     """A caster on that a retry or the user must clear, which the top card's line does not name: an "Also:" line with
-    why and the next try (the Casters card shows its word only). Not for a retry the no-internet alert explains, a
+    why and the next try (the NTRIP card shows its word only). Not for a retry the no-internet alert explains, a
     wait, or while the line names or counts the casters down. Onocoy not set up while the casters that are on all
     fail: the failure is the top card (red, naming the caster and why), and the Onocoy card offers the setup."""
     backoff_nonet = over(BASE, alerts=[{"id": "no_upstream", "source": "health"}], receiver={"rtcm_age_ms": 30000},
@@ -1496,12 +1669,12 @@ def test_top_card_names_every_failing_caster():
     assert refused["line"] == "RTK2go is not streaming: login refused. Next try in 4\xa0min." and refused["subject"] == 1
     assert not any(a[0].startswith("caster:") for a in refused["also"]) and refused["heroButtons"] == []
     # The line names RTK2go: its row's word is neutral, not a second red statement.
-    assert refused["cards"]["Casters"]["lineTones"] == ["muted"] and refused["cards"]["Casters"]["tones"] == []
-    assert refused["cards"]["Onocoy today"]["links"][0][:2] == ["Set up", "#/casters/onocoy"]
+    assert refused["cards"]["NTRIP"]["lineTones"] == ["muted"] and refused["cards"]["NTRIP"]["tones"] == []
+    assert refused["cards"]["Onocoy"]["links"][0][:2] == ["Set up", "#/ntrip/onocoy"]
     # Something streams: Onocoy not set up stays on top, "too" is true, and the refused caster gets its "Also:" line.
     assert too["key"] == "onocoy_setup" and too["line"].endswith(" to stream to Onocoy too.")
     assert ["caster:2", "Bench not streaming", "Next try in 1\xa0min 30\xa0s.", "bad"] in too["also"]
-    assert too["cards"]["Casters"]["tones"] == [["ok", "Streaming"], ["bad", "Login refused"]]
+    assert too["cards"]["NTRIP"]["tones"] == [["ok", "Streaming"], ["bad", "Login refused"]]
     assert banned["key"] == "stopped" and [a[0] for a in banned["also"]] == ["caster:1"]
     assert banned["also"][0][3] == "bad"
     assert settings["key"] == "settings" and "caster:1" in [a[0] for a in settings["also"]]
@@ -1521,19 +1694,17 @@ def test_closed_port_panel_says_so_without_cable_advice():
     assert out[1][0] == "No receiver found" and "cable" in out[1][1] and out[1][2] is True
 
 
-def test_status_page_names_receiver_management_with_a_way_to_change_it():
-    """Receiver management other than the default: a fact under the top card, by the setting's name, the choice said
-    from the station's side, and a Change link to the card on Receiver settings (named for screen readers)."""
+def test_status_page_leaves_receiver_management_to_receiver_settings():
+    """How the receiver is managed is set and said on Receiver settings only: the top card has no fact or Change link
+    for it, whatever the choice."""
     me = st_status(health={"level": "degraded", "recovery_mode": "alerts_only"},
                    alerts=[{"id": "no_rtcm", "source": "health"}], casters=[st_caster(0, "Onocoy", "wait_data")])
     out = run_editor([{"fn": "dashboard", "status": x, "admin": True}
                       for x in (me, st_status(health={"level": "ok", "recovery_mode": "no_reboot"}), st_status())])
     assert out[0]["head"] == "Receiver sends no corrections"
-    assert out[0]["facts"] == [["Receiver management", "ManualChange"]]
-    assert out[0]["factLinks"] == [["Change", "#/receiver/settings/manage", "Change receiver management"]]
-    assert out[1]["facts"] == [["Receiver management", "Automatic, no station restartsChange"]]
-    # The default (the station, restarts allowed) is not said.
-    assert out[2]["facts"] == [] and out[2]["factLinks"] == []
+    for o in out:
+        assert o["facts"] == [] and o["factLinks"] == [], o
+        assert "management" not in json.dumps(o["heroAlsoShown"] + [o["head"], o["line"], o["plan"]]), o
 
 
 def test_header_shows_the_station_state_and_says_when_contact_is_lost():
@@ -1601,23 +1772,23 @@ def test_no_contact_greys_every_colour_on_the_status_page():
 
 
 def test_top_card_buttons_never_repeat_a_cards_link():
-    """A top-card button named after a page (Receiver, Casters) goes where a card's link in its head goes already: the
+    """A top-card button named after a page (Receiver, NTRIP) goes where a card's link in its head goes already: the
     page leaves it out. Real actions stay (Set up Onocoy, What to do, Check again, End now, Leave safe mode)."""
     out = matrix()
     for name, o in out.items():
         heads = {lk[1] for c in o["cards"].values() for lk in c["links"] if lk[3]}
         for label, href in o["heroButtons"]:
-            assert not (label in ("Receiver", "Casters") and href in heads), (name, label, href)
+            assert not (label in ("Receiver", "NTRIP") and href in heads), (name, label, href)
     for name in ("quality", "partly", "nonet", "alloff", "refused"):
         assert out[name]["heroButtons"] == [], (name, out[name]["actions"], out[name]["heroButtons"])
     assert out["quality"]["actions"] == [["Receiver", "#/receiver"]]   # Logs' Overview keeps it (no cards there)
-    assert out["setup"]["heroButtons"] == [["Set up Onocoy", "#/casters/onocoy"]]
-    assert out["stopped"]["heroButtons"] == [["What to do", "#/casters"]]
+    assert out["setup"]["heroButtons"] == [["Set up Onocoy", "#/ntrip/onocoy"]]
+    assert out["stopped"]["heroButtons"] == [["What to do", "#/ntrip"]]
     assert out["norx"]["heroButtons"] == [["Check again", None]]
     assert out["maint"]["heroButtons"] == [["End now", None]]
     assert out["safe"]["heroButtons"] == [["Updates", "#/settings/updates"], ["Leave safe mode", None]]
-    assert out["onooff_none"]["heroButtons"] == [["Turn Onocoy on", "#/casters/onocoy"]]
-    assert out["nocasters"]["heroButtons"] == [["Add a caster", "#/casters"]]
+    assert out["onooff_none"]["heroButtons"] == [["Turn Onocoy on", "#/ntrip/onocoy"]]
+    assert out["nocasters"]["heroButtons"] == [["Add a server", "#/ntrip"]]
 def test_setup_onocoy_step_sends_the_duplicate_stream_answer():
     """The setup's Onocoy step while RTK2go is on: the station asks about the duplicate stream; ticking the box (its
     input event reaches the form) keeps the question with "Save anyway" enabled, and that sends the answer."""
@@ -1695,7 +1866,7 @@ def test_event_filter_changed_while_the_journal_loads():
     assert r["rows"] > 0
 
 
-# ---- Status: Onocoy today's bar; Logs: the Health card and Chip and Wi-Fi; Signals; long values; plain port ----
+# ---- Status: the Onocoy card's bar; Logs: the Health card and Chip and Wi-Fi; Signals; long values; plain port ----
 
 def test_onocoy_today_bar_is_the_share_of_the_allowance_left():
     """The bar under the offline time left fills with what is left of today's allowance, left / (left + offline
@@ -1709,7 +1880,7 @@ def test_onocoy_today_bar_is_the_share_of_the_allowance_left():
              st_status(casters=ono(streak_ok=False, data_rate_permille=950), availability={"protected_down_today_s": 10,
                                                                                          "budget_left_s": 200})]
     out = run_editor([{"fn": "dashboard", "status": x, "admin": True} for x in cases])
-    bars = [o["cards"]["Onocoy today"]["bar"] for o in out]
+    bars = [o["cards"]["Onocoy"]["bar"] for o in out]
     assert bars[0] == {"cls": "bar ok", "role": "meter", "label": "Today's offline time left", "now": "97",
                        "text": "97\u00a0% left", "width": "97.9%"}, bars[0]
     # The screenshots' "On track, 7 min 31 s left": nearly full, not nearly empty.
@@ -1751,7 +1922,7 @@ def test_health_card_takes_the_worse_of_the_alerts_and_the_status_page():
     assert stop["chip"] == ["Needs attention", "badge bad"]
     assert [m[:2] for m in stop["msgs"]] == [["msg bad", "Onocoy stopped"], ["msg warn", "Memory fragmented"]], stop["msgs"]
     # With the Status page's button (the page-wide notice that says the same is left out here).
-    assert stop["buttons"] == [["What to do", "#/casters"]]
+    assert stop["buttons"] == [["What to do", "#/ntrip"]]
     assert port["chip"] == ["Needs attention", "badge bad"] and port["buttons"] == []
     assert port["msgs"] == [["msg bad", "Receiver port closed", "The station cannot open its port to the receiver and keeps trying."]]
     # Said once: no "Receiver port: Closed, reopening" row under the line that says it.
@@ -1791,7 +1962,7 @@ def test_health_card_says_the_state_beside_an_alert_of_its_colour():
     assert [m[:2] for m in stall_["msgs"]] == [["msg warn", "Receiver stopped sending data"],
                                               ["msg warn", "Output differs from the profile"]], stall_["msgs"]
     assert safe_["chip"][1] == "badge bad"
-    assert safe_["msgs"] == [["msg bad", "Safe mode", "The receiver and casters are off after 3 crashes. The station tries "
+    assert safe_["msgs"] == [["msg bad", "Safe mode", "The receiver and NTRIP servers are off after 3 crashes. The station tries "
                               "normal operation again in 45\u00a0min."]], safe_["msgs"]
     assert safe_["buttons"] == [["Updates", "#/settings/updates"], ["Leave safe mode", "leave-safe"]]
     assert settings_["msgs"] == [["msg bad", "Settings cannot be saved",
@@ -1803,7 +1974,8 @@ def test_health_card_says_the_state_beside_an_alert_of_its_colour():
 
 def test_onocoy_card_says_a_tls_failure_once():
     """TLS to Onocoy failing again and again: the box with the count and the plain port says it, not a line above it
-    as well (the last failure, or the station's hint that says the same). Fewer failures: the line alone."""
+    as well (the last failure, or the station's hint that says the same), nor the failures row. Fewer failures: the
+    line (the last failure) and the failures row (the count by cause)."""
     cfg = stored("servers.onocoy.com", "fast", name="Onocoy", tls=True, port=2121, mountpoint="MP0TEST1", username="u")
     st = {"state": "backoff", "reason": "tls", "failures_by_class": {"tls": 12}, "state_age_s": 30, "next_retry_s": 20}
     box = "TLS to Onocoy failed 12 times. Onocoy documents uploads on the plain port only.Use plain port 2101"
@@ -1814,7 +1986,7 @@ def test_onocoy_card_says_a_tls_failure_once():
     assert out[0] == [box] and out[1] == [box]
     # Another cause last time: that line stays.
     assert out[2] == ["Timed out", box]
-    assert out[3] == ["TLS failed"]
+    assert out[3] == ["TLS failed", "FailuresTLS failed (3)"]
 
 
 def test_chip_card_names_the_access_point_and_the_transmit_power():
@@ -2013,7 +2185,7 @@ def test_long_values_wrap_at_their_separators():
                          st_caster(1, "MyVeryLongCasterName-Backup_Two", "streaming"),
                          st_caster(2, "", "streaming", host="caster.example-ntrip-service.org")])
     (o,) = dashboards(long)
-    assert o["cards"]["Casters"]["names"] == ["Onocoy", "My|Very|Long|Caster|Name-|Backup_|Two", "caster.|example-|ntrip-|service.|org"]
+    assert o["cards"]["NTRIP"]["names"] == ["Onocoy", "My|Very|Long|Caster|Name-|Backup_|Two", "caster.|example-|ntrip-|service.|org"]
     assert dict(o["cards"]["Station"]["rows"])["Wi-Fi"].startswith("HomeNetworkWithAVeryLongName2024 \u00b7 ")
     assert ".fit-kv .kv dd { overflow-wrap: anywhere; }" in css
     assert ".cline .name { font-weight: 650; overflow-wrap: anywhere; }" in css

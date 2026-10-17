@@ -206,10 +206,10 @@ def run_routes(routes: list[list[str]]) -> dict:
 
 
 def test_the_ntrip_tab_and_the_old_casters_addresses():
-    """The tab is "NTRIP" at #/ntrip, drawn by the casters view; #/casters and its parts land on #/ntrip and its parts
+    """The tab is "NTRIP" at #/ntrip, drawn by the ntrip view; #/casters and its parts land on #/ntrip and its parts
     (a bookmark, or a link not switched yet), and every tab's address has a view."""
     out = run_routes([["ntrip", ""], ["ntrip", "onocoy"], ["casters", ""], ["casters", "onocoy"], ["", ""], ["receiver", ""],
                       ["logs", ""], ["settings", ""]])
     assert out["nav"][1] == ["ntrip", "NTRIP"]
-    assert out["routes"] == [[None, "casters"], [None, "casters"], ["ntrip", "casters"], ["ntrip/onocoy", "casters"],
+    assert out["routes"] == [[None, "ntrip"], [None, "ntrip"], ["ntrip", "ntrip"], ["ntrip/onocoy", "ntrip"],
                              [None, "dashboard"], [None, "receiver"], [None, "logs"], [None, "settings"]]

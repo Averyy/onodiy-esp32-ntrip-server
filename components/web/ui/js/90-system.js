@@ -352,7 +352,7 @@ const systemPart = {
     function renderDevice() {
       const name = textInput(sys.hostname, { maxlength: 32 });
       const fName = field('Station name', name, 'Letters, digits and "-"; also its web address.');
-      const pub = checkbox('Public status page', sys.public_status, 'Anyone on your network sees the station state without logging in.');
+      const pub = checkbox('Public status page', sys.public_status, 'Anyone on your network sees the station state without a login.');
       const err = errBox();
       const save = h('button', { type: 'submit', class: 'btn primary', hidden: true }, 'Save');
       /* The .local name answers only while the mDNS responder runs (mdns_host set). */

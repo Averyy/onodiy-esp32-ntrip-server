@@ -63,7 +63,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '    return { title: t.head, tone: t.tone, key: t.key, line: t.lead, alert: t.alertId, notice: t.notice, trial: t.trial,\n' +
   '      action: t.actions.length ? (t.actions[0].act || t.actions[0].label) : null, actions: t.actions.map(x => x.act || x.label),\n' +
   '      primary: t.actions.some(x => x.primary), also: t.also.map(x => x.id), alsoText: t.also.map(x => x.title + \'. \' + x.text),\n' +
-  '      facts: t.facts, delivering: t.delivering, ono: t.onoStreaming, quality: t.quality,\n' +
+  '      delivering: t.delivering, ono: t.onoStreaming, quality: t.quality,\n' +
   '      subject: t.subject, plan: t.plan }; },\n' +
   '  onocoy: a => { const t = stationState(a, true), d = onocoyDay(a, t);\n' +
   '    return d && { verdict: d.verdict, tone: d.tone, why: d.why, left: d.left, used: d.used, share: d.share, hero: t.key }; },\n' +
@@ -114,9 +114,6 @@ def run_ui(cases: list[tuple[str, object]]) -> list:
     assert res.returncode == 0, res.stderr
     return json.loads(res.stdout)
 
-
-# Receiver setup "Manual" as the Status page's top card says it: a fact with a Change link to its card.
-ME_FACT = [["Receiver management", "Manual", "#/receiver/settings/manage"]]
 
 # The hold-overlay station whose replay stopped: the ladder's episode with the admin page open.
 HOLD = {"reboot_hold": ["admin"], "reboot_hold_left_s": 1578, "reboot_cap_wait_s": None,
@@ -226,15 +223,16 @@ def test_setup_done_says_onocoy_as_it_is():
         ("receiver", "info", "Waiting for the receiver", None),
         ("failing", "warn", "Not connected yet", None),
         ("failing", "warn", "Not connected yet", None),
-        ("safe_mode", "bad", "Casters are off in safe mode", None),
+        ("safe_mode", "bad", "NTRIP servers are off in safe mode", None),
     ], got
     assert out[3]["text"].endswith("Next try in 4\u00a0min 50\u00a0s.")
     assert out[8]["text"] == "Onocoy starts once corrections arrive. Now: receiver stopped sending data."
     assert out[10]["text"] == "DNS lookup failed. Next try in 20\u00a0s."
     assert out[11]["text"] == "Timed out. Trying again now."
-    # Plain words only: no state names or protocol terms.
+    # Plain words only: no state names or protocol terms ("NTRIP" only as the name of its page and its servers).
     for o in out:
-        assert not any(w in (o["head"] + o["text"]).lower() for w in ("rtcm", "auth_failed", "ntrip", "backoff")), o
+        said = re.sub(r"NTRIP (page|servers)", "", o["head"] + o["text"]).lower()
+        assert not any(w in said for w in ("rtcm", "auth_failed", "ntrip", "backoff")), o
 
 
 def test_onocoy_hint_never_says_set_up_for_a_slot_that_is_not():
@@ -252,24 +250,23 @@ def test_onocoy_hint_never_says_set_up_for_a_slot_that_is_not():
         assert "slot" not in text.lower()
 
 
-def test_every_caster_choice_has_its_box():
-    """Every caster in the editor's list has a box: one line saying what it is, 1 to 4 short steps, and a link
-    to the caster's own guide (Other caster has no guide). Nothing that goes stale: no dates."""
+def test_every_server_choice_has_one_help_line():
+    """Every server type in the editor's list has one short line of help (what to enter) and a link to its own
+    guide (Other server has no guide). Nothing that goes stale: no dates. Onocoy's console gives the username and
+    password only: the mountpoint is a name of the owner's, so the line never says the console gives it."""
     (got,) = run_ui([("presetInfo", None)])
     ids = [p["id"] for p in got["PRESETS"]]
     info = got["PRESET_INFO"]
     assert sorted(ids) == sorted(info), (ids, list(info))
     for pid, p in info.items():
-        assert p["what"] and p["what"].endswith("."), pid
-        assert 1 <= len(p["steps"]) <= 4, pid
-        assert all(s.endswith(".") and len(s) <= 130 for s in p["steps"]), pid
-        text = " ".join([p["what"], *p["steps"]])
-        assert not any(m in text for m in ("2025", "2026", "2027", "as of", "Rev1 =", "kbit", "Mbit")), pid
+        assert p["help"] and p["help"].endswith(".") and len(p["help"]) <= 100, pid
+        assert not any(m in p["help"] for m in ("2025", "2026", "2027", "as of", "Rev1 =", "kbit", "Mbit")), pid
         if pid == "custom":
             assert p["guide"] is None
         else:
             label, url = p["guide"]
             assert label and url.startswith(("https://", "http://rtk2go.com/")), pid
+    assert "mountpoint" not in info["onocoy"]["help"].lower()
 
 
 def test_no_receiver_refusal_text():
@@ -323,7 +320,7 @@ def test_event_list_pairs_a_drop_with_its_return_and_folds_repeats():
     assert [r["ev"] for r in rows] == ["Onocoy disconnected", "Wi-Fi dropped", "Onocoy disconnected", "Onocoy stopped"]
     assert rows[0]["det"] == "after 1\u00a0min online, timed out" and rows[0]["tone"] == "warn"
     assert rows[1]["det"] == "back after 40\u00a0s, authentication failed (wrong password?) (202), signal \u221267\u00a0dBm"
-    assert rows[2]["det"] == "back after 20\u00a0s, closed by the caster, 2 failed attempts"
+    assert rows[2]["det"] == "back after 20\u00a0s, closed by the server, 2 failed attempts"
     assert len(rows[2]["all"]) == 3 and rows[2]["id"] == "r10"
     assert rows[3]["det"] == "duplicate stream, no new attempt until you act" and rows[3]["tone"] == "bad"
     for r in rows:
@@ -606,9 +603,6 @@ def test_hero_says_what_blocks_first_and_what_to_do():
     assert out[0]["title"] == "Onocoy not set up" and out[0]["tone"] == "warn", out[0]
     assert out[0]["line"] == "Add your Onocoy credentials to start streaming."
     assert out[0]["action"] == "Set up Onocoy" and out[0]["primary"] is True
-    # Receiver management shows as a fact only when it is not the default, by the name of the setting, the choice said
-    # from the station's side ("You", where the setting's own choice says "Me"), with a link to its card.
-    assert out[0]["facts"] == ME_FACT
 
     assert out[1]["title"] == "Receiver maintenance"
     assert out[1]["line"] == "The station sends the receiver no commands. Ends in about 14 min."
@@ -626,14 +620,12 @@ def test_hero_says_what_blocks_first_and_what_to_do():
     assert out[3]["ono"] is False and out[3]["delivering"] is False
 
     assert out[4]["title"] == "Receiver sends no corrections" and out[4]["alert"] == "no_rtcm", out[4]
-    # The choice is said once, in the fact row under the line (never again in the line itself); the title says that no
-    # corrections come, the line what that means and what to do.
+    # The receiver management choice is Receiver settings' (never in the line); the title says that no corrections
+    # come, the line what that means and what to do.
     assert out[4]["line"] == "The receiver answers. Check that the antenna is on the socket marked M and sees the open sky."
     assert out[4]["tone"] == "bad" and out[4]["plan"] is None
-    assert out[4]["facts"] == ME_FACT
     assert out[5]["title"] == "Receiver stopped sending data" and out[5]["tone"] == "bad"
     assert "recovery" not in out[5]["line"] and "choice" not in out[5]["line"]
-    assert out[5]["facts"] == ME_FACT
 
 
 def test_recovery_says_what_it_does_now():
@@ -693,7 +685,6 @@ def test_recovery_says_what_it_does_now():
     assert (out[7]["key"], out[7]["line"]) == ("rx_stopped", "The station is searching for the receiver.")
     assert out[7]["plan"] == "Station restart in 27\u00a0min at the latest"
     assert (out[5]["key"], out[5]["tone"], out[5]["plan"]) == ("no_rtcm", "bad", None)
-    assert out[5]["facts"] == ME_FACT
     assert (out[6]["key"], out[6]["tone"], out[6]["plan"]) == ("no_rtcm", "warn", "The station tries again shortly.")
     silent_between = status(receiver={"rtcm_age_ms": 30000}, health=hl("none", "none"))
     assert heroes(silent_between)[0]["line"] == "The station tries again shortly."
@@ -786,20 +777,15 @@ def test_hero_casters_down_one_two_three_and_all_good():
     dns = status(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "backoff", reason="dns")])
     out = heroes(one, two, three, good_one, good_two, waiting, dns)
     assert out[0]["title"] == "Partly streaming"
-    assert out[0]["line"] == "Bench is not streaming: login refused. Next try in 30 s." and out[0]["action"] == "Casters"
-    # The line names the caster that does not stream: no "1 of 2" count beside it.
-    assert out[0]["facts"] == [] and out[0]["subject"] == 1
+    assert out[0]["line"] == "Bench is not streaming: login refused. Next try in 30 s." and out[0]["action"] == "NTRIP"
+    # The line names the server that does not stream (its subject).
+    assert out[0]["subject"] == 1
     assert out[1]["title"] == "Not streaming" and out[1]["tone"] == "bad"
-    assert out[1]["line"] == "Onocoy and Bench are not streaming." and out[1]["facts"] == []
-    # Three down: the line counts them; the Status page's Casters card lists each, so no fact counts them again.
-    assert out[2]["line"] == "3 casters are not streaming."
-    assert out[2]["facts"] == []
+    assert out[1]["line"] == "Onocoy and Bench are not streaming."
+    # Three down: the line counts them; the Status page's NTRIP card lists each.
+    assert out[2]["line"] == "3 servers are not streaming."
     assert out[3] == {**out[3], "title": "Streaming", "tone": "ok", "line": "Onocoy is receiving corrections.", "action": None}
-    # One caster turned on: no "1 of 1" fact.
-    assert out[3]["facts"] == []
     assert out[4]["line"] == "Onocoy and RTK2go are receiving corrections."
-    # The line names both as streaming: the count would say it again.
-    assert out[4]["facts"] == []
     assert out[5]["line"] == "Waiting for corrections from the receiver."
     assert out[6]["line"] == "Bench is not streaming: DNS lookup failed."
     # The public form: states only, no reason, no button.
@@ -824,7 +810,7 @@ def test_hero_safe_mode_stop_and_alerts_while_streaming():
     none = status(casters=[])
     out = heroes(safe, stopped, link_loss, bare_level, off, none)
     assert out[0]["title"] == "Safe mode" and out[0]["tone"] == "bad"
-    assert out[0]["line"] == "The receiver and casters are off after 3 crashes. The station tries normal operation again in 45 min."
+    assert out[0]["line"] == "The receiver and NTRIP servers are off after 3 crashes. The station tries normal operation again in 45 min."
     assert out[0]["alert"] == "safe_mode" and out[0]["notice"] == "safe_mode" and out[0]["also"] == []
     # Two buttons in safe mode: the cure (an update) and leaving it, a button the page handles.
     assert out[0]["actions"] == ["Updates", "leave-safe"]
@@ -837,13 +823,13 @@ def test_hero_safe_mode_stop_and_alerts_while_streaming():
     # The level alone (no alert to show) leaves the dot green and adds nothing.
     assert out[3]["tone"] == "ok" and out[3]["line"] == "Onocoy is receiving corrections." and out[3]["also"] == []
     assert out[4]["line"] == "Onocoy is set up but turned off. Turn it on to start streaming." and out[4]["action"] == "Turn Onocoy on"
-    assert out[5]["line"] == "Add a caster to start streaming." and out[5]["action"] == "Add a caster"
+    assert out[5]["line"] == "Add a server to start streaming." and out[5]["action"] == "Add a server"
     # The public form says safe mode by its one flag (no crashes, no retry, no button); an older one without it: as before.
     pub = {"api": 1, "public": True, "uptime_s": 60, "device": {"hostname": "onocoydiy"}, "safe_mode": {"active": True},
            "receiver": {"state": "idle", "best_bands": 0}, "casters": [], "health": {"level": "failed"}}
     older = {k: v for k, v in pub.items() if k != "safe_mode"}
     p_safe, p_old = heroes(pub, older, admin=False)
-    assert p_safe == {**p_safe, "key": "safe_mode", "title": "Safe mode", "tone": "bad", "line": "The receiver and casters are off.",
+    assert p_safe == {**p_safe, "key": "safe_mode", "title": "Safe mode", "tone": "bad", "line": "The receiver and NTRIP servers are off.",
                       "actions": []}
     assert p_old["key"] == "receiver" and p_old["title"] == "Starting up"
 
@@ -1466,7 +1452,7 @@ def test_header_says_the_station_state_in_a_word_in_the_top_cards_colour():
         # The owner's board without its antenna, receiver setup "Manual".
         (dict(health={"level": "degraded", "recovery_mode": "alerts_only"}, alerts=[{"id": "no_rtcm", "source": "health"}],
               casters=wait), ("no_rtcm", "bad", "Not streaming")),
-        (dict(casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate")]), ("stopped", "bad", "Caster stopped")),
+        (dict(casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate")]), ("stopped", "bad", "Server stopped")),
         (dict(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 830}), ("maintenance", "info", "Maintenance")),
         (dict(receiver={"state": "configuring", "signal_test": {"state": "measuring", "phase": 0, "left_s": 600,
                                                                "group": {"master": 3, "slave": 6}}}),
@@ -1485,7 +1471,7 @@ def test_header_says_the_station_state_in_a_word_in_the_top_cards_colour():
         # Nothing streams and the caster that is on fails: that first (Onocoy's setup waits on the Status page's card).
         (dict(casters=[caster(0, "Onocoy", "disabled", onocoy_ready=False), caster(1, "RTK2go", "backoff")]),
          ("casters_down", "bad", "Not streaming")),
-        (dict(casters=[caster(0, "Onocoy", "disabled")]), ("no_caster", "warn", "No caster")),
+        (dict(casters=[caster(0, "Onocoy", "disabled")]), ("no_caster", "warn", "No server")),
         (dict(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "auth_failed", reason="auth")]),
          ("casters_down", "warn", "Partly streaming")),
         (dict(casters=[caster(0, "Onocoy", "backoff", reason="refused")]), ("casters_down", "bad", "Not streaming")),
@@ -1509,7 +1495,7 @@ def test_header_says_the_station_state_in_a_word_in_the_top_cards_colour():
     public = [status(public=True), status(public=True, casters=[]),
               status(public=True, receiver={"state": "no_receiver", "rtcm_age_ms": None})]
     assert [g[:3] for g in run_ui([("word", [x, False]) for x in public])] == [
-        ["streaming", "ok", "Streaming"], ["no_caster", "warn", "No caster"], ["no_receiver", "bad", "No receiver"]]
+        ["streaming", "ok", "Streaming"], ["no_caster", "warn", "No server"], ["no_receiver", "bad", "No receiver"]]
 
 
 def test_logs_three_parts_and_the_old_diagnostics_addresses():
@@ -1525,7 +1511,7 @@ def test_logs_three_parts_and_the_old_diagnostics_addresses():
 
 def test_every_link_in_the_ui_goes_to_a_page_that_exists():
     """No button, link or notice points at an old address (it would only redirect) or a part a page does not have."""
-    pages = {"": None, "ntrip": None, "casters": None, "receiver": {"settings", "live"},
+    pages = {"": None, "ntrip": None, "receiver": {"settings", "live"},
              "settings": {"updates", "session", "wifi", "restart"}, "logs": {"history", "console"}}
     # The places a part is opened at (#/receiver/settings/manage: the Receiver setup card).
     places = {("receiver", "settings"): {"manage"}, ("receiver", "live"): {"start"}}

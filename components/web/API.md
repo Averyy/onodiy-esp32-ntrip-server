@@ -2578,15 +2578,16 @@ LAN).
    goes on.
 6. Optional: the Onocoy slot, `PUT /api/casters/0` with `onocoy_preset`
    (host `servers.onocoy.com` and port 2101, shown, not editable) and what the
-   Onocoy console gives: `mountpoint`, `username` and `password`
-   (section 10).
+   Onocoy console gives (`username` and `password`), plus a `mountpoint`
+   that is any name (prefilled with the station name; Onocoy shows it
+   only in the owner's dashboard) (section 10).
 7. The last screen (`setup_step` `casters`): the UI polls `GET /api/status`
    and shows the Onocoy slot's state as it happens (connecting, a refused
    login with `login_rejects` from `GET /api/casters`, streaming once
    corrections flow), the next steps in the Onocoy console, and a link to
-   the Casters page for more casters.
+   the NTRIP page (`#/ntrip`) for more servers.
 8. `POST /api/setup/done` (it also erases `setup_step`): the dashboard, or
-   the Casters page from that link.
+   the NTRIP page from that link.
 
 Every step posts the next one (`POST /api/setup/step`) before it shows it.
 Wi-Fi credentials can never be saved before an admin password exists

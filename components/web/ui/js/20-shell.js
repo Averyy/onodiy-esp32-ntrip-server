@@ -15,7 +15,7 @@
 const Views = {};
 const NAV = [['', 'Status'], ['ntrip', 'NTRIP'], ['receiver', 'Receiver'], ['logs', 'Logs'], ['settings', 'Settings']];
 /* The view that draws an address whose name is not its key. */
-const VIEW_KEY = { '': 'dashboard', ntrip: 'casters' };
+const VIEW_KEY = { '': 'dashboard' };
 
 function viewOf(name) {
   return Views[VIEW_KEY[name] || name];
@@ -244,7 +244,6 @@ function openView(name, arg) {
       console.error(e);
     }
   }
-  if (name === 'casters') name = 'ntrip';   /* a page that opens itself by its view key ("Try again") */
   const def = viewOf(name);
   /* Each visit draws into its own element: an answer that arrives after the page was left lands nowhere. */
   const el = h('div', { class: 'page-root' });

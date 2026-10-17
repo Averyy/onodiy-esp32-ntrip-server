@@ -55,10 +55,8 @@ const ALERT_PAGE = {
   profile_drift: '#/receiver', position_mismatch: '#/receiver', rx_held: '#/receiver',
   receiver_attention: '#/settings/updates', receiver_in_loader: '#/settings/session',
 };
-/* Where the Onocoy credentials are entered (the caster editor opens on the Onocoy slot). */
-const ONOCOY_SETUP_HASH = '#/casters/onocoy';
-/* Receiver settings opened at its Receiver management card. */
-const MANAGE_HASH = '#/receiver/settings/manage';
+/* Where Onocoy is set up or turned on (the NTRIP page opens the Onocoy slot's editor, or its card while it is set up and off). */
+const ONOCOY_SETUP_HASH = '#/ntrip/onocoy';
 /* A caster's states that keep it from streaming until a retry or the user: its colour stays amber or red meanwhile. */
 const CASTER_FAULT = ['backoff', 'auth_failed', 'config_error', 'banned', 'stopped'];
 /* Corrections this fresh (ms) arrive, as the station counts them (it calls the receiver streaming while they do). */
@@ -81,7 +79,7 @@ function onocoySlot(s) {
   return p.find(casterOn) || p[0] || null;
 }
 
-/** True when the Onocoy slot is enabled and has the console's mountpoint, username and password. */
+/** True when the Onocoy slot is enabled and set up (a mountpoint, the console's username and password). */
 function onocoyCounting(c) {
   return !!(c && c.enabled !== false && c.onocoy_ready);
 }
@@ -98,7 +96,7 @@ function rxState(s) {
   return r.state;
 }
 
-const casterName = c => c.name || c.host || 'A caster';
+const casterName = c => c.name || c.host || 'A server';
 
 /* "A and B", "A, B and C". */
 function andList(names) {
@@ -195,9 +193,8 @@ function qualityLead(q, name) {
  * else), plan (doing, then the next
  * search and restart: one short line), trial (the Wi-Fi on trial), also
  * (other alerts, and each caster on that a retry or the user must clear,
- * unless the line names it or counts the casters down), facts ([label,
- * value, href of a Change link]: Receiver management when not the
- * default), delivering, arriving (corrections arrive: as fresh as the
+ * unless the line names it or counts the casters down), delivering,
+ * arriving (corrections arrive: as fresh as the
  * station's own rule, RTCM_FRESH_MS, and nothing says the receiver stopped),
  * quality (rxQuality()),
  * ono (the Onocoy slot while it counts), onoStreaming (with corrections
@@ -247,8 +244,8 @@ function stationState(s, admin) {
 
   const decide = () => {
     if (sm.active) {
-      if (!admin) return pick('safe_mode', 'Safe mode', 'bad', 'The receiver and casters are off.');
-      return pick('safe_mode', 'Safe mode', 'bad', 'The receiver and casters are off after ' +
+      if (!admin) return pick('safe_mode', 'Safe mode', 'bad', 'The receiver and NTRIP servers are off.');
+      return pick('safe_mode', 'Safe mode', 'bad', 'The receiver and NTRIP servers are off after ' +
         (sm.crashes ? sm.crashes + ' crashes' : 'repeated crashes') + '.' +
         (sm.retry_in_s ? ' The station tries normal operation again in ' + upMin(sm.retry_in_s) + '.' : ''),
       { actions: [go('Updates', '#/settings/updates'), { act: 'leave-safe', label: 'Leave safe mode' }], alertId: 'safe_mode',
@@ -315,7 +312,7 @@ function stationState(s, admin) {
     if (stopped) {
       return pick('stopped', casterName(stopped) + ' stopped', 'bad', capFirst(lbl(L.stop, stopped.stop_reason || 'none')) +
         '. The station makes no new attempt until you act.',
-      { actions: [go('What to do', '#/casters')], notice: 'onocoy_stopped:' + stopped.slot, subject: stopped.slot,
+      { actions: [go('What to do', '#/ntrip')], notice: 'onocoy_stopped:' + stopped.slot, subject: stopped.slot,
         named: [stopped.slot] });
     }
     if (admin && rcv.rx_maintenance) {
@@ -352,26 +349,26 @@ function stationState(s, admin) {
         'Add your Onocoy credentials to start streaming.', { actions: [go('Set up Onocoy', ONOCOY_SETUP_HASH, true)] });
     }
     if (!on.length) {
-      if (!admin) return pick('no_caster', 'Not streaming', 'warn', 'The station is not streaming to any caster.');
+      if (!admin) return pick('no_caster', 'Not streaming', 'warn', 'The station is not streaming to any NTRIP server.');
       if (onoSlot) {
-        return pick('no_caster', 'No caster turned on', 'warn', 'Onocoy is set up but turned off. Turn it on to start streaming.',
+        return pick('no_caster', 'No NTRIP server turned on', 'warn', 'Onocoy is set up but turned off. Turn it on to start streaming.',
           { actions: [go('Turn Onocoy on', ONOCOY_SETUP_HASH, true)] });
       }
       if ((s.casters || []).some(c => !emptySlot(c))) {
-        return pick('no_caster', 'No caster turned on', 'warn', 'Every caster is turned off. Turn one on to start streaming.',
-          { actions: [page('Casters', '#/casters', true)] });
+        return pick('no_caster', 'No NTRIP server turned on', 'warn', 'Every server is turned off. Turn one on to start streaming.',
+          { actions: [page('NTRIP', '#/ntrip', true)] });
       }
-      return pick('no_caster', 'No caster turned on', 'warn', 'Add a caster to start streaming.',
-        { actions: [go('Add a caster', '#/casters', true)] });
+      return pick('no_caster', 'No NTRIP server turned on', 'warn', 'Add a server to start streaming.',
+        { actions: [go('Add a server', '#/ntrip', true)] });
     }
     if (down.length) {
       const head = streaming.length ? 'Partly streaming' : 'Not streaming';
       const tone = streaming.length ? 'warn' : 'bad';
-      const more = admin ? { actions: [page('Casters', '#/casters')] } : {};
+      const more = admin ? { actions: [page('NTRIP', '#/ntrip')] } : {};
       const noNet = find('no_upstream');
       if (noNet) return pick('casters_down', head, tone, alertText(noNet)[1], Object.assign(more, { alertId: 'no_upstream' }));
       if (down.every(c => c.state === 'wait_data')) {
-        /* The receiver delivers, yet the casters wait: an alert of the station's may say why. */
+        /* The receiver delivers, yet the servers wait: an alert of the station's may say why. */
         for (const [id, label, href] of [['antenna_moved', 'Receiver', '#/receiver'], ['receiver_attention', 'Updates', '#/settings/updates'],
           ['config_failed', 'Receiver', '#/receiver']]) {
           const a = find(id, 'station');
@@ -387,7 +384,7 @@ function stationState(s, admin) {
         more.subject = c.slot;
         more.named = [c.slot];
       } else {
-        lead = (down.length === 2 ? andList(down.map(casterName)) : down.length + ' casters') + ' are not streaming.';
+        lead = (down.length === 2 ? andList(down.map(casterName)) : down.length + ' servers') + ' are not streaming.';
         more.named = down.length === 2 ? down.map(c => c.slot) : [];
       }
       return pick('casters_down', head, tone, lead, more);
@@ -403,7 +400,7 @@ function stationState(s, admin) {
           alertId: quality.fewBands && find('bands') ? 'bands' : null });
     }
     const names = on.map(casterName);
-    return pick('streaming', 'Streaming', 'ok', (names.length > 3 ? names.length + ' casters' : andList(names)) +
+    return pick('streaming', 'Streaming', 'ok', (names.length > 3 ? names.length + ' servers' : andList(names)) +
       (names.length > 1 ? ' are' : ' is') + ' receiving corrections.', { named: names.length > 3 ? [] : on.map(c => c.slot) });
   };
 
@@ -412,20 +409,18 @@ function stationState(s, admin) {
   /* A closed port is why no receiver is found: its cable advice would mislead. */
   r.also = alerts.filter(a => a.id !== r.alertId && r.covers.indexOf(a.id) < 0 && !(r.key === 'uart_closed' && a.id === 'no_receiver'))
     .map(a => ({ id: a.id, title: alertText(a, rcv)[0], text: alertText(a, rcv)[1], tone: alertTone(a), href: ALERT_PAGE[a.id] || '#/logs' }));
-  /* A caster the line does not name keeps its amber or red word until a retry or the user clears it: an "Also:" line says why
-   * (the Casters card shows the word only). Not while the line names or counts the casters down; a retry wait while the
+  /* A server the line does not name keeps its amber or red word until a retry or the user clears it: an "Also:" line says why
+   * (the NTRIP card shows the word only). Not while the line names or counts the servers down; a retry wait while the
    * station has no internet is that alert's. */
   if (admin && r.key !== 'casters_down') {
     const noNet = !!find('no_upstream');
     for (const c of on) {
       if (c.slot === r.subject || CASTER_FAULT.indexOf(c.state) < 0 || (c.state === 'backoff' && noNet)) continue;
       r.also.push({ id: 'caster:' + c.slot, title: casterName(c) + ' not streaming', text: casterWhy(c) || '',
-        tone: casterTone(c.state), href: '#/casters' });
+        tone: casterTone(c.state), href: '#/ntrip' });
     }
   }
   r.also.sort((a, b) => (order[a.tone] || 0) - (order[b.tone] || 0));
-  r.facts = [];
-  if (admin && hl.recovery_mode && hl.recovery_mode !== 'full') r.facts.push(['Receiver management', lbl(L.manage, hl.recovery_mode), MANAGE_HASH]);
   const plan = admin && ['rx_stopped', 'no_receiver', 'no_satellites', 'no_rtcm'].indexOf(r.key) >= 0 ?
     [r.search, restartPlanShort(hl)].filter(Boolean) : [];
   const later = plan.length ? capFirst(plan.join(' · ')) : null;
@@ -451,8 +446,8 @@ const STATE_WORD = {
   safe_mode: 'Safe mode', journal: 'Needs you', settings: 'Settings error', updating: 'Updating', uart_closed: 'Port closed',
   no_receiver: 'No receiver', rx_stopped: { bad: 'Not streaming', warn: 'Recovering' },
   no_satellites: { bad: 'Not streaming', warn: 'Recovering' }, no_rtcm: { bad: 'Not streaming', warn: 'Recovering' },
-  stopped: 'Caster stopped', maintenance: 'Maintenance', signal_test: { warn: 'Needs you', info: 'Comparing' },
-  wifi_trial: 'Trying Wi-Fi', held: 'Needs you', receiver: null, onocoy_setup: 'Not set up', no_caster: 'No caster',
+  stopped: 'Server stopped', maintenance: 'Maintenance', signal_test: { warn: 'Needs you', info: 'Comparing' },
+  wifi_trial: 'Trying Wi-Fi', held: 'Needs you', receiver: null, onocoy_setup: 'Not set up', no_caster: 'No server',
   casters_down: { bad: 'Not streaming', warn: 'Partly streaming' }, fixed_far: 'Wrong position', quality: null,
   streaming: 'Streaming',
 };
@@ -532,8 +527,8 @@ function onocoyNow(s, rejects) {
   const st = stationState(s, true);
   const c = onocoySlot(s);
   const r = (key, tone, head, text, act) => ({ key: key, tone: tone, head: head, text: text || '', act: act || null });
-  if (st.key === 'safe_mode') return r('safe_mode', 'bad', 'Casters are off in safe mode', 'The Status page says what to do.');
-  if (!c || c.onocoy_ready === false) return r('setup', 'warn', 'Onocoy is not set up', 'Add it now, or later on the Casters page.', 'setup');
+  if (st.key === 'safe_mode') return r('safe_mode', 'bad', 'NTRIP servers are off in safe mode', 'The Status page says what to do.');
+  if (!c || c.onocoy_ready === false) return r('setup', 'warn', 'Onocoy is not set up', 'Add it now, or later on the NTRIP page.', 'setup');
   if (c.enabled === false || c.state === 'disabled') return r('setup', 'warn', 'Onocoy is turned off', 'Saving its credentials turns it on.', 'setup');
   if (st.onoStreaming) return r('streaming', 'ok', 'Streaming to Onocoy', '');
   const next = c.next_retry_s ? ' Next try in ' + fmt.dur(c.next_retry_s) + '.' : '';
@@ -546,7 +541,7 @@ function onocoyNow(s, rejects) {
   }
   if (c.state === 'auth_failed') {
     return r('refused', 'bad', 'Login refused' + (rejects ? ' (' + rejects + ' of 3)' : ''),
-      'Check the mountpoint, username and password against the Onocoy console.' + next, 'edit');
+      'Check the username and password against the Onocoy console.' + next, 'edit');
   }
   if (!st.delivering) return r('receiver', 'info', 'Waiting for the receiver', 'Onocoy starts once corrections arrive. Now: ' + st.head.toLowerCase() + '.');
   /* After a failure the title stays put while the station tries again (no flicker with each attempt). */
