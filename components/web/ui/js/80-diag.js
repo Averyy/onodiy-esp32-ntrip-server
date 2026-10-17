@@ -4,10 +4,10 @@
  *
  * Diagnostics (#/diag, not a tab: reached from Settings) in three parts:
  * Overview (health and alerts, this start with its core dump, earlier
- * starts, the chip, the Wi-Fi signal and access point, the firmware's raw
- * counters folded), History (the last 30 days, then one event list read
- * from the journal) and Logs (this start and the previous one, the log
- * level).
+ * starts, the chip, the Wi-Fi signal and access point, what the Receiver
+ * page leaves out of the receiver, the firmware's raw counters folded),
+ * History (the last 30 days, then one event list read from the journal)
+ * and Logs (this start and the previous one, the log level).
  */
 
 const DIAG_TABS = [['', 'Overview'], ['history', 'History'], ['logs', 'Logs']];
@@ -330,6 +330,130 @@ function linkCounts(net, w) {
   w && w.roams ? ['Moves to another access point', fmt.num(w.roams) + ' this start'] : null];
 }
 
+/* ---- Receiver: what the Receiver page leaves out --------------------------- */
+
+const SETTING = { on: 'On', off: 'Off', unknown: 'Unknown' };
+
+/** When the settings were read back: "at 9:06", an older read with its date, or its age. */
+function readWhen(rs) {
+  if (rs.read_unix) {
+    const d = new Date(rs.read_unix * 1000);
+    return Date.now() - d.getTime() < 20 * 3600000 ?
+      'at ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : 'on ' + fmt.time(rs.read_unix);
+  }
+  return rs.age_s !== null && rs.age_s !== undefined ? fmt.dur(rs.age_s) + ' ago' : '';
+}
+
+/**
+ * What the running signal group configures on the main antenna input, from
+ * the last configuration (rx_bands), short: bands per constellation, the
+ * signals on hover.
+ */
+function bandsRow(g) {
+  const b = g.rx_bands || {};
+  const muted = t => ['Bands configured', h('span', { class: 'muted' }, t)];
+  if (b.state === 'refused') return muted('Not reported by this firmware');
+  if (b.state === 'unread') return muted('Unknown');
+  if (b.state !== 'ok') return muted('Known after the next configuration');
+  const list = [];
+  (b.systems || []).filter(x => (x.signals || []).length).forEach((x, i) => list.push(i ? ' · ' : '',
+    h('span', { title: (BAND_SYS[x.sys] || x.sys) + ': ' + x.signals.join(', ') }, (BAND_SYS[x.sys] || x.sys) + ' ' + x.bands)));
+  return ['Bands configured', list];
+}
+
+/* Two names as the station compares them: runs of spaces as one, the ends trimmed. */
+const sameText = (a, b) => String(a || '').replace(/\s+/g, ' ').trim() === String(b || '').replace(/\s+/g, ' ').trim();
+
+/**
+ * What the descriptor (RTCM 1033, d) says of the receiver and its antenna,
+ * against the identity (r) and the antenna read back (ant, null: not read)
+ * above it: {rows, matches}. Where every field that can be compared is the
+ * same, only those that cannot be are rows and matches is true; once one
+ * differs, every field is a row, those that differ in amber.
+ */
+function descriptorRows(d, r, ant) {
+  const known = r.valid !== false;
+  /* The type names the model, maybe with its maker ("UNICORE UM982"). */
+  const typeHas = m => String(d.receiver_type || '').toUpperCase().indexOf(String(m).toUpperCase()) >= 0;
+  /* [label, value, null: cannot be compared / true: the same / false: differs] */
+  const f = [
+    ['Receiver type', d.receiver_type, known && r.model ? typeHas(r.model) : null],
+    ['Receiver firmware', d.receiver_fw, known && r.firmware ? sameText(d.receiver_fw, r.firmware) : null],
+    ['Receiver serial', d.receiver_serial, known && r.serial ? sameText(d.receiver_serial, r.serial) : null],
+    ['Antenna', d.antenna, ant ? sameText(d.antenna, ant.model) : null],
+    ['Antenna serial', d.antenna_serial, ant ? sameText(d.antenna_serial, ant.serial) : null],
+    ['Antenna setup ID', String(d.setup_id), ant ? Number(d.setup_id) === Number(ant.setup_id) : null],
+  ];
+  const differs = f.some(x => x[2] === false);
+  /* The antenna's name as the receiver keeps it (spaces shown); no name is "none", any other empty field a dash. */
+  const value = x => (x[0] === 'Antenna' ? (x[1] ? h('span', { class: 'ant' }, x[1]) : h('span', { class: 'muted' }, 'none')) : x[1] || DASH);
+  return {
+    matches: !differs && f.some(x => x[2] === true),
+    rows: f.filter(x => differs || x[2] === null).map(x => [x[0], x[2] === false ? h('span', { class: 't-warn' }, value(x), ' (differs)') :
+      value(x)]),
+  };
+}
+
+/**
+ * The Receiver card (GET /api/gnss, may be missing): who the receiver is and
+ * whether it answers, what it read back at the last configuration with the
+ * steps it took or refused, and what casters get from it (the station's own
+ * messages: its position and its descriptor, RTCM 1033, whose receiver and
+ * antenna fields show only where they cannot be checked against the parts
+ * before or differ: descriptorRows). While the first configuration is held,
+ * the commands it would send (preview: GET /api/gnss/apply/preview).
+ */
+function diagReceiverCard(g, preview) {
+  if (!g) return null;
+  const r = g.receiver || {};
+  const rs = g.rx_settings || {};
+  const steps = g.apply_steps || {};
+  const ant = rs.antenna;
+  const d = g.rtcm1033 || {};
+  const arp = g.arp || {};
+  const ago = v => (v === null || v === undefined ? DASH : fmt.ms(v) + ' ago');
+  const step = (label, x) => (x && x.sent ? [label, x.ok ? 'Accepted' :
+    h('span', { class: 't-warn' }, 'Rejected: ' + (x.reply || 'no reason given'))] : null);
+  const part = (title, ...kids) => h('div', null, h('h3', { class: 'sub' }, title), kids);
+  const when = rs.valid ? readWhen(rs) : '';
+  const desc = d.valid ? descriptorRows(d, r, rs.valid ? ant : null) : { rows: [], matches: false };
+  return h('section', { class: 'card wide tight-kv' }, h('h2', null, 'Receiver'), h('div', { class: 'parts' },
+    part('Identity', kv([
+      ['Model', r.valid === false ? h('span', { class: 'muted' }, 'Not identified yet') : [r.model || DASH, ' · ', fwText(r.firmware, r.build)]],
+      ['Serial number', r.serial],
+      ['Part number', r.pn],
+      ['Chip ID', r.efuse_id],
+      ['Firmware date', r.compile_date],
+      /* responding: it streams, or it answered since its corrections stopped (a reply, its NMEA). */
+      ['Answers', g.restarting ? h('span', { class: 't-warn' }, 'Restarting, back in about 10 s') : fmt.yesno(g.responding)],
+      /* Not checked during maintenance: no "No" that reads as a failed check. */
+      ['Identity confirmed', gnssUnchecked(g) ? DASH : fmt.yesno(g.identity_confirmed)],
+    ])),
+    part('Read from the receiver' + (when ? ' ' + when : ''), rs.valid ? null :
+      h('p', { class: 'muted small' }, 'Read at each configuration; unknown until the next one.'), kv([
+      rs.valid ? ['B1C/B2a output', lbl(SETTING, rs.b1cb2a || 'unknown')] : null,
+      rs.valid ? ['Multipath mitigation', lbl(SETTING, rs.mmp || 'unknown')] : null,
+      rs.valid ? ['Elevation mask', rs.mask_deg === null || rs.mask_deg === undefined ? 'Unknown' : Number(rs.mask_deg).toFixed(1) + '°'] : null,
+      rs.valid ? ['Antenna in the receiver', ant ? [ant.model ? h('span', { class: 'ant' }, ant.model) : h('span', { class: 'muted' }, 'none'),
+        ant.serial ? ' · serial ' + ant.serial : '', ' · setup ID ' + ant.setup_id] : 'Unknown'] : null,
+      step('Antenna name sent', steps.antenna),
+      step('B1C/B2a turned on', steps.b1cb2a),
+      ['GLONASS biases (1230)', g.rtcm1230_supported === null || g.rtcm1230_supported === undefined ? 'Not configured yet' :
+        g.rtcm1230_supported ? 'Accepted' : h('span', { class: 't-warn' }, 'Refused by the receiver')],
+      bandsRow(g),
+    ])),
+    part('What casters get', kv([
+      ['Station ID', d.valid ? String(d.station_id) : arp.valid ? String(arp.station_id) : DASH],
+      ['Position (1005)', arp.valid ? 'Received ' + ago(arp.age_ms) : h('span', { class: 'muted' }, 'Not received yet')],
+      ['Descriptor (1033)', d.valid ? 'Received ' + ago(d.age_ms) + (desc.matches ? ', matches the receiver' : '') :
+        h('span', { class: 'muted' }, 'Not received yet')],
+      ...desc.rows,
+      d.bad_frames ? ['Unreadable 1033 messages', h('span', { class: 't-warn' }, fmt.num(d.bad_frames))] : null,
+    ]))),
+    g.first_apply_held ? h('div', null, h('h3', { class: 'sub' }, 'Commands the first configuration sends'),
+      preview ? previewList(preview) : h('p', { class: 'muted small' }, 'Reading the commands…')) : null);
+}
+
 /*
  * Patched in place with each GET /api/health (every 5 s) and each status
  * (patchDetect; the buttons act through data-act), so the focus, a
@@ -337,7 +461,7 @@ function linkCounts(net, w) {
  * while their section is open.
  */
 function overviewTab(box) {
-  let lastHl = null, sys = null, wifi = null, tasks = null, stopTasks = null, gone = false;
+  let lastHl = null, sys = null, wifi = null, gnss = null, preview = null, tasks = null, stopTasks = null, gone = false;
   const render = hl => {
     if (gone) return;   /* an answer that came after the page was left */
     lastHl = hl;
@@ -385,6 +509,7 @@ function overviewTab(box) {
         h('h2', null, 'Earlier starts'),
         lines.length ? scrollBox('Earlier starts', h('table', { class: 'rows' },
           h('tbody', null, foldRows(lines, 5, 'Older starts', 3, opened.has('starts'), 'starts')))) : h('p', { class: 'muted' }, 'None recorded.')),
+      diagReceiverCard(gnss, preview),
       h('section', { class: 'card wide tight-kv' },
         h('details', { class: 'fold', 'data-k': 'internals', open: opened.has('internals') },
           h('summary', null, h('h2', null, 'Firmware internals')),
@@ -471,6 +596,12 @@ function overviewTab(box) {
     wifi = await api('GET', '/api/wifi');
     again();
   });
+  /* The receiver (its Receiver card) every 10 s; while its first configuration is held, also what that would send. */
+  const stopGnss = poller(10000, async () => {
+    gnss = await api('GET', '/api/gnss');
+    preview = gnss && gnss.first_apply_held ? await api('GET', '/api/gnss/apply/preview').catch(() => null) : null;
+    again();
+  });
   const stopHl = pollInto(box, 5000, '/api/health', render);
   return {
     update: again,
@@ -479,6 +610,7 @@ function overviewTab(box) {
       healthCardShown = false;
       stopHl();
       stopWifi();
+      stopGnss();
       if (stopTasks) stopTasks();
     },
   };

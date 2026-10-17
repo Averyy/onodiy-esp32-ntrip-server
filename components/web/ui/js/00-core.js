@@ -185,14 +185,6 @@ function settingRow(title, text, button) {
   return h('div', { class: 'setting-row' }, h('div', null, h('strong', null, title), h('span', null, text)), button);
 }
 
-/**
- * A disclosure (details.more): its summary, then kids. open: the state to
- * start in (a refresh that rebuilds it passes what the user left it at).
- */
-function disclosure(summary, open, ...kids) {
-  return h('details', { class: 'more', open: !!open }, h('summary', null, summary), kids);
-}
-
 /** A card that is the whole page (log in, no answer, the wizard): its title is the page's one h1. */
 function pageCard(title, ...kids) {
   return h('section', { class: 'card' }, h('h1', null, title), kids);

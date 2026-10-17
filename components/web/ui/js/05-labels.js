@@ -251,8 +251,9 @@ const L = {
   liveEnd: {
     none: '', user: 'you stopped it', expired: 'its time was up', idle: 'no page showed it for a while', flash: 'a receiver update began',
   },
-  previewKind: { query: 'reads only', write: 'changes the receiver' },
-  previewWhen: { always: 'always', if_differs: 'only if the receiver differs', if_off: 'only if it is off in the receiver' },
+  /* A command of the held configuration, in a word or two after it (always: nothing to add). */
+  previewKind: { query: 'reads', write: 'writes' },
+  previewWhen: { always: '', if_differs: 'if different', if_off: 'if off' },
   /* Signal-group comparison (GET /api/gnss/signal-test). */
   sgtState: {
     idle: '', switching: 'Switching', settling: 'Settling', measuring: 'Measuring', deciding: 'Waiting for your choice',
@@ -295,25 +296,6 @@ function sgName(m, s) {
 function fwText(fw, build) {
   if (!fw) return DASH;
   return build && String(fw).indexOf(String(build)) < 0 ? fw + ' (build ' + build + ')' : fw;
-}
-
-/* MSM signal IDs by name (public RTCM signal tables), per constellation. */
-const SIG_NAME = {
-  gps: { 2: 'L1 C/A', 3: 'L1P', 4: 'L1W', 8: 'L2C', 9: 'L2P', 10: 'L2W', 15: 'L2C(M)', 16: 'L2C(L)', 17: 'L2C', 22: 'L5I',
-    23: 'L5Q', 24: 'L5', 30: 'L1C(D)', 31: 'L1C(P)', 32: 'L1C' },
-  glonass: { 2: 'G1 C/A', 3: 'G1P', 8: 'G2 C/A', 9: 'G2P' },
-  galileo: { 2: 'E1C', 3: 'E1A', 4: 'E1B', 5: 'E1', 6: 'E1Z', 8: 'E6C', 9: 'E6A', 10: 'E6B', 11: 'E6', 12: 'E6Z', 14: 'E5bI',
-    15: 'E5bQ', 16: 'E5b', 18: 'E5 AltBOC I', 19: 'E5 AltBOC Q', 20: 'E5 AltBOC', 22: 'E5aI', 23: 'E5aQ', 24: 'E5a' },
-  qzss: { 2: 'L1 C/A', 9: 'L6D', 10: 'L6P', 11: 'L6', 12: 'L6E', 13: 'L6Z', 15: 'L2C(M)', 16: 'L2C(L)', 17: 'L2C', 22: 'L5I',
-    23: 'L5Q', 24: 'L5', 30: 'L1C(D)', 31: 'L1C(P)', 32: 'L1C' },
-  beidou: { 2: 'B1I', 3: 'B1Q', 4: 'B1', 8: 'B3I', 9: 'B3Q', 10: 'B3', 14: 'B2I', 15: 'B2Q', 16: 'B2', 22: 'B2a data',
-    23: 'B2a pilot', 24: 'B2a', 25: 'B2b', 30: 'B1C data', 31: 'B1C pilot', 32: 'B1C' },
-  navic: { 22: 'L5 SPS' },
-};
-
-function sigNames(sys, ids) {
-  const t = SIG_NAME[sys] || {};
-  return (ids || []).map(id => t[id] || 'signal ' + id).join(', ');
 }
 
 /* Receiver maintenance durations (s) as the station offers them. */
@@ -427,12 +409,6 @@ function casterTone(state) {
 
 function healthTone(level) {
   return { ok: 'ok', degraded: 'warn', recovering: 'warn', failed: 'bad' }[level] || '';
-}
-
-/** Tone for an RTCM age in ms (Onocoy wants each epoch within a second). */
-function ageTone(ms) {
-  if (ms === null || ms === undefined) return 'bad';
-  return ms < 1500 ? 'ok' : ms < 5000 ? 'warn' : 'bad';
 }
 
 /* Minutes for a sentence ("4 min"; under a minute in seconds). */

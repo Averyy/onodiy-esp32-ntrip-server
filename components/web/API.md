@@ -1084,8 +1084,8 @@ interrupts RTCM is PROVISIONAL, to be confirmed on hardware.
 The UI opens it from the Receiver page's Signals card ("Show the sky"):
 the time left with Extend and Close, the sky plot (satellites with a
 position, coloured by C/N0, labelled) beside the card's band table, and
-every satellite behind "Show all", one line each (best C/N0 and the C/N0
-per band). The station map sits in the Receiver card's Details: the
+every satellite under that table, one line each (best C/N0 and the C/N0
+per band). The station map sits in the Receiver page's Position card: the
 position with a small OpenStreetMap tile mosaic, fetched only after the
 user asks for it, with the attribution and a plain link to open the
 position in an external map (offline: the coordinates only).

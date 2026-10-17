@@ -685,7 +685,7 @@ input:disabled, select:disabled { opacity: 0.65; }
 }
 
 details.more { margin-top: 0.85rem; }
-/* A card that folds to its title row (Receiver settings: the comparison, the receiver's details). */
+/* A card that folds to its title row (Diagnostics: Firmware internals). */
 details.fold > summary { display: flex; align-items: center; gap: 0.6rem; min-height: 32px; cursor: pointer; list-style: none; }
 details.fold > summary::-webkit-details-marker { display: none; }
 details.fold > summary::before { content: '›'; flex: none; width: 1rem; color: var(--accent); font-size: 1.35rem; font-weight: 700; line-height: 1; transition: transform 0.15s; }
@@ -804,9 +804,10 @@ tbody tr:last-child td { border-bottom: 0; }
 /* A phone: a tick and the figure per band (the column names the band; the cell's title the signals). */
 /* The sky beside the table: the names give way. */
 .sky-open .bands .wide-only { display: none; }
+/* A phone: the table fits a 390 px screen (seven columns). */
 @media (max-width: 719px) {
   .bands .wide-only { display: none; }
-  .bands th, .bands td { padding-left: 0.3rem; padding-right: 0.3rem; }
+  .bands th, .bands td { padding-left: 0.25rem; padding-right: 0.25rem; }
 }
 .cnr-weak { color: var(--bad); }
 .cnr-ok { color: var(--warn); }
@@ -818,6 +819,12 @@ tbody tr:last-child td { border-bottom: 0; }
 .sky-wrap { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
 .sky-wrap > * { flex: 1 1 26rem; min-width: 0; }
 .sky-wrap > :first-child { flex-basis: 17.5rem; max-width: 420px; margin: 0 auto; }
+/* Every satellite under the band table: from 560 px a box of its own height, its sort buttons in view while it scrolls;
+ * on a phone the page alone scrolls. */
+@media (min-width: 560px) {
+  .sat-list .scroll { max-height: 26rem; overflow-y: auto; }
+  .sat-list thead th { position: sticky; top: 0; z-index: 1; background: var(--surface); }
+}
 svg.sky { width: 100%; max-width: 420px; height: auto; display: block; margin: 0 auto; }
 svg.sky .ring { fill: none; stroke: var(--edge); stroke-width: 1; }
 svg.sky .axis { stroke: var(--edge); stroke-width: 1; }
@@ -885,10 +892,13 @@ table.counts td { white-space: nowrap; }
 /* One line per row (the satellites, the RTCM messages): no stacked blocks on a phone; a long name ends in "…". */
 table.rows th, table.rows td { padding: 0.35rem 0.45rem; white-space: nowrap; }
 table.rows td.name { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The receiver's messages sit in a half-width card: their names wrap rather than end in "…". */
+table.rows.msgs td.name { white-space: normal; overflow: visible; }
 table.rows i.dot { display: inline-block; width: 8px; height: 8px; margin-right: 0.35rem; border-radius: 50%; }
 @media (max-width: 559px) {
-  table.rows { font-size: 0.875rem; }
-  table.rows th, table.rows td, table.counts th, table.counts td, table.events th, table.events td { padding-left: 0.3rem; padding-right: 0.3rem; }
+  table.rows, table.cmp { font-size: 0.875rem; }
+  table.rows th, table.rows td, table.counts th, table.counts td, table.events th, table.events td, table.cmp th, table.cmp td {
+    padding-left: 0.3rem; padding-right: 0.3rem; }
   table.counts { font-size: 0.875rem; }
   table.counts .wide-only { display: none; }
 }
@@ -968,10 +978,29 @@ input.ant { white-space: normal; }
 .pgroup { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
 .pgroup:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
 .pgroup > h3 { margin: 0; font-size: 1rem; }
-.pgroup > details.more:first-child { margin-top: 0; }
-/* A heading inside Details. */
+/* A small heading inside a card (the receiver's messages, the parts of Diagnostics' Receiver card). */
 .sub { margin: 1rem 0 0.4rem; color: var(--muted); font-size: 0.9rem; font-weight: 650; }
-summary + .sub { margin-top: 0; }
+.stack > .sub:first-child { margin-top: 0; }
+/* Parts of a card side by side on a wide screen, under each other on a phone (Diagnostics' Receiver card). */
+.parts > * > .sub:first-child { margin-top: 0; }
+.parts > * + * { margin-top: 1rem; }
+@media (min-width: 1000px) {
+  .parts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 1.5rem; }
+  .parts > * + * { margin-top: 0; }
+  .parts .kv { grid-template-columns: max-content minmax(0, 1fr); column-gap: 1rem; }
+}
+/* The held configuration's commands: one line each, in as many 17rem columns as the card holds. */
+ol.cmds { margin: 0; padding-left: 2rem; columns: 17rem auto; column-gap: 2.5rem; }
+ol.cmds li { break-inside: avoid; padding: 0.15rem 0; }
+/* The comparison's two groups, the time and Start: one row on a wide screen. */
+.sgt-form > .act { justify-content: flex-end; }
+@media (min-width: 720px) {
+  .cols.sgt-form { grid-template-columns: repeat(3, minmax(0, 1fr)) auto; }
+}
+/* Its results: the two groups side by side, wrapping on a phone rather than scrolling sideways. */
+table.cmp th, table.cmp td { white-space: normal; }
+table.cmp td:first-child { width: 1%; white-space: nowrap; }
+table.cmp small { display: block; color: var(--muted); }
 .choices.stacked { flex-direction: column; align-items: stretch; }
 .choices.grid2 { display: grid; }
 @media (min-width: 560px) { .choices.grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

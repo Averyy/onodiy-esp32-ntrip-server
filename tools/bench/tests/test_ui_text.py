@@ -1092,13 +1092,16 @@ def test_position_message_waits_for_the_survey():
 
 
 def test_message_and_satellite_lists_are_one_line_rows():
-    """No stacked blocks for the RTCM messages and the satellites on a phone: one line per row."""
+    """No stacked blocks for the RTCM messages and the satellites on a phone: a table row each. The satellites keep one
+    line; a message's name wraps in its half-width card rather than ending in "…"."""
     for name in ("65-signals.js", "66-live.js"):
         text = (UI_JS / name).read_text()
         assert "stack-sm" not in text and "stack: true" not in text, name
-        assert "class: 'rows'" in text, name
+    assert "class: 'rows msgs'" in (UI_JS / "65-signals.js").read_text()
+    assert "class: 'rows'" in (UI_JS / "66-live.js").read_text()
     css = (UI_JS.parent / "app.css").read_text()
     assert "table.rows th, table.rows td { padding: 0.35rem 0.45rem; white-space: nowrap; }" in css
+    assert "table.rows.msgs td.name { white-space: normal; overflow: visible; }" in css
 
 
 def test_firmware_build_shown_once_and_distances_in_mm_and_cm():
