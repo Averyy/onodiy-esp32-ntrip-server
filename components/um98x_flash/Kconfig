@@ -64,7 +64,7 @@ menu "Station: receiver flasher"
         help
             Every byte sent to and received from the receiver by the
             flasher and the bench console, time-stamped as hex and text, in
-            a 256 KB PSRAM ring (downloadable from the web UI's diagnostics)
+            a 256 KB PSRAM ring (downloadable from the web UI's Logs > Console)
             and on the console. Selected by the bench console; never in a
             release.
 

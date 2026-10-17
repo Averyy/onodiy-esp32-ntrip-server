@@ -6,7 +6,7 @@
  * job progress, log text), with GET /api/status polling whenever the socket
  * is down. Views read S.status and listen on the bus:
  *   status (model)  event (message)  progress (message)  log (message)
- *   live (state)    unauthorized     rebooting (reason)
+ *   unauthorized    rebooting (reason)
  */
 
 const S = {
@@ -175,14 +175,7 @@ const live = {
         /* already closed */
       }
     }
-    this.setState('off');
-  },
-
-  setState(s) {
-    if (this.state !== s) {
-      this.state = s;
-      bus.emit('live', s);
-    }
+    this.state = 'off';
   },
 
   connect() {
@@ -195,7 +188,7 @@ const live = {
       return;
     }
     this.ws = ws;
-    this.setState('connecting');
+    this.state = 'connecting';
     this.lastMsg = Date.now();
     this.openedAt = 0;
     ws.onopen = () => {
@@ -246,7 +239,7 @@ const live = {
 
   scheduleReconnect() {
     if (!this.running) return;
-    this.setState('poll');
+    this.state = 'poll';
     const delay = Math.round(this.retryMs * (1 - WS_JITTER + 2 * WS_JITTER * Math.random()));
     this.reconnectAt = Date.now() + delay;
     this.retryMs = Math.min(this.retryMs * 2, WS_RETRY_MAX_MS);
@@ -320,10 +313,10 @@ const live = {
           sessionLost();
           return;
         }
-        this.setState('ws');
+        this.state = 'ws';
         break;
       case 'status':
-        this.setState('ws');
+        this.state = 'ws';
         applyStatusMessage(m);
         break;
       case 'event':
@@ -401,7 +394,6 @@ const live = {
         statusChanged();
       }
     } catch (e) {
-      if (e instanceof ApiError && e.status === 0 && this.state !== 'ws') bus.emit('live', 'down');
       /* GET /api/status answers 403 only to a page without a session while
        * public status is off: an admin page lost its session, a public view
        * its public status (the session check stops it). */

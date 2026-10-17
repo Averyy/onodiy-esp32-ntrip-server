@@ -145,7 +145,8 @@ const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard, healthCard, chipCard, signalsHead, bandTable, kv,\n' +
   '  startLines, foldRows, receiverDetails, renderLive,\n' +
   '  setStatus: s => { S.status = s; }, setSession: s => { S.session = s; },\n' +
-  '  setLive: (age, started) => { S.statusAt = age === null ? 0 : Date.now() - age * 1000; shell.started = started; } };\n})()',
+  '  setLive: (age, started, page) => { S.statusAt = age === null ? 0 : Date.now() - age * 1000; shell.started = started;\n' +
+  '    shell.current = page === null ? null : { name: page, arg: \'\', view: {} }; } };\n})()',
   ctx);
 
 /* The elements on screen: hidden ones and everything inside them left out. */
@@ -523,11 +524,16 @@ for (const c of JSON.parse(casesJson)) {
   }
   if (c.fn === 'header') {
     /* The header's indicator for a status (c.age seconds old, null: none yet) as a visitor (c.admin false) or the
-     * admin: [the link's class, its word, the word's role, the count, whether the count is hidden from assistive
-     * technology, title, name, address], and whether a second render kept the same word element (its live region). */
+     * admin, on the page c.page ('' the Status page; default Casters): [the link's class, its word, the word's role, the
+     * count, whether the count is hidden from assistive technology, the tooltip (on the box inside the link), name,
+     * address], whether a second render kept the same word element (its live region), whether the indicator is hidden,
+     * whether the link itself has a title (its description), and whether the page is marked as without contact. */
+    const cls = new Set();
+    ctx.document.body.classList = { add: k => cls.add(k), remove: k => cls.delete(k), contains: k => cls.has(k),
+      toggle: (k, on) => (on ? cls.add(k) : cls.delete(k)) };
     ui.setSession({ authenticated: !!c.admin });
     ui.setStatus(c.status);
-    ui.setLive(c.age, c.started !== false);
+    ui.setLive(c.age, c.started !== false, c.page === undefined ? 'casters' : c.page);
     ids.live = new El('span');
     ui.renderLive();
     const a = ids.live.querySelector('a');
@@ -535,10 +541,11 @@ for (const c of JSON.parse(casesJson)) {
       out.push(null);
       continue;
     }
-    const w = a.querySelector('.word'), n = a.querySelector('.age');
+    const w = a.querySelector('.word'), n = a.querySelector('.age'), box = a.querySelector('.in');
     ui.renderLive();
-    out.push([a.className, w.textContent, w.getAttribute('role'), n.textContent, n.getAttribute('aria-hidden'), a.getAttribute('title'),
-      a.getAttribute('aria-label'), a.getAttribute('href'), ids.live.querySelector('a') === a && a.querySelector('.word') === w]);
+    out.push([a.className, w.textContent, w.getAttribute('role'), n.textContent, n.getAttribute('aria-hidden'), box.getAttribute('title'),
+      a.getAttribute('aria-label'), a.getAttribute('href'), ids.live.querySelector('a') === a && a.querySelector('.word') === w,
+      ids.live.hidden, a.hasAttribute('title'), cls.has('no-contact')]);
     continue;
   }
   if (c.fn === 'norx') {
@@ -902,11 +909,13 @@ def test_status_page_names_receiver_management_with_a_way_to_change_it():
 
 def test_header_shows_the_station_state_and_says_when_contact_is_lost():
     """The header's indicator: the Status page's state in a word, its dot in the top card's colour (the link's
-    class), the full title as tooltip and in the name (after the word when the title does not start with it), a link
-    to the Status page; a visitor sees the public form's. Without a status for 6 s: "No contact", grey, and the
-    running count beside the word, outside its live region and hidden from screen readers; "Connecting…" before the
-    first. A second render keeps the elements (the live region announces a change once). Nothing before the app
-    runs (log in, setup)."""
+    class), the full title as tooltip (on the box inside the link, so the link's name is not read again as its
+    description) and in the name (after the word when the title does not start with it), a link to the Status page; a
+    visitor sees the public form's. Without a status for 6 s: "No contact", grey, and the running count beside the word,
+    outside its live region and hidden from screen readers, and the page is marked so (the Status page's top card goes
+    grey too); "Connecting…" before the first. A second render keeps the elements (the live region announces a change
+    once). On the Status page, whose top card says the state, it is hidden and says nothing, but for "No contact". Nothing
+    before the app runs (log in, setup)."""
     me = st_status(health={"level": "degraded", "recovery_mode": "alerts_only"},
                    alerts=[{"id": "no_rtcm", "source": "health"}], casters=[st_caster(0, "Onocoy", "wait_data")])
     public = {"api": 1, "public": True, "device": {"hostname": "onocoydiy"}, "receiver": {"state": "detecting"},
@@ -918,22 +927,29 @@ def test_header_shows_the_station_state_and_says_when_contact_is_lost():
                       {"fn": "header", "status": st_status(), "age": 100, "admin": True},
                       {"fn": "header", "status": None, "age": None, "admin": True},
                       {"fn": "header", "status": st_status(), "age": 1, "admin": True, "started": False}] +
-                     [{"fn": "header", "status": st_status(), "age": a, "admin": True} for a in (59, 3599, 9000, 3 * 86400 + 5)])
+                     [{"fn": "header", "status": st_status(), "age": a, "admin": True} for a in (59, 3599, 9000, 3 * 86400 + 5)] +
+                     [{"fn": "header", "status": me, "age": 1, "admin": True, "page": ""},
+                      {"fn": "header", "status": public, "age": 2, "admin": False, "page": ""},
+                      {"fn": "header", "status": me, "age": 9, "admin": True, "page": ""},
+                      {"fn": "header", "status": None, "age": None, "admin": True, "page": ""}])
+    shown = [False, False, False]   # not hidden, no title on the link itself, the page not marked as without contact
     assert out[0] == ["bad", "Not streaming", "status", "", "true", "Receiver sends no corrections",
-                      "Not streaming: Receiver sends no corrections", "#/", True]
-    assert out[1] == ["ok", "Streaming", "status", "", "true", "Streaming", "Streaming", "#/", True]
+                      "Not streaming: Receiver sends no corrections", "#/", True, *shown]
+    assert out[1] == ["ok", "Streaming", "status", "", "true", "Streaming", "Streaming", "#/", True, *shown]
     assert out[2] == ["info", "Searching", "status", "", "true", "Looking for the receiver",
-                      "Searching: Looking for the receiver", "#/", True]
+                      "Searching: Looking for the receiver", "#/", True, *shown]
     assert out[3] == ["", "No contact", "status", "9\u00a0s", "true", "No contact with the station for 9\u00a0s",
-                      "No contact with the station", "#/", True]
+                      "No contact with the station", "#/", True, False, False, True]
     # Past a minute the count is its largest unit (it fits a phone's header); the title keeps the whole time.
     assert out[4][1] == "No contact" and out[4][3] == "1\u00a0min" and out[4][5].endswith("1\u00a0min 40\u00a0s")
-    assert [o[3] for o in out[7:]] == ["59\u00a0s", "59\u00a0min", "2\u00a0h", "3\u00a0d"]
+    assert [o[3] for o in out[7:11]] == ["59\u00a0s", "59\u00a0min", "2\u00a0h", "3\u00a0d"]
     assert out[5] == ["", "Connecting…", "status", "", "true", "Connecting to the station", "Connecting to the station", "#/",
-                      True]
+                      True, *shown]
     assert out[6] is None
-
-
+    # The Status page (the admin's and a visitor's): hidden and silent while in contact; "No contact" shows.
+    assert [o[9] for o in out[11:]] == [True, True, False, True]
+    assert out[11][1] == out[12][1] == out[14][1] == "" and out[11][3] == ""
+    assert out[13][1] == "No contact" and out[13][3] == "9\u00a0s" and out[13][11]
 def test_setup_onocoy_step_sends_the_duplicate_stream_answer():
     """The setup's Onocoy step while RTK2go is on: the station asks about the duplicate stream; ticking the box (its
     input event reaches the form) keeps the question with "Save anyway" enabled, and that sends the answer."""

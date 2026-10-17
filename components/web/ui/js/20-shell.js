@@ -100,24 +100,31 @@ function contactAge(s) {
  * with the word; a tap opens the Status page. Without a status for CONTACT_S
  * it says "No contact" and counts the time (contactAge; the whole time on
  * hover), grey (the station's state is not known), and "Connecting…" before
- * the first. The word is a polite live
- * region, so a screen reader hears it once when it changes; the running
- * count sits beside it, outside the region (and hidden from assistive
- * technology), or it would be read out every second.
+ * the first. On the Status page, whose top card says the state in full, it
+ * shows only "No contact" (that card cannot know it; its dot goes grey too,
+ * body.no-contact), so nothing is said or announced twice. The word is a
+ * polite live region, so a screen reader hears it once when it changes; the
+ * running count sits beside it, outside the region (and hidden from
+ * assistive technology), or it would be read out every second. The tooltip
+ * sits inside the link, so the link's name (aria-label) is not read again as
+ * its description.
  */
 function renderLive() {
   const el = doc.getElementById('live');
   if (!shell.started) {
     clear(el);
+    el.hidden = false;
+    doc.body.classList.remove('no-contact');
     return;
   }
   const s = S.status;
   const age = S.statusAt ? (Date.now() - S.statusAt) / 1000 : null;
+  const lost = !!s && age !== null && age >= CONTACT_S;
   let tone = '', text, title, count = '';
   if (!s || age === null) {
     text = 'Connecting…';
     title = 'Connecting to the station';
-  } else if (age >= CONTACT_S) {
+  } else if (lost) {
     text = 'No contact';
     count = contactAge(age);
     title = 'No contact with the station for ' + fmt.dur(age);
@@ -127,16 +134,21 @@ function renderLive() {
     text = stateWord(st);
     title = st.head;
   }
+  doc.body.classList.toggle('no-contact', lost);
+  const quiet = !lost && !!shell.current && shell.current.name === '';
   let a = el.querySelector('a');
   if (!a) {
-    a = h('a', { href: '#/' }, h('span', { class: 'word', role: 'status' }), h('span', { class: 'age', 'aria-hidden': 'true' }));
+    a = h('a', { href: '#/' }, h('span', { class: 'in' }, h('span', { class: 'word', role: 'status' }),
+      h('span', { class: 'age', 'aria-hidden': 'true' })));
     mount(el, a);
   }
-  const word = a.querySelector('.word'), ageEl = a.querySelector('.age');
+  const box = a.querySelector('.in'), word = a.querySelector('.word'), ageEl = a.querySelector('.age');
+  el.hidden = quiet;
+  if (quiet) text = count = '';   /* the region says the next word it shows */
   const name = count ? 'No contact with the station' :
     title.toLowerCase().indexOf(text.replace(/…$/, '').toLowerCase()) === 0 ? title : text + ': ' + title;
   a.className = tone;
-  if (a.getAttribute('title') !== title) a.setAttribute('title', title);
+  if (box.getAttribute('title') !== title) box.setAttribute('title', title);
   if (a.getAttribute('aria-label') !== name) a.setAttribute('aria-label', name);
   if (word.textContent !== text) word.textContent = text;
   if (ageEl.textContent !== count) ageEl.textContent = count;
@@ -248,6 +260,7 @@ function openView(name, arg) {
   head.className = t[1] ? 'page-title' : 'sr-only';
   head.hidden = false;
   setDocTitle();
+  renderLive();
   renderNav();
   renderNotices();
   window.scrollTo(0, 0);
@@ -341,7 +354,6 @@ bus.on('status', st => {
   renderLive();
   refreshView();
 });
-bus.on('live', () => renderLive());
 setInterval(() => {
   renderLive();
   tickTrialLeft();

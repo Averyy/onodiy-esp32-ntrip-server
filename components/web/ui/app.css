@@ -194,6 +194,9 @@ small { font-size: 0.85rem; }
 
 /* ---- Header and navigation ------------------------------------------- */
 
+/* The header's height, where the tab bar sticks under it: its top padding (a phone's notch inset), a 40 px row (the
+ * buttons), 0.5rem under that and its border. */
+body { --top-pad: max(0.5rem, env(safe-area-inset-top)); --top-h: calc(var(--top-pad) + 40px + 0.5rem + 1px); }
 .top {
   position: sticky;
   top: 0;
@@ -201,8 +204,9 @@ small { font-size: 0.85rem; }
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  min-height: var(--top-h);
   padding: 0.5rem max(1rem, calc((100% - 1120px) / 2 + 1rem));
-  padding-top: max(0.5rem, env(safe-area-inset-top));
+  padding-top: var(--top-pad);
   padding-left: max(1rem, calc((100% - 1120px) / 2 + 1rem), calc(env(safe-area-inset-left) + 0.5rem));
   padding-right: max(1rem, calc((100% - 1120px) / 2 + 1rem), calc(env(safe-area-inset-right) + 0.5rem));
   background: var(--surface);
@@ -213,18 +217,19 @@ small { font-size: 0.85rem; }
   align-items: center;
   gap: 0.5rem;
   min-width: 0;
+  margin-right: auto;   /* the state and the buttons at the right, also while the state is hidden (Status page) */
   color: var(--text);
   font-weight: 650;
   text-decoration: none;
 }
 .brand img { width: 28px; height: 28px; flex: none; }
 .brand span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The station's state (renderLive): the top card's dot and a word, a link to the Status page; grey while unknown. */
-.live { display: flex; margin-left: auto; }
+/* The station's state (renderLive): the top card's dot and a word, a link to the Status page; grey while unknown. Its
+ * tooltip is on the inner box (.in), which also draws the dot. */
+.live { display: flex; }
 .live a {
   display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
   min-height: 36px;
   padding: 0 0.3rem;
   border-radius: 8px;
@@ -235,7 +240,8 @@ small { font-size: 0.85rem; }
   white-space: nowrap;
 }
 .live a:hover { background: var(--surface-2); }
-.live a::before {
+.live .in { display: inline-flex; align-items: center; gap: 0.4rem; }
+.live .in::before {
   content: "";
   flex: none;
   width: 10px;
@@ -248,7 +254,8 @@ small { font-size: 0.85rem; }
 /* A phone: the brand, the state (its longest word too), the theme and Log out on one line at 390 px. */
 @media (max-width: 420px) {
   .top { gap: 0.25rem; }
-  .live a { gap: 0.3rem; padding: 0; font-size: 0.8rem; }
+  .live a { padding: 0; font-size: 0.8rem; }
+  .live .in { gap: 0.3rem; }
   .top-actions .icon-btn { min-width: 36px; }
   .top-actions .btn.small { padding-left: 0.5rem; padding-right: 0.5rem; }
 }
@@ -256,7 +263,7 @@ small { font-size: 0.85rem; }
 
 .tabs {
   position: sticky;
-  top: 49px;
+  top: var(--top-h);
   z-index: 19;
   display: flex;
   gap: 0.25rem;
@@ -282,6 +289,7 @@ small { font-size: 0.85rem; }
 .tabs a.active { color: var(--text); border-bottom-color: var(--accent); }
 /* The five tabs fit a 390 px phone; a narrower screen scrolls them (the fades say so). */
 @media (max-width: 420px) { .tabs a { padding-left: 0.5rem; padding-right: 0.5rem; } }
+@media (max-width: 380px) { .tabs a { padding-left: 0.45rem; padding-right: 0.45rem; } }
 .tabs a .dot {
   display: inline-block;
   width: 7px;
@@ -400,6 +408,8 @@ small { font-size: 0.85rem; }
 .hero.warn .state::before { background: var(--warn); }
 .hero.bad .state::before { background: var(--bad); }
 .hero.info .state::before { background: var(--info); }
+/* No contact (renderLive): the top card shows the last state it had, its dot grey like the header's. */
+body.no-contact .hero .state::before { background: var(--off); }
 .hero .hero-actions { display: flex; margin-top: 0.4rem; }
 /* Other named alerts: one line each, its mark, the words, Details at the right. */
 .also { display: grid; gap: 0.5rem; padding: 0.6rem 0 0; border-top: 1px solid var(--border); list-style: none; }

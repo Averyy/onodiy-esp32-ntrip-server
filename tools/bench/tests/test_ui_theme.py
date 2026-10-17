@@ -117,7 +117,10 @@ def test_the_header_state_reads_in_both_themes():
     assert "color: var(--text)" in rule(".live a")
     assert "background: var(--surface-2)" in rule(".live a:hover")
     assert "color: var(--muted)" in rule(".live .age")
-    assert "background: var(--tone, var(--off))" in rule(".live a::before")
+    assert "background: var(--tone, var(--off))" in rule(".live .in::before")
+    # Without contact the Status page's top card goes grey like the header (after its tone rules, which it overrides).
+    assert "background: var(--off)" in rule("body.no-contact .hero .state::before")
+    assert NOCOMMENT.index("body.no-contact .hero .state::before") > NOCOMMENT.index(".hero.info .state::before")
     behind = ("--surface", "--surface-2")
     for name, theme in (("light", LIGHT), ("dark", DARK_SYSTEM)):
         assert low_pairs(theme, [(f, b) for f in ("--text", "--muted") for b in behind], 4.5) == [], name
