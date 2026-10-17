@@ -43,7 +43,8 @@
  *   - reconnects: entries into streaming after a period of expected
  *     downtime;
  *   - per day also power-off time (gaps between the last-alive mark and a
- *     boot after a power cut) and UART overflow events;
+ *     boot after a power cut; taken back once the station learns that the
+ *     receiver kept running, lc_power_kept) and UART overflow events;
  *   - today only: the epochs the protected slot should have sent while
  *     online but did not (lost epochs, reported by the caster client as
  *     they grow), so the day's data rate survives restarts. A finished day
@@ -207,6 +208,8 @@ typedef struct {
     bool alive_valid;
     int64_t alive_ms;
     bool gap_power_off;
+    int64_t gap_off_start_ms;           /**< the power-off gap first_clock counted: its start (UTC ms) ... */
+    uint64_t gap_off_ms;                /**< ... and its length (0 = none counted) */
     bool prev_planned;                  /**< planned receiver work was going on at its end */
     bool prev_reboot_planned;           /**< it ended in a reboot the user asked for */
     bool prev_unplanned;                /**< it is known not to have (crash, reset pin, lifecycle's record) */
@@ -269,8 +272,10 @@ void lc_unplanned_boot(lc_t *c);
  * A power-on reset whose receiver kept running (the station's verdict): on
  * the ESP32-S3 the reset pin reads as power-on, so the gap was the reset
  * pin's, not a power cut: it stops counting as power-off time (unplanned all
- * the same, lc_unplanned_boot). Only while the gap has not been accrued
- * (no clock yet this boot); afterwards it stays as counted.
+ * the same, lc_unplanned_boot). Before the first clock of the boot the gap
+ * is then counted without it; after it (the clock came first) the gap's
+ * power-off time comes off the days it went to (those still kept), and the
+ * gap stays downtime as counted.
  * @return true if the gap changed.
  */
 bool lc_power_kept(lc_t *c);

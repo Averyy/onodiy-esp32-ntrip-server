@@ -150,9 +150,9 @@ void ledger_note_prev_reboot(bool planned);
  * The station's verdict after a power-on reset: the receiver kept running,
  * so the ESP32 alone was reset (on the ESP32-S3 its reset pin reads as
  * power-on: the USB serial chip's auto-reset, the RST button). The gap
- * before this boot is then not power-off time (and not planned). Only
- * before the first trusted clock of the boot, which is when the gap is
- * counted; later it stays as counted (a few seconds of power-off time).
+ * before this boot is then not power-off time (and not planned): counted
+ * without it when the verdict comes before the first trusted clock of the
+ * boot, else taken off the days it was counted on (it stays downtime).
  */
 void ledger_note_power_kept(void);
 

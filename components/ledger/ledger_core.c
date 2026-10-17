@@ -330,6 +330,10 @@ static void first_clock(lc_t *c, int64_t unix_ms)
             }
             bool planned = c->prev_planned || c->prev_reboot_planned;
             accrue_span(c, start, (uint64_t)gap, c->prev_expected_mask, 0, planned ? 0xFFu : 0u, c->gap_power_off);
+            if (c->gap_power_off) {
+                c->gap_off_start_ms = start;   /* lc_power_kept takes it back */
+                c->gap_off_ms = (uint64_t)gap;
+            }
         }
     }
     spread_pending(c, unix_ms);
@@ -375,13 +379,46 @@ void lc_unplanned_boot(lc_t *c)
     c->boot_planned_mask = 0;   /* nothing accrued yet: the window never started */
 }
 
+/* A kept record of `day` (today or the history), never a new one. */
+static lc_day_t *kept_day(lc_t *c, int32_t day)
+{
+    if (day == c->today.utc_day) {
+        return &c->today;
+    }
+    for (size_t i = 0; i < c->hist_n; i++) {
+        if (c->hist[i].utc_day == day) {
+            return &c->hist[i];
+        }
+    }
+    return NULL;
+}
+
 bool lc_power_kept(lc_t *c)
 {
-    if (!c->gap_power_off || c->clock != LC_CLOCK_NONE) {
+    if (!c->gap_power_off) {
         return false;
     }
     c->gap_power_off = false;
     lc_unplanned_boot(c);
+    /* Counted already (the clock came first): its power-off time comes off
+     * each day it went to, as accrue_span split it; the downtime stays. */
+    int64_t t = c->gap_off_start_ms;
+    uint64_t left = c->gap_off_ms;
+    while (left > 0) {
+        int32_t day = day_of(t);
+        uint64_t piece = (uint64_t)(((int64_t)day + 1) * LC_DAY_MS - t);
+        if (piece > left) {
+            piece = left;
+        }
+        lc_day_t *r = kept_day(c, day);
+        if (r != NULL) {
+            r->power_off_ms = r->power_off_ms > piece ? r->power_off_ms - (uint32_t)piece : 0u;
+            mark(c, r);
+        }
+        t += (int64_t)piece;
+        left -= piece;
+    }
+    c->gap_off_ms = 0;
     return true;
 }
 

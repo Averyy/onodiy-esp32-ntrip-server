@@ -2130,8 +2130,9 @@ receiver that just got power needs longer). The earliest decides; it is
 journalled once (`rx_boot`). Only a power-on boot's `restarted` counts
 toward the `power_lost` alert (three within 24 h; a brownout raises
 `power_supply`), and only a power-on boot's `kept_running` makes its gap no
-power-off time in the availability ledger (when the verdict comes before
-the first trusted clock; a brownout is the ESP32's own power dip whatever
+power-off time in the availability ledger (`power_off_s`; a gap counted
+before the verdict, after the first trusted clock, has it taken back; the
+gap stays offline time; a brownout is the ESP32's own power dip whatever
 the receiver did). A `restarted` verdict ends a receiver maintenance resumed
 at that boot. PROVISIONAL, to be confirmed on hardware (a real power cut's
 timing was not measured).
@@ -2185,7 +2186,9 @@ offering the download.
 ```
 
 Per-slot arrays have `max_slots` entries. `history` holds up to 30 past days
-in the `today` shape, newest first. `up_s` counts seconds a slot streamed
+in the `today` shape, newest first. `power_off_s`: gaps before a boot after
+a power cut (not one whose receiver kept running: the ESP32's reset pin,
+`station.rx_boot`). `up_s` counts seconds a slot streamed
 with fresh RTCM behind it (online; 0 for days stored by a build that did
 not count it); `down_s` seconds it should have streamed but did not;
 `planned_s` the planned part of it: casters
