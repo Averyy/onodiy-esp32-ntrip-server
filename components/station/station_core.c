@@ -461,19 +461,33 @@ static void track_rtcm(stn_t *s, const stn_in_t *in)
     }
 }
 
-/* The question to a receiver that sent no RTCM frame this boot (see the
- * header): no line for STN_ASK_MS, and none asked for as long. */
-static bool ask_due(const stn_t *s, const stn_in_t *in)
-{
-    int64_t now = in->now_ms;
-    return in->rtcm_frames == 0 && (s->line_change_ms == STN_NEVER || now - s->line_change_ms >= STN_ASK_MS) &&
-           (s->ask_ms == STN_NEVER || now - s->ask_ms >= STN_ASK_MS);
-}
-
 /* A valid RTCM frame arrived in the last STN_RTCM_QUIET_MS. */
 static bool rtcm_flowing(const stn_t *s, int64_t now)
 {
     return s->rtcm_change_ms != STN_NEVER && now - s->rtcm_change_ms < STN_RTCM_QUIET_MS;
+}
+
+/* `at` (STN_NEVER = never) came after the last RTCM frame as the samples
+ * show it (any time with none this boot). */
+static bool since_rtcm(const stn_t *s, int64_t at)
+{
+    return at != STN_NEVER && (s->rtcm_change_ms == STN_NEVER || at > s->rtcm_change_ms);
+}
+
+/* The question to a receiver that sends no RTCM (none this boot, or none
+ * for STN_RTCM_QUIET_MS; see the header): at once when nothing came since
+ * its last RTCM frame, then while no line comes for STN_ASK_MS, at most
+ * once every STN_ASK_MS. */
+static bool ask_due(const stn_t *s, const stn_in_t *in)
+{
+    int64_t now = in->now_ms;
+    if (rtcm_flowing(s, now)) {
+        return false;
+    }
+    if (since_rtcm(s, s->line_change_ms) && now - s->line_change_ms < STN_ASK_MS) {
+        return false;   /* it sent a line since: it answers */
+    }
+    return !since_rtcm(s, s->ask_ms) || now - s->ask_ms >= STN_ASK_MS;
 }
 
 void stn_start(stn_t *s, const stn_in_t *in)
@@ -603,13 +617,21 @@ static void judge_window(stn_t *s, const stn_in_t *in)
             s->antenna_check = false;
             s->antenna_probe = true;   /* a fixed base that sends nothing: moved antenna? */
             s->profile_applied = false;
+            s->check_pending = check;  /* judged by a window with RTCM (below) */
         } else if (verify) {
             s->profile_applied = false;
             s->drift_blocked = true;
         } else if (check) {
             s->profile_applied = false;
-            if (auto_apply_allowed(s, in)) {
-                want_apply(s, STN_WHY_CHECK, STN_CHANGE_NONE, false);
+            if (s->static_ok) {
+                /* The receiver acknowledged this profile on this firmware
+                 * (the applied state): a window without RTCM says nothing
+                 * about what it runs, and a re-apply could not be checked
+                 * without RTCM. The check waits for a window with RTCM; the
+                 * stall is the health ladder's (its reconfigure step). */
+                s->check_pending = true;
+            } else if (auto_apply_allowed(s, in)) {
+                want_apply(s, STN_WHY_CHECK, STN_CHANGE_NONE, false);   /* never acknowledged */
             }
         }
         /* Otherwise a stall: the health ladder's business, not drift. */
@@ -1872,11 +1894,11 @@ bool stn_responding(const stn_t *s, int64_t now_ms, uint32_t rtcm_age_ms, int64_
     if (line_ms == STN_NEVER || (s->no_rx_ms != STN_NEVER && line_ms <= s->no_rx_ms)) {
         return false;
     }
-    if (rtcm_age_ms == UINT32_MAX) {
-        return now_ms - line_ms <= STN_ANSWER_FRESH_MS;   /* asked every STN_ASK_MS: its answer is this fresh */
+    if (now_ms - line_ms > STN_ANSWER_FRESH_MS) {
+        return false;   /* asked every STN_ASK_MS while it sends no RTCM: an answer is this fresh */
     }
-    /* Its last line came after its last RTCM frame. */
-    return line_ms - (now_ms - (int64_t)rtcm_age_ms) > STN_ANSWER_SLACK_MS;
+    /* With RTCM this boot: its last line came after its last RTCM frame. */
+    return rtcm_age_ms == UINT32_MAX || line_ms - (now_ms - (int64_t)rtcm_age_ms) > STN_ANSWER_SLACK_MS;
 }
 
 /* ---- receiver maintenance --------------------------------------------------- */

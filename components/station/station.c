@@ -199,6 +199,7 @@ static bool s_journal_clearing;
 static volatile bool s_prompt_seen;
 static volatile bool s_restart_pending;
 static int64_t s_line_ms = STN_NEVER;   /* the last checksum-valid text line (now_ms); under s_lock */
+static int64_t s_unasked_ms = STN_NEVER; /* ... the last one that was no reply to our own commands; under s_lock */
 static volatile bool s_journal_cleared;
 
 static TaskHandle_t s_task;
@@ -813,11 +814,14 @@ static void on_text_line(const char *line, size_t len, void *ctx)
         s_rxb_data_us = t;
         portEXIT_CRITICAL(&s_lock);
     }
-    um98x_ctl_on_line(line, len, ctx);
+    bool reply = um98x_ctl_on_line(line, len, ctx);
     gnss_obs_feed_line(line, len);
     int64_t at = now_ms();
     portENTER_CRITICAL(&s_lock);
     s_line_ms = at;
+    if (!reply) {
+        s_unasked_ms = at;
+    }
     portEXIT_CRITICAL(&s_lock);
 }
 
@@ -1478,9 +1482,10 @@ static void job_own_fix(const stn_job_t *job, stn_result_t *r)
     }
 }
 
-/* The question to a receiver that never streamed this boot: the version
- * query without a lease, only so that its answer (a line like any other)
- * keeps "the receiver answers" fresh. Logged when the outcome changes. */
+/* The question to a receiver that sends no RTCM (none this boot, or its RTCM
+ * stopped): the version query without a lease, only so that its answer (a
+ * line like any other) keeps "the receiver answers" fresh. Logged when the
+ * outcome changes. */
 static void job_ask(stn_result_t *r)
 {
     static int s_last_ok = -1;
@@ -1494,7 +1499,7 @@ static void job_ask(stn_result_t *r)
     r->err = ok ? STN_OK : STN_E_TIMEOUT;
     if (ok != s_last_ok) {
         if (ok) {
-            ESP_LOGI(TAG, "the receiver answers when asked (no RTCM this boot)");
+            ESP_LOGI(TAG, "the receiver answers when asked (no RTCM)");
         } else {
             ESP_LOGW(TAG, "no answer to the station's question (%s)", esp_err_to_name(err));
         }
@@ -3362,6 +3367,13 @@ esp_err_t station_start(void)
     return ESP_OK;
 }
 
+/* Milliseconds from `then` to `now`, clamped below UINT32_MAX (which means "never"). */
+static uint32_t age_of(int64_t now, int64_t then)
+{
+    int64_t age = now - then;
+    return age < 0 ? 0u : age >= (int64_t)UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)age;
+}
+
 esp_err_t station_get_status(station_status_t *out)
 {
     if (out == NULL) {
@@ -3414,6 +3426,7 @@ esp_err_t station_get_status(station_status_t *out)
         out->receiver_responding = stn_responding(&s_core, lin.now_ms, rtcm_age, s_line_ms);
     }
     int64_t line_ms = s_line_ms;
+    int64_t unasked_ms = s_unasked_ms;
     jerr = s_journal_err;
     journal = s_journal;
     read = s_journal_read;
@@ -3447,12 +3460,9 @@ esp_err_t station_get_status(station_status_t *out)
     }
     out->rtcm_excluded = excluded;
     out->autocfg_off_this_boot = s_autocfg_ram_off;
-    if (line_ms == STN_NEVER) {
-        out->rx_line_age_ms = UINT32_MAX;
-    } else {
-        int64_t age = now_ms() - line_ms;
-        out->rx_line_age_ms = age < 0 ? 0u : age >= (int64_t)UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)age;
-    }
+    int64_t now = now_ms();
+    out->rx_line_age_ms = line_ms == STN_NEVER ? UINT32_MAX : age_of(now, line_ms);
+    out->rx_unasked_line_age_ms = unasked_ms == STN_NEVER ? UINT32_MAX : age_of(now, unasked_ms);
     if (!have) {
         out->sg_test.phase = -1;   /* no comparison without the station */
         out->sg_test.left_s = UINT32_MAX;

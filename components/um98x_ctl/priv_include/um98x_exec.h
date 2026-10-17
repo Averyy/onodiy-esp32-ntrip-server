@@ -180,6 +180,9 @@ typedef struct {
 /** um98x_chan_dispatch() result bits. */
 #define UM98X_CHAN_WAKE    0x1u   /**< the waiting executor should look (consumed line or banner) */
 #define UM98X_CHAN_RESTART 0x2u   /**< unsolicited restart evidence */
+#define UM98X_CHAN_REPLY   0x4u   /**< a reply to the station's own commands: every command-layer line (acknowledgement,
+                                       dump item, log, restarting answer, the banner of a restart of ours) but unsolicited
+                                       restart evidence */
 
 void um98x_chan_init(um98x_chan_t *ch);
 

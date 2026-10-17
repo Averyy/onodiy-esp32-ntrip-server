@@ -365,11 +365,11 @@ esp_err_t um98x_ctl_init(void)
     return ESP_OK;
 }
 
-void um98x_ctl_on_line(const char *line, size_t len, void *ctx)
+bool um98x_ctl_on_line(const char *line, size_t len, void *ctx)
 {
     (void)ctx;
     if (!s_inited || line == NULL) {
-        return;
+        return false;
     }
     /* GNSS RX task: classify outside the lock, never block, never log. */
     um98x_line_t l;
@@ -386,6 +386,7 @@ void um98x_ctl_on_line(const char *line, size_t len, void *ctx)
     if ((ev & UM98X_CHAN_RESTART) && cb != NULL) {
         cb(cb_ctx);
     }
+    return (ev & UM98X_CHAN_REPLY) != 0;
 }
 
 void um98x_ctl_notify_prompt(void)

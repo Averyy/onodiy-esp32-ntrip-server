@@ -47,15 +47,21 @@
  *    that detected the receiver discarded those bytes, one version log).
  *  - GROUPS: the signal-group query (ANT1GROUPA, one-shot: no rate). Done
  *    on the main antenna's signal-group log; the ack comes first. After an
- *    accepting ack the log has 1000 ms, then the query ends as a timeout
- *    without a resend (the receiver knows the command: its answer was not
- *    read). A negative reply is final at once (a firmware without the
- *    query refuses every send alike). No ack: 2 sends, 3000 ms each, 1000
- *    ms apart. Never fatal to a session.
+ *    accepting ack the log has UM98X_GROUPS_LOG_MS (3000 ms), then the
+ *    query ends as a timeout without a resend (the receiver knows the
+ *    command: its answer was not read). A wait of 1000 ms missed the log on
+ *    the board (build 25164, an apply on 2026-10-16: "unknown (timeout)" in
+ *    a session of 3.5 s, so the ack had come, no resend ran, and the log
+ *    did not follow within the second; the sessions before and after it
+ *    read it): a one-shot log may wait for the receiver's next cycle.
+ *    PROVISIONAL. A negative reply is final at once (a firmware without
+ *    the query refuses every send alike). No ack: 2 sends, 3000 ms each,
+ *    1000 ms apart. Never fatal to a session.
  *  - OWNPOS: an own-position query (BASEPOSA or SPPNAVA, one-shot: no
  *    rate; um98x_fixcheck.h), done on that position log; otherwise as
- *    GROUPS (the log has 1000 ms after an accepting ack, a negative reply is
- *    final at once, no ack: 2 sends, 3000 ms each, 1000 ms apart).
+ *    GROUPS (the log has UM98X_GROUPS_LOG_MS after an accepting ack, a
+ *    negative reply is final at once, no ack: 2 sends, 3000 ms each, 1000 ms
+ *    apart).
  *
  * The receiver's restarting answer ("The Board is resetting,...") carries
  * no echo: it answers whatever was sent while the receiver restarts. It is
@@ -97,7 +103,7 @@ extern "C" {
 #define UM98X_PROBE_SENDS               2
 #define UM98X_PROBE_LOG_MS              1000
 #define UM98X_GROUPS_SENDS              2
-#define UM98X_GROUPS_LOG_MS             1000
+#define UM98X_GROUPS_LOG_MS             3000
 #define UM98X_GROUPS_BODY_MAX           96
 #define UM98X_OWN_BODY_MAX              256
 

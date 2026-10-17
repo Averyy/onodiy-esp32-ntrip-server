@@ -125,8 +125,16 @@ extern "C" {
 /** Prepare internal state (reply channel, wake-up, call lock). Idempotent. */
 esp_err_t um98x_ctl_init(void);
 
-/** Line sink for gnss_link (called from the GNSS RX task; never blocks, never logs). */
-void um98x_ctl_on_line(const char *line, size_t len, void *ctx);
+/**
+ * Line sink for gnss_link (called from the GNSS RX task; never blocks, never logs).
+ * @return true when the line is a reply to the station's own commands (every
+ *         command-layer line but unsolicited restart evidence: an
+ *         acknowledgement, a dump item, a log, the restarting answer, the
+ *         banner of a restart of ours); false for anything the receiver sent
+ *         unasked (NMEA and other output, its own restart's banner or version
+ *         log, lines this layer does not read).
+ */
+bool um98x_ctl_on_line(const char *line, size_t len, void *ctx);
 
 /**
  * The link's loader prompt detector fired (call from the on_prompt sink).
