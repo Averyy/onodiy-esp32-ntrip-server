@@ -806,7 +806,8 @@ for (const c of JSON.parse(casesJson)) {
     routes = m => (m === 'PUT' ? answers.shift() : [200, {}]);
     ids.modal = new El('div');
     ids.toasts = new El('div');
-    const done = ui.turnCaster({ slot: 1, name: 'RTK2go', enabled: !c.on }, c.on, null);
+    /* The slot number apart: a config from GET /api/casters has none. */
+    const done = ui.turnCaster(1, { name: 'RTK2go', enabled: !c.on }, c.on);
     await settle();
     const dlg = () => [...visible(ids.modal)];
     const asked = dlg().some(e => e.tagName === 'H2' && e.textContent === 'Duplicate-stream risk');
@@ -821,7 +822,8 @@ for (const c of JSON.parse(casesJson)) {
     await settle();
     const saved = await done;
     routes = null;
-    out.push({ puts: sent.filter(x => x.method === 'PUT').map(x => x.body), asked: asked, saved: saved,
+    out.push({ puts: sent.filter(x => x.method === 'PUT').map(x => x.body), paths: sent.filter(x => x.method === 'PUT').map(x => x.path),
+      asked: asked, saved: saved,
       toasts: ids.toasts.kids.map(t => t.textContent) });
     continue;
   }
@@ -1121,6 +1123,8 @@ def test_turn_off_and_on_from_the_card():
         {"fn": "turn", "on": True, "answers": [dup], "confirm": False},
     ])
     assert off["puts"] == [{"enabled": False}] and not off["asked"] and off["saved"]
+    # To the slot's own address: the config the card holds has no slot number.
+    assert off["paths"] == ["/api/casters/1"] and confirmed["paths"] == ["/api/casters/1"] * 2
     assert off["toasts"] == ["RTK2go is turned off."]
     assert on["puts"] == [{"enabled": True}] and on["toasts"] == ["RTK2go is turned on."]
     assert confirmed["asked"] and confirmed["puts"] == [{"enabled": True}, {"enabled": True, "dup_stream_ack": True}]

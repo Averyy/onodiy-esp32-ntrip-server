@@ -736,10 +736,11 @@ function onOffSwitch(on, label, onChange) {
  * Turn a server off or on (its card's switch): PUT with `enabled` only (the
  * rest stays as stored). On next to Onocoy, an open server needs the
  * duplicate-stream acknowledgement, as a save does: a dialog asks for it.
- * The slot's entry as the station stored it, or null when nothing changed.
+ * slot: its number (the entry's, not in its config); c: its config. The slot's
+ * entry as the station stored it, or null when nothing changed.
  */
-async function turnCaster(c, on) {
-  const put = body => saveCaster(c.slot, body);
+async function turnCaster(slot, c, on) {
+  const put = body => saveCaster(slot, body);
   let saved = null;
   try {
     saved = await put({ enabled: on });
@@ -801,7 +802,7 @@ Views.ntrip = {
       fill(s);
       const name = c.name || 'Slot ' + (s.slot + 1);
       const sw = onOffSwitch(!!c.enabled, 'Stream to ' + name, async on => {
-        const saved = await turnCaster(c, on);
+        const saved = await turnCaster(s.slot, c, on);
         if (!saved) return false;
         if (gone) return true;
         data.slots = data.slots.map(x => (x.slot === saved.slot ? saved : x));
