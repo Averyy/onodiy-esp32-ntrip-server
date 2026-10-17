@@ -417,11 +417,9 @@ static esp_err_t h_session_post(web_req_t *r)
     if (!web_auth_check(r->req, r->on_ap, pw)) {
         return web_send_err(r->req, WEB_ERR_WRONG_PASSWORD);
     }
-    if (r->sess >= 0) {
-        web_auth_end_session(r->sess);   /* a fresh login replaces the one this browser had */
-    }
+    /* A fresh login replaces the one this browser had. */
     char cookie[96];
-    if (web_auth_start_session(r->req, remember, cookie) < 0) {
+    if (web_auth_start_session(r->req, remember, r->sess, cookie) < 0) {
         return web_send_internal(r->req, ESP_FAIL);
     }
     if (remember) {
@@ -464,7 +462,7 @@ static esp_err_t h_setup_admin(web_req_t *r)
     ESP_LOGW(TAG, "admin password set over the setup Wi-Fi%s", persisted ? "" : " (this boot only)");
     /* Never remembered: its cookie belongs to the setup network's address, which closes after the setup. */
     char cookie[96];
-    if (web_auth_start_session(r->req, false, cookie) < 0) {
+    if (web_auth_start_session(r->req, false, -1, cookie) < 0) {
         return web_send_internal(r->req, ESP_FAIL);
     }
     return web_send_json_literal(r->req, 200, persisted ? "{\"authenticated\":true,\"persisted\":true}"

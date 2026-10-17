@@ -323,10 +323,12 @@ bool web_auth_check(httpd_req_t *req, bool on_ap, const char *pw);
 /**
  * New session; sets the cookie header on the response (`cookie_buf` must
  * outlive the response). `remember`: 30 days without an idle timeout, kept
- * across restarts (web_core.h), and a cookie with that Max-Age.
- * @return its index, -1 if no token key could be made (no session, no cookie).
+ * across restarts (web_core.h), and a cookie with that Max-Age. `replace`:
+ * the session this browser had (-1 = none), ended in the same store.
+ * @return its index, -1 if no token key could be made (no session, no cookie;
+ * `replace` stays).
  */
-int web_auth_start_session(httpd_req_t *req, bool remember, char cookie_buf[96]);
+int web_auth_start_session(httpd_req_t *req, bool remember, int replace, char cookie_buf[96]);
 
 /** End the request's session (and its WebSocket clients); sets the clearing cookie. */
 void web_auth_logout(httpd_req_t *req, int idx);
@@ -339,9 +341,6 @@ esp_err_t web_auth_set_password(const char *pw, bool *persisted);
 
 /** End every session but `keep` (-1 = all); their WebSocket clients close with 4001. */
 void web_auth_end_sessions(int keep);
-
-/** End one session (its WebSocket clients close with 4001). */
-void web_auth_end_session(int idx);
 
 /** End expired sessions, and remembered ones whose end the trusted clock shows has passed (once a second). */
 void web_auth_expire(void);

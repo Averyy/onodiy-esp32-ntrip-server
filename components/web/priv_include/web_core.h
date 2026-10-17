@@ -196,17 +196,33 @@ bool web_query_value(const char *query, const char *key, char *out, size_t out_s
  * monotonic clock; its end in UTC (end_unix) is known once the trusted clock
  * (GNSS or SNTP) is: set at a login with the clock, otherwise stamped (now +
  * time left) the first time the clock is seen. Only stamped sessions are
- * stored. A stored session read back at boot (web_sess_restore) gets the
- * time its UTC end leaves; while the clock is not set yet it is accepted
- * with the full lifetime, and web_sess_clock() ends it as soon as the clock
- * shows its end has passed (a station counts the time it was off only once
- * it knows the date). Whichever end comes first counts.
+ * stored. Whichever end comes first counts.
+ *
+ * The clock can be wrong, and a station can restart without one, so:
+ *  - An end is never more than the lifetime ahead of the trusted clock:
+ *    set so at a login, cut back to it whenever the clock shows less
+ *    (web_sess_clock, web_sess_restore), and stored cut back.
+ *  - The mark (mark_unix) is the latest UTC the sessions may assume: the
+ *    highest trusted time seen, carried forward by the monotonic clock while
+ *    the station runs (it ran at least that long since, so the true time is
+ *    no earlier). It is stored with the sessions, refreshed with every write
+ *    and at most once a day while one is stored (web_sess_mark_due). A
+ *    trusted clock behind the mark moves nothing back: the mark stays.
+ *  - At boot a stored session is taken back only if its end is past the
+ *    mark and past the trusted clock (when set), for the time from the later
+ *    of the two to its end, at most the lifetime: one that ended while the
+ *    station was off, or before the mark, is dropped; without a clock the
+ *    off time cannot be known, so only the time the mark leaves is given.
+ *  - While the station runs, the trusted clock ends a session whose end it
+ *    has passed (a clock behind the mark ends nothing early, and gives no
+ *    time either: the monotonic count goes on).
  */
 #define WEB_SESSIONS_MAX        8u
 #define WEB_SESSION_IDLE_S      1800u          /**< idle timeout, extended by every authenticated request */
 #define WEB_SESSION_LIFE_S      86400u         /**< absolute lifetime */
 #define WEB_SESSION_REMEMBER_S  2592000u       /**< a remembered session's lifetime (30 days from its login), no idle timeout */
 #define WEB_SESSION_KEY_LEN     32u            /**< SHA-256 of the token */
+#define WEB_SESS_MARK_EVERY_S   86400u         /**< the stored mark is refreshed at most this often (besides other writes) */
 
 typedef struct {
     bool used;
@@ -221,6 +237,8 @@ typedef struct {
 typedef struct {
     web_session_t s[WEB_SESSIONS_MAX];
     uint32_t next_gen;
+    int64_t mark_unix;     /**< the mark (UTC) at monotonic time mark_s; 0 = none yet */
+    uint32_t mark_s;
 } web_sessions_t;
 
 void web_sess_init(web_sessions_t *t);
@@ -257,22 +275,34 @@ uint32_t web_sess_expire(web_sessions_t *t, uint32_t now_s);
 /** True while index idx holds the session generation `gen`. */
 bool web_sess_alive(const web_sessions_t *t, int idx, uint32_t gen);
 
+/** Raise the mark to unix_s (trusted UTC, or a stored mark) if that is later than the mark carried to now_s. */
+void web_sess_mark(web_sessions_t *t, int64_t unix_s, uint32_t now_s);
+
+/** The mark carried to now_s, or the trusted clock if that is later (0 = neither known). */
+int64_t web_sess_mark_now(const web_sessions_t *t, uint32_t now_s, int64_t now_unix);
+
+/** True when a stored mark is WEB_SESS_MARK_EVERY_S or more behind the current one (the daily refresh). */
+bool web_sess_mark_due(int64_t stored_mark, int64_t mark_now);
+
 /**
- * The trusted clock is set (now_unix > 0): remembered sessions without a
- * UTC end get one (now + time left; *stamped = true), those whose UTC end
- * has passed end, and a UTC end sooner than the monotonic one shortens it.
+ * The trusted clock is set (now_unix > 0): the mark rises to it; remembered
+ * sessions without a UTC end get one (now + time left), an end more than
+ * the lifetime ahead is cut back to now + lifetime (*changed = true for
+ * either: the store must follow), those whose UTC end has passed end, and a
+ * UTC end sooner than the monotonic one shortens it.
  * @return bit mask of the ended indexes.
  */
-uint32_t web_sess_clock(web_sessions_t *t, uint32_t now_s, int64_t now_unix, bool *stamped);
+uint32_t web_sess_clock(web_sessions_t *t, uint32_t now_s, int64_t now_unix, bool *changed);
 
-/* Stored remembered sessions (settings web/sessions), v1 (settings_codec.h):
- *   u8 version (1), salt[16] of the admin password they belong to, u8 count,
- *   count x {key[32], i64 end_unix}.
+/* Stored remembered sessions (settings web/sessions), v2 (settings_codec.h):
+ *   u8 version (2), salt[16] of the admin password they belong to,
+ *   i64 mark (UTC), u8 count, count x {key[32], i64 end_unix}.
  * A new password has a new salt, so sessions of an older one are never read
- * back, whichever way the password changed. */
-#define WEB_SESS_STORE_VERSION  1u
+ * back, whichever way the password changed. A v1 record (no mark) is not
+ * read: its sessions log in again. */
+#define WEB_SESS_STORE_VERSION  2u
 #define WEB_SESS_BIND_LEN       16u
-#define WEB_SESS_STORE_MAX_LEN  (1u + WEB_SESS_BIND_LEN + 1u + WEB_SESSIONS_MAX * (WEB_SESSION_KEY_LEN + 8u))
+#define WEB_SESS_STORE_MAX_LEN  (1u + WEB_SESS_BIND_LEN + 8u + 1u + WEB_SESSIONS_MAX * (WEB_SESSION_KEY_LEN + 8u))
 
 typedef struct {
     uint8_t key[WEB_SESSION_KEY_LEN];
@@ -280,20 +310,22 @@ typedef struct {
 } web_sess_rec_t;
 
 /**
- * Encode the remembered sessions that have a UTC end. @return the length
- * (0 if cap is too small); *count = how many (0 = nothing to store).
+ * Encode the remembered sessions that have a UTC end, with this mark.
+ * @return the length (0 if cap is too small); *count = how many (0 = nothing to store).
  */
-size_t web_sess_store_encode(const web_sessions_t *t, const uint8_t bind[WEB_SESS_BIND_LEN], uint8_t *buf, size_t cap,
-                             size_t *count);
+size_t web_sess_store_encode(const web_sessions_t *t, const uint8_t bind[WEB_SESS_BIND_LEN], int64_t mark_unix,
+                             uint8_t *buf, size_t cap, size_t *count);
 
-/** Decode a v1 record (at most WEB_SESSIONS_MAX sessions); false for any other layout. */
-bool web_sess_store_decode(const uint8_t *buf, size_t len, uint8_t bind[WEB_SESS_BIND_LEN],
+/** Decode a v2 record (at most WEB_SESSIONS_MAX sessions); false for any other layout. */
+bool web_sess_store_decode(const uint8_t *buf, size_t len, uint8_t bind[WEB_SESS_BIND_LEN], int64_t *mark_unix,
                            web_sess_rec_t out[WEB_SESSIONS_MAX], size_t *count);
 
 /**
- * Take a stored session back at boot: the time its UTC end leaves (at most
- * the lifetime), the full lifetime while the clock is not set (now_unix 0).
- * @return its index, or -1 (its end passed, no UTC end, the table is full).
+ * Take a stored session back at boot (raise the mark to the stored one
+ * first): from the later of the mark and the trusted clock (now_unix, 0 =
+ * not set) to its end, at most the lifetime; its end cut back to the clock
+ * + lifetime. @return its index, or -1 (its end is not past both, no UTC
+ * end, the table is full).
  */
 int web_sess_restore(web_sessions_t *t, const web_sess_rec_t *rec, uint32_t now_s, int64_t now_unix);
 

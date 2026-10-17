@@ -317,24 +317,174 @@ TEST_CASE("the clock stamps a remembered session's UTC end and ends one whose en
     int ia = web_sess_create(&t, a, true, 1000, 0);        /* before the clock */
     int ib = web_sess_create(&t, b, true, 1000, T_UNIX);   /* with it */
     int ic = web_sess_create(&t, c, false, 1000, 0);
-    bool stamped = true;
-    TEST_ASSERT_EQUAL_UINT32(0, web_sess_clock(&t, 1500, 0, &stamped));   /* no clock: nothing */
-    TEST_ASSERT_FALSE(stamped);
-    TEST_ASSERT_EQUAL_UINT32(0, web_sess_clock(&t, 1500, T_UNIX + 500, &stamped));
-    TEST_ASSERT_TRUE(stamped);
-    TEST_ASSERT_EQUAL_INT64(T_UNIX + 500 + WEB_SESSION_REMEMBER_S - 500, t.s[ia].end_unix);
+    bool changed = true;
+    TEST_ASSERT_EQUAL_UINT32(0, web_sess_clock(&t, 1500, 0, &changed));   /* no clock: nothing */
+    TEST_ASSERT_FALSE(changed);
+    TEST_ASSERT_EQUAL_UINT32(0, web_sess_clock(&t, 1500, T_UNIX + 500, &changed));
+    TEST_ASSERT_TRUE(changed);
+    TEST_ASSERT_EQUAL_INT64(T_UNIX + 500 + WEB_SESSION_REMEMBER_S - 500, t.s[ia].end_unix);   /* now + time left */
     TEST_ASSERT_EQUAL_INT64(0, t.s[ic].end_unix);
-    TEST_ASSERT_EQUAL_UINT32(0, web_sess_clock(&t, 1501, T_UNIX + 501, &stamped));
-    TEST_ASSERT_FALSE(stamped);   /* once */
+    TEST_ASSERT_EQUAL_INT64(T_UNIX + 500, web_sess_mark_now(&t, 1500, 0));                    /* the mark follows */
+    TEST_ASSERT_EQUAL_UINT32(0, web_sess_clock(&t, 1501, T_UNIX + 501, &changed));
+    TEST_ASSERT_FALSE(changed);   /* once */
 
     /* The clock jumps ahead (the station learns the true date): a UTC end sooner than the monotonic one counts. */
-    TEST_ASSERT_EQUAL_UINT32(0, web_sess_clock(&t, 1600, T_UNIX + 20 * (int64_t)DAY_S, &stamped));
+    TEST_ASSERT_EQUAL_UINT32(0, web_sess_clock(&t, 1600, T_UNIX + 20 * (int64_t)DAY_S, &changed));
+    TEST_ASSERT_FALSE(changed);
     TEST_ASSERT_EQUAL_UINT32(10 * DAY_S, web_sess_left_s(&t, ib, 1600));
     /* And past it: ended, reported in the mask. */
-    uint32_t mask = web_sess_clock(&t, 1700, T_UNIX + 31 * (int64_t)DAY_S, &stamped);
+    uint32_t mask = web_sess_clock(&t, 1700, T_UNIX + 31 * (int64_t)DAY_S, &changed);
     TEST_ASSERT_EQUAL_UINT32((1u << ia) | (1u << ib), mask);
     TEST_ASSERT_EQUAL(-1, web_sess_find(&t, a, 1700));
     TEST_ASSERT_EQUAL(ic, web_sess_find(&t, c, 1700));
+}
+
+TEST_CASE("an end is never more than 30 days ahead of the clock, and is stored cut back", "[web_core]")
+{
+    web_sessions_t t;
+    web_sess_init(&t);
+    uint8_t a[WEB_SESSION_KEY_LEN];
+    key(a, 4);
+    /* A login while the trusted clock is a year ahead. */
+    const int64_t ahead = T_UNIX + 365 * (int64_t)DAY_S;
+    int idx = web_sess_create(&t, a, true, 100, ahead);
+    TEST_ASSERT_EQUAL_INT64(ahead + WEB_SESSION_REMEMBER_S, t.s[idx].end_unix);
+    /* The clock is put right: the end is cut back to it + 30 days, and the store must follow. */
+    bool changed = false;
+    TEST_ASSERT_EQUAL_UINT32(0, web_sess_clock(&t, 110, T_UNIX, &changed));
+    TEST_ASSERT_TRUE(changed);
+    TEST_ASSERT_EQUAL_INT64(T_UNIX + WEB_SESSION_REMEMBER_S, t.s[idx].end_unix);
+    TEST_ASSERT_EQUAL_UINT32(0, web_sess_clock(&t, 111, T_UNIX + 1, &changed));
+    TEST_ASSERT_FALSE(changed);
+    uint8_t bind[WEB_SESS_BIND_LEN] = { 0 };
+    uint8_t buf[WEB_SESS_STORE_MAX_LEN];
+    size_t count = 0;
+    size_t len = web_sess_store_encode(&t, bind, web_sess_mark_now(&t, 111, T_UNIX + 1), buf, sizeof(buf), &count);
+    web_sess_rec_t recs[WEB_SESSIONS_MAX];
+    int64_t mark = 0;
+    size_t n = 0;
+    TEST_ASSERT_TRUE(web_sess_store_decode(buf, len, bind, &mark, recs, &n));
+    TEST_ASSERT_EQUAL_INT64(T_UNIX + WEB_SESSION_REMEMBER_S, recs[0].end_unix);
+    /* The mark kept the year-ahead time (a clock behind it moves nothing back): at the next boot that session is past. */
+    TEST_ASSERT_TRUE(mark >= ahead);
+    web_sess_init(&t);
+    web_sess_mark(&t, mark, 5);
+    TEST_ASSERT_EQUAL(-1, web_sess_restore(&t, &recs[0], 5, T_UNIX + DAY_S));
+    TEST_ASSERT_EQUAL(-1, web_sess_restore(&t, &recs[0], 5, 0));
+
+    /* A stored end 90 days ahead of the clock at boot (the clock went back since): cut to 30 days, also as stored, so
+     * the next boot does not get 30 days again. */
+    web_sess_init(&t);
+    web_sess_mark(&t, T_UNIX - DAY_S, 5);
+    web_sess_rec_t r;
+    key(r.key, 5);
+    r.end_unix = T_UNIX + 90 * (int64_t)DAY_S;
+    idx = web_sess_restore(&t, &r, 5, T_UNIX);
+    TEST_ASSERT_TRUE(idx >= 0);
+    TEST_ASSERT_EQUAL_UINT32(WEB_SESSION_REMEMBER_S, web_sess_left_s(&t, idx, 5));
+    TEST_ASSERT_EQUAL_INT64(T_UNIX + WEB_SESSION_REMEMBER_S, t.s[idx].end_unix);
+    len = web_sess_store_encode(&t, bind, web_sess_mark_now(&t, 5, T_UNIX), buf, sizeof(buf), &count);
+    TEST_ASSERT_TRUE(web_sess_store_decode(buf, len, bind, &mark, recs, &n));
+    TEST_ASSERT_EQUAL_INT64(T_UNIX + WEB_SESSION_REMEMBER_S, recs[0].end_unix);
+    web_sess_init(&t);
+    web_sess_mark(&t, mark, 5);
+    idx = web_sess_restore(&t, &recs[0], 5, T_UNIX + 10 * (int64_t)DAY_S);   /* ten days later */
+    TEST_ASSERT_EQUAL_UINT32(20 * DAY_S, web_sess_left_s(&t, idx, 5));
+}
+
+TEST_CASE("a clock stepping back and forth past an end revives nothing at the next boot", "[web_core]")
+{
+    web_sessions_t t;
+    web_sess_init(&t);
+    uint8_t a[WEB_SESSION_KEY_LEN];
+    key(a, 6);
+    uint8_t bind[WEB_SESS_BIND_LEN] = { 0 };
+    uint8_t buf[WEB_SESS_STORE_MAX_LEN];
+    web_sess_rec_t recs[WEB_SESSIONS_MAX];
+    int64_t mark = 0;
+    size_t count = 0;
+    size_t n = 0;
+
+    /* Back 40 days: the end is cut to the clock + 30 days, the mark stays; the session lives on (its uptime count). */
+    int idx = web_sess_create(&t, a, true, 100, T_UNIX);
+    bool changed = false;
+    TEST_ASSERT_EQUAL_UINT32(0, web_sess_clock(&t, 200, T_UNIX - 40 * (int64_t)DAY_S + 100, &changed));
+    TEST_ASSERT_TRUE(changed);
+    TEST_ASSERT_EQUAL_INT64(T_UNIX - 10 * (int64_t)DAY_S + 100, t.s[idx].end_unix);
+    TEST_ASSERT_EQUAL_INT64(T_UNIX + 100, web_sess_mark_now(&t, 200, 0));
+    TEST_ASSERT_EQUAL(idx, web_sess_find(&t, a, 300));
+    size_t len = web_sess_store_encode(&t, bind, web_sess_mark_now(&t, 200, 0), buf, sizeof(buf), &count);
+    /* Forward again, past that end: it ends. */
+    TEST_ASSERT_EQUAL_UINT32(1u << idx, web_sess_clock(&t, 300, T_UNIX + 200, &changed));
+    /* A boot from the record written in between takes nothing back, with or without the clock. */
+    TEST_ASSERT_TRUE(web_sess_store_decode(buf, len, bind, &mark, recs, &n));
+    web_sess_init(&t);
+    web_sess_mark(&t, mark, 5);
+    TEST_ASSERT_EQUAL(-1, web_sess_restore(&t, &recs[0], 5, 0));
+    TEST_ASSERT_EQUAL(-1, web_sess_restore(&t, &recs[0], 5, T_UNIX - 40 * (int64_t)DAY_S));
+
+    /* Forward past the end, then back: the session ended, and a stale record of it stays dead under the mark. */
+    web_sess_init(&t);
+    idx = web_sess_create(&t, a, true, 100, T_UNIX);
+    len = web_sess_store_encode(&t, bind, web_sess_mark_now(&t, 100, T_UNIX), buf, sizeof(buf), &count);
+    TEST_ASSERT_EQUAL_UINT32(1u << idx, web_sess_clock(&t, 200, T_UNIX + 31 * (int64_t)DAY_S, &changed));
+    TEST_ASSERT_EQUAL_UINT32(0, web_sess_clock(&t, 300, T_UNIX + DAY_S, &changed));
+    int64_t late = web_sess_mark_now(&t, 300, T_UNIX + DAY_S);
+    TEST_ASSERT_EQUAL_INT64(T_UNIX + 31 * (int64_t)DAY_S + 100, late);   /* the step back moved nothing */
+    TEST_ASSERT_TRUE(web_sess_store_decode(buf, len, bind, &mark, recs, &n));
+    web_sess_init(&t);
+    web_sess_mark(&t, late, 5);
+    TEST_ASSERT_EQUAL(-1, web_sess_restore(&t, &recs[0], 5, 0));
+    TEST_ASSERT_EQUAL(-1, web_sess_restore(&t, &recs[0], 5, T_UNIX + DAY_S));
+}
+
+TEST_CASE("without the clock at boot, the mark decides: from it to the end, none that ended before it", "[web_core]")
+{
+    web_sessions_t t;
+    web_sess_init(&t);
+    web_sess_mark(&t, T_UNIX + 20 * (int64_t)DAY_S, 5);   /* the stored mark */
+    web_sess_rec_t r;
+    key(r.key, 7);
+    r.end_unix = T_UNIX + 10 * (int64_t)DAY_S;   /* ended before the mark (while the station was off, or earlier) */
+    TEST_ASSERT_EQUAL(-1, web_sess_restore(&t, &r, 5, 0));
+    r.end_unix = T_UNIX + 20 * (int64_t)DAY_S;
+    TEST_ASSERT_EQUAL(-1, web_sess_restore(&t, &r, 5, 0));
+    r.end_unix = T_UNIX + 25 * (int64_t)DAY_S;   /* five days past the mark: five days, not thirty */
+    int idx = web_sess_restore(&t, &r, 5, 0);
+    TEST_ASSERT_TRUE(idx >= 0);
+    TEST_ASSERT_EQUAL_UINT32(5 * DAY_S, web_sess_left_s(&t, idx, 5));
+    TEST_ASSERT_EQUAL_INT64(r.end_unix, t.s[idx].end_unix);
+    /* Running on without a clock, the mark is carried forward (the station ran that long at least). */
+    TEST_ASSERT_EQUAL_INT64(T_UNIX + 20 * (int64_t)DAY_S + 3600, web_sess_mark_now(&t, 5 + 3600, 0));
+    /* A trusted clock behind the mark gives nothing back. */
+    web_sess_mark(&t, T_UNIX, 5 + 3600);
+    TEST_ASSERT_EQUAL_INT64(T_UNIX + 20 * (int64_t)DAY_S + 3600, web_sess_mark_now(&t, 5 + 3600, T_UNIX));
+}
+
+TEST_CASE("the stored mark is refreshed at most once a day", "[web_core]")
+{
+    web_sessions_t t;
+    web_sess_init(&t);
+    web_sess_mark(&t, T_UNIX, 0);
+    /* Three days without a clock, checked every minute: three writes. */
+    int64_t stored = T_UNIX;
+    int writes = 0;
+    for (uint32_t s = 0; s <= 3 * DAY_S; s += 60) {
+        int64_t now = web_sess_mark_now(&t, s, 0);
+        if (web_sess_mark_due(stored, now)) {
+            stored = now;
+            writes++;
+        }
+    }
+    TEST_ASSERT_EQUAL(3, writes);
+    /* A clock far ahead: one write, then none for a day. */
+    int64_t now = web_sess_mark_now(&t, 3 * DAY_S, T_UNIX + 40 * (int64_t)DAY_S);
+    TEST_ASSERT_TRUE(web_sess_mark_due(stored, now));
+    stored = now;
+    web_sess_mark(&t, now, 3 * DAY_S);
+    TEST_ASSERT_FALSE(web_sess_mark_due(stored, web_sess_mark_now(&t, 4 * DAY_S - 1, 0)));
+    TEST_ASSERT_TRUE(web_sess_mark_due(stored, web_sess_mark_now(&t, 4 * DAY_S, 0)));
+    TEST_ASSERT_FALSE(web_sess_mark_due(0, 0));   /* nothing known */
 }
 
 TEST_CASE("stored sessions: only remembered ones with a UTC end, bound to the password's salt", "[web_core]")
@@ -353,49 +503,52 @@ TEST_CASE("stored sessions: only remembered ones with a UTC end, bound to the pa
     memset(bind, 0xA5, sizeof(bind));
     uint8_t buf[WEB_SESS_STORE_MAX_LEN];
     size_t count = 99;
-    size_t len = web_sess_store_encode(&t, bind, buf, sizeof(buf), &count);
+    size_t len = web_sess_store_encode(&t, bind, T_UNIX + 15, buf, sizeof(buf), &count);
     TEST_ASSERT_EQUAL(2, count);
-    TEST_ASSERT_EQUAL(1 + WEB_SESS_BIND_LEN + 1 + 2 * (WEB_SESSION_KEY_LEN + 8), len);
+    TEST_ASSERT_EQUAL(1 + WEB_SESS_BIND_LEN + 8 + 1 + 2 * (WEB_SESSION_KEY_LEN + 8), len);
     TEST_ASSERT_EQUAL_UINT8(WEB_SESS_STORE_VERSION, buf[0]);
-    /* No token anywhere: only the keys (the tokens' digests) and the ends. */
+    /* No token anywhere: only the keys (the tokens' digests), the ends and the mark. */
     uint8_t got_bind[WEB_SESS_BIND_LEN];
     web_sess_rec_t recs[WEB_SESSIONS_MAX];
+    int64_t mark = 0;
     size_t n = 0;
-    TEST_ASSERT_TRUE(web_sess_store_decode(buf, len, got_bind, recs, &n));
+    TEST_ASSERT_TRUE(web_sess_store_decode(buf, len, got_bind, &mark, recs, &n));
     TEST_ASSERT_EQUAL(2, n);
+    TEST_ASSERT_EQUAL_INT64(T_UNIX + 15, mark);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(bind, got_bind, sizeof(bind));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(k[0], recs[0].key, WEB_SESSION_KEY_LEN);
     TEST_ASSERT_EQUAL_INT64(T_UNIX + WEB_SESSION_REMEMBER_S, recs[0].end_unix);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(k[3], recs[1].key, WEB_SESSION_KEY_LEN);
     TEST_ASSERT_EQUAL_INT64(T_UNIX + 10 + WEB_SESSION_REMEMBER_S, recs[1].end_unix);
 
-    /* Anything else is refused: a short or long record, another version, more sessions than the table holds. */
-    TEST_ASSERT_FALSE(web_sess_store_decode(buf, len - 1, got_bind, recs, &n));
+    /* Anything else is refused: a short or long record, another version (v1 had no mark), more sessions than the
+     * table holds. */
+    TEST_ASSERT_FALSE(web_sess_store_decode(buf, len - 1, got_bind, &mark, recs, &n));
     uint8_t longer[WEB_SESS_STORE_MAX_LEN + 1];
     memcpy(longer, buf, len);
     longer[len] = 0;
-    TEST_ASSERT_FALSE(web_sess_store_decode(longer, len + 1, got_bind, recs, &n));
-    buf[0] = 2;
-    TEST_ASSERT_FALSE(web_sess_store_decode(buf, len, got_bind, recs, &n));
+    TEST_ASSERT_FALSE(web_sess_store_decode(longer, len + 1, got_bind, &mark, recs, &n));
+    buf[0] = 1;
+    TEST_ASSERT_FALSE(web_sess_store_decode(buf, len, got_bind, &mark, recs, &n));
     buf[0] = WEB_SESS_STORE_VERSION;
-    buf[1 + WEB_SESS_BIND_LEN] = WEB_SESSIONS_MAX + 1;
-    TEST_ASSERT_FALSE(web_sess_store_decode(buf, len, got_bind, recs, &n));
-    TEST_ASSERT_EQUAL(0, web_sess_store_encode(&t, bind, buf, 20, &count));   /* too small */
+    buf[1 + WEB_SESS_BIND_LEN + 8] = WEB_SESSIONS_MAX + 1;
+    TEST_ASSERT_FALSE(web_sess_store_decode(buf, len, got_bind, &mark, recs, &n));
+    TEST_ASSERT_EQUAL(0, web_sess_store_encode(&t, bind, T_UNIX, buf, 30, &count));   /* too small */
 
     /* A password change keeps the current session and ends every other one: one record left. */
     web_sess_end_all_except(&t, 0);
-    len = web_sess_store_encode(&t, bind, buf, sizeof(buf), &count);
+    len = web_sess_store_encode(&t, bind, T_UNIX + 15, buf, sizeof(buf), &count);
     TEST_ASSERT_EQUAL(1, count);
-    TEST_ASSERT_TRUE(web_sess_store_decode(buf, len, got_bind, recs, &n));
+    TEST_ASSERT_TRUE(web_sess_store_decode(buf, len, got_bind, &mark, recs, &n));
     TEST_ASSERT_EQUAL(1, n);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(k[0], recs[0].key, WEB_SESSION_KEY_LEN);
     /* Logout of that one too: nothing to store. */
     web_sess_end(&t, 0);
-    (void)web_sess_store_encode(&t, bind, buf, sizeof(buf), &count);
+    (void)web_sess_store_encode(&t, bind, T_UNIX + 15, buf, sizeof(buf), &count);
     TEST_ASSERT_EQUAL(0, count);
 }
 
-TEST_CASE("restore: the time the UTC end leaves; without the clock in full until the clock ends it", "[web_core]")
+TEST_CASE("restore: the time the UTC end leaves; without the clock from the mark until the clock ends it", "[web_core]")
 {
     web_sessions_t t;
     web_sess_init(&t);
@@ -418,22 +571,20 @@ TEST_CASE("restore: the time the UTC end leaves; without the clock in full until
     TEST_ASSERT_EQUAL(-1, web_sess_restore(&t, &r, boot, T_UNIX));
     r.end_unix = 0;
     TEST_ASSERT_EQUAL(-1, web_sess_restore(&t, &r, boot, T_UNIX));
-    /* An end further than 30 days ahead (the clock went back): 30 days at most. */
-    r.end_unix = T_UNIX + 90 * (int64_t)DAY_S;
-    idx = web_sess_restore(&t, &r, boot, T_UNIX);
-    TEST_ASSERT_EQUAL_UINT32(WEB_SESSION_REMEMBER_S, web_sess_left_s(&t, idx, boot));
 
-    /* The clock not set yet: taken back with the full lifetime; once the clock shows its end passed, it ends. */
+    /* The clock not set yet: from the stored mark to its end; once the clock shows its end passed, it ends. */
     web_sess_init(&t);
+    web_sess_mark(&t, T_UNIX, boot);
     r.end_unix = T_UNIX + 100;
     idx = web_sess_restore(&t, &r, boot, 0);
     TEST_ASSERT_TRUE(idx >= 0);
+    TEST_ASSERT_EQUAL_UINT32(100, web_sess_left_s(&t, idx, boot));
     TEST_ASSERT_EQUAL(idx, web_sess_find(&t, r.key, boot + 60));
-    bool stamped = false;
-    TEST_ASSERT_EQUAL_UINT32(0, web_sess_clock(&t, boot + 60, T_UNIX + 50, &stamped));
-    TEST_ASSERT_FALSE(stamped);
-    TEST_ASSERT_EQUAL_UINT32(50, web_sess_left_s(&t, idx, boot + 60));
-    TEST_ASSERT_EQUAL_UINT32(1u << idx, web_sess_clock(&t, boot + 120, T_UNIX + 110, &stamped));
+    bool changed = false;
+    TEST_ASSERT_EQUAL_UINT32(0, web_sess_clock(&t, boot + 60, T_UNIX + 70, &changed));
+    TEST_ASSERT_FALSE(changed);
+    TEST_ASSERT_EQUAL_UINT32(30, web_sess_left_s(&t, idx, boot + 60));   /* the station was off 10 s more than the mark knew */
+    TEST_ASSERT_EQUAL_UINT32(1u << idx, web_sess_clock(&t, boot + 120, T_UNIX + 130, &changed));
     TEST_ASSERT_EQUAL(-1, web_sess_find(&t, r.key, boot + 120));
 
     /* A full table takes nothing back (it ends no session for a stored one). */
