@@ -194,6 +194,9 @@ small { font-size: 0.85rem; }
 
 /* ---- Header and navigation ------------------------------------------- */
 
+/* The header's height, where the tab bar sticks under it: its top padding (a phone's notch inset), a 40 px row (the
+ * buttons), 0.5rem under that and its border. */
+body { --top-pad: max(0.5rem, env(safe-area-inset-top)); --top-h: calc(var(--top-pad) + 40px + 0.5rem + 1px); }
 .top {
   position: sticky;
   top: 0;
@@ -201,8 +204,9 @@ small { font-size: 0.85rem; }
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  min-height: var(--top-h);
   padding: 0.5rem max(1rem, calc((100% - 1120px) / 2 + 1rem));
-  padding-top: max(0.5rem, env(safe-area-inset-top));
+  padding-top: var(--top-pad);
   padding-left: max(1rem, calc((100% - 1120px) / 2 + 1rem), calc(env(safe-area-inset-left) + 0.5rem));
   padding-right: max(1rem, calc((100% - 1120px) / 2 + 1rem), calc(env(safe-area-inset-right) + 0.5rem));
   background: var(--surface);
@@ -213,38 +217,53 @@ small { font-size: 0.85rem; }
   align-items: center;
   gap: 0.5rem;
   min-width: 0;
+  margin-right: auto;   /* the state and the buttons at the right, also while the state is hidden (Status page) */
   color: var(--text);
   font-weight: 650;
   text-decoration: none;
 }
 .brand img { width: 28px; height: 28px; flex: none; }
 .brand span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.live {
+/* The station's state (renderLive): the top card's dot and a word, a link to the Status page; grey while unknown. Its
+ * tooltip is on the inner box (.in), which also draws the dot. */
+.live { display: flex; }
+.live a {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 0.8rem;
+  min-height: 36px;
+  padding: 0 0.3rem;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
   white-space: nowrap;
 }
-.live::before {
+.live a:hover { background: var(--surface-2); }
+.live .in { display: inline-flex; align-items: center; gap: 0.4rem; }
+.live .in::before {
   content: "";
-  width: 8px;
-  height: 8px;
+  flex: none;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
-  background: var(--off);
+  background: var(--tone, var(--off));
 }
-.live:empty::before { display: none; }
+.live .age { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
 .live .age:empty { display: none; }
-.live.on::before { background: var(--ok); }
-.live.poll::before { background: var(--warn); }
-.live.down::before { background: var(--bad); }
+/* A phone: the brand, the state (its longest word too), the theme and Log out on one line at 390 px. */
+@media (max-width: 420px) {
+  .top { gap: 0.25rem; }
+  .live a { padding: 0; font-size: 0.8rem; }
+  .live .in { gap: 0.3rem; }
+  .top-actions .icon-btn { min-width: 36px; }
+  .top-actions .btn.small { padding-left: 0.5rem; padding-right: 0.5rem; }
+}
 .top-actions { display: flex; gap: 0.25rem; white-space: nowrap; }
 
 .tabs {
   position: sticky;
-  top: 49px;
+  top: var(--top-h);
   z-index: 19;
   display: flex;
   gap: 0.25rem;
@@ -268,6 +287,9 @@ small { font-size: 0.85rem; }
   white-space: nowrap;
 }
 .tabs a.active { color: var(--text); border-bottom-color: var(--accent); }
+/* The five tabs fit a 390 px phone; a narrower screen scrolls them (the fades say so). */
+@media (max-width: 420px) { .tabs a { padding-left: 0.5rem; padding-right: 0.5rem; } }
+@media (max-width: 380px) { .tabs a { padding-left: 0.45rem; padding-right: 0.45rem; } }
 .tabs a .dot {
   display: inline-block;
   width: 7px;
@@ -386,6 +408,8 @@ small { font-size: 0.85rem; }
 .hero.warn .state::before { background: var(--warn); }
 .hero.bad .state::before { background: var(--bad); }
 .hero.info .state::before { background: var(--info); }
+/* No contact (renderLive): the top card shows the last state it had, its dot grey like the header's. */
+body.no-contact .hero .state::before { background: var(--off); }
 .hero .hero-actions { display: flex; margin-top: 0.4rem; }
 /* Other named alerts: one line each, its mark, the words, Details at the right. */
 .also { display: grid; gap: 0.5rem; padding: 0.6rem 0 0; border-top: 1px solid var(--border); list-style: none; }
@@ -420,7 +444,10 @@ small { font-size: 0.85rem; }
 .facts > div { display: flex; gap: 0.4rem; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.facts dd a { margin-left: 0.6rem; font-weight: 400; }   /* "Change": where the fact is set */
 .hero .facts { margin-top: 0.4rem; }
+/* A fact too long for one line puts its value under its label (never both squeezed into two narrow columns). */
+.hero .facts > div { flex-wrap: wrap; row-gap: 0; }
 @media (min-width: 560px) {
   .hero { grid-template-columns: minmax(0, 1fr) auto; column-gap: 1.25rem; }
   .hero > * { grid-column: 1; }
@@ -685,7 +712,7 @@ input:disabled, select:disabled { opacity: 0.65; }
 }
 
 details.more { margin-top: 0.85rem; }
-/* A card that folds to its title row (Diagnostics: Firmware internals). */
+/* A card that folds to its title row (Logs: Firmware internals). */
 details.fold > summary { display: flex; align-items: center; gap: 0.6rem; min-height: 32px; cursor: pointer; list-style: none; }
 details.fold > summary::-webkit-details-marker { display: none; }
 details.fold > summary::before { content: '›'; flex: none; width: 1rem; color: var(--accent); font-size: 1.35rem; font-weight: 700; line-height: 1; transition: transform 0.15s; }
@@ -978,10 +1005,10 @@ input.ant { white-space: normal; }
 .pgroup { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
 .pgroup:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
 .pgroup > h3 { margin: 0; font-size: 1rem; }
-/* A small heading inside a card (the receiver's messages, the parts of Diagnostics' Receiver card). */
+/* A small heading inside a card (the receiver's messages, the parts of Logs' Receiver card). */
 .sub { margin: 1rem 0 0.4rem; color: var(--muted); font-size: 0.9rem; font-weight: 650; }
 .stack > .sub:first-child { margin-top: 0; }
-/* Parts of a card side by side on a wide screen, under each other on a phone (Diagnostics' Receiver card). */
+/* Parts of a card side by side on a wide screen, under each other on a phone (Logs' Receiver card). */
 .parts > * > .sub:first-child { margin-top: 0; }
 .parts > * + * { margin-top: 1rem; }
 @media (min-width: 1000px) {
@@ -1032,7 +1059,7 @@ pre.log .e { color: var(--bad); }
 pre.log .w { color: var(--warn); }
 pre.log .gap { color: var(--muted); font-style: italic; cursor: auto; }
 
-/* Sub-tabs (Diagnostics: Overview, History, Logs): one row, also on a phone. */
+/* Sub-tabs (Logs: Overview, History, Console): one row, also on a phone. */
 .seg { display: flex; gap: 0.35rem; }
 .seg a {
   flex: none;

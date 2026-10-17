@@ -14,7 +14,7 @@
  *    a receiver update journal is open, and while any other receiver session
  *    or job runs;
  *  - every byte sent and received is printed with its time (hex and text)
- *    and kept in a capture ring the web UI's diagnostics can download (admin);
+ *    and kept in a capture ring the web UI's Logs > Console can download (admin);
  *  - each ends with one PASS or FAIL line with the values the bench test asks
  *    to record.
  * Nothing runs at boot except the stop key from boot, and only for the one

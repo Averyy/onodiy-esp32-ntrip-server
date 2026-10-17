@@ -13,7 +13,7 @@ the page gets), submits the form and returns the body of the PUT it sends
 where. Other cases build a caster card's parts (the duplicate-stream
 warning, the connection details), the Status page and the no-receiver
 panel, and run the setup's Onocoy step against scripted answers (events
-bubble up through the parents there) and Diagnostics' "Clear journal"
+bubble up through the parents there) and Logs' "Clear journal"
 against the station's answers to it. The Receiver pages are built whole
 against scripted answers (patch() works on this DOM too: children know
 their parent and siblings, and a node appended elsewhere moves). Skipped
@@ -185,8 +185,10 @@ vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { casterEditor, openCasterWarning, casterDetails, casterSummary, casterChip, stationState, adminDashboard,\n' +
   '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard, healthCard, chipCard, signalsHead, bandTable, kv,\n' +
-  '  startLines, foldRows, diagReceiverCard, receiverPage,\n' +
-  '  setStatus: s => { S.status = s; }, setSession: s => { S.session = s; } };\n})()',
+  '  startLines, foldRows, diagReceiverCard, receiverPage, renderLive,\n' +
+  '  setStatus: s => { S.status = s; }, setSession: s => { S.session = s; },\n' +
+  '  setLive: (age, started, page) => { S.statusAt = age === null ? 0 : Date.now() - age * 1000; shell.started = started;\n' +
+  '    shell.current = page === null ? null : { name: page, arg: \'\', view: {} }; } };\n})()',
   ctx);
 
 /* The elements on screen: hidden ones and everything inside them left out. */
@@ -312,7 +314,7 @@ async function manageSave(c) {
   return sent.filter(x => x.method === 'PUT').map(x => x.body);
 }
 
-/* Diagnostics' event card with two records: "Clear journal…", confirmed, answered with c.answer ([status, body]).
+/* Logs' event card with two records: "Clear journal…", confirmed, answered with c.answer ([status, body]).
  * What it then shows: the toast (text, tone), the card's error line, whether it read the journal again, and
  * the time the DELETE may take before the page gives up on it. */
 async function journalClear(c) {
@@ -371,7 +373,7 @@ async function journalClear(c) {
   return r;
 }
 
-/* Diagnostics' event card, its filter changed while the first read still runs: the journal reads it sends. */
+/* Logs' event card, its filter changed while the first read still runs: the journal reads it sends. */
 async function eventFilterEarly() {
   const settle = async () => {
     for (let i = 0; i < 40; i++) await new Promise(r => setImmediate(r));
@@ -393,7 +395,7 @@ async function eventFilterEarly() {
     rows: [...visible(card.el)].filter(e => e.tagName === 'TR').length };
 }
 
-/* The Diagnostics Health card for (hl, status): the chip [text, class], the messages' titles and lines, the rows. */
+/* Logs' Health card for (hl, status): the chip [text, class], the messages' titles and lines, the rows. */
 function healthView(c) {
   const sec = ui.healthCard(c.hl, c.status);
   const v = [...visible(sec)];
@@ -525,7 +527,7 @@ for (const c of JSON.parse(casesJson)) {
     continue;
   }
   if (c.fn === 'starts') {
-    /* Diagnostics' earlier starts: per row its cells' text, then its hover text. today: the day of `now` in the page's zone. */
+    /* Logs' earlier starts: per row its cells' text, then its hover text. today: the day of `now` in the page's zone. */
     const day = new Date(c.now * 1000).toDateString();
     out.push(ui.startLines(c.starts, day).map(tr => [...tr.kids.map(td => td.textContent), tr.getAttribute('title')]));
     continue;
@@ -611,9 +613,10 @@ for (const c of JSON.parse(casesJson)) {
     const st = ui.stationState(c.status, c.admin);
     const kids = (c.admin ? ui.adminDashboard(c.status, st, c.open || []) : ui.publicDashboard(c.status, st, null)).filter(Boolean);
     const all = kids.flatMap(k => [...visible(k)]);
+    /* A list's label/value pairs (the top card's facts: each pair in a div of its own). */
     const pairs = v => v.filter(e => e.tagName === 'DL').flatMap(dl => {
-      const r = [];
-      for (let i = 0; i + 1 < dl.kids.length; i += 2) r.push([dl.kids[i].textContent, dl.kids[i + 1].textContent]);
+      const r = [], kids = dl.kids.flatMap(k => (k.tagName === 'DIV' ? k.kids : [k]));
+      for (let i = 0; i + 1 < kids.length; i += 2) r.push([kids[i].textContent, kids[i + 1].textContent]);
       return r;
     });
     const hero = all.find(e => e.tagName === 'SECTION' && e.className.indexOf('hero') >= 0);
@@ -628,8 +631,36 @@ for (const c of JSON.parse(casesJson)) {
           text: bar.attrs['aria-valuetext'] || null, width: bar.kids[0].style.width } : null };
     }
     const plan = hv.find(e => e.tagName === 'P' && e.className === 'muted small');
+    const factLinks = hv.filter(e => e.tagName === 'A' && e.parent && e.parent.tagName === 'DD')
+      .map(e => [e.textContent, e.getAttribute('href'), e.getAttribute('aria-label')]);
     out.push({ head: hv.find(e => e.tagName === 'H2').textContent, line: hv.find(e => e.className === 'line').textContent,
-      plan: plan ? plan.textContent : null, facts: pairs(hv), cards: cards });
+      plan: plan ? plan.textContent : null, facts: pairs(hv), factLinks: factLinks, cards: cards });
+    continue;
+  }
+  if (c.fn === 'header') {
+    /* The header's indicator for a status (c.age seconds old, null: none yet) as a visitor (c.admin false) or the
+     * admin, on the page c.page ('' the Status page; default Casters): [the link's class, its word, the word's role, the
+     * count, whether the count is hidden from assistive technology, the tooltip (on the box inside the link), name,
+     * address], whether a second render kept the same word element (its live region), whether the indicator is hidden,
+     * whether the link itself has a title (its description), and whether the page is marked as without contact. */
+    const cls = new Set();
+    ctx.document.body.classList = { add: k => cls.add(k), remove: k => cls.delete(k), contains: k => cls.has(k),
+      toggle: (k, on) => (on ? cls.add(k) : cls.delete(k)) };
+    ui.setSession({ authenticated: !!c.admin });
+    ui.setStatus(c.status);
+    ui.setLive(c.age, c.started !== false, c.page === undefined ? 'casters' : c.page);
+    ids.live = new El('span');
+    ui.renderLive();
+    const a = ids.live.querySelector('a');
+    if (!a) {
+      out.push(null);
+      continue;
+    }
+    const w = a.querySelector('.word'), n = a.querySelector('.age'), box = a.querySelector('.in');
+    ui.renderLive();
+    out.push([a.className, w.textContent, w.getAttribute('role'), n.textContent, n.getAttribute('aria-hidden'), box.getAttribute('title'),
+      a.getAttribute('aria-label'), a.getAttribute('href'), ids.live.querySelector('a') === a && a.querySelector('.word') === w,
+      ids.live.hidden, a.hasAttribute('title'), cls.has('no-contact')]);
     continue;
   }
   if (c.fn === 'norx') {
@@ -642,7 +673,7 @@ for (const c of JSON.parse(casesJson)) {
     continue;
   }
   if (c.fn === 'rx_details') {
-    /* Diagnostics' Receiver card (c.preview: the held configuration's commands): every row as [label, text]; with c.full
+    /* Logs' Receiver card (c.preview: the held configuration's commands): every row as [label, text]; with c.full
      * what pageParts says of it. */
     const card = ui.diagReceiverCard(c.g, c.preview || null);
     const all = [...card.walk()];
@@ -978,6 +1009,64 @@ def test_status_quality_said_once_and_closed_port_panel():
     assert out[3][0] == "No receiver found" and "cable" in out[3][1] and out[3][2] is True
 
 
+def test_status_page_names_receiver_management_with_a_way_to_change_it():
+    """Receiver management other than the default: a fact under the top card, by the setting's name, the choice said
+    from the station's side, and a Change link to the card on Receiver settings (named for screen readers)."""
+    me = st_status(health={"level": "degraded", "recovery_mode": "alerts_only"},
+                   alerts=[{"id": "no_rtcm", "source": "health"}], casters=[st_caster(0, "Onocoy", "wait_data")])
+    out = run_editor([{"fn": "dashboard", "status": x, "admin": True}
+                      for x in (me, st_status(health={"level": "ok", "recovery_mode": "no_reboot"}), st_status())])
+    assert out[0]["head"] == "Receiver sends no corrections"
+    assert out[0]["facts"] == [["Receiver management", "You (alerts only)Change"]]
+    assert out[0]["factLinks"] == [["Change", "#/receiver/settings/manage", "Change receiver management"]]
+    assert out[1]["facts"] == [["Receiver management", "The station, no restartsChange"]]
+    # The default (the station, restarts allowed) is not said.
+    assert out[2]["facts"] == [] and out[2]["factLinks"] == []
+
+
+def test_header_shows_the_station_state_and_says_when_contact_is_lost():
+    """The header's indicator: the Status page's state in a word, its dot in the top card's colour (the link's
+    class), the full title as tooltip (on the box inside the link, so the link's name is not read again as its
+    description) and in the name (after the word when the title does not start with it), a link to the Status page; a
+    visitor sees the public form's. Without a status for 6 s: "No contact", grey, and the running count beside the word,
+    outside its live region and hidden from screen readers, and the page is marked so (the Status page's top card goes
+    grey too); "Connecting…" before the first. A second render keeps the elements (the live region announces a change
+    once). On the Status page, whose top card says the state, it is hidden and says nothing, but for "No contact". Nothing
+    before the app runs (log in, setup)."""
+    me = st_status(health={"level": "degraded", "recovery_mode": "alerts_only"},
+                   alerts=[{"id": "no_rtcm", "source": "health"}], casters=[st_caster(0, "Onocoy", "wait_data")])
+    public = {"api": 1, "public": True, "device": {"hostname": "onocoydiy"}, "receiver": {"state": "detecting"},
+              "casters": [{"slot": 0, "name": "Onocoy", "state": "wait_data"}], "health": {"level": "ok"}}
+    out = run_editor([{"fn": "header", "status": me, "age": 1, "admin": True},
+                      {"fn": "header", "status": st_status(), "age": 0, "admin": True},
+                      {"fn": "header", "status": public, "age": 2, "admin": False},
+                      {"fn": "header", "status": st_status(), "age": 9, "admin": True},
+                      {"fn": "header", "status": st_status(), "age": 100, "admin": True},
+                      {"fn": "header", "status": None, "age": None, "admin": True},
+                      {"fn": "header", "status": st_status(), "age": 1, "admin": True, "started": False}] +
+                     [{"fn": "header", "status": st_status(), "age": a, "admin": True} for a in (59, 3599, 9000, 3 * 86400 + 5)] +
+                     [{"fn": "header", "status": me, "age": 1, "admin": True, "page": ""},
+                      {"fn": "header", "status": public, "age": 2, "admin": False, "page": ""},
+                      {"fn": "header", "status": me, "age": 9, "admin": True, "page": ""},
+                      {"fn": "header", "status": None, "age": None, "admin": True, "page": ""}])
+    shown = [False, False, False]   # not hidden, no title on the link itself, the page not marked as without contact
+    assert out[0] == ["bad", "Not streaming", "status", "", "true", "Receiver sends no corrections",
+                      "Not streaming: Receiver sends no corrections", "#/", True, *shown]
+    assert out[1] == ["ok", "Streaming", "status", "", "true", "Streaming", "Streaming", "#/", True, *shown]
+    assert out[2] == ["info", "Searching", "status", "", "true", "Looking for the receiver",
+                      "Searching: Looking for the receiver", "#/", True, *shown]
+    assert out[3] == ["", "No contact", "status", "9\u00a0s", "true", "No contact with the station for 9\u00a0s",
+                      "No contact with the station", "#/", True, False, False, True]
+    # Past a minute the count is its largest unit (it fits a phone's header); the title keeps the whole time.
+    assert out[4][1] == "No contact" and out[4][3] == "1\u00a0min" and out[4][5].endswith("1\u00a0min 40\u00a0s")
+    assert [o[3] for o in out[7:11]] == ["59\u00a0s", "59\u00a0min", "2\u00a0h", "3\u00a0d"]
+    assert out[5] == ["", "Connecting…", "status", "", "true", "Connecting to the station", "Connecting to the station", "#/",
+                      True, *shown]
+    assert out[6] is None
+    # The Status page (the admin's and a visitor's): hidden and silent while in contact; "No contact" shows.
+    assert [o[9] for o in out[11:]] == [True, True, False, True]
+    assert out[11][1] == out[12][1] == out[14][1] == "" and out[11][3] == ""
+    assert out[13][1] == "No contact" and out[13][3] == "9\u00a0s" and out[13][11]
 def test_setup_onocoy_step_sends_the_duplicate_stream_answer():
     """The setup's Onocoy step while RTK2go is on: the station asks about the duplicate stream; ticking the box (its
     input event reaches the form) keeps the question with "Save anyway" enabled, and that sends the answer."""
@@ -1055,7 +1144,7 @@ def test_event_filter_changed_while_the_journal_loads():
     assert r["rows"] > 0
 
 
-# ---- Status: Onocoy today's bar; Diagnostics: the Health card and Chip and Wi-Fi; Signals; long values; plain port ----
+# ---- Status: Onocoy today's bar; Logs: the Health card and Chip and Wi-Fi; Signals; long values; plain port ----
 
 def test_onocoy_today_bar_is_the_share_of_the_allowance_left():
     """The bar under the offline time left fills with what is left of today's allowance, left / (left + offline
@@ -1134,7 +1223,7 @@ def test_health_card_says_the_state_beside_an_alert_of_its_colour():
     """The Status page's state goes above the alerts while it is at least as bad as each of them. A stall (amber)
     beside the profile alert (amber): both, as the Status page says them. Safe mode: the state's line with when it
     tries again and its two buttons, its own alert not again. Settings storage: Restart, and no pointer to
-    Diagnostics on Diagnostics. A Wi-Fi trial: the network and the time left, as the Status page says."""
+    Logs on Logs. A Wi-Fi trial: the network and the time left, as the Status page says."""
     drift = {"id": "profile_drift", "source": "health"}
     stall = st_status(receiver={"rtcm_age_ms": 30000}, health={"level": "recovering", "last_step": "link_restart"},
                       alerts=[drift])
@@ -1207,7 +1296,7 @@ def test_chip_card_names_the_access_point_and_the_transmit_power():
 
 
 def test_earlier_starts_say_when_what_and_which_version():
-    """Diagnostics' earlier starts, one line each: when it started (else how long it ran, else a dash), a word for the
+    """Logs' earlier starts, one line each: when it started (else how long it ran, else a dash), a word for the
     kind of start and the version; the full sentence only on hover, never in every row. How long the newest ran is This
     start's "Previous run", so never said again in its row; a start from another year says its year."""
     now = 1760090000   # Oct 10, 2025
@@ -1238,7 +1327,7 @@ def test_earlier_starts_say_when_what_and_which_version():
 
 
 def test_folded_rows_stay_in_their_table():
-    """Rows past the first few (Diagnostics' older starts, History's earlier days) come after a summary row of the same
+    """Rows past the first few (Logs' older starts, History's earlier days) come after a summary row of the same
     table, spanning its columns, so they keep the columns of the rows above; nothing to fold when they all fit."""
     fit, starts, days = run_editor([
         {"fn": "fold", "count": 5, "n": 5, "more": "Older starts", "cols": 3, "open": False, "k": "starts"},
@@ -1315,7 +1404,7 @@ MAINT_G = {"state": "idle", "maintenance": {"on": True}, "identity_confirmed": F
 
 
 def test_receiver_details_say_nothing_was_checked_in_a_maintenance_with_nothing_kept():
-    """Diagnostics' Receiver card in a maintenance resumed with nothing kept of the receiver: it is not checked, so the
+    """Logs' Receiver card in a maintenance resumed with nothing kept of the receiver: it is not checked, so the
     identity row reads as unchecked (a dash, like the fixed-position row), not a "No" that reads as a failed check.
     Outside maintenance, or with the identity kept, the row says Yes or No as before."""
     g = MAINT_G
@@ -1441,7 +1530,7 @@ def test_receiver_pages_show_everything_without_fold_outs():
     assert "Locked. If the antenna moves, survey again." in stream["lines"]
     assert "Messages" in stream["subs"] and any(r.startswith("1005 Station position") for r in stream["trs"])
     assert "Survey again" in stream["buttons"] and "Receiver settings" in stream["buttons"]
-    # Diagnostics' rows, not here.
+    # Logs' rows, not here.
     assert not {"Link", "Part number", "Chip ID", "Answers", "Identity confirmed", "Epochs"} & set(rows)
 
     # The sky as it is: every satellite listed under the table, nothing to open first.
@@ -1463,7 +1552,7 @@ def test_receiver_pages_show_everything_without_fold_outs():
     assert norx["cards"] == ["Receiver"] and "Check again" in norx["buttons"] and "Messages" not in norx["subs"]
     assert not norx["rows"]
 
-    # The held configuration's commands in one line (Diagnostics lists them); a write sent only if the receiver differs
+    # The held configuration's commands in one line (Logs lists them); a write sent only if the receiver differs
     # may change nothing, so "up to".
     held = out["held"]
     assert held["cards"][0] == "Receiver not configured yet" and held["lis"] == 0 and "Commands it will send" not in held["subs"]
@@ -1524,8 +1613,8 @@ def test_receiver_pages_say_refusals_the_survey_and_a_stream_off_the_position():
     assert "1.32\u00a0m from this position" in offset["warn"]
 
 
-def test_diagnostics_receiver_card_says_the_descriptor_once():
-    """Diagnostics' Receiver card: the descriptor casters get (1033) names the receiver and its antenna; where that is
+def test_logs_receiver_card_says_the_descriptor_once():
+    """Logs' Receiver card: the descriptor casters get (1033) names the receiver and its antenna; where that is
     what the identity and the read-back above say, one row says it matches instead of repeating them. A field that
     differs shows every field, that one in amber; one that cannot be checked (nothing read back since the start) shows
     as it is. While the first configuration is held, the card lists the commands it would send."""

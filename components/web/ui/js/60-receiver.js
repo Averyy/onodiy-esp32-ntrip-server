@@ -10,7 +10,7 @@
  * profile (signals, corrections, advanced), receiver management (who
  * configures the receiver and what happens if corrections stop) and the
  * comparison of two signal groups. What the receiver read back and what it
- * publishes are on Diagnostics (80-diag.js). Receiver maintenance (hands
+ * publishes are on Logs (80-diag.js). Receiver maintenance (hands
  * off) is in Settings, next to the receiver update (70-updates.js).
  * Field rules mirror PUT /api/gnss/profile; the station's own validation
  * has the last word.
@@ -378,8 +378,8 @@ function manageCtl() {
 /* The user's "keep it configured" choice, kept until the first configuration has worked (this browser). */
 const HELD_AUTO_KEY = 'heldAuto';
 
-/** What the station would send, from GET /api/gnss/apply/preview, as a numbered list for Diagnostics (the Receiver page and
- * the setup say it in one line: previewSummary): one short line a command ("CONFIG SIGNALGROUP 3 6 · writes, if different,
+/** What the station would send, from GET /api/gnss/apply/preview, as a numbered list for Logs (the Receiver page and the
+ * setup say it in one line: previewSummary): one short line a command ("CONFIG SIGNALGROUP 3 6 · writes, if different,
  * saved"), in columns where the card is wide enough. */
 function previewList(d) {
   const steps = (d && d.steps) || [];
@@ -419,7 +419,7 @@ async function finishHeld(g) {
 
 /**
  * The receiver's first configuration, held until the user confirms it (a
- * build that holds it): how many commands it would send (Diagnostics lists
+ * build that holds it): how many commands it would send (Logs lists
  * them), the choice of automatic configuration afterwards, "Configure the
  * receiver now" and "Not now". The Receiver page and the setup wizard show it alike, so its
  * words name no place on either. opts.onLater: "Not now"; opts.onApplied:
@@ -586,7 +586,7 @@ function matchLine(g) {
 }
 
 /** The antenna and B1C/B2a steps the receiver refused at the last configuration (GET /api/gnss apply_steps), as messages
- * (Diagnostics lists both steps either way). */
+ * (Logs lists both steps either way). */
 function stepsRefused(g) {
   const s = g.apply_steps || {};
   const no = (x, what) => (x && x.sent && !x.ok ? msg('warn', what + ': ' + (x.reply || 'no reason given') + '.') : null);
@@ -1209,7 +1209,7 @@ function sgtPageNote(t) {
 Views.receiver = {
   title: 'Receiver',
   admin: true,
-  heading: arg => (arg === 'settings' ? ['Receiver settings', true] : null),
+  heading: arg => (/^settings(\/|$)/.test(arg) ? ['Receiver settings', true] : null),
   create(el, arg) {
     return receiverPage(el, arg || '');
   },
@@ -1218,10 +1218,11 @@ Views.receiver = {
 /**
  * The Receiver page (#/receiver; #/receiver/live shows the sky when it is
  * open, #/receiver/live/start opens it), or with arg "settings" the
- * Receiver settings page; both read GET /api/gnss every 5 s.
+ * Receiver settings page (#/receiver/settings/manage: at its Receiver
+ * management card); both read GET /api/gnss every 5 s.
  */
 function receiverPage(el, arg) {
-  const settings = arg === 'settings';
+  const settings = /^settings(\/|$)/.test(arg);
   let g = null, t = null, forms = null, stop = null, held = null, heldLater = false, sigs = null, missing = null;
   /* gone: the page was left (an answer that comes later starts nothing) */
   let gone = false;
@@ -1249,7 +1250,7 @@ function receiverPage(el, arg) {
   const profChip = badge('', '');
   const profile = h('section', { class: 'card a-prof' });
   const manage = manageCtl();
-  const manageCard = h('section', { class: 'card a-man' }, manage.nodes);
+  const manageCard = h('section', { class: 'card a-man', id: 'manage', tabindex: '-1' }, manage.nodes);
   const sgt = sgTestCtl(() => refresh().catch(() => {}));
   const compare = h('section', { class: 'card wide', id: 'compare', tabindex: '-1' }, cardHead('Compare two signal groups', sgt.badge),
     sgt.nodes);
@@ -1362,6 +1363,11 @@ function receiverPage(el, arg) {
       sigs = signalsSection(grid, msgs);
     }
     fill();
+    /* Receiver settings asked for at its management card (the Status page's "Change"). */
+    if (arg === 'settings/manage') {
+      manageCard.scrollIntoView({ block: 'start' });
+      manageCard.focus({ preventScroll: true });
+    }
     /* An address that asks for the sky: open it (live/start) or show it when it is open (live); then the page's own address. */
     if (/^live/.test(arg)) {
       if (arg === 'live/start') sigs.sky.start();

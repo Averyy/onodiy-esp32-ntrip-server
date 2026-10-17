@@ -18,7 +18,7 @@ menu "Station: bench console (bench builds only)"
             the station's normal ownership of the receiver link (casters
             paused, refused in maintenance and while anything else runs),
             records every byte (also downloadable from the web UI's
-            diagnostics) and prints a PASS/FAIL line. Nothing runs at boot
+            Logs > Console) and prints a PASS/FAIL line. Nothing runs at boot
             except the one-shot stop key, and only when armed. The release
             job refuses a build with this on.
 

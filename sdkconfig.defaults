@@ -40,7 +40,7 @@ CONFIG_SPI_FLASH_BYPASS_BLOCK_ERASE=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # 1 ms tick: fine-grained UART/transfer timeouts and caster pacing.
 CONFIG_FREERTOS_HZ=1000
-# Per-task CPU/stack statistics for the diagnostics page. 64-bit run-time
+# Per-task CPU/stack statistics for the web UI's Logs page. 64-bit run-time
 # counter (a 32-bit 1 MHz counter wraps every ~71 min); core id in task info.
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y

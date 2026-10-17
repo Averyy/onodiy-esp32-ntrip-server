@@ -2,15 +2,16 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Diagnostics (#/diag, not a tab: reached from Settings) in three parts:
- * Overview (health and alerts, this start with its core dump, earlier
- * starts, the chip, the Wi-Fi signal and access point, what the Receiver
- * page leaves out of the receiver, the firmware's raw counters folded),
- * History (the last 30 days, then one event list read from the journal)
- * and Logs (this start and the previous one, the log level).
+ * Logs (#/logs, a tab) in three parts: Overview (#/logs: health and
+ * alerts, this start with its core dump, earlier starts, the chip, the
+ * Wi-Fi signal and access point, what the Receiver page leaves out of the
+ * receiver, the firmware's raw counters folded), History (#/logs/history:
+ * the last 30 days, then one event list read from the journal) and Console
+ * (#/logs/console: the log of this start and the previous one, the log
+ * level).
  */
 
-const DIAG_TABS = [['', 'Overview'], ['history', 'History'], ['logs', 'Logs']];
+const LOGS_TABS = [['', 'Overview'], ['history', 'History'], ['console', 'Console']];
 
 const KEY_WORDS = {
   rx: 'RX', tx: 'TX', rtcm: 'RTCM', crc: 'CRC', hw: 'hardware', fifo: 'FIFO', dns: 'DNS', mmb: 'multiple-message bit',
@@ -124,10 +125,10 @@ function startLines(starts, day) {
   });
 }
 
-/* "If corrections stop": the choice's name, or "Paused" while the station holds the recovery. */
+/* "Receiver management": the choice, as the Status page names it, or "Paused" while the station holds the recovery. */
 function recoveryNow(hl) {
   if (hl.ladder_suspended) return pausedText(hl.station || {});
-  return hl.recovery_mode ? lbl(L.recovery, hl.recovery_mode) : DASH;
+  return hl.recovery_mode ? lbl(L.manage, hl.recovery_mode) : DASH;
 }
 
 /* The recovery waits, and for what (GET /api/health station): it goes on by itself after it. A session of the station's
@@ -230,7 +231,7 @@ function tasksTable(r) {
 
 /* The Status page's buttons for the state, small, without the one to this page. */
 function stateActions(st) {
-  const acts = st.actions.filter(a => a.href !== '#/diag')
+  const acts = st.actions.filter(a => a.href !== '#/logs')
     .map(a => (a.act ? heroAction(a) : link(a.label, a.href, 'btn small'))).filter(Boolean);
   return acts.length ? h('div', { class: 'form-actions' }, acts) : null;
 }
@@ -238,7 +239,7 @@ function stateActions(st) {
 /* The Overview's Health card is on the page: from its first render until the Overview goes (noticeItems). */
 let healthCardShown = false;
 
-/* The notice the Health card says itself (the state above its alerts), which Diagnostics' Overview leaves out. */
+/* The notice the Health card says itself (the state above its alerts), which Logs' Overview leaves out. */
 function healthNotice(s) {
   const st = stationState(s, true);
   return healthItems(Array.isArray(s.alerts) ? s.alerts : [], st).state ? st.notice : null;
@@ -290,7 +291,7 @@ function healthCard(hl, s) {
     hi.alerts.length ? alertList(hi.alerts, { detect: true }) : hi.state ? null : h('p', { class: 'muted' }, 'No alerts.'),
     plan ? h('p', { class: 'small' }, plan) : null,
     kv([
-      ['If corrections stop', recoveryNow(hl)],
+      ['Receiver management', recoveryNow(hl)],
       /* The port's row only while the state above does not say it. */
       port.open === false && port.mode !== 'off' && !(hi.state && st.key === 'uart_closed') ?
         ['Receiver port', h('span', { class: 't-bad' }, 'Closed, reopening')] : null,
@@ -542,7 +543,7 @@ function overviewTab(box) {
       renderNotices();   /* the notice the card says now goes */
     }
   };
-  /* Also on every status (Views.diag.update): the Health card follows it as the notices do. */
+  /* Also on every status (Views.logs.update): the Health card follows it as the notices do. */
   const again = () => {
     if (lastHl) render(lastHl);
   };
@@ -805,7 +806,7 @@ function connOf(e) {
     class: e.kind === 'caster_down' ? J.fail[x] || String(x) : null, stop_reason: e.kind === 'caster_stop' ? J.stop[x] || String(x) : null };
 }
 
-/* ---- Logs ------------------------------------------------------------------ */
+/* ---- Console: the log ------------------------------------------------------ */
 
 const LOG_KEEP = 200000; /* characters kept in the view */
 const LOG_LEVELS = ['none', 'error', 'warn', 'info', 'debug', 'verbose'];
@@ -836,7 +837,7 @@ function logRow(line) {
  * message that does not continue where the view stands makes it read the
  * difference over HTTP and follow again from there.
  */
-function logsTab(box) {
+function consoleTab(box) {
   let cursor = 0, prev = false, paused = false, loading = false, again = false, kept = 0;
   const pre = h('pre', { class: 'log', tabindex: '0', 'aria-label': 'Log' });
   const follow = checkbox('Follow new lines', true);
@@ -1369,19 +1370,19 @@ function historyTab(box) {
   return { stop: pollInto(month, 60000, '/api/availability', av => monthCard(month, av)) };
 }
 
-const DIAG_PAGES = { '': overviewTab, history: historyTab, logs: logsTab };
+const LOGS_PAGES = { '': overviewTab, history: historyTab, console: consoleTab };
 
-Views.diag = {
-  title: 'Diagnostics',
+Views.logs = {
+  title: 'Logs',
   showTitle: true,
   admin: true,
   create(el, arg) {
-    const tab = DIAG_PAGES[arg] ? arg : '';
+    const tab = LOGS_PAGES[arg] ? arg : '';
     const box = h('div', { class: 'stack' }, h('p', { class: 'loading' }, 'Loading…'));
-    mount(el, h('nav', { class: 'seg', 'aria-label': 'Diagnostics sections' },
-      DIAG_TABS.map(t => h('a', { href: '#/diag' + (t[0] ? '/' + t[0] : ''), class: t[0] === tab ? 'active' : null,
+    mount(el, h('nav', { class: 'seg', 'aria-label': 'Logs sections' },
+      LOGS_TABS.map(t => h('a', { href: '#/logs' + (t[0] ? '/' + t[0] : ''), class: t[0] === tab ? 'active' : null,
         'aria-current': t[0] === tab ? 'page' : null }, t[1]))), box);
-    const sub = DIAG_PAGES[tab](box);
+    const sub = LOGS_PAGES[tab](box);
     return {
       update() {
         if (sub && sub.update) sub.update();

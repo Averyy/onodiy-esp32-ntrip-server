@@ -104,3 +104,24 @@ def test_c_n0_steps_stay_an_even_ramp():
         ratios = [contrast(a, b) for a, b in zip(steps, steps[1:])]
         assert all(1.38 <= r <= 1.65 for r in ratios), (name, [round(r, 2) for r in ratios])
         assert low_pairs(theme, [(f"--cnr-ink-{i}", f"--cnr-{i}") for i in range(5)], 4.5) == [], name
+
+
+def test_the_header_state_reads_in_both_themes():
+    """The header's indicator (renderLive in 20-shell.js): its word in the text colour and the count of seconds
+    without contact in the muted one, at 4.5:1 on the header and on its hover background; its dot, in the top card's
+    colour (grey while the state is unknown), at 3:1 there in every tone."""
+    def rule(sel: str) -> str:
+        m = re.search(re.escape(sel) + r"\s*\{([^}]*)\}", NOCOMMENT)
+        assert m, sel
+        return m.group(1)
+    assert "color: var(--text)" in rule(".live a")
+    assert "background: var(--surface-2)" in rule(".live a:hover")
+    assert "color: var(--muted)" in rule(".live .age")
+    assert "background: var(--tone, var(--off))" in rule(".live .in::before")
+    # Without contact the Status page's top card goes grey like the header (after its tone rules, which it overrides).
+    assert "background: var(--off)" in rule("body.no-contact .hero .state::before")
+    assert NOCOMMENT.index("body.no-contact .hero .state::before") > NOCOMMENT.index(".hero.info .state::before")
+    behind = ("--surface", "--surface-2")
+    for name, theme in (("light", LIGHT), ("dark", DARK_SYSTEM)):
+        assert low_pairs(theme, [(f, b) for f in ("--text", "--muted") for b in behind], 4.5) == [], name
+        assert low_pairs(theme, [(f"--{t}", b) for t in ("ok", "warn", "bad", "info", "off") for b in behind], 3) == [], name

@@ -2,9 +2,9 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * App shell: header, the four tabs, hash router (#/casters, #/diag/logs, ...;
- * old addresses redirect), page-wide notices (one line each), dialogs, the
- * restart overlay and the colour theme.
+ * App shell: header (with the station's state), the five tabs, hash router
+ * (#/casters, #/logs/console, ...; old addresses redirect), page-wide
+ * notices (one line each), dialogs, the restart overlay and the colour theme.
  *
  * A view is {title, admin, heading(arg)?, create(el, arg) -> {update(status)?,
  * destroy()?, dirty()?, reload()?}}. update() runs on every status change;
@@ -13,23 +13,24 @@
  */
 
 const Views = {};
-const NAV = [['', 'Status'], ['casters', 'Casters'], ['receiver', 'Receiver'], ['settings', 'Settings']];
+const NAV = [['', 'Status'], ['casters', 'Casters'], ['receiver', 'Receiver'], ['logs', 'Logs'], ['settings', 'Settings']];
 
 /*
- * Old addresses (the seven tabs, Diagnostics' six parts) and where that
- * content is now: #/signals/live opens #/receiver/live, the journal and the
- * availability Diagnostics' History, its tasks and core dump its Overview.
+ * Old addresses (the seven tabs, Diagnostics and its parts) and where that
+ * content is now: #/signals/live opens #/receiver/live; Diagnostics is Logs,
+ * its History (and the journal and availability before it) Logs' History,
+ * its Logs Logs' Console, its tasks and core dump (and anything else) the
+ * Overview.
  */
 function movedTo(name, arg) {
   if (name === 'dashboard') return '';
   if (name === 'updates') return 'settings/' + (arg || 'updates');
-  if (name === 'diag') return { availability: 'diag/history', journal: 'diag/history', tasks: 'diag', coredump: 'diag' }[arg] || null;
+  if (name === 'diag') {
+    return 'logs' + ({ history: '/history', availability: '/history', journal: '/history', logs: '/console' }[(arg || '').split('/')[0]] || '');
+  }
   const to = { signals: 'receiver', live: 'receiver/live', system: 'settings/wifi' }[name];
   return to ? to + (arg ? '/' + arg : '') : null;
 }
-
-/* The tab a page belongs to: Diagnostics is reached from Settings. */
-const tabOf = name => (name === 'diag' ? 'settings' : name);
 
 const shell = {
   current: null,     /* {name, arg, view} */
@@ -83,43 +84,72 @@ function renderTopActions() {
   }
 }
 
+/* Seconds without a status before the header says "No contact" (the station sends one every second; a poll every 2 s). */
+const CONTACT_S = 6;
+
+/* The header's count without contact: seconds for the first minute, then its largest unit ("12 min", "3 h"), so it fits a phone. */
+function contactAge(s) {
+  if (s < 60) return fmt.dur(s);
+  return s < 3600 ? Math.floor(s / 60) + NB + 'min' : s < 86400 ? Math.floor(s / 3600) + NB + 'h' : Math.floor(s / 86400) + NB + 'd';
+}
+
 /*
- * Connection indicator. Its state word is a polite live region, so a screen
- * reader hears "Live", "Updating" or "No contact" once when it changes; the
- * running count of seconds without contact sits beside it, outside the
- * region (and hidden from assistive technology), or it would be read out
- * every second.
+ * The header's indicator: the station's state as the Status page's top card
+ * says it (stationState, the public form for a visitor), a dot in its colour
+ * and a word (stateWord); its title on hover and in its name, which starts
+ * with the word; a tap opens the Status page. Without a status for CONTACT_S
+ * it says "No contact" and counts the time (contactAge; the whole time on
+ * hover), grey (the station's state is not known), and "Connecting…" before
+ * the first. On the Status page, whose top card says the state in full, it
+ * shows only "No contact" (that card cannot know it; its dot goes grey too,
+ * body.no-contact), so nothing is said or announced twice. The word is a
+ * polite live region, so a screen reader hears it once when it changes; the
+ * running count sits beside it, outside the region (and hidden from
+ * assistive technology), or it would be read out every second. The tooltip
+ * sits inside the link, so the link's name (aria-label) is not read again as
+ * its description.
  */
-function renderLive(state) {
+function renderLive() {
   const el = doc.getElementById('live');
-  const age = S.statusAt ? (Date.now() - S.statusAt) / 1000 : null;
-  let cls = '', text = '', count = '';
   if (!shell.started) {
-    cls = '';
-    text = '';
-  } else if (state === 'ws' && age !== null && age < 5) {
-    cls = 'on';
-    text = 'Live';
-  } else if (age !== null && age < 6) {
-    cls = 'poll';
-    text = 'Updating';
-  } else {
-    cls = 'down';
-    text = age === null ? 'Connecting…' : 'No contact';
-    count = age === null ? '' : fmt.dur(age);
-  }
-  el.className = 'live ' + cls;
-  if (!text) {
     clear(el);
+    el.hidden = false;
+    doc.body.classList.remove('no-contact');
     return;
   }
-  let word = el.querySelector('.word');
-  let ageEl = el.querySelector('.age');
-  if (!word || !ageEl) {
-    word = h('span', { class: 'word', role: 'status' });
-    ageEl = h('span', { class: 'age', 'aria-hidden': 'true' });
-    mount(el, word, ageEl);
+  const s = S.status;
+  const age = S.statusAt ? (Date.now() - S.statusAt) / 1000 : null;
+  const lost = !!s && age !== null && age >= CONTACT_S;
+  let tone = '', text, title, count = '';
+  if (!s || age === null) {
+    text = 'Connecting…';
+    title = 'Connecting to the station';
+  } else if (lost) {
+    text = 'No contact';
+    count = contactAge(age);
+    title = 'No contact with the station for ' + fmt.dur(age);
+  } else {
+    const st = stationState(s, isAdmin() && !s.public);
+    tone = st.tone;
+    text = stateWord(st);
+    title = st.head;
   }
+  doc.body.classList.toggle('no-contact', lost);
+  const quiet = !lost && !!shell.current && shell.current.name === '';
+  let a = el.querySelector('a');
+  if (!a) {
+    a = h('a', { href: '#/' }, h('span', { class: 'in' }, h('span', { class: 'word', role: 'status' }),
+      h('span', { class: 'age', 'aria-hidden': 'true' })));
+    mount(el, a);
+  }
+  const box = a.querySelector('.in'), word = a.querySelector('.word'), ageEl = a.querySelector('.age');
+  el.hidden = quiet;
+  if (quiet) text = count = '';   /* the region says the next word it shows */
+  const name = count ? 'No contact with the station' :
+    title.toLowerCase().indexOf(text.replace(/…$/, '').toLowerCase()) === 0 ? title : text + ': ' + title;
+  a.className = tone;
+  if (box.getAttribute('title') !== title) box.setAttribute('title', title);
+  if (a.getAttribute('aria-label') !== name) a.setAttribute('aria-label', name);
   if (word.textContent !== text) word.textContent = text;
   if (ageEl.textContent !== count) ageEl.textContent = count;
 }
@@ -127,7 +157,7 @@ function renderLive(state) {
 function renderNav() {
   const nav = doc.getElementById('tabs');
   const admin = isAdmin();
-  const name = shell.current ? tabOf(shell.current.name) : '';
+  const name = shell.current ? shell.current.name : '';
   const u = (S.status || {}).update || {};
   const dot = !!(u.app_available || u.gnss_available || u.app_reverted_in_stage1);
   /* The public view is one page: no tabs. */
@@ -230,6 +260,7 @@ function openView(name, arg) {
   head.className = t[1] ? 'page-title' : 'sr-only';
   head.hidden = false;
   setDocTitle();
+  renderLive();
   renderNav();
   renderNotices();
   window.scrollTo(0, 0);
@@ -247,6 +278,7 @@ function startShell() {
   shell.started = true;
   doc.body.classList.remove('bare');
   renderTopActions();
+  renderLive();
   renderNav();
   shell.current = null;
   route();
@@ -319,12 +351,11 @@ window.addEventListener('blur', pressEnd);
 
 bus.on('status', st => {
   if (st && st.device && st.device.hostname) setBrand(st.device.hostname);
-  renderLive(live.state);
+  renderLive();
   refreshView();
 });
-bus.on('live', renderLive);
 setInterval(() => {
-  renderLive(live.state);
+  renderLive();
   tickTrialLeft();
 }, 1000);
 
@@ -423,16 +454,17 @@ const upMin = s => fmt.dur(Math.ceil(s / 60) * 60);
 
 /*
  * The page a notice is on: the route's name, 'receiver/settings',
- * 'diag/history' and 'diag/logs' for those pages; '' is the Status page.
+ * 'logs/history' and 'logs/console' for those pages; '' is the Status page.
  * Any other address under them opens the page itself (#/receiver/live the
- * Receiver page, #/diag/foo the Overview), and is that page here too.
+ * Receiver page, #/receiver/settings/manage Receiver settings, #/logs/foo
+ * the Overview), and is that page here too.
  */
 function pageKey() {
   const c = shell.current;
   if (!c) return '';
   const sub = (c.arg || '').split('/')[0];
   if (c.name === 'receiver') return sub === 'settings' ? 'receiver/settings' : 'receiver';
-  if (c.name === 'diag') return sub && DIAG_PAGES[sub] ? 'diag/' + sub : 'diag';
+  if (c.name === 'logs') return sub && LOGS_PAGES[sub] ? 'logs/' + sub : 'logs';
   return c.name;
 }
 
@@ -443,7 +475,7 @@ const TONE_ORDER = { bad: 0, warn: 1, info: 2 };
  * [{key, tone, title, text, actions, urgent, trial}], one line and one
  * button each. urgent: it needs the user now and never folds away. A page
  * whose own card says a thing leaves its notice out; the Status page the one
- * its top card says (stationState().notice), Diagnostics the one its Health
+ * its top card says (stationState().notice), Logs' Overview the one its Health
  * card says (healthNotice()), only while that card is on the page
  * (healthCardShown: not while it loads or its first request failed).
  */
@@ -460,7 +492,7 @@ function noticeItems(st, page) {
 
   if (dev.settings_available === false) add('settings', 'bad', 'Settings cannot be saved', 'Restart the station.', go('Restart', '#/settings/restart'), true);
   if (st.health && st.health.factory_reset_refused) {
-    add('factory_reset', 'warn', 'Factory reset refused', 'Hold BOOT again after the receiver update.', go('Details', '#/diag'), true);
+    add('factory_reset', 'warn', 'Factory reset refused', 'Hold BOOT again after the receiver update.', go('Details', '#/logs'), true);
   }
   /* Settings has the safe-mode box itself, with "Leave safe mode". */
   if (sm.active && page !== 'settings') add('safe_mode', 'bad', 'Safe mode', 'The receiver and casters are off.', go('Details', '#/settings/restart'), true);
@@ -472,7 +504,7 @@ function noticeItems(st, page) {
   if (rcv.first_apply_held && page !== 'receiver') add('held', 'info', 'Receiver not configured yet', '', go('Review and configure', '#/receiver'));
   /* The Receiver page's own panel says it there. */
   if (rcv.uart_closed && !sm.active && page !== 'receiver') {
-    add('uart_closed', 'bad', 'Receiver port closed', 'The station keeps trying.', go('Details', '#/diag'), true);
+    add('uart_closed', 'bad', 'Receiver port closed', 'The station keeps trying.', go('Details', '#/logs'), true);
   }
   /* Settings shows a Wi-Fi trial and new settings waiting in its Wi-Fi card, with the buttons. */
   const pend = net.pending_ssid || 'the new network';
@@ -515,7 +547,7 @@ function noticeItems(st, page) {
       }, 'small ghost'),
       go('Update', '#/settings/updates')]);
   }
-  const covered = page === '' ? stationState(st, true).notice : page === 'diag' && healthCardShown ? healthNotice(st) : null;
+  const covered = page === '' ? stationState(st, true).notice : page === 'logs' && healthCardShown ? healthNotice(st) : null;
   return items.filter(i => i.key !== covered).sort((a, b) => TONE_ORDER[a.tone] - TONE_ORDER[b.tone]);
 }
 

@@ -220,7 +220,7 @@ function signalsSection(el, msgs) {
     patch(head, signalsHead(sig, live, sg === undefined ? null : sg));
     /* No observations: the headline says so ("No signals for 1 min"), the table goes. */
     patch(bands, systems.length ? [bandTable(systems), h('p', { class: 'muted small foot' }, BANDS_FOOT)] : null);
-    /* The epoch counters are on Diagnostics (Firmware internals, Observations). */
+    /* The epoch counters are on Logs (Firmware internals, Observations). */
     const seen = (sig.messages || []).some(m => m.count);
     patch(msgs, seen ? [h('h3', { class: 'sub' }, 'Messages'), messagesView(sig.messages, live, !!(g && (g.survey || {}).active))] : null);
     msgsSync();

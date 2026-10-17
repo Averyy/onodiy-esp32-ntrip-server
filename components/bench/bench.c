@@ -523,7 +523,7 @@ static int cmd_capture(int argc, char **argv)
         buf[n] = '\0';
         diag_console_put(&s_out, buf, strlen(buf));
     }
-    say("\nBENCH capture end (download it all from the web UI: Diagnostics)\n");
+    say("\nBENCH capture end (download it all from the web UI: Logs > Console)\n");
     return 0;
 }
 
