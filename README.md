@@ -349,14 +349,14 @@ Manifest format and rules: `components/fw_update/priv_include/manifest.h`.
 
 ## First setup and reaching the station
 
-1. Power the station. With no Wi-Fi set up it opens its own network,
+1. Power the station. With no Wi-Fi set up it opens its setup hotspot,
    `onodiy-XXXX` (the last four hex digits of its MAC address). Join it with a
    phone; the setup page opens by itself (or open `http://192.168.4.1/`).
 2. Choose the admin password, then the Wi-Fi network the station should use.
 3. Once the station has joined that network, the page shows its name and address
-   and counts down: its own network closes about 15 seconds later. Put the phone
+   and counts down: the setup hotspot closes about 15 seconds later. Put the phone
    back on your Wi-Fi.
-4. Open **`http://onodiy.local/`** (or the address the page showed) and log in;
+4. Open **`http://onodiy.local/`** (or the address the page showed) and **Login**;
    the setup continues there with the antenna check and the Onocoy credentials.
    The last screen shows whether Onocoy accepts the login and what to do next in
    the Onocoy console. More servers can be added on the NTRIP page.
@@ -380,25 +380,25 @@ station name. Settings shows both as links.
 
 - **Forgot the admin password:** hold the **BOOT** button (printed `BOT`, next to the
   `ESP32S3` USB-C) for 10 s while the station
-  is running. The password is cleared and the setup Wi-Fi network (`onodiy-XXXX`)
+  is running. The password is cleared and the setup hotspot (`onodiy-XXXX`)
   comes up for 15 minutes (longer while you stay connected to it) so you can set a new
-  one. Casters and settings are kept.
+  one. NTRIP servers and settings are kept.
 - **Wi-Fi gone:** the station never gives up; it keeps retrying (every 30 s at most)
-  and after 5 minutes offline also opens the setup Wi-Fi network beside it, so you
-  can fix the credentials. That network closes again 15 seconds after the station is
+  and after 5 minutes offline also opens the setup hotspot beside it, so you
+  can fix the credentials. The hotspot closes again 15 seconds after the station is
   back online. While the Onocoy stream is down for a network reason on the station's
   side, it reconnects, renews its address and restarts Wi-Fi by itself, and reboots
   for it at most once every 6 hours (never during a receiver firmware update).
 - **Mesh Wi-Fi** (several access points under one name): the station moves to another
   node when the mesh asks it to, and by itself (at most once every 30 minutes) when its
   signal is weak and another node is clearly stronger; never during a firmware update.
-  A move that takes only a few seconds keeps the station's address and the caster
+  A move that takes only a few seconds keeps the station's address and the NTRIP
   connections; a slower one drops them briefly. Each move shows in Logs > History.
-- **Factory reset:** hold **BOOT** for 20 s. Wi-Fi, admin password, casters and
+- **Factory reset:** hold **BOOT** for 20 s. Wi-Fi, admin password, NTRIP servers and
   receiver profile are erased; the station restarts in setup mode. Refused while a
   receiver firmware update is running.
 - **Safe mode:** after repeated crashes the station keeps Wi-Fi, the web UI, update
-  checks and app installs running but turns off the receiver path and casters. It retries a normal
+  checks and app installs running but turns off the receiver path and NTRIP streaming. It retries a normal
   boot by itself after 1 h, 4 h and then every 24 h, or immediately from the web UI.
   Brownouts never trigger safe mode; they show a power-supply warning instead.
 
