@@ -41,7 +41,7 @@ typedef struct {
     uint8_t b[16];
 } lcast_addr_t;
 
-/** Who may connect (spec: private, link-local or loopback; not the gateway; not over the hotspot). */
+/** Who may connect: a private, link-local or loopback peer; not the gateway; not over the hotspot. */
 typedef enum {
     LCAST_ADDR_OK = 0,
     LCAST_ADDR_NOT_PRIVATE,     /**< outside the private, link-local and loopback ranges (100.64/10 included) */
@@ -212,7 +212,7 @@ typedef struct {
 } lcast_decision_t;
 
 /**
- * The decision for a request (spec order): not DONE (bad, too long, late) ->
+ * The decision for a request, in this order: not DONE (bad, too long, late) ->
  * 400; a browser -> 403; an empty mount or not ours (ignoring case) -> the
  * source table; throttle_wait_s > 0 -> 429 (credentials not checked); no
  * Authorization -> 401; wrong or malformed -> 401 counted; `streaming` >=

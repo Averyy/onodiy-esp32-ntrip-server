@@ -657,7 +657,7 @@ TEST_CASE("lcast parser: targets, refused methods and versions, limits, NUL, Aut
 
 /* ---- 6. decisions -------------------------------------------------------------------------- */
 
-TEST_CASE("lcast decisions in the spec's order", "[lcast]")
+TEST_CASE("lcast decisions in their documented order", "[lcast]")
 {
     lcast_req_t *r = &s_req;
     lcast_cred_t cred;
@@ -943,7 +943,7 @@ static size_t count_char(const char *s, char c)
     return n;
 }
 
-TEST_CASE("lcast STR: the spec's example, 19 fields, sanitised", "[lcast]")
+TEST_CASE("lcast STR: the documented example, 19 fields, sanitised", "[lcast]")
 {
     lcast_str_in_t in;
     memset(&in, 0, sizeof(in));
