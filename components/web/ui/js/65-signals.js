@@ -130,7 +130,7 @@ function signalsCard(sig) {
  */
 function signalChecks(sig, master) {
   const systems = sig.systems || [];
-  let n = 0, sum = 0, w = 0;
+  let n = 0, sum = 0, w = 0, sum1 = 0, w1 = 0;
   const sys = systems.map(s => {
     const bands = {};
     for (const b of s.bands || []) bands[b] = s.satellites;
@@ -138,12 +138,17 @@ function signalChecks(sig, master) {
       if (s.cnr_dbhz[b]) {
         sum += s.cnr_dbhz[b] * s.satellites;
         w += s.satellites;
+        if (b === 'l1') {
+          sum1 += s.cnr_dbhz[b] * s.satellites;
+          w1 += s.satellites;
+        }
       }
     }
     n += s.satellites;
     return { sys: s.sys, bands: bands };
   });
-  const r = receptionChecks({ totals: { tracked: n, cnr_dbhz: w ? Math.round(sum / w) : null, msm_age_ms: sig.epoch_age_ms, systems: sys } });
+  const r = receptionChecks({ totals: { tracked: n, cnr_dbhz: w ? Math.round(sum / w) : null, msm_age_ms: sig.epoch_age_ms, systems: sys,
+    bands: w1 ? { l1: { cnr_dbhz: Math.round(sum1 / w1) } } : {} } });
   if (r.waiting) return r;
   const gal = systems.find(s => s.sys === 'galileo');
   const bands = r.items.find(i => i[4] === 'bands');

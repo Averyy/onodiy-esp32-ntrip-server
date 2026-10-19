@@ -54,7 +54,8 @@ function liveBands(t) {
 
 /* ---- Sky plot -------------------------------------------------------------- */
 
-/* mini: the Status page's preview, without the satellites' names and the elevation labels (each still named in its title). */
+/* mini: the Status page's preview, without the satellites' names and the elevation labels (each still named in its
+ * title): each dot in its constellation's colour, fainter the weaker its signal. */
 function liveSkyPlot(sats, mini) {
   const C = 170, R = 140;
   const placed = sats.filter(hasSkyPos).sort((a, b) => (satCnr(a) || 0) - (satCnr(b) || 0));   /* strongest on top */
@@ -72,7 +73,7 @@ function liveSkyPlot(sats, mini) {
     const x = C + r * Math.sin(a), y = C - r * Math.cos(a);
     const cnr = satCnr(s);
     const step = cnrStep(cnr);
-    const cls = step < 0 ? 'none' : 'b' + step;
+    const cls = mini ? 'sys-' + s.sys + ' ' + (step < 0 ? 'qn' : 'q' + step) : step < 0 ? 'none' : 'b' + step;
     plot.append(svg('g', null,
       svg('title', null, satId(s) + ' (' + lbl(L.sys, s.sys) + ' ' + s.prn + '): elevation ' + s.el_deg + '°, azimuth ' + s.az_deg + '°' +
         (cnr ? ', ' + cnr + ' dB-Hz' : ', no C/N0')),
@@ -437,15 +438,20 @@ function receptionChecks(d) {
     items.push(['bad', sats, 'Very few. Check that the antenna sees the open sky and that its cable is connected.',
       sats + ': check the antenna\'s view and cable', 'sats']);
   }
-  const c = t.cnr_dbhz;
-  const db = c ? ' (' + c + NB + 'dB\u2011Hz)' : '';
+  /* Judged on L1, the band every satellite has: L2, L5 and L6 run a few dB lower on any antenna, so a mean over every
+   * band reads "fair" for a good one. The mean over every band only without L1's. */
+  const l1 = t.bands && t.bands.l1 && t.bands.l1.cnr_dbhz;
+  const c = l1 || t.cnr_dbhz;
+  const on = l1 ? ' on L1' : '';
+  const db = c ? ' (' + c + NB + 'dB\u2011Hz' + on + ')' : '';
+  const title = 'Signal strength' + on + ' ' + (c ? c + NB + 'dB\u2011Hz' : 'unknown');
   if (c && c >= RX_CHECK.cnrGood) {
-    items.push(['ok', 'Mean signal strength ' + c + NB + 'dB\u2011Hz', 'Strong signals.', 'Strong signals' + db, 'cnr']);
+    items.push(['ok', title, 'Strong signals.', 'Strong signals' + db, 'cnr']);
   } else if (c && c >= RX_CHECK.cnrFair) {
-    items.push(['warn', 'Mean signal strength ' + c + NB + 'dB\u2011Hz', 'Fair. Check the antenna cable and its connectors, and keep metal and walls away from the antenna.',
-      'Fair signals' + db + ': check the antenna cable', 'cnr']);
+    items.push(['warn', title, 'Fair. A partly hidden sky, or a long or damaged cable, lowers it.',
+      'Fair signals' + db + ': check the antenna\'s view and cable', 'cnr']);
   } else {
-    items.push(['bad', 'Mean signal strength ' + (c ? c + NB + 'dB\u2011Hz' : 'unknown'), 'Weak. Check the antenna, its cable and its connectors.',
+    items.push(['bad', title, 'Weak. Check the antenna, its cable and its connectors.',
       (c ? 'Weak signals' + db : 'Signal strength unknown') + ': check the antenna and its cable', 'cnr']);
   }
   let best = null, bestN = 0;

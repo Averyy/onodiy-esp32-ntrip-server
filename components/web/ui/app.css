@@ -897,22 +897,31 @@ svg.sky .lbl { fill: var(--muted); font-size: 11px; font-family: inherit; }
 .legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
 .legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 
-/* The Status page's Sky card: a small sky plot beside the count and two bar charts (one column on a phone). */
-.sky-glance { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 2rem; }
-svg.sky.mini { flex: 0 0 auto; width: 200px; max-width: 100%; }
+/* The Status page's Sky card: a small sky plot, the count, and the bands per constellation (stacked on a phone). */
+.sky-glance { display: grid; justify-items: center; align-items: center; gap: 1.25rem; }
+@media (min-width: 720px) { .sky-glance { grid-template-columns: auto auto auto; justify-content: space-around; } }
+.sky-grid { width: auto; }
+.sky-fig { margin: 0; flex: 0 0 auto; text-align: center; }
+svg.sky.mini { width: 200px; max-width: 100%; }
 svg.sky.mini .lbl { font-size: 22px; }
-svg.live-sky.mini .sat { stroke-width: 2; }
-.sky-info { flex: 1 1 20rem; min-width: 0; }
-.sky-total { margin: 0 0 0.75rem; }
-.sky-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1rem 2rem; }
-.sky-sub { margin: 0 0 0.4rem; color: var(--muted); font-size: 0.85rem; font-weight: 650; }
-.sky-bars { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.35rem 0.6rem; font-size: 0.9rem; }
-.sky-name { display: inline-flex; align-items: center; gap: 0.4rem; }
+svg.live-sky.mini .sat { stroke: var(--surface); stroke-width: 2; }
+svg.live-sky.mini .sat.q0 { fill-opacity: 0.3; }
+svg.live-sky.mini .sat.q1 { fill-opacity: 0.45; }
+svg.live-sky.mini .sat.q2 { fill-opacity: 0.62; }
+svg.live-sky.mini .sat.q3 { fill-opacity: 0.8; }
+svg.live-sky.mini .sat.q4 { fill-opacity: 1; }
+svg.live-sky.mini .sat.qn { fill-opacity: 0.15; stroke: var(--muted); stroke-dasharray: 3 2; }
+.sky-total { text-align: center; }
+.sky-total .big { font-size: 2.6rem; }
+.sky-grid { border-collapse: collapse; font-size: 0.95rem; }
+.sky-grid th { padding: 0 0.6rem 0.4rem; color: var(--muted); font-size: 0.8rem; font-weight: 650; text-align: center; }
+.sky-grid td { padding: 0.3rem 0.6rem; text-align: center; }
+.sky-grid th:first-child, .sky-grid td.name { padding-left: 0; text-align: left; white-space: nowrap; }
+.sky-grid .num { text-align: right; font-variant-numeric: tabular-nums; }
+.sky-name { display: inline-flex; align-items: center; gap: 0.45rem; }
 .sky-name i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-.sky-track { height: 8px; border-radius: 4px; background: color-mix(in srgb, var(--edge) 60%, transparent); overflow: hidden; }
-.sky-track > i { display: block; height: 100%; border-radius: inherit; }
-.sky-track > i.band-fill { background: var(--accent); }
-.sky-bars .num { text-align: right; }
+.band-dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%; vertical-align: middle; }
+.band-dot.off { width: 6px; height: 6px; background: var(--edge); }
 
 /* ---- Live view ---------------------------------------------------------- */
 

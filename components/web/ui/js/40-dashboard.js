@@ -407,38 +407,48 @@ function stationCard(s, st) {
     kv([['Wi-Fi', wifiView(s.network || {})], ['Running for', fmt.dur(s.uptime_s)], ['Firmware', dotted(fw.parts)]]));
 }
 
-/* Satellites per constellation or band as bars on one scale (every tracked satellite: a full bar). rows: [label, count, fill class]. */
-function skyBars(title, rows, all) {
-  return h('div', null, h('h3', { class: 'sky-sub' }, title),
-    h('div', { class: 'sky-bars' }, rows.map(r => [h('span', null, r[0]),
-      h('span', { class: 'sky-track', 'aria-hidden': 'true' }, h('i', { class: r[2], style: { width: Math.min(100, (100 * r[1]) / all).toFixed(1) + '%' } })),
-      h('span', { class: 'num' }, fmt.num(r[1]))])));
+/* Each constellation with satellites: its count, and a dot in its colour under every band it is tracked on (the count
+ * on that band in the dot's title), a small grey one under the others. */
+function skyGrid(t) {
+  const bands = liveBands(t);
+  const systems = (t.systems || []).filter(x => x.satellites > 0);
+  return h('table', { class: 'sky-grid' },
+    h('thead', null, h('tr', null, h('th', null, h('span', { class: 'sr-only' }, 'Constellation')), h('th', { class: 'num' }, 'Satellites'),
+      bands.map(b => h('th', null, BAND_HEAD[b])))),
+    h('tbody', null, systems.map(x => {
+      const name = lbl(L.sys, x.sys);
+      return h('tr', null,
+        h('td', { class: 'name' }, h('span', { class: 'sky-name' }, h('i', { class: 'sys-' + x.sys }), name)),
+        h('td', { class: 'num' }, fmt.num(x.satellites)),
+        bands.map(b => {
+          const n = (x.bands || {})[b] || 0;
+          const what = name + ' ' + BAND_HEAD[b] + ': ' + (n ? n + ' satellite' + (n === 1 ? '' : 's') : 'not tracked');
+          return h('td', null, h('i', { class: n ? 'band-dot sys-' + x.sys : 'band-dot off', role: 'img', 'aria-label': what, title: what }));
+        }));
+    })));
 }
 
 /*
  * The sky at a glance, a small copy of the Receiver page's Signals card: the
- * satellites on a sky plot without their names (while the receiver reports
- * where they are), how many are tracked and their mean C/N0, and bars of the
- * satellites per constellation and per band. From GET /api/gnss/live (read
- * every 5 s by the page), only while the corrections arrive, like the
- * Receiver card's bands.
+ * satellites on a sky plot without their names, in their constellation's
+ * colour and fainter the weaker their signal (while the receiver reports
+ * where they are), how many are tracked and their mean C/N0, and each
+ * constellation's count with the bands it is tracked on. From GET
+ * /api/gnss/live (read every 5 s by the page), only while the corrections
+ * arrive, like the Receiver card's bands.
  */
 function skyCard(s, st, live) {
   const t = live && live.totals;
   const head = cardHead('Sky', headLink(st, null, { label: 'Details', name: 'Details on the Receiver page', href: '#/receiver' }));
   if (rxDashed(s, st) || !st.arriving || !t || !t.tracked) return h('section', { class: 'card wide sky-card' }, head, mutedLine('No satellites tracked yet.'));
   const sats = live.satellites || [];
-  const systems = (t.systems || []).filter(x => x.satellites > 0);
   return h('section', { class: 'card wide sky-card' }, head,
     h('div', { class: 'sky-glance' },
-      sats.some(hasSkyPos) ? liveSkyPlot(sats, true) : null,
-      h('div', { class: 'sky-info' },
-        h('p', { class: 'sky-total' }, h('span', { class: 'big' }, fmt.num(t.tracked)), ' satellites',
-          t.cnr_dbhz ? h('span', { class: 'muted' }, ' · mean C/N0 ' + t.cnr_dbhz + NB + 'dB-Hz') : null),
-        h('div', { class: 'sky-charts' },
-          skyBars('Constellations', systems.map(x => [h('span', { class: 'sky-name' }, h('i', { class: 'sys-' + x.sys }), lbl(L.sys, x.sys)),
-            x.satellites, 'sys-' + x.sys]), t.tracked),
-          skyBars('Bands', liveBands(t).map(b => [BAND_HEAD[b], t.bands[b].satellites, 'band-fill']), t.tracked)))));
+      sats.some(hasSkyPos) ? h('figure', { class: 'sky-fig' }, liveSkyPlot(sats, true),
+        h('figcaption', { class: 'muted small' }, 'Fainter: weaker signal')) : null,
+      h('div', { class: 'sky-total' }, h('div', { class: 'big' }, fmt.num(t.tracked)), h('div', null, 'satellites'),
+        t.bands && t.bands.l1 && t.bands.l1.cnr_dbhz ? h('div', { class: 'muted small' }, 'C/N0 ' + t.bands.l1.cnr_dbhz + NB + 'dB-Hz on L1') : null),
+      skyGrid(t)));
 }
 
 /* The top card, then five cards in reading order: the sky across the page, the receiver and the station, Onocoy and the NTRIP servers. */

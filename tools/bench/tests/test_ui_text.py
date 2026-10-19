@@ -1011,6 +1011,21 @@ def test_band_wording_never_promises_a_top_reward():
     assert a["items"][2][3] == "4 bands on Galileo" and b["items"][2][3].startswith("Onocoy needs 4 bands")
 
 
+def test_signal_strength_is_judged_on_l1():
+    """Signal strength is judged on L1, the band every satellite has: L2, L5 and L6 run a few dB lower on any antenna,
+    so a mean over every band of 37 dB-Hz beside 42 on L1 is strong, not fair. Without L1's figure, the mean."""
+    sats = [{"sys": "galileo", "bands": {"l1": 8, "l5": 8, "l6": 7, "l2": 8}}]
+    l1 = {"totals": {"tracked": 30, "cnr_dbhz": 37, "msm_age_ms": 100, "systems": sats,
+                     "bands": {"l1": {"satellites": 30, "cnr_dbhz": 42}}}}
+    l1_fair = {"totals": {"tracked": 30, "cnr_dbhz": 33, "msm_age_ms": 100, "systems": sats,
+                          "bands": {"l1": {"satellites": 30, "cnr_dbhz": 37}}}}
+    mean = {"totals": {"tracked": 30, "cnr_dbhz": 37, "msm_age_ms": 100, "systems": sats}}
+    a, b, c = run_ui([("checks", l1), ("checks", l1_fair), ("checks", mean)])
+    assert a["items"][1][0] == "ok" and a["items"][1][3] == "Strong signals (42\u00a0dB\u2011Hz on L1)"
+    assert b["items"][1][0] == "warn" and b["items"][1][3] == "Fair signals (37\u00a0dB\u2011Hz on L1): check the antenna's view and cable"
+    assert c["items"][1][0] == "warn" and c["items"][1][3] == "Fair signals (37\u00a0dB\u2011Hz): check the antenna's view and cable"
+
+
 def test_password_mismatch_and_unknown_signal():
     mismatch, short, ok = run_ui([("pwProblem", ["abcdefgh", "abcdefgi"]), ("pwProblem", ["abc", "abc"]),
                                   ("pwProblem", ["abcdefgh", "abcdefgh"])])
@@ -1111,7 +1126,7 @@ def test_signals_card_headline_and_hints():
     good, bad3, e6, glo, r1230 = run_ui([("sigChecks", [x, 7]) for x in (SIG, no_e6, lost, no_glo, refused)])
     line = lambda r: [[i[0], i[3]] for i in r["items"]]
     # One line each; the 4 bands are the headline's, not a hint as well.
-    assert line(good) == [["ok", "32 satellites tracked"], ["ok", "Strong signals (42\u00a0dB\u2011Hz)"]] and good["ok"] is True
+    assert line(good) == [["ok", "32 satellites tracked"], ["ok", "Strong signals (43\u00a0dB\u2011Hz on L1)"]] and good["ok"] is True
     assert line(bad3)[2] == ["warn", "Onocoy needs 4 bands: signal group 3 6 adds Galileo E6"] and bad3["ok"] is False
     # Galileo short of E6 with 3 6 already applied: not that group again, the antenna. The group not read yet: the
     # plain line.

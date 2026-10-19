@@ -1595,10 +1595,11 @@ def test_sky_card():
     assert sky["links"] == [["Details", "#/receiver", "Details on the Receiver page", True]]
     assert sky["big"][0] == "31"
     text = sky["text"]
-    assert "31 satellites · mean C/N0 38\u00a0dB-Hz" in text
-    assert "ConstellationsGPS11Galileo8Bands" in text and "QZSS" not in text
-    assert "BandsL131L223L522L610" in text
+    assert "31satellitesC/N0 42\u00a0dB-Hz on L1" in text
+    # Each constellation with satellites, its count, then a dot per band (named in its title).
+    assert "SatellitesL1L2L5L6GPS11Galileo8" in text and "QZSS" not in text
     assert "G12 (GPS 12): elevation 45°, azimuth 210°, 44 dB-Hz" in text and "E05" not in text
+    assert "Fainter: weaker signal" in text
     for o in (noant, safe, matrix()["healthy"]):
         assert o["cards"]["Sky"]["notes"] == [["No satellites tracked yet.", "muted"]], o["key"]
         assert o["cards"]["Sky"]["big"] is None
@@ -2360,7 +2361,7 @@ def test_signals_card_says_the_bands_once():
                                   {"fn": "signals", "live": True, "sig": three, "master": 7},
                                   {"fn": "signals", "live": False, "sig": SIG, "master": 7}])
     assert good["big"] == "Galileo \u00b7 4 bands" and good["table"] and good["lines"] == ["checks lines"]
-    assert good["checks"] == [["ok", "\u2713Good: 40 satellites tracked"], ["ok", "\u2713Good: Strong signals (42\u00a0dB\u2011Hz)"]], good
+    assert good["checks"] == [["ok", "\u2713Good: 40 satellites tracked"], ["ok", "\u2713Good: Strong signals (44\u00a0dB\u2011Hz on L1)"]], good
     assert not any("band" in c[1] or "Galileo" in c[1] for c in good["checks"])
     assert good["words"] == ["Good: ", "Good: "]
     assert few["big"] == "GPS \u00b7 3 bands"
