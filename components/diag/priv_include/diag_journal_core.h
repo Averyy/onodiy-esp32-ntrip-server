@@ -225,11 +225,12 @@ void dj_queue_clear_started(dj_queue_t *q, uint32_t queued, int start_result);
 /* ---- rate limits ------------------------------------------------------------------ */
 
 #define DJ_RATE_KINDS 32u   /**< kinds 0..31 are tracked separately; higher ones share the last entry */
+#define DJ_RATE_KEYS  16u   /**< indexes a keyed kind tells apart (the low 4 bits of `a`) */
 
 /** Result of a rate check. */
 typedef enum {
     DJ_RATE_OK = 0,
-    DJ_RATE_KIND,          /**< same kind too soon */
+    DJ_RATE_KIND,          /**< same kind (and, for a keyed kind, same index) too soon */
     DJ_RATE_BUDGET,        /**< the hourly budget is used up */
 } dj_rate_result_t;
 
@@ -238,12 +239,23 @@ typedef enum {
  * at most ten minutes' worth). Kinds in `exempt_mask` (bit = kind) skip both
  * limits but still use a token when one is left, so they count toward the
  * budget of the others.
+ *
+ * Keyed kinds (dj_rate_key_kinds; bit = kind): records about one of several
+ * peers (a caster slot, a rover connection) carry its index in the low 4
+ * bits of `a`, and several of them can end at once (a restart ends every
+ * session). The interval of such a kind holds per index: the record that
+ * opens an interval starts it, a record of another index within it is
+ * accepted without moving it, and a second record of the same index within
+ * it is refused. So one index still gets at most one record per interval
+ * (two at its edges), and the kind at most DJ_RATE_KEYS.
  */
 typedef struct {
     uint32_t min_interval_ms;
     uint32_t per_hour;
     uint32_t exempt_mask;
-    uint32_t last_ms[DJ_RATE_KINDS];
+    uint32_t keyed_mask;
+    uint32_t last_ms[DJ_RATE_KINDS];   /**< start of the kind's current interval */
+    uint16_t keys[DJ_RATE_KINDS];      /**< indexes with a record in that interval (bit = index; unkeyed: bit 0) */
     uint32_t seen_mask;
     uint64_t tokens_milli;  /**< thousandths of a record */
     uint64_t burst_milli;   /**< bucket size */
@@ -257,7 +269,16 @@ typedef struct {
 /** `per_hour` 0 = no budget (per-kind interval only). The bucket starts full. */
 void dj_rate_init(dj_rate_t *r, uint32_t min_interval_ms, uint32_t per_hour, uint32_t exempt_mask);
 
-/** Check (and, if accepted, account) one record of `kind` at `now_ms` (wraps freely). */
+/** The kinds whose interval holds per index (bit = kind; kinds 0..31). None after dj_rate_init(). */
+void dj_rate_key_kinds(dj_rate_t *r, uint32_t keyed_mask);
+
+/**
+ * Check (and, if accepted, account) one record of `kind` at `now_ms` (wraps
+ * freely); `a` is the record's `a` (its low 4 bits are the index of a keyed kind).
+ */
+dj_rate_result_t dj_rate_check_rec(dj_rate_t *r, uint16_t kind, int32_t a, uint32_t now_ms);
+
+/** dj_rate_check_rec() with `a` = 0: per kind only. */
 dj_rate_result_t dj_rate_check(dj_rate_t *r, uint16_t kind, uint32_t now_ms);
 
 #ifdef __cplusplus

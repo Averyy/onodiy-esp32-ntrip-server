@@ -5,8 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "diag.h"
 #include "diag_journal_core.h"
 #include "diag_task_core.h"
+#include "local_caster.h"
 #include "unity.h"
 
 /* NOR flash in RAM: erase sets 0xFF, a write can only clear bits. A "power
@@ -660,6 +662,83 @@ TEST_CASE("journal rate limit: hourly budget with a ten-minute burst", "[diag][j
         burst++;
     }
     TEST_ASSERT_EQUAL_UINT32(100, burst);
+}
+
+/* The kinds diag_journal.c keys by slot or connection, as it sets them up. */
+#define KEYED ((1u << DIAG_EV_CASTER_DOWN) | (1u << DIAG_EV_CASTER_UP) | (1u << DIAG_EV_CASTER_STOP) | \
+               (1u << DIAG_EV_ROVER_UP) | (1u << DIAG_EV_ROVER_DOWN))
+#define EXEMPT ((1u << DIAG_EV_LADDER_STEP) | (1u << DIAG_EV_GNSS_FLASH) | (1u << DIAG_EV_RX_BOOT))
+
+TEST_CASE("journal rate limit: per kind alone, a restart keeps one caster_down and one rover_disconnect",
+          "[diag][journal]")
+{
+    /* The interval as it was (per kind only): four caster slots and two
+     * rovers end in the same restart, within a few milliseconds. */
+    dj_rate_t r;
+    dj_rate_init(&r, 1000, 1800, EXEMPT);
+    uint32_t t = 50000;
+    uint32_t ok = 0;
+    for (uint32_t slot = 0; slot < 4; slot++) {
+        ok += dj_rate_check_rec(&r, DIAG_EV_CASTER_DOWN, diag_caster_a(slot, 0, 0), t + slot) == DJ_RATE_OK;
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, ok);   /* slots 1-3 are refused, and the restart follows before 1 s */
+    ok = 0;
+    for (uint32_t conn = 0; conn < 2; conn++) {
+        ok += dj_rate_check_rec(&r, DIAG_EV_ROVER_DOWN, diag_rover_down_a(conn, LOCAL_CASTER_END_RESTART),
+                                t + 10u + conn) == DJ_RATE_OK;
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, ok);
+    TEST_ASSERT_EQUAL_UINT32(4, r.refused_kind);
+}
+
+TEST_CASE("journal rate limit: caster and rover kinds hold the interval per slot or connection", "[diag][journal]")
+{
+    dj_rate_t r;
+    dj_rate_init(&r, 1000, 1800, EXEMPT);
+    dj_rate_key_kinds(&r, KEYED);
+    uint32_t t = UINT32_MAX - 300u;   /* across the clock wrap */
+    for (uint32_t slot = 0; slot < 8; slot++) {
+        TEST_ASSERT_EQUAL_INT(DJ_RATE_OK,
+                              dj_rate_check_rec(&r, DIAG_EV_CASTER_DOWN, diag_caster_a(slot, 0, slot), t + slot));
+    }
+    for (uint32_t conn = 0; conn < LOCAL_CASTER_MAX_CONNS; conn++) {
+        TEST_ASSERT_EQUAL_INT(DJ_RATE_OK,
+                              dj_rate_check_rec(&r, DIAG_EV_ROVER_DOWN,
+                                                diag_rover_down_a(conn, LOCAL_CASTER_END_RESTART), t + 20u));
+    }
+    /* the same slot or connection again within the interval: refused, as before */
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_KIND, dj_rate_check_rec(&r, DIAG_EV_CASTER_DOWN, diag_caster_a(3, 2, 0), t + 500u));
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_KIND, dj_rate_check_rec(&r, DIAG_EV_ROVER_DOWN,
+                                                          diag_rover_down_a(1, LOCAL_CASTER_END_CLOSED), t + 999u));
+    /* the interval runs from the record that opened it (slot 0 at t), not from the later slots'; the
+     * next one opens a new interval with only its own slot in it */
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_OK, dj_rate_check_rec(&r, DIAG_EV_CASTER_DOWN, diag_caster_a(3, 2, 0), t + 1000u));
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_KIND, dj_rate_check_rec(&r, DIAG_EV_CASTER_DOWN, diag_caster_a(3, 0, 0), t + 1001u));
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_OK, dj_rate_check_rec(&r, DIAG_EV_CASTER_DOWN, diag_caster_a(7, 0, 0), t + 1001u));
+    /* an up and a stop of other slots are their own kinds, keyed the same way */
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_OK, dj_rate_check_rec(&r, DIAG_EV_CASTER_UP, diag_caster_a(0, 0, 1), t + 1002u));
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_OK, dj_rate_check_rec(&r, DIAG_EV_CASTER_UP, diag_caster_a(1, 0, 1), t + 1002u));
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_OK, dj_rate_check_rec(&r, DIAG_EV_CASTER_STOP, 2 | (1 << 8), t + 1002u));
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_OK, dj_rate_check_rec(&r, DIAG_EV_CASTER_STOP, 3 | (1 << 8), t + 1002u));
+
+    /* every other kind keeps one record per interval, whatever its `a` */
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_OK, dj_rate_check_rec(&r, DIAG_EV_WIFI_UP, 1, t + 2000u));
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_KIND, dj_rate_check_rec(&r, DIAG_EV_WIFI_UP, 2, t + 2001u));
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_OK, dj_rate_check_rec(&r, DIAG_EV_DATA_LOSS, 3, t + 2001u));
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_KIND, dj_rate_check_rec(&r, DIAG_EV_DATA_LOSS, 4, t + 2002u));
+    /* exempt kinds pass, keyed or not */
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_OK, dj_rate_check_rec(&r, DIAG_EV_LADDER_STEP, 0, t + 2003u));
+    TEST_ASSERT_EQUAL_INT(DJ_RATE_OK, dj_rate_check_rec(&r, DIAG_EV_LADDER_STEP, 0, t + 2003u));
+
+    /* the hourly budget still counts every keyed record */
+    dj_rate_init(&r, 1000, 60, 0);   /* burst 10 */
+    dj_rate_key_kinds(&r, KEYED);
+    uint32_t ok = 0;
+    for (uint32_t conn = 0; conn < 16; conn++) {
+        ok += dj_rate_check_rec(&r, DIAG_EV_ROVER_UP, diag_rover_up_a(conn, 2, false, 10, 0), 7000u) == DJ_RATE_OK;
+    }
+    TEST_ASSERT_EQUAL_UINT32(10, ok);
+    TEST_ASSERT_EQUAL_UINT32(6, r.refused_budget);
 }
 
 TEST_CASE("task CPU shares from run-time counters, two cores", "[diag]")
