@@ -20,6 +20,7 @@
 #include "esp_log.h"
 #include "gnss_types.h"
 #include "health.h"
+#include "local_caster.h"
 #include "ntrip_server.h"
 #include "web_core.h"
 
@@ -161,6 +162,21 @@ bool web_parse_ca_pem(const cJSON *root, const char **pem, web_bad_t *bad);
 
 /** PEM text made only of CERTIFICATE blocks (and blank space), at most WEB_CA_PEM_MAX bytes. */
 bool web_pem_certs_only(const char *pem);
+
+/* ---- local NTRIP (Your rover) ------------------------------------------------------------- */
+
+/**
+ * PUT /api/local-caster: any of {"enabled": bool, "mountpoint", "username",
+ * "password": string}, merged into `stored` (local_caster_get_config(), its
+ * password ""). A password that is empty or left out keeps the stored one
+ * (out->password ""); password_set is ignored. Types and sizes only: a wrong
+ * type, a string longer than its field holds or a control character is
+ * invalid_field for that field without a rule (the rules and their words are
+ * local_caster_set_config()'s). On a refusal out->password is wiped; on
+ * success it is the caller's to wipe.
+ */
+bool web_parse_local_caster_put(const cJSON *root, const local_caster_cfg_t *stored, local_caster_cfg_t *out,
+                                web_bad_t *bad);
 
 /* ---- Wi-Fi and system ------------------------------------------------------------------------ */
 

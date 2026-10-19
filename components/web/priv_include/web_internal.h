@@ -55,9 +55,10 @@ extern "C" {
 /** This project, as the app description of an image names it. */
 #define WEB_PROJECT_NAME "onodiy-esp32-ntrip-server"
 
-/** Largest JSON request body; the CA certificate route takes more. */
+/** Largest JSON request body; the CA certificate route takes more, the local NTRIP route less. */
 #define WEB_JSON_MAX       2048u
 #define WEB_JSON_MAX_CA    6144u
+#define WEB_JSON_MAX_LCAST 512u
 
 /** Uploads and downloads move in pieces of this size (internal RAM buffer). */
 #define WEB_IO_CHUNK       4096u

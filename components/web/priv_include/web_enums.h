@@ -23,6 +23,7 @@
 #include "health.h"
 #include "ledger.h"
 #include "lifecycle.h"
+#include "local_caster.h"
 #include "network.h"
 #include "ntrip_server.h"
 #include "station.h"
@@ -45,6 +46,10 @@ const char *web_ntrip_trust_name(ntrip_trust_t v);
 const char *web_ntrip_backoff_name(ntrip_backoff_profile_t v);
 /** ntrip_stop_t: "none", "rejected", "login_blocked", "in_use", "kicked", "duplicate", "banned". */
 const char *web_ntrip_stop_name(ntrip_stop_t v);
+/** local_caster_state_t: "off", "wait_network", "listening", "error". */
+const char *web_local_caster_state_name(local_caster_state_t v);
+/** local_caster_end_t: "none", "closed", "stalled", "lost", "settings", "network", "restart". */
+const char *web_local_caster_end_name(local_caster_end_t v);
 const char *web_base_mode_name(um98x_base_mode_t v);
 const char *web_pos_source_name(um98x_pos_source_t v);
 const char *web_flash_phase_name(um98x_flash_phase_t v);

@@ -21,6 +21,7 @@
 #include "health.h"
 #include "ledger.h"
 #include "lifecycle.h"
+#include "local_caster.h"
 #include "network.h"
 #include "ntrip_server.h"
 #include "pkg_store.h"
@@ -131,6 +132,9 @@ typedef struct {
     bool cfg_valid;                /**< configs loaded (not in safe mode) */
     ntrip_caster_cfg_t cfg[WEB_MAX_SLOTS];        /**< read without secrets */
     ntrip_caster_status_t cst[WEB_MAX_SLOTS];
+    bool lcast_enabled;            /**< local NTRIP (Your rover) turned on: its config (none in safe mode: false) */
+    local_caster_state_t lcast_state;
+    uint8_t lcast_clients;         /**< rovers streaming now */
     health_status_t health;
     fw_update_status_t fw;
     uint32_t protected_down_today_s;
@@ -148,6 +152,7 @@ typedef enum {
     WEB_SEC_ALERTS,
     WEB_SEC_AVAILABILITY,
     WEB_SEC_UPDATE,
+    WEB_SEC_LOCAL_CASTER,
     WEB_SEC_COUNT,
 } web_section_t;
 
@@ -284,6 +289,18 @@ void web_build_caster_warnings(wj_t *w, const ntrip_caster_cfg_t *cfgs, size_t n
 
 /** The "onocoy_preset" member. */
 void web_build_onocoy_preset(wj_t *w, const ntrip_caster_cfg_t *preset, uint16_t tls_port);
+
+/* ---- local NTRIP (Your rover) ------------------------------------------------------------ */
+
+/**
+ * GET and PUT /api/local-caster: {"config", "status"}. cfg NULL (safe mode:
+ * not loaded) writes "config": null; the password is never written, only
+ * password_set. "clients" lists the streaming rovers oldest first (at most
+ * LOCAL_CASTER_MAX_CLIENTS), each "agent" null when the rover sent none;
+ * "listen_errno" is null unless the state is error; "refused" holds the
+ * refused_* counters.
+ */
+void web_build_local_caster(wj_t *w, const local_caster_cfg_t *cfg, const local_caster_status_t *st);
 
 /* ---- Wi-Fi, system, updates -------------------------------------------------------------- */
 

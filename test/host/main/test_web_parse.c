@@ -888,3 +888,84 @@ TEST_CASE("signal-group comparison refusals map to the API's errors", "[web_pars
     TEST_ASSERT_EQUAL(WEB_ERR_SAFE_MODE, web_sgt_error(STATION_SGT_E_NOT_RUNNING, true, &field));
     TEST_ASSERT_EQUAL(WEB_ERR_BUSY, web_sgt_error(STATION_SGT_E_NOT_RUNNING, false, &field));
 }
+
+/* ---- local NTRIP (Your rover) ------------------------------------------------------------------- */
+
+/* PUT /api/local-caster over the stored config (on, a password stored: get_config() returns it blank). */
+static bool lcast_put(const char *json, local_caster_cfg_t *out, web_bad_t *b)
+{
+    local_caster_cfg_t stored = { .enabled = true, .mountpoint = "onodiy", .username = "rover", .password_set = true };
+    cJSON *root = body(json);
+    memset(out, 'Z', sizeof(*out));   /* nothing of the caller's old buffer may survive */
+    bool ok = web_parse_local_caster_put(root, &stored, out, b);
+    cJSON_Delete(root);
+    return ok;
+}
+
+TEST_CASE("local caster edits merge into the stored config; an empty or missing password keeps it", "[web_parse]")
+{
+    local_caster_cfg_t c;
+    web_bad_t b = { 0 };
+    TEST_ASSERT_TRUE(lcast_put("{}", &c, &b));
+    TEST_ASSERT_TRUE(c.enabled);
+    TEST_ASSERT_EQUAL_STRING("onodiy", c.mountpoint);
+    TEST_ASSERT_EQUAL_STRING("rover", c.username);
+    TEST_ASSERT_EQUAL_STRING("", c.password);   /* "" = keep the stored one */
+    TEST_ASSERT_TRUE(lcast_put("{\"enabled\":false}", &c, &b));
+    TEST_ASSERT_FALSE(c.enabled);
+    TEST_ASSERT_EQUAL_STRING("onodiy", c.mountpoint);
+    TEST_ASSERT_TRUE(lcast_put("{\"mountpoint\":\"ROVER\",\"username\":\"me.2\",\"password\":\"p4ss:word!\","
+                               "\"password_set\":false}", &c, &b));
+    TEST_ASSERT_EQUAL_STRING("ROVER", c.mountpoint);
+    TEST_ASSERT_EQUAL_STRING("me.2", c.username);
+    TEST_ASSERT_EQUAL_STRING("p4ss:word!", c.password);
+    TEST_ASSERT_TRUE(c.password_set);   /* output only: ignored */
+    TEST_ASSERT_TRUE(lcast_put("{\"password\":\"\"}", &c, &b));
+    TEST_ASSERT_EQUAL_STRING("", c.password);
+    /* The caster's own rules are not the parser's: set_config words them (a space, a short password, a "/"). */
+    TEST_ASSERT_TRUE(lcast_put("{\"mountpoint\":\"a/b\",\"password\":\"short\"}", &c, &b));
+    /* The longest each field holds. */
+    TEST_ASSERT_TRUE(lcast_put("{\"mountpoint\":\"MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\","
+                               "\"username\":\"UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU\",\"password\":"
+                               "\"PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP\"}", &c, &b));
+    TEST_ASSERT_EQUAL(47, strlen(c.mountpoint));
+    TEST_ASSERT_EQUAL(31, strlen(c.username));
+    TEST_ASSERT_EQUAL(63, strlen(c.password));
+}
+
+TEST_CASE("local caster refusals name the field: wrong type, too long, control characters", "[web_parse]")
+{
+    static const struct {
+        const char *json;
+        const char *field;
+    } bad[] = {
+        { "{\"enabled\":1}", "enabled" },
+        { "{\"enabled\":\"true\"}", "enabled" },
+        { "{\"mountpoint\":5}", "mountpoint" },
+        { "{\"mountpoint\":null}", "mountpoint" },
+        { "{\"mountpoint\":\"MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\"}", "mountpoint" },   /* 48 */
+        { "{\"username\":[\"rover\"]}", "username" },
+        { "{\"username\":\"UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU\"}", "username" },                     /* 32 */
+        { "{\"username\":\"tab\\there\"}", "username" },
+        { "{\"password\":false}", "password" },
+        /* 64 */
+        { "{\"password\":\"PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP\"}", "password" },
+        /* The first offending field, in the order enabled, mountpoint, username, password. */
+        { "{\"password\":1,\"username\":2}", "username" },
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        local_caster_cfg_t c;
+        web_bad_t b = { 0 };
+        TEST_ASSERT_FALSE_MESSAGE(lcast_put(bad[i].json, &c, &b), bad[i].json);
+        TEST_ASSERT_EQUAL(WEB_ERR_INVALID_FIELD, b.err);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(bad[i].field, b.field, bad[i].json);
+        TEST_ASSERT_NULL_MESSAGE(b.rule, bad[i].json);   /* the handler asks the caster for its words */
+    }
+    /* A refused body leaves no password behind. */
+    local_caster_cfg_t c;
+    web_bad_t b = { 0 };
+    TEST_ASSERT_FALSE(lcast_put("{\"password\":\"secret123\",\"username\":7}", &c, &b));
+    for (size_t i = 0; i < sizeof(c.password); i++) {
+        TEST_ASSERT_EQUAL_HEX8(0, (uint8_t)c.password[i]);
+    }
+}
