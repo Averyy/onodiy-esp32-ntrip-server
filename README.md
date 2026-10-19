@@ -42,9 +42,11 @@ board as delivered), [board notes](reference/um982-board-onocoy.md),
 
 ## Install
 
-No release is published yet: [build and flash it yourself](#building). Each release's
-notes will give the `esptool` command for a new board; after that, updates install
-from the web UI.
+Download the files from the
+[latest release](https://github.com/Averyy/onodiy-esp32-ntrip-server/releases/latest):
+its notes give the `esptool` command for a new board. After that, updates install from
+the web UI. Or [build it yourself](#building). What each release changes:
+[CHANGELOG](CHANGELOG.md).
 
 ## First setup
 

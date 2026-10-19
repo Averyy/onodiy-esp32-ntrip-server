@@ -5,12 +5,17 @@ Back to the [README](../README.md).
 
 ## Cutting a release
 
-Tag the commit and push the tag:
+Add the release's highlights to [`CHANGELOG.md`](../CHANGELOG.md) under `## v0.3.0`,
+commit, then tag the commit and push the tag:
 
 ```sh
 git tag v0.3.0
 git push origin v0.3.0
 ```
+
+The release notes start with that section ([`tools/release_notes.py`](../tools/release_notes.py)),
+then the install steps. A tag without its section fails the bench tools job within minutes,
+and the release job before it makes anything.
 
 CI builds the tag as release `v0.3.0` (`-DRELEASE_VERSION`), runs every test job (host
 tests, bench tools, the bench-overlay build and both QEMU jobs), then creates the GitHub

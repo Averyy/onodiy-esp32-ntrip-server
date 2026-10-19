@@ -343,7 +343,8 @@ jobs:
   # package(s) from firmware/um982/ and manifest.json listing each with its
   # size and SHA-256 (tools/release_manifest.py; signed only when the
   # MANIFEST_SIGNING_KEY secret is set), plus the files for a first flash
-  # over USB and THIRD_PARTY_NOTICES.md. A tag with "-PRE" is a pre-release:
+  # over USB and THIRD_PARTY_NOTICES.md; its notes start with the tag's
+  # CHANGELOG.md section. A tag with "-PRE" is a pre-release:
   # stations read releases/latest only, so it is installed by manual upload.
   # The release is created as a draft and published once every file is
   # attached, so a station never sees a manifest without its files. Latest
@@ -448,9 +449,14 @@ jobs:
             pre=(--prerelease)
             offer="Pre-release: stations do not offer it; $upload"
           fi
+          # The highlights: the tag's section of CHANGELOG.md (fails without one, before anything is made).
+          highlights=$(python3 tools/release_notes.py "$TAG")
           {
+            echo "$highlights"
+            echo
+            echo "### Install"
+            echo
             echo "$offer"
-            echo "\`manifest.json\` lists every file with its size and SHA-256."
             echo
             echo "First flash of a new board over USB (the files below):"
             echo
@@ -458,9 +464,10 @@ jobs:
             echo "esptool --chip esp32s3 write-flash $settings $flash"
             echo '```'
             echo
+            echo "\`manifest.json\` lists every file with its size and SHA-256."
           } > "$RUNNER_TEMP/notes.md"
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$TAG" \
-            --notes-file "$RUNNER_TEMP/notes.md" --generate-notes ${pre[@]+"${pre[@]}"} \
+            --notes-file "$RUNNER_TEMP/notes.md" ${pre[@]+"${pre[@]}"} \
             "$a/onodiy-esp32-ntrip-server.bin" firmware/um982/*.pkg release/manifest.json \
             "$a/bootloader/bootloader.bin" "$a/partition_table/partition-table.bin" "$a/ota_data_initial.bin" \
             artifact/THIRD_PARTY_NOTICES.md
