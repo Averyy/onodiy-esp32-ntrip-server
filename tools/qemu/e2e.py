@@ -1410,7 +1410,10 @@ class E2E:
         if self.lease_overlap(a["end_mono"]):
             self.note(f"{what}: a receiver query paused the casters inside this wait; not judged")
             return True
-        return self.within(b["start_mono"] - a["end_mono"], entry, what)
+        # The station's wait runs from the refusal it read; when the caster closed afterwards (a reply, then the
+        # close), the gap from that close is short by the connection's length: allowed below, up to 1 s.
+        slack = 0.5 + (min(1.0, a["end_mono"] - a["start_mono"]) if str(a.get("closed_by", "")).startswith("caster") else 0.0)
+        return self.within(b["start_mono"] - a["end_mono"], entry, what, slack=slack)
 
     def lease_overlap(self, since_mono: float) -> bool:
         """A receiver lease (casters paused) since then?"""

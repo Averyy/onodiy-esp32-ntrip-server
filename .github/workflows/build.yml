@@ -10,6 +10,9 @@ on:
     paths-ignore: ["README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/**", "gnss-splitter/**", "reference/**"]
   pull_request:
     paths-ignore: ["README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/**", "gnss-splitter/**", "reference/**"]
+  # Weekly: the slow jobs (firmware-bench and the two QEMU ones) that a push to main skips.
+  schedule:
+    - cron: "17 6 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -35,6 +38,10 @@ concurrency:
 # timeout, a container key other than image and options, an expression it
 # would have to evaluate, a workflow-level env: or defaults:. Such a change
 # there needs it taught first.
+#
+# A push to main runs firmware, host-tests and bench-tools; firmware-bench and
+# the two QEMU jobs run on tags, pull requests, the weekly run and on request
+# (Actions > build > Run workflow), and a release needs every job.
 #
 # Jobs: firmware (the station image, uploaded), firmware-bench (the
 # sdkconfig.bench overlay built and checked like the station image, so code
@@ -141,6 +148,7 @@ jobs:
   # it (a bench build is never released).
   firmware-bench:
     name: Firmware, bench overlay (esp32s3)
+    if: github.event_name != 'push' || github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     container: espressif/idf@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c  # v6.1
     steps:
@@ -217,6 +225,7 @@ jobs:
   # A development check only; nothing here is released.
   qemu-smoke:
     name: QEMU smoke test
+    if: github.event_name != 'push' || github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     container:
       image: espressif/idf@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c  # v6.1
@@ -284,6 +293,7 @@ jobs:
   # builds the overlay. A development check only; nothing here is released.
   qemu-bench-console:
     name: QEMU bench console
+    if: github.event_name != 'push' || github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     container: espressif/idf@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c  # v6.1
     steps:
@@ -344,7 +354,7 @@ jobs:
   release:
     name: GitHub Release
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    needs: [firmware, host-tests]
+    needs: [firmware, host-tests, bench-tools, firmware-bench, qemu-smoke, qemu-bench-console]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

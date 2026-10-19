@@ -394,7 +394,8 @@ def plan(workflow: dict, job_id: str) -> list[tuple[str, dict]]:
     if not isinstance(job, dict):
         raise JobError("the job is not a mapping")
     _only(job, JOB_KEYS, "the job")
-    _condition(job.get("if"), "the job")
+    # A job's if: only says on which events CI runs it (build.yml runs the QEMU jobs on tags, the weekly run and on
+    # request); a local run is a request, so the job runs whatever it says. Steps' if: is still judged (condition()).
     container(job)
     _env_block(job, "the job")
     steps = job.get("steps")

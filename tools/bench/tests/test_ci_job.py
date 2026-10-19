@@ -137,6 +137,13 @@ def test_env_values_reach_a_step_as_actions_gives_them():
                                              "NONE": "", "QUOTED": "True"}
 
 
+def test_a_jobs_condition_only_picks_ci_events_and_a_local_run_runs_the_job():
+    """A job's if: says on which events CI runs it (the QEMU jobs: tags, the weekly run, on request); a local run is a
+    request, so the job is planned whatever it says. A step's if: is still judged."""
+    assert ci.plan(job(STEP, extra="if: github.event_name != 'push' || github.ref_type == 'tag'\n"), "j")
+    assert "only success() and always() are run" in refused(job("- run: 'true'\n  if: github.event_name == 'push'\n"))
+
+
 # --- what is refused before the first step ---------------------------------------------------------
 
 STEP = "- run: 'true'\n"
@@ -154,7 +161,6 @@ STEP = "- run: 'true'\n"
     (lambda: job(STEP, extra="services:\n  db:\n    image: x\n"), "the job sets services"),
     (lambda: job(STEP, extra="defaults:\n  run:\n    shell: bash\n"), "the job sets defaults"),
     (lambda: job(STEP, extra="environment: prod\n"), "the job sets environment"),
-    (lambda: job(STEP, extra="if: github.event_name == 'push'\n"), "the job has the condition"),
     (lambda: workflow(f"runs-on: x\ncontainer:\n  image: {IMAGE}\n  env:\n    A: b\nsteps:\n  {STEP}"),
      "the job's container sets env, which this script does not reproduce (only image and options)"),
     (lambda: workflow(f"runs-on: x\ncontainer:\n  image: {IMAGE}\n  ports: [80]\n  volumes: [/a:/b]\nsteps:\n"

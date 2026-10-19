@@ -23,9 +23,11 @@ idf.py build
 ./build/onodiy_host_tests.elf
 ```
 
-CI runs both for pushes to `main`, release tags and pull requests
-(`.github/workflows/build.yml`), together with the bench tools' tests and a QEMU smoke
-test (below); a release tag also publishes the GitHub Release (see below).
+CI (`.github/workflows/build.yml`) runs both, with the bench tools' tests, for every push
+to `main` (changes to documentation only run nothing). Release tags, pull requests, a
+weekly run and **Actions > build > Run workflow** also run the bench-overlay build and
+the two QEMU jobs (below). A release tag publishes the GitHub Release only once every
+job has passed (see [releases](releases.md)).
 
 CI builds the host tests on Linux with gcc and glibc, which find problems a macOS
 (clang) build does not: other warnings under `-Werror`, archive order at link time, and

@@ -12,8 +12,9 @@ git tag v0.3.0
 git push origin v0.3.0
 ```
 
-CI builds the tag as release `v0.3.0` (`-DRELEASE_VERSION`), runs the host tests, then
-creates the GitHub Release with:
+CI builds the tag as release `v0.3.0` (`-DRELEASE_VERSION`), runs every test job (host
+tests, bench tools, the bench-overlay build and both QEMU jobs), then creates the GitHub
+Release with:
 
 - `onodiy-esp32-ntrip-server.bin`, the app image stations install;
 - the receiver package(s) from [`firmware/um982/`](../firmware/um982/) (checked against
