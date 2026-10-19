@@ -31,7 +31,9 @@ earlier run can never write into it). Other options (`tools/qemu/run.sh
 file, for scripts), `--console connect:PORT` (with `--headless`: the
 console on a socket a script listens on, so it can type commands; the log
 file still gets everything the firmware prints), `--seconds N`,
-`--http-port N`, `--uart1 MODE`, `--no-wdt`, `--pcap FILE` (every Ethernet
+`--http-port N`, `--ntrip-port N` (a host port forwarded to the station's
+caster for a rover, port 2101, which then sees the client as 10.0.2.2),
+`--uart1 MODE`, `--no-wdt`, `--pcap FILE` (every Ethernet
 frame between the station and QEMU's user-mode network, both ways, in pcap
 form: QEMU's `filter-dump` on the NIC's netdev). `--overlay FILE` adds one more sdkconfig overlay after
 `sdkconfig.qemu` and builds into `build-qemu-<name>/` (`--overlay
@@ -580,14 +582,16 @@ tools/qemu/run.sh --build-only
 uv run tools/qemu/e2e.py                       # every scenario; logs in build-qemu/e2e/
 uv run tools/qemu/e2e.py --scenario stream --caster docker
 uv run tools/qemu/e2e.py --scenario stream --ntrip-version 2   # slot 1 over NTRIP 2.0
+uv run tools/qemu/e2e.py --scenario local-caster    # the station's caster for a rover
 uv run tools/qemu/e2e.py --scenario signal-test
 ```
 
 Like `smoke.py` it needs the ESP-IDF environment and uses only the standard
-library (it imports `tools/bench/rtcm_replay.py`, `fake_caster.py` and their
-`benchlib` modules by path). Nothing leaves this computer: the replay and
-the casters listen on 127.0.0.1, which the emulated station reaches as
-10.0.2.2.
+library (it imports `tools/bench/rtcm_replay.py`, `fake_caster.py`,
+`ntrip_client.py` and their `benchlib` modules by path). Nothing leaves this
+computer: the replay and the casters listen on 127.0.0.1, which the emulated
+station reaches as 10.0.2.2, and the station's caster for a rover is
+forwarded to a free port on 127.0.0.1 (`run.sh --ntrip-port`).
 
 It replays the fixture (`--fixture`: an RTCM file or a `capture.py` run;
 default `test/fixtures/rtcm/centipede_LAX_30ep.rtcm3`, looped at its own one
@@ -661,6 +665,62 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
   Wi-Fi restart or a reboot cannot fix a caster's reply); pointed at a
   closed port (the connect refused) it has. It runs before `stream`; a wait
   that a receiver lease interrupted is noted and not judged;
+- scenario `local-caster`: the station's own caster for a rover ("Your
+  rover", `components/local_caster`), read with `tools/bench/ntrip_client.py`
+  on the port `run.sh --ntrip-port` forwards to the station's 2101. It runs
+  right after `stream` and compares every rover's record with what slot 1
+  sends the fake caster meanwhile (the upstream; alone it sets slot 1 up
+  itself). Every rover is 10.0.2.2 to the station: a private address, and
+  the QEMU build has no gateway rule. Off by default: the forwarded port is
+  closed at once, `GET /api/local-caster` says `off` with the host name as
+  mountpoint and `rover` as username, and `/api/health` `hub.consumers` is
+  4. `PUT /api/local-caster` turns it on (mountpoint `ROVER`, a random
+  password that no answer returns): `listening` within 5 s and `lcast:
+  listening on port 2101, mountpoint ROVER` on the console. The source table
+  over NTRIP 1.0 and 2.0 is the station's reply byte for byte with one STR
+  record (19 fields, `ROVER`, the host name, `RTCM 3.3`, the fixture's
+  message types in order with whole-second periods, its constellations,
+  carrier 2, `0.00;0.00`, `B`, a bit rate near the fixture's), and so is
+  the answer to `GET /NOPE`. A wrong password over 1.0 and 2.0 and no login
+  get 401 with `WWW-Authenticate: Basic realm="/ROVER"` (error replies are
+  compared line by line in any order: their order is not fixed). Rover A
+  (2.0 over HTTP/1.1, chunked) and, 2 s later (the journal's one record of
+  a kind a second), rover B (1.0, the mountpoint in lower case) read for
+  60 s: A's reply head byte for byte, B's `ICY 200 OK` and the blank line,
+  then 0xD3; each record passes the strict check of `stream` with no gap,
+  A's chunks hold whole frames, and each record is, after the sticky
+  copies its session opened with, the upstream record frame for frame
+  (aligned at the loop nearest in time) over at least 50 s; `GET
+  /api/local-caster` lists both (10.0.2.2, versions 2 and 1, chunked, the
+  client's agent, `bytes_sent` within 5 % of what each counted),
+  `/api/status` 2 rovers, `hub.consumers` 6. A third rover gets 503 with
+  the right login and 401 with a wrong one. B leaves, and rover C
+  (`SO_RCVBUF` 4096) never reads: the station closes C (`stalled` + 1)
+  10 s after its `bytes_sent` stopped growing (QEMU's user network buffers
+  128 KiB per connection and this computer's sockets more, so that comes
+  about 1.5-2 min after its login at the fixture's 1.7 kB/s on Linux and
+  several minutes on macOS, which grows a socket's receive buffer whatever
+  `SO_RCVBUF` says; at most 8 min; on a board within seconds), while A, slot 1 (`streaming` throughout, same session,
+  `frames_dropped`, `epochs_dropped` and `laps` unchanged) and the upstream
+  record since the scenario began go on without a gap. A request that
+  never ends (`GET /ROVER HTTP/1.0` and nothing more) is closed 5-8 s after
+  the connect, with a 400 or without a reply; `Origin` and `Sec-Fetch-Site`
+  get 403. After a good login (it resets this address's count), 5 wrong
+  logins, then the right one gets 429 with `Retry-After` and streams once
+  that has passed. The journal lists A (2.0, still open), B (1.0,
+  `closed`) and C (`stalled`), each with b = 167772674 (10.0.2.2) and
+  listed 10 s into its session. Turned off, A gets the last chunk and the
+  close within 1 s of the answer, its whole record still checks out and
+  ends on a whole frame, the state is `off` with `lcast: off` on the
+  console, the journal ends A's session with `settings`, `hub.consumers`
+  is 4 and the port is closed again. The task `lcast` keeps at least
+  1024 B of its stack free. On again with a rover connected, a planned
+  restart (the replay paused across it, as for every restart here) gives
+  the rover a clean close before the station goes down and the console
+  `lcast: rover 10.0.2.2 disconnected after ... (the station restarted)`;
+  after the boot it listens again within 30 s and the stored password
+  still logs a rover in. The rover passwords never reach the console. It
+  turns the caster off again at the end;
 - scenario `signal-test` (runs last, under 15 minutes on this computer): the replay gets a
   scripted UM982 behind it (`tools/bench/benchlib/um982_sim.py`, see
   `tools/bench/README.md`, `--respond`): it answers the identity query, the
@@ -747,7 +807,9 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
 Everything lands in `--out`: `console.log`, `e2e.log` (the run's events),
 `replay/` (what the firmware sent on UART1 and, in `replay.log`, the
 responder's replies), `caster/` and `guard/` (each caster's
-`connections.jsonl` and records), the HTTP answers (`sgt-*.json` for the
+`connections.jsonl` and records), `lcast/` (each rover's record) and
+`lcast-*.json` / `lcast-*.txt` (the local caster's answers, its source
+tables and the stuck rover's `bytes_sent`), the HTTP answers (`sgt-*.json` for the
 comparison), `qemu-net.pcap` and `slow-requests.log` (as `smoke.py` writes
 them) and `summary.txt`. The `qemu-smoke` CI job runs it after the smoke test with
 `--out qemu-e2e --scenario all` and uploads that directory too.
