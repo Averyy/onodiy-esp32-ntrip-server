@@ -130,7 +130,8 @@ the receiver, and opening the receiver's USB-C does not reset it either.
    downloads only from this repository's GitHub releases over verified HTTPS and uses a
    file only if it matches (see [Releases and updates](#releases-and-updates)).
 5. **Web UI** — Wi-Fi setup, NTRIP configuration, live status, firmware updates, and a
-   signal/satellite view.
+   signal/satellite view with a sky map (the receiver sends the satellites' positions every
+   10 s; "Sky map" in Receiver settings turns that off).
 6. **Health monitoring** — GNSS watchdog, auto-recovery, and data-loss counters.
 7. **Local server** *(in progress: not yet tested with a real rover)* — a local NTRIP
    caster for your own rover on the home network (NTRIP 1.0 and 2.0, one mountpoint, at

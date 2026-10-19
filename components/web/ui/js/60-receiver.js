@@ -5,9 +5,10 @@
  * Receiver page (#/receiver): the receiver (state, model, configuration,
  * problems as messages, the messages it sends), its base position (where,
  * the checks, the map on request, Lock or Survey again), then the signals
- * (65-signals.js) with the sky on request (66-live.js).
+ * (65-signals.js) with the sky map (66-live.js).
  * Receiver settings (#/receiver/settings): the base position, the receiver
- * profile (signals, correction messages, antenna model, advanced), receiver
+ * profile (signals and the sky map, correction messages, and Advanced folded
+ * until opened: station ID, link speed, antenna model, Apply again), receiver
  * setup (automatic or manual: how the receiver gets its settings and what
  * happens if corrections stop) and the comparison of two signal groups (not
  * with manual setup, which cannot start one). What the receiver read back
@@ -644,11 +645,14 @@ function editRow(line, box, onToggle) {
  * Receiver settings' Position and Receiver profile cards. Each saves its own
  * fields over the profile as stored now (latest()), so an edit in one never
  * travels with the other's Save; Position's Save shows once its fields
- * differ. Returns {position, profile, update(g), dirty()}.
+ * differ. fold: {advanced} whether Advanced is open, kept by the page across
+ * rebuilds (closed on a new visit). Returns {position, profile, update(g),
+ * dirty()}.
  */
-function receiverForms(g, latest, done, onCompare) {
+function receiverForms(g, latest, done, onCompare, fold) {
   const p = Object.assign({ signal_group_master: 3, signal_group_slave: 6, base_mode: 'survey_in', survey_in_s: 600, fixed: null,
-    station_id: 0, com1_baud: DEFAULT_BAUD, rtcm: [], sat_view_output: false }, g.profile || {});
+    station_id: 0, com1_baud: DEFAULT_BAUD, rtcm: [], sat_view_output: true }, g.profile || {});
+  const folds = fold || { advanced: false };
   let profDirty = false;
 
   /* -- Position -- */
@@ -674,8 +678,8 @@ function receiverForms(g, latest, done, onCompare) {
     'listed above; a pair the receiver refuses is undone.');
   const sid = numInput(p.station_id, { inputmode: 'numeric', maxlength: 4 });
   const baud = selectInput(BAUDS.map(b => [b, b + ' baud' + (b === DEFAULT_BAUD ? ' (default)' : '')]), p.com1_baud);
-  const satView = checkbox('Satellite positions output', p.sat_view_output, 'Off by default: the sky view turns them on while ' +
-    'open, pausing corrections for a moment. On: always sent, so the sky never pauses corrections and works with manual setup.');
+  const satView = checkbox('Sky map', p.sat_view_output, 'On (default): the receiver sends where each satellite is every 10' + NB +
+    's, so the Receiver page shows them on a sky map. Off: no sky map.');
   const antModel = textInput(p.antenna_model || '', { maxlength: 64, class: 'ant' });
   const antSerial = textInput(p.antenna_serial || '', { maxlength: 64 });
   const antSetup = numInput(p.antenna_setup_id || 0, { inputmode: 'numeric', maxlength: 3 });
@@ -838,7 +842,7 @@ function receiverForms(g, latest, done, onCompare) {
   const antBox = h('div', { class: 'stack' }, F.antenna_model.el, h('div', { class: 'cols c2' }, F.antenna_serial.el, F.antenna_setup_id.el),
     h('p', { class: 'hint' }, 'Serial and setup ID are only sent with a model.'));
 
-  /* Field checks; a field behind its Edit button opens first. */
+  /* Field checks; a field behind its Edit button or in the closed Advanced opens first. */
   const int = (s, lo, hi) => {
     const n = Number(String(s).trim());
     return String(s).trim() !== '' && Number.isInteger(n) && n >= lo && n <= hi ? n : null;
@@ -859,6 +863,10 @@ function receiverForms(g, latest, done, onCompare) {
         if (!bad) return true;
         for (let n = bad; n; n = n.parentElement) {
           if (n.classList && n.classList.contains('edit-box')) n.hidden = false;
+          if (n.tagName === 'DETAILS' && !n.open) {
+            n.open = true;
+            folds.advanced = true;
+          }
         }
         if (bad.focus) bad.focus();
         return false;
@@ -978,10 +986,19 @@ function receiverForms(g, latest, done, onCompare) {
   const actions = h('div', { class: 'form-actions' }, saveBtn);
   const antLine = p.antenna_model ? h('span', { class: 'ant' }, p.antenna_model) :
     h('span', null, 'Not set (recommended unless your antenna is in the IGS list)');
-  /* The antenna step's refusal under the antenna, the B1C/B2a step's under the messages (stepsRefused). */
+  /* The antenna step's refusal above Advanced (in view while it is closed), the B1C/B2a step's under the messages
+   * (stepsRefused). */
   const refused = [h('div', { class: 'stack', hidden: true }), h('div', { class: 'stack', hidden: true })];
   /* Hidden while there is no comparison to go to (manual setup). */
   const cmpLink = h('button', { type: 'button', class: 'linkbtn', onclick: onCompare }, 'Not sure? Compare two groups');
+  /* Advanced: closed until opened (the one fold here, as the owner asked), as the page last left it across rebuilds. */
+  const advanced = h('details', { class: 'pgroup more', ontoggle: () => {
+    folds.advanced = advanced.open;
+  } }, h('summary', null, 'Advanced'),
+  h('div', { class: 'stack' }, h('div', { class: 'cols c2' }, F.station_id.el, F.com1_baud.el), sgCustom.el, sgNumbers,
+    h('h3', { class: 'sub' }, 'Antenna model'), editRow(antLine, antBox),
+    h('p', { class: 'muted small' }, 'Goes to servers in message 1033. ', seeLine), applyRow));
+  advanced.open = !!folds.advanced;
   const profile = h('form', { class: 'stack', oninput: () => {
     profDirty = true;
     sumUp();
@@ -990,13 +1007,13 @@ function receiverForms(g, latest, done, onCompare) {
     e.preventDefault();
     save('profile', saveBtn, err);
   } },
-  pgroup('Signals', null, sgChoice.el, cmpLink),
+  pgroup('Signals', null, sgChoice.el, cmpLink, satView.el),
   pgroup('Correction messages', setChip, editRow(summary, msgBox, open => {
     msgList.hidden = open;
   }), msgList, refused[1]),
-  pgroup('Antenna model', null, editRow(antLine, antBox), h('p', { class: 'muted small' }, 'Goes to servers in message 1033. ', seeLine),
-    refused[0]),
-  pgroup('Advanced', null, h('div', { class: 'cols c2' }, F.station_id.el, F.com1_baud.el), sgCustom.el, sgNumbers, satView.el, applyRow),
+  /* The antenna's refusal stays in view while Advanced is closed. */
+  refused[0],
+  advanced,
   err,
   actions);
 
@@ -1271,8 +1288,8 @@ Views.receiver = {
 };
 
 /**
- * The Receiver page (#/receiver; #/receiver/live shows the sky when it is
- * open, #/receiver/live/start opens it), or with arg "settings" the
+ * The Receiver page (#/receiver; #/receiver/live and #/receiver/live/start,
+ * which opened the sky before it was a map, land here), or with arg "settings" the
  * Receiver settings page (#/receiver/settings/manage: at its Receiver
  * setup card); both read GET /api/gnss every 5 s.
  */
@@ -1392,8 +1409,10 @@ function receiverPage(el, arg) {
     }
     sigs.gnss(g);
   };
+  /* Advanced open or closed, kept while the page rebuilds its forms. */
+  const fold = { advanced: false };
   const buildForms = () => {
-    forms = receiverForms(g, () => g, refresh, openCompare);
+    forms = receiverForms(g, () => g, refresh, openCompare, fold);
     forms.compare(!compare.hidden);
     mount(posCard, forms.position);
     mount(profile, cardHead('Receiver profile', profChip), forms.profile);
@@ -1430,10 +1449,8 @@ function receiverPage(el, arg) {
       manageCard.scrollIntoView({ block: 'start' });
       manageCard.focus({ preventScroll: true });
     }
-    /* An address that asks for the sky: open it (live/start) or show it when it is open (live); then the page's own address. */
+    /* An address that asked for the sky (live, live/start): the page itself, the sky map in its Signals card. */
     if (/^live/.test(arg)) {
-      if (arg === 'live/start') sigs.sky.start();
-      else sigs.sky.resume();
       history.replaceState(null, '', '#/receiver');
       if (shell.current) shell.current.arg = '';
     }

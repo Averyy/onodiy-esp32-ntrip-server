@@ -239,19 +239,6 @@ const L = {
   /* The same words where another page tells it (Logs' Health card). */
   manage: { full: 'Automatic', no_reboot: 'Automatic, no station restarts', alerts_only: 'Manual' },
   trigger: { protected: 'Onocoy server down', assoc_no_ip: 'connected without an IP address', unreached: 'a server not reached' },
-  liveWhy: {
-    none: '',
-    busy: 'the station is busy with the receiver',
-    not_streaming: 'the receiver is not streaming',
-    maintenance: 'receiver maintenance is on',
-    autocfg_off: 'receiver setup is manual',
-    unsupported: 'the station does not configure this receiver model',
-    reconfigured: 'the receiver was configured or restarted; extend to turn them on again',
-    rejected: 'the receiver refused the command',
-    no_answer: 'the receiver did not answer',
-    flash: 'a receiver update runs',
-    not_running: 'the receiver path is not running',
-  },
   liveEnd: {
     none: '', user: 'you stopped it', expired: 'its time was up', idle: 'no page showed it for a while', flash: 'a receiver update began',
   },

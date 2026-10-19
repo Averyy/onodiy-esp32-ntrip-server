@@ -495,8 +495,10 @@ async function startWizard(claim) {
   /*
    * Antenna check: with no receiver (or while looking for it) the
    * no-receiver panel and nothing opened; once it streams the live view
-   * with plain hints (RX_CHECK, 66-live.js), closed again on leaving. Going
-   * on without the check is a secondary button.
+   * with plain hints (RX_CHECK, 66-live.js). A profile that sends satellite
+   * positions (the sky map, the default) gives them as they are; otherwise
+   * the station's live window turns them on for a while, closed again on
+   * leaving. Going on without the check is a secondary button.
    */
   function stepReception() {
     const box = h('div', { class: 'stack' }, h('div', { class: 'spinner' }), h('p', { class: 'muted' }, 'Checking the receiver…'));
@@ -590,6 +592,14 @@ async function startWizard(claim) {
       setCont(r.ok ? 'Continue' : 'Continue anyway', true);
       setNote(r.waiting ? '' : 'These are rough guide values, not Onocoy\'s scoring. The sky is also on the Receiver page.');
       later.textContent = '';
+      /* The profile's positions: no window to close. */
+      if (w.sky === 'on_profile') {
+        if (closedShown) {
+          closedShown = false;
+          err.hidden = true;
+        }
+        return;
+      }
       /* A 200 to our own start means open; a closed window read within 5 s
        * of it is a stale answer, ignored once. */
       if (w.open === false && Date.now() - postAt < 5000 && !closeIgnored) {
@@ -609,11 +619,16 @@ async function startWizard(claim) {
     }
 
     async function openLive() {
-      postAt = Date.now();
-      closeIgnored = false;
-      let d;
+      let d, posted = false;
       try {
-        d = await api('POST', '/api/gnss/live', {});
+        /* The profile sends the positions (the sky map): nothing to open, only to read. */
+        d = await api('GET', '/api/gnss/live');
+        if ((d.window || {}).sky !== 'on_profile') {
+          postAt = Date.now();
+          closeIgnored = false;
+          d = await api('POST', '/api/gnss/live', {});
+          posted = true;
+        }
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) return;
         if (gone()) return;
@@ -628,9 +643,9 @@ async function startWizard(claim) {
         }
         return;
       }
-      opened = true;
+      opened = opened || posted;
       if (gone()) {
-        api('DELETE', '/api/gnss/live').catch(() => {});   /* nobody shows it: close it again */
+        if (posted) api('DELETE', '/api/gnss/live').catch(() => {});   /* nobody shows it: close it again */
         return;
       }
       if (mode !== 'live') {

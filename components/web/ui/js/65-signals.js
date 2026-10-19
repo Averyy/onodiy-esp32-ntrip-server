@@ -5,8 +5,8 @@
  * Signals, on the Receiver page: one card with the best constellation and
  * its bands, the Good / Check / Problem hints in one line each (only what
  * that headline does not say), the frequency bands per constellation from
- * the MSM data (with the mean C/N0 from MSM4 to MSM7) and the sky on
- * request (66-live.js); in the Receiver card, the RTCM messages seen against
+ * the MSM data (with the mean C/N0 from MSM4 to MSM7) and the sky map
+ * (66-live.js); in the Receiver card, the RTCM messages seen against
  * the profile. The public page shows the summary and the band table
  * (signalsCard).
  */
@@ -186,42 +186,44 @@ function signalsHead(sig, live, master, why) {
 
 /**
  * The Receiver page's Signals card in el: the best constellation, the hints
- * (while the receiver delivers), the band table with the sky beside it once
- * shown (every satellite under the table). Hidden without a receiver (the
- * Receiver card says so). msgs: the Receiver card's box for the messages
- * the receiver sends, shown once any arrived (until then the card's line
- * says that none do) and not while messagesOff(true). Returns
- * {update(status), gnss(g), messagesOff(off), destroy(), sky}.
+ * (while the receiver delivers), the band table with the sky map beside it
+ * while the profile sends satellite positions (every satellite under the
+ * table; without them a line says where to turn them on). Hidden without a
+ * receiver (the Receiver card says so). msgs: the Receiver card's box for
+ * the messages the receiver sends, shown once any arrived (until then the
+ * card's line says that none do) and not while messagesOff(true). Returns
+ * {update(status), gnss(g), messagesOff(off), destroy()}.
  */
 function signalsSection(el, msgs) {
-  const sky = skySection();
+  const sky = skyMap();
   const head = h('div', { class: 'stack' }, h('p', { class: 'loading' }, 'Loading signals…'));
   const bands = h('div');
   const wrap = h('div', { class: 'sky-wrap' }, sky.plot, h('div', { class: 'stack' }, bands, sky.list));
-  const card = h('section', { class: 'card wide' }, h('h2', null, 'Signals'), head, sky.head, wrap,
-    h('div', { class: 'form-actions' }, sky.note, sky.button), sky.el);
-  /* No band table and no sky: no empty box under the head. */
+  const card = h('section', { class: 'card wide' }, h('h2', null, 'Signals'), head, wrap);
+  /* No band table and no sky: no empty box under the head. The sky beside the table: its signal names give way. */
   const wrapSync = () => {
     wrap.hidden = !bands.firstChild && sky.plot.hidden;
+    card.classList.toggle('sky-open', !sky.plot.hidden);
   };
   sky.watch(wrapSync);
   el.append(card);
-  let collapsed = false, g = null, msgsOff = false, why = '', lastSig = null;
+  let collapsed = false, g = null, msgsOff = false, why = '', lastSig = null, skyOn = false;
   const msgsSync = () => {
     msgs.hidden = collapsed || msgsOff || !msgs.firstChild;
   };
+  /* The sky map is read while it can show: the profile sends the positions and the card shows. */
+  const skySync = () => sky.set(skyOn && !collapsed, !!g && !g.autocfg);
   /* Verdicts (hints, red messages) only while corrections come from the receiver. */
   const delivering = () => !!(S.status && stationState(S.status, true).delivering);
   /* No receiver, or the station looking for it: the card hides. */
   function receiverState(st) {
     const r = (st && st.receiver) || {};
     const c = !r.rx_maintenance && (r.state === 'no_receiver' || r.state === 'detecting' || r.state === 'idle');
-    card.classList.toggle('sky-open', !sky.plot.hidden);
     if (c === collapsed) return;
     collapsed = c;
     card.hidden = c;
     msgsSync();
-    if (c) sky.hide();
+    skySync();
   }
   receiverState(S.status);
 
@@ -255,18 +257,16 @@ function signalsSection(el, msgs) {
 
   const stop = poller(2000, loadSignals);
   return {
-    sky: sky,
     update: receiverState,
-    /* GET /api/gnss: the survey (1005 waits for it) and whether the sky can show satellites: automatic setup turns their
-     * output on while it is open; with manual setup only the profile's satellite positions output gives them (a held first
-     * configuration sent neither). */
+    /* GET /api/gnss: the survey (1005 waits for it) and whether the sky map can show satellites: the profile's satellite
+     * positions (Sky map in Receiver settings) give them once applied (a held first configuration sent nothing). */
     gnss(gg) {
       g = gg;
       const settings = h('a', { href: '#/receiver/settings' }, 'Receiver settings');
-      why = g.first_apply_held ? 'To show the sky, configure the receiver first.' :
-        g.autocfg || (g.profile || {}).sat_view_output ? '' :
-          ['To show the sky with manual setup, turn on Satellite positions output in ', settings, '.'];
-      sky.block(why);
+      skyOn = !g.first_apply_held && !!(g.profile || {}).sat_view_output;
+      why = g.first_apply_held ? 'To see the sky map, configure the receiver first.' :
+        skyOn ? '' : ['Turn on Sky map in ', settings, ' to see the satellites on a map.'];
+      skySync();
       if (lastSig && !collapsed) drawHead();
     },
     messagesOff(off) {

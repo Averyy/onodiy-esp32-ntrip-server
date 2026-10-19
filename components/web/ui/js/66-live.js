@@ -2,13 +2,12 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * The sky in the Receiver page's Signals card: a live window opened on
- * request (POST /api/gnss/live) for a limited time, extended or closed by
- * the user; the station closes it when time is up or no page asked for it
- * for a while (each GET /api/gnss/live keeps it open, so the page polls
- * only while it shows it). While it is open the receiver also sends azimuth
- * and elevation for the sky plot; the rest comes from the RTCM stream. The
- * setup wizard's antenna check reuses the plot, the counts and the hints.
+ * The sky map in the Receiver page's Signals card: the satellites where the
+ * receiver profile's satellite positions put them (GET /api/gnss/live, read
+ * while the page shows it), the rest from the RTCM stream. The setup
+ * wizard's antenna check reuses the plot, the counts and the hints (and,
+ * for a profile without the positions, opens the station's live window,
+ * POST /api/gnss/live, which turns them on for a while).
  */
 
 const LIVE_POLL_MS = 2000;
@@ -285,193 +284,72 @@ function mapBox() {
   };
 }
 
-/* ---- The window: Show the sky, Extend, Close --------------------------------------------- */
-
-function skyOutputText(w) {
-  const why = w.sky_why && w.sky_why !== 'none' ? lbl(L.liveWhy, w.sky_why) : '';
-  switch (w.sky) {
-    case 'on':
-      return 'Satellite positions: on.';
-    case 'on_profile':
-      return 'Satellite positions: on (receiver profile).';
-    case 'pending':
-      return 'Satellite positions: waiting' + (why ? ': ' + why : '') + '.';
-    case 'blocked':
-      if (w.sky_why === 'maintenance') return 'Satellite positions: off during receiver maintenance. Extend afterwards to turn them on.';
-      if (w.sky_why === 'no_answer') return 'Satellite positions: the receiver did not answer. Extend to try again.';
-      return 'Satellite positions: not available' + (why ? ' (' + why + ')' : '') + '.';
-    case 'stopping':
-      return 'Satellite positions: turning off.';
-    default:
-      return '';
-  }
-}
+/* ---- The sky map (the profile's satellite positions) -------------------------------------- */
 
 /**
- * The sky section: head (time left, Close, Extend) above plot, which sits
- * beside the band table; list (every satellite, in a box of its own height)
- * under that table; button ("Show the sky") and note (why it is off or
- * closed) in the card's action row; el (errors, the note on pauses) under
- * it. Returns {button, note, head, plot, list, el, start(), resume(),
- * block(text), hide(), destroy()}: hide() closes it here and stops asking
- * (the station closes an unwatched window).
+ * The sky in the Receiver page's Signals card while the receiver profile
+ * sends satellite positions (Sky map in Receiver settings): plot (beside the
+ * band table) and list (every satellite, under that table), read from GET
+ * /api/gnss/live every LIVE_POLL_MS. Nothing to open: the station never
+ * toggles the output the profile sends. Both stay hidden while no satellite
+ * is tracked (the card's head says why). Returns {plot, list, set(on,
+ * manual), watch(f), destroy()}: set(true) reads, set(false) hides and stops
+ * (manual: receiver setup is manual, so only an apply sends the positions).
  */
-function skySection() {
-  let stopPoll = null, gone = false, open = false, deadline = 0, postAt = 0, closeIgnored = false, blocked = '', closedWhy = '';
-  let onChange = null;
-  const err = errBox();
-  const left = h('span', { class: 'live-left' });
-  const upTo = h('span');
-  const state = h('span', { class: 'note small' }, left, upTo);
-  const skyLine = h('p', { class: 'muted small' });
-  const conn = h('p', { class: 'msg warn', role: 'status', hidden: true });   /* polling failed: once, until it works again */
-  const announce = h('span', { class: 'sr-only', role: 'status' });
-  const note = h('span', { class: 'note muted small', id: 'sky-why', hidden: true });
-  const showBtn = btn('Show the sky', () => start(showBtn));
-  const extendBtn = btn('Extend', () => act(extendBtn, async () => {
-    posted();
-    show(await api('POST', '/api/gnss/live', {}));
-  }, err));
-  const closeBtn = btn('Close', () => act(closeBtn, async () => {
-    try {
-      await api('DELETE', '/api/gnss/live');
-    } catch (e) {
-      if (!(e instanceof ApiError && e.code === 'live_view_closed')) throw e;
-    }
-    postAt = 0;
-    show({ window: { open: false, last_end: 'user' } });
-    showBtn.focus();
-  }, err));
+function skyMap() {
+  let stopPoll = null, gone = false, on = false, manual = false, onChange = null;
   const plotBox = h('div');
-  const skyNote = h('p', { class: 'muted small' });
-  const plot = h('div', { class: 'sky-pane', hidden: true }, plotBox, cnrLegend(), h('p', { class: 'muted small' }, SYS_KEY), skyNote);
+  const note = h('p', { class: 'muted small' });
+  const plot = h('div', { class: 'sky-pane', hidden: true }, plotBox, cnrLegend(), h('p', { class: 'muted small' }, SYS_KEY), note);
   const rows = satRows();
   const list = h('div', { class: 'sat-list', hidden: true }, rows.el);
-  const head = h('div', { class: 'stack', hidden: true }, h('div', { class: 'form-actions' }, state, closeBtn, extendBtn), skyLine, conn);
-  const box = h('p', { class: 'muted small', hidden: true }, 'Turning satellite positions on and off pauses corrections for a moment. ' +
-    'The sky closes by itself when time is up or no page shows it.');
-
-  const posted = () => {
-    postAt = Date.now();
-    closeIgnored = false;
+  const show = vis => {
+    if (plot.hidden !== vis) return;
+    plot.hidden = list.hidden = !vis;
+    if (onChange) onChange();
   };
   const endPoll = () => {
     if (stopPoll) stopPoll();
     stopPoll = null;
   };
-  const tick = () => {
-    if (open) left.textContent = fmt.dur(Math.max(0, Math.round((deadline - Date.now()) / 1000)));
-  };
-  const timer = setInterval(tick, 1000);
-  /* While the sky cannot show (block(): the card's banner says why), no button that cannot work. */
-  const syncNote = () => {
-    note.textContent = blocked ? '' : closedWhy;
-    note.hidden = open || !note.textContent;
-    showBtn.hidden = open || !!blocked;
-    showBtn.setAttribute('aria-describedby', note.id);
-    /* The action row goes with its last visible part (no empty gap under a banner). */
-    const row = showBtn.parentElement;
-    if (row && row.contains(note)) row.hidden = showBtn.hidden && note.hidden;
-    if (onChange) onChange();
-  };
 
-  function show(d) {
-    if (gone || !d) return;
-    const w = d.window || {};
-    /* A 200 to our own start means open: a closed window read within 5 s of it is a stale answer, ignored once. */
-    if (w.open === false && Date.now() - postAt < 5000 && !closeIgnored) {
-      closeIgnored = true;
-      return;
-    }
-    conn.hidden = true;
-    const was = open;
-    open = !!w.open;
-    if (was !== open) announce.textContent = open ? 'Sky open.' : 'Sky closed.';
-    head.hidden = box.hidden = plot.hidden = list.hidden = !open;
-    showBtn.hidden = open || !!blocked;
-    if (!open) {
-      endPoll();
-      const why = w.last_end && w.last_end !== 'none' && w.last_end !== 'user' ? lbl(L.liveEnd, w.last_end) : '';
-      closedWhy = why ? 'Closed: ' + why + '.' : '';
-      syncNote();
-      return;
-    }
-    closedWhy = '';
-    syncNote();
-    if (!stopPoll) stopPoll = poller(LIVE_POLL_MS, fetchLive, true);
-    deadline = Date.now() + w.left_s * 1000;
-    tick();
-    upTo.textContent = ' left (up to ' + w.max_min + NB + 'min with extensions).';
-    const again = w.sky === 'blocked' && ['reconfigured', 'maintenance', 'no_answer'].indexOf(w.sky_why) >= 0;
-    extendBtn.textContent = again ? 'Extend and turn positions on' : 'Extend by ' + w.default_min + NB + 'min';
-    skyLine.textContent = skyOutputText(w);
-    skyLine.hidden = !skyLine.textContent;
+  function render(d) {
+    if (gone || !on) return;
     const t = d.totals;
-    if (!t) {
-      patch(plotBox, msg('warn', 'The station cannot read the observations right now.'));
-      return;
-    }
-    const sats = d.satellites || [];
+    const sats = t ? d.satellites || [] : [];
+    show(sats.length > 0);
+    if (!sats.length) return;
     patch(plotBox, liveSkyPlot(sats));
     const placed = sats.filter(hasSkyPos).length;
-    skyNote.textContent = placed ? placed + ' of ' + sats.length + ' satellites shown.' :
-      w.sky === 'on' || w.sky === 'on_profile' ? 'Waiting for the first satellite positions from the receiver.' :
-        'No satellite positions yet: see the line above.';
+    /* None this boot with manual setup: the profile may never have reached the receiver. */
+    note.textContent = placed ? placed + ' of ' + sats.length + ' satellites on the map.' :
+      manual && (t.sky_age_ms === null || t.sky_age_ms === undefined) ?
+        'No satellite positions yet. With manual setup, Apply again in Receiver settings sends them.' :
+        'Waiting for the first satellite positions from the receiver.';
     rows.update(d);
   }
 
-  async function fetchLive() {
-    let d;
-    try {
-      d = await api('GET', '/api/gnss/live');
-    } catch (e) {
-      /* Once in the section, not a toast every 2 s (a phone off Wi-Fi, a restarting station). */
-      if (!gone && !(e instanceof ApiError && e.status === 401)) {
-        conn.textContent = 'No answer from the station: ' + errText(e) + ' Showing the last figures; still trying.';
-        conn.hidden = false;
-      }
-      return;
-    }
-    show(d);
-  }
-
-  async function start(b) {
-    posted();
-    const d = await act(b, () => api('POST', '/api/gnss/live', {}), err);
-    if (!d) return;
-    show(d);
-    if (open && b === showBtn) closeBtn.focus();
-  }
-
   return {
-    button: showBtn,
-    note: note,
-    head: head,
-    el: h('div', { class: 'sky-extra' }, announce, err, box),
     plot: plot,
     list: list,
-    start: () => start(showBtn),
-    /* The window as it is (an address that asks for the sky): shown when it is open. */
-    resume: () => fetchLive(),
-    /* f(): called after the sky opened, closed or was blocked (the card hides what has nothing to show). */
+    set(want, man) {
+      manual = !!man;
+      if (!!want === on) return;
+      on = !!want;
+      if (on) {
+        stopPoll = poller(LIVE_POLL_MS, async () => render(await api('GET', '/api/gnss/live')));
+      } else {
+        endPoll();
+        show(false);
+      }
+    },
+    /* f(): called when the sky shows or hides (the card hides what has nothing to show). */
     watch(f) {
       onChange = f;
-    },
-    /* text: why the sky cannot show ('' when it can): the button goes while it is set. */
-    block(text) {
-      blocked = text || '';
-      syncNote();
-    },
-    hide() {
-      endPoll();
-      open = false;
-      head.hidden = box.hidden = plot.hidden = list.hidden = true;
-      syncNote();
     },
     destroy() {
       gone = true;
       endPoll();
-      clearInterval(timer);
     },
   };
 }

@@ -45,6 +45,7 @@ const noop = () => {};
 
 class Node {
   get parentNode() { return this.parent || null; }
+  get parentElement() { return this.parent || null; }
   get nextSibling() {
     const k = this.parent ? this.parent.kids : [];
     const i = k.indexOf(this);
@@ -142,7 +143,11 @@ class El extends Node {
     }
     return null;
   }
-  querySelectorAll() { return []; }
+  /* A plain "tag" finds every such element inside; any other selector finds nothing. */
+  querySelectorAll(sel) {
+    const tag = /^([a-z]+)$/.exec(sel);
+    return tag ? [...this.walk()].filter(e => e !== this && e.tagName === tag[1].toUpperCase()) : [];
+  }
   closest() { return null; }
   contains(x) { for (const e of this.walk()) if (e === x) return true; return false; }
   *walk() { yield this; for (const c of this.kids) if (c instanceof El) yield* c.walk(); }
@@ -194,11 +199,12 @@ const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '    shell.current = page === null ? null : { name: page, arg: \'\', view: {} }; } };\n})()',
   ctx);
 
-/* The elements on screen: hidden ones and everything inside them left out. */
+/* The elements on screen: hidden ones and everything inside them left out; of a closed fold, its summary only. */
 function* visible(e) {
   if (e.hidden) return;
   yield e;
-  for (const c of e.kids) if (c instanceof El) yield* visible(c);
+  const shut = e.tagName === 'DETAILS' && !e.open && !('open' in e.attrs);
+  for (const c of e.kids) if (c instanceof El && (!shut || c.tagName === 'SUMMARY')) yield* visible(c);
 }
 
 /* What the editor shows: its heading, the field names in order, a preset's host and port (text), the help line, the
@@ -431,6 +437,10 @@ function pageParts(el) {
   const card = e => e.tagName === 'SECTION' && (' ' + e.className + ' ').indexOf(' card ') >= 0;
   return {
     details: [...el.walk()].filter(e => e.tagName === 'DETAILS').length,
+    /* The folds by their title, and whether a sky plot shows. */
+    summaries: v.filter(e => e.tagName === 'SUMMARY').map(e => e.textContent),
+    hints: v.filter(e => e.tagName === 'SMALL' && e.className === 'hint').map(e => e.textContent),
+    sky: v.some(e => e.tagName === 'SVG' && (e.attrs.class || '').indexOf('sky') >= 0),
     cards: v.filter(card).map(c => (([...visible(c)].find(e => e.tagName === 'H2') || {}).textContent || null)),
     subs: v.filter(e => e.tagName === 'H3').map(e => e.textContent),
     fields: v.filter(e => e.tagName === 'SPAN' && e.className === 'lbl').map(e => e.textContent),
@@ -450,14 +460,18 @@ function pageParts(el) {
   };
 }
 
-/* A Receiver page (c.arg: '' the page, 'settings' Receiver settings, 'live' the page with the sky as it is) for the
+/* A Receiver page (c.arg: '' the page, 'settings' Receiver settings, 'live' the old address of the sky) for the
  * status c.status and the station's answers: c.gnss (GET /api/gnss), c.sig (its signals), c.test (the comparison),
- * c.live (the live view), c.preview (the held configuration's commands). What it shows (pageParts); with c.confirm,
- * also what the held configuration's dialog shows once "Configure the receiver now" is pressed. */
+ * c.live (the live view), c.preview (the held configuration's commands). What it shows (pageParts) and the methods it
+ * sent to /api/gnss/live (live); with c.confirm, also what the held configuration's dialog shows once "Configure the
+ * receiver now" is pressed; with c.openAdvanced, what Receiver settings shows with Advanced opened (adv), and whether
+ * it is still open once the page rebuilt its forms; with c.badStationId, what a save with station ID 5000 does
+ * (invalid). */
 async function receiverPageView(c) {
   const settle = async () => {
     for (let i = 0; i < 60; i++) await new Promise(r => setImmediate(r));
   };
+  const first = sent.length;
   routes = (m, p) => {
     const path = p.split('?')[0];
     if (path === '/api/gnss') return [200, c.gnss];
@@ -473,10 +487,39 @@ async function receiverPageView(c) {
   const view = ui.receiverPage(el, c.arg);
   await settle();
   const r = pageParts(el);
+  r.live = sent.slice(first).filter(x => x.path === '/api/gnss/live').map(x => x.method);
   if (c.confirm) {
     [...visible(el)].find(e => e.tagName === 'BUTTON' && e.textContent === 'Configure the receiver now').fire('click');
     await settle();
     r.dialog = pageParts(ids.modal);
+  }
+  const fold = () => [...el.walk()].find(e => e.tagName === 'DETAILS');
+  if (c.openAdvanced) {
+    const adv = fold();
+    adv.open = true;
+    adv.fire('toggle');
+    r.adv = pageParts(el);
+    view.reload();
+    await settle();
+    const again = fold();
+    r.adv.rebuilt = again !== adv;
+    r.adv.stillOpen = !!again.open;
+  }
+  if (c.badStationId) {
+    const adv = fold();
+    const lab = [...el.walk()].find(e => e.tagName === 'SPAN' && e.className === 'lbl' && e.textContent === 'Station ID');
+    const input = lab.parent.kids.find(k => k.tagName === 'INPUT');
+    let focused = false;
+    input.focus = () => {
+      focused = true;
+    };
+    input.value = '5000';
+    input.fire('input', true);
+    const n = sent.length;
+    [...el.walk()].find(e => e.tagName === 'FORM' && [...e.walk()].includes(input)).fire('submit');
+    await settle();
+    r.invalid = { open: !!adv.open, focused: focused, puts: sent.slice(n).filter(x => x.method === 'PUT').length,
+      errors: [...visible(el)].filter(e => e.tagName === 'SMALL' && e.className === 'err').map(e => e.textContent) };
   }
   if (c.test2) {
     /* The comparison's next answer (c.test2) and a refresh: is its results box the same element (a focus on it stays), and
@@ -2354,7 +2397,7 @@ GNSS = {"state": "streaming", "receiver": RX, "responding": True, "restarting": 
         "autocfg": True, "recovery": "full", "first_apply_held": False,
         "profile": {"signal_group_master": 3, "signal_group_slave": 6, "base_mode": "fixed", "survey_in_s": 0,
                     "fixed": {"lat_deg": 45.1, "lon_deg": -75.1, "height_m": 85.1}, "station_id": 1234, "com1_baud": 115200,
-                    "rtcm": [{"msg": 1005, "period_s": 1}, {"msg": 1077, "period_s": 1}], "sat_view_output": False,
+                    "rtcm": [{"msg": 1005, "period_s": 1}, {"msg": 1077, "period_s": 1}], "sat_view_output": True,
                     "antenna_model": "", "antenna_serial": "", "antenna_setup_id": 0},
         "rx_settings": {"valid": True, "age_s": 3600, "read_unix": None, "b1cb2a": "on", "mmp": "off", "mask_deg": 10.0,
                         "antenna": {"model": "", "serial": "", "setup_id": 0}},
@@ -2404,11 +2447,16 @@ SGT_RUN2 = {**SGT_RUN, "left_s": 1100, "results": [sgt_result(3, 6, "done", "gal
     {**GAL["per_band"][0], "cnr_dbhz": 45.0}, *GAL["per_band"][1:]]}]), sgt_result(7, 0, "measuring", "beidou", [BDS])]}
 SGT_DONE = {**SGT_RUN, "state": "deciding", "phase": None, "left_s": None, "decide_left_s": 84000,
             "results": [sgt_result(3, 6, "done", "galileo", [GAL]), sgt_result(7, 0, "done", "beidou", [BDS])]}
-LIVE = {"window": {"open": True, "left_s": 540, "max_min": 60, "default_min": 10, "sky": "on", "sky_why": "none", "last_end": "none"},
+# GET /api/gnss/live while the profile sends the satellite positions: no window open, every satellite placed.
+LIVE = {"window": {"open": False, "left_s": 0, "max_min": 60, "default_min": 10, "sky": "on_profile", "sky_why": "none",
+                   "last_end": "none"},
         "totals": {"satellites": 2, "tracked": 2, "with_pos": 2, "dropped": 0, "cnr_dbhz": 43, "msm_age_ms": 400,
-                   "bands": {"l1": {"satellites": 2, "cnr_dbhz": 44}}, "systems": []},
+                   "sky_age_ms": 4000, "bands": {"l1": {"satellites": 2, "cnr_dbhz": 44}}, "systems": []},
         "satellites": [{"sys": "gps", "prn": 12, "cnr_dbhz": {"l1": 44}, "el_deg": 45, "az_deg": 210},
                        {"sys": "galileo", "prn": 5, "cnr_dbhz": {"l1": 41}, "el_deg": 30, "az_deg": 90}]}
+# The same before any position came this boot.
+LIVE_NOPOS = {**LIVE, "totals": {**LIVE["totals"], "with_pos": 0, "sky_age_ms": None},
+              "satellites": [{**x, "el_deg": None, "az_deg": None} for x in LIVE["satellites"]]}
 PREVIEW = {"steps": [{"text": "VERSIONA", "kind": "query", "when": "always", "saved": False},
                      {"text": "CONFIG SIGNALGROUP 3 6", "kind": "write", "when": "if_differs", "saved": True},
                      {"text": "SAVECONFIG", "kind": "write", "when": "always", "saved": True}], "saveconfig": True}
@@ -2419,39 +2467,48 @@ def rx_page(arg: str, status: dict, gnss: dict, sig: dict, **kw) -> dict:
 
 
 def test_receiver_pages_show_everything_without_fold_outs():
-    """The Receiver page, its live address and Receiver settings, built whole in the states the other tests build
+    """The Receiver page, its old sky address and Receiver settings, built whole in the states the other tests build
     (streaming with a locked position and four bands, no antenna, a maintenance resumed with nothing kept, the held
-    first configuration, no receiver, a comparison running and one waiting for a choice): no <details> anywhere, nor in the held
+    first configuration, no receiver, a comparison running and one waiting for a choice): no <details> anywhere but
+    Receiver settings' Advanced, the one fold the owner asked for (closed until opened), nor in the held
     configuration's dialog. What the folds held is in plain view where it matters: the position in its own card,
-    the messages in the Receiver card (once any arrived), every satellite while the sky is open, the profile's
-    correction messages and advanced settings, the comparison's form while idle (only why while a start would be
-    refused) and its results (each band's C/N0 inline) while it runs. With manual receiver setup no comparison card, nor
-    the link to it, unless one still runs."""
+    the messages in the Receiver card (once any arrived), the sky map and every satellite while the profile sends
+    their positions (no window to open, no button), the profile's correction messages and the Sky map box, the
+    comparison's form while idle (only why while a start would be refused) and its results (each band's C/N0 inline)
+    while it runs. With manual receiver setup no comparison card, nor the link to it, unless one still runs."""
     maint_st = st_status(receiver={"state": "idle", "rx_maintenance": True, "maintenance_left_s": 600})
     norx_st = st_status(receiver={"state": "no_receiver", "rtcm_age_ms": None},
                         alerts=[{"id": "no_receiver", "source": "station", "saw_bytes": False, "next_detect_in_s": 90}])
     held_g = {**GNSS, "first_apply_held": True, "autocfg": False, "profile_applied": False, "profile_acknowledged": False}
     run_st = st_status(receiver={"signal_test": {"state": "measuring", "phase": 1, "left_s": 1160}})
     done_st = st_status(receiver={"signal_test": {"state": "deciding", "decide_left_s": 84000}})
+    off_g = {**GNSS, "profile": {**GNSS["profile"], "sat_view_output": False}}
+    noant_off = {**NOANT_G, "profile": {**NOANT_G["profile"], "sat_view_output": False}}
+    manual_g = {**GNSS, "autocfg": False, "recovery": "alerts_only"}
     cases = {
-        "stream": rx_page("", st_status(), GNSS, SIG_MSGS),
+        "stream": rx_page("", st_status(), GNSS, SIG_MSGS, live=LIVE),
         "live": rx_page("live", st_status(), GNSS, SIG_MSGS, live=LIVE),
-        "noant": rx_page("", NOANT_ST, NOANT_G, NOANT_SIG),
+        "sky_off": rx_page("", st_status(), off_g, SIG_MSGS, live=LIVE),
+        "sky_waits": rx_page("", st_status(), GNSS, SIG_MSGS, live=LIVE_NOPOS),
+        "manual_waits": rx_page("", st_status(), manual_g, SIG_MSGS, live=LIVE_NOPOS),
+        "noant": rx_page("", NOANT_ST, noant_off, NOANT_SIG),
         "maint": rx_page("", maint_st, {**GNSS, **MAINT_G, "profile": NOANT_G["profile"], "survey": {"active": False}}, NOANT_SIG),
         "norx": rx_page("", norx_st, {**GNSS, "state": "no_receiver"}, NOANT_SIG),
-        "held": rx_page("", st_status(), held_g, SIG_MSGS, preview=PREVIEW, confirm=True),
-        "settings": rx_page("settings", st_status(), GNSS, SIG_MSGS),
+        "held": rx_page("", st_status(), held_g, SIG_MSGS, preview=PREVIEW, confirm=True, live=LIVE),
+        "settings": rx_page("settings", st_status(), GNSS, SIG_MSGS, openAdvanced=True),
+        "settings_bad": rx_page("settings", st_status(), GNSS, SIG_MSGS, badStationId=True),
         "settings_noant": rx_page("settings", NOANT_ST, NOANT_G, NOANT_SIG),
-        "noant_satview": rx_page("", NOANT_ST, {**NOANT_G, "profile": {**NOANT_G["profile"], "sat_view_output": True}}, NOANT_SIG),
+        "noant_satview": rx_page("", NOANT_ST, NOANT_G, NOANT_SIG),
         "no_restart": rx_page("settings", st_status(), {**GNSS, "recovery": "no_reboot"}, SIG_MSGS),
         "settings_unlocked": rx_page("settings", st_status(), {**GNSS, "position": {"locked": False, "source": "none"}}, SIG_MSGS),
-        "manual_running": rx_page("settings", run_st, {**GNSS, "autocfg": False, "recovery": "alerts_only"}, SIG_MSGS,
-                                  test=SGT_RUN),
+        "manual_running": rx_page("settings", run_st, manual_g, SIG_MSGS, test=SGT_RUN),
         "running": rx_page("settings", run_st, GNSS, SIG_MSGS, test=SGT_RUN, test2=SGT_RUN2),
         "deciding": rx_page("settings", done_st, GNSS, SIG_MSGS, test=SGT_DONE),
     }
     out = dict(zip(cases, run_editor(list(cases.values()))))
-    assert {k: v["details"] for k, v in out.items()} == {k: 0 for k in cases}
+    folded = {k for k, c in cases.items() if c["arg"] == "settings"}
+    assert {k: v["details"] for k, v in out.items()} == {k: int(k in folded) for k in cases}
+    assert all(out[k]["summaries"] == ["Advanced"] for k in folded)
     assert out["held"]["dialog"]["details"] == 0
 
     stream = out["stream"]
@@ -2465,22 +2522,40 @@ def test_receiver_pages_show_everything_without_fold_outs():
     # Logs' rows, not here.
     assert not {"Link", "Part number", "Chip ID", "Answers", "Identity confirmed", "Epochs"} & set(rows)
 
-    # The sky as it is: every satellite listed under the table, nothing to open first.
-    live = out["live"]
-    assert any(r.startswith("G12") for r in live["trs"]) and any(r.startswith("E05") for r in live["trs"])
-    assert not any("Show all" in b for b in live["buttons"])
+    # The profile sends the positions: the sky map and every satellite under the table, nothing to open or close, no
+    # note on pauses; the station is only read (the old address shows the same).
+    for k in ("stream", "live"):
+        sky = out[k]
+        assert sky["sky"] and any(r.startswith("G12") for r in sky["trs"]) and any(r.startswith("E05") for r in sky["trs"])
+        assert "2 of 2 satellites on the map." in sky["lines"]
+        assert not {"Show the sky", "Close", "Extend", "Extend by 10\u00a0min"} & set(sky["buttons"]), sky["buttons"]
+        assert not any("pause" in t for t in sky["lines"]) and sky["notes"] == []
+        assert not any("Sky map" in m[1] for m in sky["msgs"])
+        assert sky["live"] and set(sky["live"]) == {"GET"}, sky["live"]
+    # Before the first positions: the list, an empty sky and why; with manual setup, what sends them.
+    assert out["sky_waits"]["sky"] and "Waiting for the first satellite positions from the receiver." in out["sky_waits"]["lines"]
+    assert "No satellite positions yet. With manual setup, Apply again in Receiver settings sends them." in \
+        out["manual_waits"]["lines"]
+    # Off: one line with the way to turn it on, no sky, no list and no button; the station is never asked.
+    off = out["sky_off"]
+    assert ["info", "Turn on Sky map in Receiver settings to see the satellites on a map."] in off["msgs"]
+    assert not off["sky"] and not any(r.startswith("G12") for r in off["trs"]) and "Show the sky" not in off["buttons"]
+    assert off["live"] == [] and off["notes"] == []
+    # The held first configuration: why the sky waits, nothing read for it.
+    assert ["info", "To see the sky map, configure the receiver first."] in out["held"]["msgs"] and out["held"]["live"] == []
 
     # Nothing known about the position but its line: a row of the Receiver card, no card of its own.
     noant = out["noant"]
     assert noant["cards"] == ["Receiver", "Signals"]
     assert dict(noant["rows"])["Position"] == "Surveying, paused while no corrections arrive."
-    # No signals: one banner says so, and (manual setup) that the sky needs the profile's satellite positions output, with
-    # the way to Receiver settings; no big headline, and no button that cannot work.
-    assert ["info", "No signals yet" "To show the sky with manual setup, turn on Satellite positions output in Receiver "
-            "settings."] in noant["msgs"]
+    # No signals: one banner says so, and (Sky map off) where to turn the sky map on, with the way to Receiver settings;
+    # no big headline, and no button that cannot work.
+    assert ["info", "No signals yet" "Turn on Sky map in Receiver settings to see the satellites on a map."] in noant["msgs"]
     assert noant["notes"] == [] and "Show the sky" not in noant["buttons"]
-    assert out["noant_satview"]["notes"] == [] and out["stream"]["notes"] == []
-    assert "Show the sky" in out["noant_satview"]["buttons"]
+    # Sky map on with manual setup and no antenna: the banner alone, no empty sky, no button.
+    satview = out["noant_satview"]
+    assert ["info", "No signals yet"] in satview["msgs"] and not satview["sky"]
+    assert satview["notes"] == [] and "Show the sky" not in satview["buttons"]
     # No message ever arrived: the card's line says so, no table of "Never".
     assert "Messages" not in noant["subs"] and not any(r.startswith("1005") for r in noant["trs"])
 
@@ -2500,9 +2575,22 @@ def test_receiver_pages_show_everything_without_fold_outs():
 
     settings = out["settings"]
     assert settings["cards"] == ["Position", "Receiver profile", "Receiver setup", "Compare two signal groups"]
-    assert settings["subs"] == ["Signals", "Correction messages", "Antenna model", "Advanced"]
-    assert {"Station ID", "Receiver link speed (COM1)", "Group A", "Group B", "Time per group"} <= set(settings["fields"])
-    assert "Start comparison" in settings["buttons"] and "Apply again" in settings["buttons"]
+    # Advanced closed: its title only; the Sky map box in view, under the signal groups.
+    assert settings["subs"] == ["Signals", "Correction messages"]
+    assert {"Group A", "Group B", "Time per group"} <= set(settings["fields"])
+    assert not {"Station ID", "Receiver link speed (COM1)"} & set(settings["fields"]) and "Apply again" not in settings["buttons"]
+    assert "Sky map" in settings["checks"]
+    assert ("On (default): the receiver sends where each satellite is every 10\u00a0s, so the Receiver page shows them "
+            "on a sky map. Off: no sky map.") in settings["hints"]
+    # Opened: the station ID, the link speed, the antenna model and Apply again; still open once the forms rebuild.
+    adv = settings["adv"]
+    assert adv["subs"] == ["Signals", "Correction messages", "Antenna model"]
+    assert {"Station ID", "Receiver link speed (COM1)"} <= set(adv["fields"]) and "Apply again" in adv["buttons"]
+    assert adv["rebuilt"] and adv["stillOpen"]
+    # A station ID out of range in the closed fold: it opens, the field says why and has the focus; nothing is sent.
+    bad = out["settings_bad"]["invalid"]
+    assert bad == {"open": True, "focused": True, "puts": 0, "errors": ["A number from 0 to 4095."]}, bad
+    assert "Start comparison" in settings["buttons"]
     assert "Not sure? Compare two groups" in settings["buttons"]
     assert any(t.startswith("Tries two signal groups") for t in settings["lines"])
     # The messages listed without opening anything; the editor behind Edit.

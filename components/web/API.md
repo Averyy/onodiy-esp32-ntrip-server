@@ -1035,8 +1035,8 @@ At most 64 satellites, from the receiver's satellite-in-view output of the
 last 30 s. `prn` is the satellite's PRN (GLONASS: its slot number).
 `available: false` with `reason`: `sat_view_off` (the profile's
 `sat_view_output` is off) or `no_data` (it is on, but nothing arrived in
-the last 30 s). The UI draws its sky from the live view (`GET
-/api/gnss/live`), not from this endpoint.
+the last 30 s). The UI draws its sky map from `GET /api/gnss/live`, not from
+this endpoint.
 
 ### Receiver maintenance
 
@@ -1186,11 +1186,15 @@ interrupts RTCM is PROVISIONAL, to be confirmed on hardware.
 | `totals` | `gnss_obs_get_live` over every satellite, also those beyond the list: `satellites` listed, `tracked` in an MSM within the last 10 s, `signals` their signals, `with_pos` with azimuth and elevation, `dropped` beyond the list; `cnr_dbhz` mean over every satellite band (`null` = none); `bands` per band with tracked satellites (count, mean C/N0); `systems` per constellation with tracked satellites, their count per band (only bands with any). `null` when the observations cannot be read |
 | `satellites` | at most 96, by constellation and number. `prn` as in `/api/sky` (QZSS and SBAS by PRN, GLONASS by slot). `in_msm` and `msm_age_ms` (`null` = only the sky view knows it); `signal_ids` the MSM signal IDs; `cnr_dbhz` per band present: its best signal's C/N0 (`null` = no C/N0 in the MSM type). `el_deg`, `az_deg` (`null` until the satellite-in-view output reported it), `sky_cnr_dbhz` from that report, `pos_age_ms` its age |
 
-The UI opens it from the Receiver page's Signals card ("Show the sky"):
-the time left with Extend and Close, the sky plot (satellites with a
-position, coloured by C/N0, labelled) beside the card's band table, and
-every satellite under that table, one line each (best C/N0 and the C/N0
-per band). The station map sits in the Receiver page's Position card: the
+The Receiver page's Signals card reads it every 2 s while the profile's
+`sat_view_output` is on (and the first configuration is not held), with no
+window: the sky map (satellites with a position, coloured by C/N0,
+labelled) beside the card's band table, and every satellite under that
+table, one line each (best C/N0 and the C/N0 per band); both stay hidden
+while no satellite is tracked. With the output off it shows "Turn on Sky
+map in Receiver settings to see the satellites on a map." and reads
+nothing. The setup wizard's antenna check reads it the same way when
+`sky` is `on_profile`, and opens the window otherwise. The station map sits in the Receiver page's Position card: the
 position with a small OpenStreetMap tile mosaic, fetched only after the
 user asks for it, with the attribution and a plain link to open the
 position in an external map (offline: the coordinates only).

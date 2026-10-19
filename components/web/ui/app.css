@@ -732,6 +732,9 @@ details.fold > :not(summary) + * { margin-top: 0.75rem; }
 .card > details.more + details.more, details.fold > details.more + details.more { margin-top: 0.2rem; }
 details.more > summary { cursor: pointer; color: var(--accent); font-weight: 600; padding: 0.3rem 0; }
 details.more[open] > summary { margin-bottom: 0.6rem; }
+/* The receiver profile's Advanced: a group like the others (the line above it), folded to its title until opened. */
+details.pgroup { margin-top: 1.25rem; }
+details.pgroup > summary { font-size: 1rem; }
 
 .msgrows { display: grid; gap: 0.4rem; }
 .msgrow { display: grid; grid-template-columns: 5.5rem 5rem 1fr auto; gap: 0.4rem; align-items: center; }
@@ -870,8 +873,6 @@ tbody tr:last-child td { border-bottom: 0; }
  * for both; stacked otherwise, as in the setup wizard's narrow column. The
  * items may shrink below their content (a wide table scrolls in its box). */
 .sky-wrap { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
-/* The sky's notes and errors: no gap while none shows (its screen-reader line takes no room). */
-.card > .sky-extra:not(:has(> :not([hidden]):not(.sr-only))) { margin-top: 0; }
 .sky-wrap > * { flex: 1 1 26rem; min-width: 0; }
 .sky-wrap > :first-child { flex-basis: 17.5rem; max-width: 420px; margin: 0 auto; }
 /* Every satellite under the band table: from 560 px a box of its own height, its sort buttons in view while it scrolls;
@@ -897,7 +898,6 @@ svg.sky .lbl { fill: var(--muted); font-size: 11px; font-family: inherit; }
 
 /* ---- Live view ---------------------------------------------------------- */
 
-.live-left { font-weight: 700; font-variant-numeric: tabular-nums; }
 .sr-only {
   position: absolute;
   width: 1px;
