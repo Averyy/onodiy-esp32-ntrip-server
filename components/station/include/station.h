@@ -251,7 +251,10 @@
  * Everything else in the live view comes from the RTCM stream without any
  * receiver traffic.
  * Whether toggling the output interrupts RTCM is PROVISIONAL, to be
- * confirmed on hardware.
+ * confirmed on hardware. The profile's own output (sat_view_output, on by
+ * default: the sky map) needs no window: the positions reach
+ * gnss_obs_get_live whenever they arrive, and the window is only for a
+ * profile without it.
  *
  * Dependencies point down only: the station never calls health or
  * fw_update; it learns about an app trial from lifecycle.

@@ -687,15 +687,21 @@ static void load_profile(void)
     static bool s_upgrade_told;   /* once a boot: the profile is read at every identity and apply */
     uint8_t buf[UM98X_PROFILE_BLOB_MAX];
     size_t len = sizeof(buf);
-    bool upgraded = false;
+    unsigned upgraded = 0;
     if (settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_PROFILE, buf, &len) == ESP_OK &&
         um98x_profile_decode_ex(buf, len, &s_profile, &upgraded)) {
-        if (upgraded && !s_upgrade_told) {
-            /* Saved while that set was the default: read as today's default
+        if (upgraded != 0 && !s_upgrade_told) {
+            /* Saved while that was the default: read as today's default
              * (um98x_profile.h). Its hash is not the applied one, so the
-             * receiver is configured with it once, as after a profile save. */
+             * receiver is configured with it once, as after a profile save
+             * (with automatic setup). */
             s_upgrade_told = true;
-            ESP_LOGI(TAG, "profile: the old default message set reads as the current one (adds 1137)");
+            if ((upgraded & UM98X_PROFILE_UPGRADED_RTCM) != 0) {
+                ESP_LOGI(TAG, "profile: the old default message set reads as the current one (adds 1137)");
+            }
+            if ((upgraded & UM98X_PROFILE_UPGRADED_SKY) != 0) {
+                ESP_LOGI(TAG, "profile: satellite-in-view output reads as on, the current default (sky map)");
+            }
         }
     } else {
         /* Default: the station ID comes from the base MAC, stable per device. */

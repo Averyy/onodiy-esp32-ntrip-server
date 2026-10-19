@@ -52,7 +52,7 @@ static void plan_text(const um98x_base_profile_t *p, const um98x_plan_t *plan, c
     }
 }
 
-TEST_CASE("plan: nothing differs -> RTCM outputs and one save only", "[um98x_plan]")
+TEST_CASE("plan: nothing differs -> outputs and one save only", "[um98x_plan]")
 {
     um98x_base_profile_t p;
     um98x_readback_t rb;
@@ -62,13 +62,23 @@ TEST_CASE("plan: nothing differs -> RTCM outputs and one save only", "[um98x_pla
     matching_readback(&p, &rb);
     TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, 115200, false, &plan));
     plan_text(&p, &plan, text, sizeof(text));
+    /* The default sends the satellite positions for the sky map. */
+    TEST_ASSERT_EQUAL_STRING("RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
+                             "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|RTCM1230 COM1 1|GPGSV COM1 10|SAVECONFIG",
+                             text);
+    for (size_t i = 0; i < plan.count; i++) {
+        bool optional = (plan.step[i].kind == UM98X_STEP_RTCM && (plan.step[i].msg == 1230 || plan.step[i].msg == 1137)) ||
+                        plan.step[i].kind == UM98X_STEP_SAT_VIEW;
+        TEST_ASSERT_EQUAL(!optional, plan.step[i].fatal);
+    }
+
+    /* Without them: no GPGSV (the session's UNLOG COM1 has turned it off). */
+    p.sat_view_output = false;
+    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, 115200, false, &plan));
+    plan_text(&p, &plan, text, sizeof(text));
     TEST_ASSERT_EQUAL_STRING("RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
                              "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|RTCM1230 COM1 1|SAVECONFIG",
                              text);
-    for (size_t i = 0; i < plan.count; i++) {
-        bool optional = plan.step[i].kind == UM98X_STEP_RTCM && (plan.step[i].msg == 1230 || plan.step[i].msg == 1137);
-        TEST_ASSERT_EQUAL(!optional, plan.step[i].fatal);
-    }
 }
 
 TEST_CASE("plan: optional messages are 1230 and the NavIC MSMs, nothing else", "[um98x_plan]")
@@ -448,7 +458,7 @@ TEST_CASE("plan: the antenna descriptor only with a model that the receiver does
     TEST_ASSERT_EQUAL_STRING("MODE BASE 1234 TIME 600 0|"
                              "CONFIG BASEANTENNAMODEL \"TRM59800.00     SCIS\" \"5000112233\" 3 USER|"
                              "RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
-                             "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|RTCM1230 COM1 1|SAVECONFIG",
+                             "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|RTCM1230 COM1 1|GPGSV COM1 10|SAVECONFIG",
                              text);
     TEST_ASSERT_FALSE(plan.step[step_index(&plan, UM98X_STEP_ANTENNA)].fatal);
 
@@ -511,7 +521,7 @@ TEST_CASE("plan: B1C/B2a in RTCM is turned on only when it reads back off", "[um
     plan_text(&p, &plan, text, sizeof(text));
     TEST_ASSERT_EQUAL_STRING("CONFIG RTCMB1CB2A ENABLE|RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|"
                              "RTCM1087 COM1 1|RTCM1097 COM1 1|RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|"
-                             "RTCM1230 COM1 1|SAVECONFIG",
+                             "RTCM1230 COM1 1|GPGSV COM1 10|SAVECONFIG",
                              text);
     TEST_ASSERT_FALSE(plan.step[0].fatal);
 
@@ -591,10 +601,10 @@ TEST_CASE("plan preview: the default profile's exact list", "[um98x_plan]")
                              "wo- CONFIG RTCMB1CB2A ENABLE|"
                              "wa- RTCM1005 COM1 1|wa- RTCM1033 COM1 1|wa- RTCM1077 COM1 1|wa- RTCM1087 COM1 1|"
                              "wa- RTCM1097 COM1 1|wa- RTCM1117 COM1 1|wa- RTCM1127 COM1 1|wa- RTCM1137 COM1 1|"
-                             "wa- RTCM1230 COM1 1|"
+                             "wa- RTCM1230 COM1 1|wa- GPGSV COM1 10|"
                              "was SAVECONFIG",
                              text);
-    TEST_ASSERT_EQUAL_size_t(18, n);
+    TEST_ASSERT_EQUAL_size_t(19, n);
 
     /* Not for an invalid profile; a short buffer never holds a cut list's SAVECONFIG out of place. */
     p.survey_in_s = 0;

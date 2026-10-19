@@ -3000,10 +3000,14 @@ TEST_CASE("station core: the live view never configures behind the user's back",
     TEST_ASSERT_EQUAL_UINT8(STN_SKY_BLOCKED, live_status(&w).sky);
     TEST_ASSERT_EQUAL_UINT8(STN_SKY_WHY_AUTOCFG_OFF, live_status(&w).why);
 
-    /* The profile sends it permanently: never toggled. */
+    /* The profile sends it permanently: on without a window (the sky map
+     * reads it as it comes), never toggled, also with a window open. */
     sim_init(&w, false);
     boot_applied(&w);
     w.in.profile_sky = true;
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 30).kind);
+    TEST_ASSERT_FALSE(live_status(&w).open);
+    TEST_ASSERT_EQUAL_UINT8(STN_SKY_ON_PROFILE, live_status(&w).sky);
     TEST_ASSERT_EQUAL(STN_OK, stn_live_start(&w.s, LIVE_MS, w.in.now_ms, NULL));
     TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 30).kind);
     TEST_ASSERT_EQUAL_UINT8(STN_SKY_ON_PROFILE, live_status(&w).sky);

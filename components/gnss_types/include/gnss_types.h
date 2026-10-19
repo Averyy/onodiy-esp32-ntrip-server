@@ -76,7 +76,7 @@ typedef struct {
     uint32_t com1_baud;              /**< receiver COM1 baud rate the profile sets (one the receiver supports) */
     uint8_t rtcm_count;
     um98x_rtcm_out_t rtcm[UM98X_MAX_RTCM_MSGS];
-    bool sat_view_output;            /**< also emit satellite-in-view sentences permanently (saved in the receiver) */
+    bool sat_view_output;            /**< also emit satellite-in-view sentences permanently (saved in the receiver): the sky map */
     char antenna_model[UM98X_ANTENNA_STR_MAX + 1];   /**< IGS antenna name with radome; "" = leave the receiver's value */
     char antenna_serial[UM98X_ANTENNA_STR_MAX + 1];  /**< antenna serial number, may be empty */
     uint8_t antenna_setup_id;        /**< antenna setup ID 0..255 */

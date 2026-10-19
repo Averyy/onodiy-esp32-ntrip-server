@@ -12,11 +12,13 @@
 #define PROFILE_BLOB_VERSION  1
 #define POSITION_BLOB_VERSION 1
 
-/* The default message set a profile blob was written under: a byte appended
- * after the antenna fields (an older reader stops ahead of it). A blob
- * without it was written under set 1. */
-#define PROFILE_RTCM_SET_OLD 1u   /* 1005 1033 1077 1087 1097 1117 1127 1230, all every 1 s */
-#define PROFILE_RTCM_SET     2u   /* set 1 with 1137 (Onocoy's list), written by encode */
+/* The defaults a profile blob was written under: a byte appended after the
+ * antenna fields (an older reader stops ahead of it). A blob without it was
+ * written under the first. Decode reads what each later default changed into
+ * a blob written before it (um98x_profile.h). */
+#define PROFILE_DEFAULTS_1 1u   /* 1005 1033 1077 1087 1097 1117 1127 1230, all every 1 s; no satellite-in-view output */
+#define PROFILE_DEFAULTS_2 2u   /* the first with 1137 (Onocoy's list); still no satellite-in-view output */
+#define PROFILE_DEFAULTS   3u   /* the second with satellite-in-view output on (the sky map), written by encode */
 
 /* Format of um98x_profile_hash(), frozen separately from the blob layout
  * once released: changing it makes every station's gnss/applied_hash
@@ -159,7 +161,7 @@ static const um98x_rtcm_out_t k_onocoy_set[] = {
 _Static_assert(sizeof(k_onocoy_set) / sizeof(k_onocoy_set[0]) <= UM98X_MAX_RTCM_MSGS,
                "default RTCM set exceeds UM98X_MAX_RTCM_MSGS");
 
-/* The default set before 1137 was added (PROFILE_RTCM_SET_OLD). */
+/* The default set before 1137 was added (PROFILE_DEFAULTS_1). */
 static const uint16_t k_old_set[] = { 1005, 1033, 1077, 1087, 1097, 1117, 1127, 1230 };
 
 /* The list is the old default set: the same messages (in any order, as the
@@ -196,7 +198,7 @@ void um98x_profile_default(um98x_base_profile_t *out, uint16_t station_id)
     out->com1_baud = UM98X_DEFAULT_COM1_BAUD;
     out->rtcm_count = (uint8_t)(sizeof(k_onocoy_set) / sizeof(k_onocoy_set[0]));
     memcpy(out->rtcm, k_onocoy_set, sizeof(k_onocoy_set));
-    out->sat_view_output = false;   /* default not decided yet: send nothing extra */
+    out->sat_view_output = true;    /* the sky map: satellite positions every 10 s */
     /* antenna: empty, so the receiver keeps its own descriptor */
 }
 
@@ -280,8 +282,8 @@ size_t um98x_profile_encode(const um98x_base_profile_t *profile, uint8_t *buf, s
     blob_put_str(&w, p->antenna_model);
     blob_put_str(&w, p->antenna_serial);
     blob_put_u8(&w, p->antenna_setup_id);
-    /* Appended after them: whatever list this holds is the one wanted. */
-    blob_put_u8(&w, PROFILE_RTCM_SET);
+    /* Appended after them: whatever this holds is the one wanted. */
+    blob_put_u8(&w, PROFILE_DEFAULTS);
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
@@ -290,10 +292,10 @@ bool um98x_profile_decode(const uint8_t *buf, size_t len, um98x_base_profile_t *
     return um98x_profile_decode_ex(buf, len, out, NULL);
 }
 
-bool um98x_profile_decode_ex(const uint8_t *buf, size_t len, um98x_base_profile_t *out, bool *rtcm_upgraded)
+bool um98x_profile_decode_ex(const uint8_t *buf, size_t len, um98x_base_profile_t *out, unsigned *upgraded)
 {
-    if (rtcm_upgraded != NULL) {
-        *rtcm_upgraded = false;
+    if (upgraded != NULL) {
+        *upgraded = 0;
     }
     blob_reader_t r;
     blob_reader_init(&r, buf, len);
@@ -325,24 +327,30 @@ bool um98x_profile_decode_ex(const uint8_t *buf, size_t len, um98x_base_profile_
         blob_get_str(&r, p.antenna_serial, sizeof(p.antenna_serial));
         p.antenna_setup_id = blob_get_u8(&r);
     }
-    uint8_t set = PROFILE_RTCM_SET_OLD;
+    uint8_t defaults = PROFILE_DEFAULTS_1;
     if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
-        set = blob_get_u8(&r);
+        defaults = blob_get_u8(&r);
     }
     if (!blob_reader_ok(&r) || !um98x_profile_valid(&p)) {
         return false;
     }
-    bool upgraded = false;
-    if (set == PROFILE_RTCM_SET_OLD && is_old_default_set(&p)) {
+    unsigned up = 0;
+    if (defaults == PROFILE_DEFAULTS_1 && is_old_default_set(&p)) {
         /* Written while the old set was the default, and still that set:
          * the default it stood for is Onocoy's list now. */
         p.rtcm_count = (uint8_t)(sizeof(k_onocoy_set) / sizeof(k_onocoy_set[0]));
         memcpy(p.rtcm, k_onocoy_set, sizeof(k_onocoy_set));
-        upgraded = true;
+        up |= UM98X_PROFILE_UPGRADED_RTCM;
+    }
+    if ((defaults == PROFILE_DEFAULTS_1 || defaults == PROFILE_DEFAULTS_2) && !p.sat_view_output) {
+        /* Off was the default then, a choice nobody made: the default it
+         * stood for is on now (the sky map). */
+        p.sat_view_output = true;
+        up |= UM98X_PROFILE_UPGRADED_SKY;
     }
     canonical(&p, out);
-    if (rtcm_upgraded != NULL) {
-        *rtcm_upgraded = upgraded;
+    if (upgraded != NULL) {
+        *upgraded = up;
     }
     return true;
 }

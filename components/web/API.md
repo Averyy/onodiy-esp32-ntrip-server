@@ -761,7 +761,7 @@ oldest.
     "base_mode": "survey_in", "survey_in_s": 600, "fixed": null,
     "station_id": 1234, "com1_baud": 115200,
     "rtcm": [{"msg": 1005, "period_s": 1}, {"msg": 1033, "period_s": 1}, {"msg": 1077, "period_s": 1}],
-    "sat_view_output": false,
+    "sat_view_output": true,
     "antenna_model": "", "antenna_serial": "", "antenna_setup_id": 0
   },
   "rx_settings": {"valid": true, "age_s": 3600, "read_unix": 1760000000,
@@ -832,7 +832,7 @@ reads it every tick, a step already running completes).
 {"profile": {"signal_group_master": 3, "signal_group_slave": 6, "base_mode": "fixed", "survey_in_s": 600,
              "fixed": {"lat_deg": 45.123456789, "lon_deg": -75.123456789, "height_m": 85.1234},
              "station_id": 1234, "com1_baud": 115200,
-             "rtcm": [{"msg": 1005, "period_s": 1}], "sat_view_output": false,
+             "rtcm": [{"msg": 1005, "period_s": 1}], "sat_view_output": true,
              "antenna_model": "TRM59800.00     SCIS", "antenna_serial": "5000123", "antenna_setup_id": 0},
  "autocfg": true, "recovery": "full"}
 ```
@@ -882,13 +882,21 @@ name) clears a model the receiver already holds.
 The default profile (`um98x_profile_default()`, used while none is stored)
 carries the list Onocoy's connection guide asks for: 1005, 1033, MSM7 1077,
 1087, 1097, 1117, 1127, 1137 and 1230, each every second (the UI's "Onocoy
-set"). A stored profile whose list is exactly the earlier default (the same
-without 1137, each once and every second, in any order) and that was saved
-before 1137 joined it reads as today's list wherever it is read (`GET
-/api/gnss`, the apply, a signal-group switch), with nothing written: its
-hash then differs from the applied one, so with `autocfg` on the receiver is
-configured with it once, as after a save. A list saved since, the earlier
-set included, stays as saved. An apply tolerates the receiver refusing 1230
+set"), and `sat_view_output` on: `GPGSV COM1 10`, the satellites' elevation
+and azimuth every 10 s, saved in the receiver, for the UI's sky map (its
+"Sky map" box in Receiver settings; non-fatal, so a receiver that refuses it
+still gets the rest). A stored profile whose list is exactly the earlier
+default (the same without 1137, each once and every second, in any order)
+and that was saved before 1137 joined it reads as today's list wherever it
+is read (`GET /api/gnss`, the apply, a signal-group switch), with nothing
+written; likewise a profile saved before `sat_view_output` was on by default
+with it off (its default then, a choice nobody made) reads with it on. The
+blob carries the defaults it was written under (`um98x_profile.h`), so a
+list or an off saved since, the earlier set included, stays as saved, and an
+image rolled back to still reads what was stored. The hash then differs
+from the applied one, so with `autocfg` on the receiver is configured with
+it once, as after a save; with `autocfg` off nothing reaches the receiver
+until the user applies. An apply tolerates the receiver refusing 1230
 or a NavIC MSM (1131-1137, refused by a firmware without NavIC): the rest is
 applied and saved as usual, and the station logs the refusal
 (`rtcm1230_supported` keeps 1230's answer); any other refused message fails
@@ -1112,7 +1120,18 @@ receiver as at boot. `202 {"accepted": true}`. Errors:
 
 ### Live view
 
-A window the user opens on request (satellites first). It runs for
+The satellites as the receiver tracks them (`GET /api/gnss/live`): what the
+RTCM stream says about each, and where it is in the sky while the
+receiver's satellite-in-view output arrives. The profile's
+`sat_view_output` (on by default) sends that output all the time: then no
+window is needed, the read below has the positions whenever they come
+(`window.sky` `on_profile`, open or not) and the station sends the receiver
+nothing for it. The UI's sky map (the Receiver page's Signals card) only
+reads it. For a profile without the output the station offers a window
+instead, which the setup wizard's antenna check opens (the Receiver page
+says where to turn Sky map on).
+
+The window: one the user opens on request (satellites first). It runs for
 `default_min` minutes (10, `CONFIG_STATION_LIVE_VIEW_MIN`), can be extended
 up to `max_min` (60) from now, and closes by itself when its time is up, at
 the user's stop, when a receiver update begins, or when no admin client

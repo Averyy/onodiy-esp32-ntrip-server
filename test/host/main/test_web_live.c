@@ -409,6 +409,44 @@ TEST_CASE("live view: a closed window with its end reason, no data without total
     cJSON_Delete(root);
 }
 
+TEST_CASE("live view: the profile's satellite positions with no window open", "[web_live]")
+{
+    /* The sky map reads them as they come: no window, nothing toggled. */
+    memset(&s_st, 0, sizeof(s_st));
+    s_st.state = STATION_STATE_STREAMING;
+    s_st.live.sky = STATION_LIVE_SKY_ON_PROFILE;
+    static gnss_obs_live_sat_t sat;
+    memset(&sat, 0, sizeof(sat));
+    sat.sys = GNSS_SYS_BEIDOU;
+    sat.prn = 23;
+    sat.in_msm = true;
+    sat.msm_age_ms = 400;
+    sat.band_mask = 1u << GNSS_BAND_L1;
+    sat.cnr_dbhz[GNSS_BAND_L1] = 45;
+    sat.has_pos = true;
+    sat.elevation_deg = 61;
+    sat.azimuth_deg = 12;
+    sat.pos_age_ms = 4000;
+    static gnss_obs_live_t t;
+    memset(&t, 0, sizeof(t));
+    t.satellites = 1;
+    t.tracked = 1;
+    t.with_pos = 1;
+    t.sky_age_ms = 4000;
+    web_live_snap_t l = { .st = &s_st, .limits = { 10, 60, 120 }, .sats = &sat, .count = 1, .totals = &t };
+    cJSON *root = build_live(&l);
+    const cJSON *win = at(root, "window");
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(win, "open")));
+    TEST_ASSERT_EQUAL_STRING("on_profile", at(win, "sky")->valuestring);
+    TEST_ASSERT_EQUAL(1, at(at(root, "totals"), "with_pos")->valueint);
+    const cJSON *s0 = cJSON_GetArrayItem(at(root, "satellites"), 0);
+    TEST_ASSERT_EQUAL_STRING("beidou", at(s0, "sys")->valuestring);
+    TEST_ASSERT_EQUAL(61, at(s0, "el_deg")->valueint);
+    TEST_ASSERT_EQUAL(12, at(s0, "az_deg")->valueint);
+    TEST_ASSERT_EQUAL(4000, at(s0, "pos_age_ms")->valueint);
+    cJSON_Delete(root);
+}
+
 TEST_CASE("live view, recovery and read-back enum names", "[web_live]")
 {
     TEST_ASSERT_EQUAL_STRING("off", web_live_sky_name(STATION_LIVE_SKY_OFF));
