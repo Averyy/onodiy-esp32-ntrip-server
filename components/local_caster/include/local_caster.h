@@ -21,12 +21,29 @@
  * judged as its IPv4 address), that is not the station's IPv4 gateway (a
  * router that masquerades a port forward shows up as itself; the QEMU build
  * skips this rule because its host connections all come from its gateway),
- * and that does not come in over the setup hotspot. 100.64/10 (carrier-grade
- * NAT) does not count as a home network. A request from a web browser (an
- * Origin or Sec-Fetch-* header) gets 403. Wrong logins are throttled per
- * address and in total, as the web Login is (5 free, then 2^(n-4) s up to
- * 300 s; 30 in a burst, then one per 120 s); a throttled request gets 429
- * and its login is not checked.
+ * and that does not come in over the setup hotspot: its local address is not
+ * the hotspot's, and while the hotspot is up its IPv4 address is not in the
+ * hotspot's subnet (the station takes IPv4 packets for any of its addresses
+ * on either interface, so a hotspot client could reach the home-network
+ * address; over IPv6 the station has link-local addresses only, which it
+ * takes only on their own interface). 100.64/10 (carrier-grade NAT) does
+ * not count as a home network.
+ *
+ * Connections: a connection that sends nothing within 2 s is closed, and
+ * when all LOCAL_CASTER_MAX_CONNS are taken a new one takes the place of
+ * one that cannot be a rover's (one lingering after its answer, one that
+ * has sent nothing, the same client's earlier request, a request of a client
+ * holding another connection), so idle connections cannot keep a rover out.
+ *
+ * Requests: one from a web browser (an Origin or Sec-Fetch-* header) gets
+ * 403. That is defence in depth only: a browser sends neither header on
+ * every request (no Origin on a plain cross-site GET, no Sec-Fetch-* to a
+ * plain-HTTP address), and the login is what protects the stream. Wrong
+ * logins are throttled per address and in total, as the web Login is (5
+ * free, then 2^(n-4) s up to 300 s; 30 in a burst, then one per 120 s); a
+ * throttled request gets 429 and its login is not checked. The addresses of
+ * the last 2 successful logins (since boot) are exempt from the total, so
+ * failures elsewhere never lock the owner's rover out.
  *
  * Data: one rtcm_hub consumer per streaming rover, attached after its login
  * and detached when its session ends, with lag limit
@@ -56,8 +73,9 @@
  * DIAG_EV_ROVER_DOWN (diag.h), at most 6 sessions an hour.
  *
  * Never logged: the Authorization header, the username or password a rover
- * sent, raw request lines, or anything a rover sends after its request
- * (such as its position in GGA sentences).
+ * sent, raw request lines, its User-Agent (the status has it), or anything a
+ * rover sends after its request (such as its position in GGA sentences).
+ * Refusal lines, and a rover's connect and end lines, are rate-limited.
  */
 #pragma once
 
@@ -81,6 +99,7 @@ extern "C" {
 #define LOCAL_CASTER_AGENT_LEN          48u    /**< a rover's User-Agent, printable ASCII, cut to 47 */
 #define LOCAL_CASTER_REQUEST_MAX        1024u  /**< longest request (line and headers) */
 #define LOCAL_CASTER_REQUEST_TIMEOUT_MS 5000u  /**< the whole request must arrive within this, counted from the accept */
+#define LOCAL_CASTER_FIRST_BYTE_MS      2000u  /**< a connection that sends nothing for this long is closed (no reply) */
 #define LOCAL_CASTER_SEND_STALL_MS      10000u /**< a rover that takes no byte of pending data for this long is closed */
 #define LOCAL_CASTER_DEFAULT_USER       "rover"
 
@@ -133,12 +152,15 @@ typedef struct {
     local_caster_client_t clients[LOCAL_CASTER_MAX_CLIENTS];
     uint32_t sessions;                /**< sessions started */
     uint64_t bytes_sent;              /**< RTCM bytes sent, every session */
-    uint32_t refused_not_local;       /**< closed at once: not a local address, the gateway, or over the setup hotspot */
+    uint32_t refused_not_local;       /**< closed at once: not a local address, the gateway, over the setup hotspot or
+                                           from its subnet */
     uint32_t refused_login;           /**< 401: wrong or missing username or password */
     uint32_t refused_throttled;       /**< 429: too many wrong logins (from that address, or in total) */
     uint32_t refused_full;            /**< 503 (LOCAL_CASTER_MAX_CLIENTS rovers streaming, or no free hub consumer),
-                                           or closed at once with LOCAL_CASTER_MAX_CONNS connections open */
-    uint32_t refused_bad_request;     /**< 400 or 403: not an NTRIP GET, too long, not complete in time, from a web browser */
+                                           or closed at once: every connection a rover or an answer being written */
+    uint32_t refused_bad_request;     /**< 400 or 403: not an NTRIP GET, too long, not complete in time, from a web
+                                           browser; or closed without a reply: nothing sent within
+                                           LOCAL_CASTER_FIRST_BYTE_MS */
     uint32_t stalled;                 /**< sessions closed because the rover took no data for LOCAL_CASTER_SEND_STALL_MS */
     int listen_errno;                 /**< LOCAL_CASTER_ERROR: errno of the failed socket, bind or listen
                                            (ENOMEM: no task or no memory); 0 otherwise */

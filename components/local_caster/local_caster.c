@@ -16,7 +16,10 @@
  *     LOCAL_CASTER_MAX_CONNS connections, all non-blocking, one select() per
  *     pass (20 ms while a rover streams, else 100 ms). A connection that does
  *     not pass lcast_addr_verdict() is closed right after accept(), before a
- *     byte is read, without a reply.
+ *     byte is read, without a reply. One that sends nothing within
+ *     LCAST_FIRST_BYTE_MS is closed; with every slot taken, a new connection
+ *     takes the slot of one that cannot be a rover's (lcast_slot_pick), so
+ *     idle connections from the LAN cannot keep a rover out.
  *   - A streaming rover owns one hub consumer, read with timeout 0 (no hub
  *     waiter, so one task may own several), and the next read happens only
  *     once the previous one is written. A rover that takes no byte for
@@ -26,12 +29,14 @@
  *     terminator when nothing is pending, then FIN) within 300 ms.
  *
  * Never logged: the Authorization header, the credentials a rover sent, the
- * request line, or anything a rover sends after its request.
+ * request line, its User-Agent, or anything a rover sends after its request.
+ * Refusal lines and a rover's connect and end lines are rate-limited.
  */
 #include "local_caster.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
@@ -79,12 +84,13 @@ _Static_assert(LOCAL_CASTER_MAX_CONNS <= 16u, "the connection index goes into 4 
 #define LISTEN_RETRY_MS     10000u
 #define LOG_EVERY_MS        60000u    /* refusal lines: at most one a minute, with the count held back */
 #define SHUTDOWN_MAX_MS     300u
-#define LISTEN_BACKLOG      2
+#define LISTEN_BACKLOG      4
 #define RX_DISCARD          1024u     /* bytes read from a rover per pass (dropped) */
 #define DRAIN_MAX           8u        /* reads of RX_DISCARD before a planned close, so it ends with a FIN */
 #define JQ_RETRY_MS         100u
 #define STATS_MS            1000u
 #define NETIF_LOOKUP_MS     1000u
+#define MOUNT_RETRY_MS      60000u    /* the stored host name, after a read that failed */
 #define KEEPALIVE_IDLE_S    10
 #define KEEPALIVE_INTVL_S   5
 #define KEEPALIVE_COUNT     3
@@ -101,6 +107,8 @@ typedef struct {
     int fd;
     conn_state_t state;
     uint32_t since_ms;          /* accept (REQ), reply start (REPLY), linger start (LINGER) */
+    bool got_bytes;             /* REQ: a byte of the request arrived */
+    uint64_t key;               /* lcast_client_key() of the peer */
     lcast_addr_t peer;          /* unmapped */
     char addr[LOCAL_CASTER_ADDR_LEN];
     char agent[LOCAL_CASTER_AGENT_LEN];
@@ -123,16 +131,20 @@ typedef struct {
     uint64_t epochs_dropped;
 } conn_t;
 
-typedef enum { LOGK_REFUSED = 0, LOGK_LOGIN, LOGK_BAD, LOGK_COUNT } logk_t;
+typedef enum { LOGK_REFUSED = 0, LOGK_LOGIN, LOGK_BAD, LOGK_UP, LOGK_DOWN, LOGK_COUNT } logk_t;
 
-/* A refusal log line at most once a minute: the first event at once, the
- * next ones held back and named (the first of them, and how many more) when
- * the minute is over. */
+#define LOG_LINE_MAX 112u
+
+/* Log lines of one kind: at most a few a minute (refusals one, a rover's
+ * connects and ends four each), the next ones held back and named (the first
+ * of them, and how many more) when the minute is over. A rover client stuck
+ * in a reconnect loop cannot flood the log ring. */
 typedef struct {
-    bool logged;
+    bool open;                  /* a minute is running, from at_ms */
     uint32_t at_ms;
-    uint32_t held;
-    char first[LOCAL_CASTER_ADDR_LEN];
+    uint32_t used;              /* lines written in it */
+    uint32_t held;              /* lines held back in it */
+    char first[LOG_LINE_MAX];   /* the first held back */
 } rate_log_t;
 
 typedef struct {
@@ -160,6 +172,7 @@ typedef struct {
     uint32_t sta_ip;
     uint32_t sta_gw;
     uint32_t ap_ip;
+    uint32_t ap_mask;           /* the AP's netmask while it is up, else 0 */
     bool ap_ll_ok;
     uint8_t ap_ll[16];
     /* counters since boot */
@@ -195,7 +208,9 @@ static uint32_t s_cfg_gen;              /* written under s_cfg_mutex, read atomi
  * only after the hostname setting changed (SETTINGS_EVENT_CHANGED), so the
  * status a page polls every second never reads NVS. */
 static char s_default_mount[LOCAL_CASTER_MOUNT_LEN];   /* under s_cfg_mutex */
-static bool s_mount_stale;              /* atomic: sys/hostname changed since it was read */
+static bool s_mount_stale;              /* atomic: sys/hostname changed since it was read, or the read failed */
+static bool s_mount_failed;             /* atomic: the last read failed (NVS not readable): */
+static uint32_t s_mount_failed_ms;      /* atomic: then, so the next waits MOUNT_RETRY_MS */
 
 static SemaphoreHandle_t s_wake;        /* config change or shutdown: the task looks now */
 static SemaphoreHandle_t s_closed;      /* the task closed everything for the restart */
@@ -280,15 +295,18 @@ static void set_sock_opts(int fd)
 /* The station's host name (settings sys/hostname, else the build's). A
  * stored name the mountpoint rule refuses is passed over, as the network
  * component passes over an invalid one. Not from the caster task (NVS). */
-static void host_name(char *out, size_t size)
+static bool host_name(char *out, size_t size)
 {
     char name[LOCAL_CASTER_MOUNT_LEN] = "";
-    if (settings_get_str(SETTINGS_NS_SYS, SETTINGS_KEY_HOSTNAME, name, sizeof(name)) == ESP_OK &&
-        lcast_name_ok(name, sizeof(name))) {
+    esp_err_t err = settings_get_str(SETTINGS_NS_SYS, SETTINGS_KEY_HOSTNAME, name, sizeof(name));
+    if (err == ESP_OK && lcast_name_ok(name, sizeof(name))) {
         strlcpy(out, name, size);
-    } else {
-        strlcpy(out, CONFIG_LWIP_LOCAL_HOSTNAME, size);
+        return true;
     }
+    strlcpy(out, CONFIG_LWIP_LOCAL_HOSTNAME, size);
+    /* None stored, or one that cannot be a mountpoint: the build's for good. Else (NVS not
+     * readable now) the build's for the moment, and false: read it again later. */
+    return err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_LENGTH;
 }
 
 static void defaults(local_caster_cfg_t *c)
@@ -306,52 +324,79 @@ static void on_settings_changed(void *arg, esp_event_base_t base, int32_t id, vo
     const settings_changed_t *ev = data;
     if (id == SETTINGS_EVENT_CHANGED && ev != NULL && strcmp(ev->ns, SETTINGS_NS_SYS) == 0 &&
         (ev->key[0] == '\0' || strcmp(ev->key, SETTINGS_KEY_HOSTNAME) == 0)) {
+        __atomic_store_n(&s_mount_failed, false, __ATOMIC_RELEASE);   /* a change is read at once */
         __atomic_store_n(&s_mount_stale, true, __ATOMIC_RELEASE);
     }
 }
 
-/* ---- refusal log lines ----------------------------------------------------------------------- */
+/* ---- log lines -------------------------------------------------------------------------------- */
 
-static void log_line(logk_t k, const char *addr, uint32_t more)
+static bool log_is_session(logk_t k)
 {
-    switch (k) {
-    case LOGK_REFUSED:
-        ESP_LOGW(TAG, "refused %s: not on the local network (%u more held back)", addr, (unsigned)more);
-        break;
-    case LOGK_LOGIN:
-        ESP_LOGW(TAG, "wrong login from %s (%u more held back)", addr, (unsigned)more);
-        break;
-    case LOGK_BAD:
-    default:
-        ESP_LOGW(TAG, "bad request from %s (%u more held back)", addr, (unsigned)more);
-        break;
+    return k == LOGK_UP || k == LOGK_DOWN;
+}
+
+/* A refusal line always says how many were held back; a rover's line only when some were. */
+static void log_line(logk_t k, const char *text, uint32_t more)
+{
+    if (log_is_session(k)) {
+        if (more == 0) {
+            ESP_LOGI(TAG, "%s", text);
+        } else {
+            ESP_LOGI(TAG, "%s (%u more held back)", text, (unsigned)more);
+        }
+    } else {
+        ESP_LOGW(TAG, "%s (%u more held back)", text, (unsigned)more);
     }
 }
 
-/* The minute is over: name what was held back. */
+/* The minute is over: name what was held back (that line opens the next minute). */
 static void log_flush(ctx_t *x, logk_t k, uint32_t now)
 {
     rate_log_t *l = &x->logs[k];
-    if (l->held > 0 && (uint32_t)(now - l->at_ms) >= LOG_EVERY_MS) {
+    if (!l->open || (uint32_t)(now - l->at_ms) < LOG_EVERY_MS) {
+        return;
+    }
+    l->open = false;
+    if (l->held > 0) {
         log_line(k, l->first, l->held - 1u);
-        l->held = 0;
+        l->open = true;
         l->at_ms = now;
+        l->used = 1;
+        l->held = 0;
     }
 }
 
-static void log_event(ctx_t *x, logk_t k, const char *addr, uint32_t now)
+static void log_event(ctx_t *x, logk_t k, const char *text, uint32_t now)
 {
     rate_log_t *l = &x->logs[k];
     log_flush(x, k, now);
-    if (!l->logged || (uint32_t)(now - l->at_ms) >= LOG_EVERY_MS) {
-        log_line(k, addr, 0);
-        l->logged = true;
+    if (!l->open) {
+        l->open = true;
         l->at_ms = now;
+        l->used = 0;
+        l->held = 0;
+    }
+    if (l->used < (log_is_session(k) ? 4u : 1u)) {
+        l->used++;
+        log_line(k, text, 0);
         return;
     }
     if (l->held++ == 0) {
-        strlcpy(l->first, addr, sizeof(l->first));
+        strlcpy(l->first, text, sizeof(l->first));
     }
+}
+
+/* log_event() with a printf-style line. */
+static void log_eventf(ctx_t *x, logk_t k, uint32_t now, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
+static void log_eventf(ctx_t *x, logk_t k, uint32_t now, const char *fmt, ...)
+{
+    char text[LOG_LINE_MAX];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+    log_event(x, k, text, now);
 }
 
 /* ---- journal --------------------------------------------------------------------------------- */
@@ -453,6 +498,16 @@ static bool drain(ctx_t *x, conn_t *c, unsigned reads)
     return true;
 }
 
+/* select() says the socket takes data now (zero timeout). */
+static bool writable_now(int fd)
+{
+    fd_set wr;
+    FD_ZERO(&wr);
+    FD_SET(fd, &wr);
+    struct timeval tv = { 0, 0 };
+    return select(fd + 1, NULL, &wr, NULL, &tv) > 0 && FD_ISSET(fd, &wr);
+}
+
 static bool net_changed(const ctx_t *x, const conn_t *c)
 {
     return c->sta_ip_at_start != 0 && x->sta_ip != c->sta_ip_at_start;
@@ -467,9 +522,15 @@ static void stream_end(ctx_t *x, conn_t *c, local_caster_end_t reason)
     }
     bool planned = reason == LOCAL_CASTER_END_SETTINGS || reason == LOCAL_CASTER_END_RESTART;
     if (planned) {
-        /* Only between chunks, and only if the socket takes all five bytes. */
-        if (c->chunked && c->hdr_done && c->tx_off >= c->tx_end) {
-            (void)send(c->fd, LCAST_CHUNK_END, sizeof(LCAST_CHUNK_END) - 1u, MSG_DONTWAIT);
+        /* Only between chunks, and only if the socket takes all five bytes:
+         * lwIP reports a socket writable only with more than its low-water
+         * mark free (thousands of bytes), so a writable one takes them whole.
+         * A short write would leave half a terminator: then none goes out. */
+        if (c->chunked && c->hdr_done && c->tx_off >= c->tx_end && writable_now(c->fd)) {
+            int n = send(c->fd, LCAST_CHUNK_END, sizeof(LCAST_CHUNK_END) - 1u, MSG_DONTWAIT);
+            if (n != (int)(sizeof(LCAST_CHUNK_END) - 1u)) {
+                ESP_LOGD(TAG, "rover %s: terminator not sent whole (%d)", c->addr, n);
+            }
         }
         /* Unread bytes would turn the close into a reset. */
         (void)drain(x, c, DRAIN_MAX);
@@ -484,8 +545,8 @@ static void stream_end(ctx_t *x, conn_t *c, local_caster_end_t reason)
     } else {
         lcast_jgate_unlisted_end(&x->jgate);
     }
-    ESP_LOGI(TAG, "rover %s disconnected after %u s (%s), %llu bytes", c->addr, (unsigned)age_s,
-             lcast_end_name(reason), (unsigned long long)c->bytes_sent);
+    log_eventf(x, LOGK_DOWN, now_ms(), "rover %s disconnected after %u s (%s), %llu bytes", c->addr, (unsigned)age_s,
+               lcast_end_name(reason), (unsigned long long)c->bytes_sent);
     x->bytes_done += c->bytes_sent;
     c->bytes_sent = 0;
     c->listed = false;
@@ -534,8 +595,8 @@ static bool stream_start(ctx_t *x, conn_t *c, lcast_flavour_t f, uint32_t now)
     c->sta_ip_at_start = x->sta_ip;
     c->listed = false;
     x->sessions++;
-    ESP_LOGI(TAG, "rover %s connected (NTRIP %u.0, %s)", c->addr, (unsigned)c->version,
-             c->agent[0] != '\0' ? c->agent : "no agent");
+    /* Its User-Agent is in the status, not in the log (it is what the rover sent). */
+    log_eventf(x, LOGK_UP, now, "rover %s connected (NTRIP %u.0)", c->addr, (unsigned)c->version);
     return true;
 }
 
@@ -614,7 +675,7 @@ static void answer(ctx_t *x, conn_t *c, lcast_req_result_t res, uint32_t now)
         case LCAST_ACT_E401:
             x->refused_login++;
             if (d.count_fail) {
-                log_event(x, LOGK_LOGIN, c->addr, now);
+                log_eventf(x, LOGK_LOGIN, now, "wrong login from %s", c->addr);
             }
             break;
         case LCAST_ACT_E429:
@@ -625,7 +686,7 @@ static void answer(ctx_t *x, conn_t *c, lcast_req_result_t res, uint32_t now)
             break;
         default:
             x->refused_bad_request++;
-            log_event(x, LOGK_BAD, c->addr, now);
+            log_eventf(x, LOGK_BAD, now, "bad request from %s", c->addr);
             break;
         }
         len = lcast_reply_error((char *)c->tx, sizeof(c->tx), d.action, d.flavour, x->cfg.mountpoint, wait,
@@ -650,11 +711,19 @@ static void step_req(ctx_t *x, conn_t *c, uint32_t now)
     if (room > 0) {
         int n = recv(c->fd, dst, room, MSG_DONTWAIT);
         if (n > 0) {
+            c->got_bytes = true;
             res = lcast_req_added(&c->req, (size_t)n);
         } else if (n == 0 || !would_block()) {
             conn_close(c);   /* gone before its request was complete */
             return;
         }
+    }
+    if (!c->got_bytes && (uint32_t)(now - c->since_ms) >= LCAST_FIRST_BYTE_MS) {
+        /* Nothing sent: no request to answer. Its slot goes back at once. */
+        x->refused_bad_request++;
+        log_eventf(x, LOGK_BAD, now, "silent connection from %s", c->addr);
+        conn_close(c);
+        return;
     }
     if (res == LCAST_REQ_NEED_MORE && (uint32_t)(now - c->since_ms) < LOCAL_CASTER_REQUEST_TIMEOUT_MS) {
         return;
@@ -860,9 +929,13 @@ static void read_netifs(ctx_t *x, uint32_t now)
     x->sta_gw = 0;
 #endif
     x->ap_ip = 0;
+    x->ap_mask = 0;
     x->ap_ll_ok = false;
     if (x->ap != NULL && esp_netif_get_ip_info(x->ap, &ip) == ESP_OK) {
         x->ap_ip = ip.ip.addr;
+        if (esp_netif_is_netif_up(x->ap)) {
+            x->ap_mask = ip.netmask.addr;   /* its subnet is the hotspot's only while it is up */
+        }
     }
 #if CONFIG_LWIP_IPV6
     esp_ip6_addr_t ll;
@@ -888,7 +961,7 @@ static void accept_all(ctx_t *x, uint32_t now)
         struct sockaddr_storage ls;
         socklen_t ll = sizeof(ls);
         bool ok = sock_addr(&ss, &peer) && getsockname(fd, (struct sockaddr *)&ls, &ll) == 0 && sock_addr(&ls, &local);
-        lcast_addr_verdict_t v = ok ? lcast_addr_verdict(&peer, &local, x->sta_gw, x->ap_ip,
+        lcast_addr_verdict_t v = ok ? lcast_addr_verdict(&peer, &local, x->sta_gw, x->ap_ip, x->ap_mask,
                                                          x->ap_ll_ok ? x->ap_ll : NULL)
                                     : LCAST_ADDR_NOT_PRIVATE;
         if (v != LCAST_ADDR_OK) {
@@ -896,25 +969,41 @@ static void accept_all(ctx_t *x, uint32_t now)
             x->refused_not_local++;
             char text[LOCAL_CASTER_ADDR_LEN];
             (void)lcast_addr_text(ok ? &peer : NULL, text, sizeof(text));
-            log_event(x, LOGK_REFUSED, text, now);
+            log_eventf(x, LOGK_REFUSED, now, "refused %s: not on the local network", text);
             continue;
         }
-        conn_t *c = NULL;
-        for (size_t k = 0; k < LOCAL_CASTER_MAX_CONNS && c == NULL; k++) {
-            if (x->c[k].state == CONN_FREE) {
-                c = &x->c[k];
-            }
+        /* A slot: a free one, else one a connection that cannot be a rover's gives up (lcast_slot_pick). */
+        lcast_addr_unmap(&peer);
+        uint64_t key = lcast_client_key(&peer);
+        lcast_slot_view_t views[LOCAL_CASTER_MAX_CONNS];
+        for (size_t k = 0; k < LOCAL_CASTER_MAX_CONNS; k++) {
+            const conn_t *s = &x->c[k];
+            views[k] = (lcast_slot_view_t) {
+                .kind = s->state == CONN_FREE     ? LCAST_SLOT_FREE
+                        : s->state == CONN_REQ    ? LCAST_SLOT_REQ
+                        : s->state == CONN_LINGER ? LCAST_SLOT_LINGER
+                                                  : LCAST_SLOT_BUSY,
+                .key = s->key,
+                .since_ms = s->since_ms,
+                .got_bytes = s->got_bytes,
+            };
         }
-        if (c == NULL) {
+        lcast_slot_pick_t pick = lcast_slot_pick(views, LOCAL_CASTER_MAX_CONNS, key, now);
+        if (pick.slot < 0) {
             close(fd);
             x->refused_full++;
             continue;
         }
+        conn_t *c = &x->c[pick.slot];
+        if (pick.evict) {
+            conn_close(c);   /* a request not sent, a client's second one, or an answer already out */
+        }
         set_nonblocking(fd);
         set_sock_opts(fd);
         lcast_req_reset(&c->req);
-        lcast_addr_unmap(&peer);
         c->fd = fd;
+        c->key = key;
+        c->got_bytes = false;
         c->peer = peer;
         (void)lcast_addr_text(&peer, c->addr, sizeof(c->addr));
         c->agent[0] = '\0';
@@ -1100,7 +1189,8 @@ static void caster_task(void *arg)
         now = now_ms();
         read_netifs(x, now);
         x->state = x->sta_ip != 0 ? LOCAL_CASTER_LISTENING : LOCAL_CASTER_WAIT_NETWORK;
-        accept_all(x, now);
+        /* The connections first, new ones after: a request already waiting
+         * in its socket is read before the slot policy looks at it. */
         for (size_t i = 0; i < LOCAL_CASTER_MAX_CONNS; i++) {
             conn_t *c = &x->c[i];
             switch (c->state) {
@@ -1121,6 +1211,7 @@ static void caster_task(void *arg)
                 break;
             }
         }
+        accept_all(x, now);
         list_sessions(x);
         journal_step(x, now, false);
         for (int k = 0; k < LOGK_COUNT; k++) {
@@ -1222,7 +1313,12 @@ esp_err_t local_caster_init(void)
     if (s_cfg_mutex == NULL || s_set_mutex == NULL || s_wake == NULL || s_closed == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    host_name(s_default_mount, sizeof(s_default_mount));
+    if (!host_name(s_default_mount, sizeof(s_default_mount))) {
+        /* NVS not readable now: the build's name until a later read works. */
+        __atomic_store_n(&s_mount_failed_ms, now_ms(), __ATOMIC_RELEASE);
+        __atomic_store_n(&s_mount_failed, true, __ATOMIC_RELEASE);
+        __atomic_store_n(&s_mount_stale, true, __ATOMIC_RELEASE);
+    }
     strlcpy(s_identifier, s_default_mount, sizeof(s_identifier));
     (void)lcast_sanitize(esp_app_get_description()->version, s_server_ver, sizeof(s_server_ver), false);
 
@@ -1288,13 +1384,25 @@ esp_err_t local_caster_get_config(local_caster_cfg_t *out)
     }
     /* Nothing stored: the default mountpoint is the stored host name, read
      * from NVS only after the hostname setting changed (a rename since the
-     * boot shows; a page polls this every second). */
+     * boot shows; a page polls this every second). A read that fails keeps
+     * the name it has and is tried again, at most once a minute. */
     if (__atomic_exchange_n(&s_mount_stale, false, __ATOMIC_ACQ_REL)) {
+        uint32_t now = now_ms();
+        bool wait = __atomic_load_n(&s_mount_failed, __ATOMIC_ACQUIRE) &&
+                    (uint32_t)(now - __atomic_load_n(&s_mount_failed_ms, __ATOMIC_ACQUIRE)) < MOUNT_RETRY_MS;
         char name[LOCAL_CASTER_MOUNT_LEN];
-        host_name(name, sizeof(name));
-        xSemaphoreTake(s_cfg_mutex, portMAX_DELAY);
-        strlcpy(s_default_mount, name, sizeof(s_default_mount));
-        xSemaphoreGive(s_cfg_mutex);
+        if (wait || !host_name(name, sizeof(name))) {
+            if (!wait) {
+                __atomic_store_n(&s_mount_failed_ms, now, __ATOMIC_RELEASE);
+                __atomic_store_n(&s_mount_failed, true, __ATOMIC_RELEASE);
+            }
+            __atomic_store_n(&s_mount_stale, true, __ATOMIC_RELEASE);
+        } else {
+            __atomic_store_n(&s_mount_failed, false, __ATOMIC_RELEASE);
+            xSemaphoreTake(s_cfg_mutex, portMAX_DELAY);
+            strlcpy(s_default_mount, name, sizeof(s_default_mount));
+            xSemaphoreGive(s_cfg_mutex);
+        }
     }
     local_caster_cfg_t cfg;
     xSemaphoreTake(s_cfg_mutex, portMAX_DELAY);

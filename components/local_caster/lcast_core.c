@@ -100,13 +100,21 @@ static bool v6_private(const uint8_t b[16])
 }
 
 lcast_addr_verdict_t lcast_addr_verdict(const lcast_addr_t *peer, const lcast_addr_t *local, uint32_t gw_ip4,
-                                        uint32_t ap_ip4, const uint8_t *ap_ll6)
+                                        uint32_t ap_ip4, uint32_t ap_mask4, const uint8_t *ap_ll6)
 {
     if (peer == NULL) {
         return LCAST_ADDR_NOT_PRIVATE;
     }
     lcast_addr_t p = *peer;
     lcast_addr_unmap(&p);
+    if (!p.v6 && ap_ip4 != 0 && ap_mask4 != 0) {
+        /* From the hotspot's subnet while it is up, whichever local address it reached (weak host). */
+        uint32_t v4;
+        memcpy(&v4, p.b, 4);
+        if ((v4 & ap_mask4) == (ap_ip4 & ap_mask4)) {
+            return LCAST_ADDR_HOTSPOT;
+        }
+    }
     if (local != NULL) {
         lcast_addr_t l = *local;
         lcast_addr_unmap(&l);
@@ -216,6 +224,72 @@ void lcast_addr_word(const lcast_addr_t *a, uint8_t out[4])
     } else {
         memcpy(out, a->b + 12, 4);
     }
+}
+
+/* ---- connection slots ------------------------------------------------------------------------ */
+
+/* The oldest slot of `kind` that `ok` accepts, or -1. */
+static int oldest(const lcast_slot_view_t *s, size_t n, lcast_slot_kind_t kind, uint32_t now_ms,
+                  bool (*ok)(const lcast_slot_view_t *s, size_t n, size_t i, uint64_t key), uint64_t key)
+{
+    int best = -1;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i].kind != kind || (ok != NULL && !ok(s, n, i, key))) {
+            continue;
+        }
+        if (best < 0 || (uint32_t)(now_ms - s[i].since_ms) > (uint32_t)(now_ms - s[best].since_ms)) {
+            best = (int)i;
+        }
+    }
+    return best;
+}
+
+static bool silent(const lcast_slot_view_t *s, size_t n, size_t i, uint64_t key)
+{
+    (void)n;
+    (void)key;
+    return !s[i].got_bytes;
+}
+
+static bool same_client(const lcast_slot_view_t *s, size_t n, size_t i, uint64_t key)
+{
+    (void)n;
+    return s[i].key == key;
+}
+
+static bool client_holds_more(const lcast_slot_view_t *s, size_t n, size_t i, uint64_t key)
+{
+    (void)key;
+    for (size_t k = 0; k < n; k++) {
+        if (k != i && s[k].kind != LCAST_SLOT_FREE && s[k].key == s[i].key) {
+            return true;
+        }
+    }
+    return false;
+}
+
+lcast_slot_pick_t lcast_slot_pick(const lcast_slot_view_t *slots, size_t n, uint64_t key, uint32_t now_ms)
+{
+    lcast_slot_pick_t p = { .slot = -1, .evict = false };
+    for (size_t i = 0; i < n; i++) {
+        if (slots[i].kind == LCAST_SLOT_FREE) {
+            p.slot = (int)i;
+            return p;
+        }
+    }
+    int i = oldest(slots, n, LCAST_SLOT_LINGER, now_ms, NULL, key);
+    if (i < 0) {
+        i = oldest(slots, n, LCAST_SLOT_REQ, now_ms, silent, key);
+    }
+    if (i < 0) {
+        i = oldest(slots, n, LCAST_SLOT_REQ, now_ms, same_client, key);
+    }
+    if (i < 0) {
+        i = oldest(slots, n, LCAST_SLOT_REQ, now_ms, client_holds_more, key);
+    }
+    p.slot = i;
+    p.evict = i >= 0;
+    return p;
 }
 
 /* ---- request ------------------------------------------------------------------------------ */
@@ -1064,11 +1138,21 @@ static lcast_throttle_client_t *client_find(lcast_throttles_t *t, uint64_t key)
     return NULL;
 }
 
+static bool trusted(const lcast_throttles_t *t, uint64_t key)
+{
+    for (uint32_t i = 0; i < t->trusted_n && i < LCAST_THROTTLE_TRUSTED; i++) {
+        if (t->trusted[i] == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
 uint32_t lcast_throttles_wait_s(lcast_throttles_t *t, uint64_t key, uint32_t now_s)
 {
     bucket_refill(t, now_s);
     uint32_t wait = 0;
-    if (t->left == 0) {
+    if (t->left == 0 && !trusted(t, key)) {
         uint32_t since = now_s - t->at_s;
         wait = since >= LCAST_THROTTLE_REFILL_S ? 1u : LCAST_THROTTLE_REFILL_S - since;
     }
@@ -1123,6 +1207,23 @@ void lcast_throttles_ok(lcast_throttles_t *t, uint64_t key)
     if (c != NULL) {
         memset(c, 0, sizeof(*c));
     }
+    /* Newest first; the key moves up if it was there already. */
+    uint32_t n = t->trusted_n < LCAST_THROTTLE_TRUSTED ? t->trusted_n : LCAST_THROTTLE_TRUSTED;
+    uint32_t at = n;
+    for (uint32_t i = 0; i < n; i++) {
+        if (t->trusted[i] == key) {
+            at = i;
+            break;
+        }
+    }
+    if (at == n) {
+        at = n < LCAST_THROTTLE_TRUSTED ? n : LCAST_THROTTLE_TRUSTED - 1u;
+        if (n < LCAST_THROTTLE_TRUSTED) {
+            t->trusted_n = n + 1u;
+        }
+    }
+    memmove(&t->trusted[1], &t->trusted[0], at * sizeof(t->trusted[0]));
+    t->trusted[0] = key;
 }
 
 /* ---- journal gate and queue ------------------------------------------------------------------ */
