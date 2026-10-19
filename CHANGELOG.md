@@ -13,7 +13,12 @@ rename that heading to the new version ([releases](docs/releases.md)).
   release after an update or a power cut.
 - Times read 17s, 4min 10s, 23h 39min.
 - Receiver, Signals: the checks lead the card, the bands one of them, naming every
-  constellation with the most bands.
+  constellation with the most bands. The satellite table is half as tall.
+- Status: the Receiver card shows the signal strength instead of the bands the Sky card
+  already shows.
+- Logs: "Previous uptime"; a UM982's own descriptor no longer shows its firmware and serial
+  as differing.
+- A planned restart turns the receiver port's interrupts off first.
 
 ## v0.1.1
 
