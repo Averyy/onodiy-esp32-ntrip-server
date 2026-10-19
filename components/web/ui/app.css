@@ -1334,7 +1334,7 @@ table.starts .when .j { display: none; }
   table.starts .when { width: 12.5rem; }
   table.starts .when :is(.d, .tm, .j) { display: inline; }
 }
-table.events tr.sep th { padding-top: 0.8rem; color: var(--text); font-size: 0.95rem; font-weight: 650; white-space: normal; background: var(--surface-2); }
+table.events tr.sep th { color: var(--text); font-size: 0.95rem; font-weight: 650; white-space: normal; background: var(--surface-2); }
 table.events tr.sep th.when { color: var(--muted); font-size: inherit; font-weight: 500; }
 table.events tr.rep-row td { background: var(--surface-2); font-size: 0.9rem; }
 table.events tr.rep-row td + td { padding-left: 1.25rem; }
