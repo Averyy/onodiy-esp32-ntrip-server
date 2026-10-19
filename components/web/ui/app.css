@@ -879,7 +879,7 @@ tbody tr:last-child td { border-bottom: 0; }
 /* Every satellite under the band table: from 560 px a box of its own height, its sort buttons in view while it scrolls;
  * on a phone the page alone scrolls. */
 @media (min-width: 560px) {
-  .sat-list .scroll { max-height: 26rem; overflow-y: auto; }
+  .sat-list .scroll { max-height: 13rem; overflow-y: auto; }
   .sat-list thead th { position: sticky; top: 0; z-index: 1; background: var(--surface); }
 }
 svg.sky { width: 100%; max-width: 420px; height: auto; display: block; margin: 0 auto; }

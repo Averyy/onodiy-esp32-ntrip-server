@@ -410,7 +410,7 @@ def test_event_journal_one_heading_per_start_and_repeats_folded():
         ("journalItems", [steps[-5:] + second, False, None]),
     ])
     heads = [i["head"][1] for i in every if "head" in i]
-    assert heads == ["Restarted by you (previous run 44s)", "Started after power-on or a reset by its pin"]
+    assert heads == ["Restarted by you (previous uptime 44s)", "Started after power-on or a reset by its pin"]
     rows = [i for i in every if "head" not in i]
     # The restart record went into the heading; a recovery step is named after its recovery, the step is the detail.
     assert [r["ev"] for r in rows] == ["Wi-Fi dropped", "Receiver recovery"]
@@ -422,7 +422,7 @@ def test_event_journal_one_heading_per_start_and_repeats_folded():
     # Starts only: the two headings; casters only: nothing; the oldest start not loaded yet is a plain "Start".
     assert [("head" in i) for i in starts] == [True, True]
     assert casters == []
-    assert [i["head"][1] for i in part if "head" in i] == ["Restarted by you (previous run 44s)", "Start"]
+    assert [i["head"][1] for i in part if "head" in i] == ["Restarted by you (previous uptime 44s)", "Start"]
 
 
 def test_event_journal_sky_sessions_and_plain_rows():

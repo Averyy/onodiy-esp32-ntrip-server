@@ -296,7 +296,7 @@ const MAINT_CHOICES = [[900, '15 minutes'], [1800, '30 minutes'], [3600, '1 hour
 /* Journal enumerations by C value (API.md appendix: position in C order). */
 const J = {
   /* The event list's names (a connection or a recovery step is named by connRow, by its recovery). */
-  kind: { boot: 'Start', session: 'Previous run', reboot: 'Restart', app_update: 'App update', app_revert: 'App rolled back',
+  kind: { boot: 'Start', session: 'Previous uptime', reboot: 'Restart', app_update: 'App update', app_revert: 'App rolled back',
     gnss_flash: 'Receiver update', safe_mode: 'Safe mode', data_loss: 'Data lost', rx_maintenance: 'Receiver maintenance',
     live_view: 'Sky view', sg_test: 'Signal groups', rx_boot: 'Receiver at the start', fixed_check: 'Fixed position',
     wifi_roam: 'Wi-Fi moved', rover_connect: 'Rover connected', rover_disconnect: 'Rover disconnected' },

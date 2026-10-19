@@ -112,7 +112,7 @@ function startKind(cls, planned) {
  * dash), the kind and the version; its sentence on hover. A start ran for
  * the previous run of the start after it when their counts follow on (a
  * power-on between them leaves it unknown); the newest's is This start's
- * "Previous run", so not here. day: today (toDateString).
+ * "Previous uptime", so not here. day: today (toDateString).
  */
 function startLines(starts, day) {
   const year = Number(day.slice(-4));
@@ -366,10 +366,30 @@ function bandsRow(g) {
 /* Two names as the station compares them: runs of spaces as one, the ends trimmed. */
 const sameText = (a, b) => String(a || '').replace(/\s+/g, ' ').trim() === String(b || '').replace(/\s+/g, ' ').trim();
 
+/* The descriptor's firmware ("25164-42227") against the identity's ("R4.10Build25164", build 25164): the same when
+ * one of its numbers is the build, else when the texts are. */
+function sameFirmware(fw, r) {
+  const build = r.build || (String(r.firmware || '').match(/Build(\d+)/i) || [])[1];
+  return build ? String(fw || '').split(/\D+/).indexOf(String(build)) >= 0 : sameText(fw, r.firmware);
+}
+
+/* The descriptor's serial against the identity's product serial and chip ID (a UM982 sends its chip ID), ignoring case
+ * and spaces; an ID of 8 or more characters may be cut short on either side. */
+function sameSerial(s, r) {
+  const norm = x => String(x || '').replace(/\s+/g, '').toLowerCase();
+  const a = norm(s);
+  return [r.serial, r.efuse_id].map(norm).some(b => !!a && !!b &&
+    (a === b || (Math.min(a.length, b.length) >= 8 && (a.startsWith(b) || b.startsWith(a)))));
+}
+
 /**
  * What the descriptor (RTCM 1033, d) says of the receiver and its antenna,
  * against the identity (r) and the antenna read back (ant, null: not read)
- * above it: {rows, matches}. Where every field that can be compared is the
+ * above it: {rows, matches}. The two name the receiver differently: the
+ * descriptor's firmware is "25164-42227" where the identity says
+ * "R4.10Build25164" (the same when its numbers hold the build), and its
+ * serial is the chip's ID (efuse), not the product serial (the same when it
+ * is either). Where every field that can be compared is the
  * same, only those that cannot be are rows and matches is true; once one
  * differs, every field is a row, those that differ in amber.
  */
@@ -380,8 +400,8 @@ function descriptorRows(d, r, ant) {
   /* [label, value, null: cannot be compared / true: the same / false: differs] */
   const f = [
     ['Receiver type', d.receiver_type, known && r.model ? typeHas(r.model) : null],
-    ['Receiver firmware', d.receiver_fw, known && r.firmware ? sameText(d.receiver_fw, r.firmware) : null],
-    ['Receiver serial', d.receiver_serial, known && r.serial ? sameText(d.receiver_serial, r.serial) : null],
+    ['Receiver firmware', d.receiver_fw, known && r.firmware ? sameFirmware(d.receiver_fw, r) : null],
+    ['Receiver serial', d.receiver_serial, known && (r.serial || r.efuse_id) ? sameSerial(d.receiver_serial, r) : null],
     ['Antenna', d.antenna, ant ? sameText(d.antenna, ant.model) : null],
     ['Antenna serial', d.antenna_serial, ant ? sameText(d.antenna_serial, ant.serial) : null],
     ['Antenna setup ID', String(d.setup_id), ant ? Number(d.setup_id) === Number(ant.setup_id) : null],
@@ -497,7 +517,7 @@ function overviewTab(box) {
           ['Starts since power-on', fmt.num(b.boots_since_power_on)],
           ['Crashes counted', fmt.num(b.crashes)],
           ['Brownouts since power-on', fmt.num(b.brownouts_since_power_on)],
-          ['Previous run', fmt.dur(b.prev_session_uptime_s)],
+          ['Previous uptime', fmt.dur(b.prev_session_uptime_s)],
         ]),
         /* A crash's copy of the memory: it can hold passwords, so the download asks first. */
         cd.present ? msg('warn', h('strong', null, 'Core dump stored'),
@@ -1060,7 +1080,7 @@ function journalDetail(e) {
     case 'boot':
       return startSentence(J.resetClassKey[a], null, J.rebootKey[b]);
     case 'session':
-      return 'The previous run ' + (a < 0 ? 'lasted an unknown time' : 'lasted ' + fmt.dur(a)) + '; it ended ' +
+      return 'Previous uptime ' + (a < 0 ? 'unknown' : fmt.dur(a)) + '; it ended ' +
         (J.resetReason[b] ? 'with a ' + J.resetReason[b] + ' reset' : 'with reset ' + b);
     case 'reboot': {
       const why = lbl(L.plannedReason, J.rebootKey[a]) || J.rebootReason[a] || String(a);
@@ -1288,7 +1308,7 @@ function journalItems(entries, atStart, kinds) {
     if (!kinds || kinds.indexOf('boot') >= 0 || rows.length) {
       let text = boot ? startSentence(J.resetClassKey[boot.a], sess ? RESET_KEYS[sess.b] : null, J.rebootKey[boot.b]) :
         gi === 0 && !atStart ? 'Start' : 'Start (its first records are gone)';
-      if (sess && sess.a >= 0) text += ' (previous run ' + fmt.dur(sess.a) + ')';
+      if (sess && sess.a >= 0) text += ' (previous uptime ' + fmt.dur(sess.a) + ')';
       /* When it started: its boot record's time, else (its first records gone) the start the others imply. */
       const t = boot ? timeOf(boot) : g.offset;
       items.push({ head: [t !== null ? whenParts(t, t, !(boot && boot.time_unix), year) : null,

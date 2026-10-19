@@ -1552,14 +1552,17 @@ def test_status_page_always_has_five_cards():
         assert o["cards"]["Receiver"]["links"][0][:3] == ["Manage", "#/receiver", "Manage the receiver"]
 
 
+STRONG = "Strong \u00b7 42\u00a0dB\u2011Hz on L1"   # SKY_LIVE's L1
+
+
 def test_receiver_rows_in_every_state():
-    """The Receiver card's three rows, in every state (the Sky card has the satellites): dashes while the receiver's
-    figures mean nothing; the bands only while it delivers (so they never sit beside no corrections); the corrections'
-    age; the position in a word."""
-    out = matrix()
+    """The Receiver card's three rows, in every state (the Sky card has the satellites and their bands): dashes while
+    the receiver's figures mean nothing; the signal strength on L1 only while it delivers (so it never sits beside no
+    corrections); the corrections' age; the position in a word."""
+    out = dict(zip(MATRIX, dashboards(*MATRIX.values(), live=SKY_LIVE)))
     for name, o in out.items():
-        assert [r[0] for r in o["cards"]["Receiver"]["rows"]] == ["Bands", "Corrections", "Position"], name
-    assert rx_rows(out["healthy"]) == ["4 on Galileo", "Arriving", "Locked"]
+        assert [r[0] for r in o["cards"]["Receiver"]["rows"]] == ["Signal", "Corrections", "Position"], name
+    assert rx_rows(out["healthy"]) == [STRONG, "Arriving", "Locked"]
     assert rx_rows(out["noant"]) == ["–", "None yet", "Surveying, paused"]
     for name in ("norx", "uart", "safe", "journal", "updating", "starting"):
         assert rx_rows(out[name]) == ["–"] * 3, name
@@ -1568,13 +1571,13 @@ def test_receiver_rows_in_every_state():
         assert out[name]["key"] == "settings" and rx_rows(out[name]) == ["–"] * 3, name
     # A gap shorter than the station's 10 s: the receiver still streams, the corrections still count as arriving, as
     # the top card says (one freshness rule for the row and the counts).
-    assert out["rtcm7"]["key"] == "streaming" and rx_rows(out["rtcm7"]) == ["4 on Galileo", "Arriving", "Locked"]
+    assert out["rtcm7"]["key"] == "streaming" and rx_rows(out["rtcm7"]) == [STRONG, "Arriving", "Locked"]
     (gap,) = dashboards(over(BASE, receiver={"rtcm_age_ms": 12000, "state": "recovering"}, health={"level": "recovering"},
                              casters=WAITING))
     assert rx_rows(gap)[:2] == ["–", "None for 12s"]
-    assert rx_rows(out["maint"]) == ["4 on Galileo", "Arriving", "Locked"]
-    assert rx_rows(out["maint_unchecked"]) == ["4 on Galileo", "Arriving", "Not checked"]
-    assert rx_rows(out["survey"]) == ["4 on Galileo", "Arriving", "Surveying, 5min left"]
+    assert rx_rows(out["maint"]) == [STRONG, "Arriving", "Locked"]
+    assert rx_rows(out["maint_unchecked"]) == [STRONG, "Arriving", "Not checked"]
+    assert rx_rows(out["survey"]) == [STRONG, "Arriving", "Surveying, 5min left"]
     # The top card says the fixed position looks wrong: the row agrees in amber, without its sentence.
     assert out["fixed_far"]["head"] == "Fixed position looks wrong" and rx_rows(out["fixed_far"])[2] == "Fixed, check it"
     assert out["fixed_far"]["cards"]["Receiver"]["tones"] == [["warn", "Fixed, check it"]]
@@ -1608,11 +1611,11 @@ def test_sky_card():
     assert sky["links"] == [["Details", "#/receiver", "Details on the Receiver page", True]]
     assert sky["big"][0] == "31"
     text = sky["text"]
-    assert "31satellitesC/N0 42\u00a0dB-Hz on L1" in text
+    assert "31satellitesConstellation" in text and "C/N0" not in text
     # Each constellation with satellites, its count, then a dot per band (named in its title).
     assert "SatellitesL1L2L5L6GPS11Galileo8" in text and "QZSS" not in text
     assert "G12 (GPS 12): elevation 45°, azimuth 210°, 44 dB-Hz" in text and "E05" not in text
-    assert "Fainter: weaker signal" in text
+    assert "Fainter" not in text
     for o in (noant, safe, matrix()["healthy"]):
         assert o["cards"]["Sky"]["notes"] == [["No satellites tracked yet.", "muted"]], o["key"]
         assert o["cards"]["Sky"]["big"] is None
@@ -1629,9 +1632,10 @@ def test_power_lost_line_has_a_dismiss_button():
     assert visitor["dismiss"] == []
 
 
-def test_bands_row_says_onocoys_need_once():
-    """The Bands row marks too few bands while Onocoy counts, and says what Onocoy needs only when nothing else on the
-    page says it (the top card's line, Onocoy's verdict line, the bands "Also:" line); without Onocoy it is plain."""
+def test_signal_row_says_onocoys_need_once():
+    """The Signal row: the strength on L1 (Fair or Weak in amber), then what Onocoy's quality score misses while it
+    counts, in amber, only when nothing else on the page says it (the top card's line, Onocoy's verdict line, the bands
+    "Also:" line); without Onocoy, the strength only."""
     few = MATRIX["quality"]
     few_no_alert = over(BASE, receiver=FEW)
     refused = over(BASE, receiver={"rtcm1230_supported": False})
@@ -1640,23 +1644,33 @@ def test_bands_row_says_onocoys_need_once():
     no_gl = MATRIX["noglonass"]
     off = over(BASE, receiver=FEW, casters=[ONO_OFF, RTK])
     alert = MATRIX["quality_down_alert"]
-    out = dashboards(few, few_no_alert, refused, why_says, why_other, no_gl, off, alert)
-    bands = [dict(o["cards"]["Receiver"]["rows"])["Bands"] for o in out]
+    out = dashboards(few, few_no_alert, refused, why_says, why_other, no_gl, off, alert, live=SKY_LIVE)
+    sig = [dict(o["cards"]["Receiver"]["rows"])["Signal"] for o in out]
     tones = [o["cards"]["Receiver"]["tones"] for o in out]
-    assert out[0]["head"] == "Too few bands for Onocoy" and bands[0] == "3 on GPS ✕" and tones[0] == [["warn", bands[0]]]
-    assert bands[1] == "3 on GPS ✕"
-    assert out[2]["key"] == "quality" and bands[2] == "4 on Galileo" and tones[2] == []
+    assert out[0]["head"] == "Too few bands for Onocoy" and sig[0] == STRONG and tones[0] == []
+    assert sig[1] == STRONG
+    assert out[2]["key"] == "quality" and sig[2] == STRONG
     # Onocoy's verdict line says it (another state on top).
     assert out[3]["key"] == "casters_down" and out[3]["cards"]["Onocoy"]["notes"][0][0].startswith("Only 3 bands")
-    assert bands[3] == "3 on GPS ✕"
+    assert sig[3] == STRONG
     assert out[4]["cards"]["Onocoy"]["notes"][0][0] == "Offline time is counting now."
-    assert bands[4] == "3 on GPS ✕ · Onocoy needs 4"
-    assert bands[5] == "4 on Galileo · no GLONASS" and tones[5] == [["warn", " · no GLONASS"]]
-    assert out[6]["key"] == "streaming" and bands[6] == "3 on GPS" and tones[6] == []
+    assert sig[4] == STRONG + " \u00b7 3 bands, Onocoy needs 4" and tones[4] == [["warn", " \u00b7 3 bands, Onocoy needs 4"]]
+    assert sig[5] == STRONG + " \u00b7 no GLONASS" and tones[5] == [["warn", " \u00b7 no GLONASS"]]
+    assert out[6]["key"] == "streaming" and sig[6] == STRONG and tones[6] == []
     # The bands "Also:" line says it: neither the row nor Onocoy's verdict line again (At risk stays).
-    assert "bands" in [a[0] for a in out[7]["also"]] and bands[7] == "3 on GPS ✕"
+    assert "bands" in [a[0] for a in out[7]["also"]] and sig[7] == STRONG
     assert out[7]["cards"]["Onocoy"]["chip"] == ["At risk", "badge warn"]
     assert not any(n[0].startswith("Only 3 bands") for n in out[7]["cards"]["Onocoy"]["notes"])
+    # A fair or weak signal in amber; no figures from the receiver yet: the notes alone, else a dash.
+    fair = {**SKY_LIVE, "totals": {**SKY_LIVE["totals"], "bands": {"l1": {"satellites": 31, "cnr_dbhz": 37}}}}
+    weak = {**SKY_LIVE, "totals": {**SKY_LIVE["totals"], "bands": {}, "cnr_dbhz": 30}}
+    (f,), (w,), (none_ok, none_note) = (dashboards(BASE, live=fair), dashboards(BASE, live=weak),
+                                        dashboards(BASE, why_other))
+    assert dict(f["cards"]["Receiver"]["rows"])["Signal"] == "Fair \u00b7 37\u00a0dB\u2011Hz on L1"
+    assert f["cards"]["Receiver"]["tones"] == [["warn", "Fair \u00b7 37\u00a0dB\u2011Hz on L1"]]
+    assert dict(w["cards"]["Receiver"]["rows"])["Signal"] == "Weak \u00b7 30\u00a0dB\u2011Hz"
+    assert dict(none_ok["cards"]["Receiver"]["rows"])["Signal"] == "\u2013"
+    assert dict(none_note["cards"]["Receiver"]["rows"])["Signal"] == "3 bands, Onocoy needs 4"
 
 
 def test_casters_card_lists_counting_onocoy_first():
@@ -2742,9 +2756,12 @@ def test_logs_receiver_card_says_the_descriptor_once():
     differ = {**GNSS, "rtcm1033": {**GNSS["rtcm1033"], "antenna": "TESTANT1", "receiver_serial": "TEST0002"}}
     unread = {**GNSS, "rx_settings": {"valid": False}}
     held = {**GNSS, "first_apply_held": True}
-    same, other, nothing_read, commands = run_editor([
+    # A UM982's own descriptor: its chip ID for the serial, "build-subbuild" for the firmware: the same receiver.
+    chip = {**GNSS, "rtcm1033": {**GNSS["rtcm1033"], "receiver_fw": "25164-42227", "receiver_serial": "efuse-test"}}
+    same, other, nothing_read, commands, own = run_editor([
         {"fn": "rx_details", "g": GNSS, "full": True}, {"fn": "rx_details", "g": differ, "full": True},
-        {"fn": "rx_details", "g": unread, "full": True}, {"fn": "rx_details", "g": held, "preview": PREVIEW, "full": True}])
+        {"fn": "rx_details", "g": unread, "full": True}, {"fn": "rx_details", "g": held, "preview": PREVIEW, "full": True},
+        {"fn": "rx_details", "g": chip, "full": True}])
     rows = dict(same["rows"])
     assert rows["Descriptor (1033)"] == "Received 400ms ago, matches the receiver"
     assert not {"Receiver serial", "Receiver type", "Receiver firmware", "Antenna", "Antenna serial", "Antenna setup ID"} & set(rows)
@@ -2761,6 +2778,9 @@ def test_logs_receiver_card_says_the_descriptor_once():
     assert rows["Antenna"] == "none" and rows["Antenna setup ID"] == "0" and "Receiver serial" not in rows
 
     assert "Commands the first configuration sends" in commands["subs"] and commands["lis"] == 3
+    rows = dict(own["rows"])
+    assert rows["Descriptor (1033)"] == "Received 400ms ago, matches the receiver" and own["warn"] == []
+    assert not {"Receiver serial", "Receiver firmware"} & set(rows)
 
 
 # ---- Your rover (local NTRIP): its card and editor on the NTRIP page, its line on the Status page ----

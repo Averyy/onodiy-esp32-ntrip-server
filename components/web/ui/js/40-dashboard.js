@@ -244,22 +244,34 @@ function qualitySaid(st, day) {
 }
 
 /*
- * The Bands row: "4 on Galileo" ("4 bands" without a constellation); a dash
- * until the receiver delivers. While Onocoy counts, what its quality score
- * misses, in amber, unless the page says it already (qualitySaid): too few
- * bands mark the count, with a muted "Onocoy needs 4".
+ * The Signal row: the strength on L1, the band the antenna check judges
+ * (receptionChecks; the mean over every band without L1's), as "Strong ·
+ * 44 dB-Hz on L1", Fair or Weak in amber. While Onocoy counts, what its
+ * quality score misses follows in amber, unless the page says it already
+ * (qualitySaid). A dash until the receiver delivers. t: GET /api/gnss/live's
+ * totals (the strength), missing until the page has read it.
  */
-function bandsView(st, day) {
+function signalView(st, day, t) {
   const q = st.quality;
   if (!q.known) return DASH;
-  const count = q.sys ? q.bands + ' on ' + lbl(L.sys, q.sys) : q.bands + ' bands';
-  if (!st.ono) return count;
-  const said = qualitySaid(st, day);
-  const tell = k => said.indexOf(k) < 0;
-  return [q.fewBands ? h('span', { class: 't-warn' }, count + NB + '✕') : count,
-    q.fewBands && tell('bands') ? h('span', { class: 'muted' }, ' · Onocoy needs 4') : null,
-    q.noGlonass && tell('glonass') ? h('span', { class: 't-warn' }, ' · no GLONASS') : null,
-    q.refused1230 && tell('g1230') ? h('span', { class: 't-warn' }, ' · GLONASS does not count') : null];
+  const l1 = t && t.bands && t.bands.l1 && t.bands.l1.cnr_dbhz;
+  const c = l1 || (t && t.cnr_dbhz);
+  let strength = null;
+  if (c) {
+    const word = c >= RX_CHECK.cnrGood ? 'Strong' : c >= RX_CHECK.cnrFair ? 'Fair' : 'Weak';
+    const text = word + ' · ' + c + NB + 'dB\u2011Hz' + (l1 ? ' on L1' : '');
+    strength = word === 'Strong' ? text : h('span', { class: 't-warn' }, text);
+  }
+  const notes = [];
+  if (st.ono) {
+    const said = qualitySaid(st, day);
+    const tell = k => said.indexOf(k) < 0;
+    if (q.fewBands && tell('bands')) notes.push(plural(q.bands, 'band', 'bands') + ', Onocoy needs 4');
+    if (q.noGlonass && tell('glonass')) notes.push('no GLONASS');
+    if (q.refused1230 && tell('g1230')) notes.push('GLONASS does not count');
+  }
+  if (!strength && !notes.length) return DASH;
+  return [strength, ...notes.map((n, i) => h('span', { class: 't-warn' }, (strength || i ? ' · ' : '') + n))];
 }
 
 /* The corrections from the receiver: arriving (st.arriving: by the station's own freshness), none this boot, or none for how long. */
@@ -282,15 +294,16 @@ function rxDashed(s, st) {
 }
 
 /*
- * Three rows, always in this order: Bands, Corrections, Position (the Sky
- * card has the satellites). The bands only while the receiver delivers and
- * the corrections arrive (st.quality.known, st.arriving: the station's
- * 10 s), so they never sit beside no corrections. No colour but
- * Onocoy's quality needs (bandsView) and a fixed position the station finds
- * far from the receiver's own (amber, as the top card or its "Also:" line
- * says it): never green beside a red top card.
+ * Three rows, always in this order: Signal, Corrections, Position (the Sky
+ * card has the satellites and their bands). The signal only while the
+ * receiver delivers and the corrections arrive (st.quality.known,
+ * st.arriving: the station's 10 s), so it never sits beside no corrections.
+ * No colour but a fair or weak signal, Onocoy's quality needs (signalView)
+ * and a fixed position the station finds far from the receiver's own (amber,
+ * as the top card or its "Also:" line says it): never green beside a red top
+ * card. live: GET /api/gnss/live, as the Sky card has it.
  */
-function receiverCard(s, st) {
+function receiverCard(s, st, lv) {
   const r = s.receiver || {};
   const dash = rxDashed(s, st);
   const q = st.quality;
@@ -299,7 +312,7 @@ function receiverCard(s, st) {
   const far = !dash && r.position_locked && (s.alerts || []).some(a => a.id === 'fixed_far' && a.source === 'station');
   return h('section', { class: 'card fit-kv' },
     cardHead('Receiver', headLink(st, null, { label: 'Manage', name: 'Manage the receiver', href: '#/receiver' })),
-    kv([['Bands', live ? bandsView(st, onocoyDay(s, st)) : DASH],
+    kv([['Signal', live ? signalView(st, onocoyDay(s, st), lv && lv.totals) : DASH],
       ['Corrections', dash ? DASH : correctionsText(r.rtcm_age_ms, st.arriving)],
       ['Position', pos === NOT_CHECKED ? NOT_CHECKED_CHIP : far ? h('span', { class: 't-warn' }, 'Fixed, check it') : pos]]));
 }
@@ -432,10 +445,10 @@ function skyGrid(t) {
  * The sky at a glance, a small copy of the Receiver page's Signals card: the
  * satellites on a sky plot without their names, in their constellation's
  * colour and fainter the weaker their signal (while the receiver reports
- * where they are), how many are tracked and their mean C/N0, and each
- * constellation's count with the bands it is tracked on. From GET
- * /api/gnss/live (read every 5 s by the page), only while the corrections
- * arrive, like the Receiver card's bands.
+ * where they are), how many are tracked, and each constellation's count
+ * with the bands it is tracked on (the signal strength is the Receiver
+ * card's). From GET /api/gnss/live (read every 5 s by the page), only while
+ * the corrections arrive, like the Receiver card's signal.
  */
 function skyCard(s, st, live) {
   const t = live && live.totals;
@@ -444,16 +457,14 @@ function skyCard(s, st, live) {
   const sats = live.satellites || [];
   return h('section', { class: 'card wide sky-card' }, head,
     h('div', { class: 'sky-glance' },
-      sats.some(hasSkyPos) ? h('figure', { class: 'sky-fig' }, liveSkyPlot(sats, true),
-        h('figcaption', { class: 'muted small' }, 'Fainter: weaker signal')) : null,
-      h('div', { class: 'sky-total' }, h('div', { class: 'big' }, fmt.num(t.tracked)), h('div', null, 'satellites'),
-        t.bands && t.bands.l1 && t.bands.l1.cnr_dbhz ? h('div', { class: 'muted small' }, 'C/N0 ' + t.bands.l1.cnr_dbhz + NB + 'dB-Hz on L1') : null),
+      sats.some(hasSkyPos) ? h('figure', { class: 'sky-fig' }, liveSkyPlot(sats, true)) : null,
+      h('div', { class: 'sky-total' }, h('div', { class: 'big' }, fmt.num(t.tracked)), h('div', null, 'satellites')),
       skyGrid(t)));
 }
 
 /* The top card, then five cards in reading order: the sky across the page, the receiver and the station, Onocoy and the NTRIP servers. */
 function adminDashboard(s, st, openSlots, live) {
-  const cards = [skyCard(s, st, live), receiverCard(s, st), stationCard(s, st), onocoyCard(s, st), castersCard(s, st, true)];
+  const cards = [skyCard(s, st, live), receiverCard(s, st, live), stationCard(s, st), onocoyCard(s, st), castersCard(s, st, true)];
   const links = cards.map(c => c.querySelector('.head-link')).filter(Boolean).map(a => a.getAttribute('href'));
   return [heroCard(s, st, heroAlso(s, st, openSlots), links), h('div', { class: 'grid' }, cards)];
 }
