@@ -1114,6 +1114,7 @@ Views.ntrip = {
       const old = data, oldRover = rover;
       data = d;
       rover = r && r.config ? r : null;
+      if (!rover) roverEd = null;
       if (!old || old.slots.length !== d.slots.length || !oldRover !== !rover) {
         render();
         return;
