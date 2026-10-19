@@ -802,6 +802,34 @@ bool web_parse_ca_pem(const cJSON *root, const char **pem, web_bad_t *bad)
     return true;
 }
 
+/* ---- local NTRIP (Your rover) --------------------------------------------------------------------- */
+
+bool web_parse_local_caster_put(const cJSON *root, const local_caster_cfg_t *stored, local_caster_cfg_t *out,
+                                web_bad_t *bad)
+{
+    *out = *stored;
+    memset(out->password, 0, sizeof(out->password));
+    bool b = false;
+    member_t m = get_bool(root, "enabled", &b);
+    if (m == M_BAD) {
+        return invalid(bad, "enabled");
+    }
+    if (m == M_OK) {
+        out->enabled = b;
+    }
+    /* No rule here: the handler asks local_caster_check_config() for the field's words. */
+    if (!str_field_rule(root, "mountpoint", out->mountpoint, sizeof(out->mountpoint), sizeof(out->mountpoint) - 1, NULL,
+                        NULL, bad) ||
+        !str_field_rule(root, "username", out->username, sizeof(out->username), sizeof(out->username) - 1, NULL, NULL,
+                        bad) ||
+        !str_field_rule(root, "password", out->password, sizeof(out->password), sizeof(out->password) - 1, NULL, NULL,
+                        bad)) {
+        memset(out->password, 0, sizeof(out->password));
+        return false;
+    }
+    return true;
+}
+
 /* ---- Wi-Fi and system ----------------------------------------------------------------------------- */
 
 bool web_parse_wifi_put(const cJSON *root, web_wifi_put_t *out, web_bad_t *bad)

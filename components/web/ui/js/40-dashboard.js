@@ -294,13 +294,23 @@ function casterRow(c, admin, st) {
       share ? [' ', h('span', { class: 'muted nowrap' }, '· ' + share)] : null));
 }
 
+/* Your rover in one line, built like casterRow: "1 connected" in green, else its state in a word (not listening: red). */
+function roverRow(lc) {
+  const n = lc.clients || 0, word = lbl(L.rover, lc.state === 'off' ? 'starting' : lc.state);
+  const tone = n ? 'ok' : lc.state === 'error' ? 'bad' : '';
+  return h('div', { class: 'cline' }, h('div', null, h('span', { class: 'name' }, 'Your rover'), ' ',
+    h('span', { class: 'nowrap' }, '· ', h('span', { class: tone ? 't-' + tone : 'muted' },
+      n ? n + ' connected' : word.charAt(0).toLowerCase() + word.slice(1)))));
+}
+
 /*
  * The NTRIP servers, one line each: for the admin every one set up, Onocoy
  * first while it counts and left out otherwise (its own card says it); "No
  * other servers." beside an Onocoy that is set up, else "No servers yet.",
- * with a link to add one; in safe mode when it shows. The public form: every
- * server it lists, no link (no tabs there); no card when it lists none (safe
- * mode, none set up: the top card says it).
+ * with a link to add one; in safe mode when it shows. Your rover, while it is
+ * on, one line after them (admin only). The public form: every server it
+ * lists, no link (no tabs there); no card when it lists none (safe mode, none
+ * set up: the top card says it).
  */
 function castersCard(s, st, admin) {
   const ono = admin ? onocoySlot(s) : null;
@@ -311,7 +321,9 @@ function castersCard(s, st, admin) {
   if (!admin && (safe || !list.length)) return null;
   const add = !safe && !list.length ? { label: 'Add', name: 'Add a server', href: '#/ntrip' } : null;
   const none = safe ? 'Shows after safe mode.' : ono && ono.onocoy_ready !== false ? 'No other servers.' : 'No servers yet.';
-  const body = list.length && !safe ? h('div', { class: 'clines' }, list.map(c => casterRow(c, admin, st))) : mutedLine(none);
+  const lines = list.length && !safe ? list.map(c => casterRow(c, admin, st)) : [];
+  const rover = admin && !safe && s.local_caster && s.local_caster.enabled ? roverRow(s.local_caster) : null;
+  const body = [lines.length ? null : mutedLine(none), lines.length || rover ? h('div', { class: 'clines' }, lines, rover) : null];
   return h('section', { class: admin ? 'card' : 'card wide' },
     admin ? cardHead('NTRIP', headLink(st, add, { label: 'Manage', name: 'Manage NTRIP servers', href: '#/ntrip' })) : h('h2', null, 'NTRIP'),
     body);

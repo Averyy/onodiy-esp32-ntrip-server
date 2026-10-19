@@ -464,6 +464,49 @@ def test_event_filter_covers_every_journal_kind():
     assert filters[0][:2] == ["all", "All events"]
 
 
+def rover_up(seq: int, conn: int, version: int, addr: int, up: int, unlisted: int = 0, v6: bool = False) -> dict:
+    """rover_connect as the caster journals it (diag_rover_up_a, diag_rover_addr_b: b a signed 32-bit word)."""
+    a = conn | (version << 4) | ((1 << 6) if v6 else 0) | (10 << 8) | (unlisted << 16)
+    return jrec(seq, "rover_connect", a, addr - (1 << 32) if addr >= 1 << 31 else addr, up)
+
+
+def rover_down(seq: int, conn: int, reason: int, secs: int, up: int) -> dict:
+    return jrec(seq, "rover_disconnect", conn | (reason << 8), secs, up)
+
+
+def test_event_list_names_a_rovers_sessions():
+    """A rover's start (journalled after 10 s) says its address and NTRIP version, and the shorter sessions not listed
+    before it; its end says the address of its start (same connection, same start of the station; else "a rover"), how
+    long it lasted and why, neutral when your settings or a restart ended it. IPv6 shows its last 4 bytes. The NTRIP
+    filter keeps them, the Wi-Fi filter does not."""
+    ip = (192 << 24) | (168 << 16) | (2 << 8) | 50
+    recs = [jrec(1, "boot", 0, 0, 1),
+            rover_up(2, 0, 2, ip, 600, unlisted=3), rover_up(3, 1, 1, 0x2C4F7B2D, 900, v6=True),
+            rover_down(4, 1, 3, 610, 1500), rover_down(5, 0, 4, 3010, 3600), rover_down(6, 2, 2, 75, 3700),
+            rover_up(7, 0, 1, (10 << 24) | (0 << 16) | (2 << 8) | 2, 3800),
+            jrec(8, "boot", 1, 1, 1), rover_down(9, 0, 6, 40, 5), rover_down(10, 3, 5, 61, 9), rover_down(11, 3, 1, 62, 9)]
+    every, ntrip, wifi = run_ui([("journalItems", [recs, True, None]),
+                                 ("journalItems", [recs, True, ["caster_down", "caster_up", "caster_stop", "rover_connect",
+                                                                "rover_disconnect"]]),
+                                 ("journalItems", [recs, True, ["wifi_disconnect", "wifi_up", "wifi_roam"]])])
+    rows = [(r["ev"], r["det"], r.get("tone")) for r in every if "head" not in r]
+    assert rows == [
+        # The second start: its rover_connect was before the restart, so the end has no address.
+        ("Rover disconnected", "a rover, after 1 min 2 s: the rover closed the connection", "warn"),
+        ("Rover disconnected", "a rover, after 1 min 1 s: the station lost its network address", "warn"),
+        ("Rover disconnected", "a rover, after 40 s: the station restarted", ""),
+        ("Rover connected", "10.0.2.2, NTRIP 1.0", "ok"),
+        ("Rover disconnected", "a rover, after 1 min 15 s: the rover took no data for 10 s", "warn"),
+        ("Rover disconnected", "192.168.2.50, after 50 min 10 s: turned off or its settings changed", ""),
+        ("Rover disconnected", "IPv6 …:2c4f:7b2d, after 10 min 10 s: the connection was lost", "warn"),
+        ("Rover connected", "IPv6 …:2c4f:7b2d, NTRIP 1.0", "ok"),
+        ("Rover connected", "192.168.2.50, NTRIP 2.0, 3 shorter sessions not listed", "ok"),
+    ], rows
+    assert [(r["ev"], r["det"]) for r in ntrip if "head" not in r] == [x[:2] for x in rows]
+    assert [r for r in wifi if "head" not in r] == []
+    assert "slot" not in json.dumps(every).lower() and "caster" not in json.dumps(every).lower()
+
+
 def test_today_online_share_on_the_dashboard():
     """Whole numbers at 0 % and 100 % (no "0.00 %"), two decimals in between, rounded down: never "100.00 %"
     while the caster was offline for a moment."""

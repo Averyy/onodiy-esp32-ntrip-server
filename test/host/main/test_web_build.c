@@ -2530,3 +2530,199 @@ TEST_CASE("fixed-position warning: a height above sea level says so in the alert
     TEST_ASSERT_TRUE(cJSON_IsNull(at(c, "vertical_m")));
     cJSON_Delete(root);
 }
+
+/* ---- local NTRIP (Your rover) ---------------------------------------------------------------------- */
+
+TEST_CASE("status: local_caster in the admin form only, three values, off with zeros in safe mode", "[web_build]")
+{
+    fixture();
+    s_snap.lcast_enabled = true;
+    s_snap.lcast_state = LOCAL_CASTER_LISTENING;
+    s_snap.lcast_clients = 1;
+    char frag[256];
+    wj_t w;
+    wj_init_members(&w, frag, sizeof(frag));
+    web_build_section(&w, &s_snap, WEB_SEC_LOCAL_CASTER, false);
+    TEST_ASSERT_EQUAL_STRING("\"local_caster\":{\"enabled\":true,\"state\":\"listening\",\"clients\":1}", wj_text(&w));
+    TEST_ASSERT_EQUAL_STRING("local_caster", web_section_name(WEB_SEC_LOCAL_CASTER));
+    TEST_ASSERT_FALSE(web_section_public(WEB_SEC_LOCAL_CASTER));
+    wj_init_members(&w, frag, sizeof(frag));
+    web_build_section(&w, &s_snap, WEB_SEC_LOCAL_CASTER, true);
+    TEST_ASSERT_EQUAL_STRING("", wj_text(&w));
+
+    cJSON *root = build_status(false);
+    const cJSON *lc = at(root, "local_caster");
+    TEST_ASSERT_EQUAL(3, cJSON_GetArraySize(lc));
+    TEST_ASSERT_EQUAL(1, at(lc, "clients")->valueint);
+    cJSON_Delete(root);
+    root = build_status(true);
+    TEST_ASSERT_NULL(cJSON_GetObjectItem(root, "local_caster"));
+    cJSON_Delete(root);
+
+    /* Safe mode: no config (not enabled), the caster's status off with zeros. */
+    s_snap.lcast_enabled = false;
+    s_snap.lcast_state = LOCAL_CASTER_OFF;
+    s_snap.lcast_clients = 0;
+    wj_init_members(&w, frag, sizeof(frag));
+    web_build_section(&w, &s_snap, WEB_SEC_LOCAL_CASTER, false);
+    TEST_ASSERT_EQUAL_STRING("\"local_caster\":{\"enabled\":false,\"state\":\"off\",\"clients\":0}", wj_text(&w));
+}
+
+static void lcast_fixture(local_caster_cfg_t *cfg, local_caster_status_t *st)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->enabled = true;
+    strcpy(cfg->mountpoint, "onodiy");
+    strcpy(cfg->username, "rover");
+    strcpy(cfg->password, "secretpw1");   /* never in a reply, whatever the caller left in it */
+    cfg->password_set = true;
+    memset(st, 0, sizeof(*st));
+    st->state = LOCAL_CASTER_LISTENING;
+    st->port = 2101;
+    st->max_clients = LOCAL_CASTER_MAX_CLIENTS;
+    st->client_count = 2;
+    strcpy(st->clients[0].addr, "192.168.2.50");
+    st->clients[0].ntrip_version = 2;
+    st->clients[0].chunked = true;
+    st->clients[0].connected_s = 3725;
+    st->clients[0].bytes_sent = 6172000;
+    strcpy(st->clients[0].agent, "NTRIP RTKLIB/2.4.3");
+    strcpy(st->clients[1].addr, "fd00::1:2");
+    st->clients[1].ntrip_version = 1;
+    st->clients[1].connected_s = 12;
+    st->clients[1].bytes_sent = UINT64_C(0x1FFFFFFFFFFFFF);
+    st->clients[1].epochs_dropped = 3;
+    st->sessions = 4;
+    st->bytes_sent = 9120000;
+    st->refused_login = 1;
+    st->refused_not_local = 2;
+    st->refused_throttled = 3;
+    st->refused_full = 4;
+    st->refused_bad_request = 5;
+    st->stalled = 6;
+    st->listen_errno = 112;   /* only said in the error state */
+}
+
+static cJSON *build_lcast(const local_caster_cfg_t *cfg, const local_caster_status_t *st)
+{
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_local_caster(&w, cfg, st);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    return root;
+}
+
+TEST_CASE("GET /api/local-caster: config without the password, the rovers oldest first, the counters", "[web_build]")
+{
+    static local_caster_cfg_t cfg;
+    static local_caster_status_t st;
+    lcast_fixture(&cfg, &st);
+    cJSON *root = build_lcast(&cfg, &st);
+    TEST_ASSERT_NULL(strstr(s_out, "secretpw1"));
+    TEST_ASSERT_NULL(strstr(s_out, "\"password\""));
+    const cJSON *c = at(root, "config");
+    TEST_ASSERT_EQUAL(4, cJSON_GetArraySize(c));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(c, "enabled")));
+    TEST_ASSERT_EQUAL_STRING("onodiy", at(c, "mountpoint")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("rover", at(c, "username")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(c, "password_set")));
+    const cJSON *s = at(root, "status");
+    TEST_ASSERT_EQUAL_STRING("listening", at(s, "state")->valuestring);
+    TEST_ASSERT_EQUAL(2101, at(s, "port")->valueint);
+    TEST_ASSERT_EQUAL(2, at(s, "max_clients")->valueint);
+    const cJSON *list = at(s, "clients");
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(list));
+    const cJSON *r0 = cJSON_GetArrayItem(list, 0);
+    TEST_ASSERT_EQUAL(7, cJSON_GetArraySize(r0));
+    TEST_ASSERT_EQUAL_STRING("192.168.2.50", at(r0, "addr")->valuestring);
+    TEST_ASSERT_EQUAL(2, at(r0, "ntrip_version")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(r0, "chunked")));
+    TEST_ASSERT_EQUAL(3725, at(r0, "connected_s")->valueint);
+    TEST_ASSERT_EQUAL_DOUBLE(6172000.0, at(r0, "bytes_sent")->valuedouble);
+    TEST_ASSERT_EQUAL(0, at(r0, "epochs_dropped")->valueint);
+    TEST_ASSERT_EQUAL_STRING("NTRIP RTKLIB/2.4.3", at(r0, "agent")->valuestring);
+    const cJSON *r1 = cJSON_GetArrayItem(list, 1);
+    TEST_ASSERT_EQUAL_STRING("fd00::1:2", at(r1, "addr")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(r1, "chunked")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(r1, "agent")));   /* the rover sent none */
+    TEST_ASSERT_EQUAL(3, at(r1, "epochs_dropped")->valueint);
+    TEST_ASSERT_NOT_NULL(strstr(s_out, "\"bytes_sent\":9007199254740991"));
+    TEST_ASSERT_EQUAL(4, at(s, "sessions")->valueint);
+    TEST_ASSERT_EQUAL(9120000, at(s, "bytes_sent")->valueint);
+    TEST_ASSERT_EQUAL(6, at(s, "stalled")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(s, "listen_errno")));
+    const cJSON *ref = at(s, "refused");
+    TEST_ASSERT_EQUAL(5, cJSON_GetArraySize(ref));
+    TEST_ASSERT_EQUAL(2, at(ref, "not_local")->valueint);
+    TEST_ASSERT_EQUAL(1, at(ref, "login")->valueint);
+    TEST_ASSERT_EQUAL(3, at(ref, "throttled")->valueint);
+    TEST_ASSERT_EQUAL(4, at(ref, "full")->valueint);
+    TEST_ASSERT_EQUAL(5, at(ref, "bad_request")->valueint);
+    cJSON_Delete(root);
+}
+
+TEST_CASE("GET /api/local-caster: safe mode has no config; the error state says its errno; at most 2 rovers",
+          "[web_build]")
+{
+    static local_caster_cfg_t cfg;
+    static local_caster_status_t st;
+    lcast_fixture(&cfg, &st);
+    st.state = LOCAL_CASTER_ERROR;
+    st.client_count = 9;   /* more than the list holds: never read past it */
+    cJSON *root = build_lcast(NULL, &st);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "config")));
+    const cJSON *s = at(root, "status");
+    TEST_ASSERT_EQUAL_STRING("error", at(s, "state")->valuestring);
+    TEST_ASSERT_EQUAL(112, at(s, "listen_errno")->valueint);
+    TEST_ASSERT_EQUAL(LOCAL_CASTER_MAX_CLIENTS, cJSON_GetArraySize(at(s, "clients")));
+    cJSON_Delete(root);
+
+    /* Off with nothing stored: no rovers, an empty list. */
+    memset(&st, 0, sizeof(st));
+    st.port = 2101;
+    st.max_clients = LOCAL_CASTER_MAX_CLIENTS;
+    cfg.enabled = false;
+    cfg.password_set = false;
+    root = build_lcast(&cfg, &st);
+    TEST_ASSERT_EQUAL_STRING("off", at(at(root, "status"), "state")->valuestring);
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(at(root, "status"), "clients")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(at(root, "config"), "password_set")));
+    cJSON_Delete(root);
+
+    /* The longest values every field takes (an address of 45 characters, an agent of 47 with quotes to escape) fit. */
+    lcast_fixture(&cfg, &st);
+    memset(cfg.mountpoint, 'M', sizeof(cfg.mountpoint) - 1);
+    memset(cfg.username, 'U', sizeof(cfg.username) - 1);
+    for (size_t i = 0; i < LOCAL_CASTER_MAX_CLIENTS; i++) {
+        memset(st.clients[i].addr, 'a', sizeof(st.clients[i].addr) - 1);
+        memset(st.clients[i].agent, '"', sizeof(st.clients[i].agent) - 1);
+        st.clients[i].bytes_sent = UINT64_MAX;
+        st.clients[i].epochs_dropped = UINT64_MAX;
+        st.clients[i].connected_s = UINT32_MAX;
+    }
+    st.listen_errno = -2147483647 - 1;
+    st.state = LOCAL_CASTER_ERROR;
+    root = build_lcast(&cfg, &st);
+    TEST_ASSERT_EQUAL(47, strlen(at(at(root, "config"), "mountpoint")->valuestring));
+    TEST_ASSERT_EQUAL(47, strlen(at(cJSON_GetArrayItem(at(at(root, "status"), "clients"), 1), "agent")->valuestring));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("local caster states and end reasons have API names", "[web_build]")
+{
+    static const char *const states[] = { "off", "wait_network", "listening", "error" };
+    for (int i = 0; i <= LOCAL_CASTER_ERROR; i++) {
+        TEST_ASSERT_EQUAL_STRING(states[i], web_local_caster_state_name((local_caster_state_t)i));
+    }
+    TEST_ASSERT_EQUAL_STRING("unknown", web_local_caster_state_name((local_caster_state_t)(LOCAL_CASTER_ERROR + 1)));
+    static const char *const ends[] = { "none", "closed", "stalled", "lost", "settings", "network", "restart" };
+    for (int i = 0; i <= LOCAL_CASTER_END_RESTART; i++) {
+        TEST_ASSERT_EQUAL_STRING(ends[i], web_local_caster_end_name((local_caster_end_t)i));
+    }
+    TEST_ASSERT_EQUAL_STRING("unknown", web_local_caster_end_name((local_caster_end_t)(LOCAL_CASTER_END_RESTART + 1)));
+    /* Stored in the journal (rover_disconnect bits 8-15): the numbers keep their meaning. */
+    TEST_ASSERT_EQUAL(4, LOCAL_CASTER_END_SETTINGS);
+    TEST_ASSERT_EQUAL(6, LOCAL_CASTER_END_RESTART);
+}

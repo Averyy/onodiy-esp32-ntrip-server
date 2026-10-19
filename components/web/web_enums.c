@@ -208,6 +208,35 @@ const char *web_ntrip_stop_name(ntrip_stop_t v)
     return pick(s_ntrip_stop, COUNT(s_ntrip_stop), (int)v);
 }
 
+static const char *const s_lcast_state[] = {
+    [LOCAL_CASTER_OFF] = "off",
+    [LOCAL_CASTER_WAIT_NETWORK] = "wait_network",
+    [LOCAL_CASTER_LISTENING] = "listening",
+    [LOCAL_CASTER_ERROR] = "error",
+};
+_Static_assert(COUNT(s_lcast_state) == (size_t)LOCAL_CASTER_ERROR + 1u, "local caster states moved: update the table");
+
+const char *web_local_caster_state_name(local_caster_state_t v)
+{
+    return pick(s_lcast_state, COUNT(s_lcast_state), (int)v);
+}
+
+static const char *const s_lcast_end[] = {
+    [LOCAL_CASTER_END_NONE] = "none",
+    [LOCAL_CASTER_END_CLOSED] = "closed",
+    [LOCAL_CASTER_END_STALLED] = "stalled",
+    [LOCAL_CASTER_END_LOST] = "lost",
+    [LOCAL_CASTER_END_SETTINGS] = "settings",
+    [LOCAL_CASTER_END_NETWORK] = "network",
+    [LOCAL_CASTER_END_RESTART] = "restart",
+};
+_Static_assert(COUNT(s_lcast_end) == (size_t)LOCAL_CASTER_END_RESTART + 1u, "end reasons moved: update the table");
+
+const char *web_local_caster_end_name(local_caster_end_t v)
+{
+    return pick(s_lcast_end, COUNT(s_lcast_end), (int)v);
+}
+
 static const char *const s_base_mode[] = {
     [UM98X_BASE_SURVEY_IN] = "survey_in",
     [UM98X_BASE_FIXED] = "fixed",

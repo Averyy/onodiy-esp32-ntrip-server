@@ -835,6 +835,8 @@ tbody tr:last-child td { border-bottom: 0; }
 .wifi-line > .nowrap { flex: none; padding-left: 0.3em; }
 .caster-live > * + * { margin-top: 0.35rem; }
 .caster-live > .msg { margin-top: 0.6rem; }
+/* Your rover's settings: what to type into the rover; a tap selects the whole value, for a copy. */
+.copy { -webkit-user-select: all; user-select: all; }
 /* A card that holds only a row of actions (the add card): no gap above it. */
 .card > .form-actions:first-child { margin-top: 0; }
 .card > p:last-child { margin-bottom: 0; }

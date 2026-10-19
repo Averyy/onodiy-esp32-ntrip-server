@@ -4,9 +4,9 @@ This is the contract between the web backend (`components/web`) and the
 browser UI embedded in the same app image. Both sides follow it; a change to
 either side that breaks it changes this file in the same commit. The data
 behind each endpoint comes from the public headers of `station`,
-`ntrip_server`, `network`, `fw_update`, `pkg_store`, `health`, `diag`,
-`ledger`, `gnss_obs`, `settings` and `lifecycle`; field meanings follow those
-headers unless this file says otherwise.
+`ntrip_server`, `local_caster`, `network`, `fw_update`, `pkg_store`,
+`health`, `diag`, `ledger`, `gnss_obs`, `settings` and `lifecycle`; field
+meanings follow those headers unless this file says otherwise.
 
 API version: **1** (`api` in `GET /api/session` and `GET /api/status`).
 Adding fields or endpoints keeps the number; removing or re-typing a field
@@ -15,10 +15,11 @@ not know verbatim.
 
 Contents: 1 Conventions · 2 Request checks · 3 Authentication · 4 Endpoint
 index · 5 Session and setup · 6 Status · 7 WebSocket · 8 Receiver ·
-9 Receiver update sessions · 10 Casters · 11 Wi-Fi and system settings ·
-12 Updates · 13 Uploads · 14 Diagnostics · 15 System actions · 16 Captive
-portal and first setup · 17 What is refused when · 18 Server limits and
-implementation notes · 19 Open items · Appendix: enumerations.
+9 Receiver update sessions · 10 Casters · 10a Local NTRIP · 11 Wi-Fi and
+system settings · 12 Updates · 13 Uploads · 14 Diagnostics · 15 System
+actions · 16 Captive portal and first setup · 17 What is refused when ·
+18 Server limits and implementation notes · 19 Open items · Appendix:
+enumerations.
 
 ---
 
@@ -132,8 +133,8 @@ Applied to every request before any handler runs.
    body: a cross-site page cannot send a `DELETE` without a CORS preflight,
    which this server never grants. There is no CORS: no `Access-Control-*`
    header is ever sent, and `OPTIONS` gets `405`.
-4. **Sizes.** JSON bodies at most 2 KB (`PUT /api/casters/{n}/ca`: 6 KB),
-   else `413`. Uploads: section 13.
+4. **Sizes.** JSON bodies at most 2 KB (`PUT /api/casters/{n}/ca`: 6 KB;
+   `PUT /api/local-caster`: 512 bytes), else `413`. Uploads: section 13.
 5. **Bodies nobody reads.** A body is never read where nothing takes one:
    the answer goes out with `Connection: close` and the connection ends
    (section 18). A `GET` or `DELETE` route with a body:
@@ -363,6 +364,8 @@ status is on, **adm** = admin session, **claim** = section 3.
 | PUT | `/api/casters/{n}` | adm | Edit slot n | `ntrip_server_set_config` |
 | PUT, DELETE | `/api/casters/{n}/ca` | adm | Store / remove the slot's CA certificate | settings `cstN/ca_pem` |
 | POST | `/api/casters/{n}/retry` | adm | Try a stopped (or waiting) slot once now | `ntrip_server_retry_slot` |
+| GET | `/api/local-caster` | adm | Your rover: config and live status | `local_caster_get_config`, `local_caster_get_status` |
+| PUT | `/api/local-caster` | adm | Edit it, turn it on or off | `local_caster_set_config` |
 | GET | `/api/wifi` | adm | Wi-Fi state, AP, cached scan | network |
 | PUT | `/api/wifi` | adm | Station credentials, AP password | `network_set_credentials`, settings |
 | POST | `/api/wifi/scan` | adm | Fresh scan | `network_scan_start` |
@@ -511,6 +514,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
      "onocoy_ready": true, "bytes_sent": 74000000, "lag_ms_now": 40, "next_retry_s": 0, "unreached_s": 0, "hint": "",
      "stop_reason": "none"}
   ],
+  "local_caster": {"enabled": true, "state": "listening", "clients": 1},
   "health": {"level": "degraded", "last_step": "none", "step": "none", "step_phase": "none", "ladder_suspended": false,
              "factory_reset_refused": false, "recovery_mode": "full", "reboot_recheck": false,
              "reboot_hold": [], "reboot_hold_left_s": null, "reboot_cap_wait_s": null, "reboot_cap_limit": null},
@@ -552,6 +556,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
 | `receiver.signal_test` | the signal-group comparison (section 8) in short: `null` when none runs and none ended in the last 24 h of this boot; else `{"state", "phase", "group", "left_s", "decide_left_s", "outcome"}`: `state` as in `GET /api/gnss/signal-test`, `phase` 0 or 1 while switching, settling or measuring (else `null`), `group` the group being switched to, measured or (deciding) running, or the one restored to (`{"master", "slave"}`, else `null`), `left_s` the time left in the phase rounded up to 10 s, `decide_left_s` the time left to choose rounded up to a minute (`null` outside those states; rounded so the section changes rarely), `outcome` once decided (`null` while running). Admin form only |
 | `casters[]` | every slot; the full status is in `/api/casters`. `empty`: the slot has no host and is not enabled (never set up, or removed); its `name` is then `""` whatever the stored name is. In safe mode (configs not loaded) no slot is empty and every `name` is `null`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with a mountpoint and the console's username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none); `stop_reason` why the Onocoy login guard stopped the slot (`ntrip_stop_t`; `none` unless `state` is `stopped`, section 10) |
+| `local_caster` | Your rover in short (section 10a): `enabled` as its config says (`false` in safe mode, where it has none), `state` (`local_caster_state_t`; `off` in safe mode), `clients` (rovers streaming now). No times or byte counts (`GET /api/local-caster` has them), so the section changes only when one of the three does; admin form only |
 | `alerts[]` | health's alerts (`source: "health"`, `health_alert_t`) and the station's (`source: "station"`, `station_alert_t`). A `failed` health level always comes with the alert that says why (below); `config_failed` carries `retry_in_s` and `auto_retry` (as `config_retry_in_s` and `config_auto_retry` in `GET /api/gnss`); `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`); `fixed_far` (the fixed base position looks wrong: more than 50 m from the receiver's own solution, horizontally or in height, or its height is the receiver's height above sea level: section 8, `fixed_check`) carries `horizontal_m`, `vertical_m`, `distance_m`, `height_only` and `sea_level` as `fixed_check` does, in whole metres |
 | `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without an enabled protected slot that is set up (`onocoy_ready`), or without a trusted clock. Information only, never a gate |
 | health alerts that say why there is no RTCM | set from the GNSS ladder's evidence while it is in its last step (`failed`), or while a stall is only reported (`alerts_only`, `degraded`; also the grace of a step the station ran before the user chose `alerts_only`); `no_satellites` and `no_rtcm` also while the recovery runs (`recovering`: a step in progress, a step whose grace waits while a session of the station's own runs, or between two of its steps), as soon as the receiver answered after its last RTCM frame within the last 90 s (as `receiver.responding` reads it), so the antenna hint comes with the recovery; a session of the station's own (an apply, the applied check's, one after a receiver restart) never drops the level or the reason meanwhile: `receiver_power` (bytes but no answer after the receiver reset: power-cycle the station), `receiver_silent` (nothing usable from the receiver and no answer to commands: power-cycle the station), `no_satellites` (the receiver answers, and its own position sentence says no fix with no satellites used: check that the antenna is on the socket marked M and sees the sky), `no_rtcm` (the receiver answers, by text lines or replies to the station, but sends no RTCM: most often the antenna; only while its last answer is at most 90 s old: older, it is `receiver_silent` in the last step and in `alerts_only`, and no reason while a step runs), `rx_held` (the first configuration is held, `first_apply_held`, and the receiver answers: no RTCM is expected yet; level `degraded`, never `failed`, and the ladder declares no stall for it). None of them while the station finds no receiver: its own `no_receiver` alert says that. With `no_satellites` or `no_rtcm` the ladder does not reset the receiver again on its 10-min retry pass (a silent receiver gets the link restart and the rescan only); the same after a receiver reset that brought RTCM back only briefly (the stall within 60 s of it) when the receiver answers |
@@ -566,7 +571,8 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `update` | the banner (section 12); admin form only |
 
 In safe mode the receiver section shows `state: "idle"` with the journal
-read from settings, and every caster `disabled`.
+read from settings, every caster `disabled`, and `local_caster`
+`{"enabled": false, "state": "off", "clients": 0}`.
 
 Public form (no session, public status on):
 
@@ -1697,6 +1703,80 @@ removes it. The slot reconnects. `200` with the slot entry. Errors:
 
 ---
 
+## 10a. Local NTRIP
+
+The station serves its own RTCM to the owner's rover on the home network
+(`local_caster.h`; the UI calls it "Your rover", never a caster or a
+server). NTRIP 1.0 and 2.0 on TCP port 2101 (`CONFIG_LOCAL_CASTER_PORT`,
+fixed), one mountpoint, one username and password, at most 2 rovers at
+once (`LOCAL_CASTER_MAX_CLIENTS`). Only peers with a private, link-local
+or loopback address connect, never the station's IPv4 gateway (a router
+that masquerades a port forward) and never over the setup hotspot. Off by
+default. The rover's sessions are journalled (`rover_connect`,
+`rover_disconnect`, section 14).
+
+### `GET /api/local-caster` (adm)
+
+```json
+{
+  "config": {"enabled": true, "mountpoint": "onodiy", "username": "rover", "password_set": true},
+  "status": {
+    "state": "listening", "port": 2101, "max_clients": 2,
+    "clients": [
+      {"addr": "192.168.2.50", "ntrip_version": 2, "chunked": true, "connected_s": 3725,
+       "bytes_sent": 6172000, "epochs_dropped": 0, "agent": "NTRIP RTKLIB/2.4.3"}
+    ],
+    "sessions": 4, "bytes_sent": 9120000, "stalled": 0, "listen_errno": null,
+    "refused": {"not_local": 0, "login": 1, "throttled": 0, "full": 0, "bad_request": 0}
+  }
+}
+```
+
+| Field | Notes |
+|---|---|
+| `config` | `local_caster_get_config()`; `null` in safe mode (not loaded). With nothing stored: off, the mountpoint the station's hostname (`sys/hostname`, else the build's), the username `rover`, no password. The password is never returned: `password_set` says whether one is stored |
+| `status.state` | `local_caster_state_t`: `off`; `wait_network` (on, but the station has no IPv4 address on the home network); `listening`; `error` (the port could not be opened; tried again every 10 s) |
+| `status.port`, `status.max_clients` | the build's: 2101 and 2 |
+| `status.clients[]` | the rovers streaming now, oldest first: `addr` (IPv6 in RFC 5952 form, an IPv4-mapped address as IPv4), `ntrip_version` (2 when its request said `Ntrip-Version: Ntrip/2.0`, else 1), `chunked` (its data goes in HTTP chunks: NTRIP 2.0 over HTTP/1.1), `connected_s` (since its success reply), `bytes_sent` (RTCM bytes its socket took; no reply header, no chunk framing), `epochs_dropped` (whole epochs the hub dropped because it read too slowly), `agent` (its `User-Agent`, printable ASCII cut to 47; `null` when it sent none) |
+| `status.sessions`, `status.bytes_sent`, `status.stalled` | since boot: sessions started, RTCM bytes sent in all of them, sessions closed because the rover took no data for 10 s |
+| `status.listen_errno` | the `errno` of the socket, bind or listen that failed (`ENOMEM`: no task or no memory); `null` unless `state` is `error` |
+| `status.refused` | since boot: `not_local` (closed at once without a reply: not a local address, the gateway, or over the setup hotspot), `login` (`401`: a wrong or missing username or password), `throttled` (`429`: too many wrong logins, from that address or in total), `full` (`503`: 2 rovers streaming or no free hub consumer, or closed at once with 4 connections open), `bad_request` (`400` or `403`: not an NTRIP `GET`, too long, not complete within 5 s, or from a web browser) |
+
+### `PUT /api/local-caster` (adm)
+
+Body: any of `{"enabled": bool, "mountpoint": string, "username": string,
+"password": string}`, at most 512 bytes. Fields left out keep their stored
+value; `password_set` is ignored. A `password` that is empty or left out
+keeps the stored one (a stored password is never removed: turn the feature
+off instead). The server merges the body into `local_caster_get_config()`
+and hands it to `local_caster_set_config()`, which checks, stores (one
+blob, `lcast/cfg`) and applies it; the server wipes its copy of the
+password afterwards. Sessions end when the feature is turned off or the
+mountpoint, username or password changes (`rover_disconnect`, reason
+`settings`): they logged in under the old values.
+
+Rules (`400 invalid_field` with `field` and the rule in `message`, in the
+words of `local_caster_check_config()`):
+- `mountpoint`: `1 to 47 letters, digits, dots, hyphens or underscores`
+  (a rover's request matches it ignoring case);
+- `username`: `1 to 31 letters, digits, dots, hyphens or underscores`;
+- `password`: `8 to 63 characters, letters, digits and symbols, no spaces`
+  (printable ASCII without the space, `:` allowed); `needed to turn this on`
+  for `"enabled": true` with none given and none stored.
+
+A wrong JSON type, or a string longer than its field holds, is
+`invalid_field` for that field with the same rule (`enabled` that is not a
+boolean: the default message).
+
+`200` with the GET body. Also `400 bad_json`, `409 safe_mode` and
+`409 settings_unavailable` (both checked before the body), `413 too_large`,
+`500 internal` with the `esp_err_t` name in `message`: a settings write
+that failed (nothing changed), or `ESP_ERR_NO_MEM` when the task could not
+be created (the config is stored, and `state` is `error` with
+`listen_errno` `ENOMEM`).
+
+---
+
 ## 11. Wi-Fi and system settings
 
 ### `GET /api/wifi` (adm)
@@ -2433,6 +2513,8 @@ by `kind` (integers; only a `wifi_disconnect` entry's `b` can be `null`):
 | `caster_stop` | slot (bits 0-7) \| stop reason (`ntrip_stop_t`, bits 8-15): the Onocoy login guard stopped the slot until the user acts (once per stop) | 0 |
 | `wifi_up` | connect attempts during the outage | outage s |
 | `wifi_roam` | the station moved to another access point of its network and got its address there (no `wifi_disconnect` or `wifi_up` for it): channel before (bits 0-7) \| channel after (bits 8-15) \| who started it (bits 16-23: 1 the access point asked, 2 the station found a clearly stronger one, 3 asked for on the bench console) \| bit 24: its reconnect found no stronger one after all and it stayed \| bit 25: the address and the connections were kept (a channel of 0 = unknown) | RSSI before (bits 0-7) \| after (bits 8-15), each a signed byte in dBm, 0 = unknown \| seconds without an address, with bit 25 without a link (bits 16-30) |
+| `rover_connect` | a rover's session (section 10a) that has streamed 10 s, journalled then (at most 6 sessions an hour are listed; the others are only counted): connection (bits 0-3) \| NTRIP version (bits 4-5) \| IPv6 (bit 6) \| seconds since its success reply (bits 8-15) \| sessions not listed since the previous listed one, shorter ones included (bits 16-30) | its IPv4 address as `(a << 24) \| (b << 16) \| (c << 8) \| d` (read it as `b >>> 0`); for IPv6, the address's last 4 bytes |
+| `rover_disconnect` | the end of a listed session: connection (bits 0-3) \| end reason (`local_caster_end_t`, bits 8-15) | session s, since its success reply |
 | `rx_maintenance` | 1 entry, 0 exit | chosen duration s (entry), time spent s (exit) |
 | `rx_boot` | after a power-on or brownout reset, whether the receiver kept running (`diag_rx_boot_t`): 1 kept running (only the ESP32 was reset, its reset pin, or only its supply dipped), 2 restarted with it (the power was cut, or dipped for both), 3 unknown; written once per power-on or brownout boot, when the station knows (`station.rx_boot` in `/api/health`); only a power-on boot's 2 counts toward `power_lost` | what told it (`diag_rx_boot_by_t`): 0 nothing, 1 its restart banner before any data, 2 its version log's time since its restart, 3 RTCM or NMEA at once |
 | `live_view` | event (bits 0-7: 1 opened, 2 extended, 3 closed, 4 satellite-in-view output on, 5 off) \| detail << 8 (closed: end reason; on/off: 0 accepted, 1 rejected, 2 no answer, 3 not sent) | opened: window s; extended: s left; closed: s open; on/off: ms the lease held RTCM back |
@@ -2656,6 +2738,7 @@ client stays connected): the claim works again over that AP. BOOT held
 |---|---|---|---|---|---|
 | Profile save / apply / lock / re-survey | `journal_open` | `journal_open` | save ✓, others `safe_mode` | ✓ | ✓ |
 | Caster edit, retry | ✓ | ✓ | `safe_mode` | ✓ | ✓ |
+| Your rover (local NTRIP) edit | ✓ | ✓ | `safe_mode` | ✓ | ✓ |
 | Wi-Fi edit, scan | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Update check | ✓ | ✓ | ✓ | `busy` | stage 1: `app_trial` |
 | App install / upload | `journal_open` | ✓ | ✓ | `busy` | stage 1, verify window: `app_trial` |
@@ -2697,8 +2780,8 @@ boot), and a journal in state `unknown` allows no receiver update action.
 - **Server:** `esp_http_server`, task priority 5, 8 KB stack in internal
   RAM; `max_open_sockets` 7 (the lwIP socket budget counts on it),
   `max_uri_handlers` 72 (`WEB_MAX_URI_HANDLERS`; a static assertion keeps
-  the API routes, `/ws` and the catch-all within it) with wildcard
-  matching for `/api/casters/*`,
+  the API routes, `/ws` and the catch-all within it: 69 routes today, 71
+  handlers) with wildcard matching for `/api/casters/*`,
   `max_req_hdr_len` 2048 (cookies and long browser headers), receive
   timeout 4 s (a client that sends nothing that long is dropped while it
   sends headers; a body read gives up after three in a row), send timeout
@@ -2962,6 +3045,8 @@ after it). The journal's `a` and `b` carry these C values.
 | `ntrip_trust_t` | `bundle`, `custom_ca`, `insecure` |
 | `ntrip_backoff_profile_t` | `fast`, `standard`, `polite` |
 | `ntrip_stop_t` | `none`, `rejected`, `login_blocked`, `in_use`, `kicked`, `duplicate`, `banned` |
+| `local_caster_state_t` | `off`, `wait_network`, `listening`, `error` |
+| `local_caster_end_t` | `none`, `closed` (the rover closed the connection), `stalled` (the rover took no data for 10 s), `lost` (the connection failed: a reset, keepalive or socket error), `settings` (turned off, or its mountpoint, username or password changed), `network` (the station's IPv4 address went away or changed), `restart` (a planned restart) |
 | `um98x_base_mode_t` | `survey_in`, `fixed` |
 | `um98x_pos_source_t` | `none`, `survey`, `averaged`, `user` |
 | `um98x_setting_t` | `unknown`, `on`, `off` |
@@ -2993,7 +3078,7 @@ after it). The journal's `a` and `b` carry these C values.
 | `ledger_clock_t` | `none`, `sntp`, `gnss` |
 | `gnss_sys_t` | `gps`, `glonass`, `galileo`, `sbas`, `qzss`, `beidou`, `navic` |
 | `gnss_band_t` | `l1`, `l2`, `l5`, `l6`, `e5ab` |
-| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21, `sg_test` = 22, `rx_boot` = 23, `fixed_check` = 24, `wifi_roam` = 25 |
+| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21, `sg_test` = 22, `rx_boot` = 23, `fixed_check` = 24, `wifi_roam` = 25, `rover_connect` = 26, `rover_disconnect` = 27 |
 | `station_sgt_state_t` | `idle`, `switching`, `settling`, `measuring`, `deciding`, `restoring` |
 | `station_sgt_outcome_t` | (none: `null`), `kept`, `timed_out`, `cancelled`, `rejected`, `failed`, `interrupted` |
 | `station_sgt_res_status_t` | `pending`, `measuring`, `done`, `rejected` |

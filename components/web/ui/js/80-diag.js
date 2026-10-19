@@ -818,6 +818,30 @@ function connRow(e, back) {
   }
 }
 
+/* A rover's address from its rover_connect record: IPv4 from b; IPv6 (a bit 6) as the last 4 bytes, which b holds. */
+function roverAddr(e) {
+  const b = e.b >>> 0;
+  if ((e.a >>> 6) & 1) return 'IPv6 …:' + (b >>> 16).toString(16) + ':' + (b & 0xffff).toString(16);
+  return [b >>> 24, (b >>> 16) & 0xff, (b >>> 8) & 0xff, b & 0xff].join('.');
+}
+
+/*
+ * A rover's session in words: [event, details, tone]. Its start (journalled
+ * once it streamed 10 s): the address, the NTRIP version and the shorter
+ * sessions not listed before it. Its end: the address of its start (from:
+ * null when not in this start's records), how long it lasted, why (neutral
+ * when the owner's own settings or a restart ended it).
+ */
+function roverEvent(e, from) {
+  const a = e.a >>> 0, why = (a >>> 8) & 0xff, n = (a >>> 16) & 0x7fff;
+  if (e.kind === 'rover_connect') {
+    return [J.kind.rover_connect, roverAddr(e) + ', NTRIP ' + ((a >>> 4) & 3) + '.0' +
+      (n ? ', ' + plural(n, 'shorter session', 'shorter sessions') + ' not listed' : ''), 'ok'];
+  }
+  return [J.kind.rover_disconnect, (from ? roverAddr(from) : 'a rover') + ', after ' + fmt.dur(e.b) +
+    (J.roverEnd[why] ? ': ' + J.roverEnd[why] : ''), why === 4 || why === 6 ? '' : 'warn'];
+}
+
 /* The journal's connection records (casters and Wi-Fi drops and returns; a move between access points is a row of its own); key: the caster's slot, or the Wi-Fi. */
 const isConn = e => /^(caster|wifi)_/.test(e.kind) && e.kind !== 'wifi_roam';
 const connKey = e => (e.kind.indexOf('wifi') === 0 ? 'w' : 'c' + (e.a & 0xff));
@@ -1150,7 +1174,7 @@ const EV_FILTER = [
   ['all', 'All events', null],
   ['starts', 'Starts and restarts', ['boot', 'session', 'reboot', 'safe_mode', 'rx_boot']],
   ['recovery', 'Recovery', ['ladder_step']],
-  ['casters', 'NTRIP', ['caster_down', 'caster_up', 'caster_stop']],
+  ['casters', 'NTRIP', ['caster_down', 'caster_up', 'caster_stop', 'rover_connect', 'rover_disconnect']],
   ['wifi', 'Wi-Fi', ['wifi_disconnect', 'wifi_up', 'wifi_roam']],
   ['updates', 'Updates', ['app_update', 'app_revert', 'gnss_flash']],
   ['receiver', 'Receiver', ['rx_maintenance', 'live_view', 'sg_test', 'fixed_check']],
@@ -1196,6 +1220,15 @@ function journalItems(entries, atStart, kinds) {
         down[key] = null;
       }
     }
+    /* A rover's end: the start of the same connection (a bits 0-3) before it in this start, used once. */
+    const roverOf = new Map(), roverUp = {};
+    for (const e of es) {
+      if (e.kind === 'rover_connect') roverUp[e.a & 0xf] = e;
+      else if (e.kind === 'rover_disconnect') {
+        roverOf.set(e, roverUp[e.a & 0xf] || null);
+        roverUp[e.a & 0xf] = null;
+      }
+    }
     /* A sky session (opened, extended, satellite output on, closed, output off) is one row, at its newest record. */
     const skyOf = new Map();
     let ses = null;
@@ -1235,6 +1268,9 @@ function journalItems(entries, atStart, kinds) {
         const back = backOf.get(e);
         const c = connRow(connOf(e), back && connOf(back));
         rows.push(Object.assign(when, { k: [e.kind, connKey(e), !!back].join('|'), seq: e.seq, ev: c[0], det: c[1], tone: c[2] }));
+      } else if (e.kind === 'rover_connect' || e.kind === 'rover_disconnect') {
+        const c = roverEvent(e, roverOf.get(e));
+        rows.push(Object.assign(when, { k: e.kind + '|' + c[1], seq: e.seq, ev: c[0], det: c[1], tone: c[2] }));
       } else {
         /* A recovery step under its recovery's name ("Receiver recovery"); a start and an end (maintenance, the sky) never fold together. */
         const sub = e.kind === 'ladder_step' || e.kind === 'rx_maintenance' || e.kind === 'data_loss' ? e.a :

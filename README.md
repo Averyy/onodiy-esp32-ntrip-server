@@ -132,6 +132,9 @@ the receiver, and opening the receiver's USB-C does not reset it either.
 5. **Web UI** — Wi-Fi setup, NTRIP configuration, live status, firmware updates, and a
    signal/satellite view.
 6. **Health monitoring** — GNSS watchdog, auto-recovery, and data-loss counters.
+7. **Your rover** — a local NTRIP caster for your own rover on the home network
+   (NTRIP 1.0 and 2.0, one mountpoint, at most 2 rovers, local addresses only); see
+   [Your rover](#your-rover-local-ntrip).
 
 ## Repository layout
 
@@ -376,6 +379,28 @@ device already uses that name the station takes `onodiy-2` and the web page
 says so), and to its IP address, which your router's device list shows under the
 station name. Settings shows both as links.
 
+## Your rover (local NTRIP)
+
+The station can send corrections straight to your own rover on your home network,
+with no internet in between. On the **NTRIP** page, turn on **Your rover** and choose
+a password. Then set the rover's NTRIP client to:
+
+| Setting | Value |
+|---|---|
+| Host | `onodiy.local`, or the station's IP address (the card shows both; use the IP address if the rover cannot find `.local` names) |
+| Port | `2101` |
+| Mountpoint | the one on the card (default: the station's name, `onodiy`) |
+| Username / password | the ones on the card (default username `rover`; the password is the one you chose) |
+| NTRIP version | 1.0 or 2.0. If your rover shows garbled data with 2.0, choose 1.0 |
+
+At most 2 rovers at once. Only devices on your local network can connect: the
+station refuses addresses outside the private ranges, the router's own address and
+the station's setup hotspot, so a port forward does not expose it. Do not forward
+port 2101 anyway.
+
+This is for your own rover only. Onocoy's terms for its loopback stream allow
+internal use only, so do not share this stream with others.
+
 ## Recovery (planned behaviour)
 
 - **Forgot the admin password:** hold the **BOOT** button (printed `BOT`, next to the
@@ -394,8 +419,8 @@ station name. Settings shows both as links.
   signal is weak and another node is clearly stronger; never during a firmware update.
   A move that takes only a few seconds keeps the station's address and the NTRIP
   connections; a slower one drops them briefly. Each move shows in Logs > History.
-- **Factory reset:** hold **BOOT** for 20 s. Wi-Fi, admin password, NTRIP servers and
-  receiver profile are erased; the station restarts in setup mode. Refused while a
+- **Factory reset:** hold **BOOT** for 20 s. Wi-Fi, admin password, NTRIP servers, Your
+  rover and the receiver profile are erased; the station restarts in setup mode. Refused while a
   receiver firmware update is running.
 - **Safe mode:** after repeated crashes the station keeps Wi-Fi, the web UI, update
   checks and app installs running but turns off the receiver path and NTRIP streaming. It retries a normal

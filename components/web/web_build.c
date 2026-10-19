@@ -268,6 +268,7 @@ static const char *const s_section_names[WEB_SEC_COUNT] = {
     [WEB_SEC_ALERTS] = "alerts",
     [WEB_SEC_AVAILABILITY] = "availability",
     [WEB_SEC_UPDATE] = "update",
+    [WEB_SEC_LOCAL_CASTER] = "local_caster",
 };
 
 const char *web_section_name(web_section_t sec)
@@ -631,6 +632,17 @@ static void sec_update(wj_t *w, const web_status_snap_t *s)
     wj_obj_close(w);
 }
 
+/* Your rover in short: on, the state, the rovers streaming. No times or byte counts (GET /api/local-caster has
+ * them), so the section changes only when one of the three does. */
+static void sec_local_caster(wj_t *w, const web_status_snap_t *s)
+{
+    wj_obj_open(w, "local_caster");
+    wj_bool(w, "enabled", s->lcast_enabled);
+    wj_str(w, "state", web_local_caster_state_name(s->lcast_state));
+    wj_uint(w, "clients", s->lcast_clients);
+    wj_obj_close(w);
+}
+
 void web_build_section(wj_t *w, const web_status_snap_t *s, web_section_t sec, bool pub)
 {
     if (pub && !web_section_public(sec)) {
@@ -660,6 +672,9 @@ void web_build_section(wj_t *w, const web_status_snap_t *s, web_section_t sec, b
         break;
     case WEB_SEC_UPDATE:
         sec_update(w, s);
+        break;
+    case WEB_SEC_LOCAL_CASTER:
+        sec_local_caster(w, s);
         break;
     default:
         break;
@@ -728,6 +743,7 @@ void web_build_status(wj_t *w, const web_status_snap_t *s, bool pub)
         web_build_caster_summary(w, s, i, pub);
     }
     wj_arr_close(w);
+    web_build_section(w, s, WEB_SEC_LOCAL_CASTER, pub);
     web_build_section(w, s, WEB_SEC_HEALTH, pub);
     web_build_section(w, s, WEB_SEC_ALERTS, pub);
     web_build_section(w, s, WEB_SEC_AVAILABILITY, pub);
@@ -1732,6 +1748,69 @@ void web_build_onocoy_preset(wj_t *w, const ntrip_caster_cfg_t *p, uint16_t tls_
     wj_uint(w, "tls_port", tls_port);
     wj_int(w, "ntrip_version", p->proto == NTRIP_PROTO_V2 ? 2 : 1);
     wj_str(w, "backoff_profile", web_ntrip_backoff_name(p->backoff_profile));
+    wj_obj_close(w);
+}
+
+/* ---- local NTRIP (Your rover) ------------------------------------------------------------------- */
+
+/* A text field of the caster's (terminated by contract; bounded here all the same), null when empty. */
+static void lcast_text(wj_t *w, const char *key, const char *s, size_t size)
+{
+    size_t n = strnlen(s, size);
+    if (n == 0) {
+        wj_null(w, key);
+    } else {
+        wj_strn(w, key, s, n);
+    }
+}
+
+void web_build_local_caster(wj_t *w, const local_caster_cfg_t *cfg, const local_caster_status_t *st)
+{
+    wj_obj_open(w, NULL);
+    if (cfg == NULL) {
+        wj_null(w, "config");
+    } else {
+        wj_obj_open(w, "config");
+        wj_bool(w, "enabled", cfg->enabled);
+        wj_strn(w, "mountpoint", cfg->mountpoint, strnlen(cfg->mountpoint, sizeof(cfg->mountpoint)));
+        wj_strn(w, "username", cfg->username, strnlen(cfg->username, sizeof(cfg->username)));
+        wj_bool(w, "password_set", cfg->password_set);
+        wj_obj_close(w);
+    }
+    wj_obj_open(w, "status");
+    wj_str(w, "state", web_local_caster_state_name(st->state));
+    wj_uint(w, "port", st->port);
+    wj_uint(w, "max_clients", st->max_clients);
+    wj_arr_open(w, "clients");
+    for (size_t i = 0; i < st->client_count && i < LOCAL_CASTER_MAX_CLIENTS; i++) {
+        const local_caster_client_t *c = &st->clients[i];
+        wj_obj_open(w, NULL);
+        lcast_text(w, "addr", c->addr, sizeof(c->addr));
+        wj_uint(w, "ntrip_version", c->ntrip_version);
+        wj_bool(w, "chunked", c->chunked);
+        wj_uint(w, "connected_s", c->connected_s);
+        wj_uint(w, "bytes_sent", c->bytes_sent);
+        wj_uint(w, "epochs_dropped", c->epochs_dropped);
+        lcast_text(w, "agent", c->agent, sizeof(c->agent));
+        wj_obj_close(w);
+    }
+    wj_arr_close(w);
+    wj_uint(w, "sessions", st->sessions);
+    wj_uint(w, "bytes_sent", st->bytes_sent);
+    wj_uint(w, "stalled", st->stalled);
+    if (st->state == LOCAL_CASTER_ERROR) {
+        wj_int(w, "listen_errno", st->listen_errno);
+    } else {
+        wj_null(w, "listen_errno");
+    }
+    wj_obj_open(w, "refused");
+    wj_uint(w, "not_local", st->refused_not_local);
+    wj_uint(w, "login", st->refused_login);
+    wj_uint(w, "throttled", st->refused_throttled);
+    wj_uint(w, "full", st->refused_full);
+    wj_uint(w, "bad_request", st->refused_bad_request);
+    wj_obj_close(w);
+    wj_obj_close(w);
     wj_obj_close(w);
 }
 

@@ -29,6 +29,7 @@
 #include "health.h"
 #include "ledger.h"
 #include "lifecycle.h"
+#include "local_caster.h"
 #include "network.h"
 #include "ntrip_server.h"
 #include "pkg_store.h"
@@ -77,6 +78,8 @@ EXT_RAM_BSS_ATTR static gnss_obs_live_t s_live_totals;
 EXT_RAM_BSS_ATTR static char s_text[LOG_PAGE + 1];
 EXT_RAM_BSS_ATTR static um98x_preview_step_t s_preview[UM98X_PREVIEW_MAX];
 EXT_RAM_BSS_ATTR static station_sg_test_t s_sgt_view;
+EXT_RAM_BSS_ATTR static local_caster_cfg_t s_lcfg;
+EXT_RAM_BSS_ATTR static local_caster_status_t s_lst;
 
 /* ---- shared helpers ------------------------------------------------------------------------ */
 
@@ -205,6 +208,11 @@ void web_snap_status(web_status_snap_t *s)
             memset(&s->cst[i], 0, sizeof(s->cst[i]));
         }
     }
+    /* Your rover: on as its config says (none in safe mode: off), its state and the rovers streaming. */
+    s->lcast_enabled = local_caster_get_config(&s_lcfg) == ESP_OK && s_lcfg.enabled;
+    local_caster_get_status(&s_lst);
+    s->lcast_state = s_lst.state;
+    s->lcast_clients = s_lst.client_count;
     if (health_get_status(&s->health) != ESP_OK) {
         memset(&s->health, 0, sizeof(s->health));
         s->health.rtcm_gap_ms = UINT32_MAX;
@@ -1375,6 +1383,78 @@ static esp_err_t h_caster_post(web_req_t *r)
     return accepted(r->req);
 }
 
+/* ---- local NTRIP (Your rover) ------------------------------------------------------------------------------ */
+
+static esp_err_t send_local_caster(httpd_req_t *req)
+{
+    bool have = local_caster_get_config(&s_lcfg) == ESP_OK;
+    local_caster_get_status(&s_lst);
+    web_resp_t resp;
+    resp_begin(&resp, req, 200);
+    web_build_local_caster(&resp.w, have ? &s_lcfg : NULL, &s_lst);
+    return web_resp_end(&resp);
+}
+
+static esp_err_t h_lcast_get(web_req_t *r)
+{
+    return send_local_caster(r->req);
+}
+
+/* The words local_caster_check_config() has for a field the parser refused before it got there (the wrong JSON type,
+ * or longer than the field holds): asked with a value that breaks that field's rule. NULL for "enabled". */
+static const char *lcast_rule(const char *field)
+{
+    local_caster_cfg_t probe = { .mountpoint = "x", .username = "x" };
+    if (field == NULL) {
+        return NULL;
+    } else if (strcmp(field, "mountpoint") == 0) {
+        probe.mountpoint[0] = '\0';
+    } else if (strcmp(field, "username") == 0) {
+        probe.username[0] = '\0';
+    } else if (strcmp(field, "password") == 0) {
+        strlcpy(probe.password, " ", sizeof(probe.password));
+    } else {
+        return NULL;
+    }
+    const char *f = NULL;
+    const char *rule = NULL;
+    (void)local_caster_check_config(&probe, true, &f, &rule);
+    return rule;
+}
+
+static esp_err_t h_lcast_put(web_req_t *r)
+{
+    if (local_caster_get_config(&s_lcfg) != ESP_OK) {
+        return web_send_err(r->req, WEB_ERR_SAFE_MODE);
+    }
+    if (!settings_ok()) {
+        return web_send_err(r->req, WEB_ERR_SETTINGS_UNAVAILABLE);
+    }
+    local_caster_cfg_t next;
+    web_bad_t b = { 0 };
+    if (!web_parse_local_caster_put(r->body, &s_lcfg, &next, &b)) {
+        if (b.err == WEB_ERR_INVALID_FIELD && b.rule == NULL) {
+            b.rule = lcast_rule(b.field);
+        }
+        return bad(r->req, &b);
+    }
+    const char *field = NULL;
+    const char *rule = NULL;
+    esp_err_t err = local_caster_set_config(&next, &field, &rule);
+    memset(next.password, 0, sizeof(next.password));
+    switch (err) {
+    case ESP_OK:
+        ESP_LOGI(TAG, "local NTRIP saved: %s", next.enabled ? "on" : "off");
+        return send_local_caster(r->req);
+    case ESP_ERR_INVALID_ARG:
+        return web_send_error(r->req, WEB_ERR_INVALID_FIELD, rule, field, UINT32_MAX, NULL, NULL);
+    case ESP_ERR_INVALID_STATE:
+        return web_send_err(r->req, WEB_ERR_SAFE_MODE);
+    default:
+        return web_send_internal(r->req, err);
+    }
+}
+
 /* ---- Wi-Fi and system --------------------------------------------------------------------------------------- */
 
 static bool ap_password_set(void)
@@ -2332,6 +2412,9 @@ const web_route_t web_api_routes[] = {
       .max_body = WEB_JSON_MAX_CA, .fn = h_caster_put },
     ROUTE("/api/casters/*", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_caster_delete),
     ROUTE("/api/casters/*", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_caster_post),
+    ROUTE("/api/local-caster", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_lcast_get),
+    { .uri = "/api/local-caster", .method = HTTP_PUT, .access = WEB_ACC_ADMIN, .body = WEB_BODY_JSON,
+      .max_body = WEB_JSON_MAX_LCAST, .fn = h_lcast_put },
     ROUTE("/api/wifi", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_wifi_get),
     ROUTE("/api/wifi", HTTP_PUT, WEB_ACC_ADMIN, WEB_BODY_JSON, h_wifi_put),
     ROUTE("/api/wifi/scan", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_wifi_scan),
