@@ -7,15 +7,17 @@
 # ///
 """QEMU end to end: recorded RTCM through the firmware to a caster on this machine.
 
-    uv run tools/qemu/e2e.py [--out DIR] [--scenario stream|onocoy-guard|signal-test|all] [--long]
+    uv run tools/qemu/e2e.py [--out DIR] [--scenario stream|onocoy-guard|local-caster|signal-test|all] [--long]
                              [--caster fake|docker] [--ntrip-version 1|2] [--fixture PATH] [--observe S]
 
 Needs the ESP-IDF environment and a QEMU build (tools/qemu/run.sh
 --build-only), like smoke.py. Standard library only: the bench tools it
-uses (tools/bench rtcm_replay.py, fake_caster.py and benchlib) are imported
-by path and need no third-party package. Everything stays on this machine:
-the replay and the casters listen on 127.0.0.1, which the emulated station
-reaches as 10.0.2.2.
+uses (tools/bench rtcm_replay.py, fake_caster.py, ntrip_client.py and
+benchlib) are imported by path and need no third-party package. Everything
+stays on this machine: the replay and the casters listen on 127.0.0.1,
+which the emulated station reaches as 10.0.2.2, and the station's own
+caster for a rover is forwarded to a free port on 127.0.0.1 (run.sh
+--ntrip-port).
 
 What it does:
   1. replays the fixture (default: test/fixtures/rtcm/centipede_LAX_30ep.rtcm3,
@@ -52,6 +54,39 @@ What it does:
      extension with the time it set, and GET /api/gnss agrees; a restart
      during it (the replay paused across it) resumes it with its time left
      (never more, at most 5 s less) and the station only listens;
+  scenario "local-caster" (the station's own caster for a rover, "Your
+  rover"; with --scenario all right after "stream", whose slot 1 session
+  to the fake caster is the upstream; every rover is 10.0.2.2 to the
+  station, a private address, and the QEMU build has no gateway rule):
+  5. off by default (the forwarded port closed at once; GET
+     /api/local-caster off, the host name as mountpoint, user rover;
+     /api/health hub.consumers 4); PUT on (mountpoint ROVER, a random
+     password that is never returned): listening within 5 s and its
+     console line; the source table over NTRIP 1.0 and 2.0 byte for byte
+     with one STR record (19 fields, ROVER, the host name, RTCM 3.3, the
+     fixture's message types and constellations, 0.00/0.00, B), also for
+     GET /NOPE; 401 with the realm for a wrong password (1.0, 2.0) and for
+     no login; rover A (2.0, chunked) and B (1.0, the mountpoint in lower
+     case) read 60 s: the exact reply heads, data from 0xD3 on, each record
+     strict in fixture order without a gap, A's chunks whole frames, and
+     each record frame for frame the upstream's (aligned at the nearest
+     loop) over 50 s; GET /api/local-caster lists both (10.0.2.2, versions
+     2 and 1, chunked, the agent, bytes_sent within 5 % of what each
+     counted), /api/status 2 rovers, hub.consumers 6; a third rover gets
+     503 after a good login, 401 after a wrong one; B leaves and C
+     (SO_RCVBUF 4096) never reads: the station closes C 10 s after its
+     bytes_sent stopped growing (stalled +1) while A, slot 1 (streaming
+     throughout, nothing dropped) and the upstream record since the
+     scenario began go on without a gap; a request that never ends closed
+     5-8 s after the connect; Origin and Sec-Fetch-Site get 403; after a
+     good login, 5 wrong ones, then the right one gets 429 with Retry-After
+     and streams after it; the journal lists A (2.0), B (1.0, closed) and
+     C (stalled) from 10.0.2.2; turned off, A gets the last chunk and the
+     close within 1 s (rover_disconnect settings, hub.consumers 4, the port
+     closed again); the "lcast" task keeps 1024 B of stack; on again, a
+     rover sees a clean close before a restart (the replay paused across
+     it) and the console names it; after the boot the station listens with
+     the stored password; the rover password never reaches the console;
   scenario "signal-test" (the replay answers as a scripted UM982,
   benchlib.um982_sim; with --scenario all it runs last, under 10 min):
   5. a fixed profile (the stream's own position) through PUT: the station
@@ -117,10 +152,12 @@ passes), 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import base64
 import http.client
 import json
 import os
 import random
+import re
 import secrets
 import signal
 import socket
@@ -139,8 +176,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # Imported by path (above): smoke.py for its console checks and HTTP helper,
 # the bench tools for the replay and the casters.
+import ntrip_client
 import smoke
 from benchlib import rtcm
+from benchlib.ntrip import (
+    V1, V2_CHUNKED, station_error, station_sourcetable, station_stream_head, str_field,
+)
 from benchlib.replay import Burst, EpochGrouper, Schedule, load, msm_of
 from benchlib.stream import StreamSplitter
 from benchlib.um982_sim import Um982Responder, with_station_messages
@@ -188,6 +229,40 @@ CUT_CLOSE_LINE = "closing inside an epoch"
 # it was before maintenance, identified, though the station then listens first and asks it again.
 MAINT_ENDED_LINE = "station: receiver maintenance ended"
 STOP_REASONS = ["none", "rejected", "login_blocked", "in_use", "kicked", "duplicate", "banned"]
+
+# Scenario "local-caster": the station's own caster for a rover ("Your rover", components/local_caster; the
+# constants are local_caster.h's).
+LCAST_PORT = 2101                 # CONFIG_LOCAL_CASTER_PORT
+LCAST_MOUNT = "ROVER"
+LCAST_USER = "rover"              # LOCAL_CASTER_DEFAULT_USER
+LCAST_MAX_ROVERS = 2              # LOCAL_CASTER_MAX_CLIENTS
+LCAST_RUN_S = 60.0                # rovers A and B read together at least this long
+LCAST_MATCH_S = 50.0              # ... and each record equals the upstream's, frame for frame, over at least this
+LCAST_TAIL_S = 5.0                # rover frames past the end of the upstream record read just after (still arriving)
+LCAST_STALL_S = 10.0              # LOCAL_CASTER_SEND_STALL_MS
+LCAST_REQUEST_S = 5.0             # LOCAL_CASTER_REQUEST_TIMEOUT_MS
+LCAST_LINGER_S = 2.0              # the drain after a reply, before the station closes
+LCAST_BYTES_TOLERANCE = 0.05      # bytes_sent against what a rover counted
+# The stuck rover: the station closes it once its socket took no byte for LCAST_STALL_S. Between the station and
+# this computer QEMU's user network (slirp) holds up to 128 KiB per connection (libslirp TCP_RCVSPACE), and this
+# computer's socket buffers hold more (Linux keeps a small SO_RCVBUF; macOS grows the receive buffer anyway, to
+# about 0.3-0.5 MB on loopback), so the station's socket stops taking data only after those are full: about
+# 1.5-2 min at the default fixture's 1.7 kB/s on Linux, up to several minutes on macOS; on a board within
+# seconds. So the check is the stall rule itself (closed LCAST_STALL_S after the rover's bytes_sent stopped
+# growing), with this bound from its login.
+LCAST_STUCK_MAX_S = 480.0
+LCAST_BUDGET_S = 780              # what the scenario may add to the run (run.sh's backstop)
+LCAST_TASK = "lcast"
+LCAST_STACK_MIN = 1024
+LCAST_LISTEN_LINE = f"lcast: listening on port {LCAST_PORT}, mountpoint {LCAST_MOUNT}"
+LCAST_OFF_LINE = "lcast: off"
+QEMU_PEER_WORD = 167772674        # 10.0.2.2 as the journal's address word (b of rover_connect)
+ROVER_ENDS = ["none", "closed", "stalled", "lost", "settings", "network", "restart"]   # local_caster_end_t
+RESTART_WORDS = "the station restarted"   # the end reason's words in the console line
+# The MSM constellations in the order of an STR record's nav-system field.
+NAV_NAMES = ((107, "GPS"), (108, "GLO"), (109, "GAL"), (112, "BDS"), (111, "QZS"), (113, "IRN"))
+IMF_DATE = re.compile(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+                      r"\d{4} \d{2}:\d{2}:\d{2} GMT$")
 
 
 class SkipScenario(Exception):
@@ -267,7 +342,7 @@ def split_at_station(data: bytes, station: list[bytes]) -> tuple[bytes, bytes]:
 
 
 def check_record(data: bytes, schedule: Schedule, leading_junk_ok: bool = False,
-                 whole_tail: bool = False) -> tuple[bool, str, float]:
+                 whole_tail: bool = False, max_gaps: int | None = None) -> tuple[bool, str, float]:
     """The record against the fixture, strictly. Returns (ok, detail, seconds
     of the fixture's time the record covers).
 
@@ -294,7 +369,9 @@ def check_record(data: bytes, schedule: Schedule, leading_junk_ok: bool = False,
     with no partial frame after it. Station messages after it are allowed
     (the next epoch's, sent before the pause: they are never part of an MSM
     run). Without it the record's last epoch may be cut, as a record still
-    growing when it is read is."""
+    growing when it is read is.
+
+    max_gaps: at most this many gaps (0: a stretch with no pause in it)."""
     split = StreamSplitter()
     items = split.feed(data) + split.flush()
     fx: list[bytes] = []
@@ -446,7 +523,313 @@ def check_record(data: bytes, schedule: Schedule, leading_junk_ok: bool = False,
     detail = (f"{len(frames)} frames, {len(frames) - k0} from the first epoch's first frame over {epochs} {unit}, "
               f"{gaps} gap{'' if gaps == 1 else 's'} on epoch boundaries; skipped fixture types never forwarded: "
               f"{', '.join(f'{t} x{n}' for t, n in sorted(skipped_types.items())) or 'none'}")
+    if max_gaps is not None and gaps > max_gaps:
+        return False, f"{detail} (at most {max_gaps} gap{'' if max_gaps == 1 else 's'} allowed here)", 0.0
     return True, detail, seconds + schedule.period
+
+
+# ---------------------------------------------------------------------------
+# the local caster's checks (scenario local-caster)
+
+
+def record_since(frames: list[tuple[float | None, bytes]], schedule: Schedule, t0: float) -> bytes:
+    """A longer record's frames from the first epoch that begins at or after `t0` (the arrival time, unix), as
+    bytes: the part of a session one span of a scenario judges (check_record wants a record that starts at an
+    epoch's first frame). b"" when no epoch began since."""
+    heads = set()
+    for b in schedule.bursts:
+        fwd = [f for f in b.frames if not rtcm.is_suspect_sbas(frame_type(f) or 0)]   # what the station forwards
+        if fwd:
+            heads.add(fwd[0])
+    for k, (t, f) in enumerate(frames):
+        if t is not None and t >= t0 and f in heads:
+            return b"".join(x for _, x in frames[k:])
+    return b""
+
+
+def align_to_upstream(rover: list[tuple[float | None, bytes]], upstream: list[tuple[float | None, bytes]],
+                      min_s: float, tail_s: float = LCAST_TAIL_S,
+                      until: float | None = None) -> tuple[bool, str, float]:
+    """A rover's frames, after the sticky copies its session opened with, are one contiguous run of the upstream
+    caster's record, frame for frame and byte for byte. Both come from the station's hub, so neither may lack
+    a frame the other has. The fixture loops, so the same bytes come back every loop: the run is aligned at the
+    upstream's occurrence of the rover's first epoch frame nearest in arrival time. Rover frames past the end
+    of the upstream record (read a moment later) are allowed for `tail_s`. `until`: when the rover stopped
+    reading (unix; now for one still reading): upstream frames that came more than `tail_s` before it must be
+    in the rover's record too (its data did not stop early). Returns (ok, detail, seconds the compared run
+    spans; at least `min_s` for ok)."""
+    k0 = next((k for k, (_, f) in enumerate(rover) if frame_type(f) not in STICKY_TYPES), None)
+    if k0 is None:
+        return False, "no rover frame after the sticky copies", 0.0
+    t_r = rover[k0][0] or 0.0
+    cand = [j for j, (_, f) in enumerate(upstream) if f == rover[k0][1]]
+    if not cand:
+        return False, (f"the rover's first epoch frame (type {frame_type(rover[k0][1])}) is nowhere in the upstream "
+                       f"record ({len(upstream)} frames)"), 0.0
+    j0 = min(cand, key=lambda j: abs((upstream[j][0] or 0.0) - t_r))
+    k, j = k0, j0
+    while k > 0 and j > 0 and rover[k - 1][1] == upstream[j - 1][1]:   # the epoch's own leading station messages
+        k, j = k - 1, j - 1
+    lead = rover[:k]   # the session's sticky copies (all of a sticky type: k0 is the first frame that is not)
+    n = 0
+    while k + n < len(rover) and j + n < len(upstream):
+        if rover[k + n][1] != upstream[j + n][1]:
+            return False, (f"rover frame #{k + n} (type {frame_type(rover[k + n][1])}) is not upstream frame "
+                           f"#{j + n} (type {frame_type(upstream[j + n][1])}) after {n} equal frames: a frame one "
+                           f"of them lacks"), 0.0
+        n += 1
+    tail = rover[k + n:]
+    if tail and (tail[-1][0] or 0.0) - (tail[0][0] or 0.0) > tail_s:
+        return False, (f"{len(tail)} rover frames over {(tail[-1][0] or 0.0) - (tail[0][0] or 0.0):.1f} s past the "
+                       f"end of the upstream record"), 0.0
+    span = (rover[k + n - 1][0] or 0.0) - (rover[k][0] or 0.0)
+    missed = [t for t, _ in upstream[j + n:] if until is not None and t is not None and t <= until - tail_s]
+    if missed:
+        return False, (f"the rover's record stops {until - (rover[-1][0] or 0.0):.0f} s before it stopped reading: "
+                       f"the upstream got {len(missed)} more frames before then (after {n} equal frames over "
+                       f"{span:.0f} s)"), span
+    offset = (upstream[j0][0] or 0.0) - t_r
+    detail = (f"{n} frames equal to upstream frames #{j}-#{j + n - 1} over {span:.0f} s ({len(lead)} sticky "
+              f"cop{'y' if len(lead) == 1 else 'ies'} first, upstream {offset:+.2f} s against the rover, "
+              f"{len(tail)} frame(s) past its end)")
+    if span < min_s:
+        return False, f"{detail}: under {min_s:.0f} s", span
+    return True, detail, span
+
+
+def expected_str(schedule: Schedule) -> dict:
+    """What the station's STR record says for the replayed fixture: the message types it forwards (ascending,
+    1101-1107 never), the constellations of its MSMs in the record's order, the carrier (2 with a constellation
+    on two bands), the generator (the fixture's 1033 receiver type, else onodiy) and its rate in bits/s."""
+    fwd = [f for b in schedule.bursts for f in b.frames if not rtcm.is_suspect_sbas(frame_type(f) or 0)]
+    types = sorted({frame_type(f) for f in fwd})
+    msm = {t // 10 for t in types if rtcm.msm_system(t)}
+    bands = expected_signals(schedule)
+    if any(len(v) >= 2 for v in bands.values()):
+        carrier = "2"
+    elif any(bands.values()):
+        carrier = "1"
+    else:
+        carrier = "2" if msm else "0"
+    generator = "onodiy"
+    for f in fwd:
+        if frame_type(f) == 1033:
+            rx = rtcm.decode_1033(rtcm.payload_of(f)).receiver_type
+            if rx:
+                generator = str_field(rx[:31])
+    rate = sum(len(f) for f in fwd) * 8 / schedule.duration if schedule.duration else 0.0
+    return {"types": types, "nav": "+".join(name for num, name in NAV_NAMES if num in msm), "carrier": carrier,
+            "generator": generator, "bitrate": rate}
+
+
+def str_problems(rec: dict, want: dict, mount: str, identifier: str) -> list[str]:
+    """The station's STR record (parse_sourcetable's dict) against expected_str()."""
+    p = []
+    if rec.get("field_count") != 19:
+        p.append(f"{rec.get('field_count')} fields (19 wanted)")
+    fixed = {"type": "STR", "mountpoint": mount, "identifier": identifier, "format": "RTCM 3.3",
+             "carrier": want["carrier"], "nav_system": want["nav"], "network": "onodiy", "country": "",
+             "latitude": "0.00", "longitude": "0.00", "nmea": "0", "solution": "0", "generator": want["generator"],
+             "compr_encryp": "none", "authentication": "B", "fee": "N", "misc": ""}
+    for k, v in fixed.items():
+        if rec.get(k) != v:
+            p.append(f"{k} {rec.get(k)!r} ({v!r} wanted)")
+    entries = [re.fullmatch(r"(\d{4})\((\d+)\)", x) for x in (rec.get("format_details") or "").split(",")]
+    if not all(entries):
+        p.append(f"format details {rec.get('format_details')!r} not all <type>(<period s>)")
+    else:
+        types = [int(m.group(1)) for m in entries]
+        periods = {int(m.group(1)): int(m.group(2)) for m in entries}
+        if types != want["types"]:
+            p.append(f"message types {types} ({want['types']} wanted, ascending)")
+        bad = [f"{t}({s})" for t, s in periods.items() if s < 1 or (rtcm.msm_system(t) and s != 1)]
+        if bad:
+            p.append(f"periods {bad} (at least 1 s; the fixture's MSMs come every second)")
+    rate = rec.get("bitrate") or ""
+    if not rate.isdigit():
+        p.append(f"bitrate {rate!r} is not a number")
+    elif want["bitrate"] and not 0.5 * want["bitrate"] <= int(rate) <= 1.5 * want["bitrate"]:
+        p.append(f"bitrate {rate} (the fixture's {want['bitrate']:.0f} bits/s, +-50 %)")
+    return p
+
+
+def head_lines(head: bytes) -> list[str]:
+    return [x for x in head.decode("latin-1").split("\r\n") if x]
+
+
+def server_ver_date(head: bytes) -> tuple[str | None, str | None]:
+    """The version in "Server: NTRIP onodiy/<version>" and the Date value of a reply head (None when absent)."""
+    ver = date = None
+    for line in head_lines(head)[1:]:
+        k, _, v = line.partition(": ")
+        if k == "Server" and v.startswith("NTRIP onodiy/"):
+            ver = v[len("NTRIP onodiy/"):]
+        elif k == "Date":
+            date = v
+    return ver, date
+
+
+def _ver_date_problems(ver: str | None, date: str | None) -> list[str]:
+    p = []
+    if ver is None:
+        p.append("no 'Server: NTRIP onodiy/<version>' line")
+    elif not ver or len(ver) > 31 or any(not 0x20 <= ord(c) <= 0x7E for c in ver):
+        p.append(f"version {ver!r} (1-31 printable characters)")
+    if date is not None and not IMF_DATE.match(date):
+        p.append(f"Date {date!r} is not in IMF-fixdate form")
+    return p
+
+
+def stream_head_problems(head: bytes, flavour: str) -> list[str]:
+    """A success reply's head against the station's, byte for byte (the version and Date taken from it)."""
+    if flavour == V1:
+        want = station_stream_head(V1, "")
+        return [] if head == want else [f"{head!r} ({want!r} wanted)"]
+    ver, date = server_ver_date(head)
+    p = _ver_date_problems(ver, date)
+    if p:
+        return p
+    want = station_stream_head(flavour, ver, date)
+    return [] if head == want else [f"{head!r} ({want!r} wanted)"]
+
+
+def table_problems(head: bytes, body: bytes, flavour: str) -> list[str]:
+    """A source table reply against the station's, byte for byte (its STR records as received: str_problems
+    judges those)."""
+    ver, date = server_ver_date(head)
+    p = _ver_date_problems(ver, date)
+    if flavour == V1 and date is not None:
+        p.append("a Date line in an NTRIP 1.0 source table")
+    if p:
+        return p
+    records = [x for x in body.decode("latin-1").split("\r\n") if x.startswith("STR;")]
+    want = station_sourcetable(flavour, ver, records, date)
+    got = head + body
+    return [] if got == want else [f"{got!r} ({want!r} wanted)"]
+
+
+def error_problems(head: bytes, body: bytes, code: int, flavour: str, mount: str = "") -> list[str]:
+    """An error reply against the station's: the status line, every header line (in any order: the order is
+    not fixed) and the body, byte for byte. A 429's wait is taken from its Retry-After (1-300 s)."""
+    ver, date = server_ver_date(head)
+    p = _ver_date_problems(ver, date)
+    if p:
+        return p
+    retry = 0
+    if code == 429:
+        val = next((x.partition(": ")[2] for x in head_lines(head) if x.startswith("Retry-After: ")), "")
+        if not val.isdigit() or not 1 <= int(val) <= 300:
+            return [f"Retry-After {val!r} (1-300 s wanted)"]
+        retry = int(val)
+    want = station_error(code, flavour, ver, date, mount, retry)
+    whead, _, wbody = want.partition(b"\r\n\r\n")
+    wl, gl = head_lines(whead), head_lines(head)
+    if not head.endswith(b"\r\n\r\n"):
+        p.append("the head does not end with a blank line")
+    if gl[:1] != wl[:1]:
+        p.append(f"status line {gl[:1]} ({wl[:1]} wanted)")
+    missing = sorted(set(wl[1:]) - set(gl[1:]))
+    extra = sorted(set(gl[1:]) - set(wl[1:]))
+    if missing or extra or len(gl) != len(wl):
+        p.append(f"header lines: missing {missing}, unexpected {extra}")
+    if body != wbody:
+        p.append(f"body {body!r} ({wbody!r} wanted)")
+    return p
+
+
+def rover_up_fields(a: int) -> dict:
+    """rover_connect's a (diag_rover_up_a)."""
+    return {"conn": a & 0xF, "version": (a >> 4) & 0x3, "v6": bool((a >> 6) & 1), "age_s": (a >> 8) & 0xFF,
+            "unlisted": (a >> 16) & 0x7FFF}
+
+
+def rover_down_fields(a: int) -> dict:
+    """rover_disconnect's a (diag_rover_down_a): the connection and the end reason's name."""
+    r = (a >> 8) & 0xFF
+    return {"conn": a & 0xF, "reason": ROVER_ENDS[r] if r < len(ROVER_ENDS) else f"?{r}"}
+
+
+def addr_word_text(b: int) -> str:
+    """rover_connect's b (diag_rover_addr_b: an IPv4 address as a signed 32-bit word) as a dotted address."""
+    q = b & 0xFFFFFFFF
+    return ".".join(str((q >> s) & 0xFF) for s in (24, 16, 8, 0))
+
+
+def rover_sessions(entries: list[dict]) -> list[dict]:
+    """The listed rover sessions of journal entries, in order: each rover_connect's fields, its address and
+    word, and the matching rover_disconnect (the next one with its connection index; a boot ends every open
+    one unmatched): `end` the reason (None while open), `length_s`."""
+    out: list[dict] = []
+    live: dict[int, dict] = {}
+    for e in entries:
+        kind = e.get("kind")
+        if kind == "rover_connect":
+            f = rover_up_fields(e["a"])
+            s = dict(f, b=e["b"], addr=None if f["v6"] else addr_word_text(e["b"]), seq=e.get("seq"), end=None,
+                     length_s=None)
+            out.append(s)
+            live[f["conn"]] = s
+        elif kind == "rover_disconnect":
+            f = rover_down_fields(e["a"])
+            s = live.pop(f["conn"], None)
+            if s is None:
+                out.append(dict(f, unmatched=True, end=f["reason"], length_s=e["b"], seq=e.get("seq")))
+            else:
+                s["end"], s["length_s"] = f["reason"], e["b"]
+        elif kind == "boot":
+            live.clear()
+    return out
+
+
+def read_to_end(sock: socket.socket, timeout: float) -> tuple[bytes, float | None, str]:
+    """Everything the peer sends until it closes: (bytes, time.monotonic() of the close or None, how: eof,
+    reset or timeout)."""
+    data = bytearray()
+    deadline = time.monotonic() + timeout
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return bytes(data), None, "timeout"
+        sock.settimeout(left)
+        try:
+            d = sock.recv(65536)
+        except socket.timeout:
+            return bytes(data), None, "timeout"
+        except OSError:
+            return bytes(data), time.monotonic(), "reset"
+        if not d:
+            return bytes(data), time.monotonic(), "eof"
+        data += d
+
+
+class Rover:
+    """A rover on the forwarded port: ntrip_client's stream, read in a thread until stopped or closed."""
+
+    def __init__(self, stream: ntrip_client.Stream, name: str) -> None:
+        self.st = stream
+        self.name = name
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=ntrip_client.read_for, args=(stream, None),
+                                       kwargs={"stop": self.stop_event}, name=f"rover-{name}", daemon=True)
+        self.t_start = time.monotonic()
+
+    def start(self) -> Rover:
+        self.thread.start()
+        return self
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self.stop_event.set()
+        if self.thread.is_alive():
+            self.thread.join(timeout)
+
+    def ended(self, timeout: float) -> bool:
+        """The reading ended (the station closed or reset it) within `timeout`."""
+        self.thread.join(timeout)
+        return not self.thread.is_alive()
+
+    @property
+    def frames(self) -> int:
+        return self.st.record.frames_ok
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +933,8 @@ class E2E:
         self.cookie: str | None = None
         self.password = "e2e-" + secrets.token_hex(8)
         self.http_port = smoke.free_port()
+        self.ntrip_port = smoke.free_port()   # forwarded to the station's caster for a rover (run.sh --ntrip-port)
+        self.lcast_password: str | None = None
         self.planned_reboots = 0
         self.slot1_body: dict | None = None   # slot 1's settings as PUT (saved again for planned closes)
         # The signal-test scenario's caster sessions by what opened them: (first connection, what), in order.
@@ -649,8 +1034,8 @@ class E2E:
         backstop = self.budget_s() + smoke.BACKSTOP_MARGIN_S
         pcap = self.out / "qemu-net.pcap"
         cmd = [str(smoke.RUN_SH), "--no-build", "--headless", str(self.console), "--uart1",
-               f"connect:{self.replay.port}", "--http-port", str(self.http_port), "--seconds", str(int(backstop)),
-               "--pcap", str(pcap)]
+               f"connect:{self.replay.port}", "--http-port", str(self.http_port), "--ntrip-port",
+               str(self.ntrip_port), "--seconds", str(int(backstop)), "--pcap", str(pcap)]
         print("starting: " + " ".join(cmd), flush=True)
         self.console.unlink(missing_ok=True)
         pcap.unlink(missing_ok=True)
@@ -664,6 +1049,8 @@ class E2E:
         s = 240 + self.args.observe
         if self.args.scenario in ("onocoy-guard", "all"):
             s += 900 + (900 if self.args.long else 0)
+        if self.args.scenario in ("local-caster", "all"):
+            s += LCAST_BUDGET_S
         if self.args.scenario in ("signal-test", "all"):
             s += 720 + 2 * SGT_PAUSES * 30
         return s
@@ -1231,6 +1618,524 @@ class E2E:
         want = {"in_use", "kicked", "banned", "duplicate"}
         self.check(want <= set(stops), f"journal caster_stop records for slot 0: {stops}")
 
+    # -- scenario: local-caster ---------------------------------------------------
+
+    def journal_since(self, cursor: int) -> tuple[list[dict], int]:
+        """Journal entries newer than `cursor` (seq) and the cursor after the newest."""
+        out = []
+        start = cursor
+        for _ in range(200):
+            status, data = self.api("GET", f"/api/journal?cursor={cursor}")
+            if status != 200 or not isinstance(data, dict):
+                break
+            out += [e for e in data.get("entries", []) if e.get("seq", 0) > start]
+            cursor = data.get("cursor", cursor)
+            if not data.get("more"):
+                break
+        return out, cursor
+
+    def lc_open(self, version: int = 1, password: str | None | bool = True, mount: str = LCAST_MOUNT,
+                **kw) -> ntrip_client.Stream:
+        """A rover's GET on the forwarded port (password True: the one configured; None: no login)."""
+        pw = self.lcast_password if password is True else password
+        return ntrip_client.open_stream("127.0.0.1", self.ntrip_port, mount, LCAST_USER, pw, version, **kw)
+
+    def lc_get(self) -> dict:
+        status, data = self.api("GET", "/api/local-caster")
+        if status != 200 or not isinstance(data, dict):
+            raise ValueError(f"GET /api/local-caster: HTTP {status}")
+        return data
+
+    def lc_state(self) -> dict:
+        return self.lc_get().get("status") or {}
+
+    def lc_refused(self) -> dict:
+        return dict(self.lc_state().get("refused") or {})
+
+    def lc_counts(self, before: dict, grew: dict, what: str) -> None:
+        """status.refused grew by exactly `grew` (every other counter unchanged)."""
+        after = self.lc_refused()
+        got = {k: after.get(k, 0) - before.get(k, 0) for k in sorted(set(after) | set(before) | set(grew))}
+        want = {k: grew.get(k, 0) for k in got}
+        self.check(got == want, f"{what}: status.refused grew by {{{', '.join(f'{k}: {v}' for k, v in got.items() if v)}}}"
+                                f" (wanted {grew})")
+
+    def lc_consumers(self, want: int, what: str) -> None:
+        """/api/health hub.consumers reaches `want` within 5 s (the session of a rover that just closed ends on
+        the station's next pass)."""
+        got = self.poll(lambda: (lambda c: c if c == want else None)(self.health()["hub"]["consumers"]), 5,
+                        every=0.5)
+        self.check(got is not None, f"/api/health hub.consumers {want} {what}"
+                   + ("" if got is not None else f" (now {self.health()['hub']['consumers']})"))
+
+    def lc_wait_state(self, state: str, timeout: float, what: str) -> bool:
+        st = self.poll(lambda: (lambda s: s if s.get("state") == state else None)(self.lc_state()), timeout,
+                       every=0.5)
+        return self.check(st is not None, f"{what}: state {state!r} within {timeout:.0f} s"
+                          + ("" if st is not None else f" (now {self.lc_state().get('state')!r})"))
+
+    def lc_port_closed(self) -> tuple[bool, str]:
+        """The forwarded port while nothing listens on the station's 2101: QEMU takes the connection on this side,
+        the station refuses it, and QEMU closes it at once."""
+        try:
+            s = socket.create_connection(("127.0.0.1", self.ntrip_port), timeout=5)
+        except OSError as e:
+            return False, f"refused on this side ({e}): no port forward (run.sh --ntrip-port)?"
+        with s:
+            data, _end, how = read_to_end(s, 10)
+        if how != "timeout" and not data:
+            return True, f"closed at once ({how})"
+        return False, f"{how}, {len(data)} bytes {data[:40]!r}"
+
+    def lc_upstream(self) -> int | None:
+        """Slot 1 streaming to the fake caster (the stream scenario's, or set up here): the upstream every rover's
+        record is compared with. Returns the fake caster's connection number of that session."""
+        if self.caster is None:
+            self.caster = self.stream_caster()
+            body = self.stream_body(self.caster.port, STREAM_PASSWORD)
+            self.slot1_body = body
+            status, _ = self.api("PUT", "/api/casters/1", body)
+            if not self.check(status == 200, f"PUT /api/casters/1 (slot 1 for the upstream record): HTTP {status}"):
+                return None
+
+        def live():
+            if self.slot(1)["status"].get("state") != "streaming":
+                return None
+            c = [x for x in self.sources() if x.get("end_mono") is None and x.get("row") == self.stream_row()]
+            return c[0]["n"] if len(c) == 1 else None
+        n = self.poll(live, 90)
+        self.check(n is not None, "slot 1 streaming to the fake caster, the upstream the rovers are compared with"
+                   + (f" (connection {n})" if n is not None else ""))
+        return n
+
+    def lc_judge(self, name: str, st: ntrip_client.Stream, n_up: int, what: str) -> None:
+        """A rover's record: strict against the fixture with no gap, the chunks whole frames, and frame for frame
+        the upstream's."""
+        data = bytes(st.data)
+        (self.out / "lcast" / f"rover-{name}.rtcm3").write_bytes(data)
+        ok, detail, _ = check_record(data, self.schedule, max_gaps=0)
+        p = st.problems(min_frames=1)
+        s = st.summary()
+        chunks = f"; {s['chunks']} chunks, each whole frames" if st.chunked and not p else ""
+        self.check(ok and not p, f"rover {name}'s record {what}: {detail}{chunks}" + (f"; {'; '.join(p)}" if p else ""))
+        up = self.caster.record_of(n_up)
+        # When it stopped reading (unix), or now: the upstream's frames until shortly before must all be there.
+        until = time.time() - (time.monotonic() - st.end_t if st.end_t is not None else 0.0)
+        ok, detail, _ = align_to_upstream(st.frames(), list(up.frames) if up else [], LCAST_MATCH_S, until=until)
+        self.check(ok, f"rover {name}'s record {what}, against the upstream fake caster's: {detail}")
+
+    def lc_error(self, st: ntrip_client.Stream, code: int, flavour: str, what: str, mount: str = "") -> bool:
+        """A refusal, byte for byte as the station's (the header lines in any order)."""
+        if not st.refused:
+            st.close()
+            p = ["it streamed"]
+        else:
+            p = error_problems(st.reply.head, st.body, code, flavour, mount)
+        return self.check(st.reply.code == code and not p and st.body_eof,
+                          f"{what}: {st.reply.status_line!r}" + (f": {'; '.join(p)}" if p else
+                                                                 " (byte for byte), then the close"
+                                                                 + ("" if st.body_eof else ": no close")))
+
+    def local_caster(self) -> None:
+        if self.args.caster == "docker":
+            self.skip("local-caster: compares the rovers' records with the fake caster's (not with --caster docker)")
+            return
+        (self.out / "lcast").mkdir(exist_ok=True)
+        t_scn = time.monotonic()
+        rovers: list[Rover] = []
+        try:
+            self.lc_run(rovers)
+        finally:
+            for r in rovers:
+                r.stop()
+            self.note(f"local-caster scenario took {time.monotonic() - t_scn:.0f} s")
+
+    def lc_run(self, rovers: list[Rover]) -> None:
+        t0_unix = time.time()
+        n_up = self.lc_upstream()
+        if n_up is None:
+            return
+
+        # 1. Off by default; the baseline.
+        ok, how = self.lc_port_closed()
+        self.check(ok, f"forwarded port {self.ntrip_port} -> the station's {LCAST_PORT}, off by default: {how}")
+        consumers0 = self.health()["hub"]["consumers"]
+        self.check(consumers0 == 4, f"/api/health hub.consumers {consumers0} before any rover (4: the caster slots)")
+        s1 = self.slot(1)["status"]
+        slot_base = {k: s1.get(k) for k in ("frames_dropped", "epochs_dropped", "laps")}
+        _, jcur = self.journal_since(0)
+        status, lc = self.api("GET", "/api/local-caster")
+        self.save("lcast-before.json", lc)
+        if not self.check(status == 200 and isinstance(lc, dict),
+                          f"GET /api/local-caster: HTTP {status}" + ("" if status == 200 else
+                          " (this firmware has no local caster API: the rest of the scenario needs it)")):
+            return
+        cfg, st = lc.get("config") or {}, lc.get("status") or {}
+        want = {"enabled": False, "mountpoint": smoke.HOSTNAME, "username": LCAST_USER, "password_set": False}
+        self.check(all(cfg.get(k) == v for k, v in want.items()) and st.get("state") == "off"
+                   and st.get("port") == LCAST_PORT and st.get("max_clients") == LCAST_MAX_ROVERS
+                   and st.get("clients") == [],
+                   f"off by default: config {cfg}, state {st.get('state')!r}, port {st.get('port')}, "
+                   f"max_clients {st.get('max_clients')}, clients {st.get('clients')}")
+
+        # 2. On.
+        pw = self.lcast_password = secrets.token_urlsafe(12)   # 16 characters of [A-Za-z0-9_-]
+        wrong = "wrong-" + secrets.token_hex(6)
+        at = len(self.console_text())
+        status, data = self.api("PUT", "/api/local-caster", {"enabled": True, "mountpoint": LCAST_MOUNT,
+                                                             "username": LCAST_USER, "password": pw})
+        self.save("lcast-put-on.json", data)
+        cfg = (data.get("config") or {}) if isinstance(data, dict) else {}
+        if not self.check(status == 200 and cfg.get("enabled") is True and cfg.get("mountpoint") == LCAST_MOUNT
+                          and cfg.get("username") == LCAST_USER and cfg.get("password_set") is True
+                          and pw not in json.dumps(data),
+                          f"PUT /api/local-caster on (mountpoint {LCAST_MOUNT}, username {LCAST_USER}, a random "
+                          f"password, never returned): HTTP {status}, config {cfg}"):
+            return
+        if not self.lc_wait_state("listening", 5, "turned on"):
+            return
+        self.check(self.poll(lambda: LCAST_LISTEN_LINE in self.console_text()[at:], 5, every=0.5) is not None,
+                   f"console: {LCAST_LISTEN_LINE!r}")
+
+        # 3. The source table, no login: NTRIP 1.0 and 2.0, and for a mountpoint the station does not have.
+        want_str = expected_str(self.schedule)
+        for version, flavour in ((1, V1), (2, V2_CHUNKED)):
+            t = ntrip_client.fetch_sourcetable("127.0.0.1", self.ntrip_port, version)
+            self.save(f"lcast-sourcetable-{version}.txt", (t.reply.head + t.body).decode("latin-1"))
+            p = t.problems() + (table_problems(t.reply.head, t.body, flavour) if t.is_table else [])
+            recs = t.records
+            if len(recs) != 1:
+                p.append(f"{len(recs)} STR records (1 wanted)")
+            else:
+                p += str_problems(recs[0], want_str, LCAST_MOUNT, smoke.HOSTNAME)
+            if not t.eof:
+                p.append("no close after it")
+            line = next((x for x in t.text.split("\r\n") if x.startswith("STR;")), "")
+            self.check(not p, f"source table over NTRIP {version}.0 ({t.reply.status_line!r}): "
+                       + ("; ".join(p) if p else f"byte for byte, {line}"))
+        t = ntrip_client.fetch_sourcetable("127.0.0.1", self.ntrip_port, 1, mount="NOPE")
+        self.check(t.is_table and [r.get("mountpoint") for r in t.records] == [LCAST_MOUNT] and not t.problems(),
+                   f"GET /NOPE (a mountpoint the station does not have) gets the source table: "
+                   f"{t.reply.status_line!r}, {[r.get('mountpoint') for r in t.records]}")
+
+        # 4. Wrong or no login: 401 with the realm.
+        refused = self.lc_refused()
+        for version, flavour in ((1, V1), (2, V2_CHUNKED)):
+            self.lc_error(self.lc_open(version, password=wrong), 401, flavour,
+                          f"a wrong password over NTRIP {version}.0", LCAST_MOUNT)
+        self.lc_error(self.lc_open(1, password=None), 401, V1, "no login", LCAST_MOUNT)
+        self.lc_counts(refused, {"login": 3}, "two wrong logins and none")
+
+        # 5. Rovers A (2.0 chunked) and B (1.0) together, slot 1 watched from here on.
+        states: set = set()
+        watching = threading.Event()
+
+        def watch_slot() -> None:
+            while not watching.wait(1.0):
+                try:
+                    states.add(self.slot(1)["status"].get("state"))
+                except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError):
+                    pass
+        watcher = threading.Thread(target=watch_slot, name="slot1-watch-lcast", daemon=True)
+        watcher.start()
+        try:
+            ok = self.lc_rovers(rovers, consumers0, n_up, wrong)
+        finally:
+            watching.set()
+            watcher.join(timeout=5)
+        if not ok:
+            return
+        self.check(bool(states) and states <= {"streaming"},
+                   f"slot 1 streaming throughout the rovers (states seen: {sorted(x for x in states if x)})")
+        live = [x["n"] for x in self.sources() if x.get("end_mono") is None]
+        s1 = self.slot(1)["status"]
+        now = {k: s1.get(k) for k in slot_base}
+        self.check(live == [n_up] and now == slot_base,
+                   f"slot 1 kept its session (fake caster connection {n_up}; live now: {live}) and dropped nothing: "
+                   f"{now} (before: {slot_base})")
+        up = self.caster.record_of(n_up)
+        ok, detail, _ = check_record(record_since(list(up.frames) if up else [], self.schedule, t0_unix),
+                                     self.schedule, max_gaps=0)
+        self.check(ok, f"the upstream record since the scenario began, without a gap: {detail}")
+
+        # 8. A request that never ends: closed 5 s after the accept (a 400, or a bare close), plus the drain.
+        refused = self.lc_refused()
+        with socket.create_connection(("127.0.0.1", self.ntrip_port), timeout=10) as s:
+            t_conn = time.monotonic()
+            s.sendall(f"GET /{LCAST_MOUNT} HTTP/1.0\r\n".encode())
+            data, end, how = read_to_end(s, 20)
+        took = None if end is None else end - t_conn
+        head, sep, body = data.partition(b"\r\n\r\n")
+        p = error_problems(head + sep, body, 400, V1) if data else []
+        lo, hi = LCAST_REQUEST_S - 0.25, LCAST_REQUEST_S + LCAST_LINGER_S + 1.0
+        self.check(took is not None and lo <= took <= hi and not p,
+                   f"a request that never ends ('GET /{LCAST_MOUNT} HTTP/1.0' and nothing more): {how}"
+                   + (f" {took:.1f} s after the connect" if took is not None else "")
+                   + f" (window {lo:.1f}-{hi:.0f} s), " + ("a 400 byte for byte" if data and not p else
+                                                          "; ".join(p) if p else "no reply"))
+        # 9. A web browser's request: 403.
+        self.lc_error(self.lc_open(1, extra_headers={"Origin": "http://x"}), 403, V1, "a request with Origin")
+        self.lc_error(self.lc_open(2, extra_headers={"Sec-Fetch-Site": "cross-site"}), 403, V2_CHUNKED,
+                      "a request with Sec-Fetch-Site")
+        self.lc_counts(refused, {"bad_request": 3}, "the request that never ended and the two from a browser")
+
+        # 10. The login throttle (last: every rover here is 10.0.2.2 to the station).
+        self.lc_throttle(wrong)
+
+        # 11. The journal: A (2.0, still open), B (1.0, closed), C (stalled), each listed after 10 s.
+        entries, _ = self.journal_since(jcur)
+        self.save("lcast-journal.json", entries)
+        sess = rover_sessions(entries)
+        got = [(x.get("version"), x.get("addr"), x.get("end")) for x in sess]
+        want = [(2, smoke.QEMU_PEER, None), (1, smoke.QEMU_PEER, "closed"), (1, smoke.QEMU_PEER, "stalled")]
+        self.check(got == want and all(x.get("b") == QEMU_PEER_WORD and x.get("age_s", 0) >= 10 for x in sess),
+                   f"journal: the rover sessions listed {got} (A 2.0 open, B 1.0 closed, C stalled, each b "
+                   f"{QEMU_PEER_WORD} = {smoke.QEMU_PEER}, listed after 10 s)")
+        self.lc_consumers(consumers0 + 1, "with A alone")
+
+        # 12. Off: A gets the last chunk and the close at once.
+        self.lc_off(rovers[0], n_up, consumers0, jcur)
+        # 14. The task's stack, after all of the above.
+        status, data = self.api("GET", "/api/diag/tasks")
+        self.save("lcast-tasks.json", data)
+        task = next((x for x in (data or {}).get("tasks", []) if x.get("name") == LCAST_TASK), None) \
+            if isinstance(data, dict) else None
+        self.check(task is not None and (task.get("stack_free_min") or 0) >= LCAST_STACK_MIN,
+                   f"/api/diag/tasks: task {LCAST_TASK!r} stack_free_min "
+                   f"{task.get('stack_free_min') if task else 'no task'} (at least {LCAST_STACK_MIN} B)")
+        # 13. A planned restart with a rover connected; the setting persists.
+        self.lc_restart(rovers)
+        text = self.console_text()
+        b64 = base64.b64encode(f"{LCAST_USER}:{pw}".encode()).decode()
+        self.check(pw not in text and b64 not in text and wrong not in text,
+                   "the rover passwords (and their Basic form) never on the console")
+
+    def lc_rovers(self, rovers: list[Rover], consumers0: int, n_up: int, wrong: str) -> bool:
+        """Steps 5-7: A and B for a minute, the full caster, then B leaves and C gets stuck."""
+        a = self.lc_open(2)
+        p = stream_head_problems(a.reply.head, V2_CHUNKED) if a.reply.accepted else ["refused"]
+        if not self.check(a.reply.accepted and a.chunked and not p,
+                          f"rover A (NTRIP 2.0 over HTTP/1.1) streams: {a.reply.status_line!r}"
+                          + (f": {'; '.join(p)}" if p else ", its head byte for byte")):
+            a.close()
+            return False
+        ra = Rover(a, "A").start()
+        rovers.append(ra)
+        time.sleep(2)   # the journal takes one record of a kind a second: A's and B's come 10 s after their logins
+        b = self.lc_open(1, mount=LCAST_MOUNT.lower())
+        if not self.check(b.reply.accepted and b.reply.kind == "icy",
+                          f"rover B (NTRIP 1.0, mountpoint {LCAST_MOUNT.lower()!r}: matched ignoring case) streams: "
+                          f"{b.reply.status_line!r}"):
+            b.close()
+            return False
+        rb = Rover(b, "B").start()
+        rovers.append(rb)
+        first = self.poll(lambda: a.first_byte is not None and b.first_byte is not None, 20, every=0.2)
+        self.check(first is not None and b.reply.head == b"ICY 200 OK\r\n\r\n" and b.first_byte == 0xD3,
+                   f"B's reply {b.reply.head!r}, then {b.first_byte:#04x} (ICY 200 OK, a blank line, then 0xD3)"
+                   if b.first_byte is not None else "B got no data within 20 s")
+        self.check(first is not None and a.first_byte == 0xD3,
+                   f"A's first chunk starts with {a.first_byte:#04x} (0xD3)" if a.first_byte is not None
+                   else "A got no data within 20 s")
+        lc = self.poll(lambda: (lambda x: x if len(x["status"].get("clients", [])) == 2 else None)(self.lc_get()),
+                       15, every=1.0)
+        cl = (lc or {}).get("status", {}).get("clients", []) if lc else []
+        got = [(x.get("addr"), x.get("ntrip_version"), x.get("chunked"), x.get("agent")) for x in cl]
+        want = [(smoke.QEMU_PEER, 2, True, ntrip_client.AGENT), (smoke.QEMU_PEER, 1, False, ntrip_client.AGENT)]
+        self.check(got == want, f"GET /api/local-caster lists A and B, oldest first: {got}")
+        status, sj = self.api("GET", "/api/status")
+        lcs = (sj or {}).get("local_caster") or {} if isinstance(sj, dict) else {}
+        self.check((lcs.get("enabled"), lcs.get("state"), lcs.get("clients")) == (True, "listening", 2),
+                   f"/api/status local_caster {lcs}")
+        self.lc_consumers(consumers0 + 2, "with two rovers")
+
+        time.sleep(max(0.0, rb.t_start + LCAST_RUN_S - time.monotonic()))
+        before = {2: a.record.bytes, 1: b.record.bytes}
+        lc = self.lc_get()
+        after = {2: a.record.bytes, 1: b.record.bytes}
+        self.save("lcast-two-rovers.json", lc)
+        by_ver = {x.get("ntrip_version"): x for x in lc["status"].get("clients", [])}
+        for name, v in (("A", 2), ("B", 1)):
+            counted = (before[v] + after[v]) / 2
+            sent = by_ver.get(v, {}).get("bytes_sent")
+            self.check(isinstance(sent, int) and counted > 0
+                       and abs(sent - counted) <= LCAST_BYTES_TOLERANCE * counted,
+                       f"rover {name}: bytes_sent {sent}, it counted {counted:.0f} (within "
+                       f"{LCAST_BYTES_TOLERANCE * 100:.0f} %) after {time.monotonic() - rovers[-1].t_start:.0f} s")
+
+        # 6. Full: the right login gets 503, a wrong one 401 (the occupancy is not shown without a login).
+        refused = self.lc_refused()
+        self.lc_error(self.lc_open(1), 503, V1, f"a third rover with the right login ({LCAST_MAX_ROVERS} streaming)")
+        self.lc_error(self.lc_open(1, password=wrong), 401, V1, "a third rover with a wrong login", LCAST_MOUNT)
+        self.lc_counts(refused, {"full": 1, "login": 1}, "the third rover")
+
+        # 7. B leaves; C logs in and never reads. A and the upstream go on.
+        rb.stop()
+        gone = self.poll(lambda: [x.get("ntrip_version") for x in self.lc_state().get("clients", [])] == [2], 15,
+                         every=0.5)
+        self.check(gone is not None, f"B closed: only A listed ({b.end})")
+        self.lc_judge("B", b, n_up, f"({b.summary()['seconds']:.0f} s)")
+        stalled0 = self.lc_state().get("stalled", 0)
+        c = self.lc_open(1, rcvbuf=4096)
+        if self.check(c.reply.accepted, f"rover C (NTRIP 1.0, SO_RCVBUF 4096, never reads) streams: "
+                                        f"{c.reply.status_line!r}"):
+            self.lc_stuck(c, stalled0)
+        else:
+            c.close()
+        self.lc_judge("A", a, n_up, f"so far ({a.summary()['seconds']:.0f} s, through the stuck rover)")
+        return True
+
+    def lc_stuck(self, c: ntrip_client.Stream, stalled0: int) -> None:
+        """The station closes a rover whose socket takes no byte for LCAST_STALL_S: once C's bytes_sent stops
+        growing (the buffers on the way are full, see LCAST_STUCK_MAX_S), within the stall rule's window."""
+        t_login = time.monotonic()
+        lo, hi = LCAST_STALL_S - 2.0, LCAST_STALL_S + 5.0 + QEMU_TOLERANCE_S
+        samples: list[tuple[float, int]] = []   # (when, bytes_sent) each time it changed
+        closed_at = None
+        why = f"not closed within {LCAST_STUCK_MAX_S:.0f} s of its login"
+        try:
+            while time.monotonic() - t_login < LCAST_STUCK_MAX_S:
+                try:
+                    st = self.lc_state()
+                except (OSError, http.client.HTTPException, ValueError) as e:
+                    self.say(f"stuck rover: {type(e).__name__}: {e}")
+                    time.sleep(1.0)
+                    continue
+                now = time.monotonic()
+                mine = [x for x in st.get("clients", []) if x.get("ntrip_version") == 1]
+                if mine and (not samples or samples[-1][1] != mine[0].get("bytes_sent")):
+                    samples.append((now, mine[0].get("bytes_sent")))
+                if not mine:
+                    if st.get("stalled", 0) >= stalled0 + 1:
+                        closed_at = now
+                    else:
+                        why = f"its session ended without stalled growing ({st.get('stalled')})"
+                    break
+                if samples and now - samples[-1][0] > hi:
+                    why = f"still open {now - samples[-1][0]:.0f} s after its bytes_sent stopped growing"
+                    break
+                time.sleep(1.0)
+        finally:
+            c.close()
+        self.save("lcast-stuck-rover.json", [{"t_s": round(t - t_login, 1), "bytes_sent": v} for t, v in samples])
+        last_t, last_v = samples[-1] if samples else (t_login, None)
+        if not self.check(closed_at is not None, "the station closed the stuck rover (stalled +1)"
+                          + ("" if closed_at is not None else f": {why} (bytes_sent {last_v})")):
+            return
+        quiet = closed_at - last_t
+        self.check(lo <= quiet <= hi,
+                   f"... {quiet:.1f} s after its bytes_sent stopped growing at {last_v} (the stall rule: "
+                   f"{LCAST_STALL_S:.0f} s; window {lo:.0f}-{hi:.0f} s), {closed_at - t_login:.0f} s after its "
+                   f"login (the network on the way buffered the rest)")
+
+    def lc_throttle(self, wrong: str) -> None:
+        """After a good login, 5 wrong ones; the right one then gets 429 with Retry-After, and streams after it."""
+        refused = self.lc_refused()
+        s = self.lc_open(2)
+        s.close()
+        self.check(s.reply.accepted, f"a good login first (it resets this address's count): {s.reply.status_line!r}")
+        codes = []
+        for _ in range(5):
+            w = self.lc_open(2, password=wrong)
+            codes.append(w.reply.code)
+            w.close()
+        s = self.lc_open(2)
+        retry = s.reply.header("Retry-After")
+        self.lc_error(s, 429, V2_CHUNKED, f"5 wrong logins ({codes}), then the right one (Retry-After {retry})")
+        self.check(codes == [401] * 5, f"the 5 wrong logins got 401: {codes}")
+        self.lc_counts(refused, {"login": 5, "throttled": 1}, "the throttle")
+        if s.reply.code != 429 or not (retry or "").isdigit():
+            return
+        time.sleep(int(retry) + 1)
+        d = self.lc_open(2)
+        rd = Rover(d, "D").start() if d.reply.accepted else None
+        got = rd is not None and self.poll(lambda: rd.frames > 0, 30, every=0.5) is not None
+        if rd is not None:
+            rd.stop()
+        self.check(got, f"{int(retry) + 1} s later the right login streams again: {d.reply.status_line!r}")
+
+    def lc_off(self, ra: Rover, n_up: int, consumers0: int, jcur: int) -> None:
+        a = ra.st
+        at = len(self.console_text())
+        status, _ = self.api("PUT", "/api/local-caster", {"enabled": False})
+        t_ans = time.monotonic()
+        ended = ra.ended(10)
+        late = (a.end_t - t_ans) if a.end_t is not None else None
+        self.check(status == 200 and ended and a.eof and not a.reset and a.last_chunk and late is not None
+                   and late <= 1.0,
+                   f"PUT /api/local-caster off (HTTP {status}): A got the last chunk {'and' if a.last_chunk else 'NOT'}"
+                   f" the close ({a.end}) "
+                   + (f"{late:+.2f} s after the answer (at most 1 s)" if late is not None else "not within 10 s"))
+        self.lc_judge("A", a, n_up, f"over its whole session ({a.summary()['seconds']:.0f} s)")
+        self.check(a.summary()["partial_tail"] == 0, f"A's record ends on a whole frame "
+                                                     f"({a.summary()['partial_tail']} bytes of a cut one)")
+        self.lc_wait_state("off", 5, "turned off")
+        self.check(self.poll(lambda: LCAST_OFF_LINE in self.console_text()[at:], 5, every=0.5) is not None,
+                   f"console: {LCAST_OFF_LINE!r}")
+        sess = self.poll(lambda: (lambda x: x if x and x[0].get("end") else None)(
+            rover_sessions(self.journal_since(jcur)[0])), 15, every=1.0)
+        self.check(bool(sess) and sess[0].get("end") == "settings",
+                   f"journal: A's rover_disconnect says {sess[0].get('end') if sess else None!r} ('settings'), "
+                   f"after {sess[0].get('length_s') if sess else None} s")
+        self.lc_consumers(consumers0, "once off")
+        ok, how = self.lc_port_closed()
+        self.check(ok, f"the forwarded port once off: {how}")
+
+    def lc_restart(self, rovers: list[Rover]) -> None:
+        """On again, a rover connected, then a planned restart: the rover sees a clean close before the station
+        goes down (the replay paused across it, see reboot_check); after the boot the station listens again with
+        the stored settings and password."""
+        status, data = self.api("PUT", "/api/local-caster", {"enabled": True})
+        cfg = (data.get("config") or {}) if isinstance(data, dict) else {}
+        if not self.check(status == 200 and cfg.get("enabled") is True and cfg.get("password_set") is True,
+                          f"PUT /api/local-caster on again (the stored password kept): HTTP {status}, config {cfg}"):
+            return
+        if not self.lc_wait_state("listening", 5, "on again"):
+            return
+        a2 = self.lc_open(2)
+        if not self.check(a2.reply.accepted, f"rover A2 (NTRIP 2.0) streams: {a2.reply.status_line!r}"):
+            a2.close()
+            return
+        r2 = Rover(a2, "A2").start()
+        rovers.append(r2)
+        self.poll(lambda: r2.frames > 0, 20, every=0.5)
+        self.replay.pause()   # quiet across the restart (reboot_check says why)
+        time.sleep(2)
+        at = len(self.console_text())
+        status, _ = self.api("POST", "/api/system/reboot", {})
+        if not self.check(status == 202, f"POST /api/system/reboot with a rover connected: HTTP {status}"):
+            self.replay.resume()
+            return
+        self.planned_reboots += 1
+        ended = r2.ended(15)
+        self.check(ended and a2.eof and not a2.reset,
+                   f"the restart: A2 sees a clean close ({a2.end}"
+                   + (", the last chunk first" if a2.last_chunk else ", without the last chunk") + ")")
+        time.sleep(5)
+        self.cookie = None
+        back = self.wait_http(self.args.timeout)
+        self.replay.resume()
+        if not self.check(back and self.login(first=False), "back after the restart with a rover connected"):
+            return
+        shutdown = self.console_text()[at:].split(smoke.BOOT_MARK)[0]
+        lines = [x.strip() for x in shutdown.splitlines() if f"lcast: rover {smoke.QEMU_PEER} disconnected after" in x]
+        self.check(any(f"({RESTART_WORDS})" in x for x in lines),
+                   "console before the restart: " + (lines[-1][:160] if lines else
+                                                     f"no 'lcast: rover {smoke.QEMU_PEER} disconnected' line"))
+        if not self.lc_wait_state("listening", 30, "after the restart (the setting persisted)"):
+            return
+        a3 = self.lc_open(1)
+        r3 = Rover(a3, "A3").start() if a3.reply.accepted else None
+        if r3 is not None:
+            rovers.append(r3)
+        got = r3 is not None and self.poll(lambda: r3.frames > 0, 90, every=1.0) is not None
+        if r3 is not None:
+            r3.stop()
+        self.check(got, f"after the restart a rover logs in with the stored password and gets frames: "
+                        f"{a3.reply.status_line!r}")
+        status, _ = self.api("PUT", "/api/local-caster", {"enabled": False})
+        self.check(status == 200, f"PUT /api/local-caster off again for what follows: HTTP {status}")
+
     # -- scenario: signal-test ---------------------------------------------------
 
     def gnss(self) -> dict:
@@ -1685,6 +2590,8 @@ class E2E:
                         self.skip(str(e))
                 if self.args.scenario in ("stream", "all"):
                     self.stream()
+                if self.args.scenario in ("local-caster", "all"):
+                    self.local_caster()
                 if self.args.scenario in ("signal-test", "all"):
                     self.signal_test()
             alive = self.proc.poll() is None
@@ -1716,7 +2623,8 @@ def main() -> int:
         signal.signal(sig, _exit_on_signal)
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", default=str(ROOT / "build-qemu" / "e2e"), help="output directory")
-    ap.add_argument("--scenario", choices=("stream", "onocoy-guard", "signal-test", "all"), default="all")
+    ap.add_argument("--scenario", choices=("stream", "onocoy-guard", "local-caster", "signal-test", "all"),
+                    default="all")
     ap.add_argument("--long", action="store_true",
                     help="also the 5-minute wait after a rejected login and the whole in-use retry ladder")
     ap.add_argument("--caster", choices=("fake", "docker"), default="fake",

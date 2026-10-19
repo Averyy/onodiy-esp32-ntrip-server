@@ -1,17 +1,21 @@
 # SPDX-FileCopyrightText: 2026 Avery L.
 # SPDX-License-Identifier: MIT
 """NTRIP helpers for the local test tools (stdlib only): HTTP chunked
-transfer coding, request parsing with the password masked, and a frame
-recorder that checks an RTCM byte stream as it arrives.
+transfer coding, request parsing with the password masked, a frame
+recorder that checks an RTCM byte stream as it arrives, source table
+records by field name, and the replies of the station's own caster for
+a rover ("Your rover", components/local_caster) as its header documents
+them.
 
 Public protocol only: NTRIP 1.0 ("SOURCE <password> /<mountpoint>",
-"ICY 200 OK") and NTRIP 2.0 (HTTP/1.1 with "Ntrip-Version: Ntrip/2.0",
-Basic authentication, chunked bodies).
+"ICY 200 OK", "SOURCETABLE 200 OK") and NTRIP 2.0 (HTTP/1.1 with
+"Ntrip-Version: Ntrip/2.0", Basic authentication, chunked bodies).
 """
 
 from __future__ import annotations
 
 import base64
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -35,7 +39,11 @@ class Dechunker:
     feed() returns the data bytes as they complete. `done` is set by the
     last chunk ("0" size line and its blank line); `error` names the first
     framing error, after which the rest is passed through as plain data (so
-    nothing the peer sent is lost from the byte count)."""
+    nothing the peer sent is lost from the byte count).
+
+    `chunk_boundaries` holds, for every chunk whose data and closing CR LF
+    arrived, the offset in the decoded data where it ended (the next chunk
+    starts there): a reader checks with it that no frame spans two chunks."""
 
     def __init__(self) -> None:
         self.buf = bytearray()
@@ -44,6 +52,8 @@ class Dechunker:
         self.done = False
         self.error: str | None = None
         self.chunks = 0
+        self.out = 0  # decoded data bytes so far
+        self.chunk_boundaries: list[int] = []
 
     def feed(self, data: bytes) -> bytes:
         out = bytearray()
@@ -51,6 +61,7 @@ class Dechunker:
         while self.buf:
             if self.state == "raw":
                 out += self.buf
+                self.out += len(self.buf)
                 self.buf.clear()
             elif self.state == "done":
                 if self.buf:
@@ -79,6 +90,7 @@ class Dechunker:
                 take = min(self.left, len(self.buf))
                 out += self.buf[:take]
                 del self.buf[:take]
+                self.out += take
                 self.left -= take
                 if self.left == 0:
                     self.state = "crlf"
@@ -90,6 +102,7 @@ class Dechunker:
                     continue
                 del self.buf[:2]
                 self.chunks += 1
+                self.chunk_boundaries.append(self.out)
                 self.state = "size"
             elif self.state == "trailer":
                 nl = self.buf.find(b"\r\n")
@@ -276,3 +289,149 @@ class FrameRecord:
             "last_frame_unix": self.last_t,
             "frames_span_s": (self.last_t - self.first_t) if self.first_t is not None else None,
         }
+
+
+# ---------------------------------------------------------------------------
+# source tables
+
+# The fields of a source table STR record, in order (NTRIP 2.0). The last one
+# (misc) is often empty, so a well-formed record then ends with ';'.
+STR_FIELDS = ("type", "mountpoint", "identifier", "format", "format_details", "carrier", "nav_system", "network",
+              "country", "latitude", "longitude", "nmea", "solution", "generator", "compr_encryp", "authentication",
+              "fee", "bitrate", "misc")
+SOURCETABLE_END = "ENDSOURCETABLE"
+
+
+def parse_sourcetable(text: str) -> list[dict]:
+    """The STR records of a source table body, up to ENDSOURCETABLE (CAS and
+    NET records are skipped): one dict per record with its fields by name
+    (STR_FIELDS) and "field_count", the number of ';'-separated fields (19
+    when well formed). A record with more fields keeps the rest in "misc",
+    joined by ';'; one with fewer lacks the names at the end."""
+    out = []
+    for line in text.replace("\r\n", "\n").split("\n"):
+        line = line.rstrip("\r")
+        if line.strip() == SOURCETABLE_END:
+            break
+        if not line.startswith("STR;"):
+            continue
+        parts = line.split(";")
+        rec: dict = {"field_count": len(parts)}
+        n = len(STR_FIELDS)
+        if len(parts) > n:
+            parts = parts[: n - 1] + [";".join(parts[n - 1 :])]
+        rec.update(zip(STR_FIELDS, parts))
+        out.append(rec)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The station's own caster for a rover ("Your rover", components/local_caster):
+# its replies as components/local_caster/include/local_caster.h and
+# components/web/API.md describe them, byte for byte. The test caster in
+# tests/test_ntrip_client.py answers with these, and tools/qemu/e2e.py compares
+# the station's replies with them. The order of an error reply's header lines is
+# not fixed there: the e2e compares those as a set.
+
+V1 = "v1"                  # no "Ntrip-Version: Ntrip/2.0": "ICY 200 OK", raw data
+V2_CHUNKED = "v2-chunked"  # NTRIP 2.0 over HTTP/1.1: chunked data, one chunk of whole frames per read
+V2_RAW = "v2-raw"          # NTRIP 2.0 over HTTP/1.0: an HTTP/1.0 status line, raw data
+STATION_MAX_ROVERS = 2     # LOCAL_CASTER_MAX_CLIENTS
+STATION_SERVER = "NTRIP onodiy/{ver}"
+
+STATION_ERRORS = {
+    400: ("Bad Request", "Bad request\r\n"),
+    401: ("Unauthorized", "Wrong or missing username or password\r\n"),
+    403: ("Forbidden", "Not for web browsers\r\n"),
+    429: ("Too Many Requests", "Too many wrong logins, try again in {s} s\r\n"),
+    503: ("Service Unavailable", f"At most {STATION_MAX_ROVERS} rovers at a time\r\n"),
+}
+
+_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def imf_date(unix: float) -> str:
+    """HTTP's IMF-fixdate, e.g. "Mon, 19 Oct 2026 04:30:00 GMT" (no locale involved)."""
+    t = time.gmtime(int(unix))
+    return (f"{_DAYS[t.tm_wday]}, {t.tm_mday:02d} {_MONTHS[t.tm_mon - 1]} {t.tm_year:04d} "
+            f"{t.tm_hour:02d}:{t.tm_min:02d}:{t.tm_sec:02d} GMT")
+
+
+def reply_flavour(ntrip2: bool, http11: bool) -> str:
+    """V1 without "Ntrip-Version: Ntrip/2.0"; with it, V2_CHUNKED over HTTP/1.1, V2_RAW over HTTP/1.0."""
+    if not ntrip2:
+        return V1
+    return V2_CHUNKED if http11 else V2_RAW
+
+
+def _head(lines: list[str]) -> bytes:
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+
+
+def _status(flavour: str, code_reason: str) -> str:
+    return f"HTTP/{'1.1' if flavour == V2_CHUNKED else '1.0'} {code_reason}"
+
+
+def station_stream_head(flavour: str, ver: str, date: str | None = None) -> bytes:
+    """The success reply before the data. `date`: the Date header's value
+    (sent only when the station's clock is trusted), None = no Date line."""
+    if flavour == V1:
+        return b"ICY 200 OK\r\n\r\n"
+    lines = [_status(flavour, "200 OK"), "Ntrip-Version: Ntrip/2.0", "Server: " + STATION_SERVER.format(ver=ver)]
+    if date:
+        lines.append(f"Date: {date}")
+    lines += ["Cache-Control: no-store, no-cache, max-age=0", "Pragma: no-cache", "Connection: close",
+              "Content-Type: gnss/data"]
+    if flavour == V2_CHUNKED:
+        lines.append("Transfer-Encoding: chunked")
+    return _head(lines)
+
+
+def station_sourcetable(flavour: str, ver: str, records: list[str], date: str | None = None) -> bytes:
+    """The source table reply: header, then the STR records and ENDSOURCETABLE, each line ending in CR LF."""
+    body = "".join(r + "\r\n" for r in records) + SOURCETABLE_END + "\r\n"
+    server = "Server: " + STATION_SERVER.format(ver=ver)
+    if flavour == V1:
+        lines = ["SOURCETABLE 200 OK", server, "Content-Type: text/plain", f"Content-Length: {len(body)}"]
+    else:
+        lines = [_status(flavour, "200 OK"), "Ntrip-Version: Ntrip/2.0", server]
+        if date:
+            lines.append(f"Date: {date}")
+        lines += ["Connection: close", "Content-Type: gnss/sourcetable", f"Content-Length: {len(body)}"]
+    return _head(lines) + body.encode("latin-1")
+
+
+def station_error(code: int, flavour: str, ver: str, date: str | None = None, mount: str = "",
+                  retry_s: int = 0) -> bytes:
+    """An error reply (400, 401, 403, 429, 503): an HTTP/1.0 status line for
+    NTRIP 1.0; for 2.0 the request's HTTP version and Ntrip-Version. `mount`:
+    the station's mountpoint (the 401's realm); `retry_s`: the 429's wait."""
+    reason, body = STATION_ERRORS[code]
+    body = body.format(s=retry_s)
+    if flavour == V1:
+        lines = [f"HTTP/1.0 {code} {reason}"]
+    else:
+        lines = [_status(flavour, f"{code} {reason}"), "Ntrip-Version: Ntrip/2.0"]
+    lines.append("Server: " + STATION_SERVER.format(ver=ver))
+    if date:
+        lines.append(f"Date: {date}")
+    if code == 401:
+        lines.append(f'WWW-Authenticate: Basic realm="/{mount}"')
+    elif code == 429:
+        lines.append(f"Retry-After: {retry_s}")
+    lines += ["Connection: close", "Content-Type: text/plain", f"Content-Length: {len(body)}"]
+    return _head(lines) + body.encode("latin-1")
+
+
+def str_field(text: str) -> str:
+    """A source table field as the station writes it: printable ASCII only, ';' as '_'."""
+    return "".join("_" if c == ";" else c for c in text if 0x20 <= ord(c) <= 0x7E)
+
+
+def station_str(mount: str, identifier: str, details: str, carrier: int, nav: str, generator: str,
+                bitrate: int) -> str:
+    """The station's one STR record: no position (0.00/0.00), Basic authentication, no fee."""
+    f = str_field
+    return (f"STR;{f(mount)};{f(identifier)};RTCM 3.3;{f(details)};{carrier};{f(nav)};onodiy;;0.00;0.00;0;0;"
+            f"{f(generator)};none;B;N;{bitrate};")

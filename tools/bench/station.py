@@ -48,6 +48,7 @@ DUMP_ENDPOINTS = [
     ("sky", "/api/sky"),
     ("gnss-flash", "/api/gnss/flash"),
     ("casters", "/api/casters"),
+    ("local-caster", "/api/local-caster"),
     ("wifi", "/api/wifi"),
     ("system", "/api/system"),
     ("update", "/api/update"),

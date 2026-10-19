@@ -40,6 +40,10 @@ password, default settings).
   --seconds N         stop QEMU after N seconds (with --headless)
   --http-port N       host port forwarded to the web server's port 80
                       (default 8080; the UI is at http://localhost:N/)
+  --ntrip-port N      host port forwarded to the station's caster for a rover
+                      ("Your rover", port 2101; default: not forwarded): a
+                      rover's NTRIP client on this computer reads
+                      127.0.0.1:N (the station sees it as 10.0.2.2)
   --pcap FILE         write every Ethernet frame between the emulated station
                       and QEMU's user-mode network to FILE (pcap, both
                       directions; QEMU's filter-dump on the NIC's netdev)
@@ -73,6 +77,7 @@ run=1
 headless=""
 seconds=""
 http_port=8080
+ntrip_port=""
 uart1="listen:5556"
 console="file"
 wdt=1
@@ -87,6 +92,7 @@ while [ $# -gt 0 ]; do
         --headless) [ $# -ge 2 ] || die "--headless needs a log file"; headless="$2"; shift ;;
         --seconds) [ $# -ge 2 ] || die "--seconds needs a number"; seconds="$2"; shift ;;
         --http-port) [ $# -ge 2 ] || die "--http-port needs a port"; http_port="$2"; shift ;;
+        --ntrip-port) [ $# -ge 2 ] || die "--ntrip-port needs a port"; ntrip_port="$2"; shift ;;
         --pcap) [ $# -ge 2 ] || die "--pcap needs a file"; pcap="$2"; shift ;;
         --uart1) [ $# -ge 2 ] || die "--uart1 needs a mode"; uart1="$2"; shift ;;
         --console) [ $# -ge 2 ] || die "--console needs a mode"; console="$2"; shift ;;
@@ -96,6 +102,8 @@ while [ $# -gt 0 ]; do
     shift
 done
 [[ "$http_port" =~ ^[0-9]+$ ]] && [ "$http_port" -ge 1 ] && [ "$http_port" -le 65535 ] || die "bad --http-port"
+[ -z "$ntrip_port" ] || { [[ "$ntrip_port" =~ ^[0-9]+$ ]] && [ "$ntrip_port" -ge 1 ] && [ "$ntrip_port" -le 65535 ] &&
+    [ "$ntrip_port" != "$http_port" ]; } || die "bad --ntrip-port (1-65535, not the --http-port)"
 [ -z "$seconds" ] || [[ "$seconds" =~ ^[0-9]+$ ]] || die "bad --seconds"
 [ -z "$seconds" ] || [ -n "$headless" ] || die "--seconds needs --headless"
 [ "$build" = 1 ] || [ "$run" = 1 ] || die "--no-build and --build-only together do nothing"
@@ -201,12 +209,15 @@ fi
 # watchdog (TIMG0) and the interrupt watchdog (TIMG1) fire here as on a
 # board, so a task that starves IDLE panics in QEMU too. --no-wdt turns them
 # off for a debugger session.
+nic="user,id=net0,model=open_eth,hostfwd=tcp:127.0.0.1:$http_port-:80"
+# The station's caster for a rover listens on 2101 (CONFIG_LOCAL_CASTER_PORT).
+[ -z "$ntrip_port" ] || nic="$nic,hostfwd=tcp:127.0.0.1:$ntrip_port-:2101"
 args=(
     -M esp32s3 -m 8M -accel tcg,thread=single
     -drive "file=$bdir/qemu_flash.bin,if=mtd,format=raw"
     -drive "file=$bdir/qemu_efuse.bin,if=none,format=raw,id=efuse"
     -global driver=nvram.esp32s3.efuse,property=drive,value=efuse
-    -nic "user,id=net0,model=open_eth,hostfwd=tcp:127.0.0.1:$http_port-:80"
+    -nic "$nic"
 )
 if [ -n "$pcap" ]; then
     # Commas doubled: QEMU's option syntax.
@@ -220,6 +231,7 @@ fi
 
 [ -z "$overlay_abs" ] || echo "Overlay: $(basename "$overlay_abs") ($bname/)"
 echo "Web UI:  http://localhost:$http_port/  (empty NVS: set the admin password on the first page)"
+[ -z "$ntrip_port" ] || echo "Rover:   127.0.0.1:$ntrip_port -> the station's port 2101 (Your rover, local NTRIP)"
 echo "UART1:   $uart1_text"
 
 if [ -z "$headless" ]; then
