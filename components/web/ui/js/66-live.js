@@ -54,17 +54,18 @@ function liveBands(t) {
 
 /* ---- Sky plot -------------------------------------------------------------- */
 
-function liveSkyPlot(sats) {
+/* mini: the Status page's preview, without the satellites' names and the elevation labels (each still named in its title). */
+function liveSkyPlot(sats, mini) {
   const C = 170, R = 140;
   const placed = sats.filter(hasSkyPos).sort((a, b) => (satCnr(a) || 0) - (satCnr(b) || 0));   /* strongest on top */
-  const plot = svg('svg', { class: 'sky live-sky', viewBox: '0 0 340 340', role: 'img',
+  const plot = svg('svg', { class: 'sky live-sky' + (mini ? ' mini' : ''), viewBox: '0 0 340 340', role: 'img',
     'aria-label': 'Sky plot: ' + placed.length + ' satellites placed by azimuth and elevation, coloured by C/N0. The list shows every satellite.' });
   for (const el of [0, 30, 60]) plot.append(svg('circle', { class: 'ring', cx: C, cy: C, r: (R * (90 - el)) / 90 }));
   plot.append(svg('line', { class: 'axis', x1: C, y1: C - R, x2: C, y2: C + R }), svg('line', { class: 'axis', x1: C - R, y1: C, x2: C + R, y2: C }));
   for (const l of [['N', C, C - R - 8], ['S', C, C + R + 16], ['E', C + R + 11, C + 4], ['W', C - R - 11, C + 4]]) {
     plot.append(svg('text', { class: 'lbl', x: l[1], y: l[2], 'text-anchor': 'middle' }, l[0]));
   }
-  plot.append(svg('text', { class: 'lbl', x: C + 4, y: C - (R * 60) / 90 + 12 }, '30°'), svg('text', { class: 'lbl', x: C + 4, y: C - (R * 30) / 90 + 12 }, '60°'));
+  if (!mini) plot.append(svg('text', { class: 'lbl', x: C + 4, y: C - (R * 60) / 90 + 12 }, '30°'), svg('text', { class: 'lbl', x: C + 4, y: C - (R * 30) / 90 + 12 }, '60°'));
   for (const s of placed) {
     const r = (R * (90 - Math.min(90, s.el_deg))) / 90;
     const a = (s.az_deg * Math.PI) / 180;
@@ -75,8 +76,8 @@ function liveSkyPlot(sats) {
     plot.append(svg('g', null,
       svg('title', null, satId(s) + ' (' + lbl(L.sys, s.sys) + ' ' + s.prn + '): elevation ' + s.el_deg + '°, azimuth ' + s.az_deg + '°' +
         (cnr ? ', ' + cnr + ' dB-Hz' : ', no C/N0')),
-      svg('circle', { class: 'sat ' + cls, cx: x.toFixed(1), cy: y.toFixed(1), r: 11 }),
-      svg('text', { class: 'sid ' + cls, x: x.toFixed(1), y: (y + 3).toFixed(1), 'text-anchor': 'middle' }, satId(s))));
+      svg('circle', { class: 'sat ' + cls, cx: x.toFixed(1), cy: y.toFixed(1), r: mini ? 13 : 11 }),
+      mini ? null : svg('text', { class: 'sid ' + cls, x: x.toFixed(1), y: (y + 3).toFixed(1), 'text-anchor': 'middle' }, satId(s))));
   }
   return plot;
 }

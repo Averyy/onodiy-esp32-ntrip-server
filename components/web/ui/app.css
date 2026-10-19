@@ -896,6 +896,23 @@ svg.sky .lbl { fill: var(--muted); font-size: 11px; font-family: inherit; }
 .legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
 .legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 
+/* The Status page's Sky card: a small sky plot beside the count and two bar charts (one column on a phone). */
+.sky-glance { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 2rem; }
+svg.sky.mini { flex: 0 0 auto; width: 200px; max-width: 100%; }
+svg.sky.mini .lbl { font-size: 22px; }
+svg.live-sky.mini .sat { stroke-width: 2; }
+.sky-info { flex: 1 1 20rem; min-width: 0; }
+.sky-total { margin: 0 0 0.75rem; }
+.sky-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1rem 2rem; }
+.sky-sub { margin: 0 0 0.4rem; color: var(--muted); font-size: 0.85rem; font-weight: 650; }
+.sky-bars { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.35rem 0.6rem; font-size: 0.9rem; }
+.sky-name { display: inline-flex; align-items: center; gap: 0.4rem; }
+.sky-name i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.sky-track { height: 8px; border-radius: 4px; background: color-mix(in srgb, var(--edge) 60%, transparent); overflow: hidden; }
+.sky-track > i { display: block; height: 100%; border-radius: inherit; }
+.sky-track > i.band-fill { background: var(--accent); }
+.sky-bars .num { text-align: right; }
+
 /* ---- Live view ---------------------------------------------------------- */
 
 .sr-only {

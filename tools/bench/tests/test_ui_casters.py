@@ -845,7 +845,7 @@ for (const c of JSON.parse(casesJson)) {
      * whether it is wide. The top card's buttons as shown [text, href], the caster slots its line names, and every class
      * on the page that gives a colour (a tone, a tone's text, a C/N0 class). */
     const st = ui.stationState(c.status, c.admin);
-    const kids = (c.admin ? ui.adminDashboard(c.status, st, c.open || []) : ui.publicDashboard(c.status, st, null)).filter(Boolean);
+    const kids = (c.admin ? ui.adminDashboard(c.status, st, c.open || [], c.live || null) : ui.publicDashboard(c.status, st, null)).filter(Boolean);
     const all = kids.flatMap(k => [...visible(k)]);
     /* A list's label/value pairs (the top card's facts: each pair in a div of its own). */
     const pairs = v => v.filter(e => e.tagName === 'DL').flatMap(dl => {
@@ -1504,11 +1504,12 @@ MATRIX = {
     "setup_too": over(BASE, casters=[ONO_SETUP, RTK, st_caster(2, "Bench", "auth_failed", reason="auth", next_retry_s=90)],
                       availability={"budget_left_s": None}),
 }
-CARDS = ["Receiver", "Station", "Onocoy", "NTRIP"]
+CARDS = ["Sky", "Receiver", "Station", "Onocoy", "NTRIP"]
 
 
-def dashboards(*statuses, admin: bool = True, open_slots: list | None = None) -> list[dict]:
-    return run_editor([{"fn": "dashboard", "status": s, "admin": admin, "open": open_slots or []} for s in statuses])
+def dashboards(*statuses, admin: bool = True, open_slots: list | None = None, live: dict | None = None) -> list[dict]:
+    return run_editor([{"fn": "dashboard", "status": s, "admin": admin, "open": open_slots or [], "live": live}
+                       for s in statuses])
 
 
 def matrix() -> dict[str, dict]:
@@ -1519,16 +1520,16 @@ def rx_rows(o: dict) -> list[str]:
     return [v for _, v in o["cards"]["Receiver"]["rows"]]
 
 
-def test_status_page_always_has_four_cards():
-    """Whatever the state the admin sees the same four cards in the same places (never a card missing, never one
-    taking the row): Receiver and Station, then Onocoy and NTRIP. Each has one link, in its head, whose name
-    starts with its visible word, and no button: the top card has the page's buttons."""
+def test_status_page_always_has_five_cards():
+    """Whatever the state the admin sees the same five cards in the same places (never a card missing): Sky across
+    the page, then Receiver and Station, Onocoy and NTRIP (none of them taking the row). Each has one link, in its
+    head, whose name starts with its visible word, and no button: the top card has the page's buttons."""
     for name, o in matrix().items():
         assert o["order"] == CARDS, name
         assert o["grid"] == "grid", name
         for title in CARDS:
             card = o["cards"][title]
-            assert not card["wide"], (name, title)
+            assert card["wide"] == (title == "Sky"), (name, title)
             assert card["buttons"] == 0, (name, title)
             assert len(card["links"]) == 1 and card["links"][0][3] is True, (name, title, card["links"])
             text, _, aria, _ = card["links"][0]
@@ -1537,39 +1538,68 @@ def test_status_page_always_has_four_cards():
 
 
 def test_receiver_rows_in_every_state():
-    """The Receiver card's four rows, in every state: dashes while the receiver's figures mean nothing; the two counts
-    only while it delivers (so they never sit beside no corrections); the corrections' age; the position in a word."""
+    """The Receiver card's three rows, in every state (the Sky card has the satellites): dashes while the receiver's
+    figures mean nothing; the bands only while it delivers (so they never sit beside no corrections); the corrections'
+    age; the position in a word."""
     out = matrix()
     for name, o in out.items():
-        assert [r[0] for r in o["cards"]["Receiver"]["rows"]] == ["Satellites", "Bands", "Corrections", "Position"], name
-    assert rx_rows(out["healthy"]) == ["28", "4 on Galileo", "Arriving", "Locked"]
-    assert rx_rows(out["noant"]) == ["–", "–", "None yet", "Surveying, paused"]
+        assert [r[0] for r in o["cards"]["Receiver"]["rows"]] == ["Bands", "Corrections", "Position"], name
+    assert rx_rows(out["healthy"]) == ["4 on Galileo", "Arriving", "Locked"]
+    assert rx_rows(out["noant"]) == ["–", "None yet", "Surveying, paused"]
     for name in ("norx", "uart", "safe", "journal", "updating", "starting"):
-        assert rx_rows(out[name]) == ["–"] * 4, name
+        assert rx_rows(out[name]) == ["–"] * 3, name
     # Settings cannot be saved, said first: a missing or updating receiver still dashes every row.
     for name in ("settings_norx", "settings_flash"):
-        assert out[name]["key"] == "settings" and rx_rows(out[name]) == ["–"] * 4, name
+        assert out[name]["key"] == "settings" and rx_rows(out[name]) == ["–"] * 3, name
     # A gap shorter than the station's 10 s: the receiver still streams, the corrections still count as arriving, as
     # the top card says (one freshness rule for the row and the counts).
-    assert out["rtcm7"]["key"] == "streaming" and rx_rows(out["rtcm7"]) == ["28", "4 on Galileo", "Arriving", "Locked"]
+    assert out["rtcm7"]["key"] == "streaming" and rx_rows(out["rtcm7"]) == ["4 on Galileo", "Arriving", "Locked"]
     (gap,) = dashboards(over(BASE, receiver={"rtcm_age_ms": 12000, "state": "recovering"}, health={"level": "recovering"},
                              casters=WAITING))
-    assert rx_rows(gap)[:3] == ["–", "–", "None for 12\u00a0s"]
-    assert rx_rows(out["maint"]) == ["28", "4 on Galileo", "Arriving", "Locked"]
-    assert rx_rows(out["maint_unchecked"]) == ["28", "4 on Galileo", "Arriving", "Not checked"]
-    assert rx_rows(out["survey"]) == ["28", "4 on Galileo", "Arriving", "Surveying, 5 min left"]
+    assert rx_rows(gap)[:2] == ["–", "None for 12\u00a0s"]
+    assert rx_rows(out["maint"]) == ["4 on Galileo", "Arriving", "Locked"]
+    assert rx_rows(out["maint_unchecked"]) == ["4 on Galileo", "Arriving", "Not checked"]
+    assert rx_rows(out["survey"]) == ["4 on Galileo", "Arriving", "Surveying, 5 min left"]
     # The top card says the fixed position looks wrong: the row agrees in amber, without its sentence.
-    assert out["fixed_far"]["head"] == "Fixed position looks wrong" and rx_rows(out["fixed_far"])[3] == "Fixed, check it"
+    assert out["fixed_far"]["head"] == "Fixed position looks wrong" and rx_rows(out["fixed_far"])[2] == "Fixed, check it"
     assert out["fixed_far"]["cards"]["Receiver"]["tones"] == [["warn", "Fixed, check it"]]
     # A stall: the fixture still has satellites, but nothing arrives.
-    assert rx_rows(out["stall"])[:3] == ["–", "–", "None for 6 s"]
-    assert rx_rows(out["configuring"])[:3] == ["–", "–", "Arriving"]
-    assert rx_rows(out["held"])[:3] == ["–", "–", "None yet"]
-    # An older firmware without the count: a dash.
-    rx = dict(BASE["receiver"])
-    del rx["satellites"]
-    (old,) = dashboards({**BASE, "receiver": rx})
-    assert rx_rows(old) == ["–", "4 on Galileo", "Arriving", "Locked"]
+    assert rx_rows(out["stall"])[:2] == ["–", "None for 6 s"]
+    assert rx_rows(out["configuring"])[:2] == ["–", "Arriving"]
+    assert rx_rows(out["held"])[:2] == ["–", "None yet"]
+
+
+
+SKY_LIVE = {
+    "totals": {"satellites": 31, "tracked": 31, "signals": 86, "with_pos": 1, "dropped": 0, "cnr_dbhz": 38,
+               "bands": {"l1": {"satellites": 31, "cnr_dbhz": 42}, "l2": {"satellites": 23, "cnr_dbhz": 34},
+                         "l5": {"satellites": 22, "cnr_dbhz": 38}, "l6": {"satellites": 10, "cnr_dbhz": 32}},
+               "systems": [{"sys": "gps", "satellites": 11, "bands": {"l1": 11, "l2": 10, "l5": 8}},
+                           {"sys": "galileo", "satellites": 8, "bands": {"l1": 8, "l2": 8, "l5": 8, "l6": 6}},
+                           {"sys": "qzss", "satellites": 0, "bands": {}}]},
+    "satellites": [{"sys": "gps", "prn": 12, "in_msm": True, "cnr_dbhz": {"l1": 44}, "el_deg": 45, "az_deg": 210,
+                    "sky_cnr_dbhz": 44},
+                   {"sys": "galileo", "prn": 5, "in_msm": True, "cnr_dbhz": {"l1": 40}, "el_deg": None, "az_deg": None}]}
+
+
+def test_sky_card():
+    """The Sky card, across the page under the top card: while the corrections arrive, how many satellites are tracked
+    with their mean C/N0, bars of the satellites per constellation (those with any) and per band, and the sky plot
+    without the satellites' names (only those with a position, each named in its title); otherwise one muted line. Its
+    one link, Details, opens the Receiver page."""
+    healthy, noant, safe = dashboards(MATRIX["healthy"], MATRIX["noant"], MATRIX["safe"], live=SKY_LIVE)
+    sky = healthy["cards"]["Sky"]
+    assert healthy["order"][0] == "Sky" and sky["wide"]
+    assert sky["links"] == [["Details", "#/receiver", "Details on the Receiver page", True]]
+    assert sky["big"][0] == "31"
+    text = sky["text"]
+    assert "31 satellites · mean C/N0 38\u00a0dB-Hz" in text
+    assert "ConstellationsGPS11Galileo8Bands" in text and "QZSS" not in text
+    assert "BandsL131L223L522L610" in text
+    assert "G12 (GPS 12): elevation 45°, azimuth 210°, 44 dB-Hz" in text and "E05" not in text
+    for o in (noant, safe, matrix()["healthy"]):
+        assert o["cards"]["Sky"]["notes"] == [["No satellites tracked yet.", "muted"]], o["key"]
+        assert o["cards"]["Sky"]["big"] is None
 
 
 def test_bands_row_says_onocoys_need_once():

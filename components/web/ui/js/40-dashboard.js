@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: MIT
  *
  * Status page: a summary that is always whole. The top card (title, one
- * line, its buttons, "Also:" lines), then four cards in the same places
- * whatever the state: Receiver and Station, then Onocoy and NTRIP. Each
+ * line, its buttons, "Also:" lines), then five cards in the same places
+ * whatever the state: Sky across the page, Receiver and Station, then
+ * Onocoy and NTRIP. Each
  * card says its few facts once and has one link out, in its head, to the
  * page that manages them; nothing is edited here. All of it from
  * stationState() (15-state.js), so no card contradicts another.
@@ -29,6 +30,12 @@ Views.dashboard = {
       sig = await api('GET', '/api/gnss/signals');
       render();
     });
+    /* The Sky card's satellites (GET /api/gnss/live, admin only), read every 5 s. */
+    let live = null;
+    const stopLive = isAdmin() ? poller(5000, async () => {
+      live = await api('GET', '/api/gnss/live');
+      render();
+    }) : null;
     /* Open servers that stream while Onocoy does (GET /api/casters warnings): fetched when the turned-on servers change; the
      * top card says it in an "Also:" line. */
     let openSlots = [], openKey = '';
@@ -61,7 +68,7 @@ Views.dashboard = {
           if (key) loadOpen();
         }
       }
-      patchDetect(el, admin ? adminDashboard(s, st, openSlots) : publicDashboard(s, st, sig));
+      patchDetect(el, admin ? adminDashboard(s, st, openSlots, live) : publicDashboard(s, st, sig));
     };
     detectClicks(el, render);
     endMaintClicks(el, render);
@@ -72,6 +79,7 @@ Views.dashboard = {
       destroy() {
         gone = true;
         if (stopSig) stopSig();
+        if (stopLive) stopLive();
       },
     };
   },
@@ -247,10 +255,10 @@ function rxDashed(s, st) {
 }
 
 /*
- * Four rows, always in this order: Satellites, Bands, Corrections, Position.
- * The two counts only while the receiver delivers and the corrections arrive
- * (st.quality.known, st.arriving: the station's 10 s), so they never disagree
- * with each other or sit beside no corrections. No colour but
+ * Three rows, always in this order: Bands, Corrections, Position (the Sky
+ * card has the satellites). The bands only while the receiver delivers and
+ * the corrections arrive (st.quality.known, st.arriving: the station's
+ * 10 s), so they never sit beside no corrections. No colour but
  * Onocoy's quality needs (bandsView) and a fixed position the station finds
  * far from the receiver's own (amber, as the top card or its "Also:" line
  * says it): never green beside a red top card.
@@ -264,8 +272,7 @@ function receiverCard(s, st) {
   const far = !dash && r.position_locked && (s.alerts || []).some(a => a.id === 'fixed_far' && a.source === 'station');
   return h('section', { class: 'card fit-kv' },
     cardHead('Receiver', headLink(st, null, { label: 'Manage', name: 'Manage the receiver', href: '#/receiver' })),
-    kv([['Satellites', live && typeof r.satellites === 'number' ? fmt.num(r.satellites) : DASH],
-      ['Bands', live ? bandsView(st, onocoyDay(s, st)) : DASH],
+    kv([['Bands', live ? bandsView(st, onocoyDay(s, st)) : DASH],
       ['Corrections', dash ? DASH : correctionsText(r.rtcm_age_ms, st.arriving)],
       ['Position', pos === NOT_CHECKED ? NOT_CHECKED_CHIP : far ? h('span', { class: 't-warn' }, 'Fixed, check it') : pos]]));
 }
@@ -373,9 +380,43 @@ function stationCard(s, st) {
     kv([['Wi-Fi', wifiView(s.network || {})], ['Running for', fmt.dur(s.uptime_s)], ['Firmware', dotted(fw.parts)]]));
 }
 
-/* The top card, then four cards in reading order: the receiver and the station, Onocoy and the NTRIP servers. */
-function adminDashboard(s, st, openSlots) {
-  const cards = [receiverCard(s, st), stationCard(s, st), onocoyCard(s, st), castersCard(s, st, true)];
+/* Satellites per constellation or band as bars on one scale (every tracked satellite: a full bar). rows: [label, count, fill class]. */
+function skyBars(title, rows, all) {
+  return h('div', null, h('h3', { class: 'sky-sub' }, title),
+    h('div', { class: 'sky-bars' }, rows.map(r => [h('span', null, r[0]),
+      h('span', { class: 'sky-track', 'aria-hidden': 'true' }, h('i', { class: r[2], style: { width: Math.min(100, (100 * r[1]) / all).toFixed(1) + '%' } })),
+      h('span', { class: 'num' }, fmt.num(r[1]))])));
+}
+
+/*
+ * The sky at a glance, a small copy of the Receiver page's Signals card: the
+ * satellites on a sky plot without their names (while the receiver reports
+ * where they are), how many are tracked and their mean C/N0, and bars of the
+ * satellites per constellation and per band. From GET /api/gnss/live (read
+ * every 5 s by the page), only while the corrections arrive, like the
+ * Receiver card's bands.
+ */
+function skyCard(s, st, live) {
+  const t = live && live.totals;
+  const head = cardHead('Sky', headLink(st, null, { label: 'Details', name: 'Details on the Receiver page', href: '#/receiver' }));
+  if (rxDashed(s, st) || !st.arriving || !t || !t.tracked) return h('section', { class: 'card wide sky-card' }, head, mutedLine('No satellites tracked yet.'));
+  const sats = live.satellites || [];
+  const systems = (t.systems || []).filter(x => x.satellites > 0);
+  return h('section', { class: 'card wide sky-card' }, head,
+    h('div', { class: 'sky-glance' },
+      sats.some(hasSkyPos) ? liveSkyPlot(sats, true) : null,
+      h('div', { class: 'sky-info' },
+        h('p', { class: 'sky-total' }, h('span', { class: 'big' }, fmt.num(t.tracked)), ' satellites',
+          t.cnr_dbhz ? h('span', { class: 'muted' }, ' · mean C/N0 ' + t.cnr_dbhz + NB + 'dB-Hz') : null),
+        h('div', { class: 'sky-charts' },
+          skyBars('Constellations', systems.map(x => [h('span', { class: 'sky-name' }, h('i', { class: 'sys-' + x.sys }), lbl(L.sys, x.sys)),
+            x.satellites, 'sys-' + x.sys]), t.tracked),
+          skyBars('Bands', liveBands(t).map(b => [BAND_HEAD[b], t.bands[b].satellites, 'band-fill']), t.tracked)))));
+}
+
+/* The top card, then five cards in reading order: the sky across the page, the receiver and the station, Onocoy and the NTRIP servers. */
+function adminDashboard(s, st, openSlots, live) {
+  const cards = [skyCard(s, st, live), receiverCard(s, st), stationCard(s, st), onocoyCard(s, st), castersCard(s, st, true)];
   const links = cards.map(c => c.querySelector('.head-link')).filter(Boolean).map(a => a.getAttribute('href'));
   return [heroCard(s, st, heroAlso(s, st, openSlots), links), h('div', { class: 'grid' }, cards)];
 }
