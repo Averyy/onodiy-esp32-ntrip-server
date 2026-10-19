@@ -126,7 +126,7 @@ TEST_CASE("profile edits merge into the stored profile", "[web_parse]")
     TEST_ASSERT_EQUAL_UINT16(7, p.station_id);
     TEST_ASSERT_EQUAL_UINT16(120, p.survey_in_s);
     TEST_ASSERT_EQUAL(st.rtcm_count, p.rtcm_count);
-    TEST_ASSERT_EQUAL_UINT32(115200, p.com1_baud);
+    TEST_ASSERT_EQUAL_UINT32(460800, p.com1_baud);   /* the stored (default) speed */
 
     TEST_ASSERT_TRUE(profile_put("{\"profile\":{\"base_mode\":\"fixed\",\"fixed\":{\"lat_deg\":45.123456789,"
                                  "\"lon_deg\":-75.123456789,\"height_m\":85.1234}}}",
@@ -161,7 +161,8 @@ TEST_CASE("profile field rules name the field", "[web_parse]")
         { "{\"profile\":{\"rtcm\":[{\"msg\":1000,\"period_s\":1}]}}", "rtcm" },
         { "{\"profile\":{\"rtcm\":[{\"msg\":1005,\"period_s\":0}]}}", "rtcm" },
         { "{\"profile\":{\"rtcm\":[{\"msg\":1104,\"period_s\":1}]}}", "rtcm" },
-        { "{\"profile\":{\"rtcm\":[{\"msg\":1019,\"period_s\":30}]}}", "rtcm" },
+        /* Ephemeris below 460800. */
+        { "{\"profile\":{\"com1_baud\":115200,\"rtcm\":[{\"msg\":1019,\"period_s\":30}]}}", "rtcm" },
         { "{\"profile\":{\"rtcm\":[{\"msg\":1005,\"period_s\":1},{\"msg\":1005,\"period_s\":5}]}}", "rtcm" },
         { "{\"profile\":{\"rtcm\":{}}}", "rtcm" },
         { "{\"profile\":{\"sat_view_output\":1}}", "sat_view_output" },

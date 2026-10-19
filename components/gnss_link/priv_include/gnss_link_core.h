@@ -141,6 +141,8 @@ extern "C" {
 /** Driver defaults for the 128 B hardware FIFO: RX-full threshold 120 B, RX timeout 10 symbols. */
 #define GNSS_LINK_RX_FULL_THRESH_DEFAULT 120
 #define GNSS_LINK_RX_TIMEOUT_DEFAULT     10
+/** RX-full threshold above 115200: the 8 B the default leaves last 0.17 ms at 460800, 64 B last 1.4 ms. */
+#define GNSS_LINK_RX_FULL_THRESH_FAST    64
 
 /** UART conditions, mapped from the driver's event types by gnss_link.c. */
 typedef enum {

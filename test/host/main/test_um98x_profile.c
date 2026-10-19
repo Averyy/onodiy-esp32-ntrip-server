@@ -17,8 +17,10 @@
 #define OLD_DEFAULT_PROFILE_HASH 0x139710D8u
 /* The default with 1137, before the satellite-in-view output joined it. */
 #define NO_SKY_DEFAULT_PROFILE_HASH 0x4D4127DFu
-/* um98x_profile_hash() of um98x_profile_default(TEST_STATION_ID): 1137 and the sky map's output included. */
-#define DEFAULT_PROFILE_HASH 0xCD18DA52u
+/* The default with the sky map's output, before COM1 went to 460800. */
+#define BAUD115200_DEFAULT_PROFILE_HASH 0xCD18DA52u
+/* um98x_profile_hash() of um98x_profile_default(TEST_STATION_ID): 1137, the sky map's output and COM1 at 460800. */
+#define DEFAULT_PROFILE_HASH 0xB7732F46u
 
 /* The default message set before 1137 joined it. */
 static const uint16_t k_old_set[] = { 1005, 1033, 1077, 1087, 1097, 1117, 1127, 1230 };
@@ -36,7 +38,7 @@ TEST_CASE("default profile is the Onocoy set and valid", "[um98x_profile]")
     TEST_ASSERT_EQUAL(UM98X_BASE_SURVEY_IN, p.base_mode);
     TEST_ASSERT_EQUAL_UINT16(600, p.survey_in_s);
     TEST_ASSERT_EQUAL_UINT16(TEST_STATION_ID, p.station_id);
-    TEST_ASSERT_EQUAL_UINT32(115200, p.com1_baud);
+    TEST_ASSERT_EQUAL_UINT32(460800, p.com1_baud);
     TEST_ASSERT_TRUE(p.sat_view_output);                     /* the sky map's satellite positions */
     TEST_ASSERT_EQUAL_UINT8(sizeof(expected) / sizeof(expected[0]), p.rtcm_count);
     for (size_t i = 0; i < p.rtcm_count; i++) {
@@ -125,7 +127,7 @@ TEST_CASE("profile blob round-trips every field", "[um98x_profile]")
     TEST_ASSERT_EQUAL_UINT8(a.signal_group_slave, b.signal_group_slave);
     TEST_ASSERT_EQUAL(a.sat_view_output, b.sat_view_output);
     TEST_ASSERT_EQUAL_UINT16(TEST_STATION_ID, b.station_id);
-    TEST_ASSERT_EQUAL_UINT32(115200, b.com1_baud);
+    TEST_ASSERT_EQUAL_UINT32(460800, b.com1_baud);
 }
 
 TEST_CASE("profile hash ignores struct padding", "[um98x_profile]")
@@ -184,16 +186,17 @@ TEST_CASE("profile hash and blob ignore fields the mode does not use", "[um98x_p
     b.station_id = (uint16_t)(a.station_id + 1);
     TEST_ASSERT_NOT_EQUAL(um98x_profile_hash(&a), um98x_profile_hash(&b));
     b.station_id = a.station_id;
-    b.com1_baud = 460800;
+    b.com1_baud = 230400;                         /* not the default */
     TEST_ASSERT_NOT_EQUAL(um98x_profile_hash(&a), um98x_profile_hash(&b));
 }
 
 /* The default profile as it was before 1137 joined it: the old message set,
- * no satellite-in-view output. */
+ * no satellite-in-view output, COM1 at 115200. */
 static void old_default(um98x_base_profile_t *p)
 {
     um98x_profile_default(p, TEST_STATION_ID);
     p->sat_view_output = false;
+    p->com1_baud = 115200;
     p->rtcm_count = (uint8_t)OLD_SET_N;
     for (size_t i = 0; i < OLD_SET_N; i++) {
         p->rtcm[i].msg = k_old_set[i];
@@ -213,7 +216,11 @@ TEST_CASE("profile hash format is frozen", "[um98x_profile]")
      * default read as today's, reconfigure once for it). */
     um98x_profile_default(&p, TEST_STATION_ID);
     p.sat_view_output = false;
+    p.com1_baud = 115200;
     TEST_ASSERT_EQUAL_HEX32(NO_SKY_DEFAULT_PROFILE_HASH, um98x_profile_hash(&p));
+    um98x_profile_default(&p, TEST_STATION_ID);
+    p.com1_baud = 115200;
+    TEST_ASSERT_EQUAL_HEX32(BAUD115200_DEFAULT_PROFILE_HASH, um98x_profile_hash(&p));
     um98x_profile_default(&p, TEST_STATION_ID);
     TEST_ASSERT_EQUAL_HEX32(DEFAULT_PROFILE_HASH, um98x_profile_hash(&p));
 }
@@ -223,7 +230,7 @@ static size_t encode_before_set_byte(const um98x_base_profile_t *p, uint8_t *buf
 {
     size_t len = um98x_profile_encode(p, buf, cap);
     TEST_ASSERT_TRUE(len > 1);
-    TEST_ASSERT_EQUAL_UINT8(3, buf[len - 1]);   /* the defaults this firmware writes */
+    TEST_ASSERT_EQUAL_UINT8(4, buf[len - 1]);   /* the defaults this firmware writes */
     return len - 1;
 }
 
@@ -232,8 +239,18 @@ static size_t encode_before_sky(const um98x_base_profile_t *p, uint8_t *buf, siz
 {
     size_t len = um98x_profile_encode(p, buf, cap);
     TEST_ASSERT_TRUE(len > 1);
-    TEST_ASSERT_EQUAL_UINT8(3, buf[len - 1]);
+    TEST_ASSERT_EQUAL_UINT8(4, buf[len - 1]);
     buf[len - 1] = 2;
+    return len;
+}
+
+/* p encoded as the firmware before COM1 went to 460800 wrote it (defaults byte 3). */
+static size_t encode_before_baud(const um98x_base_profile_t *p, uint8_t *buf, size_t cap)
+{
+    size_t len = um98x_profile_encode(p, buf, cap);
+    TEST_ASSERT_TRUE(len > 1);
+    TEST_ASSERT_EQUAL_UINT8(4, buf[len - 1]);
+    buf[len - 1] = 3;
     return len;
 }
 
@@ -258,7 +275,7 @@ TEST_CASE("profile: the old default set saved before 1137 reads as today's defau
     a.survey_in_s = 900;
     size_t len = encode_before_set_byte(&a, buf, sizeof(buf));
     TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
-    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_RTCM | UM98X_PROFILE_UPGRADED_SKY, up);
+    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_RTCM | UM98X_PROFILE_UPGRADED_SKY | UM98X_PROFILE_UPGRADED_BAUD, up);
     assert_default_list(&b);
     TEST_ASSERT_TRUE(b.sat_view_output);
     TEST_ASSERT_EQUAL_UINT16(900, b.survey_in_s);
@@ -284,7 +301,10 @@ TEST_CASE("profile: the old default set saved before 1137 reads as today's defau
     a.sat_view_output = true;                    /* turned on by the user then: no upgrade for it */
     len = encode_before_set_byte(&a, buf, sizeof(buf));
     TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len - 3, &b, &up));   /* two empty strings and the setup ID */
-    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_RTCM, up);
+    /* No defaults byte: written under the first defaults, so the link at
+     * 115200 (old_default) was the default then too and reads as 460800. */
+    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_RTCM | UM98X_PROFILE_UPGRADED_BAUD, up);
+    TEST_ASSERT_EQUAL_UINT32(460800, b.com1_baud);
     assert_default_list(&b);
     TEST_ASSERT_EQUAL(UM98X_BASE_FIXED, b.base_mode);
     TEST_ASSERT_TRUE(b.fixed_height_m == 112.5);
@@ -317,14 +337,14 @@ TEST_CASE("profile: any other list, or the old set chosen since, stays as stored
     a.rtcm[0].period_s = 30;                     /* 1005 every 30 s */
     len = encode_before_set_byte(&a, buf, sizeof(buf));
     TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
-    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_SKY, up);   /* only the output, off then */
+    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_SKY | UM98X_PROFILE_UPGRADED_BAUD, up);   /* the output and the link, defaults then */
     TEST_ASSERT_EQUAL_MEMORY(a.rtcm, b.rtcm, sizeof(a.rtcm[0]) * OLD_SET_N);
 
     old_default(&a);
     a.rtcm_count--;                               /* without 1230 */
     len = encode_before_set_byte(&a, buf, sizeof(buf));
     TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
-    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_SKY, up);   /* only the output, off then */
+    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_SKY | UM98X_PROFILE_UPGRADED_BAUD, up);   /* the output and the link, defaults then */
     TEST_ASSERT_EQUAL_UINT8(OLD_SET_N - 1, b.rtcm_count);
 
     old_default(&a);
@@ -333,21 +353,21 @@ TEST_CASE("profile: any other list, or the old set chosen since, stays as stored
     a.rtcm_count++;
     len = encode_before_set_byte(&a, buf, sizeof(buf));
     TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
-    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_SKY, up);   /* only the output, off then */
+    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_SKY | UM98X_PROFILE_UPGRADED_BAUD, up);   /* the output and the link, defaults then */
     TEST_ASSERT_EQUAL_UINT8(OLD_SET_N + 1, b.rtcm_count);
 
     old_default(&a);
     a.rtcm[1].msg = 1005;                         /* 1005 twice, no 1033 */
     len = encode_before_set_byte(&a, buf, sizeof(buf));
     TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
-    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_SKY, up);   /* only the output, off then */
+    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_SKY | UM98X_PROFILE_UPGRADED_BAUD, up);   /* the output and the link, defaults then */
     TEST_ASSERT_EQUAL_UINT16(1005, b.rtcm[1].msg);
 
     old_default(&a);
     a.rtcm_count = 0;                             /* no messages */
     len = encode_before_set_byte(&a, buf, sizeof(buf));
     TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
-    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_SKY, up);   /* only the output, off then */
+    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_SKY | UM98X_PROFILE_UPGRADED_BAUD, up);   /* the output and the link, defaults then */
     TEST_ASSERT_EQUAL_UINT8(0, b.rtcm_count);
 
     /* A defaults byte this firmware does not know (a newer one wrote it): as stored. */
@@ -403,7 +423,7 @@ TEST_CASE("profile: satellite positions off from before the sky map read as on, 
     /* Off saved by this firmware: the user's choice, kept. */
     a.sat_view_output = false;
     len = um98x_profile_encode(&a, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_UINT8(3, buf[len - 1]);
+    TEST_ASSERT_EQUAL_UINT8(4, buf[len - 1]);
     TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
     TEST_ASSERT_EQUAL_HEX(0, up);
     TEST_ASSERT_FALSE(b.sat_view_output);
@@ -426,6 +446,49 @@ TEST_CASE("profile: satellite positions off from before the sky map read as on, 
     TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_SKY, up);
     TEST_ASSERT_TRUE(b.sat_view_output);
     TEST_ASSERT_EQUAL_UINT8(2, b.rtcm_count);
+}
+
+TEST_CASE("profile: COM1 at 115200 from before 460800 reads as 460800, a speed chosen since stays", "[um98x_profile]")
+{
+    um98x_base_profile_t a;
+    um98x_base_profile_t b;
+    uint8_t buf[UM98X_PROFILE_BLOB_MAX];
+    unsigned up = 0;
+
+    /* Saved by the firmware before (defaults 3) at 115200, its default then: 460800, everything else as stored. */
+    um98x_profile_default(&a, TEST_STATION_ID);
+    a.com1_baud = 115200;
+    a.survey_in_s = 900;
+    size_t len = encode_before_baud(&a, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
+    TEST_ASSERT_EQUAL_HEX(UM98X_PROFILE_UPGRADED_BAUD, up);
+    TEST_ASSERT_EQUAL_UINT32(460800, b.com1_baud);
+    TEST_ASSERT_EQUAL_UINT16(900, b.survey_in_s);
+    TEST_ASSERT_TRUE(b.sat_view_output);
+    assert_default_list(&b);
+    TEST_ASSERT_NOT_EQUAL(um98x_profile_hash(&a), um98x_profile_hash(&b));   /* not what was applied: applied once */
+
+    /* Another speed chosen then: as stored. */
+    a.com1_baud = 230400;
+    len = encode_before_baud(&a, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
+    TEST_ASSERT_EQUAL_HEX(0, up);
+    TEST_ASSERT_EQUAL_UINT32(230400, b.com1_baud);
+
+    /* 115200 saved by this firmware: the user's choice, kept. */
+    a.com1_baud = 115200;
+    len = um98x_profile_encode(&a, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &b, &up));
+    TEST_ASSERT_EQUAL_HEX(0, up);
+    TEST_ASSERT_EQUAL_UINT32(115200, b.com1_baud);
+
+    /* The upgraded profile stored again (any save): 460800, as stored, from then on. */
+    len = encode_before_baud(&a, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode(buf, len, &b));
+    len = um98x_profile_encode(&b, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(um98x_profile_decode_ex(buf, len, &a, &up));
+    TEST_ASSERT_EQUAL_HEX(0, up);
+    TEST_ASSERT_EQUAL_UINT32(460800, a.com1_baud);
 }
 
 TEST_CASE("profile decode rejects foreign or damaged blobs", "[um98x_profile]")

@@ -16,7 +16,9 @@ switches its signal group:
   MODE                        OK and the base-mode log (what MODE BASE set)
   MODE BASE ..., RTCMxxxx COM1 n, CONFIG COM1 n, CONFIG RTCMB1CB2A ...,
   CONFIG BASEANTENNAMODEL ..., GPGSV COM1 n, UNLOG COM1 GPGSV
-                              OK (RTCMxxxx turns the RTCM output on)
+                              OK (RTCMxxxx turns the RTCM output on;
+                              CONFIG COM1 n puts n in the dump's COM1
+                              line: the replay's TCP link has no speed)
   SAVECONFIG                  OK; what runs is saved
   RESET                       OK, then a restart
   CONFIG SIGNALGROUP m [s]    OK for 4 5, 3 6, 5 0 and 7 0 (minus `reject`;
@@ -45,8 +47,9 @@ A restart withholds the RTCM output for `restart_s`, answers every command
 meanwhile with `The Board is resetting,do not response any command!*39`
 (build 25164 answered a command 0.4 s into a restart so; later in a restart
 it was not tried), then prints the restart banner and comes back with what
-was saved (signal group, base mode, outputs). Build 25164 takes 8.0-9.2 s
-to its banner; the default here is shorter, to keep the tests quick.
+was saved (signal group, base mode, outputs, COM1 speed). Build 25164 takes
+8.0-9.2 s to its banner; the default here is shorter, to keep the tests
+quick.
 Nothing here touches a real receiver: the station's commands arrive over the
 replay's local TCP connection.
 
@@ -170,7 +173,7 @@ class Um982Responder:
 
     def _state(self) -> dict:
         return {"mode": self.mode, "b1c": self.b1c, "antenna": self.antenna, "output": self.output,
-                "station_out": dict(self.station_out)}
+                "station_out": dict(self.station_out), "baud": self.baud}
 
     def _restore(self) -> None:
         self.mode = self.saved["mode"]
@@ -178,6 +181,7 @@ class Um982Responder:
         self.antenna = self.saved["antenna"]
         self.output = self.saved["output"]
         self.station_out = dict(self.saved["station_out"])
+        self.baud = self.saved["baud"]
 
     def _restart(self, now: float) -> None:
         """Quiet for restart_s, then the banner and the saved configuration."""

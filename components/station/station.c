@@ -702,6 +702,9 @@ static void load_profile(void)
             if ((upgraded & UM98X_PROFILE_UPGRADED_SKY) != 0) {
                 ESP_LOGI(TAG, "profile: satellite-in-view output reads as on, the current default (sky map)");
             }
+            if ((upgraded & UM98X_PROFILE_UPGRADED_BAUD) != 0) {
+                ESP_LOGI(TAG, "profile: the receiver link reads as 460800 baud, the current default");
+            }
         }
     } else {
         /* Default: the station ID comes from the base MAC, stable per device. */

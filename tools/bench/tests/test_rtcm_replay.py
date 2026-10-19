@@ -578,6 +578,38 @@ def test_responder_saves_outputs_and_mode_and_a_reset_brings_back_what_was_saved
     assert lines_of(r.due()) == [unicore.ack_line("FRESET", unicore.refusal_text("FRESET"))]
 
 
+def test_responder_takes_the_default_link_speed_and_a_reset_brings_back_the_saved_one():
+    clk = FakeClock()
+    r = Um982Responder(clock=clk)                   # COM1 at the factory 115200
+
+    def com1() -> list[str]:
+        r.feed(b"CONFIG\r\n")
+        clk.t += 0.2
+        return unicore.parse_config(lines_of(r.due())).get("COM1", [])
+
+    assert com1() == ["CONFIG COM1 115200"]
+    # The default profile's speed: OK, then in the dump; saved, it survives a restart.
+    r.feed(b"CONFIG COM1 460800\r\n")
+    clk.t += 0.1
+    assert lines_of(r.due()) == [unicore.ack_line("CONFIG COM1 460800")]
+    assert com1() == ["CONFIG COM1 460800"]
+    for cmd in (b"SAVECONFIG", b"RESET"):
+        r.feed(cmd + b"\r\n")
+        clk.t += 0.1
+    clk.t += 3.5
+    r.due()
+    assert r.saves == 1 and r.restarts == 1 and com1() == ["CONFIG COM1 460800"]
+    # Not saved: a RESET (or a signal-group restart) goes back to the saved speed.
+    r.feed(b"CONFIG COM1 230400\r\nRESET\r\n")
+    clk.t += 3.6
+    r.due()
+    assert com1() == ["CONFIG COM1 460800"]
+    r.feed(b"CONFIG COM1 230400\r\nCONFIG SIGNALGROUP 3 6\r\n")
+    clk.t += 3.6
+    r.due()
+    assert r.signal_group() == (3, 6) and com1() == ["CONFIG COM1 460800"]
+
+
 def test_station_message_builders_decode_with_benchlib():
     from benchlib.um982_sim import arp_frame, descriptor_frame, glo_bias_frame
     xyz = (-2503389.9916, -4660267.5866, 3551298.6913)

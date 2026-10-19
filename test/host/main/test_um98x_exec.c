@@ -587,15 +587,16 @@ TEST_CASE("exec: apply on a factory receiver: signal group first, restart, then 
     TEST_ASSERT_TRUE(r.signal_group_sent);
     TEST_ASSERT_TRUE(r.mode_sent);
     TEST_ASSERT_TRUE(r.rtcm1230_ok);
-    TEST_ASSERT_FALSE(r.baud_changed);
+    TEST_ASSERT_TRUE(r.baud_changed);   /* the factory 115200 to the default's 460800 */
     TEST_ASSERT_FALSE(r.rolled_back);
     TEST_ASSERT_EQUAL_UINT32(0, r.found_baud);
-    TEST_ASSERT_EQUAL_UINT32(115200, r.baud);
+    TEST_ASSERT_EQUAL_UINT32(460800, r.baud);
     TEST_ASSERT_EQUAL_STRING("R4.10Build18975", r.firmware);
     TEST_ASSERT_EQUAL_STRING("", r.failed_cmd);
 
     /* Order: identity, quiet port, read-back, signal group and its restart,
-     * quiet port and read-back again, base mode, outputs, one save. */
+     * quiet port and read-back again, the link speed, base mode, outputs,
+     * one save. */
     int sg = nth(s, "CONFIG SIGNALGROUP 3 6", 0);
     TEST_ASSERT_EQUAL_INT(0, nth(s, "VERSIONA", 0));
     TEST_ASSERT_EQUAL_INT(1, nth(s, "UNLOG COM1", 0));
@@ -605,12 +606,16 @@ TEST_CASE("exec: apply on a factory receiver: signal group first, restart, then 
     TEST_ASSERT_GREATER_THAN_INT(sg, nth(s, "UNLOG COM1", 1));
     TEST_ASSERT_GREATER_THAN_INT(nth(s, "UNLOG COM1", 1), nth(s, "CONFIG", 1));
     TEST_ASSERT_GREATER_THAN_INT(nth(s, "CONFIG", 1), nth(s, "MODE", 1));
-    TEST_ASSERT_GREATER_THAN_INT(nth(s, "MODE", 1), nth(s, "MODE BASE 1234 TIME 600 0", 0));
+    int com1 = nth(s, "CONFIG COM1 460800", 0);
+    TEST_ASSERT_GREATER_THAN_INT(nth(s, "MODE", 1), com1);
+    TEST_ASSERT_EQUAL_UINT32(115200, s->rx[com1].host_baud);   /* sent at the speed it came back at */
+    TEST_ASSERT_GREATER_THAN_INT(com1, nth(s, "MODE BASE 1234 TIME 600 0", 0));
+    TEST_ASSERT_EQUAL_UINT32(460800, s->rx[nth(s, "MODE BASE 1234 TIME 600 0", 0)].host_baud);
     TEST_ASSERT_GREATER_THAN_INT(nth(s, "MODE BASE 1234 TIME 600 0", 0), nth(s, "RTCM1005 COM1 1", 0));
     TEST_ASSERT_EQUAL_INT(s->nrx - 1, nth(s, "SAVECONFIG", 0));
     TEST_ASSERT_EQUAL_INT(1, count(s, "SAVECONFIG"));
     TEST_ASSERT_EQUAL_INT(1, count(s, "CONFIG SIGNALGROUP"));
-    TEST_ASSERT_EQUAL_INT(0, count(s, "CONFIG COM1"));
+    TEST_ASSERT_EQUAL_INT(1, count(s, "CONFIG COM1"));
     TEST_ASSERT_EQUAL_INT(0, count(s, "RESET"));
     TEST_ASSERT_EQUAL_INT(p.rtcm_count, count(s, "RTCM"));   /* each profile message once */
     for (int i = 0; i < s->nrx; i++) {
@@ -626,6 +631,8 @@ TEST_CASE("exec: apply on a factory receiver: signal group first, restart, then 
     /* The receiver now runs the profile. */
     TEST_ASSERT_EQUAL_UINT8(3, s->sg_m);
     TEST_ASSERT_EQUAL_UINT8(6, s->sg_s);
+    TEST_ASSERT_EQUAL_UINT32(460800, s->saved_baud);
+    TEST_ASSERT_EQUAL_UINT32(460800, s->host_baud);
     TEST_ASSERT_EQUAL_STRING("MODE BASE 1234 TIME 600 0", s->saved_mode);
     TEST_ASSERT_TRUE(s->saved_output);
     TEST_ASSERT_EQUAL_INT(1, s->saves);
@@ -678,6 +685,7 @@ TEST_CASE("exec: a receiver that runs the profile gets no base mode and no signa
     configured(s);
     um98x_base_profile_t p;
     default_profile(&p);
+    p.com1_baud = 115200;   /* the simulated receiver's link: no speed change either */
     gnss_versiona_t id;
     known_identity(&id);
     snprintf(id.firmware, sizeof(id.firmware), "R4.10Build13495");   /* known from before an update */
@@ -998,6 +1006,7 @@ TEST_CASE("exec: after a signal-group restart at the saved baud, detection finds
     strcpy(s->mode, s->saved_mode);
     um98x_base_profile_t p;
     default_profile(&p);
+    p.com1_baud = 115200;   /* the profile's speed is the saved one */
     gnss_versiona_t id;
     known_identity(&id);
     um98x_apply_result_t r;
@@ -1030,6 +1039,7 @@ TEST_CASE("exec: an unacknowledged signal group that lands at the saved baud is 
     strcpy(s->mode, s->saved_mode);
     um98x_base_profile_t p;
     default_profile(&p);
+    p.com1_baud = 115200;   /* the profile's speed is the saved one: no speed change after it is found */
     gnss_versiona_t id;
     known_identity(&id);
     um98x_apply_result_t r;
@@ -1709,6 +1719,7 @@ TEST_CASE("exec: a restart while B1C/B2a is in flight fails the session", "[um98
     s->restart_ms = 1500;   /* the banner comes well within the command's reply time */
     um98x_base_profile_t p;
     default_profile(&p);
+    p.com1_baud = 115200;   /* the simulated receiver's link: its banner comes at the session's speed */
     gnss_versiona_t id;
     known_identity(&id);
     um98x_apply_result_t r;
@@ -1733,6 +1744,7 @@ TEST_CASE("exec: a restart after the B1C/B2a ack, before the save, fails the ses
     snprintf(s->restart_after, sizeof(s->restart_after), "CONFIG RTCMB1CB2A");
     um98x_base_profile_t p;
     default_profile(&p);
+    p.com1_baud = 115200;   /* the simulated receiver's link: its banner comes at the session's speed */
     gnss_versiona_t id;
     known_identity(&id);
     um98x_apply_result_t r;

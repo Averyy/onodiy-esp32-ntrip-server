@@ -32,7 +32,7 @@ const EPHEMERIS_MSGS = [1019, 1020, 1042, 1045, 1046];
 const ONOCOY_RTCM = [1005, 1033, 1077, 1087, 1097, 1117, 1127, 1137, 1230];
 const BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 /* The profile's default link speed (um98x_profile.h). */
-const DEFAULT_BAUD = 115200;
+const DEFAULT_BAUD = 460800;
 const IGS_ANTENNAS = 'https://files.igs.org/pub/station/general/rcvr_ant.tab';
 const ONOCOY_INSTALL = 'https://docs.onocoy.com/documentation/3.-become-a-miner/2.-install-your-station';
 
@@ -694,7 +694,8 @@ function receiverForms(g, latest, done, onCompare, fold) {
     signal_group_slave: field('Second antenna', sgs, '0 turns it off.'),
     station_id: field('Station ID', sid, 'In every message. The default comes from this device\'s MAC; change it only if a ' +
       'server asks for a number.'),
-    com1_baud: field('Receiver link speed (COM1)', baud, 'Enough for the Onocoy set. Ephemeris messages need 460800 or more.'),
+    com1_baud: field('Receiver link speed (COM1)', baud, '460800 (default) brings each epoch out sooner. Ephemeris messages ' +
+      'need 460800 or more.'),
     rtcm: { el: h('div'), input: null, error: null },
     antenna_model: field('Antenna model (IGS name)', antModel, ['Only for an antenna in the IGS list: name and radome as listed. ' +
       'Empty keeps the receiver\'s value; ADVNULLANTENNA clears it. ', extLink('IGS antenna list', IGS_ANTENNAS)]),

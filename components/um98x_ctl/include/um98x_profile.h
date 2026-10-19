@@ -66,11 +66,11 @@ extern "C" {
 #define UM98X_STATION_ID_MAX     4095u    /**< reference station ID is 12 bits */
 #define UM98X_SURVEY_MAX_S       3600u    /**< longest survey-in the receiver accepts */
 #define UM98X_DEFAULT_SURVEY_S   600u
-#define UM98X_DEFAULT_COM1_BAUD  115200u
+#define UM98X_DEFAULT_COM1_BAUD  460800u
 
 /**
  * Onocoy default profile: signal group 3/6 (adds Galileo E6 on the UM982),
- * survey-in 600 s, COM1 at 115200, RTCM 1005, 1033, MSM7
+ * survey-in 600 s, COM1 at 460800, RTCM 1005, 1033, MSM7
  * 1077/1087/1097/1117/1127/1137 and 1230, all every 1 s: the list Onocoy's
  * station connection guide asks for (1005 at 1 s too, which it allows).
  * 1137 (NavIC) and 1230 may be refused by a receiver firmware without them;
@@ -80,10 +80,11 @@ extern "C" {
  * 10 s, saved in the receiver): the UI's sky map places the satellites with
  * them; the signal view comes from MSM data either way.
  *
- * The 600 s survey assumes the receiver keeps sending MSM observations
- * while it surveys; PROVISIONAL, to be confirmed on hardware (if it holds
- * them back, the default goes back to 60 s). 460800 becomes the COM1 default
- * only once confirmed on hardware.
+ * The 600 s survey works on hardware: the receiver keeps sending MSM
+ * observations while it surveys. COM1 runs at 460800 (on hardware: the whole
+ * epoch reaches a client about 80 ms sooner than at 115200, and the
+ * satellite-in-view burst every 10 s delays its epoch by about 33 ms instead
+ * of 165 ms).
  *
  * @param station_id reference station ID, normally um98x_station_id_from_mac()
  *                   of the base MAC (stable per device).
@@ -136,6 +137,7 @@ bool um98x_profile_decode(const uint8_t *buf, size_t len, um98x_base_profile_t *
 /** What um98x_profile_decode_ex() read as today's default (bits of *upgraded). */
 #define UM98X_PROFILE_UPGRADED_RTCM 0x01u   /**< the old default message set, read as Onocoy's list */
 #define UM98X_PROFILE_UPGRADED_SKY  0x02u   /**< satellite-in-view output off from before it was the default, read as on */
+#define UM98X_PROFILE_UPGRADED_BAUD 0x04u   /**< COM1 at 115200 from before 460800 was the default, read as 460800 */
 
 /** um98x_profile_decode(); *upgraded (may be NULL) says which old defaults were read as today's (0 = none). */
 bool um98x_profile_decode_ex(const uint8_t *buf, size_t len, um98x_base_profile_t *out, unsigned *upgraded);

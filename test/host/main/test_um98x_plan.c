@@ -60,7 +60,8 @@ TEST_CASE("plan: nothing differs -> outputs and one save only", "[um98x_plan]")
     char text[512];
     survey_profile(&p);
     matching_readback(&p, &rb);
-    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, 115200, false, &plan));
+    /* The link already at the profile's speed: no baud step either. */
+    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, p.com1_baud, false, &plan));
     plan_text(&p, &plan, text, sizeof(text));
     /* The default sends the satellite positions for the sky map. */
     TEST_ASSERT_EQUAL_STRING("RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
@@ -74,7 +75,7 @@ TEST_CASE("plan: nothing differs -> outputs and one save only", "[um98x_plan]")
 
     /* Without them: no GPGSV (the session's UNLOG COM1 has turned it off). */
     p.sat_view_output = false;
-    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, 115200, false, &plan));
+    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, p.com1_baud, false, &plan));
     plan_text(&p, &plan, text, sizeof(text));
     TEST_ASSERT_EQUAL_STRING("RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
                              "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|RTCM1230 COM1 1|SAVECONFIG",
@@ -129,12 +130,63 @@ TEST_CASE("plan: signal group first, then baud, base mode, outputs, save", "[um9
     TEST_ASSERT_NULL(strstr(text, "FRESET"));
 }
 
+static int occurrences(const char *text, const char *needle)
+{
+    int n = 0;
+    for (const char *at = strstr(text, needle); at != NULL; at = strstr(at + 1, needle)) {
+        n++;
+    }
+    return n;
+}
+
+TEST_CASE("plan: the default profile switches a factory receiver's 115200 link to 460800 once", "[um98x_plan]")
+{
+    um98x_base_profile_t p;
+    um98x_readback_t rb;
+    um98x_plan_t plan;
+    char text[512];
+    static um98x_preview_step_t prev[UM98X_PREVIEW_MAX];
+    survey_profile(&p);
+    TEST_ASSERT_EQUAL_UINT32(460800, p.com1_baud);
+
+    /* A factory receiver: signal group 4 5, rover, COM1 at 115200. */
+    matching_readback(&p, &rb);
+    rb.config.signal_group_master = 4;
+    rb.config.signal_group_slave = 5;
+    strcpy(rb.mode_body, "MODE ROVER");
+    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, 115200, false, &plan));
+    plan_text(&p, &plan, text, sizeof(text));
+    TEST_ASSERT_EQUAL_INT(1, occurrences(text, "CONFIG COM1 460800"));
+    TEST_ASSERT_EQUAL_INT(1, occurrences(text, "CONFIG COM1"));
+    TEST_ASSERT_EQUAL(UM98X_STEP_SIGNALGROUP, plan.step[0].kind);
+    TEST_ASSERT_EQUAL(UM98X_STEP_BAUD, plan.step[1].kind);   /* before the base mode and outputs */
+    TEST_ASSERT_EQUAL(UM98X_STEP_MODE, plan.step[2].kind);
+    TEST_ASSERT_TRUE(plan.step[1].fatal);
+    size_t n = um98x_plan_preview(&p, 115200, prev, UM98X_PREVIEW_MAX);
+    int baud_lines = 0;
+    for (size_t i = 0; i < n; i++) {
+        baud_lines += strcmp(prev[i].text, "CONFIG COM1 460800") == 0;
+    }
+    TEST_ASSERT_EQUAL_INT(1, baud_lines);
+
+    /* Already at 460800 (applied before): no CONFIG COM1 step. */
+    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, 460800, false, &plan));
+    plan_text(&p, &plan, text, sizeof(text));
+    TEST_ASSERT_NULL(strstr(text, "CONFIG COM1"));
+    n = um98x_plan_preview(&p, 460800, prev, UM98X_PREVIEW_MAX);
+    TEST_ASSERT_GREATER_THAN_size_t(0, n);
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_NULL(strstr(prev[i].text, "CONFIG COM1"));
+    }
+}
+
 TEST_CASE("plan: each step only when its read-back differs", "[um98x_plan]")
 {
     um98x_base_profile_t p;
     um98x_readback_t rb;
     um98x_plan_t plan;
     survey_profile(&p);
+    p.com1_baud = 115200;   /* the link's speed in the builds below: no baud step unless it differs */
 
     /* Signal group 4 5 (the receiver's factory value) -> sent. */
     matching_readback(&p, &rb);
@@ -441,6 +493,7 @@ TEST_CASE("plan: the antenna descriptor only with a model that the receiver does
 
     /* No model in the profile: never sent, whatever the receiver holds. */
     survey_profile(&p);
+    p.com1_baud = 115200;   /* the link's speed in the builds below: no baud step */
     matching_readback(&p, &rb);
     antenna_readback(&rb, "SOMETHING ELSE", "", 0);
     um98x_plan_build(&p, &rb, 115200, false, &plan);
@@ -514,6 +567,7 @@ TEST_CASE("plan: B1C/B2a in RTCM is turned on only when it reads back off", "[um
     um98x_plan_t plan;
     char text[768];
     survey_profile(&p);
+    p.com1_baud = 115200;   /* the link's speed in the builds below: no baud step until it is set apart */
 
     matching_readback(&p, &rb);
     rb.config.rx.b1cb2a = UM98X_SETTING_OFF;
@@ -594,17 +648,20 @@ TEST_CASE("plan preview: the default profile's exact list", "[um98x_plan]")
     um98x_base_profile_t p;
     char text[2048];
     survey_profile(&p);
+    /* The link at a factory receiver's 115200: the default's 460800 after
+     * the signal group's restart, before the base mode. */
     size_t n = um98x_plan_preview(&p, 115200, s_prev, UM98X_PREVIEW_MAX);
     preview_text(s_prev, n, text, sizeof(text));
     TEST_ASSERT_EQUAL_STRING("wa- UNLOG COM1|qa- VERSIONA|qa- CONFIG|qa- MODE|"
-                             "wds CONFIG SIGNALGROUP 3 6|qa- ANT1GROUPA|wd- MODE BASE 1234 TIME 600 0|"
+                             "wds CONFIG SIGNALGROUP 3 6|qa- ANT1GROUPA|wd- CONFIG COM1 460800|"
+                             "wd- MODE BASE 1234 TIME 600 0|"
                              "wo- CONFIG RTCMB1CB2A ENABLE|"
                              "wa- RTCM1005 COM1 1|wa- RTCM1033 COM1 1|wa- RTCM1077 COM1 1|wa- RTCM1087 COM1 1|"
                              "wa- RTCM1097 COM1 1|wa- RTCM1117 COM1 1|wa- RTCM1127 COM1 1|wa- RTCM1137 COM1 1|"
                              "wa- RTCM1230 COM1 1|wa- GPGSV COM1 10|"
                              "was SAVECONFIG",
                              text);
-    TEST_ASSERT_EQUAL_size_t(19, n);
+    TEST_ASSERT_EQUAL_size_t(20, n);
 
     /* Not for an invalid profile; a short buffer never holds a cut list's SAVECONFIG out of place. */
     p.survey_in_s = 0;

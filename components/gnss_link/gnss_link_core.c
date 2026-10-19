@@ -443,11 +443,10 @@ uint32_t gnss_link_core_open_baud(esp_err_t stored_err, uint32_t stored, uint32_
 
 int gnss_link_core_rx_full_threshold(uint32_t baud)
 {
-    /* PROVISIONAL, to be confirmed on hardware: the driver default at every
-     * baud. If 460800 is adopted for streaming and the bench then shows FIFO
-     * overflows, this becomes 64 B above 115200, here and nowhere else. */
-    (void)baud;
-    return GNSS_LINK_RX_FULL_THRESH_DEFAULT;
+    /* The driver default up to 115200. Above it the default left too little
+     * room: at 460800 the board overflowed the FIFO about once every 10 min,
+     * at the moments settings were written, so the interrupt comes earlier. */
+    return baud > 115200u ? GNSS_LINK_RX_FULL_THRESH_FAST : GNSS_LINK_RX_FULL_THRESH_DEFAULT;
 }
 
 uint8_t gnss_link_core_rx_timeout(uint32_t baud)

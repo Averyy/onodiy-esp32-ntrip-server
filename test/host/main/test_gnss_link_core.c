@@ -452,8 +452,9 @@ TEST_CASE("link core: open baud, receiver rates, thresholds and break length", "
     static const uint32_t ok[] = { 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600 };
     for (size_t i = 0; i < sizeof(ok) / sizeof(ok[0]); i++) {
         TEST_ASSERT_TRUE(gnss_link_core_baud_supported(ok[i]));
-        /* v1 keeps the driver defaults at every rate. */
-        TEST_ASSERT_EQUAL_INT(GNSS_LINK_RX_FULL_THRESH_DEFAULT, gnss_link_core_rx_full_threshold(ok[i]));
+        /* The driver's RX-full threshold up to 115200, an earlier one above it; the driver's RX timeout at every rate. */
+        TEST_ASSERT_EQUAL_INT(ok[i] > 115200 ? GNSS_LINK_RX_FULL_THRESH_FAST : GNSS_LINK_RX_FULL_THRESH_DEFAULT,
+                              gnss_link_core_rx_full_threshold(ok[i]));
         TEST_ASSERT_EQUAL_UINT8(GNSS_LINK_RX_TIMEOUT_DEFAULT, gnss_link_core_rx_timeout(ok[i]));
     }
     TEST_ASSERT_FALSE(gnss_link_core_baud_supported(0));

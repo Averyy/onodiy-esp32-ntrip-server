@@ -18,7 +18,8 @@
  * a blob written before it (um98x_profile.h). */
 #define PROFILE_DEFAULTS_1 1u   /* 1005 1033 1077 1087 1097 1117 1127 1230, all every 1 s; no satellite-in-view output */
 #define PROFILE_DEFAULTS_2 2u   /* the first with 1137 (Onocoy's list); still no satellite-in-view output */
-#define PROFILE_DEFAULTS   3u   /* the second with satellite-in-view output on (the sky map), written by encode */
+#define PROFILE_DEFAULTS_3 3u   /* the second with satellite-in-view output on (the sky map); COM1 still at 115200 */
+#define PROFILE_DEFAULTS   4u   /* the third with COM1 at 460800, written by encode */
 
 /* Format of um98x_profile_hash(), frozen separately from the blob layout
  * once released: changing it makes every station's gnss/applied_hash
@@ -347,6 +348,12 @@ bool um98x_profile_decode_ex(const uint8_t *buf, size_t len, um98x_base_profile_
          * stood for is on now (the sky map). */
         p.sat_view_output = true;
         up |= UM98X_PROFILE_UPGRADED_SKY;
+    }
+    if ((defaults == PROFILE_DEFAULTS_1 || defaults == PROFILE_DEFAULTS_2 || defaults == PROFILE_DEFAULTS_3) &&
+        p.com1_baud == 115200u) {
+        /* 115200 was the default then: the default it stood for is 460800 now. */
+        p.com1_baud = UM98X_DEFAULT_COM1_BAUD;
+        up |= UM98X_PROFILE_UPGRADED_BAUD;
     }
     canonical(&p, out);
     if (upgraded != NULL) {
