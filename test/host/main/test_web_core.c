@@ -1010,24 +1010,46 @@ TEST_CASE("client key: IPv4 and v4-mapped alike, each link-local host apart, a g
     TEST_ASSERT_EQUAL_UINT32(0, web_throttles_wait_s(&t, web_client_key(&p2), true, 0));
 }
 
-TEST_CASE("on the AP: its IPv4 address, v4-mapped too, and its link-local address", "[web_core]")
+TEST_CASE("on the AP: its IPv4 address with a peer in its subnet, v4-mapped too, and its link-local address",
+          "[web_core]")
 {
     const uint32_t ap = ip4(192, 168, 4, 1);
+    const uint32_t mask = ip4(255, 255, 255, 0);
     web_addr_t a = v4(192, 168, 4, 1);
     web_addr_t sta = v4(192, 168, 1, 50);
     web_addr_t m = v6(k_mapped_ap);
     web_addr_t ll_ap = v6(k_ap_ll);
     web_addr_t ll_sta = v6(k_sta_ll);
-    TEST_ASSERT_TRUE(web_addr_on_ap(&a, ap, k_ap_ll));
-    TEST_ASSERT_TRUE(web_addr_on_ap(&m, ap, k_ap_ll));
-    TEST_ASSERT_TRUE(web_addr_on_ap(&ll_ap, ap, k_ap_ll));
-    TEST_ASSERT_FALSE(web_addr_on_ap(&ll_sta, ap, k_ap_ll));
-    TEST_ASSERT_FALSE(web_addr_on_ap(&sta, ap, k_ap_ll));
-    /* the AP without a link-local address yet, or without an address at all */
-    TEST_ASSERT_FALSE(web_addr_on_ap(&ll_ap, ap, NULL));
-    TEST_ASSERT_TRUE(web_addr_on_ap(&a, ap, NULL));
-    TEST_ASSERT_FALSE(web_addr_on_ap(&a, 0, NULL));
-    TEST_ASSERT_FALSE(web_addr_on_ap(NULL, ap, k_ap_ll));
+    web_addr_t phone = v4(192, 168, 4, 2);       /* a client of the AP */
+    web_addr_t lan_host = v4(192, 168, 1, 20);   /* a home-network host */
+    web_addr_t ll_peer = v6(k_sta_ll);
+    TEST_ASSERT_TRUE(web_addr_on_ap(&a, &phone, ap, mask, k_ap_ll));
+    TEST_ASSERT_TRUE(web_addr_on_ap(&m, &phone, ap, mask, k_ap_ll));
+    TEST_ASSERT_TRUE(web_addr_on_ap(&ll_ap, &ll_peer, ap, mask, k_ap_ll));
+    TEST_ASSERT_FALSE(web_addr_on_ap(&ll_sta, &ll_peer, ap, mask, k_ap_ll));
+    TEST_ASSERT_FALSE(web_addr_on_ap(&sta, &phone, ap, mask, k_ap_ll));
+    /* lwIP takes a packet for the AP's address on the station interface too (weak host): a home-network
+     * host that routes 192.168.4.1 through the station is not on the AP */
+    TEST_ASSERT_FALSE(web_addr_on_ap(&a, &lan_host, ap, mask, k_ap_ll));
+    TEST_ASSERT_FALSE(web_addr_on_ap(&m, &lan_host, ap, mask, k_ap_ll));
+    web_addr_t far = v4(192, 168, 5, 2);
+    TEST_ASSERT_FALSE(web_addr_on_ap(&a, &far, ap, mask, k_ap_ll));
+    web_addr_t phone_m = v6(k_mapped_ap);
+    phone_m.b[15] = 9;   /* ::ffff:192.168.4.9 */
+    TEST_ASSERT_TRUE(web_addr_on_ap(&a, &phone_m, ap, mask, k_ap_ll));
+    /* the AP without a link-local address yet, without an address, or with no netmask known */
+    TEST_ASSERT_FALSE(web_addr_on_ap(&ll_ap, &ll_peer, ap, mask, NULL));
+    TEST_ASSERT_TRUE(web_addr_on_ap(&a, &phone, ap, mask, NULL));
+    TEST_ASSERT_FALSE(web_addr_on_ap(&a, &phone, 0, mask, NULL));
+    TEST_ASSERT_FALSE(web_addr_on_ap(&a, &phone, ap, 0, NULL));
+    TEST_ASSERT_FALSE(web_addr_on_ap(NULL, &phone, ap, mask, k_ap_ll));
+    TEST_ASSERT_FALSE(web_addr_on_ap(&a, NULL, ap, mask, k_ap_ll));
+    /* wiping */
+    char secret[8] = "pw12345";
+    web_wipe(secret, sizeof(secret));
+    for (size_t i = 0; i < sizeof(secret); i++) {
+        TEST_ASSERT_EQUAL_CHAR(0, secret[i]);
+    }
     /* A literal IPv6 Host stays refused: only names and the IPv4 addresses pass. */
     web_host_names_t names = { .sta_ip = "192.168.1.50", .ap_ip = "192.168.4.1", .hostname = "onodiy",
                                .mdns_host = "onodiy" };

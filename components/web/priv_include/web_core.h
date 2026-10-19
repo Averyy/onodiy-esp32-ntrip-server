@@ -567,11 +567,22 @@ typedef struct {
 uint64_t web_client_key(const web_addr_t *a);
 
 /**
- * The request came over the AP: its local address is the AP's IPv4 address
- * (`ap_ip4`, network order, 0 = unknown), also v4-mapped, or the AP
- * interface's IPv6 link-local address (`ap_ll6`, NULL = none).
+ * The request came over the AP. IPv4: its local address is the AP's
+ * (`ap_ip4`, network order, 0 = unknown), also v4-mapped, AND its peer is
+ * inside the AP's subnet (`ap_mask4`, 0 = unknown: never). lwIP takes an
+ * IPv4 packet for any of the station's addresses on any interface (the weak
+ * host model), so a home-network host that routes the AP's address through
+ * the station reaches it too; its peer address gives it away, and a forged
+ * one inside the AP's subnet gets the answers over the AP, so the connection
+ * never completes. IPv6: its local address is the AP interface's link-local
+ * address (`ap_ll6`, NULL = none); the station has link-local addresses
+ * only, and lwIP takes those only on their own interface.
  */
-bool web_addr_on_ap(const web_addr_t *local, uint32_t ap_ip4, const uint8_t *ap_ll6);
+bool web_addr_on_ap(const web_addr_t *local, const web_addr_t *peer, uint32_t ap_ip4, uint32_t ap_mask4,
+                    const uint8_t *ap_ll6);
+
+/** Overwrite with zeros (not optimised away): request bodies that carried a secret. */
+void web_wipe(void *p, size_t len);
 
 /**
  * Address text for the log: dotted IPv4 (a v4-mapped IPv6 address as its

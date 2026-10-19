@@ -838,8 +838,9 @@ function roverEvent(e, from) {
     return [J.kind.rover_connect, roverAddr(e) + ', NTRIP ' + ((a >>> 4) & 3) + '.0' +
       (n ? ', ' + plural(n, 'shorter session', 'shorter sessions') + ' not listed' : ''), 'ok'];
   }
+  /* The rover closing it (1), new settings (4) and a restart (6) are normal ends: neutral. */
   return [J.kind.rover_disconnect, (from ? roverAddr(from) : 'a rover') + ', after ' + fmt.dur(e.b) +
-    (J.roverEnd[why] ? ': ' + J.roverEnd[why] : ''), why === 4 || why === 6 ? '' : 'warn'];
+    (J.roverEnd[why] ? ': ' + J.roverEnd[why] : ''), why === 1 || why === 4 || why === 6 ? '' : 'warn'];
 }
 
 /* The journal's connection records (casters and Wi-Fi drops and returns; a move between access points is a row of its own); key: the caster's slot, or the Wi-Fi. */

@@ -46,7 +46,7 @@ typedef enum {
     LCAST_ADDR_OK = 0,
     LCAST_ADDR_NOT_PRIVATE,     /**< outside the private, link-local and loopback ranges (100.64/10 included) */
     LCAST_ADDR_GATEWAY,         /**< the station's IPv4 gateway: a router masquerading a port forward */
-    LCAST_ADDR_HOTSPOT,         /**< it came in over the setup hotspot */
+    LCAST_ADDR_HOTSPOT,         /**< it came in over the setup hotspot, or comes from the hotspot's subnet */
 } lcast_addr_verdict_t;
 
 /** An IPv4-mapped IPv6 address (::ffff:a.b.c.d) becomes the IPv4 address; anything else stays. */
@@ -56,11 +56,25 @@ void lcast_addr_unmap(lcast_addr_t *a);
  * The verdict for a new connection. peer and local are unmapped here (copies).
  * gw_ip4: the station interface's IPv4 gateway, network order as a uint32_t in
  * memory (0 = unknown or no rule). ap_ip4: the AP's IPv4 address, same form (0
- * = none). ap_ll6: the AP's IPv6 link-local address (NULL = none). Order: the
- * hotspot, then the ranges, then the gateway.
+ * = none). ap_mask4: the AP's netmask while the AP is up, else 0. ap_ll6: the
+ * AP's IPv6 link-local address (NULL = none). Order: the hotspot, then the
+ * ranges, then the gateway.
+ *
+ * The hotspot: the local address is the AP's (IPv4, also v4-mapped, or its
+ * link-local address), or, while the AP is up, the peer is an IPv4 address
+ * inside the AP's subnet. lwIP accepts an IPv4 packet for any of the
+ * station's addresses on any interface (the weak host model), so a phone on
+ * the hotspot can reach the station's home-network address: the local
+ * address alone does not tell. Its answers go back over the hotspot, so a
+ * home-network host cannot pass for one with a forged hotspot source. IPv6:
+ * the station has link-local addresses only, and lwIP takes a packet for a
+ * link-local address only on that address's own interface, so the local
+ * address decides (a peer's link-local address says nothing: every link
+ * uses fe80::/64). A home network numbered like the hotspot (192.168.4.0/24)
+ * counts as the hotspot while the AP is up.
  */
 lcast_addr_verdict_t lcast_addr_verdict(const lcast_addr_t *peer, const lcast_addr_t *local, uint32_t gw_ip4,
-                                        uint32_t ap_ip4, const uint8_t *ap_ll6);
+                                        uint32_t ap_ip4, uint32_t ap_mask4, const uint8_t *ap_ll6);
 
 /**
  * Address text: dotted IPv4 (a v4-mapped address as IPv4), IPv6 in RFC 5952
@@ -78,6 +92,45 @@ uint64_t lcast_client_key(const lcast_addr_t *a);
 
 /** The 4 bytes a journal record carries: the IPv4 address, or an IPv6 address's last 4. */
 void lcast_addr_word(const lcast_addr_t *a, uint8_t out[4]);
+
+/* ---- connection slots -------------------------------------------------------------------- */
+
+#define LCAST_FIRST_BYTE_MS  LOCAL_CASTER_FIRST_BYTE_MS  /**< nothing sent this long after the accept: closed */
+
+/** What a connection slot holds, as the slot policy sees it. */
+typedef enum {
+    LCAST_SLOT_FREE = 0,
+    LCAST_SLOT_REQ,             /**< reading a request */
+    LCAST_SLOT_LINGER,          /**< its answer is out: draining until the peer closes */
+    LCAST_SLOT_BUSY,            /**< writing an answer, or a rover streaming: never taken */
+} lcast_slot_kind_t;
+
+typedef struct {
+    lcast_slot_kind_t kind;
+    uint64_t key;               /**< lcast_client_key() of its peer */
+    uint32_t since_ms;          /**< its accept (REQ) or the end of its answer (LINGER) */
+    bool got_bytes;             /**< REQ: a byte of its request arrived */
+} lcast_slot_view_t;
+
+/** slot -1: refuse the new connection; else the slot it takes (`evict`: close what is there first). */
+typedef struct {
+    int slot;
+    bool evict;
+} lcast_slot_pick_t;
+
+/**
+ * A slot for a new connection from `key` (nothing read from it yet). A free
+ * slot first. With none free, a connection that cannot be a rover's gives
+ * its slot up, the oldest of the first of these kinds found: one lingering
+ * after its answer; one that has sent nothing yet; one still sending its
+ * request from the same client (when slots are scarce a client has one
+ * request in the works: the newer replaces it); one still sending its
+ * request from a client that holds another slot. Streaming rovers and
+ * answers being written are never taken. None of these: refused. While
+ * slots are free a client may open several (two rovers behind one address
+ * connect at the same moment).
+ */
+lcast_slot_pick_t lcast_slot_pick(const lcast_slot_view_t *slots, size_t n, uint64_t key, uint32_t now_ms);
 
 /* ---- request ----------------------------------------------------------------------------- */
 
@@ -295,20 +348,29 @@ typedef struct {
     uint32_t last_s;            /**< the last counted failure */
 } lcast_throttle_client_t;
 
+#define LCAST_THROTTLE_TRUSTED   2u     /**< addresses of the latest logins, exempt from the global bucket */
+
 typedef struct {
     lcast_throttle_client_t c[LCAST_THROTTLE_CLIENTS];
     uint32_t left;              /**< failures left in the global burst */
     uint32_t at_s;              /**< its refill reference */
+    uint64_t trusted[LCAST_THROTTLE_TRUSTED];   /**< the latest successful logins' keys, newest first */
+    uint32_t trusted_n;
 } lcast_throttles_t;
 
 /** Delay after the n-th consecutive failure: 0 below 5, then min(2^(n-4), 300) s. */
 uint32_t lcast_throttle_delay_s(uint32_t fails);
 void lcast_throttles_init(lcast_throttles_t *t, uint32_t now_s);
-/** Seconds until this address may try again (0 = now): its own delay or the global bucket. */
+/**
+ * Seconds until this address may try again (0 = now): its own delay or the
+ * global bucket. The addresses of the latest successful logins (RAM, since
+ * boot) skip the global bucket, so failures from elsewhere never lock the
+ * owner's rover out; their own delay still holds.
+ */
 uint32_t lcast_throttles_wait_s(lcast_throttles_t *t, uint64_t key, uint32_t now_s);
 /** A counted failure (only after a wait of 0). @return its consecutive failures. */
 uint32_t lcast_throttles_fail(lcast_throttles_t *t, uint64_t key, uint32_t now_s);
-/** A success resets the address. */
+/** A success resets the address and makes it the newest trusted one. */
 void lcast_throttles_ok(lcast_throttles_t *t, uint64_t key);
 
 /* ---- journal gate and queue -------------------------------------------------------------- */
@@ -369,21 +431,26 @@ void lcast_jq_pop(lcast_jq_t *q);
 /* ---- bit rate ---------------------------------------------------------------------------- */
 
 #define LCAST_RATE_SAMPLES   6u
-#define LCAST_RATE_STEP_S    10u
+#define LCAST_RATE_STEP_MS   10000u
+#define LCAST_RATE_MIN_MS    1000u     /**< a shorter span gives no rate */
 
-/** Input bytes sampled every LCAST_RATE_STEP_S into a ring; the rate is over the span the ring holds. */
+/**
+ * Input bytes (the hub's bytes_in) sampled every LCAST_RATE_STEP_MS into a
+ * ring, from boot on; the rate runs from the oldest sample (at most a minute
+ * old) to now, so it is there as soon as the station has seen data.
+ */
 typedef struct {
     uint64_t bytes[LCAST_RATE_SAMPLES];
-    uint32_t at_s[LCAST_RATE_SAMPLES];
+    uint32_t at_ms[LCAST_RATE_SAMPLES];
     uint32_t n;                 /**< samples held */
     uint32_t head;              /**< the next slot */
 } lcast_rate_t;
 
 void lcast_rate_init(lcast_rate_t *r);
-/** Take a sample when LCAST_RATE_STEP_S passed since the last one (a gap over twice that starts over). */
-void lcast_rate_sample(lcast_rate_t *r, uint32_t now_s, uint64_t bytes_in);
-/** Bits per second over the ring, 0 until two samples. */
-uint32_t lcast_rate_bps(const lcast_rate_t *r);
+/** Take a sample when LCAST_RATE_STEP_MS passed since the last one (a gap over twice that, or the count going back, starts over). */
+void lcast_rate_sample(lcast_rate_t *r, uint32_t now_ms, uint64_t bytes_in);
+/** Bits per second from the oldest sample to now (bytes_now: the count now); 0 without a sample or within LCAST_RATE_MIN_MS of it. */
+uint32_t lcast_rate_bps(const lcast_rate_t *r, uint32_t now_ms, uint64_t bytes_now);
 
 /* ---- stored config ----------------------------------------------------------------------- */
 
@@ -417,8 +484,11 @@ bool lcast_password_ok(const char *s);
  */
 bool lcast_cfg_check(const local_caster_cfg_t *cfg, bool password_stored, const char **field, const char **rule);
 
-/** End-reason words for the log ("closed", "stalled", ...); "none" for an unknown value. */
+/** End-reason names as the API has them ("closed", "stalled", ...); "none" for an unknown value. */
 const char *lcast_end_name(local_caster_end_t reason);
+
+/** End-reason words for the console line ("the rover closed the connection", ...); "ended" for none or unknown. */
+const char *lcast_end_words(local_caster_end_t reason);
 
 #ifdef __cplusplus
 }

@@ -661,12 +661,17 @@ bool web_req_on_ap(httpd_req_t *req)
     struct sockaddr_storage addr;
     socklen_t len = sizeof(addr);
     web_addr_t local;
+    web_addr_t peer;
     if (fd < 0 || s_ap == NULL || getsockname(fd, (struct sockaddr *)&addr, &len) != 0 ||
-        !sock_addr(&addr, &local)) {
+        !sock_addr(&addr, &local) || !web_req_peer(req, &peer)) {
         return false;
     }
+    /* The local address and the peer's subnet together (web_addr_on_ap): lwIP takes a
+     * packet for the AP's address on the station interface too. */
     esp_netif_ip_info_t info;
-    uint32_t ap4 = esp_netif_get_ip_info(s_ap, &info) == ESP_OK ? info.ip.addr : 0;
+    bool have = esp_netif_get_ip_info(s_ap, &info) == ESP_OK;
+    uint32_t ap4 = have ? info.ip.addr : 0;
+    uint32_t mask4 = have ? info.netmask.addr : 0;
     const uint8_t *ap6 = NULL;
 #if CONFIG_LWIP_IPV6
     /* A phone that reaches the AP over IPv6 talks to the AP's link-local address. */
@@ -677,7 +682,7 @@ bool web_req_on_ap(httpd_req_t *req)
         ap6 = ll;
     }
 #endif
-    return web_addr_on_ap(&local, ap4, ap6);
+    return web_addr_on_ap(&local, &peer, ap4, mask4, ap6);
 }
 
 static esp_err_t captive_redirect(httpd_req_t *req)
@@ -910,6 +915,19 @@ static bool note_client_id(httpd_req_t *req)
     return true;
 }
 
+/* Zero every string value of a parsed body before it is freed (iterative over
+ * siblings, recursive over nesting: at most WEB_JSON_MAX_DEPTH, which
+ * web_parse_body() checks before it parses). */
+static void wipe_json(cJSON *j)
+{
+    for (; j != NULL; j = j->next) {
+        if (j->valuestring != NULL) {
+            web_wipe(j->valuestring, strlen(j->valuestring));
+        }
+        wipe_json(j->child);
+    }
+}
+
 /* Every path either reads the request's body, hands it to the worker, or
  * answers and closes the connection (ESP_FAIL): esp_http_server never has a
  * body left to read away after the handler, which it would do on the server
@@ -976,11 +994,14 @@ static esp_err_t api_handle(httpd_req_t *req, web_req_t *rp)
     }
 
     if (rt->body == WEB_BODY_JSON) {
-        if (read_body(req, req->content_len) != ESP_OK) {
+        esp_err_t rerr = read_body(req, req->content_len);
+        web_bad_t bad = { 0 };
+        r.body = rerr == ESP_OK ? web_parse_body(s_body, req->content_len, &bad) : NULL;
+        /* The raw body can carry a password (Login, the casters, Wi-Fi, Your rover): gone at once. */
+        web_wipe(s_body, req->content_len < sizeof(s_body) ? req->content_len + 1u : sizeof(s_body));
+        if (rerr != ESP_OK) {
             return ESP_FAIL;
         }
-        web_bad_t bad = { 0 };
-        r.body = web_parse_body(s_body, req->content_len, &bad);
         if (r.body == NULL) {
             return web_send_err(req, bad.err);
         }
@@ -993,6 +1014,7 @@ static esp_err_t api_handle(httpd_req_t *req, web_req_t *rp)
         s_client_done_ms = now_ms();
         taskEXIT_CRITICAL(&s_client_lock);
     }
+    wipe_json(r.body);   /* its strings too: the heap keeps freed blocks as they were */
     cJSON_Delete(r.body);
     return ret;
 }

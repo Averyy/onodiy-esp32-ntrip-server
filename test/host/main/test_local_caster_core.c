@@ -118,9 +118,9 @@ TEST_CASE("lcast addresses: every edge of the IPv4 ranges, plain and v4-mapped",
         snprintf(msg, sizeof(msg), "%u.%u.%u.%u", t[i].q[0], t[i].q[1], t[i].q[2], t[i].q[3]);
         lcast_addr_verdict_t want = t[i].ok ? LCAST_ADDR_OK : LCAST_ADDR_NOT_PRIVATE;
         lcast_addr_t p = a4(t[i].q[0], t[i].q[1], t[i].q[2], t[i].q[3]);
-        TEST_ASSERT_EQUAL_INT_MESSAGE(want, lcast_addr_verdict(&p, &local, 0, 0, NULL), msg);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(want, lcast_addr_verdict(&p, &local, 0, 0, 0, NULL), msg);
         lcast_addr_t m = a4m(t[i].q[0], t[i].q[1], t[i].q[2], t[i].q[3]);
-        TEST_ASSERT_EQUAL_INT_MESSAGE(want, lcast_addr_verdict(&m, &local, 0, 0, NULL), msg);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(want, lcast_addr_verdict(&m, &local, 0, 0, 0, NULL), msg);
     }
 }
 
@@ -144,7 +144,7 @@ TEST_CASE("lcast addresses: IPv6 ranges, the gateway and the setup hotspot", "[l
     for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
         lcast_addr_t p = a6(t[i].a);
         TEST_ASSERT_EQUAL_INT_MESSAGE(t[i].ok ? LCAST_ADDR_OK : LCAST_ADDR_NOT_PRIVATE,
-                                      lcast_addr_verdict(&p, &local6, 0, 0, NULL), t[i].a);
+                                      lcast_addr_verdict(&p, &local6, 0, 0, 0, NULL), t[i].a);
     }
 
     /* The gateway: refused when equal (also v4-mapped), not a rule when unknown. */
@@ -153,13 +153,13 @@ TEST_CASE("lcast addresses: IPv6 ranges, the gateway and the setup hotspot", "[l
     lcast_addr_t router = a4(192, 168, 2, 1);
     lcast_addr_t router_m = a4m(192, 168, 2, 1);
     lcast_addr_t phone = a4(192, 168, 2, 50);
-    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_GATEWAY, lcast_addr_verdict(&router, &local, gw, 0, NULL));
-    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_GATEWAY, lcast_addr_verdict(&router_m, &local, gw, 0, NULL));
-    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_OK, lcast_addr_verdict(&phone, &local, gw, 0, NULL));
-    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_OK, lcast_addr_verdict(&router, &local, 0, 0, NULL));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_GATEWAY, lcast_addr_verdict(&router, &local, gw, 0, 0, NULL));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_GATEWAY, lcast_addr_verdict(&router_m, &local, gw, 0, 0, NULL));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_OK, lcast_addr_verdict(&phone, &local, gw, 0, 0, NULL));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_OK, lcast_addr_verdict(&router, &local, 0, 0, 0, NULL));
     /* a public gateway address is refused by the ranges first */
     lcast_addr_t pub = a4(203, 0, 113, 1);
-    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_NOT_PRIVATE, lcast_addr_verdict(&pub, &local, ip4(203, 0, 113, 1), 0, NULL));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_NOT_PRIVATE, lcast_addr_verdict(&pub, &local, ip4(203, 0, 113, 1), 0, 0, NULL));
 
     /* The hotspot: the local address is the AP's IPv4 (also v4-mapped) or its link-local address. */
     uint32_t ap4 = ip4(192, 168, 4, 1);
@@ -168,13 +168,13 @@ TEST_CASE("lcast addresses: IPv6 ranges, the gateway and the setup hotspot", "[l
     lcast_addr_t setup_phone = a4(192, 168, 4, 2);
     lcast_addr_t ll = a6("fe80::aa:bbff:fecc:ddee");
     lcast_addr_t ll_peer = a6("fe80::5");
-    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_HOTSPOT, lcast_addr_verdict(&setup_phone, &ap_local, gw, ap4, ll.b));
-    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_HOTSPOT, lcast_addr_verdict(&setup_phone, &ap_local_m, gw, ap4, ll.b));
-    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_HOTSPOT, lcast_addr_verdict(&ll_peer, &ll, gw, ap4, ll.b));
-    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_OK, lcast_addr_verdict(&ll_peer, &local6, gw, ap4, ll.b));
-    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_OK, lcast_addr_verdict(&phone, &local, gw, ap4, ll.b));
-    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_OK, lcast_addr_verdict(&setup_phone, &ap_local, gw, 0, NULL));   /* no AP */
-    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_NOT_PRIVATE, lcast_addr_verdict(NULL, &local, 0, 0, NULL));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_HOTSPOT, lcast_addr_verdict(&setup_phone, &ap_local, gw, ap4, 0, ll.b));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_HOTSPOT, lcast_addr_verdict(&setup_phone, &ap_local_m, gw, ap4, 0, ll.b));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_HOTSPOT, lcast_addr_verdict(&ll_peer, &ll, gw, ap4, 0, ll.b));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_OK, lcast_addr_verdict(&ll_peer, &local6, gw, ap4, 0, ll.b));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_OK, lcast_addr_verdict(&phone, &local, gw, ap4, 0, ll.b));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_OK, lcast_addr_verdict(&setup_phone, &ap_local, gw, 0, 0, NULL));   /* no AP */
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_NOT_PRIVATE, lcast_addr_verdict(NULL, &local, 0, 0, 0, NULL));
 
     /* unmapping */
     lcast_addr_t m = a4m(10, 0, 2, 2);
@@ -185,6 +185,116 @@ TEST_CASE("lcast addresses: IPv6 ranges, the gateway and the setup hotspot", "[l
     lcast_addr_t t6 = a6("::ffff:0:a00:1");
     lcast_addr_unmap(&t6);
     TEST_ASSERT_TRUE(t6.v6);
+}
+
+TEST_CASE("lcast addresses: a hotspot client that reaches the home-network address is refused while the AP is up",
+          "[lcast]")
+{
+    /* lwIP takes an IPv4 packet for any of the station's addresses on any interface: a phone on the
+     * hotspot (192.168.4.2) can connect to the station's home address (192.168.2.10). */
+    const uint32_t ap4 = ip4(192, 168, 4, 1);
+    const uint32_t mask = ip4(255, 255, 255, 0);
+    const uint32_t gw = ip4(192, 168, 2, 1);
+    lcast_addr_t sta_local = a4(192, 168, 2, 10);
+    lcast_addr_t setup_phone = a4(192, 168, 4, 2);
+    lcast_addr_t setup_phone_m = a4m(192, 168, 4, 200);
+    lcast_addr_t lan_phone = a4(192, 168, 2, 50);
+    lcast_addr_t next_subnet = a4(192, 168, 5, 2);
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_HOTSPOT, lcast_addr_verdict(&setup_phone, &sta_local, gw, ap4, mask, NULL));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_HOTSPOT, lcast_addr_verdict(&setup_phone_m, &sta_local, gw, ap4, mask, NULL));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_OK, lcast_addr_verdict(&lan_phone, &sta_local, gw, ap4, mask, NULL));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_OK, lcast_addr_verdict(&next_subnet, &sta_local, gw, ap4, mask, NULL));
+    /* the AP down (mask 0): its subnet is nobody's, the home network may even use it */
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_OK, lcast_addr_verdict(&setup_phone, &sta_local, gw, ap4, 0, NULL));
+    /* a home network numbered like the hotspot counts as the hotspot while the AP is up (documented) */
+    lcast_addr_t same_local = a4(192, 168, 4, 20);
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_HOTSPOT, lcast_addr_verdict(&setup_phone, &same_local, 0, ap4, mask, NULL));
+    /* IPv6 is decided by the local address (link-local addresses only, taken on their own interface) */
+    lcast_addr_t ap_ll = a6("fe80::aa:bbff:fecc:ddee");
+    lcast_addr_t sta_ll = a6("fe80::1234");
+    lcast_addr_t peer_ll = a6("fe80::5");
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_HOTSPOT, lcast_addr_verdict(&peer_ll, &ap_ll, gw, ap4, mask, ap_ll.b));
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_OK, lcast_addr_verdict(&peer_ll, &sta_ll, gw, ap4, mask, ap_ll.b));
+    /* the order: the hotspot before the ranges and the gateway */
+    lcast_addr_t ap_gw = a4(192, 168, 4, 1);
+    TEST_ASSERT_EQUAL_INT(LCAST_ADDR_HOTSPOT, lcast_addr_verdict(&ap_gw, &sta_local, ip4(192, 168, 4, 1), ap4, mask,
+                                                                 NULL));
+}
+
+/* ---- connection slots ------------------------------------------------------------------------ */
+
+static lcast_slot_view_t sv(lcast_slot_kind_t kind, uint64_t key, uint32_t since, bool bytes)
+{
+    return (lcast_slot_view_t) { .kind = kind, .key = key, .since_ms = since, .got_bytes = bytes };
+}
+
+TEST_CASE("lcast slots: idle connections from the LAN never keep a rover out", "[lcast]")
+{
+    const uint64_t A = 0x0A00020A, B = 0x0A00020B, R = 0x0A000232;
+    lcast_slot_view_t s[4];
+    lcast_slot_pick_t p;
+    /* a free slot: taken, nothing closed; a client may hold several while slots are free */
+    s[0] = sv(LCAST_SLOT_REQ, A, 100, false);
+    s[1] = sv(LCAST_SLOT_FREE, 0, 0, false);
+    s[2] = sv(LCAST_SLOT_REQ, A, 150, true);
+    s[3] = sv(LCAST_SLOT_BUSY, R, 50, false);
+    p = lcast_slot_pick(s, 4, A, 1000);
+    TEST_ASSERT_EQUAL_INT(1, p.slot);
+    TEST_ASSERT_FALSE(p.evict);
+
+    /* all taken by one client's idle connections: the oldest silent one gives way to the rover */
+    for (int i = 0; i < 4; i++) {
+        s[i] = sv(LCAST_SLOT_REQ, A, (uint32_t)(100 + 10 * i), false);
+    }
+    p = lcast_slot_pick(s, 4, R, 1000);
+    TEST_ASSERT_EQUAL_INT(0, p.slot);
+    TEST_ASSERT_TRUE(p.evict);
+    /* ... also when they each sent a byte (a request in the works): one client, several slots */
+    for (int i = 0; i < 4; i++) {
+        s[i] = sv(LCAST_SLOT_REQ, A, (uint32_t)(100 + 10 * i), true);
+    }
+    s[0].since_ms = 400;
+    p = lcast_slot_pick(s, 4, R, 1000);
+    TEST_ASSERT_EQUAL_INT(1, p.slot);   /* the oldest */
+    TEST_ASSERT_TRUE(p.evict);
+
+    /* a lingering connection (its answer is out) goes first, before a request */
+    s[0] = sv(LCAST_SLOT_REQ, A, 100, false);
+    s[1] = sv(LCAST_SLOT_LINGER, B, 900, false);
+    s[2] = sv(LCAST_SLOT_BUSY, R, 50, false);
+    s[3] = sv(LCAST_SLOT_LINGER, A, 800, false);
+    p = lcast_slot_pick(s, 4, R, 1000);
+    TEST_ASSERT_EQUAL_INT(3, p.slot);
+
+    /* the same client's earlier request is replaced by its newer one */
+    s[0] = sv(LCAST_SLOT_REQ, A, 100, true);
+    s[1] = sv(LCAST_SLOT_REQ, B, 50, true);
+    s[2] = sv(LCAST_SLOT_BUSY, R, 50, false);
+    s[3] = sv(LCAST_SLOT_BUSY, R + 1, 50, false);
+    p = lcast_slot_pick(s, 4, A, 1000);
+    TEST_ASSERT_EQUAL_INT(0, p.slot);
+    TEST_ASSERT_TRUE(p.evict);
+    /* a stranger with requests from two clients, each holding one slot: refused (no rover's slot is taken) */
+    p = lcast_slot_pick(s, 4, R + 2, 1000);
+    TEST_ASSERT_EQUAL_INT(-1, p.slot);
+    TEST_ASSERT_FALSE(p.evict);
+    /* a client that holds a rover and a request: its request may go */
+    s[1].key = R;
+    p = lcast_slot_pick(s, 4, R + 2, 1000);
+    TEST_ASSERT_EQUAL_INT(1, p.slot);
+
+    /* streaming rovers and answers being written are never taken */
+    for (int i = 0; i < 4; i++) {
+        s[i] = sv(LCAST_SLOT_BUSY, A, 0, false);
+    }
+    p = lcast_slot_pick(s, 4, A, 1000);
+    TEST_ASSERT_EQUAL_INT(-1, p.slot);
+
+    /* age across the clock wrap */
+    s[0] = sv(LCAST_SLOT_REQ, A, UINT32_MAX - 100u, false);
+    s[1] = sv(LCAST_SLOT_REQ, B, 50, false);
+    p = lcast_slot_pick(s, 2, R, 100);
+    TEST_ASSERT_EQUAL_INT(0, p.slot);
 }
 
 /* ---- 2. address text and client key -------------------------------------------------------- */
@@ -1086,6 +1196,43 @@ TEST_CASE("lcast throttle: 5 free, then 2, 4, 8 ... 300 s; per address; LRU; glo
     TEST_ASSERT_EQUAL_UINT32(0, lcast_throttles_wait_s(&t, 2, 5120 + 30u * 120u));
 }
 
+TEST_CASE("lcast throttle: the latest logins' addresses skip the global bucket, never their own delay", "[lcast]")
+{
+    lcast_throttles_t t;
+    lcast_throttles_init(&t, 1000);
+    const uint64_t owner = 0x0A000232, rover2 = 0x0A000233, third = 0x0A000234;
+    lcast_throttles_ok(&t, owner);
+    /* someone else empties the bucket and keeps it empty with one failure per 120 s */
+    for (uint32_t k = 0; k < LCAST_THROTTLE_BURST; k++) {
+        lcast_throttles_fail(&t, 9000 + k, 1000);
+    }
+    TEST_ASSERT_EQUAL_UINT32(120, lcast_throttles_wait_s(&t, rover2, 1000));
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_throttles_wait_s(&t, owner, 1000));   /* the owner's rover still logs in */
+    lcast_throttles_fail(&t, 9999, 1120);
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_throttles_wait_s(&t, owner, 1121));
+    /* its own failures still delay it */
+    for (int i = 0; i < 5; i++) {
+        lcast_throttles_fail(&t, owner, 1200);
+    }
+    TEST_ASSERT_EQUAL_UINT32(2, lcast_throttles_wait_s(&t, owner, 1200));
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_throttles_wait_s(&t, owner, 1202));
+    /* two are trusted, newest first: a third login pushes the oldest out; a repeat moves up */
+    lcast_throttles_ok(&t, rover2);
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_throttles_wait_s(&t, rover2, 1300));
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_throttles_wait_s(&t, owner, 1300));
+    lcast_throttles_ok(&t, owner);   /* owner newest, rover2 second */
+    lcast_throttles_ok(&t, third);   /* rover2 goes */
+    TEST_ASSERT_EQUAL_UINT32(2, t.trusted_n);
+    TEST_ASSERT_EQUAL_UINT64(third, t.trusted[0]);
+    TEST_ASSERT_EQUAL_UINT64(owner, t.trusted[1]);
+    lcast_throttles_fail(&t, 9998, 1300);   /* the token that came back meanwhile: used again */
+    TEST_ASSERT_NOT_EQUAL(0, lcast_throttles_wait_s(&t, rover2, 1300));
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_throttles_wait_s(&t, owner, 1300));
+    /* a new table trusts nobody */
+    lcast_throttles_init(&t, 0);
+    TEST_ASSERT_EQUAL_UINT32(0, t.trusted_n);
+}
+
 /* ---- 11. journal gate --------------------------------------------------------------------------- */
 
 TEST_CASE("lcast journal gate: listed at 10 s with a token, 6 an hour, unlisted counted, records packed", "[lcast]")
@@ -1366,38 +1513,53 @@ TEST_CASE("lcast config rules: every boundary and its words", "[lcast]")
 
 /* ---- 13. rate estimate -------------------------------------------------------------------------- */
 
-TEST_CASE("lcast bit rate: 10 s samples in a ring of 6, 0 until two, a gap starts over", "[lcast]")
+TEST_CASE("lcast bit rate: from the oldest of 6 samples 10 s apart to now, there within seconds of boot", "[lcast]")
 {
     lcast_rate_t r;
     lcast_rate_init(&r);
-    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r));
-    lcast_rate_sample(&r, 100, 1000);
-    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r));
-    lcast_rate_sample(&r, 105, 5000);   /* too soon: not taken */
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, 1000, 5000));   /* no sample */
+    lcast_rate_sample(&r, 300, 0);                                 /* at init: nothing in yet */
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, 1000, 1000));   /* 0.7 s: too short to tell */
+    /* 7.5 s after it (the caster just turned on): the rate so far */
+    TEST_ASSERT_EQUAL_UINT32(11786, lcast_rate_bps(&r, 7800, 11050));
+    lcast_rate_sample(&r, 5300, 5000);                              /* too soon: not taken */
     TEST_ASSERT_EQUAL_UINT32(1, r.n);
-    lcast_rate_sample(&r, 110, 1000 + 17000);   /* 1700 B/s */
-    TEST_ASSERT_EQUAL_UINT32(13600, lcast_rate_bps(&r));
-    /* the ring keeps 6 samples (50 s): the oldest goes */
-    uint64_t bytes = 18000;
-    uint32_t t = 110;
+    /* the ring keeps 6 samples: the oldest is 50 s back */
+    uint64_t bytes = 0;
+    uint32_t t = 300;
     for (int i = 0; i < 8; i++) {
-        t += 10;
+        t += LCAST_RATE_STEP_MS;
         bytes += i < 4 ? 17000 : 34000;   /* the rate doubles */
         lcast_rate_sample(&r, t, bytes);
     }
     TEST_ASSERT_EQUAL_UINT32(6, r.n);
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)((uint64_t)(34000 * 4 + 17000 * 1) * 8u / 50u), lcast_rate_bps(&r));
-    /* a gap (the caster was off) or a counter going back starts over */
-    lcast_rate_sample(&r, t + 100, bytes + 1000);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)((34000ull * 4u + 17000u) * 8000u / 50000u), lcast_rate_bps(&r, t, bytes));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)((34000ull * 4u + 17000u * 2u) * 8000u / 55000u),
+                             lcast_rate_bps(&r, t + 5000u, bytes + 17000u));
+    /* no sample for a long time (the timer stopped): no rate rather than an old one */
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, t + 100000u, bytes + 17000u));
+    /* samples missed, or a counter going back, start over */
+    lcast_rate_sample(&r, t + 30000u, bytes + 1000u);
     TEST_ASSERT_EQUAL_UINT32(1, r.n);
-    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r));
-    lcast_rate_sample(&r, t + 110, 10);
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, t + 30500u, bytes + 2000u));
+    lcast_rate_sample(&r, t + 40000u, 10);
     TEST_ASSERT_EQUAL_UINT32(1, r.n);
-    /* across the uptime wrap of the seconds */
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, t + 45000u, 5));
+    /* across the wrap of the millisecond clock */
     lcast_rate_init(&r);
-    lcast_rate_sample(&r, UINT32_MAX - 4u, 0);
-    lcast_rate_sample(&r, 5, 2500);
-    TEST_ASSERT_EQUAL_UINT32(2000, lcast_rate_bps(&r));
+    lcast_rate_sample(&r, UINT32_MAX - 4999u, 0);
+    TEST_ASSERT_EQUAL_UINT32(2000, lcast_rate_bps(&r, 5000, 2500));
+}
+
+TEST_CASE("lcast end reasons: the API's names and the console's words", "[lcast]")
+{
+    static const char *const words[] = { "ended", "the rover closed the connection", "the rover took no data for 10 s",
+                                         "the connection was lost", "turned off or its settings changed",
+                                         "the station lost its network address", "the station restarted" };
+    for (int i = 0; i <= LOCAL_CASTER_END_RESTART; i++) {
+        TEST_ASSERT_EQUAL_STRING(words[i], lcast_end_words((local_caster_end_t)i));
+    }
+    TEST_ASSERT_EQUAL_STRING("ended", lcast_end_words((local_caster_end_t)42));
 }
 
 /* ---- 14. fuzz --------------------------------------------------------------------------------- */

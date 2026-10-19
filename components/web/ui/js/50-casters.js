@@ -1062,9 +1062,21 @@ Views.ntrip = {
         const d = await api('PUT', '/api/local-caster', { enabled: on });
         if (d && d.config) rover = d;
       } catch (e) {
-        if (on && e instanceof ApiError && e.code === 'invalid_field' && e.field === 'password') editRover(true);
-        else showErr(e);
-        return false;
+        if (on && e instanceof ApiError && e.code === 'invalid_field' && e.field === 'password') {
+          editRover(true);
+          return false;
+        }
+        showErr(e);
+        /* The station may have stored it all the same (500 internal: stored, but the caster could not start):
+         * the card shows what it has now, the switch included. */
+        try {
+          const d = await api('GET', '/api/local-caster');
+          if (d && d.config) {
+            rover = d;
+            renderRover();
+          }
+        } catch (e2) { /* the card stays as it was */ }
+        return !!rover && rover.config.enabled === on;
       }
       toast(on ? 'Corrections for your rover are on.' : 'Corrections for your rover are off.', 'ok');
       fillRover();

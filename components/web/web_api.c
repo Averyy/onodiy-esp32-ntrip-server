@@ -1424,8 +1424,10 @@ static const char *lcast_rule(const char *field)
 
 static esp_err_t h_lcast_put(web_req_t *r)
 {
-    if (local_caster_get_config(&s_lcfg) != ESP_OK) {
-        return web_send_err(r->req, WEB_ERR_SAFE_MODE);
+    esp_err_t gerr = local_caster_get_config(&s_lcfg);
+    if (gerr != ESP_OK) {
+        /* Not initialised: safe mode skips it; otherwise its init failed. */
+        return lifecycle_in_safe_mode() ? web_send_err(r->req, WEB_ERR_SAFE_MODE) : web_send_internal(r->req, gerr);
     }
     if (!settings_ok()) {
         return web_send_err(r->req, WEB_ERR_SETTINGS_UNAVAILABLE);
@@ -1441,7 +1443,7 @@ static esp_err_t h_lcast_put(web_req_t *r)
     const char *field = NULL;
     const char *rule = NULL;
     esp_err_t err = local_caster_set_config(&next, &field, &rule);
-    memset(next.password, 0, sizeof(next.password));
+    web_wipe(next.password, sizeof(next.password));
     switch (err) {
     case ESP_OK:
         ESP_LOGI(TAG, "local NTRIP saved: %s", next.enabled ? "on" : "off");
@@ -1449,7 +1451,10 @@ static esp_err_t h_lcast_put(web_req_t *r)
     case ESP_ERR_INVALID_ARG:
         return web_send_error(r->req, WEB_ERR_INVALID_FIELD, rule, field, UINT32_MAX, NULL, NULL);
     case ESP_ERR_INVALID_STATE:
-        return web_send_err(r->req, WEB_ERR_SAFE_MODE);
+        if (lifecycle_in_safe_mode()) {
+            return web_send_err(r->req, WEB_ERR_SAFE_MODE);
+        }
+        return web_send_internal(r->req, err);
     default:
         return web_send_internal(r->req, err);
     }
