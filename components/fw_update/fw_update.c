@@ -210,21 +210,26 @@ static void log_banner(void)
     }
 }
 
-/* The accepted manifest in NVS (ota/manifest): the repository it came from, a NUL, then the body as fetched. */
-static void save_manifest(const char *repo, const char *body, size_t len)
+/* The accepted manifest in NVS (ota/manifest): the repository it came from and its ETag, each ended by a NUL, then
+ * the body as fetched. The ETag travels with the body, so a restored manifest is never asked about with another
+ * one's ETag (a "not modified" would then keep an old release). */
+static void save_manifest(const char *repo, const char *etag, const char *body, size_t len)
 {
+    g_fw.manifest_saved = false;
     size_t rl = strlen(repo) + 1u;
-    if (len > MANIFEST_KEEP - rl) {
+    size_t el = strlen(etag) + 1u;
+    if (len > MANIFEST_KEEP - rl - el) {
         ESP_LOGW(TAG, "manifest of %u bytes: not kept over a restart", (unsigned)len);
         return;
     }
-    char *buf = malloc(rl + len);
+    char *buf = malloc(rl + el + len);
     if (buf == NULL) {
         return;
     }
     memcpy(buf, repo, rl);
-    memcpy(buf + rl, body, len);
-    esp_err_t err = settings_set_state_blob(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_MANIFEST, buf, rl + len);
+    memcpy(buf + rl, etag, el);
+    memcpy(buf + rl + el, body, len);
+    esp_err_t err = settings_set_state_blob(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_MANIFEST, buf, rl + el + len);
     free(buf);
     if (err == ESP_OK) {
         g_fw.manifest_saved = true;
@@ -246,15 +251,18 @@ static void load_manifest(void)
     }
     if (settings_get_blob(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_MANIFEST, buf, &len) == ESP_OK) {
         size_t rl = strnlen(buf, len);
-        if (rl < len && strcmp(buf, repo) == 0) {
+        size_t el = rl < len ? strnlen(buf + rl + 1u, len - rl - 1u) : 0;
+        if (rl < len && el < len - rl - 1u && el < sizeof(g_fw.etag) && strcmp(buf, repo) == 0) {
+            const char *etag = buf + rl + 1u;
+            const char *body = etag + el + 1u;
             int key = -1;
             fw_lock();
-            bool ok = fw_manifest_read(buf + rl + 1u, len - rl - 1u, g_fw.keys, g_fw.key_count, &g_fw.manifest,
-                                       &key) == FW_MANIFEST_OK;
+            bool ok = fw_manifest_read(body, len - rl - el - 2u, g_fw.keys, g_fw.key_count, &g_fw.manifest, &key) ==
+                      FW_MANIFEST_OK;
             g_fw.have_manifest = ok;
             g_fw.manifest_saved = ok;
             if (ok) {
-                strlcpy(g_fw.etag, g_fw.etag_saved, sizeof(g_fw.etag));
+                strlcpy(g_fw.etag, etag, sizeof(g_fw.etag));
             }
             fw_unlock();
             if (ok) {
@@ -328,7 +336,7 @@ static void run_check(void)
             }
             /* Without an ETag a changed manifest cannot be told from the stored one: stored each time. */
             if (changed || etag[0] == '\0' || !g_fw.manifest_saved) {
-                save_manifest(repo, body, len);
+                save_manifest(repo, etag, body, len);
             }
         } else {
             result = merr == FW_MANIFEST_ERR_NO_MEM ? FW_CHECK_NO_RESPONSE : FW_CHECK_UNUSABLE;

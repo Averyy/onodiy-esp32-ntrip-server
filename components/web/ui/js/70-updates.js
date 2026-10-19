@@ -186,7 +186,6 @@ function checkFailure(u) {
   return { tone: 'warn', text: text };
 }
 
-/** "2 h ago": the age of an update check in whole minutes, hours or days. */
 /* "On trial, 23h 59min left: confirming the start (15s)." The whole trial's time left, then the stage, with its own
  * time while another stage follows it. */
 const TRIAL_NOW = { confirming: 'confirming the start', verifying: 'verifying it works as before', watching: 'watching for crashes' };
@@ -206,6 +205,7 @@ function gnssReleaseText(g, app) {
     'Up to date.';
 }
 
+/** "2h ago": the age of an update check in whole minutes, hours or days. */
 function checkedAgo(unix) {
   const s = Date.now() / 1000 - unix;
   return s < 90 ? 'just now' : s < 5400 ? Math.round(s / 60) + 'min ago' : s < 172800 ? Math.round(s / 3600) + 'h ago' :

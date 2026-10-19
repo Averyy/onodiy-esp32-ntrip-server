@@ -1,7 +1,19 @@
 # Changelog
 
 What each release changes, newest first. A release's notes on GitHub start with its
-section here: add it before you tag ([releases](docs/releases.md)).
+section here. Changes since the last release collect under Unreleased; before you tag,
+rename that heading to the new version ([releases](docs/releases.md)).
+
+## Unreleased
+
+- Settings, Updates: the trial line names its stage and gives the whole trial's time
+  left. The receiver line says "Up to date" when the receiver runs a newer build than the
+  release has.
+- A restart keeps what the last update check found, so the card still knows the latest
+  release after an update or a power cut.
+- Times read 17s, 4min 10s, 23h 39min.
+- Receiver, Signals: the checks lead the card, the bands one of them, naming every
+  constellation with the most bands.
 
 ## v0.1.1
 

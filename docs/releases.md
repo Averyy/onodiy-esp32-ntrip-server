@@ -5,8 +5,9 @@ Back to the [README](../README.md).
 
 ## Cutting a release
 
-Add the release's highlights to [`CHANGELOG.md`](../CHANGELOG.md) under `## v0.3.0`,
-commit, then tag the commit and push the tag:
+In [`CHANGELOG.md`](../CHANGELOG.md), rename `## Unreleased` (the changes since the last
+release, collected as they land) to `## v0.3.0`, commit, then tag the commit and push the
+tag:
 
 ```sh
 git tag v0.3.0

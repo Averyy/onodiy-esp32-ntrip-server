@@ -58,6 +58,7 @@
 #include "esp_attr.h"
 #include "esp_intr_alloc.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -65,6 +66,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "gnss_link_core.h"
+#include "hal/uart_ll.h"
 #include "sdkconfig.h"
 #include "settings.h"
 #include "settings_schema.h"
@@ -1282,6 +1284,23 @@ static void sync_init(void)
     s_sync_ready = true;
 }
 
+/*
+ * esp_restart(), the last step before the reset: UART1's interrupts off and
+ * cleared. A board resets UART1 at the next boot's first uart_param_config()
+ * anyway. Espressif's QEMU keeps UART1's registers and the CPU line it drove
+ * across the restart, so RTCM arriving at that moment left the line raised and
+ * the next boot's uart_driver_install() in an endless interrupt
+ * (tools/qemu/README.md, UART1). With its interrupts off, UART1 drives no line
+ * into the restart.
+ */
+static void on_restart(void)
+{
+    if (s_inited) {
+        (void)uart_disable_intr_mask(s_port, UART_LL_INTR_MASK);
+        (void)uart_clear_intr_status(s_port, UART_LL_INTR_MASK);
+    }
+}
+
 esp_err_t gnss_link_init(void)
 {
     if (s_inited) {
@@ -1313,6 +1332,10 @@ esp_err_t gnss_link_init(void)
     }
     taskEXIT_CRITICAL(&s_lock);
     s_inited = true;
+    if (esp_register_shutdown_handler(on_restart) != ESP_OK) {
+        ESP_LOGW(TAG, "no restart handler: UART%d's interrupts stay on into a restart (a hang in QEMU only)",
+                 b->gnss_uart_num);
+    }
     if (err != ESP_OK) {
         /* Closed, not given up: the RX task reopens it on its own. */
         s_reopen_failures = 0;

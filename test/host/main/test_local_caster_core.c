@@ -1573,6 +1573,12 @@ TEST_CASE("lcast bit rate: from the oldest of 60 samples 1 s apart to now, from 
     lcast_rate_init(&r);
     lcast_rate_sample(&r, UINT32_MAX - 4999u, 0);
     TEST_ASSERT_EQUAL_UINT32(2000, lcast_rate_bps(&r, 5000, 2500));
+    /* the timer's sample came after the caller read the count and the clock: that sample is the latest reading */
+    lcast_rate_init(&r);
+    lcast_rate_sample(&r, 1000, 0);
+    lcast_rate_sample(&r, 2000, 0);
+    lcast_rate_sample(&r, 3000, 1700);
+    TEST_ASSERT_EQUAL_UINT32(13600, lcast_rate_bps(&r, 2990, 1690));
 }
 
 TEST_CASE("lcast end reasons: the API's names and the console's words", "[lcast]")

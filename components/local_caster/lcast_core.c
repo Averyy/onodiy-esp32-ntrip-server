@@ -1362,6 +1362,12 @@ uint32_t lcast_rate_bps(const lcast_rate_t *r, uint32_t now_ms, uint64_t bytes_n
     if (r->n == 0) {
         return 0;
     }
+    /* A sample the timer took after the caller read the count and the clock (the other core) is the latest reading. */
+    uint32_t newest = (r->head + LCAST_RATE_SAMPLES - 1u) % LCAST_RATE_SAMPLES;
+    if ((int32_t)(now_ms - r->at_ms[newest]) < 0 || bytes_now < r->bytes[newest]) {
+        now_ms = r->at_ms[newest];
+        bytes_now = r->bytes[newest];
+    }
     uint32_t oldest = (r->head + LCAST_RATE_SAMPLES - r->n) % LCAST_RATE_SAMPLES;
     if (now_ms - r->at_ms[oldest] > (LCAST_RATE_SAMPLES + 2u) * LCAST_RATE_STEP_MS || bytes_now < r->bytes[oldest]) {
         return 0;   /* samples missed, or a counter reset */

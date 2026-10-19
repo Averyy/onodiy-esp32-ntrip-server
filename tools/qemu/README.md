@@ -238,7 +238,12 @@ boot stops before `gnss_link: UART1 open` (seen with gdb: `-s` on the
 QEMU command line, every entry `INT_ST` 0, `INT_ENA` still holding the
 previous boot's bits at `call_start_cpu0`). A restart with nothing
 arriving on UART1 boots normally (with the system timer still counting
-from the first boot, see above). `e2e.py` therefore pauses its replay
+from the first boot, see above). The firmware therefore turns UART1's
+interrupts off and clears them in `esp_restart()` (gnss_link's shutdown
+handler, the last step before the reset), so UART1 drives no line into a
+planned restart: 8 restarts in a row under an unpaced `rtcm_replay.py
+--respond` stream all booted. A reset that skips `esp_restart()` (a panic,
+a watchdog) can still hang this way, so `e2e.py` also pauses its replay
 (`ReplayServer.pause()`: bursts that fall due are dropped) from 2 s before
 the reboot it asks for until the web server answers again.
 

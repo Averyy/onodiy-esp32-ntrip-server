@@ -429,7 +429,7 @@ jobs:
           settings=$(jq -r '.flash_settings | "--flash-mode \(.flash_mode) --flash-size \(.flash_size) --flash-freq \(.flash_freq)"' \
             "$a/flasher_args.json")
           stable='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
-          upload="install onodiy-esp32-ntrip-server.bin with a file upload in the web UI."
+          upload="install onodiy-esp32-ntrip-server.bin from Settings → Install manually."
           pre=()
           latest=(--latest=false)
           if [[ "$TAG" =~ $stable ]]; then
@@ -440,14 +440,14 @@ jobs:
                       grep -E "$stable" | sort -V | tail -n 1)
             if [ "$newest" = "$TAG" ]; then
               latest=(--latest)
-              offer="Stations offer this release in their daily update check; nothing installs until you click Update."
+              offer="Update a station from Settings → Updates."
             else
               echo "::notice::$TAG is lower than $newest: published without becoming Latest"
-              offer="Not the newest release ($newest is), so stations do not offer it: $upload"
+              offer="Not the latest release ($newest is): $upload"
             fi
           else
             pre=(--prerelease)
-            offer="Pre-release: stations do not offer it; $upload"
+            offer="Pre-release: $upload"
           fi
           # The highlights: the tag's section of CHANGELOG.md (fails without one, before anything is made).
           highlights=$(python3 tools/release_notes.py "$TAG")
@@ -456,15 +456,11 @@ jobs:
             echo
             echo "### Install"
             echo
-            echo "$offer"
-            echo
-            echo "First flash of a new board over USB (the files below):"
+            echo "$offer A new board: flash it over USB."
             echo
             echo '```'
             echo "esptool --chip esp32s3 write-flash $settings $flash"
             echo '```'
-            echo
-            echo "\`manifest.json\` lists every file with its size and SHA-256."
           } > "$RUNNER_TEMP/notes.md"
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$TAG" \
             --notes-file "$RUNNER_TEMP/notes.md" ${pre[@]+"${pre[@]}"} \

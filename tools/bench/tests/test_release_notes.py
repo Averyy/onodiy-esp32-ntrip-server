@@ -73,6 +73,8 @@ def test_main_exit_status(tmp_path, capsys):
 def test_changelog_headings_are_release_tags_newest_first():
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     tags = re.findall(r"^## (.+)$", text, re.MULTILINE)
+    if tags and tags[0] == "Unreleased":   # the changes since the last release, only at the top
+        tags = tags[1:]
     assert tags, "CHANGELOG.md has no release sections"
     bad = [t for t in tags if not re.fullmatch(r"v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?", t)]
     assert not bad, f"headings that are not release tags: {bad}"

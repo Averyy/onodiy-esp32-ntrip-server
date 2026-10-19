@@ -17,8 +17,8 @@ affiliated with or endorsed by Onocoy.
 
 > **Early development.** Working on the board with an antenna: the receiver setup, the
 > survey-in and lock, corrections every second with Galileo E6, streaming to a test
-> NTRIP server and to local clients, and updates by file upload. **Not tested yet:**
-> streaming to Onocoy live, updates from GitHub Releases, and a real rover. Don't use it
+> NTRIP server and to local clients, and updates by file upload and from GitHub
+> Releases. **Not tested yet:** streaming to Onocoy live, and a real rover. Don't use it
 > for a station you rely on yet.
 
 ## Hardware
