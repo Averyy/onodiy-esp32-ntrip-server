@@ -169,10 +169,19 @@ function signalsHeadline(sig) {
   return sig.best_sys ? lbl(L.sys, sig.best_sys) + ' · ' + sig.best_bands + ' bands' : 'No signals yet';
 }
 
-/* The card's head: the headline and, while corrections come (live), the hints in one line each (master: signalChecks). */
-function signalsHead(sig, live, master) {
-  const checks = live && sig.epoch_age_ms < 5000 ? signalChecks(sig, master) : null;
-  return [h('div', { class: 'big' }, signalsHeadline(sig)), checks && !checks.waiting ? receptionList(checks, true) : null];
+/* Observations arrive: the headline names the best constellation (else a banner says none do). */
+const hasSignals = sig => typeof sig.epoch_age_ms === 'number' && sig.epoch_age_ms < 5000 && !!sig.best_sys;
+
+/* The card's head: the headline and, while corrections come (live), the hints in one line each (master: signalChecks).
+ * Without signals one banner says so, with why the sky cannot show under it (why: nodes, '' when it can). */
+function signalsHead(sig, live, master, why) {
+  if (!hasSignals(sig)) {
+    return msg(typeof sig.epoch_age_ms === 'number' ? 'warn' : 'info', h('strong', null, signalsHeadline(sig)),
+      why ? h('div', null, why) : null);
+  }
+  const checks = live ? signalChecks(sig, master) : null;
+  return [h('div', { class: 'big' }, signalsHeadline(sig)), checks && !checks.waiting ? receptionList(checks, true) : null,
+    why ? msg('info', why) : null];
 }
 
 /**
@@ -188,11 +197,16 @@ function signalsSection(el, msgs) {
   const sky = skySection();
   const head = h('div', { class: 'stack' }, h('p', { class: 'loading' }, 'Loading signals…'));
   const bands = h('div');
-  const card = h('section', { class: 'card wide' }, h('h2', null, 'Signals'), head, sky.banner, sky.head,
-    h('div', { class: 'sky-wrap' }, sky.plot, h('div', { class: 'stack' }, bands, sky.list)),
+  const wrap = h('div', { class: 'sky-wrap' }, sky.plot, h('div', { class: 'stack' }, bands, sky.list));
+  const card = h('section', { class: 'card wide' }, h('h2', null, 'Signals'), head, sky.head, wrap,
     h('div', { class: 'form-actions' }, sky.note, sky.button), sky.el);
+  /* No band table and no sky: no empty box under the head. */
+  const wrapSync = () => {
+    wrap.hidden = !bands.firstChild && sky.plot.hidden;
+  };
+  sky.watch(wrapSync);
   el.append(card);
-  let collapsed = false, g = null, msgsOff = false;
+  let collapsed = false, g = null, msgsOff = false, why = '', lastSig = null;
   const msgsSync = () => {
     msgs.hidden = collapsed || msgsOff || !msgs.firstChild;
   };
@@ -211,6 +225,13 @@ function signalsSection(el, msgs) {
   }
   receiverState(S.status);
 
+  /* The head from the last signals read: also when only GET /api/gnss changed (why the sky cannot show). */
+  function drawHead() {
+    /* The group the receiver runs, else the profile's (the hint on Galileo E6 depends on it). */
+    const sg = g && (g.rx_signal_group ? g.rx_signal_group.master : (g.profile || {}).signal_group_master);
+    patch(head, signalsHead(lastSig, delivering(), sg === undefined ? null : sg, why));
+  }
+
   async function loadSignals() {
     let sig;
     try {
@@ -221,15 +242,14 @@ function signalsSection(el, msgs) {
     }
     if (collapsed) return;
     const systems = sig.systems || [];
-    const live = delivering();
-    /* The group the receiver runs, else the profile's (the hint on Galileo E6 depends on it). */
-    const sg = g && (g.rx_signal_group ? g.rx_signal_group.master : (g.profile || {}).signal_group_master);
-    patch(head, signalsHead(sig, live, sg === undefined ? null : sg));
+    lastSig = sig;
+    drawHead();
     /* No observations: the headline says so ("No signals for 1 min"), the table goes. */
     patch(bands, systems.length ? [bandTable(systems), h('p', { class: 'muted small foot' }, BANDS_FOOT)] : null);
+    wrapSync();
     /* The epoch counters are on Logs (Firmware internals, Observations). */
     const seen = (sig.messages || []).some(m => m.count);
-    patch(msgs, seen ? [h('h3', { class: 'sub' }, 'Messages'), messagesView(sig.messages, live, !!(g && (g.survey || {}).active))] : null);
+    patch(msgs, seen ? [h('h3', { class: 'sub' }, 'Messages'), messagesView(sig.messages, delivering(), !!(g && (g.survey || {}).active))] : null);
     msgsSync();
   }
 
@@ -243,9 +263,11 @@ function signalsSection(el, msgs) {
     gnss(gg) {
       g = gg;
       const settings = h('a', { href: '#/receiver/settings' }, 'Receiver settings');
-      sky.block(g.first_apply_held ? 'To show the sky, configure the receiver first.' :
+      why = g.first_apply_held ? 'To show the sky, configure the receiver first.' :
         g.autocfg || (g.profile || {}).sat_view_output ? '' :
-          ['To show the sky with manual setup, turn on Satellite positions output in ', settings, '.']);
+          ['To show the sky with manual setup, turn on Satellite positions output in ', settings, '.'];
+      sky.block(why);
+      if (lastSig && !collapsed) drawHead();
     },
     messagesOff(off) {
       msgsOff = off;

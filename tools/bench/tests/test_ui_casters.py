@@ -2474,9 +2474,10 @@ def test_receiver_pages_show_everything_without_fold_outs():
     noant = out["noant"]
     assert noant["cards"] == ["Receiver", "Signals"]
     assert dict(noant["rows"])["Position"] == "Surveying, paused while no corrections arrive."
-    # Manual setup: the sky needs the profile's satellite positions output; a banner says so (with the way to Receiver
-    # settings) and there is no button that cannot work.
-    assert ["info", "To show the sky with manual setup, turn on Satellite positions output in Receiver settings."] in noant["msgs"]
+    # No signals: one banner says so, and (manual setup) that the sky needs the profile's satellite positions output, with
+    # the way to Receiver settings; no big headline, and no button that cannot work.
+    assert ["info", "No signals yet" "To show the sky with manual setup, turn on Satellite positions output in Receiver "
+            "settings."] in noant["msgs"]
     assert noant["notes"] == [] and "Show the sky" not in noant["buttons"]
     assert out["noant_satview"]["notes"] == [] and out["stream"]["notes"] == []
     assert "Show the sky" in out["noant_satview"]["buttons"]

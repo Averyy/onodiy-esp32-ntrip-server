@@ -318,6 +318,7 @@ function skyOutputText(w) {
  */
 function skySection() {
   let stopPoll = null, gone = false, open = false, deadline = 0, postAt = 0, closeIgnored = false, blocked = '', closedWhy = '';
+  let onChange = null;
   const err = errBox();
   const left = h('span', { class: 'live-left' });
   const upTo = h('span');
@@ -362,18 +363,16 @@ function skySection() {
     if (open) left.textContent = fmt.dur(Math.max(0, Math.round((deadline - Date.now()) / 1000)));
   };
   const timer = setInterval(tick, 1000);
-  /* Why the sky cannot show (block()): a banner under the card's headline, and no button that cannot work. */
-  const banner = h('div', { hidden: true });
+  /* While the sky cannot show (block(): the card's banner says why), no button that cannot work. */
   const syncNote = () => {
     note.textContent = blocked ? '' : closedWhy;
     note.hidden = open || !note.textContent;
-    mount(banner, blocked ? msg('info', blocked) : null);
-    banner.hidden = !blocked || open;
     showBtn.hidden = open || !!blocked;
     showBtn.setAttribute('aria-describedby', note.id);
     /* The action row goes with its last visible part (no empty gap under a banner). */
     const row = showBtn.parentElement;
     if (row && row.contains(note)) row.hidden = showBtn.hidden && note.hidden;
+    if (onChange) onChange();
   };
 
   function show(d) {
@@ -448,14 +447,17 @@ function skySection() {
     button: showBtn,
     note: note,
     head: head,
-    el: h('div', null, announce, err, box),
+    el: h('div', { class: 'sky-extra' }, announce, err, box),
     plot: plot,
     list: list,
     start: () => start(showBtn),
     /* The window as it is (an address that asks for the sky): shown when it is open. */
     resume: () => fetchLive(),
-    banner: banner,
-    /* text: why the sky cannot show (a string or nodes), '' when it can. */
+    /* f(): called after the sky opened, closed or was blocked (the card hides what has nothing to show). */
+    watch(f) {
+      onChange = f;
+    },
+    /* text: why the sky cannot show ('' when it can): the button goes while it is set. */
     block(text) {
       blocked = text || '';
       syncNote();

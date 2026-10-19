@@ -870,6 +870,8 @@ tbody tr:last-child td { border-bottom: 0; }
  * for both; stacked otherwise, as in the setup wizard's narrow column. The
  * items may shrink below their content (a wide table scrolls in its box). */
 .sky-wrap { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
+/* The sky's notes and errors: no gap while none shows (its screen-reader line takes no room). */
+.card > .sky-extra:not(:has(> :not([hidden]):not(.sr-only))) { margin-top: 0; }
 .sky-wrap > * { flex: 1 1 26rem; min-width: 0; }
 .sky-wrap > :first-child { flex-basis: 17.5rem; max-width: 420px; margin: 0 auto; }
 /* Every satellite under the band table: from 560 px a box of its own height, its sort buttons in view while it scrolls;
