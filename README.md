@@ -132,9 +132,9 @@ the receiver, and opening the receiver's USB-C does not reset it either.
 5. **Web UI** — Wi-Fi setup, NTRIP configuration, live status, firmware updates, and a
    signal/satellite view.
 6. **Health monitoring** — GNSS watchdog, auto-recovery, and data-loss counters.
-7. **Your rover** — a local NTRIP caster for your own rover on the home network
-   (NTRIP 1.0 and 2.0, one mountpoint, at most 2 rovers, local addresses only); see
-   [Your rover](#your-rover-local-ntrip).
+7. **Your rover** *(in progress: not yet tested with a real rover)* — a local NTRIP
+   caster for your own rover on the home network (NTRIP 1.0 and 2.0, one mountpoint, at
+   most 2 rovers, local addresses only); see [Your rover](#your-rover-local-ntrip).
 
 ## Repository layout
 
@@ -380,6 +380,13 @@ says so), and to its IP address, which your router's device list shows under the
 station name. Settings shows both as links.
 
 ## Your rover (local NTRIP)
+
+> [!WARNING]
+> **In progress: not yet tested with a real rover.** So far it has been tested in the
+> emulator with recorded corrections and standard NTRIP clients (pygnssutils as an
+> NTRIP 1.0 and 2.0 rover sending GGA, and curl), and on the board for logins and limits
+> (no antenna yet, so no corrections flowed there). If you try it with a rover, please
+> open an issue with what worked and what didn't.
 
 The station can send corrections straight to your own rover on your home network,
 with no internet in between. On the **NTRIP** page, turn on **Your rover** and choose
