@@ -82,6 +82,7 @@ alone does not say which way round the plug is.
 | `rtcm_replay.py` | nothing (no serial port) | TCP only, local: serves a recorded stream to one client at a time (QEMU's UART1) and logs what the client sends back |
 | `fake_caster.py` | nothing (no serial port) | TCP only, local: a scripted NTRIP caster listening on 127.0.0.1; it only answers |
 | `ntrip_timing.py` | nothing (no serial port) | TCP only: one NTRIP client (GET) to the caster you name; there is no default host |
+| `ntrip_client.py` | nothing (no serial port) | TCP only: one NTRIP client (GET) to the host you name; no position (GGA) or anything else after the request |
 
 Never sent by any tool, even with `--write`: `FRESET`, `RESET` with
 parameters and any firmware/bootloader command. Bootloader keys are sent
@@ -350,10 +351,10 @@ uv run station.py get /api/gnss/signals
 ```
 
 `dump` saves every read-only endpoint of `components/web/API.md` as JSON
-(status, receiver, signals, sky, receiver-update session, casters, Wi-Fi,
-system, updates, health with boot history and core dump summary,
-availability, task stats), the event journal, the log ring of this boot and
-the previous one, and the core dump if there is one (decode it with
+(status, receiver, signals, sky, receiver-update session, casters, the
+caster for a rover, Wi-Fi, system, updates, health with boot history and
+core dump summary, availability, task stats), the event journal, the log
+ring of this boot and the previous one, and the core dump if there is one (decode it with
 `idf.py coredump-info -c <file>`; it may contain secrets, so keep it out of
 bug reports). `watch` prints one line per second (uptime, receiver state,
 RTCM age, best constellation and bands, each caster with its lag, Wi-Fi
@@ -514,7 +515,7 @@ does that in QEMU).
 
 | File | Contents |
 |---|---|
-| `ports.py`, `capture.py`, `um982.py`, `rtcm_inspect.py`, `station.py`, `bootprobe.py`, `rtcm_replay.py`, `fake_caster.py`, `ntrip_timing.py` | the tools |
+| `ports.py`, `capture.py`, `um982.py`, `rtcm_inspect.py`, `station.py`, `bootprobe.py`, `rtcm_replay.py`, `fake_caster.py`, `ntrip_timing.py`, `ntrip_client.py` | the tools |
 | `benchlib/rtcm.py` | RTCM 3 framing, CRC-24Q, MSM/1005/1006/1033/1230 decoders, band mapping |
 | `benchlib/stream.py` | splits a byte stream into RTCM frames, text lines (checksum-checked), binary logs and junk |
 | `benchlib/rtcmstats.py` | counts, rates, MSM content and the Onocoy checks |
@@ -522,13 +523,13 @@ does that in QEMU).
 | `benchlib/serialio.py` | port listing, identification, listen-only probing, safe opening |
 | `benchlib/common.py` | run directories, rotating files, Ctrl-C handling |
 | `benchlib/replay.py` | replay schedules: capture runs timed by their `.idx`, RTCM files grouped into epochs by MSM epoch time, looping on a continuous time base |
-| `benchlib/ntrip.py` | NTRIP helpers for the local tools: chunked transfer coding, request parsing with the password masked, a frame recorder (CRC, bytes outside frames, cut end) |
+| `benchlib/ntrip.py` | NTRIP helpers for the local tools: chunked transfer coding (with where each chunk ended), request parsing with the password masked, a frame recorder (CRC, bytes outside frames, cut end), source table STR records by field name, and the replies of the station's caster for a rover byte for byte (stream heads, source table, errors, its STR record) |
 | `benchlib/um982_sim.py` | the scripted UM982 command responder (test tooling) behind `rtcm_replay.py --respond`, which the replay and the QEMU e2e use: version, configuration dump, signal-group switches with restarts, the station messages as configured, its own position |
 | `docker/bkg-caster/` | Dockerfile, configuration and scripts for the optional BKG caster test peer |
-| `tests/` | pytest; RTCM test frames are built field by field from the public layouts and cross-checked with pyrtcm; `bootprobe.py` runs against a scripted receiver over a socketpair; the replay, fake caster and timing tools run over local sockets; `test_ui_text.py` runs sentences the web UI builds from the station's status (`components/web/ui/js`) in Node.js (skipped without it), among them the station state every Status card reads (each condition, their order, the Onocoy verdict), the header's word for each state (in the top card's colour), the page notices (order, folding, the page that leaves each out: on Status also the update and every stopped server), where the old addresses land (the five tabs), and the receiver pages (the Receiver card's chip, the paused survey, the Signals headline and hints, the position message that waits for the survey, receiver setup (Automatic or Manual) and Custom) Settings (the setup hotspot's chip, the age of the last update check, receiver maintenance started in one place) and Logs (its three parts and where the old Diagnostics addresses land, the health chip that follows the Status page, the event list that pairs a drop with its return and makes a sky session one row, one-line log and event rows, every event's date said alike), the short restart line and the setup's last screen (Onocoy's state as it happens); `test_ui_casters.py` drives the NTRIP server editor over a small DOM in Node.js and checks the body its Save sends and what it shows where, a server card's state and address lines, its on/off switch (saved to its own slot) and duplicate-stream warning, the Status page in every state (its four cards always there with one link each, the receiver rows, the NTRIP lines, Onocoy's day, the station's firmware words, colours that never contradict the top card, each fact said once, an "Also:" line for each failing server the top card does not name, no top-card button that repeats a card's link, every colour grey without contact, no receiver-setup line), the header's state (the word, its colour, the title, No contact with the count outside the live region, the state on every page), the no-receiver panel, receiver setup's save order, the Receiver pages built whole in each state (no fold-outs; the position card, the messages, the comparison's results with each band's satellites, the held configuration in one line), Logs' Receiver card (the descriptor said once, the held configuration's commands) and event list (one width for its When column, the date in every row), Settings built whole (Network, Updates and the Danger zone, no fold-outs), and the setup's Onocoy step answering the duplicate-stream question (skipped without it); `test_ui_theme.py` reads the UI's colour tokens (`components/web/ui/app.css`): the dark theme the same from the system setting and from the header's button, text at 4.5:1 in both themes (the header's state too, its dot at 3:1), and in the dark one the edges of controls, bars, dialogs and the sky's dots at 3:1; `test_bench_console_checks.py` checks the pure parts of `tools/qemu/bench_console.py` (the commands it expects from `components/bench/bench.c`, the `ftimes summary` form); `test_smoke_boot.py` checks `tools/qemu/smoke.py`'s boot accounting (a planned restart cut short in the bootloader named as QEMU's APP-CPU artefact, never a crash), its slow-request watch over a local server (`request()` and a socket exchange of its own, each named with its client port) and its reading of a pcap (the station's packets, the client SYNs it turned away with a bare ACK or a reset, the client's resets, and which of the client's SYNs it took); `test_ci_job.py` checks `tools/ci/ci_job.py` (`build.yml` read as Actions reads it, what it refuses, continue-on-error, timeout-minutes and the upload stand-in over small jobs run with bash); `test_docker_run_script.py` checks the options of `docker/bkg-caster/run.sh` (`--print`, no Docker needed); `test_docker_caster.py` only with `RUN_DOCKER_TESTS=1`; `test_readme_layout.py` checks that this table names every `benchlib` module; `test_um982.py` runs `um982.py` against scripted ports (a loader, a silent port, and the replay's scripted receiver with `ANT1GROUPA`/`ANT2GROUPA` answers, for `query`, `e6-check --write` and a restart); `receiver_25164.py` holds what build 25164 wrote on the bench, byte for byte; `test_capture.py` checks that a running capture's files are on the disk within about a second |
+| `tests/` | pytest; RTCM test frames are built field by field from the public layouts and cross-checked with pyrtcm; `bootprobe.py` runs against a scripted receiver over a socketpair; the replay, fake caster and timing tools run over local sockets; `test_ntrip_client.py` runs `ntrip_client.py` against a small caster in the test that answers with the station's rover replies byte for byte (NTRIP 1.0 with and without the blank line, 2.0 chunked and over HTTP/1.0, the source table, 401, 403, 429, 503, a corrupted frame, a frame split across chunks, the password never in the output); `test_e2e_checks.py` checks the pure parts of `tools/qemu/e2e.py` (a caster record against the fixture, a rover's record against the upstream caster's, the station's replies and STR record, the journal's rover records); `test_ui_text.py` runs sentences the web UI builds from the station's status (`components/web/ui/js`) in Node.js (skipped without it), among them the station state every Status card reads (each condition, their order, the Onocoy verdict), the header's word for each state (in the top card's colour), the page notices (order, folding, the page that leaves each out: on Status also the update and every stopped server), where the old addresses land (the five tabs), and the receiver pages (the Receiver card's chip, the paused survey, the Signals headline and hints, the position message that waits for the survey, receiver setup (Automatic or Manual) and Custom) Settings (the setup hotspot's chip, the age of the last update check, receiver maintenance started in one place) and Logs (its three parts and where the old Diagnostics addresses land, the health chip that follows the Status page, the event list that pairs a drop with its return and makes a sky session one row, one-line log and event rows, every event's date said alike), the short restart line and the setup's last screen (Onocoy's state as it happens); `test_ui_casters.py` drives the NTRIP server editor over a small DOM in Node.js and checks the body its Save sends and what it shows where, a server card's state and address lines, its on/off switch (saved to its own slot) and duplicate-stream warning, the "Your rover" card (each state, the body its editor saves, its line on the Status page), the Status page in every state (its four cards always there with one link each, the receiver rows, the NTRIP lines, Onocoy's day, the station's firmware words, colours that never contradict the top card, each fact said once, an "Also:" line for each failing server the top card does not name, no top-card button that repeats a card's link, every colour grey without contact, no receiver-setup line), the header's state (the word, its colour, the title, No contact with the count outside the live region, the state on every page), the no-receiver panel, receiver setup's save order, the Receiver pages built whole in each state (no fold-outs; the position card, the messages, the comparison's results with each band's satellites, the held configuration in one line), Logs' Receiver card (the descriptor said once, the held configuration's commands) and event list (one width for its When column, the date in every row), Settings built whole (Network, Updates and the Danger zone, no fold-outs), and the setup's Onocoy step answering the duplicate-stream question (skipped without it); `test_ui_theme.py` reads the UI's colour tokens (`components/web/ui/app.css`): the dark theme the same from the system setting and from the header's button, text at 4.5:1 in both themes (the header's state too, its dot at 3:1), and in the dark one the edges of controls, bars, dialogs and the sky's dots at 3:1; `test_bench_console_checks.py` checks the pure parts of `tools/qemu/bench_console.py` (the commands it expects from `components/bench/bench.c`, the `ftimes summary` form); `test_smoke_boot.py` checks `tools/qemu/smoke.py`'s boot accounting (a planned restart cut short in the bootloader named as QEMU's APP-CPU artefact, never a crash), its slow-request watch over a local server (`request()` and a socket exchange of its own, each named with its client port) and its reading of a pcap (the station's packets, the client SYNs it turned away with a bare ACK or a reset, the client's resets, and which of the client's SYNs it took); `test_ci_job.py` checks `tools/ci/ci_job.py` (`build.yml` read as Actions reads it, what it refuses, continue-on-error, timeout-minutes and the upload stand-in over small jobs run with bash); `test_docker_run_script.py` checks the options of `docker/bkg-caster/run.sh` (`--print`, no Docker needed); `test_docker_caster.py` only with `RUN_DOCKER_TESTS=1`; `test_readme_layout.py` checks that this table names every `benchlib` module; `test_um982.py` runs `um982.py` against scripted ports (a loader, a silent port, and the replay's scripted receiver with `ANT1GROUPA`/`ANT2GROUPA` answers, for `query`, `e6-check --write` and a restart); `receiver_25164.py` holds what build 25164 wrote on the bench, byte for byte; `test_capture.py` checks that a running capture's files are on the disk within about a second |
 
-`rtcm_replay.py`, `fake_caster.py`, `ntrip_timing.py` and the `benchlib`
-modules they use (`rtcm`, `stream`, `common`, `replay`, `ntrip`, `um982_sim`
+`rtcm_replay.py`, `fake_caster.py`, `ntrip_timing.py`, `ntrip_client.py` and the
+`benchlib` modules they use (`rtcm`, `stream`, `common`, `replay`, `ntrip`, `um982_sim`
 and the `unicore` it builds its replies with) need only
 the Python standard library, so `tools/qemu/e2e.py` can import them without
 this project's environment.
@@ -696,6 +697,48 @@ VAR`) or at a prompt (`--password-prompt`); it is never taken from the
 command line, printed or written to the run directory. `--ntrip-version 2`
 and `--tls` as the caster needs. Epoch times: GPS, Galileo, QZSS time of
 week, BeiDou + 14 s, GLONASS Moscow day time, GPS - UTC = 18 s.
+
+## Reading the station as a rover
+
+`ntrip_client.py` is an NTRIP client that checks what it gets, for the
+station's own caster for a rover ("Your rover" on the NTRIP page, port
+2101) or any other caster: the source table with each STR record field by
+field, or a mountpoint's stream frame by frame.
+
+```sh
+uv run ntrip_client.py --host onodiy.local --sourcetable
+export ROVER_PASSWORD=...        # the password chosen on the "Your rover" card
+uv run ntrip_client.py --host onodiy.local --mount onodiy --password-env ROVER_PASSWORD --duration 600
+uv run ntrip_client.py --host onodiy.local --mount onodiy --password-env ROVER_PASSWORD --ntrip-version 2 --save
+uv run ntrip_client.py --host 127.0.0.1 --port <run.sh --ntrip-port> --mount ROVER --password-prompt   # QEMU
+```
+
+- The source table (`--sourcetable`, or no `--mount`): `GET /` without a
+  login. It prints the reply's status line and headers, the table and
+  every STR record by field name; exit 0 when the table ends with
+  `ENDSOURCETABLE` and holds an STR record of 19 fields.
+- A stream: `GET /<mount>` with Basic authentication (`--user`, default
+  `rover`; the password from `--password-env VAR` or `--password-prompt`,
+  never the command line; without one no `Authorization` header is sent).
+  NTRIP 1.0 asks over HTTP/1.0 and takes `ICY 200 OK` with or without the
+  blank line after it; `--ntrip-version 2` asks over HTTP/1.1 with
+  `Ntrip-Version: Ntrip/2.0` and `Host:` and decodes the chunks, each of
+  which must hold whole frames. Every 10 s it prints frames, bytes,
+  frames/s, epochs, CRC failures, bytes outside frames and the message
+  types. Exit 0 when at least `--min-frames` (default 1) came, no CRC
+  failed, nothing was outside a frame and the chunking was clean; 1 when a
+  check failed; 2 when the caster refused (401, 403, 429 with its
+  `Retry-After`, 503, or its source table for a mountpoint it does not
+  have: the code and reason are printed).
+- It only reads: one GET, no position (GGA) and nothing else after it.
+  The request is printed without its `Authorization` header, and the
+  password is never printed or written.
+- The run directory: `command.txt`, `reply-header.txt` (the reply as
+  received), `summary.json` (`--json` prints it too), `sourcetable.txt`,
+  and with `--save` the stream as `stream-NNNN.bin` + `.idx` (chunking
+  removed), the format `ntrip_timing.py report` reads.
+- `tools/qemu/e2e.py` (scenario `local-caster`) imports it:
+  `fetch_sourcetable()`, `open_stream()`, `read_for()`.
 
 ## A real caster in Docker
 
