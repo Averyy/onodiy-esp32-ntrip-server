@@ -2662,7 +2662,8 @@ def test_receiver_pages_show_everything_without_fold_outs():
     # Each band's C/N0 and its satellites inline; on a phone a cell wraps only between its parts, each ending with its dot.
     assert ("Galileo | 10.9 satellites\u00a0\u00b7 4 bandsL1 44.6 (10.9)\u00a0\u00b7 L2 42.8 (10.9)\u00a0\u00b7 "
             "L5 44.7 (9.6)\u00a0\u00b7 L6 41.2 (8.3) | \u2013") in running["trs"]
-    assert any(t.startswith("Per band: mean C/N0 in dB-Hz; in brackets, mean satellites. Onocoy score: Onocoy's quality scale")
+    assert any(t.startswith("Satellites rise and set, so their counts differ between the two measurements; the bands and "
+                            "signals are what a group changes. Onocoy score: constellations \u00d7 bands, from Onocoy's quality scale")
                for t in running["lines"]) and "Stop" in running["buttons"]
     # Its next answer patches the same results box (a keyboard focus on it stays) with the new figures.
     assert running["again"]["same"]

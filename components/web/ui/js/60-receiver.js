@@ -1132,9 +1132,10 @@ function sgtResults(t) {
     })]);
   }
   return h('div', null, table(head, rows, { label: 'Signal-group comparison results', cls: 'cmp' }),
-    h('p', { class: 'muted small foot' }, 'Per band: mean C/N0 in dB-Hz; in brackets, mean satellites. Onocoy score: ',
-      extLink('Onocoy\'s quality scale', ONO_QUALITY_DOC), ' without its signal-quality factor, which Onocoy measures and ' +
-      'which is alike for both groups on one antenna.'));
+    h('p', { class: 'muted small foot' }, 'Satellites rise and set, so their counts differ between the two measurements; ' +
+      'the bands and signals are what a group changes. Onocoy score: constellations \u00d7 bands, from ',
+      extLink('Onocoy\'s quality scale', ONO_QUALITY_DOC), ' (its signal-quality factor is alike for both groups on one ' +
+      'antenna). Per band: mean C/N0 in dB-Hz, mean satellites in brackets.'));
 }
 
 /*
