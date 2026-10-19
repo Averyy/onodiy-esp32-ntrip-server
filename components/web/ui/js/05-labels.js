@@ -68,6 +68,9 @@ const L = {
     banned: ['banned', 'Onocoy reports this credential or connection as banned. Check the Onocoy console.'],
   },
   backoff: { fast: 'Fast', standard: 'Standard', polite: 'Polite' },
+  /* Your rover (local_caster_state_t; starting: not a state of the station's, what off says while the config is on) */
+  rover: { off: 'Off', starting: 'Starting', wait_network: 'Waiting for Wi-Fi', listening: 'Waiting for a rover',
+    error: 'Not listening' },
   trust: { bundle: 'Built-in certificate bundle', custom_ca: 'My own CA certificate', insecure: 'Do not check (insecure)' },
   health: { ok: 'Healthy', degraded: 'Needs attention', recovering: 'Recovering', failed: 'Needs attention' },
   step: {
@@ -309,7 +312,7 @@ const J = {
   kind: { boot: 'Start', session: 'Previous run', reboot: 'Restart', app_update: 'App update', app_revert: 'App rolled back',
     gnss_flash: 'Receiver update', safe_mode: 'Safe mode', data_loss: 'Data lost', rx_maintenance: 'Receiver maintenance',
     live_view: 'Sky view', sg_test: 'Signal groups', rx_boot: 'Receiver at the start', fixed_check: 'Fixed position',
-    wifi_roam: 'Wi-Fi moved' },
+    wifi_roam: 'Wi-Fi moved', rover_connect: 'Rover connected', rover_disconnect: 'Rover disconnected' },
   /* By C value, as the API names them (lifecycle_reset_class_t, lifecycle_reboot_reason_t). */
   resetClassKey: ['power_on', 'planned', 'crash', 'brownout', 'other'],
   rebootKey: ['none', 'user', 'factory_reset', 'admin_reset', 'app_update', 'app_revert', 'gnss_ladder', 'network_ladder',
@@ -338,6 +341,9 @@ const J = {
     'login_blocked', 'in_use', 'replaced', 'local'],
   /* ntrip_stop_t (a caster_stop record's bits 8-15) */
   stop: ['none', 'rejected', 'login_blocked', 'in_use', 'kicked', 'duplicate', 'banned'],
+  /* Why a rover's session ended (local_caster_end_t, a rover_disconnect record's bits 8-15) */
+  roverEnd: ['', 'the rover closed the connection', 'the rover took no data for 10 s', 'the connection was lost',
+    'turned off or its settings changed', 'the station lost its network address', 'the station restarted'],
   liveEv: [null, 'Opened', 'Extended', 'Closed', 'Satellite output on', 'Satellite output off'],
   liveEnd: ['', 'closed by you', 'time up', 'nobody watching', 'receiver update'],
   /* A satellite output command's answer (0: accepted, said by nothing) */

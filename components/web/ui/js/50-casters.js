@@ -27,6 +27,10 @@
  * slot has an Onocoy host, and says so once Onocoy is chosen; the Onocoy
  * choice is hidden while another enabled slot streams to Onocoy. A slot
  * saved without a host and not enabled is empty again, stored without a name.
+ *
+ * After the servers, the card "Your rover": the station's own corrections
+ * for the owner's rover on the home network (GET/PUT /api/local-caster; the
+ * page never calls it a caster or a server).
  */
 
 const PRESETS = [
@@ -758,6 +762,131 @@ async function turnCaster(slot, c, on) {
   return saved;
 }
 
+/* ---- Your rover ----------------------------------------------------------- */
+
+/* Its fields as the station takes them, with the station's words (local_caster.h). */
+const ROVER_RULE = {
+  mountpoint: [/^[A-Za-z0-9._-]{1,47}$/, '1 to 47 letters, digits, dots, hyphens or underscores.'],
+  username: [/^[A-Za-z0-9._-]{1,31}$/, '1 to 31 letters, digits, dots, hyphens or underscores.'],
+  password: [/^[!-~]{8,63}$/, '8 to 63 characters, letters, digits and symbols, no spaces.'],
+};
+
+/** Where a rover finds the station: its name on the home network (<mdns_host>.local), its IP address. */
+function roverHosts(net) {
+  net = net || {};
+  return [net.mdns_host ? net.mdns_host + '.local' : null, net.ip || null].filter(Boolean);
+}
+
+/* A value to type into the rover's NTRIP client: a tap selects all of it, for a copy. */
+const copyable = v => h('code', { class: 'copy' }, breakable(String(v)));
+
+/*
+ * Your rover's card under its head (d: GET /api/local-caster, s: the
+ * status). Off: what it does, in one line. On, always in full: its state,
+ * a warning while the receiver sends no corrections, what to type into the
+ * rover, one line per rover connected, the limits, and what was refused
+ * since the start. Patched in place (nothing in it has a listener), so a
+ * value selected for a copy stays selected.
+ */
+function roverSummary(d, s) {
+  const c = d.config, st = d.status || {}, port = st.port || 2101;
+  const hosts = roverHosts(s && s.network);
+  if (!c.enabled) {
+    return [h('p', { class: 'muted' }, 'Off. When on, a rover on your home network gets corrections from the station' +
+      (hosts.length ? ' at ' + hosts[0] + ':' + port : '') + ', no internet needed.')];
+  }
+  const list = st.clients || [], n = list.length, rf = st.refused || {}, wrong = (rf.login || 0) + (rf.throttled || 0);
+  const line = st.state === 'error' ? ['bad', 'Not listening on port ' + port + ' (error ' + st.listen_errno + '). ' +
+    'Trying again every 10 s.'] :
+    st.state === 'wait_network' ? ['', 'Waiting for Wi-Fi. Rovers connect over your home network, not the setup hotspot.'] :
+    n ? ['ok', plural(n, 'rover', 'rovers') + ' connected'] : ['', lbl(L.rover, st.state === 'off' ? 'starting' : st.state)];
+  /* A throttled login is a wrong password too (the rover's own retries). */
+  const refused = [wrong && plural(wrong, 'wrong password', 'wrong passwords'), rf.not_local && rf.not_local + ' from outside your network',
+    rf.full && rf.full + ' while full', rf.bad_request && plural(rf.bad_request, 'bad request', 'bad requests')].filter(Boolean);
+  const rx = s && s.receiver;
+  const oneRover = r => h('div', null, breakable(r.addr || DASH), ['NTRIP ' + (r.ntrip_version || 1) + '.0',
+    'for ' + fmt.dur(r.connected_s), fmt.bytes(r.bytes_sent) + ' sent',
+    r.epochs_dropped && plural(r.epochs_dropped, 'epoch', 'epochs') + ' dropped (slow link)']
+    .filter(Boolean).map(t => [' ', h('span', { class: 'nowrap muted' }, '· ' + t)]));
+  return [
+    h('div', { class: 'cstate' }, h('span', { class: line[0] ? 't-' + line[0] : 'muted' }, line[1])),
+    rx && !(typeof rx.rtcm_age_ms === 'number' && rx.rtcm_age_ms <= 3000) ?
+      msg('warn', 'No corrections from the receiver right now: connected rovers get nothing.') : null,
+    kv([['Host', hosts.length ? hosts.map((x, i) => [i ? ' or ' : '', copyable(x)]) : DASH], ['Port', copyable(port)],
+      ['Mountpoint', copyable(c.mountpoint)], ['Username', copyable(c.username)], ['Password', c.password_set ? 'Set' : 'Not set'],
+      ['NTRIP version', '1.0 or 2.0']]),
+    list.map(oneRover),
+    h('p', { class: 'muted small' }, 'At most ' + (st.max_clients || 2) + ' rovers at once. ' +
+      'Only devices on your home network can connect.'),
+    refused.length ? h('p', { class: 'muted small' }, 'Refused since the station started: ' + refused.join(', ') + '.') : null,
+  ];
+}
+
+/**
+ * Your rover's editor, in its card as a server's is: mountpoint, username
+ * and password, each saying what it is and its default; the password is
+ * write-only (empty keeps the stored one). opts: turnOn (opened by the
+ * switch with no password stored: it says so, and Save turns it on),
+ * hostname (the default mountpoint), onSaved(GET body), onCancel().
+ * Returns {el, dirty(), focusPassword()}.
+ */
+function roverEditor(cfg, opts) {
+  let dirty = false;
+  const mp = textInput(cfg.mountpoint, { maxlength: 47 });
+  const user = textInput(cfg.username, { maxlength: 31 });
+  const pw = pwInput({ maxlength: 63, placeholder: cfg.password_set ? 'Stored, leave empty to keep' : '' });
+  const F = {
+    mountpoint: field('Mountpoint', mp, 'The name your rover asks for. Default: the station\'s name' +
+      (opts.hostname ? ' (' + opts.hostname + ')' : '') + '. Letters, digits, dots, hyphens or underscores.'),
+    username: field('Username', user, 'Default: rover.'),
+    password: field('Password', pw, '8 to 63 characters, no spaces. No default: you choose it.'),
+  };
+  const err = errBox();
+  const saveBtn = h('button', { type: 'submit', class: 'btn primary' }, opts.turnOn ? 'Save and turn on' : 'Save');
+  const form = h('form', { class: 'stack', onsubmit: e => {
+    e.preventDefault();
+    save();
+  }, oninput: () => {
+    dirty = true;
+  } }, h('div', { class: 'card-head' }, h('h2', null, 'Your rover')), opts.turnOn ? h('p', null, 'Choose a password first.') : null,
+  h('div', { class: 'cols c3' }, F.mountpoint.el, F.username.el, F.password.el), err,
+  h('div', { class: 'form-actions' }, saveBtn, btn('Cancel', () => opts.onCancel(), 'ghost')));
+
+  async function save() {
+    const body = { mountpoint: mp.value.trim(), username: user.value.trim() };
+    if (pw.value) body.password = pw.value;
+    if (opts.turnOn) body.enabled = true;
+    let bad = null;
+    for (const k of Object.keys(F)) {
+      const v = body[k];
+      const why = v ? (ROVER_RULE[k][0].test(v) ? null : ROVER_RULE[k][1]) :
+        k !== 'password' ? ROVER_RULE[k][1] : opts.turnOn && !cfg.password_set ? 'Choose a password.' : null;
+      F[k].error(why);
+      if (why && !bad) bad = F[k].input;
+    }
+    if (bad) {
+      bad.focus();
+      return;
+    }
+    err.hidden = true;
+    try {
+      const d = await busy(saveBtn, () => api('PUT', '/api/local-caster', body));
+      dirty = false;
+      pw.value = '';
+      toast(opts.turnOn ? 'Saved. Corrections for your rover are on.' : 'Saved.', 'ok');
+      opts.onSaved(d);
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'invalid_field' && F[e.field]) {
+        F[e.field].error(ruleText(e));
+        F[e.field].input.focus();
+        return;
+      }
+      showErr(e, err);
+    }
+  }
+  return { el: form, dirty: () => dirty, focusPassword: () => pw.focus({ preventScroll: true }) };
+}
+
 Views.ntrip = {
   title: 'NTRIP',
   showTitle: true,
@@ -769,6 +898,8 @@ Views.ntrip = {
     const refs = {};    /* slot -> {badge, live} for in-place updates */
     let addCard = null;
     let stopPoll = null, gone = false;
+    /* Your rover: GET /api/local-caster (null: none to show, safe mode), its card, its live part, its editor. */
+    let rover = null, roverCard = null, roverLive = null, roverEd = null;
 
     const liveOf = slot => {
       const l = S.status && S.status.casters ? S.status.casters.find(c => c.slot === slot) : null;
@@ -888,6 +1019,58 @@ Views.ntrip = {
       if (target) target.scrollIntoView({ block: 'start', behavior: 'smooth' });
     }
 
+    /* Your rover's card: its name, Edit and the switch (on with no password stored opens the editor first), then its
+     * live part; or its editor. */
+    function roverBody() {
+      if (roverEd) return [roverEd.el];
+      roverLive = h('div', { class: 'caster-live fit-kv' });
+      fillRover();
+      return [h('div', { class: 'card-head switch-head' }, h('h2', null, 'Your rover'),
+        btn('Edit', () => editRover(false), 'small', { 'aria-label': 'Edit your rover' }),
+        onOffSwitch(!!rover.config.enabled, 'Corrections for your rover', turnRover)), roverLive];
+    }
+
+    function fillRover() {
+      if (roverLive && rover && !roverEd) patch(roverLive, roverSummary(rover, S.status));
+    }
+
+    function renderRover() {
+      if (roverCard && rover) mount(roverCard, roverBody());
+      else render();
+    }
+
+    function editRover(turnOn) {
+      const done = d => {
+        roverEd = null;
+        if (d && d.config) rover = d;
+        renderRover();
+      };
+      roverEd = roverEditor(rover.config, { turnOn: turnOn, hostname: S.status && S.status.device ? S.status.device.hostname : '',
+        onSaved: done, onCancel: () => done(null) });
+      renderRover();
+      if (roverCard) roverCard.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      /* Opened by the switch: the password is what it waits for. */
+      if (turnOn && roverEd) roverEd.focusPassword();
+    }
+
+    async function turnRover(on) {
+      if (on && !rover.config.password_set) {
+        editRover(true);
+        return false;
+      }
+      try {
+        const d = await api('PUT', '/api/local-caster', { enabled: on });
+        if (d && d.config) rover = d;
+      } catch (e) {
+        if (on && e instanceof ApiError && e.code === 'invalid_field' && e.field === 'password') editRover(true);
+        else showErr(e);
+        return false;
+      }
+      toast(on ? 'Corrections for your rover are on.' : 'Corrections for your rover are off.', 'ok');
+      fillRover();
+      return true;
+    }
+
     /* Redraw the cards of Onocoy slots not set up (their button is the main one only while no editor is open). */
     function setupCards() {
       for (const x of data.slots) {
@@ -913,23 +1096,31 @@ Views.ntrip = {
     }
 
     /* The page's heading (the view's title) says "NTRIP"; then one card per server, two side by side on a wide
-     * screen (an editor takes the whole row), and the add card. Safe mode: the page-wide notice says it, each card
-     * says "Not loaded", and there is no add card. */
+     * screen (an editor takes the whole row), the add card and Your rover's, the whole row. Safe mode: the page-wide
+     * notice says it, each card says "Not loaded", and there is no add card and no rover card. */
     function render() {
       for (const k of Object.keys(cards)) delete cards[k];
       addCard = safeMode() ? null : h('section', { class: 'card' });
       if (addCard) fillAdd();
+      roverCard = rover ? h('section', { class: 'card wide' }, roverBody()) : null;
       mount(el, h('div', { class: 'grid' }, data.slots.filter(s => !isFree(s)).map(s =>
-        (cards[s.slot] = h('section', { class: editing === s.slot ? 'card wide' : 'card' }, cardBody(s)))), addCard));
+        (cards[s.slot] = h('section', { class: editing === s.slot ? 'card wide' : 'card' }, cardBody(s)))), addCard, roverCard));
     }
 
     async function load() {
-      const d = await api('GET', '/api/casters');
-      const old = data;
+      /* Your rover's part fails alone: a station without it (404) has no card; another failure keeps what it showed. */
+      const [d, r] = await Promise.all([api('GET', '/api/casters'),
+        api('GET', '/api/local-caster').catch(e => (e instanceof ApiError && e.status === 404 ? null : rover))]);
+      const old = data, oldRover = rover;
       data = d;
-      if (!old || old.slots.length !== d.slots.length) {
+      rover = r && r.config ? r : null;
+      if (!old || old.slots.length !== d.slots.length || !oldRover !== !rover) {
         render();
         return;
+      }
+      if (rover && !roverEd) {
+        if (JSON.stringify(oldRover.config) === JSON.stringify(rover.config)) fillRover();
+        else renderRover();
       }
       /* The cards whose duplicate-stream warning comes or goes are rebuilt. */
       const warned = JSON.stringify(old.warnings || []) === JSON.stringify(d.warnings || []) ? [] :
@@ -967,12 +1158,13 @@ Views.ntrip = {
       update() {
         if (!data) return;
         for (const s of data.slots) if (s.slot !== editing) fill(s);
+        fillRover();
       },
       destroy() {
         gone = true;
         if (stopPoll) stopPoll();
       },
-      dirty: () => !!(editor && editor.dirty()),
+      dirty: () => !!(editor && editor.dirty()) || !!(roverEd && roverEd.dirty()),
       reload() {
         if (editing === null) load().catch(() => {});
       },

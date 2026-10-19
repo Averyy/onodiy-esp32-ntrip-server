@@ -187,8 +187,8 @@ vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { casterEditor, openCasterWarning, casterEvidence, casterSummary, turnCaster, onOffSwitch, stationState, adminDashboard, heroAlso,\n' +
   '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard, healthCard, chipCard, signalsHead, bandTable, kv,\n' +
-  '  startLines, foldRows, diagReceiverCard, receiverPage, renderLive,\n' +
-  '  settingsPage: (el, arg) => Views.settings.create(el, arg),\n' +
+  '  startLines, foldRows, diagReceiverCard, receiverPage, renderLive, roverSummary, roverEditor,\n' +
+  '  settingsPage: (el, arg) => Views.settings.create(el, arg), ntripPage: (el, arg) => Views.ntrip.create(el, arg),\n' +
   '  setStatus: s => { S.status = s; }, setSession: s => { S.session = s; },\n' +
   '  setLive: (age, started, page) => { S.statusAt = age === null ? 0 : Date.now() - age * 1000; shell.started = started;\n' +
   '    shell.current = page === null ? null : { name: page, arg: \'\', view: {} }; } };\n})()',
@@ -563,9 +563,116 @@ function signalsView(c) {
     table: v.some(e => e.tagName === 'TABLE'), lines: v.filter(e => e.tagName === 'UL').map(e => e.className) };
 }
 
+/* Your rover's card under its head for GET /api/local-caster c.d and the status c.status: what pageParts says of it,
+ * the state line [its word's class, text], each rover's line and the values marked for a copy. */
+function roverCard(c) {
+  const root = new El('div');
+  root.append(...[ui.roverSummary(c.d, c.status)].flat(4).filter(Boolean));
+  const v = [...visible(root)];
+  const st = v.find(e => e.className === 'cstate');
+  return Object.assign(pageParts(root), { state: st ? [st.kids[0].className, st.textContent] : null,
+    rovers: root.kids.filter(k => k.tagName === 'DIV' && !k.className).map(k => k.textContent),
+    copy: v.filter(e => e.className === 'copy').map(e => e.textContent) });
+}
+
+/* Your rover's editor on the config c.cfg (c.turnOn: opened by the switch with no password stored), its fields set as
+ * c.steps say, then Save against the station's answer c.answer (default: saved). What it shows first (pageParts, the
+ * hints, the password's placeholder), then the PUT bodies, the field errors, its error box, whether it handed the
+ * answer on, whether it still counts as changed, and the toasts. */
+async function roverEdit(c) {
+  const settle = async () => {
+    for (let i = 0; i < 30; i++) await new Promise(r => setImmediate(r));
+  };
+  sent.length = 0;
+  ids.toasts = new El('div');
+  routes = (m, p, body) => c.answer || [200, { config: Object.assign({}, c.cfg, body, { password: undefined }), status: {} }];
+  let saved = null;
+  const ed = ui.roverEditor(c.cfg, { turnOn: !!c.turnOn, hostname: 'onodiy', onSaved: d => { saved = d; }, onCancel: () => {} });
+  const all = [...ed.el.walk()];
+  const inp = { mountpoint: all.find(e => e.tagName === 'INPUT' && e.attrs.maxlength === '47'),
+    username: all.find(e => e.tagName === 'INPUT' && e.attrs.maxlength === '31'),
+    password: all.find(e => e.tagName === 'INPUT' && e.attrs.type === 'password') };
+  const view = Object.assign(pageParts(ed.el), { hints: [...visible(ed.el)].filter(e => e.tagName === 'SMALL' &&
+    e.className === 'hint').map(e => e.textContent), placeholder: inp.password.getAttribute('placeholder') });
+  for (const [k, v] of c.steps || []) {
+    inp[k].value = v;
+    ed.el.fire('input');
+  }
+  ed.el.fire('submit');
+  await settle();
+  routes = null;
+  const box = all.find(e => e.attrs.role === 'alert' && (e.className || '').indexOf('msg') === 0);
+  return { view: view, puts: sent.filter(x => x.method === 'PUT').map(x => x.body), saved: !!saved, dirty: ed.dirty(),
+    errors: [...visible(ed.el)].filter(e => e.tagName === 'SMALL' && e.className === 'err').map(e => e.textContent),
+    box: box && !box.hidden ? box.textContent : null, toasts: ids.toasts.kids.map(t => t.textContent) };
+}
+
+/* The NTRIP page against GET /api/casters c.casters and GET /api/local-caster c.rover ([status, body]); a PUT to
+ * /api/local-caster answers c.put, by default the stored body with the request merged in. c.act: 'switch' clicks Your
+ * rover's switch, 'edit' its Edit. The cards' titles, Your rover's card before and after (pageParts), its class, its
+ * switch [checked, name] before and checked after, the PUT bodies, the toasts and whether the page counts as changed. */
+async function ntripRover(c) {
+  const settle = async () => {
+    for (let i = 0; i < 40; i++) await new Promise(r => setImmediate(r));
+  };
+  sent.length = 0;
+  ids.toasts = new El('div');
+  ids.modal = new El('div');
+  let lc = c.rover;
+  routes = (m, p, body) => {
+    if (p === '/api/casters') return [200, c.casters];
+    if (p === '/api/local-caster' && m === 'GET') return lc;
+    if (p === '/api/local-caster' && m === 'PUT') {
+      if (c.put) return c.put;
+      const d = JSON.parse(JSON.stringify(lc[1]));
+      Object.assign(d.config, body);
+      delete d.config.password;
+      lc = [200, d];
+      return lc;
+    }
+    return [200, {}];
+  };
+  ui.setStatus(c.status || null);
+  const el = new El('div');
+  const view = ui.ntripPage(el, '');
+  await settle();
+  const card = () => [...visible(el)].find(e => e.tagName === 'SECTION' && [...e.walk()].some(x => x.tagName === 'H2' &&
+    x.textContent === 'Your rover'));
+  const sw = () => (card() ? [...card().walk()].find(e => e.attrs.role === 'switch') : null);
+  const r = { cards: pageParts(el).cards, before: card() ? pageParts(card()) : null, cls: card() ? card().className : null,
+    sw: sw() ? [sw().getAttribute('aria-checked'), sw().getAttribute('aria-label')] : null };
+  if (c.act === 'switch') sw().fire('click');
+  if (c.act === 'edit') [...card().walk()].find(e => e.tagName === 'BUTTON' && e.textContent === 'Edit').fire('click');
+  if (c.act === 'reload') {
+    /* The page reads its data again (a settings change), GET /api/local-caster now answering c.again. */
+    lc = c.again;
+    view.reload();
+  }
+  await settle();
+  Object.assign(r, { after: card() ? pageParts(card()) : null, swAfter: sw() ? sw().getAttribute('aria-checked') : null,
+    puts: sent.filter(x => x.method === 'PUT').map(x => x.body), toasts: ids.toasts.kids.map(t => t.textContent),
+    dirty: view.dirty() });
+  view.destroy();
+  routes = null;
+  ui.setStatus(null);
+  return r;
+}
+
 const out = [];
 (async () => {
 for (const c of JSON.parse(casesJson)) {
+  if (c.fn === 'rover_card') {
+    out.push(roverCard(c));
+    continue;
+  }
+  if (c.fn === 'rover_edit') {
+    out.push(await roverEdit(c));
+    continue;
+  }
+  if (c.fn === 'ntrip_rover') {
+    out.push(await ntripRover(c));
+    continue;
+  }
   if (c.fn === 'journal_clear') {
     out.push(await journalClear(c));
     continue;
@@ -2476,4 +2583,212 @@ def test_logs_receiver_card_says_the_descriptor_once():
     assert rows["Antenna"] == "none" and rows["Antenna setup ID"] == "0" and "Receiver serial" not in rows
 
     assert "Commands the first configuration sends" in commands["subs"] and commands["lis"] == 3
+
+
+# ---- Your rover (local NTRIP): its card and editor on the NTRIP page, its line on the Status page ----
+
+def lcast(enabled: bool = True, pw: bool = True, state: str = "listening", clients: tuple = (), refused: dict | None = None,
+          errno: int | None = None, mount: str = "onodiy") -> dict:
+    """GET /api/local-caster as API.md section 10a shows it."""
+    ref = {"not_local": 0, "login": 0, "throttled": 0, "full": 0, "bad_request": 0, **(refused or {})}
+    return {"config": {"enabled": enabled, "mountpoint": mount, "username": "rover", "password_set": pw},
+            "status": {"state": state, "port": 2101, "max_clients": 2, "clients": list(clients), "sessions": len(clients),
+                       "bytes_sent": 0, "stalled": 0, "listen_errno": errno, "refused": ref}}
+
+
+ROVER_A = {"addr": "192.168.2.50", "ntrip_version": 2, "chunked": True, "connected_s": 3725, "bytes_sent": 6172000,
+           "epochs_dropped": 0, "agent": "NTRIP RTKLIB/2.4.3"}
+ROVER_B = {"addr": "fd12:3456:789a:1:2c4f:9aff:fe31:7b2d", "ntrip_version": 1, "chunked": False, "connected_s": 340,
+           "bytes_sent": 577000, "epochs_dropped": 3, "agent": None}
+NET = {"mdns_host": "onodiy", "ip": "192.168.1.50"}
+RX_OK = {"rtcm_age_ms": 180}
+ROVER_LIMITS = "At most 2 rovers at once. Only devices on your home network can connect."
+ROVER_OFF = "Off. When on, a rover on your home network gets corrections from the station at onodiy.local:2101, no internet needed."
+NB = " "
+
+
+def rover_cards(*cases) -> list[dict]:
+    return run_editor([{"fn": "rover_card", "d": d, "status": {"network": net, "receiver": rx}} for d, net, rx in cases])
+
+
+def test_rover_card_says_how_to_point_a_rover_at_the_station():
+    """Off: one line on what it does, with the address. On, always in full and without fold-outs: the state, then what to
+    type into the rover (host by name and IP, port, mountpoint, username, the password only as set or not, NTRIP
+    1.0 or 2.0), the values to copy marked as such, and the limits."""
+    off, off_nonet, on, ip_only = rover_cards((lcast(enabled=False, pw=False), NET, RX_OK), (lcast(enabled=False), {}, RX_OK),
+                                              (lcast(), NET, RX_OK), (lcast(pw=True), {"mdns_host": None, "ip": "192.168.1.50"}, RX_OK))
+    assert off["lines"] == [ROVER_OFF] and off["rows"] == [] and off["state"] is None
+    assert off_nonet["lines"] == ["Off. When on, a rover on your home network gets corrections from the station, no internet needed."]
+    assert on["state"] == ["muted", "Waiting for a rover"]
+    assert on["rows"] == [["Host", "onodiy.local or 192.168.1.50"], ["Port", "2101"], ["Mountpoint", "onodiy"],
+                          ["Username", "rover"], ["Password", "Set"], ["NTRIP version", "1.0 or 2.0"]]
+    assert on["copy"] == ["onodiy.local", "192.168.1.50", "2101", "onodiy", "rover"]
+    assert on["lines"] == [ROVER_LIMITS] and on["msgs"] == [] and on["rovers"] == []
+    assert ip_only["rows"][0] == ["Host", "192.168.1.50"]
+    for o in (off, on, ip_only):
+        assert o["details"] == 0 and "caster" not in json.dumps(o).lower() and "server" not in json.dumps(o).lower()
+
+
+def test_rover_card_states_rovers_and_refusals():
+    """The state line in each state (its colour: green with rovers, red when it cannot listen, else neutral), one line
+    per rover (address, NTRIP version, for how long, what it was sent, epochs dropped for a slow link), what was refused
+    since the start (only what happened; a throttled login counts as a wrong password), and a warning while the receiver
+    sends no corrections."""
+    two, one, error, wifi, stale, quiet, fresh = rover_cards(
+        (lcast(clients=(ROVER_A, ROVER_B), refused={"login": 1, "throttled": 1, "not_local": 1, "full": 1, "bad_request": 1}),
+         NET, RX_OK),
+        (lcast(clients=(ROVER_A,), refused={"bad_request": 2}), NET, RX_OK),
+        (lcast(state="error", errno=112), NET, RX_OK),
+        (lcast(state="wait_network"), {"mdns_host": "onodiy", "ip": None}, RX_OK),
+        (lcast(clients=(ROVER_A,)), NET, {"rtcm_age_ms": 3001}),
+        (lcast(), NET, {"rtcm_age_ms": None}),
+        (lcast(), NET, {"rtcm_age_ms": 3000}))
+    assert two["state"] == ["t-ok", "2 rovers connected"] and one["state"] == ["t-ok", "1 rover connected"]
+    assert two["rovers"] == [
+        f"192.168.2.50 · NTRIP 2.0 · for 1{NB}h 2{NB}min · 5.9{NB}MB sent",
+        f"fd12:3456:789a:1:2c4f:9aff:fe31:7b2d · NTRIP 1.0 · for 5{NB}min 40{NB}s · 563{NB}KB sent · 3 epochs dropped (slow link)"]
+    assert two["lines"] == [ROVER_LIMITS, "Refused since the station started: 2 wrong passwords, 1 from outside your network, "
+                                          "1 while full, 1 bad request."]
+    assert one["lines"][1] == "Refused since the station started: 2 bad requests."
+    assert error["state"] == ["t-bad", f"Not listening on port 2101 (error 112). Trying again every 10{NB}s."]
+    assert wifi["state"] == ["muted", "Waiting for Wi-Fi. Rovers connect over your home network, not the setup hotspot."]
+    assert wifi["rows"][0] == ["Host", "onodiy.local"]
+    no_rtcm = [["warn", "No corrections from the receiver right now: connected rovers get nothing."]]
+    assert stale["msgs"] == quiet["msgs"] == no_rtcm and fresh["msgs"] == two["msgs"] == []
+    # Just turned on, before the station's task reports: not "Off" beside a switch that is on.
+    (starting,) = rover_cards((lcast(state="off"), NET, RX_OK))
+    assert starting["state"] == ["muted", "Starting"]
+
+
+def rover_edit(cfg: dict, steps: list, turn_on: bool = False, answer: list | None = None) -> dict:
+    return run_editor([{"fn": "rover_edit", "cfg": cfg, "steps": steps, "turnOn": turn_on, "answer": answer}])[0]
+
+
+def test_rover_editor_fields_say_what_they_do_and_their_defaults():
+    """Three fields, each with what it is and its default; the password is write-only (its placeholder says a stored one
+    stays); opened by the switch with no password stored, it asks for one first and its Save turns the feature on."""
+    edit = rover_edit(lcast()["config"], [])["view"]
+    first = rover_edit(lcast(enabled=False, pw=False)["config"], [], turn_on=True)["view"]
+    for v in (edit, first):
+        assert v["fields"] == ["Mountpoint", "Username", "Password"] and v["details"] == 0
+        assert v["hints"] == ["The name your rover asks for. Default: the station's name (onodiy). Letters, digits, dots, "
+                              "hyphens or underscores.", "Default: rover.", "8 to 63 characters, no spaces. No default: you choose it."]
+        assert v["cards"] == [] and "caster" not in json.dumps(v).lower()
+    assert edit["placeholder"] == "Stored, leave empty to keep" and first["placeholder"] == ""
+    assert edit["lines"] == [] and edit["buttons"] == ["Save", "Cancel"]
+    assert first["lines"] == ["Choose a password first."] and first["buttons"] == ["Save and turn on", "Cancel"]
+
+
+def test_rover_editor_sends_the_fields_and_keeps_the_stored_password():
+    """Save sends the mountpoint and the username, the password only when one is typed (empty keeps the stored one),
+    and `enabled` only from the switch's first-time editor; a save keeps whether the feature is on."""
+    cfg = lcast()["config"]
+    kept = rover_edit(cfg, [("mountpoint", " ROVER "), ("username", "me.2")])
+    assert kept["puts"] == [{"mountpoint": "ROVER", "username": "me.2"}] and kept["saved"] and not kept["dirty"]
+    assert kept["toasts"] == ["Saved."]
+    new_pw = rover_edit(cfg, [("password", "p4ss:word!")])
+    assert new_pw["puts"] == [{"mountpoint": "onodiy", "username": "rover", "password": "p4ss:word!"}]
+    first = rover_edit(lcast(enabled=False, pw=False)["config"], [("password", "secret123")], turn_on=True)
+    assert first["puts"] == [{"mountpoint": "onodiy", "username": "rover", "password": "secret123", "enabled": True}]
+    assert first["toasts"] == ["Saved. Corrections for your rover are on."]
+
+
+def test_rover_editor_checks_the_stations_rules_and_shows_its_refusals():
+    """The station's rules are checked before anything is sent, in its words, under the field; a refusal the station
+    words goes under its field too, anything else into the editor's error box."""
+    cfg = lcast()["config"]
+    bad = rover_edit(cfg, [("mountpoint", "a/b"), ("username", ""), ("password", "with space")])
+    assert bad["puts"] == [] and bad["errors"] == ["1 to 47 letters, digits, dots, hyphens or underscores.",
+                                                   "1 to 31 letters, digits, dots, hyphens or underscores.",
+                                                   "8 to 63 characters, letters, digits and symbols, no spaces."]
+    assert rover_edit(cfg, [("password", "short")])["errors"] == ["8 to 63 characters, letters, digits and symbols, no spaces."]
+    assert rover_edit(cfg, [("password", "x" * 64)])["errors"] != []
+    none = rover_edit(lcast(enabled=False, pw=False)["config"], [], turn_on=True)
+    assert none["puts"] == [] and none["errors"] == ["Choose a password."]
+    # Off with no password stored, a plain save needs none.
+    assert rover_edit(lcast(enabled=False, pw=False)["config"], [])["errors"] == []
+    refused = rover_edit(lcast(enabled=False, pw=False)["config"], [("password", "secret123")], turn_on=True,
+                         answer=[400, {"error": {"code": "invalid_field", "field": "password", "message": "needed to turn this on"}}])
+    assert refused["errors"] == ["Needed to turn this on."] and not refused["saved"] and refused["dirty"]
+    busy = rover_edit(cfg, [], answer=[409, {"error": {"code": "settings_unavailable", "message": "x"}}])
+    assert busy["box"] == "The settings storage is unavailable this boot, so nothing can be saved." and busy["errors"] == []
+
+
+PAGE_CASTERS = {"max_slots": 2, "warnings": [], "onocoy_preset": {"host": "servers.onocoy.com", "port": 2101},
+                "slots": [{"slot": 0, "config": stored("rtk2go.com", "polite", name="RTK2go"), "status": {"state": "streaming"}},
+                          {"slot": 1, "config": stored("", "standard", name="", enabled=False, password_set=False),
+                           "status": {"state": "disabled"}}]}
+PAGE_STATUS = st_status(network={"online": True, "ip": "192.168.1.50", "mdns_host": "onodiy"},
+                        casters=[st_caster(0, "RTK2go", "streaming")])
+
+
+def ntrip_rover(rover: list, act: str | None = None, put: list | None = None, again: list | None = None) -> dict:
+    return run_editor([{"fn": "ntrip_rover", "casters": PAGE_CASTERS, "rover": rover, "act": act, "put": put,
+                        "again": again, "status": PAGE_STATUS}])[0]
+
+
+def test_rover_card_on_the_ntrip_page():
+    """After the servers and the add card, the whole row: "Your rover" with Edit and its switch; hidden in safe mode
+    (no config) and on a station without the endpoint, the servers as before."""
+    on = ntrip_rover([200, lcast()])
+    assert on["cards"] == ["RTK2go", None, "Your rover"] and on["cls"] == "card wide"
+    assert on["sw"] == ["true", "Corrections for your rover"] and on["before"]["buttons"] == ["Edit", ""]
+    assert on["before"]["rows"][2] == ["Mountpoint", "onodiy"]
+    safe = ntrip_rover([200, {"config": None, "status": lcast(enabled=False)["status"]}])
+    old = ntrip_rover([404, {"error": {"code": "not_found"}}])
+    for o in (safe, old):
+        assert o["before"] is None and o["cards"] == ["RTK2go", None], o
+    # Read again: a failed read keeps the card as it was; the config changed elsewhere redraws it.
+    blip = ntrip_rover([200, lcast()], act="reload", again=[500, {"error": {"code": "internal"}}])
+    assert blip["after"] == blip["before"]
+    changed = ntrip_rover([200, lcast()], act="reload", again=[200, lcast(enabled=False)])
+    assert changed["after"]["lines"] == [ROVER_OFF] and changed["swAfter"] == "false"
+
+
+def test_rover_switch_saves_at_once_and_asks_for_a_password_first():
+    """The switch sends {"enabled": ...} alone and says so; turning it on with no password stored sends nothing and opens
+    the editor, which asks for one first; a station that still refuses opens it too."""
+    off = ntrip_rover([200, lcast()], act="switch")
+    assert off["puts"] == [{"enabled": False}] and off["swAfter"] == "false"
+    assert off["after"]["lines"] == [ROVER_OFF] and off["toasts"] == ["Corrections for your rover are off."]
+    on = ntrip_rover([200, lcast(enabled=False)], act="switch")
+    assert on["puts"] == [{"enabled": True}] and on["swAfter"] == "true"
+    assert on["after"]["rows"][0] == ["Host", "onodiy.local or 192.168.1.50"] and on["toasts"] == ["Corrections for your rover are on."]
+    first = ntrip_rover([200, lcast(enabled=False, pw=False)], act="switch")
+    assert first["puts"] == [] and first["after"]["lines"] == ["Choose a password first."]
+    assert first["after"]["fields"] == ["Mountpoint", "Username", "Password"] and not first["dirty"]
+    refused = ntrip_rover([200, lcast(enabled=False)], act="switch",
+                          put=[400, {"error": {"code": "invalid_field", "field": "password", "message": "needed to turn this on"}}])
+    assert refused["puts"] == [{"enabled": True}] and refused["after"]["lines"] == ["Choose a password first."]
+    edit = ntrip_rover([200, lcast()], act="edit")
+    assert edit["after"]["fields"] == ["Mountpoint", "Username", "Password"] and edit["after"]["lines"] == []
+
+
+def test_status_ntrip_card_says_your_rover_in_one_line():
+    """While Your rover is on, one line after the servers, built like theirs: "1 connected" in green, else its state in
+    a word (not listening in red); nothing while it is off or in safe mode, and never in the public form."""
+    lc = lambda state="listening", clients=0, enabled=True: {"enabled": enabled, "state": state, "clients": clients}
+    out = dashboards(over(BASE, local_caster=lc(clients=1)), over(BASE, local_caster=lc(clients=2)),
+                     over(BASE, local_caster=lc()), over(BASE, local_caster=lc("wait_network")),
+                     over(BASE, local_caster=lc("error")), over(BASE, local_caster=lc("off", enabled=False)),
+                     over(MATRIX["nocasters"], local_caster=lc(clients=1)),
+                     over(MATRIX["safe"], local_caster=lc("off", enabled=False)), over(BASE, local_caster=lc("off")))
+    cas = [o["cards"]["NTRIP"] for o in out]
+    assert cas[8]["lines"][2:] == ["Your rover · starting"]
+    servers = ["Onocoy · Streaming", f"RTK2go · Streaming · 99.97{NB}% today"]
+    assert [c["lines"][2:] for c in cas[:5]] == [["Your rover · 1 connected"], ["Your rover · 2 connected"],
+                                                 ["Your rover · waiting for a rover"], ["Your rover · waiting for Wi-Fi"],
+                                                 ["Your rover · not listening"]]
+    assert [c["lineTones"][2:] for c in cas[:5]] == [["t-ok"], ["t-ok"], ["muted"], ["muted"], ["t-bad"]]
+    assert cas[0]["lines"][:2] == servers and cas[5]["lines"] == servers
+    # No server yet: the note stays, the rover's line under it.
+    assert cas[6]["notes"] == [["No servers yet.", "muted"]] and cas[6]["lines"] == ["Your rover · 1 connected"]
+    assert cas[7]["lines"] == [] and cas[7]["notes"] == [["Shows after safe mode.", "muted"]]
+    for o in out:
+        assert o["order"] == CARDS and o["cards"]["NTRIP"]["buttons"] == 0
+    (pub,) = dashboards({"api": 1, "public": True, "device": {"hostname": "onodiy"}, "safe_mode": {"active": False},
+                         "receiver": {"state": "streaming", "best_bands": 4}, "health": {"level": "ok"},
+                         "casters": [{"slot": 0, "name": "Onocoy", "state": "streaming"}],
+                         "local_caster": lc(clients=1)}, admin=False)
+    assert pub["cards"]["NTRIP"]["lines"] == ["Onocoy · Streaming"]
 
