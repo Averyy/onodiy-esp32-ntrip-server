@@ -5,10 +5,11 @@ Receiver output captured by other people, with independent decodes of it
 against frames we built ourselves. The host tests (`test/host`, Unity) and
 the bench tool tests (`tools/bench`, pytest) read the same files.
 
-Nothing here comes from our own board yet. Every file is from a public
-source with a permissive license, listed below with the exact upstream
-commit; the license texts are in [`LICENSES/`](LICENSES). About 300 KB of
-data and 370 KB of oracles.
+One file comes from our own board: `unicore/um982_build25164_replies.json`,
+receiver replies recorded on the bench (MIT, this project). Every other file
+is from a public source with a permissive license, listed below with the
+exact upstream commit; the license texts are in [`LICENSES/`](LICENSES).
+About 300 KB of data and 370 KB of oracles.
 
 ## Files
 

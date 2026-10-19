@@ -9,10 +9,10 @@ All code is original and MIT-licensed.
 
 onodiy is an independent project, not affiliated with or endorsed by Onocoy.
 
-> Early development. The firmware scaffold builds (component structure, settings, boot
-> accounting and safe mode, partition layout, CI, host unit tests), but most subsystems
-> are still stubs and nothing has run on hardware yet. Don't flash it to a station you
-> rely on.
+> Early development. On the board with an antenna, the automatic receiver setup, the
+> survey-in, the RTCM output and the local NTRIP server work, and so does installing an
+> app image by file upload. Streaming to Onocoy has not been tested live yet, and
+> updates from GitHub Releases are untested. Don't flash it to a station you rely on.
 
 ## Why
 
@@ -110,15 +110,16 @@ the receiver, and opening the receiver's USB-C does not reset it either.
   mode, COM1/COM2/COM3 at 115200, and COM1 sending a position line and a status report
   at 1 Hz. This build accepts the signal groups `4 5`, `3 6`, `5 0` and `7 0`; `3 6`
   (Galileo E6) and `7 0` (BeiDou B2a) each give 4 bands on one constellation, which
-  Onocoy rewards most. Checked without an antenna so far; tracking with sky is still
-  to be confirmed.
+  Onocoy rewards most. With an antenna, this build tracks Galileo E6 in `3 6`.
 
-## Features (planned)
+## Features
 
 1. **Multi-caster NTRIP server** — fan RTCM3 to Onocoy and any other casters from one
-   shared ring buffer.
+   shared ring buffer. *Tested in the emulator against local casters; not yet tested
+   live with Onocoy.*
 2. **UM982 auto-config** — base mode, the signal group needed for 4-band tracking, and
-   the right RTCM messages, applied on first boot.
+   the right RTCM messages, applied on first boot. *Works on the board: the setup, a
+   600 s survey-in, the position lock, and every listed RTCM message at 1 Hz.*
 3. **UM982 firmware update over UART (XMODEM)** from the ESP32 — no Windows or vendor
    tool needed. Lower priority now: the board ships with a newer receiver build than
    the package in this repository, so the flasher stays in bench builds until a newer
@@ -128,14 +129,18 @@ the receiver, and opening the receiver's USB-C does not reset it either.
    (or upload a file). The `.pkg` lives in [`firmware/um982/`](firmware/um982/). Each
    release carries a manifest listing every file with its size and SHA-256; the station
    downloads only from this repository's GitHub releases over verified HTTPS and uses a
-   file only if it matches (see [Releases and updates](#releases-and-updates)).
-5. **Web UI** — Wi-Fi setup, NTRIP configuration, live status, firmware updates, and a
-   signal/satellite view with a sky map (the receiver sends the satellites' positions every
-   10 s; "Sky map" in Receiver settings turns that off).
+   file only if it matches (see [Releases and updates](#releases-and-updates)). *Installing
+   an app image by file upload works on the board, trial boot included; updates from
+   GitHub Releases are untested.*
+5. **Web UI** — Wi-Fi setup, NTRIP configuration, live status (the Status page's Sky
+   card: a small sky plot and the satellites per constellation and per band), firmware
+   updates, and a signal/satellite view with a sky map (the receiver sends the
+   satellites' positions every 10 s; "Sky map" in Receiver settings turns that off).
 6. **Health monitoring** — GNSS watchdog, auto-recovery, and data-loss counters.
-7. **Local server** *(in progress: not yet tested with a real rover)* — a local NTRIP
-   caster for your own rover on the home network (NTRIP 1.0 and 2.0, one mountpoint, at
-   most 2 rovers, local addresses only); see [Local server](#local-server-local-ntrip).
+7. **Local server** *(streams to NTRIP 1.0 and 2.0 clients on the bench; not yet tried
+   with a real rover app)* — a local NTRIP caster for your own rover on the home
+   network (NTRIP 1.0 and 2.0, one mountpoint, at most 2 rovers, local addresses only);
+   see [Local server](#local-server-local-ntrip).
 
 ## Repository layout
 
@@ -145,7 +150,7 @@ the receiver, and opening the receiver's USB-C does not reset it either.
 | `test/host/` | Host unit tests (ESP-IDF linux target, Unity) |
 | `test/fixtures/` | Real-world RTCM streams, a receiver NMEA capture, receiver binary logs and reply samples with independent decodes, used by the host and bench tests (see its README) |
 | `firmware/um982/` | Unicore UM982 receiver firmware the device flashes and offers as a user-confirmed update (see its README) |
-| `gnss-splitter/` | KiCad/EasyEDA PCB for an optional GNSS antenna splitter |
+| `gnss-splitter/` | EasyEDA PCB for an optional GNSS antenna splitter |
 | `tools/` | Release tooling (`release_manifest.py` writes a release's `manifest.json`) |
 | `tools/ci/` | CI's host-test and QEMU jobs run locally in their pinned Linux container (see Building) |
 | `tools/bench/` | Host-side bench tools for the board: port finder, captures of both serial ports, receiver queries, RTCM inspection, station API dumps, and the receiver boot menu check over its USB port (see its README) |
@@ -202,12 +207,12 @@ tools/ci/qemu_linux.sh                    # both jobs; --job smoke or --job benc
 ```
 
 The container gets the repository's history too (the jobs name the build with `git
-describe`) and, by default, the 2 CPUs of GitHub's runner for a private repository
-(`--cpus`), since the QEMU checks depend on timing. What a job uploads lands in
-`build-ci/<job>/`, with `steps.log` holding every step's output. CI's runners are
-amd64 (the default `--platform`); on Apple silicon Docker emulates them, and a run
-of both jobs took 39 minutes there, 21 natively (`--platform linux/arm64` is
-native and faster, but not what CI runs).
+describe`) and, by default, 2 CPUs (`--cpus`), since the QEMU checks depend on timing:
+the fewest a GitHub-hosted standard Linux runner has (2 for a private repository, 4 for
+a public one). What a job uploads lands in `build-ci/<job>/`, with `steps.log` holding
+every step's output. CI's runners are amd64 (the default `--platform`); on Apple
+silicon Docker emulates them, and a run of both jobs took 39 minutes there, 21
+natively (`--platform linux/arm64` is native and faster, but not what CI runs).
 
 Notes:
 
@@ -333,8 +338,7 @@ manifest on its way from GitHub. Certificate revocation is not checked, and the 
 bundle is fixed in each image, so a root certificate distrusted later stays trusted
 until a newer firmware is installed. Whatever CI builds from a tag is what stations
 are offered, so the CI build image and actions are part of the trust: the build image
-is pinned by digest, the actions only by version tag so far (see the note at the top
-of the workflow).
+is pinned by digest and each action by commit SHA (its version tag in a comment).
 
 **Forks.** Set `CONFIG_FW_UPDATE_GITHUB_REPO` to your repository; the release job
 refuses to publish a build that reads releases from another one. Signing is optional:
@@ -365,11 +369,11 @@ Manifest format and rules: `components/fw_update/priv_include/manifest.h`.
    The last screen shows whether Onocoy accepts the login and what to do next in
    the Onocoy console. More servers can be added on the NTRIP page.
 
-For the Onocoy step, add an NTRIP credential in the Onocoy console (Reference
-Stations, NTRIP Credentials): you choose its password and the console generates
-the username. The station asks for those two and a mountpoint, which can be any
-name (Onocoy shows it on your dashboard only), and connects to
-`servers.onocoy.com:2101` with NTRIP 2.0, as
+The Onocoy steps have not been tested live yet. For the Onocoy step, add an NTRIP
+credential in the Onocoy console (Reference Stations, NTRIP Credentials): you choose
+its password and the console generates the username. The station asks for those two
+and a mountpoint, which can be any name (Onocoy shows it on your dashboard only), and
+connects to `servers.onocoy.com:2101` with NTRIP 2.0, as
 [Onocoy's guide](https://docs.onocoy.com/documentation/3.-become-a-miner/3.-connect-your-station-to-onocoy)
 describes. The receiver sends the messages that guide lists: 1005, 1033, MSM7
 1077, 1087, 1097, 1117, 1127, 1137 and 1230, every second.
@@ -383,11 +387,11 @@ station name. Settings shows both as links.
 ## Local server (local NTRIP)
 
 > [!WARNING]
-> **In progress: not yet tested with a real rover.** So far it has been tested in the
-> emulator with recorded corrections and standard NTRIP clients (pygnssutils as an
-> NTRIP 1.0 and 2.0 rover sending GGA, and curl), and on the board for logins and limits
-> (no antenna yet, so no corrections flowed there). If you try it with a rover, please
-> open an issue with what worked and what didn't.
+> **Not yet tried with a real rover app.** So far it has been tested in the emulator
+> with recorded corrections and standard NTRIP clients (pygnssutils as an NTRIP 1.0 and
+> 2.0 rover sending GGA, and curl), and on the board with an antenna, streaming
+> corrections to NTRIP 1.0 and 2.0 clients on the local network. If you try it with a
+> rover, please open an issue with what worked and what didn't.
 
 The station can send corrections straight to your own rover on your home network,
 with no internet in between. On the **NTRIP** page, turn on **Local server** and choose
@@ -409,7 +413,9 @@ port 2101 anyway.
 This is for your own rover only. Onocoy's terms for its loopback stream allow
 internal use only, so do not share this stream with others.
 
-## Recovery (planned behaviour)
+## Recovery
+
+These have not been confirmed on the board yet.
 
 - **Forgot the admin password:** hold the **BOOT** button (printed `BOT`, next to the
   `ESP32S3` USB-C) for 10 s while the station

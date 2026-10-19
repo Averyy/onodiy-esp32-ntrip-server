@@ -3,7 +3,7 @@
 Host-side scripts for bench work on the UM982 + ESP32-S3 board: find the
 ports, capture both serial ports with timestamps, query the receiver from
 the PC, decode RTCM captures, and pull diagnostics from the station
-firmware's web API. The aim is that bench day is "plug in and iterate".
+firmware's web API. The aim is that bench work is "plug in and iterate".
 
 Everything is a [uv](https://docs.astral.sh/uv/) project. Run the scripts
 from this directory:
@@ -362,7 +362,7 @@ RSSI, health, alerts), marks reboots, rides out the station being
 unreachable, and with `--logs` tails the device log ring. The password is
 never written to the logs.
 
-## Bench day
+## Bench workflow
 
 0. **Unbox, antenna on the master SMA with the board unpowered**, then plug
    both USB-C ports into USB-A ports (A-to-C data cables; C-to-C does not
@@ -383,7 +383,7 @@ never written to the logs.
    its `boot-menu.txt`.
 2. **Build and flash our firmware** from the repository root:
    ```sh
-   . ~/esp/esp-idf-v6.1/export.sh
+   . $IDF_PATH/export.sh            # your ESP-IDF v6.1 checkout
    idf.py set-target esp32s3        # once per checkout
    idf.py build
    idf.py -p <console port> flash   # the CH343P port; stop any capture on it first

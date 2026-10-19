@@ -35,7 +35,8 @@ firmware line via `CONFIG SIGNALGROUP 3 6`, according to Unicore's signal-group
 tables. Build 18975 itself has not run on our hardware. On the shipped Build 25164,
 `CONFIG SIGNALGROUP 3 6` and `7 0` are accepted, and the receiver's `ANT1GROUPA`
 query lists Galileo E6 in group `3 6` and BeiDou B2a in group `7 0` (checked without
-an antenna; tracking with sky is still to be confirmed).
+an antenna). With an antenna, Galileo E6 tracking in group `3 6` is confirmed on
+Build 25164.
 
 ## Package format
 

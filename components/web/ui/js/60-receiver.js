@@ -991,7 +991,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
   const refused = [h('div', { class: 'stack', hidden: true }), h('div', { class: 'stack', hidden: true })];
   /* Hidden while there is no comparison to go to (manual setup). */
   const cmpLink = h('button', { type: 'button', class: 'linkbtn', onclick: onCompare }, 'Not sure? Compare two groups');
-  /* Advanced: closed until opened (the one fold here, as the owner asked), as the page last left it across rebuilds. */
+  /* Advanced: closed until opened (the only fold on this page), as the page last left it across rebuilds. */
   const advanced = h('details', { class: 'pgroup more', ontoggle: () => {
     folds.advanced = advanced.open;
   } }, h('summary', null, 'Advanced'),

@@ -2514,7 +2514,7 @@ def test_receiver_pages_show_everything_without_fold_outs():
     """The Receiver page, its old sky address and Receiver settings, built whole in the states the other tests build
     (streaming with a locked position and four bands, no antenna, a maintenance resumed with nothing kept, the held
     first configuration, no receiver, a comparison running and one waiting for a choice): no <details> anywhere but
-    Receiver settings' Advanced, the one fold the owner asked for (closed until opened), nor in the held
+    Receiver settings' Advanced, the only fold kept (closed until opened), nor in the held
     configuration's dialog. What the folds held is in plain view where it matters: the position in its own card,
     the messages in the Receiver card (once any arrived), the sky map and every satellite while the profile sends
     their positions (no window to open, no button), the profile's correction messages and the Sky map box, the

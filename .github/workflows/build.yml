@@ -38,8 +38,8 @@ concurrency:
 # that only bench builds compile cannot rot; nothing uploaded), host-tests,
 # bench-tools (pytest), qemu-smoke, qemu-bench-console (the bench overlay
 # run in QEMU: its console answers), and release (tags only).
-# The actions are still referenced by version tag; pin each to a full commit
-# SHA (with the tag as a comment) before the repository goes public.
+# Every action is pinned to a full commit SHA, with its version tag in a
+# comment; to move one, look up the new tag's commit and change both.
 
 jobs:
   firmware:

@@ -1508,7 +1508,7 @@ def test_header_says_the_station_state_in_a_word_in_the_top_cards_colour():
         (dict(health={"level": "failed"}, alerts=[{"id": "no_satellites", "source": "health"}], casters=wait),
          ("no_satellites", "bad", "Not streaming")),
         (dict(health=recovering, alerts=[{"id": "no_rtcm", "source": "health"}], casters=wait), ("no_rtcm", "warn", "Recovering")),
-        # The owner's board without its antenna, receiver setup "Manual".
+        # A board without its antenna, receiver setup "Manual".
         (dict(health={"level": "degraded", "recovery_mode": "alerts_only"}, alerts=[{"id": "no_rtcm", "source": "health"}],
               casters=wait), ("no_rtcm", "bad", "Not streaming")),
         (dict(casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate")]), ("stopped", "bad", "Server stopped")),

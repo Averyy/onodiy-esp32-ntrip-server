@@ -110,9 +110,10 @@ class SocketSerial:
 
 
 def versiona_line(build: int) -> str:
-    body = (f'"UM982","R4.10Build{build}","HRPT00-S10C-P","2310415000012-LR23A2225208904",'
-            f'"ff2740966a10124c","2024/08/08"')
-    line = f"#VERSIONA,79,GPS,FINE,2326,378237000,{build},0,18,889;{body}"
+    """A made-up version log in the manual's layout (made-up P/N, serial, chip ID and date)."""
+    body = (f'"UM982","R4.10Build{build}","HRPT00-S10C-P","1234567890123-XX00A0000000001",'
+            f'"0011223344556677","2025/01/02"')
+    line = f"#VERSIONA,80,GPS,FINE,2400,100000000,{build},0,18,12;{body}"
     return f"{line}*{crc32_unicore(line[1:].encode()):08x}"
 
 

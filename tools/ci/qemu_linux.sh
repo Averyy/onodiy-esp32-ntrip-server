@@ -34,10 +34,10 @@ lists every compiler warning or error in the project's own sources.
   --platform P      linux/amd64 (default: CI's runners; emulated on Apple
                     silicon, so slower) or linux/arm64 (native there; CI never
                     runs it)
-  --cpus N          CPUs for the container (default 2: GitHub's standard
-                    Linux runner for a private repository has 2, for a
-                    public one 4; 0 = all Docker has). The QEMU checks are
-                    timing-sensitive, so CI's CPU count is the default
+  --cpus N          CPUs for the container (default 2, the fewest a GitHub
+                    standard Linux runner has: 2 for a private repository,
+                    4 for a public one; 0 = all Docker has). The QEMU checks
+                    are timing-sensitive, so the default is the smaller runner
   --out DIR         where each job's uploads land, in DIR/<job>/ (default
                     build-ci/; emptied first)
   --allow-warnings  pass with compiler warnings in the project's own sources
@@ -55,7 +55,7 @@ CI_SCRIPT=qemu_linux.sh
 platform=linux/amd64
 which=all
 out="$ci_root/build-ci"
-cpus=2
+cpus=2  # the smaller GitHub runner (private repositories); public ones have 4
 CI_ALLOW_WARNINGS=0
 while [ $# -gt 0 ]; do
     case "$1" in

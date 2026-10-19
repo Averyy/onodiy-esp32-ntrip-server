@@ -140,12 +140,14 @@ def test_data_matchers():
 
 
 def test_parse_versiona_body_rule():
-    body = '"UM982","R4.10Build15434","HRPT00-S10C-P","2310415000012-LR23A2225208904","ff2740966a10124c","2024/08/08"'
-    line = "#VERSIONA,79,GPS,FINE,2326,378237000,15434,0,18,889;" + body
+    # A made-up line in the manual's layout (made-up P/N, serial, chip ID and date).
+    body = '"UM982","R4.10Build12345","HRPT00-S10C-P","1234567890123-XX00A0000000001","0011223344556677","2025/01/02"'
+    line = "#VERSIONA,80,GPS,FINE,2400,100000000,12345,0,18,12;" + body
     v = parse_versiona(f"{line}*{crc32_unicore(line[1:].encode()):08x}")
-    assert v["model"] == "UM982" and v["build"] == 15434 and v["firmware"] == "R4.10Build15434"
-    assert v["pn"] == "2310415000012" and v["serial"] == "LR23A2225208904"
-    assert v["compile_date"] == "2024/08/08" and v["header_fields"] == 10
+    assert v["model"] == "UM982" and v["build"] == 12345 and v["firmware"] == "R4.10Build12345"
+    assert v["pn"] == "1234567890123" and v["serial"] == "XX00A0000000001"
+    assert v["efuse_id"] == "0011223344556677"
+    assert v["compile_date"] == "2025/01/02" and v["header_fields"] == 10
 
 
 def test_parse_config_and_signal_group():

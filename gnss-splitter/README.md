@@ -2,9 +2,9 @@
 
 ![GNSS Splitter 3D render](gnss-splitter-3d.png)
 
-Budget active 1-to-2 GNSS antenna splitter PCB. Shares one antenna between two receivers while blocking DC bias voltage on one output so the receivers don't fight over antenna power. ~C$15 per board fully assembled from JLCPCB (5 board minimum), compared to commercial GNSS splitters at US$75+ that perform the same for residential use cases. If you don't want to order 5, reach out as I have extras on hand.
+Budget active 1-to-2 GNSS antenna splitter PCB. Shares one antenna between two receivers while blocking DC bias voltage on one output so the receivers don't fight over antenna power. ~C$15 per board fully assembled from JLCPCB (5 board minimum), compared to commercial GNSS splitters at US$75+ that perform the same for residential use cases. If you don't want to order 5, ask in [GitHub Issues](https://github.com/Averyy/onodiy-esp32-ntrip-server/issues): I have extras on hand.
 
-Designed in EasyEDA (rev 1.0, Jan 2025). Running full time since June 2025 splitting between a GEODNET miner and an Onocoy station with full rewards and signal on both. Pair with short [SMA patch cables](https://www.aliexpress.com/item/1005002380816726.html) to keep things tidy.
+Designed in EasyEDA (rev 1.0, Jan 2025). Pair with short [SMA patch cables](https://www.aliexpress.com/item/1005002380816726.html) to keep things tidy.
 
 **Important:** This is a bare PCB with exposed SMA connectors. Wrap it in a non-conductive case or electrical tape to prevent shorts and reduce interference. Don't let it rest on metal surfaces.
 
@@ -55,6 +55,12 @@ Share one multi-band GNSS antenna between:
 - An Onocoy station (DC-BLOCK port, gets RF only, no DC conflict)
 
 Or any two GNSS receivers that need to share an antenna without both trying to power it.
+
+GEODNET advises against splitters because they can cause interference, and onocoy flags two of its stations that share one antenna (see [`reference/antenna-specs.md`](../reference/antenna-specs.md)).
+
+## Daisy-chaining
+
+To feed more than two receivers, connect the second splitter's ANT input to the first splitter's DC-BLOCK port. Keep the first splitter's DC-PASS port for a receiver: DC-PASS is the path that carries that receiver's bias power up to the antenna, and without a receiver on it the antenna gets no power.
 
 ## Notes
 

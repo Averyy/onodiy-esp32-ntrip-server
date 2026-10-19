@@ -142,13 +142,14 @@ def test_checksum_rules():
     assert check_text(unicore_line("CONFIG,COM1,CONFIG COM1 115200")) == "unicore"
     assert check_text("$command,CONFIG,response: OK*00") == "bad"
     assert check_text("no checksum here") == "none"
-    # Published examples from the public Unicore N4 command manual:
-    # #MODE uses a 2-hex XOR including '#'; #VERSIONA a CRC-32 over the bytes after '#'.
-    assert check_text("#MODE,81,GPS,FINE,2230,547967000,0,0,18,518;MODE ROVER SURVEY,*1B") == "unicore"
-    versiona = ('#VERSIONA,79,GPS,FINE,2326,378237000,15434,0,18,889;"UM982","R4.10Build15434",'
-                '"HRPT00-S10C-P","2310415000012-LR23A2225208904","ff2740966a10124c","2024/08/08"*769fd54f')
+    # Made-up lines in the layouts of the Unicore N4 command manual (made-up P/N, serial, chip ID
+    # and date): #MODE uses a 2-hex XOR including '#'; #VERSIONA a CRC-32 over the bytes after '#'
+    # (computed with zlib: crc32(data, 0xFFFFFFFF) ^ 0xFFFFFFFF).
+    assert check_text("#MODE,80,GPS,FINE,2400,100000000,0,0,18,12;MODE ROVER SURVEY,*2F") == "unicore"
+    versiona = ('#VERSIONA,80,GPS,FINE,2400,100000000,12345,0,18,12;"UM982","R4.10Build12345",'
+                '"HRPT00-S10C-P","1234567890123-XX00A0000000001","0011223344556677","2025/01/02"*fcd153ad')
     assert check_text(versiona) == "crc32"
-    assert check_text(versiona.replace("*769fd54f", "*769fd54e")) == "bad"
+    assert check_text(versiona.replace("*fcd153ad", "*fcd153ac")) == "bad"
 
 
 def test_unicore_binary_log_with_valid_crc():
