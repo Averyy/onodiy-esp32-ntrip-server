@@ -376,16 +376,16 @@ const fmt = {
     if (s === null || s === undefined || isNaN(s)) return DASH;
     s = Math.max(0, Math.round(s));
     const d = Math.floor(s / 86400), hh = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
-    if (d) return d + NB + 'd' + (hh ? ' ' + hh + NB + 'h' : '');
-    if (hh) return hh + NB + 'h' + (m ? ' ' + m + NB + 'min' : '');
-    if (m) return m + NB + 'min' + (ss ? ' ' + ss + NB + 's' : '');
-    return ss + NB + 's';
+    if (d) return d + 'd' + (hh ? ' ' + hh + 'h' : '');
+    if (hh) return hh + 'h' + (m ? ' ' + m + 'min' : '');
+    if (m) return m + 'min' + (ss ? ' ' + ss + 's' : '');
+    return ss + 's';
   },
   /** Age or latency in milliseconds. */
   ms(v) {
     if (v === null || v === undefined || isNaN(v)) return DASH;
-    if (v < 1000) return Math.round(v) + NB + 'ms';
-    if (v < 60000) return (v / 1000).toFixed(v < 10000 ? 1 : 0) + NB + 's';
+    if (v < 1000) return Math.round(v) + 'ms';
+    if (v < 60000) return (v / 1000).toFixed(v < 10000 ? 1 : 0) + 's';
     return fmt.dur(v / 1000);
   },
   bytes(b) {

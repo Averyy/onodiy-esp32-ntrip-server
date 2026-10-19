@@ -187,9 +187,28 @@ function checkFailure(u) {
 }
 
 /** "2 h ago": the age of an update check in whole minutes, hours or days. */
+/* "On trial, 23h 59min left: confirming the start (15s)." The whole trial's time left, then the stage, with its own
+ * time while another stage follows it. */
+const TRIAL_NOW = { confirming: 'confirming the start', verifying: 'verifying it works as before', watching: 'watching for crashes' };
+function trialText(t) {
+  const end = t.ends_in_s || t.left_s;
+  const own = t.stage !== 'watching' && t.left_s && t.left_s !== end ? ' (' + fmt.dur(t.left_s) + ')' : '';
+  return 'On trial' + (end ? ', ' + fmt.dur(end) + ' left' : '') + ': ' + (TRIAL_NOW[t.stage] || t.stage) + own + '.';
+}
+
+/* The receiver's line when nothing is offered, against the latest release's package for its model (g: u.gnss, app: u.app). */
+function gnssReleaseText(g, app) {
+  if (app.dev_build) return 'Development build: no release offers.';
+  if (!app.latest) return 'No release information yet.';
+  if (!g.release) return 'The latest release has no firmware for this receiver.';
+  if (!g.running_build || !g.release_build) return 'The latest release has ' + fwText(g.release, g.release_build) + '.';
+  return g.running_build > g.release_build ? 'Up to date: newer than ' + fwText(g.release, g.release_build) + ' in the latest release.' :
+    'Up to date.';
+}
+
 function checkedAgo(unix) {
   const s = Date.now() / 1000 - unix;
-  return s < 90 ? 'just now' : s < 5400 ? Math.round(s / 60) + NB + 'min ago' : s < 172800 ? Math.round(s / 3600) + NB + 'h ago' :
+  return s < 90 ? 'just now' : s < 5400 ? Math.round(s / 60) + 'min ago' : s < 172800 ? Math.round(s / 3600) + 'h ago' :
     Math.round(s / 86400) + NB + 'days ago';
 }
 
@@ -357,7 +376,7 @@ const updatesPart = {
       } else {
         text = a.dev_build ? 'Development build: no release offers.' : a.latest ? 'Up to date.' : 'No release information yet.';
       }
-      if (trial.stage && trial.stage !== 'none') text += ' On trial' + (trial.left_s ? ', ' + fmt.dur(trial.left_s) + ' left' : '') + '.';
+      if (trial.stage && trial.stage !== 'none') text += ' ' + trialText(trial);
       appMain = !!b && b.classList.contains('primary');
       mount(appBox, settingRow('App ' + (a.running || ''), text, b),
         lr && ['app_update', 'app_upload', 'rollback'].indexOf(lr.job) >= 0 && lr.result !== 'ok' ?
@@ -411,7 +430,7 @@ const updatesPart = {
         settingRow('Receiver ' + (g.running ? fwText(g.running, g.running_build) : ''),
           g.available ? fwText(g.latest, g.latest_build) + ' is available.' + (g.flash_available ? '' : ' This build can only download and check it.') :
             !g.running ? (((S.status || {}).receiver || {}).rx_maintenance ? NOT_CHECKED + '.' : 'Its firmware shows once the station finds it.') :
-            g.latest ? 'Up to date.' : 'No release information yet.', upd),
+            gnssReleaseText(g, u.app || {}), upd),
         blocked && g.available ? msg('warn', 'Not possible right now: ' + lbl(L.gnssBlock, g.blocked).toLowerCase() +
           (g.blocked_left_s ? ' (about ' + fmt.dur(g.blocked_left_s) + ' left).' : '.')) : null,
         rflow ? receiverSteps(rflow.state, rflow.upload, !g.flash_available) : null,
@@ -443,7 +462,7 @@ const updatesPart = {
       /* The receiver row says when its firmware is not checked during maintenance. */
       if (was !== null && u && (was === 'off') !== (key === 'off')) renderGnss();
       if (on) {
-        const more = btn('Add 30 min', async () => {
+        const more = btn('Add 30min', async () => {
           const x = await act(more, () => api('POST', '/api/gnss/maintenance', { duration_s: 1800 }), maintErr);
           if (x !== undefined) toast('Receiver maintenance: ' + fmt.dur(x.left_s) + ' left.', 'ok');
         });

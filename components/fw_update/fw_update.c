@@ -38,6 +38,7 @@ fw_ctx_t g_fw;
 #define HUB_FED_MS       5000u
 #define CHECK_INTERVAL_S ((uint32_t)CONFIG_FW_UPDATE_CHECK_INTERVAL_H * 3600u)
 #define MANIFEST_CAP     ((size_t)CONFIG_FW_UPDATE_MANIFEST_MAX_KB * 1024u)
+#define MANIFEST_KEEP    4000u   /* a larger manifest (with its repository) is not kept over a restart */
 /* A wall clock before this (2026-01-01) is not a trusted one. */
 #define MIN_TRUSTED_UNIX 1767225600LL
 
@@ -209,6 +210,63 @@ static void log_banner(void)
     }
 }
 
+/* The accepted manifest in NVS (ota/manifest): the repository it came from, a NUL, then the body as fetched. */
+static void save_manifest(const char *repo, const char *body, size_t len)
+{
+    size_t rl = strlen(repo) + 1u;
+    if (len > MANIFEST_KEEP - rl) {
+        ESP_LOGW(TAG, "manifest of %u bytes: not kept over a restart", (unsigned)len);
+        return;
+    }
+    char *buf = malloc(rl + len);
+    if (buf == NULL) {
+        return;
+    }
+    memcpy(buf, repo, rl);
+    memcpy(buf + rl, body, len);
+    esp_err_t err = settings_set_state_blob(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_MANIFEST, buf, rl + len);
+    free(buf);
+    if (err == ESP_OK) {
+        g_fw.manifest_saved = true;
+    } else {
+        ESP_LOGW(TAG, "manifest not stored: %s", esp_err_to_name(err));
+    }
+}
+
+/* At boot: the manifest the last check accepted, read again as a fetched one is (its signature too), and only
+ * if it came from this build's repository, so the update card knows the latest release before the next check. */
+static void load_manifest(void)
+{
+    char repo[FW_UPDATE_REPO_MAX];
+    fw_repo(repo, sizeof(repo));
+    size_t len = MANIFEST_KEEP;
+    char *buf = malloc(len);
+    if (buf == NULL) {
+        return;
+    }
+    if (settings_get_blob(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_MANIFEST, buf, &len) == ESP_OK) {
+        size_t rl = strnlen(buf, len);
+        if (rl < len && strcmp(buf, repo) == 0) {
+            int key = -1;
+            fw_lock();
+            bool ok = fw_manifest_read(buf + rl + 1u, len - rl - 1u, g_fw.keys, g_fw.key_count, &g_fw.manifest,
+                                       &key) == FW_MANIFEST_OK;
+            g_fw.have_manifest = ok;
+            g_fw.manifest_saved = ok;
+            if (ok) {
+                strlcpy(g_fw.etag, g_fw.etag_saved, sizeof(g_fw.etag));
+            }
+            fw_unlock();
+            if (ok) {
+                ESP_LOGI(TAG, "latest release %s, as the last check found", g_fw.manifest.version);
+            } else {
+                ESP_LOGW(TAG, "stored manifest not accepted: the next check fetches it again");
+            }
+        }
+    }
+    free(buf);
+}
+
 static void run_check(void)
 {
     uint32_t started = fw_uptime_s();
@@ -231,7 +289,7 @@ static void run_check(void)
     fw_http_result_t r;
     if (fw_release_latest_url(url, sizeof(url), repo, CONFIG_FW_UPDATE_MANIFEST_ASSET)) {
         /* "Not modified" is only useful while this boot holds the accepted
-         * manifest it refers to. */
+         * manifest it refers to (fetched now, or kept from the last check). */
         r = fw_http_fetch(url, (have && etag_in[0] != '\0') ? etag_in : NULL, MANIFEST_CAP, &body, &len, etag,
                           sizeof(etag), &http_status);
     } else {
@@ -262,10 +320,15 @@ static void run_check(void)
                 ESP_LOGI(TAG, "manifest %s from github.com/%s over HTTPS, %u receiver package(s)", m.version, repo,
                          (unsigned)m.gnss_count);
             }
-            if (strcmp(etag, g_fw.etag_saved) != 0) {
+            bool changed = strcmp(etag, g_fw.etag_saved) != 0;
+            if (changed) {
                 if (settings_set_state_str(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_ETAG, etag) == ESP_OK) {
                     strlcpy(g_fw.etag_saved, etag, sizeof(g_fw.etag_saved));
                 }
+            }
+            /* Without an ETag a changed manifest cannot be told from the stored one: stored each time. */
+            if (changed || etag[0] == '\0' || !g_fw.manifest_saved) {
+                save_manifest(repo, body, len);
             }
         } else {
             result = merr == FW_MANIFEST_ERR_NO_MEM ? FW_CHECK_NO_RESPONSE : FW_CHECK_UNUSABLE;
@@ -495,6 +558,7 @@ esp_err_t fw_update_init(void)
         g_fw.last_check_unix = last;
     }
     (void)settings_get_str(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_ETAG, g_fw.etag_saved, sizeof(g_fw.etag_saved));
+    load_manifest();
 
     /* Trial and rollback bookkeeping; a failing trial image is reverted here
      * (and this does not return), before the steps that may be what fails. */
@@ -694,6 +758,12 @@ esp_err_t fw_update_get_status(fw_update_status_t *out)
             out->gnss_latest_build = g->build;
             out->gnss_update_available = true;
             out->gnss_expected_downtime_s = station_expected_flash_downtime_s(g->file.size);
+        }
+        const fw_manifest_gnss_t *rel =
+            st_ok && st->receiver.valid ? fw_policy_gnss_release(&g_fw.manifest, st->receiver.model) : NULL;
+        if (rel != NULL) {
+            strlcpy(out->gnss_release, rel->version, sizeof(out->gnss_release));
+            out->gnss_release_build = rel->build;
         }
     }
     fw_unlock();

@@ -229,7 +229,7 @@ function inspect(root) {
     details: [...root.walk()].filter(e => e.tagName === 'DETAILS').length,
     pace: vis.some(e => e.kids.some(k => k instanceof Text && k.data.indexOf('Retry pace') >= 0)),
     paces: pace ? pace.options.map(text) : null,
-    waits: vis.filter(e => /\d\u00a0(s|min)\b/.test(text(e)) && (e.tagName === 'SMALL' || e.tagName === 'P')).map(text),
+    waits: vis.filter(e => /\d(s|min)\b/.test(text(e)) && (e.tagName === 'SMALL' || e.tagName === 'P')).map(text),
   };
 }
 
@@ -1257,9 +1257,9 @@ def test_presets_ask_only_for_what_they_use():
     assert custom["fields"] == ["NTRIP server", "Host and port", "Mountpoint", "Password", "Retry pace", "NTRIP version",
                                 "TLS", "Encrypted"], custom
     assert custom["help"] == "Enter what your server gives you for a base."
-    assert custom["paces"] == ["Standard (2 s to 1 min)", "Polite (10 s to 5 min)"]
-    assert custom["waits"] == ["Refused logins: 1, 5, 15, then 30 min."], custom["waits"]
-    assert polite["waits"] == ["Refused logins: 5, 15, 30, then 60 min; after 20 failed connections in a row, one try an "
+    assert custom["paces"] == ["Standard (2s to 1min)", "Polite (10s to 5min)"]
+    assert custom["waits"] == ["Refused logins: 1, 5, 15, then 30min."], custom["waits"]
+    assert polite["waits"] == ["Refused logins: 5, 15, 30, then 60min; after 20 failed connections in a row, one try an "
                                "hour."], polite["waits"]
     assert custom_tls["fields"][-4:] == ["NTRIP version", "TLS", "Encrypted", "Certificate check"], custom_tls
 
@@ -1376,11 +1376,11 @@ def test_server_card_says_its_state_traffic_and_address_in_two_lines():
         {"fn": "card", "cfg": stored("my.caster.net", "standard"), "st": {"state": "auth_failed", "next_retry_s": 240}},
         {"fn": "card", "cfg": stored("my.caster.net", "standard", enabled=False), "st": {"state": "disabled"}},
     ])
-    assert out[0] == {"line": "Streaming for 2 h · 133.7 MB sent", "tone": "t-ok", "address": "rtk2go.com:2101/MINE01"}
+    assert out[0] == {"line": "Streaming for 2h · 133.7 MB sent", "tone": "t-ok", "address": "rtk2go.com:2101/MINE01"}
     assert out[1] == {"line": "Stopped: needs you", "tone": "t-bad",
                       "address": "10.0.2.2:2111/MP0TEST1 · Test Onocoy slot (bench build)"}
     assert out[2] == {"line": "Waiting for the receiver", "tone": "t-warn", "address": "servers.onocoy.com:2101"}
-    assert out[3]["line"] == "Login refused · next try in 4 min" and out[3]["tone"] == "t-bad"
+    assert out[3]["line"] == "Login refused · next try in 4min" and out[3]["tone"] == "t-bad"
     assert out[4]["line"] == "Off"
 
 
@@ -1571,15 +1571,15 @@ def test_receiver_rows_in_every_state():
     assert out["rtcm7"]["key"] == "streaming" and rx_rows(out["rtcm7"]) == ["4 on Galileo", "Arriving", "Locked"]
     (gap,) = dashboards(over(BASE, receiver={"rtcm_age_ms": 12000, "state": "recovering"}, health={"level": "recovering"},
                              casters=WAITING))
-    assert rx_rows(gap)[:2] == ["–", "None for 12\u00a0s"]
+    assert rx_rows(gap)[:2] == ["–", "None for 12s"]
     assert rx_rows(out["maint"]) == ["4 on Galileo", "Arriving", "Locked"]
     assert rx_rows(out["maint_unchecked"]) == ["4 on Galileo", "Arriving", "Not checked"]
-    assert rx_rows(out["survey"]) == ["4 on Galileo", "Arriving", "Surveying, 5 min left"]
+    assert rx_rows(out["survey"]) == ["4 on Galileo", "Arriving", "Surveying, 5min left"]
     # The top card says the fixed position looks wrong: the row agrees in amber, without its sentence.
     assert out["fixed_far"]["head"] == "Fixed position looks wrong" and rx_rows(out["fixed_far"])[2] == "Fixed, check it"
     assert out["fixed_far"]["cards"]["Receiver"]["tones"] == [["warn", "Fixed, check it"]]
     # A stall: the fixture still has satellites, but nothing arrives.
-    assert rx_rows(out["stall"])[:2] == ["–", "None for 6 s"]
+    assert rx_rows(out["stall"])[:2] == ["–", "None for 6s"]
     assert rx_rows(out["configuring"])[:2] == ["–", "Arriving"]
     assert rx_rows(out["held"])[:2] == ["–", "None yet"]
 
@@ -1732,7 +1732,7 @@ def test_station_card_rows():
                                                                                   "· up to date"]
     # The firmware's parts too: a phone breaks before a separator.
     assert [" ".join(t.split()) for t in out[8]["cards"]["Station"]["nowrap"]][-2:] == ["· v0.4.0 available", "· receiver update"]
-    assert rows[0]["Running for"] == "1 d"
+    assert rows[0]["Running for"] == "1d"
     fw = [r["Firmware"] for r in rows[6:15]]
     assert rows[0]["Firmware"] == "v0.3.0 · up to date" and links[0] == ["Manage", "#/settings", "Manage station settings"]
     assert fw == ["v0.3.0 · v0.4.0 available", "v0.3.0 · receiver update available",
@@ -1754,7 +1754,7 @@ def test_onocoy_today_forms():
              "alloff"]
     out = dict(zip(names, dashboards(*[MATRIX[n] for n in names])))
     ono = {n: o["cards"]["Onocoy"] for n, o in out.items()}
-    assert ono["healthy"]["chip"] == ["On track", "badge ok"] and ono["healthy"]["big"][0].startswith("7 min 43 s")
+    assert ono["healthy"]["chip"] == ["On track", "badge ok"] and ono["healthy"]["big"][0].startswith("7min 43s")
     assert [r[0] for r in ono["healthy"]["rows"]] == ["Online today", "Offline today"]
     assert ono["healthy"]["links"][0][:3] == ["Manage", "#/ntrip", "Manage Onocoy"]
     for o in ono.values():
@@ -1884,14 +1884,14 @@ def test_top_card_names_every_failing_caster():
                                                         MATRIX["settings"], MATRIX["setup_too"])
     nonet, wait = dashboards(backoff_nonet, waits)
     assert (refused["key"], refused["head"], refused["tone"]) == ("casters_down", "Not streaming", "bad")
-    assert refused["line"] == "RTK2go is not streaming: login refused. Next try in 4\xa0min." and refused["subject"] == 1
+    assert refused["line"] == "RTK2go is not streaming: login refused. Next try in 4min." and refused["subject"] == 1
     assert not any(a[0].startswith("caster:") for a in refused["also"]) and refused["heroButtons"] == []
     # The line names RTK2go: its row's word is neutral, not a second red statement.
     assert refused["cards"]["NTRIP"]["lineTones"] == ["muted"] and refused["cards"]["NTRIP"]["tones"] == []
     assert refused["cards"]["Onocoy"]["links"][0][:2] == ["Set up", "#/ntrip/onocoy"]
     # Something streams: Onocoy not set up stays on top, "too" is true, and the refused caster gets its "Also:" line.
     assert too["key"] == "onocoy_setup" and too["line"].endswith(" to stream to Onocoy too.")
-    assert ["caster:2", "Bench not streaming", "Next try in 1\xa0min 30\xa0s.", "bad"] in too["also"]
+    assert ["caster:2", "Bench not streaming", "Next try in 1min 30s.", "bad"] in too["also"]
     assert too["cards"]["NTRIP"]["tones"] == [["ok", "Streaming"], ["bad", "Login refused"]]
     assert banned["key"] == "stopped" and [a[0] for a in banned["also"]] == ["caster:1"]
     assert banned["also"][0][3] == "bad"
@@ -1955,11 +1955,11 @@ def test_header_shows_the_station_state_and_says_when_contact_is_lost():
     assert out[1] == ["ok", "Streaming", "status", "", "true", "Streaming", "Streaming", "#/", True, *shown]
     assert out[2] == ["info", "Searching", "status", "", "true", "Looking for the receiver",
                       "Searching: Looking for the receiver", "#/", True, *shown]
-    assert out[3] == ["", "No contact", "status", "9\u00a0s", "true", "No contact with the station for 9\u00a0s",
+    assert out[3] == ["", "No contact", "status", "9s", "true", "No contact with the station for 9s",
                       "No contact with the station", "#/", True, False, False, True]
     # Past a minute the count is its largest unit (it fits a phone's header); the title keeps the whole time.
-    assert out[4][1] == "No contact" and out[4][3] == "1\u00a0min" and out[4][5].endswith("1\u00a0min 40\u00a0s")
-    assert [o[3] for o in out[7:11]] == ["59\u00a0s", "59\u00a0min", "2\u00a0h", "3\u00a0d"]
+    assert out[4][1] == "No contact" and out[4][3] == "1min" and out[4][5].endswith("1min 40s")
+    assert [o[3] for o in out[7:11]] == ["59s", "59min", "2h", "3d"]
     assert out[5] == ["", "Connecting…", "status", "", "true", "Connecting to the station", "Connecting to the station", "#/",
                       True, *shown]
     assert out[6] is None
@@ -2181,12 +2181,12 @@ def test_health_card_says_the_state_beside_an_alert_of_its_colour():
                                               ["msg warn", "Output differs from the profile"]], stall_["msgs"]
     assert safe_["chip"][1] == "badge bad"
     assert safe_["msgs"] == [["msg bad", "Safe mode", "The receiver and NTRIP servers are off after 3 crashes. The station tries "
-                              "normal operation again in 45\u00a0min."]], safe_["msgs"]
+                              "normal operation again in 45min."]], safe_["msgs"]
     assert safe_["buttons"] == [["Updates", "#/settings/updates"], ["Leave safe mode", "leave-safe"]]
     assert settings_["msgs"] == [["msg bad", "Settings cannot be saved",
                                   "The station runs, but changes are not saved this boot. Restart it."]], settings_["msgs"]
     assert settings_["buttons"] == [["Restart", "#/settings/restart"]]
-    assert trial_["msgs"] == [["msg info", "Trying new Wi-Fi", "Trying Cabin: 1\u00a0min 20\u00a0s left. If it gets no address "
+    assert trial_["msgs"] == [["msg info", "Trying new Wi-Fi", "Trying Cabin: 1min 20s left. If it gets no address "
                                "there, the station goes back to the previous network by itself."]], trial_["msgs"]
 
 
@@ -2232,7 +2232,7 @@ def test_chip_card_names_the_access_point_and_the_transmit_power():
     assert [r[0] for r in bare] == ["Chip", "ESP-IDF", "Wi-Fi", "Signal", "MAC address"]
     assert gone == [r for r in gone if r[0] != "Signal"] and [r[0] for r in gone] == ["Chip", "ESP-IDF", "Wi-Fi", "MAC address",
                                                                                     "Moves to another access point"]
-    assert dict(gone)["Wi-Fi"] == "Home, offline for 30\u00a0s"
+    assert dict(gone)["Wi-Fi"] == "Home, offline for 30s"
 
 
 def test_earlier_starts_say_when_what_and_which_version():
@@ -2259,7 +2259,7 @@ def test_earlier_starts_say_when_what_and_which_version():
     # A power-on came after the crash (count 2, then 1): how long it ran is not known.
     assert rows[2][:3] == ["\u2013", "Crash", "v0.2.9"]
     # Not dated: how long it ran, the previous run of the start after it (their counts follow on: 1, then 2).
-    assert rows[3][:3] == ["Ran 50\u00a0s", "Power-on", "v0.2.8"]
+    assert rows[3][:3] == ["Ran 50s", "Power-on", "v0.2.8"]
     # Over a year back (the history survives a factory reset): the year too, so it never reads as this year's.
     assert "2024" in rows[4][0] and ":" in rows[4][0] and rows[4][1:3] == ["Power-on", "v0.2.7"]
     assert rows[1][3] == "Started after power-on or a reset by its pin" and rows[2][3] == "Restarted after a crash (the task watchdog)"
@@ -2365,22 +2365,23 @@ SIG = {"best_sys": "galileo", "best_bands": 4, "e6_lost": False, "epoch_age_ms":
 
 
 def test_signals_card_says_the_bands_once():
-    """The Receiver page's Signals card: the best constellation and its bands in the headline only; the hints are one
-    line each and only what the headline does not say; the band table stays. Short of 4 bands, one line says what
-    Onocoy needs."""
+    """The Receiver page's Signals card: while corrections come, the hints one line each (satellites, signal strength,
+    the bands) and no headline above them; the band table stays. Short of 4 bands, the bands line says what Onocoy
+    needs. Without corrections, the headline and the table only."""
     three = {**SIG, "best_sys": "gps", "best_bands": 3,
              "systems": [{**x, "bands": x["bands"][:3]} for x in SIG["systems"]]}
     good, few, idle = run_editor([{"fn": "signals", "live": True, "sig": SIG, "master": 7},
                                   {"fn": "signals", "live": True, "sig": three, "master": 7},
                                   {"fn": "signals", "live": False, "sig": SIG, "master": 7}])
-    assert good["big"] == "Galileo \u00b7 4 bands" and good["table"] and good["lines"] == ["checks lines"]
-    assert good["checks"] == [["ok", "\u2713Good: 40 satellites tracked"], ["ok", "\u2713Good: Strong signals (44\u00a0dB\u2011Hz on L1)"]], good
-    assert not any("band" in c[1] or "Galileo" in c[1] for c in good["checks"])
-    assert good["words"] == ["Good: ", "Good: "]
-    assert few["big"] == "GPS \u00b7 3 bands"
+    assert good["big"] is None and good["table"] and good["lines"] == ["checks lines"]
+    assert good["checks"] == [["ok", "\u2713Good: 40 satellites tracked"],
+                              ["ok", "\u2713Good: Strong signals (44\u00a0dB\u2011Hz on L1)"],
+                              ["ok", "\u2713Good: 4 bands on Galileo and BeiDou"]], good
+    assert good["words"] == ["Good: ", "Good: ", "Good: "]
+    assert few["big"] is None
     assert few["checks"][-1] == ["warn", "!Check: Onocoy needs 4 bands: signal group 3 6 adds Galileo E6"], few
     # No corrections from the receiver: no verdicts, the headline and the table only.
-    assert idle["checks"] == [] and idle["big"] == "Galileo \u00b7 4 bands" and idle["table"]
+    assert idle["checks"] == [] and idle["big"] == "4 bands on Galileo and BeiDou" and idle["table"]
     # Group 3 6 applied (the Receiver card above says so) and still no Galileo E6: the antenna, not that group again.
     (applied,) = run_editor([{"fn": "signals", "live": True, "sig": three, "master": 3}])
     assert applied["checks"][-1] == ["warn", "!Check: Onocoy needs 4 bands: Galileo E6 is not tracked, check the antenna covers L6"]
@@ -2586,7 +2587,7 @@ def test_receiver_pages_show_everything_without_fold_outs():
         sky = out[k]
         assert sky["sky"] and any(r.startswith("G12") for r in sky["trs"]) and any(r.startswith("E05") for r in sky["trs"])
         assert "2 of 2 satellites on the map." in sky["lines"]
-        assert not {"Show the sky", "Close", "Extend", "Extend by 10\u00a0min"} & set(sky["buttons"]), sky["buttons"]
+        assert not {"Show the sky", "Close", "Extend", "Extend by 10min"} & set(sky["buttons"]), sky["buttons"]
         assert not any("pause" in t for t in sky["lines"]) and sky["notes"] == []
         assert not any("Sky map" in m[1] for m in sky["msgs"])
         assert sky["live"] and set(sky["live"]) == {"GET"}, sky["live"]
@@ -2638,7 +2639,7 @@ def test_receiver_pages_show_everything_without_fold_outs():
     assert {"Group A", "Group B", "Time per group"} <= set(settings["fields"])
     assert not {"Station ID", "Receiver link speed (COM1)"} & set(settings["fields"]) and "Apply again" not in settings["buttons"]
     assert "Sky map" in settings["checks"]
-    assert ("On (default): the receiver sends where each satellite is every 10\u00a0s, so the Receiver page shows them "
+    assert ("On (default): the receiver sends where each satellite is every 10s, so the Receiver page shows them "
             "on a sky map. Off: no sky map.") in settings["hints"]
     # Opened: the station ID, the link speed, the antenna model and Apply again; still open once the forms rebuild.
     adv = settings["adv"]
@@ -2745,18 +2746,18 @@ def test_logs_receiver_card_says_the_descriptor_once():
         {"fn": "rx_details", "g": GNSS, "full": True}, {"fn": "rx_details", "g": differ, "full": True},
         {"fn": "rx_details", "g": unread, "full": True}, {"fn": "rx_details", "g": held, "preview": PREVIEW, "full": True}])
     rows = dict(same["rows"])
-    assert rows["Descriptor (1033)"] == "Received 400\u00a0ms ago, matches the receiver"
+    assert rows["Descriptor (1033)"] == "Received 400ms ago, matches the receiver"
     assert not {"Receiver serial", "Receiver type", "Receiver firmware", "Antenna", "Antenna serial", "Antenna setup ID"} & set(rows)
     assert rows["Serial number"] == "TEST0001" and "Commands the first configuration sends" not in same["subs"]
 
     rows = dict(other["rows"])
-    assert rows["Descriptor (1033)"] == "Received 400\u00a0ms ago"
+    assert rows["Descriptor (1033)"] == "Received 400ms ago"
     assert rows["Receiver serial"] == "TEST0002 (differs)" and rows["Antenna"] == "TESTANT1 (differs)"
     assert rows["Receiver type"] == "UM982" and rows["Antenna setup ID"] == "0"
     assert other["warn"] == ["TEST0002 (differs)", "TESTANT1 (differs)"]
 
     rows = dict(nothing_read["rows"])
-    assert rows["Descriptor (1033)"] == "Received 400\u00a0ms ago, matches the receiver"
+    assert rows["Descriptor (1033)"] == "Received 400ms ago, matches the receiver"
     assert rows["Antenna"] == "none" and rows["Antenna setup ID"] == "0" and "Receiver serial" not in rows
 
     assert "Commands the first configuration sends" in commands["subs"] and commands["lis"] == 3
@@ -2822,12 +2823,12 @@ def test_rover_card_states_rovers_and_refusals():
         (lcast(), NET, {"rtcm_age_ms": 3000}))
     assert two["state"] == ["t-ok", "2 rovers connected"] and one["state"] == ["t-ok", "1 rover connected"]
     assert two["rovers"] == [
-        f"192.168.2.50 · NTRIP 2.0 · for 1{NB}h 2{NB}min · 5.9{NB}MB sent",
-        f"fd12:3456:789a:1:2c4f:9aff:fe31:7b2d · NTRIP 1.0 · for 5{NB}min 40{NB}s · 563{NB}KB sent · 3 epochs dropped (slow link)"]
+        f"192.168.2.50 · NTRIP 2.0 · for 1h 2min · 5.9{NB}MB sent",
+        f"fd12:3456:789a:1:2c4f:9aff:fe31:7b2d · NTRIP 1.0 · for 5min 40s · 563{NB}KB sent · 3 epochs dropped (slow link)"]
     assert two["lines"] == [ROVER_LIMITS, "Refused since the station started: 2 wrong passwords, 1 from outside your network, "
                                           "1 while full, 1 bad request."]
     assert one["lines"][1] == "Refused since the station started: 2 bad requests."
-    assert error["state"] == ["t-bad", f"Not listening on port 2101 (error 112). Trying again every 10{NB}s."]
+    assert error["state"] == ["t-bad", f"Not listening on port 2101 (error 112). Trying again every 10s."]
     assert wifi["state"] == ["muted", "Waiting for Wi-Fi. Rovers connect over your home network, not the setup hotspot."]
     assert wifi["rows"][0] == ["Host", "onodiy.local"]
     no_rtcm = [["warn", "No corrections from the receiver right now: connected rovers get nothing."]]

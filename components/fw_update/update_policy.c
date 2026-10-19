@@ -60,6 +60,21 @@ const fw_manifest_gnss_t *fw_policy_gnss_offer(const fw_manifest_t *m, const cha
     return best;
 }
 
+const fw_manifest_gnss_t *fw_policy_gnss_release(const fw_manifest_t *m, const char *model)
+{
+    if (m == NULL || model == NULL || model[0] == '\0') {
+        return NULL;
+    }
+    const fw_manifest_gnss_t *best = NULL;
+    for (size_t i = 0; i < m->gnss_count && i < FW_MANIFEST_MAX_GNSS; i++) {
+        const fw_manifest_gnss_t *g = &m->gnss[i];
+        if (strcmp(g->model, model) == 0 && (best == NULL || g->build > best->build)) {
+            best = g;
+        }
+    }
+    return best;
+}
+
 static uint32_t max_u32(uint32_t a, uint32_t b)
 {
     return a > b ? a : b;

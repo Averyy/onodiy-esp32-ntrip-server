@@ -123,7 +123,8 @@ def test_the_schema_tells_device_state_from_settings():
               "SETTINGS_KEY_BOOT_HISTORY", "SETTINGS_KEY_BOOT_GEN", "SETTINGS_KEY_GNSS_MODEL", "SETTINGS_KEY_GNSS_FW",
               "SETTINGS_KEY_GNSS_BAUD", "SETTINGS_KEY_GNSS_APPLIED", "SETTINGS_KEY_GNSS_SG_TEST",
               "SETTINGS_KEY_GNSS_MAINT", "SETTINGS_KEY_GNSS_FLASH_JOB", "SETTINGS_KEY_CST_BACKOFF",
-              "SETTINGS_KEY_OTA_TRIAL", "SETTINGS_KEY_OTA_LAST_CHECK", "SETTINGS_KEY_OTA_ETAG"):
+              "SETTINGS_KEY_OTA_TRIAL", "SETTINGS_KEY_OTA_LAST_CHECK", "SETTINGS_KEY_OTA_ETAG",
+              "SETTINGS_KEY_OTA_MANIFEST"):
         assert k in state, k
     # What a person sets (and the receiver profile, which the station also changes at a position lock).
     for k in ("SETTINGS_KEY_HOSTNAME", "SETTINGS_KEY_ADMIN_HASH", "SETTINGS_KEY_WIFI_SSID", "SETTINGS_KEY_WIFI_AP_PASS",

@@ -128,6 +128,24 @@ TEST_CASE("receiver offer: exact model, higher build only", "[update_policy]")
     TEST_ASSERT_NULL(fw_policy_gnss_offer(NULL, REL, "UM982", 1));
 }
 
+TEST_CASE("receiver release: the release's package for the model, offered or not", "[update_policy]")
+{
+    fw_manifest_t m;
+    memset(&m, 0, sizeof(m));
+    TEST_ASSERT_NULL(fw_policy_gnss_release(&m, "UM982"));          /* no package */
+    add_gnss(&m, "UM982", 18975);
+    add_gnss(&m, "UM980", 30000);
+    add_gnss(&m, "UM982", 13495);
+    const fw_manifest_gnss_t *g = fw_policy_gnss_release(&m, "UM982");
+    TEST_ASSERT_NOT_NULL(g);
+    TEST_ASSERT_EQUAL_UINT32(18975, g->build);                       /* the highest, older than a receiver on 25164 */
+    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, REL, "UM982", 25164));  /* which is offered nothing */
+    TEST_ASSERT_NULL(fw_policy_gnss_release(&m, "UM982C"));         /* exact model */
+    TEST_ASSERT_NULL(fw_policy_gnss_release(&m, ""));
+    TEST_ASSERT_NULL(fw_policy_gnss_release(&m, NULL));
+    TEST_ASSERT_NULL(fw_policy_gnss_release(NULL, "UM982"));
+}
+
 TEST_CASE("receiver offer: a dev build is offered nothing", "[update_policy]")
 {
     fw_manifest_t m;

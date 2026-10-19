@@ -229,9 +229,9 @@ function onocoyElsewhereText(o) {
  * waits after a refused login]. A preset's pace is its own (Onocoy: the station's fast one; RTK2go: polite).
  */
 const PACE = {
-  standard: [lbl(L.backoff, 'standard') + ' (2 s to 1 min)', 'Refused logins: 1, 5, 15, then 30 min.'],
-  polite: [lbl(L.backoff, 'polite') + ' (10 s to 5 min)',
-    'Refused logins: 5, 15, 30, then 60 min; after 20 failed connections in a row, one try an hour.'],
+  standard: [lbl(L.backoff, 'standard') + ' (2s to 1min)', 'Refused logins: 1, 5, 15, then 30min.'],
+  polite: [lbl(L.backoff, 'polite') + ' (10s to 5min)',
+    'Refused logins: 5, 15, 30, then 60min; after 20 failed connections in a row, one try an hour.'],
 };
 
 /** The mountpoint the editor proposes for Onocoy: the station's name as the field takes it (Onocoy shows it only to you). */
@@ -678,7 +678,7 @@ function casterSummary(c, st, preset) {
     st.state === 'stopped' ? stopPanel(c, st) : null,
     casterDetail(st, { unreached: true, tls: plain }),
     /* Public servers ban fast streams: a warning only when this one gets close. */
-    avg !== null && avg > 28000 ? h('div', { class: 'small t-warn' }, 'Average over 60 s: ' + fmt.kbps(avg) +
+    avg !== null && avg > 28000 ? h('div', { class: 'small t-warn' }, 'Average over 60s: ' + fmt.kbps(avg) +
       '. That is close to the limits of public servers; consider MSM4 messages instead of MSM7.') : null,
     st.unreached_s ? h('div', { class: 'hintline' }, 'Server not reached for ' + fmt.dur(st.unreached_s) +
       (st.reason && st.reason !== 'none' ? ': ' + lbl(L.fail, st.reason) : '') + '.') : null,
@@ -799,7 +799,7 @@ function roverSummary(d, s) {
   }
   const list = st.clients || [], n = list.length, rf = st.refused || {}, wrong = (rf.login || 0) + (rf.throttled || 0);
   const line = st.state === 'error' ? ['bad', 'Not listening on port ' + port + ' (error ' + st.listen_errno + '). ' +
-    'Trying again every 10 s.'] :
+    'Trying again every 10s.'] :
     st.state === 'wait_network' ? ['', 'Waiting for Wi-Fi. Rovers connect over your home network, not the setup hotspot.'] :
     n ? ['ok', plural(n, 'rover', 'rovers') + ' connected'] : ['', lbl(L.rover, st.state === 'off' ? 'starting' : st.state)];
   /* A throttled login is a wrong password too (the rover's own retries). */

@@ -509,8 +509,9 @@ void fw_trial_status_locked(fw_update_status_t *out, bool clock_trusted, int64_t
     case FW_TRIAL_RUN_NONE:
         break;
     }
+    out->trial_end_s = fw_trial_left_s(run, uptime, CONFIG_FW_UPDATE_CONFIRM_S, elapsed, watch_s);
     if (out->gnss_blocked == FW_GNSS_BLOCK_APP_TRIAL) {
-        out->gnss_blocked_left_s = fw_trial_left_s(run, uptime, CONFIG_FW_UPDATE_CONFIRM_S, elapsed, watch_s);
+        out->gnss_blocked_left_s = out->trial_end_s;
     }
     if (g_fw.rec.stage == FW_TRIAL_REC_REVERTED || g_fw.rec.stage == FW_TRIAL_REC_ROLLED_BACK) {
         strlcpy(out->reverted_version, g_fw.rec.version, sizeof(out->reverted_version));

@@ -57,7 +57,8 @@ typedef struct {
     esp_err_t last_err;
     uint8_t progress_pct;
     bool busy;                    /**< a job or a manual upload runs (one at a time) */
-    bool have_manifest;           /**< `manifest` was accepted during this boot */
+    bool have_manifest;           /**< `manifest` was accepted during this boot, or by the last check before it (ota/manifest) */
+    bool manifest_saved;          /**< ota/manifest holds `manifest` */
     fw_manifest_t manifest;
     char etag[64];                /**< ETag of `manifest` */
     int64_t last_check_unix;      /**< ota/last_check */

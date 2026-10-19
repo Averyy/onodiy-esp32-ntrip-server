@@ -56,7 +56,7 @@ function bandTable(systems) {
 /* A seen period in words: whole seconds within 10 % of them ("1 s" for 950 ms: jitter, not another rate). */
 function periodText(ms) {
   const s = ms / 1000, r = Math.round(s);
-  return r >= 1 && Math.abs(s - r) <= 0.1 * r ? r + NB + 's' : fmt.ms(ms);
+  return r >= 1 && Math.abs(s - r) <= 0.1 * r ? r + 's' : fmt.ms(ms);
 }
 
 /* A message name without its MSM type, for the one line of extra messages ("1107 SBAS observations"). */
@@ -97,7 +97,7 @@ function messagesView(list, colour, surveying) {
     return h('tr', null,
       h('td', { class: 'name' }, h('b', { class: bad }, String(m.msg)), h('span', { class: bad }, ' ' + (rtcmName(m.msg) || ''))),
       waits || none ? h('td', { class: 'num muted', colspan: 2 }, waits ? 'Waits for the survey' : 'None in view') : [
-        h('td', { class: 'num' }, seen, m.period_ms && seen !== expected + NB + 's' ? h('span', { class: 'muted' }, ' (' + expected + NB + 's)') : null),
+        h('td', { class: 'num' }, seen, m.period_ms && seen !== expected + 's' ? h('span', { class: 'muted' }, ' (' + expected + 's)') : null),
         h('td', { class: 'num' + (bad ? ' t-bad' : '') }, neverSeen(m) ? 'Never' : fmt.ms(m.age_ms) + NB + 'ago')]);
   });
   return [
@@ -123,8 +123,7 @@ function signalsCard(sig) {
 /*
  * The Signals card's hints from GET /api/gnss/signals, one line each (the
  * antenna check's, C/N0: band means weighted by satellites), plus E6 lost,
- * no GLONASS, 1230 refused. The bands only when short of 4: the headline
- * says the best constellation and its bands. master: the main antenna's
+ * no GLONASS, 1230 refused. master: the main antenna's
  * signal group the receiver runs (GET /api/gnss), null while unknown; with
  * Galileo short of E6 it says whether 3 6 would add it or runs already.
  */
@@ -157,7 +156,6 @@ function signalChecks(sig, master) {
     bands[3] = master === 3 ? 'Onocoy needs 4 bands: Galileo E6 is not tracked, check the antenna covers L6' :
       'Onocoy needs 4 bands: signal group 3 6 adds Galileo E6';
   }
-  r.items = r.items.filter(i => i !== bands || i[0] !== 'ok');
   const add = (tone, line) => r.items.push([tone, null, null, line, 'more']);
   if (sig.e6_lost) add('bad', 'Galileo E6 lost: it was tracked before with this signal group');
   if (!systems.some(s => s.sys === 'glonass')) add('warn', 'No GLONASS: Onocoy\'s quality score needs it');
@@ -166,18 +164,20 @@ function signalChecks(sig, master) {
   return r;
 }
 
-/** The big line: the best constellation while observations arrive, else how long they have been missing. */
+/** The big line: the constellations with the most bands while observations arrive, else how long they have been missing. */
 function signalsHeadline(sig) {
   const age = sig.epoch_age_ms;
   if (age === null || age === undefined) return 'No signals yet';
   if (age >= 5000) return 'No signals for ' + fmt.dur(age / 1000);
-  return sig.best_sys ? lbl(L.sys, sig.best_sys) + ' · ' + sig.best_bands + ' bands' : 'No signals yet';
+  if (!sig.best_sys) return 'No signals yet';
+  const most = mostBands((sig.systems || []).map(s => ({ sys: s.sys, n: (s.bands || []).length })));
+  return most.n ? most.n + ' bands on ' + most.names : lbl(L.sys, sig.best_sys) + ' · ' + sig.best_bands + ' bands';
 }
 
 /* Observations arrive: the headline names the best constellation (else a banner says none do). */
 const hasSignals = sig => typeof sig.epoch_age_ms === 'number' && sig.epoch_age_ms < 5000 && !!sig.best_sys;
 
-/* The card's head: the headline and, while corrections come (live), the hints in one line each (master: signalChecks).
+/* The card's head: while corrections come (live), the hints in one line each (master: signalChecks), else the headline.
  * Without signals one banner says so, with why the sky cannot show under it (why: nodes, '' when it can). */
 function signalsHead(sig, live, master, why) {
   if (!hasSignals(sig)) {
@@ -185,7 +185,7 @@ function signalsHead(sig, live, master, why) {
       why ? h('div', null, why) : null);
   }
   const checks = live ? signalChecks(sig, master) : null;
-  return [h('div', { class: 'big' }, signalsHeadline(sig)), checks && !checks.waiting ? receptionList(checks, true) : null,
+  return [checks && !checks.waiting ? receptionList(checks, true) : h('div', { class: 'big' }, signalsHeadline(sig)),
     why ? msg('info', why) : null];
 }
 

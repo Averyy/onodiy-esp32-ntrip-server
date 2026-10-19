@@ -82,6 +82,7 @@ extern "C" {
 #define SETTINGS_KEY_OTA_TRIAL      "trial"       /**< blob, device state: app trial {version, baseline, stage, started, boots, crashes}; survives factory reset */
 #define SETTINGS_KEY_OTA_BAD_VER    "bad_ver"     /**< blob, device state: versions rolled back (never offered by the update banner); survives factory reset */
 #define SETTINGS_KEY_OTA_ETAG       "etag"        /**< str, device state: ETag of the last manifest fetched (written only when it changes) */
+#define SETTINGS_KEY_OTA_MANIFEST   "manifest"    /**< blob, device state: the last manifest accepted, as fetched, after its repository and a NUL (written only when it changes), so a restart keeps what the last check found */
 #define SETTINGS_KEY_OTA_LAST_CHECK "last_check"  /**< i64, device state: unix time of the last successful update check (written once per check), so reboots add no checks */
 
 /* ---- "life": boot history and image generation (crash counter and

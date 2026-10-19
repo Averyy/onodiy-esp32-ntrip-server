@@ -96,7 +96,7 @@ const CONTACT_S = 6;
 /* The header's count without contact: seconds for the first minute, then its largest unit ("12 min", "3 h"), so it fits a phone. */
 function contactAge(s) {
   if (s < 60) return fmt.dur(s);
-  return s < 3600 ? Math.floor(s / 60) + NB + 'min' : s < 86400 ? Math.floor(s / 3600) + NB + 'h' : Math.floor(s / 86400) + NB + 'd';
+  return s < 3600 ? Math.floor(s / 60) + 'min' : s < 86400 ? Math.floor(s / 3600) + 'h' : Math.floor(s / 86400) + 'd';
 }
 
 /*

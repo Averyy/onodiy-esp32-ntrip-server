@@ -329,7 +329,7 @@ const J = {
   /* ntrip_stop_t (a caster_stop record's bits 8-15) */
   stop: ['none', 'rejected', 'login_blocked', 'in_use', 'kicked', 'duplicate', 'banned'],
   /* Why a rover's session ended (local_caster_end_t, a rover_disconnect record's bits 8-15) */
-  roverEnd: ['', 'the rover closed the connection', 'the rover took no data for 10 s', 'the connection was lost',
+  roverEnd: ['', 'the rover closed the connection', 'the rover took no data for 10s', 'the connection was lost',
     'turned off or its settings changed', 'the station lost its network address', 'the station restarted'],
   liveEv: [null, 'Opened', 'Extended', 'Closed', 'Satellite output on', 'Satellite output off'],
   liveEnd: ['', 'closed by you', 'time up', 'nobody watching', 'receiver update'],

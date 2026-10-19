@@ -202,7 +202,7 @@ function onocoyCard(s, st) {
   return card(badge(d.verdict, d.tone), null,
     d.why ? h('p', { class: 'small t-' + d.tone }, d.why) : null,
     d.known ? [
-      h('div', { class: 'big t-' + d.tone }, d.left > 0 ? fmt.dur(d.left) : '0' + NB + 's', ' ', h('small', null, 'offline time left')),
+      h('div', { class: 'big t-' + d.tone }, d.left > 0 ? fmt.dur(d.left) : '0s', ' ', h('small', null, 'offline time left')),
       bar(d.share, d.tone, 'Today\'s offline time left', Math.floor(d.share * 100) + NB + '% left'),
       h('div', { class: 'muted small' }, 'Resets at ' + utcResetTime() + ' · Estimate')] :
       h('p', { class: 'muted' }, 'Shows once the station has the time (from GNSS or the internet).'),

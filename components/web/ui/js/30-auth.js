@@ -23,7 +23,7 @@ function apSsidText() {
 /* Settings' one line under the admin password (the login's Forgot password has the steps in full). */
 function recoveryHint() {
   const ap = apSsidText();
-  return 'Forgot it? Hold BOOT for 10 s, then join the setup hotspot' + (ap ? ' ' + ap : '') + ' and open http://192.168.4.1/.';
+  return 'Forgot it? Hold BOOT for 10s, then join the setup hotspot' + (ap ? ' ' + ap : '') + ' and open http://192.168.4.1/.';
 }
 
 /* Forgot the password: the two steps (the login's Forgot password dialog). */

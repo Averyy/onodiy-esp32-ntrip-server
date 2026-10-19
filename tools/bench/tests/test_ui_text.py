@@ -91,6 +91,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  sgtBlock: g => sgtBlock(g), sgtLine: t => sgtLine(t), profileChip: g => profileChip(g), saveLabel: a => saveLabel(a[0], a[1]),\n' +
   '  sgtNotice: st => { const n = sgTestNotice(st); return n && n.slice(0, 3); },\n' +
   '  rxChip: s => receiverChip(s), posLine: a => positionLine(a[0], a[1]), statusPos: a => positionText(a[0], a[1]),\n' +
+  '  trial: t => trialText(t), gnssRel: a => gnssReleaseText(a[0], a[1]), dur: x => fmt.dur(x), ms: x => fmt.ms(x),\n' +
   '  headline: sig => signalsHeadline(sig), sigChecks: a => signalChecks(a[0], a[1]), msgCheck: a => msgCheck(a[0], a[1], a[2]),\n' +
   '  manage: () => MANAGE, manageKey: a => manageKey(a[0], a[1]), manageCustom: a => manageCustom(a[0], a[1]),\n' +
   '  doing: hl => recoveryDoing(hl), healthPlan: a => healthPlanText(a[0], stationState(a[1], true)),\n' +
@@ -128,7 +129,7 @@ def test_restart_plan_only_in_full_recovery():
         ("restartPlanText", {**HOLD, "recovery_mode": "alerts_only"}),
         ("restartPlanText", HOLD),
     ])
-    assert full is not None and "restarts itself" in full and "Postponed" in full and "27 min" in full
+    assert full is not None and "restarts itself" in full and "Postponed" in full and "27min" in full
     # The modes without the ESP32 restart never announce one, whatever the station reports.
     assert no_reboot is None
     assert alerts is None
@@ -165,12 +166,12 @@ def test_restart_plan_in_a_few_words_for_the_status_page():
         ("restartPlanShort", {**base, **HOLD, "recovery_mode": "no_reboot"}),
         ("restartPlanShort", {**base, **HOLD, "recovery_mode": "alerts_only"}),
     ])
-    assert out[0] == "station restart in 27\u00a0min at the latest"
+    assert out[0] == "station restart in 27min at the latest"
     # The setup hold has no end: what it waits for, not a time.
     assert out[1] == "station restart postponed (first setup not finished)"
-    assert out[2] == "station restart possible in 40\u00a0min"
+    assert out[2] == "station restart possible in 40min"
     # The cap outlasts the hold: the restart waits for the cap.
-    assert out[3] == "station restart possible in 40\u00a0min"
+    assert out[3] == "station restart possible in 40min"
     assert out[4] == "station may restart after the next search"
     assert out[5:] == [None, None, None]
     # On the Status page it follows the next search on one muted line.
@@ -180,7 +181,7 @@ def test_restart_plan_in_a_few_words_for_the_status_page():
                        alerts=[{**NO_RX, "next_detect_in_s": 0, "saw_bytes": True}])
     a, b = heroes(no_rx, searching)
     assert a["line"] == "Nothing arrives from the receiver. Check its power and the COM1 cable."
-    assert a["plan"] == "Next search in 24\u00a0s \u00b7 station restart in 27\u00a0min at the latest"
+    assert a["plan"] == "Next search in 24s \u00b7 station restart in 27min at the latest"
     assert "GPIO" not in a["line"] + a["plan"]
     assert b["line"] == "Data arrives, but the station cannot read it. Check the wiring and the receiver's port speed."
     assert b["plan"] == "Searching now"
@@ -226,9 +227,9 @@ def test_setup_done_says_onocoy_as_it_is():
         ("failing", "warn", "Not connected yet", None),
         ("safe_mode", "bad", "NTRIP servers are off in safe mode", None),
     ], got
-    assert out[3]["text"].endswith("Next try in 4\u00a0min 50\u00a0s.")
+    assert out[3]["text"].endswith("Next try in 4min 50s.")
     assert out[8]["text"] == "Onocoy starts once corrections arrive. Now: receiver stopped sending data."
-    assert out[10]["text"] == "DNS lookup failed. Next try in 20\u00a0s."
+    assert out[10]["text"] == "DNS lookup failed. Next try in 20s."
     assert out[11]["text"] == "Timed out. Trying again now."
     # Plain words only: no state names or protocol terms ("NTRIP" only as the name of its page and its servers).
     for o in out:
@@ -319,9 +320,9 @@ def test_event_list_pairs_a_drop_with_its_return_and_folds_repeats():
                              ("journalItems", [recs, True, ["caster_down", "caster_up", "caster_stop"], st])])
     rows = [i for i in every if "head" not in i]
     assert [r["ev"] for r in rows] == ["Onocoy disconnected", "Wi-Fi dropped", "Onocoy disconnected", "Onocoy stopped"]
-    assert rows[0]["det"] == "after 1\u00a0min online, timed out" and rows[0]["tone"] == "warn"
-    assert rows[1]["det"] == "back after 40\u00a0s, authentication failed (wrong password?) (202), signal \u221267\u00a0dBm"
-    assert rows[2]["det"] == "back after 20\u00a0s, closed by the server, 2 failed attempts"
+    assert rows[0]["det"] == "after 1min online, timed out" and rows[0]["tone"] == "warn"
+    assert rows[1]["det"] == "back after 40s, authentication failed (wrong password?) (202), signal \u221267\u00a0dBm"
+    assert rows[2]["det"] == "back after 20s, closed by the server, 2 failed attempts"
     assert len(rows[2]["all"]) == 3 and rows[2]["id"] == "r10"
     assert rows[3]["det"] == "duplicate stream, no new attempt until you act" and rows[3]["tone"] == "bad"
     for r in rows:
@@ -357,11 +358,11 @@ def test_event_list_names_moves_between_access_points():
     rows = [(r["ev"], r["det"]) for r in every if "head" not in r]
     # The time offline first: a phone cuts the end of the row off.
     assert rows == [
-        ("Wi-Fi dropped", "back after 6\u00a0s, left the network (8), signal \u221270\u00a0dBm"),
-        ("Wi-Fi moved", "2\u00a0s offline, to a stronger access point, channel 11 to 1"),
-        ("Wi-Fi reconnected", "5\u00a0s offline, no stronger access point after all"),
-        ("Wi-Fi moved", "4\u00a0s offline, to a stronger access point, channel 6, signal \u221275 to \u221258\u00a0dBm"),
-        ("Wi-Fi moved", "3\u00a0s offline, at the access point's request, channel 1 to 6, signal \u221278 to \u221252\u00a0dBm"),
+        ("Wi-Fi dropped", "back after 6s, left the network (8), signal \u221270\u00a0dBm"),
+        ("Wi-Fi moved", "2s offline, to a stronger access point, channel 11 to 1"),
+        ("Wi-Fi reconnected", "5s offline, no stronger access point after all"),
+        ("Wi-Fi moved", "4s offline, to a stronger access point, channel 6, signal \u221275 to \u221258\u00a0dBm"),
+        ("Wi-Fi moved", "3s offline, at the access point's request, channel 1 to 6, signal \u221278 to \u221252\u00a0dBm"),
     ], rows
     assert [(r["ev"], r["det"]) for r in wifi if "head" not in r] == rows
     assert casters == []
@@ -385,7 +386,7 @@ def test_event_list_says_a_move_kept_the_connections():
     (items,) = run_ui([("journalItems", [recs, True, None])])
     rows = [(r["ev"], r["det"]) for r in items if "head" not in r]
     assert rows == [
-        ("Wi-Fi moved", "9\u00a0s offline, on request, channel 11 to 1, signal \u221256 to \u221250\u00a0dBm"),
+        ("Wi-Fi moved", "9s offline, on request, channel 11 to 1, signal \u221256 to \u221250\u00a0dBm"),
         ("Wi-Fi stayed", "connections kept, on request, the same access point"),
         ("Wi-Fi moved", "connections kept, on request, channel 6 to 11, signal \u221260 to \u221255\u00a0dBm"),
         ("Wi-Fi stayed", "connections kept, no stronger access point after all"),
@@ -409,7 +410,7 @@ def test_event_journal_one_heading_per_start_and_repeats_folded():
         ("journalItems", [steps[-5:] + second, False, None]),
     ])
     heads = [i["head"][1] for i in every if "head" in i]
-    assert heads == ["Restarted by you (previous run 44\u00a0s)", "Started after power-on or a reset by its pin"]
+    assert heads == ["Restarted by you (previous run 44s)", "Started after power-on or a reset by its pin"]
     rows = [i for i in every if "head" not in i]
     # The restart record went into the heading; a recovery step is named after its recovery, the step is the detail.
     assert [r["ev"] for r in rows] == ["Wi-Fi dropped", "Receiver recovery"]
@@ -421,7 +422,7 @@ def test_event_journal_one_heading_per_start_and_repeats_folded():
     # Starts only: the two headings; casters only: nothing; the oldest start not loaded yet is a plain "Start".
     assert [("head" in i) for i in starts] == [True, True]
     assert casters == []
-    assert [i["head"][1] for i in part if "head" in i] == ["Restarted by you (previous run 44\u00a0s)", "Start"]
+    assert [i["head"][1] for i in part if "head" in i] == ["Restarted by you (previous run 44s)", "Start"]
 
 
 def test_event_journal_sky_sessions_and_plain_rows():
@@ -441,13 +442,13 @@ def test_event_journal_sky_sessions_and_plain_rows():
     (items,) = run_ui([("journalItems", [first + sky + other, True, None])])
     rows = [i for i in items if "head" not in i]
     assert [(r["ev"], r["det"]) for r in rows] == [
-        ("Sky view", "closed after 30\u00a0s"),                      # a lone record of a session not loaded whole
+        ("Sky view", "closed after 30s"),                      # a lone record of a session not loaded whole
         ("Receiver recovery", "restarting the receiver: failed"),
         ("Network recovery", "started: Onocoy down"),
         ("Receiver data lost", "453 bytes"),
         ("Receiver recovery", "healthy again"),
-        ("Sky view", "12\u00a0s, satellite output off: refused by the receiver"),
-        ("Sky view", "12\u00a0s"),
+        ("Sky view", "12s, satellite output off: refused by the receiver"),
+        ("Sky view", "12s"),
     ], rows
     # The two sessions without trouble are one row with a toggle, its time the span of both.
     assert len(rows[6]["all"]) == 2 and "\u2013" in rows[6]["when"][1]
@@ -493,13 +494,13 @@ def test_event_list_names_a_rovers_sessions():
     rows = [(r["ev"], r["det"], r.get("tone")) for r in every if "head" not in r]
     assert rows == [
         # The second start: its rover_connect was before the restart, so the end has no address.
-        ("Rover disconnected", "a rover, after 1 min 2 s: the rover closed the connection", ""),
-        ("Rover disconnected", "a rover, after 1 min 1 s: the station lost its network address", "warn"),
-        ("Rover disconnected", "a rover, after 40 s: the station restarted", ""),
+        ("Rover disconnected", "a rover, after 1min 2s: the rover closed the connection", ""),
+        ("Rover disconnected", "a rover, after 1min 1s: the station lost its network address", "warn"),
+        ("Rover disconnected", "a rover, after 40s: the station restarted", ""),
         ("Rover connected", "10.0.2.2, NTRIP 1.0", "ok"),
-        ("Rover disconnected", "a rover, after 1 min 15 s: the rover took no data for 10 s", "warn"),
-        ("Rover disconnected", "192.168.2.50, after 50 min 10 s: turned off or its settings changed", ""),
-        ("Rover disconnected", "IPv6 …:2c4f:7b2d, after 10 min 10 s: the connection was lost", "warn"),
+        ("Rover disconnected", "a rover, after 1min 15s: the rover took no data for 10s", "warn"),
+        ("Rover disconnected", "192.168.2.50, after 50min 10s: turned off or its settings changed", ""),
+        ("Rover disconnected", "IPv6 …:2c4f:7b2d, after 10min 10s: the connection was lost", "warn"),
         ("Rover connected", "IPv6 …:2c4f:7b2d, NTRIP 1.0", "ok"),
         ("Rover connected", "192.168.2.50, NTRIP 2.0, 3 shorter sessions not listed", "ok"),
     ], rows
@@ -649,13 +650,13 @@ def test_hero_says_what_blocks_first_and_what_to_do():
     assert out[0]["action"] == "Set up Onocoy" and out[0]["primary"] is True
 
     assert out[1]["title"] == "Receiver maintenance"
-    assert out[1]["line"] == "The station sends the receiver no commands. Ends in about 14 min."
+    assert out[1]["line"] == "The station sends the receiver no commands. Ends in about 14min."
     assert out[1]["action"] == "end-maint" and out[1]["notice"] == "maintenance"
 
     assert out[2]["title"] == "No receiver found" and out[2]["tone"] == "bad", out[2]
     # One plain line on top (the pins are in the Receiver page's panel); the next search in the short muted line.
     assert out[2]["line"] == "Nothing arrives from the receiver. Check its power and the COM1 cable."
-    assert out[2]["plan"] == "Next search in 24 s"
+    assert out[2]["plan"] == "Next search in 24s"
     assert out[2]["action"] == "detect" and out[2]["alert"] == "no_receiver" and out[2]["also"] == []
 
     # A stall while the station still says streaming: never "Streaming" on top, and Onocoy does not count as streaming.
@@ -727,7 +728,7 @@ def test_recovery_says_what_it_does_now():
     assert out[3]["plan"] == "The station is re-sending the receiver's settings."
     assert out[4]["plan"] == "The station is restarting the receiver."
     assert (out[7]["key"], out[7]["line"]) == ("rx_stopped", "The station is searching for the receiver.")
-    assert out[7]["plan"] == "Station restart in 27\u00a0min at the latest"
+    assert out[7]["plan"] == "Station restart in 27min at the latest"
     assert (out[5]["key"], out[5]["tone"], out[5]["plan"]) == ("no_rtcm", "bad", None)
     assert (out[6]["key"], out[6]["tone"], out[6]["plan"]) == ("no_rtcm", "warn", "The station tries again shortly.")
     silent_between = status(receiver={"rtcm_age_ms": 30000}, health=hl("none", "none"))
@@ -821,7 +822,7 @@ def test_hero_casters_down_one_two_three_and_all_good():
     dns = status(casters=[caster(0, "Onocoy", "streaming"), caster(1, "Bench", "backoff", reason="dns")])
     out = heroes(one, two, three, good_one, good_two, waiting, dns)
     assert out[0]["title"] == "Partly streaming"
-    assert out[0]["line"] == "Bench is not streaming: login refused. Next try in 30 s." and out[0]["action"] == "NTRIP"
+    assert out[0]["line"] == "Bench is not streaming: login refused. Next try in 30s." and out[0]["action"] == "NTRIP"
     # The line names the server that does not stream (its subject).
     assert out[0]["subject"] == 1
     assert out[1]["title"] == "Not streaming" and out[1]["tone"] == "bad"
@@ -854,7 +855,7 @@ def test_hero_safe_mode_stop_and_alerts_while_streaming():
     none = status(casters=[])
     out = heroes(safe, stopped, link_loss, bare_level, off, none)
     assert out[0]["title"] == "Safe mode" and out[0]["tone"] == "bad"
-    assert out[0]["line"] == "The receiver and NTRIP servers are off after 3 crashes. The station tries normal operation again in 45 min."
+    assert out[0]["line"] == "The receiver and NTRIP servers are off after 3 crashes. The station tries normal operation again in 45min."
     assert out[0]["alert"] == "safe_mode" and out[0]["notice"] == "safe_mode" and out[0]["also"] == []
     # Two buttons in safe mode: the cure (an update) and leaving it, a button the page handles.
     assert out[0]["actions"] == ["Updates", "leave-safe"]
@@ -960,7 +961,7 @@ def test_state_during_maintenance_restarts_and_one_caster_down():
     out = heroes(maint, maint_quiet, stall, stall_alerts_only, one_down, status())
     assert out[0]["key"] == "maintenance" and out[0]["delivering"] is True and out[0]["ono"] is True
     assert out[1]["delivering"] is False
-    assert out[2]["plan"] == "Station restart in 27\u00a0min at the latest"
+    assert out[2]["plan"] == "Station restart in 27min at the latest"
     assert out[3]["plan"] is None
     assert out[4]["subject"] == 2 and out[5]["plan"] is None and out[5]["subject"] is None
     days = run_ui([("onocoy", maint), ("onocoy", maint_quiet)])
@@ -1196,10 +1197,10 @@ def test_survey_pauses_without_data_on_both_pages():
                   ("statusPos", [{"surveying": False, "position_known": False}, True]),
                   ("statusPos", [{"surveying": False, "position_known": True}, True]),
                   ("statusPos", [{"surveying": False}, True])])
-    assert out[0] == "Surveying, about 11\u00a0min left. Then lock it."
+    assert out[0] == "Surveying, about 11min left. Then lock it."
     assert out[1] == "Surveying, paused while no corrections arrive."
     assert out[2].startswith("Locked.") and out[3].startswith("Fixed (typed in).") and out[4] == "No position yet."
-    assert out[5] == "Surveying, 11\u00a0min left" and out[6] == "Surveying, paused"
+    assert out[5] == "Surveying, 11min left" and out[6] == "Surveying, paused"
     # After a survey that found nothing the Status page says what the Receiver page says; "Not locked" only for a
     # position the station has (or from a firmware that does not say).
     assert out[7] == "No position yet" and out[8] == "Not locked" and out[9] == "Not locked"
@@ -1214,12 +1215,15 @@ SIG = {"best_sys": "galileo", "best_bands": 4, "e6_lost": False, "epoch_age_ms":
 
 
 def test_signals_card_headline_and_hints():
-    """The Signals card: the best constellation while observations arrive, how long they have been missing when they
-    stop (never "No signals yet" after a stall). The hints are the antenna check's, from the signal summary: QZSS never
-    counts as the best; E6 lost, no GLONASS and a refused 1230 are added when they apply."""
+    """The Signals card: the constellations with the most bands while observations arrive, how long they have been
+    missing when they stop (never "No signals yet" after a stall). The hints are the antenna check's, from the signal
+    summary: QZSS never counts; E6 lost, no GLONASS and a refused 1230 are added when they apply."""
     stale = {**SIG, "epoch_age_ms": 37000}
-    out = run_ui([("headline", SIG), ("headline", stale), ("headline", {"epoch_age_ms": None, "systems": []})])
-    assert out == ["Galileo · 4 bands", "No signals for 37\u00a0s", "No signals yet"]
+    bds = {**SIG, "systems": SIG["systems"] + [{"sys": "beidou", "satellites": 8, "bands": ["l1", "l2", "l5", "l6"],
+                                                "cnr_dbhz": {"l1": 42}}]}
+    out = run_ui([("headline", SIG), ("headline", stale), ("headline", {"epoch_age_ms": None, "systems": []}),
+                  ("headline", bds)])
+    assert out == ["4 bands on Galileo", "No signals for 37s", "No signals yet", "4 bands on Galileo and BeiDou"]
     no_e6 = {**SIG, "best_bands": 3, "systems": [s if s["sys"] != "galileo" else {**s, "bands": ["l1", "l2", "l5"]}
                                                  for s in SIG["systems"] if s["sys"] != "qzss"]}
     lost = {**SIG, "e6_lost": True}
@@ -1227,8 +1231,9 @@ def test_signals_card_headline_and_hints():
     refused = {**SIG, "rtcm1230_supported": False}
     good, bad3, e6, glo, r1230 = run_ui([("sigChecks", [x, 7]) for x in (SIG, no_e6, lost, no_glo, refused)])
     line = lambda r: [[i[0], i[3]] for i in r["items"]]
-    # One line each; the 4 bands are the headline's, not a hint as well.
-    assert line(good) == [["ok", "32 satellites tracked"], ["ok", "Strong signals (43\u00a0dB\u2011Hz on L1)"]] and good["ok"] is True
+    # One line each, the bands too (the card shows these lines instead of a headline).
+    assert line(good) == [["ok", "32 satellites tracked"], ["ok", "Strong signals (43\u00a0dB\u2011Hz on L1)"],
+                          ["ok", "4 bands on Galileo"]] and good["ok"] is True
     assert line(bad3)[2] == ["warn", "Onocoy needs 4 bands: signal group 3 6 adds Galileo E6"] and bad3["ok"] is False
     # Galileo short of E6 with 3 6 already applied: not that group again, the antenna. The group not read yet: the
     # plain line.
@@ -1238,6 +1243,38 @@ def test_signals_card_headline_and_hints():
     assert line(e6)[-1] == ["bad", "Galileo E6 lost: it was tracked before with this signal group"] and e6["ok"] is False
     assert line(glo)[-1] == ["warn", "No GLONASS: Onocoy's quality score needs it"]
     assert line(r1230)[-1] == ["warn", "Message 1230 refused: GLONASS does not count for Onocoy"]
+
+
+def test_times_have_no_space_before_their_unit():
+    """Durations as 17s, 4min 10s, 23h 39min, 2d 3h; milliseconds as 420ms and 1.5s (minutes stay "min": "m" is
+    metres on the Receiver page)."""
+    out = run_ui([("dur", x) for x in (17, 250, 85140, 183600)] + [("ms", x) for x in (420, 1500)])
+    assert out == ["17s", "4min 10s", "23h 39min", "2d 3h", "420ms", "1.5s"]
+
+
+def test_update_card_trial_and_receiver_lines():
+    """The trial line names its stage and gives the whole trial's time (the stage's own while another follows); the
+    receiver line, with nothing offered, compares its build with the latest release's package."""
+    out = run_ui([("trial", {"stage": "confirming", "left_s": 15, "ends_in_s": 86415}),
+                  ("trial", {"stage": "verifying", "left_s": 552, "ends_in_s": 86100}),
+                  ("trial", {"stage": "watching", "left_s": 85140, "ends_in_s": 85140}),
+                  ("trial", {"stage": "confirming", "left_s": 15, "ends_in_s": 15}),   # same image: no crash watch
+                  ("trial", {"stage": "watching", "left_s": 600})])                   # a firmware without ends_in_s
+    assert out == ["On trial, 1d left: confirming the start (15s).",
+                   "On trial, 23h 55min left: verifying it works as before (9min 12s).",
+                   "On trial, 23h 39min left: watching for crashes.",
+                   "On trial, 15s left: confirming the start.",
+                   "On trial, 10min left: watching for crashes."]
+    app = {"latest": "v0.1.1", "dev_build": False}
+    rx = {"running": "R4.10Build25164", "running_build": 25164}
+    out = run_ui([("gnssRel", [{**rx, "release": "R4.10Build18975", "release_build": 18975}, app]),
+                  ("gnssRel", [{**rx, "release": "R4.10Build25164", "release_build": 25164}, app]),
+                  ("gnssRel", [{**rx, "release": None, "release_build": None}, app]),
+                  ("gnssRel", [{**rx, "release": None}, {"latest": None, "dev_build": False}]),
+                  ("gnssRel", [{**rx, "release": "R4.10Build18975", "release_build": 18975}, {"dev_build": True}])])
+    assert out == ["Up to date: newer than R4.10Build18975 in the latest release.", "Up to date.",
+                   "The latest release has no firmware for this receiver.", "No release information yet.",
+                   "Development build: no release offers."]
 
 
 def test_position_message_waits_for_the_survey():
@@ -1305,18 +1342,18 @@ def test_comparison_lines_short_and_in_hours():
     st = status(receiver={"signal_test": {"state": "deciding", "decide_left_s": 86000, "group": {"master": 7, "slave": 0}}})
     line, sw, idle, notice = run_ui([("sgtLine", measuring), ("sgtLine", switching), ("sgtLine", {"state": "idle"}),
                                      ("sgtNotice", st)])
-    assert line == "Group 1 of 2, 3 6 (Galileo E6): measuring, about 25\u00a0min left."
+    assert line == "Group 1 of 2, 3 6 (Galileo E6): measuring, about 25min left."
     assert sw == "Switching the receiver to 7 0 (most signals). Corrections pause briefly."
     assert idle is None
     # The notice says what the top card says, in one line.
     assert notice[1] == "Choose a signal group"
-    assert notice[2] == "With no choice the old group comes back in about 24\u00a0h." and " 1 d" not in notice[2]
+    assert notice[2] == "With no choice the old group comes back in about 24h." and " 1 d" not in notice[2]
     # Elsewhere a running comparison is one title and a few words.
     running = status(receiver={"signal_test": {"state": "measuring", "phase": 1, "left_s": 300, "group": {"master": 7, "slave": 0}}})
     switching = status(receiver={"signal_test": {"state": "switching", "phase": 0, "left_s": 0, "group": {"master": 3, "slave": 6}}})
     n, sw = run_ui([("sgtNotice", running), ("sgtNotice", switching)])
     assert n[1] == "Comparing signal groups"
-    assert n[2] == "Group 2 of 2, about 5\u00a0min left."
+    assert n[2] == "Group 2 of 2, about 5min left."
     assert sw[2] == "Corrections pause briefly."
 
 
@@ -1414,7 +1451,7 @@ def test_system_wifi_chip_and_recovery_line():
                   ("recoveryHint", None)])
     assert out[:4] == [["Not set up", "plain"], ["Online", "ok"], ["Connecting", "warn"], ["Offline", "bad"]]
     # One line under the admin password: what to do, no paragraph (the login page has the steps in full).
-    assert out[4] == "Forgot it? Hold BOOT for 10 s, then join the setup hotspot and open http://192.168.4.1/."
+    assert out[4] == "Forgot it? Hold BOOT for 10s, then join the setup hotspot and open http://192.168.4.1/."
     # Logs' Wi-Fi: a row each, no value joined to the next with a dot (a wrapped line never starts with one). The
     # signal's words are the casters harness's (it has a DOM).
     net = {"online": True, "ssid": "Home", "rssi": -61}
@@ -1427,7 +1464,7 @@ def test_system_wifi_chip_and_recovery_line():
                     ["Transmit power", "19.5\u00a0dBm"], ["Access point can steer", "Unknown"]]
     assert not any("\u00b7" in (r[1] or "") for r in rows)
     assert bare == [["Wi-Fi", "Home"], ["Signal", None]]
-    assert off == [["Wi-Fi", "Home, offline for 1\u00a0min 30\u00a0s"]]
+    assert off == [["Wi-Fi", "Home, offline for 1min 30s"]]
     assert unset == [["Wi-Fi", "Not set up"]] and none == [["Wi-Fi", "\u2013"]]
 
 
@@ -1465,7 +1502,7 @@ def test_own_wifi_chip_warns_only_while_it_is_open_to_anyone():
 
 def test_update_check_age_in_whole_units():
     out = run_ui([("ago", s) for s in (30, 600, 5400, 7 * 3600, 3 * 86400)])
-    assert out == ["just now", "10\u00a0min ago", "2\u00a0h ago", "7\u00a0h ago", "3\u00a0days ago"]
+    assert out == ["just now", "10min ago", "2h ago", "7h ago", "3\u00a0days ago"]
 
 
 def test_update_check_failure_says_the_status_once_and_no_error_code():
@@ -1527,7 +1564,7 @@ def test_receiver_unchecked_during_maintenance_says_so():
                   ("posChip", unchecked), ("posChip", known), ("posChip", surveying)])
     # The Receiver card says it once, in a line of its own: the position row goes (None) unless the station knows it.
     assert out == [None, "No position yet.", "Locked. If the antenna moves, survey again.",
-                   "Surveying, about 10\u00a0min left. Then lock it.",
+                   "Surveying, about 10min left. Then lock it.",
                    ["Not checked", ""], ["Not applied", "warn"], ["Manual setup", ""],
                    ["Not checked", ""], ["Not locked", ""], ["Surveying", "info"]]
     r = {"rx_maintenance": True, "identity_confirmed": False, "profile_applied": False, "position_locked": False,
@@ -1539,7 +1576,7 @@ def test_receiver_unchecked_during_maintenance_says_so():
                   ("statusPos", [{**r, "surveying": True, "survey_window_left_s": 300}, True]),
                   ("statusPos", [{**r, "rx_maintenance": False}, True])])
     assert out == ["Not checked during maintenance", "Not checked during maintenance", "Locked", "No position yet",
-                   "Fixed, not applied yet", "Surveying, 5\u00a0min left", "No position yet"]
+                   "Fixed, not applied yet", "Surveying, 5min left", "No position yet"]
     out = run_ui([("fixPending", ["checking", True, False]), ("fixPending", ["checking", False, False]),
                   ("fixPending", ["checking", True, True]), ("fixPending", ["no_solution", True, False]),
                   ("fixPending", ["refused", True, False])])
@@ -1726,7 +1763,7 @@ def test_notices_one_line_one_button_worst_first():
         assert buttons == (2 if key == "update" else 1), key
     assert lines[0][3] == "Settings cannot be saved. Restart the station."
     assert lines[2][3] == "New Wi-Fi settings for Cabin not confirmed yet"
-    assert lines[3][3] == "Receiver maintenance. Ends in about 10\u00a0min."
+    assert lines[3][3] == "Receiver maintenance. Ends in about 10min."
 
 
 def test_notices_fold_after_two_but_never_the_urgent_ones():
@@ -1969,8 +2006,8 @@ def test_a_day_of_the_last_30_in_words():
                                  "rx_overflows": 1}, 0]),
                   ("dayParts", [{"down_s": [0, 5], "planned_s": [0, 0], "reconnects": [1, 0], "power_off_s": 0}, 0]),
                   ("dayParts", [{"down_s": [0], "planned_s": [0], "reconnects": [0], "power_off_s": 0, "lost_epochs": 0}, 0])])
-    assert out[0] == ["10\u00a0min 12\u00a0s offline", "1\u00a0min of it planned", "4 reconnects", "38 epochs lost",
-                      "30\u00a0min powered off", "1 receiver data overflow"]
+    assert out[0] == ["10min 12s offline", "1min of it planned", "4 reconnects", "38 epochs lost",
+                      "30min powered off", "1 receiver data overflow"]
     assert out[1] == ["1 reconnect"]
     assert out[2] == []
 

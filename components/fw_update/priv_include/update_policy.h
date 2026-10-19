@@ -84,6 +84,9 @@ bool fw_policy_app_install_allowed(const char *running, const char *offered);
 const fw_manifest_gnss_t *fw_policy_gnss_offer(const fw_manifest_t *m, const char *running, const char *model,
                                                uint32_t current_build);
 
+/** The release's package for this receiver model, offered or not (the highest build if several); NULL if none or the model is "". */
+const fw_manifest_gnss_t *fw_policy_gnss_release(const fw_manifest_t *m, const char *model);
+
 /** Transport result of a release request (fw_http.c). */
 typedef enum {
     FW_HTTP_OK = 0,

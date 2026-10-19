@@ -212,15 +212,18 @@ typedef struct {
     char running_version[32];
     fw_update_trial_t trial;
     uint32_t trial_left_s;         /**< remaining time of the current trial stage */
+    uint32_t trial_end_s;          /**< remaining time of the whole trial (to the crash watch's end), 0 without one */
     char reverted_version[32];     /**< last version rolled back, "" if none (the whole list: fw_update_get_rolled_back) */
     bool reverted_in_stage1;       /**< it rolled back in its first minute (crash or reset): offer it again */
     bool rollback_available;       /**< the other slot holds a valid image */
-    char latest_version[32];       /**< "" until a check succeeded */
+    char latest_version[32];       /**< "" until a check succeeded (kept over a restart: ota/manifest) */
     bool app_update_available;     /**< banner: newer than running, not in bad_ver, running is not a dev build */
     bool latest_rolled_back;       /**< latest_version is in ota/bad_ver: not offered, installable with a warning */
     char gnss_running[48];         /**< receiver firmware as detected */
     char gnss_latest[48];
     uint32_t gnss_latest_build;
+    char gnss_release[48];         /**< the latest release's package for the detected model, offered or not; "" = none, or no release known */
+    uint32_t gnss_release_build;
     bool gnss_update_available;    /**< banner: a higher build for the detected model, running is not a dev build */
     fw_update_gnss_block_t gnss_blocked;
     uint32_t gnss_blocked_left_s;  /**< for FW_GNSS_BLOCK_APP_TRIAL: seconds until the trial ends */

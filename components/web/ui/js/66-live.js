@@ -454,23 +454,25 @@ function receptionChecks(d) {
     items.push(['bad', title, 'Weak. Check the antenna, its cable and its connectors.',
       (c ? 'Weak signals' + db : 'Signal strength unknown') + ': check the antenna and its cable', 'cnr']);
   }
-  let best = null, bestN = 0;
-  for (const s of t.systems || []) {
-    const n = Object.keys(s.bands || {}).filter(b => s.bands[b] > 0).length;
-    if (REWARDED.indexOf(s.sys) >= 0 && n > bestN) {
-      best = s.sys;
-      bestN = n;
-    }
-  }
+  const most = mostBands((t.systems || []).map(s => ({ sys: s.sys, n: Object.keys(s.bands || {}).filter(b => s.bands[b] > 0).length })));
+  const bestN = most.n;
   if (bestN >= RX_CHECK.bands) {
-    items.push(['ok', lbl(L.sys, best) + ': ' + bestN + ' bands', '4 bands on one constellation: the most this receiver can reach.',
-      bestN + ' bands on ' + lbl(L.sys, best), 'bands']);
+    items.push(['ok', most.names + ': ' + bestN + ' bands', '4 bands on one constellation: the most this receiver can reach.',
+      bestN + ' bands on ' + most.names, 'bands']);
   } else {
-    items.push(['warn', best ? 'Best: ' + lbl(L.sys, best) + ' with ' + bestN + (bestN === 1 ? ' band' : ' bands') : 'No bands yet',
+    items.push(['warn', bestN ? 'Best: ' + most.names + ' with ' + bestN + (bestN === 1 ? ' band' : ' bands') : 'No bands yet',
       'Onocoy\'s quality score needs 4 bands on one constellation. The signal group in Receiver settings sets them; ' +
       'right after a start this can take a minute.', 'Onocoy needs 4 bands: change the signal group in Receiver settings', 'bands']);
   }
   return { items: items, ok: items.every(i => i[0] === 'ok') };
+}
+
+/* The constellations Onocoy rewards that have the most bands (list: [{sys, n}]): {n, names: "Galileo and BeiDou"}. */
+function mostBands(list) {
+  const rewarded = list.filter(x => REWARDED.indexOf(x.sys) >= 0 && x.n > 0);
+  const n = rewarded.reduce((m, x) => Math.max(m, x.n), 0);
+  const names = rewarded.filter(x => x.n === n).map(x => lbl(L.sys, x.sys));
+  return { n: n, names: names.length > 1 ? names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1] : names[0] || '' };
 }
 
 const CHECK_ICON = { ok: '✓', warn: '!', bad: '✕' };

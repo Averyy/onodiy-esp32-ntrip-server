@@ -427,7 +427,7 @@ function diagReceiverCard(g, preview) {
       ['Part number', r.pn],
       ['Chip ID', r.efuse_id],
       /* responding: it streams, or it answered since its corrections stopped (a reply, its NMEA). */
-      ['Answers', g.restarting ? h('span', { class: 't-warn' }, 'Restarting, back in about 10 s') : fmt.yesno(g.responding)],
+      ['Answers', g.restarting ? h('span', { class: 't-warn' }, 'Restarting, back in about 10s') : fmt.yesno(g.responding)],
       /* Not checked during maintenance: no "No" that reads as a failed check. */
       ['Identity confirmed', gnssUnchecked(g) ? DASH : fmt.yesno(g.identity_confirmed)],
     ])),

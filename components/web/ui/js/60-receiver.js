@@ -678,8 +678,8 @@ function receiverForms(g, latest, done, onCompare, fold) {
     'listed above; a pair the receiver refuses is undone.');
   const sid = numInput(p.station_id, { inputmode: 'numeric', maxlength: 4 });
   const baud = selectInput(BAUDS.map(b => [b, b + ' baud' + (b === DEFAULT_BAUD ? ' (default)' : '')]), p.com1_baud);
-  const satView = checkbox('Sky map', p.sat_view_output, 'On (default): the receiver sends where each satellite is every 10' + NB +
-    's, so the Receiver page shows them on a sky map. Off: no sky map.');
+  const satView = checkbox('Sky map', p.sat_view_output, 'On (default): the receiver sends where each satellite is every 10s, so ' +
+    'the Receiver page shows them on a sky map. Off: no sky map.');
   const antModel = textInput(p.antenna_model || '', { maxlength: 64, class: 'ant' });
   const antSerial = textInput(p.antenna_serial || '', { maxlength: 64 });
   const antSetup = numInput(p.antenna_setup_id || 0, { inputmode: 'numeric', maxlength: 3 });
@@ -801,7 +801,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
     summary.textContent = !n ? 'No messages: the receiver sends no corrections.' : (onocoy ? 'The Onocoy set: ' : '') +
       n + (n === 1 ? ' message' : ' messages') + (!each ? '.' : n === 1 ? ', every second.' : ', each every second.');
     patch(msgList, list.filter(x => x[0]).map(x => h('li', null, h('b', null, String(x[0])), ' ' + rtcmName(x[0]),
-      x[1] !== 1 ? ' · every ' + x[1] + NB + 's' : '')));
+      x[1] !== 1 ? ' · every ' + x[1] + 's' : '')));
   };
   function addRow(msgNo, period) {
     const m = numInput(msgNo, { inputmode: 'numeric', maxlength: 4, 'aria-label': 'Message number' });
@@ -1050,7 +1050,7 @@ const SGT_MINUTES = [[15, '15 minutes'], [30, '30 minutes'], [60, '1 hour'], [12
 const SGT_RUNNING = ['switching', 'settling', 'measuring', 'deciding', 'restoring'];
 
 /* Hours left to choose, rounded up ("24 h"). */
-const sgtHours = s => Math.max(1, Math.ceil((s || 0) / 3600)) + NB + 'h';
+const sgtHours = s => Math.max(1, Math.ceil((s || 0) / 3600)) + 'h';
 
 /** What a running comparison does now, in one line (null when idle or deciding). */
 function sgtLine(t) {

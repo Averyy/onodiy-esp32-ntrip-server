@@ -2039,6 +2039,7 @@ void web_build_update(wj_t *w, const web_update_snap_t *u)
     wj_obj_open(w, "trial");
     wj_str(w, "stage", web_fw_trial_name(f->trial));
     wj_uint(w, "left_s", f->trial == FW_TRIAL_NONE ? 0 : f->trial_left_s);
+    wj_uint(w, "ends_in_s", f->trial == FW_TRIAL_NONE ? 0 : f->trial_end_s);
     wj_obj_close(w);
     wj_bool(w, "rollback_available", f->rollback_available);
     wj_obj_close(w);
@@ -2057,6 +2058,12 @@ void web_build_update(wj_t *w, const web_update_snap_t *u)
         wj_uint(w, "latest_build", f->gnss_latest_build);
     } else {
         wj_null(w, "latest_build");
+    }
+    wj_str_or_null(w, "release", f->gnss_release);
+    if (f->gnss_release_build != 0) {
+        wj_uint(w, "release_build", f->gnss_release_build);
+    } else {
+        wj_null(w, "release_build");
     }
     wj_bool(w, "available", f->gnss_update_available);
     wj_str(w, "blocked", web_gnss_block_name(f->gnss_blocked));
