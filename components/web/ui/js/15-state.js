@@ -443,11 +443,11 @@ function stationState(s, admin) {
  * (stationState's rx) by RX_WORD; Onocoy's quality by what it misses.
  */
 const STATE_WORD = {
-  safe_mode: 'Safe mode', journal: 'Needs you', settings: 'Settings error', updating: 'Updating', uart_closed: 'Port closed',
+  safe_mode: 'Safe mode', journal: 'Needs attention', settings: 'Settings error', updating: 'Updating', uart_closed: 'Port closed',
   no_receiver: 'No receiver', rx_stopped: { bad: 'Not streaming', warn: 'Recovering' },
   no_satellites: { bad: 'Not streaming', warn: 'Recovering' }, no_rtcm: { bad: 'Not streaming', warn: 'Recovering' },
-  stopped: 'Server stopped', maintenance: 'Maintenance', signal_test: { warn: 'Needs you', info: 'Comparing' },
-  wifi_trial: 'Trying Wi-Fi', held: 'Needs you', receiver: null, onocoy_setup: 'Not set up', no_caster: 'No server',
+  stopped: 'Server stopped', maintenance: 'Maintenance', signal_test: { warn: 'Needs attention', info: 'Comparing' },
+  wifi_trial: 'Trying Wi-Fi', held: 'Needs attention', receiver: null, onocoy_setup: 'Not set up', no_caster: 'No server',
   casters_down: { bad: 'Not streaming', warn: 'Partly streaming' }, fixed_far: 'Wrong position', quality: null,
   streaming: 'Streaming',
 };
