@@ -959,7 +959,9 @@ Views.ntrip = {
     function addBody() {
       const free = freeSlots();
       if (editor && free.some(x => x.slot === editing)) return [editor.el];
-      const head = cardHead('More servers', badge(free.length + ' of ' + data.max_slots + ' slots free', ''));
+      /* Not set up while no server besides Onocoy is; then how many slots are free. */
+      const others = data.slots.filter(x => !isFree(x) && !(x.config && isOnocoySlot(x.config))).length;
+      const head = cardHead('More servers', badge(!others ? 'Not set up' : free.length + ' of ' + data.max_slots + ' slots free', ''));
       if (!free.length) return [head, h('p', null, 'Every slot is in use. Edit a server to replace it.')];
       return [head, h('p', null, 'Stream to another NTRIP server as well.'),
         h('div', { class: 'form-actions' }, btn('Add a server', () => edit(free[0]), free.length === data.slots.length ? 'primary' : ''))];
@@ -1101,14 +1103,21 @@ Views.ntrip = {
       if (isFree(s)) {
         if (addCard) fillAdd();
       } else {
-        /* Its editor takes the whole row. */
-        cards[n].classList.toggle('wide', editing === n);
         mount(cards[n], cardBody(s));
       }
+      sizeCards();
     }
 
-    /* The page's heading (the view's title) says "NTRIP"; then one card per server, two side by side on a wide
-     * screen (an editor takes the whole row), the add card and Your rover's, the whole row. Safe mode: the page-wide
+    /* Two server cards side by side on a wide screen; the whole row for an open editor, and for a card that would
+     * otherwise sit alone on its row (one server, or the last of an odd count). */
+    function sizeCards() {
+      const rest = data.slots.filter(x => !isFree(x) && x.slot !== editing && cards[x.slot]);
+      const alone = rest.length % 2 ? rest[rest.length - 1].slot : null;
+      for (const k of Object.keys(cards)) cards[k].classList.toggle('wide', Number(k) === editing || Number(k) === alone);
+    }
+
+    /* The page's heading (the view's title) says "NTRIP"; then one card per server (sizeCards), the add card and the
+     * local server's, the whole row. Safe mode: the page-wide
      * notice says it, each card says "Not loaded", and there is no add card and no rover card. */
     function render() {
       for (const k of Object.keys(cards)) delete cards[k];
@@ -1116,7 +1125,8 @@ Views.ntrip = {
       if (addCard) fillAdd();
       roverCard = rover ? h('section', { class: 'card wide' }, roverBody()) : null;
       mount(el, h('div', { class: 'grid' }, data.slots.filter(s => !isFree(s)).map(s =>
-        (cards[s.slot] = h('section', { class: editing === s.slot ? 'card wide' : 'card' }, cardBody(s)))), addCard, roverCard));
+        (cards[s.slot] = h('section', { class: 'card' }, cardBody(s)))), addCard, roverCard));
+      sizeCards();
     }
 
     async function load() {
