@@ -356,7 +356,7 @@ function bandsRow(g) {
   const muted = t => ['Bands configured', h('span', { class: 'muted' }, t)];
   if (b.state === 'refused') return muted('Not reported by this firmware');
   if (b.state === 'unread') return muted('Unknown');
-  if (b.state !== 'ok') return muted('Known after the next configuration');
+  if (b.state !== 'ok') return muted('After the next configuration');
   const list = [];
   (b.systems || []).filter(x => (x.signals || []).length).forEach((x, i) => list.push(i ? ' · ' : '',
     h('span', { title: (BAND_SYS[x.sys] || x.sys) + ': ' + x.signals.join(', ') }, (BAND_SYS[x.sys] || x.sys) + ' ' + x.bands)));
@@ -421,18 +421,18 @@ function diagReceiverCard(g, preview) {
   const desc = d.valid ? descriptorRows(d, r, rs.valid ? ant : null) : { rows: [], matches: false };
   return h('section', { class: 'card wide tight-kv' }, h('h2', null, 'Receiver'), h('div', { class: 'parts' },
     part('Identity', kv([
-      ['Model', r.valid === false ? h('span', { class: 'muted' }, 'Not identified yet') : [r.model || DASH, ' · ', fwText(r.firmware, r.build)]],
+      ['Model', r.valid === false ? h('span', { class: 'muted' }, 'Not identified yet') : r.model || DASH],
+      r.valid === false ? null : ['Firmware', [fwText(r.firmware, r.build), r.compile_date ? h('span', { class: 'muted' }, ' · ' + r.compile_date) : null]],
       ['Serial number', r.serial],
       ['Part number', r.pn],
       ['Chip ID', r.efuse_id],
-      ['Firmware date', r.compile_date],
       /* responding: it streams, or it answered since its corrections stopped (a reply, its NMEA). */
       ['Answers', g.restarting ? h('span', { class: 't-warn' }, 'Restarting, back in about 10 s') : fmt.yesno(g.responding)],
       /* Not checked during maintenance: no "No" that reads as a failed check. */
       ['Identity confirmed', gnssUnchecked(g) ? DASH : fmt.yesno(g.identity_confirmed)],
     ])),
-    part('Read from the receiver' + (when ? ' ' + when : ''), rs.valid ? null :
-      h('p', { class: 'muted small' }, 'Read at each configuration; unknown until the next one.'), kv([
+    part('Read from the receiver' + (when ? ' ' + when : ''), kv([
+      rs.valid ? null : ['Settings', h('span', { class: 'muted' }, 'Read at the next configuration')],
       rs.valid ? ['B1C/B2a output', lbl(SETTING, rs.b1cb2a || 'unknown')] : null,
       rs.valid ? ['Multipath mitigation', lbl(SETTING, rs.mmp || 'unknown')] : null,
       rs.valid ? ['Elevation mask', rs.mask_deg === null || rs.mask_deg === undefined ? 'Unknown' : Number(rs.mask_deg).toFixed(1) + '°'] : null,
@@ -493,7 +493,7 @@ function overviewTab(box) {
         kv([
           ['Running for', fmt.dur(hl.uptime_s)],
           ['Time', dev.time_source && dev.time_source !== 'none' && dev.time_unix ?
-            fmt.time(dev.time_unix) + ' (' + lbl(L.timeSource, dev.time_source) + ')' : h('span', { class: 't-warn' }, 'Not known yet')],
+            fmt.time(dev.time_unix) : h('span', { class: 't-warn' }, 'Not known yet')],
           ['Starts since power-on', fmt.num(b.boots_since_power_on)],
           ['Crashes counted', fmt.num(b.crashes)],
           ['Brownouts since power-on', fmt.num(b.brownouts_since_power_on)],

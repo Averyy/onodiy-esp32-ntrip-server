@@ -64,12 +64,13 @@ function wifiStatus(w) {
 }
 
 /* The setup hotspot (the station's access point) in a few rows: its name and password, while it is open why, where and who. */
-function apStatus(w) {
+function apStatus(w, onPassword) {
   const ap = w.ap || {};
+  const pwLink = h('button', { type: 'button', class: 'linkbtn', onclick: onPassword }, ap.password_set ? 'change' : 'set password');
   const close = typeof ap.close_in_s === 'number' ? ap.close_in_s : ap.recovery_left_s || null;
   return kv([
     ['Network name', ap.ssid],
-    ['Password', ap.password_set ? 'Set' : h('span', { class: 't-warn' }, 'None: anyone nearby can join')],
+    ['Password', [ap.password_set ? 'Set' : h('span', { class: 't-warn' }, 'None'), ' (', pwLink, ')']],
     ap.active ? ['Open because', (ap.reasons || []).map(r => lbl(L.apReason, r)).join(', ') || DASH] : null,
     ap.active ? ['Address on it', h('a', { href: 'http://192.168.4.1/' }, 'http://192.168.4.1/')] : null,
     ap.active && w.mdns_host ? ['Web address on it', h('a', { href: 'http://' + w.mdns_host + '.local/' }, 'http://' + w.mdns_host + '.local/')] : null,
@@ -102,9 +103,8 @@ const systemPart = {
       const ap = apChip(w.ap || {});
       apBadge.className = 'badge ' + ap[1];
       apBadge.textContent = ap[0];
-      mount(apBody, apStatus(w));
+      mount(apBody, apStatus(w, openAp));
       apBox.hidden = false;
-      apOpen.textContent = (w.ap || {}).password_set ? 'Change password' : 'Set a password';
       apClear.hidden = !(w.ap || {}).password_set;
       showPending(w);
     };
@@ -204,7 +204,7 @@ const systemPart = {
         clear(joinBox);
         changeBtn.hidden = false;
       }), go)));
-    });
+    }, 'small');
 
     /*
      * Follow a change of network made on this page (or a retry of pending
@@ -303,13 +303,12 @@ const systemPart = {
       apField.error(null);
       apErr.hidden = true;
       apForm.hidden = true;
-      apOpen.hidden = false;
     };
-    const apOpen = btn('Change password', () => {
+    /* The Password row's link opens the field under the rows. */
+    function openAp() {
       apForm.hidden = false;
-      apOpen.hidden = true;
       apPw.focus();
-    });
+    }
     const apClear = btn('Remove password', async () => {
       const ok = await dialog({ title: 'Remove the password?', ok: 'Remove', okKind: 'danger solid',
         body: h('p', null, 'Anyone nearby can then join the setup hotspot while it is open.') });
@@ -336,22 +335,25 @@ const systemPart = {
         toast('Password set.', 'ok');
         load();
       }
-    } }, apField.el, apErr, h('div', { class: 'form-actions' }, btn('Cancel', () => {
-      apShut();
-      apOpen.focus();
-    }), apClear, apSet));
+    } }, apField.el, apErr, h('div', { class: 'form-actions' }, btn('Cancel', () => apShut()), apClear, apSet));
     const apBox = h('div', { class: 'subcard sect', 'data-k': 'hotspot', hidden: true },
       h('div', { class: 'card-head' }, h('h3', null, 'Setup hotspot'), apBadge),
       h('p', { class: 'muted small' }, 'Opens for first setup, when the station cannot reach your Wi-Fi, and after BOOT is held.'),
-      apBody, h('div', { class: 'form-actions' }, apOpen), apForm);
+      apBody, apForm);
 
     /* ---- The station's name and public status page, in the Network card: its own Save once something changed ---- */
     const deviceBox = h('div', { class: 'subcard sect', hidden: true });
-    const netCard = h('section', { class: 'card' }, cardHead('Network', wifiBadge), wifiBody, pendingBox,
-      h('div', { class: 'form-actions' }, changeBtn), joinBox, deviceBox, apBox);
+    const netHead = cardHead('Network', h('div', { class: 'tools' }, wifiBadge, changeBtn));
+    netHead.classList.add('fit');
+    const netCard = h('section', { class: 'card' }, netHead, wifiBody, pendingBox, joinBox, deviceBox, apBox);
     function renderDevice() {
-      const name = textInput(sys.hostname, { maxlength: 32 });
-      const fName = field('Station name', name, 'Letters, digits and "-"; also its web address.');
+      const name = textInput(sys.hostname, { maxlength: 32, autocapitalize: 'off', spellcheck: 'false' });
+      /* Only what a web address takes: anything else is dropped as it is typed or pasted. */
+      name.addEventListener('input', () => {
+        const v = name.value.replace(/[^A-Za-z0-9-]/g, '');
+        if (v !== name.value) name.value = v;
+      });
+      const fName = field('Station name', name);
       const pub = checkbox('Public status page', sys.public_status, 'Anyone on your network sees the station state without a login.');
       const err = errBox();
       const save = h('button', { type: 'submit', class: 'btn primary', hidden: true }, 'Save');

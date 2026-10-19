@@ -28,7 +28,7 @@
  * choice is hidden while another enabled slot streams to Onocoy. A slot
  * saved without a host and not enabled is empty again, stored without a name.
  *
- * After the servers, the card "Your rover": the station's own corrections
+ * After the servers, the card "Local server": the station's own corrections
  * for the owner's rover on the home network (GET/PUT /api/local-caster; the
  * page never calls it a caster or a server).
  */
@@ -321,8 +321,9 @@ function casterEditor(entry, opts) {
   const mpHint = F.mountpoint.el.querySelector('.hint');
   const paceHint = F.backoff_profile.el.querySelector('.hint');
   /* A preset's host and port: text where Other server has its field. */
-  const fixedText = h('div', { class: 'fixed-value' });
-  const fixedField = h('div', { class: 'field' }, h('span', { class: 'lbl' }, 'Host and port'), fixedText);
+  /* A preset's host and port: a field that cannot be edited, so the form reads alike for every server. */
+  const fixedText = h('input', { type: 'text', disabled: true });
+  const fixedField = h('div', { class: 'field' }, h('label', null, h('span', { class: 'lbl' }, 'Host and port'), fixedText));
   /* TLS, and its certificate check while it is on. */
   const tlsField = h('div', { class: 'field' }, h('span', { class: 'lbl' }, 'TLS'), h('div', { class: 'fixed-value' }, tls.el),
     F.trust.el);
@@ -400,7 +401,7 @@ function casterEditor(entry, opts) {
     presetHelp(kind, help);
     F.host.el.hidden = !custom;
     fixedField.hidden = custom;
-    fixedText.textContent = fixedHost + ':' + fixedPort;
+    fixedText.value = fixedHost + ':' + fixedPort;
     mpHint.hidden = !ono;
     F.username.el.hidden = !ono && !v2();
     own.hidden = !custom;
@@ -792,8 +793,7 @@ function roverSummary(d, s) {
   const c = d.config, st = d.status || {}, port = st.port || 2101;
   const hosts = roverHosts(s && s.network);
   if (!c.enabled) {
-    return [h('p', { class: 'muted' }, 'Off. When on, a rover on your home network gets corrections from the station' +
-      (hosts.length ? ' at ' + hosts[0] + ':' + port : '') + ', no internet needed.')];
+    return [h('p', { class: 'muted' }, 'Stream location data locally so a rover or device can use it on your network without internet.')];
   }
   const list = st.clients || [], n = list.length, rf = st.refused || {}, wrong = (rf.login || 0) + (rf.throttled || 0);
   const line = st.state === 'error' ? ['bad', 'Not listening on port ' + port + ' (error ' + st.listen_errno + '). ' +
@@ -848,7 +848,7 @@ function roverEditor(cfg, opts) {
     save();
   }, oninput: () => {
     dirty = true;
-  } }, h('div', { class: 'card-head' }, h('h2', null, 'Your rover')), opts.turnOn ? h('p', null, 'Choose a password first.') : null,
+  } }, h('div', { class: 'card-head' }, h('h2', null, 'Local server')), opts.turnOn ? h('p', null, 'Choose a password first.') : null,
   h('div', { class: 'cols c3' }, F.mountpoint.el, F.username.el, F.password.el), err,
   h('div', { class: 'form-actions' }, saveBtn, btn('Cancel', () => opts.onCancel(), 'ghost')));
 
@@ -873,7 +873,7 @@ function roverEditor(cfg, opts) {
       const d = await busy(saveBtn, () => api('PUT', '/api/local-caster', body));
       dirty = false;
       pw.value = '';
-      toast(opts.turnOn ? 'Saved. Corrections for your rover are on.' : 'Saved.', 'ok');
+      toast(opts.turnOn ? 'Saved. The local server is on.' : 'Saved.', 'ok');
       opts.onSaved(d);
     } catch (e) {
       if (e instanceof ApiError && e.code === 'invalid_field' && F[e.field]) {
@@ -953,20 +953,20 @@ Views.ntrip = {
       ];
     }
 
-    /* The card after the servers: how many slots are free and "Add a server" (its editor opens in place). The main
-     * button only while there is no server yet: otherwise a server's own action (or an editor's Save) is the one. */
+    /* The card after the servers, laid out as a server's: its title and how many slots are free, one line, and "Add a
+     * server" (its editor opens in place). The main button only while there is no server yet: otherwise a server's own
+     * action (or an editor's Save) is the one. */
     function addBody() {
       const free = freeSlots();
       if (editor && free.some(x => x.slot === editing)) return [editor.el];
-      if (!free.length) return [h('p', { class: 'muted' }, 'All ' + data.max_slots + ' slots are in use. Edit a server to replace it.')];
-      return [h('div', { class: 'form-actions' }, h('span', { class: 'note muted' }, free.length + ' of ' + data.max_slots + ' slots free.'),
-        btn('Add a server', () => edit(free[0]), free.length === data.slots.length ? 'primary' : ''))];
+      const head = cardHead('More servers', badge(free.length + ' of ' + data.max_slots + ' slots free', ''));
+      if (!free.length) return [head, h('p', null, 'Every slot is in use. Edit a server to replace it.')];
+      return [head, h('p', null, 'Stream to another NTRIP server as well.'),
+        h('div', { class: 'form-actions' }, btn('Add a server', () => edit(free[0]), free.length === data.slots.length ? 'primary' : ''))];
     }
 
-    /* The add card beside an odd server out on a wide screen; the whole row after an even count or with its editor open. */
+    /* The add card: the whole row. */
     function fillAdd() {
-      const n = data.slots.filter(s => !isFree(s)).length;
-      addCard.classList.toggle('wide', n % 2 === 0 || freeSlots().some(x => x.slot === editing));
       mount(addCard, addBody());
     }
 
@@ -1025,9 +1025,9 @@ Views.ntrip = {
       if (roverEd) return [roverEd.el];
       roverLive = h('div', { class: 'caster-live fit-kv' });
       fillRover();
-      return [h('div', { class: 'card-head switch-head' }, h('h2', null, 'Your rover'),
+      return [h('div', { class: 'card-head switch-head' }, h('h2', null, 'Local server'),
         btn('Edit', () => editRover(false), 'small', { 'aria-label': 'Edit your rover' }),
-        onOffSwitch(!!rover.config.enabled, 'Corrections for your rover', turnRover)), roverLive];
+        onOffSwitch(!!rover.config.enabled, 'Local server', turnRover)), roverLive];
     }
 
     function fillRover() {
@@ -1078,7 +1078,7 @@ Views.ntrip = {
         } catch (e2) { /* the card stays as it was */ }
         return !!rover && rover.config.enabled === on;
       }
-      toast(on ? 'Corrections for your rover are on.' : 'Corrections for your rover are off.', 'ok');
+      toast(on ? 'The local server is on.' : 'The local server is off.', 'ok');
       fillRover();
       return true;
     }
@@ -1112,7 +1112,7 @@ Views.ntrip = {
      * notice says it, each card says "Not loaded", and there is no add card and no rover card. */
     function render() {
       for (const k of Object.keys(cards)) delete cards[k];
-      addCard = safeMode() ? null : h('section', { class: 'card' });
+      addCard = safeMode() ? null : h('section', { class: 'card wide' });
       if (addCard) fillAdd();
       roverCard = rover ? h('section', { class: 'card wide' }, roverBody()) : null;
       mount(el, h('div', { class: 'grid' }, data.slots.filter(s => !isFree(s)).map(s =>

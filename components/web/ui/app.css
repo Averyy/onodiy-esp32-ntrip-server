@@ -702,7 +702,7 @@ input:disabled, select:disabled { opacity: 0.65; }
 .rows > :not([hidden]) ~ :not([hidden]) { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
 .rows > * > * + * { margin-top: 0.6rem; }
 /* A titled list as a part (Updates: Install manually): the title is the part's first line. */
-.rows > * > .sub:first-child { margin-top: 0; }
+.rows > * > .sub:first-child { margin-top: 0.5rem; }
 /* Tools in a card's title row that act on its list (Refresh, a filter): at the right, under the title on a phone. */
 .card-head > .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 /* A short title and its tools on one line, also on a phone (Updates: the last check, Check now). */
@@ -1032,14 +1032,17 @@ input.ant { white-space: normal; }
 .pgroup:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
 .pgroup > h3 { margin: 0; font-size: 1rem; }
 /* A small heading inside a card (the receiver's messages, the parts of Logs' Receiver card). */
-.sub { margin: 1rem 0 0.4rem; color: var(--muted); font-size: 0.9rem; font-weight: 650; }
+.sub { margin: 1.5rem 0 0.75rem; color: var(--muted); font-size: 0.9rem; font-weight: 650; }
 .stack > .sub:first-child { margin-top: 0; }
-/* Parts of a card side by side on a wide screen, under each other on a phone (Logs' Receiver card). */
+/* Parts of a card in two columns on a wide screen, under each other on a phone (Logs' Receiver card). */
 .parts > * > .sub:first-child { margin-top: 0; }
-.parts > * + * { margin-top: 1rem; }
+.parts > * + * { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
 @media (min-width: 1000px) {
-  .parts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 1.5rem; }
-  .parts > * + * { margin-top: 0; }
+  /* Two columns: the first part on the left, the others under each other on the right, a line between them. */
+  .parts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 1.5rem; }
+  .parts > :first-child { grid-row: span 4; }
+  .parts > * + * { margin-top: 0; padding-top: 0; border-top: 0; border-left: 1px solid var(--border); padding-left: 1.5rem; }
+  .parts > * + * + * { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
   .parts .kv { grid-template-columns: max-content minmax(0, 1fr); column-gap: 1rem; }
 }
 /* The held configuration's commands: one line each, in as many 17rem columns as the card holds. */

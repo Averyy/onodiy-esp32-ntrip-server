@@ -362,11 +362,18 @@ function skySection() {
     if (open) left.textContent = fmt.dur(Math.max(0, Math.round((deadline - Date.now()) / 1000)));
   };
   const timer = setInterval(tick, 1000);
+  /* Why the sky cannot show (block()): a banner under the card's headline, and no button that cannot work. */
+  const banner = h('div', { hidden: true });
   const syncNote = () => {
-    note.textContent = blocked || closedWhy;
+    note.textContent = blocked ? '' : closedWhy;
     note.hidden = open || !note.textContent;
-    showBtn.disabled = !!blocked;
+    mount(banner, blocked ? msg('info', blocked) : null);
+    banner.hidden = !blocked || open;
+    showBtn.hidden = open || !!blocked;
     showBtn.setAttribute('aria-describedby', note.id);
+    /* The action row goes with its last visible part (no empty gap under a banner). */
+    const row = showBtn.parentElement;
+    if (row && row.contains(note)) row.hidden = showBtn.hidden && note.hidden;
   };
 
   function show(d) {
@@ -382,7 +389,7 @@ function skySection() {
     open = !!w.open;
     if (was !== open) announce.textContent = open ? 'Sky open.' : 'Sky closed.';
     head.hidden = box.hidden = plot.hidden = list.hidden = !open;
-    showBtn.hidden = open;
+    showBtn.hidden = open || !!blocked;
     if (!open) {
       endPoll();
       const why = w.last_end && w.last_end !== 'none' && w.last_end !== 'user' ? lbl(L.liveEnd, w.last_end) : '';
@@ -447,6 +454,8 @@ function skySection() {
     start: () => start(showBtn),
     /* The window as it is (an address that asks for the sky): shown when it is open. */
     resume: () => fetchLive(),
+    banner: banner,
+    /* text: why the sky cannot show (a string or nodes), '' when it can. */
     block(text) {
       blocked = text || '';
       syncNote();
@@ -455,7 +464,6 @@ function skySection() {
       endPoll();
       open = false;
       head.hidden = box.hidden = plot.hidden = list.hidden = true;
-      showBtn.hidden = false;
       syncNote();
     },
     destroy() {

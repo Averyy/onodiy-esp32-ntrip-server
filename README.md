@@ -132,9 +132,9 @@ the receiver, and opening the receiver's USB-C does not reset it either.
 5. **Web UI** — Wi-Fi setup, NTRIP configuration, live status, firmware updates, and a
    signal/satellite view.
 6. **Health monitoring** — GNSS watchdog, auto-recovery, and data-loss counters.
-7. **Your rover** *(in progress: not yet tested with a real rover)* — a local NTRIP
+7. **Local server** *(in progress: not yet tested with a real rover)* — a local NTRIP
    caster for your own rover on the home network (NTRIP 1.0 and 2.0, one mountpoint, at
-   most 2 rovers, local addresses only); see [Your rover](#your-rover-local-ntrip).
+   most 2 rovers, local addresses only); see [Local server](#local-server-local-ntrip).
 
 ## Repository layout
 
@@ -379,7 +379,7 @@ device already uses that name the station takes `onodiy-2` and the web page
 says so), and to its IP address, which your router's device list shows under the
 station name. Settings shows both as links.
 
-## Your rover (local NTRIP)
+## Local server (local NTRIP)
 
 > [!WARNING]
 > **In progress: not yet tested with a real rover.** So far it has been tested in the
@@ -389,7 +389,7 @@ station name. Settings shows both as links.
 > open an issue with what worked and what didn't.
 
 The station can send corrections straight to your own rover on your home network,
-with no internet in between. On the **NTRIP** page, turn on **Your rover** and choose
+with no internet in between. On the **NTRIP** page, turn on **Local server** and choose
 a password. Then set the rover's NTRIP client to:
 
 | Setting | Value |

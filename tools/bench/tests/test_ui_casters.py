@@ -209,14 +209,14 @@ function inspect(root) {
   const text = e => e.textContent;
   const names = els => els.filter(e => e.tagName === 'LEGEND' || (e.tagName === 'SPAN' && e.className === 'lbl') ||
     (e.tagName === 'LABEL' && e.className === 'check')).map(e => (e.tagName === 'LABEL' ? text(e.kids[1].kids[0]) : text(e)));
-  /* A preset's host and port, as text where Other server has its field. */
-  const fixed = vis.find(e => e.className === 'fixed-value' && !e.kids.some(k => k.tagName === 'LABEL'));
+  /* A preset's host and port, in a field that cannot be edited where Other server has its own. */
+  const fixed = vis.find(e => e.tagName === 'INPUT' && e.disabled);
   const help = vis.find(e => e.tagName === 'P' && e.className === 'muted small');
   const pace = vis.find(e => e.tagName === 'SELECT' && e.options.some(o => o.v === 'polite'));
   return {
     title: text(vis.find(e => e.tagName === 'H2')),
     fields: names(vis),
-    fixed: fixed ? text(fixed) : null,
+    fixed: fixed ? fixed.value : null,
     help: help ? text(help) : null,
     hints: vis.filter(e => e.tagName === 'SMALL' && e.className === 'hint').map(text),
     values: vis.filter(e => e.tagName === 'INPUT' && e.attrs.maxlength && e.attrs.type !== 'password').map(e => e.value),
@@ -641,7 +641,7 @@ async function ntripRover(c) {
   const view = ui.ntripPage(el, '');
   await settle();
   const card = () => [...visible(el)].find(e => e.tagName === 'SECTION' && [...e.walk()].some(x => x.tagName === 'H2' &&
-    x.textContent === 'Your rover'));
+    x.textContent === 'Local server'));
   const sw = () => (card() ? [...card().walk()].find(e => e.attrs.role === 'switch') : null);
   const r = { cards: pageParts(el).cards, before: card() ? pageParts(card()) : null, cls: card() ? card().className : null,
     sw: sw() ? [sw().getAttribute('aria-checked'), sw().getAttribute('aria-label')] : null };
@@ -1596,7 +1596,7 @@ def test_casters_card_lists_counting_onocoy_first():
     assert out[-1]["actions"] == [["Add a server", "#/ntrip"]] and cas["no_slots"]["links"][0][:3] == [
         "Manage", "#/ntrip", "Manage NTRIP servers"]
     assert cas["healthy"]["links"][0][:3] == ["Manage", "#/ntrip", "Manage NTRIP servers"]
-    assert cas["safe"]["lines"] == [] and cas["safe"]["notes"] == [["Shows after safe mode.", "muted"]]
+    assert cas["safe"]["lines"] == [] and cas["safe"]["notes"] == [["Not available in safe mode.", "muted"]]
     assert pub[0]["cards"]["NTRIP"]["lines"] == ["Onocoy · Streaming", "Bench · Off"]
     assert pub[0]["cards"]["NTRIP"]["links"] == [] and pub[0]["cards"]["NTRIP"]["wide"]
     assert pub[1]["head"] == "Safe mode" and pub[1]["line"] == "The receiver and NTRIP servers are off."
@@ -1659,10 +1659,10 @@ def test_onocoy_today_forms():
     for o in ono.values():
         assert all(n[0] not in ("", "–") for n in o["notes"]), o["notes"]
     shows = {n: o["notes"] for n, o in ono.items() if o["chip"] is None}
-    assert shows == {"setup": [["Shows once Onocoy is set up.", "muted"]], "onooff_none": [["Shows while Onocoy is on.", "muted"]],
-                     "setup_rx": [["Shows once Onocoy is set up.", "muted"]], "onooff": [["Shows while Onocoy is on.", "muted"]],
-                     "safe": [["Shows after safe mode.", "muted"]], "nocasters": [["Shows once Onocoy is set up.", "muted"]],
-                     "refused": [["Shows once Onocoy is set up.", "muted"]], "alloff": [["Shows once Onocoy is set up.", "muted"]]}
+    assert shows == {"setup": [["Onocoy is not set up yet.", "muted"]], "onooff_none": [["Onocoy is turned off.", "muted"]],
+                     "setup_rx": [["Onocoy is not set up yet.", "muted"]], "onooff": [["Onocoy is turned off.", "muted"]],
+                     "safe": [["Not available in safe mode.", "muted"]], "nocasters": [["Onocoy is not set up yet.", "muted"]],
+                     "refused": [["Onocoy is not set up yet.", "muted"]], "alloff": [["Onocoy is not set up yet.", "muted"]]}
     assert all(ono[n]["rows"] == [] for n in shows)
     # The top card's button sets Onocoy up or turns it on: the card's link is Manage.
     assert out["setup"]["key"] == "onocoy_setup" and out["onooff_none"]["key"] == "no_caster"
@@ -1725,7 +1725,7 @@ def test_card_colours_never_contradict_the_top_card():
 def test_status_page_says_each_fact_once():
     """Each fact once: no top-card title or line inside a card, and no three words of a card in the top card's title,
     line or "Also:" lines; no facts under the top card at all (the NTRIP card lists the servers); the duplicate stream an
-    "Also:" line; Onocoy not set up or off said once (the Onocoy card's line says when it shows, not that)."""
+    "Also:" line; Onocoy not set up or off said once by the top card and once by the Onocoy card's own line."""
     out = matrix()
     norm = lambda t: re.sub(r"[^a-z0-9 ]", "", t.lower().replace(" ", " ").replace("·", " ")).split()
     for name, o in out.items():
@@ -1737,7 +1737,9 @@ def test_status_page_says_each_fact_once():
             # A caster line's state word is the top card's sentence in a word ("Waiting for the receiver" beside "The station
             # is listening for the receiver"): its name and share count, not the word.
             lines = [p for ln in card["lines"] for i, p in enumerate(ln.split(" \u00b7 ")) if i != 1]
-            atoms = [v for r in card["rows"] for v in r] + lines + [n[0] for n in card["notes"]]
+            # The Onocoy card's own line ("Onocoy is not set up yet.", the owner's words) may repeat the top card.
+            own = ("Onocoy is not set up yet.", "Onocoy is turned off.")
+            atoms = [v for r in card["rows"] for v in r] + lines + [n[0] for n in card["notes"] if n[0] not in own]
             atoms += [card["big"][0]] if card["big"] else []
             for atom in atoms:
                 w = norm(atom)
@@ -1748,7 +1750,7 @@ def test_status_page_says_each_fact_once():
         # when it shows, in every such state.
         if name in ("setup", "refused", "setup_rx", "onooff", "onooff_none", "nocasters", "alloff", "setup_too"):
             ono = o["cards"]["Onocoy"]["notes"]
-            shows = [n[0] for n in ono if n[0] in ("Shows once Onocoy is set up.", "Shows while Onocoy is on.")]
+            shows = [n[0] for n in ono if n[0] in ("Onocoy is not set up yet.", "Onocoy is turned off.")]
             said = [t for t in [o["head"], o["line"]] + [n[0] for c in o["cards"].values() for n in c["notes"]] +
                     o["cards"]["NTRIP"]["lines"]
                     if t not in shows and "Onocoy" in t and
@@ -2225,24 +2227,25 @@ def test_settings_is_network_updates_and_the_danger_zone_without_fold_outs():
     on = {**SET_WIFI, "online": False, "rssi": None, "offline_s": 420,
           "ap": {**SET_WIFI["ap"], "active": True, "reasons": ["fallback"], "clients": 1, "password_set": False}}
     off, hot, sess = run_editor([
-        {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI, "update": SET_UPDATE, "click": "Change password"},
-        {"fn": "settings_page", "status": st_status(), "wifi": on, "update": SET_UPDATE, "click": "Set a password"},
+        {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI, "update": SET_UPDATE, "click": "change"},
+        {"fn": "settings_page", "status": st_status(), "wifi": on, "update": SET_UPDATE, "click": "set password"},
         {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI, "update": SET_UPDATE, "flash": SET_FLASH}])
     assert off["cards"] == ["Network", "Updates", "Danger zone"] and off["details"] == 0
     assert off["subs"] == ["Setup hotspot", "Install manually"]
     rows = dict(off["rows"])
     assert rows["Wi-Fi"] == "Home" and rows["Signal"] == " Weak (\u221282\u00a0dBm)"
-    assert rows["Network name"] == "onodiy-1A2B" and rows["Password"] == "Set"
-    assert off["buttons"] == ["Change network", "Change password", "Check now", "Choose file", "Choose file", "Start", "Go back…",
+    assert rows["Network name"] == "onodiy-1A2B" and rows["Password"] == "Set (change)"
+    # Change network small in the title row; the hotspot's password through the link in its row, no button of its own.
+    assert off["buttons"] == ["Change network", "change", "Check now", "Choose file", "Choose file", "Start", "Go back…",
                               "Restart", "Change password", "Factory reset…"]
     assert off["lines"] == ["Opens for first setup, when the station cannot reach your Wi-Fi, and after BOOT is held."]
     # The hotspot's password: its field and buttons once its button is pressed (the admin password's stays as it is).
     assert off["after"]["fields"] == ["Station name", "New password"]
-    assert off["after"]["buttons"][:4] == ["Change network", "Cancel", "Remove password", "Set password"]
+    assert off["after"]["buttons"][:5] == ["Change network", "change", "Cancel", "Remove password", "Set password"]
     assert off["after"]["buttons"][-2] == "Change password"
     # Offline, the hotspot open without a password: no signal row (no word without its dBm), nothing to remove.
-    assert "Signal" not in dict(hot["rows"]) and dict(hot["rows"])["Password"] == "None: anyone nearby can join"
-    assert "Set a password" in hot["buttons"] and "Remove password" not in hot["after"]["buttons"]
+    assert "Signal" not in dict(hot["rows"]) and dict(hot["rows"])["Password"] == "None (set password)"
+    assert "set password" in hot["buttons"] and "Remove password" not in hot["after"]["buttons"]
     # The update session: what it recorded, shown whole, and the receiver's own text under its title.
     assert sess["cards"] == ["Network", "Updates", "Receiver update session", "Danger zone"] and sess["details"] == 0
     assert sess["subs"][-1] == "What the receiver sent"
@@ -2470,9 +2473,12 @@ def test_receiver_pages_show_everything_without_fold_outs():
     noant = out["noant"]
     assert noant["cards"] == ["Receiver", "Signals"]
     assert dict(noant["rows"])["Position"] == "Surveying, paused while no corrections arrive."
-    # Manual setup: the sky needs the profile's satellite positions output, and says so beside its button.
-    assert noant["notes"] == ["Manual setup: turn on Satellite positions output in Receiver settings."]
+    # Manual setup: the sky needs the profile's satellite positions output; a banner says so (with the way to Receiver
+    # settings) and there is no button that cannot work.
+    assert ["info", "To show the sky with manual setup, turn on Satellite positions output in Receiver settings."] in noant["msgs"]
+    assert noant["notes"] == [] and "Show the sky" not in noant["buttons"]
     assert out["noant_satview"]["notes"] == [] and out["stream"]["notes"] == []
+    assert "Show the sky" in out["noant_satview"]["buttons"]
     # No message ever arrived: the card's line says so, no table of "Never".
     assert "Messages" not in noant["subs"] and not any(r.startswith("1005") for r in noant["trs"])
 
@@ -2607,7 +2613,7 @@ ROVER_B = {"addr": "fd12:3456:789a:1:2c4f:9aff:fe31:7b2d", "ntrip_version": 1, "
 NET = {"mdns_host": "onodiy", "ip": "192.168.1.50"}
 RX_OK = {"rtcm_age_ms": 180}
 ROVER_LIMITS = "At most 2 rovers at once. Only devices on your home network can connect."
-ROVER_OFF = "Off. When on, a rover on your home network gets corrections from the station at onodiy.local:2101, no internet needed."
+ROVER_OFF = "Stream location data locally so a rover or device can use it on your network without internet."
 NB = " "
 
 
@@ -2622,7 +2628,7 @@ def test_rover_card_says_how_to_point_a_rover_at_the_station():
     off, off_nonet, on, ip_only = rover_cards((lcast(enabled=False, pw=False), NET, RX_OK), (lcast(enabled=False), {}, RX_OK),
                                               (lcast(), NET, RX_OK), (lcast(pw=True), {"mdns_host": None, "ip": "192.168.1.50"}, RX_OK))
     assert off["lines"] == [ROVER_OFF] and off["rows"] == [] and off["state"] is None
-    assert off_nonet["lines"] == ["Off. When on, a rover on your home network gets corrections from the station, no internet needed."]
+    assert off_nonet["lines"] == [ROVER_OFF]
     assert on["state"] == ["muted", "Waiting for a rover"]
     assert on["rows"] == [["Host", "onodiy.local or 192.168.1.50"], ["Port", "2101"], ["Mountpoint", "onodiy"],
                           ["Username", "rover"], ["Password", "Set"], ["NTRIP version", "1.0 or 2.0"]]
@@ -2694,7 +2700,7 @@ def test_rover_editor_sends_the_fields_and_keeps_the_stored_password():
     assert new_pw["puts"] == [{"mountpoint": "onodiy", "username": "rover", "password": "p4ss:word!"}]
     first = rover_edit(lcast(enabled=False, pw=False)["config"], [("password", "secret123")], turn_on=True)
     assert first["puts"] == [{"mountpoint": "onodiy", "username": "rover", "password": "secret123", "enabled": True}]
-    assert first["toasts"] == ["Saved. Corrections for your rover are on."]
+    assert first["toasts"] == ["Saved. The local server is on."]
 
 
 def test_rover_editor_checks_the_stations_rules_and_shows_its_refusals():
@@ -2732,16 +2738,16 @@ def ntrip_rover(rover: list, act: str | None = None, put: list | None = None, ag
 
 
 def test_rover_card_on_the_ntrip_page():
-    """After the servers and the add card, the whole row: "Your rover" with Edit and its switch; hidden in safe mode
+    """After the servers and the add card, the whole row: "Local server" with Edit and its switch; hidden in safe mode
     (no config) and on a station without the endpoint, the servers as before."""
     on = ntrip_rover([200, lcast()])
-    assert on["cards"] == ["RTK2go", None, "Your rover"] and on["cls"] == "card wide"
-    assert on["sw"] == ["true", "Corrections for your rover"] and on["before"]["buttons"] == ["Edit", ""]
+    assert on["cards"] == ["RTK2go", "More servers", "Local server"] and on["cls"] == "card wide"
+    assert on["sw"] == ["true", "Local server"] and on["before"]["buttons"] == ["Edit", ""]
     assert on["before"]["rows"][2] == ["Mountpoint", "onodiy"]
     safe = ntrip_rover([200, {"config": None, "status": lcast(enabled=False)["status"]}])
     old = ntrip_rover([404, {"error": {"code": "not_found"}}])
     for o in (safe, old):
-        assert o["before"] is None and o["cards"] == ["RTK2go", None], o
+        assert o["before"] is None and o["cards"] == ["RTK2go", "More servers"], o
     # Read again: a failed read keeps the card as it was; the config changed elsewhere redraws it.
     blip = ntrip_rover([200, lcast()], act="reload", again=[500, {"error": {"code": "internal"}}])
     assert blip["after"] == blip["before"]
@@ -2754,10 +2760,10 @@ def test_rover_switch_saves_at_once_and_asks_for_a_password_first():
     the editor, which asks for one first; a station that still refuses opens it too."""
     off = ntrip_rover([200, lcast()], act="switch")
     assert off["puts"] == [{"enabled": False}] and off["swAfter"] == "false"
-    assert off["after"]["lines"] == [ROVER_OFF] and off["toasts"] == ["Corrections for your rover are off."]
+    assert off["after"]["lines"] == [ROVER_OFF] and off["toasts"] == ["The local server is off."]
     on = ntrip_rover([200, lcast(enabled=False)], act="switch")
     assert on["puts"] == [{"enabled": True}] and on["swAfter"] == "true"
-    assert on["after"]["rows"][0] == ["Host", "onodiy.local or 192.168.1.50"] and on["toasts"] == ["Corrections for your rover are on."]
+    assert on["after"]["rows"][0] == ["Host", "onodiy.local or 192.168.1.50"] and on["toasts"] == ["The local server is on."]
     first = ntrip_rover([200, lcast(enabled=False, pw=False)], act="switch")
     assert first["puts"] == [] and first["after"]["lines"] == ["Choose a password first."]
     assert first["after"]["fields"] == ["Mountpoint", "Username", "Password"] and not first["dirty"]
@@ -2778,7 +2784,7 @@ def test_rover_switch_saves_at_once_and_asks_for_a_password_first():
 
 
 def test_status_ntrip_card_says_your_rover_in_one_line():
-    """While Your rover is on, one line after the servers, built like theirs: "1 connected" in green, else its state in
+    """While the local server is on, one line after the servers, built like theirs: "1 connected" in green, else its state in
     a word (not listening in red); nothing while it is off or in safe mode, and never in the public form."""
     lc = lambda state="listening", clients=0, enabled=True: {"enabled": enabled, "state": state, "clients": clients}
     out = dashboards(over(BASE, local_caster=lc(clients=1)), over(BASE, local_caster=lc(clients=2)),
@@ -2787,16 +2793,16 @@ def test_status_ntrip_card_says_your_rover_in_one_line():
                      over(MATRIX["nocasters"], local_caster=lc(clients=1)),
                      over(MATRIX["safe"], local_caster=lc("off", enabled=False)), over(BASE, local_caster=lc("off")))
     cas = [o["cards"]["NTRIP"] for o in out]
-    assert cas[8]["lines"][2:] == ["Your rover · starting"]
+    assert cas[8]["lines"][2:] == ["Local server · starting"]
     servers = ["Onocoy · Streaming", f"RTK2go · Streaming · 99.97{NB}% today"]
-    assert [c["lines"][2:] for c in cas[:5]] == [["Your rover · 1 connected"], ["Your rover · 2 connected"],
-                                                 ["Your rover · waiting for a rover"], ["Your rover · waiting for Wi-Fi"],
-                                                 ["Your rover · not listening"]]
+    assert [c["lines"][2:] for c in cas[:5]] == [["Local server · 1 connected"], ["Local server · 2 connected"],
+                                                 ["Local server · waiting for a rover"], ["Local server · waiting for Wi-Fi"],
+                                                 ["Local server · not listening"]]
     assert [c["lineTones"][2:] for c in cas[:5]] == [["t-ok"], ["t-ok"], ["muted"], ["muted"], ["t-bad"]]
     assert cas[0]["lines"][:2] == servers and cas[5]["lines"] == servers
     # No server yet: the note stays, the rover's line under it.
-    assert cas[6]["notes"] == [["No servers yet.", "muted"]] and cas[6]["lines"] == ["Your rover · 1 connected"]
-    assert cas[7]["lines"] == [] and cas[7]["notes"] == [["Shows after safe mode.", "muted"]]
+    assert cas[6]["notes"] == [["No servers yet.", "muted"]] and cas[6]["lines"] == ["Local server · 1 connected"]
+    assert cas[7]["lines"] == [] and cas[7]["notes"] == [["Not available in safe mode.", "muted"]]
     for o in out:
         assert o["order"] == CARDS and o["cards"]["NTRIP"]["buttons"] == 0
     (pub,) = dashboards({"api": 1, "public": True, "device": {"hostname": "onodiy"}, "safe_mode": {"active": False},

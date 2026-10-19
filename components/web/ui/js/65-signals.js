@@ -188,7 +188,7 @@ function signalsSection(el, msgs) {
   const sky = skySection();
   const head = h('div', { class: 'stack' }, h('p', { class: 'loading' }, 'Loading signals…'));
   const bands = h('div');
-  const card = h('section', { class: 'card wide' }, h('h2', null, 'Signals'), head, sky.head,
+  const card = h('section', { class: 'card wide' }, h('h2', null, 'Signals'), head, sky.banner, sky.head,
     h('div', { class: 'sky-wrap' }, sky.plot, h('div', { class: 'stack' }, bands, sky.list)),
     h('div', { class: 'form-actions' }, sky.note, sky.button), sky.el);
   el.append(card);
@@ -242,8 +242,10 @@ function signalsSection(el, msgs) {
      * configuration sent neither). */
     gnss(gg) {
       g = gg;
-      sky.block(g.first_apply_held ? 'Configure the receiver first.' : g.autocfg || (g.profile || {}).sat_view_output ? '' :
-        'Manual setup: turn on Satellite positions output in Receiver settings.');
+      const settings = h('a', { href: '#/receiver/settings' }, 'Receiver settings');
+      sky.block(g.first_apply_held ? 'To show the sky, configure the receiver first.' :
+        g.autocfg || (g.profile || {}).sat_view_output ? '' :
+          ['To show the sky with manual setup, turn on Satellite positions output in ', settings, '.']);
     },
     messagesOff(off) {
       msgsOff = off;

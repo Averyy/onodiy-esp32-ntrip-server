@@ -261,7 +261,7 @@ function fileButton(label, name, accept, onFile) {
     input.value = '';   /* the same file again fires again */
     if (f) onFile(f);
   } });
-  return { input: input, b: btn(label, () => input.click(), '', { 'aria-label': name }) };
+  return { input: input, b: btn(label, () => input.click(), 'small', { 'aria-label': name }) };
 }
 
 /* Receiver maintenance (Settings, Install manually): the duration, what it does and what a configuration saves, then start. */
@@ -370,7 +370,7 @@ const updatesPart = {
         if (!ok) return;
         const r = await act(rb, () => api('POST', '/api/update/rollback', { confirm: true }), appErr);
         if (r !== undefined) showRestarting('Going back to the previous version');
-      }, 'danger') : null;
+      }, 'small danger') : null;
       mount(rbBox, rb ? settingRow('Go back to the previous version', 'The one installed before ' + a.running + '.', rb) : null,
         (a.rolled_back || []).length ? h('p', { class: 'muted small' }, 'Rolled back here, not offered again: ' + a.rolled_back.join(', ') + '.') : null);
       rbBox.hidden = !rbBox.firstChild;
@@ -450,7 +450,7 @@ const updatesPart = {
         mount(maintBox, settingRow('Receiver maintenance is on', ['The station sends the receiver no commands.', maintLeft],
           h('div', { class: 'form-actions' }, more, btn('End now', endMaintenance, mainShown ? '' : 'primary'))), maintErr);
       } else {
-        const start = btn('Start', () => startMaintenance(start, maintErr));
+        const start = btn('Start', () => startMaintenance(start, maintErr), 'small');
         mount(maintBox, settingRow('Receiver from a PC', 'Start receiver maintenance first.', start), maintErr);
       }
     }

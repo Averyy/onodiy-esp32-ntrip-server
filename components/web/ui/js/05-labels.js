@@ -149,7 +149,6 @@ const L = {
   },
   upstream: { none: 'Not checked yet', ok: 'Reachable', no_ip: 'No IP address', dns_failed: 'DNS fails', no_upstream: 'Router only, no internet' },
   apReason: { setup: 'first setup', fallback: 'Wi-Fi unreachable', linger: 'closing soon', recovery: 'recovery (BOOT button)' },
-  timeSource: { gnss: 'GNSS', sntp: 'internet time', none: 'not set' },
   journal: {
     none: ['No session', ''],
     running: ['Running', 'A receiver update runs. App updates, restarts and receiver changes wait until it ends.'],

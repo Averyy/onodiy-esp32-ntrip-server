@@ -151,11 +151,11 @@ function onocoyCard(s, st) {
     cardHead('Onocoy', chip, headLink(st, want, manage)), kids);
   const d = st.key === 'safe_mode' ? null : onocoyDay(s, st);
   if (!d) {
-    if (st.key === 'safe_mode') return card(null, null, mutedLine('Shows after safe mode.'));
+    if (st.key === 'safe_mode') return card(null, null, mutedLine('Not available in safe mode.'));
     if (!slot || !slot.onocoy_ready) {
-      return card(null, { label: 'Set up', name: 'Set up Onocoy', href: ONOCOY_SETUP_HASH }, mutedLine('Shows once Onocoy is set up.'));
+      return card(null, { label: 'Set up', name: 'Set up Onocoy', href: ONOCOY_SETUP_HASH }, mutedLine('Onocoy is not set up yet.'));
     }
-    return card(null, { label: 'Turn on', name: 'Turn on Onocoy', href: ONOCOY_SETUP_HASH }, mutedLine('Shows while Onocoy is on.'));
+    return card(null, { label: 'Turn on', name: 'Turn on Onocoy', href: ONOCOY_SETUP_HASH }, mutedLine('Onocoy is turned off.'));
   }
   const c = st.ono;
   const rows = kv([['Online today', fmt.dur(c.today_online_s)], ['Offline today', fmt.dur(d.known ? d.down : c.today_offline_s)]]);
@@ -298,7 +298,7 @@ function casterRow(c, admin, st) {
 function roverRow(lc) {
   const n = lc.clients || 0, word = lbl(L.rover, lc.state === 'off' ? 'starting' : lc.state);
   const tone = n ? 'ok' : lc.state === 'error' ? 'bad' : '';
-  return h('div', { class: 'cline' }, h('div', null, h('span', { class: 'name' }, 'Your rover'), ' ',
+  return h('div', { class: 'cline' }, h('div', null, h('span', { class: 'name' }, 'Local server'), ' ',
     h('span', { class: 'nowrap' }, '· ', h('span', { class: tone ? 't-' + tone : 'muted' },
       n ? n + ' connected' : word.charAt(0).toLowerCase() + word.slice(1)))));
 }
@@ -320,7 +320,7 @@ function castersCard(s, st, admin) {
   const safe = st.key === 'safe_mode';
   if (!admin && (safe || !list.length)) return null;
   const add = !safe && !list.length ? { label: 'Add', name: 'Add a server', href: '#/ntrip' } : null;
-  const none = safe ? 'Shows after safe mode.' : ono && ono.onocoy_ready !== false ? 'No other servers.' : 'No servers yet.';
+  const none = safe ? 'Not available in safe mode.' : ono && ono.onocoy_ready !== false ? 'No other servers.' : 'No servers yet.';
   const lines = list.length && !safe ? list.map(c => casterRow(c, admin, st)) : [];
   const rover = admin && !safe && s.local_caster && s.local_caster.enabled ? roverRow(s.local_caster) : null;
   const body = [lines.length ? null : mutedLine(none), lines.length || rover ? h('div', { class: 'clines' }, lines, rover) : null];
