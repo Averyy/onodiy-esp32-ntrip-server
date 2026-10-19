@@ -689,7 +689,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
     survey_in_s: field('Survey-in time (seconds)', survey),
     lat_deg: field('Latitude (°)', lat),
     lon_deg: field('Longitude (°)', lon),
-    height_m: field('Height above the ellipsoid (m)', hgt),
+    height_m: field('Height (m)', hgt),
     signal_group_master: field('Main antenna', sgm),
     signal_group_slave: field('Second antenna', sgs, '0 turns it off.'),
     station_id: field('Station ID', sid, 'In every message. The default comes from this device\'s MAC; change it only if a ' +
