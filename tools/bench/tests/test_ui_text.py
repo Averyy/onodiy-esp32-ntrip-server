@@ -68,6 +68,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  onocoy: a => { const t = stationState(a, true), d = onocoyDay(a, t);\n' +
   '    return d && { verdict: d.verdict, tone: d.tone, why: d.why, left: d.left, used: d.used, share: d.share, hero: t.key }; },\n' +
   '  checks: d => receptionChecks(d),\n' +
+  '  sgScore: r => onocoyScore(r), sgAdvice: t => sgtAdvice(t),\n' +
   '  notices: a => noticeItems(a[0], a[1]).map(i => [i.key, i.title]),\n' +
   '  noticesNoCard: a => { healthCardShown = false; const r = noticeItems(a[0], a[1]).map(i => i.key); healthCardShown = true;\n' +
   '    return r; },\n' +
@@ -1026,6 +1027,45 @@ def test_signal_strength_is_judged_on_l1():
     assert c["items"][1][0] == "warn" and c["items"][1][3] == "Fair signals (37\u00a0dB\u2011Hz): check the antenna's view and cable"
 
 
+def sg_result(group, systems, gaps=0):
+    """A measured group as GET /api/gnss/signal-test lists it: systems as [(sys, bands, signal ids per band)]."""
+    return {"group": {"master": group[0], "slave": group[1]}, "status": "done", "measured_s": 1800, "epoch_gaps": gaps,
+            "systems": [{"sys": sys, "satellites": 8.0, "bands": bands,
+                         "per_band": [{"band": b, "satellites": 8.0, "cnr_dbhz": 40.0, "signal_ids": ids}
+                                      for b, ids in zip(bands, sig)]} for sys, bands, sig in systems]}
+
+
+def test_comparison_advice_follows_onocoys_quality_scale():
+    """The comparison advises by Onocoy's quality scale: constellations (GPS, Galileo, BeiDou 0.286 each, GLONASS 0.142,
+    QZSS and NavIC nothing) times bands (the most on one constellation: 3 = 0.80, 4 = 0.95); with equal scores the
+    group with more signals (Onocoy asks for as many as possible), then the one that missed fewer epochs."""
+    gps = ("gps", ["l1", "l2", "l5"], [[2], [15], [22]])
+    glo = ("glonass", ["l1", "l2"], [[2], [8]])
+    gal = ("galileo", ["l1", "l2", "l5", "l6"], [[2], [14], [22], [9]])
+    bds3 = ("beidou", ["l1", "l5", "l6"], [[2], [23], [8]])
+    bds4 = ("beidou", ["l1", "l2", "l5", "l6"], [[2, 31], [25], [23], [8]])
+    g36 = sg_result((3, 6), [gps, glo, gal, bds3], gaps=1)
+    g70 = sg_result((7, 0), [gps, glo, gal, bds4])
+    g45 = sg_result((4, 5), [gps, glo, ("galileo", ["l1", "l2", "l5"], [[2], [14], [22]]), bds3])
+    s36, s70, s45, sgal = run_ui([("sgScore", g36), ("sgScore", g70), ("sgScore", g45),
+                                  ("sgScore", sg_result((3, 6), [gal, ("qzss", ["l1"], [[2]])]))])
+    assert (s36["cons"], s36["band"], s36["score"], s36["signals"]) == (1, 0.95, 0.95, 12)
+    assert (s70["score"], s70["signals"]) == (0.95, 14)
+    assert (s45["band"], s45["score"]) == (0.8, 0.8)
+    assert (sgal["cons"], sgal["score"]) == (0.286, 0.27)     # QZSS counts nothing
+    same, higher, gaps, tie = run_ui([
+        ("sgAdvice", {"results": [g36, g70]}), ("sgAdvice", {"results": [g45, g36]}),
+        ("sgAdvice", {"results": [g36, sg_result((7, 0), [gps, glo, gal, bds3])]}),
+        ("sgAdvice", {"results": [g70, sg_result((3, 6), [gps, glo, gal, bds4])]})])
+    assert same == {"pick": 1, "text": "Keep 7 0 (most signals): Onocoy scores both 0.95, and this one sends more signals "
+                                       "(14 against 12), as Onocoy asks."}
+    assert higher == {"pick": 1, "text": "Keep 3 6 (Galileo E6): Onocoy scores it higher (0.95 against 0.80)."}
+    assert gaps["pick"] == 1 and gaps["text"].endswith("this one missed fewer epochs.")
+    assert tie == {"pick": None, "text": "Onocoy scores both 0.95 with the same signals: either is fine."}
+    # Until both are measured, no advice.
+    assert run_ui([("sgAdvice", {"results": [g36, {**g70, "status": "measuring"}]})]) == [None]
+
+
 def test_password_mismatch_and_unknown_signal():
     mismatch, short, ok = run_ui([("pwProblem", ["abcdefgh", "abcdefgi"]), ("pwProblem", ["abc", "abc"]),
                                   ("pwProblem", ["abcdefgh", "abcdefgh"])])
@@ -1040,7 +1080,7 @@ def test_password_mismatch_and_unknown_signal():
 def test_signal_groups_short_and_plain():
     (choices,) = run_ui([("sgChoices", None)])
     names = run_ui([("sgName", [int(c[0].split()[0]), int(c[0].split()[1])]) for c in choices] + [("sgName", [9, 9])])
-    assert names == ["3 6 (Galileo E6)", "7 0 (BeiDou B2a)", "4 5 (factory)", "5 0 (no L5)", "9 9"]
+    assert names == ["3 6 (Galileo E6)", "7 0 (most signals)", "4 5 (factory)", "5 0 (no L5)", "9 9"]
     for pair, name, line, short in choices:
         # One short line each; "(recommended)" is the Receiver page's mark, never part of the name others reuse.
         assert line.endswith(".") and len(line) <= 60, pair
@@ -1204,7 +1244,7 @@ def test_comparison_lines_short_and_in_hours():
     line, sw, idle, notice = run_ui([("sgtLine", measuring), ("sgtLine", switching), ("sgtLine", {"state": "idle"}),
                                      ("sgtNotice", st)])
     assert line == "Group 1 of 2, 3 6 (Galileo E6): measuring, about 25\u00a0min left."
-    assert sw == "Switching the receiver to 7 0 (BeiDou B2a). Corrections pause briefly."
+    assert sw == "Switching the receiver to 7 0 (most signals). Corrections pause briefly."
     assert idle is None
     # The notice says what the top card says, in one line.
     assert notice[1] == "Choose a signal group"

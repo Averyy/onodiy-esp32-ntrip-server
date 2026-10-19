@@ -264,13 +264,14 @@ const L = {
 /*
  * Signal groups offered by name (the receiver's CONFIG SIGNALGROUP pairs,
  * main and second antenna input): exactly the pairs UM982 build 25164
- * accepts, with what each gives on the main input (as that build reported
- * it): [pair, name, one line, short name]. Other pairs are entered as
- * numbers, for another firmware.
+ * accepts, with what each gives on the main input (3 6 and 7 0 as that
+ * build sent them with an antenna; 4 5 and 5 0 as it reported them):
+ * [pair, name, one line, short name]. Other pairs are entered as numbers,
+ * for another firmware.
  */
 const SG_CHOICES = [
-  ['3 6', 'Galileo E6', 'Four Galileo bands; no BeiDou B2a.', 'Galileo E6'],
-  ['7 0', 'BeiDou B2a', 'Four BeiDou bands; no Galileo E6; second antenna off.', 'BeiDou B2a'],
+  ['3 6', 'Galileo E6', 'Four Galileo bands; BeiDou on three.', 'Galileo E6'],
+  ['7 0', 'Most signals', 'Four Galileo and four BeiDou bands; second antenna off.', 'most signals'],
   ['4 5', 'Factory setting', 'At most three bands on any constellation.', 'factory'],
   ['5 0', 'No L5', 'Low power, no L5 signals; second antenna off.', 'no L5'],
 ];

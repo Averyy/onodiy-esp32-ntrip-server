@@ -2662,12 +2662,13 @@ def test_receiver_pages_show_everything_without_fold_outs():
     # Each band's C/N0 and its satellites inline; on a phone a cell wraps only between its parts, each ending with its dot.
     assert ("Galileo | 10.9 satellites\u00a0\u00b7 4 bandsL1 44.6 (10.9)\u00a0\u00b7 L2 42.8 (10.9)\u00a0\u00b7 "
             "L5 44.7 (9.6)\u00a0\u00b7 L6 41.2 (8.3) | \u2013") in running["trs"]
-    assert "Per band: mean C/N0 in dB-Hz; in brackets, mean satellites." in running["lines"] and "Stop" in running["buttons"]
+    assert any(t.startswith("Per band: mean C/N0 in dB-Hz; in brackets, mean satellites. Onocoy score: Onocoy's quality scale")
+               for t in running["lines"]) and "Stop" in running["buttons"]
     # Its next answer patches the same results box (a keyboard focus on it stays) with the new figures.
     assert running["again"]["same"]
     assert any(r.startswith("Galileo | 10.9 satellites") and "L1 45.0 (10.9)" in r for r in running["again"]["trs"])
     deciding = out["deciding"]
-    assert {"Keep 3 6 (Galileo E6)", "Keep 7 0 (BeiDou B2a)"} <= set(deciding["buttons"])
+    assert {"Keep 3 6 (Galileo E6)", "Keep 7 0 (most signals)"} <= set(deciding["buttons"])
 
 
 def test_receiver_pages_say_refusals_the_survey_and_a_stream_off_the_position():

@@ -1109,9 +1109,15 @@ function sgtResults(t) {
   const rows = [
     ['Measured', ...res.map(r => r.status === 'rejected' ? h('span', { class: 't-bad' }, lbl(L.sgtResult, r.status)) :
       parts([fmt.dur(r.measured_s), r.status === 'measuring' ? 'measuring' : null,
-        r.epoch_gaps ? fmt.num(r.epoch_gaps) + ' epochs missing' : null]))],
+        r.epoch_gaps ? fmt.num(r.epoch_gaps) + (r.epoch_gaps === 1 ? ' epoch missing' : ' epochs missing') : null]))],
     ['Best', ...res.map(r => r.best_sys ? h('b', { class: r.best_bands >= 4 ? 't-ok' : 't-warn' },
       parts([lbl(L.sys, r.best_sys), r.best_bands + ' bands'])) : DASH)],
+    ['Onocoy score', ...res.map(r => {
+      if (!(r.systems || []).length) return DASH;
+      const s = onocoyScore(r);
+      return [h('b', null, s.score.toFixed(2)), ' ', h('small', null, parts(['constellations ' + s.cons.toFixed(2),
+        'bands ' + s.band.toFixed(2), s.signals + ' signals']))];
+    })],
   ];
   for (const sys of present) {
     rows.push([h('b', null, lbl(L.sys, sys)), ...res.map(r => {
@@ -1126,7 +1132,60 @@ function sgtResults(t) {
     })]);
   }
   return h('div', null, table(head, rows, { label: 'Signal-group comparison results', cls: 'cmp' }),
-    h('p', { class: 'muted small foot' }, 'Per band: mean C/N0 in dB-Hz; in brackets, mean satellites.'));
+    h('p', { class: 'muted small foot' }, 'Per band: mean C/N0 in dB-Hz; in brackets, mean satellites. Onocoy score: ',
+      extLink('Onocoy\'s quality scale', ONO_QUALITY_DOC), ' without its signal-quality factor, which Onocoy measures and ' +
+      'which is alike for both groups on one antenna.'));
+}
+
+/*
+ * Onocoy's Quality Scale (its docs, Mining rewards breakdown > Quality Scale): the constellation reward (each
+ * constellation's factor added up; QZSS and NavIC count nothing) times the band reward (the most bands on one
+ * constellation; a fifth is Galileo E5 AltBOC, which the UM982 lacks). Its third factor, signal quality, is Onocoy's own
+ * measurement of the stream, alike for two groups on one antenna. signals: the MSM signals sent, every constellation.
+ */
+const ONO_SYS_FACTOR = { gps: 0.286, glonass: 0.142, galileo: 0.286, beidou: 0.286 };
+const ONO_BAND_FACTOR = [0, 0.08, 0.32, 0.8, 0.95, 1];
+const ONO_QUALITY_DOC = 'https://docs.onocoy.com/documentation/mining-rewards-breakdown/quality-scale';
+
+function onocoyScore(r) {
+  let cons = 0, most = 0, signals = 0;
+  for (const x of r.systems || []) {
+    const n = (x.bands || []).length;
+    if (!n) continue;
+    if (ONO_SYS_FACTOR[x.sys]) {
+      cons += ONO_SYS_FACTOR[x.sys];
+      most = Math.max(most, n);
+    }
+    const per = x.per_band || [];
+    signals += per.length ? per.reduce((k, pb) => k + Math.max(1, (pb.signal_ids || []).length), 0) : n;
+  }
+  cons = Math.min(1, Math.round(cons * 1000) / 1000);
+  const band = ONO_BAND_FACTOR[Math.min(5, most)];
+  return { cons: cons, band: band, score: Math.round(cons * band * 100) / 100, signals: signals };
+}
+
+/* Which group to keep, by Onocoy's score, then the signals sent (Onocoy asks for as many as possible), then the epochs
+ * missed: {pick (0, 1 or null), text}; null until both are measured. */
+function sgtAdvice(t) {
+  const res = t.results || [];
+  if (res.length !== 2 || res.some(r => r.status !== 'done')) return null;
+  const s = res.map(onocoyScore);
+  const keep = i => 'Keep ' + sgPairLabel(res[i].group) + ': ';
+  if (s[0].score !== s[1].score) {
+    const i = s[0].score > s[1].score ? 0 : 1;
+    return { pick: i, text: keep(i) + 'Onocoy scores it higher (' + s[i].score.toFixed(2) + ' against ' + s[1 - i].score.toFixed(2) + ').' };
+  }
+  if (s[0].signals !== s[1].signals) {
+    const i = s[0].signals > s[1].signals ? 0 : 1;
+    return { pick: i, text: keep(i) + 'Onocoy scores both ' + s[i].score.toFixed(2) + ', and this one sends more signals (' +
+      s[i].signals + ' against ' + s[1 - i].signals + '), as Onocoy asks.' };
+  }
+  const g = res.map(r => r.epoch_gaps || 0);
+  if (g[0] !== g[1]) {
+    const i = g[0] < g[1] ? 0 : 1;
+    return { pick: i, text: keep(i) + 'Onocoy scores both ' + s[i].score.toFixed(2) + ' with the same signals, and this one missed fewer epochs.' };
+  }
+  return { pick: null, text: 'Onocoy scores both ' + s[0].score.toFixed(2) + ' with the same signals: either is fine.' };
 }
 
 /** Why the station would refuse a start now (its own order), or '' (GET /api/gnss). The station still decides. With manual
@@ -1255,9 +1314,15 @@ function sgTestCtl(done) {
       let text = null;
       const line = sgtLine(t);
       if (line) text = msg('info', line);
-      else if (t.state === 'deciding') text = msg('warn', h('strong', null, 'Both groups measured: keep one.'), ' Until then the receiver ' +
-        'stays on ' + sgPairLabel(t.running_group) + '. With no choice within ' + sgtHours(t.decide_left_s) + ', ' +
-        sgPairLabel(t.before) + ' comes back.');
+      else if (t.state === 'deciding') {
+        const adv = sgtAdvice(t);
+        text = msg('warn', h('strong', null, adv ? adv.text : 'Both groups measured: keep one.'), ' Until then the receiver ' +
+          'stays on ' + sgPairLabel(t.running_group) + '. With no choice within ' + sgtHours(t.decide_left_s) + ', ' +
+          sgPairLabel(t.before) + ' comes back.');
+        /* The advised group's button is the primary one. */
+        keepA.classList.toggle('primary', !adv || adv.pick !== 1);
+        keepB.classList.toggle('primary', !adv || adv.pick !== 0);
+      }
       else if (t.outcome) text = msg(t.outcome === 'kept' || t.outcome === 'cancelled' ? 'ok' : 'warn',
         h('strong', null, t.outcome === 'kept' && t.kept ? 'You kept ' + sgPairLabel(t.kept) + '.' : (L.sgtOutcome[t.outcome] || t.outcome)),
         t.reason && t.outcome !== 'kept' ? ' ' + t.reason : '', t.ended_unix ? h('span', { class: 'muted' }, ' (' + fmt.time(t.ended_unix) + ')') : null);
