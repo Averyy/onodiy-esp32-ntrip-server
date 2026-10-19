@@ -436,6 +436,7 @@ body.no-contact .hero .state::before { background: var(--off); }
   font-weight: 800;
 }
 .also .btn { flex: none; align-self: center; }
+.also .dismiss { padding-inline: 0.6rem; font-size: 1.1rem; line-height: 1; }
 .hero .hero-actions .btn { width: 100%; }
 @media (min-width: 560px) {
   .hero { grid-template-columns: minmax(0, 1fr) auto; column-gap: 1.25rem; }

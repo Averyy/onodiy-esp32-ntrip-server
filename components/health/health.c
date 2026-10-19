@@ -188,6 +188,8 @@ static uint32_t s_jcursor;              /* journal records read so far (seq) */
 static uint32_t s_jclears;              /* the journal's clear count those records belong to */
 static bool s_power_caught_up;          /* every record written before the reads began was fed once */
 static bool s_power_alert;              /* last judgement (kept until the reader caught up) */
+static uint32_t s_power_ack;            /* life/pwr_ack: records up to this seq were dismissed by the user */
+static bool s_power_dismiss;            /* health_dismiss_power_lost() asked, the next tick does it (atomic) */
 static diag_journal_entry_t s_jbuf[JOURNAL_CHUNK];
 
 /* Large snapshots, kept off the task stack. */
@@ -684,6 +686,21 @@ static bool power_tick(void)
         hm_power_init(&s_power);
         s_jcursor = 0;
     }
+    /* Dismissed: forget every record written so far (also those not read yet, which the filter below skips); records
+     * still queued for the flash come later and count. The seq is never reused, a journal clear included. */
+    if (__atomic_exchange_n(&s_power_dismiss, false, __ATOMIC_SEQ_CST)) {
+        diag_journal_info(&ji);
+        uint32_t upto = ji.available && ji.newest_seq > s_jcursor ? ji.newest_seq : s_jcursor;
+        s_power_ack = upto;
+        hm_power_init(&s_power);
+        s_power_alert = false;
+        esp_err_t err = settings_is_available() ? settings_set_state_u32(SETTINGS_NS_LIFE, SETTINGS_KEY_POWER_ACK, upto)
+                                                : ESP_ERR_INVALID_STATE;
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "power-lost dismissal not stored (%s): it lasts until the next restart", esp_err_to_name(err));
+        }
+        ESP_LOGI(TAG, "power-lost alert dismissed by the user (journal records up to %u)", (unsigned)upto);
+    }
     if (!s_power_caught_up) {
         diag_journal_info(&ji);
         flushed = ji.available && ji.queued == 0;
@@ -695,7 +712,9 @@ static bool power_tick(void)
             break;
         }
         for (size_t k = 0; k < n; k++) {
-            hm_power_feed(&s_power, s_jbuf[k].kind, s_jbuf[k].a, s_jbuf[k].unix_s, s_jbuf[k].uptime_s);
+            if (s_jbuf[k].seq > s_power_ack) {
+                hm_power_feed(&s_power, s_jbuf[k].kind, s_jbuf[k].a, s_jbuf[k].unix_s, s_jbuf[k].uptime_s);
+            }
         }
         if (n < JOURNAL_CHUNK) {
             short_read = true;
@@ -1007,6 +1026,10 @@ esp_err_t health_init(void)
     hm_power_init(&s_power);
     s_power_caught_up = false;
     s_power_alert = false;
+    s_power_ack = 0;
+    if (settings_is_available() && settings_get_u32(SETTINGS_NS_LIFE, SETTINGS_KEY_POWER_ACK, &s_power_ack) != ESP_OK) {
+        s_power_ack = 0;
+    }
     s_mode = read_recovery_mode();
     hm_hold_init(&s_hold);
 
@@ -1095,4 +1118,9 @@ void health_note_admin_activity(void)
 {
     uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
     __atomic_store_n(&s_admin_at_s, up + 1u, __ATOMIC_SEQ_CST);
+}
+
+void health_dismiss_power_lost(void)
+{
+    __atomic_store_n(&s_power_dismiss, true, __ATOMIC_SEQ_CST);
 }

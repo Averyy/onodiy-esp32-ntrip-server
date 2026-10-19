@@ -537,8 +537,12 @@ Views.settings = {
   create(el, arg) {
     const s = systemPart.create(arg), u = updatesPart.create(arg);
     const c = Object.assign({}, s.cards, u.cards);
-    /* Network beside Updates (one column on a phone), the receiver update session and the Danger zone under both. */
-    mount(el, h('div', { class: 'grid' }, c.wifi, c.updates, c.session, c.restart));
+    /* The receiver's settings live on the Receiver page: this card opens them. */
+    const rxCard = h('section', { class: 'card wide' },
+      cardHead('Receiver', link('Receiver settings', '#/receiver/settings', 'btn small')),
+      h('p', { class: 'muted' }, 'Position, signals, correction messages and how the receiver is set up.'));
+    /* Network beside Updates (one column on a phone), then the receiver, its update session and the Danger zone. */
+    mount(el, h('div', { class: 'grid' }, c.wifi, c.updates, rxCard, c.session, c.restart));
     /* Opened at a card (#/settings/restart): once both parts are in, so the place does not move. */
     Promise.all([u.ready, s.ready]).then(() => {
       const at = c[arg];

@@ -90,6 +90,7 @@ extern "C" {
 #define SETTINGS_NS_LIFE            "life"        /**< whole namespace survives factory reset */
 #define SETTINGS_KEY_BOOT_HISTORY   "boots"       /**< blob, device state: last 16 boots (reset class, raw reason, planned-reboot reason, boot no., previous session uptime, app version) */
 #define SETTINGS_KEY_BOOT_GEN       "gen"         /**< blob, device state: image generation {u8 version, u32 generation, u32 image id} stamped into the RTC blocks; written only when another app image boots */
+#define SETTINGS_KEY_POWER_ACK      "pwr_ack"     /**< u32, device state: the newest journal record's seq when the user dismissed the "power was lost" alert; power losses recorded up to it no longer count (health_dismiss_power_lost); written only at a dismissal */
 
 /* ---- "ledger": availability accounting ------------------------------------- */
 #define SETTINGS_NS_LEDGER          "ledger"      /**< whole namespace survives factory reset */

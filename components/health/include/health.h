@@ -353,6 +353,15 @@ esp_err_t health_get_status(health_status_t *out);
  */
 void health_note_admin_activity(void);
 
+/**
+ * The user dismissed the "power was lost" alert: every power loss recorded
+ * so far stops counting (stored in life/pwr_ack, so a restart keeps it), and
+ * the alert comes back only after HM_POWER_COUNT new ones within 24 h. The
+ * monitor task does the work at its next tick (within a second). Never
+ * blocks (one atomic store); any task.
+ */
+void health_dismiss_power_lost(void);
+
 #ifdef __cplusplus
 }
 #endif

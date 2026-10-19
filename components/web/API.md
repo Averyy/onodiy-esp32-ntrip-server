@@ -391,6 +391,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | POST | `/api/upload/gnss/confirm` | adm | Start the receiver update with it | `station_request_flash` |
 | DELETE | `/api/upload/gnss` | adm | Cancel, release the package | `pkg_store_release` |
 | GET | `/api/health` | adm | Health, loss counters, boots, core dump summary | health, gnss_link, rtcm_hub, lifecycle, diag |
+| POST | `/api/health/power-lost/dismiss` | adm | Dismiss the "power was lost" alert | health, settings `life/pwr_ack` |
 | GET | `/api/availability` | adm | Per-day availability, budget | ledger, ntrip_server |
 | GET | `/api/diag/tasks` | adm | Task statistics | `diag_task_stats` |
 | GET | `/api/diag/flash-capture` | adm | Receiver byte capture download (bench builds) | `um98x_flash_capture_read` |
@@ -2383,6 +2384,17 @@ rolled back before the new image recorded a boot reads as `app_revert`. `inhibit
 the label of a held reboot inhibit; `update_slot` is `none`, `app` or
 `receiver`. The UI warns that a core dump may contain secrets before
 offering the download.
+
+### `POST /api/health/power-lost/dismiss`
+
+Empty body (or `{}`). Dismisses the `power_lost` alert:
+`health_dismiss_power_lost()`, `202 {"accepted": true}`. The monitor task
+handles it at its next tick, within a second: every power loss the journal
+holds so far stops counting (records up to its newest `seq`, stored as
+device state in `life/pwr_ack`, so a restart keeps it), and the alert goes.
+It comes back only after three new power losses within 24 h. Power losses
+whose records were still queued for the flash at that moment count. The
+UI's Status page shows a × on the alert's "Also:" line for it.
 
 ### `GET /api/availability`
 

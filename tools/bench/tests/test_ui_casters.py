@@ -898,6 +898,8 @@ for (const c of JSON.parse(casesJson)) {
       grid: grid ? grid.className : null, also: also, key: st.key, tone: st.tone, subject: st.subject,
       actions: st.actions.map(a => [a.label, a.href || null]), named: st.named,
       heroButtons: heroActs ? heroActs.kids.map(e => [e.textContent, e.getAttribute('href')]) : [], toneClasses: toneClasses,
+      dismiss: hv.filter(e => e.tagName === 'BUTTON' && e.getAttribute('data-act') === 'dismiss-power')
+        .map(e => [e.textContent, e.getAttribute('aria-label')]),
       heroAlsoShown: hv.filter(e => e.tagName === 'LI').map(e => [e.className, e.kids[1].textContent]) });
     continue;
   }
@@ -1602,6 +1604,17 @@ def test_sky_card():
         assert o["cards"]["Sky"]["big"] is None
 
 
+def test_power_lost_line_has_a_dismiss_button():
+    """The admin's "Also: Power was lost." line has a × (named Dismiss: Power was lost) beside Details; no other line has
+    one, and a visitor's page has none."""
+    lost = over(BASE, alerts=[{"id": "power_lost", "source": "health"}, {"id": "link_loss", "source": "health"}])
+    admin, = dashboards(lost)
+    visitor, = dashboards(lost, admin=False)
+    assert {"power_lost", "link_loss"} <= {a[0] for a in admin["also"]}
+    assert admin["dismiss"] == [["×", "Dismiss: Power was lost"]]
+    assert visitor["dismiss"] == []
+
+
 def test_bands_row_says_onocoys_need_once():
     """The Bands row marks too few bands while Onocoy counts, and says what Onocoy needs only when nothing else on the
     page says it (the top card's line, Onocoy's verdict line, the bands "Also:" line); without Onocoy it is plain."""
@@ -2292,11 +2305,11 @@ SET_FLASH = {"journal": "waiting",
              "last": None, "flash_available": True}
 
 
-def test_settings_is_network_updates_and_the_danger_zone_without_fold_outs():
+def test_settings_is_network_updates_the_receiver_and_the_danger_zone_without_fold_outs():
     """Settings: Network (the Wi-Fi with its signal in words and dBm, Change network, the station's name and public status
     page, the setup hotspot with its name, password and its own password button), Updates (then Install manually: both
-    files, the receiver from a PC and going back) and the Danger zone (restart, the admin password with the BOOT-button
-    way back, factory reset). No fold-outs anywhere: the hotspot's password field comes with its button, the update
+    files, the receiver from a PC and going back), Receiver (a link to Receiver settings) and the Danger zone (restart,
+    the admin password with the BOOT-button way back, factory reset). No fold-outs anywhere: the hotspot's password field comes with its button, the update
     session's record shows whole."""
     on = {**SET_WIFI, "online": False, "rssi": None, "offline_s": 420,
           "ap": {**SET_WIFI["ap"], "active": True, "reasons": ["fallback"], "clients": 1, "password_set": False}}
@@ -2304,15 +2317,16 @@ def test_settings_is_network_updates_and_the_danger_zone_without_fold_outs():
         {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI, "update": SET_UPDATE, "click": "change"},
         {"fn": "settings_page", "status": st_status(), "wifi": on, "update": SET_UPDATE, "click": "set password"},
         {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI, "update": SET_UPDATE, "flash": SET_FLASH}])
-    assert off["cards"] == ["Network", "Updates", "Danger zone"] and off["details"] == 0
+    assert off["cards"] == ["Network", "Updates", "Receiver", "Danger zone"] and off["details"] == 0
     assert off["subs"] == ["Setup hotspot", "Install manually"]
     rows = dict(off["rows"])
     assert rows["Wi-Fi"] == "Home" and rows["Signal"] == " Weak (\u221282\u00a0dBm)"
     assert rows["Network name"] == "onodiy-1A2B" and rows["Password"] == "Set (change)"
     # Change network small in the title row; the hotspot's password through the link in its row, no button of its own.
     assert off["buttons"] == ["Change network", "change", "Check now", "Choose file", "Choose file", "Start", "Go back…",
-                              "Restart", "Change password", "Factory reset…"]
-    assert off["lines"] == ["Opens for first setup, when the station cannot reach your Wi-Fi, and after BOOT is held."]
+                              "Receiver settings", "Restart", "Change password", "Factory reset…"]
+    assert off["lines"] == ["Opens for first setup, when the station cannot reach your Wi-Fi, and after BOOT is held.",
+                            "Position, signals, correction messages and how the receiver is set up."]
     # The hotspot's password: its field and buttons once its button is pressed (the admin password's stays as it is).
     assert off["after"]["fields"] == ["Station name", "New password"]
     assert off["after"]["buttons"][:5] == ["Change network", "change", "Cancel", "Remove password", "Set password"]
@@ -2321,7 +2335,7 @@ def test_settings_is_network_updates_and_the_danger_zone_without_fold_outs():
     assert "Signal" not in dict(hot["rows"]) and dict(hot["rows"])["Password"] == "None (set password)"
     assert "set password" in hot["buttons"] and "Remove password" not in hot["after"]["buttons"]
     # The update session: what it recorded, shown whole, and the receiver's own text under its title.
-    assert sess["cards"] == ["Network", "Updates", "Receiver update session", "Danger zone"] and sess["details"] == 0
+    assert sess["cards"] == ["Network", "Updates", "Receiver", "Receiver update session", "Danger zone"] and sess["details"] == 0
     assert sess["subs"][-1] == "What the receiver sent"
     srows = dict(sess["rows"])
     assert srows["Package"].startswith("2.9") and srows["Transfers / loader attempts"] == "1 / 1" and srows["Blocks resent"] == "3"

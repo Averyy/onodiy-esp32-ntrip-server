@@ -71,6 +71,7 @@ Views.dashboard = {
       patchDetect(el, admin ? adminDashboard(s, st, openSlots, live) : publicDashboard(s, st, sig));
     };
     detectClicks(el, render);
+    dismissPowerClicks(el, render);
     endMaintClicks(el, render);
     leaveSafeClicks(el, render);
     render();
@@ -113,14 +114,40 @@ function heroCard(s, st, also, links) {
     also.length ? h('ul', { class: 'also' }, also.map(a => h('li', { class: a.tone },
       h('span', { class: 'ic', 'aria-hidden': 'true' }, a.tone === 'bad' ? '✕' : a.tone === 'info' ? 'i' : '!'),
       h('span', null, h('strong', null, 'Also: ' + a.title + '.'), a.text ? ' ' + a.text : ''),
-      link('Details', a.href, 'btn small')))) : null);
+      link('Details', a.href, 'btn small'),
+      a.dismiss ? h('button', { type: 'button', class: 'btn small dismiss', 'data-act': a.dismiss, 'aria-label': 'Dismiss: ' + a.title }, '×') : null))) : null);
+}
+
+/* "Power was lost" dismissed from this page: its line stays hidden until the station drops the alert (within a second),
+ * for at most 15 s. */
+const POWER_DISMISS = { at: 0 };
+
+/* The × on "Also: Power was lost." (POST /api/health/power-lost/dismiss): the power losses so far stop counting. */
+function dismissPowerClicks(root, refresh) {
+  root.addEventListener('click', async e => {
+    const b = e.target && e.target.closest ? e.target.closest('[data-act="dismiss-power"]') : null;
+    if (!b || !root.contains(b)) return;
+    try {
+      await busy(b, () => api('POST', '/api/health/power-lost/dismiss', {}));
+      POWER_DISMISS.at = Date.now();
+      setTimeout(() => {
+        if (refresh && root.isConnected) refresh();
+      }, 15500);
+    } catch (err) {
+      toast(errText(err), 'bad');
+    }
+    if (refresh && root.isConnected) refresh();
+  });
 }
 
 /* The top card's "Also:" lines with the duplicate stream (open servers on beside Onocoy: GET /api/casters), in tone order. */
 function heroAlso(s, st, openSlots) {
   const open = (openSlots || []).map(n => (s.casters || []).find(c => c.slot === n && !emptySlot(c))).filter(Boolean);
-  if (!open.length) return st.also;
-  return st.also.concat([{ id: 'dup_stream', title: 'Onocoy and ' + andList(open.map(casterName)) + ' are both on',
+  const hide = Date.now() - POWER_DISMISS.at < 15000;
+  const also = st.also.filter(a => !(hide && a.id === 'power_lost'))
+    .map(a => (a.id === 'power_lost' ? Object.assign({}, a, { dismiss: 'dismiss-power' }) : a));
+  if (!open.length) return also;
+  return also.concat([{ id: 'dup_stream', title: 'Onocoy and ' + andList(open.map(casterName)) + ' are both on',
     text: 'A duplicate stream can get the Onocoy account banned.', tone: 'warn', href: '#/ntrip' }])
     .sort((a, b) => (TONE_ORDER[a.tone] || 0) - (TONE_ORDER[b.tone] || 0));
 }

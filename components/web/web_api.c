@@ -2376,6 +2376,14 @@ static esp_err_t h_safe_mode_clear(web_req_t *r)
     return accepted(r->req);
 }
 
+/* The "power was lost" alert dismissed (health_dismiss_power_lost): it goes within a second. */
+static esp_err_t h_power_lost_dismiss(web_req_t *r)
+{
+    health_dismiss_power_lost();
+    ESP_LOGI(TAG, "power-lost alert dismissed at the user's request");
+    return accepted(r->req);
+}
+
 /* ---- routes ------------------------------------------------------------------------------------------------------ */
 
 #define ROUTE(u, m, a, b, f) { .uri = (u), .method = (m), .access = (a), .body = (b), .max_body = 0, .fn = (f) }
@@ -2452,6 +2460,7 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/system/reboot", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_reboot),
     ROUTE("/api/system/factory-reset", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_factory_reset),
     ROUTE("/api/system/safe-mode/clear", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_safe_mode_clear),
+    ROUTE("/api/health/power-lost/dismiss", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_power_lost_dismiss),
 };
 
 const size_t web_api_route_count = sizeof(web_api_routes) / sizeof(web_api_routes[0]);
