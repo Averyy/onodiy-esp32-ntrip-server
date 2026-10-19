@@ -3,10 +3,13 @@
 name: build
 
 on:
+  # Docs-only changes run nothing; a tag push always runs (GitHub never filters tag pushes by path).
   push:
     branches: [main]
     tags: ["v*"]
+    paths-ignore: ["README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/**", "gnss-splitter/**", "reference/**"]
   pull_request:
+    paths-ignore: ["README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/**", "gnss-splitter/**", "reference/**"]
   workflow_dispatch:
 
 permissions:
