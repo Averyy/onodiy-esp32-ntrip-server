@@ -550,8 +550,10 @@ static const char *const s_diag_event[] = {
     [DIAG_EV_RX_BOOT] = "rx_boot",
     [DIAG_EV_FIXED_POS] = "fixed_check",
     [DIAG_EV_WIFI_ROAM] = "wifi_roam",
+    [DIAG_EV_ROVER_UP] = "rover_connect",
+    [DIAG_EV_ROVER_DOWN] = "rover_disconnect",
 };
-_Static_assert(COUNT(s_diag_event) == (size_t)DIAG_EV_WIFI_ROAM + 1u, "journal kinds added: update the table");
+_Static_assert(COUNT(s_diag_event) == (size_t)DIAG_EV_ROVER_DOWN + 1u, "journal kinds added: update the table");
 
 const char *web_diag_event_name(uint16_t kind)
 {

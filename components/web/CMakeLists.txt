@@ -52,6 +52,7 @@ idf_component_register(
         um98x_flash
         network
         ntrip_server
+        local_caster
         station
         health
         fw_update)

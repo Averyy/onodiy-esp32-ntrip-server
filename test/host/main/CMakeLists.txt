@@ -159,6 +159,7 @@ idf_component_register(
         "${_fw}/web/priv_include"
         "${_fw}/station/include"
         "${_fw}/ntrip_server/include"
+        "${_fw}/local_caster/include"
         "${_fw}/network/include"
         "${_fw}/fw_update/include"
         "${_fw}/health/include"

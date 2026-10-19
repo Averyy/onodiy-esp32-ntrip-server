@@ -908,13 +908,18 @@ TEST_CASE("journal names cover the connection-history and receiver kinds; the ga
     TEST_ASSERT_EQUAL(21, DIAG_EV_LIVE_VIEW);
     TEST_ASSERT_EQUAL(24, DIAG_EV_FIXED_POS);
     TEST_ASSERT_EQUAL(25, DIAG_EV_WIFI_ROAM);
+    TEST_ASSERT_EQUAL(26, DIAG_EV_ROVER_UP);
+    TEST_ASSERT_EQUAL(27, DIAG_EV_ROVER_DOWN);
 }
 
-TEST_CASE("journal: a move between access points is wifi_roam, the kinds after it unknown", "[web_build]")
+TEST_CASE("journal: a move between access points is wifi_roam, a rover's session rover_connect and rover_disconnect, "
+          "the kinds after them unknown", "[web_build]")
 {
     TEST_ASSERT_EQUAL_STRING("wifi_roam", web_diag_event_name(DIAG_EV_WIFI_ROAM));
     TEST_ASSERT_EQUAL_STRING("rx_boot", web_diag_event_name(DIAG_EV_RX_BOOT));
-    TEST_ASSERT_EQUAL_STRING("unknown", web_diag_event_name(DIAG_EV_WIFI_ROAM + 1));
+    TEST_ASSERT_EQUAL_STRING("rover_connect", web_diag_event_name(DIAG_EV_ROVER_UP));
+    TEST_ASSERT_EQUAL_STRING("rover_disconnect", web_diag_event_name(DIAG_EV_ROVER_DOWN));
+    TEST_ASSERT_EQUAL_STRING("unknown", web_diag_event_name(DIAG_EV_ROVER_DOWN + 1));
 }
 
 TEST_CASE("the power-lost alert and the new network ladder reasons have API names", "[web_build]")

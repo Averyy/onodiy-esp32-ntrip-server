@@ -24,6 +24,7 @@ idf_component_register(
         um98x_flash
         pkg_store
         ntrip_server
+        local_caster
         network
         web
         fw_update

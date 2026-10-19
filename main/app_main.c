@@ -57,6 +57,7 @@
 #include "health.h"
 #include "ledger.h"
 #include "lifecycle.h"
+#include "local_caster.h"
 #include "network.h"
 #include "ntrip_server.h"
 #include "pkg_store.h"
@@ -133,6 +134,7 @@ static const boot_step_t s_init_steps[] = {
     { "um98x_flash",  um98x_flash_init,  true  },
     { "station",      station_init,      true  }, /* wires GNSS link sinks to hub + ctl */
     { "ntrip_server", ntrip_server_init, true  },
+    { "local_caster", local_caster_init, true  },
     { "network",      network_init,      false },
     { "health",       health_init,       false },
     { "web",          web_init,          false },
@@ -151,6 +153,7 @@ static const boot_step_t s_start_steps[] = {
     { "web",          web_start,          false },
     { "station",      station_start,      true  }, /* starts the GNSS RX task: stream-first bring-up */
     { "ntrip_server", ntrip_server_start, true  },
+    { "local_caster", local_caster_start, true  },
     { "fw_update",    fw_update_start,    false },
     { "health",       health_start,       false },
 };

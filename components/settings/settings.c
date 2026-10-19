@@ -23,7 +23,7 @@ static bool s_available;
 /* User-config namespaces a factory reset clears ("life" and "ledger" hold
  * device history and are left alone). */
 static const char *const s_user_namespaces[] = {
-    SETTINGS_NS_SYS, SETTINGS_NS_WIFI, SETTINGS_NS_GNSS, SETTINGS_NS_OTA, SETTINGS_NS_WEB,
+    SETTINGS_NS_SYS, SETTINGS_NS_WIFI, SETTINGS_NS_GNSS, SETTINGS_NS_OTA, SETTINGS_NS_WEB, SETTINGS_NS_LCAST,
 };
 
 /* Device state inside user namespaces that a factory reset must keep. The

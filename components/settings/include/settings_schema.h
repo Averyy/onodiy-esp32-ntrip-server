@@ -102,6 +102,10 @@ extern "C" {
 #define SETTINGS_KEY_WEB_PUBLIC     "public_status" /**< u8: minimal status readable without login */
 #define SETTINGS_KEY_WEB_SESSIONS   "sessions"    /**< blob, device state: remembered logins (web_core.h web_sess_store_*, versioned: the admin password's salt they belong to, the latest UTC they may assume, then per session the SHA-256 of its token and its end in UTC; never a token); written at a login, a logout, a purge of ended ones, a password change and when the clock sets or cuts back an end, plus at most once a day for the mark, never per request; erased by factory reset */
 
+/* ---- "lcast": local NTRIP for a rover (local_caster.h) ------------------- */
+#define SETTINGS_NS_LCAST           "lcast"
+#define SETTINGS_KEY_LCAST_CFG      "cfg"         /**< blob (a setting: settings_set_blob, posts SETTINGS_EVENT_CHANGED): v1 {u8 version = 1, bool enabled, str mountpoint (1-47), str username (1-31), str password (0 or 8-63, secret)}; later versions only append fields, and a reader ignores what it does not know (blob_reader_remaining); at most 146 bytes; written only on a user save, never periodically */
+
 #ifdef __cplusplus
 }
 #endif

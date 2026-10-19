@@ -261,6 +261,17 @@ typedef enum {
      * (16-30).
      */
     DIAG_EV_WIFI_ROAM = 25,
+    /**
+     * Local NTRIP (components/local_caster): a rover's session has streamed
+     * 10 s (journalled then, not at its connect; at most 6 sessions an hour
+     * are listed, the others only counted): a = diag_rover_up_a(connection
+     * index, NTRIP version, IPv6, seconds since its success reply, sessions
+     * not listed since the previous listed one), b = diag_rover_addr_b() of
+     * its IPv4 address (for IPv6, of the address's last 4 bytes).
+     */
+    DIAG_EV_ROVER_UP = 26,
+    /** The end of a listed rover session: a = diag_rover_down_a(connection index, local_caster_end_t), b = seconds since its success reply. */
+    DIAG_EV_ROVER_DOWN = 27,
 } diag_event_t;
 
 /** DIAG_EV_FIXED_POS events (low byte of `a`). */
@@ -321,6 +332,35 @@ static inline int32_t diag_caster_a(uint32_t slot, uint32_t cls, uint32_t count)
         count = 32767u;
     }
     return (int32_t)((slot & 0xFFu) | ((cls & 0xFFu) << 8) | (count << 16));
+}
+
+/**
+ * `a` of DIAG_EV_ROVER_UP: connection index in bits 0-3, NTRIP version in
+ * bits 4-5, IPv6 in bit 6, seconds since the success reply in bits 8-15
+ * (saturating at 255), sessions not listed in bits 16-30 (saturating at
+ * 32 767, so `a` stays >= 0).
+ */
+static inline int32_t diag_rover_up_a(uint32_t conn, uint32_t version, bool v6, uint32_t age_s, uint32_t unlisted)
+{
+    if (age_s > 255u) {
+        age_s = 255u;
+    }
+    if (unlisted > 32767u) {
+        unlisted = 32767u;
+    }
+    return (int32_t)((conn & 0xFu) | ((version & 0x3u) << 4) | ((v6 ? 1u : 0u) << 6) | (age_s << 8) | (unlisted << 16));
+}
+
+/** `a` of DIAG_EV_ROVER_DOWN: connection index in bits 0-3, local_caster_end_t in bits 8-15. */
+static inline int32_t diag_rover_down_a(uint32_t conn, uint32_t reason)
+{
+    return (int32_t)((conn & 0xFu) | ((reason & 0xFFu) << 8));
+}
+
+/** 4 address bytes a.b.c.d -> (a << 24 | b << 16 | c << 8 | d) as int32_t (read it back as b >>> 0). */
+static inline int32_t diag_rover_addr_b(const uint8_t q[4])
+{
+    return (int32_t)(((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16) | ((uint32_t)q[2] << 8) | (uint32_t)q[3]);
 }
 
 /**

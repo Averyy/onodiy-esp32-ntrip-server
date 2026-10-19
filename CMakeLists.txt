@@ -130,7 +130,7 @@ endif()
 # under components/ must be listed here.
 set(_layer_0 board settings diag gnss_framing gnss_types)
 set(_layer_1 gnss_link rtcm_hub pkg_store lifecycle ledger gnss_obs)
-set(_layer_2 um98x_ctl um98x_flash ntrip_server network)
+set(_layer_2 um98x_ctl um98x_flash ntrip_server local_caster network)
 set(_layer_3 station)
 set(_layer_4 fw_update health bench)
 set(_layer_5 web)

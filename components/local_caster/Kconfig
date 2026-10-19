@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+menu "Station: local NTRIP for a rover"
+
+    config LOCAL_CASTER_PORT
+        int "TCP port rovers connect to"
+        range 1024 65535
+        default 2101
+        help
+            TCP port rovers connect to (never 80 or 53: the range starts at
+            1024). Every rover app accepts 2101; this is not a user setting,
+            only an option for a special build.
+
+    config LOCAL_CASTER_MAX_LAG_MS
+        int "Hub lag limit per rover (ms)"
+        range 500 10000
+        default 2000
+        help
+            Hub lag limit per rover: a rover that reads more slowly loses
+            whole old epochs, which are dropped in the hub. Nothing waits
+            in a private queue.
+
+    config LOCAL_CASTER_TASK_PRIO
+        int "Task priority"
+        range 1 7
+        default 4
+        help
+            Below the web server (5) and the caster slots (8), so a rover
+            can never take CPU from the main stream.
+
+    config LOCAL_CASTER_TASK_STACK
+        int "Task stack (bytes)"
+        range 4096 16384
+        default 6144
+        help
+            Bytes, in PSRAM (the task does no flash work).
+
+endmenu
