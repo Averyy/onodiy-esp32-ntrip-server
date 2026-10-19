@@ -1337,39 +1337,38 @@ void lcast_rate_init(lcast_rate_t *r)
     memset(r, 0, sizeof(*r));
 }
 
-void lcast_rate_sample(lcast_rate_t *r, uint32_t now_s, uint64_t bytes_in)
+void lcast_rate_sample(lcast_rate_t *r, uint32_t now_ms, uint64_t bytes_in)
 {
     if (r->n > 0) {
         uint32_t last = (r->head + LCAST_RATE_SAMPLES - 1u) % LCAST_RATE_SAMPLES;
-        uint32_t since = now_s - r->at_s[last];
-        if (since < LCAST_RATE_STEP_S) {
+        uint32_t since = now_ms - r->at_ms[last];
+        if (since < LCAST_RATE_STEP_MS) {
             return;
         }
-        if (since > 2u * LCAST_RATE_STEP_S || bytes_in < r->bytes[last]) {
-            lcast_rate_init(r);   /* a gap (the caster was off) or a counter reset: start over */
+        if (since > 2u * LCAST_RATE_STEP_MS || bytes_in < r->bytes[last]) {
+            lcast_rate_init(r);   /* samples missed, or a counter reset: start over */
         }
     }
     r->bytes[r->head] = bytes_in;
-    r->at_s[r->head] = now_s;
+    r->at_ms[r->head] = now_ms;
     r->head = (r->head + 1u) % LCAST_RATE_SAMPLES;
     if (r->n < LCAST_RATE_SAMPLES) {
         r->n++;
     }
 }
 
-uint32_t lcast_rate_bps(const lcast_rate_t *r)
+uint32_t lcast_rate_bps(const lcast_rate_t *r, uint32_t now_ms, uint64_t bytes_now)
 {
-    if (r->n < 2) {
+    if (r->n == 0) {
         return 0;
     }
-    uint32_t newest = (r->head + LCAST_RATE_SAMPLES - 1u) % LCAST_RATE_SAMPLES;
     uint32_t oldest = (r->head + LCAST_RATE_SAMPLES - r->n) % LCAST_RATE_SAMPLES;
-    uint32_t span = r->at_s[newest] - r->at_s[oldest];
-    if (span == 0) {
-        return 0;
+    uint32_t span = now_ms - r->at_ms[oldest];
+    if (span < LCAST_RATE_MIN_MS || span > (LCAST_RATE_SAMPLES + 2u) * LCAST_RATE_STEP_MS ||
+        bytes_now < r->bytes[oldest]) {
+        return 0;   /* too short to tell, samples missed, or a counter reset */
     }
-    uint64_t bits = (r->bytes[newest] - r->bytes[oldest]) * 8u;
-    uint64_t bps = bits / span;
+    uint64_t bps = (bytes_now - r->bytes[oldest]) * 8000u / span;
     return bps > UINT32_MAX ? UINT32_MAX : (uint32_t)bps;
 }
 
@@ -1505,5 +1504,28 @@ const char *lcast_end_name(local_caster_end_t reason)
     case LOCAL_CASTER_END_NONE:
     default:
         return "none";
+    }
+}
+
+_Static_assert(LOCAL_CASTER_SEND_STALL_MS == 10000u, "the words for a stalled rover say 10 s");
+
+const char *lcast_end_words(local_caster_end_t reason)
+{
+    switch (reason) {
+    case LOCAL_CASTER_END_CLOSED:
+        return "the rover closed the connection";
+    case LOCAL_CASTER_END_STALLED:
+        return "the rover took no data for 10 s";
+    case LOCAL_CASTER_END_LOST:
+        return "the connection was lost";
+    case LOCAL_CASTER_END_SETTINGS:
+        return "turned off or its settings changed";
+    case LOCAL_CASTER_END_NETWORK:
+        return "the station lost its network address";
+    case LOCAL_CASTER_END_RESTART:
+        return "the station restarted";
+    case LOCAL_CASTER_END_NONE:
+    default:
+        return "ended";
     }
 }

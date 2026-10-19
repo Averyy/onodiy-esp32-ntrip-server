@@ -1799,6 +1799,18 @@ class E2E:
 
         # 3. The source table, no login: NTRIP 1.0 and 2.0, and for a mountpoint the station does not have.
         want_str = expected_str(self.schedule)
+
+        # The station lists the types it has seen in the last 60 s (spec section 2.4). Run alone, this scenario
+        # starts seconds after the boot, before a type the fixture sends once a loop (1230, 21 s into its 30 s)
+        # has come: wait (at most a loop and a bit) until the table lists every type the fixture forwards.
+        def table_types() -> list[int] | None:
+            recs = ntrip_client.fetch_sourcetable("127.0.0.1", self.ntrip_port, 1).records
+            if len(recs) != 1:
+                return None
+            details = (recs[0].get("format_details") or "").split(",")
+            return sorted(int(x[:4]) for x in details if x[:4].isdigit())
+
+        self.poll(lambda: table_types() == want_str["types"] or None, self.schedule.duration + 10, every=2)
         for version, flavour in ((1, V1), (2, V2_CHUNKED)):
             t = ntrip_client.fetch_sourcetable("127.0.0.1", self.ntrip_port, version)
             self.save(f"lcast-sourcetable-{version}.txt", (t.reply.head + t.body).decode("latin-1"))

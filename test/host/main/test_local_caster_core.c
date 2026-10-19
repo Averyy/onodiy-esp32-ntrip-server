@@ -1513,38 +1513,53 @@ TEST_CASE("lcast config rules: every boundary and its words", "[lcast]")
 
 /* ---- 13. rate estimate -------------------------------------------------------------------------- */
 
-TEST_CASE("lcast bit rate: 10 s samples in a ring of 6, 0 until two, a gap starts over", "[lcast]")
+TEST_CASE("lcast bit rate: from the oldest of 6 samples 10 s apart to now, there within seconds of boot", "[lcast]")
 {
     lcast_rate_t r;
     lcast_rate_init(&r);
-    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r));
-    lcast_rate_sample(&r, 100, 1000);
-    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r));
-    lcast_rate_sample(&r, 105, 5000);   /* too soon: not taken */
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, 1000, 5000));   /* no sample */
+    lcast_rate_sample(&r, 300, 0);                                 /* at init: nothing in yet */
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, 1000, 1000));   /* 0.7 s: too short to tell */
+    /* 7.5 s after it (the caster just turned on): the rate so far */
+    TEST_ASSERT_EQUAL_UINT32(11786, lcast_rate_bps(&r, 7800, 11050));
+    lcast_rate_sample(&r, 5300, 5000);                              /* too soon: not taken */
     TEST_ASSERT_EQUAL_UINT32(1, r.n);
-    lcast_rate_sample(&r, 110, 1000 + 17000);   /* 1700 B/s */
-    TEST_ASSERT_EQUAL_UINT32(13600, lcast_rate_bps(&r));
-    /* the ring keeps 6 samples (50 s): the oldest goes */
-    uint64_t bytes = 18000;
-    uint32_t t = 110;
+    /* the ring keeps 6 samples: the oldest is 50 s back */
+    uint64_t bytes = 0;
+    uint32_t t = 300;
     for (int i = 0; i < 8; i++) {
-        t += 10;
+        t += LCAST_RATE_STEP_MS;
         bytes += i < 4 ? 17000 : 34000;   /* the rate doubles */
         lcast_rate_sample(&r, t, bytes);
     }
     TEST_ASSERT_EQUAL_UINT32(6, r.n);
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)((uint64_t)(34000 * 4 + 17000 * 1) * 8u / 50u), lcast_rate_bps(&r));
-    /* a gap (the caster was off) or a counter going back starts over */
-    lcast_rate_sample(&r, t + 100, bytes + 1000);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)((34000ull * 4u + 17000u) * 8000u / 50000u), lcast_rate_bps(&r, t, bytes));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)((34000ull * 4u + 17000u * 2u) * 8000u / 55000u),
+                             lcast_rate_bps(&r, t + 5000u, bytes + 17000u));
+    /* no sample for a long time (the timer stopped): no rate rather than an old one */
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, t + 100000u, bytes + 17000u));
+    /* samples missed, or a counter going back, start over */
+    lcast_rate_sample(&r, t + 30000u, bytes + 1000u);
     TEST_ASSERT_EQUAL_UINT32(1, r.n);
-    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r));
-    lcast_rate_sample(&r, t + 110, 10);
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, t + 30500u, bytes + 2000u));
+    lcast_rate_sample(&r, t + 40000u, 10);
     TEST_ASSERT_EQUAL_UINT32(1, r.n);
-    /* across the uptime wrap of the seconds */
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, t + 45000u, 5));
+    /* across the wrap of the millisecond clock */
     lcast_rate_init(&r);
-    lcast_rate_sample(&r, UINT32_MAX - 4u, 0);
-    lcast_rate_sample(&r, 5, 2500);
-    TEST_ASSERT_EQUAL_UINT32(2000, lcast_rate_bps(&r));
+    lcast_rate_sample(&r, UINT32_MAX - 4999u, 0);
+    TEST_ASSERT_EQUAL_UINT32(2000, lcast_rate_bps(&r, 5000, 2500));
+}
+
+TEST_CASE("lcast end reasons: the API's names and the console's words", "[lcast]")
+{
+    static const char *const words[] = { "ended", "the rover closed the connection", "the rover took no data for 10 s",
+                                         "the connection was lost", "turned off or its settings changed",
+                                         "the station lost its network address", "the station restarted" };
+    for (int i = 0; i <= LOCAL_CASTER_END_RESTART; i++) {
+        TEST_ASSERT_EQUAL_STRING(words[i], lcast_end_words((local_caster_end_t)i));
+    }
+    TEST_ASSERT_EQUAL_STRING("ended", lcast_end_words((local_caster_end_t)42));
 }
 
 /* ---- 14. fuzz --------------------------------------------------------------------------------- */

@@ -431,21 +431,26 @@ void lcast_jq_pop(lcast_jq_t *q);
 /* ---- bit rate ---------------------------------------------------------------------------- */
 
 #define LCAST_RATE_SAMPLES   6u
-#define LCAST_RATE_STEP_S    10u
+#define LCAST_RATE_STEP_MS   10000u
+#define LCAST_RATE_MIN_MS    1000u     /**< a shorter span gives no rate */
 
-/** Input bytes sampled every LCAST_RATE_STEP_S into a ring; the rate is over the span the ring holds. */
+/**
+ * Input bytes (the hub's bytes_in) sampled every LCAST_RATE_STEP_MS into a
+ * ring, from boot on; the rate runs from the oldest sample (at most a minute
+ * old) to now, so it is there as soon as the station has seen data.
+ */
 typedef struct {
     uint64_t bytes[LCAST_RATE_SAMPLES];
-    uint32_t at_s[LCAST_RATE_SAMPLES];
+    uint32_t at_ms[LCAST_RATE_SAMPLES];
     uint32_t n;                 /**< samples held */
     uint32_t head;              /**< the next slot */
 } lcast_rate_t;
 
 void lcast_rate_init(lcast_rate_t *r);
-/** Take a sample when LCAST_RATE_STEP_S passed since the last one (a gap over twice that starts over). */
-void lcast_rate_sample(lcast_rate_t *r, uint32_t now_s, uint64_t bytes_in);
-/** Bits per second over the ring, 0 until two samples. */
-uint32_t lcast_rate_bps(const lcast_rate_t *r);
+/** Take a sample when LCAST_RATE_STEP_MS passed since the last one (a gap over twice that, or the count going back, starts over). */
+void lcast_rate_sample(lcast_rate_t *r, uint32_t now_ms, uint64_t bytes_in);
+/** Bits per second from the oldest sample to now (bytes_now: the count now); 0 without a sample or within LCAST_RATE_MIN_MS of it. */
+uint32_t lcast_rate_bps(const lcast_rate_t *r, uint32_t now_ms, uint64_t bytes_now);
 
 /* ---- stored config ----------------------------------------------------------------------- */
 
@@ -479,8 +484,11 @@ bool lcast_password_ok(const char *s);
  */
 bool lcast_cfg_check(const local_caster_cfg_t *cfg, bool password_stored, const char **field, const char **rule);
 
-/** End-reason words for the log ("closed", "stalled", ...); "none" for an unknown value. */
+/** End-reason names as the API has them ("closed", "stalled", ...); "none" for an unknown value. */
 const char *lcast_end_name(local_caster_end_t reason);
+
+/** End-reason words for the console line ("the rover closed the connection", ...); "ended" for none or unknown. */
+const char *lcast_end_words(local_caster_end_t reason);
 
 #ifdef __cplusplus
 }

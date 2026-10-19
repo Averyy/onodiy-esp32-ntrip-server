@@ -161,8 +161,6 @@ typedef struct {
     lcast_jgate_t jgate;
     lcast_jq_t jq;
     uint32_t jq_try_ms;
-    lcast_rate_t rate;
-    uint32_t rate_next_s;
     uint32_t stats_ms;
     uint32_t order;
     /* network, read every pass */
@@ -230,6 +228,13 @@ static local_caster_status_t s_status = {
 };
 static int64_t s_start_us[LOCAL_CASTER_MAX_CLIENTS];   /* under s_lock: clients' success replies */
 
+/* The hub's input rate for the STR record, sampled from init on (an
+ * esp_timer, every LCAST_RATE_STEP_MS), so the source table has it whenever
+ * the station has seen data, also right after the caster is turned on. */
+static portMUX_TYPE s_rate_lock = portMUX_INITIALIZER_UNLOCKED;
+static lcast_rate_t s_rate;             /* under s_rate_lock */
+static esp_timer_handle_t s_rate_timer;
+
 /* ---- small helpers ------------------------------------------------------------------------- */
 
 static uint32_t now_ms(void)
@@ -240,6 +245,29 @@ static uint32_t now_ms(void)
 static uint32_t now_s(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000000);
+}
+
+static void rate_tick(void *arg)
+{
+    (void)arg;
+    rtcm_hub_stats_t hs;
+    rtcm_hub_get_stats(&hs);
+    uint32_t now = now_ms();
+    portENTER_CRITICAL(&s_rate_lock);
+    lcast_rate_sample(&s_rate, now, hs.bytes_in);
+    portEXIT_CRITICAL(&s_rate_lock);
+}
+
+/* Bits per second the hub took in over the last minute (up to now). */
+static uint32_t bitrate_now(void)
+{
+    rtcm_hub_stats_t hs;
+    rtcm_hub_get_stats(&hs);
+    lcast_rate_t r;
+    portENTER_CRITICAL(&s_rate_lock);
+    r = s_rate;
+    portEXIT_CRITICAL(&s_rate_lock);
+    return lcast_rate_bps(&r, now_ms(), hs.bytes_in);
 }
 
 static int64_t unix_now(void)
@@ -350,11 +378,11 @@ static void log_line(logk_t k, const char *text, uint32_t more)
     }
 }
 
-/* The minute is over: name what was held back (that line opens the next minute). */
-static void log_flush(ctx_t *x, logk_t k, uint32_t now)
+/* The minute is over (or `force`: the task stops): name what was held back (that line opens the next minute). */
+static void log_flush(ctx_t *x, logk_t k, uint32_t now, bool force)
 {
     rate_log_t *l = &x->logs[k];
-    if (!l->open || (uint32_t)(now - l->at_ms) < LOG_EVERY_MS) {
+    if (!l->open || (!force && (uint32_t)(now - l->at_ms) < LOG_EVERY_MS)) {
         return;
     }
     l->open = false;
@@ -370,7 +398,7 @@ static void log_flush(ctx_t *x, logk_t k, uint32_t now)
 static void log_event(ctx_t *x, logk_t k, const char *text, uint32_t now)
 {
     rate_log_t *l = &x->logs[k];
-    log_flush(x, k, now);
+    log_flush(x, k, now, false);
     if (!l->open) {
         l->open = true;
         l->at_ms = now;
@@ -545,8 +573,14 @@ static void stream_end(ctx_t *x, conn_t *c, local_caster_end_t reason)
     } else {
         lcast_jgate_unlisted_end(&x->jgate);
     }
-    log_eventf(x, LOGK_DOWN, now_ms(), "rover %s disconnected after %u s (%s), %llu bytes", c->addr, (unsigned)age_s,
-               lcast_end_name(reason), (unsigned long long)c->bytes_sent);
+    if (planned) {
+        /* At most 2 at once, and the task may stop right after (a restart): never held back. */
+        ESP_LOGI(TAG, "rover %s disconnected after %u s (%s), %llu bytes", c->addr, (unsigned)age_s,
+                 lcast_end_words(reason), (unsigned long long)c->bytes_sent);
+    } else {
+        log_eventf(x, LOGK_DOWN, now_ms(), "rover %s disconnected after %u s (%s), %llu bytes", c->addr,
+                   (unsigned)age_s, lcast_end_words(reason), (unsigned long long)c->bytes_sent);
+    }
     x->bytes_done += c->bytes_sent;
     c->bytes_sent = 0;
     c->listed = false;
@@ -634,7 +668,7 @@ static void build_str(ctx_t *x)
     }
     in->mount = x->cfg.mountpoint;
     in->identifier = s_identifier;
-    in->bitrate = lcast_rate_bps(&x->rate);
+    in->bitrate = bitrate_now();
     if (lcast_str_build(in, x->str, sizeof(x->str)) == 0) {
         x->str[0] = '\0';
     }
@@ -1162,6 +1196,9 @@ static void caster_task(void *arg)
             end_all(x, LOCAL_CASTER_END_RESTART, false);
             close_listener(x);
             journal_step(x, now_ms(), true);
+            for (int k = 0; k < LOGK_COUNT; k++) {
+                log_flush(x, (logk_t)k, now_ms(), true);   /* what was held back, before the restart */
+            }
             x->state = LOCAL_CASTER_OFF;
             publish(x, now_ms());
             xSemaphoreGive(s_closed);
@@ -1215,14 +1252,7 @@ static void caster_task(void *arg)
         list_sessions(x);
         journal_step(x, now, false);
         for (int k = 0; k < LOGK_COUNT; k++) {
-            log_flush(x, (logk_t)k, now);
-        }
-        uint32_t t = now_s();
-        if ((int32_t)(t - x->rate_next_s) >= 0) {
-            rtcm_hub_stats_t hs;
-            rtcm_hub_get_stats(&hs);
-            lcast_rate_sample(&x->rate, t, hs.bytes_in);
-            x->rate_next_s = t + LCAST_RATE_STEP_S;
+            log_flush(x, (logk_t)k, now, false);
         }
         publish(x, now);
     }
@@ -1263,8 +1293,6 @@ static esp_err_t ensure_task(void)
     uint32_t t = now_s();
     lcast_throttles_init(&x->thr, t);
     lcast_jgate_init(&x->jgate, t);
-    lcast_rate_init(&x->rate);
-    x->rate_next_s = t;
     x->netif_lookup_ms = now_ms() - NETIF_LOOKUP_MS;
     /* Stack and TCB in PSRAM: the task does no flash or NVS work. Never deleted. */
     TaskHandle_t h = NULL;
@@ -1352,6 +1380,16 @@ esp_err_t local_caster_init(void)
     if (herr != ESP_OK) {
         ESP_LOGW(TAG, "no settings events (%s): the default mountpoint follows a rename only after a restart",
                  esp_err_to_name(herr));
+    }
+    /* The input rate from now on (a sample every 10 s, the first at once). */
+    rate_tick(NULL);
+    const esp_timer_create_args_t targs = { .callback = rate_tick, .name = "lcast_rate" };
+    herr = esp_timer_create(&targs, &s_rate_timer);
+    if (herr == ESP_OK) {
+        herr = esp_timer_start_periodic(s_rate_timer, (uint64_t)LCAST_RATE_STEP_MS * 1000u);
+    }
+    if (herr != ESP_OK) {
+        ESP_LOGW(TAG, "no rate timer (%s): the source table says bit rate 0", esp_err_to_name(herr));
     }
     s_ready = true;
     if (!on) {
