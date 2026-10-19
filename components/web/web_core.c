@@ -1370,16 +1370,31 @@ uint64_t web_client_key(const web_addr_t *a)
     return hi;
 }
 
-bool web_addr_on_ap(const web_addr_t *local, uint32_t ap_ip4, const uint8_t *ap_ll6)
+bool web_addr_on_ap(const web_addr_t *local, const web_addr_t *peer, uint32_t ap_ip4, uint32_t ap_mask4,
+                    const uint8_t *ap_ll6)
 {
-    if (local == NULL) {
+    if (local == NULL || peer == NULL) {
         return false;
     }
     uint32_t v4;
     if (addr_v4(local, &v4)) {
-        return ap_ip4 != 0 && v4 == ap_ip4;
+        /* The AP's address alone is not enough: lwIP takes a packet for it on the station
+         * interface too. A peer inside the AP's subnet gets its answers over the AP, so a
+         * home-network host cannot complete a connection with a forged one. */
+        uint32_t p4;
+        return ap_ip4 != 0 && ap_mask4 != 0 && v4 == ap_ip4 && addr_v4(peer, &p4) &&
+               (p4 & ap_mask4) == (ap_ip4 & ap_mask4);
     }
+    /* IPv6: link-local addresses only, which lwIP takes only on their own interface. */
     return ap_ll6 != NULL && memcmp(local->b, ap_ll6, 16) == 0;
+}
+
+void web_wipe(void *p, size_t len)
+{
+    volatile uint8_t *v = (volatile uint8_t *)p;
+    while (len-- > 0) {
+        *v++ = 0;
+    }
 }
 
 /* Append text, keeping out terminated; counts what it would have written. */

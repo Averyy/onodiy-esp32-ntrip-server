@@ -477,8 +477,8 @@ def rover_down(seq: int, conn: int, reason: int, secs: int, up: int) -> dict:
 def test_event_list_names_a_rovers_sessions():
     """A rover's start (journalled after 10 s) says its address and NTRIP version, and the shorter sessions not listed
     before it; its end says the address of its start (same connection, same start of the station; else "a rover"), how
-    long it lasted and why, neutral when your settings or a restart ended it. IPv6 shows its last 4 bytes. The NTRIP
-    filter keeps them, the Wi-Fi filter does not."""
+    long it lasted and why, neutral when the rover closed it or your settings or a restart ended it. IPv6 shows its
+    last 4 bytes. The NTRIP filter keeps them, the Wi-Fi filter does not."""
     ip = (192 << 24) | (168 << 16) | (2 << 8) | 50
     recs = [jrec(1, "boot", 0, 0, 1),
             rover_up(2, 0, 2, ip, 600, unlisted=3), rover_up(3, 1, 1, 0x2C4F7B2D, 900, v6=True),
@@ -492,7 +492,7 @@ def test_event_list_names_a_rovers_sessions():
     rows = [(r["ev"], r["det"], r.get("tone")) for r in every if "head" not in r]
     assert rows == [
         # The second start: its rover_connect was before the restart, so the end has no address.
-        ("Rover disconnected", "a rover, after 1 min 2 s: the rover closed the connection", "warn"),
+        ("Rover disconnected", "a rover, after 1 min 2 s: the rover closed the connection", ""),
         ("Rover disconnected", "a rover, after 1 min 1 s: the station lost its network address", "warn"),
         ("Rover disconnected", "a rover, after 40 s: the station restarted", ""),
         ("Rover connected", "10.0.2.2, NTRIP 1.0", "ok"),

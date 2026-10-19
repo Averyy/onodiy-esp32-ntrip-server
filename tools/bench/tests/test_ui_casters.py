@@ -623,7 +623,11 @@ async function ntripRover(c) {
     if (p === '/api/casters') return [200, c.casters];
     if (p === '/api/local-caster' && m === 'GET') return lc;
     if (p === '/api/local-caster' && m === 'PUT') {
-      if (c.put) return c.put;
+      if (c.put) {
+        /* A refused PUT the station stored all the same: GET answers c.again from now on. */
+        if (c.again && c.act === 'switch') lc = c.again;
+        return c.put;
+      }
       const d = JSON.parse(JSON.stringify(lc[1]));
       Object.assign(d.config, body);
       delete d.config.password;
@@ -2762,6 +2766,15 @@ def test_rover_switch_saves_at_once_and_asks_for_a_password_first():
     assert refused["puts"] == [{"enabled": True}] and refused["after"]["lines"] == ["Choose a password first."]
     edit = ntrip_rover([200, lcast()], act="edit")
     assert edit["after"]["fields"] == ["Mountpoint", "Username", "Password"] and edit["after"]["lines"] == []
+    # A 500 on turning on (the config stored, the caster could not start): the card reads the station again, so the
+    # switch shows on with the error state; a refusal that stored nothing leaves it off.
+    stored = ntrip_rover([200, lcast(enabled=False)], act="switch", put=[500, internal("ESP_ERR_NO_MEM")],
+                         again=[200, lcast(state="error", errno=12)])
+    assert stored["puts"] == [{"enabled": True}] and stored["swAfter"] == "true", stored
+    assert stored["after"]["rows"][0] == ["Host", "onodiy.local or 192.168.1.50"]
+    kept = ntrip_rover([200, lcast(enabled=False)], act="switch", put=[500, internal("ESP_FAIL")],
+                       again=[200, lcast(enabled=False)])
+    assert kept["swAfter"] == "false" and kept["after"]["lines"] == [ROVER_OFF], kept
 
 
 def test_status_ntrip_card_says_your_rover_in_one_line():

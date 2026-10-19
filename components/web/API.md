@@ -296,8 +296,15 @@ client, +4 not logged)` (the `+k` part only when lines were held back).
 
 **First password ("claim").** `POST /api/setup/admin` works only while no
 admin password is stored **and** the request arrived over the device's own
-AP (the socket's local address is the AP's IPv4 address, or its IPv6
-link-local address for a phone that reaches the AP over IPv6). The AP is up only while
+AP (the socket's local address is the AP's IPv4 address and the client's
+address is inside the AP's subnet, or the local address is its IPv6
+link-local address for a phone that reaches the AP over IPv6). The client's
+subnet matters because lwIP takes a packet for the AP's address on the
+station interface too: a home-network host that routes the AP's address
+through the station is not on the AP, and one that forges an AP-subnet
+source gets the answers over the AP, so its connection never completes.
+Link-local addresses (the station has no other IPv6 address) are taken only
+on their own interface. The AP is up only while
 the station is unconfigured, offline (fallback), or for 15 min after a
 BOOT-button hold (recovery AP; open unless `wifi/ap_pass` is set), so a
 claim needs someone within Wi-Fi range of the station while its AP is up.
@@ -1711,9 +1718,26 @@ server). NTRIP 1.0 and 2.0 on TCP port 2101 (`CONFIG_LOCAL_CASTER_PORT`,
 fixed), one mountpoint, one username and password, at most 2 rovers at
 once (`LOCAL_CASTER_MAX_CLIENTS`). Only peers with a private, link-local
 or loopback address connect, never the station's IPv4 gateway (a router
-that masquerades a port forward) and never over the setup hotspot. Off by
-default. The rover's sessions are journalled (`rover_connect`,
-`rover_disconnect`, section 14).
+that masquerades a port forward) and never over the setup hotspot: neither
+to the hotspot's address nor, while the hotspot is up, from an address in
+its subnet (the station takes IPv4 packets for any of its addresses on
+either interface, so a hotspot client could reach the home-network
+address). Off by default. The rover's sessions are journalled
+(`rover_connect`, `rover_disconnect`, section 14).
+
+Connections: at most 4 at once. One that sends nothing within 2 s is
+closed without a reply, and when all 4 are taken a new one takes the place
+of one that cannot be a rover's (one lingering after its answer, one that
+has sent nothing, the same client's earlier request, a request of a client
+holding another connection), so idle connections from the LAN cannot keep
+a rover out. A request with an `Origin` or `Sec-Fetch-*` header gets `403`:
+defence in depth only, since a browser sends neither on every request (no
+`Origin` on a plain cross-site `GET`, no `Sec-Fetch-*` to a plain-HTTP
+address); the login is what protects the stream. Wrong logins are
+throttled as the web Login is (per address: 5 free, then 2^(n-4) s up to
+300 s; in total: 30 in a burst, then one per 120 s); the addresses of the
+last 2 successful logins since boot skip the total, so failures elsewhere
+never lock the owner's rover out.
 
 ### `GET /api/local-caster` (adm)
 
@@ -1740,7 +1764,7 @@ default. The rover's sessions are journalled (`rover_connect`,
 | `status.clients[]` | the rovers streaming now, oldest first: `addr` (IPv6 in RFC 5952 form, an IPv4-mapped address as IPv4), `ntrip_version` (2 when its request said `Ntrip-Version: Ntrip/2.0`, else 1), `chunked` (its data goes in HTTP chunks: NTRIP 2.0 over HTTP/1.1), `connected_s` (since its success reply), `bytes_sent` (RTCM bytes its socket took; no reply header, no chunk framing), `epochs_dropped` (whole epochs the hub dropped because it read too slowly), `agent` (its `User-Agent`, printable ASCII cut to 47; `null` when it sent none) |
 | `status.sessions`, `status.bytes_sent`, `status.stalled` | since boot: sessions started, RTCM bytes sent in all of them, sessions closed because the rover took no data for 10 s |
 | `status.listen_errno` | the `errno` of the socket, bind or listen that failed (`ENOMEM`: no task or no memory); `null` unless `state` is `error` |
-| `status.refused` | since boot: `not_local` (closed at once without a reply: not a local address, the gateway, or over the setup hotspot), `login` (`401`: a wrong or missing username or password), `throttled` (`429`: too many wrong logins, from that address or in total), `full` (`503`: 2 rovers streaming or no free hub consumer, or closed at once with 4 connections open), `bad_request` (`400` or `403`: not an NTRIP `GET`, too long, not complete within 5 s, or from a web browser) |
+| `status.refused` | since boot: `not_local` (closed at once without a reply: not a local address, the gateway, over the setup hotspot or from its subnet), `login` (`401`: a wrong or missing username or password), `throttled` (`429`: too many wrong logins, from that address or in total), `full` (`503`: 2 rovers streaming or no free hub consumer, or closed at once: all 4 connections rovers or answers being written), `bad_request` (`400` or `403`: not an NTRIP `GET`, too long, not complete within 5 s, or from a web browser; or closed without a reply: nothing sent within 2 s) |
 
 ### `PUT /api/local-caster` (adm)
 
@@ -1771,9 +1795,10 @@ boolean: the default message).
 `200` with the GET body. Also `400 bad_json`, `409 safe_mode` and
 `409 settings_unavailable` (both checked before the body), `413 too_large`,
 `500 internal` with the `esp_err_t` name in `message`: a settings write
-that failed (nothing changed), or `ESP_ERR_NO_MEM` when the task could not
-be created (the config is stored, and `state` is `error` with
-`listen_errno` `ENOMEM`).
+that failed (nothing changed), `ESP_ERR_NO_MEM` when the task could not be
+created (the config is stored, and `state` is `error` with `listen_errno`
+`ENOMEM`; the page reads the card again), or `ESP_ERR_INVALID_STATE`
+outside safe mode (the caster did not initialise).
 
 ---
 
