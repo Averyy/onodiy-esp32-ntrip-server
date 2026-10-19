@@ -75,7 +75,9 @@ What it does:
      counted), /api/status 2 rovers, hub.consumers 6; a third rover gets
      503 after a good login, 401 after a wrong one; B leaves and C
      (SO_RCVBUF 4096) never reads: the station closes C 10 s after its
-     bytes_sent stopped growing (stalled +1) while A, slot 1 (streaming
+     bytes_sent stopped growing (stalled +1; on Linux only with
+     net.ipv4.tcp_wmem's max at most 256 KiB, as CI's container sets it,
+     else that check fails at once) while A, slot 1 (streaming
      throughout, nothing dropped) and the upstream record since the
      scenario began go on without a gap; a request that never ends closed
      5-8 s after the connect; Origin and Sec-Fetch-Site get 403; after a
@@ -244,13 +246,21 @@ LCAST_REQUEST_S = 5.0             # LOCAL_CASTER_REQUEST_TIMEOUT_MS
 LCAST_LINGER_S = 2.0              # the drain after a reply, before the station closes
 LCAST_BYTES_TOLERANCE = 0.05      # bytes_sent against what a rover counted
 # The stuck rover: the station closes it once its socket took no byte for LCAST_STALL_S. Between the station and
-# this computer QEMU's user network (slirp) holds up to 128 KiB per connection (libslirp TCP_RCVSPACE), and this
-# computer's socket buffers hold more (Linux keeps a small SO_RCVBUF; macOS grows the receive buffer anyway, to
-# about 0.3-0.5 MB on loopback), so the station's socket stops taking data only after those are full: about
-# 1.5-2 min at the default fixture's 1.7 kB/s on Linux, up to several minutes on macOS; on a board within
-# seconds. So the check is the stall rule itself (closed LCAST_STALL_S after the rover's bytes_sent stopped
-# growing), with this bound from its login.
+# the rover QEMU's user network (slirp) holds up to 128 KiB per connection (libslirp TCP_RCVSPACE), then QEMU's
+# socket to the rover on this computer and the rover's receive buffer hold more, so the station's socket stops
+# taking data only after those are full. Linux grows the buffer of that sending socket up to net.ipv4.tcp_wmem's
+# max (4 MB by default) though the rover's window is closed: a sender to a client with SO_RCVBUF 4096 that never
+# reads took 1,834,312 bytes with the default "4096 16384 4194304" and 54,600 with "4096 16384 65536". With the
+# default, slirp went on advertising a 65535 window to the station and C's bytes_sent grew at the fixture's
+# 1.7 kB/s for all 480 s (812 KB) in CI. So CI's qemu-smoke container sets "4096 16384 65536" (build.yml), and on
+# a Linux host whose max is above LCAST_WMEM_MAX the step fails at once (wmem_problem) rather than after 480 s.
+# With that max the station's socket stops taking data about 1.5-2 min after C's login at 1.7 kB/s. On macOS,
+# left as it is, the step passes, though there the rover's receive buffer grows anyway (about 0.3-0.5 MB on
+# loopback): up to several minutes. On a board within seconds. So the check is the stall rule itself (closed
+# LCAST_STALL_S after the rover's bytes_sent stopped growing), with this bound from its login.
 LCAST_STUCK_MAX_S = 480.0
+LCAST_WMEM_MAX = 262144           # the most net.ipv4.tcp_wmem's max may be for the stuck rover on Linux
+LCAST_WMEM_FIX = 'net.ipv4.tcp_wmem="4096 16384 65536"'   # what CI's container sets (build.yml qemu-smoke)
 LCAST_BUDGET_S = 780              # what the scenario may add to the run (run.sh's backstop)
 LCAST_TASK = "lcast"
 LCAST_STACK_MIN = 1024
@@ -802,6 +812,30 @@ def read_to_end(sock: socket.socket, timeout: float) -> tuple[bytes, float | Non
         data += d
 
 
+def wmem_problem(platform: str, tcp_wmem: str | None) -> str | None:
+    """Why this host hides a stuck rover from the station (see LCAST_STUCK_MAX_S), or None: on Linux
+    (`platform` as sys.platform names it), a net.ipv4.tcp_wmem (`tcp_wmem`, /proc/sys/net/ipv4/tcp_wmem's
+    text) whose max is above LCAST_WMEM_MAX. None too when that cannot be read: the step then runs as it would."""
+    if platform != "linux" or tcp_wmem is None:
+        return None
+    fields = tcp_wmem.split()
+    if len(fields) != 3 or not all(f.isdigit() for f in fields) or int(fields[2]) <= LCAST_WMEM_MAX:
+        return None
+    return (f"this Linux host lets QEMU's sender buffer {int(fields[2])} bytes, so a stuck rover never looks stuck "
+            f"to the station; run in a container with --sysctl {LCAST_WMEM_FIX} as CI does")
+
+
+def host_wmem_problem() -> str | None:
+    """wmem_problem for this computer."""
+    text = None
+    if sys.platform == "linux":
+        try:
+            text = Path("/proc/sys/net/ipv4/tcp_wmem").read_text(encoding="ascii")
+        except (OSError, UnicodeDecodeError):
+            pass
+    return wmem_problem(sys.platform, text)
+
+
 class Rover:
     """A rover on the forwarded port: ntrip_client's stream, read in a thread until stopped or closed."""
 
@@ -935,6 +969,7 @@ class E2E:
         self.http_port = smoke.free_port()
         self.ntrip_port = smoke.free_port()   # forwarded to the station's caster for a rover (run.sh --ntrip-port)
         self.lcast_password: str | None = None
+        self.lcast_stuck_tried = True         # False when this host hides a stuck rover (wmem_problem)
         self.planned_reboots = 0
         self.slot1_body: dict | None = None   # slot 1's settings as PUT (saved again for planned closes)
         # The signal-test scenario's caster sessions by what opened them: (first connection, what), in order.
@@ -1899,10 +1934,13 @@ class E2E:
         self.save("lcast-journal.json", entries)
         sess = rover_sessions(entries)
         got = [(x.get("version"), x.get("addr"), x.get("end")) for x in sess]
-        want = [(2, smoke.QEMU_PEER, None), (1, smoke.QEMU_PEER, "closed"), (1, smoke.QEMU_PEER, "stalled")]
+        want = [(2, smoke.QEMU_PEER, None), (1, smoke.QEMU_PEER, "closed")]
+        if self.lcast_stuck_tried:
+            want.append((1, smoke.QEMU_PEER, "stalled"))
         self.check(got == want and all(x.get("b") == QEMU_PEER_WORD and x.get("age_s", 0) >= 10 for x in sess),
-                   f"journal: the rover sessions listed {got} (A 2.0 open, B 1.0 closed, C stalled, each b "
-                   f"{QEMU_PEER_WORD} = {smoke.QEMU_PEER}, listed after 10 s)")
+                   f"journal: the rover sessions listed {got} (A 2.0 open, B 1.0 closed, "
+                   + ("C stalled" if self.lcast_stuck_tried else "no C: the stuck rover was not tried")
+                   + f", each b {QEMU_PEER_WORD} = {smoke.QEMU_PEER}, listed after 10 s)")
         self.lc_consumers(consumers0 + 1, "with A alone")
 
         # 12. Off: A gets the last chunk and the close at once.
@@ -1988,12 +2026,17 @@ class E2E:
         self.check(gone is not None, f"B closed: only A listed ({b.end})")
         self.lc_judge("B", b, n_up, f"({b.summary()['seconds']:.0f} s)")
         stalled0 = self.lc_state().get("stalled", 0)
-        c = self.lc_open(1, rcvbuf=4096)
-        if self.check(c.reply.accepted, f"rover C (NTRIP 1.0, SO_RCVBUF 4096, never reads) streams: "
-                                        f"{c.reply.status_line!r}"):
-            self.lc_stuck(c, stalled0)
+        problem = host_wmem_problem()
+        self.lcast_stuck_tried = problem is None
+        if problem:
+            self.check(False, f"the station closed the stuck rover (stalled +1): not tried: {problem}")
         else:
-            c.close()
+            c = self.lc_open(1, rcvbuf=4096)
+            if self.check(c.reply.accepted, f"rover C (NTRIP 1.0, SO_RCVBUF 4096, never reads) streams: "
+                                            f"{c.reply.status_line!r}"):
+                self.lc_stuck(c, stalled0)
+            else:
+                c.close()
         self.lc_judge("A", a, n_up, f"so far ({a.summary()['seconds']:.0f} s, through the stuck rover)")
         return True
 

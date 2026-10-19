@@ -2,14 +2,17 @@
 # SPDX-License-Identifier: MIT
 """tools/ci/ci_job.py, which runs a job of build.yml as CI's runner does: build.yml read as Actions
 reads it (YAML 1.2 core types, values made text as Actions makes them), everything it would not run
-as CI does refused before the first step, and continue-on-error, timeout-minutes, if: always() and
-the upload stand-in's if-no-files-found applied, over small jobs run here with bash."""
+as CI does refused before the first step, the job's container (an image, or image and options, the
+options split into docker arguments as the runner splits them; tools/ci/common.sh reading the same
+image), and continue-on-error, timeout-minutes, if: always() and the upload stand-in's
+if-no-files-found applied, over small jobs run here with bash."""
 
 from __future__ import annotations
 
 import importlib.util
 import math
 import os
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -153,8 +156,21 @@ STEP = "- run: 'true'\n"
     (lambda: job(STEP, extra="environment: prod\n"), "the job sets environment"),
     (lambda: job(STEP, extra="if: github.event_name == 'push'\n"), "the job has the condition"),
     (lambda: workflow(f"runs-on: x\ncontainer:\n  image: {IMAGE}\n  env:\n    A: b\nsteps:\n  {STEP}"),
-     "names no container image"),
+     "the job's container sets env, which this script does not reproduce (only image and options)"),
+    (lambda: workflow(f"runs-on: x\ncontainer:\n  image: {IMAGE}\n  ports: [80]\n  volumes: [/a:/b]\nsteps:\n"
+                      f"  {STEP}"), "the job's container sets ports, volumes"),
+    (lambda: workflow(f"runs-on: x\ncontainer:\n  options: --cpus 2\nsteps:\n  {STEP}"), "names no container image"),
+    (lambda: workflow(f"runs-on: x\ncontainer:\n  image: ''\nsteps:\n  {STEP}"), "names no container image"),
+    (lambda: workflow(f"runs-on: x\ncontainer: {{}}\nsteps:\n  {STEP}"), "names no container image"),
     (lambda: workflow(f"runs-on: x\nsteps:\n  {STEP}"), "names no container image"),
+    (lambda: workflow(f"runs-on: x\ncontainer: ${{{{ inputs.image }}}}\nsteps:\n  {STEP}"),
+     "container image has an expression"),
+    (lambda: workflow(f"runs-on: x\ncontainer:\n  image: {IMAGE}\n  options: --cpus ${{{{ inputs.n }}}}\nsteps:\n"
+                      f"  {STEP}"), "container options has an expression"),
+    (lambda: workflow(f"runs-on: x\ncontainer:\n  image: {IMAGE}\n  options: --sysctl a=\"1 2\nsteps:\n  {STEP}"),
+     "leave a double quote open"),
+    (lambda: workflow(f"runs-on: x\ncontainer:\n  image: {IMAGE}\n  options: [--cpus, '2']\nsteps:\n  {STEP}"),
+     "is not a single value"),
     (lambda: job("- run: 'true'\n  timeout-minute: 5\n"), "sets timeout-minute,"),
     (lambda: job("- run: 'true'\n  with:\n    a: b\n"), "sets with,"),
     (lambda: job("- uses: actions/checkout@v7\n  working-directory: sub\n- run: 'true'\n"), "sets working-directory"),
@@ -223,6 +239,34 @@ def test_what_it_reproduces_is_accepted():
     assert [kind for kind, _ in ci.plan(wf, "j")] == ["checkout", "setup-uv", "run", "upload"]
 
 
+def test_both_forms_of_container_are_read():
+    assert ci.container(job(STEP)["jobs"]["j"]) == (IMAGE, [])
+    wf = workflow(f"runs-on: x\ncontainer:\n  image: {IMAGE}\n  options: >-\n    --sysctl\n"
+                  f"    net.ipv4.tcp_wmem=\"4096 16384 65536\" --cpus 2\nsteps:\n  {STEP}")
+    assert [kind for kind, _ in ci.plan(wf, "j")] == ["run"]
+    assert ci.container(wf["jobs"]["j"]) == (IMAGE, ["--sysctl", "net.ipv4.tcp_wmem=4096 16384 65536", "--cpus", "2"])
+    wf = workflow(f"runs-on: x\ncontainer:\n  image: {IMAGE}\nsteps:\n  {STEP}")
+    assert ci.container(wf["jobs"]["j"]) == (IMAGE, [])
+
+
+@pytest.mark.parametrize("text, args", [
+    ("", []),
+    ("  \t ", []),
+    ("--cpus 2", ["--cpus", "2"]),
+    (" --cpus\t2  ", ["--cpus", "2"]),
+    ('--sysctl net.ipv4.tcp_wmem="4096 16384 65536"', ["--sysctl", "net.ipv4.tcp_wmem=4096 16384 65536"]),
+    ('"a b"c "" d', ["a bc", "", "d"]),
+    ("--label 'a b'", ["--label", "'a", "b'"]),  # a single quote is an ordinary character
+    ('"say ""hi"""', ['say "hi"']),              # two double quotes inside quotes give one
+    (r'a\"b', ['a"b']),                          # an odd backslash makes the quote a character
+    (r'a\\"b c"', [r"a\b c"]),                   # a pair gives one backslash, the quote groups
+    (r"C:\dir\ x\\", ["C:\\dir\\", "x\\\\"]),    # backslashes before no quote stay as they are
+    ("a\nb c", ["a\nb", "c"]),                   # only a space or a tab ends an argument
+])
+def test_container_options_split_as_the_runner_splits_them(text, args):
+    assert ci.runner_split(text) == args
+
+
 @pytest.mark.parametrize("value, minutes", [(30, 30), (1.9, 1), (0.9, 0), (0, 0), (-5, 0), (None, 0)])
 def test_timeout_minutes_counted_as_the_runner_counts_them(value, minutes):
     step = {"run": "true"} if value is None else {"run": "true", "timeout-minutes": float(value)}
@@ -236,6 +280,65 @@ def test_build_yml_jobs_run_here_are_accepted():
     assert kinds["host-tests"] == ["checkout", "run"]
     assert kinds["qemu-smoke"] == ["checkout", "setup-uv", "run", "run", "run", "upload"]
     assert kinds["qemu-bench-console"] == ["checkout", "setup-uv", "run", "run", "upload"]
+    # qemu-smoke's container bounds TCP send buffers (e2e.py's stuck rover); the others take none. One image.
+    containers = {name: ci.container(wf["jobs"][name]) for name in ("host-tests", "qemu-smoke", "qemu-bench-console")}
+    assert containers["qemu-smoke"][1] == ["--sysctl", "net.ipv4.tcp_wmem=4096 16384 65536"]
+    assert containers["host-tests"][1] == [] and containers["qemu-bench-console"][1] == []
+    assert len({image for image, _ in containers.values()}) == 1
+
+
+def test_container_prints_the_image_and_the_options_for_docker_run():
+    out = subprocess.run([sys.executable, str(ROOT / "tools" / "ci" / "ci_job.py"), str(BUILD_YML), "qemu-smoke",
+                          "--container"], capture_output=True, check=True).stdout
+    image, _ = ci.container(ci.load_workflow(BUILD_YML.read_text(encoding="utf-8"))["jobs"]["qemu-smoke"])
+    assert out == f"{image}\0--sysctl\0net.ipv4.tcp_wmem=4096 16384 65536\0".encode()
+
+
+def _ci_image(workflow_path: Path, job_id: str) -> subprocess.CompletedProcess:
+    """tools/ci/common.sh's ci_image (awk, on the host) for a job of a workflow file."""
+    return subprocess.run(["bash", "-c", '. "$1"; ci_workflow="$2"; ci_image "$3"', "bash",
+                           str(ROOT / "tools" / "ci" / "common.sh"), str(workflow_path), job_id],
+                          capture_output=True, text=True)
+
+
+def test_common_sh_reads_the_image_ci_job_reads():
+    wf = ci.load_workflow(BUILD_YML.read_text(encoding="utf-8"))
+    for name in ("host-tests", "qemu-smoke", "qemu-bench-console"):
+        r = _ci_image(BUILD_YML, name)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == ci.container(wf["jobs"][name])[0]
+
+
+def test_common_sh_reads_both_forms_of_container(tmp_path):
+    other = "espressif/idf@sha256:" + "1" * 64
+    path = tmp_path / "w.yml"
+    path.write_text(textwrap.dedent(f"""\
+        on: push
+        jobs:
+          plain:
+            runs-on: x
+            container: {IMAGE}  # a comment
+            steps: []
+          mapped:
+            runs-on: x
+            container:
+              # a comment
+              options: --cpus 2
+              image: {other}  # v1
+            steps: []
+          elsewhere:
+            runs-on: x
+            container:
+              options: --cpus 2
+            services:
+              db:
+                image: {IMAGE}
+            steps: []
+        """), encoding="utf-8")
+    assert _ci_image(path, "plain").stdout.strip() == IMAGE
+    assert _ci_image(path, "mapped").stdout.strip() == other
+    r = _ci_image(path, "elsewhere")   # the image under services: is not the container's
+    assert r.returncode != 0 and "no espressif/idf@sha256 image pinned" in r.stderr
 
 
 # --- running a job -----------------------------------------------------------------------------------

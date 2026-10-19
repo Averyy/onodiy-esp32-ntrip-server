@@ -698,9 +698,19 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
   (`SO_RCVBUF` 4096) never reads: the station closes C (`stalled` + 1)
   10 s after its `bytes_sent` stopped growing (QEMU's user network buffers
   128 KiB per connection and this computer's sockets more, so that comes
-  about 1.5-2 min after its login at the fixture's 1.7 kB/s on Linux and
-  several minutes on macOS, which grows a socket's receive buffer whatever
-  `SO_RCVBUF` says; at most 8 min; on a board within seconds), while A, slot 1 (`streaming` throughout, same session,
+  about 1.5-2 min after its login at the fixture's 1.7 kB/s on Linux with
+  CI's send buffer limit (below) and several minutes on macOS, which grows
+  a socket's receive buffer whatever `SO_RCVBUF` says; at most 8 min; on a
+  board within seconds). On Linux QEMU's socket to C grows its send buffer
+  up to `net.ipv4.tcp_wmem`'s max although C's window is closed: 4 MB by
+  default, more than the stream fills in 8 min (a sender to a client like
+  C took 1,834,312 bytes with the default, 54,600 with a 64 KiB max), so
+  the station never sees C stall. CI's `qemu-smoke` container sets
+  `--sysctl net.ipv4.tcp_wmem="4096 16384 65536"` (a per-network-namespace
+  setting an unprivileged container may change; `tools/ci/qemu_linux.sh`
+  passes the job's container options too), and on a Linux host whose max
+  is above 256 KiB this check fails at once and says so instead of
+  waiting 8 min. Meanwhile A, slot 1 (`streaming` throughout, same session,
   `frames_dropped`, `epochs_dropped` and `laps` unchanged) and the upstream
   record since the scenario began go on without a gap. A request that
   never ends (`GET /ROVER HTTP/1.0` and nothing more) is closed 5-8 s after
@@ -708,7 +718,8 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
   get 403. After a good login (it resets this address's count), 5 wrong
   logins, then the right one gets 429 with `Retry-After` and streams once
   that has passed. The journal lists A (2.0, still open), B (1.0,
-  `closed`) and C (`stalled`), each with b = 167772674 (10.0.2.2) and
+  `closed`) and C (`stalled`; no C when the host check above kept it
+  out), each with b = 167772674 (10.0.2.2) and
   listed 10 s into its session. Turned off, A gets the last chunk and the
   close within 1 s of the answer, its whole record still checks out and
   ends on a whole frame, the state is `off` with `lcast: off` on the

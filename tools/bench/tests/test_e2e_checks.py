@@ -4,7 +4,8 @@
 a fixture, and the caster record against the fixture, strictly (it starts at
 an epoch's first frame after the sticky copies; order modulo the loop;
 frames the station never forwards; gaps only on epoch boundaries; bytes
-outside frames; the cut end)."""
+outside frames; the cut end), and whether a Linux host's TCP send buffers
+let the stuck rover look stuck."""
 
 from __future__ import annotations
 
@@ -495,3 +496,22 @@ def test_read_to_end():
     with a, b:
         data, end, how = e2e.read_to_end(b, 0.3)
         assert (data, end, how) == (b"", None, "timeout")
+
+
+@pytest.mark.parametrize("platform, tcp_wmem, n", [
+    ("linux", "4096\t16384\t4194304\n", 4194304),      # Linux's default: the stuck rover never looks stuck
+    ("linux", "4096 16384 262145", 262145),
+    ("linux", "4096 16384 262144", None),              # LCAST_WMEM_MAX itself is enough
+    ("linux", "4096\t16384\t65536\n", None),           # what CI's container sets
+    ("linux", None, None),                             # unreadable: the step runs as it would
+    ("linux", "4096 16384", None),
+    ("darwin", "4096 16384 4194304", None),            # macOS is left as it is
+])
+def test_wmem_problem(platform, tcp_wmem, n):
+    got = e2e.wmem_problem(platform, tcp_wmem)
+    if n is None:
+        assert got is None
+    else:
+        assert got == (f"this Linux host lets QEMU's sender buffer {n} bytes, so a stuck rover never looks stuck "
+                       'to the station; run in a container with --sysctl net.ipv4.tcp_wmem="4096 16384 65536" '
+                       "as CI does")

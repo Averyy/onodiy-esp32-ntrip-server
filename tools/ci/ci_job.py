@@ -4,10 +4,18 @@
 """Run one job of .github/workflows/build.yml the way its runner does, inside the job's own container.
 
     python tools/ci/ci_job.py WORKFLOW JOB --log FILE [--artifacts DIR]
+    python tools/ci/ci_job.py WORKFLOW JOB --container
 
 Not for direct use: tools/ci/host_tests_linux.sh and tools/ci/qemu_linux.sh start the image the job
 pins, with a copy of the working tree in /work, and run this there with the image's ESP-IDF Python
 (PyYAML), so the steps come from build.yml itself and never drift from CI.
+
+The job's container is `container: <image>` or a mapping of `image:` and `options:`. The runner puts
+the options into the command line of its `docker create`, which .NET splits into arguments (a space
+or a tab ends one outside double quotes; double quotes group and are dropped; a backslash escapes a
+double quote; a single quote is an ordinary character). --container checks the job as a whole, then
+prints the image and the options split that way, NUL-separated: tools/ci/common.sh runs it in the
+image first and gives those arguments to its `docker run`, as the runner gives them to docker create.
 
 build.yml is read as Actions reads a workflow: a plain scalar is typed by the YAML 1.2 core schema
 (`on`, `yes` and `1:30` stay text, `010` is ten), and a value given where Actions wants text (an
@@ -34,13 +42,14 @@ with the runner's sequence, SIGINT, then SIGTERM 7.5 s later and SIGKILL 2.5 s a
 to the step's process group.
 
 Anything else stops the run before the first step, since this script would not run that job as CI
-does: a workflow-level `env:` or `defaults:`, a job key other than name, runs-on, container (an image
-name), steps, env, needs, permissions, concurrency, outputs and if (so no matrix, services, defaults,
-job timeout or job continue-on-error), a step key a step of its kind cannot have here, a condition
-other than success() or always(), an expression in a value the script uses (env, run, shell,
-working-directory, an input a stand-in reads), any other action or input, an upload path that is a
-pattern or leaves the workspace, `timeout-minutes` on an action, and a continue-on-error or
-timeout-minutes that is not written out as a literal.
+does: a workflow-level `env:` or `defaults:`, a job key other than name, runs-on, container, steps,
+env, needs, permissions, concurrency, outputs and if (so no matrix, services, defaults, job timeout or
+job continue-on-error), a container key other than image and options (so no env, ports, volumes or
+credentials), a step key a step of its kind cannot have here, a condition other than success() or
+always(), an expression in a value the script uses (the container's image and options, env, run,
+shell, working-directory, an input a stand-in reads), options that leave a double quote open, any
+other action or input, an upload path that is a pattern or leaves the workspace, `timeout-minutes` on
+an action, and a continue-on-error or timeout-minutes that is not written out as a literal.
 
 Every step's output goes to stdout and to --log. Exit status 0 when every step passed.
 """
@@ -76,6 +85,7 @@ UV_ARCH = {"x86_64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}
 WORKFLOW_KEYS = frozenset({"name", "run-name", "on", "permissions", "concurrency", "jobs"})
 JOB_KEYS = frozenset({"name", "runs-on", "container", "steps", "env", "needs", "permissions", "concurrency",
                       "outputs", "if"})
+CONTAINER_KEYS = frozenset({"image", "options"})
 RUN_STEP_KEYS = frozenset({"name", "id", "if", "run", "shell", "working-directory", "env", "continue-on-error",
                            "timeout-minutes"})
 ACTION_STEP_KEYS = frozenset({"name", "id", "if", "uses", "with", "env", "continue-on-error"})
@@ -303,6 +313,77 @@ def upload_mode(step: dict) -> str:
     return mode
 
 
+def runner_split(text: str) -> list[str]:
+    """Docker options as arguments, split as the runner's `docker create` command line is: .NET's rules
+    for ProcessStartInfo.Arguments on Linux (ProcessUtils.Unix.cs, ParseArgumentsIntoList). A space or
+    a tab ends an argument outside double quotes; double quotes group and are dropped, two of them
+    inside quotes give one; backslashes before a double quote give one for each pair, and an odd one
+    out makes the quote a character; other backslashes and single quotes are characters."""
+    args: list[str] = []
+    i, n = 0, len(text)
+    while True:
+        while i < n and text[i] in " \t":
+            i += 1
+        if i == n:
+            return args
+        arg: list[str] = []
+        quoted = False
+        while i < n:
+            slashes = 0
+            while i < n and text[i] == "\\":
+                slashes += 1
+                i += 1
+            if slashes:
+                if i < n and text[i] == '"':
+                    arg.append("\\" * (slashes // 2))
+                    if slashes % 2:
+                        arg.append('"')
+                        i += 1
+                else:
+                    arg.append("\\" * slashes)
+                continue
+            c = text[i]
+            if c == '"':
+                if quoted and i + 1 < n and text[i + 1] == '"':
+                    arg.append('"')
+                    i += 1
+                else:
+                    quoted = not quoted
+                i += 1
+                continue
+            if c in " \t" and not quoted:
+                break
+            arg.append(c)
+            i += 1
+        if quoted:
+            # The runner's command line goes on after the options (-e, -v, the image): the open quote
+            # would take them into this argument.
+            raise JobError(f"the job's container options {text!r} leave a double quote open")
+        args.append("".join(arg))
+
+
+def container(job: dict) -> tuple[str, list[str]]:
+    """The job's image and its docker options as arguments: `container: <image>`, or `container:` with
+    image: and options: (nothing else)."""
+    spec = job.get("container")
+    if isinstance(spec, dict):
+        extra = sorted(str(k) for k in spec if k not in CONTAINER_KEYS)
+        if extra:
+            raise JobError(f"the job's container sets {', '.join(extra)}, which this script does not reproduce "
+                           "(only image and options)")
+        image, options = spec.get("image"), spec.get("options")
+    else:
+        image, options = spec, None
+    if not isinstance(image, str) or not image:
+        raise JobError("the job names no container image (container: <image>, or container: with image:); "
+                       "this script runs a job in its image only")
+    image = _literal(image, "the job's container image")
+    options = _literal(options, "the job's container options")
+    if "\0" in image + options:
+        raise JobError("the job's container has a NUL character, which no command line can carry")
+    return image, runner_split(options)
+
+
 def plan(workflow: dict, job_id: str) -> list[tuple[str, dict]]:
     """The job's steps as (kind, step), after checking the workflow, the job and every step."""
     _only(workflow, WORKFLOW_KEYS, "the workflow")
@@ -314,9 +395,7 @@ def plan(workflow: dict, job_id: str) -> list[tuple[str, dict]]:
         raise JobError("the job is not a mapping")
     _only(job, JOB_KEYS, "the job")
     _condition(job.get("if"), "the job")
-    image = job.get("container")
-    if not isinstance(image, str) or not image:
-        raise JobError("the job names no container image (container: <image>); this script runs a job in its image only")
+    container(job)
     _env_block(job, "the job")
     steps = job.get("steps")
     if not isinstance(steps, list):
@@ -617,16 +696,25 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("workflow")
     ap.add_argument("job")
-    ap.add_argument("--log", required=True, help="every step's output is appended here too")
+    ap.add_argument("--log", help="every step's output is appended here too (needed to run the job)")
     ap.add_argument("--artifacts", help="where upload-artifact steps copy their paths")
     ap.add_argument("--list", action="store_true", help="print the job's steps and stop")
+    ap.add_argument("--container", action="store_true",
+                    help="print the job's image and its container options as docker arguments, NUL-separated, "
+                         "and stop")
     args = ap.parse_args()
+    if not (args.log or args.list or args.container):
+        ap.error("--log is needed to run the job")
     try:
         workflow = load_workflow(Path(args.workflow).read_text(encoding="utf-8"))
         steps = plan(workflow, args.job)
     except (JobError, yaml.YAMLError) as e:
         print(f"ci_job.py: {args.workflow}, job {args.job}: {e}", file=sys.stderr)
         return 2
+    if args.container:
+        image, options = container(workflow["jobs"][args.job])
+        sys.stdout.write("".join(f"{a}\0" for a in [image] + options))
+        return 0
     if args.list:
         for kind, st in steps:
             print(f"{kind}: {step_name(st)}")

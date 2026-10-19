@@ -4,11 +4,13 @@
 #
 # CI's QEMU jobs (.github/workflows/build.yml: qemu-smoke, the smoke test and
 # the end-to-end run; qemu-bench-console, the bench overlay's command line) on
-# this machine: the image each job pins and the steps it runs, both read from
-# build.yml (tools/ci/common.sh, tools/ci/ci_job.py), so this script never
-# drifts from CI. A QEMU check that passes on a Mac can fail in CI's Linux
-# container (another QEMU build of the same release, another host network
-# stack, other timing); this runs it there before a push.
+# this machine: the image each job pins, started with the job's container
+# options (qemu-smoke bounds TCP send buffers for e2e.py's stuck rover), and
+# the steps it runs, all read from build.yml (tools/ci/common.sh,
+# tools/ci/ci_job.py), so this script never drifts from CI. A QEMU check that
+# passes on a Mac can fail in CI's Linux container (another QEMU build of the
+# same release, another host network stack, other timing); this runs it there
+# before a push.
 #
 # The container gets a copy of the working tree with the repository's history
 # (the jobs' checkout fetches it: git describe names the build) and builds

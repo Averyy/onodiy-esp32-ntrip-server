@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 #
 # Sourced by tools/ci/host_tests_linux.sh and tools/ci/qemu_linux.sh: one job
-# of .github/workflows/build.yml in the image that job pins, on a copy of the
+# of .github/workflows/build.yml in the image that job pins (started with the
+# container options the job gives, as the runner starts it), on a copy of the
 # working tree, its steps read from build.yml and run there by
 # tools/ci/ci_job.py, so neither script drifts from CI. The checkout is never
 # written; what the job uploads is copied out at the end. Needs Docker and git,
@@ -16,6 +17,7 @@ ci_die() {
 
 ci_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ci_workflow="$ci_root/.github/workflows/build.yml"
+ci_options=()   # ci_container_options
 
 ci_check_host() {
     [ -f "$ci_workflow" ] || ci_die "no $ci_workflow"
@@ -23,11 +25,20 @@ ci_check_host() {
     command -v git >/dev/null || ci_die "git not found"
 }
 
-# The image of job $1: its container line (the one place it is pinned).
+# The image of job $1 (the one place it is pinned): its container line, or the
+# image line under it when the container is a mapping (image, options).
 ci_image() {
     local image
-    image=$(awk -v job="$1:" '/^  [A-Za-z0-9_-]+:[[:space:]]*$/ { injob = ($1 == job) }
-                              injob && $1 == "container:" { print $2; exit }' "$ci_workflow")
+    image=$(awk -v job="$1:" '
+        /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { injob = ($1 == job); block = 0; next }
+        !injob || /^[[:space:]]*(#|$)/ { next }
+        { indent = match($0, /[^ ]/) - 1 }
+        block && indent <= block_indent { block = 0 }
+        $1 == "container:" {
+            if (NF >= 2 && $2 !~ /^#/) { print $2; exit }
+            block = 1; block_indent = indent; next
+        }
+        block && $1 == "image:" { print $2; exit }' "$ci_workflow")
     [[ "$image" =~ ^espressif/idf@sha256:[0-9a-f]{64}$ ]] ||
         ci_die "no espressif/idf@sha256 image pinned in build.yml's $1 job (found '${image}')"
     printf '%s\n' "$image"
@@ -86,6 +97,42 @@ cp /work/.steps.log /artifacts/steps.log 2>/dev/null || true
 exit "$rc"
 INNER
 
+# Runs in the job's image (bash -c) before the job: ci_job.py --container
+# prints the image and the container's options as docker arguments (split as
+# the runner splits them), read with the image's ESP-IDF Python, so the host
+# needs no Python of its own and the job is checked before the long run.
+IFS= read -r -d '' ci_container_inner <<'INNER' || true
+set -euo pipefail
+d=$(mktemp -d)
+tar -xf - -C "$d" --no-same-owner --warning=no-unknown-keyword
+py=$(ls "$IDF_TOOLS_PATH"/python_env/*/bin/python 2>/dev/null | head -n 1)
+[ -x "$py" ] || { echo "no ESP-IDF Python environment in the image" >&2; exit 1; }
+"$py" "$d/tools/ci/ci_job.py" "$d/.github/workflows/build.yml" "$CI_JOB" --container
+INNER
+
+# The container options of job $1 in image $2 on platform $3, as docker run
+# arguments, into the array ci_options. The image ci_job.py reads must be the
+# one ci_image read.
+ci_container_options() {
+    local job="$1" image="$2" platform="$3" file rc=0 a
+    local got=()
+    file=$(mktemp)
+    COPYFILE_DISABLE=1 tar -C "$ci_root" -cf - tools/ci/ci_job.py .github/workflows/build.yml |
+        docker run -i --rm --platform "$platform" --entrypoint bash -e CI_JOB="$job" \
+            "$image" -c "$ci_container_inner" > "$file" || rc=$?
+    while IFS= read -r -d '' a; do
+        got+=("$a")
+    done < "$file"
+    rm -f "$file"
+    [ "$rc" = 0 ] || ci_die "job $job: ci_job.py --container failed in $image (exit $rc)"
+    [ "${got[0]:-}" = "$image" ] ||
+        ci_die "job $job: ci_job.py reads the image as '${got[0]:-}', this script as '$image'"
+    ci_options=()
+    if [ "${#got[@]}" -gt 1 ]; then
+        ci_options=("${got[@]:1}")
+    fi
+}
+
 # Run job $1 on platform $2; what it uploads (and steps.log, every step's
 # output) lands in $3 (emptied first; "" = not kept). Options from the
 # environment: CI_WITH_GIT=1 copies .git too, CI_KEEP_GOING_DIR names the
@@ -101,6 +148,10 @@ ci_run_job() {
         cpus_text=", $CI_CPUS CPUs"
     fi
     image=$(ci_image "$job")
+    ci_container_options "$job" "$image" "$platform"
+    if [ "${#ci_options[@]}" -gt 0 ]; then
+        cpus_text="$cpus_text, options$(printf ' %q' "${ci_options[@]}")"
+    fi
     name="ci-$job-$$-$RANDOM"
     echo "${CI_SCRIPT:-ci}: job $job in $image ($platform$cpus_text)"
     # shellcheck disable=SC2064  # the name is fixed now
@@ -109,7 +160,8 @@ ci_run_job() {
     trap 'exit 143' TERM
     ci_files "$([ "${CI_WITH_GIT:-0}" = 1 ] && echo git)" |
         COPYFILE_DISABLE=1 tar -C "$ci_root" -cf - --null -T - |
-        docker run -i --init --name "$name" --platform "$platform" ${limits[@]+"${limits[@]}"} --entrypoint bash \
+        docker run -i --init --name "$name" --platform "$platform" ${limits[@]+"${limits[@]}"} \
+            ${ci_options[@]+"${ci_options[@]}"} --entrypoint bash \
             -e CI_JOB="$job" -e KEEP_GOING_DIR="${CI_KEEP_GOING_DIR:-}" \
             -e ALLOW_WARNINGS="${CI_ALLOW_WARNINGS:-0}" \
             "$image" -c "$ci_inner" || rc=$?
