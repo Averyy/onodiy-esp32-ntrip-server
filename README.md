@@ -88,6 +88,16 @@ addresses, so a port forward doesn't expose it (don't forward port 2101 anyway).
 for your own rover only: Onocoy's terms allow its loopback stream for internal use
 only.
 
+## GNSS splitter
+
+![3D render of the splitter: a small blue PCB with one SMA socket marked ANT on the left and two on the right marked DC-PASS and DC-BLOCK, a splitter chip in the middle](gnss-splitter/gnss-splitter-3d.png)
+
+An optional board that shares one antenna between two receivers, such as this station
+and another one, for about C$15 assembled at JLCPCB. The receiver on **DC-PASS** powers
+the antenna; the one on **DC-BLOCK** gets only the signal. To feed a third receiver,
+connect a second splitter to the first one's DC-BLOCK port, so DC-PASS still powers
+the antenna. Design files, parts and notes: [gnss-splitter/](gnss-splitter/README.md).
+
 ## Updates
 
 The station checks GitHub Releases once a day and shows a banner; nothing is
