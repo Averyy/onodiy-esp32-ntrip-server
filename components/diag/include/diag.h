@@ -264,13 +264,23 @@ typedef enum {
     /**
      * Local NTRIP (components/local_caster): a rover's session has streamed
      * 10 s (journalled then, not at its connect; at most 6 sessions an hour
-     * are listed, the others only counted): a = diag_rover_up_a(connection
-     * index, NTRIP version, IPv6, seconds since its success reply, sessions
-     * not listed since the previous listed one), b = diag_rover_addr_b() of
-     * its IPv4 address (for IPv6, of the address's last 4 bytes).
+     * are listed, one more every 10 min after a burst of 6: a session that
+     * finds none left is listed when one frees up, with its later age; one
+     * that ends unlisted is only counted):
+     * a = diag_rover_up_a(connection index, NTRIP version, IPv6, seconds
+     * since its success reply, sessions not listed since the previous
+     * listed one), b = diag_rover_addr_b() of its IPv4 address (for IPv6,
+     * of the address's last 4 bytes). The connection index (0-3) is the
+     * caster's connection slot: the next session on it may be another
+     * rover.
      */
     DIAG_EV_ROVER_UP = 26,
-    /** The end of a listed rover session: a = diag_rover_down_a(connection index, local_caster_end_t), b = seconds since its success reply. */
+    /**
+     * The end of a listed rover session (every session that a restart ends
+     * gets its record: the journal's interval holds per connection):
+     * a = diag_rover_down_a(connection index, local_caster_end_t),
+     * b = seconds since its success reply.
+     */
     DIAG_EV_ROVER_DOWN = 27,
 } diag_event_t;
 
@@ -609,9 +619,11 @@ esp_err_t diag_log_fix_level(const char *tag, esp_log_level_t level);
  * Append a journal record (never blocks; written to flash by diag's writer
  * task within milliseconds). Not from an interrupt handler.
  * @return ESP_OK when accepted; ESP_ERR_INVALID_STATE when a rate limit (per
- *         kind or the hourly budget) refused it (nothing written: keep the
- *         data and retry later; never for DIAG_EV_LADDER_STEP,
- *         DIAG_EV_GNSS_FLASH or DIAG_EV_RX_BOOT);
+ *         kind, per slot or connection for DIAG_EV_CASTER_DOWN, _UP, _STOP,
+ *         DIAG_EV_ROVER_UP and _DOWN (the low 4 bits of `a`), or the hourly
+ *         budget) refused it (nothing written: keep the data and retry
+ *         later; never for DIAG_EV_LADDER_STEP, DIAG_EV_GNSS_FLASH or
+ *         DIAG_EV_RX_BOOT);
  *         ESP_ERR_NO_MEM when the write queue is full; ESP_ERR_NOT_FOUND
  *         when there is no usable journal partition.
  */

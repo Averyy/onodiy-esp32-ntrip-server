@@ -488,7 +488,17 @@ void dj_rate_init(dj_rate_t *r, uint32_t min_interval_ms, uint32_t per_hour, uin
     r->tokens_milli = r->burst_milli;
 }
 
+void dj_rate_key_kinds(dj_rate_t *r, uint32_t keyed_mask)
+{
+    r->keyed_mask = keyed_mask;
+}
+
 dj_rate_result_t dj_rate_check(dj_rate_t *r, uint16_t kind, uint32_t now_ms)
+{
+    return dj_rate_check_rec(r, kind, 0, now_ms);
+}
+
+dj_rate_result_t dj_rate_check_rec(dj_rate_t *r, uint16_t kind, int32_t a, uint32_t now_ms)
 {
     if (!r->started) {
         r->started = true;
@@ -507,8 +517,11 @@ dj_rate_result_t dj_rate_check(dj_rate_t *r, uint16_t kind, uint32_t now_ms)
     }
     uint32_t idx = (kind < DJ_RATE_KINDS) ? kind : DJ_RATE_KINDS - 1u;
     bool exempt = kind < DJ_RATE_KINDS && ((r->exempt_mask >> kind) & 1u) != 0;
+    bool keyed = kind < DJ_RATE_KINDS && ((r->keyed_mask >> kind) & 1u) != 0;
+    uint16_t key = (uint16_t)(1u << (keyed ? ((uint32_t)a & (DJ_RATE_KEYS - 1u)) : 0u));
+    bool open = ((r->seen_mask >> idx) & 1u) != 0 && (uint32_t)(now_ms - r->last_ms[idx]) < r->min_interval_ms;
     if (!exempt) {
-        if (((r->seen_mask >> idx) & 1u) != 0 && (uint32_t)(now_ms - r->last_ms[idx]) < r->min_interval_ms) {
+        if (open && (r->keys[idx] & key) != 0) {
             r->refused_kind++;
             return DJ_RATE_KIND;
         }
@@ -520,7 +533,12 @@ dj_rate_result_t dj_rate_check(dj_rate_t *r, uint16_t kind, uint32_t now_ms)
     if (r->per_hour != 0 && r->tokens_milli >= 1000u) {
         r->tokens_milli -= 1000u;
     }
-    r->last_ms[idx] = now_ms;
+    if (open) {
+        r->keys[idx] |= key;   /* another index within the interval: it stays where it started */
+    } else {
+        r->last_ms[idx] = now_ms;
+        r->keys[idx] = key;
+    }
     r->seen_mask |= 1u << idx;
     return DJ_RATE_OK;
 }

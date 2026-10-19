@@ -115,7 +115,11 @@ menu "Station: diagnostics"
             written, so callers that accumulate deltas keep them pending.
             Health-ladder step records are exempt: one step's result and the
             next step's start fall in the same second, and the ladder bounds
-            their rate itself (each step has a grace of at least 5 s).
+            their rate itself (each step has a grace of at least 5 s). The
+            records of one caster slot or one rover connection (caster and
+            rover connects, disconnects and stops) have the interval per
+            slot or connection: a restart ends every session at once, and
+            each one's record gets in.
 
     config DIAG_JOURNAL_BUDGET_PER_H
         int "Journal records per hour, all kinds together"

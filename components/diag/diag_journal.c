@@ -48,6 +48,17 @@ static const char *TAG = "diag";
 #define INFO_WAIT_MS  1000      /* longer than one sector erase, the longest the writer or a clear holds the journal */
 #define READ_CHUNK    16u
 
+/* Kinds that carry a caster slot or a rover connection in the low bits of
+ * `a`: one restart ends every session, and each one's record must get in
+ * (the per-kind interval holds per slot or connection, dj_rate_key_kinds). */
+#define RATE_KEYED_KINDS                                                                                       \
+    ((1u << DIAG_EV_CASTER_DOWN) | (1u << DIAG_EV_CASTER_UP) | (1u << DIAG_EV_CASTER_STOP) |                   \
+     (1u << DIAG_EV_ROVER_UP) | (1u << DIAG_EV_ROVER_DOWN))
+_Static_assert(DIAG_EV_ROVER_DOWN < DJ_RATE_KINDS, "keyed kinds need their own rate entry");
+#if defined(CONFIG_NTRIP_MAX_CASTERS)
+_Static_assert(CONFIG_NTRIP_MAX_CASTERS <= DJ_RATE_KEYS, "every caster slot needs its own rate key");
+#endif
+
 typedef enum {
     J_PENDING = 0,      /* before diag_init: appends wait in the queue */
     J_READY,
@@ -154,12 +165,13 @@ esp_err_t diag_journal_append(diag_event_t kind, int32_t a, int32_t b)
     if (!s_rate_ready) {
         dj_rate_init(&s_rate, CONFIG_DIAG_JOURNAL_MIN_INTERVAL_MS, CONFIG_DIAG_JOURNAL_BUDGET_PER_H,
                      (1u << DIAG_EV_LADDER_STEP) | (1u << DIAG_EV_GNSS_FLASH) | (1u << DIAG_EV_RX_BOOT));
+        dj_rate_key_kinds(&s_rate, RATE_KEYED_KINDS);
         s_rate_ready = true;
     }
     if (s_q.count >= DJ_QUEUE_LEN) {
         s_queue_full++;
         err = ESP_ERR_NO_MEM;
-    } else if (dj_rate_check(&s_rate, (uint16_t)kind, (uint32_t)(now_us / 1000)) != DJ_RATE_OK) {
+    } else if (dj_rate_check_rec(&s_rate, (uint16_t)kind, a, (uint32_t)(now_us / 1000)) != DJ_RATE_OK) {
         err = ESP_ERR_INVALID_STATE;
     } else {
         (void)dj_queue_push(&s_q, &r);

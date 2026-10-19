@@ -120,14 +120,19 @@ CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT=y
 CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 
 # ---- Networking -------------------------------------------------------------
-# Casters (up to 8) + web clients (httpd 7) + captive DNS + OTA + SNTP + probes.
-CONFIG_LWIP_MAX_SOCKETS=24
+# Sockets in use at most: the web server 10 (max_open_sockets 7 + 3 internal),
+# the caster slots 4 (8 in an 8-slot build), captive DNS 1 (while the AP is
+# up), the upstream probe 1, the update client 1, the local caster for a
+# rover 5 (listener + 4 connections): 22 (26). A build directory made before
+# 28 keeps its old value in its own sdkconfig; local_caster.c refuses to
+# build with less (set both to 28 there, or start a new build directory).
+CONFIG_LWIP_MAX_SOCKETS=28
 # Same budget for TCP PCBs. With none left, lwIP frees the oldest one in
 # TIME_WAIT, then one in LAST_ACK, CLOSING, FIN_WAIT_2 or FIN_WAIT_1, and only
 # then an open connection of lower priority (tcp.c, tcp_alloc). Every socket
-# gets the same priority, so 24 open connections would refuse the next web
+# gets the same priority, so 28 open connections would refuse the next web
 # client or OTA download.
-CONFIG_LWIP_MAX_ACTIVE_TCP=24
+CONFIG_LWIP_MAX_ACTIVE_TCP=28
 CONFIG_LWIP_LOCAL_HOSTNAME="onodiy"
 # DNS fallback server used when DHCP leaves no working one (needs
 # LWIP_DNS_MAX_SERVERS >= 3, the default). Compile-time, not a user setting.
@@ -178,7 +183,7 @@ CONFIG_LWIP_SO_RCVBUF=y
 # falls inside the old connection's window (rare: a client's new initial
 # sequence number lands there by chance) gets a reset instead, and that
 # client's connect() fails at once. Not for memory: TIME_WAIT pcbs count among
-# the 24 above, and lwIP frees the oldest on demand. A stale segment would
+# the 28 above, and lwIP frees the oldest on demand. A stale segment would
 # have to outlive 10 s and fall inside the new connection's window (the
 # station's initial sequence numbers follow RFC 6528): not plausible on a
 # LAN. The station's own outgoing connections skip every port lwIP still
@@ -195,7 +200,7 @@ CONFIG_LWIP_TCP_MSL=5000
 # cache is off: the mDNS task does no flash or NVS work, and its one callback
 # into the station (the rename note in network.c) copies a string under a
 # spinlock. That keeps 4 KB of internal RAM free. The default lwIP raw-PCB
-# networking is kept (MDNS_NETWORKING_SOCKET off), so it uses none of the 24
+# networking is kept (MDNS_NETWORKING_SOCKET off), so it uses none of the 28
 # lwIP sockets. The predefined STA and AP interfaces stay on (component
 # defaults): the name answers on the home network and on the setup/recovery
 # AP (192.168.4.1 there).

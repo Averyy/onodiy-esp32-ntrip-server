@@ -81,9 +81,10 @@ static bool s_hist_dated;
 /* Shutdown hooks run once per boot. If they overrun the budget, a one-shot
  * timer restarts anyway, well before the task watchdog of a subscribed caller
  * would turn a planned reboot into a crash reset. Registered today: the
- * ledger, the casters, the network, the web server and the station (its
- * signal-group comparison record); one spare. */
-#define MAX_HOOKS              6
+ * ledger, the station (its signal-group comparison record), the casters,
+ * the local caster for a rover (after the casters, so they keep their epoch
+ * drain), the network and the web server; two spare. */
+#define MAX_HOOKS              8
 #define HOOK_OVERRUN_MARGIN_MS 500
 static struct {
     lifecycle_shutdown_hook_t fn;
