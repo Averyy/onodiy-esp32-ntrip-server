@@ -1195,14 +1195,15 @@ def test_presets_ask_only_for_what_they_use():
     assert (emlid_saved["tls"], emlid_saved["trust"], emlid_saved["ntrip_version"]) == (True, "custom_ca", 1), emlid_saved
     assert (rtkdirect["host"], rtkdirect["tls"], rtkdirect["ntrip_version"], rtkdirect["username"]) == (
         "ntrip.rtkdirect.com", False, 2, "me"), rtkdirect
-    assert custom["fields"] == ["NTRIP server", "Host and port", "Mountpoint", "Password", "NTRIP version", "TLS",
-                                "Encrypted", "Retry pace"], custom
+    # The retry pace beside the password; NTRIP version and TLS in a row under them.
+    assert custom["fields"] == ["NTRIP server", "Host and port", "Mountpoint", "Password", "Retry pace", "NTRIP version",
+                                "TLS", "Encrypted"], custom
     assert custom["help"] == "Enter what your server gives you for a base."
     assert custom["paces"] == ["Standard (2 s to 1 min)", "Polite (10 s to 5 min)"]
     assert custom["waits"] == ["Refused logins: 1, 5, 15, then 30 min."], custom["waits"]
     assert polite["waits"] == ["Refused logins: 5, 15, 30, then 60 min; after 20 failed connections in a row, one try an "
                                "hour."], polite["waits"]
-    assert custom_tls["fields"][-4:] == ["TLS", "Encrypted", "Certificate check", "Retry pace"], custom_tls
+    assert custom_tls["fields"][-4:] == ["NTRIP version", "TLS", "Encrypted", "Certificate check"], custom_tls
 
 
 def test_every_server_has_one_help_line():

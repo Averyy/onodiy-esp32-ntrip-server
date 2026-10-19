@@ -340,8 +340,9 @@ function casterEditor(entry, opts) {
     opts.openSlot ? h('div', { class: 'form-actions' }, btn('Open Onocoy', () => opts.openSlot(elsewhere.slot), 'small')) : null) : null;
   const testNote = testSlot ? h('p', { class: 'small' }, badge('Test Onocoy slot (bench build)', 'warn'),
     ' Counts as Onocoy at this host, for a local test server.') : null;
-  /* Other server's own settings, in one row under the four fields (TLS's certificate check under it). */
-  const own = h('div', { class: 'cols c3' }, F.ntrip_version.el, tlsField, F.backoff_profile.el);
+  /* Other server's own settings: its retry pace beside the password, NTRIP version and TLS in a row under them (TLS's
+   * certificate check under it). */
+  const own = h('div', { class: 'cols c2' }, F.ntrip_version.el, tlsField);
   const caBox = h('div', { class: 'stack' });
   const ackNote = cfg.dup_stream_ack ? h('p', { class: 'muted small' }, 'You accepted the duplicate-stream risk for this server.') : null;
   const err = errBox();
@@ -393,7 +394,7 @@ function casterEditor(entry, opts) {
   /* Onocoy already elsewhere: that comes first, before how to set up a new one. */
   mount(form, h('div', { class: 'card-head' }, title), h('div', { class: 'cols c2' }, field('NTRIP server', presetSel).el), help,
     elsewhereNote, testNote,
-    h('div', { class: 'cols c2' }, F.host.el, fixedField, F.mountpoint.el, F.username.el, F.password.el), pwNote,
+    h('div', { class: 'cols c2' }, F.host.el, fixedField, F.mountpoint.el, F.username.el, F.password.el, F.backoff_profile.el), pwNote,
     own, caBox, ackNote, dupBox, err, actions);
 
   function sync() {
@@ -405,6 +406,7 @@ function casterEditor(entry, opts) {
     mpHint.hidden = !ono;
     F.username.el.hidden = !ono && !v2();
     own.hidden = !custom;
+    F.backoff_profile.el.hidden = !custom;
     paceHint.textContent = PACE[backoff.value === 'polite' ? 'polite' : 'standard'][1];
     F.trust.el.hidden = !custom || !tls.input.checked;
     caBox.hidden = F.trust.el.hidden || trust.value !== 'custom_ca';
