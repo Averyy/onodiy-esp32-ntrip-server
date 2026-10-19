@@ -1251,9 +1251,9 @@ function sgTestCtl(done) {
   /* The two groups, the time and Start in one row on a wide screen. While a start would be refused (no receiver, held,
    * not locked) only why, beside Start that waits. */
   const why = h('span', { class: 'note muted small', id: 'sgt-why', hidden: true });
-  const act = h('div', { class: 'act' }, startBtn);
+  const startRow = h('div', { class: 'act' }, startBtn);
   const fields = h('div', { class: 'cols sgt-form' }, field('Group A', selA).el, field('Group B', selB).el,
-    field('Time per group', minutes).el, act);
+    field('Time per group', minutes).el, startRow);
   const blocked = h('div', { class: 'form-actions', hidden: true }, why);
   const form = h('div', { class: 'stack' }, fields, blocked);
   const intro = h('p', { class: 'muted small' }, 'Tries two signal groups one after the other on this antenna, so you can keep the better one.');
@@ -1294,7 +1294,7 @@ function sgTestCtl(done) {
       why.textContent = block;
       why.hidden = blocked.hidden = !block;
       fields.hidden = !!block;
-      const home = block ? blocked : act;
+      const home = block ? blocked : startRow;
       if (startBtn.parentNode !== home) home.append(startBtn);
       if (block) startBtn.setAttribute('aria-describedby', why.id);
       else startBtn.removeAttribute('aria-describedby');

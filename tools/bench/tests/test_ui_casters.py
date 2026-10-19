@@ -521,6 +521,19 @@ async function receiverPageView(c) {
     r.invalid = { open: !!adv.open, focused: focused, puts: sent.slice(n).filter(x => x.method === 'PUT').length,
       errors: [...visible(el)].filter(e => e.tagName === 'SMALL' && e.className === 'err').map(e => e.textContent) };
   }
+  if (c.press) {
+    /* c.press: a button pressed (by its text), then c.confirm2 in the dialog it opens, if any: the requests that went out. */
+    const n = sent.length;
+    [...visible(el)].find(e => e.tagName === 'BUTTON' && e.textContent === c.press).fire('click');
+    await settle();
+    if (c.confirm2) {
+      /* Its OK is the form's submit button: the dialog named c.confirm2 is submitted. */
+      const ok = [...visible(ids.modal)].find(e => e.tagName === 'BUTTON' && e.textContent === c.confirm2);
+      [...ids.modal.walk()].find(e => e.tagName === 'FORM' && [...e.walk()].includes(ok)).fire('submit');
+      await settle();
+    }
+    r.pressed = sent.slice(n).filter(x => x.method !== 'GET').map(x => [x.method, x.path, x.body]);
+  }
   if (c.test2) {
     /* The comparison's next answer (c.test2) and a refresh: is its results box the same element (a focus on it stays), and
      * what does it show now. */
@@ -2670,6 +2683,23 @@ def test_receiver_pages_show_everything_without_fold_outs():
     assert any(r.startswith("Galileo | 10.9 satellites") and "L1 45.0 (10.9)" in r for r in running["again"]["trs"])
     deciding = out["deciding"]
     assert {"Keep 3 6 (Galileo E6)", "Keep 7 0 (most signals)"} <= set(deciding["buttons"])
+
+
+def test_comparison_buttons_send_their_requests():
+    """The comparison's buttons do what they say: Keep sends the group pressed (0: the first, 1: the second), Stop asks
+    first and then ends the test, and Start (after its dialog) sends the two groups."""
+    done_st = st_status(receiver={"signal_test": {"state": "deciding", "decide_left_s": 84000}})
+    run_st = st_status(receiver={"signal_test": {"state": "measuring"}})
+    keep_b, keep_a, stop, start = run_editor([
+        rx_page("settings", done_st, GNSS, SIG_MSGS, test=SGT_DONE, press="Keep 7 0 (most signals)"),
+        rx_page("settings", done_st, GNSS, SIG_MSGS, test=SGT_DONE, press="Keep 3 6 (Galileo E6)"),
+        rx_page("settings", run_st, GNSS, SIG_MSGS, test=SGT_RUN, press="Stop", confirm2="Stop"),
+        rx_page("settings", st_status(), GNSS, SIG_MSGS, press="Start comparison", confirm2="Start")])
+    assert keep_b["pressed"] == [["POST", "/api/gnss/signal-test/keep", {"group": 1}]]
+    assert keep_a["pressed"] == [["POST", "/api/gnss/signal-test/keep", {"group": 0}]]
+    assert stop["pressed"] == [["DELETE", "/api/gnss/signal-test", None]]
+    assert [x[:2] for x in start["pressed"]] == [["POST", "/api/gnss/signal-test"]]
+    assert len(start["pressed"][0][2]["groups"]) == 2
 
 
 def test_receiver_pages_say_refusals_the_survey_and_a_stream_off_the_position():
