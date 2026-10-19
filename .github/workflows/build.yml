@@ -377,7 +377,7 @@ jobs:
           # tool refuses to write an unsigned one for such a build.
           MANIFEST_SIGNING_KEY: ${{ secrets.MANIFEST_SIGNING_KEY }}
           # Empty except for the release that moves stations to another
-          # repository (README, "Keep the repository's name"): that build
+          # repository (docs/releases.md, "Keep the repository's name"): that build
           # reads releases from this owner/name instead of this repository.
           RELEASE_MOVE_TO: ${{ vars.RELEASE_MOVE_TO }}
         run: |

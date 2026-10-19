@@ -26,7 +26,7 @@ menu "Station: firmware updates"
             refuse GitHub's redirect to the new name (untrusted_host). To
             move, publish from the old repository, while you still hold it,
             a release built with the new name here, and keep the old
-            repository afterwards (README, "Keep the repository's name").
+            repository afterwards (docs/releases.md, "Keep the repository's name").
 
     config FW_UPDATE_MANIFEST_ASSET
         string "Release manifest asset name"

@@ -34,7 +34,7 @@
  * account's old name. The path rule refuses that redirect, so a renamed
  * repository stops updates (untrusted_host) instead of quietly pointing
  * stations at a name that may change hands. Nothing on the device can tell
- * a new owner of the same name apart (README, "Keep the repository's name").
+ * a new owner of the same name apart (docs/releases.md, "Keep the repository's name").
  */
 #pragma once
 
