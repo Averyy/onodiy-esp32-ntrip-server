@@ -857,7 +857,7 @@ size_t lcast_str_msgs_from_obs(const lcast_obs_msg_t *obs, size_t n, lcast_str_m
         uint32_t p;
         if (!seen_any) {
             p = m->expected_period_s;
-        } else if (m->period_ms == UINT32_MAX) {
+        } else if (m->period_ms == UINT32_MAX || (m->expected_period_s > 0u && m->count < LCAST_STR_PERIOD_SEEN)) {
             p = m->expected_period_s > 0u ? m->expected_period_s : 1u;
         } else {
             p = (uint32_t)(((uint64_t)m->period_ms + 500u) / 1000u);
@@ -1363,10 +1363,20 @@ uint32_t lcast_rate_bps(const lcast_rate_t *r, uint32_t now_ms, uint64_t bytes_n
         return 0;
     }
     uint32_t oldest = (r->head + LCAST_RATE_SAMPLES - r->n) % LCAST_RATE_SAMPLES;
+    if (now_ms - r->at_ms[oldest] > (LCAST_RATE_SAMPLES + 2u) * LCAST_RATE_STEP_MS || bytes_now < r->bytes[oldest]) {
+        return 0;   /* samples missed, or a counter reset */
+    }
+    /* From the last of the oldest samples the count stood still over: the time before the input began is no part of its rate. */
+    for (uint32_t k = 1; k < r->n; k++) {
+        uint32_t next = (oldest + 1u) % LCAST_RATE_SAMPLES;
+        if (r->bytes[next] != r->bytes[oldest]) {
+            break;
+        }
+        oldest = next;
+    }
     uint32_t span = now_ms - r->at_ms[oldest];
-    if (span < LCAST_RATE_MIN_MS || span > (LCAST_RATE_SAMPLES + 2u) * LCAST_RATE_STEP_MS ||
-        bytes_now < r->bytes[oldest]) {
-        return 0;   /* too short to tell, samples missed, or a counter reset */
+    if (span < LCAST_RATE_MIN_MS) {
+        return 0;   /* too short to tell */
     }
     uint64_t bps = (bytes_now - r->bytes[oldest]) * 8000u / span;
     return bps > UINT32_MAX ? UINT32_MAX : (uint32_t)bps;

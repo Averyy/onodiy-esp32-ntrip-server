@@ -1009,10 +1009,12 @@ TEST_CASE("lcast STR: messages from the observations, periods, the profile, limi
     o[6] = (lcast_obs_msg_t) { 1087, 1, 10, 1000, 60001 };        /* too old */
     o[7] = (lcast_obs_msg_t) { 1097, 1, 0, UINT32_MAX, UINT32_MAX }; /* profile only, never seen */
     o[8] = (lcast_obs_msg_t) { 1042, 0, 3, 400, 60000 };          /* 400 -> at least 1; 60 s is in */
-    size_t n = lcast_str_msgs_from_obs(o, 9, m, LCAST_STR_MSGS_MAX);
-    TEST_ASSERT_EQUAL_size_t(6, n);
+    o[9] = (lcast_obs_msg_t) { 1117, 1, 8, 2000, 100 };           /* 8 sightings: still the profile's 1 */
+    o[10] = (lcast_obs_msg_t) { 1127, 1, 9, 2000, 100 };          /* 9: the measured 2 */
+    size_t n = lcast_str_msgs_from_obs(o, 11, m, LCAST_STR_MSGS_MAX);
+    TEST_ASSERT_EQUAL_size_t(8, n);
     static const lcast_str_msg_t want[] = { { 1005, 1 }, { 1019, 1 }, { 1033, 10 }, { 1042, 1 }, { 1077, 2 },
-                                            { 1230, 5 } };
+                                            { 1117, 1 }, { 1127, 2 }, { 1230, 5 } };
     for (size_t i = 0; i < n; i++) {
         TEST_ASSERT_EQUAL_UINT16(want[i].msg, m[i].msg);
         TEST_ASSERT_EQUAL_UINT16(want[i].period_s, m[i].period_s);
@@ -1035,7 +1037,7 @@ TEST_CASE("lcast STR: messages from the observations, periods, the profile, limi
     /* at most 24 entries */
     memset(o, 0, sizeof(o));
     for (size_t i = 0; i < 40; i++) {
-        o[i] = (lcast_obs_msg_t) { (uint16_t)(1001 + i), 1, 5, 1000, 0 };
+        o[i] = (lcast_obs_msg_t) { (uint16_t)(1001 + i), 1, LCAST_STR_PERIOD_SEEN, 1000, 0 };
     }
     n = lcast_str_msgs_from_obs(o, 40, m, LCAST_STR_MSGS_MAX);
     TEST_ASSERT_EQUAL_size_t(24, n);
@@ -1513,38 +1515,60 @@ TEST_CASE("lcast config rules: every boundary and its words", "[lcast]")
 
 /* ---- 13. rate estimate -------------------------------------------------------------------------- */
 
-TEST_CASE("lcast bit rate: from the oldest of 6 samples 10 s apart to now, there within seconds of boot", "[lcast]")
+TEST_CASE("lcast bit rate: from the oldest of 60 samples 1 s apart to now, from when the input began", "[lcast]")
 {
     lcast_rate_t r;
     lcast_rate_init(&r);
     TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, 1000, 5000));   /* no sample */
     lcast_rate_sample(&r, 300, 0);                                 /* at init: nothing in yet */
     TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, 1000, 1000));   /* 0.7 s: too short to tell */
-    /* 7.5 s after it (the caster just turned on): the rate so far */
-    TEST_ASSERT_EQUAL_UINT32(11786, lcast_rate_bps(&r, 7800, 11050));
-    lcast_rate_sample(&r, 5300, 5000);                              /* too soon: not taken */
+    TEST_ASSERT_EQUAL_UINT32(8000, lcast_rate_bps(&r, 1300, 1000));
+    lcast_rate_sample(&r, 1000, 5000);                              /* too soon: not taken */
     TEST_ASSERT_EQUAL_UINT32(1, r.n);
-    /* the ring keeps 6 samples: the oldest is 50 s back */
-    uint64_t bytes = 0;
+    /* 12 s with nothing in (the receiver not streaming yet), then 1700 bytes/s from 12.8 s on */
     uint32_t t = 300;
-    for (int i = 0; i < 8; i++) {
+    uint64_t bytes = 0;
+    while (t < 16300u) {
         t += LCAST_RATE_STEP_MS;
-        bytes += i < 4 ? 17000 : 34000;   /* the rate doubles */
+        bytes = t > 12800u ? (t - 12800u) * 17u / 10u : 0;
         lcast_rate_sample(&r, t, bytes);
     }
-    TEST_ASSERT_EQUAL_UINT32(6, r.n);
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)((34000ull * 4u + 17000u) * 8000u / 50000u), lcast_rate_bps(&r, t, bytes));
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)((34000ull * 4u + 17000u * 2u) * 8000u / 55000u),
-                             lcast_rate_bps(&r, t + 5000u, bytes + 17000u));
+    TEST_ASSERT_EQUAL_UINT32(17, r.n);
+    TEST_ASSERT_EQUAL_UINT32(5950, (uint32_t)bytes);
+    /* 4 s in: from the last still sample (12.3 s), not from boot (which would say 3296) */
+    TEST_ASSERT_EQUAL_UINT32(6800u * 8000u / 4500u, lcast_rate_bps(&r, 16800, 6800));
+    /* the input began after the newest sample: too short to tell yet */
+    lcast_rate_t still;
+    lcast_rate_init(&still);
+    for (uint32_t i = 0; i < 5; i++) {
+        lcast_rate_sample(&still, 300u + i * LCAST_RATE_STEP_MS, 100);
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&still, 4700, 400));
+    TEST_ASSERT_EQUAL_UINT32(2400, lcast_rate_bps(&still, 5300, 400));
+    /* the ring keeps 60 samples: the oldest is 59 s back */
+    for (int i = 0; i < 70; i++) {
+        t += LCAST_RATE_STEP_MS;
+        bytes += 1700u;
+        lcast_rate_sample(&r, t, bytes);
+    }
+    TEST_ASSERT_EQUAL_UINT32(60, r.n);
+    TEST_ASSERT_EQUAL_UINT32(13600, lcast_rate_bps(&r, t, bytes));
+    TEST_ASSERT_EQUAL_UINT32(13600, lcast_rate_bps(&r, t + 500u, bytes + 850u));
+    /* a pause inside the minute counts: 20 s with nothing in */
+    for (int i = 0; i < 20; i++) {
+        t += LCAST_RATE_STEP_MS;
+        lcast_rate_sample(&r, t, bytes);
+    }
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(1700ull * 39u * 8000u / 59000u), lcast_rate_bps(&r, t, bytes));
     /* no sample for a long time (the timer stopped): no rate rather than an old one */
     TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, t + 100000u, bytes + 17000u));
     /* samples missed, or a counter going back, start over */
     lcast_rate_sample(&r, t + 30000u, bytes + 1000u);
     TEST_ASSERT_EQUAL_UINT32(1, r.n);
     TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, t + 30500u, bytes + 2000u));
-    lcast_rate_sample(&r, t + 40000u, 10);
+    lcast_rate_sample(&r, t + 31000u, 10);
     TEST_ASSERT_EQUAL_UINT32(1, r.n);
-    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, t + 45000u, 5));
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, t + 32500u, 5));
     /* across the wrap of the millisecond clock */
     lcast_rate_init(&r);
     lcast_rate_sample(&r, UINT32_MAX - 4999u, 0);

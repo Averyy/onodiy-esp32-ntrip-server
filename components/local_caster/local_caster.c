@@ -258,16 +258,17 @@ static void rate_tick(void *arg)
     portEXIT_CRITICAL(&s_rate_lock);
 }
 
-/* Bits per second the hub took in over the last minute (up to now). */
+/* Bits per second the hub took in over the last minute (up to now). The ring
+ * is read in place: a copy would put its 728 bytes on the caller's stack. */
 static uint32_t bitrate_now(void)
 {
     rtcm_hub_stats_t hs;
     rtcm_hub_get_stats(&hs);
-    lcast_rate_t r;
+    uint32_t now = now_ms();
     portENTER_CRITICAL(&s_rate_lock);
-    r = s_rate;
+    uint32_t bps = lcast_rate_bps(&s_rate, now, hs.bytes_in);
     portEXIT_CRITICAL(&s_rate_lock);
-    return lcast_rate_bps(&r, now_ms(), hs.bytes_in);
+    return bps;
 }
 
 static int64_t unix_now(void)
@@ -1381,7 +1382,7 @@ esp_err_t local_caster_init(void)
         ESP_LOGW(TAG, "no settings events (%s): the default mountpoint follows a rename only after a restart",
                  esp_err_to_name(herr));
     }
-    /* The input rate from now on (a sample every 10 s, the first at once). */
+    /* The input rate from now on (a sample every second, the first at once). */
     rate_tick(NULL);
     const esp_timer_create_args_t targs = { .callback = rate_tick, .name = "lcast_rate" };
     herr = esp_timer_create(&targs, &s_rate_timer);

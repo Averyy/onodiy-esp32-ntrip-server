@@ -253,6 +253,7 @@ size_t lcast_reply_sourcetable(char *buf, size_t cap, lcast_flavour_t f, const c
 
 #define LCAST_STR_MSGS_MAX    24u     /**< messages listed in the format details */
 #define LCAST_STR_DETAILS_MAX 255u    /**< characters of the format details */
+#define LCAST_STR_PERIOD_SEEN 9u      /**< sightings before a measured period replaces the profile's: the mean then spans 8 intervals */
 #define LCAST_STR_MAX         512u    /**< a record always fits (fields are bounded) */
 
 typedef struct {
@@ -283,8 +284,10 @@ typedef struct {
  * The format details' messages: those seen in the last 60 s, else the
  * profile's; 1101-1107 left out; ascending; at most LCAST_STR_MSGS_MAX, and
  * only as many as LCAST_STR_DETAILS_MAX characters hold. Periods in whole
- * seconds (rounded, at least 1; with one sighting only, the profile's period
- * or 1). @return the number written.
+ * seconds (rounded, at least 1): the profile's until a message was seen
+ * LCAST_STR_PERIOD_SEEN times (a mean of the first few intervals still holds
+ * the start's gaps), then the measured one; without a profile period, the
+ * measured one from two sightings on, else 1. @return the number written.
  */
 size_t lcast_str_msgs_from_obs(const lcast_obs_msg_t *obs, size_t n, lcast_str_msg_t *out, size_t cap);
 
@@ -430,14 +433,16 @@ void lcast_jq_pop(lcast_jq_t *q);
 
 /* ---- bit rate ---------------------------------------------------------------------------- */
 
-#define LCAST_RATE_SAMPLES   6u
-#define LCAST_RATE_STEP_MS   10000u
+#define LCAST_RATE_SAMPLES   60u
+#define LCAST_RATE_STEP_MS   1000u
 #define LCAST_RATE_MIN_MS    1000u     /**< a shorter span gives no rate */
 
 /**
  * Input bytes (the hub's bytes_in) sampled every LCAST_RATE_STEP_MS into a
  * ring, from boot on; the rate runs from the oldest sample (at most a minute
- * old) to now, so it is there as soon as the station has seen data.
+ * old) to now, so it is there as soon as the station has seen data. The
+ * oldest samples the count stood still over (nothing in yet, or a pause the
+ * minute starts in) are left out: that time does not dilute the rate.
  */
 typedef struct {
     uint64_t bytes[LCAST_RATE_SAMPLES];
@@ -449,7 +454,8 @@ typedef struct {
 void lcast_rate_init(lcast_rate_t *r);
 /** Take a sample when LCAST_RATE_STEP_MS passed since the last one (a gap over twice that, or the count going back, starts over). */
 void lcast_rate_sample(lcast_rate_t *r, uint32_t now_ms, uint64_t bytes_in);
-/** Bits per second from the oldest sample to now (bytes_now: the count now); 0 without a sample or within LCAST_RATE_MIN_MS of it. */
+/** Bits per second from the oldest sample to now, or from the last of the oldest ones the count stood still over
+ * (bytes_now: the count now); 0 without a sample or within LCAST_RATE_MIN_MS of it. */
 uint32_t lcast_rate_bps(const lcast_rate_t *r, uint32_t now_ms, uint64_t bytes_now);
 
 /* ---- stored config ----------------------------------------------------------------------- */
