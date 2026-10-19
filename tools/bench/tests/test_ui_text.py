@@ -1066,6 +1066,68 @@ def test_comparison_advice_follows_onocoys_quality_scale():
     assert run_ui([("sgAdvice", {"results": [g36, {**g70, "status": "measuring"}]})]) == [None]
 
 
+def _js_blank_strings_and_comments(text: str) -> str:
+    """The source with string, template and comment contents blanked (offsets and newlines kept)."""
+    out, i, n = list(text), 0, len(text)
+    while i < n:
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2) + 2
+        elif text[i] in "'\"`":
+            q, j = text[i], i + 1
+            while j < n and text[j] != q:
+                j += 2 if text[j] == "\\" else 1
+            for k in range(i + 1, min(j, n)):
+                out[k] = out[k] if text[k] == "\n" else " "
+            i = j + 1
+            continue
+        else:
+            i += 1
+            continue
+        for k in range(i, j):
+            out[k] = out[k] if text[k] == "\n" else " "
+        i = j
+    return "".join(out)
+
+
+def test_no_local_value_hides_a_shared_function_that_its_block_calls():
+    """A const/let/var that is not a function, named like one of the UI's shared functions, is never called in its
+    block: the call would reach the local (a button row once hid act(), so Start, Keep and Stop sent nothing). Locals
+    that are functions of their own (a local add(), say()) are fine."""
+    files = {f.name: f.read_text() for f in sorted(UI_JS.glob("*.js"))}
+    shared = set()
+    for text in files.values():
+        shared.update(re.findall(r"^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(", text, re.M))
+    is_fn = re.compile(r"\s*(?:async\s+)?(?:function\b|\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)")
+    bad = []
+    for name, raw in files.items():
+        text = _js_blank_strings_and_comments(raw)
+        for m in re.finditer(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=(?!=)", text):
+            v = m.group(1)
+            line_start = text.rfind("\n", 0, m.start()) + 1
+            if v not in shared or m.start() == line_start or is_fn.match(text, m.end()):
+                continue
+            depth, i = 0, m.start()
+            while i > 0:
+                i -= 1
+                if text[i] == "}":
+                    depth += 1
+                elif text[i] == "{":
+                    if depth == 0:
+                        break
+                    depth -= 1
+            depth, j = 0, i
+            while j < len(text):
+                depth += {"{": 1, "}": -1}.get(text[j], 0)
+                if depth == 0 and text[j] == "}":
+                    break
+                j += 1
+            if re.search(r"(?<![\w$.])" + re.escape(v) + r"\s*\(", text[i:j]):
+                bad.append(f"{name}:{raw.count(chr(10), 0, m.start()) + 1} {v}")
+    assert not bad, bad
+
 def test_password_mismatch_and_unknown_signal():
     mismatch, short, ok = run_ui([("pwProblem", ["abcdefgh", "abcdefgi"]), ("pwProblem", ["abc", "abc"]),
                                   ("pwProblem", ["abcdefgh", "abcdefgh"])])

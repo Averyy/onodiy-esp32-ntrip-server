@@ -469,12 +469,12 @@ function overviewTab(box) {
     lastHl = hl;
     const b = hl.boot || {};
     const heap = hl.heap || {};
-    const link = hl.link || {};
+    const rxLink = hl.link || {};
     const net = hl.network || {};
     const cd = hl.coredump || {};
     const dev = (S.status || {}).device || {};
     /* A closed port is why the station finds no receiver: its state row says the port, not "No receiver found". */
-    const station = link.open === false && link.mode !== 'off' && (hl.station || {}).state === 'no_receiver' ?
+    const station = rxLink.open === false && rxLink.mode !== 'off' && (hl.station || {}).state === 'no_receiver' ?
       Object.assign({}, hl.station, { state: 'uart_closed' }) : hl.station;
     const opened = new Set(Array.from(box.querySelectorAll('details[data-k]')).filter(d => d.open).map(d => d.getAttribute('data-k')));
     const sect = (k, title, ...kids) => h('details', { class: 'more', 'data-k': k, open: opened.has(k) }, h('summary', null, title), kids);
@@ -523,8 +523,8 @@ function overviewTab(box) {
             heap.psram_min !== undefined ? ['PSRAM lowest', fmt.bytes(heap.psram_min)] : null,
             heap.psram_largest !== undefined ? ['Largest PSRAM block', fmt.bytes(heap.psram_largest)] : null,
           ])),
-          sect('link', 'Receiver link', autoKv(link)),
-          sect('framing', 'Framing', autoKv(link.framing)),
+          sect('link', 'Receiver link', autoKv(rxLink)),
+          sect('framing', 'Framing', autoKv(rxLink.framing)),
           sect('hub', 'RTCM hub', autoKv(hl.hub)),
           sect('station', 'Station', autoKv(station)),
           sect('obs', 'Observations', autoKv(hl.obs)),
