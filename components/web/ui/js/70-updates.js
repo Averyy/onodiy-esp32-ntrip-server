@@ -382,15 +382,17 @@ const updatesPart = {
         lr && ['app_update', 'app_upload', 'rollback'].indexOf(lr.job) >= 0 && lr.result !== 'ok' ?
           h('p', { class: 'muted small' }, 'Last attempt: ' + resultText(lr)) : null,
         P.app_update.el, appErr);
-      const rb = a.rollback_available ? btn('Go back…', async () => {
-        const ok = await dialog({ title: 'Go back to the previous version?', ok: 'Go back', okKind: 'danger solid',
-          body: h('p', null, 'The station restarts into the version installed before ' + a.running + '. ' + a.running +
+      /* The version the station would start: the other app slot's, else (unreadable) the one before this. */
+      const to = a.rollback_version || 'the version installed before ' + a.running;
+      const rb = a.rollback_available ? btn('Revert…', async () => {
+        const ok = await dialog({ title: 'Revert to ' + to + '?', ok: 'Revert', okKind: 'danger solid',
+          body: h('p', null, 'The station restarts into ' + to + '. ' + a.running +
             ' is not offered again; you can still install it from a file.') });
         if (!ok) return;
         const r = await act(rb, () => api('POST', '/api/update/rollback', { confirm: true }), appErr);
-        if (r !== undefined) showRestarting('Going back to the previous version');
+        if (r !== undefined) showRestarting('Reverting to ' + to);
       }, 'small danger') : null;
-      mount(rbBox, rb ? settingRow('Go back to the previous version', 'The one installed before ' + a.running + '.', rb) : null,
+      mount(rbBox, rb ? settingRow('Revert version', 'Revert to ' + to + '.', rb) : null,
         (a.rolled_back || []).length ? h('p', { class: 'muted small' }, 'Rolled back here, not offered again: ' + a.rolled_back.join(', ') + '.') : null);
       rbBox.hidden = !rbBox.firstChild;
     }

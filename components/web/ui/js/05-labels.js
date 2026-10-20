@@ -109,7 +109,7 @@ const L = {
     unsupported_model: ['Receiver model not supported', 'The station streams what this receiver sends but does not configure or update it.'],
     config_failed: ['Receiver configuration failed', ''],   /* the text depends on the retry: configFailedText() */
     position_mismatch: ['Position mismatch', 'The streamed position is more than 5 mm from the locked one.'],
-    antenna_moved: ['Antenna moved?', 'The fixed base sends nothing since the receiver restarted. If the antenna moved, survey again.'],
+    antenna_moved: ['Antenna moved?', 'The fixed base sends nothing since the receiver restarted. If the antenna moved, reset the location.'],
     receiver_attention: ['Receiver needs attention', 'Corrections did not come back after the receiver update.'],
     receiver_in_loader: ['Receiver in its update loader', 'The station only listens until you choose what to do in Settings.'],
     no_receiver: ['No receiver found', ''],   /* the text depends on the alert: noReceiverText() */

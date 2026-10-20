@@ -1568,7 +1568,7 @@ def test_receiver_unchecked_during_maintenance_says_so():
                   ("profileChip", unchecked), ("profileChip", known), ("profileChip", {**unchecked, "autocfg": False}),
                   ("posChip", unchecked), ("posChip", known), ("posChip", surveying)])
     # The Receiver card says it once, in a line of its own: the position row goes (None) unless the station knows it.
-    assert out == [None, "No position yet.", "Locked. If the antenna moves, survey again.",
+    assert out == [None, "No position yet.", "Locked. If the antenna moves, reset the location.",
                    "Surveying, about 10min left. Then lock it.",
                    ["Not checked", ""], ["Not applied", "warn"], ["Manual setup", ""],
                    ["Not checked", ""], ["Not locked", ""], ["Surveying", "info"]]

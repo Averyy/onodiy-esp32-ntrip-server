@@ -951,6 +951,18 @@ svg.live-sky .sid.b4 { fill: var(--cnr-ink-4); }
 svg.live-sky .sat.none { fill: var(--surface); stroke: var(--muted); stroke-dasharray: 3 2; }
 svg.live-sky .sid.none { fill: var(--muted); }
 .legend .cnr-sw { width: 12px; height: 12px; }
+/* The sky's C/N0 key: its label on a line of its own, the swatches in one row under it. */
+.legend.foot { gap: 0.3rem 0.65rem; font-size: 0.8rem; }
+.legend .lead { flex-basis: 100%; color: var(--text); font-weight: 600; }
+/* The constellation letters in even columns, never one pair alone on a line. */
+.legend.sys-key { display: grid; grid-template-columns: repeat(auto-fill, minmax(5.6rem, 1fr)); gap: 0.2rem 0.6rem;
+  font-size: 0.8rem; margin-top: 0.5rem; }
+.legend.sys-key span { gap: 0.3rem; }
+.legend.sys-key b { color: var(--text); font-weight: 650; min-width: 0.7rem; }
+/* The Signals card's checks side by side on a faint banner. */
+.check-banner { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 0.55rem 0.8rem; }
+.check-banner .checks.lines { display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem; }
+.check-banner .checks .ic { width: 1.35rem; height: 1.35rem; font-size: 0.8rem; }
 .cnr-sw.b0 { background: var(--cnr-0); }
 .cnr-sw.b1 { background: var(--cnr-1); }
 .cnr-sw.b2 { background: var(--cnr-2); }
@@ -1093,7 +1105,6 @@ table.cmp small { display: block; color: var(--muted); }
 .choices.stacked .choice input { margin-top: 0.15rem; }
 .choice .opt { display: block; font-weight: 600; }
 /* Receiver setup: the restart box under Automatic, set in as its part. */
-.choices .sub-check { margin-left: 2.1rem; }
 /* A profile group's title with its chip (Correction messages). */
 .pgroup > .card-head { margin-bottom: 0; }
 .pgroup > .card-head > h3 { font-size: 1rem; }

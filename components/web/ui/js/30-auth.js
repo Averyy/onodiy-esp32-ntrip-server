@@ -587,7 +587,7 @@ async function startWizard(claim) {
           h('details', { class: 'more sky-more', open: was && was.open ? true : null }, h('summary', null, 'Sky view and satellite counts'),
             h('div', { class: 'stack' }, liveTiles(t),
               h('div', { class: 'sky-wrap' }, liveSkyPlot(d.satellites || []), h('div', null, cnrLegend(),
-                h('p', { class: 'muted small' }, SYS_KEY), liveCountsTable(t))))));
+                sysKey(), liveCountsTable(t))))));
       }
       setCont(r.ok ? 'Continue' : 'Continue anyway', true);
       setNote(r.waiting ? '' : 'These are rough guide values, not Onocoy\'s scoring. The sky is also on the Receiver page.');

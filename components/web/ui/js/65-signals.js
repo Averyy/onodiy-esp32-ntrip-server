@@ -185,7 +185,8 @@ function signalsHead(sig, live, master, why) {
       why ? h('div', null, why) : null);
   }
   const checks = live ? signalChecks(sig, master) : null;
-  return [checks && !checks.waiting ? receptionList(checks, true) : h('div', { class: 'big' }, signalsHeadline(sig)),
+  return [checks && !checks.waiting ? h('div', { class: 'check-banner' }, receptionList(checks, true)) :
+    h('div', { class: 'big' }, signalsHeadline(sig)),
     why ? msg('info', why) : null];
 }
 

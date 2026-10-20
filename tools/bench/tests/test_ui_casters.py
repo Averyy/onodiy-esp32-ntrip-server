@@ -1202,7 +1202,7 @@ def test_onocoy_asks_for_its_username_and_password_and_a_name():
     for o in out:
         assert o["fields"] == ["NTRIP server", "Host and port", "Mountpoint", "Username", "Password"], o
         assert o["pace"] is False and o["details"] == 0 and o["waits"] == [], o
-        assert o["hints"] == ["Any name; shows only in your Onocoy dashboard."], o
+        assert o["hints"] == ["Any name; shows only in your Onocoy dashboard.", "Reference station credential."], o
         assert o["help"] == "The Onocoy console gives the username and password, under NTRIP Credentials. Onocoy's guide ↗", o
     assert edit["fixed"] == new["fixed"] == switched["fixed"] == "servers.onocoy.com:2101"
     assert tls["fixed"] == "servers.onocoy.com:2121" and test["fixed"] == "10.0.2.2:2111"
@@ -1773,8 +1773,11 @@ def test_onocoy_today_forms():
              "alloff"]
     out = dict(zip(names, dashboards(*[MATRIX[n] for n in names])))
     ono = {n: o["cards"]["Onocoy"] for n, o in out.items()}
-    assert ono["healthy"]["chip"] == ["On track", "badge ok"] and ono["healthy"]["big"][0].startswith("7min 43s")
-    assert [r[0] for r in ono["healthy"]["rows"]] == ["Online today", "Offline today"]
+    # Today's online share is the figure (most stations are online all day); the offline time left a row.
+    assert ono["healthy"]["chip"] == ["On track", "badge ok"] and ono["healthy"]["big"][0].endswith("online today")
+    assert "%" in ono["healthy"]["big"][0] and ono["healthy"]["bar"] is None
+    assert [r[0] for r in ono["healthy"]["rows"]] == ["Offline time left", "Online today", "Offline today"]
+    assert dict(ono["healthy"]["rows"])["Offline time left"] == "7min 43s"
     assert ono["healthy"]["links"][0][:3] == ["Manage", "#/ntrip", "Manage Onocoy"]
     for o in ono.values():
         assert all(n[0] not in ("", "–") for n in o["notes"]), o["notes"]
@@ -2105,10 +2108,9 @@ def test_event_filter_changed_while_the_journal_loads():
 
 # ---- Status: the Onocoy card's bar; Logs: the Health card and Chip and Wi-Fi; Signals; long values; plain port ----
 
-def test_onocoy_today_bar_is_the_share_of_the_allowance_left():
-    """The bar under the offline time left fills with what is left of today's allowance, left / (left + offline
-    counted against it): nearly full on a clean day, partly full at risk, empty once missed. Its colour is the
-    verdict's; assistive technology reads it as a meter with the share left in words."""
+def test_onocoy_offline_time_left_row():
+    """The Offline time left row: today's allowance left, plain while On track, amber at risk, gone once missed (the
+    verdict and its line say it). No bar: the online share is the card's figure."""
     ono = lambda **kw: [st_caster(0, "Onocoy", "streaming", **kw)]
     cases = [st_status(availability={"protected_down_today_s": 10, "budget_left_s": 463}),
              st_status(availability={"protected_down_today_s": 22, "budget_left_s": 451}),
@@ -2117,14 +2119,11 @@ def test_onocoy_today_bar_is_the_share_of_the_allowance_left():
              st_status(casters=ono(streak_ok=False, data_rate_permille=950), availability={"protected_down_today_s": 10,
                                                                                          "budget_left_s": 200})]
     out = run_editor([{"fn": "dashboard", "status": x, "admin": True} for x in cases])
-    bars = [o["cards"]["Onocoy"]["bar"] for o in out]
-    assert bars[0] == {"cls": "bar ok", "role": "meter", "label": "Today's offline time left", "now": "97",
-                       "text": "97\u00a0% left", "width": "97.9%"}, bars[0]
-    # The screenshots' "On track, 7 min 31 s left": nearly full, not nearly empty.
-    assert bars[1]["width"] == "95.3%" and bars[1]["cls"] == "bar ok"
-    assert bars[2]["width"] == "36.6%" and bars[2]["cls"] == "bar warn" and bars[2]["text"] == "36\u00a0% left"
-    # Missed: no bar (the verdict and its line say it), whatever offline time the budget still shows.
-    assert bars[3] is None and bars[4] is None
+    cards = [o["cards"]["Onocoy"] for o in out]
+    left = [dict(c["rows"]).get("Offline time left") for c in cards]
+    assert left[:3] == ["7min 43s", "7min 31s", "2min 53s"] and all(c["bar"] is None for c in cards)
+    assert ["warn", "2min 53s"] in cards[2]["tones"] and not any(t[1] == "7min 43s" for t in cards[0]["tones"])
+    assert left[3] is None and left[4] is None
 
 
 def health_hl(**kw) -> dict:
@@ -2357,7 +2356,7 @@ def test_settings_is_network_updates_the_receiver_and_the_danger_zone_without_fo
     assert rows["Wi-Fi"] == "Home" and rows["Signal"] == " Weak (\u221282\u00a0dBm)"
     assert rows["Network name"] == "onodiy-1A2B" and rows["Password"] == "Set (change)"
     # Change network small in the title row; the hotspot's password through the link in its row, no button of its own.
-    assert off["buttons"] == ["Change network", "change", "Check now", "Choose file", "Choose file", "Start", "Go back…",
+    assert off["buttons"] == ["Change network", "change", "Check now", "Choose file", "Choose file", "Start", "Revert…",
                               "Receiver settings", "Restart", "Change password", "Factory reset…"]
     assert off["lines"] == ["Opens for first setup, when the station cannot reach your Wi-Fi, and after BOOT is held.",
                             "Position, signals, correction messages and how the receiver is set up."]
@@ -2595,9 +2594,9 @@ def test_receiver_pages_show_everything_without_fold_outs():
     rows = dict(stream["rows"])
     assert rows["Model"] == "UM982 \u00b7 R4.10Build25164" and rows["Source"] == "Survey-in"
     assert rows["Latitude"].startswith("45.1") and rows["Sent to servers"] == "This position"
-    assert "Locked. If the antenna moves, survey again." in stream["lines"]
+    assert "Locked. If the antenna moves, reset the location." in stream["lines"]
     assert "Messages" in stream["subs"] and any(r.startswith("1005 Station position") for r in stream["trs"])
-    assert "Survey again" in stream["buttons"] and "Receiver settings" in stream["buttons"]
+    assert "Reset location" in stream["buttons"] and "Receiver settings" in stream["buttons"]
     # Logs' rows, not here.
     assert not {"Link", "Part number", "Chip ID", "Answers", "Identity confirmed", "Epochs"} & set(rows)
 
@@ -2606,7 +2605,7 @@ def test_receiver_pages_show_everything_without_fold_outs():
     for k in ("stream", "live"):
         sky = out[k]
         assert sky["sky"] and any(r.startswith("G12") for r in sky["trs"]) and any(r.startswith("E05") for r in sky["trs"])
-        assert "2 of 2 satellites on the map." in sky["lines"]
+        assert not any("on the map" in t or "no position" in t for t in sky["lines"])   # every one placed: nothing to say
         assert not {"Show the sky", "Close", "Extend", "Extend by 10min"} & set(sky["buttons"]), sky["buttons"]
         assert not any("pause" in t for t in sky["lines"]) and sky["notes"] == []
         assert not any("Sky map" in m[1] for m in sky["msgs"])
@@ -2679,7 +2678,7 @@ def test_receiver_pages_show_everything_without_fold_outs():
     blocked = out["settings_unlocked"]
     assert "Group A" not in blocked["fields"] and "Start comparison" in blocked["buttons"]
     # Automatic setup: its restart box under it, ticked for full recovery (no_reboot: the same box cleared).
-    restart = "Also restart the station if that doesn't help"
+    restart = "Restart the station if the receiver stops answering"
     assert restart in settings["checks"] and restart in out["no_restart"]["checks"]
     # Manual setup cannot start one: no card and no link to it; nor the restart box.
     manual = out["settings_noant"]
@@ -2747,7 +2746,7 @@ def test_receiver_pages_say_refusals_the_survey_and_a_stream_off_the_position():
     assert survey["cards"] == ["Receiver", "Position", "Signals"]
     assert rows["Latitude"].startswith("45.2") and rows["Source"] == "Survey-in (running)"
     assert "Sent to servers" not in rows and "Locked on" not in rows
-    assert "Lock this position" in survey["buttons"] and "Survey again" not in survey["buttons"]
+    assert "Lock this position" in survey["buttons"] and "Reset location" not in survey["buttons"]
     assert any(t.startswith("Surveying, about 5") for t in survey["lines"])
 
     assert dict(offset["rows"])["Sent to servers"] == "1.32\u00a0m from this position"

@@ -53,7 +53,7 @@ function fmtDist(m) {
 }
 
 /**
- * Lock / survey-again buttons with their warnings and their error box (out),
+ * Lock / Reset location buttons with their warnings and their error box (out),
  * built once per view: a pending request (or its dialog) keeps its button and
  * box across the refresh. update(g) shows the buttons that fit the state.
  */
@@ -70,18 +70,18 @@ function positionActions(done) {
       done();
     }
   }, 'primary', { hidden: true });
-  const resurveyBtn = btn('Survey again', async () => {
-    const ok = await dialog({ title: 'Survey the position again?', ok: 'Survey again', okKind: 'danger solid',
-      body: [h('p', null, 'The station forgets the locked position and the receiver surveys again.'),
+  const resurveyBtn = btn('Reset location', async () => {
+    const ok = await dialog({ title: 'Reset the location?', ok: 'Reset location', okKind: 'danger solid',
+      body: [h('p', null, 'The station forgets the locked position; the receiver works it out again (a survey-in) and it locks.'),
         msg('warn', 'The position sent to servers changes. Onocoy may validate the station again.')],
       check: 'I understand that the position changes.' });
     if (!ok) return;
     const r = await act(resurveyBtn, () => api('DELETE', '/api/gnss/position/lock'), out);
     if (r !== undefined) {
-      toast('Surveying again…', 'ok');
+      toast('Working out the location again…', 'ok');
       done();
     }
-  }, 'danger', { hidden: true });
+  }, 'danger small', { hidden: true });
   return {
     out: out,
     buttons: [resurveyBtn, lockBtn],
@@ -190,7 +190,7 @@ function positionLine(g, delivering) {
   const prof = g.profile || {};
   const have = pos.source && pos.source !== 'none';
   if (prof.base_mode === 'fixed' && prof.fixed && !(pos.locked && have)) return 'Fixed (typed in). Sent at the next configuration.';
-  if (pos.locked) return 'Locked. If the antenna moves, survey again.';
+  if (pos.locked) return 'Locked. If the antenna moves, reset the location.';
   if (surveyRuns(g)) {
     if (!delivering) return 'Surveying, paused while no corrections arrive.';
     return sv.window_left_s ? 'Surveying, about ' + inMinutes(sv.window_left_s) + ' left. Then lock it.' : 'Surveying. Lock it when it ends.';
@@ -305,19 +305,18 @@ function manageCustom(autocfg, recovery) {
 }
 
 /**
- * Receiver setup: Automatic (recommended), with "Also restart the station"
- * under it while it is chosen, or Manual. onSaved: the settings changed (the
+ * Receiver setup: Automatic, with "Restart the station if the receiver stops
+ * answering" under it while it is chosen, or Manual. onSaved: the settings changed (the
  * page reads them again). Returns {nodes, update(g), dirty()}.
  */
 function manageCtl(onSaved) {
   const out = errBox();
   let stored = null, autocfg = true, recovery = 'full', held = false, fixKey = null;
   const name = k => L.recovery[MANAGE[k][1]];
-  const restart = checkbox('Also restart the station if that doesn\'t help', true,
-    'Only if the receiver stops answering; at most once an hour and 3 times in 24 hours.');
-  restart.el.classList.add('sub-check');
+  const restart = checkbox('Restart the station if the receiver stops answering', true,
+    'When restarting the receiver did not help. At most once an hour and 3 times a day.');
   const choice = radios('Receiver setup', 'manage', [
-    ['auto', h('span', { class: 'opt' }, h('span', null, name('auto') + ' (recommended)'), h('small', { class: 'hint' },
+    ['auto', h('span', { class: 'opt' }, h('span', null, name('auto')), h('small', { class: 'hint' },
       'Sets up the receiver with the profile on this page and keeps it so. If corrections stop, it reconnects, sends the ' +
       'setup again, then restarts the receiver.'))],
     ['manual', h('span', { class: 'opt' }, h('span', null, name('manual')), h('small', { class: 'hint' },
@@ -451,7 +450,7 @@ function heldPanel(opts) {
   const err = errBox();
   const status = h('div', { hidden: true });
   const sum = h('p', { class: 'muted small' }, 'Reading the commands…');
-  const auto = checkbox('Afterwards, keep it configured and fix problems automatically (recommended)', true,
+  const auto = checkbox('Afterwards, keep it configured and fix problems automatically', true,
     'Turns on automatic receiver setup once this has worked.');
   let preview = null;
   let watching = false;
@@ -670,7 +669,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
   const sgKey = p.signal_group_master + ' ' + p.signal_group_slave;
   const named = SG_CHOICES.some(c => c[0] === sgKey);
   const sgChoice = radios('Signal group', 'sgroup', SG_CHOICES.map(c => [c[0], h('span', { class: 'opt' },
-    h('span', null, c[0] + ' ' + c[1] + (c[0] === SG_RECOMMENDED ? ' (recommended)' : '')), h('small', { class: 'hint' }, c[2]))]),
+    h('span', null, c[0] + ' ' + c[1]), h('small', { class: 'hint' }, c[2]))]),
   named ? sgKey : null);
   sgChoice.el.querySelector('.choices').classList.add('stacked', 'grid2');
   sgChoice.el.querySelector('legend').classList.add('sr-only');
@@ -1380,7 +1379,7 @@ function receiverPage(el, arg) {
   const posRows = h('div');
   const map = mapBox();
   const where = h('section', { class: 'card' }, h('h2', null, 'Position'), posLine, posRows, map.el, posActions.out,
-    h('div', { class: 'form-actions' }, posActions.buttons));
+    h('div', { class: 'form-actions sep' }, posActions.buttons));
   /* Nothing known about the position but its line (no coordinates, so no map, and nothing to do): the line is a row of
    * the Receiver card, which then spans the page (as without a receiver). */
   const posAlone = () => !posRows.firstChild && map.el.hidden && posActions.buttons.every(b => b.hidden);

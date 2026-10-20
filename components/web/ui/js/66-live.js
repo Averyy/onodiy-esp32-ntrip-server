@@ -14,7 +14,6 @@ const LIVE_POLL_MS = 2000;
 
 /* C/N0 classes for colour (dB-Hz): under 30, 30-34, 35-39, 40-44, 45 or more. */
 const CNR_STEPS = [30, 35, 40, 45];
-const CNR_STEP_LABEL = ['under 30', '30–34', '35–39', '40–44', '45 or more'];
 
 function cnrStep(v) {
   if (!v) return -1;
@@ -84,12 +83,19 @@ function liveSkyPlot(sats, mini) {
 }
 
 function cnrLegend() {
-  return h('div', { class: 'legend foot' }, h('span', null, 'C/N0 (dB-Hz):'),
-    CNR_STEP_LABEL.map((t, i) => h('span', null, h('i', { class: 'cnr-sw b' + i }), t)),
+  return h('div', { class: 'legend foot' }, h('span', { class: 'lead' }, 'C/N0, dB-Hz'),
+    CNR_SHORT.map((t, i) => h('span', null, h('i', { class: 'cnr-sw b' + i }), t)),
     h('span', null, h('i', { class: 'cnr-sw none' }), 'none'));
 }
 
-const SYS_KEY = 'G GPS · R GLONASS · E Galileo · C BeiDou · J QZSS · S SBAS · I NavIC';
+/* The swatches' labels, short enough for one row beside the plot. */
+const CNR_SHORT = ['<30', '30–34', '35–39', '40–44', '45+'];
+
+/* The labels' letters, each pair kept on one line. */
+const SYS_KEY_PAIRS = [['G', 'GPS'], ['R', 'GLONASS'], ['E', 'Galileo'], ['C', 'BeiDou'], ['J', 'QZSS'], ['S', 'SBAS'],
+  ['I', 'NavIC']];
+const sysKey = () => h('div', { class: 'legend sys-key' },
+  SYS_KEY_PAIRS.map(p => h('span', null, h('b', null, p[0]), p[1])));
 
 /* ---- Every satellite, one line each (sortable) ------------------------------------------- */
 
@@ -249,7 +255,8 @@ function tileMosaic(lat, lon, onFail) {
   return box;
 }
 
-/* The station map: tiles only after "Show the map" (remembered here), and a link to OpenStreetMap. {el, update(position)}. */
+/* The station map: tiles only after "Show the map" (remembered here), then a link to OpenStreetMap beside "Hide the map".
+ * {el, update(position)}. */
 function mapBox() {
   const el = h('div', { class: 'stack map-box' });
   let key = null;
@@ -268,9 +275,9 @@ function mapBox() {
         h('div', { class: 'row foot' }, btn('Hide the map', () => {
           store.set('map', false);
           offer();
-        }, 'small ghost')));
+        }, 'small ghost'), extLink('Open in OpenStreetMap', ext)));
     }
-    mount(el, box, h('div', { class: 'foot' }, extLink('Open in OpenStreetMap', ext)));
+    mount(el, box);
     if (store.get('map', false)) show();
     else offer();
   }
@@ -302,7 +309,7 @@ function skyMap() {
   let stopPoll = null, gone = false, on = false, manual = false, onChange = null;
   const plotBox = h('div');
   const note = h('p', { class: 'muted small' });
-  const plot = h('div', { class: 'sky-pane', hidden: true }, plotBox, cnrLegend(), h('p', { class: 'muted small' }, SYS_KEY), note);
+  const plot = h('div', { class: 'sky-pane', hidden: true }, plotBox, cnrLegend(), sysKey(), note);
   const rows = satRows();
   const list = h('div', { class: 'sat-list', hidden: true }, rows.el);
   const show = vis => {
@@ -324,10 +331,13 @@ function skyMap() {
     patch(plotBox, liveSkyPlot(sats));
     const placed = sats.filter(hasSkyPos).length;
     /* None this boot with manual setup: the profile may never have reached the receiver. */
-    note.textContent = placed ? placed + ' of ' + sats.length + ' satellites on the map.' :
+    /* Said only when some cannot be placed yet (no position from the receiver, or below the horizon). */
+    note.textContent = placed === sats.length ? '' : placed ? (sats.length - placed) + ' of ' + sats.length +
+      ' satellites have no position yet.' :
       manual && (t.sky_age_ms === null || t.sky_age_ms === undefined) ?
         'No satellite positions yet. With manual setup, Apply again in Receiver settings sends them.' :
         'Waiting for the first satellite positions from the receiver.';
+    note.hidden = !note.textContent;
     rows.update(d);
   }
 

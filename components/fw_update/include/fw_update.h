@@ -216,6 +216,7 @@ typedef struct {
     char reverted_version[32];     /**< last version rolled back, "" if none (the whole list: fw_update_get_rolled_back) */
     bool reverted_in_stage1;       /**< it rolled back in its first minute (crash or reset): offer it again */
     bool rollback_available;       /**< the other slot holds a valid image */
+    char rollback_version[32];     /**< the version a rollback starts (that image's), "" when unknown or none */
     char latest_version[32];       /**< "" until a check succeeded (kept over a restart: ota/manifest) */
     bool app_update_available;     /**< banner: newer than running, not in bad_ver, running is not a dev build */
     bool latest_rolled_back;       /**< latest_version is in ota/bad_ver: not offered, installable with a warning */

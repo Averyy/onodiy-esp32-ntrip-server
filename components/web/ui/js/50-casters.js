@@ -311,7 +311,7 @@ function casterEditor(entry, opts) {
   const F = {
     host: field('Host and port', hostPort),
     mountpoint: field('Mountpoint', mp, 'Any name; shows only in your Onocoy dashboard.'),
-    username: field('Username', user),
+    username: field('Username', user, 'Reference station credential.'),
     password: field('Password', pw),
     ntrip_version: field('NTRIP version', version),
     trust: field('Certificate check', trust),
@@ -319,6 +319,7 @@ function casterEditor(entry, opts) {
   };
   F.port = F.host;   /* a refused port is the same field's */
   const mpHint = F.mountpoint.el.querySelector('.hint');
+  const userHint = F.username.el.querySelector('.hint');
   const paceHint = F.backoff_profile.el.querySelector('.hint');
   /* A preset's host and port: text where Other server has its field. */
   /* A preset's host and port: a field that cannot be edited, so the form reads alike for every server. */
@@ -404,6 +405,7 @@ function casterEditor(entry, opts) {
     fixedField.hidden = custom;
     fixedText.value = fixedHost + ':' + fixedPort;
     mpHint.hidden = !ono;
+    userHint.hidden = !ono;
     F.username.el.hidden = !ono && !v2();
     own.hidden = !custom;
     F.backoff_profile.el.hidden = !custom;

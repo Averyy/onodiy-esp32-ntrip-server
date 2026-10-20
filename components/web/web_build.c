@@ -2042,6 +2042,7 @@ void web_build_update(wj_t *w, const web_update_snap_t *u)
     wj_uint(w, "ends_in_s", f->trial == FW_TRIAL_NONE ? 0 : f->trial_end_s);
     wj_obj_close(w);
     wj_bool(w, "rollback_available", f->rollback_available);
+    wj_str_or_null(w, "rollback_version", f->rollback_version);
     wj_obj_close(w);
 
     bool rx = st != NULL && st->receiver.valid;

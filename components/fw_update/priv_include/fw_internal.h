@@ -86,6 +86,7 @@ typedef struct {
     bool trial_inhibit_held;
     lifecycle_inhibit_t trial_inhibit;
     bool rollback_available;      /**< the other slot holds a bootable image (refreshed by the worker) */
+    char rollback_version[32];    /**< that image's version, "" when unknown */
     bool rollback_known;
     char etag_saved[64];          /**< ota/etag as stored */
     fw_job_kind_t job;            /**< the job that holds `busy` (0 for a manual upload) */

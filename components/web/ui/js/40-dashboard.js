@@ -173,9 +173,11 @@ function utcResetTime() {
 }
 
 /*
- * Onocoy's day while it counts: the verdict, the offline time left in large
- * type with its bar (full on a clean day), and two rows; once missed the
- * verdict, one line with the reset and the rows. Otherwise one muted line
+ * Onocoy's day while it counts: the verdict, today's online share in large
+ * type (most stations are online all day), and rows: the offline time left
+ * before Onocoy's daily limit (amber once the verdict is not On track) and
+ * the offline time today; once missed the verdict, one line with the reset
+ * and the rows. Otherwise one muted line
  * on when the card shows, with the link that sets Onocoy up or turns it on
  * (Manage when the top card's button does).
  */
@@ -193,7 +195,11 @@ function onocoyCard(s, st) {
     return card(null, { label: 'Turn on', name: 'Turn on Onocoy', href: ONOCOY_SETUP_HASH }, mutedLine('Onocoy is turned off.'));
   }
   const c = st.ono;
-  const rows = kv([['Online today', fmt.dur(c.today_online_s)], ['Offline today', fmt.dur(d.known ? d.down : c.today_offline_s)]]);
+  const down = d.known ? d.down : c.today_offline_s;
+  const leftText = d.left > 0 ? fmt.dur(d.left) : '0s';
+  const rows = kv([
+    ...(d.known && d.verdict !== 'Missed' ? [['Offline time left', d.tone === 'ok' ? leftText : h('span', { class: 't-' + d.tone }, leftText)]] : []),
+    ['Online today', fmt.dur(c.today_online_s)], ['Offline today', fmt.dur(down)]]);
   if (d.verdict === 'Missed') {
     const at = utcResetTime();   /* "8:00 PM", or "8:00 p.m." in a locale that ends it with a period */
     return card(badge(d.verdict, d.tone), null,
@@ -202,11 +208,11 @@ function onocoyCard(s, st) {
   return card(badge(d.verdict, d.tone), null,
     d.why ? h('p', { class: 'small t-' + d.tone }, d.why) : null,
     d.known ? [
-      h('div', { class: 'big t-' + d.tone }, d.left > 0 ? fmt.dur(d.left) : '0s', ' ', h('small', null, 'offline time left')),
-      bar(d.share, d.tone, 'Today\'s offline time left', Math.floor(d.share * 100) + NB + '% left'),
-      h('div', { class: 'muted small' }, 'Resets at ' + utcResetTime() + ' · Estimate')] :
-      h('p', { class: 'muted' }, 'Shows once the station has the time (from GNSS or the internet).'),
-    rows);
+      h('div', { class: 'big' }, (c.today_online_s || down) ? onlineShare(c.today_online_s || 0, down || 0) : DASH, ' ',
+        h('small', null, 'online today')),
+      rows,
+      h('div', { class: 'muted small' }, 'Offline limit resets at ' + utcResetTime() + ' · Estimate')] :
+      [h('p', { class: 'muted' }, 'Shows once the station has the time (from GNSS or the internet).'), rows]);
 }
 
 /* "Locked", "Surveying, 11 min left"... (position_locked is the stored profile's base mode: it runs once the receiver took the

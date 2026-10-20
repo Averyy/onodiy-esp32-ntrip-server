@@ -458,8 +458,16 @@ void fw_trial_tick_worker(void)
 void fw_trial_refresh_rollback(void)
 {
     bool possible = esp_ota_check_rollback_is_possible();
+    /* The image a rollback starts: with the two app slots of this partition table, the other one. */
+    char version[sizeof(g_fw.rollback_version)] = "";
+    const esp_partition_t *other = possible ? esp_ota_get_next_update_partition(NULL) : NULL;
+    esp_app_desc_t desc;
+    if (other != NULL && esp_ota_get_partition_description(other, &desc) == ESP_OK) {
+        strlcpy(version, desc.version, sizeof(version));
+    }
     fw_lock();
     g_fw.rollback_available = possible;
+    strlcpy(g_fw.rollback_version, version, sizeof(g_fw.rollback_version));
     g_fw.rollback_known = true;
     fw_unlock();
 }
@@ -519,6 +527,9 @@ void fw_trial_status_locked(fw_update_status_t *out, bool clock_trusted, int64_t
             g_fw.rec.stage == FW_TRIAL_REC_ROLLED_BACK && !fw_bad_contains(&g_fw.bad, g_fw.rec.version);
     }
     out->rollback_available = g_fw.rollback_known && g_fw.rollback_available;
+    if (out->rollback_available) {
+        strlcpy(out->rollback_version, g_fw.rollback_version, sizeof(out->rollback_version));
+    }
 }
 
 _Static_assert(FW_UPDATE_ROLLED_BACK_MAX == FW_BAD_VER_MAX, "the rolled-back list moved: update fw_update.h");

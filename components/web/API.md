@@ -2035,7 +2035,8 @@ until a newer version appears; the server keeps no "later" state.
   "last_result": {"job": "gnss_update", "result": "not_available_yet", "message": "ESP_ERR_NOT_SUPPORTED"},
   "app": {"running": "v0.3.0", "dev_build": false, "latest": "v0.4.0", "available": true,
           "latest_rolled_back": false, "rolled_back": ["v0.3.1"], "reverted": "", "reverted_in_stage1": false,
-          "trial": {"stage": "none", "left_s": 0, "ends_in_s": 0}, "rollback_available": true},
+          "trial": {"stage": "none", "left_s": 0, "ends_in_s": 0}, "rollback_available": true,
+          "rollback_version": "v0.2.0"},
   "gnss": {"model": "UM982", "running": "R4.10Build18975", "running_build": 18975,
            "latest": "R4.10Build19152", "latest_build": 19152,
            "release": "R4.10Build19152", "release_build": 19152, "available": true,
@@ -2062,6 +2063,7 @@ until a newer version appears; the server keeps no "later" state.
 | `app.trial.stage` | `none`, `confirming`, `verifying`, `watching`; `left_s` is the stage's time left, `ends_in_s` the whole trial's (to the crash watch's end; both 0 without a trial) |
 | `gnss.latest`, `gnss.latest_build` | the package offered (a higher build for this model), else `null` |
 | `gnss.release`, `gnss.release_build` | the latest release's package for this receiver model, offered or not (`null` without one, or before a check found a release): the card says "up to date" when the receiver runs it or a newer build |
+| `app.rollback_version` | the version `POST /api/update/rollback` would start (the other app slot's image), `null` without a rollback or when its description cannot be read |
 | `app.latest_rolled_back` | the latest release is one that was rolled back here: not offered, installable with a warning |
 | `app.rolled_back` | every version rolled back on this station, newest first (`fw_update_get_rolled_back()`: reverted by its trial, rolled back by the user, or rolled back twice in its first minute; the last 8, kept through a factory reset). The banner offers none of them, however many daily checks later; installing one, from the banner or as an upload, asks for `rolled_back_ack` first |
 | `gnss.expected_downtime_s` | `station_expected_flash_downtime_s()` for the offered package (PROVISIONAL, to be confirmed on hardware); information, never a gate |
