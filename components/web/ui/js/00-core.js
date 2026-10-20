@@ -528,10 +528,21 @@ class ApiError extends Error {
  * Call the API. POST and PUT always send Content-Type: application/json
  * (the server's CSRF rule, also for an empty body). Resolves with the parsed
  * body; rejects with ApiError. A 401 also emits "unauthorized" unless
- * opts.quiet401.
+ * opts.quiet401. A GET whose connection failed before an answer (a dropped
+ * Wi-Fi frame, a connection the station closed) is sent once more after
+ * 300 ms: reading changes nothing, so a second try is safe.
  */
 async function api(method, path, body, opts) {
   opts = opts || {};
+  if (method === 'GET' && !opts.once) {
+    try {
+      return await api(method, path, body, Object.assign({}, opts, { once: true }));
+    } catch (e) {
+      if (!(e instanceof ApiError) || e.code !== 'network') throw e;
+      await sleep(300);
+      return api(method, path, body, Object.assign({}, opts, { once: true }));
+    }
+  }
   const init = { method: method, credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' } };
   if (method === 'POST' || method === 'PUT') {
     init.headers['Content-Type'] = 'application/json';

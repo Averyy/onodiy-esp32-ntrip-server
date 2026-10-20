@@ -55,9 +55,11 @@ _Static_assert(ESP_APP_DESC_MAGIC_WORD == WEB_DESC_MAGIC, "app description magic
 _Static_assert(ESP_IMAGE_HEADER_MAGIC == WEB_IMAGE_MAGIC, "image magic moved");
 _Static_assert(ESP_ERR_OTA_VALIDATE_FAILED == 0x1503, "OTA validation error code moved (web_build.c)");
 
-/* Server limits (socket budget: 7 here + 3 for the server itself, beside the
- * casters). One of the 7 is kept free for the next connection (web_conn.h). */
-#define SERVER_MAX_SOCKETS   7
+/* Server limits (socket budget: 10 here + 3 for the server itself, beside the
+ * casters). One of the 10 is kept free for the next connection (web_conn.h).
+ * One browser page can hold 7 by itself: its WebSocket and the 6 connections
+ * a browser opens to one host for its requests. */
+#define SERVER_MAX_SOCKETS   10
 #define SERVER_MAX_URIS      WEB_MAX_URI_HANDLERS
 #define SERVER_STACK         8192
 #define SERVER_PRIO          5
@@ -218,7 +220,7 @@ bool web_conn_req_close(httpd_req_t *req)
  * now, so a request the worker takes over carries it too) and
  * request_end() closes the connection.
  */
-static bool request_begin(httpd_req_t *req)
+static bool request_begin(httpd_req_t *req, bool may_pay)
 {
     int fd = httpd_req_to_sockfd(req);
     taskENTER_CRITICAL(&s_conn_lock);
@@ -231,10 +233,16 @@ static bool request_begin(httpd_req_t *req)
         tokens = web_connection_tokens(v);
     }
     bool close = web_conn_should_close(tokens, http10);
+    taskENTER_CRITICAL(&s_conn_lock);
+    /* A socket owed (none could be closed for a new connection): this answer ends its connection to free it. */
+    if (!close && may_pay && web_conn_take_owed(&s_conns, fd)) {
+        close = true;
+    }
     if (close) {
-        taskENTER_CRITICAL(&s_conn_lock);
         web_conn_set_close_after(&s_conns, fd, true);
-        taskEXIT_CRITICAL(&s_conn_lock);
+    }
+    taskEXIT_CRITICAL(&s_conn_lock);
+    if (close) {
         web_resp_close_hdr(req);
     }
     return close;
@@ -370,8 +378,26 @@ static void evict(int fd)
 static esp_err_t on_sess_open(httpd_handle_t hd, int fd)
 {
     uint32_t now = now_ms();
+    /* Which of the others have bytes waiting (a request sent, not read yet): read outside the lock, never chosen. */
+    int fds[WEB_CONN_MAX];
+    bool unread[WEB_CONN_MAX];
+    size_t nf = 0;
+    taskENTER_CRITICAL(&s_conn_lock);
+    for (size_t i = 0; i < WEB_CONN_MAX; i++) {
+        if (s_conns.c[i].fd >= 0 && s_conns.c[i].fd != fd) {
+            fds[nf++] = s_conns.c[i].fd;
+        }
+    }
+    taskEXIT_CRITICAL(&s_conn_lock);
+    for (size_t i = 0; i < nf; i++) {
+        int n = 0;
+        unread[i] = ioctl(fds[i], FIONREAD, &n) == 0 && n > 0;
+    }
     taskENTER_CRITICAL(&s_conn_lock);
     bool tracked = web_conn_open(&s_conns, fd, now);
+    for (size_t i = 0; i < nf; i++) {
+        web_conn_set_unread(&s_conns, fds[i], unread[i]);
+    }
     int victim = web_conn_victim(&s_conns, fd, SERVER_MAX_SOCKETS, now);
     taskEXIT_CRITICAL(&s_conn_lock);
     if (!tracked) {
@@ -1022,7 +1048,7 @@ static esp_err_t api_handle(httpd_req_t *req, web_req_t *rp)
 static esp_err_t api_dispatch(httpd_req_t *req)
 {
     web_req_t r = { .sess = -1 };
-    bool close = request_begin(req);
+    bool close = request_begin(req, true);
     esp_err_t ret = request_end(req, close, api_handle(req, &r));
     if (r.sess >= 0) {
         health_note_admin_activity();   /* someone uses the page: the GNSS ladder's restart waits */
@@ -1110,7 +1136,7 @@ static esp_err_t fallback_handle(httpd_req_t *req)
 
 static esp_err_t fallback(httpd_req_t *req)
 {
-    bool close = request_begin(req);
+    bool close = request_begin(req, true);
     esp_err_t ret = request_end(req, close, fallback_handle(req));
     web_conn_request_done(req, false);
     return ret;
@@ -1121,7 +1147,7 @@ static esp_err_t fallback(httpd_req_t *req)
  * request like any other: it may ask for the connection to end. */
 static esp_err_t ws_frame(httpd_req_t *req)
 {
-    bool close = req->method == HTTP_GET && request_begin(req);
+    bool close = req->method == HTTP_GET && request_begin(req, false);   /* a handshake never pays an owed socket */
     esp_err_t ret = request_end(req, close, web_ws_handler(req));
     web_conn_request_done(req, false);
     return ret;

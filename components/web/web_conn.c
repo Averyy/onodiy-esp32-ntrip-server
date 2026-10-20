@@ -66,6 +66,9 @@ void web_conn_close(web_conns_t *t, int fd)
 {
     web_conn_t *e = find(t, fd);
     if (e != NULL) {
+        if (!e->pays && t->owed > 0) {
+            t->owed--;   /* it went by itself: the owed socket is free */
+        }
         memset(e, 0, sizeof(*e));
         e->fd = -1;
     }
@@ -353,12 +356,15 @@ void web_conn_between_requests(web_conns_t *t)
 }
 
 /* Eviction rank (lower goes first); -1 = never. */
-static int rank(const web_conn_t *e)
+static int rank(const web_conn_t *e, uint32_t now_ms)
 {
-    if (e->closing || e->phase != WEB_CONN_IDLE) {
-        return -1;   /* already going, or its request runs on the worker */
+    if (e->closing || e->phase != WEB_CONN_IDLE || e->unread) {
+        return -1;   /* already going, its request runs on the worker, or one waits in its socket */
     }
     if (!e->ws) {
+        if (now_ms - e->active_ms < WEB_CONN_QUIET_MS) {
+            return -1;   /* just answered: its next request may be on the way */
+        }
         return e->admin ? 1 : 0;   /* a browser reopens an idle keep-alive connection by itself */
     }
     return e->admin ? -1 : 2;      /* an admin's live page is never cut for someone else's socket */
@@ -378,7 +384,7 @@ int web_conn_victim(web_conns_t *t, int new_fd, size_t max_open, uint32_t now_ms
         if (e->fd < 0 || e->fd == new_fd) {
             continue;
         }
-        int r = rank(e);
+        int r = rank(e, now_ms);
         if (r < 0) {
             continue;
         }
@@ -389,14 +395,45 @@ int web_conn_victim(web_conns_t *t, int new_fd, size_t max_open, uint32_t now_ms
             best_idle = idle;
         }
     }
-    if (best == NULL) {
-        best = find(t, new_fd);
-        if (best == NULL) {
+    /* No quiet plain connection to close: one that was just busy (or has a request waiting) ends after its next
+     * answer instead, rather than an admin's connection or a viewer being cut for this one. */
+    bool payer = false;
+    for (size_t i = 0; i < WEB_CONN_MAX && (best == NULL || best_rank > 0); i++) {
+        const web_conn_t *e = &t->c[i];
+        payer = payer || (e->fd >= 0 && e->fd != new_fd && !e->ws && !e->closing && !e->pays &&
+                          e->phase == WEB_CONN_IDLE && rank(e, now_ms) < 0);
+    }
+    if (best == NULL || (best_rank > 0 && payer)) {
+        if (find(t, new_fd) == NULL) {
             return new_fd;   /* not tracked (table full): close it all the same */
         }
+        /* The new connection stays; the next plain request's answer frees a socket (web_conn_take_owed). */
+        if (t->owed < WEB_CONN_MAX) {
+            t->owed++;
+        }
+        return -1;
     }
     best->closing = true;
     return best->fd;
+}
+
+bool web_conn_take_owed(web_conns_t *t, int fd)
+{
+    web_conn_t *e = find(t, fd);
+    if (t->owed == 0 || e == NULL || e->ws || e->closing || e->pays) {
+        return false;
+    }
+    e->pays = true;
+    t->owed--;
+    return true;
+}
+
+void web_conn_set_unread(web_conns_t *t, int fd, bool unread)
+{
+    web_conn_t *e = find(t, fd);
+    if (e != NULL) {
+        e->unread = unread;
+    }
 }
 
 web_drain_end_t web_conn_drain(const web_drain_io_t *io, size_t max_bytes, uint32_t max_ms, size_t *dropped)

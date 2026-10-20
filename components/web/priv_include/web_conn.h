@@ -38,6 +38,21 @@
  * when nothing else is left, the new connection itself is closed. The choice
  * is made on the server task between requests, so no connection is in the
  * middle of one then (an armed deadline there is stale and dropped first).
+ * A connection with bytes waiting in its socket is not idle either: a
+ * browser sends its next request on a kept-alive connection without
+ * waiting, and closing it then loses that request (the browser sees an
+ * empty answer). web.c reads each socket's waiting bytes just before the
+ * choice (web_conn_set_unread), and such a connection is never chosen. Nor
+ * is one whose last request ended less than WEB_CONN_QUIET_MS ago: a
+ * browser that just had an answer often sends its next request at once, and
+ * a close crossing it on the wire loses it the same way.
+ * A plain connection that was just busy is no reason to cut an admin's idle
+ * connection or a viewer either: it pays an owed socket instead.
+ * When nothing may be closed, the new connection stays and a socket is owed:
+ * the next request that begins on a plain connection pays it, its answer
+ * carrying "Connection: close" (web_conn_take_owed), so the socket comes
+ * free without a request lost; a connection that closes by itself meanwhile
+ * pays it too.
  *
  * HTTP version. esp_http_server parses each request's version but does not
  * keep it, so an HTTP/1.0 request could not be told from an HTTP/1.1 one,
@@ -72,7 +87,8 @@ extern "C" {
 #endif
 
 /** Connections tracked (at least the server's max_open_sockets). */
-#define WEB_CONN_MAX 8
+#define WEB_CONN_MAX 12
+#define WEB_CONN_QUIET_MS 1000u   /**< a plain connection quiet this long may be closed outright (else it pays an owed socket) */
 
 typedef enum {
     WEB_CONN_IDLE = 0,       /**< between requests: the next byte arms the deadline */
@@ -122,11 +138,14 @@ typedef struct {
     bool close_after;        /**< the request being answered ends the connection */
     bool close_hdr;          /**< its answer carries "Connection: close" already */
     bool http10;             /**< the request being answered is HTTP/1.0 (its streamed answer is not chunked) */
+    bool unread;             /**< bytes wait in its socket (a request not read yet): never chosen to close */
+    bool pays;               /**< it ends after its answer to pay an owed socket */
 } web_conn_t;
 
 typedef struct {
     web_conn_t c[WEB_CONN_MAX];
     uint32_t deadline_ms;
+    uint32_t owed;           /**< sockets to free by ending a connection after its answer (none could be closed) */
 } web_conns_t;
 
 /** Empty table; every request must be in within `deadline_ms` of its first byte. */
@@ -210,9 +229,19 @@ void web_conn_between_requests(web_conns_t *t);
  * After `new_fd` opened (server task, between requests: stale deadlines are
  * dropped first, as web_conn_between_requests does): the connection to close
  * so that one of `max_open` sockets stays free, marked closing; -1 when none
- * needs to go. It is `new_fd` itself when nothing else may be closed.
+ * needs to go, or when none may: then a socket is owed (web_conn_take_owed).
+ * It is `new_fd` itself only when the table has no entry for it.
  */
 int web_conn_victim(web_conns_t *t, int new_fd, size_t max_open, uint32_t now_ms);
+
+/** Bytes wait in `fd`'s socket now (read just before web_conn_victim; every call sets it afresh). */
+void web_conn_set_unread(web_conns_t *t, int fd, bool unread);
+
+/**
+ * A request begins on `fd` (a plain request, not a WebSocket handshake): true
+ * when a socket is owed and this connection pays it, ending after its answer.
+ */
+bool web_conn_take_owed(web_conns_t *t, int fd);
 
 /*
  * Lingering close (web_linger_close: an answer with "Connection: close" is

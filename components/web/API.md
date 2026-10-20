@@ -2842,7 +2842,10 @@ boot), and a journal in state `unknown` allows no receiver update action.
 ## 18. Server limits and implementation notes
 
 - **Server:** `esp_http_server`, task priority 5, 8 KB stack in internal
-  RAM; `max_open_sockets` 7 (the lwIP socket budget counts on it),
+  RAM; `max_open_sockets` 10 (the lwIP socket budget counts on it; one
+  page can hold 7: its WebSocket and a browser's 6 connections to one
+  host), one kept free by closing an idle connection, never one with a
+  request waiting unread in its socket,
   `max_uri_handlers` 72 (`WEB_MAX_URI_HANDLERS`; a static assertion keeps
   the API routes, `/ws` and the catch-all within it: 69 routes today, 71
   handlers) with wildcard matching for `/api/casters/*`,

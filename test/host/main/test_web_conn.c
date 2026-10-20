@@ -11,6 +11,7 @@
 #define DEADLINE 6000u
 #define T0       (UINT32_MAX - 2000u)   /* the clock wraps during the tests */
 #define MAXS     7u
+#define Q        WEB_CONN_QUIET_MS   /* a plain connection quiet this long may be closed outright */
 
 static web_conns_t t;
 
@@ -93,36 +94,74 @@ static void fill(void)
 TEST_CASE("web conn: one socket stays free; idle plain connections go first, oldest first", "[web_conn]")
 {
     fill();
-    TEST_ASSERT_EQUAL_INT(-1, web_conn_victim(&t, 15, MAXS, T0 + 1000u));    /* six open: room left */
-    TEST_ASSERT_TRUE(web_conn_open(&t, 16, T0 + 1000u));                     /* the seventh */
-    TEST_ASSERT_EQUAL_INT(13, web_conn_victim(&t, 16, MAXS, T0 + 1000u));
+    TEST_ASSERT_EQUAL_INT(-1, web_conn_victim(&t, 15, MAXS, T0 + Q + 1000u));    /* six open: room left */
+    TEST_ASSERT_TRUE(web_conn_open(&t, 16, T0 + Q + 1000u));                     /* the seventh */
+    TEST_ASSERT_EQUAL_INT(13, web_conn_victim(&t, 16, MAXS, T0 + Q + 1000u));
     TEST_ASSERT_EQUAL_size_t(MAXS - 1u, web_conn_count(&t));
     /* The closing one is not chosen twice, and while it goes there is room. */
-    TEST_ASSERT_EQUAL_INT(-1, web_conn_victim(&t, 16, MAXS, T0 + 1001u));
+    TEST_ASSERT_EQUAL_INT(-1, web_conn_victim(&t, 16, MAXS, T0 + Q + 1001u));
     web_conn_close(&t, 13);
-    TEST_ASSERT_TRUE(web_conn_open(&t, 17, T0 + 2000u));
-    TEST_ASSERT_EQUAL_INT(14, web_conn_victim(&t, 17, MAXS, T0 + 2000u));
+    TEST_ASSERT_TRUE(web_conn_open(&t, 17, T0 + Q + 2000u));
+    TEST_ASSERT_EQUAL_INT(14, web_conn_victim(&t, 17, MAXS, T0 + Q + 2000u));
+}
+
+TEST_CASE("web conn: a connection with a request waiting in its socket is never closed", "[web_conn]")
+{
+    fill();
+    TEST_ASSERT_TRUE(web_conn_open(&t, 16, T0 + Q + 1000u));
+    web_conn_set_unread(&t, 13, true);                                      /* the oldest idle one: a request waits */
+    TEST_ASSERT_EQUAL_INT(14, web_conn_victim(&t, 16, MAXS, T0 + Q + 1000u));
+    web_conn_close(&t, 14);
+    /* Every quiet plain connection with a request waiting: the viewer is not cut for this one; a socket is owed,
+     * and a waiting request's answer pays it as it begins. */
+    TEST_ASSERT_TRUE(web_conn_open(&t, 17, T0 + Q + 2000u));
+    web_conn_set_unread(&t, 12, true);
+    web_conn_set_unread(&t, 15, true);
+    web_conn_set_unread(&t, 16, true);
+    TEST_ASSERT_EQUAL_INT(-1, web_conn_victim(&t, 17, MAXS, T0 + Q + 2000u));
+    TEST_ASSERT_EQUAL_UINT32(1, t.owed);
+    TEST_ASSERT_TRUE(web_conn_take_owed(&t, 13));
+    web_conn_close(&t, 13);
+    TEST_ASSERT_TRUE(web_conn_open(&t, 18, T0 + Q + 3000u));
+    web_conn_set_unread(&t, 17, true);
+    TEST_ASSERT_EQUAL_INT(-1, web_conn_victim(&t, 18, MAXS, T0 + Q + 3000u));
+    TEST_ASSERT_TRUE(web_conn_take_owed(&t, 15));
+    web_conn_close(&t, 15);
+    web_conn_close(&t, 18);
+    TEST_ASSERT_EQUAL_UINT32(0, t.owed);
+    /* Read since then: each choice reads the sockets afresh. */
+    TEST_ASSERT_TRUE(web_conn_open(&t, 19, T0 + Q + 4000u));
+    TEST_ASSERT_EQUAL_INT(-1, web_conn_victim(&t, 19, MAXS, T0 + Q + 4000u));   /* room again */
+    TEST_ASSERT_TRUE(web_conn_open(&t, 20, T0 + Q + 4001u));
+    web_conn_set_unread(&t, 16, false);
+    TEST_ASSERT_EQUAL_INT(16, web_conn_victim(&t, 20, MAXS, T0 + Q + 4001u));   /* not 19: just opened */
+    web_conn_set_unread(&t, 99, true);                                          /* an unknown socket: nothing */
 }
 
 TEST_CASE("web conn: an admin's WebSocket is never closed for someone else's socket", "[web_conn]")
 {
     fill();
-    /* A client opening sockets one after another (and even sending
-     * requests on them) only ever pushes out plain connections: its own,
-     * oldest first. The admin's page, its keep-alive connection and the
-     * viewer stay. */
-    int oldest_own = 16;
+    /* A client opening sockets one after another (and sending requests on
+     * them) only ever pushes out plain connections: the quiet ones outright,
+     * oldest first; then, its own being just busy, one of them ends after its
+     * next answer (an owed socket). The admin's page, its keep-alive
+     * connection and the viewer stay. */
+    int own_oldest = 16;
     for (int i = 0; i < 20; i++) {
         int fd = 16 + i;
-        uint32_t now = T0 + 3000u + (uint32_t)i * 10u;
+        uint32_t now = T0 + Q + 3000u + (uint32_t)i * 10u;
         TEST_ASSERT_TRUE(web_conn_open(&t, fd, now));
         int v = web_conn_victim(&t, fd, MAXS, now);
         if (i < 3) {
-            TEST_ASSERT_EQUAL_INT(13 + i, v);                                /* the idle plain ones first */
+            TEST_ASSERT_EQUAL_INT(13 + i, v);                                /* the quiet plain ones first */
+            web_conn_close(&t, v);
         } else {
-            TEST_ASSERT_EQUAL_INT(oldest_own++, v);
+            TEST_ASSERT_EQUAL_INT(-1, v);                                    /* owed instead */
+            TEST_ASSERT_EQUAL_UINT32(1, t.owed);
+            TEST_ASSERT_TRUE(web_conn_take_owed(&t, own_oldest));            /* its next request's answer ends it */
+            web_conn_close(&t, own_oldest++);
+            TEST_ASSERT_EQUAL_UINT32(0, t.owed);
         }
-        web_conn_close(&t, v);
         web_conn_done(&t, fd, now, false);
     }
     for (int i = 0; i < 3; i++) {
@@ -144,15 +183,20 @@ TEST_CASE("web conn: an admin's idle connection goes before a viewer, a viewer b
     web_conn_async(&t, 5, true, T0);
     web_conn_async(&t, 6, true, T0);
     web_conn_open(&t, 7, T0 + 10u);
-    TEST_ASSERT_EQUAL_INT(3, web_conn_victim(&t, 7, MAXS, T0 + 10u));
+    TEST_ASSERT_EQUAL_INT(-1, web_conn_victim(&t, 7, MAXS, T0 + 10u));      /* the keep-alive was just busy: owed */
+    TEST_ASSERT_TRUE(web_conn_take_owed(&t, 3));
     web_conn_close(&t, 3);
+    web_conn_done(&t, 7, T0 + 11u, true);                                    /* the admin's keep-alive again */
+    web_conn_open(&t, 8, T0 + Q + 20u);
+    TEST_ASSERT_EQUAL_INT(7, web_conn_victim(&t, 8, MAXS, T0 + Q + 20u));   /* quiet now: closed outright */
+    web_conn_close(&t, 7);
 
-    web_conn_websocket(&t, 7, false, T0 + 11u);                              /* a second viewer */
-    web_conn_open(&t, 8, T0 + 20u);
-    TEST_ASSERT_EQUAL_INT(2, web_conn_victim(&t, 8, MAXS, T0 + 20u));        /* the older viewer */
+    web_conn_websocket(&t, 8, false, T0 + Q + 21u);                          /* a second viewer */
+    web_conn_open(&t, 9, T0 + Q + 30u);
+    TEST_ASSERT_EQUAL_INT(2, web_conn_victim(&t, 9, MAXS, T0 + Q + 30u));   /* the older viewer */
 }
 
-TEST_CASE("web conn: nothing else may go: the new connection itself is closed", "[web_conn]")
+TEST_CASE("web conn: nothing else may go: the new connection stays and the next plain answer frees a socket", "[web_conn]")
 {
     web_conns_init(&t, DEADLINE);
     for (int fd = 1; fd <= 6; fd++) {
@@ -164,7 +208,29 @@ TEST_CASE("web conn: nothing else may go: the new connection itself is closed", 
     web_conn_async(&t, 5, true, T0);                                         /* an upload */
     web_conn_async(&t, 6, true, T0);                                         /* a download */
     web_conn_open(&t, 7, T0 + 1u);
-    TEST_ASSERT_EQUAL_INT(7, web_conn_victim(&t, 7, MAXS, T0 + 1u));
+    TEST_ASSERT_EQUAL_INT(-1, web_conn_victim(&t, 7, MAXS, T0 + 1u));       /* kept: a socket is owed */
+    TEST_ASSERT_EQUAL_UINT32(1, t.owed);
+    TEST_ASSERT_EQUAL_size_t(MAXS, web_conn_count(&t));
+    TEST_ASSERT_FALSE(web_conn_take_owed(&t, 1));                            /* never a WebSocket */
+    TEST_ASSERT_TRUE(web_conn_take_owed(&t, 7));                             /* its first request's answer ends it */
+    TEST_ASSERT_EQUAL_UINT32(0, t.owed);
+    TEST_ASSERT_FALSE(web_conn_take_owed(&t, 7));                            /* paid once */
+    web_conn_close(&t, 7);
+    TEST_ASSERT_EQUAL_UINT32(0, t.owed);                                     /* that close was the payment */
+    /* Owed again, and a connection closing by itself pays it. */
+    web_conn_open(&t, 8, T0 + 2u);
+    TEST_ASSERT_EQUAL_INT(-1, web_conn_victim(&t, 8, MAXS, T0 + 2u));
+    TEST_ASSERT_EQUAL_UINT32(1, t.owed);
+    web_conn_close(&t, 6);
+    TEST_ASSERT_EQUAL_UINT32(0, t.owed);
+    TEST_ASSERT_FALSE(web_conn_take_owed(&t, 8));
+    web_conn_close(&t, 8);
+    web_conn_open(&t, 6, T0 + 3u);
+    web_conn_async(&t, 6, true, T0 + 3u);
+    web_conn_open(&t, 7, T0 + 4u);
+    TEST_ASSERT_EQUAL_INT(-1, web_conn_victim(&t, 7, MAXS, T0 + 4u));
+    TEST_ASSERT_TRUE(web_conn_take_owed(&t, 7));
+    web_conn_closing(&t, 7, true);
     TEST_ASSERT_EQUAL_size_t(MAXS - 1u, web_conn_count(&t));
     web_conn_closing(&t, 7, false);                                          /* its close could not start */
     TEST_ASSERT_EQUAL_size_t(MAXS, web_conn_count(&t));
@@ -173,8 +239,10 @@ TEST_CASE("web conn: nothing else may go: the new connection itself is closed", 
      * takes over its old entry. */
     TEST_ASSERT_TRUE(web_conn_open(&t, 3, T0 + 2u));
     TEST_ASSERT_FALSE(t.c[2].ws);
-    TEST_ASSERT_TRUE(web_conn_open(&t, 8, T0 + 3u));                         /* the eighth entry */
-    TEST_ASSERT_FALSE(web_conn_open(&t, 9, T0 + 3u));                        /* full */
+    for (int fd = 8; fd <= (int)WEB_CONN_MAX; fd++) {
+        TEST_ASSERT_TRUE(web_conn_open(&t, fd, T0 + 3u));                    /* up to the last entry */
+    }
+    TEST_ASSERT_FALSE(web_conn_open(&t, (int)WEB_CONN_MAX + 1, T0 + 3u));    /* full */
     TEST_ASSERT_FALSE(web_conn_open(&t, -1, T0 + 3u));
 }
 
