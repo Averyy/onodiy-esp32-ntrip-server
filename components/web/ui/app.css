@@ -550,6 +550,10 @@ body.no-contact .status-page .bands td.on { color: var(--off); }
 .btn.danger.solid { background: var(--bad); color: var(--bad-text); }
 .btn.ghost { border-color: transparent; background: transparent; }
 .btn.small { min-height: 36px; padding: 0.3rem 0.7rem; font-size: 0.9rem; }
+/* A button that reads as a text link (an editor's Delete): no box, the text's size; the tap height stays. */
+.btn.link, .btn.link.danger { min-height: 36px; padding: 0.3rem 0; border-color: transparent; background: transparent;
+  font-size: 0.9rem; font-weight: 500; }
+.btn.link:hover { background: transparent; text-decoration: underline; }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
 /* Waiting, but keeps the keyboard focus (a disabled button would drop it). */
 .btn[aria-disabled="true"] { opacity: 0.55; cursor: progress; filter: none; }
@@ -666,12 +670,15 @@ input:disabled, select:disabled { opacity: 0.65; }
  * Actions, the same everywhere: on a phone full width, stacked, the main one
  * (.primary or submit) on top under a .note (why one is off), a destructive
  * one last; from 560 px up one line at the right, the main one at the right
- * edge, the note at the left.
+ * edge, the note at the left, and a destructive .start one (an editor's
+ * Delete) at the left edge. A .link button keeps its text's width, at the
+ * left on a phone too.
  */
 .form-actions { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem; }
 .form-actions .btn { width: 100%; }
 .form-actions > .primary, .form-actions > [type="submit"] { order: -1; }
 .form-actions > .danger:not(.primary, [type="submit"]) { order: 1; }
+.form-actions > .btn.link { width: auto; align-self: flex-start; }
 .form-actions > .note { order: -2; }
 .form-actions:not(:has(> :not([hidden]))) { display: none; }
 /* A field that belongs to the buttons (maintenance's duration): on top on a phone, at the left on a desktop. */
@@ -681,6 +688,8 @@ input:disabled, select:disabled { opacity: 0.65; }
   .form-actions .btn { width: auto; }
   .form-actions > .primary, .form-actions > [type="submit"] { order: 1; }
   .form-actions > .danger:not(.primary, [type="submit"]) { order: 0; }
+  .form-actions > .danger.start:not(.primary, [type="submit"]) { order: -1; margin-right: auto; }
+  .form-actions > .btn.link { align-self: auto; }   /* on the buttons' line, centred like them */
   .form-actions > .note { order: -1; margin-right: auto; }
   .form-actions:has(> .field) { align-items: flex-end; }
   .form-actions > .field { order: -2; flex: 0 1 15rem; margin-right: auto; }

@@ -1319,6 +1319,27 @@ static esp_err_t h_caster_put(web_req_t *r)
     return ca ? caster_ca(r, slot, true) : caster_put(r, slot);
 }
 
+/* DELETE /api/casters/{n}: the slot's server removed, the slot empty again (ntrip_server_remove_slot). */
+static esp_err_t caster_delete(web_req_t *r, size_t slot)
+{
+    if (!load_configs()) {
+        return web_send_err(r->req, WEB_ERR_SAFE_MODE);
+    }
+    if (!settings_ok()) {
+        return web_send_err(r->req, WEB_ERR_SETTINGS_UNAVAILABLE);
+    }
+    esp_err_t err = ntrip_server_remove_slot(slot);
+    switch (err) {
+    case ESP_OK:
+        ESP_LOGI(TAG, "caster slot %u removed", (unsigned)slot);
+        return send_slot(r->req, slot);
+    case ESP_ERR_INVALID_STATE:
+        return web_send_err(r->req, WEB_ERR_SAFE_MODE);
+    default:
+        return web_send_internal(r->req, err);
+    }
+}
+
 static esp_err_t h_caster_delete(web_req_t *r)
 {
     size_t slot = 0;
@@ -1326,10 +1347,7 @@ static esp_err_t h_caster_delete(web_req_t *r)
     if (!parse_slot_path(r->req->uri, &slot, &ca)) {
         return slot_path_refused(r->req);
     }
-    if (!ca) {
-        return web_send_err(r->req, WEB_ERR_METHOD_NOT_ALLOWED);
-    }
-    return caster_ca(r, slot, false);
+    return ca ? caster_ca(r, slot, false) : caster_delete(r, slot);
 }
 
 /* "/api/casters/<n>/retry": the slot index. */

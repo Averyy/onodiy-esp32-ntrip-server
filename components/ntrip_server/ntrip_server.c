@@ -383,16 +383,22 @@ static bool has_bad_name(const char *s)
 
 /* ---- config persistence ---------------------------------------------------------- */
 
+/* An empty slot: no server in it (the slots after the first before they are set up, and a removed one). */
+static void empty_slot(ntrip_caster_cfg_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->port = 2101;
+    out->proto = NTRIP_PROTO_V2;
+    out->trust_mode = NTRIP_TRUST_BUNDLE;
+    out->backoff_profile = NTRIP_BACKOFF_STANDARD;
+}
+
 static void slot_defaults(size_t slot, ntrip_caster_cfg_t *out)
 {
     if (slot == 0) {
         ntrip_server_onocoy_defaults(out);
     } else {
-        memset(out, 0, sizeof(*out));
-        out->port = 2101;
-        out->proto = NTRIP_PROTO_V2;
-        out->trust_mode = NTRIP_TRUST_BUNDLE;
-        out->backoff_profile = NTRIP_BACKOFF_STANDARD;
+        empty_slot(out);
     }
 }
 
@@ -2291,6 +2297,24 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg, nt
     }
     ntrip_secure_zero(next.password, sizeof(next.password));
     xSemaphoreGive(s_cfg_mutex);
+    return err;
+}
+
+esp_err_t ntrip_server_remove_slot(size_t slot)
+{
+    if (slot >= ntrip_server_slot_count()) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ntrip_caster_cfg_t empty;
+    empty_slot(&empty);
+    empty.clear_password = true;
+    /* Off and without a host: no field or cross-slot rule refuses it. */
+    esp_err_t err = ntrip_server_set_config(slot, &empty, NULL);
+    if (err == ESP_OK) {
+        char ns[16];
+        slot_ns(slot, ns, sizeof(ns));
+        err = settings_erase_key(ns, SETTINGS_KEY_CST_CA_PEM);
+    }
     return err;
 }
 

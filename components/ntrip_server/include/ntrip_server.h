@@ -378,6 +378,16 @@ esp_err_t ntrip_server_get_config(size_t slot, ntrip_caster_cfg_t *out, bool wit
  */
 esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg, ntrip_policy_t *policy);
 
+/**
+ * Remove a slot's server: the slot is empty again, as a slot after the first
+ * is before it is ever set up (no host, off, no name, no credentials, no
+ * duplicate-stream acknowledgement), saved through ntrip_server_set_config(),
+ * and its custom CA PEM is erased. Only that slot disconnects.
+ * @return ESP_ERR_INVALID_STATE before ntrip_server_init() (safe mode), or
+ *         the settings error of the save or the erase.
+ */
+esp_err_t ntrip_server_remove_slot(size_t slot);
+
 /** Live status of a slot. Works before ntrip_server_init() (every slot DISABLED). */
 esp_err_t ntrip_server_get_status(size_t slot, ntrip_caster_status_t *out);
 

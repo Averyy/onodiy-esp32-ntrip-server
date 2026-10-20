@@ -369,6 +369,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | GET | `/api/casters` | adm | All slots: config and status | ntrip_server |
 | GET | `/api/casters/{n}` | adm | One slot | ntrip_server |
 | PUT | `/api/casters/{n}` | adm | Edit slot n | `ntrip_server_set_config` |
+| DELETE | `/api/casters/{n}` | adm | Remove slot n's server: the slot is empty again | `ntrip_server_remove_slot` |
 | PUT, DELETE | `/api/casters/{n}/ca` | adm | Store / remove the slot's CA certificate | settings `cstN/ca_pem` |
 | POST | `/api/casters/{n}/retry` | adm | Try a stopped (or waiting) slot once now | `ntrip_server_retry_slot` |
 | GET | `/api/local-caster` | adm | Local server: config and live status | `local_caster_get_config`, `local_caster_get_status` |
@@ -1457,11 +1458,11 @@ safe mode `config` is `null` (the slots were never loaded) and every status
 is `disabled`.
 
 An **empty slot** is one with no `host` that is not enabled: never set up,
-or removed (`DELETE /api/casters/{n}`). Its `config` keeps whatever is
-stored, but the status summaries (`/api/status` `casters[]`, section 6, and
-`/api/availability` `slots[]`, section 14) mark it `empty` with the name
-`""`, and the public status leaves it out, so a removed slot's old name
-never shows.
+or removed (`DELETE /api/casters/{n}`, which stores the defaults). Its
+`config` keeps whatever is stored, but the status summaries (`/api/status`
+`casters[]`, section 6, and `/api/availability` `slots[]`, section 14) mark
+it `empty` with the name `""`, and the public status leaves it out, so a
+removed slot's old name never shows.
 
 **`config`** (`ntrip_caster_cfg_t`):
 
@@ -1716,6 +1717,17 @@ reconnects. A session inside an epoch first sends the rest of it (at most
 1 s), so the caster's last epoch of that session is a whole one; a reboot
 ends sessions the same way. Also `409 safe_mode`,
 `409 settings_unavailable`.
+
+### `DELETE /api/casters/{n}` (adm)
+
+Removes the slot's server: the slot is saved empty, as a slot after the
+first is before it is ever set up (`enabled` false, no `name`, `host`,
+`mountpoint`, `username` or `label`, port 2101, NTRIP 2.0, no TLS, the
+standard retry pace, no `dup_stream_ack`), its password is removed and its
+custom CA certificate erased. Any slot can be removed, the Onocoy one too;
+the first-run setup and "Add a server" use an empty slot again. Only that
+slot disconnects. No body. `200` with the slot's `{"slot", "config",
+"status"}` (an empty slot); `409 safe_mode`, `409 settings_unavailable`.
 
 ### `POST /api/casters/{n}/retry` (adm)
 

@@ -27,6 +27,8 @@
  * slot has an Onocoy host, and says so once Onocoy is chosen; the Onocoy
  * choice is hidden while another enabled slot streams to Onocoy. A slot
  * saved without a host and not enabled is empty again, stored without a name.
+ * The editor's Delete (after a dialog; DELETE /api/casters/{n}) empties the
+ * slot too and erases its settings, password and CA certificate.
  *
  * After the servers, the card "Local server": the station's own corrections
  * for the owner's rover on the home network (GET/PUT /api/local-caster; the
@@ -252,7 +254,8 @@ function splitHostPort(text) {
  * NTRIP server editor. entry = {slot, config}. opts: preset (onocoy_preset),
  * hostname (the Onocoy mountpoint it proposes), hideOnocoy (no Onocoy
  * choice), onocoyElsewhere ({slot, ready, enabled} of another Onocoy slot),
- * openSlot(n), onSaved(entry), onCancel(). Returns {el, dirty()}.
+ * openSlot(n), onSaved(entry), onCancel(), onDeleted(entry) (a Delete for a
+ * stored server). Returns {el, dirty()}.
  *
  * Only what the chosen server needs: its type with one line of help, then
  * host and port (a preset's as text), mountpoint, username (Onocoy and
@@ -349,7 +352,21 @@ function casterEditor(entry, opts) {
   const err = errBox();
   const dupBox = h('div');
   const saveBtn = h('button', { type: 'submit', class: 'btn primary' }, 'Save');
-  const actions = h('div', { class: 'form-actions' }, saveBtn, opts.onCancel ? btn('Cancel', () => opts.onCancel(), 'ghost') : null);
+  /* Delete, for a server already stored (the NTRIP page's editor): asks first, then the slot is empty again. */
+  const delBtn = opts.onDeleted && !isNew ? btn('Delete', async () => {
+    const name = cfg.name || labelOf(kind) || 'this server';
+    const ok = await dialog({ title: 'Delete ' + name + '?', ok: 'Delete', okKind: 'danger solid',
+      body: [h('p', null, 'Streaming to it stops, and its settings and password are erased.'),
+        isOnocoySlot(cfg) ? msg('warn', 'Onocoy rewards stop until you set it up again.') : null] });
+    if (!ok) return;
+    const r = await act(delBtn, () => api('DELETE', '/api/casters/' + slot), err);
+    if (r === undefined) return;
+    dirty = false;
+    toast(name + ' deleted.', 'ok');
+    opts.onDeleted(r);
+  }, 'link danger start') : null;
+  const actions = h('div', { class: 'form-actions' }, saveBtn, opts.onCancel ? btn('Cancel', () => opts.onCancel(), 'ghost') : null,
+    delBtn);
 
   /* Custom CA certificate (stored at once, separate from Save). */
   const pem = h('textarea', { rows: 6, placeholder: '-----BEGIN CERTIFICATE-----', spellcheck: 'false' });
@@ -996,6 +1013,14 @@ Views.ntrip = {
       /* Another slot with an Onocoy host (the enabled one first): this one starts elsewhere and says where Onocoy is. */
       const onoSlots = data.slots.filter(x => x.slot !== s.slot && x.config && isOnocoySlot(x.config));
       const ono = onoSlots.find(x => x.config.enabled) || onoSlots[0];
+      /* Saved or deleted: the slot as the station returns it (a deleted one is free: its card goes). */
+      const done = saved => {
+        editing = null;
+        editor = null;
+        if (saved && saved.slot !== undefined) data.slots = data.slots.map(x => x.slot === saved.slot ? saved : x);
+        render();
+        load().catch(() => {});
+      };
       editor = casterEditor(s, {
         preset: data.onocoy_preset,
         hostname: S.status && S.status.device ? S.status.device.hostname : '',
@@ -1005,13 +1030,8 @@ Views.ntrip = {
           const t = data.slots.find(x => x.slot === n);
           if (t) edit(t);
         },
-        onSaved: saved => {
-          editing = null;
-          editor = null;
-          if (saved && saved.slot !== undefined) data.slots = data.slots.map(x => x.slot === saved.slot ? saved : x);
-          render();
-          load().catch(() => {});
-        },
+        onSaved: done,
+        onDeleted: done,
         onCancel: () => {
           editing = null;
           editor = null;

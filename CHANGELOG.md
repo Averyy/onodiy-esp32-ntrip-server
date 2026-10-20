@@ -9,6 +9,8 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 - Wi-Fi: no more "sta is connecting, cannot set config" error in the log at every join
   (ESP-IDF's supplicant made a call the Wi-Fi driver refuses at that moment; it changed
   nothing).
+- NTRIP: Delete in a server's editor (asks first) removes the server and erases its
+  settings, password and certificate; the slot is free again.
 
 ## v0.1.4
 
